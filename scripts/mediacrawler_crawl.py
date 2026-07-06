@@ -1,0 +1,1252 @@
+#!/usr/bin/env python3
+"""MediaCrawler-first structured crawl entrypoint."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import signal
+import shlex
+import sqlite3
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+from typing import Any
+
+from db_bootstrap import bootstrap_connection, bootstrap_database
+from project_paths import (
+    DEFAULT_DB,
+    MEDIACRAWLER_DIR,
+    MEDIACRAWLER_RUNS_OUTPUT,
+    PROJECT_ROOT,
+    ensure_dir,
+    ensure_parent,
+)
+
+
+ROOT = PROJECT_ROOT
+DEFAULT_OUTPUT = MEDIACRAWLER_RUNS_OUTPUT
+COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
+
+PLATFORMS: dict[str, dict[str, str]] = {
+    "bilibili": {"mediacrawler": "bili", "label": "B站"},
+    "xhs": {"mediacrawler": "xhs", "label": "小红书"},
+    "weibo": {"mediacrawler": "wb", "label": "微博"},
+    "douyin": {"mediacrawler": "dy", "label": "抖音"},
+    "zhihu": {"mediacrawler": "zhihu", "label": "知乎"},
+}
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".svg", ".img"}
+VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm"}
+AUTHOR_FIELD_MARKERS = ("author", "user", "nickname", "avatar", "fans", "follower", "follow", "up")
+IMAGE_URL_KEYS = ("cover", "image", "img", "pic", "avatar")
+URL_RE = re.compile(r"https?://[^\s\"'<>,，]+", re.I)
+VIDEO_URL_RE = re.compile(r"(?i)(?:/(?:video|share/video)/\d+|\.(?:mp4|m4v|mov|webm|flv|m3u8|mpd)(?:[?#]|$))")
+CHINA_TZ = timezone(timedelta(hours=8))
+TIMESTAMP_MIN = 946_684_800
+TIMESTAMP_MAX = 4_102_444_800
+DATETIME_TEXT_FORMATS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y/%m/%d",
+    "%Y年%m月%d日 %H:%M:%S",
+    "%Y年%m月%d日 %H:%M",
+    "%Y年%m月%d日",
+)
+PUBLISHED_AT_KEYS = (
+    "published_at",
+    "date_published",
+    "datePublished",
+    "publish_at",
+    "publish_time",
+    "publish_date",
+    "pub_time",
+    "pubdate",
+    "created_at",
+    "created_time",
+    "create_date_time",
+    "create_time",
+    "ctime",
+    "timestamp",
+    "time",
+)
+NESTED_PUBLISHED_AT_KEYS = tuple(key for key in PUBLISHED_AT_KEYS if key not in {"time", "timestamp"})
+SAMPLE_KEYS = (
+    "title",
+    "desc",
+    "content",
+    "published_at",
+    "create_time",
+    "publish_time",
+    "time",
+    "create_date_time",
+    "note_id",
+    "aweme_id",
+    "content_id",
+    "content_type",
+    "video_id",
+    "bvid",
+    "aid",
+    "note_url",
+    "video_url",
+    "content_url",
+    "created_time",
+    "updated_time",
+    "user_id",
+    "nickname",
+    "user_nickname",
+    "fans",
+    "fans_count",
+    "followers_count",
+    "following_count",
+    "aweme_count",
+    "author_liked_count",
+    "author_followers_source",
+    "liked_count",
+    "voteup_count",
+    "collected_count",
+    "comment_count",
+    "comments_count",
+    "share_count",
+    "shared_count",
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run MediaCrawler for supported structured social platforms.")
+    parser.add_argument("--keyword", default="济南旅游", help="Search keyword.")
+    parser.add_argument("--platforms", nargs="+", default=["xhs", "weibo", "douyin"], help="bilibili xhs weibo douyin zhihu")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Output root.")
+    parser.add_argument("--timeout-per-platform", type=int, default=180, help="Timeout per MediaCrawler platform.")
+    parser.add_argument("--mediacrawler-max-notes", type=int, default=1, help="Requested MediaCrawler note count.")
+    parser.add_argument("--login-type", default="cookie", choices=("cookie", "qrcode", "phone"), help="MediaCrawler login type.")
+    parser.add_argument("--get-media", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--download-images", action="store_true", help="Download image files for supported image-only platforms. Videos remain disabled.")
+    parser.add_argument("--headed", action="store_true", help="Run browser with visible UI.")
+    parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path for web_posts import.")
+    parser.add_argument("--import-limit", type=int, default=0, help="Maximum non-video content rows to import. 0 means unlimited.")
+    parser.add_argument("--no-import", action="store_true", help="Do not import MediaCrawler JSONL records into SQLite.")
+    return parser.parse_args()
+
+
+def utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%z")
+
+
+def selected_platforms(values: list[str]) -> list[str]:
+    unknown = sorted(set(values) - set(PLATFORMS))
+    if unknown:
+        raise SystemExit(f"Unsupported MediaCrawler platform in this project: {', '.join(unknown)}")
+    return values
+
+
+def ensure_prerequisites() -> None:
+    if not (MEDIACRAWLER_DIR / "pyproject.toml").exists():
+        raise SystemExit(f"MediaCrawler is missing or incomplete: {MEDIACRAWLER_DIR}")
+
+
+def discover_cdp_browser_path() -> str | None:
+    for env_key in ("TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH", "CUSTOM_BROWSER_PATH"):
+        value = os.environ.get(env_key)
+        if value and Path(value).is_file():
+            return value
+
+    candidates = [
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        Path("/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta"),
+        Path("/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev"),
+        Path("/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"),
+        Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+        Path("/Applications/Microsoft Edge Beta.app/Contents/MacOS/Microsoft Edge Beta"),
+        Path("/Applications/Microsoft Edge Dev.app/Contents/MacOS/Microsoft Edge Dev"),
+        Path("/Applications/Microsoft Edge Canary.app/Contents/MacOS/Microsoft Edge Canary"),
+    ]
+    playwright_cache = Path.home() / "Library" / "Caches" / "ms-playwright"
+    candidates.extend(
+        sorted(
+            playwright_cache.glob(
+                "chromium-*/chrome-*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+            ),
+            reverse=True,
+        )
+    )
+    for path in candidates:
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
+def profile_dir_for(platform_key: str) -> Path:
+    code = PLATFORMS[platform_key]["mediacrawler"]
+    return MEDIACRAWLER_DIR / "browser_data" / f"{code}_user_data_dir"
+
+
+def cookie_snapshot_path(platform_key: str) -> Path:
+    return profile_dir_for(platform_key) / COOKIE_SNAPSHOT_FILENAME
+
+
+def required_cookie_names(platform_key: str) -> tuple[str, ...]:
+    if platform_key == "zhihu":
+        return ("d_c0", "z_c0")
+    return ()
+
+
+def cookie_names_from_header(cookie_header: str) -> list[str]:
+    names = []
+    for item in cookie_header.split(";"):
+        if "=" not in item:
+            continue
+        name = item.split("=", 1)[0].strip()
+        if name:
+            names.append(name)
+    return sorted(set(names))
+
+
+def cookies_to_header(cookies: list[dict[str, Any]]) -> str:
+    pairs = []
+    now = time.time()
+    for item in cookies:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        value = item.get("value")
+        if not name or value in (None, ""):
+            continue
+        expires = item.get("expires")
+        if isinstance(expires, (int, float)) and expires > 0 and expires < now:
+            continue
+        pairs.append(f"{name}={value}")
+    return ";".join(pairs)
+
+
+def load_cookie_snapshot(platform_key: str) -> dict[str, Any] | None:
+    path = cookie_snapshot_path(platform_key)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    cookies = payload.get("cookies")
+    if not isinstance(cookies, list):
+        return None
+    cookie_header = cookies_to_header(cookies)
+    names = cookie_names_from_header(cookie_header)
+    missing = [name for name in required_cookie_names(platform_key) if name not in names]
+    if missing:
+        return None
+    return {
+        "cookie_header": cookie_header,
+        "source": "snapshot",
+        "snapshot_path": str(path),
+        "saved_at": payload.get("saved_at"),
+        "cookie_names": names,
+        "required_cookie_names": list(required_cookie_names(platform_key)),
+    }
+
+
+def public_cookie_export(cookie_export: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in cookie_export.items() if key != "cookie_header"}
+
+
+def export_profile_cookies(platform_key: str, browser_path: str | None) -> dict[str, Any] | None:
+    snapshot = load_cookie_snapshot(platform_key)
+    if snapshot:
+        return snapshot
+
+    profile_dir = profile_dir_for(platform_key)
+    if not profile_dir.exists():
+        return None
+    script = r"""
+import asyncio
+import sys
+from playwright.async_api import async_playwright
+
+async def main() -> int:
+    profile_dir = sys.argv[1]
+    executable_path = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+    async with async_playwright() as playwright:
+        context = await playwright.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
+            headless=True,
+            executable_path=executable_path,
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            args=["--disable-dev-shm-usage", "--no-sandbox"],
+        )
+        page = context.pages[0] if context.pages else await context.new_page()
+        try:
+            await page.goto("https://www.zhihu.com/", wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1000)
+        cookies = await context.cookies(["https://www.zhihu.com"])
+        await context.close()
+        sys.stdout.write(";".join(f"{item['name']}={item.get('value', '')}" for item in cookies))
+    return 0
+
+raise SystemExit(asyncio.run(main()))
+"""
+    cmd = [sys.executable, "-c", script, str(profile_dir)]
+    if browser_path:
+        cmd.append(browser_path)
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=45,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    cookie_str = result.stdout.strip()
+    names = cookie_names_from_header(cookie_str)
+    missing = [name for name in required_cookie_names(platform_key) if name not in names]
+    if result.returncode != 0 or missing:
+        return None
+    return {
+        "cookie_header": cookie_str,
+        "source": "live_profile",
+        "snapshot_path": str(cookie_snapshot_path(platform_key)),
+        "saved_at": None,
+        "cookie_names": names,
+        "required_cookie_names": list(required_cookie_names(platform_key)),
+    }
+
+
+def decode_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+
+
+def tail(value: str, limit: int = 4000) -> str:
+    return value[-limit:] if len(value) > limit else value
+
+
+def json_dump(value: Any) -> str:
+    return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True)
+
+
+def parse_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip().replace(",", "")
+    if not text or text in {"-", "无"}:
+        return None
+    unit = 1
+    if text.endswith("万"):
+        unit = 10_000
+        text = text[:-1]
+    elif text.endswith("亿"):
+        unit = 100_000_000
+        text = text[:-1]
+    try:
+        return int(float(text) * unit)
+    except ValueError:
+        return None
+
+
+def first_value(record: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = record.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def timestamp_to_iso(value: Any) -> str | None:
+    parsed = parse_int(value)
+    if parsed is None:
+        return None
+    if parsed > 10_000_000_000:
+        parsed = parsed // 1000
+    if parsed < TIMESTAMP_MIN or parsed > TIMESTAMP_MAX:
+        return None
+    try:
+        return datetime.fromtimestamp(parsed, CHINA_TZ).isoformat(timespec="seconds")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def parse_datetime_text(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text or text in {"-", "无"}:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        for fmt in DATETIME_TEXT_FORMATS:
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        try:
+            parsed = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            parsed = None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=CHINA_TZ)
+    return parsed.astimezone(CHINA_TZ).isoformat(timespec="seconds")
+
+
+def datetime_value_to_iso(value: Any) -> str | None:
+    return timestamp_to_iso(value) or parse_datetime_text(value)
+
+
+def iter_nested_values_for_keys(value: Any, keys: tuple[str, ...], *, depth: int = 0) -> list[Any]:
+    if depth > 4:
+        return []
+    found: list[Any] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in keys and child not in (None, ""):
+                found.append(child)
+            found.extend(iter_nested_values_for_keys(child, keys, depth=depth + 1))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(iter_nested_values_for_keys(child, keys, depth=depth + 1))
+    return found
+
+
+def published_at_for_record(record: dict[str, Any]) -> str | None:
+    for key in PUBLISHED_AT_KEYS:
+        value = record.get(key)
+        parsed = datetime_value_to_iso(value)
+        if parsed:
+            return parsed
+    for value in iter_nested_values_for_keys(record, NESTED_PUBLISHED_AT_KEYS):
+        parsed = datetime_value_to_iso(value)
+        if parsed:
+            return parsed
+    return None
+
+
+def normalize_image_url(value: Any) -> str | None:
+    if not value:
+        return None
+    text = str(value).strip().rstrip(").];")
+    if text.startswith("//"):
+        text = "https:" + text
+    return text if text.startswith(("http://", "https://")) else None
+
+
+def extract_image_urls(value: Any, *, key_hint: str = "") -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            items.extend(extract_image_urls(child, key_hint=str(key)))
+        return items
+    if isinstance(value, list):
+        for child in value:
+            items.extend(extract_image_urls(child, key_hint=key_hint))
+        return items
+    if not isinstance(value, str):
+        return items
+
+    key_lower = key_hint.lower()
+    key_is_image_like = any(marker in key_lower for marker in IMAGE_URL_KEYS)
+    if key_is_image_like:
+        image_url = normalize_image_url(value)
+        if image_url and "," not in value and "，" not in value:
+            role = "author_avatar" if "avatar" in key_lower else "content"
+            return [{"url": image_url, "role": role, "source_key": key_hint}]
+
+    for match in URL_RE.finditer(value):
+        url = normalize_image_url(match.group(0))
+        if url and (key_is_image_like or any(marker in url.lower() for marker in IMAGE_URL_KEYS)):
+            role = "author_avatar" if "avatar" in key_lower else "content"
+            items.append({"url": url, "role": role, "source_key": key_hint})
+    return items
+
+
+def dedupe_image_urls(record: dict[str, Any]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    result: list[dict[str, Any]] = []
+    for item in extract_image_urls(record):
+        key = (item["role"], item["url"])
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def is_video_record(platform_key: str, record: dict[str, Any]) -> bool:
+    if platform_key == "bilibili" and first_value(record, "video_id", "video_url", "bvid", "aid"):
+        return True
+    if platform_key == "zhihu":
+        content_type = str(first_value(record, "content_type", "type") or "").strip().lower()
+        content_url = str(first_value(record, "content_url", "url", "share_url") or "")
+        if "zvideo" in content_type or content_type == "video" or "/zvideo/" in content_url:
+            return True
+    if platform_key == "douyin":
+        note_images = first_value(record, "note_download_url", "image_list", "images")
+        aweme_type = str(first_value(record, "aweme_type", "video_type", "media_type", "type") or "").strip().lower()
+        if note_images or aweme_type in {"68", "note", "image", "images", "image_text", "图文"}:
+            return False
+        if first_value(record, "video_download_url"):
+            return True
+    video_type = str(first_value(record, "video_type", "media_type", "type") or "").strip().lower()
+    if video_type and video_type not in {"note", "image", "images", "image_text", "图文"}:
+        if "video" in video_type or "视频" in video_type:
+            return True
+    for key, value in record.items():
+        key_lower = str(key).lower()
+        if "video" not in key_lower and key_lower not in {"bvid", "aid"}:
+            continue
+        if value not in (None, "") and VIDEO_URL_RE.search(str(value)):
+            return True
+    for value in (first_value(record, "url", "share_url", "note_url", "aweme_url", "video_url"),):
+        if value and VIDEO_URL_RE.search(str(value)):
+            return True
+    return False
+
+
+def run_command(
+    cmd: list[str],
+    cwd: Path,
+    timeout: int,
+    log_dir: Path,
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    log_dir = ensure_dir(log_dir)
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    if extra_env:
+        env.update(extra_env)
+    started = time.monotonic()
+    stdout = ""
+    stderr = ""
+    returncode = 0
+    timed_out = False
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        stdout_data, stderr_data = proc.communicate(timeout=timeout)
+        stdout = decode_text(stdout_data)
+        stderr = decode_text(stderr_data)
+        returncode = int(proc.returncode or 0)
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        returncode = 124
+        stdout = decode_text(exc.stdout)
+        stderr = decode_text(exc.stderr)
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                extra_stdout, extra_stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                extra_stdout, extra_stderr = proc.communicate()
+            stdout += decode_text(extra_stdout)
+            stderr += decode_text(extra_stderr)
+
+    stdout_log = log_dir / "stdout.log"
+    stderr_log = log_dir / "stderr.log"
+    command_log = log_dir / "command.txt"
+    stdout_log.write_text(stdout, encoding="utf-8")
+    stderr_log.write_text(stderr, encoding="utf-8")
+    command_log.write_text(shlex.join(cmd), encoding="utf-8")
+    return {
+        "command": cmd,
+        "command_text": shlex.join(cmd),
+        "returncode": returncode,
+        "timed_out": timed_out,
+        "elapsed_seconds": round(time.monotonic() - started, 2),
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+        "command_log": str(command_log),
+        "stdout_tail": tail(stdout),
+        "stderr_tail": tail(stderr),
+    }
+
+
+def skipped_command(cmd: list[str], log_dir: Path, reason: str) -> dict[str, Any]:
+    log_dir = ensure_dir(log_dir)
+    stdout_log = log_dir / "stdout.log"
+    stderr_log = log_dir / "stderr.log"
+    command_log = log_dir / "command.txt"
+    stdout_log.write_text("", encoding="utf-8")
+    stderr_log.write_text(reason, encoding="utf-8")
+    command_log.write_text(shlex.join(cmd), encoding="utf-8")
+    return {
+        "command": cmd,
+        "command_text": shlex.join(cmd),
+        "returncode": 1,
+        "timed_out": False,
+        "elapsed_seconds": 0,
+        "skipped": True,
+        "reason": reason,
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+        "command_log": str(command_log),
+        "stdout_tail": "",
+        "stderr_tail": reason,
+    }
+
+
+def item_type_from_path(path: Path) -> str:
+    name = path.name
+    if "_contents_" in name:
+        return "contents"
+    if "_comments_" in name:
+        return "comments"
+    if "_creators_" in name:
+        return "creators"
+    return "unknown"
+
+
+def truncate(value: Any, limit: int = 240) -> str:
+    text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def extract_sample(record: dict[str, Any]) -> dict[str, str]:
+    sample = {key: truncate(record[key]) for key in SAMPLE_KEYS if record.get(key) not in (None, "")}
+    published_at = published_at_for_record(record)
+    if published_at and "published_at" not in sample:
+        sample["published_at"] = published_at
+    return sample or {key: truncate(value) for key, value in list(record.items())[:8]}
+
+
+def summarize_jsonl(path: Path, keyword: str) -> dict[str, Any]:
+    item_type = item_type_from_path(path)
+    platform_key = platform_from_path(path)
+    fields: set[str] = set()
+    author_like_fields: set[str] = set()
+    samples: list[dict[str, str]] = []
+    line_count = 0
+    parse_errors = 0
+    keyword_hits = 0
+    video_like_records = 0
+    published_at_records = 0
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            line_count += 1
+            if keyword in text:
+                keyword_hits += 1
+            try:
+                record = json.loads(text)
+            except json.JSONDecodeError:
+                parse_errors += 1
+                continue
+            if isinstance(record, dict):
+                fields.update(record)
+                author_like_fields.update(
+                    key for key in record if any(marker in key.lower() for marker in AUTHOR_FIELD_MARKERS)
+                )
+                is_video = item_type == "contents" and is_video_record(platform_key, record)
+                if is_video:
+                    video_like_records += 1
+                if item_type == "contents" and not is_video and published_at_for_record(record):
+                    published_at_records += 1
+                if item_type == "contents" and len(samples) < 3:
+                    samples.append(extract_sample(record))
+    return {
+        "path": str(path),
+        "item_type": item_type,
+        "line_count": line_count,
+        "keyword_hit_records": keyword_hits,
+        "parse_errors": parse_errors,
+        "video_like_records": video_like_records,
+        "published_at_records": published_at_records,
+        "top_level_fields": sorted(fields),
+        "author_like_fields": sorted(author_like_fields),
+        "samples": samples,
+    }
+
+
+def summarize_output(save_path: Path, keyword: str) -> dict[str, Any]:
+    jsonl_files = sorted(save_path.rglob("*.jsonl")) if save_path.exists() else []
+    jsonl = [summarize_jsonl(path, keyword) for path in jsonl_files]
+    counts = {"contents": 0, "comments": 0, "creators": 0, "unknown": 0}
+    fields: set[str] = set()
+    author_like_fields: set[str] = set()
+    samples: list[dict[str, str]] = []
+    keyword_hits = 0
+    parse_errors = 0
+    video_like_records = 0
+    published_at_records = 0
+    for item in jsonl:
+        counts[item["item_type"]] = counts.get(item["item_type"], 0) + item["line_count"]
+        fields.update(item["top_level_fields"])
+        author_like_fields.update(item["author_like_fields"])
+        keyword_hits += item["keyword_hit_records"]
+        parse_errors += item["parse_errors"]
+        video_like_records += int(item.get("video_like_records") or 0)
+        published_at_records += int(item.get("published_at_records") or 0)
+        samples.extend(item["samples"])
+
+    files = [path for path in save_path.rglob("*") if path.is_file()] if save_path.exists() else []
+    image_files = [path for path in files if path.suffix.lower() in IMAGE_SUFFIXES]
+    video_files = [path for path in files if path.suffix.lower() in VIDEO_SUFFIXES]
+    return {
+        "save_path": str(save_path),
+        "jsonl_files": [str(path) for path in jsonl_files],
+        "jsonl_file_count": len(jsonl_files),
+        "content_records": counts.get("contents", 0),
+        "non_video_content_records": max(0, counts.get("contents", 0) - video_like_records),
+        "video_like_records": video_like_records,
+        "comment_records": counts.get("comments", 0),
+        "creator_records": counts.get("creators", 0),
+        "unknown_records": counts.get("unknown", 0),
+        "total_jsonl_records": sum(counts.values()),
+        "keyword_hit_records": keyword_hits,
+        "parse_errors": parse_errors,
+        "image_file_count": len(image_files),
+        "video_file_count": len(video_files),
+        "published_at_records": published_at_records,
+        "top_level_fields": sorted(fields)[:120],
+        "author_like_fields": sorted(author_like_fields),
+        "samples": samples[:5],
+        "files": jsonl,
+    }
+
+
+def ensure_web_schema(conn: sqlite3.Connection) -> dict[str, Any]:
+    return bootstrap_connection(conn)
+
+
+def platform_from_path(path: Path) -> str:
+    parts = [part.lower() for part in path.parts]
+    if "bili" in parts:
+        return "bilibili"
+    if "zhihu" in parts:
+        return "zhihu"
+    if "xhs" in parts:
+        return "xhs"
+    if "weibo" in parts:
+        return "weibo"
+    if "douyin" in parts:
+        return "douyin"
+    for key in PLATFORMS:
+        if key in parts:
+            return key
+    return "unknown"
+
+
+def post_id_for_record(platform_key: str, record: dict[str, Any]) -> str | None:
+    value = first_value(record, "note_id", "aweme_id", "content_id", "video_id", "bvid", "aid", "id")
+    return str(value) if value not in (None, "") else None
+
+
+def canonical_url_for_record(platform_key: str, record: dict[str, Any]) -> str | None:
+    value = first_value(record, "note_url", "aweme_url", "content_url", "video_url", "url", "share_url")
+    if value:
+        return str(value)
+    post_id = post_id_for_record(platform_key, record)
+    if not post_id:
+        return None
+    if platform_key == "weibo":
+        return f"https://m.weibo.cn/detail/{post_id}"
+    if platform_key == "douyin":
+        return f"https://www.douyin.com/video/{post_id}"
+    if platform_key == "bilibili":
+        return f"https://www.bilibili.com/video/av{post_id}"
+    if platform_key == "xhs":
+        return f"https://www.xiaohongshu.com/explore/{post_id}"
+    if platform_key == "zhihu":
+        content_type = str(first_value(record, "content_type", "type") or "").strip().lower()
+        question_id = first_value(record, "question_id")
+        if content_type == "article":
+            return f"https://zhuanlan.zhihu.com/p/{post_id}"
+        if content_type == "answer" and question_id:
+            return f"https://www.zhihu.com/question/{question_id}/answer/{post_id}"
+    return None
+
+
+def content_text_for_record(platform_key: str, record: dict[str, Any]) -> str:
+    title = str(first_value(record, "title") or "").strip()
+    body = str(first_value(record, "content_text", "content", "desc") or "").strip()
+    if platform_key in {"xhs", "zhihu"}:
+        parts = [part for part in (title, body) if part]
+        return "\n".join(dict.fromkeys(parts))
+    return str(first_value(record, "content_text", "content", "desc", "title") or "")
+
+
+def row_for_record(
+    platform_key: str,
+    record: dict[str, Any],
+    *,
+    artifact_dir: str,
+    captured_at: str,
+    keyword: str,
+) -> dict[str, Any]:
+    content_text = content_text_for_record(platform_key, record)
+    canonical_url = canonical_url_for_record(platform_key, record)
+    image_items = dedupe_image_urls(record)
+    metrics = {
+        "liked_count": parse_int(first_value(record, "liked_count", "voteup_count")),
+        "favorites_count": parse_int(first_value(record, "collected_count", "video_favorite_count")),
+        "comments_count": parse_int(first_value(record, "comment_count", "comments_count", "video_comment")),
+        "shares_count": parse_int(first_value(record, "share_count", "shared_count", "video_share_count")),
+        "reposts_count": parse_int(first_value(record, "reposts_count", "repost_count")),
+        "views_count": parse_int(first_value(record, "video_play_count", "view_count", "play_count")),
+    }
+    author = {
+        "nickname": first_value(record, "nickname", "user_nickname", "user_name", "author_name"),
+        "creator_hash": first_value(record, "user_id", "creator_id", "creator_hash", "author_id"),
+        "avatar_url": first_value(record, "avatar_url", "avatar", "user_avatar"),
+        "followers_count": parse_int(
+            first_value(
+                record,
+                "author_followers_count",
+                "followers_count",
+                "follower_count",
+                "fans_count",
+                "fans",
+                "followers",
+            )
+        ),
+        "following_count": parse_int(first_value(record, "author_following_count", "following_count", "follow_count", "follows")),
+        "posts_count": parse_int(first_value(record, "author_posts_count", "aweme_count", "posts_count", "note_count", "notes_count", "video_count")),
+        "liked_count": parse_int(first_value(record, "author_liked_count", "total_favorited", "favorited_count")),
+    }
+    return {
+        "platform_key": platform_key,
+        "platform_post_id": post_id_for_record(platform_key, record),
+        "source_type": "mediacrawler_search",
+        "source_url": canonical_url or "",
+        "canonical_url": canonical_url,
+        "title": first_value(record, "title"),
+        "author_display_name": author["nickname"],
+        "author_platform_id": author["creator_hash"],
+        "author_profile_url": first_value(record, "author_profile_url", "user_link", "profile_url", "user_url"),
+        "author_avatar_url": author["avatar_url"],
+        "author_description": first_value(record, "author_desc", "user_desc"),
+        "author_followers_count": author["followers_count"],
+        "author_following_count": author["following_count"],
+        "author_posts_count": author["posts_count"],
+        "author_platform_level": first_value(record, "level", "user_level"),
+        "author_verified": None,
+        "author_verified_text": first_value(record, "verified_text", "verify_info"),
+        "published_at": published_at_for_record(record),
+        "captured_at": captured_at,
+        "city_name": "济南市" if "济南" in (str(record.get("source_keyword") or "") + content_text) else None,
+        "keyword": str(record.get("source_keyword") or keyword or ""),
+        "content_text": content_text,
+        "content_length": len(content_text),
+        "post_likes_count": metrics["liked_count"],
+        "post_favorites_count": metrics["favorites_count"],
+        "post_comments_count": metrics["comments_count"],
+        "post_shares_count": metrics["shares_count"],
+        "post_reposts_count": metrics["reposts_count"],
+        "post_views_count": metrics["views_count"],
+        "post_images_count": len([item for item in image_items if item["role"] == "content"]),
+        "metrics_json": json_dump(metrics),
+        "author_json": json_dump(author),
+        "raw_sample_json": json_dump(record),
+        "artifact_dir": artifact_dir,
+        "capture_method": "import",
+        "status": "captured" if content_text else "partial",
+        "_image_items": image_items,
+    }
+
+
+def find_existing_post(conn: sqlite3.Connection, row: dict[str, Any]) -> int | None:
+    if row.get("platform_post_id"):
+        found = conn.execute(
+            "SELECT id FROM web_posts WHERE platform_key=? AND platform_post_id=?",
+            (row["platform_key"], row["platform_post_id"]),
+        ).fetchone()
+        if found:
+            return int(found[0])
+    if row.get("canonical_url"):
+        found = conn.execute(
+            "SELECT id FROM web_posts WHERE platform_key=? AND canonical_url=?",
+            (row["platform_key"], row["canonical_url"]),
+        ).fetchone()
+        if found:
+            return int(found[0])
+    return None
+
+
+def upsert_web_post(conn: sqlite3.Connection, row: dict[str, Any]) -> int:
+    image_items = row.pop("_image_items", [])
+    existing_id = find_existing_post(conn, row)
+    columns = list(row)
+    if existing_id:
+        updates = ", ".join(f"{column}=:{column}" for column in columns)
+        conn.execute(f"UPDATE web_posts SET {updates}, updated_at=datetime('now') WHERE id=:id", {**row, "id": existing_id})
+        post_id = existing_id
+    else:
+        placeholders = ", ".join(f":{column}" for column in columns)
+        conn.execute(f"INSERT INTO web_posts ({', '.join(columns)}) VALUES ({placeholders})", row)
+        post_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+    conn.execute("DELETE FROM web_post_images WHERE web_post_id=?", (post_id,))
+    for index, item in enumerate(image_items):
+        conn.execute(
+            """
+            INSERT INTO web_post_images (
+                web_post_id, image_index, image_url, image_role, local_path, raw_image_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (post_id, index, item["url"], item["role"], None, json_dump(item)),
+        )
+    return post_id
+
+
+def import_jsonl_file(
+    conn: sqlite3.Connection,
+    path: Path,
+    *,
+    keyword: str,
+    captured_at: str,
+    artifact_dir: str,
+    max_records: int | None = None,
+) -> dict[str, Any]:
+    platform_key = platform_from_path(path)
+    imported = 0
+    skipped = 0
+    skipped_video = 0
+    parse_errors = 0
+    if platform_key not in PLATFORMS:
+        return {
+            "path": str(path),
+            "platform": platform_key,
+            "imported": 0,
+            "skipped": 0,
+            "skipped_video": 0,
+            "parse_errors": 0,
+            "reason": "unsupported_platform",
+        }
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if max_records is not None and imported >= max_records:
+                break
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                record = json.loads(text)
+            except json.JSONDecodeError:
+                parse_errors += 1
+                continue
+            if not isinstance(record, dict):
+                skipped += 1
+                continue
+            if is_video_record(platform_key, record):
+                skipped_video += 1
+                skipped += 1
+                continue
+            row = row_for_record(platform_key, record, artifact_dir=artifact_dir, captured_at=captured_at, keyword=keyword)
+            if not row["platform_post_id"] and not row["canonical_url"]:
+                skipped += 1
+                continue
+            upsert_web_post(conn, row)
+            imported += 1
+    return {
+        "path": str(path),
+        "platform": platform_key,
+        "imported": imported,
+        "skipped": skipped,
+        "skipped_video": skipped_video,
+        "parse_errors": parse_errors,
+    }
+
+
+def import_to_db(summary: dict[str, Any], db_path: Path, *, max_records: int | None = None) -> dict[str, Any]:
+    db_path = ensure_parent(db_path)
+    captured_at = str(summary.get("captured_at") or datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    keyword = str(summary.get("keyword") or "")
+    files: list[Path] = []
+    for record in summary.get("records") or []:
+        output = record.get("output") if isinstance(record, dict) else {}
+        for path_value in (output or {}).get("jsonl_files") or []:
+            files.append(Path(path_value))
+    results: list[dict[str, Any]] = []
+    with sqlite3.connect(db_path) as conn:
+        db_sync = ensure_web_schema(conn)
+        remaining = max_records
+        for path in files:
+            if remaining is not None and remaining <= 0:
+                break
+            result = import_jsonl_file(
+                conn,
+                path,
+                keyword=keyword,
+                captured_at=captured_at,
+                artifact_dir=str(Path(str(summary.get("batch_dir") or "")).resolve()),
+                max_records=remaining,
+            )
+            if remaining is not None:
+                remaining -= int(result.get("imported") or 0)
+            results.append(
+                result
+            )
+        conn.commit()
+    return {
+        "db": str(db_path),
+        "db_sync": db_sync,
+        "jsonl_files": len(files),
+        "imported": sum(int(item.get("imported", 0)) for item in results),
+        "skipped": sum(int(item.get("skipped", 0)) for item in results),
+        "skipped_video": sum(int(item.get("skipped_video", 0)) for item in results),
+        "parse_errors": sum(int(item.get("parse_errors", 0)) for item in results),
+        "import_limit": max_records,
+        "files": results,
+    }
+
+
+def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -> dict[str, Any]:
+    platform = PLATFORMS[platform_key]
+    save_path = batch_dir / platform_key / "data"
+    log_dir = batch_dir / "logs" / platform_key
+    image_download_enabled = bool(args.download_images and platform_key == "xhs")
+    cmd = [
+        "uv",
+        "run",
+        "python",
+        "main.py",
+        "--platform",
+        platform["mediacrawler"],
+        "--lt",
+        args.login_type,
+        "--type",
+        "search",
+        "--keywords",
+        args.keyword,
+        "--get_comment",
+        "false",
+        "--get_sub_comment",
+        "false",
+        "--get_media",
+        "true" if image_download_enabled else "false",
+        "--headless",
+        "false" if args.headed else "true",
+        "--save_data_option",
+        "jsonl",
+        "--save_data_path",
+        str(save_path),
+        "--crawler_max_notes_count",
+        str(args.mediacrawler_max_notes),
+        "--max_concurrency_num",
+        "1",
+        "--enable_ip_proxy",
+        "false",
+    ]
+    extra_env: dict[str, str] = {}
+    login_state: dict[str, Any] | None = None
+    if platform_key == "xhs":
+        cmd.extend(["--enable_cdp_mode", "true"])
+        extra_env.update(
+            {
+                "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": "1",
+                "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",
+                "TRIPPOSTCOLLECT_SHARE_CDP_PROFILE": "1",
+                "TRIPPOSTCOLLECT_XHS_QR_REFRESH_SECONDS": "90",
+                "TRIPPOSTCOLLECT_XHS_QR_ATTEMPTS": "5",
+            }
+        )
+    elif platform_key == "zhihu":
+        cmd.extend(["--enable_cdp_mode", "true"])
+        extra_env.update({"TRIPPOSTCOLLECT_SHARE_CDP_PROFILE": "1"})
+    elif platform_key == "douyin":
+        extra_env.update(
+            {
+                "TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS": "1",
+                "TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES": "1",
+                "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": "30",
+                "TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS": "0.25",
+            }
+        )
+    if platform_key in {"xhs", "zhihu"}:
+        browser_path = discover_cdp_browser_path()
+        if browser_path:
+            extra_env.setdefault("TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH", browser_path)
+        if platform_key == "zhihu":
+            cookie_export = export_profile_cookies(platform_key, browser_path)
+            if not cookie_export:
+                reason = (
+                    "missing_zhihu_login_cookies: run "
+                    ".venv/bin/python scripts/mediacrawler_login_warmup.py --platforms zhihu "
+                    "until d_c0/z_c0 are verified and snapshotted"
+                )
+                run = skipped_command(cmd, log_dir, reason)
+                output = summarize_output(save_path, args.keyword)
+                return {
+                    "platform": platform_key,
+                    "label": platform["label"],
+                    "status": "failed",
+                    "ok": False,
+                    "media_enabled": image_download_enabled,
+                    "video_enabled": False,
+                    "login_state": {
+                        "ok": False,
+                        "reason": "missing_required_cookies",
+                        "required_cookie_names": list(required_cookie_names(platform_key)),
+                        "snapshot_path": str(cookie_snapshot_path(platform_key)),
+                    },
+                    "run": run,
+                    "output": output,
+                }
+            extra_env["TRIPPOSTCOLLECT_COOKIES"] = str(cookie_export["cookie_header"])
+            login_state = {"ok": True, **public_cookie_export(cookie_export)}
+    timeout = args.timeout_per_platform
+    if platform_key == "xhs" and args.login_type == "qrcode":
+        timeout = max(timeout, 420)
+    if platform_key == "zhihu":
+        timeout = max(timeout, 300)
+    run = run_command(cmd, MEDIACRAWLER_DIR, timeout, log_dir, extra_env=extra_env)
+    output = summarize_output(save_path, args.keyword)
+    status = "completed" if output["non_video_content_records"] > 0 and output["parse_errors"] == 0 else "failed"
+    if output["content_records"] > 0 and output["non_video_content_records"] == 0 and output["video_like_records"] > 0:
+        status = "skipped_video_only"
+    if run["timed_out"] and output["non_video_content_records"] > 0:
+        status = "partial_completed"
+    return {
+        "platform": platform_key,
+        "label": platform["label"],
+        "status": status,
+        "ok": status in {"completed", "partial_completed", "skipped_video_only"},
+        "media_enabled": image_download_enabled,
+        "video_enabled": False,
+        "login_state": login_state,
+        "run": run,
+        "output": output,
+    }
+
+
+def write_markdown(summary: dict[str, Any], path: Path) -> None:
+    lines = [
+        "# MediaCrawler 结构化抓取摘要",
+        "",
+        f"- 时间：`{summary['captured_at']}`",
+        f"- 关键词：`{summary['keyword']}`",
+        f"- 输出目录：`{summary['batch_dir']}`",
+        "",
+        "| 平台 | 状态 | 图文内容记录 | 发帖时间记录 | 跳过视频记录 | 图片文件 | 视频文件(应为0) | 作者字段 |",
+        "|---|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for record in summary["records"]:
+        output = record["output"]
+        lines.append(
+            "| {label} | {status} | {contents} | {published_at} | {skipped_videos} | {images} | {videos} | {fields} |".format(
+                label=record["label"],
+                status=record["status"],
+                contents=output["non_video_content_records"],
+                published_at=output["published_at_records"],
+                skipped_videos=output["video_like_records"],
+                images=output["image_file_count"],
+                videos=output["video_file_count"],
+                fields=", ".join(output["author_like_fields"]) or "无",
+            )
+        )
+    lines.extend(["", "## 样本", ""])
+    for record in summary["records"]:
+        lines.append(f"### {record['label']}")
+        samples = record["output"].get("samples") or []
+        if not samples:
+            lines.append("")
+            lines.append("无")
+            lines.append("")
+            continue
+        for sample in samples[:2]:
+            lines.append(f"- `{json.dumps(sample, ensure_ascii=False)}`")
+        lines.append("")
+    import_result = summary.get("import_result") or {}
+    if import_result:
+        db_sync = import_result.get("db_sync") or {}
+        db_value = import_result.get("db") or db_sync.get("db", "")
+        lines.extend(
+            [
+                "## 入库",
+                "",
+                f"- 数据库：`{db_value}`",
+                f"- JSONL 文件数：`{import_result.get('jsonl_files', 0)}`",
+                f"- 导入记录：`{import_result.get('imported', 0)}`",
+                f"- 跳过记录：`{import_result.get('skipped', 0)}`",
+                f"- 跳过视频记录：`{import_result.get('skipped_video', 0)}`",
+                f"- 解析错误：`{import_result.get('parse_errors', 0)}`",
+                f"- 同步任务：`{db_sync.get('synced_jobs', '')}`",
+                "",
+            ]
+        )
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def main() -> int:
+    args = parse_args()
+    if args.get_media:
+        raise SystemExit("--get-media 已禁用：当前项目只采集图文内容和图片 URL，不下载媒体或视频。")
+    ensure_prerequisites()
+    platforms = selected_platforms(args.platforms)
+    if args.download_images and any(platform != "xhs" for platform in platforms):
+        raise SystemExit("--download-images 目前只允许 xhs：其他平台可能混入视频媒体。")
+    batch_dir = ensure_dir(Path(args.output_dir).expanduser() / utc_stamp())
+
+    records = []
+    for platform_key in platforms:
+        print(f"[mediacrawler] {platform_key}", flush=True)
+        records.append(run_platform(platform_key, args, batch_dir))
+
+    summary = {
+        "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "keyword": args.keyword,
+        "batch_dir": str(batch_dir),
+        "ok_count": sum(1 for record in records if record["ok"]),
+        "skipped_video_only_count": sum(1 for record in records if record["status"] == "skipped_video_only"),
+        "failed_count": sum(1 for record in records if not record["ok"]),
+        "records": records,
+    }
+    if args.no_import:
+        db_sync = bootstrap_database(Path(args.db).expanduser())
+        summary["import_result"] = {"skipped": True, "reason": "no_import", "db_sync": db_sync}
+    else:
+        limit = args.import_limit if args.import_limit > 0 else None
+        summary["import_result"] = import_to_db(summary, Path(args.db).expanduser(), max_records=limit)
+    summary_path = batch_dir / "summary.json"
+    report_path = batch_dir / "summary.md"
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_markdown(summary, report_path)
+    print(json.dumps({"summary": str(summary_path), "report": str(report_path), "batch_dir": str(batch_dir), **summary}, ensure_ascii=False, indent=2))
+    return 0 if summary["failed_count"] == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

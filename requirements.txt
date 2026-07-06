@@ -1,0 +1,8 @@
+anyio==4.14.1
+browserforge==1.2.4
+curl_cffi==0.15.0
+msgspec==0.21.1
+patchright==1.60.1
+playwright==1.61.0
+protego==0.6.2
+scrapling==0.4.9

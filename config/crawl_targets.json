@@ -1,0 +1,184 @@
+{
+  "defaults": {
+    "headless": false,
+    "import_results": true,
+    "schedule_jitter_ratio": 0.18
+  },
+  "jobs": [
+    {
+      "job_key": "page_bilibili_jinan_opus",
+      "site_key": "bilibili",
+      "target_url": "https://www.bilibili.com/opus/917192602541883449",
+      "job_kind": "ctf_resource_crawl",
+      "enabled": true,
+      "priority": 50,
+      "schedule_seconds": 172800,
+      "max_attempts": 1,
+      "params": {
+        "max_image_save": 3,
+        "max_scrolls": 2,
+        "scrapling_preflight": "auto"
+      },
+      "behavior_profile": {
+        "name": "social_high_risk"
+      }
+    },
+    {
+      "job_key": "mc_weibo_jinan_search",
+      "site_key": "weibo",
+      "target_url": "https://m.weibo.cn/search?containerid=100103type%3D1%26q%3D%E6%B5%8E%E5%8D%97%E6%97%85%E6%B8%B8",
+      "job_kind": "mediacrawler_search",
+      "enabled": true,
+      "priority": 20,
+      "schedule_seconds": 43200,
+      "max_attempts": 2,
+      "params": {
+        "platform": "weibo",
+        "keyword": "济南旅游",
+        "max_notes": 1,
+        "timeout_per_platform": 180,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "behavior_profile": {
+        "name": "media_crawler_low_frequency"
+      }
+    },
+    {
+      "job_key": "mc_xhs_jinan_search",
+      "site_key": "xhs",
+      "target_url": "https://www.xiaohongshu.com/search_result?keyword=%E6%B5%8E%E5%8D%97%E6%97%85%E6%B8%B8",
+      "job_kind": "mediacrawler_search",
+      "enabled": true,
+      "priority": 25,
+      "schedule_seconds": 86400,
+      "max_attempts": 1,
+      "params": {
+        "platform": "xhs",
+        "keyword": "济南旅游",
+        "max_notes": 3,
+        "timeout_per_platform": 240,
+        "login_type": "cookie",
+        "headless": false,
+        "download_images": true
+      },
+      "behavior_profile": {
+        "name": "social_high_risk"
+      }
+    },
+    {
+      "job_key": "mc_douyin_jinan_search",
+      "site_key": "douyin",
+      "target_url": "https://www.douyin.com/search/%E6%B5%8E%E5%8D%97%E6%97%85%E6%B8%B8",
+      "job_kind": "mediacrawler_search",
+      "enabled": true,
+      "priority": 30,
+      "schedule_seconds": 43200,
+      "max_attempts": 2,
+      "params": {
+        "platform": "douyin",
+        "keyword": "济南旅游",
+        "max_notes": 1,
+        "timeout_per_platform": 180,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "behavior_profile": {
+        "name": "media_crawler_low_frequency"
+      }
+    },
+    {
+      "job_key": "mc_zhihu_jinan_search",
+      "site_key": "zhihu",
+      "target_url": "https://www.zhihu.com/search?q=%E6%B5%8E%E5%8D%97%E6%97%85%E6%B8%B8&type=content",
+      "job_kind": "mediacrawler_search",
+      "enabled": true,
+      "priority": 60,
+      "schedule_seconds": 129600,
+      "max_attempts": 1,
+      "params": {
+        "platform": "zhihu",
+        "keyword": "济南旅游",
+        "max_notes": 20,
+        "timeout_per_platform": 420,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "behavior_profile": {
+        "name": "social_high_risk"
+      }
+    },
+    {
+      "job_key": "page_ctrip_jinan_notes",
+      "site_key": "ctrip",
+      "target_url": "https://you.ctrip.com/travels/jinan128.html",
+      "job_kind": "ctf_resource_crawl",
+      "enabled": true,
+      "priority": 70,
+      "schedule_seconds": 172800,
+      "max_attempts": 1,
+      "params": {
+        "max_image_save": 3,
+        "max_scrolls": 2,
+        "scrapling_preflight": "auto"
+      },
+      "behavior_profile": {
+        "name": "travel_medium"
+      }
+    },
+    {
+      "job_key": "page_qunar_jinan",
+      "site_key": "qunar",
+      "target_url": "https://travel.qunar.com/p-cs300150-jinan",
+      "job_kind": "ctf_resource_crawl",
+      "enabled": true,
+      "priority": 80,
+      "schedule_seconds": 172800,
+      "max_attempts": 1,
+      "params": {
+        "max_image_save": 3,
+        "max_scrolls": 2,
+        "scrapling_preflight": "auto"
+      },
+      "behavior_profile": {
+        "name": "travel_medium"
+      }
+    },
+    {
+      "job_key": "page_qyer_jinan",
+      "site_key": "qyer",
+      "target_url": "https://place.qyer.com/jinan/",
+      "job_kind": "ctf_resource_crawl",
+      "enabled": true,
+      "priority": 90,
+      "schedule_seconds": 172800,
+      "max_attempts": 1,
+      "params": {
+        "max_image_save": 3,
+        "max_scrolls": 2,
+        "scrapling_preflight": "auto"
+      },
+      "behavior_profile": {
+        "name": "travel_medium"
+      }
+    },
+    {
+      "job_key": "page_douban_group_jinan",
+      "site_key": "douban_group",
+      "target_url": "https://www.douban.com/group/topic/53104421/",
+      "job_kind": "ctf_resource_crawl",
+      "enabled": true,
+      "priority": 100,
+      "schedule_seconds": 172800,
+      "max_attempts": 1,
+      "params": {
+        "max_image_save": 3,
+        "max_scrolls": 2,
+        "scrapling_preflight": "auto"
+      },
+      "behavior_profile": {
+        "name": "conservative"
+      }
+    }
+  ]
+}

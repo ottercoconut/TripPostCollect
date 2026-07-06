@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+data/
+playwright-profile/
+outputs/
+temp/
+tools/MediaCrawler/
+tools/MediaCrawler/browser_data/*/trippostcollect_cookie_snapshot.json
