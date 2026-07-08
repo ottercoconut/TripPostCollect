@@ -1,0 +1,758 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TripPostCollect Admin Record Workbench</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --panel-soft: #fafbfc;
+      --line: #d9dee7;
+      --line-strong: #b8c0cc;
+      --text: #1d2733;
+      --muted: #647184;
+      --quiet: #8b96a6;
+      --accent: #167c80;
+      --accent-soft: #e4f4f3;
+      --blue: #2f6fed;
+      --amber: #b7791f;
+      --amber-soft: #fff7e6;
+      --green: #257a48;
+      --green-soft: #e8f5ed;
+      --red: #b42318;
+      --red-soft: #fff1f0;
+      --shadow: 0 12px 30px rgba(25, 35, 52, 0.08);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-width: 1180px;
+      background: var(--bg);
+      color: var(--text);
+      letter-spacing: 0;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 216px 1fr;
+      min-height: 960px;
+    }
+
+    .sidebar {
+      background: #fcfcfd;
+      border-right: 1px solid var(--line);
+      padding: 18px 14px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 4px 6px 18px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 14px;
+    }
+
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      background: #20313f;
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .brand-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .brand-subtitle {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .nav-section {
+      margin-top: 18px;
+    }
+
+    .nav-label {
+      padding: 0 8px 8px;
+      color: var(--quiet);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 34px;
+      padding: 7px 9px;
+      border-radius: 6px;
+      color: #334155;
+      font-size: 13px;
+    }
+
+    .nav-item.active {
+      background: var(--accent-soft);
+      color: #075e61;
+      font-weight: 700;
+    }
+
+    .nav-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      border: 1px solid currentColor;
+    }
+
+    .main {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .topbar {
+      height: 58px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 22px;
+    }
+
+    .topbar-title {
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .topbar-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .status-pill,
+    .chip,
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 0 9px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .status-pill.ok {
+      color: var(--green);
+      background: var(--green-soft);
+      border-color: #b9e4c8;
+      font-weight: 700;
+    }
+
+    .content {
+      padding: 18px 22px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .filter-panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+
+    .filter-grid {
+      display: grid;
+      grid-template-columns: 220px 160px 220px 140px 170px 1fr auto;
+      gap: 10px;
+      align-items: end;
+    }
+
+    .field label {
+      display: block;
+      margin: 0 0 5px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .control,
+    .button {
+      width: 100%;
+      height: 34px;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      font-size: 13px;
+    }
+
+    .button {
+      width: auto;
+      justify-content: center;
+      gap: 6px;
+      font-weight: 700;
+      cursor: default;
+    }
+
+    .button.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .workbench {
+      display: grid;
+      grid-template-columns: minmax(620px, 1fr) 420px;
+      gap: 14px;
+      align-items: start;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-header {
+      min-height: 48px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel-title {
+      font-size: 14px;
+      font-weight: 800;
+    }
+
+    .panel-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid #edf0f4;
+      padding: 10px 10px;
+      vertical-align: middle;
+      text-align: left;
+      font-size: 12px;
+    }
+
+    th {
+      color: var(--muted);
+      background: var(--panel-soft);
+      font-weight: 800;
+    }
+
+    td {
+      color: #2d3748;
+    }
+
+    tr.selected td {
+      background: #f0f8f7;
+      border-bottom-color: #c9e8e5;
+    }
+
+    .record-title {
+      font-weight: 800;
+      color: var(--text);
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .record-sub {
+      margin-top: 3px;
+      color: var(--quiet);
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .platform {
+      font-weight: 800;
+      color: #334155;
+    }
+
+    .tag.green {
+      color: var(--green);
+      background: var(--green-soft);
+      border-color: #c6e7d1;
+      font-weight: 700;
+    }
+
+    .tag.amber {
+      color: var(--amber);
+      background: var(--amber-soft);
+      border-color: #f4d99a;
+      font-weight: 700;
+    }
+
+    .tag.red {
+      color: var(--red);
+      background: var(--red-soft);
+      border-color: #fac5bf;
+      font-weight: 700;
+    }
+
+    .detail {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .detail-body {
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .image-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      grid-template-rows: 132px 132px;
+      gap: 8px;
+    }
+
+    .image-grid img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: var(--panel-soft);
+    }
+
+    .image-grid img:first-child {
+      grid-row: span 2;
+    }
+
+    .section {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #fff;
+    }
+
+    .section-title {
+      height: 34px;
+      padding: 0 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--panel-soft);
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .section-body {
+      padding: 10px;
+    }
+
+    .kv-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 9px 12px;
+    }
+
+    .kv-label {
+      color: var(--quiet);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .kv-value {
+      margin-top: 3px;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 700;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      background: #fff;
+    }
+
+    .metric-value {
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1.1;
+    }
+
+    .metric-label {
+      margin-top: 3px;
+      font-size: 11px;
+      color: var(--quiet);
+    }
+
+    .evidence-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      min-height: 30px;
+      color: #334155;
+      font-size: 12px;
+      border-bottom: 1px solid #edf0f4;
+    }
+
+    .evidence-row:last-child {
+      border-bottom: 0;
+    }
+
+    .mono {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 11px;
+      color: #455468;
+    }
+
+    .footer-note {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 0 2px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">TP</div>
+        <div>
+          <div class="brand-title">TripPostCollect</div>
+          <div class="brand-subtitle">Local Admin</div>
+        </div>
+      </div>
+
+      <div class="nav-section">
+        <div class="nav-label">工作区</div>
+        <div class="nav-item active"><span class="nav-dot"></span>记录工作台</div>
+        <div class="nav-item"><span class="nav-dot"></span>数据质量</div>
+        <div class="nav-item"><span class="nav-dot"></span>图片浏览</div>
+        <div class="nav-item"><span class="nav-dot"></span>关联证据</div>
+      </div>
+
+      <div class="nav-section">
+        <div class="nav-label">运行</div>
+        <div class="nav-item"><span class="nav-dot"></span>调度配置</div>
+        <div class="nav-item"><span class="nav-dot"></span>运行报告</div>
+      </div>
+
+      <div class="nav-section">
+        <div class="nav-label">系统</div>
+        <div class="nav-item"><span class="nav-dot"></span>数据库</div>
+        <div class="nav-item"><span class="nav-dot"></span>审计日志</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-title">记录工作台</div>
+        <div class="topbar-meta">
+          <span>data/trippostcollect.sqlite</span>
+          <span class="status-pill ok">只读关闭</span>
+          <span class="status-pill">本机 127.0.0.1</span>
+        </div>
+      </header>
+
+      <section class="content">
+        <div class="filter-panel">
+          <div class="filter-grid">
+            <div class="field">
+              <label>平台</label>
+              <div class="control">全部平台</div>
+            </div>
+            <div class="field">
+              <label>城市</label>
+              <div class="control">济南市</div>
+            </div>
+            <div class="field">
+              <label>关键词</label>
+              <div class="control">济南旅游</div>
+            </div>
+            <div class="field">
+              <label>状态</label>
+              <div class="control">captured</div>
+            </div>
+            <div class="field">
+              <label>缺字段</label>
+              <div class="control">不限</div>
+            </div>
+            <div class="field">
+              <label>全文搜索</label>
+              <div class="control">标题 / 正文 / 作者 / URL</div>
+            </div>
+            <button class="button primary">筛选</button>
+          </div>
+        </div>
+
+        <div class="workbench">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">记录列表</div>
+                <div class="record-sub">370 条记录，按图片数和抓取时间排序</div>
+              </div>
+              <div class="panel-actions">
+                <span class="chip">列</span>
+                <span class="chip">导出</span>
+              </div>
+            </div>
+
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 84px;">平台</th>
+                  <th>记录</th>
+                  <th style="width: 92px;">作者</th>
+                  <th style="width: 92px;">发布时间</th>
+                  <th style="width: 68px;">图片</th>
+                  <th style="width: 72px;">互动</th>
+                  <th style="width: 82px;">状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="selected">
+                  <td><span class="platform">抖音</span></td>
+                  <td>
+                    <div class="record-title">Ji Nan · 济南，老舍笔下的泉城</div>
+                    <div class="record-sub">济南市 · 济南旅游 图文 · source_type=mediacrawler</div>
+                  </td>
+                  <td>╭***°</td>
+                  <td>2025-09-22</td>
+                  <td>71</td>
+                  <td>17</td>
+                  <td><span class="tag green">captured</span></td>
+                </tr>
+                <tr>
+                  <td><span class="platform">知乎</span></td>
+                  <td>
+                    <div class="record-title">济南有什么必去的景点？</div>
+                    <div class="record-sub">济南市 · 济南旅游 · source_type=mediacrawler</div>
+                  </td>
+                  <td>x***x</td>
+                  <td>2026-07-04</td>
+                  <td>141</td>
+                  <td>1</td>
+                  <td><span class="tag green">captured</span></td>
+                </tr>
+                <tr>
+                  <td><span class="platform">抖音</span></td>
+                  <td>
+                    <div class="record-title">57 张照片，一半泉水潺潺，一半古韵悠长</div>
+                    <div class="record-sub">济南市 · 济南旅游 图文 · source_type=mediacrawler</div>
+                  </td>
+                  <td>史***</td>
+                  <td>2026-06-09</td>
+                  <td>61</td>
+                  <td>55</td>
+                  <td><span class="tag green">captured</span></td>
+                </tr>
+                <tr>
+                  <td><span class="platform">携程</span></td>
+                  <td>
+                    <div class="record-title">济南游记页面证据归一化记录</div>
+                    <div class="record-sub">页面证据 · ctf_capture · 本地图片样本</div>
+                  </td>
+                  <td>未提取</td>
+                  <td>未知</td>
+                  <td>131</td>
+                  <td>-</td>
+                  <td><span class="tag amber">需复核</span></td>
+                </tr>
+                <tr>
+                  <td><span class="platform">知乎</span></td>
+                  <td>
+                    <div class="record-title">这周末准备去济南两日游，怎么安排？</div>
+                    <div class="record-sub">济南市 · 济南旅游 · source_type=mediacrawler</div>
+                  </td>
+                  <td>小*</td>
+                  <td>2026-06-01</td>
+                  <td>136</td>
+                  <td>4</td>
+                  <td><span class="tag green">captured</span></td>
+                </tr>
+                <tr>
+                  <td><span class="platform">抖音</span></td>
+                  <td>
+                    <div class="record-title">总要来趟老舍笔下的泉城</div>
+                    <div class="record-sub">济南市 · 济南旅游 图文 · high engagement</div>
+                  </td>
+                  <td>橘****</td>
+                  <td>2026-05-03</td>
+                  <td>42</td>
+                  <td>16.4k</td>
+                  <td><span class="tag green">captured</span></td>
+                </tr>
+                <tr>
+                  <td><span class="platform">微博</span></td>
+                  <td>
+                    <div class="record-title">济南城市旅行图片记录</div>
+                    <div class="record-sub">字段完整性待确认 · author_followers_count 为空</div>
+                  </td>
+                  <td>旅***</td>
+                  <td>2026-07-06</td>
+                  <td>9</td>
+                  <td>36</td>
+                  <td><span class="tag red">缺字段</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+
+          <aside class="panel detail">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">选中记录</div>
+                <div class="record-sub">ID 65 · douyin · captured</div>
+              </div>
+              <div class="panel-actions">
+                <span class="chip">保存</span>
+                <span class="chip">外链</span>
+              </div>
+            </div>
+
+            <div class="detail-body">
+              <div class="image-grid">
+                <img src="assets/admin-template-jinan-01.jpg" alt="济南旅行图片样本 1">
+                <img src="assets/admin-template-jinan-02.jpg" alt="济南旅行图片样本 2">
+                <img src="assets/admin-template-jinan-03.jpg" alt="济南旅行图片样本 3">
+              </div>
+
+              <section class="section">
+                <div class="section-title">
+                  <span>作者信息</span>
+                  <span class="tag amber">粉丝数缺失</span>
+                </div>
+                <div class="section-body">
+                  <div class="kv-grid">
+                    <div>
+                      <div class="kv-label">展示名</div>
+                      <div class="kv-value">╭***°</div>
+                    </div>
+                    <div>
+                      <div class="kv-label">平台 ID</div>
+                      <div class="kv-value">douyin_user_xxx</div>
+                    </div>
+                    <div>
+                      <div class="kv-label">主页</div>
+                      <div class="kv-value">https://www.douyin.com/...</div>
+                    </div>
+                    <div>
+                      <div class="kv-label">认证</div>
+                      <div class="kv-value">未认证</div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="section">
+                <div class="section-title">互动指标</div>
+                <div class="section-body">
+                  <div class="metrics">
+                    <div class="metric">
+                      <div class="metric-value">13</div>
+                      <div class="metric-label">点赞</div>
+                    </div>
+                    <div class="metric">
+                      <div class="metric-value">4</div>
+                      <div class="metric-label">评论</div>
+                    </div>
+                    <div class="metric">
+                      <div class="metric-value">71</div>
+                      <div class="metric-label">图片</div>
+                    </div>
+                    <div class="metric">
+                      <div class="metric-value">0</div>
+                      <div class="metric-label">分享</div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="section">
+                <div class="section-title">证据与原始数据</div>
+                <div class="section-body">
+                  <div class="evidence-row">
+                    <span>source_capture_id</span>
+                    <span class="mono">null</span>
+                  </div>
+                  <div class="evidence-row">
+                    <span>artifact_dir</span>
+                    <span class="mono">outputs/mediacrawler_runs/...</span>
+                  </div>
+                  <div class="evidence-row">
+                    <span>raw_sample_json</span>
+                    <span class="tag green">valid</span>
+                  </div>
+                  <div class="evidence-row">
+                    <span>author_json</span>
+                    <span class="tag amber">partial</span>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </aside>
+        </div>
+
+        <div class="footer-note">
+          静态模板：首屏以记录筛选和选中记录上下文为中心；抓取任务不从前端触发。
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
