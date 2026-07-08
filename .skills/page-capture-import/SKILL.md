@@ -26,11 +26,13 @@ description: 仅用于 TripPostCollect 面向 bilibili、ctrip、qunar、douban_
 
 1. 确认站点已配置为 `ctf_resource_crawl`，并在 `scripts/web_sites.py` 中识别站点策略。
 2. 修改浏览器上下文、浏览器配置目录、节流、行为配置、Scrapling 预检、冷却或可见/无界面行为前，先读 `docs/anti-automation-behavior.md`。
-3. 除非用户要求更广泛的证据，否则用较小的图片和滚动限制做定向抓取。
-4. 检查 `capture_meta.json`、`summary.json`、`visible_text.txt` 摘要、图片数量、`policy_events`、`behavior_events`、浏览器引擎和失败分类。
-5. 需要时用 `scripts/import_ctf_captures.py` 导入明确的 `capture_meta.json` 文件；验证代码改动时使用临时数据库。
-6. 验证两层数据：`ctf_captures` 中的证据行，以及 `web_posts` 中面向用户的行。
-7. 发帖时间提取逻辑变化时，确认 `published_at` 来自页面元数据或可见日期文本，而不是抓取时间。
+3. 页面级 Playwright 和 Patchright 应共享本机 Playwright Chrome for Testing；Patchright 只作为知乎等页面兜底驱动层，不应恢复旧的双 Chromium 路径。
+4. 除非用户要求更广泛的证据，否则用较小的图片和滚动限制做定向抓取；浏览器/profile 烟测必须用 `--behavior-profile quick_probe`，不要把默认长停留误判为卡死。
+5. 检查 `capture_meta.json`、`summary.json`、`visible_text.txt` 摘要、图片数量、`policy_events`、`behavior_events`、浏览器引擎和失败分类。
+6. 需要时用 `scripts/import_ctf_captures.py` 导入明确的 `capture_meta.json` 文件；验证代码改动时使用临时数据库。
+7. 验证两层数据：`ctf_captures` 中的证据行，以及 `web_posts` 中面向用户的行。
+8. 发帖时间提取逻辑变化时，确认 `published_at` 来自页面元数据或可见日期文本，保存为 Asia/Shanghai ISO，不用抓取时间或 UTC `+00:00` 代替。
+9. 截图是证据附件；截图失败应记录到 `artifact_errors`，不应在内容、文本和图片资源已成功采集时误伤整条记录。
 
 ## 豆瓣小组特定逻辑
 
@@ -45,8 +47,10 @@ description: 仅用于 TripPostCollect 面向 bilibili、ctrip、qunar、douban_
 
 ## 验证
 
-- Python 改动：`.venv/bin/python -m py_compile scripts/ctf_resource_crawl.py scripts/import_ctf_captures.py`
+- 先运行 `source .venv/bin/activate`，之后只用 `python`。
+- Python 改动：`python -m py_compile scripts/ctf_resource_crawl.py scripts/import_ctf_captures.py`
 - 抓取证据：`outputs/ctf_resource_crawls/` 下的 `summary.json` 和目标 `capture_meta.json`。
+- 页面级烟测：使用 `--behavior-profile quick_probe`、较小 `--max-image-save`/`--max-scrolls`、`--output-dir temp/<task>`，完成后删除该临时目录。
 - 导入证据：SQL 查询显示 `ctf_captures` 行以及对应的 `web_posts.source_capture_id`。
 - 字段变化：只有具备产物证据时才更新 `docs/platform-field-coverage.md`。
 
@@ -56,6 +60,7 @@ description: 仅用于 TripPostCollect 面向 bilibili、ctrip、qunar、douban_
 - 把已跳过的抓取作为面向用户的帖子导入。
 - 可见文本、元数据和摘要已经足够时，仍读取完整渲染 HTML。
 - 把 `temp/` 产物当作稳定项目状态来依赖。
+- 页面烟测不用 `quick_probe`，把默认详情页停留误判为浏览器卡死。
 - 没有任务特定理由时，在正式取证中使用 `--no-throttle` 或无界面模式。
 - 豆瓣显式 topic URL 只传 `--urls --site-label douban_group`，导致抓取落到 `douban_group_<digest>` profile 并丢登录态。
 - 把豆瓣隐私用户的粉丝量 NULL 当作 0；`rev-link` 块消失是隐私标记，需标 `followers_source="privacy_restricted"` 保持 NULL。
