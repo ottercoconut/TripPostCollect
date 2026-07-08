@@ -26,6 +26,10 @@ CURRENT_JOB_KINDS = {"mediacrawler_search", "ctf_resource_crawl"}
 JOB_KIND_CHECK_RE = re.compile(r"CHECK\s*\(\s*job_kind\s+IN\s*\(([^)]*)\)", re.IGNORECASE | re.DOTALL)
 
 
+def qmarks(values: set[str] | list[str]) -> str:
+    return ",".join("?" for _ in values)
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -46,6 +50,14 @@ def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
+def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return bool(row)
+
+
 def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> bool:
     if column_name in table_columns(conn, table_name):
         return False
@@ -57,6 +69,7 @@ def ensure_source_platforms(conn: sqlite3.Connection) -> int:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SOURCE_PLATFORMS_SCHEMA.read_text(encoding="utf-8"))
     conn.execute("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", (3, "source_platforms"))
+    platform_keys = set(SITES)
     for site in SITES.values():
         conn.execute(
             """
@@ -119,6 +132,17 @@ def ensure_source_platforms(conn: sqlite3.Connection) -> int:
                 ),
                 site.notes,
             ),
+        )
+    if platform_keys and table_exists(conn, "web_posts") and table_exists(conn, "ctf_captures"):
+        placeholders = qmarks(platform_keys)
+        conn.execute(
+            f"""
+            DELETE FROM source_platforms
+            WHERE platform_key NOT IN ({placeholders})
+              AND platform_key NOT IN (SELECT platform_key FROM web_posts)
+              AND platform_key NOT IN (SELECT site_key FROM ctf_captures)
+            """,
+            sorted(platform_keys),
         )
     return len(SITES)
 
@@ -224,7 +248,15 @@ def sync_config_jobs(conn: sqlite3.Connection, config: dict[str, Any]) -> int:
         )
         count += 1
     if active_keys:
-        placeholders = ",".join("?" for _ in active_keys)
+        placeholders = qmarks(active_keys)
+        conn.execute(
+            f"""
+            DELETE FROM crawl_jobs
+            WHERE job_key NOT IN ({placeholders})
+              AND id NOT IN (SELECT DISTINCT job_id FROM crawl_attempts)
+            """,
+            sorted(active_keys),
+        )
         conn.execute(
             f"UPDATE crawl_jobs SET enabled=0, status='disabled', updated_at=datetime('now') WHERE job_key NOT IN ({placeholders})",
             sorted(active_keys),

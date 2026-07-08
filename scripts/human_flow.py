@@ -83,7 +83,6 @@ SITE_PROFILE_MAP = {
     "zhihu": "social_high_risk",
     "ctrip": "travel_medium",
     "qunar": "travel_medium",
-    "qyer": "travel_medium",
     "douban_group": "conservative",
 }
 

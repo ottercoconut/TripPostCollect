@@ -138,7 +138,19 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
         if args.no_import:
             command.append("--no-import")
     elif kind == "ctf_resource_crawl":
-        command = [sys.executable, str(ROOT / "scripts" / "ctf_resource_crawl.py"), "--sites", site]
+        if url:
+            command = [
+                sys.executable,
+                str(ROOT / "scripts" / "ctf_resource_crawl.py"),
+                "--urls",
+                url,
+                "--site-label",
+                site,
+                "--configured-site-urls",
+            ]
+        else:
+            command = [sys.executable, str(ROOT / "scripts" / "ctf_resource_crawl.py"), "--sites", site]
+        add_flag(command, "--keyword", params.get("keyword", ""))
         add_flag(command, "--scrapling-preflight", params.get("scrapling_preflight", "auto"))
         add_flag(command, "--max-image-save", params.get("max_image_save", 20))
         add_flag(command, "--max-scrolls", params.get("max_scrolls", 4))

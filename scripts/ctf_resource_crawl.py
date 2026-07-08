@@ -205,6 +205,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sites", nargs="+", choices=site_keys(include_no_login=True), help="Configured site keys.")
     parser.add_argument("--urls", nargs="+", help="Explicit URLs. Use with optional --site-label.")
     parser.add_argument("--site-label", default="custom", help="Label for explicit URLs.")
+    parser.add_argument(
+        "--configured-site-urls",
+        action="store_true",
+        help=(
+            "Treat explicit --urls as targets for the configured --site-label, "
+            "reusing that site's policy, browser profile, mobile context, and engine."
+        ),
+    )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Output root.")
     parser.add_argument("--headless", action="store_true", help="Run browser headless.")
     parser.add_argument("--max-image-save", type=int, default=30, help="Maximum image bodies saved per target.")
@@ -234,6 +242,7 @@ def parse_args() -> argparse.Namespace:
         help="Scrapling static preflight timeout in seconds.",
     )
     parser.add_argument("--no-throttle", action="store_true", help="Skip shared crawl policy checks.")
+    parser.add_argument("--keyword", default="", help="Optional search keyword to record in capture_meta for downstream import (e.g. 烟台旅游).")
     return parser.parse_args()
 
 
@@ -247,7 +256,20 @@ def slug(value: str) -> str:
 
 def active_targets(args: argparse.Namespace) -> list[dict[str, Any]]:
     if args.urls:
-        return [{"site": args.site_label, "url": url, "configured": False, "mobile": False} for url in args.urls]
+        configured = bool(args.configured_site_urls)
+        if configured and args.site_label not in SITES:
+            raise SystemExit("--configured-site-urls requires --site-label to be a configured site key.")
+        site_config = get_site(args.site_label) if configured else None
+        return [
+            {
+                "site": args.site_label,
+                "url": url,
+                "configured": configured,
+                "mobile": bool(site_config.mobile_context) if site_config else False,
+                "explicit_url": True,
+            }
+            for url in args.urls
+        ]
     keys = args.sites or [key for key, site in SITES.items() if site.active and site.daily_request_budget > 0]
     return [
         {"site": key, "url": get_site(key).default_url, "configured": True, "mobile": get_site(key).mobile_context}
@@ -278,7 +300,17 @@ def content_type_base(content_type: str) -> str:
 
 def is_image_response(response: Response) -> bool:
     ctype = content_type_base(response.headers.get("content-type", ""))
+    if ctype and not ctype.startswith("image/") and (ctype.startswith("application/") or ctype.startswith("text/")):
+        return False
     return ctype.startswith("image/") or response.request.resource_type == "image"
+
+
+PERIPHERAL_IMAGE_URL_RE = re.compile(r"doubanio\.com/f/", re.IGNORECASE)
+
+
+def is_peripheral_image_url(url: str) -> bool:
+    """True for known non-content decorative images (e.g. douban CSS assets)."""
+    return bool(PERIPHERAL_IMAGE_URL_RE.search(url or ""))
 
 
 def is_video_url(url: str) -> bool:
@@ -452,6 +484,7 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
             "flags": [],
             "artifact_dir": str(target_dir),
             "artifacts": artifacts,
+            "keyword": str(args.keyword or ""),
         }
         (target_dir / "capture_meta.json").write_text(json.dumps(skipped_summary, ensure_ascii=False, indent=2), encoding="utf-8")
         return skipped_summary
@@ -500,6 +533,7 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
                 "flags": [],
                 "artifact_dir": str(target_dir),
                 "artifacts": artifacts,
+                "keyword": str(args.keyword or ""),
             }
             (target_dir / "capture_meta.json").write_text(json.dumps(blocked_summary, ensure_ascii=False, indent=2), encoding="utf-8")
             return blocked_summary
@@ -539,6 +573,8 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
                     )
                 return
             if is_image_response(response):
+                if is_peripheral_image_url(response.url):
+                    return
                 record: dict[str, Any] = {
                     "url": response.url,
                     "status": response.status,
@@ -656,6 +692,7 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
         "policy_events": policy_events,
         "cookie_events": cookie_events,
         "scrapling_preflight": scrapling_preflight,
+        "keyword": str(args.keyword or ""),
         "image_summary": {
             "total_requests": total_image_requests,
             "successful_responses": image_success,

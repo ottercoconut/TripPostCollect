@@ -145,24 +145,6 @@
       }
     },
     {
-      "job_key": "page_qyer_jinan",
-      "site_key": "qyer",
-      "target_url": "https://place.qyer.com/jinan/",
-      "job_kind": "ctf_resource_crawl",
-      "enabled": true,
-      "priority": 90,
-      "schedule_seconds": 172800,
-      "max_attempts": 1,
-      "params": {
-        "max_image_save": 3,
-        "max_scrolls": 2,
-        "scrapling_preflight": "auto"
-      },
-      "behavior_profile": {
-        "name": "travel_medium"
-      }
-    },
-    {
       "job_key": "page_douban_group_jinan",
       "site_key": "douban_group",
       "target_url": "https://www.douban.com/group/topic/53104421/",
@@ -172,6 +154,7 @@
       "schedule_seconds": 172800,
       "max_attempts": 1,
       "params": {
+        "keyword": "济南旅游",
         "max_image_save": 3,
         "max_scrolls": 2,
         "scrapling_preflight": "auto"
