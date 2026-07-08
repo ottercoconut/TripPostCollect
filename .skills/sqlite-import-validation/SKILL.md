@@ -1,17 +1,17 @@
 ---
 name: sqlite-import-validation
-description: Use only when changing or validating TripPostCollect SQLite schema, bootstrap, import mapping, de-duplication, or field persistence.
+description: 仅在改动或验证 TripPostCollect SQLite 数据库结构、初始化、导入映射、去重或字段持久化时使用。
 ---
 
-# SQLite Import Validation
+# SQLite 入库验证
 
-## Trigger
+## 触发条件
 
-- Changes touch `db/*.sql`, `scripts/db_bootstrap.py`, `scripts/mediacrawler_crawl.py`, or `scripts/import_ctf_captures.py`.
-- User asks about table structure, import correctness, de-duplication, `published_at`, author fields, images, or row counts.
-- A crawl result must be verified in SQLite.
+- 改动涉及 `db/*.sql`、`scripts/db_bootstrap.py`、`scripts/mediacrawler_crawl.py` 或 `scripts/import_ctf_captures.py`。
+- 用户询问表结构、导入正确性、去重、`published_at`、作者字段、图片或行数。
+- 抓取结果必须在 SQLite 中验证。
 
-## Inputs
+## 输入材料
 
 - `docs/data-persistence.md`
 - `db/source_platforms.sql`
@@ -19,32 +19,32 @@ description: Use only when changing or validating TripPostCollect SQLite schema,
 - `db/ctf_captures.sql`
 - `db/crawl_scheduler.sql`
 - `scripts/db_bootstrap.py`
-- Relevant importer script for the source being tested
+- 被测试来源对应的导入脚本
 
-## Workflow
+## 工作流程
 
-1. Inspect the schema and importer boundary for the field or table being changed.
-2. Use a temp SQLite database for code validation unless the user explicitly asks to update the default DB.
-3. Run bootstrap through an existing entrypoint or `crawl_runner.py --sync-only` with the temp DB.
-4. Import a small, explicit artifact or run a small crawl into the temp DB.
-5. Query row counts, key identifiers, timestamps, author fields, image rows, and source/evidence links.
-6. If a persistent field contract changes, update `docs/data-persistence.md` and, when platform capability changes, `docs/platform-field-coverage.md`.
+1. 检查被改字段或表对应的数据库结构和导入器边界。
+2. 除非用户明确要求更新默认数据库，否则用临时 SQLite 数据库验证代码。
+3. 通过现有入口或带临时数据库的 `crawl_runner.py --sync-only` 执行初始化。
+4. 导入一个小而明确的产物，或把一次小范围抓取写入临时数据库。
+5. 查询行数、关键标识、时间戳、作者字段、图片行和来源/证据链接。
+6. 如果持久化字段契约变化，更新 `docs/data-persistence.md`；平台能力变化时同步更新 `docs/platform-field-coverage.md`。
 
-## Validation
+## 验证
 
-- Python changes: `.venv/bin/python -m py_compile scripts/db_bootstrap.py scripts/mediacrawler_crawl.py scripts/import_ctf_captures.py`
-- Schema sanity: SQLite opens the temp DB and required tables exist.
-- Import sanity: representative `SELECT` queries show expected rows and no unintended video or skipped rows.
-- Config/schema sync: `crawl_jobs` contains only current configured job kinds.
+- Python 改动：`.venv/bin/python -m py_compile scripts/db_bootstrap.py scripts/mediacrawler_crawl.py scripts/import_ctf_captures.py`
+- 数据库结构健全性：SQLite 能打开临时数据库，且必需表存在。
+- 导入健全性：代表性 `SELECT` 查询显示预期行，且没有意外的视频或跳过行。
+- 配置/数据库结构同步：`crawl_jobs` 只包含当前配置的任务类型。
 
-## Common Mistakes
+## 常见错误
 
-- Testing against the default DB when a temp DB would prove the change.
-- Backfilling old records without an explicit user request.
-- Adding platform-specific columns when the existing normalized fields or JSON payloads are sufficient.
-- Updating `web_posts` without rebuilding associated `web_post_images` when importer logic expects replacement.
+- 本可用临时数据库证明改动，却直接用默认数据库测试。
+- 未经用户明确要求就回填旧记录。
+- 现有归一化字段或 JSON 载荷已足够时，仍新增平台专用列。
+- 导入器逻辑预期替换图片行时，只更新 `web_posts` 而未重建关联的 `web_post_images`。
 
-## References
+## 参考文件
 
 - `docs/data-persistence.md`
 - `db/*.sql`
@@ -52,8 +52,8 @@ description: Use only when changing or validating TripPostCollect SQLite schema,
 - `scripts/mediacrawler_crawl.py`
 - `scripts/import_ctf_captures.py`
 
-## Scripts
+## 脚本
 
-- Existing: `scripts/db_bootstrap.py`
-- Existing: `scripts/mediacrawler_crawl.py`
-- Existing: `scripts/import_ctf_captures.py`
+- 现有：`scripts/db_bootstrap.py`
+- 现有：`scripts/mediacrawler_crawl.py`
+- 现有：`scripts/import_ctf_captures.py`
