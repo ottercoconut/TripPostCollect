@@ -116,6 +116,18 @@ class RecordRepository:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_record_image(self, image_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT i.*, p.platform_key, p.id AS record_id
+            FROM web_post_images i
+            JOIN web_posts p ON p.id = i.web_post_id
+            WHERE i.id = ?
+            """,
+            (image_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def get_capture_for_record(self, record: dict[str, Any]) -> dict[str, Any] | None:
         capture_id = record.get("source_capture_id")
         if capture_id is None:

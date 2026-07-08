@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from apps.admin_api.app.routers import health, maintenance, records
+from apps.admin_api.app.routers import captures, health, images, maintenance, overview, platforms, records, scheduler
 
 
 def create_app() -> FastAPI:
@@ -26,6 +26,11 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(maintenance.router)
     app.include_router(records.router)
+    app.include_router(images.router)
+    app.include_router(captures.router)
+    app.include_router(overview.router)
+    app.include_router(platforms.router)
+    app.include_router(scheduler.router)
     return app
 
 
