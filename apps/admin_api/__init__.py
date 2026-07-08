@@ -1,0 +1,1 @@
+"""TripPostCollect admin API application."""
