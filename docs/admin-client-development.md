@@ -2,7 +2,7 @@
 
 ## 目标
 
-建设一个面向本项目 SQLite 数据库的本地/内网管理台，以“记录”为核心管理图文内容。用户先通过平台、城市名、关键词、状态和时间等条件筛选出符合条件的记录，再围绕选中记录查看图片预览、作者信息、互动指标、页面证据和原始 JSON。客户端不是新的抓取器，不绕过现有 `crawl_runner.py`、`mediacrawler_crawl.py`、`ctf_resource_crawl.py` 和入库脚本；它只提供清晰、可审计的管理界面。
+建设一个面向本项目 SQLite 数据库的本地/内网管理台，以“记录”为核心查看和管理图文内容线索。用户先通过平台、城市名、关键词、状态和时间等条件筛选出符合条件的记录，再围绕选中记录查看图片预览、作者信息、互动指标、页面证据和原始 JSON。客户端不是新的抓取器，不绕过现有 `crawl_runner.py`、`mediacrawler_crawl.py`、`ctf_resource_crawl.py` 和入库脚本；首版管理端 HTTP API 只读，负责实时呈现数据库最新状态，不负责修改记录。
 
 首版采用正式产品化技术栈：
 
@@ -21,9 +21,10 @@
 
 - 不重新实现抓取逻辑。
 - 不直接从 UI 高频触发线上平台抓取。
-- 不从 UI 触发真实抓取、sync 或 dry-run；抓取和调度仍从命令行进入。
+- 不从 UI 触发真实抓取、sync、bootstrap 或 dry-run；抓取、调度同步和数据库维护仍从命令行进入。
 - 不把 `ctf_captures` 当作普通内容表随意修改。
-- 不在 UI 中手工新增记录；记录新增只来自现有抓取和入库链路。
+- 不在 UI 中手工新增、修改、软删除或物理删除记录；记录新增只来自现有抓取和入库链路，记录修正通过受控终端脚本处理。
+- 不在 UI 中修改、重排、替换或删除记录图片行；图片新增和更新默认来自入库链路。
 - 不在首版实现多用户协作、远程公网部署、复杂 RBAC 或 OAuth。
 - 不让前端直接访问 SQLite 文件或本地任意路径。
 - 不在 UI 中编辑 `source_platforms` 数据库行；重构前平台注册源头仍是 `scripts/web_sites.py`，重构后迁移到 `trippostcollect.platforms.registry`。
@@ -35,13 +36,13 @@
 2. `web_posts` 是记录主表；产品语言统一称为“记录”，表名只作为实现细节出现。
 3. 平台和城市名是首要筛选维度，允许只按城市名筛选，也允许平台 + 城市组合筛选。
 4. 图片、作者、互动指标、证据和 JSON 都是选中记录的上下文面板。
-5. `web_post_images` 是记录图片子表，首版允许排序、标记、替换 URL 和删除错误图片行；新增图片默认由入库链路完成。
+5. `web_post_images` 是记录图片子表，首版只读展示和预览；新增、替换、排序和删除默认由入库链路或后续终端维护脚本完成。
 6. `ctf_captures` 和 `ctf_capture_images` 是证据/调试底座，默认只读；通常从关联记录进入。
 7. 调度配置和运行报告在管理端只读；修改配置、sync、dry-run 和真实抓取继续使用命令行。
 8. 图片读取必须经过后端代理，后端只允许读取项目目录内白名单路径。
-9. 所有写操作必须记录变更审计。
-10. 记录删除只做软删除；图片行删除不删除磁盘文件，磁盘清理另做维护工具。
-11. 保留原始 `raw_sample_json`、`raw_meta_json`、HTML、截图和图片证据。
+9. 首版管理端不提供写入 HTTP API；需要修正、隐藏、重导入或维护时，通过受控终端脚本完成并在脚本层做备份和审计。
+10. 管理端支持抓取脚本运行期间实时读取最新数据库状态，但不主动改变数据库结构、调度配置、抓取任务或内容记录。
+11. 保留记录原始 JSON、关联证据原始 JSON、HTML、截图和图片证据；字段归属必须清楚，不把 `ctf_captures.raw_meta_json` 当作 `web_posts` 字段。
 12. `published_at` 只能表示平台原始发帖时间；UI 不提供“一键用抓取时间填充”的功能。
 13. 视频记录仍不进入内容主表；UI 只展示跳过原因或证据，不提供视频处理能力。
 
@@ -55,7 +56,8 @@
 - 互动指标：点赞、收藏、评论、转发、浏览量和 `metrics_json`。
 - 证据信息：`source_capture_id` 关联的 `ctf_captures`。
 - 证据图片：关联证据下的 `ctf_capture_images`。
-- 原始数据：`raw_sample_json`、`raw_meta_json`、`artifact_dir`、截图、HTML、可见文本。
+- 记录原始数据：`web_posts.raw_sample_json`、`web_posts.metrics_json`、`web_posts.author_json`。
+- 关联证据原始数据：通过 `source_capture_id` 读取 `ctf_captures.raw_meta_json`、截图、HTML、可见文本和证据图片。
 
 前端不应该把 `web_posts`、`web_post_images`、`ctf_captures` 暴露成并列的主工作区。它们在界面上应被组织为：
 
@@ -77,23 +79,23 @@
 - 在记录列表中快速判断平台、标题、作者、城市、发布时间、图片数和状态。
 - 打开一条记录后查看其图片预览、作者信息、正文、互动指标、证据和原始 JSON。
 - 找出缺图片、缺发布时间、缺作者粉丝量的记录。
-- 编辑记录标题、正文、作者字段、互动数、城市、关键词和状态。
+- 在抓取脚本运行过程中，通过刷新或自动轮询看到新入库记录、图片和运行报告。
 - 打开记录对应截图、HTML、可见文本和 JSON 原始证据。
 - 查看 `crawl_targets.json` 中的长期任务和当前任务状态。
-- 查看运行报告，不从前端触发 sync、dry-run 或真实抓取。
+- 查看运行报告，不从前端触发 bootstrap、sync、dry-run 或真实抓取。
 
 ### 工作区
 
 | 工作区 | 作用 | 首版要求 |
 |---|---|---|
 | 记录工作台 | 按平台、城市、关键词、状态、时间筛选记录，并显示记录列表 | 必做，默认首页 |
-| 记录详情 | 围绕单条记录展示图片、作者、内容、互动、证据和 JSON，并提供白名单字段 CRUD | 必做 |
+| 记录详情 | 围绕单条记录只读展示图片、作者、内容、互动、证据和 JSON | 必做 |
 | 数据质量 | 以记录为单位查看缺图片、缺发布时间、缺作者粉丝量等问题 | 必做 |
-| 图片浏览 | 从记录进入图片墙、失效图片、重复图片初筛 | 必做，作为记录上下文 |
+| 图片浏览 | 从记录进入图片墙、缩略图和原图预览 | 必做，作为记录上下文 |
 | 证据查看 | 从记录进入关联 `ctf_captures`；允许独立查询证据 | 必做，只读 |
 | 调度配置 | 查看 `config/crawl_targets.json` 和同步后的任务状态 | 必做，只读 |
 | 运行报告 | 查看 `crawl_run_reports` 和摘要文件 | 必做，只读 |
-| 系统设置 | DB 路径、只读模式、备份、维护命令 | 二期 |
+| 系统设置 | DB 路径、只读模式、刷新频率、维护命令说明 | 二期 |
 
 ## 信息架构
 
@@ -115,16 +117,16 @@ TripPostCollect Admin
       内容正文
       互动指标
       证据与原始数据
-      审计日志
+      刷新状态
   数据质量
     缺图片记录
     缺发布时间记录
     缺作者字段记录
-    批量编辑
+    问题记录定位
   图片浏览
     当前记录图片
-    失效图片初筛
-    重复图片初筛
+    缩略图
+    原图预览
   证据
     关联证据
     独立证据查询
@@ -135,8 +137,8 @@ TripPostCollect Admin
     运行报告
   设置
     数据库
-    备份
-    审计日志
+    只读状态
+    刷新频率
 ```
 
 ## 前端静态模板
@@ -212,6 +214,8 @@ apps/
       routes/
       styles/
       types/
+
+pyproject.toml
 
 src/
   trippostcollect/
@@ -328,6 +332,34 @@ if __name__ == "__main__":
 
 也就是说，用户入口不变，业务实现位置迁移。
 
+### Python 包安装与导入
+
+`src/trippostcollect/` 必须作为标准 Python 包安装，不依赖临时 `PYTHONPATH`。阶段 1 需要在仓库根目录新增 `pyproject.toml`，至少声明：
+
+```toml
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trippostcollect"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+```
+
+开发和运行管理端前，先在现有虚拟环境中安装 editable 包：
+
+```bash
+source .venv/bin/activate
+python -m pip install -e .
+```
+
+安装后，旧脚本 wrapper、FastAPI app 和测试都应能直接 `import trippostcollect`。不得把 `apps/admin_api` 长期写成直接 import `scripts/*.py`，也不要通过在命令前临时设置 `PYTHONPATH=src` 作为正式方案。
+
 ### 路径迁移规则
 
 - `scripts/project_paths.py` 先保留，内部转发到 `trippostcollect.core.paths`。
@@ -361,6 +393,7 @@ if __name__ == "__main__":
 
 ```bash
 source .venv/bin/activate
+python -m pip install -e .
 python -m uvicorn apps.admin_api.app.main:app \
   --reload \
   --host 127.0.0.1 \
@@ -371,6 +404,7 @@ python -m uvicorn apps.admin_api.app.main:app \
 
 ```bash
 source .venv/bin/activate
+python -m pip install -e .
 python -m uvicorn apps.admin_api.app.main:app \
   --host 127.0.0.1 \
   --port 8787
@@ -395,20 +429,24 @@ Python 依赖：
 ### SQLite 连接策略
 
 - 每个请求打开短连接，设置 `row_factory=sqlite3.Row`。
-- 每个写请求使用事务。
-- 启动时执行 `bootstrap_database()`，确保 schema 和平台注册/任务配置一致。
-- 对写操作设置 `PRAGMA foreign_keys = ON`。
-- 不开启长期持有的全局连接。
+- 管理端 HTTP API 首版只读；默认使用只读连接打开 SQLite，不在请求中写入业务表、配置表、调度表或证据表。
+- 设置 `PRAGMA foreign_keys = ON` 和合理的 `PRAGMA busy_timeout`，避免抓取脚本短事务写入时管理端读请求立即失败。
+- 启动时只做 schema/status 检查，不执行会修改数据库的 `bootstrap_database()`、平台注册同步或 `crawl_jobs` 同步。
+- 管理端不长期持有全局连接，不做长事务和大范围无分页查询。
 
 建议封装：
 
 ```python
-def connect_db(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
+    uri = f"file:{db_path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 ```
+
+抓取脚本运行过程中，管理端通过重新查询 SQLite 获得最新记录、图片、证据和运行报告；这属于实时读取，不属于 sync 或 bootstrap。
 
 ### 配置
 
@@ -420,44 +458,22 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
 | `TRIPPOST_ADMIN_CONFIG` | `config/crawl_targets.json` | 调度配置路径 |
 | `TRIPPOST_ADMIN_HOST` | `127.0.0.1` | 服务监听 |
 | `TRIPPOST_ADMIN_PORT` | `8787` | 服务端口 |
-| `TRIPPOST_ADMIN_WRITE_ENABLED` | `true` | 是否允许写入 |
-| `TRIPPOST_ADMIN_ALLOW_COMMANDS` | `false` | 首版固定为 false，不允许前端触发 sync、dry-run 或真实抓取 |
-| `TRIPPOST_ADMIN_BACKUP_BEFORE_WRITE` | `true` | 写入前是否备份 DB |
+| `TRIPPOST_ADMIN_DB_READONLY` | `true` | 首版固定只读打开 SQLite |
+| `TRIPPOST_ADMIN_ALLOW_COMMANDS` | `false` | 首版固定为 false，不允许前端触发 bootstrap、sync、dry-run 或真实抓取 |
+| `TRIPPOST_ADMIN_REFRESH_SECONDS` | `5` | 前端默认轮询刷新间隔 |
 
 所有路径必须用 `trippostcollect.core.paths` 或后端 settings 统一解析，不在业务代码里硬编码。迁移期允许 `scripts/project_paths.py` 作为兼容 wrapper 存在。
 
-### 审计表
+### 审计和备份边界
 
-建议新增 `admin_audit_log`。这是管理台自己的审计表，不影响抓取主链路。
+首版管理端 HTTP API 不写数据库，因此不要求管理端服务创建 `admin_audit_log` 或写前备份。后续如果设计终端修正脚本、隐藏脚本、重导入脚本或维护脚本，必须在这些命令行入口中实现：
 
-```sql
-CREATE TABLE IF NOT EXISTS admin_audit_log (
-    id INTEGER PRIMARY KEY,
-    actor TEXT NOT NULL DEFAULT 'local_admin',
-    action TEXT NOT NULL,
-    table_name TEXT NOT NULL,
-    row_id INTEGER,
-    before_json TEXT NOT NULL DEFAULT '{}',
-    after_json TEXT NOT NULL DEFAULT '{}',
-    reason TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+- 写入前备份 SQLite。
+- 参数校验和变更摘要。
+- 可追溯的审计记录。
+- 临时库验证和回滚说明。
 
-CREATE INDEX IF NOT EXISTS idx_admin_audit_log_table_row
-ON admin_audit_log(table_name, row_id, id DESC);
-```
-
-所有 `POST`、`PATCH`、`DELETE` 必须写审计。批量操作写一条批量摘要，再按行写明细。
-
-### 备份策略
-
-默认每次写操作前按日创建 SQLite 备份：
-
-```text
-data/runtime/admin_backups/YYYYMMDD/HHMMSS_trippostcollect.sqlite
-```
-
-同一分钟多次写入可以复用同一个备份，避免文件膨胀。备份失败时，写操作失败。
+这些终端写入能力不通过前端暴露。
 
 ### API 约定
 
@@ -509,7 +525,7 @@ data/runtime/admin_backups/YYYYMMDD/HHMMSS_trippostcollect.sqlite
 | 方法 | 路径 | 作用 |
 |---|---|---|
 | `GET` | `/api/health` | 服务健康检查 |
-| `GET` | `/api/meta` | DB 路径、写入开关、版本、表计数 |
+| `GET` | `/api/meta` | DB 路径、只读状态、版本、表计数 |
 
 #### Overview
 
@@ -534,13 +550,11 @@ data/runtime/admin_backups/YYYYMMDD/HHMMSS_trippostcollect.sqlite
 | `GET` | `/api/records` | 分页筛选记录 |
 | `GET` | `/api/records/{id}` | 记录详情 |
 | `GET` | `/api/records/{id}/context` | 记录上下文聚合数据 |
-| `PATCH` | `/api/records/{id}` | 更新记录 |
-| `DELETE` | `/api/records/{id}` | 默认软删除记录 |
-| `POST` | `/api/records/bulk-update` | 批量更新记录 |
+| `GET` | `/api/records/{id}/raw` | 懒加载记录和关联证据 JSON |
 
-`/api/records` 是产品层主 API。实现上读取和写入 `web_posts`，但前端路由、组件和文案统一使用 `record`。若为了兼容早期脚本保留 `/api/posts`，也只能作为 `/api/records` 的别名，不作为文档和前端主入口。
+`/api/records` 是产品层主 API。实现上只读取 `web_posts` 和关联上下文，前端路由、组件和文案统一使用 `record`。若为了兼容早期脚本保留 `/api/posts`，也只能作为 `/api/records` 的别名，不作为文档和前端主入口。
 
-首版不提供 `POST /api/records`。记录创建只由现有抓取和入库链路完成，管理端只负责筛选、查看、修正白名单字段、软删除和审计。
+首版不提供 `POST`、`PATCH`、`DELETE` 或 bulk update。记录创建、修正、隐藏、重导入和维护只由现有抓取/入库链路或后续受控终端脚本完成，管理端只负责筛选、查看和定位问题。
 
 筛选参数：
 
@@ -600,10 +614,9 @@ data/runtime/admin_backups/YYYYMMDD/HHMMSS_trippostcollect.sqlite
     "images": [],
     "capture": null,
     "artifacts": {},
-    "raw": {
-      "raw_sample_json": {},
-      "metrics_json": {},
-      "author_json": {}
+    "raw_summary": {
+      "record_json_fields": ["raw_sample_json", "metrics_json", "author_json"],
+      "has_capture_raw_meta": false
     }
   },
   "meta": {},
@@ -611,7 +624,33 @@ data/runtime/admin_backups/YYYYMMDD/HHMMSS_trippostcollect.sqlite
 }
 ```
 
-可编辑字段白名单：
+完整 JSON 不默认塞进轻量详情响应，避免列表切详情时传输过大；前端打开 JSON 标签页时再请求 `/api/records/{id}/raw`。
+
+`/api/records/{id}/raw` 响应分层：
+
+```json
+{
+  "data": {
+    "record": {
+      "raw_sample_json": {},
+      "metrics_json": {},
+      "author_json": {}
+    },
+    "capture": {
+      "raw_meta_json": {},
+      "navigation_json": {},
+      "image_summary_json": {},
+      "validation_json": {}
+    }
+  },
+  "meta": {},
+  "errors": []
+}
+```
+
+如果记录没有 `source_capture_id`，`capture` 返回 `null`。后端读取 JSON TEXT 时应尽量解析为 object；解析失败时返回原字符串和 parse error，不在首版修写原字段。
+
+首版只读展示字段包括：
 
 - `platform_post_id`
 - `source_url`
@@ -642,7 +681,7 @@ data/runtime/admin_backups/YYYYMMDD/HHMMSS_trippostcollect.sqlite
 - `author_json`
 - `status`
 
-不可编辑字段：
+始终不可由管理端 HTTP API 写入的字段：
 
 - `id`
 - `source_capture_id`
@@ -654,24 +693,24 @@ data/runtime/admin_backups/YYYYMMDD/HHMMSS_trippostcollect.sqlite
 - `created_at`
 - `updated_at`
 
-如果后续确实需要人工补录记录，必须单独设计补录流程、来源标记、审计和 schema 约束，不混入首版记录工作台。
+如果后续确实需要人工补录、修正、隐藏或删除记录，必须单独设计终端命令、来源标记、备份、审计和 schema 约束，不混入首版记录工作台。
 
 #### Record Images
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
 | `GET` | `/api/records/{id}/images` | 记录图片列表 |
-| `PATCH` | `/api/images/{id}` | 修改图片元数据 |
-| `DELETE` | `/api/images/{id}` | 删除图片行 |
-| `POST` | `/api/records/{id}/images/reorder` | 重排图片 |
-| `GET` | `/api/images/{id}/preview` | 图片代理 |
-| `GET` | `/api/images/by-url` | 远程图片代理 |
+| `GET` | `/api/images/{id}/preview` | 按 `web_post_images.id` 预览记录图片 |
 
 图片代理策略：
 
+- 前端只能按数据库图片 ID 请求预览，不提交任意 URL。
 - 若 `local_path` 存在并位于项目根目录内，返回本地文件。
-- 若没有本地文件，返回带签名/短时缓存的远程 URL 代理或直接返回 URL。
-- 后端必须拒绝 `..`、绝对任意路径、项目根外路径。
+- 若没有本地文件，后端可读取该图片行已有的 `image_url` 做远程预览，或把原始 URL 返回给前端直接展示。
+- 后端必须对本地路径做 `resolve()`，拒绝 `..`、项目根外路径和符号链接逃逸；前端不能提交 `local_path`。
+- 远程预览只允许数据库中已存在的 `http://` 或 `https://` 图片 URL。
+- 如果后端代取远程图片，必须禁止 localhost、内网 IP、link-local、非 HTTP(S) 协议；重定向后的目标也要重新校验。
+- 远程响应必须设置超时、最大响应大小和 `Content-Type: image/*` 校验。
 - `web_post_images.image_role` 限定为 `content`、`page`、`author_avatar`。
 
 #### Captures
@@ -682,29 +721,20 @@ data/runtime/admin_backups/YYYYMMDD/HHMMSS_trippostcollect.sqlite
 | `GET` | `/api/captures` | 独立分页查看页面级证据 |
 | `GET` | `/api/captures/{id}` | 证据详情 |
 | `GET` | `/api/captures/{id}/images` | 证据图片 |
-| `GET` | `/api/captures/{id}/artifact` | 读取白名单产物 |
-| `POST` | `/api/captures/{id}/promote` | 重新归一化生成/更新 `web_posts` |
+| `GET` | `/api/captures/images/{id}/preview` | 按 `ctf_capture_images.id` 预览证据图片 |
+| `GET` | `/api/captures/{id}/artifact?kind=screenshot` | 读取截图 |
+| `GET` | `/api/captures/{id}/artifact?kind=visible_text` | 读取可见文本 |
+| `GET` | `/api/captures/{id}/artifact?kind=rendered_html` | 读取 HTML 证据 |
 
-`ctf_captures` 默认不可编辑，并且不作为首屏主对象。允许的操作只有：
+`ctf_captures` 默认只读，并且不作为首屏主对象。允许的操作只有：
 
 - 查看。
 - 从记录详情进入关联证据。
-- 重新导入指定 `capture_meta.json`。
-- 给证据添加管理台注释，建议写入新表 `capture_annotations`，不直接写 `ctf_captures`。
+- 定位需要通过终端重导入的 `capture_meta.json`。
 
-建议新增：
+重新导入指定 `capture_meta.json`、证据注释和证据状态标记属于后续终端维护能力，不通过首版前端提供。
 
-```sql
-CREATE TABLE IF NOT EXISTS capture_annotations (
-    id INTEGER PRIMARY KEY,
-    ctf_capture_id INTEGER NOT NULL REFERENCES ctf_captures(id) ON DELETE CASCADE,
-    status TEXT NOT NULL DEFAULT 'unreviewed',
-    note TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    CHECK (status IN ('unreviewed', 'useful', 'noise', 'needs_login', 'blocked', 'error'))
-);
-```
+证据文件读取只允许使用枚举 `kind`，不接受前端传入任意路径。后端根据 `ctf_captures` 行中的 `screenshot_path`、`visible_text_path`、`rendered_html_path` 等已入库路径解析文件。
 
 #### Scheduler
 
@@ -721,15 +751,15 @@ CREATE TABLE IF NOT EXISTS capture_annotations (
 - 前端不执行 `crawl_runner.py --sync-only`。
 - 前端不执行 dry-run。
 - 前端不触发真实抓取。
-- 配置修改、sync、dry-run 和真实抓取继续通过命令行完成。
+- 配置修改、bootstrap、sync、dry-run 和真实抓取继续通过命令行完成。
 
 #### Maintenance
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| `POST` | `/api/maintenance/bootstrap` | 执行 bootstrap |
-| `POST` | `/api/maintenance/backup-db` | 创建 DB 备份 |
-| `GET` | `/api/audit-log` | 查看管理台审计日志 |
+| `GET` | `/api/maintenance/schema-status` | 只读检查表、索引、平台和任务计数 |
+
+Maintenance 首版只读，不执行 bootstrap、备份、sync、dry-run、真实抓取或任意 shell 命令。
 
 ## 前端技术设计
 
@@ -781,7 +811,7 @@ UI：
 管理台应是高密度、安静、可扫描的工作台：
 
 - 左侧固定导航。
-- 顶部只放数据库状态、写入状态、当前 DB 文件。
+- 顶部只放数据库状态、只读状态、当前 DB 文件。
 - 默认首页是记录工作台，筛选器和记录列表为主体。
 - 详情区采用两栏或三栏：记录字段、图片/作者/互动、证据/JSON。
 - 卡片圆角不超过 8px。
@@ -798,7 +828,6 @@ UI：
 | `RecordFilterBar` | 平台、城市、关键词、状态、日期、缺字段筛选 |
 | `RecordTable` | 记录列表，支持分页、排序、列显隐和行选择 |
 | `RecordDetailDrawer` | 选中记录的详情抽屉或详情页 |
-| `RecordEditor` | 记录白名单字段编辑表单 |
 | `RecordImagePreview` | 当前记录图片预览 |
 | `AuthorPanel` | 当前记录作者信息 |
 | `MetricsPanel` | 当前记录互动指标 |
@@ -806,8 +835,7 @@ UI：
 | `ImageGrid` | 从记录进入的图片墙 |
 | `JsonViewer` | 展示 JSON 字段 |
 | `ArtifactViewer` | 展示 HTML/文本/截图路径 |
-| `ConfirmDialog` | 删除和批量操作确认 |
-| `AuditLogPanel` | 写操作审计 |
+| `RefreshControl` | 手动刷新和轮询状态 |
 
 ### 记录工作台布局
 
@@ -867,9 +895,9 @@ UI：
 ### 记录详情布局
 
 ```text
-顶部：平台 / 状态 / 标题 / 外链 / 保存按钮
+顶部：平台 / 状态 / 标题 / 外链 / 刷新状态
 
-左栏：可编辑字段
+左栏：记录字段
   基础信息
   作者信息
   互动指标
@@ -890,13 +918,13 @@ UI：
 
 详情页使用标签或分组切换：
 
-- 图片：`web_post_images` 缩略图、原图预览、排序、URL、local_path 状态。
+- 图片：`web_post_images` 缩略图、原图预览、URL、local_path 状态。
 - 作者：展示名、平台 ID、主页、头像、简介、粉丝数、关注数、作品数、认证信息。
 - 内容：标题、正文、城市、关键词、发布时间、来源 URL。
 - 互动：点赞、收藏、评论、分享、转发、浏览量、`metrics_json`。
 - 证据：关联 `ctf_captures`、截图、HTML、可见文本、证据图片。
-- JSON：`raw_sample_json`、`author_json`、`metrics_json`。
-- 审计：本记录相关 `admin_audit_log`。
+- JSON：记录侧 `raw_sample_json`、`author_json`、`metrics_json`；有关联证据时展示 `ctf_captures.raw_meta_json` 等证据 JSON。
+- 刷新：当前详情最近刷新时间和轮询状态。
 
 ### 图片预览规则
 
@@ -904,8 +932,8 @@ UI：
 
 1. `web_post_images.local_path` 对应本地文件。
 2. `web_post_images.image_url` 远程 URL。
-3. `author_avatar_url` 头像。
-4. `ctf_capture_images.saved_path` 页面证据图片。
+3. `ctf_capture_images.saved_path` 页面证据图片。
+4. `ctf_capture_images.image_url` 页面证据图片远程 URL。
 
 前端不直接使用本地文件路径。所有本地图片都通过后端：
 
@@ -913,6 +941,8 @@ UI：
 /api/images/{id}/preview
 /api/captures/images/{id}/preview
 ```
+
+这些接口只按数据库图片 ID 取图，不提供 `/api/images/by-url` 这类任意 URL 代理。
 
 图片组件状态：
 
@@ -924,30 +954,44 @@ UI：
 - 复制 URL。
 - 打开外链。
 
-## 数据写入边界
+## 读写边界
 
-### 允许直接写
+### 首版直接读
 
-- 记录白名单字段，落库到 `web_posts`。
-- 记录图片，落库到 `web_post_images`。
-- `admin_audit_log`。
-- `capture_annotations`。
+- `web_posts`。
+- `web_post_images`。
+- `source_platforms`。
+- `ctf_captures`。
+- `ctf_capture_images`。
+- `crawl_jobs`。
+- `crawl_run_reports`。
+- `config/crawl_targets.json`。
+- `outputs/` 和 `data/runtime/` 下的摘要文件。
 
-### 间接写
+### 首版不写
 
-- `crawl_jobs`：只由命令行 sync 更新，管理端不写。
-- `source_platforms`：迁移前通过修改 `scripts/web_sites.py` 后执行 bootstrap；迁移后通过修改 `trippostcollect.platforms.registry` 后执行 bootstrap；UI 首版不支持。
-- `ctf_captures`：通过重新导入 `capture_meta.json`。
-
-### 不写
-
+- `web_posts`、`web_post_images`。
+- `ctf_captures`、`ctf_capture_images`。
+- `crawl_jobs`、`crawl_run_reports`。
+- `source_platforms`。
 - `raw_sample_json`。
 - `raw_meta_json`。
 - `capture_meta_path`、`rendered_html_path` 等证据路径。
 - `schema_migrations`。
 - `cities`，除非后续单独做城市管理。
 
-## CRUD 语义
+### 终端写入
+
+以下能力不属于首版管理端 HTTP API，后续如需要，应做成受控终端命令：
+
+- 修正记录字段。
+- 隐藏或恢复记录。
+- 重新导入指定 `capture_meta.json`。
+- 执行 bootstrap、sync、dry-run 或真实抓取。
+
+终端写入命令必须包含备份、审计、参数校验和临时库验证策略。
+
+## 读取语义
 
 ### Create
 
@@ -958,11 +1002,13 @@ UI：
 - `import_ctf_captures.py`。
 - 后续可能存在的受控导入脚本。
 
-管理端的“新增”边界只允许出现在这些链路完成后：用户在记录工作台看到新记录，并对其做查看、修正、软删除或审计。
+管理端的“新增”边界只允许出现在这些链路完成后：用户在记录工作台看到新记录，并对其做查看和问题定位。
 
 ### Read
 
 所有记录列表必须分页。默认 `page_size=50`，最大 `page_size=200`。
+
+抓取脚本运行期间，前端可通过 React Query 轮询重新请求列表、详情、图片、证据和运行报告。后端每次请求重新读取 SQLite，不缓存会影响实时性的记录数据。
 
 全文搜索首版使用 `LIKE`：
 
@@ -972,27 +1018,9 @@ WHERE title LIKE ? OR content_text LIKE ? OR author_display_name LIKE ?
 
 二期可考虑 FTS5。
 
-### Update
+### Update 和 Delete
 
-更新时：
-
-- 读取旧行。
-- 校验字段白名单。
-- 校验类型和范围。
-- 写入审计。
-- 更新 `updated_at=datetime('now')`。
-
-### Delete
-
-默认软删除：
-
-```sql
-UPDATE web_posts SET status='skipped', updated_at=datetime('now') WHERE id=?
-```
-
-首版不提供记录物理删除。删除动作只做软删除，并写审计。
-
-图片物理删除只删除数据库行，不删除磁盘文件；磁盘清理另做维护工具。
+首版管理端不提供 HTTP 更新或删除能力。记录修正、隐藏、恢复、图片标记和重导入应通过后续终端维护脚本设计，不复用前端工作台接口。
 
 ## 校验规则
 
@@ -1013,8 +1041,8 @@ UPDATE web_posts SET status='skipped', updated_at=datetime('now') WHERE id=?
 ### JSON 字段
 
 - `metrics_json`、`author_json` 必须是 JSON object。
-- UI 提供格式化编辑器。
-- 保存前后端重新 `json.loads` 校验。
+- UI 只读格式化展示。
+- 后续终端修改脚本保存前必须重新 `json.loads` 校验。
 
 ### URL 字段
 
@@ -1026,11 +1054,14 @@ UPDATE web_posts SET status='skipped', updated_at=datetime('now') WHERE id=?
 首版是本机管理台，但仍按安全边界设计：
 
 - 默认监听 `127.0.0.1`。
-- 写入可通过 `TRIPPOST_ADMIN_WRITE_ENABLED=false` 禁用。
+- 管理端 HTTP API 首版固定只读。
 - 命令执行首版固定禁用，`TRIPPOST_ADMIN_ALLOW_COMMANDS=false`。
-- 后端不提供 sync、dry-run 或真实抓取触发接口。
+- 后端不提供 bootstrap、sync、dry-run 或真实抓取触发接口。
 - 后端不接受前端传入任意 shell。
 - 文件读取只允许项目根、`outputs/`、`data/runtime/`、图片保存目录。
+- 文件读取不接受任意 path 参数，只能通过数据库 ID 或枚举 `kind` 解析已入库路径。
+- 本地路径必须 `resolve()` 后仍处于允许目录内，符号链接不能逃逸到项目外。
+- 远程图片代理只处理数据库已有图片 URL；禁止前端传任意 URL，禁止 localhost、内网 IP、link-local 和非 HTTP(S) 协议。
 - HTML 证据默认以纯文本或 iframe sandbox 展示，避免执行抓取页面脚本。
 - 远程图片代理设置超时和最大响应大小。
 - 所有危险操作二次确认。
@@ -1056,8 +1087,6 @@ repositories/
 services/
   image_service.py
   scheduler_service.py
-  backup_service.py
-  audit_service.py
   validation_service.py
 
 src/trippostcollect/
@@ -1067,15 +1096,17 @@ src/trippostcollect/
   db/
 ```
 
-Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和备份。SQL repository、记录聚合、证据读取、调度配置读取等可复用能力放在 `src/trippostcollect/`，避免抓取脚本和管理端重复实现。
+Router 只处理 HTTP。管理端 service 处理 API 编排、只读边界、路径安全和响应模型。SQL repository、记录聚合、证据读取、调度配置读取等可复用能力放在 `src/trippostcollect/`，避免抓取脚本和管理端重复实现。
 
 ## 前端状态管理
 
 使用 React Query 管理服务端状态：
 
 - 列表查询按筛选条件生成 query key。
-- 保存后 invalidate 对应列表和详情。
-- 乐观更新只用于低风险字段；删除、批量操作不做乐观更新。
+- 记录列表、详情、图片和运行报告支持定时轮询。
+- 提供手动刷新按钮，避免用户等待下一次轮询。
+- 抓取运行中出现新记录时，列表重新请求后展示最新分页和计数。
+- 首版没有保存、删除或批量操作，因此不做乐观更新。
 
 本地 UI 状态：
 
@@ -1083,7 +1114,7 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和
 - 筛选器折叠状态。
 - 当前选中行。
 - 图片预览弹窗。
-- JSON 编辑器展开状态。
+- JSON 查看器展开状态。
 
 ## 测试策略
 
@@ -1094,21 +1125,20 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和
 - bootstrap 后表存在。
 - `GET /api/records` 支持平台、城市、关键词、状态和时间筛选。
 - `GET /api/records/{id}/context` 返回图片、作者、互动、证据和 JSON 聚合数据。
-- `PATCH /api/records/{id}` 只允许白名单字段。
-- 软删除只改 `status`。
 - 图片代理拒绝项目外路径。
 - `ctf_captures` 只读。
 - 调度 API 只读。
-- 不存在从前端触发 sync、dry-run 或真实抓取的接口。
+- 不存在从前端触发 bootstrap、sync、dry-run 或真实抓取的接口。
+- 不存在首版 HTTP `POST`、`PATCH`、`DELETE` 写入记录、图片、证据、平台或调度表的接口。
+- 抓取脚本写入新记录后，管理端下一次查询能读到最新数据。
 
 ### 前端
 
 - 表格渲染字段。
 - 筛选器改变会重新请求。
-- 编辑表单校验。
 - 图片加载失败状态。
-- 删除确认流程。
-- JSON 字段非法时阻止保存。
+- 手动刷新和轮询刷新。
+- JSON 字段只读格式化展示。
 
 ### 集成
 
@@ -1118,7 +1148,7 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和
 2. bootstrap。
 3. 插入样本 `web_posts` 和 `web_post_images`。
 4. 启动 FastAPI 测试客户端。
-5. 验证记录筛选、记录详情上下文、CRUD 和审计日志。
+5. 验证记录筛选、记录详情上下文、图片预览、证据只读和实时刷新读取。
 
 ## 开发阶段
 
@@ -1130,6 +1160,7 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和
 - 明确技术栈和目录。
 - 明确写入边界。
 - 明确 `apps/`、`src/trippostcollect/`、`scripts/`、`data/`、`outputs/` 的职责。
+- 明确 `pyproject.toml`、editable install 和 `trippostcollect` 包导入方案。
 - 明确旧脚本兼容策略。
 
 验收：
@@ -1137,6 +1168,7 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和
 - 不改变默认数据库和现有抓取命令。
 - 文档中没有把管理端设计成表级浏览器。
 - 文档中没有让 `apps/admin_api` 长期直接依赖 `scripts/*.py` 的方案。
+- 文档中没有把临时 `PYTHONPATH=src` 当作正式导入方案。
 
 ### 阶段 1：共享包骨架
 
@@ -1146,6 +1178,7 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和
 - `src/trippostcollect/core/paths.py`。
 - `src/trippostcollect/db/bootstrap.py`。
 - `src/trippostcollect/platforms/registry.py`。
+- `pyproject.toml`。
 - `scripts/project_paths.py`、`scripts/db_bootstrap.py`、`scripts/web_sites.py` 的兼容 wrapper 或兼容导出。
 
 验收：
@@ -1154,6 +1187,7 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和
 - 临时 SQLite bootstrap 仍可创建完整 schema。
 - 平台注册同步后仍是 8 个当前平台。
 - 新代码可以从 `trippostcollect.core.paths` 读取默认 DB、config、outputs 和 runtime 路径。
+- `source .venv/bin/activate` 后执行 `python -m pip install -e .`，旧脚本、FastAPI app 和测试均可直接 `import trippostcollect`。
 
 ### 阶段 2：后端基础
 
@@ -1163,9 +1197,9 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和
 - settings。
 - SQLite 连接。
 - overview API。
-- records list/detail/context/update。
+- records list/detail/context。
 - record images list/preview。
-- audit log。
+- scheduler/config/reports 只读 API。
 
 验收：
 
@@ -1173,7 +1207,8 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和
 - 能用临时库跑测试。
 - 能按平台、城市名或平台 + 城市名筛选记录。
 - 能返回单条记录下的图片、作者、互动、证据和 JSON 上下文。
-- 写操作前有备份和审计。
+- 不存在管理端 HTTP 写入接口。
+- 抓取脚本运行时，新入库记录能被后续 API 查询读到。
 
 ### 阶段 3：前端基础
 
@@ -1192,8 +1227,8 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和
 - 浏览器可打开管理台。
 - 能按平台、城市名或平台 + 城市名筛选记录。
 - 能围绕选中记录查看图片、作者、互动、证据和 JSON。
-- 能编辑记录白名单字段。
 - 能预览本地和远程图片。
+- 能手动刷新或自动刷新记录列表和运行报告。
 
 ### 阶段 4：证据和调度
 
@@ -1209,23 +1244,23 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和
 
 - `ctf_captures` 不被直接修改。
 - 前端不能修改 `crawl_targets.json`。
-- 前端不能触发 sync、dry-run 或真实抓取。
+- 前端不能触发 bootstrap、sync、dry-run 或真实抓取。
 - 能查看当前 8 个同步任务和最近运行报告。
 
 ### 阶段 5：质量和打磨
 
 交付：
 
-- 批量编辑。
-- 字段缺失修复工作流。
-- 图片失效检查。
-- 审计日志页。
+- 数据质量定位视图。
+- 字段缺失记录定位。
+- 图片预览体验打磨。
+- 终端维护命令说明。
 - 文档补充。
 
 验收：
 
-- 常用管理动作不需要写 SQL。
-- 危险操作都有确认和审计。
+- 常用定位动作不需要写 SQL。
+- 需要修改数据时，页面能给出对应终端维护入口或说明，不在前端直接写库。
 - 布局在 1280px 和移动窄屏下不重叠。
 
 ## 验收标准
@@ -1235,47 +1270,50 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、权限、审计和
 - 默认首页是记录工作台，而不是表级数据浏览器。
 - 可以通过平台、城市名或平台 + 城市名筛选记录。
 - 可以围绕选中记录查看 `web_posts`、`web_post_images`、关联 `ctf_captures` 和 `crawl_run_reports` 上下文。
-- 可以查看、更新、软删除记录白名单字段；记录创建只来自抓取和入库链路。
-- 可以编辑、排序、删除记录图片行；图片新增默认来自入库链路。
+- 可以在抓取脚本运行期间通过刷新看到新入库记录、图片、证据和运行报告。
+- 首版管理端不提供记录创建、更新、软删除、物理删除或批量更新。
+- 首版管理端不提供图片新增、编辑、排序或删除；图片新增默认来自入库链路。
 - 可以预览记录图片和关联证据图片。
 - 可以从记录详情查看截图、HTML、可见文本路径和 JSON 原始数据。
 - 可以只读查看 `crawl_targets.json`、`crawl_jobs` 和运行报告。
-- 前端不提供 sync、dry-run 或真实抓取按钮。
+- 前端不提供 bootstrap、sync、dry-run 或真实抓取按钮。
 - 默认库中 `source_platforms=8`、`crawl_jobs=8` 的状态不会被管理台破坏。
-- 所有写操作有备份和 `admin_audit_log`。
 - `ctf_captures` 默认只读。
-- 后端测试覆盖关键写入边界。
+- 后端测试覆盖只读边界和实时读取。
 
 ## 风险和决策
 
 | 风险 | 影响 | 决策 |
 |---|---|---|
 | 直接改证据表破坏溯源 | 高 | `ctf_captures` 默认只读 |
-| 前端误触发抓取或 sync | 高 | 首版调度只读，不提供命令执行接口 |
+| 前端误触发抓取、bootstrap 或 sync | 高 | 首版调度只读，不提供命令执行接口 |
 | 图片本地路径泄漏 | 中 | 后端代理，限制白名单路径 |
-| SQLite 并发写冲突 | 中 | 单用户设计，短事务，写前备份 |
+| SQLite 抓取写入期间读请求短暂等待 | 中 | 只读短连接、强制分页、`busy_timeout`、手动刷新 |
 | 前端表格一次加载太多 | 中 | 强制分页 |
-| JSON 字段被写坏 | 中 | 后端校验 JSON object |
-| 删除误操作 | 高 | 默认软删除，物理删除严格限制 |
+| 只读边界后续被功能扩张打破 | 高 | 写入能力必须另走终端脚本设计和审计 |
 
 ## 已确认边界和待定问题
 
 1. 已确认：首版只在本机使用，默认监听 `127.0.0.1`。
-2. 已确认：首版不手工新增记录，记录新增由现有抓取和入库链路完成。
-3. 已确认：抓取任务不由前端使用，前端不触发 sync、dry-run 或真实抓取。
-4. 待定：`web_posts` 是否需要新增 `review_status`、`review_note` 字段，还是先复用 `status` 和审计日志。
+2. 已确认：首版管理端只读；不从前端新增、修改、隐藏、删除记录或图片。
+3. 已确认：记录新增由现有抓取和入库链路完成；记录修正、隐藏、重导入和维护后续通过受控终端脚本设计。
+4. 已确认：抓取任务不由前端使用，前端不触发 bootstrap、sync、dry-run 或真实抓取。
+5. 已确认：管理端需要支持抓取脚本运行期间的实时读取，通过轮询或手动刷新看到最新数据库状态。
+6. 后续待定：如果终端维护脚本需要记录审核/隐藏状态，应新增独立状态字段或状态表，不复用 `web_posts.status` 的采集状态。
 
 ## 推荐首个实现任务
 
 先实现结构准备和后端基础：
 
-1. 创建 `src/trippostcollect/` 包骨架。
-2. 抽取 `core.paths`、`db.bootstrap`、`platforms.registry`，保留 `scripts/` 兼容入口。
-3. 创建 `apps/admin_api`。
-4. 加入 settings、DB 连接、bootstrap。
-5. 实现 `/api/meta`、`/api/overview/counts`、`/api/records`、`/api/records/{id}`。
-6. 实现 `/api/records/{id}/context`，聚合图片、作者、互动、证据和 JSON。
-7. 实现 `PATCH /api/records/{id}` 的白名单更新、备份和审计。
-8. 用 `temp/admin_client_verify.sqlite` 做集成测试。
+1. 创建 `pyproject.toml` 和 `src/trippostcollect/` 包骨架。
+2. 在 `.venv` 中执行 `python -m pip install -e .`，确认可以 `import trippostcollect`。
+3. 抽取 `core.paths`、`db.bootstrap`、`platforms.registry`，保留 `scripts/` 兼容入口。
+4. 创建 `apps/admin_api`。
+5. 加入 settings、只读 DB 连接和 schema 状态检查。
+6. 实现 `/api/meta`、`/api/overview/counts`、`/api/records`、`/api/records/{id}`。
+7. 实现 `/api/records/{id}/context` 和 `/api/records/{id}/raw`，聚合图片、作者、互动、证据和 JSON。
+8. 实现只读图片预览、调度配置和运行报告 API。
+9. 验证抓取脚本写入新数据后，管理端 API 后续查询能读到最新状态。
+10. 用 `temp/admin_client_verify.sqlite` 做集成测试。
 
-后端边界稳定后，再搭前端。这样可以避免 UI 先行导致 CRUD 规则散落在浏览器里。
+后端只读边界稳定后，再搭前端。这样可以避免 UI 先行导致读写规则散落在浏览器里。
