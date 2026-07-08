@@ -153,6 +153,7 @@ await inter_detail_cooldown(profile)
 - 忽略默认 `--enable-automation`。
 - 注入 `navigator.webdriver`、`navigator.languages`、`navigator.plugins`、`navigator.platform`、`hardwareConcurrency`、`deviceMemory`、`window.chrome` 等 runtime override。
 - 按 `web_sites.py` 的 `preferred_engine` 在 Playwright 和 Patchright 间选择；知乎当前走 `patchright` 和 `data/browser_profiles_stealth/zhihu`。
+- Patchright 只作为驱动层使用，默认不再隐式启动 Patchright 自带 revision 的 Chromium；`ctf_resource_crawl.py` 会通过 `executable_path` 统一指向本机 Playwright 缓存中最新的 Chrome for Testing。需要临时覆盖时使用 `TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH` 或 `CUSTOM_BROWSER_PATH`；Patchright 目标找不到共享浏览器时会失败，不回退到 Patchright 自带 revision。
 
 因此后续脚本优先调用现有入口，而不是新建裸 Playwright：
 

@@ -77,7 +77,7 @@ data/trippostcollect.sqlite
 
 ## 页面级抓取结果入库
 
-B站 Opus 详情页、携程、去哪儿、豆瓣小组由 `ctf_resource_crawl.py` 保存页面证据，再由 `import_ctf_captures.py` 同步写入两层数据：`ctf_captures` / `ctf_capture_images` 作为证据和调试底座，`web_posts` / `web_post_images` 作为用户使用的统一内容主表。页面级抓取会从 `article:published_time`、JSON-LD、`time[datetime]` 等明确页面元数据中提取 `published_at`；B站 Opus/图文页还会从可见文本中的明确日期行提取。没有明确证据时保持为空，不用抓取时间替代。
+B站 Opus 详情页、携程、去哪儿、豆瓣小组由 `ctf_resource_crawl.py` 保存页面证据，再由 `import_ctf_captures.py` 同步写入两层数据：`ctf_captures` / `ctf_capture_images` 作为证据和调试底座，`web_posts` / `web_post_images` 作为用户使用的统一内容主表。页面级抓取会从 `article:published_time`、JSON-LD、`time[datetime]` 等明确页面元数据中提取 `published_at`，并在抓取元数据中直接保存为 Asia/Shanghai ISO 字符串；B站 Opus/图文页还会从可见文本中的明确日期行提取。没有明确证据时保持为空，不用抓取时间替代。截图属于证据附件，截图失败会记录到 `artifact_errors`，但只要页面内容、文本和图片资源已成功采集，不应把整条内容标成抓取失败。
 
 豆瓣小组入库有四处平台特定逻辑：`extract_douban_topic_fields()` 从话题页 `rendered.html` 提取标题、作者五元组（display_name/platform_id/profile_url/avatar_url + group_name 写入 `author_description`）、发帖时间（`create-time`）、正文（`link-report`）；`is_douban_topic_url()` 保证只有 `/group/topic/{id}/` 详情页进 `web_posts`，搜索页只留 `ctf_captures` 证据层；`city_name_from_keyword()` 把 `crawl_targets.json` 传入的 keyword（经 `crawl_runner.py --keyword` → `capture_meta`）归一成山东 16 地市标准名写入 `city_name`；作者粉丝量不在话题页入库时填入，而由独立 enrichment 脚本访问 people 页补全（见 `docs/crawl-architecture.md` 豆瓣小组节）。`author_followers_count` / `author_following_count` / `author_posts_count` 在话题入库时为 NULL，粉丝量在 enrichment 后按 `author_platform_id` 批量 UPDATE；隐私用户（people 页显示「由于用户的设置，无法查看主页内容」）保持 NULL 并标 `followers_source="privacy_restricted"`，不当作 0。成功且内容就绪的页面正文来自 `visible_text.txt`，图片来自 `images.json`。
 

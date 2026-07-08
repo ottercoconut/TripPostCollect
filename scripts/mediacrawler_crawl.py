@@ -183,6 +183,18 @@ def discover_cdp_browser_path() -> str | None:
         if value and Path(value).is_file():
             return value
 
+    playwright_cache = Path.home() / "Library" / "Caches" / "ms-playwright"
+    cache_candidates = sorted(
+        playwright_cache.glob(
+            "chromium-*/chrome-*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+        ),
+        key=lambda path: int(match.group(1)) if (match := re.search(r"chromium-(\d+)", str(path))) else -1,
+        reverse=True,
+    )
+    for path in cache_candidates:
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+
     candidates = [
         Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
         Path("/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta"),
@@ -193,15 +205,6 @@ def discover_cdp_browser_path() -> str | None:
         Path("/Applications/Microsoft Edge Dev.app/Contents/MacOS/Microsoft Edge Dev"),
         Path("/Applications/Microsoft Edge Canary.app/Contents/MacOS/Microsoft Edge Canary"),
     ]
-    playwright_cache = Path.home() / "Library" / "Caches" / "ms-playwright"
-    candidates.extend(
-        sorted(
-            playwright_cache.glob(
-                "chromium-*/chrome-*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-            ),
-            reverse=True,
-        )
-    )
     for path in candidates:
         if path.is_file() and os.access(path, os.X_OK):
             return str(path)

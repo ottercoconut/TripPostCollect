@@ -168,7 +168,9 @@ B站默认不走 MediaCrawler 视频搜索调度，因为搜索结果容易返�
 
 对于 MediaCrawler 支持的平台，项目不再复刻复杂页面行为，而是降低项目侧调用频率、限制并发、强制关闭媒体下载，并把平台细节交给 MediaCrawler。
 
-页面级抓取会按 `web_sites.py` 的 `preferred_engine` 选择 Playwright 或 Patchright。`max_scrolls` 会传入详情页停留流程，限制滚动次数。B站 Opus/图文页会从可见文本中的明确日期行提取 `published_at`。
+页面级抓取会按 `web_sites.py` 的 `preferred_engine` 选择 Playwright 或 Patchright。Patchright 只作为知乎等高风险目标的驱动层保留，浏览器二进制默认仍由 `ctf_resource_crawl.py` 显式指定为本机 Playwright 缓存中最新的 Chrome for Testing，避免 Playwright 与 Patchright 各自使用一套 Chromium。`TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH` 或 `CUSTOM_BROWSER_PATH` 可以覆盖该选择；如果 Patchright 目标找不到这条共享浏览器路径，会直接失败并提示安装 Playwright Chromium 或显式指定路径，而不是回退到 Patchright 自带 revision。`max_scrolls` 会传入详情页停留流程，限制滚动次数。B站 Opus/图文页会从可见文本中的明确日期行提取 `published_at`。
+
+默认行为 profile 是正式低频抓取策略，详情页停留可能达到几十秒到数分钟；不要用默认 profile 判断浏览器是否卡死。页面级烟测应显式传 `--behavior-profile quick_probe`、降低图片保存数量和滚动次数，并把输出写入 `temp/`，验证后删除对应临时目录。烟测只判断浏览器、登录态、导航、基本图片保存和摘要结构是否可用，不替代正式调度运行。
 
 调度配置默认使用 headed 浏览器以减少 headless 指纹；需要快速验证或无界面环境时，可以在 `crawl_runner.py` 上显式传 `--headless`。
 

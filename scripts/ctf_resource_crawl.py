@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import random
 import re
 from contextlib import AsyncExitStack
@@ -179,11 +180,31 @@ async def extract_published_at(page: Page) -> dict[str, Any]:
                 seen.add(key);
                 normalized.push(item);
             }
+            const shanghaiFormatter = new Intl.DateTimeFormat('en-CA', {
+                timeZone: 'Asia/Shanghai',
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hourCycle: 'h23',
+            });
+            const toShanghaiIso = (timestamp) => {
+                const parts = Object.fromEntries(
+                    shanghaiFormatter
+                        .formatToParts(new Date(timestamp))
+                        .filter((part) => part.type !== 'literal')
+                        .map((part) => [part.type, part.value])
+                );
+                return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}+08:00`;
+            };
             for (const item of normalized) {
                 const timestamp = Date.parse(item.value);
                 if (Number.isFinite(timestamp)) {
                     return {
-                        published_at: new Date(timestamp).toISOString().replace(/\\.\\d{3}Z$/, '+00:00'),
+                        published_at: toShanghaiIso(timestamp),
+                        timezone: 'Asia/Shanghai',
                         source: item.source,
                         raw_value: item.value,
                         candidates: normalized.slice(0, 20),
@@ -283,6 +304,45 @@ def target_engine(target: dict[str, Any]) -> str:
     return get_site(str(target["site"])).preferred_engine
 
 
+def browser_cache_revision(path: Path) -> int:
+    for part in path.parts:
+        match = re.fullmatch(r"chromium-(\d+)", part)
+        if match:
+            return int(match.group(1))
+    return -1
+
+
+def discover_chrome_for_testing_path() -> str | None:
+    for env_key in ("TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH", "CUSTOM_BROWSER_PATH"):
+        value = os.environ.get(env_key)
+        if value and Path(value).is_file():
+            return value
+
+    cache_roots: list[Path] = []
+    playwright_browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if playwright_browsers_path and playwright_browsers_path != "0":
+        cache_roots.append(Path(playwright_browsers_path).expanduser())
+    cache_roots.extend(
+        [
+            Path.home() / "Library" / "Caches" / "ms-playwright",
+            Path.home() / ".cache" / "ms-playwright",
+        ]
+    )
+    patterns = (
+        "chromium-*/chrome-*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "chromium-*/chrome-linux/chrome",
+        "chromium-*/chrome-win/chrome.exe",
+    )
+    candidates: list[Path] = []
+    for root in dict.fromkeys(cache_roots):
+        for pattern in patterns:
+            candidates.extend(root.glob(pattern))
+    for path in sorted(set(candidates), key=browser_cache_revision, reverse=True):
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
 def profile_dir_for_target(target: dict[str, Any]) -> Path:
     site = str(target["site"])
     if target.get("configured"):
@@ -338,6 +398,13 @@ def image_extension(response: Response, url: str) -> str:
 async def open_context(playwright, target: dict[str, Any], args: argparse.Namespace) -> BrowserContext:
     profile_dir = profile_dir_for_target(target)
     ensure_dir(profile_dir)
+    engine = target_engine(target)
+    executable_path = discover_chrome_for_testing_path()
+    if engine == "patchright" and executable_path is None:
+        raise RuntimeError(
+            "Patchright targets require a shared Chrome for Testing executable. "
+            "Install the Playwright Chromium browser or set TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH."
+        )
     mobile = bool(target.get("mobile"))
     viewport = (
         {"width": RANDOM.randint(375, 430), "height": RANDOM.randint(780, 920)}
@@ -347,6 +414,7 @@ async def open_context(playwright, target: dict[str, Any], args: argparse.Namesp
     return await playwright.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
         headless=args.headless,
+        executable_path=executable_path,
         locale="zh-CN",
         timezone_id="Asia/Shanghai",
         viewport=viewport,
@@ -656,6 +724,7 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
     rendered_html = ""
     visible_text = ""
     flags: list[str] = []
+    artifact_errors: list[str] = []
     published_at_evidence: dict[str, Any] = {"published_at": None, "candidates": []}
     screenshot_path = target_dir / "screen.png"
     if not blocked_by_policy:
@@ -664,9 +733,12 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
             visible_text = await page.locator("body").inner_text(timeout=10_000)
             flags = extract_flags_from_text(rendered_html + "\n" + visible_text)
             published_at_evidence = await extract_published_at(page)
-            await page.screenshot(path=str(screenshot_path), full_page=False)
         except Exception as exc:
             nav_error = nav_error or f"{type(exc).__name__}: {exc}"
+        try:
+            await page.screenshot(path=str(screenshot_path), full_page=False, timeout=10_000)
+        except Exception as exc:
+            artifact_errors.append(f"screenshot: {type(exc).__name__}: {exc}")
     if pending_tasks:
         await asyncio.wait(pending_tasks, timeout=10)
     await context.close()
@@ -693,6 +765,7 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
         "cookie_events": cookie_events,
         "scrapling_preflight": scrapling_preflight,
         "keyword": str(args.keyword or ""),
+        "artifact_errors": artifact_errors,
         "image_summary": {
             "total_requests": total_image_requests,
             "successful_responses": image_success,

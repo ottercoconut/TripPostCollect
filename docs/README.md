@@ -8,6 +8,7 @@
 | [入库与校验](data-persistence.md) | SQLite 表、入库脚本、查询和校验方法。 |
 | [平台字段覆盖表](platform-field-coverage.md) | 各平台当前能结构化提供、只能保留证据或不能提供的字段。 |
 | [反自动化检测与人类行为模拟](anti-automation-behavior.md) | 授权靶场中的随机间隔、行为模拟、浏览器指纹和稳定规避方案。 |
+| [可视化管理客户端开发文档](admin-client-development.md) | FastAPI + React/Vite 管理台的产品范围、项目结构重构、记录中心 API、CRUD 边界和验收标准。 |
 
 ## 项目目标
 
@@ -57,19 +58,22 @@
 `crawl_runner.py`、`mediacrawler_crawl.py` 入库流程和 `import_ctf_captures.py` 都会自动补齐数据库 schema、平台注册表和调度配置。需要只刷新/检查调度库时，可以显式运行：
 
 ```bash
-.venv/bin/python scripts/crawl_runner.py --sync-only
+source .venv/bin/activate
+python scripts/crawl_runner.py --sync-only
 ```
 
 查看将要执行的任务，不真正抓取：
 
 ```bash
-.venv/bin/python scripts/crawl_runner.py --dry-run --max-jobs 5
+source .venv/bin/activate
+python scripts/crawl_runner.py --dry-run --max-jobs 5
 ```
 
 执行到期任务：
 
 ```bash
-.venv/bin/python scripts/crawl_runner.py --max-jobs 3
+source .venv/bin/activate
+python scripts/crawl_runner.py --max-jobs 3
 ```
 
 调度配置默认使用可见浏览器窗口，降低 headless 指纹。只做快速验证或无界面运行时再显式加 `--headless`。
@@ -142,17 +146,38 @@ python scripts/mediacrawler_crawl.py \
 只跑一个页面级兜底抓取：
 
 ```bash
-.venv/bin/python scripts/ctf_resource_crawl.py \
+source .venv/bin/activate
+python scripts/ctf_resource_crawl.py \
   --sites bilibili \
   --headless \
   --max-image-save 3 \
   --max-scrolls 2
 ```
 
+页面级抓取的默认行为 profile 会保留较长详情页停留时间，适合低频正式运行，不适合烟测。只验证浏览器、登录态或页面基本可用性时，使用 `quick_probe` 并把输出写入 `temp/`，验证完及时删除对应目录：
+
+```bash
+source .venv/bin/activate
+python scripts/ctf_resource_crawl.py \
+  --sites bilibili ctrip qunar douban_group \
+  --headless \
+  --behavior-profile quick_probe \
+  --max-image-save 1 \
+  --max-scrolls 1 \
+  --settle-min-ms 200 \
+  --settle-max-ms 400 \
+  --timeout 20000 \
+  --commit-timeout 6000 \
+  --readiness-timeout 8000 \
+  --no-throttle \
+  --output-dir temp/page_smoke
+```
+
 豆瓣小组显式 topic URL 需要复用已预热的配置站点 profile：
 
 ```bash
-.venv/bin/python scripts/ctf_resource_crawl.py \
+source .venv/bin/activate
+python scripts/ctf_resource_crawl.py \
   --urls https://www.douban.com/group/topic/53104421/ \
   --site-label douban_group \
   --configured-site-urls \
@@ -171,7 +196,7 @@ python scripts/mediacrawler_crawl.py \
 | `data/trippostcollect.sqlite` | 默认 SQLite 数据库。 |
 | `temp/` | 只用于临时验证和一次性测试，可随时清空；正式流程不得依赖这里的文件。 |
 
-旧结构产物不再保留 `legacy/` 归档。被淘汰的一次性探测、历史对照测试和旧专用采集产物可以直接删除；长期数据以 SQLite 为准。
+旧结构产物不再保留 `legacy/` 归档。被淘汰的一次性探测、历史对照测试和旧专用采集产物可以直接删除；长期数据以 SQLite 为准。临时验证完成后应删除本次创建的 `temp/<任务名>/` 目录，只把必要结论同步到文档、SQLite 或 `outputs/` 摘要。
 
 项目路径统一由 `scripts/project_paths.py` 定义。新增脚本不要自行硬编码 `outputs/`、`temp/`、`data/runtime/` 或 profile 目录。
 
