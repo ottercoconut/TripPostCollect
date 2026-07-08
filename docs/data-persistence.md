@@ -25,7 +25,7 @@ data/trippostcollect.sqlite
 
 ## MediaCrawler 结果入库
 
-微博、小红书、抖音、知乎等非视频结构化结果由 `scripts/mediacrawler_crawl.py` 调用 MediaCrawler 后导入 `web_posts`。小红书搜索会在低样本量下补拉作者主页指标，用于填充粉丝数等作者字段。知乎搜索结果中的回答/文章 `created_time` 会映射到 `published_at`，并统一为 Asia/Shanghai；`zvideo` 记录会按视频跳过。B站默认走页面级 Opus/图文证据抓取；手工运行 B站 MediaCrawler 时，如果返回视频记录，会计入 `skipped_video` 并跳过入库。
+微博、小红书、抖音、知乎等非视频结构化结果由 `scripts/mediacrawler_crawl.py` 调用 MediaCrawler 后导入 `web_posts`。微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和 `mblog.user.followers_count/followers_count_str`，用于图文和作者粉丝量校验。小红书搜索会在低样本量下补拉作者主页指标，用于填充粉丝数等作者字段。知乎搜索结果中的回答/文章 `created_time` 会映射到 `published_at`，正文 HTML 图片会在清洗为纯文本前保存为 `image_list/image_count` 并写入 `web_post_images`，时间统一为 Asia/Shanghai；`zvideo` 记录会按视频跳过。B站长期默认走页面级 Opus/图文证据抓取；手工运行 `mediacrawler_crawl.py --platforms bilibili` 时走 B站专栏/图文 article 搜索，`image_urls`、`pubdate/pub_time`、作者昵称/ID、点赞/评论/浏览数会结构化入库。如果后续 JSONL 中出现视频记录，会计入 `skipped_video` 并跳过入库。
 
 导入字段映射：
 
@@ -38,14 +38,15 @@ data/trippostcollect.sqlite
 | `content_text` | 优先 `content_text` 或 `content`，其次 `desc`，最后 `title` |
 | `author_display_name` | `nickname` 或 `user_nickname` |
 | `author_platform_id` | 小红书 `user_id`、`creator_hash` 或其他平台用户 ID |
-| `author_followers_count` | 小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans` |
+| `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans` |
 | `published_at` | 发帖时间，统一保存为 Asia/Shanghai ISO 字符串，如 `2024-04-06T15:35:00+08:00`。优先取平台原始发布时间字段，如 `create_time`、`publish_time`、`time`、`datePublished`；`captured_at` 只表示本项目抓取时间 |
+| `city_name` | 从检索关键词匹配山东 16 市名称或别名，如 `济南旅游`、`烟台旅游` 分别写入 `济南市`、`烟台市`；不从正文内容反推城市 |
 | `post_likes_count` | `liked_count`、知乎 `voteup_count` |
 | `post_favorites_count` | `collected_count` 等收藏字段 |
 | `post_comments_count` | `comment_count`、`comments_count` 等评论字段 |
 | `post_shares_count` | `share_count`、`shared_count` 等分享字段 |
 | `post_views_count` | `view_count`、`play_count` 等浏览字段 |
-| `web_post_images` | `cover`、`image`、`pic`、`avatar` 等 URL 字段 |
+| `web_post_images` | `cover`、`image`、`pic`、`image_list`、`image_urls`、`avatar` 等 URL 字段；微博来自 `mblog.pics` 保存后的 `image_list`，知乎来自正文 HTML 保存后的 `image_list`，B站 article 搜索来自 `image_urls` |
 | `raw_sample_json` | MediaCrawler 原始 JSONL 行 |
 
 代码只在导入边界识别不同平台对同类指标的字段名差异，内部持久化结构统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
@@ -76,7 +77,11 @@ data/trippostcollect.sqlite
 
 ## 页面级抓取结果入库
 
-B站、携程、去哪儿、穷游、豆瓣小组由 `ctf_resource_crawl.py` 保存页面证据，再由 `import_ctf_captures.py` 同步写入两层数据：`ctf_captures` / `ctf_capture_images` 作为证据和调试底座，`web_posts` / `web_post_images` 作为用户使用的统一内容主表。页面级抓取会从 `article:published_time`、JSON-LD、`time[datetime]` 等明确页面元数据中提取 `published_at`；B站 Opus/图文页还会从可见文本中的明确日期行提取。没有明确证据时保持为空，不用抓取时间替代。成功且内容就绪的页面正文来自 `visible_text.txt`，图片来自 `images.json`。
+B站 Opus 详情页、携程、去哪儿、豆瓣小组由 `ctf_resource_crawl.py` 保存页面证据，再由 `import_ctf_captures.py` 同步写入两层数据：`ctf_captures` / `ctf_capture_images` 作为证据和调试底座，`web_posts` / `web_post_images` 作为用户使用的统一内容主表。页面级抓取会从 `article:published_time`、JSON-LD、`time[datetime]` 等明确页面元数据中提取 `published_at`；B站 Opus/图文页还会从可见文本中的明确日期行提取。没有明确证据时保持为空，不用抓取时间替代。
+
+豆瓣小组入库有四处平台特定逻辑：`extract_douban_topic_fields()` 从话题页 `rendered.html` 提取标题、作者五元组（display_name/platform_id/profile_url/avatar_url + group_name 写入 `author_description`）、发帖时间（`create-time`）、正文（`link-report`）；`is_douban_topic_url()` 保证只有 `/group/topic/{id}/` 详情页进 `web_posts`，搜索页只留 `ctf_captures` 证据层；`city_name_from_keyword()` 把 `crawl_targets.json` 传入的 keyword（经 `crawl_runner.py --keyword` → `capture_meta`）归一成山东 16 地市标准名写入 `city_name`；作者粉丝量不在话题页入库时填入，而由独立 enrichment 脚本访问 people 页补全（见 `docs/crawl-architecture.md` 豆瓣小组节）。`author_followers_count` / `author_following_count` / `author_posts_count` 在话题入库时为 NULL，粉丝量在 enrichment 后按 `author_platform_id` 批量 UPDATE；隐私用户（people 页显示「由于用户的设置，无法查看主页内容」）保持 NULL 并标 `followers_source="privacy_restricted"`，不当作 0。成功且内容就绪的页面正文来自 `visible_text.txt`，图片来自 `images.json`。
+
+显式抓取豆瓣 topic URL 时不能只用 `--urls --site-label douban_group`，否则会按 URL 创建隔离 profile，无法复用 `ctf_login_warmup.py` 写入的 `data/browser_profiles_ctf/douban_group/` 登录态；应同时传 `--configured-site-urls`。调度器的页面级任务会自动用这个方式传 `target_url`。
 
 单次抓取：
 

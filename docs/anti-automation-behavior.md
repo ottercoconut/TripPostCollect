@@ -88,7 +88,7 @@ python scripts/ctf_resource_crawl.py \
 | profile | 适用场景 | 特征 |
 |---|---|---|
 | `social_high_risk` | 小红书、微博、抖音、知乎、B站等高压社交目标 | 停留更久、单批详情更少、评论区访问概率更高、CDP 触摸滚动概率更高。 |
-| `travel_medium` | 携程、去哪儿、穷游等旅游内容页 | 阅读停留更长、滚动次数适中。 |
+| `travel_medium` | 携程、去哪儿等旅游内容页 | 阅读停留更长、滚动次数适中。 |
 | `conservative` | 普通页面兜底取证 | 低频、稳定、较少额外交互。 |
 | `quick_probe` | 本地快速确认，不用于正式取证 | 停留短、交互少。 |
 
@@ -216,10 +216,11 @@ python scripts/ctf_resource_crawl.py \
 
 | 层级 | 文件/入口 | 作用 |
 |---|---|---|
-| 可见 preflight | `scripts/mediacrawler_batch_validate.py --xhs-preflight-only` 或完整批量任务的 xhs preflight | 打开可见窗口前先恢复 storage snapshot，随后等待安全扫码、普通登录和页面稳定；保存截图与 marker。 |
+| 登录 warmup | `scripts/mediacrawler_login_warmup.py --platforms xhs` | 打开与 MediaCrawler 相同的可见 profile，等待人工完成安全确认/扫码，重开验证后写入 storage snapshot。 |
+| 可见 preflight | `scripts/mediacrawler_batch_validate.py --xhs-preflight-only` 或完整批量任务的 xhs preflight | 批量验证前恢复 storage snapshot，检查登录态是否仍有效并保存截图与 marker。 |
 | storage snapshot | `tools/MediaCrawler/browser_data/xhs_user_data_dir/trippostcollect_storage_state.json` | 登录成功后导出 cookies、localStorage、sessionStorage；后续 MediaCrawler 新窗口启动时先恢复，再创建 API client。 |
 
-修正后的流程是：preflight 和正式 MediaCrawler CDP 窗口都读取同一份 `trippostcollect_storage_state.json`。如果 snapshot 仍有效，preflight 会在导航前注入 cookies、localStorage 和 sessionStorage，通常不再需要重复扫码；如果站点仍弹安全确认，则按截图和 marker 作为证据等待人工确认。preflight 成功后会再次覆盖写入最新 snapshot，正式抓取窗口随后复用这份状态。
+修正后的流程是：先用 `mediacrawler_login_warmup.py --platforms xhs` 刷新并验证登录态；preflight 和正式 MediaCrawler CDP 窗口都读取同一份 `trippostcollect_storage_state.json`。如果 snapshot 仍有效，preflight 会在导航前注入 cookies、localStorage 和 sessionStorage，通常不再需要重复扫码；如果 snapshot 缺失，`mediacrawler_crawl.py --platforms xhs` 的默认 `cookie` 模式会早停并提示先运行 warmup，不再让后续模型靠猜测处理登录。
 
 判断登录成功时只认强信号：
 
@@ -240,19 +241,13 @@ python scripts/ctf_resource_crawl.py \
 | 回到首页 | 首页出现普通登录框，左侧仍是“登录” | `web_session` 可能已有，但仍未登录。 |
 | 成功 | 左侧出现“我”，页面有“登录成功”提示 | 可以导出 storage snapshot。 |
 
-刷新小红书登录态并只生成 snapshot：
+刷新小红书登录态并生成 snapshot：
 
 ```bash
 source .venv/bin/activate
-python scripts/mediacrawler_batch_validate.py \
-  --xhs-preflight-only \
+python scripts/mediacrawler_login_warmup.py \
   --platforms xhs \
-  --target-count 10 \
-  --batch-size 10 \
-  --login-type cookie \
-  --xhs-preflight-timeout 300 \
-  --xhs-initial-delay-seconds 8 \
-  --xhs-screenshot-interval 5
+  --timeout-seconds 600
 ```
 
 验证新窗口能不扫码恢复登录态：
@@ -285,6 +280,8 @@ Wrote storage state snapshot
 - `outputs/mediacrawler_batch_validation/20260706T100008+0000/summary.json`：登录成功后导出 snapshot，记录 cookie 名、origin 数和截图。
 - `outputs/mediacrawler_batch_validation/20260706T100307+0000/summary.json`：跳过 preflight 后，新窗口直接恢复登录态并抓到 10 条有效小红书图文。
 - `outputs/mediacrawler_batch_validation/20260706T100307+0000/xhs/batch_01/logs/stderr.log`：包含 storage restore、`pong=True` 和多页补足图文记录。
+- `outputs/mediacrawler_batch_validation/20260706T110128+0000/summary.json`：preflight 自身在导航前恢复 snapshot，`restored_snapshot.restored=true`，7.81 秒完成登录态确认，没有等待扫码。
+- `outputs/mediacrawler_batch_validation/20260706T110128+0000/xhs/preflight/screenshots/0007s_page01.png`：可见页面已处于登录态，左侧出现“我”入口。
 
 抖音例外：当前脚本会在页面级抓取前后清理抖音相关 cookie，避免陈旧挑战态、异常风控态污染后续取证。该行为由 `--douyin-cookie-cleanup auto` 控制：
 

@@ -19,14 +19,20 @@
 
 | 平台 | 当前做法 | 原因 |
 |---|---|---|
-| B站 | 默认做 Opus/图文页面级抓取，并归一化到 `web_posts` | B站搜索结果容易返回视频；当前规则禁止视频采集。 |
-| 微博 | MediaCrawler 搜索抓取，项目负责调度和入库 | 原自写脚本等待节奏固定，维护成本高。 |
+| B站 | 默认做 Opus/图文页面级抓取；手工关键词验证可走 `mediacrawler_crawl.py --platforms bilibili` 的专栏/图文 article 搜索分支 | B站视频搜索容易返回视频；当前规则禁止视频采集，article 搜索只入非视频图文。 |
+| 微博 | MediaCrawler 搜索抓取，项目负责调度和入库 | 原自写脚本等待节奏固定；当前 store 会保留微博搜索结果中的图片 URL 和作者粉丝量。 |
 | 小红书 | MediaCrawler 搜索抓取，项目负责作者主页补充和入库 | 网页端详情限制较严；使用可见浏览器/CDP、storage snapshot 登录态恢复和低频策略。 |
 | 抖音 | MediaCrawler 搜索抓取，项目负责调度和入库 | 原自写脚本对页面状态和会话非常敏感。 |
-| 知乎 | MediaCrawler 搜索抓取，项目负责调度和入库 | MediaCrawler 内容模型提供回答/文章发布时间；需要可用 Chrome/CDP 和已验证 cookie 快照。 |
-| 携程、去哪儿、穷游、豆瓣小组 | 走通用页面/图片资源抓取，并归一化到 `web_posts` | MediaCrawler 不覆盖这些页面类型，项目同时保留低频证据抓取。 |
+| 知乎 | MediaCrawler 搜索抓取，项目负责调度和入库 | MediaCrawler 内容模型提供回答/文章发布时间和正文图片 URL；需要可用 Chrome/CDP 和已验证 cookie 快照。 |
+| 携程、去哪儿、豆瓣小组 | 走通用页面/图片资源抓取，并归一化到 `web_posts` | MediaCrawler 不覆盖这些页面类型，项目同时保留低频证据抓取。 |
 
 项目只采集图文内容、作者可见信息、图片 URL/图片样本和页面证据。视频目标、视频媒体请求和 MediaCrawler 返回的明确视频记录一律忽略或跳过，不作为抓取失败处理。
+
+2026-07-06 的微博修复后，`tools/MediaCrawler/store/weibo/__init__.py` 会从 `mblog.user` 保留 `followers_count/fans_count`，并从 `mblog.pics` 保留 `image_list/image_count`。验证产物 `outputs/mediacrawler_runs/20260706T151935+0000/weibo/usable_50_validation.json` 显示：从 149 条候选中筛出 50 条唯一图文，正文、图片 URL、作者粉丝量、发布时间和互动指标均完整。
+
+2026-07-08 的 B站图文验证后，`scripts/mediacrawler_crawl.py --platforms bilibili --keyword 烟台旅游 --mediacrawler-max-notes 50 --import-limit 50` 会走 B站专栏/图文 article 搜索，产物 `outputs/mediacrawler_runs/20260707T173332+0000/summary.json` 显示：50 条唯一图文全部入库，图片 URL、发布时间、作者昵称/ID、点赞/评论/浏览指标均可结构化保留。
+
+2026-07-08 的知乎修复后，MediaCrawler 知乎搜索会在把正文 HTML 清洗为纯文本前提取正文图片 URL，保存为 `image_list/image_count`，并由统一导入写入 `web_post_images`。知乎抓取还会在启动 Chrome 前清理 profile 中的 Session/Last Tabs 会话恢复文件，并在启动后关闭旧标签页；这只清理历史页面，不清 cookie、localStorage 或 cookie snapshot。`outputs/mediacrawler_runs/20260707T193211+0000/summary.json` 显示：36 条非视频内容全部有发布时间，18 条 JSONL 记录带图片；导入前 20 条后，SQLite 中 8 条为有效图片记录。
 
 ## 现在保留的脚本
 
@@ -37,7 +43,7 @@
 | `crawl_runner.py` | 统一调度入口，读取配置、选择到期任务、记录运行结果。 |
 | `mediacrawler_crawl.py` | 调用 `tools/MediaCrawler`，抓取微博、小红书、抖音、知乎等非视频结构化结果，并导入 `web_posts`。 |
 | `mediacrawler_login_warmup.py` | 需要人工登录时，打开 MediaCrawler 支持的平台登录窗口，并保存已验证登录态快照。 |
-| `mediacrawler_batch_validate.py` | 按批次执行小红书/抖音抓取，每批立即校验字段；小红书会先做可见 preflight、截图和 storage snapshot 登录态恢复。 |
+| `mediacrawler_batch_validate.py` | 按批次执行小红书/抖音抓取，每批立即校验字段；小红书会先验证 storage snapshot 可恢复。 |
 | `ctf_resource_crawl.py` | 对不适合 MediaCrawler 的站点做页面、图片、截图和 flag-like 文本兜底抓取。 |
 | `import_ctf_captures.py` | 把 `ctf_resource_crawl.py` 的产物导入 `ctf_captures`，并把成功页面归一化写入 `web_posts`。 |
 | `crawl_policy.py`、`human_flow.py`、`failure_classifier.py` | 共享节流、页面停留/滚动、失败分类。 |
@@ -68,7 +74,7 @@
 
 调度配置默认使用可见浏览器窗口，降低 headless 指纹。只做快速验证或无界面运行时再显式加 `--headless`。
 
-刷新知乎等 MediaCrawler 平台登录态：
+刷新知乎登录态：
 
 ```bash
 source .venv/bin/activate
@@ -77,22 +83,18 @@ python scripts/mediacrawler_login_warmup.py \
   --timeout-seconds 600
 ```
 
-知乎 warmup 成功后会重开验证登录态，并在 `tools/MediaCrawler/browser_data/zhihu_user_data_dir/trippostcollect_cookie_snapshot.json` 保存本地 cookie 快照；抓取脚本缺少有效 `d_c0/z_c0` 快照时会早停。小红书还会保存 `tools/MediaCrawler/browser_data/xhs_user_data_dir/trippostcollect_storage_state.json`，preflight 和正式抓取窗口都会用它恢复 cookies、localStorage 和 sessionStorage，避免只依赖 Chromium profile 的 `Default/Cookies`。
+知乎 warmup 成功后会重开验证登录态，并在 `tools/MediaCrawler/browser_data/zhihu_user_data_dir/trippostcollect_cookie_snapshot.json` 保存本地 cookie 快照；抓取脚本缺少有效 `d_c0/z_c0` 快照时会早停。正式抓取会复用同一 profile，但启动前会清理 Chromium 的历史标签页恢复文件，避免窗口打开后堆满上次留下的知乎标签页。
 
-只刷新小红书 storage snapshot，不执行正式抓取：
+刷新小红书登录态并保存 storage snapshot：
 
 ```bash
 source .venv/bin/activate
-python scripts/mediacrawler_batch_validate.py \
-  --xhs-preflight-only \
+python scripts/mediacrawler_login_warmup.py \
   --platforms xhs \
-  --target-count 10 \
-  --batch-size 10 \
-  --login-type cookie \
-  --xhs-preflight-timeout 300 \
-  --xhs-initial-delay-seconds 8 \
-  --xhs-screenshot-interval 5
+  --timeout-seconds 600
 ```
+
+小红书 warmup 成功条件是页面侧出现左侧“我”入口；脚本会关闭并重开浏览器验证持久化，再写入 `tools/MediaCrawler/browser_data/xhs_user_data_dir/trippostcollect_storage_state.json`。preflight 和正式抓取窗口都会用它恢复 cookies、localStorage 和 sessionStorage，避免只依赖 Chromium profile 的 `Default/Cookies`。`mediacrawler_crawl.py --platforms xhs` 在默认 `cookie` 模式下缺少该 snapshot 会早停并提示先执行 warmup。
 
 按 10 条一批验证小红书和抖音字段完整性：
 
@@ -123,12 +125,38 @@ python scripts/mediacrawler_crawl.py \
   --timeout-per-platform 420
 ```
 
+微博图文字段验证时可以先只保存文件、不入库，再从 JSONL 中筛选图片和粉丝量完整的记录：
+
+```bash
+source .venv/bin/activate
+python scripts/mediacrawler_crawl.py \
+  --platforms weibo \
+  --keyword 济南旅游 \
+  --login-type cookie \
+  --headed \
+  --mediacrawler-max-notes 150 \
+  --timeout-per-platform 1200 \
+  --no-import
+```
+
 只跑一个页面级兜底抓取：
 
 ```bash
 .venv/bin/python scripts/ctf_resource_crawl.py \
   --sites bilibili \
   --headless \
+  --max-image-save 3 \
+  --max-scrolls 2
+```
+
+豆瓣小组显式 topic URL 需要复用已预热的配置站点 profile：
+
+```bash
+.venv/bin/python scripts/ctf_resource_crawl.py \
+  --urls https://www.douban.com/group/topic/53104421/ \
+  --site-label douban_group \
+  --configured-site-urls \
+  --keyword 济南旅游 \
   --max-image-save 3 \
   --max-scrolls 2
 ```
