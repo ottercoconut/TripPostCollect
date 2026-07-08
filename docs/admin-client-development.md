@@ -1263,6 +1263,29 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、只读边界、路
 - 需要修改数据时，页面能给出对应终端维护入口或说明，不在前端直接写库。
 - 布局在 1280px 和移动窄屏下不重叠。
 
+## 当前实现状态
+
+截至 2026-07-09，首版只读管理端已按 `docs/admin-client-phase-prompts.md` 的阶段 0-6 完成实现并逐阶段提交。
+
+已实现：
+
+- `pyproject.toml` 和 `src/trippostcollect/` src-layout 包骨架，旧 `scripts/project_paths.py`、`scripts/db_bootstrap.py`、`scripts/web_sites.py` 保持兼容导出。
+- `apps/admin_api` FastAPI 只读后端，提供 health/meta/schema-status、records、images、captures、overview、platforms、scheduler API。
+- SQLite 管理端连接使用只读短连接，不在启动或请求中执行数据库 bootstrap、配置同步、调度预览或抓取命令。
+- 图片和证据读取只通过数据库 ID 或 `kind` 枚举反查；本地路径会 resolve 并限制在项目根目录内，项目外路径和符号链接逃逸会被拒绝。
+- 记录 raw JSON 与关联证据 raw JSON 分层返回；JSON 解析失败只返回解析错误，不修写数据库。
+- `apps/admin_web` React + TypeScript + Vite 前端，默认进入记录工作台，支持平台、城市、关键词、状态、时间、缺字段和全文筛选。
+- 记录详情支持图片、作者、内容、互动、证据和 JSON 懒加载；图片组件展示加载中、加载失败、本地缺失和远程 URL 不可达状态。
+- 数据质量视图支持缺图片、缺发布时间、缺作者粉丝量记录定位，并能跳转回记录详情。
+- 运行报告、数据库状态、平台和调度任务只读展示；前端没有写库或命令触发入口。
+- 后端 `unittest` 覆盖只读边界、实时读取、图片/证据路径安全、overview 和 scheduler。
+
+仍作为二期或终端能力保留：
+
+- 受控终端维护脚本：记录修正、隐藏/恢复、指定 `capture_meta.json` 重导入、写前备份和审计。
+- 系统设置页：刷新频率、维护命令索引和更细的数据库状态说明。
+- 更复杂的前端表格能力：列显隐、持久化用户偏好和大规模虚拟滚动。
+
 ## 验收标准
 
 首版完成标准：

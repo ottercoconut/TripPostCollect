@@ -6,6 +6,7 @@ import {
   FileJson,
   Gauge,
   ImageIcon,
+  LocateFixed,
   ListFilter,
   Loader2,
   RefreshCcw,
@@ -17,7 +18,7 @@ import type { ReactNode } from "react";
 import { api, type RecordFilters } from "./api";
 import type { Meta, Platform, RecordContext, RecordRaw, RecordSummary, Report } from "./types";
 
-type View = "records" | "reports";
+type View = "records" | "quality" | "reports";
 type DetailTab = "images" | "author" | "content" | "metrics" | "evidence" | "json";
 
 const emptyFilters: RecordFilters = {
@@ -48,6 +49,7 @@ export function App() {
   const [raw, setRaw] = useState<RecordRaw | null>(null);
   const [reports, setReports] = useState<Report[]>([]);
   const [fieldGaps, setFieldGaps] = useState<Record<string, number | null>>({});
+  const [qualityGroups, setQualityGroups] = useState<Record<string, RecordSummary[]>>({});
   const [detailTab, setDetailTab] = useState<DetailTab>("images");
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -58,12 +60,15 @@ export function App() {
     setLoading(true);
     setError(null);
     try {
-      const [metaData, platformData, recordsPayload, reportsData, gapsData] = await Promise.all([
+      const [metaData, platformData, recordsPayload, reportsData, gapsData, missingImages, missingPublished, missingFollowers] = await Promise.all([
         api.meta(),
         api.platforms(),
         api.records(filters),
         api.reports(),
-        api.overviewGaps()
+        api.overviewGaps(),
+        api.records({ missing_field: "images", page_size: 8, sort: "-captured_at" }),
+        api.records({ missing_field: "published_at", page_size: 8, sort: "-captured_at" }),
+        api.records({ missing_field: "author_followers", page_size: 8, sort: "-captured_at" })
       ]);
       setMeta(metaData);
       setPlatforms(platformData);
@@ -71,6 +76,11 @@ export function App() {
       setRecordsMeta(recordsPayload.meta);
       setReports(reportsData);
       setFieldGaps(gapsData);
+      setQualityGroups({
+        images: missingImages.data,
+        published_at: missingPublished.data,
+        author_followers: missingFollowers.data
+      });
       setLastRefresh(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
       setSelectedId((current) => current ?? recordsPayload.data[0]?.id ?? null);
     } catch (err) {
@@ -119,6 +129,14 @@ export function App() {
     [records, selectedId]
   );
 
+  const locateIssue = (missingField: string, recordId?: number) => {
+    setFilters({ ...emptyFilters, missing_field: missingField, page: 1, sort: "-captured_at" });
+    if (recordId) {
+      setSelectedId(recordId);
+    }
+    setView("records");
+  };
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -134,7 +152,7 @@ export function App() {
           <button className={view === "records" ? "nav-item active" : "nav-item"} onClick={() => setView("records")}>
             <BarChart3 size={16} /> 记录工作台
           </button>
-          <button className="nav-item" onClick={() => setView("records")}>
+          <button className={view === "quality" ? "nav-item active" : "nav-item"} onClick={() => setView("quality")}>
             <AlertCircle size={16} /> 数据质量
           </button>
         </nav>
@@ -149,7 +167,7 @@ export function App() {
       <main className="main">
         <header className="topbar">
           <div>
-            <div className="topbar-title">{view === "records" ? "记录工作台" : "运行报告"}</div>
+            <div className="topbar-title">{view === "records" ? "记录工作台" : view === "quality" ? "数据质量" : "运行报告"}</div>
             <div className="topbar-subtitle">{lastRefresh ? `最近刷新 ${lastRefresh}` : "等待数据"}</div>
           </div>
           <div className="topbar-meta">
@@ -183,7 +201,10 @@ export function App() {
             setDetailTab={setDetailTab}
             raw={raw}
             fieldGaps={fieldGaps}
+            locateIssue={locateIssue}
           />
+        ) : view === "quality" ? (
+          <QualityView fieldGaps={fieldGaps} qualityGroups={qualityGroups} locateIssue={locateIssue} />
         ) : (
           <ReportsView reports={reports} meta={meta} />
         )}
@@ -207,6 +228,7 @@ function RecordWorkbench(props: {
   setDetailTab: (tab: DetailTab) => void;
   raw: RecordRaw | null;
   fieldGaps: Record<string, number | null>;
+  locateIssue: (missingField: string, recordId?: number) => void;
 }) {
   const { filters, setFilters, platforms, records, recordsMeta } = props;
   return (
@@ -256,16 +278,16 @@ function RecordWorkbench(props: {
       </div>
 
       <div className="quality-strip">
-        <QualityMetric label="缺图片" value={props.fieldGaps.missing_images} onClick={() => setFilters({ ...filters, missing_field: "images", page: 1 })} />
+        <QualityMetric label="缺图片" value={props.fieldGaps.missing_images} onClick={() => props.locateIssue("images")} />
         <QualityMetric
           label="缺发布时间"
           value={props.fieldGaps.missing_published_at}
-          onClick={() => setFilters({ ...filters, missing_field: "published_at", page: 1 })}
+          onClick={() => props.locateIssue("published_at")}
         />
         <QualityMetric
           label="缺粉丝量"
           value={props.fieldGaps.missing_author_followers}
-          onClick={() => setFilters({ ...filters, missing_field: "author_followers", page: 1 })}
+          onClick={() => props.locateIssue("author_followers")}
         />
       </div>
 
@@ -405,12 +427,42 @@ function ImagePanel({ context }: { context: RecordContext | null }) {
   return (
     <div className="image-grid">
       {images.slice(0, 6).map((image) => (
-        <figure key={image.id} className="image-tile">
-          <img src={`/api/images/${image.id}/preview`} alt="" loading="lazy" onError={(event) => event.currentTarget.classList.add("image-error")} />
-          <figcaption>{image.image_role}</figcaption>
-        </figure>
+        <ImageTile key={image.id} image={image} />
       ))}
     </div>
+  );
+}
+
+function ImageTile({ image }: { image: RecordContext["images"][number] }) {
+  const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
+  const source = image.local_path ? "本地" : "远程 URL";
+  const failedText = image.local_path ? "本地缺失或不可读" : "远程 URL 不可达";
+  return (
+    <figure className={`image-tile ${state}`}>
+      <img
+        src={`/api/images/${image.id}/preview`}
+        alt=""
+        loading="lazy"
+        onLoad={() => setState("ready")}
+        onError={(event) => {
+          setState("failed");
+          event.currentTarget.classList.add("image-error");
+        }}
+      />
+      <figcaption>{state === "failed" ? failedText : `${image.image_role} · ${source}`}</figcaption>
+      {state === "loading" ? (
+        <div className="image-state">
+          <Loader2 className="spin" size={16} />
+          <span>加载中</span>
+        </div>
+      ) : null}
+      {state === "failed" ? (
+        <div className="image-state failed">
+          <ImageIcon size={16} />
+          <span>{failedText}</span>
+        </div>
+      ) : null}
+    </figure>
   );
 }
 
@@ -561,6 +613,62 @@ function ReportsView({ reports, meta }: { reports: Report[]; meta: Meta | null }
             <KV label="任务" value={meta?.table_counts.crawl_jobs ?? 0} />
           </div>
         </div>
+      </div>
+    </section>
+  );
+}
+
+function QualityView(props: {
+  fieldGaps: Record<string, number | null>;
+  qualityGroups: Record<string, RecordSummary[]>;
+  locateIssue: (missingField: string, recordId?: number) => void;
+}) {
+  const groups = [
+    { key: "images", title: "缺图片", count: props.fieldGaps.missing_images, records: props.qualityGroups.images ?? [] },
+    {
+      key: "published_at",
+      title: "缺发布时间",
+      count: props.fieldGaps.missing_published_at,
+      records: props.qualityGroups.published_at ?? []
+    },
+    {
+      key: "author_followers",
+      title: "缺作者粉丝量",
+      count: props.fieldGaps.missing_author_followers,
+      records: props.qualityGroups.author_followers ?? []
+    }
+  ];
+  return (
+    <section className="content">
+      <div className="notice-panel">数据修正走受控终端脚本，前端仅定位问题记录。</div>
+      <div className="quality-grid">
+        {groups.map((group) => (
+          <section className="panel" key={group.key}>
+            <div className="panel-header">
+              <div>
+                <div className="panel-title">{group.title}</div>
+                <div className="panel-subtitle">{group.count ?? 0} 条记录</div>
+              </div>
+              <button className="icon-button" title="定位" aria-label="定位" onClick={() => props.locateIssue(group.key)}>
+                <LocateFixed size={16} />
+              </button>
+            </div>
+            <div className="issue-list">
+              {group.records.map((record) => (
+                <button className="issue-row" key={record.id} onClick={() => props.locateIssue(group.key, record.id)}>
+                  <span>
+                    <strong>{record.title || record.content_text || record.source_url}</strong>
+                    <small>
+                      {record.platform_name ?? record.platform_key} · {record.city_name || "未标城市"} · {formatDate(record.captured_at)}
+                    </small>
+                  </span>
+                  <LocateFixed size={15} />
+                </button>
+              ))}
+              {group.records.length === 0 ? <div className="empty-state compact">暂无问题记录</div> : null}
+            </div>
+          </section>
+        ))}
       </div>
     </section>
   );
