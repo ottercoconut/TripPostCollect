@@ -9,6 +9,7 @@
 | [平台字段覆盖表](platform-field-coverage.md) | 各平台当前能结构化提供、只能保留证据或不能提供的字段。 |
 | [反自动化检测与人类行为模拟](anti-automation-behavior.md) | 授权靶场中的随机间隔、行为模拟、浏览器指纹和稳定规避方案。 |
 | [可视化管理客户端开发文档](admin-client-development.md) | FastAPI + React/Vite 管理台的产品范围、项目结构重构、记录中心 API、只读边界和验收标准。 |
+| [管理端分阶段开发提示词](admin-client-phase-prompts.md) | 按阶段拆分的 Codex 提示词，用于分批实现只读管理端。 |
 
 ## 项目目标
 
