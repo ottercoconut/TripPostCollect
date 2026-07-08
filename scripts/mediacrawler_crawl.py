@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
@@ -17,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 from db_bootstrap import bootstrap_connection, bootstrap_database
 from project_paths import (
@@ -32,6 +35,9 @@ from project_paths import (
 ROOT = PROJECT_ROOT
 DEFAULT_OUTPUT = MEDIACRAWLER_RUNS_OUTPUT
 COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
+STORAGE_SNAPSHOT_FILENAME = "trippostcollect_storage_state.json"
+BILIBILI_ARTICLE_SEARCH_URL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
+BILIBILI_ARTICLE_PAGE_SIZE = 20
 
 PLATFORMS: dict[str, dict[str, str]] = {
     "bilibili": {"mediacrawler": "bili", "label": "B站"},
@@ -40,6 +46,24 @@ PLATFORMS: dict[str, dict[str, str]] = {
     "douyin": {"mediacrawler": "dy", "label": "抖音"},
     "zhihu": {"mediacrawler": "zhihu", "label": "知乎"},
 }
+SHANDONG_CITY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("济南市", ("济南市", "济南", "泉城")),
+    ("青岛市", ("青岛市", "青岛")),
+    ("淄博市", ("淄博市", "淄博")),
+    ("枣庄市", ("枣庄市", "枣庄")),
+    ("东营市", ("东营市", "东营")),
+    ("烟台市", ("烟台市", "烟台")),
+    ("潍坊市", ("潍坊市", "潍坊")),
+    ("济宁市", ("济宁市", "济宁")),
+    ("泰安市", ("泰安市", "泰安")),
+    ("威海市", ("威海市", "威海")),
+    ("日照市", ("日照市", "日照")),
+    ("临沂市", ("临沂市", "临沂")),
+    ("德州市", ("德州市", "德州")),
+    ("聊城市", ("聊城市", "聊城")),
+    ("滨州市", ("滨州市", "滨州")),
+    ("菏泽市", ("菏泽市", "菏泽")),
+)
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".svg", ".img"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm"}
@@ -193,10 +217,53 @@ def cookie_snapshot_path(platform_key: str) -> Path:
     return profile_dir_for(platform_key) / COOKIE_SNAPSHOT_FILENAME
 
 
+def storage_snapshot_path(platform_key: str) -> Path:
+    return profile_dir_for(platform_key) / STORAGE_SNAPSHOT_FILENAME
+
+
 def required_cookie_names(platform_key: str) -> tuple[str, ...]:
     if platform_key == "zhihu":
         return ("d_c0", "z_c0")
     return ()
+
+
+def xhs_storage_snapshot_info(path: Path) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "path": str(path),
+        "exists": path.is_file(),
+        "ok": False,
+        "cookie_names": [],
+        "origin_count": 0,
+        "runtime_storage_count": 0,
+        "saved_at": None,
+        "reason": "",
+    }
+    if not path.is_file():
+        info["reason"] = "missing_snapshot"
+        return info
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        info["reason"] = f"read_failed:{type(exc).__name__}"
+        info["error"] = str(exc)
+        return info
+    cookies = state.get("cookies") if isinstance(state, dict) else []
+    origins = state.get("origins") if isinstance(state, dict) else []
+    marker = state.get("trippostcollect") if isinstance(state, dict) else {}
+    cookie_names = sorted({item.get("name", "") for item in cookies if isinstance(item, dict) and item.get("name")})
+    origin_count = len(origins) if isinstance(origins, list) else 0
+    runtime_storage = marker.get("runtime_storage") if isinstance(marker, dict) else []
+    info.update(
+        {
+            "ok": bool(cookie_names or origin_count),
+            "cookie_names": cookie_names,
+            "origin_count": origin_count,
+            "runtime_storage_count": len(runtime_storage) if isinstance(runtime_storage, list) else 0,
+            "saved_at": marker.get("saved_at") or marker.get("captured_at") if isinstance(marker, dict) else None,
+            "reason": "ready" if cookie_names or origin_count else "empty_snapshot",
+        }
+    )
+    return info
 
 
 def cookie_names_from_header(cookie_header: str) -> list[str]:
@@ -641,6 +708,13 @@ def truncate(value: Any, limit: int = 240) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
+def clean_html_text(value: Any) -> str:
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
 def extract_sample(record: dict[str, Any]) -> dict[str, str]:
     sample = {key: truncate(record[key]) for key in SAMPLE_KEYS if record.get(key) not in (None, "")}
     published_at = published_at_for_record(record)
@@ -785,6 +859,9 @@ def canonical_url_for_record(platform_key: str, record: dict[str, Any]) -> str |
     if platform_key == "douyin":
         return f"https://www.douyin.com/video/{post_id}"
     if platform_key == "bilibili":
+        content_type = str(first_value(record, "content_type", "type") or "").strip().lower()
+        if content_type in {"article", "read", "opus", "dynamic"}:
+            return f"https://www.bilibili.com/read/cv{post_id}/"
         return f"https://www.bilibili.com/video/av{post_id}"
     if platform_key == "xhs":
         return f"https://www.xiaohongshu.com/explore/{post_id}"
@@ -807,6 +884,22 @@ def content_text_for_record(platform_key: str, record: dict[str, Any]) -> str:
     return str(first_value(record, "content_text", "content", "desc", "title") or "")
 
 
+def city_name_from_keyword(keyword: str) -> str | None:
+    text = str(keyword or "").strip()
+    if not text:
+        return None
+    best_match: tuple[int, int, int, str] | None = None
+    for order, (city_name, aliases) in enumerate(SHANDONG_CITY_ALIASES):
+        for alias in aliases:
+            index = text.find(alias)
+            if index < 0:
+                continue
+            candidate = (index, -len(alias), order, city_name)
+            if best_match is None or candidate < best_match:
+                best_match = candidate
+    return best_match[3] if best_match else None
+
+
 def row_for_record(
     platform_key: str,
     record: dict[str, Any],
@@ -818,6 +911,7 @@ def row_for_record(
     content_text = content_text_for_record(platform_key, record)
     canonical_url = canonical_url_for_record(platform_key, record)
     image_items = dedupe_image_urls(record)
+    keyword_value = str(record.get("source_keyword") or keyword or "")
     metrics = {
         "liked_count": parse_int(first_value(record, "liked_count", "voteup_count")),
         "favorites_count": parse_int(first_value(record, "collected_count", "video_favorite_count")),
@@ -865,8 +959,8 @@ def row_for_record(
         "author_verified_text": first_value(record, "verified_text", "verify_info"),
         "published_at": published_at_for_record(record),
         "captured_at": captured_at,
-        "city_name": "济南市" if "济南" in (str(record.get("source_keyword") or "") + content_text) else None,
-        "keyword": str(record.get("source_keyword") or keyword or ""),
+        "city_name": city_name_from_keyword(keyword_value),
+        "keyword": keyword_value,
         "content_text": content_text,
         "content_length": len(content_text),
         "post_likes_count": metrics["liked_count"],
@@ -1033,7 +1127,153 @@ def import_to_db(summary: dict[str, Any], db_path: Path, *, max_records: int | N
     }
 
 
+def normalize_bilibili_article_record(item: dict[str, Any], keyword: str) -> dict[str, Any] | None:
+    post_id = str(item.get("id") or "").strip()
+    if not post_id:
+        return None
+    title = clean_html_text(item.get("title"))
+    desc = clean_html_text(item.get("desc"))
+    if not title and not desc:
+        return None
+    content_url = str(item.get("arcurl") or item.get("url") or f"https://www.bilibili.com/read/cv{post_id}/")
+    image_urls = item.get("image_urls") if isinstance(item.get("image_urls"), list) else []
+    content_parts = [part for part in (title, desc) if part]
+    record = dict(item)
+    record.update(
+        {
+            "id": post_id,
+            "content_id": post_id,
+            "content_type": "article",
+            "title": title,
+            "desc": desc,
+            "content_text": "\n".join(dict.fromkeys(content_parts)),
+            "content_url": content_url,
+            "image_urls": image_urls,
+            "source_keyword": keyword,
+            "created_time": item.get("pubdate") or item.get("pub_time"),
+            "published_at": item.get("pubdate") or item.get("pub_time"),
+            "liked_count": item.get("like"),
+            "comment_count": item.get("reply"),
+            "view_count": item.get("view"),
+            "nickname": item.get("author"),
+            "user_id": item.get("mid"),
+            "raw_bilibili_type": item.get("type"),
+        }
+    )
+    return record
+
+
+def fetch_bilibili_article_page(keyword: str, page: int) -> list[dict[str, Any]]:
+    params = {
+        "keyword": keyword,
+        "page": page,
+        "page_size": BILIBILI_ARTICLE_PAGE_SIZE,
+        "search_type": "article",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://search.bilibili.com/article?keyword=" + quote(keyword),
+    }
+    request = Request(BILIBILI_ARTICLE_SEARCH_URL + "?" + urlencode(params), headers=headers)
+    with urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    if payload.get("code") != 0:
+        raise RuntimeError(f"bilibili article search failed: {payload.get('code')} {payload.get('message')}")
+    result = (payload.get("data") or {}).get("result") or []
+    return [item for item in result if isinstance(item, dict)]
+
+
+def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> dict[str, Any]:
+    platform_key = "bilibili"
+    platform = PLATFORMS[platform_key]
+    save_path = ensure_dir(batch_dir / platform_key / "data" / platform["mediacrawler"] / "jsonl")
+    log_dir = ensure_dir(batch_dir / "logs" / platform_key)
+    jsonl_path = save_path / f"search_contents_{datetime.now(CHINA_TZ).date().isoformat()}.jsonl"
+    stdout_log = log_dir / "stdout.log"
+    stderr_log = log_dir / "stderr.log"
+    command_log = log_dir / "command.txt"
+    command = [
+        "bilibili_article_search",
+        "--keyword",
+        args.keyword,
+        "--crawler-max-notes",
+        str(args.mediacrawler_max_notes),
+    ]
+
+    started = time.monotonic()
+    records: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    stderr = ""
+    returncode = 0
+    try:
+        max_records = max(1, int(args.mediacrawler_max_notes or 1))
+        max_pages = max(1, (max_records + BILIBILI_ARTICLE_PAGE_SIZE - 1) // BILIBILI_ARTICLE_PAGE_SIZE)
+        for page in range(1, max_pages + 1):
+            page_items = fetch_bilibili_article_page(args.keyword, page)
+            if not page_items:
+                break
+            for item in page_items:
+                normalized = normalize_bilibili_article_record(item, args.keyword)
+                if not normalized:
+                    continue
+                post_id = str(normalized.get("content_id") or "")
+                if post_id in seen_ids:
+                    continue
+                seen_ids.add(post_id)
+                records.append(normalized)
+                if len(records) >= max_records:
+                    break
+            if len(records) >= max_records:
+                break
+    except Exception as exc:
+        returncode = 1
+        stderr = repr(exc)
+
+    with jsonl_path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    stdout = json.dumps(
+        {
+            "keyword": args.keyword,
+            "jsonl": str(jsonl_path),
+            "records": len(records),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    stdout_log.write_text(stdout, encoding="utf-8")
+    stderr_log.write_text(stderr, encoding="utf-8")
+    command_log.write_text(shlex.join(command), encoding="utf-8")
+    output = summarize_output(batch_dir / platform_key / "data", args.keyword)
+    status = "completed" if records and returncode == 0 else "failed"
+    return {
+        "platform": platform_key,
+        "label": platform["label"],
+        "status": status,
+        "ok": status == "completed",
+        "media_enabled": False,
+        "video_enabled": False,
+        "login_state": None,
+        "run": {
+            "command": command,
+            "command_text": shlex.join(command),
+            "returncode": returncode,
+            "timed_out": False,
+            "elapsed_seconds": round(time.monotonic() - started, 2),
+            "stdout_log": str(stdout_log),
+            "stderr_log": str(stderr_log),
+            "command_log": str(command_log),
+            "stdout_tail": tail(stdout),
+            "stderr_tail": tail(stderr),
+        },
+        "output": output,
+    }
+
+
 def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -> dict[str, Any]:
+    if platform_key == "bilibili":
+        return run_bilibili_article_search(args, batch_dir)
+
     platform = PLATFORMS[platform_key]
     save_path = batch_dir / platform_key / "data"
     log_dir = batch_dir / "logs" / platform_key
@@ -1073,19 +1313,54 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
     extra_env: dict[str, str] = {}
     login_state: dict[str, Any] | None = None
     if platform_key == "xhs":
+        xhs_storage_path = storage_snapshot_path(platform_key)
+        xhs_storage_info = xhs_storage_snapshot_info(xhs_storage_path)
+        login_state = {"ok": bool(xhs_storage_info.get("ok")), "storage_snapshot": xhs_storage_info}
+        if args.login_type == "cookie" and not xhs_storage_info.get("ok"):
+            reason = (
+                "missing_xhs_storage_state: run "
+                ".venv/bin/python scripts/mediacrawler_login_warmup.py --platforms xhs "
+                "until profile_ui is verified and trippostcollect_storage_state.json is snapshotted"
+            )
+            run = skipped_command(cmd, log_dir, reason)
+            output = summarize_output(save_path, args.keyword)
+            return {
+                "platform": platform_key,
+                "label": platform["label"],
+                "status": "failed",
+                "ok": False,
+                "media_enabled": image_download_enabled,
+                "video_enabled": False,
+                "login_state": {
+                    "ok": False,
+                    "reason": "missing_storage_snapshot",
+                    "storage_snapshot": xhs_storage_info,
+                },
+                "run": run,
+                "output": output,
+            }
         cmd.extend(["--enable_cdp_mode", "true"])
         extra_env.update(
             {
                 "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": "1",
                 "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",
                 "TRIPPOSTCOLLECT_SHARE_CDP_PROFILE": "1",
+                "TRIPPOSTCOLLECT_XHS_STORAGE_STATE_PATH": str(xhs_storage_path),
+                "TRIPPOSTCOLLECT_XHS_INITIAL_SETTLE_SECONDS": "12",
+                "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS": "180" if args.headed else "0",
                 "TRIPPOSTCOLLECT_XHS_QR_REFRESH_SECONDS": "90",
                 "TRIPPOSTCOLLECT_XHS_QR_ATTEMPTS": "5",
             }
         )
     elif platform_key == "zhihu":
         cmd.extend(["--enable_cdp_mode", "true"])
-        extra_env.update({"TRIPPOSTCOLLECT_SHARE_CDP_PROFILE": "1"})
+        extra_env.update(
+            {
+                "TRIPPOSTCOLLECT_SHARE_CDP_PROFILE": "1",
+                "TRIPPOSTCOLLECT_CLEAN_BROWSER_TABS": "1",
+                "TRIPPOSTCOLLECT_ZHIHU_INITIAL_SETTLE_SECONDS": "8",
+            }
+        )
     elif platform_key == "douyin":
         extra_env.update(
             {
@@ -1128,7 +1403,7 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
             extra_env["TRIPPOSTCOLLECT_COOKIES"] = str(cookie_export["cookie_header"])
             login_state = {"ok": True, **public_cookie_export(cookie_export)}
     timeout = args.timeout_per_platform
-    if platform_key == "xhs" and args.login_type == "qrcode":
+    if platform_key == "xhs" and (args.login_type == "qrcode" or args.headed):
         timeout = max(timeout, 420)
     if platform_key == "zhihu":
         timeout = max(timeout, 300)

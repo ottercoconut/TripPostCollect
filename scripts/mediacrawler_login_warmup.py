@@ -446,6 +446,22 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
         except KeyboardInterrupt:
             pass
 
+    if result["ok"] and args.skip_reopen_verify and not args.no_close_on_success:
+        result["cookie_snapshot"] = write_cookie_snapshot(
+            platform_key,
+            profile_dir,
+            session_cookies,
+            source="session_skip_reopen_verify",
+            state=state,
+        )
+        result["storage_snapshot"] = await write_storage_snapshot(
+            platform_key,
+            profile_dir,
+            context,
+            source="session_skip_reopen_verify",
+            state=state,
+        )
+
     await context.close()
     if result["ok"] and not args.skip_reopen_verify and not args.no_close_on_success:
         verify_context = await launch_login_context(playwright, profile_dir, browser_path)
@@ -457,7 +473,6 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
             verify_nav_error = f"{type(exc).__name__}: {exc}"
         verify_state = await current_state(verify_context, verify_page, platform_key)
         verify_cookies = await verify_context.cookies(platform["urls"]) if verify_state.get("ok") else []
-        await verify_context.close()
         result["persisted_ok"] = bool(verify_state.get("ok"))
         result["ok"] = bool(result["session_ok"] and result["persisted_ok"])
         if result["ok"]:
@@ -475,6 +490,7 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
                 source="reopen_verify",
                 state=verify_state,
             )
+        await verify_context.close()
         result["reopen_verify"] = {
             "ok": result["persisted_ok"],
             "nav_error": verify_nav_error,
@@ -482,21 +498,6 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
             "verified_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         print(f"[login] reopen verify {platform['label']} markers={verify_state.get('markers')}", flush=True)
-    elif result["ok"] and args.skip_reopen_verify:
-        result["cookie_snapshot"] = write_cookie_snapshot(
-            platform_key,
-            profile_dir,
-            session_cookies,
-            source="session_skip_reopen_verify",
-            state=state,
-        )
-        result["storage_snapshot"] = await write_storage_snapshot(
-            platform_key,
-            profile_dir,
-            context,
-            source="session_skip_reopen_verify",
-            state=state,
-        )
 
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[login] {platform['label']} {'ok' if result['ok'] else 'not verified'} -> {out_path}", flush=True)
