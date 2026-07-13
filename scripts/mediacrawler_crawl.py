@@ -1103,11 +1103,73 @@ def validate_formal_record(platform_key: str, record: dict[str, Any], seen: set[
     }
 
 
+PAGINATION_EVENT_FIELDS = (
+    "platform",
+    "batch_no",
+    "candidate_count",
+    "valid_unique_count",
+    "new_valid_count",
+    "source_page",
+    "source_offset",
+    "source_cursor",
+    "next_cursor",
+    "source_has_more",
+    "raw_batch_count",
+    "raw_response_count",
+    "stagnant_batches",
+    "stop_reason",
+    "stop_detail",
+)
+
+
+def load_pagination_evidence(state_path: str | Path | None) -> dict[str, Any]:
+    if not state_path:
+        return {"available": False, "stopped": False, "batches": []}
+    path = Path(state_path).expanduser()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {
+            "available": False,
+            "stopped": False,
+            "state_path": str(path),
+            "batches": [],
+        }
+
+    batches = []
+    stopped_details: dict[str, Any] | None = None
+    for event in payload.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        details = event.get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        selected = {key: details.get(key) for key in PAGINATION_EVENT_FIELDS if key in details}
+        if event.get("type") == "adaptive_batch_completed":
+            batches.append(selected)
+        elif event.get("type") == "adaptive_search_stopped":
+            stopped_details = selected
+
+    latest = stopped_details or (batches[-1] if batches else {})
+    return {
+        "available": bool(batches or stopped_details),
+        "state_path": str(path),
+        "batch_count": len(batches),
+        "candidate_count": int(latest.get("candidate_count") or 0),
+        "stopped": stopped_details is not None,
+        "stop_reason": str((stopped_details or {}).get("stop_reason") or ""),
+        "stop_detail": str((stopped_details or {}).get("stop_detail") or ""),
+        "batches": batches,
+        "stop_event": stopped_details,
+    }
+
+
 def collect_formal_records(
     summary: dict[str, Any],
     *,
     candidate_hard_limit: int,
     target_valid_posts: int,
+    pagination_evidence: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     seen: set[str] = set()
     selected: list[dict[str, Any]] = []
@@ -1162,20 +1224,34 @@ def collect_formal_records(
         if stop:
             break
 
+    output_record_count = candidate_count
+    pagination_evidence = pagination_evidence or {}
+    candidate_count = max(candidate_count, int(pagination_evidence.get("candidate_count") or 0))
     target_met = target_valid_posts <= 0 or len(selected) >= target_valid_posts
     if target_met and target_valid_posts > 0:
         stop_reason = "target_met"
     elif candidate_count >= candidate_hard_limit:
         stop_reason = "candidate_hard_limit_reached"
+    elif pagination_evidence.get("stopped") and pagination_evidence.get("stop_reason") in {
+        "source_exhausted",
+        "stagnated",
+        "runtime_failed",
+        "login_required",
+        "captcha_detected",
+    }:
+        stop_reason = str(pagination_evidence["stop_reason"])
     else:
-        stop_reason = "source_exhausted"
+        stop_reason = "runtime_failed"
     validation_summary = {
         "candidate_hard_limit": candidate_hard_limit,
         "candidate_count": candidate_count,
+        "output_record_count": output_record_count,
         "target_valid_posts": target_valid_posts,
         "valid_unique_count": len(selected),
         "target_met": target_met,
         "stop_reason": stop_reason,
+        "stop_detail": str(pagination_evidence.get("stop_detail") or ""),
+        "pagination_evidence": pagination_evidence,
         "parse_errors": parse_errors,
         "invalid_reason_counts": dict(sorted(reason_counts.items())),
         "valid_identities": [item["identity"] for item in selected],
@@ -1419,6 +1495,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     follower_cache: dict[str, int | None] = {}
     valid_seen: set[str] = set()
     valid_count = 0
+    candidate_count = 0
     stagnant_pages = 0
     state_path = os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()
     stderr = ""
@@ -1426,12 +1503,12 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     try:
         max_records = args.candidate_hard_limit
         target_valid = max(1, int(args.target_valid_posts or max_records))
-        max_pages = max(1, (max_records + BILIBILI_ARTICLE_PAGE_SIZE - 1) // BILIBILI_ARTICLE_PAGE_SIZE)
         browser_path = discover_cdp_browser_path()
         cookie_export = export_profile_cookies(platform_key, browser_path)
         cookie_header = str((cookie_export or {}).get("cookie_header") or "")
         wbi_keys = fetch_bilibili_wbi_keys(cookie_header)
-        for page in range(1, max_pages + 1):
+        page = 1
+        while candidate_count < max_records:
             page_items = fetch_bilibili_article_page(
                 args.keyword,
                 page,
@@ -1439,9 +1516,31 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 cookie_header=cookie_header,
             )
             if not page_items:
+                if state_path:
+                    FrozenExecutionState(state_path).append_event(
+                        "adaptive_search_stopped",
+                        {
+                            "platform": platform_key,
+                            "candidate_count": candidate_count,
+                            "valid_unique_count": valid_count,
+                            "target": target_valid,
+                            "hard_limit": max_records,
+                            "stagnant_batches": stagnant_pages,
+                            "stop_reason": "source_exhausted",
+                            "stop_detail": "empty_page",
+                            "pages_fetched": page - 1,
+                            "source_page": page,
+                            "raw_batch_count": 0,
+                        },
+                    )
                 break
             valid_before = valid_count
+            processed_in_batch = 0
             for item in page_items:
+                if candidate_count >= max_records:
+                    break
+                candidate_count += 1
+                processed_in_batch += 1
                 normalized = normalize_bilibili_article_record(item, args.keyword)
                 if not normalized:
                     continue
@@ -1470,12 +1569,12 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 if validation["valid"]:
                     valid_seen.add(str(validation["identity"]))
                     valid_count += 1
-                if len(records) >= max_records or valid_count >= target_valid:
+                if candidate_count >= max_records or valid_count >= target_valid:
                     break
             stagnant_pages = stagnant_pages + 1 if valid_count == valid_before else 0
             if valid_count >= target_valid:
                 batch_stop_reason = "target_met"
-            elif len(records) >= max_records:
+            elif candidate_count >= max_records:
                 batch_stop_reason = "candidate_hard_limit_reached"
             elif stagnant_pages >= max(1, args.max_stagnant_batches):
                 batch_stop_reason = "stagnated"
@@ -1488,13 +1587,17 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     {
                         "platform": platform_key,
                         "batch_no": page,
-                        "candidate_count": len(records),
+                        "candidate_count": candidate_count,
                         "valid_unique_count": valid_count,
                         "new_valid_count": valid_count - valid_before,
                         "stagnant_batches": stagnant_pages,
                         "target": target_valid,
                         "hard_limit": max_records,
                         "stop_reason": batch_stop_reason,
+                        "source_page": page,
+                        "source_has_more": None,
+                        "raw_batch_count": processed_in_batch,
+                        "raw_response_count": len(page_items),
                     },
                 )
                 if batch_stop_reason != "continue":
@@ -1502,23 +1605,44 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                         "adaptive_search_stopped",
                         {
                             "platform": platform_key,
-                            "candidate_count": len(records),
+                            "candidate_count": candidate_count,
                             "valid_unique_count": valid_count,
                             "target": target_valid,
                             "hard_limit": max_records,
                             "stagnant_batches": stagnant_pages,
                             "stop_reason": batch_stop_reason,
+                            "pages_fetched": page,
+                            "source_page": page,
+                            "source_has_more": None,
+                            "raw_batch_count": processed_in_batch,
+                            "raw_response_count": len(page_items),
                         },
                     )
             if (
-                len(records) >= max_records
+                candidate_count >= max_records
                 or valid_count >= target_valid
                 or stagnant_pages >= max(1, args.max_stagnant_batches)
             ):
                 break
+            page += 1
     except Exception as exc:
         returncode = 1
         stderr = repr(exc)
+        if state_path:
+            FrozenExecutionState(state_path).append_event(
+                "adaptive_search_stopped",
+                {
+                    "platform": platform_key,
+                    "candidate_count": candidate_count,
+                    "valid_unique_count": valid_count,
+                    "target": max(1, int(args.target_valid_posts or args.candidate_hard_limit)),
+                    "hard_limit": args.candidate_hard_limit,
+                    "stagnant_batches": stagnant_pages,
+                    "stop_reason": "runtime_failed",
+                    "stop_detail": type(exc).__name__,
+                    "source_page": locals().get("page"),
+                },
+            )
 
     with jsonl_path.open("w", encoding="utf-8") as handle:
         for record in records:
@@ -1761,6 +1885,7 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
         lines.append("")
     validation = summary.get("formal_validation") or {}
     if validation:
+        pagination = validation.get("pagination_evidence") or {}
         lines.extend(
             [
                 "## 正式校验",
@@ -1769,6 +1894,9 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
                 f"- 有效唯一图文：`{validation.get('valid_unique_count', 0)}` / 目标 `{validation.get('target_valid_posts', 0)}`",
                 f"- 目标达成：`{validation.get('target_met', False)}`",
                 f"- 停止原因：`{validation.get('stop_reason', '')}`",
+                f"- 停止细节：`{validation.get('stop_detail', '')}`",
+                f"- 已处理分页批次：`{pagination.get('batch_count', 0)}`",
+                f"- 正常停止事件：`{pagination.get('stopped', False)}`",
                 f"- 无效原因计数：`{json.dumps(validation.get('invalid_reason_counts') or {}, ensure_ascii=False, sort_keys=True)}`",
                 "",
             ]
@@ -1834,10 +1962,15 @@ def main() -> int:
         "failed_count": sum(1 for record in records if not record["ok"]),
         "records": records,
     }
+    pagination_evidence = load_pagination_evidence(
+        os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()
+    )
+    summary["pagination_evidence"] = pagination_evidence
     validation, valid_records = collect_formal_records(
         summary,
         candidate_hard_limit=candidate_hard_limit,
         target_valid_posts=target_valid_posts,
+        pagination_evidence=pagination_evidence,
     )
     summary["required_fields_profile"] = args.required_fields_profile
     summary["formal_validation"] = validation
