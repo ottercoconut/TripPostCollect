@@ -18,6 +18,25 @@ def write_state(path: Path, events: list[dict]) -> None:
     path.write_text(json.dumps({"events": events}), encoding="utf-8")
 
 
+def bilibili_record(post_id: str) -> dict:
+    return {
+        "content_id": post_id,
+        "content_type": "article",
+        "title": f"title-{post_id}",
+        "desc": "body",
+        "pub_time": "2026-07-13 12:00:00",
+        "user_id": "author-1",
+        "nickname": "author",
+        "image_urls": [f"https://example.test/{post_id}-1.jpg"],
+        "followers_count": 100,
+        "followers_observed": True,
+        "author_followers_source": "relation_stat",
+        "liked_count": 1,
+        "comment_count": 2,
+        "view_count": 3,
+    }
+
+
 def test_unfinished_pagination_is_not_reported_as_source_exhausted(tmp_path: Path) -> None:
     state_path = tmp_path / "state.json"
     write_state(
@@ -29,7 +48,7 @@ def test_unfinished_pagination_is_not_reported_as_source_exhausted(tmp_path: Pat
                     "platform": "xhs",
                     "batch_no": 1,
                     "candidate_count": 20,
-                    "valid_unique_count": 11,
+                    "valid_new_count": 11,
                     "source_page": 1,
                     "source_has_more": True,
                     "raw_batch_count": 20,
@@ -43,7 +62,8 @@ def test_unfinished_pagination_is_not_reported_as_source_exhausted(tmp_path: Pat
     validation, _ = mediacrawler_crawl.collect_formal_records(
         {"records": []},
         candidate_hard_limit=300,
-        target_valid_posts=50,
+        target_new_posts=50,
+        db_path=tmp_path / "missing.sqlite",
         pagination_evidence=evidence,
     )
 
@@ -63,7 +83,7 @@ def test_explicit_empty_page_proves_source_exhaustion(tmp_path: Path) -> None:
                 "details": {
                     "platform": "douyin",
                     "candidate_count": 84,
-                    "valid_unique_count": 0,
+                    "valid_new_count": 0,
                     "pages_fetched": 6,
                     "source_page": 7,
                     "source_has_more": False,
@@ -79,7 +99,8 @@ def test_explicit_empty_page_proves_source_exhaustion(tmp_path: Path) -> None:
     validation, _ = mediacrawler_crawl.collect_formal_records(
         {"records": []},
         candidate_hard_limit=1000,
-        target_valid_posts=50,
+        target_new_posts=50,
+        db_path=tmp_path / "missing.sqlite",
         pagination_evidence=evidence,
     )
 
@@ -87,3 +108,43 @@ def test_explicit_empty_page_proves_source_exhaustion(tmp_path: Path) -> None:
     assert validation["candidate_count"] == 84
     assert validation["stop_reason"] == "source_exhausted"
     assert validation["stop_detail"] == "empty_page"
+
+
+def test_existing_valid_record_is_update_not_valid_new_target(tmp_path: Path) -> None:
+    db_path = tmp_path / "posts.sqlite"
+    existing = bilibili_record("existing")
+    new = bilibili_record("new")
+    import_summary = {
+        "captured_at": "2026-07-13T12:00:00+08:00",
+        "keyword": "济南旅游",
+        "batch_dir": str(tmp_path),
+    }
+    first_import = mediacrawler_crawl.import_valid_records(
+        import_summary,
+        [{"platform": "bilibili", "record": existing}],
+        db_path,
+    )
+    assert first_import["inserted_rows"] == 1
+
+    jsonl_path = tmp_path / "bili" / "jsonl" / "search_contents_2026-07-13.jsonl"
+    jsonl_path.parent.mkdir(parents=True)
+    jsonl_path.write_text(
+        "\n".join(json.dumps(item) for item in (existing, new)) + "\n",
+        encoding="utf-8",
+    )
+    summary = {"records": [{"output": {"jsonl_files": [str(jsonl_path)]}}]}
+
+    validation, selected = mediacrawler_crawl.collect_formal_records(
+        summary,
+        candidate_hard_limit=10,
+        target_new_posts=1,
+        db_path=db_path,
+    )
+    imported = mediacrawler_crawl.import_valid_records(import_summary, selected, db_path)
+
+    assert validation["valid_new_count"] == 1
+    assert validation["valid_existing_count"] == 1
+    assert validation["valid_total_count"] == 2
+    assert validation["new_target_met"] is True
+    assert imported["inserted_rows"] == 1
+    assert imported["updated_rows"] == 1

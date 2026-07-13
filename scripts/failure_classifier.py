@@ -18,7 +18,7 @@ BROWSER_LAUNCH_PATTERNS = re.compile(
     r"TargetClosedError|BrowserType\.launch|launch_persistent_context|SIGABRT|signal 6|crashpad|kill EPERM",
     re.I,
 )
-IMPORT_TARGET_PATTERNS = re.compile(r"import_target_not_met", re.I)
+IMPORT_TARGET_PATTERNS = re.compile(r"import_new_target_not_met", re.I)
 RATE_PATTERNS = re.compile(r"429|too many requests|rate limit|访问过于频繁|请求过于频繁|操作频繁", re.I)
 TIMEOUT_PATTERNS = re.compile(r"Timeout|timeout|ETIMEDOUT|Navigation timeout|net::ERR_TIMED_OUT", re.I)
 NO_IMAGE_PATTERNS = re.compile(r"No image-bearing|no_content_images|skipped_no_image", re.I)
@@ -90,14 +90,14 @@ def classify_attempt(
         }
 
     formal_validation = stdout_json.get("formal_validation") or {}
-    if stdout_json.get("import_target_met") is False and isinstance(formal_validation, dict):
-        stop_reason = str(formal_validation.get("stop_reason") or "target_not_met")
+    if stdout_json.get("import_new_target_met") is False and isinstance(formal_validation, dict):
+        stop_reason = str(formal_validation.get("stop_reason") or "new_target_not_met")
         return {
             "status": "retry_wait",
-            "failure_type": "import_target_not_met",
+            "failure_type": "import_new_target_not_met",
             "retryable": True,
             "wait_seconds": 600,
-            "reason": f"formal_import_target_not_reached:{stop_reason}",
+            "reason": f"formal_import_new_target_not_reached:{stop_reason}",
         }
 
     runtime_permission = RUNTIME_PERMISSION_PATTERNS.search(text)
@@ -189,10 +189,10 @@ def classify_attempt(
     if IMPORT_TARGET_PATTERNS.search(text):
         return {
             "status": "retry_wait",
-            "failure_type": "import_target_not_met",
+            "failure_type": "import_new_target_not_met",
             "retryable": True,
             "wait_seconds": 600,
-            "reason": "formal_import_target_not_reached",
+            "reason": "formal_import_new_target_not_reached",
         }
 
     return {

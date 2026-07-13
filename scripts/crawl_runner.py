@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from trippostcollect.db.bootstrap import bootstrap_connection
-from execution_state import ExecutionStateError, FrozenExecutionState
+from execution_state import FrozenExecutionState
 from failure_classifier import classify_attempt, extract_stdout_json
 from trippostcollect.core.paths import (
     CRAWL_EXECUTION_STATE_ROOT,
@@ -131,14 +131,14 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
         if "candidate_hard_limit" not in params:
             raise ValueError(f"Missing candidate_hard_limit for formal job {row['job_key']}")
         candidate_hard_limit = int(params["candidate_hard_limit"])
-        target_valid_posts = int(params.get("target_valid_posts") or 0)
+        target_new_posts = int(params.get("target_new_posts") or 0)
         max_stagnant_batches = int(params.get("max_stagnant_batches") or 0)
         required_fields_profile = str(params.get("required_fields_profile") or "")
         followers_policy = str(params.get("followers_policy") or "")
-        if candidate_hard_limit <= 0 or target_valid_posts <= 0 or max_stagnant_batches <= 0:
+        if candidate_hard_limit <= 0 or target_new_posts <= 0 or max_stagnant_batches <= 0:
             raise ValueError(f"Invalid formal limits for job {row['job_key']}")
-        if target_valid_posts > candidate_hard_limit:
-            raise ValueError(f"target_valid_posts exceeds candidate_hard_limit for job {row['job_key']}")
+        if target_new_posts > candidate_hard_limit:
+            raise ValueError(f"target_new_posts exceeds candidate_hard_limit for job {row['job_key']}")
         if required_fields_profile != "image_post_with_followers_v1":
             raise ValueError(f"Unsupported required_fields_profile for job {row['job_key']}")
         if followers_policy != "required":
@@ -152,7 +152,7 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
         add_flag(command, "--keyword", params.get("keyword", "济南旅游"))
         add_flag(command, "--timeout-per-platform", params.get("timeout_per_platform", 180))
         add_flag(command, "--candidate-hard-limit", candidate_hard_limit)
-        add_flag(command, "--target-valid-posts", target_valid_posts)
+        add_flag(command, "--target-new-posts", target_new_posts)
         add_flag(command, "--max-stagnant-batches", max_stagnant_batches)
         add_flag(command, "--required-fields-profile", required_fields_profile)
         add_flag(command, "--login-type", params.get("login_type", "cookie"))
@@ -582,11 +582,15 @@ def main() -> int:
                 elif row["job_kind"] == "mediacrawler_search":
                     child_summary = load_json(Path(str(summary_path)))
                     import_result = dict(child_summary.get("import_result") or {})
-                    persistence_ok = bool(child_summary.get("import_target_met"))
+                    persistence_ok = bool(child_summary.get("import_new_target_met"))
                     if persistence_ok:
                         state.complete("persistence_verified", evidence=import_result)
                     else:
-                        state.fail("persistence_verified", error="formal_import_target_not_reached", evidence=import_result)
+                        state.fail(
+                            "persistence_verified",
+                            error="formal_import_new_target_not_reached",
+                            evidence=import_result,
+                        )
                 else:
                     import_result = {"skipped": True, "reason": "skipped_capture"}
                     state.complete("persistence_verified", evidence=import_result, skipped=True)

@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
         "--per-target",
         type=int,
         default=0,
-        help="Override the formal valid-post target. 0 reads target_valid_posts from crawl_targets.json.",
+        help="Override the formal new-post target. 0 reads target_new_posts from crawl_targets.json.",
     )
     parser.add_argument(
         "--fetch-multiplier",
@@ -133,9 +133,9 @@ def load_subprocess_json(path: Path) -> dict[str, Any]:
 def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_dir: Path, db_path: Path) -> dict[str, Any]:
     params = job.get("params") or {}
     platform = str(params.get("platform") or job["site_key"])
-    target_count = int(args.per_target or params.get("target_valid_posts") or 0)
+    target_count = int(args.per_target or params.get("target_new_posts") or 0)
     if target_count <= 0:
-        raise ValueError(f"Missing formal target_valid_posts for {job['job_key']}")
+        raise ValueError(f"Missing formal target_new_posts for {job['job_key']}")
     candidate_hard_limit = int(params.get("candidate_hard_limit") or target_count)
     if args.fetch_multiplier > 0:
         candidate_hard_limit = max(target_count, target_count * args.fetch_multiplier)
@@ -157,7 +157,7 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         args.keyword,
         "--candidate-hard-limit",
         str(candidate_hard_limit),
-        "--target-valid-posts",
+        "--target-new-posts",
         str(target_count),
         "--timeout-per-platform",
         str(timeout),
@@ -204,20 +204,20 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
     db_written = max(0, after_count - before_count)
     average = round(elapsed / imported, 3) if imported else None
     db_average = round(elapsed / db_written, 3) if db_written else None
-    valid_unique = int(formal_validation.get("valid_unique_count") or 0)
-    target_met = bool(formal_validation.get("target_met")) and valid_unique >= target_count and not timed_out
+    valid_new = int(formal_validation.get("valid_new_count") or 0)
+    new_target_met = bool(formal_validation.get("new_target_met")) and valid_new >= target_count and not timed_out
     return {
         "job_key": job["job_key"],
         "site_key": job["site_key"],
         "platform": platform,
         "job_kind": job["job_kind"],
-        "status": "completed" if target_met else ("timed_out" if timed_out else "target_not_met"),
-        "ok": bool(record.get("ok")) and target_met,
-        "requested_records": target_count,
+        "status": "completed" if new_target_met else ("timed_out" if timed_out else "new_target_not_met"),
+        "ok": bool(record.get("ok")) and new_target_met,
+        "requested_new_records": target_count,
         "record_mode": "keyword_search_post",
         "candidate_hard_limit": candidate_hard_limit,
         "processed_import_rows": imported,
-        "valid_unique_records": valid_unique,
+        "valid_new_records": valid_new,
         "formal_stop_reason": str(formal_validation.get("stop_reason") or ""),
         "imported_records": db_written,
         "db_keyword_rows_before": before_count,
