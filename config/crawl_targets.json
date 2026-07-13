@@ -94,7 +94,7 @@
         "platform": "douyin",
         "keyword": "济南旅游",
         "candidate_hard_limit": 1000,
-        "max_stagnant_batches": 3,
+        "max_stagnant_batches": 67,
         "target_valid_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",

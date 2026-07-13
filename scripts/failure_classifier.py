@@ -89,6 +89,17 @@ def classify_attempt(
             "reason": "completed",
         }
 
+    formal_validation = stdout_json.get("formal_validation") or {}
+    if stdout_json.get("import_target_met") is False and isinstance(formal_validation, dict):
+        stop_reason = str(formal_validation.get("stop_reason") or "target_not_met")
+        return {
+            "status": "retry_wait",
+            "failure_type": "import_target_not_met",
+            "retryable": True,
+            "wait_seconds": 600,
+            "reason": f"formal_import_target_not_reached:{stop_reason}",
+        }
+
     runtime_permission = RUNTIME_PERMISSION_PATTERNS.search(text)
     if runtime_permission and (
         "uv" in text.lower()
