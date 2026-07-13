@@ -96,6 +96,9 @@ python scripts/import_ctf_captures.py \
 - 正式入库的 `processed_rows` 等于本轮有效集合大小；诊断 `--no-import` 必须明确标为非正式。
 - 正式结构化任务的冻结状态为 `completed`，且 `formal_validation.target_met` 和 `import_target_met` 都为 true。
 - `processed_rows`、`inserted_rows`、`updated_rows` 分别报告；任何一个都不能替代 `valid_unique_count`。
+- `updated_rows` 是 upsert 命中已有 `web_posts` 的数量：优先按
+  `(platform_key, platform_post_id)`，平台 ID 缺失时按 `(platform_key, canonical_url)`；
+  本轮覆盖主表字段并删除后重建该帖的 `web_post_images`，不增加主表总行数。
 - 新增/更新记录出现在 `web_posts`，图片 URL 出现在 `web_post_images`。
 - 页面级证据出现在 `ctf_captures`，成功且内容就绪的详情页同步生成 `web_posts`。
 - 关键字段符合平台能力表：文本/标题、平台原始 ID/URL、发布时间、作者字段、图片 URL、互动指标按平台应有尽有。

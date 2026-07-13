@@ -26,7 +26,10 @@ config/crawl_targets.json
 后的阶段保持冻结。
 
 MediaCrawler 的自适应分页会向同一状态文件追加批次事件，包括实际候选、有效唯一数、
-本批新增和连续停滞次数。状态事件是过程证据，最终成功仍以正式校验和数据库验证为准。
+本批新增、连续停滞次数、平台页码、游标/search ID、原始返回条数和 `has_more`。循环按
+实际候选累计，不按名义页大小预先换算最大页数。空页或 `has_more=false` 才能生成
+`source_exhausted`；请求异常生成 `runtime_failed`；缺少停止事件时执行器不得猜测数据源
+已经耗尽。状态事件是过程证据，最终成功仍以正式校验和数据库验证为准。
 
 ## 结构化平台
 
@@ -49,8 +52,8 @@ MediaCrawler 的自适应分页会向同一状态文件追加批次事件，包�
 
 ## 辅助入口
 
-- `mediacrawler_login_warmup.py`：刷新 MediaCrawler 平台登录态。
-- `ctf_login_warmup.py`：刷新页面证据平台登录态。
+- `login_warmup.py`：统一验证并按需刷新所有已实现登录判据的平台登录态。
+- `mediacrawler_login_warmup.py`、`ctf_login_warmup.py`：统一入口调用的底层平台实现。
 - `mediacrawler_batch_validate.py`：开发期严格字段验证。
 - `info_collection_benchmark.py`：性能和容量评估。
 

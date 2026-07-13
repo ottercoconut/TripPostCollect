@@ -49,10 +49,35 @@ python scripts/mediacrawler_crawl.py \
 
 ## 登录态
 
-- 小红书：`mediacrawler_login_warmup.py --platforms xhs`，成功后必须生成并验证 storage snapshot。
-- 知乎：`mediacrawler_login_warmup.py --platforms zhihu`，成功后必须生成包含 `d_c0/z_c0` 的 cookie snapshot。
-- 其他 MediaCrawler 平台：复用各自持久化 profile；登录失败按分类结果处理。
-- 豆瓣小组页面链路：使用 `ctf_login_warmup.py`，必须复用站点 profile。
+正式抓取前使用唯一公开登录入口检查全部已实现登录判据的平台：
+
+```bash
+source .venv/bin/activate
+python scripts/login_warmup.py --targets all
+```
+
+也可以只检查指定平台：
+
+```bash
+source .venv/bin/activate
+python scripts/login_warmup.py \
+  --targets xhs zhihu douban_group \
+  --timeout-seconds 600
+```
+
+当前目标包括抖音、知乎、微博、小红书、B站和豆瓣小组。脚本按顺序加载正式抓取使用的
+持久 profile，先验证平台特定 cookie、localStorage、用户接口或页面标记；已有状态有效
+时直接通过，失效时在有头窗口等待人工登录。登录成功后关闭并重开同一 profile，只有
+重开验证仍成功才写 cookie/storage snapshot 并标记 `ok=true`。单个平台浏览器异常会记
+录失败并继续后续平台。
+
+统一报告位于 `outputs/login_warmup/<run_id>/summary.json` 和 `summary.md`，每个平台记录
+`initial_ok`、`login_refreshed`、`persisted_ok`、profile 路径和错误。该脚本只负责登录，
+不抓内容、不写 SQLite。`mediacrawler_login_warmup.py` 和 `ctf_login_warmup.py` 是其底层
+平台实现，正常操作不再分别调用。
+
+携程和去哪儿当前正式配置只抓公开固定页面，尚无经过验证的账号登录标记，不纳入统一
+登录清单；不得以任意匿名 cookie 存在作为登录成功。
 
 ## 浏览器运行环境
 
@@ -79,5 +104,8 @@ Chrome HOME、Crashpad 和 `uv` 缓存由 `scripts/browser_runtime.py` 指向
 - `import_result.processed_rows`、`inserted_rows`、`updated_rows` 分别存在；
 - SQLite 中作者粉丝量、发布时间和图片关系符合平台 profile；
 - 视频只出现在跳过计数中。
+- `formal_validation.pagination_evidence` 有连续页级事件；未达目标时，`source_exhausted`
+  必须有空页或 `has_more=false` 的 `adaptive_search_stopped` 事件。只有批次事件而没有停止
+  事件的任务按 `runtime_failed` 排查浏览器、登录态、超时或请求异常。
 
 固定 URL 页面任务只验证该页面证据和入库，不得汇报为平台批量目标完成。

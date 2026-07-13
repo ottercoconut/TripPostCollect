@@ -21,6 +21,8 @@
   的记录数。
 - `processed_rows`：执行过入库 upsert 的行数，不表示新增数或有效数。
 - `inserted_rows` / `updated_rows`：数据库新增和更新数量，必须分别报告。
+  `updated_rows` 表示相同平台 ID（缺失时用规范 URL）已存在，本轮用最新字段覆盖该行并
+  重建其图片关系；它不是额外新增记录，也不表示平台内容一定发生过编辑。
 
 正式结构化任务只有 `valid_unique_count >= target_valid_posts` 才能进入入库阶段并
 标记 `target_met`。不能用退出码、`processed_rows`、少量样本或历史数据库总量替代。
@@ -71,10 +73,17 @@ Agent 临场判断。
 
 - `target_met`：有效唯一图文达到目标。
 - `candidate_hard_limit_reached`：实际候选达到硬上限但目标未达成。
-- `source_exhausted`：平台明确没有下一页或游标。
+- `source_exhausted`：平台明确返回空页、空游标或 `has_more=false`，且状态文件存在对应
+  `adaptive_search_stopped` 证据。
 - `stagnated`：连续配置页数没有新增有效记录；一批固定表示平台的一页，不提供伪页大小参数。
 - `login_required` / `captcha_detected`：登录或验证阻断。
 - `runtime_failed`：浏览器或本地运行环境失败。
 
 除 `target_met` 外，其余状态都不能汇报为正式结构化轮次完成。固定 URL 页面任务的
 成功只代表该页面证据完成，不代表平台批量目标完成。
+
+每个分页批次必须记录平台页码、请求游标或 search ID（平台提供时）、下一游标、原始
+返回条数和 `has_more`（平台提供时）。仅有一条或多条 `adaptive_batch_completed`、但没有
+`adaptive_search_stopped` 的任务，不得推断为 `source_exhausted`；目标未达成时统一按
+`runtime_failed` 处理。分页循环以实际候选累计到 `candidate_hard_limit` 为边界，不得用
+“页数 × 名义页大小”提前截断。

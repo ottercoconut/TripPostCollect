@@ -79,9 +79,9 @@ python scripts/crawl_runner.py \
 ## 任务路由
 
 - 正式抓取、数量、停止和成功：读 `docs/formal-crawl-contract.md`、`config/crawl_targets.json`、`scripts/crawl_runner.py`。
-- 登录、Chrome、阻断恢复：读 `docs/operations-runbook.md` 和对应 warmup 脚本。
+- 登录、Chrome、阻断恢复：读 `docs/operations-runbook.md`；统一登录入口是 `scripts/login_warmup.py`。
 - MediaCrawler 平台实现：读 `docs/platforms/<platform>.md`、`scripts/mediacrawler_crawl.py`，必要时只读对应第三方精确文件。
-- 页面证据抓取和导入：读 `docs/platforms/page-evidence.md`、`docs/data-persistence.md`、`scripts/ctf_resource_crawl.py`、`scripts/import_ctf_captures.py`；登录态预热读 `scripts/ctf_login_warmup.py`。
+- 页面证据抓取和导入：读 `docs/platforms/page-evidence.md`、`docs/data-persistence.md`、`scripts/ctf_resource_crawl.py`、`scripts/import_ctf_captures.py`；登录态统一由 `scripts/login_warmup.py` 处理。
 - 数据库结构、入库、去重：读 `docs/data-persistence.md`、`db/*.sql`、`trippostcollect.db.bootstrap` 和相关导入脚本。
 - 字段能力或平台分工：读 `docs/platform-field-coverage.md` 和对应 `docs/platforms/*.md`。
 
@@ -91,5 +91,7 @@ python scripts/crawl_runner.py \
 - Python 行为改动运行 `python -m pytest`；静态检查按需运行 `python -m ruff check <touched files>`。
 - JSON 配置改动后先 `source .venv/bin/activate`，再运行 `python -m json.tool <file> >/dev/null`。
 - 调度改动至少做 `--dry-run` 试运行或小范围运行验证。
+- 正式结构化任务未达目标时必须检查页级状态；没有 `adaptive_search_stopped` 证据不得写成
+  `source_exhausted`，应按 `runtime_failed` 继续排查。
 - 入库或数据库结构改动使用临时 SQLite 验证，并用 SQL 检查行数和关键字段。
 - 最终说明变更文件、验证命令和关键产物路径；不要粘贴大段日志或原始 JSON。

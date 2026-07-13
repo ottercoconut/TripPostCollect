@@ -20,6 +20,16 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 
 ## 唯一正式入口
 
+正式抓取前统一验证并按需刷新登录态：
+
+```bash
+source .venv/bin/activate
+python scripts/login_warmup.py --targets all
+```
+
+该脚本只处理持久登录态，不抓取内容、不导入数据库。已有登录态有效时直接通过；失效时
+等待人工登录，并在关闭、重开同一 profile 后再次验证。
+
 查看任务计划：
 
 ```bash
