@@ -55,7 +55,7 @@ data/trippostcollect.sqlite
 - `published_at` 必须来自平台原始发帖时间；缺明确证据时保持 NULL，不能用 `captured_at` 或导入时间补。
 - 页面级错误页、搜索页、中间页和验证码页只保留证据，不生成用户内容记录。
 - `web_posts` 面向用户查询；`ctf_captures` 面向证据和调试。不要让用户内容只停留在 `ctf_captures`。
-- 正式结构化任务必须配置 `candidate_hard_limit`、`target_valid_posts` 和字段 profile；只有 `valid_unique_count >= target_valid_posts` 且持久化验证完成才算达到本轮目标。
+- 正式结构化任务必须配置 `candidate_hard_limit`、`target_new_posts` 和字段 profile；只有 `valid_new_count >= target_new_posts` 且实际新增行数达标才算达到本轮目标。
 - 固定 URL 页面证据任务只代表一个页面，不能汇报为平台级批量抓取完成。
 
 ### 标准执行流程
@@ -94,8 +94,8 @@ python scripts/import_ctf_captures.py \
 
 - 有 `summary.json` 或 `run_summary.json`，且平台任务状态不是 failed。
 - 正式入库的 `processed_rows` 等于本轮有效集合大小；诊断 `--no-import` 必须明确标为非正式。
-- 正式结构化任务的冻结状态为 `completed`，且 `formal_validation.target_met` 和 `import_target_met` 都为 true。
-- `processed_rows`、`inserted_rows`、`updated_rows` 分别报告；任何一个都不能替代 `valid_unique_count`。
+- 正式结构化任务的冻结状态为 `completed`，且 `formal_validation.new_target_met` 和 `import_new_target_met` 都为 true。
+- `processed_rows`、`inserted_rows`、`updated_rows` 分别报告；只有 `inserted_rows` 可以兑现 `valid_new_count`，更新行不能计入新增目标。
 - `updated_rows` 是 upsert 命中已有 `web_posts` 的数量：优先按
   `(platform_key, platform_post_id)`，平台 ID 缺失时按 `(platform_key, canonical_url)`；
   本轮覆盖主表字段并删除后重建该帖的 `web_post_images`，不增加主表总行数。
@@ -198,14 +198,15 @@ PY
 {
   "formal_validation": {
     "candidate_count": 80,
-    "valid_unique_count": 50,
-    "target_met": true,
-    "stop_reason": "target_met"
+    "valid_new_count": 50,
+    "valid_existing_count": 15,
+    "new_target_met": true,
+    "stop_reason": "target_new_met"
   },
   "import_result": {
     "db": "data/trippostcollect.sqlite",
-    "processed_rows": 50,
-    "inserted_rows": 35,
+    "processed_rows": 65,
+    "inserted_rows": 50,
     "updated_rows": 15
   }
 }
@@ -343,7 +344,7 @@ python scripts/mediacrawler_crawl.py \
   --platforms weibo \
   --keyword 济南旅游 \
   --candidate-hard-limit 20 \
-  --target-valid-posts 1 \
+  --target-new-posts 1 \
   --timeout-per-platform 180 \
   --db temp/mediacrawler_import_verify.sqlite
 ```

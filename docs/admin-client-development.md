@@ -240,7 +240,7 @@ python scripts/mediacrawler_crawl.py \
   --platforms xhs \
   --keyword 济南旅游 \
   --candidate-hard-limit 20 \
-  --target-valid-posts 0 \
+  --target-new-posts 0 \
   --login-type cookie \
   --headed \
   --no-import

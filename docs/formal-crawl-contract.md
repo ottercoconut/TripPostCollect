@@ -16,16 +16,19 @@
 
 - `candidate_hard_limit`：本轮允许处理的实际原始候选总数。按实际返回记录计数，
   不是底层请求参数的同义词。
-- `target_valid_posts`：本轮必须取得的唯一有效图文数。
-- `valid_unique_count`：完成视频过滤、平台 ID 去重、必需字段校验和作者字段补全后
-  的记录数。
+- `target_new_posts`：本轮必须取得并实际新增到 SQLite 的唯一有效图文数。
+- `valid_new_count`：完成视频过滤、平台 ID 去重、必需字段校验和作者字段补全后，且
+  SQLite 中不存在相同平台 ID（缺失时按规范 URL）的记录数。
+- `valid_existing_count`：字段校验有效、但 SQLite 已有对应记录的数量；它们可以刷新，
+  但不计入 `target_new_posts`。
 - `processed_rows`：执行过入库 upsert 的行数，不表示新增数或有效数。
 - `inserted_rows` / `updated_rows`：数据库新增和更新数量，必须分别报告。
   `updated_rows` 表示相同平台 ID（缺失时用规范 URL）已存在，本轮用最新字段覆盖该行并
   重建其图片关系；它不是额外新增记录，也不表示平台内容一定发生过编辑。
 
-正式结构化任务只有 `valid_unique_count >= target_valid_posts` 才能进入入库阶段并
-标记 `target_met`。不能用退出码、`processed_rows`、少量样本或历史数据库总量替代。
+正式结构化任务只有 `valid_new_count >= target_new_posts` 才能进入入库阶段，并且实际
+`inserted_rows >= target_new_posts` 才能标记 `import_new_target_met=true`。不能用退出码、
+`processed_rows`、`updated_rows`、少量样本或历史数据库总量替代。
 
 ## 有效记录
 
@@ -71,15 +74,16 @@ Agent 临场判断。
 
 ## 停止状态
 
-- `target_met`：有效唯一图文达到目标。
+- `target_new_met`：有效新增图文达到目标。
 - `candidate_hard_limit_reached`：实际候选达到硬上限但目标未达成。
 - `source_exhausted`：平台明确返回空页、空游标或 `has_more=false`，且状态文件存在对应
   `adaptive_search_stopped` 证据。
-- `stagnated`：连续配置页数没有新增有效记录；一批固定表示平台的一页，不提供伪页大小参数。
+- `stagnated`：连续配置页数没有出现新的平台候选 ID，表示重复页或分页没有向前推进；
+  数据库旧记录虽不计新增目标，但只要首次出现在本轮就仍算分页进展。
 - `login_required` / `captcha_detected`：登录或验证阻断。
 - `runtime_failed`：浏览器或本地运行环境失败。
 
-除 `target_met` 外，其余状态都不能汇报为正式结构化轮次完成。固定 URL 页面任务的
+除 `target_new_met` 外，其余状态都不能汇报为正式结构化轮次完成。固定 URL 页面任务的
 成功只代表该页面证据完成，不代表平台批量目标完成。
 
 每个分页批次必须记录平台页码、请求游标或 search ID（平台提供时）、下一游标、原始

@@ -20,7 +20,7 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - `published_at` 必须来自平台原始发帖时间，入库保存为 Asia/Shanghai ISO；不要用抓取时间冒充发帖时间。
 - 正式任务只从 `scripts/crawl_runner.py` 进入；数量和字段策略只读 `config/crawl_targets.json`，语义只读 `docs/formal-crawl-contract.md`。
 - 每个任务必须生成 `data/runtime/crawl_execution_states/<run_id>/<job>.json`；进入下一阶段前重新读取状态并确认上一阶段完成。不得手工解冻或补签状态。
-- 正式结构化抓取以 `candidate_hard_limit`、`target_valid_posts` 和 `required_fields_profile` 为准；未达到 `valid_unique_count` 目标不得汇报完成。
+- 正式结构化抓取以 `candidate_hard_limit`、`target_new_posts` 和 `required_fields_profile` 为准；数据库已有记录只算更新，未达到 `valid_new_count` 新增目标不得汇报完成。
 - B站、微博、小红书、抖音、知乎粉丝量为必需字段；数值、来源和 `followers_observed=true` 必须同时存在，平台不提供时只能由配置声明 `ignored`。
 - 携程、去哪儿、豆瓣小组当前是固定 URL 页面证据任务；单页成功不代表平台级批量采集完成。
 - 路径定义集中在 `trippostcollect.core.paths`；新增代码不要硬编码 `outputs/`、`data/runtime/`、浏览器配置目录等目录。

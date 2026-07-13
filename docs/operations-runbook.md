@@ -40,7 +40,7 @@ python scripts/mediacrawler_crawl.py \
   --platforms weibo \
   --keyword 济南旅游 \
   --candidate-hard-limit 20 \
-  --target-valid-posts 0 \
+  --target-new-posts 0 \
   --no-import
 ```
 
@@ -99,8 +99,9 @@ Chrome HOME、Crashpad 和 `uv` 缓存由 `scripts/browser_runtime.py` 指向
 正式结构化任务至少检查：
 
 - 状态文件最终为 `completed`，所有阶段均完成或有明确允许的 `skipped`；
-- `formal_validation.target_met=true`；
-- `valid_unique_count` 达到配置目标；
+- `formal_validation.new_target_met=true`；
+- `valid_new_count` 和 `inserted_rows` 都达到 `target_new_posts`；
+- `valid_existing_count` / `updated_rows` 单独报告且不计入新增目标；
 - `import_result.processed_rows`、`inserted_rows`、`updated_rows` 分别存在；
 - SQLite 中作者粉丝量、发布时间和图片关系符合平台 profile；
 - 视频只出现在跳过计数中。
