@@ -47,6 +47,29 @@ python scripts/mediacrawler_crawl.py \
 `mediacrawler_batch_validate.py` 只用于开发期字段检查，`info_collection_benchmark.py`
 只用于性能和容量评估。两者都不能替代 `crawl_runner.py` 的正式状态文件和报告。
 
+接近新增目标但未入库时，使用冻结断点续跑；继续同一关键词后续页：
+
+```bash
+source .venv/bin/activate
+python scripts/crawl_runner.py \
+  --job-key mc_xhs_jinan_search \
+  --start-page 8 \
+  --resume-summary outputs/mediacrawler_runs/<run_id>/summary.json
+```
+
+单关键词明确耗尽时，可换同城市补充关键词：
+
+```bash
+source .venv/bin/activate
+python scripts/crawl_runner.py \
+  --job-key mc_douyin_jinan_search \
+  --resume-summary outputs/mediacrawler_runs/<run_id>/summary.json \
+  --recovery-keyword 济南旅行
+```
+
+续跑会把上一轮摘要及 JSONL 加入冻结输入，并将其中已收集 ID 注入底层去重集合。只有
+合并后的有效新增数和实际新增行同时达到完整目标才入库。
+
 ## 登录态
 
 正式抓取前使用唯一公开登录入口检查全部已实现登录判据的平台：
