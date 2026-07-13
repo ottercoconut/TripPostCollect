@@ -5,15 +5,16 @@ from __future__ import annotations
 import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, Response
 
 from apps.admin_api.app.deps import get_db
 from apps.admin_api.app.response import ok
 from trippostcollect.artifacts.image_proxy import (
+    RemoteImageFetchError,
     UnsafeImageUrl,
     content_type_for_path,
+    fetch_remote_image_preview,
     local_image_file,
-    validate_remote_image_url,
 )
 from trippostcollect.artifacts.paths import UnsafeArtifactPath
 from trippostcollect.records.repository import RecordRepository
@@ -48,7 +49,13 @@ def preview_record_image(image_id: int, conn: sqlite3.Connection = Depends(get_d
             media_type = image.get("mime_type") or content_type_for_path(path)
             return FileResponse(path, media_type=media_type)
     try:
-        remote_url = validate_remote_image_url(image.get("image_url"))
+        preview = fetch_remote_image_preview(image.get("image_url"), platform_key=image.get("platform_key"))
     except UnsafeImageUrl as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    return RedirectResponse(remote_url, status_code=307)
+    except RemoteImageFetchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(
+        content=preview.content,
+        media_type=preview.media_type,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )

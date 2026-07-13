@@ -12,6 +12,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
+from trippostcollect.artifacts.image_proxy import RemoteImagePreview
 from trippostcollect.db.bootstrap import bootstrap_database
 
 
@@ -186,6 +187,7 @@ class ReadonlyAdminApiTest(unittest.TestCase):
         records = self.client.get("/api/records", params={"platform_key": "bilibili", "city_name": "济南市"})
         self.assertEqual(records.status_code, 200, records.text)
         self.assertEqual(records.json()["meta"]["total"], 1)
+        self.assertEqual(records.json()["data"][0]["author_followers_count"], 42)
 
         detail = self.client.get(f"/api/records/{self.post_id}")
         self.assertEqual(detail.status_code, 200, detail.text)
@@ -223,9 +225,17 @@ class ReadonlyAdminApiTest(unittest.TestCase):
     def test_images_and_capture_artifacts_enforce_readonly_path_boundaries(self) -> None:
         self.assertEqual(self.client.get(f"/api/records/{self.post_id}/images").status_code, 200)
         self.assertEqual(self.client.get(f"/api/images/{self.local_image_id}/preview").status_code, 200)
-        remote = self.client.get(f"/api/images/{self.remote_image_id}/preview", follow_redirects=False)
-        self.assertEqual(remote.status_code, 307)
-        self.assertEqual(remote.headers["location"], "https://example.test/remote.jpg")
+        with mock.patch("apps.admin_api.app.routers.images.fetch_remote_image_preview") as fetch_preview:
+            fetch_preview.return_value = RemoteImagePreview(
+                content=b"remote-image",
+                media_type="image/jpeg",
+                final_url="https://example.test/remote.jpg",
+            )
+            remote = self.client.get(f"/api/images/{self.remote_image_id}/preview")
+            self.assertEqual(remote.status_code, 200, remote.text)
+            self.assertEqual(remote.headers["content-type"], "image/jpeg")
+            self.assertEqual(remote.content, b"remote-image")
+            fetch_preview.assert_called_once_with("https://example.test/remote.jpg", platform_key="bilibili")
         self.assertEqual(self.client.get(f"/api/images/{self.unsafe_remote_image_id}/preview").status_code, 403)
         self.assertEqual(self.client.get(f"/api/images/{self.outside_image_id}/preview").status_code, 403)
         if self.symlink_image_id is not None:

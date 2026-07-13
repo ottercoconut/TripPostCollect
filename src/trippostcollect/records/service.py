@@ -77,6 +77,7 @@ class RecordService:
             "canonical_url": record.get("canonical_url"),
             "title": record.get("title"),
             "author_display_name": record.get("author_display_name"),
+            "author_followers_count": record.get("author_followers_count"),
             "published_at": record.get("published_at"),
             "captured_at": record.get("captured_at"),
             "city_name": record.get("city_name"),
