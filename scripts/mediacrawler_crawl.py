@@ -191,6 +191,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-hard-limit", type=int, required=True, help="Maximum actual content candidates processed for validation.")
     parser.add_argument("--required-fields-profile", default="image_post_with_followers_v1")
     parser.add_argument("--max-stagnant-batches", type=int, default=3)
+    parser.add_argument("--start-page", type=int, default=1, help="Recovery-only first platform page.")
+    parser.add_argument("--resume-summary", help="Recovery-only prior summary whose JSONL records join this run.")
     parser.add_argument("--no-import", action="store_true", help="Do not import MediaCrawler JSONL records into SQLite.")
     return parser.parse_args()
 
@@ -1766,6 +1768,10 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
         return run_bilibili_article_search(args, batch_dir)
 
     platform = PLATFORMS[platform_key]
+    source_candidate_hard_limit = int(
+        getattr(args, "source_candidate_hard_limit", args.candidate_hard_limit)
+    )
+    source_target_new_posts = int(getattr(args, "source_target_new_posts", args.target_new_posts))
     save_path = batch_dir / platform_key / "data"
     log_dir = batch_dir / "logs" / platform_key
     image_download_enabled = bool(args.download_images and platform_key == "xhs")
@@ -1795,18 +1801,22 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
         "--save_data_path",
         str(save_path),
         "--crawler_max_notes_count",
-        str(args.candidate_hard_limit),
+        str(source_candidate_hard_limit),
+        "--start",
+        str(args.start_page),
         "--max_concurrency_num",
         "1",
         "--enable_ip_proxy",
         "false",
     ]
     extra_env: dict[str, str] = {
-        "TRIPPOSTCOLLECT_TARGET_NEW_POSTS": str(max(1, args.target_new_posts or args.candidate_hard_limit)),
-        "TRIPPOSTCOLLECT_CANDIDATE_HARD_LIMIT": str(args.candidate_hard_limit),
+        "TRIPPOSTCOLLECT_TARGET_NEW_POSTS": str(max(1, source_target_new_posts)),
+        "TRIPPOSTCOLLECT_CANDIDATE_HARD_LIMIT": str(source_candidate_hard_limit),
         "TRIPPOSTCOLLECT_MAX_STAGNANT_BATCHES": str(max(1, args.max_stagnant_batches)),
         "TRIPPOSTCOLLECT_DB_PATH": str(Path(args.db).expanduser().resolve()),
     }
+    if args.resume_identities_path:
+        extra_env["TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH"] = args.resume_identities_path
     login_state: dict[str, Any] | None = None
     if platform_key == "xhs":
         xhs_storage_path = storage_snapshot_path(platform_key)
@@ -1862,7 +1872,7 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
             {
                 "TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS": "1",
                 "TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES": "1",
-                "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": str(args.candidate_hard_limit),
+                "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": str(source_candidate_hard_limit),
                 "TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS": "0.25",
             }
         )
@@ -2018,15 +2028,92 @@ def main() -> int:
         raise SystemExit(f"unsupported required fields profile: {args.required_fields_profile}")
     if not args.no_import and target_new_posts <= 0:
         raise SystemExit("--target-new-posts must be positive unless --no-import is used")
+    if args.start_page <= 0:
+        raise SystemExit("--start-page must be positive")
+    if args.start_page > 1 and not args.resume_summary:
+        raise SystemExit("--start-page greater than 1 requires --resume-summary")
     if args.get_media:
         raise SystemExit("--get-media 已禁用：当前项目只采集图文内容和图片 URL，不下载媒体或视频。")
     ensure_prerequisites()
     platforms = selected_platforms(args.platforms)
+    if args.resume_summary and "bilibili" in platforms:
+        raise SystemExit("--resume-summary is only supported for MediaCrawler-backed platforms")
     if args.download_images and any(platform != "xhs" for platform in platforms):
         raise SystemExit("--download-images 目前只允许 xhs：其他平台可能混入视频媒体。")
-    batch_dir = ensure_dir(Path(args.output_dir).expanduser() / utc_stamp()).resolve()
+    resume_records: list[dict[str, Any]] = []
+    resume_info: dict[str, Any] | None = None
+    resume_identity_values: list[str] = []
+    args.source_target_new_posts = max(1, target_new_posts or candidate_hard_limit)
+    args.source_candidate_hard_limit = candidate_hard_limit
+    if args.resume_summary:
+        resume_path = Path(args.resume_summary).expanduser().resolve()
+        try:
+            resume_summary = json.loads(resume_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"cannot load --resume-summary: {exc}") from exc
+        previous_keyword = str(resume_summary.get("keyword") or "")
+        if (
+            previous_keyword != args.keyword
+            and city_name_from_keyword(previous_keyword) != city_name_from_keyword(args.keyword)
+        ):
+            raise SystemExit("--resume-summary keyword must resolve to the same city as --keyword")
+        resume_records = [
+            record
+            for record in (resume_summary.get("records") or [])
+            if isinstance(record, dict) and record.get("platform") in platforms
+        ]
+        if not resume_records:
+            raise SystemExit("--resume-summary has no records for the selected platform")
+        resume_validation, _ = collect_formal_records(
+            {"records": resume_records},
+            candidate_hard_limit=candidate_hard_limit,
+            target_new_posts=0,
+            db_path=args.db,
+        )
+        prior_new_count = int(resume_validation.get("valid_new_count") or 0)
+        resume_identity_values = [
+            identity.split(":id:", 1)[1]
+            for identity in (
+                list(resume_validation.get("new_identities") or [])
+                + list(resume_validation.get("existing_identities") or [])
+            )
+            if ":id:" in identity
+        ]
+        previous_candidate_count = int(
+            (resume_summary.get("formal_validation") or {}).get("candidate_count") or 0
+        )
+        consumed_candidates = max(
+            int(resume_validation.get("candidate_count") or 0),
+            previous_candidate_count,
+        )
+        remaining_target = max(0, target_new_posts - prior_new_count)
+        if remaining_target == 0:
+            raise SystemExit("--resume-summary already meets the configured new-post target")
+        remaining_candidates = candidate_hard_limit - consumed_candidates
+        if remaining_candidates <= 0:
+            raise SystemExit("--resume-summary already consumed the candidate hard limit")
+        args.source_target_new_posts = remaining_target
+        args.source_candidate_hard_limit = remaining_candidates
+        resume_info = {
+            "summary_path": str(resume_path),
+            "valid_new_count": prior_new_count,
+            "candidate_count": consumed_candidates,
+            "remaining_target_new_posts": remaining_target,
+            "remaining_candidate_hard_limit": remaining_candidates,
+            "start_page": args.start_page,
+        }
 
-    records = []
+    batch_dir = ensure_dir(Path(args.output_dir).expanduser() / utc_stamp()).resolve()
+    args.resume_identities_path = None
+    if resume_identity_values:
+        resume_identities_path = batch_dir / "resume_identities.json"
+        resume_identities_path.write_text(
+            json.dumps(sorted(set(resume_identity_values)), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        args.resume_identities_path = str(resume_identities_path)
+
+    records = list(resume_records)
     for platform_key in platforms:
         print(f"[mediacrawler] {platform_key}", flush=True)
         records.append(run_platform(platform_key, args, batch_dir))
@@ -2040,6 +2127,8 @@ def main() -> int:
         "failed_count": sum(1 for record in records if not record["ok"]),
         "records": records,
     }
+    if resume_info:
+        summary["resume"] = resume_info
     pagination_evidence = load_pagination_evidence(
         os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()
     )

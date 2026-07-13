@@ -48,6 +48,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--site", help="Optional site_key filter.")
     parser.add_argument("--kind", help="Optional job_kind filter.")
     parser.add_argument("--job-key", help="Run one specific job key.")
+    parser.add_argument("--start-page", type=int, help="Recovery-only platform page to start from.")
+    parser.add_argument("--resume-summary", help="Recovery-only prior MediaCrawler summary to include and freeze.")
+    parser.add_argument("--recovery-keyword", help="Recovery-only same-city keyword used for the continuation.")
     parser.add_argument("--sync-only", action="store_true", help="Only sync config into crawl_jobs.")
     parser.add_argument("--no-sync-config", action="store_true", help="Do not sync config before selecting jobs.")
     parser.add_argument("--dry-run", action="store_true", help="Plan jobs and commands without executing them.")
@@ -149,7 +152,7 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
         if download_images and platform != "xhs":
             raise ValueError(f"download_images is only allowed for xhs job {row['job_key']}")
         command = [sys.executable, str(ROOT / "scripts" / "mediacrawler_crawl.py"), "--platforms", platform]
-        add_flag(command, "--keyword", params.get("keyword", "济南旅游"))
+        add_flag(command, "--keyword", args.recovery_keyword or params.get("keyword", "济南旅游"))
         add_flag(command, "--timeout-per-platform", params.get("timeout_per_platform", 180))
         add_flag(command, "--candidate-hard-limit", candidate_hard_limit)
         add_flag(command, "--target-new-posts", target_new_posts)
@@ -157,6 +160,10 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
         add_flag(command, "--required-fields-profile", required_fields_profile)
         add_flag(command, "--login-type", params.get("login_type", "cookie"))
         add_flag(command, "--db", args.db)
+        if args.start_page is not None:
+            add_flag(command, "--start-page", args.start_page)
+        if args.resume_summary:
+            add_flag(command, "--resume-summary", args.resume_summary)
         if download_images:
             command.append("--download-images")
         if args.headful or (params.get("headless") is False and not args.headless):
@@ -446,6 +453,12 @@ def finish_run_report(conn: sqlite3.Connection, run_id: str, summary: dict[str, 
 
 def main() -> int:
     args = parse_args()
+    if (args.start_page is not None or args.resume_summary or args.recovery_keyword) and not args.job_key:
+        raise SystemExit("recovery options require --job-key")
+    if args.recovery_keyword and not args.resume_summary:
+        raise SystemExit("--recovery-keyword requires --resume-summary")
+    if args.start_page is not None and args.start_page <= 0:
+        raise SystemExit("--start-page must be positive")
     db_path = Path(args.db).expanduser()
     config_path = Path(args.config).expanduser()
     config = load_json(config_path)
@@ -469,6 +482,15 @@ def main() -> int:
         records: list[dict[str, Any]] = []
         for row in jobs:
             command = build_command(row, args)
+            frozen_inputs = [config_path, contract_path]
+            if args.resume_summary:
+                resume_path = Path(args.resume_summary).expanduser().resolve()
+                resume_summary = load_json(resume_path)
+                frozen_inputs.append(resume_path)
+                for record in resume_summary.get("records") or []:
+                    output = record.get("output") if isinstance(record, dict) else {}
+                    for path_value in (output or {}).get("jsonl_files") or []:
+                        frozen_inputs.append(Path(path_value).expanduser().resolve())
             state_path = state_dir / f"{row['job_key']}.json"
             state = FrozenExecutionState.create(
                 state_path,
@@ -485,7 +507,7 @@ def main() -> int:
                     "no_import": bool(args.no_import),
                     "dry_run": bool(args.dry_run),
                 },
-                frozen_inputs=[config_path, contract_path],
+                frozen_inputs=frozen_inputs,
                 dry_run=args.dry_run,
             )
             if args.dry_run:
