@@ -28,6 +28,7 @@ export type RecordSummary = {
   canonical_url?: string;
   title?: string;
   author_display_name?: string;
+  author_followers_count?: number | null;
   published_at?: string;
   captured_at?: string;
   city_name?: string;

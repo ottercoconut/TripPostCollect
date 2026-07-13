@@ -1,25 +1,47 @@
 import {
   AlertCircle,
+  ArrowLeft,
   BarChart3,
   Clock3,
   Database,
+  ExternalLink,
   FileJson,
   Gauge,
   ImageIcon,
   LocateFixed,
   ListFilter,
   Loader2,
+  PanelRightOpen,
   RefreshCcw,
   Search,
   ShieldCheck
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, type RecordFilters } from "./api";
 import type { Meta, Platform, RecordContext, RecordRaw, RecordSummary, Report } from "./types";
 
 type View = "records" | "quality" | "reports";
-type DetailTab = "images" | "author" | "content" | "metrics" | "evidence" | "json";
+
+const SHANDONG_CITIES = [
+  "济南市",
+  "青岛市",
+  "淄博市",
+  "枣庄市",
+  "东营市",
+  "烟台市",
+  "潍坊市",
+  "济宁市",
+  "泰安市",
+  "威海市",
+  "日照市",
+  "临沂市",
+  "德州市",
+  "聊城市",
+  "滨州市",
+  "菏泽市"
+];
 
 const emptyFilters: RecordFilters = {
   platform_key: "",
@@ -38,21 +60,18 @@ const emptyFilters: RecordFilters = {
 };
 
 export function App() {
-  const [view, setView] = useState<View>("records");
+  const navigate = useNavigate();
+  const location = useLocation();
+  const view = viewFromPath(location.pathname);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [platforms, setPlatforms] = useState<Platform[]>([]);
   const [filters, setFilters] = useState<RecordFilters>(emptyFilters);
   const [records, setRecords] = useState<RecordSummary[]>([]);
   const [recordsMeta, setRecordsMeta] = useState<Record<string, unknown>>({});
-  const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [context, setContext] = useState<RecordContext | null>(null);
-  const [raw, setRaw] = useState<RecordRaw | null>(null);
   const [reports, setReports] = useState<Report[]>([]);
   const [fieldGaps, setFieldGaps] = useState<Record<string, number | null>>({});
   const [qualityGroups, setQualityGroups] = useState<Record<string, RecordSummary[]>>({});
-  const [detailTab, setDetailTab] = useState<DetailTab>("images");
   const [loading, setLoading] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<string>("");
 
@@ -82,7 +101,6 @@ export function App() {
         author_followers: missingFollowers.data
       });
       setLastRefresh(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
-      setSelectedId((current) => current ?? recordsPayload.data[0]?.id ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "读取失败");
     } finally {
@@ -102,39 +120,9 @@ export function App() {
     return () => window.clearInterval(handle);
   }, [meta?.refresh_seconds, refresh]);
 
-  useEffect(() => {
-    if (!selectedId) {
-      setContext(null);
-      setRaw(null);
-      return;
-    }
-    setDetailLoading(true);
-    setRaw(null);
-    api
-      .context(selectedId)
-      .then(setContext)
-      .catch((err) => setError(err instanceof Error ? err.message : "详情读取失败"))
-      .finally(() => setDetailLoading(false));
-  }, [selectedId]);
-
-  useEffect(() => {
-    if (detailTab !== "json" || !selectedId || raw) {
-      return;
-    }
-    api.raw(selectedId).then(setRaw).catch((err) => setError(err instanceof Error ? err.message : "JSON 读取失败"));
-  }, [detailTab, raw, selectedId]);
-
-  const selectedRecord = useMemo(
-    () => records.find((record) => record.id === selectedId) ?? records[0] ?? null,
-    [records, selectedId]
-  );
-
   const locateIssue = (missingField: string, recordId?: number) => {
     setFilters({ ...emptyFilters, missing_field: missingField, page: 1, sort: "-captured_at" });
-    if (recordId) {
-      setSelectedId(recordId);
-    }
-    setView("records");
+    navigate(recordId ? `/records/${recordId}` : "/records");
   };
 
   return (
@@ -149,16 +137,16 @@ export function App() {
         </div>
         <nav className="nav-block">
           <div className="nav-label">工作区</div>
-          <button className={view === "records" ? "nav-item active" : "nav-item"} onClick={() => setView("records")}>
+          <button className={view === "records" ? "nav-item active" : "nav-item"} onClick={() => navigate("/records")}>
             <BarChart3 size={16} /> 记录工作台
           </button>
-          <button className={view === "quality" ? "nav-item active" : "nav-item"} onClick={() => setView("quality")}>
+          <button className={view === "quality" ? "nav-item active" : "nav-item"} onClick={() => navigate("/quality")}>
             <AlertCircle size={16} /> 数据质量
           </button>
         </nav>
         <nav className="nav-block">
           <div className="nav-label">运行</div>
-          <button className={view === "reports" ? "nav-item active" : "nav-item"} onClick={() => setView("reports")}>
+          <button className={view === "reports" ? "nav-item active" : "nav-item"} onClick={() => navigate("/reports")}>
             <Clock3 size={16} /> 运行报告
           </button>
         </nav>
@@ -167,7 +155,7 @@ export function App() {
       <main className="main">
         <header className="topbar">
           <div>
-            <div className="topbar-title">{view === "records" ? "记录工作台" : view === "quality" ? "数据质量" : "运行报告"}</div>
+            <div className="topbar-title">{titleFromPath(location.pathname)}</div>
             <div className="topbar-subtitle">{lastRefresh ? `最近刷新 ${lastRefresh}` : "等待数据"}</div>
           </div>
           <div className="topbar-meta">
@@ -185,29 +173,28 @@ export function App() {
 
         {error ? <div className="error-strip">{error}</div> : null}
 
-        {view === "records" ? (
-          <RecordWorkbench
-            filters={filters}
-            setFilters={setFilters}
-            platforms={platforms}
-            records={records}
-            recordsMeta={recordsMeta}
-            selectedRecord={selectedRecord}
-            selectedId={selectedId}
-            setSelectedId={setSelectedId}
-            context={context}
-            detailLoading={detailLoading}
-            detailTab={detailTab}
-            setDetailTab={setDetailTab}
-            raw={raw}
-            fieldGaps={fieldGaps}
-            locateIssue={locateIssue}
+        <Routes>
+          <Route path="/" element={<Navigate to="/records" replace />} />
+          <Route
+            path="/records"
+            element={
+              <RecordWorkbench
+                filters={filters}
+                setFilters={setFilters}
+                platforms={platforms}
+                records={records}
+                recordsMeta={recordsMeta}
+                fieldGaps={fieldGaps}
+                locateIssue={locateIssue}
+                openRecord={(recordId) => navigate(`/records/${recordId}`)}
+              />
+            }
           />
-        ) : view === "quality" ? (
-          <QualityView fieldGaps={fieldGaps} qualityGroups={qualityGroups} locateIssue={locateIssue} />
-        ) : (
-          <ReportsView reports={reports} meta={meta} />
-        )}
+          <Route path="/records/:recordId" element={<RecordDetailPage />} />
+          <Route path="/quality" element={<QualityView fieldGaps={fieldGaps} qualityGroups={qualityGroups} locateIssue={locateIssue} />} />
+          <Route path="/reports" element={<ReportsView reports={reports} meta={meta} />} />
+          <Route path="*" element={<Navigate to="/records" replace />} />
+        </Routes>
       </main>
     </div>
   );
@@ -219,18 +206,21 @@ function RecordWorkbench(props: {
   platforms: Platform[];
   records: RecordSummary[];
   recordsMeta: Record<string, unknown>;
-  selectedRecord: RecordSummary | null;
-  selectedId: number | null;
-  setSelectedId: (id: number) => void;
-  context: RecordContext | null;
-  detailLoading: boolean;
-  detailTab: DetailTab;
-  setDetailTab: (tab: DetailTab) => void;
-  raw: RecordRaw | null;
   fieldGaps: Record<string, number | null>;
   locateIssue: (missingField: string, recordId?: number) => void;
+  openRecord: (recordId: number) => void;
 }) {
   const { filters, setFilters, platforms, records, recordsMeta } = props;
+  const total = Number(recordsMeta.total ?? records.length);
+  const page = Number(filters.page ?? recordsMeta.page ?? 1);
+  const pageSize = Number(filters.page_size ?? recordsMeta.page_size ?? 50);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const setPage = (nextPage: number) => {
+    setFilters({ ...filters, page: Math.min(Math.max(1, nextPage), totalPages) });
+  };
+  const setPageSize = (nextPageSize: number) => {
+    setFilters({ ...filters, page_size: nextPageSize, page: 1 });
+  };
   return (
     <section className="content">
       <div className="filter-panel">
@@ -246,7 +236,14 @@ function RecordWorkbench(props: {
             </select>
           </Field>
           <Field label="城市">
-            <input value={filters.city_name} onChange={(event) => setFilters({ ...filters, city_name: event.target.value, page: 1 })} />
+            <select value={filters.city_name} onChange={(event) => setFilters({ ...filters, city_name: event.target.value, page: 1 })}>
+              <option value="">全部城市</option>
+              {SHANDONG_CITIES.map((city) => (
+                <option key={city} value={city}>
+                  {city}
+                </option>
+              ))}
+            </select>
           </Field>
           <Field label="关键词">
             <input value={filters.keyword} onChange={(event) => setFilters({ ...filters, keyword: event.target.value, page: 1 })} />
@@ -296,7 +293,9 @@ function RecordWorkbench(props: {
           <div className="panel-header">
             <div>
               <div className="panel-title">记录列表</div>
-              <div className="panel-subtitle">{String(recordsMeta.total ?? records.length)} 条记录</div>
+              <div className="panel-subtitle">
+                {total} 条记录 · 第 {page} / {totalPages} 页
+              </div>
             </div>
             <ListFilter size={17} />
           </div>
@@ -307,15 +306,26 @@ function RecordWorkbench(props: {
                   <th className="col-platform">平台</th>
                   <th>记录</th>
                   <th className="col-author">作者</th>
+                  <th className="col-followers">粉丝量</th>
                   <th className="col-date">发布时间</th>
                   <th className="col-small">图片</th>
                   <th className="col-small">互动</th>
                   <th className="col-status">状态</th>
+                  <th className="col-open">详情</th>
                 </tr>
               </thead>
               <tbody>
                 {records.map((record) => (
-                  <tr key={record.id} className={props.selectedId === record.id ? "selected" : ""} onClick={() => props.setSelectedId(record.id)}>
+                  <tr
+                    key={record.id}
+                    tabIndex={0}
+                    onClick={() => props.openRecord(record.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        props.openRecord(record.id);
+                      }
+                    }}
+                  >
                     <td className="platform-cell">{record.platform_name ?? record.platform_key}</td>
                     <td>
                       <div className="record-title">{record.title || record.content_text || record.source_url}</div>
@@ -324,27 +334,60 @@ function RecordWorkbench(props: {
                       </div>
                     </td>
                     <td>{record.author_display_name || "未提取"}</td>
+                    <td>{compactNumber(record.author_followers_count)}</td>
                     <td>{formatDate(record.published_at)}</td>
                     <td>{record.post_images_count}</td>
                     <td>{compactNumber((record.post_likes_count ?? 0) + (record.post_comments_count ?? 0))}</td>
                     <td>
                       <span className={`tag ${statusTone(record.status)}`}>{record.status || "unknown"}</span>
                     </td>
+                    <td>
+                      <button
+                        className="row-action"
+                        title="打开详情页"
+                        aria-label="打开详情页"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          props.openRecord(record.id);
+                        }}
+                      >
+                        <PanelRightOpen size={15} />
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+          <div className="pagination-bar">
+            <div className="page-size">
+              <span>每页</span>
+              <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={200}>200</option>
+              </select>
+            </div>
+            <div className="page-actions">
+              <button onClick={() => setPage(1)} disabled={page <= 1}>
+                首页
+              </button>
+              <button onClick={() => setPage(page - 1)} disabled={page <= 1}>
+                上一页
+              </button>
+              <span>
+                {page} / {totalPages}
+              </span>
+              <button onClick={() => setPage(page + 1)} disabled={page >= totalPages}>
+                下一页
+              </button>
+              <button onClick={() => setPage(totalPages)} disabled={page >= totalPages}>
+                末页
+              </button>
+            </div>
+          </div>
         </section>
-
-        <RecordDetail
-          context={props.context}
-          selectedRecord={props.selectedRecord}
-          loading={props.detailLoading}
-          tab={props.detailTab}
-          setTab={props.setDetailTab}
-          raw={props.raw}
-        />
       </div>
     </section>
   );
@@ -369,50 +412,151 @@ function QualityMetric(props: { label: string; value?: number | null; onClick: (
   );
 }
 
-function RecordDetail(props: {
-  context: RecordContext | null;
-  selectedRecord: RecordSummary | null;
-  loading: boolean;
-  tab: DetailTab;
-  setTab: (tab: DetailTab) => void;
-  raw: RecordRaw | null;
-}) {
-  const context = props.context;
-  const record = context?.record ?? props.selectedRecord;
-  if (!record) {
-    return (
-      <aside className="panel detail-panel">
-        <div className="empty-state">暂无记录</div>
-      </aside>
-    );
-  }
+function RecordDetailPage() {
+  const params = useParams();
+  const navigate = useNavigate();
+  const recordId = Number(params.recordId);
+  const [context, setContext] = useState<RecordContext | null>(null);
+  const [raw, setRaw] = useState<RecordRaw | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!Number.isInteger(recordId) || recordId <= 0) {
+      setError("记录 ID 无效");
+      setLoading(false);
+      return;
+    }
+    let active = true;
+    setLoading(true);
+    setError(null);
+    setContext(null);
+    setRaw(null);
+    Promise.all([api.context(recordId), api.raw(recordId)])
+      .then(([contextData, rawData]) => {
+        if (!active) return;
+        setContext(contextData);
+        setRaw(rawData);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "详情读取失败");
+      })
+      .finally(() => {
+        if (active) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [recordId]);
+
+  const record = context?.record;
   return (
-    <aside className="panel detail-panel">
-      <div className="panel-header detail-header">
-        <div>
-          <div className="panel-title">{record.title || record.source_url}</div>
-          <div className="panel-subtitle">
-            {record.platform_name ?? record.platform_key} · {record.status}
+    <section className="content record-page">
+      <div className="record-page-toolbar">
+        <button className="text-button" onClick={() => navigate("/records")}>
+          <ArrowLeft size={16} /> 返回列表
+        </button>
+        {record?.source_url ? (
+          <a className="text-button" href={record.canonical_url || record.source_url} target="_blank" rel="noreferrer">
+            <ExternalLink size={16} /> 来源页面
+          </a>
+        ) : null}
+      </div>
+
+      {error ? <div className="error-strip inline">{error}</div> : null}
+      {loading ? <div className="panel empty-state">详情加载中</div> : null}
+
+      {record ? (
+        <>
+          <section className="panel record-hero">
+            <div>
+              <div className="record-hero-title">{record.title || record.source_url}</div>
+              <div className="record-hero-meta">
+                <span>{record.platform_name ?? record.platform_key}</span>
+                <span>{record.city_name || "未标城市"}</span>
+                <span>{formatDate(record.published_at)}</span>
+                <span>{record.status || "unknown"}</span>
+              </div>
+            </div>
+            <div className="record-hero-stats">
+              <Metric label="图片" value={context.images.length} />
+              <Metric label="粉丝量" value={context.author.followers_count} />
+              <Metric label="互动" value={(context.metrics.likes ?? 0) + (context.metrics.comments ?? 0)} />
+            </div>
+          </section>
+
+          <div className="record-detail-layout">
+            <div className="record-detail-main">
+              <section className="panel">
+                <div className="panel-header">
+                  <div>
+                    <div className="panel-title">全部图片</div>
+                    <div className="panel-subtitle">{context.images.length} 张记录图片</div>
+                  </div>
+                  <ImageIcon size={18} />
+                </div>
+                <div className="detail-body spacious">
+                  <ImagePanel context={context} />
+                </div>
+              </section>
+
+              <section className="panel">
+                <div className="panel-header">
+                  <div>
+                    <div className="panel-title">正文与来源</div>
+                    <div className="panel-subtitle">{record.keyword || "无关键词"}</div>
+                  </div>
+                </div>
+                <div className="detail-body spacious">
+                  <ContentPanel record={record} />
+                </div>
+              </section>
+            </div>
+
+            <aside className="record-detail-side">
+              <section className="panel">
+                <div className="panel-header">
+                  <div className="panel-title">作者</div>
+                </div>
+                <div className="detail-body">
+                  <AuthorPanel context={context} />
+                </div>
+              </section>
+
+              <section className="panel">
+                <div className="panel-header">
+                  <div className="panel-title">互动</div>
+                </div>
+                <div className="detail-body">
+                  <MetricsPanel context={context} />
+                </div>
+              </section>
+
+              <section className="panel">
+                <div className="panel-header">
+                  <div className="panel-title">证据</div>
+                </div>
+                <div className="detail-body">
+                  <EvidencePanel context={context} />
+                </div>
+              </section>
+
+              <section className="panel">
+                <div className="panel-header">
+                  <div className="panel-title">原始 JSON</div>
+                </div>
+                <div className="detail-body">
+                  <JsonPanel raw={raw} />
+                </div>
+              </section>
+            </aside>
           </div>
-        </div>
-        {props.loading ? <Loader2 className="spin" size={18} /> : null}
-      </div>
-      <div className="tabs">
-        {(["images", "author", "content", "metrics", "evidence", "json"] as DetailTab[]).map((tab) => (
-          <button key={tab} className={props.tab === tab ? "tab active" : "tab"} onClick={() => props.setTab(tab)}>
-            {tabLabel(tab)}
-          </button>
-        ))}
-      </div>
-      <div className="detail-body">
-        {props.tab === "images" ? <ImagePanel context={context} /> : null}
-        {props.tab === "author" ? <AuthorPanel context={context} /> : null}
-        {props.tab === "content" ? <ContentPanel record={record} /> : null}
-        {props.tab === "metrics" ? <MetricsPanel context={context} /> : null}
-        {props.tab === "evidence" ? <EvidencePanel context={context} /> : null}
-        {props.tab === "json" ? <JsonPanel raw={props.raw} /> : null}
-      </div>
-    </aside>
+        </>
+      ) : null}
+    </section>
   );
 }
 
@@ -426,7 +570,7 @@ function ImagePanel({ context }: { context: RecordContext | null }) {
   }
   return (
     <div className="image-grid">
-      {images.slice(0, 6).map((image) => (
+      {images.map((image) => (
         <ImageTile key={image.id} image={image} />
       ))}
     </div>
@@ -436,7 +580,7 @@ function ImagePanel({ context }: { context: RecordContext | null }) {
 function ImageTile({ image }: { image: RecordContext["images"][number] }) {
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   const source = image.local_path ? "本地" : "远程 URL";
-  const failedText = image.local_path ? "本地缺失或不可读" : "远程 URL 不可达";
+  const failedText = image.local_path ? "本地缺失或不可读" : "远程图片拉取失败";
   return (
     <figure className={`image-tile ${state}`}>
       <img
@@ -674,17 +818,6 @@ function QualityView(props: {
   );
 }
 
-function tabLabel(tab: DetailTab): string {
-  return {
-    images: "图片",
-    author: "作者",
-    content: "内容",
-    metrics: "互动",
-    evidence: "证据",
-    json: "JSON"
-  }[tab];
-}
-
 function formatDate(value?: string | null): string {
   if (!value) return "未知";
   return value.slice(0, 10);
@@ -701,4 +834,17 @@ function statusTone(status?: string): string {
   if (status === "partial" || status === "skipped") return "amber";
   if (status === "failed") return "red";
   return "";
+}
+
+function viewFromPath(pathname: string): View {
+  if (pathname.startsWith("/quality")) return "quality";
+  if (pathname.startsWith("/reports")) return "reports";
+  return "records";
+}
+
+function titleFromPath(pathname: string): string {
+  if (pathname.startsWith("/records/")) return "记录详情";
+  if (pathname.startsWith("/quality")) return "数据质量";
+  if (pathname.startsWith("/reports")) return "运行报告";
+  return "记录工作台";
 }
