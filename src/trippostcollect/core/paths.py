@@ -25,8 +25,12 @@ CTF_LOGIN_OUTPUT = OUTPUTS_ROOT / "ctf_login_warmup"
 CTF_RESOURCE_OUTPUT = OUTPUTS_ROOT / "ctf_resource_crawls"
 
 CRAWL_RUNNER_RUNTIME = RUNTIME_ROOT / "crawl_runner"
+CRAWL_EXECUTION_STATE_ROOT = RUNTIME_ROOT / "crawl_execution_states"
 CRAWL_POLICY_STATE = RUNTIME_ROOT / "scrapling_throttle.json"
 LOCK_DIR = RUNTIME_ROOT / "locks"
+UV_CACHE_ROOT = RUNTIME_ROOT / "uv_cache"
+BROWSER_RUNTIME_HOME = RUNTIME_ROOT / "browser_home"
+CHROME_CRASH_DUMPS = RUNTIME_ROOT / "chrome_crash_dumps"
 
 BROWSER_PROFILE_ROOT = DATA_ROOT / "browser_profiles"
 BROWSER_STATE_ROOT = DATA_ROOT / "browser_state"

@@ -13,8 +13,8 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
-from db_bootstrap import bootstrap_connection
-from project_paths import DEFAULT_DB, OUTPUTS_ROOT, PROJECT_ROOT, ensure_parent
+from trippostcollect.core.paths import DEFAULT_DB, OUTPUTS_ROOT, PROJECT_ROOT, ensure_parent
+from trippostcollect.db.bootstrap import bootstrap_connection
 
 
 ROOT = PROJECT_ROOT
@@ -566,6 +566,19 @@ def capture_post_id(site_key: str, capture_id: int) -> str:
     return f"capture:{site_key}:{capture_id}"
 
 
+ERROR_PAGE_MARKERS = (
+    "非常抱歉，您访问的页面不存在，可能已被删除",
+    "返回上一页",
+)
+
+
+def looks_like_error_page(site_key: str, content_text: str) -> bool:
+    normalized = "\n".join(line.strip() for line in content_text.splitlines() if line.strip())
+    if site_key == "qunar" and all(marker in normalized for marker in ERROR_PAGE_MARKERS):
+        return True
+    return False
+
+
 def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any] | None:
     site_key = str(row["site_key"])
     visible_text = load_text(row.get("visible_text_path"))
@@ -584,6 +597,8 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
     if site_key != "douban_group" and not row["content_ready"]:
         return None
     if not content_text:
+        return None
+    if looks_like_error_page(site_key, content_text):
         return None
     if site_key == "douban_group":
         published_at = douban_fields.get("published_at") or row.get("published_at")

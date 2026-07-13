@@ -6,21 +6,28 @@
   },
   "jobs": [
     {
-      "job_key": "page_bilibili_jinan_opus",
+      "job_key": "mc_bilibili_jinan_article",
       "site_key": "bilibili",
-      "target_url": "https://www.bilibili.com/opus/917192602541883449",
-      "job_kind": "ctf_resource_crawl",
+      "target_url": "https://search.bilibili.com/article?keyword=%E6%B5%8E%E5%8D%97%E6%97%85%E6%B8%B8",
+      "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 50,
       "schedule_seconds": 172800,
       "max_attempts": 1,
       "params": {
-        "max_image_save": 3,
-        "max_scrolls": 2,
-        "scrapling_preflight": "auto"
+        "platform": "bilibili",
+        "keyword": "济南旅游",
+        "candidate_hard_limit": 100,
+        "max_stagnant_batches": 3,
+        "target_valid_posts": 50,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false
       },
       "behavior_profile": {
-        "name": "social_high_risk"
+        "name": "media_crawler_low_frequency"
       }
     },
     {
@@ -35,8 +42,12 @@
       "params": {
         "platform": "weibo",
         "keyword": "济南旅游",
-        "max_notes": 1,
-        "timeout_per_platform": 180,
+        "candidate_hard_limit": 300,
+        "max_stagnant_batches": 3,
+        "target_valid_posts": 50,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },
@@ -56,8 +67,12 @@
       "params": {
         "platform": "xhs",
         "keyword": "济南旅游",
-        "max_notes": 3,
-        "timeout_per_platform": 240,
+        "candidate_hard_limit": 300,
+        "max_stagnant_batches": 3,
+        "target_valid_posts": 50,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1800,
         "login_type": "cookie",
         "headless": false,
         "download_images": true
@@ -78,8 +93,12 @@
       "params": {
         "platform": "douyin",
         "keyword": "济南旅游",
-        "max_notes": 1,
-        "timeout_per_platform": 180,
+        "candidate_hard_limit": 1000,
+        "max_stagnant_batches": 3,
+        "target_valid_posts": 50,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },
@@ -99,8 +118,12 @@
       "params": {
         "platform": "zhihu",
         "keyword": "济南旅游",
-        "max_notes": 20,
-        "timeout_per_platform": 420,
+        "candidate_hard_limit": 100,
+        "max_stagnant_batches": 3,
+        "target_valid_posts": 20,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },
@@ -118,8 +141,9 @@
       "schedule_seconds": 172800,
       "max_attempts": 1,
       "params": {
+        "followers_policy": "ignored",
         "max_image_save": 3,
-        "max_scrolls": 2,
+        "max_scrolls": 12,
         "scrapling_preflight": "auto"
       },
       "behavior_profile": {
@@ -136,8 +160,9 @@
       "schedule_seconds": 172800,
       "max_attempts": 1,
       "params": {
+        "followers_policy": "ignored",
         "max_image_save": 3,
-        "max_scrolls": 2,
+        "max_scrolls": 12,
         "scrapling_preflight": "auto"
       },
       "behavior_profile": {
@@ -155,8 +180,9 @@
       "max_attempts": 1,
       "params": {
         "keyword": "济南旅游",
+        "followers_policy": "conditional_enrichment",
         "max_image_save": 3,
-        "max_scrolls": 2,
+        "max_scrolls": 8,
         "scrapling_preflight": "auto"
       },
       "behavior_profile": {

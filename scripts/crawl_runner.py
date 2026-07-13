@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import sqlite3
@@ -14,9 +15,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from db_bootstrap import bootstrap_connection
+from trippostcollect.db.bootstrap import bootstrap_connection
+from execution_state import ExecutionStateError, FrozenExecutionState
 from failure_classifier import classify_attempt, extract_stdout_json
-from project_paths import (
+from trippostcollect.core.paths import (
+    CRAWL_EXECUTION_STATE_ROOT,
     CRAWL_RUNNER_RUNTIME,
     DEFAULT_CONFIG,
     DEFAULT_DB,
@@ -36,6 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path.")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Crawl target config JSON.")
     parser.add_argument("--run-root", default=str(DEFAULT_RUN_ROOT), help="Directory for run summaries.")
+    parser.add_argument(
+        "--execution-state-root",
+        default=str(CRAWL_EXECUTION_STATE_ROOT),
+        help="Directory for frozen per-job execution states.",
+    )
     parser.add_argument("--max-jobs", type=int, default=3, help="Maximum due jobs to run in this invocation.")
     parser.add_argument("--site", help="Optional site_key filter.")
     parser.add_argument("--kind", help="Optional job_kind filter.")
@@ -120,6 +128,21 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
 
     if kind == "mediacrawler_search":
         platform = str(params.get("platform") or site)
+        if "candidate_hard_limit" not in params:
+            raise ValueError(f"Missing candidate_hard_limit for formal job {row['job_key']}")
+        candidate_hard_limit = int(params["candidate_hard_limit"])
+        target_valid_posts = int(params.get("target_valid_posts") or 0)
+        max_stagnant_batches = int(params.get("max_stagnant_batches") or 0)
+        required_fields_profile = str(params.get("required_fields_profile") or "")
+        followers_policy = str(params.get("followers_policy") or "")
+        if candidate_hard_limit <= 0 or target_valid_posts <= 0 or max_stagnant_batches <= 0:
+            raise ValueError(f"Invalid formal limits for job {row['job_key']}")
+        if target_valid_posts > candidate_hard_limit:
+            raise ValueError(f"target_valid_posts exceeds candidate_hard_limit for job {row['job_key']}")
+        if required_fields_profile != "image_post_with_followers_v1":
+            raise ValueError(f"Unsupported required_fields_profile for job {row['job_key']}")
+        if followers_policy != "required":
+            raise ValueError(f"Structured platform must require followers for job {row['job_key']}")
         if params.get("get_media"):
             raise ValueError(f"Generic media/video downloads are disabled for job {row['job_key']}")
         download_images = bool(params.get("download_images"))
@@ -128,7 +151,10 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
         command = [sys.executable, str(ROOT / "scripts" / "mediacrawler_crawl.py"), "--platforms", platform]
         add_flag(command, "--keyword", params.get("keyword", "济南旅游"))
         add_flag(command, "--timeout-per-platform", params.get("timeout_per_platform", 180))
-        add_flag(command, "--mediacrawler-max-notes", params.get("max_notes", 1))
+        add_flag(command, "--candidate-hard-limit", candidate_hard_limit)
+        add_flag(command, "--target-valid-posts", target_valid_posts)
+        add_flag(command, "--max-stagnant-batches", max_stagnant_batches)
+        add_flag(command, "--required-fields-profile", required_fields_profile)
         add_flag(command, "--login-type", params.get("login_type", "cookie"))
         add_flag(command, "--db", args.db)
         if download_images:
@@ -195,6 +221,11 @@ def find_artifact_paths(stdout: str, row: sqlite3.Row) -> tuple[str, list[str], 
         value = stdout_json.get(key)
         if value:
             artifact_dirs.append(str(value))
+    summary_value = stdout_json.get("summary")
+    if summary_value:
+        candidate_summary = Path(str(summary_value))
+        if candidate_summary.is_file():
+            summary_path = str(candidate_summary)
     for record in stdout_json.get("records") or []:
         if isinstance(record, dict):
             for key in ("artifact_dir", "capture_dir"):
@@ -203,6 +234,7 @@ def find_artifact_paths(stdout: str, row: sqlite3.Row) -> tuple[str, list[str], 
     match = re.search(r"Summary:\s*(.+)", stdout)
     if match:
         summary_path = match.group(1).strip()
+    if summary_path:
         try:
             summary = load_json(Path(summary_path))
             if summary.get("batch_dir"):
@@ -356,13 +388,24 @@ def markdown_report(summary: dict[str, Any]) -> str:
         "",
         "## 任务结果",
         "",
-        "| job_key | site | kind | status | failure_type | artifact |",
-        "|---|---|---|---|---|---|",
+        "| job_key | site | kind | status | failure_type | state | artifact |",
+        "|---|---|---|---|---|---|---|",
     ]
     for item in summary["records"]:
         lines.append(
-            "| {job_key} | {site_key} | {job_kind} | {status} | {failure_type} | {artifact_dir} |".format(
-                **{key: str(item.get(key, "")) for key in ("job_key", "site_key", "job_kind", "status", "failure_type", "artifact_dir")}
+            "| {job_key} | {site_key} | {job_kind} | {status} | {failure_type} | {execution_state} | {artifact_dir} |".format(
+                **{
+                    key: str(item.get(key, ""))
+                    for key in (
+                        "job_key",
+                        "site_key",
+                        "job_kind",
+                        "status",
+                        "failure_type",
+                        "execution_state",
+                        "artifact_dir",
+                    )
+                }
             )
         )
     lines.append("")
@@ -378,6 +421,7 @@ def create_run_report(conn: sqlite3.Connection, run_id: str) -> None:
 
 
 def finish_run_report(conn: sqlite3.Connection, run_id: str, summary: dict[str, Any], report_path: Path) -> None:
+    run_status = "failed" if summary["failed_count"] else ("blocked" if summary["blocked_count"] else "completed")
     conn.execute(
         """
         UPDATE crawl_run_reports
@@ -387,7 +431,7 @@ def finish_run_report(conn: sqlite3.Connection, run_id: str, summary: dict[str, 
         """,
         (
             summary["finished_at"],
-            "completed",
+            run_status,
             summary["jobs_selected"],
             summary["completed_count"],
             summary["failed_count"],
@@ -407,6 +451,8 @@ def main() -> int:
     config = load_json(config_path)
     run_id = utc_now().strftime("%Y%m%dT%H%M%S%z")
     run_dir = ensure_dir(Path(args.run_root).expanduser() / run_id)
+    state_dir = ensure_dir(Path(args.execution_state_root).expanduser() / run_id)
+    contract_path = ROOT / "docs" / "formal-crawl-contract.md"
 
     ensure_parent(db_path)
     with sqlite3.connect(db_path) as conn:
@@ -423,6 +469,25 @@ def main() -> int:
         records: list[dict[str, Any]] = []
         for row in jobs:
             command = build_command(row, args)
+            state_path = state_dir / f"{row['job_key']}.json"
+            state = FrozenExecutionState.create(
+                state_path,
+                run_id=run_id,
+                job_key=str(row["job_key"]),
+                site_key=str(row["site_key"]),
+                job_kind=str(row["job_kind"]),
+                plan={
+                    "contract_path": str(contract_path.resolve()),
+                    "config_path": str(config_path.resolve()),
+                    "database_path": str(db_path.resolve()),
+                    "job_params": params_for(row),
+                    "command": command,
+                    "no_import": bool(args.no_import),
+                    "dry_run": bool(args.dry_run),
+                },
+                frozen_inputs=[config_path, contract_path],
+                dry_run=args.dry_run,
+            )
             if args.dry_run:
                 records.append(
                     {
@@ -435,13 +500,32 @@ def main() -> int:
                         "artifact_dir": "",
                         "capture_meta_paths": [],
                         "command": command,
+                        "execution_state": str(state_path),
                         "import_result": {"skipped": True, "reason": "dry_run"},
                     }
                 )
                 continue
             attempt_id = insert_attempt(conn, row, run_id, command)
-            completed = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
-            artifact_dir, capture_meta_paths, _summary_path = find_artifact_paths(completed.stdout, row)
+            state.begin("command_executed")
+            child_env = os.environ.copy()
+            child_env["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(state_path)
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=child_env,
+                )
+            except OSError as exc:
+                completed = subprocess.CompletedProcess(
+                    args=command,
+                    returncode=127,
+                    stdout="",
+                    stderr=f"subprocess_launch_failed: {exc!r}",
+                )
+            artifact_dir, capture_meta_paths, summary_path = find_artifact_paths(completed.stdout, row)
             meta = load_first_meta(capture_meta_paths)
             classification = classify_attempt(
                 exit_code=completed.returncode,
@@ -449,27 +533,101 @@ def main() -> int:
                 stderr=completed.stderr,
                 meta=meta,
             )
-            if (
-                not args.no_import
-                and classification.get("status") == "completed"
-                and row["job_kind"] == "ctf_resource_crawl"
-                and not meta.get("skipped")
-            ):
-                import_result = import_capture_results(capture_meta_paths, db_path)
+            command_evidence = {
+                "exit_code": completed.returncode,
+                "classification": classification,
+            }
+            if classification.get("status") == "completed":
+                state.complete("command_executed", evidence=command_evidence)
             else:
-                reason = "skipped_capture" if meta.get("skipped") else "not_importable"
-                import_result = {"skipped": True, "reason": reason}
-            finalize_attempt(
-                conn,
-                row=row,
-                attempt_id=attempt_id,
-                completed=completed,
-                classification=classification,
-                artifact_dir=artifact_dir,
-                capture_meta_paths=capture_meta_paths,
-                import_result=import_result,
-                config=config,
-            )
+                state.fail(
+                    "command_executed",
+                    error=str(classification.get("reason") or "command_failed"),
+                    evidence=command_evidence,
+                )
+
+            import_result: dict[str, Any] = {"skipped": True, "reason": "command_not_completed"}
+            ready_to_finalize_state = False
+            if classification.get("status") == "completed":
+                state.begin("artifacts_verified")
+                if row["job_kind"] == "mediacrawler_search":
+                    artifact_ok = bool(summary_path and Path(summary_path).is_file())
+                    artifact_evidence = {"summary_path": summary_path or "", "exists": artifact_ok}
+                else:
+                    artifact_ok = bool(capture_meta_paths)
+                    artifact_evidence = {"capture_meta_paths": capture_meta_paths, "count": len(capture_meta_paths)}
+                if artifact_ok:
+                    state.complete("artifacts_verified", evidence=artifact_evidence)
+                else:
+                    state.fail("artifacts_verified", error="required_artifacts_missing", evidence=artifact_evidence)
+                    classification = {
+                        "status": "retry_wait",
+                        "failure_type": "artifact_missing",
+                        "retryable": True,
+                        "wait_seconds": 600,
+                        "reason": "required_artifacts_missing",
+                    }
+
+            if classification.get("status") == "completed":
+                state.begin("persistence_verified")
+                if args.no_import:
+                    import_result = {"skipped": True, "reason": "no_import"}
+                    state.complete("persistence_verified", evidence=import_result, skipped=True)
+                elif row["job_kind"] == "ctf_resource_crawl" and not meta.get("skipped"):
+                    import_result = import_capture_results(capture_meta_paths, db_path)
+                    if import_result.get("ok"):
+                        state.complete("persistence_verified", evidence=import_result)
+                    else:
+                        state.fail("persistence_verified", error="capture_import_failed", evidence=import_result)
+                elif row["job_kind"] == "mediacrawler_search":
+                    child_summary = load_json(Path(str(summary_path)))
+                    import_result = dict(child_summary.get("import_result") or {})
+                    persistence_ok = bool(child_summary.get("import_target_met"))
+                    if persistence_ok:
+                        state.complete("persistence_verified", evidence=import_result)
+                    else:
+                        state.fail("persistence_verified", error="formal_import_target_not_reached", evidence=import_result)
+                else:
+                    import_result = {"skipped": True, "reason": "skipped_capture"}
+                    state.complete("persistence_verified", evidence=import_result, skipped=True)
+
+                persistence_step = state.load()["steps"]["persistence_verified"]
+                if persistence_step["status"] == "failed":
+                    classification = {
+                        "status": "retry_wait",
+                        "failure_type": "persistence_failed",
+                        "retryable": True,
+                        "wait_seconds": 600,
+                        "reason": str(persistence_step.get("error") or "persistence_failed"),
+                    }
+                else:
+                    ready_to_finalize_state = True
+            try:
+                finalize_attempt(
+                    conn,
+                    row=row,
+                    attempt_id=attempt_id,
+                    completed=completed,
+                    classification=classification,
+                    artifact_dir=artifact_dir,
+                    capture_meta_paths=capture_meta_paths,
+                    import_result=import_result,
+                    config=config,
+                )
+            except Exception as exc:
+                if ready_to_finalize_state:
+                    state.begin("task_finalized")
+                    state.fail(
+                        "task_finalized",
+                        error="scheduler_finalize_failed",
+                        evidence={"error": repr(exc)},
+                    )
+                raise
+            if ready_to_finalize_state:
+                state.finalize(
+                    outcome="completed",
+                    evidence={"classification": classification, "import_result": import_result},
+                )
             records.append(
                 {
                     "job_key": row["job_key"],
@@ -478,9 +636,14 @@ def main() -> int:
                     "status": classification["status"],
                     "failure_type": classification.get("failure_type", ""),
                     "retryable": bool(classification.get("retryable")),
+                    "reason": classification.get("reason", ""),
+                    "exit_code": completed.returncode,
+                    "stdout_tail": tail(completed.stdout, 2000),
+                    "stderr_tail": tail(completed.stderr, 2000),
                     "artifact_dir": artifact_dir,
                     "capture_meta_paths": capture_meta_paths,
                     "command": command,
+                    "execution_state": str(state_path),
                     "import_result": import_result,
                 }
             )
@@ -493,6 +656,7 @@ def main() -> int:
             "finished_at": iso(),
             "db": str(db_path),
             "config": str(config_path),
+            "execution_state_dir": str(state_dir),
             "synced_jobs": synced,
             "jobs_selected": len(jobs),
             "completed_count": sum(1 for item in records if item["status"] == "completed"),
@@ -507,7 +671,7 @@ def main() -> int:
         finish_run_report(conn, run_id, summary, report_path)
 
     print(json.dumps({"summary": str(summary_path), "report": str(report_path), **summary}, ensure_ascii=False, indent=2))
-    return 0 if summary["failed_count"] == 0 else 1
+    return 0 if summary["failed_count"] == 0 and summary["blocked_count"] == 0 else 1
 
 
 if __name__ == "__main__":

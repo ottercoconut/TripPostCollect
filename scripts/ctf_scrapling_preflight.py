@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from scrapling import Fetcher, Selector
 
-from project_paths import ensure_dir
+from trippostcollect.core.paths import ensure_dir
 
 
 MOBILE_USER_AGENT = (

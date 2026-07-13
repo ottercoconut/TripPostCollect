@@ -27,8 +27,9 @@ from playwright.async_api import (
     async_playwright,
 )
 
-from project_paths import CTF_BROWSER_PROFILE_ROOT, CTF_LOGIN_OUTPUT, PROJECT_ROOT, ensure_dir
-from web_sites import get_site, site_keys
+from browser_runtime import browser_launch_environment, browser_runtime_args
+from trippostcollect.core.paths import CTF_BROWSER_PROFILE_ROOT, CTF_LOGIN_OUTPUT, PROJECT_ROOT, ensure_dir
+from trippostcollect.platforms.registry import get_site, site_keys
 
 
 ROOT = PROJECT_ROOT
@@ -39,7 +40,7 @@ COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
 # Per-site login verification config. ``marker_cookies`` are checked against the
 # persistent profile cookie jar; any one hit counts as logged in. ``check_urls``
 # are the URLs passed to ``BrowserContext.cookies`` so the jar returns cookies
-# for the right domain. Site URL/login config comes from ``web_sites.SITES``.
+# for the right domain. Site URL/login config comes from the platform registry.
 LOGIN_CHECKERS: dict[str, dict[str, Any]] = {
     "douban_group": {
         "label": "豆瓣小组",
@@ -166,7 +167,9 @@ async def launch_login_context(playwright, profile_dir: Path, browser_path: str 
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
+            *browser_runtime_args(),
         ],
+        "env": browser_launch_environment(),
     }
     if browser_path:
         kwargs["executable_path"] = browser_path

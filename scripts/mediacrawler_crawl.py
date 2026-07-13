@@ -14,22 +14,27 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from hashlib import md5
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from db_bootstrap import bootstrap_connection, bootstrap_database
-from project_paths import (
+from execution_state import FrozenExecutionState
+from trippostcollect.core.paths import (
     DEFAULT_DB,
     MEDIACRAWLER_DIR,
     MEDIACRAWLER_RUNS_OUTPUT,
     PROJECT_ROOT,
+    UV_CACHE_ROOT,
     ensure_dir,
     ensure_parent,
 )
+from trippostcollect.db.bootstrap import bootstrap_connection
+from browser_runtime import browser_launch_environment, browser_runtime_args
 
 
 ROOT = PROJECT_ROOT
@@ -37,7 +42,14 @@ DEFAULT_OUTPUT = MEDIACRAWLER_RUNS_OUTPUT
 COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
 STORAGE_SNAPSHOT_FILENAME = "trippostcollect_storage_state.json"
 BILIBILI_ARTICLE_SEARCH_URL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
+BILIBILI_RELATION_STAT_URL = "https://api.bilibili.com/x/relation/stat"
 BILIBILI_ARTICLE_PAGE_SIZE = 20
+BILIBILI_WBI_MIXIN_TABLE = (
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52,
+)
 
 PLATFORMS: dict[str, dict[str, str]] = {
     "bilibili": {"mediacrawler": "bili", "label": "B站"},
@@ -45,6 +57,21 @@ PLATFORMS: dict[str, dict[str, str]] = {
     "weibo": {"mediacrawler": "wb", "label": "微博"},
     "douyin": {"mediacrawler": "dy", "label": "抖音"},
     "zhihu": {"mediacrawler": "zhihu", "label": "知乎"},
+}
+FOLLOWERS_REQUIRED_PLATFORMS = frozenset(PLATFORMS)
+REQUIRED_FOLLOWER_SOURCES = {
+    "bilibili": frozenset({"relation_stat"}),
+    "weibo": frozenset({"search_author"}),
+    "xhs": frozenset({"creator_profile"}),
+    "douyin": frozenset({"creator_profile"}),
+    "zhihu": frozenset({"search_author"}),
+}
+PLATFORM_REQUIRED_METRICS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "bilibili": (("liked_count",), ("comment_count", "comments_count"), ("view_count", "video_play_count")),
+    "weibo": (("liked_count",), ("comments_count", "comment_count"), ("shared_count", "reposts_count")),
+    "xhs": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
+    "douyin": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
+    "zhihu": (("voteup_count", "liked_count"), ("comment_count", "comments_count")),
 }
 SHANDONG_CITY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("济南市", ("济南市", "济南", "泉城")),
@@ -68,7 +95,7 @@ SHANDONG_CITY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".svg", ".img"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm"}
 AUTHOR_FIELD_MARKERS = ("author", "user", "nickname", "avatar", "fans", "follower", "follow", "up")
-IMAGE_URL_KEYS = ("cover", "image", "img", "pic", "avatar")
+IMAGE_URL_KEYS = ("cover", "image", "img", "pic", "avatar", "note_download")
 URL_RE = re.compile(r"https?://[^\s\"'<>,，]+", re.I)
 VIDEO_URL_RE = re.compile(r"(?i)(?:/(?:video|share/video)/\d+|\.(?:mp4|m4v|mov|webm|flv|m3u8|mpd)(?:[?#]|$))")
 CHINA_TZ = timezone(timedelta(hours=8))
@@ -150,13 +177,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--platforms", nargs="+", default=["xhs", "weibo", "douyin"], help="bilibili xhs weibo douyin zhihu")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Output root.")
     parser.add_argument("--timeout-per-platform", type=int, default=180, help="Timeout per MediaCrawler platform.")
-    parser.add_argument("--mediacrawler-max-notes", type=int, default=1, help="Requested MediaCrawler note count.")
     parser.add_argument("--login-type", default="cookie", choices=("cookie", "qrcode", "phone"), help="MediaCrawler login type.")
     parser.add_argument("--get-media", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--download-images", action="store_true", help="Download image files for supported image-only platforms. Videos remain disabled.")
     parser.add_argument("--headed", action="store_true", help="Run browser with visible UI.")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path for web_posts import.")
-    parser.add_argument("--import-limit", type=int, default=0, help="Maximum non-video content rows to import. 0 means unlimited.")
+    parser.add_argument("--target-valid-posts", type=int, default=0, help="Required unique records passing the formal field profile.")
+    parser.add_argument("--candidate-hard-limit", type=int, required=True, help="Maximum actual content candidates processed for validation.")
+    parser.add_argument("--required-fields-profile", default="image_post_with_followers_v1")
+    parser.add_argument("--max-stagnant-batches", type=int, default=3)
     parser.add_argument("--no-import", action="store_true", help="Do not import MediaCrawler JSONL records into SQLite.")
     return parser.parse_args()
 
@@ -222,6 +251,16 @@ def cookie_snapshot_path(platform_key: str) -> Path:
 
 def storage_snapshot_path(platform_key: str) -> Path:
     return profile_dir_for(platform_key) / STORAGE_SNAPSHOT_FILENAME
+
+
+def platform_cookie_url(platform_key: str) -> str:
+    return {
+        "bilibili": "https://www.bilibili.com/",
+        "weibo": "https://m.weibo.cn/",
+        "xhs": "https://www.xiaohongshu.com/",
+        "douyin": "https://www.douyin.com/",
+        "zhihu": "https://www.zhihu.com/",
+    }[platform_key]
 
 
 def required_cookie_names(platform_key: str) -> tuple[str, ...]:
@@ -337,12 +376,15 @@ def export_profile_cookies(platform_key: str, browser_path: str | None) -> dict[
         return None
     script = r"""
 import asyncio
+import json
 import sys
 from playwright.async_api import async_playwright
 
 async def main() -> int:
     profile_dir = sys.argv[1]
     executable_path = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+    target_url = sys.argv[3]
+    runtime_args = json.loads(sys.argv[4])
     async with async_playwright() as playwright:
         context = await playwright.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
@@ -350,15 +392,15 @@ async def main() -> int:
             executable_path=executable_path,
             locale="zh-CN",
             timezone_id="Asia/Shanghai",
-            args=["--disable-dev-shm-usage", "--no-sandbox"],
+            args=["--disable-dev-shm-usage", "--no-sandbox", *runtime_args],
         )
         page = context.pages[0] if context.pages else await context.new_page()
         try:
-            await page.goto("https://www.zhihu.com/", wait_until="domcontentloaded", timeout=30000)
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
         except Exception:
             pass
         await page.wait_for_timeout(1000)
-        cookies = await context.cookies(["https://www.zhihu.com"])
+        cookies = await context.cookies([target_url])
         await context.close()
         sys.stdout.write(";".join(f"{item['name']}={item.get('value', '')}" for item in cookies))
     return 0
@@ -368,6 +410,10 @@ raise SystemExit(asyncio.run(main()))
     cmd = [sys.executable, "-c", script, str(profile_dir)]
     if browser_path:
         cmd.append(browser_path)
+    else:
+        cmd.append("")
+    cmd.append(platform_cookie_url(platform_key))
+    cmd.append(json.dumps(browser_runtime_args()))
     try:
         result = subprocess.run(
             cmd,
@@ -377,6 +423,7 @@ raise SystemExit(asyncio.run(main()))
             stderr=subprocess.PIPE,
             timeout=45,
             check=False,
+            env=browser_launch_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -606,9 +653,10 @@ def run_command(
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     log_dir = ensure_dir(log_dir)
-    env = os.environ.copy()
+    env = browser_launch_environment()
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("UV_CACHE_DIR", str(ensure_dir(UV_CACHE_ROOT)))
     if extra_env:
         env.update(extra_env)
     started = time.monotonic()
@@ -941,6 +989,8 @@ def row_for_record(
         "following_count": parse_int(first_value(record, "author_following_count", "following_count", "follow_count", "follows")),
         "posts_count": parse_int(first_value(record, "author_posts_count", "aweme_count", "posts_count", "note_count", "notes_count", "video_count")),
         "liked_count": parse_int(first_value(record, "author_liked_count", "total_favorited", "favorited_count")),
+        "followers_observed": record.get("followers_observed") is True,
+        "followers_source": first_value(record, "author_followers_source", "followers_source"),
     }
     return {
         "platform_key": platform_key,
@@ -983,6 +1033,164 @@ def row_for_record(
     }
 
 
+def formal_record_identity(platform_key: str, record: dict[str, Any]) -> str:
+    post_id = post_id_for_record(platform_key, record)
+    if post_id:
+        return f"{platform_key}:id:{post_id}"
+    canonical_url = canonical_url_for_record(platform_key, record)
+    return f"{platform_key}:url:{canonical_url}" if canonical_url else ""
+
+
+def validate_formal_record(platform_key: str, record: dict[str, Any], seen: set[str]) -> dict[str, Any]:
+    identity = formal_record_identity(platform_key, record)
+    reasons: list[str] = []
+    if not identity:
+        reasons.append("missing_identity")
+    elif identity in seen:
+        reasons.append("duplicate_identity")
+    if is_video_record(platform_key, record):
+        reasons.append("video_record")
+    if not content_text_for_record(platform_key, record).strip():
+        reasons.append("missing_content")
+    if not published_at_for_record(record):
+        reasons.append("missing_published_at")
+    if not first_value(record, "user_id", "creator_id", "creator_hash", "author_id", "mid"):
+        reasons.append("missing_author_id")
+    if not first_value(record, "nickname", "user_nickname", "user_name", "author_name", "author"):
+        reasons.append("missing_author_name")
+    content_images = [item for item in dedupe_image_urls(record) if item.get("role") == "content"]
+    if not content_images:
+        reasons.append("missing_content_image")
+
+    followers_count = parse_int(
+        first_value(
+            record,
+            "author_followers_count",
+            "followers_count",
+            "follower_count",
+            "fans_count",
+            "fans",
+            "followers",
+        )
+    )
+    followers_observed = record.get("followers_observed") is True
+    followers_source = str(first_value(record, "author_followers_source", "followers_source") or "")
+    if platform_key in FOLLOWERS_REQUIRED_PLATFORMS:
+        if followers_count is None:
+            reasons.append("missing_followers_count")
+        if not followers_observed:
+            reasons.append("followers_not_observed")
+        if not followers_source or followers_source == "missing":
+            reasons.append("missing_followers_source")
+        elif followers_source not in REQUIRED_FOLLOWER_SOURCES.get(platform_key, frozenset()):
+            reasons.append("untrusted_followers_source")
+
+    missing_metric_groups = [
+        "/".join(keys)
+        for keys in PLATFORM_REQUIRED_METRICS.get(platform_key, ())
+        if first_value(record, *keys) is None
+    ]
+    if missing_metric_groups:
+        reasons.append("missing_metrics:" + ",".join(missing_metric_groups))
+    return {
+        "valid": not reasons,
+        "identity": identity,
+        "reasons": reasons,
+        "followers_count": followers_count,
+        "followers_observed": followers_observed,
+        "followers_source": followers_source,
+        "content_image_count": len(content_images),
+    }
+
+
+def collect_formal_records(
+    summary: dict[str, Any],
+    *,
+    candidate_hard_limit: int,
+    target_valid_posts: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    seen: set[str] = set()
+    selected: list[dict[str, Any]] = []
+    reason_counts: Counter[str] = Counter()
+    candidate_count = 0
+    parse_errors = 0
+    stop = False
+    for platform_record in summary.get("records") or []:
+        output = platform_record.get("output") if isinstance(platform_record, dict) else {}
+        for path_value in (output or {}).get("jsonl_files") or []:
+            path = Path(path_value)
+            if item_type_from_path(path) != "contents":
+                continue
+            platform_key = platform_from_path(path)
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    if candidate_count >= candidate_hard_limit:
+                        stop = True
+                        break
+                    text = line.strip()
+                    if not text:
+                        continue
+                    candidate_count += 1
+                    try:
+                        record = json.loads(text)
+                    except json.JSONDecodeError:
+                        parse_errors += 1
+                        reason_counts["invalid_json"] += 1
+                        continue
+                    if not isinstance(record, dict):
+                        reason_counts["invalid_record_type"] += 1
+                        continue
+                    validation = validate_formal_record(platform_key, record, seen)
+                    if not validation["valid"]:
+                        reason_counts.update(validation["reasons"])
+                        continue
+                    seen.add(str(validation["identity"]))
+                    selected.append(
+                        {
+                            "platform": platform_key,
+                            "record": record,
+                            "identity": validation["identity"],
+                            "source_path": str(path),
+                            "line_number": line_number,
+                        }
+                    )
+                    if target_valid_posts > 0 and len(selected) >= target_valid_posts:
+                        stop = True
+                        break
+            if stop:
+                break
+        if stop:
+            break
+
+    target_met = target_valid_posts <= 0 or len(selected) >= target_valid_posts
+    if target_met and target_valid_posts > 0:
+        stop_reason = "target_met"
+    elif candidate_count >= candidate_hard_limit:
+        stop_reason = "candidate_hard_limit_reached"
+    else:
+        stop_reason = "source_exhausted"
+    validation_summary = {
+        "candidate_hard_limit": candidate_hard_limit,
+        "candidate_count": candidate_count,
+        "target_valid_posts": target_valid_posts,
+        "valid_unique_count": len(selected),
+        "target_met": target_met,
+        "stop_reason": stop_reason,
+        "parse_errors": parse_errors,
+        "invalid_reason_counts": dict(sorted(reason_counts.items())),
+        "valid_identities": [item["identity"] for item in selected],
+        "valid_samples": [
+            {
+                "identity": item["identity"],
+                "source_path": item["source_path"],
+                "line_number": item["line_number"],
+            }
+            for item in selected[:5]
+        ],
+    }
+    return validation_summary, selected
+
+
 def find_existing_post(conn: sqlite3.Connection, row: dict[str, Any]) -> int | None:
     if row.get("platform_post_id"):
         found = conn.execute(
@@ -1001,7 +1209,7 @@ def find_existing_post(conn: sqlite3.Connection, row: dict[str, Any]) -> int | N
     return None
 
 
-def upsert_web_post(conn: sqlite3.Connection, row: dict[str, Any]) -> int:
+def upsert_web_post(conn: sqlite3.Connection, row: dict[str, Any]) -> tuple[int, bool]:
     image_items = row.pop("_image_items", [])
     existing_id = find_existing_post(conn, row)
     columns = list(row)
@@ -1025,108 +1233,44 @@ def upsert_web_post(conn: sqlite3.Connection, row: dict[str, Any]) -> int:
             """,
             (post_id, index, item["url"], item["role"], None, json_dump(item)),
         )
-    return post_id
+    return post_id, existing_id is None
 
 
-def import_jsonl_file(
-    conn: sqlite3.Connection,
-    path: Path,
-    *,
-    keyword: str,
-    captured_at: str,
-    artifact_dir: str,
-    max_records: int | None = None,
+def import_valid_records(
+    summary: dict[str, Any],
+    selected: list[dict[str, Any]],
+    db_path: Path,
 ) -> dict[str, Any]:
-    platform_key = platform_from_path(path)
-    imported = 0
-    skipped = 0
-    skipped_video = 0
-    parse_errors = 0
-    if platform_key not in PLATFORMS:
-        return {
-            "path": str(path),
-            "platform": platform_key,
-            "imported": 0,
-            "skipped": 0,
-            "skipped_video": 0,
-            "parse_errors": 0,
-            "reason": "unsupported_platform",
-        }
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            if max_records is not None and imported >= max_records:
-                break
-            text = line.strip()
-            if not text:
-                continue
-            try:
-                record = json.loads(text)
-            except json.JSONDecodeError:
-                parse_errors += 1
-                continue
-            if not isinstance(record, dict):
-                skipped += 1
-                continue
-            if is_video_record(platform_key, record):
-                skipped_video += 1
-                skipped += 1
-                continue
-            row = row_for_record(platform_key, record, artifact_dir=artifact_dir, captured_at=captured_at, keyword=keyword)
-            if not row["platform_post_id"] and not row["canonical_url"]:
-                skipped += 1
-                continue
-            upsert_web_post(conn, row)
-            imported += 1
-    return {
-        "path": str(path),
-        "platform": platform_key,
-        "imported": imported,
-        "skipped": skipped,
-        "skipped_video": skipped_video,
-        "parse_errors": parse_errors,
-    }
-
-
-def import_to_db(summary: dict[str, Any], db_path: Path, *, max_records: int | None = None) -> dict[str, Any]:
     db_path = ensure_parent(db_path)
     captured_at = str(summary.get("captured_at") or datetime.now(timezone.utc).isoformat(timespec="seconds"))
     keyword = str(summary.get("keyword") or "")
-    files: list[Path] = []
-    for record in summary.get("records") or []:
-        output = record.get("output") if isinstance(record, dict) else {}
-        for path_value in (output or {}).get("jsonl_files") or []:
-            files.append(Path(path_value))
-    results: list[dict[str, Any]] = []
+    processed = inserted = updated = 0
     with sqlite3.connect(db_path) as conn:
         db_sync = ensure_web_schema(conn)
-        remaining = max_records
-        for path in files:
-            if remaining is not None and remaining <= 0:
-                break
-            result = import_jsonl_file(
-                conn,
-                path,
-                keyword=keyword,
-                captured_at=captured_at,
+        for item in selected:
+            record = item["record"]
+            platform_key = str(item["platform"])
+            row = row_for_record(
+                platform_key,
+                record,
                 artifact_dir=str(Path(str(summary.get("batch_dir") or "")).resolve()),
-                max_records=remaining,
+                captured_at=captured_at,
+                keyword=keyword,
             )
-            if remaining is not None:
-                remaining -= int(result.get("imported") or 0)
-            results.append(
-                result
-            )
+            _, was_inserted = upsert_web_post(conn, row)
+            processed += 1
+            inserted += int(was_inserted)
+            updated += int(not was_inserted)
         conn.commit()
     return {
         "db": str(db_path),
         "db_sync": db_sync,
-        "jsonl_files": len(files),
-        "imported": sum(int(item.get("imported", 0)) for item in results),
-        "skipped": sum(int(item.get("skipped", 0)) for item in results),
-        "skipped_video": sum(int(item.get("skipped_video", 0)) for item in results),
-        "parse_errors": sum(int(item.get("parse_errors", 0)) for item in results),
-        "import_limit": max_records,
-        "files": results,
+        "processed_rows": processed,
+        "inserted_rows": inserted,
+        "updated_rows": updated,
+        "skipped": 0,
+        "skipped_video": 0,
+        "parse_errors": 0,
     }
 
 
@@ -1166,24 +1310,90 @@ def normalize_bilibili_article_record(item: dict[str, Any], keyword: str) -> dic
     return record
 
 
-def fetch_bilibili_article_page(keyword: str, page: int) -> list[dict[str, Any]]:
+def fetch_bilibili_wbi_keys(cookie_header: str = "") -> tuple[str, str]:
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.bilibili.com/"}
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    request = Request(
+        "https://api.bilibili.com/x/web-interface/nav",
+        headers=headers,
+    )
+    with urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    data = payload.get("data") or {}
+    wbi_img = data.get("wbi_img") or {}
+    img_url = str(wbi_img.get("img_url") or "")
+    sub_url = str(wbi_img.get("sub_url") or "")
+    if not img_url or not sub_url:
+        raise RuntimeError("bilibili nav response missing WBI keys")
+    return Path(img_url).stem, Path(sub_url).stem
+
+
+def sign_bilibili_wbi_params(params: dict[str, Any], img_key: str, sub_key: str) -> dict[str, str]:
+    mixin_key = img_key + sub_key
+    salt = "".join(mixin_key[index] for index in BILIBILI_WBI_MIXIN_TABLE)[:32]
+    signed = {**params, "wts": int(time.time())}
+    filtered = {
+        key: "".join(character for character in str(value) if character not in "!'()*")
+        for key, value in sorted(signed.items())
+    }
+    query = urlencode(filtered)
+    filtered["w_rid"] = md5((query + salt).encode("utf-8")).hexdigest()
+    return filtered
+
+
+def fetch_bilibili_article_page(
+    keyword: str,
+    page: int,
+    *,
+    wbi_keys: tuple[str, str] | None = None,
+    cookie_header: str = "",
+) -> list[dict[str, Any]]:
     params = {
         "keyword": keyword,
         "page": page,
         "page_size": BILIBILI_ARTICLE_PAGE_SIZE,
         "search_type": "article",
     }
+    img_key, sub_key = wbi_keys or fetch_bilibili_wbi_keys(cookie_header)
+    signed_params = sign_bilibili_wbi_params(params, img_key, sub_key)
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Referer": "https://search.bilibili.com/article?keyword=" + quote(keyword),
     }
-    request = Request(BILIBILI_ARTICLE_SEARCH_URL + "?" + urlencode(params), headers=headers)
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    request = Request(BILIBILI_ARTICLE_SEARCH_URL + "?" + urlencode(signed_params), headers=headers)
     with urlopen(request, timeout=30) as response:
         payload = json.loads(response.read().decode("utf-8", errors="replace"))
     if payload.get("code") != 0:
         raise RuntimeError(f"bilibili article search failed: {payload.get('code')} {payload.get('message')}")
     result = (payload.get("data") or {}).get("result") or []
     return [item for item in result if isinstance(item, dict)]
+
+
+def fetch_bilibili_follower_count(creator_id: str, cookie_header: str = "") -> int | None:
+    if not creator_id:
+        return None
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": f"https://space.bilibili.com/{creator_id}",
+    }
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    request = Request(
+        BILIBILI_RELATION_STAT_URL + "?" + urlencode({"vmid": creator_id}),
+        headers=headers,
+    )
+    with urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    if payload.get("code") != 0:
+        return None
+    value = (payload.get("data") or {}).get("follower")
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> dict[str, Any]:
@@ -1199,34 +1409,112 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
         "bilibili_article_search",
         "--keyword",
         args.keyword,
-        "--crawler-max-notes",
-        str(args.mediacrawler_max_notes),
+        "--candidate-hard-limit",
+        str(args.candidate_hard_limit),
     ]
 
     started = time.monotonic()
     records: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    follower_cache: dict[str, int | None] = {}
+    valid_seen: set[str] = set()
+    valid_count = 0
+    stagnant_pages = 0
+    state_path = os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()
     stderr = ""
     returncode = 0
     try:
-        max_records = max(1, int(args.mediacrawler_max_notes or 1))
+        max_records = args.candidate_hard_limit
+        target_valid = max(1, int(args.target_valid_posts or max_records))
         max_pages = max(1, (max_records + BILIBILI_ARTICLE_PAGE_SIZE - 1) // BILIBILI_ARTICLE_PAGE_SIZE)
+        browser_path = discover_cdp_browser_path()
+        cookie_export = export_profile_cookies(platform_key, browser_path)
+        cookie_header = str((cookie_export or {}).get("cookie_header") or "")
+        wbi_keys = fetch_bilibili_wbi_keys(cookie_header)
         for page in range(1, max_pages + 1):
-            page_items = fetch_bilibili_article_page(args.keyword, page)
+            page_items = fetch_bilibili_article_page(
+                args.keyword,
+                page,
+                wbi_keys=wbi_keys,
+                cookie_header=cookie_header,
+            )
             if not page_items:
                 break
+            valid_before = valid_count
             for item in page_items:
                 normalized = normalize_bilibili_article_record(item, args.keyword)
                 if not normalized:
                     continue
+                creator_id = str(normalized.get("user_id") or "")
+                if creator_id:
+                    if creator_id not in follower_cache:
+                        try:
+                            follower_cache[creator_id] = fetch_bilibili_follower_count(creator_id, cookie_header)
+                        except Exception:
+                            follower_cache[creator_id] = None
+                        time.sleep(0.15)
+                    follower_count = follower_cache[creator_id]
+                    normalized["followers_observed"] = follower_count is not None
+                    normalized["author_followers_source"] = (
+                        "relation_stat" if follower_count is not None else "missing"
+                    )
+                    if follower_count is not None:
+                        normalized["followers_count"] = follower_count
+                        normalized["author_followers_count"] = follower_count
                 post_id = str(normalized.get("content_id") or "")
                 if post_id in seen_ids:
                     continue
                 seen_ids.add(post_id)
                 records.append(normalized)
-                if len(records) >= max_records:
+                validation = validate_formal_record(platform_key, normalized, valid_seen)
+                if validation["valid"]:
+                    valid_seen.add(str(validation["identity"]))
+                    valid_count += 1
+                if len(records) >= max_records or valid_count >= target_valid:
                     break
-            if len(records) >= max_records:
+            stagnant_pages = stagnant_pages + 1 if valid_count == valid_before else 0
+            if valid_count >= target_valid:
+                batch_stop_reason = "target_met"
+            elif len(records) >= max_records:
+                batch_stop_reason = "candidate_hard_limit_reached"
+            elif stagnant_pages >= max(1, args.max_stagnant_batches):
+                batch_stop_reason = "stagnated"
+            else:
+                batch_stop_reason = "continue"
+            if state_path:
+                frozen_state = FrozenExecutionState(state_path)
+                frozen_state.append_event(
+                    "adaptive_batch_completed",
+                    {
+                        "platform": platform_key,
+                        "batch_no": page,
+                        "candidate_count": len(records),
+                        "valid_unique_count": valid_count,
+                        "new_valid_count": valid_count - valid_before,
+                        "stagnant_batches": stagnant_pages,
+                        "target": target_valid,
+                        "hard_limit": max_records,
+                        "stop_reason": batch_stop_reason,
+                    },
+                )
+                if batch_stop_reason != "continue":
+                    frozen_state.append_event(
+                        "adaptive_search_stopped",
+                        {
+                            "platform": platform_key,
+                            "candidate_count": len(records),
+                            "valid_unique_count": valid_count,
+                            "target": target_valid,
+                            "hard_limit": max_records,
+                            "stagnant_batches": stagnant_pages,
+                            "stop_reason": batch_stop_reason,
+                        },
+                    )
+            if (
+                len(records) >= max_records
+                or valid_count >= target_valid
+                or stagnant_pages >= max(1, args.max_stagnant_batches)
+            ):
                 break
     except Exception as exc:
         returncode = 1
@@ -1307,13 +1595,17 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
         "--save_data_path",
         str(save_path),
         "--crawler_max_notes_count",
-        str(args.mediacrawler_max_notes),
+        str(args.candidate_hard_limit),
         "--max_concurrency_num",
         "1",
         "--enable_ip_proxy",
         "false",
     ]
-    extra_env: dict[str, str] = {}
+    extra_env: dict[str, str] = {
+        "TRIPPOSTCOLLECT_TARGET_VALID_POSTS": str(max(1, args.target_valid_posts or args.candidate_hard_limit)),
+        "TRIPPOSTCOLLECT_CANDIDATE_HARD_LIMIT": str(args.candidate_hard_limit),
+        "TRIPPOSTCOLLECT_MAX_STAGNANT_BATCHES": str(max(1, args.max_stagnant_batches)),
+    }
     login_state: dict[str, Any] | None = None
     if platform_key == "xhs":
         xhs_storage_path = storage_snapshot_path(platform_key)
@@ -1369,7 +1661,7 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
             {
                 "TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS": "1",
                 "TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES": "1",
-                "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": "30",
+                "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": str(args.candidate_hard_limit),
                 "TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS": "0.25",
             }
         )
@@ -1467,6 +1759,20 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
         for sample in samples[:2]:
             lines.append(f"- `{json.dumps(sample, ensure_ascii=False)}`")
         lines.append("")
+    validation = summary.get("formal_validation") or {}
+    if validation:
+        lines.extend(
+            [
+                "## 正式校验",
+                "",
+                f"- 实际候选：`{validation.get('candidate_count', 0)}` / 硬上限 `{validation.get('candidate_hard_limit', 0)}`",
+                f"- 有效唯一图文：`{validation.get('valid_unique_count', 0)}` / 目标 `{validation.get('target_valid_posts', 0)}`",
+                f"- 目标达成：`{validation.get('target_met', False)}`",
+                f"- 停止原因：`{validation.get('stop_reason', '')}`",
+                f"- 无效原因计数：`{json.dumps(validation.get('invalid_reason_counts') or {}, ensure_ascii=False, sort_keys=True)}`",
+                "",
+            ]
+        )
     import_result = summary.get("import_result") or {}
     if import_result:
         db_sync = import_result.get("db_sync") or {}
@@ -1477,7 +1783,9 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
                 "",
                 f"- 数据库：`{db_value}`",
                 f"- JSONL 文件数：`{import_result.get('jsonl_files', 0)}`",
-                f"- 导入记录：`{import_result.get('imported', 0)}`",
+                f"- 处理行：`{import_result.get('processed_rows', 0)}`",
+                f"- 新增行：`{import_result.get('inserted_rows', 0)}`",
+                f"- 更新行：`{import_result.get('updated_rows', 0)}`",
                 f"- 跳过记录：`{import_result.get('skipped', 0)}`",
                 f"- 跳过视频记录：`{import_result.get('skipped_video', 0)}`",
                 f"- 解析错误：`{import_result.get('parse_errors', 0)}`",
@@ -1490,13 +1798,27 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
 
 def main() -> int:
     args = parse_args()
+    if (
+        args.target_valid_posts < 0
+        or args.candidate_hard_limit <= 0
+        or args.max_stagnant_batches <= 0
+    ):
+        raise SystemExit("--candidate-hard-limit must be positive; other record limits cannot be negative")
+    target_valid_posts = args.target_valid_posts
+    candidate_hard_limit = args.candidate_hard_limit
+    if target_valid_posts > candidate_hard_limit:
+        raise SystemExit("--target-valid-posts cannot exceed --candidate-hard-limit")
+    if args.required_fields_profile != "image_post_with_followers_v1":
+        raise SystemExit(f"unsupported required fields profile: {args.required_fields_profile}")
+    if not args.no_import and target_valid_posts <= 0:
+        raise SystemExit("--target-valid-posts must be positive unless --no-import is used")
     if args.get_media:
         raise SystemExit("--get-media 已禁用：当前项目只采集图文内容和图片 URL，不下载媒体或视频。")
     ensure_prerequisites()
     platforms = selected_platforms(args.platforms)
     if args.download_images and any(platform != "xhs" for platform in platforms):
         raise SystemExit("--download-images 目前只允许 xhs：其他平台可能混入视频媒体。")
-    batch_dir = ensure_dir(Path(args.output_dir).expanduser() / utc_stamp())
+    batch_dir = ensure_dir(Path(args.output_dir).expanduser() / utc_stamp()).resolve()
 
     records = []
     for platform_key in platforms:
@@ -1512,18 +1834,47 @@ def main() -> int:
         "failed_count": sum(1 for record in records if not record["ok"]),
         "records": records,
     }
+    validation, valid_records = collect_formal_records(
+        summary,
+        candidate_hard_limit=candidate_hard_limit,
+        target_valid_posts=target_valid_posts,
+    )
+    summary["required_fields_profile"] = args.required_fields_profile
+    summary["formal_validation"] = validation
     if args.no_import:
-        db_sync = bootstrap_database(Path(args.db).expanduser())
-        summary["import_result"] = {"skipped": True, "reason": "no_import", "db_sync": db_sync}
+        summary["import_result"] = {"skipped": True, "reason": "no_import"}
+    elif target_valid_posts > 0 and not validation["target_met"]:
+        summary["import_result"] = {
+            "skipped": True,
+            "reason": validation["stop_reason"],
+            "processed_rows": 0,
+            "inserted_rows": 0,
+            "updated_rows": 0,
+        }
     else:
-        limit = args.import_limit if args.import_limit > 0 else None
-        summary["import_result"] = import_to_db(summary, Path(args.db).expanduser(), max_records=limit)
+        summary["import_result"] = import_valid_records(
+            summary,
+            valid_records,
+            Path(args.db).expanduser(),
+        )
+    processed = int((summary.get("import_result") or {}).get("processed_rows") or 0)
+    summary["target_valid_posts"] = target_valid_posts
+    summary["import_target_met"] = (
+        validation["target_met"]
+        and (args.no_import or target_valid_posts <= 0 or processed >= target_valid_posts)
+    )
+    if not summary["import_target_met"]:
+        summary["failure_reason"] = (
+            "import_target_not_met: "
+            f"valid_unique={validation['valid_unique_count']} required={target_valid_posts} "
+            f"stop_reason={validation['stop_reason']}"
+        )
     summary_path = batch_dir / "summary.json"
     report_path = batch_dir / "summary.md"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     write_markdown(summary, report_path)
     print(json.dumps({"summary": str(summary_path), "report": str(report_path), "batch_dir": str(batch_dir), **summary}, ensure_ascii=False, indent=2))
-    return 0 if summary["failed_count"] == 0 else 1
+    return 0 if summary["failed_count"] == 0 and summary["import_target_met"] else 2
 
 
 if __name__ == "__main__":

@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from db_bootstrap import bootstrap_database
-from project_paths import DEFAULT_CONFIG, DEFAULT_DB, PROJECT_ROOT, ensure_dir, ensure_parent, runtime_dir
+from trippostcollect.core.paths import DEFAULT_CONFIG, DEFAULT_DB, PROJECT_ROOT, ensure_dir, ensure_parent, runtime_dir
+from trippostcollect.db.bootstrap import bootstrap_database
 
 
 ROOT = PROJECT_ROOT
@@ -24,8 +24,18 @@ DEFAULT_OUTPUT = runtime_dir("info_collection_benchmarks")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run crawl/import benchmark for configured targets.")
     parser.add_argument("--keyword", default="烟台旅游", help="Keyword for structured-search targets.")
-    parser.add_argument("--per-target", type=int, default=10, help="Requested records per structured-search target.")
-    parser.add_argument("--fetch-multiplier", type=int, default=4, help="Candidate crawl multiplier before import limiting.")
+    parser.add_argument(
+        "--per-target",
+        type=int,
+        default=0,
+        help="Override the formal valid-post target. 0 reads target_valid_posts from crawl_targets.json.",
+    )
+    parser.add_argument(
+        "--fetch-multiplier",
+        type=int,
+        default=0,
+        help="Override candidate hard limit. 0 reads candidate_hard_limit from crawl_targets.json.",
+    )
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path.")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Crawl target config JSON.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Benchmark output root.")
@@ -123,6 +133,12 @@ def load_subprocess_json(path: Path) -> dict[str, Any]:
 def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_dir: Path, db_path: Path) -> dict[str, Any]:
     params = job.get("params") or {}
     platform = str(params.get("platform") or job["site_key"])
+    target_count = int(args.per_target or params.get("target_valid_posts") or 0)
+    if target_count <= 0:
+        raise ValueError(f"Missing formal target_valid_posts for {job['job_key']}")
+    candidate_hard_limit = int(params.get("candidate_hard_limit") or target_count)
+    if args.fetch_multiplier > 0:
+        candidate_hard_limit = max(target_count, target_count * args.fetch_multiplier)
     timeout = max(int(params.get("timeout_per_platform") or 180), int(args.timeout_per_target))
     if platform == "xhs":
         timeout = max(timeout, 600)
@@ -139,8 +155,10 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         platform,
         "--keyword",
         args.keyword,
-        "--mediacrawler-max-notes",
-        str(max(args.per_target, args.per_target * max(1, args.fetch_multiplier))),
+        "--candidate-hard-limit",
+        str(candidate_hard_limit),
+        "--target-valid-posts",
+        str(target_count),
         "--timeout-per-platform",
         str(timeout),
         "--login-type",
@@ -149,8 +167,6 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         str(db_path),
         "--output-dir",
         str(mc_output),
-        "--import-limit",
-        str(args.per_target),
     ]
     if bool(params.get("download_images")):
         command.append("--download-images")
@@ -183,21 +199,26 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
     record = platform_summary(summary, platform)
     output = record.get("output") or {}
     import_result = summary.get("import_result") or {}
-    imported = int(import_result.get("imported") or 0)
+    formal_validation = summary.get("formal_validation") or {}
+    imported = int(import_result.get("processed_rows") or 0)
     db_written = max(0, after_count - before_count)
     average = round(elapsed / imported, 3) if imported else None
     db_average = round(elapsed / db_written, 3) if db_written else None
+    valid_unique = int(formal_validation.get("valid_unique_count") or 0)
+    target_met = bool(formal_validation.get("target_met")) and valid_unique >= target_count and not timed_out
     return {
         "job_key": job["job_key"],
         "site_key": job["site_key"],
         "platform": platform,
         "job_kind": job["job_kind"],
-        "status": record.get("status") or ("timed_out" if timed_out else "failed"),
-        "ok": bool(record.get("ok")) and imported > 0 and not timed_out,
-        "requested_records": args.per_target,
+        "status": "completed" if target_met else ("timed_out" if timed_out else "target_not_met"),
+        "ok": bool(record.get("ok")) and target_met,
+        "requested_records": target_count,
         "record_mode": "keyword_search_post",
-        "crawler_max_notes": max(args.per_target, args.per_target * max(1, args.fetch_multiplier)),
+        "candidate_hard_limit": candidate_hard_limit,
         "processed_import_rows": imported,
+        "valid_unique_records": valid_unique,
+        "formal_stop_reason": str(formal_validation.get("stop_reason") or ""),
         "imported_records": db_written,
         "db_keyword_rows_before": before_count,
         "db_keyword_rows_after": after_count,
@@ -342,7 +363,7 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
         "# 信息收集入库效率基准测试",
         "",
         f"- 结构化搜索关键词：`{summary['keyword']}`",
-        f"- 结构化搜索每目标请求记录数：`{summary['per_target']}`",
+        f"- 结构化搜索每目标覆盖值：`{summary['per_target_override'] or '读取正式配置'}`",
         f"- 数据库：`{summary['db']}`",
         "",
         "| 目标 | 类型 | 模式 | 状态 | DB新增 | 处理行 | 非视频内容 | 跳过视频 | 用时(s) | 平均(s/处理条) |",
@@ -369,6 +390,8 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
 
 def main() -> int:
     args = parse_args()
+    if args.per_target < 0 or args.fetch_multiplier < 0:
+        raise SystemExit("--per-target and --fetch-multiplier must be zero or positive")
     db_path = ensure_parent(Path(args.db).expanduser())
     bootstrap_database(db_path)
     config = load_json(Path(args.config).expanduser())
@@ -388,7 +411,7 @@ def main() -> int:
         "started_at": batch_dir.name,
         "finished_at": utc_now(),
         "keyword": args.keyword,
-        "per_target": args.per_target,
+        "per_target_override": args.per_target or None,
         "db": str(db_path),
         "batch_dir": str(batch_dir),
         "target_count": len(records),
@@ -409,6 +432,7 @@ def main() -> int:
         "report": str(report_path),
         "db": str(db_path),
         "keyword": args.keyword,
+        "per_target_override": args.per_target or None,
         "total_imported_records": total_imported,
         "total_processed_records": total_processed,
         "overall_avg_seconds_per_imported_record": summary["overall_avg_seconds_per_imported_record"],
@@ -425,7 +449,7 @@ def main() -> int:
         ],
     }
     print(json.dumps(compact, ensure_ascii=False, indent=2))
-    return 0 if any(record.get("processed_import_rows") for record in records) else 1
+    return 0 if records and all(record.get("ok") for record in records) else 1
 
 
 if __name__ == "__main__":

@@ -13,8 +13,9 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, async_playwright
 
+from browser_runtime import browser_launch_environment, browser_runtime_args
 from mediacrawler_crawl import discover_cdp_browser_path
-from project_paths import MEDIACRAWLER_DIR, MEDIACRAWLER_LOGIN_OUTPUT, PROJECT_ROOT, ensure_dir
+from trippostcollect.core.paths import MEDIACRAWLER_DIR, MEDIACRAWLER_LOGIN_OUTPUT, PROJECT_ROOT, ensure_dir
 
 
 ROOT = PROJECT_ROOT
@@ -256,7 +257,9 @@ async def launch_login_context(playwright, profile_dir: Path, browser_path: str 
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
             "--no-sandbox",
+            *browser_runtime_args(),
         ],
+        "env": browser_launch_environment(),
     }
     if browser_path:
         kwargs["executable_path"] = browser_path

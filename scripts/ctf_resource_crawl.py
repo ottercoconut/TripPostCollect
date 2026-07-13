@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Page, Request, Response, TimeoutError as PlaywrightTimeoutError
 
+from browser_runtime import browser_launch_environment, browser_runtime_args
 from ctf_browser_resilience import (
     clean_douyin_profile_cookies,
     clear_douyin_context_cookies,
@@ -27,8 +28,8 @@ from ctf_browser_resilience import (
 from ctf_scrapling_preflight import run_scrapling_static_preflight, should_preflight
 from crawl_policy import CrawlPolicyBlocked, site_request_guard, varied_wait_seconds
 from human_flow import dwell_on_detail, install_runtime_hints, load_behavior_profile
-from project_paths import CTF_BROWSER_PROFILE_ROOT, CTF_RESOURCE_OUTPUT, PROJECT_ROOT, ensure_dir
-from web_sites import SITES, get_site, site_keys
+from trippostcollect.core.paths import CTF_BROWSER_PROFILE_ROOT, CTF_RESOURCE_OUTPUT, PROJECT_ROOT, ensure_dir
+from trippostcollect.platforms.registry import SITES, get_site, site_keys
 
 
 ROOT = PROJECT_ROOT
@@ -427,7 +428,12 @@ async def open_context(playwright, target: dict[str, Any], args: argparse.Namesp
         service_workers="allow",
         ignore_https_errors=True,
         extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
-        args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"],
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            *browser_runtime_args(),
+        ],
+        env=browser_launch_environment(),
         ignore_default_args=["--enable-automation"],
     )
 

@@ -9,7 +9,16 @@ from typing import Any
 
 
 CAPTCHA_PATTERNS = re.compile(r"验证码|人机验证|安全验证|captcha|turnstile|geetest|滑块|wappoc_appmsgcaptcha", re.I)
-LOGIN_PATTERNS = re.compile(r"登录后|请登录|需要登录|signin|login_required|passport|未登录", re.I)
+LOGIN_PATTERNS = re.compile(r"登录后|请登录|需要登录|(?<![A-Za-z])sign[ _-]?in(?![A-Za-z])|login_required|passport|未登录", re.I)
+RUNTIME_PERMISSION_PATTERNS = re.compile(
+    r"Failed to initialize cache|Operation not permitted|Permission denied|browser_runtime_permission",
+    re.I,
+)
+BROWSER_LAUNCH_PATTERNS = re.compile(
+    r"TargetClosedError|BrowserType\.launch|launch_persistent_context|SIGABRT|signal 6|crashpad|kill EPERM",
+    re.I,
+)
+IMPORT_TARGET_PATTERNS = re.compile(r"import_target_not_met", re.I)
 RATE_PATTERNS = re.compile(r"429|too many requests|rate limit|访问过于频繁|请求过于频繁|操作频繁", re.I)
 TIMEOUT_PATTERNS = re.compile(r"Timeout|timeout|ETIMEDOUT|Navigation timeout|net::ERR_TIMED_OUT", re.I)
 NO_IMAGE_PATTERNS = re.compile(r"No image-bearing|no_content_images|skipped_no_image", re.I)
@@ -80,6 +89,29 @@ def classify_attempt(
             "reason": "completed",
         }
 
+    runtime_permission = RUNTIME_PERMISSION_PATTERNS.search(text)
+    if runtime_permission and (
+        "uv" in text.lower()
+        or "browser_runtime_permission" in text.lower()
+        or BROWSER_LAUNCH_PATTERNS.search(text)
+    ):
+        return {
+            "status": "failed_final",
+            "failure_type": "runtime_permission_error",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": "local_runtime_path_is_not_writable",
+        }
+
+    if BROWSER_LAUNCH_PATTERNS.search(text):
+        return {
+            "status": "retry_wait",
+            "failure_type": "browser_launch_failed",
+            "retryable": True,
+            "wait_seconds": 60,
+            "reason": "chromium_or_playwright_launch_failed",
+        }
+
     if bool(markers.get("captcha_or_verify")) or CAPTCHA_PATTERNS.search(text):
         return {
             "status": "captcha_detected",
@@ -141,6 +173,15 @@ def classify_attempt(
             "retryable": False,
             "wait_seconds": 0,
             "reason": "parser_or_extractor_failed",
+        }
+
+    if IMPORT_TARGET_PATTERNS.search(text):
+        return {
+            "status": "retry_wait",
+            "failure_type": "import_target_not_met",
+            "retryable": True,
+            "wait_seconds": 600,
+            "reason": "formal_import_target_not_reached",
         }
 
     return {

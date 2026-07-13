@@ -30,11 +30,13 @@ from mediacrawler_crawl import (
     summarize_output,
     utc_stamp,
 )
-from project_paths import OUTPUTS_ROOT
+from browser_runtime import browser_launch_environment, browser_runtime_args
+from trippostcollect.core.paths import OUTPUTS_ROOT
 
 
 DEFAULT_OUTPUT = OUTPUTS_ROOT / "mediacrawler_batch_validation"
 REQUIRED_METRIC_KEYS = ("liked_count", "collected_count", "comment_count", "share_count")
+EXPECTED_FOLLOWER_SOURCES = {"xhs": "creator_profile", "douyin": "creator_profile"}
 XHS_HOME_URL = "https://www.xiaohongshu.com"
 XHS_COOKIE_URLS = ("https://www.xiaohongshu.com", "https://www.rednote.com")
 XHS_SECURITY_TEXTS = ("请通过验证", "安全验证", "验证码", "身份验证", "操作频繁", "环境异常", "风险")
@@ -91,6 +93,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=2.0,
         help="Candidate records requested per Xiaohongshu batch, relative to --batch-size.",
+    )
+    parser.add_argument(
+        "--douyin-candidate-multiplier",
+        type=float,
+        default=1.0,
+        help="Candidate records requested per Douyin batch, relative to --batch-size.",
     )
     parser.add_argument(
         "--xhs-inter-batch-delay-seconds",
@@ -154,6 +162,16 @@ def validate_record(platform_key: str, record: dict[str, Any], seen: set[str]) -
     author_id = first_value(record, "user_id", "creator_id", "creator_hash", "author_id")
     author_name = first_value(record, "nickname", "user_nickname", "user_name", "author_name")
     published_at = published_at_for_record(record)
+    followers_count = first_value(
+        record,
+        "author_followers_count",
+        "followers_count",
+        "follower_count",
+        "fans_count",
+        "fans",
+    )
+    followers_observed = record.get("followers_observed") is True
+    followers_source = first_value(record, "author_followers_source", "followers_source")
 
     missing: list[str] = []
     if record.get("__invalid_json__"):
@@ -176,6 +194,14 @@ def validate_record(platform_key: str, record: dict[str, Any], seen: set[str]) -
         missing.append("published_at")
     if not images:
         missing.append("content_image_url")
+    if followers_count in (None, ""):
+        missing.append("author_followers_count")
+    if not followers_observed:
+        missing.append("followers_observed")
+    if followers_source in (None, "", "missing"):
+        missing.append("author_followers_source")
+    elif followers_source != EXPECTED_FOLLOWER_SOURCES.get(platform_key):
+        missing.append("trusted_author_followers_source")
 
     missing_metrics = [key for key in REQUIRED_METRIC_KEYS if metric_value(record, key) in (None, "")]
     if missing_metrics:
@@ -192,6 +218,9 @@ def validate_record(platform_key: str, record: dict[str, Any], seen: set[str]) -
         "author_name_present": bool(author_name),
         "published_at": published_at,
         "content_image_count": len(images),
+        "followers_count": followers_count,
+        "followers_observed": followers_observed,
+        "followers_source": followers_source,
         "metric_values": {key: metric_value(record, key) for key in REQUIRED_METRIC_KEYS},
         "sample": {
             "title": first_value(record, "title"),
@@ -284,13 +313,17 @@ def command_for_batch(
     xhs_initial_delay_seconds: float,
     xhs_login_wait_seconds: int,
     xhs_candidate_multiplier: float,
+    douyin_candidate_multiplier: float,
 ) -> tuple[list[str], dict[str, str]]:
     platform = PLATFORMS[platform_key]
     crawler_candidate_count = batch_size
     if platform_key == "xhs":
         crawler_candidate_count = max(batch_size, int(round(batch_size * max(1.0, xhs_candidate_multiplier))))
     elif platform_key == "douyin":
-        crawler_candidate_count = max(batch_size, batch_size * batch_no)
+        crawler_candidate_count = max(
+            batch_size,
+            int(round(batch_size * batch_no * max(1.0, douyin_candidate_multiplier))),
+        )
     cmd = [
         "uv",
         "run",
@@ -351,7 +384,7 @@ def command_for_batch(
             {
                 "TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS": "1",
                 "TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES": "1",
-                "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": str(batch_size),
+                "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": str(crawler_candidate_count),
                 "TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS": "0.25",
             }
         )
@@ -632,7 +665,9 @@ async def run_xhs_preflight(args: argparse.Namespace, preflight_dir: Path) -> di
                 "--disable-backgrounding-occluded-windows",
                 "--disable-renderer-backgrounding",
                 "--no-sandbox",
+                *browser_runtime_args(),
             ],
+            "env": browser_launch_environment(),
         }
         if browser_path:
             launch_kwargs["executable_path"] = browser_path
@@ -827,6 +862,7 @@ def main() -> int:
                 xhs_initial_delay_seconds=args.xhs_initial_delay_seconds,
                 xhs_login_wait_seconds=args.xhs_login_wait_seconds,
                 xhs_candidate_multiplier=args.xhs_candidate_multiplier,
+                douyin_candidate_multiplier=args.douyin_candidate_multiplier,
             )
             print(f"[batch] {platform_key} batch={batch_no} start={page_start} cmd={shlex.join(cmd)}", flush=True)
             run = run_command(cmd, MEDIACRAWLER_DIR, args.timeout_per_batch, log_dir, extra_env=env)

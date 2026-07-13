@@ -11,8 +11,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from project_paths import CRAWL_POLICY_STATE, LOCK_DIR, PROJECT_ROOT, ensure_dir, ensure_parent
-from web_sites import WebSite
+from trippostcollect.core.paths import CRAWL_POLICY_STATE, LOCK_DIR, PROJECT_ROOT, ensure_dir, ensure_parent
+from trippostcollect.platforms.registry import WebSite
 
 
 ROOT = PROJECT_ROOT
