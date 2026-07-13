@@ -32,7 +32,7 @@ dev = [
 where = ["src"]
 
 [tool.pytest.ini_options]
-testpaths = ["apps/admin_api/tests"]
+testpaths = ["apps/admin_api/tests", "tests"]
 addopts = "-ra"
 
 [tool.ruff]

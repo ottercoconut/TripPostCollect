@@ -22,6 +22,7 @@ MEDIACRAWLER_DIR = TOOLS_ROOT / "MediaCrawler"
 MEDIACRAWLER_RUNS_OUTPUT = OUTPUTS_ROOT / "mediacrawler_runs"
 MEDIACRAWLER_LOGIN_OUTPUT = OUTPUTS_ROOT / "mediacrawler_login_warmup"
 CTF_LOGIN_OUTPUT = OUTPUTS_ROOT / "ctf_login_warmup"
+LOGIN_WARMUP_OUTPUT = OUTPUTS_ROOT / "login_warmup"
 CTF_RESOURCE_OUTPUT = OUTPUTS_ROOT / "ctf_resource_crawls"
 
 CRAWL_RUNNER_RUNTIME = RUNTIME_ROOT / "crawl_runner"

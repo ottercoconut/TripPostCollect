@@ -199,7 +199,7 @@ async def warmup_one(playwright, site_key: str, batch_dir: Path, args: argparse.
 
     print(f"[login] {checker['label']} profile={profile_dir}", flush=True)
     print(f"[login] browser={browser_path or 'playwright bundled chromium'}", flush=True)
-    print(f"[login] 请在打开的浏览器窗口中手动完成登录；检测条件：{checker['required_hint']}", flush=True)
+    print(f"[login] 正在验证持久登录态；若已失效，请在窗口中重新登录。检测条件：{checker['required_hint']}", flush=True)
 
     context = await launch_login_context(playwright, profile_dir, browser_path)
     page = context.pages[0] if context.pages else await context.new_page()
@@ -214,8 +214,11 @@ async def warmup_one(playwright, site_key: str, batch_dir: Path, args: argparse.
     started = time.monotonic()
     last_print = 0.0
     state: dict[str, Any] = {}
+    initial_state: dict[str, Any] = {}
     while time.monotonic() - started < args.timeout_seconds:
         state = await current_state(context, page, site_key)
+        if not initial_state:
+            initial_state = dict(state)
         if state["ok"]:
             break
         now = time.monotonic()
@@ -232,6 +235,9 @@ async def warmup_one(playwright, site_key: str, batch_dir: Path, args: argparse.
         "ok": bool(state.get("ok")),
         "session_ok": bool(state.get("ok")),
         "persisted_ok": None,
+        "initial_ok": bool(initial_state.get("ok")),
+        "login_refreshed": not bool(initial_state.get("ok")) and bool(state.get("ok")),
+        "initial_state": initial_state,
         "cookie_snapshot": None,
         "elapsed_seconds": elapsed,
         "profile_dir": str(profile_dir),

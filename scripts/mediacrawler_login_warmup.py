@@ -40,7 +40,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "code": "wb",
         "label": "微博",
         "urls": ["https://m.weibo.cn", "https://www.weibo.com"],
-        "required": "cookie SSOLoginState or WBPSESS",
+        "required": "m.weibo.cn /api/config login=true, with current or legacy login cookies",
     },
     "xhs": {
         "code": "xhs",
@@ -304,6 +304,32 @@ async def zhihu_api_check(page: Page) -> dict[str, Any]:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
+async def weibo_api_check(page: Page) -> dict[str, Any]:
+    try:
+        result = await page.evaluate(
+            """
+            async () => {
+              try {
+                const res = await fetch('https://m.weibo.cn/api/config', {credentials: 'include'});
+                const payload = await res.json();
+                const data = payload && payload.data || {};
+                return {
+                  ok: res.ok && payload && payload.ok === 1,
+                  status: res.status,
+                  login: data.login === true,
+                  uid: data.uid || null
+                };
+              } catch (error) {
+                return {ok: false, login: false, error: String(error)};
+              }
+            }
+            """
+        )
+        return result if isinstance(result, dict) else {"ok": False, "login": False, "error": "unexpected result"}
+    except Exception as exc:
+        return {"ok": False, "login": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 async def xhs_ui_check(page: Page) -> dict[str, Any]:
     try:
         profile_links = await page.locator("xpath=//a[contains(@href, '/user/profile/')]").count()
@@ -339,10 +365,19 @@ async def current_state(context: BrowserContext, page: Page, platform_key: str) 
             "api_uid": api.get("uid"),
         }
     elif platform_key == "weibo":
-        ok = bool(cookies.get("SSOLoginState") or cookies.get("WBPSESS"))
+        api = await weibo_api_check(page)
+        legacy_cookie_ok = bool(cookies.get("SSOLoginState") or cookies.get("WBPSESS"))
+        current_cookie_ok = bool(cookies.get("SUB") and cookies.get("MLOGIN"))
+        ok = bool((api.get("ok") and api.get("login")) or legacy_cookie_ok)
         markers = {
             "SSOLoginState": bool(cookies.get("SSOLoginState")),
             "WBPSESS": bool(cookies.get("WBPSESS")),
+            "SUB": bool(cookies.get("SUB")),
+            "MLOGIN": bool(cookies.get("MLOGIN")),
+            "current_cookie_pair": current_cookie_ok,
+            "api_ok": api.get("ok"),
+            "api_login": api.get("login"),
+            "api_uid": api.get("uid"),
         }
     elif platform_key == "xhs":
         api = await xhs_ui_check(page)
@@ -383,7 +418,7 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
 
     print(f"[login] {platform['label']} profile={profile_dir}", flush=True)
     print(f"[login] browser={browser_path or 'playwright default chromium'}", flush=True)
-    print(f"[login] 请在打开的浏览器窗口中手动完成登录；检测条件：{platform['required']}", flush=True)
+    print(f"[login] 正在验证持久登录态；若已失效，请在窗口中重新登录。检测条件：{platform['required']}", flush=True)
 
     context = await launch_login_context(playwright, profile_dir, browser_path)
     page = context.pages[0] if context.pages else await context.new_page()
@@ -399,8 +434,11 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
     started = time.monotonic()
     last_print = 0.0
     state: dict[str, Any] = {}
+    initial_state: dict[str, Any] = {}
     while time.monotonic() - started < args.timeout_seconds:
         state = await current_state(context, page, platform_key)
+        if not initial_state:
+            initial_state = dict(state)
         if state["ok"]:
             break
         now = time.monotonic()
@@ -417,6 +455,9 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
         "ok": bool(state.get("ok")),
         "session_ok": bool(state.get("ok")),
         "persisted_ok": None,
+        "initial_ok": bool(initial_state.get("ok")),
+        "login_refreshed": not bool(initial_state.get("ok")) and bool(state.get("ok")),
+        "initial_state": initial_state,
         "cookie_snapshot": None,
         "storage_snapshot": None,
         "elapsed_seconds": elapsed,
