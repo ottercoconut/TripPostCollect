@@ -27,19 +27,19 @@
 - 不在 UI 中修改、重排、替换或删除记录图片行；图片新增和更新默认来自入库链路。
 - 不在首版实现多用户协作、远程公网部署、复杂 RBAC 或 OAuth。
 - 不让前端直接访问 SQLite 文件或本地任意路径。
-- 不在 UI 中编辑 `source_platforms` 数据库行；重构前平台注册源头仍是 `scripts/web_sites.py`，重构后迁移到 `trippostcollect.platforms.registry`。
+- 不在 UI 中编辑 `source_platforms` 数据库行；平台注册源头是 `trippostcollect.platforms.registry`。
 - 不在 UI 中直接编辑 `crawl_jobs` 行；调度源头仍是 `config/crawl_targets.json`，同步入口仍是命令行 `crawl_runner.py --sync-only`。
 
 ## 设计原则
 
 1. 管理台第一入口是记录筛选和记录工作台，不是数据库表导航。
 2. `web_posts` 是记录主表；产品语言统一称为“记录”，表名只作为实现细节出现。
-3. 平台和城市名是首要筛选维度，允许只按城市名筛选，也允许平台 + 城市组合筛选。
+3. 平台和城市名是首要筛选维度，允许只按城市名筛选，也允许平台 + 城市组合筛选；管理端城市控件使用山东十六市固定选项。
 4. 图片、作者、互动指标、证据和 JSON 都是选中记录的上下文面板。
 5. `web_post_images` 是记录图片子表，首版只读展示和预览；新增、替换、排序和删除默认由入库链路或后续终端维护脚本完成。
 6. `ctf_captures` 和 `ctf_capture_images` 是证据/调试底座，默认只读；通常从关联记录进入。
 7. 调度配置和运行报告在管理端只读；修改配置、sync、dry-run 和真实抓取继续使用命令行。
-8. 图片读取必须经过后端代理，后端只允许读取项目目录内白名单路径。
+8. 图片读取必须经过后端代理，本地文件只允许读取项目目录内白名单路径，远程图片只允许读取数据库已有且通过安全校验的 URL。
 9. 首版管理端不提供写入 HTTP API；需要修正、隐藏、重导入或维护时，通过受控终端脚本完成并在脚本层做备份和审计。
 10. 管理端支持抓取脚本运行期间实时读取最新数据库状态，但不主动改变数据库结构、调度配置、抓取任务或内容记录。
 11. 保留记录原始 JSON、关联证据原始 JSON、HTML、截图和图片证据；字段归属必须清楚，不把 `ctf_captures.raw_meta_json` 当作 `web_posts` 字段。
@@ -75,8 +75,8 @@
 
 典型任务：
 
-- 选择平台、城市名，或只输入城市名，筛选出符合条件的记录。
-- 在记录列表中快速判断平台、标题、作者、城市、发布时间、图片数和状态。
+- 选择平台、山东十六市城市项，或只选择城市，筛选出符合条件的记录。
+- 在记录列表中快速判断平台、标题、作者、粉丝量、城市、发布时间、图片数和状态。
 - 打开一条记录后查看其图片预览、作者信息、正文、互动指标、证据和原始 JSON。
 - 找出缺图片、缺发布时间、缺作者粉丝量的记录。
 - 在抓取脚本运行过程中，通过刷新或自动轮询看到新入库记录、图片和运行报告。
@@ -178,127 +178,49 @@ config/crawl_targets.json
 
 后端是唯一允许访问 SQLite、配置文件和本地证据路径的进程。前端只通过 API 获取数据和图片。现有抓取脚本和新管理台不应该各自实现一套数据库访问、路径解析、平台映射或记录聚合逻辑；这些能力必须下沉到 `src/trippostcollect/`。
 
-## 项目结构重构方案
+## 项目结构
 
-当前仓库以“收集数据并入库”为中心，`scripts/` 同时承担 CLI、领域逻辑、数据库访问、路径解析和外部工具编排。管理端产品化后，需要把项目拆成四层：
+当前项目分为四层：
 
 - `apps/`：可运行应用，包括管理端 API 和管理端 Web。
 - `src/trippostcollect/`：项目共享 Python 包，承载数据库、记录、证据、调度、抓取编排等领域代码。
-- `scripts/`：保留用户已有命令入口，但只做参数解析和调用共享包，不再沉淀新业务逻辑。
+- `scripts/`：CLI、抓取器和入库命令，直接引用共享包。
 - `data/`、`outputs/`、`temp/`、`tools/`：继续作为运行数据、证据产物、临时验证和第三方工具目录，不混入应用源码。
 
-### 目标目录
+### 关键目录
 
 ```text
-apps/
-  admin_api/
-    app/
-      __init__.py
-      main.py
-      deps.py
-      settings.py
-      schemas/
-      routers/
-      services/
-    tests/
-  admin_web/
-    index.html
-    package.json
-    tsconfig.json
-    vite.config.ts
-    src/
-      api/
-      components/
-      features/
-      layouts/
-      routes/
-      styles/
-      types/
-
-pyproject.toml
-
-src/
-  trippostcollect/
-    __init__.py
-    core/
-      paths.py
-      settings.py
-      time.py
-      json_utils.py
-      subprocesses.py
-    db/
-      connection.py
-      bootstrap.py
-      migrations.py
-      repositories/
-    platforms/
-      registry.py
-      models.py
-    records/
-      schemas.py
-      repository.py
-      service.py
-      images.py
-      quality.py
-    artifacts/
-      paths.py
-      image_proxy.py
-      evidence_reader.py
-    scheduler/
-      config.py
-      runner.py
-      reports.py
-    crawling/
-      policy.py
-      human_flow.py
-      media_crawler.py
-      ctf_capture.py
-      failure_classifier.py
-    imports/
-      mediacrawler_import.py
-      ctf_import.py
-
-scripts/
-  crawl_runner.py
-  mediacrawler_crawl.py
-  mediacrawler_login_warmup.py
-  mediacrawler_batch_validate.py
-  ctf_resource_crawl.py
-  import_ctf_captures.py
-  project_paths.py
-  db_bootstrap.py
-  web_sites.py
-
-db/
-  *.sql
-config/
-  crawl_targets.json
-docs/
-  admin-client-development.md
+apps/admin_api/          FastAPI 管理端
+apps/admin_web/          React/Vite 管理端
+src/trippostcollect/     项目共享 Python 包
+scripts/                 抓取、入库和维护 CLI
+db/                      SQLite schema
+config/                  正式任务配置
+data/                    SQLite 和运行状态
+outputs/                 当前运行产物
+tools/MediaCrawler/      第三方抓取工具
 ```
 
 ### 目录职责
 
-| 目录 | 职责 | 迁移策略 |
+| 目录 | 职责 | 状态 |
 |---|---|---|
-| `apps/admin_api/` | FastAPI 管理端，只处理 HTTP、依赖注入、响应模型和权限边界 | 新增 |
-| `apps/admin_web/` | React/Vite 管理端前端 | 新增 |
-| `src/trippostcollect/core/` | 路径、时间、配置、JSON、子进程固定命令模板 | 从 `scripts/project_paths.py` 和零散工具函数抽取 |
-| `src/trippostcollect/db/` | SQLite 连接、bootstrap、迁移、通用 repository 基础能力 | 从 `scripts/db_bootstrap.py` 抽取 |
-| `src/trippostcollect/platforms/` | 平台注册、平台 key、平台展示名、默认 URL 和风险配置 | 从 `scripts/web_sites.py` 抽取 |
-| `src/trippostcollect/records/` | 记录列表、记录详情上下文、图片、作者、互动、质量检查 | 新增，管理端优先使用 |
-| `src/trippostcollect/artifacts/` | 本地文件白名单、图片代理、截图/HTML/文本读取 | 从证据抓取和管理端需求中抽取 |
-| `src/trippostcollect/scheduler/` | 任务配置、sync、dry-run、运行报告读取 | 从 `scripts/crawl_runner.py` 抽取 |
-| `src/trippostcollect/crawling/` | 抓取策略、MediaCrawler 编排、页面证据抓取 | 从现有抓取脚本逐步抽取 |
-| `src/trippostcollect/imports/` | MediaCrawler 和 CTF 证据入库、归一化 | 从导入脚本抽取 |
-| `scripts/` | 兼容已有命令，保留当前用户操作习惯 | 逐步改为薄 wrapper |
+| `apps/admin_api/` | FastAPI 管理端，只处理 HTTP、依赖注入、响应模型和权限边界 | 当前实现 |
+| `apps/admin_web/` | React/Vite 管理端前端 | 当前实现 |
+| `src/trippostcollect/core/` | 路径、时间、配置、JSON、子进程固定命令模板 | 当前实现 |
+| `src/trippostcollect/db/` | SQLite 连接、bootstrap、迁移、通用 repository 基础能力 | 当前实现 |
+| `src/trippostcollect/platforms/` | 平台注册、平台 key、平台展示名、默认 URL 和风险配置 | 当前实现 |
+| `src/trippostcollect/records/` | 记录列表、记录详情上下文、图片、作者、互动、质量检查 | 当前实现 |
+| `src/trippostcollect/artifacts/` | 本地文件白名单、图片代理、截图/HTML/文本读取 | 当前实现 |
+| `src/trippostcollect/scheduler/` | 任务配置和只读调度查询 | 当前实现 |
+| `scripts/` | CLI、抓取器和入库命令 | 直接引用 `trippostcollect` 包，不设置兼容 wrapper |
 | `db/` | SQL schema 仍作为数据库结构权威文件 | 保留根目录，避免和运行库混淆 |
 | `tools/MediaCrawler/` | 第三方工具 | 不移动，不改成项目源码 |
 | `data/`、`outputs/`、`temp/` | 数据库、浏览器状态、运行产物、临时验证 | 不移动，只通过 `core.paths` 访问 |
 
-### 兼容入口
+### 命令入口
 
-重构后，以下现有命令必须继续可用：
+当前命令入口：
 
 ```bash
 source .venv/bin/activate
@@ -317,24 +239,16 @@ source .venv/bin/activate
 python scripts/mediacrawler_crawl.py \
   --platforms xhs \
   --keyword 济南旅游 \
+  --candidate-hard-limit 20 \
+  --target-valid-posts 0 \
   --login-type cookie \
-  --headed
+  --headed \
+  --no-import
 ```
-
-这些脚本内部可以改为：
-
-```python
-from trippostcollect.scheduler.runner import main
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-```
-
-也就是说，用户入口不变，业务实现位置迁移。
 
 ### Python 包安装与导入
 
-`src/trippostcollect/` 必须作为标准 Python 包安装，不依赖临时 `PYTHONPATH`。阶段 1 需要在仓库根目录新增 `pyproject.toml`，至少声明：
+`src/trippostcollect/` 是标准 Python 包，不依赖临时 `PYTHONPATH`。仓库根目录的 `pyproject.toml` 声明：
 
 ```toml
 [build-system]
@@ -351,39 +265,21 @@ dependencies = []
 where = ["src"]
 ```
 
-开发和运行管理端前，先在现有虚拟环境中安装 editable 包：
+开发管理端前，安装 editable 包及开发工具：
 
 ```bash
 source .venv/bin/activate
-python -m pip install -e .
+python -m pip install -e '.[dev]'
 ```
 
-安装后，旧脚本 wrapper、FastAPI app 和测试都应能直接 `import trippostcollect`。不得把 `apps/admin_api` 长期写成直接 import `scripts/*.py`，也不要通过在命令前临时设置 `PYTHONPATH=src` 作为正式方案。
+安装后，CLI、FastAPI app 和测试都直接 `import trippostcollect`。不得让 `apps/admin_api` import `scripts/*.py`，也不要通过在命令前临时设置 `PYTHONPATH=src` 作为正式方案。
 
-### 路径迁移规则
+### 路径规则
 
-- `scripts/project_paths.py` 先保留，内部转发到 `trippostcollect.core.paths`。
-- 新代码只允许引用 `trippostcollect.core.paths` 或后端 settings，不再直接引用 `scripts/project_paths.py`。
+- Python 代码只允许引用 `trippostcollect.core.paths` 或后端 settings。
 - 不移动 `data/`、`outputs/`、`temp/` 和 `tools/MediaCrawler/`，避免破坏既有运行产物、浏览器 profile 和第三方工具路径。
 - 管理端文件代理必须通过 `trippostcollect.artifacts` 做白名单检查，不允许自行拼本地路径。
 - 数据库 schema 文件继续留在 `db/`；`trippostcollect.db.bootstrap` 负责定位和执行 schema。
-
-### 重构边界
-
-首版不做一次性全仓库搬迁。迁移顺序应服务于管理端：
-
-1. 先抽 `core.paths`、`db.bootstrap`、`platforms.registry`，让管理端和旧脚本共用基础能力。
-2. 再实现 `records.repository` 和 `records.service`，支撑 `/api/records`。
-3. 再抽 `artifacts.image_proxy` 和 `artifacts.evidence_reader`，支撑图片预览和证据查看。
-4. 最后再逐步整理抓取和导入脚本，避免在管理端首版前大面积改动稳定抓取链路。
-
-禁止在重构中做以下事情：
-
-- 为了目录美观移动 `data/` 或 `outputs/` 中已有产物。
-- 把 `tools/MediaCrawler/` 合并进项目包。
-- 让 `apps/admin_api` 直接 import `scripts/*.py` 中的业务函数作为长期方案。
-- 同时重写抓取逻辑和管理端逻辑。
-- 修改数据库 schema 却不提供迁移和临时库验证。
 
 ## 后端技术设计
 
@@ -462,7 +358,7 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
 | `TRIPPOST_ADMIN_ALLOW_COMMANDS` | `false` | 首版固定为 false，不允许前端触发 bootstrap、sync、dry-run 或真实抓取 |
 | `TRIPPOST_ADMIN_REFRESH_SECONDS` | `5` | 前端默认轮询刷新间隔 |
 
-所有路径必须用 `trippostcollect.core.paths` 或后端 settings 统一解析，不在业务代码里硬编码。迁移期允许 `scripts/project_paths.py` 作为兼容 wrapper 存在。
+所有路径必须用 `trippostcollect.core.paths` 或后端 settings 统一解析，不在业务代码里硬编码。
 
 ### 审计和备份边界
 
@@ -501,6 +397,14 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
   "errors": []
 }
 ```
+
+分页约束：
+
+- `page` 从 1 开始。
+- 默认 `page_size=50`。
+- 前端可选页大小为 25、50、100、200。
+- 最大 `page_size=200`；超过上限时后端应裁剪或返回参数错误。
+- 列表标题显示总数、当前页和总页数，避免用户误以为只返回一页数据。
 
 错误响应：
 
@@ -541,7 +445,7 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
 |---|---|---|
 | `GET` | `/api/platforms` | 读取 `source_platforms` |
 
-`source_platforms` 只读。若要改平台，迁移前修改 `scripts/web_sites.py`，迁移后修改 `trippostcollect.platforms.registry`。
+`source_platforms` 只读。若要改平台，修改 `trippostcollect.platforms.registry`。
 
 #### Records
 
@@ -552,7 +456,7 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
 | `GET` | `/api/records/{id}/context` | 记录上下文聚合数据 |
 | `GET` | `/api/records/{id}/raw` | 懒加载记录和关联证据 JSON |
 
-`/api/records` 是产品层主 API。实现上只读取 `web_posts` 和关联上下文，前端路由、组件和文案统一使用 `record`。若为了兼容早期脚本保留 `/api/posts`，也只能作为 `/api/records` 的别名，不作为文档和前端主入口。
+`/api/records` 是产品层唯一记录 API。实现上只读取 `web_posts` 和关联上下文，前端路由、组件和文案统一使用 `record`；不提供 `/api/posts` 别名。
 
 首版不提供 `POST`、`PATCH`、`DELETE` 或 bulk update。记录创建、修正、隐藏、重导入和维护只由现有抓取/入库链路或后续受控终端脚本完成，管理端只负责筛选、查看和定位问题。
 
@@ -592,8 +496,9 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
       "platform_key": "xiaohongshu",
       "platform_name": "小红书",
       "title": "示例标题",
-      "city_name": "上海",
-      "keyword": "citywalk",
+      "city_name": "济南市",
+      "keyword": "济南旅游",
+      "author_followers_count": 1200,
       "status": "captured"
     },
     "author": {
@@ -706,10 +611,10 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
 
 - 前端只能按数据库图片 ID 请求预览，不提交任意 URL。
 - 若 `local_path` 存在并位于项目根目录内，返回本地文件。
-- 若没有本地文件，后端可读取该图片行已有的 `image_url` 做远程预览，或把原始 URL 返回给前端直接展示。
+- 若没有本地文件，后端读取该图片行已有的 `image_url` 做远程预览，不把第三方图片 URL 直接作为 `<img>` 跳转目标。
 - 后端必须对本地路径做 `resolve()`，拒绝 `..`、项目根外路径和符号链接逃逸；前端不能提交 `local_path`。
 - 远程预览只允许数据库中已存在的 `http://` 或 `https://` 图片 URL。
-- 如果后端代取远程图片，必须禁止 localhost、内网 IP、link-local、非 HTTP(S) 协议；重定向后的目标也要重新校验。
+- 后端代取远程图片时，必须禁止 localhost、内网 IP、link-local、非 HTTP(S) 协议；重定向后的目标也要重新校验。
 - 远程响应必须设置超时、最大响应大小和 `Content-Type: image/*` 校验。
 - `web_post_images.image_role` 限定为 `content`、`page`、`author_avatar`。
 
@@ -785,7 +690,7 @@ Vite 默认开发服务器端口是 `5173`。前端 dev server 通过 Vite proxy
 
 路由：
 
-- `react-router`
+- `react-router-dom`
 
 数据请求：
 
@@ -813,7 +718,8 @@ UI：
 - 左侧固定导航。
 - 顶部只放数据库状态、只读状态、当前 DB 文件。
 - 默认首页是记录工作台，筛选器和记录列表为主体。
-- 详情区采用两栏或三栏：记录字段、图片/作者/互动、证据/JSON。
+- 单条记录使用 `react-router-dom` 动态路由 `/records/:id` 生成详情页；列表页不再把详情做成固定侧栏。
+- 详情页采用主栏 + 侧栏：主栏展示全部图片和正文，侧栏展示作者、互动、证据和 JSON。
 - 卡片圆角不超过 8px。
 - 操作按钮用图标 + tooltip，危险操作使用明确文本和确认对话框。
 - 主色不要单一紫蓝渐变；建议使用中性灰 + 少量状态色。
@@ -824,10 +730,10 @@ UI：
 |---|---|
 | `AppShell` | 左侧导航、顶部状态栏 |
 | `DataTable` | 分页、排序、列显隐、行选择 |
-| `RecordWorkbench` | 默认首页，承载筛选器、记录列表和详情预览 |
+| `RecordWorkbench` | 默认首页，承载筛选器、记录列表和详情页入口 |
 | `RecordFilterBar` | 平台、城市、关键词、状态、日期、缺字段筛选 |
 | `RecordTable` | 记录列表，支持分页、排序、列显隐和行选择 |
-| `RecordDetailDrawer` | 选中记录的详情抽屉或详情页 |
+| `RecordDetailPage` | 基于 `/records/:id` 动态渲染单条记录详情 |
 | `RecordImagePreview` | 当前记录图片预览 |
 | `AuthorPanel` | 当前记录作者信息 |
 | `MetricsPanel` | 当前记录互动指标 |
@@ -848,21 +754,20 @@ UI：
     平台
     标题
     作者
+    粉丝量
     城市
     发布时间
     图片数
     状态
+  分页条
+    每页 25 / 50 / 100 / 200
+    首页 / 上一页 / 下一页 / 末页
 
-主体右侧或抽屉：
-  选中记录预览
-    图片缩略图
-    作者摘要
-    正文摘要
-    互动指标
-    证据状态
+记录行操作：
+  点击行或详情按钮进入 /records/:id
 ```
 
-平台和城市筛选必须始终可见。城市输入不依赖平台选择，适合直接查询“某城市在所有平台下的记录”。
+平台和城市筛选必须始终可见。城市筛选不依赖平台选择，适合直接查询“某城市在所有平台下的记录”。当前管理端城市控件必须使用固定下拉项，不允许用户自由输入；下拉项为山东十六市：济南市、青岛市、淄博市、枣庄市、东营市、烟台市、潍坊市、济宁市、泰安市、威海市、日照市、临沂市、德州市、聊城市、滨州市、菏泽市。
 
 ### 记录列表列
 
@@ -871,6 +776,7 @@ UI：
 - 平台
 - 标题
 - 作者
+- 粉丝量
 - 发布时间
 - 抓取时间
 - 城市
@@ -887,7 +793,6 @@ UI：
 - `platform_post_id`
 - `canonical_url`
 - `source_type`
-- `author_followers_count`
 - `post_favorites_count`
 - `post_shares_count`
 - `post_views_count`
@@ -895,19 +800,17 @@ UI：
 ### 记录详情布局
 
 ```text
-顶部：平台 / 状态 / 标题 / 外链 / 刷新状态
+路径：/records/:id
 
-左栏：记录字段
-  基础信息
+顶部：返回列表 / 来源页面 / 平台 / 状态 / 标题 / 图片数 / 粉丝量 / 互动量
+
+主栏：正文与图片
+  全部 web_post_images
+  content_text
+
+侧栏：作者、互动、证据与原始数据
   作者信息
   互动指标
-  发布时间和城市
-
-中栏：正文与图片
-  content_text
-  web_post_images
-
-右栏：证据与原始数据
   source_capture_id
   artifact_dir
   raw_sample_json
@@ -916,9 +819,9 @@ UI：
   关联 ctf_capture
 ```
 
-详情页使用标签或分组切换：
+详情页按分区展示：
 
-- 图片：`web_post_images` 缩略图、原图预览、URL、local_path 状态。
+- 图片：展示该记录全部 `web_post_images`，不限制为列表侧栏预览数量；图片使用懒加载，仍通过 `/api/images/{id}/preview`。
 - 作者：展示名、平台 ID、主页、头像、简介、粉丝数、关注数、作品数、认证信息。
 - 内容：标题、正文、城市、关键词、发布时间、来源 URL。
 - 互动：点赞、收藏、评论、分享、转发、浏览量、`metrics_json`。
@@ -935,7 +838,7 @@ UI：
 3. `ctf_capture_images.saved_path` 页面证据图片。
 4. `ctf_capture_images.image_url` 页面证据图片远程 URL。
 
-前端不直接使用本地文件路径。所有本地图片都通过后端：
+前端不直接使用本地文件路径，也不直接跳转第三方图片 URL。所有图片预览都通过后端：
 
 ```text
 /api/images/{id}/preview
@@ -944,11 +847,13 @@ UI：
 
 这些接口只按数据库图片 ID 取图，不提供 `/api/images/by-url` 这类任意 URL 代理。
 
+远程图片预览由后端按数据库中的图片 URL 受限拉取：只允许 `http/https`、拒绝 localhost、私网、保留地址和本地地址，重定向后的 URL 也必须重新校验；请求会使用浏览器 User-Agent 和平台 Referer。这样可以避免浏览器从管理端域名直接访问微博、豆瓣等第三方图片域时被防盗链拦截。远程响应必须是 `image/*`，否则按图片拉取失败处理。
+
 图片组件状态：
 
 - 加载中。
 - 加载失败。
-- 远程 URL 不可达。
+- 远程图片拉取失败。
 - 本地文件缺失。
 - 原图预览弹窗。
 - 复制 URL。
@@ -1007,6 +912,8 @@ UI：
 ### Read
 
 所有记录列表必须分页。默认 `page_size=50`，最大 `page_size=200`。
+
+记录工作台前端必须暴露分页控件，而不只是调用分页 API。当前实现中，记录列表标题显示“总记录数 · 第 X / Y 页”，底部分页条支持首页、上一页、下一页、末页和每页 25/50/100/200 条。切换筛选条件或页大小时回到第 1 页；单条记录详情通过 `/records/:id` 独立打开，不再依赖列表页中的选中行状态。
 
 抓取脚本运行期间，前端可通过 React Query 轮询重新请求列表、详情、图片、证据和运行报告。后端每次请求重新读取 SQLite，不缓存会影响实时性的记录数据。
 
@@ -1150,132 +1057,20 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、只读边界、路
 4. 启动 FastAPI 测试客户端。
 5. 验证记录筛选、记录详情上下文、图片预览、证据只读和实时刷新读取。
 
-## 开发阶段
-
-### 阶段 0：文档、约束和结构准备
-
-交付：
-
-- 本文档。
-- 明确技术栈和目录。
-- 明确写入边界。
-- 明确 `apps/`、`src/trippostcollect/`、`scripts/`、`data/`、`outputs/` 的职责。
-- 明确 `pyproject.toml`、editable install 和 `trippostcollect` 包导入方案。
-- 明确旧脚本兼容策略。
-
-验收：
-
-- 不改变默认数据库和现有抓取命令。
-- 文档中没有把管理端设计成表级浏览器。
-- 文档中没有让 `apps/admin_api` 长期直接依赖 `scripts/*.py` 的方案。
-- 文档中没有把临时 `PYTHONPATH=src` 当作正式导入方案。
-
-### 阶段 1：共享包骨架
-
-交付：
-
-- `src/trippostcollect/__init__.py`。
-- `src/trippostcollect/core/paths.py`。
-- `src/trippostcollect/db/bootstrap.py`。
-- `src/trippostcollect/platforms/registry.py`。
-- `pyproject.toml`。
-- `scripts/project_paths.py`、`scripts/db_bootstrap.py`、`scripts/web_sites.py` 的兼容 wrapper 或兼容导出。
-
-验收：
-
-- 现有 `scripts/crawl_runner.py --sync-only` 仍可运行。
-- 临时 SQLite bootstrap 仍可创建完整 schema。
-- 平台注册同步后仍是 8 个当前平台。
-- 新代码可以从 `trippostcollect.core.paths` 读取默认 DB、config、outputs 和 runtime 路径。
-- `source .venv/bin/activate` 后执行 `python -m pip install -e .`，旧脚本、FastAPI app 和测试均可直接 `import trippostcollect`。
-
-### 阶段 2：后端基础
-
-交付：
-
-- FastAPI app。
-- settings。
-- SQLite 连接。
-- overview API。
-- records list/detail/context。
-- record images list/preview。
-- scheduler/config/reports 只读 API。
-
-验收：
-
-- 能读取默认库。
-- 能用临时库跑测试。
-- 能按平台、城市名或平台 + 城市名筛选记录。
-- 能返回单条记录下的图片、作者、互动、证据和 JSON 上下文。
-- 不存在管理端 HTTP 写入接口。
-- 抓取脚本运行时，新入库记录能被后续 API 查询读到。
-
-### 阶段 3：前端基础
-
-交付：
-
-- Vite + React + TypeScript。
-- AppShell。
-- 记录工作台。
-- 平台和城市筛选器。
-- 记录列表。
-- 记录详情。
-- 图片预览。
-
-验收：
-
-- 浏览器可打开管理台。
-- 能按平台、城市名或平台 + 城市名筛选记录。
-- 能围绕选中记录查看图片、作者、互动、证据和 JSON。
-- 能预览本地和远程图片。
-- 能手动刷新或自动刷新记录列表和运行报告。
-
-### 阶段 4：证据和调度
-
-交付：
-
-- 记录详情中的证据面板。
-- 独立证据查询页。
-- 截图/HTML/文本查看。
-- 调度配置只读查看。
-- 运行报告查看。
-
-验收：
-
-- `ctf_captures` 不被直接修改。
-- 前端不能修改 `crawl_targets.json`。
-- 前端不能触发 bootstrap、sync、dry-run 或真实抓取。
-- 能查看当前 8 个同步任务和最近运行报告。
-
-### 阶段 5：质量和打磨
-
-交付：
-
-- 数据质量定位视图。
-- 字段缺失记录定位。
-- 图片预览体验打磨。
-- 终端维护命令说明。
-- 文档补充。
-
-验收：
-
-- 常用定位动作不需要写 SQL。
-- 需要修改数据时，页面能给出对应终端维护入口或说明，不在前端直接写库。
-- 布局在 1280px 和移动窄屏下不重叠。
-
 ## 当前实现状态
 
-截至 2026-07-09，首版只读管理端已按 `docs/admin-client-phase-prompts.md` 的阶段 0-6 完成实现并逐阶段提交。
+截至 2026-07-09，首版只读管理端已完成实现。
 
 已实现：
 
-- `pyproject.toml` 和 `src/trippostcollect/` src-layout 包骨架，旧 `scripts/project_paths.py`、`scripts/db_bootstrap.py`、`scripts/web_sites.py` 保持兼容导出。
+- `pyproject.toml` 和 `src/trippostcollect/` src-layout 包已落地，脚本直接引用共享包。
 - `apps/admin_api` FastAPI 只读后端，提供 health/meta/schema-status、records、images、captures、overview、platforms、scheduler API。
 - SQLite 管理端连接使用只读短连接，不在启动或请求中执行数据库 bootstrap、配置同步、调度预览或抓取命令。
 - 图片和证据读取只通过数据库 ID 或 `kind` 枚举反查；本地路径会 resolve 并限制在项目根目录内，项目外路径和符号链接逃逸会被拒绝。
 - 记录 raw JSON 与关联证据 raw JSON 分层返回；JSON 解析失败只返回解析错误，不修写数据库。
-- `apps/admin_web` React + TypeScript + Vite 前端，默认进入记录工作台，支持平台、城市、关键词、状态、时间、缺字段和全文筛选。
-- 记录详情支持图片、作者、内容、互动、证据和 JSON 懒加载；图片组件展示加载中、加载失败、本地缺失和远程 URL 不可达状态。
+- `apps/admin_web` React + TypeScript + Vite 前端，默认进入记录工作台，支持平台、山东十六市城市下拉、关键词、状态、时间、缺字段和全文筛选。
+- 记录工作台已实现分页控件：默认每页 50 条，可切换 25/50/100/200 条，并支持首页、上一页、下一页和末页；页面标题显示总数和当前页数。
+- 记录详情通过 `/records/:id` 动态路由展示，支持全部图片、作者、内容、互动、证据和 JSON；图片组件展示加载中、加载失败、本地缺失和远程图片拉取失败状态。
 - 数据质量视图支持缺图片、缺发布时间、缺作者粉丝量记录定位，并能跳转回记录详情。
 - 运行报告、数据库状态、平台和调度任务只读展示；前端没有写库或命令触发入口。
 - 后端 `unittest` 覆盖只读边界、实时读取、图片/证据路径安全、overview 和 scheduler。
@@ -1291,7 +1086,7 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、只读边界、路
 首版完成标准：
 
 - 默认首页是记录工作台，而不是表级数据浏览器。
-- 可以通过平台、城市名或平台 + 城市名筛选记录。
+- 可以通过平台、山东十六市城市项或平台 + 城市组合筛选记录。
 - 可以围绕选中记录查看 `web_posts`、`web_post_images`、关联 `ctf_captures` 和 `crawl_run_reports` 上下文。
 - 可以在抓取脚本运行期间通过刷新看到新入库记录、图片、证据和运行报告。
 - 首版管理端不提供记录创建、更新、软删除、物理删除或批量更新。
@@ -1323,20 +1118,3 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、只读边界、路
 4. 已确认：抓取任务不由前端使用，前端不触发 bootstrap、sync、dry-run 或真实抓取。
 5. 已确认：管理端需要支持抓取脚本运行期间的实时读取，通过轮询或手动刷新看到最新数据库状态。
 6. 后续待定：如果终端维护脚本需要记录审核/隐藏状态，应新增独立状态字段或状态表，不复用 `web_posts.status` 的采集状态。
-
-## 推荐首个实现任务
-
-先实现结构准备和后端基础：
-
-1. 创建 `pyproject.toml` 和 `src/trippostcollect/` 包骨架。
-2. 在 `.venv` 中执行 `python -m pip install -e .`，确认可以 `import trippostcollect`。
-3. 抽取 `core.paths`、`db.bootstrap`、`platforms.registry`，保留 `scripts/` 兼容入口。
-4. 创建 `apps/admin_api`。
-5. 加入 settings、只读 DB 连接和 schema 状态检查。
-6. 实现 `/api/meta`、`/api/overview/counts`、`/api/records`、`/api/records/{id}`。
-7. 实现 `/api/records/{id}/context` 和 `/api/records/{id}/raw`，聚合图片、作者、互动、证据和 JSON。
-8. 实现只读图片预览、调度配置和运行报告 API。
-9. 验证抓取脚本写入新数据后，管理端 API 后续查询能读到最新状态。
-10. 用 `temp/admin_client_verify.sqlite` 做集成测试。
-
-后端只读边界稳定后，再搭前端。这样可以避免 UI 先行导致读写规则散落在浏览器里。

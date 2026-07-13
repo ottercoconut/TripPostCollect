@@ -18,7 +18,12 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 只采集图文内容、作者可见信息、图片 URL/样本和页面证据；视频目标、视频媒体请求和明确视频记录跳过，不作为失败。
 - `web_posts` 是用户使用的统一内容主表；`ctf_captures` 是程序和智能代理（Agent）使用的证据/调试底座。
 - `published_at` 必须来自平台原始发帖时间，入库保存为 Asia/Shanghai ISO；不要用抓取时间冒充发帖时间。
-- 路径定义集中在 `scripts/project_paths.py`；新增代码不要硬编码 `outputs/`、`data/runtime/`、浏览器配置目录等目录。
+- 正式任务只从 `scripts/crawl_runner.py` 进入；数量和字段策略只读 `config/crawl_targets.json`，语义只读 `docs/formal-crawl-contract.md`。
+- 每个任务必须生成 `data/runtime/crawl_execution_states/<run_id>/<job>.json`；进入下一阶段前重新读取状态并确认上一阶段完成。不得手工解冻或补签状态。
+- 正式结构化抓取以 `candidate_hard_limit`、`target_valid_posts` 和 `required_fields_profile` 为准；未达到 `valid_unique_count` 目标不得汇报完成。
+- B站、微博、小红书、抖音、知乎粉丝量为必需字段；数值、来源和 `followers_observed=true` 必须同时存在，平台不提供时只能由配置声明 `ignored`。
+- 携程、去哪儿、豆瓣小组当前是固定 URL 页面证据任务；单页成功不代表平台级批量采集完成。
+- 路径定义集中在 `trippostcollect.core.paths`；新增代码不要硬编码 `outputs/`、`data/runtime/`、浏览器配置目录等目录。
 - 文档和总结默认使用中文。
 
 ## 工作方式
@@ -26,10 +31,30 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 先用 `rg`、`git status --short` 和定向文件读取确认现状；手工编辑用 `apply_patch`。
 - 明确要求运行 Python 前必须 `source .venv/bin/activate`，激活后只用 `python`，不要用系统 `python` / `python3`。
 - 优先改现有脚本、配置或数据库结构；不要新增一次性探测脚本。
+- 不为已废弃的命令、字段、数据类型或文档保留兼容层；确认当前流程无调用后直接删除，历史需要从 Git 查询。
 - 大型抓取产物优先看 `summary.json`、`summary.md`、`run_summary.json`、计数、字段列表、样本和标准输出/标准错误尾部摘要；不要全文展开 JSONL、HTML、过长 JSON 或截图元数据。
 - 输出包含 3 个及以上参数、长路径、JSON、环境变量或多个 `--xxx` 选项的命令时，必须用反斜杠 `\` 分行展示；每个参数或逻辑参数组单独一行，避免压缩成长单行。命令很短且参数简单时可以保持单行。
-- 根项目未发现 Makefile、CI、测试目录、项目级 package.json 或 pom.xml；不要虚构构建、lint、test 命令。
+- Python 测试使用 `pytest`，当前测试目录是 `apps/admin_api/tests/`；开发依赖通过 `python -m pip install -e '.[dev]'` 安装。
 - 模型输出尽量用中文。
+- `mediacrawler_batch_validate.py` 和 `info_collection_benchmark.py` 只用于诊断/开发，不能作为正式轮次完成证据。
+
+## 上下文和 Token 消耗强约束
+
+以下限制优先级高于一般排查便利性。默认必须遵守；只有问题无法继续定位时，才可以向用户申请临时解限。
+
+- 不对 `outputs/**/logs/*.log`、JSONL、HTML、截图元数据做宽泛 `rg`。
+- 查日志只用 `tail -n 40`、`summary.json`、字段列表、计数和样本。
+- 对第三方目录 `tools/MediaCrawler` 只查精确文件，不做全树大范围搜索。
+- 长跑 server 会话不直接 poll 大缓冲；需要停服务时先判断是否有日志积压，必要时只用进程/端口状态确认。
+- 文档只读相关章节，不重复整篇读取。
+- 对大文件验证用小脚本输出计数、字段名和短样本，不把原文吐回上下文。
+
+如果上述限制导致问题无法解决，先暂停扩大读取范围，向用户申请临时解限。申请必须说明：
+
+- 要放开的具体限制。
+- 需要读取的文件、目录或命令范围。
+- 预计输出规模和控制方式。
+- 为什么现有摘要、计数、样本不足以继续定位。
 
 ## 常用命令
 
@@ -53,15 +78,17 @@ python scripts/crawl_runner.py \
 
 ## 任务路由
 
-- 调度、任务（job）选择、运行报告：读 `docs/crawl-architecture.md`、`config/crawl_targets.json`、`scripts/crawl_runner.py`。
-- MediaCrawler 平台抓取：读 `docs/crawl-architecture.md`、`scripts/mediacrawler_crawl.py`、必要时读 `scripts/mediacrawler_login_warmup.py`。
-- 页面证据抓取和导入：读 `docs/data-persistence.md`、`scripts/ctf_resource_crawl.py`、`scripts/import_ctf_captures.py`；CTF 链路登录态预热读 `scripts/ctf_login_warmup.py`；豆瓣作者粉丝量补全逻辑见 `docs/crawl-architecture.md` 豆瓣小组节。
-- 数据库结构、入库、去重：读 `docs/data-persistence.md`、`db/*.sql`、`scripts/db_bootstrap.py` 和相关导入脚本。
-- 字段能力或平台分工：读 `docs/platform-field-coverage.md` 和 `docs/crawl-architecture.md`。
+- 正式抓取、数量、停止和成功：读 `docs/formal-crawl-contract.md`、`config/crawl_targets.json`、`scripts/crawl_runner.py`。
+- 登录、Chrome、阻断恢复：读 `docs/operations-runbook.md` 和对应 warmup 脚本。
+- MediaCrawler 平台实现：读 `docs/platforms/<platform>.md`、`scripts/mediacrawler_crawl.py`，必要时只读对应第三方精确文件。
+- 页面证据抓取和导入：读 `docs/platforms/page-evidence.md`、`docs/data-persistence.md`、`scripts/ctf_resource_crawl.py`、`scripts/import_ctf_captures.py`；登录态预热读 `scripts/ctf_login_warmup.py`。
+- 数据库结构、入库、去重：读 `docs/data-persistence.md`、`db/*.sql`、`trippostcollect.db.bootstrap` 和相关导入脚本。
+- 字段能力或平台分工：读 `docs/platform-field-coverage.md` 和对应 `docs/platforms/*.md`。
 
 ## 完成标准
 
 - Python 脚本改动后先 `source .venv/bin/activate`，再运行 `python -m py_compile <touched files>`。
+- Python 行为改动运行 `python -m pytest`；静态检查按需运行 `python -m ruff check <touched files>`。
 - JSON 配置改动后先 `source .venv/bin/activate`，再运行 `python -m json.tool <file> >/dev/null`。
 - 调度改动至少做 `--dry-run` 试运行或小范围运行验证。
 - 入库或数据库结构改动使用临时 SQLite 验证，并用 SQL 检查行数和关键字段。
