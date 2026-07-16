@@ -7,6 +7,7 @@ import asyncio
 import json
 import random
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from human_flow import (
 
 HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS = 240
 XHS_VISIBLE_CHECK_INTERVAL_SECONDS = 5.0
+XHS_SEARCH_READY_TIMEOUT_SECONDS = 90.0
 REQUEST_RANDOM = random.SystemRandom()
 XHS_POST_INTERACTION_MODES = frozenset({"comment-scroll", "like-one", "random"})
 REQUIRED_BEHAVIOR_EVENTS = frozenset({"pause", "mouse_moves", "human_scroll_complete"})
@@ -63,23 +65,24 @@ def write_evidence(path: str | Path, evidence: dict[str, Any]) -> None:
 
 
 async def runtime_fingerprint(page: Page) -> dict[str, Any]:
-    return await page.evaluate(
-        """() => ({
-            webdriver: navigator.webdriver,
-            languages: Array.from(navigator.languages || []),
-            platform: navigator.platform || '',
-            user_agent: navigator.userAgent || '',
-            hardware_concurrency: navigator.hardwareConcurrency || null,
-            device_memory: navigator.deviceMemory || null,
-            max_touch_points: navigator.maxTouchPoints || 0,
-            viewport: {
-                width: window.innerWidth || 0,
-                height: window.innerHeight || 0,
-                device_pixel_ratio: window.devicePixelRatio || 1,
-            },
-            visibility_state: document.visibilityState || '',
-        })"""
-    )
+    async with asyncio.timeout(10):
+        return await page.evaluate(
+            """() => ({
+                webdriver: navigator.webdriver,
+                languages: Array.from(navigator.languages || []),
+                platform: navigator.platform || '',
+                user_agent: navigator.userAgent || '',
+                hardware_concurrency: navigator.hardwareConcurrency || null,
+                device_memory: navigator.deviceMemory || null,
+                max_touch_points: navigator.maxTouchPoints || 0,
+                viewport: {
+                    width: window.innerWidth || 0,
+                    height: window.innerHeight || 0,
+                    device_pixel_ratio: window.devicePixelRatio || 1,
+                },
+                visibility_state: document.visibilityState || '',
+            })"""
+        )
 
 
 async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
@@ -101,11 +104,125 @@ def visible_challenge(markers: dict[str, bool]) -> str:
     return next(
         (
             key
-            for key in ("captcha_or_verify", "rate_limited", "blocked")
+            for key in ("captcha_or_verify", "rate_limited", "blocked", "login_required")
             if markers.get(key)
         ),
         "",
     )
+
+
+def runtime_fingerprint_valid(fingerprint: dict[str, Any] | None) -> bool:
+    if not isinstance(fingerprint, dict):
+        return False
+    viewport = fingerprint.get("viewport") or {}
+    return bool(
+        "webdriver" in fingerprint
+        and fingerprint.get("webdriver") is None
+        and fingerprint.get("languages")
+        and fingerprint.get("platform")
+        and fingerprint.get("user_agent")
+        and fingerprint.get("visibility_state") == "visible"
+        and int(viewport.get("width") or 0) > 0
+        and int(viewport.get("height") or 0) > 0
+    )
+
+
+def effective_scroll_recorded(events: list[dict[str, Any]]) -> bool:
+    return any(
+        item.get("event") == "human_scroll_complete"
+        and int(item.get("effective_passes") or 0) > 0
+        for item in events
+        if isinstance(item, dict)
+    )
+
+
+async def wait_for_xhs_search_ready(
+    page: Page,
+    events: list[dict[str, Any]],
+    *,
+    timeout_seconds: float = XHS_SEARCH_READY_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Wait for a logged-in result page without performing behavior on login UI."""
+    started = time.monotonic()
+    deadline = started + max(0.1, float(timeout_seconds))
+    last_text = ""
+    last_markers: dict[str, bool] = {}
+    card_count = 0
+    profile_count = 0
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            reason = "login_required" if last_markers.get("login_required") else "search_results_not_ready"
+            return {
+                "ready": False,
+                "reason": reason,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "card_count": card_count,
+                "profile_count": profile_count,
+                "markers": last_markers,
+                "visible_text_sample": last_text,
+                "url": page.url,
+            }
+
+        try:
+            async with asyncio.timeout(min(6.0, remaining)):
+                last_text, last_markers = await visible_page_state(page)
+                counts = await page.evaluate(
+                    """() => ({
+                        card_count: document.querySelectorAll(
+                            "a[href*='/explore/'], a[href*='/discovery/item/']"
+                        ).length,
+                        profile_count: document.querySelectorAll("a[href*='/user/profile/']").length,
+                    })"""
+                )
+                card_count = int((counts or {}).get("card_count") or 0)
+                profile_count = int((counts or {}).get("profile_count") or 0)
+        except TimeoutError:
+            events.append(
+                {
+                    "event": "page_readiness_check",
+                    "ready": False,
+                    "reason": "inspection_timeout",
+                }
+            )
+        else:
+            challenge = visible_challenge(last_markers)
+            ready = not challenge and card_count > 0 and profile_count > 0
+            events.append(
+                {
+                    "event": "page_readiness_check",
+                    "ready": ready,
+                    "challenge": challenge,
+                    "card_count": card_count,
+                    "profile_count": profile_count,
+                    "markers": last_markers,
+                }
+            )
+            if ready:
+                return {
+                    "ready": True,
+                    "reason": "",
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "card_count": card_count,
+                    "profile_count": profile_count,
+                    "markers": last_markers,
+                    "visible_text_sample": last_text,
+                    "url": page.url,
+                }
+            if challenge and challenge != "login_required":
+                return {
+                    "ready": False,
+                    "reason": challenge,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "card_count": card_count,
+                    "profile_count": profile_count,
+                    "markers": last_markers,
+                    "visible_text_sample": last_text,
+                    "url": page.url,
+                }
+
+        await asyncio.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
 
 
 async def dwell_on_list_with_checks(
@@ -149,8 +266,22 @@ def behavior_evidence_valid(evidence: dict[str, Any] | None) -> bool:
     events = evidence.get("events") or []
     event_names = {str(item.get("event") or "") for item in events if isinstance(item, dict)}
     markers = evidence.get("visible_markers") or {}
-    challenge = any(bool(markers.get(key)) for key in ("captcha_or_verify", "rate_limited", "blocked"))
-    return REQUIRED_BEHAVIOR_EVENTS.issubset(event_names) and not challenge
+    initial_markers = evidence.get("initial_visible_markers") or {}
+    challenge = any(
+        bool(marker_set.get(key))
+        for marker_set in (initial_markers, markers)
+        for key in ("captcha_or_verify", "rate_limited", "blocked", "login_required")
+    )
+    base_ok = REQUIRED_BEHAVIOR_EVENTS.issubset(event_names) and not challenge
+    if evidence.get("profile") != "xhs_guarded":
+        return base_ok
+    readiness = evidence.get("page_readiness") or {}
+    return bool(
+        base_ok
+        and readiness.get("ready") is True
+        and runtime_fingerprint_valid(evidence.get("runtime_fingerprint"))
+        and effective_scroll_recorded(events)
+    )
 
 
 async def run_guarded_request_pause(
@@ -180,6 +311,54 @@ async def run_guarded_request_pause(
     evidence["request_pacing_events"] = events[-200:]
     write_evidence(path, evidence)
     return event
+
+
+async def run_xhs_continuity_behavior(
+    page: Page,
+    *,
+    evidence_path: str | Path,
+    stage: str,
+) -> dict[str, Any]:
+    path = Path(evidence_path).expanduser()
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot update XHS continuity evidence: {exc}") from exc
+    if evidence.get("profile") != "xhs_guarded" or not behavior_evidence_valid(evidence):
+        raise RuntimeError("XHS continuity behavior requires completed xhs_guarded evidence")
+
+    initial_text, initial_markers = await visible_page_state(page)
+    challenge = visible_challenge(initial_markers)
+    if challenge:
+        raise RuntimeError(f"{challenge}_detected_during_xhs_continuity:{stage}")
+
+    started_at = utc_now()
+    events: list[dict[str, Any]] = []
+    profile = load_behavior_profile("xhs_guarded", strict=True)
+    await human_pause(page, (1.5, 4.5), reason=f"continuity_{stage}", log=events)
+    await random_mouse_moves(page, profile, events)
+    final_text, final_markers = await visible_page_state(page)
+    final_challenge = visible_challenge(final_markers)
+    continuity = {
+        "stage": stage,
+        "started_at": started_at,
+        "finished_at": utc_now(),
+        "status": "completed" if not final_challenge else "failed",
+        "events": events,
+        "initial_visible_markers": initial_markers,
+        "initial_visible_text_sample": initial_text,
+        "visible_markers": final_markers,
+        "visible_text_sample": final_text,
+        "challenge": final_challenge,
+        "url": page.url,
+    }
+    continuity_events = evidence.setdefault("continuity_events", [])
+    continuity_events.append(continuity)
+    evidence["continuity_events"] = continuity_events[-50:]
+    write_evidence(path, evidence)
+    if final_challenge:
+        raise RuntimeError(f"{final_challenge}_detected_during_xhs_continuity:{stage}")
+    return continuity
 
 
 async def _first_visible_locator(page: Page, selectors: tuple[str, ...]):
@@ -408,22 +587,37 @@ async def run_page_behavior(
     initial_visible_markers: dict[str, bool] = {}
     screenshot_path = str(Path(evidence_path).expanduser().with_suffix(".png"))
     artifact_errors: list[str] = []
+    page_readiness: dict[str, Any] = {}
 
     try:
         profile = load_behavior_profile(profile_name, strict=True)
-        initial_visible_text_sample, initial_visible_markers = await visible_page_state(page)
-        initial_challenge = visible_challenge(initial_visible_markers)
-        if initial_challenge:
-            visible_text_sample = initial_visible_text_sample
-            visible_markers = initial_visible_markers
-        else:
-            if profile_name == "xhs_guarded":
-                visible_text_sample, visible_markers = await dwell_on_list_with_checks(page, profile, events)
+        behavior_ready = True
+        if profile_name == "xhs_guarded":
+            page_readiness = await wait_for_xhs_search_ready(page, events)
+            behavior_ready = bool(page_readiness.get("ready"))
+            if not behavior_ready:
+                initial_visible_text_sample = str(page_readiness.get("visible_text_sample") or "")
+                initial_visible_markers = dict(page_readiness.get("markers") or {})
+                visible_text_sample = initial_visible_text_sample
+                visible_markers = initial_visible_markers
+                reason = str(page_readiness.get("reason") or "search_results_not_ready")
+                if reason not in {"captcha_or_verify", "rate_limited", "blocked", "login_required"}:
+                    raise RuntimeError(f"xhs_page_not_ready:{reason}")
+
+        if behavior_ready:
+            initial_visible_text_sample, initial_visible_markers = await visible_page_state(page)
+            initial_challenge = visible_challenge(initial_visible_markers)
+            if initial_challenge:
+                visible_text_sample = initial_visible_text_sample
+                visible_markers = initial_visible_markers
             else:
-                await dwell_on_list(page, profile, log=events)
-            if not visible_challenge(visible_markers):
-                fingerprint = await runtime_fingerprint(page)
-                visible_text_sample, visible_markers = await visible_page_state(page)
+                if profile_name == "xhs_guarded":
+                    visible_text_sample, visible_markers = await dwell_on_list_with_checks(page, profile, events)
+                else:
+                    await dwell_on_list(page, profile, log=events)
+                if not visible_challenge(visible_markers):
+                    fingerprint = await runtime_fingerprint(page)
+                    visible_text_sample, visible_markers = await visible_page_state(page)
         try:
             await page.screenshot(path=screenshot_path, full_page=False, timeout=10_000, animations="disabled")
         except Exception as exc:
@@ -444,6 +638,7 @@ async def run_page_behavior(
         "url": page.url,
         "events": events,
         "runtime_fingerprint": fingerprint,
+        "page_readiness": page_readiness,
         "initial_visible_markers": initial_visible_markers,
         "initial_visible_text_sample": initial_visible_text_sample,
         "visible_markers": visible_markers,

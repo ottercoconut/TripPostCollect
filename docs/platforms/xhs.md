@@ -144,10 +144,20 @@ python scripts/xhs_runner.py \
 ## 5. 抓取中的固定行为
 
 - `xhs_guarded` 在真实关键词页检查可见阻断；长停留期间每 5 秒复查一次可见页面，发现
-  验证、频控或封禁立即留证并停止；未发现阻断时再执行少量鼠标移动和低次数桌面滚轮；
-  不使用触摸行为，不扫描隐藏 HTML 关键词。
+  验证、频控、封禁或登录要求立即留证并停止。行为开始前必须确认登录 UI 已就绪、关键词页
+  存在搜索卡片和作者链接；未就绪期间只等待，不在登录页面执行模拟行为。
+- 前置行为执行少量鼠标移动和低次数桌面滚轮，不使用触摸行为，不扫描隐藏 HTML 关键词。
+  滚轮调用后必须观测到窗口或实际滚动容器位置变化；只有调用事件但页面没有位移时，行为
+  证据无效。
+- 运行时指纹不仅保存，还必须通过门禁：`navigator.webdriver` 不得暴露，语言、平台、UA、
+  可见状态和 viewport 必须完整。XHS API 请求头从当前 Chromium 会话生成，UA 与 UA Client
+  Hints 主版本不一致时立即失败，禁止使用固定旧版本请求头。
 - MediaCrawler 搜索并发固定为 1。搜索结果、笔记详情、作者主页和翻页分别执行随机等待，实际
   秒数写入 `behavior_evidence.request_pacing_events`。
+- 每批搜索结果和翻页等待后继续执行短停留与鼠标移动，并写入
+  `behavior_evidence.continuity_events`；不能只在抓取开始前执行一次页面行为。
+- 搜索页、帖子互动和作者主页浏览器导航使用绝对 deadline。导航事件超时但关键词 URL 已提交
+  时交给可见页面就绪门禁判断；URL 未提交或页面调用超过 deadline 时按运行失败停止。
 - 作者粉丝补全先请求当前登录会话的无 token 作者主页。空结果时随机等待，再用同一已登录
   BrowserContext 打开无 token 作者页并解析。
 - 笔记 `xsec_token` 只属于笔记访问上下文，不能当作作者主页凭据。
@@ -164,6 +174,7 @@ python scripts/xhs_runner.py \
 - 顶层 `run_summary.json` 状态为 `completed`，且账号租约已经释放；
 - 冻结状态的五个阶段全部为 `completed`，或契约明确允许 `skipped`；
 - child summary 中 `behavior_validation.ok=true`；
+- `behavior_validation.platforms.xhs.continuity_ok=true`，且至少覆盖 `search_results`；
 - `formal_validation.behavior_evidence_ok=true`、`policy_evidence_ok=true`；
 - `formal_validation.new_target_met=true`；
 - `valid_new_count >= target_new_posts`；

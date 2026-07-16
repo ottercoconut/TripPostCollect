@@ -192,7 +192,10 @@ Chrome HOME、Crashpad 和 `uv` 缓存由 `scripts/browser_runtime.py` 指向
 `behavior_evidence.events`、`runtime_fingerprint`、`visible_markers`、截图和
 `policy_events`。行为阶段占用独立的 240 秒超时预算，不挤占配置中的平台抓取超时。
 小红书摘要还应包含 `behavior_evidence.request_pacing_events`，覆盖 search results、note
-detail、creator profile 和实际发生的 page navigation 阶段。
+detail、creator profile 和实际发生的 page navigation 阶段；同时包含
+`continuity_events`，证明搜索批次之间仍执行了可见页面停留和鼠标移动。小红书行为开始前
+必须确认登录完成且结果卡片可见，滚轮必须产生可观测位移，浏览器 UA 与 API UA Client Hints
+主版本必须一致。
 失败轮次只要 child summary 已生成，Runner 顶层仍必须读取其中的行为与帖子互动证据；退出码
 失败不能把已发生的互动错误汇总为空。
 

@@ -1972,6 +1972,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
                 "TRIPPOSTCOLLECT_XHS_POST_INTERACTION": str(args.xhs_post_interaction),
                 "TRIPPOSTCOLLECT_XHS_INITIAL_SETTLE_SECONDS": "12",
                 "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS": "180" if args.headed else "0",
+                "TRIPPOSTCOLLECT_XHS_NAVIGATION_DEADLINE_SECONDS": "60",
                 "TRIPPOSTCOLLECT_XHS_QR_REFRESH_SECONDS": "90",
                 "TRIPPOSTCOLLECT_XHS_QR_ATTEMPTS": "5",
             }
@@ -2163,12 +2164,23 @@ def collect_behavior_validation(
             if isinstance(item, dict)
         ]
         pacing_stages = {str(item.get("stage") or "") for item in pacing_events}
+        continuity_events = [
+            item
+            for item in evidence.get("continuity_events") or []
+            if isinstance(item, dict)
+        ]
+        continuity_stages = {
+            str(item.get("stage") or "")
+            for item in continuity_events
+            if item.get("status") == "completed"
+        }
         required_pacing_stages = (
             {"search_results", "note_detail", "creator_profile"}
             if platform_key == "xhs"
             else set()
         )
         pacing_ok = required_pacing_stages.issubset(pacing_stages)
+        continuity_ok = platform_key != "xhs" or "search_results" in continuity_stages
         post_interactions = [
             item
             for item in evidence.get("post_interactions") or []
@@ -2194,6 +2206,7 @@ def collect_behavior_validation(
                 and target_url_ok
                 and profile_ok
                 and pacing_ok
+                and continuity_ok
             ),
             "behavior_status": str(evidence.get("status") or "missing"),
             "behavior_profile": behavior_profile,
@@ -2202,6 +2215,9 @@ def collect_behavior_validation(
             "request_pacing_event_count": len(pacing_events),
             "request_pacing_stages": sorted(pacing_stages),
             "request_pacing_ok": pacing_ok,
+            "continuity_event_count": len(continuity_events),
+            "continuity_stages": sorted(continuity_stages),
+            "continuity_ok": continuity_ok,
             "post_interaction_requested": interaction_requested,
             "post_interaction_mode": xhs_post_interaction if platform_key == "xhs" else "none",
             "post_interaction_ok": interaction_ok,

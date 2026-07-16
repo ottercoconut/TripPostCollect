@@ -146,6 +146,47 @@ async def page_size(page: Page) -> tuple[int, int]:
     return int(size.get("width") or 1280), int(size.get("height") or 800)
 
 
+async def scroll_position(page: Page) -> dict[str, int]:
+    """Return compact scroll state so emitted input can be verified."""
+    try:
+        async with asyncio.timeout(5):
+            value = await page.evaluate(
+                """() => {
+                    const nodes = [document.scrollingElement, ...document.querySelectorAll('*')].filter(Boolean);
+                    const seen = new Set();
+                    const scrollable = nodes.filter((node) => {
+                        if (seen.has(node)) return false;
+                        seen.add(node);
+                        return Number(node.scrollHeight || 0) - Number(node.clientHeight || 0) > 40;
+                    }).slice(0, 40);
+                    const positions = scrollable.map((node) => Math.round(Number(node.scrollTop || 0)));
+                    return {
+                        window_y: Math.round(Number(window.scrollY || 0)),
+                        scrollable_count: scrollable.length,
+                        scroll_top_sum: positions.reduce((total, item) => total + item, 0),
+                        max_scroll_top: positions.length ? Math.max(...positions) : 0,
+                    };
+                }"""
+            )
+    except Exception:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: int(value.get(key) or 0)
+        for key in ("window_y", "scrollable_count", "scroll_top_sum", "max_scroll_top")
+    }
+
+
+def scroll_effect_observed(before: dict[str, int], after: dict[str, int]) -> bool:
+    if not before or not after:
+        return False
+    return any(
+        before.get(key) != after.get(key)
+        for key in ("window_y", "scroll_top_sum", "max_scroll_top")
+    )
+
+
 async def human_pause(
     page: Page,
     seconds_range: tuple[float, float],
@@ -173,6 +214,7 @@ async def random_mouse_moves(page: Page, profile: BehaviorProfile, log: list[dic
 
 
 async def cdp_touch_scroll(page: Page, delta_y: int, log: list[dict[str, Any]] | None = None) -> bool:
+    before = await scroll_position(page)
     try:
         session = await page.context.new_cdp_session(page)
         width, height = await page_size(page)
@@ -196,16 +238,43 @@ async def cdp_touch_scroll(page: Page, delta_y: int, log: list[dict[str, Any]] |
             )
             await asyncio.sleep(RANDOM.uniform(0.018, 0.055))
         await session.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": [], "timestamp": time.time()})
-        _log(log, {"event": "cdp_touch_scroll", "delta_y": delta_y, "steps": steps})
-        return True
+        await page.wait_for_timeout(120)
+        after = await scroll_position(page)
+        effect_observed = scroll_effect_observed(before, after)
+        _log(
+            log,
+            {
+                "event": "cdp_touch_scroll",
+                "delta_y": delta_y,
+                "steps": steps,
+                "effect_observed": effect_observed,
+                "before": before,
+                "after": after,
+            },
+        )
+        return effect_observed
     except Exception as exc:
         _log(log, {"event": "cdp_touch_scroll_failed", "error": f"{type(exc).__name__}: {exc}"})
         return False
 
 
-async def wheel_scroll(page: Page, delta_y: int, log: list[dict[str, Any]] | None = None) -> None:
+async def wheel_scroll(page: Page, delta_y: int, log: list[dict[str, Any]] | None = None) -> bool:
+    before = await scroll_position(page)
     await page.mouse.wheel(RANDOM.randint(-40, 40), delta_y)
-    _log(log, {"event": "wheel_scroll", "delta_y": delta_y})
+    await page.wait_for_timeout(120)
+    after = await scroll_position(page)
+    effect_observed = scroll_effect_observed(before, after)
+    _log(
+        log,
+        {
+            "event": "wheel_scroll",
+            "delta_y": delta_y,
+            "effect_observed": effect_observed,
+            "before": before,
+            "after": after,
+        },
+    )
+    return effect_observed
 
 
 async def human_scroll(
@@ -220,14 +289,33 @@ async def human_scroll(
     passes = RANDOM.randint(low, high)
     if max_passes is not None:
         passes = min(passes, max_passes)
+    effective_passes = 0
     for index in range(max(1, passes)):
+        width, height = await page_size(page)
+        target_x = RANDOM.randint(max(30, width // 3), max(31, width * 4 // 5))
+        target_y = RANDOM.randint(max(40, height // 3), max(41, height * 4 // 5))
+        await page.mouse.move(target_x, target_y, steps=RANDOM.randint(3, 8))
+        _log(log, {"event": "scroll_target", "x": target_x, "y": target_y})
         direction = -1 if index > 0 and RANDOM.random() < 0.16 else 1
         delta = direction * RANDOM.randint(*profile.scroll_delta_px)
         use_touch = RANDOM.random() < profile.cdp_touch_probability
-        if not use_touch or not await cdp_touch_scroll(page, delta, log):
-            await wheel_scroll(page, delta, log)
+        effect_observed = use_touch and await cdp_touch_scroll(page, delta, log)
+        if not effect_observed:
+            effect_observed = await wheel_scroll(page, delta, log)
+        if not effect_observed:
+            effect_observed = await wheel_scroll(page, -delta, log)
+        if effect_observed:
+            effective_passes += 1
         await page.wait_for_timeout(RANDOM.randint(450, 2600))
-    _log(log, {"event": "human_scroll_complete", "intent": intent, "passes": passes})
+    _log(
+        log,
+        {
+            "event": "human_scroll_complete",
+            "intent": intent,
+            "passes": passes,
+            "effective_passes": effective_passes,
+        },
+    )
 
 
 async def dwell_on_list(page: Page, profile: BehaviorProfile, log: list[dict[str, Any]] | None = None) -> None:

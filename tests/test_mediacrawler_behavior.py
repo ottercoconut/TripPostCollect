@@ -16,6 +16,47 @@ if str(SCRIPTS) not in sys.path:
 
 mediacrawler_behavior = import_module("mediacrawler_behavior")
 mediacrawler_crawl = import_module("mediacrawler_crawl")
+human_flow = import_module("human_flow")
+
+
+def valid_fingerprint(*, webdriver=None) -> dict:
+    return {
+        "webdriver": webdriver,
+        "languages": ["zh-CN", "zh"],
+        "platform": "MacIntel",
+        "user_agent": "test-agent",
+        "hardware_concurrency": 8,
+        "device_memory": 8,
+        "max_touch_points": 0,
+        "viewport": {"width": 1440, "height": 900, "device_pixel_ratio": 2},
+        "visibility_state": "visible",
+    }
+
+
+def valid_xhs_events() -> list[dict]:
+    return [
+        {"event": "pause"},
+        {"event": "mouse_moves"},
+        {"event": "wheel_scroll", "effect_observed": True},
+        {
+            "event": "human_scroll_complete",
+            "intent": "list",
+            "passes": 1,
+            "effective_passes": 1,
+        },
+    ]
+
+
+def valid_xhs_evidence() -> dict:
+    return {
+        "status": "completed",
+        "profile": "xhs_guarded",
+        "events": valid_xhs_events(),
+        "runtime_fingerprint": valid_fingerprint(),
+        "page_readiness": {"ready": True},
+        "initial_visible_markers": {},
+        "visible_markers": {},
+    }
 
 
 class FakeLocator:
@@ -27,26 +68,23 @@ class FakeLocator:
 
 
 class FakePage:
-    def __init__(self, text: str = "正常搜索内容") -> None:
+    def __init__(self, text: str = "正常搜索内容", *, card_count: int = 1, profile_count: int = 1) -> None:
         self.url = "https://example.test/search"
         self.text = text
+        self.card_count = card_count
+        self.profile_count = profile_count
 
     def locator(self, selector: str) -> FakeLocator:
         assert selector == "body"
         return FakeLocator(self.text)
 
     async def evaluate(self, script: str) -> dict:
-        return {
-            "webdriver": None,
-            "languages": ["zh-CN", "zh"],
-            "platform": "MacIntel",
-            "user_agent": "test-agent",
-            "hardware_concurrency": 8,
-            "device_memory": 8,
-            "max_touch_points": 0,
-            "viewport": {"width": 1440, "height": 900, "device_pixel_ratio": 2},
-            "visibility_state": "visible",
-        }
+        if "card_count:" in script:
+            return {
+                "card_count": self.card_count,
+                "profile_count": self.profile_count,
+            }
+        return valid_fingerprint()
 
     async def screenshot(self, path: str, full_page: bool, timeout: int, animations: str) -> None:
         Path(path).write_bytes(b"png")
@@ -57,8 +95,13 @@ async def fake_dwell_on_list(page, profile, log) -> None:
         [
             {"event": "pause", "reason": "list_dwell_initial", "seconds": 1.0},
             {"event": "mouse_moves", "count": 3},
-            {"event": "wheel_scroll", "delta_y": 500},
-            {"event": "human_scroll_complete", "intent": "list", "passes": 1},
+            {"event": "wheel_scroll", "delta_y": 500, "effect_observed": True},
+            {
+                "event": "human_scroll_complete",
+                "intent": "list",
+                "passes": 1,
+                "effective_passes": 1,
+            },
         ]
     )
 
@@ -110,7 +153,7 @@ async def test_xhs_dwell_stops_when_rate_limit_appears(
     async def changing_page_state(page):
         nonlocal checks
         checks += 1
-        if checks == 1:
+        if checks <= 2:
             return "正常搜索内容", {
                 "captcha_or_verify": False,
                 "rate_limited": False,
@@ -164,6 +207,53 @@ async def test_sms_login_code_text_is_not_a_security_challenge(
 
 
 @pytest.mark.asyncio
+async def test_xhs_login_required_never_runs_behavior(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def not_ready(page, events):
+        return {
+            "ready": False,
+            "reason": "login_required",
+            "markers": {
+                "captcha_or_verify": False,
+                "rate_limited": False,
+                "blocked": False,
+                "login_required": True,
+            },
+            "visible_text_sample": "登录后查看",
+            "url": page.url,
+        }
+
+    monkeypatch.setattr(mediacrawler_behavior, "wait_for_xhs_search_ready", not_ready)
+    monkeypatch.setattr(mediacrawler_behavior, "dwell_on_list", fake_dwell_on_list)
+    evidence_path = tmp_path / "behavior.json"
+
+    with pytest.raises(RuntimeError, match="login_required_detected"):
+        await mediacrawler_behavior.run_page_behavior(
+            FakePage("登录后查看", card_count=0, profile_count=0),
+            platform_key="xhs",
+            evidence_path=evidence_path,
+            profile_name="xhs_guarded",
+        )
+
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["status"] == "failed"
+    assert evidence["events"] == []
+    assert evidence["visible_markers"]["login_required"] is True
+
+
+def test_xhs_behavior_rejects_exposed_webdriver_and_ineffective_scroll() -> None:
+    exposed = valid_xhs_evidence()
+    exposed["runtime_fingerprint"] = valid_fingerprint(webdriver=True)
+    ineffective = valid_xhs_evidence()
+    ineffective["events"][-1]["effective_passes"] = 0
+
+    assert mediacrawler_behavior.behavior_evidence_valid(exposed) is False
+    assert mediacrawler_behavior.behavior_evidence_valid(ineffective) is False
+
+
+@pytest.mark.asyncio
 async def test_xhs_guarded_request_pause_is_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class FixedRandom:
         @staticmethod
@@ -177,20 +267,7 @@ async def test_xhs_guarded_request_pause_is_persisted(tmp_path: Path, monkeypatc
         slept.append(seconds)
 
     evidence_path = tmp_path / "behavior.json"
-    evidence_path.write_text(
-        json.dumps(
-            {
-                "status": "completed",
-                "events": [
-                    {"event": "pause"},
-                    {"event": "mouse_moves"},
-                    {"event": "human_scroll_complete"},
-                ],
-                "visible_markers": {},
-            }
-        ),
-        encoding="utf-8",
-    )
+    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
     monkeypatch.setattr(mediacrawler_behavior, "REQUEST_RANDOM", FixedRandom())
     monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", fake_sleep)
 
@@ -209,6 +286,34 @@ async def test_xhs_guarded_request_pause_is_persisted(tmp_path: Path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_xhs_continuity_behavior_is_persisted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_pause(page, seconds_range, *, reason, log):
+        log.append({"event": "pause", "reason": reason, "seconds": 2.0})
+
+    async def fake_mouse_moves(page, profile, log):
+        log.append({"event": "mouse_moves", "count": 1})
+
+    evidence_path = tmp_path / "behavior.json"
+    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
+    monkeypatch.setattr(mediacrawler_behavior, "human_pause", fake_pause)
+    monkeypatch.setattr(mediacrawler_behavior, "random_mouse_moves", fake_mouse_moves)
+
+    continuity = await mediacrawler_behavior.run_xhs_continuity_behavior(
+        FakePage(),
+        evidence_path=evidence_path,
+        stage="search_results",
+    )
+
+    persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert continuity["status"] == "completed"
+    assert persisted["continuity_events"][0]["stage"] == "search_results"
+    assert [item["event"] for item in continuity["events"]] == ["pause", "mouse_moves"]
+
+
+@pytest.mark.asyncio
 async def test_xhs_requested_comment_scroll_is_recorded_without_changing_base_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -221,21 +326,7 @@ async def test_xhs_requested_comment_scroll_is_recorded_without_changing_base_ga
         return {"status": "completed", "action": "comment-scroll", "selector": "#comments"}
 
     evidence_path = tmp_path / "behavior.json"
-    evidence_path.write_text(
-        json.dumps(
-            {
-                "status": "completed",
-                "profile": "xhs_guarded",
-                "events": [
-                    {"event": "pause"},
-                    {"event": "mouse_moves"},
-                    {"event": "human_scroll_complete"},
-                ],
-                "visible_markers": {},
-            }
-        ),
-        encoding="utf-8",
-    )
+    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
     monkeypatch.setattr(mediacrawler_behavior, "human_pause", fake_pause)
     monkeypatch.setattr(mediacrawler_behavior, "_run_xhs_comment_scroll", fake_comment_scroll)
 
@@ -361,6 +452,62 @@ async def test_xhs_like_clicks_once_and_verifies_state_change(monkeypatch: pytes
     assert page.like.click_count == 1
 
 
+@pytest.mark.asyncio
+async def test_human_scroll_records_observed_page_movement(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FixedRandom:
+        @staticmethod
+        def randint(low: int, high: int) -> int:
+            return low
+
+        @staticmethod
+        def random() -> float:
+            return 1.0
+
+    class Mouse:
+        def __init__(self, page) -> None:
+            self.page = page
+
+        async def move(self, x: int, y: int, steps: int) -> None:
+            return None
+
+        async def wheel(self, delta_x: int, delta_y: int) -> None:
+            self.page.scroll_top = max(0, self.page.scroll_top + delta_y)
+
+    class ScrollPage:
+        def __init__(self) -> None:
+            self.scroll_top = 0
+            self.mouse = Mouse(self)
+
+        async def evaluate(self, script: str) -> dict:
+            if "window.innerWidth" in script:
+                return {"width": 1280, "height": 900}
+            return {
+                "window_y": self.scroll_top,
+                "scrollable_count": 1,
+                "scroll_top_sum": self.scroll_top,
+                "max_scroll_top": self.scroll_top,
+            }
+
+        async def wait_for_timeout(self, milliseconds: int) -> None:
+            return None
+
+    monkeypatch.setattr(human_flow, "RANDOM", FixedRandom())
+    events: list[dict] = []
+    page = ScrollPage()
+
+    await human_flow.human_scroll(
+        page,
+        human_flow.load_behavior_profile("xhs_guarded", strict=True),
+        intent="list",
+        max_passes=1,
+        log=events,
+    )
+
+    completion = next(item for item in events if item["event"] == "human_scroll_complete")
+    assert completion["effective_passes"] == 1
+    assert any(item.get("effect_observed") is True for item in events)
+
+
 def test_all_selected_platforms_require_behavior_and_policy_evidence() -> None:
     events = [
         {"event": "pause"},
@@ -428,24 +575,23 @@ def test_behavior_validation_rejects_wrong_keyword_url() -> None:
 
 
 def test_xhs_behavior_validation_requires_guarded_request_pacing() -> None:
-    record = {
-        "platform": "xhs",
-        "behavior_evidence": {
-            "status": "completed",
-            "profile": "xhs_guarded",
-            "events": [
-                {"event": "pause"},
-                {"event": "mouse_moves"},
-                {"event": "human_scroll_complete"},
-            ],
+    evidence = valid_xhs_evidence()
+    evidence.update(
+        {
             "request_pacing_events": [
                 {"stage": "search_results", "seconds": 9.0},
                 {"stage": "note_detail", "seconds": 6.0},
                 {"stage": "creator_profile", "seconds": 12.0},
             ],
-            "visible_markers": {},
+            "continuity_events": [
+                {"stage": "search_results", "status": "completed"},
+            ],
             "url": "https://www.xiaohongshu.com/search_result?keyword=青岛旅游",
-        },
+        }
+    )
+    record = {
+        "platform": "xhs",
+        "behavior_evidence": evidence,
         "policy_events": [{"allowed": True, "disabled": False}],
     }
 
@@ -459,28 +605,52 @@ def test_xhs_behavior_validation_requires_guarded_request_pacing() -> None:
     assert missing["platforms"]["xhs"]["request_pacing_ok"] is False
 
 
-def test_xhs_interaction_is_reported_but_does_not_invalidate_crawl() -> None:
-    record = {
-        "platform": "xhs",
-        "behavior_evidence": {
-            "status": "completed",
-            "profile": "xhs_guarded",
-            "events": [
-                {"event": "pause"},
-                {"event": "mouse_moves"},
-                {"event": "human_scroll_complete"},
-            ],
+def test_xhs_behavior_validation_requires_continuity_behavior() -> None:
+    evidence = valid_xhs_evidence()
+    evidence.update(
+        {
             "request_pacing_events": [
                 {"stage": "search_results"},
                 {"stage": "note_detail"},
                 {"stage": "creator_profile"},
             ],
+            "continuity_events": [],
+            "url": "https://www.xiaohongshu.com/search_result?keyword=青岛旅游",
+        }
+    )
+    record = {
+        "platform": "xhs",
+        "behavior_evidence": evidence,
+        "policy_events": [{"allowed": True, "disabled": False}],
+    }
+
+    validation = mediacrawler_crawl.collect_behavior_validation([record], ["xhs"], "青岛旅游")
+
+    assert validation["ok"] is False
+    assert validation["platforms"]["xhs"]["continuity_ok"] is False
+
+
+def test_xhs_interaction_is_reported_but_does_not_invalidate_crawl() -> None:
+    evidence = valid_xhs_evidence()
+    evidence.update(
+        {
+            "request_pacing_events": [
+                {"stage": "search_results"},
+                {"stage": "note_detail"},
+                {"stage": "creator_profile"},
+            ],
+            "continuity_events": [
+                {"stage": "search_results", "status": "completed"},
+            ],
             "post_interactions": [
                 {"requested_mode": "like-one", "selected_mode": "like-one", "status": "failed"}
             ],
-            "visible_markers": {},
             "url": "https://www.xiaohongshu.com/search_result?keyword=青岛旅游",
-        },
+        }
+    )
+    record = {
+        "platform": "xhs",
+        "behavior_evidence": evidence,
         "policy_events": [{"allowed": True, "disabled": False}],
     }
 
