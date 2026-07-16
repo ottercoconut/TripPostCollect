@@ -266,9 +266,15 @@ class ReadonlyAdminApiTest(unittest.TestCase):
         ]:
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, (path, response.text))
-        self.assertEqual(len(self.client.get("/api/platforms").json()["data"]), 8)
-        self.assertEqual(len(self.client.get("/api/scheduler/config").json()["data"]["jobs"]), 8)
-        self.assertEqual(len(self.client.get("/api/scheduler/jobs").json()["data"]), 8)
+        configured_job_count = len(
+            json.loads(Path("config/crawl_targets.json").read_text(encoding="utf-8"))["jobs"]
+        )
+        platform_keys = {
+            item["platform_key"] for item in self.client.get("/api/platforms").json()["data"]
+        }
+        self.assertEqual(platform_keys, {"bilibili", "douban_group", "douyin", "weibo", "xhs", "zhihu"})
+        self.assertEqual(len(self.client.get("/api/scheduler/config").json()["data"]["jobs"]), configured_job_count)
+        self.assertEqual(len(self.client.get("/api/scheduler/jobs").json()["data"]), configured_job_count)
 
     def test_no_write_or_command_routes_and_no_command_execution(self) -> None:
         paths = self.app.openapi()["paths"]

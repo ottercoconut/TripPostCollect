@@ -23,6 +23,7 @@ from trippostcollect.core.paths import (
     CRAWL_RUNNER_RUNTIME,
     DEFAULT_CONFIG,
     DEFAULT_DB,
+    FORMAL_CRAWL_CONTRACT,
     PROJECT_ROOT,
     ensure_dir,
     ensure_parent,
@@ -63,6 +64,10 @@ def parse_args() -> argparse.Namespace:
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def utc_stamp() -> str:
+    return utc_now().strftime("%Y%m%dT%H%M%S%f%z")
 
 
 def iso(value: datetime | None = None) -> str:
@@ -131,6 +136,8 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
 
     if kind == "mediacrawler_search":
         platform = str(params.get("platform") or site)
+        if platform == "xhs":
+            raise ValueError("XHS formal jobs must use scripts/xhs_runner.py")
         if "candidate_hard_limit" not in params:
             raise ValueError(f"Missing candidate_hard_limit for formal job {row['job_key']}")
         candidate_hard_limit = int(params["candidate_hard_limit"])
@@ -148,9 +155,8 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
             raise ValueError(f"Structured platform must require followers for job {row['job_key']}")
         if params.get("get_media"):
             raise ValueError(f"Generic media/video downloads are disabled for job {row['job_key']}")
-        download_images = bool(params.get("download_images"))
-        if download_images and platform != "xhs":
-            raise ValueError(f"download_images is only allowed for xhs job {row['job_key']}")
+        if params.get("download_images"):
+            raise ValueError(f"download_images requires the independent XHS runner: {row['job_key']}")
         command = [sys.executable, str(ROOT / "scripts" / "mediacrawler_crawl.py"), "--platforms", platform]
         add_flag(command, "--keyword", args.recovery_keyword or params.get("keyword", "济南旅游"))
         add_flag(command, "--timeout-per-platform", params.get("timeout_per_platform", 180))
@@ -164,12 +170,40 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
             add_flag(command, "--start-page", args.start_page)
         if args.resume_summary:
             add_flag(command, "--resume-summary", args.resume_summary)
-        if download_images:
-            command.append("--download-images")
         if args.headful or (params.get("headless") is False and not args.headless):
             command.append("--headed")
         if args.no_import:
             command.append("--no-import")
+    elif kind == "douban_group_search":
+        candidate_hard_limit = int(params.get("candidate_hard_limit") or 0)
+        target_new_posts = int(params.get("target_new_posts") or 0)
+        max_stagnant_batches = int(params.get("max_stagnant_batches") or 0)
+        if site != "douban_group" or not url:
+            raise ValueError(f"Invalid Douban discovery target for job {row['job_key']}")
+        if candidate_hard_limit <= 0 or target_new_posts <= 0 or max_stagnant_batches <= 0:
+            raise ValueError(f"Invalid formal limits for job {row['job_key']}")
+        if target_new_posts > candidate_hard_limit:
+            raise ValueError(f"target_new_posts exceeds candidate_hard_limit for job {row['job_key']}")
+        if str(params.get("followers_policy") or "") != "conditional_enrichment":
+            raise ValueError(f"Douban Group discovery requires conditional_enrichment for job {row['job_key']}")
+        command = [
+            sys.executable,
+            str(ROOT / "scripts" / "douban_group_crawl.py"),
+            "--search-url",
+            url,
+        ]
+        add_flag(command, "--keyword", params.get("keyword", ""))
+        add_flag(command, "--candidate-hard-limit", candidate_hard_limit)
+        add_flag(command, "--target-new-posts", target_new_posts)
+        add_flag(command, "--max-stagnant-batches", max_stagnant_batches)
+        add_flag(command, "--db", args.db)
+        add_flag(command, "--discovery-page-size", params.get("discovery_page_size", 50))
+        add_flag(command, "--scrapling-preflight", params.get("scrapling_preflight", "auto"))
+        add_flag(command, "--max-image-save", params.get("max_image_save", 3))
+        add_flag(command, "--max-scrolls", params.get("max_scrolls", 8))
+        add_flag(command, "--behavior-profile", profile)
+        if args.headless or params.get("headless", False):
+            command.append("--headless")
     elif kind == "ctf_resource_crawl":
         if url:
             command = [
@@ -293,12 +327,14 @@ def import_capture_results(paths: list[str], db_path: Path) -> dict[str, Any]:
         *paths,
     ]
     completed = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    payload = extract_stdout_json(completed.stdout)
     return {
         "command": command,
         "exit_code": completed.returncode,
         "stdout_tail": tail(completed.stdout),
         "stderr_tail": tail(completed.stderr),
         "ok": completed.returncode == 0,
+        **payload,
     }
 
 
@@ -462,10 +498,10 @@ def main() -> int:
     db_path = Path(args.db).expanduser()
     config_path = Path(args.config).expanduser()
     config = load_json(config_path)
-    run_id = utc_now().strftime("%Y%m%dT%H%M%S%z")
+    run_id = utc_stamp()
     run_dir = ensure_dir(Path(args.run_root).expanduser() / run_id)
     state_dir = ensure_dir(Path(args.execution_state_root).expanduser() / run_id)
-    contract_path = ROOT / "docs" / "formal-crawl-contract.md"
+    contract_path = FORMAL_CRAWL_CONTRACT
 
     ensure_parent(db_path)
     with sqlite3.connect(db_path) as conn:
@@ -595,12 +631,19 @@ def main() -> int:
                 if args.no_import:
                     import_result = {"skipped": True, "reason": "no_import"}
                     state.complete("persistence_verified", evidence=import_result, skipped=True)
-                elif row["job_kind"] == "ctf_resource_crawl" and not meta.get("skipped"):
+                elif row["job_kind"] in {"ctf_resource_crawl", "douban_group_search"} and not meta.get("skipped"):
                     import_result = import_capture_results(capture_meta_paths, db_path)
-                    if import_result.get("ok"):
+                    target_new_posts = int(params_for(row).get("target_new_posts") or 0)
+                    import_new_target_met = (
+                        row["job_kind"] != "douban_group_search"
+                        or int(import_result.get("inserted_rows") or 0) >= target_new_posts
+                    )
+                    import_result["import_new_target_met"] = import_new_target_met
+                    if import_result.get("ok") and import_new_target_met:
                         state.complete("persistence_verified", evidence=import_result)
                     else:
-                        state.fail("persistence_verified", error="capture_import_failed", evidence=import_result)
+                        error = "capture_import_failed" if not import_result.get("ok") else "formal_import_new_target_not_reached"
+                        state.fail("persistence_verified", error=error, evidence=import_result)
                 elif row["job_kind"] == "mediacrawler_search":
                     child_summary = load_json(Path(str(summary_path)))
                     import_result = dict(child_summary.get("import_result") or {})

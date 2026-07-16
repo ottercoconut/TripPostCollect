@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+"""Required human-behavior stage for project-managed MediaCrawler runs."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import random
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from playwright.async_api import Page
+
+from human_flow import (
+    dwell_on_list,
+    human_pause,
+    human_scroll,
+    load_behavior_profile,
+    random_mouse_moves,
+)
+
+
+HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS = 240
+XHS_VISIBLE_CHECK_INTERVAL_SECONDS = 5.0
+REQUEST_RANDOM = random.SystemRandom()
+XHS_POST_INTERACTION_MODES = frozenset({"comment-scroll", "like-one", "random"})
+REQUIRED_BEHAVIOR_EVENTS = frozenset({"pause", "mouse_moves", "human_scroll_complete"})
+CAPTCHA_VISIBLE_RE = re.compile(
+    r"人机验证|安全验证|请完成验证|请通过验证|图形验证码|滑块验证码|拖动滑块|captcha|geetest",
+    re.I,
+)
+RATE_LIMIT_VISIBLE_RE = re.compile(r"访问过于频繁|请求过于频繁|操作频繁|too many requests|rate limit", re.I)
+BLOCKED_VISIBLE_RE = re.compile(r"拒绝访问|access denied|forbidden|访问受限", re.I)
+LOGIN_VISIBLE_RE = re.compile(r"请先登录|登录后查看|需要登录|login_required", re.I)
+XHS_COMMENT_SELECTORS = (
+    "[class*='comments-container']",
+    "[class*='comment-list']",
+    "[id*='comment']",
+    "[class*='comment']",
+    "[aria-label*='评论']",
+)
+XHS_LIKE_SELECTORS = (
+    ".note-detail-mask .interact-container .like-wrapper",
+    ".interact-container .like-wrapper",
+    "[class*='engage-bar'] [class*='like-wrapper']",
+    "[role='button'][aria-label*='点赞']",
+    "button[aria-label*='点赞']",
+)
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def write_evidence(path: str | Path, evidence: dict[str, Any]) -> None:
+    destination = Path(path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(destination)
+
+
+async def runtime_fingerprint(page: Page) -> dict[str, Any]:
+    return await page.evaluate(
+        """() => ({
+            webdriver: navigator.webdriver,
+            languages: Array.from(navigator.languages || []),
+            platform: navigator.platform || '',
+            user_agent: navigator.userAgent || '',
+            hardware_concurrency: navigator.hardwareConcurrency || null,
+            device_memory: navigator.deviceMemory || null,
+            max_touch_points: navigator.maxTouchPoints || 0,
+            viewport: {
+                width: window.innerWidth || 0,
+                height: window.innerHeight || 0,
+                device_pixel_ratio: window.devicePixelRatio || 1,
+            },
+            visibility_state: document.visibilityState || '',
+        })"""
+    )
+
+
+async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
+    try:
+        text = await page.locator("body").inner_text(timeout=5_000)
+    except Exception:
+        text = ""
+    normalized = " ".join(text.split())
+    markers = {
+        "captcha_or_verify": bool(CAPTCHA_VISIBLE_RE.search(normalized)),
+        "rate_limited": bool(RATE_LIMIT_VISIBLE_RE.search(normalized)),
+        "blocked": bool(BLOCKED_VISIBLE_RE.search(normalized)),
+        "login_required": bool(LOGIN_VISIBLE_RE.search(normalized)),
+    }
+    return normalized[:360], markers
+
+
+def visible_challenge(markers: dict[str, bool]) -> str:
+    return next(
+        (
+            key
+            for key in ("captcha_or_verify", "rate_limited", "blocked")
+            if markers.get(key)
+        ),
+        "",
+    )
+
+
+async def dwell_on_list_with_checks(
+    page: Page,
+    profile: Any,
+    events: list[dict[str, Any]],
+) -> tuple[str, dict[str, bool]]:
+    """Run the XHS list dwell while periodically checking visible block state."""
+    dwell_task = asyncio.create_task(dwell_on_list(page, profile, log=events))
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {dwell_task},
+                timeout=XHS_VISIBLE_CHECK_INTERVAL_SECONDS,
+            )
+            if dwell_task in done:
+                await dwell_task
+                return "", {}
+            text_sample, markers = await visible_page_state(page)
+            challenge = visible_challenge(markers)
+            events.append(
+                {
+                    "event": "visible_state_check",
+                    "challenge": challenge,
+                    "markers": markers,
+                }
+            )
+            if challenge:
+                dwell_task.cancel()
+                await asyncio.gather(dwell_task, return_exceptions=True)
+                return text_sample, markers
+    finally:
+        if not dwell_task.done():
+            dwell_task.cancel()
+            await asyncio.gather(dwell_task, return_exceptions=True)
+
+
+def behavior_evidence_valid(evidence: dict[str, Any] | None) -> bool:
+    if not isinstance(evidence, dict) or evidence.get("status") != "completed":
+        return False
+    events = evidence.get("events") or []
+    event_names = {str(item.get("event") or "") for item in events if isinstance(item, dict)}
+    markers = evidence.get("visible_markers") or {}
+    challenge = any(bool(markers.get(key)) for key in ("captcha_or_verify", "rate_limited", "blocked"))
+    return REQUIRED_BEHAVIOR_EVENTS.issubset(event_names) and not challenge
+
+
+async def run_guarded_request_pause(
+    *,
+    evidence_path: str | Path,
+    profile_name: str,
+    stage: str,
+    minimum: float,
+    maximum: float,
+) -> dict[str, Any]:
+    if profile_name != "xhs_guarded":
+        raise RuntimeError("XHS request pacing requires the xhs_guarded behavior profile")
+    low, high = sorted((max(0.0, float(minimum)), max(0.0, float(maximum))))
+    seconds = REQUEST_RANDOM.uniform(low, high)
+    await asyncio.sleep(seconds)
+
+    path = Path(evidence_path).expanduser()
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot update XHS request pacing evidence: {exc}") from exc
+    if not behavior_evidence_valid(evidence):
+        raise RuntimeError("cannot append XHS request pacing to incomplete behavior evidence")
+    event = {"stage": stage, "seconds": round(seconds, 3), "finished_at": utc_now()}
+    events = evidence.setdefault("request_pacing_events", [])
+    events.append(event)
+    evidence["request_pacing_events"] = events[-200:]
+    write_evidence(path, evidence)
+    return event
+
+
+async def _first_visible_locator(page: Page, selectors: tuple[str, ...]):
+    for selector in selectors:
+        locator = page.locator(selector)
+        for index in range(min(await locator.count(), 8)):
+            candidate = locator.nth(index)
+            try:
+                if await candidate.is_visible(timeout=1_000):
+                    return selector, candidate
+            except Exception:
+                continue
+    return "", None
+
+
+async def _like_control_state(locator: Any) -> dict[str, Any]:
+    return await locator.evaluate(
+        """element => {
+            const control = element.closest('button,[role="button"]') || element;
+            const className = String(control.className || element.className || '');
+            const activeDescendant = Boolean(
+                control.querySelector('[class*="liked"], [class*="active"], [data-state="active"], [aria-pressed="true"]')
+            );
+            const useElement = control.querySelector('use');
+            return {
+                aria_pressed: control.getAttribute('aria-pressed') || '',
+                aria_label: control.getAttribute('aria-label') || '',
+                title: control.getAttribute('title') || '',
+                data_state: control.getAttribute('data-state') || '',
+                class_name: className.slice(0, 240),
+                text: String(control.innerText || element.innerText || '').trim().slice(0, 120),
+                icon_ref: useElement ? (useElement.getAttribute('href') || useElement.getAttribute('xlink:href') || '') : '',
+                active_descendant: activeDescendant,
+            };
+        }"""
+    )
+
+
+def _looks_liked(state: dict[str, Any]) -> bool:
+    pressed = str(state.get("aria_pressed") or "").lower()
+    data_state = str(state.get("data_state") or "").lower()
+    classes = str(state.get("class_name") or "").lower()
+    label = f"{state.get('aria_label') or ''} {state.get('title') or ''}".strip()
+    icon_ref = str(state.get("icon_ref") or "").lower()
+    return (
+        pressed == "true"
+        or data_state in {"active", "checked", "liked", "selected"}
+        or bool(state.get("active_descendant"))
+        or bool(re.search(r"(?:^|[-_\s])(liked|selected)(?:$|[-_\s])", classes))
+        or "取消点赞" in label
+        or "liked" in icon_ref
+    )
+
+
+def _looks_unliked(state: dict[str, Any]) -> bool:
+    pressed = str(state.get("aria_pressed") or "").lower()
+    data_state = str(state.get("data_state") or "").lower()
+    classes = str(state.get("class_name") or "").lower()
+    label = f"{state.get('aria_label') or ''} {state.get('title') or ''}".strip()
+    icon_ref = str(state.get("icon_ref") or "").lower()
+    return (
+        pressed == "false"
+        or data_state in {"inactive", "unchecked", "unliked"}
+        or bool(re.search(r"(?:^|[-_\s])(unliked|inactive)(?:$|[-_\s])", classes))
+        or ("点赞" in label and "取消点赞" not in label)
+        or bool(re.search(r"(?:^|[#/_-])like(?:$|[?#/_-])", icon_ref))
+    )
+
+
+async def _run_xhs_comment_scroll(page: Page, profile: Any, events: list[dict[str, Any]]) -> dict[str, Any]:
+    await random_mouse_moves(page, profile, events)
+    selector = ""
+    locator = None
+    for _ in range(4):
+        selector, locator = await _first_visible_locator(page, XHS_COMMENT_SELECTORS)
+        if locator is not None:
+            break
+        await human_scroll(page, profile, intent="find_comments", max_passes=1, log=events)
+    if locator is None:
+        return {"status": "failed", "action": "comment-scroll", "reason": "comment_container_not_found"}
+    await locator.scroll_into_view_if_needed(timeout=5_000)
+    await human_pause(page, (2.0, 8.0), reason="comments_arrival", log=events)
+    await human_scroll(page, profile, intent="comments", max_passes=2, log=events)
+    return {"status": "completed", "action": "comment-scroll", "selector": selector}
+
+
+async def _run_xhs_like_once(page: Page, profile: Any, events: list[dict[str, Any]]) -> dict[str, Any]:
+    await random_mouse_moves(page, profile, events)
+    selector, locator = await _first_visible_locator(page, XHS_LIKE_SELECTORS)
+    if locator is None:
+        return {"status": "failed", "action": "like-one", "reason": "like_control_not_found"}
+    before = await _like_control_state(locator)
+    if _looks_liked(before):
+        return {
+            "status": "skipped_already_liked",
+            "action": "like-one",
+            "selector": selector,
+            "before": before,
+        }
+    if not _looks_unliked(before):
+        return {
+            "status": "skipped_ambiguous_state",
+            "action": "like-one",
+            "selector": selector,
+            "before": before,
+        }
+    await locator.scroll_into_view_if_needed(timeout=5_000)
+    await locator.hover(timeout=3_000)
+    await human_pause(page, (1.2, 4.5), reason="before_like", log=events)
+    await locator.click(timeout=5_000, delay=REQUEST_RANDOM.randint(80, 220))
+    await human_pause(page, (1.5, 4.0), reason="after_like", log=events)
+    after = await _like_control_state(locator)
+    verified = _looks_liked(after) or any(
+        before.get(key) != after.get(key)
+        for key in (
+            "aria_pressed",
+            "data_state",
+            "class_name",
+            "text",
+            "icon_ref",
+            "active_descendant",
+        )
+    )
+    return {
+        "status": "completed" if verified else "clicked_unverified",
+        "action": "like-one",
+        "selector": selector,
+        "before": before,
+        "after": after,
+    }
+
+
+async def run_xhs_post_interaction(
+    page: Page,
+    *,
+    evidence_path: str | Path,
+    requested_mode: str,
+    note_id: str,
+) -> dict[str, Any]:
+    if requested_mode not in XHS_POST_INTERACTION_MODES:
+        raise ValueError(f"unsupported XHS post interaction: {requested_mode}")
+    path = Path(evidence_path).expanduser()
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot update XHS post interaction evidence: {exc}") from exc
+    if evidence.get("profile") != "xhs_guarded" or not behavior_evidence_valid(evidence):
+        raise RuntimeError("XHS post interaction requires completed xhs_guarded evidence")
+
+    selected_mode = REQUEST_RANDOM.choice(("comment-scroll", "like-one")) if requested_mode == "random" else requested_mode
+    events: list[dict[str, Any]] = []
+    started_at = utc_now()
+    initial_text, initial_markers = await visible_page_state(page)
+    blocked = any(initial_markers.values())
+    result: dict[str, Any]
+    error = ""
+    if blocked:
+        result = {"status": "failed", "action": selected_mode, "reason": "visible_page_blocked"}
+    else:
+        try:
+            profile = load_behavior_profile("xhs_guarded", strict=True)
+            await human_pause(page, (8.0, 24.0), reason="post_interaction_arrival", log=events)
+            if selected_mode == "comment-scroll":
+                result = await _run_xhs_comment_scroll(page, profile, events)
+            else:
+                result = await _run_xhs_like_once(page, profile, events)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            result = {"status": "failed", "action": selected_mode, "reason": error}
+
+    visible_text, visible_markers = await visible_page_state(page)
+    final_blocked = any(visible_markers.values())
+    if final_blocked:
+        result = {
+            "status": "failed",
+            "action": selected_mode,
+            "reason": "visible_page_blocked_after_interaction",
+        }
+    safe_note_id = re.sub(r"[^a-zA-Z0-9_-]", "_", note_id)[:80] or "unknown"
+    screenshot_path = path.with_name(f"{path.stem}.interaction.{safe_note_id}.png")
+    artifact_error = ""
+    try:
+        await page.screenshot(path=str(screenshot_path), full_page=False, timeout=10_000, animations="disabled")
+    except Exception as exc:
+        artifact_error = f"{type(exc).__name__}: {exc}"
+
+    interaction = {
+        "requested_mode": requested_mode,
+        "selected_mode": selected_mode,
+        "note_id": note_id,
+        "url": page.url,
+        "started_at": started_at,
+        "finished_at": utc_now(),
+        "status": result.get("status", "failed"),
+        "result": result,
+        "events": events,
+        "initial_visible_markers": initial_markers,
+        "initial_visible_text_sample": initial_text,
+        "visible_markers": visible_markers,
+        "visible_text_sample": visible_text,
+        "screenshot": str(screenshot_path) if not artifact_error else "",
+        "artifact_error": artifact_error,
+        "error": error,
+    }
+    interactions = evidence.setdefault("post_interactions", [])
+    interactions.append(interaction)
+    evidence["post_interactions"] = interactions[-20:]
+    write_evidence(path, evidence)
+    return interaction
+
+
+async def run_page_behavior(
+    page: Page,
+    *,
+    platform_key: str,
+    evidence_path: str | Path,
+    profile_name: str = "social_high_risk",
+) -> dict[str, Any]:
+    started_at = utc_now()
+    events: list[dict[str, Any]] = []
+    error = ""
+    fingerprint: dict[str, Any] = {}
+    visible_text_sample = ""
+    visible_markers: dict[str, bool] = {}
+    initial_visible_text_sample = ""
+    initial_visible_markers: dict[str, bool] = {}
+    screenshot_path = str(Path(evidence_path).expanduser().with_suffix(".png"))
+    artifact_errors: list[str] = []
+
+    try:
+        profile = load_behavior_profile(profile_name, strict=True)
+        initial_visible_text_sample, initial_visible_markers = await visible_page_state(page)
+        initial_challenge = visible_challenge(initial_visible_markers)
+        if initial_challenge:
+            visible_text_sample = initial_visible_text_sample
+            visible_markers = initial_visible_markers
+        else:
+            if profile_name == "xhs_guarded":
+                visible_text_sample, visible_markers = await dwell_on_list_with_checks(page, profile, events)
+            else:
+                await dwell_on_list(page, profile, log=events)
+            if not visible_challenge(visible_markers):
+                fingerprint = await runtime_fingerprint(page)
+                visible_text_sample, visible_markers = await visible_page_state(page)
+        try:
+            await page.screenshot(path=screenshot_path, full_page=False, timeout=10_000, animations="disabled")
+        except Exception as exc:
+            artifact_errors.append(f"screenshot:{type(exc).__name__}:{exc}")
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+
+    challenge = visible_challenge(visible_markers)
+    status = "completed" if not error and not challenge else "failed"
+    evidence = {
+        "schema_version": 1,
+        "platform": platform_key,
+        "phase": "pre_search_human_behavior",
+        "profile": profile_name,
+        "status": status,
+        "started_at": started_at,
+        "finished_at": utc_now(),
+        "url": page.url,
+        "events": events,
+        "runtime_fingerprint": fingerprint,
+        "initial_visible_markers": initial_visible_markers,
+        "initial_visible_text_sample": initial_visible_text_sample,
+        "visible_markers": visible_markers,
+        "visible_text_sample": visible_text_sample,
+        "screenshot": screenshot_path,
+        "artifact_errors": artifact_errors,
+        "error": error,
+        "challenge": challenge,
+        "evidence_path": str(Path(evidence_path).expanduser()),
+    }
+    write_evidence(evidence_path, evidence)
+
+    if error:
+        raise RuntimeError(f"human_behavior_failed:{platform_key}:{error}")
+    if challenge:
+        raise RuntimeError(f"{challenge}_detected_during_human_behavior:{platform_key}")
+    if not behavior_evidence_valid(evidence):
+        raise RuntimeError(f"human_behavior_evidence_incomplete:{platform_key}")
+    return evidence

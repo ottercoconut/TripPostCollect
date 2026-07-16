@@ -9,3 +9,5 @@
 - 有效性：必须满足 `image_post_with_followers_v1`，粉丝统计失败的 article 继续作为候选，
   但不能进入有效集合。
 - 单页 Opus 抓取只用于定向页面证据，不代表正式平台轮次。
+- article API 搜索前必须在 MediaCrawler 持久 profile 执行共享行为阶段，并复用该会话
+  cookie；行为与请求策略证据缺失时不得入库。

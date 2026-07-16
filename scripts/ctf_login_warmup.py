@@ -70,7 +70,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def utc_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%z")
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f%z")
 
 
 def selected_sites(values: list[str]) -> list[str]:

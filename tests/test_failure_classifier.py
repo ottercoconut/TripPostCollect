@@ -32,3 +32,75 @@ def test_formal_target_failure_beats_incidental_rate_text() -> None:
     assert result["status"] == "retry_wait"
     assert result["failure_type"] == "import_new_target_not_met"
     assert result["reason"] == "formal_import_new_target_not_reached:stagnated"
+
+
+def test_sms_code_login_text_is_login_required_not_captcha() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr="手机号登录 获取验证码 Login state result: False",
+    )
+
+    assert result["status"] == "login_required"
+    assert result["failure_type"] == "login_required"
+
+
+def test_strong_security_challenge_is_captcha() -> None:
+    result = failure_classifier.classify_attempt(exit_code=1, stderr="请完成安全验证并拖动滑块")
+
+    assert result["status"] == "captcha_detected"
+
+
+def test_false_captcha_marker_key_does_not_self_match() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        meta={"structured_markers": {"captcha_or_verify": False}},
+    )
+
+    assert result["status"] == "retry_wait"
+    assert result["failure_type"] == "tool_error"
+
+
+def test_strong_platform_classification_beats_formal_count_failure() -> None:
+    stdout = json.dumps(
+        {
+            "records": [
+                {
+                    "failure_classification": {
+                        "status": "login_required",
+                        "failure_type": "login_required",
+                        "retryable": False,
+                        "wait_seconds": 0,
+                        "reason": "login_or_profile_refresh_required",
+                    }
+                }
+            ],
+            "import_new_target_met": False,
+            "formal_validation": {"new_target_met": False, "stop_reason": "behavior_evidence_failed"},
+        }
+    )
+
+    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout)
+
+    assert result["status"] == "login_required"
+    assert result["failure_type"] == "login_required"
+
+
+def test_target_closed_after_page_launch_is_not_browser_launch_failure() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr="TargetClosedError: Page.wait_for_timeout: Target page, context or browser has been closed",
+    )
+
+    assert result["status"] == "failed_final"
+    assert result["failure_type"] == "browser_target_closed"
+    assert result["retryable"] is False
+
+
+def test_rate_limit_beats_target_closed_after_operator_closes_page() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr="请求过于频繁\nTargetClosedError: Target page, context or browser has been closed",
+    )
+
+    assert result["failure_type"] == "rate_limited"
+    assert result["wait_seconds"] == 3600

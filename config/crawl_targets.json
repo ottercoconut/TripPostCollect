@@ -6,9 +6,9 @@
   },
   "jobs": [
     {
-      "job_key": "mc_bilibili_jinan_article",
+      "job_key": "mc_bilibili_yantai_article",
       "site_key": "bilibili",
-      "target_url": "https://search.bilibili.com/article?keyword=%E6%B5%8E%E5%8D%97%E6%97%85%E6%B8%B8",
+      "target_url": "https://search.bilibili.com/article?keyword=%E7%83%9F%E5%8F%B0%E6%97%85%E6%B8%B8",
       "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 50,
@@ -16,8 +16,8 @@
       "max_attempts": 1,
       "params": {
         "platform": "bilibili",
-        "keyword": "济南旅游",
-        "candidate_hard_limit": 100,
+        "keyword": "烟台旅游",
+        "candidate_hard_limit": 300,
         "max_stagnant_batches": 3,
         "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
@@ -31,9 +31,9 @@
       }
     },
     {
-      "job_key": "mc_weibo_jinan_search",
+      "job_key": "mc_weibo_yantai_search",
       "site_key": "weibo",
-      "target_url": "https://m.weibo.cn/search?containerid=100103type%3D1%26q%3D%E6%B5%8E%E5%8D%97%E6%97%85%E6%B8%B8",
+      "target_url": "https://m.weibo.cn/search?containerid=100103type%3D1%26q%3D%E7%83%9F%E5%8F%B0%E6%97%85%E6%B8%B8",
       "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 20,
@@ -41,7 +41,7 @@
       "max_attempts": 2,
       "params": {
         "platform": "weibo",
-        "keyword": "济南旅游",
+        "keyword": "烟台旅游",
         "candidate_hard_limit": 300,
         "max_stagnant_batches": 3,
         "target_new_posts": 50,
@@ -56,35 +56,9 @@
       }
     },
     {
-      "job_key": "mc_xhs_jinan_search",
-      "site_key": "xhs",
-      "target_url": "https://www.xiaohongshu.com/search_result?keyword=%E6%B5%8E%E5%8D%97%E6%97%85%E6%B8%B8",
-      "job_kind": "mediacrawler_search",
-      "enabled": true,
-      "priority": 25,
-      "schedule_seconds": 86400,
-      "max_attempts": 1,
-      "params": {
-        "platform": "xhs",
-        "keyword": "济南旅游",
-        "candidate_hard_limit": 300,
-        "max_stagnant_batches": 3,
-        "target_new_posts": 50,
-        "required_fields_profile": "image_post_with_followers_v1",
-        "followers_policy": "required",
-        "timeout_per_platform": 1800,
-        "login_type": "cookie",
-        "headless": false,
-        "download_images": true
-      },
-      "behavior_profile": {
-        "name": "social_high_risk"
-      }
-    },
-    {
-      "job_key": "mc_douyin_jinan_search",
+      "job_key": "mc_douyin_yantai_search",
       "site_key": "douyin",
-      "target_url": "https://www.douyin.com/search/%E6%B5%8E%E5%8D%97%E6%97%85%E6%B8%B8",
+      "target_url": "https://www.douyin.com/search/%E7%83%9F%E5%8F%B0%E6%97%85%E6%B8%B8",
       "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 30,
@@ -92,7 +66,7 @@
       "max_attempts": 2,
       "params": {
         "platform": "douyin",
-        "keyword": "济南旅游",
+        "keyword": "烟台旅游",
         "candidate_hard_limit": 1000,
         "max_stagnant_batches": 67,
         "target_new_posts": 50,
@@ -107,9 +81,9 @@
       }
     },
     {
-      "job_key": "mc_zhihu_jinan_search",
+      "job_key": "mc_zhihu_yantai_search",
       "site_key": "zhihu",
-      "target_url": "https://www.zhihu.com/search?q=%E6%B5%8E%E5%8D%97%E6%97%85%E6%B8%B8&type=content",
+      "target_url": "https://www.zhihu.com/search?q=%E7%83%9F%E5%8F%B0%E6%97%85%E6%B8%B8&type=content",
       "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 60,
@@ -117,10 +91,10 @@
       "max_attempts": 1,
       "params": {
         "platform": "zhihu",
-        "keyword": "济南旅游",
-        "candidate_hard_limit": 100,
+        "keyword": "烟台旅游",
+        "candidate_hard_limit": 200,
         "max_stagnant_batches": 3,
-        "target_new_posts": 20,
+        "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
         "timeout_per_platform": 1200,
@@ -132,55 +106,21 @@
       }
     },
     {
-      "job_key": "page_ctrip_jinan_notes",
-      "site_key": "ctrip",
-      "target_url": "https://you.ctrip.com/travels/jinan128.html",
-      "job_kind": "ctf_resource_crawl",
-      "enabled": true,
-      "priority": 70,
-      "schedule_seconds": 172800,
-      "max_attempts": 1,
-      "params": {
-        "followers_policy": "ignored",
-        "max_image_save": 3,
-        "max_scrolls": 12,
-        "scrapling_preflight": "auto"
-      },
-      "behavior_profile": {
-        "name": "travel_medium"
-      }
-    },
-    {
-      "job_key": "page_qunar_jinan",
-      "site_key": "qunar",
-      "target_url": "https://travel.qunar.com/p-cs300150-jinan",
-      "job_kind": "ctf_resource_crawl",
-      "enabled": true,
-      "priority": 80,
-      "schedule_seconds": 172800,
-      "max_attempts": 1,
-      "params": {
-        "followers_policy": "ignored",
-        "max_image_save": 3,
-        "max_scrolls": 12,
-        "scrapling_preflight": "auto"
-      },
-      "behavior_profile": {
-        "name": "travel_medium"
-      }
-    },
-    {
-      "job_key": "page_douban_group_jinan",
+      "job_key": "douban_group_yantai_search",
       "site_key": "douban_group",
-      "target_url": "https://www.douban.com/group/topic/53104421/",
-      "job_kind": "ctf_resource_crawl",
+      "target_url": "https://www.douban.com/group/search?cat=1013&q=%E7%83%9F%E5%8F%B0%E6%97%85%E6%B8%B8",
+      "job_kind": "douban_group_search",
       "enabled": true,
       "priority": 100,
       "schedule_seconds": 172800,
       "max_attempts": 1,
       "params": {
-        "keyword": "济南旅游",
+        "keyword": "烟台旅游",
+        "candidate_hard_limit": 300,
+        "target_new_posts": 50,
+        "max_stagnant_batches": 3,
         "followers_policy": "conditional_enrichment",
+        "discovery_page_size": 50,
         "max_image_save": 3,
         "max_scrolls": 8,
         "scrapling_preflight": "auto"

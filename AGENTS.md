@@ -4,7 +4,7 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 
 ## 仓库地图
 
-- `config/`: 长期抓取任务配置，当前入口是 `crawl_targets.json`。
+- `config/`: 长期抓取任务配置；通用入口是 `crawl_targets.json`，小红书使用独立 `xhs_*.json`。
 - `db/`: SQLite 表结构，包括平台表、内容表、证据表和调度表。
 - `docs/`: 架构、入库、字段覆盖说明；字段能力变化必须同步文档。
 - `scripts/`: 调度、MediaCrawler 对接、页面证据抓取、导入和共享策略。
@@ -18,11 +18,11 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 只采集图文内容、作者可见信息、图片 URL/样本和页面证据；视频目标、视频媒体请求和明确视频记录跳过，不作为失败。
 - `web_posts` 是用户使用的统一内容主表；`ctf_captures` 是程序和智能代理（Agent）使用的证据/调试底座。
 - `published_at` 必须来自平台原始发帖时间，入库保存为 Asia/Shanghai ISO；不要用抓取时间冒充发帖时间。
-- 正式任务只从 `scripts/crawl_runner.py` 进入；数量和字段策略只读 `config/crawl_targets.json`，语义只读 `docs/formal-crawl-contract.md`。
-- 每个任务必须生成 `data/runtime/crawl_execution_states/<run_id>/<job>.json`；进入下一阶段前重新读取状态并确认上一阶段完成。不得手工解冻或补签状态。
+- 通用正式任务从 `scripts/crawl_runner.py` 进入；小红书只从 `scripts/xhs_runner.py` 进入，禁止放回通用 job 或登录流程。
+- 通用状态写入 `data/runtime/crawl_execution_states/`；小红书状态写入 `data/runtime/xhs/execution_states/`。进入下一阶段前重新读取状态并确认上一阶段完成，不得手工解冻或补签。
 - 正式结构化抓取以 `candidate_hard_limit`、`target_new_posts` 和 `required_fields_profile` 为准；数据库已有记录只算更新，未达到 `valid_new_count` 新增目标不得汇报完成。
 - B站、微博、小红书、抖音、知乎粉丝量为必需字段；数值、来源和 `followers_observed=true` 必须同时存在，平台不提供时只能由配置声明 `ignored`。
-- 携程、去哪儿、豆瓣小组当前是固定 URL 页面证据任务；单页成功不代表平台级批量采集完成。
+- 豆瓣小组正式任务通过搜索页发现话题并按有效新增/实际插入目标完成；显式单 URL 页面成功仍不代表平台级批量完成。
 - 路径定义集中在 `trippostcollect.core.paths`；新增代码不要硬编码 `outputs/`、`data/runtime/`、浏览器配置目录等目录。
 - 文档和总结默认使用中文。
 
@@ -34,9 +34,9 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 不为已废弃的命令、字段、数据类型或文档保留兼容层；确认当前流程无调用后直接删除，历史需要从 Git 查询。
 - 大型抓取产物优先看 `summary.json`、`summary.md`、`run_summary.json`、计数、字段列表、样本和标准输出/标准错误尾部摘要；不要全文展开 JSONL、HTML、过长 JSON 或截图元数据。
 - 输出包含 3 个及以上参数、长路径、JSON、环境变量或多个 `--xxx` 选项的命令时，必须用反斜杠 `\` 分行展示；每个参数或逻辑参数组单独一行，避免压缩成长单行。命令很短且参数简单时可以保持单行。
-- Python 测试使用 `pytest`，当前测试目录是 `apps/admin_api/tests/`；开发依赖通过 `python -m pip install -e '.[dev]'` 安装。
+- Python 测试使用 `pytest`，当前测试目录是 `tests/` 和 `apps/admin_api/tests/`；开发依赖通过 `python -m pip install -e '.[dev]'` 安装。
 - 模型输出尽量用中文。
-- `mediacrawler_batch_validate.py` 和 `info_collection_benchmark.py` 只用于诊断/开发，不能作为正式轮次完成证据。
+- `info_collection_benchmark.py` 只用于通用平台诊断/开发，不能作为正式轮次完成证据，也不接受小红书。
 
 ## 上下文和 Token 消耗强约束
 
@@ -78,8 +78,11 @@ python scripts/crawl_runner.py \
 
 ## 任务路由
 
-- 正式抓取、数量、停止和成功：读 `docs/formal-crawl-contract.md`、`config/crawl_targets.json`、`scripts/crawl_runner.py`。
-- 登录、Chrome、阻断恢复：读 `docs/operations-runbook.md`；统一登录入口是 `scripts/login_warmup.py`。
+- 通用正式抓取、数量、停止和成功：读 `docs/formal-crawl-contract.md`、`config/crawl_targets.json`、`scripts/crawl_runner.py`。
+- 小红书账号、登录、抓取和失败恢复：先完整执行 `docs/platforms/xhs.md` 的阶段清单，再读
+  `config/xhs_*.json` 和对应的 `scripts/xhs_accounts.py`、`scripts/xhs_login.py`、`scripts/xhs_runner.py`；
+  不得把小红书放入通用 runner、warmup、benchmark 或中途自动换号。
+- 登录、Chrome、阻断恢复：读 `docs/operations-runbook.md`；通用入口是 `scripts/login_warmup.py`，小红书不得使用该入口。
 - MediaCrawler 平台实现：读 `docs/platforms/<platform>.md`、`scripts/mediacrawler_crawl.py`，必要时只读对应第三方精确文件。
 - 页面证据抓取和导入：读 `docs/platforms/page-evidence.md`、`docs/data-persistence.md`、`scripts/ctf_resource_crawl.py`、`scripts/import_ctf_captures.py`；登录态统一由 `scripts/login_warmup.py` 处理。
 - 数据库结构、入库、去重：读 `docs/data-persistence.md`、`db/*.sql`、`trippostcollect.db.bootstrap` 和相关导入脚本。

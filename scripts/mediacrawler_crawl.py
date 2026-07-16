@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import html
 import json
 import os
@@ -20,10 +21,20 @@ from email.utils import parsedate_to_datetime
 from hashlib import md5
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode
 from urllib.request import Request, urlopen
 
+from playwright.async_api import async_playwright
+
+from crawl_policy import CrawlPolicyBlocked, record_site_cooldown, site_request_guard
 from execution_state import FrozenExecutionState
+from failure_classifier import classify_attempt
+from human_flow import install_runtime_hints
+from mediacrawler_behavior import (
+    HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS,
+    behavior_evidence_valid,
+    run_page_behavior,
+)
 from trippostcollect.core.paths import (
     DEFAULT_DB,
     MEDIACRAWLER_DIR,
@@ -34,13 +45,13 @@ from trippostcollect.core.paths import (
     ensure_parent,
 )
 from trippostcollect.db.bootstrap import bootstrap_connection
+from trippostcollect.platforms.registry import get_site
 from browser_runtime import browser_launch_environment, browser_runtime_args
 
 
 ROOT = PROJECT_ROOT
 DEFAULT_OUTPUT = MEDIACRAWLER_RUNS_OUTPUT
 COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
-STORAGE_SNAPSHOT_FILENAME = "trippostcollect_storage_state.json"
 BILIBILI_ARTICLE_SEARCH_URL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
 BILIBILI_RELATION_STAT_URL = "https://api.bilibili.com/x/relation/stat"
 BILIBILI_ARTICLE_PAGE_SIZE = 20
@@ -174,7 +185,12 @@ SAMPLE_KEYS = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run MediaCrawler for supported structured social platforms.")
     parser.add_argument("--keyword", default="济南旅游", help="Search keyword.")
-    parser.add_argument("--platforms", nargs="+", default=["xhs", "weibo", "douyin"], help="bilibili xhs weibo douyin zhihu")
+    parser.add_argument(
+        "--platforms",
+        nargs="+",
+        default=["weibo", "douyin"],
+        help="bilibili weibo douyin zhihu; XHS is a low-level target selected only by xhs_runner.py",
+    )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Output root.")
     parser.add_argument("--timeout-per-platform", type=int, default=180, help="Timeout per MediaCrawler platform.")
     parser.add_argument("--login-type", default="cookie", choices=("cookie", "qrcode", "phone"), help="MediaCrawler login type.")
@@ -190,6 +206,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--candidate-hard-limit", type=int, required=True, help="Maximum actual content candidates processed for validation.")
     parser.add_argument("--required-fields-profile", default="image_post_with_followers_v1")
+    parser.add_argument("--behavior-profile", default="social_high_risk")
+    parser.add_argument("--xhs-account-id", help="Required isolated account id for the XHS low-level executor.")
+    parser.add_argument("--xhs-profile-dir", help="Required isolated persistent profile for XHS.")
+    parser.add_argument("--xhs-storage-state", help="Required per-run decrypted XHS storage state.")
+    parser.add_argument(
+        "--xhs-post-interaction",
+        choices=("none", "comment-scroll", "like-one", "random"),
+        default="none",
+        help="Optional one-post visible XHS interaction selected by xhs_runner.py.",
+    )
     parser.add_argument("--max-stagnant-batches", type=int, default=3)
     parser.add_argument("--start-page", type=int, default=1, help="Recovery-only first platform page.")
     parser.add_argument("--resume-summary", help="Recovery-only prior summary whose JSONL records join this run.")
@@ -198,7 +224,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def utc_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%z")
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f%z")
 
 
 def selected_platforms(values: list[str]) -> list[str]:
@@ -254,10 +280,6 @@ def profile_dir_for(platform_key: str) -> Path:
 
 def cookie_snapshot_path(platform_key: str) -> Path:
     return profile_dir_for(platform_key) / COOKIE_SNAPSHOT_FILENAME
-
-
-def storage_snapshot_path(platform_key: str) -> Path:
-    return profile_dir_for(platform_key) / STORAGE_SNAPSHOT_FILENAME
 
 
 def platform_cookie_url(platform_key: str) -> str:
@@ -447,6 +469,96 @@ raise SystemExit(asyncio.run(main()))
         "cookie_names": names,
         "required_cookie_names": list(required_cookie_names(platform_key)),
     }
+
+
+def load_behavior_evidence(path: str | Path) -> dict[str, Any]:
+    candidate = Path(path).expanduser()
+    try:
+        value = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "status": "missing",
+            "evidence_path": str(candidate),
+            "error": "behavior_evidence_missing_or_invalid",
+        }
+    return value if isinstance(value, dict) else {
+        "status": "invalid",
+        "evidence_path": str(candidate),
+        "error": "behavior_evidence_not_an_object",
+    }
+
+
+def behavior_environment(evidence_path: Path, profile_name: str) -> dict[str, str]:
+    return {
+        "TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_ENABLED": "1",
+        "TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_PROFILE": profile_name,
+        "TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE": str(evidence_path),
+        "TRIPPOSTCOLLECT_PROJECT_SCRIPTS": str(ROOT / "scripts"),
+        "TRIPPOSTCOLLECT_BROWSER_ARGS_JSON": json.dumps(browser_runtime_args()),
+    }
+
+
+async def run_bilibili_behavior_session(
+    args: argparse.Namespace,
+    evidence_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    browser_path = discover_cdp_browser_path()
+    profile_dir = ensure_dir(profile_dir_for("bilibili"))
+    stealth_script = MEDIACRAWLER_DIR / "libs" / "stealth.min.js"
+    target_url = "https://search.bilibili.com/article?keyword=" + quote(args.keyword)
+
+    async with async_playwright() as playwright:
+        context = await playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            headless=not args.headed,
+            executable_path=browser_path,
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            viewport={"width": 1440, "height": 900},
+            screen={"width": 1440, "height": 900},
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                *browser_runtime_args(),
+            ],
+            env=browser_launch_environment(),
+            ignore_default_args=["--enable-automation"],
+        )
+        try:
+            if stealth_script.is_file():
+                await context.add_init_script(path=str(stealth_script))
+            await install_runtime_hints(context)
+
+            async def block_video_media(route) -> None:
+                request = route.request
+                if request.resource_type == "media" or VIDEO_URL_RE.search(request.url):
+                    await route.abort()
+                    return
+                await route.continue_()
+
+            await context.route("**/*", block_video_media)
+            page = context.pages[0] if context.pages else await context.new_page()
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=60_000)
+            evidence = await run_page_behavior(
+                page,
+                platform_key="bilibili",
+                evidence_path=evidence_path,
+                profile_name="social_high_risk",
+            )
+            cookies = await context.cookies([platform_cookie_url("bilibili")])
+        finally:
+            await context.close()
+
+    cookie_header = cookies_to_header(cookies)
+    cookie_export = {
+        "cookie_header": cookie_header,
+        "source": "human_behavior_session",
+        "snapshot_path": str(cookie_snapshot_path("bilibili")),
+        "saved_at": evidence.get("finished_at"),
+        "cookie_names": cookie_names_from_header(cookie_header),
+        "required_cookie_names": list(required_cookie_names("bilibili")),
+    }
+    return cookie_export, evidence
 
 
 def decode_text(value: str | bytes | None) -> str:
@@ -1546,6 +1658,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     stdout_log = log_dir / "stdout.log"
     stderr_log = log_dir / "stderr.log"
     command_log = log_dir / "command.txt"
+    behavior_evidence_path = log_dir / "behavior_evidence.json"
     command = [
         "bilibili_article_search",
         "--keyword",
@@ -1566,12 +1679,14 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     state_path = os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()
     stderr = ""
     returncode = 0
+    behavior_evidence: dict[str, Any] = load_behavior_evidence(behavior_evidence_path)
     try:
         max_records = args.candidate_hard_limit
         target_new = max(1, int(args.target_new_posts or max_records))
         existing_identities = load_existing_formal_identities(args.db)
-        browser_path = discover_cdp_browser_path()
-        cookie_export = export_profile_cookies(platform_key, browser_path)
+        cookie_export, behavior_evidence = asyncio.run(
+            run_bilibili_behavior_session(args, behavior_evidence_path)
+        )
         cookie_header = str((cookie_export or {}).get("cookie_header") or "")
         wbi_keys = fetch_bilibili_wbi_keys(cookie_header)
         page = 1
@@ -1705,6 +1820,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     except Exception as exc:
         returncode = 1
         stderr = repr(exc)
+        behavior_evidence = load_behavior_evidence(behavior_evidence_path)
         if state_path:
             FrozenExecutionState(state_path).append_event(
                 "adaptive_search_stopped",
@@ -1738,7 +1854,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     stderr_log.write_text(stderr, encoding="utf-8")
     command_log.write_text(shlex.join(command), encoding="utf-8")
     output = summarize_output(batch_dir / platform_key / "data", args.keyword)
-    status = "completed" if records and returncode == 0 else "failed"
+    status = "completed" if records and returncode == 0 and behavior_evidence_valid(behavior_evidence) else "failed"
     return {
         "platform": platform_key,
         "label": platform["label"],
@@ -1747,6 +1863,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
         "media_enabled": False,
         "video_enabled": False,
         "login_state": None,
+        "behavior_evidence": behavior_evidence,
         "run": {
             "command": command,
             "command_text": shlex.join(command),
@@ -1763,7 +1880,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     }
 
 
-def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -> dict[str, Any]:
+def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, batch_dir: Path) -> dict[str, Any]:
     if platform_key == "bilibili":
         return run_bilibili_article_search(args, batch_dir)
 
@@ -1774,6 +1891,7 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
     source_target_new_posts = int(getattr(args, "source_target_new_posts", args.target_new_posts))
     save_path = batch_dir / platform_key / "data"
     log_dir = batch_dir / "logs" / platform_key
+    behavior_evidence_path = log_dir / "behavior_evidence.json"
     image_download_enabled = bool(args.download_images and platform_key == "xhs")
     cmd = [
         "uv",
@@ -1814,20 +1932,17 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
         "TRIPPOSTCOLLECT_CANDIDATE_HARD_LIMIT": str(source_candidate_hard_limit),
         "TRIPPOSTCOLLECT_MAX_STAGNANT_BATCHES": str(max(1, args.max_stagnant_batches)),
         "TRIPPOSTCOLLECT_DB_PATH": str(Path(args.db).expanduser().resolve()),
+        **behavior_environment(behavior_evidence_path, args.behavior_profile),
     }
     if args.resume_identities_path:
         extra_env["TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH"] = args.resume_identities_path
     login_state: dict[str, Any] | None = None
     if platform_key == "xhs":
-        xhs_storage_path = storage_snapshot_path(platform_key)
+        xhs_storage_path = Path(str(args.xhs_storage_state)).expanduser().resolve()
         xhs_storage_info = xhs_storage_snapshot_info(xhs_storage_path)
         login_state = {"ok": bool(xhs_storage_info.get("ok")), "storage_snapshot": xhs_storage_info}
         if args.login_type == "cookie" and not xhs_storage_info.get("ok"):
-            reason = (
-                "missing_xhs_storage_state: run "
-                ".venv/bin/python scripts/mediacrawler_login_warmup.py --platforms xhs "
-                "until profile_ui is verified and trippostcollect_storage_state.json is snapshotted"
-            )
+            reason = "missing_xhs_storage_state: run scripts/xhs_login.py for the selected account"
             run = skipped_command(cmd, log_dir, reason)
             output = summarize_output(save_path, args.keyword)
             return {
@@ -1852,6 +1967,9 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
                 "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",
                 "TRIPPOSTCOLLECT_SHARE_CDP_PROFILE": "1",
                 "TRIPPOSTCOLLECT_XHS_STORAGE_STATE_PATH": str(xhs_storage_path),
+                "TRIPPOSTCOLLECT_XHS_PROFILE_DIR": str(Path(args.xhs_profile_dir).expanduser().resolve()),
+                "TRIPPOSTCOLLECT_XHS_ACCOUNT_ID": str(args.xhs_account_id),
+                "TRIPPOSTCOLLECT_XHS_POST_INTERACTION": str(args.xhs_post_interaction),
                 "TRIPPOSTCOLLECT_XHS_INITIAL_SETTLE_SECONDS": "12",
                 "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS": "180" if args.headed else "0",
                 "TRIPPOSTCOLLECT_XHS_QR_REFRESH_SECONDS": "90",
@@ -1913,13 +2031,28 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
         timeout = max(timeout, 420)
     if platform_key == "zhihu":
         timeout = max(timeout, 300)
-    run = run_command(cmd, MEDIACRAWLER_DIR, timeout, log_dir, extra_env=extra_env)
+    run = run_command(
+        cmd,
+        MEDIACRAWLER_DIR,
+        timeout + HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS,
+        log_dir,
+        extra_env=extra_env,
+    )
+    behavior_evidence = load_behavior_evidence(behavior_evidence_path)
     output = summarize_output(save_path, args.keyword)
     status = "completed" if output["non_video_content_records"] > 0 and output["parse_errors"] == 0 else "failed"
     if output["content_records"] > 0 and output["non_video_content_records"] == 0 and output["video_like_records"] > 0:
         status = "skipped_video_only"
+    if (
+        output["content_records"] == 0
+        and platform_key in {"xhs", "douyin"}
+        and "skip video" in str(run.get("stderr_tail") or "").lower()
+    ):
+        status = "skipped_video_only"
     if run["timed_out"] and output["non_video_content_records"] > 0:
         status = "partial_completed"
+    if not behavior_evidence_valid(behavior_evidence):
+        status = "behavior_failed"
     return {
         "platform": platform_key,
         "label": platform["label"],
@@ -1928,8 +2061,167 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
         "media_enabled": image_download_enabled,
         "video_enabled": False,
         "login_state": login_state,
+        "behavior_evidence": behavior_evidence,
         "run": run,
         "output": output,
+    }
+
+
+def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -> dict[str, Any]:
+    platform = PLATFORMS[platform_key]
+    site = get_site(platform_key)
+    log_dir = batch_dir / "logs" / platform_key
+    save_path = batch_dir / platform_key / "data"
+    policy_events: list[dict[str, Any]] = []
+    try:
+        with site_request_guard(site, label="mediacrawler:formal_platform_session") as event:
+            policy_events.append(event)
+            record = _run_platform_without_policy(platform_key, args, batch_dir)
+    except CrawlPolicyBlocked as exc:
+        policy_events.append(exc.event)
+        reason = json.dumps(exc.event, ensure_ascii=False, sort_keys=True)
+        return {
+            "platform": platform_key,
+            "label": platform["label"],
+            "status": "policy_blocked",
+            "ok": False,
+            "media_enabled": False,
+            "video_enabled": False,
+            "login_state": None,
+            "behavior_evidence": {
+                "status": "skipped",
+                "reason": "policy_blocked_before_behavior",
+            },
+            "policy_events": policy_events,
+            "failure_classification": {
+                "status": "retry_wait",
+                "failure_type": "policy_blocked",
+                "retryable": True,
+                "wait_seconds": int(exc.event.get("wait_seconds") or 0),
+                "reason": str(exc.event.get("reason") or "policy_blocked"),
+            },
+            "run": skipped_command(["crawl_policy", platform_key], log_dir, reason),
+            "output": summarize_output(save_path, args.keyword),
+        }
+    except Exception as exc:
+        reason = f"platform_session_failed:{type(exc).__name__}:{exc}"
+        record = {
+            "platform": platform_key,
+            "label": platform["label"],
+            "status": "failed",
+            "ok": False,
+            "media_enabled": False,
+            "video_enabled": False,
+            "login_state": None,
+            "behavior_evidence": load_behavior_evidence(log_dir / "behavior_evidence.json"),
+            "run": skipped_command(["mediacrawler", platform_key], log_dir, reason),
+            "output": summarize_output(save_path, args.keyword),
+        }
+
+    record["policy_events"] = policy_events
+    run = record.get("run") or {}
+    evidence = record.get("behavior_evidence") or {}
+    effective_exit_code = 0 if record.get("ok") else int(run.get("returncode") or 1)
+    classification = classify_attempt(
+        exit_code=effective_exit_code,
+        stdout=str(run.get("stdout_tail") or ""),
+        stderr=str(run.get("stderr_tail") or ""),
+        meta={"structured_markers": evidence.get("visible_markers") or {}},
+    )
+    record["failure_classification"] = classification
+    if classification.get("failure_type") in {"captcha_detected", "rate_limited", "blocked_or_forbidden"}:
+        record["cooldown_event"] = record_site_cooldown(
+            site,
+            reason=str(classification.get("failure_type")),
+            evidence=[str(classification.get("reason") or "")],
+        )
+    return record
+
+
+def collect_behavior_validation(
+    records: list[dict[str, Any]],
+    platforms: list[str],
+    keyword: str,
+    xhs_post_interaction: str = "none",
+) -> dict[str, Any]:
+    latest_by_platform: dict[str, dict[str, Any]] = {}
+    for record in reversed(records):
+        platform_key = str(record.get("platform") or "")
+        if platform_key in platforms and platform_key not in latest_by_platform:
+            latest_by_platform[platform_key] = record
+
+    platform_results: dict[str, Any] = {}
+    for platform_key in platforms:
+        record = latest_by_platform.get(platform_key) or {}
+        evidence = record.get("behavior_evidence") or {}
+        behavior_profile = str(evidence.get("profile") or "")
+        expected_profile = "xhs_guarded" if platform_key == "xhs" else "social_high_risk"
+        profile_ok = behavior_profile == expected_profile
+        pacing_events = [
+            item
+            for item in evidence.get("request_pacing_events") or []
+            if isinstance(item, dict)
+        ]
+        pacing_stages = {str(item.get("stage") or "") for item in pacing_events}
+        required_pacing_stages = (
+            {"search_results", "note_detail", "creator_profile"}
+            if platform_key == "xhs"
+            else set()
+        )
+        pacing_ok = required_pacing_stages.issubset(pacing_stages)
+        post_interactions = [
+            item
+            for item in evidence.get("post_interactions") or []
+            if isinstance(item, dict)
+        ]
+        interaction_requested = platform_key == "xhs" and xhs_post_interaction != "none"
+        interaction_ok = (not interaction_requested) or any(
+            item.get("requested_mode") == xhs_post_interaction and item.get("status") == "completed"
+            for item in post_interactions
+        )
+        policy_events = record.get("policy_events") or []
+        policy_allowed = any(
+            isinstance(event, dict)
+            and event.get("allowed") is True
+            and event.get("disabled") is not True
+            for event in policy_events
+        )
+        behavior_url = str(evidence.get("url") or "")
+        target_url_ok = bool(keyword) and keyword in unquote(behavior_url)
+        platform_results[platform_key] = {
+            "behavior_ok": (
+                behavior_evidence_valid(evidence)
+                and target_url_ok
+                and profile_ok
+                and pacing_ok
+            ),
+            "behavior_status": str(evidence.get("status") or "missing"),
+            "behavior_profile": behavior_profile,
+            "behavior_profile_ok": profile_ok,
+            "behavior_event_count": len(evidence.get("events") or []),
+            "request_pacing_event_count": len(pacing_events),
+            "request_pacing_stages": sorted(pacing_stages),
+            "request_pacing_ok": pacing_ok,
+            "post_interaction_requested": interaction_requested,
+            "post_interaction_mode": xhs_post_interaction if platform_key == "xhs" else "none",
+            "post_interaction_ok": interaction_ok,
+            "post_interactions": post_interactions,
+            "behavior_url": behavior_url,
+            "target_url_ok": target_url_ok,
+            "policy_allowed": policy_allowed,
+            "policy_event_count": len(policy_events),
+            "evidence_path": str(evidence.get("evidence_path") or ""),
+        }
+
+    behavior_ok = bool(platform_results) and all(item["behavior_ok"] for item in platform_results.values())
+    policy_ok = bool(platform_results) and all(item["policy_allowed"] for item in platform_results.values())
+    return {
+        "required": True,
+        "ok": behavior_ok and policy_ok,
+        "behavior_ok": behavior_ok,
+        "policy_ok": policy_ok,
+        "required_platforms": platforms,
+        "platforms": platform_results,
     }
 
 
@@ -1989,6 +2281,19 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
                 "",
             ]
         )
+    behavior_validation = summary.get("behavior_validation") or {}
+    if behavior_validation:
+        lines.extend(
+            [
+                "## 行为与策略门禁",
+                "",
+                f"- 总体通过：`{behavior_validation.get('ok', False)}`",
+                f"- 人类行为证据通过：`{behavior_validation.get('behavior_ok', False)}`",
+                f"- 请求预算与冷却门禁通过：`{behavior_validation.get('policy_ok', False)}`",
+                f"- 平台证据：`{json.dumps(behavior_validation.get('platforms') or {}, ensure_ascii=False, sort_keys=True)}`",
+                "",
+            ]
+        )
     import_result = summary.get("import_result") or {}
     if import_result:
         db_sync = import_result.get("db_sync") or {}
@@ -2036,6 +2341,21 @@ def main() -> int:
         raise SystemExit("--get-media 已禁用：当前项目只采集图文内容和图片 URL，不下载媒体或视频。")
     ensure_prerequisites()
     platforms = selected_platforms(args.platforms)
+    if "xhs" in platforms:
+        if len(platforms) != 1:
+            raise SystemExit("XHS must run alone through scripts/xhs_runner.py")
+        if not args.xhs_account_id or not args.xhs_profile_dir or not args.xhs_storage_state:
+            raise SystemExit("XHS requires --xhs-account-id, --xhs-profile-dir and --xhs-storage-state")
+        if args.behavior_profile != "xhs_guarded":
+            raise SystemExit("XHS requires --behavior-profile xhs_guarded")
+        if not Path(args.xhs_profile_dir).expanduser().is_dir():
+            raise SystemExit("XHS isolated profile directory does not exist")
+        if not Path(args.xhs_storage_state).expanduser().is_file():
+            raise SystemExit("XHS decrypted storage state does not exist")
+    elif args.xhs_post_interaction != "none":
+        raise SystemExit("--xhs-post-interaction is only supported for XHS")
+    elif args.behavior_profile != "social_high_risk":
+        raise SystemExit("generic MediaCrawler platforms require --behavior-profile social_high_risk")
     if args.resume_summary and "bilibili" in platforms:
         raise SystemExit("--resume-summary is only supported for MediaCrawler-backed platforms")
     if args.download_images and any(platform != "xhs" for platform in platforms):
@@ -2127,6 +2447,13 @@ def main() -> int:
         "failed_count": sum(1 for record in records if not record["ok"]),
         "records": records,
     }
+    behavior_validation = collect_behavior_validation(
+        records,
+        platforms,
+        args.keyword,
+        args.xhs_post_interaction,
+    )
+    summary["behavior_validation"] = behavior_validation
     if resume_info:
         summary["resume"] = resume_info
     pagination_evidence = load_pagination_evidence(
@@ -2140,6 +2467,16 @@ def main() -> int:
         db_path=args.db,
         pagination_evidence=pagination_evidence,
     )
+    validation["content_new_target_met"] = bool(validation.get("new_target_met"))
+    validation["behavior_evidence_ok"] = bool(behavior_validation.get("behavior_ok"))
+    validation["policy_evidence_ok"] = bool(behavior_validation.get("policy_ok"))
+    if not behavior_validation["ok"]:
+        validation["new_target_met"] = False
+        validation["stop_reason"] = (
+            "behavior_evidence_failed"
+            if not behavior_validation["behavior_ok"]
+            else "crawl_policy_evidence_failed"
+        )
     summary["required_fields_profile"] = args.required_fields_profile
     summary["formal_validation"] = validation
     if args.no_import:
@@ -2168,7 +2505,9 @@ def main() -> int:
         summary["failure_reason"] = (
             "import_new_target_not_met: "
             f"valid_new={validation['valid_new_count']} required={target_new_posts} "
-            f"stop_reason={validation['stop_reason']}"
+            f"stop_reason={validation['stop_reason']} "
+            f"behavior_ok={behavior_validation['behavior_ok']} "
+            f"policy_ok={behavior_validation['policy_ok']}"
         )
     summary_path = batch_dir / "summary.json"
     report_path = batch_dir / "summary.md"

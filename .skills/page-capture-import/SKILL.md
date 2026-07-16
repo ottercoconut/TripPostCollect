@@ -1,6 +1,6 @@
 ---
 name: page-capture-import
-description: 仅用于 TripPostCollect 面向 bilibili、ctrip、qunar、douban_group 等非 MediaCrawler 目标的页面级证据抓取、反自动化行为、浏览器韧性和导入流程。
+description: 仅用于 TripPostCollect 面向 bilibili、douban_group 等非 MediaCrawler 目标的页面级证据抓取、反自动化行为、浏览器韧性和导入流程。
 ---
 
 # 页面证据抓取与导入

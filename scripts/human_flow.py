@@ -52,16 +52,17 @@ DEFAULT_PROFILES: dict[str, BehaviorProfile] = {
         scroll_delta_px=(320, 1150),
         cdp_touch_probability=0.55,
     ),
-    "travel_medium": BehaviorProfile(
-        name="travel_medium",
-        list_dwell_seconds=(20, 90),
-        detail_dwell_seconds=(75, 260),
-        inter_detail_cooldown_seconds=(90, 480),
-        comment_visit_probability=0.12,
-        max_details_per_batch=2,
-        scroll_passes=(5, 12),
-        scroll_delta_px=(520, 1700),
-        cdp_touch_probability=0.22,
+    "xhs_guarded": BehaviorProfile(
+        name="xhs_guarded",
+        list_dwell_seconds=(45, 120),
+        detail_dwell_seconds=(90, 240),
+        inter_detail_cooldown_seconds=(600, 1800),
+        comment_visit_probability=0.0,
+        max_details_per_batch=1,
+        scroll_passes=(2, 5),
+        scroll_delta_px=(360, 980),
+        cdp_touch_probability=0.0,
+        mouse_move_count=(1, 3),
     ),
     "quick_probe": BehaviorProfile(
         name="quick_probe",
@@ -81,8 +82,7 @@ SITE_PROFILE_MAP = {
     "douyin": "social_high_risk",
     "weibo": "social_high_risk",
     "zhihu": "social_high_risk",
-    "ctrip": "travel_medium",
-    "qunar": "travel_medium",
+    "xhs": "xhs_guarded",
     "douban_group": "conservative",
 }
 

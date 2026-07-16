@@ -1,16 +1,58 @@
 # 正式抓取执行契约
 
-本文定义正式抓取的机器语义。数量、平台参数和必需字段 profile 只在
-`config/crawl_targets.json` 中配置；本文不重复平台数值。
+本文定义正式抓取的机器语义。数量、平台参数和必需字段 profile：通用平台在
+`config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
+`config/xhs_pool.json` 中配置。本文不重复平台数值。
 
 ## 唯一入口
 
-正式任务只通过 `scripts/crawl_runner.py` 执行。其他入口的定位如下：
+通用平台正式任务只通过 `scripts/crawl_runner.py` 执行；小红书正式任务只通过
+`scripts/xhs_runner.py` 执行。其他入口的定位如下：
 
 - `mediacrawler_crawl.py`：调度器调用的结构化执行器，也可用于 `--no-import` 诊断。
-- `mediacrawler_batch_validate.py`：开发期字段验证，不代表正式轮次完成。
-- `info_collection_benchmark.py`：性能和容量评估，不代表正式轮次完成。
+- `info_collection_benchmark.py`：通用平台性能和容量评估，不代表正式轮次完成，也不接受小红书。
 - `ctf_resource_crawl.py`：固定 URL 页面证据执行器，由调度器调用。
+- `douban_group_crawl.py`：豆瓣小组搜索发现与话题页面证据执行器，只由调度器正式调用。
+
+## 行为与策略门禁
+
+B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
+
+1. `site_request_guard()` 检查平台级最小间隔、随机抖动、单会话预算、每日预算和冷却；
+2. 使用正式抓取的持久 profile 完成登录态确认；
+3. 在实际搜索使用的浏览器页面执行 `social_high_risk` 行为阶段，包括随机停留、鼠标移动
+   和随机触摸/滚轮滚动；
+4. 行为阶段通过后才执行原平台搜索、分页、字段补全和候选累计；
+5. 汇总行为证据、分页证据和字段校验后决定是否入库。
+
+请求预算的计量单位是一次正式平台抓取会话，不按页面加载产生的每个图片、脚本或底层 API
+请求重复计数。该门禁不改变原平台分页大小、候选上限、字段映射或去重规则。
+
+每个平台本轮摘要必须包含 `policy_events` 和 `behavior_evidence`。行为证据至少包含
+`pause`、`mouse_moves`、`human_scroll_complete`、运行时指纹、可见页面阻断标记，以及截图
+路径或明确的截图错误；证据 URL 解码后必须包含本轮真实关键词，不能用平台首页、旧关键词
+搜索页或固定占位搜索页代替。
+触摸滚动与滚轮滚动按 profile 随机选择，不要求每轮同时出现。只有
+`behavior_validation.ok=true`、`formal_validation.behavior_evidence_ok=true` 和
+`formal_validation.policy_evidence_ok=true` 才能进入入库；文件缺失、事件不完整、验证码、
+频控或阻断都必须失败，不能用内容 JSONL 或退出码补签。
+
+小红书在此门禁外再强制执行独立控制面：账号和浏览器 profile 一一绑定；storage state
+静态保存为 AES-GCM 密文，只在运行目录短暂解密；操作人必须通过 `--account-id` 选择账号；
+单账号租约只防止同一账号并发使用，不实施自动账号轮换、日预算、冷却或全池熔断。登录失效
+进入 `login_required`，其他验证和频控信号只记录证据，后续重试、隔离、恢复和切号由操作人
+决定。小红书只允许 `xhs_guarded`，不自动处理验证，不在失败中途切换账号。搜索结果、笔记
+详情、作者主页和翻页必须产生分阶段随机等待证据，不能退回固定短等待。完整操作顺序只在
+[`platforms/xhs.md`](platforms/xhs.md) 维护，本文只定义机器门禁。
+
+小红书可由操作人显式请求一轮最多一次的 `comment-scroll`、`like-one` 或 `random` 帖子互动。
+互动默认关闭，运行在独立详情页标签，结果写入 `behavior_evidence.post_interactions`；互动失败
+默认不否定抓取和入库契约，只有页面明确出现验证码、频控、封禁或登录失效时终止当前轮。
+点赞会产生真实平台副作用，只有显式参数才能启用。
+
+通用平台的验证码、频控或拒绝访问会写入站点冷却，后续任务由同一策略门禁停止；小红书只
+记录本轮证据，等待操作人指挥。断点续跑只校验本次新执行记录的行为与策略证据，不要求历史
+摘要补造新字段。
 
 ## 数量定义
 
@@ -51,14 +93,20 @@ Agent 临场判断。
 `search_author`，小红书和抖音只接受 `creator_profile`。抖音搜索作者对象中的占位 0
 不能替代作者主页结果。
 
+小红书必须为每条候选图文取得当前作者主页证据：先使用登录会话的无 token 作者页请求，
+空结果才允许在随机等待后通过同一已登录 BrowserContext 打开无 token 作者页。笔记
+`xsec_token` 不能作为作者主页凭据。作者页仍为空时该候选无效；页面出现验证、频控或封禁
+标记时本轮运行失败，不能把阻断降级为普通缺字段。
+
 ## 冻结执行状态
 
-每个任务必须在 `data/runtime/crawl_execution_states/<run_id>/<job_key>.json` 生成独立
-状态文件。状态文件冻结以下输入及 SHA-256：
+通用任务必须在 `data/runtime/crawl_execution_states/<run_id>/<job_key>.json` 生成状态；
+小红书必须在 `data/runtime/xhs/execution_states/<run_id>/<target_key>.json` 生成状态。
+状态文件冻结以下输入及 SHA-256：
 
 - 当前配置文件；
 - 本执行契约；
-- 任务参数和实际命令。
+- 任务参数和实际命令；
 - 断点续跑时使用的上一轮 `summary.json` 及其全部内容 JSONL。
 
 阶段固定为：
@@ -68,6 +116,10 @@ Agent 临场判断。
 3. `artifacts_verified`
 4. `persistence_verified`
 5. `task_finalized`
+
+dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后四阶段保持 `frozen`，
+运行摘要任务状态为 `planned` 且入库明确跳过。不得把该预期状态误报为阶段阻断；真实运行
+才要求五阶段全部 `completed`。
 
 进入下一阶段前，程序必须重新读取状态文件，确认上一阶段为 `completed` 或明确
 `skipped`，并重新校验冻结输入。任一阶段失败或冻结输入变化，后续阶段保持
@@ -79,13 +131,15 @@ Agent 临场判断。
 - `candidate_hard_limit_reached`：实际候选达到硬上限但目标未达成。
 - `source_exhausted`：平台明确返回空页、空游标或 `has_more=false`，且状态文件存在对应
   `adaptive_search_stopped` 证据。
-- `stagnated`：连续配置页数没有出现新的平台候选 ID，表示重复页或分页没有向前推进；
-  数据库旧记录虽不计新增目标，但只要首次出现在本轮就仍算分页进展。
+- `stagnated`：连续配置批次没有新增满足正式字段 profile 且数据库中不存在的唯一记录。
+  新的无效候选、重复候选和数据库已有记录都不能重置停滞计数；批次事件仍分别记录新候选
+  ID 数和有效新增数，供定位分页进展与字段失败。
 - `login_required` / `captcha_detected`：登录或验证阻断。
 - `runtime_failed`：浏览器或本地运行环境失败。
 
-除 `target_new_met` 外，其余状态都不能汇报为正式结构化轮次完成。固定 URL 页面任务的
-成功只代表该页面证据完成，不代表平台批量目标完成。
+除 `target_new_met` 外，其余状态都不能汇报为正式结构化轮次完成。豆瓣小组批量任务也必须
+同时达到 `valid_new_count >= target_new_posts` 和实际 `inserted_rows >= target_new_posts`；
+固定 URL 页面任务的成功仍只代表该页面证据完成，不代表平台批量目标完成。
 
 每个分页批次必须记录平台页码、请求游标或 search ID（平台提供时）、下一游标、原始
 返回条数和 `has_more`（平台提供时）。仅有一条或多条 `adaptive_batch_completed`、但没有
@@ -100,3 +154,6 @@ Agent 临场判断。
 底层去重集合，并只抓剩余新增目标和候选预算；可用 `--start-page` 继续同一关键词后续页，
 或用 `--recovery-keyword` 切换到能归一为同一城市的补充关键词。最终校验必须同时读取旧、
 新两轮产物，达到完整 `target_new_posts` 后一次性入库；不得把未达标的部分产物单独导入。
+
+该断点续跑只适用于通用调度链路。小红书独立 runner 当前不接受 `--resume-summary`；
+失败后结束该轮并等待人工登录、验证复核或切换下一轮账号，不能把账号轮换当作同一正式轮次续跑。

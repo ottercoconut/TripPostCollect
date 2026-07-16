@@ -1,5 +1,8 @@
 # 知乎
 
+- 登录确认后先进入本轮真实关键词搜索页，再执行共享行为阶段并刷新搜索页 cookie；行为
+  证据 URL 不含本轮关键词，或行为与请求策略证据缺失时，不得入库。
+
 - 正式入口：`crawl_runner.py` 调用 MediaCrawler 知乎搜索。
 - 登录态：必须存在经重开验证的 `d_c0/z_c0` cookie snapshot。
 - 内容类型：answer 和 article；zvideo 跳过。

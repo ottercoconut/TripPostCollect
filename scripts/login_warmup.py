@@ -76,7 +76,7 @@ def utc_iso() -> str:
 
 
 def utc_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%z")
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f%z")
 
 
 def implementation_args(args: argparse.Namespace) -> argparse.Namespace:

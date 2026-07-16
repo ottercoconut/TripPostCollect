@@ -15,6 +15,7 @@ from typing import Any
 
 from trippostcollect.core.paths import DEFAULT_CONFIG, DEFAULT_DB, PROJECT_ROOT, ensure_dir, ensure_parent, runtime_dir
 from trippostcollect.db.bootstrap import bootstrap_database
+from mediacrawler_behavior import HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS
 
 
 ROOT = PROJECT_ROOT
@@ -50,7 +51,7 @@ def utc_now() -> str:
 
 
 def run_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%z")
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f%z")
 
 
 def load_json(path: Path) -> Any:
@@ -133,6 +134,8 @@ def load_subprocess_json(path: Path) -> dict[str, Any]:
 def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_dir: Path, db_path: Path) -> dict[str, Any]:
     params = job.get("params") or {}
     platform = str(params.get("platform") or job["site_key"])
+    if platform == "xhs":
+        raise ValueError("XHS is independently orchestrated; use scripts/xhs_runner.py")
     target_count = int(args.per_target or params.get("target_new_posts") or 0)
     if target_count <= 0:
         raise ValueError(f"Missing formal target_new_posts for {job['job_key']}")
@@ -140,8 +143,6 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
     if args.fetch_multiplier > 0:
         candidate_hard_limit = max(target_count, target_count * args.fetch_multiplier)
     timeout = max(int(params.get("timeout_per_platform") or 180), int(args.timeout_per_target))
-    if platform == "xhs":
-        timeout = max(timeout, 600)
     target_dir = ensure_dir(batch_dir / job["job_key"])
     logs_dir = ensure_dir(target_dir / "logs")
     mc_output = ensure_dir(target_dir / "mediacrawler")
@@ -184,14 +185,17 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
-                timeout=timeout + 120,
+                timeout=timeout + HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS + 120,
                 check=False,
             )
             returncode = int(completed.returncode)
         except subprocess.TimeoutExpired:
             timed_out = True
             returncode = 124
-            stderr.write(f"\n[benchmark] outer timeout after {timeout + 120}s\n")
+            stderr.write(
+                f"\n[benchmark] outer timeout after "
+                f"{timeout + HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS + 120}s\n"
+            )
     elapsed = round(time.monotonic() - started, 2)
     after_count = db_keyword_count(db_path, platform, args.keyword)
     summary_path = latest_summary(mc_output)

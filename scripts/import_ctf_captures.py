@@ -207,6 +207,7 @@ def extract_visible_text_published_at(site_key: str, visible_text_path: str | No
 
 
 DOUBAN_TOPIC_URL_RE = re.compile(r"douban\.com/group/topic/\d+", re.IGNORECASE)
+DOUBAN_PRIVACY_MARKER = "由于用户的设置，无法查看主页内容"
 
 
 def is_douban_topic_url(url: str | None) -> bool:
@@ -299,6 +300,92 @@ def extract_douban_topic_fields(html_path: str | None) -> dict[str, Any]:
             fields["content_text"] = content
 
     return fields
+
+
+def extract_douban_followers_enrichment(meta: dict[str, Any], topic_artifact_dir: str) -> dict[str, Any]:
+    enrichment = meta.get("conditional_enrichment") or (meta.get("navigation") or {}).get("enrichment") or {}
+    result: dict[str, Any] = {
+        "status": str(enrichment.get("status") or "not_observed"),
+        "followers_count": None,
+        "followers_observed": False,
+        "followers_source": None,
+        "evidence": {
+            "reason": "conditional_enrichment_not_observed",
+        },
+    }
+    if not enrichment.get("triggered"):
+        result["evidence"] = dict(enrichment.get("evidence") or result["evidence"])
+        return result
+
+    capture_meta_value = str(enrichment.get("capture_meta_path") or "")
+    if not capture_meta_value:
+        result["evidence"] = {"reason": "conditional_enrichment_capture_meta_missing"}
+        return result
+    capture_meta_path = Path(capture_meta_value).expanduser().resolve()
+    topic_dir = Path(topic_artifact_dir).expanduser().resolve()
+    if not capture_meta_path.is_file() or capture_meta_path.parent.parent != topic_dir.parent:
+        result["evidence"] = {"reason": "conditional_enrichment_capture_not_from_same_run"}
+        return result
+    try:
+        profile_meta = load_json(capture_meta_path)
+    except (OSError, json.JSONDecodeError):
+        result["evidence"] = {"reason": "conditional_enrichment_capture_unreadable"}
+        return result
+
+    parent = profile_meta.get("conditional_enrichment_for") or {}
+    if Path(str(parent.get("parent_artifact_dir") or "")).expanduser().resolve() != topic_dir:
+        result["evidence"] = {"reason": "conditional_enrichment_parent_mismatch"}
+        return result
+    if profile_meta.get("capture_role") != "conditional_enrichment" or not profile_meta.get("ok"):
+        result["evidence"] = {"reason": "conditional_enrichment_capture_not_ok"}
+        return result
+
+    observed = profile_meta.get("douban_people_followers") or {}
+    evidence = dict(observed.get("evidence") or {})
+    evidence.update(
+        {
+            "capture_meta_path": str(capture_meta_path),
+            "artifact_dir": str(capture_meta_path.parent),
+            "same_run": True,
+        }
+    )
+    count_value = observed.get("followers_count")
+    followers_count = None if isinstance(count_value, bool) else parse_int(count_value)
+    if (
+        followers_count is not None
+        and followers_count >= 0
+        and observed.get("followers_observed") is True
+        and observed.get("followers_source") == "people_page"
+    ):
+        return {
+            "status": "observed",
+            "followers_count": followers_count,
+            "followers_observed": True,
+            "followers_source": "people_page",
+            "evidence": evidence,
+        }
+
+    if (
+        observed.get("status") == "privacy_restricted"
+        and observed.get("followers_observed") is False
+        and observed.get("followers_source") == "privacy_restricted"
+        and evidence.get("privacy_marker") == DOUBAN_PRIVACY_MARKER
+    ):
+        return {
+            "status": "privacy_restricted",
+            "followers_count": None,
+            "followers_observed": False,
+            "followers_source": "privacy_restricted",
+            "evidence": evidence,
+        }
+
+    return {
+        "status": "not_observed",
+        "followers_count": None,
+        "followers_observed": False,
+        "followers_source": None,
+        "evidence": evidence or {"reason": "conditional_enrichment_followers_not_observed"},
+    }
 
 
 def discover_capture_meta(outputs_root: Path) -> list[Path]:
@@ -566,19 +653,6 @@ def capture_post_id(site_key: str, capture_id: int) -> str:
     return f"capture:{site_key}:{capture_id}"
 
 
-ERROR_PAGE_MARKERS = (
-    "非常抱歉，您访问的页面不存在，可能已被删除",
-    "返回上一页",
-)
-
-
-def looks_like_error_page(site_key: str, content_text: str) -> bool:
-    normalized = "\n".join(line.strip() for line in content_text.splitlines() if line.strip())
-    if site_key == "qunar" and all(marker in normalized for marker in ERROR_PAGE_MARKERS):
-        return True
-    return False
-
-
 def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any] | None:
     site_key = str(row["site_key"])
     visible_text = load_text(row.get("visible_text_path"))
@@ -586,10 +660,12 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
     content_text = visible_text or title
     raw_meta = json.loads(row["raw_meta_json"]) if row.get("raw_meta_json") else {}
     douban_fields: dict[str, Any] = {}
+    douban_followers: dict[str, Any] = {}
     if site_key == "douban_group":
         if not is_douban_topic_url(row.get("target_url")):
             return None
         douban_fields = extract_douban_topic_fields(row.get("rendered_html_path"))
+        douban_followers = extract_douban_followers_enrichment(raw_meta, str(row["artifact_dir"]))
         title = str(douban_fields.get("title") or title or "").strip() or None
         content_text = str(douban_fields.get("content_text") or content_text or "")
     if not row["ok"]:
@@ -597,8 +673,6 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
     if site_key != "douban_group" and not row["content_ready"]:
         return None
     if not content_text:
-        return None
-    if looks_like_error_page(site_key, content_text):
         return None
     if site_key == "douban_group":
         published_at = douban_fields.get("published_at") or row.get("published_at")
@@ -627,10 +701,27 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
         "flag_count": row.get("flag_count"),
         "saved_images": row.get("saved_images"),
     }
+    if site_key == "douban_group":
+        metrics.update(
+            {
+                "followers_observed": bool(douban_followers.get("followers_observed")),
+                "followers_source": douban_followers.get("followers_source"),
+                "followers_evidence": douban_followers.get("evidence") or {},
+            }
+        )
     author = {
         "source": "ctf_capture",
         "follower_count_available": False,
     }
+    if site_key == "douban_group":
+        author.update(
+            {
+                "follower_count_available": bool(douban_followers.get("followers_observed")),
+                "followers_observed": bool(douban_followers.get("followers_observed")),
+                "followers_source": douban_followers.get("followers_source"),
+                "followers_evidence": douban_followers.get("evidence") or {},
+            }
+        )
     return {
         "platform_key": site_key,
         "source_capture_id": capture_id,
@@ -644,7 +735,7 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
         "author_profile_url": author_profile_url,
         "author_avatar_url": author_avatar_url,
         "author_description": author_description,
-        "author_followers_count": None,
+        "author_followers_count": douban_followers.get("followers_count"),
         "author_following_count": None,
         "author_posts_count": None,
         "author_platform_level": None,
@@ -757,6 +848,8 @@ def main() -> int:
     imported = 0
     image_rows = 0
     post_rows = 0
+    inserted_rows = 0
+    updated_rows = 0
     post_image_rows = 0
     skipped = 0
     failures: list[str] = []
@@ -782,7 +875,12 @@ def main() -> int:
             image_rows += replace_capture_images(conn, capture_id, row.get("images_json_path"))
             post_row = web_post_for_capture(row, capture_id)
             if post_row:
+                existing_post_id = find_existing_web_post(conn, post_row)
                 web_post_id = upsert_web_post_from_capture(conn, post_row)
+                if existing_post_id is None:
+                    inserted_rows += 1
+                else:
+                    updated_rows += 1
                 inserted_post_images = replace_web_post_images_from_capture(conn, web_post_id, row.get("images_json_path"))
                 conn.execute("UPDATE web_posts SET post_images_count=?, updated_at=datetime('now') WHERE id=?", (inserted_post_images, web_post_id))
                 post_image_rows += inserted_post_images
@@ -797,6 +895,8 @@ def main() -> int:
                 "imported": imported,
                 "image_rows": image_rows,
                 "post_rows": post_rows,
+                "inserted_rows": inserted_rows,
+                "updated_rows": updated_rows,
                 "post_image_rows": post_image_rows,
                 "skipped": skipped,
                 "failed": len(failures),

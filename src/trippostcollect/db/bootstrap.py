@@ -16,13 +16,35 @@ from trippostcollect.core.paths import (
     DEFAULT_DB,
     SOURCE_PLATFORMS_SCHEMA,
     WEB_POSTS_SCHEMA,
+    XHS_CONTROL_SCHEMA,
     ensure_parent,
 )
 from trippostcollect.platforms.registry import SITES
 
 
-CURRENT_JOB_KINDS = {"mediacrawler_search", "ctf_resource_crawl"}
+CURRENT_JOB_KINDS = {"mediacrawler_search", "ctf_resource_crawl", "douban_group_search"}
 JOB_KIND_CHECK_RE = re.compile(r"CHECK\s*\(\s*job_kind\s+IN\s*\(([^)]*)\)", re.IGNORECASE | re.DOTALL)
+CRAWL_ATTEMPT_COLUMNS = (
+    "id",
+    "job_id",
+    "run_id",
+    "attempt_no",
+    "status",
+    "failure_type",
+    "retryable",
+    "wait_seconds",
+    "command_json",
+    "started_at",
+    "finished_at",
+    "exit_code",
+    "artifact_dir",
+    "capture_meta_paths_json",
+    "import_result_json",
+    "stdout_tail",
+    "stderr_tail",
+    "classification_json",
+    "created_at",
+)
 
 
 def qmarks(values: set[str] | list[str]) -> str:
@@ -169,35 +191,162 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
         for value in (match.group(1).split(",") if match else [])
         if value.strip()
     }
-    if row and configured_job_kinds != CURRENT_JOB_KINDS:
+    attempt_fk_targets = {
+        str(item[2])
+        for item in conn.execute("PRAGMA foreign_key_list(crawl_attempts)").fetchall()
+    } if table_exists(conn, "crawl_attempts") else set()
+    needs_rebuild = row and (
+        configured_job_kinds != CURRENT_JOB_KINDS or attempt_fk_targets != {"crawl_jobs"}
+    )
+    if needs_rebuild:
+        conn.commit()
         conn.execute("PRAGMA foreign_keys = OFF")
-        conn.execute("PRAGMA legacy_alter_table = ON")
-        conn.execute("ALTER TABLE crawl_jobs RENAME TO crawl_jobs_old")
-        conn.executescript(CRAWL_SCHEDULER_SCHEMA.read_text(encoding="utf-8"))
-        conn.execute(
-            """
-            INSERT INTO crawl_jobs (
-                id, job_key, site_key, target_url, job_kind, enabled, status, priority,
-                schedule_seconds, next_run_at, max_attempts, consecutive_failures,
-                last_attempt_id, last_status, last_failure_type, params_json,
-                behavior_profile_json, created_at, updated_at
+        try:
+            has_attempts = table_exists(conn, "crawl_attempts")
+            if has_attempts:
+                conn.execute("ALTER TABLE crawl_attempts RENAME TO crawl_attempts_old")
+            conn.execute("ALTER TABLE crawl_jobs RENAME TO crawl_jobs_old")
+            conn.executescript(CRAWL_SCHEDULER_SCHEMA.read_text(encoding="utf-8"))
+            conn.execute(
+                """
+                INSERT INTO crawl_jobs (
+                    id, job_key, site_key, target_url, job_kind, enabled, status, priority,
+                    schedule_seconds, next_run_at, max_attempts, consecutive_failures,
+                    last_attempt_id, last_status, last_failure_type, params_json,
+                    behavior_profile_json, created_at, updated_at
+                )
+                SELECT
+                    id, job_key, site_key, target_url, job_kind, enabled, status, priority,
+                    schedule_seconds, next_run_at, max_attempts, consecutive_failures,
+                    last_attempt_id, last_status, last_failure_type, params_json,
+                    behavior_profile_json, created_at, updated_at
+                FROM crawl_jobs_old
+                WHERE job_kind IN ('mediacrawler_search', 'ctf_resource_crawl', 'douban_group_search')
+                """
             )
-            SELECT
-                id, job_key, site_key, target_url, job_kind, enabled, status, priority,
-                schedule_seconds, next_run_at, max_attempts, consecutive_failures,
-                last_attempt_id, last_status, last_failure_type, params_json,
-                behavior_profile_json, created_at, updated_at
-            FROM crawl_jobs_old
-            WHERE job_kind IN ('mediacrawler_search', 'ctf_resource_crawl')
-            """
-        )
-        conn.execute("DROP TABLE crawl_jobs_old")
-        conn.execute("PRAGMA legacy_alter_table = OFF")
-        conn.execute("PRAGMA foreign_keys = ON")
+            if has_attempts:
+                columns = ", ".join(CRAWL_ATTEMPT_COLUMNS)
+                conn.execute(
+                    f"INSERT INTO crawl_attempts ({columns}) SELECT {columns} FROM crawl_attempts_old"
+                )
+                conn.execute("DROP TABLE crawl_attempts_old")
+            conn.execute("DROP TABLE crawl_jobs_old")
+            conn.executescript(CRAWL_SCHEDULER_SCHEMA.read_text(encoding="utf-8"))
+            conn.commit()
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(f"crawl scheduler foreign-key repair failed: {violations[:3]!r}")
     conn.executescript(CRAWL_SCHEDULER_SCHEMA.read_text(encoding="utf-8"))
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
         (6, "crawl_scheduler"),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
+        (11, "douban_group_search_job_kind"),
+    )
+
+
+def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
+    legacy_account_columns = {
+        "health_score",
+        "consecutive_failures",
+        "daily_date",
+        "daily_runs",
+        "cooldown_until",
+    }
+    requires_v10_migration = (
+        table_exists(conn, "xhs_accounts")
+        and bool(table_columns(conn, "xhs_accounts") & legacy_account_columns)
+    ) or table_exists(conn, "xhs_platform_state")
+    if requires_v10_migration:
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.executescript(
+                """
+                CREATE TEMP TABLE xhs_accounts_v9_backup AS
+                SELECT
+                    account_id,
+                    CASE
+                        WHEN status IN ('active', 'cooling', 'challenge') THEN 'active'
+                        WHEN status IN ('login_pending', 'login_required', 'quarantined', 'retired') THEN status
+                        ELSE 'login_pending'
+                    END AS status,
+                    profile_dir,
+                    encrypted_state_path,
+                    identity_hash,
+                    last_verified_at,
+                    last_used_at,
+                    created_at,
+                    updated_at
+                FROM xhs_accounts;
+
+                CREATE TEMP TABLE xhs_account_events_v9_backup AS
+                SELECT id, account_id, run_id, event_type, details_json, created_at
+                FROM xhs_account_events;
+
+                CREATE TEMP TABLE xhs_account_leases_v9_backup AS
+                SELECT account_id, run_id, acquired_at, expires_at
+                FROM xhs_account_leases;
+
+                CREATE TEMP TABLE xhs_runs_v9_backup AS
+                SELECT
+                    run_id, target_key, account_id, status, started_at, finished_at,
+                    execution_state_path, child_summary_path, report_json
+                FROM xhs_runs;
+
+                DROP TABLE xhs_account_leases;
+                DROP TABLE xhs_account_events;
+                DROP TABLE xhs_runs;
+                DROP TABLE xhs_platform_state;
+                DROP TABLE xhs_accounts;
+                """
+            )
+            conn.executescript(XHS_CONTROL_SCHEMA.read_text(encoding="utf-8"))
+            conn.executescript(
+                """
+                INSERT INTO xhs_accounts(
+                    account_id, status, profile_dir, encrypted_state_path, identity_hash,
+                    last_verified_at, last_used_at, created_at, updated_at
+                )
+                SELECT
+                    account_id, status, profile_dir, encrypted_state_path, identity_hash,
+                    last_verified_at, last_used_at, created_at, updated_at
+                FROM xhs_accounts_v9_backup;
+
+                INSERT INTO xhs_account_events(id, account_id, run_id, event_type, details_json, created_at)
+                SELECT id, account_id, run_id, event_type, details_json, created_at
+                FROM xhs_account_events_v9_backup;
+
+                INSERT INTO xhs_account_leases(account_id, run_id, acquired_at, expires_at)
+                SELECT account_id, run_id, acquired_at, expires_at
+                FROM xhs_account_leases_v9_backup;
+
+                INSERT INTO xhs_runs(
+                    run_id, target_key, account_id, status, started_at, finished_at,
+                    execution_state_path, child_summary_path, report_json
+                )
+                SELECT
+                    run_id, target_key, account_id, status, started_at, finished_at,
+                    execution_state_path, child_summary_path, report_json
+                FROM xhs_runs_v9_backup;
+
+                DROP TABLE xhs_accounts_v9_backup;
+                DROP TABLE xhs_account_events_v9_backup;
+                DROP TABLE xhs_account_leases_v9_backup;
+                DROP TABLE xhs_runs_v9_backup;
+                """
+            )
+            conn.commit()
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(XHS_CONTROL_SCHEMA.read_text(encoding="utf-8"))
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
+        (10, "xhs_manual_account_selection"),
     )
 
 
@@ -276,6 +425,7 @@ def bootstrap_connection(
     platform_count = ensure_content_schema(conn) if sync_content else 0
     if sync_scheduler:
         ensure_scheduler_schema(conn)
+        ensure_xhs_control_schema(conn)
     synced_jobs = 0
     if sync_jobs:
         loaded_config = config if config is not None else load_json(config_path)

@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Login and persist one isolated Xiaohongshu account."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import re
+import sqlite3
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from playwright.async_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, async_playwright
+
+from mediacrawler_crawl import discover_cdp_browser_path
+from mediacrawler_login_warmup import launch_login_context
+from trippostcollect.core.paths import DEFAULT_DB, XHS_LOGIN_OUTPUT, ensure_dir
+from trippostcollect.db.bootstrap import bootstrap_database
+from trippostcollect.xhs.accounts import (
+    account_paths,
+    ensure_xhs_schema,
+    get_account,
+    mark_account_verified,
+    record_event,
+    set_account_status,
+    validate_account_id,
+)
+from trippostcollect.xhs.sessions import (
+    decrypt_storage_state,
+    encrypt_storage_state,
+    load_snapshot_key,
+    restore_context_state,
+)
+
+
+XHS_HOME_URL = "https://www.xiaohongshu.com"
+PROFILE_ID_RE = re.compile(r"/user/profile/([^/?#]+)")
+CHALLENGE_RE = re.compile(r"安全验证|请完成验证|请通过验证|操作频繁|环境异常|访问受限")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Login one isolated Xiaohongshu account and verify persistence.")
+    parser.add_argument("--account-id", required=True)
+    parser.add_argument("--db", default=str(DEFAULT_DB))
+    parser.add_argument("--timeout-seconds", type=int, default=600)
+    parser.add_argument("--browser-path")
+    return parser.parse_args()
+
+
+def utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f%z")
+
+
+def utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+async def xhs_page_state(page: Page) -> dict[str, Any]:
+    try:
+        text = await page.locator("body").inner_text(timeout=5_000)
+    except Exception:
+        text = ""
+    links = page.locator("a[href*='/user/profile/']")
+    profile_ids: list[str] = []
+    me_visible = False
+    for index in range(min(await links.count(), 20)):
+        link = links.nth(index)
+        href = str(await link.get_attribute("href") or "")
+        match = PROFILE_ID_RE.search(href)
+        try:
+            link_text = " ".join((await link.inner_text(timeout=1_000)).split())
+            if link_text == "我" and await link.is_visible():
+                me_visible = True
+                if match:
+                    profile_ids.append(match.group(1))
+        except Exception:
+            continue
+    profile_ids = sorted(set(profile_ids))
+    challenge_markers = sorted(set(CHALLENGE_RE.findall(" ".join(text.split()))))
+    return {
+        "ok": bool(me_visible and profile_ids),
+        "url": page.url,
+        "me_visible": me_visible,
+        "profile_ids": profile_ids,
+        "challenge_markers": challenge_markers,
+        "visible_text_sample": " ".join(text.split())[:360],
+    }
+
+
+async def wait_for_login(page: Page, timeout_seconds: int) -> dict[str, Any]:
+    started = time.monotonic()
+    state: dict[str, Any] = {}
+    while time.monotonic() - started < timeout_seconds:
+        state = await xhs_page_state(page)
+        if state["ok"] or state["challenge_markers"]:
+            return state
+        await page.wait_for_timeout(2_000)
+    return state
+
+
+async def open_account_context(playwright: Any, profile_dir: Path, browser_path: str | None) -> BrowserContext:
+    return await launch_login_context(playwright, profile_dir, browser_path or discover_cdp_browser_path())
+
+
+async def single_login_page(context: BrowserContext) -> Page:
+    """Reuse one existing page and close stale pages while a user is logging in."""
+    pages = [page for page in context.pages if not page.is_closed()]
+    page = pages[0] if pages else await context.new_page()
+    for other_page in pages:
+        if other_page is page:
+            continue
+        await other_page.close()
+    return page
+
+
+async def run_login(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
+    account_id = validate_account_id(args.account_id)
+    db_path = Path(args.db).expanduser()
+    bootstrap_database(db_path, sync_jobs=False)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_xhs_schema(conn)
+        account = get_account(conn, account_id)
+        if not account:
+            raise SystemExit(f"XHS account is not enrolled: {account_id}")
+        if account["status"] == "retired":
+            raise SystemExit(f"XHS account is retired: {account_id}")
+
+    paths = account_paths(account_id)
+    ensure_dir(paths["profile"])
+    output_dir = ensure_dir(XHS_LOGIN_OUTPUT / utc_stamp())
+    screenshot_path = output_dir / "challenge.png"
+    key = load_snapshot_key(create=True)
+    initial_state: dict[str, Any] = {}
+    persisted_state: dict[str, Any] = {}
+    error = ""
+
+    async with async_playwright() as playwright:
+        context = await open_account_context(playwright, paths["profile"], args.browser_path)
+        if paths["encrypted_state"].is_file():
+            await restore_context_state(
+                context,
+                decrypt_storage_state(paths["encrypted_state"], account_id=account_id, key=key),
+            )
+        page = await single_login_page(context)
+        try:
+            await page.goto(XHS_HOME_URL, wait_until="domcontentloaded", timeout=60_000)
+            initial_state = await wait_for_login(page, args.timeout_seconds)
+            if initial_state.get("challenge_markers"):
+                await page.screenshot(path=str(screenshot_path), full_page=False, timeout=10_000)
+                error = "xhs_challenge_detected_during_login"
+            elif not initial_state.get("ok"):
+                error = "xhs_login_timeout"
+            else:
+                platform_id = str(initial_state["profile_ids"][0])
+                identity_hash = hashlib.sha256(platform_id.encode("utf-8")).hexdigest()
+                storage_state = await context.storage_state()
+                storage_state["trippostcollect"] = {
+                    "schema_version": 1,
+                    "platform": "xhs",
+                    "account_id": account_id,
+                    "identity_hash": identity_hash,
+                    "captured_at": utc_iso(),
+                }
+                encrypt_storage_state(storage_state, paths["encrypted_state"], account_id=account_id, key=key)
+                paths["metadata"].write_text(
+                    json.dumps(storage_state["trippostcollect"], ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                paths["metadata"].chmod(0o600)
+        except PlaywrightTimeoutError as exc:
+            error = f"navigation_timeout:{exc}"
+        finally:
+            await context.close()
+
+        if not error:
+            verify_context = await open_account_context(playwright, paths["profile"], args.browser_path)
+            await restore_context_state(
+                verify_context,
+                decrypt_storage_state(paths["encrypted_state"], account_id=account_id, key=key),
+            )
+            verify_page = await single_login_page(verify_context)
+            try:
+                await verify_page.goto(XHS_HOME_URL, wait_until="domcontentloaded", timeout=60_000)
+                persisted_state = await wait_for_login(verify_page, min(args.timeout_seconds, 60))
+            finally:
+                await verify_context.close()
+            if not persisted_state.get("ok"):
+                error = "xhs_persisted_login_not_verified"
+            elif persisted_state.get("profile_ids", [None])[0] != initial_state.get("profile_ids", [None])[0]:
+                error = "xhs_profile_identity_changed_after_reopen"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_xhs_schema(conn)
+        if error == "xhs_challenge_detected_during_login":
+            record_event(
+                conn,
+                account_id=account_id,
+                event_type="login_challenge_detected",
+                details={"error": error},
+            )
+        elif error:
+            set_account_status(conn, account_id, "login_required", reason=error)
+        else:
+            identity_hash = hashlib.sha256(str(persisted_state["profile_ids"][0]).encode("utf-8")).hexdigest()
+            try:
+                mark_account_verified(conn, account_id, identity_hash)
+            except ValueError as exc:
+                error = f"xhs_identity_conflict:{exc}"
+                set_account_status(conn, account_id, "quarantined", reason=error)
+        record_event(
+            conn,
+            account_id=account_id,
+            event_type="login_check_finished",
+            details={"ok": not error, "error": error},
+        )
+        conn.commit()
+
+    summary = {
+        "status": "completed" if not error else "failed",
+        "account_id": account_id,
+        "profile_dir": str(paths["profile"]),
+        "encrypted_state_path": str(paths["encrypted_state"]),
+        "initial_state": initial_state,
+        "persisted_state": persisted_state,
+        "challenge_screenshot": str(screenshot_path) if screenshot_path.is_file() else None,
+        "error": error,
+        "finished_at": utc_iso(),
+    }
+    summary_path = output_dir / "summary.json"
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary["summary"] = str(summary_path)
+    return (0 if not error else 1), summary
+
+
+def main() -> int:
+    args = parse_args()
+    if args.timeout_seconds <= 0:
+        raise SystemExit("--timeout-seconds must be positive")
+    try:
+        code, summary = asyncio.run(run_login(args))
+    except Exception as exc:
+        account_id = validate_account_id(args.account_id)
+        error = f"xhs_login_runtime_failed:{type(exc).__name__}:{exc}"
+        db_path = Path(args.db).expanduser()
+        bootstrap_database(db_path, sync_jobs=False)
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_xhs_schema(conn)
+            account = get_account(conn, account_id)
+            if account and account["status"] != "retired":
+                set_account_status(conn, account_id, "login_required", reason=error)
+                record_event(
+                    conn,
+                    account_id=account_id,
+                    event_type="login_runtime_failed",
+                    details={"error": error},
+                )
+                conn.commit()
+        output_dir = ensure_dir(XHS_LOGIN_OUTPUT / utc_stamp())
+        summary = {
+            "status": "failed",
+            "account_id": account_id,
+            "error": error,
+            "finished_at": utc_iso(),
+        }
+        summary_path = output_dir / "summary.json"
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        summary["summary"] = str(summary_path)
+        code = 1
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

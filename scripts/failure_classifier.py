@@ -8,14 +8,26 @@ import re
 from typing import Any
 
 
-CAPTCHA_PATTERNS = re.compile(r"验证码|人机验证|安全验证|captcha|turnstile|geetest|滑块|wappoc_appmsgcaptcha", re.I)
-LOGIN_PATTERNS = re.compile(r"登录后|请登录|需要登录|(?<![A-Za-z])sign[ _-]?in(?![A-Za-z])|login_required|passport|未登录", re.I)
+CAPTCHA_PATTERNS = re.compile(
+    r"人机验证|安全验证|请完成验证|请通过验证|图形验证码|滑块验证码|拖动滑块|"
+    r"captcha|turnstile|geetest|wappoc_appmsgcaptcha",
+    re.I,
+)
+LOGIN_PATTERNS = re.compile(
+    r"登录后|请登录|需要登录|手机号登录|扫码登录|未登录|login state (?:result: false|not confirmed)|"
+    r"(?<![A-Za-z])sign[ _-]?in(?![A-Za-z])|login_required|passport",
+    re.I,
+)
 RUNTIME_PERMISSION_PATTERNS = re.compile(
     r"Failed to initialize cache|Operation not permitted|Permission denied|browser_runtime_permission",
     re.I,
 )
 BROWSER_LAUNCH_PATTERNS = re.compile(
-    r"TargetClosedError|BrowserType\.launch|launch_persistent_context|SIGABRT|signal 6|crashpad|kill EPERM",
+    r"BrowserType\.launch|launch_persistent_context|SIGABRT|signal 6|crashpad|kill EPERM",
+    re.I,
+)
+TARGET_CLOSED_PATTERNS = re.compile(
+    r"TargetClosedError|Target page, context or browser has been closed",
     re.I,
 )
 IMPORT_TARGET_PATTERNS = re.compile(r"import_new_target_not_met", re.I)
@@ -49,6 +61,17 @@ def _text_blob(*parts: Any) -> str:
     return "\n".join(str(part or "") for part in parts)
 
 
+def _strong_child_classification(stdout_json: dict[str, Any]) -> dict[str, Any] | None:
+    strong_statuses = {"captcha_detected", "login_required", "blocked", "failed_final"}
+    for record in stdout_json.get("records") or []:
+        if not isinstance(record, dict):
+            continue
+        classification = record.get("failure_classification") or {}
+        if isinstance(classification, dict) and classification.get("status") in strong_statuses:
+            return dict(classification)
+    return None
+
+
 def classify_attempt(
     *,
     exit_code: int | None,
@@ -58,8 +81,20 @@ def classify_attempt(
 ) -> dict[str, Any]:
     meta = meta or {}
     stdout_json = extract_stdout_json(stdout)
-    text = _text_blob(stdout, stderr, json.dumps(meta, ensure_ascii=False), json.dumps(stdout_json, ensure_ascii=False))
     markers = _meta_markers(meta)
+    text_meta = dict(meta)
+    text_meta.pop("structured_markers", None)
+    preflight = text_meta.get("scrapling_preflight")
+    if isinstance(preflight, dict):
+        text_meta["scrapling_preflight"] = {
+            key: value for key, value in preflight.items() if key != "structured_markers"
+        }
+    text = _text_blob(
+        stdout,
+        stderr,
+        json.dumps(text_meta, ensure_ascii=False),
+        json.dumps(stdout_json, ensure_ascii=False),
+    )
 
     if meta.get("skipped") and str(meta.get("skip_reason") or "").startswith("video_"):
         return {
@@ -88,6 +123,10 @@ def classify_attempt(
             "wait_seconds": 0,
             "reason": "completed",
         }
+
+    child_classification = _strong_child_classification(stdout_json)
+    if child_classification:
+        return child_classification
 
     formal_validation = stdout_json.get("formal_validation") or {}
     if stdout_json.get("import_new_target_met") is False and isinstance(formal_validation, dict):
@@ -148,6 +187,15 @@ def classify_attempt(
             "retryable": True,
             "wait_seconds": 3600,
             "reason": "rate_limited",
+        }
+
+    if TARGET_CLOSED_PATTERNS.search(text):
+        return {
+            "status": "failed_final",
+            "failure_type": "browser_target_closed",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": "page_context_or_browser_closed_after_launch",
         }
 
     if BLOCK_PATTERNS.search(text) or meta.get("blocked_detected"):

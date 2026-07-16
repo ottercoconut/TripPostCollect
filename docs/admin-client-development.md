@@ -146,9 +146,6 @@ TripPostCollect Admin
 首版视觉方向先以静态模板固定：本机后台、记录工作台、高密度表格、右侧记录上下文，不做营销页，不做表级数据库浏览器。
 
 - HTML 模板：[admin-client-record-workbench-template.html](admin-client-record-workbench-template.html)。
-- PNG 预览：[assets/admin-client-record-workbench.png](assets/admin-client-record-workbench.png)。
-
-![记录工作台静态模板](assets/admin-client-record-workbench.png)
 
 ## 技术架构
 
@@ -237,12 +234,10 @@ python scripts/crawl_runner.py \
 ```bash
 source .venv/bin/activate
 python scripts/mediacrawler_crawl.py \
-  --platforms xhs \
+  --platforms weibo \
   --keyword 济南旅游 \
   --candidate-hard-limit 20 \
   --target-new-posts 0 \
-  --login-type cookie \
-  --headed \
   --no-import
 ```
 
@@ -274,6 +269,54 @@ python -m pip install -e '.[dev]'
 
 安装后，CLI、FastAPI app 和测试都直接 `import trippostcollect`。不得让 `apps/admin_api` import `scripts/*.py`，也不要通过在命令前临时设置 `PYTHONPATH=src` 作为正式方案。
 
+## Docker 运行（推荐）
+
+管理端生产形态使用单个容器：镜像构建阶段编译 React，运行阶段只保留 Python 和编译后的静态文件，由 FastAPI 同源提供管理页面与 `/api`。这样不需要同时维护 Vite 开发服务器和 Uvicorn 两个常驻进程。
+
+在仓库根目录启动：
+
+```bash
+docker compose \
+  -f compose.admin.yaml \
+  up \
+  --build \
+  -d
+```
+
+打开 `http://127.0.0.1:8787`。查看容器和健康状态：
+
+```bash
+docker compose \
+  -f compose.admin.yaml \
+  ps
+```
+
+只查看末尾日志：
+
+```bash
+docker compose \
+  -f compose.admin.yaml \
+  logs \
+  --tail 40 \
+  admin
+```
+
+停止管理端：
+
+```bash
+docker compose \
+  -f compose.admin.yaml \
+  down
+```
+
+运行约束：
+
+- 必须从仓库根目录执行，Compose 使用当前 `PWD` 把仓库只读挂载到容器内的相同绝对路径。这样数据库中已保存的本地图片、截图和 HTML 绝对路径仍可由白名单正常解析。
+- SQLite、`config/`、`outputs/` 和其他证据文件对容器均为只读；宿主机抓取进程继续负责写入，管理端通过短连接读取最新状态。
+- 容器使用非 root 用户、只读根文件系统、最小 Linux capabilities 和 `/api/meta` 健康检查。
+- 默认只监听宿主机 `127.0.0.1:8787`。可在启动前设置 `TRIPPOST_ADMIN_PORT` 修改宿主机端口，不改变容器内部端口。
+- `Dockerfile` 位于 `docker/admin/Dockerfile`，Compose 入口是仓库根目录的 `compose.admin.yaml`。
+
 ### 路径规则
 
 - Python 代码只允许引用 `trippostcollect.core.paths` 或后端 settings。
@@ -283,7 +326,7 @@ python -m pip install -e '.[dev]'
 
 ## 后端技术设计
 
-### 运行方式
+### 本地开发运行方式
 
 开发期：
 
@@ -296,7 +339,7 @@ python -m uvicorn apps.admin_api.app.main:app \
   --port 8787
 ```
 
-生产/本机常驻期：
+临时无容器联调：
 
 ```bash
 source .venv/bin/activate
@@ -305,6 +348,8 @@ python -m uvicorn apps.admin_api.app.main:app \
   --host 127.0.0.1 \
   --port 8787
 ```
+
+常驻运行使用前述 Docker 入口。
 
 ### 依赖建议
 
@@ -352,11 +397,14 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
 |---|---|---|
 | `TRIPPOST_ADMIN_DB` | `data/trippostcollect.sqlite` | SQLite 路径 |
 | `TRIPPOST_ADMIN_CONFIG` | `config/crawl_targets.json` | 调度配置路径 |
+| `TRIPPOST_ADMIN_STATIC_DIR` | `apps/admin_web/dist` | 已构建前端静态文件目录；镜像内固定为 `/app/apps/admin_web/dist` |
 | `TRIPPOST_ADMIN_HOST` | `127.0.0.1` | 服务监听 |
 | `TRIPPOST_ADMIN_PORT` | `8787` | 服务端口 |
 | `TRIPPOST_ADMIN_DB_READONLY` | `true` | 首版固定只读打开 SQLite |
 | `TRIPPOST_ADMIN_ALLOW_COMMANDS` | `false` | 首版固定为 false，不允许前端触发 bootstrap、sync、dry-run 或真实抓取 |
 | `TRIPPOST_ADMIN_REFRESH_SECONDS` | `5` | 前端默认轮询刷新间隔 |
+
+容器另外设置全局路径变量 `TRIPPOST_PROJECT_ROOT`，使 `trippostcollect.core.paths` 以只读挂载后的仓库绝对路径作为项目根目录。非容器运行无需设置。
 
 所有路径必须用 `trippostcollect.core.paths` 或后端 settings 统一解析，不在业务代码里硬编码。
 
@@ -668,7 +716,7 @@ Maintenance 首版只读，不执行 bootstrap、备份、sync、dry-run、真�
 
 ## 前端技术设计
 
-### 运行方式
+### 开发运行方式
 
 ```bash
 cd apps/admin_web
@@ -677,6 +725,7 @@ npm run dev
 ```
 
 Vite 默认开发服务器端口是 `5173`。前端 dev server 通过 Vite proxy 转发 `/api` 到 `http://127.0.0.1:8787`。
+生产或本机常驻使用上文 Docker 入口，不运行 Vite dev server。
 
 ### 前端依赖建议
 

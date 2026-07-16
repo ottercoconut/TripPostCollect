@@ -25,7 +25,7 @@ description: 仅用于 TripPostCollect 抓取调度配置、到期任务选择�
 
 1. 在推理任务前先验证 `config/crawl_targets.json` 语法。
 2. 检查目标任务：`job_key`、`site_key`、`job_kind`、启用标记、优先级、调度、参数和行为配置。
-3. 当前只保留 8 个启用任务：`page_bilibili_jinan_opus`、`page_ctrip_jinan_notes`、`page_qunar_jinan`、`page_douban_group_jinan`、`mc_weibo_jinan_search`、`mc_xhs_jinan_search`、`mc_douyin_jinan_search`、`mc_zhihu_jinan_search`；不要把废弃平台重新写入 `source_platforms` 或启用任务。
+3. 通用任务以 `config/crawl_targets.json` 当前启用项为准；不要把已删除的平台重新写入 `source_platforms` 或启用任务。
 4. 涉及反自动化敏感改动时，检查 `docs/anti-automation-behavior.md`；调度间隔需符合站点策略，避免使用 `--no-throttle`，正式取证优先使用可见浏览器运行。
 5. 验证配置或数据库结构改动时，把配置同步到临时数据库。
 6. 执行前用 `--dry-run` 输出验证命令构造和选中的到期任务。

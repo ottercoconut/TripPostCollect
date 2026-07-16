@@ -22,7 +22,6 @@ def test_selected_targets_supports_all_aliases_and_deduplication() -> None:
         "douyin",
         "zhihu",
         "weibo",
-        "xhs",
         "bilibili",
         "douban_group",
     ]
@@ -65,20 +64,20 @@ def test_markdown_summary_includes_login_refresh_state() -> None:
         "failed_count": 0,
         "records": [
             {
-                "target": "xhs",
+                "target": "weibo",
                 "target_kind": "mediacrawler",
                 "ok": True,
                 "initial_ok": False,
                 "login_refreshed": True,
                 "persisted_ok": True,
-                "profile_dir": "/tmp/xhs-profile",
+                "profile_dir": "/tmp/weibo-profile",
             }
         ],
     }
 
     report = login_warmup.markdown_summary(summary)
 
-    assert "| xhs | mediacrawler | ok | False | True | True |" in report
+    assert "| weibo | mediacrawler | ok | False | True | True |" in report
 
 
 def test_weibo_login_accepts_current_mobile_session(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,3 +107,55 @@ def test_weibo_login_accepts_current_mobile_session(monkeypatch: pytest.MonkeyPa
     assert state["ok"] is True
     assert state["markers"]["current_cookie_pair"] is True
     assert state["markers"]["api_login"] is True
+
+
+def test_weibo_login_rejects_desktop_cookie_without_mobile_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    media_login = sys.modules["mediacrawler_login_warmup"]
+
+    class FakeContext:
+        async def cookies(self, urls):
+            assert urls == ["https://m.weibo.cn"]
+            return [{"name": "WBPSESS", "value": "desktop-only"}]
+
+    class FakePage:
+        url = "https://m.weibo.cn"
+
+    async def fake_storage(_page):
+        return {}
+
+    async def fake_api(_page):
+        return {"ok": True, "login": False, "uid": None}
+
+    monkeypatch.setattr(media_login, "safe_local_storage", fake_storage)
+    monkeypatch.setattr(media_login, "weibo_api_check", fake_api)
+
+    state = asyncio.run(media_login.current_state(FakeContext(), FakePage(), "weibo"))
+
+    assert state["ok"] is False
+    assert state["markers"]["api_login"] is False
+
+
+def test_weibo_login_uses_desktop_login_and_mobile_verification() -> None:
+    media_login = sys.modules["mediacrawler_login_warmup"]
+    config = media_login.PLATFORMS["weibo"]
+
+    assert config["login_url"] == "https://passport.weibo.com/sso/signin?entry=miniblog&source=miniblog"
+    assert config["verify_url"] == "https://m.weibo.cn"
+    assert config["login_url"] != config["verify_url"]
+
+
+def test_weibo_desktop_login_requires_sso_or_changed_session() -> None:
+    media_login = sys.modules["mediacrawler_login_warmup"]
+
+    assert media_login.weibo_desktop_login_completed(
+        {"WBPSESS": "anonymous"},
+        {"WBPSESS": "anonymous", "SSOLoginState": None},
+    ) is False
+    assert media_login.weibo_desktop_login_completed(
+        {"WBPSESS": "anonymous"},
+        {"WBPSESS": "authenticated", "SSOLoginState": None},
+    ) is True
+    assert media_login.weibo_desktop_login_completed(
+        {"WBPSESS": "anonymous"},
+        {"WBPSESS": "anonymous", "SSOLoginState": "present"},
+    ) is True

@@ -118,15 +118,31 @@ def _seconds_until_next_utc_day(now: datetime) -> int:
 
 def _normalize_entry(entry: dict[str, Any], site: WebSite, now: datetime) -> dict[str, Any]:
     daily_key = _current_daily_key(now)
-    if entry.get("daily_date") != daily_key:
+    daily_reset = entry.get("daily_date") != daily_key
+    if daily_reset:
         entry["daily_date"] = daily_key
         entry["daily_count"] = 0
+        entry["session_count"] = 0
 
     cooldown_until = parse_iso_timestamp(entry.get("cooldown_until"))
+    cooldown_reason = str(entry.get("cooldown_reason") or "")
+    last_request_at = parse_iso_timestamp(entry.get("last_request_finished_at") or entry.get("last_request_at"))
+    session_idle = bool(
+        last_request_at
+        and (now - last_request_at).total_seconds() >= max(0, site.cooldown_minutes) * 60
+    )
+    automatic_cooldown = cooldown_reason == "max_requests_per_session"
+
     if cooldown_until and cooldown_until <= now:
         entry["session_count"] = 0
         entry.pop("cooldown_until", None)
         entry.pop("cooldown_reason", None)
+    elif automatic_cooldown and (daily_reset or session_idle):
+        entry["session_count"] = 0
+        entry.pop("cooldown_until", None)
+        entry.pop("cooldown_reason", None)
+    elif cooldown_until is None and session_idle:
+        entry["session_count"] = 0
 
     entry["min_delay_seconds"] = site.min_delay_seconds
     entry["max_requests_per_session"] = site.max_requests_per_session
