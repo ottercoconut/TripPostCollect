@@ -1973,6 +1973,8 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
                 "TRIPPOSTCOLLECT_XHS_INITIAL_SETTLE_SECONDS": "12",
                 "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS": "180" if args.headed else "0",
                 "TRIPPOSTCOLLECT_XHS_NAVIGATION_DEADLINE_SECONDS": "60",
+                "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS": "600",
+                "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_POLL_SECONDS": "2",
                 "TRIPPOSTCOLLECT_XHS_QR_REFRESH_SECONDS": "90",
                 "TRIPPOSTCOLLECT_XHS_QR_ATTEMPTS": "5",
             }
