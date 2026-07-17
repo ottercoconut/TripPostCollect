@@ -74,8 +74,9 @@ python scripts/mediacrawler_crawl.py \
 
 ## 恢复与临时候选预算
 
-冻结断点续跑当前只支持微博、抖音和知乎。接近新增目标但未入库时，可继续同一关键词后续页；
-`start-page` 必须取上一轮 `pagination_evidence` 中首个未处理页，不得按名义页大小推算：
+冻结产物合并当前只支持微博、抖音和知乎。微博和知乎接近新增目标但未入库时，可以继续同一
+关键词后续页；`start-page` 必须取上一轮 `pagination_evidence` 中首个未处理页，不得按名义
+页大小推算：
 
 ```bash
 source .venv/bin/activate
@@ -85,8 +86,9 @@ python scripts/crawl_runner.py \
   --resume-summary outputs/mediacrawler_runs/<run_id>/summary.json
 ```
 
-单关键词有明确 `source_exhausted` 证据时，可换能归一到同一城市的补充关键词，并从该关键词
-第 1 页开始：
+抖音后续页同时依赖上一响应的 search ID，当前执行器不会跨进程恢复该值，因此抖音不得用
+大于 1 的 `--start-page` 做同词续跑。抖音恢复必须换能归一到同一城市的补充关键词，并从该
+关键词第 1 页开始；微博和知乎单关键词有明确 `source_exhausted` 证据时也可以使用相同办法：
 
 ```bash
 source .venv/bin/activate
@@ -106,7 +108,8 @@ python scripts/crawl_runner.py \
 每个恢复计划的 dry-run 与正式 runner 参数除 `--dry-run` 外必须一致；未使用的可选恢复参数
 不要添加。检查冻结状态为 `planned` 后，还要检查 `plan.command`：`--resume-summary` 和显式
 请求的 `--start-page` 必须原样存在；使用 `--recovery-keyword` 时，child 命令的 `--keyword`
-必须等于恢复词。任一项不符时不能继续正式运行。
+必须等于恢复词。抖音恢复还必须同时满足 `--recovery-keyword` 已提供且 `--start-page` 等于 1；
+任一项不符时不能继续正式运行。
 
 B站 article 当前不支持断点续跑。只有停止证据为 `candidate_hard_limit_reached` 且没有来源
 耗尽证据时，才临时提高该 job 配置中的 `candidate_hard_limit`；新完整轮次不带任何恢复参数，

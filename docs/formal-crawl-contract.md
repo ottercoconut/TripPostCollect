@@ -158,10 +158,12 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 
 当前 `--resume-summary` 只支持微博、抖音和知乎这三个由底层 MediaCrawler 分页执行的
 `mediacrawler_search` 任务。它们在接近目标时因字段差异、运行异常或单关键词耗尽而未入库，
-可以通过调度器继续：续跑必须冻结上一轮摘要和 JSONL，将上一轮通过正式校验的新增及已有记录
-ID 注入底层去重集合，并只抓剩余新增目标和候选预算；可用 `--start-page` 继续同一关键词后续页，
-或用 `--recovery-keyword` 切换到能归一为同一城市的补充关键词。最终校验必须同时读取旧、新两轮
-产物，达到完整 `target_new_posts` 后一次性入库；不得把未达标的部分产物单独导入。
+可以通过调度器冻结并合并上一轮摘要和 JSONL，将上一轮通过正式校验的新增及已有记录 ID 注入
+底层去重集合，并只抓剩余新增目标和候选预算。微博和知乎可以用 `--start-page` 继续同一关键词
+后续页；抖音后续页同时依赖上一响应的 search ID，当前执行器没有跨进程恢复该 search ID，
+所以抖音不得用大于 1 的 `--start-page` 做同词续跑，只能用 `--recovery-keyword` 切换到能归一为
+同一城市的补充关键词并从第 1 页开始。最终校验必须同时读取旧、新两轮产物，达到完整
+`target_new_posts` 后一次性入库；不得把未达标的部分产物单独导入。
 
 B站 article 虽由通用调度器调用 `mediacrawler_crawl.py`，但使用项目自有 article 搜索实现，
 不支持冻结断点续跑。B站新完整轮次的 dry-run 和正式命令均不得传入 `--resume-summary`、
@@ -172,7 +174,9 @@ dry-run 阶段提前拒绝 B站的 `--resume-summary`，所以带恢复参数的
 验证通过，真实执行仍会拒绝。
 
 恢复 dry-run 只能用于微博、抖音和知乎。冻结状态 `plan.command` 中，请求的
-`--resume-summary` 和 `--start-page` 必须原样存在；`--recovery-keyword` 的值必须作为 child
-命令的 `--keyword` 值存在。任一项不符时不得执行正式续跑。小红书独立 runner 当前也不接受
-`--resume-summary`；失败后结束该轮，并严格按小红书失败分流决定同账号登录复验、调整下一轮
-候选预算或关键词，或由操作人手工选择下一轮账号。任何换号都不得解释为同一正式轮次续跑。
+`--resume-summary` 和显式提供的 `--start-page` 必须原样存在；`--recovery-keyword` 的值必须作为
+child 命令的 `--keyword` 值存在。微博和知乎同词续跑的 `--start-page` 可以大于 1；抖音恢复
+必须同时使用同城市 `--recovery-keyword` 和 `--start-page 1`。任一项不符时不得执行正式续跑。
+小红书独立 runner 当前也不接受 `--resume-summary`；失败后结束该轮，并严格按小红书失败分流
+决定同账号登录复验、调整下一轮候选预算或关键词，或由操作人手工选择下一轮账号。任何换号都
+不得解释为同一正式轮次续跑。
