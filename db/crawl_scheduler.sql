@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS crawl_jobs (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     CHECK (enabled IN (0, 1)),
-    CHECK (job_kind IN ('mediacrawler_search', 'ctf_resource_crawl', 'douban_group_search')),
+    CHECK (job_kind IN ('mediacrawler_search', 'ctf_resource_crawl')),
     CHECK (status IN ('pending', 'leased', 'completed', 'retry_wait', 'blocked', 'login_required', 'captcha_detected', 'failed_final', 'disabled')),
     CHECK (schedule_seconds >= 0),
     CHECK (max_attempts >= 1),

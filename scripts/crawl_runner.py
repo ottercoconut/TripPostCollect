@@ -174,36 +174,6 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
             command.append("--headed")
         if args.no_import:
             command.append("--no-import")
-    elif kind == "douban_group_search":
-        candidate_hard_limit = int(params.get("candidate_hard_limit") or 0)
-        target_new_posts = int(params.get("target_new_posts") or 0)
-        max_stagnant_batches = int(params.get("max_stagnant_batches") or 0)
-        if site != "douban_group" or not url:
-            raise ValueError(f"Invalid Douban discovery target for job {row['job_key']}")
-        if candidate_hard_limit <= 0 or target_new_posts <= 0 or max_stagnant_batches <= 0:
-            raise ValueError(f"Invalid formal limits for job {row['job_key']}")
-        if target_new_posts > candidate_hard_limit:
-            raise ValueError(f"target_new_posts exceeds candidate_hard_limit for job {row['job_key']}")
-        if str(params.get("followers_policy") or "") != "conditional_enrichment":
-            raise ValueError(f"Douban Group discovery requires conditional_enrichment for job {row['job_key']}")
-        command = [
-            sys.executable,
-            str(ROOT / "scripts" / "douban_group_crawl.py"),
-            "--search-url",
-            url,
-        ]
-        add_flag(command, "--keyword", params.get("keyword", ""))
-        add_flag(command, "--candidate-hard-limit", candidate_hard_limit)
-        add_flag(command, "--target-new-posts", target_new_posts)
-        add_flag(command, "--max-stagnant-batches", max_stagnant_batches)
-        add_flag(command, "--db", args.db)
-        add_flag(command, "--discovery-page-size", params.get("discovery_page_size", 50))
-        add_flag(command, "--scrapling-preflight", params.get("scrapling_preflight", "auto"))
-        add_flag(command, "--max-image-save", params.get("max_image_save", 3))
-        add_flag(command, "--max-scrolls", params.get("max_scrolls", 8))
-        add_flag(command, "--behavior-profile", profile)
-        if args.headless or params.get("headless", False):
-            command.append("--headless")
     elif kind == "ctf_resource_crawl":
         if url:
             command = [
@@ -631,19 +601,13 @@ def main() -> int:
                 if args.no_import:
                     import_result = {"skipped": True, "reason": "no_import"}
                     state.complete("persistence_verified", evidence=import_result, skipped=True)
-                elif row["job_kind"] in {"ctf_resource_crawl", "douban_group_search"} and not meta.get("skipped"):
+                elif row["job_kind"] == "ctf_resource_crawl" and not meta.get("skipped"):
                     import_result = import_capture_results(capture_meta_paths, db_path)
-                    target_new_posts = int(params_for(row).get("target_new_posts") or 0)
-                    import_new_target_met = (
-                        row["job_kind"] != "douban_group_search"
-                        or int(import_result.get("inserted_rows") or 0) >= target_new_posts
-                    )
-                    import_result["import_new_target_met"] = import_new_target_met
-                    if import_result.get("ok") and import_new_target_met:
+                    import_result["import_new_target_met"] = True
+                    if import_result.get("ok"):
                         state.complete("persistence_verified", evidence=import_result)
                     else:
-                        error = "capture_import_failed" if not import_result.get("ok") else "formal_import_new_target_not_reached"
-                        state.fail("persistence_verified", error=error, evidence=import_result)
+                        state.fail("persistence_verified", error="capture_import_failed", evidence=import_result)
                 elif row["job_kind"] == "mediacrawler_search":
                     child_summary = load_json(Path(str(summary_path)))
                     import_result = dict(child_summary.get("import_result") or {})

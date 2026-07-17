@@ -83,7 +83,6 @@ SITE_PROFILE_MAP = {
     "weibo": "social_high_risk",
     "zhihu": "social_high_risk",
     "xhs": "xhs_guarded",
-    "douban_group": "conservative",
 }
 
 COMMENT_SELECTORS = (

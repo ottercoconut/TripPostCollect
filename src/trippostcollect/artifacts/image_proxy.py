@@ -32,7 +32,6 @@ class RemoteImagePreview:
 
 REMOTE_IMAGE_REFERERS = {
     "bilibili": "https://www.bilibili.com/",
-    "douban_group": "https://www.douban.com/",
     "douyin": "https://www.douyin.com/",
     "weibo": "https://weibo.com/",
     "xhs": "https://www.xiaohongshu.com/",

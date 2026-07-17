@@ -104,30 +104,6 @@
       "behavior_profile": {
         "name": "social_high_risk"
       }
-    },
-    {
-      "job_key": "douban_group_qingdao_search",
-      "site_key": "douban_group",
-      "target_url": "https://www.douban.com/group/search?cat=1013&q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",
-      "job_kind": "douban_group_search",
-      "enabled": true,
-      "priority": 100,
-      "schedule_seconds": 172800,
-      "max_attempts": 1,
-      "params": {
-        "keyword": "青岛旅游",
-        "candidate_hard_limit": 300,
-        "target_new_posts": 50,
-        "max_stagnant_batches": 3,
-        "followers_policy": "conditional_enrichment",
-        "discovery_page_size": 50,
-        "max_image_save": 3,
-        "max_scrolls": 8,
-        "scrapling_preflight": "auto"
-      },
-      "behavior_profile": {
-        "name": "conservative"
-      }
     }
   ]
 }

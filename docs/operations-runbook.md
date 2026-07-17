@@ -69,28 +69,81 @@ python scripts/mediacrawler_crawl.py \
 `info_collection_benchmark.py` 只用于通用平台性能和容量评估，不能替代正式状态文件和报告，
 也不接受小红书任务。
 
-接近新增目标但未入库时，使用冻结断点续跑；继续同一关键词后续页：
+`crawl_runner.py --no-import` 和 `xhs_runner.py --no-import` 同样只用于诊断。当前执行器可能在
+内容与产物校验通过时把这类运行写成 `completed`，但入库被跳过，不能按正式轮次完成汇报。
+
+## 恢复与临时候选预算
+
+冻结断点续跑当前只支持微博、抖音和知乎。接近新增目标但未入库时，可继续同一关键词后续页；
+`start-page` 必须取上一轮 `pagination_evidence` 中首个未处理页，不得按名义页大小推算：
 
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \
-  --job-key mc_weibo_jinan_search \
+  --job-key mc_weibo_qingdao_search \
   --start-page 8 \
   --resume-summary outputs/mediacrawler_runs/<run_id>/summary.json
 ```
 
-单关键词明确耗尽时，可换同城市补充关键词：
+单关键词有明确 `source_exhausted` 证据时，可换能归一到同一城市的补充关键词，并从该关键词
+第 1 页开始：
 
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \
-  --job-key mc_douyin_jinan_search \
+  --job-key mc_douyin_qingdao_search \
   --resume-summary outputs/mediacrawler_runs/<run_id>/summary.json \
-  --recovery-keyword 济南旅行
+  --recovery-keyword 青岛旅行 \
+  --start-page 1
 ```
 
-续跑会把上一轮摘要及 JSONL 加入冻结输入，并将其中已收集 ID 注入底层去重集合。只有
-合并后的有效新增数和实际新增行同时达到完整目标才入库。
+续跑会把上一轮摘要及 JSONL 加入冻结输入，并将上一轮通过正式校验的新增及已有记录平台 ID
+注入底层去重集合；未通过字段校验的候选不会注入。
+`candidate_hard_limit` 是旧、新产物合并后的总候选预算，不是续跑可再使用的增量；执行器会用
+配置上限减去旧摘要已消费候选得到本轮剩余预算。只有合并后的 `valid_new_count` 达到完整目标
+才进入一次性入库；入库后 `inserted_rows` 也达到目标，正式轮次才可完成。
+
+每个恢复计划的 dry-run 与正式 runner 参数除 `--dry-run` 外必须一致；未使用的可选恢复参数
+不要添加。检查冻结状态为 `planned` 后，还要检查 `plan.command`：`--resume-summary` 和显式
+请求的 `--start-page` 必须原样存在；使用 `--recovery-keyword` 时，child 命令的 `--keyword`
+必须等于恢复词。任一项不符时不能继续正式运行。
+
+B站 article 当前不支持断点续跑。只有停止证据为 `candidate_hard_limit_reached` 且没有来源
+耗尽证据时，才临时提高该 job 配置中的 `candidate_hard_limit`；新完整轮次不带任何恢复参数，
+由执行器默认从第 1 页开始，旧轮部分产物不得拼接或单独导入。登录、验证、运行错误或明确
+`source_exhausted` 必须按对应失败原因处理，不能靠盲目扩容重复同词。
+
+临时候选扩容没有命令行覆盖参数，只能通过配置完成。必须按以下顺序操作：
+
+1. 记录原 `candidate_hard_limit`，只修改目标 job 的配置值；续跑平台填写旧、新轮共用的总预算，
+   B站填写新完整轮次的预算。
+2. 激活项目虚拟环境并校验配置：
+
+   ```bash
+   source .venv/bin/activate
+   python -m json.tool \
+     config/crawl_targets.json \
+     >/dev/null
+   ```
+
+3. 同步配置，再用目标 job 冻结并核对实际命令；恢复轮还要追加本计划实际使用的恢复参数：
+
+   ```bash
+   source .venv/bin/activate
+   python scripts/crawl_runner.py --sync-only
+   python scripts/crawl_runner.py \
+     --dry-run \
+     --no-sync-config \
+     --job-key <enabled_job_key_from_config>
+   ```
+
+   正式轮使用完全相同的 runner 参数，去掉 `--dry-run` 并保留 `--no-sync-config`。
+4. 运行结束并完成摘要、状态和 SQLite 检查后，恢复原配置值，再次校验 JSON 并执行
+   `--sync-only`。从临时配置第一次 `--sync-only` 开始，直至正式轮摘要、状态和 SQLite 检查
+   完成，配置文件不得再修改。
+
+临时值只服务当前恢复或新轮，不得因为一次扩容无意改变长期调度标准。涉及三个及以上参数的
+dry-run 或正式命令仍按本项目规则分行展示。
 
 ## 登录态
 
@@ -106,11 +159,12 @@ python scripts/login_warmup.py --targets all
 ```bash
 source .venv/bin/activate
 python scripts/login_warmup.py \
-  --targets weibo zhihu douban_group \
+  --targets weibo zhihu bilibili \
   --timeout-seconds 600
 ```
 
-当前目标包括抖音、知乎、微博、B站和豆瓣小组，不包含小红书。脚本按顺序加载正式抓取使用的
+`--targets all` 当前只展开为抖音、知乎、微博和 B站；不包含小红书，也不验证页面证据执行器
+使用的独立浏览器 profile。脚本按顺序加载这四个平台正式抓取使用的
 持久 profile，先验证平台特定 cookie、localStorage、用户接口或页面标记；已有状态有效
 时直接通过，失效时在有头窗口等待人工登录。登录成功后关闭并重开同一 profile，只有
 重开验证仍成功才写 cookie/storage snapshot 并标记 `ok=true`。单个平台浏览器异常会记
@@ -123,8 +177,7 @@ SSO 登录后，脚本把该页导航到移动端以刷新 Cookie。关闭并重
 
 统一报告位于 `outputs/login_warmup/<run_id>/summary.json` 和 `summary.md`，每个平台记录
 `initial_ok`、`login_refreshed`、`persisted_ok`、profile 路径和错误。该脚本只负责登录，
-不抓内容、不写 SQLite。`mediacrawler_login_warmup.py` 和 `ctf_login_warmup.py` 是其底层
-平台实现，正常操作不再分别调用。
+不抓内容、不写 SQLite。`mediacrawler_login_warmup.py` 是其底层平台实现，正常操作不再单独调用。
 
 ### 小红书独立登录与运行
 
@@ -189,7 +242,8 @@ Chrome HOME、Crashpad 和 `uv` 缓存由 `scripts/browser_runtime.py` 指向
 
 通用四个结构化平台在正式搜索前必须执行 `social_high_risk`；小红书独立链路必须执行
 `xhs_guarded`。正常摘要中的
-`behavior_validation.ok`、`behavior_ok` 和 `policy_ok` 都应为 `true`；每个平台记录应有
+`behavior_validation.ok`、`behavior_validation.behavior_ok` 和
+`behavior_validation.policy_ok` 都应为 `true`；每个平台记录应有
 `behavior_evidence.events`、`runtime_fingerprint`、`visible_markers`、截图和
 `policy_events`。行为阶段占用独立的 240 秒超时预算，不挤占配置中的平台抓取超时。
 小红书摘要还应包含 `behavior_evidence.request_pacing_events`，覆盖 search results、note
@@ -214,7 +268,7 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 
 正式结构化任务至少检查：
 
-- 状态文件最终为 `completed`，所有阶段均完成或有明确允许的 `skipped`；
+- 状态文件最终为 `completed`，且真实正式入库运行的五个阶段全部为 `completed`；
 - `formal_validation.new_target_met=true`；
 - `behavior_validation.ok=true`，且行为与策略平台列表覆盖本轮全部结构化平台；
 - 每个平台 `behavior_validation.platforms.<platform>.target_url_ok=true`，证据 URL 对应本轮关键词；
@@ -222,11 +276,11 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 - `valid_new_count` 和 `inserted_rows` 都达到 `target_new_posts`；
 - `valid_existing_count` / `updated_rows` 单独报告且不计入新增目标；
 - `import_result.processed_rows`、`inserted_rows`、`updated_rows` 分别存在；
+- 命令未使用 `--no-import`，`persistence_verified` 没有以 `skipped` 代替真实入库；
 - SQLite 中作者粉丝量、发布时间和图片关系符合平台 profile；
 - 视频只出现在跳过计数中。
 - `formal_validation.pagination_evidence` 有连续页级事件；未达目标时，`source_exhausted`
   必须有空页或 `has_more=false` 的 `adaptive_search_stopped` 事件。只有批次事件而没有停止
   事件的任务按 `runtime_failed` 排查浏览器、登录态、超时或请求异常。
 
-豆瓣小组搜索发现任务按配置的有效新增和实际插入目标判断；其他固定 URL 页面任务只验证该页
-证据和入库，不得汇报为平台批量目标完成。
+固定 URL 页面任务只验证该页证据和入库，不得汇报为平台批量目标完成。

@@ -15,7 +15,6 @@ if str(SCRIPTS) not in sys.path:
 STAMP_PATTERN = re.compile(r"^\d{8}T\d{12}[+-]\d{4}$")
 STAMP_FUNCTIONS = (
     ("crawl_runner", "utc_stamp"),
-    ("ctf_login_warmup", "utc_stamp"),
     ("ctf_resource_crawl", "utc_stamp"),
     ("login_warmup", "utc_stamp"),
     ("mediacrawler_crawl", "utc_stamp"),
@@ -42,4 +41,3 @@ def test_concurrent_runner_ids_are_unique() -> None:
 
     assert len(stamps) == len(set(stamps))
     assert all(STAMP_PATTERN.fullmatch(stamp) for stamp in stamps)
-

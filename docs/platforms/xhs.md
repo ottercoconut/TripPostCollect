@@ -11,6 +11,7 @@
 - 不把小红书放入 `crawl_runner.py`、`login_warmup.py`、`config/crawl_targets.json` 或
   `info_collection_benchmark.py`。
 - 不直接运行 MediaCrawler 完成正式任务，不复用旧 `browser_data` 或明文 storage state。
+- `xhs_runner.py --no-import` 只用于诊断；即使顶层状态显示 `completed`，也不满足正式完成判据。
 - 必须人工传入 `--account-id`；同一正式轮次不自动选号、换号、解验证、重试或放宽字段。
 - 视频跳过；图文必须保存全部正文图片关系。数据库已有记录只能更新，不计新增目标。
 - 缺少粉丝数值、观测标记或可信来源的候选无效，不能用默认 `0`、昵称字段或旧缓存降级。
@@ -175,7 +176,7 @@ python scripts/xhs_runner.py \
 只在以下条件全部成立时汇报完成：
 
 - 顶层 `run_summary.json` 状态为 `completed`，且账号租约已经释放；
-- 冻结状态的五个阶段全部为 `completed`，或契约明确允许 `skipped`；
+- 冻结状态的五个阶段全部为 `completed`，`persistence_verified` 不得因 `--no-import` 跳过；
 - child summary 中 `behavior_validation.ok=true`；
 - `behavior_validation.platforms.xhs.continuity_ok=true`，且至少覆盖 `search_results`；
 - `formal_validation.behavior_evidence_ok=true`、`policy_evidence_ok=true`；

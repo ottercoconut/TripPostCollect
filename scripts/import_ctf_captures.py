@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import re
 import sqlite3
@@ -196,7 +195,7 @@ def extract_published_at(meta: dict[str, Any]) -> str | None:
 
 
 def extract_visible_text_published_at(site_key: str, visible_text_path: str | None) -> str | None:
-    if site_key not in ("bilibili", "douban_group"):
+    if site_key != "bilibili":
         return None
     text = load_text(visible_text_path, limit=4000)
     for match in VISIBLE_TEXT_DATETIME_RE.finditer(text):
@@ -204,188 +203,6 @@ def extract_visible_text_published_at(site_key: str, visible_text_path: str | No
         if parsed:
             return parsed
     return None
-
-
-DOUBAN_TOPIC_URL_RE = re.compile(r"douban\.com/group/topic/\d+", re.IGNORECASE)
-DOUBAN_PRIVACY_MARKER = "由于用户的设置，无法查看主页内容"
-
-
-def is_douban_topic_url(url: str | None) -> bool:
-    """True if the URL is a douban group topic detail page (not a search/list page)."""
-    return bool(DOUBAN_TOPIC_URL_RE.search(url or ""))
-
-
-SHANDONG_CITY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("济南市", ("济南市", "济南", "泉城")),
-    ("青岛市", ("青岛市", "青岛")),
-    ("淄博市", ("淄博市", "淄博")),
-    ("枣庄市", ("枣庄市", "枣庄")),
-    ("东营市", ("东营市", "东营")),
-    ("烟台市", ("烟台市", "烟台")),
-    ("潍坊市", ("潍坊市", "潍坊")),
-    ("济宁市", ("济宁市", "济宁")),
-    ("泰安市", ("泰安市", "泰安")),
-    ("威海市", ("威海市", "威海")),
-    ("日照市", ("日照市", "日照")),
-    ("临沂市", ("临沂市", "临沂")),
-    ("德州市", ("德州市", "德州")),
-    ("聊城市", ("聊城市", "聊城")),
-    ("滨州市", ("滨州市", "滨州")),
-    ("菏泽市", ("菏泽市", "菏泽")),
-)
-
-
-def city_name_from_keyword(keyword: str) -> str | None:
-    text = str(keyword or "").strip()
-    if not text:
-        return None
-    for city_name, aliases in SHANDONG_CITY_ALIASES:
-        for alias in aliases:
-            if alias in text:
-                return city_name
-    return None
-
-
-def extract_douban_topic_fields(html_path: str | None) -> dict[str, Any]:
-    if not html_path or not Path(html_path).exists():
-        return {}
-    raw = Path(html_path).read_text(encoding="utf-8", errors="replace")
-    fields: dict[str, Any] = {}
-
-    title_match = re.search(r"<h1[^>]*>(.*?)</h1>", raw, re.S)
-    if title_match:
-        title = re.sub(r"<[^>]+>", " ", title_match.group(1))
-        title = re.sub(r"\s+", " ", html.unescape(title)).strip()
-        if title:
-            fields["title"] = title
-
-    author_match = re.search(
-        r'<span class="from">\s*<a\s+href="([^"]*?/people/([^/]+)/[^"]*)"[^>]*>(.*?)</a>',
-        raw,
-        re.S,
-    )
-    if author_match:
-        fields["author_profile_url"] = author_match.group(1)
-        fields["author_platform_id"] = author_match.group(2)
-        nickname = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", author_match.group(3)))).strip()
-        if nickname:
-            fields["author_display_name"] = nickname
-
-    avatar_match = re.search(r'<img\s+class="pil"[^>]*src="([^"]+)"[^>]*alt="([^"]*)"', raw)
-    if avatar_match:
-        fields["author_avatar_url"] = avatar_match.group(1)
-        fields.setdefault("author_display_name", avatar_match.group(2))
-
-    create_time_match = re.search(r'<span class="create-time"[^>]*>([^<]+)</span>', raw)
-    if create_time_match:
-        parsed = parse_datetime_text(create_time_match.group(1).strip())
-        if parsed:
-            fields["published_at"] = parsed
-
-    group_match = re.search(r'<a\s+href="https?://www\.douban\.com/group/\d+/?"[^>]*>(.*?)</a>', raw, re.S)
-    if group_match:
-        group = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", group_match.group(1)))).strip()
-        if group and len(group) < 40:
-            fields["group_name"] = group
-
-    content_match = re.search(r'<div id="link-report"[^>]*>(.*?)</div>\s*<div class="topic-opts-bar"', raw, re.S)
-    if not content_match:
-        content_match = re.search(r'<div id="link-report"[^>]*>(.*?)</div>\s*</div>', raw, re.S)
-    if content_match:
-        content = re.sub(r"<script.*?</script>", " ", content_match.group(1), flags=re.S)
-        content = re.sub(r"<style.*?</style>", " ", content, flags=re.S)
-        content = re.sub(r"<[^>]+>", " ", content)
-        content = re.sub(r"\s+", " ", html.unescape(content)).strip()
-        if content:
-            fields["content_text"] = content
-
-    return fields
-
-
-def extract_douban_followers_enrichment(meta: dict[str, Any], topic_artifact_dir: str) -> dict[str, Any]:
-    enrichment = meta.get("conditional_enrichment") or (meta.get("navigation") or {}).get("enrichment") or {}
-    result: dict[str, Any] = {
-        "status": str(enrichment.get("status") or "not_observed"),
-        "followers_count": None,
-        "followers_observed": False,
-        "followers_source": None,
-        "evidence": {
-            "reason": "conditional_enrichment_not_observed",
-        },
-    }
-    if not enrichment.get("triggered"):
-        result["evidence"] = dict(enrichment.get("evidence") or result["evidence"])
-        return result
-
-    capture_meta_value = str(enrichment.get("capture_meta_path") or "")
-    if not capture_meta_value:
-        result["evidence"] = {"reason": "conditional_enrichment_capture_meta_missing"}
-        return result
-    capture_meta_path = Path(capture_meta_value).expanduser().resolve()
-    topic_dir = Path(topic_artifact_dir).expanduser().resolve()
-    if not capture_meta_path.is_file() or capture_meta_path.parent.parent != topic_dir.parent:
-        result["evidence"] = {"reason": "conditional_enrichment_capture_not_from_same_run"}
-        return result
-    try:
-        profile_meta = load_json(capture_meta_path)
-    except (OSError, json.JSONDecodeError):
-        result["evidence"] = {"reason": "conditional_enrichment_capture_unreadable"}
-        return result
-
-    parent = profile_meta.get("conditional_enrichment_for") or {}
-    if Path(str(parent.get("parent_artifact_dir") or "")).expanduser().resolve() != topic_dir:
-        result["evidence"] = {"reason": "conditional_enrichment_parent_mismatch"}
-        return result
-    if profile_meta.get("capture_role") != "conditional_enrichment" or not profile_meta.get("ok"):
-        result["evidence"] = {"reason": "conditional_enrichment_capture_not_ok"}
-        return result
-
-    observed = profile_meta.get("douban_people_followers") or {}
-    evidence = dict(observed.get("evidence") or {})
-    evidence.update(
-        {
-            "capture_meta_path": str(capture_meta_path),
-            "artifact_dir": str(capture_meta_path.parent),
-            "same_run": True,
-        }
-    )
-    count_value = observed.get("followers_count")
-    followers_count = None if isinstance(count_value, bool) else parse_int(count_value)
-    if (
-        followers_count is not None
-        and followers_count >= 0
-        and observed.get("followers_observed") is True
-        and observed.get("followers_source") == "people_page"
-    ):
-        return {
-            "status": "observed",
-            "followers_count": followers_count,
-            "followers_observed": True,
-            "followers_source": "people_page",
-            "evidence": evidence,
-        }
-
-    if (
-        observed.get("status") == "privacy_restricted"
-        and observed.get("followers_observed") is False
-        and observed.get("followers_source") == "privacy_restricted"
-        and evidence.get("privacy_marker") == DOUBAN_PRIVACY_MARKER
-    ):
-        return {
-            "status": "privacy_restricted",
-            "followers_count": None,
-            "followers_observed": False,
-            "followers_source": "privacy_restricted",
-            "evidence": evidence,
-        }
-
-    return {
-        "status": "not_observed",
-        "followers_count": None,
-        "followers_observed": False,
-        "followers_source": None,
-        "evidence": evidence or {"reason": "conditional_enrichment_followers_not_observed"},
-    }
 
 
 def discover_capture_meta(outputs_root: Path) -> list[Path]:
@@ -446,18 +263,7 @@ def normalize_meta(path: Path) -> dict[str, Any]:
     target_url = str(meta.get("url") or target.get("url") or "")
     visible_text_path = artifact_value(meta, "visible_text")
     published_at = extract_published_at(meta) or extract_visible_text_published_at(site_key, visible_text_path)
-    rendered_html_path = artifact_value(meta, "rendered_html")
-    douban_fields: dict[str, Any] = {}
-    if site_key == "douban_group":
-        douban_fields = extract_douban_topic_fields(rendered_html_path)
-        if not readiness.get("title") and douban_fields.get("title"):
-            meta_title = douban_fields["title"]
-        else:
-            meta_title = readiness.get("title")
-        if not published_at and douban_fields.get("published_at"):
-            published_at = douban_fields["published_at"]
-    else:
-        meta_title = readiness.get("title")
+    meta_title = readiness.get("title")
     row = {
         "capture_kind": kind,
         "site_key": site_key,
@@ -658,40 +464,12 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
     visible_text = load_text(row.get("visible_text_path"))
     title = str(row.get("title") or "").strip()
     content_text = visible_text or title
-    raw_meta = json.loads(row["raw_meta_json"]) if row.get("raw_meta_json") else {}
-    douban_fields: dict[str, Any] = {}
-    douban_followers: dict[str, Any] = {}
-    if site_key == "douban_group":
-        if not is_douban_topic_url(row.get("target_url")):
-            return None
-        douban_fields = extract_douban_topic_fields(row.get("rendered_html_path"))
-        douban_followers = extract_douban_followers_enrichment(raw_meta, str(row["artifact_dir"]))
-        title = str(douban_fields.get("title") or title or "").strip() or None
-        content_text = str(douban_fields.get("content_text") or content_text or "")
     if not row["ok"]:
         return None
-    if site_key != "douban_group" and not row["content_ready"]:
+    if not row["content_ready"]:
         return None
     if not content_text:
         return None
-    if site_key == "douban_group":
-        published_at = douban_fields.get("published_at") or row.get("published_at")
-        author_display_name = douban_fields.get("author_display_name")
-        author_platform_id = douban_fields.get("author_platform_id")
-        author_profile_url = douban_fields.get("author_profile_url")
-        author_avatar_url = douban_fields.get("author_avatar_url")
-        author_description = douban_fields.get("group_name")
-        keyword_value = str(raw_meta.get("keyword") or "")
-        city_value = city_name_from_keyword(keyword_value) if keyword_value else None
-    else:
-        published_at = row.get("published_at")
-        author_display_name = None
-        author_platform_id = None
-        author_profile_url = None
-        author_avatar_url = None
-        author_description = None
-        keyword_value = None
-        city_value = None
     metrics = {
         "capture_kind": row.get("capture_kind"),
         "body_text_length": row.get("body_text_length"),
@@ -701,27 +479,10 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
         "flag_count": row.get("flag_count"),
         "saved_images": row.get("saved_images"),
     }
-    if site_key == "douban_group":
-        metrics.update(
-            {
-                "followers_observed": bool(douban_followers.get("followers_observed")),
-                "followers_source": douban_followers.get("followers_source"),
-                "followers_evidence": douban_followers.get("evidence") or {},
-            }
-        )
     author = {
         "source": "ctf_capture",
         "follower_count_available": False,
     }
-    if site_key == "douban_group":
-        author.update(
-            {
-                "follower_count_available": bool(douban_followers.get("followers_observed")),
-                "followers_observed": bool(douban_followers.get("followers_observed")),
-                "followers_source": douban_followers.get("followers_source"),
-                "followers_evidence": douban_followers.get("evidence") or {},
-            }
-        )
     return {
         "platform_key": site_key,
         "source_capture_id": capture_id,
@@ -730,21 +491,21 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
         "source_url": row["target_url"],
         "canonical_url": row.get("final_url") or row["target_url"],
         "title": title or None,
-        "author_display_name": author_display_name,
-        "author_platform_id": author_platform_id,
-        "author_profile_url": author_profile_url,
-        "author_avatar_url": author_avatar_url,
-        "author_description": author_description,
-        "author_followers_count": douban_followers.get("followers_count"),
+        "author_display_name": None,
+        "author_platform_id": None,
+        "author_profile_url": None,
+        "author_avatar_url": None,
+        "author_description": None,
+        "author_followers_count": None,
         "author_following_count": None,
         "author_posts_count": None,
         "author_platform_level": None,
         "author_verified": None,
         "author_verified_text": None,
-        "published_at": published_at,
+        "published_at": row.get("published_at"),
         "captured_at": row["captured_at"],
-        "city_name": city_value,
-        "keyword": keyword_value,
+        "city_name": None,
+        "keyword": None,
         "content_text": content_text,
         "content_length": len(content_text),
         "post_likes_count": None,

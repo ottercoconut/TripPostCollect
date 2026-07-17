@@ -14,7 +14,7 @@ from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Page, Request, Response, TimeoutError as PlaywrightTimeoutError
 
@@ -366,111 +366,6 @@ def is_image_response(response: Response) -> bool:
     return ctype.startswith("image/") or response.request.resource_type == "image"
 
 
-PERIPHERAL_IMAGE_URL_RE = re.compile(r"doubanio\.com/f/", re.IGNORECASE)
-DOUBAN_TOPIC_URL_RE = re.compile(r"^/group/topic/\d+/?$", re.IGNORECASE)
-DOUBAN_PEOPLE_URL_RE = re.compile(r"^/people/[^/]+/?$", re.IGNORECASE)
-DOUBAN_FOLLOWERS_LINK_RE = re.compile(
-    r'<a\b[^>]*href=["\'][^"\']*/rev_contacts(?:[/?#][^"\']*)?["\'][^>]*>(.*?)</a>',
-    re.IGNORECASE | re.DOTALL,
-)
-DOUBAN_PRIVACY_MARKER = "由于用户的设置，无法查看主页内容"
-
-
-def is_peripheral_image_url(url: str) -> bool:
-    """True for known non-content decorative images (e.g. douban CSS assets)."""
-    return bool(PERIPHERAL_IMAGE_URL_RE.search(url or ""))
-
-
-def is_douban_topic_url(url: str) -> bool:
-    parsed = urlparse(url or "")
-    return bool(parsed.hostname and parsed.hostname.endswith("douban.com") and DOUBAN_TOPIC_URL_RE.fullmatch(parsed.path))
-
-
-def is_douban_people_url(url: str) -> bool:
-    parsed = urlparse(url or "")
-    return bool(parsed.hostname and parsed.hostname.endswith("douban.com") and DOUBAN_PEOPLE_URL_RE.fullmatch(parsed.path))
-
-
-def extract_douban_topic_author_profile_url(rendered_html: str, topic_url: str) -> str | None:
-    from_match = re.search(
-        r'<span\b[^>]*class=["\'][^"\']*\bfrom\b[^"\']*["\'][^>]*>(.*?)</span>',
-        rendered_html or "",
-        re.IGNORECASE | re.DOTALL,
-    )
-    if not from_match:
-        return None
-    link_match = re.search(
-        r'<a\b[^>]*href=["\']([^"\']*/people/[^"\']+)["\']',
-        from_match.group(1),
-        re.IGNORECASE | re.DOTALL,
-    )
-    if not link_match:
-        return None
-    profile_url = urljoin(topic_url, link_match.group(1).strip())
-    parsed = urlparse(profile_url)
-    if not is_douban_people_url(profile_url):
-        return None
-    return f"{parsed.scheme or 'https'}://{parsed.netloc}{parsed.path.rstrip('/')}/"
-
-
-def parse_douban_follower_count(text: str) -> int | None:
-    normalized = re.sub(r"\s+", "", text or "").replace(",", "")
-    match = re.search(r"(?:被)?(?P<number>\d+(?:\.\d+)?)(?P<unit>万)?人关注", normalized)
-    if not match:
-        return None
-    number = float(match.group("number"))
-    value = number * 10_000 if match.group("unit") else number
-    return int(value)
-
-
-def extract_douban_people_followers(
-    rendered_html: str,
-    visible_text: str,
-    *,
-    profile_url: str,
-) -> dict[str, Any]:
-    link_match = DOUBAN_FOLLOWERS_LINK_RE.search(rendered_html or "")
-    if link_match:
-        raw_text = re.sub(r"<[^>]+>", " ", link_match.group(1))
-        raw_text = re.sub(r"\s+", " ", raw_text).strip()
-        followers_count = parse_douban_follower_count(raw_text)
-        if followers_count is not None:
-            return {
-                "status": "observed",
-                "followers_count": followers_count,
-                "followers_observed": True,
-                "followers_source": "people_page",
-                "evidence": {
-                    "profile_url": profile_url,
-                    "selector": 'a[href*="/rev_contacts"]',
-                    "raw_text": raw_text,
-                },
-            }
-
-    if DOUBAN_PRIVACY_MARKER in (visible_text or ""):
-        return {
-            "status": "privacy_restricted",
-            "followers_count": None,
-            "followers_observed": False,
-            "followers_source": "privacy_restricted",
-            "evidence": {
-                "profile_url": profile_url,
-                "privacy_marker": DOUBAN_PRIVACY_MARKER,
-            },
-        }
-
-    return {
-        "status": "not_observed",
-        "followers_count": None,
-        "followers_observed": False,
-        "followers_source": None,
-        "evidence": {
-            "profile_url": profile_url,
-            "reason": "rev_contacts_followers_not_found",
-        },
-    }
-
-
 def is_video_url(url: str) -> bool:
     return bool(VIDEO_URL_RE.search(url or ""))
 
@@ -744,8 +639,6 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
                     )
                 return
             if is_image_response(response):
-                if is_peripheral_image_url(response.url):
-                    return
                 record: dict[str, Any] = {
                     "url": response.url,
                     "status": response.status,
@@ -889,123 +782,12 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
             "screenshot": str(screenshot_path),
         },
     }
-    if site_key == "douban_group" and is_douban_people_url(url):
-        followers_evidence = extract_douban_people_followers(
-            rendered_html,
-            visible_text,
-            profile_url=url,
-        )
-        followers_evidence["artifact_dir"] = str(target_dir)
-        followers_evidence["capture_meta_path"] = str(target_dir / "capture_meta.json")
-        followers_evidence["artifacts"] = {
-            "rendered_html": str(target_dir / "rendered.html"),
-            "visible_text": str(target_dir / "visible_text.txt"),
-            "screenshot": str(screenshot_path),
-        }
-        summary["douban_people_followers"] = followers_evidence
     (target_dir / "rendered.html").write_text(rendered_html, encoding="utf-8")
     (target_dir / "visible_text.txt").write_text(visible_text, encoding="utf-8")
     (target_dir / "images.json").write_text(json.dumps(image_records, ensure_ascii=False, indent=2), encoding="utf-8")
     (target_dir / "failed_images.json").write_text(json.dumps(failed_image_records, ensure_ascii=False, indent=2), encoding="utf-8")
     (target_dir / "capture_meta.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
-
-
-def write_capture_meta(summary: dict[str, Any]) -> None:
-    artifact_dir = Path(str(summary["artifact_dir"]))
-    (artifact_dir / "capture_meta.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-async def run_douban_conditional_enrichment(
-    playwright,
-    target: dict[str, Any],
-    primary: dict[str, Any],
-    batch_dir: Path,
-    args: argparse.Namespace,
-) -> dict[str, Any] | None:
-    if str(target.get("site") or "") != "douban_group" or not is_douban_topic_url(str(target.get("url") or "")):
-        return None
-
-    existing = primary.get("conditional_enrichment") or (primary.get("navigation") or {}).get("enrichment") or {}
-    if existing.get("followers_observed") is True and existing.get("followers_count") is not None:
-        return None
-
-    rendered_html_path = Path(str((primary.get("artifacts") or {}).get("rendered_html") or ""))
-    rendered_html = (
-        rendered_html_path.read_text(encoding="utf-8", errors="replace")
-        if rendered_html_path.is_file()
-        else ""
-    )
-    profile_url = extract_douban_topic_author_profile_url(rendered_html, str(target["url"]))
-    enrichment: dict[str, Any] = {
-        "kind": "douban_author_followers",
-        "triggered": False,
-        "status": "not_applicable",
-        "followers_count": None,
-        "followers_observed": False,
-        "followers_source": None,
-        "author_profile_url": profile_url,
-        "evidence": {},
-    }
-    if not primary.get("ok"):
-        enrichment["status"] = "primary_capture_failed"
-        enrichment["evidence"] = {"reason": "primary_capture_not_ok"}
-    elif not profile_url:
-        enrichment["status"] = "not_observed"
-        enrichment["evidence"] = {"reason": "visible_author_people_url_not_found"}
-    else:
-        enrichment["triggered"] = True
-        enrichment_target = {
-            **target,
-            "url": profile_url,
-            "explicit_url": True,
-            "capture_role": "conditional_enrichment",
-            "parent_url": str(target["url"]),
-        }
-        profile_capture = await crawl_one(playwright, enrichment_target, batch_dir, args)
-        followers = dict(profile_capture.get("douban_people_followers") or {})
-        if profile_capture.get("ok"):
-            enrichment.update(followers)
-        else:
-            enrichment.update(
-                {
-                    "status": "capture_failed",
-                    "followers_count": None,
-                    "followers_observed": False,
-                    "followers_source": None,
-                    "evidence": {
-                        "reason": str(profile_capture.get("nav_error") or "people_page_capture_failed"),
-                    },
-                }
-            )
-        enrichment.update(
-            {
-                "kind": "douban_author_followers",
-                "triggered": True,
-                "author_profile_url": profile_url,
-                "profile_capture_ok": bool(profile_capture.get("ok")),
-                "capture_meta_path": str(Path(str(profile_capture["artifact_dir"])) / "capture_meta.json"),
-                "artifact_dir": str(profile_capture["artifact_dir"]),
-            }
-        )
-        profile_capture["conditional_enrichment_for"] = {
-            "parent_url": str(target["url"]),
-            "parent_artifact_dir": str(primary["artifact_dir"]),
-        }
-        write_capture_meta(profile_capture)
-
-        primary["conditional_enrichment"] = enrichment
-        primary.setdefault("navigation", {})["enrichment"] = enrichment
-        write_capture_meta(primary)
-        return profile_capture
-
-    primary["conditional_enrichment"] = enrichment
-    primary.setdefault("navigation", {})["enrichment"] = enrichment
-    write_capture_meta(primary)
-    return None
 
 
 def aggregate(records: list[dict[str, Any]], batch_dir: Path) -> dict[str, Any]:
@@ -1045,7 +827,6 @@ async def main_async() -> int:
     from playwright.async_api import async_playwright
 
     records: list[dict[str, Any]] = []
-    conditional_enrichments: list[dict[str, Any]] = []
     engines = {target_engine(target) for target in targets}
     async with AsyncExitStack() as stack:
         drivers = {"playwright": await stack.enter_async_context(async_playwright())}
@@ -1058,24 +839,9 @@ async def main_async() -> int:
             driver = drivers[target_engine(target)]
             primary = await crawl_one(driver, target, batch_dir, args)
             records.append(primary)
-            enrichment_capture = await run_douban_conditional_enrichment(
-                driver,
-                target,
-                primary,
-                batch_dir,
-                args,
-            )
-            if enrichment_capture is not None:
-                conditional_enrichments.append(enrichment_capture)
             await asyncio.sleep(varied_wait_seconds(2.0, ratio=0.8, floor_seconds=0.5, ceiling_seconds=5.0))
 
     summary = aggregate(records, batch_dir)
-    summary["conditional_enrichments"] = conditional_enrichments
-    summary["conditional_enrichment_count"] = len(conditional_enrichments)
-    summary["conditional_enrichment_failed_count"] = sum(
-        1 for record in conditional_enrichments if not record.get("ok")
-    )
-    summary["failed_count"] += summary["conditional_enrichment_failed_count"]
     summary_path = batch_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))

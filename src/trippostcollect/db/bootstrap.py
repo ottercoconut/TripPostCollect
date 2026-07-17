@@ -22,7 +22,7 @@ from trippostcollect.core.paths import (
 from trippostcollect.platforms.registry import SITES
 
 
-CURRENT_JOB_KINDS = {"mediacrawler_search", "ctf_resource_crawl", "douban_group_search"}
+CURRENT_JOB_KINDS = {"mediacrawler_search", "ctf_resource_crawl"}
 JOB_KIND_CHECK_RE = re.compile(r"CHECK\s*\(\s*job_kind\s+IN\s*\(([^)]*)\)", re.IGNORECASE | re.DOTALL)
 CRAWL_ATTEMPT_COLUMNS = (
     "id",
@@ -221,7 +221,7 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
                     last_attempt_id, last_status, last_failure_type, params_json,
                     behavior_profile_json, created_at, updated_at
                 FROM crawl_jobs_old
-                WHERE job_kind IN ('mediacrawler_search', 'ctf_resource_crawl', 'douban_group_search')
+                WHERE job_kind IN ('mediacrawler_search', 'ctf_resource_crawl')
                 """
             )
             if has_attempts:
@@ -242,10 +242,6 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
         (6, "crawl_scheduler"),
-    )
-    conn.execute(
-        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
-        (11, "douban_group_search_job_kind"),
     )
 
 

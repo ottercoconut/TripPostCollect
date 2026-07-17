@@ -11,8 +11,12 @@
 
 - `mediacrawler_crawl.py`：调度器调用的结构化执行器，也可用于 `--no-import` 诊断。
 - `info_collection_benchmark.py`：通用平台性能和容量评估，不代表正式轮次完成，也不接受小红书。
-- `ctf_resource_crawl.py`：固定 URL 页面证据执行器，由调度器调用。
-- `douban_group_crawl.py`：豆瓣小组搜索发现与话题页面证据执行器，只由调度器正式调用。
+- `ctf_resource_crawl.py`：固定 URL 页面证据执行器。当前正式配置没有此类任务，直接运行只用于
+  开发或诊断验证；以后若配置 `job_kind=ctf_resource_crawl`，正式执行必须由调度器调用。
+
+任何入口使用 `--no-import` 都是诊断运行。即使摘要或冻结状态因执行与产物校验通过而显示
+`completed`，没有实际 SQLite 新增就不满足正式完成契约；不得用
+`import_new_target_met=true`、退出码或状态文件替代 `import_result.inserted_rows` 校验。
 
 ## 行为与策略门禁
 
@@ -131,15 +135,18 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 - `candidate_hard_limit_reached`：实际候选达到硬上限但目标未达成。
 - `source_exhausted`：平台明确返回空页、空游标或 `has_more=false`，且状态文件存在对应
   `adaptive_search_stopped` 证据。
-- `stagnated`：连续配置批次没有新增满足正式字段 profile 且数据库中不存在的唯一记录。
-  新的无效候选、重复候选和数据库已有记录都不能重置停滞计数；批次事件仍分别记录新候选
-  ID 数和有效新增数，供定位分页进展与字段失败。
+- `stagnated`：微博、抖音、知乎和小红书按连续配置批次没有新增满足正式字段 profile 且
+  数据库中不存在的唯一记录累计。新的无效候选、重复候选和数据库已有记录都不能重置这些
+  平台的停滞计数；批次事件仍分别记录新候选 ID 数和有效新增数，供定位分页进展与字段失败。
+  B站当前自有 article 实现是明确例外：它按页面是否出现成功归一化且本轮未见的 article ID
+  累计停滞；这类新 ID 即使后续正式字段校验无效或数据库已有，也会重置停滞计数。该例外不
+  放宽完成标准，仍只有有效新增达到目标才算完成；判断 B站是否值得扩容时必须同时读取新 ID
+  数和有效新增数。
 - `login_required` / `captcha_detected`：登录或验证阻断。
 - `runtime_failed`：浏览器或本地运行环境失败。
 
-除 `target_new_met` 外，其余状态都不能汇报为正式结构化轮次完成。豆瓣小组批量任务也必须
-同时达到 `valid_new_count >= target_new_posts` 和实际 `inserted_rows >= target_new_posts`；
-固定 URL 页面任务的成功仍只代表该页面证据完成，不代表平台批量目标完成。
+除 `target_new_met` 外，其余状态都不能汇报为正式结构化轮次完成。固定 URL 页面任务的成功
+仍只代表该页面证据完成，不代表平台批量目标完成。
 
 每个分页批次必须记录平台页码、请求游标或 search ID（平台提供时）、下一游标、原始
 返回条数和 `has_more`（平台提供时）。仅有一条或多条 `adaptive_batch_completed`、但没有
@@ -149,11 +156,23 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 
 ## 断点续跑
 
-正式任务在接近目标时因字段差异、运行异常或单关键词耗尽而未入库，可以通过调度器的
-`--resume-summary` 继续。续跑必须冻结上一轮摘要和 JSONL，将上一轮正式有效新增 ID 注入
-底层去重集合，并只抓剩余新增目标和候选预算；可用 `--start-page` 继续同一关键词后续页，
-或用 `--recovery-keyword` 切换到能归一为同一城市的补充关键词。最终校验必须同时读取旧、
-新两轮产物，达到完整 `target_new_posts` 后一次性入库；不得把未达标的部分产物单独导入。
+当前 `--resume-summary` 只支持微博、抖音和知乎这三个由底层 MediaCrawler 分页执行的
+`mediacrawler_search` 任务。它们在接近目标时因字段差异、运行异常或单关键词耗尽而未入库，
+可以通过调度器继续：续跑必须冻结上一轮摘要和 JSONL，将上一轮通过正式校验的新增及已有记录
+ID 注入底层去重集合，并只抓剩余新增目标和候选预算；可用 `--start-page` 继续同一关键词后续页，
+或用 `--recovery-keyword` 切换到能归一为同一城市的补充关键词。最终校验必须同时读取旧、新两轮
+产物，达到完整 `target_new_posts` 后一次性入库；不得把未达标的部分产物单独导入。
 
-该断点续跑只适用于通用调度链路。小红书独立 runner 当前不接受 `--resume-summary`；
-失败后结束该轮并等待人工登录、验证复核或切换下一轮账号，不能把账号轮换当作同一正式轮次续跑。
+B站 article 虽由通用调度器调用 `mediacrawler_crawl.py`，但使用项目自有 article 搜索实现，
+不支持冻结断点续跑。B站新完整轮次的 dry-run 和正式命令均不得传入 `--resume-summary`、
+`--recovery-keyword` 或 `--start-page`，由执行器默认从第 1 页开始。未达标时必须结束当前轮；
+只有停止证据为 `candidate_hard_limit_reached` 且没有来源耗尽证据时，才调整下一轮配置中的候选
+预算。新轮从零累计候选、新增和已有记录，不拼接或单独导入旧轮部分产物。调度器当前不会在
+dry-run 阶段提前拒绝 B站的 `--resume-summary`，所以带恢复参数的 `planned` 状态不代表能力
+验证通过，真实执行仍会拒绝。
+
+恢复 dry-run 只能用于微博、抖音和知乎。冻结状态 `plan.command` 中，请求的
+`--resume-summary` 和 `--start-page` 必须原样存在；`--recovery-keyword` 的值必须作为 child
+命令的 `--keyword` 值存在。任一项不符时不得执行正式续跑。小红书独立 runner 当前也不接受
+`--resume-summary`；失败后结束该轮，并严格按小红书失败分流决定同账号登录复验、调整下一轮
+候选预算或关键词，或由操作人手工选择下一轮账号。任何换号都不得解释为同一正式轮次续跑。

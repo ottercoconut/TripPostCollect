@@ -541,7 +541,7 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
   "data": {
     "record": {
       "id": 1,
-      "platform_key": "xiaohongshu",
+      "platform_key": "xhs",
       "platform_name": "小红书",
       "title": "示例标题",
       "city_name": "济南市",
@@ -670,7 +670,6 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| `GET` | `/api/records/{id}/capture` | 查看记录关联证据 |
 | `GET` | `/api/captures` | 独立分页查看页面级证据 |
 | `GET` | `/api/captures/{id}` | 证据详情 |
 | `GET` | `/api/captures/{id}/images` | 证据图片 |
@@ -682,7 +681,7 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
 `ctf_captures` 默认只读，并且不作为首屏主对象。允许的操作只有：
 
 - 查看。
-- 从记录详情进入关联证据。
+- 从记录详情的 `/api/records/{id}/context` 响应进入关联证据。
 - 定位需要通过终端重导入的 `capture_meta.json`。
 
 重新导入指定 `capture_meta.json`、证据注释和证据状态标记属于后续终端维护能力，不通过首版前端提供。
@@ -896,7 +895,7 @@ UI：
 
 这些接口只按数据库图片 ID 取图，不提供 `/api/images/by-url` 这类任意 URL 代理。
 
-远程图片预览由后端按数据库中的图片 URL 受限拉取：只允许 `http/https`、拒绝 localhost、私网、保留地址和本地地址，重定向后的 URL 也必须重新校验；请求会使用浏览器 User-Agent 和平台 Referer。这样可以避免浏览器从管理端域名直接访问微博、豆瓣等第三方图片域时被防盗链拦截。远程响应必须是 `image/*`，否则按图片拉取失败处理。
+远程图片预览由后端按数据库中的图片 URL 受限拉取：只允许 `http/https`、拒绝 localhost、私网、保留地址和本地地址，重定向后的 URL 也必须重新校验；请求会使用浏览器 User-Agent 和平台 Referer。这样可以避免浏览器从管理端域名直接访问微博等第三方图片域时被防盗链拦截。远程响应必须是 `image/*`，否则按图片拉取失败处理。
 
 图片组件状态：
 
@@ -1108,7 +1107,7 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、只读边界、路
 
 ## 当前实现状态
 
-截至 2026-07-09，首版只读管理端已完成实现。
+截至 2026-07-17，首版只读管理端已完成实现。
 
 已实现：
 
@@ -1144,7 +1143,8 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、只读边界、路
 - 可以从记录详情查看截图、HTML、可见文本路径和 JSON 原始数据。
 - 可以只读查看 `crawl_targets.json`、`crawl_jobs` 和运行报告。
 - 前端不提供 bootstrap、sync、dry-run 或真实抓取按钮。
-- 默认库中 `source_platforms=8`、`crawl_jobs=8` 的状态不会被管理台破坏。
+- 管理台只读访问前后，默认库的 `source_platforms`、`crawl_jobs` 及内容表行数保持不变；
+  平台和任务集合以当前数据库与配置为准，不把动态数量写死为验收条件。
 - `ctf_captures` 默认只读。
 - 后端测试覆盖只读边界和实时读取。
 

@@ -16,12 +16,6 @@ config/crawl_targets.json
           -> ctf_captures / ctf_capture_images
           -> scripts/import_ctf_captures.py
           -> web_posts / web_post_images
-      -> scripts/douban_group_crawl.py
-          -> 搜索页话题发现 / 候选累计 / 页面证据
-          -> scripts/ctf_resource_crawl.py
-          -> scripts/import_ctf_captures.py
-          -> web_posts / web_post_images
-
 config/xhs_pool.json + config/xhs_targets.json
   -> scripts/xhs_runner.py
       -> explicit --account-id
@@ -86,25 +80,19 @@ MediaCrawler 的自适应分页会向同一状态文件追加批次事件，包�
 
 ## 页面证据平台
 
-豆瓣小组正式任务由 `douban_group_crawl.py` 从配置的搜索页发现唯一话题 URL，按
-`candidate_hard_limit`、`target_new_posts` 和 `max_stagnant_batches` 累计候选；单页证据仍由
-`ctf_resource_crawl.py` 生成。搜索页和作者页只进入 `ctf_captures`，符合正式字段条件的话题页
-归一化到 `web_posts`。只有有效新增和实际插入数同时达到目标才完成。详细限制见
+固定 URL 页面证据由 `ctf_resource_crawl.py` 生成并写入证据层；内容就绪的页面可由
+`import_ctf_captures.py` 归一化到 `web_posts`。页面错误、搜索页、中间页和验证码页只保留证据，
+单页成功不代表平台批量目标完成。当前 `config/crawl_targets.json` 没有
+`ctf_resource_crawl` 正式任务，因此直接运行页面执行器只属于开发或诊断验证；以后若新增固定
+URL 正式任务，必须在该配置中声明并从 `crawl_runner.py` 进入。详细限制见
 [页面证据平台](platforms/page-evidence.md)。
-
-豆瓣小组话题页在同一正式轮次执行条件补全：本轮话题 `rendered.html` 中存在可见作者
-`/people/{id}/` 链接且尚无粉丝证据时，执行器使用同一持久 profile 和页面证据链抓取该 people
-页。people capture 独立保存 HTML、可见文本、截图和 `capture_meta.json`；话题 capture 的
-`conditional_enrichment` / `navigation.enrichment` 引用该同轮产物，并保存
-`followers_count`、`followers_observed`、`followers_source` 和提取证据。导入器只接受同一批次、
-父 capture 匹配且成功的 people capture，不从历史 capture 补签。只有当前 people 页可见明确
-隐私限制文案时才记录 `privacy_restricted`；其他缺失保持 NULL，不默认填 0。
 
 ## 辅助入口
 
-- `login_warmup.py`：验证并按需刷新通用平台登录态，不包含小红书。
+- `login_warmup.py`：验证并按需刷新 B站、微博、抖音和知乎登录态；不包含小红书，也不覆盖
+  页面证据执行器的独立 profile。
 - `xhs_accounts.py`、`xhs_login.py`：小红书账号登记、人工状态管理、隔离登录和持久状态复验。
-- `mediacrawler_login_warmup.py`、`ctf_login_warmup.py`：统一入口调用的底层平台实现。
+- `mediacrawler_login_warmup.py`：统一入口调用的底层平台实现。
 - `info_collection_benchmark.py`：通用平台性能和容量评估。
 
 辅助入口不创建完整正式阶段，不能替代对应平台的正式 runner。

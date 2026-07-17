@@ -22,7 +22,6 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 通用状态写入 `data/runtime/crawl_execution_states/`；小红书状态写入 `data/runtime/xhs/execution_states/`。进入下一阶段前重新读取状态并确认上一阶段完成，不得手工解冻或补签。
 - 正式结构化抓取以 `candidate_hard_limit`、`target_new_posts` 和 `required_fields_profile` 为准；数据库已有记录只算更新，未达到 `valid_new_count` 新增目标不得汇报完成。
 - B站、微博、小红书、抖音、知乎粉丝量为必需字段；数值、来源和 `followers_observed=true` 必须同时存在，平台不提供时只能由配置声明 `ignored`。
-- 豆瓣小组正式任务通过搜索页发现话题并按有效新增/实际插入目标完成；显式单 URL 页面成功仍不代表平台级批量完成。
 - 路径定义集中在 `trippostcollect.core.paths`；新增代码不要硬编码 `outputs/`、`data/runtime/`、浏览器配置目录等目录。
 - 文档和总结默认使用中文。
 
@@ -84,7 +83,10 @@ python scripts/crawl_runner.py \
   不得把小红书放入通用 runner、warmup、benchmark 或中途自动换号。
 - 登录、Chrome、阻断恢复：读 `docs/operations-runbook.md`；通用入口是 `scripts/login_warmup.py`，小红书不得使用该入口。
 - MediaCrawler 平台实现：读 `docs/platforms/<platform>.md`、`scripts/mediacrawler_crawl.py`，必要时只读对应第三方精确文件。
-- 页面证据抓取和导入：读 `docs/platforms/page-evidence.md`、`docs/data-persistence.md`、`scripts/ctf_resource_crawl.py`、`scripts/import_ctf_captures.py`；登录态统一由 `scripts/login_warmup.py` 处理。
+- 页面证据抓取和导入：读 `docs/platforms/page-evidence.md`、`docs/data-persistence.md`、
+  `scripts/ctf_resource_crawl.py`、`scripts/import_ctf_captures.py`。当前正式配置没有页面证据任务；
+  直接运行只用于开发或诊断，且其独立 profile 不由 `scripts/login_warmup.py` 验证。以后若新增
+  固定 URL 正式任务，必须配置后从 `scripts/crawl_runner.py` 进入。
 - 数据库结构、入库、去重：读 `docs/data-persistence.md`、`db/*.sql`、`trippostcollect.db.bootstrap` 和相关导入脚本。
 - 字段能力或平台分工：读 `docs/platform-field-coverage.md` 和对应 `docs/platforms/*.md`。
 

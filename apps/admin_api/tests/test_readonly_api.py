@@ -272,7 +272,7 @@ class ReadonlyAdminApiTest(unittest.TestCase):
         platform_keys = {
             item["platform_key"] for item in self.client.get("/api/platforms").json()["data"]
         }
-        self.assertEqual(platform_keys, {"bilibili", "douban_group", "douyin", "weibo", "xhs", "zhihu"})
+        self.assertEqual(platform_keys, {"bilibili", "douyin", "weibo", "xhs", "zhihu"})
         self.assertEqual(len(self.client.get("/api/scheduler/config").json()["data"]["jobs"]), configured_job_count)
         self.assertEqual(len(self.client.get("/api/scheduler/jobs").json()["data"]), configured_job_count)
 

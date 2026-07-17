@@ -21,7 +21,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 
 ## 正式入口
 
-通用平台（B站、微博、抖音、知乎及页面证据平台）在正式抓取前统一验证并按需刷新登录态：
+B站、微博、抖音和知乎的正式结构化抓取，在执行前统一验证并按需刷新登录态：
 
 ```bash
 source .venv/bin/activate
@@ -29,7 +29,8 @@ python scripts/login_warmup.py --targets all
 ```
 
 该脚本只处理持久登录态，不抓取内容、不导入数据库。已有登录态有效时直接通过；失效时
-等待人工登录，并在关闭、重开同一 profile 后再次验证。
+等待人工登录，并在关闭、重开同一 profile 后再次验证。`--targets all` 只展开为上述四个平台；
+不包含小红书，也不验证页面证据执行器使用的独立浏览器 profile。
 
 查看任务计划：
 
@@ -55,7 +56,8 @@ python scripts/crawl_runner.py \
 
 小红书不进入上述通用登录和调度链路。先完整读取
 [小红书正式抓取 Workflow](platforms/xhs.md)，再使用独立账号目录、加密 storage state 和
-人工指定账号执行：
+人工指定账号执行。以下命令以新账号为例；已有账号跳过 `enroll`，先用
+`xhs_accounts.py list` 核对状态：
 
 ```bash
 source .venv/bin/activate
@@ -80,11 +82,9 @@ dry-run 通过并经人工确认后，才同时启用 `config/xhs_pool.json` 和
 - `web_posts` 是用户使用的统一内容主表；`ctf_captures` 是证据和调试底座。
 - `published_at` 必须来自平台原始发布时间，保存为 Asia/Shanghai ISO。
 - 结构化长期数据以 SQLite 为准，`outputs/` 是运行产物和摘要。
-- 豆瓣小组正式任务从小组搜索页发现话题 URL，达到配置的有效新增目标后一次性入库；
-  单个显式 URL 仍只代表该页面证据完成。
 
 ## 诊断与开发入口
 
-`mediacrawler_crawl.py --no-import` 和 `info_collection_benchmark.py` 只用于通用平台诊断
-或开发验证。它们不能替代正式调度状态，也不能用于小红书独立账号执行，
-也不能单独作为“平台正式轮次完成”的证据。
+任意 runner 或执行器使用 `--no-import`，以及运行 `info_collection_benchmark.py`，都只属于
+诊断或开发验证。它们不能替代正式入库，也不能作为正式完成证据；小红书仍必须经独立账号
+runner 执行，不能直接交给通用 MediaCrawler 入口。

@@ -23,12 +23,8 @@ def test_selected_targets_supports_all_aliases_and_deduplication() -> None:
         "zhihu",
         "weibo",
         "bilibili",
-        "douban_group",
     ]
-    assert login_warmup.selected_targets(["微博", "wb", "豆瓣", "douban_group"]) == [
-        "weibo",
-        "douban_group",
-    ]
+    assert login_warmup.selected_targets(["微博", "wb"]) == ["weibo"]
 
 
 def test_selected_targets_rejects_unknown_target() -> None:

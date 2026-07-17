@@ -15,7 +15,7 @@ data/trippostcollect.sqlite
 | `db/source_platforms.sql` | `source_platforms` |
 | `db/web_posts.sql` | `web_posts`、`web_post_images` |
 | `db/ctf_captures.sql` | `ctf_captures`、`ctf_capture_images` |
-| `db/crawl_scheduler.sql` | `crawl_jobs`、`crawl_attempts`、`crawl_run_reports`、`profile_health_checks`；任务类型包含通用搜索、页面证据和豆瓣小组搜索批量任务 |
+| `db/crawl_scheduler.sql` | `crawl_jobs`、`crawl_attempts`、`crawl_run_reports`、`profile_health_checks`；任务类型包含通用搜索和页面证据 |
 | `db/xhs_control.sql` | `xhs_accounts`、`xhs_account_events`、`xhs_account_leases`、`xhs_runs` |
 
 `trippostcollect.db.bootstrap` 是统一实现。通用 runner、小红书 runner、MediaCrawler 入库和
@@ -53,8 +53,7 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 | 通用平台正式抓取或落库 | `scripts/crawl_runner.py` | 冻结状态后调用对应执行器并验证持久化 |
 | 小红书正式抓取或落库 | `scripts/xhs_runner.py` | 租赁人工指定账号、冻结状态、调用底层执行器并验证持久化 |
 | 通用 MediaCrawler 字段诊断 | `scripts/mediacrawler_crawl.py --no-import` | 不作为正式入库或完成证据；不接受小红书独立账号链路 |
-| 豆瓣小组正式批量抓取 | `scripts/crawl_runner.py` | 调用 `douban_group_crawl.py` 发现话题并验证新增/插入目标 |
-| 页面执行器开发验证 | `scripts/ctf_resource_crawl.py` | 只验证产物；正式任务仍由调度器进入 |
+| 页面执行器开发验证 | `scripts/ctf_resource_crawl.py` | 只验证产物；当前配置没有页面证据正式任务 |
 | 只刷新调度库 | `scripts/crawl_runner.py --sync-only` | 只同步平台和任务，不抓取内容 |
 
 不要直接调用 `tools/MediaCrawler` 作为根项目命令；根项目必须通过 `scripts/mediacrawler_crawl.py` 封装入口统一处理登录态、视频跳过、输出目录、摘要和 SQLite 导入。
@@ -70,7 +69,8 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 - 页面级错误页、搜索页、中间页和验证码页只保留证据，不生成用户内容记录。
 - `web_posts` 面向用户查询；`ctf_captures` 面向证据和调试。不要让用户内容只停留在 `ctf_captures`。
 - 正式结构化任务必须配置 `candidate_hard_limit`、`target_new_posts` 和字段 profile；只有 `valid_new_count >= target_new_posts` 且实际新增行数达标才算达到本轮目标。
-- 豆瓣小组批量任务必须同时满足有效新增和实际插入目标；其他固定 URL 页面证据任务只代表一个页面。
+- 固定 URL 页面证据任务只代表一个页面。以后若新增正式任务，必须在
+  `config/crawl_targets.json` 声明 `job_kind=ctf_resource_crawl` 并从 `crawl_runner.py` 进入。
 
 ### 标准执行流程
 
@@ -114,11 +114,18 @@ python scripts/import_ctf_captures.py \
 
 ### 成功标准
 
-一次抓取或导入不能只看命令退出码。必须同时满足：
+一次抓取或导入不能只看命令退出码。先按入口判断，不能混用完成语义：
 
-- 有 `summary.json` 或 `run_summary.json`，且平台任务状态不是 failed。
-- 正式入库的 `processed_rows` 等于本轮有效集合大小；诊断 `--no-import` 必须明确标为非正式。
-- 正式结构化任务的冻结状态为 `completed`，且 `formal_validation.new_target_met` 和 `import_new_target_met` 都为 true。
+- 通用正式结构化任务必须有 `summary.json`，runner 任务状态为 `completed`，冻结状态五阶段
+  全部完成，且 `formal_validation.new_target_met=true`、`import_new_target_met=true`。
+- 小红书正式任务必须有顶层 `run_summary.json` 和 child `summary.json`，顶层任务状态为
+  `completed`，冻结状态五阶段全部完成，且 child 的正式校验与实际新增均达到配置目标。
+- 任意入口的 `--no-import` 和直接运行 `ctf_resource_crawl.py` 都是诊断或开发验证。即使退出码
+  为 0、摘要或冻结状态显示 `completed`、产物完整，也不能汇报为正式轮次完成；正式完成必须
+  直接核对 `import_result.inserted_rows`，不能只看 `import_new_target_met`。
+- 以后若配置固定 URL 正式任务，其 runner 状态和冻结阶段必须为 `completed`，页面证据必须成功
+  导入；成功只代表该 URL，不代表平台批量完成。
+- 正式入库的 `processed_rows` 等于本轮有效集合大小。
 - `processed_rows`、`inserted_rows`、`updated_rows` 分别报告；只有 `inserted_rows` 可以兑现 `valid_new_count`，更新行不能计入新增目标。
 - `updated_rows` 是 upsert 命中已有 `web_posts` 的数量：优先按
   `(platform_key, platform_post_id)`，平台 ID 缺失时按 `(platform_key, canonical_url)`；
@@ -223,7 +230,8 @@ PY
 
 ### 失败处理
 
-- 通用平台登录态缺失时运行 `login_warmup.py`；小红书只运行所选账号的 `xhs_login.py`。
+- B站、微博、抖音或知乎登录态缺失时运行 `login_warmup.py`；小红书只运行所选账号的
+  `xhs_login.py`。页面证据使用独立 profile，当前不由统一 warmup 验证。
   不要临时改抓取脚本绕过登录判断或复用其他账号 profile。
 - 字段缺失时，先检查 JSONL 顶层字段、`raw_sample_json` 和平台字段覆盖表；确认来源字段存在但没入库，再改导入映射。
 - 来源字段根本不存在时，先用浏览器或 API 定位字段来源，再补抓取器；不要在入库层造数。
@@ -254,6 +262,7 @@ PY
 | `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎搜索结果 `author.follower_count` 归一后的 `followers_count` |
 | `published_at` | 发帖时间，统一保存为 Asia/Shanghai ISO 字符串，如 `2024-04-06T15:35:00+08:00`。优先取平台原始发布时间字段，如 `create_time`、`publish_time`、`time`、`datePublished`；`captured_at` 只表示本项目抓取时间 |
 | `city_name` | 从检索关键词匹配山东 16 市名称或别名，如 `济南旅游`、`烟台旅游` 分别写入 `济南市`、`烟台市`；不从正文内容反推城市 |
+| `keyword` | 优先保存每条记录的 `source_keyword`；缺失时回退到最终执行摘要的 `keyword`，即本次 child 命令实际使用的检索词。当前微博、抖音和知乎 store 会逐条写入 `source_keyword`，正常恢复产物因此能保留原词和恢复词；旧记录缺少该字段时，回退值不能作为其原始检索词证据 |
 | `post_likes_count` | `liked_count`、知乎 `voteup_count` |
 | `post_favorites_count` | `collected_count` 等收藏字段 |
 | `post_comments_count` | `comment_count`、`comments_count` 等评论字段 |
@@ -263,6 +272,22 @@ PY
 | `raw_sample_json` | MediaCrawler 原始 JSONL 行 |
 
 代码只在导入边界识别不同平台对同类指标的字段名差异，内部持久化结构统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
+
+微博、抖音和知乎使用同城市 `--recovery-keyword` 续跑时，最终摘要会合并旧、新两轮记录，
+正常记录的 `web_posts.keyword` 会逐条保存真实来源，因此同一个最终 `artifact_dir` 可以同时
+出现原关键词和恢复关键词。若旧记录缺少 `source_keyword`，必须结合原摘要和 JSONL 审计，
+不能把回退到最终摘要的值解释成原始检索词。
+
+原关键词和恢复关键词均能解析、且解析结果相同时，各记录的 `city_name` 才会归一到同一城市。
+恢复前及入库后都必须确认两个关键词解析为非空的预期城市；不能只把恢复参数未被执行器拒绝
+当作城市校验通过。原正式任务意图以该轮冻结 execution state 的 `plan.job_params`、
+`plan.command` 和递归 resume 摘要链为准；`crawl_jobs` 当前值只用于核对现行调度配置，不能
+单独证明历史轮次意图，也不能仅用内容行的 `keyword` 反推整轮唯一任务关键词。
+
+本次入库完成后应立即按最终 `artifact_dir` 核对行数与 `import_result.processed_rows`，并按
+`keyword` 分组报告来源分布，同时检查 `raw_sample_json.source_keyword`。`artifact_dir` 会在
+后续 upsert 时更新，不是不可变的历史成员关系；长期审计仍以冻结状态和摘要链为准。不得把
+恢复词记录静默改名或误报为关键词错配。
 
 运行命令：
 
@@ -288,31 +313,17 @@ PY
 
 ## 页面级抓取结果入库
 
-B站 Opus 详情页和豆瓣小组由 `ctf_resource_crawl.py` 保存页面证据，再由 `import_ctf_captures.py` 同步写入两层数据：`ctf_captures` / `ctf_capture_images` 作为证据和调试底座，`web_posts` / `web_post_images` 作为用户使用的统一内容主表。页面级抓取会从 `article:published_time`、JSON-LD、`time[datetime]` 等明确页面元数据中提取 `published_at`，并在抓取元数据中直接保存为 Asia/Shanghai ISO 字符串；B站 Opus/图文页还会从可见文本中的明确日期行提取。没有明确证据时保持为空，不用抓取时间替代。截图属于证据附件，截图失败会记录到 `artifact_errors`，但只要页面内容、文本和图片资源已成功采集，不应把整条内容标成抓取失败。
+B站 Opus 详情页由 `ctf_resource_crawl.py` 保存页面证据，再由 `import_ctf_captures.py` 同步写入两层数据：`ctf_captures` / `ctf_capture_images` 作为证据和调试底座，`web_posts` / `web_post_images` 作为用户使用的统一内容主表。页面级抓取会从 `article:published_time`、JSON-LD、`time[datetime]` 等明确页面元数据中提取 `published_at`，并在抓取元数据中直接保存为 Asia/Shanghai ISO 字符串；B站 Opus/图文页还会从可见文本中的明确日期行提取。没有明确证据时保持为空，不用抓取时间替代。截图属于证据附件，截图失败会记录到 `artifact_errors`，但只要页面内容、文本和图片资源已成功采集，不应把整条内容标成抓取失败。
 
-豆瓣小组正式批量任务先由 `douban_group_crawl.py` 从搜索页发现唯一话题 URL，并在入库前按
-数据库规范 URL 去重和正式字段检查；搜索页、无效话题和 people 页不计有效新增。入库包含平台
-特定条件补全：`extract_douban_topic_fields()` 从话题页 `rendered.html` 提取标题、作者五元组
-（display_name/platform_id/profile_url/avatar_url + group_name 写入 `author_description`）、发帖时间
-（`create-time`）和正文（`link-report`）；`is_douban_topic_url()` 保证只有 `/group/topic/{id}/`
-详情页进 `web_posts`，搜索页和 people 页只留 `ctf_captures` 证据层；`city_name_from_keyword()`
-将正式 job 传入的 keyword 归一为城市。话题页存在可见 people URL 且缺少粉丝证据时，
-`ctf_resource_crawl.py` 在同一轮次调用原页面证据链抓取作者页，并将 people capture 路径、父
-capture、`followers_count`、`followers_observed`、`followers_source` 及原始提取文本写入话题
-`conditional_enrichment`。`import_ctf_captures.py` 重新读取被引用的 people `capture_meta.json`，
-只接受同批次且父 capture 匹配的成功产物；确认 `rev_contacts` 数值后写
-`author_followers_count`，并在 `author_json` / `metrics_json` 保存 `people_page` 来源和 observed
-证据。显式 0 有效；缺失保持 NULL。仅当前 people 页可见「由于用户的设置，无法查看主页内容」
-时标 `privacy_restricted`，不会使用历史 capture 补签。`author_following_count` /
-`author_posts_count` 仍保持 NULL。成功且内容就绪的话题正文来自 `visible_text.txt`，图片来自
-`images.json`。导入摘要同时区分 `inserted_rows` 与 `updated_rows`，runner 只用新增行兑现目标。
-
-显式抓取豆瓣 topic URL 时不能只用 `--urls --site-label douban_group`，否则会按 URL 创建隔离 profile，无法复用 `ctf_login_warmup.py` 写入的 `data/browser_profiles_ctf/douban_group/` 登录态；应同时传 `--configured-site-urls`。调度器的页面级任务会自动用这个方式传 `target_url`。
+当前 `config/crawl_targets.json` 没有页面证据正式任务，以下直接命令只用于开发或诊断验证。
+该执行器使用独立浏览器 profile，`login_warmup.py --targets all` 不验证它。若以后新增固定 URL
+正式任务，应配置 `job_kind=ctf_resource_crawl` 并通过 `crawl_runner.py` 执行和自动导入。
 
 单次抓取：
 
 ```bash
-.venv/bin/python scripts/ctf_resource_crawl.py \
+source .venv/bin/activate
+python scripts/ctf_resource_crawl.py \
   --sites bilibili \
   --headless \
   --max-image-save 3 \
@@ -322,11 +333,12 @@ capture、`followers_count`、`followers_observed`、`followers_source` 及原�
 导入指定产物：
 
 ```bash
-.venv/bin/python scripts/import_ctf_captures.py \
+source .venv/bin/activate
+python scripts/import_ctf_captures.py \
   --capture-meta outputs/ctf_resource_crawls/<批次>/<目标>/capture_meta.json
 ```
 
-调度器正常执行 `ctf_resource_crawl` 或 `douban_group_search` 时会自动导入，除非传入 `--no-import`。
+调度器执行已配置的 `ctf_resource_crawl` 时会自动导入，除非 runner 传入 `--no-import`。
 
 ## 常用校验 SQL
 
@@ -445,7 +457,8 @@ sqlite3 temp/mediacrawler_import_verify.sqlite \
 显式验证调度同步：
 
 ```bash
-.venv/bin/python scripts/crawl_runner.py \
+source .venv/bin/activate
+python scripts/crawl_runner.py \
   --db temp/scheduler_verify.sqlite \
   --sync-only
 ```
@@ -453,7 +466,8 @@ sqlite3 temp/mediacrawler_import_verify.sqlite \
 查看计划命令：
 
 ```bash
-.venv/bin/python scripts/crawl_runner.py \
+source .venv/bin/activate
+python scripts/crawl_runner.py \
   --db temp/scheduler_verify.sqlite \
   --dry-run \
   --max-jobs 5

@@ -12,7 +12,6 @@ from typing import Any
 
 from playwright.async_api import async_playwright
 
-from ctf_login_warmup import LOGIN_CHECKERS, warmup_one as warmup_page_site
 from mediacrawler_login_warmup import (
     ALIASES as MEDIACRAWLER_ALIASES,
     PLATFORMS as MEDIACRAWLER_PLATFORMS,
@@ -22,23 +21,11 @@ from trippostcollect.core.paths import LOGIN_WARMUP_OUTPUT, MEDIACRAWLER_DIR, en
 
 
 TARGETS: dict[str, dict[str, str]] = {
-    **{
-        key: {"kind": "mediacrawler", "label": str(config["label"])}
-        for key, config in MEDIACRAWLER_PLATFORMS.items()
-    },
-    **{
-        key: {"kind": "page", "label": str(config["label"])}
-        for key, config in LOGIN_CHECKERS.items()
-    },
+    key: {"kind": "mediacrawler", "label": str(config["label"])}
+    for key, config in MEDIACRAWLER_PLATFORMS.items()
 }
 
-ALIASES = {
-    **MEDIACRAWLER_ALIASES,
-    "douban": "douban_group",
-    "douban_group": "douban_group",
-    "豆瓣": "douban_group",
-    "豆瓣小组": "douban_group",
-}
+ALIASES = dict(MEDIACRAWLER_ALIASES)
 
 
 def parse_args() -> argparse.Namespace:
@@ -115,10 +102,7 @@ async def run_target(
     config = TARGETS[target]
     child_args = implementation_args(args)
     try:
-        if config["kind"] == "mediacrawler":
-            result = await warmup_mediacrawler(playwright, target, batch_dir, child_args)
-        else:
-            result = await warmup_page_site(playwright, target, batch_dir, child_args)
+        result = await warmup_mediacrawler(playwright, target, batch_dir, child_args)
         normalized = dict(result)
         normalized["target"] = target
         normalized["target_kind"] = config["kind"]
