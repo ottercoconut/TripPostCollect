@@ -17,7 +17,7 @@
       "params": {
         "platform": "bilibili",
         "keyword": "青岛旅游",
-        "candidate_hard_limit": 4000,
+        "candidate_hard_limit": 300,
         "max_stagnant_batches": 3,
         "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
@@ -42,7 +42,7 @@
       "params": {
         "platform": "weibo",
         "keyword": "青岛旅游",
-        "candidate_hard_limit": 450,
+        "candidate_hard_limit": 300,
         "max_stagnant_batches": 3,
         "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
@@ -92,7 +92,7 @@
       "params": {
         "platform": "zhihu",
         "keyword": "青岛旅游",
-        "candidate_hard_limit": 400,
+        "candidate_hard_limit": 200,
         "max_stagnant_batches": 3,
         "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
