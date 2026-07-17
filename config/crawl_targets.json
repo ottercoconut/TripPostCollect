@@ -6,9 +6,9 @@
   },
   "jobs": [
     {
-      "job_key": "mc_bilibili_yantai_article",
+      "job_key": "mc_bilibili_qingdao_article",
       "site_key": "bilibili",
-      "target_url": "https://search.bilibili.com/article?keyword=%E7%83%9F%E5%8F%B0%E6%97%85%E6%B8%B8",
+      "target_url": "https://search.bilibili.com/article?keyword=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",
       "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 50,
@@ -16,7 +16,7 @@
       "max_attempts": 1,
       "params": {
         "platform": "bilibili",
-        "keyword": "烟台旅游",
+        "keyword": "青岛旅游",
         "candidate_hard_limit": 300,
         "max_stagnant_batches": 3,
         "target_new_posts": 50,
@@ -31,9 +31,9 @@
       }
     },
     {
-      "job_key": "mc_weibo_yantai_search",
+      "job_key": "mc_weibo_qingdao_search",
       "site_key": "weibo",
-      "target_url": "https://m.weibo.cn/search?containerid=100103type%3D1%26q%3D%E7%83%9F%E5%8F%B0%E6%97%85%E6%B8%B8",
+      "target_url": "https://m.weibo.cn/search?containerid=100103type%3D1%26q%3D%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",
       "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 20,
@@ -41,7 +41,7 @@
       "max_attempts": 2,
       "params": {
         "platform": "weibo",
-        "keyword": "烟台旅游",
+        "keyword": "青岛旅游",
         "candidate_hard_limit": 300,
         "max_stagnant_batches": 3,
         "target_new_posts": 50,
@@ -56,9 +56,9 @@
       }
     },
     {
-      "job_key": "mc_douyin_yantai_search",
+      "job_key": "mc_douyin_qingdao_search",
       "site_key": "douyin",
-      "target_url": "https://www.douyin.com/search/%E7%83%9F%E5%8F%B0%E6%97%85%E6%B8%B8",
+      "target_url": "https://www.douyin.com/search/%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",
       "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 30,
@@ -66,7 +66,7 @@
       "max_attempts": 2,
       "params": {
         "platform": "douyin",
-        "keyword": "烟台旅游",
+        "keyword": "青岛旅游",
         "candidate_hard_limit": 1000,
         "max_stagnant_batches": 67,
         "target_new_posts": 50,
@@ -81,9 +81,9 @@
       }
     },
     {
-      "job_key": "mc_zhihu_yantai_search",
+      "job_key": "mc_zhihu_qingdao_search",
       "site_key": "zhihu",
-      "target_url": "https://www.zhihu.com/search?q=%E7%83%9F%E5%8F%B0%E6%97%85%E6%B8%B8&type=content",
+      "target_url": "https://www.zhihu.com/search?q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8&type=content",
       "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 60,
@@ -91,7 +91,7 @@
       "max_attempts": 1,
       "params": {
         "platform": "zhihu",
-        "keyword": "烟台旅游",
+        "keyword": "青岛旅游",
         "candidate_hard_limit": 200,
         "max_stagnant_batches": 3,
         "target_new_posts": 50,
@@ -106,16 +106,16 @@
       }
     },
     {
-      "job_key": "douban_group_yantai_search",
+      "job_key": "douban_group_qingdao_search",
       "site_key": "douban_group",
-      "target_url": "https://www.douban.com/group/search?cat=1013&q=%E7%83%9F%E5%8F%B0%E6%97%85%E6%B8%B8",
+      "target_url": "https://www.douban.com/group/search?cat=1013&q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",
       "job_kind": "douban_group_search",
       "enabled": true,
       "priority": 100,
       "schedule_seconds": 172800,
       "max_attempts": 1,
       "params": {
-        "keyword": "烟台旅游",
+        "keyword": "青岛旅游",
         "candidate_hard_limit": 300,
         "target_new_posts": 50,
         "max_stagnant_batches": 3,

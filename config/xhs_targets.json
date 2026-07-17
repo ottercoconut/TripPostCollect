@@ -2,10 +2,10 @@
   "schema_version": 1,
   "targets": [
     {
-      "target_key": "yantai_travel",
+      "target_key": "qingdao_travel",
       "enabled": false,
-      "keyword": "烟台旅游",
-      "target_url": "https://www.xiaohongshu.com/search_result?keyword=%E7%83%9F%E5%8F%B0%E6%97%85%E6%B8%B8",
+      "keyword": "青岛旅游",
+      "target_url": "https://www.xiaohongshu.com/search_result?keyword=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",
       "target_new_posts": 20,
       "candidate_hard_limit": 150,
       "max_stagnant_batches": 3,
