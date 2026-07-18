@@ -29,8 +29,24 @@ python scripts/crawl_runner.py \
 
 dry-run 的预期状态是仅 `plan_frozen=completed`，`command_executed`、
 `artifacts_verified`、`persistence_verified` 和 `task_finalized` 保持 `frozen`；运行摘要中
-任务为 `planned`，入库结果为 `skipped: dry_run`。这是计划验证成功，不是执行失败。只有
-真实运行才要求五个阶段全部 `completed`。
+任务为 `planned`。通用任务记录的入库结果为 `skipped: dry_run`；小红书 dry-run 没有 child
+或 `import_result`，以后四阶段未启动证明没有入库。这是计划验证成功，不是执行失败。只有真实
+运行才要求五个阶段全部 `completed`。
+
+通用 dry-run “不抓取”不等于“不写本地状态”：默认会先把配置同步到 `crawl_jobs`，再写
+`crawl_run_reports`、运行摘要和每任务 execution state。没有 `--job-key` 时，只选择
+`enabled=1`、状态为 `pending/completed/retry_wait` 且 `next_run_at` 已到期的任务，按
+`priority`、`next_run_at`、数据库 ID 排序后取 `--max-jobs`；指定 `--job-key` 时不要求到期，但
+该任务仍必须启用。实际选中集合始终以本轮 dry-run 摘要为准。
+
+dry-run 的 `crawl_run_reports.status=completed` 只表示 runner 成功生成并保存计划报告，不表示
+任何正式任务抓取完成；任务记录仍应为 `planned`、`completed_count=0`，并满足上面的冻结阶段
+语义。需要解释未选中任务时使用只读查询，不猜测调度原因：
+
+```bash
+sqlite3 data/trippostcollect.sqlite \
+  "SELECT job_key, enabled, status, next_run_at, priority FROM crawl_jobs ORDER BY priority, next_run_at, id;"
+```
 
 确认 dry-run 为每个任务生成独立执行状态后，再运行到期任务：
 
@@ -88,14 +104,14 @@ offset 时停止执行，不得用空 cursor 请求深页。
 
 ```bash
 sqlite3 data/trippostcollect.sqlite \
-  "SELECT job_id, platform_key, keyword, resume_page, resume_offset, status, last_stop_reason, updated_at FROM crawl_discovery_checkpoints ORDER BY job_id;"
+  "SELECT job_id, platform_key, keyword, resume_page, resume_offset, resume_cursor, status, last_batch_complete, last_stop_reason, last_run_id, updated_at FROM crawl_discovery_checkpoints ORDER BY job_id;"
 ```
 
 检查小红书账号级记忆：
 
 ```bash
 sqlite3 data/trippostcollect.sqlite \
-  "SELECT target_key, account_id, keyword, resume_page, resume_search_id, status, last_stop_reason, campaign_candidate_count, updated_at FROM xhs_discovery_checkpoints ORDER BY target_key, account_id;"
+  "SELECT target_key, account_id, keyword, resume_page, resume_search_id, status, last_batch_complete, last_stop_reason, last_run_id, campaign_candidate_count, updated_at FROM xhs_discovery_checkpoints ORDER BY target_key, account_id;"
 ```
 
 已处理候选只看计数，不展开 ID 全量：
@@ -130,12 +146,25 @@ checkpoint 记录了非空 `last_summary_path` 但文件丢失时，runner 必�
 只用于报告，不从本次预算扣减。`source_exhausted` 后只做顶部刷新，不再请求已耗尽深页。
 `--no-import` 自动禁用 checkpoint 写入，因此诊断不会污染正式记忆。
 
+耗尽 checkpoint 的生成命令仍会携带保存的 page/offset/cursor，用于冻结并保留原前沿；同时出现
+的 `--discovery-source-exhausted` 优先控制执行阶段，child 只建立顶部刷新 phase，不请求这些深层
+坐标。不要因为命令中仍有坐标就判断它会继续深层抓取。
+
 小红书 dry-run 的 `plan.discovery` 必须与上面的账号级行一致。首次执行应为第 1 页、空
 `resume_search_id`、顶部刷新 0；续跑应包含已保存页码、非空 ID、配置的顶部刷新页数和可选
 `campaign_summary_path`。正式 child 结束后核对顶层 `run_summary.json` 的 `discovery`、child 的
 `pagination_evidence` 和 SQLite `last_run_id`。顶部刷新完成目标时，深层页码与 ID 必须保持不变。
 同时核对顶层 `discovery.seen_candidate_count` 与本轮停止事件的候选 ID 数；不要在报告中展开
 全部 ID。
+
+字段映射固定为：SQLite `resume_search_id` → dry-run `plan.discovery.resume_search_id` → child
+CLI `--start-cursor` →分页事件 `source_cursor/resume_cursor`。这些名称描述同一个小红书 client
+search ID，不是四套独立游标。
+
+小红书在一页中途以 `target_new_met` 达标并成功入库时，checkpoint 不删除：若来源仍可继续，
+`status` 保持 `active`，`last_stop_reason=target_new_met`，`last_batch_complete=false` 并保留当前
+page/search ID；同时清空 `last_summary_path`，把 `campaign_candidate_count` 重置为 0。下轮重取
+边界页并依赖持久候选集合跳过已处理 ID，这是成功后的正常状态，不是未提交或活动丢失。
 
 `--start-page`、`--resume-summary` 和 `--recovery-keyword` 仅保留给明确的人工恢复。使用任一显式
 恢复参数时，runner 不自动加载现有 checkpoint；操作人必须从状态事件读取未处理位置，且抖音

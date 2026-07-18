@@ -111,16 +111,25 @@ dry-run 通过的判据：
 - `plan_frozen=completed`，其余阶段保持 `frozen`；
 - 冻结输入包含 pool、target 和正式契约的 SHA-256；
 - 计划中的账号、关键词、有效新增目标、候选硬上限、行为 profile 和互动模式正确；
+- `plan.preflight` 明确记录账号为 `active`、没有活动租约、加密状态文件存在且可读，以及
+  `lease_seconds >= timeout_seconds + 300`；`plan.headed=true`。密文的实际解密仍在正式执行构造
+  child 命令前完成，解密失败不得启动抓取；
 - 计划中的 `discovery` 与 `xhs_discovery_checkpoints` 一致：首次运行从第 1 页开始且顶部刷新为
   0；续跑包含保存的页码、非空 `search_id`、顶部刷新页数及可选累计摘要；
 - 加密状态存在且账号仍为 `active`。
 
-dry-run 的 `frozen` 后续阶段不是失败。dry-run 不访问内容、不申请正式租约、不写内容表。
+dry-run 的 `frozen` 后续阶段不是失败。dry-run 不访问内容、不申请正式租约、不写内容表，也不
+构造依赖临时解密 storage state 的实际 child 命令；正式命令只出现在真实运行的
+`command_executed.evidence.command`。小红书 dry-run 顶层摘要没有 `import_result`，不能把字段缺席
+误读成已入库。
 
 ## 4. 正式运行
 
 dry-run 经人工确认后，才在 `config/xhs_pool.json` 和 `config/xhs_targets.json` 同时启用本轮
-pool 与目标。不要在运行中修改这两个冻结输入。
+pool 与目标：只把 pool 根级 `enabled` 和 `target_key` 对应目标项的 `enabled` 改为 `true`，不要
+顺带修改数量、关键词或行为字段；修改后分别运行 `python -m json.tool <file> >/dev/null`。不要在
+运行中修改这两个冻结输入。无论正式轮成功或失败，完成摘要、状态和 SQLite 检查后都把两个开关
+恢复为 `false` 并再次校验 JSON。
 
 无互动副作用：
 
@@ -234,11 +243,19 @@ Runner 会提交安全前沿并保存累计摘要；下轮同一账号把历史�
 `target_new_posts` 后才一次性入库。`candidate_hard_limit` 是每次 child 的未知候选预算，不从历史
 累计数扣减。`--no-import` 不写 checkpoint，也不能作为正式完成证据。
 
+若 `target_new_met` 在页面中途触发并成功入库，checkpoint 仍保留当前 page/search ID，
+`last_batch_complete=false`；来源未耗尽时 `status=active`。成功入库会清空
+`last_summary_path` 并把 `campaign_candidate_count` 重置为 0，但不会删除前沿或已处理候选。
+
 checkpoint 与已处理候选集合均以 `target_key + account_id + query_fingerprint` 定位。更换账号会
 开始该账号自己的发现记忆，不共享尚未入库的累计摘要或已处理集合，也不能解释为原账号轮次的
 续跑；已经进入 `web_posts` 的 ID 仍会在所有账号的详情请求前跳过。平台若不接受跨进程复用旧
 `search_id`，该轮按 `runtime_failed` 停止且不推进位置，不设计猜页、静默换游标或从第一页大量
 重抓的降级路径。
+
+字段和命令映射固定为：SQLite `resume_search_id`、dry-run
+`plan.discovery.resume_search_id`、child `--start-cursor` 及分页事件
+`source_cursor/resume_cursor` 都表示同一个 client search ID。操作人只检查映射，不手工传参。
 
 ## 8. 账号与状态存储
 

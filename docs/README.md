@@ -41,6 +41,10 @@ python scripts/crawl_runner.py \
   --max-jobs 5
 ```
 
+该命令不访问平台内容，但不是文件系统/SQLite 只读操作：默认会同步 `crawl_jobs`，并写本轮运行
+摘要、run report 和 execution state。未指定 `--job-key` 时只计划已启用且到期的任务，因此同步
+任务数可能大于本轮选中任务数；以 dry-run 摘要的 `jobs_selected` 和每任务状态为准。
+
 执行到期任务：
 
 ```bash
@@ -57,6 +61,27 @@ python scripts/crawl_runner.py \
 冻结未完成累计摘要，先刷新顶部，再使用已保存的 `page + search_id` 继续深层发现。
 每个任务会在 `data/runtime/crawl_execution_states/<run_id>/` 生成冻结状态文件；只有状态
 文件和正式摘要同时满足执行契约，才能汇报完成。
+
+## 抓取记忆速查
+
+“所有平台都有抓取记忆”只指五个正式结构化搜索平台；固定 URL 页面证据任务没有分页发现
+前沿，每个已配置 URL 仍是独立任务。五个平台的记忆作用域和能力并不完全相同：
+
+| 平台 | 控制面记忆 | 保存的深层前沿 | 跨轮详情前去重 |
+|---|---|---|---|
+| B站、微博、知乎 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | 下一安全页 | SQLite 已入库 ID、未完成累计摘要中的有效 ID |
+| 抖音 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | page、offset、响应 search ID 必须成组恢复 | SQLite 已入库 ID、未完成累计摘要中的有效 ID |
+| 小红书 | `xhs_discovery_checkpoints`，按目标、人工指定账号与查询指纹隔离 | page 与 client search ID 必须成组恢复 | SQLite 已入库 ID、累计摘要 ID，以及 `xhs_discovery_seen_candidates` 中所有已处理候选 ID |
+
+首次运行从第一页开始且顶部刷新页数为 0；存在 checkpoint 后才先刷新配置限定的顶部页，再从
+保存的深层前沿继续。顶部刷新不推进深层前沿。目标或候选上限在一页中途触发时，checkpoint
+保留当前请求位置，下一轮允许重取这个边界页；已进入上述去重集合的 ID 会在昂贵详情或作者补全
+前跳过。
+
+通用平台没有“小红书式的全部已处理候选永久表”：字段无效且未进入有效累计摘要的候选，可能在
+边界页重取时再次处理。小红书则把视频、字段无效和有效候选都持久记忆。这个差异不能写成五个平台
+具有完全相同的去重强度。正常运行一律让 runner 自动生成恢复参数；人工恢复仅按
+[运行手册](operations-runbook.md) 的限制处理。
 
 小红书不进入上述通用登录和调度链路。先完整读取
 [小红书正式抓取 Workflow](platforms/xhs.md)，再使用独立账号目录、加密 storage state 和

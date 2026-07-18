@@ -28,7 +28,8 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 `resume_offset` 和 `resume_cursor`，`last_summary_path` 指向尚未达到目标的累计摘要，
 `campaign_candidate_count` 保存累计报告数。`status=exhausted` 表示深层来源明确耗尽，后续只做
 顶部刷新。checkpoint 只能在 child 摘要形成后提交；诊断 `--no-import` 不得更新它。内容仍只在
-完整目标达到后写入 `web_posts` / `web_post_images`。
+完整目标达到后写入 `web_posts` / `web_post_images`。通用 schema 没有所有已处理候选表；跨轮
+预过滤只读取内容表和未完成有效累计摘要，字段无效候选不会因此永久记忆。
 
 `web_posts` 是统一内容主表，面向用户查询和后续数据使用。`ctf_captures` 是证据和调试底座，面向程序脚本或 Agent 排查抓取过程。页面级抓取成功后，也会归一化生成 `web_posts` 行，并通过 `web_posts.source_capture_id` 关联对应 `ctf_captures.id`。
 
@@ -100,6 +101,10 @@ python scripts/crawl_runner.py \
   --dry-run \
   --max-jobs 5
 ```
+
+这里的“不抓取”只表示不访问平台内容、不写 `web_posts`；默认仍会把配置同步到调度表，并写
+`crawl_run_reports`、run summary 和 execution state。若只想用已经同步的调度表冻结计划，显式
+使用运行手册中的 `--no-sync-config`。
 
 执行到期任务：
 

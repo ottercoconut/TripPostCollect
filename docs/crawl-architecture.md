@@ -74,7 +74,8 @@ runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并�
 和 opaque search ID。child 先做有限顶部刷新，再走深层前沿；顶部刷新不覆盖 checkpoint。
 执行器完成摘要构造后，从最后一条前沿事件提交下一恢复位置，runner 再把本次摘要路径写回
 checkpoint。这个提交顺序保证游标不会先于可累计产物前移。达到完整入库目标后只清空累计摘要，
-不删除发现位置。
+不删除发现位置。通用控制面不保存“全部已处理无效候选”集合：跨轮详情前去重依赖内容表与未完成
+有效累计摘要，字段无效候选在边界页重取时可能再次处理。
 
 小红书独立 runner 不读写通用 checkpoint 表，而是在 `xhs_discovery_checkpoints` 中按目标、账号和
 查询指纹保存 `page + search_id`，在 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID。
