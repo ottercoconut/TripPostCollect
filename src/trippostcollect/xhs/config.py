@@ -19,7 +19,7 @@ def _read_object(path: str | Path) -> tuple[Path, dict[str, Any]]:
         value = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise XhsConfigError(f"cannot read XHS config {resolved}: {exc}") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
+    if not isinstance(value, dict) or value.get("schema_version") != 2:
         raise XhsConfigError(f"unsupported XHS config schema: {resolved}")
     return resolved, value
 
@@ -27,6 +27,7 @@ def _read_object(path: str | Path) -> tuple[Path, dict[str, Any]]:
 def load_pool_config(path: str | Path = XHS_POOL_CONFIG) -> dict[str, Any]:
     resolved, value = _read_object(path)
     removed_automatic_controls = {
+        "enabled",
         "max_parallel",
         "global_daily_runs",
         "per_account_daily_runs",
@@ -56,6 +57,10 @@ def load_target(target_key: str, path: str | Path = XHS_TARGET_CONFIG) -> dict[s
     if len(matches) != 1:
         raise XhsConfigError(f"XHS target {target_key!r} must occur exactly once in {resolved}")
     target = dict(matches[0])
+    if "enabled" in target:
+        raise XhsConfigError(
+            f"removed XHS target enabled gate remains in {resolved}: {target_key}"
+        )
     target_new = int(target.get("target_new_posts") or 0)
     candidates = int(target.get("candidate_hard_limit") or 0)
     stagnant = int(target.get("max_stagnant_batches") or 0)

@@ -1,9 +1,8 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "targets": [
     {
       "target_key": "qingdao_travel",
-      "enabled": false,
       "keyword": "青岛旅游",
       "target_url": "https://www.xiaohongshu.com/search_result?keyword=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",
       "target_new_posts": 20,

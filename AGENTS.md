@@ -19,6 +19,7 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - `web_posts` 是用户使用的统一内容主表；`ctf_captures` 是程序和智能代理（Agent）使用的证据/调试底座。
 - `published_at` 必须来自平台原始发帖时间，入库保存为 Asia/Shanghai ISO；不要用抓取时间冒充发帖时间。
 - 通用正式任务从 `scripts/crawl_runner.py` 进入；小红书只从 `scripts/xhs_runner.py` 进入，禁止放回通用 job 或登录流程。
+- 小红书配置使用 schema v2，不再有 pool/target `enabled` 开关；显式 `xhs_runner.py` 命令是唯一启动动作，不为每轮修改或恢复配置开关，旧字段直接视为配置错误。
 - 通用状态写入 `data/runtime/crawl_execution_states/`；小红书状态写入 `data/runtime/xhs/execution_states/`。进入下一阶段前重新读取状态并确认上一阶段完成，不得手工解冻或补签。
 - 正式结构化抓取以 `candidate_hard_limit`、`target_new_posts` 和 `required_fields_profile` 为准；数据库已有记录只算更新，未达到 `valid_new_count` 新增目标不得汇报完成。
 - 五个正式结构化搜索平台都由 runner 自动维护 SQLite 抓取记忆：首次从第一页开始，续跑先有限刷新顶部再恢复深层前沿；正常 workflow 不手工传页码、摘要或游标。通用平台保存安全前沿和有效累计摘要；小红书额外保存所有已处理候选 ID，不能宣称去重强度完全相同。

@@ -266,8 +266,7 @@ python scripts/xhs_runner.py \
   --account-id xhs-a01
 ```
 
-确认 dry-run 输出为 `planned`、只有 `plan_frozen=completed` 后，经明确批准同时启用 pool
-和目标，再运行：
+确认 dry-run 输出为 `planned`、只有 `plan_frozen=completed` 后，经明确批准直接运行：
 
 ```bash
 source .venv/bin/activate
@@ -276,8 +275,9 @@ python scripts/xhs_runner.py \
   --account-id xhs-a01
 ```
 
-运行结束后按顺序读取顶层 `run_summary.json`、冻结状态、child summary 和 SQLite 计数，再将
-pool 与目标开关恢复为禁用。登录失效时对原账号运行 `xhs_login.py`；作者页二维码安全验证会
+运行结束后按顺序读取顶层 `run_summary.json`、冻结状态、child summary 和 SQLite 计数。XHS
+配置 schema v2 没有 pool/target `enabled` 开关，显式 runner 命令就是唯一启动动作，不修改配置。
+登录失效时对原账号运行 `xhs_login.py`；作者页二维码安全验证会
 保留当前标签页并置前，最多等待操作人扫码 600 秒，通过后继续。其他验证、频控、拒绝访问或
 环境异常时停止请求并等待操作人决定。不得自动解验证、自动重试或在同一正式轮次中途换号。
 

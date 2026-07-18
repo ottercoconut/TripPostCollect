@@ -382,8 +382,6 @@ def main() -> int:
         if args.dry_run:
             account = _eligible_account_for_plan(conn, args.account_id)
         else:
-            if not pool.get("enabled") or not target.get("enabled"):
-                raise SystemExit("XHS pool and target must both be enabled for a formal run")
             try:
                 account = acquire_account_lease(
                     conn,

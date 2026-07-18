@@ -100,9 +100,10 @@ python scripts/xhs_runner.py \
   --account-id xhs-a01
 ```
 
-dry-run 通过并经人工确认后，才同时启用 `config/xhs_pool.json` 和目标项并去掉
-`--dry-run`。运行结束后检查顶层摘要、child summary、冻结状态和 SQLite，再关闭两个
-`enabled` 开关。dry-run 计划中的 `discovery` 必须与所选账号的
+dry-run 通过并经人工确认后，直接用相同账号、目标和互动参数去掉 `--dry-run`。XHS 配置
+schema v2 已删除 pool/target 的 `enabled` 开关；正式运行只由显式 runner 命令触发，不再为每轮
+修改配置或在结束后重新冻结。运行结束后检查顶层摘要、child summary、冻结状态和 SQLite。
+dry-run 计划中的 `discovery` 必须与所选账号的
 `xhs_discovery_checkpoints` 一致。小红书状态位于
 `data/runtime/xhs/execution_states/<run_id>/`；其余平台仍位于通用状态目录。
 

@@ -24,7 +24,6 @@
   -> 人工登录并完成关闭/重开复验
   -> dry-run 冻结计划
   -> 人工确认本轮账号、目标、数量和互动副作用
-  -> 同时启用 pool 与 target
   -> 正式运行并申请单账号互斥租约
   -> xhs_guarded 行为阶段
   -> 有 checkpoint 时刷新顶部，再恢复 page + search_id 深层前沿
@@ -34,7 +33,6 @@
   -> 累计达到有效新增目标后一次性写入 SQLite 并清空累计摘要
   -> 加密最新 storage state、删除临时明文、释放租约
   -> 检查顶层摘要、child summary、冻结状态和 SQLite
-  -> 关闭 pool 与 target 开关
 ```
 
 ## 1. 执行前检查
@@ -54,7 +52,8 @@ python scripts/xhs_accounts.py list
 - `behavior_profile` 为 `xhs_guarded`，有头浏览器已启用；
 - `lease_seconds >= timeout_seconds + 300`；
 - 是否执行评论区访问或点赞已经由操作人明确决定；未明确时必须使用默认 `none`；
-- 本轮开始前 `pool.enabled` 和目标 `enabled` 可以保持 `false`，dry-run 不要求开启。
+- pool 与 target 配置使用 schema v2，已删除 `enabled` 字段；出现旧字段必须在冻结前失败，不保留
+  兼容门禁。只有显式执行 `xhs_runner.py` 才会启动抓取；读取配置本身不会调度任务。
 - 若该目标和账号已有 checkpoint，其累计摘要及摘要引用的全部 JSONL 必须仍存在；缺失时停止，
   不得丢弃历史成果后推进前沿。
 
@@ -125,11 +124,9 @@ dry-run 的 `frozen` 后续阶段不是失败。dry-run 不访问内容、不申
 
 ## 4. 正式运行
 
-dry-run 经人工确认后，才在 `config/xhs_pool.json` 和 `config/xhs_targets.json` 同时启用本轮
-pool 与目标：只把 pool 根级 `enabled` 和 `target_key` 对应目标项的 `enabled` 改为 `true`，不要
-顺带修改数量、关键词或行为字段；修改后分别运行 `python -m json.tool <file> >/dev/null`。不要在
-运行中修改这两个冻结输入。无论正式轮成功或失败，完成摘要、状态和 SQLite 检查后都把两个开关
-恢复为 `false` 并再次校验 JSON。
+dry-run 经人工确认后，直接用相同账号、目标和互动参数执行正式命令。正式启动不再修改
+`config/xhs_pool.json` 或 `config/xhs_targets.json`；这两个文件仍作为数量、行为和发现计划的冻结
+输入，运行中不得修改。schema v2 不接受 `enabled` 字段，不存在运行后恢复开关的步骤。
 
 无互动副作用：
 
@@ -155,7 +152,7 @@ python scripts/xhs_runner.py \
 - `random`：在上述两项中随机选择；可能产生真实点赞副作用。
 
 互动默认 `none`。普通控件查找失败只记录证据，不否定抓取；页面出现验证、频控、封禁或
-登录失效时必须终止本轮。运行结束并检查完产物后，将两个 `enabled` 开关恢复为 `false`。
+登录失效时必须终止本轮。运行结束后直接进入摘要、状态、SQLite 和租约验收，不修改配置。
 
 ## 5. 抓取中的固定行为
 

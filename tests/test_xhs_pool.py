@@ -201,11 +201,10 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
     target_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "targets": [
                     {
                         "target_key": "test",
-                        "enabled": True,
                         "keyword": "青岛旅游",
                         "target_new_posts": 5,
                         "candidate_hard_limit": 50,
@@ -225,8 +224,7 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
     pool_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
-                "enabled": True,
+                "schema_version": 2,
                 "lease_seconds": 2400,
                 "behavior_profile": "xhs_guarded",
                 "headed": True,
@@ -275,8 +273,7 @@ def test_xhs_pool_requires_headed_browser(tmp_path: Path) -> None:
     pool_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
-                "enabled": False,
+                "schema_version": 2,
                 "lease_seconds": 2400,
                 "behavior_profile": "xhs_guarded",
                 "headed": False,
@@ -318,8 +315,7 @@ def test_pool_config_rejects_removed_automatic_controls(tmp_path: Path) -> None:
     path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
-                "enabled": True,
+                "schema_version": 2,
                 "lease_seconds": 2400,
                 "behavior_profile": "xhs_guarded",
                 "headed": True,
@@ -331,6 +327,48 @@ def test_pool_config_rejects_removed_automatic_controls(tmp_path: Path) -> None:
 
     with pytest.raises(XhsConfigError, match="removed automatic XHS controls"):
         load_pool_config(path)
+
+
+def test_xhs_config_rejects_removed_enabled_gates(tmp_path: Path) -> None:
+    pool_path = tmp_path / "pool.json"
+    pool_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "enabled": False,
+                "lease_seconds": 2400,
+                "behavior_profile": "xhs_guarded",
+                "headed": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    target_path = tmp_path / "targets.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "targets": [{"target_key": "test", "enabled": False}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(XhsConfigError, match="removed automatic XHS controls"):
+        load_pool_config(pool_path)
+    with pytest.raises(XhsConfigError, match="removed XHS target enabled gate"):
+        load_target("test", target_path)
+
+
+def test_xhs_config_rejects_legacy_schema(tmp_path: Path) -> None:
+    pool_path = tmp_path / "pool.json"
+    pool_path.write_text(
+        json.dumps({"schema_version": 1}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(XhsConfigError, match="unsupported XHS config schema"):
+        load_pool_config(pool_path)
 
 
 def test_failed_child_summary_remains_available_for_reporting(tmp_path: Path) -> None:
