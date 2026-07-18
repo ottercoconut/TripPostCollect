@@ -116,6 +116,44 @@ def test_xhs_runner_reads_challenge_from_structured_child_summary() -> None:
     assert xhs_runner._challenge_reason("", "", child_summary) == "captcha"
 
 
+def test_xhs_runner_does_not_treat_false_marker_names_as_failures() -> None:
+    child_summary = {
+        "records": [
+            {
+                "failure_classification": {
+                    "status": "completed",
+                    "failure_type": "success",
+                    "reason": "completed",
+                },
+                "behavior_evidence": {
+                    "status": "completed",
+                    "challenge": "",
+                    "error": "",
+                    "initial_visible_markers": {
+                        "captcha_or_verify": False,
+                        "login_required": False,
+                    },
+                    "visible_markers": {
+                        "captcha_or_verify": False,
+                        "rate_limited": False,
+                        "blocked": False,
+                        "login_required": False,
+                    },
+                },
+            }
+        ]
+    }
+    stdout = json.dumps(child_summary, ensure_ascii=False)
+
+    assert xhs_runner._challenge_reason(stdout, "", child_summary) == ""
+    assert xhs_runner._login_reason(stdout, "", child_summary) == ""
+
+
+def test_xhs_runner_uses_raw_failure_text_without_structured_records() -> None:
+    assert xhs_runner._challenge_reason("请完成验证", "", {}) == "请完成验证"
+    assert xhs_runner._login_reason("", "missing_xhs_storage_state", {}) == "missing_xhs_storage_state"
+
+
 def test_storage_state_encryption_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     key = b"k" * 32
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_SNAPSHOT_KEY", base64.urlsafe_b64encode(key).decode("ascii"))

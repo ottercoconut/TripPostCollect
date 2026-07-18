@@ -168,37 +168,69 @@ def build_child_command(
     return command
 
 
-def _structured_failure_evidence(child_summary: dict[str, Any]) -> str:
-    evidence: list[dict[str, Any]] = []
-    for record in child_summary.get("records") or []:
-        if not isinstance(record, dict):
-            continue
-        behavior = record.get("behavior_evidence") or {}
-        evidence.append(
-            {
-                "failure_classification": record.get("failure_classification") or {},
-                "behavior_evidence": {
-                    "status": behavior.get("status"),
-                    "challenge": behavior.get("challenge"),
-                    "error": behavior.get("error"),
-                    "visible_markers": behavior.get("visible_markers") or {},
-                    "initial_visible_markers": behavior.get("initial_visible_markers") or {},
-                },
-            }
-        )
-    return json.dumps(evidence, ensure_ascii=False)
+def _structured_failure_records(stdout: str, child_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    records = child_summary.get("records") or []
+    if not records:
+        records = extract_stdout_json(stdout).get("records") or []
+    return [record for record in records if isinstance(record, dict)]
+
+
+def _structured_failure_text(record: dict[str, Any]) -> str:
+    classification = record.get("failure_classification") or {}
+    behavior = record.get("behavior_evidence") or {}
+    values = [
+        classification.get("status"),
+        classification.get("failure_type"),
+        classification.get("reason"),
+        behavior.get("status"),
+        behavior.get("challenge"),
+        behavior.get("error"),
+        behavior.get("reason"),
+    ]
+    return "\n".join(str(value) for value in values if value).lower()
 
 
 def _challenge_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -> str:
-    evidence = json.dumps(child_summary.get("behavior_validation") or {}, ensure_ascii=False)
-    structured = _structured_failure_evidence(child_summary)
-    combined = f"{tail(stdout, 3000)}\n{tail(stderr, 3000)}\n{evidence}\n{structured}".lower()
+    records = _structured_failure_records(stdout, child_summary)
+    for record in records:
+        behavior = record.get("behavior_evidence") or {}
+        markers = {
+            **(behavior.get("initial_visible_markers") or {}),
+            **(behavior.get("visible_markers") or {}),
+        }
+        if bool(markers.get("captcha_or_verify")) or bool(markers.get("captcha")):
+            return "captcha"
+        if bool(markers.get("rate_limited")):
+            return "操作频繁"
+        if bool(markers.get("blocked")):
+            return "访问受限"
+        failure_text = _structured_failure_text(record)
+        reason = next((marker for marker in CHALLENGE_MARKERS if marker.lower() in failure_text), "")
+        if reason:
+            return reason
+    if records:
+        return ""
+    combined = f"{tail(stdout, 3000)}\n{tail(stderr, 3000)}".lower()
     return next((marker for marker in CHALLENGE_MARKERS if marker.lower() in combined), "")
 
 
 def _login_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -> str:
-    structured = _structured_failure_evidence(child_summary)
-    combined = f"{tail(stdout, 3000)}\n{tail(stderr, 3000)}\n{structured}".lower()
+    records = _structured_failure_records(stdout, child_summary)
+    for record in records:
+        behavior = record.get("behavior_evidence") or {}
+        markers = {
+            **(behavior.get("initial_visible_markers") or {}),
+            **(behavior.get("visible_markers") or {}),
+        }
+        if bool(markers.get("login_required")):
+            return "login_required"
+        failure_text = _structured_failure_text(record)
+        reason = next((marker for marker in LOGIN_MARKERS if marker.lower() in failure_text), "")
+        if reason:
+            return reason
+    if records:
+        return ""
+    combined = f"{tail(stdout, 3000)}\n{tail(stderr, 3000)}".lower()
     return next((marker for marker in LOGIN_MARKERS if marker.lower() in combined), "")
 
 
