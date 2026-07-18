@@ -16,6 +16,7 @@ from trippostcollect.xhs.accounts import (
     enroll_account,
     ensure_xhs_schema,
     get_account,
+    iso,
     list_accounts,
     record_event,
     set_account_status,
@@ -68,7 +69,13 @@ def main() -> int:
             print(json.dumps(public_account(result), ensure_ascii=False, indent=2))
             return 0
         if args.command == "list":
-            leases = [dict(row) for row in conn.execute("SELECT * FROM xhs_account_leases ORDER BY acquired_at")]
+            leases = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM xhs_account_leases WHERE expires_at>? ORDER BY acquired_at",
+                    (iso(),),
+                )
+            ]
             print(
                 json.dumps(
                     {

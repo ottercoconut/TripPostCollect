@@ -44,6 +44,8 @@ def load_pool_config(path: str | Path = XHS_POOL_CONFIG) -> dict[str, Any]:
     profile = str(value.get("behavior_profile") or "")
     if profile != "xhs_guarded":
         raise XhsConfigError("XHS behavior_profile must be xhs_guarded")
+    if value.get("headed") is not True:
+        raise XhsConfigError("XHS formal workflow requires headed=true")
     return {"path": str(resolved), **value}
 
 

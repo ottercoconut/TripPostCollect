@@ -86,9 +86,16 @@ def tail(value: str, limit: int = 6000) -> str:
 
 
 def _eligible_account_for_plan(conn: sqlite3.Connection, requested: str) -> dict[str, Any]:
-    account = get_account(conn, validate_account_id(requested))
+    account_id = validate_account_id(requested)
+    account = get_account(conn, account_id)
     if not account or account["status"] != "active":
         raise XhsAccountUnavailable("requested_xhs_account_not_active")
+    active_lease = conn.execute(
+        "SELECT expires_at FROM xhs_account_leases WHERE account_id=? AND expires_at>?",
+        (account_id, utc_iso()),
+    ).fetchone()
+    if active_lease:
+        raise XhsAccountUnavailable("requested_xhs_account_busy")
     return account
 
 
@@ -161,14 +168,37 @@ def build_child_command(
     return command
 
 
+def _structured_failure_evidence(child_summary: dict[str, Any]) -> str:
+    evidence: list[dict[str, Any]] = []
+    for record in child_summary.get("records") or []:
+        if not isinstance(record, dict):
+            continue
+        behavior = record.get("behavior_evidence") or {}
+        evidence.append(
+            {
+                "failure_classification": record.get("failure_classification") or {},
+                "behavior_evidence": {
+                    "status": behavior.get("status"),
+                    "challenge": behavior.get("challenge"),
+                    "error": behavior.get("error"),
+                    "visible_markers": behavior.get("visible_markers") or {},
+                    "initial_visible_markers": behavior.get("initial_visible_markers") or {},
+                },
+            }
+        )
+    return json.dumps(evidence, ensure_ascii=False)
+
+
 def _challenge_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -> str:
     evidence = json.dumps(child_summary.get("behavior_validation") or {}, ensure_ascii=False)
-    combined = f"{tail(stdout, 3000)}\n{tail(stderr, 3000)}\n{evidence}".lower()
+    structured = _structured_failure_evidence(child_summary)
+    combined = f"{tail(stdout, 3000)}\n{tail(stderr, 3000)}\n{evidence}\n{structured}".lower()
     return next((marker for marker in CHALLENGE_MARKERS if marker.lower() in combined), "")
 
 
-def _login_reason(stdout: str, stderr: str) -> str:
-    combined = f"{tail(stdout, 3000)}\n{tail(stderr, 3000)}".lower()
+def _login_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -> str:
+    structured = _structured_failure_evidence(child_summary)
+    combined = f"{tail(stdout, 3000)}\n{tail(stderr, 3000)}\n{structured}".lower()
     return next((marker for marker in LOGIN_MARKERS if marker.lower() in combined), "")
 
 
@@ -475,9 +505,21 @@ def main() -> int:
         "target_new_posts": target["target_new_posts"],
         "candidate_hard_limit": target["candidate_hard_limit"],
         "max_stagnant_batches": target["max_stagnant_batches"],
+        "timeout_seconds": target["timeout_seconds"],
+        "lease_seconds": pool["lease_seconds"],
         "behavior_profile": pool["behavior_profile"],
+        "headed": pool["headed"],
         "post_interaction": args.post_interaction,
         "no_import": args.no_import,
+        "preflight": {
+            "account_status": account["status"],
+            "active_lease": False,
+            "encrypted_state_exists": True,
+            "encrypted_state_readable": True,
+            "lease_covers_timeout_cleanup": (
+                int(pool["lease_seconds"]) >= int(target["timeout_seconds"]) + 300
+            ),
+        },
         "discovery": discovery_plan,
     }
     state: FrozenExecutionState | None = None
@@ -651,7 +693,7 @@ def main() -> int:
         )
 
     challenge = _challenge_reason(stdout, stderr, child_summary)
-    login_reason = _login_reason(stdout, stderr)
+    login_reason = _login_reason(stdout, stderr, child_summary)
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         ensure_xhs_schema(conn)

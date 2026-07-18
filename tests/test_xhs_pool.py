@@ -77,6 +77,45 @@ def test_manual_xhs_login_keeps_one_existing_tab() -> None:
     assert third.closed
 
 
+def test_xhs_runner_reads_login_required_from_structured_child_summary() -> None:
+    child_summary = {
+        "records": [
+            {
+                "failure_classification": {
+                    "status": "login_required",
+                    "failure_type": "login_required",
+                    "reason": "login_or_profile_refresh_required",
+                },
+                "behavior_evidence": {
+                    "status": "failed",
+                    "visible_markers": {"login_required": True},
+                },
+            }
+        ]
+    }
+
+    assert xhs_runner._login_reason("unrelated" * 1000, "", child_summary) == "login_required"
+
+
+def test_xhs_runner_reads_challenge_from_structured_child_summary() -> None:
+    child_summary = {
+        "records": [
+            {
+                "failure_classification": {
+                    "status": "captcha_detected",
+                    "failure_type": "captcha_detected",
+                },
+                "behavior_evidence": {
+                    "status": "failed",
+                    "visible_markers": {"captcha": True},
+                },
+            }
+        ]
+    }
+
+    assert xhs_runner._challenge_reason("", "", child_summary) == "captcha"
+
+
 def test_storage_state_encryption_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     key = b"k" * 32
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_SNAPSHOT_KEY", base64.urlsafe_b64encode(key).decode("ascii"))
@@ -138,6 +177,22 @@ def test_account_lease_requires_explicit_account_and_only_blocks_same_account(
         accounts.release_account_lease(conn, account_id="xhs-a02", run_id="run-2", outcome="failed")
         assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
         assert accounts.get_account(conn, "xhs-a02")["status"] == "active"
+
+
+def test_xhs_dry_run_account_preflight_rejects_active_lease(tmp_path: Path) -> None:
+    with open_db(tmp_path) as conn:
+        accounts.enroll_account(conn, "xhs-a01")
+        accounts.mark_account_verified(conn, "xhs-a01", "identity-1")
+        accounts.acquire_account_lease(
+            conn,
+            run_id="active-run",
+            pool_config=pool_config(lease_seconds=3600),
+            requested_account_id="xhs-a01",
+            now=datetime.now(timezone.utc),
+        )
+
+        with pytest.raises(XhsAccountUnavailable, match="busy"):
+            xhs_runner._eligible_account_for_plan(conn, "xhs-a01")
 
 
 def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
@@ -213,6 +268,25 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
     assert command[command.index("--start-cursor") + 1] == "saved-search-id"
     assert command[command.index("--top-refresh-max-pages") + 1] == "3"
     assert "--download-images" in command
+
+
+def test_xhs_pool_requires_headed_browser(tmp_path: Path) -> None:
+    pool_path = tmp_path / "pool.json"
+    pool_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "enabled": False,
+                "lease_seconds": 2400,
+                "behavior_profile": "xhs_guarded",
+                "headed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(XhsConfigError, match="headed=true"):
+        load_pool_config(pool_path)
 
 
 def test_xhs_schema_migrates_automatic_budget_and_breaker_fields(tmp_path: Path) -> None:
