@@ -72,54 +72,55 @@ python scripts/mediacrawler_crawl.py \
 `crawl_runner.py --no-import` 和 `xhs_runner.py --no-import` 同样只用于诊断。当前执行器可能在
 内容与产物校验通过时把这类运行写成 `completed`，但入库被跳过，不能按正式轮次完成汇报。
 
-## 恢复与临时候选预算
+## 自动恢复、检查与临时候选预算
 
-冻结产物合并当前只支持微博、抖音和知乎。微博和知乎接近新增目标但未入库时，可以继续同一
-关键词后续页；`start-page` 必须取上一轮 `pagination_evidence` 中首个未处理页，不得按名义
-页大小推算：
+B站、微博、抖音和知乎的正常正式 workflow 不需要人工拼接恢复参数。`crawl_runner.py` 每次
+先按任务与查询指纹读取 `crawl_discovery_checkpoints`：没有记录就从第一页开始；有记录就自动
+冻结累计摘要、恢复保存的前沿，并先刷新配置的 `top_refresh_max_pages` 个顶部页面。抖音 child
+命令必须同时出现保存的 `--start-page`、`--start-offset` 和 `--start-cursor`；只出现页码或
+offset 时停止执行，不得用空 cursor 请求深页。
+
+检查记忆状态：
+
+```bash
+sqlite3 data/trippostcollect.sqlite \
+  "SELECT job_id, platform_key, keyword, resume_page, resume_offset, status, last_stop_reason, updated_at FROM crawl_discovery_checkpoints ORDER BY job_id;"
+```
+
+再冻结目标任务，检查生成命令而不抓取：
 
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \
-  --job-key mc_weibo_qingdao_search \
-  --start-page 8 \
-  --resume-summary outputs/mediacrawler_runs/<run_id>/summary.json
+  --dry-run \
+  --no-sync-config \
+  --job-key mc_douyin_qingdao_search
 ```
 
-抖音后续页同时依赖上一响应的 search ID，当前执行器不会跨进程恢复该值，因此抖音不得用
-大于 1 的 `--start-page` 做同词续跑。抖音恢复必须换能归一到同一城市的补充关键词，并从该
-关键词第 1 页开始；微博和知乎单关键词有明确 `source_exhausted` 证据时也可以使用相同办法：
+有 checkpoint 的抖音计划应同时含三个恢复参数和 `--top-refresh-max-pages`；B站、微博、知乎有
+checkpoint 时应含保存页码和顶部刷新参数。只有 checkpoint 的 `last_summary_path` 非空且文件
+存在时才应再含累计 `--resume-summary`。首次任务没有 checkpoint，不应出现 `--resume-summary`，
+顶部刷新值为 0。实际执行结束后同时核对 child `summary.json` 的
+`pagination_evidence`、`discovery_checkpoint` 与 SQLite 行；SQLite 的 `last_run_id` 必须等于
+本次运行 ID。未达到目标但前沿推进时，任务仍不是正式完成，不过连续失败会清零，下一次按
+正常 `schedule_seconds` 调度，而不是立即反复抓顶部。
+checkpoint 记录了非空 `last_summary_path` 但文件丢失时，runner 必须在冻结前报错；不得静默
+丢弃历史成果并推进游标。
 
-```bash
-source .venv/bin/activate
-python scripts/crawl_runner.py \
-  --job-key mc_douyin_qingdao_search \
-  --resume-summary outputs/mediacrawler_runs/<run_id>/summary.json \
-  --recovery-keyword 青岛旅行 \
-  --start-page 1
-```
+累计摘要保存各次 JSONL，只有合并后的 `valid_new_count` 达到完整目标才一次性入库。
+`candidate_hard_limit` 是每次 child 的未知候选预算，每次续跑重新获得完整预算；历史累计候选
+只用于报告，不从本次预算扣减。`source_exhausted` 后只做顶部刷新，不再请求已耗尽深页。
+`--no-import` 自动禁用 checkpoint 写入，因此诊断不会污染正式记忆。
 
-续跑会把上一轮摘要及 JSONL 加入冻结输入，并将上一轮通过正式校验的新增及已有记录平台 ID
-注入底层去重集合；未通过字段校验的候选不会注入。
-`candidate_hard_limit` 是旧、新产物合并后的总候选预算，不是续跑可再使用的增量；执行器会用
-配置上限减去旧摘要已消费候选得到本轮剩余预算。只有合并后的 `valid_new_count` 达到完整目标
-才进入一次性入库；入库后 `inserted_rows` 也达到目标，正式轮次才可完成。
-
-每个恢复计划的 dry-run 与正式 runner 参数除 `--dry-run` 外必须一致；未使用的可选恢复参数
-不要添加。检查冻结状态为 `planned` 后，还要检查 `plan.command`：`--resume-summary` 和显式
-请求的 `--start-page` 必须原样存在；使用 `--recovery-keyword` 时，child 命令的 `--keyword`
-必须等于恢复词。抖音恢复还必须同时满足 `--recovery-keyword` 已提供且 `--start-page` 等于 1；
-任一项不符时不能继续正式运行。
-
-B站 article 当前不支持断点续跑。只有停止证据为 `candidate_hard_limit_reached` 且没有来源
-耗尽证据时，才临时提高该 job 配置中的 `candidate_hard_limit`；新完整轮次不带任何恢复参数，
-由执行器默认从第 1 页开始，旧轮部分产物不得拼接或单独导入。登录、验证、运行错误或明确
-`source_exhausted` 必须按对应失败原因处理，不能靠盲目扩容重复同词。
+`--start-page`、`--resume-summary` 和 `--recovery-keyword` 仅保留给明确的人工恢复。使用任一显式
+恢复参数时，runner 不自动加载现有 checkpoint；操作人必须从状态事件读取未处理位置，且抖音
+人工深页恢复目前没有 runner 级 cursor 参数，不能只靠 `--start-page` 执行。优先修复或保留
+自动 checkpoint，不要删除记录后靠猜页码续跑。小红书不使用本表，仍按独立文档结束失败轮次。
 
 临时候选扩容没有命令行覆盖参数，只能通过配置完成。必须按以下顺序操作：
 
-1. 记录原 `candidate_hard_limit`，只修改目标 job 的配置值；续跑平台填写旧、新轮共用的总预算，
-   B站填写新完整轮次的预算。
+1. 记录原 `candidate_hard_limit`，只修改目标 job 的单次 child 预算；不要把历史累计候选数加到
+   临时值中。
 2. 激活项目虚拟环境并校验配置：
 
    ```bash
@@ -129,7 +130,7 @@ B站 article 当前不支持断点续跑。只有停止证据为 `candidate_hard
      >/dev/null
    ```
 
-3. 同步配置，再用目标 job 冻结并核对实际命令；恢复轮还要追加本计划实际使用的恢复参数：
+3. 同步配置，再用目标 job 冻结并核对自动生成的恢复命令：
 
    ```bash
    source .venv/bin/activate

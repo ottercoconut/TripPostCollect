@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import random
@@ -16,6 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from trippostcollect.db.bootstrap import bootstrap_connection
+from trippostcollect.scheduler.discovery import (
+    clear_campaign,
+    load_checkpoint,
+    query_fingerprint,
+    update_campaign,
+)
 from execution_state import FrozenExecutionState
 from failure_classifier import classify_attempt, extract_stdout_json
 from trippostcollect.core.paths import (
@@ -121,6 +128,74 @@ def params_for(row: sqlite3.Row) -> dict[str, Any]:
     return json.loads(row["params_json"] or "{}")
 
 
+def resolve_discovery_args(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    args: argparse.Namespace,
+    *,
+    run_id: str,
+) -> tuple[argparse.Namespace, dict[str, Any] | None]:
+    job_args = copy.copy(args)
+    if row["job_kind"] != "mediacrawler_search":
+        return job_args, None
+
+    params = params_for(row)
+    platform_key = str(params.get("platform") or row["site_key"])
+    keyword = str(args.recovery_keyword or params.get("keyword") or "济南旅游")
+    fingerprint = query_fingerprint(platform_key, keyword, params)
+    checkpoint = load_checkpoint(
+        conn,
+        job_id=int(row["id"]),
+        query_fingerprint_value=fingerprint,
+    )
+    explicit_recovery = bool(args.start_page is not None or args.resume_summary or args.recovery_keyword)
+
+    job_args.discovery_job_id = int(row["id"])
+    job_args.discovery_query_fingerprint = fingerprint
+    job_args.discovery_run_id = run_id
+    job_args.discovery_source_exhausted = False
+    job_args.start_offset = None
+    job_args.start_cursor = None
+    job_args.top_refresh_max_pages = 0
+    job_args.auto_resume = False
+    if checkpoint and not explicit_recovery:
+        summary_value = str(checkpoint.get("last_summary_path") or "")
+        summary_path = Path(summary_value).expanduser() if summary_value else None
+        job_args.start_page = max(1, int(checkpoint.get("resume_page") or 1))
+        job_args.start_offset = checkpoint.get("resume_offset")
+        job_args.start_cursor = checkpoint.get("resume_cursor")
+        job_args.discovery_source_exhausted = checkpoint.get("status") == "exhausted"
+        job_args.top_refresh_max_pages = max(
+            0,
+            int(params.get("top_refresh_max_pages") or 3),
+        )
+        if summary_path:
+            if not summary_path.is_file():
+                raise RuntimeError(
+                    "checkpoint campaign summary is missing: "
+                    f"job={row['job_key']} path={summary_path}"
+                )
+            job_args.resume_summary = str(summary_path.resolve())
+        job_args.auto_resume = True
+
+    plan = {
+        "job_id": int(row["id"]),
+        "platform_key": platform_key,
+        "keyword": keyword,
+        "query_fingerprint": fingerprint,
+        "checkpoint_found": checkpoint is not None,
+        "auto_resume": bool(job_args.auto_resume),
+        "resume_page": int(job_args.start_page or 1),
+        "resume_offset": job_args.start_offset,
+        "resume_cursor": job_args.start_cursor,
+        "source_exhausted": bool(job_args.discovery_source_exhausted),
+        "top_refresh_max_pages": int(job_args.top_refresh_max_pages),
+        "campaign_summary_path": str(job_args.resume_summary or ""),
+        "checkpoint_before": checkpoint,
+    }
+    return job_args, plan
+
+
 def add_flag(command: list[str], flag: str, value: Any | None = None) -> None:
     command.append(flag)
     if value is not None:
@@ -170,10 +245,29 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
             add_flag(command, "--start-page", args.start_page)
         if args.resume_summary:
             add_flag(command, "--resume-summary", args.resume_summary)
+        if getattr(args, "start_offset", None) is not None:
+            add_flag(command, "--start-offset", args.start_offset)
+        if getattr(args, "start_cursor", None):
+            add_flag(command, "--start-cursor", args.start_cursor)
+        add_flag(command, "--discovery-job-id", getattr(args, "discovery_job_id", row["id"]))
+        add_flag(
+            command,
+            "--discovery-query-fingerprint",
+            getattr(args, "discovery_query_fingerprint", ""),
+        )
+        add_flag(command, "--discovery-run-id", getattr(args, "discovery_run_id", ""))
+        add_flag(
+            command,
+            "--top-refresh-max-pages",
+            getattr(args, "top_refresh_max_pages", 0),
+        )
+        if getattr(args, "discovery_source_exhausted", False):
+            command.append("--discovery-source-exhausted")
         if args.headful or (params.get("headless") is False and not args.headless):
             command.append("--headed")
         if args.no_import:
             command.append("--no-import")
+            command.append("--no-checkpoint-write")
     elif kind == "ctf_resource_crawl":
         if url:
             command = [
@@ -313,7 +407,7 @@ def next_run_time(row: sqlite3.Row, classification: dict[str, Any], config: dict
     if status in {"blocked", "login_required", "captcha_detected", "failed_final"}:
         return None
     wait_seconds = int(classification.get("wait_seconds") or 0)
-    if status == "retry_wait":
+    if status == "retry_wait" and not classification.get("checkpoint_progress"):
         return iso(utc_now() + timedelta(seconds=max(60, wait_seconds)))
     schedule_seconds = int(row["schedule_seconds"] or 86400)
     jitter_ratio = float((config.get("defaults") or {}).get("schedule_jitter_ratio") or 0.0)
@@ -361,7 +455,12 @@ def finalize_attempt(
             attempt_id,
         ),
     )
-    failures = 0 if classification["status"] == "completed" else int(row["consecutive_failures"] or 0) + 1
+    made_discovery_progress = bool(classification.get("checkpoint_progress"))
+    failures = (
+        0
+        if classification["status"] == "completed" or made_discovery_progress
+        else int(row["consecutive_failures"] or 0) + 1
+    )
     status = classification["status"]
     if status == "retry_wait" and failures >= int(row["max_attempts"]):
         status = "failed_final"
@@ -487,10 +586,11 @@ def main() -> int:
         jobs = select_due_jobs(conn, args)
         records: list[dict[str, Any]] = []
         for row in jobs:
-            command = build_command(row, args)
+            job_args, discovery_plan = resolve_discovery_args(conn, row, args, run_id=run_id)
+            command = build_command(row, job_args)
             frozen_inputs = [config_path, contract_path]
-            if args.resume_summary:
-                resume_path = Path(args.resume_summary).expanduser().resolve()
+            if getattr(job_args, "resume_summary", None):
+                resume_path = Path(job_args.resume_summary).expanduser().resolve()
                 resume_summary = load_json(resume_path)
                 frozen_inputs.append(resume_path)
                 for record in resume_summary.get("records") or []:
@@ -510,6 +610,7 @@ def main() -> int:
                     "database_path": str(db_path.resolve()),
                     "job_params": params_for(row),
                     "command": command,
+                    "discovery": discovery_plan,
                     "no_import": bool(args.no_import),
                     "dry_run": bool(args.dry_run),
                 },
@@ -561,6 +662,72 @@ def main() -> int:
                 stderr=completed.stderr,
                 meta=meta,
             )
+            child_summary: dict[str, Any] = {}
+            checkpoint_progress = False
+            if (
+                discovery_plan
+                and summary_path
+                and Path(summary_path).is_file()
+                and not args.no_import
+            ):
+                try:
+                    child_summary = load_json(Path(summary_path))
+                except (OSError, json.JSONDecodeError, TypeError):
+                    child_summary = {}
+                checkpoint_after = load_checkpoint(
+                    conn,
+                    job_id=int(row["id"]),
+                    query_fingerprint_value=str(discovery_plan["query_fingerprint"]),
+                )
+                checkpoint_before = discovery_plan.get("checkpoint_before") or {}
+                if checkpoint_after and checkpoint_after.get("last_run_id") == run_id:
+                    before_position = (
+                        checkpoint_before.get(
+                            "resume_page",
+                            discovery_plan.get("resume_page"),
+                        ),
+                        checkpoint_before.get(
+                            "resume_offset",
+                            discovery_plan.get("resume_offset"),
+                        ),
+                        checkpoint_before.get(
+                            "resume_cursor",
+                            discovery_plan.get("resume_cursor"),
+                        ),
+                    )
+                    after_position = (
+                        checkpoint_after.get("resume_page"),
+                        checkpoint_after.get("resume_offset"),
+                        checkpoint_after.get("resume_cursor"),
+                    )
+                    checkpoint_progress = (
+                        after_position != before_position
+                        or checkpoint_after.get("status") == "exhausted"
+                    )
+                    formal_validation = child_summary.get("formal_validation") or {}
+                    import_result_value = child_summary.get("import_result") or {}
+                    imported_target = bool(child_summary.get("import_new_target_met")) and not bool(
+                        import_result_value.get("skipped")
+                    )
+                    if imported_target:
+                        clear_campaign(
+                            conn,
+                            job_id=int(row["id"]),
+                            query_fingerprint_value=str(discovery_plan["query_fingerprint"]),
+                        )
+                    else:
+                        update_campaign(
+                            conn,
+                            job_id=int(row["id"]),
+                            query_fingerprint_value=str(discovery_plan["query_fingerprint"]),
+                            summary_path=str(Path(summary_path).resolve()),
+                            campaign_candidate_count=int(
+                                formal_validation.get("candidate_count") or 0
+                            ),
+                        )
+                    conn.commit()
+            if checkpoint_progress:
+                classification["checkpoint_progress"] = True
             command_evidence = {
                 "exit_code": completed.returncode,
                 "classification": classification,
@@ -609,7 +776,8 @@ def main() -> int:
                     else:
                         state.fail("persistence_verified", error="capture_import_failed", evidence=import_result)
                 elif row["job_kind"] == "mediacrawler_search":
-                    child_summary = load_json(Path(str(summary_path)))
+                    if not child_summary:
+                        child_summary = load_json(Path(str(summary_path)))
                     import_result = dict(child_summary.get("import_result") or {})
                     persistence_ok = bool(child_summary.get("import_new_target_met"))
                     if persistence_ok:

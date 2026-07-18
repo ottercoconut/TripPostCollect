@@ -148,3 +148,37 @@ def test_existing_valid_record_is_update_not_valid_new_target(tmp_path: Path) ->
     assert validation["new_target_met"] is True
     assert imported["inserted_rows"] == 1
     assert imported["updated_rows"] == 1
+
+
+def test_campaign_records_may_exceed_each_run_candidate_budget(tmp_path: Path) -> None:
+    first_path = tmp_path / "first" / "bili" / "jsonl" / "search_contents_1.jsonl"
+    second_path = tmp_path / "second" / "bili" / "jsonl" / "search_contents_2.jsonl"
+    first_path.parent.mkdir(parents=True)
+    second_path.parent.mkdir(parents=True)
+    first_path.write_text(
+        "\n".join(json.dumps(bilibili_record(f"old-{index}")) for index in range(3)) + "\n",
+        encoding="utf-8",
+    )
+    second_path.write_text(
+        "\n".join(json.dumps(bilibili_record(f"new-{index}")) for index in range(3)) + "\n",
+        encoding="utf-8",
+    )
+
+    validation, selected = mediacrawler_crawl.collect_formal_records(
+        {
+            "records": [
+                {"output": {"jsonl_files": [str(first_path)]}},
+                {"output": {"jsonl_files": [str(second_path)]}},
+            ]
+        },
+        candidate_hard_limit=3,
+        target_new_posts=6,
+        db_path=tmp_path / "missing.sqlite",
+        pagination_evidence={"candidate_count": 3, "stopped": True},
+        enforce_candidate_limit=False,
+    )
+
+    assert validation["candidate_count"] == 6
+    assert validation["run_candidate_count"] == 3
+    assert validation["new_target_met"] is True
+    assert len(selected) == 6

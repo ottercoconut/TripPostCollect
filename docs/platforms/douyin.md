@@ -16,8 +16,12 @@
 - 搜索接口每次请求 15 条，offset 必须按 15 递增；响应 `logid` 作为下一页 search ID。
   页级状态记录 page、offset/search ID、原始返回条数和 `has_more`。响应缺少 `data` 是
   运行/风控失败，不得写成数据源耗尽。
-- 当前 `--start-page` 只改变 offset，不会恢复上一进程的 search ID；大于 1 的值不能作为同一
-  关键词的有效断点。抖音在发现游标持久化实现前，只允许通过同城市 `--recovery-keyword` 从
-  第 1 页合并续跑，不得把空 search ID 的深页请求解释为来源耗尽。
+- SQLite checkpoint 同时保存下一 page、offset 和响应 `logid`。自动恢复必须把三者一起传给
+  child；只有 `--start-page` 或 offset、但 search ID 为空时执行器直接拒绝，不能把这种深页
+  请求的空结果解释为来源耗尽。
+- 有 checkpoint 时先用空 cursor 从顶部刷新配置页数，再用保存的三元组进入深层前沿。已知
+  `aweme_id` 在作者主页补全和媒体处理前跳过；顶部刷新不覆盖深层 cursor。
+- 完整响应保存下一 page、`offset + 15` 和下一 `logid`；在目标或候选上限处中途停止时保存当前
+  请求三元组，下一次重取边界批次。未达标摘要自动累计，正常 workflow 不使用人工恢复参数。
 - `data=[]` 但 `has_more=1` 是可继续的空批次，必须携带响应 `logid` 请求下一页并计入连续
   停滞；只有 `has_more=false`、缺失继续游标或达到连续停滞上限时才能停止。

@@ -12,16 +12,16 @@
 - article API 搜索前必须在 MediaCrawler 持久 profile 执行共享行为阶段，并复用该会话
   cookie；行为与请求策略证据缺失时不得入库。
 - 配置中的 job kind 虽为 `mediacrawler_search`，B站内容抓取实际使用项目自有 article API
-  分支，不属于当前支持冻结断点续跑的 MediaCrawler 分页平台。
-- 当前不支持冻结断点续跑。B站新完整轮次的 dry-run 和正式命令均不得传入
-  `--resume-summary`、`--recovery-keyword` 或 `--start-page`，由执行器默认从第 1 页开始。
-  未达标轮次不入库；只有停止证据为 `candidate_hard_limit_reached` 且没有来源耗尽证据时，才按
-  页级证据调整配置中的候选预算，再启动新的完整正式轮次。
-- 旧轮产物及其计数不并入新轮去重集合；新轮从零累计 `candidate_count`、`valid_new_count` 和
-  `valid_existing_count`，其中只有新轮启动时 SQLite 已存在的身份才计入
-  `valid_existing_count`。
-- B站当前按页面是否出现成功归一化且本轮未见的 article ID 累计停滞；这类新 ID 即使后续
-  正式字段校验无效或数据库已有，也会重置停滞页数。该平台例外不改变完成判据，判断是否
+  分支，但与其它通用平台共用 SQLite 发现 checkpoint 和跨次累计摘要。
+- 首次从第 1 页开始；有 checkpoint 时先刷新 `top_refresh_max_pages` 个顶部页，再从
+  `resume_page` 继续。数据库、累计摘要或本次已见的 article ID 在作者粉丝接口前跳过，不消耗
+  单次未知候选预算。
+- 每个完整深层页保存下一页；达到目标或候选上限时若页面尚未处理完，保存当前页，下一次允许
+  重取并靠已知 ID 跳过已持久化边界。空页保存 `status=exhausted`，后续只刷新顶部。
+- 未达标产物不单独入库；runner 自动拼接摘要，累计达到完整目标后一次性导入。人工
+  `--resume-summary` 或 `--start-page` 不是正常 workflow。
+- B站当前按页面是否出现成功归一化且数据库、累计摘要和本轮均未见的 article ID 累计停滞；
+  这类未知 ID 即使后续正式字段校验无效，也会重置停滞页数。该平台例外不改变完成判据，判断是否
   扩容时必须同时检查新 ID 数和有效新增数。
 - 临时调整候选预算必须遵循运行手册的配置校验、`--sync-only`、dry-run、正式执行和恢复原值
-  顺序；dry-run 的实际命令中不得出现任何恢复参数。
+  顺序；候选预算是单次 child 预算，不是跨次累计总额。

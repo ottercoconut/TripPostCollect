@@ -15,13 +15,20 @@ data/trippostcollect.sqlite
 | `db/source_platforms.sql` | `source_platforms` |
 | `db/web_posts.sql` | `web_posts`、`web_post_images` |
 | `db/ctf_captures.sql` | `ctf_captures`、`ctf_capture_images` |
-| `db/crawl_scheduler.sql` | `crawl_jobs`、`crawl_attempts`、`crawl_run_reports`、`profile_health_checks`；任务类型包含通用搜索和页面证据 |
+| `db/crawl_scheduler.sql` | `crawl_jobs`、`crawl_discovery_checkpoints`、`crawl_attempts`、`crawl_run_reports`、`profile_health_checks`；任务类型包含通用搜索和页面证据 |
 | `db/xhs_control.sql` | `xhs_accounts`、`xhs_account_events`、`xhs_account_leases`、`xhs_runs` |
 
 `trippostcollect.db.bootstrap` 是统一实现。通用 runner、小红书 runner、MediaCrawler 入库和
 CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度任务仍只同步到
 `crawl_jobs`，小红书运行与账号状态写入独立 `xhs_*` 表。手工 `--sync-only` 只用于通用
 调度配置的显式刷新或排查。
+
+`crawl_discovery_checkpoints` 是 B站、微博、抖音和知乎正式搜索的控制面记忆，不是内容表。
+`job_id + query_fingerprint` 唯一定位同一来源查询；`resume_page` 保存下一安全页，抖音同时使用
+`resume_offset` 和 `resume_cursor`，`last_summary_path` 指向尚未达到目标的累计摘要，
+`campaign_candidate_count` 保存累计报告数。`status=exhausted` 表示深层来源明确耗尽，后续只做
+顶部刷新。checkpoint 只能在 child 摘要形成后提交；诊断 `--no-import` 不得更新它。内容仍只在
+完整目标达到后写入 `web_posts` / `web_post_images`。
 
 `web_posts` 是统一内容主表，面向用户查询和后续数据使用。`ctf_captures` 是证据和调试底座，面向程序脚本或 Agent 排查抓取过程。页面级抓取成功后，也会归一化生成 `web_posts` 行，并通过 `web_posts.source_capture_id` 关联对应 `ctf_captures.id`。
 
@@ -68,7 +75,9 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 - `published_at` 必须来自平台原始发帖时间；缺明确证据时保持 NULL，不能用 `captured_at` 或导入时间补。
 - 页面级错误页、搜索页、中间页和验证码页只保留证据，不生成用户内容记录。
 - `web_posts` 面向用户查询；`ctf_captures` 面向证据和调试。不要让用户内容只停留在 `ctf_captures`。
-- 正式结构化任务必须配置 `candidate_hard_limit`、`target_new_posts` 和字段 profile；只有 `valid_new_count >= target_new_posts` 且实际新增行数达标才算达到本轮目标。
+- 正式结构化任务必须配置 `candidate_hard_limit`、`target_new_posts`、`top_refresh_max_pages` 和字段
+  profile；候选上限是每次 child 的未知候选预算。只有跨次累计的
+  `valid_new_count >= target_new_posts` 且实际新增行数达标才算达到完整目标。
 - 固定 URL 页面证据任务只代表一个页面。以后若新增正式任务，必须在
   `config/crawl_targets.json` 声明 `job_kind=ctf_resource_crawl` 并从 `crawl_runner.py` 进入。
 
@@ -262,7 +271,7 @@ PY
 | `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎搜索结果 `author.follower_count` 归一后的 `followers_count` |
 | `published_at` | 发帖时间，统一保存为 Asia/Shanghai ISO 字符串，如 `2024-04-06T15:35:00+08:00`。优先取平台原始发布时间字段，如 `create_time`、`publish_time`、`time`、`datePublished`；`captured_at` 只表示本项目抓取时间 |
 | `city_name` | 从检索关键词匹配山东 16 市名称或别名，如 `济南旅游`、`烟台旅游` 分别写入 `济南市`、`烟台市`；不从正文内容反推城市 |
-| `keyword` | 优先保存每条记录的 `source_keyword`；缺失时回退到最终执行摘要的 `keyword`，即本次 child 命令实际使用的检索词。当前微博、抖音和知乎 store 会逐条写入 `source_keyword`，正常恢复产物因此能保留原词和恢复词；旧记录缺少该字段时，回退值不能作为其原始检索词证据 |
+| `keyword` | 优先保存每条记录的 `source_keyword`；缺失时回退到最终执行摘要的 `keyword`，即本次 child 命令实际使用的检索词。当前通用结构化 store 会逐条写入 `source_keyword`；自动 checkpoint 延续同一查询词，显式 `--recovery-keyword` 才会产生恢复词。旧记录缺少该字段时，回退值不能作为其原始检索词证据 |
 | `post_likes_count` | `liked_count`、知乎 `voteup_count` |
 | `post_favorites_count` | `collected_count` 等收藏字段 |
 | `post_comments_count` | `comment_count`、`comments_count` 等评论字段 |
@@ -273,7 +282,7 @@ PY
 
 代码只在导入边界识别不同平台对同类指标的字段名差异，内部持久化结构统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
 
-微博、抖音和知乎使用同城市 `--recovery-keyword` 续跑时，最终摘要会合并旧、新两轮记录，
+显式使用同城市 `--recovery-keyword` 人工续跑时，最终摘要会合并旧、新两轮记录，
 正常记录的 `web_posts.keyword` 会逐条保存真实来源，因此同一个最终 `artifact_dir` 可以同时
 出现原关键词和恢复关键词。若旧记录缺少 `source_keyword`，必须结合原摘要和 JSONL 审计，
 不能把回退到最终摘要的值解释成原始检索词。

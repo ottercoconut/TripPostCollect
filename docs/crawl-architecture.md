@@ -5,6 +5,7 @@
 ```text
 config/crawl_targets.json
   -> scripts/crawl_runner.py
+      -> SQLite crawl_discovery_checkpoints
       -> data/runtime/crawl_execution_states/<run_id>/<job>.json
       -> scripts/mediacrawler_crawl.py
           -> scripts/crawl_policy.py
@@ -59,11 +60,19 @@ Runner、执行器和登录/诊断输出的 UTC 运行标识统一包含六位�
 后的阶段保持冻结。
 
 MediaCrawler 的自适应分页会向同一状态文件追加批次事件，包括实际候选、有效唯一数、
-本批新增、连续停滞次数、平台页码、游标/search ID、原始返回条数和 `has_more`。循环按
+本批新增、连续停滞次数、平台页码、游标/search ID、下一恢复位置、批次完整性、发现阶段、
+原始返回条数和 `has_more`。循环按
 实际候选累计，不按名义页大小预先换算最大页数。空页或 `has_more=false` 才能生成
 `source_exhausted`；请求异常生成 `runtime_failed`；缺少停止事件时执行器不得猜测数据源
 已经耗尽。连续停滞按本批没有新增有效且数据库中不存在的记录计算；新的无效候选和数据库
 已有记录不会重置停滞计数。状态事件是过程证据，最终成功仍以正式校验和数据库验证为准。
+
+通用结构化任务的发现位置保存在 `crawl_discovery_checkpoints`，唯一键是任务 ID 与查询指纹。
+runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并传入页码；抖音额外传入 offset
+和 opaque search ID。child 先做有限顶部刷新，再走深层前沿；顶部刷新不覆盖 checkpoint。
+执行器完成摘要构造后，从最后一条前沿事件提交下一恢复位置，runner 再把本次摘要路径写回
+checkpoint。这个提交顺序保证游标不会先于可累计产物前移。达到完整入库目标后只清空累计摘要，
+不删除发现位置。小红书独立 runner 当前不读写该表。
 
 ## 结构化平台
 

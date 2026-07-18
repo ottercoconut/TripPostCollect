@@ -11,5 +11,9 @@
 - 缺失粉丝字段不得使用模型默认 0 通过校验。
 - 图片来源：正文 HTML 中的正文图片，公式图片不计入。
 - 去重键：内容 ID；answer URL 同时包含 question ID。
+- 有 checkpoint 时先刷新配置的顶部页，再从保存页码继续。已知内容 ID 不再写入当前 JSONL；
+  完整页保存下一页，页面中途停止保存当前页，顶部刷新不推进深层 checkpoint。
+- 未达标摘要由 runner 自动累计，达到完整目标后一次性入库；正常 workflow 不使用人工
+  `--start-page` 或 `--resume-summary`。
 - 首页、cookie reload 和搜索页导航的 `domcontentloaded` 超时为软失败；继续用已验证 cookie
   和 API client 检查。最终 API/字段失败仍按正式状态报告，不能仅因导航超时宣布失败或成功。

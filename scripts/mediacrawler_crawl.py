@@ -46,6 +46,7 @@ from trippostcollect.core.paths import (
 )
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.registry import get_site
+from trippostcollect.scheduler.discovery import save_checkpoint
 from browser_runtime import browser_launch_environment, browser_runtime_args
 
 
@@ -218,7 +219,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-stagnant-batches", type=int, default=3)
     parser.add_argument("--start-page", type=int, default=1, help="Recovery-only first platform page.")
+    parser.add_argument("--start-offset", type=int, default=0, help="Saved platform offset for the discovery frontier.")
+    parser.add_argument("--start-cursor", default="", help="Saved opaque platform cursor for the discovery frontier.")
     parser.add_argument("--resume-summary", help="Recovery-only prior summary whose JSONL records join this run.")
+    parser.add_argument("--discovery-job-id", type=int)
+    parser.add_argument("--discovery-query-fingerprint")
+    parser.add_argument("--discovery-run-id")
+    parser.add_argument("--top-refresh-max-pages", type=int, default=0)
+    parser.add_argument("--discovery-source-exhausted", action="store_true")
+    parser.add_argument("--no-checkpoint-write", action="store_true")
     parser.add_argument("--no-import", action="store_true", help="Do not import MediaCrawler JSONL records into SQLite.")
     return parser.parse_args()
 
@@ -1245,6 +1254,11 @@ PAGINATION_EVENT_FIELDS = (
     "source_offset",
     "source_cursor",
     "next_cursor",
+    "resume_page",
+    "resume_offset",
+    "resume_cursor",
+    "batch_complete",
+    "discovery_phase",
     "source_has_more",
     "raw_batch_count",
     "raw_response_count",
@@ -1252,6 +1266,77 @@ PAGINATION_EVENT_FIELDS = (
     "stop_reason",
     "stop_detail",
 )
+
+
+def persist_discovery_checkpoint(
+    args: argparse.Namespace,
+    platform_key: str,
+    pagination_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    if args.discovery_job_id is None:
+        return {"skipped": True, "reason": "not_scheduler_managed"}
+    if args.no_checkpoint_write:
+        return {"skipped": True, "reason": "checkpoint_write_disabled"}
+    event = pagination_evidence.get("stop_event") or (
+        (pagination_evidence.get("batches") or [None])[-1]
+    )
+    if not isinstance(event, dict):
+        return {"skipped": True, "reason": "no_frontier_batch_evidence"}
+    refresh_only = event.get("discovery_phase") == "refresh"
+    if refresh_only:
+        resume_page = int(args.start_page)
+        resume_offset = (
+            int(args.start_offset)
+            if platform_key == "douyin" and args.start_offset is not None
+            else None
+        )
+        resume_cursor = (
+            (str(args.start_cursor or "") or None)
+            if platform_key == "douyin"
+            else None
+        )
+        source_has_more_value = False if args.discovery_source_exhausted else None
+    else:
+        resume_page = int(
+            event.get("resume_page") or event.get("source_page") or args.start_page
+        )
+        resume_offset_value = event.get("resume_offset")
+        resume_offset = (
+            int(resume_offset_value)
+            if resume_offset_value not in (None, "")
+            else None
+        )
+        resume_cursor = str(event.get("resume_cursor") or "") or None
+        source_has_more_value = event.get("source_has_more")
+    source_has_more = (
+        None if source_has_more_value is None else bool(source_has_more_value)
+    )
+    with sqlite3.connect(Path(args.db).expanduser()) as conn:
+        bootstrap_connection(conn, sync_content=False, sync_jobs=False)
+        save_checkpoint(
+            conn,
+            job_id=int(args.discovery_job_id),
+            platform_key=platform_key,
+            keyword=args.keyword,
+            query_fingerprint_value=str(args.discovery_query_fingerprint),
+            resume_page=resume_page,
+            resume_offset=resume_offset,
+            resume_cursor=resume_cursor,
+            source_has_more=source_has_more,
+            last_batch_complete=bool(event.get("batch_complete")),
+            last_stop_reason=str(event.get("stop_reason") or "continue"),
+            last_run_id=str(args.discovery_run_id),
+        )
+        conn.commit()
+    return {
+        "skipped": False,
+        "resume_page": resume_page,
+        "resume_offset": resume_offset,
+        "resume_cursor": resume_cursor,
+        "source_has_more": source_has_more,
+        "last_stop_reason": str(event.get("stop_reason") or "continue"),
+        "refresh_only": refresh_only,
+    }
 
 
 def load_existing_formal_identities(db_path: str | Path | None) -> set[str]:
@@ -1325,6 +1410,7 @@ def collect_formal_records(
     target_new_posts: int,
     db_path: str | Path | None,
     pagination_evidence: dict[str, Any] | None = None,
+    enforce_candidate_limit: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     seen: set[str] = set()
     selected: list[dict[str, Any]] = []
@@ -1344,7 +1430,7 @@ def collect_formal_records(
             platform_key = platform_from_path(path)
             with path.open("r", encoding="utf-8", errors="replace") as handle:
                 for line_number, line in enumerate(handle, start=1):
-                    if candidate_count >= candidate_hard_limit:
+                    if enforce_candidate_limit and candidate_count >= candidate_hard_limit:
                         stop = True
                         break
                     text = line.strip()
@@ -1390,11 +1476,14 @@ def collect_formal_records(
 
     output_record_count = candidate_count
     pagination_evidence = pagination_evidence or {}
-    candidate_count = max(candidate_count, int(pagination_evidence.get("candidate_count") or 0))
+    run_candidate_count = int(pagination_evidence.get("candidate_count") or 0)
+    candidate_count = max(candidate_count, run_candidate_count)
     new_target_met = target_new_posts <= 0 or valid_new_count >= target_new_posts
     if new_target_met and target_new_posts > 0:
         stop_reason = "target_new_met"
-    elif candidate_count >= candidate_hard_limit:
+    elif run_candidate_count >= candidate_hard_limit or (
+        enforce_candidate_limit and candidate_count >= candidate_hard_limit
+    ):
         stop_reason = "candidate_hard_limit_reached"
     elif pagination_evidence.get("stopped") and pagination_evidence.get("stop_reason") in {
         "source_exhausted",
@@ -1409,6 +1498,7 @@ def collect_formal_records(
     validation_summary = {
         "candidate_hard_limit": candidate_hard_limit,
         "candidate_count": candidate_count,
+        "run_candidate_count": run_candidate_count,
         "output_record_count": output_record_count,
         "target_new_posts": target_new_posts,
         "valid_new_count": valid_new_count,
@@ -1681,142 +1771,194 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     returncode = 0
     behavior_evidence: dict[str, Any] = load_behavior_evidence(behavior_evidence_path)
     try:
-        max_records = args.candidate_hard_limit
-        target_new = max(1, int(args.target_new_posts or max_records))
+        max_records = int(
+            getattr(args, "source_candidate_hard_limit", args.candidate_hard_limit)
+        )
+        target_new = max(
+            1,
+            int(getattr(args, "source_target_new_posts", args.target_new_posts) or max_records),
+        )
         existing_identities = load_existing_formal_identities(args.db)
+        known_post_ids = {
+            identity.split(":id:", 1)[1]
+            for identity in existing_identities
+            if identity.startswith("bilibili:id:")
+        }
+        if args.resume_identities_path:
+            try:
+                resume_values = json.loads(
+                    Path(args.resume_identities_path).read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError, TypeError):
+                resume_values = []
+            known_post_ids.update(str(value) for value in resume_values if value)
         cookie_export, behavior_evidence = asyncio.run(
             run_bilibili_behavior_session(args, behavior_evidence_path)
         )
         cookie_header = str((cookie_export or {}).get("cookie_header") or "")
         wbi_keys = fetch_bilibili_wbi_keys(cookie_header)
-        page = 1
-        while candidate_count < max_records:
-            page_items = fetch_bilibili_article_page(
-                args.keyword,
-                page,
-                wbi_keys=wbi_keys,
-                cookie_header=cookie_header,
+        frontier_start = max(1, int(args.start_page))
+        phases: list[tuple[str, int, int | None]] = []
+        if frontier_start > 1 and args.top_refresh_max_pages > 0:
+            phases.append(
+                ("refresh", 1, min(frontier_start - 1, args.top_refresh_max_pages))
             )
-            if not page_items:
-                if state_path:
-                    FrozenExecutionState(state_path).append_event(
-                        "adaptive_search_stopped",
-                        {
-                            "platform": platform_key,
-                            "candidate_count": candidate_count,
-                            "valid_new_count": valid_new_count,
-                            "valid_existing_count": valid_existing_count,
-                            "target_new": target_new,
-                            "hard_limit": max_records,
-                            "stagnant_batches": stagnant_pages,
-                            "stop_reason": "source_exhausted",
-                            "stop_detail": "empty_page",
-                            "pages_fetched": page - 1,
-                            "source_page": page,
-                            "raw_batch_count": 0,
-                        },
-                    )
-                break
-            new_before = valid_new_count
-            seen_before = len(seen_ids)
-            processed_in_batch = 0
-            for item in page_items:
-                if candidate_count >= max_records:
-                    break
-                candidate_count += 1
-                processed_in_batch += 1
-                normalized = normalize_bilibili_article_record(item, args.keyword)
-                if not normalized:
-                    continue
-                creator_id = str(normalized.get("user_id") or "")
-                if creator_id:
-                    if creator_id not in follower_cache:
-                        try:
-                            follower_cache[creator_id] = fetch_bilibili_follower_count(creator_id, cookie_header)
-                        except Exception:
-                            follower_cache[creator_id] = None
-                        time.sleep(0.15)
-                    follower_count = follower_cache[creator_id]
-                    normalized["followers_observed"] = follower_count is not None
-                    normalized["author_followers_source"] = (
-                        "relation_stat" if follower_count is not None else "missing"
-                    )
-                    if follower_count is not None:
-                        normalized["followers_count"] = follower_count
-                        normalized["author_followers_count"] = follower_count
-                post_id = str(normalized.get("content_id") or "")
-                if post_id in seen_ids:
-                    continue
-                seen_ids.add(post_id)
-                records.append(normalized)
-                validation = validate_formal_record(platform_key, normalized, valid_seen)
-                if validation["valid"]:
-                    identity = str(validation["identity"])
-                    valid_seen.add(identity)
-                    if formal_database_identities(platform_key, normalized) & existing_identities:
-                        valid_existing_count += 1
-                    else:
-                        valid_new_count += 1
-                if candidate_count >= max_records or valid_new_count >= target_new:
-                    break
-            candidate_identities_added = len(seen_ids) - seen_before
-            stagnant_pages = stagnant_pages + 1 if candidate_identities_added == 0 else 0
-            if valid_new_count >= target_new:
-                batch_stop_reason = "target_new_met"
-            elif candidate_count >= max_records:
-                batch_stop_reason = "candidate_hard_limit_reached"
-            elif stagnant_pages >= max(1, args.max_stagnant_batches):
-                batch_stop_reason = "stagnated"
-            else:
-                batch_stop_reason = "continue"
-            if state_path:
-                frozen_state = FrozenExecutionState(state_path)
-                frozen_state.append_event(
-                    "adaptive_batch_completed",
-                    {
-                        "platform": platform_key,
-                        "batch_no": page,
-                        "candidate_count": candidate_count,
-                        "valid_new_count": valid_new_count,
-                        "valid_existing_count": valid_existing_count,
-                        "batch_new_count": valid_new_count - new_before,
-                        "batch_candidate_identity_count": candidate_identities_added,
-                        "stagnant_batches": stagnant_pages,
-                        "target_new": target_new,
-                        "hard_limit": max_records,
-                        "stop_reason": batch_stop_reason,
-                        "source_page": page,
-                        "source_has_more": None,
-                        "raw_batch_count": processed_in_batch,
-                        "raw_response_count": len(page_items),
-                    },
+        if not args.discovery_source_exhausted:
+            phases.append(("frontier", frontier_start, None))
+
+        stop_all = False
+        for discovery_phase, phase_start, phase_end in phases:
+            page = phase_start
+            while not stop_all and (phase_end is None or page <= phase_end):
+                page_items = fetch_bilibili_article_page(
+                    args.keyword,
+                    page,
+                    wbi_keys=wbi_keys,
+                    cookie_header=cookie_header,
                 )
+                if not page_items:
+                    if discovery_phase == "frontier" and state_path:
+                        FrozenExecutionState(state_path).append_event(
+                            "adaptive_search_stopped",
+                            {
+                                "platform": platform_key,
+                                "candidate_count": candidate_count,
+                                "valid_new_count": valid_new_count,
+                                "valid_existing_count": valid_existing_count,
+                                "target_new": target_new,
+                                "hard_limit": max_records,
+                                "stagnant_batches": stagnant_pages,
+                                "stop_reason": "source_exhausted",
+                                "stop_detail": "empty_page",
+                                "source_page": page,
+                                "resume_page": page,
+                                "source_has_more": False,
+                                "batch_complete": True,
+                                "discovery_phase": discovery_phase,
+                                "raw_batch_count": 0,
+                                "raw_response_count": 0,
+                            },
+                        )
+                    break
+                new_before = valid_new_count
+                seen_before = len(seen_ids)
+                processed_in_batch = 0
+                batch_complete = True
+                for item_index, item in enumerate(page_items):
+                    post_id = str(item.get("id") or "").strip()
+                    if post_id and (post_id in known_post_ids or post_id in seen_ids):
+                        continue
+                    if candidate_count >= max_records:
+                        batch_complete = False
+                        break
+                    candidate_count += 1
+                    processed_in_batch += 1
+                    normalized = normalize_bilibili_article_record(item, args.keyword)
+                    if not normalized:
+                        continue
+                    post_id = str(normalized.get("content_id") or "")
+                    if post_id in seen_ids:
+                        continue
+                    creator_id = str(normalized.get("user_id") or "")
+                    if creator_id:
+                        if creator_id not in follower_cache:
+                            try:
+                                follower_cache[creator_id] = fetch_bilibili_follower_count(
+                                    creator_id,
+                                    cookie_header,
+                                )
+                            except Exception:
+                                follower_cache[creator_id] = None
+                            time.sleep(0.15)
+                        follower_count = follower_cache[creator_id]
+                        normalized["followers_observed"] = follower_count is not None
+                        normalized["author_followers_source"] = (
+                            "relation_stat" if follower_count is not None else "missing"
+                        )
+                        if follower_count is not None:
+                            normalized["followers_count"] = follower_count
+                            normalized["author_followers_count"] = follower_count
+                    seen_ids.add(post_id)
+                    known_post_ids.add(post_id)
+                    records.append(normalized)
+                    validation = validate_formal_record(platform_key, normalized, valid_seen)
+                    if validation["valid"]:
+                        identity = str(validation["identity"])
+                        valid_seen.add(identity)
+                        if formal_database_identities(platform_key, normalized) & existing_identities:
+                            valid_existing_count += 1
+                        else:
+                            valid_new_count += 1
+                    if candidate_count >= max_records or valid_new_count >= target_new:
+                        batch_complete = item_index == len(page_items) - 1
+                        break
+                candidate_identities_added = len(seen_ids) - seen_before
+                if discovery_phase == "frontier":
+                    stagnant_pages = stagnant_pages + 1 if candidate_identities_added == 0 else 0
+                if valid_new_count >= target_new:
+                    batch_stop_reason = "target_new_met"
+                elif candidate_count >= max_records:
+                    batch_stop_reason = "candidate_hard_limit_reached"
+                elif (
+                    discovery_phase == "frontier"
+                    and stagnant_pages >= max(1, args.max_stagnant_batches)
+                ):
+                    batch_stop_reason = "stagnated"
+                else:
+                    batch_stop_reason = "continue"
+                resume_page = page + 1 if batch_complete else page
+                event_details = {
+                    "platform": platform_key,
+                    "batch_no": page,
+                    "candidate_count": candidate_count,
+                    "valid_new_count": valid_new_count,
+                    "valid_existing_count": valid_existing_count,
+                    "batch_new_count": valid_new_count - new_before,
+                    "batch_candidate_identity_count": candidate_identities_added,
+                    "stagnant_batches": stagnant_pages,
+                    "target_new": target_new,
+                    "hard_limit": max_records,
+                    "stop_reason": batch_stop_reason,
+                    "source_page": page,
+                    "resume_page": resume_page,
+                    "source_has_more": None,
+                    "batch_complete": batch_complete,
+                    "discovery_phase": discovery_phase,
+                    "raw_batch_count": processed_in_batch,
+                    "raw_response_count": len(page_items),
+                }
+                if state_path:
+                    frozen_state = FrozenExecutionState(state_path)
+                    frozen_state.append_event("adaptive_batch_completed", event_details)
+                    if batch_stop_reason != "continue":
+                        frozen_state.append_event("adaptive_search_stopped", event_details)
                 if batch_stop_reason != "continue":
-                    frozen_state.append_event(
-                        "adaptive_search_stopped",
-                        {
-                            "platform": platform_key,
-                            "candidate_count": candidate_count,
-                            "valid_new_count": valid_new_count,
-                            "valid_existing_count": valid_existing_count,
-                            "target_new": target_new,
-                            "hard_limit": max_records,
-                            "stagnant_batches": stagnant_pages,
-                            "stop_reason": batch_stop_reason,
-                            "pages_fetched": page,
-                            "source_page": page,
-                            "source_has_more": None,
-                            "raw_batch_count": processed_in_batch,
-                            "raw_response_count": len(page_items),
-                        },
-                    )
-            if (
-                candidate_count >= max_records
-                or valid_new_count >= target_new
-                or stagnant_pages >= max(1, args.max_stagnant_batches)
-            ):
-                break
-            page += 1
+                    stop_all = True
+                    break
+                page += 1
+
+        if (not phases or (args.discovery_source_exhausted and not stop_all)) and state_path:
+            FrozenExecutionState(state_path).append_event(
+                "adaptive_search_stopped",
+                {
+                    "platform": platform_key,
+                    "candidate_count": candidate_count,
+                    "valid_new_count": valid_new_count,
+                    "valid_existing_count": valid_existing_count,
+                    "target_new": target_new,
+                    "hard_limit": max_records,
+                    "stagnant_batches": stagnant_pages,
+                    "stop_reason": "source_exhausted",
+                    "stop_detail": "saved_source_exhausted",
+                    "source_page": frontier_start,
+                    "resume_page": frontier_start,
+                    "source_has_more": False,
+                    "batch_complete": True,
+                    "discovery_phase": "frontier",
+                    "raw_batch_count": 0,
+                    "raw_response_count": 0,
+                },
+            )
     except Exception as exc:
         returncode = 1
         stderr = repr(exc)
@@ -1829,8 +1971,11 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "candidate_count": candidate_count,
                     "valid_new_count": valid_new_count,
                     "valid_existing_count": valid_existing_count,
-                    "target_new": max(1, int(args.target_new_posts or args.candidate_hard_limit)),
-                    "hard_limit": args.candidate_hard_limit,
+                    "target_new": locals().get(
+                        "target_new",
+                        max(1, int(args.target_new_posts or args.candidate_hard_limit)),
+                    ),
+                    "hard_limit": locals().get("max_records", args.candidate_hard_limit),
                     "stagnant_batches": stagnant_pages,
                     "stop_reason": "runtime_failed",
                     "stop_detail": type(exc).__name__,
@@ -1934,6 +2079,30 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "TRIPPOSTCOLLECT_DB_PATH": str(Path(args.db).expanduser().resolve()),
         **behavior_environment(behavior_evidence_path, args.behavior_profile),
     }
+    if args.discovery_job_id is not None:
+        extra_env.update(
+            {
+                "TRIPPOSTCOLLECT_DISCOVERY_JOB_ID": str(args.discovery_job_id),
+                "TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT": str(
+                    args.discovery_query_fingerprint or ""
+                ),
+                "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID": str(args.discovery_run_id or ""),
+                "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM": platform_key,
+                "TRIPPOSTCOLLECT_DISCOVERY_KEYWORD": args.keyword,
+                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE": str(args.start_page),
+                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET": str(args.start_offset),
+                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR": str(args.start_cursor or ""),
+                "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES": str(
+                    args.top_refresh_max_pages
+                ),
+                "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED": (
+                    "1" if args.discovery_source_exhausted else "0"
+                ),
+                "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED": (
+                    "1" if args.no_checkpoint_write else "0"
+                ),
+            }
+        )
     if args.resume_identities_path:
         extra_env["TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH"] = args.resume_identities_path
     login_state: dict[str, Any] | None = None
@@ -2353,12 +2522,29 @@ def main() -> int:
         raise SystemExit("--target-new-posts must be positive unless --no-import is used")
     if args.start_page <= 0:
         raise SystemExit("--start-page must be positive")
-    if args.start_page > 1 and not args.resume_summary:
+    if args.start_offset < 0 or args.top_refresh_max_pages < 0:
+        raise SystemExit("--start-offset and --top-refresh-max-pages cannot be negative")
+    discovery_values = (
+        args.discovery_job_id,
+        args.discovery_query_fingerprint,
+        args.discovery_run_id,
+    )
+    if any(value not in (None, "") for value in discovery_values) and not all(
+        value not in (None, "") for value in discovery_values
+    ):
+        raise SystemExit("discovery job id, query fingerprint and run id must be supplied together")
+    if args.no_import:
+        args.no_checkpoint_write = True
+    if args.start_page > 1 and not args.resume_summary and args.discovery_job_id is None:
         raise SystemExit("--start-page greater than 1 requires --resume-summary")
     if args.get_media:
         raise SystemExit("--get-media 已禁用：当前项目只采集图文内容和图片 URL，不下载媒体或视频。")
     ensure_prerequisites()
     platforms = selected_platforms(args.platforms)
+    if "douyin" in platforms and args.start_page > 1 and not args.start_cursor:
+        raise SystemExit(
+            "Douyin continuation requires --start-cursor together with --start-page"
+        )
     if "xhs" in platforms:
         if len(platforms) != 1:
             raise SystemExit("XHS must run alone through scripts/xhs_runner.py")
@@ -2374,8 +2560,6 @@ def main() -> int:
         raise SystemExit("--xhs-post-interaction is only supported for XHS")
     elif args.behavior_profile != "social_high_risk":
         raise SystemExit("generic MediaCrawler platforms require --behavior-profile social_high_risk")
-    if args.resume_summary and "bilibili" in platforms:
-        raise SystemExit("--resume-summary is only supported for MediaCrawler-backed platforms")
     if args.download_images and any(platform != "xhs" for platform in platforms):
         raise SystemExit("--download-images 目前只允许 xhs：其他平台可能混入视频媒体。")
     resume_records: list[dict[str, Any]] = []
@@ -2407,6 +2591,7 @@ def main() -> int:
             candidate_hard_limit=candidate_hard_limit,
             target_new_posts=0,
             db_path=args.db,
+            enforce_candidate_limit=False,
         )
         prior_new_count = int(resume_validation.get("valid_new_count") or 0)
         resume_identity_values = [
@@ -2427,17 +2612,14 @@ def main() -> int:
         remaining_target = max(0, target_new_posts - prior_new_count)
         if remaining_target == 0:
             raise SystemExit("--resume-summary already meets the configured new-post target")
-        remaining_candidates = candidate_hard_limit - consumed_candidates
-        if remaining_candidates <= 0:
-            raise SystemExit("--resume-summary already consumed the candidate hard limit")
         args.source_target_new_posts = remaining_target
-        args.source_candidate_hard_limit = remaining_candidates
+        args.source_candidate_hard_limit = candidate_hard_limit
         resume_info = {
             "summary_path": str(resume_path),
             "valid_new_count": prior_new_count,
             "candidate_count": consumed_candidates,
             "remaining_target_new_posts": remaining_target,
-            "remaining_candidate_hard_limit": remaining_candidates,
+            "run_candidate_hard_limit": candidate_hard_limit,
             "start_page": args.start_page,
         }
 
@@ -2484,6 +2666,7 @@ def main() -> int:
         target_new_posts=target_new_posts,
         db_path=args.db,
         pagination_evidence=pagination_evidence,
+        enforce_candidate_limit=not bool(resume_info),
     )
     validation["content_new_target_met"] = bool(validation.get("new_target_met"))
     validation["behavior_evidence_ok"] = bool(behavior_validation.get("behavior_ok"))
@@ -2529,10 +2712,34 @@ def main() -> int:
         )
     summary_path = batch_dir / "summary.json"
     report_path = batch_dir / "summary.md"
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    checkpoint_ok = True
+    try:
+        summary["discovery_checkpoint"] = persist_discovery_checkpoint(
+            args,
+            platforms[0],
+            pagination_evidence,
+        )
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        checkpoint_ok = False
+        summary["discovery_checkpoint"] = {
+            "skipped": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        summary["failure_reason"] = "discovery_checkpoint_write_failed"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     write_markdown(summary, report_path)
     print(json.dumps({"summary": str(summary_path), "report": str(report_path), "batch_dir": str(batch_dir), **summary}, ensure_ascii=False, indent=2))
-    return 0 if summary["failed_count"] == 0 and summary["import_new_target_met"] else 2
+    return (
+        0
+        if summary["failed_count"] == 0
+        and summary["import_new_target_met"]
+        and checkpoint_ok
+        else 2
+    )
 
 
 if __name__ == "__main__":

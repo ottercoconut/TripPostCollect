@@ -60,13 +60,14 @@ B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
 
 ## 数量定义
 
-- `candidate_hard_limit`：本轮允许处理的实际原始候选总数。按实际返回记录计数，
-  不是底层请求参数的同义词。
+- `candidate_hard_limit`：单次 child 执行允许进入字段校验的未知原始候选上限，不是跨多次
+  续跑活动的总预算，也不是底层请求参数的同义词。数据库、当前累计摘要或本次已见集合中
+  已知的平台 ID 会在详情、作者补全和媒体处理前跳过，不消耗该预算。
 - `target_new_posts`：本轮必须取得并实际新增到 SQLite 的唯一有效图文数。
 - `valid_new_count`：完成视频过滤、平台 ID 去重、必需字段校验和作者字段补全后，且
   SQLite 中不存在相同平台 ID（缺失时按规范 URL）的记录数。
-- `valid_existing_count`：字段校验有效、但 SQLite 已有对应记录的数量；它们可以刷新，
-  但不计入 `target_new_posts`。
+- `valid_existing_count`：本次产物中完成字段校验、但 SQLite 已有对应记录的数量；它们不计入
+  `target_new_posts`。发现阶段提前识别并跳过的已知 ID 不进入本计数。
 - `processed_rows`：执行过入库 upsert 的行数，不表示新增数或有效数。
 - `inserted_rows` / `updated_rows`：数据库新增和更新数量，必须分别报告。
   `updated_rows` 表示相同平台 ID（缺失时用规范 URL）已存在，本轮用最新字段覆盖该行并
@@ -111,7 +112,7 @@ Agent 临场判断。
 - 当前配置文件；
 - 本执行契约；
 - 任务参数和实际命令；
-- 断点续跑时使用的上一轮 `summary.json` 及其全部内容 JSONL。
+- 自动或人工跨次累计时使用的上一轮 `summary.json` 及其全部内容 JSONL。
 
 阶段固定为：
 
@@ -138,8 +139,9 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 - `stagnated`：微博、抖音、知乎和小红书按连续配置批次没有新增满足正式字段 profile 且
   数据库中不存在的唯一记录累计。新的无效候选、重复候选和数据库已有记录都不能重置这些
   平台的停滞计数；批次事件仍分别记录新候选 ID 数和有效新增数，供定位分页进展与字段失败。
-  B站当前自有 article 实现是明确例外：它按页面是否出现成功归一化且本轮未见的 article ID
-  累计停滞；这类新 ID 即使后续正式字段校验无效或数据库已有，也会重置停滞计数。该例外不
+  B站当前自有 article 实现是明确例外：它按页面是否出现成功归一化且不在数据库、累计摘要或
+  本次已见集合中的 article ID 累计停滞；这类未知 ID 即使后续正式字段校验无效，也会重置
+  停滞计数。该例外不
   放宽完成标准，仍只有有效新增达到目标才算完成；判断 B站是否值得扩容时必须同时读取新 ID
   数和有效新增数。
 - `login_required` / `captcha_detected`：登录或验证阻断。
@@ -148,35 +150,40 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 除 `target_new_met` 外，其余状态都不能汇报为正式结构化轮次完成。固定 URL 页面任务的成功
 仍只代表该页面证据完成，不代表平台批量目标完成。
 
-每个分页批次必须记录平台页码、请求游标或 search ID（平台提供时）、下一游标、原始
-返回条数和 `has_more`（平台提供时）。仅有一条或多条 `adaptive_batch_completed`、但没有
+每个分页批次必须记录平台页码、请求游标或 search ID（平台提供时）、下一游标、可恢复的
+下一页/offset/cursor、批次是否完整、发现阶段、原始返回条数和 `has_more`（平台提供时）。
+仅有一条或多条 `adaptive_batch_completed`、但没有
 `adaptive_search_stopped` 的任务，不得推断为 `source_exhausted`；目标未达成时统一按
 `runtime_failed` 处理。分页循环以实际候选累计到 `candidate_hard_limit` 为边界，不得用
 “页数 × 名义页大小”提前截断。
 
-## 断点续跑
+## 持久化发现记忆与跨次累计
 
-当前 `--resume-summary` 只支持微博、抖音和知乎这三个由底层 MediaCrawler 分页执行的
-`mediacrawler_search` 任务。它们在接近目标时因字段差异、运行异常或单关键词耗尽而未入库，
-可以通过调度器冻结并合并上一轮摘要和 JSONL，将上一轮通过正式校验的新增及已有记录 ID 注入
-底层去重集合，并只抓剩余新增目标和候选预算。微博和知乎可以用 `--start-page` 继续同一关键词
-后续页；抖音后续页同时依赖上一响应的 search ID，当前执行器没有跨进程恢复该 search ID，
-所以抖音不得用大于 1 的 `--start-page` 做同词续跑，只能用 `--recovery-keyword` 切换到能归一为
-同一城市的补充关键词并从第 1 页开始。最终校验必须同时读取旧、新两轮产物，达到完整
-`target_new_posts` 后一次性入库；不得把未达标的部分产物单独导入。
+B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由调度器自动维护发现记忆。SQLite
+`crawl_discovery_checkpoints` 以 `job_id + query_fingerprint` 唯一定位；指纹包含平台、关键词和
+影响来源结果的查询参数，不包含候选上限、目标数、超时、登录和顶部刷新页数。关键词或来源
+查询参数改变时必须形成新记忆，不得误用旧游标。
 
-B站 article 虽由通用调度器调用 `mediacrawler_crawl.py`，但使用项目自有 article 搜索实现，
-不支持冻结断点续跑。B站新完整轮次的 dry-run 和正式命令均不得传入 `--resume-summary`、
-`--recovery-keyword` 或 `--start-page`，由执行器默认从第 1 页开始。未达标时必须结束当前轮；
-只有停止证据为 `candidate_hard_limit_reached` 且没有来源耗尽证据时，才调整下一轮配置中的候选
-预算。新轮从零累计候选、新增和已有记录，不拼接或单独导入旧轮部分产物。调度器当前不会在
-dry-run 阶段提前拒绝 B站的 `--resume-summary`，所以带恢复参数的 `planned` 状态不代表能力
-验证通过，真实执行仍会拒绝。
+首次执行从来源第一页开始，不做顶部刷新。每个完整前沿批次把下一页写入状态事件；抖音还必须
+同时写入下一 offset 和响应 search ID。根执行器在 child 摘要形成后才把状态事件提交到 SQLite，
+不得由底层循环提前推进数据库游标。中途停止的批次保存当前请求位置，下一次允许重取该批次，
+依靠已知 ID 提前去重；这样可以重复少量边界数据，但不能跳过未持久化候选。
 
-恢复 dry-run 只能用于微博、抖音和知乎。冻结状态 `plan.command` 中，请求的
-`--resume-summary` 和显式提供的 `--start-page` 必须原样存在；`--recovery-keyword` 的值必须作为
-child 命令的 `--keyword` 值存在。微博和知乎同词续跑的 `--start-page` 可以大于 1；抖音恢复
-必须同时使用同城市 `--recovery-keyword` 和 `--start-page 1`。任一项不符时不得执行正式续跑。
-小红书独立 runner 当前也不接受 `--resume-summary`；失败后结束该轮，并严格按小红书失败分流
-决定同账号登录复验、调整下一轮候选预算或关键词，或由操作人手工选择下一轮账号。任何换号都
-不得解释为同一正式轮次续跑。
+存在 checkpoint 时，runner 自动把保存位置传给 child；有未完成累计摘要时再传入上一份
+`summary.json`。child 先刷新
+配置的 `top_refresh_max_pages` 个顶部页面，再从保存前沿继续。顶部刷新用于发现新近发布内容，
+不推进深层 checkpoint，也不累计前沿停滞；已知 ID 在详情、粉丝和媒体处理前跳过。深层批次
+完整结束才推进到下一页；抖音恢复命令必须同时包含 `--start-page`、`--start-offset` 和非空
+`--start-cursor`，只有页码没有 search ID 的请求是无效恢复。
+
+未达到目标的产物不单独入库。runner 保存其摘要路径，下一次将历史与本次 JSONL 合并校验，
+并只向底层下发剩余新增目标；`candidate_hard_limit` 每次 child 执行重新提供完整预算，不从历史
+候选数中扣减。累计 `valid_new_count` 达到完整 `target_new_posts` 后才一次性入库并清空累计摘要，
+checkpoint 本身保留，供下一次定时任务继续向后发现。前沿推进但本次尚未达标时不增加连续失败，
+下一次按任务正常调度间隔运行；无推进的运行错误仍按重试策略处理。
+
+`source_exhausted` checkpoint 不再盲目请求深页，只执行顶部刷新；来源重新出现未知内容时仍可
+累计。`--no-import` 诊断自动禁用 checkpoint 写入。显式 `--resume-summary`、`--start-page` 和
+`--recovery-keyword` 仅用于人工恢复，不是正常 workflow；使用显式参数时调度器不自动混入旧
+checkpoint。小红书仍使用独立 runner，当前没有跨轮发现 checkpoint，也不接受
+`--resume-summary`；换号不得解释为同一正式轮次续跑。

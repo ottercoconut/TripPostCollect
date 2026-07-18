@@ -38,6 +38,35 @@ ON crawl_jobs(enabled, status, next_run_at, priority);
 CREATE INDEX IF NOT EXISTS idx_crawl_jobs_site
 ON crawl_jobs(site_key, job_kind, next_run_at);
 
+CREATE TABLE IF NOT EXISTS crawl_discovery_checkpoints (
+    id INTEGER PRIMARY KEY,
+    job_id INTEGER NOT NULL REFERENCES crawl_jobs(id) ON DELETE CASCADE,
+    platform_key TEXT NOT NULL,
+    keyword TEXT NOT NULL,
+    query_fingerprint TEXT NOT NULL,
+    resume_page INTEGER NOT NULL DEFAULT 1,
+    resume_offset INTEGER,
+    resume_cursor TEXT,
+    source_has_more INTEGER,
+    status TEXT NOT NULL DEFAULT 'active',
+    last_batch_complete INTEGER NOT NULL DEFAULT 1,
+    last_stop_reason TEXT NOT NULL DEFAULT '',
+    last_run_id TEXT,
+    last_summary_path TEXT,
+    campaign_candidate_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(job_id, query_fingerprint),
+    CHECK (resume_page >= 1),
+    CHECK (source_has_more IS NULL OR source_has_more IN (0, 1)),
+    CHECK (status IN ('active', 'exhausted', 'cursor_invalid')),
+    CHECK (last_batch_complete IN (0, 1)),
+    CHECK (campaign_candidate_count >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_crawl_discovery_checkpoints_job
+ON crawl_discovery_checkpoints(job_id, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS crawl_attempts (
     id INTEGER PRIMARY KEY,
     job_id INTEGER NOT NULL REFERENCES crawl_jobs(id) ON DELETE CASCADE,
