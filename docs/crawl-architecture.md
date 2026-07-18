@@ -6,6 +6,7 @@
 config/crawl_targets.json
   -> scripts/crawl_runner.py
       -> SQLite crawl_discovery_checkpoints
+      -> SQLite crawl_discovery_seen_candidates
       -> data/runtime/crawl_execution_states/<run_id>/<job>.json
       -> scripts/mediacrawler_crawl.py
           -> scripts/crawl_policy.py
@@ -64,18 +65,21 @@ Runner、执行器和登录/诊断输出的 UTC 运行标识统一包含六位�
 MediaCrawler 的自适应分页会向同一状态文件追加批次事件，包括实际候选、有效唯一数、
 本批新增、连续停滞次数、平台页码、游标/search ID、下一恢复位置、批次完整性、发现阶段、
 原始返回条数和 `has_more`。循环按
-实际候选累计，不按名义页大小预先换算最大页数。空页或 `has_more=false` 才能生成
+实际候选累计，不按名义页大小预先换算最大页数。空页、明确缺失继续 cursor 或 `has_more=false` 才能生成
 `source_exhausted`；请求异常生成 `runtime_failed`；缺少停止事件时执行器不得猜测数据源
-已经耗尽。连续停滞按本批没有新增有效且数据库中不存在的记录计算；新的无效候选和数据库
-已有记录不会重置停滞计数。状态事件是过程证据，最终成功仍以正式校验和数据库验证为准。
+已经耗尽。抖音旧 cursor 耗尽后，只有顶部刷新同时发现持久记忆中不存在的新候选 ID、
+`has_more=true` 和非空连续 cursor 才建立新
+前沿，并记录 reseed 事件。抖音、知乎和小红书按本批没有新增有效且数据库中不存在的记录计算
+连续停滞；微博按是否出现不在数据库、累计摘要、`crawl_discovery_seen_candidates` 和本 child 已见集合中的新微博 ID 计算，避免综合搜索连续出现纯文本/视频时
+过早停止。状态事件会写 `stagnation_basis`；最终成功仍以正式校验和数据库验证为准。
 
 通用结构化任务的发现位置保存在 `crawl_discovery_checkpoints`，唯一键是任务 ID 与查询指纹。
 runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并传入页码；抖音额外传入 offset
 和 opaque search ID。child 先做有限顶部刷新，再走深层前沿；顶部刷新不覆盖 checkpoint。
-执行器完成摘要构造后，从最后一条前沿事件提交下一恢复位置，runner 再把本次摘要路径写回
-checkpoint。这个提交顺序保证游标不会先于可累计产物前移。达到完整入库目标后只清空累计摘要，
-不删除发现位置。通用控制面不保存“全部已处理无效候选”集合：跨轮详情前去重依赖内容表与未完成
-有效累计摘要，字段无效候选在边界页重取时可能再次处理。
+执行器完成摘要构造后，在同一事务提交下一恢复位置和本轮已处理候选 ID，runner 再把本次摘要
+路径写回 checkpoint。这个提交顺序保证游标和候选记忆不会先于可累计产物前移。达到完整入库目标后
+只清空累计摘要，不删除发现位置或候选记忆。通用控制面用
+`crawl_discovery_seen_candidates` 保存视频、字段无效和有效候选，跨轮在详情、作者与媒体处理前跳过。
 
 小红书独立 runner 不读写通用 checkpoint 表，而是在 `xhs_discovery_checkpoints` 中按目标、账号和
 查询指纹保存 `page + search_id`，在 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID。

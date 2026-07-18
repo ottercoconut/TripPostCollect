@@ -9,7 +9,13 @@
 - 粉丝来源：搜索响应 author/member 的 `follower_count`，同时保存
   `followers_observed` 和 `author_followers_source=search_author`。
 - 缺失粉丝字段不得使用模型默认 0 通过校验。
-- 图片来源：正文 HTML 中的正文图片，公式图片不计入。
+- 图片来源：正文 HTML 中的正文图片，公式图片不计入。搜索响应没有正文图时，正式搜索会按内容
+  ID 低频请求回答/文章详情并重新解析；只合并详情正文与图片，继续保留搜索响应中的作者和粉丝
+  证据。详情 HTTP 请求成功，且页面 `js-initialData` 中能解析出 answer/article entity 并构造非空
+  内容对象时，JSONL 才写 `content_detail_status=detail_observed`；该状态不依赖“最终是否有图”。
+  此时仍无图片才记为
+  `missing_content_image`；`request_failed`、`parse_failed` 或旧产物缺少该字段统一记为
+  `content_detail_unobserved`，不能解释成内容真实无图。
 - 去重键：内容 ID；answer URL 同时包含 question ID。
 - 有 checkpoint 时先刷新配置的顶部页，再从保存页码继续。已知内容 ID 不再写入当前 JSONL；
   完整页保存下一页，页面中途停止保存当前页，顶部刷新不推进深层 checkpoint。

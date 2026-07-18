@@ -204,11 +204,20 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
         try:
             has_attempts = table_exists(conn, "crawl_attempts")
             has_checkpoints = table_exists(conn, "crawl_discovery_checkpoints")
+            has_seen_candidates = table_exists(
+                conn,
+                "crawl_discovery_seen_candidates",
+            )
             if has_attempts:
                 conn.execute("ALTER TABLE crawl_attempts RENAME TO crawl_attempts_old")
             if has_checkpoints:
                 conn.execute(
                     "ALTER TABLE crawl_discovery_checkpoints RENAME TO crawl_discovery_checkpoints_old"
+                )
+            if has_seen_candidates:
+                conn.execute(
+                    "ALTER TABLE crawl_discovery_seen_candidates "
+                    "RENAME TO crawl_discovery_seen_candidates_old"
                 )
             conn.execute("ALTER TABLE crawl_jobs RENAME TO crawl_jobs_old")
             conn.executescript(CRAWL_SCHEDULER_SCHEMA.read_text(encoding="utf-8"))
@@ -253,6 +262,22 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
                     """
                 )
                 conn.execute("DROP TABLE crawl_discovery_checkpoints_old")
+            if has_seen_candidates:
+                conn.execute(
+                    """
+                    INSERT INTO crawl_discovery_seen_candidates (
+                        job_id, platform_key, query_fingerprint, platform_post_id,
+                        first_run_id, last_run_id, first_seen_at, last_seen_at
+                    )
+                    SELECT
+                        seen.job_id, seen.platform_key, seen.query_fingerprint,
+                        seen.platform_post_id, seen.first_run_id, seen.last_run_id,
+                        seen.first_seen_at, seen.last_seen_at
+                    FROM crawl_discovery_seen_candidates_old AS seen
+                    JOIN crawl_jobs AS jobs ON jobs.id=seen.job_id
+                    """
+                )
+                conn.execute("DROP TABLE crawl_discovery_seen_candidates_old")
             conn.execute("DROP TABLE crawl_jobs_old")
             conn.executescript(CRAWL_SCHEDULER_SCHEMA.read_text(encoding="utf-8"))
             conn.commit()
@@ -269,6 +294,10 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
         (11, "crawl_discovery_checkpoints"),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
+        (12, "crawl_discovery_seen_candidates"),
     )
 
 

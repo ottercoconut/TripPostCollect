@@ -14,13 +14,13 @@
 - 配置中的 job kind 虽为 `mediacrawler_search`，B站内容抓取实际使用项目自有 article API
   分支，但与其它通用平台共用 SQLite 发现 checkpoint 和跨次累计摘要。
 - 首次从第 1 页开始；有 checkpoint 时先刷新 `top_refresh_max_pages` 个顶部页，再从
-  `resume_page` 继续。数据库、累计摘要或本次已见的 article ID 在作者粉丝接口前跳过，不消耗
+  `resume_page` 继续。数据库、累计摘要、`crawl_discovery_seen_candidates` 或本次已见的 article ID 在作者粉丝接口前跳过，不消耗
   单次未知候选预算。
 - 每个完整深层页保存下一页；达到目标或候选上限时若页面尚未处理完，保存当前页，下一次允许
   重取并靠已知 ID 跳过已持久化边界。空页保存 `status=exhausted`，后续只刷新顶部。
 - 未达标产物不单独入库；runner 自动拼接摘要，累计达到完整目标后一次性导入。人工
   `--resume-summary` 或 `--start-page` 不是正常 workflow。
-- B站当前按页面是否出现成功归一化且数据库、累计摘要和本轮均未见的 article ID 累计停滞；
+- B站当前按页面是否出现成功归一化且数据库、累计摘要、`crawl_discovery_seen_candidates` 和本轮均未见的 article ID 累计停滞；
   这类未知 ID 即使后续正式字段校验无效，也会重置停滞页数。该平台例外不改变完成判据，判断是否
   扩容时必须同时检查新 ID 数和有效新增数。
 - 临时调整候选预算必须遵循运行手册的配置校验、`--sync-only`、dry-run、正式执行和恢复原值

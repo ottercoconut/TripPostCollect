@@ -15,7 +15,7 @@ data/trippostcollect.sqlite
 | `db/source_platforms.sql` | `source_platforms` |
 | `db/web_posts.sql` | `web_posts`、`web_post_images` |
 | `db/ctf_captures.sql` | `ctf_captures`、`ctf_capture_images` |
-| `db/crawl_scheduler.sql` | `crawl_jobs`、`crawl_discovery_checkpoints`、`crawl_attempts`、`crawl_run_reports`、`profile_health_checks`；任务类型包含通用搜索和页面证据 |
+| `db/crawl_scheduler.sql` | `crawl_jobs`、`crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates`、`crawl_attempts`、`crawl_run_reports`、`profile_health_checks`；任务类型包含通用搜索和页面证据 |
 | `db/xhs_control.sql` | `xhs_accounts`、`xhs_account_events`、`xhs_account_leases`、`xhs_runs`、`xhs_discovery_checkpoints`、`xhs_discovery_seen_candidates` |
 
 `trippostcollect.db.bootstrap` 是统一实现。通用 runner、小红书 runner、MediaCrawler 入库和
@@ -23,13 +23,16 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 `crawl_jobs`，小红书运行与账号状态写入独立 `xhs_*` 表。手工 `--sync-only` 只用于通用
 调度配置的显式刷新或排查。
 
-`crawl_discovery_checkpoints` 是 B站、微博、抖音和知乎正式搜索的控制面记忆，不是内容表。
+`crawl_discovery_checkpoints` 和 `crawl_discovery_seen_candidates` 是 B站、微博、抖音和知乎正式
+搜索的控制面记忆，不是内容表。
 `job_id + query_fingerprint` 唯一定位同一来源查询；`resume_page` 保存下一安全页，抖音同时使用
 `resume_offset` 和 `resume_cursor`，`last_summary_path` 指向尚未达到目标的累计摘要，
-`campaign_candidate_count` 保存累计报告数。`status=exhausted` 表示深层来源明确耗尽，后续只做
-顶部刷新。checkpoint 只能在 child 摘要形成后提交；诊断 `--no-import` 不得更新它。内容仍只在
-完整目标达到后写入 `web_posts` / `web_post_images`。通用 schema 没有所有已处理候选表；跨轮
-预过滤只读取内容表和未完成有效累计摘要，字段无效候选不会因此永久记忆。
+`campaign_candidate_count` 保存累计报告数。`status=exhausted` 表示已保存深层前沿明确耗尽，
+后续默认只做顶部刷新；抖音若刷新同时证明存在持久记忆中没有的新候选 ID、`has_more=true` 与可继续的新 search ID，则从刷新链
+建立新前沿并把 checkpoint 恢复为 `active`。checkpoint 只能在 child 摘要形成后提交；诊断
+`--no-import` 不得更新它。内容仍只在
+完整目标达到后写入 `web_posts` / `web_post_images`。通用已处理候选表按 job 与查询指纹保存视频、
+字段无效和有效候选 ID；它只用于发现去重，不把无效候选变成内容记录。
 
 `web_posts` 是统一内容主表，面向用户查询和后续数据使用。`ctf_captures` 是证据和调试底座，面向程序脚本或 Agent 排查抓取过程。页面级抓取成功后，也会归一化生成 `web_posts` 行，并通过 `web_posts.source_capture_id` 关联对应 `ctf_captures.id`。
 
@@ -267,7 +270,8 @@ PY
 微博、抖音、知乎等通用结构化结果由 `scripts/mediacrawler_crawl.py` 调用 MediaCrawler 后
 导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定账号申请互斥租约并解密会话后调用同一底层执行器。
 微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；小红书搜索会补拉
-作者主页指标。知乎回答/文章的原始时间、正文图片和作者粉丝会在清洗前保存并归一化；
+作者主页指标。知乎回答/文章的原始时间、正文图片和作者粉丝会在清洗前保存并归一化；搜索响应
+缺图时先请求详情补全，并用 `content_detail_status` 区分详情确认无图和详情未观察；
 `zvideo` 记录跳过。B站正式调度走专栏/图文 article 搜索。所有平台后续 JSONL 中出现的
 视频记录均计入 `skipped_video` 并跳过入库。
 

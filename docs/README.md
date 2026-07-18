@@ -69,8 +69,8 @@ python scripts/crawl_runner.py \
 
 | 平台 | 控制面记忆 | 保存的深层前沿 | 跨轮详情前去重 |
 |---|---|---|---|
-| B站、微博、知乎 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | 下一安全页 | SQLite 已入库 ID、未完成累计摘要中的有效 ID |
-| 抖音 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | page、offset、响应 search ID 必须成组恢复 | SQLite 已入库 ID、未完成累计摘要中的有效 ID |
+| B站、微博、知乎 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | 下一安全页 | SQLite 已入库 ID、累计摘要 ID、`crawl_discovery_seen_candidates` 中所有已处理候选 ID |
+| 抖音 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | page、offset、响应 search ID 必须成组恢复 | SQLite 已入库 ID、累计摘要 ID、`crawl_discovery_seen_candidates` 中所有已处理候选 ID |
 | 小红书 | `xhs_discovery_checkpoints`，按目标、人工指定账号与查询指纹隔离 | page 与 client search ID 必须成组恢复 | SQLite 已入库 ID、累计摘要 ID，以及 `xhs_discovery_seen_candidates` 中所有已处理候选 ID |
 
 首次运行从第一页开始且顶部刷新页数为 0；存在 checkpoint 后才先刷新配置限定的顶部页，再从
@@ -78,9 +78,13 @@ python scripts/crawl_runner.py \
 保留当前请求位置，下一轮允许重取这个边界页；已进入上述去重集合的 ID 会在昂贵详情或作者补全
 前跳过。
 
-通用平台没有“小红书式的全部已处理候选永久表”：字段无效且未进入有效累计摘要的候选，可能在
-边界页重取时再次处理。小红书则把视频、字段无效和有效候选都持久记忆。这个差异不能写成五个平台
-具有完全相同的去重强度。正常运行一律让 runner 自动生成恢复参数；人工恢复仅按
+抖音的 `exhausted` 只结束已保存 search ID 的游标链：顶部刷新发现持久记忆中不存在的新候选 ID 且获得可继续的
+新 search ID 时，从刷新链下一页建立新前沿；否则保持耗尽，不重复深扫旧结果。微博综合搜索的
+连续停滞按“没有新微博 ID”计算，纯文本或视频页不会因暂时没有有效图文而过早截断。
+
+五个平台都会在 child 摘要形成后持久记忆视频、字段无效和有效候选。通用平台写
+`crawl_discovery_seen_candidates`，按 job 与查询指纹隔离；小红书写独立表并额外按人工指定账号隔离。
+正常运行一律让 runner 自动生成恢复参数；人工恢复仅按
 [运行手册](operations-runbook.md) 的限制处理。
 
 小红书不进入上述通用登录和调度链路。先完整读取

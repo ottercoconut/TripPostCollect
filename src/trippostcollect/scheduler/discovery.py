@@ -118,6 +118,71 @@ def save_checkpoint(
     )
 
 
+def save_seen_candidates(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    platform_key: str,
+    query_fingerprint_value: str,
+    platform_post_ids: list[str],
+    run_id: str,
+) -> int:
+    identities = sorted(
+        {
+            str(value).strip()
+            for value in platform_post_ids
+            if str(value).strip()
+        }
+    )
+    conn.executemany(
+        """
+        INSERT INTO crawl_discovery_seen_candidates (
+            job_id, platform_key, query_fingerprint, platform_post_id,
+            first_run_id, last_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_id, query_fingerprint, platform_post_id)
+        DO UPDATE SET
+            platform_key=excluded.platform_key,
+            last_run_id=excluded.last_run_id,
+            last_seen_at=datetime('now')
+        """,
+        [
+            (
+                job_id,
+                platform_key,
+                query_fingerprint_value,
+                identity,
+                run_id,
+                run_id,
+            )
+            for identity in identities
+        ],
+    )
+    return len(identities)
+
+
+def load_seen_candidates(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    platform_key: str,
+    query_fingerprint_value: str,
+) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT platform_post_id
+        FROM crawl_discovery_seen_candidates
+        WHERE job_id=? AND platform_key=? AND query_fingerprint=?
+        """,
+        (job_id, platform_key, query_fingerprint_value),
+    ).fetchall()
+    return {
+        str(row[0]).strip()
+        for row in rows
+        if row[0] is not None and str(row[0]).strip()
+    }
+
+
 def update_campaign(
     conn: sqlite3.Connection,
     *,

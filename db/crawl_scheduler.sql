@@ -67,6 +67,21 @@ CREATE TABLE IF NOT EXISTS crawl_discovery_checkpoints (
 CREATE INDEX IF NOT EXISTS idx_crawl_discovery_checkpoints_job
 ON crawl_discovery_checkpoints(job_id, updated_at DESC);
 
+CREATE TABLE IF NOT EXISTS crawl_discovery_seen_candidates (
+    job_id INTEGER NOT NULL REFERENCES crawl_jobs(id) ON DELETE CASCADE,
+    platform_key TEXT NOT NULL,
+    query_fingerprint TEXT NOT NULL,
+    platform_post_id TEXT NOT NULL,
+    first_run_id TEXT NOT NULL,
+    last_run_id TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (job_id, query_fingerprint, platform_post_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_crawl_discovery_seen_candidates_job
+ON crawl_discovery_seen_candidates(job_id, query_fingerprint, last_seen_at DESC);
+
 CREATE TABLE IF NOT EXISTS crawl_attempts (
     id INTEGER PRIMARY KEY,
     job_id INTEGER NOT NULL REFERENCES crawl_jobs(id) ON DELETE CASCADE,

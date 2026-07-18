@@ -12,8 +12,10 @@ from unittest.mock import AsyncMock
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.scheduler.discovery import (
     load_checkpoint,
+    load_seen_candidates,
     query_fingerprint,
     save_checkpoint,
+    save_seen_candidates,
 )
 
 
@@ -123,6 +125,7 @@ def test_executor_commits_cursor_from_durable_pagination_evidence(tmp_path: Path
                 "batch_complete": True,
                 "discovery_phase": "frontier",
                 "stop_reason": "candidate_hard_limit_reached",
+                "candidate_identities": ["video-1", "image-1"],
             }
         },
     )
@@ -195,6 +198,72 @@ def test_top_refresh_keeps_saved_douyin_frontier(tmp_path: Path) -> None:
     assert checkpoint["status"] == "exhausted"
 
 
+def test_reseeded_douyin_frontier_replaces_exhausted_cursor(tmp_path: Path) -> None:
+    db_path = tmp_path / "reseed.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        bootstrap_connection(conn, sync_content=False, sync_jobs=False)
+        row = insert_job(conn, {"platform": "douyin", "keyword": "青岛旅游"})
+        job_id = int(row["id"])
+    fingerprint = query_fingerprint("douyin", "青岛旅游", {})
+    args = SimpleNamespace(
+        discovery_job_id=job_id,
+        discovery_query_fingerprint=fingerprint,
+        discovery_run_id="reseed-run",
+        discovery_source_exhausted=True,
+        no_checkpoint_write=False,
+        db=str(db_path),
+        keyword="青岛旅游",
+        start_page=22,
+        start_offset=315,
+        start_cursor="old-search-id",
+    )
+
+    result = mediacrawler_crawl.persist_discovery_checkpoint(
+        args,
+        "douyin",
+        {
+            "stop_event": {
+                "source_page": 4,
+                "resume_page": 5,
+                "resume_offset": 60,
+                "resume_cursor": "new-search-id-2",
+                "source_has_more": True,
+                "batch_complete": True,
+                "discovery_phase": "frontier",
+                "stop_reason": "candidate_hard_limit_reached",
+                "candidate_identities": ["video-1", "image-1"],
+            }
+        },
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        checkpoint = load_checkpoint(
+            conn,
+            job_id=job_id,
+            query_fingerprint_value=fingerprint,
+        )
+    assert result["refresh_only"] is False
+    assert checkpoint is not None
+    assert checkpoint["resume_page"] == 5
+    assert checkpoint["resume_offset"] == 60
+    assert checkpoint["resume_cursor"] == "new-search-id-2"
+    assert checkpoint["status"] == "active"
+    with sqlite3.connect(db_path) as conn:
+        seen = conn.execute(
+            """
+            SELECT platform_post_id
+            FROM crawl_discovery_seen_candidates
+            WHERE job_id=? AND query_fingerprint=?
+            ORDER BY platform_post_id
+            """,
+            (job_id, fingerprint),
+        ).fetchall()
+    assert seen == [("image-1",), ("video-1",)]
+    assert result["seen_candidate_count"] == 2
+
+
 def test_runner_auto_resumes_only_matching_query(tmp_path: Path) -> None:
     summary_path = tmp_path / "summary.json"
     summary_path.write_text("{}", encoding="utf-8")
@@ -264,6 +333,29 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
             "CREATE TABLE web_posts (platform_key TEXT, platform_post_id TEXT, canonical_url TEXT)"
         )
         conn.execute("INSERT INTO web_posts VALUES ('bilibili', 'known', NULL)")
+        conn.execute(
+            """
+            CREATE TABLE crawl_discovery_seen_candidates (
+                job_id INTEGER NOT NULL,
+                platform_key TEXT NOT NULL,
+                query_fingerprint TEXT NOT NULL,
+                platform_post_id TEXT NOT NULL,
+                first_run_id TEXT NOT NULL,
+                last_run_id TEXT NOT NULL,
+                first_seen_at TEXT,
+                last_seen_at TEXT,
+                PRIMARY KEY (job_id, query_fingerprint, platform_post_id)
+            )
+            """
+        )
+        save_seen_candidates(
+            conn,
+            job_id=7,
+            platform_key="bilibili",
+            query_fingerprint_value="bili-fingerprint",
+            platform_post_ids=["remembered"],
+            run_id="prior-run",
+        )
     state_path = tmp_path / "state.json"
     mediacrawler_crawl.FrozenExecutionState.create(
         state_path,
@@ -300,6 +392,19 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
                 "view": 3,
                 "author": "known-author",
                 "mid": "known-author-id",
+            },
+            {
+                "id": "remembered",
+                "title": "remembered",
+                "desc": "body",
+                "arcurl": "https://www.bilibili.com/read/cvremembered/",
+                "image_urls": ["https://example.test/remembered.jpg"],
+                "pubdate": 1_700_000_000,
+                "like": 1,
+                "reply": 2,
+                "view": 3,
+                "author": "remembered-author",
+                "mid": "remembered-author-id",
             },
             {
                 "id": "new",
@@ -340,6 +445,8 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
         start_page=4,
         top_refresh_max_pages=0,
         discovery_source_exhausted=False,
+        discovery_job_id=7,
+        discovery_query_fingerprint="bili-fingerprint",
         resume_identities_path=None,
     )
 
@@ -351,6 +458,15 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
     assert stopped["details"]["resume_page"] == 5
+    assert stopped["details"]["stagnation_basis"] == "candidate_identity"
+    assert stopped["details"]["candidate_identities"] == ["new"]
+    with sqlite3.connect(db_path) as conn:
+        assert load_seen_candidates(
+            conn,
+            job_id=7,
+            platform_key="bilibili",
+            query_fingerprint_value="bili-fingerprint",
+        ) == {"remembered"}
 
 
 def test_checkpoint_progress_resets_failure_counter(tmp_path: Path) -> None:

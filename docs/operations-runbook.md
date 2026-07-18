@@ -107,6 +107,13 @@ sqlite3 data/trippostcollect.sqlite \
   "SELECT job_id, platform_key, keyword, resume_page, resume_offset, resume_cursor, status, last_batch_complete, last_stop_reason, last_run_id, updated_at FROM crawl_discovery_checkpoints ORDER BY job_id;"
 ```
 
+检查通用平台已处理候选只看分组计数，不展开 ID：
+
+```bash
+sqlite3 data/trippostcollect.sqlite \
+  "SELECT job_id, platform_key, query_fingerprint, COUNT(*) AS seen_candidates FROM crawl_discovery_seen_candidates GROUP BY job_id, platform_key, query_fingerprint ORDER BY job_id;"
+```
+
 检查小红书账号级记忆：
 
 ```bash
@@ -143,12 +150,19 @@ checkpoint 记录了非空 `last_summary_path` 但文件丢失时，runner 必�
 
 累计摘要保存各次 JSONL，只有合并后的 `valid_new_count` 达到完整目标才一次性入库。
 `candidate_hard_limit` 是每次 child 的未知候选预算，每次续跑重新获得完整预算；历史累计候选
-只用于报告，不从本次预算扣减。`source_exhausted` 后只做顶部刷新，不再请求已耗尽深页。
+只用于报告，不从本次预算扣减。`source_exhausted` 后不再请求原耗尽深页。抖音顶部刷新若取得
+不在数据库、累计摘要或持久候选集合中的新候选 ID，且最后一页同时返回 `has_more=true` 和非空下一 search ID，会从刷新链下一页建立
+新的 cursor 前沿；摘要的 `pagination_evidence.frontier_reseeds` 必须保留旧坐标、新坐标和触发原因。
+没有新候选 ID 或没有可继续游标时仍保持耗尽，不得每轮重扫完整结果集。新前沿中的历史视频、
+字段无效项和有效项由 `crawl_discovery_seen_candidates` 在昂贵处理前跳过，不再消耗候选预算。
+顶部刷新已经达到本轮新增目标时，以 `target_new_met` 优先结束，不建立新前沿，旧耗尽 checkpoint
+保持不变。
 `--no-import` 自动禁用 checkpoint 写入，因此诊断不会污染正式记忆。
 
 耗尽 checkpoint 的生成命令仍会携带保存的 page/offset/cursor，用于冻结并保留原前沿；同时出现
-的 `--discovery-source-exhausted` 优先控制执行阶段，child 只建立顶部刷新 phase，不请求这些深层
-坐标。不要因为命令中仍有坐标就判断它会继续深层抓取。
+的 `--discovery-source-exhausted` 表示禁止直接请求这些旧深层坐标。B站、微博和知乎只建立顶部
+刷新 phase；抖音只有满足上一段的新候选与连续游标双重证据才建立新 cursor 前沿。不要因为
+命令中仍有旧坐标就判断它会继续原深层抓取。
 
 小红书 dry-run 的 `plan.discovery` 必须与上面的账号级行一致。首次执行应为第 1 页、空
 `resume_search_id`、顶部刷新 0；续跑应包含已保存页码、非空 ID、配置的顶部刷新页数和可选
@@ -339,7 +353,7 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 - SQLite 中作者粉丝量、发布时间和图片关系符合平台 profile；
 - 视频只出现在跳过计数中。
 - `formal_validation.pagination_evidence` 有连续页级事件；未达目标时，`source_exhausted`
-  必须有空页或 `has_more=false` 的 `adaptive_search_stopped` 事件。只有批次事件而没有停止
+  必须有空页、明确缺失继续 cursor 或 `has_more=false` 的 `adaptive_search_stopped` 事件。只有批次事件而没有停止
   事件的任务按 `runtime_failed` 排查浏览器、登录态、超时或请求异常。
 
 固定 URL 页面任务只验证该页证据和入库，不得汇报为平台批量目标完成。

@@ -46,7 +46,11 @@ from trippostcollect.core.paths import (
 )
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.registry import get_site
-from trippostcollect.scheduler.discovery import save_checkpoint
+from trippostcollect.scheduler.discovery import (
+    load_seen_candidates,
+    save_checkpoint,
+    save_seen_candidates,
+)
 from browser_runtime import browser_launch_environment, browser_runtime_args
 
 
@@ -1201,7 +1205,15 @@ def validate_formal_record(platform_key: str, record: dict[str, Any], seen: set[
         reasons.append("missing_author_name")
     content_images = [item for item in dedupe_image_urls(record) if item.get("role") == "content"]
     if not content_images:
-        reasons.append("missing_content_image")
+        detail_status = str(record.get("content_detail_status") or "")
+        if (
+            platform_key == "zhihu"
+            and str(record.get("content_type") or "") in {"answer", "article"}
+            and detail_status != "detail_observed"
+        ):
+            reasons.append("content_detail_unobserved")
+        else:
+            reasons.append("missing_content_image")
 
     followers_count = parse_int(
         first_value(
@@ -1265,9 +1277,22 @@ PAGINATION_EVENT_FIELDS = (
     "raw_batch_count",
     "raw_response_count",
     "stagnant_batches",
+    "stagnation_basis",
     "stop_reason",
     "stop_detail",
     "candidate_identities",
+)
+
+DISCOVERY_RESEED_EVENT_FIELDS = (
+    "platform",
+    "reason",
+    "saved_resume_page",
+    "saved_resume_offset",
+    "saved_resume_cursor",
+    "resume_page",
+    "resume_offset",
+    "resume_cursor",
+    "refresh_new_candidate_count",
 )
 
 
@@ -1330,6 +1355,14 @@ def persist_discovery_checkpoint(
             last_stop_reason=str(event.get("stop_reason") or "continue"),
             last_run_id=str(args.discovery_run_id),
         )
+        seen_candidate_count = save_seen_candidates(
+            conn,
+            job_id=int(args.discovery_job_id),
+            platform_key=platform_key,
+            query_fingerprint_value=str(args.discovery_query_fingerprint),
+            platform_post_ids=list(event.get("candidate_identities") or []),
+            run_id=str(args.discovery_run_id),
+        )
         conn.commit()
     return {
         "skipped": False,
@@ -1339,6 +1372,7 @@ def persist_discovery_checkpoint(
         "source_has_more": source_has_more,
         "last_stop_reason": str(event.get("stop_reason") or "continue"),
         "refresh_only": refresh_only,
+        "seen_candidate_count": seen_candidate_count,
     }
 
 
@@ -1380,6 +1414,7 @@ def load_pagination_evidence(state_path: str | Path | None) -> dict[str, Any]:
 
     batches = []
     stopped_details: dict[str, Any] | None = None
+    frontier_reseeds: list[dict[str, Any]] = []
     for event in payload.get("events") or []:
         if not isinstance(event, dict):
             continue
@@ -1391,6 +1426,14 @@ def load_pagination_evidence(state_path: str | Path | None) -> dict[str, Any]:
             batches.append(selected)
         elif event.get("type") == "adaptive_search_stopped":
             stopped_details = selected
+        elif event.get("type") == "discovery_frontier_reseeded":
+            frontier_reseeds.append(
+                {
+                    key: details.get(key)
+                    for key in DISCOVERY_RESEED_EVENT_FIELDS
+                    if key in details
+                }
+            )
 
     latest = stopped_details or (batches[-1] if batches else {})
     return {
@@ -1402,6 +1445,7 @@ def load_pagination_evidence(state_path: str | Path | None) -> dict[str, Any]:
         "stop_reason": str((stopped_details or {}).get("stop_reason") or ""),
         "stop_detail": str((stopped_details or {}).get("stop_detail") or ""),
         "batches": batches,
+        "frontier_reseeds": frontier_reseeds,
         "stop_event": stopped_details,
     }
 
@@ -1787,6 +1831,20 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
             for identity in existing_identities
             if identity.startswith("bilibili:id:")
         }
+        discovery_job_id = getattr(args, "discovery_job_id", None)
+        discovery_fingerprint = str(
+            getattr(args, "discovery_query_fingerprint", "") or ""
+        ).strip()
+        if discovery_job_id is not None and discovery_fingerprint:
+            with sqlite3.connect(Path(args.db).expanduser()) as conn:
+                known_post_ids.update(
+                    load_seen_candidates(
+                        conn,
+                        job_id=int(discovery_job_id),
+                        platform_key=platform_key,
+                        query_fingerprint_value=discovery_fingerprint,
+                    )
+                )
         if args.resume_identities_path:
             try:
                 resume_values = json.loads(
@@ -1840,6 +1898,8 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                                 "discovery_phase": discovery_phase,
                                 "raw_batch_count": 0,
                                 "raw_response_count": 0,
+                                "stagnation_basis": "candidate_identity",
+                                "candidate_identities": sorted(seen_ids),
                             },
                         )
                     break
@@ -1919,6 +1979,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "batch_new_count": valid_new_count - new_before,
                     "batch_candidate_identity_count": candidate_identities_added,
                     "stagnant_batches": stagnant_pages,
+                    "stagnation_basis": "candidate_identity",
                     "target_new": target_new,
                     "hard_limit": max_records,
                     "stop_reason": batch_stop_reason,
@@ -1929,6 +1990,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "discovery_phase": discovery_phase,
                     "raw_batch_count": processed_in_batch,
                     "raw_response_count": len(page_items),
+                    "candidate_identities": sorted(seen_ids),
                 }
                 if state_path:
                     frozen_state = FrozenExecutionState(state_path)
@@ -1960,6 +2022,8 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "discovery_phase": "frontier",
                     "raw_batch_count": 0,
                     "raw_response_count": 0,
+                    "stagnation_basis": "candidate_identity",
+                    "candidate_identities": sorted(seen_ids),
                 },
             )
     except Exception as exc:
@@ -1983,6 +2047,8 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "stop_reason": "runtime_failed",
                     "stop_detail": type(exc).__name__,
                     "source_page": locals().get("page"),
+                    "stagnation_basis": "candidate_identity",
+                    "candidate_identities": sorted(seen_ids),
                 },
             )
 

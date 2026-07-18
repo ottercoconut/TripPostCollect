@@ -61,8 +61,8 @@ B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
 ## 数量定义
 
 - `candidate_hard_limit`：单次 child 执行允许进入字段校验的未知原始候选上限，不是跨多次
-  续跑活动的总预算，也不是底层请求参数的同义词。数据库、当前累计摘要或本次已见集合中
-  已知的平台 ID 会在详情、作者补全和媒体处理前跳过，不消耗该预算。
+  续跑活动的总预算，也不是底层请求参数的同义词。数据库、当前累计摘要、对应平台的持久候选
+  记忆表或本次已见集合中已知的平台 ID 会在详情、作者补全和媒体处理前跳过，不消耗该预算。
 - `target_new_posts`：本轮必须取得并实际新增到 SQLite 的唯一有效图文数。
 - `valid_new_count`：完成视频过滤、平台 ID 去重、必需字段校验和作者字段补全后，且
   SQLite 中不存在相同平台 ID（缺失时按规范 URL）的记录数。
@@ -140,11 +140,13 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 - `candidate_hard_limit_reached`：实际候选达到硬上限但目标未达成。
 - `source_exhausted`：平台明确返回空页、空游标或 `has_more=false`，且状态文件存在对应
   `adaptive_search_stopped` 证据。
-- `stagnated`：微博、抖音、知乎和小红书按连续配置批次没有新增满足正式字段 profile 且
-  数据库中不存在的唯一记录累计。新的无效候选、重复候选和数据库已有记录都不能重置这些
-  平台的停滞计数；批次事件仍分别记录新候选 ID 数和有效新增数，供定位分页进展与字段失败。
-  B站当前自有 article 实现是明确例外：它按页面是否出现成功归一化且不在数据库、累计摘要或
-  本次已见集合中的 article ID 累计停滞；这类未知 ID 即使后续正式字段校验无效，也会重置
+- `stagnated`：抖音、知乎和小红书按连续配置批次没有新增满足正式字段 profile 且数据库中
+  不存在的唯一记录累计；新的无效候选、重复候选和数据库已有记录都不能重置停滞计数。微博
+  按是否出现不在数据库、累计摘要、`crawl_discovery_seen_candidates` 和本 child 已见集合中的候选 ID 累计停滞：综合搜索连续出现纯文本或视频时仍推进扫描，
+  只有连续批次没有新 ID 才停；正式完成仍只计算有效新增图文。批次事件记录
+  `stagnation_basis`、新候选 ID 数和有效新增数，供区分“结果类型不合格”与“页面实际重复”。
+  B站当前自有 article 实现是另一明确例外：它按页面是否出现成功归一化且不在数据库、累计摘要、
+  `crawl_discovery_seen_candidates` 或本次已见集合中的 article ID 累计停滞；这类未知 ID 即使后续正式字段校验无效，也会重置
   停滞计数。该例外不
   放宽完成标准，仍只有有效新增达到目标才算完成；判断 B站是否值得扩容时必须同时读取新 ID
   数和有效新增数。
@@ -164,17 +166,19 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 ## 持久化发现记忆与跨次累计
 
 B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用调度器自动维护发现记忆。SQLite
-`crawl_discovery_checkpoints` 以 `job_id + query_fingerprint` 唯一定位。小红书由独立 runner
+`crawl_discovery_checkpoints` 与 `crawl_discovery_seen_candidates` 均以
+`job_id + query_fingerprint` 隔离；前者保存安全前沿，后者保存已完成处理的候选 ID。小红书由独立 runner
 维护 `xhs_discovery_checkpoints`，以 `target_key + account_id + query_fingerprint` 唯一定位，
 并在同一作用域的 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID；两者不与通用任务或
 其他账号共享未入库活动。指纹包含平台、关键词和影响来源结果的查询参数，
 不包含候选上限、目标数、超时、登录和顶部刷新页数。关键词或来源查询参数改变时必须形成新
 记忆，不得误用旧游标。
 
-通用平台持久化的是安全前沿和未完成的有效累计摘要，不另建“所有已处理无效候选”的永久集合。
-它们在昂贵处理前跳过 `web_posts` 已有 ID、累计摘要中的有效 ID 和当前 child 已见 ID；字段无效
-且没有进入有效累计摘要的候选可能在边界页重取时再次处理。小红书额外持久化所有已完成处理的
-候选 ID，因此视频、字段无效和有效候选都会跨轮跳过。两种机制都属于抓取记忆，但去重强度不同。
+通用平台在昂贵处理前跳过 `web_posts` 已有 ID、累计摘要中的有效 ID、
+`crawl_discovery_seen_candidates` 已处理 ID 和当前 child 已见 ID；小红书读取独立的
+`xhs_discovery_seen_candidates`。五个平台的视频、字段无效和有效候选都在 child 摘要形成后获得
+跨轮记忆，进程在摘要前崩溃的候选不会被提前标记。两套表的作用域不同：通用平台按 job 与查询
+指纹隔离，小红书还按人工指定账号隔离，不能跨账号共享未入库活动。
 
 首次执行从来源第一页开始，不做顶部刷新。每个完整前沿批次把下一页写入状态事件；抖音还必须
 同时写入下一 offset 和响应 search ID，小红书保存本次搜索使用的 client search ID。对应根执行器
@@ -197,8 +201,14 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 checkpoint 本身保留，供下一次定时任务继续向后发现。前沿推进但本次尚未达标时不增加连续失败，
 下一次按任务正常调度间隔运行；无推进的运行错误仍按重试策略处理。
 
-`source_exhausted` checkpoint 不再盲目请求深页，只执行顶部刷新；来源重新出现未知内容时仍可
-累计。`--no-import` 诊断自动禁用 checkpoint 写入。通用 runner 的显式 `--resume-summary`、
+`source_exhausted` checkpoint 默认不再盲目请求原深页，只执行顶部刷新。抖音的耗尽只证明旧
+search ID 游标链结束：若顶部刷新同时观察到至少一个不在数据库、累计摘要或持久候选集合中的
+新候选 ID、最新响应 `has_more=true`
+且带非空下一 search ID，child 必须记录 `discovery_frontier_reseeded`，从该刷新链的下一组三元组
+建立新前沿并替换旧耗尽 checkpoint；任一条件缺失时保持耗尽，只做顶部刷新，避免每轮盲扫旧结果。
+若顶部刷新已经达到 `target_new_met`，本轮立即结束且不建立新前沿，旧耗尽 checkpoint 保持不变；
+下一次正式轮次再按相同双重证据判断是否需要建立新 cursor 前沿。
+来源重新出现未知内容时仍可累计。`--no-import` 诊断自动禁用 checkpoint 写入。通用 runner 的显式 `--resume-summary`、
 `--start-page` 和 `--recovery-keyword` 仅用于人工恢复，不是正常 workflow；使用显式参数时调度器
 不自动混入旧 checkpoint。小红书不开放这些人工恢复参数，全部由独立 runner 从账号级 checkpoint
 生成；换号产生独立记忆，不得解释为同一正式轮次续跑。旧 `search_id` 恢复失败时必须保留原

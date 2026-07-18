@@ -21,6 +21,13 @@
   请求的空结果解释为来源耗尽。
 - 有 checkpoint 时先用空 cursor 从顶部刷新配置页数，再用保存的三元组进入深层前沿。已知
   `aweme_id` 在作者主页补全和媒体处理前跳过；顶部刷新不覆盖深层 cursor。
+- `status=exhausted` 只证明已保存 search ID 的游标链结束。顶部刷新若观察到至少一个不在数据库、
+  累计摘要或 `crawl_discovery_seen_candidates` 中的新 `aweme_id`，并且最后一页返回
+  `has_more=true` 与非空 `logid`，从刷新链下一页
+  建立新 cursor 前沿，写 `discovery_frontier_reseeded` 证据并由新三元组替换旧耗尽 checkpoint。
+  没有新候选 ID 或连续游标时保持耗尽，仅刷新顶部。新前沿遇到历史视频、字段无效项或有效项时
+  由持久候选集合在作者主页和媒体处理前跳过，不消耗候选预算。
+  顶部刷新本身已经 `target_new_met` 时不 reseed，立即结束并保留旧耗尽 checkpoint。
 - 完整响应保存下一 page、`offset + 15` 和下一 `logid`；在目标或候选上限处中途停止时保存当前
   请求三元组，下一次重取边界批次。未达标摘要自动累计，正常 workflow 不使用人工恢复参数。
 - `data=[]` 但 `has_more=1` 是可继续的空批次，必须携带响应 `logid` 请求下一页并计入连续

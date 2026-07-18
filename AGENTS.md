@@ -22,7 +22,7 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 小红书配置使用 schema v2，不再有 pool/target `enabled` 开关；显式 `xhs_runner.py` 命令是唯一启动动作，不为每轮修改或恢复配置开关，旧字段直接视为配置错误。
 - 通用状态写入 `data/runtime/crawl_execution_states/`；小红书状态写入 `data/runtime/xhs/execution_states/`。进入下一阶段前重新读取状态并确认上一阶段完成，不得手工解冻或补签。
 - 正式结构化抓取以 `candidate_hard_limit`、`target_new_posts` 和 `required_fields_profile` 为准；数据库已有记录只算更新，未达到 `valid_new_count` 新增目标不得汇报完成。
-- 五个正式结构化搜索平台都由 runner 自动维护 SQLite 抓取记忆：首次从第一页开始，续跑先有限刷新顶部再恢复深层前沿；正常 workflow 不手工传页码、摘要或游标。通用平台保存安全前沿和有效累计摘要；小红书额外保存所有已处理候选 ID，不能宣称去重强度完全相同。
+- 五个正式结构化搜索平台都由 runner 自动维护 SQLite 抓取记忆：首次从第一页开始，续跑先有限刷新顶部再恢复深层前沿；正常 workflow 不手工传页码、摘要或游标。通用平台按 job 与查询指纹保存安全前沿、有效累计摘要和所有已处理候选 ID；小红书使用独立表并额外按人工指定账号隔离所有已处理候选 ID。
 - 通用 `--dry-run` 不访问平台内容，但默认会同步调度表并写 run report、摘要和 execution state；小红书 dry-run 不构造 child 命令且没有 `import_result`，以后四阶段保持 `frozen` 证明未执行。
 - B站、微博、小红书、抖音、知乎粉丝量为必需字段；数值、来源和 `followers_observed=true` 必须同时存在，平台不提供时只能由配置声明 `ignored`。
 - 路径定义集中在 `trippostcollect.core.paths`；新增代码不要硬编码 `outputs/`、`data/runtime/`、浏览器配置目录等目录。

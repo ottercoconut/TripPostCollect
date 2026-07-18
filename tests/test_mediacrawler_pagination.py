@@ -110,6 +110,45 @@ def test_explicit_empty_page_proves_source_exhaustion(tmp_path: Path) -> None:
     assert validation["stop_detail"] == "empty_page"
 
 
+def test_pagination_evidence_keeps_douyin_frontier_reseed_event(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+    write_state(
+        state_path,
+        [
+            {
+                "type": "discovery_frontier_reseeded",
+                "details": {
+                    "platform": "douyin",
+                    "reason": "new_candidates_after_saved_exhaustion",
+                    "saved_resume_page": 22,
+                    "saved_resume_offset": 315,
+                    "saved_resume_cursor": "old-search-id",
+                    "resume_page": 4,
+                    "resume_offset": 45,
+                    "resume_cursor": "new-search-id",
+                    "refresh_new_candidate_count": 34,
+                },
+            }
+        ],
+    )
+
+    evidence = mediacrawler_crawl.load_pagination_evidence(state_path)
+
+    assert evidence["frontier_reseeds"] == [
+        {
+            "platform": "douyin",
+            "reason": "new_candidates_after_saved_exhaustion",
+            "saved_resume_page": 22,
+            "saved_resume_offset": 315,
+            "saved_resume_cursor": "old-search-id",
+            "resume_page": 4,
+            "resume_offset": 45,
+            "resume_cursor": "new-search-id",
+            "refresh_new_candidate_count": 34,
+        }
+    ]
+
+
 def test_existing_valid_record_is_update_not_valid_new_target(tmp_path: Path) -> None:
     db_path = tmp_path / "posts.sqlite"
     existing = bilibili_record("existing")
@@ -148,6 +187,40 @@ def test_existing_valid_record_is_update_not_valid_new_target(tmp_path: Path) ->
     assert validation["new_target_met"] is True
     assert imported["inserted_rows"] == 1
     assert imported["updated_rows"] == 1
+
+
+def test_zhihu_missing_image_distinguishes_unobserved_detail() -> None:
+    base = {
+        "content_id": "answer-1",
+        "content_type": "answer",
+        "content_text": "正文",
+        "content_url": "https://www.zhihu.com/question/1/answer/answer-1",
+        "created_time": 1_700_000_000,
+        "creator_hash": "author-1",
+        "user_nickname": "author",
+        "followers_count": 10,
+        "followers_observed": True,
+        "author_followers_source": "search_author",
+        "voteup_count": 1,
+        "comment_count": 2,
+        "image_list": [],
+    }
+
+    request_failed = mediacrawler_crawl.validate_formal_record(
+        "zhihu",
+        {**base, "content_detail_status": "request_failed"},
+        set(),
+    )
+    observed_without_image = mediacrawler_crawl.validate_formal_record(
+        "zhihu",
+        {**base, "content_detail_status": "detail_observed"},
+        set(),
+    )
+
+    assert "content_detail_unobserved" in request_failed["reasons"]
+    assert "missing_content_image" not in request_failed["reasons"]
+    assert "missing_content_image" in observed_without_image["reasons"]
+    assert "content_detail_unobserved" not in observed_without_image["reasons"]
 
 
 def test_campaign_records_may_exceed_each_run_candidate_budget(tmp_path: Path) -> None:
