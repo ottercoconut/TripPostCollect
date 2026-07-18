@@ -88,6 +88,11 @@ python scripts/mediacrawler_crawl.py \
 `crawl_runner.py --no-import` 和 `xhs_runner.py --no-import` 同样只用于诊断。当前执行器可能在
 内容与产物校验通过时把这类运行写成 `completed`，但入库被跳过，不能按正式轮次完成汇报。
 
+复核一组已知知乎回答/文章是否真实无图时，将规范 URL 保存为 JSON 数组，并通过
+`mediacrawler_crawl.py --platforms zhihu --zhihu-detail-urls-file <文件> --no-import` 执行。
+只有 `content_detail_status=detail_observed` 后仍无正文图片才可判为真实无图；请求或解析失败必须
+保留为未观察，不能直接运行 `tools/MediaCrawler` 内部命令绕过项目行为与登录门禁。
+
 ## 自动恢复、检查与临时候选预算
 
 B站、微博、抖音和知乎的正常正式 workflow 不需要人工拼接恢复参数。`crawl_runner.py` 每次

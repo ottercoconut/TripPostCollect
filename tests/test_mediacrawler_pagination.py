@@ -5,6 +5,8 @@ import sys
 from importlib import import_module
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -221,6 +223,32 @@ def test_zhihu_missing_image_distinguishes_unobserved_detail() -> None:
     assert "missing_content_image" not in request_failed["reasons"]
     assert "missing_content_image" in observed_without_image["reasons"]
     assert "content_detail_unobserved" not in observed_without_image["reasons"]
+
+
+def test_load_zhihu_detail_urls_accepts_only_answer_and_article(tmp_path: Path) -> None:
+    path = tmp_path / "zhihu-urls.json"
+    path.write_text(
+        json.dumps(
+            [
+                "https://www.zhihu.com/question/123/answer/456?utm_source=test",
+                "https://zhuanlan.zhihu.com/p/789",
+                "https://zhuanlan.zhihu.com/p/789",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert mediacrawler_crawl.load_zhihu_detail_urls(path) == [
+        "https://www.zhihu.com/question/123/answer/456",
+        "https://zhuanlan.zhihu.com/p/789",
+    ]
+
+    path.write_text(
+        json.dumps(["https://www.zhihu.com/zvideo/123"]),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit, match="unsupported Zhihu detail URL"):
+        mediacrawler_crawl.load_zhihu_detail_urls(path)
 
 
 def test_campaign_records_may_exceed_each_run_candidate_budget(tmp_path: Path) -> None:

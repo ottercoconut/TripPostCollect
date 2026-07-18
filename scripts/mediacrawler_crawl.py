@@ -21,7 +21,7 @@ from email.utils import parsedate_to_datetime
 from hashlib import md5
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlencode
+from urllib.parse import quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from playwright.async_api import async_playwright
@@ -235,6 +235,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--discovery-source-exhausted", action="store_true")
     parser.add_argument("--no-checkpoint-write", action="store_true")
     parser.add_argument("--no-import", action="store_true", help="Do not import MediaCrawler JSONL records into SQLite.")
+    parser.add_argument(
+        "--zhihu-detail-urls-file",
+        help="Diagnostic-only JSON array of Zhihu answer/article URLs to inspect via detail mode.",
+    )
     return parser.parse_args()
 
 
@@ -247,6 +251,36 @@ def selected_platforms(values: list[str]) -> list[str]:
     if unknown:
         raise SystemExit(f"Unsupported MediaCrawler platform in this project: {', '.join(unknown)}")
     return values
+
+
+def load_zhihu_detail_urls(path_value: str | Path) -> list[str]:
+    path = Path(path_value).expanduser().resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid Zhihu detail URL file: {path}: {exc}") from exc
+    if not isinstance(payload, list):
+        raise SystemExit("Zhihu detail URL file must contain a JSON array")
+
+    urls: list[str] = []
+    for value in payload:
+        url = str(value or "").strip().split("#", 1)[0].split("?", 1)[0]
+        parsed = urlparse(url)
+        answer_url = bool(
+            parsed.hostname in {"zhihu.com", "www.zhihu.com"}
+            and re.fullmatch(r"/question/[^/]+/answer/[^/]+/?", parsed.path)
+        )
+        article_url = bool(
+            parsed.hostname == "zhuanlan.zhihu.com"
+            and re.fullmatch(r"/p/[^/]+/?", parsed.path)
+        )
+        if not (parsed.scheme == "https" and (answer_url or article_url)):
+            raise SystemExit(f"unsupported Zhihu detail URL: {url or value!r}")
+        if url not in urls:
+            urls.append(url)
+    if not urls:
+        raise SystemExit("Zhihu detail URL file contains no answer/article URLs")
+    return urls
 
 
 def ensure_prerequisites() -> None:
@@ -2117,7 +2151,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "--lt",
         args.login_type,
         "--type",
-        "search",
+        "detail" if getattr(args, "zhihu_detail_urls", []) else "search",
         "--keywords",
         args.keyword,
         "--get_comment",
@@ -2141,6 +2175,8 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "--enable_ip_proxy",
         "false",
     ]
+    if getattr(args, "zhihu_detail_urls", []):
+        cmd.extend(["--specified_id", ",".join(args.zhihu_detail_urls)])
     extra_env: dict[str, str] = {
         "TRIPPOSTCOLLECT_TARGET_NEW_POSTS": str(max(1, source_target_new_posts)),
         "TRIPPOSTCOLLECT_CANDIDATE_HARD_LIMIT": str(source_candidate_hard_limit),
@@ -2635,6 +2671,19 @@ def main() -> int:
         raise SystemExit("--get-media 已禁用：当前项目只采集图文内容和图片 URL，不下载媒体或视频。")
     ensure_prerequisites()
     platforms = selected_platforms(args.platforms)
+    args.zhihu_detail_urls = []
+    if args.zhihu_detail_urls_file:
+        if platforms != ["zhihu"]:
+            raise SystemExit("--zhihu-detail-urls-file requires --platforms zhihu only")
+        if not args.no_import:
+            raise SystemExit("--zhihu-detail-urls-file is diagnostic-only and requires --no-import")
+        if args.resume_summary or args.start_page != 1 or args.discovery_job_id is not None:
+            raise SystemExit("Zhihu detail diagnosis cannot use discovery resume arguments")
+        args.zhihu_detail_urls = load_zhihu_detail_urls(args.zhihu_detail_urls_file)
+        if len(args.zhihu_detail_urls) > candidate_hard_limit:
+            raise SystemExit(
+                "--candidate-hard-limit must cover every URL in --zhihu-detail-urls-file"
+            )
     if "douyin" in platforms and args.start_page > 1 and not args.start_cursor:
         raise SystemExit(
             "Douyin continuation requires --start-cursor together with --start-page"

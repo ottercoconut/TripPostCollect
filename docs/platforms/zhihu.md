@@ -21,5 +21,8 @@
   完整页保存下一页，页面中途停止保存当前页，顶部刷新不推进深层 checkpoint。
 - 未达标摘要由 runner 自动累计，达到完整目标后一次性入库；正常 workflow 不使用人工
   `--start-page` 或 `--resume-summary`。
+- 对一组已知 answer/article URL 重新核验详情时，使用根项目执行器的
+  `--zhihu-detail-urls-file <JSON数组文件> --no-import` 诊断模式；该模式串行复用同一详情并发门禁，
+  不写正式 checkpoint、不入库，也不能作为正式轮次完成证据。不要直接运行第三方内部命令。
 - 首页、cookie reload 和搜索页导航的 `domcontentloaded` 超时为软失败；继续用已验证 cookie
   和 API client 检查。最终 API/字段失败仍按正式状态报告，不能仅因导航超时宣布失败或成功。
