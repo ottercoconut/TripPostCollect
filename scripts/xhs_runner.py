@@ -38,6 +38,10 @@ from trippostcollect.xhs.accounts import (
     validate_account_id,
 )
 from trippostcollect.xhs.config import load_pool_config, load_target
+from trippostcollect.xhs.discovery import (
+    commit_child_discovery,
+    resolve_discovery_plan,
+)
 from trippostcollect.xhs.sessions import (
     encrypt_storage_state,
     load_snapshot_key,
@@ -98,6 +102,7 @@ def build_child_command(
     output_root: Path,
     no_import: bool,
     post_interaction: str,
+    discovery: dict[str, Any],
 ) -> list[str]:
     command = [
         sys.executable,
@@ -116,6 +121,10 @@ def build_child_command(
         str(int(target["target_new_posts"])),
         "--max-stagnant-batches",
         str(int(target["max_stagnant_batches"])),
+        "--start-page",
+        str(int(discovery["resume_page"])),
+        "--top-refresh-max-pages",
+        str(int(discovery["top_refresh_max_pages"])),
         "--required-fields-profile",
         str(target["required_fields_profile"]),
         "--behavior-profile",
@@ -126,6 +135,10 @@ def build_child_command(
         str(db_path),
         "--xhs-account-id",
         str(account["account_id"]),
+        "--xhs-discovery-target-key",
+        str(discovery["target_key"]),
+        "--xhs-discovery-query-fingerprint",
+        str(discovery["query_fingerprint"]),
         "--xhs-profile-dir",
         str(account["profile_dir"]),
         "--xhs-storage-state",
@@ -133,6 +146,12 @@ def build_child_command(
         "--xhs-post-interaction",
         post_interaction,
     ]
+    if discovery.get("resume_search_id"):
+        command.extend(["--start-cursor", str(discovery["resume_search_id"])])
+    if discovery.get("campaign_summary_path"):
+        command.extend(["--resume-summary", str(discovery["campaign_summary_path"])])
+    if discovery.get("source_exhausted"):
+        command.append("--discovery-source-exhausted")
     if target.get("download_images"):
         command.append("--download-images")
     if pool.get("headed", True):
@@ -168,6 +187,20 @@ def load_child_summary(path_value: str) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def frozen_discovery_inputs(discovery: dict[str, Any]) -> list[Path]:
+    summary_value = str(discovery.get("campaign_summary_path") or "")
+    if not summary_value:
+        return []
+    summary_path = Path(summary_value).expanduser().resolve()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    inputs = [summary_path]
+    for record in summary.get("records") or []:
+        output = record.get("output") if isinstance(record, dict) else {}
+        for path_value in (output or {}).get("jsonl_files") or []:
+            inputs.append(Path(path_value).expanduser().resolve())
+    return inputs
 
 
 def fail_open_step(state: FrozenExecutionState, *, error: str, evidence: dict[str, Any] | None = None) -> None:
@@ -312,6 +345,7 @@ def main() -> int:
     state_path = ensure_dir(XHS_EXECUTION_STATE_ROOT / run_id) / f"{args.target_key}.json"
 
     lease_acquired = False
+    discovery_plan: dict[str, Any]
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         ensure_xhs_schema(conn)
@@ -380,6 +414,22 @@ def main() -> int:
                 print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
                 return 2
             lease_acquired = True
+        try:
+            discovery_plan = resolve_discovery_plan(
+                conn,
+                target=target,
+                account_id=str(account["account_id"]),
+            )
+        except Exception:
+            if lease_acquired:
+                release_account_lease(
+                    conn,
+                    account_id=str(account["account_id"]),
+                    run_id=run_id,
+                    outcome="failed",
+                )
+                lease_acquired = False
+            raise
 
     encrypted_state = Path(str(account["encrypted_state_path"]))
     if not encrypted_state.is_file():
@@ -428,6 +478,7 @@ def main() -> int:
         "behavior_profile": pool["behavior_profile"],
         "post_interaction": args.post_interaction,
         "no_import": args.no_import,
+        "discovery": discovery_plan,
     }
     state: FrozenExecutionState | None = None
     try:
@@ -438,7 +489,12 @@ def main() -> int:
             site_key="xhs",
             job_kind="xhs_account_search",
             plan=plan,
-            frozen_inputs=[Path(target["path"]), Path(pool["path"]), FORMAL_CRAWL_CONTRACT],
+            frozen_inputs=[
+                Path(target["path"]),
+                Path(pool["path"]),
+                FORMAL_CRAWL_CONTRACT,
+                *frozen_discovery_inputs(discovery_plan),
+            ],
             dry_run=args.dry_run,
         )
         with sqlite3.connect(db_path) as conn:
@@ -475,6 +531,7 @@ def main() -> int:
     stdout = ""
     stderr = ""
     exit_code = 1
+    discovery_commit: dict[str, Any] = {"skipped": True, "reason": "child_not_started"}
     try:
         key = load_snapshot_key(create=False)
         if snapshot_sha256(encrypted_state) != plan["encrypted_state_sha256"]:
@@ -494,6 +551,7 @@ def main() -> int:
                 output_root=ensure_dir(XHS_RUNS_OUTPUT / run_id),
                 no_import=args.no_import,
                 post_interaction=args.post_interaction,
+                discovery=discovery_plan,
             )
             state.begin("command_executed")
             env = os.environ.copy()
@@ -518,6 +576,33 @@ def main() -> int:
             stdout_json = extract_stdout_json(stdout)
             child_summary_path = str(stdout_json.get("summary") or "")
             child_summary = load_child_summary(child_summary_path)
+            if args.no_import:
+                discovery_commit = {"skipped": True, "reason": "no_import"}
+            elif child_summary_path and child_summary:
+                try:
+                    with sqlite3.connect(db_path) as conn:
+                        conn.row_factory = sqlite3.Row
+                        ensure_xhs_schema(conn)
+                        discovery_commit = commit_child_discovery(
+                            conn,
+                            target=target,
+                            account_id=str(account["account_id"]),
+                            run_id=run_id,
+                            discovery_plan=discovery_plan,
+                            child_summary_path=child_summary_path,
+                            child_summary=child_summary,
+                        )
+                except (OSError, sqlite3.Error, TypeError, ValueError, RuntimeError) as exc:
+                    discovery_commit = {
+                        "skipped": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                    stderr = (
+                        f"{stderr}\nXHS discovery checkpoint write failed: {type(exc).__name__}: {exc}"
+                    ).strip()
+                    exit_code = 2
+            else:
+                discovery_commit = {"skipped": True, "reason": "child_summary_missing"}
             if exit_code != 0:
                 state.fail(
                     "command_executed",
@@ -598,6 +683,7 @@ def main() -> int:
         "account_id": account["account_id"],
         "execution_state": str(state_path),
         "child_summary": child_summary_path,
+        "discovery": discovery_commit,
         "exit_code": exit_code,
         "challenge": challenge,
         "login_reason": login_reason,

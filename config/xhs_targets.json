@@ -9,6 +9,7 @@
       "target_new_posts": 20,
       "candidate_hard_limit": 150,
       "max_stagnant_batches": 3,
+      "top_refresh_max_pages": 3,
       "timeout_seconds": 3600,
       "required_fields_profile": "image_post_with_followers_v1",
       "followers_policy": "required",

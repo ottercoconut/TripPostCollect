@@ -57,8 +57,13 @@ def load_target(target_key: str, path: str | Path = XHS_TARGET_CONFIG) -> dict[s
     target_new = int(target.get("target_new_posts") or 0)
     candidates = int(target.get("candidate_hard_limit") or 0)
     stagnant = int(target.get("max_stagnant_batches") or 0)
+    if "top_refresh_max_pages" not in target:
+        raise XhsConfigError(f"XHS target {target_key} must define top_refresh_max_pages")
+    top_refresh = int(target.get("top_refresh_max_pages") or 0)
     if target_new <= 0 or candidates < target_new or stagnant <= 0:
         raise XhsConfigError(f"invalid formal limits for XHS target {target_key}")
+    if top_refresh < 0:
+        raise XhsConfigError(f"top_refresh_max_pages cannot be negative for XHS target {target_key}")
     if target.get("required_fields_profile") != "image_post_with_followers_v1":
         raise XhsConfigError("XHS requires image_post_with_followers_v1")
     if target.get("followers_policy") != "required":

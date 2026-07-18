@@ -80,11 +80,29 @@ B站、微博、抖音和知乎的正常正式 workflow 不需要人工拼接恢
 命令必须同时出现保存的 `--start-page`、`--start-offset` 和 `--start-cursor`；只出现页码或
 offset 时停止执行，不得用空 cursor 请求深页。
 
+小红书使用相同的安全前沿原则，但不使用通用表或通用 runner。`xhs_runner.py` 按
+`target_key + account_id + query_fingerprint` 读取 `xhs_discovery_checkpoints`；续跑必须同时冻结
+保存的页码和非空 `search_id`，先有限刷新顶部，再恢复深层前沿。操作人不手工传恢复参数。
+
 检查记忆状态：
 
 ```bash
 sqlite3 data/trippostcollect.sqlite \
   "SELECT job_id, platform_key, keyword, resume_page, resume_offset, status, last_stop_reason, updated_at FROM crawl_discovery_checkpoints ORDER BY job_id;"
+```
+
+检查小红书账号级记忆：
+
+```bash
+sqlite3 data/trippostcollect.sqlite \
+  "SELECT target_key, account_id, keyword, resume_page, resume_search_id, status, last_stop_reason, campaign_candidate_count, updated_at FROM xhs_discovery_checkpoints ORDER BY target_key, account_id;"
+```
+
+已处理候选只看计数，不展开 ID 全量：
+
+```bash
+sqlite3 data/trippostcollect.sqlite \
+  "SELECT target_key, account_id, query_fingerprint, COUNT(*) AS seen_candidates FROM xhs_discovery_seen_candidates GROUP BY target_key, account_id, query_fingerprint ORDER BY target_key, account_id;"
 ```
 
 再冻结目标任务，检查生成命令而不抓取：
@@ -112,10 +130,18 @@ checkpoint 记录了非空 `last_summary_path` 但文件丢失时，runner 必�
 只用于报告，不从本次预算扣减。`source_exhausted` 后只做顶部刷新，不再请求已耗尽深页。
 `--no-import` 自动禁用 checkpoint 写入，因此诊断不会污染正式记忆。
 
+小红书 dry-run 的 `plan.discovery` 必须与上面的账号级行一致。首次执行应为第 1 页、空
+`resume_search_id`、顶部刷新 0；续跑应包含已保存页码、非空 ID、配置的顶部刷新页数和可选
+`campaign_summary_path`。正式 child 结束后核对顶层 `run_summary.json` 的 `discovery`、child 的
+`pagination_evidence` 和 SQLite `last_run_id`。顶部刷新完成目标时，深层页码与 ID 必须保持不变。
+同时核对顶层 `discovery.seen_candidate_count` 与本轮停止事件的候选 ID 数；不要在报告中展开
+全部 ID。
+
 `--start-page`、`--resume-summary` 和 `--recovery-keyword` 仅保留给明确的人工恢复。使用任一显式
 恢复参数时，runner 不自动加载现有 checkpoint；操作人必须从状态事件读取未处理位置，且抖音
 人工深页恢复目前没有 runner 级 cursor 参数，不能只靠 `--start-page` 执行。优先修复或保留
-自动 checkpoint，不要删除记录后靠猜页码续跑。小红书不使用本表，仍按独立文档结束失败轮次。
+自动 checkpoint，不要删除记录后靠猜页码续跑。小红书不使用通用表；旧 `search_id` 恢复失败时
+按独立文档保留原账号级 checkpoint 并结束失败轮次，不生成新 ID 猜测深页。
 
 临时候选扩容没有命令行覆盖参数，只能通过配置完成。必须按以下顺序操作：
 

@@ -50,3 +50,46 @@ CREATE TABLE IF NOT EXISTS xhs_runs (
 
 CREATE INDEX IF NOT EXISTS idx_xhs_runs_account
 ON xhs_runs(account_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS xhs_discovery_checkpoints (
+    id INTEGER PRIMARY KEY,
+    target_key TEXT NOT NULL,
+    account_id TEXT NOT NULL REFERENCES xhs_accounts(account_id) ON DELETE CASCADE,
+    keyword TEXT NOT NULL,
+    query_fingerprint TEXT NOT NULL,
+    resume_page INTEGER NOT NULL DEFAULT 1,
+    resume_search_id TEXT,
+    source_has_more INTEGER,
+    status TEXT NOT NULL DEFAULT 'active',
+    last_batch_complete INTEGER NOT NULL DEFAULT 1,
+    last_stop_reason TEXT NOT NULL DEFAULT '',
+    last_run_id TEXT,
+    last_summary_path TEXT,
+    campaign_candidate_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(target_key, account_id, query_fingerprint),
+    CHECK (resume_page >= 1),
+    CHECK (source_has_more IS NULL OR source_has_more IN (0, 1)),
+    CHECK (status IN ('active', 'exhausted')),
+    CHECK (last_batch_complete IN (0, 1)),
+    CHECK (campaign_candidate_count >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_xhs_discovery_checkpoints_target
+ON xhs_discovery_checkpoints(target_key, account_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS xhs_discovery_seen_candidates (
+    target_key TEXT NOT NULL,
+    account_id TEXT NOT NULL REFERENCES xhs_accounts(account_id) ON DELETE CASCADE,
+    query_fingerprint TEXT NOT NULL,
+    platform_post_id TEXT NOT NULL,
+    first_run_id TEXT NOT NULL,
+    last_run_id TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (target_key, account_id, query_fingerprint, platform_post_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_xhs_discovery_seen_candidates_account
+ON xhs_discovery_seen_candidates(account_id, query_fingerprint, last_seen_at DESC);

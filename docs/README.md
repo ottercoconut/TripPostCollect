@@ -52,8 +52,9 @@ python scripts/crawl_runner.py \
 通用平台正式数量、字段 profile、分页和停止条件只从 `config/crawl_targets.json` 读取；结构化平台
 同时强制执行正式契约定义的行为与请求策略门禁。
 通用 runner 会为 B站、微博、抖音和知乎自动读取 SQLite 发现 checkpoint：先有限刷新顶部，
-再从已保存前沿继续；正常运行不需要人工传 `--start-page` 或 `--resume-summary`。小红书不使用
-该通用记忆，仍按独立 workflow 处理。
+再从已保存前沿继续；正常运行不需要人工传 `--start-page` 或 `--resume-summary`。小红书仍走
+独立 workflow，但 `xhs_runner.py` 会按目标、人工指定账号和查询指纹自动读取自己的 checkpoint，
+冻结未完成累计摘要，先刷新顶部，再使用已保存的 `page + search_id` 继续深层发现。
 每个任务会在 `data/runtime/crawl_execution_states/<run_id>/` 生成冻结状态文件；只有状态
 文件和正式摘要同时满足执行契约，才能汇报完成。
 
@@ -76,8 +77,9 @@ python scripts/xhs_runner.py \
 
 dry-run 通过并经人工确认后，才同时启用 `config/xhs_pool.json` 和目标项并去掉
 `--dry-run`。运行结束后检查顶层摘要、child summary、冻结状态和 SQLite，再关闭两个
-`enabled` 开关。小红书状态位于 `data/runtime/xhs/execution_states/<run_id>/`；其余平台
-仍位于通用状态目录。
+`enabled` 开关。dry-run 计划中的 `discovery` 必须与所选账号的
+`xhs_discovery_checkpoints` 一致。小红书状态位于
+`data/runtime/xhs/execution_states/<run_id>/`；其余平台仍位于通用状态目录。
 
 ## 数据边界
 

@@ -159,22 +159,28 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 
 ## 持久化发现记忆与跨次累计
 
-B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由调度器自动维护发现记忆。SQLite
-`crawl_discovery_checkpoints` 以 `job_id + query_fingerprint` 唯一定位；指纹包含平台、关键词和
-影响来源结果的查询参数，不包含候选上限、目标数、超时、登录和顶部刷新页数。关键词或来源
-查询参数改变时必须形成新记忆，不得误用旧游标。
+B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用调度器自动维护发现记忆。SQLite
+`crawl_discovery_checkpoints` 以 `job_id + query_fingerprint` 唯一定位。小红书由独立 runner
+维护 `xhs_discovery_checkpoints`，以 `target_key + account_id + query_fingerprint` 唯一定位，
+并在同一作用域的 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID；两者不与通用任务或
+其他账号共享未入库活动。指纹包含平台、关键词和影响来源结果的查询参数，
+不包含候选上限、目标数、超时、登录和顶部刷新页数。关键词或来源查询参数改变时必须形成新
+记忆，不得误用旧游标。
 
 首次执行从来源第一页开始，不做顶部刷新。每个完整前沿批次把下一页写入状态事件；抖音还必须
-同时写入下一 offset 和响应 search ID。根执行器在 child 摘要形成后才把状态事件提交到 SQLite，
-不得由底层循环提前推进数据库游标。中途停止的批次保存当前请求位置，下一次允许重取该批次，
-依靠已知 ID 提前去重；这样可以重复少量边界数据，但不能跳过未持久化候选。
+同时写入下一 offset 和响应 search ID，小红书保存本次搜索使用的 client search ID。对应根执行器
+在 child 摘要形成后才把状态事件提交到 SQLite，不得由底层循环提前推进数据库游标。中途停止的
+批次保存当前请求位置，下一次允许重取该批次，依靠已知 ID 提前去重；这样可以重复少量边界
+数据，但不能跳过未持久化候选。小红书只有在 child 摘要形成后才把本轮候选 ID 与前沿一起提交；
+视频、字段无效和有效候选都会获得发现记忆，进程在摘要前崩溃的候选不会被提前标记为已处理。
 
 存在 checkpoint 时，runner 自动把保存位置传给 child；有未完成累计摘要时再传入上一份
 `summary.json`。child 先刷新
 配置的 `top_refresh_max_pages` 个顶部页面，再从保存前沿继续。顶部刷新用于发现新近发布内容，
 不推进深层 checkpoint，也不累计前沿停滞；已知 ID 在详情、粉丝和媒体处理前跳过。深层批次
 完整结束才推进到下一页；抖音恢复命令必须同时包含 `--start-page`、`--start-offset` 和非空
-`--start-cursor`，只有页码没有 search ID 的请求是无效恢复。
+`--start-cursor`，小红书深页恢复必须同时包含 `--start-page` 和非空 `--start-cursor`。只有
+页码没有 search ID 的请求是无效恢复。
 
 未达到目标的产物不单独入库。runner 保存其摘要路径，下一次将历史与本次 JSONL 合并校验，
 并只向底层下发剩余新增目标；`candidate_hard_limit` 每次 child 执行重新提供完整预算，不从历史
@@ -183,7 +189,8 @@ checkpoint 本身保留，供下一次定时任务继续向后发现。前沿推
 下一次按任务正常调度间隔运行；无推进的运行错误仍按重试策略处理。
 
 `source_exhausted` checkpoint 不再盲目请求深页，只执行顶部刷新；来源重新出现未知内容时仍可
-累计。`--no-import` 诊断自动禁用 checkpoint 写入。显式 `--resume-summary`、`--start-page` 和
-`--recovery-keyword` 仅用于人工恢复，不是正常 workflow；使用显式参数时调度器不自动混入旧
-checkpoint。小红书仍使用独立 runner，当前没有跨轮发现 checkpoint，也不接受
-`--resume-summary`；换号不得解释为同一正式轮次续跑。
+累计。`--no-import` 诊断自动禁用 checkpoint 写入。通用 runner 的显式 `--resume-summary`、
+`--start-page` 和 `--recovery-keyword` 仅用于人工恢复，不是正常 workflow；使用显式参数时调度器
+不自动混入旧 checkpoint。小红书不开放这些人工恢复参数，全部由独立 runner 从账号级 checkpoint
+生成；换号产生独立记忆，不得解释为同一正式轮次续跑。旧 `search_id` 恢复失败时必须保留原
+checkpoint 并按 `runtime_failed` 停止，不得静默生成新 ID 请求猜测的深页。

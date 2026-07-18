@@ -155,6 +155,7 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
                         "target_new_posts": 5,
                         "candidate_hard_limit": 50,
                         "max_stagnant_batches": 3,
+                        "top_refresh_max_pages": 3,
                         "timeout_seconds": 1800,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
@@ -189,11 +190,28 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
         output_root=tmp_path / "output",
         no_import=False,
         post_interaction="comment-scroll",
+        discovery={
+            "resume_page": 7,
+            "resume_search_id": "saved-search-id",
+            "source_exhausted": False,
+            "top_refresh_max_pages": 3,
+            "campaign_summary_path": "",
+            "target_key": "test",
+            "query_fingerprint": "test-fingerprint",
+        },
     )
 
     assert command[command.index("--xhs-account-id") + 1] == "xhs-a01"
+    assert command[command.index("--xhs-discovery-target-key") + 1] == "test"
+    assert (
+        command[command.index("--xhs-discovery-query-fingerprint") + 1]
+        == "test-fingerprint"
+    )
     assert command[command.index("--behavior-profile") + 1] == "xhs_guarded"
     assert command[command.index("--xhs-post-interaction") + 1] == "comment-scroll"
+    assert command[command.index("--start-page") + 1] == "7"
+    assert command[command.index("--start-cursor") + 1] == "saved-search-id"
+    assert command[command.index("--top-refresh-max-pages") + 1] == "3"
     assert "--download-images" in command
 
 

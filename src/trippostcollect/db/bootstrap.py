@@ -371,6 +371,10 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
         (10, "xhs_manual_account_selection"),
     )
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
+        (12, "xhs_discovery_checkpoints"),
+    )
 
 
 def sync_config_jobs(conn: sqlite3.Connection, config: dict[str, Any]) -> int:

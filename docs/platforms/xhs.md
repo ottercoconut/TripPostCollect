@@ -27,9 +27,11 @@
   -> 同时启用 pool 与 target
   -> 正式运行并申请单账号互斥租约
   -> xhs_guarded 行为阶段
-  -> 自适应搜索、详情、作者粉丝补全和分页
+  -> 有 checkpoint 时刷新顶部，再恢复 page + search_id 深层前沿
+  -> 已知 ID 详情前去重、自适应搜索、详情、作者粉丝补全和分页
   -> 正式字段校验
-  -> 达到有效新增目标后一次性写入 SQLite
+  -> child 摘要形成后提交账号级 checkpoint 和未完成累计摘要
+  -> 累计达到有效新增目标后一次性写入 SQLite 并清空累计摘要
   -> 加密最新 storage state、删除临时明文、释放租约
   -> 检查顶层摘要、child summary、冻结状态和 SQLite
   -> 关闭 pool 与 target 开关
@@ -48,11 +50,13 @@ python scripts/xhs_accounts.py list
 
 - 操作人已经指定账号，账号状态为 `active`，且没有活动租约；
 - 账号目录与其他账号隔离，`storage_state.enc` 存在且可解密；
-- `target_key` 存在，关键词、有效新增目标、候选硬上限、停滞批次和超时符合本轮要求；
+- `target_key` 存在，关键词、有效新增目标、候选硬上限、顶部刷新页数、停滞批次和超时符合本轮要求；
 - `behavior_profile` 为 `xhs_guarded`，有头浏览器已启用；
 - `lease_seconds >= timeout_seconds + 300`；
 - 是否执行评论区访问或点赞已经由操作人明确决定；未明确时必须使用默认 `none`；
 - 本轮开始前 `pool.enabled` 和目标 `enabled` 可以保持 `false`，dry-run 不要求开启。
+- 若该目标和账号已有 checkpoint，其累计摘要及摘要引用的全部 JSONL 必须仍存在；缺失时停止，
+  不得丢弃历史成果后推进前沿。
 
 缺少任一前提时停止，不用底层 MediaCrawler 探测登录态，也不临时修改代码绕过门禁。
 
@@ -107,6 +111,8 @@ dry-run 通过的判据：
 - `plan_frozen=completed`，其余阶段保持 `frozen`；
 - 冻结输入包含 pool、target 和正式契约的 SHA-256；
 - 计划中的账号、关键词、有效新增目标、候选硬上限、行为 profile 和互动模式正确；
+- 计划中的 `discovery` 与 `xhs_discovery_checkpoints` 一致：首次运行从第 1 页开始且顶部刷新为
+  0；续跑包含保存的页码、非空 `search_id`、顶部刷新页数及可选累计摘要；
 - 加密状态存在且账号仍为 `active`。
 
 dry-run 的 `frozen` 后续阶段不是失败。dry-run 不访问内容、不申请正式租约、不写内容表。
@@ -167,8 +173,15 @@ python scripts/xhs_runner.py \
   标记消失且作者数据可读后才关闭页面并继续。等待超时、限流或封禁标记仍抛出运行错误，不能
   静默保存为缺粉丝候选。
 - 成功作者结果按作者 ID 缓存；缓存只减少本轮重复请求，不替代当前轮的来源和观测证据。
-- 自适应搜索复用本关键词的 `search_id` 并递增 `page`。每批记录真实页码、原始返回数、
-  `has_more`、候选数、有效新增数和停止原因。
+- 首轮自适应搜索为关键词生成一个 `search_id` 并递增 `page`。后续正式轮先用新 `search_id`
+  刷新最多 `top_refresh_max_pages` 个顶部页面，再用 checkpoint 保存的 `page + search_id` 恢复
+  深层前沿；深层来源已耗尽时只刷新顶部。
+- 搜索卡片 ID 在笔记详情、作者粉丝和媒体处理前与数据库、账号级已处理候选、累计摘要及本轮
+  已见集合去重；已知 ID 不占 `candidate_hard_limit`。视频或字段无效候选也在 child 摘要形成后
+  写入 `xhs_discovery_seen_candidates`，不靠内容入库才能获得记忆。完整处理一页才保存下一页，
+  候选预算在页中耗尽时保存当前页，下轮重取边界页并靠 ID 去重，避免跳过未处理卡片。
+- 每批记录真实页码、`search_id`、可恢复页码、批次完整性、发现阶段、原始返回数、`has_more`、
+  候选数、有效新增数和停止原因。顶部刷新事件不能覆盖深层 checkpoint，也不累计深层停滞。
 - 连续停滞按“该批没有新增有效记录”累计；出现新的无效候选不能重置停滞计数。
 
 ## 6. 完成判据
@@ -178,6 +191,7 @@ python scripts/xhs_runner.py \
 - 顶层 `run_summary.json` 状态为 `completed`，且账号租约已经释放；
 - 冻结状态的五个阶段全部为 `completed`，`persistence_verified` 不得因 `--no-import` 跳过；
 - child summary 中 `behavior_validation.ok=true`；
+- 顶层摘要 `discovery.skipped=false` 且没有 checkpoint 写入错误；
 - `behavior_validation.platforms.xhs.continuity_ok=true`，且至少覆盖 `search_results`；
 - `formal_validation.behavior_evidence_ok=true`、`policy_evidence_ok=true`；
 - `formal_validation.new_target_met=true`；
@@ -206,14 +220,25 @@ python scripts/xhs_runner.py \
 | `browser_launch_failed` / `runtime_permission_error` | 运行环境失败 | 按运行手册修复 Chrome、HOME、Crashpad 或权限，再重新 dry-run |
 | `browser_target_closed` | 页面、context 或浏览器在启动成功后关闭 | 核对是否人工关闭或浏览器崩溃，不自动重试 |
 | 缺粉丝数值、来源或观测标记 | 字段补全失败 | 检查作者补全是否启用、是否逐条调用、无 token 请求和浏览器回退；禁止放宽 profile |
-| `candidate_hard_limit_reached` | 未达到正式目标 | 结束本轮；由操作人调整下一轮候选预算或关键词 |
+| `candidate_hard_limit_reached` | 未达到正式目标 | 本轮失败但保留累计摘要和安全前沿；下轮同账号自动续跑，必要时再调整单轮候选预算 |
 | `stagnated` | 连续批次无新增有效记录 | 检查无效原因和分页证据；不能把新无效候选解释为进展 |
-| `source_exhausted` | 当前关键词明确耗尽但未完成 | 只有空响应或 `has_more=false` 证据才接受；下一轮由操作人决定关键词 |
+| `source_exhausted` | 深层来源明确耗尽但未完成 | 只有深层阶段空响应或 `has_more=false` 证据才接受；checkpoint 保留，下一轮只刷新顶部 |
 | 超时或缺少停止事件 | `runtime_failed` | 读取 child summary 和日志尾部；不能推断为来源耗尽 |
+| 保存的 `search_id` 恢复请求失败 | `runtime_failed` | checkpoint 保持原位置；保留失败证据，不自动换新 ID 猜测深页，不删除 checkpoint |
+| checkpoint 累计摘要或 JSONL 缺失 | 冻结前失败 | 从原运行产物恢复文件或停止；不得清空路径后继续 |
 | 互动控件失败且无阻断 | 互动失败、抓取可继续 | 只报告 `post_interaction.ok=false`，仍按正式字段和入库判据决定结果 |
 
-小红书当前不支持 `--resume-summary`。失败轮次不导入部分有效记录，不修改冻结状态，不在同一
-轮次中途换账号。失败 child summary 已存在时，顶层 Runner 仍必须报告其中的行为和互动证据。
+小红书不向操作人开放手工 `--resume-summary`、`--start-page` 或 `--start-cursor`；正常续跑全部由
+`xhs_runner.py` 从 SQLite 生成。失败轮次不导入部分有效记录，但 child 摘要存在且分页证据完整时，
+Runner 会提交安全前沿并保存累计摘要；下轮同一账号把历史与本轮 JSONL 合并校验，达到完整
+`target_new_posts` 后才一次性入库。`candidate_hard_limit` 是每次 child 的未知候选预算，不从历史
+累计数扣减。`--no-import` 不写 checkpoint，也不能作为正式完成证据。
+
+checkpoint 与已处理候选集合均以 `target_key + account_id + query_fingerprint` 定位。更换账号会
+开始该账号自己的发现记忆，不共享尚未入库的累计摘要或已处理集合，也不能解释为原账号轮次的
+续跑；已经进入 `web_posts` 的 ID 仍会在所有账号的详情请求前跳过。平台若不接受跨进程复用旧
+`search_id`，该轮按 `runtime_failed` 停止且不推进位置，不设计猜页、静默换游标或从第一页大量
+重抓的降级路径。
 
 ## 8. 账号与状态存储
 

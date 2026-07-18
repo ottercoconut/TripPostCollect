@@ -211,6 +211,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--xhs-account-id", help="Required isolated account id for the XHS low-level executor.")
     parser.add_argument("--xhs-profile-dir", help="Required isolated persistent profile for XHS.")
     parser.add_argument("--xhs-storage-state", help="Required per-run decrypted XHS storage state.")
+    parser.add_argument("--xhs-discovery-target-key", help=argparse.SUPPRESS)
+    parser.add_argument("--xhs-discovery-query-fingerprint", help=argparse.SUPPRESS)
     parser.add_argument(
         "--xhs-post-interaction",
         choices=("none", "comment-scroll", "like-one", "random"),
@@ -1265,6 +1267,7 @@ PAGINATION_EVENT_FIELDS = (
     "stagnant_batches",
     "stop_reason",
     "stop_detail",
+    "candidate_identities",
 )
 
 
@@ -2103,6 +2106,19 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
                 ),
             }
         )
+    if platform_key == "xhs":
+        extra_env.update(
+            {
+                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE": str(args.start_page),
+                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR": str(args.start_cursor or ""),
+                "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES": str(
+                    args.top_refresh_max_pages
+                ),
+                "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED": (
+                    "1" if args.discovery_source_exhausted else "0"
+                ),
+            }
+        )
     if args.resume_identities_path:
         extra_env["TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH"] = args.resume_identities_path
     login_state: dict[str, Any] | None = None
@@ -2138,6 +2154,12 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
                 "TRIPPOSTCOLLECT_XHS_STORAGE_STATE_PATH": str(xhs_storage_path),
                 "TRIPPOSTCOLLECT_XHS_PROFILE_DIR": str(Path(args.xhs_profile_dir).expanduser().resolve()),
                 "TRIPPOSTCOLLECT_XHS_ACCOUNT_ID": str(args.xhs_account_id),
+                "TRIPPOSTCOLLECT_XHS_DISCOVERY_TARGET_KEY": str(
+                    args.xhs_discovery_target_key
+                ),
+                "TRIPPOSTCOLLECT_XHS_DISCOVERY_QUERY_FINGERPRINT": str(
+                    args.xhs_discovery_query_fingerprint
+                ),
                 "TRIPPOSTCOLLECT_XHS_POST_INTERACTION": str(args.xhs_post_interaction),
                 "TRIPPOSTCOLLECT_XHS_INITIAL_SETTLE_SECONDS": "12",
                 "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS": "180" if args.headed else "0",
@@ -2535,7 +2557,13 @@ def main() -> int:
         raise SystemExit("discovery job id, query fingerprint and run id must be supplied together")
     if args.no_import:
         args.no_checkpoint_write = True
-    if args.start_page > 1 and not args.resume_summary and args.discovery_job_id is None:
+    xhs_managed_resume = bool(args.xhs_account_id and args.start_cursor)
+    if (
+        args.start_page > 1
+        and not args.resume_summary
+        and args.discovery_job_id is None
+        and not xhs_managed_resume
+    ):
         raise SystemExit("--start-page greater than 1 requires --resume-summary")
     if args.get_media:
         raise SystemExit("--get-media 已禁用：当前项目只采集图文内容和图片 URL，不下载媒体或视频。")
@@ -2550,8 +2578,12 @@ def main() -> int:
             raise SystemExit("XHS must run alone through scripts/xhs_runner.py")
         if not args.xhs_account_id or not args.xhs_profile_dir or not args.xhs_storage_state:
             raise SystemExit("XHS requires --xhs-account-id, --xhs-profile-dir and --xhs-storage-state")
+        if not args.xhs_discovery_target_key or not args.xhs_discovery_query_fingerprint:
+            raise SystemExit("XHS requires runner-managed discovery target and query fingerprint")
         if args.behavior_profile != "xhs_guarded":
             raise SystemExit("XHS requires --behavior-profile xhs_guarded")
+        if args.start_page > 1 and not args.start_cursor:
+            raise SystemExit("XHS continuation requires --start-cursor together with --start-page")
         if not Path(args.xhs_profile_dir).expanduser().is_dir():
             raise SystemExit("XHS isolated profile directory does not exist")
         if not Path(args.xhs_storage_state).expanduser().is_file():

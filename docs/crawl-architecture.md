@@ -21,10 +21,12 @@ config/xhs_pool.json + config/xhs_targets.json
   -> scripts/xhs_runner.py
       -> explicit --account-id
       -> SQLite xhs_accounts / xhs_account_leases / xhs_account_events / xhs_runs
+      -> SQLite xhs_discovery_checkpoints / xhs_discovery_seen_candidates
       -> data/runtime/xhs/execution_states/<run_id>/<target>.json
       -> decrypt account storage state into an ephemeral runtime file
       -> scripts/mediacrawler_crawl.py --platforms xhs --behavior-profile xhs_guarded
-          -> tools/MediaCrawler search/detail pagination
+          -> tools/MediaCrawler top refresh + page/search ID frontier
+          -> known-ID pre-detail filtering
           -> signed-in no-token creator request
           -> signed-in BrowserContext creator fallback
           -> formal_validation
@@ -72,7 +74,14 @@ runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并�
 和 opaque search ID。child 先做有限顶部刷新，再走深层前沿；顶部刷新不覆盖 checkpoint。
 执行器完成摘要构造后，从最后一条前沿事件提交下一恢复位置，runner 再把本次摘要路径写回
 checkpoint。这个提交顺序保证游标不会先于可累计产物前移。达到完整入库目标后只清空累计摘要，
-不删除发现位置。小红书独立 runner 当前不读写该表。
+不删除发现位置。
+
+小红书独立 runner 不读写通用 checkpoint 表，而是在 `xhs_discovery_checkpoints` 中按目标、账号和
+查询指纹保存 `page + search_id`，在 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID。
+它在冻结时同时纳入累计摘要及其 JSONL，child 摘要形成后才由 `xhs_runner.py` 在同一事务提交
+安全前沿、候选 ID 和活动摘要。顶部刷新使用新 search ID 且不覆盖深层位置；深层续跑复用保存
+的 search ID，详情请求前跳过数据库、已处理候选、累计摘要和本轮已见 ID。换号产生独立活动，
+不共享尚未入库的摘要或候选集合。
 
 ## 结构化平台
 

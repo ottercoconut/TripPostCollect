@@ -16,7 +16,7 @@ data/trippostcollect.sqlite
 | `db/web_posts.sql` | `web_posts`、`web_post_images` |
 | `db/ctf_captures.sql` | `ctf_captures`、`ctf_capture_images` |
 | `db/crawl_scheduler.sql` | `crawl_jobs`、`crawl_discovery_checkpoints`、`crawl_attempts`、`crawl_run_reports`、`profile_health_checks`；任务类型包含通用搜索和页面证据 |
-| `db/xhs_control.sql` | `xhs_accounts`、`xhs_account_events`、`xhs_account_leases`、`xhs_runs` |
+| `db/xhs_control.sql` | `xhs_accounts`、`xhs_account_events`、`xhs_account_leases`、`xhs_runs`、`xhs_discovery_checkpoints`、`xhs_discovery_seen_candidates` |
 
 `trippostcollect.db.bootstrap` 是统一实现。通用 runner、小红书 runner、MediaCrawler 入库和
 CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度任务仍只同步到
@@ -37,8 +37,17 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 `xhs_*` 表只保存小红书控制面和审计信息，不替代内容主表：`xhs_accounts` 保存账号状态、
 隔离 profile 路径、加密状态路径和身份哈希；`xhs_account_leases` 只防止同一账号并发使用；
 `xhs_account_events`、`xhs_runs` 保存人工状态变化、挑战信号和运行摘要。Cookie、localStorage
-原文和加密密钥不写 SQLite；小红书有效图文仍
-写入 `web_posts` / `web_post_images`。
+原文和加密密钥不写 SQLite。`xhs_discovery_checkpoints` 按目标、账号和查询指纹保存下一安全页、
+该深层搜索的 `search_id`、耗尽状态、停止原因和未完成累计摘要路径；它不保存 Cookie，也不跨
+账号共享未入库活动。`xhs_discovery_seen_candidates` 在相同作用域保存已经完成处理的笔记 ID，
+包括因视频或正式字段不足而不进入累计摘要的候选，避免它们跨轮反复触发详情和作者请求。
+小红书有效图文仍写入 `web_posts` / `web_post_images`。
+
+小红书 checkpoint 与通用表遵守同一提交边界：只有 child `summary.json` 已形成且含分页证据时，
+`xhs_runner.py` 才在同一事务提交前沿与已处理候选 ID；未达到目标时 `last_summary_path` 指向
+合并活动的最新摘要，达到完整目标并成功入库后清空摘要路径但保留深层前沿。
+`status=exhausted` 后只刷新顶部；`--no-import` 不更新
+checkpoint。摘要或其 JSONL 缺失时冻结失败，不能静默丢弃活动。
 
 ## 模型执行抓取持久化规范
 
