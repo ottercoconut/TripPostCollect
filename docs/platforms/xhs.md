@@ -4,6 +4,10 @@
 [`formal-crawl-contract.md`](../formal-crawl-contract.md)，当前数值只从 `config/xhs_targets.json`
 和 `config/xhs_pool.json` 读取，不在文档中复制。
 
+> 临时运行约束（2026-07-19）：暂时不抓取小红书。暂停只针对登录和正式抓取执行；账号、
+> 配置、checkpoint 与候选记忆必须原样保留。解除该约束前，以下执行清单仅作恢复依据，
+> 不得实际运行 `xhs_login.py` 或 `xhs_runner.py`，也不得从通用入口绕过暂停。
+
 ## 硬边界
 
 - 正式抓取只运行 `scripts/xhs_runner.py`。
