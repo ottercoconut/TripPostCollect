@@ -60,6 +60,45 @@ def test_false_captcha_marker_key_does_not_self_match() -> None:
     assert result["failure_type"] == "tool_error"
 
 
+def test_false_captcha_marker_in_stdout_json_does_not_self_match() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stdout=json.dumps(
+            {
+                "records": [
+                    {
+                        "behavior_evidence": {
+                            "visible_markers": {"captcha_or_verify": False}
+                        }
+                    }
+                ]
+            }
+        ),
+    )
+
+    assert result["status"] == "retry_wait"
+    assert result["failure_type"] == "tool_error"
+
+
+def test_true_captcha_marker_in_stdout_json_is_detected() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stdout=json.dumps(
+            {
+                "records": [
+                    {
+                        "behavior_evidence": {
+                            "visible_markers": {"captcha_or_verify": True}
+                        }
+                    }
+                ]
+            }
+        ),
+    )
+
+    assert result["status"] == "captcha_detected"
+
+
 def test_strong_platform_classification_beats_formal_count_failure() -> None:
     stdout = json.dumps(
         {

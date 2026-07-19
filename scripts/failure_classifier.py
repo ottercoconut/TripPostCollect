@@ -61,6 +61,28 @@ def _text_blob(*parts: Any) -> str:
     return "\n".join(str(part or "") for part in parts)
 
 
+def _without_false_security_markers(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _without_false_security_markers(item)
+            for key, item in value.items()
+            if not (key in {"captcha", "captcha_or_verify"} and item is False)
+        }
+    if isinstance(value, list):
+        return [_without_false_security_markers(item) for item in value]
+    return value
+
+
+def _stdout_without_json_payload(stdout: str, stdout_json: dict[str, Any]) -> str:
+    if not stdout_json:
+        return stdout
+    start = stdout.find("{")
+    end = stdout.rfind("}")
+    if start < 0 or end < start:
+        return stdout
+    return f"{stdout[:start]}\n{stdout[end + 1:]}"
+
+
 def _strong_child_classification(stdout_json: dict[str, Any]) -> dict[str, Any] | None:
     strong_statuses = {"captcha_detected", "login_required", "blocked", "failed_final"}
     for record in stdout_json.get("records") or []:
@@ -90,10 +112,10 @@ def classify_attempt(
             key: value for key, value in preflight.items() if key != "structured_markers"
         }
     text = _text_blob(
-        stdout,
+        _stdout_without_json_payload(stdout, stdout_json),
         stderr,
         json.dumps(text_meta, ensure_ascii=False),
-        json.dumps(stdout_json, ensure_ascii=False),
+        json.dumps(_without_false_security_markers(stdout_json), ensure_ascii=False),
     )
 
     if meta.get("skipped") and str(meta.get("skip_reason") or "").startswith("video_"):

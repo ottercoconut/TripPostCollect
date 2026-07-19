@@ -59,6 +59,23 @@ def valid_xhs_evidence() -> dict:
     }
 
 
+def test_latest_platform_result_counts_ignore_prior_failed_resume_record() -> None:
+    counts = mediacrawler_crawl.latest_platform_result_counts(
+        [
+            {"platform": "bilibili", "status": "failed", "ok": False},
+            {"platform": "bilibili", "status": "completed", "ok": True},
+            {"platform": "weibo", "status": "skipped_video_only", "ok": True},
+        ],
+        ["bilibili", "weibo"],
+    )
+
+    assert counts == {
+        "ok_count": 2,
+        "skipped_video_only_count": 1,
+        "failed_count": 0,
+    }
+
+
 class FakeLocator:
     def __init__(self, text: str) -> None:
         self.text = text

@@ -2536,6 +2536,25 @@ def collect_behavior_validation(
     }
 
 
+def latest_platform_result_counts(
+    records: list[dict[str, Any]],
+    platforms: list[str],
+) -> dict[str, int]:
+    latest_by_platform: dict[str, dict[str, Any]] = {}
+    for record in records:
+        platform_key = str(record.get("platform") or "")
+        if platform_key in platforms:
+            latest_by_platform[platform_key] = record
+    latest_records = list(latest_by_platform.values())
+    return {
+        "ok_count": sum(1 for record in latest_records if record.get("ok")),
+        "skipped_video_only_count": sum(
+            1 for record in latest_records if record.get("status") == "skipped_video_only"
+        ),
+        "failed_count": sum(1 for record in latest_records if not record.get("ok")),
+    }
+
+
 def write_markdown(summary: dict[str, Any], path: Path) -> None:
     lines = [
         "# MediaCrawler 结构化抓取摘要",
@@ -2785,14 +2804,13 @@ def main() -> int:
         print(f"[mediacrawler] {platform_key}", flush=True)
         records.append(run_platform(platform_key, args, batch_dir))
 
+    result_counts = latest_platform_result_counts(records, platforms)
     summary = {
         "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "keyword": args.keyword,
         "batch_dir": str(batch_dir),
-        "ok_count": sum(1 for record in records if record["ok"]),
-        "skipped_video_only_count": sum(1 for record in records if record["status"] == "skipped_video_only"),
-        "failed_count": sum(1 for record in records if not record["ok"]),
         "records": records,
+        **result_counts,
     }
     behavior_validation = collect_behavior_validation(
         records,
