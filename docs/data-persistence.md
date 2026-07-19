@@ -89,7 +89,8 @@ checkpoint。摘要或其 JSONL 缺失时冻结失败，不能静默丢弃活动
 - 页面级错误页、搜索页、中间页和验证码页只保留证据，不生成用户内容记录。
 - `web_posts` 面向用户查询；`ctf_captures` 面向证据和调试。不要让用户内容只停留在 `ctf_captures`。
 - 正式结构化任务必须配置 `candidate_hard_limit`、`target_new_posts`、`top_refresh_max_pages` 和字段
-  profile；候选上限是每次 child 的未知候选预算。只有跨次累计的
+  profile；候选上限是每次 child 的未知候选安全预算，实际候选从 0 按需增长，达到新增目标后
+  立即停止，不要求抓满上限。只有跨次累计的
   `valid_new_count >= target_new_posts` 且实际新增行数达标才算达到完整目标。
 - 固定 URL 页面证据任务只代表一个页面。以后若新增正式任务，必须在
   `config/crawl_targets.json` 声明 `job_kind=ctf_resource_crawl` 并从 `crawl_runner.py` 进入。

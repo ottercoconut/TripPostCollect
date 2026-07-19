@@ -73,6 +73,10 @@ MediaCrawler 的自适应分页会向同一状态文件追加批次事件，包�
 连续停滞；微博按是否出现不在数据库、累计摘要、`crawl_discovery_seen_candidates` 和本 child 已见集合中的新微博 ID 计算，避免综合搜索连续出现纯文本/视频时
 过早停止。状态事件会写 `stagnation_basis`；最终成功仍以正式校验和数据库验证为准。
 
+候选硬上限只限制单次 child 可进入昂贵处理的未知候选，不是预先抓满的页数或记录数。小红书
+从 0 开始按页增加实际候选，先做数据库、账号级候选记忆、累计摘要和本轮集合去重，达到有效
+新增目标后立即停止；提高目标只改变运行预算，不创建新查询指纹，也不重置已有前沿。
+
 通用结构化任务的发现位置保存在 `crawl_discovery_checkpoints`，唯一键是任务 ID 与查询指纹。
 runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并传入页码；抖音额外传入 offset
 和 opaque search ID。child 先做有限顶部刷新，再走深层前沿；顶部刷新不覆盖 checkpoint。

@@ -62,6 +62,12 @@ python scripts/crawl_runner.py \
 每个任务会在 `data/runtime/crawl_execution_states/<run_id>/` 生成冻结状态文件；只有状态
 文件和正式摘要同时满足执行契约，才能汇报完成。
 
+小红书的实际候选量从 0 开始按页增长，只有通过详情前去重的未知候选才占预算；达到
+`target_new_posts` 后立即停止，不会为了配置的 `candidate_hard_limit` 继续抓满。后者只是单次
+child 的安全上限。永久提高目标时应在 `config/xhs_targets.json` 同步调整候选上限、停滞批次、
+顶部刷新和超时，并在 `config/xhs_pool.json` 保证租约至少覆盖超时加 300 秒清理时间；这些运行
+预算变化不改变查询指纹，也不清空既有账号级 checkpoint 或候选记忆。
+
 ## 抓取记忆速查
 
 “所有平台都有抓取记忆”只指五个正式结构化搜索平台；固定 URL 页面证据任务没有分页发现

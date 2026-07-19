@@ -46,6 +46,19 @@ def pool_config(**overrides) -> dict:
     return value
 
 
+def test_default_xhs_target_budget() -> None:
+    target = load_target("qingdao_travel")
+    pool = load_pool_config()
+
+    assert target["target_new_posts"] == 50
+    assert target["candidate_hard_limit"] == 300
+    assert target["max_stagnant_batches"] == 8
+    assert target["top_refresh_max_pages"] == 5
+    assert target["timeout_seconds"] == 7200
+    assert pool["lease_seconds"] == 7500
+    assert pool["lease_seconds"] >= target["timeout_seconds"] + 300
+
+
 def test_manual_xhs_login_keeps_one_existing_tab() -> None:
     class FakePage:
         def __init__(self) -> None:

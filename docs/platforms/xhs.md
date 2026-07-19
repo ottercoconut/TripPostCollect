@@ -182,6 +182,10 @@ python scripts/xhs_runner.py \
 - 首轮自适应搜索为关键词生成一个 `search_id` 并递增 `page`。后续正式轮先用新 `search_id`
   刷新最多 `top_refresh_max_pages` 个顶部页面，再用 checkpoint 保存的 `page + search_id` 恢复
   深层前沿；深层来源已耗尽时只刷新顶部。
+- 实际候选量从 0 开始按页增长，只有完成详情前去重的未知候选才占预算；达到
+  `target_new_posts` 后立即停止，不会为了 `candidate_hard_limit` 继续抓满。候选硬上限、停滞批次、
+  顶部刷新和超时共同构成单次运行的安全边界；提高正式目标时必须同步核对这些配置以及
+  `lease_seconds >= timeout_seconds + 300`，但不得清空原账号的 checkpoint 或候选记忆。
 - 搜索卡片 ID 在笔记详情、作者粉丝和媒体处理前与数据库、账号级已处理候选、累计摘要及本轮
   已见集合去重；已知 ID 不占 `candidate_hard_limit`。视频或字段无效候选也在 child 摘要形成后
   写入 `xhs_discovery_seen_candidates`，不靠内容入库才能获得记忆。完整处理一页才保存下一页，

@@ -53,6 +53,28 @@ def test_new_valid_record_resets_stagnation(monkeypatch) -> None:
     assert accumulator.stagnant_batches == 0
 
 
+def test_xhs_target_stops_before_candidate_hard_limit(monkeypatch) -> None:
+    monkeypatch.setattr(
+        trippostcollect_adaptive,
+        "append_execution_event",
+        lambda *args, **kwargs: None,
+    )
+    accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
+        platform="xhs",
+        hard_limit=300,
+        target_new=50,
+        max_stagnant_batches=8,
+    )
+
+    for index in range(49):
+        assert accumulator.consider(f"candidate-{index}", valid=True) is False
+
+    assert accumulator.consider("candidate-49", valid=True) is True
+    assert accumulator.candidate_count == 50
+    assert accumulator.candidate_count < accumulator.hard_limit
+    assert accumulator.stop_reason == "target_new_met"
+
+
 def test_weibo_stagnation_tracks_candidate_identity_progress(monkeypatch) -> None:
     monkeypatch.setattr(trippostcollect_adaptive, "append_execution_event", lambda *args, **kwargs: None)
     accumulator = trippostcollect_adaptive.AdaptiveAccumulator(

@@ -73,6 +73,13 @@ B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
   `updated_rows` 表示相同平台 ID（缺失时用规范 URL）已存在，本轮用最新字段覆盖该行并
   重建其图片关系；它不是额外新增记录，也不表示平台内容一定发生过编辑。
 
+候选累计从 0 开始，按平台实际分页逐个增加；达到 `target_new_posts`、来源明确耗尽、连续停滞、
+运行超时或触及 `candidate_hard_limit` 才停止。`candidate_hard_limit` 不是要求底层预取或处理的
+固定数量。小红书提高正式目标时必须同时核对候选上限、`max_stagnant_batches`、
+`top_refresh_max_pages`、`timeout_seconds` 和账号 `lease_seconds`；租约必须至少覆盖超时加 300 秒。
+这些运行预算不属于查询来源参数，调整后继续使用原目标、账号和查询指纹对应的 checkpoint，
+但必须通过新的 dry-run 冻结并核对实际计划。
+
 正式结构化任务只有 `valid_new_count >= target_new_posts` 才能进入入库阶段，并且实际
 `inserted_rows >= target_new_posts` 才能标记 `import_new_target_met=true`。不能用退出码、
 `processed_rows`、`updated_rows`、少量样本或历史数据库总量替代。

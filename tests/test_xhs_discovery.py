@@ -18,6 +18,8 @@ from trippostcollect.xhs.discovery import (
 
 
 def target(**overrides: object) -> dict[str, object]:
+    # Deliberately use a small unit-test budget; production values live only in
+    # config/xhs_targets.json and are covered by test_default_xhs_target_budget.
     return {
         "target_key": "qingdao_travel",
         "keyword": "青岛旅游",

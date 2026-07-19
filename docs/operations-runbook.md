@@ -294,6 +294,13 @@ python scripts/xhs_runner.py \
   --account-id xhs-a01
 ```
 
+小红书实际候选量从 0 按页增长，达到配置的有效新增目标即停止；`candidate_hard_limit` 只是单次
+child 的未知候选安全上限。永久提高检索目标时只修改 `config/xhs_targets.json` 和必要的
+`config/xhs_pool.json`，同步核对候选上限、停滞批次、顶部刷新、超时以及
+`lease_seconds >= timeout_seconds + 300`，再运行 JSON 校验和上述 dry-run。目标与运行预算不进入
+查询指纹，因此不得删除或手工改写原账号 checkpoint、累计摘要、page 或 search ID；dry-run
+应继续显示原前沿并冻结新的数量计划。
+
 运行结束后按顺序读取顶层 `run_summary.json`、冻结状态、child summary 和 SQLite 计数。XHS
 配置 schema v2 没有 pool/target `enabled` 开关，显式 runner 命令就是唯一启动动作，不修改配置。
 登录失效时对原账号运行 `xhs_login.py`；作者页二维码安全验证会

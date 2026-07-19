@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "lease_seconds": 3900,
+  "lease_seconds": 7500,
   "behavior_profile": "xhs_guarded",
   "headed": true
 }
