@@ -4,6 +4,9 @@
 
 通用平台正式任务只从调度器开始；小红书使用本手册后文的独立 runner：
 
+当前临时平台范围只解冻小红书；`config/crawl_targets.json` 中所有通用任务均已冻结。
+解除该约束前，不运行本节的通用 warmup、dry-run 或正式命令；小红书按后文独立账号流程执行。
+
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \

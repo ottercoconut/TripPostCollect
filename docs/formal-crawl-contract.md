@@ -4,6 +4,10 @@
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
 `config/xhs_pool.json` 中配置。本文不重复平台数值。
 
+> 临时平台范围（2026-07-20）：当前只允许显式执行小红书独立 workflow；通用配置中的
+> B站、微博、抖音和知乎任务全部 `enabled=false`。冻结不删除其 checkpoint 或候选记忆，
+> 也不改变本文的通用完成语义。
+
 ## 唯一入口
 
 通用平台正式任务只通过 `scripts/crawl_runner.py` 执行；小红书正式任务只通过

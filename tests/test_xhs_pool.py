@@ -55,7 +55,20 @@ def test_default_xhs_target_budget() -> None:
     assert target["max_stagnant_batches"] == 8
     assert target["top_refresh_max_pages"] == 5
     assert target["timeout_seconds"] == 7200
-    assert pool["lease_seconds"] == 7500
+    assert pool["lease_seconds"] == 29100
+    assert pool["lease_seconds"] >= target["timeout_seconds"] + 300
+
+
+def test_exhaustive_xhs_target_budget() -> None:
+    target = load_target("qingdao_free_travel_exhaustive")
+    pool = load_pool_config()
+
+    assert target["keyword"] == "青岛自由行"
+    assert target["target_new_posts"] == 1000
+    assert target["candidate_hard_limit"] == 1000
+    assert target["max_stagnant_batches"] == 50
+    assert target["top_refresh_max_pages"] == 5
+    assert target["timeout_seconds"] == 28800
     assert pool["lease_seconds"] >= target["timeout_seconds"] + 300
 
 

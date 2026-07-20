@@ -4,9 +4,11 @@
 [`formal-crawl-contract.md`](../formal-crawl-contract.md)，当前数值只从 `config/xhs_targets.json`
 和 `config/xhs_pool.json` 读取，不在文档中复制。
 
-> 临时运行约束（2026-07-19）：暂时不抓取小红书。暂停只针对登录和正式抓取执行；账号、
-> 配置、checkpoint 与候选记忆必须原样保留。解除该约束前，以下执行清单仅作恢复依据，
-> 不得实际运行 `xhs_login.py` 或 `xhs_runner.py`，也不得从通用入口绕过暂停。
+> 临时运行约束（2026-07-20）：小红书独立 workflow 已解冻，B站、微博、抖音和知乎在
+> `config/crawl_targets.json` 中冻结。小红书仍不使用 `enabled` 开关，只允许操作人显式执行
+> 本文入口。当前“青岛自由行”使用独立耗尽扫描目标：有效新增目标和候选硬上限设为同一高位
+> 安全边界；若先触及边界而来源仍有后续，必须保留账号级记忆、提高边界并续跑，不能据此宣称
+> 来源耗尽。具体预算只读取 `config/xhs_targets.json` 和 `config/xhs_pool.json`。
 
 ## 硬边界
 
