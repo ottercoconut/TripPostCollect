@@ -76,6 +76,19 @@ def test_latest_platform_result_counts_ignore_prior_failed_resume_record() -> No
     }
 
 
+def test_failed_process_cannot_be_classified_as_success_when_output_exists(
+) -> None:
+    exit_code = mediacrawler_crawl.effective_attempt_exit_code(
+        {
+            "status": "completed",
+            "ok": True,
+            "run": {"returncode": 1},
+        }
+    )
+
+    assert exit_code == 1
+
+
 class FakeLocator:
     def __init__(self, text: str) -> None:
         self.text = text

@@ -2347,6 +2347,8 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         status = "skipped_video_only"
     if run["timed_out"] and output["non_video_content_records"] > 0:
         status = "partial_completed"
+    elif int(run.get("returncode") or 0) != 0:
+        status = "runtime_failed"
     if not behavior_evidence_valid(behavior_evidence):
         status = "behavior_failed"
     return {
@@ -2361,6 +2363,14 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "run": run,
         "output": output,
     }
+
+
+def effective_attempt_exit_code(record: dict[str, Any]) -> int:
+    run = record.get("run") or {}
+    raw_returncode = run.get("returncode")
+    if raw_returncode is not None:
+        return int(raw_returncode)
+    return 0 if record.get("ok") else 1
 
 
 def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -> dict[str, Any]:
@@ -2417,7 +2427,7 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
     record["policy_events"] = policy_events
     run = record.get("run") or {}
     evidence = record.get("behavior_evidence") or {}
-    effective_exit_code = 0 if record.get("ok") else int(run.get("returncode") or 1)
+    effective_exit_code = effective_attempt_exit_code(record)
     classification = classify_attempt(
         exit_code=effective_exit_code,
         stdout=str(run.get("stdout_tail") or ""),
