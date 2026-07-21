@@ -123,6 +123,9 @@ class FakePage:
     async def bring_to_front(self) -> None:
         self.brought_to_front += 1
 
+    async def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        self.url = url
+
 
 async def fake_dwell_on_list(page, profile, log) -> None:
     log.extend(
@@ -443,6 +446,50 @@ async def test_xhs_continuity_rate_limit_fails_and_is_persisted(tmp_path: Path) 
     assert persisted["status"] == "failed"
     assert persisted["challenge"] == "rate_limited"
     assert persisted["continuity_events"][0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_xhs_api_captcha_opens_operator_page_and_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = FakePage()
+    redirect_url = page.url
+    normal_markers = {
+        "captcha_or_verify": False,
+        "rate_limited": False,
+        "blocked": False,
+        "login_required": False,
+    }
+
+    async def completed_verification(current_page):
+        current_page.url = redirect_url
+        return "正常搜索内容", normal_markers
+
+    async def no_sleep(seconds):
+        return None
+
+    evidence_path = tmp_path / "behavior.json"
+    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
+    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", completed_verification)
+    monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", no_sleep)
+
+    event = await mediacrawler_behavior.run_xhs_api_captcha_verification(
+        page,
+        evidence_path=evidence_path,
+        verify_type="216",
+        verify_uuid="test-uuid",
+        verify_biz=461,
+    )
+
+    persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert page.brought_to_front == 1
+    assert event["status"] == "completed"
+    assert event["redirect_url"] == redirect_url
+    assert event["verify_type"] == "216"
+    assert "verifyUuid=test-uuid" in event["captcha_url"]
+    assert persisted["operator_verification_events"][0]["status"] == "completed"
+    assert persisted["status"] == "completed"
 
 
 @pytest.mark.asyncio

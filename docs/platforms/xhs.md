@@ -182,6 +182,10 @@ python scripts/xhs_runner.py \
   `behavior_evidence.operator_verification_events`，状态依次为 `waiting_for_operator` 与
   `completed` 或 `failed`；验证标记消失后才恢复抓取。等待过程不自动点击、识别或绕过验证，
   600 秒超时则本轮失败且不入库。
+- 搜索 API 返回 461/471 和 `Verifyuuid`、`Verifytype` 时，不得让 MediaCrawler 直接退出；使用
+  同一 BrowserContext 打开 `/website-login/captcha` 人工验证页并置前，等待规则和证据字段同上。
+  操作人完成验证并回到原关键词页后刷新客户端 Cookie，再重试原请求；不得调用验证码识别或
+  自动生成滑动轨迹。
 - 搜索页、帖子互动和作者主页浏览器导航使用绝对 deadline。导航事件超时但关键词 URL 已提交
   时交给可见页面就绪门禁判断；URL 未提交或页面调用超过 deadline 时按运行失败停止。
 - 作者粉丝补全先请求当前登录会话的无 token 作者主页。空结果时随机等待，再用同一已登录
@@ -239,6 +243,7 @@ python scripts/xhs_runner.py \
 |---|---|---|
 | 启动前 `login_required` | 失败，不入库 | 对同一账号运行 `xhs_login.py` 人工复验；复验成功后开始新轮次 |
 | 搜索连续性登录/图片验证 | 暂停当前搜索批次 | 保持当前页置前，等待操作人处理；通过后继续，600 秒超时则失败且不入库 |
+| 搜索 API 461/471 验证 | 暂停原 API 请求 | 用响应的 `Verifyuuid`、`Verifytype` 打开平台人工验证页；通过后刷新 Cookie 并重试原请求 |
 | 作者页二维码安全验证 | 暂停当前作者补全 | 保持验证页置前，等待操作人扫码；通过后继续，600 秒超时则失败且不入库 |
 | 频控、拒绝访问、环境异常 | 失败，不入库 | 保留证据并停止请求；由操作人决定隔离、等待或下一轮切号 |
 | `browser_launch_failed` / `runtime_permission_error` | 运行环境失败 | 按运行手册修复 Chrome、HOME、Crashpad 或权限，再重新 dry-run |

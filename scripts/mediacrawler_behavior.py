@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from playwright.async_api import Page
 
@@ -452,6 +453,168 @@ async def wait_for_xhs_continuity_verification(
             raise RuntimeError(
                 f"{latest_challenge}_detected_during_xhs_continuity:{stage}"
             )
+
+
+async def run_xhs_api_captcha_verification(
+    page: Page,
+    *,
+    evidence_path: str | Path,
+    verify_type: str,
+    verify_uuid: str,
+    verify_biz: int,
+    timeout_seconds: float | None = None,
+    poll_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Open an API-issued XHS captcha in the current browser for manual verification."""
+    path = Path(evidence_path).expanduser()
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot update XHS API captcha evidence: {exc}") from exc
+    if evidence.get("profile") != "xhs_guarded" or not behavior_evidence_valid(evidence):
+        raise RuntimeError("XHS API captcha verification requires completed xhs_guarded evidence")
+    if not verify_type or not verify_uuid:
+        raise RuntimeError("XHS API captcha response is missing verification identifiers")
+
+    timeout = max(
+        0.1,
+        float(
+            XHS_CONTINUITY_VERIFY_WAIT_SECONDS
+            if timeout_seconds is None
+            else timeout_seconds
+        ),
+    )
+    poll = max(
+        0.01,
+        float(
+            XHS_CONTINUITY_VERIFY_POLL_SECONDS
+            if poll_seconds is None
+            else poll_seconds
+        ),
+    )
+    redirect_url = page.url
+    captcha_url = "https://www.xiaohongshu.com/website-login/captcha?" + urlencode(
+        {
+            "redirectPath": redirect_url,
+            "verifyUuid": verify_uuid,
+            "verifyType": verify_type,
+            "verifyBiz": str(verify_biz),
+        }
+    )
+    started = time.monotonic()
+    event: dict[str, Any] = {
+        "stage": "api_captcha",
+        "started_at": utc_now(),
+        "finished_at": None,
+        "status": "waiting_for_operator",
+        "initial_challenge": "api_captcha",
+        "challenge": "api_captcha",
+        "verify_type": verify_type,
+        "verify_uuid": verify_uuid,
+        "verify_biz": verify_biz,
+        "redirect_url": redirect_url,
+        "captcha_url": captcha_url,
+        "timeout_seconds": round(timeout, 3),
+    }
+    verification_events = evidence.setdefault("operator_verification_events", [])
+    verification_events.append(event)
+    evidence["operator_verification_events"] = verification_events[-50:]
+    write_evidence(path, evidence)
+
+    try:
+        await page.goto(captcha_url, wait_until="domcontentloaded", timeout=30_000)
+        await page.bring_to_front()
+    except Exception as exc:
+        event.update(
+            {
+                "finished_at": utc_now(),
+                "status": "failed",
+                "error": f"captcha_navigation_failed:{type(exc).__name__}:{exc}",
+            }
+        )
+        evidence.update(
+            {
+                "status": "failed",
+                "challenge": "captcha_or_verify",
+                "visible_markers": {"captcha_or_verify": True},
+            }
+        )
+        write_evidence(path, evidence)
+        raise RuntimeError("xhs_api_captcha_page_unavailable") from exc
+
+    latest_text = ""
+    latest_markers: dict[str, bool] = {"captcha_or_verify": True}
+    while True:
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            event.update(
+                {
+                    "finished_at": utc_now(),
+                    "status": "failed",
+                    "challenge": "api_captcha",
+                    "visible_markers": latest_markers,
+                    "visible_text_sample": latest_text,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "error": "operator_verification_timeout",
+                    "url": page.url,
+                }
+            )
+            evidence.update(
+                {
+                    "status": "failed",
+                    "challenge": "captcha_or_verify",
+                    "visible_markers": latest_markers,
+                    "visible_text_sample": latest_text,
+                }
+            )
+            write_evidence(path, evidence)
+            raise RuntimeError("xhs_api_captcha_verification_timeout")
+
+        await asyncio.sleep(min(poll, remaining))
+        latest_text, latest_markers = await visible_page_state(page)
+        current_url = page.url
+        visible = visible_challenge(latest_markers)
+        event.update(
+            {
+                "challenge": visible or "api_captcha",
+                "visible_markers": latest_markers,
+                "visible_text_sample": latest_text,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "url": current_url,
+            }
+        )
+        if (
+            "/website-login/captcha" not in current_url
+            and not latest_markers.get("captcha_or_verify")
+            and not latest_markers.get("login_required")
+        ):
+            event.update(
+                {
+                    "finished_at": utc_now(),
+                    "status": "completed",
+                    "challenge": "",
+                }
+            )
+            write_evidence(path, evidence)
+            return event
+        if visible in {"rate_limited", "blocked"}:
+            event.update(
+                {
+                    "finished_at": utc_now(),
+                    "status": "failed",
+                    "error": f"{visible}_during_operator_verification",
+                }
+            )
+            evidence.update(
+                {
+                    "status": "failed",
+                    "challenge": visible,
+                    "visible_markers": latest_markers,
+                    "visible_text_sample": latest_text,
+                }
+            )
+            write_evidence(path, evidence)
+            raise RuntimeError(f"{visible}_detected_during_xhs_api_captcha")
 
 
 def persist_xhs_continuity_failure(
