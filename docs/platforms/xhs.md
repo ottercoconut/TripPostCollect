@@ -13,6 +13,8 @@
 ## 硬边界
 
 - 正式抓取只运行 `scripts/xhs_runner.py`。
+- 小红书的会话预算、请求节奏、验证和失败恢复由独立 runner 与 `xhs_guarded` 管理，不读写通用
+  `scrapling_throttle.json` 冷却；发现旧 XHS 通用策略状态时由正式入口删除。
 - 账号登记和人工状态变更只运行 `scripts/xhs_accounts.py`；登录只运行 `scripts/xhs_login.py`。
 - 不把小红书放入 `crawl_runner.py`、`login_warmup.py`、`config/crawl_targets.json` 或
   `info_collection_benchmark.py`。

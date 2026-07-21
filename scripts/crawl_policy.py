@@ -68,6 +68,23 @@ def save_policy_state(state: dict[str, Any], path: Path | None = None) -> None:
     tmp_path.replace(path)
 
 
+def clear_site_policy_state(site_key: str) -> dict[str, Any] | None:
+    """Remove obsolete shared-policy state for a platform with an independent scheduler."""
+    with site_policy_lock(site_key):
+        state = load_policy_state()
+        removed = state.pop(site_key, None)
+        if removed is None:
+            return None
+        save_policy_state(state)
+        return {
+            "site": site_key,
+            "cleared": True,
+            "prior_cooldown_reason": str(removed.get("cooldown_reason") or ""),
+            "prior_cooldown_until": str(removed.get("cooldown_until") or ""),
+            "state_path": str(POLICY_STATE),
+        }
+
+
 @contextlib.contextmanager
 def site_policy_lock(site_key: str) -> Iterator[None]:
     lock_path = ensure_dir(LOCK_DIR) / f"{site_key}.lock"

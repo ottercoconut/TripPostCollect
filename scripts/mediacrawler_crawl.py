@@ -26,7 +26,12 @@ from urllib.request import Request, urlopen
 
 from playwright.async_api import async_playwright
 
-from crawl_policy import CrawlPolicyBlocked, record_site_cooldown, site_request_guard
+from crawl_policy import (
+    CrawlPolicyBlocked,
+    clear_site_policy_state,
+    record_site_cooldown,
+    site_request_guard,
+)
 from execution_state import FrozenExecutionState
 from failure_classifier import classify_attempt
 from human_flow import install_runtime_hints
@@ -2379,8 +2384,16 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
     log_dir = batch_dir / "logs" / platform_key
     save_path = batch_dir / platform_key / "data"
     policy_events: list[dict[str, Any]] = []
+    shared_policy_disabled = platform_key == "xhs"
+    policy_cleanup = clear_site_policy_state(site.key) if shared_policy_disabled else None
     try:
-        with site_request_guard(site, label="mediacrawler:formal_platform_session") as event:
+        with site_request_guard(
+            site,
+            label="mediacrawler:formal_platform_session",
+            disabled=shared_policy_disabled,
+        ) as event:
+            if policy_cleanup:
+                event["obsolete_policy_state_cleared"] = policy_cleanup
             policy_events.append(event)
             record = _run_platform_without_policy(platform_key, args, batch_dir)
     except CrawlPolicyBlocked as exc:
@@ -2435,7 +2448,11 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
         meta={"structured_markers": evidence.get("visible_markers") or {}},
     )
     record["failure_classification"] = classification
-    if classification.get("failure_type") in {"captcha_detected", "rate_limited", "blocked_or_forbidden"}:
+    if platform_key != "xhs" and classification.get("failure_type") in {
+        "captcha_detected",
+        "rate_limited",
+        "blocked_or_forbidden",
+    }:
         record["cooldown_event"] = record_site_cooldown(
             site,
             reason=str(classification.get("failure_type")),
@@ -2500,7 +2517,7 @@ def collect_behavior_validation(
         policy_allowed = any(
             isinstance(event, dict)
             and event.get("allowed") is True
-            and event.get("disabled") is not True
+            and (platform_key == "xhs" or event.get("disabled") is not True)
             for event in policy_events
         )
         behavior_url = str(evidence.get("url") or "")

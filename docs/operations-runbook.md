@@ -353,6 +353,10 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 验证码：站点打包脚本和隐藏组件可能包含 `geetest`、`captcha` 或“请先登录”，会产生
 假阳性。行为证据缺失或不完整时保留 JSONL 排障，但禁止入库。
 
+小红书不使用通用 `scrapling_throttle.json` 的站点预算或验证码冷却；其独立 runner、租约和
+`xhs_guarded` 已承担这些门禁。正式入口发现历史 XHS 通用策略状态时删除该平台条目，其他平台
+状态必须保留。不得因接口 461/471 写入通用三小时冷却而阻止操作人完成平台验证。
+
 策略状态中的 `max_requests_per_session` 是自动会话冷却：跨 UTC 日，或从
 `last_request_finished_at`（缺失时用 `last_request_at`）起已完整空闲 `cooldown_minutes`，会开启
 新会话并清零计数。验证码、频控和封禁写入的其他 `cooldown_reason` 是显式冷却，在有效期内

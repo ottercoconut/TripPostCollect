@@ -103,3 +103,27 @@ def test_stale_automatic_cooldown_is_cleared_even_if_until_is_in_future() -> Non
     assert "cooldown_until" not in normalized
     assert "cooldown_reason" not in normalized
 
+
+def test_clear_site_policy_state_removes_only_requested_platform(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_path = tmp_path / "policy.json"
+    monkeypatch.setattr(crawl_policy, "POLICY_STATE", state_path)
+    crawl_policy.save_policy_state(
+        {
+            "xhs": {
+                "cooldown_reason": "captcha_detected",
+                "cooldown_until": "2026-07-21T17:42:46+00:00",
+            },
+            "weibo": {"daily_count": 2},
+        }
+    )
+
+    event = crawl_policy.clear_site_policy_state("xhs")
+
+    persisted = crawl_policy.load_policy_state()
+    assert event is not None
+    assert event["prior_cooldown_reason"] == "captcha_detected"
+    assert "xhs" not in persisted
+    assert persisted["weibo"] == {"daily_count": 2}
