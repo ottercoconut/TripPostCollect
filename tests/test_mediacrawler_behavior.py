@@ -90,6 +90,7 @@ class FakePage:
         self.text = text
         self.card_count = card_count
         self.profile_count = profile_count
+        self.brought_to_front = 0
 
     def locator(self, selector: str) -> FakeLocator:
         assert selector == "body"
@@ -105,6 +106,9 @@ class FakePage:
 
     async def screenshot(self, path: str, full_page: bool, timeout: int, animations: str) -> None:
         Path(path).write_bytes(b"png")
+
+    async def bring_to_front(self) -> None:
+        self.brought_to_front += 1
 
 
 async def fake_dwell_on_list(page, profile, log) -> None:
@@ -328,6 +332,104 @@ async def test_xhs_continuity_behavior_is_persisted(
     assert continuity["status"] == "completed"
     assert persisted["continuity_events"][0]["stage"] == "search_results"
     assert [item["event"] for item in continuity["events"]] == ["pause", "mouse_moves"]
+
+
+@pytest.mark.asyncio
+async def test_xhs_continuity_waits_for_operator_login_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normal_markers = {
+        "captcha_or_verify": False,
+        "rate_limited": False,
+        "blocked": False,
+        "login_required": False,
+    }
+    login_markers = {**normal_markers, "login_required": True}
+    states = iter(
+        [
+            ("登录后查看", login_markers),
+            ("正常搜索内容", normal_markers),
+            ("正常搜索内容", normal_markers),
+        ]
+    )
+
+    async def changing_page_state(page):
+        return next(states)
+
+    async def no_sleep(seconds):
+        return None
+
+    async def fake_pause(page, seconds_range, *, reason, log):
+        log.append({"event": "pause", "reason": reason, "seconds": 2.0})
+
+    async def fake_mouse_moves(page, profile, log):
+        log.append({"event": "mouse_moves", "count": 1})
+
+    page = FakePage()
+    evidence_path = tmp_path / "behavior.json"
+    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
+    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", changing_page_state)
+    monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(mediacrawler_behavior, "human_pause", fake_pause)
+    monkeypatch.setattr(mediacrawler_behavior, "random_mouse_moves", fake_mouse_moves)
+
+    continuity = await mediacrawler_behavior.run_xhs_continuity_behavior(
+        page,
+        evidence_path=evidence_path,
+        stage="search_results",
+    )
+
+    persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
+    verification = persisted["operator_verification_events"][0]
+    assert page.brought_to_front == 1
+    assert verification["initial_challenge"] == "login_required"
+    assert verification["status"] == "completed"
+    assert continuity["status"] == "completed"
+    assert persisted["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_xhs_continuity_verification_timeout_is_persisted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_path = tmp_path / "behavior.json"
+    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
+    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_WAIT_SECONDS", 0.1)
+    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.01)
+
+    with pytest.raises(RuntimeError, match="xhs_continuity_verification_timeout"):
+        await mediacrawler_behavior.run_xhs_continuity_behavior(
+            FakePage("登录后查看"),
+            evidence_path=evidence_path,
+            stage="search_results",
+        )
+
+    persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
+    verification = persisted["operator_verification_events"][0]
+    assert verification["status"] == "failed"
+    assert verification["error"] == "operator_verification_timeout"
+    assert persisted["status"] == "failed"
+    assert persisted["challenge"] == "login_required"
+
+
+@pytest.mark.asyncio
+async def test_xhs_continuity_rate_limit_fails_and_is_persisted(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "behavior.json"
+    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="rate_limited_detected"):
+        await mediacrawler_behavior.run_xhs_continuity_behavior(
+            FakePage("请求过于频繁"),
+            evidence_path=evidence_path,
+            stage="search_results",
+        )
+
+    persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "failed"
+    assert persisted["challenge"] == "rate_limited"
+    assert persisted["continuity_events"][0]["status"] == "failed"
 
 
 @pytest.mark.asyncio

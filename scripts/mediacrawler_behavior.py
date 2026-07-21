@@ -26,6 +26,8 @@ from human_flow import (
 HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS = 240
 XHS_VISIBLE_CHECK_INTERVAL_SECONDS = 5.0
 XHS_SEARCH_READY_TIMEOUT_SECONDS = 90.0
+XHS_CONTINUITY_VERIFY_WAIT_SECONDS = 600.0
+XHS_CONTINUITY_VERIFY_POLL_SECONDS = 2.0
 REQUEST_RANDOM = random.SystemRandom()
 XHS_POST_INTERACTION_MODES = frozenset({"comment-scroll", "like-one", "random"})
 REQUIRED_BEHAVIOR_EVENTS = frozenset({"pause", "mouse_moves", "human_scroll_complete"})
@@ -313,6 +315,184 @@ async def run_guarded_request_pause(
     return event
 
 
+async def wait_for_xhs_continuity_verification(
+    page: Page,
+    *,
+    evidence: dict[str, Any],
+    evidence_path: str | Path,
+    stage: str,
+    initial_challenge: str,
+    initial_text: str,
+    initial_markers: dict[str, bool],
+    timeout_seconds: float | None = None,
+    poll_seconds: float | None = None,
+) -> tuple[str, dict[str, bool], dict[str, Any]]:
+    """Keep an XHS search page open while an operator completes visible verification."""
+    if initial_challenge not in {"captcha_or_verify", "login_required"}:
+        raise RuntimeError(f"unsupported_xhs_operator_verification:{initial_challenge}")
+
+    timeout = max(
+        0.1,
+        float(
+            XHS_CONTINUITY_VERIFY_WAIT_SECONDS
+            if timeout_seconds is None
+            else timeout_seconds
+        ),
+    )
+    poll = max(
+        0.01,
+        float(
+            XHS_CONTINUITY_VERIFY_POLL_SECONDS
+            if poll_seconds is None
+            else poll_seconds
+        ),
+    )
+    started = time.monotonic()
+    event: dict[str, Any] = {
+        "stage": stage,
+        "started_at": utc_now(),
+        "finished_at": None,
+        "status": "waiting_for_operator",
+        "initial_challenge": initial_challenge,
+        "challenge": initial_challenge,
+        "visible_markers": initial_markers,
+        "visible_text_sample": initial_text,
+        "timeout_seconds": round(timeout, 3),
+        "url": page.url,
+    }
+    verification_events = evidence.setdefault("operator_verification_events", [])
+    verification_events.append(event)
+    evidence["operator_verification_events"] = verification_events[-50:]
+    write_evidence(evidence_path, evidence)
+
+    try:
+        await page.bring_to_front()
+    except Exception as exc:
+        event.update(
+            {
+                "finished_at": utc_now(),
+                "status": "failed",
+                "error": f"bring_to_front_failed:{type(exc).__name__}:{exc}",
+            }
+        )
+        evidence.update(
+            {
+                "status": "failed",
+                "challenge": initial_challenge,
+                "visible_markers": initial_markers,
+                "visible_text_sample": initial_text,
+            }
+        )
+        write_evidence(evidence_path, evidence)
+        raise RuntimeError(f"xhs_continuity_page_unavailable:{stage}") from exc
+
+    latest_challenge = initial_challenge
+    latest_text = initial_text
+    latest_markers = initial_markers
+    while True:
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            event.update(
+                {
+                    "finished_at": utc_now(),
+                    "status": "failed",
+                    "challenge": latest_challenge,
+                    "visible_markers": latest_markers,
+                    "visible_text_sample": latest_text,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "error": "operator_verification_timeout",
+                }
+            )
+            evidence.update(
+                {
+                    "status": "failed",
+                    "challenge": latest_challenge or initial_challenge,
+                    "visible_markers": latest_markers,
+                    "visible_text_sample": latest_text,
+                }
+            )
+            write_evidence(evidence_path, evidence)
+            raise RuntimeError(
+                f"xhs_continuity_verification_timeout:{stage}:{initial_challenge}"
+            )
+
+        await asyncio.sleep(min(poll, remaining))
+        latest_text, latest_markers = await visible_page_state(page)
+        latest_challenge = visible_challenge(latest_markers)
+        event.update(
+            {
+                "challenge": latest_challenge,
+                "visible_markers": latest_markers,
+                "visible_text_sample": latest_text,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "url": page.url,
+            }
+        )
+        if not latest_challenge:
+            event.update({"finished_at": utc_now(), "status": "completed"})
+            write_evidence(evidence_path, evidence)
+            return latest_text, latest_markers, event
+        if latest_challenge in {"rate_limited", "blocked"}:
+            event.update(
+                {
+                    "finished_at": utc_now(),
+                    "status": "failed",
+                    "error": f"{latest_challenge}_during_operator_verification",
+                }
+            )
+            evidence.update(
+                {
+                    "status": "failed",
+                    "challenge": latest_challenge,
+                    "visible_markers": latest_markers,
+                    "visible_text_sample": latest_text,
+                }
+            )
+            write_evidence(evidence_path, evidence)
+            raise RuntimeError(
+                f"{latest_challenge}_detected_during_xhs_continuity:{stage}"
+            )
+
+
+def persist_xhs_continuity_failure(
+    evidence: dict[str, Any],
+    *,
+    evidence_path: str | Path,
+    stage: str,
+    started_at: str,
+    challenge: str,
+    text_sample: str,
+    markers: dict[str, bool],
+    initial_text: str,
+    initial_markers: dict[str, bool],
+    events: list[dict[str, Any]],
+) -> None:
+    continuity = {
+        "stage": stage,
+        "started_at": started_at,
+        "finished_at": utc_now(),
+        "status": "failed",
+        "events": events,
+        "initial_visible_markers": initial_markers,
+        "initial_visible_text_sample": initial_text,
+        "visible_markers": markers,
+        "visible_text_sample": text_sample,
+        "challenge": challenge,
+    }
+    continuity_events = evidence.setdefault("continuity_events", [])
+    continuity_events.append(continuity)
+    evidence["continuity_events"] = continuity_events[-50:]
+    evidence.update(
+        {
+            "status": "failed",
+            "challenge": challenge,
+            "visible_markers": markers,
+            "visible_text_sample": text_sample,
+        }
+    )
+    write_evidence(evidence_path, evidence)
+
+
 async def run_xhs_continuity_behavior(
     page: Page,
     *,
@@ -327,26 +507,76 @@ async def run_xhs_continuity_behavior(
     if evidence.get("profile") != "xhs_guarded" or not behavior_evidence_valid(evidence):
         raise RuntimeError("XHS continuity behavior requires completed xhs_guarded evidence")
 
+    started_at = utc_now()
     initial_text, initial_markers = await visible_page_state(page)
+    observed_initial_text = initial_text
+    observed_initial_markers = initial_markers
     challenge = visible_challenge(initial_markers)
     if challenge:
-        raise RuntimeError(f"{challenge}_detected_during_xhs_continuity:{stage}")
+        if challenge in {"captcha_or_verify", "login_required"}:
+            initial_text, initial_markers, _ = await wait_for_xhs_continuity_verification(
+                page,
+                evidence=evidence,
+                evidence_path=path,
+                stage=stage,
+                initial_challenge=challenge,
+                initial_text=initial_text,
+                initial_markers=initial_markers,
+            )
+        else:
+            persist_xhs_continuity_failure(
+                evidence,
+                evidence_path=path,
+                stage=stage,
+                started_at=started_at,
+                challenge=challenge,
+                text_sample=initial_text,
+                markers=initial_markers,
+                initial_text=observed_initial_text,
+                initial_markers=observed_initial_markers,
+                events=[],
+            )
+            raise RuntimeError(f"{challenge}_detected_during_xhs_continuity:{stage}")
 
-    started_at = utc_now()
     events: list[dict[str, Any]] = []
     profile = load_behavior_profile("xhs_guarded", strict=True)
     await human_pause(page, (1.5, 4.5), reason=f"continuity_{stage}", log=events)
     await random_mouse_moves(page, profile, events)
     final_text, final_markers = await visible_page_state(page)
     final_challenge = visible_challenge(final_markers)
+    if final_challenge in {"captcha_or_verify", "login_required"}:
+        final_text, final_markers, _ = await wait_for_xhs_continuity_verification(
+            page,
+            evidence=evidence,
+            evidence_path=path,
+            stage=stage,
+            initial_challenge=final_challenge,
+            initial_text=final_text,
+            initial_markers=final_markers,
+        )
+        final_challenge = ""
+    elif final_challenge:
+        persist_xhs_continuity_failure(
+            evidence,
+            evidence_path=path,
+            stage=stage,
+            started_at=started_at,
+            challenge=final_challenge,
+            text_sample=final_text,
+            markers=final_markers,
+            initial_text=observed_initial_text,
+            initial_markers=observed_initial_markers,
+            events=events,
+        )
+        raise RuntimeError(f"{final_challenge}_detected_during_xhs_continuity:{stage}")
     continuity = {
         "stage": stage,
         "started_at": started_at,
         "finished_at": utc_now(),
         "status": "completed" if not final_challenge else "failed",
         "events": events,
-        "initial_visible_markers": initial_markers,
-        "initial_visible_text_sample": initial_text,
+        "initial_visible_markers": observed_initial_markers,
+        "initial_visible_text_sample": observed_initial_text,
         "visible_markers": final_markers,
         "visible_text_sample": final_text,
         "challenge": final_challenge,
@@ -356,8 +586,6 @@ async def run_xhs_continuity_behavior(
     continuity_events.append(continuity)
     evidence["continuity_events"] = continuity_events[-50:]
     write_evidence(path, evidence)
-    if final_challenge:
-        raise RuntimeError(f"{final_challenge}_detected_during_xhs_continuity:{stage}")
     return continuity
 
 
