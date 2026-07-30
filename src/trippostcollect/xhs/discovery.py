@@ -240,9 +240,11 @@ def commit_child_discovery(
     if not isinstance(candidate_identities, list):
         raise RuntimeError("XHS pagination candidate identities must be a list")
     import_result = child_summary.get("import_result") or {}
-    imported_target = bool(child_summary.get("import_new_target_met")) and not bool(
-        import_result.get("skipped")
-    )
+    imported_target = bool(
+        child_summary.get("import_completion_met")
+        if "import_completion_met" in child_summary
+        else child_summary.get("import_new_target_met")
+    ) and not bool(import_result.get("reason"))
     formal_validation = child_summary.get("formal_validation") or {}
     if imported_target:
         campaign_summary_path = None

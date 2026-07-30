@@ -62,6 +62,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sync-only", action="store_true", help="Only sync config into crawl_jobs.")
     parser.add_argument("--no-sync-config", action="store_true", help="Do not sync config before selecting jobs.")
     parser.add_argument("--dry-run", action="store_true", help="Plan jobs and commands without executing them.")
+    parser.add_argument(
+        "--completion-mode",
+        choices=("target-new-posts", "source-exhausted"),
+        default="target-new-posts",
+        help=(
+            "Runtime-only completion gate. source-exhausted ignores quantity and "
+            "stagnation stops for this invocation and imports only after explicit "
+            "source exhaustion evidence."
+        ),
+    )
     parser.add_argument("--headless", action="store_true", help="Pass headless mode to browser jobs.")
     parser.add_argument("--headful", action="store_true", help="Pass headed mode to browser jobs when supported.")
     parser.add_argument("--no-throttle", action="store_true", help="Forward --no-throttle to child scripts.")
@@ -237,6 +247,7 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
         add_flag(command, "--timeout-per-platform", params.get("timeout_per_platform", 180))
         add_flag(command, "--candidate-hard-limit", candidate_hard_limit)
         add_flag(command, "--target-new-posts", target_new_posts)
+        add_flag(command, "--completion-mode", args.completion_mode)
         add_flag(command, "--max-stagnant-batches", max_stagnant_batches)
         add_flag(command, "--required-fields-profile", required_fields_profile)
         add_flag(command, "--login-type", params.get("login_type", "cookie"))
@@ -609,6 +620,10 @@ def main() -> int:
                     "config_path": str(config_path.resolve()),
                     "database_path": str(db_path.resolve()),
                     "job_params": params_for(row),
+                    "runtime_overrides": {
+                        "completion_mode": args.completion_mode,
+                        "quantity_limits_enforced": args.completion_mode == "target-new-posts",
+                    },
                     "command": command,
                     "discovery": discovery_plan,
                     "no_import": bool(args.no_import),
@@ -706,10 +721,12 @@ def main() -> int:
                     )
                     formal_validation = child_summary.get("formal_validation") or {}
                     import_result_value = child_summary.get("import_result") or {}
-                    imported_target = bool(child_summary.get("import_new_target_met")) and not bool(
-                        import_result_value.get("skipped")
-                    )
-                    if imported_target:
+                    imported_completion = bool(
+                        child_summary.get("import_completion_met")
+                        if "import_completion_met" in child_summary
+                        else child_summary.get("import_new_target_met")
+                    ) and not bool(import_result_value.get("reason"))
+                    if imported_completion:
                         clear_campaign(
                             conn,
                             job_id=int(row["id"]),
@@ -779,13 +796,17 @@ def main() -> int:
                     if not child_summary:
                         child_summary = load_json(Path(str(summary_path)))
                     import_result = dict(child_summary.get("import_result") or {})
-                    persistence_ok = bool(child_summary.get("import_new_target_met"))
+                    persistence_ok = bool(
+                        child_summary.get("import_completion_met")
+                        if "import_completion_met" in child_summary
+                        else child_summary.get("import_new_target_met")
+                    )
                     if persistence_ok:
                         state.complete("persistence_verified", evidence=import_result)
                     else:
                         state.fail(
                             "persistence_verified",
-                            error="formal_import_new_target_not_reached",
+                            error="formal_import_completion_not_reached",
                             evidence=import_result,
                         )
                 else:
@@ -857,6 +878,7 @@ def main() -> int:
             "finished_at": iso(),
             "db": str(db_path),
             "config": str(config_path),
+            "completion_mode": args.completion_mode,
             "execution_state_dir": str(state_dir),
             "synced_jobs": synced,
             "jobs_selected": len(jobs),

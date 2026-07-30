@@ -75,6 +75,33 @@ def test_xhs_target_stops_before_candidate_hard_limit(monkeypatch) -> None:
     assert accumulator.stop_reason == "target_new_met"
 
 
+def test_source_exhausted_mode_ignores_quantity_and_stagnation_stops(monkeypatch) -> None:
+    monkeypatch.setattr(
+        trippostcollect_adaptive,
+        "append_execution_event",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setenv("TRIPPOSTCOLLECT_COMPLETION_MODE", "source-exhausted")
+    accumulator = trippostcollect_adaptive.AdaptiveAccumulator.from_environment(
+        "xhs",
+        hard_limit=1,
+    )
+    accumulator.max_stagnant_batches = 1
+
+    accumulator.begin_batch()
+    assert accumulator.consider("candidate-1", valid=True) is False
+    assert accumulator.consider("candidate-2", valid=False) is False
+    assert accumulator.finish_batch(source_page=1) is False
+    assert accumulator.candidate_count == 2
+    assert accumulator.can_continue is True
+    assert accumulator.stop_reason == ""
+
+    accumulator.mark_source_exhausted("empty_page", source_page=2)
+    assert accumulator.stop_reason == "source_exhausted"
+    assert accumulator.can_continue is False
+    assert accumulator.summary()["quantity_limits_enforced"] is False
+
+
 def test_weibo_stagnation_tracks_candidate_identity_progress(monkeypatch) -> None:
     monkeypatch.setattr(trippostcollect_adaptive, "append_execution_event", lambda *args, **kwargs: None)
     accumulator = trippostcollect_adaptive.AdaptiveAccumulator(

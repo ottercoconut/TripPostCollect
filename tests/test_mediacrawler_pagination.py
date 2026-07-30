@@ -112,6 +112,41 @@ def test_explicit_empty_page_proves_source_exhaustion(tmp_path: Path) -> None:
     assert validation["stop_detail"] == "empty_page"
 
 
+def test_source_exhausted_completion_ignores_configured_quantity_limits(tmp_path: Path) -> None:
+    jsonl_path = tmp_path / "bili" / "jsonl" / "search_contents_2026-07-13.jsonl"
+    jsonl_path.parent.mkdir(parents=True)
+    jsonl_path.write_text(
+        "\n".join(
+            json.dumps(record)
+            for record in (bilibili_record("first"), bilibili_record("second"))
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pagination = {
+        "stopped": True,
+        "stop_reason": "source_exhausted",
+        "stop_detail": "empty_page",
+        "candidate_count": 2,
+    }
+
+    validation, selected = mediacrawler_crawl.collect_formal_records(
+        {"records": [{"output": {"jsonl_files": [str(jsonl_path)]}}]},
+        candidate_hard_limit=1,
+        target_new_posts=1,
+        db_path=tmp_path / "missing.sqlite",
+        pagination_evidence=pagination,
+        completion_mode="source-exhausted",
+    )
+
+    assert len(selected) == 2
+    assert validation["candidate_count"] == 2
+    assert validation["new_target_met"] is True
+    assert validation["source_exhausted_met"] is True
+    assert validation["completion_met"] is True
+    assert validation["quantity_limits_enforced"] is False
+
+
 def test_pagination_evidence_keeps_douyin_frontier_reseed_event(tmp_path: Path) -> None:
     state_path = tmp_path / "state.json"
     write_state(

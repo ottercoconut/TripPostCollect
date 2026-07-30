@@ -307,6 +307,7 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
         output_root=tmp_path / "output",
         no_import=False,
         post_interaction="comment-scroll",
+        completion_mode="source-exhausted",
         discovery={
             "resume_page": 7,
             "resume_search_id": "saved-search-id",
@@ -326,6 +327,7 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
     )
     assert command[command.index("--behavior-profile") + 1] == "xhs_guarded"
     assert command[command.index("--xhs-post-interaction") + 1] == "comment-scroll"
+    assert command[command.index("--completion-mode") + 1] == "source-exhausted"
     assert command[command.index("--start-page") + 1] == "7"
     assert command[command.index("--start-cursor") + 1] == "saved-search-id"
     assert command[command.index("--top-refresh-max-pages") + 1] == "3"

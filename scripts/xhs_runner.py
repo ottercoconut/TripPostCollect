@@ -70,6 +70,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pool-config", default=str(XHS_POOL_CONFIG))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-import", action="store_true")
+    parser.add_argument(
+        "--completion-mode",
+        choices=("target-new-posts", "source-exhausted"),
+        default="target-new-posts",
+        help=(
+            "Runtime-only completion gate. source-exhausted ignores quantity and "
+            "stagnation stops and imports only after explicit source exhaustion."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -110,6 +119,7 @@ def build_child_command(
     no_import: bool,
     post_interaction: str,
     discovery: dict[str, Any],
+    completion_mode: str = "target-new-posts",
 ) -> list[str]:
     command = [
         sys.executable,
@@ -126,6 +136,8 @@ def build_child_command(
         str(int(target["candidate_hard_limit"])),
         "--target-new-posts",
         str(int(target["target_new_posts"])),
+        "--completion-mode",
+        completion_mode,
         "--max-stagnant-batches",
         str(int(target["max_stagnant_batches"])),
         "--start-page",
@@ -342,6 +354,8 @@ def record_preexecution_failure(
         "keyword": target["keyword"],
         "target_new_posts": target["target_new_posts"],
         "candidate_hard_limit": target["candidate_hard_limit"],
+        "completion_mode": args.completion_mode,
+        "quantity_limits_enforced": args.completion_mode == "target-new-posts",
         "behavior_profile": pool["behavior_profile"],
         "preexecution_failure": reason,
     }
@@ -429,6 +443,8 @@ def main() -> int:
                     "keyword": target["keyword"],
                     "target_new_posts": target["target_new_posts"],
                     "candidate_hard_limit": target["candidate_hard_limit"],
+                    "completion_mode": args.completion_mode,
+                    "quantity_limits_enforced": args.completion_mode == "target-new-posts",
                     "behavior_profile": pool["behavior_profile"],
                     "blocked_before_lease": True,
                     "reason": exc.reason,
@@ -535,6 +551,8 @@ def main() -> int:
         "target_new_posts": target["target_new_posts"],
         "candidate_hard_limit": target["candidate_hard_limit"],
         "max_stagnant_batches": target["max_stagnant_batches"],
+        "completion_mode": args.completion_mode,
+        "quantity_limits_enforced": args.completion_mode == "target-new-posts",
         "timeout_seconds": target["timeout_seconds"],
         "lease_seconds": pool["lease_seconds"],
         "behavior_profile": pool["behavior_profile"],
@@ -624,6 +642,7 @@ def main() -> int:
                 no_import=args.no_import,
                 post_interaction=args.post_interaction,
                 discovery=discovery_plan,
+                completion_mode=args.completion_mode,
             )
             state.begin("command_executed")
             env = os.environ.copy()
@@ -690,13 +709,21 @@ def main() -> int:
                     state.complete("artifacts_verified", evidence={"summary_path": child_summary_path})
                     state.begin("persistence_verified")
                     import_result = child_summary.get("import_result") or {}
-                    persistence_ok = bool(child_summary.get("import_new_target_met"))
+                    persistence_ok = bool(
+                        child_summary.get("import_completion_met")
+                        if "import_completion_met" in child_summary
+                        else child_summary.get("import_new_target_met")
+                    )
                     if args.no_import:
                         state.complete("persistence_verified", evidence=import_result, skipped=True)
-                    elif persistence_ok and int(import_result.get("inserted_rows") or 0) >= int(target["target_new_posts"]):
+                    elif persistence_ok and (
+                        args.completion_mode == "source-exhausted"
+                        or int(import_result.get("inserted_rows") or 0)
+                        >= int(target["target_new_posts"])
+                    ):
                         state.complete("persistence_verified", evidence=import_result)
                     else:
-                        state.fail("persistence_verified", error="xhs_new_target_not_persisted", evidence=import_result)
+                        state.fail("persistence_verified", error="xhs_completion_not_persisted", evidence=import_result)
                     if state.load()["steps"]["persistence_verified"]["status"] in {"completed", "skipped"}:
                         updated_state = json.loads(storage_state.read_text(encoding="utf-8"))
                         encrypt_storage_state(
@@ -772,6 +799,7 @@ def main() -> int:
                 .get("post_interactions", [])
             )[-1:],
         },
+        "completion_mode": args.completion_mode,
         "import_result": child_summary.get("import_result") or {},
         "stdout_tail": tail(stdout),
         "stderr_tail": tail(stderr),
