@@ -102,6 +102,29 @@ def test_source_exhausted_mode_ignores_quantity_and_stagnation_stops(monkeypatch
     assert accumulator.summary()["quantity_limits_enforced"] is False
 
 
+def test_completed_batch_event_keeps_candidate_identities_for_failed_run_resume(monkeypatch) -> None:
+    events = []
+    monkeypatch.setattr(
+        trippostcollect_adaptive,
+        "append_execution_event",
+        lambda event_type, details: events.append((event_type, details)),
+    )
+    accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
+        platform="xhs",
+        hard_limit=20,
+        target_new=10,
+        max_stagnant_batches=3,
+    )
+
+    accumulator.begin_batch()
+    accumulator.consider("valid-note", valid=True)
+    accumulator.consider("invalid-note", valid=False)
+    accumulator.finish_batch(source_page=1, batch_complete=True)
+
+    assert events[-1][0] == "adaptive_batch_completed"
+    assert events[-1][1]["candidate_identities"] == ["invalid-note", "valid-note"]
+
+
 def test_weibo_stagnation_tracks_candidate_identity_progress(monkeypatch) -> None:
     monkeypatch.setattr(trippostcollect_adaptive, "append_execution_event", lambda *args, **kwargs: None)
     accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
