@@ -79,7 +79,7 @@ python scripts/crawl_runner.py --sync-only
 source .venv/bin/activate
 python scripts/mediacrawler_crawl.py \
   --platforms weibo \
-  --keyword 济南旅游 \
+  --keyword 青岛旅游 \
   --candidate-hard-limit 20 \
   --target-new-posts 0 \
   --no-import
@@ -143,7 +143,7 @@ source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
   --no-sync-config \
-  --job-key mc_douyin_qingdao_search
+  --job-key mc_douyin_qingdao_laoshan_guide_search
 ```
 
 有 checkpoint 的抖音计划应同时含三个恢复参数和 `--top-refresh-max-pages`；B站、微博、知乎有

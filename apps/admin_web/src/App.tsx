@@ -24,28 +24,8 @@ import type { Meta, Platform, RecordContext, RecordRaw, RecordSummary, Report } 
 
 type View = "records" | "quality" | "reports";
 
-const SHANDONG_CITIES = [
-  "济南市",
-  "青岛市",
-  "淄博市",
-  "枣庄市",
-  "东营市",
-  "烟台市",
-  "潍坊市",
-  "济宁市",
-  "泰安市",
-  "威海市",
-  "日照市",
-  "临沂市",
-  "德州市",
-  "聊城市",
-  "滨州市",
-  "菏泽市"
-];
-
 const emptyFilters: RecordFilters = {
   platform_key: "",
-  city_name: "",
   keyword: "",
   status: "",
   published_from: "",
@@ -235,16 +215,6 @@ function RecordWorkbench(props: {
               ))}
             </select>
           </Field>
-          <Field label="城市">
-            <select value={filters.city_name} onChange={(event) => setFilters({ ...filters, city_name: event.target.value, page: 1 })}>
-              <option value="">全部城市</option>
-              {SHANDONG_CITIES.map((city) => (
-                <option key={city} value={city}>
-                  {city}
-                </option>
-              ))}
-            </select>
-          </Field>
           <Field label="关键词">
             <input value={filters.keyword} onChange={(event) => setFilters({ ...filters, keyword: event.target.value, page: 1 })} />
           </Field>
@@ -305,6 +275,7 @@ function RecordWorkbench(props: {
                 <tr>
                   <th className="col-platform">平台</th>
                   <th>记录</th>
+                  <th className="col-keyword">关键词</th>
                   <th className="col-author">作者</th>
                   <th className="col-followers">粉丝量</th>
                   <th className="col-date">发布时间</th>
@@ -329,9 +300,12 @@ function RecordWorkbench(props: {
                     <td className="platform-cell">{record.platform_name ?? record.platform_key}</td>
                     <td>
                       <div className="record-title">{record.title || record.content_text || record.source_url}</div>
-                      <div className="record-sub">
-                        {record.city_name || "未标城市"} · {record.keyword || "无关键词"} · {record.source_type}
-                      </div>
+                      <div className="record-sub">{record.source_type}</div>
+                    </td>
+                    <td>
+                      <span className="keyword-tag" title={record.keyword || "无关键词"}>
+                        {record.keyword || "无关键词"}
+                      </span>
                     </td>
                     <td>{record.author_display_name || "未提取"}</td>
                     <td>{compactNumber(record.author_followers_count)}</td>
@@ -476,7 +450,6 @@ function RecordDetailPage() {
               <div className="record-hero-title">{record.title || record.source_url}</div>
               <div className="record-hero-meta">
                 <span>{record.platform_name ?? record.platform_key}</span>
-                <span>{record.city_name || "未标城市"}</span>
                 <span>{formatDate(record.published_at)}</span>
                 <span>{record.status || "unknown"}</span>
               </div>
@@ -630,7 +603,6 @@ function ContentPanel({ record }: { record: RecordSummary }) {
   return (
     <div className="content-panel">
       <div className="kv-grid">
-        <KV label="城市" value={record.city_name} />
         <KV label="关键词" value={record.keyword} />
         <KV label="发布时间" value={record.published_at} />
         <KV label="抓取时间" value={record.captured_at} />
@@ -803,7 +775,7 @@ function QualityView(props: {
                   <span>
                     <strong>{record.title || record.content_text || record.source_url}</strong>
                     <small>
-                      {record.platform_name ?? record.platform_key} · {record.city_name || "未标城市"} · {formatDate(record.captured_at)}
+                      {record.platform_name ?? record.platform_key} · {formatDate(record.captured_at)}
                     </small>
                   </span>
                   <LocateFixed size={15} />

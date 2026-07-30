@@ -22,7 +22,6 @@ def record_service(conn: sqlite3.Connection = Depends(get_db)) -> RecordService:
 @router.get("")
 def list_records(
     platform_key: str | None = None,
-    city_name: str | None = None,
     source_type: str | None = None,
     status: str | None = None,
     keyword: str | None = None,
@@ -42,7 +41,6 @@ def list_records(
 ) -> dict:
     filters = RecordFilters(
         platform_key=platform_key,
-        city_name=city_name,
         source_type=source_type,
         status=status,
         keyword=keyword,

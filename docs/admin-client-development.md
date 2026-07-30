@@ -2,7 +2,7 @@
 
 ## 目标
 
-建设一个面向本项目 SQLite 数据库的本地/内网管理台，以“记录”为核心查看和管理图文内容线索。用户先通过平台、城市名、关键词、状态和时间等条件筛选出符合条件的记录，再围绕选中记录查看图片预览、作者信息、互动指标、页面证据和原始 JSON。客户端不是新的抓取器，不绕过现有 `crawl_runner.py`、`mediacrawler_crawl.py`、`ctf_resource_crawl.py` 和入库脚本；首版管理端 HTTP API 只读，负责实时呈现数据库最新状态，不负责修改记录。
+建设一个面向本项目 SQLite 数据库的本地/内网管理台，以“记录”为核心查看和管理青岛图文内容线索。用户先通过平台、关键词、状态和时间等条件筛选出符合条件的记录，再围绕选中记录查看图片预览、作者信息、互动指标、页面证据和原始 JSON。客户端不是新的抓取器，不绕过现有 `crawl_runner.py`、`mediacrawler_crawl.py`、`ctf_resource_crawl.py` 和入库脚本；首版管理端 HTTP API 只读，负责实时呈现数据库最新状态，不负责修改记录。
 
 首版采用正式产品化技术栈：
 
@@ -34,7 +34,7 @@
 
 1. 管理台第一入口是记录筛选和记录工作台，不是数据库表导航。
 2. `web_posts` 是记录主表；产品语言统一称为“记录”，表名只作为实现细节出现。
-3. 平台和城市名是首要筛选维度，允许只按城市名筛选，也允许平台 + 城市组合筛选；管理端城市控件使用山东十六市固定选项。
+3. `city_name` 已从数据模型移除，管理端不展示或筛选城市；平台和关键词是首要筛选维度。
 4. 图片、作者、互动指标、证据和 JSON 都是选中记录的上下文面板。
 5. `web_post_images` 是记录图片子表，首版只读展示和预览；新增、替换、排序和删除默认由入库链路或后续终端维护脚本完成。
 6. `ctf_captures` 和 `ctf_capture_images` 是证据/调试底座，默认只读；通常从关联记录进入。
@@ -75,8 +75,8 @@
 
 典型任务：
 
-- 选择平台、山东十六市城市项，或只选择城市，筛选出符合条件的记录。
-- 在记录列表中快速判断平台、标题、作者、粉丝量、城市、发布时间、图片数和状态。
+- 选择平台或关键词，筛选出符合条件的青岛记录。
+- 在记录列表中快速判断平台、标题、作者、粉丝量、发布时间、图片数和状态。
 - 打开一条记录后查看其图片预览、作者信息、正文、互动指标、证据和原始 JSON。
 - 找出缺图片、缺发布时间、缺作者粉丝量的记录。
 - 在抓取脚本运行过程中，通过刷新或自动轮询看到新入库记录、图片和运行报告。
@@ -88,7 +88,7 @@
 
 | 工作区 | 作用 | 首版要求 |
 |---|---|---|
-| 记录工作台 | 按平台、城市、关键词、状态、时间筛选记录，并显示记录列表 | 必做，默认首页 |
+| 记录工作台 | 按平台、关键词、状态、时间筛选记录，并显示记录列表 | 必做，默认首页 |
 | 记录详情 | 围绕单条记录只读展示图片、作者、内容、互动、证据和 JSON | 必做 |
 | 数据质量 | 以记录为单位查看缺图片、缺发布时间、缺作者粉丝量等问题 | 必做 |
 | 图片浏览 | 从记录进入图片墙、缩略图和原图预览 | 必做，作为记录上下文 |
@@ -104,7 +104,6 @@ TripPostCollect Admin
   记录工作台
     筛选器
       平台
-      城市
       关键词
       状态
       发布时间
@@ -235,7 +234,7 @@ python scripts/crawl_runner.py \
 source .venv/bin/activate
 python scripts/mediacrawler_crawl.py \
   --platforms weibo \
-  --keyword 济南旅游 \
+  --keyword 青岛旅游 \
   --candidate-hard-limit 20 \
   --target-new-posts 0 \
   --no-import
@@ -511,7 +510,6 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
 筛选参数：
 
 - `platform_key`
-- `city_name`
 - `source_type`
 - `status`
 - `keyword`
@@ -529,8 +527,7 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
 
 筛选行为：
 
-- `city_name` 可以单独使用，不要求同时选择平台。
-- `platform_key + city_name` 是首要组合筛选。
+- 数据模型不包含 `city_name`，API 不提供城市筛选参数。
 - `q` 用于标题、正文、作者名、平台帖子 ID 和 URL 的模糊查询。
 - 缺字段筛选返回记录列表，不跳转到表级维护页面。
 
@@ -544,8 +541,7 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
       "platform_key": "xhs",
       "platform_name": "小红书",
       "title": "示例标题",
-      "city_name": "济南市",
-      "keyword": "济南旅游",
+      "keyword": "青岛旅游",
       "author_followers_count": 1200,
       "status": "captured"
     },
@@ -621,7 +617,6 @@ def connect_readonly_db(db_path: Path) -> sqlite3.Connection:
 - `author_verified`
 - `author_verified_text`
 - `published_at`
-- `city_name`
 - `keyword`
 - `content_text`
 - `post_likes_count`
@@ -779,7 +774,7 @@ UI：
 | `AppShell` | 左侧导航、顶部状态栏 |
 | `DataTable` | 分页、排序、列显隐、行选择 |
 | `RecordWorkbench` | 默认首页，承载筛选器、记录列表和详情页入口 |
-| `RecordFilterBar` | 平台、城市、关键词、状态、日期、缺字段筛选 |
+| `RecordFilterBar` | 平台、关键词、状态、日期、缺字段筛选 |
 | `RecordTable` | 记录列表，支持分页、排序、列显隐和行选择 |
 | `RecordDetailPage` | 基于 `/records/:id` 动态渲染单条记录详情 |
 | `RecordImagePreview` | 当前记录图片预览 |
@@ -795,7 +790,7 @@ UI：
 
 ```text
 顶部筛选条：
-  平台 / 城市 / 关键词 / 状态 / 发布时间 / 抓取时间 / 缺字段 / 重置
+  平台 / 关键词 / 状态 / 发布时间 / 抓取时间 / 缺字段 / 重置
 
 主体左侧或中间：
   记录列表
@@ -803,7 +798,6 @@ UI：
     标题
     作者
     粉丝量
-    城市
     发布时间
     图片数
     状态
@@ -815,7 +809,7 @@ UI：
   点击行或详情按钮进入 /records/:id
 ```
 
-平台和城市筛选必须始终可见。城市筛选不依赖平台选择，适合直接查询“某城市在所有平台下的记录”。当前管理端城市控件必须使用固定下拉项，不允许用户自由输入；下拉项为山东十六市：济南市、青岛市、淄博市、枣庄市、东营市、烟台市、潍坊市、济宁市、泰安市、威海市、日照市、临沂市、德州市、聊城市、滨州市、菏泽市。
+平台和关键词筛选必须始终可见。数据模型不包含 `city_name`，因此前端不显示城市控件，API 也不接受城市筛选参数。
 
 ### 记录列表列
 
@@ -827,7 +821,6 @@ UI：
 - 粉丝量
 - 发布时间
 - 抓取时间
-- 城市
 - 关键词
 - 图片数
 - 点赞
@@ -871,7 +864,7 @@ UI：
 
 - 图片：展示该记录全部 `web_post_images`，不限制为列表侧栏预览数量；图片使用懒加载，仍通过 `/api/images/{id}/preview`。
 - 作者：展示名、平台 ID、主页、头像、简介、粉丝数、关注数、作品数、认证信息。
-- 内容：标题、正文、城市、关键词、发布时间、来源 URL。
+- 内容：标题、正文、关键词、发布时间、来源 URL。
 - 互动：点赞、收藏、评论、分享、转发、浏览量、`metrics_json`。
 - 证据：关联 `ctf_captures`、截图、HTML、可见文本、证据图片。
 - JSON：记录侧 `raw_sample_json`、`author_json`、`metrics_json`；有关联证据时展示 `ctf_captures.raw_meta_json` 等证据 JSON。
@@ -931,7 +924,6 @@ UI：
 - `raw_meta_json`。
 - `capture_meta_path`、`rendered_html_path` 等证据路径。
 - `schema_migrations`。
-- `cities`，除非后续单独做城市管理。
 
 ### 终端写入
 
@@ -1078,7 +1070,7 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、只读边界、路
 使用临时 SQLite：
 
 - bootstrap 后表存在。
-- `GET /api/records` 支持平台、城市、关键词、状态和时间筛选。
+- `GET /api/records` 支持平台、关键词、状态和时间筛选。
 - `GET /api/records/{id}/context` 返回图片、作者、互动、证据和 JSON 聚合数据。
 - 图片代理拒绝项目外路径。
 - `ctf_captures` 只读。
@@ -1107,7 +1099,7 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、只读边界、路
 
 ## 当前实现状态
 
-截至 2026-07-17，首版只读管理端已完成实现。
+截至 2026-07-29，首版只读管理端已完成实现，并已移除城市维度。
 
 已实现：
 
@@ -1116,7 +1108,7 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、只读边界、路
 - SQLite 管理端连接使用只读短连接，不在启动或请求中执行数据库 bootstrap、配置同步、调度预览或抓取命令。
 - 图片和证据读取只通过数据库 ID 或 `kind` 枚举反查；本地路径会 resolve 并限制在项目根目录内，项目外路径和符号链接逃逸会被拒绝。
 - 记录 raw JSON 与关联证据 raw JSON 分层返回；JSON 解析失败只返回解析错误，不修写数据库。
-- `apps/admin_web` React + TypeScript + Vite 前端，默认进入记录工作台，支持平台、山东十六市城市下拉、关键词、状态、时间、缺字段和全文筛选。
+- `apps/admin_web` React + TypeScript + Vite 前端，默认进入记录工作台，支持平台、关键词、状态、时间、缺字段和全文筛选。
 - 记录工作台已实现分页控件：默认每页 50 条，可切换 25/50/100/200 条，并支持首页、上一页、下一页和末页；页面标题显示总数和当前页数。
 - 记录详情通过 `/records/:id` 动态路由展示，支持全部图片、作者、内容、互动、证据和 JSON；图片组件展示加载中、加载失败、本地缺失和远程图片拉取失败状态。
 - 数据质量视图支持缺图片、缺发布时间、缺作者粉丝量记录定位，并能跳转回记录详情。
@@ -1134,7 +1126,7 @@ Router 只处理 HTTP。管理端 service 处理 API 编排、只读边界、路
 首版完成标准：
 
 - 默认首页是记录工作台，而不是表级数据浏览器。
-- 可以通过平台、山东十六市城市项或平台 + 城市组合筛选记录。
+- 可以通过平台、关键词或平台 + 关键词组合筛选青岛记录。
 - 可以围绕选中记录查看 `web_posts`、`web_post_images`、关联 `ctf_captures` 和 `crawl_run_reports` 上下文。
 - 可以在抓取脚本运行期间通过刷新看到新入库记录、图片、证据和运行报告。
 - 首版管理端不提供记录创建、更新、软删除、物理删除或批量更新。

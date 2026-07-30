@@ -115,16 +115,16 @@ class ReadonlyAdminApiTest(unittest.TestCase):
                     platform_key, source_capture_id, platform_post_id, source_type,
                     source_url, canonical_url, title, author_display_name,
                     author_platform_id, author_followers_count, published_at,
-                    captured_at, city_name, keyword, content_text, content_length,
+                    captured_at, keyword, content_text, content_length,
                     post_likes_count, post_comments_count, post_images_count,
                     metrics_json, author_json, raw_sample_json, artifact_dir,
                     capture_method, status
                 ) VALUES (
                     'bilibili', ?, 'opus-1', 'ctf_capture',
                     'https://example.test/opus/1', 'https://example.test/opus/1',
-                    '济南记录', '作者A', 'author-a', 42,
+                    '青岛记录', '作者A', 'author-a', 42,
                     '2026-07-08T12:00:00+08:00', '2026-07-09T08:00:00+08:00',
-                    '济南市', '济南旅游', '正文内容', 4,
+                    '青岛旅游', '正文内容', 4,
                     10, 2, 4, ?, ?, ?, ?,
                     'import', 'captured'
                 )
@@ -184,7 +184,7 @@ class ReadonlyAdminApiTest(unittest.TestCase):
             conn.commit()
 
     def test_records_list_detail_context_raw_and_realtime_reads(self) -> None:
-        records = self.client.get("/api/records", params={"platform_key": "bilibili", "city_name": "济南市"})
+        records = self.client.get("/api/records", params={"platform_key": "bilibili"})
         self.assertEqual(records.status_code, 200, records.text)
         self.assertEqual(records.json()["meta"]["total"], 1)
         self.assertEqual(records.json()["data"][0]["author_followers_count"], 42)
@@ -209,17 +209,17 @@ class ReadonlyAdminApiTest(unittest.TestCase):
                 """
                 INSERT INTO web_posts (
                     platform_key, platform_post_id, source_type, source_url, title,
-                    captured_at, city_name, keyword, content_text, content_length,
+                    captured_at, keyword, content_text, content_length,
                     raw_sample_json, metrics_json, author_json, capture_method, status
                 ) VALUES (
                     'weibo', 'wb-live', 'mediacrawler', 'https://example.test/wb-live', '新增记录',
-                    '2026-07-09T08:01:00+08:00', '济南市', '济南旅游', '新正文', 3,
+                    '2026-07-09T08:01:00+08:00', '青岛旅游', '新正文', 3,
                     '{}', '{}', '{}', 'import', 'captured'
                 )
                 """
             )
             conn.commit()
-        latest = self.client.get("/api/records", params={"city_name": "济南市"})
+        latest = self.client.get("/api/records")
         self.assertEqual(latest.json()["meta"]["total"], 2)
 
     def test_images_and_capture_artifacts_enforce_readonly_path_boundaries(self) -> None:
@@ -286,6 +286,7 @@ class ReadonlyAdminApiTest(unittest.TestCase):
         ]
         self.assertEqual(write_routes, [])
         serialized_paths = json.dumps(paths, ensure_ascii=False).lower()
+        self.assertNotIn("city_name", serialized_paths)
         for forbidden in ["sync-only", "dry-run", "bootstrap", "crawl_runner.py"]:
             self.assertNotIn(forbidden, serialized_paths)
 

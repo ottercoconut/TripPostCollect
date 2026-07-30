@@ -264,7 +264,7 @@ def parse_args() -> argparse.Namespace:
         help="Scrapling static preflight timeout in seconds.",
     )
     parser.add_argument("--no-throttle", action="store_true", help="Skip shared crawl policy checks.")
-    parser.add_argument("--keyword", default="", help="Optional search keyword to record in capture_meta for downstream import (e.g. 烟台旅游).")
+    parser.add_argument("--keyword", default="", help="Optional search keyword to record in capture_meta for downstream import.")
     return parser.parse_args()
 
 

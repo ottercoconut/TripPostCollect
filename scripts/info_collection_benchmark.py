@@ -24,7 +24,7 @@ DEFAULT_OUTPUT = runtime_dir("info_collection_benchmarks")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run crawl/import benchmark for configured targets.")
-    parser.add_argument("--keyword", default="烟台旅游", help="Keyword for structured-search targets.")
+    parser.add_argument("--keyword", default="青岛旅游", help="Qingdao keyword for structured-search targets.")
     parser.add_argument(
         "--per-target",
         type=int,

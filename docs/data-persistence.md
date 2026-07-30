@@ -23,6 +23,11 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 `crawl_jobs`，小红书运行与账号状态写入独立 `xhs_*` 表。手工 `--sync-only` 只用于通用
 调度配置的显式刷新或排查。
 
+`web_posts` 不再建模城市。迁移 `13/remove_city_name` 使用旧库原有的 `city_name` 完成一次性历史
+数据清理，随后移除该列、城市索引和 `cities` 表；迁移 `14/configured_scheduler_scope` 删除不在
+当前配置中的历史调度任务。当前内容属于青岛是业务前提，不进入 schema、筛选或校验逻辑；
+`keyword` 只表达检索主题，因此“崂山攻略”等关键词可以正常入库。
+
 `crawl_discovery_checkpoints` 和 `crawl_discovery_seen_candidates` 是 B站、微博、抖音和知乎正式
 搜索的控制面记忆，不是内容表。
 `job_id + query_fingerprint` 唯一定位同一来源查询；`resume_page` 保存下一安全页，抖音同时使用
@@ -289,7 +294,6 @@ PY
 | `author_platform_id` | 小红书 `user_id`、`creator_hash` 或其他平台用户 ID |
 | `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎搜索结果 `author.follower_count` 归一后的 `followers_count` |
 | `published_at` | 发帖时间，统一保存为 Asia/Shanghai ISO 字符串，如 `2024-04-06T15:35:00+08:00`。优先取平台原始发布时间字段，如 `create_time`、`publish_time`、`time`、`datePublished`；`captured_at` 只表示本项目抓取时间 |
-| `city_name` | 从检索关键词匹配山东 16 市名称或别名，如 `济南旅游`、`烟台旅游` 分别写入 `济南市`、`烟台市`；不从正文内容反推城市 |
 | `keyword` | 优先保存每条记录的 `source_keyword`；缺失时回退到最终执行摘要的 `keyword`，即本次 child 命令实际使用的检索词。当前通用结构化 store 会逐条写入 `source_keyword`；自动 checkpoint 延续同一查询词，显式 `--recovery-keyword` 才会产生恢复词。旧记录缺少该字段时，回退值不能作为其原始检索词证据 |
 | `post_likes_count` | `liked_count`、知乎 `voteup_count` |
 | `post_favorites_count` | `collected_count` 等收藏字段 |
@@ -301,14 +305,13 @@ PY
 
 代码只在导入边界识别不同平台对同类指标的字段名差异，内部持久化结构统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
 
-显式使用同城市 `--recovery-keyword` 人工续跑时，最终摘要会合并旧、新两轮记录，
+显式使用 `--recovery-keyword` 人工续跑时，最终摘要会合并旧、新两轮记录，
 正常记录的 `web_posts.keyword` 会逐条保存真实来源，因此同一个最终 `artifact_dir` 可以同时
 出现原关键词和恢复关键词。若旧记录缺少 `source_keyword`，必须结合原摘要和 JSONL 审计，
 不能把回退到最终摘要的值解释成原始检索词。
 
-原关键词和恢复关键词均能解析、且解析结果相同时，各记录的 `city_name` 才会归一到同一城市。
-恢复前及入库后都必须确认两个关键词解析为非空的预期城市；不能只把恢复参数未被执行器拒绝
-当作城市校验通过。原正式任务意图以该轮冻结 execution state 的 `plan.job_params`、
+系统不再保存 `city_name`，也不再做城市别名解析或关键词城市校验。
+原正式任务意图以该轮冻结 execution state 的 `plan.job_params`、
 `plan.command` 和递归 resume 摘要链为准；`crawl_jobs` 当前值只用于核对现行调度配置，不能
 单独证明历史轮次意图，也不能仅用内容行的 `keyword` 反推整轮唯一任务关键词。
 
@@ -353,6 +356,7 @@ B站 Opus 详情页由 `ctf_resource_crawl.py` 保存页面证据，再由 `impo
 source .venv/bin/activate
 python scripts/ctf_resource_crawl.py \
   --sites bilibili \
+  --keyword 崂山攻略 \
   --headless \
   --max-image-save 3 \
   --max-scrolls 2
@@ -468,7 +472,7 @@ MediaCrawler 入库采用去重更新：
 source .venv/bin/activate
 python scripts/mediacrawler_crawl.py \
   --platforms weibo \
-  --keyword 济南旅游 \
+  --keyword 青岛旅游 \
   --candidate-hard-limit 20 \
   --target-new-posts 1 \
   --timeout-per-platform 180 \

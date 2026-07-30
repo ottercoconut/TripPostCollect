@@ -94,25 +94,6 @@ PLATFORM_REQUIRED_METRICS: dict[str, tuple[tuple[str, ...], ...]] = {
     "douyin": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
     "zhihu": (("voteup_count", "liked_count"), ("comment_count", "comments_count")),
 }
-SHANDONG_CITY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("济南市", ("济南市", "济南", "泉城")),
-    ("青岛市", ("青岛市", "青岛")),
-    ("淄博市", ("淄博市", "淄博")),
-    ("枣庄市", ("枣庄市", "枣庄")),
-    ("东营市", ("东营市", "东营")),
-    ("烟台市", ("烟台市", "烟台")),
-    ("潍坊市", ("潍坊市", "潍坊")),
-    ("济宁市", ("济宁市", "济宁")),
-    ("泰安市", ("泰安市", "泰安")),
-    ("威海市", ("威海市", "威海")),
-    ("日照市", ("日照市", "日照")),
-    ("临沂市", ("临沂市", "临沂")),
-    ("德州市", ("德州市", "德州")),
-    ("聊城市", ("聊城市", "聊城")),
-    ("滨州市", ("滨州市", "滨州")),
-    ("菏泽市", ("菏泽市", "菏泽")),
-)
-
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".svg", ".img"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm"}
 AUTHOR_FIELD_MARKERS = ("author", "user", "nickname", "avatar", "fans", "follower", "follow", "up")
@@ -194,7 +175,7 @@ SAMPLE_KEYS = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run MediaCrawler for supported structured social platforms.")
-    parser.add_argument("--keyword", default="济南旅游", help="Search keyword.")
+    parser.add_argument("--keyword", default="青岛旅游", help="Qingdao search keyword.")
     parser.add_argument(
         "--platforms",
         nargs="+",
@@ -1108,22 +1089,6 @@ def content_text_for_record(platform_key: str, record: dict[str, Any]) -> str:
     return str(first_value(record, "content_text", "content", "desc", "title") or "")
 
 
-def city_name_from_keyword(keyword: str) -> str | None:
-    text = str(keyword or "").strip()
-    if not text:
-        return None
-    best_match: tuple[int, int, int, str] | None = None
-    for order, (city_name, aliases) in enumerate(SHANDONG_CITY_ALIASES):
-        for alias in aliases:
-            index = text.find(alias)
-            if index < 0:
-                continue
-            candidate = (index, -len(alias), order, city_name)
-            if best_match is None or candidate < best_match:
-                best_match = candidate
-    return best_match[3] if best_match else None
-
-
 def row_for_record(
     platform_key: str,
     record: dict[str, Any],
@@ -1185,7 +1150,6 @@ def row_for_record(
         "author_verified_text": first_value(record, "verified_text", "verify_info"),
         "published_at": published_at_for_record(record),
         "captured_at": captured_at,
-        "city_name": city_name_from_keyword(keyword_value),
         "keyword": keyword_value,
         "content_text": content_text,
         "content_length": len(content_text),
@@ -2766,12 +2730,6 @@ def main() -> int:
             resume_summary = json.loads(resume_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise SystemExit(f"cannot load --resume-summary: {exc}") from exc
-        previous_keyword = str(resume_summary.get("keyword") or "")
-        if (
-            previous_keyword != args.keyword
-            and city_name_from_keyword(previous_keyword) != city_name_from_keyword(args.keyword)
-        ):
-            raise SystemExit("--resume-summary keyword must resolve to the same city as --keyword")
         resume_records = [
             record
             for record in (resume_summary.get("records") or [])
@@ -2805,7 +2763,7 @@ def main() -> int:
         remaining_target = max(0, target_new_posts - prior_new_count)
         if remaining_target == 0:
             raise SystemExit("--resume-summary already meets the configured new-post target")
-        args.source_target_new_posts = remaining_target
+        args.source_target_new_posts = int(remaining_target or 0)
         args.source_candidate_hard_limit = candidate_hard_limit
         resume_info = {
             "summary_path": str(resume_path),

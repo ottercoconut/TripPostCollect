@@ -31,7 +31,6 @@ export type RecordSummary = {
   author_followers_count?: number | null;
   published_at?: string;
   captured_at?: string;
-  city_name?: string;
   keyword?: string;
   content_text?: string;
   post_images_count: number;

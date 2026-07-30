@@ -395,7 +395,7 @@ button {
 
 table {
   width: 100%;
-  min-width: 900px;
+  min-width: 1020px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -443,6 +443,24 @@ tr.selected td {
 
 .col-platform {
   width: 88px;
+}
+
+.col-keyword {
+  width: 128px;
+}
+
+.keyword-tag {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 4px 7px;
+  border: 1px solid #c7ddd9;
+  border-radius: 999px;
+  background: #eef8f6;
+  color: #21665f;
+  font-weight: 800;
 }
 
 .col-author,

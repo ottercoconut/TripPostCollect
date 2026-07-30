@@ -11,7 +11,6 @@ import type {
 
 export type RecordFilters = {
   platform_key?: string;
-  city_name?: string;
   keyword?: string;
   status?: string;
   published_from?: string;
@@ -63,7 +62,6 @@ export const api = {
     requestWithMeta<RecordSummary[]>(
       `/api/records${query({
         platform_key: filters.platform_key,
-        city_name: filters.city_name,
         keyword: filters.keyword,
         status: filters.status,
         published_from: filters.published_from,

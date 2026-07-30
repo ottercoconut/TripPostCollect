@@ -80,7 +80,6 @@ class RecordService:
             "author_followers_count": record.get("author_followers_count"),
             "published_at": record.get("published_at"),
             "captured_at": record.get("captured_at"),
-            "city_name": record.get("city_name"),
             "keyword": record.get("keyword"),
             "content_text": record.get("content_text"),
             "post_images_count": int(record.get("image_count") or record.get("post_images_count") or 0),

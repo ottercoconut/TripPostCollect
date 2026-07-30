@@ -355,16 +355,17 @@
       gap: 8px;
     }
 
-    .image-grid img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
+    .image-placeholder {
+      display: grid;
+      place-items: center;
       border-radius: 6px;
       border: 1px solid var(--line);
-      background: var(--panel-soft);
+      background: linear-gradient(145deg, #d9eff1, #f5e7cf);
+      color: var(--muted);
+      font-size: 12px;
     }
 
-    .image-grid img:first-child {
+    .image-placeholder:first-child {
       grid-row: span 2;
     }
 
@@ -516,12 +517,8 @@
               <div class="control">全部平台</div>
             </div>
             <div class="field">
-              <label>城市</label>
-              <div class="control">济南市</div>
-            </div>
-            <div class="field">
               <label>关键词</label>
-              <div class="control">济南旅游</div>
+              <div class="control">青岛旅游</div>
             </div>
             <div class="field">
               <label>状态</label>
@@ -568,8 +565,8 @@
                 <tr class="selected">
                   <td><span class="platform">抖音</span></td>
                   <td>
-                    <div class="record-title">Ji Nan · 济南，老舍笔下的泉城</div>
-                    <div class="record-sub">济南市 · 济南旅游 图文 · source_type=mediacrawler</div>
+                    <div class="record-title">Qingdao · 青岛海岸线漫游</div>
+                    <div class="record-sub">青岛旅游 图文 · source_type=mediacrawler</div>
                   </td>
                   <td>╭***°</td>
                   <td>2025-09-22</td>
@@ -580,8 +577,8 @@
                 <tr>
                   <td><span class="platform">知乎</span></td>
                   <td>
-                    <div class="record-title">济南有什么必去的景点？</div>
-                    <div class="record-sub">济南市 · 济南旅游 · source_type=mediacrawler</div>
+                    <div class="record-title">青岛有什么必去的景点？</div>
+                    <div class="record-sub">青岛旅游 · source_type=mediacrawler</div>
                   </td>
                   <td>x***x</td>
                   <td>2026-07-04</td>
@@ -592,8 +589,8 @@
                 <tr>
                   <td><span class="platform">抖音</span></td>
                   <td>
-                    <div class="record-title">57 张照片，一半泉水潺潺，一半古韵悠长</div>
-                    <div class="record-sub">济南市 · 济南旅游 图文 · source_type=mediacrawler</div>
+                    <div class="record-title">57 张照片，海风、红瓦与落日</div>
+                    <div class="record-sub">青岛旅游 图文 · source_type=mediacrawler</div>
                   </td>
                   <td>史***</td>
                   <td>2026-06-09</td>
@@ -604,8 +601,8 @@
                 <tr>
                   <td><span class="platform">知乎</span></td>
                   <td>
-                    <div class="record-title">这周末准备去济南两日游，怎么安排？</div>
-                    <div class="record-sub">济南市 · 济南旅游 · source_type=mediacrawler</div>
+                    <div class="record-title">这周末准备去青岛两日游，怎么安排？</div>
+                    <div class="record-sub">青岛旅游 · source_type=mediacrawler</div>
                   </td>
                   <td>小*</td>
                   <td>2026-06-01</td>
@@ -616,8 +613,8 @@
                 <tr>
                   <td><span class="platform">抖音</span></td>
                   <td>
-                    <div class="record-title">总要来趟老舍笔下的泉城</div>
-                    <div class="record-sub">济南市 · 济南旅游 图文 · high engagement</div>
+                    <div class="record-title">青岛海岸线旅行图文记录</div>
+                    <div class="record-sub">青岛旅游 图文 · high engagement</div>
                   </td>
                   <td>橘****</td>
                   <td>2026-05-03</td>
@@ -628,7 +625,7 @@
                 <tr>
                   <td><span class="platform">微博</span></td>
                   <td>
-                    <div class="record-title">济南城市旅行图片记录</div>
+                    <div class="record-title">青岛旅行图片记录</div>
                     <div class="record-sub">字段完整性待确认 · author_followers_count 为空</div>
                   </td>
                   <td>旅***</td>
@@ -654,10 +651,10 @@
             </div>
 
             <div class="detail-body">
-              <div class="image-grid">
-                <img src="assets/admin-template-jinan-01.jpg" alt="济南旅行图片样本 1">
-                <img src="assets/admin-template-jinan-02.jpg" alt="济南旅行图片样本 2">
-                <img src="assets/admin-template-jinan-03.jpg" alt="济南旅行图片样本 3">
+              <div class="image-grid" aria-label="青岛图片预览占位">
+                <div class="image-placeholder">青岛图片样本 1</div>
+                <div class="image-placeholder">青岛图片样本 2</div>
+                <div class="image-placeholder">青岛图片样本 3</div>
               </div>
 
               <section class="section">

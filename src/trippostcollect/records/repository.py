@@ -10,7 +10,6 @@ from typing import Any
 @dataclass(frozen=True)
 class RecordFilters:
     platform_key: str | None = None
-    city_name: str | None = None
     source_type: str | None = None
     status: str | None = None
     keyword: str | None = None
@@ -154,7 +153,6 @@ class RecordRepository:
         clauses: list[str] = []
         params: list[Any] = []
         self._add_equal(clauses, params, "p.platform_key", filters.platform_key)
-        self._add_equal(clauses, params, "p.city_name", filters.city_name)
         self._add_equal(clauses, params, "p.source_type", filters.source_type)
         self._add_equal(clauses, params, "p.status", filters.status)
         self._add_equal(clauses, params, "p.keyword", filters.keyword)

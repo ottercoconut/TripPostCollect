@@ -401,6 +401,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     bootstrap_connection(conn)
 
 
+def keyword_from_capture(row: dict[str, Any]) -> str | None:
+    try:
+        raw_meta = json.loads(row.get("raw_meta_json") or "{}")
+    except json.JSONDecodeError:
+        return None
+    keyword = str(raw_meta.get("keyword") or "").strip()
+    return keyword or None
+
+
 def upsert_capture(conn: sqlite3.Connection, row: dict[str, Any]) -> int:
     columns = list(row)
     placeholders = ", ".join(f":{column}" for column in columns)
@@ -468,6 +477,7 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
         return None
     if not row["content_ready"]:
         return None
+    keyword = keyword_from_capture(row)
     if not content_text:
         return None
     metrics = {
@@ -504,8 +514,7 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
         "author_verified_text": None,
         "published_at": row.get("published_at"),
         "captured_at": row["captured_at"],
-        "city_name": None,
-        "keyword": None,
+        "keyword": keyword,
         "content_text": content_text,
         "content_length": len(content_text),
         "post_likes_count": None,

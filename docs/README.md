@@ -126,6 +126,7 @@ dry-run 计划中的 `discovery` 必须与所选账号的
 
 ## 数据边界
 
+- `web_posts` 不保存 `city_name`；当前内容属于青岛是业务前提，不进入 schema、筛选或关键词校验。
 - 只采集图文、作者公开可见信息、图片 URL/样本和页面证据；明确视频记录跳过。
 - `web_posts` 是用户使用的统一内容主表；`ctf_captures` 是证据和调试底座。
 - `published_at` 必须来自平台原始发布时间，保存为 Asia/Shanghai ISO。

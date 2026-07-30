@@ -26,7 +26,6 @@ CREATE TABLE IF NOT EXISTS web_posts (
     author_verified_text TEXT,
     published_at TEXT,
     captured_at TEXT NOT NULL,
-    city_name TEXT,
     keyword TEXT,
     content_text TEXT,
     content_length INTEGER NOT NULL DEFAULT 0,
@@ -59,9 +58,6 @@ WHERE canonical_url IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_web_posts_platform_captured
 ON web_posts(platform_key, captured_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_web_posts_city
-ON web_posts(city_name, platform_key);
 
 CREATE TABLE IF NOT EXISTS web_post_images (
     id INTEGER PRIMARY KEY,

@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--job-key", help="Run one specific job key.")
     parser.add_argument("--start-page", type=int, help="Recovery-only platform page to start from.")
     parser.add_argument("--resume-summary", help="Recovery-only prior MediaCrawler summary to include and freeze.")
-    parser.add_argument("--recovery-keyword", help="Recovery-only same-city keyword used for the continuation.")
+    parser.add_argument("--recovery-keyword", help="Recovery-only alternative keyword used for the continuation.")
     parser.add_argument("--sync-only", action="store_true", help="Only sync config into crawl_jobs.")
     parser.add_argument("--no-sync-config", action="store_true", help="Do not sync config before selecting jobs.")
     parser.add_argument("--dry-run", action="store_true", help="Plan jobs and commands without executing them.")
@@ -141,7 +141,7 @@ def resolve_discovery_args(
 
     params = params_for(row)
     platform_key = str(params.get("platform") or row["site_key"])
-    keyword = str(args.recovery_keyword or params.get("keyword") or "济南旅游")
+    keyword = str(args.recovery_keyword or params.get("keyword") or "青岛旅游")
     fingerprint = query_fingerprint(platform_key, keyword, params)
     checkpoint = load_checkpoint(
         conn,
@@ -233,7 +233,7 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
         if params.get("download_images"):
             raise ValueError(f"download_images requires the independent XHS runner: {row['job_key']}")
         command = [sys.executable, str(ROOT / "scripts" / "mediacrawler_crawl.py"), "--platforms", platform]
-        add_flag(command, "--keyword", args.recovery_keyword or params.get("keyword", "济南旅游"))
+        add_flag(command, "--keyword", args.recovery_keyword or params.get("keyword", "青岛旅游"))
         add_flag(command, "--timeout-per-platform", params.get("timeout_per_platform", 180))
         add_flag(command, "--candidate-hard-limit", candidate_hard_limit)
         add_flag(command, "--target-new-posts", target_new_posts)

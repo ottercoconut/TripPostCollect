@@ -157,7 +157,7 @@ def test_existing_valid_record_is_update_not_valid_new_target(tmp_path: Path) ->
     new = bilibili_record("new")
     import_summary = {
         "captured_at": "2026-07-13T12:00:00+08:00",
-        "keyword": "济南旅游",
+        "keyword": "青岛旅游",
         "batch_dir": str(tmp_path),
     }
     first_import = mediacrawler_crawl.import_valid_records(

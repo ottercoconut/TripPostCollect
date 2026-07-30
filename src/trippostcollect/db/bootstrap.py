@@ -86,6 +86,50 @@ def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, d
     return True
 
 
+def migration_applied(conn: sqlite3.Connection, version: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM schema_migrations WHERE version=?",
+        (version,),
+    ).fetchone()
+    return bool(row)
+
+
+def migrate_remove_city_name(conn: sqlite3.Connection) -> None:
+    if migration_applied(conn, 13):
+        return
+    web_post_columns = table_columns(conn, "web_posts")
+    if "city_name" in web_post_columns:
+        conn.execute(
+            "DELETE FROM web_posts WHERE city_name IS NULL OR city_name NOT IN ('青岛', '青岛市')"
+        )
+        conn.execute("DROP INDEX IF EXISTS idx_web_posts_city")
+        conn.execute("ALTER TABLE web_posts DROP COLUMN city_name")
+    conn.execute("DROP TABLE IF EXISTS cities")
+    conn.execute(
+        "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+        (13, "remove_city_name"),
+    )
+
+
+def migrate_configured_scheduler_scope(
+    conn: sqlite3.Connection,
+    active_keys: set[str],
+) -> None:
+    if migration_applied(conn, 14):
+        return
+    if not active_keys:
+        return
+    placeholders = qmarks(active_keys)
+    conn.execute(
+        f"DELETE FROM crawl_jobs WHERE job_key NOT IN ({placeholders})",
+        sorted(active_keys),
+    )
+    conn.execute(
+        "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+        (14, "configured_scheduler_scope"),
+    )
+
+
 def ensure_source_platforms(conn: sqlite3.Connection) -> int:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SOURCE_PLATFORMS_SCHEMA.read_text(encoding="utf-8"))
@@ -177,6 +221,7 @@ def ensure_content_schema(conn: sqlite3.Connection) -> int:
     conn.executescript(CTF_CAPTURES_SCHEMA.read_text(encoding="utf-8"))
     conn.execute("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", (5, "ctf_captures"))
     ensure_column(conn, "ctf_captures", "published_at", "TEXT")
+    migrate_remove_city_name(conn)
     conn.execute("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", (7, "published_at_fields"))
     conn.execute("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", (8, "capture_to_posts"))
     return platform_count
@@ -411,6 +456,7 @@ def sync_config_jobs(conn: sqlite3.Connection, config: dict[str, Any]) -> int:
     active_keys = {item["job_key"] for item in jobs}
     count = 0
     for item in jobs:
+        job_params = item.get("params") or {}
         next_run_at = item.get("next_run_at") or iso()
         row = {
             "job_key": item["job_key"],
@@ -422,7 +468,7 @@ def sync_config_jobs(conn: sqlite3.Connection, config: dict[str, Any]) -> int:
             "schedule_seconds": int(item.get("schedule_seconds", 86400)),
             "next_run_at": next_run_at,
             "max_attempts": int(item.get("max_attempts", 2)),
-            "params_json": json_dump(item.get("params") or {}),
+            "params_json": json_dump(job_params),
             "behavior_profile_json": json_dump(item.get("behavior_profile") or {}),
         }
         conn.execute(
@@ -451,6 +497,7 @@ def sync_config_jobs(conn: sqlite3.Connection, config: dict[str, Any]) -> int:
             row,
         )
         count += 1
+    migrate_configured_scheduler_scope(conn, active_keys)
     if active_keys:
         placeholders = qmarks(active_keys)
         conn.execute(
