@@ -6,6 +6,10 @@
   行为滚动分页，避免对同一 offset/search ID 重复请求。只有超过浏览器已加载前沿时才发出后续
   API 请求。同一关键词、offset 和 search ID 若观察到多条响应，视为预取/预测与正式响应竞态：
   合并去重并优先使用最新的非 `verify_check` 响应；只有全部响应均为验证信号时才按风控失败停止。
+  首页流响应无法读取或额外首页请求返回 `verify_check` 时，只有页面至少存在 10 个可见
+  `waterfall_item_*` 作品卡、且浏览器已取得同一关键词 offset 10 的健康响应和非空 search ID，
+  才允许用前 10 个可见作品 ID 的详情重建首页，并从该 search ID 继续。任一证据不足仍按风控
+  失败停止，不能跳过首页或猜测 cursor。
 
 - 正式入口：`crawl_runner.py` 调用 MediaCrawler 抖音搜索。
 - 当前正式数量只读取 `config/crawl_targets.json` 中该 job 的 `target_new_posts` 和
