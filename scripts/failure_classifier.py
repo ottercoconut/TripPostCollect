@@ -85,11 +85,16 @@ def _stdout_without_json_payload(stdout: str, stdout_json: dict[str, Any]) -> st
 
 def _strong_child_classification(stdout_json: dict[str, Any]) -> dict[str, Any] | None:
     strong_statuses = {"captcha_detected", "login_required", "blocked", "failed_final"}
-    for record in stdout_json.get("records") or []:
+    for record in reversed(stdout_json.get("records") or []):
         if not isinstance(record, dict):
             continue
         classification = record.get("failure_classification") or {}
-        if isinstance(classification, dict) and classification.get("status") in strong_statuses:
+        if not isinstance(classification, dict):
+            continue
+        if (
+            classification.get("failure_type") == "policy_blocked"
+            or classification.get("status") in strong_statuses
+        ):
             return dict(classification)
     return None
 

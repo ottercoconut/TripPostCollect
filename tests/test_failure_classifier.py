@@ -124,6 +124,45 @@ def test_strong_platform_classification_beats_formal_count_failure() -> None:
     assert result["failure_type"] == "login_required"
 
 
+def test_latest_policy_block_preserves_child_cooldown() -> None:
+    stdout = json.dumps(
+        {
+            "records": [
+                {
+                    "failure_classification": {
+                        "status": "completed",
+                        "failure_type": "success",
+                        "retryable": False,
+                        "wait_seconds": 0,
+                        "reason": "completed",
+                    }
+                },
+                {
+                    "failure_classification": {
+                        "status": "retry_wait",
+                        "failure_type": "policy_blocked",
+                        "retryable": True,
+                        "wait_seconds": 7200,
+                        "reason": "max_requests_per_session",
+                    }
+                },
+            ],
+            "import_new_target_met": False,
+            "formal_validation": {
+                "new_target_met": False,
+                "stop_reason": "behavior_evidence_failed",
+            },
+        }
+    )
+
+    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout)
+
+    assert result["status"] == "retry_wait"
+    assert result["failure_type"] == "policy_blocked"
+    assert result["wait_seconds"] == 7200
+    assert result["reason"] == "max_requests_per_session"
+
+
 def test_target_closed_after_page_launch_is_not_browser_launch_failure() -> None:
     result = failure_classifier.classify_attempt(
         exit_code=1,
