@@ -2,6 +2,9 @@
 
 - 登录确认后先进入本轮真实关键词搜索页，再执行共享行为阶段并刷新 API 客户端 cookie；
   行为证据 URL 不是该搜索页，或行为与请求策略证据缺失时，不得入库。
+  API 客户端在进入关键词页之前监听浏览器搜索响应；搜索循环优先复用浏览器已经取得的首页和
+  行为滚动分页，避免对同一 offset/search ID 重复请求。只有超过浏览器已加载前沿时才发出后续
+  API 请求。
 
 - 正式入口：`crawl_runner.py` 调用 MediaCrawler 抖音搜索。
 - 当前正式数量只读取 `config/crawl_targets.json` 中该 job 的 `target_new_posts` 和
@@ -13,15 +16,23 @@
 - 图片来源：图文作品的 note/image 列表。
 - 去重键：`aweme_id`。
 - 自适应循环持续分页，直到有效目标、候选硬上限、数据源耗尽或连续停滞。
-- 搜索接口每次请求 15 条，offset 必须按 15 递增；响应 `logid` 作为下一页 search ID。
+- 搜索接口当前使用站内单列搜索契约：新鲜首页调用 `/general/search/stream/`，后续携带 search ID
+  的分页调用 `/general/search/single/`。首页响应可能保留原始 HTTP chunk 边界，必须重组所有 chunk
+  后再解析 JSON。两类请求均使用 `count=10`、`list_type=single`、
+  `search_source=normal_search`；每次请求 10 条，offset 必须按 10 递增；响应 `logid` 作为下一页
+  search ID。不得复用旧版固定 `from_group_id` 或 `count=15/list_type=multi` 组合，否则接口可能
+  返回空数组，而同一浏览器搜索页仍显示结果。
   页级状态记录 page、offset/search ID、原始返回条数和 `has_more`。响应缺少 `data` 是
   运行/风控失败，不得写成数据源耗尽。
 - 搜索 JSON 必须通过业务 envelope 校验：非成功 `status_code`、`data` 不是列表、缺失或非法
   `has_more`，以及 `has_more=true` 但没有下一 `logid`，都停止为 `runtime_failed`。状态文件只保存
   `status_code`、数据条数、`has_more` 和 `logid` 是否存在等脱敏元数据，不保存完整响应。
+  `search_nil_info.search_nil_type=verify_check` 是显式风控信号，必须停止为
+  `search_verify_check`，不得解释成来源耗尽。
 - 新鲜游标链的第 1 页（page 1、offset 0、空 search ID）若返回
   `data=[]、has_more=false`，必须检查当前可见搜索页。存在作品链接或搜索结果卡片时停止为
-  `empty_api_response_with_visible_results`；既无卡片也无明确可见“无结果”文案时停止为
+  `empty_api_response_with_visible_results`；新版无作品链接的 `.search-result-card` 和
+  `waterfall_item_*` 瀑布流节点也属于可见卡片。既无卡片也无明确可见“无结果”文案时停止为
   `ambiguous_empty_first_page`。这两种情况均为运行/风控失败，checkpoint 保持第 1 页不前移。
   只有可见页面明确显示无结果，才允许 `verified_empty_first_page` 证明来源耗尽。
 - SQLite checkpoint 同时保存下一 page、offset 和响应 `logid`。自动恢复必须把三者一起传给
@@ -36,7 +47,7 @@
   没有新候选 ID 或连续游标时保持耗尽，仅刷新顶部。新前沿遇到历史视频、字段无效项或有效项时
   由持久候选集合在作者主页和媒体处理前跳过，不消耗候选预算。
   顶部刷新本身已经 `target_new_met` 时不 reseed，立即结束并保留旧耗尽 checkpoint。
-- 完整响应保存下一 page、`offset + 15` 和下一 `logid`；在目标或候选上限处中途停止时保存当前
+- 完整响应保存下一 page、`offset + 10` 和下一 `logid`；在目标或候选上限处中途停止时保存当前
   请求三元组，下一次重取边界批次。未达标摘要自动累计，正常 workflow 不使用人工恢复参数。
 - `data=[]` 但 `has_more=1` 是可继续的空批次，必须携带响应 `logid` 请求下一页并计入连续
   停滞；深层页的 `has_more=false` 可以证明当前游标链耗尽。缺失继续游标属于响应异常；新鲜第
