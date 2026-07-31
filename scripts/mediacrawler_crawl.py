@@ -1037,7 +1037,7 @@ def summarize_output(save_path: Path, keyword: str) -> dict[str, Any]:
 
 
 def ensure_web_schema(conn: sqlite3.Connection) -> dict[str, Any]:
-    return bootstrap_connection(conn)
+    return bootstrap_connection(conn, sync_jobs=False)
 
 
 def platform_from_path(path: Path) -> str:

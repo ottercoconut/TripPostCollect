@@ -398,7 +398,7 @@ def validate_images(meta: dict[str, Any]) -> dict[str, Any]:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    bootstrap_connection(conn)
+    bootstrap_connection(conn, sync_jobs=False)
 
 
 def keyword_from_capture(row: dict[str, Any]) -> str | None:

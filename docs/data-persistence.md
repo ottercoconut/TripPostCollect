@@ -23,6 +23,11 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 `crawl_jobs`，小红书运行与账号状态写入独立 `xhs_*` 表。手工 `--sync-only` 只用于通用
 调度配置的显式刷新或排查。
 
+内容入库阶段的 bootstrap 只补齐内容、调度控制面和小红书控制面 schema，不同步
+`crawl_jobs`。调度任务只能由父 `crawl_runner.py` 使用本轮冻结配置显式同步；否则父 runner
+使用一次性 `--config` 时，child 若按默认主配置同步任务，会删除尚未执行的一次性 job，并在
+切换下个平台时触发 attempt 外键失败。
+
 `web_posts` 不再建模城市。迁移 `13/remove_city_name` 使用旧库原有的 `city_name` 完成一次性历史
 数据清理，随后移除该列、城市索引和 `cities` 表；迁移 `14/configured_scheduler_scope` 删除不在
 当前配置中的历史调度任务。当前内容属于青岛是业务前提，不进入 schema、筛选或校验逻辑；
