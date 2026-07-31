@@ -383,6 +383,8 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 新会话并清零计数。验证码、频控和封禁写入的其他 `cooldown_reason` 是显式冷却，在有效期内
 仍必须停止；不要通过删状态或改计数解除。达到会话上限后的首次拒绝只写入上述既定空闲截止
 时间，后续被拒绝的检查不能从检查时刻重新加满一个冷却周期。
+`wait_seconds` 对未满整秒的剩余时间必须向上取整，保证 Runner 的 `next_run_at` 不早于
+`cooldown_until`，避免在截止前一秒产生无意义的再次拒绝。
 当 child 因该门禁返回 `policy_blocked` 时，外层 Runner 必须保留 child 给出的
 `wait_seconds` 和原因来计算 `next_run_at`，不能被汇总层的 `behavior_evidence_failed` 降级成
 通用 600 秒重试。断点和候选记忆在冷却期间保持不变，到期后再从同一 checkpoint 续跑。

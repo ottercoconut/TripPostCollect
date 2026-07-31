@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import math
 import random
 import time
 from datetime import datetime, timedelta, timezone
@@ -128,9 +129,13 @@ def _current_daily_key(now: datetime) -> str:
     return now.strftime("%Y-%m-%d")
 
 
+def _ceil_positive_seconds(delta: timedelta) -> int:
+    return max(1, math.ceil(delta.total_seconds()))
+
+
 def _seconds_until_next_utc_day(now: datetime) -> int:
     next_day = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return max(1, int((next_day - now).total_seconds()))
+    return _ceil_positive_seconds(next_day - now)
 
 
 def _automatic_session_cooldown_until(
@@ -250,7 +255,7 @@ def site_request_guard(
             event = _blocked_event(
                 site,
                 reason=str(entry.get("cooldown_reason") or "cooldown_active"),
-                wait_seconds=max(1, int((cooldown_until - now).total_seconds())),
+                wait_seconds=_ceil_positive_seconds(cooldown_until - now),
                 label=label,
                 entry=entry,
             )
@@ -292,7 +297,7 @@ def site_request_guard(
             event = _blocked_event(
                 site,
                 reason="max_requests_per_session",
-                wait_seconds=max(1, int((cooldown_until - now).total_seconds())),
+                wait_seconds=_ceil_positive_seconds(cooldown_until - now),
                 label=label,
                 entry=entry,
             )
