@@ -37,6 +37,9 @@
 - 搜索 JSON 必须通过业务 envelope 校验：非成功 `status_code`、`data` 不是列表、缺失或非法
   `has_more`，以及 `has_more=true` 但没有下一 `logid`，都停止为 `runtime_failed`。状态文件只保存
   `status_code`、数据条数、`has_more` 和 `logid` 是否存在等脱敏元数据，不保存完整响应。
+  响应体在 JSON/chunk 重组阶段产生的 `SearchResponseError` 必须保留其具体 reason 传到分页停止
+  证据，不能被通用 `DataFetchError` 吞并成 `search_request_failed`；浏览器监听日志也只记录该
+  reason，不输出完整响应体。
   `search_nil_info.search_nil_type=verify_check` 是显式风控信号，必须停止为
   `search_verify_check`，不得解释成来源耗尽。
 - 新鲜游标链的第 1 页（page 1、offset 0、空 search ID）若返回
