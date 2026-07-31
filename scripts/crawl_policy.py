@@ -207,6 +207,18 @@ def _compute_pacing_wait(site: WebSite, entry: dict[str, Any], now: datetime) ->
     return idle_jitter, 0.0, idle_jitter
 
 
+def _automatic_session_cooldown_until(
+    site: WebSite,
+    entry: dict[str, Any],
+    now: datetime,
+) -> datetime:
+    last_at = parse_iso_timestamp(
+        entry.get("last_request_finished_at") or entry.get("last_request_at")
+    )
+    cooldown_origin = last_at or now
+    return cooldown_origin + timedelta(minutes=site.cooldown_minutes)
+
+
 @contextlib.contextmanager
 def site_request_guard(
     site: WebSite | None,
@@ -271,7 +283,7 @@ def site_request_guard(
             raise CrawlPolicyBlocked(event)
 
         if site.max_requests_per_session > 0 and int(entry.get("session_count") or 0) >= site.max_requests_per_session:
-            cooldown_until = now + timedelta(minutes=site.cooldown_minutes)
+            cooldown_until = _automatic_session_cooldown_until(site, entry, now)
             entry["cooldown_until"] = isoformat(cooldown_until)
             entry["cooldown_reason"] = "max_requests_per_session"
             event = _blocked_event(

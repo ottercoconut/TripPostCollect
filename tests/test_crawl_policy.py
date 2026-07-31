@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from pathlib import Path
 
+import pytest
+
 from trippostcollect.platforms.registry import WebSite
 
 
@@ -102,6 +104,30 @@ def test_stale_automatic_cooldown_is_cleared_even_if_until_is_in_future() -> Non
     assert normalized["session_count"] == 0
     assert "cooldown_until" not in normalized
     assert "cooldown_reason" not in normalized
+
+
+def test_session_limit_cooldown_uses_last_finished_time(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    now = datetime(2026, 7, 15, 8, 0, tzinfo=timezone.utc)
+    state_path = tmp_path / "policy.json"
+    monkeypatch.setattr(crawl_policy, "POLICY_STATE", state_path)
+    monkeypatch.setattr(crawl_policy, "utc_now", lambda: now)
+    crawl_policy.save_policy_state(
+        {"test": entry_at(now, idle=timedelta(minutes=30))}
+    )
+
+    with pytest.raises(crawl_policy.CrawlPolicyBlocked) as caught:
+        with crawl_policy.site_request_guard(policy_site(), label="test-session"):
+            raise AssertionError("session limit must block before yielding")
+
+    event = caught.value.event
+    assert event["reason"] == "max_requests_per_session"
+    assert event["wait_seconds"] == 30 * 60
+    assert event["cooldown_until"] == crawl_policy.isoformat(
+        now + timedelta(minutes=30)
+    )
 
 
 def test_clear_site_policy_state_removes_only_requested_platform(
