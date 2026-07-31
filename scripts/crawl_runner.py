@@ -154,6 +154,22 @@ def is_unverified_douyin_first_page_checkpoint(
     )
 
 
+def stable_douyin_search_id_from_summary(summary: dict[str, Any]) -> str:
+    pagination = summary.get("pagination_evidence") or {}
+    for batch in pagination.get("batches") or []:
+        if not isinstance(batch, dict) or batch.get("platform") != "douyin":
+            continue
+        if batch.get("discovery_phase") not in (None, "frontier"):
+            continue
+        source_cursor = str(batch.get("source_cursor") or "")
+        next_cursor = str(batch.get("next_cursor") or "")
+        if source_cursor:
+            return source_cursor
+        if batch.get("source_offset") in (None, 0, "0") and next_cursor:
+            return next_cursor
+    return ""
+
+
 def resolve_discovery_args(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -184,6 +200,7 @@ def resolve_discovery_args(
     job_args.start_cursor = None
     job_args.top_refresh_max_pages = 0
     job_args.auto_resume = False
+    resume_cursor_corrected_from_summary = False
     if checkpoint and not explicit_recovery:
         unverified_first_page = is_unverified_douyin_first_page_checkpoint(checkpoint)
         summary_value = str(checkpoint.get("last_summary_path") or "")
@@ -205,6 +222,12 @@ def resolve_discovery_args(
                     f"job={row['job_key']} path={summary_path}"
                 )
             job_args.resume_summary = str(summary_path.resolve())
+            if platform_key == "douyin":
+                prior_summary = load_json(summary_path)
+                stable_search_id = stable_douyin_search_id_from_summary(prior_summary)
+                if stable_search_id and stable_search_id != str(job_args.start_cursor or ""):
+                    job_args.start_cursor = stable_search_id
+                    resume_cursor_corrected_from_summary = True
         job_args.auto_resume = True
 
     plan = {
@@ -217,6 +240,7 @@ def resolve_discovery_args(
         "resume_page": int(job_args.start_page or 1),
         "resume_offset": job_args.start_offset,
         "resume_cursor": job_args.start_cursor,
+        "resume_cursor_corrected_from_summary": resume_cursor_corrected_from_summary,
         "source_exhausted": bool(job_args.discovery_source_exhausted),
         "unverified_first_page_checkpoint_rejected": bool(
             checkpoint

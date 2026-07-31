@@ -1310,6 +1310,22 @@ DISCOVERY_RESEED_EVENT_FIELDS = (
 )
 
 
+def stable_douyin_search_id(pagination_evidence: dict[str, Any]) -> str:
+    """Return the session search ID, not per-response request log IDs."""
+    for batch in pagination_evidence.get("batches") or []:
+        if not isinstance(batch, dict) or batch.get("platform") != "douyin":
+            continue
+        if batch.get("discovery_phase") not in (None, "frontier"):
+            continue
+        source_cursor = str(batch.get("source_cursor") or "")
+        next_cursor = str(batch.get("next_cursor") or "")
+        if source_cursor:
+            return source_cursor
+        if batch.get("source_offset") in (None, 0, "0") and next_cursor:
+            return next_cursor
+    return ""
+
+
 def persist_discovery_checkpoint(
     args: argparse.Namespace,
     platform_key: str,
@@ -1349,6 +1365,8 @@ def persist_discovery_checkpoint(
             else None
         )
         resume_cursor = str(event.get("resume_cursor") or "") or None
+        if platform_key == "douyin":
+            resume_cursor = stable_douyin_search_id(pagination_evidence) or resume_cursor
         source_has_more_value = event.get("source_has_more")
     source_has_more = (
         None if source_has_more_value is None else bool(source_has_more_value)

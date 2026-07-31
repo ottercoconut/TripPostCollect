@@ -147,6 +147,144 @@ def test_executor_commits_cursor_from_durable_pagination_evidence(tmp_path: Path
     assert checkpoint["last_stop_detail"] == "candidate_hard_limit"
 
 
+def test_executor_keeps_first_douyin_search_id_when_response_logids_rotate(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "stable-cursor.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        bootstrap_connection(conn, sync_content=False, sync_jobs=False)
+        row = insert_job(conn, {"platform": "douyin", "keyword": "青岛旅游"})
+        job_id = int(row["id"])
+    fingerprint = query_fingerprint("douyin", "青岛旅游", {})
+    args = SimpleNamespace(
+        discovery_job_id=job_id,
+        discovery_query_fingerprint=fingerprint,
+        discovery_run_id="stable-run",
+        no_checkpoint_write=False,
+        db=str(db_path),
+        keyword="青岛旅游",
+        start_page=1,
+    )
+
+    result = mediacrawler_crawl.persist_discovery_checkpoint(
+        args,
+        "douyin",
+        {
+            "batches": [
+                {
+                    "platform": "douyin",
+                    "discovery_phase": "frontier",
+                    "source_offset": 0,
+                    "source_cursor": "",
+                    "next_cursor": "stable-search-id",
+                },
+                {
+                    "platform": "douyin",
+                    "discovery_phase": "frontier",
+                    "source_offset": 10,
+                    "source_cursor": "stable-search-id",
+                    "next_cursor": "rotating-log-id",
+                },
+            ],
+            "stop_event": {
+                "platform": "douyin",
+                "source_page": 3,
+                "resume_page": 3,
+                "resume_offset": 20,
+                "resume_cursor": "rotating-log-id",
+                "source_has_more": None,
+                "batch_complete": False,
+                "discovery_phase": "frontier",
+                "stop_reason": "runtime_failed",
+                "stop_detail": "search_verify_check",
+            },
+        },
+    )
+
+    assert result["resume_page"] == 3
+    assert result["resume_offset"] == 20
+    assert result["resume_cursor"] == "stable-search-id"
+
+
+def test_runner_repairs_rotated_douyin_cursor_from_frozen_summary(tmp_path: Path) -> None:
+    params = {
+        "platform": "douyin",
+        "keyword": "青岛海滨旅游",
+        "top_refresh_max_pages": 3,
+    }
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "pagination_evidence": {
+                    "batches": [
+                        {
+                            "platform": "douyin",
+                            "discovery_phase": "frontier",
+                            "source_offset": 0,
+                            "source_cursor": "",
+                            "next_cursor": "stable-search-id",
+                        },
+                        {
+                            "platform": "douyin",
+                            "discovery_phase": "frontier",
+                            "source_offset": 10,
+                            "source_cursor": "stable-search-id",
+                            "next_cursor": "rotating-log-id",
+                        },
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with sqlite3.connect(tmp_path / "runner-stable.sqlite") as conn:
+        conn.row_factory = sqlite3.Row
+        bootstrap_connection(conn, sync_content=False, sync_jobs=False)
+        row = insert_job(conn, params)
+        fingerprint = query_fingerprint("douyin", "青岛海滨旅游", params)
+        save_checkpoint(
+            conn,
+            job_id=int(row["id"]),
+            platform_key="douyin",
+            keyword="青岛海滨旅游",
+            query_fingerprint_value=fingerprint,
+            resume_page=3,
+            resume_offset=20,
+            resume_cursor="rotating-log-id",
+            source_has_more=None,
+            last_batch_complete=False,
+            last_stop_reason="runtime_failed",
+            last_run_id="failed-run",
+        )
+        conn.execute(
+            """
+            UPDATE crawl_discovery_checkpoints
+            SET last_summary_path=?
+            WHERE job_id=? AND query_fingerprint=?
+            """,
+            (str(summary_path), int(row["id"]), fingerprint),
+        )
+        conn.commit()
+        args = SimpleNamespace(
+            recovery_keyword=None,
+            start_page=None,
+            resume_summary=None,
+        )
+        resolved, plan = crawl_runner.resolve_discovery_args(
+            conn,
+            row,
+            args,
+            run_id="retry-run",
+        )
+
+    assert resolved.start_page == 3
+    assert resolved.start_offset == 20
+    assert resolved.start_cursor == "stable-search-id"
+    assert plan["resume_cursor_corrected_from_summary"] is True
+
+
 def test_top_refresh_keeps_saved_douyin_frontier(tmp_path: Path) -> None:
     db_path = tmp_path / "refresh.sqlite"
     with sqlite3.connect(db_path) as conn:
