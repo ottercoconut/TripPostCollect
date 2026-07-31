@@ -321,6 +321,11 @@ child 的未知候选安全上限。永久提高检索目标时只修改 `config
 600 秒，通过后继续；等待状态写入 `behavior_evidence.operator_verification_events`。系统不自动
 点击、识别或绕过验证。搜索 API 返回 461/471 时，使用响应中的 `Verifyuuid`、`Verifytype` 和
 状态码打开平台 `/website-login/captcha` 人工验证页；通过后刷新同一会话 Cookie 并重试原请求。
+除这些已识别验证路径外，BrowserContext 中任何由平台自行弹出的未知新标签页也必须立即置前并
+无条件保留至少 30 秒。该门禁不依赖页面文本或验证码识别，登录页整理、异常退出、Playwright
+退出以及最终 BrowserContext/CDP 清理都必须先等待保护期；crawler 主动创建的互动页和作者页通过
+受控入口标记，不误算为平台弹窗。其他路径已经明确识别出的验证页仍执行原有 600 秒人工等待，
+不得用未知弹窗的 30 秒最低保护期缩短。
 频控、拒绝访问或环境异常仍立即停止请求并等待操作人决定；不得自动
 重试或在同一正式轮次中途换号。
 
@@ -355,6 +360,9 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 主版本必须一致。抓取中若等待人工登录或图片验证，证据还必须包含
 `operator_verification_events`；只有对应事件为 `completed` 且后续连续性事件完成，才能恢复
 正式抓取。
+排查“弹窗被关闭”时还要核对 child 日志中的 `Unexpected browser tab opened` 和
+`Unexpected-tab minimum hold completed`：两者之间必须至少覆盖 30 秒，且浏览器上下文关闭不得早于
+后者。不要以日志中没有识别到验证码文本为理由跳过保护期。
 失败轮次只要 child summary 已生成，Runner 顶层仍必须读取其中的行为与帖子互动证据；退出码
 失败不能把已发生的互动错误汇总为空。
 
