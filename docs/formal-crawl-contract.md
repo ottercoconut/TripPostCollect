@@ -150,7 +150,11 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 - `target_new_met`：有效新增图文达到目标。
 - `candidate_hard_limit_reached`：实际候选达到硬上限但目标未达成。
 - `source_exhausted`：平台明确返回空页、空游标或 `has_more=false`，且状态文件存在对应
-  `adaptive_search_stopped` 证据。
+  `adaptive_search_stopped` 证据。抖音新鲜游标链的第 1 页是例外：`data=[]` 与
+  `has_more=false` 不能单独证明耗尽；还必须由当前可见搜索页明确显示无结果，停止细节写为
+  `verified_empty_first_page`。可见页仍有作品或页面状态不明确时必须写
+  `runtime_failed`，分别使用 `empty_api_response_with_visible_results` 或
+  `ambiguous_empty_first_page`，并保留第 1 页、offset 0、空 search ID 供下轮重取。
 - `stagnated`：抖音、知乎和小红书按连续配置批次没有新增满足正式字段 profile 且数据库中
   不存在的唯一记录累计；新的无效候选、重复候选和数据库已有记录都不能重置停滞计数。微博
   按是否出现不在数据库、累计摘要、`crawl_discovery_seen_candidates` 和本 child 已见集合中的候选 ID 累计停滞：综合搜索连续出现纯文本或视频时仍推进扫描，
@@ -169,6 +173,11 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 
 每个分页批次必须记录平台页码、请求游标或 search ID（平台提供时）、下一游标、可恢复的
 下一页/offset/cursor、批次是否完整、发现阶段、原始返回条数和 `has_more`（平台提供时）。
+抖音搜索响应还必须验证 HTTP 可解析后的业务 envelope：非成功 `status_code`、缺失或非列表
+`data`、缺失或非法 `has_more`，以及 `has_more=true` 但没有下一 `logid`，都属于
+`runtime_failed`，不得降级成空页。状态文件保存脱敏的 `douyin_search_response_observed`；
+新鲜第 1 页为空时另存 `douyin_empty_first_page_checked`，只记录计数、匹配到的可见无结果标记、
+URL 和检查错误，不保存完整响应或整页文本。
 仅有一条或多条 `adaptive_batch_completed`、但没有
 `adaptive_search_stopped` 的任务，不得推断为 `source_exhausted`；目标未达成时统一按
 `runtime_failed` 处理。分页循环以实际候选累计到 `candidate_hard_limit` 为边界，不得用

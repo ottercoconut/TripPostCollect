@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS crawl_discovery_checkpoints (
     status TEXT NOT NULL DEFAULT 'active',
     last_batch_complete INTEGER NOT NULL DEFAULT 1,
     last_stop_reason TEXT NOT NULL DEFAULT '',
+    last_stop_detail TEXT NOT NULL DEFAULT '',
     last_run_id TEXT,
     last_summary_path TEXT,
     campaign_candidate_count INTEGER NOT NULL DEFAULT 0,

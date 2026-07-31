@@ -16,6 +16,14 @@
 - 搜索接口每次请求 15 条，offset 必须按 15 递增；响应 `logid` 作为下一页 search ID。
   页级状态记录 page、offset/search ID、原始返回条数和 `has_more`。响应缺少 `data` 是
   运行/风控失败，不得写成数据源耗尽。
+- 搜索 JSON 必须通过业务 envelope 校验：非成功 `status_code`、`data` 不是列表、缺失或非法
+  `has_more`，以及 `has_more=true` 但没有下一 `logid`，都停止为 `runtime_failed`。状态文件只保存
+  `status_code`、数据条数、`has_more` 和 `logid` 是否存在等脱敏元数据，不保存完整响应。
+- 新鲜游标链的第 1 页（page 1、offset 0、空 search ID）若返回
+  `data=[]、has_more=false`，必须检查当前可见搜索页。存在作品链接或搜索结果卡片时停止为
+  `empty_api_response_with_visible_results`；既无卡片也无明确可见“无结果”文案时停止为
+  `ambiguous_empty_first_page`。这两种情况均为运行/风控失败，checkpoint 保持第 1 页不前移。
+  只有可见页面明确显示无结果，才允许 `verified_empty_first_page` 证明来源耗尽。
 - SQLite checkpoint 同时保存下一 page、offset 和响应 `logid`。自动恢复必须把三者一起传给
   child；只有 `--start-page` 或 offset、但 search ID 为空时执行器直接拒绝，不能把这种深页
   请求的空结果解释为来源耗尽。
@@ -31,4 +39,5 @@
 - 完整响应保存下一 page、`offset + 15` 和下一 `logid`；在目标或候选上限处中途停止时保存当前
   请求三元组，下一次重取边界批次。未达标摘要自动累计，正常 workflow 不使用人工恢复参数。
 - `data=[]` 但 `has_more=1` 是可继续的空批次，必须携带响应 `logid` 请求下一页并计入连续
-  停滞；只有 `has_more=false`、缺失继续游标或达到连续停滞上限时才能停止。
+  停滞；深层页的 `has_more=false` 可以证明当前游标链耗尽。缺失继续游标属于响应异常；新鲜第
+  1 页的 `has_more=false` 还必须满足上面的可见无结果门禁，不能只凭接口空数组停止。

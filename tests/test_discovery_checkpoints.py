@@ -125,6 +125,7 @@ def test_executor_commits_cursor_from_durable_pagination_evidence(tmp_path: Path
                 "batch_complete": True,
                 "discovery_phase": "frontier",
                 "stop_reason": "candidate_hard_limit_reached",
+                "stop_detail": "candidate_hard_limit",
                 "candidate_identities": ["video-1", "image-1"],
             }
         },
@@ -143,6 +144,7 @@ def test_executor_commits_cursor_from_durable_pagination_evidence(tmp_path: Path
     assert checkpoint["resume_offset"] == 150
     assert checkpoint["resume_cursor"] == "next-cursor"
     assert checkpoint["last_run_id"] == "run-2"
+    assert checkpoint["last_stop_detail"] == "candidate_hard_limit"
 
 
 def test_top_refresh_keeps_saved_douyin_frontier(tmp_path: Path) -> None:
@@ -196,6 +198,76 @@ def test_top_refresh_keeps_saved_douyin_frontier(tmp_path: Path) -> None:
     assert checkpoint["resume_offset"] == 315
     assert checkpoint["resume_cursor"] == "saved-frontier"
     assert checkpoint["status"] == "exhausted"
+
+
+def test_saved_empty_first_page_keeps_verified_exhaustion_detail(tmp_path: Path) -> None:
+    db_path = tmp_path / "verified-refresh.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        bootstrap_connection(conn, sync_content=False, sync_jobs=False)
+        row = insert_job(
+            conn,
+            {"platform": "douyin", "keyword": "青岛崂山旅游攻略"},
+        )
+        job_id = int(row["id"])
+        fingerprint = query_fingerprint("douyin", "青岛崂山旅游攻略", {})
+        save_checkpoint(
+            conn,
+            job_id=job_id,
+            platform_key="douyin",
+            keyword="青岛崂山旅游攻略",
+            query_fingerprint_value=fingerprint,
+            resume_page=1,
+            resume_offset=0,
+            resume_cursor=None,
+            source_has_more=False,
+            last_batch_complete=True,
+            last_stop_reason="source_exhausted",
+            last_stop_detail="verified_empty_first_page",
+            last_run_id="verified-run",
+        )
+        conn.commit()
+    args = SimpleNamespace(
+        discovery_job_id=job_id,
+        discovery_query_fingerprint=fingerprint,
+        discovery_run_id="refresh-run",
+        discovery_source_exhausted=True,
+        no_checkpoint_write=False,
+        db=str(db_path),
+        keyword="青岛崂山旅游攻略",
+        start_page=1,
+        start_offset=0,
+        start_cursor=None,
+    )
+
+    result = mediacrawler_crawl.persist_discovery_checkpoint(
+        args,
+        "douyin",
+        {
+            "stop_event": {
+                "source_page": 1,
+                "resume_page": 1,
+                "resume_offset": 0,
+                "resume_cursor": None,
+                "source_has_more": False,
+                "batch_complete": True,
+                "discovery_phase": "frontier",
+                "stop_reason": "source_exhausted",
+                "stop_detail": "saved_source_exhausted",
+            }
+        },
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        checkpoint = load_checkpoint(
+            conn,
+            job_id=job_id,
+            query_fingerprint_value=fingerprint,
+        )
+    assert checkpoint is not None
+    assert checkpoint["last_stop_detail"] == "verified_empty_first_page"
+    assert result["last_stop_detail"] == "verified_empty_first_page"
 
 
 def test_reseeded_douyin_frontier_replaces_exhausted_cursor(tmp_path: Path) -> None:
@@ -321,6 +393,73 @@ def test_runner_auto_resumes_only_matching_query(tmp_path: Path) -> None:
     assert resolved.start_page == 7
     assert resolved.resume_summary == str(summary_path.resolve())
     assert resolved.top_refresh_max_pages == 3
+
+
+def test_runner_retries_unverified_douyin_first_page_checkpoint(tmp_path: Path) -> None:
+    params = {
+        "platform": "douyin",
+        "keyword": "青岛崂山旅游攻略",
+        "top_refresh_max_pages": 3,
+    }
+    with sqlite3.connect(tmp_path / "runner.sqlite") as conn:
+        conn.row_factory = sqlite3.Row
+        bootstrap_connection(conn, sync_content=False, sync_jobs=False)
+        row = insert_job(conn, params)
+        fingerprint = query_fingerprint("douyin", "青岛崂山旅游攻略", params)
+        save_checkpoint(
+            conn,
+            job_id=int(row["id"]),
+            platform_key="douyin",
+            keyword="青岛崂山旅游攻略",
+            query_fingerprint_value=fingerprint,
+            resume_page=1,
+            resume_offset=0,
+            resume_cursor=None,
+            source_has_more=False,
+            last_batch_complete=True,
+            last_stop_reason="source_exhausted",
+            last_run_id="legacy-run",
+        )
+        conn.commit()
+        args = SimpleNamespace(
+            recovery_keyword=None,
+            start_page=None,
+            resume_summary=None,
+        )
+
+        retried, retry_plan = crawl_runner.resolve_discovery_args(
+            conn,
+            row,
+            args,
+            run_id="retry-run",
+        )
+
+        assert retry_plan is not None
+        assert retry_plan["unverified_first_page_checkpoint_rejected"] is True
+        assert retried.discovery_source_exhausted is False
+        assert retried.start_page == 1
+        assert retried.start_offset == 0
+        assert retried.start_cursor is None
+
+        conn.execute(
+            """
+            UPDATE crawl_discovery_checkpoints
+            SET last_stop_detail='verified_empty_first_page'
+            WHERE job_id=? AND query_fingerprint=?
+            """,
+            (int(row["id"]), fingerprint),
+        )
+        conn.commit()
+        preserved, verified_plan = crawl_runner.resolve_discovery_args(
+            conn,
+            row,
+            args,
+            run_id="verified-run",
+        )
+
+    assert verified_plan is not None
+    assert verified_plan["unverified_first_page_checkpoint_rejected"] is False
+    assert preserved.discovery_source_exhausted is True
 
 
 def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(

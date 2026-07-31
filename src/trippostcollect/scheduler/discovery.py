@@ -77,6 +77,7 @@ def save_checkpoint(
     last_batch_complete: bool,
     last_stop_reason: str,
     last_run_id: str | None,
+    last_stop_detail: str = "",
 ) -> None:
     if resume_page < 1:
         raise ValueError("resume_page must be positive")
@@ -86,8 +87,8 @@ def save_checkpoint(
         INSERT INTO crawl_discovery_checkpoints (
             job_id, platform_key, keyword, query_fingerprint, resume_page,
             resume_offset, resume_cursor, source_has_more, status,
-            last_batch_complete, last_stop_reason, last_run_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            last_batch_complete, last_stop_reason, last_stop_detail, last_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(job_id, query_fingerprint) DO UPDATE SET
             platform_key=excluded.platform_key,
             keyword=excluded.keyword,
@@ -98,6 +99,7 @@ def save_checkpoint(
             status=excluded.status,
             last_batch_complete=excluded.last_batch_complete,
             last_stop_reason=excluded.last_stop_reason,
+            last_stop_detail=excluded.last_stop_detail,
             last_run_id=excluded.last_run_id,
             updated_at=datetime('now')
         """,
@@ -113,6 +115,7 @@ def save_checkpoint(
             status,
             int(last_batch_complete),
             last_stop_reason,
+            last_stop_detail,
             last_run_id,
         ),
     )

@@ -52,6 +52,7 @@ from trippostcollect.core.paths import (
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.registry import get_site
 from trippostcollect.scheduler.discovery import (
+    load_checkpoint,
     load_seen_candidates,
     save_checkpoint,
     save_seen_candidates,
@@ -1352,8 +1353,27 @@ def persist_discovery_checkpoint(
     source_has_more = (
         None if source_has_more_value is None else bool(source_has_more_value)
     )
+    stop_detail = str(event.get("stop_detail") or "")
     with sqlite3.connect(Path(args.db).expanduser()) as conn:
+        conn.row_factory = sqlite3.Row
         bootstrap_connection(conn, sync_content=False, sync_jobs=False)
+        existing_checkpoint = load_checkpoint(
+            conn,
+            job_id=int(args.discovery_job_id),
+            query_fingerprint_value=str(args.discovery_query_fingerprint),
+        )
+        if (
+            platform_key == "douyin"
+            and stop_detail == "saved_source_exhausted"
+            and source_has_more is False
+            and resume_page == 1
+            and resume_offset in (None, 0)
+            and not resume_cursor
+            and existing_checkpoint
+            and existing_checkpoint.get("last_stop_detail")
+            == "verified_empty_first_page"
+        ):
+            stop_detail = "verified_empty_first_page"
         save_checkpoint(
             conn,
             job_id=int(args.discovery_job_id),
@@ -1367,6 +1387,7 @@ def persist_discovery_checkpoint(
             last_batch_complete=bool(event.get("batch_complete")),
             last_stop_reason=str(event.get("stop_reason") or "continue"),
             last_run_id=str(args.discovery_run_id),
+            last_stop_detail=stop_detail,
         )
         seen_candidate_count = save_seen_candidates(
             conn,
@@ -1384,6 +1405,7 @@ def persist_discovery_checkpoint(
         "resume_cursor": resume_cursor,
         "source_has_more": source_has_more,
         "last_stop_reason": str(event.get("stop_reason") or "continue"),
+        "last_stop_detail": stop_detail,
         "refresh_only": refresh_only,
         "seen_candidate_count": seen_candidate_count,
     }
@@ -1551,16 +1573,29 @@ def collect_formal_records(
     run_candidate_count = int(pagination_evidence.get("candidate_count") or 0)
     candidate_count = max(candidate_count, run_candidate_count)
     new_target_met = target_new_posts <= 0 or valid_new_count >= target_new_posts
+    stop_event = pagination_evidence.get("stop_event") or {}
+    unverified_douyin_first_page_empty = bool(
+        stop_event.get("platform") == "douyin"
+        and stop_event.get("stop_reason") == "source_exhausted"
+        and stop_event.get("stop_detail") in {"empty_page", "has_more_false"}
+        and stop_event.get("source_page") in (1, "1")
+        and stop_event.get("source_offset") in (None, "", 0, "0")
+        and not str(stop_event.get("source_cursor") or "").strip()
+        and stop_event.get("raw_batch_count") in (None, "", 0, "0")
+    )
     source_exhausted_met = bool(
         pagination_evidence.get("stopped")
         and pagination_evidence.get("stop_reason") == "source_exhausted"
+        and not unverified_douyin_first_page_empty
     )
     completion_met = (
         source_exhausted_met
         if completion_mode == "source-exhausted"
         else new_target_met
     )
-    if completion_mode == "source-exhausted" and pagination_evidence.get("stopped"):
+    if unverified_douyin_first_page_empty:
+        stop_reason = "runtime_failed"
+    elif completion_mode == "source-exhausted" and pagination_evidence.get("stopped"):
         stop_reason = str(pagination_evidence.get("stop_reason") or "runtime_failed")
     elif new_target_met and target_new_posts > 0:
         stop_reason = "target_new_met"
@@ -1594,7 +1629,11 @@ def collect_formal_records(
         "source_exhausted_met": source_exhausted_met,
         "completion_met": completion_met,
         "stop_reason": stop_reason,
-        "stop_detail": str(pagination_evidence.get("stop_detail") or ""),
+        "stop_detail": (
+            "unverified_empty_first_page"
+            if unverified_douyin_first_page_empty
+            else str(pagination_evidence.get("stop_detail") or "")
+        ),
         "pagination_evidence": pagination_evidence,
         "parse_errors": parse_errors,
         "invalid_reason_counts": dict(sorted(reason_counts.items())),

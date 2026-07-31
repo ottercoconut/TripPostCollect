@@ -112,6 +112,78 @@ def test_explicit_empty_page_proves_source_exhaustion(tmp_path: Path) -> None:
     assert validation["stop_detail"] == "empty_page"
 
 
+def test_unverified_douyin_first_page_empty_is_runtime_failure(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+    write_state(
+        state_path,
+        [
+            {
+                "type": "adaptive_search_stopped",
+                "details": {
+                    "platform": "douyin",
+                    "candidate_count": 0,
+                    "valid_new_count": 0,
+                    "pages_fetched": 1,
+                    "source_page": 1,
+                    "source_offset": 0,
+                    "source_cursor": "",
+                    "source_has_more": False,
+                    "raw_batch_count": 0,
+                    "stop_reason": "source_exhausted",
+                    "stop_detail": "empty_page",
+                },
+            }
+        ],
+    )
+
+    evidence = mediacrawler_crawl.load_pagination_evidence(state_path)
+    validation, _ = mediacrawler_crawl.collect_formal_records(
+        {"records": []},
+        candidate_hard_limit=1000,
+        target_new_posts=50,
+        db_path=tmp_path / "missing.sqlite",
+        pagination_evidence=evidence,
+        completion_mode="source-exhausted",
+    )
+
+    assert validation["source_exhausted_met"] is False
+    assert validation["completion_met"] is False
+    assert validation["stop_reason"] == "runtime_failed"
+    assert validation["stop_detail"] == "unverified_empty_first_page"
+
+
+def test_verified_douyin_first_page_empty_can_prove_exhaustion(tmp_path: Path) -> None:
+    pagination = {
+        "stopped": True,
+        "stop_reason": "source_exhausted",
+        "stop_detail": "verified_empty_first_page",
+        "candidate_count": 0,
+        "stop_event": {
+            "platform": "douyin",
+            "source_page": 1,
+            "source_offset": 0,
+            "source_cursor": "",
+            "raw_batch_count": 0,
+            "stop_reason": "source_exhausted",
+            "stop_detail": "verified_empty_first_page",
+        },
+    }
+
+    validation, _ = mediacrawler_crawl.collect_formal_records(
+        {"records": []},
+        candidate_hard_limit=1000,
+        target_new_posts=50,
+        db_path=tmp_path / "missing.sqlite",
+        pagination_evidence=pagination,
+        completion_mode="source-exhausted",
+    )
+
+    assert validation["source_exhausted_met"] is True
+    assert validation["completion_met"] is True
+    assert validation["stop_reason"] == "source_exhausted"
+    assert validation["stop_detail"] == "verified_empty_first_page"
+
+
 def test_source_exhausted_completion_ignores_configured_quantity_limits(tmp_path: Path) -> None:
     jsonl_path = tmp_path / "bili" / "jsonl" / "search_contents_2026-07-13.jsonl"
     jsonl_path.parent.mkdir(parents=True)

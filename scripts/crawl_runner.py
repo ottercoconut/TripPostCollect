@@ -138,6 +138,22 @@ def params_for(row: sqlite3.Row) -> dict[str, Any]:
     return json.loads(row["params_json"] or "{}")
 
 
+def is_unverified_douyin_first_page_checkpoint(
+    checkpoint: dict[str, Any] | None,
+) -> bool:
+    if not checkpoint:
+        return False
+    return bool(
+        checkpoint.get("platform_key") == "douyin"
+        and checkpoint.get("status") == "exhausted"
+        and checkpoint.get("last_stop_reason") == "source_exhausted"
+        and checkpoint.get("last_stop_detail") != "verified_empty_first_page"
+        and checkpoint.get("resume_page") in (1, "1")
+        and checkpoint.get("resume_offset") in (None, "", 0, "0")
+        and not str(checkpoint.get("resume_cursor") or "").strip()
+    )
+
+
 def resolve_discovery_args(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -169,12 +185,15 @@ def resolve_discovery_args(
     job_args.top_refresh_max_pages = 0
     job_args.auto_resume = False
     if checkpoint and not explicit_recovery:
+        unverified_first_page = is_unverified_douyin_first_page_checkpoint(checkpoint)
         summary_value = str(checkpoint.get("last_summary_path") or "")
         summary_path = Path(summary_value).expanduser() if summary_value else None
         job_args.start_page = max(1, int(checkpoint.get("resume_page") or 1))
         job_args.start_offset = checkpoint.get("resume_offset")
         job_args.start_cursor = checkpoint.get("resume_cursor")
-        job_args.discovery_source_exhausted = checkpoint.get("status") == "exhausted"
+        job_args.discovery_source_exhausted = bool(
+            checkpoint.get("status") == "exhausted" and not unverified_first_page
+        )
         job_args.top_refresh_max_pages = max(
             0,
             int(params.get("top_refresh_max_pages") or 3),
@@ -199,6 +218,11 @@ def resolve_discovery_args(
         "resume_offset": job_args.start_offset,
         "resume_cursor": job_args.start_cursor,
         "source_exhausted": bool(job_args.discovery_source_exhausted),
+        "unverified_first_page_checkpoint_rejected": bool(
+            checkpoint
+            and not explicit_recovery
+            and is_unverified_douyin_first_page_checkpoint(checkpoint)
+        ),
         "top_refresh_max_pages": int(job_args.top_refresh_max_pages),
         "campaign_summary_path": str(job_args.resume_summary or ""),
         "checkpoint_before": checkpoint,

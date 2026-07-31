@@ -332,6 +332,12 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
         if violations:
             raise RuntimeError(f"crawl scheduler foreign-key repair failed: {violations[:3]!r}")
     conn.executescript(CRAWL_SCHEDULER_SCHEMA.read_text(encoding="utf-8"))
+    ensure_column(
+        conn,
+        "crawl_discovery_checkpoints",
+        "last_stop_detail",
+        "TEXT NOT NULL DEFAULT ''",
+    )
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
         (6, "crawl_scheduler"),
@@ -343,6 +349,10 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
         (12, "crawl_discovery_seen_candidates"),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
+        (15, "crawl_discovery_stop_detail"),
     )
 
 

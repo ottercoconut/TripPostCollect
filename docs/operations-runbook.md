@@ -112,7 +112,7 @@ offset 时停止执行，不得用空 cursor 请求深页。
 
 ```bash
 sqlite3 data/trippostcollect.sqlite \
-  "SELECT job_id, platform_key, keyword, resume_page, resume_offset, resume_cursor, status, last_batch_complete, last_stop_reason, last_run_id, updated_at FROM crawl_discovery_checkpoints ORDER BY job_id;"
+  "SELECT job_id, platform_key, keyword, resume_page, resume_offset, resume_cursor, status, last_batch_complete, last_stop_reason, last_stop_detail, last_run_id, updated_at FROM crawl_discovery_checkpoints ORDER BY job_id;"
 ```
 
 检查通用平台已处理候选只看分组计数，不展开 ID：
@@ -166,6 +166,16 @@ checkpoint 记录了非空 `last_summary_path` 但文件丢失时，runner 必�
 顶部刷新已经达到本轮新增目标时，以 `target_new_met` 优先结束，不建立新前沿，旧耗尽 checkpoint
 保持不变。
 `--no-import` 自动禁用 checkpoint 写入，因此诊断不会污染正式记忆。
+
+抖音新鲜游标链在第 1 页收到 `data=[]、has_more=false` 时，不直接创建耗尽 checkpoint。
+执行器必须检查当前可见搜索页：存在 `/video/`、`/note/` 或搜索结果卡片时停止为
+`empty_api_response_with_visible_results`；没有结果卡片、但也没有明确可见的“无结果”提示时停止为
+`ambiguous_empty_first_page`。两者都属于 `runtime_failed`，恢复坐标保持 page 1、offset 0、
+空 search ID。只有页面明确显示无结果时才允许 `verified_empty_first_page`。主执行器还会拒绝
+旧版本产生的抖音第 1 页 `empty_page` / `has_more_false` 耗尽证据，防止它进入正式完成或入库门禁。
+checkpoint 额外保存 `last_stop_detail`；历史记录没有
+`verified_empty_first_page` 时，runner 会忽略其 `exhausted` 状态并从 page 1、offset 0、空 search ID
+重新请求，不需要手工删除 checkpoint。
 
 耗尽 checkpoint 的生成命令仍会携带保存的 page/offset/cursor，用于冻结并保留原前沿；同时出现
 的 `--discovery-source-exhausted` 表示禁止直接请求这些旧深层坐标。B站、微博和知乎只建立顶部
@@ -380,5 +390,8 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 - `formal_validation.pagination_evidence` 有连续页级事件；未达目标时，`source_exhausted`
   必须有空页、明确缺失继续 cursor 或 `has_more=false` 的 `adaptive_search_stopped` 事件。只有批次事件而没有停止
   事件的任务按 `runtime_failed` 排查浏览器、登录态、超时或请求异常。
+- 抖音第 1 页零候选时还必须检查 `douyin_search_response_observed` 和
+  `douyin_empty_first_page_checked`。`empty_page`、`has_more_false`、页面仍有结果或页面状态不明确，
+  都不能作为新鲜第 1 页的耗尽证明。
 
 固定 URL 页面任务只验证该页证据和入库，不得汇报为平台批量目标完成。

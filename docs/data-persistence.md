@@ -31,7 +31,8 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 `crawl_discovery_checkpoints` 和 `crawl_discovery_seen_candidates` 是 B站、微博、抖音和知乎正式
 搜索的控制面记忆，不是内容表。
 `job_id + query_fingerprint` 唯一定位同一来源查询；`resume_page` 保存下一安全页，抖音同时使用
-`resume_offset` 和 `resume_cursor`，`last_summary_path` 指向尚未达到目标的累计摘要，
+`resume_offset` 和 `resume_cursor`，`last_stop_reason` 与 `last_stop_detail` 保存停止分类，
+`last_summary_path` 指向尚未达到目标的累计摘要，
 `campaign_candidate_count` 保存累计报告数。`status=exhausted` 表示已保存深层前沿明确耗尽，
 后续默认只做顶部刷新；抖音若刷新同时证明存在持久记忆中没有的新候选 ID、`has_more=true` 与可继续的新 search ID，则从刷新链
 建立新前沿并把 checkpoint 恢复为 `active`。checkpoint 只能在 child 摘要形成后提交；诊断
