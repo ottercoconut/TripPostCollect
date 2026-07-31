@@ -106,6 +106,25 @@ def test_stale_automatic_cooldown_is_cleared_even_if_until_is_in_future() -> Non
     assert "cooldown_reason" not in normalized
 
 
+def test_overlong_automatic_cooldown_is_reanchored_to_last_finished() -> None:
+    now = datetime(2026, 7, 15, 8, 0, tzinfo=timezone.utc)
+    entry = entry_at(now, idle=timedelta(minutes=30))
+    entry.update(
+        {
+            "cooldown_until": crawl_policy.isoformat(now + timedelta(hours=1)),
+            "cooldown_reason": "max_requests_per_session",
+        }
+    )
+
+    normalized = crawl_policy._normalize_entry(entry, policy_site(), now)
+
+    assert normalized["session_count"] == 8
+    assert normalized["cooldown_reason"] == "max_requests_per_session"
+    assert normalized["cooldown_until"] == crawl_policy.isoformat(
+        now + timedelta(minutes=30)
+    )
+
+
 def test_session_limit_cooldown_uses_last_finished_time(
     tmp_path: Path,
     monkeypatch,

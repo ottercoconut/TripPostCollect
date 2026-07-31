@@ -133,6 +133,18 @@ def _seconds_until_next_utc_day(now: datetime) -> int:
     return max(1, int((next_day - now).total_seconds()))
 
 
+def _automatic_session_cooldown_until(
+    site: WebSite,
+    entry: dict[str, Any],
+    now: datetime,
+) -> datetime:
+    last_at = parse_iso_timestamp(
+        entry.get("last_request_finished_at") or entry.get("last_request_at")
+    )
+    cooldown_origin = last_at or now
+    return cooldown_origin + timedelta(minutes=site.cooldown_minutes)
+
+
 def _normalize_entry(entry: dict[str, Any], site: WebSite, now: datetime) -> dict[str, Any]:
     daily_key = _current_daily_key(now)
     daily_reset = entry.get("daily_date") != daily_key
@@ -149,6 +161,9 @@ def _normalize_entry(entry: dict[str, Any], site: WebSite, now: datetime) -> dic
         and (now - last_request_at).total_seconds() >= max(0, site.cooldown_minutes) * 60
     )
     automatic_cooldown = cooldown_reason == "max_requests_per_session"
+    if automatic_cooldown and last_request_at:
+        cooldown_until = _automatic_session_cooldown_until(site, entry, now)
+        entry["cooldown_until"] = isoformat(cooldown_until)
 
     if cooldown_until and cooldown_until <= now:
         entry["session_count"] = 0
@@ -205,18 +220,6 @@ def _compute_pacing_wait(site: WebSite, entry: dict[str, Any], now: datetime) ->
 
     idle_jitter = min(jitter, 5.0)
     return idle_jitter, 0.0, idle_jitter
-
-
-def _automatic_session_cooldown_until(
-    site: WebSite,
-    entry: dict[str, Any],
-    now: datetime,
-) -> datetime:
-    last_at = parse_iso_timestamp(
-        entry.get("last_request_finished_at") or entry.get("last_request_at")
-    )
-    cooldown_origin = last_at or now
-    return cooldown_origin + timedelta(minutes=site.cooldown_minutes)
 
 
 @contextlib.contextmanager
