@@ -12,7 +12,7 @@
       "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 20,
-      "schedule_seconds": 31536000,
+      "schedule_seconds": 600,
       "max_attempts": 20,
       "params": {
         "platform": "weibo",
@@ -38,7 +38,7 @@
       "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 30,
-      "schedule_seconds": 31536000,
+      "schedule_seconds": 600,
       "max_attempts": 20,
       "params": {
         "platform": "douyin",
@@ -64,7 +64,7 @@
       "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 50,
-      "schedule_seconds": 31536000,
+      "schedule_seconds": 600,
       "max_attempts": 20,
       "params": {
         "platform": "bilibili",
@@ -90,7 +90,7 @@
       "job_kind": "mediacrawler_search",
       "enabled": true,
       "priority": 60,
-      "schedule_seconds": 31536000,
+      "schedule_seconds": 600,
       "max_attempts": 20,
       "params": {
         "platform": "zhihu",

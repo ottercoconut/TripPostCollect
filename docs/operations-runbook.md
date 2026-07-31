@@ -153,6 +153,9 @@ checkpoint 时应含保存页码和顶部刷新参数。只有 checkpoint 的 `l
 `pagination_evidence`、`discovery_checkpoint` 与 SQLite 行；SQLite 的 `last_run_id` 必须等于
 本次运行 ID。未达到目标但前沿推进时，任务仍不是正式完成，不过连续失败会清零，下一次按
 正常 `schedule_seconds` 调度，而不是立即反复抓顶部。
+因此，明确要求无人值守“持续到来源耗尽”的一次性任务，必须在其独立 one-off 配置中把
+`schedule_seconds` 设为经批准的恢复间隔；不能沿用用于防止重复运行的年度占位值。任务一旦进入
+`completed`，runner 不会因这个较短间隔再次执行。长期冻结配置不随 one-off 任务改动。
 checkpoint 记录了非空 `last_summary_path` 但文件丢失时，runner 必须在冻结前报错；不得静默
 丢弃历史成果并推进游标。
 
