@@ -4,7 +4,8 @@
   行为证据 URL 不是该搜索页，或行为与请求策略证据缺失时，不得入库。
   API 客户端在进入关键词页之前监听浏览器搜索响应；搜索循环优先复用浏览器已经取得的首页和
   行为滚动分页，避免对同一 offset/search ID 重复请求。只有超过浏览器已加载前沿时才发出后续
-  API 请求。
+  API 请求。同一关键词、offset 和 search ID 若观察到多条响应，视为预取/预测与正式响应竞态：
+  合并去重并优先使用最新的非 `verify_check` 响应；只有全部响应均为验证信号时才按风控失败停止。
 
 - 正式入口：`crawl_runner.py` 调用 MediaCrawler 抖音搜索。
 - 当前正式数量只读取 `config/crawl_targets.json` 中该 job 的 `target_new_posts` 和
