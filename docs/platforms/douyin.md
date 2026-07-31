@@ -49,8 +49,11 @@
   中标记 `resume_cursor_corrected_from_summary=true`。只有 `--start-page` 或 offset、但 search ID
   为空时执行器直接拒绝，不能把这种深页
   请求的空结果解释为来源耗尽。
-- 有 checkpoint 时先用空 cursor 从顶部刷新配置页数，再用保存的三元组进入深层前沿。已知
-  `aweme_id` 在作者主页补全和媒体处理前跳过；顶部刷新不覆盖深层 cursor。
+- 有 checkpoint 时先用空 cursor 从顶部刷新配置页数，再进入保存的深层 page/offset。抖音
+  search ID 是浏览器搜索会话级 cursor，不能跨进程照搬：只有本轮顶部刷新已经取得健康后页、
+  `has_more=true` 和非空稳定 search ID，才用该 ID 重新绑定深层前沿；page/offset 必须原样保留，
+  并写 `douyin_frontier_cursor_rebound` 证据。没有健康刷新链时保持旧 checkpoint 并失败，不能猜 ID。
+  已知 `aweme_id` 在作者主页补全和媒体处理前跳过。
 - `status=exhausted` 只证明已保存 search ID 的游标链结束。顶部刷新若观察到至少一个不在数据库、
   累计摘要或 `crawl_discovery_seen_candidates` 中的新 `aweme_id`，并且最后一页返回
   `has_more=true` 与非空稳定 search ID，从刷新链下一页
