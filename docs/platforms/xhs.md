@@ -112,7 +112,8 @@ source .venv/bin/activate
 python scripts/xhs_runner.py \
   --dry-run \
   --target-key qingdao_travel \
-  --account-id xhs-a01
+  --account-id xhs-a01 \
+  --completion-mode target-new-posts
 ```
 
 dry-run 通过的判据：
@@ -145,7 +146,8 @@ dry-run 经人工确认后，直接用相同账号、目标和互动参数执行
 source .venv/bin/activate
 python scripts/xhs_runner.py \
   --target-key qingdao_travel \
-  --account-id xhs-a01
+  --account-id xhs-a01 \
+  --completion-mode target-new-posts
 ```
 
 显式请求一轮最多一次的帖子互动：
@@ -155,6 +157,7 @@ source .venv/bin/activate
 python scripts/xhs_runner.py \
   --target-key qingdao_travel \
   --account-id xhs-a01 \
+  --completion-mode target-new-posts \
   --post-interaction comment-scroll
 ```
 

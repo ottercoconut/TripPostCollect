@@ -8,6 +8,13 @@
 > `enabled=true` 的 job；小红书因账号隔离由操作人显式运行独立 runner。两类入口服从相同的
 > 完成模式和正式证据门禁。
 
+操作层使用 `trippostcollect-crawl` 作为共享核心，并为每个正式任务选择且只选择一个模式 Skill：
+
+- `trippostcollect-crawl-to-target` 固定使用 `target-new-posts`；
+- `trippostcollect-crawl-to-source-exhaustion` 固定使用 `source-exhausted`，且只能由用户明确要求触发。
+
+模式 Skill 只负责选择 runner 参数与完成谓词，不拥有第二套平台、分页、登录或入库实现。
+
 ## 唯一入口
 
 通用平台正式任务只通过 `scripts/crawl_runner.py` 执行；小红书正式任务只通过
@@ -74,6 +81,10 @@ B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
   参数。该模式不以 `target_new_posts`、`candidate_hard_limit` 或停滞批次作为完成/停止门禁，而以
   平台返回可验证的来源耗尽证据为完成条件。超时、登录/验证阻断、字段 profile、行为/策略证据和
   实际入库要求仍然有效。
+
+CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和正式运行中显式传入选定值，
+便于冻结状态审计。`completion_mode` 不属于来源查询参数，不进入查询指纹；两种模式切换时继承
+同一任务的 checkpoint、累计摘要和候选记忆，不得清空进度或重扫已处理候选。
 
 - `candidate_hard_limit`：单次 child 执行允许进入字段校验的未知原始候选上限，不是跨多次
   续跑活动的总预算，也不是底层请求参数的同义词。数据库、当前累计摘要、对应平台的持久候选

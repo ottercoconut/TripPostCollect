@@ -115,6 +115,7 @@ checkpoint。摘要或其 JSONL 缺失时冻结失败，不能静默丢弃活动
 source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
+  --completion-mode target-new-posts \
   --max-jobs 5
 ```
 
@@ -127,6 +128,7 @@ python scripts/crawl_runner.py \
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \
+  --completion-mode target-new-posts \
   --max-jobs 3
 ```
 
@@ -137,7 +139,8 @@ source .venv/bin/activate
 python scripts/xhs_runner.py \
   --dry-run \
   --target-key qingdao_travel \
-  --account-id xhs-a01
+  --account-id xhs-a01 \
+  --completion-mode target-new-posts
 ```
 
 单平台字段诊断命令见 `docs/operations-runbook.md`。诊断参数不得复制到正式配置，
@@ -511,6 +514,7 @@ source .venv/bin/activate
 python scripts/crawl_runner.py \
   --db temp/scheduler_verify.sqlite \
   --dry-run \
+  --completion-mode target-new-posts \
   --max-jobs 5
 ```
 

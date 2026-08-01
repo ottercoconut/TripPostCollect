@@ -1,5 +1,10 @@
 # 正式抓取运行手册
 
+正式运行先同时应用 `trippostcollect-crawl` 共享核心，并选择恰好一个模式 Skill：定量任务使用
+`trippostcollect-crawl-to-target`，明确要求当前关键词来源耗尽时使用
+`trippostcollect-crawl-to-source-exhaustion`。模式 Skill 会让 dry-run 与正式命令显式携带相同的
+`--completion-mode`；同一任务不得同时应用两个模式。
+
 ## 执行顺序
 
 通用平台正式任务只从调度器开始；小红书使用本手册后文的独立 runner：
@@ -11,6 +16,7 @@ B站、微博、抖音、知乎和小红书五个平台默认均可运行。通�
 source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
+  --completion-mode target-new-posts \
   --max-jobs 5
 ```
 
@@ -21,13 +27,15 @@ python scripts/crawl_runner.py \
 source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
-  --job-key <enabled_job_key_from_config>
+  --job-key <enabled_job_key_from_config> \
+  --completion-mode target-new-posts
 ```
 
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \
-  --job-key <enabled_job_key_from_config>
+  --job-key <enabled_job_key_from_config> \
+  --completion-mode target-new-posts
 ```
 
 dry-run 的预期状态是仅 `plan_frozen=completed`，`command_executed`、
@@ -42,9 +50,10 @@ dry-run 的预期状态是仅 `plan_frozen=completed`，`command_executed`、
 `priority`、`next_run_at`、数据库 ID 排序后取 `--max-jobs`；指定 `--job-key` 时不要求到期，但
 该任务仍必须启用。实际选中集合始终以本轮 dry-run 摘要为准。
 
-不传 `--completion-mode` 时使用正常默认的 `target-new-posts` 数量模式。只有用户明确要求某一轮
-“直到来源耗尽”时，才给该轮 dry-run 与正式命令同时追加
-`--completion-mode source-exhausted`。这是进程级临时参数，不修改 `target_new_posts`、
+CLI 不传 `--completion-mode` 时仍使用正常默认的 `target-new-posts` 数量模式；定量模式 Skill
+显式传 `--completion-mode target-new-posts` 以便冻结审计。只有用户明确要求某一轮直到来源耗尽时，
+才选择来源耗尽 Skill，并给 dry-run 和正式运行同时传 `--completion-mode source-exhausted`。
+这是进程级临时参数，不修改 `target_new_posts`、
 `candidate_hard_limit`、`max_stagnant_batches` 或后续轮次的默认设置。
 
 dry-run 的 `crawl_run_reports.status=completed` 只表示 runner 成功生成并保存计划报告，不表示
@@ -61,6 +70,7 @@ sqlite3 data/trippostcollect.sqlite \
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \
+  --completion-mode target-new-posts \
   --max-jobs 3
 ```
 
@@ -148,7 +158,8 @@ source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
   --no-sync-config \
-  --job-key mc_douyin_qingdao_laoshan_guide_search
+  --job-key mc_douyin_qingdao_laoshan_guide_search \
+  --completion-mode target-new-posts
 ```
 
 有 checkpoint 的抖音计划应同时含三个恢复参数和 `--top-refresh-max-pages`；B站、微博、知乎有
@@ -214,36 +225,53 @@ page/search ID；同时清空 `last_summary_path`，把 `campaign_candidate_coun
 自动 checkpoint，不要删除记录后靠猜页码续跑。小红书不使用通用表；旧 `search_id` 恢复失败时
 按独立文档保留原账号级 checkpoint 并结束失败轮次，不生成新 ID 猜测深页。
 
-临时候选扩容没有命令行覆盖参数，只能通过配置完成。必须按以下顺序操作：
+### 一次性配置与临时候选预算
 
-1. 记录原 `candidate_hard_limit`，只修改目标 job 的单次 child 预算；不要把历史累计候选数加到
-   临时值中。
-2. 激活项目虚拟环境并校验配置：
+新关键词、临时数量、临时平台组合或临时候选扩容使用 `config/one_off/` 下的独立配置，不直接编辑
+`config/crawl_targets.json`。只有用户明确要求改变长期调度标准时才修改主配置。
+
+通用 one-off 配置必须从当前主配置完整派生：保留 `defaults` 和所有长期 job 原值，再新增一次性
+job，或只在派生副本中调整目标 job。不能只写一次性 job，否则调度同步会禁用未出现在该文件中的
+长期 job。临时配置中的既有 job key、平台和来源查询参数必须保持与主配置一致；新关键词使用新的
+job key 和查询指纹。
+
+按以下顺序操作：
+
+1. 记录目标 job 的原值。临时候选扩容只在派生配置中修改单次 child 的
+   `candidate_hard_limit`，不要把历史累计候选数加到临时值中。来源耗尽模式不得放大目标、候选
+   上限或停滞批次来模拟无限抓取。
+2. 激活项目虚拟环境并校验派生配置：
 
    ```bash
    source .venv/bin/activate
    python -m json.tool \
-     config/crawl_targets.json \
+     config/one_off/<task-config>.json \
      >/dev/null
    ```
 
-3. 同步配置，再用目标 job 冻结并核对自动生成的恢复命令：
+3. 用完整派生配置同步调度表，再用同一配置和目标 job 冻结并核对自动生成的恢复命令：
 
    ```bash
    source .venv/bin/activate
-   python scripts/crawl_runner.py --sync-only
    python scripts/crawl_runner.py \
+     --config config/one_off/<task-config>.json \
+     --sync-only
+   python scripts/crawl_runner.py \
+     --config config/one_off/<task-config>.json \
      --dry-run \
      --no-sync-config \
-     --job-key <enabled_job_key_from_config>
+     --job-key <enabled_job_key_from_config> \
+     --completion-mode target-new-posts
    ```
 
-   正式轮使用完全相同的 runner 参数，去掉 `--dry-run` 并保留 `--no-sync-config`。
-4. 运行结束并完成摘要、状态和 SQLite 检查后，恢复原配置值，再次校验 JSON 并执行
-   `--sync-only`。从临时配置第一次 `--sync-only` 开始，直至正式轮摘要、状态和 SQLite 检查
-   完成，配置文件不得再修改。
+4. 正式轮使用完全相同的 `--config`、`--no-sync-config`、job 和完成模式，去掉 `--dry-run`。
+   从 one-off 配置第一次 `--sync-only` 开始，直至正式轮摘要、状态和 SQLite 检查完成，派生配置
+   不得再修改。
+5. 任务验收后执行主配置的 `python scripts/crawl_runner.py --sync-only`，恢复长期调度范围和参数；
+   不手工编辑 SQLite。保留 one-off 文件作为本轮冻结输入和 Git 证据，后续任务不得直接复用旧
+   job key。
 
-临时值只服务当前恢复或新轮，不得因为一次扩容无意改变长期调度标准。涉及三个及以上参数的
+临时值只服务当前恢复或新轮，不得因为一次任务无意改变长期调度标准。涉及三个及以上参数的
 dry-run 或正式命令仍按本项目规则分行展示。
 
 ## 登录态
@@ -306,7 +334,8 @@ python scripts/xhs_accounts.py list
 python scripts/xhs_runner.py \
   --dry-run \
   --target-key qingdao_travel \
-  --account-id xhs-a01
+  --account-id xhs-a01 \
+  --completion-mode target-new-posts
 ```
 
 确认 dry-run 输出为 `planned`、只有 `plan_frozen=completed` 后，经明确批准直接运行：
@@ -315,7 +344,8 @@ python scripts/xhs_runner.py \
 source .venv/bin/activate
 python scripts/xhs_runner.py \
   --target-key qingdao_travel \
-  --account-id xhs-a01
+  --account-id xhs-a01 \
+  --completion-mode target-new-posts
 ```
 
 小红书实际候选量从 0 按页增长，达到配置的有效新增目标即停止；`candidate_hard_limit` 只是单次

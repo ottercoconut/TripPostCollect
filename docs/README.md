@@ -25,6 +25,17 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 
 ## 正式入口
 
+正式抓取先选择完成模式。两个模式共用 `trippostcollect-crawl` 共享核心、平台实现、SQLite
+checkpoint、累计摘要和候选记忆；模式切换不清空进度，也不修改长期配置：
+
+| 用户意图 | 必须使用的模式 Skill | runner 参数 | 完成判据 |
+|---|---|---|---|
+| 新增 N 条、达到配置数量或普通正式抓取 | `trippostcollect-crawl-to-target` | `--completion-mode target-new-posts` | 实际新增并入库达到目标 |
+| 明确要求当前关键词来源耗尽、不设数量限制或抓完结果 | `trippostcollect-crawl-to-source-exhaustion` | `--completion-mode source-exhausted` | 存在真实来源耗尽证据并完成入库 |
+
+同一任务只能选择一个模式 Skill。用户没有明确要求来源耗尽时使用定量模式；目标很大、定量未达标
+或普通“抓取”请求都不能推断为来源耗尽模式。
+
 B站、微博、抖音和知乎的正式结构化抓取，在执行前统一验证并按需刷新登录态：
 
 ```bash
@@ -42,6 +53,7 @@ python scripts/login_warmup.py --targets all
 source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
+  --completion-mode target-new-posts \
   --max-jobs 5
 ```
 
@@ -54,14 +66,15 @@ python scripts/crawl_runner.py \
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \
+  --completion-mode target-new-posts \
   --max-jobs 3
 ```
 
 通用平台正式数量、字段 profile、分页和停止条件只从 `config/crawl_targets.json` 读取；结构化平台
 同时强制执行正式契约定义的行为与请求策略门禁。
-正常任务不传 `--completion-mode`，默认按配置的 `target_new_posts`、`candidate_hard_limit` 和停滞
-边界限量执行。只有用户明确要求某一轮“直到来源耗尽”时，才在该轮 dry-run 和正式命令同时传
-`--completion-mode source-exhausted`；该参数不写回长期配置，也不把后续轮次永久改为无限数量。
+CLI 不传 `--completion-mode` 时仍默认按配置的 `target_new_posts`、`candidate_hard_limit` 和停滞
+边界限量执行。模式 Skill 为了让冻结计划可审计，会在 dry-run 和正式命令中显式传入
+`target-new-posts` 或 `source-exhausted`。后者不写回长期配置，也不把后续轮次永久改为无限数量。
 通用 runner 会为 B站、微博、抖音和知乎自动读取 SQLite 发现 checkpoint：先有限刷新顶部，
 再从已保存前沿继续；正常运行不需要人工传 `--start-page` 或 `--resume-summary`。小红书仍走
 独立 workflow，但 `xhs_runner.py` 会按目标、人工指定账号和查询指纹自动读取自己的 checkpoint，
@@ -122,7 +135,8 @@ python scripts/xhs_login.py \
 python scripts/xhs_runner.py \
   --dry-run \
   --target-key qingdao_travel \
-  --account-id xhs-a01
+  --account-id xhs-a01 \
+  --completion-mode target-new-posts
 ```
 
 dry-run 通过并经人工确认后，直接用相同账号、目标和互动参数去掉 `--dry-run`。XHS 配置

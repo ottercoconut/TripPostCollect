@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,10 @@ def verify_frozen_files(manifest_path: Path = FROZEN_FILES_MANIFEST) -> list[str
         actual = sha256_file(target)
         if actual != expected:
             errors.append(f"frozen file hash mismatch: {relative_path} expected={expected} actual={actual}")
+        require_immutable = bool(item.get("require_immutable_flag"))
+        immutable_flag = getattr(stat, "UF_IMMUTABLE", 0)
+        if require_immutable and immutable_flag and not (target.stat().st_flags & immutable_flag):
+            errors.append(f"frozen file is not filesystem-immutable: {relative_path}")
     return errors
 
 

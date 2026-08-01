@@ -44,7 +44,9 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 优先改现有脚本、配置或数据库结构；不要新增一次性探测脚本。
 - 不为已废弃的命令、字段、数据类型或文档保留兼容层；确认当前流程无调用后直接删除，历史需要从 Git 查询。
 - `config/frozen_files.json` 中登记的资产是用户确认的冻结快照。除非用户明确要求解冻对应文件，
-  不得修改资产正文或更新登记哈希；提交前运行 `python scripts/verify_frozen_files.py`。
+  不得移除不可变标志、修改资产正文或更新登记哈希；提交前运行
+  `python scripts/verify_frozen_files.py`。用户明确解冻时才依次执行 `chflags nouchg`、修改资产与
+  哈希、重新执行 `chflags uchg` 和完整验证。
 - 大型抓取产物优先看 `summary.json`、`summary.md`、`run_summary.json`、计数、字段列表、样本和标准输出/标准错误尾部摘要；不要全文展开 JSONL、HTML、过长 JSON 或截图元数据。
 - 输出包含 3 个及以上参数、长路径、JSON、环境变量或多个 `--xxx` 选项的命令时，必须用反斜杠 `\` 分行展示；每个参数或逻辑参数组单独一行，避免压缩成长单行。命令很短且参数简单时可以保持单行。
 - Python 测试使用 `pytest`，当前测试目录是 `tests/` 和 `apps/admin_api/tests/`；开发依赖通过 `python -m pip install -e '.[dev]'` 安装。
@@ -80,17 +82,23 @@ python scripts/crawl_runner.py --sync-only
 source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
+  --completion-mode target-new-posts \
   --max-jobs 5
 ```
 
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \
+  --completion-mode target-new-posts \
   --max-jobs 3
 ```
 
 ## 任务路由
 
+- 正式抓取必须同时使用共享核心 `trippostcollect-crawl`，并选择恰好一个完成模式 Skill：用户要求
+  新增数量、达到配置目标或普通正式抓取时使用 `trippostcollect-crawl-to-target`；只有用户明确要求
+  当前关键词来源耗尽、不设数量限制或抓完结果时使用
+  `trippostcollect-crawl-to-source-exhaustion`。二者不得同时用于同一任务。
 - 通用正式抓取、数量、停止和成功：读 `docs/formal-crawl-contract.md`、`config/crawl_targets.json`、`scripts/crawl_runner.py`。
 - 小红书账号、登录、抓取和失败恢复：先完整执行 `docs/platforms/xhs.md` 的阶段清单，再读
   `config/xhs_*.json` 和对应的 `scripts/xhs_accounts.py`、`scripts/xhs_login.py`、`scripts/xhs_runner.py`；
