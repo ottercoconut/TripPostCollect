@@ -222,6 +222,58 @@ def acquire_account_lease(
         raise
 
 
+def acquire_account_login_lease(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    requested_account_id: str,
+    lease_seconds: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Exclusively reserve one non-retired account for the full login workflow."""
+    if lease_seconds <= 0:
+        raise ValueError("lease_seconds must be positive")
+
+    current = now or utc_now()
+    current_iso = iso(current)
+    lease_expires = iso(current + timedelta(seconds=lease_seconds))
+    requested = validate_account_id(requested_account_id)
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM xhs_account_leases WHERE expires_at<=?", (current_iso,))
+        account = _row(conn, requested)
+        if not account:
+            raise XhsAccountUnavailable("requested_xhs_account_not_enrolled")
+        if account["status"] == "retired":
+            raise XhsAccountUnavailable("requested_xhs_account_retired")
+        active_lease = conn.execute(
+            "SELECT expires_at FROM xhs_account_leases WHERE account_id=?",
+            (requested,),
+        ).fetchone()
+        if active_lease:
+            raise XhsAccountUnavailable(
+                "requested_xhs_account_busy",
+                _seconds_until(parse_iso(active_lease["expires_at"]), current),
+            )
+        account_data = dict(account)
+        conn.execute(
+            "INSERT INTO xhs_account_leases(account_id, run_id, acquired_at, expires_at) VALUES (?, ?, ?, ?)",
+            (account_data["account_id"], run_id, current_iso, lease_expires),
+        )
+        record_event(
+            conn,
+            account_id=account_data["account_id"],
+            run_id=run_id,
+            event_type="login_lease_acquired",
+        )
+        conn.commit()
+        return {**account_data, "lease_expires_at": lease_expires}
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def release_account_lease(
     conn: sqlite3.Connection,
     *,

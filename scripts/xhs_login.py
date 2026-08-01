@@ -21,11 +21,14 @@ from mediacrawler_login_warmup import launch_login_context
 from trippostcollect.core.paths import DEFAULT_DB, XHS_LOGIN_OUTPUT, ensure_dir
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs.accounts import (
+    XhsAccountUnavailable,
+    acquire_account_login_lease,
     account_paths,
     ensure_xhs_schema,
     get_account,
     mark_account_verified,
     record_event,
+    release_account_lease,
     set_account_status,
     validate_account_id,
 )
@@ -117,19 +120,13 @@ async def single_login_page(context: BrowserContext) -> Page:
     return page
 
 
-async def run_login(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
-    account_id = validate_account_id(args.account_id)
-    db_path = Path(args.db).expanduser()
-    bootstrap_database(db_path, sync_jobs=False)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        ensure_xhs_schema(conn)
-        account = get_account(conn, account_id)
-        if not account:
-            raise SystemExit(f"XHS account is not enrolled: {account_id}")
-        if account["status"] == "retired":
-            raise SystemExit(f"XHS account is retired: {account_id}")
-
+async def _run_login_session(
+    args: argparse.Namespace,
+    *,
+    account_id: str,
+    db_path: Path,
+    run_id: str,
+) -> tuple[int, dict[str, Any]]:
     paths = account_paths(account_id)
     ensure_dir(paths["profile"])
     output_dir = ensure_dir(XHS_LOGIN_OUTPUT / utc_stamp())
@@ -223,6 +220,7 @@ async def run_login(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
 
     summary = {
         "status": "completed" if not error else "failed",
+        "run_id": run_id,
         "account_id": account_id,
         "profile_dir": str(paths["profile"]),
         "encrypted_state_path": str(paths["encrypted_state"]),
@@ -238,12 +236,70 @@ async def run_login(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     return (0 if not error else 1), summary
 
 
+async def run_login(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
+    account_id = validate_account_id(args.account_id)
+    db_path = Path(args.db).expanduser()
+    bootstrap_database(db_path, sync_jobs=False)
+    run_id = f"xhs-login-{account_id}-{utc_stamp()}"
+    lease_seconds = max(args.timeout_seconds + 300, 600)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_xhs_schema(conn)
+        account = get_account(conn, account_id)
+        if not account:
+            raise SystemExit(f"XHS account is not enrolled: {account_id}")
+        if account["status"] == "retired":
+            raise SystemExit(f"XHS account is retired: {account_id}")
+        acquire_account_login_lease(
+            conn,
+            run_id=run_id,
+            requested_account_id=account_id,
+            lease_seconds=lease_seconds,
+        )
+
+    succeeded = False
+    try:
+        code, summary = await _run_login_session(
+            args,
+            account_id=account_id,
+            db_path=db_path,
+            run_id=run_id,
+        )
+        succeeded = code == 0
+        return code, summary
+    finally:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_xhs_schema(conn)
+            release_account_lease(
+                conn,
+                account_id=account_id,
+                run_id=run_id,
+                outcome="completed" if succeeded else "failed",
+            )
+
+
 def main() -> int:
     args = parse_args()
     if args.timeout_seconds <= 0:
         raise SystemExit("--timeout-seconds must be positive")
     try:
         code, summary = asyncio.run(run_login(args))
+    except XhsAccountUnavailable as exc:
+        account_id = validate_account_id(args.account_id)
+        output_dir = ensure_dir(XHS_LOGIN_OUTPUT / utc_stamp())
+        summary = {
+            "status": "blocked",
+            "account_id": account_id,
+            "error": exc.reason,
+            "wait_seconds": exc.wait_seconds,
+            "finished_at": utc_iso(),
+        }
+        summary_path = output_dir / "summary.json"
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        summary["summary"] = str(summary_path)
+        code = 2
     except Exception as exc:
         account_id = validate_account_id(args.account_id)
         error = f"xhs_login_runtime_failed:{type(exc).__name__}:{exc}"

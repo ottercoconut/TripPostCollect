@@ -4,15 +4,16 @@
 [`formal-crawl-contract.md`](../formal-crawl-contract.md)，当前数值只从 `config/xhs_targets.json`
 和 `config/xhs_pool.json` 读取，不在文档中复制。
 
-> 临时运行约束（2026-07-20）：小红书独立 workflow 已解冻，B站、微博、抖音和知乎在
-> `config/crawl_targets.json` 中冻结。小红书仍不使用 `enabled` 开关，只允许操作人显式执行
-> 本文入口。当前“青岛自由行”使用独立耗尽扫描目标：有效新增目标和候选硬上限设为同一高位
-> 安全边界；若先触及边界而来源仍有后续，必须保留账号级记忆、提高边界并续跑，不能据此宣称
-> 来源耗尽。具体预算只读取 `config/xhs_targets.json` 和 `config/xhs_pool.json`。
+> B站、微博、抖音、知乎和小红书五个平台默认均可运行。小红书因账号隔离由操作人显式执行本文
+> 独立 runner，配置 schema v2 不设 `enabled` 字段；这是入口架构，不是特殊启停策略。正常运行仍
+> 受 `config/xhs_targets.json` 和 `config/xhs_pool.json` 的数量边界约束。只有用户明确要求某一轮
+> 直到来源耗尽时，才临时传 `--completion-mode source-exhausted`，不修改永久配置。
 
 ## 硬边界
 
 - 正式抓取只运行 `scripts/xhs_runner.py`。
+- 完成模式服从正式契约：正常默认使用 `target-new-posts`；只有用户明确要求某一轮直到来源耗尽时，
+  才在该轮命令临时使用 `source-exhausted`，不修改长期配置。
 - 小红书的会话预算、请求节奏、验证和失败恢复由独立 runner 与 `xhs_guarded` 管理，不读写通用
   `scrapling_throttle.json` 冷却；发现旧 XHS 通用策略状态时由正式入口删除。
 - 账号登记和人工状态变更只运行 `scripts/xhs_accounts.py`；登录只运行 `scripts/xhs_login.py`。
@@ -29,7 +30,7 @@
 ```text
 检查配置和账号
   -> 必要时登记账号
-  -> 人工登录并完成关闭/重开复验
+  -> 在账号互斥租约内人工登录并完成关闭/重开复验
   -> dry-run 冻结计划
   -> 人工确认本轮账号、目标、数量和互动副作用
   -> 正式运行并申请单账号互斥租约
@@ -38,7 +39,7 @@
   -> 已知 ID 详情前去重、自适应搜索、详情、作者粉丝补全和分页
   -> 正式字段校验
   -> child 摘要形成后提交账号级 checkpoint 和未完成累计摘要
-  -> 累计达到有效新增目标后一次性写入 SQLite 并清空累计摘要
+  -> 默认累计达到有效新增目标，或本轮显式来源耗尽后，一次性写入 SQLite 并清空累计摘要
   -> 加密最新 storage state、删除临时明文、释放租约
   -> 检查顶层摘要、child summary、冻结状态和 SQLite
 ```
@@ -94,8 +95,10 @@ python scripts/xhs_login.py \
 4. 重开后仍识别为同一身份；
 5. 将快照以 AES-GCM 写入该账号的 `storage_state.enc`，账号状态变为 `active`。
 
-登录与关闭/重开复验期间只保留一个浏览器标签页，并复用 profile 中已有页面；登录成功后，
-正式抓取可按既有策略打开页面，但新打开页面仍受本页定义的无条件 30 秒保护期约束。
+`xhs_login.py` 在打开浏览器前申请与正式抓取相同的账号租约，登录与关闭/重开复验结束后在
+`finally` 路径释放。账号已有活动租约时登录返回 `blocked`，不得把忙碌误写为 `login_required`。
+登录工具只保留一个浏览器标签页并复用 profile 中已有页面；它的目的仅是完成登录和持久化复验，
+不安装正式抓取的新标签页守卫。正式抓取开始后才按下一节执行统一的 30 秒保护规则。
 
 同一平台身份不能登记到两个槽位。`retired` 账号不能重新登录；`quarantine` 账号只有人工
 复验后才能执行 `activate`。不要用正式抓取顺便完成登录。
@@ -165,13 +168,13 @@ python scripts/xhs_runner.py \
 
 ## 5. 抓取中的固定行为
 
-- BrowserContext 必须监听所有新标签页。守卫安装后出现的页面无论由平台自行弹出，还是由 crawler
-  通过受控 `new_page` 为作者主页回退、互动或登录辅助而创建，一律立即置前，并从页面出现时起至少
-  保留 30 秒；不得依赖验证码文案识别结果。滚动无位移、正常返回、异常分支、登录页归一化、单页
-  清理、Playwright 退出和最终 BrowserContext/CDP 清理都必须等待该保护期，禁止直接 `page.close()`
-  或绕过 crawler 的安全关闭入口。浏览器启动时保留的首个主页面可以豁免；启动时已经存在的额外页
-  仍必须保护。其他路径明确识别出的登录、扫码或验证码页继续按本节既有规则最多等待 600 秒，不能
-  用 30 秒最低保护期替代人工验证等待。
+- 正式抓取 BrowserContext 必须监听所有新标签页。守卫安装后出现的页面无论由平台自行弹出，还是
+  由 crawler 为作者主页回退、互动或验证辅助而创建，一律立即置前，并从页面出现时起至少保留
+  30 秒；不得依赖验证码文案识别结果、滚动位移或创建来源。正常返回、异常分支、Playwright 退出
+  和最终 BrowserContext/CDP 清理都必须等待该保护期，禁止直接 `page.close()` 或绕过 crawler 的
+  安全关闭入口。浏览器启动时保留的首个主页面可以豁免；启动时已经存在的额外页仍必须保护。
+  其他路径明确识别出的登录、扫码或验证码页继续按本节既有规则最多等待 600 秒，不能用 30 秒
+  最低保护期替代人工验证等待。独立登录工具不在此 BrowserContext 守卫范围内。
 - `xhs_guarded` 在真实关键词页检查可见阻断；长停留期间每 5 秒复查一次可见页面。行为开始前
   发现登录要求时按启动失败留证，由同一账号执行 `xhs_login.py` 后开始新轮次；行为开始后，
   搜索批次间的连续性检查发现可见登录要求或图片验证时，保持当前标签页并置前，最多等待人工
@@ -208,9 +211,11 @@ python scripts/xhs_runner.py \
 - 首轮自适应搜索为关键词生成一个 `search_id` 并递增 `page`。后续正式轮先用新 `search_id`
   刷新最多 `top_refresh_max_pages` 个顶部页面，再用 checkpoint 保存的 `page + search_id` 恢复
   深层前沿；深层来源已耗尽时只刷新顶部。
-- 实际候选量从 0 开始按页增长，只有完成详情前去重的未知候选才占预算；达到
-  `target_new_posts` 后立即停止，不会为了 `candidate_hard_limit` 继续抓满。候选硬上限、停滞批次、
-  顶部刷新和超时共同构成单次运行的安全边界；提高正式目标时必须同步核对这些配置以及
+- 实际候选量从 0 开始按页增长，只有完成详情前去重的未知候选才占预算。默认
+  `target-new-posts` 模式达到 `target_new_posts` 后立即停止，不会为了 `candidate_hard_limit` 继续抓满；
+  候选硬上限、停滞批次、顶部刷新和超时共同构成单次运行的安全边界。显式
+  `source-exhausted` 模式只对当前进程生效，忽略数量和停滞停止条件，直到平台给出来源耗尽证据或
+  发生运行阻断。永久提高正式目标时必须同步核对这些配置以及
   `lease_seconds >= timeout_seconds + 300`，但不得清空原账号的 checkpoint 或候选记忆。
 - 搜索卡片 ID 在笔记详情、作者粉丝和媒体处理前与数据库、账号级已处理候选、累计摘要及本轮
   已见集合去重；已知 ID 不占 `candidate_hard_limit`。视频或字段无效候选也在 child 摘要形成后
@@ -222,7 +227,7 @@ python scripts/xhs_runner.py \
 
 ## 6. 完成判据
 
-只在以下条件全部成立时汇报完成：
+所有模式都先满足以下共同条件：
 
 - 顶层 `run_summary.json` 状态为 `completed`，且账号租约已经释放；
 - 冻结状态的五个阶段全部为 `completed`，`persistence_verified` 不得因 `--no-import` 跳过；
@@ -230,13 +235,19 @@ python scripts/xhs_runner.py \
 - 顶层摘要 `discovery.skipped=false` 且没有 checkpoint 写入错误；
 - `behavior_validation.platforms.xhs.continuity_ok=true`，且至少覆盖 `search_results`；
 - `formal_validation.behavior_evidence_ok=true`、`policy_evidence_ok=true`；
-- `formal_validation.new_target_met=true`；
-- `valid_new_count >= target_new_posts`；
-- `import_result.inserted_rows >= target_new_posts`，`import_new_target_met=true`；
 - `valid_existing_count` 和 `updated_rows` 只单独报告，没有计入新增目标；
 - 每条入库图文都有平台原始发布时间、作者 ID/昵称、完整图片关系，以及
   `followers_count`、`followers_observed=true`、`author_followers_source=creator_profile`；
 - 视频只出现在跳过计数中；帖子互动结果单独报告，不冒充抓取成功。
+
+完成门禁再按本轮模式二选一：
+
+- 默认 `target-new-posts`：`formal_validation.new_target_met=true`、
+  `valid_new_count >= target_new_posts`、`import_result.inserted_rows >= target_new_posts` 且
+  `import_new_target_met=true`。
+- 显式 `source-exhausted`：`formal_validation.source_exhausted_met=true`，停止原因为
+  `source_exhausted`，并完成真实入库；新增数可以低于配置目标甚至为 0，此时
+  `new_target_met` / `import_new_target_met` 不作为门禁。
 
 检查顺序固定为：
 
@@ -259,9 +270,9 @@ python scripts/xhs_runner.py \
 | `browser_launch_failed` / `runtime_permission_error` | 运行环境失败 | 按运行手册修复 Chrome、HOME、Crashpad 或权限，再重新 dry-run |
 | `browser_target_closed` | 页面、context 或浏览器在启动成功后关闭 | 核对是否人工关闭或浏览器崩溃，不自动重试 |
 | 缺粉丝数值、来源或观测标记 | 字段补全失败 | 检查作者补全是否启用、是否逐条调用、无 token 请求和浏览器回退；禁止放宽 profile |
-| `candidate_hard_limit_reached` | 未达到正式目标 | 本轮失败但保留累计摘要和安全前沿；下轮同账号自动续跑，必要时再调整单轮候选预算 |
-| `stagnated` | 连续批次无新增有效记录 | 检查无效原因和分页证据；不能把新无效候选解释为进展 |
-| `source_exhausted` | 深层来源明确耗尽但未完成 | 只有深层阶段空响应或 `has_more=false` 证据才接受；checkpoint 保留，下一轮只刷新顶部 |
+| `candidate_hard_limit_reached` | 默认数量模式未达到正式目标 | 本轮失败但保留累计摘要和安全前沿；下轮同账号自动续跑，必要时再调整单轮候选预算 |
+| `stagnated` | 默认数量模式连续批次无新增有效记录 | 检查无效原因和分页证据；不能把新无效候选解释为进展 |
+| `source_exhausted` | 默认数量模式未达目标；显式来源耗尽模式可完成 | 只有深层阶段空响应或 `has_more=false` 且 `source_exhausted_met=true` 才接受；checkpoint 保留，下一轮只刷新顶部 |
 | 超时或缺少停止事件 | `runtime_failed` | 读取 child summary 和日志尾部；不能推断为来源耗尽 |
 | 保存的 `search_id` 恢复请求失败 | `runtime_failed` | checkpoint 保持原位置；保留失败证据，不自动换新 ID 猜测深页，不删除 checkpoint |
 | checkpoint 累计摘要或 JSONL 缺失 | 冻结前失败 | 从原运行产物恢复文件或停止；不得清空路径后继续 |
@@ -269,9 +280,10 @@ python scripts/xhs_runner.py \
 
 小红书不向操作人开放手工 `--resume-summary`、`--start-page` 或 `--start-cursor`；正常续跑全部由
 `xhs_runner.py` 从 SQLite 生成。失败轮次不导入部分有效记录，但 child 摘要存在且分页证据完整时，
-Runner 会提交安全前沿并保存累计摘要；下轮同一账号把历史与本轮 JSONL 合并校验，达到完整
-`target_new_posts` 后才一次性入库。`candidate_hard_limit` 是每次 child 的未知候选预算，不从历史
-累计数扣减。`--no-import` 不写 checkpoint，也不能作为正式完成证据。
+Runner 会提交安全前沿并保存累计摘要；默认数量模式下，下轮同一账号把历史与本轮 JSONL 合并
+校验，达到完整 `target_new_posts` 后才一次性入库。显式来源耗尽模式在取得完整耗尽证据后入库，
+不等待数量目标。`candidate_hard_limit` 是正常模式每次 child 的未知候选预算，不从历史累计数扣减。
+`--no-import` 不写 checkpoint，也不能作为正式完成证据。
 
 若 `target_new_met` 在页面中途触发并成功入库，checkpoint 仍保留当前 page/search ID，
 `last_batch_complete=false`；来源未耗尽时 `status=active`。成功入库会清空

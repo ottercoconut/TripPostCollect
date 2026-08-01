@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import base64
 import json
@@ -241,6 +242,98 @@ def test_account_lease_requires_explicit_account_and_only_blocks_same_account(
         accounts.release_account_lease(conn, account_id="xhs-a02", run_id="run-2", outcome="failed")
         assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
         assert accounts.get_account(conn, "xhs-a02")["status"] == "active"
+
+
+def test_login_lease_and_crawl_lease_are_mutually_exclusive(tmp_path: Path) -> None:
+    with open_db(tmp_path) as conn:
+        accounts.enroll_account(conn, "xhs-a01")
+        accounts.mark_account_verified(conn, "xhs-a01", "identity-1")
+        login_lease = accounts.acquire_account_login_lease(
+            conn,
+            run_id="login-1",
+            requested_account_id="xhs-a01",
+            lease_seconds=900,
+            now=datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc),
+        )
+        assert login_lease["account_id"] == "xhs-a01"
+        with pytest.raises(XhsAccountUnavailable, match="busy"):
+            accounts.acquire_account_lease(
+                conn,
+                run_id="crawl-1",
+                pool_config=pool_config(),
+                requested_account_id="xhs-a01",
+                now=datetime(2026, 7, 14, 0, 1, tzinfo=timezone.utc),
+            )
+        accounts.release_account_lease(conn, account_id="xhs-a01", run_id="login-1", outcome="completed")
+        crawl_lease = accounts.acquire_account_lease(
+            conn,
+            run_id="crawl-2",
+            pool_config=pool_config(),
+            requested_account_id="xhs-a01",
+            now=datetime(2026, 7, 14, 0, 2, tzinfo=timezone.utc),
+        )
+        assert crawl_lease["account_id"] == "xhs-a01"
+        with pytest.raises(XhsAccountUnavailable, match="busy"):
+            accounts.acquire_account_login_lease(
+                conn,
+                run_id="login-2",
+                requested_account_id="xhs-a01",
+                lease_seconds=900,
+                now=datetime(2026, 7, 14, 0, 3, tzinfo=timezone.utc),
+            )
+        accounts.release_account_lease(conn, account_id="xhs-a01", run_id="crawl-2", outcome="completed")
+
+
+def test_login_lease_accepts_login_pending_account(tmp_path: Path) -> None:
+    with open_db(tmp_path) as conn:
+        accounts.enroll_account(conn, "xhs-a01")
+        lease = accounts.acquire_account_login_lease(
+            conn,
+            run_id="login-pending",
+            requested_account_id="xhs-a01",
+            lease_seconds=600,
+            now=datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc),
+        )
+
+        assert lease["status"] == "login_pending"
+        assert conn.execute(
+            "SELECT event_type FROM xhs_account_events WHERE run_id=?",
+            ("login-pending",),
+        ).fetchone()["event_type"] == "login_lease_acquired"
+
+
+def test_busy_login_returns_blocked_without_changing_account_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "pool.sqlite"
+    with open_db(tmp_path) as conn:
+        accounts.enroll_account(conn, "xhs-a01")
+        accounts.mark_account_verified(conn, "xhs-a01", "identity-1")
+        accounts.acquire_account_lease(
+            conn,
+            run_id="active-crawl",
+            pool_config=pool_config(lease_seconds=3600),
+            requested_account_id="xhs-a01",
+            now=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(
+        xhs_login,
+        "parse_args",
+        lambda: argparse.Namespace(
+            account_id="xhs-a01",
+            db=str(db_path),
+            timeout_seconds=600,
+            browser_path=None,
+        ),
+    )
+    monkeypatch.setattr(xhs_login, "XHS_LOGIN_OUTPUT", tmp_path / "login-output")
+
+    assert xhs_login.main() == 2
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
 
 
 def test_xhs_dry_run_account_preflight_rejects_active_lease(tmp_path: Path) -> None:

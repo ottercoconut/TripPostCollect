@@ -100,9 +100,10 @@ checkpoint。摘要或其 JSONL 缺失时冻结失败，不能静默丢弃活动
 - 页面级错误页、搜索页、中间页和验证码页只保留证据，不生成用户内容记录。
 - `web_posts` 面向用户查询；`ctf_captures` 面向证据和调试。不要让用户内容只停留在 `ctf_captures`。
 - 正式结构化任务必须配置 `candidate_hard_limit`、`target_new_posts`、`top_refresh_max_pages` 和字段
-  profile；候选上限是每次 child 的未知候选安全预算，实际候选从 0 按需增长，达到新增目标后
-  立即停止，不要求抓满上限。只有跨次累计的
-  `valid_new_count >= target_new_posts` 且实际新增行数达标才算达到完整目标。
+  profile；正常默认模式中，候选上限是每次 child 的未知候选安全预算，实际候选从 0 按需增长，
+  达到新增目标后立即停止，不要求抓满上限。只有跨次累计的 `valid_new_count >= target_new_posts`
+  且实际新增行数达标才算达到数量目标。用户显式要求的单轮 `source-exhausted` 模式不改这些配置，
+  只把可验证来源耗尽作为该轮替代完成门禁。
 - 固定 URL 页面证据任务只代表一个页面。以后若新增正式任务，必须在
   `config/crawl_targets.json` 声明 `job_kind=ctf_resource_crawl` 并从 `crawl_runner.py` 进入。
 
@@ -155,9 +156,11 @@ python scripts/import_ctf_captures.py \
 一次抓取或导入不能只看命令退出码。先按入口判断，不能混用完成语义：
 
 - 通用正式结构化任务必须有 `summary.json`，runner 任务状态为 `completed`，冻结状态五阶段
-  全部完成，且 `formal_validation.new_target_met=true`、`import_new_target_met=true`。
+  全部完成；默认数量模式要求 `formal_validation.new_target_met=true`、
+  `import_new_target_met=true`，显式来源耗尽模式改为要求
+  `formal_validation.source_exhausted_met=true` 并完成真实入库。
 - 小红书正式任务必须有顶层 `run_summary.json` 和 child `summary.json`，顶层任务状态为
-  `completed`，冻结状态五阶段全部完成，且 child 的正式校验与实际新增均达到配置目标。
+  `completed`，冻结状态五阶段全部完成；完成门禁同样按本轮默认数量模式或显式来源耗尽模式判断。
 - 任意入口的 `--no-import` 和直接运行 `ctf_resource_crawl.py` 都是诊断或开发验证。即使退出码
   为 0、摘要或冻结状态显示 `completed`、产物完整，也不能汇报为正式轮次完成；正式完成必须
   直接核对 `import_result.inserted_rows`，不能只看 `import_new_target_met`。

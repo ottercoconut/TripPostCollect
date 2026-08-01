@@ -4,8 +4,8 @@
 
 通用平台正式任务只从调度器开始；小红书使用本手册后文的独立 runner：
 
-当前临时平台范围只解冻小红书；`config/crawl_targets.json` 中所有通用任务均已冻结。
-解除该约束前，不运行本节的通用 warmup、dry-run 或正式命令；小红书按后文独立账号流程执行。
+B站、微博、抖音、知乎和小红书五个平台默认均可运行。通用 runner 只选择
+`config/crawl_targets.json` 中现存且 `enabled=true` 的 job；小红书按后文独立账号流程显式执行。
 
 ```bash
 source .venv/bin/activate
@@ -41,6 +41,11 @@ dry-run 的预期状态是仅 `plan_frozen=completed`，`command_executed`、
 `enabled=1`、状态为 `pending/completed/retry_wait` 且 `next_run_at` 已到期的任务，按
 `priority`、`next_run_at`、数据库 ID 排序后取 `--max-jobs`；指定 `--job-key` 时不要求到期，但
 该任务仍必须启用。实际选中集合始终以本轮 dry-run 摘要为准。
+
+不传 `--completion-mode` 时使用正常默认的 `target-new-posts` 数量模式。只有用户明确要求某一轮
+“直到来源耗尽”时，才给该轮 dry-run 与正式命令同时追加
+`--completion-mode source-exhausted`。这是进程级临时参数，不修改 `target_new_posts`、
+`candidate_hard_limit`、`max_stagnant_batches` 或后续轮次的默认设置。
 
 dry-run 的 `crawl_run_reports.status=completed` 只表示 runner 成功生成并保存计划报告，不表示
 任何正式任务抓取完成；任务记录仍应为 `planned`、`completed_count=0`，并满足上面的冻结阶段
@@ -153,13 +158,15 @@ checkpoint 时应含保存页码和顶部刷新参数。只有 checkpoint 的 `l
 `pagination_evidence`、`discovery_checkpoint` 与 SQLite 行；SQLite 的 `last_run_id` 必须等于
 本次运行 ID。未达到目标但前沿推进时，任务仍不是正式完成，不过连续失败会清零，下一次按
 正常 `schedule_seconds` 调度，而不是立即反复抓顶部。
-因此，明确要求无人值守“持续到来源耗尽”的一次性任务，必须在其独立 one-off 配置中把
-`schedule_seconds` 设为经批准的恢复间隔；不能沿用用于防止重复运行的年度占位值。任务一旦进入
-`completed`，runner 不会因这个较短间隔再次执行。长期冻结配置不随 one-off 任务改动。
+明确要求某一轮“持续到来源耗尽”时，不使用超大数量或调度间隔模拟无限抓取；应在独立 one-off
+配置或明确 job 上，给 dry-run 与正式运行传同一个 `--completion-mode source-exhausted`。模式只对
+该次进程生效，长期配置仍保留正常数量限制。`schedule_seconds` 只决定启用 job 何时再次到期：
+状态为 `completed` 的周期任务到期后仍可再次被选择，不能把调度间隔当作一次性完成门禁。
 checkpoint 记录了非空 `last_summary_path` 但文件丢失时，runner 必须在冻结前报错；不得静默
 丢弃历史成果并推进游标。
 
-累计摘要保存各次 JSONL，只有合并后的 `valid_new_count` 达到完整目标才一次性入库。
+默认数量模式的累计摘要保存各次 JSONL，只有合并后的 `valid_new_count` 达到完整目标才一次性入库；
+显式来源耗尽模式则在取得可验证的 `source_exhausted` 停止证据后入库，即使新增数低于配置目标。
 `candidate_hard_limit` 是每次 child 的未知候选预算，每次续跑重新获得完整预算；历史累计候选
 只用于报告，不从本次预算扣减。`source_exhausted` 后不再请求原耗尽深页。抖音顶部刷新若取得
 不在数据库、累计摘要或持久候选集合中的新候选 ID，且最后一页同时返回 `has_more=true` 和非空下一 search ID，会从刷新链下一页建立
@@ -289,8 +296,9 @@ python scripts/xhs_login.py \
   --timeout-seconds 600
 ```
 
-`xhs_login.py` 只负责人工登录和关闭/重开复验，不抓取内容。正式运行前查看账号状态，并用
-同一个账号、目标和互动参数冻结计划：
+`xhs_login.py` 只负责人工登录和关闭/重开复验，不抓取内容。它在打开浏览器前申请与正式抓取相同
+的账号租约，整个登录与复验期间持有，并在结束时释放；账号忙时只返回 `blocked`，不改变账号登录
+状态。正式运行前查看账号状态，并用同一个账号、目标和互动参数冻结计划：
 
 ```bash
 source .venv/bin/activate
@@ -324,11 +332,12 @@ child 的未知候选安全上限。永久提高检索目标时只修改 `config
 600 秒，通过后继续；等待状态写入 `behavior_evidence.operator_verification_events`。系统不自动
 点击、识别或绕过验证。搜索 API 返回 461/471 时，使用响应中的 `Verifyuuid`、`Verifytype` 和
 状态码打开平台 `/website-login/captcha` 人工验证页；通过后刷新同一会话 Cookie 并重试原请求。
-除这些已识别验证路径外，BrowserContext 中任何由平台自行弹出的未知新标签页也必须立即置前并
-无条件保留至少 30 秒。该门禁不依赖页面文本或验证码识别，登录页整理、异常退出、Playwright
-退出以及最终 BrowserContext/CDP 清理都必须先等待保护期；crawler 主动创建的互动页和作者页通过
-受控入口标记，不误算为平台弹窗。其他路径已经明确识别出的验证页仍执行原有 600 秒人工等待，
-不得用未知弹窗的 30 秒最低保护期缩短。
+正式抓取 BrowserContext 的守卫安装后，任何新标签页都必须立即置前并无条件保留至少 30 秒，
+无论它由平台弹出，还是 crawler 为互动、作者主页回退或验证辅助而创建。门禁不依赖页面文本、
+验证码识别、滚动是否有位移或创建来源；异常退出、Playwright 退出以及最终 BrowserContext/CDP
+清理也必须先等待保护期。浏览器启动时保留的首个主页面可以豁免，启动时已经存在的额外页仍受
+保护。其他路径明确识别出的验证页继续执行原有 600 秒人工等待，不得用 30 秒最低保护期缩短。
+独立 `xhs_login.py` 是单页登录/复验工具，不安装正式抓取的新标签页守卫。
 频控、拒绝访问或环境异常仍立即停止请求并等待操作人决定；不得自动
 重试或在同一正式轮次中途换号。
 
@@ -363,8 +372,8 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 主版本必须一致。抓取中若等待人工登录或图片验证，证据还必须包含
 `operator_verification_events`；只有对应事件为 `completed` 且后续连续性事件完成，才能恢复
 正式抓取。
-排查“弹窗被关闭”时还要核对 child 日志中的 `Unexpected browser tab opened` 和
-`Unexpected-tab minimum hold completed`：两者之间必须至少覆盖 30 秒，且浏览器上下文关闭不得早于
+排查“弹窗被关闭”时还要核对 child 日志中的 `New browser tab opened` 和
+`New-tab minimum hold completed`：两者之间必须至少覆盖 30 秒，且浏览器上下文关闭不得早于
 后者。不要以日志中没有识别到验证码文本为理由跳过保护期。
 失败轮次只要 child summary 已生成，Runner 顶层仍必须读取其中的行为与帖子互动证据；退出码
 失败不能把已发生的互动错误汇总为空。
@@ -394,11 +403,13 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 正式结构化任务至少检查：
 
 - 状态文件最终为 `completed`，且真实正式入库运行的五个阶段全部为 `completed`；
-- `formal_validation.new_target_met=true`；
+- 默认 `target-new-posts` 模式要求 `formal_validation.new_target_met=true`；显式
+  `source-exhausted` 模式改为要求 `formal_validation.source_exhausted_met=true`；
 - `behavior_validation.ok=true`，且行为与策略平台列表覆盖本轮全部结构化平台；
 - 每个平台 `behavior_validation.platforms.<platform>.target_url_ok=true`，证据 URL 对应本轮关键词；
 - `formal_validation.behavior_evidence_ok=true`、`policy_evidence_ok=true`；
-- `valid_new_count` 和 `inserted_rows` 都达到 `target_new_posts`；
+- 默认数量模式要求 `valid_new_count` 和 `inserted_rows` 都达到 `target_new_posts`；来源耗尽模式
+  允许低于目标，但必须真实执行持久化并报告实际计数；
 - `valid_existing_count` / `updated_rows` 单独报告且不计入新增目标；
 - `import_result.processed_rows`、`inserted_rows`、`updated_rows` 分别存在；
 - 命令未使用 `--no-import`，`persistence_verified` 没有以 `skipped` 代替真实入库；

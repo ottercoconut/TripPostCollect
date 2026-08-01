@@ -4,6 +4,8 @@
   证据 URL 不含本轮关键词，或行为与请求策略证据缺失时，不得入库。
 
 - 正式入口：`crawl_runner.py` 调用 MediaCrawler 知乎搜索。
+- 完成模式服从正式契约：正常默认使用 `target-new-posts`；只有用户明确要求某一轮直到来源耗尽时，
+  才在该轮命令临时使用 `source-exhausted`，不修改长期配置。
 - 登录态：必须存在经重开验证的 `d_c0/z_c0` cookie snapshot。
 - 内容类型：answer 和 article；zvideo 跳过。
 - 粉丝来源：搜索响应 author/member 的 `follower_count`，同时保存
@@ -19,7 +21,8 @@
 - 去重键：内容 ID；answer URL 同时包含 question ID。
 - 有 checkpoint 时先刷新配置的顶部页，再从保存页码继续。已知内容 ID 不再写入当前 JSONL；
   完整页保存下一页，页面中途停止保存当前页，顶部刷新不推进深层 checkpoint。
-- 未达标摘要由 runner 自动累计，达到完整目标后一次性入库；正常 workflow 不使用人工
+- 默认数量模式的未达标摘要由 runner 自动累计，达到完整目标后一次性入库；显式来源耗尽模式在
+  取得可验证耗尽证据后入库。正常 workflow 不使用人工
   `--start-page` 或 `--resume-summary`。
 - 对一组已知 answer/article URL 重新核验详情时，使用根项目执行器的
   `--zhihu-detail-urls-file <JSON数组文件> --no-import` 诊断模式；该模式串行复用同一详情并发门禁，

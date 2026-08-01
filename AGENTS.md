@@ -15,15 +15,19 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 
 ## 全局边界
 
-- 临时运行约束（2026-07-19）：暂时不抓取小红书。保留其账号、配置、checkpoint 和候选记忆；
-  解除该约束前，不得运行小红书登录或正式抓取命令，也不得通过通用流程绕过暂停。
+- B站、微博、抖音、知乎和小红书五个正式结构化搜索平台默认均可运行。通用任务是否进入调度只由
+  `config/crawl_targets.json` 中现存 job 的 `enabled` 与到期状态决定；小红书由操作人显式运行独立
+  runner。入口不同是账号隔离架构，不代表平台被特殊启用、暂停或降级。
 - 只采集图文内容、作者可见信息、图片 URL/样本和页面证据；视频目标、视频媒体请求和明确视频记录跳过，不作为失败。
 - `web_posts` 是用户使用的统一内容主表；`ctf_captures` 是程序和智能代理（Agent）使用的证据/调试底座。
 - `published_at` 必须来自平台原始发帖时间，入库保存为 Asia/Shanghai ISO；不要用抓取时间冒充发帖时间。
 - 通用正式任务从 `scripts/crawl_runner.py` 进入；小红书只从 `scripts/xhs_runner.py` 进入，禁止放回通用 job 或登录流程。
 - 小红书配置使用 schema v2，不再有 pool/target `enabled` 开关；显式 `xhs_runner.py` 命令是唯一启动动作，不为每轮修改或恢复配置开关，旧字段直接视为配置错误。
 - 通用状态写入 `data/runtime/crawl_execution_states/`；小红书状态写入 `data/runtime/xhs/execution_states/`。进入下一阶段前重新读取状态并确认上一阶段完成，不得手工解冻或补签。
-- 正式结构化抓取以 `candidate_hard_limit`、`target_new_posts` 和 `required_fields_profile` 为准；数据库已有记录只算更新，未达到 `valid_new_count` 新增目标不得汇报完成。
+- 正常正式抓取默认使用 `target-new-posts` 完成模式，以 `candidate_hard_limit`、
+  `target_new_posts` 和 `required_fields_profile` 为准；数据库已有记录只算更新，未达到
+  `valid_new_count` 新增目标不得汇报完成。`source-exhausted` 只能由用户针对某一轮显式要求，
+  是不写回配置的临时完成模式；dry-run 与正式命令必须使用相同的 `--completion-mode`。
 - `candidate_hard_limit` 是未知候选的安全上限，不是预定抓取量；实际候选从 0 按页增长并在达到
   `target_new_posts` 时立即停止。永久提高小红书目标时必须同步核对候选上限、停滞批次、顶部刷新、
   超时与账号租约，并用独立 dry-run 冻结验证。
@@ -104,7 +108,8 @@ python scripts/crawl_runner.py \
 - Python 行为改动运行 `python -m pytest`；静态检查按需运行 `python -m ruff check <touched files>`。
 - JSON 配置改动后先 `source .venv/bin/activate`，再运行 `python -m json.tool <file> >/dev/null`。
 - 调度改动至少做 `--dry-run` 试运行或小范围运行验证。
-- 正式结构化任务未达目标时必须检查页级状态；没有 `adaptive_search_stopped` 证据不得写成
-  `source_exhausted`，应按 `runtime_failed` 继续排查。
+- 默认 `target-new-posts` 模式未达目标时必须检查页级状态；即使来源耗尽也不能汇报数量目标完成。
+  显式 `source-exhausted` 模式只有在 `source_exhausted_met=true` 且存在对应
+  `adaptive_search_stopped` 证据时才完成；没有停止证据仍按 `runtime_failed` 继续排查。
 - 入库或数据库结构改动使用临时 SQLite 验证，并用 SQL 检查行数和关键字段。
 - 最终说明变更文件、验证命令和关键产物路径；不要粘贴大段日志或原始 JSON。

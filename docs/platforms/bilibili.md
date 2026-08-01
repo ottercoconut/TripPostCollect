@@ -1,6 +1,8 @@
 # B站 article
 
 - 正式入口：`crawl_runner.py` 调用 `mediacrawler_crawl.py --platforms bilibili`。
+- 完成模式服从正式契约：正常默认使用 `target-new-posts`；只有用户明确要求某一轮直到来源耗尽时，
+  才在该轮命令临时使用 `source-exhausted`，不修改长期配置。
 - 内容来源：B站 article 搜索；不使用视频搜索。
 - 粉丝来源：按 article 的作者 `mid` 调用作者关系统计接口，保存数值、
   `followers_observed` 和 `author_followers_source=relation_stat`。
@@ -18,7 +20,8 @@
   单次未知候选预算。
 - 每个完整深层页保存下一页；达到目标或候选上限时若页面尚未处理完，保存当前页，下一次允许
   重取并靠已知 ID 跳过已持久化边界。空页保存 `status=exhausted`，后续只刷新顶部。
-- 未达标产物不单独入库；runner 自动拼接摘要，累计达到完整目标后一次性导入。人工
+- 默认数量模式的未达标产物不单独入库；runner 自动拼接摘要，累计达到完整目标后一次性导入。
+  显式来源耗尽模式在取得可验证耗尽证据后入库。人工
   `--resume-summary` 或 `--start-page` 不是正常 workflow。
 - B站当前按页面是否出现成功归一化且数据库、累计摘要、`crawl_discovery_seen_candidates` 和本轮均未见的 article ID 累计停滞；
   这类未知 ID 即使后续正式字段校验无效，也会重置停滞页数。该平台例外不改变完成判据，判断是否

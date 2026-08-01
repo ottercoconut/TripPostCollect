@@ -15,7 +15,9 @@
   失败停止，不能跳过首页或猜测 cursor。
 
 - 正式入口：`crawl_runner.py` 调用 MediaCrawler 抖音搜索。
-- 当前正式数量只读取 `config/crawl_targets.json` 中该 job 的 `target_new_posts` 和
+- 完成模式服从正式契约：正常默认使用 `target-new-posts`；只有用户明确要求某一轮直到来源耗尽时，
+  才在该轮命令临时使用 `source-exhausted`，不修改长期配置。
+- 默认正式数量只读取 `config/crawl_targets.json` 中该 job 的 `target_new_posts` 和
   `candidate_hard_limit`：达到有效新增目标即提前停止，否则最多累计候选硬上限后结束本轮。
 - 只接受图文作品；视频作品计入跳过候选。
 - 粉丝来源：图文作者主页，搜索作者对象只在原始字段明确存在时作为来源。
@@ -23,7 +25,7 @@
 - 粉丝量为 0 只有 `followers_observed=true` 才有效；旧版可疑 0 不得通过校验。
 - 图片来源：图文作品的 note/image 列表。
 - 去重键：`aweme_id`。
-- 自适应循环持续分页，直到有效目标、候选硬上限、数据源耗尽或连续停滞。
+- 默认模式的自适应循环持续分页，直到有效目标、候选硬上限、数据源耗尽或连续停滞。
 - 搜索接口当前使用站内单列搜索契约：新鲜首页调用 `/general/search/stream/`，后续携带 search ID
   的分页调用 `/general/search/single/`。首页响应可能保留原始 HTTP chunk 边界，必须重组所有 chunk
   后再解析 JSON。两类请求均使用 `count=10`、`list_type=single`、
