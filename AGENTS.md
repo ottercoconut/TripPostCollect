@@ -43,6 +43,8 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 明确要求运行 Python 前必须 `source .venv/bin/activate`，激活后只用 `python`，不要用系统 `python` / `python3`。
 - 优先改现有脚本、配置或数据库结构；不要新增一次性探测脚本。
 - 不为已废弃的命令、字段、数据类型或文档保留兼容层；确认当前流程无调用后直接删除，历史需要从 Git 查询。
+- `config/frozen_files.json` 中登记的资产是用户确认的冻结快照。除非用户明确要求解冻对应文件，
+  不得修改资产正文或更新登记哈希；提交前运行 `python scripts/verify_frozen_files.py`。
 - 大型抓取产物优先看 `summary.json`、`summary.md`、`run_summary.json`、计数、字段列表、样本和标准输出/标准错误尾部摘要；不要全文展开 JSONL、HTML、过长 JSON 或截图元数据。
 - 输出包含 3 个及以上参数、长路径、JSON、环境变量或多个 `--xxx` 选项的命令时，必须用反斜杠 `\` 分行展示；每个参数或逻辑参数组单独一行，避免压缩成长单行。命令很短且参数简单时可以保持单行。
 - Python 测试使用 `pytest`，当前测试目录是 `tests/` 和 `apps/admin_api/tests/`；开发依赖通过 `python -m pip install -e '.[dev]'` 安装。
@@ -107,6 +109,8 @@ python scripts/crawl_runner.py \
 - Python 脚本改动后先 `source .venv/bin/activate`，再运行 `python -m py_compile <touched files>`。
 - Python 行为改动运行 `python -m pytest`；静态检查按需运行 `python -m ruff check <touched files>`。
 - JSON 配置改动后先 `source .venv/bin/activate`，再运行 `python -m json.tool <file> >/dev/null`。
+- 冻结资产：运行 `python scripts/verify_frozen_files.py`，确保正文与 `config/frozen_files.json` 的
+  SHA-256 基线一致。
 - 调度改动至少做 `--dry-run` 试运行或小范围运行验证。
 - 默认 `target-new-posts` 模式未达目标时必须检查页级状态；即使来源耗尽也不能汇报数量目标完成。
   显式 `source-exhausted` 模式只有在 `source_exhausted_met=true` 且存在对应

@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: verify-frozen-files
+        name: verify user-approved frozen files
+        entry: .venv/bin/python scripts/verify_frozen_files.py
+        language: system
+        pass_filenames: false
+        always_run: true

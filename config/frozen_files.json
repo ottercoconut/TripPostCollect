@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "path": "docs/admin-client-record-workbench-template.html",
+      "sha256": "6d751d0b2d7c57536b662b753cf6b4a8d28478a7cf019642b5a14e158783e5a0",
+      "reason": "用户确认冻结的 TripPostCollect 管理客户端工作台 v1 静态模板",
+      "change_policy": "explicit-user-unfreeze"
+    }
+  ]
+}
