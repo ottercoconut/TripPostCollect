@@ -1,9 +1,11 @@
 # B站 article
 
-> **修复过渡状态（2026-08-02）：** 已确认当前实现把 article 搜索结果的 `desc` 摘要写成
-> `content_text`，尚未满足本文件的详情正文契约。详情抓取、门禁和测试全部落地前，B站正式产物
-> 不得报告为完整正文，也不得用新的摘要记录扩大历史问题。事件证据见
-> [`2026-08-02-bilibili-article-completeness.md`](../incidents/2026-08-02-bilibili-article-completeness.md)。
+> **修复状态（2026-08-02）：** 新抓取路径已改为先发现 article ID，再取得详情正文和正文图片；
+> 130 项项目测试及 3 条真实 `--no-import` 小样通过。该结论只适用于修复后的新产物；默认库中
+> 既有 3,009 条摘要记录仍未回填，不得报告为完整正文。事件证据见
+> [`2026-08-02-bilibili-article-completeness.md`](../incidents/2026-08-02-bilibili-article-completeness.md)，
+> 全库回填步骤见
+> [`2026-08-02-bilibili-full-library-repair.md`](../plans/2026-08-02-bilibili-full-library-repair.md)。
 
 ## 入口与范围
 
@@ -24,6 +26,9 @@
 - 正文规范化保留段落换行；不得使用会把全部空白压成单行的摘要清洗方法处理完整正文。
 - 正文图片从详情响应或详情页正文结构提取并去重。搜索 `image_urls` 可作为预览来源留在原始证据，
   但不能作为“已经检查全部正文图片”的唯一证据。
+- 当前 Opus 详情优先使用 `opus.content.paragraphs[].pic.pics`；旧 article 优先解析详情正文 HTML，
+  仅在没有这些更明确的正文图片结构时才使用详情响应的 `origin_image_urls` / `image_urls`。这是因为
+  新 Opus 的同名字段可能只是封面，而旧 article 的同名字段才是正文图。
 - 详情成功必须保存 `content_detail_status=detail_observed` 和明确的详情来源；详情未请求、请求失败、
   限流或解析失败均不能进入正式有效集合。
 - 粉丝来源仍为作者 `mid` 的关系统计接口，保存数值、`followers_observed=true` 和

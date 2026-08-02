@@ -502,7 +502,9 @@ MediaCrawler 入库采用去重更新：
 
 回填属于历史数据修复，不兑现新抓取的 `target_new_posts`，也不改变任何来源耗尽结论。具体事故
 范围与阶段记录见
-[`incidents/2026-08-02-bilibili-article-completeness.md`](incidents/2026-08-02-bilibili-article-completeness.md)。
+[`incidents/2026-08-02-bilibili-article-completeness.md`](incidents/2026-08-02-bilibili-article-completeness.md)，
+执行顺序、检查点和验收门槛见
+[`plans/2026-08-02-bilibili-full-library-repair.md`](plans/2026-08-02-bilibili-full-library-repair.md)。
 
 ## 手工验证步骤
 

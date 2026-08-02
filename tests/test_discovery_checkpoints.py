@@ -704,7 +704,27 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
         follower_ids.append(creator_id)
         return 100
 
+    detail_ids: list[str] = []
+
+    def fetch_detail(post_id, cookie_header):
+        detail_ids.append(post_id)
+        return (
+            {
+                "title": "new detail title",
+                "content": "完整正文",
+                "image_urls": ["https://example.test/new-detail.jpg"],
+                "opus": {"content": {"paragraphs": []}},
+            },
+            1,
+            0.0,
+        )
+
     monkeypatch.setattr(mediacrawler_crawl, "fetch_bilibili_article_page", fetch_page)
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_article_detail_with_retry",
+        fetch_detail,
+    )
     monkeypatch.setattr(
         mediacrawler_crawl,
         "fetch_bilibili_follower_count",
@@ -731,6 +751,7 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
 
     assert result["ok"] is True
     assert requested_pages == [4]
+    assert detail_ids == ["new"]
     assert follower_ids == ["new-author-id"]
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]

@@ -8,6 +8,7 @@ import asyncio
 import html
 import json
 import os
+import random
 import re
 import signal
 import shlex
@@ -22,6 +23,7 @@ from hashlib import md5
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlencode, urlparse
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from playwright.async_api import async_playwright
@@ -65,14 +67,49 @@ DEFAULT_OUTPUT = MEDIACRAWLER_RUNS_OUTPUT
 COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
 XHS_OPERATOR_LOGIN_WAIT_SECONDS = 600
 BILIBILI_ARTICLE_SEARCH_URL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
+BILIBILI_ARTICLE_DETAIL_URL = "https://api.bilibili.com/x/article/view"
 BILIBILI_RELATION_STAT_URL = "https://api.bilibili.com/x/relation/stat"
 BILIBILI_ARTICLE_PAGE_SIZE = 20
+BILIBILI_DETAIL_MAX_ATTEMPTS = 3
+BILIBILI_DETAIL_RETRY_DELAY_SECONDS = (4.0, 7.0)
+BILIBILI_DETAIL_PACING_SECONDS = (1.5, 3.0)
+BILIBILI_DETAIL_RETRYABLE_CODES = frozenset({-509, -412, -352})
+BILIBILI_TRUSTED_DETAIL_SOURCES = frozenset({"article_view_api"})
+BILIBILI_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/138.0.0.0 Safari/537.36"
+)
+BILIBILI_HTML_IMAGE_RE = re.compile(
+    r"<(?:img|source)\b[^>]*?\b(?:src|data-src|data-original)\s*=\s*"
+    r"(?:[\"']([^\"']+)[\"']|([^\s>]+))",
+    re.I,
+)
 BILIBILI_WBI_MIXIN_TABLE = (
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
     33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
     61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
     36, 20, 34, 44, 52,
 )
+
+
+class BilibiliArticleDetailError(RuntimeError):
+    """A detail request that must not advance the Bilibili search frontier."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        code: int | None = None,
+        attempts: int = 1,
+        retry_wait_seconds: float = 0.0,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.code = code
+        self.attempts = attempts
+        self.retry_wait_seconds = retry_wait_seconds
 
 PLATFORMS: dict[str, dict[str, str]] = {
     "bilibili": {"mediacrawler": "bili", "label": "B站"},
@@ -1094,6 +1131,8 @@ def canonical_url_for_record(platform_key: str, record: dict[str, Any]) -> str |
 
 def content_text_for_record(platform_key: str, record: dict[str, Any]) -> str:
     title = str(first_value(record, "title") or "").strip()
+    if platform_key == "bilibili":
+        return str(first_value(record, "content_text", "content") or "")
     body = str(first_value(record, "content_text", "content", "desc") or "").strip()
     if platform_key in {"xhs", "zhihu"}:
         parts = [part for part in (title, body) if part]
@@ -1212,6 +1251,16 @@ def validate_formal_record(platform_key: str, record: dict[str, Any], seen: set[
         reasons.append("video_record")
     if not content_text_for_record(platform_key, record).strip():
         reasons.append("missing_content")
+    if platform_key == "bilibili":
+        detail_status = str(record.get("content_detail_status") or "")
+        detail_source = str(record.get("content_detail_source") or "")
+        image_detail_status = str(record.get("content_images_detail_status") or "")
+        if detail_status != "detail_observed":
+            reasons.append("content_detail_unobserved")
+        if detail_source not in BILIBILI_TRUSTED_DETAIL_SOURCES:
+            reasons.append("untrusted_content_detail_source")
+        if image_detail_status != "detail_observed":
+            reasons.append("content_images_detail_unobserved")
     if not published_at_for_record(record):
         reasons.append("missing_published_at")
     if not first_value(record, "user_id", "creator_id", "creator_hash", "author_id", "mid"):
@@ -1776,8 +1825,7 @@ def normalize_bilibili_article_record(item: dict[str, Any], keyword: str) -> dic
     if not title and not desc:
         return None
     content_url = str(item.get("arcurl") or item.get("url") or f"https://www.bilibili.com/read/cv{post_id}/")
-    image_urls = item.get("image_urls") if isinstance(item.get("image_urls"), list) else []
-    content_parts = [part for part in (title, desc) if part]
+    search_preview_urls = item.get("image_urls") if isinstance(item.get("image_urls"), list) else []
     record = dict(item)
     record.update(
         {
@@ -1786,9 +1834,16 @@ def normalize_bilibili_article_record(item: dict[str, Any], keyword: str) -> dic
             "content_type": "article",
             "title": title,
             "desc": desc,
-            "content_text": "\n".join(dict.fromkeys(content_parts)),
+            "search_desc": desc,
+            "search_excerpt_length": len(desc),
+            "search_preview_urls": search_preview_urls,
+            "search_preview_count": len(search_preview_urls),
+            "content_text": "",
+            "content_detail_status": "search_only",
+            "content_detail_source": "article_search_api",
+            "content_images_detail_status": "search_only",
             "content_url": content_url,
-            "image_urls": image_urls,
+            "image_urls": [],
             "source_keyword": keyword,
             "created_time": item.get("pubdate") or item.get("pub_time"),
             "published_at": item.get("pubdate") or item.get("pub_time"),
@@ -1801,6 +1856,240 @@ def normalize_bilibili_article_record(item: dict[str, Any], keyword: str) -> dic
         }
     )
     return record
+
+
+def clean_bilibili_article_body(value: Any) -> str:
+    """Normalize a detail body without flattening its paragraph boundaries."""
+
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</(?:p|div|li|blockquote|h[1-6]|section|article)\s*>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text).replace("\xa0", " ")
+    text = re.sub(r"[^\S\n]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def normalize_bilibili_detail_image_url(value: Any) -> str | None:
+    url = normalize_image_url(value)
+    if url and url.startswith("http://"):
+        return "https://" + url.removeprefix("http://")
+    return url
+
+
+def extract_bilibili_detail_images(detail: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Return only images observed in article detail, never search previews."""
+
+    images: list[str] = []
+    sources: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any, source: str) -> None:
+        url = normalize_bilibili_detail_image_url(value)
+        if not url or url in seen:
+            return
+        seen.add(url)
+        images.append(url)
+        sources.append(source)
+
+    opus = detail.get("opus") if isinstance(detail.get("opus"), dict) else {}
+    opus_content = opus.get("content") if isinstance(opus.get("content"), dict) else {}
+    paragraphs = opus_content.get("paragraphs") if isinstance(opus_content.get("paragraphs"), list) else []
+    for paragraph in paragraphs:
+        if not isinstance(paragraph, dict):
+            continue
+        pic = paragraph.get("pic") if isinstance(paragraph.get("pic"), dict) else {}
+        pics = pic.get("pics") if isinstance(pic.get("pics"), list) else []
+        for item in pics:
+            if isinstance(item, dict):
+                add(item.get("url") or item.get("src"), "opus_paragraph_pic")
+            else:
+                add(item, "opus_paragraph_pic")
+
+    content = str(detail.get("content") or "")
+    for match in BILIBILI_HTML_IMAGE_RE.finditer(content):
+        add(match.group(1) or match.group(2), "content_html_img")
+
+    for key in ("content_pic_list",):
+        values = detail.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if isinstance(item, dict):
+                add(
+                    item.get("url") or item.get("src") or item.get("image_url"),
+                    f"detail_{key}",
+                )
+            else:
+                add(item, f"detail_{key}")
+
+    # Current opus articles expose their cover through image_urls, while legacy
+    # articles use that same field for inline body images. Use it only when no
+    # richer inline representation was observed.
+    if not images:
+        for key in ("origin_image_urls", "image_urls"):
+            values = detail.get(key)
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if isinstance(item, dict):
+                    add(
+                        item.get("url") or item.get("src") or item.get("image_url"),
+                        f"detail_{key}",
+                    )
+                else:
+                    add(item, f"detail_{key}")
+    return images, sources
+
+
+def bilibili_detail_headers(post_id: str, cookie_header: str = "") -> dict[str, str]:
+    headers = {
+        "User-Agent": BILIBILI_BROWSER_USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Origin": "https://www.bilibili.com",
+        "Referer": f"https://www.bilibili.com/read/cv{post_id}/",
+    }
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    return headers
+
+
+def fetch_bilibili_article_detail(post_id: str, cookie_header: str = "") -> dict[str, Any]:
+    request = Request(
+        BILIBILI_ARTICLE_DETAIL_URL + "?" + urlencode({"id": post_id}),
+        headers=bilibili_detail_headers(post_id, cookie_header),
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except HTTPError as exc:
+        raise BilibiliArticleDetailError(
+            f"bilibili article detail HTTP {exc.code}",
+            retryable=exc.code == 429 or exc.code >= 500,
+            code=exc.code,
+        ) from exc
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        raise BilibiliArticleDetailError(
+            f"bilibili article detail transport/parse failure: {type(exc).__name__}",
+            retryable=True,
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise BilibiliArticleDetailError(
+            "bilibili article detail payload is not an object",
+            retryable=True,
+        )
+    try:
+        code = int(payload.get("code"))
+    except (TypeError, ValueError):
+        code = None
+    if code != 0:
+        raise BilibiliArticleDetailError(
+            f"bilibili article detail failed: {code} {payload.get('message')}",
+            retryable=code in BILIBILI_DETAIL_RETRYABLE_CODES,
+            code=code,
+        )
+    detail = payload.get("data")
+    if not isinstance(detail, dict):
+        raise BilibiliArticleDetailError(
+            "bilibili article detail missing data object",
+            retryable=True,
+            code=code,
+        )
+    if not clean_bilibili_article_body(detail.get("content")):
+        raise BilibiliArticleDetailError(
+            "bilibili article detail has no parseable body",
+            retryable=True,
+            code=code,
+        )
+    return detail
+
+
+def fetch_bilibili_article_detail_with_retry(
+    post_id: str,
+    cookie_header: str = "",
+) -> tuple[dict[str, Any], int, float]:
+    last_error: BilibiliArticleDetailError | None = None
+    retry_wait_seconds = 0.0
+    for attempt in range(1, BILIBILI_DETAIL_MAX_ATTEMPTS + 1):
+        try:
+            return (
+                fetch_bilibili_article_detail(post_id, cookie_header),
+                attempt,
+                round(retry_wait_seconds, 3),
+            )
+        except BilibiliArticleDetailError as exc:
+            last_error = exc
+            if not exc.retryable or attempt >= BILIBILI_DETAIL_MAX_ATTEMPTS:
+                exc.attempts = attempt
+                exc.retry_wait_seconds = round(retry_wait_seconds, 3)
+                raise
+            delay = random.uniform(*BILIBILI_DETAIL_RETRY_DELAY_SECONDS) * attempt
+            retry_wait_seconds += delay
+            time.sleep(delay)
+    assert last_error is not None
+    last_error.attempts = BILIBILI_DETAIL_MAX_ATTEMPTS
+    last_error.retry_wait_seconds = round(retry_wait_seconds, 3)
+    raise last_error
+
+
+def hydrate_bilibili_article_record(
+    search_record: dict[str, Any],
+    detail: dict[str, Any],
+    *,
+    attempts: int,
+    retry_wait_seconds: float = 0.0,
+    pacing_wait_seconds: float = 0.0,
+) -> dict[str, Any]:
+    post_id = str(search_record.get("content_id") or search_record.get("id") or "")
+    body = clean_bilibili_article_body(detail.get("content"))
+    if not body:
+        raise BilibiliArticleDetailError(
+            f"bilibili article detail {post_id} has no body",
+            retryable=True,
+            code=0,
+            attempts=attempts,
+        )
+    image_urls, image_sources = extract_bilibili_detail_images(detail)
+    opus = detail.get("opus") if isinstance(detail.get("opus"), dict) else {}
+    opus_content = opus.get("content") if isinstance(opus.get("content"), dict) else {}
+    paragraphs = opus_content.get("paragraphs") if isinstance(opus_content.get("paragraphs"), list) else []
+    hydrated = dict(search_record)
+    hydrated.update(
+        {
+            "title": clean_html_text(detail.get("title")) or search_record.get("title"),
+            "content_text": body,
+            "content_length": len(body),
+            "content_detail_status": "detail_observed",
+            "content_detail_source": "article_view_api",
+            "content_detail_attempts": attempts,
+            "content_detail_retry_wait_seconds": round(retry_wait_seconds, 3),
+            "content_detail_pacing_wait_seconds": round(pacing_wait_seconds, 3),
+            "content_images_detail_status": "detail_observed",
+            "detail_image_urls": image_urls,
+            "image_urls": image_urls,
+            "detail_image_count": len(image_urls),
+            "detail_image_sources": image_sources,
+            "detail_opus_observed": bool(opus),
+            "detail_opus_paragraph_count": len(paragraphs),
+            "detail_content_image_token_count": body.count("图片"),
+            "content_detail_evidence": {
+                "source": "article_view_api",
+                "attempts": attempts,
+                "retry_wait_seconds": round(retry_wait_seconds, 3),
+                "pacing_wait_seconds": round(pacing_wait_seconds, 3),
+                "content_length": len(body),
+                "image_count": len(image_urls),
+                "image_sources": image_sources,
+                "opus_observed": bool(opus),
+                "opus_paragraph_count": len(paragraphs),
+            },
+        }
+    )
+    return hydrated
 
 
 def fetch_bilibili_wbi_keys(cookie_header: str = "") -> tuple[str, str]:
@@ -1919,6 +2208,8 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     valid_existing_count = 0
     candidate_count = 0
     stagnant_pages = 0
+    last_detail_request_at: float | None = None
+    detail_request_pacing_events: list[dict[str, Any]] = []
     state_path = os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()
     stderr = ""
     returncode = 0
@@ -2016,6 +2307,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 seen_before = len(seen_ids)
                 processed_in_batch = 0
                 batch_complete = True
+                batch_runtime_error: BilibiliArticleDetailError | None = None
                 for item_index, item in enumerate(page_items):
                     post_id = str(item.get("id") or "").strip()
                     if post_id and (post_id in known_post_ids or post_id in seen_ids):
@@ -2031,6 +2323,72 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     post_id = str(normalized.get("content_id") or "")
                     if post_id in seen_ids:
                         continue
+                    applied_pacing_delay = 0.0
+                    if last_detail_request_at is not None:
+                        pacing_delay = random.uniform(*BILIBILI_DETAIL_PACING_SECONDS)
+                        elapsed_since_detail = time.monotonic() - last_detail_request_at
+                        if elapsed_since_detail < pacing_delay:
+                            applied_pacing_delay = pacing_delay - elapsed_since_detail
+                            time.sleep(applied_pacing_delay)
+                    try:
+                        detail_result = fetch_bilibili_article_detail_with_retry(
+                            post_id,
+                            cookie_header,
+                        )
+                        detail, detail_attempts, retry_wait_seconds = detail_result
+                        last_detail_request_at = time.monotonic()
+                        normalized = hydrate_bilibili_article_record(
+                            normalized,
+                            detail,
+                            attempts=detail_attempts,
+                            retry_wait_seconds=retry_wait_seconds,
+                            pacing_wait_seconds=applied_pacing_delay,
+                        )
+                        detail_request_pacing_events.append(
+                            {
+                                "stage": "article_detail",
+                                "post_id": post_id,
+                                "seconds": round(
+                                    applied_pacing_delay + retry_wait_seconds,
+                                    3,
+                                ),
+                                "pacing_wait_seconds": round(applied_pacing_delay, 3),
+                                "retry_wait_seconds": round(retry_wait_seconds, 3),
+                                "attempts": detail_attempts,
+                                "status": "completed",
+                                "finished_at": datetime.now(timezone.utc).isoformat(
+                                    timespec="seconds"
+                                ),
+                            }
+                        )
+                    except BilibiliArticleDetailError as exc:
+                        last_detail_request_at = time.monotonic()
+                        detail_request_pacing_events.append(
+                            {
+                                "stage": "article_detail",
+                                "post_id": post_id,
+                                "seconds": round(
+                                    applied_pacing_delay + exc.retry_wait_seconds,
+                                    3,
+                                ),
+                                "pacing_wait_seconds": round(applied_pacing_delay, 3),
+                                "retry_wait_seconds": exc.retry_wait_seconds,
+                                "attempts": exc.attempts,
+                                "status": "failed",
+                                "code": exc.code,
+                                "finished_at": datetime.now(timezone.utc).isoformat(
+                                    timespec="seconds"
+                                ),
+                            }
+                        )
+                        batch_runtime_error = exc
+                        batch_complete = False
+                        returncode = 1
+                        stderr = (
+                            f"BilibiliArticleDetailError(post_id={post_id!r}, "
+                            f"attempts={exc.attempts}, code={exc.code!r}): {exc}"
+                        )
+                        break
                     creator_id = str(normalized.get("user_id") or "")
                     if creator_id:
                         if creator_id not in follower_cache:
@@ -2069,7 +2427,9 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 candidate_identities_added = len(seen_ids) - seen_before
                 if discovery_phase == "frontier":
                     stagnant_pages = stagnant_pages + 1 if candidate_identities_added == 0 else 0
-                if not exhaustion_mode and valid_new_count >= target_new:
+                if batch_runtime_error is not None:
+                    batch_stop_reason = "runtime_failed"
+                elif not exhaustion_mode and valid_new_count >= target_new:
                     batch_stop_reason = "target_new_met"
                 elif not exhaustion_mode and candidate_count >= max_records:
                     batch_stop_reason = "candidate_hard_limit_reached"
@@ -2098,15 +2458,29 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "completion_mode": completion_mode,
                     "quantity_limits_enforced": not exhaustion_mode,
                     "stop_reason": batch_stop_reason,
+                    "stop_detail": (
+                        "bilibili_article_detail_failed"
+                        if batch_runtime_error is not None
+                        else None
+                    ),
                     "source_page": page,
                     "resume_page": resume_page,
-                    "source_has_more": None,
+                    "source_has_more": True if batch_runtime_error is not None else None,
                     "batch_complete": batch_complete,
                     "discovery_phase": discovery_phase,
                     "raw_batch_count": processed_in_batch,
                     "raw_response_count": len(page_items),
                     "candidate_identities": sorted(seen_ids),
                 }
+                if batch_runtime_error is not None:
+                    event_details.update(
+                        {
+                            "failed_candidate_id": post_id,
+                            "detail_error_code": batch_runtime_error.code,
+                            "detail_error_attempts": batch_runtime_error.attempts,
+                            "detail_error_retryable": batch_runtime_error.retryable,
+                        }
+                    )
                 if state_path:
                     frozen_state = FrozenExecutionState(state_path)
                     frozen_state.append_event("adaptive_batch_completed", event_details)
@@ -2166,10 +2540,28 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "stop_reason": "runtime_failed",
                     "stop_detail": type(exc).__name__,
                     "source_page": locals().get("page"),
+                    "resume_page": locals().get("page"),
+                    "source_has_more": True,
+                    "batch_complete": False,
+                    "discovery_phase": locals().get("discovery_phase"),
+                    "raw_batch_count": locals().get("processed_in_batch", 0),
+                    "raw_response_count": len(locals().get("page_items", [])),
                     "stagnation_basis": "candidate_identity",
                     "candidate_identities": sorted(seen_ids),
                 },
             )
+
+    if detail_request_pacing_events:
+        prior_pacing_events = behavior_evidence.get("request_pacing_events")
+        if not isinstance(prior_pacing_events, list):
+            prior_pacing_events = []
+        behavior_evidence["request_pacing_events"] = (
+            prior_pacing_events + detail_request_pacing_events
+        )[-200:]
+        behavior_evidence_path.write_text(
+            json.dumps(behavior_evidence, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     with jsonl_path.open("w", encoding="utf-8") as handle:
         for record in records:
