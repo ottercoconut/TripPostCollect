@@ -765,6 +765,53 @@ def test_incremental_promotion_and_target_state_clone(
     assert counts["succeeded"] == 2
 
 
+def test_pilot_gate_rejects_retryable_rows(tmp_path: Path) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=2)
+    source_backup = tmp_path / "source-backup.sqlite"
+    pilot = tmp_path / "pilot.sqlite"
+    repair.create_online_backup(target, source_backup)
+    repair.create_online_backup(target, pilot)
+    pilot_state = tmp_path / "pilot-state.sqlite"
+    with repair.sqlite_connect(pilot_state) as connection:
+        repair.initialize_repair_state(
+            pilot,
+            connection,
+            tmp_path / "pilot-reports",
+        )
+        connection.execute(
+            "UPDATE repair_items SET status='retryable', updated_at=?",
+            (repair.utc_now(),),
+        )
+        connection.commit()
+
+    config = supervisor.SupervisorConfig(
+        pilot_db_path=pilot,
+        pilot_state_path=pilot_state,
+        source_backup_path=source_backup,
+        target_db_path=target,
+        expected_target_sha256=repair.sha256_file(target),
+        pre_full_backup_path=tmp_path / "pre-full.sqlite",
+        full_state_path=tmp_path / "full-state.sqlite",
+        pilot_report_dir=tmp_path / "pilot-reports",
+        promotion_report_dir=tmp_path / "promotion-reports",
+        full_report_dir=tmp_path / "full-reports",
+        supervisor_report_path=tmp_path / "supervisor.json",
+        confirm_default_db_full_repair=False,
+        source_limit=2,
+        max_items=2,
+        session_size=1,
+        pacing_min=0,
+        pacing_max=0,
+        session_pause_min=0,
+        session_pause_max=0,
+        retry_delay_seconds=0,
+    )
+
+    with pytest.raises(RuntimeError, match="still has retryable rows"):
+        supervisor.validate_pilot_gate(config)
+
+
 def test_supervisor_promotes_pilot_and_prepares_full_state(
     monkeypatch,
     tmp_path: Path,
@@ -790,10 +837,12 @@ def test_supervisor_promotes_pilot_and_prepares_full_state(
     assert repair_result["updated"] == 2
 
     continuous_calls = 0
+    stop_modes: list[bool] = []
 
     def completed_repair(config, *, stop_when_scope_attempted):
         nonlocal continuous_calls
         continuous_calls += 1
+        stop_modes.append(stop_when_scope_attempted)
         return 0, {
             "scope_status_counts": {
                 "pending": 0,
@@ -832,6 +881,7 @@ def test_supervisor_promotes_pilot_and_prepares_full_state(
 
     assert return_code == resume_code == 0
     assert continuous_calls == 3
+    assert stop_modes == [False, False, False]
     assert config.pre_full_backup_path.is_file()
     assert config.full_state_path.is_file()
     payload = json.loads(config.supervisor_report_path.read_text())

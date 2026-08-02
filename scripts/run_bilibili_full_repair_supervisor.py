@@ -126,11 +126,10 @@ def validate_pilot_gate(config: SupervisorConfig) -> dict[str, Any]:
             connection,
             meta,
         )
-    terminal_or_retryable = sum(
+    terminal = sum(
         int(scope.get(status) or 0)
         for status in (
             "succeeded",
-            "retryable",
             "permanent_unavailable",
             "invalid_detail",
         )
@@ -139,10 +138,12 @@ def validate_pilot_gate(config: SupervisorConfig) -> dict[str, Any]:
         raise RuntimeError("pilot scope count differs from required source limit")
     if int(scope.get("pending") or 0) != 0:
         raise RuntimeError("pilot still has pending rows")
+    if int(scope.get("retryable") or 0) != 0:
+        raise RuntimeError("pilot still has retryable rows")
     if int(scope.get("conflict") or 0) != 0:
         raise RuntimeError("pilot has optimistic-lock conflicts")
-    if terminal_or_retryable != config.source_limit:
-        raise RuntimeError("pilot statuses do not account for the complete scope")
+    if terminal != config.source_limit:
+        raise RuntimeError("pilot terminal statuses do not account for the complete scope")
     if not validation["ok"]:
         raise RuntimeError(f"pilot row validation failed: {validation}")
     invariants = assert_external_invariants(config.pilot_db_path, meta)
@@ -258,7 +259,7 @@ def run_supervisor(config: SupervisorConfig) -> int:
     )
     pilot_code, pilot_result = run_continuous_repair(
         pilot_config,
-        stop_when_scope_attempted=True,
+        stop_when_scope_attempted=False,
     )
     if pilot_code != 0:
         write_supervisor_report(
