@@ -44,8 +44,9 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 后续默认只做顶部刷新；抖音若刷新同时证明存在持久记忆中没有的新候选 ID、`has_more=true` 与可继续的新 search ID，则从刷新链
 建立新前沿并把 checkpoint 恢复为 `active`。checkpoint 只能在 child 摘要形成后提交；诊断
 `--no-import` 不得更新它。内容仍只在
-完整目标达到后写入 `web_posts` / `web_post_images`。通用已处理候选表按 job 与查询指纹保存视频、
-字段无效和有效候选 ID；它只用于发现去重，不把无效候选变成内容记录。
+完整目标达到后写入 `web_posts` / `web_post_images`。通用已完成处理候选表按 job 与查询指纹保存
+视频、有决定性证据的字段无效候选和有效候选 ID；它只用于发现去重，不把无效候选变成内容记录。
+可恢复请求失败不属于已完成处理，尤其不能把 B站详情失败 ID 写入该表。
 
 `web_posts` 是统一内容主表，面向用户查询和后续数据使用。`ctf_captures` 是证据和调试底座，面向程序脚本或 Agent 排查抓取过程。页面级抓取成功后，也会归一化生成 `web_posts` 行，并通过 `web_posts.source_capture_id` 关联对应 `ctf_captures.id`。
 
@@ -292,7 +293,9 @@ PY
 微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；小红书搜索会补拉
 作者主页指标。知乎回答/文章的原始时间、正文图片和作者粉丝会在清洗前保存并归一化；搜索响应
 缺图时先请求详情补全，并用 `content_detail_status` 区分详情确认无图和详情未观察；
-`zvideo` 记录跳过。B站正式调度走专栏/图文 article 搜索。所有平台后续 JSONL 中出现的
+`zvideo` 记录跳过。B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得 article 详情
+正文和正文图片证据；搜索 `desc` 与 `image_urls` 仅为摘要和预览，不能直接入库为完整正文。
+所有平台后续 JSONL 中出现的
 视频记录均计入 `skipped_video` 并跳过入库。
 
 导入字段映射：
@@ -303,7 +306,7 @@ PY
 | `platform_post_id` | `note_id`、`aweme_id`、`content_id`、`id` 等非视频内容 ID |
 | `canonical_url` | `note_url`、`aweme_url`、`content_url`、`url`、`share_url`，缺失时按平台 ID 拼接 |
 | `title` | `title` |
-| `content_text` | 优先 `content_text` 或 `content`，其次 `desc`，最后 `title` |
+| `content_text` | 优先平台正式详情正文；B站必须来自 `content_detail_status=detail_observed` 的 article 详情，禁止回退到搜索 `desc`；其他平台再按 `content_text`、`content`、`desc`、`title` 的已定义能力映射 |
 | `author_display_name` | `nickname` 或 `user_nickname` |
 | `author_platform_id` | 小红书 `user_id`、`creator_hash` 或其他平台用户 ID |
 | `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎搜索结果 `author.follower_count` 归一后的 `followers_count` |
@@ -314,7 +317,7 @@ PY
 | `post_comments_count` | `comment_count`、`comments_count` 等评论字段 |
 | `post_shares_count` | `share_count`、`shared_count` 等分享字段 |
 | `post_views_count` | `view_count`、`play_count` 等浏览字段 |
-| `web_post_images` | `cover`、`image`、`pic`、`image_list`、`image_urls`、`avatar` 等 URL 字段；微博来自 `mblog.pics` 保存后的 `image_list`，知乎来自正文 HTML 保存后的 `image_list`，B站 article 搜索来自 `image_urls` |
+| `web_post_images` | `cover`、`image`、`pic`、`image_list`、`image_urls`、`avatar` 等 URL 字段；微博来自 `mblog.pics` 保存后的 `image_list`，知乎来自正文 HTML 保存后的 `image_list`；B站正文图片必须从详情响应或详情页正文结构提取，搜索 `image_urls` 只保留为预览证据 |
 | `raw_sample_json` | MediaCrawler 原始 JSONL 行 |
 
 代码只在导入边界识别不同平台对同类指标的字段名差异，内部持久化结构统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
@@ -333,6 +336,10 @@ PY
 `keyword` 分组报告来源分布，同时检查 `raw_sample_json.source_keyword`。`artifact_dir` 会在
 后续 upsert 时更新，不是不可变的历史成员关系；长期审计仍以冻结状态和摘要链为准。不得把
 恢复词记录静默改名或误报为关键词错配。
+
+B站还要按本轮 `artifact_dir` 检查 `raw_sample_json.content_detail_status=detail_observed`、详情来源、
+详情正文长度和正文图片关系。搜索摘要长度、非空 `content_text` 或 `status=captured` 均不能单独
+证明正文完整；详情失败记录不得进入入库集合。
 
 运行命令：
 
@@ -477,6 +484,25 @@ MediaCrawler 入库采用去重更新：
 - 没有平台 ID 时用 `(platform_key, canonical_url)` 匹配旧记录。
 - 更新帖子时会重建该帖子的 `web_post_images` 行。
 - 原始 JSONL 行完整保留在 `raw_sample_json`，便于后续清洗补字段。
+
+## B站历史摘要回填
+
+既有 B站摘要记录已经存在于 `web_posts` 和候选记忆，正常正式搜索会在详情前跳过这些 ID，因此
+不能靠重跑关键词自动修复。历史回填使用独立、幂等的详情修复流程：
+
+1. 写默认库前创建 SQLite 一致性备份；先在临时库用固定小样本验证。
+2. 从 `web_posts` 读取现有 B站平台 ID 与原关键词，分批请求详情并保存可恢复进度；不删除或修改
+   `crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates` 和 `crawl_jobs`。
+3. 只有详情正文与正文图片门禁通过时才按相同平台 ID upsert。主表行数不得增加，原关键词必须
+   保留，`raw_sample_json` 必须能区分原搜索摘要与本次详情来源。
+4. 限流、超时、请求或解析失败保持待重试，不覆盖现有行并假称完整；明确删除、私密或永久不可用
+   单独报告，不伪造正文。
+5. 回填报告分别列出计划、详情成功、更新、永久无效、待重试和解析错误数量，并验证正文长度、
+   图片关系、唯一 ID、外键及 SQLite 完整性。
+
+回填属于历史数据修复，不兑现新抓取的 `target_new_posts`，也不改变任何来源耗尽结论。具体事故
+范围与阶段记录见
+[`incidents/2026-08-02-bilibili-article-completeness.md`](incidents/2026-08-02-bilibili-article-completeness.md)。
 
 ## 手工验证步骤
 

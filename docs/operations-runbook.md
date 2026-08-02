@@ -188,6 +188,12 @@ checkpoint 记录了非空 `last_summary_path` 但文件丢失时，runner 必�
 保持不变。
 `--no-import` 自动禁用 checkpoint 写入，因此诊断不会污染正式记忆。
 
+B站 article 的安全前沿还取决于详情处理是否完成。搜索页返回未知 ID 后，只有详情成功并完成
+正式字段判断，或详情明确证明内容已删除、私密、永久不可用时，该 ID 才能写入
+`crawl_discovery_seen_candidates`。详情接口 `-509`、HTTP/业务错误、超时或解析失败经过有限退避仍
+未恢复时，当前页必须保持 `last_batch_complete=false`，`resume_page` 保持当前页，失败 ID 不进入
+累计摘要或候选记忆。不要通过删除 checkpoint 或扩大候选预算绕过详情失败。
+
 抖音新鲜游标链在第 1 页收到 `data=[]、has_more=false` 时，不直接创建耗尽 checkpoint。
 执行器必须检查当前可见搜索页：存在 `/video/`、`/note/` 或搜索结果卡片时停止为
 `empty_api_response_with_visible_results`；没有结果卡片、但也没有明确可见的“无结果”提示时停止为

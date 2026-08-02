@@ -1,30 +1,76 @@
 # B站 article
 
+> **修复过渡状态（2026-08-02）：** 已确认当前实现把 article 搜索结果的 `desc` 摘要写成
+> `content_text`，尚未满足本文件的详情正文契约。详情抓取、门禁和测试全部落地前，B站正式产物
+> 不得报告为完整正文，也不得用新的摘要记录扩大历史问题。事件证据见
+> [`2026-08-02-bilibili-article-completeness.md`](../incidents/2026-08-02-bilibili-article-completeness.md)。
+
+## 入口与范围
+
 - 正式入口：`crawl_runner.py` 调用 `mediacrawler_crawl.py --platforms bilibili`。
+- 内容范围：只发现 B站 article/专栏图文，不使用视频搜索。单页 Opus 抓取只用于定向页面证据，
+  不代表正式平台轮次。
 - 完成模式服从正式契约：正常默认使用 `target-new-posts`；只有用户明确要求某一轮直到来源耗尽时，
-  才在该轮命令临时使用 `source-exhausted`，不修改长期配置。
-- 内容来源：B站 article 搜索；不使用视频搜索。
-- 粉丝来源：按 article 的作者 `mid` 调用作者关系统计接口，保存数值、
-  `followers_observed` 和 `author_followers_source=relation_stat`。
-- 图片来源：article 搜索结果的 `image_urls`。
-- 去重键：article 内容 ID。
-- 有效性：必须满足 `image_post_with_followers_v1`，粉丝统计失败的 article 继续作为候选，
-  但不能进入有效集合。
-- 单页 Opus 抓取只用于定向页面证据，不代表正式平台轮次。
-- article API 搜索前必须在 MediaCrawler 持久 profile 执行共享行为阶段，并复用该会话
-  cookie；行为与请求策略证据缺失时不得入库。
-- 配置中的 job kind 虽为 `mediacrawler_search`，B站内容抓取实际使用项目自有 article API
-  分支，但与其它通用平台共用 SQLite 发现 checkpoint 和跨次累计摘要。
-- 首次从第 1 页开始；有 checkpoint 时先刷新 `top_refresh_max_pages` 个顶部页，再从
-  `resume_page` 继续。数据库、累计摘要、`crawl_discovery_seen_candidates` 或本次已见的 article ID 在作者粉丝接口前跳过，不消耗
-  单次未知候选预算。
-- 每个完整深层页保存下一页；达到目标或候选上限时若页面尚未处理完，保存当前页，下一次允许
-  重取并靠已知 ID 跳过已持久化边界。空页保存 `status=exhausted`，后续只刷新顶部。
-- 默认数量模式的未达标产物不单独入库；runner 自动拼接摘要，累计达到完整目标后一次性导入。
-  显式来源耗尽模式在取得可验证耗尽证据后入库。人工
-  `--resume-summary` 或 `--start-page` 不是正常 workflow。
-- B站当前按页面是否出现成功归一化且数据库、累计摘要、`crawl_discovery_seen_candidates` 和本轮均未见的 article ID 累计停滞；
-  这类未知 ID 即使后续正式字段校验无效，也会重置停滞页数。该平台例外不改变完成判据，判断是否
-  扩容时必须同时检查新 ID 数和有效新增数。
-- 临时调整候选预算必须遵循运行手册的配置校验、`--sync-only`、dry-run、正式执行和恢复原值
-  顺序；候选预算是单次 child 预算，不是跨次累计总额。
+  才临时使用 `source-exhausted`，不修改长期配置。
+- 配置中的 job kind 虽为 `mediacrawler_search`，B站实际使用项目自有 article API 分支；发现
+  checkpoint、候选记忆和跨次累计仍复用通用控制面。
+
+## 字段来源与详情门禁
+
+搜索接口只负责发现候选和提供预览字段。搜索结果中的 `desc`、`image_urls` 分别是摘要和预览图，
+不能单独证明正文或正文图片完整。未知 article ID 在进入正式有效集合前必须完成详情补全：
+
+- `content_text` 来自已成功观察的 article 详情正文；标题单独保存，不用“标题 + `desc`”冒充正文。
+- 正文规范化保留段落换行；不得使用会把全部空白压成单行的摘要清洗方法处理完整正文。
+- 正文图片从详情响应或详情页正文结构提取并去重。搜索 `image_urls` 可作为预览来源留在原始证据，
+  但不能作为“已经检查全部正文图片”的唯一证据。
+- 详情成功必须保存 `content_detail_status=detail_observed` 和明确的详情来源；详情未请求、请求失败、
+  限流或解析失败均不能进入正式有效集合。
+- 粉丝来源仍为作者 `mid` 的关系统计接口，保存数值、`followers_observed=true` 和
+  `author_followers_source=relation_stat`。
+- 发布时间、赞、评、浏览等字段可以由搜索结果发现，详情响应有更明确值时使用详情值；不得用
+  抓取时间补原始发布时间。
+- 去重键为 article 内容 ID。
+
+最终记录仍须满足 `image_post_with_followers_v1`，并额外满足上述 B站详情门禁。详情已观察但
+文章确实已删除、私密或没有满足字段 profile 的正文图片时，该候选可以作为有决定性证据的无效项；
+普通请求失败不能伪装成这种永久无效状态。
+
+## 请求节奏、失败与安全前沿
+
+article 搜索前必须在 MediaCrawler 持久 profile 执行共享行为阶段，并让搜索、详情和关系统计请求
+复用同一会话 cookie。行为与请求策略证据缺失时不得入库。
+
+详情请求必须串行或按经验证的低并发执行，并记录随机等待、重试次数和业务状态。`-509`、HTTP
+失败、超时和无法解析的详情属于可恢复运行错误：允许有限退避重试；仍失败时停止当前 child，当前
+页标记 `last_batch_complete=false`，恢复页保持为本次请求页。失败 article ID 不得写入
+`crawl_discovery_seen_candidates`，也不得因搜索摘要非空而进入累计摘要。
+
+只有以下候选才算“已完成处理”，可以进入持久候选记忆：
+
+- 详情和正式字段全部成功，成为有效记录；
+- 详情已获得决定性证据，但内容类型或字段永久不符合正式 profile；
+- 平台明确证明 article 已删除、私密或不存在。
+
+首次运行从第 1 页开始；有 checkpoint 时先刷新 `top_refresh_max_pages` 个顶部页，再从
+`resume_page` 继续。数据库、累计摘要、已完成候选记忆和本轮已完成集合中的 ID 在昂贵详情前跳过。
+每个完整深层页保存下一页；目标或候选上限在页中触发时保留当前页，下一轮重取边界并靠已完成
+候选去重。空页才保存 `status=exhausted`。默认数量模式未达标不单独入库；显式来源耗尽模式也
+必须先满足全部详情门禁，不能用搜索来源耗尽替代详情成功。
+
+B站停滞仍按是否发现未知 article ID 判断，但“未知”不等于“完成处理”：可恢复详情失败必须停止并
+保留安全前沿，不能用它重置停滞后继续跨页。判断是否扩容时同时检查新 ID、详情成功数和有效新增数。
+
+## 历史摘要记录回填
+
+正常正式抓取会在详情前跳过数据库已有 ID，因此不能修复既有摘要记录。历史修复必须使用独立、
+可恢复的 B站详情回填入口，并遵守以下边界：
+
+- 写默认库前创建 SQLite 一致性备份，先在临时库验证正文、图片和 upsert 行数。
+- 以数据库现有 B站 `platform_post_id` 为输入，不清空或改写搜索 checkpoint、候选记忆和任务状态。
+- 详情成功后只 upsert 同一平台 ID，不新增重复主表行；保留原关键词并写入新的详情来源证据。
+- 限流或请求失败的 ID 留在回填待处理状态，允许下次恢复；不得把摘要原文重新标记为完整。
+- 分别报告计划数、详情成功数、更新数、永久无效数、待重试数和解析错误，并核对正文图片关系。
+
+临时候选预算仍按运行手册使用 one-off 配置；它是正常搜索 child 的未知候选预算，不是历史详情
+回填预算，也不能替代专门回填。

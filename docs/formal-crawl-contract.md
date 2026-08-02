@@ -132,6 +132,11 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 - 有至少一个正文图片 URL；
 - 满足任务配置指定的作者粉丝量策略和平台字段 profile。
 
+B站 article 还必须满足详情完整性门禁：搜索结果中的 `desc` 只允许作为发现摘要保存在原始证据，
+不得作为 `content_text`；正式记录必须保存 `content_detail_status=detail_observed` 和受信任的 article
+详情来源。正文图片必须经过详情响应或详情页正文结构检查，不能仅凭搜索 `image_urls` 宣布完整。
+详情请求限流、超时、HTTP/业务失败或解析失败属于可恢复运行错误，不是字段永久无效。
+
 B站、微博、小红书、抖音、知乎使用 `followers_policy=required`。粉丝量为 `0` 只有在
 平台响应明确出现该值且保存了 `followers_observed=true` 时有效；缺失值不得转换为
 `0`。不提供粉丝量的平台使用 `followers_policy=ignored`，必须由配置声明，不能由
@@ -192,11 +197,12 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
   按是否出现不在数据库、累计摘要、`crawl_discovery_seen_candidates` 和本 child 已见集合中的候选 ID 累计停滞：综合搜索连续出现纯文本或视频时仍推进扫描，
   只有连续批次没有新 ID 才停；正式完成仍只计算有效新增图文。批次事件记录
   `stagnation_basis`、新候选 ID 数和有效新增数，供区分“结果类型不合格”与“页面实际重复”。
-  B站当前自有 article 实现是另一明确例外：它按页面是否出现成功归一化且不在数据库、累计摘要、
-  `crawl_discovery_seen_candidates` 或本次已见集合中的 article ID 累计停滞；这类未知 ID 即使后续正式字段校验无效，也会重置
-  停滞计数。该例外不
-  放宽完成标准，仍只有有效新增达到目标才算完成；判断 B站是否值得扩容时必须同时读取新 ID
-  数和有效新增数。
+  B站自有 article 实现是另一明确例外：它按页面是否出现不在数据库、累计摘要、
+  `crawl_discovery_seen_candidates` 或本次已完成集合中的 article ID 判断来源是否仍有新候选。
+  未知 ID 只有在详情与字段处理得到决定性结果后才算完成处理；详情限流、超时、请求或解析失败
+  必须停止当前 child、保留本页且不持久化该 ID，不能靠摘要非空重置停滞并继续跨页。详情已观察后
+  才确定的永久无效候选可以重置停滞。该例外不放宽完成标准；判断 B站是否值得扩容时必须同时读取
+  新 ID 数、详情成功数和有效新增数。
 - `login_required` / `captcha_detected`：登录或验证阻断。
 - `runtime_failed`：浏览器或本地运行环境失败。
 
@@ -228,10 +234,14 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 记忆，不得误用旧游标。
 
 通用平台在昂贵处理前跳过 `web_posts` 已有 ID、累计摘要中的有效 ID、
-`crawl_discovery_seen_candidates` 已处理 ID 和当前 child 已见 ID；小红书读取独立的
+`crawl_discovery_seen_candidates` 已完成处理 ID 和当前 child 已完成 ID；小红书读取独立的
 `xhs_discovery_seen_candidates`。五个平台的视频、字段无效和有效候选都在 child 摘要形成后获得
 跨轮记忆，进程在摘要前崩溃的候选不会被提前标记。两套表的作用域不同：通用平台按 job 与查询
 指纹隔离，小红书还按人工指定账号隔离，不能跨账号共享未入库活动。
+
+“字段无效”必须已有决定性来源证据。B站 article 的详情限流、超时、请求失败或解析失败表示候选
+尚未完成处理：失败 ID 不得进入候选记忆，失败页不得推进为下一页；正常搜索也不会因数据库已有
+ID 自动修复历史摘要记录，历史详情回填必须走平台文档定义的独立流程。
 
 首次执行从来源第一页开始，不做顶部刷新。每个完整前沿批次把下一页写入状态事件；抖音还必须
 同时写入下一 offset 和响应 search ID，小红书保存本次搜索使用的 client search ID。对应根执行器

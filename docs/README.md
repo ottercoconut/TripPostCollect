@@ -18,10 +18,17 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 | 调度器、执行器和数据流 | [抓取架构](crawl-architecture.md) |
 | SQLite、字段映射和入库 | [数据持久化](data-persistence.md) |
 | 当前平台字段能力 | [平台字段覆盖](platform-field-coverage.md) |
+| B站专栏正文、详情失败与历史回填 | [B站 article](platforms/bilibili.md) |
 | 管理端开发 | [管理客户端开发](admin-client-development.md) |
 | 小红书账号、登录、正式抓取和恢复 | [小红书正式抓取 Workflow](platforms/xhs.md) |
 
 平台细节位于 `docs/platforms/`。
+
+## 当前数据质量事件
+
+- 2026-08-02 确认 B站正式 article 分支曾把搜索摘要误当完整正文；影响范围、证据、修复阶段和
+  历史回填边界见 [B站 article 正文完整性事件](incidents/2026-08-02-bilibili-article-completeness.md)。
+  在详情抓取、正式门禁和测试同步落地前，不得把 B站新产物或既有摘要记录报告为完整正文。
 
 ## 正式入口
 
@@ -100,9 +107,9 @@ child 的安全上限。永久提高目标时应在 `config/xhs_targets.json` �
 
 | 平台 | 控制面记忆 | 保存的深层前沿 | 跨轮详情前去重 |
 |---|---|---|---|
-| B站、微博、知乎 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | 下一安全页 | SQLite 已入库 ID、累计摘要 ID、`crawl_discovery_seen_candidates` 中所有已处理候选 ID |
-| 抖音 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | page、offset、响应 search ID 必须成组恢复 | SQLite 已入库 ID、累计摘要 ID、`crawl_discovery_seen_candidates` 中所有已处理候选 ID |
-| 小红书 | `xhs_discovery_checkpoints`，按目标、人工指定账号与查询指纹隔离 | page 与 client search ID 必须成组恢复 | SQLite 已入库 ID、累计摘要 ID，以及 `xhs_discovery_seen_candidates` 中所有已处理候选 ID |
+| B站、微博、知乎 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | 下一安全页 | SQLite 已入库 ID、累计摘要 ID、`crawl_discovery_seen_candidates` 中所有已完成处理候选 ID |
+| 抖音 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | page、offset、响应 search ID 必须成组恢复 | SQLite 已入库 ID、累计摘要 ID、`crawl_discovery_seen_candidates` 中所有已完成处理候选 ID |
+| 小红书 | `xhs_discovery_checkpoints`，按目标、人工指定账号与查询指纹隔离 | page 与 client search ID 必须成组恢复 | SQLite 已入库 ID、累计摘要 ID，以及 `xhs_discovery_seen_candidates` 中所有已完成处理候选 ID |
 
 首次运行从第一页开始且顶部刷新页数为 0；存在 checkpoint 后才先刷新配置限定的顶部页，再从
 保存的深层前沿继续。顶部刷新不推进深层前沿。目标或候选上限在一页中途触发时，checkpoint
@@ -116,7 +123,8 @@ child 的安全上限。永久提高目标时应在 `config/xhs_targets.json` �
 明确“无结果”提示时按运行异常保留第 1 页，不能建立耗尽 checkpoint；只有 API 业务状态正常、
 `has_more=false` 且页面明确显示无结果，才记录 `verified_empty_first_page`。
 
-五个平台都会在 child 摘要形成后持久记忆视频、字段无效和有效候选。通用平台写
+五个平台都会在 child 摘要形成后持久记忆视频、有决定性证据的字段无效候选和有效候选；可恢复
+请求失败不属于“已完成处理”。通用平台写
 `crawl_discovery_seen_candidates`，按 job 与查询指纹隔离；小红书写独立表并额外按人工指定账号隔离。
 正常运行一律让 runner 自动生成恢复参数；人工恢复仅按
 [运行手册](operations-runbook.md) 的限制处理。
