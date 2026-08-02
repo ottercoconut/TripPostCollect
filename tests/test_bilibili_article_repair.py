@@ -7,6 +7,8 @@ from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 
+import pytest
+
 from trippostcollect.db.bootstrap import bootstrap_connection
 
 
@@ -142,6 +144,25 @@ def fake_detail(post_id: str, cookie_header: str):
         },
         1,
         0.0,
+    )
+
+
+@pytest.fixture(autouse=True)
+def valid_bilibili_login(monkeypatch) -> None:
+    monkeypatch.setattr(
+        repair,
+        "load_cookie_snapshot",
+        lambda platform: {"cookie_header": "SESSDATA=test-session"},
+    )
+    monkeypatch.setattr(
+        repair,
+        "check_bilibili_login",
+        lambda cookie_header: {
+            "ok": True,
+            "code": 0,
+            "is_login": True,
+            "source": "test",
+        },
     )
 
 
@@ -586,6 +607,93 @@ def test_promote_validated_successes_into_original_target(
         ("https://example.test/detail-1001.jpg",),
         ("https://example.test/detail-1002.jpg",),
     ]
+
+
+def test_live_login_loss_stops_before_detail_request(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=1)
+    baseline = repair.sha256_file(target)
+    backup = tmp_path / "backup.sqlite"
+    repair.create_online_backup(target, backup)
+    config = config_for(
+        target,
+        tmp_path / "state.sqlite",
+        backup,
+        tmp_path / "reports",
+        apply=True,
+        expected_sha256=baseline,
+    )
+    detail_calls = 0
+
+    def login_lost(cookie_header):
+        raise repair.BilibiliRepairLoginRequiredError("code=-101 isLogin=False")
+
+    def unexpected_detail(post_id, cookie_header):
+        nonlocal detail_calls
+        detail_calls += 1
+        return fake_detail(post_id, cookie_header)
+
+    monkeypatch.setattr(repair, "check_bilibili_login", login_lost)
+    monkeypatch.setattr(repair, "fetch_repair_article_detail", unexpected_detail)
+
+    return_code, result = repair.run_repair(config)
+
+    assert return_code == 4
+    assert result["stopped_reason"] == "login_required"
+    assert detail_calls == 0
+    with sqlite3.connect(target) as connection:
+        assert connection.execute(
+            "SELECT content_text FROM web_posts"
+        ).fetchone()[0] == "旧搜索摘要-1001"
+    with sqlite3.connect(config.state_db_path) as connection:
+        assert connection.execute(
+            "SELECT status FROM repair_items"
+        ).fetchone()[0] == "pending"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM repair_events WHERE event_type='login_required'"
+        ).fetchone()[0] == 1
+
+
+def test_article_api_login_code_stops_without_invalidating_item(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=1)
+    baseline = repair.sha256_file(target)
+    backup = tmp_path / "backup.sqlite"
+    repair.create_online_backup(target, backup)
+    config = config_for(
+        target,
+        tmp_path / "state.sqlite",
+        backup,
+        tmp_path / "reports",
+        apply=True,
+        expected_sha256=baseline,
+    )
+
+    def login_code(post_id, cookie_header):
+        raise repair.BilibiliArticleDetailError(
+            "login required",
+            retryable=False,
+            code=-101,
+            attempts=1,
+        )
+
+    monkeypatch.setattr(repair, "fetch_repair_article_detail", login_code)
+
+    return_code, result = repair.run_repair(config)
+
+    assert return_code == 4
+    assert result["stopped_reason"] == "login_required"
+    with sqlite3.connect(config.state_db_path) as connection:
+        row = connection.execute(
+            "SELECT status, last_error_type, last_error_code FROM repair_items"
+        ).fetchone()
+    assert row == ("pending", "login_required", -101)
 
 
 def test_optimistic_lock_conflict_does_not_overwrite(monkeypatch, tmp_path: Path) -> None:

@@ -51,6 +51,12 @@ article 搜索前必须在 MediaCrawler 持久 profile 执行共享行为阶段�
 页标记 `last_batch_complete=false`，恢复页保持为本次请求页。失败 article ID 不得写入
 `crawl_discovery_seen_candidates`，也不得因搜索摘要非空而进入累计摘要。
 
+无人值守历史修复不能只凭 Cookie 文件存在判断已登录。每个修复批次开始和会话间隔结束后，必须用
+同一 Cookie 调用 `/x/web-interface/nav`，只有 `code=0` 且 `data.isLogin=true` 才能继续；快照缺失、
+接口返回 `-101`、`isLogin=false`，或 article 详情中途返回 `-101` 时立即停止，保留当前记录原状态，
+不得把它记为无效正文或继续请求。登录校验本身无法取得决定性结果时也停止无人值守任务，等待人工
+复验。
+
 只有以下候选才算“已完成处理”，可以进入持久候选记忆：
 
 - 详情和正式字段全部成功，成为有效记录；

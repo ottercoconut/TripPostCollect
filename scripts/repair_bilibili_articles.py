@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from mediacrawler_crawl import (
     BILIBILI_DETAIL_PACING_SECONDS,
@@ -45,6 +47,15 @@ TERMINAL_STATUSES = frozenset(
 )
 REPAIRABLE_STATUSES = frozenset({"pending", "retryable"})
 STATE_SCHEMA_VERSION = 1
+BILIBILI_NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
+
+
+class BilibiliRepairLoginRequiredError(RuntimeError):
+    """The saved Bilibili session is no longer authenticated."""
+
+
+class BilibiliRepairLoginCheckError(RuntimeError):
+    """The unattended repair could not prove that login is still valid."""
 
 
 @dataclass(frozen=True)
@@ -609,6 +620,99 @@ def fetch_repair_article_detail(
     """Make one detail request so a rate-limit response freezes the whole run."""
 
     return fetch_bilibili_article_detail(post_id, cookie_header), 1, 0.0
+
+
+def check_bilibili_login(cookie_header: str) -> dict[str, Any]:
+    if not cookie_header or "SESSDATA=" not in cookie_header:
+        raise BilibiliRepairLoginRequiredError(
+            "Bilibili cookie snapshot has no active SESSDATA"
+        )
+    request = Request(
+        BILIBILI_NAV_URL,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.bilibili.com/",
+            "Cookie": cookie_header,
+        },
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except HTTPError as exc:
+        raise BilibiliRepairLoginCheckError(
+            f"Bilibili login check HTTP {exc.code}"
+        ) from exc
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        raise BilibiliRepairLoginCheckError(
+            f"Bilibili login check failed: {type(exc).__name__}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise BilibiliRepairLoginCheckError(
+            "Bilibili login check payload is not an object"
+        )
+    data = payload.get("data")
+    data = data if isinstance(data, dict) else {}
+    try:
+        code = int(payload.get("code"))
+    except (TypeError, ValueError):
+        code = None
+    is_login = data.get("isLogin") is True
+    if code == -101 or not is_login:
+        raise BilibiliRepairLoginRequiredError(
+            f"Bilibili login is no longer valid: code={code} isLogin={is_login}"
+        )
+    if code != 0:
+        raise BilibiliRepairLoginCheckError(
+            f"Bilibili login check returned unexpected code={code}"
+        )
+    return {
+        "ok": True,
+        "code": code,
+        "is_login": True,
+        "checked_at": utc_now(),
+        "source": "x_web_interface_nav",
+    }
+
+
+def record_login_stop(
+    connection: sqlite3.Connection,
+    *,
+    reason: str,
+    error: str,
+    item: sqlite3.Row | None = None,
+    code: int | None = None,
+) -> None:
+    if item is not None:
+        connection.execute(
+            """
+            UPDATE repair_items
+            SET last_error_type=?, last_error_code=?, last_error=?, updated_at=?
+            WHERE web_post_id=?
+            """,
+            (
+                reason,
+                code,
+                error[:2000],
+                utc_now(),
+                int(item["web_post_id"]),
+            ),
+        )
+    set_meta(
+        connection,
+        {
+            "repair_stopped_reason": reason,
+            "repair_stopped_at": utc_now(),
+            "repair_stopped_error": error[:2000],
+        },
+    )
+    add_event(
+        connection,
+        reason,
+        item=item,
+        details={"code": code, "error": error},
+    )
+    connection.commit()
 
 
 def migrate_legacy_retryable_backoff(
@@ -1377,6 +1481,44 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
             return 3, invocation
         cookie = load_cookie_snapshot("bilibili") or {}
         cookie_header = str(cookie.get("cookie_header") or "")
+        try:
+            invocation["login_check"] = check_bilibili_login(cookie_header)
+        except BilibiliRepairLoginRequiredError as exc:
+            record_login_stop(
+                state_connection,
+                reason="login_required",
+                error=str(exc),
+            )
+            invocation["stopped_reason"] = "login_required"
+            invocation["login_check"] = {"ok": False, "error": str(exc)}
+            invocation["finished_at"] = utc_now()
+            report_path = write_report(
+                config,
+                state_connection,
+                meta,
+                invocation=invocation,
+                invariants=initial_invariants,
+            )
+            invocation["report_path"] = str(report_path)
+            return 4, invocation
+        except BilibiliRepairLoginCheckError as exc:
+            record_login_stop(
+                state_connection,
+                reason="login_check_failed",
+                error=str(exc),
+            )
+            invocation["stopped_reason"] = "login_check_failed"
+            invocation["login_check"] = {"ok": False, "error": str(exc)}
+            invocation["finished_at"] = utc_now()
+            report_path = write_report(
+                config,
+                state_connection,
+                meta,
+                invocation=invocation,
+                invariants=initial_invariants,
+            )
+            invocation["report_path"] = str(report_path)
+            return 5, invocation
         last_request_at: float | None = None
         requests_in_session = 0
         return_code = 0
@@ -1400,6 +1542,30 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
                     time.sleep(pause)
                     requests_in_session = 0
                     last_request_at = None
+                    try:
+                        invocation["login_check"] = check_bilibili_login(
+                            cookie_header
+                        )
+                    except BilibiliRepairLoginRequiredError as exc:
+                        record_login_stop(
+                            state_connection,
+                            reason="login_required",
+                            error=str(exc),
+                            item=item,
+                        )
+                        invocation["stopped_reason"] = "login_required"
+                        return_code = 4
+                        break
+                    except BilibiliRepairLoginCheckError as exc:
+                        record_login_stop(
+                            state_connection,
+                            reason="login_check_failed",
+                            error=str(exc),
+                            item=item,
+                        )
+                        invocation["stopped_reason"] = "login_check_failed"
+                        return_code = 5
+                        break
                 applied_pacing = 0.0
                 if last_request_at is not None:
                     pacing = random.uniform(config.pacing_min, config.pacing_max)
@@ -1461,6 +1627,17 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
                     invocation[result] = int(invocation.get(result) or 0) + 1
                 except BilibiliArticleDetailError as exc:
                     last_request_at = time.monotonic()
+                    if exc.code == -101:
+                        record_login_stop(
+                            state_connection,
+                            reason="login_required",
+                            error=str(exc),
+                            item=item,
+                            code=exc.code,
+                        )
+                        invocation["stopped_reason"] = "login_required"
+                        return_code = 4
+                        break
                     status = "retryable" if exc.retryable else "invalid_detail"
                     mark_failure(
                         state_connection,
