@@ -126,6 +126,7 @@ def config_for(
         session_pause_min=0,
         session_pause_max=0,
         retry_delay_seconds=0,
+        source_limit=0,
         only_ids=frozenset(),
     )
 
@@ -171,6 +172,32 @@ def test_dry_run_creates_manifest_without_changing_target(tmp_path: Path) -> Non
         ).fetchone()[0] == 2
 
 
+def test_source_limit_restricts_pilot_scope(tmp_path: Path) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=3)
+    baseline = repair.sha256_file(target)
+    backup = tmp_path / "backup.sqlite"
+    repair.create_online_backup(target, backup)
+    config = replace(
+        config_for(
+            target,
+            tmp_path / "state.sqlite",
+            backup,
+            tmp_path / "reports",
+            apply=False,
+            expected_sha256=baseline,
+        ),
+        source_limit=2,
+    )
+
+    return_code, result = repair.run_repair(config)
+
+    assert return_code == 0
+    assert result["selected_count"] == 2
+    assert result["scope_status_counts"]["total"] == 2
+    assert result["scope_status_counts"]["pending"] == 2
+
+
 def test_apply_updates_same_rows_and_is_idempotent(monkeypatch, tmp_path: Path) -> None:
     target = tmp_path / "target.sqlite"
     create_target(target)
@@ -185,7 +212,7 @@ def test_apply_updates_same_rows_and_is_idempotent(monkeypatch, tmp_path: Path) 
         apply=True,
         expected_sha256=baseline,
     )
-    monkeypatch.setattr(repair, "fetch_bilibili_article_detail_with_retry", fake_detail)
+    monkeypatch.setattr(repair, "fetch_repair_article_detail", fake_detail)
 
     first_code, first = repair.run_repair(config)
     second_code, second = repair.run_repair(config)
@@ -246,7 +273,7 @@ def test_retryable_failure_preserves_original_row(monkeypatch, tmp_path: Path) -
             retry_wait_seconds=12.0,
         )
 
-    monkeypatch.setattr(repair, "fetch_bilibili_article_detail_with_retry", fail)
+    monkeypatch.setattr(repair, "fetch_repair_article_detail", fail)
 
     return_code, result = repair.run_repair(config)
     cooldown_code, cooldown_result = repair.run_repair(config)
@@ -299,7 +326,7 @@ def test_optimistic_lock_conflict_does_not_overwrite(monkeypatch, tmp_path: Path
         apply=True,
         expected_sha256=baseline,
     )
-    monkeypatch.setattr(repair, "fetch_bilibili_article_detail_with_retry", fake_detail)
+    monkeypatch.setattr(repair, "fetch_repair_article_detail", fake_detail)
 
     return_code, result = repair.run_repair(apply_config)
 

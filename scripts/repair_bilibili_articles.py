@@ -23,7 +23,7 @@ from typing import Any, Iterator
 from mediacrawler_crawl import (
     BILIBILI_DETAIL_PACING_SECONDS,
     BilibiliArticleDetailError,
-    fetch_bilibili_article_detail_with_retry,
+    fetch_bilibili_article_detail,
     hydrate_bilibili_article_record,
     load_cookie_snapshot,
     normalize_bilibili_article_record,
@@ -63,6 +63,7 @@ class RepairConfig:
     session_pause_min: float
     session_pause_max: float
     retry_delay_seconds: int
+    source_limit: int
     only_ids: frozenset[str]
 
 
@@ -548,6 +549,7 @@ def selected_items(
     connection: sqlite3.Connection,
     *,
     max_items: int,
+    source_limit: int,
     only_ids: frozenset[str],
 ) -> list[sqlite3.Row]:
     now = utc_now()
@@ -561,9 +563,50 @@ def selected_items(
         """,
         (now,),
     ).fetchall()
+    if source_limit:
+        scoped_ids = {
+            int(row[0])
+            for row in connection.execute(
+                "SELECT web_post_id FROM repair_items ORDER BY web_post_id LIMIT ?",
+                (source_limit,),
+            )
+        }
+        rows = [row for row in rows if int(row["web_post_id"]) in scoped_ids]
     if only_ids:
         rows = [row for row in rows if str(row["platform_post_id"]) in only_ids]
     return rows[:max_items]
+
+
+def scoped_state_counts(
+    connection: sqlite3.Connection,
+    *,
+    source_limit: int,
+    only_ids: frozenset[str],
+) -> dict[str, int]:
+    rows = connection.execute(
+        "SELECT web_post_id, platform_post_id, status FROM repair_items ORDER BY web_post_id"
+    ).fetchall()
+    if source_limit:
+        rows = rows[:source_limit]
+    if only_ids:
+        rows = [row for row in rows if str(row["platform_post_id"]) in only_ids]
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row["status"])
+        counts[status] = counts.get(status, 0) + 1
+    for status in (*REPAIRABLE_STATUSES, *TERMINAL_STATUSES):
+        counts.setdefault(status, 0)
+    counts["total"] = len(rows)
+    return counts
+
+
+def fetch_repair_article_detail(
+    post_id: str,
+    cookie_header: str,
+) -> tuple[dict[str, Any], int, float]:
+    """Make one detail request so a rate-limit response freezes the whole run."""
+
+    return fetch_bilibili_article_detail(post_id, cookie_header), 1, 0.0
 
 
 def active_global_cooldown(connection: sqlite3.Connection) -> dict[str, str] | None:
@@ -1058,6 +1101,7 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
             else selected_items(
                 state_connection,
                 max_items=config.max_items,
+                source_limit=config.source_limit,
                 only_ids=config.only_ids,
             )
         )
@@ -1065,6 +1109,11 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
             "started_at": utc_now(),
             "selected_count": len(selected),
             "selected_ids": [str(item["platform_post_id"]) for item in selected],
+            "scope_status_counts": scoped_state_counts(
+                state_connection,
+                source_limit=config.source_limit,
+                only_ids=config.only_ids,
+            ),
             "updated": 0,
             "reconciled": 0,
             "invalid_detail": 0,
@@ -1136,7 +1185,7 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
                         time.sleep(applied_pacing)
                 mark_attempt(state_connection, item)
                 try:
-                    detail, attempts, retry_wait = fetch_bilibili_article_detail_with_retry(
+                    detail, attempts, retry_wait = fetch_repair_article_detail(
                         str(item["platform_post_id"]),
                         cookie_header,
                     )
@@ -1232,6 +1281,11 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
                     )
 
         final_invariants = assert_external_invariants(config.db_path, meta)
+        invocation["scope_status_counts"] = scoped_state_counts(
+            state_connection,
+            source_limit=config.source_limit,
+            only_ids=config.only_ids,
+        )
         invocation["finished_at"] = utc_now()
         report_path = write_report(
             config,
@@ -1291,6 +1345,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--session-pause-min", type=float, default=8.0)
     parser.add_argument("--session-pause-max", type=float, default=15.0)
     parser.add_argument("--retry-delay-seconds", type=int, default=300)
+    parser.add_argument(
+        "--source-limit",
+        type=int,
+        default=0,
+        help="restrict a pilot to the first N source-manifest rows (0 means all)",
+    )
     parser.add_argument("--only-ids-file")
     return parser.parse_args()
 
@@ -1309,6 +1369,8 @@ def main() -> int:
         raise SystemExit("--state-db is required unless --create-backup is used")
     if args.max_items <= 0 or args.session_size <= 0:
         raise SystemExit("--max-items and --session-size must be positive")
+    if args.source_limit < 0:
+        raise SystemExit("--source-limit cannot be negative")
     if min(
         args.pacing_min,
         args.pacing_max,
@@ -1343,6 +1405,7 @@ def main() -> int:
         session_pause_min=min(args.session_pause_min, args.session_pause_max),
         session_pause_max=max(args.session_pause_min, args.session_pause_max),
         retry_delay_seconds=int(args.retry_delay_seconds),
+        source_limit=int(args.source_limit),
         only_ids=load_only_ids(args.only_ids_file),
     )
     ensure_dir(BILIBILI_REPAIR_RUNTIME_ROOT)
