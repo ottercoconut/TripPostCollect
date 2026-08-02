@@ -198,6 +198,46 @@ def test_source_limit_restricts_pilot_scope(tmp_path: Path) -> None:
     assert result["scope_status_counts"]["pending"] == 2
 
 
+def test_retryable_selection_uses_oldest_due_time(tmp_path: Path) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=3)
+    backup = tmp_path / "backup.sqlite"
+    repair.create_online_backup(target, backup)
+    state = tmp_path / "state.sqlite"
+    config = config_for(
+        target,
+        state,
+        backup,
+        tmp_path / "reports",
+        apply=False,
+        expected_sha256=repair.sha256_file(target),
+    )
+    repair.run_repair(config)
+    with repair.sqlite_connect(state) as connection:
+        rows = connection.execute(
+            "SELECT web_post_id FROM repair_items ORDER BY web_post_id"
+        ).fetchall()
+        due_times = (
+            "2026-01-03T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-02T00:00:00+00:00",
+        )
+        for row, due_time in zip(rows, due_times, strict=True):
+            connection.execute(
+                "UPDATE repair_items SET status='retryable', next_retry_at=? WHERE web_post_id=?",
+                (due_time, int(row["web_post_id"])),
+            )
+        connection.commit()
+        selected = repair.selected_items(
+            connection,
+            max_items=3,
+            source_limit=0,
+            only_ids=frozenset(),
+        )
+
+    assert [str(row["platform_post_id"]) for row in selected] == ["1002", "1003", "1001"]
+
+
 def test_apply_updates_same_rows_and_is_idempotent(monkeypatch, tmp_path: Path) -> None:
     target = tmp_path / "target.sqlite"
     create_target(target)

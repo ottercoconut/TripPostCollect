@@ -559,7 +559,9 @@ def selected_items(
         FROM repair_items
         WHERE status='pending'
            OR (status='retryable' AND COALESCE(next_retry_at, '') <= ?)
-        ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, web_post_id
+        ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,
+                 CASE WHEN status='retryable' THEN COALESCE(next_retry_at, '') ELSE '' END,
+                 web_post_id
         """,
         (now,),
     ).fetchall()
