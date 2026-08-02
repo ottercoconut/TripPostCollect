@@ -19,6 +19,7 @@ if str(SCRIPTS) not in sys.path:
 
 repair = import_module("repair_bilibili_articles")
 promotion = import_module("promote_bilibili_repair_results")
+supervisor = import_module("run_bilibili_full_repair_supervisor")
 
 
 def create_target(path: Path, count: int = 2) -> None:
@@ -694,6 +695,152 @@ def test_article_api_login_code_stops_without_invalidating_item(
             "SELECT status, last_error_type, last_error_code FROM repair_items"
         ).fetchone()
     assert row == ("pending", "login_required", -101)
+
+
+def test_incremental_promotion_and_target_state_clone(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=2)
+    backup = tmp_path / "backup.sqlite"
+    staged = tmp_path / "staged.sqlite"
+    repair.create_online_backup(target, backup)
+    repair.create_online_backup(target, staged)
+    state = tmp_path / "state.sqlite"
+    repair_config = config_for(
+        staged,
+        state,
+        backup,
+        tmp_path / "repair-reports",
+        apply=True,
+        expected_sha256=repair.sha256_file(staged),
+    )
+    monkeypatch.setattr(repair, "fetch_repair_article_detail", fake_detail)
+
+    first_code, first_result = repair.run_repair(
+        replace(repair_config, max_items=1)
+    )
+    assert first_code == 0
+    assert first_result["updated"] == 1
+    first_promotion = promotion.PromotionConfig(
+        target_db_path=target,
+        staged_db_path=staged,
+        state_db_path=state,
+        backup_path=backup,
+        report_dir=tmp_path / "promotion-reports",
+        expected_target_sha256=repair.sha256_file(target),
+        apply=True,
+        confirm_default_db_promotion=False,
+    )
+    _, first_promoted = promotion.run_promotion(first_promotion)
+    assert first_promoted["promoted_count"] == 1
+    assert first_promoted["already_promoted_count"] == 0
+
+    second_code, second_result = repair.run_repair(repair_config)
+    assert second_code == 0
+    assert second_result["updated"] == 1
+    second_promotion = replace(
+        first_promotion,
+        expected_target_sha256=repair.sha256_file(target),
+    )
+    _, second_promoted = promotion.run_promotion(second_promotion)
+    assert second_promoted["promoted_count"] == 1
+    assert second_promoted["already_promoted_count"] == 1
+
+    cloned_state = tmp_path / "full-state.sqlite"
+    clone = promotion.clone_repair_state_for_target(
+        source_state_path=state,
+        destination_state_path=cloned_state,
+        staged_db_path=staged,
+        target_db_path=target,
+    )
+
+    assert clone["cloned_validation"]["ok"] is True
+    with repair.sqlite_connect(cloned_state, readonly=True) as connection:
+        meta = repair.meta_values(connection)
+        counts = repair.state_counts(connection)
+    assert meta["target_db_path"] == str(target.resolve())
+    assert meta["cloned_from_state_db"] == str(state.resolve())
+    assert counts["succeeded"] == 2
+
+
+def test_supervisor_promotes_pilot_and_prepares_full_state(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=2)
+    source_backup = tmp_path / "source-backup.sqlite"
+    pilot = tmp_path / "pilot.sqlite"
+    repair.create_online_backup(target, source_backup)
+    repair.create_online_backup(target, pilot)
+    pilot_state = tmp_path / "pilot-state.sqlite"
+    pilot_config = config_for(
+        pilot,
+        pilot_state,
+        source_backup,
+        tmp_path / "pilot-reports",
+        apply=True,
+        expected_sha256=repair.sha256_file(pilot),
+    )
+    monkeypatch.setattr(repair, "fetch_repair_article_detail", fake_detail)
+    repair_code, repair_result = repair.run_repair(pilot_config)
+    assert repair_code == 0
+    assert repair_result["updated"] == 2
+
+    continuous_calls = 0
+
+    def completed_repair(config, *, stop_when_scope_attempted):
+        nonlocal continuous_calls
+        continuous_calls += 1
+        return 0, {
+            "scope_status_counts": {
+                "pending": 0,
+                "retryable": 0,
+                "succeeded": 2,
+                "total": 2,
+            }
+        }
+
+    monkeypatch.setattr(supervisor, "run_continuous_repair", completed_repair)
+    config = supervisor.SupervisorConfig(
+        pilot_db_path=pilot,
+        pilot_state_path=pilot_state,
+        source_backup_path=source_backup,
+        target_db_path=target,
+        expected_target_sha256=repair.sha256_file(target),
+        pre_full_backup_path=tmp_path / "pre-full.sqlite",
+        full_state_path=tmp_path / "full-state.sqlite",
+        pilot_report_dir=tmp_path / "pilot-reports",
+        promotion_report_dir=tmp_path / "promotion-reports",
+        full_report_dir=tmp_path / "full-reports",
+        supervisor_report_path=tmp_path / "supervisor.json",
+        confirm_default_db_full_repair=False,
+        source_limit=2,
+        max_items=2,
+        session_size=1,
+        pacing_min=0,
+        pacing_max=0,
+        session_pause_min=0,
+        session_pause_max=0,
+        retry_delay_seconds=0,
+    )
+
+    return_code = supervisor.run_supervisor(config)
+    resume_code = supervisor.run_supervisor(config)
+
+    assert return_code == resume_code == 0
+    assert continuous_calls == 3
+    assert config.pre_full_backup_path.is_file()
+    assert config.full_state_path.is_file()
+    payload = json.loads(config.supervisor_report_path.read_text())
+    assert payload["stage"] == "completed"
+    assert payload["status"] == "completed"
+    with sqlite3.connect(target) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM web_posts WHERE content_text LIKE '第一段完整正文%'"
+        ).fetchone()[0] == 2
 
 
 def test_optimistic_lock_conflict_does_not_overwrite(monkeypatch, tmp_path: Path) -> None:

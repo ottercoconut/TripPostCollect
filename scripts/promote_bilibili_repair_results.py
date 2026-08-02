@@ -16,6 +16,7 @@ from repair_bilibili_articles import (
     build_source_manifest,
     control_plane_fingerprint,
     current_image_rows,
+    create_online_backup,
     existing_target_row,
     git_commit,
     json_text,
@@ -123,17 +124,25 @@ def verify_inputs(
     if not target_checks["ok"] or not staged_checks["ok"] or not backup_checks["ok"]:
         raise RuntimeError("target, staged, or backup SQLite validation failed")
 
-    target_manifest, target_manifest_sha256 = build_source_manifest(
-        config.target_db_path
-    )
+    target_manifest, target_manifest_sha256 = build_source_manifest(config.target_db_path)
     backup_manifest, backup_manifest_sha256 = build_source_manifest(config.backup_path)
     source_manifest_sha256 = meta["source_manifest_sha256"]
-    if target_manifest_sha256 != source_manifest_sha256:
-        raise RuntimeError("target database no longer matches the repair source manifest")
     if backup_manifest_sha256 != source_manifest_sha256:
         raise RuntimeError("backup database does not match the repair source manifest")
     if len(target_manifest) != int(meta["source_count"]):
         raise RuntimeError("target Bilibili row count differs from repair source")
+
+    target_validation = validate_incremental_target(
+        config.target_db_path,
+        config.staged_db_path,
+        state_connection,
+        meta,
+    )
+    if not target_validation["ok"]:
+        raise RuntimeError(
+            f"target is neither original nor previously promoted: {target_validation}"
+        )
+    external_invariants = assert_external_invariants(config.target_db_path, meta)
 
     idle = control_plane_is_idle(config.target_db_path)
     if not idle["ok"]:
@@ -149,6 +158,8 @@ def verify_inputs(
         "staged_sqlite": staged_checks,
         "backup_sqlite": backup_checks,
         "control_plane_idle": idle,
+        "target_incremental_validation": target_validation,
+        "external_invariants": external_invariants,
     }
 
 
@@ -171,17 +182,105 @@ def original_row_matches(
     )
 
 
+def repaired_row_matches(
+    target_connection: sqlite3.Connection,
+    staged_connection: sqlite3.Connection,
+    item: sqlite3.Row,
+) -> bool:
+    web_post_id = int(item["web_post_id"])
+    target_row = existing_target_row(target_connection, web_post_id)
+    staged_row = existing_target_row(staged_connection, web_post_id)
+    target_urls = repaired_content_image_urls(target_connection, web_post_id)
+    staged_urls = repaired_content_image_urls(staged_connection, web_post_id)
+    return (
+        str(target_row["platform_post_id"]) == str(item["platform_post_id"])
+        and str(staged_row["platform_post_id"]) == str(item["platform_post_id"])
+        and sha256_text(str(target_row["content_text"] or ""))
+        == str(item["repaired_content_sha256"])
+        and sha256_text(json_text(target_urls))
+        == str(item["repaired_images_sha256"])
+        and str(target_row["raw_sample_json"] or "")
+        == str(staged_row["raw_sample_json"] or "")
+        and target_urls == staged_urls
+        and target_row["keyword"] == item["original_keyword"]
+        and target_row["canonical_url"] == item["original_canonical_url"]
+        and target_row["artifact_dir"] == item["original_artifact_dir"]
+    )
+
+
+def validate_incremental_target(
+    target_path: Path,
+    staged_path: Path,
+    state_connection: sqlite3.Connection,
+    meta: dict[str, str],
+) -> dict[str, Any]:
+    original_count = 0
+    already_promoted_count = 0
+    error_count = 0
+    errors: list[dict[str, Any]] = []
+
+    def fail(item: sqlite3.Row, reason: str) -> None:
+        nonlocal error_count
+        error_count += 1
+        if len(errors) < 50:
+            errors.append(
+                {
+                    "web_post_id": int(item["web_post_id"]),
+                    "platform_post_id": str(item["platform_post_id"]),
+                    "status": str(item["status"]),
+                    "reason": reason,
+                }
+            )
+
+    with sqlite_connect(target_path, readonly=True) as target_connection:
+        with sqlite_connect(staged_path, readonly=True) as staged_connection:
+            for item in state_connection.execute(
+                "SELECT * FROM repair_items ORDER BY web_post_id"
+            ):
+                status = str(item["status"])
+                if status == "succeeded" and repaired_row_matches(
+                    target_connection,
+                    staged_connection,
+                    item,
+                ):
+                    already_promoted_count += 1
+                elif original_row_matches(target_connection, item):
+                    original_count += 1
+                elif status == "conflict":
+                    fail(item, "target_conflict_item_changed")
+                else:
+                    fail(item, "target_row_matches_neither_original_nor_staged")
+
+    return {
+        "ok": error_count == 0,
+        "source_count": int(meta["source_count"]),
+        "original_count": original_count,
+        "already_promoted_count": already_promoted_count,
+        "error_count": error_count,
+        "errors": errors,
+    }
+
+
 def promote_successes(
     config: PromotionConfig,
     state_connection: sqlite3.Connection,
     items: list[sqlite3.Row],
-) -> int:
+) -> dict[str, int]:
+    promoted_count = 0
+    already_promoted_count = 0
     with sqlite_connect(config.staged_db_path, readonly=True) as staged_connection:
         with sqlite_connect(config.target_db_path) as target_connection:
             target_connection.execute("BEGIN IMMEDIATE")
             try:
                 for item in items:
                     web_post_id = int(item["web_post_id"])
+                    if repaired_row_matches(
+                        target_connection,
+                        staged_connection,
+                        item,
+                    ):
+                        already_promoted_count += 1
+                        continue
                     if not original_row_matches(target_connection, item):
                         raise RuntimeError(
                             f"target row {web_post_id} changed after the repair manifest"
@@ -259,6 +358,7 @@ def promote_successes(
                             for image in content_images
                         ],
                     )
+                    promoted_count += 1
 
                 for item in items:
                     web_post_id = int(item["web_post_id"])
@@ -280,7 +380,83 @@ def promote_successes(
             except Exception:
                 target_connection.rollback()
                 raise
-    return len(items)
+    return {
+        "promoted_count": promoted_count,
+        "already_promoted_count": already_promoted_count,
+    }
+
+
+def clone_repair_state_for_target(
+    *,
+    source_state_path: Path,
+    destination_state_path: Path,
+    staged_db_path: Path,
+    target_db_path: Path,
+) -> dict[str, Any]:
+    if destination_state_path.exists():
+        raise RuntimeError(
+            f"destination repair state already exists: {destination_state_path}"
+        )
+    with sqlite_connect(source_state_path, readonly=True) as state_connection:
+        meta = meta_values(state_connection)
+        if meta.get("target_db_path") != str(staged_db_path.resolve()):
+            raise RuntimeError("source repair state does not belong to staged database")
+        staged_validation = repair_state_validation(
+            staged_db_path,
+            state_connection,
+            meta,
+        )
+        target_validation = repair_state_validation(
+            target_db_path,
+            state_connection,
+            meta,
+        )
+        if not staged_validation["ok"] or not target_validation["ok"]:
+            raise RuntimeError(
+                "staged or promoted target validation failed before state clone"
+            )
+        external_invariants = assert_external_invariants(target_db_path, meta)
+    backup = create_online_backup(source_state_path, destination_state_path)
+    with sqlite_connect(destination_state_path) as clone_connection:
+        clone_connection.execute(
+            """
+            INSERT INTO repair_meta(key, value) VALUES ('target_db_path', ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (str(target_db_path.resolve()),),
+        )
+        clone_connection.executemany(
+            """
+            INSERT INTO repair_meta(key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            [
+                ("cloned_from_state_db", str(source_state_path.resolve())),
+                ("cloned_from_staged_db", str(staged_db_path.resolve())),
+                ("cloned_at", utc_now()),
+                ("cloned_by_code_commit", git_commit()),
+                ("target_db_sha256_at_clone", sha256_file(target_db_path)),
+            ],
+        )
+        clone_connection.commit()
+        cloned_meta = meta_values(clone_connection)
+        cloned_validation = repair_state_validation(
+            target_db_path,
+            clone_connection,
+            cloned_meta,
+        )
+    if not cloned_validation["ok"]:
+        raise RuntimeError("cloned repair state failed target validation")
+    return {
+        "source_state": str(source_state_path.resolve()),
+        "destination_state": str(destination_state_path.resolve()),
+        "target_db": str(target_db_path.resolve()),
+        "backup": backup,
+        "staged_validation": staged_validation,
+        "target_validation": target_validation,
+        "cloned_validation": cloned_validation,
+        "external_invariants": external_invariants,
+    }
 
 
 def write_report(config: PromotionConfig, payload: dict[str, Any]) -> Path:
@@ -323,7 +499,7 @@ def run_promotion(config: PromotionConfig) -> tuple[int, dict[str, Any]]:
 
         before_control = control_plane_fingerprint(config.target_db_path)
         before_non_bilibili = non_bilibili_fingerprint(config.target_db_path)
-        promoted_count = promote_successes(config, state_connection, items)
+        promotion_counts = promote_successes(config, state_connection, items)
         if control_plane_fingerprint(config.target_db_path) != before_control:
             raise RuntimeError("crawl control plane changed during promotion")
         if non_bilibili_fingerprint(config.target_db_path) != before_non_bilibili:
@@ -341,7 +517,7 @@ def run_promotion(config: PromotionConfig) -> tuple[int, dict[str, Any]]:
         payload.update(
             {
                 "status": "completed",
-                "promoted_count": promoted_count,
+                **promotion_counts,
                 "finished_at": utc_now(),
                 "target": target_summary(config.target_db_path),
                 "target_validation": target_validation,
