@@ -1,8 +1,8 @@
 # B站 article
 
-> **修复状态（2026-08-02）：** 新抓取路径已改为先发现 article ID，再取得详情正文和正文图片；
-> 130 项项目测试及 3 条真实 `--no-import` 小样通过。该结论只适用于修复后的新产物；默认库中
-> 既有 3,009 条摘要记录仍未回填，不得报告为完整正文。事件证据见
+> **修复状态（2026-08-03）：** 新抓取路径已改为先发现 article ID，再取得详情正文和正文图片；
+> 148 项项目测试及 3 条真实 `--no-import` 小样通过。默认库已原位回写 20 条逐条验收成功项，
+> 其余 2,989 条仍不得报告为完整正文。事件证据见
 > [`2026-08-02-bilibili-article-completeness.md`](../incidents/2026-08-02-bilibili-article-completeness.md)，
 > 全库回填步骤见
 > [`2026-08-02-bilibili-full-library-repair.md`](../plans/2026-08-02-bilibili-full-library-repair.md)。
