@@ -1506,6 +1506,16 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
                     )
 
         final_invariants = assert_external_invariants(config.db_path, meta)
+        cooldown_after_batch = (
+            active_global_cooldown(
+                state_connection,
+                base_delay_seconds=config.retry_delay_seconds,
+            )
+            if config.apply
+            else None
+        )
+        if cooldown_after_batch:
+            invocation["global_cooldown"] = cooldown_after_batch
         invocation["scope_status_counts"] = scoped_state_counts(
             state_connection,
             source_limit=config.source_limit,
@@ -1521,6 +1531,69 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
         )
         invocation["report_path"] = str(report_path)
         return return_code, invocation
+
+
+def continuous_wait_seconds(
+    result: dict[str, Any],
+    config: RepairConfig,
+) -> float:
+    cooldown = result.get("global_cooldown")
+    if isinstance(cooldown, dict) and cooldown.get("next_request_at"):
+        deadline = datetime.fromisoformat(str(cooldown["next_request_at"]))
+        if deadline.tzinfo is None:
+            raise RuntimeError("continuous cooldown deadline must include a timezone")
+        return max(1.0, (deadline - datetime.now(UTC)).total_seconds() + 1.0)
+    return max(1.0, random.uniform(config.pacing_min, config.pacing_max))
+
+
+def run_continuous_repair(
+    config: RepairConfig,
+    *,
+    stop_when_scope_attempted: bool,
+) -> tuple[int, dict[str, Any]]:
+    if not config.apply:
+        raise RuntimeError("--continuous requires --apply")
+    while True:
+        return_code, result = run_repair(config)
+        print(json_text(result, pretty=True), flush=True)
+        scope = result.get("scope_status_counts") or {}
+        pending = int(scope.get("pending") or 0)
+        retryable = int(scope.get("retryable") or 0)
+        if pending == 0 and (stop_when_scope_attempted or retryable == 0):
+            result["continuous_stop_reason"] = (
+                "scope_attempted"
+                if stop_when_scope_attempted and retryable > 0
+                else "scope_terminal"
+            )
+            print(
+                json_text(
+                    {
+                        "continuous_stop_reason": result["continuous_stop_reason"],
+                        "scope_status_counts": scope,
+                    },
+                    pretty=True,
+                ),
+                flush=True,
+            )
+            return 0, result
+        if return_code not in {0, 2, 3}:
+            return return_code, result
+        wait_seconds = continuous_wait_seconds(result, config)
+        print(
+            json_text(
+                {
+                    "continuous_wait_seconds": round(wait_seconds, 3),
+                    "pending": pending,
+                    "retryable": retryable,
+                    "next_request_at": (
+                        (result.get("global_cooldown") or {}).get("next_request_at")
+                    ),
+                },
+                pretty=True,
+            ),
+            flush=True,
+        )
+        time.sleep(wait_seconds)
 
 
 @contextmanager
@@ -1577,6 +1650,8 @@ def parse_args() -> argparse.Namespace:
         help="restrict a pilot to the first N source-manifest rows (0 means all)",
     )
     parser.add_argument("--only-ids-file")
+    parser.add_argument("--continuous", action="store_true")
+    parser.add_argument("--stop-when-scope-attempted", action="store_true")
     return parser.parse_args()
 
 
@@ -1596,6 +1671,8 @@ def main() -> int:
         raise SystemExit("--max-items and --session-size must be positive")
     if args.source_limit < 0:
         raise SystemExit("--source-limit cannot be negative")
+    if args.stop_when_scope_attempted and not args.continuous:
+        raise SystemExit("--stop-when-scope-attempted requires --continuous")
     if min(
         args.pacing_min,
         args.pacing_max,
@@ -1635,8 +1712,14 @@ def main() -> int:
     )
     ensure_dir(BILIBILI_REPAIR_RUNTIME_ROOT)
     with repair_lock(state_path):
-        return_code, result = run_repair(config)
-    print(json_text(result, pretty=True))
+        if args.continuous:
+            return_code, result = run_continuous_repair(
+                config,
+                stop_when_scope_attempted=bool(args.stop_when_scope_attempted),
+            )
+        else:
+            return_code, result = run_repair(config)
+            print(json_text(result, pretty=True))
     return return_code
 
 

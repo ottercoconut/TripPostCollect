@@ -486,6 +486,47 @@ def test_successful_detail_resets_global_retryable_streak(
     assert reset_events == 1
 
 
+def test_continuous_pilot_stops_when_scope_has_been_attempted(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=1)
+    config = config_for(
+        target,
+        tmp_path / "state.sqlite",
+        tmp_path / "backup.sqlite",
+        tmp_path / "reports",
+        apply=True,
+        expected_sha256=repair.sha256_file(target),
+    )
+    calls = 0
+
+    def completed_scope(value):
+        nonlocal calls
+        calls += 1
+        return 2, {
+            "scope_status_counts": {"pending": 0, "retryable": 1},
+            "global_cooldown": {"next_request_at": "2099-01-01T00:00:00+00:00"},
+        }
+
+    monkeypatch.setattr(repair, "run_repair", completed_scope)
+    monkeypatch.setattr(
+        repair.time,
+        "sleep",
+        lambda seconds: (_ for _ in ()).throw(AssertionError("unexpected sleep")),
+    )
+
+    return_code, result = repair.run_continuous_repair(
+        config,
+        stop_when_scope_attempted=True,
+    )
+
+    assert return_code == 0
+    assert result["continuous_stop_reason"] == "scope_attempted"
+    assert calls == 1
+
+
 def test_optimistic_lock_conflict_does_not_overwrite(monkeypatch, tmp_path: Path) -> None:
     target = tmp_path / "target.sqlite"
     create_target(target, count=1)
