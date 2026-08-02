@@ -325,6 +325,9 @@ def test_apply_updates_same_rows_and_is_idempotent(monkeypatch, tmp_path: Path) 
         ("https://example.test/detail-1001.jpg",),
         ("https://example.test/detail-1002.jpg",),
     ]
+    latest_report = json.loads((config.report_dir / "latest.json").read_text())
+    assert latest_report["repair_state_validation"]["ok"] is True
+    assert latest_report["repair_state_validation"]["checked_succeeded"] == 2
 
 
 def test_retryable_failure_preserves_original_row(monkeypatch, tmp_path: Path) -> None:
@@ -380,6 +383,9 @@ def test_retryable_failure_preserves_original_row(monkeypatch, tmp_path: Path) -
         assert connection.execute(
             "SELECT value FROM repair_meta WHERE key='global_retryable_streak'"
         ).fetchone()[0] == "1"
+    latest_report = json.loads((config.report_dir / "latest.json").read_text())
+    assert latest_report["repair_state_validation"]["ok"] is True
+    assert latest_report["repair_state_validation"]["checked_untouched"] == 1
 
 
 def test_consecutive_retryable_failures_double_global_cooldown(

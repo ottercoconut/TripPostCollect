@@ -1125,6 +1125,107 @@ def target_summary(path: Path) -> dict[str, Any]:
     }
 
 
+def repair_state_validation(
+    path: Path,
+    state_connection: sqlite3.Connection,
+    meta: dict[str, str],
+) -> dict[str, Any]:
+    errors: list[dict[str, Any]] = []
+    error_count = 0
+    checked_succeeded = 0
+    checked_untouched = 0
+    skipped_conflicts = 0
+
+    def fail(item: sqlite3.Row, reason: str) -> None:
+        nonlocal error_count
+        error_count += 1
+        if len(errors) < 50:
+            errors.append(
+                {
+                    "web_post_id": int(item["web_post_id"]),
+                    "platform_post_id": str(item["platform_post_id"]),
+                    "status": str(item["status"]),
+                    "reason": reason,
+                }
+            )
+
+    with sqlite_connect(path, readonly=True) as target_connection:
+        for item in state_connection.execute(
+            "SELECT * FROM repair_items ORDER BY web_post_id"
+        ):
+            try:
+                row = existing_target_row(
+                    target_connection,
+                    int(item["web_post_id"]),
+                )
+            except RuntimeError:
+                fail(item, "missing_target_row")
+                continue
+            current_images = current_image_rows(
+                target_connection,
+                int(item["web_post_id"]),
+            )
+            current_content_sha = sha256_text(str(row["content_text"] or ""))
+            current_raw_sha = sha256_text(str(row["raw_sample_json"] or ""))
+            current_images_sha = sha256_text(json_text(current_images))
+            preserved_fields = (
+                row["keyword"] == item["original_keyword"]
+                and row["canonical_url"] == item["original_canonical_url"]
+                and row["artifact_dir"] == item["original_artifact_dir"]
+            )
+            if not preserved_fields:
+                fail(item, "preserved_source_fields_changed")
+                continue
+
+            status = str(item["status"])
+            if status == "succeeded":
+                checked_succeeded += 1
+                raw = read_json_object(row["raw_sample_json"])
+                evidence = raw.get("bilibili_history_repair")
+                content_urls = repaired_content_image_urls(
+                    target_connection,
+                    int(item["web_post_id"]),
+                )
+                repaired_images_sha = sha256_text(json_text(content_urls))
+                if not isinstance(evidence, dict) or evidence.get("run_id") != meta["run_id"]:
+                    fail(item, "missing_or_foreign_repair_evidence")
+                elif raw.get("content_detail_status") != "detail_observed":
+                    fail(item, "content_detail_not_observed")
+                elif raw.get("content_detail_source") != "article_view_api":
+                    fail(item, "untrusted_detail_source")
+                elif current_content_sha != item["repaired_content_sha256"]:
+                    fail(item, "repaired_content_hash_mismatch")
+                elif repaired_images_sha != item["repaired_images_sha256"]:
+                    fail(item, "repaired_image_hash_mismatch")
+                elif int(row["post_images_count"] or 0) != len(content_urls):
+                    fail(item, "target_content_image_count_mismatch")
+                elif int(item["detail_image_count"] or 0) != len(content_urls):
+                    fail(item, "state_content_image_count_mismatch")
+                elif int(item["detail_content_length"] or 0) != len(
+                    str(row["content_text"] or "")
+                ):
+                    fail(item, "state_content_length_mismatch")
+            elif status == "conflict":
+                skipped_conflicts += 1
+            else:
+                checked_untouched += 1
+                if current_content_sha != item["original_content_sha256"]:
+                    fail(item, "failed_or_pending_content_changed")
+                elif current_raw_sha != item["original_raw_sha256"]:
+                    fail(item, "failed_or_pending_raw_changed")
+                elif current_images_sha != item["original_images_sha256"]:
+                    fail(item, "failed_or_pending_images_changed")
+
+    return {
+        "ok": not errors,
+        "checked_succeeded": checked_succeeded,
+        "checked_untouched": checked_untouched,
+        "skipped_conflicts": skipped_conflicts,
+        "error_count": error_count,
+        "errors": errors,
+    }
+
+
 def write_report(
     config: RepairConfig,
     state_connection: sqlite3.Connection,
@@ -1149,6 +1250,11 @@ def write_report(
         "invocation": invocation,
         "status_counts": state_counts(state_connection),
         "target": target_summary(config.db_path),
+        "repair_state_validation": repair_state_validation(
+            config.db_path,
+            state_connection,
+            meta,
+        ),
         "external_invariants": invariants,
     }
     report_path = report_dir / f"report_{utc_stamp()}.json"
