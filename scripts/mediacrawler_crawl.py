@@ -63,6 +63,7 @@ from browser_runtime import browser_launch_environment, browser_runtime_args
 ROOT = PROJECT_ROOT
 DEFAULT_OUTPUT = MEDIACRAWLER_RUNS_OUTPUT
 COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
+XHS_OPERATOR_LOGIN_WAIT_SECONDS = 600
 BILIBILI_ARTICLE_SEARCH_URL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
 BILIBILI_RELATION_STAT_URL = "https://api.bilibili.com/x/relation/stat"
 BILIBILI_ARTICLE_PAGE_SIZE = 20
@@ -2351,7 +2352,9 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
                 ),
                 "TRIPPOSTCOLLECT_XHS_POST_INTERACTION": str(args.xhs_post_interaction),
                 "TRIPPOSTCOLLECT_XHS_INITIAL_SETTLE_SECONDS": "12",
-                "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS": "180" if args.headed else "0",
+                "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS": (
+                    str(XHS_OPERATOR_LOGIN_WAIT_SECONDS) if args.headed else "0"
+                ),
                 "TRIPPOSTCOLLECT_XHS_NAVIGATION_DEADLINE_SECONDS": "60",
                 "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS": "600",
                 "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_POLL_SECONDS": "2",

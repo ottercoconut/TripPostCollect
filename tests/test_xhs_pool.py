@@ -199,6 +199,10 @@ def test_manual_xhs_login_lease_covers_both_operator_waits() -> None:
     assert xhs_login.login_lease_seconds(600) == 1_500
 
 
+def test_formal_xhs_operator_login_wait_matches_documented_window() -> None:
+    assert mediacrawler_crawl.XHS_OPERATOR_LOGIN_WAIT_SECONDS == 600
+
+
 def test_xhs_runner_reads_login_required_from_structured_child_summary() -> None:
     child_summary = {
         "records": [
