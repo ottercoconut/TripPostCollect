@@ -28,8 +28,9 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 
 - 2026-08-02 确认 B站正式 article 分支曾把搜索摘要误当完整正文；影响范围、证据、修复阶段和
   历史回填边界见 [B站 article 正文完整性事件](incidents/2026-08-02-bilibili-article-completeness.md)。
-  新抓取详情逻辑已通过测试与 3 条真实 `--no-import` 小样；既有 3,009 条仍不得报告为完整正文，
-  后续按 [B站全库记录修复计划](plans/2026-08-02-bilibili-full-library-repair.md) 独立回填。
+  新抓取详情逻辑已通过测试与 3 条真实 `--no-import` 小样。2026-08-03 已把临时库中逐条验收通过的
+  20 条结果原位回写默认库；剩余 2,989 条仍不得报告为完整正文，后续继续按
+  [B站全库记录修复计划](plans/2026-08-02-bilibili-full-library-repair.md) 独立回填。
 
 ## 正式入口
 
