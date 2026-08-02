@@ -238,6 +238,49 @@ def test_retryable_selection_uses_oldest_due_time(tmp_path: Path) -> None:
     assert [str(row["platform_post_id"]) for row in selected] == ["1002", "1003", "1001"]
 
 
+def test_legacy_state_migrates_trailing_retryables_to_exponential_cooldown(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=1)
+    backup = tmp_path / "backup.sqlite"
+    repair.create_online_backup(target, backup)
+    state = tmp_path / "state.sqlite"
+    config = config_for(
+        target,
+        state,
+        backup,
+        tmp_path / "reports",
+        apply=False,
+        expected_sha256=repair.sha256_file(target),
+    )
+    repair.run_repair(config)
+    before = repair.datetime.now(repair.UTC)
+    with repair.sqlite_connect(state) as connection:
+        repair.add_event(connection, "retryable")
+        repair.add_event(connection, "retryable")
+        repair.set_meta(
+            connection,
+            {
+                "global_next_request_at": (
+                    before + repair.timedelta(seconds=300)
+                ).isoformat(timespec="seconds"),
+                "global_cooldown_reason": "legacy-test",
+            },
+        )
+        connection.commit()
+        cooldown = repair.active_global_cooldown(
+            connection,
+            base_delay_seconds=300,
+        )
+        meta = repair.meta_values(connection)
+
+    assert cooldown is not None
+    assert meta["global_retryable_streak"] == "2"
+    deadline = repair.datetime.fromisoformat(meta["global_next_request_at"])
+    assert (deadline - before).total_seconds() >= 599
+
+
 def test_apply_updates_same_rows_and_is_idempotent(monkeypatch, tmp_path: Path) -> None:
     target = tmp_path / "target.sqlite"
     create_target(target)
@@ -334,6 +377,107 @@ def test_retryable_failure_preserves_original_row(monkeypatch, tmp_path: Path) -
         assert connection.execute(
             "SELECT value FROM repair_meta WHERE key='global_next_request_at'"
         ).fetchone()[0]
+        assert connection.execute(
+            "SELECT value FROM repair_meta WHERE key='global_retryable_streak'"
+        ).fetchone()[0] == "1"
+
+
+def test_consecutive_retryable_failures_double_global_cooldown(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=1)
+    baseline = repair.sha256_file(target)
+    backup = tmp_path / "backup.sqlite"
+    repair.create_online_backup(target, backup)
+    config = replace(
+        config_for(
+            target,
+            tmp_path / "state.sqlite",
+            backup,
+            tmp_path / "reports",
+            apply=True,
+            expected_sha256=baseline,
+        ),
+        retry_delay_seconds=300,
+    )
+
+    def fail(post_id, cookie_header):
+        raise repair.BilibiliArticleDetailError(
+            "rate limited",
+            retryable=True,
+            code=-509,
+            attempts=1,
+        )
+
+    monkeypatch.setattr(repair, "fetch_repair_article_detail", fail)
+    first_code, _ = repair.run_repair(config)
+    with repair.sqlite_connect(config.state_db_path) as connection:
+        connection.execute(
+            "UPDATE repair_meta SET value='2026-01-01T00:00:00+00:00' WHERE key='global_next_request_at'"
+        )
+        connection.execute(
+            "UPDATE repair_items SET next_retry_at='2026-01-01T00:00:00+00:00'"
+        )
+        connection.commit()
+
+    before = repair.datetime.now(repair.UTC)
+    second_code, _ = repair.run_repair(config)
+
+    assert first_code == second_code == 2
+    with repair.sqlite_connect(config.state_db_path) as connection:
+        meta = repair.meta_values(connection)
+    assert meta["global_retryable_streak"] == "2"
+    deadline = repair.datetime.fromisoformat(meta["global_next_request_at"])
+    assert (deadline - before).total_seconds() >= 599
+
+
+def test_successful_detail_resets_global_retryable_streak(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=1)
+    baseline = repair.sha256_file(target)
+    backup = tmp_path / "backup.sqlite"
+    repair.create_online_backup(target, backup)
+    state = tmp_path / "state.sqlite"
+    report_dir = tmp_path / "reports"
+    dry_config = config_for(
+        target,
+        state,
+        backup,
+        report_dir,
+        apply=False,
+        expected_sha256=baseline,
+    )
+    repair.run_repair(dry_config)
+    with repair.sqlite_connect(state) as connection:
+        repair.set_meta(
+            connection,
+            {
+                "global_retryable_streak": 3,
+                "global_next_request_at": "2026-01-01T00:00:00+00:00",
+                "global_cooldown_reason": "test",
+            },
+        )
+        connection.commit()
+    monkeypatch.setattr(repair, "fetch_repair_article_detail", fake_detail)
+
+    return_code, result = repair.run_repair(
+        replace(dry_config, apply=True)
+    )
+
+    assert return_code == 0
+    assert result["updated"] == 1
+    with repair.sqlite_connect(state) as connection:
+        meta = repair.meta_values(connection)
+        reset_events = connection.execute(
+            "SELECT COUNT(*) FROM repair_events WHERE event_type='global_retryable_streak_reset'"
+        ).fetchone()[0]
+    assert meta["global_retryable_streak"] == "0"
+    assert reset_events == 1
 
 
 def test_optimistic_lock_conflict_does_not_overwrite(monkeypatch, tmp_path: Path) -> None:

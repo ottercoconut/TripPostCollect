@@ -611,7 +611,49 @@ def fetch_repair_article_detail(
     return fetch_bilibili_article_detail(post_id, cookie_header), 1, 0.0
 
 
-def active_global_cooldown(connection: sqlite3.Connection) -> dict[str, str] | None:
+def migrate_legacy_retryable_backoff(
+    connection: sqlite3.Connection,
+    *,
+    base_delay_seconds: int,
+) -> None:
+    meta = meta_values(connection)
+    if "global_retryable_streak" in meta:
+        return
+    streak = trailing_retryable_streak(connection)
+    set_meta(connection, {"global_retryable_streak": streak})
+    next_request_at = meta.get("global_next_request_at")
+    latest_failure = connection.execute(
+        "SELECT event_at FROM repair_events WHERE event_type='retryable' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if streak > 0 and next_request_at and latest_failure:
+        failure_at = datetime.fromisoformat(str(latest_failure["event_at"]))
+        if failure_at.tzinfo is None:
+            raise RuntimeError("retryable event_at must include a timezone")
+        multiplier = 2 ** min(streak - 1, 6)
+        effective_delay = min(max(0, base_delay_seconds) * multiplier, 3600)
+        migrated_deadline = (
+            failure_at + timedelta(seconds=effective_delay)
+        ).isoformat(timespec="seconds")
+        if migrated_deadline > next_request_at:
+            set_meta(connection, {"global_next_request_at": migrated_deadline})
+            next_request_at = migrated_deadline
+    add_event(
+        connection,
+        "global_retryable_backoff_migrated",
+        details={"streak": streak, "next_request_at": next_request_at},
+    )
+    connection.commit()
+
+
+def active_global_cooldown(
+    connection: sqlite3.Connection,
+    *,
+    base_delay_seconds: int,
+) -> dict[str, str] | None:
+    migrate_legacy_retryable_backoff(
+        connection,
+        base_delay_seconds=base_delay_seconds,
+    )
     meta = meta_values(connection)
     next_request_at = meta.get("global_next_request_at")
     if not next_request_at:
@@ -637,6 +679,51 @@ def active_global_cooldown(connection: sqlite3.Connection) -> dict[str, str] | N
     )
     connection.commit()
     return None
+
+
+def trailing_retryable_streak(connection: sqlite3.Connection) -> int:
+    streak = 0
+    for row in connection.execute(
+        """
+        SELECT event_type
+        FROM repair_events
+        WHERE event_type IN ('retryable', 'succeeded', 'reconciled_after_commit')
+        ORDER BY id DESC
+        """
+    ):
+        if str(row["event_type"]) != "retryable":
+            break
+        streak += 1
+    return streak
+
+
+def current_retryable_streak(connection: sqlite3.Connection) -> int:
+    value = meta_values(connection).get("global_retryable_streak")
+    if value is None:
+        return trailing_retryable_streak(connection)
+    try:
+        return max(0, int(value))
+    except ValueError as exc:
+        raise RuntimeError("invalid global_retryable_streak in repair state") from exc
+
+
+def reset_global_retryable_streak(connection: sqlite3.Connection) -> None:
+    previous = current_retryable_streak(connection)
+    if previous <= 0:
+        return
+    set_meta(
+        connection,
+        {
+            "global_retryable_streak": 0,
+            "global_retryable_last_success_at": utc_now(),
+        },
+    )
+    add_event(
+        connection,
+        "global_retryable_streak_reset",
+        details={"previous_streak": previous},
+    )
+    connection.commit()
 
 
 def start_global_cooldown(
@@ -693,10 +780,25 @@ def mark_failure(
     details: dict[str, Any] | None = None,
 ) -> None:
     next_retry_at = None
+    retryable_streak = 0
+    effective_retry_delay_seconds = 0
     if status == "retryable":
+        retryable_streak = current_retryable_streak(connection) + 1
+        multiplier = 2 ** min(retryable_streak - 1, 6)
+        effective_retry_delay_seconds = min(
+            max(0, retry_delay_seconds) * multiplier,
+            3600,
+        )
         next_retry_at = (
-            datetime.now(UTC) + timedelta(seconds=max(0, retry_delay_seconds))
+            datetime.now(UTC) + timedelta(seconds=effective_retry_delay_seconds)
         ).isoformat(timespec="seconds")
+        set_meta(
+            connection,
+            {
+                "global_retryable_streak": retryable_streak,
+                "global_retryable_last_failure_at": utc_now(),
+            },
+        )
     connection.execute(
         """
         UPDATE repair_items
@@ -718,7 +820,14 @@ def mark_failure(
         connection,
         status,
         item=item,
-        details={"error_type": error_type, "code": code, "error": error, **(details or {})},
+        details={
+            "error_type": error_type,
+            "code": code,
+            "error": error,
+            "retryable_streak": retryable_streak,
+            "effective_retry_delay_seconds": effective_retry_delay_seconds,
+            **(details or {}),
+        },
     )
     if status == "retryable" and next_retry_at:
         start_global_cooldown(
@@ -1096,7 +1205,14 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
     with sqlite_connect(config.state_db_path) as state_connection:
         meta = initialize_repair_state(config.db_path, state_connection, config.report_dir)
         initial_invariants = assert_external_invariants(config.db_path, meta)
-        cooldown = active_global_cooldown(state_connection) if config.apply else None
+        cooldown = (
+            active_global_cooldown(
+                state_connection,
+                base_delay_seconds=config.retry_delay_seconds,
+            )
+            if config.apply
+            else None
+        )
         selected = (
             []
             if cooldown
@@ -1191,6 +1307,7 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
                         str(item["platform_post_id"]),
                         cookie_header,
                     )
+                    reset_global_retryable_streak(state_connection)
                     last_request_at = time.monotonic()
                     requests_in_session += 1
                     target_row = existing_target_row(
