@@ -104,6 +104,101 @@ def test_manual_xhs_login_keeps_one_existing_tab() -> None:
     assert third.closed
 
 
+def test_manual_xhs_login_waits_through_visible_challenge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    states = [
+        {
+            "ok": False,
+            "challenge_markers": ["安全验证"],
+        },
+        {
+            "ok": True,
+            "challenge_markers": [],
+        },
+    ]
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.brought_to_front = 0
+            self.waits = 0
+
+        async def bring_to_front(self) -> None:
+            self.brought_to_front += 1
+
+        async def wait_for_timeout(self, timeout_ms: int) -> None:
+            assert timeout_ms == 2_000
+            self.waits += 1
+
+    async def fake_page_state(page: FakePage) -> dict:
+        return states.pop(0)
+
+    monkeypatch.setattr(xhs_login, "xhs_page_state", fake_page_state)
+    page = FakePage()
+
+    state = asyncio.run(
+        xhs_login.wait_for_login(
+            page,
+            600,
+            phase="测试登录",
+        )
+    )
+
+    assert state["ok"] is True
+    assert state["challenge_observed"] is True
+    assert state["observed_challenge_markers"] == ["安全验证"]
+    assert page.brought_to_front == 1
+    assert page.waits == 1
+
+
+def test_manual_xhs_login_challenge_overrides_stale_signed_in_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    states = [
+        {
+            "ok": True,
+            "challenge_markers": ["安全验证"],
+        },
+        {
+            "ok": True,
+            "challenge_markers": [],
+        },
+    ]
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.waits = 0
+
+        async def bring_to_front(self) -> None:
+            return None
+
+        async def wait_for_timeout(self, timeout_ms: int) -> None:
+            assert timeout_ms == 2_000
+            self.waits += 1
+
+    async def fake_page_state(page: FakePage) -> dict:
+        return states.pop(0)
+
+    monkeypatch.setattr(xhs_login, "xhs_page_state", fake_page_state)
+    page = FakePage()
+
+    state = asyncio.run(
+        xhs_login.wait_for_login(
+            page,
+            600,
+            phase="测试登录",
+        )
+    )
+
+    assert state["ok"] is True
+    assert state["challenge_observed"] is True
+    assert page.waits == 1
+
+
+def test_manual_xhs_login_lease_covers_both_operator_waits() -> None:
+    assert xhs_login.login_lease_seconds(600) == 1_500
+
+
 def test_xhs_runner_reads_login_required_from_structured_child_summary() -> None:
     child_summary = {
         "records": [

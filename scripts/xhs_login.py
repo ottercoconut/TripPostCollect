@@ -94,15 +94,47 @@ async def xhs_page_state(page: Page) -> dict[str, Any]:
     }
 
 
-async def wait_for_login(page: Page, timeout_seconds: int) -> dict[str, Any]:
+async def wait_for_login(
+    page: Page,
+    timeout_seconds: int,
+    *,
+    phase: str,
+) -> dict[str, Any]:
     started = time.monotonic()
     state: dict[str, Any] = {}
+    observed_challenge_markers: set[str] = set()
+    challenge_announced = False
     while time.monotonic() - started < timeout_seconds:
         state = await xhs_page_state(page)
-        if state["ok"] or state["challenge_markers"]:
+        challenge_markers = set(state.get("challenge_markers") or [])
+        observed_challenge_markers.update(challenge_markers)
+        state["challenge_observed"] = bool(observed_challenge_markers)
+        state["observed_challenge_markers"] = sorted(observed_challenge_markers)
+        # A stale signed-in navigation shell can remain visible behind a
+        # verification overlay.  Current challenge evidence therefore wins
+        # over the profile marker and keeps the operator window open.
+        if state["ok"] and not challenge_markers:
             return state
+        if challenge_markers and not challenge_announced:
+            try:
+                await page.bring_to_front()
+            except Exception:
+                pass
+            print(
+                f"[xhs-login] {phase}检测到安全验证，已保留并置前页面，"
+                f"等待人工处理，最长 {timeout_seconds} 秒。",
+                flush=True,
+            )
+            challenge_announced = True
         await page.wait_for_timeout(2_000)
+    state["challenge_observed"] = bool(observed_challenge_markers)
+    state["observed_challenge_markers"] = sorted(observed_challenge_markers)
     return state
+
+
+def login_lease_seconds(timeout_seconds: int) -> int:
+    """Cover full operator waits for initial login and reopen verification."""
+    return max(timeout_seconds * 2 + 300, 600)
 
 
 async def open_account_context(playwright: Any, profile_dir: Path, browser_path: str | None) -> BrowserContext:
@@ -135,6 +167,7 @@ async def _run_login_session(
     initial_state: dict[str, Any] = {}
     persisted_state: dict[str, Any] = {}
     error = ""
+    challenge_phases: list[str] = []
 
     async with async_playwright() as playwright:
         context = await open_account_context(playwright, paths["profile"], args.browser_path)
@@ -146,8 +179,14 @@ async def _run_login_session(
         page = await single_login_page(context)
         try:
             await page.goto(XHS_HOME_URL, wait_until="domcontentloaded", timeout=60_000)
-            initial_state = await wait_for_login(page, args.timeout_seconds)
-            if initial_state.get("challenge_markers"):
+            initial_state = await wait_for_login(
+                page,
+                args.timeout_seconds,
+                phase="初次登录",
+            )
+            if initial_state.get("challenge_observed"):
+                challenge_phases.append("initial_login")
+            if not initial_state.get("ok") and initial_state.get("challenge_observed"):
                 await page.screenshot(path=str(screenshot_path), full_page=False, timeout=10_000)
                 error = "xhs_challenge_detected_during_login"
             elif not initial_state.get("ok"):
@@ -183,7 +222,19 @@ async def _run_login_session(
             verify_page = await single_login_page(verify_context)
             try:
                 await verify_page.goto(XHS_HOME_URL, wait_until="domcontentloaded", timeout=60_000)
-                persisted_state = await wait_for_login(verify_page, min(args.timeout_seconds, 60))
+                persisted_state = await wait_for_login(
+                    verify_page,
+                    args.timeout_seconds,
+                    phase="关闭重开复验",
+                )
+                if persisted_state.get("challenge_observed"):
+                    challenge_phases.append("reopen_verification")
+                if not persisted_state.get("ok") and persisted_state.get("challenge_observed"):
+                    await verify_page.screenshot(
+                        path=str(screenshot_path),
+                        full_page=False,
+                        timeout=10_000,
+                    )
             finally:
                 await verify_context.close()
             if not persisted_state.get("ok"):
@@ -194,14 +245,7 @@ async def _run_login_session(
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         ensure_xhs_schema(conn)
-        if error == "xhs_challenge_detected_during_login":
-            record_event(
-                conn,
-                account_id=account_id,
-                event_type="login_challenge_detected",
-                details={"error": error},
-            )
-        elif error:
+        if error:
             set_account_status(conn, account_id, "login_required", reason=error)
         else:
             identity_hash = hashlib.sha256(str(persisted_state["profile_ids"][0]).encode("utf-8")).hexdigest()
@@ -210,6 +254,17 @@ async def _run_login_session(
             except ValueError as exc:
                 error = f"xhs_identity_conflict:{exc}"
                 set_account_status(conn, account_id, "quarantined", reason=error)
+        if challenge_phases:
+            record_event(
+                conn,
+                account_id=account_id,
+                event_type=(
+                    "login_challenge_completed"
+                    if not error
+                    else "login_challenge_detected"
+                ),
+                details={"error": error, "phases": challenge_phases},
+            )
         record_event(
             conn,
             account_id=account_id,
@@ -241,7 +296,7 @@ async def run_login(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     db_path = Path(args.db).expanduser()
     bootstrap_database(db_path, sync_jobs=False)
     run_id = f"xhs-login-{account_id}-{utc_stamp()}"
-    lease_seconds = max(args.timeout_seconds + 300, 600)
+    lease_seconds = login_lease_seconds(args.timeout_seconds)
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
