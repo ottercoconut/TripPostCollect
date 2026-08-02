@@ -75,6 +75,45 @@ def test_unfinished_pagination_is_not_reported_as_source_exhausted(tmp_path: Pat
     assert validation["stop_reason"] == "runtime_failed"
 
 
+def test_source_exhaustion_without_stop_event_never_falls_back_to_target_met(
+    tmp_path: Path,
+) -> None:
+    jsonl_path = tmp_path / "bili" / "jsonl" / "search_contents_2026-07-13.jsonl"
+    jsonl_path.parent.mkdir(parents=True)
+    jsonl_path.write_text(
+        json.dumps(bilibili_record("new")) + "\n",
+        encoding="utf-8",
+    )
+    pagination = {
+        "available": True,
+        "stopped": False,
+        "candidate_count": 267,
+        "batches": [
+            {
+                "candidate_count": 267,
+                "valid_new_count": 208,
+                "stop_reason": "continue",
+                "source_page": 17,
+                "source_has_more": True,
+            }
+        ],
+    }
+
+    validation, _ = mediacrawler_crawl.collect_formal_records(
+        {"records": [{"output": {"jsonl_files": [str(jsonl_path)]}}]},
+        candidate_hard_limit=100,
+        target_new_posts=1,
+        db_path=tmp_path / "missing.sqlite",
+        pagination_evidence=pagination,
+        completion_mode="source-exhausted",
+    )
+
+    assert validation["new_target_met"] is True
+    assert validation["source_exhausted_met"] is False
+    assert validation["completion_met"] is False
+    assert validation["stop_reason"] == "runtime_failed"
+
+
 def test_explicit_empty_page_proves_source_exhaustion(tmp_path: Path) -> None:
     state_path = tmp_path / "state.json"
     write_state(

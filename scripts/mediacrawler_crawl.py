@@ -1616,7 +1616,11 @@ def collect_formal_records(
         stop_reason = "runtime_failed"
     elif completion_mode == "source-exhausted" and pagination_evidence.get("stopped"):
         stop_reason = str(pagination_evidence.get("stop_reason") or "runtime_failed")
-    elif new_target_met and target_new_posts > 0:
+    elif (
+        completion_mode == "target-new-posts"
+        and new_target_met
+        and target_new_posts > 0
+    ):
         stop_reason = "target_new_met"
     elif quantity_limits_enforced and (
         run_candidate_count >= candidate_hard_limit
