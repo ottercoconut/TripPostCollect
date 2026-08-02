@@ -363,8 +363,12 @@ child 的未知候选安全上限。永久提高检索目标时只修改 `config
 启动前登录失效时对原账号运行 `xhs_login.py`。正式抓取中，搜索连续性阶段出现可见登录要求或
 图片验证，以及作者页出现二维码安全验证时，都会保留当前标签页并置前，最多等待操作人处理
 600 秒，通过后继续；等待状态写入 `behavior_evidence.operator_verification_events`。系统不自动
-点击、识别或绕过验证。搜索 API 返回 461/471 时，使用响应中的 `Verifyuuid`、`Verifytype` 和
-状态码打开平台 `/website-login/captcha` 人工验证页；通过后刷新同一会话 Cookie 并重试原请求。
+点击、识别或绕过验证。搜索 API 明确返回登录已过期时，即使错误被请求重试器包装，
+也必须暂停原请求、刷新当前可见页但不关闭任何标签页，并置前最新的小红书页等待操作人恢复；
+可见登录 UI 与 self-info API 均恢复后刷新 Cookie/storage state 并重试同一来源页，600 秒超时
+才写 `login_required`，且 checkpoint 保持当前页。搜索 API 返回 461/471 时，使用响应中的
+`Verifyuuid`、`Verifytype` 和状态码打开平台 `/website-login/captcha` 人工验证页；通过后刷新
+同一会话 Cookie 并重试原请求。
 正式抓取 BrowserContext 的守卫安装后，任何新标签页都必须立即置前并无条件保留至少 30 秒，
 无论它由平台弹出，还是 crawler 为互动、作者主页回退或验证辅助而创建。门禁不依赖页面文本、
 验证码识别、滚动是否有位移或创建来源；异常退出、Playwright 退出以及最终 BrowserContext/CDP
