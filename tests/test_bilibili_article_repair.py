@@ -16,6 +16,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 repair = import_module("repair_bilibili_articles")
+promotion = import_module("promote_bilibili_repair_results")
 
 
 def create_target(path: Path, count: int = 2) -> None:
@@ -525,6 +526,66 @@ def test_continuous_pilot_stops_when_scope_has_been_attempted(
     assert return_code == 0
     assert result["continuous_stop_reason"] == "scope_attempted"
     assert calls == 1
+
+
+def test_promote_validated_successes_into_original_target(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=2)
+    target_sha256 = repair.sha256_file(target)
+    backup = tmp_path / "backup.sqlite"
+    staged = tmp_path / "staged.sqlite"
+    repair.create_online_backup(target, backup)
+    repair.create_online_backup(target, staged)
+    state = tmp_path / "state.sqlite"
+    repair_report_dir = tmp_path / "repair-reports"
+    repair_config = config_for(
+        staged,
+        state,
+        backup,
+        repair_report_dir,
+        apply=True,
+        expected_sha256=repair.sha256_file(staged),
+    )
+    monkeypatch.setattr(repair, "fetch_repair_article_detail", fake_detail)
+    repair_code, repair_result = repair.run_repair(repair_config)
+    assert repair_code == 0
+    assert repair_result["updated"] == 2
+
+    config = promotion.PromotionConfig(
+        target_db_path=target,
+        staged_db_path=staged,
+        state_db_path=state,
+        backup_path=backup,
+        report_dir=tmp_path / "promotion-reports",
+        expected_target_sha256=target_sha256,
+        apply=False,
+        confirm_default_db_promotion=False,
+    )
+    dry_code, dry_result = promotion.run_promotion(config)
+    apply_code, apply_result = promotion.run_promotion(replace(config, apply=True))
+
+    assert dry_code == apply_code == 0
+    assert dry_result["planned_count"] == 2
+    assert dry_result["promoted_count"] == 0
+    assert apply_result["promoted_count"] == 2
+    assert apply_result["target_validation"]["ok"] is True
+    with sqlite3.connect(target) as connection:
+        rows = connection.execute(
+            "SELECT id, content_text, post_images_count FROM web_posts ORDER BY id"
+        ).fetchall()
+        image_urls = connection.execute(
+            "SELECT image_url FROM web_post_images ORDER BY web_post_id, image_index"
+        ).fetchall()
+    assert [row[0] for row in rows] == [1, 2]
+    assert all(str(row[1]).startswith("第一段完整正文") for row in rows)
+    assert all(row[2] == 1 for row in rows)
+    assert image_urls == [
+        ("https://example.test/detail-1001.jpg",),
+        ("https://example.test/detail-1002.jpg",),
+    ]
 
 
 def test_optimistic_lock_conflict_does_not_overwrite(monkeypatch, tmp_path: Path) -> None:
