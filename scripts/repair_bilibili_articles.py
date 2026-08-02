@@ -566,6 +566,61 @@ def selected_items(
     return rows[:max_items]
 
 
+def active_global_cooldown(connection: sqlite3.Connection) -> dict[str, str] | None:
+    meta = meta_values(connection)
+    next_request_at = meta.get("global_next_request_at")
+    if not next_request_at:
+        return None
+    try:
+        deadline = datetime.fromisoformat(next_request_at)
+    except ValueError as exc:
+        raise RuntimeError("invalid global_next_request_at in repair state") from exc
+    if deadline.tzinfo is None:
+        raise RuntimeError("global_next_request_at must include a timezone")
+    if deadline > datetime.now(UTC):
+        return {
+            "next_request_at": next_request_at,
+            "reason": meta.get("global_cooldown_reason", "retryable_failure"),
+        }
+    connection.execute(
+        "DELETE FROM repair_meta WHERE key IN ('global_next_request_at', 'global_cooldown_reason')"
+    )
+    add_event(
+        connection,
+        "global_cooldown_expired",
+        details={"next_request_at": next_request_at},
+    )
+    connection.commit()
+    return None
+
+
+def start_global_cooldown(
+    connection: sqlite3.Connection,
+    item: sqlite3.Row,
+    *,
+    next_request_at: str,
+    reason: str,
+) -> None:
+    current = meta_values(connection).get("global_next_request_at")
+    effective_next_request_at = max(current or "", next_request_at)
+    set_meta(
+        connection,
+        {
+            "global_next_request_at": effective_next_request_at,
+            "global_cooldown_reason": reason,
+        },
+    )
+    add_event(
+        connection,
+        "global_cooldown_started",
+        item=item,
+        details={
+            "next_request_at": effective_next_request_at,
+            "reason": reason,
+        },
+    )
+
+
 def mark_attempt(connection: sqlite3.Connection, item: sqlite3.Row) -> None:
     connection.execute(
         """
@@ -620,6 +675,13 @@ def mark_failure(
         item=item,
         details={"error_type": error_type, "code": code, "error": error, **(details or {})},
     )
+    if status == "retryable" and next_retry_at:
+        start_global_cooldown(
+            connection,
+            item,
+            next_request_at=next_retry_at,
+            reason=f"{error_type}:{code}" if code is not None else error_type,
+        )
     connection.commit()
 
 
@@ -989,10 +1051,15 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
     with sqlite_connect(config.state_db_path) as state_connection:
         meta = initialize_repair_state(config.db_path, state_connection, config.report_dir)
         initial_invariants = assert_external_invariants(config.db_path, meta)
-        selected = selected_items(
-            state_connection,
-            max_items=config.max_items,
-            only_ids=config.only_ids,
+        cooldown = active_global_cooldown(state_connection) if config.apply else None
+        selected = (
+            []
+            if cooldown
+            else selected_items(
+                state_connection,
+                max_items=config.max_items,
+                only_ids=config.only_ids,
+            )
         )
         invocation: dict[str, Any] = {
             "started_at": utc_now(),
@@ -1003,8 +1070,14 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
             "invalid_detail": 0,
             "conflict": 0,
             "retryable": 0,
-            "stopped_reason": "dry_run" if not config.apply else "completed_batch",
+            "stopped_reason": (
+                "dry_run"
+                if not config.apply
+                else "global_cooldown" if cooldown else "completed_batch"
+            ),
         }
+        if cooldown:
+            invocation["global_cooldown"] = cooldown
         if not config.apply:
             report_path = write_report(
                 config,
@@ -1018,6 +1091,17 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
 
         backup = verify_apply_inputs(config, meta)
         invocation["backup"] = backup
+        if cooldown:
+            invocation["finished_at"] = utc_now()
+            report_path = write_report(
+                config,
+                state_connection,
+                meta,
+                invocation=invocation,
+                invariants=initial_invariants,
+            )
+            invocation["report_path"] = str(report_path)
+            return 3, invocation
         cookie = load_cookie_snapshot("bilibili") or {}
         cookie_header = str(cookie.get("cookie_header") or "")
         last_request_at: float | None = None

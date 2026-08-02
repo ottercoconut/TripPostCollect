@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 
@@ -231,7 +232,12 @@ def test_retryable_failure_preserves_original_row(monkeypatch, tmp_path: Path) -
         expected_sha256=baseline,
     )
 
+    config = replace(config, retry_delay_seconds=300)
+    calls = 0
+
     def fail(post_id, cookie_header):
+        nonlocal calls
+        calls += 1
         raise repair.BilibiliArticleDetailError(
             "rate limited",
             retryable=True,
@@ -243,9 +249,14 @@ def test_retryable_failure_preserves_original_row(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(repair, "fetch_bilibili_article_detail_with_retry", fail)
 
     return_code, result = repair.run_repair(config)
+    cooldown_code, cooldown_result = repair.run_repair(config)
 
     assert return_code == 2
     assert result["retryable"] == 1
+    assert cooldown_code == 3
+    assert cooldown_result["selected_count"] == 0
+    assert cooldown_result["stopped_reason"] == "global_cooldown"
+    assert calls == 1
     with sqlite3.connect(target) as connection:
         row = connection.execute(
             "SELECT content_text, post_images_count, capture_method FROM web_posts"
@@ -253,6 +264,9 @@ def test_retryable_failure_preserves_original_row(monkeypatch, tmp_path: Path) -
     assert row == ("旧搜索摘要-1001", 1, "import")
     with sqlite3.connect(config.state_db_path) as connection:
         assert connection.execute("SELECT status FROM repair_items").fetchone()[0] == "retryable"
+        assert connection.execute(
+            "SELECT value FROM repair_meta WHERE key='global_next_request_at'"
+        ).fetchone()[0]
 
 
 def test_optimistic_lock_conflict_does_not_overwrite(monkeypatch, tmp_path: Path) -> None:
