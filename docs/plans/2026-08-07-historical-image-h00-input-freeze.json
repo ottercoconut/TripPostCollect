@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "campaign_id": "historical-images-20260807-v1",
+  "status": "input_frozen",
+  "historical_data_complete": false,
+  "input": {
+    "database_path": "data/trippostcollect.sqlite",
+    "database_sha256": "a7f78d3636025d61b442b50050afb2c36b7808772131d77df1c344bcdf371006",
+    "database_size_bytes": 143273984,
+    "quick_check": "ok",
+    "foreign_key_violations": 0,
+    "root_commit": "cca9972738beee92cd8fabd9d1444e2e943a5fa1",
+    "mediacrawler_commit": "6e7475d4a3501a346ec0eccb592f5598b9b9718b"
+  },
+  "projection": {
+    "sha256": "d0c476b21ca745434244e3e4b778273dd00bb78919cd9cd1bec8428b24a8e52b",
+    "authoritative_images": 57143,
+    "current_content_rows": 61232,
+    "misclassified_rows": 4089,
+    "existing_local_authoritative": 17150,
+    "local_gap": 39993,
+    "platforms": {
+      "bilibili": {
+        "posts": 3006,
+        "current_content_rows": 18050,
+        "authoritative_images": 18050,
+        "misclassified_rows": 0,
+        "existing_local_authoritative": 0,
+        "local_gap": 18050,
+        "projection_sha256": "e2c31bb6c4d0e54110420ee51f34faf901179f8842dfbb6206c8fd38aec174da"
+      },
+      "weibo": {
+        "posts": 1007,
+        "current_content_rows": 6384,
+        "authoritative_images": 6384,
+        "misclassified_rows": 0,
+        "existing_local_authoritative": 0,
+        "local_gap": 6384,
+        "projection_sha256": "84f9788c54848f7f5aa5ed7dd0a5467a8d9abef01382f5f25b7655c4481ebbc7"
+      },
+      "xhs": {
+        "posts": 1808,
+        "current_content_rows": 21040,
+        "authoritative_images": 17416,
+        "misclassified_rows": 3624,
+        "existing_local_authoritative": 17150,
+        "local_gap": 266,
+        "projection_sha256": "2ef8e5b14a3d089da25c0d05ad75e3244567c0fb3d1944bf29d1e246d9d20c17"
+      },
+      "douyin": {
+        "posts": 461,
+        "current_content_rows": 4991,
+        "authoritative_images": 4528,
+        "misclassified_rows": 463,
+        "existing_local_authoritative": 0,
+        "local_gap": 4528,
+        "projection_sha256": "90bd15b4d78411f89000994a3fb3b56fb895adc610fbfe272b8c52414615131e"
+      },
+      "zhihu": {
+        "posts": 437,
+        "current_content_rows": 10767,
+        "authoritative_images": 10765,
+        "misclassified_rows": 2,
+        "existing_local_authoritative": 0,
+        "local_gap": 10765,
+        "projection_sha256": "da8446e51e6da35c0491441cf13b4059b50b7cb3e3e01b24e23d1acc5997f2e2"
+      }
+    }
+  },
+  "invariants": {
+    "web_posts_non_image_sha256": "51c265efa2cdbd8f4c69588a7ded1ed054be7258f2282a710b657673fb470458",
+    "web_post_images_sha256": "3cbf8b579494a3904fc7953893020784f2b5fcb2aad70da4cf9d81a992453420",
+    "local_inventory_sha256": "6dcdc295809100777f5a29be603b950cef54e019dbb2f9f8dfb436a0430a9c81",
+    "local_rows": 17150,
+    "local_bytes": 4596325862,
+    "local_missing": 0,
+    "local_sha_mismatch": 0,
+    "discovery_table_sha256": {
+      "crawl_discovery_checkpoints": "34a5b433d5281733ca6a07d4fe7f750653d946aeb0d0f318b46bc59470de0637",
+      "crawl_discovery_seen_candidates": "5ad57355938919cee6f037dc4cef9af13aa6342cc314abb2da5173593136629c",
+      "xhs_discovery_checkpoints": "dded8ebfd10868e4d1af2e8609f410bbbb764f8576a7a02e91aa7fd4e0ccdc82",
+      "xhs_discovery_seen_candidates": "9446934b2666432dcc2d9fc148201d924ad4b004aff4bccd6bac97737d475680"
+    }
+  },
+  "capacity": {
+    "existing_local_bytes": 4596325862,
+    "free_bytes": 264269946880,
+    "free_gib": 246.121
+  }
+}
