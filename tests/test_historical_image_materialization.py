@@ -368,6 +368,77 @@ def test_apply_can_resume_from_committed_batch_state(tmp_path: Path) -> None:
     assert second["database_sha256_after"] == sha256_file(db_path)
 
 
+def test_existing_xhs_promotion_is_dry_run_first_and_preserves_source_bytes(tmp_path: Path) -> None:
+    db_path = _fixture_database(tmp_path)
+    campaign_path = tmp_path / "campaign.json"
+    _campaign(db_path, campaign_path)
+    legacy_file = tmp_path / "legacy" / "xhs" / "xhs-1.jpg"
+    legacy_sha = hashlib.sha256(legacy_file.read_bytes()).hexdigest()
+    media_root = tmp_path / "data" / "media"
+    base = [
+        "--db",
+        str(db_path),
+        "--campaign",
+        str(campaign_path),
+        "--project-root",
+        str(tmp_path),
+        "--media-root",
+        str(media_root),
+        "--platform",
+        "xhs",
+        "--batch-size",
+        "10",
+        "--promote-existing",
+    ]
+    db_sha_before = sha256_file(db_path)
+    assert materialize_main(base + ["--report", str(tmp_path / "promotion-dry.json")]) == 0
+    assert sha256_file(db_path) == db_sha_before
+    assert not media_root.exists()
+    assert hashlib.sha256(legacy_file.read_bytes()).hexdigest() == legacy_sha
+
+    assert materialize_main(
+        base
+        + [
+            "--report",
+            str(tmp_path / "promotion-apply.json"),
+            "--resume-state",
+            str(tmp_path / "promotion-resume.json"),
+            "--backup-dir",
+            str(tmp_path / "backups" / "promotion"),
+            "--apply",
+        ]
+    ) == 0
+    report = json.loads((tmp_path / "promotion-apply.json").read_text(encoding="utf-8"))
+    assert report["operation"] == "promote_existing"
+    assert report["promotion"] == {
+        "promoted_bytes": legacy_file.stat().st_size,
+        "promoted_images": 1,
+        "reused_images": 0,
+    }
+    with sqlite3.connect(db_path) as conn:
+        local_path, raw_image = conn.execute(
+            """
+            SELECT local_path, raw_image_json
+            FROM web_post_images i
+            JOIN web_posts p ON p.id=i.web_post_id
+            WHERE p.platform_key='xhs' AND i.image_role='content'
+            """
+        ).fetchone()
+        assert str(local_path).startswith("data/media/xhs/xhs-1/000-")
+        assert json.loads(raw_image)["local_file"]["source"] == "historical_existing_promotion_v1"
+        assert conn.execute(
+            """
+            SELECT local_path FROM web_post_images i
+            JOIN web_posts p ON p.id=i.web_post_id
+            WHERE p.platform_key='xhs' AND i.image_role='author_avatar'
+            """
+        ).fetchone() == (None,)
+    promoted_file = tmp_path / local_path
+    assert promoted_file.is_file()
+    assert hashlib.sha256(promoted_file.read_bytes()).hexdigest() == legacy_sha
+    assert hashlib.sha256(legacy_file.read_bytes()).hexdigest() == legacy_sha
+
+
 def test_gc_defaults_to_report_only_and_requires_explicit_confirmation(tmp_path: Path) -> None:
     db_path = _fixture_database(tmp_path)
     media_root = tmp_path / "data" / "media"

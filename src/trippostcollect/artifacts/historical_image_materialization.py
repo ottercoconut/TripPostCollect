@@ -10,8 +10,13 @@ import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
 
 from trippostcollect.artifacts.image_candidates import (
+    ImageCandidate,
     content_image_candidates,
     source_asset_key_for_image,
+)
+from trippostcollect.artifacts.image_materialization import (
+    promote_validated_image,
+    validate_image_file,
 )
 from trippostcollect.artifacts.image_persistence import (
     existing_image_records,
@@ -56,6 +61,7 @@ class HistoricalRelationshipPlan:
     source_digest: str
     plan_digest: str
     remaining_posts_by_platform: dict[str, int]
+    skipped_incomplete_by_platform: dict[str, int]
 
 
 def sha256_file(path: str | Path) -> str:
@@ -289,6 +295,7 @@ def build_relationship_plan(
     batch_size: int = 10,
     project_root: str | Path,
     media_root: str | Path,
+    require_complete_existing_local: bool = False,
 ) -> HistoricalRelationshipPlan:
     """Build a bounded plan using the production candidate and persistence components."""
 
@@ -302,6 +309,7 @@ def build_relationship_plan(
     resolved_media_root = Path(media_root).expanduser().resolve()
     selected: list[tuple[Any, ...]] = []
     remaining_by_platform: dict[str, int] = {}
+    skipped_incomplete_by_platform: dict[str, int] = {}
     slots = batch_size
     for platform_key in HISTORICAL_PLATFORM_ORDER:
         if platform_key not in platforms:
@@ -318,6 +326,33 @@ def build_relationship_plan(
                 (platform_key, cursor),
             )
         )
+        if require_complete_existing_local:
+            eligible: list[tuple[Any, ...]] = []
+            skipped = 0
+            for row in available:
+                web_post_id, _platform_post_id, raw_sample_json = row
+                authoritative_count = len(
+                    content_image_candidates(platform_key, _json_object(raw_sample_json))
+                )
+                local_count = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM web_post_images
+                        WHERE web_post_id=?
+                          AND image_role='content'
+                          AND local_path IS NOT NULL
+                          AND local_path<>''
+                        """,
+                        (web_post_id,),
+                    ).fetchone()[0]
+                )
+                if authoritative_count > 0 and local_count == authoritative_count:
+                    eligible.append(row)
+                else:
+                    skipped += 1
+            available = eligible
+            skipped_incomplete_by_platform[platform_key] = skipped
         if batch_size == 0:
             take = len(available)
         else:
@@ -412,7 +447,110 @@ def build_relationship_plan(
         source_digest=relationship_source_digest(conn, post_ids),
         plan_digest=_plan_digest(posts),
         remaining_posts_by_platform=remaining_by_platform,
+        skipped_incomplete_by_platform=skipped_incomplete_by_platform,
     )
+
+
+def promote_existing_plan(
+    plan: HistoricalRelationshipPlan,
+    *,
+    project_root: str | Path,
+    media_root: str | Path,
+) -> tuple[HistoricalRelationshipPlan, dict[str, int]]:
+    """Promote a complete-existing batch through the production validator and promoter."""
+
+    resolved_project_root = Path(project_root).expanduser().resolve(strict=True)
+    resolved_media_root = Path(media_root).expanduser().resolve()
+    promoted_posts: list[HistoricalPostPlan] = []
+    promoted_images = reused_images = promoted_bytes = 0
+    for post in plan.posts:
+        if post.authoritative_images <= 0 or post.preserved_local_rows != post.authoritative_images:
+            raise ValueError(
+                f"existing promotion requires a complete post: {post.platform_key}:{post.platform_post_id}"
+            )
+        image_items: list[dict[str, Any]] = []
+        for item in post.prepared_images:
+            local_path = str(item.get("local_path") or "")
+            local_file = Path(local_path).expanduser()
+            if not local_file.is_absolute():
+                local_file = resolved_project_root / local_file
+            validated = validate_image_file(
+                local_file,
+                allowed_root=resolved_project_root,
+                expected_sha256=str(item.get("sha256") or ""),
+                require_suffix_match=False,
+            )
+            candidate = ImageCandidate(
+                platform_key=post.platform_key,
+                platform_post_id=post.platform_post_id,
+                image_role=str(item["role"]),
+                source_index=int(item["source_index"]),
+                source_url=str(item["url"]),
+                source_key=str(item["source_key"]),
+                source_asset_key=str(item["source_asset_key"]),
+            )
+            promoted = promote_validated_image(
+                validated,
+                candidate,
+                staging_root=resolved_project_root,
+                media_root=resolved_media_root,
+                project_root=resolved_project_root,
+            )
+            promoted_images += int(not promoted.reused)
+            reused_images += int(promoted.reused)
+            promoted_bytes += promoted.size_bytes
+            image_items.append(
+                {
+                    **item,
+                    "local_path": promoted.local_path,
+                    "width": promoted.width,
+                    "height": promoted.height,
+                    "mime_type": promoted.mime_type,
+                    "sha256": promoted.sha256,
+                    "local_file": {
+                        "source": "historical_existing_promotion_v1",
+                        "source_path": local_path,
+                        "source_url": promoted.source_url,
+                        "size_bytes": promoted.size_bytes,
+                    },
+                }
+            )
+        prepared = prepare_image_rows(
+            post.platform_key,
+            normalize_persistence_items(image_items),
+            [],
+            project_root=resolved_project_root,
+            media_root=resolved_media_root,
+            require_local_images=True,
+        )
+        promoted_posts.append(
+            HistoricalPostPlan(
+                web_post_id=post.web_post_id,
+                platform_key=post.platform_key,
+                platform_post_id=post.platform_post_id,
+                current_content_rows=post.current_content_rows,
+                authoritative_images=post.authoritative_images,
+                misclassified_rows=post.misclassified_rows,
+                duplicate_variant_rows=post.duplicate_variant_rows,
+                missing_authoritative_relations=post.missing_authoritative_relations,
+                url_normalizations=post.url_normalizations,
+                existing_local_rows=post.existing_local_rows,
+                preserved_local_rows=len(prepared),
+                prepared_images=tuple(prepared),
+            )
+        )
+    promoted_plan = HistoricalRelationshipPlan(
+        posts=tuple(promoted_posts),
+        source_digest=plan.source_digest,
+        plan_digest=_plan_digest(promoted_posts),
+        remaining_posts_by_platform=plan.remaining_posts_by_platform,
+        skipped_incomplete_by_platform=plan.skipped_incomplete_by_platform,
+    )
+    return promoted_plan, {
+        "promoted_images": promoted_images,
+        "reused_images": reused_images,
+        "promoted_bytes": promoted_bytes,
+    }
 
 
 def apply_relationship_plan(
@@ -494,5 +632,6 @@ def summarize_plan(plan: HistoricalRelationshipPlan) -> dict[str, Any]:
         "source_digest": plan.source_digest,
         "plan_digest": plan.plan_digest,
         "remaining_posts_by_platform": plan.remaining_posts_by_platform,
+        "skipped_incomplete_by_platform": plan.skipped_incomplete_by_platform,
         "platforms": platforms,
     }

@@ -20,6 +20,7 @@ from trippostcollect.artifacts.historical_image_materialization import (
     build_relationship_plan,
     database_integrity,
     projection_inventory,
+    promote_existing_plan,
     protected_database_digests,
     sha256_file,
     sqlite_backup,
@@ -69,6 +70,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--project-root", default=str(PROJECT_ROOT), help=argparse.SUPPRESS)
     parser.add_argument("--media-root", default=str(LOCAL_MEDIA_ROOT), help=argparse.SUPPRESS)
     parser.add_argument(
+        "--promote-existing",
+        action="store_true",
+        help="Select only posts whose existing local relationships are complete and promote them to media root.",
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="Apply the planned relationship rebuild after creating a verified SQLite backup.",
@@ -110,8 +116,8 @@ def _default_report_path(campaign_id: str, timestamp: str) -> Path:
     return IMAGE_MATERIALIZATION_RUNTIME / campaign_id / timestamp / "report.json"
 
 
-def _default_resume_path(campaign_id: str, db_path: Path) -> Path:
-    return IMAGE_MATERIALIZATION_RUNTIME / campaign_id / f"{db_path.stem}-relationship-state.json"
+def _default_resume_path(campaign_id: str, db_path: Path, operation: str) -> Path:
+    return IMAGE_MATERIALIZATION_RUNTIME / campaign_id / f"{db_path.stem}-{operation}-state.json"
 
 
 def _validate_campaign(campaign: dict[str, Any]) -> str:
@@ -128,12 +134,15 @@ def _resume_context(
     resume_path: Path | None,
     campaign_id: str,
     database_sha256: str,
+    operation: str,
 ) -> tuple[dict[str, Any] | None, dict[str, int]]:
     if resume_path is None or not resume_path.exists():
         return None, {}
     state = _read_json_object(resume_path)
     if state.get("campaign_id") != campaign_id:
         raise ValueError("resume state belongs to a different campaign")
+    if state.get("operation") != operation:
+        raise ValueError("resume state belongs to a different operation")
     if state.get("database_sha256_after") != database_sha256:
         raise ValueError("database SHA does not match resume state")
     cursors = {
@@ -153,7 +162,13 @@ def _initial_invariants_match(campaign: dict[str, Any], digests: dict[str, Any])
             raise ValueError(f"discovery invariant differs from H-00: {table}")
 
 
-def _report_paths(args: argparse.Namespace, campaign_id: str, timestamp: str, db_path: Path) -> tuple[Path, Path | None]:
+def _report_paths(
+    args: argparse.Namespace,
+    campaign_id: str,
+    timestamp: str,
+    db_path: Path,
+    operation: str,
+) -> tuple[Path, Path | None]:
     report_path = (
         Path(args.report).expanduser().resolve()
         if args.report
@@ -162,7 +177,7 @@ def _report_paths(args: argparse.Namespace, campaign_id: str, timestamp: str, db
     if args.resume_state:
         resume_path = Path(args.resume_state).expanduser().resolve()
     elif args.apply:
-        resume_path = _default_resume_path(campaign_id, db_path)
+        resume_path = _default_resume_path(campaign_id, db_path, operation)
     else:
         resume_path = None
     return report_path, resume_path
@@ -178,14 +193,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     media_root = Path(args.media_root).expanduser().resolve()
     campaign = _read_json_object(campaign_path)
     campaign_id = _validate_campaign(campaign)
+    operation = "promote_existing" if args.promote_existing else "relationship_rebuild"
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    report_path, resume_path = _report_paths(args, campaign_id, timestamp, db_path)
+    report_path, resume_path = _report_paths(args, campaign_id, timestamp, db_path, operation)
     selected_platforms = _platforms(args.platform)
+    if args.promote_existing and selected_platforms != ("xhs",):
+        raise SystemExit("--promote-existing currently requires exactly --platform xhs")
     db_sha_before = sha256_file(db_path)
     resume_state, cursors = _resume_context(
         resume_path=resume_path,
         campaign_id=campaign_id,
         database_sha256=db_sha_before,
+        operation=operation,
     )
     if resume_state is None and db_sha_before != campaign.get("input", {}).get("database_sha256"):
         raise SystemExit("database SHA does not match H-00 input and no matching resume state exists")
@@ -207,6 +226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             batch_size=args.batch_size,
             project_root=project_root,
             media_root=media_root,
+            require_complete_existing_local=args.promote_existing,
         )
     plan_summary = summarize_plan(plan)
     report: dict[str, Any] = {
@@ -214,7 +234,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "campaign_id": campaign_id,
         "mode": "apply" if args.apply else "dry-run",
-        "operation": "relationship_rebuild",
+        "operation": operation,
         "database": str(db_path),
         "database_sha256_before": db_sha_before,
         "campaign_input_database_sha256": campaign.get("input", {}).get("database_sha256"),
@@ -228,6 +248,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "plan": plan_summary,
         "backup": None,
         "apply_result": None,
+        "promotion": None,
     }
 
     if args.apply:
@@ -238,12 +259,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         backup_path = backup_root / db_path.name
         report["backup"] = sqlite_backup(db_path, backup_path)
+        apply_plan = plan
+        if args.promote_existing:
+            apply_plan, promotion = promote_existing_plan(
+                plan,
+                project_root=project_root,
+                media_root=media_root,
+            )
+            report["promotion"] = promotion
         with sqlite3.connect(db_path) as conn:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("BEGIN IMMEDIATE")
             try:
-                apply_result = apply_relationship_plan(conn, plan)
+                apply_result = apply_relationship_plan(conn, apply_plan)
                 invariants_after = protected_database_digests(conn)
                 if invariants_after != invariants_before:
                     raise RuntimeError("protected database invariants changed during relationship rebuild")
@@ -259,7 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             inventory_after = projection_inventory(conn)
             content_relationship_sha256 = table_digest(conn, "web_post_images")
         after_post_ids = dict(cursors)
-        for post in plan.posts:
+        for post in apply_plan.posts:
             after_post_ids[post.platform_key] = max(
                 after_post_ids.get(post.platform_key, 0),
                 post.web_post_id,
@@ -275,11 +304,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         state = {
             "schema_version": 1,
             "campaign_id": campaign_id,
+            "operation": operation,
             "database": str(db_path),
             "database_sha256_after": db_sha_after,
             "after_post_ids": after_post_ids,
             "completed_platforms": completed_platforms,
-            "last_plan_digest": plan.plan_digest,
+            "last_plan_digest": apply_plan.plan_digest,
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         if resume_path is None:
