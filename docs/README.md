@@ -19,7 +19,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 | SQLite、字段映射和入库 | [数据持久化](data-persistence.md) |
 | 当前平台字段能力 | [平台字段覆盖](platform-field-coverage.md) |
 | 五平台正文图片本地存储实施 | [五平台正文图片本地存储工程实现方案](plans/2026-08-07-multiplatform-local-image-storage.md) |
-| 历史图片输入冻结与工具演练 | [H-00 输入冻结](plans/2026-08-07-historical-image-h00-input-freeze.md)、[H-01 工具验收](plans/2026-08-07-historical-image-h01-tooling-report.md) |
+| 历史图片输入冻结与执行门禁 | [H-00 输入冻结](plans/2026-08-07-historical-image-h00-input-freeze.md)、[H-01 工具验收](plans/2026-08-07-historical-image-h01-tooling-report.md)、[H-02 执行门禁](plans/2026-08-07-historical-image-h02-execution-gate.md) |
 | B站专栏正文、详情失败与历史回填 | [B站 article](platforms/bilibili.md) |
 | 管理端开发 | [管理客户端开发](admin-client-development.md) |
 | 小红书账号、登录、正式抓取和恢复 | [小红书正式抓取 Workflow](platforms/xhs.md) |
