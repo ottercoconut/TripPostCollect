@@ -354,6 +354,28 @@ def test_apply_can_resume_from_committed_batch_state(tmp_path: Path) -> None:
     first = json.loads(state_path.read_text(encoding="utf-8"))
     assert first["completed_platforms"] == []
 
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO xhs_accounts (
+              account_id, status, profile_dir, encrypted_state_path, last_verified_at
+            ) VALUES ('xhs-test', 'active', 'profile/xhs-test', 'state/xhs-test.enc',
+                      '2026-08-07T13:04:17+00:00')
+            """
+        )
+        conn.commit()
+
+    with pytest.raises(ValueError, match="database SHA does not match resume state"):
+        materialize_main(
+            base
+            + [
+                "--report",
+                str(tmp_path / "batch-2-refused.json"),
+                "--backup-dir",
+                str(tmp_path / "backups" / "batch-2-refused"),
+            ]
+        )
+
     assert materialize_main(
         base
         + [
@@ -361,6 +383,9 @@ def test_apply_can_resume_from_committed_batch_state(tmp_path: Path) -> None:
             str(tmp_path / "batch-2.json"),
             "--backup-dir",
             str(tmp_path / "backups" / "batch-2"),
+            "--resume-report",
+            str(tmp_path / "batch-1.json"),
+            "--allow-control-plane-drift",
         ]
     ) == 0
     second = json.loads(state_path.read_text(encoding="utf-8"))

@@ -65,6 +65,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Maximum posts in this batch; zero processes every remaining post.",
     )
     parser.add_argument("--resume-state", help="Optional JSON state used to continue after a committed batch.")
+    parser.add_argument(
+        "--resume-report",
+        help="Previous committed report used to prove permitted control-plane-only database drift.",
+    )
+    parser.add_argument(
+        "--allow-control-plane-drift",
+        action="store_true",
+        help="Allow a database SHA change only when content and discovery hashes match --resume-report.",
+    )
     parser.add_argument("--report", help="Optional JSON report destination.")
     parser.add_argument("--backup-dir", help="Backup directory used before --apply.")
     parser.add_argument("--project-root", default=str(PROJECT_ROOT), help=argparse.SUPPRESS)
@@ -135,6 +144,9 @@ def _resume_context(
     campaign_id: str,
     database_sha256: str,
     operation: str,
+    db_path: Path,
+    allow_control_plane_drift: bool,
+    resume_report_path: Path | None,
 ) -> tuple[dict[str, Any] | None, dict[str, int]]:
     if resume_path is None or not resume_path.exists():
         return None, {}
@@ -144,7 +156,34 @@ def _resume_context(
     if state.get("operation") != operation:
         raise ValueError("resume state belongs to a different operation")
     if state.get("database_sha256_after") != database_sha256:
-        raise ValueError("database SHA does not match resume state")
+        if not allow_control_plane_drift or resume_report_path is None:
+            raise ValueError("database SHA does not match resume state")
+        previous_report = _read_json_object(resume_report_path)
+        if (
+            previous_report.get("campaign_id") != campaign_id
+            or previous_report.get("operation") != operation
+            or previous_report.get("database_sha256_after") != state.get("database_sha256_after")
+            or previous_report.get("resume") != state
+        ):
+            raise ValueError("resume report does not exactly attest the current resume state")
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            current_relationships = table_digest(conn, "web_post_images")
+            current_protected = protected_database_digests(conn)
+            current_inventory = projection_inventory(conn)
+        if (
+            current_relationships != previous_report.get("content_relationship_sha256_after")
+            or current_protected != previous_report.get("protected_invariants_after")
+            or current_inventory != previous_report.get("inventory_after")
+        ):
+            raise ValueError("database drift touched content or discovery state")
+        state = {
+            **state,
+            "control_plane_drift": {
+                "database_sha256_before": state["database_sha256_after"],
+                "database_sha256_after": database_sha256,
+                "attested_by_report": str(resume_report_path),
+            },
+        }
     cursors = {
         str(platform): int(value)
         for platform, value in (state.get("after_post_ids") or {}).items()
@@ -205,6 +244,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         campaign_id=campaign_id,
         database_sha256=db_sha_before,
         operation=operation,
+        db_path=db_path,
+        allow_control_plane_drift=args.allow_control_plane_drift,
+        resume_report_path=(
+            Path(args.resume_report).expanduser().resolve(strict=True)
+            if args.resume_report
+            else None
+        ),
     )
     if resume_state is None and db_sha_before != campaign.get("input", {}).get("database_sha256"):
         raise SystemExit("database SHA does not match H-00 input and no matching resume state exists")
@@ -242,6 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "batch_size": args.batch_size,
         "resume_state": str(resume_path) if resume_path else None,
         "resume_loaded": resume_state is not None,
+        "control_plane_drift": (resume_state or {}).get("control_plane_drift"),
         "inventory_before": inventory_before,
         "integrity_before": integrity_before,
         "protected_invariants_before": invariants_before,
@@ -288,6 +335,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
             inventory_after = projection_inventory(conn)
             content_relationship_sha256 = table_digest(conn, "web_post_images")
+            web_posts_sha256 = table_digest(conn, "web_posts")
         after_post_ids = dict(cursors)
         for post in apply_plan.posts:
             after_post_ids[post.platform_key] = max(
@@ -311,6 +359,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "after_post_ids": after_post_ids,
             "completed_platforms": completed_platforms,
             "last_plan_digest": apply_plan.plan_digest,
+            "web_posts_sha256_after": web_posts_sha256,
+            "web_post_images_sha256_after": content_relationship_sha256,
+            "protected_invariants_after": invariants_after,
+            "inventory_after": inventory_after,
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         if resume_path is None:
