@@ -5,8 +5,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, fields
 from hashlib import sha256
 import json
+import os
+from pathlib import Path
 from pathlib import PurePosixPath
 import re
+import secrets
 from typing import Any, Iterable
 
 from trippostcollect.artifacts.image_candidates import ImageCandidate, normalize_image_url
@@ -179,6 +182,30 @@ def serialize_manifest(entries: Iterable[ImageManifestEntry]) -> bytes:
 
 def manifest_sha256(entries: Iterable[ImageManifestEntry]) -> str:
     return sha256(serialize_manifest(entries)).hexdigest()
+
+
+def write_manifest_atomic(
+    path: str | Path,
+    entries: Iterable[ImageManifestEntry],
+) -> tuple[Path, str]:
+    """Validate and atomically replace one deterministic UTF-8 JSONL manifest."""
+
+    target = Path(path).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = serialize_manifest(entries)
+    parse_manifest(payload)
+    part = target.parent / f".{target.name}.{secrets.token_hex(8)}.part"
+    with part.open("xb") as file_handle:
+        file_handle.write(payload)
+        file_handle.flush()
+        os.fsync(file_handle.fileno())
+    os.replace(part, target)
+    descriptor = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return target, sha256(payload).hexdigest()
 
 
 def parse_manifest(payload: str | bytes) -> tuple[ImageManifestEntry, ...]:

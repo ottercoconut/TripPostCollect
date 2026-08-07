@@ -34,9 +34,24 @@ from trippostcollect.artifacts.image_candidates import (
     normalize_image_url,
     source_asset_key_for_image,
 )
+from trippostcollect.artifacts.image_manifest import (
+    ImageManifestEntry,
+    manifest_sha256,
+    write_manifest_atomic,
+)
 from trippostcollect.artifacts.image_materialization import (
+    DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
+    ImageMaterializationError,
     MaterializedImage,
+    SUPPORTED_IMAGE_MIME_TYPES,
+    safe_platform_post_id,
     validate_image_file,
+    write_staging_image,
+)
+from trippostcollect.artifacts.image_proxy import (
+    RemoteImageFetchError,
+    RemoteImagePreview,
+    fetch_remote_image_bytes,
 )
 from crawl_policy import (
     CrawlPolicyBlocked,
@@ -85,6 +100,8 @@ BILIBILI_DETAIL_MAX_ATTEMPTS = 3
 BILIBILI_DETAIL_RETRY_DELAY_SECONDS = (4.0, 7.0)
 BILIBILI_DETAIL_PACING_SECONDS = (1.5, 3.0)
 BILIBILI_DETAIL_RETRYABLE_CODES = frozenset({-509, -412, -352})
+BILIBILI_IMAGE_MAX_ATTEMPTS = 3
+BILIBILI_IMAGE_RETRY_DELAY_SECONDS = (1.0, 2.0)
 BILIBILI_TRUSTED_DETAIL_SOURCES = frozenset({"article_view_api"})
 BILIBILI_BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -125,6 +142,17 @@ class BilibiliArticleDetailError(RuntimeError):
 
 class ImagePersistenceError(ValueError):
     """Raised before a partial post/image relationship can be committed."""
+
+
+class BilibiliImageDownloadError(RuntimeError):
+    """A body-image failure that must keep the current Bilibili page open."""
+
+    def __init__(self, entry: ImageManifestEntry) -> None:
+        super().__init__(entry.error_code or "bilibili image download failed")
+        self.code = entry.error_code
+        self.retryable = entry.error_code == "image_download_retryable"
+        self.attempts = entry.attempts
+        self.http_status = entry.http_status
 
 PLATFORMS: dict[str, dict[str, str]] = {
     "bilibili": {"mediacrawler": "bili", "label": "B站"},
@@ -991,7 +1019,9 @@ def summarize_jsonl(path: Path, keyword: str) -> dict[str, Any]:
 
 
 def summarize_output(save_path: Path, keyword: str) -> dict[str, Any]:
-    jsonl_files = sorted(save_path.rglob("*.jsonl")) if save_path.exists() else []
+    all_jsonl_files = sorted(save_path.rglob("*.jsonl")) if save_path.exists() else []
+    image_manifest_paths = [path for path in all_jsonl_files if path.name == "image_manifest.jsonl"]
+    jsonl_files = [path for path in all_jsonl_files if path.name != "image_manifest.jsonl"]
     jsonl = [summarize_jsonl(path, keyword) for path in jsonl_files]
     counts = {"contents": 0, "comments": 0, "creators": 0, "unknown": 0}
     fields: set[str] = set()
@@ -1017,6 +1047,7 @@ def summarize_output(save_path: Path, keyword: str) -> dict[str, Any]:
     return {
         "save_path": str(save_path),
         "jsonl_files": [str(path) for path in jsonl_files],
+        "image_manifest_paths": [str(path) for path in image_manifest_paths],
         "jsonl_file_count": len(jsonl_files),
         "content_records": counts.get("contents", 0),
         "non_video_content_records": max(0, counts.get("contents", 0) - video_like_records),
@@ -2259,6 +2290,129 @@ def bilibili_detail_headers(post_id: str, cookie_header: str = "") -> dict[str, 
     return headers
 
 
+def bilibili_image_headers(post_id: str, cookie_header: str = "") -> dict[str, str]:
+    headers = {
+        "User-Agent": BILIBILI_BROWSER_USER_AGENT,
+        "Accept": "image/avif,image/webp,image/png,image/jpeg,image/gif;q=0.9",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": f"https://www.bilibili.com/read/cv{post_id}/",
+    }
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    return headers
+
+
+def fetch_bilibili_image_bytes(
+    source_url: str,
+    post_id: str,
+    cookie_header: str = "",
+) -> RemoteImagePreview:
+    return fetch_remote_image_bytes(
+        source_url,
+        headers=bilibili_image_headers(post_id, cookie_header),
+        max_bytes=DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
+        timeout_seconds=30,
+        allowed_media_types=SUPPORTED_IMAGE_MIME_TYPES,
+    )
+
+
+def download_bilibili_record_images(
+    record: dict[str, Any],
+    *,
+    cookie_header: str,
+    platform_data_root: Path,
+    fetcher: Any | None = None,
+    sleep_fn: Any | None = None,
+) -> list[ImageManifestEntry]:
+    """Download only detail-observed Bilibili article images into staging."""
+
+    fetch = fetcher or fetch_bilibili_image_bytes
+    wait = sleep_fn or time.sleep
+    root = platform_data_root.expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    entries: list[ImageManifestEntry] = []
+    for candidate in content_image_candidates("bilibili", record):
+        attempts = 0
+        http_status: int | None = None
+        error_code = "image_download_retryable"
+        while attempts < BILIBILI_IMAGE_MAX_ATTEMPTS:
+            attempts += 1
+            try:
+                response = fetch(candidate.source_url, candidate.platform_post_id, cookie_header)
+                http_status = response.http_status
+                staged = write_staging_image(
+                    [response.content],
+                    staging_root=root,
+                    relative_stem=(
+                        f"images/{safe_platform_post_id(candidate.platform_post_id)}/"
+                        f"{candidate.source_index:03d}"
+                    ),
+                    content_type=response.media_type,
+                    content_length=len(response.content),
+                    source_url=response.final_url,
+                )
+                entries.append(
+                    ImageManifestEntry(
+                        schema_version=1,
+                        platform_key=candidate.platform_key,
+                        platform_post_id=candidate.platform_post_id,
+                        image_role=candidate.image_role,
+                        source_index=candidate.source_index,
+                        source_key=candidate.source_key,
+                        source_asset_key=candidate.source_asset_key,
+                        source_url=candidate.source_url,
+                        fetch_status="downloaded",
+                        attempts=attempts,
+                        http_status=http_status,
+                        staging_path=staged.path.relative_to(root).as_posix(),
+                        size_bytes=staged.size_bytes,
+                        mime_type=staged.mime_type,
+                        width=staged.width,
+                        height=staged.height,
+                        sha256=staged.sha256,
+                        error_code=None,
+                    )
+                )
+                break
+            except RemoteImageFetchError as exc:
+                http_status = exc.http_status
+                error_code = "image_download_retryable"
+                if exc.retryable and attempts < BILIBILI_IMAGE_MAX_ATTEMPTS:
+                    wait(random.uniform(*BILIBILI_IMAGE_RETRY_DELAY_SECONDS) * (2 ** (attempts - 1)))
+                    continue
+            except ImageMaterializationError as exc:
+                error_code = exc.code
+            except (OSError, TimeoutError):
+                error_code = "image_download_retryable"
+                if attempts < BILIBILI_IMAGE_MAX_ATTEMPTS:
+                    wait(random.uniform(*BILIBILI_IMAGE_RETRY_DELAY_SECONDS) * (2 ** (attempts - 1)))
+                    continue
+            entries.append(
+                ImageManifestEntry(
+                    schema_version=1,
+                    platform_key=candidate.platform_key,
+                    platform_post_id=candidate.platform_post_id,
+                    image_role=candidate.image_role,
+                    source_index=candidate.source_index,
+                    source_key=candidate.source_key,
+                    source_asset_key=candidate.source_asset_key,
+                    source_url=candidate.source_url,
+                    fetch_status="failed",
+                    attempts=attempts,
+                    http_status=http_status,
+                    staging_path=None,
+                    size_bytes=None,
+                    mime_type=None,
+                    width=None,
+                    height=None,
+                    sha256=None,
+                    error_code=error_code,
+                )
+            )
+            return entries
+    return entries
+
+
 def fetch_bilibili_article_detail(post_id: str, cookie_header: str = "") -> dict[str, Any]:
     request = Request(
         BILIBILI_ARTICLE_DETAIL_URL + "?" + urlencode({"id": post_id}),
@@ -2484,7 +2638,12 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     platform_key = "bilibili"
     completion_mode = str(getattr(args, "completion_mode", "target-new-posts"))
     platform = PLATFORMS[platform_key]
-    save_path = ensure_dir(batch_dir / platform_key / "data" / platform["mediacrawler"] / "jsonl")
+    platform_data_root = ensure_dir(
+        batch_dir / platform_key / "data" / platform["mediacrawler"]
+    )
+    save_path = ensure_dir(platform_data_root / "jsonl")
+    manifest_path = platform_data_root / "image_manifest.jsonl"
+    download_images = bool(getattr(args, "download_images", False))
     log_dir = ensure_dir(batch_dir / "logs" / platform_key)
     jsonl_path = save_path / f"search_contents_{datetime.now(CHINA_TZ).date().isoformat()}.jsonl"
     stdout_log = log_dir / "stdout.log"
@@ -2500,6 +2659,8 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
         "--completion-mode",
         completion_mode,
     ]
+    if download_images:
+        command.append("--download-images")
 
     started = time.monotonic()
     records: list[dict[str, Any]] = []
@@ -2512,11 +2673,16 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     stagnant_pages = 0
     last_detail_request_at: float | None = None
     detail_request_pacing_events: list[dict[str, Any]] = []
+    image_manifest_entries: list[ImageManifestEntry] = []
+    expected_image_count = 0
+    image_candidate_posts: set[str] = set()
     state_path = os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()
     stderr = ""
     returncode = 0
     behavior_evidence: dict[str, Any] = load_behavior_evidence(behavior_evidence_path)
     try:
+        if download_images:
+            write_manifest_atomic(manifest_path, image_manifest_entries)
         exhaustion_mode = completion_mode == "source-exhausted"
         max_records = int(
             getattr(args, "source_candidate_hard_limit", args.candidate_hard_limit)
@@ -2609,7 +2775,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 seen_before = len(seen_ids)
                 processed_in_batch = 0
                 batch_complete = True
-                batch_runtime_error: BilibiliArticleDetailError | None = None
+                batch_runtime_error: BilibiliArticleDetailError | BilibiliImageDownloadError | None = None
                 for item_index, item in enumerate(page_items):
                     post_id = str(item.get("id") or "").strip()
                     if post_id and (post_id in known_post_ids or post_id in seen_ids):
@@ -2691,6 +2857,38 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                             f"attempts={exc.attempts}, code={exc.code!r}): {exc}"
                         )
                         break
+                    if download_images:
+                        expected_image_count += len(
+                            content_image_candidates(platform_key, normalized)
+                        )
+                        image_candidate_posts.add(post_id)
+                        post_image_entries = download_bilibili_record_images(
+                            normalized,
+                            cookie_header=cookie_header,
+                            platform_data_root=platform_data_root,
+                        )
+                        image_manifest_entries.extend(post_image_entries)
+                        write_manifest_atomic(manifest_path, image_manifest_entries)
+                        failed_image = next(
+                            (
+                                entry
+                                for entry in post_image_entries
+                                if entry.fetch_status != "downloaded"
+                            ),
+                            None,
+                        )
+                        if failed_image is not None:
+                            batch_runtime_error = BilibiliImageDownloadError(failed_image)
+                            batch_complete = False
+                            returncode = 1
+                            stderr = (
+                                f"BilibiliImageDownloadError(post_id={post_id!r}, "
+                                f"source_index={failed_image.source_index}, "
+                                f"attempts={failed_image.attempts}, "
+                                f"code={failed_image.error_code!r}, "
+                                f"http_status={failed_image.http_status!r})"
+                            )
+                            break
                     creator_id = str(normalized.get("user_id") or "")
                     if creator_id:
                         if creator_id not in follower_cache:
@@ -2761,8 +2959,10 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "quantity_limits_enforced": not exhaustion_mode,
                     "stop_reason": batch_stop_reason,
                     "stop_detail": (
-                        "bilibili_article_detail_failed"
-                        if batch_runtime_error is not None
+                        "bilibili_article_image_failed"
+                        if isinstance(batch_runtime_error, BilibiliImageDownloadError)
+                        else "bilibili_article_detail_failed"
+                        if isinstance(batch_runtime_error, BilibiliArticleDetailError)
                         else None
                     ),
                     "source_page": page,
@@ -2775,14 +2975,24 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "candidate_identities": sorted(seen_ids),
                 }
                 if batch_runtime_error is not None:
-                    event_details.update(
-                        {
-                            "failed_candidate_id": post_id,
-                            "detail_error_code": batch_runtime_error.code,
-                            "detail_error_attempts": batch_runtime_error.attempts,
-                            "detail_error_retryable": batch_runtime_error.retryable,
-                        }
-                    )
+                    event_details["failed_candidate_id"] = post_id
+                    if isinstance(batch_runtime_error, BilibiliImageDownloadError):
+                        event_details.update(
+                            {
+                                "image_error_code": batch_runtime_error.code,
+                                "image_error_attempts": batch_runtime_error.attempts,
+                                "image_error_retryable": batch_runtime_error.retryable,
+                                "image_error_http_status": batch_runtime_error.http_status,
+                            }
+                        )
+                    else:
+                        event_details.update(
+                            {
+                                "detail_error_code": batch_runtime_error.code,
+                                "detail_error_attempts": batch_runtime_error.attempts,
+                                "detail_error_retryable": batch_runtime_error.retryable,
+                            }
+                        )
                 if state_path:
                     frozen_state = FrozenExecutionState(state_path)
                     frozen_state.append_event("adaptive_batch_completed", event_details)
@@ -2881,10 +3091,22 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     stderr_log.write_text(stderr, encoding="utf-8")
     command_log.write_text(shlex.join(command), encoding="utf-8")
     output = summarize_output(batch_dir / platform_key / "data", args.keyword)
+    downloaded_image_count = sum(
+        entry.fetch_status == "downloaded" for entry in image_manifest_entries
+    )
+    failed_image_count = len(image_manifest_entries) - downloaded_image_count
+    images_complete = (
+        not download_images
+        or (
+            len(image_manifest_entries) == expected_image_count
+            and failed_image_count == 0
+        )
+    )
     status = (
         "completed"
         if returncode == 0
         and behavior_evidence_valid(behavior_evidence)
+        and images_complete
         and (bool(records) or completion_mode == "source-exhausted")
         else "failed"
     )
@@ -2893,9 +3115,29 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
         "label": platform["label"],
         "status": status,
         "ok": status == "completed",
-        "media_enabled": False,
+        "media_enabled": download_images,
         "video_enabled": False,
         "login_state": None,
+        "image_materialization": {
+            "required": download_images,
+            "candidate_posts": len(image_candidate_posts),
+            "expected_images": expected_image_count,
+            "downloaded_images": downloaded_image_count,
+            "retryable_failures": sum(
+                entry.error_code == "image_download_retryable"
+                for entry in image_manifest_entries
+            ),
+            "terminal_failures": sum(
+                entry.fetch_status == "failed"
+                and entry.error_code != "image_download_retryable"
+                for entry in image_manifest_entries
+            ),
+            "complete": images_complete,
+            "manifest_paths": [str(manifest_path)] if download_images else [],
+            "manifest_sha256": (
+                manifest_sha256(image_manifest_entries) if download_images else None
+            ),
+        },
         "behavior_evidence": behavior_evidence,
         "run": {
             "command": command,

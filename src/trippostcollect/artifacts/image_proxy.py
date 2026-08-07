@@ -23,12 +23,24 @@ class UnsafeImageUrl(ValueError):
 class RemoteImageFetchError(ValueError):
     """Raised when a stored remote image cannot be fetched as an image."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        http_status: int | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.retryable = retryable
+
 
 @dataclass(frozen=True)
 class RemoteImagePreview:
     content: bytes
     media_type: str
     final_url: str
+    http_status: int = 200
 
 
 REMOTE_IMAGE_REFERERS = {
@@ -122,10 +134,28 @@ def fetch_remote_image_preview(
     max_bytes: int = DEFAULT_REMOTE_IMAGE_MAX_BYTES,
     timeout_seconds: int = 12,
 ) -> RemoteImagePreview:
+    return fetch_remote_image_bytes(
+        url,
+        headers=_remote_image_headers(platform_key),
+        max_bytes=max_bytes,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def fetch_remote_image_bytes(
+    url: str | None,
+    *,
+    headers: dict[str, str],
+    max_bytes: int,
+    timeout_seconds: int,
+    allowed_media_types: Collection[str] | None = None,
+) -> RemoteImagePreview:
+    """Fetch bounded bytes while revalidating every manual redirect target."""
+
     current_url = validate_remote_image_url(url)
     opener = build_opener(_NoRedirectHandler)
     for _attempt in range(4):
-        request = Request(current_url, headers=_remote_image_headers(platform_key))
+        request = Request(current_url, headers=headers)
         try:
             with opener.open(request, timeout=timeout_seconds) as response:
                 media_type = validate_remote_image_response(
@@ -133,19 +163,35 @@ def fetch_remote_image_preview(
                     content_length=response.headers.get("content-length"),
                     url=current_url,
                     max_bytes=max_bytes,
+                    allowed_media_types=allowed_media_types,
                 )
                 content = read_limited_response(response, max_bytes=max_bytes)
-                return RemoteImagePreview(content=content, media_type=media_type, final_url=response.geturl())
+                return RemoteImagePreview(
+                    content=content,
+                    media_type=media_type,
+                    final_url=response.geturl(),
+                    http_status=int(response.getcode() or 200),
+                )
         except HTTPError as exc:
             if 300 <= exc.code < 400:
                 location = exc.headers.get("location")
                 if not location:
-                    raise RemoteImageFetchError(f"remote image redirected without Location: HTTP {exc.code}") from exc
+                    raise RemoteImageFetchError(
+                        f"remote image redirected without Location: HTTP {exc.code}",
+                        http_status=exc.code,
+                    ) from exc
                 current_url = validate_remote_image_url(urljoin(current_url, location))
                 continue
-            raise RemoteImageFetchError(f"remote image returned HTTP {exc.code}") from exc
+            raise RemoteImageFetchError(
+                f"remote image returned HTTP {exc.code}",
+                http_status=exc.code,
+                retryable=exc.code in {401, 403, 408, 425, 429} or exc.code >= 500,
+            ) from exc
         except (URLError, TimeoutError, socket.timeout, ssl.SSLError) as exc:
-            raise RemoteImageFetchError(f"remote image fetch failed: {exc}") from exc
+            raise RemoteImageFetchError(
+                f"remote image fetch failed: {exc}",
+                retryable=True,
+            ) from exc
     raise RemoteImageFetchError("remote image redirected too many times")
 
 
