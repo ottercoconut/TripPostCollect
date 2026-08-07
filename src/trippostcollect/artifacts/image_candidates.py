@@ -5,11 +5,18 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
+import re
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 XHS_STABLE_PATH_MARKERS = ("/notes_pre_post/", "/notes_post/", "/notes/")
+ZHIMG_TRANSFORM_SUFFIX_RE = re.compile(
+    r"_(?:b|r|qhd|hd|xs|s|m|l|xl|xxl|original|watermark)\.(?:avif|gif|jpe?g|png|webp)$",
+    re.IGNORECASE,
+)
+RASTER_SUFFIX_RE = re.compile(r"\.(?:avif|gif|jpe?g|png|webp)$", re.IGNORECASE)
+BILIBILI_TRANSFORM_RE = re.compile(r"@.*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +52,12 @@ def normalize_image_url(value: Any) -> str | None:
         parsed = urlsplit(text)
     except ValueError:
         return None
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
         return None
     netloc = parsed.netloc.lower()
     return urlunsplit((parsed.scheme.lower(), netloc, parsed.path, parsed.query, ""))
@@ -128,12 +140,68 @@ def _dedupe_identity(platform_key: str, source_url: str) -> str:
     return source_url
 
 
-def _provisional_asset_key(platform_key: str, source_url: str) -> str:
-    """Provide a deterministic pre-manifest key; I-02 adds platform asset IDs."""
+def _fallback_key(platform_key: str, identity: str) -> str:
+    digest = sha256(identity.encode("utf-8")).hexdigest()
+    return f"{platform_key}:urlsha256:{digest}"
 
-    parsed = urlsplit(source_url)
-    identity = _xhs_path_identity(source_url) if platform_key == "xhs" else f"{parsed.netloc}{parsed.path}"
-    return f"{platform_key}:urlsha256:{sha256(identity.encode('utf-8')).hexdigest()}"
+
+def _asset_id(*items: Any, keys: tuple[str, ...]) -> str | None:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for key in keys:
+            value = item.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+    return None
+
+
+def source_asset_key_for_image(
+    platform_key: str,
+    source_url: str,
+    *,
+    source_item: Any = None,
+    asset_metadata: Any = None,
+) -> str:
+    """Return the stable, non-random platform identity for one source image."""
+
+    normalized = normalize_image_url(source_url)
+    if not normalized:
+        raise ValueError("source image URL must be HTTP(S)")
+    parsed = urlsplit(normalized)
+    path = unquote(parsed.path)
+
+    if platform_key == "bilibili":
+        logical_path = BILIBILI_TRANSFORM_RE.sub("", path)
+        if "/bfs/" in logical_path:
+            bfs_asset = logical_path.split("/bfs/", 1)[1].lstrip("/")
+            bfs_asset = RASTER_SUFFIX_RE.sub("", bfs_asset)
+            return f"bilibili:bfs:{bfs_asset}"
+        return _fallback_key(platform_key, f"{parsed.hostname.lower()}{logical_path}")
+
+    if platform_key == "weibo":
+        pid = _asset_id(source_item, asset_metadata, keys=("pid", "picture_id"))
+        if pid:
+            return f"weibo:pid:{pid}"
+        return _fallback_key(platform_key, f"{parsed.hostname.lower()}{path}")
+
+    if platform_key == "xhs":
+        return f"xhs:path:{_xhs_path_identity(normalized)}"
+
+    if platform_key == "douyin":
+        uri = _asset_id(source_item, asset_metadata, keys=("uri", "image_uri"))
+        if uri:
+            return f"douyin:uri:{uri}"
+        return _fallback_key(platform_key, path)
+
+    if platform_key == "zhihu":
+        logical_path = ZHIMG_TRANSFORM_SUFFIX_RE.sub("", path)
+        if parsed.hostname.lower().endswith("zhimg.com"):
+            logical_path = RASTER_SUFFIX_RE.sub("", logical_path)
+            return _fallback_key(platform_key, logical_path)
+        return _fallback_key(platform_key, f"{parsed.hostname.lower()}{logical_path}")
+
+    raise ValueError(f"unsupported image candidate platform: {platform_key}")
 
 
 def _authoritative_values(platform_key: str, record: dict[str, Any]) -> tuple[str, list[Any]]:
@@ -155,6 +223,23 @@ def _authoritative_values(platform_key: str, record: dict[str, Any]) -> tuple[st
     raise ValueError(f"unsupported image candidate platform: {platform_key}")
 
 
+def _asset_metadata_for(
+    record: dict[str, Any],
+    source_position: int,
+    source_url: str,
+) -> dict[str, Any] | None:
+    assets = _sequence(record.get("image_assets"))
+    if source_position < len(assets) and isinstance(assets[source_position], dict):
+        return assets[source_position]
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        asset_url = _mapping_url(asset, ("url", "source_url", "url_default", "url_pre"))
+        if asset_url == source_url:
+            return asset
+    return None
+
+
 def _is_zhihu_formula(source_url: str) -> bool:
     path = urlsplit(source_url).path.lower().rstrip("/")
     return path.endswith("/equation") or "/equation/" in f"{path}/"
@@ -166,8 +251,8 @@ def content_image_candidates(platform_key: str, record: dict[str, Any]) -> list[
     source_key, raw_values = _authoritative_values(platform_key, record)
     platform_post_id = _platform_post_id(platform_key, record)
     seen: set[str] = set()
-    source_urls: list[str] = []
-    for item in raw_values:
+    source_items: list[tuple[str, Any, dict[str, Any] | None]] = []
+    for source_position, item in enumerate(raw_values):
         source_url = _item_url(platform_key, item)
         if not source_url:
             continue
@@ -177,7 +262,13 @@ def content_image_candidates(platform_key: str, record: dict[str, Any]) -> list[
         if identity in seen:
             continue
         seen.add(identity)
-        source_urls.append(source_url)
+        source_items.append(
+            (
+                source_url,
+                item,
+                _asset_metadata_for(record, source_position, source_url),
+            )
+        )
 
     return [
         ImageCandidate(
@@ -187,9 +278,14 @@ def content_image_candidates(platform_key: str, record: dict[str, Any]) -> list[
             source_index=index,
             source_url=source_url,
             source_key=source_key,
-            source_asset_key=_provisional_asset_key(platform_key, source_url),
+            source_asset_key=source_asset_key_for_image(
+                platform_key,
+                source_url,
+                source_item=source_item,
+                asset_metadata=asset_metadata,
+            ),
         )
-        for index, source_url in enumerate(source_urls)
+        for index, (source_url, source_item, asset_metadata) in enumerate(source_items)
     ]
 
 
