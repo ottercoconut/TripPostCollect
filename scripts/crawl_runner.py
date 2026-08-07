@@ -17,6 +17,10 @@ from pathlib import Path
 from typing import Any
 
 from trippostcollect.db.bootstrap import bootstrap_connection
+from trippostcollect.artifacts.image_completion import (
+    verify_image_artifacts,
+    verify_image_persistence,
+)
 from trippostcollect.scheduler.discovery import (
     clear_campaign,
     load_checkpoint,
@@ -31,6 +35,7 @@ from trippostcollect.core.paths import (
     DEFAULT_CONFIG,
     DEFAULT_DB,
     FORMAL_CRAWL_CONTRACT,
+    LOCAL_MEDIA_ROOT,
     PROJECT_ROOT,
     ensure_dir,
     ensure_parent,
@@ -250,6 +255,8 @@ def resolve_discovery_args(
         "top_refresh_max_pages": int(job_args.top_refresh_max_pages),
         "campaign_summary_path": str(job_args.resume_summary or ""),
         "checkpoint_before": checkpoint,
+        "local_image_storage_required": True,
+        "media_root": str(LOCAL_MEDIA_ROOT.resolve()),
     }
     return job_args, plan
 
@@ -288,8 +295,8 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
             raise ValueError(f"Structured platform must require followers for job {row['job_key']}")
         if params.get("get_media"):
             raise ValueError(f"Generic media/video downloads are disabled for job {row['job_key']}")
-        if params.get("download_images"):
-            raise ValueError(f"download_images requires the independent XHS runner: {row['job_key']}")
+        if "download_images" in params:
+            raise ValueError(f"removed download_images option remains in job {row['job_key']}")
         command = [sys.executable, str(ROOT / "scripts" / "mediacrawler_crawl.py"), "--platforms", platform]
         add_flag(command, "--keyword", args.recovery_keyword or params.get("keyword", "青岛旅游"))
         add_flag(command, "--timeout-per-platform", params.get("timeout_per_platform", 180))
@@ -300,6 +307,8 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
         add_flag(command, "--required-fields-profile", required_fields_profile)
         add_flag(command, "--login-type", params.get("login_type", "cookie"))
         add_flag(command, "--db", args.db)
+        command.append("--download-images")
+        add_flag(command, "--media-root", LOCAL_MEDIA_ROOT.resolve())
         if args.start_page is not None:
             add_flag(command, "--start-page", args.start_page)
         if args.resume_summary:
@@ -672,6 +681,12 @@ def main() -> int:
                         "completion_mode": args.completion_mode,
                         "quantity_limits_enforced": args.completion_mode == "target-new-posts",
                     },
+                    "local_image_storage_required": row["job_kind"] == "mediacrawler_search",
+                    "media_root": (
+                        str(LOCAL_MEDIA_ROOT.resolve())
+                        if row["job_kind"] == "mediacrawler_search"
+                        else None
+                    ),
                     "command": command,
                     "discovery": discovery_plan,
                     "no_import": bool(args.no_import),
@@ -769,11 +784,27 @@ def main() -> int:
                     )
                     formal_validation = child_summary.get("formal_validation") or {}
                     import_result_value = child_summary.get("import_result") or {}
+                    checkpoint_image_artifacts = verify_image_artifacts(
+                        child_summary,
+                        project_root=ROOT,
+                        expect_promotion=True,
+                    )
+                    checkpoint_image_persistence = verify_image_persistence(
+                        child_summary,
+                        db_path,
+                        project_root=ROOT,
+                        media_root=LOCAL_MEDIA_ROOT,
+                    )
                     imported_completion = bool(
                         child_summary.get("import_completion_met")
                         if "import_completion_met" in child_summary
                         else child_summary.get("import_new_target_met")
                     ) and not bool(import_result_value.get("reason"))
+                    imported_completion = bool(
+                        imported_completion
+                        and checkpoint_image_artifacts["ok"]
+                        and checkpoint_image_persistence["ok"]
+                    )
                     if imported_completion:
                         clear_campaign(
                             conn,
@@ -811,8 +842,23 @@ def main() -> int:
             if classification.get("status") == "completed":
                 state.begin("artifacts_verified")
                 if row["job_kind"] == "mediacrawler_search":
-                    artifact_ok = bool(summary_path and Path(summary_path).is_file())
-                    artifact_evidence = {"summary_path": summary_path or "", "exists": artifact_ok}
+                    summary_exists = bool(summary_path and Path(summary_path).is_file())
+                    if summary_exists and not child_summary:
+                        try:
+                            child_summary = load_json(Path(str(summary_path)))
+                        except (OSError, json.JSONDecodeError, TypeError):
+                            child_summary = {}
+                    image_artifacts = verify_image_artifacts(
+                        child_summary,
+                        project_root=ROOT,
+                        expect_promotion=not args.no_import,
+                    )
+                    artifact_ok = bool(summary_exists and image_artifacts["ok"])
+                    artifact_evidence = {
+                        "summary_path": summary_path or "",
+                        "exists": summary_exists,
+                        "local_images": image_artifacts,
+                    }
                 else:
                     artifact_ok = bool(capture_meta_paths)
                     artifact_evidence = {"capture_meta_paths": capture_meta_paths, "count": len(capture_meta_paths)}
@@ -844,11 +890,19 @@ def main() -> int:
                     if not child_summary:
                         child_summary = load_json(Path(str(summary_path)))
                     import_result = dict(child_summary.get("import_result") or {})
-                    persistence_ok = bool(
+                    import_completion_ok = bool(
                         child_summary.get("import_completion_met")
                         if "import_completion_met" in child_summary
                         else child_summary.get("import_new_target_met")
                     )
+                    image_persistence = verify_image_persistence(
+                        child_summary,
+                        db_path,
+                        project_root=ROOT,
+                        media_root=LOCAL_MEDIA_ROOT,
+                    )
+                    import_result["local_images"] = image_persistence
+                    persistence_ok = bool(import_completion_ok and image_persistence["ok"])
                     if persistence_ok:
                         state.complete("persistence_verified", evidence=import_result)
                     else:

@@ -15,9 +15,14 @@ from typing import Any
 
 from execution_state import FORMAL_STEPS, FrozenExecutionState
 from failure_classifier import extract_stdout_json
+from trippostcollect.artifacts.image_completion import (
+    verify_image_artifacts,
+    verify_image_persistence,
+)
 from trippostcollect.core.paths import (
     DEFAULT_DB,
     FORMAL_CRAWL_CONTRACT,
+    LOCAL_MEDIA_ROOT,
     PROJECT_ROOT,
     XHS_EXECUTION_STATE_ROOT,
     XHS_POOL_CONFIG,
@@ -171,8 +176,8 @@ def build_child_command(
         command.extend(["--resume-summary", str(discovery["campaign_summary_path"])])
     if discovery.get("source_exhausted"):
         command.append("--discovery-source-exhausted")
-    if target.get("download_images"):
-        command.append("--download-images")
+    command.append("--download-images")
+    command.extend(["--media-root", str(LOCAL_MEDIA_ROOT.resolve())])
     if pool.get("headed", True):
         command.append("--headed")
     if no_import:
@@ -357,6 +362,8 @@ def record_preexecution_failure(
         "completion_mode": args.completion_mode,
         "quantity_limits_enforced": args.completion_mode == "target-new-posts",
         "behavior_profile": pool["behavior_profile"],
+        "local_image_storage_required": True,
+        "media_root": str(LOCAL_MEDIA_ROOT.resolve()),
         "preexecution_failure": reason,
     }
     state = FrozenExecutionState.create(
@@ -446,6 +453,8 @@ def main() -> int:
                     "completion_mode": args.completion_mode,
                     "quantity_limits_enforced": args.completion_mode == "target-new-posts",
                     "behavior_profile": pool["behavior_profile"],
+                    "local_image_storage_required": True,
+                    "media_root": str(LOCAL_MEDIA_ROOT.resolve()),
                     "blocked_before_lease": True,
                     "reason": exc.reason,
                     "wait_seconds": exc.wait_seconds,
@@ -556,6 +565,8 @@ def main() -> int:
         "timeout_seconds": target["timeout_seconds"],
         "lease_seconds": pool["lease_seconds"],
         "behavior_profile": pool["behavior_profile"],
+        "local_image_storage_required": True,
+        "media_root": str(LOCAL_MEDIA_ROOT.resolve()),
         "headed": pool["headed"],
         "post_interaction": args.post_interaction,
         "no_import": args.no_import,
@@ -671,6 +682,17 @@ def main() -> int:
                 discovery_commit = {"skipped": True, "reason": "no_import"}
             elif child_summary_path and child_summary:
                 try:
+                    discovery_image_artifacts = verify_image_artifacts(
+                        child_summary,
+                        project_root=ROOT,
+                        expect_promotion=True,
+                    )
+                    discovery_image_persistence = verify_image_persistence(
+                        child_summary,
+                        db_path,
+                        project_root=ROOT,
+                        media_root=LOCAL_MEDIA_ROOT,
+                    )
                     with sqlite3.connect(db_path) as conn:
                         conn.row_factory = sqlite3.Row
                         ensure_xhs_schema(conn)
@@ -682,6 +704,10 @@ def main() -> int:
                             discovery_plan=discovery_plan,
                             child_summary_path=child_summary_path,
                             child_summary=child_summary,
+                            imported_completion_verified=bool(
+                                discovery_image_artifacts["ok"]
+                                and discovery_image_persistence["ok"]
+                            ),
                         )
                 except (OSError, sqlite3.Error, TypeError, ValueError, RuntimeError) as exc:
                     discovery_commit = {
@@ -706,24 +732,58 @@ def main() -> int:
                 if not child_summary_path or not Path(child_summary_path).is_file():
                     state.fail("artifacts_verified", error="xhs_child_summary_missing")
                 else:
-                    state.complete("artifacts_verified", evidence={"summary_path": child_summary_path})
+                    image_artifacts = verify_image_artifacts(
+                        child_summary,
+                        project_root=ROOT,
+                        expect_promotion=not args.no_import,
+                    )
+                    artifact_evidence = {
+                        "summary_path": child_summary_path,
+                        "local_images": image_artifacts,
+                    }
+                    if image_artifacts["ok"]:
+                        state.complete("artifacts_verified", evidence=artifact_evidence)
+                    else:
+                        state.fail(
+                            "artifacts_verified",
+                            error="xhs_local_image_artifacts_incomplete",
+                            evidence=artifact_evidence,
+                        )
+                if state.load()["steps"]["artifacts_verified"]["status"] == "completed":
                     state.begin("persistence_verified")
-                    import_result = child_summary.get("import_result") or {}
-                    persistence_ok = bool(
+                    import_result = dict(child_summary.get("import_result") or {})
+                    import_completion_ok = bool(
                         child_summary.get("import_completion_met")
                         if "import_completion_met" in child_summary
                         else child_summary.get("import_new_target_met")
                     )
                     if args.no_import:
                         state.complete("persistence_verified", evidence=import_result, skipped=True)
-                    elif persistence_ok and (
-                        args.completion_mode == "source-exhausted"
-                        or int(import_result.get("inserted_rows") or 0)
-                        >= int(target["target_new_posts"])
-                    ):
-                        state.complete("persistence_verified", evidence=import_result)
                     else:
-                        state.fail("persistence_verified", error="xhs_completion_not_persisted", evidence=import_result)
+                        image_persistence = verify_image_persistence(
+                            child_summary,
+                            db_path,
+                            project_root=ROOT,
+                            media_root=LOCAL_MEDIA_ROOT,
+                        )
+                        import_result["local_images"] = image_persistence
+                        persistence_ok = bool(
+                            import_completion_ok
+                            and image_persistence["ok"]
+                            and (
+                                args.completion_mode == "source-exhausted"
+                                or int(import_result.get("inserted_rows") or 0)
+                                >= int(target["target_new_posts"])
+                            )
+                        )
+                        if persistence_ok:
+                            state.complete("persistence_verified", evidence=import_result)
+                        else:
+                            state.fail(
+                                "persistence_verified",
+                                error="xhs_completion_not_persisted",
+                                evidence=import_result,
+                            )
                     if state.load()["steps"]["persistence_verified"]["status"] in {"completed", "skipped"}:
                         updated_state = json.loads(storage_state.read_text(encoding="utf-8"))
                         encrypt_storage_state(

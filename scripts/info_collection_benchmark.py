@@ -13,7 +13,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from trippostcollect.core.paths import DEFAULT_CONFIG, DEFAULT_DB, PROJECT_ROOT, ensure_dir, ensure_parent, runtime_dir
+from trippostcollect.core.paths import (
+    DEFAULT_CONFIG,
+    DEFAULT_DB,
+    LOCAL_MEDIA_ROOT,
+    PROJECT_ROOT,
+    ensure_dir,
+    ensure_parent,
+    runtime_dir,
+)
 from trippostcollect.db.bootstrap import bootstrap_database
 from mediacrawler_behavior import HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS
 
@@ -168,9 +176,10 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         str(db_path),
         "--output-dir",
         str(mc_output),
+        "--download-images",
+        "--media-root",
+        str(LOCAL_MEDIA_ROOT.resolve()),
     ]
-    if bool(params.get("download_images")):
-        command.append("--download-images")
     if not args.headless and params.get("headless") is False:
         command.append("--headed")
 

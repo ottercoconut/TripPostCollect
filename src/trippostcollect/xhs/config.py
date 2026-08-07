@@ -61,6 +61,10 @@ def load_target(target_key: str, path: str | Path = XHS_TARGET_CONFIG) -> dict[s
         raise XhsConfigError(
             f"removed XHS target enabled gate remains in {resolved}: {target_key}"
         )
+    if "download_images" in target:
+        raise XhsConfigError(
+            f"removed XHS target download_images option remains in {resolved}: {target_key}"
+        )
     target_new = int(target.get("target_new_posts") or 0)
     candidates = int(target.get("candidate_hard_limit") or 0)
     stagnant = int(target.get("max_stagnant_batches") or 0)
@@ -75,4 +79,8 @@ def load_target(target_key: str, path: str | Path = XHS_TARGET_CONFIG) -> dict[s
         raise XhsConfigError("XHS requires image_post_with_followers_v1")
     if target.get("followers_policy") != "required":
         raise XhsConfigError("XHS author followers must be required")
-    return {"path": str(resolved), **target}
+    return {
+        "path": str(resolved),
+        **target,
+        "local_image_storage_required": True,
+    }

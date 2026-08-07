@@ -56,6 +56,8 @@ def test_default_xhs_target_budget() -> None:
     assert target["max_stagnant_batches"] == 8
     assert target["top_refresh_max_pages"] == 5
     assert target["timeout_seconds"] == 7200
+    assert target["local_image_storage_required"] is True
+    assert "download_images" not in target
     assert pool["lease_seconds"] == 29100
     assert pool["lease_seconds"] >= target["timeout_seconds"] + 300
 
@@ -469,7 +471,6 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
                         "timeout_seconds": 1800,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
-                        "download_images": True,
                     }
                 ],
             },
@@ -524,6 +525,10 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
     assert command[command.index("--start-cursor") + 1] == "saved-search-id"
     assert command[command.index("--top-refresh-max-pages") + 1] == "3"
     assert "--download-images" in command
+    assert command[command.index("--media-root") + 1] == str(
+        xhs_runner.LOCAL_MEDIA_ROOT.resolve()
+    )
+    assert "--get-media" not in command
 
 
 def test_xhs_pool_requires_headed_browser(tmp_path: Path) -> None:
@@ -627,6 +632,35 @@ def test_xhs_config_rejects_legacy_schema(tmp_path: Path) -> None:
 
     with pytest.raises(XhsConfigError, match="unsupported XHS config schema"):
         load_pool_config(pool_path)
+
+
+def test_xhs_target_rejects_removed_download_images_option(tmp_path: Path) -> None:
+    target_path = tmp_path / "targets.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "targets": [
+                    {
+                        "target_key": "test",
+                        "keyword": "青岛旅游",
+                        "target_new_posts": 1,
+                        "candidate_hard_limit": 1,
+                        "max_stagnant_batches": 1,
+                        "top_refresh_max_pages": 0,
+                        "timeout_seconds": 30,
+                        "required_fields_profile": "image_post_with_followers_v1",
+                        "followers_policy": "required",
+                        "download_images": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(XhsConfigError, match="removed XHS target download_images"):
+        load_target("test", target_path)
 
 
 def test_failed_child_summary_remains_available_for_reporting(tmp_path: Path) -> None:

@@ -76,4 +76,9 @@ def test_enabled_bilibili_job_routes_to_formal_detail_executor(tmp_path: Path) -
         "image_post_with_followers_v1"
     )
     assert command_value(command, "--completion-mode") == "target-new-posts"
+    assert "--download-images" in command
+    assert command_value(command, "--media-root") == str(
+        crawl_runner.LOCAL_MEDIA_ROOT.resolve()
+    )
+    assert "--get-media" not in command
     assert "--no-import" not in command

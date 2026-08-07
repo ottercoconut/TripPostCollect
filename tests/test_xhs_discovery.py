@@ -249,6 +249,52 @@ def test_frontier_commit_advances_and_clears_completed_campaign(tmp_path: Path) 
     assert checkpoint["campaign_candidate_count"] == 0
 
 
+def test_image_persistence_failure_preserves_campaign_summary(tmp_path: Path) -> None:
+    conn = prepare_connection(tmp_path / "image-failure.sqlite")
+    plan = resolve_discovery_plan(conn, target=target(), account_id="xhs-a01")
+    child_path = tmp_path / "image-failure-summary.json"
+    child_path.write_text("{}", encoding="utf-8")
+
+    result = commit_child_discovery(
+        conn,
+        target=target(),
+        account_id="xhs-a01",
+        run_id="run-image-failure",
+        discovery_plan=plan,
+        child_summary_path=child_path,
+        child_summary={
+            "pagination_evidence": {
+                "stop_event": {
+                    "source_page": 4,
+                    "resume_page": 5,
+                    "resume_cursor": "stable-search-id",
+                    "source_has_more": True,
+                    "batch_complete": True,
+                    "discovery_phase": "frontier",
+                    "stop_reason": "target_new_met",
+                }
+            },
+            "formal_validation": {"candidate_count": 20},
+            "import_result": {"inserted_rows": 20},
+            "import_completion_met": True,
+        },
+        imported_completion_verified=False,
+    )
+    fingerprint = xhs_query_fingerprint(target())
+    checkpoint = load_checkpoint(
+        conn,
+        target_key="qingdao_travel",
+        account_id="xhs-a01",
+        query_fingerprint_value=fingerprint,
+    )
+    conn.close()
+
+    assert result["imported_target"] is False
+    assert checkpoint is not None
+    assert checkpoint["last_summary_path"] == str(child_path.resolve())
+    assert checkpoint["campaign_candidate_count"] == 20
+
+
 def test_incomplete_last_page_does_not_mark_frontier_exhausted(tmp_path: Path) -> None:
     conn = prepare_connection(tmp_path / "incomplete.sqlite")
     plan = resolve_discovery_plan(conn, target=target(), account_id="xhs-a01")

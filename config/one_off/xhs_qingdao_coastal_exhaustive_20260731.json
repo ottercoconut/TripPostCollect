@@ -11,8 +11,7 @@
       "top_refresh_max_pages": 5,
       "timeout_seconds": 28800,
       "required_fields_profile": "image_post_with_followers_v1",
-      "followers_policy": "required",
-      "download_images": true
+      "followers_policy": "required"
     }
   ]
 }

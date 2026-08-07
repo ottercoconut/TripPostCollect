@@ -198,6 +198,7 @@ def commit_child_discovery(
     discovery_plan: Mapping[str, Any],
     child_summary_path: str | Path,
     child_summary: Mapping[str, Any],
+    imported_completion_verified: bool | None = None,
 ) -> dict[str, Any]:
     """Commit a durable frontier only from child pagination evidence."""
     pagination = child_summary.get("pagination_evidence") or {}
@@ -245,6 +246,8 @@ def commit_child_discovery(
         if "import_completion_met" in child_summary
         else child_summary.get("import_new_target_met")
     ) and not bool(import_result.get("reason"))
+    if imported_completion_verified is not None:
+        imported_target = bool(imported_target and imported_completion_verified)
     formal_validation = child_summary.get("formal_validation") or {}
     if imported_target:
         campaign_summary_path = None
