@@ -8,6 +8,7 @@ import mimetypes
 from pathlib import Path
 import socket
 import ssl
+from typing import Any, Collection
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -61,9 +62,57 @@ def validate_remote_image_url(url: str | None) -> str:
     host = parsed.hostname
     if not host:
         raise UnsafeImageUrl("image URL host is missing")
+    if parsed.username is not None or parsed.password is not None:
+        raise UnsafeImageUrl("image URL credentials are not allowed")
     if _is_blocked_host(host):
         raise UnsafeImageUrl("image URL host is not allowed")
     return url
+
+
+def remote_image_media_type(content_type: str | None, url: str) -> str:
+    """Normalize a remote response MIME, falling back to the URL suffix."""
+
+    if content_type:
+        return content_type.split(";", 1)[0].strip().lower()
+    return content_type_for_path(Path(urlparse(url).path), fallback="application/octet-stream")
+
+
+def validate_remote_image_response(
+    *,
+    content_type: str | None,
+    content_length: str | int | None,
+    url: str,
+    max_bytes: int,
+    allowed_media_types: Collection[str] | None = None,
+) -> str:
+    """Validate headers before a bounded image response body is consumed."""
+
+    media_type = remote_image_media_type(content_type, url)
+    if allowed_media_types is None:
+        if not media_type.startswith("image/"):
+            raise RemoteImageFetchError(f"remote image returned non-image content type: {media_type}")
+    elif media_type not in allowed_media_types:
+        raise RemoteImageFetchError(f"remote image returned unsupported content type: {media_type}")
+
+    if content_length not in (None, ""):
+        try:
+            declared_size = int(content_length)
+        except (TypeError, ValueError) as exc:
+            raise RemoteImageFetchError("remote image returned invalid Content-Length") from exc
+        if declared_size < 0:
+            raise RemoteImageFetchError("remote image returned negative Content-Length")
+        if declared_size > max_bytes:
+            raise RemoteImageFetchError(f"remote image exceeds {max_bytes} bytes")
+    return media_type
+
+
+def read_limited_response(response: Any, *, max_bytes: int) -> bytes:
+    """Read no more than one byte beyond the configured response limit."""
+
+    content = response.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise RemoteImageFetchError(f"remote image exceeds {max_bytes} bytes")
+    return content
 
 
 def fetch_remote_image_preview(
@@ -79,12 +128,13 @@ def fetch_remote_image_preview(
         request = Request(current_url, headers=_remote_image_headers(platform_key))
         try:
             with opener.open(request, timeout=timeout_seconds) as response:
-                media_type = _remote_media_type(response.headers.get("content-type"), current_url)
-                if not media_type.startswith("image/"):
-                    raise RemoteImageFetchError(f"remote image returned non-image content type: {media_type}")
-                content = response.read(max_bytes + 1)
-                if len(content) > max_bytes:
-                    raise RemoteImageFetchError(f"remote image exceeds {max_bytes} bytes")
+                media_type = validate_remote_image_response(
+                    content_type=response.headers.get("content-type"),
+                    content_length=response.headers.get("content-length"),
+                    url=current_url,
+                    max_bytes=max_bytes,
+                )
+                content = read_limited_response(response, max_bytes=max_bytes)
                 return RemoteImagePreview(content=content, media_type=media_type, final_url=response.geturl())
         except HTTPError as exc:
             if 300 <= exc.code < 400:
@@ -134,12 +184,6 @@ def _remote_image_headers(platform_key: str | None) -> dict[str, str]:
     if referer:
         headers["Referer"] = referer
     return headers
-
-
-def _remote_media_type(content_type: str | None, url: str) -> str:
-    if content_type:
-        return content_type.split(";", 1)[0].strip().lower()
-    return content_type_for_path(Path(urlparse(url).path), fallback="application/octet-stream")
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
