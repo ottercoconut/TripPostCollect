@@ -1,9 +1,11 @@
 # 五平台正文图片本地存储工程实现方案
 
-> 状态：主程序阶段 I-00 至 I-14 已完成，`MAIN_PROGRAM_READY=true`；历史数据阶段 H-00 已完成，
-> H-01 至 H-08 尚未开始，`HISTORICAL_DATA_COMPLETE=false`。主程序验收证据见
+> 状态：主程序阶段 I-00 至 I-14 已完成，`MAIN_PROGRAM_READY=true`；历史数据阶段 H-00、H-01
+> 已完成，H-02 至 H-08 尚未开始，`HISTORICAL_DATA_COMPLETE=false`。主程序验收证据见
 > [`2026-08-07-image-main-program-i14-report.md`](2026-08-07-image-main-program-i14-report.md)，历史输入冻结证据见
-> [`2026-08-07-historical-image-h00-input-freeze.md`](2026-08-07-historical-image-h00-input-freeze.md)。
+> [`2026-08-07-historical-image-h00-input-freeze.md`](2026-08-07-historical-image-h00-input-freeze.md)，
+> 历史工具与副本演练证据见
+> [`2026-08-07-historical-image-h01-tooling-report.md`](2026-08-07-historical-image-h01-tooling-report.md)。
 >
 > 基线日期：2026-08-07。
 >
