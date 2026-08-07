@@ -29,10 +29,11 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 - 2026-08-02 确认 B站正式 article 分支曾把搜索摘要误当完整正文；影响范围、证据、修复阶段和
   历史回填边界见 [B站 article 正文完整性事件](incidents/2026-08-02-bilibili-article-completeness.md)。
   新抓取详情逻辑已通过测试与真实小样。历史回填于 2026-08-07 完成：冻结范围 3,009 条中
-  3,006 条已取得详情并原位更新，2 条反复返回“无可解析正文”而经用户明确批准保留原记录并标记
-  `operator_excluded`，1 条因平台返回 `-404` 保留原记录并标记 `invalid_detail`；当前为
-  0 `pending`、0 `retryable`。全库逐条哈希/图片关系校验通过，5 条分层实时复取样本正文和图片
-  集合全部精确一致，未发现截断。完整口径和证据见
+  3,006 条已取得详情并原位更新，另有 2 条 `operator_excluded` 和 1 条 `invalid_detail`。用户随后
+  明确要求从当前业务数据删除这 3 条未成功修复记录；当前默认库保留 3,006 条 B站记录，全部具有
+  `content_detail_status=detail_observed`。全库逐条哈希/图片关系校验通过，5 条分层实时复取样本正文
+  和图片集合全部精确一致，未发现截断。历史 sidecar、原始 artifact、报告和修复前备份仅作为审计/
+  恢复证据保留，不属于当前内容数据。完整口径和证据见
   [B站全库记录修复计划](plans/2026-08-02-bilibili-full-library-repair.md)。
 
 ## 正式入口

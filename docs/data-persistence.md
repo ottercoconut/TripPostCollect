@@ -487,8 +487,9 @@ MediaCrawler 入库采用去重更新：
 
 ## B站历史摘要回填
 
-既有 B站摘要记录已经存在于 `web_posts` 和候选记忆，正常正式搜索会在详情前跳过这些 ID，因此
-不能靠重跑关键词自动修复。历史回填使用独立、幂等的详情修复流程：
+本节记录 2026-08-02 正文完整性事件的历史回填约束。事件处理时，既有 B站摘要记录已经存在于
+`web_posts` 和候选记忆，正常正式搜索会在详情前跳过这些 ID，因此不能靠重跑关键词自动修复。
+历史回填使用独立、幂等的详情修复流程：
 
 1. 写默认库前创建 SQLite 一致性备份；先在临时库用固定小样本验证。
 2. 从 `web_posts` 读取现有 B站平台 ID 与原关键词，分批请求详情并保存可恢复进度；不删除或修改
@@ -505,6 +506,9 @@ MediaCrawler 入库采用去重更新：
 [`incidents/2026-08-02-bilibili-article-completeness.md`](incidents/2026-08-02-bilibili-article-completeness.md)，
 执行顺序、检查点和验收门槛见
 [`plans/2026-08-02-bilibili-full-library-repair.md`](plans/2026-08-02-bilibili-full-library-repair.md)。
+历史冻结范围完成后，用户于 2026-08-07 明确要求从当前业务数据删除 3 条未成功修复记录。当前
+默认库保留的 3,006 条 B站记录全部具有 `content_detail_status=detail_observed`；原始 artifact、
+sidecar、修复报告和备份仍作为历史审计/恢复证据，不属于当前内容数据。
 
 ## 手工验证步骤
 

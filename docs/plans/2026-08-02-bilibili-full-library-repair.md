@@ -223,3 +223,20 @@ supervisor 随后完成以下受检步骤：
 集合均和数据库精确一致，错误 0、疑似前缀截断 0；其中旧结构样本本次接口已迁移为 Opus，但正文和
 图片仍完全一致。审计前后数据库 SHA-256 未变化；报告位于
 `outputs/bilibili_article_repair/full_20260803/live_sample_audit_20260807T055455Z.json`。
+
+## 后续未成功项清理
+
+2026-08-07，用户进一步明确要求从当前业务数据删除本计划中未成功修复的 3 条记录：
+`22878089`、`21810656` 和 `48982378`。执行边界如下：
+
+- 删除前在线备份为
+  `data/backups/bilibili_article_repair/20260807_before_delete_unrepairable_bilibili.sqlite`，SHA-256
+  为 `e749a9b3bb6d6c4c9f754825b7a4aabcfb443a1ef6a448ced631abee5060c8fb`，快速检查通过；
+- 默认库在单一事务中删除 3 条 `web_posts`，外键级联删除 3 条 `web_post_images`，不存在
+  `source_capture_id` 或本地图片文件需要额外删除；随后执行 `secure_delete` 和 `VACUUM`；
+- 清理后默认库 B站记录数、唯一平台 ID 数和 `detail_observed` 数均为 3,006，目标 ID 查询结果为 0；
+- 非 B站内容指纹和调度控制面指纹与删除前备份一致，SQLite 快速检查与外键检查通过；
+- 当前默认库 SHA-256 为 `a7f78d3636025d61b442b50050afb2c36b7808772131d77df1c344bcdf371006`；
+- 历史 sidecar、原始 artifact、修复报告及修复前备份不改写，以保持此前 SHA-256 和审计证据链；
+  `21810656`、`22878089` 的既有候选记忆保留为负向控制面墓碑，不属于当前内容数据；`48982378`
+  原本没有候选记忆，其平台 `-404` 终态证据仍保存在历史 sidecar 和报告中。

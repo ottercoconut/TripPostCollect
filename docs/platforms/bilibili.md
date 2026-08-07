@@ -2,8 +2,10 @@
 
 > **修复状态（2026-08-07）：** 新抓取路径已改为先发现 article ID，再取得详情正文和正文图片；
 > 153 项项目测试及真实 `--no-import` 小样通过。历史冻结范围 3,009 条已完成处理：3,006 条详情成功
-> 并原位更新，2 条经用户批准保留原记录并进入 `operator_excluded`，1 条平台 `-404` 保留原记录并
-> 进入 `invalid_detail`，当前无 `pending` 或 `retryable`。全库校验及 5 条分层实时复取验收均通过。
+> 并原位更新，另有 2 条 `operator_excluded` 和 1 条 `invalid_detail`。用户随后明确要求从当前业务
+> 数据删除这 3 条未成功修复记录；当前默认库保留 3,006 条 B站记录，全部具有详情观察证据。历史
+> sidecar、原始 artifact、报告和修复前备份继续作为审计/恢复证据。全库校验及 5 条分层实时复取
+> 验收均通过。
 > 事件证据见
 > [`2026-08-02-bilibili-article-completeness.md`](../incidents/2026-08-02-bilibili-article-completeness.md)，
 > 全库回填步骤见
