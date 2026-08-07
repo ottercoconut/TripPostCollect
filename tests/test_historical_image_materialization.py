@@ -370,9 +370,30 @@ def test_apply_can_resume_from_committed_batch_state(tmp_path: Path) -> None:
 
 def test_existing_xhs_promotion_is_dry_run_first_and_preserves_source_bytes(tmp_path: Path) -> None:
     db_path = _fixture_database(tmp_path)
+    legacy_file = tmp_path / "legacy" / "xhs" / "xhs-1.jpg"
+    Image.new("RGB", (4, 3), (80, 60, 40)).save(legacy_file, format="WEBP")
+    legacy_verified = validate_image_file(
+        legacy_file,
+        allowed_root=tmp_path,
+        require_suffix_match=False,
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE web_post_images
+            SET width=?, height=?, mime_type=?, sha256=?
+            WHERE local_path='legacy/xhs/xhs-1.jpg'
+            """,
+            (
+                legacy_verified.width,
+                legacy_verified.height,
+                legacy_verified.mime_type,
+                legacy_verified.sha256,
+            ),
+        )
+        conn.commit()
     campaign_path = tmp_path / "campaign.json"
     _campaign(db_path, campaign_path)
-    legacy_file = tmp_path / "legacy" / "xhs" / "xhs-1.jpg"
     legacy_sha = hashlib.sha256(legacy_file.read_bytes()).hexdigest()
     media_root = tmp_path / "data" / "media"
     base = [
@@ -435,6 +456,7 @@ def test_existing_xhs_promotion_is_dry_run_first_and_preserves_source_bytes(tmp_
         ).fetchone() == (None,)
     promoted_file = tmp_path / local_path
     assert promoted_file.is_file()
+    assert promoted_file.suffix == ".webp"
     assert hashlib.sha256(promoted_file.read_bytes()).hexdigest() == legacy_sha
     assert hashlib.sha256(legacy_file.read_bytes()).hexdigest() == legacy_sha
 

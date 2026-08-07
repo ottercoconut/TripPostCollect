@@ -16,7 +16,9 @@ from trippostcollect.artifacts.image_candidates import (
 )
 from trippostcollect.artifacts.image_materialization import (
     promote_validated_image,
+    safe_platform_post_id,
     validate_image_file,
+    write_staging_image,
 )
 from trippostcollect.artifacts.image_persistence import (
     existing_image_records,
@@ -456,11 +458,13 @@ def promote_existing_plan(
     *,
     project_root: str | Path,
     media_root: str | Path,
+    staging_root: str | Path,
 ) -> tuple[HistoricalRelationshipPlan, dict[str, int]]:
     """Promote a complete-existing batch through the production validator and promoter."""
 
     resolved_project_root = Path(project_root).expanduser().resolve(strict=True)
     resolved_media_root = Path(media_root).expanduser().resolve()
+    resolved_staging_root = Path(staging_root).expanduser().resolve()
     promoted_posts: list[HistoricalPostPlan] = []
     promoted_images = reused_images = promoted_bytes = 0
     for post in plan.posts:
@@ -480,6 +484,18 @@ def promote_existing_plan(
                 expected_sha256=str(item.get("sha256") or ""),
                 require_suffix_match=False,
             )
+            with validated.path.open("rb") as source_handle:
+                staged = write_staging_image(
+                    iter(lambda: source_handle.read(1024 * 1024), b""),
+                    staging_root=resolved_staging_root,
+                    relative_stem=(
+                        f"{post.platform_key}/{safe_platform_post_id(post.platform_post_id)}/"
+                        f"{int(item['source_index']):03d}-{validated.sha256[:16]}"
+                    ),
+                    content_type=validated.mime_type,
+                    content_length=validated.size_bytes,
+                    source_url=str(item["url"]),
+                )
             candidate = ImageCandidate(
                 platform_key=post.platform_key,
                 platform_post_id=post.platform_post_id,
@@ -490,9 +506,9 @@ def promote_existing_plan(
                 source_asset_key=str(item["source_asset_key"]),
             )
             promoted = promote_validated_image(
-                validated,
+                staged,
                 candidate,
-                staging_root=resolved_project_root,
+                staging_root=resolved_staging_root,
                 media_root=resolved_media_root,
                 project_root=resolved_project_root,
             )

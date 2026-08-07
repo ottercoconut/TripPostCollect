@@ -265,6 +265,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 plan,
                 project_root=project_root,
                 media_root=media_root,
+                staging_root=IMAGE_MATERIALIZATION_RUNTIME / campaign_id / "staging" / operation,
             )
             report["promotion"] = promotion
         with sqlite3.connect(db_path) as conn:
