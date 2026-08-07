@@ -13,6 +13,7 @@ import pytest
 from trippostcollect.artifacts.image_candidates import content_image_candidates
 from trippostcollect.artifacts.image_materialization import (
     MaterializedImage,
+    PIL_FORMAT_MIME,
     promote_validated_image,
     write_staging_image,
 )
@@ -35,6 +36,10 @@ def png_bytes(color: tuple[int, int, int]) -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (5, 4), color=color).save(output, format="PNG")
     return output.getvalue()
+
+
+def test_pillow_mpo_decoder_is_treated_as_jpeg_bytes() -> None:
+    assert PIL_FORMAT_MIME["MPO"] == "image/jpeg"
 
 
 def xhs_record(urls: list[str], *, title: str = "title") -> dict:

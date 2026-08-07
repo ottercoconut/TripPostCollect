@@ -35,6 +35,7 @@ MIME_EXTENSIONS = {
 }
 PIL_FORMAT_MIME = {
     "JPEG": "image/jpeg",
+    "MPO": "image/jpeg",
     "PNG": "image/png",
     "WEBP": "image/webp",
     "GIF": "image/gif",
