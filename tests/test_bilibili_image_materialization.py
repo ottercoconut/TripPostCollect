@@ -207,6 +207,33 @@ def test_retryable_image_failure_writes_only_failed_manifest_status(tmp_path: Pa
     assert list(tmp_path.rglob("*.png")) == []
 
 
+def test_terminal_http_failure_is_not_mislabeled_retryable(tmp_path: Path) -> None:
+    record = hydrated_record()
+    calls = 0
+
+    def fetcher(*args):
+        nonlocal calls
+        calls += 1
+        raise mediacrawler_crawl.RemoteImageFetchError(
+            "HTTP 404",
+            http_status=404,
+            retryable=False,
+        )
+
+    entries = mediacrawler_crawl.download_bilibili_record_images(
+        record,
+        cookie_header="",
+        platform_data_root=tmp_path,
+        fetcher=fetcher,
+        sleep_fn=lambda _value: None,
+    )
+
+    assert calls == 1
+    assert entries[0].attempts == 1
+    assert entries[0].http_status == 404
+    assert entries[0].error_code == "image_source_unavailable"
+
+
 def test_bilibili_run_writes_manifest_and_never_downloads_preview(monkeypatch, tmp_path: Path) -> None:
     db_path = tmp_path / "posts.sqlite"
     with sqlite3.connect(db_path) as conn:

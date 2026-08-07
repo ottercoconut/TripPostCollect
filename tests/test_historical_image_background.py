@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 import sys
 import time
@@ -185,3 +186,73 @@ def test_background_failure_classification_and_capacity_gate(
     assert capacity["remaining_estimate_bytes"] == sum(worker.P95_IMAGE_BYTES.values())
     assert worker._classify_failure({"error": "Weibo online login check failed"}) == "auth_required"
     assert worker._classify_failure({"error": "image_decode_failed"}) == "failed"
+
+
+def test_worker_failure_decision_retries_only_with_remaining_budget() -> None:
+    retry = worker._failure_decision(
+        {
+            "downloaded_posts": [
+                {
+                    "platform_post_id": "bili-1",
+                    "failed_images": 1,
+                    "failure_codes": ["image_download_retryable"],
+                    "failures": [{"attempts": 1, "error_code": "image_download_retryable"}],
+                }
+            ]
+        }
+    )
+    exhausted = worker._failure_decision(
+        {
+            "downloaded_posts": [
+                {
+                    "platform_post_id": "bili-1",
+                    "failed_images": 1,
+                    "failure_codes": ["image_download_retryable"],
+                    "failures": [{"attempts": 3, "error_code": "image_download_retryable"}],
+                }
+            ]
+        }
+    )
+
+    assert retry["action"] == "retry"
+    assert retry["attempts_used"] == 1
+    assert exhausted["action"] == "defer"
+    assert exhausted["reason"] == "image_retry_exhausted"
+
+
+def test_worker_records_terminal_image_for_review_and_registry(tmp_path: Path) -> None:
+    state: dict[str, object] = {"deferred_posts": {}}
+    decision = worker._failure_decision(
+        {
+            "downloaded_posts": [
+                {
+                    "platform_post_id": "24066523",
+                    "failed_images": 1,
+                    "failure_codes": ["image_source_unavailable"],
+                    "failures": [
+                        {
+                            "source_index": 3,
+                            "attempts": 1,
+                            "http_status": 404,
+                            "error_code": "image_source_unavailable",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    worker._record_deferred_posts(
+        state,
+        platform_key="bilibili",
+        report_path=tmp_path / "report.json",
+        decision=decision,
+    )
+    registry_path = tmp_path / "deferred-posts.json"
+    worker._sync_deferred_registry(registry_path, state)
+
+    assert decision["action"] == "defer"
+    assert state["deferred_posts"]["bilibili"]["24066523"]["status"] == "review_required"
+    assert json.loads(registry_path.read_text(encoding="utf-8"))["platform_post_ids"] == {
+        "bilibili": ["24066523"]
+    }

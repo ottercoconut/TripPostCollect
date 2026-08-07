@@ -7,7 +7,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Collection, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from trippostcollect.artifacts.image_candidates import (
@@ -303,6 +303,7 @@ def build_relationship_plan(
     *,
     platforms: Sequence[str],
     after_post_ids: Mapping[str, int] | None = None,
+    excluded_platform_post_ids: Mapping[str, Collection[str]] | None = None,
     batch_size: int = 10,
     project_root: str | Path,
     media_root: str | Path,
@@ -319,6 +320,10 @@ def build_relationship_plan(
     if batch_size < 0:
         raise ValueError("batch_size must be zero or positive")
     cursors = dict(after_post_ids or {})
+    exclusions = {
+        platform_key: {str(value) for value in values}
+        for platform_key, values in (excluded_platform_post_ids or {}).items()
+    }
     resolved_project_root = Path(project_root).expanduser().resolve(strict=True)
     resolved_media_root = Path(media_root).expanduser().resolve()
     selected: list[tuple[Any, ...]] = []
@@ -340,6 +345,11 @@ def build_relationship_plan(
                 (platform_key, cursor),
             )
         )
+        platform_exclusions = exclusions.get(platform_key, set())
+        if platform_exclusions:
+            available = [
+                row for row in available if str(row[1] or "") not in platform_exclusions
+            ]
         if require_complete_existing_local or require_missing_local:
             eligible: list[tuple[Any, ...]] = []
             skipped = 0

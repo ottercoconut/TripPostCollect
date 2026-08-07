@@ -35,6 +35,16 @@ class RemoteImageFetchError(ValueError):
         self.retryable = retryable
 
 
+def remote_image_failure_code(error: RemoteImageFetchError) -> str:
+    """Map transport evidence to a stable materialization failure code."""
+
+    if error.retryable:
+        return "image_download_retryable"
+    if error.http_status is not None:
+        return "image_source_unavailable"
+    return "image_non_raster_response"
+
+
 @dataclass(frozen=True)
 class RemoteImagePreview:
     content: bytes

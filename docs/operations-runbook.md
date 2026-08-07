@@ -501,6 +501,10 @@ tail -n 40 data/runtime/image_materialization/historical-images-20260807-v1/back
 | 状态 | 含义 | 处理 |
 |---|---|---|
 | `starting` / `running` / `login_preflight` | 正常启动、批次执行或平台登录预检 | 等待自动推进 |
+| `retry_wait` | 可恢复批次失败，已落盘并等待有限退避 | 无需模型介入；查看 `active_retry`、`next_retry_at` 和 `retry_events` |
+| `running_with_deferred` | 单图重试已耗尽或出现终态来源错误，失败帖子已暂存，正在处理同平台其他帖子 | 无需立即介入；不得把暂存项算作完成或手工补空关系 |
+| `retry_exhausted` | 无法定位到具体帖子的批次级瞬时错误已连续失败 3 轮 | 查看三轮报告和日志，修复根因后再次 `start` |
+| `review_required` | 当前平台其余可执行帖子已处理完，只剩暂存失败帖 | 按 `deferred_posts` 和 `deferred-posts.json` 逐项处理；未批准排除前不得进入下一平台 |
 | `auth_required` | 当前平台持久会话失效 | 运行 `python scripts/login_warmup.py --targets <platform> --timeout-seconds 600`，完成扫码后再次 `start` |
 | `capacity_blocked` | 剩余空间未达到冻结公式 | 扩容或清理非 campaign 数据后再次 `start` |
 | `code_drift` | 启动后 git commit 或关键文件 SHA 改变 | 审计并提交代码，确认无运行批次后再次 `start` |
@@ -519,6 +523,18 @@ python scripts/historical_image_worker.py stop
 worker 会完成当前帖子批次的下载、复验和事务，再读取 `stop.requested` 并退出。不要对 worker 或
 单批进程使用 `kill -9`；若机器异常退出，重新 `start` 会根据数据库非空 `local_path` 自动选择剩余
 帖子，失败 staging 保留为证据，长期目录孤儿由 H-08 GC dry-run 报告但不会自动删除。
+
+重试分两层执行。单图片对网络、超时、429 和 5xx 最多请求 3 次，并使用随机指数退避；如果批次在
+图片尝试预算尚未耗尽前被超时中断，worker 只把剩余次数传给下一轮。无法归属到具体图片的
+`TimeoutError`、`URLError`、`ConnectionError`、`OSError` 等批次错误最多运行 3 轮，轮间固定等待
+30 秒、120 秒。每次失败、已用次数、报告路径和下次时间都写入 `state.json.retry_events`，等待期间
+`stop` 仍可在 1 秒内被识别。
+
+HTTP 404 等有明确状态码的不可恢复来源错误写为 `image_source_unavailable`，不会伪装成
+`image_download_retryable`。失败帖子写入 `deferred-posts.json` 后只在当前平台内暂存，worker 会跳过
+该帖并继续当前平台其他缺口；它不会删除来源关系、写入部分帖子、自动批准永久排除，也不会跨过
+平台顺序。当前平台只剩暂存项时进入 `review_required`，并保持
+`historical_data_complete=false`。
 
 平台顺序、固定样本和扩大批次仍为 XHS → B站 50 → 微博 50 → 知乎 20 → 抖音 20；新平台首批
 固定 10 帖。微博登录必须满足 `/api/config login=true` 且 uid 非空；抖音旧签名失败只允许图片详情
@@ -572,6 +588,7 @@ child 的 `image_materialization.manifest_evidence` 所指 manifest → SQLite �
 | `image_manifest_identity_mismatch` | URL、平台、帖子、顺序、来源字段或稳定键不一致 | 视为代码/产物版本错误，修复后重跑整帖 |
 | `image_path_escape` / `image_file_missing` | 路径边界或文件缺失 | 停止晋升，检查 symlink、清理程序和 artifact 完整性 |
 | `image_non_raster_response` / `image_decode_failed` | 返回 HTML/JSON/视频或损坏图片 | 检查登录/验证和 URL 选择；不得改后缀伪装成图片 |
+| `image_source_unavailable` | 明确的非重试 HTTP 终态（如 404） | 暂存整帖并继续同平台；保留详情与 CDN 证据，最终逐项恢复或由用户批准排除 |
 | `image_too_large` | 单文件或解码像素超过安全上限 | 作为终态失败报告；如需改上限必须走代码、测试和治理变更 |
 | `image_hash_mismatch` / `image_manifest_metadata_mismatch` | staging 字节与 manifest 不一致 | 停止并保留证据，排查写入竞态或文件篡改 |
 | `image_existing_conflict` / `image_promotion_conflict` | staging 整帖目录或长期内容寻址目标已有不同字节 | 停止覆盖，保留两侧证据并排查稳定键、旧文件或并发写入 |

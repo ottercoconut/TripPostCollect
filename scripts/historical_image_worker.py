@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
@@ -38,6 +38,7 @@ PID_PATH = RUNTIME_ROOT / "worker.pid"
 LOCK_PATH = RUNTIME_ROOT / "worker.lock"
 STOP_PATH = RUNTIME_ROOT / "stop.requested"
 LOG_PATH = RUNTIME_ROOT / "worker.log"
+DEFERRED_PATH = RUNTIME_ROOT / "deferred-posts.json"
 PLATFORM_ORDER = HISTORICAL_PLATFORM_ORDER
 STAGE_BY_PLATFORM = {
     "xhs": "h03",
@@ -62,15 +63,20 @@ P95_IMAGE_BYTES = {
 }
 SAFETY_MARGIN_BYTES = 10 * 1024 * 1024 * 1024
 FROZEN_MAX_STAGING_PEAK_BYTES = 355_370_176
+MAX_IMAGE_ATTEMPTS = 3
+MAX_TRANSIENT_BATCH_ATTEMPTS = 3
+TRANSIENT_RETRY_BACKOFF_SECONDS = (30, 120)
 SOURCE_FILES = (
     PROJECT_ROOT / "scripts" / "historical_image_worker.py",
     PROJECT_ROOT / "scripts" / "historical_platform_images.py",
+    PROJECT_ROOT / "scripts" / "mediacrawler_crawl.py",
     PROJECT_ROOT / "scripts" / "refresh_douyin_image_urls.py",
     PROJECT_ROOT / "scripts" / "validate_historical_images.py",
     PROJECT_ROOT / "scripts" / "gc_local_images.py",
     PROJECT_ROOT / "src" / "trippostcollect" / "artifacts" / "historical_image_materialization.py",
     PROJECT_ROOT / "src" / "trippostcollect" / "artifacts" / "image_candidates.py",
     PROJECT_ROOT / "src" / "trippostcollect" / "artifacts" / "image_materialization.py",
+    PROJECT_ROOT / "src" / "trippostcollect" / "artifacts" / "image_proxy.py",
     PROJECT_ROOT / "docs" / "plans" / "2026-08-07-historical-image-h00-input-freeze.json",
     PROJECT_ROOT / "docs" / "plans" / "2026-08-07-historical-image-h02-execution-gate.json",
 )
@@ -100,6 +106,7 @@ def _paths(runtime_root: Path) -> dict[str, Path]:
         "lock": runtime_root / LOCK_PATH.name,
         "stop": runtime_root / STOP_PATH.name,
         "log": runtime_root / LOG_PATH.name,
+        "deferred": runtime_root / DEFERRED_PATH.name,
     }
 
 
@@ -232,6 +239,185 @@ def _classify_failure(report: dict[str, Any]) -> str:
     return "auth_required" if any(marker in text for marker in auth_markers) else "failed"
 
 
+def _failed_posts(report: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = report.get("downloaded_posts")
+    if not isinstance(rows, list):
+        return []
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict) and int(row.get("failed_images") or 0) > 0
+    ]
+
+
+def _failure_decision(report: dict[str, Any]) -> dict[str, Any]:
+    classification = _classify_failure(report)
+    if classification == "auth_required":
+        return {"action": "stop", "status": classification, "reason": "authentication"}
+    failed_posts = _failed_posts(report)
+    failure_codes = sorted(
+        {
+            str(code)
+            for post in failed_posts
+            for code in (post.get("failure_codes") or [])
+            if code
+        }
+    )
+    failed_attempts = [
+        int(failure.get("attempts") or 0)
+        for post in failed_posts
+        for failure in (post.get("failures") or [])
+        if isinstance(failure, dict)
+    ]
+    attempts_used = max(failed_attempts, default=0)
+    if failed_posts:
+        retryable_only = bool(failure_codes) and set(failure_codes) == {
+            "image_download_retryable"
+        }
+        if retryable_only and attempts_used < MAX_IMAGE_ATTEMPTS:
+            return {
+                "action": "retry",
+                "status": "retry_wait",
+                "reason": "retryable_image_failure",
+                "failure_codes": failure_codes,
+                "attempts_used": attempts_used,
+                "failed_posts": failed_posts,
+            }
+        return {
+            "action": "defer",
+            "status": "review_required",
+            "reason": (
+                "image_retry_exhausted" if retryable_only else "terminal_image_failure"
+            ),
+            "failure_codes": failure_codes,
+            "attempts_used": attempts_used,
+            "failed_posts": failed_posts,
+        }
+    retryable_types = {
+        "connectionerror",
+        "oserror",
+        "remoteimagefetcherror",
+        "timeouterror",
+        "urlerror",
+    }
+    error_type = str(report.get("error_type") or "").lower()
+    if error_type in retryable_types:
+        return {
+            "action": "retry",
+            "status": "retry_wait",
+            "reason": "transient_batch_failure",
+            "failure_codes": failure_codes,
+            "attempts_used": 0,
+            "failed_posts": [],
+        }
+    return {
+        "action": "stop",
+        "status": "failed",
+        "reason": "non_retryable_batch_failure",
+        "failure_codes": failure_codes,
+        "attempts_used": attempts_used,
+        "failed_posts": failed_posts,
+    }
+
+
+def _database_unchanged_after_failure(report: dict[str, Any]) -> bool:
+    before = str(report.get("database_sha256_before") or "")
+    final = str(report.get("database_sha256_final") or "")
+    return bool(before and final and before == final)
+
+
+def _deferred_registry(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    value = state.setdefault("deferred_posts", {})
+    if isinstance(value, dict):
+        return value
+    state["deferred_posts"] = {}
+    return state["deferred_posts"]
+
+
+def _sync_deferred_registry(path: Path, state: dict[str, Any]) -> None:
+    registry = _deferred_registry(state)
+    platform_post_ids = {
+        platform: sorted(str(post_id) for post_id in posts)
+        for platform, posts in registry.items()
+        if isinstance(posts, dict) and posts
+    }
+    _write_text_atomic(
+        path,
+        json.dumps(
+            {
+                "schema_version": 1,
+                "campaign_id": CAMPAIGN_ID,
+                "updated_at": utc_iso(),
+                "platform_post_ids": platform_post_ids,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    state["deferred_post_count"] = sum(
+        len(posts) for posts in registry.values() if isinstance(posts, dict)
+    )
+
+
+def _record_deferred_posts(
+    state: dict[str, Any],
+    *,
+    platform_key: str,
+    report_path: Path,
+    decision: dict[str, Any],
+) -> None:
+    registry = _deferred_registry(state)
+    platform_registry = registry.setdefault(platform_key, {})
+    now = utc_iso()
+    for post in decision.get("failed_posts") or []:
+        post_id = str(post.get("platform_post_id") or "")
+        if not post_id:
+            continue
+        previous = platform_registry.get(post_id) or {}
+        event = {
+            "recorded_at": now,
+            "report": str(report_path),
+            "reason": decision["reason"],
+            "failure_codes": decision.get("failure_codes") or [],
+            "attempts_used": decision.get("attempts_used") or 0,
+            "failures": post.get("failures") or [],
+        }
+        history = list(previous.get("history") or [])
+        history.append(event)
+        platform_registry[post_id] = {
+            "platform_post_id": post_id,
+            "status": "review_required",
+            "first_recorded_at": previous.get("first_recorded_at") or now,
+            "last_recorded_at": now,
+            "reason": decision["reason"],
+            "failure_codes": decision.get("failure_codes") or [],
+            "history": history,
+        }
+
+
+def _retry_delay(failed_run_count: int) -> int:
+    index = min(max(0, failed_run_count - 1), len(TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
+    return TRANSIENT_RETRY_BACKOFF_SECONDS[index]
+
+
+def _wait_for_retry(
+    delay_seconds: int,
+    *,
+    paths: dict[str, Path],
+    state: dict[str, Any],
+) -> bool:
+    deadline = time.monotonic() + delay_seconds
+    while time.monotonic() < deadline:
+        if paths["stop"].exists():
+            state.update({"status": "stopped", "stopped_at": utc_iso(), "error": None})
+            _write_state(paths["state"], state)
+            return False
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+    return True
+
+
 def _login_preflight(
     platform_key: str,
     *,
@@ -340,7 +526,7 @@ def _final_validation(
 
 def _initial_state(db_path: Path, source_digests: dict[str, str]) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "campaign_id": CAMPAIGN_ID,
         "status": "starting",
         "historical_data_complete": False,
@@ -351,6 +537,14 @@ def _initial_state(db_path: Path, source_digests: dict[str, str]) -> dict[str, A
         "source_digests": source_digests,
         "completed_platforms": [],
         "successful_batches": 0,
+        "retry_policy": {
+            "max_attempts_per_image": MAX_IMAGE_ATTEMPTS,
+            "max_transient_batch_attempts": MAX_TRANSIENT_BATCH_ATTEMPTS,
+            "backoff_seconds": list(TRANSIENT_RETRY_BACKOFF_SECONDS),
+        },
+        "retry_events": [],
+        "active_retry": None,
+        "deferred_posts": {},
         "last_report": None,
         "preflight_completed_for": None,
         "error": None,
@@ -375,10 +569,19 @@ def run_worker(args: argparse.Namespace) -> int:
         source_digests = _source_digests()
         previous = _read_state(paths["state"])
         state = _initial_state(db_path, source_digests)
+        state["deferred_registry"] = str(paths["deferred"])
         if previous.get("campaign_id") == CAMPAIGN_ID:
             state["resumed_from"] = previous.get("updated_at")
             state["successful_batches"] = int(previous.get("successful_batches") or 0)
             state["completed_platforms"] = list(previous.get("completed_platforms") or [])
+            state["retry_events"] = list(previous.get("retry_events") or [])
+            same_code = (
+                previous.get("git_commit") == state["git_commit"]
+                and previous.get("source_digests") == source_digests
+            )
+            state["active_retry"] = previous.get("active_retry") if same_code else None
+            state["deferred_posts"] = dict(previous.get("deferred_posts") or {})
+        _sync_deferred_registry(paths["deferred"], state)
         _write_state(paths["state"], state)
 
         with paths["log"].open("a", encoding="utf-8", buffering=1) as log_handle:
@@ -496,9 +699,24 @@ def run_worker(args: argparse.Namespace) -> int:
                     _write_state(paths["state"], state)
                 fixed_sample = platform_inventory["existing_local_rows"] == 0
                 batch_size = 10 if fixed_sample else EXPANDED_BATCH_POSTS[platform_key]
+                active_retry = state.get("active_retry")
+                if not isinstance(active_retry, dict) or active_retry.get("platform") != platform_key:
+                    active_retry = None
+                max_image_attempts = int(
+                    (active_retry or {}).get("remaining_image_attempts")
+                    or MAX_IMAGE_ATTEMPTS
+                )
                 stamp = utc_stamp()
                 stage = STAGE_BY_PLATFORM[platform_key]
-                label = f"background-{'fixed10' if fixed_sample else 'expanded'}-{stamp}"
+                retry_suffix = (
+                    f"-retry{int(active_retry.get('failed_run_count') or 0) + 1}"
+                    if active_retry
+                    else ""
+                )
+                label = (
+                    f"background-{'fixed10' if fixed_sample else 'expanded'}"
+                    f"{retry_suffix}-{stamp}"
+                )
                 report_path = (
                     IMAGE_MATERIALIZATION_RUNTIME
                     / CAMPAIGN_ID
@@ -520,6 +738,7 @@ def run_worker(args: argparse.Namespace) -> int:
                         "current_platform": platform_key,
                         "current_stage": stage.upper(),
                         "current_batch_size": batch_size,
+                        "current_max_image_attempts": max_image_attempts,
                         "current_report": str(report_path),
                         "error": None,
                     }
@@ -536,21 +755,204 @@ def run_worker(args: argparse.Namespace) -> int:
                     str(report_path),
                     "--backup-dir",
                     str(backup_dir),
+                    "--deferred-posts-file",
+                    str(paths["deferred"]),
+                    "--max-image-attempts",
+                    str(max_image_attempts),
                     "--apply",
                 ]
                 returncode = _run_command(command, log_handle=log_handle)
                 report = _read_state(report_path)
                 state["last_report"] = str(report_path)
                 if returncode != 0 or report.get("status") != "completed":
+                    decision = _failure_decision(report)
+                    state["last_failure_decision"] = decision["reason"]
+                    state["error"] = str(
+                        report.get("error") or f"batch exited {returncode}"
+                    )
+                    if decision["action"] in {"retry", "defer"} and not _database_unchanged_after_failure(report):
+                        state.update(
+                            {
+                                "status": "failed",
+                                "error": "failed batch database SHA is absent or changed; automatic recovery refused",
+                                "failed_at": utc_iso(),
+                            }
+                        )
+                        _write_state(paths["state"], state)
+                        return 2
+                    if decision["action"] == "defer":
+                        _record_deferred_posts(
+                            state,
+                            platform_key=platform_key,
+                            report_path=report_path,
+                            decision=decision,
+                        )
+                        state["active_retry"] = None
+                        state["retry_events"].append(
+                            {
+                                "event": "post_deferred",
+                                "recorded_at": utc_iso(),
+                                "platform": platform_key,
+                                "report": str(report_path),
+                                "reason": decision["reason"],
+                                "failure_codes": decision.get("failure_codes") or [],
+                                "platform_post_ids": [
+                                    str(post.get("platform_post_id") or "")
+                                    for post in decision.get("failed_posts") or []
+                                ],
+                            }
+                        )
+                        _sync_deferred_registry(paths["deferred"], state)
+                        state.update(
+                            {
+                                "status": "running_with_deferred",
+                                "last_deferred_at": utc_iso(),
+                            }
+                        )
+                        _write_state(paths["state"], state)
+                        continue
+                    if decision["action"] == "retry":
+                        planned_ids = list(report.get("planned_platform_post_ids") or [])
+                        previous_retry = active_retry or {}
+                        if previous_retry and list(previous_retry.get("planned_platform_post_ids") or []) != planned_ids:
+                            state.update(
+                                {
+                                    "status": "failed",
+                                    "error": "retry plan identity changed before the safe frontier advanced",
+                                    "failed_at": utc_iso(),
+                                }
+                            )
+                            _write_state(paths["state"], state)
+                            return 2
+                        failed_run_count = int(previous_retry.get("failed_run_count") or 0) + 1
+                        attempts_consumed = int(
+                            previous_retry.get("image_attempts_consumed") or 0
+                        ) + int(decision.get("attempts_used") or 0)
+                        remaining_image_attempts = MAX_IMAGE_ATTEMPTS - attempts_consumed
+                        if (
+                            decision.get("failed_posts")
+                            and remaining_image_attempts <= 0
+                        ):
+                            decision = {
+                                **decision,
+                                "action": "defer",
+                                "reason": "image_retry_exhausted",
+                                "attempts_used": attempts_consumed,
+                            }
+                            _record_deferred_posts(
+                                state,
+                                platform_key=platform_key,
+                                report_path=report_path,
+                                decision=decision,
+                            )
+                            state["active_retry"] = None
+                            state["retry_events"].append(
+                                {
+                                    "event": "post_deferred",
+                                    "recorded_at": utc_iso(),
+                                    "platform": platform_key,
+                                    "report": str(report_path),
+                                    "reason": decision["reason"],
+                                    "platform_post_ids": planned_ids,
+                                }
+                            )
+                            _sync_deferred_registry(paths["deferred"], state)
+                            _write_state(paths["state"], state)
+                            continue
+                        if failed_run_count >= MAX_TRANSIENT_BATCH_ATTEMPTS:
+                            state.update(
+                                {
+                                    "status": "retry_exhausted",
+                                    "error": (
+                                        f"transient batch retry exhausted after {failed_run_count} runs: "
+                                        f"{state['error']}"
+                                    ),
+                                    "failed_at": utc_iso(),
+                                    "active_retry": None,
+                                }
+                            )
+                            _write_state(paths["state"], state)
+                            return 2
+                        delay_seconds = _retry_delay(failed_run_count)
+                        next_retry_at = (
+                            datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+                        ).isoformat(timespec="seconds")
+                        retry_state = {
+                            "platform": platform_key,
+                            "planned_platform_post_ids": planned_ids,
+                            "failed_run_count": failed_run_count,
+                            "image_attempts_consumed": attempts_consumed,
+                            "remaining_image_attempts": max(
+                                1, remaining_image_attempts
+                            ),
+                            "last_report": str(report_path),
+                            "last_reason": decision["reason"],
+                            "next_retry_at": next_retry_at,
+                        }
+                        state["active_retry"] = retry_state
+                        state["retry_events"].append(
+                            {
+                                "event": "retry_scheduled",
+                                "recorded_at": utc_iso(),
+                                "platform": platform_key,
+                                "report": str(report_path),
+                                "failed_run_count": failed_run_count,
+                                "delay_seconds": delay_seconds,
+                                "next_retry_at": next_retry_at,
+                                "reason": decision["reason"],
+                            }
+                        )
+                        state.update(
+                            {
+                                "status": "retry_wait",
+                                "next_retry_at": next_retry_at,
+                            }
+                        )
+                        _write_state(paths["state"], state)
+                        if not _wait_for_retry(
+                            delay_seconds, paths=paths, state=state
+                        ):
+                            return 0
+                        continue
                     state.update(
                         {
-                            "status": _classify_failure(report),
-                            "error": str(report.get("error") or f"batch exited {returncode}"),
+                            "status": decision["status"],
                             "failed_at": utc_iso(),
+                            "active_retry": None,
                         }
                     )
                     _write_state(paths["state"], state)
                     return 2
+                if (
+                    int(report.get("planned_posts") or 0) == 0
+                    and platform_inventory["local_gap"] > 0
+                    and _deferred_registry(state).get(platform_key)
+                ):
+                    state.update(
+                        {
+                            "status": "review_required",
+                            "historical_data_complete": False,
+                            "active_retry": None,
+                            "error": (
+                                f"{platform_key} has no runnable posts while deferred image failures remain"
+                            ),
+                            "review_required_at": utc_iso(),
+                        }
+                    )
+                    _write_state(paths["state"], state)
+                    return 2
+                if active_retry:
+                    state["retry_events"].append(
+                        {
+                            "event": "retry_succeeded",
+                            "recorded_at": utc_iso(),
+                            "platform": platform_key,
+                            "report": str(report_path),
+                            "failed_run_count": active_retry.get("failed_run_count"),
+                        }
+                    )
+                state["active_retry"] = None
+                state.pop("next_retry_at", None)
                 state["successful_batches"] = int(state["successful_batches"]) + 1
                 state["last_completed_at"] = utc_iso()
                 _write_state(paths["state"], state)
@@ -558,7 +960,7 @@ def run_worker(args: argparse.Namespace) -> int:
         state = _read_state(paths["state"])
         state.update(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "campaign_id": CAMPAIGN_ID,
                 "status": "failed",
                 "error": f"{type(exc).__name__}: {exc}",

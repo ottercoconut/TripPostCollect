@@ -1374,6 +1374,13 @@ python -m pytest \
   `login_warmup.py` 后再次 `start` 即从数据库安全前沿恢复。
 - worker 固定记录 git commit 和关键执行文件 SHA；运行期间任一代码或冻结门禁漂移时写
   `code_drift` 并停止。每批前按剩余缺口重新计算 H-02 p95、两倍余量和 10 GiB 安全空间。
+- 单图继续遵守 H-02 最多 3 次预算。批次在预算未耗尽前被瞬时错误中断时，worker 将失败原因、
+  已用次数、剩余次数、报告路径和 `next_retry_at` 写入状态；按 30 秒、120 秒退避恢复，批次级最多
+  3 轮，等待可被 `stop` 中断。认证、格式、身份、路径、哈希和事务不变量错误不自动重试。
+- 单图预算耗尽或出现明确终态来源错误时，失败帖子进入 campaign 内的 `deferred-posts.json`；
+  worker 不提交该批，下一批暂时跳过失败帖，继续处理同一平台其他缺口。暂存不是永久排除，不删
+  来源关系、不计成功，也不允许越过当前平台；其余可执行帖子耗尽后固定进入 `review_required`，
+  等待逐项恢复或用户批准排除。
 - `stop` 只写停止请求；worker 完成当前整批事务后停止，不向正在下载或提交的子进程发送信号。
 - B站使用详情图和文章 Referer；微博使用 `mblog.pics` 投影和大图代理；知乎使用最终正文
   `image_list`；抖音先直取旧签名，失败后按 `aweme_id` 只刷新一次图片详情，单图直取加刷新总尝试
@@ -1400,6 +1407,7 @@ data/runtime/image_materialization/historical-images-20260807-v1/background-work
   worker.pid                 # 只在进程存活时存在
   worker.lock
   stop.requested             # 仅收到安全停止请求时存在
+  deferred-posts.json        # 暂存失败帖的机器可读选择输入，不代表永久排除
   validation/<platform>/
   validation/all/
 ```
@@ -1408,15 +1416,17 @@ data/runtime/image_materialization/historical-images-20260807-v1/background-work
 
 - 重复 `start` 不产生第二 worker；独立单批尚在运行时拒绝接管。
 - 终端和模型会话结束后 PID 仍存活，`state.json` 的批次、报告和库存持续推进。
-- 子批失败时数据库停在前一个完成批次；状态明确区分 `auth_required`、`capacity_blocked`、
-  `code_drift`、`validation_failed` 和普通 `failed`。
+- 子批失败时数据库停在前一个完成批次；状态明确区分 `retry_wait`、`retry_exhausted`、
+  `running_with_deferred`、`review_required`、`auth_required`、`capacity_blocked`、`code_drift`、
+  `validation_failed` 和普通 `failed`。
 - 重启 worker 不依赖人工游标，直接按 SQLite `local_gap` 选择剩余帖子，不重复已具有完整本地关系
   的帖子。
 - 只有全库验收通过并生成 GC dry-run 报告后，状态才允许写
   `historical_data_complete=true` 和 `status=completed`。
 
-失败停止点：锁冲突、代码漂移、空间不足、登录失效、任一图片/manifest/事务失败或平台验收失败
-均立即停止；后台化不改变 H-02 的任何失败门禁。
+失败停止点：锁冲突、代码漂移、空间不足、登录失效、manifest/事务不变量失败或平台验收失败立即
+停止；瞬时下载错误只按冻结次数有限重试，单帖图片失败可暂存并继续同平台，但平台验收与完成门禁
+不变。
 
 产物：后台 worker、四平台单批适配、抖音图片详情刷新器、平台/全库验收器、状态文件和操作手册。
 

@@ -49,7 +49,10 @@ from trippostcollect.artifacts.image_materialization import (
     safe_platform_post_id,
     write_staging_image,
 )
-from trippostcollect.artifacts.image_proxy import RemoteImageFetchError
+from trippostcollect.artifacts.image_proxy import (
+    RemoteImageFetchError,
+    remote_image_failure_code,
+)
 from trippostcollect.core.paths import (
     DATA_ROOT,
     DEFAULT_DB,
@@ -123,6 +126,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batch-timeout", type=int)
     parser.add_argument("--report")
     parser.add_argument("--backup-dir")
+    parser.add_argument("--deferred-posts-file", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--max-image-attempts", type=int, default=MAX_IMAGE_ATTEMPTS, help=argparse.SUPPRESS
+    )
     parser.add_argument("--apply", action="store_true")
     return parser.parse_args(argv)
 
@@ -378,6 +385,20 @@ def _failed_entry(
     )
 
 
+def _failure_evidence(entries: Sequence[ImageManifestEntry]) -> list[dict[str, Any]]:
+    return [
+        {
+            "source_index": entry.source_index,
+            "source_asset_key": entry.source_asset_key,
+            "attempts": entry.attempts,
+            "http_status": entry.http_status,
+            "error_code": entry.error_code,
+        }
+        for entry in entries
+        if entry.fetch_status == "failed"
+    ]
+
+
 def _download_candidate(
     candidate: Any,
     *,
@@ -405,12 +426,7 @@ def _download_candidate(
     )
     while attempts < max_attempts:
         if time.monotonic() >= deadline:
-            return _failed_entry(
-                candidate,
-                attempts=attempts_offset + attempts,
-                http_status=http_status,
-                error_code="image_download_retryable",
-            )
+            raise TimeoutError("historical image batch timeout reached before image request")
         attempts += 1
         try:
             response = fetch_remote_image_bytes(
@@ -454,7 +470,7 @@ def _download_candidate(
             )
         except RemoteImageFetchError as exc:
             http_status = exc.http_status
-            error_code = "image_download_retryable" if exc.retryable else "image_non_raster_response"
+            error_code = remote_image_failure_code(exc)
             if exc.retryable and attempts < max_attempts:
                 time.sleep(random.uniform(1.0, 2.0) * (2 ** (attempts - 1)))
                 continue
@@ -553,6 +569,7 @@ def _download_generic_post(
     staging_root: Path,
     cookie_header: str,
     deadline: float,
+    max_attempts: int = MAX_IMAGE_ATTEMPTS,
 ) -> tuple[list[ImageManifestEntry], dict[str, Any]]:
     started = time.monotonic()
     referer = _record_referer(platform_key, record, post.platform_post_id)
@@ -562,7 +579,7 @@ def _download_generic_post(
     refreshed_urls: dict[int, str] = {}
     entries: list[ImageManifestEntry] = []
     for candidate in candidates:
-        direct_attempts = 1 if platform_key == "douyin" else MAX_IMAGE_ATTEMPTS
+        direct_attempts = 1 if platform_key == "douyin" else max_attempts
         entry = _download_candidate(
             candidate,
             platform_key=platform_key,
@@ -572,7 +589,7 @@ def _download_generic_post(
             deadline=deadline,
             max_attempts=direct_attempts,
         )
-        if platform_key == "douyin" and entry.fetch_status == "failed":
+        if platform_key == "douyin" and entry.fetch_status == "failed" and max_attempts > 1:
             if not detail_refresh_attempted:
                 detail_refresh_attempted = True
                 refreshed_urls = _refresh_douyin_urls(post.platform_post_id, staging_root)
@@ -587,7 +604,7 @@ def _download_generic_post(
                     staging_root=staging_root,
                     deadline=deadline,
                     fetch_url_override=refreshed_url,
-                    max_attempts=MAX_IMAGE_ATTEMPTS - 1,
+                    max_attempts=max_attempts - 1,
                     attempts_offset=1,
                 )
         entries.append(entry)
@@ -599,6 +616,7 @@ def _download_generic_post(
         "downloaded_images": len(entries) - len(failures),
         "failed_images": len(failures),
         "failure_codes": sorted({str(entry.error_code or "") for entry in failures}),
+        "failures": _failure_evidence(failures),
         "detail_refresh_attempted": detail_refresh_attempted,
         "detail_refresh_succeeded": detail_refresh_succeeded,
         "refreshed_images": len(refreshed_urls),
@@ -617,6 +635,7 @@ def _download_generic_batch(
     staging_root: Path,
     cookie_header: str,
     deadline: float,
+    max_attempts: int = MAX_IMAGE_ATTEMPTS,
 ) -> tuple[Path, list[ImageManifestEntry], list[dict[str, Any]]]:
     staging_root = staging_root.expanduser().resolve()
     manifest_path = staging_root / "image_manifest.jsonl"
@@ -633,6 +652,7 @@ def _download_generic_batch(
                 staging_root=staging_root,
                 cookie_header=cookie_header,
                 deadline=deadline,
+                max_attempts=max_attempts,
             ): index
             for index, post in enumerate(plan.posts)
         }
@@ -655,6 +675,7 @@ def _download_bilibili_batch(
     staging_root: Path,
     cookie_header: str,
     deadline: float,
+    max_attempts: int = MAX_IMAGE_ATTEMPTS,
 ) -> tuple[Path, list[ImageManifestEntry], list[dict[str, Any]]]:
     manifest_path = staging_root / "image_manifest.jsonl"
     entries: list[ImageManifestEntry] = []
@@ -668,6 +689,7 @@ def _download_bilibili_batch(
             records[post.web_post_id],
             cookie_header=cookie_header,
             platform_data_root=staging_root,
+            max_attempts=max_attempts,
         )
         entries.extend(post_entries)
         write_manifest_atomic(manifest_path, entries)
@@ -683,6 +705,7 @@ def _download_bilibili_batch(
                 "failure_codes": sorted(
                     {str(entry.error_code or "") for entry in failures}
                 ),
+                "failures": _failure_evidence(failures),
                 "elapsed_seconds": round(time.monotonic() - started, 3),
             }
         )
@@ -697,6 +720,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     max_batch = MAX_BATCH_BY_PLATFORM[platform_key]
     if not 1 <= args.batch_size <= max_batch:
         raise SystemExit(f"--batch-size must be between 1 and {max_batch}")
+    if not 1 <= args.max_image_attempts <= MAX_IMAGE_ATTEMPTS:
+        raise SystemExit(
+            f"--max-image-attempts must be between 1 and {MAX_IMAGE_ATTEMPTS}"
+        )
     batch_timeout = int(
         args.batch_timeout or DEFAULT_BATCH_TIMEOUT[platform_key]
     )
@@ -710,6 +737,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     campaign_path = Path(args.campaign).expanduser().resolve(strict=True)
     campaign = _read_object(campaign_path)
     campaign_id = _campaign_id(campaign)
+    deferred_post_ids: list[str] = []
+    if args.deferred_posts_file:
+        deferred_payload = _read_object(
+            Path(args.deferred_posts_file).expanduser().resolve(strict=True)
+        )
+        if deferred_payload.get("campaign_id") != campaign_id:
+            raise SystemExit("deferred post registry belongs to another campaign")
+        platform_values = (deferred_payload.get("platform_post_ids") or {}).get(
+            platform_key, []
+        )
+        if not isinstance(platform_values, list):
+            raise SystemExit("deferred post registry platform value must be a list")
+        deferred_post_ids = sorted({str(value) for value in platform_values if value})
     run_id = utc_stamp()
     stage = STAGE_BY_PLATFORM[platform_key]
     run_dir = (
@@ -739,6 +779,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "avatar_download": False,
         "video_download": False,
         "preview_image_download": False,
+        "max_image_attempts": args.max_image_attempts,
+        "deferred_platform_post_ids": deferred_post_ids,
     }
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
@@ -753,6 +795,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             plan = build_relationship_plan(
                 conn,
                 platforms=(platform_key,),
+                excluded_platform_post_ids={platform_key: deferred_post_ids},
                 batch_size=args.batch_size,
                 project_root=PROJECT_ROOT,
                 media_root=LOCAL_MEDIA_ROOT,
@@ -777,7 +820,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
         )
         if not plan.posts:
-            report.update({"status": "completed", "reason": "no_missing_platform_images"})
+            reason = (
+                "no_eligible_missing_platform_images"
+                if deferred_post_ids and inventory_before[platform_key]["local_gap"] > 0
+                else "no_missing_platform_images"
+            )
+            report.update({"status": "completed", "reason": reason})
             _write_json_atomic(report_path, report)
             print(json.dumps({"status": "completed", "report": str(report_path)}))
             return 0
@@ -821,6 +869,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 staging_root=staging_root,
                 cookie_header=cookie_header,
                 deadline=deadline,
+                max_attempts=args.max_image_attempts,
             )
         else:
             manifest_path, entries, post_reports = _download_generic_batch(
@@ -830,6 +879,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 staging_root=staging_root,
                 cookie_header=cookie_header,
                 deadline=deadline,
+                max_attempts=args.max_image_attempts,
             )
         report["downloaded_posts"] = post_reports
         report["manifest_rows"] = len(entries)

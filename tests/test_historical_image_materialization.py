@@ -190,6 +190,22 @@ def _fixture_database(project_root: Path, *, two_xhs_posts: bool = False) -> Pat
     return db_path
 
 
+def test_relationship_plan_can_temporarily_defer_a_failed_post(tmp_path: Path) -> None:
+    db_path = _fixture_database(tmp_path)
+    with sqlite3.connect(db_path) as conn:
+        plan = build_relationship_plan(
+            conn,
+            platforms=("bilibili",),
+            excluded_platform_post_ids={"bilibili": {"101"}},
+            batch_size=10,
+            project_root=tmp_path,
+            media_root=tmp_path / "data" / "media",
+            require_missing_local=True,
+        )
+
+    assert plan.posts == ()
+
+
 def _campaign(db_path: Path, campaign_path: Path) -> dict[str, object]:
     with sqlite3.connect(db_path) as conn:
         projection = projection_inventory(conn)

@@ -62,6 +62,7 @@ from trippostcollect.artifacts.image_persistence import (
 from trippostcollect.artifacts.image_proxy import (
     RemoteImageFetchError,
     RemoteImagePreview,
+    remote_image_failure_code,
     fetch_remote_image_bytes,
 )
 from crawl_policy import (
@@ -2456,9 +2457,14 @@ def download_bilibili_record_images(
     platform_data_root: Path,
     fetcher: Any | None = None,
     sleep_fn: Any | None = None,
+    max_attempts: int = BILIBILI_IMAGE_MAX_ATTEMPTS,
 ) -> list[ImageManifestEntry]:
     """Download only detail-observed Bilibili article images into staging."""
 
+    if not 1 <= max_attempts <= BILIBILI_IMAGE_MAX_ATTEMPTS:
+        raise ValueError(
+            f"max_attempts must be between 1 and {BILIBILI_IMAGE_MAX_ATTEMPTS}"
+        )
     fetch = fetcher or fetch_bilibili_image_bytes
     wait = sleep_fn or time.sleep
     root = platform_data_root.expanduser().resolve()
@@ -2468,7 +2474,7 @@ def download_bilibili_record_images(
         attempts = 0
         http_status: int | None = None
         error_code = "image_download_retryable"
-        while attempts < BILIBILI_IMAGE_MAX_ATTEMPTS:
+        while attempts < max_attempts:
             attempts += 1
             try:
                 response = fetch(candidate.source_url, candidate.platform_post_id, cookie_header)
@@ -2509,15 +2515,15 @@ def download_bilibili_record_images(
                 break
             except RemoteImageFetchError as exc:
                 http_status = exc.http_status
-                error_code = "image_download_retryable"
-                if exc.retryable and attempts < BILIBILI_IMAGE_MAX_ATTEMPTS:
+                error_code = remote_image_failure_code(exc)
+                if exc.retryable and attempts < max_attempts:
                     wait(random.uniform(*BILIBILI_IMAGE_RETRY_DELAY_SECONDS) * (2 ** (attempts - 1)))
                     continue
             except ImageMaterializationError as exc:
                 error_code = exc.code
             except (OSError, TimeoutError):
                 error_code = "image_download_retryable"
-                if attempts < BILIBILI_IMAGE_MAX_ATTEMPTS:
+                if attempts < max_attempts:
                     wait(random.uniform(*BILIBILI_IMAGE_RETRY_DELAY_SECONDS) * (2 ** (attempts - 1)))
                     continue
             entries.append(
