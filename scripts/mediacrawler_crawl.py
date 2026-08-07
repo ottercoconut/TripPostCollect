@@ -28,6 +28,7 @@ from urllib.request import Request, urlopen
 
 from playwright.async_api import async_playwright
 
+from trippostcollect.artifacts.local_image_backfill import xhs_image_identity
 from crawl_policy import (
     CrawlPolicyBlocked,
     clear_site_policy_state,
@@ -1754,6 +1755,36 @@ def find_existing_post(conn: sqlite3.Connection, row: dict[str, Any]) -> int | N
 def upsert_web_post(conn: sqlite3.Connection, row: dict[str, Any]) -> tuple[int, bool]:
     image_items = row.pop("_image_items", [])
     existing_id = find_existing_post(conn, row)
+    platform_key = str(row.get("platform_key") or "")
+
+    def preservation_key(image_url: str, image_role: str) -> tuple[str, str]:
+        identity = xhs_image_identity(image_url) if platform_key == "xhs" else image_url
+        return identity, image_role
+
+    preserved_images: dict[tuple[str, str], dict[str, Any]] = {}
+    if existing_id:
+        existing_image_rows = conn.execute(
+            """
+            SELECT image_url, image_role, local_path, width, height, mime_type, sha256, raw_image_json
+            FROM web_post_images
+            WHERE web_post_id=?
+            ORDER BY image_index
+            """,
+            (existing_id,),
+        ).fetchall()
+        counts = Counter(preservation_key(str(item[0]), str(item[1])) for item in existing_image_rows)
+        preserved_images = {
+            preservation_key(str(item[0]), str(item[1])): {
+                "local_path": item[2],
+                "width": item[3],
+                "height": item[4],
+                "mime_type": item[5],
+                "sha256": item[6],
+                "raw_image_json": item[7],
+            }
+            for item in existing_image_rows
+            if counts[preservation_key(str(item[0]), str(item[1]))] == 1
+        }
     columns = list(row)
     if existing_id:
         updates = ", ".join(f"{column}=:{column}" for column in columns)
@@ -1766,14 +1797,36 @@ def upsert_web_post(conn: sqlite3.Connection, row: dict[str, Any]) -> tuple[int,
 
     conn.execute("DELETE FROM web_post_images WHERE web_post_id=?", (post_id,))
     for index, item in enumerate(image_items):
+        preserved = preserved_images.get(preservation_key(item["url"], item["role"]), {})
+        raw_image_payload = dict(item)
+        preserved_raw = preserved.get("raw_image_json")
+        if preserved_raw:
+            try:
+                preserved_payload = json.loads(str(preserved_raw))
+            except json.JSONDecodeError:
+                preserved_payload = {}
+            if isinstance(preserved_payload, dict) and isinstance(preserved_payload.get("local_file"), dict):
+                raw_image_payload["local_file"] = preserved_payload["local_file"]
         conn.execute(
             """
             INSERT INTO web_post_images (
-                web_post_id, image_index, image_url, image_role, local_path, raw_image_json
+                web_post_id, image_index, image_url, image_role, local_path,
+                width, height, mime_type, sha256, raw_image_json
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (post_id, index, item["url"], item["role"], None, json_dump(item)),
+            (
+                post_id,
+                index,
+                item["url"],
+                item["role"],
+                preserved.get("local_path"),
+                preserved.get("width"),
+                preserved.get("height"),
+                preserved.get("mime_type"),
+                preserved.get("sha256"),
+                json_dump(raw_image_payload),
+            ),
         )
     return post_id, existing_id is None
 

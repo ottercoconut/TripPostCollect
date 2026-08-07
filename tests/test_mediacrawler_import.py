@@ -45,3 +45,53 @@ def test_content_import_bootstrap_preserves_parent_runner_jobs() -> None:
         ).fetchall()
     assert result["synced_jobs"] == 0
     assert jobs == [("once_first", 1), ("once_second", 1)]
+
+
+def test_upsert_preserves_verified_local_image_metadata() -> None:
+    original_image_url = "https://example.test/old/notes_pre_post/image.jpg"
+    refreshed_image_url = "https://example.test/new/notes_pre_post/image.jpg"
+    post = {
+        "platform_key": "xhs",
+        "platform_post_id": "note-1",
+        "source_type": "mediacrawler_search",
+        "source_url": "https://www.xiaohongshu.com/explore/note-1",
+        "canonical_url": "https://www.xiaohongshu.com/explore/note-1",
+        "captured_at": "2026-08-07T00:00:00+00:00",
+        "raw_sample_json": "{}",
+        "_image_items": [
+            {"url": original_image_url, "role": "content", "source_key": "image_list"}
+        ],
+    }
+    with sqlite3.connect(":memory:") as conn:
+        bootstrap_connection(conn, sync_jobs=False)
+        post_id, inserted = mediacrawler_crawl.upsert_web_post(conn, dict(post))
+        assert inserted is True
+        conn.execute(
+            """
+            UPDATE web_post_images
+            SET local_path='outputs/images/note-1/0.jpg', width=800, height=600,
+                mime_type='image/jpeg', sha256='abc',
+                raw_image_json='{"local_file":{"source":"test"}}'
+            WHERE web_post_id=?
+            """,
+            (post_id,),
+        )
+
+        refreshed_post = dict(post)
+        refreshed_post["_image_items"] = [
+            {"url": refreshed_image_url, "role": "content", "source_key": "image_list"}
+        ]
+        updated_post_id, inserted = mediacrawler_crawl.upsert_web_post(conn, refreshed_post)
+        image = conn.execute(
+            """
+            SELECT image_url, local_path, width, height, mime_type, sha256, raw_image_json
+            FROM web_post_images
+            WHERE web_post_id=?
+            """,
+            (post_id,),
+        ).fetchone()
+
+    assert updated_post_id == post_id
+    assert inserted is False
+    assert image[:6] == (refreshed_image_url, "outputs/images/note-1/0.jpg", 800, 600, "image/jpeg", "abc")
+    assert '"local_file"' in image[6]
