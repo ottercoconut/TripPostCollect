@@ -84,6 +84,9 @@ python scripts/crawl_runner.py \
 
 通用平台正式数量、字段 profile、分页和停止条件只从 `config/crawl_targets.json` 读取；结构化平台
 同时强制执行正式契约定义的行为与请求策略门禁。
+当前长期配置包含已启用的 `mc_bilibili_qingdao_laoshan_guide_article`；它与其他通用 job 一样只能从
+`crawl_runner.py` 进入。配置同步后，普通定量轮次会把它路由到项目自有 B站 article 详情分支，不会
+回退到旧搜索摘要逻辑，也不会调用历史修复 supervisor。
 CLI 不传 `--completion-mode` 时仍默认按配置的 `target_new_posts`、`candidate_hard_limit` 和停滞
 边界限量执行。模式 Skill 为了让冻结计划可审计，会在 dry-run 和正式命令中显式传入
 `target-new-posts` 或 `source-exhausted`。后者不写回长期配置，也不把后续轮次永久改为无限数量。

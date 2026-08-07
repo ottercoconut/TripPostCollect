@@ -19,6 +19,49 @@
 - 配置中的 job kind 虽为 `mediacrawler_search`，B站实际使用项目自有 article API 分支；发现
   checkpoint、候选记忆和跨次累计仍复用通用控制面。
 
+## 正常正式抓取调用链
+
+历史回填完成不代表正常抓取要继续调用回填工具。新关键词或后续定时轮次的权威路径固定为：
+
+1. `config/crawl_targets.json` 中存在 `site_key=bilibili`、`job_kind=mediacrawler_search`、
+   `params.platform=bilibili` 且 `enabled=true` 的 job；当前长期 job 为
+   `mc_bilibili_qingdao_laoshan_guide_article`。
+2. `crawl_runner.py` 同步并选择该 job，构造
+   `mediacrawler_crawl.py --platforms bilibili`，同时传入关键词、完成模式、数量边界、字段 profile、
+   数据库和自动发现 checkpoint 参数。
+3. `mediacrawler_crawl.py` 的平台分派直接进入 `run_bilibili_article_search()`；不会进入第三方
+   MediaCrawler 的视频搜索，也不会进入 `repair_bilibili_articles.py`。
+4. 每个未知 article 依次执行搜索归一化、`fetch_bilibili_article_detail_with_retry()`、
+   `hydrate_bilibili_article_record()` 和作者关系统计补全。详情正文和正文图片在这一步替换空的正式
+   正文字段；搜索 `desc` 与预览图只保留为原始证据。
+5. `validate_formal_record()` 强制检查 `detail_observed`、`article_view_api`、详情图片状态、作者、
+   发布时间、至少一张正文图和 `relation_stat` 粉丝来源；任何详情失败都在入库前停止或判无效。
+6. 只有正式完成谓词、行为/策略证据和上述字段门禁同时通过，`import_valid_records()` 才把记录写入
+   `web_posts` / `web_post_images`，runner 再完成持久化状态并提交发现记忆。
+
+历史修复入口从 `mediacrawler_crawl.py` 导入同一组详情请求、正文清洗和图片提取函数；因此代码所有权
+在正常正式执行器，而不是 sidecar 修复脚本。以后不得复制第二套 B站解析器，也不得为了新抓取恢复
+旧的“标题/搜索摘要作为正文”分支。
+
+只验证冻结计划、不访问平台时使用：
+
+```bash
+source .venv/bin/activate
+python scripts/crawl_runner.py \
+  --dry-run \
+  --job-key mc_bilibili_qingdao_laoshan_guide_article \
+  --completion-mode target-new-posts
+```
+
+计划中的 child 命令必须包含 `--platforms bilibili`、正式字段 profile 和本轮完成模式；缺少任何一项
+都不能进入正式运行。dry-run 本身会同步调度表并写计划/冻结状态，不是数据库严格只读操作。
+
+对应防回归证据分为三层：`tests/test_bilibili_formal_route.py` 固定检查长期配置存在已启用 B站 job，
+并验证 runner 构造的 child 命令；`tests/test_bilibili_article_detail.py` 固定检查摘要不能通过门禁、
+Opus/旧 article 正文与图片解析、短文、重试和失败安全前沿；`tests/test_discovery_checkpoints.py` 固定
+检查正常 B站轮次会跳过已知 ID、只对未知 ID 请求详情并从保存页继续。修改 B站配置、入口或字段
+说明时必须同时运行这三组测试。
+
 ## 字段来源与详情门禁
 
 搜索接口只负责发现候选和提供预览字段。搜索结果中的 `desc`、`image_urls` 分别是摘要和预览图，
