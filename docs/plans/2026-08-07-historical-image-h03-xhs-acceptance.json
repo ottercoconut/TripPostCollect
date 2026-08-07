@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "campaign_id": "historical-images-20260807-v1",
+  "stage": "H-03",
+  "platform": "xhs",
+  "status": "completed",
+  "completed_at": "2026-08-07T13:48:00+08:00",
+  "database_sha256_after": "8f1c5c1dbb6f30622336cfaadc32c2ace6243eab8f6a671ff85bb0f3577e27d9",
+  "inventory": {
+    "posts": 1808,
+    "authoritative_images": 17416,
+    "content_rows": 17416,
+    "local_rows": 17416,
+    "media_files": 17416,
+    "local_bytes": 4674991926,
+    "local_gap": 0,
+    "misclassified_rows": 0,
+    "missing_files": 0,
+    "orphan_files": 0,
+    "avatar_local_rows": 0,
+    "video_files_added": 0,
+    "inventory_sha256": "4d5d79372f3b857a375ba805c861b72f363dc1d03a7f42978a48e8d62b64c7b4"
+  },
+  "sources": {
+    "historical_existing_promotion_v1": 17150,
+    "historical_crawler_download_v1": 266
+  },
+  "batches": {
+    "existing_inventory": {
+      "posts": 1791,
+      "images": 17150,
+      "bytes": 4596325862
+    },
+    "fixed_online": {
+      "posts": 10,
+      "images": 159,
+      "bytes": 44644970,
+      "removed_misclassified_rows": 20
+    },
+    "remaining_online": {
+      "posts": 7,
+      "images": 107,
+      "bytes": 34021094,
+      "removed_misclassified_rows": 14
+    }
+  },
+  "integrity": {
+    "quick_check": "ok",
+    "foreign_key_violations": 0,
+    "file_validation_errors": 0,
+    "protected_h00_invariants_match": true,
+    "active_xhs_leases": 0
+  },
+  "artifacts": {
+    "existing_state": "data/runtime/image_materialization/historical-images-20260807-v1/xhs-existing-promotion-state.json",
+    "fixed_online_report": "data/runtime/image_materialization/historical-images-20260807-v1/h03/xhs-download-fixed10-resume2/report.json",
+    "remaining_online_report": "data/runtime/image_materialization/historical-images-20260807-v1/h03/xhs-download-remaining7/report.json",
+    "media_root": "data/media/xhs"
+  },
+  "commits": {
+    "project": [
+      "f8defe5bd8d80299918e250ed712c3a2e83c016c",
+      "a1752893aad0bb13c855f400421be4917898869a",
+      "71d769141f63711d17c0f1a3ca9dcf29f8ad0684",
+      "712eff16734eb6386478355f8f500fc043b41e1e",
+      "70e4f27b6a5f6528e1df089b47becb89b89b8f2a",
+      "230932d924f69432888d7021093186c68a1cd3ee"
+    ],
+    "mediacrawler": "9c80a21ec801231e3c0157bcea90fa9cd8c539e5"
+  },
+  "next_stage": "H-04"
+}
