@@ -175,6 +175,49 @@ def test_candidates_use_weibo_pid_and_douyin_uri_metadata() -> None:
     ]
 
 
+def test_mediacrawler_weibo_manifest_sample_matches_root_candidates() -> None:
+    record = {
+        "note_id": "wb-note-1",
+        "image_list_source": "mblog.pics",
+        "image_list": ["https://wx1.sinaimg.cn/large/body.jpg?token=one"],
+        "image_assets": [
+            {
+                "pid": "pid-body-1",
+                "url": "https://wx1.sinaimg.cn/large/body.jpg?token=one",
+                "source_index": 0,
+            }
+        ],
+    }
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "platform_key": "weibo",
+            "platform_post_id": "wb-note-1",
+            "image_role": "content",
+            "source_index": 0,
+            "source_key": "image_list",
+            "source_asset_key": "weibo:pid:pid-body-1",
+            "source_url": "https://wx1.sinaimg.cn/large/body.jpg?token=one",
+            "fetch_status": "downloaded",
+            "attempts": 1,
+            "http_status": 200,
+            "staging_path": "weibo/images/wb-note-1/000.png",
+            "size_bytes": 96,
+            "mime_type": "image/png",
+            "width": 4,
+            "height": 3,
+            "sha256": "b" * 64,
+            "error_code": None,
+        },
+        sort_keys=True,
+    )
+    entries = parse_manifest(payload + "\n")
+    candidates = content_image_candidates("weibo", record)
+
+    assert validate_post_manifest(entries, candidates) == entries
+    assert entries[0].staging_path == "weibo/images/wb-note-1/000.png"
+
+
 def test_manifest_round_trip_sorting_and_hash_are_deterministic() -> None:
     second_candidate = candidate(1)
     entries = [downloaded_entry(second_candidate), downloaded_entry()]
