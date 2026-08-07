@@ -7,11 +7,9 @@ import argparse
 import fcntl
 import hashlib
 import json
-import os
 import random
 import sqlite3
 import subprocess
-import sys
 import time
 import uuid
 from contextlib import contextmanager

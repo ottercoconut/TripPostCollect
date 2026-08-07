@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,7 +22,6 @@ from repair_bilibili_articles import (
     repair_state_validation,
     run_continuous_repair,
     scoped_state_counts,
-    sha256_file,
     sqlite_connect,
     state_counts,
     target_summary,
