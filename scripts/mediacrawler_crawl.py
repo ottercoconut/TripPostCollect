@@ -1876,6 +1876,18 @@ def _load_manifest_with_evidence(
     return path, entries, line_numbers
 
 
+def _staging_root_for_manifest_entry(
+    manifest_path: Path,
+    entry: ImageManifestEntry,
+) -> Path:
+    """Resolve both supported layouts without platform-specific persistence code."""
+
+    staging_path = Path(str(entry.staging_path))
+    if staging_path.parts and staging_path.parts[0] == manifest_path.parent.name:
+        return manifest_path.parent.parent
+    return manifest_path.parent
+
+
 def materialize_formal_record_images(
     selected: list[dict[str, Any]],
     *,
@@ -1970,7 +1982,7 @@ def materialize_formal_record_images(
             post_materialized: list[MaterializedImage] = []
             for candidate, entry in zip(candidates, ordered_entries, strict=True):
                 manifest_path, manifest_line = evidence_by_index[entry.source_index]
-                staging_root = manifest_path.parent.parent
+                staging_root = _staging_root_for_manifest_entry(manifest_path, entry)
                 staged_path = staging_root / str(entry.staging_path)
                 validated = validate_image_file(
                     staged_path,

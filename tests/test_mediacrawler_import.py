@@ -87,13 +87,19 @@ def staged_selection(
     manifest_path = data_root / platform_key / "image_manifest.jsonl"
     entries: list[ImageManifestEntry] = []
     for candidate in content_image_candidates(platform_key, record):
-        staged = write_staging_image(
-            [png_bytes((candidate.source_index + 1, 4, 5))],
-            staging_root=data_root,
-            relative_stem=(
+        relative_stem = (
+            f"images/{candidate.platform_post_id}/{candidate.source_index:03d}"
+            if platform_key == "bilibili"
+            else (
                 f"{platform_key}/images/{candidate.platform_post_id}/"
                 f"{candidate.source_index:03d}"
-            ),
+            )
+        )
+        staging_root = manifest_path.parent if platform_key == "bilibili" else data_root
+        staged = write_staging_image(
+            [png_bytes((candidate.source_index + 1, 4, 5))],
+            staging_root=staging_root,
+            relative_stem=relative_stem,
         )
         entries.append(
             ImageManifestEntry(
@@ -108,7 +114,7 @@ def staged_selection(
                 fetch_status="downloaded",
                 attempts=1,
                 http_status=200,
-                staging_path=staged.path.relative_to(data_root).as_posix(),
+                staging_path=staged.path.relative_to(staging_root).as_posix(),
                 size_bytes=staged.size_bytes,
                 mime_type=staged.mime_type,
                 width=staged.width,
