@@ -809,6 +809,37 @@ def test_xhs_behavior_validation_requires_continuity_behavior() -> None:
     assert validation["platforms"]["xhs"]["continuity_ok"] is False
 
 
+def test_xhs_historical_image_behavior_does_not_require_creator_profile() -> None:
+    evidence = valid_xhs_evidence()
+    evidence.update(
+        {
+            "request_pacing_events": [
+                {"stage": "search_results"},
+                {"stage": "note_detail"},
+            ],
+            "continuity_events": [
+                {"stage": "search_results", "status": "completed"},
+            ],
+            "url": "https://www.xiaohongshu.com/search_result?keyword=青岛旅游",
+        }
+    )
+    record = {
+        "platform": "xhs",
+        "behavior_evidence": evidence,
+        "policy_events": [{"allowed": True, "disabled": False}],
+    }
+
+    validation = mediacrawler_crawl.collect_behavior_validation(
+        [record],
+        ["xhs"],
+        "青岛旅游",
+        historical_image_only=True,
+    )
+
+    assert validation["ok"] is True
+    assert validation["platforms"]["xhs"]["request_pacing_ok"] is True
+
+
 def test_xhs_interaction_is_reported_but_does_not_invalidate_crawl() -> None:
     evidence = valid_xhs_evidence()
     evidence.update(

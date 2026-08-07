@@ -11,13 +11,16 @@ import pytest
 from scripts.gc_local_images import main as gc_main
 from scripts.materialize_local_images import main as materialize_main
 from trippostcollect.artifacts.historical_image_materialization import (
+    build_relationship_plan,
     database_integrity,
+    promote_downloaded_plan,
     projection_inventory,
     protected_database_digests,
     sha256_file,
 )
 from trippostcollect.artifacts.image_candidates import content_image_candidates
-from trippostcollect.artifacts.image_materialization import validate_image_file
+from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
+from trippostcollect.artifacts.image_materialization import validate_image_file, write_staging_image
 from trippostcollect.db.bootstrap import bootstrap_connection
 
 
@@ -484,6 +487,77 @@ def test_existing_xhs_promotion_is_dry_run_first_and_preserves_source_bytes(tmp_
     assert promoted_file.suffix == ".webp"
     assert hashlib.sha256(promoted_file.read_bytes()).hexdigest() == legacy_sha
     assert hashlib.sha256(legacy_file.read_bytes()).hexdigest() == legacy_sha
+
+
+def test_downloaded_manifest_promotes_only_the_exact_missing_historical_post(
+    tmp_path: Path,
+) -> None:
+    db_path = _fixture_database(tmp_path, two_xhs_posts=True)
+    media_root = tmp_path / "data" / "media"
+    with sqlite3.connect(db_path) as conn:
+        plan = build_relationship_plan(
+            conn,
+            platforms=("xhs",),
+            batch_size=10,
+            project_root=tmp_path,
+            media_root=media_root,
+            require_missing_local=True,
+        )
+    assert [post.platform_post_id for post in plan.posts] == ["xhs-2"]
+    candidate = plan.posts[0].prepared_images[0]
+    platform_root = tmp_path / "staging" / "xhs"
+    staged = write_staging_image(
+        [
+            (tmp_path / "legacy" / "xhs" / "xhs-1.jpg").read_bytes(),
+        ],
+        staging_root=platform_root,
+        relative_stem="images/xhs-2/000",
+        content_type="image/jpeg",
+        source_url=str(candidate["url"]),
+    )
+    manifest_path = platform_root / "image_manifest.jsonl"
+    write_manifest_atomic(
+        manifest_path,
+        [
+            ImageManifestEntry(
+                schema_version=1,
+                platform_key="xhs",
+                platform_post_id="xhs-2",
+                image_role="content",
+                source_index=0,
+                source_key="image_list",
+                source_asset_key=str(candidate["source_asset_key"]),
+                source_url=str(candidate["url"]),
+                fetch_status="downloaded",
+                attempts=1,
+                http_status=200,
+                staging_path=staged.path.relative_to(platform_root).as_posix(),
+                size_bytes=staged.size_bytes,
+                mime_type=staged.mime_type,
+                width=staged.width,
+                height=staged.height,
+                sha256=staged.sha256,
+                error_code=None,
+            )
+        ],
+    )
+
+    promoted, report = promote_downloaded_plan(
+        plan,
+        manifest_paths=[manifest_path],
+        project_root=tmp_path,
+        media_root=media_root,
+    )
+
+    assert report["promoted_images"] == 1
+    assert report["reused_images"] == 0
+    assert promoted.posts[0].preserved_local_rows == 1
+    local_path = promoted.posts[0].prepared_images[0]["local_path"]
+    assert (tmp_path / local_path).is_file()
+    assert (
+        promoted.posts[0].prepared_images[0]["local_file"]["source"]
+        == "historical_crawler_download_v1"
+    )
 
 
 def test_gc_defaults_to_report_only_and_requires_explicit_confirmation(tmp_path: Path) -> None:

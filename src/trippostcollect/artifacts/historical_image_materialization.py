@@ -15,10 +15,17 @@ from trippostcollect.artifacts.image_candidates import (
     source_asset_key_for_image,
 )
 from trippostcollect.artifacts.image_materialization import (
+    DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
     promote_validated_image,
     safe_platform_post_id,
     validate_image_file,
     write_staging_image,
+)
+from trippostcollect.artifacts.image_manifest import (
+    ImageManifestEntry,
+    manifest_sha256,
+    parse_manifest,
+    validate_post_manifest,
 )
 from trippostcollect.artifacts.image_persistence import (
     existing_image_records,
@@ -298,9 +305,12 @@ def build_relationship_plan(
     project_root: str | Path,
     media_root: str | Path,
     require_complete_existing_local: bool = False,
+    require_missing_local: bool = False,
 ) -> HistoricalRelationshipPlan:
     """Build a bounded plan using the production candidate and persistence components."""
 
+    if require_complete_existing_local and require_missing_local:
+        raise ValueError("existing-complete and missing-local filters are mutually exclusive")
     unknown = set(platforms) - set(HISTORICAL_PLATFORM_ORDER)
     if unknown:
         raise ValueError(f"unsupported historical platforms: {sorted(unknown)}")
@@ -328,7 +338,7 @@ def build_relationship_plan(
                 (platform_key, cursor),
             )
         )
-        if require_complete_existing_local:
+        if require_complete_existing_local or require_missing_local:
             eligible: list[tuple[Any, ...]] = []
             skipped = 0
             for row in available:
@@ -349,7 +359,14 @@ def build_relationship_plan(
                         (web_post_id,),
                     ).fetchone()[0]
                 )
-                if authoritative_count > 0 and local_count == authoritative_count:
+                complete_existing = authoritative_count > 0 and local_count == authoritative_count
+                missing_local = authoritative_count > local_count
+                if (
+                    require_complete_existing_local
+                    and complete_existing
+                    or require_missing_local
+                    and missing_local
+                ):
                     eligible.append(row)
                 else:
                     skipped += 1
@@ -566,6 +583,174 @@ def promote_existing_plan(
         "promoted_images": promoted_images,
         "reused_images": reused_images,
         "promoted_bytes": promoted_bytes,
+    }
+
+
+def _manifest_staging_root(manifest_path: Path, entry: ImageManifestEntry) -> Path:
+    staging_path = Path(str(entry.staging_path))
+    if staging_path.parts and staging_path.parts[0] == manifest_path.parent.name:
+        return manifest_path.parent.parent
+    return manifest_path.parent
+
+
+def promote_downloaded_plan(
+    plan: HistoricalRelationshipPlan,
+    *,
+    manifest_paths: Sequence[str | Path],
+    project_root: str | Path,
+    media_root: str | Path,
+) -> tuple[HistoricalRelationshipPlan, dict[str, Any]]:
+    """Validate an exact crawler manifest batch and promote it into a historical plan."""
+
+    if not plan.posts:
+        raise ValueError("download promotion requires at least one planned post")
+    resolved_project_root = Path(project_root).expanduser().resolve(strict=True)
+    resolved_media_root = Path(media_root).expanduser().resolve()
+    entries_by_post: dict[tuple[str, str], list[tuple[ImageManifestEntry, Path]]] = {}
+    manifest_evidence: list[dict[str, Any]] = []
+    for path_value in dict.fromkeys(str(value) for value in manifest_paths):
+        manifest_path = Path(path_value).expanduser().resolve(strict=True)
+        if (
+            manifest_path != resolved_project_root
+            and resolved_project_root not in manifest_path.parents
+        ):
+            raise ValueError(f"image manifest escapes project root: {manifest_path}")
+        entries = parse_manifest(manifest_path.read_bytes())
+        manifest_evidence.append(
+            {
+                "path": manifest_path.relative_to(resolved_project_root).as_posix(),
+                "sha256": manifest_sha256(entries),
+                "rows": len(entries),
+            }
+        )
+        for entry in entries:
+            entries_by_post.setdefault(
+                (entry.platform_key, entry.platform_post_id), []
+            ).append((entry, manifest_path))
+
+    expected_post_keys = {
+        (post.platform_key, post.platform_post_id) for post in plan.posts
+    }
+    if set(entries_by_post) != expected_post_keys:
+        raise ValueError(
+            "image manifest post identities do not exactly match the historical plan"
+        )
+
+    promoted_posts: list[HistoricalPostPlan] = []
+    promoted_images = reused_images = promoted_bytes = 0
+    for post in plan.posts:
+        candidates = [
+            ImageCandidate(
+                platform_key=post.platform_key,
+                platform_post_id=post.platform_post_id,
+                image_role=str(item["role"]),
+                source_index=int(item["source_index"]),
+                source_url=str(item["url"]),
+                source_key=str(item["source_key"]),
+                source_asset_key=str(item["source_asset_key"]),
+            )
+            for item in post.prepared_images
+        ]
+        rows = entries_by_post[(post.platform_key, post.platform_post_id)]
+        ordered_entries = validate_post_manifest(
+            [entry for entry, _path in rows],
+            candidates,
+            require_downloaded=True,
+        )
+        manifest_path_by_index = {
+            entry.source_index: manifest_path for entry, manifest_path in rows
+        }
+        promoted_items: list[dict[str, Any]] = []
+        for item, candidate, entry in zip(
+            post.prepared_images,
+            candidates,
+            ordered_entries,
+            strict=True,
+        ):
+            manifest_path = manifest_path_by_index[entry.source_index]
+            staging_root = _manifest_staging_root(manifest_path, entry)
+            staged = validate_image_file(
+                staging_root / str(entry.staging_path),
+                allowed_root=staging_root,
+                expected_sha256=str(entry.sha256),
+                max_bytes=DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
+                require_suffix_match=True,
+            )
+            if any(
+                (
+                    staged.size_bytes != entry.size_bytes,
+                    staged.mime_type != entry.mime_type,
+                    staged.width != entry.width,
+                    staged.height != entry.height,
+                )
+            ):
+                raise ValueError(
+                    f"staging metadata differs from manifest: {post.platform_key}:{post.platform_post_id}"
+                )
+            promoted = promote_validated_image(
+                staged,
+                candidate,
+                staging_root=staging_root,
+                media_root=resolved_media_root,
+                project_root=resolved_project_root,
+            )
+            promoted_images += int(not promoted.reused)
+            reused_images += int(promoted.reused)
+            promoted_bytes += promoted.size_bytes
+            promoted_items.append(
+                {
+                    **item,
+                    "local_path": promoted.local_path,
+                    "width": promoted.width,
+                    "height": promoted.height,
+                    "mime_type": promoted.mime_type,
+                    "sha256": promoted.sha256,
+                    "local_file": {
+                        "source": "historical_crawler_download_v1",
+                        "source_url": promoted.source_url,
+                        "size_bytes": promoted.size_bytes,
+                        "manifest_path": manifest_path.relative_to(
+                            resolved_project_root
+                        ).as_posix(),
+                    },
+                }
+            )
+        prepared = prepare_image_rows(
+            post.platform_key,
+            normalize_persistence_items(promoted_items),
+            [],
+            project_root=resolved_project_root,
+            media_root=resolved_media_root,
+            require_local_images=True,
+        )
+        promoted_posts.append(
+            HistoricalPostPlan(
+                web_post_id=post.web_post_id,
+                platform_key=post.platform_key,
+                platform_post_id=post.platform_post_id,
+                current_content_rows=post.current_content_rows,
+                authoritative_images=post.authoritative_images,
+                misclassified_rows=post.misclassified_rows,
+                duplicate_variant_rows=post.duplicate_variant_rows,
+                missing_authoritative_relations=post.missing_authoritative_relations,
+                url_normalizations=post.url_normalizations,
+                existing_local_rows=post.existing_local_rows,
+                preserved_local_rows=len(prepared),
+                prepared_images=tuple(prepared),
+            )
+        )
+    promoted_plan = HistoricalRelationshipPlan(
+        posts=tuple(promoted_posts),
+        source_digest=plan.source_digest,
+        plan_digest=_plan_digest(promoted_posts),
+        remaining_posts_by_platform=plan.remaining_posts_by_platform,
+        skipped_incomplete_by_platform=plan.skipped_incomplete_by_platform,
+    )
+    return promoted_plan, {
+        "promoted_images": promoted_images,
+        "reused_images": reused_images,
+        "promoted_bytes": promoted_bytes,
+        "manifest_evidence": manifest_evidence,
     }
 
 
