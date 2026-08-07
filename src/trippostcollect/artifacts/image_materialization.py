@@ -22,7 +22,7 @@ from trippostcollect.core.paths import LOCAL_MEDIA_ROOT, PROJECT_ROOT
 
 
 DEFAULT_ARCHIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
-DEFAULT_ARCHIVE_IMAGE_MAX_PIXELS = 100_000_000
+DEFAULT_ARCHIVE_IMAGE_MAX_PIXELS = 150_000_000
 SUPPORTED_IMAGE_MIME_TYPES = frozenset(
     {"image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"}
 )

@@ -10,6 +10,8 @@ import pytest
 
 from trippostcollect.artifacts.image_candidates import ImageCandidate
 from trippostcollect.artifacts.image_materialization import (
+    DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
+    DEFAULT_ARCHIVE_IMAGE_MAX_PIXELS,
     ImageMaterializationError,
     promote_validated_image,
     safe_platform_post_id,
@@ -32,6 +34,11 @@ FORMATS = {
     "GIF": ("image/gif", ".gif"),
     "AVIF": ("image/avif", ".avif"),
 }
+
+
+def test_default_archive_limits_match_governance() -> None:
+    assert DEFAULT_ARCHIVE_IMAGE_MAX_BYTES == 20 * 1024 * 1024
+    assert DEFAULT_ARCHIVE_IMAGE_MAX_PIXELS == 150_000_000
 
 
 def image_bytes(image_format: str = "PNG", *, size: tuple[int, int] = (4, 3)) -> bytes:
