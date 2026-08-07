@@ -86,6 +86,8 @@ class MaterializedImage:
     height: int
     sha256: str
     reused: bool
+    manifest_path: str | None = None
+    manifest_line: int | None = None
 
 
 def _magic_mime(header: bytes) -> str | None:
@@ -156,6 +158,7 @@ def validate_image_file(
     expected_sha256: str | None = None,
     max_bytes: int = DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
     max_pixels: int = DEFAULT_ARCHIVE_IMAGE_MAX_PIXELS,
+    require_suffix_match: bool = True,
 ) -> ValidatedImage:
     """Verify bounds, raster magic, decoder format, dimensions, and SHA-256."""
 
@@ -179,7 +182,7 @@ def validate_image_file(
     if magic_mime not in SUPPORTED_IMAGE_MIME_TYPES:
         raise ImageMaterializationError("image_non_raster_response", "file is not an allowed raster image")
     suffix_mime = SUFFIX_MIME.get(resolved.suffix.lower())
-    if suffix_mime is not None and suffix_mime != magic_mime:
+    if require_suffix_match and suffix_mime is not None and suffix_mime != magic_mime:
         raise ImageMaterializationError("image_decode_failed", "file suffix does not match raster bytes")
 
     width, height = _decode_dimensions(resolved, magic_mime, max_pixels)

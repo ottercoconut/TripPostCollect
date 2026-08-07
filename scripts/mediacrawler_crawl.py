@@ -32,8 +32,12 @@ from trippostcollect.artifacts.image_candidates import (
     content_image_candidates,
     image_items_for_record,
     normalize_image_url,
+    source_asset_key_for_image,
 )
-from trippostcollect.artifacts.local_image_backfill import xhs_image_identity
+from trippostcollect.artifacts.image_materialization import (
+    MaterializedImage,
+    validate_image_file,
+)
 from crawl_policy import (
     CrawlPolicyBlocked,
     clear_site_policy_state,
@@ -50,6 +54,7 @@ from mediacrawler_behavior import (
 )
 from trippostcollect.core.paths import (
     DEFAULT_DB,
+    LOCAL_MEDIA_ROOT,
     MEDIACRAWLER_DIR,
     MEDIACRAWLER_RUNS_OUTPUT,
     PROJECT_ROOT,
@@ -116,6 +121,10 @@ class BilibiliArticleDetailError(RuntimeError):
         self.code = code
         self.attempts = attempts
         self.retry_wait_seconds = retry_wait_seconds
+
+
+class ImagePersistenceError(ValueError):
+    """Raised before a partial post/image relationship can be committed."""
 
 PLATFORMS: dict[str, dict[str, str]] = {
     "bilibili": {"mediacrawler": "bili", "label": "B站"},
@@ -1094,6 +1103,62 @@ def content_text_for_record(platform_key: str, record: dict[str, Any]) -> str:
     return str(first_value(record, "content_text", "content", "desc", "title") or "")
 
 
+def inject_materialized_images(
+    image_items: list[dict[str, Any]],
+    materialized_images: list[MaterializedImage],
+) -> list[dict[str, Any]]:
+    """Attach complete local-file evidence to every authoritative content image."""
+
+    materialized = {(item.image_role, item.source_index): item for item in materialized_images}
+    if len(materialized) != len(materialized_images):
+        raise ImagePersistenceError("duplicate materialized image identity")
+    content_items = [item for item in image_items if item.get("role") == "content"]
+    if len(materialized) != len(content_items):
+        raise ImagePersistenceError(
+            f"materialized image count mismatch: got={len(materialized)} expected={len(content_items)}"
+        )
+
+    result: list[dict[str, Any]] = []
+    for raw_item in image_items:
+        item = dict(raw_item)
+        if item.get("role") != "content":
+            result.append(item)
+            continue
+        identity = (str(item["role"]), int(item["source_index"]))
+        local = materialized.get(identity)
+        if local is None or any(
+            (
+                local.platform_key != item.get("platform_key"),
+                local.platform_post_id != item.get("platform_post_id"),
+                local.source_key != item.get("source_key"),
+                local.source_asset_key != item.get("source_asset_key"),
+                local.source_url != item.get("url"),
+            )
+        ):
+            raise ImagePersistenceError(f"materialized image identity mismatch: {identity}")
+        local_file = {
+            "source": "formal_image_materialization_v1",
+            "source_url": local.source_url,
+            "size_bytes": local.size_bytes,
+        }
+        if local.manifest_path:
+            local_file["manifest_path"] = local.manifest_path
+        if local.manifest_line is not None:
+            local_file["manifest_line"] = local.manifest_line
+        item.update(
+            {
+                "local_path": local.local_path,
+                "width": local.width,
+                "height": local.height,
+                "mime_type": local.mime_type,
+                "sha256": local.sha256,
+                "local_file": local_file,
+            }
+        )
+        result.append(item)
+    return result
+
+
 def row_for_record(
     platform_key: str,
     record: dict[str, Any],
@@ -1101,10 +1166,13 @@ def row_for_record(
     artifact_dir: str,
     captured_at: str,
     keyword: str,
+    materialized_images: list[MaterializedImage] | None = None,
 ) -> dict[str, Any]:
     content_text = content_text_for_record(platform_key, record)
     canonical_url = canonical_url_for_record(platform_key, record)
     image_items = image_items_for_record(platform_key, record)
+    if materialized_images is not None:
+        image_items = inject_materialized_images(image_items, materialized_images)
     keyword_value = str(record.get("source_keyword") or keyword or "")
     metrics = {
         "liked_count": parse_int(first_value(record, "liked_count", "voteup_count")),
@@ -1712,82 +1780,303 @@ def find_existing_post(conn: sqlite3.Connection, row: dict[str, Any]) -> int | N
     return None
 
 
-def upsert_web_post(conn: sqlite3.Connection, row: dict[str, Any]) -> tuple[int, bool]:
-    image_items = row.pop("_image_items", [])
-    existing_id = find_existing_post(conn, row)
-    platform_key = str(row.get("platform_key") or "")
+def _json_object(value: Any) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        payload = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
-    def preservation_key(image_url: str, image_role: str) -> tuple[str, str]:
-        identity = xhs_image_identity(image_url) if platform_key == "xhs" else image_url
-        return identity, image_role
 
-    preserved_images: dict[tuple[str, str], dict[str, Any]] = {}
-    if existing_id:
-        existing_image_rows = conn.execute(
-            """
-            SELECT image_url, image_role, local_path, width, height, mime_type, sha256, raw_image_json
-            FROM web_post_images
-            WHERE web_post_id=?
-            ORDER BY image_index
-            """,
-            (existing_id,),
-        ).fetchall()
-        counts = Counter(preservation_key(str(item[0]), str(item[1])) for item in existing_image_rows)
-        preserved_images = {
-            preservation_key(str(item[0]), str(item[1])): {
-                "local_path": item[2],
-                "width": item[3],
-                "height": item[4],
-                "mime_type": item[5],
-                "sha256": item[6],
-                "raw_image_json": item[7],
-            }
-            for item in existing_image_rows
-            if counts[preservation_key(str(item[0]), str(item[1]))] == 1
-        }
-    columns = list(row)
-    if existing_id:
-        updates = ", ".join(f"{column}=:{column}" for column in columns)
-        conn.execute(f"UPDATE web_posts SET {updates}, updated_at=datetime('now') WHERE id=:id", {**row, "id": existing_id})
-        post_id = existing_id
-    else:
-        placeholders = ", ".join(f":{column}" for column in columns)
-        conn.execute(f"INSERT INTO web_posts ({', '.join(columns)}) VALUES ({placeholders})", row)
-        post_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+def _normalize_persistence_items(image_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    role_counters: Counter[str] = Counter()
+    identities: set[tuple[str, int]] = set()
+    normalized: list[dict[str, Any]] = []
+    for raw_item in image_items:
+        item = dict(raw_item)
+        role = str(item.get("role") or "")
+        if role not in {"content", "author_avatar", "page"}:
+            raise ImagePersistenceError(f"invalid image role: {role!r}")
+        source_index = item.get("source_index")
+        if source_index is None:
+            source_index = role_counters[role]
+        if isinstance(source_index, bool) or not isinstance(source_index, int) or source_index < 0:
+            raise ImagePersistenceError("image source_index must be a non-negative integer")
+        identity = (role, source_index)
+        if identity in identities:
+            raise ImagePersistenceError(f"duplicate image identity: {identity}")
+        if not normalize_image_url(item.get("url")):
+            raise ImagePersistenceError(f"invalid image URL at {identity}")
+        item["role"] = role
+        item["source_index"] = source_index
+        identities.add(identity)
+        role_counters[role] += 1
+        normalized.append(item)
+    content_indices = sorted(index for role, index in identities if role == "content")
+    if content_indices != list(range(len(content_indices))):
+        raise ImagePersistenceError("content image indices must be continuous from zero")
+    return normalized
 
-    conn.execute("DELETE FROM web_post_images WHERE web_post_id=?", (post_id,))
-    for index, item in enumerate(image_items):
-        preserved = preserved_images.get(preservation_key(item["url"], item["role"]), {})
-        raw_image_payload = dict(item)
-        preserved_raw = preserved.get("raw_image_json")
-        if preserved_raw:
-            try:
-                preserved_payload = json.loads(str(preserved_raw))
-            except json.JSONDecodeError:
-                preserved_payload = {}
-            if isinstance(preserved_payload, dict) and isinstance(preserved_payload.get("local_file"), dict):
-                raw_image_payload["local_file"] = preserved_payload["local_file"]
-        conn.execute(
-            """
-            INSERT INTO web_post_images (
-                web_post_id, image_index, image_url, image_role, local_path,
-                width, height, mime_type, sha256, raw_image_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                post_id,
-                index,
-                item["url"],
-                item["role"],
-                preserved.get("local_path"),
-                preserved.get("width"),
-                preserved.get("height"),
-                preserved.get("mime_type"),
-                preserved.get("sha256"),
-                json_dump(raw_image_payload),
-            ),
+
+def _url_asset_identity(platform_key: str, image_url: str) -> str:
+    try:
+        return source_asset_key_for_image(platform_key, image_url)
+    except ValueError:
+        return str(normalize_image_url(image_url) or image_url)
+
+
+def _local_file_path(local_path: str, project_root: Path) -> Path:
+    raw = Path(local_path).expanduser()
+    return raw if raw.is_absolute() else project_root / raw
+
+
+def _verified_local_metadata(
+    item: dict[str, Any],
+    *,
+    project_root: Path,
+    allowed_root: Path,
+    require_suffix_match: bool,
+) -> dict[str, Any]:
+    fields = ("local_path", "width", "height", "mime_type", "sha256")
+    if not any(item.get(field) not in (None, "") for field in fields):
+        return {}
+    if any(item.get(field) in (None, "") for field in fields):
+        raise ImagePersistenceError("partial local image metadata is not allowed")
+    local_path = str(item["local_path"])
+    try:
+        verified = validate_image_file(
+            _local_file_path(local_path, project_root),
+            allowed_root=allowed_root,
+            expected_sha256=str(item["sha256"]),
+            require_suffix_match=require_suffix_match,
         )
+    except (OSError, ValueError) as exc:
+        raise ImagePersistenceError(f"local image verification failed: {exc}") from exc
+    if (
+        int(item["width"]) != verified.width
+        or int(item["height"]) != verified.height
+        or str(item["mime_type"]) != verified.mime_type
+    ):
+        raise ImagePersistenceError("local image metadata does not match file bytes")
+    local_file = item.get("local_file")
+    if not isinstance(local_file, dict):
+        local_file = {
+            "source": "verified_legacy_local_relation",
+            "source_url": str(item.get("url") or ""),
+            "size_bytes": verified.size_bytes,
+        }
+    return {
+        "local_path": local_path,
+        "width": verified.width,
+        "height": verified.height,
+        "mime_type": verified.mime_type,
+        "sha256": verified.sha256,
+        "local_file": local_file,
+    }
+
+
+def _existing_image_records(conn: sqlite3.Connection, post_id: int) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for row in conn.execute(
+        """
+        SELECT id, image_index, image_url, image_role, local_path,
+               width, height, mime_type, sha256, raw_image_json
+        FROM web_post_images
+        WHERE web_post_id=?
+        ORDER BY image_role, image_index
+        """,
+        (post_id,),
+    ):
+        raw = _json_object(row[9])
+        records.append(
+            {
+                "id": int(row[0]),
+                "source_index": int(row[1]),
+                "url": str(row[2]),
+                "role": str(row[3]),
+                "local_path": row[4],
+                "width": row[5],
+                "height": row[6],
+                "mime_type": row[7],
+                "sha256": row[8],
+                "source_asset_key": str(raw.get("source_asset_key") or ""),
+                "local_file": raw.get("local_file"),
+            }
+        )
+    return records
+
+
+def _match_existing_image(
+    platform_key: str,
+    item: dict[str, Any],
+    existing: list[dict[str, Any]],
+    used_ids: set[int],
+) -> dict[str, Any] | None:
+    available = [row for row in existing if row["id"] not in used_ids and row["role"] == item["role"]]
+    new_asset_key = str(item.get("source_asset_key") or "")
+    if new_asset_key:
+        exact = [row for row in available if row["source_asset_key"] == new_asset_key]
+        if len(exact) == 1:
+            return exact[0]
+        available = [
+            row
+            for row in available
+            if not row["source_asset_key"] or row["source_asset_key"] == new_asset_key
+        ]
+
+    url_identity = _url_asset_identity(platform_key, str(item["url"]))
+    same_url = [
+        row
+        for row in available
+        if _url_asset_identity(platform_key, row["url"]) == url_identity
+    ]
+    if len(same_url) == 1:
+        return same_url[0]
+
+    same_index = [
+        row
+        for row in available
+        if not row["source_asset_key"]
+        and row["source_index"] == item["source_index"]
+        and _url_asset_identity(platform_key, row["url"]) == url_identity
+    ]
+    return same_index[0] if len(same_index) == 1 else None
+
+
+def _prepare_image_rows(
+    platform_key: str,
+    image_items: list[dict[str, Any]],
+    existing_images: list[dict[str, Any]],
+    *,
+    project_root: Path,
+    media_root: Path,
+    require_local_images: bool,
+) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    used_ids: set[int] = set()
+    for item in image_items:
+        local_metadata: dict[str, Any] = {}
+        if any(
+            item.get(field) not in (None, "")
+            for field in ("local_path", "width", "height", "mime_type", "sha256", "local_file")
+        ):
+            local_metadata = _verified_local_metadata(
+                item,
+                project_root=project_root,
+                allowed_root=media_root,
+                require_suffix_match=True,
+            )
+        else:
+            matched = _match_existing_image(platform_key, item, existing_images, used_ids)
+            if matched is not None:
+                used_ids.add(int(matched["id"]))
+                try:
+                    local_metadata = _verified_local_metadata(
+                        matched,
+                        project_root=project_root,
+                        allowed_root=project_root,
+                        require_suffix_match=False,
+                    )
+                except ImagePersistenceError:
+                    local_metadata = {}
+        if item["role"] == "content" and require_local_images and not local_metadata:
+            raise ImagePersistenceError(
+                f"content image lacks verified local file: source_index={item['source_index']}"
+            )
+        raw_image_payload = {
+            key: value
+            for key, value in item.items()
+            if key not in {"local_path", "width", "height", "mime_type", "sha256", "local_file"}
+        }
+        if local_metadata:
+            raw_image_payload["local_file"] = local_metadata["local_file"]
+        prepared.append(
+            {
+                **item,
+                **local_metadata,
+                "raw_image_json": json_dump(raw_image_payload),
+            }
+        )
+    return prepared
+
+
+def upsert_web_post(
+    conn: sqlite3.Connection,
+    row: dict[str, Any],
+    *,
+    project_root: str | Path = PROJECT_ROOT,
+    media_root: str | Path = LOCAL_MEDIA_ROOT,
+    require_local_images: bool = False,
+) -> tuple[int, bool]:
+    post_row = dict(row)
+    image_items = _normalize_persistence_items(list(post_row.pop("_image_items", [])))
+    content_count = sum(item["role"] == "content" for item in image_items)
+    if post_row.get("post_images_count") is not None and int(post_row["post_images_count"]) != content_count:
+        raise ImagePersistenceError("post_images_count does not match projected content images")
+    existing_id = find_existing_post(conn, post_row)
+    platform_key = str(post_row.get("platform_key") or "")
+    existing_images = _existing_image_records(conn, existing_id) if existing_id else []
+    resolved_project_root = Path(project_root).expanduser().resolve(strict=True)
+    resolved_media_root = Path(media_root).expanduser().resolve()
+    if resolved_media_root != resolved_project_root and resolved_project_root not in resolved_media_root.parents:
+        raise ImagePersistenceError("media root escapes project root")
+    prepared_images = _prepare_image_rows(
+        platform_key,
+        image_items,
+        existing_images,
+        project_root=resolved_project_root,
+        media_root=resolved_media_root,
+        require_local_images=require_local_images,
+    )
+
+    conn.execute("SAVEPOINT trippostcollect_web_post_upsert")
+    try:
+        columns = list(post_row)
+        if existing_id:
+            updates = ", ".join(f"{column}=:{column}" for column in columns)
+            conn.execute(
+                f"UPDATE web_posts SET {updates}, updated_at=datetime('now') WHERE id=:id",
+                {**post_row, "id": existing_id},
+            )
+            post_id = existing_id
+        else:
+            placeholders = ", ".join(f":{column}" for column in columns)
+            conn.execute(
+                f"INSERT INTO web_posts ({', '.join(columns)}) VALUES ({placeholders})",
+                post_row,
+            )
+            post_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+        conn.execute("DELETE FROM web_post_images WHERE web_post_id=?", (post_id,))
+        for item in prepared_images:
+            conn.execute(
+                """
+                INSERT INTO web_post_images (
+                    web_post_id, image_index, image_url, image_role, local_path,
+                    width, height, mime_type, sha256, raw_image_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    post_id,
+                    item["source_index"],
+                    item["url"],
+                    item["role"],
+                    item.get("local_path"),
+                    item.get("width"),
+                    item.get("height"),
+                    item.get("mime_type"),
+                    item.get("sha256"),
+                    item["raw_image_json"],
+                ),
+            )
+    except BaseException:
+        conn.execute("ROLLBACK TO SAVEPOINT trippostcollect_web_post_upsert")
+        conn.execute("RELEASE SAVEPOINT trippostcollect_web_post_upsert")
+        raise
+    conn.execute("RELEASE SAVEPOINT trippostcollect_web_post_upsert")
     return post_id, existing_id is None
 
 
