@@ -22,3 +22,20 @@
   和存储前过滤；完整页保存下一页，页面中途停止则保存当前页。顶部刷新不推进深层页码。
 - 未达标摘要由 runner 自动累计；正常 workflow 不需要人工传 `--start-page` 或
   `--resume-summary`。明确空页后 checkpoint 标记耗尽，后续只刷新顶部。
+
+## 正文图片本地化
+
+微博只把原始 `mblog.pics` 归一化后的 `image_list` 当作权威正文图，来源字段固定为
+`source_key=image_list`，每项角色固定为 `content`。有 `pid` 时以 `weibo:pid:<pid>` 作为稳定资产
+键，没有 pid 才回退到规范 URL 哈希。`profile_image_url`、avatar、用户对象中的图、封面和视频缩略
+图不会进入候选或下载请求；“自动忽略头像”发生在显式字段投影阶段，不靠图片尺寸判断。
+
+图片字节使用当前移动搜索会话的 Cookie/请求头逐帖下载；整帖全部图片先通过真实格式和解码检查，
+再原子写入本轮 `<platform_artifact>/data/weibo/images/<weibo_id>/<index>.<real_ext>`，并更新
+`<platform_artifact>/data/weibo/image_manifest.jsonl`。单张失败使用 `image_download_retryable` 或具体格式错误码，
+当前批次停止且不推进安全前沿，不允许只保留成功子集。
+
+根执行器重新按 `image_list` 顺序核对 manifest 身份、SHA/MIME/尺寸和 staging 文件。正式 runner
+固定开启正文图下载并晋升到 `data/media/weibo/...`，随后在帖子与图片同一 SQLite 事务保存 URL、
+`local_path` 和字节元数据。`--no-import` 小样只保留 staging/manifest；任一图片失败时微博任务不能
+URL-only 完成。

@@ -29,3 +29,21 @@
   不写正式 checkpoint、不入库，也不能作为正式轮次完成证据。不要直接运行第三方内部命令。
 - 首页、cookie reload 和搜索页导航的 `domcontentloaded` 超时为软失败；继续用已验证 cookie
   和 API client 检查。最终 API/字段失败仍按正式状态报告，不能仅因导航超时宣布失败或成功。
+
+## 正文图片本地化
+
+知乎只从 answer/article 正文 HTML 归一化后的 `image_list` 生成候选。搜索正文已有图片时直接使用；
+缺图时必须先完成详情补全，只有 `content_detail_status=detail_observed` 的最终正文图集合才进入下载。
+`zvideo`、`/equation` 公式图、`avatar_url`、作者主页资源、封面和搜索预览都在候选阶段排除，不触发
+图片请求。
+
+图片字节请求复用当前知乎登录会话。每帖全部图片经真实格式、解码和大小检查后原子写入
+`<platform_artifact>/data/zhihu/images/<content_id>/<index>.<real_ext>`，manifest 位于
+`<platform_artifact>/data/zhihu/image_manifest.jsonl`，来源字段为 `image_list`、角色为 `content`；zhimg 变换
+后缀归一后形成稳定资产键。失败行使用 `image_download_retryable` 或具体格式错误码，当前批次不得
+把详情失败、部分成功或公式图排除解释成图片完成。
+
+根执行器按最终 `image_list` 顺序复验 manifest 和文件，正式运行晋升到 `data/media/zhihu/...`
+并在同一 SQLite 事务写本地证据。`request_failed`、`parse_failed` 和
+`content_detail_unobserved` 均不能进入成功态；`--no-import` 只保留 staging/manifest，不写长期
+目录或数据库。

@@ -88,6 +88,24 @@ Opus/旧 article 正文与图片解析、短文、重试和失败安全前沿；
 文章确实已删除、私密或没有满足字段 profile 的正文图片时，该候选可以作为有决定性证据的无效项；
 普通请求失败不能伪装成这种永久无效状态。
 
+## 正文图片本地化
+
+B站使用项目自有 article 分支下载，不调用 MediaCrawler 视频媒体实现。只有
+`content_images_detail_status=detail_observed` 的详情 `image_urls` 会生成候选；候选按正文顺序去重，
+`source_key=image_urls`、`image_role=content`。BFS 路径移除变换后缀后生成稳定
+`source_asset_key`，因此 HTTP/HTTPS、协议相对地址或 CDN 变换 URL 不会制造重复资产。
+
+每张图复用行为阶段导出的当前 B站 Cookie 和 article Referer，有限重试后写到本轮
+`<platform_data_root>/images/<post_id>/<index>.<real_ext>`；同目录
+`image_manifest.jsonl` 原子记录 URL、稳定键、尝试次数、HTTP 状态、SHA、真实 MIME、尺寸和相对
+staging 路径。搜索 `image_urls`、Opus 封面、作者头像和视频资源不会进入下载函数。失败行只写
+manifest 错误，不留下成功元数据；`image_download_retryable` 停止当前 child 并保留当前页。
+
+根执行器按同一详情投影逐项核对 manifest 和字节。正式运行才把文件晋升到
+`data/media/bilibili/...` 并在同一帖子事务写入 `web_post_images.local_path` 等字段；
+`--no-import --download-images --media-root temp/<目录>` 只验证 staging，不改长期目录或数据库。
+任一图片不完整时 `image_materialization.complete=false`，不能靠正文和 URL 通过正式门禁。
+
 ## 请求节奏、失败与安全前沿
 
 article 搜索前必须在 MediaCrawler 持久 profile 执行共享行为阶段，并让搜索、详情和关系统计请求

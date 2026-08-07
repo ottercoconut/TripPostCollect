@@ -32,6 +32,13 @@
 `inserted_rows` 达标；显式来源耗尽模式允许 `inserted_rows=0`，但仍须核对持久化阶段完成和实际
 计数。不得用 `import_new_target_met`、退出码或状态文件替代对应校验。
 
+五个平台的正式结构化 child 命令必须由 runner 固定注入 `--download-images` 和
+`--media-root <项目内 data/media 的绝对路径>`。`--download-images` 表示“下载并验证权威正文图”，
+不启用视频；旧兼容参数 `--get-media` 对操作人不可用且会直接失败。直接调用执行器做诊断时可以
+显式使用 `--download-images --media-root temp/<任务目录>`；`--no-import` 只保留 staging、manifest
+和根项目字节复验，不晋升长期文件、不写 SQLite、不提交发现 checkpoint。正式入库未显式启用
+`--download-images` 必须在访问平台前拒绝，任何平台都不能完成 URL-only 正式任务。
+
 ## 行为与策略门禁
 
 B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
@@ -132,6 +139,21 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 - 有至少一个正文图片 URL；
 - 满足任务配置指定的作者粉丝量策略和平台字段 profile。
 
+“正文图片”只能由以下平台权威字段显式投影，顺序去重后每项角色固定为 `content`：B站详情
+`image_urls`、微博 `mblog.pics` 归一后的 `image_list`、小红书笔记详情 `image_list`、抖音图文
+`note_download_url`、知乎正文/详情 `image_list`。通用递归 URL 搜索不属于正式能力。作者头像、作者
+主页资源、搜索预览、封面、视频、音乐和知乎公式图片均不得生成正文候选、下载任务、manifest
+行、长期文件或 `image_role=content` 的图片关系；B站搜索预览图尤其不能替代详情正文图。作者头像
+可以作为独立 `image_role=author_avatar` 的 URL-only 参考关系保留，但不下载、不计入
+`post_images_count`，也不参与本地图片完整性等式。
+
+每条进入正式有效集合的记录还必须满足整帖图片原子条件：所有权威正文图都已使用当前平台会话
+下载到 staging；`image_manifest.jsonl` 的平台、帖子、角色、顺序、来源字段、稳定资产键和 URL 与
+根项目投影完全一致；根项目重新验证文件边界、SHA-256、真实 MIME、后缀、尺寸和解码；正式模式
+全部晋升到 `data/media/<platform>/<safe_post_id>/<index>-<asset_hash>.<ext>`，并在同一 SQLite
+事务写入帖子和带 `local_path/width/height/mime_type/sha256` 的图片关系。任一图片缺失、失败或
+不一致时整帖不得入库；先写 URL、以后再补本地路径不满足本契约。
+
 B站 article 还必须满足详情完整性门禁：搜索结果中的 `desc` 只允许作为发现摘要保存在原始证据，
 不得作为 `content_text`；正式记录必须保存 `content_detail_status=detail_observed` 和受信任的 article
 详情来源。正文图片必须经过详情响应或详情页正文结构检查，不能仅凭搜索 `image_urls` 宣布完整。
@@ -172,6 +194,12 @@ Agent 临场判断。
 4. `persistence_verified`
 5. `task_finalized`
 
+本地图片证据跨越其中两阶段：`artifacts_verified` 必须重新读取 manifest 并验证聚合哈希、候选帖
+数、完整帖数和图片计数等式；真实入库的 `persistence_verified` 必须逐帖读取 SQLite，验证连续
+`image_index`、非空项目相对 `local_path`、文件仍在 `data/media` 内、文件 SHA/MIME/尺寸与数据库
+一致，并通过 `PRAGMA quick_check` 与 `foreign_key_check`。`--no-import` 诊断可以在
+`expect_promotion=false` 下完成产物验证，但持久化阶段只能明确跳过，不能据此完成正式任务。
+
 dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后四阶段保持 `frozen`，
 运行摘要任务状态为 `planned`。通用 runner 的每任务记录还写入
 `import_result.skipped=true, reason=dry_run`；小红书 dry-run 没有 child summary 或
@@ -205,6 +233,9 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
   新 ID 数、详情成功数和有效新增数。
 - `login_required` / `captcha_detected`：登录或验证阻断。
 - `runtime_failed`：浏览器或本地运行环境失败。
+- `image_materialization_incomplete`：正文图 manifest、staging 字节或晋升校验不完整。可恢复下载
+  失败保留当前安全前沿，不把该候选写入已处理记忆；身份、格式、哈希和路径边界错误必须先修复
+  代码或产物，不能降级为 URL-only。
 
 默认 `target-new-posts` 模式只有 `target_new_met` 可以汇报完成；显式 `source-exhausted` 模式只有
 `source_exhausted` 且 `source_exhausted_met=true` 可以汇报完成。其他停止状态均不能完成。固定 URL
@@ -277,3 +308,31 @@ search ID 游标链结束：若顶部刷新同时观察到至少一个不在数�
 不自动混入旧 checkpoint。小红书不开放这些人工恢复参数，全部由独立 runner 从账号级 checkpoint
 生成；换号产生独立记忆，不得解释为同一正式轮次续跑。旧 `search_id` 恢复失败时必须保留原
 checkpoint 并按 `runtime_failed` 停止，不得静默生成新 ID 请求猜测的深页。
+
+## 正文图片摘要与错误契约
+
+执行器 `summary.json.image_materialization` 是五平台统一的公开图片结果，必须包含：
+
+- `required`、`promotion_required`、`candidate_posts`、`complete_posts`；
+- `expected_images`、`downloaded_images`、`validated_images`、`reused_images`、`promoted_images`；
+- `retryable_failures`、`terminal_failures`、`complete`；
+- `manifest_paths`、`manifest_sha256`、逐文件 `manifest_evidence` 和 `failures`。
+
+产物完整的等式为
+`candidate_posts == complete_posts` 且
+`expected_images == downloaded_images == validated_images`，并且失败数与 `failures` 均为 0。正式
+入库还要求 `promoted_images + reused_images == expected_images`；诊断模式要求
+`promotion_required=false`，两项长期文件计数保持 0。执行器同时写
+`formal_validation.image_materialization_complete=true`；多平台收集的正式校验必须满足
+`local_images_complete=true`、`local_image_failure_count=0`。以上谓词还要与原数量/来源耗尽、
+字段、行为、策略、分页和真实入库谓词同时成立，不能相互替代。
+
+manifest schema v1 的稳定校验错误包括：`missing_image_manifest`、
+`image_manifest_identity_mismatch`、`image_manifest_count_mismatch`、
+`image_manifest_metadata_mismatch`、`image_path_escape`、`image_file_missing`、
+`image_non_raster_response`、`image_decode_failed`、`image_too_large` 和
+`image_hash_mismatch`、`image_existing_conflict` 和 `image_promotion_conflict`。缺少统一摘要使用
+`image_materialization_missing`，不完整摘要使用 `image_materialization_incomplete`；平台批次停止
+细节使用 `image_download_failed`，下载失败行使用稳定的 `image_download_retryable` 或平台返回的
+终态错误码。晋升/数据库文件一致性错误由 `failures[].code/message`、runner 阶段失败原因和报告共同保留。
+操作人不得编辑 manifest、摘要或冻结状态把错误补签为成功。

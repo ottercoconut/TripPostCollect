@@ -99,6 +99,13 @@ CLI 不传 `--completion-mode` 时仍默认按配置的 `target_new_posts`、`ca
 每个任务会在 `data/runtime/crawl_execution_states/<run_id>/` 生成冻结状态文件；只有状态
 文件和正式摘要同时满足执行契约，才能汇报完成。
 
+五个平台正式 child 都由 runner 固定开启 `--download-images`，只下载平台详情/正文结构中显式
+投影的正文图，并保持视频媒体关闭。平台会话先写本轮 staging 和 `image_manifest.jsonl`，根项目再
+验证身份、路径、SHA、真实 MIME、尺寸和解码，正式模式才原子晋升到 `data/media`，并把 URL、
+`local_path` 和字节证据与帖子放在同一 SQLite 事务中。头像、作者主页、封面、搜索预览、视频、
+音乐和知乎公式图在下载前自动排除；作者头像仅可保留 `author_avatar` URL 参考，不下载也不参与
+正文图计数。任何正文图失败都会阻止正式完成，不能降级为只存 URL。
+
 正常默认模式下，小红书的实际候选量从 0 开始按页增长，只有通过详情前去重的未知候选才占预算；达到
 `target_new_posts` 后立即停止，不会为了配置的 `candidate_hard_limit` 继续抓满。后者只是单次
 child 的安全上限。永久提高目标时应在 `config/xhs_targets.json` 同步调整候选上限、停滞批次、
@@ -167,10 +174,15 @@ dry-run 计划中的 `discovery` 必须与所选账号的
 ## 数据边界
 
 - `web_posts` 不保存 `city_name`；当前内容属于青岛是业务前提，不进入 schema、筛选或关键词校验。
-- 只采集图文、作者公开可见信息、图片 URL/样本和页面证据；明确视频记录跳过。
+- 只采集图文、作者公开可见信息、权威正文图片及页面证据；明确视频记录跳过。正式新抓图片长期
+  保存在 `data/media`，`web_post_images` 同时保存来源 URL、本地相对路径、尺寸、MIME 和 SHA。
+- 头像、作者主页资源、封面、搜索预览、视频、音乐及知乎公式图不属于正文图片，不下载到本地；
+  作者头像可作为独立 URL 参考入库，但不算正文图。
 - `web_posts` 是用户使用的统一内容主表；`ctf_captures` 是证据和调试底座。
 - `published_at` 必须来自平台原始发布时间，保存为 Asia/Shanghai ISO。
 - 结构化长期数据以 SQLite 为准，`outputs/` 是运行产物和摘要。
+- 主程序本地图片能力与历史补全是两个阶段：只有验收报告写明 `MAIN_PROGRAM_READY=true` 后，才按
+  工程方案 H 阶段补齐当前数据库已有记录；正常新抓不会隐式改写历史数据。
 
 ## 诊断与开发入口
 

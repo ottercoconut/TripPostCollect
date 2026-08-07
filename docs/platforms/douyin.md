@@ -76,3 +76,21 @@
 - `data=[]` 但 `has_more=1` 是可继续的空批次，必须携带已建立的稳定 search ID 请求下一页并计入连续
   停滞；深层页的 `has_more=false` 可以证明当前游标链耗尽。缺失继续游标属于响应异常；新鲜第
   1 页的 `has_more=false` 还必须满足上面的可见无结果门禁，不能只凭接口空数组停止。
+
+## 正文图片本地化与严格 images-only
+
+抖音只有已确认的图文作品会进入图片入口，权威字段固定为 `note_download_url`。store 同时保留
+原始 `images[].uri`，优先生成 `douyin:uri:<uri>` 稳定资产键；签名 URL 的查询参数刷新不会改变
+同一图片身份。`cover_url`、动态/静态封面、`video_download_url`、音乐 URL、作者头像和搜索卡片
+预览都不属于正文候选。
+
+图片入口是严格 images-only：图片列表为空直接返回，视频候选直接跳过；不会调用
+`get_aweme_video()`、视频 store 或音乐下载。图片使用当前 `dy_client` 会话和新鲜签名 URL 串行
+下载，整帖检查后原子写入 `<platform_artifact>/data/douyin/images/<aweme_id>/<index>.<real_ext>` 和
+`<platform_artifact>/data/douyin/image_manifest.jsonl`。下载失败会写失败 manifest 并以
+`image_download_failed` 停止当前批次；可恢复项使用 `image_download_retryable`，不得推进
+page/offset/search ID 或写入已处理候选。
+
+根执行器按 `note_download_url` 重建候选并复验 manifest、SHA/MIME/尺寸。正式运行晋升到
+`data/media/douyin/...` 后才在同一 SQLite 事务写帖子与 `web_post_images`；诊断模式不晋升。
+视频、音乐或封面文件计数必须始终为 0，正文图任一项不完整时任务不能以 URL-only 完成。

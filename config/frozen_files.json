@@ -7,6 +7,27 @@
       "reason": "用户确认冻结的 TripPostCollect 管理客户端工作台 v1 静态模板",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
+    },
+    {
+      "path": "docs/formal-crawl-contract.md",
+      "sha256": "f39e42876dbe63c7fec046868fc04d6c907b219b9981246bfd0ae434167d17a5",
+      "reason": "用户授权更新并重新冻结的五平台正式抓取与正文图片本地化机器契约",
+      "change_policy": "explicit-user-unfreeze",
+      "require_immutable_flag": true
+    },
+    {
+      "path": "docs/crawl-architecture.md",
+      "sha256": "50b7251d10f3e9c9a363324b73a6c973d5a35d4174532c94c7135608f44ce6ea",
+      "reason": "用户授权更新并重新冻结的五平台抓取与正文图片本地化架构基线",
+      "change_policy": "explicit-user-unfreeze",
+      "require_immutable_flag": true
+    },
+    {
+      "path": "docs/data-persistence.md",
+      "sha256": "87426cc9b1f633f45cd970e22f46a0af74a7b1fc4d0730cf25fa6922b58eb6e0",
+      "reason": "用户授权更新并重新冻结的正文图片本地路径、事务和校验规范",
+      "change_policy": "explicit-user-unfreeze",
+      "require_immutable_flag": true
     }
   ]
 }

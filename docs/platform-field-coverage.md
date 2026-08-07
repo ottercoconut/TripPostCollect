@@ -3,13 +3,13 @@
 本文只描述当前正式结构化能力，不定义数量或成功标准。必需字段以任务的
 `required_fields_profile` 为准。
 
-| 平台 | 图文 | 图片 | 发布时间 | 作者 | 粉丝量 | 互动 | 当前说明 |
-|---|---|---|---|---|---|---|---|
-| B站 article | 详情正文 | 详情正文图 | 结构化 | ID/昵称 | 作者关系统计 | 赞/评/浏览 | 正常正式入口使用已验收的详情实现；当前默认库 3,006 条历史记录全部具有详情观察证据 |
-| 微博 | 结构化 | `mblog.pics` | 结构化 | ID/昵称 | `mblog.user` | 赞/评/转 | 原始粉丝字段必须明确存在 |
-| 小红书 | 结构化 | 笔记详情全部正文图 | 结构化 | ID/昵称/主页 | 登录会话作者主页 | 赞/藏/评/分享 | 无 token 请求，空结果用同会话浏览器回退 |
-| 抖音 | 仅图文 | note images | 结构化 | ID/昵称/主页 | 作者主页 | 赞/藏/评/分享 | 可疑默认 0 不算有效 |
-| 知乎 | answer/article | 搜索正文图，缺图时详情补全 | 结构化 | ID/昵称/主页 | search author/member | 赞/评 | 详情已观察仍无图才算真实缺图；zvideo 和公式图片跳过 |
+| 平台 | 图文 | 权威正文图字段 | 本地存储与排除 | 发布时间 | 作者 | 粉丝量 | 互动 | 当前说明 |
+|---|---|---|---|---|---|---|---|---|
+| B站 article | 详情正文 | 详情观察后的 `image_urls` | 当前会话 staging → manifest → `data/media`；搜索预览/封面/头像排除 | 结构化 | ID/昵称 | 作者关系统计 | 赞/评/浏览 | 正常正式入口使用已验收的详情实现；当前默认库 3,006 条历史记录全部具有详情观察证据 |
+| 微博 | 结构化 | `mblog.pics` → `image_list` | 当前会话 staging → manifest → `data/media`；头像/封面排除 | 结构化 | ID/昵称 | `mblog.user` | 赞/评/转 | 原始粉丝字段必须明确存在 |
+| 小红书 | 结构化 | 笔记详情 `image_list` | 每个图片对象选择一个正文 URL，staging → manifest → `data/media`；头像/视频排除 | 结构化 | ID/昵称/主页 | 登录会话作者主页 | 赞/藏/评/分享 | 无 token 请求，空结果用同会话浏览器回退 |
+| 抖音 | 仅图文 | `note_download_url` | 保留 `images[].uri` 稳定键，staging → manifest → `data/media`；封面/视频/音乐/头像排除 | 结构化 | ID/昵称/主页 | 作者主页 | 赞/藏/评/分享 | 可疑默认 0 不算有效 |
+| 知乎 | answer/article | 正文/详情 `image_list` | 当前会话 staging → manifest → `data/media`；公式/头像/作者主页/zvideo 排除 | 结构化 | ID/昵称/主页 | search author/member | 赞/评 | 详情已观察仍无图才算真实缺图 |
 
 五个结构化平台都配置 `followers_policy=required`：数值、来源和
 `followers_observed=true` 缺一不可。真实 0 粉丝有效，缺失后由模型默认生成的 0 无效。
@@ -27,3 +27,9 @@ B站搜索结果的 `desc` 和 `image_urls` 只是摘要与预览，必须取得
 search ID、深层耗尽状态、已完成处理候选 ID 和累计摘要，并在详情请求前跳过数据库、持久候选、
 累计摘要及本轮已知 ID。
 任何平台的发现记忆都不放宽本表字段要求。
+
+五个平台的正式新记录都要求 `image_materialization.complete=true`。每个权威正文图必须在
+`web_post_images` 保存 `image_role=content`、连续 `image_index`、来源 URL、项目相对
+`local_path`、`width/height/mime_type/sha256`，且本地文件通过根项目复验；只有 URL 不算覆盖。
+筛除头像等无用资源依赖上表的显式字段投影，不使用递归 URL 扫描或图片尺寸启发式，因此被排除
+资源不会触发下载。当前历史数据的本地路径覆盖率不由本表承诺，待主程序总验收后单独补全。

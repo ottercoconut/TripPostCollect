@@ -14,8 +14,12 @@ config/crawl_targets.json
           -> scripts/crawl_policy.py
           -> scripts/mediacrawler_behavior.py
           -> tools/MediaCrawler
+              -> platform session image download
+              -> <artifact>/<platform>/image_manifest.jsonl + staging files
           -> formal_validation
-          -> web_posts / web_post_images
+          -> explicit content-image projection + manifest/byte verification
+          -> data/media/<platform>/<post>/<index>-<asset_hash>.<ext>
+          -> web_posts / web_post_images (same SQLite transaction)
       -> scripts/ctf_resource_crawl.py
           -> ctf_captures / ctf_capture_images
           -> scripts/import_ctf_captures.py
@@ -32,8 +36,10 @@ config/xhs_pool.json + config/xhs_targets.json
           -> known-ID pre-detail filtering
           -> signed-in no-token creator request
           -> signed-in BrowserContext creator fallback
+          -> signed-in body-image download + staging manifest
           -> formal_validation
-          -> web_posts / web_post_images
+          -> root verification + data/media promotion
+          -> web_posts / web_post_images (same SQLite transaction)
       -> encrypt refreshed storage state and remove runtime plaintext
 ```
 
@@ -49,6 +55,35 @@ article API；微博、抖音和知乎在各自 MediaCrawler 浏览器内执行 
 
 行为阶段只包围现有抓取逻辑，不修改分页、候选累计、粉丝补全、视频过滤或入库映射。
 行为和策略证据任何一项缺失时，JSONL 可以保留用于诊断，但不得进入 SQLite。
+
+## 正文图片本地化数据流
+
+五个平台共用一条由平台会话到根项目的单向链路：
+
+```text
+平台详情/正文结构
+  -> 平台显式 ImageCandidate（只允许 role=content）
+  -> 使用当前登录/签名会话下载到本轮 staging
+  -> 原子写 image_manifest.jsonl（URL + 稳定资产键 + SHA/MIME/尺寸）
+  -> 根项目重建同一候选集合并逐项核对 manifest 身份
+  -> 根项目重新读取并解码文件，验证路径边界、SHA、MIME、后缀、尺寸
+  -> 正式模式以内容寻址文件名原子晋升 data/media；已存在同 SHA 文件幂等复用
+  -> MaterializedImage 注入统一入库映射
+  -> web_posts 与 web_post_images 在同一 SQLite savepoint 中提交
+```
+
+显式投影边界分别是 B站详情 `image_urls`、微博 `image_list`、XHS `image_list`、抖音
+`note_download_url` 和知乎 `image_list`。头像、作者主页、搜索预览、封面、视频、音乐和知乎公式
+图片没有从平台对象进入正文候选的边；这项过滤发生在下载前，不依赖下载后文件名或尺寸猜测。
+作者头像可以在统一入库层保留为 `author_avatar` URL 参考，但它没有通向下载、manifest 或
+`data/media` 的边，也不参与正文图计数。
+各平台 store 只负责当前会话下载、staging 和 manifest，不拥有长期路径或 SQLite schema；根项目
+统一拥有安全复验、晋升与事务持久化，因此没有五套互不一致的本地路径实现。
+
+正式 runner 固定向 child 传 `--download-images --media-root <data/media>`，冻结计划写
+`local_image_storage_required=true`。诊断执行器可把媒体根限制到项目 `temp/`，但
+`--no-import` 不执行晋升。`--get-media` 被拒绝，MediaCrawler 的视频 store、音乐和视频下载路径
+不会因正文图片功能变得可达。
 
 `crawl_policy.py` 的 `session_count` 表示连续活跃会话，不是永久累计值：跨 UTC 日或距最后一次
 请求完成已达到站点 `cooldown_minutes` 时开始新会话并清零。`max_requests_per_session` 产生的
@@ -106,8 +141,15 @@ runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并�
 | 抖音 | MediaCrawler 搜索 + 图文作者主页 | [抖音](platforms/douyin.md) |
 | 知乎 | MediaCrawler 搜索 | [知乎](platforms/zhihu.md) |
 
-结构化执行器先生成 JSONL，再按正式 profile 过滤视频、去重、校验图片/时间/作者/粉丝
-和互动字段。只有有效唯一集合达到目标才进入入库；导入报告区分处理、新增和更新。
+结构化执行器先生成 JSONL 与图片 staging/manifest，再按正式 profile 过滤视频、去重、校验
+正文图/时间/作者/粉丝和互动字段。根项目对有效集合逐帖核对 manifest 和文件；只有本轮完成模式、
+行为/策略、字段和本地图片门禁同时成立才晋升并入库。导入报告区分处理、新增和更新；更新已有帖
+时会优先匹配并保留仍有效的既有本地图片证据，新的整帖图片集合仍在同一事务重建。
+
+`artifacts_verified` 对 `image_materialization` 的 manifest 哈希和计数等式负责；
+`persistence_verified` 对 SQLite 行、`data/media` 文件、SHA/MIME/尺寸、连续图片序号、数据库完整性
+负责。任一步失败，后续阶段保持 `frozen`，checkpoint 只停在最后安全前沿，不能用 URL-only 记录
+推进。
 
 ## 页面证据平台
 

@@ -22,7 +22,9 @@
 - 不直接运行 MediaCrawler 完成正式任务，不复用旧 `browser_data` 或明文 storage state。
 - `xhs_runner.py --no-import` 只用于诊断；即使顶层状态显示 `completed`，也不满足正式完成判据。
 - 必须人工传入 `--account-id`；同一正式轮次不自动选号、换号、解验证、重试或放宽字段。
-- 视频跳过；图文必须保存全部正文图片关系。数据库已有记录只能更新，不计新增目标。
+- 本地正文图片存储固定为必需能力，没有 target 级开关；正式 child 始终带
+  `--download-images --media-root <data/media>`。视频跳过；图文必须保存全部正文图片关系和本地
+  文件证据。数据库已有记录只能更新，不计新增目标。
 - 缺少粉丝数值、观测标记或可信来源的候选无效，不能用默认 `0`、昵称字段或旧缓存降级。
 
 ## 唯一执行流
@@ -39,11 +41,30 @@
   -> 已知 ID 详情前去重、自适应搜索、详情、作者粉丝补全和分页
   -> API 登录过期时保留全部标签页，人工恢复后重试同一来源页
   -> 正式字段校验
-  -> child 摘要形成后提交账号级 checkpoint 和未完成累计摘要
-  -> 默认累计达到有效新增目标，或本轮显式来源耗尽后，一次性写入 SQLite 并清空累计摘要
+  -> 当前会话下载全部正文图，原子生成 staging 和 image_manifest.jsonl
+  -> 默认累计达到有效新增目标，或本轮显式来源耗尽后，根项目复验并晋升 data/media
+  -> 帖子/图片在同一事务写 SQLite，形成 child 摘要
+  -> runner 根据 child 摘要提交账号级 checkpoint；成功入库后清空累计摘要
   -> 加密最新 storage state、删除临时明文、释放租约
   -> 检查顶层摘要、child summary、冻结状态和 SQLite
 ```
+
+## 正文图片本地化
+
+小红书只把笔记详情 `image_list` 作为权威正文图。每个图片对象按 `url_default`、`url`、`url_pre`
+优先级选择一个可用 URL，并以稳定的 notes 路径生成 `source_asset_key`；同一图片的多个 CDN/尺寸
+变体不会重复下载。作者头像、作者主页资源、封面、搜索卡片预览和视频字段不会进入候选。
+
+图片请求复用当前隔离账号的 BrowserContext/API Cookie，不解密第二份会话，也不调用
+`get_notice_video()` 或视频 store。整帖图片通过真实格式、解码和大小检查后，原子写入
+`<child_artifact>/xhs/data/xhs/images/<note_id>/<index>.<real_ext>` 和
+`<child_artifact>/xhs/data/xhs/image_manifest.jsonl`；来源字段固定为 `image_list`、角色固定为 `content`。
+单图失败记录 `image_download_retryable` 或具体格式错误码并停止当前安全批次，不保存成功子集为
+完整帖。
+
+根执行器按相同优先级重建候选，复验 manifest、SHA/MIME/尺寸和路径边界。正式运行晋升到
+`data/media/xhs/...` 后才写 SQLite；`--no-import` 诊断只保留 staging/manifest。本规则是固定合同，
+`config/xhs_targets.json` 不接受旧 `download_images` 字段，也没有兼容分支。
 
 ## 1. 执行前检查
 
@@ -243,6 +264,9 @@ python scripts/xhs_runner.py \
 - 顶层摘要 `discovery.skipped=false` 且没有 checkpoint 写入错误；
 - `behavior_validation.platforms.xhs.continuity_ok=true`，且至少覆盖 `search_results`；
 - `formal_validation.behavior_evidence_ok=true`、`policy_evidence_ok=true`；
+- 顶层计划与摘要 `local_image_storage_required=true`，child
+  `image_materialization.complete=true`；`artifacts_verified` 已核对 manifest，
+  `persistence_verified` 已核对 SQLite 与 `data/media` 文件；
 - `valid_existing_count` 和 `updated_rows` 只单独报告，没有计入新增目标；
 - 每条入库图文都有平台原始发布时间、作者 ID/昵称、完整图片关系，以及
   `followers_count`、`followers_observed=true`、`author_followers_source=creator_profile`；
@@ -273,6 +297,8 @@ python scripts/xhs_runner.py \
 | 搜索连续性登录/图片验证 | 暂停当前搜索批次 | 保持当前页置前，等待操作人处理；通过后继续，600 秒超时则失败且不入库 |
 | 搜索 API 返回登录已过期 | 暂停原请求 | 解开重试器包装后的内层错误，刷新当前可见页但不关闭任何标签页，置前最新的小红书页并等待人工恢复；可见登录 UI 与 self-info API 均恢复后刷新 Cookie/storage state 并重试同一来源页，600 秒超时才写 `login_required`，checkpoint 不推进 |
 | 搜索 API 461/471 验证 | 暂停原 API 请求 | 用响应的 `Verifyuuid`、`Verifytype` 打开平台人工验证页；通过后刷新 Cookie 并重试原请求 |
+| 正文图下载可恢复失败 | 失败，不入库 | 从 child `image_materialization.failures` 和 manifest 定位图片；保持当前 page/search ID，修复会话或网络后开始新轮次 |
+| manifest 身份、格式、哈希或路径错误 | 失败，不入库 | 停止晋升和 checkpoint；修复代码/产物链路后重跑，禁止删行或只保留 URL |
 | 作者页二维码安全验证 | 暂停当前作者补全 | 保持验证页置前，等待操作人扫码；通过后继续，600 秒超时则失败且不入库 |
 | 守卫安装后出现任意新标签页 | 进入无条件保护期 | 无论平台弹出还是 crawler 受控创建，均立即置前并从出现时起至少保留 30 秒；滚动无位移、所有代码关闭和浏览器退出都必须等待，不能因未识别出验证标记而立即关闭 |
 | 频控、拒绝访问、环境异常 | 失败，不入库 | 保留证据并停止请求；由操作人决定隔离、等待或下一轮切号 |

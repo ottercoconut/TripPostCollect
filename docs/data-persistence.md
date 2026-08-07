@@ -10,6 +10,17 @@
 data/trippostcollect.sqlite
 ```
 
+正式正文图片根目录：
+
+```text
+data/media/<platform_key>/<safe_platform_post_id>/<source_index>-<asset_hash>.<real_ext>
+```
+
+`web_post_images.local_path` 只保存项目相对路径；对应行还必须保存 `width`、`height`、真实
+`mime_type` 和文件 `sha256`。URL 继续作为来源与重试证据保存在 `image_url`，但 URL 本身不再满足
+正式图片持久化。`outputs/mediacrawler_runs/.../<platform>/` 或 XHS child artifact 中的图片只是本轮
+staging；正式文件只有在根项目复验后才能原子晋升到 `data/media`。
+
 相关 schema：
 
 | 文件 | 表 |
@@ -99,6 +110,12 @@ checkpoint。摘要或其 JSONL 缺失时冻结失败，不能静默丢弃活动
 - 正式流程不得依赖 `temp/` 里已有文件；`temp/` 只保存一次性验证产物，用完提取结论后清理。
 - 路径必须从脚本现有参数或 `trippostcollect.core.paths` 解析，不硬编码输出目录、浏览器 profile 或运行状态目录。
 - 视频目标、视频媒体请求和明确视频记录必须跳过，不得写入 `web_posts`。
+- 五个平台的正式结构化 child 必须由 runner 注入 `--download-images` 和正式 `--media-root`；不得
+  使用被禁用的 `--get-media`，也不得关闭图片要求完成 URL-only 入库。
+- 图片候选只来自平台权威正文图字段。头像、作者主页、封面、搜索预览、视频、音乐和知乎公式图
+  在下载前排除；不得靠下载后尺寸、文件名或人工清理作为正式过滤手段。
+- 正式运行前用 `df -h data` 检查数据库、staging 和长期图片目录所在卷的可用空间。容量不足时在
+  child 前停止；不得在图片部分晋升后继续勉强入库。
 - `published_at` 必须来自平台原始发帖时间；缺明确证据时保持 NULL，不能用 `captured_at` 或导入时间补。
 - 页面级错误页、搜索页、中间页和验证码页只保留证据，不生成用户内容记录。
 - `web_posts` 面向用户查询；`ctf_captures` 面向证据和调试。不要让用户内容只停留在 `ctf_captures`。
@@ -177,10 +194,13 @@ python scripts/import_ctf_captures.py \
 - `updated_rows` 是 upsert 命中已有 `web_posts` 的数量：优先按
   `(platform_key, platform_post_id)`，平台 ID 缺失时按 `(platform_key, canonical_url)`；
   本轮覆盖主表字段并删除后重建该帖的 `web_post_images`，不增加主表总行数。
-- 新增/更新记录出现在 `web_posts`，图片 URL 出现在 `web_post_images`。
+- 新增/更新记录出现在 `web_posts`；每张正文图在 `web_post_images` 同时具有来源 URL、角色、连续
+  顺序、非空 `local_path`、尺寸、真实 MIME 和 SHA-256，且路径对应 `data/media` 内有效文件。
 - 页面级证据出现在 `ctf_captures`，成功且内容就绪的详情页同步生成 `web_posts`。
 - 关键字段符合平台能力表：文本/标题、平台原始 ID/URL、发布时间、作者字段、图片 URL、互动指标按平台应有尽有。
 - 明确视频记录只计入跳过，不作为失败记录写入内容主表。
+- `summary.json.image_materialization.complete=true`，候选帖、完整帖和图片下载/验证/晋升计数满足
+  正式契约等式；runner 的 `artifacts_verified` 与 `persistence_verified` 均完成。
 
 ### 最低 SQL 校验
 
@@ -266,6 +286,19 @@ run_queries = {
         GROUP BY p.platform_key
         ORDER BY p.platform_key
     """,
+    "local_image_evidence": """
+        SELECT
+          p.platform_key,
+          COUNT(*) AS image_rows,
+          SUM(i.local_path IS NULL OR i.local_path='') AS missing_local_path,
+          SUM(i.width IS NULL OR i.height IS NULL) AS missing_dimensions,
+          SUM(i.mime_type IS NULL OR i.sha256 IS NULL) AS missing_integrity
+        FROM web_post_images i
+        JOIN web_posts p ON p.id=i.web_post_id
+        WHERE p.artifact_dir=? AND i.image_role='content'
+        GROUP BY p.platform_key
+        ORDER BY p.platform_key
+    """,
 }
 
 for name, sql in run_queries.items():
@@ -282,6 +315,9 @@ PY
   不要临时改抓取脚本绕过登录判断或复用其他账号 profile。
 - 字段缺失时，先检查 JSONL 顶层字段、`raw_sample_json` 和平台字段覆盖表；确认来源字段存在但没入库，再改导入映射。
 - 来源字段根本不存在时，先用浏览器或 API 定位字段来源，再补抓取器；不要在入库层造数。
+- 图片失败先读 `summary.json.image_materialization.failures` 和 manifest 对应行，再检查 staging 文件、
+  平台日志尾部及登录态。可恢复下载失败使用原 checkpoint 重试；身份、路径、格式、哈希或尺寸错误
+  必须修复产物链路，禁止删 manifest 行、改摘要或只写 URL。
 - 页面级抓取遇到错误页时，保留 `ctf_captures` 和 artifact，导入层过滤 `web_posts`。
 - 默认库需要清理脏数据时，先复制 `data/trippostcollect.sqlite` 到 `data/backups/`，再执行受控 SQL。
 - 若一次路径连续 2-3 次无法拿到目标字段，应换到平台 API、作者主页、已有 artifact 或调度链路，不要反复扩大同一个失败抓取。
@@ -290,6 +326,9 @@ PY
 
 微博、抖音、知乎等通用结构化结果由 `scripts/mediacrawler_crawl.py` 调用 MediaCrawler 后
 导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定账号申请互斥租约并解密会话后调用同一底层执行器。
+五个平台都在当前登录/签名会话中把权威正文图下载到本轮 staging，原子生成 schema v1
+`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份，正式运行再晋升到
+`data/media` 并注入统一入库映射。任何图片失败都使整帖和正式完成门禁失败。
 微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；小红书搜索会补拉
 作者主页指标。知乎回答/文章的原始时间、正文图片和作者粉丝会在清洗前保存并归一化；搜索响应
 缺图时先请求详情补全，并用 `content_detail_status` 区分详情确认无图和详情未观察；
@@ -317,10 +356,16 @@ PY
 | `post_comments_count` | `comment_count`、`comments_count` 等评论字段 |
 | `post_shares_count` | `share_count`、`shared_count` 等分享字段 |
 | `post_views_count` | `view_count`、`play_count` 等浏览字段 |
-| `web_post_images` | `cover`、`image`、`pic`、`image_list`、`image_urls`、`avatar` 等 URL 字段；微博来自 `mblog.pics` 保存后的 `image_list`，知乎来自正文 HTML 保存后的 `image_list`；B站正文图片必须从详情响应或详情页正文结构提取，搜索 `image_urls` 只保留为预览证据 |
+| `web_post_images.image_url`（`content`） | 只来自权威正文图投影：B站详情 `image_urls`、微博 `mblog.pics` 归一后的 `image_list`、小红书详情 `image_list`、抖音图文 `note_download_url`、知乎正文/详情 `image_list`；作者主页、封面、搜索预览、视频、音乐和公式图不进入正文映射 |
+| `web_post_images.image_role/image_index` | 固定 `content`；按去重后源顺序从 0 连续编号 |
+| `web_post_images.local_path` | 根项目复验并晋升后的 `data/media/...` 项目相对路径；正式新记录不能为空 |
+| `web_post_images.width/height/mime_type/sha256` | 根项目重新读取本地文件得到并与 manifest 相等的字节证据 |
+| `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；不混入头像等非正文对象 |
+| `web_post_images`（`author_avatar`） | 可选作者头像 URL 参考；`local_path` 等本地字段为空，不下载、不进 manifest、不计入 `post_images_count` 或正文图完整性 |
 | `raw_sample_json` | MediaCrawler 原始 JSONL 行 |
 
-代码只在导入边界识别不同平台对同类指标的字段名差异，内部持久化结构统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
+代码在下载前用五个平台显式投影识别正文图，在导入边界识别其他同类字段差异；内部持久化结构
+统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
 
 显式使用 `--recovery-keyword` 人工续跑时，最终摘要会合并旧、新两轮记录，
 正常记录的 `web_posts.keyword` 会逐条保存真实来源，因此同一个最终 `artifact_dir` 可以同时
@@ -352,7 +397,26 @@ B站还要按本轮 `artifact_dir` 检查 `raw_sample_json.content_detail_status
     "valid_new_count": 50,
     "valid_existing_count": 15,
     "new_target_met": true,
-    "stop_reason": "target_new_met"
+    "stop_reason": "target_new_met",
+    "image_materialization_complete": true
+  },
+  "image_materialization": {
+    "required": true,
+    "promotion_required": true,
+    "candidate_posts": 65,
+    "complete_posts": 65,
+    "expected_images": 240,
+    "downloaded_images": 240,
+    "validated_images": 240,
+    "promoted_images": 220,
+    "reused_images": 20,
+    "retryable_failures": 0,
+    "terminal_failures": 0,
+    "complete": true,
+    "manifest_paths": ["outputs/.../weibo/image_manifest.jsonl"],
+    "manifest_sha256": "<aggregate-sha256>",
+    "manifest_evidence": [{"path": "outputs/.../weibo/image_manifest.jsonl", "sha256": "<sha256>"}],
+    "failures": []
   },
   "import_result": {
     "db": "data/trippostcollect.sqlite",
@@ -423,14 +487,20 @@ ORDER BY captured_at DESC
 LIMIT 20;
 ```
 
-查看图片 URL：
+查看正文图片来源与本地证据：
 
 ```sql
 SELECT
   p.platform_key,
   p.platform_post_id,
   i.image_role,
-  i.image_url
+  i.image_index,
+  i.image_url,
+  i.local_path,
+  i.width,
+  i.height,
+  i.mime_type,
+  i.sha256
 FROM web_posts p
 JOIN web_post_images i ON i.web_post_id = p.id
 ORDER BY p.captured_at DESC, i.image_index
@@ -482,7 +552,12 @@ MediaCrawler 入库采用去重更新：
 
 - 优先用 `(platform_key, platform_post_id)` 匹配旧记录。
 - 没有平台 ID 时用 `(platform_key, canonical_url)` 匹配旧记录。
-- 更新帖子时会重建该帖子的 `web_post_images` 行。
+- 插入或更新前先把全部 `MaterializedImage` 元数据和本地文件重新验证；一张正文图缺少有效本地
+  文件即拒绝整帖。
+- 更新帖子时在同一 SQLite savepoint 删除并重建该帖子的 `web_post_images` 行；匹配到相同稳定
+  资产或源顺序的既有有效文件时可以保留其本地证据，不能因为新 JSONL 只有 URL 而清空路径。
+- 主表更新、图片关系重建任一步异常都会回滚 savepoint，不留下“帖子已更新、图片未完成”的
+  半提交状态。文件晋升采用内容寻址和原子替换；数据库失败后留下的同 SHA 文件可在重试时幂等复用。
 - 原始 JSONL 行完整保留在 `raw_sample_json`，便于后续清洗补字段。
 
 ## B站历史摘要回填
@@ -522,6 +597,8 @@ python scripts/mediacrawler_crawl.py \
   --candidate-hard-limit 20 \
   --target-new-posts 1 \
   --timeout-per-platform 180 \
+  --download-images \
+  --media-root temp/mediacrawler_import_verify_media \
   --db temp/mediacrawler_import_verify.sqlite
 ```
 
@@ -554,9 +631,16 @@ python scripts/crawl_runner.py \
 
 ## 目前边界
 
-- 当前规则禁止视频功能。项目侧 `--get-media` 会直接失败；MediaCrawler 默认 `--get_media false`，只有小红书 `--download-images` 会开启图片样本保存，视频保存分支仍被禁用。
-- MediaCrawler 会导入封面、头像等图片 URL；明确视频记录会被跳过并计入 `skipped_video`，不作为失败入库。
+- 当前规则禁止视频功能。项目侧 `--get-media` 会直接失败；五平台正式 runner 全部强制
+  `--download-images`，同时保持 MediaCrawler 视频保存关闭，抖音图片路径不会回退到视频或音乐下载。
+- 正式新记录只下载并以 `content` 角色导入显式投影的正文图。头像、作者主页、封面、搜索预览、
+  视频、音乐和知乎公式图会在下载前自动忽略，不进入 manifest 或 `data/media`；作者头像可以保留
+  为 `author_avatar` URL 参考关系，但本地字段为空且不参与正文图完整性。
 - 知乎当前是 MediaCrawler 入库路径；页面级产物只作为临时排障证据，不作为默认调度链路。
 - 正式有效性过滤在入库前完成；业务清洗、低质量分级和 flag-like 误报处理仍放在 SQL 视图或下游清洗层。
-- `outputs/` 不是长期主存储。结构化内容、作者、互动数、URL、状态和摘要应进入 SQLite；文件系统只长期保留图片、截图、必要日志和短期 staging。
+- `outputs/` 不是长期图片主存储。结构化内容、作者、互动数、URL、本地路径、状态和摘要应进入
+  SQLite；正式正文图片长期保存在 `data/media`，`outputs/` 只保留 manifest、必要日志、报告和
+  可清理 staging。
 - `temp/` 不参与正式入库和调度，只保存临时验证数据库或一次性测试结果。代码不能依赖 `temp/` 中已有文件。
+- 本节只描述主程序对以后新抓记录的保证；当前数据库中历史 URL-only 行的补全必须等待
+  `MAIN_PROGRAM_READY=true` 后按工程方案 H-00 至 H-08 执行，不能在正常新抓路径中隐式回填。

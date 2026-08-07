@@ -97,8 +97,40 @@ python scripts/mediacrawler_crawl.py \
   --keyword 青岛旅游 \
   --candidate-hard-limit 20 \
   --target-new-posts 0 \
+  --download-images \
+  --media-root temp/diagnostic_media \
   --no-import
 ```
+
+诊断也应启用正文图链路，否则只能验证文字字段，不能作为图片功能证据。`--media-root` 覆盖只允许
+项目 `temp/` 子目录；`--no-import` 会生成 staging、manifest 和
+`image_materialization(promotion_required=false)`，但不会写 `data/media`、SQLite 或 checkpoint。
+不要传旧 `--get-media`：该参数会直接失败，且视频始终禁用。
+
+## 图片磁盘预检与备份
+
+每次正式结构化运行前先检查数据库和长期媒体目录所在卷；多平台或较大候选预算还要预留本轮
+staging 与最终文件同时存在的空间：
+
+```bash
+df -h data outputs
+du -sh data/media outputs/mediacrawler_runs 2>/dev/null
+```
+
+空间明显不足时在 dry-run 后、正式 child 前停止。不要边下载边删除本轮 staging 或长期文件；
+manifest 复验依赖这些字节，部分删除会正确地使 `artifacts_verified` 失败。
+
+普通新增抓取依赖 SQLite 事务和内容寻址文件幂等，不要求每轮复制整库。任何历史补全、批量修复、
+清理或人工 SQL 写默认库前则必须先建立 SQLite 一致性备份，并记录备份 SHA-256：
+
+```bash
+mkdir -p data/backups
+sqlite3 data/trippostcollect.sqlite ".backup 'data/backups/trippostcollect-before-<run_id>.sqlite'"
+shasum -a 256 data/backups/trippostcollect-before-<run_id>.sqlite
+```
+
+历史图片补全只能在 `MAIN_PROGRAM_READY=true` 后按工程方案 H 阶段执行；主程序开发和新记录验证
+不能顺手修改默认库已有行或移动现有图片。
 
 `info_collection_benchmark.py` 只用于通用平台性能和容量评估，不能替代正式状态文件和报告，
 也不接受小红书任务。
@@ -443,6 +475,10 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 
 ## 结果检查
 
+报告读取顺序固定为：runner 顶层 `run_summary.json` → 对应 execution state → child `summary.json` →
+child 的 `image_materialization.manifest_evidence` 所指 manifest → SQLite 与 `data/media` 本地文件；
+只有前一层出现失败或计数不一致时才查看平台日志尾部。不要先全文展开 JSONL、响应体或所有图片。
+
 正式结构化任务至少检查：
 
 - 状态文件最终为 `completed`，且真实正式入库运行的五个阶段全部为 `completed`；
@@ -456,8 +492,17 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 - `valid_existing_count` / `updated_rows` 单独报告且不计入新增目标；
 - `import_result.processed_rows`、`inserted_rows`、`updated_rows` 分别存在；
 - 命令未使用 `--no-import`，`persistence_verified` 没有以 `skipped` 代替真实入库；
-- SQLite 中作者粉丝量、发布时间和图片关系符合平台 profile；
-- 视频只出现在跳过计数中。
+- 冻结计划 `local_image_storage_required=true`，child 命令包含 `--download-images` 和正式
+  `--media-root`，不包含 `--get-media`；
+- `image_materialization.required=true`、`promotion_required=true`、`complete=true`，并满足
+  `candidate_posts == complete_posts`、
+  `expected_images == downloaded_images == validated_images == promoted_images + reused_images`；
+- `retryable_failures=0`、`terminal_failures=0`、`failures=[]`，manifest 列表、单文件 SHA 和聚合
+  `manifest_sha256` 均被 `artifacts_verified` 复验；
+- SQLite 中作者粉丝量、发布时间和图片关系符合平台 profile；每张正文图具有连续 index、非空
+  项目相对 `local_path`、尺寸、真实 MIME、SHA，实际文件位于 `data/media` 且哈希相等；
+- 头像、作者主页、封面、搜索预览、视频、音乐和知乎公式图不出现在正文 manifest、长期目录或
+  `content` 图片关系；作者头像只允许保留 `author_avatar` URL 参考，视频只出现在跳过计数中。
 - `formal_validation.pagination_evidence` 有连续页级事件；未达目标时，`source_exhausted`
   必须有空页、明确缺失继续 cursor 或 `has_more=false` 的 `adaptive_search_stopped` 事件。只有批次事件而没有停止
   事件的任务按 `runtime_failed` 排查浏览器、登录态、超时或请求异常。
@@ -466,3 +511,18 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
   都不能作为新鲜第 1 页的耗尽证明。
 
 固定 URL 页面任务只验证该页证据和入库，不得汇报为平台批量目标完成。
+
+### 图片失败分流
+
+| 信号 | 分类 | 处理 |
+|---|---|---|
+| `image_download_retryable` | 平台会话、临时网络或响应可恢复失败 | 保留当前安全前沿，不写已处理候选；检查登录态和平台日志尾部后从 runner 新开一轮重试 |
+| `missing_image_manifest` / `image_manifest_count_mismatch` | staging/manifest 不完整 | 停止入库，核对 child 实际 artifact 和平台 store；禁止手工补空 manifest |
+| `image_manifest_identity_mismatch` | URL、平台、帖子、顺序、来源字段或稳定键不一致 | 视为代码/产物版本错误，修复后重跑整帖 |
+| `image_path_escape` / `image_file_missing` | 路径边界或文件缺失 | 停止晋升，检查 symlink、清理程序和 artifact 完整性 |
+| `image_non_raster_response` / `image_decode_failed` | 返回 HTML/JSON/视频或损坏图片 | 检查登录/验证和 URL 选择；不得改后缀伪装成图片 |
+| `image_too_large` | 单文件或解码像素超过安全上限 | 作为终态失败报告；如需改上限必须走代码、测试和治理变更 |
+| `image_hash_mismatch` / `image_manifest_metadata_mismatch` | staging 字节与 manifest 不一致 | 停止并保留证据，排查写入竞态或文件篡改 |
+| `image_existing_conflict` / `image_promotion_conflict` | staging 整帖目录或长期内容寻址目标已有不同字节 | 停止覆盖，保留两侧证据并排查稳定键、旧文件或并发写入 |
+| `image_materialization_missing` / `image_materialization_incomplete` | child 摘要缺少统一图片结果或完成等式失败 | 视为执行器/版本契约错误，不允许 runner 降级完成 |
+| `persistence_verified` 失败 | 晋升文件与 SQLite 路径、SHA、MIME、尺寸或计数不一致 | 不 finalize、不推进 checkpoint；从摘要身份逐帖修复并重新执行正式事务 |
