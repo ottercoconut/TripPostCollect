@@ -64,14 +64,14 @@ flowchart LR
 
 | 平台 | 帖子 | 当前 `content` 行 | 平台权威正文图 | 已有本地路径 | 需要处理的问题 |
 |---|---:|---:|---:|---:|---|
-| B站 | 3,009 | 18,053 | 18,053 | 0 | 3 条 URL 存在协议/规范化差异 |
+| B站 | 3,006 | 18,050 | 18,050 | 0 | 当前关系与详情 `image_urls` 数量一致 |
 | 微博 | 1,007 | 6,384 | 6,384 | 0 | 当前关系与 `image_list` 全部一致 |
 | 抖音 | 461 | 4,991 | 4,528 | 0 | 误含 461 封面、1 视频 URL、1 音乐 URL |
 | 知乎 | 437 | 10,767 | 10,765 | 0 | 误含 2 条作者主页 URL；另有 437 张作者头像 |
 | 小红书 | 1,808 | 21,040 | 17,416 | 17,150 | 多个 CDN 变体被展开；17 帖共 266 张尚未建立本地关系 |
 
-五平台权威正文图合计 57,146 张。当前已建立本地路径 17,150 张，剩余待本地化 39,996 张，
-其中 B站、微博、抖音、知乎合计 39,730 张，小红书缺口 266 张。
+五平台权威正文图合计 57,143 张。当前已建立本地路径 17,150 张，剩余待本地化 39,993 张，
+其中 B站、微博、抖音、知乎合计 39,727 张，小红书缺口 266 张。
 
 小红书现有回填的数据库备份、报告和逐文件 SHA-256 证据必须保留；新实现应读取并晋升这些文件，
 不能重新下载已经验证成功的 17,150 张图片。
@@ -382,6 +382,8 @@ staging、manifest 和更完整的错误分类。
 ### 11.1 CLI 语义
 
 - `scripts/mediacrawler_crawl.py --download-images` 扩展为五平台安全图片模式。
+- 新增 `--media-root` 作为测试和诊断的受控路径覆盖；正式 runner 固定冻结并使用
+  `LOCAL_MEDIA_ROOT`，不能把临时路径带入正式完成。
 - `--get-media` 继续立即失败，错误信息明确说明只能使用项目图片模式。
 - 通用 `crawl_runner.py` 为所有正式 `mediacrawler_search` child 强制加入 `--download-images`。
 - `xhs_runner.py` 的正式计划固定 `local_image_storage_required=true`，正式 child 强制加入该参数。
@@ -484,6 +486,18 @@ image_promotion_conflict
 
 ## 13. 历史数据清理与补下载
 
+本章只定义主程序总验收后的第二阶段工作，不与主程序开发并行执行。第 18 节
+`MAIN_PROGRAM_READY` 门禁完成前：
+
+- 不实现或运行默认库历史补下载；
+- 不修改默认库现有图片关系；
+- 不把现有小红书文件晋升到新的长期目录；
+- 不以历史数据是否补齐阻塞单个平台主程序模块的开发；
+- 所有关系修复、upsert 和晋升测试只使用 fixture、临时 SQLite 和临时媒体目录。
+
+主程序总验收后先重新盘点当时的默认库，再冻结历史补全输入。以下 2026-08-07 数量只是容量规划
+基线，不能代替第二阶段开始时的实时盘点。
+
 新增正式历史入口：
 
 ```text
@@ -507,7 +521,7 @@ runner，不得改变任何抓取记忆。
 - 知乎正文图片从 10,767 调整为 10,765，移除 2 条作者主页 URL。
 - 小红书正文图片从 21,040 折叠为 17,416 个权威图片对象，并保留已验证的 17,150 个本地关系。
 - 微博数量保持 6,384。
-- B站数量保持 18,053，只规范化 3 条 URL 身份。
+- B站数量保持 18,050。
 
 ### 13.2 分平台补下载
 
@@ -568,9 +582,9 @@ SHA、MIME、尺寸和原始 JSONL 对应能力，再把已验证文件晋升到
 | `scripts/xhs_runner.py` | 正式 XHS 固定要求本地图片；验收 manifest 和本地关系 |
 | `config/xhs_targets.json` | 删除可选 `download_images`，正式 XHS 固定要求本地图片 |
 | 当前有效的 XHS one-off 配置 | 按同一 schema 删除可选 `download_images`，不保留旧兼容字段 |
-| `scripts/materialize_local_images.py` | 新增历史清理、补下载、恢复和 apply 入口 |
-| `scripts/gc_local_images.py` | 新增默认 dry-run 的无引用文件审计/清理入口 |
-| `src/trippostcollect/artifacts/local_image_backfill.py` | 复用现有 XHS 证据并支持向长期目录晋升 |
+| `scripts/materialize_local_images.py` | 第二阶段新增历史清理、补下载、恢复和 apply 入口；主程序总验收前不实现、不运行 |
+| `scripts/gc_local_images.py` | 第二阶段新增默认 dry-run 的无引用文件审计/清理入口 |
+| `src/trippostcollect/artifacts/local_image_backfill.py` | 第二阶段复用现有 XHS 证据并支持向长期目录晋升 |
 
 ### 16.2 MediaCrawler 定向补丁
 
@@ -645,57 +659,824 @@ B站第三方视频下载代码不属于本功能修改范围。
 
 ### 17.4 历史迁移测试
 
+本节测试只允许在 I-14 `MAIN_PROGRAM_READY=true` 后进入；在此之前不得为了准备历史工具而提前
+修改默认库或晋升现有文件。
+
 - 使用默认库副本验证第 13.1 节五个平台的预期关系数。
 - 原 `web_posts` 行数、正文文本、作者、指标、发布时间、关键词和发现表哈希不变。
 - 小红书 17,150 个现有本地文件全部通过晋升并保持 SHA。
 - 固定每平台 10 帖小样下载成功后，再进入分批全量。
 
-## 18. 灰度实施顺序
+## 18. 分步实施执行手册
 
-### 阶段 A：数据口径和纯本地组件
+### 18.1 总体阶段与不可跨越门禁
 
-- 实现显式图片投影、稳定键、manifest 校验、长期路径和晋升。
-- 修改 importer/upsert，但只在临时 SQLite 验证。
-- 完成误分类关系 dry-run 报告，不修改默认库。
+实施严格分成两个串行阶段：
 
-通过条件：全部单元测试通过，当前默认库副本得到第 13.1 节精确关系数。
+```text
+阶段 I：主程序实现
+  -> MAIN_PROGRAM_READY 总验收
+  -> 阶段 II：当前数据清理与补全
+  -> HISTORICAL_DATA_COMPLETE 总验收
+```
 
-### 阶段 B：小红书回归与长期目录
+`MAIN_PROGRAM_READY` 未通过时，禁止开始任何 `H-*` 步骤。阶段 I 的数据库和文件测试只能使用：
 
-- 把已验证的 17,150 张图片晋升到 `data/media/xhs/`。
-- 改造 XHS manifest 和真实格式检测。
-- 用固定小样验证正式新记录的 URL、manifest、长期文件和数据库一次完成。
+- 测试 fixture；
+- `temp/` 下的临时 SQLite；
+- `temp/` 下的临时媒体根目录；
+- `--no-import` 真实小样 staging；
+- 默认库的只读查询或 SQLite backup 副本。
 
-通过条件：现有 SHA 不变；视频目录无新增；重复执行零重复文件。
+阶段 I 禁止：
 
-### 阶段 C：B站与微博
+- 对 `data/trippostcollect.sqlite` 执行图片关系修复或历史路径更新；
+- 批量下载当前库的历史图片；
+- 把现有 XHS 文件晋升到 `data/media/`；
+- 运行带 `--apply` 的历史工具；
+- 用“历史库已经补齐”代替主程序的新记录端到端验收。
 
-- 接入 B站根项目下载器和微博现有客户端。
-- 每平台先 10 帖临时库，再执行历史分批。
+每一步都遵守同一执行规则：
 
-通过条件：详情正文图/`mblog.pics` 与 manifest、长期文件和 SQLite 精确一致。
+1. 开始前确认上一步验收通过并记录当前 Git HEAD。
+2. 只修改本步骤列出的文件和直接关联测试；发现跨步骤依赖时先更新本文，不静默扩大范围。
+3. 先运行步骤专属测试，再运行受影响的回归测试。
+4. 验收失败时停止，不进入下一步，不用临时兼容或跳过门禁掩盖失败。
+5. 验收通过后形成独立 Git commit；MediaCrawler 定向补丁在其嵌套仓库单独提交并记录 SHA。
+6. 每步报告必须列出变更文件、测试命令、测试计数、关键产物和未解决事项。
 
-### 阶段 D：知乎
+### 18.2 阶段 I：主程序实现
 
-- 新增知乎客户端图片下载和 store。
-- 验证搜索有图与详情补全两种路径。
+#### I-00：冻结实现基线
 
-通过条件：公式、头像和作者主页不入正文图片；10 帖小样全量本地化。
+前置条件：本文已经进入 Git，根项目与 MediaCrawler 当前提交可解析。
 
-### 阶段 E：抖音
+实施动作：
 
-- 先合入并验证 images-only 不变量，再允许根项目为抖音传图片模式。
-- 分别验证新鲜签名 URL、历史直取和详情刷新三条路径。
+- 记录根项目 HEAD、MediaCrawler HEAD、Python/uv 版本和默认库 SHA-256。
+- 只读记录五平台帖子数、当前图片关系数、本地路径数、数据库 `quick_check` 和磁盘可用空间。
+- 建立主程序测试使用的临时根目录；确认它不指向默认库或 `data/media/`。
+- 将当前 2026-08-07 数量保存为基线报告，但明确历史阶段会重新盘点。
 
-通过条件：没有任何视频/音乐请求或文件；签名变化后关系不丢失；10 帖小样全部本地化。
+验收命令：
 
-### 阶段 F：正式契约切换与历史全量
+```bash
+git status --short
+git rev-parse HEAD
+git -C tools/MediaCrawler rev-parse HEAD
+source .venv/bin/activate
+python scripts/verify_frozen_files.py
+```
 
-- 同步治理文档、冻结哈希、runner 完成门禁和运维说明。
-- 按平台批次补齐历史 39,996 张缺口。
-- 完成全库文件、关系、SHA、尺寸、MIME、外键和磁盘容量审计。
+验收标准：
 
-通过条件：第 19 节全部满足，才宣布五平台图片本地存储上线。
+- 两个仓库 HEAD 和工作区状态均被记录；不存在来源不明的修改。
+- 默认库 `quick_check=ok`、外键违规为 0，并已记录 SHA-256。
+- 临时根目录和默认库、长期媒体目录不是同一路径。
+- 本步骤没有修改默认库、配置、浏览器状态或图片文件。
+
+失败停止点：默认库不一致、工作区存在无法归属的重叠修改、MediaCrawler HEAD 不明确时停止。
+
+产物：基线报告、根项目提交、MediaCrawler 提交和默认库摘要。
+
+#### I-01：五平台显式正文图投影与头像过滤
+
+前置条件：I-00 通过。
+
+实施动作：
+
+- 新增 `image_candidates.py` 和 `ImageCandidate`。
+- 实现第 5 节五个平台白名单字段映射、顺序、URL 规范化和同帖去重。
+- 明确让头像、作者主页、封面、视频、音乐、搜索预览和同图变体返回 0 个正文候选。
+- 将 `row_for_record()` 与正式图片字段校验切换到新投影函数。
+- 暂不下载、不创建长期目录、不修改默认库。
+
+专属测试：
+
+```bash
+source .venv/bin/activate
+python -m pytest tests/test_image_candidates.py
+python -m ruff check \
+  src/trippostcollect/artifacts/image_candidates.py \
+  scripts/mediacrawler_crawl.py \
+  tests/test_image_candidates.py
+```
+
+验收标准：
+
+- B站、微博、XHS、抖音、知乎 fixture 的正文图片数量和顺序精确一致。
+- `avatar_url`、`author_avatar`、`author_profile_url`、`cover_url`、
+  `video_download_url`、`music_download_url` 全部不产生 `content` 候选。
+- XHS 每个图片对象只产生一个候选；知乎公式图片为 0。
+- 默认库只读投影得到当前基线：B站 18,050、微博 6,384、抖音 4,528、知乎 10,765、
+  XHS 17,416；该检查不写库。
+- `post_images_count` 来自新投影，而不是递归扫描。
+
+失败停止点：任何头像/封面/视频/音乐进入候选，或任一平台正文顺序不稳定时停止。
+
+产物：候选投影模块、fixture、投影计数报告和独立 commit。
+
+#### I-02：稳定资源键与 manifest schema
+
+前置条件：I-01 通过，所有候选均有平台、帖子 ID、来源顺序和 URL。
+
+实施动作：
+
+- 实现第 6 节各平台 `source_asset_key`。
+- 定义 `image_manifest` schema v1、序列化、反序列化和逐帖完整性校验。
+- 实现 manifest 中的路径、身份、重复序号、状态和敏感字段限制。
+- 为抖音 `images[].uri`、微博 `pid` 和 XHS 路径身份增加 fixture。
+
+专属测试：
+
+```bash
+source .venv/bin/activate
+python -m pytest \
+  tests/test_image_candidates.py \
+  tests/test_image_manifest.py
+python -m ruff check \
+  src/trippostcollect/artifacts/image_candidates.py \
+  src/trippostcollect/artifacts/image_manifest.py \
+  tests/test_image_manifest.py
+```
+
+验收标准：
+
+- 同一平台资产在协议、域名变体或签名查询参数变化后得到相同稳定键。
+- 不同资产不得碰撞；fallback 使用确定性 SHA-256。
+- manifest 拒绝绝对路径、`..`、重复 `(role, source_index)`、未知 schema、身份不匹配和成功字段
+  不完整。
+- manifest round-trip 不丢字段，输出排序稳定，可计算可复现 SHA-256。
+- manifest/摘要中不存在 Cookie、Storage State 或请求头。
+
+失败停止点：稳定键依赖完整签名 URL、Python 随机 hash 或存在已知碰撞时停止。
+
+产物：稳定键实现、manifest schema/模型、测试和独立 commit。
+
+#### I-03：文件安全、staging 与长期晋升组件
+
+前置条件：I-02 通过。
+
+实施动作：
+
+- 在路径模块增加 `LOCAL_MEDIA_ROOT` 和 `IMAGE_MATERIALIZATION_RUNTIME`。
+- 实现流式体积限制、魔数检测、PIL 验证、尺寸/像素限制、SHA-256 和真实扩展名。
+- 实现 staging `.part`、`os.replace()`、长期内容哈希路径、`fsync` 和冲突拒绝。
+- 从 `image_proxy.py` 抽取通用 URL/响应安全校验；保持管理端预览行为不变。
+- 所有测试使用 pytest `tmp_path`，不得写 `data/media/`。
+
+专属测试：
+
+```bash
+source .venv/bin/activate
+python -m pytest \
+  tests/test_image_materialization.py \
+  apps/admin_api/tests/test_readonly_api.py
+python -m ruff check \
+  src/trippostcollect/artifacts/image_materialization.py \
+  src/trippostcollect/artifacts/image_proxy.py \
+  src/trippostcollect/core/paths.py
+```
+
+验收标准：
+
+- JPEG、PNG、WebP、GIF、AVIF 正常通过并取得真实 MIME、尺寸和 SHA。
+- SVG、HTML、JSON、音视频、伪造后缀、超限字节和超限像素全部拒绝。
+- 路径穿越、绝对路径、重定向到受限地址全部拒绝。
+- 相同文件重复晋升只产生一个目标；不同 SHA 不覆盖已有目标。
+- 模拟异常中断只留下可识别 `.part`，不会产生被数据库当作成功文件的半文件。
+- 管理端既有图片预览测试保持通过。
+
+失败停止点：任何非图片字节可进入成功态、文件可逃出受控目录或冲突会覆盖已有文件时停止。
+
+产物：纯本地物化组件、安全测试、临时文件报告和独立 commit。
+
+#### I-04：SQLite 图片关系与 upsert
+
+前置条件：I-01 至 I-03 通过。
+
+实施动作：
+
+- 扩展 `raw_image_json` 的来源顺序、稳定资源键和 `local_file` 证据。
+- 修改 `upsert_web_post()`，按第 9.2 节顺序保护已验证本地元数据。
+- 实现整帖图片关系的事务性提交；一张失败时整帖不提交。
+- 实现 URL 更新但资产键不变、资产键变化、顺序变化和图片删除/增加路径。
+- 只使用内存或 `temp/` SQLite 测试，不操作默认库。
+
+专属测试：
+
+```bash
+source .venv/bin/activate
+python -m pytest \
+  tests/test_mediacrawler_import.py \
+  tests/test_image_persistence.py
+python -m ruff check \
+  scripts/mediacrawler_crawl.py \
+  tests/test_image_persistence.py
+```
+
+验收标准：
+
+- `post_images_count = content rows = local rows`。
+- `image_index` 在 `content` 角色内从 0 连续递增。
+- 签名 URL 变化、稳定键不变时保留路径、SHA、尺寸和 MIME。
+- 稳定键变化或本地文件验证失败时不复用旧关系。
+- 整帖任一图片失败时，数据库保持事务前状态。
+- 重跑不增加 `web_posts`、图片行或重复文件；外键和唯一索引通过。
+
+失败停止点：出现半帖提交、签名变化丢路径、错误资产复用或主表重复时停止。
+
+产物：upsert 改造、临时 SQLite 验证报告和独立 commit。
+
+#### I-05：B站主程序图片适配
+
+前置条件：I-04 通过。
+
+实施动作：
+
+- 在根项目 article 详情路径接入图片 staging 和 manifest。
+- 只使用 `extract_bilibili_detail_images()` 的详情结果，禁止搜索预览图。
+- 复用当前 article Cookie、Referer 和 User-Agent。
+- 下载失败分类接入 B站安全前沿；不触发 MediaCrawler 视频代码。
+
+专属测试：
+
+```bash
+source .venv/bin/activate
+python -m pytest \
+  tests/test_bilibili_article_detail.py \
+  tests/test_bilibili_image_materialization.py \
+  tests/test_bilibili_formal_route.py
+```
+
+验收标准：
+
+- Opus 段落图、旧 article HTML 图和 fallback 详情图分别有 fixture 覆盖。
+- 搜索 `image_urls` 不能单独产生下载任务。
+- manifest 数量、顺序、资源键与详情正文图完全一致。
+- 模拟图片 429/5xx/超时后当前页不推进、候选不入库、不进入已处理记忆。
+- 测试和诊断输出没有任何视频请求或文件。
+
+失败停止点：预览图混入、详情失败仍入库或视频路径可达时停止。
+
+产物：B站适配、测试 manifest、失败安全前沿证据和独立 commit。
+
+#### I-06：微博主程序图片适配
+
+前置条件：I-05 通过，MediaCrawler 工作区干净。
+
+实施动作：
+
+- 改造 `get_note_images()`，传递微博 ID、`pid`、来源顺序和 URL。
+- 复用 `wb_client.get_note_image()`，改为逐帖原子 staging 和真实格式。
+- 只对初步字段有效图文下载；已知 ID 继续在媒体处理前跳过。
+- 在 MediaCrawler 嵌套仓库提交定向补丁并记录 SHA。
+
+专属测试：
+
+```bash
+cd tools/MediaCrawler
+uv run pytest \
+  tests/test_weibo_image_download.py \
+  tests/test_weibo_store.py
+```
+
+根项目回归：
+
+```bash
+source .venv/bin/activate
+python -m pytest \
+  tests/test_image_manifest.py \
+  tests/test_mediacrawler_import.py
+```
+
+验收标准：
+
+- `mblog.pics` 的每个正文图与 note ID、pid、序号和 manifest 一一对应。
+- URL 查询参数不进入文件扩展名，真实格式检测正确。
+- 头像、作者主页及无图微博不产生正文图片文件。
+- 已知 ID 不发生图片请求；失败图片不写成功 manifest。
+- MediaCrawler 和根项目相关测试全部通过，嵌套仓库 commit 可复现。
+
+失败停止点：平铺文件无法追溯到帖子、扩展名不可信或无效候选仍批量下载时停止。
+
+产物：MediaCrawler 微博补丁 commit、根项目解析测试和 manifest 样例。
+
+#### I-07：小红书主程序图片适配
+
+前置条件：I-06 通过；本步骤只改新抓取路径，不迁移当前 17,150 个文件。
+
+实施动作：
+
+- 保留 `get_notice_media()` 图片专用和视频禁用语义。
+- 每个图片对象只选一个权威 URL，写真实格式、原子 staging 和 manifest。
+- 正式 runner 计划固定要求图片，但本步骤不运行默认库历史晋升。
+- 在 MediaCrawler 嵌套仓库提交定向补丁并记录 SHA。
+
+专属测试：
+
+```bash
+cd tools/MediaCrawler
+uv run pytest \
+  tests/test_xhs_image_download.py \
+  tests/test_xhs_media_policy.py
+```
+
+根项目回归：
+
+```bash
+source .venv/bin/activate
+python -m pytest \
+  tests/test_xhs_pool.py \
+  tests/test_xhs_discovery.py \
+  tests/test_image_candidates.py
+```
+
+验收标准：
+
+- 一个 XHS 图片对象只写一个文件和一行 manifest。
+- 文件后缀与真实 MIME 一致，不再固定伪装为 `.jpg`。
+- `get_notice_video()` 和视频 store 在图片模式测试中调用次数为 0。
+- 当前默认库和现有 XHS 文件的 SHA、路径和行数在本步骤前后完全不变。
+- 新抓取 fixture 和临时目录测试通过。
+
+失败停止点：视频分支可达、同图变体重复下载或现有历史文件被改动时停止。
+
+产物：MediaCrawler XHS 补丁 commit、新记录 manifest fixture 和默认库不变量报告。
+
+#### I-08：知乎主程序图片适配
+
+前置条件：I-07 通过。
+
+实施动作：
+
+- 为 Zhihu client 增加复用当前会话的图片请求。
+- 新增知乎图片 store、原子 staging 和 manifest。
+- 搜索有图和详情补全后的 `image_list` 共用同一下载入口。
+- 保持公式、头像和作者主页排除。
+
+专属测试：
+
+```bash
+cd tools/MediaCrawler
+uv run pytest \
+  tests/test_zhihu_image_download.py \
+  tests/test_zhihu_detail_images.py
+```
+
+根项目回归：
+
+```bash
+source .venv/bin/activate
+python -m pytest \
+  tests/test_image_candidates.py \
+  tests/test_mediacrawler_pagination.py
+```
+
+验收标准：
+
+- 搜索正文图和详情补全正文图都产生准确 manifest。
+- `/equation?`、`avatar_url`、`author_profile_url` 下载次数均为 0。
+- `request_failed`/`parse_failed` 不能进入图片成功态。
+- `detail_observed` 且正文图完整时才能通过图片门禁。
+- 无视频文件、无 zvideo 图片任务。
+
+失败停止点：详情未观察仍下载或公式/作者资源进入正文图时停止。
+
+产物：MediaCrawler 知乎补丁 commit、两类详情 fixture 和 manifest 样例。
+
+#### I-09：抖音严格 images-only 适配
+
+前置条件：I-08 通过。抖音放在最后实现，因为当前 `get_aweme_media()` 存在视频回退。
+
+实施动作：
+
+- 新增严格图片入口：图片列表为空直接返回，永不调用 `get_aweme_video()`。
+- 保留 `images[].uri` 等稳定资产元数据。
+- 实现逐帖串行、原子 staging、真实格式和 manifest。
+- 新记录只使用当前 `dy_client` 会话和新鲜签名 URL。
+- 历史 URL 刷新逻辑不在本步骤实现，留到 H-07。
+
+专属测试：
+
+```bash
+cd tools/MediaCrawler
+uv run pytest \
+  tests/test_douyin_image_only.py \
+  tests/test_douyin_store.py
+```
+
+根项目回归：
+
+```bash
+source .venv/bin/activate
+python -m pytest \
+  tests/test_image_candidates.py \
+  tests/test_mediacrawler_pagination.py \
+  tests/test_discovery_checkpoints.py
+```
+
+验收标准：
+
+- 图文候选只请求 `note` 图片；空图片列表、视频候选的图片/视频下载次数都为 0。
+- `cover_url`、`video_download_url`、`music_download_url` 不出现在候选或 manifest。
+- 测试以 spy 证明 `get_aweme_video()`、视频 store、音乐请求均未调用。
+- 签名查询参数变化不改变 `source_asset_key`。
+- 图片可恢复失败不推进 page/offset/search ID，也不写入已处理候选。
+
+失败停止点：任何视频、音乐或封面字节请求可达时停止，不能靠上层过滤掩盖。
+
+产物：MediaCrawler 抖音补丁 commit、无视频调用证据和 manifest fixture。
+
+#### I-10：根执行器物化与导入编排
+
+前置条件：I-05 至 I-09 五个平台适配全部通过。
+
+实施动作：
+
+- 按第 11.2 节接入 manifest 收集、根项目复验、长期晋升和 `MaterializedImage` 注入。
+- 增加 `--media-root`，正式默认使用 `LOCAL_MEDIA_ROOT`；测试/诊断允许显式指定 `temp/` 子目录。
+- 正式模式要求 `--download-images`；`--no-import` 可只生成 staging/manifest。
+- 把图片本地化完成谓词并入 `collect_formal_records()` 和 `import_completion_met`。
+- 暂不修改父 runner 完成阶段。
+
+专属测试：
+
+```bash
+source .venv/bin/activate
+python -m pytest \
+  tests/test_image_materialization.py \
+  tests/test_image_persistence.py \
+  tests/test_mediacrawler_import.py \
+  tests/test_mediacrawler_pagination.py
+```
+
+验收标准：
+
+- 五平台 fixture 走同一根项目验证和晋升代码，没有第二套平台持久化逻辑。
+- 正式模式少 manifest、少文件、数量不符、身份不符或 SHA 不符时不入库。
+- `--no-import --download-images` 只产生 staging/manifest，不写长期目录和 SQLite。
+- 临时 SQLite 与临时媒体根目录完成整帖事务，重复执行幂等。
+- `image_materialization.complete` 与 `import_completion_met` 逻辑一致。
+
+失败停止点：可绕过 manifest、先入库后补路径或诊断模式污染长期目录时停止。
+
+产物：根执行器编排、临时端到端报告和独立 commit。
+
+#### I-11：runner、冻结状态与完成谓词
+
+前置条件：I-10 通过。
+
+实施动作：
+
+- 通用 runner 为四个平台正式 child 强制传 `--download-images` 和冻结的正式媒体根。
+- XHS runner 固定 `local_image_storage_required=true`，移除目标配置可选性。
+- 将 manifest 证据并入 `artifacts_verified`，将数据库/文件一致性并入 `persistence_verified`。
+- 默认数量和来源耗尽模式均增加 `local_images_complete` 门禁。
+- 失败后保持后续阶段 frozen，保留安全 checkpoint。
+
+专属测试：
+
+```bash
+source .venv/bin/activate
+python -m pytest \
+  tests/test_bilibili_formal_route.py \
+  tests/test_xhs_pool.py \
+  tests/test_discovery_checkpoints.py \
+  tests/test_image_runner_contract.py
+```
+
+验收标准：
+
+- dry-run 冻结计划明确包含本地图片要求和媒体根，但不下载、不入库。
+- 正式 child 命令全部使用项目 `--download-images`，没有开放 `--get-media`。
+- manifest/文件失败使 `artifacts_verified` 或 `persistence_verified` 失败，`task_finalized` 保持 frozen。
+- 图片完整时原有数量、来源耗尽、行为、策略、作者和分页门禁全部保持生效。
+- XHS 配置旧 `download_images` 字段被删除且没有兼容分支。
+
+失败停止点：任一 runner 可完成 URL-only 任务、冻结输入未包含图片契约或失败后仍 finalized 时停止。
+
+产物：runner 变更、临时 dry-run 状态、测试报告和独立 commit。
+
+#### I-12：五平台主程序综合回归
+
+前置条件：I-11 通过，五个平台单元和平台适配测试均通过。
+
+实施动作：
+
+- 运行根项目全量测试、Ruff、编译和冻结文件验证。
+- 运行 MediaCrawler 全量非外部依赖测试；Redis 等环境依赖必须单独标明，不能把代码失败归为环境。
+- 使用 fixture 执行五平台临时 SQLite + 临时媒体根端到端测试。
+- 对每个平台执行不超过 10 帖的 `--no-import --download-images` 真实小样；只验证 staging 和
+  manifest，不触碰默认库。
+- 对 B站、微博、知乎、抖音使用通用持久登录态；XHS 严格使用独立账号工作流。真实小样不是正式
+  数量任务，不提交发现 checkpoint。
+
+通用验证命令基线：
+
+```bash
+source .venv/bin/activate
+python -m pytest
+python -m ruff check \
+  src \
+  scripts \
+  tests \
+  apps/admin_api
+python -m compileall -q \
+  src \
+  scripts \
+  tests
+python scripts/verify_frozen_files.py
+```
+
+MediaCrawler 验证：
+
+```bash
+cd tools/MediaCrawler
+uv run pytest
+```
+
+验收标准：
+
+- 根项目全量测试 0 失败；静态检查、编译、冻结校验全部通过。
+- MediaCrawler 与图片有关测试 0 失败；外部服务跳过项有明确清单。
+- 五平台临时端到端均满足第 19.1 节关系等式。
+- 五平台真实小样 manifest 的候选数、文件数、成功数一致，头像/封面/视频/音乐请求为 0。
+- 默认库 SHA、行数、图片关系和现有本地路径与 I-00 基线完全一致。
+
+失败停止点：任一平台只能靠 mock 通过、真实小样字段身份不一致或默认数据发生变化时停止。
+
+产物：全量测试摘要、五平台小样摘要、默认库前后不变量报告。
+
+#### I-13：治理文档、运维文档与冻结哈希同步
+
+前置条件：I-12 代码和综合回归通过，接口和完成语义已经稳定。
+
+实施动作：
+
+- 按第 16.3 节更新正式契约、架构、持久化、字段覆盖和五个平台文档。
+- 更新运维命令、失败分类、磁盘预检、备份和报告读取顺序。
+- 对受限冻结文档执行明确解冻、更新哈希、重新设为不可变并验证。
+- 文档中的 CLI、字段、文件路径、错误码和摘要必须与实际代码逐项核对。
+
+验收命令：
+
+```bash
+source .venv/bin/activate
+python scripts/verify_frozen_files.py
+git diff --check
+```
+
+验收标准：
+
+- 所有本地 Markdown 链接有效。
+- 代码中每个公开参数、摘要字段、错误码和正式完成谓词均在文档出现。
+- 文档不再声称正式任务只保存 URL，也不保留 XHS 可选图片开关。
+- 冻结文件校验通过，配置哈希与正文一致。
+- 本步骤仍未修改默认库或执行历史补全。
+
+失败停止点：代码/文档语义不一致、冻结校验失败或需要保留未说明兼容层时停止。
+
+产物：治理文档 commit、冻结哈希验证和文档链接报告。
+
+#### I-14：`MAIN_PROGRAM_READY` 总验收
+
+前置条件：I-00 至 I-13 全部通过，无跳过的功能步骤。
+
+实施动作：
+
+- 重新执行 I-12 全量验证。
+- 汇总根项目与 MediaCrawler commit 序列，确认每步可追溯。
+- 复核五平台新记录路径、URL-only 不可降级、头像过滤和视频禁用。
+- 复核默认库及现有图片文件从 I-00 起没有被历史操作修改。
+- 生成 `MAIN_PROGRAM_READY` 验收报告和实现版本号。
+
+验收标准：
+
+- 五个平台都已实现：显式投影、平台会话下载、manifest、根校验、长期晋升、SQLite 写回。
+- 五个平台临时端到端和真实 `--no-import` 小样全部通过。
+- 正式 runner 五阶段已经纳入本地图片完整性，任何平台不能 URL-only 完成。
+- 头像、作者主页、封面、视频、音乐和公式图片过滤有单元与平台调用证据。
+- 根项目和 MediaCrawler 全量相关测试、Ruff、编译、冻结校验全部通过。
+- 默认库 SHA/行数/关系与 I-00 一致；没有执行 `materialize_local_images.py --apply`。
+- 验收报告明确写出 `MAIN_PROGRAM_READY=true`。
+
+失败停止点：任何一项不满足都保持 `MAIN_PROGRAM_READY=false`，禁止进入 H-00。
+
+产物：主程序发布 commit/tag、验收报告、完整测试摘要。到这里主程序开发完成，但整个历史数据
+补全工程尚未完成。
+
+### 18.3 阶段 II：当前数据清理与补全
+
+#### H-00：重新盘点并冻结历史输入
+
+前置条件：I-14 报告存在且 `MAIN_PROGRAM_READY=true`。
+
+实施动作：
+
+- 重新读取当前默认库，而不是沿用 2026-08-07 固定数量。
+- 用已经验收的显式投影计算每平台权威正文图、现有本地关系、误分类、重复变体和缺口。
+- 记录默认库 SHA、`quick_check`、外键、磁盘空间和当前浏览器/账号可用性。
+- 冻结历史 campaign ID、输入数据库 SHA、主程序版本和 MediaCrawler 版本。
+
+验收标准：
+
+- 实时盘点可逐平台复算，权威图总数等于各帖子投影之和。
+- 输入数据库 SHA、主程序 commit、MediaCrawler commit 和 campaign ID 已冻结。
+- `quick_check=ok`、外键违规为 0。
+- 报告只读生成，默认库和图片文件没有变化。
+
+失败停止点：数据库不一致、主程序版本与 I-14 不同或磁盘容量无法估算时停止。
+
+产物：历史输入冻结报告。本文早期数字仅作为差异参考，从本步骤开始以该报告为准。
+
+#### H-01：历史工具实现与数据库副本演练
+
+前置条件：H-00 通过。历史工具直到此步骤才开始实现。
+
+实施动作：
+
+- 实现 `materialize_local_images.py` 的 dry-run、平台选择、批次、恢复、报告、备份和 `--apply`。
+- 实现默认 dry-run 的 `gc_local_images.py`，但不执行删除。
+- 在默认库 SQLite backup 副本上执行第 13.1 节关系清理和投影重建。
+- 复用已经验收的主程序候选、下载、manifest、晋升和 upsert 组件，不复制第二套逻辑。
+
+专属测试：
+
+```bash
+source .venv/bin/activate
+python -m pytest \
+  tests/test_historical_image_materialization.py \
+  tests/test_local_image_backfill.py
+```
+
+验收标准：
+
+- 不带 `--apply` 时数据库和文件 SHA 均不变化。
+- `--apply` 必须先创建可打开、`quick_check=ok` 的 SQLite backup。
+- 数据库副本关系清理结果与 H-00 权威投影精确一致。
+- `web_posts` 及非图片字段逐条哈希不变，发现 checkpoint/seen candidates 完全不变。
+- 工具中没有平台专用第二套投影或下载实现。
+
+失败停止点：dry-run 有写入、副本演练改变主表内容或工具绕过主程序组件时停止。
+
+产物：历史工具 commit、副本演练报告和测试报告。
+
+#### H-02：默认库备份、容量与执行计划门禁
+
+前置条件：H-01 通过。
+
+实施动作：
+
+- 创建默认库一致性 backup，并验证 backup SHA、`quick_check` 和可恢复性。
+- 以每平台小样估算 p50/p95 图片大小、staging 峰值和长期空间。
+- 确认磁盘可用空间至少覆盖估算总量 2 倍和安全余量。
+- 冻结平台执行顺序、批次大小、最大重试、超时、报告目录和操作人停止条件。
+
+验收标准：
+
+- backup 可独立打开，行数、关系数和输入库一致。
+- 容量报告覆盖 staging、长期文件、backup 和日志；空间满足门槛。
+- 执行计划固定为 XHS、B站、微博、知乎、抖音；抖音最后。
+- 本步骤没有关系重建或批量补下载。
+
+失败停止点：backup 无法恢复、空间不足或批次/停止条件未冻结时停止。
+
+产物：默认库 backup、容量报告和冻结执行计划。
+
+#### H-03：小红书现有文件晋升与缺口补齐
+
+前置条件：H-02 通过，XHS 账号状态和租约满足平台文档。
+
+实施动作：
+
+- 先 dry-run 映射现有已验证 XHS 文件到长期目录。
+- 按 SHA 复用现有 17,150 个基线文件；实际数量以 H-00 为准。
+- 只对缺失图片重新取得笔记详情并下载；不重新下载已验证文件。
+- 先固定 10 帖 apply，再按冻结批次扩大。
+
+验收标准：
+
+- 晋升前后每个复用文件 SHA 完全一致。
+- XHS 权威正文图、`content` 行、本地路径和文件数相等。
+- 同图 CDN 变体为 0，作者头像本地路径仍为空。
+- 视频请求和视频文件新增为 0。
+- 每批 `quick_check=ok`、外键为 0、待重试按报告可恢复；进入下一平台前待重试必须为 0 或有用户
+  逐项批准的排除清单。
+
+失败停止点：已有文件 SHA 变化、误下载头像/视频或任一帖子部分提交时停止并从 backup 恢复。
+
+产物：XHS 分批报告、数据库 backup 引用、长期路径和平台完成报告。
+
+#### H-04：B站历史补全
+
+前置条件：H-03 平台完成报告通过。
+
+实施动作：
+
+- 以 H-00 B站权威详情图片为输入，不重新跑关键词发现。
+- 先尝试现有 URL；需要会话时复用 B站持久登录态和文章 Referer。
+- 固定 10 帖 apply 通过后按批次扩大。
+
+验收标准：
+
+- B站权威正文图、数据库 `content` 行、本地路径和文件数相等。
+- 搜索预览图、视频和作者头像下载数为 0。
+- 正文、作者、指标、关键词、发布时间和发现记忆哈希不变。
+- 所有文件 SHA、MIME、尺寸和路径复验通过；待重试归零或逐项批准排除。
+
+失败停止点：详情预览口径混入、登录失效仍继续或非图片字段变化时停止。
+
+产物：B站分批报告和平台完成报告。
+
+#### H-05：微博历史补全
+
+前置条件：H-04 平台完成报告通过。
+
+实施动作：
+
+- 使用 H-00 `image_list`/`mblog.pics` 权威关系和微博会话。
+- 固定 10 帖 apply 后按批次扩大。
+- `pid` 相同且 SHA 已存在时按主程序幂等规则复用。
+
+验收标准：
+
+- 微博权威正文图、数据库关系、本地路径和文件数相等。
+- 每个文件可追溯到微博 ID、pid 和来源顺序。
+- 头像和无图微博不产生文件；非图片字段和发现记忆不变。
+- 待重试归零或有逐项批准排除，数据库完整性通过。
+
+失败停止点：文件无法追溯到帖子、pid 冲突或无效候选被下载时停止。
+
+产物：微博分批报告和平台完成报告。
+
+#### H-06：知乎历史补全
+
+前置条件：H-05 平台完成报告通过。
+
+实施动作：
+
+- 使用 H-00 正文 `image_list`；缺图只走已经验收的 answer/article 详情路径。
+- 固定 10 帖 apply 后按批次扩大。
+- 继续执行公式、头像和作者主页排除。
+
+验收标准：
+
+- 知乎权威正文图、数据库关系、本地路径和文件数相等。
+- `/equation?`、作者头像、作者主页和 zvideo 文件新增均为 0。
+- 详情状态与图片来源一致；非图片字段和发现记忆不变。
+- 待重试归零或有逐项批准排除，数据库完整性通过。
+
+失败停止点：公式/作者资源混入、详情未观察仍提交或内容类型越界时停止。
+
+产物：知乎分批报告和平台完成报告。
+
+#### H-07：抖音历史补全
+
+前置条件：H-06 平台完成报告通过；抖音图片专用不变量已经在 I-09/I-14 验收。
+
+实施动作：
+
+- 先修复当前 `content` 误分类，只保留 H-00 `note_download_url/images[]` 权威关系。
+- 旧签名 URL 先直取；失败时按 `aweme_id` 刷新一次详情图片资产，再下载。
+- 不重新跑关键词发现，不调用视频、音乐或封面请求。
+- 固定 10 帖 apply，覆盖直取成功、详情刷新成功和可恢复失败三类后再扩大。
+
+验收标准：
+
+- 抖音权威正文图、数据库关系、本地路径和文件数相等。
+- 封面、视频 URL、音乐 URL 误分类均为 0。
+- 日志和 spy/计数证明视频、音乐请求及文件新增为 0。
+- 详情刷新只更新图片 URL/资产证据，不改变发现 checkpoint 或其他帖子字段。
+- 待重试归零或有用户逐项批准的排除清单，数据库完整性通过。
+
+失败停止点：视频/音乐/封面路径可达、签名失败被误判永久无效或刷新推进发现记忆时停止。
+
+产物：抖音三类路径报告、分批报告和平台完成报告。
+
+#### H-08：`HISTORICAL_DATA_COMPLETE` 全库验收
+
+前置条件：H-03 至 H-07 五个平台完成报告全部通过。
+
+实施动作：
+
+- 运行第 19.2 节 SQL 和逐文件 SHA/MIME/尺寸/路径校验。
+- 对比 H-00 输入冻结报告，验证非图片字段、主表数量和发现记忆不变量。
+- 审计无引用文件、`.part`、视频/音乐目录新增和磁盘余量；GC 只 dry-run。
+- 汇总所有 backup、批次报告、排除清单和平台完成报告。
+
+验收标准：
+
+- 五个平台 `relation_mismatches=0`、`local_path_mismatches=0`。
+- 所有非空本地路径文件存在且 SHA、MIME、尺寸一致；路径越界和冲突为 0。
+- 头像、作者主页、封面、视频、音乐和公式图片不在正式正文本地集合。
+- `quick_check=ok`、外键违规为 0；主表及非图片字段不变量通过。
+- 待重试为 0，或每个排除项都有用户逐项批准且不计成功。
+- 最终报告明确写出 `HISTORICAL_DATA_COMPLETE=true`。
+
+失败停止点：任何 mismatch、缺失文件、未经批准排除或发现记忆变化都不能宣布完成。
+
+产物：全库验收报告、最终数据库 SHA、长期媒体清单 SHA、backup 索引和工程完成 commit。
 
 ## 19. 验收标准
 
@@ -722,8 +1503,8 @@ post_images_count
 
 ### 19.2 历史全量验收
 
-- 权威正文图总数以迁移时默认库实时重算为准；当前基线为 57,146。
-- 每个权威正文图片行都有本地路径，当前预期缺口从 39,996 降为 0。
+- 权威正文图总数以 H-00 实时重算为准；2026-08-07 当前基线为 57,143。
+- 每个权威正文图片行都有本地路径；2026-08-07 当前基线缺口为 39,993，最终以 H-00 为准并降为 0。
 - 作者头像仍为可选远程 URL，不因未本地化导致失败。
 - `web_posts` 总行数不因补下载变化。
 - 抖音非正文媒体误分类为 0，知乎作者主页误分类为 0，小红书变体重复为 0。
@@ -772,13 +1553,32 @@ ORDER BY platform_key;
 
 ## 21. 完成定义
 
-只有以下事项全部完成，本工程任务才算完成：
+工程有两个不能混淆的完成状态。
 
-1. 五平台显式正文图投影替换通用递归提取。
-2. 五平台安全图片下载、manifest、长期晋升和 SQLite 写回全部实现。
-3. 正式 runner 把本地图片完整性纳入现有冻结完成门禁。
-4. 单元、MediaCrawler、执行器、临时 SQLite 和每平台真实小样全部通过。
-5. 历史误分类修复完成，已有小红书文件无损晋升，历史缺口补齐或有独立批准的排除项。
+### 21.1 主程序完成：`MAIN_PROGRAM_READY`
+
+只有以下事项全部完成，才允许从阶段 I 进入历史数据阶段：
+
+1. I-00 至 I-13 逐步验收全部通过，没有被跳过或事后补签的步骤。
+2. 五平台显式正文图投影替换通用递归提取，头像等非正文资源被自动过滤。
+3. 五平台安全图片下载、manifest、根项目校验、长期晋升和 SQLite 写回全部实现。
+4. 正式 runner 把本地图片完整性纳入现有冻结完成门禁，URL-only 无法完成。
+5. 单元、MediaCrawler、执行器、临时 SQLite、临时媒体目录和每平台真实小样全部通过。
 6. 视频、音乐和作者头像未进入正文图片本地化路径。
 7. 受限治理文档、平台文档、数据持久化文档和冻结哈希与代码一致。
-8. 默认库、长期文件目录、运行报告和数据库备份均通过最终审计。
+8. 默认库和现有历史文件从 I-00 起保持不变。
+9. I-14 报告明确记录 `MAIN_PROGRAM_READY=true`。
+
+达到这里表示主程序可以正确处理以后新抓的图文，但不表示当前数据库历史图片已经补齐。
+
+### 21.2 整体工程完成：`HISTORICAL_DATA_COMPLETE`
+
+只有 `MAIN_PROGRAM_READY=true` 后继续完成以下事项，整个工程才算完成：
+
+1. H-00 重新盘点并冻结当前数据，而不是直接使用本文早期容量数字。
+2. H-01 至 H-07 按顺序完成工具、副本演练、备份和五平台历史处理。
+3. 历史误分类修复完成，已有小红书文件无损晋升，历史缺口补齐或存在用户逐项批准的排除项。
+4. 默认库、长期文件目录、运行报告和数据库备份通过第 19.2 节全量审计。
+5. H-08 报告明确记录 `HISTORICAL_DATA_COMPLETE=true`。
+
+不得把主程序完成提前汇报为历史数据完成，也不得为了补历史数据而跳过主程序总验收。
