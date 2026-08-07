@@ -28,6 +28,11 @@ from urllib.request import Request, urlopen
 
 from playwright.async_api import async_playwright
 
+from trippostcollect.artifacts.image_candidates import (
+    content_image_candidates,
+    image_items_for_record,
+    normalize_image_url,
+)
 from trippostcollect.artifacts.local_image_backfill import xhs_image_identity
 from crawl_policy import (
     CrawlPolicyBlocked,
@@ -137,8 +142,6 @@ PLATFORM_REQUIRED_METRICS: dict[str, tuple[tuple[str, ...], ...]] = {
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".svg", ".img"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm"}
 AUTHOR_FIELD_MARKERS = ("author", "user", "nickname", "avatar", "fans", "follower", "follow", "up")
-IMAGE_URL_KEYS = ("cover", "image", "img", "pic", "avatar", "note_download")
-URL_RE = re.compile(r"https?://[^\s\"'<>,，]+", re.I)
 VIDEO_URL_RE = re.compile(r"(?i)(?:/(?:video|share/video)/\d+|\.(?:mp4|m4v|mov|webm|flv|m3u8|mpd)(?:[?#]|$))")
 CHINA_TZ = timezone(timedelta(hours=8))
 TIMESTAMP_MIN = 946_684_800
@@ -767,56 +770,6 @@ def published_at_for_record(record: dict[str, Any]) -> str | None:
     return None
 
 
-def normalize_image_url(value: Any) -> str | None:
-    if not value:
-        return None
-    text = str(value).strip().rstrip(").];")
-    if text.startswith("//"):
-        text = "https:" + text
-    return text if text.startswith(("http://", "https://")) else None
-
-
-def extract_image_urls(value: Any, *, key_hint: str = "") -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    if isinstance(value, dict):
-        for key, child in value.items():
-            items.extend(extract_image_urls(child, key_hint=str(key)))
-        return items
-    if isinstance(value, list):
-        for child in value:
-            items.extend(extract_image_urls(child, key_hint=key_hint))
-        return items
-    if not isinstance(value, str):
-        return items
-
-    key_lower = key_hint.lower()
-    key_is_image_like = any(marker in key_lower for marker in IMAGE_URL_KEYS)
-    if key_is_image_like:
-        image_url = normalize_image_url(value)
-        if image_url and "," not in value and "，" not in value:
-            role = "author_avatar" if "avatar" in key_lower else "content"
-            return [{"url": image_url, "role": role, "source_key": key_hint}]
-
-    for match in URL_RE.finditer(value):
-        url = normalize_image_url(match.group(0))
-        if url and (key_is_image_like or any(marker in url.lower() for marker in IMAGE_URL_KEYS)):
-            role = "author_avatar" if "avatar" in key_lower else "content"
-            items.append({"url": url, "role": role, "source_key": key_hint})
-    return items
-
-
-def dedupe_image_urls(record: dict[str, Any]) -> list[dict[str, Any]]:
-    seen: set[tuple[str, str]] = set()
-    result: list[dict[str, Any]] = []
-    for item in extract_image_urls(record):
-        key = (item["role"], item["url"])
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(item)
-    return result
-
-
 def is_video_record(platform_key: str, record: dict[str, Any]) -> bool:
     if platform_key == "bilibili" and first_value(record, "video_id", "video_url", "bvid", "aid"):
         return True
@@ -1151,7 +1104,7 @@ def row_for_record(
 ) -> dict[str, Any]:
     content_text = content_text_for_record(platform_key, record)
     canonical_url = canonical_url_for_record(platform_key, record)
-    image_items = dedupe_image_urls(record)
+    image_items = image_items_for_record(platform_key, record)
     keyword_value = str(record.get("source_keyword") or keyword or "")
     metrics = {
         "liked_count": parse_int(first_value(record, "liked_count", "voteup_count")),
@@ -1164,7 +1117,14 @@ def row_for_record(
     author = {
         "nickname": first_value(record, "nickname", "user_nickname", "user_name", "author_name"),
         "creator_hash": first_value(record, "user_id", "creator_id", "creator_hash", "author_id"),
-        "avatar_url": first_value(record, "avatar_url", "avatar", "user_avatar"),
+        "avatar_url": first_value(
+            record,
+            "avatar_url",
+            "author_avatar",
+            "author_avatar_url",
+            "avatar",
+            "user_avatar",
+        ),
         "followers_count": parse_int(
             first_value(
                 record,
@@ -1268,7 +1228,7 @@ def validate_formal_record(platform_key: str, record: dict[str, Any], seen: set[
         reasons.append("missing_author_id")
     if not first_value(record, "nickname", "user_nickname", "user_name", "author_name", "author"):
         reasons.append("missing_author_name")
-    content_images = [item for item in dedupe_image_urls(record) if item.get("role") == "content"]
+    content_images = content_image_candidates(platform_key, record)
     if not content_images:
         detail_status = str(record.get("content_detail_status") or "")
         if (
