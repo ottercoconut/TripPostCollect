@@ -423,6 +423,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest_paths=manifests,
             project_root=PROJECT_ROOT,
             media_root=LOCAL_MEDIA_ROOT,
+            allow_xhs_detail_index_match=True,
         )
 
         with sqlite3.connect(db_path) as conn:

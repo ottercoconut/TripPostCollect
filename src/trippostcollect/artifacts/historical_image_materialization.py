@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from trippostcollect.artifacts.image_candidates import (
     ImageCandidate,
@@ -23,6 +24,7 @@ from trippostcollect.artifacts.image_materialization import (
 )
 from trippostcollect.artifacts.image_manifest import (
     ImageManifestEntry,
+    ImageManifestError,
     manifest_sha256,
     parse_manifest,
     validate_post_manifest,
@@ -593,12 +595,61 @@ def _manifest_staging_root(manifest_path: Path, entry: ImageManifestEntry) -> Pa
     return manifest_path.parent
 
 
+def _validate_xhs_detail_index_manifest(
+    entries: Sequence[ImageManifestEntry],
+    candidates: Sequence[ImageCandidate],
+) -> tuple[ImageManifestEntry, ...]:
+    """Allow current signed-detail CDN variants only at the same post/index."""
+
+    if len(entries) != len(candidates):
+        raise ImageManifestError(
+            "image_manifest_count_mismatch",
+            f"manifest rows={len(entries)} expected={len(candidates)}",
+        )
+    indexed = {(entry.image_role, entry.source_index): entry for entry in entries}
+    if len(indexed) != len(entries):
+        raise ImageManifestError(
+            "image_manifest_identity_mismatch", "duplicate XHS detail image index"
+        )
+    ordered: list[ImageManifestEntry] = []
+    for candidate in candidates:
+        entry = indexed.get((candidate.image_role, candidate.source_index))
+        if entry is None or any(
+            (
+                candidate.platform_key != "xhs",
+                entry.platform_key != candidate.platform_key,
+                entry.platform_post_id != candidate.platform_post_id,
+                entry.source_key != candidate.source_key,
+                entry.fetch_status != "downloaded",
+            )
+        ):
+            raise ImageManifestError(
+                "image_manifest_identity_mismatch",
+                f"XHS detail manifest does not match post/index {candidate.source_index}",
+            )
+        source_hosts = {
+            str(urlsplit(value).hostname or "").lower()
+            for value in (candidate.source_url, entry.source_url)
+        }
+        if not source_hosts or any(
+            host != "xhscdn.com" and not host.endswith(".xhscdn.com")
+            for host in source_hosts
+        ):
+            raise ImageManifestError(
+                "image_manifest_identity_mismatch",
+                "XHS detail index fallback requires trusted XHS CDN URLs",
+            )
+        ordered.append(entry)
+    return tuple(ordered)
+
+
 def promote_downloaded_plan(
     plan: HistoricalRelationshipPlan,
     *,
     manifest_paths: Sequence[str | Path],
     project_root: str | Path,
     media_root: str | Path,
+    allow_xhs_detail_index_match: bool = False,
 ) -> tuple[HistoricalRelationshipPlan, dict[str, Any]]:
     """Validate an exact crawler manifest batch and promote it into a historical plan."""
 
@@ -638,6 +689,8 @@ def promote_downloaded_plan(
 
     promoted_posts: list[HistoricalPostPlan] = []
     promoted_images = reused_images = promoted_bytes = 0
+    strict_identity_images = detail_index_identity_images = 0
+    stable_asset_key_matches = source_url_matches = 0
     for post in plan.posts:
         candidates = [
             ImageCandidate(
@@ -652,11 +705,24 @@ def promote_downloaded_plan(
             for item in post.prepared_images
         ]
         rows = entries_by_post[(post.platform_key, post.platform_post_id)]
-        ordered_entries = validate_post_manifest(
-            [entry for entry, _path in rows],
-            candidates,
-            require_downloaded=True,
-        )
+        manifest_entries = [entry for entry, _path in rows]
+        identity_match_mode = "strict_manifest_v1"
+        try:
+            ordered_entries = validate_post_manifest(
+                manifest_entries,
+                candidates,
+                require_downloaded=True,
+            )
+            strict_identity_images += len(ordered_entries)
+        except ImageManifestError:
+            if not allow_xhs_detail_index_match or post.platform_key != "xhs":
+                raise
+            ordered_entries = _validate_xhs_detail_index_manifest(
+                manifest_entries,
+                candidates,
+            )
+            identity_match_mode = "historical_xhs_detail_post_index_v1"
+            detail_index_identity_images += len(ordered_entries)
         manifest_path_by_index = {
             entry.source_index: manifest_path for entry, manifest_path in rows
         }
@@ -667,6 +733,10 @@ def promote_downloaded_plan(
             ordered_entries,
             strict=True,
         ):
+            stable_asset_key_matches += int(
+                entry.source_asset_key == candidate.source_asset_key
+            )
+            source_url_matches += int(entry.source_url == candidate.source_url)
             manifest_path = manifest_path_by_index[entry.source_index]
             staging_root = _manifest_staging_root(manifest_path, entry)
             staged = validate_image_file(
@@ -708,6 +778,9 @@ def promote_downloaded_plan(
                     "local_file": {
                         "source": "historical_crawler_download_v1",
                         "source_url": promoted.source_url,
+                        "download_source_url": entry.source_url,
+                        "download_source_asset_key": entry.source_asset_key,
+                        "identity_match_mode": identity_match_mode,
                         "size_bytes": promoted.size_bytes,
                         "manifest_path": manifest_path.relative_to(
                             resolved_project_root
@@ -750,6 +823,10 @@ def promote_downloaded_plan(
         "promoted_images": promoted_images,
         "reused_images": reused_images,
         "promoted_bytes": promoted_bytes,
+        "strict_identity_images": strict_identity_images,
+        "detail_index_identity_images": detail_index_identity_images,
+        "stable_asset_key_matches": stable_asset_key_matches,
+        "source_url_matches": source_url_matches,
         "manifest_evidence": manifest_evidence,
     }
 

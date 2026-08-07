@@ -559,6 +559,58 @@ def test_downloaded_manifest_promotes_only_the_exact_missing_historical_post(
         == "historical_crawler_download_v1"
     )
 
+    variant_url = "https://sns-webpic-qc.xhscdn.com/current-detail/body-variant"
+    variant_manifest = platform_root / "variant_manifest.jsonl"
+    write_manifest_atomic(
+        variant_manifest,
+        [
+            ImageManifestEntry(
+                schema_version=1,
+                platform_key="xhs",
+                platform_post_id="xhs-2",
+                image_role="content",
+                source_index=0,
+                source_key="image_list",
+                source_asset_key="xhs:path:/current-detail/body-variant",
+                source_url=variant_url,
+                fetch_status="downloaded",
+                attempts=1,
+                http_status=200,
+                staging_path=staged.path.relative_to(platform_root).as_posix(),
+                size_bytes=staged.size_bytes,
+                mime_type=staged.mime_type,
+                width=staged.width,
+                height=staged.height,
+                sha256=staged.sha256,
+                error_code=None,
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="manifest does not match candidate"):
+        promote_downloaded_plan(
+            plan,
+            manifest_paths=[variant_manifest],
+            project_root=tmp_path,
+            media_root=media_root,
+        )
+
+    fallback_promoted, fallback_report = promote_downloaded_plan(
+        plan,
+        manifest_paths=[variant_manifest],
+        project_root=tmp_path,
+        media_root=media_root,
+        allow_xhs_detail_index_match=True,
+    )
+    assert fallback_report["detail_index_identity_images"] == 1
+    assert fallback_report["stable_asset_key_matches"] == 0
+    assert fallback_report["source_url_matches"] == 0
+    assert (
+        fallback_promoted.posts[0].prepared_images[0]["local_file"][
+            "identity_match_mode"
+        ]
+        == "historical_xhs_detail_post_index_v1"
+    )
+
 
 def test_gc_defaults_to_report_only_and_requires_explicit_confirmation(tmp_path: Path) -> None:
     db_path = _fixture_database(tmp_path)
