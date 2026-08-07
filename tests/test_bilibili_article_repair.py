@@ -261,6 +261,102 @@ def test_retryable_selection_uses_oldest_due_time(tmp_path: Path) -> None:
     assert [str(row["platform_post_id"]) for row in selected] == ["1002", "1003", "1001"]
 
 
+def test_operator_exclusion_terminalizes_retryables_without_target_changes(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=2)
+    target_sha256 = repair.sha256_file(target)
+    backup = tmp_path / "backup.sqlite"
+    repair.create_online_backup(target, backup)
+    state = tmp_path / "state.sqlite"
+    config = config_for(
+        target,
+        state,
+        backup,
+        tmp_path / "reports",
+        apply=False,
+        expected_sha256=target_sha256,
+    )
+    repair.run_repair(config)
+    with repair.sqlite_connect(state) as connection:
+        connection.execute(
+            """
+            UPDATE repair_items
+            SET status='retryable', attempt_count=6,
+                last_error_type='BilibiliArticleDetailError',
+                last_error_code=0, last_error='no parseable body',
+                next_retry_at='2026-08-08T00:00:00+00:00'
+            """
+        )
+        repair.set_meta(
+            connection,
+            {
+                "global_next_request_at": "2026-08-08T00:00:00+00:00",
+                "global_cooldown_reason": "BilibiliArticleDetailError:0",
+                "global_retryable_streak": 10,
+            },
+        )
+        connection.commit()
+
+    result = repair.operator_exclude_retryable_items(
+        db_path=target,
+        state_path=state,
+        report_dir=tmp_path / "exclusion-reports",
+        platform_post_ids=frozenset({"1001", "1002"}),
+        reason="用户批准保留原记录并排除反复不可解析项",
+        apply=True,
+        confirm_default_db_repair=False,
+    )
+
+    assert result["excluded_count"] == 2
+    assert result["status_counts_before"]["retryable"] == 2
+    assert result["status_counts_after"]["retryable"] == 0
+    assert result["status_counts_after"]["invalid_detail"] == 0
+    assert result["status_counts_after"]["operator_excluded"] == 2
+    assert result["repair_state_validation_after"]["ok"] is True
+    assert result["external_invariants_after"]["ok"] is True
+    assert repair.sha256_file(target) == target_sha256
+    with repair.sqlite_connect(state, readonly=True) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM repair_events WHERE event_type='operator_excluded'"
+        ).fetchone()[0] == 2
+        meta = repair.meta_values(connection)
+    assert "global_next_request_at" not in meta
+    assert "global_cooldown_reason" not in meta
+    assert meta["global_retryable_streak"] == "0"
+    assert Path(result["report_path"]).is_file()
+
+
+def test_operator_exclusion_rejects_non_retryable_items(tmp_path: Path) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=1)
+    backup = tmp_path / "backup.sqlite"
+    repair.create_online_backup(target, backup)
+    state = tmp_path / "state.sqlite"
+    repair.run_repair(
+        config_for(
+            target,
+            state,
+            backup,
+            tmp_path / "reports",
+            apply=False,
+            expected_sha256=repair.sha256_file(target),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="only accepts retryable items"):
+        repair.operator_exclude_retryable_items(
+            db_path=target,
+            state_path=state,
+            report_dir=tmp_path / "exclusion-reports",
+            platform_post_ids=frozenset({"1001"}),
+            reason="不能排除尚未尝试的记录",
+            apply=True,
+            confirm_default_db_repair=False,
+        )
+
+
 def test_legacy_state_migrates_trailing_retryables_to_exponential_cooldown(
     tmp_path: Path,
 ) -> None:

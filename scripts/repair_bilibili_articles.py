@@ -43,7 +43,13 @@ from trippostcollect.core.paths import (
 
 UTC = timezone.utc
 TERMINAL_STATUSES = frozenset(
-    {"succeeded", "permanent_unavailable", "invalid_detail", "conflict"}
+    {
+        "succeeded",
+        "permanent_unavailable",
+        "invalid_detail",
+        "operator_excluded",
+        "conflict",
+    }
 )
 REPAIRABLE_STATUSES = frozenset({"pending", "retryable"})
 STATE_SCHEMA_VERSION = 1
@@ -1787,6 +1793,211 @@ def repair_lock(state_path: Path) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def operator_exclude_retryable_items(
+    *,
+    db_path: Path,
+    state_path: Path,
+    report_dir: Path,
+    platform_post_ids: frozenset[str],
+    reason: str,
+    apply: bool,
+    confirm_default_db_repair: bool,
+) -> dict[str, Any]:
+    """Terminalize explicitly approved retryables without changing target rows."""
+
+    requested_ids = sorted(
+        {str(value).strip() for value in platform_post_ids if str(value).strip()}
+    )
+    operator_reason = str(reason or "").strip()
+    if not requested_ids:
+        raise RuntimeError("operator exclusion requires at least one platform post ID")
+    if not operator_reason:
+        raise RuntimeError("operator exclusion requires a non-empty reason")
+    if db_path.resolve() == DEFAULT_DB.resolve() and not confirm_default_db_repair:
+        raise RuntimeError(
+            "default database operator exclusion requires --confirm-default-db-repair"
+        )
+    if not state_path.is_file():
+        raise RuntimeError(f"repair state database does not exist: {state_path}")
+
+    with repair_lock(state_path):
+        with sqlite_connect(state_path) as state_connection:
+            meta = meta_values(state_connection)
+            if not meta:
+                raise RuntimeError("repair state has no frozen metadata")
+            if meta.get("target_db_path") != str(db_path.resolve()):
+                raise RuntimeError("repair state belongs to a different target database")
+
+            validation_before = repair_state_validation(
+                db_path,
+                state_connection,
+                meta,
+            )
+            if not validation_before["ok"]:
+                raise RuntimeError(
+                    f"operator exclusion preflight validation failed: {validation_before}"
+                )
+            invariants_before = assert_external_invariants(db_path, meta)
+            counts_before = state_counts(state_connection)
+            placeholders = ",".join("?" for _ in requested_ids)
+            rows = state_connection.execute(
+                f"""
+                SELECT * FROM repair_items
+                WHERE platform_post_id IN ({placeholders})
+                ORDER BY platform_post_id
+                """,
+                requested_ids,
+            ).fetchall()
+            found_ids = {str(row["platform_post_id"]) for row in rows}
+            missing_ids = sorted(set(requested_ids) - found_ids)
+            if missing_ids:
+                raise RuntimeError(
+                    f"operator exclusion IDs are absent from repair state: {missing_ids}"
+                )
+            invalid_statuses = {
+                str(row["platform_post_id"]): str(row["status"])
+                for row in rows
+                if str(row["status"]) != "retryable"
+            }
+            if invalid_statuses:
+                raise RuntimeError(
+                    "operator exclusion only accepts retryable items: "
+                    f"{invalid_statuses}"
+                )
+
+            item_evidence = [
+                {
+                    "web_post_id": int(row["web_post_id"]),
+                    "platform_post_id": str(row["platform_post_id"]),
+                    "attempt_count": int(row["attempt_count"]),
+                    "last_error_type": row["last_error_type"],
+                    "last_error_code": row["last_error_code"],
+                    "last_error": row["last_error"],
+                }
+                for row in rows
+            ]
+
+            excluded_at = utc_now()
+            if apply:
+                state_connection.execute("BEGIN IMMEDIATE")
+                try:
+                    for row in rows:
+                        update = state_connection.execute(
+                            """
+                            UPDATE repair_items
+                            SET status='operator_excluded', next_retry_at=NULL,
+                                updated_at=?
+                            WHERE web_post_id=? AND status='retryable'
+                            """,
+                            (excluded_at, int(row["web_post_id"])),
+                        )
+                        if update.rowcount != 1:
+                            raise RuntimeError(
+                                "retryable item changed during operator exclusion"
+                            )
+                        add_event(
+                            state_connection,
+                            "operator_excluded",
+                            item=row,
+                            details={
+                                "reason": operator_reason,
+                                "prior_status": "retryable",
+                                "attempt_count": int(row["attempt_count"]),
+                                "last_error_type": row["last_error_type"],
+                                "last_error_code": row["last_error_code"],
+                                "last_error": row["last_error"],
+                            },
+                        )
+                    remaining_retryable = int(
+                        state_connection.execute(
+                            "SELECT COUNT(*) FROM repair_items WHERE status='retryable'"
+                        ).fetchone()[0]
+                    )
+                    set_meta(
+                        state_connection,
+                        {
+                            "operator_exclusion_at": excluded_at,
+                            "operator_exclusion_reason": operator_reason,
+                            "operator_exclusion_ids_sha256": sha256_text(
+                                json_text(requested_ids)
+                            ),
+                        },
+                    )
+                    if remaining_retryable == 0:
+                        state_connection.execute(
+                            """
+                            DELETE FROM repair_meta
+                            WHERE key IN (
+                                'global_next_request_at',
+                                'global_cooldown_reason'
+                            )
+                            """
+                        )
+                        set_meta(
+                            state_connection,
+                            {
+                                "global_retryable_streak": 0,
+                                "global_retryable_last_success_at": excluded_at,
+                            },
+                        )
+                    state_connection.commit()
+                except Exception:
+                    state_connection.rollback()
+                    raise
+
+            counts_after = state_counts(state_connection)
+            validation_after = repair_state_validation(
+                db_path,
+                state_connection,
+                meta,
+            )
+            if not validation_after["ok"]:
+                raise RuntimeError(
+                    f"operator exclusion postflight validation failed: {validation_after}"
+                )
+            invariants_after = assert_external_invariants(db_path, meta)
+            target = target_summary(db_path)
+
+        payload = {
+            "schema_version": 1,
+            "action": "operator_exclude_retryables",
+            "generated_at": utc_now(),
+            "apply": apply,
+            "reason": operator_reason,
+            "requested_ids": requested_ids,
+            "excluded_count": len(rows) if apply else 0,
+            "items": item_evidence,
+            "status_counts_before": counts_before,
+            "status_counts_after": counts_after,
+            "repair_state_validation_before": validation_before,
+            "repair_state_validation_after": validation_after,
+            "external_invariants_before": invariants_before,
+            "external_invariants_after": invariants_after,
+            "target": target,
+            "state_db": str(state_path.resolve()),
+            "target_db": str(db_path.resolve()),
+        }
+        report_path = ensure_dir(report_dir) / (
+            f"operator_exclusion_{utc_stamp()}.json"
+        )
+        report_path.write_text(
+            json_text(payload, pretty=True) + "\n",
+            encoding="utf-8",
+        )
+        payload["report_path"] = str(report_path)
+        if apply:
+            with sqlite_connect(state_path) as state_connection:
+                set_meta(
+                    state_connection,
+                    {
+                        "operator_exclusion_report_path": report_path,
+                        "operator_exclusion_report_sha256": sha256_file(report_path),
+                    },
+                )
+                state_connection.commit()
+        return payload
+
+
 def load_only_ids(path_value: str | None) -> frozenset[str]:
     if not path_value:
         return frozenset()
@@ -1827,6 +2038,14 @@ def parse_args() -> argparse.Namespace:
         help="restrict a pilot to the first N source-manifest rows (0 means all)",
     )
     parser.add_argument("--only-ids-file")
+    parser.add_argument(
+        "--exclude-retryable-id",
+        action="append",
+        default=[],
+        help="operator-approved platform post ID to terminalize without target changes",
+    )
+    parser.add_argument("--operator-exclusion-reason")
+    parser.add_argument("--confirm-operator-exclusion", action="store_true")
     parser.add_argument("--continuous", action="store_true")
     parser.add_argument("--stop-when-scope-attempted", action="store_true")
     return parser.parse_args()
@@ -1864,6 +2083,26 @@ def main() -> int:
         if args.report_dir
         else (BILIBILI_REPAIR_OUTPUT / state_path.stem).resolve()
     )
+    if args.exclude_retryable_id:
+        if args.continuous or args.stop_when_scope_attempted or args.only_ids_file:
+            raise SystemExit(
+                "operator exclusion cannot be combined with repair selection or continuous mode"
+            )
+        if not args.operator_exclusion_reason:
+            raise SystemExit("--operator-exclusion-reason is required")
+        if args.apply and not args.confirm_operator_exclusion:
+            raise SystemExit("--apply operator exclusion requires --confirm-operator-exclusion")
+        result = operator_exclude_retryable_items(
+            db_path=db_path,
+            state_path=state_path,
+            report_dir=report_dir,
+            platform_post_ids=frozenset(args.exclude_retryable_id),
+            reason=str(args.operator_exclusion_reason),
+            apply=bool(args.apply),
+            confirm_default_db_repair=bool(args.confirm_default_db_repair),
+        )
+        print(json_text(result, pretty=True))
+        return 0
     backup_path = (
         Path(args.backup_path).expanduser().resolve()
         if args.backup_path

@@ -132,6 +132,7 @@ def validate_pilot_gate(config: SupervisorConfig) -> dict[str, Any]:
             "succeeded",
             "permanent_unavailable",
             "invalid_detail",
+            "operator_excluded",
         )
     )
     if int(scope.get("total") or 0) != config.source_limit:
