@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import replace
 import html
 import json
 import os
@@ -19,7 +20,7 @@ import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from hashlib import md5
+from hashlib import md5, sha256
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlencode, urlparse
@@ -36,7 +37,10 @@ from trippostcollect.artifacts.image_candidates import (
 )
 from trippostcollect.artifacts.image_manifest import (
     ImageManifestEntry,
+    ImageManifestError,
     manifest_sha256,
+    parse_manifest,
+    validate_post_manifest,
     write_manifest_atomic,
 )
 from trippostcollect.artifacts.image_materialization import (
@@ -44,6 +48,7 @@ from trippostcollect.artifacts.image_materialization import (
     ImageMaterializationError,
     MaterializedImage,
     SUPPORTED_IMAGE_MIME_TYPES,
+    promote_validated_image,
     safe_platform_post_id,
     validate_image_file,
     write_staging_image,
@@ -266,7 +271,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-per-platform", type=int, default=180, help="Timeout per MediaCrawler platform.")
     parser.add_argument("--login-type", default="cookie", choices=("cookie", "qrcode", "phone"), help="MediaCrawler login type.")
     parser.add_argument("--get-media", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--download-images", action="store_true", help="Download image files for supported image-only platforms. Videos remain disabled.")
+    parser.add_argument(
+        "--download-images",
+        action="store_true",
+        help="Download and verify authoritative post-body images for all selected platforms. Videos remain disabled.",
+    )
+    parser.add_argument(
+        "--media-root",
+        default=str(LOCAL_MEDIA_ROOT),
+        help="Immutable local image root. Overrides are restricted to the project temp directory.",
+    )
     parser.add_argument("--headed", action="store_true", help="Run browser with visible UI.")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path for web_posts import.")
     parser.add_argument(
@@ -1622,10 +1636,15 @@ def collect_formal_records(
     pagination_evidence: dict[str, Any] | None = None,
     enforce_candidate_limit: bool = True,
     completion_mode: str = "target-new-posts",
+    require_local_images: bool = False,
+    localized_identities: set[str] | None = None,
+    materialized_images_by_identity: dict[str, list[MaterializedImage]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if completion_mode not in {"target-new-posts", "source-exhausted"}:
         raise ValueError(f"unsupported completion mode: {completion_mode}")
     quantity_limits_enforced = completion_mode == "target-new-posts"
+    localized = localized_identities or set()
+    materialized = materialized_images_by_identity or {}
     seen: set[str] = set()
     selected: list[dict[str, Any]] = []
     existing_identities = load_existing_formal_identities(db_path)
@@ -1634,6 +1653,7 @@ def collect_formal_records(
     reason_counts: Counter[str] = Counter()
     candidate_count = 0
     parse_errors = 0
+    local_image_failure_count = 0
     stop = False
     for platform_record in summary.get("records") or []:
         output = platform_record.get("output") if isinstance(platform_record, dict) else {}
@@ -1668,6 +1688,11 @@ def collect_formal_records(
                     if not validation["valid"]:
                         reason_counts.update(validation["reasons"])
                         continue
+                    identity = str(validation["identity"])
+                    if require_local_images and identity not in localized:
+                        reason_counts["local_images_incomplete"] += 1
+                        local_image_failure_count += 1
+                        continue
                     seen.add(str(validation["identity"]))
                     is_existing = bool(
                         formal_database_identities(platform_key, record) & existing_identities
@@ -1682,6 +1707,8 @@ def collect_formal_records(
                             "source_path": str(path),
                             "line_number": line_number,
                             "is_new": not is_existing,
+                            "manifest_paths": list((output or {}).get("image_manifest_paths") or []),
+                            "materialized_images": materialized.get(identity),
                         }
                     )
                     if (
@@ -1760,6 +1787,11 @@ def collect_formal_records(
         "new_target_met": new_target_met,
         "source_exhausted_met": source_exhausted_met,
         "completion_met": completion_met,
+        "local_images_required": require_local_images,
+        "local_images_complete": (
+            not require_local_images or local_image_failure_count == 0
+        ),
+        "local_image_failure_count": local_image_failure_count,
         "stop_reason": stop_reason,
         "stop_detail": (
             "unverified_empty_first_page"
@@ -1791,6 +1823,252 @@ def collect_formal_records(
         ][:5],
     }
     return validation_summary, selected
+
+
+def resolve_media_root(
+    value: str | Path,
+    *,
+    project_root: str | Path = PROJECT_ROOT,
+    default_media_root: str | Path = LOCAL_MEDIA_ROOT,
+) -> Path:
+    """Allow the formal media root or an explicit project ``temp/`` override."""
+
+    root = Path(project_root).expanduser().resolve(strict=True)
+    media_root = Path(value).expanduser().resolve()
+    formal_root = Path(default_media_root).expanduser().resolve()
+    temp_root = (root / "temp").resolve()
+    if media_root != formal_root and media_root != temp_root and temp_root not in media_root.parents:
+        raise ImagePersistenceError(
+            "--media-root must be LOCAL_MEDIA_ROOT or a directory below project temp/"
+        )
+    if media_root != root and root not in media_root.parents:
+        raise ImagePersistenceError("media root escapes project root")
+    return media_root
+
+
+def _project_relative_evidence_path(path: Path, project_root: Path) -> str:
+    resolved = path.expanduser().resolve(strict=True)
+    if resolved != project_root and project_root not in resolved.parents:
+        raise ImageMaterializationError(
+            "image_path_escape",
+            f"image evidence escapes project root: {resolved}",
+        )
+    return resolved.relative_to(project_root).as_posix()
+
+
+def _load_manifest_with_evidence(
+    path_value: str | Path,
+    *,
+    project_root: Path,
+) -> tuple[Path, tuple[ImageManifestEntry, ...], dict[tuple[str, str, int], int]]:
+    path = Path(path_value).expanduser().resolve(strict=True)
+    _project_relative_evidence_path(path, project_root)
+    payload = path.read_bytes()
+    entries = parse_manifest(payload)
+    line_numbers: dict[tuple[str, str, int], int] = {}
+    entry_offset = 0
+    for line_number, line in enumerate(payload.decode("utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        entry = entries[entry_offset]
+        entry_offset += 1
+        line_numbers[(entry.platform_key, entry.platform_post_id, entry.source_index)] = line_number
+    return path, entries, line_numbers
+
+
+def materialize_formal_record_images(
+    selected: list[dict[str, Any]],
+    *,
+    project_root: str | Path = PROJECT_ROOT,
+    media_root: str | Path = LOCAL_MEDIA_ROOT,
+    promote: bool,
+) -> tuple[dict[str, Any], dict[str, list[MaterializedImage]], set[str]]:
+    """Verify selected post manifests and optionally promote immutable image files."""
+
+    root = Path(project_root).expanduser().resolve(strict=True)
+    resolved_media_root = Path(media_root).expanduser().resolve()
+    if resolved_media_root != root and root not in resolved_media_root.parents:
+        raise ImagePersistenceError("media root escapes project root")
+
+    cache: dict[
+        Path,
+        tuple[
+            tuple[ImageManifestEntry, ...],
+            dict[tuple[str, str, int], int],
+            str,
+        ],
+    ] = {}
+    materialized_by_identity: dict[str, list[MaterializedImage]] = {}
+    complete_identities: set[str] = set()
+    manifest_evidence: dict[str, str] = {}
+    failures: list[dict[str, Any]] = []
+    expected_images = 0
+    downloaded_images = 0
+    validated_images = 0
+    promoted_images = 0
+    reused_images = 0
+    retryable_failures = 0
+    terminal_failures = 0
+
+    for item in selected:
+        identity = str(item.get("identity") or "")
+        platform_key = str(item.get("platform") or "")
+        record = item.get("record") if isinstance(item.get("record"), dict) else {}
+        candidates = content_image_candidates(platform_key, record)
+        expected_images += len(candidates)
+        post_id = post_id_for_record(platform_key, record)
+        post_manifest_rows: list[
+            tuple[ImageManifestEntry, Path, int]
+        ] = []
+        try:
+            manifest_values = list(dict.fromkeys(item.get("manifest_paths") or []))
+            if not manifest_values:
+                raise ImageManifestError(
+                    "missing_image_manifest",
+                    f"no image manifest is associated with {identity}",
+                )
+            for path_value in manifest_values:
+                unresolved_path = Path(path_value).expanduser()
+                cache_key = unresolved_path.resolve()
+                cached = cache.get(cache_key)
+                if cached is None:
+                    path, entries, line_numbers = _load_manifest_with_evidence(
+                        unresolved_path,
+                        project_root=root,
+                    )
+                    payload_sha256 = sha256(path.read_bytes()).hexdigest()
+                    cached = (entries, line_numbers, payload_sha256)
+                    cache[path] = cached
+                    manifest_evidence[_project_relative_evidence_path(path, root)] = payload_sha256
+                else:
+                    path = cache_key
+                entries, line_numbers, _ = cached
+                for entry in entries:
+                    if entry.platform_key == platform_key and entry.platform_post_id == post_id:
+                        post_manifest_rows.append(
+                            (
+                                entry,
+                                path,
+                                line_numbers[
+                                    (entry.platform_key, entry.platform_post_id, entry.source_index)
+                                ],
+                            )
+                        )
+
+            ordered_entries = validate_post_manifest(
+                [row[0] for row in post_manifest_rows],
+                candidates,
+                require_downloaded=True,
+            )
+            downloaded_images += sum(
+                entry.fetch_status == "downloaded" for entry in ordered_entries
+            )
+            evidence_by_index = {
+                entry.source_index: (manifest_path, line_number)
+                for entry, manifest_path, line_number in post_manifest_rows
+            }
+            post_materialized: list[MaterializedImage] = []
+            for candidate, entry in zip(candidates, ordered_entries, strict=True):
+                manifest_path, manifest_line = evidence_by_index[entry.source_index]
+                staging_root = manifest_path.parent.parent
+                staged_path = staging_root / str(entry.staging_path)
+                validated = validate_image_file(
+                    staged_path,
+                    allowed_root=staging_root,
+                    expected_sha256=entry.sha256,
+                    max_bytes=DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
+                    require_suffix_match=True,
+                )
+                if any(
+                    (
+                        validated.size_bytes != entry.size_bytes,
+                        validated.mime_type != entry.mime_type,
+                        validated.width != entry.width,
+                        validated.height != entry.height,
+                    )
+                ):
+                    raise ImageMaterializationError(
+                        "image_manifest_metadata_mismatch",
+                        f"manifest byte metadata does not match staging file for {identity}",
+                    )
+                validated_images += 1
+                if not promote:
+                    continue
+                promoted = promote_validated_image(
+                    validated,
+                    candidate,
+                    staging_root=staging_root,
+                    media_root=resolved_media_root,
+                    project_root=root,
+                )
+                promoted = replace(
+                    promoted,
+                    manifest_path=_project_relative_evidence_path(manifest_path, root),
+                    manifest_line=manifest_line,
+                )
+                post_materialized.append(promoted)
+                reused_images += int(promoted.reused)
+                promoted_images += int(not promoted.reused)
+            if promote and len(post_materialized) != len(candidates):
+                raise ImageMaterializationError(
+                    "image_manifest_count_mismatch",
+                    f"promoted image count does not match candidates for {identity}",
+                )
+            if promote:
+                materialized_by_identity[identity] = post_materialized
+            complete_identities.add(identity)
+        except (ImageManifestError, ImageMaterializationError, OSError, UnicodeError) as exc:
+            code = getattr(exc, "code", "missing_image_manifest")
+            failed_rows = [row for row in post_manifest_rows if row[0].fetch_status == "failed"]
+            retryable_count = sum(
+                row[0].error_code == "image_download_retryable" for row in failed_rows
+            )
+            failure_count = max(1, len(failed_rows), len(candidates) - len(post_manifest_rows))
+            if code == "image_download_retryable":
+                retryable_count = max(retryable_count, failure_count)
+            retryable_failures += retryable_count
+            terminal_failures += max(0, failure_count - retryable_count)
+            failures.append(
+                {
+                    "identity": identity,
+                    "code": str(code),
+                    "message": str(exc),
+                    "source_path": str(item.get("source_path") or ""),
+                    "line_number": item.get("line_number"),
+                }
+            )
+
+    manifest_items = [
+        {"path": path, "sha256": digest}
+        for path, digest in sorted(manifest_evidence.items())
+    ]
+    aggregate_manifest_sha256 = sha256(
+        json.dumps(manifest_items, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    complete = (
+        len(complete_identities) == len(selected)
+        and validated_images == expected_images
+        and not failures
+    )
+    report = {
+        "required": True,
+        "promotion_required": promote,
+        "candidate_posts": len(selected),
+        "complete_posts": len(complete_identities),
+        "expected_images": expected_images,
+        "downloaded_images": downloaded_images,
+        "validated_images": validated_images,
+        "reused_images": reused_images,
+        "promoted_images": promoted_images,
+        "retryable_failures": retryable_failures,
+        "terminal_failures": terminal_failures,
+        "complete": complete,
+        "manifest_paths": [item["path"] for item in manifest_items],
+        "manifest_sha256": aggregate_manifest_sha256,
+        "manifest_evidence": manifest_items,
+        "failures": failures,
+    }
+    return report, materialized_by_identity, complete_identities
 
 
 def find_existing_post(conn: sqlite3.Connection, row: dict[str, Any]) -> int | None:
@@ -2115,6 +2393,10 @@ def import_valid_records(
     summary: dict[str, Any],
     selected: list[dict[str, Any]],
     db_path: Path,
+    *,
+    project_root: str | Path = PROJECT_ROOT,
+    media_root: str | Path = LOCAL_MEDIA_ROOT,
+    require_local_images: bool = False,
 ) -> dict[str, Any]:
     db_path = ensure_parent(db_path)
     captured_at = str(summary.get("captured_at") or datetime.now(timezone.utc).isoformat(timespec="seconds"))
@@ -2131,8 +2413,15 @@ def import_valid_records(
                 artifact_dir=str(Path(str(summary.get("batch_dir") or "")).resolve()),
                 captured_at=captured_at,
                 keyword=keyword,
+                materialized_images=item.get("materialized_images"),
             )
-            _, was_inserted = upsert_web_post(conn, row)
+            _, was_inserted = upsert_web_post(
+                conn,
+                row,
+                project_root=project_root,
+                media_root=media_root,
+                require_local_images=require_local_images,
+            )
             processed += 1
             inserted += int(was_inserted)
             updated += int(not was_inserted)
@@ -3167,7 +3456,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
     save_path = batch_dir / platform_key / "data"
     log_dir = batch_dir / "logs" / platform_key
     behavior_evidence_path = log_dir / "behavior_evidence.json"
-    image_download_enabled = bool(args.download_images and platform_key == "xhs")
+    image_download_enabled = bool(args.download_images)
     cmd = [
         "uv",
         "run",
@@ -3695,6 +3984,25 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
                 "",
             ]
         )
+    image_materialization = summary.get("image_materialization") or {}
+    if image_materialization:
+        lines.extend(
+            [
+                "## 图片本地化",
+                "",
+                f"- 正式要求：`{image_materialization.get('required', False)}`",
+                f"- 候选帖子：`{image_materialization.get('candidate_posts', 0)}`",
+                f"- 预期正文图：`{image_materialization.get('expected_images', 0)}`",
+                f"- staging 下载：`{image_materialization.get('downloaded_images', 0)}`",
+                f"- 根项目字节复验：`{image_materialization.get('validated_images', 0)}`",
+                f"- 新晋升文件：`{image_materialization.get('promoted_images', 0)}`",
+                f"- 复用文件：`{image_materialization.get('reused_images', 0)}`",
+                f"- 可恢复失败：`{image_materialization.get('retryable_failures', 0)}`",
+                f"- 终态失败：`{image_materialization.get('terminal_failures', 0)}`",
+                f"- 完整：`{image_materialization.get('complete', False)}`",
+                "",
+            ]
+        )
     import_result = summary.get("import_result") or {}
     if import_result:
         db_sync = import_result.get("db_sync") or {}
@@ -3765,9 +4073,17 @@ def main() -> int:
     ):
         raise SystemExit("--start-page greater than 1 requires --resume-summary")
     if args.get_media:
-        raise SystemExit("--get-media 已禁用：当前项目只采集图文内容和图片 URL，不下载媒体或视频。")
+        raise SystemExit(
+            "--get-media 已禁用：请使用 --download-images 启用项目正文图片模式；视频始终禁用。"
+        )
     ensure_prerequisites()
     platforms = selected_platforms(args.platforms)
+    if not args.no_import and not args.download_images:
+        raise SystemExit("正式入库模式必须显式启用 --download-images")
+    try:
+        media_root = resolve_media_root(args.media_root)
+    except ImagePersistenceError as exc:
+        raise SystemExit(str(exc)) from exc
     args.zhihu_detail_urls = []
     if args.zhihu_detail_urls_file:
         if platforms != ["zhihu"]:
@@ -3804,8 +4120,6 @@ def main() -> int:
         raise SystemExit("--xhs-post-interaction is only supported for XHS")
     elif args.behavior_profile != "social_high_risk":
         raise SystemExit("generic MediaCrawler platforms require --behavior-profile social_high_risk")
-    if args.download_images and any(platform != "xhs" for platform in platforms):
-        raise SystemExit("--download-images 目前只允许 xhs：其他平台可能混入视频媒体。")
     resume_records: list[dict[str, Any]] = []
     resume_info: dict[str, Any] | None = None
     resume_identity_values: list[str] = []
@@ -3903,7 +4217,7 @@ def main() -> int:
         os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()
     )
     summary["pagination_evidence"] = pagination_evidence
-    validation, valid_records = collect_formal_records(
+    content_validation, content_valid_records = collect_formal_records(
         summary,
         candidate_hard_limit=candidate_hard_limit,
         target_new_posts=target_new_posts,
@@ -3914,9 +4228,66 @@ def main() -> int:
         ),
         completion_mode=args.completion_mode,
     )
-    validation["content_new_target_met"] = bool(validation.get("new_target_met"))
+    if args.download_images:
+        (
+            image_materialization,
+            materialized_images_by_identity,
+            localized_identities,
+        ) = materialize_formal_record_images(
+            content_valid_records,
+            project_root=PROJECT_ROOT,
+            media_root=media_root,
+            promote=not args.no_import,
+        )
+        validation, valid_records = collect_formal_records(
+            summary,
+            candidate_hard_limit=candidate_hard_limit,
+            target_new_posts=target_new_posts,
+            db_path=args.db,
+            pagination_evidence=pagination_evidence,
+            enforce_candidate_limit=(
+                args.completion_mode == "target-new-posts" and not bool(resume_info)
+            ),
+            completion_mode=args.completion_mode,
+            require_local_images=True,
+            localized_identities=localized_identities,
+            materialized_images_by_identity=materialized_images_by_identity,
+        )
+    else:
+        image_materialization = {
+            "required": False,
+            "promotion_required": False,
+            "candidate_posts": len(content_valid_records),
+            "complete_posts": 0,
+            "expected_images": sum(
+                len(content_image_candidates(str(item["platform"]), item["record"]))
+                for item in content_valid_records
+            ),
+            "downloaded_images": 0,
+            "validated_images": 0,
+            "reused_images": 0,
+            "promoted_images": 0,
+            "retryable_failures": 0,
+            "terminal_failures": 0,
+            "complete": True,
+            "manifest_paths": [],
+            "manifest_sha256": None,
+            "manifest_evidence": [],
+            "failures": [],
+        }
+        validation, valid_records = content_validation, content_valid_records
+    summary["image_materialization"] = image_materialization
+    validation["content_new_target_met"] = bool(content_validation.get("new_target_met"))
+    validation["content_completion_met"] = bool(content_validation.get("completion_met"))
+    validation["image_materialization_complete"] = bool(
+        image_materialization.get("complete")
+    )
     validation["behavior_evidence_ok"] = bool(behavior_validation.get("behavior_ok"))
     validation["policy_evidence_ok"] = bool(behavior_validation.get("policy_ok"))
+    if args.download_images and not image_materialization["complete"]:
+        validation["new_target_met"] = False
+        validation["completion_met"] = False
+        validation["stop_reason"] = "image_materialization_incomplete"
     if not behavior_validation["ok"]:
         validation["new_target_met"] = False
         validation["completion_met"] = False
@@ -3942,6 +4313,9 @@ def main() -> int:
             summary,
             valid_records,
             Path(args.db).expanduser(),
+            project_root=PROJECT_ROOT,
+            media_root=media_root,
+            require_local_images=True,
         )
     inserted = int((summary.get("import_result") or {}).get("inserted_rows") or 0)
     summary["target_new_posts"] = target_new_posts
@@ -3957,6 +4331,7 @@ def main() -> int:
     ) and not bool(import_result_value.get("reason"))
     summary["import_completion_met"] = bool(
         validation["completion_met"]
+        and (not image_materialization["required"] or image_materialization["complete"])
         and (
             args.no_import
             or import_performed

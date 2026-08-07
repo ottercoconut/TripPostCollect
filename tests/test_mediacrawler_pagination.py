@@ -433,3 +433,37 @@ def test_campaign_records_may_exceed_each_run_candidate_budget(tmp_path: Path) -
     assert validation["run_candidate_count"] == 3
     assert validation["new_target_met"] is True
     assert len(selected) == 6
+
+
+def test_local_image_completeness_is_part_of_formal_record_selection(
+    tmp_path: Path,
+) -> None:
+    jsonl_path = tmp_path / "bili" / "jsonl" / "search_contents_1.jsonl"
+    jsonl_path.parent.mkdir(parents=True)
+    record = bilibili_record("requires-local-image")
+    jsonl_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    summary = {
+        "records": [
+            {
+                "output": {
+                    "jsonl_files": [str(jsonl_path)],
+                    "image_manifest_paths": [],
+                }
+            }
+        ]
+    }
+
+    validation, selected = mediacrawler_crawl.collect_formal_records(
+        summary,
+        candidate_hard_limit=1,
+        target_new_posts=1,
+        db_path=tmp_path / "missing.sqlite",
+        require_local_images=True,
+        localized_identities=set(),
+    )
+
+    assert selected == []
+    assert validation["local_images_required"] is True
+    assert validation["local_images_complete"] is False
+    assert validation["completion_met"] is False
+    assert validation["invalid_reason_counts"] == {"local_images_incomplete": 1}
