@@ -2,14 +2,14 @@
 
 ## 状态与目标
 
-本计划已进入分批执行阶段。目标是逐一尝试修复默认库中现有的全部 B站 article 记录：使用 article
+本计划已于 2026-08-07 完成。目标是逐一尝试修复默认库中现有的全部 B站 article 记录：使用 article
 详情重新取得完整正文和正文图片，按原平台 ID 幂等更新，且全过程可恢复、可审计、可回滚。
 
 截至 2026-08-03 03:22（Asia/Shanghai），固定 100 条临时库演练已全部 `succeeded`，其中曾因
 `-509` 待重试的 5 条均在长冷却和 90–120 秒串行间隔下恢复成功。百条逐条校验、图片关系、数据库
-不变量和外部控制面校验全部通过；默认库已增量回写这 100 条并切换到全库 sidecar。全量修复正在
-运行，精确进度以 `data/runtime/bilibili_article_repair/full_20260803/state.sqlite` 为准，不能把百条
-门禁通过报告成全库完成。
+不变量和外部控制面校验全部通过；默认库已增量回写这 100 条并切换到全库 sidecar。最终 sidecar
+为 3,006 `succeeded`、2 `operator_excluded`、1 `invalid_detail`、0 `pending`、0 `retryable`；
+3 条未成功项均保留原库内容，成功项逐条校验和分层实时复取均通过。
 
 计划基线为 3,009 条 B站记录。开始执行前必须重新生成源清单并核对实际数量，不能把 3,009 当作
 永不变化的常量。全部源记录都进入处理清单；明确删除、私密或平台永久不可用的记录也必须留下
@@ -25,7 +25,7 @@
 - `-509`、传输/解析失败采用有限退避；失败候选不进入已处理集合，恢复页不前移。
 - 自动测试覆盖详情正文、多图、短文、限流、解析失败、安全前沿、幂等 upsert、全局指数冷却、
   公平重试、逐条一致性校验、已验收结果原位回写、增量回写、状态克隆及无人值守恢复；当前项目
-  测试结果为 151 项全部通过。
+  测试结果为 153 项全部通过。
 - 3 条真实 `--no-import` 小样全部通过正式校验。两条长文的正文/图片分别由旧库
   `279/3`、`283/3` 恢复为详情 `2947/6`、`1658/7`；一条真实短文为 `266/1` 对详情
   `264/1`，证明验收依赖详情证据，不依赖长度必然增加。
@@ -56,7 +56,8 @@
 
 - repair run ID、源数据库绝对路径与 SHA-256、源清单 SHA-256、代码 commit；
 - `web_posts.id`、平台 ID、原正文 SHA-256、原正文长度、原图片数；
-- 状态 `pending`、`succeeded`、`retryable`、`permanent_unavailable`、`invalid_detail`；
+- 状态 `pending`、`succeeded`、`retryable`、`permanent_unavailable`、`invalid_detail`、
+  `operator_excluded`；后者只允许在用户明确批准保留原记录并终止指定重试项时使用；
 - 请求次数、最后业务/HTTP 错误、下一次允许时间、详情来源、详情正文长度和图片数；
 - 成功更新时的更新时间、更新后正文 SHA-256 和图片 URL 集合 SHA-256。
 
@@ -95,7 +96,7 @@
 
 每批验收：
 
-- `succeeded + retryable + permanent_unavailable + invalid_detail` 等于本批计划数；
+- `succeeded + retryable + permanent_unavailable + invalid_detail + operator_excluded` 等于本批计划数；
 - 成功项主表 ID 不变、关键词不变、`content_detail_status=detail_observed`、来源受信任；
 - `web_posts.post_images_count` 等于 `web_post_images` 中 content 角色行数，也等于详情解析去重图片数；
 - 失败项原正文哈希和图片关系完全不变；
@@ -142,8 +143,9 @@ sidecar 继续；若登录门禁返回 `-101`、`isLogin=false`，或无法证�
 
 从成功项分层随机抽样，至少覆盖当前 Opus、旧 article、长文、多图、短文和图片数未变化记录，重新
 读取真实详情并核对正文哈希/图片 URL 集合。所有待重试清零，或被逐条转为有决定性证据的永久不可用/
-无效详情后，才能宣布“已尝试修复全库”；只有每条可用 article 均成功更新后，才能宣布“可用记录
-全部修复完成”。
+无效详情；若用户明确接受保留原记录并停止重试，也可经受控入口逐条转为 `operator_excluded`，但
+必须单独报告且不得计入成功数。满足这些条件后才能宣布“已尝试修复全库”；只有成功项完成逐条校验，
+且未成功项的保留边界明确，才能按本轮经用户确认的口径宣布完成。
 
 ## 回滚
 
@@ -198,3 +200,26 @@ supervisor 随后完成以下受检步骤：
 全量运行仍执行每次会话后的实时登录门禁；后续若返回 `-101`、`isLogin=false` 或无法证明登录
 有效，supervisor 必须中止，不能自动重启。只有全量 `pending=0`、`retryable=0` 且最终数据库复验
 通过后，才能宣布本计划完成。
+
+2026-08-07 13:45（Asia/Shanghai），用户明确批准忽略两条反复不可解析的待重试项，并把成功项视为
+本轮全量完成。执行时未删除任何目标库记录：
+
+- `22878089`、`21810656` 均已尝试 6 次，最后错误为 `code=0` 但没有可解析正文；通过受控入口由
+  `retryable` 转为 `operator_excluded`，原正文、原始证据和图片关系保持不变；
+- `48982378` 保持 `invalid_detail`，平台决定性返回为 `-404 啥都木有`，原记录同样保留；
+- 操作前 sidecar 在线备份为
+  `data/backups/bilibili_article_repair/20260807_before_operator_exclusion_state.sqlite`，SHA-256
+  `79cd06f36901ed13ec812d47a2256de708faad55d437ac645e5bf0859d45a574`；
+- 人工排除报告为
+  `outputs/bilibili_article_repair/full_20260803/operator_exclusion_20260807T054509288074Z.json`；
+- 最终 supervisor 报告为 `outputs/bilibili_article_repair/full_20260803/supervisor.json`，状态为
+  `completed`；最终 3,009 条记录和 3,009 个唯一平台 ID 保持不变，3,006 条带详情修复证据，图片
+  计数差异 0，逐条校验错误 0，SQLite 快速检查通过且无外键错误；
+- 最终默认库 SHA-256 为
+  `7360c27f606843ca1af4802817f27643238436146d8dbd613b2882c2a15c14ba`。
+
+同日以 90–120 秒请求间隔，对成功项进行 5 条分层实时复取，覆盖 200,704 字长文/Opus、修复时的
+旧 article 结构、13 字短文、454 图多图记录和图片数未变化记录。5 条的规范化正文哈希与图片 URL
+集合均和数据库精确一致，错误 0、疑似前缀截断 0；其中旧结构样本本次接口已迁移为 Opus，但正文和
+图片仍完全一致。审计前后数据库 SHA-256 未变化；报告位于
+`outputs/bilibili_article_repair/full_20260803/live_sample_audit_20260807T055455Z.json`。

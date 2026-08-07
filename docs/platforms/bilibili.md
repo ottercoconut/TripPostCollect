@@ -1,8 +1,10 @@
 # B站 article
 
-> **修复状态（2026-08-03）：** 新抓取路径已改为先发现 article ID，再取得详情正文和正文图片；
-> 151 项项目测试及 3 条真实 `--no-import` 小样通过。固定 100 条演练已全部成功并增量回写默认库，
-> 全量 sidecar 已接管后续 2,909 条；精确进度以 sidecar 为准，尚不得报告全库完成。事件证据见
+> **修复状态（2026-08-07）：** 新抓取路径已改为先发现 article ID，再取得详情正文和正文图片；
+> 153 项项目测试及真实 `--no-import` 小样通过。历史冻结范围 3,009 条已完成处理：3,006 条详情成功
+> 并原位更新，2 条经用户批准保留原记录并进入 `operator_excluded`，1 条平台 `-404` 保留原记录并
+> 进入 `invalid_detail`，当前无 `pending` 或 `retryable`。全库校验及 5 条分层实时复取验收均通过。
+> 事件证据见
 > [`2026-08-02-bilibili-article-completeness.md`](../incidents/2026-08-02-bilibili-article-completeness.md)，
 > 全库回填步骤见
 > [`2026-08-02-bilibili-full-library-repair.md`](../plans/2026-08-02-bilibili-full-library-repair.md)。
@@ -90,6 +92,9 @@ B站停滞仍按是否发现未知 article ID 判断，但“未知”不等于�
   重试成功或取得永久终态，不能带着 `retryable` 提前切换全量。
 - supervisor 可以从全量 sidecar 恢复，但登录失效或登录状态无法验证时必须非零退出，不能自动重启；
   只有全量 `pending=0`、`retryable=0` 且数据库不变量通过后才能报告完成。
+- 只有用户明确逐项批准放弃重试时，才可用受控入口把指定 `retryable` 转为独立终态
+  `operator_excluded`。该动作必须记录原因和事件、保留目标库原正文/图片且通过前后逐条哈希及外部
+  不变量校验；不得把人工排除计入 `succeeded`，也不得用 `invalid_detail` 混淆两类原因。
 
 临时候选预算仍按运行手册使用 one-off 配置；它是正常搜索 child 的未知候选预算，不是历史详情
 回填预算，也不能替代专门回填。
