@@ -814,12 +814,9 @@ def test_xhs_historical_image_behavior_does_not_require_creator_profile() -> Non
     evidence.update(
         {
             "request_pacing_events": [
-                {"stage": "search_results"},
                 {"stage": "note_detail"},
             ],
-            "continuity_events": [
-                {"stage": "search_results", "status": "completed"},
-            ],
+            "continuity_events": [],
             "url": "https://www.xiaohongshu.com/search_result?keyword=青岛旅游",
         }
     )

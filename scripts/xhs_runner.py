@@ -84,6 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--historical-batch-size", type=int, default=10, help=argparse.SUPPRESS)
     parser.add_argument("--historical-report", help=argparse.SUPPRESS)
     parser.add_argument("--historical-backup-dir", help=argparse.SUPPRESS)
+    parser.add_argument("--historical-resume-summary", help=argparse.SUPPRESS)
     parser.add_argument(
         "--completion-mode",
         choices=("target-new-posts", "source-exhausted"),
@@ -465,6 +466,10 @@ def main() -> int:
             historical_args.extend(["--report", args.historical_report])
         if args.historical_backup_dir:
             historical_args.extend(["--backup-dir", args.historical_backup_dir])
+        if args.historical_resume_summary:
+            historical_args.extend(
+                ["--resume-child-summary", args.historical_resume_summary]
+            )
         if not args.dry_run:
             historical_args.append("--apply")
         return historical_images_main(historical_args)

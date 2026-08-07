@@ -3683,7 +3683,7 @@ def collect_behavior_validation(
         }
         required_pacing_stages = (
             (
-                {"search_results", "note_detail"}
+                {"note_detail"}
                 if historical_image_only
                 else {"search_results", "note_detail", "creator_profile"}
             )
@@ -3691,7 +3691,11 @@ def collect_behavior_validation(
             else set()
         )
         pacing_ok = required_pacing_stages.issubset(pacing_stages)
-        continuity_ok = platform_key != "xhs" or "search_results" in continuity_stages
+        continuity_ok = (
+            platform_key != "xhs"
+            or historical_image_only
+            or "search_results" in continuity_stages
+        )
         post_interactions = [
             item
             for item in evidence.get("post_interactions") or []
