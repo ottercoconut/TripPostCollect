@@ -1,7 +1,8 @@
 # 五平台正文图片本地存储工程实现方案
 
 > 状态：主程序阶段 I-00 至 I-14 已完成，`MAIN_PROGRAM_READY=true`；历史数据阶段 H-00 至 H-03
-> 已完成，H-04 至 H-08 尚未开始，`HISTORICAL_DATA_COMPLETE=false`。主程序验收证据见
+> 已完成，H-04 正由后台 worker 执行，H-05 至 H-08 等待同一状态机顺序推进，
+> `HISTORICAL_DATA_COMPLETE=false`。主程序验收证据见
 > [`2026-08-07-image-main-program-i14-report.md`](2026-08-07-image-main-program-i14-report.md)，历史输入冻结证据见
 > [`2026-08-07-historical-image-h00-input-freeze.md`](2026-08-07-historical-image-h00-input-freeze.md)，
 > 历史工具与副本演练证据见
@@ -1355,6 +1356,69 @@ python -m pytest \
 失败停止点：backup 无法恢复、空间不足或批次/停止条件未冻结时停止。
 
 产物：默认库 backup、容量报告和冻结执行计划。
+
+#### H-02A：脱离模型的后台执行编排
+
+目标：H-04 至 H-08 不依赖模型逐批轮询。后台 worker 只执行本文已经冻结的确定性步骤，不自行
+改变投影、批次、重试、排除清单或完成口径。
+
+实施动作：
+
+- `historical_image_worker.py start` 使用脱离终端会话的子进程启动，持有 campaign 级 `flock`
+  单实例锁；启动时若仍有独立单批进程则拒绝并发接管。
+- 每轮重新读取 SQLite 缺口，只选择固定顺序中第一个未完成平台。平台本地关系为 0 时先跑固定
+  10 帖，成功后才切换 H-02 冻结扩大批次；每个子批次仍由 `historical_platform_images.py`
+  创建独立 backup、staging、manifest 和事务报告。
+- 每个平台开始前自动运行登录 warmup 的一秒人工等待预检。有效 profile 会自动通过；失效时
+  worker 写 `auth_required` 并退出，不打开无边界等待，也不继续下载。操作人完成
+  `login_warmup.py` 后再次 `start` 即从数据库安全前沿恢复。
+- worker 固定记录 git commit 和关键执行文件 SHA；运行期间任一代码或冻结门禁漂移时写
+  `code_drift` 并停止。每批前按剩余缺口重新计算 H-02 p95、两倍余量和 10 GiB 安全空间。
+- `stop` 只写停止请求；worker 完成当前整批事务后停止，不向正在下载或提交的子进程发送信号。
+- B站使用详情图和文章 Referer；微博使用 `mblog.pics` 投影和大图代理；知乎使用最终正文
+  `image_list`；抖音先直取旧签名，失败后按 `aweme_id` 只刷新一次图片详情，单图直取加刷新总尝试
+  不超过 3，视频、音乐和封面请求计数固定为 0。
+- 平台缺口归零后，`validate_historical_images.py` 对该平台逐文件重算 SHA、MIME、宽高、路径、
+  关系身份、孤儿和 H-00 不变量，通过后才进入下一平台。五平台归零后再次全库验收并运行
+  `gc_local_images.py` dry-run；不会自动删除文件。
+
+控制入口：
+
+```bash
+source .venv/bin/activate
+python scripts/historical_image_worker.py start
+python scripts/historical_image_worker.py status
+python scripts/historical_image_worker.py stop
+```
+
+状态与日志固定为：
+
+```text
+data/runtime/image_materialization/historical-images-20260807-v1/background-worker/
+  state.json
+  worker.log
+  worker.pid                 # 只在进程存活时存在
+  worker.lock
+  stop.requested             # 仅收到安全停止请求时存在
+  validation/<platform>/
+  validation/all/
+```
+
+验收标准：
+
+- 重复 `start` 不产生第二 worker；独立单批尚在运行时拒绝接管。
+- 终端和模型会话结束后 PID 仍存活，`state.json` 的批次、报告和库存持续推进。
+- 子批失败时数据库停在前一个完成批次；状态明确区分 `auth_required`、`capacity_blocked`、
+  `code_drift`、`validation_failed` 和普通 `failed`。
+- 重启 worker 不依赖人工游标，直接按 SQLite `local_gap` 选择剩余帖子，不重复已具有完整本地关系
+  的帖子。
+- 只有全库验收通过并生成 GC dry-run 报告后，状态才允许写
+  `historical_data_complete=true` 和 `status=completed`。
+
+失败停止点：锁冲突、代码漂移、空间不足、登录失效、任一图片/manifest/事务失败或平台验收失败
+均立即停止；后台化不改变 H-02 的任何失败门禁。
+
+产物：后台 worker、四平台单批适配、抖音图片详情刷新器、平台/全库验收器、状态文件和操作手册。
 
 #### H-03：小红书现有文件晋升与缺口补齐
 

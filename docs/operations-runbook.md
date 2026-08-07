@@ -473,6 +473,57 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 `wait_seconds` 和原因来计算 `next_run_at`，不能被汇总层的 `behavior_evidence_failed` 降级成
 通用 600 秒重试。断点和候选记忆在冷却期间保持不变，到期后再从同一 checkpoint 续跑。
 
+## 历史图片后台补全
+
+H-04 至 H-08 使用单实例后台 worker，不再用终端 `for` 循环逐批监控：
+
+```bash
+cd /Users/kawauso/Documents/Projects/TripPostCollect
+source .venv/bin/activate
+python scripts/historical_image_worker.py start
+```
+
+`start` 成功会返回 PID、状态文件和日志路径。进程使用 `start_new_session` 脱离当前终端；关闭
+Codex 或 shell 不会终止任务。重复执行 `start` 是安全的：已有 worker 时只返回
+`already_running`；发现独立 `historical_platform_images.py` 批次时返回 `start_blocked`，禁止两套
+编排同时修改默认库。
+
+查看状态：
+
+```bash
+source .venv/bin/activate
+python scripts/historical_image_worker.py status
+tail -n 40 data/runtime/image_materialization/historical-images-20260807-v1/background-worker/worker.log
+```
+
+日常只读 `state.json` 和日志尾部，不全文展开批次 JSONL。关键状态含义：
+
+| 状态 | 含义 | 处理 |
+|---|---|---|
+| `starting` / `running` / `login_preflight` | 正常启动、批次执行或平台登录预检 | 等待自动推进 |
+| `auth_required` | 当前平台持久会话失效 | 运行 `python scripts/login_warmup.py --targets <platform> --timeout-seconds 600`，完成扫码后再次 `start` |
+| `capacity_blocked` | 剩余空间未达到冻结公式 | 扩容或清理非 campaign 数据后再次 `start` |
+| `code_drift` | 启动后 git commit 或关键文件 SHA 改变 | 审计并提交代码，确认无运行批次后再次 `start` |
+| `failed` | 图片、manifest、backup 或事务失败 | 查看 `last_report`，修复根因后再次 `start`；不得跳过 |
+| `validation_failed` | 平台或 H-08 全量验收失败 | 查看 `last_validation_report`，消除 mismatch 后恢复 |
+| `stopped` | 已按请求在整批边界停止 | 再次 `start` 从 SQLite 缺口恢复 |
+| `completed` | 五平台和 H-08、GC dry-run 均通过 | 确认 `historical_data_complete=true` |
+
+安全停止不会杀死当前子进程：
+
+```bash
+source .venv/bin/activate
+python scripts/historical_image_worker.py stop
+```
+
+worker 会完成当前帖子批次的下载、复验和事务，再读取 `stop.requested` 并退出。不要对 worker 或
+单批进程使用 `kill -9`；若机器异常退出，重新 `start` 会根据数据库非空 `local_path` 自动选择剩余
+帖子，失败 staging 保留为证据，长期目录孤儿由 H-08 GC dry-run 报告但不会自动删除。
+
+平台顺序、固定样本和扩大批次仍为 XHS → B站 50 → 微博 50 → 知乎 20 → 抖音 20；新平台首批
+固定 10 帖。微博登录必须满足 `/api/config login=true` 且 uid 非空；抖音旧签名失败只允许图片详情
+刷新一次。后台任务始终保持头像、作者主页、封面、视频、音乐和知乎公式图下载为 0。
+
 ## 结果检查
 
 报告读取顺序固定为：runner 顶层 `run_summary.json` → 对应 execution state → child `summary.json` →

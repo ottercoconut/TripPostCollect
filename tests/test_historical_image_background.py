@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+import io
+from pathlib import Path
+import sys
+import time
+from types import SimpleNamespace
+
+from PIL import Image
+
+
+SCRIPTS_ROOT = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+
+import historical_image_worker as worker  # noqa: E402
+import historical_platform_images as batch  # noqa: E402
+from trippostcollect.artifacts.image_proxy import (  # noqa: E402
+    RemoteImageFetchError,
+    RemoteImagePreview,
+)
+
+
+def _png_bytes() -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (7, 5), color=(20, 40, 60)).save(output, format="PNG")
+    return output.getvalue()
+
+
+def test_generic_weibo_download_uses_large_proxy_and_ignores_avatar(
+    monkeypatch, tmp_path: Path
+) -> None:
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    def fake_fetch(url, *, headers, **_kwargs):
+        seen.append((url, headers))
+        return RemoteImagePreview(
+            content=_png_bytes(),
+            media_type="image/png",
+            final_url=url,
+        )
+
+    monkeypatch.setattr(batch, "fetch_remote_image_bytes", fake_fetch)
+    record = {
+        "note_id": "wb-1",
+        "note_url": "https://m.weibo.cn/detail/wb-1",
+        "image_list_source": "mblog.pics",
+        "image_list": [
+            {
+                "url": "https://wx1.sinaimg.cn/orj360/body.jpg",
+                "pid": "body-pid",
+            }
+        ],
+        "avatar_url": "https://tvax1.sinaimg.cn/crop.0.0.100.100/avatar.jpg",
+    }
+    entries, report = batch._download_generic_post(
+        SimpleNamespace(platform_post_id="wb-1", authoritative_images=1),
+        record,
+        platform_key="weibo",
+        staging_root=tmp_path,
+        cookie_header="SUB=test",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert report["downloaded_images"] == 1
+    assert report["failed_images"] == 0
+    assert len(entries) == 1
+    assert entries[0].source_asset_key == "weibo:pid:body-pid"
+    assert entries[0].source_url == "https://wx1.sinaimg.cn/orj360/body.jpg"
+    assert entries[0].mime_type == "image/png"
+    assert seen == [
+        (
+            "https://i1.wp.com/wx1.sinaimg.cn/large/body.jpg",
+            {
+                "User-Agent": batch.MOBILE_USER_AGENT,
+                "Accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+                "Referer": "https://m.weibo.cn/detail/wb-1",
+                "Cookie": "SUB=test",
+            },
+        )
+    ]
+
+
+def test_generic_download_retries_recoverable_failure_three_times(
+    monkeypatch, tmp_path: Path
+) -> None:
+    attempts = 0
+
+    def failed_fetch(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise RemoteImageFetchError("temporary", http_status=503, retryable=True)
+
+    monkeypatch.setattr(batch, "fetch_remote_image_bytes", failed_fetch)
+    monkeypatch.setattr(batch.time, "sleep", lambda _seconds: None)
+    record = {
+        "content_id": "zh-1",
+        "content_url": "https://www.zhihu.com/question/1/answer/2",
+        "image_list": ["https://pic1.zhimg.com/v2-body_r.jpg"],
+    }
+    entries, report = batch._download_generic_post(
+        SimpleNamespace(platform_post_id="zh-1", authoritative_images=1),
+        record,
+        platform_key="zhihu",
+        staging_root=tmp_path,
+        cookie_header="d_c0=test;z_c0=test",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert attempts == 3
+    assert report["downloaded_images"] == 0
+    assert report["failure_codes"] == ["image_download_retryable"]
+    assert entries[0].attempts == 3
+    assert entries[0].http_status == 503
+
+
+def test_douyin_failure_refreshes_image_detail_once_within_attempt_budget(
+    monkeypatch, tmp_path: Path
+) -> None:
+    fetched_urls: list[str] = []
+    refresh_calls: list[str] = []
+
+    def fake_fetch(url, **_kwargs):
+        fetched_urls.append(url)
+        if "old-sign" in url:
+            raise RemoteImageFetchError("expired", http_status=403, retryable=True)
+        return RemoteImagePreview(
+            content=_png_bytes(),
+            media_type="image/png",
+            final_url=url,
+        )
+
+    def fake_refresh(post_id, _staging_root):
+        refresh_calls.append(post_id)
+        return {0: "https://p3-sign.douyinpic.com/fresh-sign.jpeg"}
+
+    monkeypatch.setattr(batch, "fetch_remote_image_bytes", fake_fetch)
+    monkeypatch.setattr(batch, "_refresh_douyin_urls", fake_refresh)
+    record = {
+        "aweme_id": "dy-1",
+        "aweme_url": "https://www.douyin.com/note/dy-1",
+        "note_download_url": ["https://p3-sign.douyinpic.com/old-sign.jpeg"],
+    }
+    entries, report = batch._download_generic_post(
+        SimpleNamespace(platform_post_id="dy-1", authoritative_images=1),
+        record,
+        platform_key="douyin",
+        staging_root=tmp_path,
+        cookie_header="sessionid=test",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert fetched_urls == [
+        "https://p3-sign.douyinpic.com/old-sign.jpeg",
+        "https://p3-sign.douyinpic.com/fresh-sign.jpeg",
+    ]
+    assert refresh_calls == ["dy-1"]
+    assert entries[0].fetch_status == "downloaded"
+    assert entries[0].attempts == 2
+    assert entries[0].source_url.endswith("old-sign.jpeg")
+    assert report["detail_refresh_attempted"] is True
+    assert report["detail_refresh_succeeded"] is True
+    assert report["video_requests"] == report["music_requests"] == report["cover_requests"] == 0
+
+
+def test_background_failure_classification_and_capacity_gate(
+    monkeypatch, tmp_path: Path
+) -> None:
+    database = tmp_path / "database.sqlite"
+    database.write_bytes(b"sqlite")
+    monkeypatch.setattr(
+        worker.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=10**15, used=0, free=10**15),
+    )
+    inventory = {
+        platform: {"local_gap": 1}
+        for platform in worker.PLATFORM_ORDER
+    }
+
+    capacity = worker._capacity_gate(database, inventory)
+
+    assert capacity["ok"] is True
+    assert capacity["remaining_estimate_bytes"] == sum(worker.P95_IMAGE_BYTES.values())
+    assert worker._classify_failure({"error": "Weibo online login check failed"}) == "auth_required"
+    assert worker._classify_failure({"error": "image_decode_failed"}) == "failed"
