@@ -685,8 +685,14 @@ def _download_bilibili_batch(
         if time.monotonic() >= deadline:
             raise TimeoutError("historical Bilibili batch timeout reached before next post")
         started = time.monotonic()
+        download_record = dict(records[post.web_post_id])
+        download_record["image_urls"] = [
+            str(item["url"]) for item in post.prepared_images
+        ]
+        download_record["detail_image_urls"] = list(download_record["image_urls"])
+        download_record["detail_image_count"] = len(download_record["image_urls"])
         post_entries = download_bilibili_record_images(
-            records[post.web_post_id],
+            download_record,
             cookie_header=cookie_header,
             platform_data_root=staging_root,
             max_attempts=max_attempts,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -436,11 +436,14 @@ def build_relationship_plan(
             (platform_key, str(platform_post_id or "")), set()
         )
         candidates = tuple(
-            candidate
-            for candidate in content_image_candidates(
-                platform_key, _json_object(raw_sample_json)
+            replace(candidate, source_index=effective_index)
+            for effective_index, candidate in enumerate(
+                candidate
+                for candidate in content_image_candidates(
+                    platform_key, _json_object(raw_sample_json)
+                )
+                if candidate.source_asset_key not in source_exclusions
             )
-            if candidate.source_asset_key not in source_exclusions
         )
         image_items = normalize_persistence_items(
             [candidate.as_image_item() for candidate in candidates]
