@@ -83,6 +83,31 @@ def test_generic_weibo_download_uses_large_proxy_and_ignores_avatar(
     ]
 
 
+def test_weibo_session_after_reloads_snapshot_before_login_check(monkeypatch) -> None:
+    checked_headers: list[str] = []
+
+    monkeypatch.setattr(
+        batch,
+        "load_cookie_snapshot",
+        lambda _platform: {"cookie_header": "SUB=fresh"},
+    )
+
+    def fake_login(cookie_header: str) -> dict[str, object]:
+        checked_headers.append(cookie_header)
+        return {"ok": True, "source": "m_weibo_cn_api_config"}
+
+    monkeypatch.setattr(batch, "_weibo_login", fake_login)
+
+    result = batch._session_after(
+        "weibo",
+        "SUB=stale;mweibo_short_token=expired",
+    )
+
+    assert checked_headers == ["SUB=fresh"]
+    assert result["ok"] is True
+    assert result["cookie_snapshot_reloaded"] is True
+
+
 def test_generic_download_retries_recoverable_failure_three_times(
     monkeypatch, tmp_path: Path
 ) -> None:

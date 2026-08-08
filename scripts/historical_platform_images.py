@@ -312,7 +312,17 @@ def _session_after(platform_key: str, cookie_header: str) -> dict[str, Any]:
     if platform_key == "bilibili":
         return check_bilibili_login(cookie_header)
     if platform_key == "weibo":
-        return _weibo_login(cookie_header)
+        snapshot = load_cookie_snapshot(platform_key)
+        if not snapshot:
+            return {
+                "ok": False,
+                "source": "reloaded_cookie_snapshot",
+                "error": "missing Weibo cookie snapshot after image download",
+                "checked_at": utc_iso(),
+            }
+        login = _weibo_login(str(snapshot.get("cookie_header") or ""))
+        login["cookie_snapshot_reloaded"] = True
+        return login
     return {
         "ok": True,
         "source": "unchanged_reopened_cookie_snapshot",
