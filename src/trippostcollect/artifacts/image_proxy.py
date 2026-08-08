@@ -95,7 +95,8 @@ def remote_image_media_type(content_type: str | None, url: str) -> str:
     """Normalize a remote response MIME, falling back to the URL suffix."""
 
     if content_type:
-        return content_type.split(";", 1)[0].strip().lower()
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        return {"image/jpg": "image/jpeg"}.get(media_type, media_type)
     return content_type_for_path(Path(urlparse(url).path), fallback="application/octet-stream")
 
 

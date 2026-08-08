@@ -44,6 +44,7 @@ DISCOVERY_TABLES = (
     "xhs_discovery_checkpoints",
     "xhs_discovery_seen_candidates",
 )
+HISTORICAL_IMAGE_EXCLUSION_TABLE = "historical_image_exclusions"
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,11 +176,12 @@ def projection_inventory(
     """Recompute current and authoritative content-image counts without writes."""
 
     result: dict[str, dict[str, int]] = {}
+    exclusions = approved_historical_image_exclusions(conn)
     for platform_key in platforms:
         posts = authoritative = current = local = 0
-        for web_post_id, raw_sample_json in conn.execute(
+        for web_post_id, platform_post_id, raw_sample_json in conn.execute(
             """
-            SELECT id, raw_sample_json
+            SELECT id, platform_post_id, raw_sample_json
             FROM web_posts
             WHERE platform_key=?
             ORDER BY id
@@ -187,8 +189,12 @@ def projection_inventory(
             (platform_key,),
         ):
             posts += 1
-            authoritative += len(
-                content_image_candidates(platform_key, _json_object(raw_sample_json))
+            excluded_keys = exclusions.get((platform_key, str(platform_post_id or "")), set())
+            authoritative += sum(
+                candidate.source_asset_key not in excluded_keys
+                for candidate in content_image_candidates(
+                    platform_key, _json_object(raw_sample_json)
+                )
             )
             current_row = conn.execute(
                 """
@@ -210,6 +216,31 @@ def projection_inventory(
             "existing_local_rows": local,
             "local_gap": authoritative - local,
         }
+    return result
+
+
+def approved_historical_image_exclusions(
+    conn: sqlite3.Connection,
+) -> dict[tuple[str, str], set[str]]:
+    """Return operator-approved historical source assets, if the schema exists."""
+
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (HISTORICAL_IMAGE_EXCLUSION_TABLE,),
+    ).fetchone()
+    if not exists:
+        return {}
+    result: dict[tuple[str, str], set[str]] = {}
+    for platform_key, platform_post_id, source_asset_key in conn.execute(
+        """
+        SELECT platform_key, platform_post_id, source_asset_key
+        FROM historical_image_exclusions
+        ORDER BY platform_key, platform_post_id, source_index, id
+        """
+    ):
+        result.setdefault(
+            (str(platform_key), str(platform_post_id)), set()
+        ).add(str(source_asset_key))
     return result
 
 
@@ -324,6 +355,7 @@ def build_relationship_plan(
         platform_key: {str(value) for value in values}
         for platform_key, values in (excluded_platform_post_ids or {}).items()
     }
+    approved_exclusions = approved_historical_image_exclusions(conn)
     resolved_project_root = Path(project_root).expanduser().resolve(strict=True)
     resolved_media_root = Path(media_root).expanduser().resolve()
     selected: list[tuple[Any, ...]] = []
@@ -355,8 +387,14 @@ def build_relationship_plan(
             skipped = 0
             for row in available:
                 web_post_id, _platform_post_id, raw_sample_json = row
-                authoritative_count = len(
-                    content_image_candidates(platform_key, _json_object(raw_sample_json))
+                source_exclusions = approved_exclusions.get(
+                    (platform_key, str(_platform_post_id or "")), set()
+                )
+                authoritative_count = sum(
+                    candidate.source_asset_key not in source_exclusions
+                    for candidate in content_image_candidates(
+                        platform_key, _json_object(raw_sample_json)
+                    )
                 )
                 local_count = int(
                     conn.execute(
@@ -394,7 +432,16 @@ def build_relationship_plan(
 
     posts: list[HistoricalPostPlan] = []
     for platform_key, web_post_id, platform_post_id, raw_sample_json in selected:
-        candidates = content_image_candidates(platform_key, _json_object(raw_sample_json))
+        source_exclusions = approved_exclusions.get(
+            (platform_key, str(platform_post_id or "")), set()
+        )
+        candidates = tuple(
+            candidate
+            for candidate in content_image_candidates(
+                platform_key, _json_object(raw_sample_json)
+            )
+            if candidate.source_asset_key not in source_exclusions
+        )
         image_items = normalize_persistence_items(
             [candidate.as_image_item() for candidate in candidates]
         )

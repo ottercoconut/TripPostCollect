@@ -92,6 +92,39 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
+def _operator_exclusions(
+    conn: sqlite3.Connection, platforms: Sequence[str]
+) -> list[dict[str, Any]]:
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='historical_image_exclusions'"
+    ).fetchone()
+    if not exists:
+        return []
+    placeholders = ",".join("?" for _ in platforms)
+    return [
+        {
+            "campaign_id": row[0],
+            "platform_key": row[1],
+            "platform_post_id": row[2],
+            "source_index": row[3],
+            "source_asset_key": row[4],
+            "reason": row[5],
+            "approved_by": row[6],
+            "approved_at": row[7],
+        }
+        for row in conn.execute(
+            f"""
+            SELECT campaign_id, platform_key, platform_post_id, source_index,
+                   source_asset_key, reason, approved_by, approved_at
+            FROM historical_image_exclusions
+            WHERE platform_key IN ({placeholders})
+            ORDER BY platform_key, platform_post_id, source_index, id
+            """,
+            tuple(platforms),
+        )
+    ]
+
+
 def _inside(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
@@ -286,6 +319,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 platforms,
             ).fetchone()[0]
         )
+        operator_exclusions = _operator_exclusions(conn, platforms)
 
     expected = campaign.get("invariants") or {}
     if protected != {
@@ -341,6 +375,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "inventory": {key: inventory[key] for key in platforms},
         "file_validation": file_validation,
         "avatar_local_rows": avatar_local_rows,
+        "operator_exclusion_count": len(operator_exclusions),
+        "operator_exclusions": operator_exclusions,
         "relationship_mismatches": sum(value.startswith("relationship mismatch") for value in errors),
         "errors": errors,
         "historical_data_complete": bool(all_platforms and status == "completed"),

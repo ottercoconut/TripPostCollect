@@ -80,3 +80,22 @@ ON web_post_images(web_post_id, image_role, image_index);
 
 CREATE INDEX IF NOT EXISTS idx_web_post_images_post
 ON web_post_images(web_post_id, image_index);
+
+CREATE TABLE IF NOT EXISTS historical_image_exclusions (
+    id INTEGER PRIMARY KEY,
+    campaign_id TEXT NOT NULL,
+    platform_key TEXT NOT NULL,
+    platform_post_id TEXT NOT NULL,
+    source_index INTEGER NOT NULL,
+    source_asset_key TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    approved_by TEXT NOT NULL,
+    approved_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (campaign_id, platform_key, platform_post_id, source_asset_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_historical_image_exclusions_post
+ON historical_image_exclusions(platform_key, platform_post_id, source_index);

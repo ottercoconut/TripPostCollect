@@ -317,6 +317,16 @@ def test_shared_preview_response_validation_keeps_preview_semantics() -> None:
         read_limited_response(io.BytesIO(b"12345"), max_bytes=4)
 
 
+def test_nonstandard_jpeg_content_type_is_normalized() -> None:
+    assert validate_remote_image_response(
+        content_type="image/jpg",
+        content_length="12",
+        url="https://example.test/image.jpg",
+        max_bytes=20,
+        allowed_media_types={"image/jpeg", "image/png"},
+    ) == "image/jpeg"
+
+
 def test_remote_url_validation_rejects_local_and_credentialed_urls() -> None:
     for url in (
         "http://127.0.0.1/image.png",

@@ -536,6 +536,13 @@ HTTP 404 等有明确状态码的不可恢复来源错误写为 `image_source_un
 平台顺序。当前平台只剩暂存项时进入 `review_required`，并保持
 `historical_data_complete=false`。
 
+用户逐项批准放弃不可恢复图片后，只能通过
+`scripts/resolve_historical_image_deferred.py` 的受控入口执行：先按
+`PLATFORM_POST_ID:SOURCE_INDEX` 精确匹配暂存证据和当前关系，创建 SQLite 一致性备份，再把批准项
+写入 `historical_image_exclusions` 并删除对应 `web_post_images` 行。原始帖和 `raw_sample_json` 保留
+为来源证据；历史计划、库存和验收只从批准后的有效正文图集合计算。入口同时生成操作报告并释放
+受影响帖子供 worker 重试，不允许直接编辑 `state.json` 或 `deferred-posts.json`。
+
 平台顺序、固定样本和扩大批次仍为 XHS → B站 50 → 微博 50 → 知乎 20 → 抖音 20；新平台首批
 固定 10 帖。微博登录必须满足 `/api/config login=true` 且 uid 非空；抖音旧签名失败只允许图片详情
 刷新一次。后台任务始终保持头像、作者主页、封面、视频、音乐和知乎公式图下载为 0。
