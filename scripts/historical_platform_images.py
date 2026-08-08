@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from http.cookies import SimpleCookie
 import json
 import os
 from pathlib import Path
@@ -232,16 +233,46 @@ def _cookie_names(snapshot: dict[str, Any]) -> set[str]:
 
 def _weibo_login(cookie_header: str) -> dict[str, Any]:
     checked_at = utc_iso()
-    request = Request(
-        "https://m.weibo.cn/api/config",
-        headers={
-            "User-Agent": MOBILE_USER_AGENT,
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://m.weibo.cn/",
-            "Cookie": cookie_header,
-        },
-    )
+    common_headers = {
+        "User-Agent": MOBILE_USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://m.weibo.cn/",
+    }
     try:
+        bootstrap_request = Request(
+            "https://m.weibo.cn/",
+            headers={**common_headers, "Cookie": cookie_header},
+        )
+        with urlopen(bootstrap_request, timeout=30) as bootstrap_response:
+            bootstrap_response.read(1024 * 1024)
+            bootstrap_status = int(bootstrap_response.status)
+            refreshed_headers = bootstrap_response.headers.get_all("Set-Cookie") or []
+
+        cookie_values: dict[str, str] = {}
+        for item in cookie_header.split(";"):
+            if "=" not in item:
+                continue
+            name, value = item.split("=", 1)
+            if name.strip():
+                cookie_values[name.strip()] = value.strip()
+        for raw_header in refreshed_headers:
+            refreshed = SimpleCookie()
+            refreshed.load(raw_header)
+            for name, morsel in refreshed.items():
+                if not morsel.value or morsel["max-age"] == "0":
+                    cookie_values.pop(name, None)
+                else:
+                    cookie_values[name] = morsel.value
+
+        request = Request(
+            "https://m.weibo.cn/api/config",
+            headers={
+                **common_headers,
+                "Cookie": "; ".join(
+                    f"{name}={value}" for name, value in cookie_values.items()
+                ),
+            },
+        )
         with urlopen(request, timeout=30) as response:
             payload = json.loads(response.read(1024 * 1024))
             data = payload.get("data") if isinstance(payload, dict) else {}
@@ -251,6 +282,7 @@ def _weibo_login(cookie_header: str) -> dict[str, Any]:
             return {
                 "ok": bool(response.status == 200 and payload.get("ok") == 1 and login and uid_present),
                 "source": "m_weibo_cn_api_config",
+                "bootstrap_http_status": bootstrap_status,
                 "http_status": int(response.status),
                 "login": login,
                 "uid_present": uid_present,

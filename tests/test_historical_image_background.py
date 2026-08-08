@@ -108,6 +108,60 @@ def test_weibo_session_after_reloads_snapshot_before_login_check(monkeypatch) ->
     assert result["cookie_snapshot_reloaded"] is True
 
 
+def test_weibo_login_bootstraps_mobile_cookies_before_api_check(monkeypatch) -> None:
+    requests = []
+
+    class FakeHeaders:
+        def __init__(self, values):
+            self.values = values
+
+        def get_all(self, _name):
+            return self.values
+
+    class FakeResponse:
+        def __init__(self, payload: bytes, *, cookies=()):
+            self.status = 200
+            self.payload = payload
+            self.headers = FakeHeaders(list(cookies))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return self.payload
+
+    responses = iter(
+        [
+            FakeResponse(
+                b"<html></html>",
+                cookies=("MLOGIN=1; Path=/", "XSRF-TOKEN=fresh; Path=/"),
+            ),
+            FakeResponse(b'{"ok":1,"data":{"login":true,"uid":"123"}}'),
+        ]
+    )
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request)
+        return next(responses)
+
+    monkeypatch.setattr(batch, "urlopen", fake_urlopen)
+
+    result = batch._weibo_login("SUB=durable; MLOGIN=stale")
+
+    assert [request.full_url for request in requests] == [
+        "https://m.weibo.cn/",
+        "https://m.weibo.cn/api/config",
+    ]
+    assert "SUB=durable" in requests[1].get_header("Cookie")
+    assert "MLOGIN=1" in requests[1].get_header("Cookie")
+    assert "XSRF-TOKEN=fresh" in requests[1].get_header("Cookie")
+    assert result["ok"] is True
+    assert result["bootstrap_http_status"] == 200
+
+
 def test_generic_download_retries_recoverable_failure_three_times(
     monkeypatch, tmp_path: Path
 ) -> None:
