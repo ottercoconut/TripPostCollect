@@ -18,6 +18,10 @@
   此时仍无图片才记为
   `missing_content_image`；`request_failed`、`parse_failed` 或旧产物缺少该字段统一记为
   `content_detail_unobserved`，不能解释成内容真实无图。
+- 正文来源：搜索对象同时含非空完整 `content` 和正文图时保存
+  `content_detail_source=search_content`；否则必须请求详情并保存 `answer_detail` 或
+  `article_detail`。`title`、`desc/excerpt` 不能单独通过。详情请求或解析失败记录
+  `content_detail_failed`，保留原页；该内容 ID 不进入 `crawl_discovery_seen_candidates`。
 - 去重键：内容 ID；answer URL 同时包含 question ID。
 - 有 checkpoint 时先刷新配置的顶部页，再从保存页码继续。已知内容 ID 不再写入当前 JSONL；
   完整页保存下一页，页面中途停止保存当前页，顶部刷新不推进深层 checkpoint。

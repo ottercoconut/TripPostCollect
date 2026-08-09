@@ -329,7 +329,8 @@ PY
 五个平台都在当前登录/签名会话中把权威正文图下载到本轮 staging，原子生成 schema v1
 `image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份，正式运行再晋升到
 `data/media` 并注入统一入库映射。任何图片失败都使整帖和正式完成门禁失败。
-微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；小红书搜索会补拉
+微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；`isLongText=true`
+必须用移动详情替换搜索截断文本，失败时不写 JSONL。小红书搜索会补拉
 作者主页指标。知乎回答/文章的原始时间、正文图片和作者粉丝会在清洗前保存并归一化；搜索响应
 缺图时先请求详情补全，并用 `content_detail_status` 区分详情确认无图和详情未观察；
 `zvideo` 记录跳过。B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得 article 详情
@@ -345,7 +346,7 @@ PY
 | `platform_post_id` | `note_id`、`aweme_id`、`content_id`、`id` 等非视频内容 ID |
 | `canonical_url` | `note_url`、`aweme_url`、`content_url`、`url`、`share_url`，缺失时按平台 ID 拼接 |
 | `title` | `title` |
-| `content_text` | 优先平台正式详情正文；B站必须来自 `content_detail_status=detail_observed` 的 article 详情，禁止回退到搜索 `desc`；其他平台再按 `content_text`、`content`、`desc`、`title` 的已定义能力映射 |
+| `content_text` | 仅接受 `content_detail_status=detail_observed` 且 `content_detail_source` 受信任的权威正文：B站 `content_text/content`，微博 `content_text/content`，小红书 `desc`，抖音 `desc`，知乎 `content_text/content`。小红书和知乎可在入库文本中拼接标题与已验证正文，但标题、搜索 `desc/excerpt` 或预览文本不能单独通过 |
 | `author_display_name` | `nickname` 或 `user_nickname` |
 | `author_platform_id` | 小红书 `user_id`、`creator_hash` 或其他平台用户 ID |
 | `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎搜索结果 `author.follower_count` 归一后的 `followers_count` |
@@ -362,7 +363,7 @@ PY
 | `web_post_images.width/height/mime_type/sha256` | 根项目重新读取本地文件得到并与 manifest 相等的字节证据 |
 | `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；不混入头像等非正文对象 |
 | `web_post_images`（`author_avatar`） | 可选作者头像 URL 参考；`local_path` 等本地字段为空，不下载、不进 manifest、不计入 `post_images_count` 或正文图完整性 |
-| `raw_sample_json` | MediaCrawler 原始 JSONL 行 |
+| `raw_sample_json` | MediaCrawler 原始 JSONL 行；正式记录必须含 `content_detail_status` 和 `content_detail_source` |
 
 代码在下载前用五个平台显式投影识别正文图，在导入边界识别其他同类字段差异；内部持久化结构
 统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。

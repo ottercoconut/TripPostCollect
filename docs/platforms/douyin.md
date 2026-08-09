@@ -79,6 +79,10 @@
 
 ## 正文图片本地化与严格 images-only
 
+抖音图文的正文只接受 aweme 详情 `desc`，JSONL 固定写
+`content_detail_status=detail_observed` 和 `content_detail_source=aweme_detail`。标题、封面或搜索预览
+文本不能替代非空 `desc` 通过正式门禁。
+
 抖音只有已确认的图文作品会进入图片入口，权威字段固定为 `note_download_url`。store 同时保留
 原始 `images[].uri`，优先生成 `douyin:uri:<uri>` 稳定资产键；签名 URL 的查询参数刷新不会改变
 同一图片身份。`cover_url`、动态/静态封面、`video_download_url`、音乐 URL、作者头像和搜索卡片

@@ -169,6 +169,20 @@ PLATFORMS: dict[str, dict[str, str]] = {
     "douyin": {"mediacrawler": "dy", "label": "抖音"},
     "zhihu": {"mediacrawler": "zhihu", "label": "知乎"},
 }
+TRUSTED_CONTENT_DETAIL_SOURCES = {
+    "bilibili": BILIBILI_TRUSTED_DETAIL_SOURCES,
+    "weibo": frozenset({"search_mblog_complete", "mobile_detail"}),
+    "xhs": frozenset({"note_detail"}),
+    "douyin": frozenset({"aweme_detail"}),
+    "zhihu": frozenset({"search_content", "answer_detail", "article_detail"}),
+}
+CONTENT_BODY_FIELDS = {
+    "bilibili": ("content_text", "content"),
+    "weibo": ("content_text", "content"),
+    "xhs": ("desc",),
+    "douyin": ("desc",),
+    "zhihu": ("content_text", "content"),
+}
 FOLLOWERS_REQUIRED_PLATFORMS = frozenset(PLATFORMS)
 REQUIRED_FOLLOWER_SOURCES = {
     "bilibili": frozenset({"relation_stat"}),
@@ -1140,15 +1154,18 @@ def canonical_url_for_record(platform_key: str, record: dict[str, Any]) -> str |
     return None
 
 
+def content_body_for_record(platform_key: str, record: dict[str, Any]) -> str:
+    fields = CONTENT_BODY_FIELDS.get(platform_key, ("content_text", "content"))
+    return str(first_value(record, *fields) or "").strip()
+
+
 def content_text_for_record(platform_key: str, record: dict[str, Any]) -> str:
     title = str(first_value(record, "title") or "").strip()
-    if platform_key == "bilibili":
-        return str(first_value(record, "content_text", "content") or "")
-    body = str(first_value(record, "content_text", "content", "desc") or "").strip()
+    body = content_body_for_record(platform_key, record)
     if platform_key in {"xhs", "zhihu"}:
         parts = [part for part in (title, body) if part]
         return "\n".join(dict.fromkeys(parts))
-    return str(first_value(record, "content_text", "content", "desc", "title") or "")
+    return body
 
 
 def inject_materialized_images(
@@ -1326,16 +1343,16 @@ def validate_formal_record(platform_key: str, record: dict[str, Any], seen: set[
         reasons.append("duplicate_identity")
     if is_video_record(platform_key, record):
         reasons.append("video_record")
-    if not content_text_for_record(platform_key, record).strip():
+    if not content_body_for_record(platform_key, record):
         reasons.append("missing_content")
+    detail_status = str(record.get("content_detail_status") or "")
+    detail_source = str(record.get("content_detail_source") or "")
+    if detail_status != "detail_observed":
+        reasons.append("content_detail_unobserved")
+    if detail_source not in TRUSTED_CONTENT_DETAIL_SOURCES.get(platform_key, frozenset()):
+        reasons.append("untrusted_content_detail_source")
     if platform_key == "bilibili":
-        detail_status = str(record.get("content_detail_status") or "")
-        detail_source = str(record.get("content_detail_source") or "")
         image_detail_status = str(record.get("content_images_detail_status") or "")
-        if detail_status != "detail_observed":
-            reasons.append("content_detail_unobserved")
-        if detail_source not in BILIBILI_TRUSTED_DETAIL_SOURCES:
-            reasons.append("untrusted_content_detail_source")
         if image_detail_status != "detail_observed":
             reasons.append("content_images_detail_unobserved")
     if not published_at_for_record(record):

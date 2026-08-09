@@ -247,9 +247,14 @@ python scripts/xhs_runner.py \
   发生运行阻断。永久提高正式目标时必须同步核对这些配置以及
   `lease_seconds >= timeout_seconds + 300`，但不得清空原账号的 checkpoint 或候选记忆。
 - 搜索卡片 ID 在笔记详情、作者粉丝和媒体处理前与数据库、账号级已处理候选、累计摘要及本轮
-  已见集合去重；已知 ID 不占 `candidate_hard_limit`。视频或字段无效候选也在 child 摘要形成后
+  已见集合去重；已知 ID 不占 `candidate_hard_limit`。视频或已由决定性详情证据证明的字段无效候选也在 child 摘要形成后
   写入 `xhs_discovery_seen_candidates`，不靠内容入库才能获得记忆。完整处理一页才保存下一页，
   候选预算在页中耗尽时保存当前页，下轮重取边界页并靠 ID 去重，避免跳过未处理卡片。
+- 正式图文必须来自笔记详情的非空 `desc`，并保存
+  `content_detail_status=detail_observed` 与 `content_detail_source=note_detail`。标题或搜索卡片
+  摘要不能单独通过。详情 API 与 HTML 回退都为空、请求失败或解析失败时，
+  记录 `note_detail_unavailable`/请求失败，保留当前 `page + search_id`；该 ID 不写入
+  `xhs_discovery_seen_candidates`。
 - 每批记录真实页码、`search_id`、可恢复页码、批次完整性、发现阶段、原始返回数、`has_more`、
   候选数、有效新增数和停止原因。顶部刷新事件不能覆盖深层 checkpoint，也不累计深层停滞。
 - 连续停滞按“该批没有新增有效记录”累计；出现新的无效候选不能重置停滞计数。
@@ -269,7 +274,8 @@ python scripts/xhs_runner.py \
   `persistence_verified` 已核对 SQLite 与 `data/media` 文件；
 - `valid_existing_count` 和 `updated_rows` 只单独报告，没有计入新增目标；
 - 每条入库图文都有平台原始发布时间、作者 ID/昵称、完整图片关系，以及
-  `followers_count`、`followers_observed=true`、`author_followers_source=creator_profile`；
+  `followers_count`、`followers_observed=true`、`author_followers_source=creator_profile`，以及
+  `content_detail_status=detail_observed`、`content_detail_source=note_detail` 和非空详情 `desc`；
 - 视频只出现在跳过计数中；帖子互动结果单独报告，不冒充抓取成功。
 
 完成门禁再按本轮模式二选一：

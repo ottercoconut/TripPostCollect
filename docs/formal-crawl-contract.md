@@ -133,7 +133,8 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 
 - 有平台原始 ID 或规范 URL，且本轮唯一；
 - 不是视频记录；
-- 有正文或标题；
+- 有平台权威正文字段；标题、搜索摘要和预览文本不能替代正文；
+- `content_detail_status=detail_observed`，且 `content_detail_source` 属于当前平台受信任来源；
 - 有平台原始发布时间；
 - 有作者平台 ID 和作者昵称；
 - 有至少一个正文图片 URL；
@@ -153,6 +154,21 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 全部晋升到 `data/media/<platform>/<safe_post_id>/<index>-<asset_hash>.<ext>`，并在同一 SQLite
 事务写入帖子和带 `local_path/width/height/mime_type/sha256` 的图片关系。任一图片缺失、失败或
 不一致时整帖不得入库；先写 URL、以后再补本地路径不满足本契约。
+
+五平台正文来源是正式字段契约，不是调试信息：
+
+| 平台 | 受信任 `content_detail_source` | 正文字段 | 不可降级的来源 |
+|---|---|---|---|
+| B站 article | `article_view_api` | `content_text/content` | 搜索 `desc`、预览图 |
+| 微博 | `search_mblog_complete`、`mobile_detail` | `content_text/content` | 长文搜索截断 `mblog.text`、标题 |
+| 小红书 | `note_detail` | `desc` | 搜索卡片摘要、标题 |
+| 抖音 | `aweme_detail` | `desc` | 标题、封面或预览文本 |
+| 知乎 | `search_content`、`answer_detail`、`article_detail` | `content_text/content` | `title`、`desc/excerpt` |
+
+微博 `isLongText=true` 时必须取得移动端详情正文后才能写 JSONL；详情请求、
+响应或解析失败立即以 `full_text_request_failed` 阻断当前批次，保留原页为恢复
+前沿，禁止把截断搜索文本交给 store。小红书笔记详情与知乎回答/文章详情的可恢复
+请求、空响应或解析失败同样阻断当前批次，失败 ID 不得进入已处理候选记忆。
 
 B站 article 还必须满足详情完整性门禁：搜索结果中的 `desc` 只允许作为发现摘要保存在原始证据，
 不得作为 `content_text`；正式记录必须保存 `content_detail_status=detail_observed` 和受信任的 article
@@ -266,20 +282,24 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 
 通用平台在昂贵处理前跳过 `web_posts` 已有 ID、累计摘要中的有效 ID、
 `crawl_discovery_seen_candidates` 已完成处理 ID 和当前 child 已完成 ID；小红书读取独立的
-`xhs_discovery_seen_candidates`。五个平台的视频、字段无效和有效候选都在 child 摘要形成后获得
-跨轮记忆，进程在摘要前崩溃的候选不会被提前标记。两套表的作用域不同：通用平台按 job 与查询
+`xhs_discovery_seen_candidates`。五个平台的视频、已由决定性权威响应证明的字段无效项和有效
+候选，都在 child 摘要形成后获得跨轮记忆。详情请求、空响应、解析或下载等可恢复失败不是
+“已完成处理”；该 ID 不写候选记忆，当前批次不完整，恢复位置保持在原请求页/游标。进程在摘要前
+崩溃的候选也不会被提前标记。两套表的作用域不同：通用平台按 job 与查询
 指纹隔离，小红书还按人工指定账号隔离，不能跨账号共享未入库活动。
 
-“字段无效”必须已有决定性来源证据。B站 article 的详情限流、超时、请求失败或解析失败表示候选
-尚未完成处理：失败 ID 不得进入候选记忆，失败页不得推进为下一页；正常搜索也不会因数据库已有
-ID 自动修复历史摘要记录，历史详情回填必须走平台文档定义的独立流程。
+“字段无效”必须已有决定性来源证据。B站 article、微博长文、小红书笔记和知乎 answer/article
+的详情限流、超时、请求失败、空响应或解析失败表示候选尚未完成处理：失败 ID 不得进入候选
+记忆，失败页不得推进为下一页。旧累计摘要缺少正文状态/来源时不做兼容放行；其中的 ID 不进入有效恢复
+去重集，续跑时重新取得权威正文证据。数据库已有 ID 的历史内容修复仍必须走平台文档定义的独立流程。
 
 首次执行从来源第一页开始，不做顶部刷新。每个完整前沿批次把下一页写入状态事件；抖音还必须
 同时写入下一 offset 和响应 search ID，小红书保存本次搜索使用的 client search ID。对应根执行器
 在 child 摘要形成后才把状态事件提交到 SQLite，不得由底层循环提前推进数据库游标。中途停止的
 批次保存当前请求位置，下一次允许重取该批次，依靠已知 ID 提前去重；这样可以重复少量边界
 数据，但不能跳过未持久化候选。小红书只有在 child 摘要形成后才把本轮候选 ID 与前沿一起提交；
-视频、字段无效和有效候选都会获得发现记忆，进程在摘要前崩溃的候选不会被提前标记为已处理。
+视频、已有决定性证据的字段无效项和有效候选都会获得发现记忆；可恢复详情失败不会。进程在摘要前
+崩溃的候选也不会被提前标记为已处理。
 
 存在 checkpoint 时，runner 自动把保存位置传给 child；有未完成累计摘要时再传入上一份
 `summary.json`。child 先刷新

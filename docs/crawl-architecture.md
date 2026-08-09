@@ -122,7 +122,9 @@ runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并�
 执行器完成摘要构造后，在同一事务提交下一恢复位置和本轮已处理候选 ID，runner 再把本次摘要
 路径写回 checkpoint。这个提交顺序保证游标和候选记忆不会先于可累计产物前移。默认模式达到完整
 入库目标，或显式来源耗尽模式取得完整耗尽证据并入库后，只清空累计摘要，不删除发现位置或候选记忆。通用控制面用
-`crawl_discovery_seen_candidates` 保存视频、字段无效和有效候选，跨轮在详情、作者与媒体处理前跳过。
+`crawl_discovery_seen_candidates` 保存视频、已有决定性权威证据的字段无效项和有效候选，跨轮在
+详情、作者与媒体处理前跳过。详情请求、空响应或解析等可恢复失败必须记录
+`runtime_failed`，保留原页/游标，且失败 ID 不进入 seen 集合。
 
 小红书独立 runner 不读写通用 checkpoint 表，而是在 `xhs_discovery_checkpoints` 中按目标、账号和
 查询指纹保存 `page + search_id`，在 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID。
@@ -142,7 +144,8 @@ runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并�
 | 知乎 | MediaCrawler 搜索 | [知乎](platforms/zhihu.md) |
 
 结构化执行器先生成 JSONL 与图片 staging/manifest，再按正式 profile 过滤视频、去重、校验
-正文图/时间/作者/粉丝和互动字段。根项目对有效集合逐帖核对 manifest 和文件；只有本轮完成模式、
+权威正文、`content_detail_status/content_detail_source`、正文图/时间/作者/粉丝和互动字段。标题或搜索摘要
+不能替代正文。根项目对有效集合逐帖核对 manifest 和文件；只有本轮完成模式、
 行为/策略、字段和本地图片门禁同时成立才晋升并入库。导入报告区分处理、新增和更新；更新已有帖
 时会优先匹配并保留仍有效的既有本地图片证据，新的整帖图片集合仍在同一事务重建。
 

@@ -11,6 +11,11 @@
 - 完成模式服从正式契约：正常默认使用 `target-new-posts`；只有用户明确要求某一轮直到来源耗尽时，
   才在该轮命令临时使用 `source-exhausted`，不修改长期配置。
 - 粉丝来源：搜索结果 `mblog.user` 的 `followers_count/fans_count` 系列字段。
+- 正文来源：非长文使用完整搜索 `mblog.text`，保存
+  `content_detail_status=detail_observed` 和 `content_detail_source=search_mblog_complete`；
+  `isLongText=true` 必须请求移动端详情并保存 `content_detail_source=mobile_detail`。
+  详情失败记录 `full_text_request_failed`，阻断当前批次并保留原页；截断文本不写 JSONL、
+  不入库、不进入已处理候选记忆。
 - 图片来源：`mblog.pics`；没有正文图片的记录不是有效图文。
 - 去重键：微博 ID。
 - 粉丝量为 0 时，只有原始 user 对象明确包含粉丝字段才有效。

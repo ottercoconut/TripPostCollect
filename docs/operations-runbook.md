@@ -136,7 +136,8 @@ shasum -a 256 data/backups/trippostcollect-before-<run_id>.sqlite
 内容与产物校验通过时把这类运行写成 `completed`，但入库被跳过，不能按正式轮次完成汇报。
 
 复核一组已知知乎回答/文章是否真实无图时，将规范 URL 保存为 JSON 数组，并通过
-`mediacrawler_crawl.py --platforms zhihu --zhihu-detail-urls-file <文件> --no-import` 执行。
+`mediacrawler_crawl.py --platforms zhihu --zhihu-detail-urls-file <文件> --download-images
+--media-root temp/<diagnostic-media-root> --no-import` 执行。
 只有 `content_detail_status=detail_observed` 后仍无正文图片才可判为真实无图；请求或解析失败必须
 保留为未观察，不能直接运行 `tools/MediaCrawler` 内部命令绕过项目行为与登录门禁。
 
@@ -217,9 +218,10 @@ checkpoint 记录了非空 `last_summary_path` 但文件丢失时，runner 必�
 保持不变。
 `--no-import` 自动禁用 checkpoint 写入，因此诊断不会污染正式记忆。
 
-B站 article 的安全前沿还取决于详情处理是否完成。搜索页返回未知 ID 后，只有详情成功并完成
+B站 article、微博长文、小红书笔记和知乎 answer/article 的安全前沿都取决于详情处理是否完成。
+搜索页返回未知 ID 后，只有权威详情成功并完成
 正式字段判断，或详情明确证明内容已删除、私密、永久不可用时，该 ID 才能写入
-`crawl_discovery_seen_candidates`。详情接口 `-509`、HTTP/业务错误、超时或解析失败经过有限退避仍
+`crawl_discovery_seen_candidates` 或小红书独立候选表。详情限流、HTTP/业务错误、空响应、超时或解析失败经过有限退避仍
 未恢复时，当前页必须保持 `last_batch_complete=false`，`resume_page` 保持当前页，失败 ID 不进入
 累计摘要或候选记忆。不要通过删除 checkpoint 或扩大候选预算绕过详情失败。
 
