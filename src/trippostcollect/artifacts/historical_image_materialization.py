@@ -340,11 +340,14 @@ def build_relationship_plan(
     media_root: str | Path,
     require_complete_existing_local: bool = False,
     require_missing_local: bool = False,
+    include_projection_mismatches: bool = False,
 ) -> HistoricalRelationshipPlan:
     """Build a bounded plan using the production candidate and persistence components."""
 
     if require_complete_existing_local and require_missing_local:
         raise ValueError("existing-complete and missing-local filters are mutually exclusive")
+    if include_projection_mismatches and not require_missing_local:
+        raise ValueError("projection mismatch selection requires the missing-local filter")
     unknown = set(platforms) - set(HISTORICAL_PLATFORM_ORDER)
     if unknown:
         raise ValueError(f"unsupported historical platforms: {sorted(unknown)}")
@@ -396,26 +399,35 @@ def build_relationship_plan(
                         platform_key, _json_object(raw_sample_json)
                     )
                 )
-                local_count = int(
-                    conn.execute(
-                        """
-                        SELECT COUNT(*)
-                        FROM web_post_images
-                        WHERE web_post_id=?
-                          AND image_role='content'
-                          AND local_path IS NOT NULL
-                          AND local_path<>''
-                        """,
-                        (web_post_id,),
-                    ).fetchone()[0]
-                )
+                current_content_count, local_count = conn.execute(
+                    """
+                    SELECT
+                      COUNT(*),
+                      COALESCE(SUM(
+                        CASE WHEN local_path IS NOT NULL AND local_path<>''
+                             THEN 1 ELSE 0 END
+                      ), 0)
+                    FROM web_post_images
+                    WHERE web_post_id=? AND image_role='content'
+                    """,
+                    (web_post_id,),
+                ).fetchone()
+                current_content_count = int(current_content_count)
+                local_count = int(local_count)
                 complete_existing = authoritative_count > 0 and local_count == authoritative_count
                 missing_local = authoritative_count > local_count
+                projection_mismatch = current_content_count != authoritative_count
                 if (
                     require_complete_existing_local
                     and complete_existing
                     or require_missing_local
-                    and missing_local
+                    and (
+                        missing_local
+                        or (
+                            include_projection_mismatches
+                            and projection_mismatch
+                        )
+                    )
                 ):
                     eligible.append(row)
                 else:
@@ -740,7 +752,9 @@ def promote_downloaded_plan(
             ).append((entry, manifest_path))
 
     expected_post_keys = {
-        (post.platform_key, post.platform_post_id) for post in plan.posts
+        (post.platform_key, post.platform_post_id)
+        for post in plan.posts
+        if post.authoritative_images > 0
     }
     if set(entries_by_post) != expected_post_keys:
         raise ValueError(
@@ -764,7 +778,7 @@ def promote_downloaded_plan(
             )
             for item in post.prepared_images
         ]
-        rows = entries_by_post[(post.platform_key, post.platform_post_id)]
+        rows = entries_by_post.get((post.platform_key, post.platform_post_id), [])
         manifest_entries = [entry for entry, _path in rows]
         identity_match_mode = "strict_manifest_v1"
         try:

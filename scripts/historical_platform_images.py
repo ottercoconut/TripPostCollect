@@ -893,6 +893,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 project_root=PROJECT_ROOT,
                 media_root=LOCAL_MEDIA_ROOT,
                 require_missing_local=True,
+                include_projection_mismatches=True,
             )
             records = _load_raw_records(
                 conn,

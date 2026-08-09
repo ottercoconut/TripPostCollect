@@ -11,6 +11,7 @@ import pytest
 from scripts.gc_local_images import main as gc_main
 from scripts.materialize_local_images import main as materialize_main
 from trippostcollect.artifacts.historical_image_materialization import (
+    apply_relationship_plan,
     build_relationship_plan,
     database_integrity,
     promote_downloaded_plan,
@@ -204,6 +205,85 @@ def test_relationship_plan_can_temporarily_defer_a_failed_post(tmp_path: Path) -
         )
 
     assert plan.posts == ()
+
+
+def test_missing_plan_can_include_projection_only_cleanup(tmp_path: Path) -> None:
+    db_path = _fixture_database(tmp_path, two_xhs_posts=True)
+    with sqlite3.connect(db_path) as conn:
+        plan = build_relationship_plan(
+            conn,
+            platforms=("xhs",),
+            batch_size=10,
+            project_root=tmp_path,
+            media_root=tmp_path / "data" / "media",
+            require_missing_local=True,
+            include_projection_mismatches=True,
+        )
+
+    assert [post.platform_post_id for post in plan.posts] == ["xhs-1", "xhs-2"]
+    assert plan.posts[0].misclassified_rows == 1
+    assert plan.posts[0].existing_local_rows == plan.posts[0].authoritative_images == 1
+
+
+def test_empty_manifest_promotes_projection_only_cleanup(tmp_path: Path) -> None:
+    db_path = _fixture_database(tmp_path)
+    with sqlite3.connect(db_path) as conn:
+        cursor = int(
+            conn.execute(
+                "SELECT MAX(id) FROM web_posts WHERE platform_key='zhihu'"
+            ).fetchone()[0]
+        )
+        web_post_id = _insert_post(
+            conn,
+            platform_key="zhihu",
+            platform_post_id="zh-empty",
+            raw={"content_id": "zh-empty", "image_list": []},
+            noise_urls=("https://www.zhihu.com/people/not-content",),
+            project_root=tmp_path,
+        )
+        conn.commit()
+        plan = build_relationship_plan(
+            conn,
+            platforms=("zhihu",),
+            after_post_ids={"zhihu": cursor},
+            batch_size=10,
+            project_root=tmp_path,
+            media_root=tmp_path / "data" / "media",
+            require_missing_local=True,
+            include_projection_mismatches=True,
+        )
+
+    assert len(plan.posts) == 1
+    assert plan.posts[0].web_post_id == web_post_id
+    assert plan.posts[0].authoritative_images == 0
+    manifest_path = tmp_path / "empty-image-manifest.jsonl"
+    write_manifest_atomic(manifest_path, [])
+
+    promoted, promotion = promote_downloaded_plan(
+        plan,
+        manifest_paths=[manifest_path],
+        project_root=tmp_path,
+        media_root=tmp_path / "data" / "media",
+    )
+
+    assert promotion["promoted_images"] == 0
+    assert promoted.posts[0].prepared_images == ()
+    with sqlite3.connect(db_path) as conn:
+        result = apply_relationship_plan(conn, promoted)
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT p.post_images_count, COUNT(i.id)
+            FROM web_posts AS p
+            LEFT JOIN web_post_images AS i
+              ON i.web_post_id=p.id AND i.image_role='content'
+            WHERE p.id=?
+            GROUP BY p.id
+            """,
+            (web_post_id,),
+        ).fetchone()
+    assert result["removed_misclassified_rows"] == 1
+    assert row == (0, 0)
 
 
 def _campaign(db_path: Path, campaign_path: Path) -> dict[str, object]:

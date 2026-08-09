@@ -394,6 +394,12 @@ def test_background_failure_classification_and_capacity_gate(
     assert capacity["remaining_estimate_bytes"] == sum(worker.P95_IMAGE_BYTES.values())
     assert worker._classify_failure({"error": "Weibo online login check failed"}) == "auth_required"
     assert worker._classify_failure({"error": "image_decode_failed"}) == "failed"
+    assert worker._platform_has_pending_projection(
+        {"local_gap": 0, "misclassified_rows": 2}
+    )
+    assert not worker._platform_has_pending_projection(
+        {"local_gap": 0, "misclassified_rows": 0}
+    )
 
 
 def test_worker_failure_decision_retries_only_with_remaining_budget() -> None:

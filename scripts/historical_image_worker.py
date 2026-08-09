@@ -207,6 +207,10 @@ def _capacity_gate(db_path: Path, inventory: dict[str, dict[str, int]]) -> dict[
     }
 
 
+def _platform_has_pending_projection(row: dict[str, int]) -> bool:
+    return int(row["local_gap"]) > 0 or int(row["misclassified_rows"]) > 0
+
+
 def _run_command(command: list[str], *, log_handle: Any) -> int:
     log_handle.write(f"[{utc_iso()}] command={json.dumps(command, ensure_ascii=False)}\n")
     log_handle.flush()
@@ -618,12 +622,15 @@ def run_worker(args: argparse.Namespace) -> int:
                     (
                         platform
                         for platform in PLATFORM_ORDER
-                        if inventory[platform]["local_gap"] > 0
+                        if _platform_has_pending_projection(inventory[platform])
                     ),
                     None,
                 )
                 for completed in PLATFORM_ORDER:
-                    if inventory[completed]["local_gap"] != 0 or completed in state["completed_platforms"]:
+                    if (
+                        _platform_has_pending_projection(inventory[completed])
+                        or completed in state["completed_platforms"]
+                    ):
                         continue
                     ok, report_path = _validate_platform(
                         completed,
