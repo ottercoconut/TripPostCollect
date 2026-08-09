@@ -83,6 +83,60 @@ def test_generic_weibo_download_uses_large_proxy_and_ignores_avatar(
     ]
 
 
+def test_weibo_download_falls_back_to_direct_large_then_original(
+    monkeypatch, tmp_path: Path
+) -> None:
+    seen: list[str] = []
+
+    def fake_fetch(url, **_kwargs):
+        seen.append(url)
+        if "i1.wp.com" in url:
+            raise RemoteImageFetchError("proxy rejected", http_status=400)
+        if "/large/" in url:
+            return RemoteImagePreview(
+                content=b"not-an-image",
+                media_type="image/jpeg",
+                final_url=url,
+            )
+        return RemoteImagePreview(
+            content=_png_bytes(),
+            media_type="image/png",
+            final_url=url,
+        )
+
+    monkeypatch.setattr(batch, "fetch_remote_image_bytes", fake_fetch)
+    record = {
+        "note_id": "wb-fallback",
+        "note_url": "https://m.weibo.cn/detail/wb-fallback",
+        "image_list_source": "mblog.pics",
+        "image_list": [
+            {
+                "url": "https://wx1.sinaimg.cn/orj360/body.jpg",
+                "pid": "body-pid",
+            }
+        ],
+    }
+
+    entries, report = batch._download_generic_post(
+        SimpleNamespace(platform_post_id="wb-fallback", authoritative_images=1),
+        record,
+        platform_key="weibo",
+        staging_root=tmp_path,
+        cookie_header="SUB=test",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert seen == [
+        "https://i1.wp.com/wx1.sinaimg.cn/large/body.jpg",
+        "https://wx1.sinaimg.cn/large/body.jpg",
+        "https://wx1.sinaimg.cn/orj360/body.jpg",
+    ]
+    assert entries[0].fetch_status == "downloaded"
+    assert entries[0].attempts == 3
+    assert report["downloaded_images"] == 1
+    assert report["failed_images"] == 0
+
+
 def test_weibo_session_after_reloads_snapshot_before_login_check(monkeypatch) -> None:
     checked_headers: list[str] = []
 

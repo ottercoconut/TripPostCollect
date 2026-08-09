@@ -371,6 +371,24 @@ def _weibo_archive_url(source_url: str) -> str:
     return f"https://i1.wp.com/{'/'.join(parts)}"
 
 
+def _weibo_direct_large_url(source_url: str) -> str:
+    without_scheme = source_url.split("://", 1)[-1]
+    parts = without_scheme.split("/")
+    if len(parts) < 3:
+        return source_url
+    parts[1] = "large"
+    return f"https://{'/'.join(parts)}"
+
+
+def _weibo_fetch_urls(source_url: str) -> list[str]:
+    urls = [
+        _weibo_archive_url(source_url),
+        _weibo_direct_large_url(source_url),
+        source_url,
+    ]
+    return list(dict.fromkeys(urls))
+
+
 def _record_referer(platform_key: str, record: dict[str, Any], post_id: str) -> str:
     for key in ("content_url", "note_url", "aweme_url"):
         value = str(record.get(key) or "").strip()
@@ -456,11 +474,12 @@ def _download_candidate(
     staging_root = staging_root.expanduser().resolve()
     attempts = 0
     http_status: int | None = None
-    fetch_url = fetch_url_override or (
-        _weibo_archive_url(candidate.source_url)
-        if platform_key == "weibo"
-        else candidate.source_url
-    )
+    if fetch_url_override:
+        fetch_urls = [fetch_url_override]
+    elif platform_key == "weibo":
+        fetch_urls = _weibo_fetch_urls(candidate.source_url)
+    else:
+        fetch_urls = [candidate.source_url]
     headers = _archive_headers(
         platform_key,
         cookie_header=cookie_header,
@@ -470,6 +489,8 @@ def _download_candidate(
         if time.monotonic() >= deadline:
             raise TimeoutError("historical image batch timeout reached before image request")
         attempts += 1
+        fetch_url = fetch_urls[min(attempts - 1, len(fetch_urls) - 1)]
+        has_fallback = attempts < min(max_attempts, len(fetch_urls))
         try:
             response = fetch_remote_image_bytes(
                 fetch_url,
@@ -513,6 +534,8 @@ def _download_candidate(
         except RemoteImageFetchError as exc:
             http_status = exc.http_status
             error_code = remote_image_failure_code(exc)
+            if has_fallback:
+                continue
             if exc.retryable and attempts < max_attempts:
                 time.sleep(random.uniform(1.0, 2.0) * (2 ** (attempts - 1)))
                 continue
@@ -523,6 +546,8 @@ def _download_candidate(
                 error_code=error_code,
             )
         except ImageMaterializationError as exc:
+            if has_fallback:
+                continue
             return _failed_entry(
                 candidate,
                 attempts=attempts_offset + attempts,

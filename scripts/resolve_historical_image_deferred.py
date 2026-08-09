@@ -24,6 +24,7 @@ from trippostcollect.db.bootstrap import bootstrap_connection
 
 
 CAMPAIGN_ID = worker.CAMPAIGN_ID
+SUPPORTED_PLATFORMS = tuple(worker.PLATFORM_ORDER)
 DEFAULT_STATE = (
     IMAGE_MATERIALIZATION_RUNTIME
     / CAMPAIGN_ID
@@ -36,6 +37,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default=str(DEFAULT_DB))
     parser.add_argument("--state", default=str(DEFAULT_STATE))
+    parser.add_argument("--platform", choices=SUPPORTED_PLATFORMS, required=True)
     parser.add_argument(
         "--exclude",
         action="append",
@@ -83,9 +85,11 @@ def _parse_targets(values: Sequence[str]) -> list[tuple[str, int]]:
 
 
 def _failure_evidence(
-    state: dict[str, Any], post_id: str, source_index: int
+    state: dict[str, Any], platform_key: str, post_id: str, source_index: int
 ) -> dict[str, Any]:
-    deferred = (state.get("deferred_posts") or {}).get("bilibili", {}).get(post_id)
+    deferred = (
+        (state.get("deferred_posts") or {}).get(platform_key, {}).get(post_id)
+    )
     if not isinstance(deferred, dict):
         raise ValueError(f"post is not deferred: {post_id}")
     for event in reversed(deferred.get("history") or []):
@@ -103,6 +107,7 @@ def _failure_evidence(
 def _resolve_targets(
     conn: sqlite3.Connection,
     state: dict[str, Any],
+    platform_key: str,
     targets: Sequence[tuple[str, int]],
 ) -> list[dict[str, Any]]:
     resolved: list[dict[str, Any]] = []
@@ -111,20 +116,20 @@ def _resolve_targets(
             """
             SELECT id, raw_sample_json
             FROM web_posts
-            WHERE platform_key='bilibili' AND platform_post_id=?
+            WHERE platform_key=? AND platform_post_id=?
             """,
-            (post_id,),
+            (platform_key, post_id),
         ).fetchone()
         if row is None:
-            raise ValueError(f"Bilibili post does not exist: {post_id}")
+            raise ValueError(f"{platform_key} post does not exist: {post_id}")
         raw = json.loads(row[1] or "{}")
-        candidates = content_image_candidates("bilibili", raw)
+        candidates = content_image_candidates(platform_key, raw)
         candidate = next(
             (item for item in candidates if item.source_index == source_index), None
         )
         if candidate is None:
             raise ValueError(f"authoritative image does not exist: {post_id}:{source_index}")
-        evidence = _failure_evidence(state, post_id, source_index)
+        evidence = _failure_evidence(state, platform_key, post_id, source_index)
         failure_key = str((evidence.get("failure") or {}).get("source_asset_key") or "")
         if failure_key != candidate.source_asset_key:
             raise ValueError(f"deferred source identity changed: {post_id}:{source_index}")
@@ -157,6 +162,7 @@ def _apply_database(
     db_path: Path,
     resolved: Sequence[dict[str, Any]],
     *,
+    platform_key: str,
     reason: str,
     backup_dir: Path,
 ) -> dict[str, Any]:
@@ -177,7 +183,7 @@ def _apply_database(
                       campaign_id, platform_key, platform_post_id, source_index,
                       source_asset_key, source_url, reason, evidence_json,
                       approved_by, approved_at
-                    ) VALUES (?, 'bilibili', ?, ?, ?, ?, ?, ?, 'user', ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'user', ?)
                     ON CONFLICT(campaign_id, platform_key, platform_post_id, source_asset_key)
                     DO UPDATE SET
                       reason=excluded.reason,
@@ -187,6 +193,7 @@ def _apply_database(
                     """,
                     (
                         CAMPAIGN_ID,
+                        platform_key,
                         item["platform_post_id"],
                         item["source_index"],
                         item["source_asset_key"],
@@ -218,12 +225,12 @@ def _apply_database(
                     (web_post_id,),
                 ).fetchone()
                 excluded_keys = exclusions.get(
-                    ("bilibili", str(platform_post_id)), set()
+                    (platform_key, str(platform_post_id)), set()
                 )
                 remaining = sum(
                     candidate.source_asset_key not in excluded_keys
                     for candidate in content_image_candidates(
-                        "bilibili", json.loads(raw_json or "{}")
+                        platform_key, json.loads(raw_json or "{}")
                     )
                 )
                 conn.execute(
@@ -253,10 +260,11 @@ def _release_state(
     state_path: Path,
     state: dict[str, Any],
     *,
+    platform_key: str,
     post_ids: set[str],
     report_path: Path,
 ) -> None:
-    deferred = (state.get("deferred_posts") or {}).get("bilibili", {})
+    deferred = (state.get("deferred_posts") or {}).get(platform_key, {})
     for post_id in post_ids:
         deferred.pop(post_id, None)
     state["retry_events"] = list(state.get("retry_events") or [])
@@ -264,7 +272,7 @@ def _release_state(
         {
             "event": "operator_resolution_applied",
             "recorded_at": utc_iso(),
-            "platform": "bilibili",
+            "platform": platform_key,
             "platform_post_ids": sorted(post_ids),
             "report": str(report_path),
         }
@@ -296,17 +304,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         raise SystemExit("historical image worker must be stopped before resolution")
     targets = _parse_targets(args.exclude)
+    platform_key = str(args.platform)
     release_post_ids = {str(value) for value in args.release_post_id if value}
     if not targets and not release_post_ids:
         raise SystemExit("at least one exclusion or release post ID is required")
+    deferred = (state.get("deferred_posts") or {}).get(platform_key, {})
+    unknown_release_ids = release_post_ids - set(deferred)
+    if unknown_release_ids:
+        raise SystemExit(
+            f"release post IDs are not deferred for {platform_key}: "
+            f"{sorted(unknown_release_ids)}"
+        )
     with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
-        resolved = _resolve_targets(conn, state, targets)
+        resolved = _resolve_targets(conn, state, platform_key, targets)
     release_post_ids.update(item["platform_post_id"] for item in resolved)
     report: dict[str, Any] = {
         "schema_version": 1,
         "campaign_id": CAMPAIGN_ID,
         "created_at": utc_iso(),
         "status": "planned",
+        "platform": platform_key,
         "database": str(db_path),
         "database_sha256_before": sha256_file(db_path),
         "reason": str(args.reason),
@@ -319,20 +336,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.confirm_operator_exclusion:
         raise SystemExit("--apply requires --confirm-operator-exclusion")
     stamp = utc_stamp()
-    report_dir = IMAGE_MATERIALIZATION_RUNTIME / CAMPAIGN_ID / "h04" / f"operator-resolution-{stamp}"
+    stage = worker.STAGE_BY_PLATFORM[platform_key]
+    report_dir = IMAGE_MATERIALIZATION_RUNTIME / CAMPAIGN_ID / stage / f"operator-resolution-{stamp}"
     report_path = report_dir / "report.json"
     backup_dir = (
         DATA_ROOT
         / "backups"
         / "historical_images"
         / CAMPAIGN_ID
-        / "h04"
+        / stage
         / f"operator-resolution-{stamp}"
     )
     report.update(
         _apply_database(
             db_path,
             resolved,
+            platform_key=platform_key,
             reason=str(args.reason),
             backup_dir=backup_dir,
         )
@@ -345,6 +364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _release_state(
         state_path,
         state,
+        platform_key=platform_key,
         post_ids=release_post_ids,
         report_path=report_path,
     )
