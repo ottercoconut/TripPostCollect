@@ -76,16 +76,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-import", action="store_true")
     parser.add_argument(
-        "--historical-images",
-        action="store_true",
-        help="Run the bounded existing-post image backfill without discovery or post import.",
-    )
-    parser.add_argument("--historical-campaign", help=argparse.SUPPRESS)
-    parser.add_argument("--historical-batch-size", type=int, default=10, help=argparse.SUPPRESS)
-    parser.add_argument("--historical-report", help=argparse.SUPPRESS)
-    parser.add_argument("--historical-backup-dir", help=argparse.SUPPRESS)
-    parser.add_argument("--historical-resume-summary", help=argparse.SUPPRESS)
-    parser.add_argument(
         "--completion-mode",
         choices=("target-new-posts", "source-exhausted"),
         default="target-new-posts",
@@ -135,9 +125,7 @@ def build_child_command(
     post_interaction: str,
     discovery: dict[str, Any],
     completion_mode: str = "target-new-posts",
-    historical_detail_urls_file: Path | None = None,
 ) -> list[str]:
-    historical_mode = historical_detail_urls_file is not None
     command = [
         sys.executable,
         str(ROOT / "scripts" / "mediacrawler_crawl.py"),
@@ -150,21 +138,17 @@ def build_child_command(
         "--timeout-per-platform",
         str(int(target["timeout_seconds"])),
         "--candidate-hard-limit",
-        str(
-            int(target["candidate_hard_limit"])
-            if not historical_mode
-            else max(1, int(target.get("historical_candidate_count") or 1))
-        ),
+        str(int(target["candidate_hard_limit"])),
         "--target-new-posts",
-        str(0 if historical_mode else int(target["target_new_posts"])),
+        str(int(target["target_new_posts"])),
         "--completion-mode",
         completion_mode,
         "--max-stagnant-batches",
         str(int(target["max_stagnant_batches"])),
         "--start-page",
-        str(1 if historical_mode else int(discovery["resume_page"])),
+        str(int(discovery["resume_page"])),
         "--top-refresh-max-pages",
-        str(0 if historical_mode else int(discovery["top_refresh_max_pages"])),
+        str(int(discovery["top_refresh_max_pages"])),
         "--required-fields-profile",
         str(target["required_fields_profile"]),
         "--behavior-profile",
@@ -176,9 +160,9 @@ def build_child_command(
         "--xhs-account-id",
         str(account["account_id"]),
         "--xhs-discovery-target-key",
-        str(discovery.get("target_key") or "historical-image-backfill"),
+        str(discovery["target_key"]),
         "--xhs-discovery-query-fingerprint",
-        str(discovery.get("query_fingerprint") or "historical-image-backfill"),
+        str(discovery["query_fingerprint"]),
         "--xhs-profile-dir",
         str(account["profile_dir"]),
         "--xhs-storage-state",
@@ -186,26 +170,17 @@ def build_child_command(
         "--xhs-post-interaction",
         post_interaction,
     ]
-    if historical_mode:
-        command.extend(
-            [
-                "--xhs-detail-urls-file",
-                str(historical_detail_urls_file),
-                "--historical-image-backfill",
-                "--no-checkpoint-write",
-            ]
-        )
-    if not historical_mode and discovery.get("resume_search_id"):
+    if discovery.get("resume_search_id"):
         command.extend(["--start-cursor", str(discovery["resume_search_id"])])
-    if not historical_mode and discovery.get("campaign_summary_path"):
+    if discovery.get("campaign_summary_path"):
         command.extend(["--resume-summary", str(discovery["campaign_summary_path"])])
-    if not historical_mode and discovery.get("source_exhausted"):
+    if discovery.get("source_exhausted"):
         command.append("--discovery-source-exhausted")
     command.append("--download-images")
     command.extend(["--media-root", str(LOCAL_MEDIA_ROOT.resolve())])
     if pool.get("headed", True):
         command.append("--headed")
-    if no_import or historical_mode:
+    if no_import:
         command.append("--no-import")
     return command
 
@@ -442,37 +417,6 @@ def record_preexecution_failure(
 
 def main() -> int:
     args = parse_args()
-    if args.historical_images:
-        from xhs_historical_images import main as historical_images_main
-
-        historical_args = [
-            "--runner-managed",
-            "--account-id",
-            args.account_id,
-            "--db",
-            args.db,
-            "--target-key",
-            args.target_key,
-            "--target-config",
-            args.target_config,
-            "--pool-config",
-            args.pool_config,
-            "--batch-size",
-            str(args.historical_batch_size),
-        ]
-        if args.historical_campaign:
-            historical_args.extend(["--campaign", args.historical_campaign])
-        if args.historical_report:
-            historical_args.extend(["--report", args.historical_report])
-        if args.historical_backup_dir:
-            historical_args.extend(["--backup-dir", args.historical_backup_dir])
-        if args.historical_resume_summary:
-            historical_args.extend(
-                ["--resume-child-summary", args.historical_resume_summary]
-            )
-        if not args.dry_run:
-            historical_args.append("--apply")
-        return historical_images_main(historical_args)
     target = load_target(args.target_key, args.target_config)
     pool = load_pool_config(args.pool_config)
     if int(pool["lease_seconds"]) < int(target["timeout_seconds"]) + 300:

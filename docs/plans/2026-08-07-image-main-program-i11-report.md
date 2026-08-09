@@ -78,7 +78,7 @@ python -m pytest tests/test_frozen_files.py
   `a7f78d3636025d61b442b50050afb2c36b7808772131d77df1c344bcdf371006`。
 - 正式 `data/media/` 新增文件数为 0；MediaCrawler 嵌套仓库保持 clean，HEAD 仍为
   `1e88b234156dfe434041f459ff0a908184d942e8`。
-- 用户冻结文件校验通过；历史补全仍未开始。
+- 用户冻结文件校验通过；默认内容库和正式媒体根没有变化。
 
 ## 结论
 

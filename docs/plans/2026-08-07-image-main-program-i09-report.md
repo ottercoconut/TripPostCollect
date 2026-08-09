@@ -11,8 +11,7 @@ MediaCrawler 补丁提交：
   返回，删除此前自动回退 `get_aweme_video()` 的行为。
 - `_extract_note_image_assets()` 对每个 `images[]` 对象只选当前 `url_list` 的 fresh URL，并保留
   `uri`、连续来源序号和稳定资源键；不同签名查询参数不改变身份。
-- 图片下载只复用当前存活的 `dy_client.get_aweme_media()`。本步骤不使用历史 URL、不刷新历史
-  详情；历史刷新仍留在 H-07。
+- 图片下载只复用当前存活的 `dy_client.get_aweme_media()`，不使用脱离当前详情会话的过期 URL。
 - Douyin 图片 store 复用共享 raster 校验和整帖原子 staging，写入
   `douyin/images/<aweme_id>/<index>.<真实扩展名>` 与 schema v1 manifest。
 - JSONL 图片模式记录新增 `image_assets` 和 `image_list_source=aweme.images`，与

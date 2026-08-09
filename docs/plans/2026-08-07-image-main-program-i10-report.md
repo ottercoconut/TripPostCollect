@@ -69,7 +69,7 @@ python -m pytest \
   `a7f78d3636025d61b442b50050afb2c36b7808772131d77df1c344bcdf371006`。
 - 正式 `data/media/` 新增文件数为 0；MediaCrawler 嵌套仓库保持 clean，HEAD 仍为
   `1e88b234156dfe434041f459ff0a908184d942e8`。
-- 父 runner、冻结状态和历史补全均未修改；I-11 之前不能把本步骤视为正式 runner 已完成。
+- 父 runner 和冻结状态均未修改；I-11 之前不能把本步骤视为正式 runner 已完成。
 
 ## 结论
 

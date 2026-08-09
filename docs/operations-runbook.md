@@ -120,7 +120,7 @@ du -sh data/media outputs/mediacrawler_runs 2>/dev/null
 空间明显不足时在 dry-run 后、正式 child 前停止。不要边下载边删除本轮 staging 或长期文件；
 manifest 复验依赖这些字节，部分删除会正确地使 `artifacts_verified` 失败。
 
-普通新增抓取依赖 SQLite 事务和内容寻址文件幂等，不要求每轮复制整库。任何历史补全、批量修复、
+普通新增抓取依赖 SQLite 事务和内容寻址文件幂等，不要求每轮复制整库。任何批量修复、
 清理或人工 SQL 写默认库前则必须先建立 SQLite 一致性备份，并记录备份 SHA-256：
 
 ```bash
@@ -128,9 +128,6 @@ mkdir -p data/backups
 sqlite3 data/trippostcollect.sqlite ".backup 'data/backups/trippostcollect-before-<run_id>.sqlite'"
 shasum -a 256 data/backups/trippostcollect-before-<run_id>.sqlite
 ```
-
-历史图片补全只能在 `MAIN_PROGRAM_READY=true` 后按工程方案 H 阶段执行；主程序开发和新记录验证
-不能顺手修改默认库已有行或移动现有图片。
 
 `info_collection_benchmark.py` 只用于通用平台性能和容量评估，不能替代正式状态文件和报告，
 也不接受小红书任务。
@@ -472,80 +469,6 @@ detail、creator profile 和实际发生的 page navigation 阶段；同时包�
 当 child 因该门禁返回 `policy_blocked` 时，外层 Runner 必须保留 child 给出的
 `wait_seconds` 和原因来计算 `next_run_at`，不能被汇总层的 `behavior_evidence_failed` 降级成
 通用 600 秒重试。断点和候选记忆在冷却期间保持不变，到期后再从同一 checkpoint 续跑。
-
-## 历史图片后台补全
-
-H-04 至 H-08 使用单实例后台 worker，不再用终端 `for` 循环逐批监控：
-
-```bash
-cd /Users/kawauso/Documents/Projects/TripPostCollect
-source .venv/bin/activate
-python scripts/historical_image_worker.py start
-```
-
-`start` 成功会返回 PID、状态文件和日志路径。进程使用 `start_new_session` 脱离当前终端；关闭
-Codex 或 shell 不会终止任务。重复执行 `start` 是安全的：已有 worker 时只返回
-`already_running`；发现独立 `historical_platform_images.py` 批次时返回 `start_blocked`，禁止两套
-编排同时修改默认库。
-
-查看状态：
-
-```bash
-source .venv/bin/activate
-python scripts/historical_image_worker.py status
-tail -n 40 data/runtime/image_materialization/historical-images-20260807-v1/background-worker/worker.log
-```
-
-日常只读 `state.json` 和日志尾部，不全文展开批次 JSONL。关键状态含义：
-
-| 状态 | 含义 | 处理 |
-|---|---|---|
-| `starting` / `running` / `login_preflight` | 正常启动、批次执行或平台登录预检 | 等待自动推进 |
-| `retry_wait` | 可恢复批次失败，已落盘并等待有限退避 | 无需模型介入；查看 `active_retry`、`next_retry_at` 和 `retry_events` |
-| `running_with_deferred` | 单图重试已耗尽或出现终态来源错误，失败帖子已暂存，正在处理同平台其他帖子 | 无需立即介入；不得把暂存项算作完成或手工补空关系 |
-| `retry_exhausted` | 无法定位到具体帖子的批次级瞬时错误已连续失败 3 轮 | 查看三轮报告和日志，修复根因后再次 `start` |
-| `review_required` | 当前平台其余可执行帖子已处理完，只剩暂存失败帖 | 按 `deferred_posts` 和 `deferred-posts.json` 逐项处理；未批准排除前不得进入下一平台 |
-| `auth_required` | 当前平台持久会话失效 | 运行 `python scripts/login_warmup.py --targets <platform> --timeout-seconds 600`，完成扫码后再次 `start` |
-| `capacity_blocked` | 剩余空间未达到冻结公式 | 扩容或清理非 campaign 数据后再次 `start` |
-| `code_drift` | 启动后 git commit 或关键文件 SHA 改变 | 审计并提交代码，确认无运行批次后再次 `start` |
-| `failed` | 图片、manifest、backup 或事务失败 | 查看 `last_report`，修复根因后再次 `start`；不得跳过 |
-| `validation_failed` | 平台或 H-08 全量验收失败 | 查看 `last_validation_report`，消除 mismatch 后恢复 |
-| `stopped` | 已按请求在整批边界停止 | 再次 `start` 从 SQLite 缺口恢复 |
-| `completed` | 五平台和 H-08、GC dry-run 均通过 | 确认 `historical_data_complete=true` |
-
-安全停止不会杀死当前子进程：
-
-```bash
-source .venv/bin/activate
-python scripts/historical_image_worker.py stop
-```
-
-worker 会完成当前帖子批次的下载、复验和事务，再读取 `stop.requested` 并退出。不要对 worker 或
-单批进程使用 `kill -9`；若机器异常退出，重新 `start` 会根据数据库非空 `local_path` 自动选择剩余
-帖子，失败 staging 保留为证据，长期目录孤儿由 H-08 GC dry-run 报告但不会自动删除。
-
-重试分两层执行。单图片对网络、超时、429 和 5xx 最多请求 3 次，并使用随机指数退避；如果批次在
-图片尝试预算尚未耗尽前被超时中断，worker 只把剩余次数传给下一轮。无法归属到具体图片的
-`TimeoutError`、`URLError`、`ConnectionError`、`OSError` 等批次错误最多运行 3 轮，轮间固定等待
-30 秒、120 秒。每次失败、已用次数、报告路径和下次时间都写入 `state.json.retry_events`，等待期间
-`stop` 仍可在 1 秒内被识别。
-
-HTTP 404 等有明确状态码的不可恢复来源错误写为 `image_source_unavailable`，不会伪装成
-`image_download_retryable`。失败帖子写入 `deferred-posts.json` 后只在当前平台内暂存，worker 会跳过
-该帖并继续当前平台其他缺口；它不会删除来源关系、写入部分帖子、自动批准永久排除，也不会跨过
-平台顺序。当前平台只剩暂存项时进入 `review_required`，并保持
-`historical_data_complete=false`。
-
-用户逐项批准放弃不可恢复图片后，只能通过
-`scripts/resolve_historical_image_deferred.py` 的受控入口执行：先按
-`PLATFORM_POST_ID:SOURCE_INDEX` 精确匹配暂存证据和当前关系，创建 SQLite 一致性备份，再把批准项
-写入 `historical_image_exclusions` 并删除对应 `web_post_images` 行。原始帖和 `raw_sample_json` 保留
-为来源证据；历史计划、库存和验收只从批准后的有效正文图集合计算。入口同时生成操作报告并释放
-受影响帖子供 worker 重试，不允许直接编辑 `state.json` 或 `deferred-posts.json`。
-
-平台顺序、固定样本和扩大批次仍为 XHS → B站 50 → 微博 50 → 知乎 20 → 抖音 20；新平台首批
-固定 10 帖。微博登录必须满足 `/api/config login=true` 且 uid 非空；抖音旧签名失败只允许图片详情
-刷新一次。后台任务始终保持头像、作者主页、封面、视频、音乐和知乎公式图下载为 0。
 
 ## 结果检查
 

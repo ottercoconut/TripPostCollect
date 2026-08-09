@@ -549,40 +549,6 @@ def test_xhs_pool_requires_headed_browser(tmp_path: Path) -> None:
         load_pool_config(pool_path)
 
 
-def test_xhs_historical_child_is_detail_only_and_never_imports(tmp_path: Path) -> None:
-    detail_file = tmp_path / "detail.json"
-    target = {
-        "keyword": "青岛旅游",
-        "timeout_seconds": 7200,
-        "candidate_hard_limit": 300,
-        "target_new_posts": 50,
-        "historical_candidate_count": 10,
-        "max_stagnant_batches": 8,
-        "required_fields_profile": "image_post_with_followers_v1",
-    }
-    command = xhs_runner.build_child_command(
-        target=target,
-        pool={"behavior_profile": "xhs_guarded", "headed": True},
-        account={"account_id": "xhs-a01", "profile_dir": str(tmp_path / "profile")},
-        storage_state=tmp_path / "state.json",
-        db_path=tmp_path / "db.sqlite",
-        output_root=tmp_path / "output",
-        no_import=False,
-        post_interaction="none",
-        discovery={},
-        historical_detail_urls_file=detail_file,
-    )
-
-    assert command[command.index("--candidate-hard-limit") + 1] == "10"
-    assert command[command.index("--target-new-posts") + 1] == "0"
-    assert command[command.index("--xhs-detail-urls-file") + 1] == str(detail_file)
-    assert "--historical-image-backfill" in command
-    assert "--no-checkpoint-write" in command
-    assert "--no-import" in command
-    assert "--start-cursor" not in command
-    assert "--resume-summary" not in command
-
-
 def test_xhs_schema_migrates_automatic_budget_and_breaker_fields(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy.sqlite"
     with sqlite3.connect(db_path) as conn:
@@ -736,49 +702,6 @@ def test_generic_entrypoints_do_not_select_xhs(monkeypatch: pytest.MonkeyPatch) 
         ).fetchone()
         with pytest.raises(ValueError, match="xhs_runner"):
             crawl_runner.build_command(row, object())
-
-
-def test_xhs_historical_detail_urls_are_signed_and_exact(tmp_path: Path) -> None:
-    path = tmp_path / "xhs-detail.json"
-    path.write_text(
-        json.dumps(
-            [
-                "https://www.xiaohongshu.com/explore/note-1?xsec_token=token%3D&xsec_source=pc_search"
-            ]
-        ),
-        encoding="utf-8",
-    )
-    assert mediacrawler_crawl.load_xhs_detail_urls(path) == [
-        "https://www.xiaohongshu.com/explore/note-1?xsec_token=token%3D&xsec_source=pc_search"
-    ]
-
-    path.write_text(
-        json.dumps(["https://www.xiaohongshu.com/search_result?keyword=test"]),
-        encoding="utf-8",
-    )
-    with pytest.raises(SystemExit, match="unsigned XHS detail URL"):
-        mediacrawler_crawl.load_xhs_detail_urls(path)
-
-
-def test_historical_image_validation_requires_existing_body_image_and_rejects_video() -> None:
-    existing = {"xhs:id:note-1"}
-    record = {
-        "note_id": "note-1",
-        "type": "normal",
-        "image_list": ["https://sns-webpic-qc.xhscdn.com/notes/body.jpg"],
-        "avatar_url": "https://sns-avatar-qc.xhscdn.com/avatar/user.jpg",
-    }
-    result = mediacrawler_crawl.validate_historical_image_record(
-        "xhs", record, set(), existing
-    )
-    assert result["valid"] is True
-    assert result["content_image_count"] == 1
-
-    video = mediacrawler_crawl.validate_historical_image_record(
-        "xhs", {**record, "type": "video"}, set(), existing
-    )
-    assert video["valid"] is False
-    assert "video_record" in video["reasons"]
 
 
 def test_xhs_runner_requires_operator_selected_account(monkeypatch: pytest.MonkeyPatch) -> None:

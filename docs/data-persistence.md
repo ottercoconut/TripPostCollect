@@ -642,5 +642,3 @@ python scripts/crawl_runner.py \
   SQLite；正式正文图片长期保存在 `data/media`，`outputs/` 只保留 manifest、必要日志、报告和
   可清理 staging。
 - `temp/` 不参与正式入库和调度，只保存临时验证数据库或一次性测试结果。代码不能依赖 `temp/` 中已有文件。
-- 本节只描述主程序对以后新抓记录的保证；当前数据库中历史 URL-only 行的补全必须等待
-  `MAIN_PROGRAM_READY=true` 后按工程方案 H-00 至 H-08 执行，不能在正常新抓路径中隐式回填。

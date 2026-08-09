@@ -32,4 +32,4 @@ search ID、深层耗尽状态、已完成处理候选 ID 和累计摘要，并�
 `web_post_images` 保存 `image_role=content`、连续 `image_index`、来源 URL、项目相对
 `local_path`、`width/height/mime_type/sha256`，且本地文件通过根项目复验；只有 URL 不算覆盖。
 筛除头像等无用资源依赖上表的显式字段投影，不使用递归 URL 扫描或图片尺寸启发式，因此被排除
-资源不会触发下载。当前历史数据的本地路径覆盖率不由本表承诺，待主程序总验收后单独补全。
+资源不会触发下载。

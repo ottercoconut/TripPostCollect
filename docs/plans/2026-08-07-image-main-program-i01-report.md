@@ -49,5 +49,5 @@ python -m pytest \
 
 `I_01_IMAGE_CANDIDATES_READY=true`
 
-尚未开始下载、manifest、长期目录、数据库关系清理或历史图片晋升；这些工作分别受后续 I 阶段和
+尚未开始下载、manifest、长期目录或数据库关系改造；这些工作受后续 I 阶段和
 `MAIN_PROGRAM_READY` 门禁约束。

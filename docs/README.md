@@ -19,7 +19,6 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 | SQLite、字段映射和入库 | [数据持久化](data-persistence.md) |
 | 当前平台字段能力 | [平台字段覆盖](platform-field-coverage.md) |
 | 五平台正文图片本地存储实施 | [五平台正文图片本地存储工程实现方案](plans/2026-08-07-multiplatform-local-image-storage.md) |
-| 历史图片输入冻结与执行门禁 | [H-00 输入冻结](plans/2026-08-07-historical-image-h00-input-freeze.md)、[H-01 工具验收](plans/2026-08-07-historical-image-h01-tooling-report.md)、[H-02 执行门禁](plans/2026-08-07-historical-image-h02-execution-gate.md) |
 | B站专栏正文、详情失败与历史回填 | [B站 article](platforms/bilibili.md) |
 | 管理端开发 | [管理客户端开发](admin-client-development.md) |
 | 小红书账号、登录、正式抓取和恢复 | [小红书正式抓取 Workflow](platforms/xhs.md) |
@@ -182,8 +181,6 @@ dry-run 计划中的 `discovery` 必须与所选账号的
 - `web_posts` 是用户使用的统一内容主表；`ctf_captures` 是证据和调试底座。
 - `published_at` 必须来自平台原始发布时间，保存为 Asia/Shanghai ISO。
 - 结构化长期数据以 SQLite 为准，`outputs/` 是运行产物和摘要。
-- 主程序本地图片能力与历史补全是两个阶段：只有验收报告写明 `MAIN_PROGRAM_READY=true` 后，才按
-  工程方案 H 阶段补齐当前数据库已有记录；正常新抓不会隐式改写历史数据。
 
 ## 诊断与开发入口
 

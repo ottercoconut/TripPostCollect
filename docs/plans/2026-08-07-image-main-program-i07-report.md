@@ -21,7 +21,7 @@ MediaCrawler 补丁提交：
   不产生伪成功路径或半帖目录。
 - 正式搜索链路只为初筛有效的非视频图文记录下载图片。图片完成后才写内容记录并累计候选；失败时
   记录 `image_download_failed`，页码和 search ID 保持当前恢复位置。
-- 本步骤没有执行根项目正式 runner、历史 backfill 或长期媒体晋升。
+- 本步骤没有执行根项目正式 runner 或长期媒体晋升。
 
 ## 测试
 
@@ -78,11 +78,11 @@ fixture 和 spy 验证证明：
   文件 SHA 不一致 0。路径关系随未变化的默认库保持不变。
 - I-00 的既有本地图片排序清单摘要仍为
   `a6031e2401bdfe224fe98835ff4726a1bac6f0cbfdbe85cb8ef4d3cb06c44ad5`。
-- MediaCrawler 嵌套仓库在补丁提交后 clean；没有创建或修改任何历史 XHS 图片。
+- MediaCrawler 嵌套仓库在补丁提交后 clean；正式媒体目录没有变化。
 
 ## 结论
 
 `I_07_XHS_IMAGES_READY=true`
 
-XHS 新抓取 staging/manifest 已完成。当前 17,150 个历史文件仍冻结，必须等
-`MAIN_PROGRAM_READY=true` 后才进入 H 阶段补全与迁移。
+XHS 新抓取 staging/manifest 已完成，正式入库与长期目录晋升仍受
+`MAIN_PROGRAM_READY` 总门禁约束。

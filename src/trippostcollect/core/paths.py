@@ -17,7 +17,6 @@ TEMP_ROOT = PROJECT_ROOT / "temp"
 TOOLS_ROOT = PROJECT_ROOT / "tools"
 RUNTIME_ROOT = DATA_ROOT / "runtime"
 LOCAL_MEDIA_ROOT = DATA_ROOT / "media"
-IMAGE_MATERIALIZATION_RUNTIME = RUNTIME_ROOT / "image_materialization"
 
 DEFAULT_DB = DATA_ROOT / "trippostcollect.sqlite"
 DEFAULT_CONFIG = CONFIG_ROOT / "crawl_targets.json"

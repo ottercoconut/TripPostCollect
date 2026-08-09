@@ -332,8 +332,6 @@ def parse_args() -> argparse.Namespace:
         "--zhihu-detail-urls-file",
         help="Diagnostic-only JSON array of Zhihu answer/article URLs to inspect via detail mode.",
     )
-    parser.add_argument("--xhs-detail-urls-file", help=argparse.SUPPRESS)
-    parser.add_argument("--historical-image-backfill", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -375,36 +373,6 @@ def load_zhihu_detail_urls(path_value: str | Path) -> list[str]:
             urls.append(url)
     if not urls:
         raise SystemExit("Zhihu detail URL file contains no answer/article URLs")
-    return urls
-
-
-def load_xhs_detail_urls(path_value: str | Path) -> list[str]:
-    """Load exact signed note URLs without ever accepting search or profile URLs."""
-
-    path = Path(path_value).expanduser().resolve()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"invalid XHS detail URL file: {path}: {exc}") from exc
-    if not isinstance(payload, list):
-        raise SystemExit("XHS detail URL file must contain a JSON array")
-    urls: list[str] = []
-    for value in payload:
-        url = str(value or "").strip().split("#", 1)[0]
-        parsed = urlparse(url)
-        query = dict(item.split("=", 1) for item in parsed.query.split("&") if "=" in item)
-        if not (
-            parsed.scheme == "https"
-            and parsed.hostname == "www.xiaohongshu.com"
-            and re.fullmatch(r"/explore/[0-9A-Za-z_-]+/?", parsed.path)
-            and query.get("xsec_token")
-            and query.get("xsec_source") in {"pc_search", "pc_cfeed", "pc_user"}
-        ):
-            raise SystemExit("unsupported or unsigned XHS detail URL")
-        if url not in urls:
-            urls.append(url)
-    if not urls:
-        raise SystemExit("XHS detail URL file contains no signed note URLs")
     return urls
 
 
@@ -1429,38 +1397,6 @@ def validate_formal_record(platform_key: str, record: dict[str, Any], seen: set[
     }
 
 
-def validate_historical_image_record(
-    platform_key: str,
-    record: dict[str, Any],
-    seen: set[str],
-    existing_identities: set[str],
-) -> dict[str, Any]:
-    """Validate only the immutable identity and body-image projection for backfill."""
-
-    identity = formal_record_identity(platform_key, record)
-    reasons: list[str] = []
-    if not identity:
-        reasons.append("missing_identity")
-    elif identity in seen:
-        reasons.append("duplicate_identity")
-    elif identity not in existing_identities:
-        reasons.append("historical_post_not_in_database")
-    if is_video_record(platform_key, record):
-        reasons.append("video_record")
-    content_images = content_image_candidates(platform_key, record)
-    if not content_images:
-        reasons.append("missing_content_image")
-    return {
-        "valid": not reasons,
-        "identity": identity,
-        "reasons": reasons,
-        "followers_count": None,
-        "followers_observed": False,
-        "followers_source": "not_requested_for_historical_images",
-        "content_image_count": len(content_images),
-    }
-
-
 PAGINATION_EVENT_FIELDS = (
     "platform",
     "batch_no",
@@ -1706,7 +1642,6 @@ def collect_formal_records(
     require_local_images: bool = False,
     localized_identities: set[str] | None = None,
     materialized_images_by_identity: dict[str, list[MaterializedImage]] | None = None,
-    historical_image_only: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if completion_mode not in {"target-new-posts", "source-exhausted"}:
         raise ValueError(f"unsupported completion mode: {completion_mode}")
@@ -1752,16 +1687,7 @@ def collect_formal_records(
                     if not isinstance(record, dict):
                         reason_counts["invalid_record_type"] += 1
                         continue
-                    validation = (
-                        validate_historical_image_record(
-                            platform_key,
-                            record,
-                            seen,
-                            existing_identities,
-                        )
-                        if historical_image_only
-                        else validate_formal_record(platform_key, record, seen)
-                    )
+                    validation = validate_formal_record(platform_key, record, seen)
                     if not validation["valid"]:
                         reason_counts.update(validation["reasons"])
                         continue
@@ -3317,12 +3243,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "--lt",
         args.login_type,
         "--type",
-        "detail"
-        if (
-            getattr(args, "zhihu_detail_urls", [])
-            or getattr(args, "xhs_detail_urls", [])
-        )
-        else "search",
+        "detail" if getattr(args, "zhihu_detail_urls", []) else "search",
         "--keywords",
         args.keyword,
         "--get_comment",
@@ -3348,8 +3269,6 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
     ]
     if getattr(args, "zhihu_detail_urls", []):
         cmd.extend(["--specified_id", ",".join(args.zhihu_detail_urls)])
-    if getattr(args, "xhs_detail_urls", []):
-        cmd.extend(["--specified_id", ",".join(args.xhs_detail_urls)])
     extra_env: dict[str, str] = {
         "TRIPPOSTCOLLECT_TARGET_NEW_POSTS": str(max(1, source_target_new_posts)),
         "TRIPPOSTCOLLECT_CANDIDATE_HARD_LIMIT": str(source_candidate_hard_limit),
@@ -3424,12 +3343,8 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         cmd.extend(["--enable_cdp_mode", "true"])
         extra_env.update(
             {
-                "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": (
-                    "0" if args.historical_image_backfill else "1"
-                ),
-                "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": (
-                    "0" if args.historical_image_backfill else "1"
-                ),
+                "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": "1",
+                "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",
                 "TRIPPOSTCOLLECT_SHARE_CDP_PROFILE": "1",
                 "TRIPPOSTCOLLECT_XHS_STORAGE_STATE_PATH": str(xhs_storage_path),
                 "TRIPPOSTCOLLECT_XHS_PROFILE_DIR": str(Path(args.xhs_profile_dir).expanduser().resolve()),
@@ -3656,7 +3571,6 @@ def collect_behavior_validation(
     platforms: list[str],
     keyword: str,
     xhs_post_interaction: str = "none",
-    historical_image_only: bool = False,
 ) -> dict[str, Any]:
     latest_by_platform: dict[str, dict[str, Any]] = {}
     for record in reversed(records):
@@ -3688,19 +3602,13 @@ def collect_behavior_validation(
             if item.get("status") == "completed"
         }
         required_pacing_stages = (
-            (
-                {"note_detail"}
-                if historical_image_only
-                else {"search_results", "note_detail", "creator_profile"}
-            )
+            {"search_results", "note_detail", "creator_profile"}
             if platform_key == "xhs"
             else set()
         )
         pacing_ok = required_pacing_stages.issubset(pacing_stages)
         continuity_ok = (
-            platform_key != "xhs"
-            or historical_image_only
-            or "search_results" in continuity_stages
+            platform_key != "xhs" or "search_results" in continuity_stages
         )
         post_interactions = [
             item
@@ -3955,7 +3863,6 @@ def main() -> int:
     except ImagePersistenceError as exc:
         raise SystemExit(str(exc)) from exc
     args.zhihu_detail_urls = []
-    args.xhs_detail_urls = []
     if args.zhihu_detail_urls_file:
         if platforms != ["zhihu"]:
             raise SystemExit("--zhihu-detail-urls-file requires --platforms zhihu only")
@@ -3968,24 +3875,6 @@ def main() -> int:
             raise SystemExit(
                 "--candidate-hard-limit must cover every URL in --zhihu-detail-urls-file"
             )
-    if args.xhs_detail_urls_file:
-        if platforms != ["xhs"]:
-            raise SystemExit("--xhs-detail-urls-file requires --platforms xhs only")
-        if not args.historical_image_backfill:
-            raise SystemExit("--xhs-detail-urls-file requires --historical-image-backfill")
-        if not args.no_import or not args.download_images:
-            raise SystemExit(
-                "XHS historical image detail mode requires --no-import and --download-images"
-            )
-        if args.resume_summary or args.start_page != 1 or args.discovery_job_id is not None:
-            raise SystemExit("XHS historical image detail mode cannot use discovery arguments")
-        args.xhs_detail_urls = load_xhs_detail_urls(args.xhs_detail_urls_file)
-        if len(args.xhs_detail_urls) > candidate_hard_limit:
-            raise SystemExit(
-                "--candidate-hard-limit must cover every URL in --xhs-detail-urls-file"
-            )
-    elif args.historical_image_backfill:
-        raise SystemExit("--historical-image-backfill requires --xhs-detail-urls-file")
     if "douyin" in platforms and args.start_page > 1 and not args.start_cursor:
         raise SystemExit(
             "Douyin continuation requires --start-cursor together with --start-page"
@@ -3995,10 +3884,7 @@ def main() -> int:
             raise SystemExit("XHS must run alone through scripts/xhs_runner.py")
         if not args.xhs_account_id or not args.xhs_profile_dir or not args.xhs_storage_state:
             raise SystemExit("XHS requires --xhs-account-id, --xhs-profile-dir and --xhs-storage-state")
-        if (
-            not args.historical_image_backfill
-            and (not args.xhs_discovery_target_key or not args.xhs_discovery_query_fingerprint)
-        ):
+        if not args.xhs_discovery_target_key or not args.xhs_discovery_query_fingerprint:
             raise SystemExit("XHS requires runner-managed discovery target and query fingerprint")
         if args.behavior_profile != "xhs_guarded":
             raise SystemExit("XHS requires --behavior-profile xhs_guarded")
@@ -4101,7 +3987,6 @@ def main() -> int:
         platforms,
         args.keyword,
         args.xhs_post_interaction,
-        historical_image_only=args.historical_image_backfill,
     )
     summary["behavior_validation"] = behavior_validation
     if resume_info:
@@ -4120,7 +4005,6 @@ def main() -> int:
             args.completion_mode == "target-new-posts" and not bool(resume_info)
         ),
         completion_mode=args.completion_mode,
-        historical_image_only=args.historical_image_backfill,
     )
     if args.download_images:
         (
@@ -4146,7 +4030,6 @@ def main() -> int:
             require_local_images=True,
             localized_identities=localized_identities,
             materialized_images_by_identity=materialized_images_by_identity,
-            historical_image_only=args.historical_image_backfill,
         )
     else:
         image_materialization = {

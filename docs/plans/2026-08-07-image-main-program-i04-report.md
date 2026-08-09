@@ -10,8 +10,8 @@
   SQLite 专用列为查询权威。
 - `upsert_web_post()` 在任何写操作前复验新文件，并按“稳定键、规范化 URL、受限旧序号”顺序匹配
   已有关系；稳定键冲突不会退化为 URL 误复用。
-- 已验证的历史 XHS 文件允许在本步骤继续保留固定 `.jpg` 旧文件名，但实际 MIME、尺寸和 SHA
-  必须复验通过；新 staging/长期文件仍严格要求真实后缀。旧文件晋升仍只允许在 H 阶段执行。
+- 新 staging 和长期文件严格要求真实后缀；已有本地关系只有在实际 MIME、尺寸和 SHA 复验通过时
+  才允许由 upsert 保留。
 - content `image_index` 按角色从 0 连续；头像继续为独立 URL-only 关系，不计入
   `post_images_count` 或正文本地完整性。
 - 每帖写入使用 SQLite savepoint。文件缺失、元数据不符、数量/身份不符或任一图片 INSERT 失败时，
