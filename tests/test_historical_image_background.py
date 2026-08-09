@@ -20,12 +20,42 @@ from trippostcollect.artifacts.image_proxy import (  # noqa: E402
     RemoteImageFetchError,
     RemoteImagePreview,
 )
+from trippostcollect.artifacts.image_candidates import (  # noqa: E402
+    content_image_candidates,
+)
 
 
 def _png_bytes() -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (7, 5), color=(20, 40, 60)).save(output, format="PNG")
     return output.getvalue()
+
+
+def _generic_post_plan(
+    platform_key: str,
+    platform_post_id: str,
+    record: dict[str, object],
+    *,
+    excluded_asset_keys: set[str] | None = None,
+) -> SimpleNamespace:
+    excluded = excluded_asset_keys or set()
+    prepared_images = []
+    for source_index, candidate in enumerate(
+        candidate
+        for candidate in content_image_candidates(platform_key, record)
+        if candidate.source_asset_key not in excluded
+    ):
+        prepared_images.append(
+            {
+                **candidate.as_image_item(),
+                "source_index": source_index,
+            }
+        )
+    return SimpleNamespace(
+        platform_post_id=platform_post_id,
+        authoritative_images=len(prepared_images),
+        prepared_images=tuple(prepared_images),
+    )
 
 
 def test_generic_weibo_download_uses_large_proxy_and_ignores_avatar(
@@ -55,7 +85,7 @@ def test_generic_weibo_download_uses_large_proxy_and_ignores_avatar(
         "avatar_url": "https://tvax1.sinaimg.cn/crop.0.0.100.100/avatar.jpg",
     }
     entries, report = batch._download_generic_post(
-        SimpleNamespace(platform_post_id="wb-1", authoritative_images=1),
+        _generic_post_plan("weibo", "wb-1", record),
         record,
         platform_key="weibo",
         staging_root=tmp_path,
@@ -118,7 +148,7 @@ def test_weibo_download_falls_back_to_direct_large_then_original(
     }
 
     entries, report = batch._download_generic_post(
-        SimpleNamespace(platform_post_id="wb-fallback", authoritative_images=1),
+        _generic_post_plan("weibo", "wb-fallback", record),
         record,
         platform_key="weibo",
         staging_root=tmp_path,
@@ -234,7 +264,7 @@ def test_generic_download_retries_recoverable_failure_three_times(
         "image_list": ["https://pic1.zhimg.com/v2-body_r.jpg"],
     }
     entries, report = batch._download_generic_post(
-        SimpleNamespace(platform_post_id="zh-1", authoritative_images=1),
+        _generic_post_plan("zhihu", "zh-1", record),
         record,
         platform_key="zhihu",
         staging_root=tmp_path,
@@ -277,7 +307,7 @@ def test_douyin_failure_refreshes_image_detail_once_within_attempt_budget(
         "note_download_url": ["https://p3-sign.douyinpic.com/old-sign.jpeg"],
     }
     entries, report = batch._download_generic_post(
-        SimpleNamespace(platform_post_id="dy-1", authoritative_images=1),
+        _generic_post_plan("douyin", "dy-1", record),
         record,
         platform_key="douyin",
         staging_root=tmp_path,
@@ -296,6 +326,51 @@ def test_douyin_failure_refreshes_image_detail_once_within_attempt_budget(
     assert report["detail_refresh_attempted"] is True
     assert report["detail_refresh_succeeded"] is True
     assert report["video_requests"] == report["music_requests"] == report["cover_requests"] == 0
+
+
+def test_generic_download_uses_approved_plan_instead_of_raw_candidates(
+    monkeypatch, tmp_path: Path
+) -> None:
+    seen: list[str] = []
+
+    def fake_fetch(url, **_kwargs):
+        seen.append(url)
+        return RemoteImagePreview(
+            content=_png_bytes(),
+            media_type="image/png",
+            final_url=url,
+        )
+
+    monkeypatch.setattr(batch, "fetch_remote_image_bytes", fake_fetch)
+    record = {
+        "content_id": "zh-excluded",
+        "content_url": "https://zhuanlan.zhihu.com/p/zh-excluded",
+        "image_list": [
+            "https://pic1.zhimg.com/v2-excluded_r.jpg",
+            "https://pic1.zhimg.com/v2-kept_r.jpg",
+        ],
+    }
+    excluded = content_image_candidates("zhihu", record)[0]
+    post = _generic_post_plan(
+        "zhihu",
+        "zh-excluded",
+        record,
+        excluded_asset_keys={excluded.source_asset_key},
+    )
+
+    entries, report = batch._download_generic_post(
+        post,
+        record,
+        platform_key="zhihu",
+        staging_root=tmp_path,
+        cookie_header="d_c0=test;z_c0=test",
+        deadline=time.monotonic() + 10,
+    )
+
+    assert seen == ["https://pic1.zhimg.com/v2-kept_r.jpg"]
+    assert len(entries) == report["downloaded_images"] == 1
+    assert entries[0].source_index == 0
+    assert entries[0].source_asset_key != excluded.source_asset_key
 
 
 def test_background_failure_classification_and_capacity_gate(

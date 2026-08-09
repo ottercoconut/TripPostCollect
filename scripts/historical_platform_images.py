@@ -38,7 +38,10 @@ from trippostcollect.artifacts.historical_image_materialization import (
     sqlite_backup,
     table_digest,
 )
-from trippostcollect.artifacts.image_candidates import content_image_candidates
+from trippostcollect.artifacts.image_candidates import (
+    ImageCandidate,
+    content_image_candidates,
+)
 from trippostcollect.artifacts.image_manifest import (
     ImageManifestEntry,
     write_manifest_atomic,
@@ -640,7 +643,24 @@ def _download_generic_post(
 ) -> tuple[list[ImageManifestEntry], dict[str, Any]]:
     started = time.monotonic()
     referer = _record_referer(platform_key, record, post.platform_post_id)
-    candidates = content_image_candidates(platform_key, record)
+    candidates = [
+        ImageCandidate(
+            platform_key=platform_key,
+            platform_post_id=post.platform_post_id,
+            image_role=str(item["role"]),
+            source_index=int(item["source_index"]),
+            source_url=str(item["url"]),
+            source_key=str(item["source_key"]),
+            source_asset_key=str(item["source_asset_key"]),
+        )
+        for item in post.prepared_images
+    ]
+    if len(candidates) != post.authoritative_images:
+        raise ValueError(
+            f"historical download plan image count changed: "
+            f"{platform_key}:{post.platform_post_id} "
+            f"prepared={len(candidates)} authoritative={post.authoritative_images}"
+        )
     detail_refresh_attempted = False
     detail_refresh_succeeded = False
     refreshed_urls: dict[int, str] = {}
