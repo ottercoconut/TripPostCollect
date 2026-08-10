@@ -201,6 +201,9 @@ def commit_child_discovery(
     imported_completion_verified: bool | None = None,
 ) -> dict[str, Any]:
     """Commit a durable frontier only from child pagination evidence."""
+    import_result = child_summary.get("import_result") or {}
+    if import_result.get("reason") == "sqlite_import_failed":
+        return {"skipped": True, "reason": "sqlite_import_failed"}
     pagination = child_summary.get("pagination_evidence") or {}
     event = pagination.get("stop_event") or ((pagination.get("batches") or [None])[-1])
     if not isinstance(event, Mapping):
@@ -240,7 +243,6 @@ def commit_child_discovery(
     candidate_identities = event.get("candidate_identities") or []
     if not isinstance(candidate_identities, list):
         raise RuntimeError("XHS pagination candidate identities must be a list")
-    import_result = child_summary.get("import_result") or {}
     imported_target = bool(
         child_summary.get("import_completion_met")
         if "import_completion_met" in child_summary

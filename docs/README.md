@@ -121,7 +121,8 @@ child 必须以 `runtime_failed` 停在当前来源坐标，修复或人工处�
 客户端必须把真实 HTTP 状态传到 manifest；HTTP 200 空字节也属于可恢复空响应，不能在第一次请求后
 误判为格式终态。晋升或确认发生在 SQLite 提交前的导入失败删除本轮新建且无数据库引用的长期文件，
 在摘要记录 `sqlite_import_failed` 并跳过 checkpoint；既有复用文件以及已提交或提交结果不确定时可能
-被 SQLite 引用的文件均不删除。
+被 SQLite 引用的文件均不删除。正式晋升到 SQLite 提交/回滚由全局跨进程锁串行化，回滚前再次核对
+数据库路径引用；小红书的 runner 和 discovery 提交层都会在导入失败时拒绝写 checkpoint、seen 和 campaign。
 
 正常默认模式下，小红书的实际候选量从 0 开始按页增长，只有通过详情前去重的未知候选才占预算；达到
 `target_new_posts` 后立即停止，不会为了配置的 `candidate_hard_limit` 继续抓满。后者只是单次

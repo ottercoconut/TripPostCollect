@@ -678,8 +678,11 @@ def main() -> int:
             stdout_json = extract_stdout_json(stdout)
             child_summary_path = str(stdout_json.get("summary") or "")
             child_summary = load_child_summary(child_summary_path)
+            child_import_result = child_summary.get("import_result") or {}
             if args.no_import:
                 discovery_commit = {"skipped": True, "reason": "no_import"}
+            elif child_import_result.get("reason") == "sqlite_import_failed":
+                discovery_commit = {"skipped": True, "reason": "sqlite_import_failed"}
             elif child_summary_path and child_summary:
                 try:
                     discovery_image_artifacts = verify_image_artifacts(

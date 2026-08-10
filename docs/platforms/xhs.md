@@ -44,7 +44,7 @@
   -> 当前会话下载全部正文图，原子生成 staging 和 image_manifest.jsonl
   -> 默认累计达到有效新增目标，或本轮显式来源耗尽后，根项目复验并晋升 data/media
   -> 帖子/图片在同一事务写 SQLite，形成 child 摘要
-  -> runner 根据 child 摘要提交账号级 checkpoint；成功入库后清空累计摘要
+  -> runner 根据 child 摘要提交账号级 checkpoint；成功入库后清空累计摘要，SQLite 导入失败则不写 checkpoint/seen/campaign
   -> 加密最新 storage state、删除临时明文、释放租约
   -> 检查顶层摘要、child summary、冻结状态和 SQLite
 ```
@@ -332,6 +332,8 @@ python scripts/xhs_runner.py \
 证据后完成。
 `candidate_hard_limit` 是正常模式每次 child 的未知候选预算，不从历史累计数扣减。
 `--no-import` 不写 checkpoint，也不能作为正式完成证据。
+child 摘要为 `import_result.reason=sqlite_import_failed` 时与 `--no-import` 一样不提交 discovery；
+runner 调用前和 `commit_child_discovery()` 内部都执行该门禁，失败候选必须留给下一轮重试。
 
 若 `target_new_met` 在页面中途触发并成功入库，checkpoint 仍保留当前 page/search ID，
 `last_batch_complete=false`；来源未耗尽时 `status=active`。成功入库会清空

@@ -295,6 +295,59 @@ def test_image_persistence_failure_preserves_campaign_summary(tmp_path: Path) ->
     assert checkpoint["campaign_candidate_count"] == 20
 
 
+def test_sqlite_import_failure_skips_checkpoint_seen_and_campaign(tmp_path: Path) -> None:
+    db_path = tmp_path / "import-failure.sqlite"
+    conn = prepare_connection(db_path)
+    plan = resolve_discovery_plan(conn, target=target(), account_id="xhs-a01")
+    child_path = tmp_path / "import-failure-summary.json"
+    child_path.write_text("{}", encoding="utf-8")
+
+    result = commit_child_discovery(
+        conn,
+        target=target(),
+        account_id="xhs-a01",
+        run_id="run-import-failure",
+        discovery_plan=plan,
+        child_summary_path=child_path,
+        child_summary={
+            "pagination_evidence": {
+                "stop_event": {
+                    "source_page": 1,
+                    "resume_page": 2,
+                    "resume_cursor": "next-search-id",
+                    "source_has_more": True,
+                    "batch_complete": True,
+                    "discovery_phase": "frontier",
+                    "stop_reason": "target_new_met",
+                    "candidate_identities": ["not-imported-note"],
+                }
+            },
+            "formal_validation": {"candidate_count": 1},
+            "import_result": {
+                "reason": "sqlite_import_failed",
+                "inserted_rows": 0,
+                "rolled_back_images": 1,
+            },
+            "import_completion_met": False,
+        },
+    )
+    fingerprint = xhs_query_fingerprint(target())
+    checkpoint = load_checkpoint(
+        conn,
+        target_key="qingdao_travel",
+        account_id="xhs-a01",
+        query_fingerprint_value=fingerprint,
+    )
+    seen_count = conn.execute(
+        "SELECT COUNT(*) FROM xhs_discovery_seen_candidates"
+    ).fetchone()[0]
+    conn.close()
+
+    assert result == {"skipped": True, "reason": "sqlite_import_failed"}
+    assert checkpoint is None
+    assert seen_count == 0
+
+
 def test_incomplete_last_page_does_not_mark_frontier_exhausted(tmp_path: Path) -> None:
     conn = prepare_connection(tmp_path / "incomplete.sqlite")
     plan = resolve_discovery_plan(conn, target=target(), account_id="xhs-a01")

@@ -170,7 +170,10 @@ page/offset/cursor 且标记批次不完整。默认数量模式若后续有效�
 staging/manifest，不写长期媒体。分页运行失败或任一 child 失败优先于数量目标，直接阻断晋升。
 晋升或已确认发生在 SQLite 提交前的事务失败会删除本轮新建文件，内容寻址复用文件保持不变，并在
 摘要写入 `sqlite_import_failed` 后跳过 checkpoint；SQLite 已成功提交或提交结果不确定时保留可能
-已有正式引用的文件，核对数据库后只恢复控制面。导入报告区分处理、新增和更新；更新已有帖
+已有正式引用的文件，核对数据库后只恢复控制面。正式媒体晋升到提交/回滚使用全局跨进程锁，回滚
+还会按当前 SQLite `local_path` 引用二次保护，避免一轮删除另一成功轮次已引用的内容寻址文件。
+XHS runner 与 discovery 提交函数都把 `sqlite_import_failed` 视为不写 checkpoint/seen/campaign 的
+硬门禁。导入报告区分处理、新增和更新；更新已有帖
 时会优先匹配并保留仍有效的既有本地图片证据，新的整帖图片集合仍在同一事务重建。
 
 `artifacts_verified` 对 `image_materialization` 的 manifest 哈希和计数等式负责；

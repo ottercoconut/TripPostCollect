@@ -80,7 +80,8 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 `xhs_runner.py` 才在同一事务提交前沿与已处理候选 ID；未达到目标时 `last_summary_path` 指向
 合并活动的最新摘要，达到完整目标并成功入库后清空摘要路径但保留深层前沿。
 `status=exhausted` 后只刷新顶部；`--no-import` 不更新
-checkpoint。摘要或其 JSONL 缺失时冻结失败，不能静默丢弃活动。
+checkpoint。`import_result.reason=sqlite_import_failed` 时 runner 和 discovery 提交函数都必须跳过
+checkpoint、seen 与 campaign 更新。摘要或其 JSONL 缺失时冻结失败，不能静默丢弃活动。
 
 ## 模型执行抓取持久化规范
 
@@ -594,6 +595,9 @@ MediaCrawler 入库采用去重更新：
   导入失败在摘要写 `sqlite_import_failed` 与回滚计数，并且不推进发现 checkpoint。数据库成功提交
   或提交结果不能安全判定时保留文件，先核对 SQLite 引用再恢复控制面，不能以清理孤儿为由删除
   可能已被正式图片关系引用的文件。
+- 正式媒体的首次晋升、SQLite 提交和失败回滚属于同一个跨进程互斥区间；不同平台、不同 XHS 账号
+  或不同 runner 不得并发交错这三个动作。回滚删除 `reused=false` 文件前仍须检查当前数据库的
+  `web_post_images.local_path`，已有提交引用时保留文件。
 - 原始 JSONL 行完整保留在 `raw_sample_json`，便于后续清洗补字段。
 
 ## B站历史摘要回填

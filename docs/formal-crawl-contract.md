@@ -387,7 +387,10 @@ checkpoint 并按 `runtime_failed` 停止，不得静默生成新 ID 请求猜�
 删除该文件；整轮后续图片或能够确认发生在 SQLite 提交前的导入失败时，根执行器回滚本轮所有
 `reused=false` 的新文件，不得删除此前已存在且 `reused=true` 的内容寻址文件。提交前失败必须在
 child 摘要写入 `import_result.reason=sqlite_import_failed`、错误和 `rolled_back_images`，并跳过本轮
-发现 checkpoint。SQLite 已成功提交或提交结果不能安全判定时，长期文件可能已形成正式引用；后续
+发现 checkpoint；通用与小红书 runner 均须执行该门禁，且 discovery 提交函数必须再次防御。
+所有正式轮次从首次长期媒体晋升开始，直到 SQLite 提交成功或本轮新文件回滚完成，都持有同一跨进程
+媒体持久化锁。回滚删除前还要查询当前 SQLite 的 `web_post_images.local_path`，已被任一已提交帖子
+引用的路径不得删除。SQLite 已成功提交或提交结果不能安全判定时，长期文件可能已形成正式引用；后续
 中断、checkpoint 或报告验证失败不得删除这些文件，而应保留并核对 SQLite 后恢复控制面状态。产物完整的等式为
 `candidate_posts == complete_posts` 且
 `expected_images == downloaded_images == validated_images`，并且失败数与 `failures` 均为 0。正式

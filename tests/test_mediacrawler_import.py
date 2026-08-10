@@ -622,6 +622,59 @@ def test_postcommit_interrupt_preserves_sqlite_referenced_media(
     assert len(list(media_root.rglob("*.png"))) == 1
 
 
+def test_rollback_preserves_file_referenced_by_another_committed_run(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    item, _, _ = staged_selection(
+        project_root,
+        "xhs",
+        five_platform_image_records()["xhs"],
+    )
+    media_root = project_root / "temp" / "formal-media"
+    report_a, materialized_a, _ = mediacrawler_crawl.materialize_formal_record_images(
+        [item],
+        project_root=project_root,
+        media_root=media_root,
+        promote=True,
+    )
+    report_b, materialized_b, _ = mediacrawler_crawl.materialize_formal_record_images(
+        [item],
+        project_root=project_root,
+        media_root=media_root,
+        promote=True,
+    )
+    assert report_a["promoted_images"] == 1
+    assert report_b["reused_images"] == 1
+    item_b = {**item, "materialized_images": materialized_b[item["identity"]]}
+    db_path = project_root / "temp" / "formal.sqlite"
+    imported = mediacrawler_crawl.import_valid_records(
+        {"keyword": "青岛旅游"},
+        [item_b],
+        db_path,
+        project_root=project_root,
+        media_root=media_root,
+        require_local_images=True,
+    )
+
+    removed = mediacrawler_crawl.rollback_newly_promoted_images(
+        materialized_a,
+        project_root=project_root,
+        media_root=media_root,
+        db_path=db_path,
+    )
+
+    assert imported["inserted_rows"] == 1
+    assert removed == 0
+    assert len(list(media_root.rglob("*.png"))) == 1
+    with sqlite3.connect(db_path) as conn:
+        local_path = conn.execute(
+            "SELECT local_path FROM web_post_images WHERE local_path IS NOT NULL"
+        ).fetchone()[0]
+    assert (project_root / local_path).is_file()
+
+
 @pytest.mark.parametrize(
     "failure_case,expected_code",
     [

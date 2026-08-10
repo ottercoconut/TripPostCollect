@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import contextmanager
 from dataclasses import replace
+import fcntl
 import html
 import json
 import os
@@ -22,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from hashlib import md5, sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import quote, unquote, urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -84,6 +86,7 @@ from mediacrawler_behavior import (
 )
 from trippostcollect.core.paths import (
     DEFAULT_DB,
+    FORMAL_MEDIA_PERSISTENCE_LOCK,
     LOCAL_MEDIA_ROOT,
     MEDIACRAWLER_DIR,
     MEDIACRAWLER_RUNS_OUTPUT,
@@ -2007,18 +2010,45 @@ def rollback_newly_promoted_images(
     *,
     project_root: str | Path = PROJECT_ROOT,
     media_root: str | Path = LOCAL_MEDIA_ROOT,
+    db_path: str | Path | None = None,
 ) -> int:
-    """Remove only files created by the current promotion attempt."""
+    """Remove current-run files unless SQLite already references their paths."""
 
     root = Path(project_root).expanduser().resolve(strict=True)
     media = Path(media_root).expanduser().resolve()
     if media != root and root not in media.parents:
         raise ImagePersistenceError("media root escapes project root")
+    referenced_paths: set[str] = set()
+    if db_path is not None:
+        resolved_db = Path(db_path).expanduser().resolve()
+        if resolved_db.is_file():
+            try:
+                with sqlite3.connect(f"file:{resolved_db}?mode=ro", uri=True) as conn:
+                    referenced_paths = {
+                        str(row[0])
+                        for row in conn.execute(
+                            """
+                            SELECT DISTINCT local_path
+                            FROM web_post_images
+                            WHERE local_path IS NOT NULL AND local_path != ''
+                            """
+                        )
+                    }
+            except sqlite3.Error as exc:
+                print(
+                    "[image_promotion_rollback_skipped] "
+                    f"reason=sqlite_reference_check_failed error={type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 0
     removed = 0
     candidate_dirs: set[Path] = set()
     for images in materialized_by_identity.values():
         for item in images:
             if item.reused:
+                continue
+            if item.local_path in referenced_paths:
                 continue
             path = (root / item.local_path).resolve()
             if path != media and media not in path.parents:
@@ -2036,6 +2066,26 @@ def rollback_newly_promoted_images(
                 break
             current = current.parent
     return removed
+
+
+@contextmanager
+def formal_media_persistence_lock(
+    *,
+    enabled: bool,
+    lock_path: str | Path = FORMAL_MEDIA_PERSISTENCE_LOCK,
+) -> Iterator[None]:
+    """Serialize formal media promotion through SQLite commit or rollback."""
+
+    if not enabled:
+        yield
+        return
+    resolved_lock = ensure_parent(lock_path)
+    with resolved_lock.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def materialize_formal_record_images(
@@ -2506,6 +2556,7 @@ def import_valid_records_with_media_rollback(
             materialized_images_by_identity,
             project_root=project_root,
             media_root=media_root,
+            db_path=db_path,
         )
         image_materialization["rolled_back_images"] = int(
             image_materialization.get("rolled_back_images") or 0
@@ -4594,81 +4645,84 @@ def main() -> int:
         download_images=args.download_images,
         child_execution_ok=child_execution_ok,
     )
-    if formal_image_promotion_allowed(
+    promotion_allowed = formal_image_promotion_allowed(
         download_images=args.download_images,
         no_import=args.no_import,
         validation=validation,
-    ):
-        (
-            image_materialization,
-            materialized_images_by_identity,
-            localized_identities,
-        ) = materialize_formal_record_images(
-            content_valid_records,
-            project_root=PROJECT_ROOT,
-            media_root=media_root,
-            promote=True,
-        )
-        validation, valid_records = collect_formal_records(
-            summary,
-            candidate_hard_limit=candidate_hard_limit,
-            target_new_posts=target_new_posts,
-            db_path=args.db,
-            pagination_evidence=pagination_evidence,
-            enforce_candidate_limit=(
-                args.completion_mode == "target-new-posts" and not bool(resume_info)
-            ),
-            completion_mode=args.completion_mode,
-            require_local_images=True,
-            localized_identities=localized_identities,
-            materialized_images_by_identity=materialized_images_by_identity,
-        )
-        validation = apply_formal_completion_gates(
-            validation,
-            content_validation=content_validation,
-            image_materialization=image_materialization,
-            behavior_validation=behavior_validation,
-            download_images=True,
-            child_execution_ok=child_execution_ok,
-        )
-        if not validation["completion_met"]:
-            rolled_back = rollback_newly_promoted_images(
+    )
+    with formal_media_persistence_lock(enabled=promotion_allowed):
+        if promotion_allowed:
+            (
+                image_materialization,
                 materialized_images_by_identity,
+                localized_identities,
+            ) = materialize_formal_record_images(
+                content_valid_records,
+                project_root=PROJECT_ROOT,
+                media_root=media_root,
+                promote=True,
+            )
+            validation, valid_records = collect_formal_records(
+                summary,
+                candidate_hard_limit=candidate_hard_limit,
+                target_new_posts=target_new_posts,
+                db_path=args.db,
+                pagination_evidence=pagination_evidence,
+                enforce_candidate_limit=(
+                    args.completion_mode == "target-new-posts" and not bool(resume_info)
+                ),
+                completion_mode=args.completion_mode,
+                require_local_images=True,
+                localized_identities=localized_identities,
+                materialized_images_by_identity=materialized_images_by_identity,
+            )
+            validation = apply_formal_completion_gates(
+                validation,
+                content_validation=content_validation,
+                image_materialization=image_materialization,
+                behavior_validation=behavior_validation,
+                download_images=True,
+                child_execution_ok=child_execution_ok,
+            )
+            if not validation["completion_met"]:
+                rolled_back = rollback_newly_promoted_images(
+                    materialized_images_by_identity,
+                    project_root=PROJECT_ROOT,
+                    media_root=media_root,
+                    db_path=args.db,
+                )
+                image_materialization["rolled_back_images"] = int(
+                    image_materialization.get("rolled_back_images") or 0
+                ) + rolled_back
+                image_materialization["promoted_images"] = 0
+                materialized_images_by_identity = {}
+                valid_records = []
+        elif args.download_images and not args.no_import:
+            image_materialization["promotion_deferred"] = True
+            image_materialization["promotion_deferred_reason"] = validation["stop_reason"]
+        summary["image_materialization"] = image_materialization
+        summary["required_fields_profile"] = args.required_fields_profile
+        summary["formal_validation"] = validation
+        if args.no_import:
+            summary["import_result"] = {"skipped": True, "reason": "no_import"}
+        elif not validation["completion_met"]:
+            summary["import_result"] = {
+                "skipped": True,
+                "reason": validation["stop_reason"],
+                "processed_rows": 0,
+                "inserted_rows": 0,
+                "updated_rows": 0,
+            }
+        else:
+            summary["import_result"] = import_valid_records_with_media_rollback(
+                summary,
+                valid_records,
+                Path(args.db).expanduser(),
+                materialized_images_by_identity=materialized_images_by_identity,
+                image_materialization=image_materialization,
                 project_root=PROJECT_ROOT,
                 media_root=media_root,
             )
-            image_materialization["rolled_back_images"] = int(
-                image_materialization.get("rolled_back_images") or 0
-            ) + rolled_back
-            image_materialization["promoted_images"] = 0
-            materialized_images_by_identity = {}
-            valid_records = []
-    elif args.download_images and not args.no_import:
-        image_materialization["promotion_deferred"] = True
-        image_materialization["promotion_deferred_reason"] = validation["stop_reason"]
-    summary["image_materialization"] = image_materialization
-    summary["required_fields_profile"] = args.required_fields_profile
-    summary["formal_validation"] = validation
-    if args.no_import:
-        summary["import_result"] = {"skipped": True, "reason": "no_import"}
-    elif not validation["completion_met"]:
-        summary["import_result"] = {
-            "skipped": True,
-            "reason": validation["stop_reason"],
-            "processed_rows": 0,
-            "inserted_rows": 0,
-            "updated_rows": 0,
-        }
-    else:
-        summary["import_result"] = import_valid_records_with_media_rollback(
-            summary,
-            valid_records,
-            Path(args.db).expanduser(),
-            materialized_images_by_identity=materialized_images_by_identity,
-            image_materialization=image_materialization,
-            project_root=PROJECT_ROOT,
-            media_root=media_root,
-        )
     inserted = int((summary.get("import_result") or {}).get("inserted_rows") or 0)
     summary["target_new_posts"] = target_new_posts
     summary["completion_mode"] = args.completion_mode
