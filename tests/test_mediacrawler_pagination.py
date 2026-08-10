@@ -207,6 +207,43 @@ def test_source_exhaustion_without_stop_event_never_falls_back_to_target_met(
     assert validation["stop_reason"] == "runtime_failed"
 
 
+def test_runtime_failed_pagination_overrides_reached_target(tmp_path: Path) -> None:
+    jsonl_path = tmp_path / "bili" / "jsonl" / "search_contents_test.jsonl"
+    jsonl_path.parent.mkdir(parents=True)
+    jsonl_path.write_text(
+        json.dumps(bilibili_record("new")) + "\n",
+        encoding="utf-8",
+    )
+    pagination = {
+        "available": True,
+        "stopped": True,
+        "stop_reason": "runtime_failed",
+        "candidate_count": 1,
+        "stop_event": {
+            "platform": "bilibili",
+            "stop_reason": "runtime_failed",
+            "batch_complete": False,
+            "candidate_count": 1,
+            "valid_new_count": 1,
+        },
+    }
+
+    validation, selected = mediacrawler_crawl.collect_formal_records(
+        {"records": [{"output": {"jsonl_files": [str(jsonl_path)]}}]},
+        candidate_hard_limit=10,
+        target_new_posts=1,
+        db_path=tmp_path / "missing.sqlite",
+        pagination_evidence=pagination,
+        completion_mode="target-new-posts",
+    )
+
+    assert len(selected) == 1
+    assert validation["valid_new_count"] == 1
+    assert validation["pagination_runtime_blocked"] is True
+    assert validation["completion_met"] is False
+    assert validation["stop_reason"] == "runtime_failed"
+
+
 def test_explicit_empty_page_proves_source_exhaustion(tmp_path: Path) -> None:
     state_path = tmp_path / "state.json"
     write_state(

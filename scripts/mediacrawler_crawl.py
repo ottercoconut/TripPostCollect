@@ -1845,13 +1845,20 @@ def collect_formal_records(
         and not unverified_douyin_first_page_empty
         and deferred_retryable_count == 0
     )
+    pagination_stop_reason = str(pagination_evidence.get("stop_reason") or "")
+    pagination_runtime_blocked = bool(
+        pagination_stop_reason
+        in {"runtime_failed", "login_required", "captcha_detected"}
+    )
     completion_met = (
         source_exhausted_met
         if completion_mode == "source-exhausted"
         else new_target_met
-    )
+    ) and not pagination_runtime_blocked
     if unverified_douyin_first_page_empty:
         stop_reason = "runtime_failed"
+    elif pagination_runtime_blocked:
+        stop_reason = pagination_stop_reason
     elif (
         completion_mode == "target-new-posts"
         and new_target_met
@@ -1891,6 +1898,7 @@ def collect_formal_records(
         "valid_total_count": len(selected),
         "new_target_met": new_target_met,
         "source_exhausted_met": source_exhausted_met,
+        "pagination_runtime_blocked": pagination_runtime_blocked,
         "deferred_retryable_count": deferred_retryable_count,
         "completion_met": completion_met,
         "local_images_required": require_local_images,
@@ -2399,6 +2407,20 @@ def upsert_web_post(
     return post_id, existing_id is None
 
 
+class FormalImportBeforeCommitError(RuntimeError):
+    """A persistence failure proven to have occurred before SQLite commit."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(f"{type(cause).__name__}: {cause}")
+        self.cause = cause
+
+
+def commit_formal_import(conn: sqlite3.Connection) -> None:
+    """Commit a formal import behind a testable transaction boundary."""
+
+    conn.commit()
+
+
 def import_valid_records(
     summary: dict[str, Any],
     selected: list[dict[str, Any]],
@@ -2412,7 +2434,9 @@ def import_valid_records(
     captured_at = str(summary.get("captured_at") or datetime.now(timezone.utc).isoformat(timespec="seconds"))
     keyword = str(summary.get("keyword") or "")
     processed = inserted = updated = 0
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    commit_started = False
+    try:
         db_sync = ensure_web_schema(conn)
         for item in selected:
             record = item["record"]
@@ -2435,7 +2459,15 @@ def import_valid_records(
             processed += 1
             inserted += int(was_inserted)
             updated += int(not was_inserted)
-        conn.commit()
+        commit_started = True
+        commit_formal_import(conn)
+    except BaseException as exc:
+        if commit_started and not conn.in_transaction:
+            raise
+        conn.rollback()
+        raise FormalImportBeforeCommitError(exc) from exc
+    finally:
+        conn.close()
     return {
         "db": str(db_path),
         "db_sync": db_sync,
@@ -2469,7 +2501,7 @@ def import_valid_records_with_media_rollback(
             media_root=media_root,
             require_local_images=True,
         )
-    except BaseException:
+    except FormalImportBeforeCommitError as exc:
         rolled_back = rollback_newly_promoted_images(
             materialized_images_by_identity,
             project_root=project_root,
@@ -2485,7 +2517,18 @@ def import_valid_records_with_media_rollback(
             file=sys.stderr,
             flush=True,
         )
-        raise
+        return {
+            "db": str(db_path),
+            "processed_rows": 0,
+            "inserted_rows": 0,
+            "updated_rows": 0,
+            "skipped": len(selected),
+            "skipped_video": 0,
+            "parse_errors": 0,
+            "reason": "sqlite_import_failed",
+            "error": str(exc),
+            "rolled_back_images": rolled_back,
+        }
 
 
 def normalize_bilibili_article_record(item: dict[str, Any], keyword: str) -> dict[str, Any] | None:
@@ -4246,6 +4289,7 @@ def apply_formal_completion_gates(
     image_materialization: dict[str, Any],
     behavior_validation: dict[str, Any],
     download_images: bool,
+    child_execution_ok: bool = True,
 ) -> dict[str, Any]:
     """Apply all read-only evidence gates before persistent writes."""
 
@@ -4255,6 +4299,7 @@ def apply_formal_completion_gates(
     gated["image_materialization_complete"] = bool(image_materialization.get("complete"))
     gated["behavior_evidence_ok"] = bool(behavior_validation.get("behavior_ok"))
     gated["policy_evidence_ok"] = bool(behavior_validation.get("policy_ok"))
+    gated["child_execution_ok"] = child_execution_ok
     if download_images and not image_materialization.get("complete"):
         gated["new_target_met"] = False
         gated["completion_met"] = False
@@ -4267,6 +4312,10 @@ def apply_formal_completion_gates(
             if not behavior_validation.get("behavior_ok")
             else "crawl_policy_evidence_failed"
         )
+    if not child_execution_ok:
+        gated["new_target_met"] = False
+        gated["completion_met"] = False
+        gated["stop_reason"] = "runtime_failed"
     return gated
 
 
@@ -4450,6 +4499,10 @@ def main() -> int:
         records.append(run_platform(platform_key, args, batch_dir))
 
     result_counts = latest_platform_result_counts(records, platforms)
+    child_execution_ok = bool(
+        result_counts["failed_count"] == 0
+        and result_counts["ok_count"] == len(platforms)
+    )
     summary = {
         "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "keyword": args.keyword,
@@ -4539,6 +4592,7 @@ def main() -> int:
         image_materialization=image_materialization,
         behavior_validation=behavior_validation,
         download_images=args.download_images,
+        child_execution_ok=child_execution_ok,
     )
     if formal_image_promotion_allowed(
         download_images=args.download_images,
@@ -4575,6 +4629,7 @@ def main() -> int:
             image_materialization=image_materialization,
             behavior_validation=behavior_validation,
             download_images=True,
+            child_execution_ok=child_execution_ok,
         )
         if not validation["completion_met"]:
             rolled_back = rollback_newly_promoted_images(
@@ -4649,20 +4704,28 @@ def main() -> int:
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    checkpoint_ok = True
-    try:
-        summary["discovery_checkpoint"] = persist_discovery_checkpoint(
-            args,
-            platforms[0],
-            pagination_evidence,
-        )
-    except (OSError, sqlite3.Error, ValueError) as exc:
-        checkpoint_ok = False
+    import_failed = import_result_value.get("reason") == "sqlite_import_failed"
+    checkpoint_ok = not import_failed
+    if import_failed:
         summary["discovery_checkpoint"] = {
-            "skipped": False,
-            "error": f"{type(exc).__name__}: {exc}",
+            "skipped": True,
+            "reason": "sqlite_import_failed",
         }
-        summary["failure_reason"] = "discovery_checkpoint_write_failed"
+        summary["failure_reason"] = "sqlite_import_failed"
+    else:
+        try:
+            summary["discovery_checkpoint"] = persist_discovery_checkpoint(
+                args,
+                platforms[0],
+                pagination_evidence,
+            )
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            checkpoint_ok = False
+            summary["discovery_checkpoint"] = {
+                "skipped": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            summary["failure_reason"] = "discovery_checkpoint_write_failed"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     write_markdown(summary, report_path)
     print(json.dumps({"summary": str(summary_path), "report": str(report_path), "batch_dir": str(batch_dir), **summary}, ensure_ascii=False, indent=2))

@@ -541,27 +541,85 @@ def test_sqlite_import_failure_rolls_back_newly_promoted_files(
         promote=True,
     )
     assert len(list(media_root.rglob("*.png"))) == 1
+    item["materialized_images"] = materialized[item["identity"]]
     monkeypatch.setattr(
         mediacrawler_crawl,
-        "import_valid_records",
+        "upsert_web_post",
         lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.Error("injected")),
     )
 
-    with pytest.raises(sqlite3.Error, match="injected"):
+    result = mediacrawler_crawl.import_valid_records_with_media_rollback(
+        {"keyword": "青岛旅游"},
+        [item],
+        project_root / "temp" / "formal.sqlite",
+        materialized_images_by_identity=materialized,
+        image_materialization=report,
+        project_root=project_root,
+        media_root=media_root,
+    )
+
+    assert result["reason"] == "sqlite_import_failed"
+    assert result["rolled_back_images"] == 1
+    assert report["rolled_back_images"] == 1
+    assert report["promoted_images"] == 0
+    assert not list(media_root.rglob("*.*"))
+    assert "reason=sqlite_import_failed removed_new_files=1" in capsys.readouterr().err
+
+
+def test_postcommit_interrupt_preserves_sqlite_referenced_media(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    item, _, _ = staged_selection(
+        project_root,
+        "xhs",
+        five_platform_image_records()["xhs"],
+    )
+    media_root = project_root / "temp" / "formal-media"
+    report, materialized, _ = mediacrawler_crawl.materialize_formal_record_images(
+        [item],
+        project_root=project_root,
+        media_root=media_root,
+        promote=True,
+    )
+    item["materialized_images"] = materialized[item["identity"]]
+    db_path = project_root / "temp" / "formal.sqlite"
+
+    def commit_then_interrupt(conn: sqlite3.Connection) -> None:
+        conn.commit()
+        raise KeyboardInterrupt("after commit")
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "commit_formal_import",
+        commit_then_interrupt,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="after commit"):
         mediacrawler_crawl.import_valid_records_with_media_rollback(
             {"keyword": "青岛旅游"},
             [item],
-            project_root / "temp" / "formal.sqlite",
+            db_path,
             materialized_images_by_identity=materialized,
             image_materialization=report,
             project_root=project_root,
             media_root=media_root,
         )
 
-    assert report["rolled_back_images"] == 1
-    assert report["promoted_images"] == 0
-    assert not list(media_root.rglob("*.*"))
-    assert "reason=sqlite_import_failed removed_new_files=1" in capsys.readouterr().err
+    with sqlite3.connect(db_path) as conn:
+        referenced = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM web_post_images AS image
+            JOIN web_posts AS post ON post.id=image.web_post_id
+            WHERE post.platform_post_id='xhs-1' AND image.local_path IS NOT NULL
+            """
+        ).fetchone()[0]
+    assert referenced == 1
+    assert report["rolled_back_images"] == 0
+    assert len(list(media_root.rglob("*.png"))) == 1
 
 
 @pytest.mark.parametrize(
@@ -700,4 +758,21 @@ def test_long_term_image_promotion_requires_all_completion_gates() -> None:
         download_images=True,
         no_import=True,
         validation=complete,
+    ) is False
+
+    failed_child = mediacrawler_crawl.apply_formal_completion_gates(
+        {"completion_met": True, "new_target_met": True, "stop_reason": "target_new_met"},
+        content_validation={"completion_met": True, "new_target_met": True},
+        image_materialization=image_complete,
+        behavior_validation=behavior_ok,
+        download_images=True,
+        child_execution_ok=False,
+    )
+    assert failed_child["completion_met"] is False
+    assert failed_child["new_target_met"] is False
+    assert failed_child["stop_reason"] == "runtime_failed"
+    assert mediacrawler_crawl.formal_image_promotion_allowed(
+        download_images=True,
+        no_import=False,
+        validation=failed_child,
     ) is False

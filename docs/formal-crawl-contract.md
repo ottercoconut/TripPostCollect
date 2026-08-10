@@ -188,6 +188,8 @@ manifest，再写 `candidate_deferred` 事件，至少包含平台、候选 ID�
 恰好用尽候选上限或随后扫描到空页时仍必须报告 `deferred_retry_pending`。格式、解码、大小、明确
 非重试 HTTP 等终态图片错误不得写 `candidate_deferred`；写完失败 manifest 后以 `runtime_failed`
 停在当前 page/offset/cursor，且失败 ID 不写正式 JSONL、SQLite 或 seen。
+分页证据为 `runtime_failed`、`login_required`、`captcha_detected`，或本轮任一目标 child 未成功完成时，
+运行失败门禁必须覆盖已经达到的数量目标：`completion_met=false`，不得晋升图片或进入 SQLite 事务。
 
 五平台正文来源是正式字段契约，不是调试信息：
 
@@ -382,9 +384,11 @@ checkpoint 并按 `runtime_failed` 停止，不得静默生成新 ID 请求猜�
 字段、行为与策略门禁；任何门禁未通过时不得写 `data/media`，摘要写
 `promotion_deferred=true` 和具体 `promotion_deferred_reason`。只有这些门禁全部通过，正式运行才以
 `promotion_required=true` 再次复验并晋升，然后进入 SQLite 事务。晋升函数在当前文件写入失败时
-删除该文件；整轮后续图片或 SQLite 导入失败时，根执行器回滚本轮所有 `reused=false` 的新文件，
-不得删除此前已存在且 `reused=true` 的内容寻址文件。SQLite 成功提交后，长期文件已形成正式引用；
-后续 checkpoint 或报告验证失败不得删除这些数据库引用文件，而应保留并恢复控制面状态。产物完整的等式为
+删除该文件；整轮后续图片或能够确认发生在 SQLite 提交前的导入失败时，根执行器回滚本轮所有
+`reused=false` 的新文件，不得删除此前已存在且 `reused=true` 的内容寻址文件。提交前失败必须在
+child 摘要写入 `import_result.reason=sqlite_import_failed`、错误和 `rolled_back_images`，并跳过本轮
+发现 checkpoint。SQLite 已成功提交或提交结果不能安全判定时，长期文件可能已形成正式引用；后续
+中断、checkpoint 或报告验证失败不得删除这些文件，而应保留并核对 SQLite 后恢复控制面状态。产物完整的等式为
 `candidate_posts == complete_posts` 且
 `expected_images == downloaded_images == validated_images`，并且失败数与 `failures` 均为 0。正式
 入库还要求 `unique_images + sha256_duplicate_images == expected_images`、
