@@ -2488,6 +2488,7 @@ def import_valid_records(
     commit_started = False
     try:
         db_sync = ensure_web_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
         for item in selected:
             record = item["record"]
             platform_key = str(item["platform"])

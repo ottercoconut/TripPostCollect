@@ -622,6 +622,118 @@ def test_postcommit_interrupt_preserves_sqlite_referenced_media(
     assert len(list(media_root.rglob("*.png"))) == 1
 
 
+def test_interrupt_before_batch_commit_rolls_back_rows_and_media(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    item, _, _ = staged_selection(
+        project_root,
+        "xhs",
+        five_platform_image_records()["xhs"],
+    )
+    media_root = project_root / "temp" / "formal-media"
+    report, materialized, _ = mediacrawler_crawl.materialize_formal_record_images(
+        [item],
+        project_root=project_root,
+        media_root=media_root,
+        promote=True,
+    )
+    item["materialized_images"] = materialized[item["identity"]]
+    db_path = project_root / "temp" / "formal.sqlite"
+
+    def interrupt_before_commit(conn: sqlite3.Connection) -> None:
+        assert conn.in_transaction is True
+        raise KeyboardInterrupt("before commit")
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "commit_formal_import",
+        interrupt_before_commit,
+    )
+    result = mediacrawler_crawl.import_valid_records_with_media_rollback(
+        {"keyword": "青岛旅游"},
+        [item],
+        db_path,
+        materialized_images_by_identity=materialized,
+        image_materialization=report,
+        project_root=project_root,
+        media_root=media_root,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        posts = conn.execute("SELECT COUNT(*) FROM web_posts").fetchone()[0]
+        images = conn.execute("SELECT COUNT(*) FROM web_post_images").fetchone()[0]
+    assert result["reason"] == "sqlite_import_failed"
+    assert result["inserted_rows"] == 0
+    assert posts == images == 0
+    assert report["rolled_back_images"] == 1
+    assert not list(media_root.rglob("*.png"))
+
+
+def test_second_post_failure_rolls_back_entire_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    media_root = project_root / "temp" / "formal-media"
+    selected: list[dict] = []
+    all_materialized: dict[str, list] = {}
+    reports: list[dict] = []
+    for platform_key in ("xhs", "weibo"):
+        item, _, _ = staged_selection(
+            project_root,
+            platform_key,
+            five_platform_image_records()[platform_key],
+        )
+        report, materialized, _ = mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=media_root,
+            promote=True,
+        )
+        item["materialized_images"] = materialized[item["identity"]]
+        selected.append(item)
+        all_materialized.update(materialized)
+        reports.append(report)
+    image_materialization = {
+        "rolled_back_images": 0,
+        "promoted_images": sum(report["promoted_images"] for report in reports),
+    }
+    real_upsert = mediacrawler_crawl.upsert_web_post
+    calls = 0
+
+    def fail_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise sqlite3.Error("second post failed")
+        return real_upsert(*args, **kwargs)
+
+    monkeypatch.setattr(mediacrawler_crawl, "upsert_web_post", fail_second)
+    db_path = project_root / "temp" / "formal.sqlite"
+    result = mediacrawler_crawl.import_valid_records_with_media_rollback(
+        {"keyword": "青岛旅游"},
+        selected,
+        db_path,
+        materialized_images_by_identity=all_materialized,
+        image_materialization=image_materialization,
+        project_root=project_root,
+        media_root=media_root,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        posts = conn.execute("SELECT COUNT(*) FROM web_posts").fetchone()[0]
+        images = conn.execute("SELECT COUNT(*) FROM web_post_images").fetchone()[0]
+    assert result["reason"] == "sqlite_import_failed"
+    assert result["processed_rows"] == result["inserted_rows"] == 0
+    assert posts == images == 0
+    assert result["rolled_back_images"] == 2
+    assert not list(media_root.rglob("*.png"))
+
+
 def test_rollback_preserves_file_referenced_by_another_committed_run(
     tmp_path: Path,
 ) -> None:

@@ -173,7 +173,8 @@ staging/manifest，不写长期媒体。分页运行失败或任一 child 失败
 已有正式引用的文件，核对数据库后只恢复控制面。正式媒体晋升到提交/回滚使用全局跨进程锁，回滚
 还会按当前 SQLite `local_path` 引用二次保护，避免一轮删除另一成功轮次已引用的内容寻址文件。
 XHS runner 与 discovery 提交函数都把 `sqlite_import_failed` 视为不写 checkpoint/seen/campaign 的
-硬门禁。导入报告区分处理、新增和更新；更新已有帖
+硬门禁。SQLite schema bootstrap 后显式开启批次外层事务，逐帖 SAVEPOINT 始终嵌套其中；任一帖
+失败会回滚整批，只有外层提交成功才形成正式引用。导入报告区分处理、新增和更新；更新已有帖
 时会优先匹配并保留仍有效的既有本地图片证据，新的整帖图片集合仍在同一事务重建。
 
 `artifacts_verified` 对 `image_materialization` 的 manifest 哈希和计数等式负责；
