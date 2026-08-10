@@ -602,7 +602,9 @@ MediaCrawler 入库采用去重更新：
 - 正式媒体的首次晋升、SQLite 提交和失败回滚属于同一个跨进程互斥区间；不同平台、不同 XHS 账号
   或不同 runner 不得并发交错这三个动作。回滚删除 `reused=false` 文件前仍须检查当前数据库的
   `web_post_images.local_path`，已有提交引用时保留文件。晋升期间的 `KeyboardInterrupt`、`SystemExit`
-  等可捕获进程中断必须先回滚此前已晋升的新文件，再继续传播中断；不可捕获的 `SIGKILL` 不作完成承诺。
+  等可捕获进程中断必须先回滚此前已晋升的新文件，再继续传播中断。进入 SQLite 批次事务后、成功
+  提交前的同类中断按提交前导入失败处理：整批数据库与新媒体回滚，返回 `sqlite_import_failed`
+  摘要而不再传播；提交成功后的中断继续传播并保留引用文件。不可捕获的 `SIGKILL` 不作完成承诺。
 - 原始 JSONL 行完整保留在 `raw_sample_json`，便于后续清洗补字段。
 
 ## B站历史摘要回填

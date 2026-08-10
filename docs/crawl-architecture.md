@@ -172,7 +172,8 @@ staging/manifest，不写长期媒体。分页运行失败或任一 child 失败
 晋升或已确认发生在 SQLite 提交前的事务失败会删除本轮新建文件，内容寻址复用文件保持不变，并在
 摘要写入 `sqlite_import_failed` 后跳过 checkpoint；SQLite 已成功提交或提交结果不确定时保留可能
 已有正式引用的文件，核对数据库后只恢复控制面。正式媒体晋升到提交/回滚使用全局跨进程锁，回滚
-还会按当前 SQLite `local_path` 引用二次保护；可捕获的进程中断会先回滚本轮已晋升新文件再传播，
+还会按当前 SQLite `local_path` 引用二次保护；晋升阶段的可捕获中断会先回滚本轮已晋升新文件再传播，
+SQLite 外层事务开始后、提交前的中断则整批回滚并转成 `sqlite_import_failed` 结果，
 避免一轮删除另一成功轮次已引用的内容寻址文件或遗留无引用长期文件。
 XHS runner 与 discovery 提交函数都把 `sqlite_import_failed` 视为不写 checkpoint/seen/campaign 的
 硬门禁。SQLite schema bootstrap 后显式开启批次外层事务，逐帖 SAVEPOINT 始终嵌套其中；任一帖

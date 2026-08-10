@@ -531,6 +531,7 @@ child 的 `image_materialization.manifest_evidence` 所指 manifest → SQLite �
 | `image_hash_mismatch` / `image_manifest_metadata_mismatch` | staging 字节与 manifest 不一致 | 停止并保留证据，排查写入竞态或文件篡改 |
 | `image_existing_conflict` / `image_promotion_conflict` | staging 整帖目录或长期内容寻址目标已有不同字节 | 停止覆盖，保留两侧证据并排查稳定键、旧文件或并发写入 |
 | 晋升期间 `KeyboardInterrupt` / `SystemExit` | 可捕获进程中断 | 执行器先回滚本轮已晋升的 `reused=false` 文件再传播中断；核对长期目录无新孤儿后按原 checkpoint 重跑。`SIGKILL`/掉电需人工核对 SQLite 引用与内容寻址文件 |
+| SQLite 批次事务开始后、提交前发生可捕获中断 | 提交前导入失败 | 整批数据库行与本轮新媒体回滚，child 返回 `import_result.reason=sqlite_import_failed` 而不再传播原中断；runner 记录失败并跳过 checkpoint/seen/campaign |
 | `rolled_back_images>0` / `image_promotion_rollback` 日志 | 晋升或已确认发生在 SQLite 提交前的导入失败，执行器删除了本轮新建的无引用文件 | 核对摘要 `import_result.reason=sqlite_import_failed`，数据库没有部分批次行，通用/XHS checkpoint 与 seen 均未推进；确认批次外层事务及媒体锁覆盖晋升到提交/回滚，删除前已按 SQLite `local_path` 排除其他已提交引用。不得删除 `reused=true` 或已引用文件；提交结果不确定时只恢复控制面 |
 | `image_materialization_missing` / `image_materialization_incomplete` | child 摘要缺少统一图片结果或完成等式失败 | 视为执行器/版本契约错误，不允许 runner 降级完成 |
 | `persistence_verified` 失败 | 晋升文件与 SQLite 路径、SHA、MIME、尺寸或计数不一致 | 不 finalize、不推进 checkpoint；从摘要身份逐帖修复并重新执行正式事务 |
