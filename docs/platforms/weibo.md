@@ -37,8 +37,9 @@
 
 图片字节使用当前移动搜索会话的 Cookie/请求头逐帖下载；整帖全部图片先通过真实格式和解码检查，
 再原子写入本轮 `<platform_artifact>/data/weibo/images/<weibo_id>/<index>.<real_ext>`，并更新
-`<platform_artifact>/data/weibo/image_manifest.jsonl`。单张失败使用 `image_download_retryable` 或具体格式错误码，
-当前批次停止且不推进安全前沿，不允许只保留成功子集。
+`<platform_artifact>/data/weibo/image_manifest.jsonl`。空响应或超时按单图最多 3 次、1–2 秒随机基数
+指数退避重试；日志逐次记录重试，成功或最终失败的 manifest 都记录实际 `attempts`。三次仍失败才使用
+`image_download_retryable`，当前批次停止且不推进安全前沿，不允许只保留成功子集。
 
 根执行器重新按 `image_list` 顺序核对 manifest 身份、SHA/MIME/尺寸和 staging 文件。正式 runner
 固定开启正文图下载并晋升到 `data/media/weibo/...`，随后在帖子与图片同一 SQLite 事务保存 URL、

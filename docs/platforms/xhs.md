@@ -59,8 +59,9 @@
 `get_notice_video()` 或视频 store。整帖图片通过真实格式、解码和大小检查后，原子写入
 `<child_artifact>/xhs/data/xhs/images/<note_id>/<index>.<real_ext>` 和
 `<child_artifact>/xhs/data/xhs/image_manifest.jsonl`；来源字段固定为 `image_list`、角色固定为 `content`。
-单图失败记录 `image_download_retryable` 或具体格式错误码并停止当前安全批次，不保存成功子集为
-完整帖。
+空响应或超时按单图最多 3 次、1–2 秒随机基数指数退避重试；日志和最终 manifest `attempts` 保留
+实际尝试证据。三次仍失败才记录 `image_download_retryable` 并停止当前安全批次，不保存成功子集为
+完整帖，也不触发自动换号。
 
 根执行器按相同优先级重建候选，复验 manifest、SHA/MIME/尺寸和路径边界。正式运行晋升到
 `data/media/xhs/...` 后才写 SQLite；`--no-import` 诊断只保留 staging/manifest。本规则是固定合同，

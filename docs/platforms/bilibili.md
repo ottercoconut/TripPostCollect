@@ -95,7 +95,8 @@ B站使用项目自有 article 分支下载，不调用 MediaCrawler 视频媒�
 `source_key=image_urls`、`image_role=content`。BFS 路径移除变换后缀后生成稳定
 `source_asset_key`，因此 HTTP/HTTPS、协议相对地址或 CDN 变换 URL 不会制造重复资产。
 
-每张图复用行为阶段导出的当前 B站 Cookie 和 article Referer，有限重试后写到本轮
+每张图复用行为阶段导出的当前 B站 Cookie 和 article Referer，空响应或超时按单图最多 3 次、
+1–2 秒随机基数指数退避重试后写到本轮
 `<platform_data_root>/images/<post_id>/<index>.<real_ext>`；同目录
 `image_manifest.jsonl` 原子记录 URL、稳定键、尝试次数、HTTP 状态、SHA、真实 MIME、尺寸和相对
 staging 路径。搜索 `image_urls`、Opus 封面、作者头像和视频资源不会进入下载函数。失败行只写

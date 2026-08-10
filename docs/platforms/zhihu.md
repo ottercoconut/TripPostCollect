@@ -47,7 +47,8 @@
 同帖 `zhimg.com` URL 先按去除 `_r`、`_720w`、`_1440w` 等已知变换后缀的资源路径去重，保留
 首次 URL 并连续编号；原始 `image_list` 继续保留全部 URL 证据，被合并变体不重复下载或写 manifest。
 该规则只识别知乎稳定 URL 语义，不做感知哈希或视觉相似比较。失败行使用
-`image_download_retryable` 或具体格式错误码，当前批次不得
+`image_download_retryable` 或具体格式错误码。空响应或超时先按单图最多 3 次、1–2 秒随机基数指数
+退避重试；日志逐次记录，成功或最终失败的 manifest `attempts` 保存实际请求次数。三次仍失败时当前批次不得
 把详情失败、部分成功或公式图排除解释成图片完成。
 
 根执行器按 `image_list` 投影后的候选顺序复验 manifest 和文件，正式运行晋升到 `data/media/zhihu/...`

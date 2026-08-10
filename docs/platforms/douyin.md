@@ -91,7 +91,8 @@
 图片入口是严格 images-only：图片列表为空直接返回，视频候选直接跳过；不会调用
 `get_aweme_video()`、视频 store 或音乐下载。图片使用当前 `dy_client` 会话和新鲜签名 URL 串行
 下载，整帖检查后原子写入 `<platform_artifact>/data/douyin/images/<aweme_id>/<index>.<real_ext>` 和
-`<platform_artifact>/data/douyin/image_manifest.jsonl`。下载失败会写失败 manifest 并以
+`<platform_artifact>/data/douyin/image_manifest.jsonl`。空响应或超时按单图最多 3 次、1–2 秒随机基数
+指数退避重试，日志和最终 manifest `attempts` 保留实际尝试证据。重试耗尽后才写失败 manifest 并以
 `image_download_failed` 停止当前批次；可恢复项使用 `image_download_retryable`，不得推进
 page/offset/search ID 或写入已处理候选。
 

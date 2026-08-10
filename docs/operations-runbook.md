@@ -516,7 +516,7 @@ child 的 `image_materialization.manifest_evidence` 所指 manifest → SQLite �
 
 | 信号 | 分类 | 处理 |
 |---|---|---|
-| `image_download_retryable` | 平台会话、临时网络或响应可恢复失败 | 保留当前安全前沿，不写已处理候选；检查登录态和平台日志尾部后从 runner 新开一轮重试 |
+| `image_download_retryable` | 单图已在同一 child 内完成最多 3 次指数退避重试，平台会话、临时网络或响应仍失败 | 核对 manifest `attempts=3` 与平台日志中的 `image_download_retry` / `image_download_retry_exhausted`；保留当前安全前沿，不写已处理候选，再从 runner 新开一轮恢复 |
 | `missing_image_manifest` / `image_manifest_count_mismatch` | staging/manifest 不完整 | 停止入库，核对 child 实际 artifact 和平台 store；禁止手工补空 manifest |
 | `image_manifest_identity_mismatch` | URL、平台、帖子、顺序、来源字段或稳定键不一致 | 视为代码/产物版本错误，修复后重跑整帖 |
 | `image_path_escape` / `image_file_missing` | 路径边界或文件缺失 | 停止晋升，检查 symlink、清理程序和 artifact 完整性 |
