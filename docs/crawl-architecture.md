@@ -7,7 +7,6 @@
 ```text
 config/crawl_targets.json
   -> scripts/crawl_runner.py
-      -> Qingdao topic guard (keyword starts with 青岛 or 崂山)
       -> SQLite crawl_discovery_checkpoints
       -> SQLite crawl_discovery_seen_candidates
       -> data/runtime/crawl_execution_states/<run_id>/<job>.json
@@ -27,7 +26,6 @@ config/crawl_targets.json
           -> web_posts / web_post_images
 config/xhs_pool.json + config/xhs_targets.json
   -> scripts/xhs_runner.py
-      -> Qingdao topic guard (keyword starts with 青岛 or 崂山)
       -> explicit --account-id
       -> SQLite xhs_accounts / xhs_account_leases / xhs_account_events / xhs_runs
       -> SQLite xhs_discovery_checkpoints / xhs_discovery_seen_candidates
@@ -48,9 +46,9 @@ config/xhs_pool.json + config/xhs_targets.json
 `crawl_runner.py` 是通用平台正式入口；`xhs_runner.py` 是小红书唯一正式入口。两者负责
 选择任务、冻结计划、执行逐步门禁和生成报告，执行器不能绕过状态文件宣布完成。
 
-主题范围是入口级不变量：通用配置同步、小红书 target 读取、恢复参数、结构化诊断和页面证据
-导入都复用 `trippostcollect.core.scope`，只接受以“青岛”或“崂山”开头的声明关键词。该层在平台
-访问或 SQLite 写入前失败；数据库不增加城市列，正文内容也不参与城市启发式判定。
+青岛主题范围由操作人或 Agent 在计划冻结时核对，不在通用配置同步、小红书 target 读取、恢复
+参数、结构化诊断或页面证据导入中设置关键词硬门禁。数据库不增加城市列，正文内容也不参与
+城市启发式判定。
 
 结构化平台进入搜索前统一经过两层强制门禁：父执行器用 `crawl_policy.py` 维护平台会话
 间隔、随机抖动、预算和冷却；MediaCrawler 使用已经完成登录确认的当前浏览器页调用

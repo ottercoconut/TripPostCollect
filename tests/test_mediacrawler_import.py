@@ -149,7 +149,6 @@ def test_content_import_bootstrap_preserves_parent_runner_jobs() -> None:
                 "target_url": "https://example.invalid/first",
                 "job_kind": "mediacrawler_search",
                 "enabled": True,
-                "params": {"keyword": "青岛旅游"},
             },
             {
                 "job_key": "once_second",
@@ -157,7 +156,6 @@ def test_content_import_bootstrap_preserves_parent_runner_jobs() -> None:
                 "target_url": "https://example.invalid/second",
                 "job_kind": "mediacrawler_search",
                 "enabled": True,
-                "params": {"keyword": "崂山攻略"},
             },
         ]
     }

@@ -40,7 +40,6 @@ from trippostcollect.core.paths import (
     ensure_dir,
     ensure_parent,
 )
-from trippostcollect.core.scope import require_qingdao_topic_keyword
 
 
 ROOT = PROJECT_ROOT
@@ -189,10 +188,7 @@ def resolve_discovery_args(
 
     params = params_for(row)
     platform_key = str(params.get("platform") or row["site_key"])
-    keyword = require_qingdao_topic_keyword(
-        args.recovery_keyword or params.get("keyword") or "青岛旅游",
-        field_name="recovery/config keyword",
-    )
+    keyword = str(args.recovery_keyword or params.get("keyword") or "青岛旅游")
     fingerprint = query_fingerprint(platform_key, keyword, params)
     checkpoint = load_checkpoint(
         conn,

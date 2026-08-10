@@ -6,8 +6,6 @@ import sys
 from importlib import import_module
 from pathlib import Path
 
-import pytest
-
 from trippostcollect.db.bootstrap import (
     ensure_scheduler_schema,
     migrate_remove_city_name,
@@ -65,7 +63,7 @@ def test_content_migration_removes_city_name_and_legacy_city_rows() -> None:
         ).fetchone() is None
 
 
-def test_scheduler_migration_keeps_allowed_laoshan_keyword() -> None:
+def test_scheduler_migration_uses_config_scope_not_keyword_text() -> None:
     with sqlite3.connect(":memory:") as conn:
         conn.execute("PRAGMA foreign_keys=ON")
         ensure_scheduler_schema(conn)
@@ -96,27 +94,7 @@ def test_scheduler_migration_keeps_allowed_laoshan_keyword() -> None:
         assert json.loads(row[1])["keyword"] == "崂山攻略"
 
 
-def test_scheduler_rejects_keyword_outside_qingdao_scope() -> None:
-    with sqlite3.connect(":memory:") as conn:
-        ensure_scheduler_schema(conn)
-        with pytest.raises(ValueError, match="must start with one of: 青岛、崂山"):
-            sync_config_jobs(
-                conn,
-                {
-                    "jobs": [
-                        {
-                            "job_key": "jinan",
-                            "site_key": "weibo",
-                            "target_url": "",
-                            "job_kind": "mediacrawler_search",
-                            "params": {"keyword": "济南旅游"},
-                        }
-                    ]
-                },
-            )
-
-
-def test_page_evidence_keyword_extraction_is_lossless() -> None:
+def test_page_evidence_preserves_optional_keyword() -> None:
     assert keyword_from_capture(
         {"raw_meta_json": json.dumps({"keyword": "崂山攻略"}, ensure_ascii=False)}
     ) == "崂山攻略"
@@ -132,14 +110,3 @@ def test_structured_import_accepts_keyword_without_city_name() -> None:
         keyword="青岛旅游",
     )
     assert row["keyword"] == "崂山攻略"
-
-
-def test_structured_import_rejects_keyword_outside_qingdao_scope() -> None:
-    with pytest.raises(ValueError, match="must start with one of: 青岛、崂山"):
-        row_for_record(
-            "weibo",
-            {"source_keyword": "济南旅游"},
-            artifact_dir="/tmp/artifact",
-            captured_at="2026-07-29T00:00:00+08:00",
-            keyword="青岛旅游",
-        )

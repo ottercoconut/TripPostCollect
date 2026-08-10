@@ -43,9 +43,9 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 
 `web_posts` 不再建模城市。迁移 `13/remove_city_name` 使用旧库原有的 `city_name` 完成一次性历史
 数据清理，随后移除该列、城市索引和 `cities` 表；迁移 `14/configured_scheduler_scope` 删除不在
-当前配置中的历史调度任务。现行项目范围由应用层的检索词门禁保证：正式配置、恢复参数、诊断
-抓取和页面证据导入声明的关键词去除首尾空白后必须以“青岛”或“崂山”开头，否则在平台访问或 SQLite 写入前
-失败。“崂山攻略”等不含“青岛”字样但明确属于青岛范围的关键词可以正常入库。
+当前配置中的历史调度任务。现行项目范围由操作人或 Agent 在计划冻结时核对；配置解析器、抓取器
+和导入器不按关键词文本设置硬门禁。“崂山攻略”等不含“青岛”字样但明确属于青岛范围的关键词
+可以正常入库。
 
 `crawl_discovery_checkpoints` 和 `crawl_discovery_seen_candidates` 是 B站、微博、抖音和知乎正式
 搜索的控制面记忆，不是内容表。
@@ -352,7 +352,7 @@ PY
 | `author_platform_id` | 小红书 `user_id`、`creator_hash` 或其他平台用户 ID |
 | `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎搜索结果 `author.follower_count` 归一后的 `followers_count` |
 | `published_at` | 发帖时间，统一保存为 Asia/Shanghai ISO 字符串，如 `2024-04-06T15:35:00+08:00`。优先取平台原始发布时间字段，如 `create_time`、`publish_time`、`time`、`datePublished`；`captured_at` 只表示本项目抓取时间 |
-| `keyword` | 优先保存每条记录的 `source_keyword`；缺失时回退到最终执行摘要的 `keyword`，即本次 child 命令实际使用的检索词。写入前必须以“青岛”或“崂山”开头。当前通用结构化 store 会逐条写入 `source_keyword`；自动 checkpoint 延续同一查询词，显式 `--recovery-keyword` 才会产生恢复词。旧记录缺少该字段时，回退值不能作为其原始检索词证据 |
+| `keyword` | 优先保存每条记录的 `source_keyword`；缺失时回退到最终执行摘要的 `keyword`，即本次 child 命令实际使用的检索词。当前通用结构化 store 会逐条写入 `source_keyword`；自动 checkpoint 延续同一查询词，显式 `--recovery-keyword` 才会产生恢复词。旧记录缺少该字段时，回退值不能作为其原始检索词证据 |
 | `post_likes_count` | `liked_count`、知乎 `voteup_count` |
 | `post_favorites_count` | `collected_count` 等收藏字段 |
 | `post_comments_count` | `comment_count`、`comments_count` 等评论字段 |
@@ -374,8 +374,8 @@ PY
 出现原关键词和恢复关键词。若旧记录缺少 `source_keyword`，必须结合原摘要和 JSONL 审计，
 不能把回退到最终摘要的值解释成原始检索词。
 
-系统不再保存 `city_name`，也不做城市别名解析或正文地名推断；应用入口只对声明关键词执行
-“以青岛或崂山开头”的项目范围校验。
+系统不再保存 `city_name`，也不做城市别名解析、关键词硬门禁或正文地名推断。项目范围以该轮
+冻结的任务配置和操作审计为准。
 原正式任务意图以该轮冻结 execution state 的 `plan.job_params`、
 `plan.command` 和递归 resume 摘要链为准；`crawl_jobs` 当前值只用于核对现行调度配置，不能
 单独证明历史轮次意图，也不能仅用内容行的 `keyword` 反推整轮唯一任务关键词。

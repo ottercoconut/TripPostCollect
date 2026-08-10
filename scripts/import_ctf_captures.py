@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 from trippostcollect.core.paths import DEFAULT_DB, OUTPUTS_ROOT, PROJECT_ROOT, ensure_parent
-from trippostcollect.core.scope import require_qingdao_topic_keyword
 from trippostcollect.db.bootstrap import bootstrap_connection
 
 
@@ -641,14 +640,6 @@ def main() -> int:
             validation = json.loads(row["validation_json"])
             if validation["errors"]:
                 failures.append(f"{path}: {validation['errors']}")
-                continue
-            try:
-                require_qingdao_topic_keyword(
-                    keyword_from_capture(row),
-                    field_name=f"{path}: capture keyword",
-                )
-            except ValueError as exc:
-                failures.append(str(exc))
                 continue
             capture_id = upsert_capture(conn, row)
             image_rows += replace_capture_images(conn, capture_id, row.get("images_json_path"))

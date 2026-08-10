@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from trippostcollect.core.paths import XHS_POOL_CONFIG, XHS_TARGET_CONFIG
-from trippostcollect.core.scope import require_qingdao_topic_keyword
 
 
 class XhsConfigError(ValueError):
@@ -66,13 +65,6 @@ def load_target(target_key: str, path: str | Path = XHS_TARGET_CONFIG) -> dict[s
         raise XhsConfigError(
             f"removed XHS target download_images option remains in {resolved}: {target_key}"
         )
-    try:
-        target["keyword"] = require_qingdao_topic_keyword(
-            target.get("keyword"),
-            field_name=f"XHS target {target_key}.keyword",
-        )
-    except ValueError as exc:
-        raise XhsConfigError(str(exc)) from exc
     target_new = int(target.get("target_new_posts") or 0)
     candidates = int(target.get("candidate_hard_limit") or 0)
     stagnant = int(target.get("max_stagnant_batches") or 0)

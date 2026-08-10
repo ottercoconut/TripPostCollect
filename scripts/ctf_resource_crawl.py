@@ -29,7 +29,6 @@ from ctf_scrapling_preflight import run_scrapling_static_preflight, should_prefl
 from crawl_policy import CrawlPolicyBlocked, site_request_guard, varied_wait_seconds
 from human_flow import dwell_on_detail, install_runtime_hints, load_behavior_profile
 from trippostcollect.core.paths import CTF_BROWSER_PROFILE_ROOT, CTF_RESOURCE_OUTPUT, PROJECT_ROOT, ensure_dir
-from trippostcollect.core.scope import require_qingdao_topic_keyword
 from trippostcollect.platforms.registry import SITES, get_site, site_keys
 
 
@@ -265,11 +264,7 @@ def parse_args() -> argparse.Namespace:
         help="Scrapling static preflight timeout in seconds.",
     )
     parser.add_argument("--no-throttle", action="store_true", help="Skip shared crawl policy checks.")
-    parser.add_argument(
-        "--keyword",
-        required=True,
-        help="Declared Qingdao/Laoshan topic keyword recorded for downstream import.",
-    )
+    parser.add_argument("--keyword", default="", help="Optional search keyword to record in capture_meta for downstream import.")
     return parser.parse_args()
 
 
@@ -826,10 +821,6 @@ def aggregate(records: list[dict[str, Any]], batch_dir: Path) -> dict[str, Any]:
 
 async def main_async() -> int:
     args = parse_args()
-    try:
-        args.keyword = require_qingdao_topic_keyword(args.keyword)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
     targets = active_targets(args)
     batch_dir = ensure_dir(Path(args.output_dir).expanduser() / utc_stamp())
 

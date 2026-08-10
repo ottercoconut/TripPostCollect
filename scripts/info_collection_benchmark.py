@@ -22,7 +22,6 @@ from trippostcollect.core.paths import (
     ensure_parent,
     runtime_dir,
 )
-from trippostcollect.core.scope import require_qingdao_topic_keyword
 from trippostcollect.db.bootstrap import bootstrap_database
 from mediacrawler_behavior import HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS
 
@@ -404,10 +403,6 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
 
 def main() -> int:
     args = parse_args()
-    try:
-        args.keyword = require_qingdao_topic_keyword(args.keyword)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
     if args.per_target < 0 or args.fetch_multiplier < 0:
         raise SystemExit("--per-target and --fetch-multiplier must be zero or positive")
     db_path = ensure_parent(Path(args.db).expanduser())
