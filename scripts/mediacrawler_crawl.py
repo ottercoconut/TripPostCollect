@@ -2315,7 +2315,19 @@ def materialize_formal_record_images(
                     f"promoted image count does not match SHA-256 unique images for {identity}",
                 )
             complete_identities.add(identity)
-        except (ImageManifestError, ImageMaterializationError, OSError, UnicodeError) as exc:
+        except BaseException as exc:
+            expected_failure = isinstance(
+                exc,
+                (ImageManifestError, ImageMaterializationError, OSError, UnicodeError),
+            )
+            if not expected_failure:
+                if promote:
+                    rolled_back_images += rollback_newly_promoted_images(
+                        materialized_by_identity,
+                        project_root=root,
+                        media_root=resolved_media_root,
+                    )
+                raise
             code = getattr(exc, "code", "missing_image_manifest")
             failed_rows = [row for row in post_manifest_rows if row[0].fetch_status == "failed"]
             retryable_count = sum(
@@ -4352,6 +4364,12 @@ def apply_formal_completion_gates(
     gated["behavior_evidence_ok"] = bool(behavior_validation.get("behavior_ok"))
     gated["policy_evidence_ok"] = bool(behavior_validation.get("policy_ok"))
     gated["child_execution_ok"] = child_execution_ok
+    runtime_stop_reason = (
+        str(gated.get("stop_reason"))
+        if str(gated.get("stop_reason") or "")
+        in {"runtime_failed", "login_required", "captcha_detected"}
+        else ""
+    )
     if download_images and not image_materialization.get("complete"):
         gated["new_target_met"] = False
         gated["completion_met"] = False
@@ -4364,10 +4382,10 @@ def apply_formal_completion_gates(
             if not behavior_validation.get("behavior_ok")
             else "crawl_policy_evidence_failed"
         )
-    if not child_execution_ok:
+    if runtime_stop_reason or not child_execution_ok:
         gated["new_target_met"] = False
         gated["completion_met"] = False
-        gated["stop_reason"] = "runtime_failed"
+        gated["stop_reason"] = runtime_stop_reason or "runtime_failed"
     return gated
 
 

@@ -349,7 +349,8 @@ PY
 图片完整的正式有效集合；未达到目标或处于显式来源耗尽模式时，存在 deferred 候选会使本轮保持
 `deferred_retry_pending`，不得入库或宣称来源耗尽。
 分页证据或任一 child 表明 `runtime_failed`、登录或验证码阻断时，即使有效新增数已经达到目标，也必须
-保持 `completion_met=false`，不得晋升或入库；运行失败优先于数量完成。
+保持 `completion_met=false`，不得晋升或入库；运行失败优先于数量完成，也不得被图片、行为或策略
+门禁的停止原因覆盖。
 微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；`isLongText=true`
 必须用移动详情替换搜索截断文本，失败时不写 JSONL。小红书搜索会补拉
 作者主页指标。知乎回答/文章的原始时间、正文图片和作者粉丝会在清洗前保存并归一化；搜索响应
@@ -600,7 +601,8 @@ MediaCrawler 入库采用去重更新：
   可能已被正式图片关系引用的文件。
 - 正式媒体的首次晋升、SQLite 提交和失败回滚属于同一个跨进程互斥区间；不同平台、不同 XHS 账号
   或不同 runner 不得并发交错这三个动作。回滚删除 `reused=false` 文件前仍须检查当前数据库的
-  `web_post_images.local_path`，已有提交引用时保留文件。
+  `web_post_images.local_path`，已有提交引用时保留文件。晋升期间的 `KeyboardInterrupt`、`SystemExit`
+  等可捕获进程中断必须先回滚此前已晋升的新文件，再继续传播中断；不可捕获的 `SIGKILL` 不作完成承诺。
 - 原始 JSONL 行完整保留在 `raw_sample_json`，便于后续清洗补字段。
 
 ## B站历史摘要回填

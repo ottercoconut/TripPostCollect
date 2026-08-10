@@ -190,6 +190,8 @@ manifest，再写 `candidate_deferred` 事件，至少包含平台、候选 ID�
 停在当前 page/offset/cursor，且失败 ID 不写正式 JSONL、SQLite 或 seen。
 分页证据为 `runtime_failed`、`login_required`、`captcha_detected`，或本轮任一目标 child 未成功完成时，
 运行失败门禁必须覆盖已经达到的数量目标：`completion_met=false`，不得晋升图片或进入 SQLite 事务。
+组合门禁失败时也必须保留这一优先级：已有 `runtime_failed`、`login_required` 或
+`captcha_detected` 不得被图片不完整、行为证据或策略证据的较低级停止原因覆盖。
 
 五平台正文来源是正式字段契约，不是调试信息：
 
@@ -384,8 +386,9 @@ checkpoint 并按 `runtime_failed` 停止，不得静默生成新 ID 请求猜�
 字段、行为与策略门禁；任何门禁未通过时不得写 `data/media`，摘要写
 `promotion_deferred=true` 和具体 `promotion_deferred_reason`。只有这些门禁全部通过，正式运行才以
 `promotion_required=true` 再次复验并晋升，然后进入 SQLite 事务。晋升函数在当前文件写入失败时
-删除该文件；整轮后续图片或能够确认发生在 SQLite 提交前的导入失败时，根执行器回滚本轮所有
-`reused=false` 的新文件，不得删除此前已存在且 `reused=true` 的内容寻址文件。提交前失败必须在
+删除该文件；整轮后续图片、可捕获的进程中断或能够确认发生在 SQLite 提交前的导入失败时，根执行器
+先回滚本轮所有 `reused=false` 的新文件；可捕获中断随后继续传播。不得删除此前已存在且
+`reused=true` 的内容寻址文件。提交前失败必须在
 child 摘要写入 `import_result.reason=sqlite_import_failed`、错误和 `rolled_back_images`，并跳过本轮
 发现 checkpoint；通用与小红书 runner 均须执行该门禁，且 discovery 提交函数必须再次防御。
 所有正式轮次从首次长期媒体晋升开始，直到 SQLite 提交成功或本轮新文件回滚完成，都持有同一跨进程

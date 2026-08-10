@@ -521,6 +521,50 @@ def test_failed_multi_image_promotion_rolls_back_new_long_term_files(
     assert not list(media_root.rglob("*.*"))
 
 
+def test_promotion_interrupt_rolls_back_prior_new_long_term_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    record = {
+        "content_id": "bili-promotion-interrupt",
+        "content_text": "body",
+        "content_images_detail_status": "detail_observed",
+        "image_urls": [
+            "https://i0.hdslb.com/bfs/article/first.png",
+            "https://i0.hdslb.com/bfs/article/second.png",
+        ],
+    }
+    item, _, _ = staged_selection(project_root, "bilibili", record)
+    media_root = project_root / "temp" / "formal-media"
+    original = mediacrawler_crawl.promote_validated_image
+    calls = 0
+
+    def interrupt_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise KeyboardInterrupt("injected promotion interrupt")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "promote_validated_image",
+        interrupt_second,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="injected promotion interrupt"):
+        mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=media_root,
+            promote=True,
+        )
+
+    assert not list(media_root.rglob("*.*"))
+
+
 def test_sqlite_import_failure_rolls_back_newly_promoted_files(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -941,3 +985,20 @@ def test_long_term_image_promotion_requires_all_completion_gates() -> None:
         no_import=False,
         validation=failed_child,
     ) is False
+
+    runtime_with_lower_priority_failures = (
+        mediacrawler_crawl.apply_formal_completion_gates(
+            {
+                "completion_met": False,
+                "new_target_met": True,
+                "stop_reason": "runtime_failed",
+            },
+            content_validation={"completion_met": False, "new_target_met": True},
+            image_materialization={"complete": False},
+            behavior_validation={"ok": False, "behavior_ok": False, "policy_ok": False},
+            download_images=True,
+        )
+    )
+    assert runtime_with_lower_priority_failures["completion_met"] is False
+    assert runtime_with_lower_priority_failures["new_target_met"] is False
+    assert runtime_with_lower_priority_failures["stop_reason"] == "runtime_failed"
