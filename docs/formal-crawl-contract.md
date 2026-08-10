@@ -190,6 +190,10 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 非重试 HTTP 等终态图片错误同样写 `candidate_deferred`，但保留终态错误码和 `retryable=false`，不
 强行补足 3 次请求；失败 ID 不写正式 JSONL、SQLite 或 seen。若终态候选跨轮持续失败，只能由操作人
 明确批准排除，runner 不得自动把它写入 seen 或伪造来源耗尽。
+若 child 在预算超时或可捕获中断前已经写出 `candidate_deferred`，但来不及写最终
+`adaptive_search_stopped`，根执行器仍必须从事件流聚合 `deferred_image_failures`；正式摘要保留
+`runtime_failed`，checkpoint 强制回到最早 frontier 失败坐标并标记 `batch_complete=false`，不得被
+随后已完成批次的 resume 坐标覆盖。refresh 阶段失败由下一轮顶部刷新自然重试，不把深层前沿改成第 1 页。
 分页证据为 `runtime_failed`、`login_required`、`captcha_detected`，或本轮任一目标 child 未成功完成时，
 运行失败门禁必须覆盖已经达到的数量目标：`completion_met=false`，不得晋升图片或进入 SQLite 事务。
 组合门禁失败时也必须保留这一优先级：已有 `runtime_failed`、`login_required` 或

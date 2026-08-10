@@ -145,6 +145,8 @@ page/offset/cursor 且标记批次不完整。默认数量模式若后续有效�
 否则保存累计摘要并以 `deferred_retry_pending` 等待下轮；该状态优先于候选上限、停滞和来源耗尽。
 显式来源耗尽模式存在 deferred 时不得生成
 `source_exhausted` 完成证据。
+即使预算超时使 child 没来得及写最终停止事件，根执行器也从既有 `candidate_deferred` 事件重建失败
+集合；摘要保持运行不完整，checkpoint 不得越过最早 frontier 图片失败坐标。
 
 小红书独立 runner 不读写通用 checkpoint 表，而是在 `xhs_discovery_checkpoints` 中按目标、账号和
 查询指纹保存 `page + search_id`，在 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID。

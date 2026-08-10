@@ -1508,6 +1508,20 @@ PAGINATION_EVENT_FIELDS = (
     "deferred_image_failures",
 )
 
+DEFERRED_IMAGE_EVENT_FIELDS = (
+    "platform",
+    "identity",
+    "detail",
+    "error_code",
+    "retryable",
+    "attempts",
+    "source_index",
+    "source_page",
+    "source_offset",
+    "source_cursor",
+    "discovery_phase",
+)
+
 DISCOVERY_RESEED_EVENT_FIELDS = (
     "platform",
     "reason",
@@ -1537,6 +1551,39 @@ def stable_douyin_search_id(pagination_evidence: dict[str, Any]) -> str:
     return ""
 
 
+def effective_discovery_checkpoint_event(
+    pagination_evidence: dict[str, Any],
+) -> dict[str, Any] | None:
+    event = pagination_evidence.get("stop_event") or (
+        (pagination_evidence.get("batches") or [None])[-1]
+    )
+    if not isinstance(event, dict):
+        return None
+    event = dict(event)
+    frontier_failures = [
+        failure
+        for failure in pagination_evidence.get("deferred_image_failures") or []
+        if failure.get("discovery_phase") != "refresh"
+    ]
+    if frontier_failures:
+        earliest_failure = frontier_failures[0]
+        for target_key, source_key in (
+            ("resume_page", "source_page"),
+            ("resume_offset", "source_offset"),
+            ("resume_cursor", "source_cursor"),
+        ):
+            if earliest_failure.get(source_key) not in (None, ""):
+                event[target_key] = earliest_failure[source_key]
+        event["batch_complete"] = False
+        event["source_has_more"] = True
+        event["deferred_image_count"] = len(frontier_failures)
+        event["deferred_image_failures"] = frontier_failures
+        if not pagination_evidence.get("stopped"):
+            event["stop_reason"] = "runtime_failed"
+            event["stop_detail"] = "deferred_image_pending_after_incomplete_run"
+    return event
+
+
 def persist_discovery_checkpoint(
     args: argparse.Namespace,
     platform_key: str,
@@ -1546,10 +1593,8 @@ def persist_discovery_checkpoint(
         return {"skipped": True, "reason": "not_scheduler_managed"}
     if args.no_checkpoint_write:
         return {"skipped": True, "reason": "checkpoint_write_disabled"}
-    event = pagination_evidence.get("stop_event") or (
-        (pagination_evidence.get("batches") or [None])[-1]
-    )
-    if not isinstance(event, dict):
+    event = effective_discovery_checkpoint_event(pagination_evidence)
+    if event is None:
         return {"skipped": True, "reason": "no_frontier_batch_evidence"}
     refresh_only = event.get("discovery_phase") == "refresh"
     if refresh_only:
@@ -1679,6 +1724,7 @@ def load_pagination_evidence(state_path: str | Path | None) -> dict[str, Any]:
     batches = []
     stopped_details: dict[str, Any] | None = None
     frontier_reseeds: list[dict[str, Any]] = []
+    deferred_image_failures: list[dict[str, Any]] = []
     for event in payload.get("events") or []:
         if not isinstance(event, dict):
             continue
@@ -1698,6 +1744,14 @@ def load_pagination_evidence(state_path: str | Path | None) -> dict[str, Any]:
                     if key in details
                 }
             )
+        elif event.get("type") == "candidate_deferred":
+            deferred_image_failures.append(
+                {
+                    key: details.get(key)
+                    for key in DEFERRED_IMAGE_EVENT_FIELDS
+                    if key in details
+                }
+            )
 
     latest = stopped_details or (batches[-1] if batches else {})
     return {
@@ -1710,6 +1764,8 @@ def load_pagination_evidence(state_path: str | Path | None) -> dict[str, Any]:
         "stop_detail": str((stopped_details or {}).get("stop_detail") or ""),
         "batches": batches,
         "frontier_reseeds": frontier_reseeds,
+        "deferred_image_count": len(deferred_image_failures),
+        "deferred_image_failures": deferred_image_failures,
         "stop_event": stopped_details,
     }
 
@@ -1872,6 +1928,10 @@ def collect_formal_records(
         and deferred_image_count == 0
     )
     pagination_stop_reason = str(pagination_evidence.get("stop_reason") or "")
+    pagination_incomplete = bool(
+        pagination_evidence.get("available")
+        and not pagination_evidence.get("stopped")
+    )
     pagination_runtime_blocked = bool(
         pagination_stop_reason
         in {"runtime_failed", "login_required", "captcha_detected"}
@@ -1880,11 +1940,13 @@ def collect_formal_records(
         source_exhausted_met
         if completion_mode == "source-exhausted"
         else new_target_met
-    ) and not pagination_runtime_blocked
+    ) and not pagination_runtime_blocked and not pagination_incomplete
     if unverified_douyin_first_page_empty:
         stop_reason = "runtime_failed"
-    elif pagination_runtime_blocked:
+    elif pagination_runtime_blocked or pagination_incomplete:
         stop_reason = pagination_stop_reason
+        if not stop_reason:
+            stop_reason = "runtime_failed"
     elif (
         completion_mode == "target-new-posts"
         and new_target_met
@@ -1925,6 +1987,7 @@ def collect_formal_records(
         "new_target_met": new_target_met,
         "source_exhausted_met": source_exhausted_met,
         "pagination_runtime_blocked": pagination_runtime_blocked,
+        "pagination_incomplete": pagination_incomplete,
         "deferred_image_count": deferred_image_count,
         "completion_met": completion_met,
         "local_images_required": require_local_images,

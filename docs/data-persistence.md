@@ -329,6 +329,8 @@ PY
   失败的整帖暂时跳过，失败 ID 不写候选记忆；child 继续后续候选，checkpoint 回到最早失败坐标。
   若既定完成条件仍未满足，本轮保留累计摘要而不做部分入库。身份、路径、格式、哈希或尺寸错误必须
   修复产物链路，禁止删 manifest 行、改摘要或只写 URL。
+  child 若在写出 `candidate_deferred` 后预算超时、没有最终停止事件，仍按事件流聚合图片失败并把
+  checkpoint 回卷到最早 frontier 失败坐标；不得用后续完整批次覆盖该恢复点。
 - 页面级抓取遇到错误页时，保留 `ctf_captures` 和 artifact，导入层过滤 `web_posts`。
 - 默认库需要清理脏数据时，先复制 `data/trippostcollect.sqlite` 到 `data/backups/`，再执行受控 SQL。
 - 若一次路径连续 2-3 次无法拿到目标字段，应换到平台 API、作者主页、已有 artifact 或调度链路，不要反复扩大同一个失败抓取。

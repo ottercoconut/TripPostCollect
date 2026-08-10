@@ -10,21 +10,21 @@
     },
     {
       "path": "docs/formal-crawl-contract.md",
-      "sha256": "9cc75cb9b663fc51fd0e89cc298c57c5807939023c973574eca5f8ed562b421d",
+      "sha256": "e24cbada387c2baf643d0b34a6cc04882e24fd67a55427f03d8372e6f137b81c",
       "reason": "用户授权更新并重新冻结的五平台正式抓取与正文图片本地化机器契约",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
     },
     {
       "path": "docs/crawl-architecture.md",
-      "sha256": "3443dea2cc9a957064fc40d58c43568ae2d195088c925d3f1764d688ac811cc6",
+      "sha256": "c5c22cbb76e9a3075ee2a41be85e159e16709fe913f63b2cc127171f874f71ce",
       "reason": "用户授权更新并重新冻结的五平台抓取与正文图片本地化架构基线",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
     },
     {
       "path": "docs/data-persistence.md",
-      "sha256": "dbdb05011ce73504b8192c089c79c98276c3b46532117eb6efd893c9024536b6",
+      "sha256": "a4301fbe5881bbc2f79a20f8317e8a39aaafcb989707732f717d9adbd9487db6",
       "reason": "用户授权更新并重新冻结的正文图片本地路径、事务和校验规范",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true

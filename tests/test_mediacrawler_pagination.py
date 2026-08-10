@@ -206,6 +206,86 @@ def test_deferred_image_failures_are_reflected_in_materialization_summary() -> N
     assert len(summary["deferred_image_failures"]) == 2
 
 
+def test_incomplete_run_rewinds_checkpoint_to_earliest_deferred_image(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state.json"
+    write_state(
+        state_path,
+        [
+            {
+                "type": "candidate_deferred",
+                "details": {
+                    "platform": "weibo",
+                    "identity": "failed-post",
+                    "detail": "image_download_failed",
+                    "error_code": "image_source_unavailable",
+                    "retryable": False,
+                    "attempts": 1,
+                    "source_index": 1,
+                    "source_page": 10,
+                    "discovery_phase": "frontier",
+                },
+            },
+            {
+                "type": "adaptive_batch_completed",
+                "details": {
+                    "platform": "weibo",
+                    "candidate_count": 10,
+                    "valid_new_count": 5,
+                    "source_page": 10,
+                    "resume_page": 10,
+                    "batch_complete": False,
+                    "stop_reason": "continue",
+                    "candidate_identities": ["success-10"],
+                },
+            },
+            {
+                "type": "adaptive_batch_completed",
+                "details": {
+                    "platform": "weibo",
+                    "candidate_count": 20,
+                    "valid_new_count": 9,
+                    "source_page": 11,
+                    "resume_page": 12,
+                    "batch_complete": True,
+                    "stop_reason": "continue",
+                    "candidate_identities": ["success-10", "success-11"],
+                },
+            },
+        ],
+    )
+
+    evidence = mediacrawler_crawl.load_pagination_evidence(state_path)
+    checkpoint_event = mediacrawler_crawl.effective_discovery_checkpoint_event(
+        evidence
+    )
+    validation, _ = mediacrawler_crawl.collect_formal_records(
+        {"records": []},
+        candidate_hard_limit=300,
+        target_new_posts=0,
+        db_path=tmp_path / "missing.sqlite",
+        pagination_evidence=evidence,
+        completion_mode="source-exhausted",
+    )
+
+    assert evidence["stopped"] is False
+    assert evidence["deferred_image_count"] == 1
+    assert evidence["deferred_image_failures"][0]["identity"] == "failed-post"
+    assert checkpoint_event is not None
+    assert checkpoint_event["resume_page"] == 10
+    assert checkpoint_event["batch_complete"] is False
+    assert checkpoint_event["source_has_more"] is True
+    assert checkpoint_event["stop_reason"] == "runtime_failed"
+    assert checkpoint_event["stop_detail"] == (
+        "deferred_image_pending_after_incomplete_run"
+    )
+    assert validation["pagination_incomplete"] is True
+    assert validation["deferred_image_count"] == 1
+    assert validation["stop_reason"] == "runtime_failed"
+    assert validation["completion_met"] is False
+
+
 def test_source_exhaustion_without_stop_event_never_falls_back_to_target_met(
     tmp_path: Path,
 ) -> None:

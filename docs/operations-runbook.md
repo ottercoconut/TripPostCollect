@@ -521,7 +521,7 @@ child 的 `image_materialization.manifest_evidence` 所指 manifest → SQLite �
 | 信号 | 分类 | 处理 |
 |---|---|---|
 | `image_download_retryable` | 单图已在同一 child 内完成最多 3 次指数退避重试，平台会话、临时网络或响应仍失败 | 核对 manifest `attempts=3`、`candidate_deferred` 与平台重试日志；暂时跳过整帖并继续后续候选，失败 ID 不写已处理记忆，checkpoint 回到最早失败坐标；若后续候选仍未满足完成条件，整轮保持 `deferred_retry_pending` 并从累计摘要恢复 |
-| `deferred_retry_pending` | 本轮存在至少一个已留证但尚未成功的图片候选 | 不得解释为 `source_exhausted`；读取 `deferred_image_failures`，从 runner 新开一轮按 checkpoint 重试。永久失败需另行取得排除授权，不能自动写 seen |
+| `deferred_retry_pending` | 本轮存在至少一个已留证但尚未成功的图片候选 | 不得解释为 `source_exhausted`；读取 `deferred_image_failures`，从 runner 新开一轮按 checkpoint 重试。即使预算超时导致没有最终停止事件，也必须从 `candidate_deferred` 重建失败集合并回卷最早 frontier 坐标。永久失败需另行取得排除授权，不能自动写 seen |
 | `missing_image_manifest` / `image_manifest_count_mismatch` | staging/manifest 不完整 | 停止入库，核对 child 实际 artifact 和平台 store；禁止手工补空 manifest |
 | `image_manifest_identity_mismatch` | URL、平台、帖子、顺序、来源字段或稳定键不一致 | 视为代码/产物版本错误，修复后重跑整帖 |
 | `image_path_escape` / `image_file_missing` | 路径边界或文件缺失 | 停止晋升，检查 symlink、清理程序和 artifact 完整性 |
