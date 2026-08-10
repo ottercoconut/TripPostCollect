@@ -39,7 +39,9 @@
 再原子写入本轮 `<platform_artifact>/data/weibo/images/<weibo_id>/<index>.<real_ext>`，并更新
 `<platform_artifact>/data/weibo/image_manifest.jsonl`。空响应或超时按单图最多 3 次、1–2 秒随机基数
 指数退避重试；日志逐次记录重试，成功或最终失败的 manifest 都记录实际 `attempts`。三次仍失败才使用
-`image_download_retryable`，当前批次停止且不推进安全前沿，不允许只保留成功子集。
+`image_download_retryable`，写 `candidate_deferred` 后暂时跳过整帖并继续本页后续候选。失败 ID 不写
+持久候选记忆，checkpoint 回到最早失败页；该帖不允许只保留成功图片子集，后续完整帖子继续参与
+本轮既定完成条件。
 
 根执行器重新按 `image_list` 顺序核对 manifest 身份、SHA/MIME/尺寸和 staging 文件。正式 runner
 固定开启正文图下载并晋升到 `data/media/weibo/...`，随后在帖子与图片同一 SQLite 事务保存 URL、

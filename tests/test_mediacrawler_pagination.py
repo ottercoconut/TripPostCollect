@@ -79,6 +79,55 @@ def test_unfinished_pagination_is_not_reported_as_source_exhausted(tmp_path: Pat
     assert validation["stop_reason"] == "runtime_failed"
 
 
+def test_deferred_image_candidate_blocks_source_exhaustion_completion(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state.json"
+    write_state(
+        state_path,
+        [
+            {
+                "type": "adaptive_search_stopped",
+                "details": {
+                    "platform": "xhs",
+                    "candidate_count": 1,
+                    "valid_new_count": 0,
+                    "stop_reason": "deferred_retry_pending",
+                    "stop_detail": "retryable_candidate_failures",
+                    "resume_page": 2,
+                    "resume_cursor": "search-id",
+                    "source_has_more": True,
+                    "batch_complete": False,
+                    "deferred_retryable_count": 1,
+                    "deferred_retryable_failures": [
+                        {
+                            "identity": "note-1",
+                            "error_code": "image_download_retryable",
+                            "attempts": 3,
+                        }
+                    ],
+                    "candidate_identities": [],
+                },
+            }
+        ],
+    )
+
+    evidence = mediacrawler_crawl.load_pagination_evidence(state_path)
+    validation, _ = mediacrawler_crawl.collect_formal_records(
+        {"records": []},
+        candidate_hard_limit=10,
+        target_new_posts=0,
+        db_path=tmp_path / "missing.sqlite",
+        pagination_evidence=evidence,
+        completion_mode="source-exhausted",
+    )
+
+    assert validation["source_exhausted_met"] is False
+    assert validation["completion_met"] is False
+    assert validation["stop_reason"] == "deferred_retry_pending"
+    assert evidence["stop_event"]["deferred_retryable_count"] == 1
+
+
 def test_source_exhaustion_without_stop_event_never_falls_back_to_target_met(
     tmp_path: Path,
 ) -> None:

@@ -308,7 +308,7 @@ def test_image_failure_keeps_page_and_candidate_unseen(monkeypatch, tmp_path: Pa
     result = mediacrawler_crawl.run_bilibili_article_search(run_args(db_path), tmp_path / "batch")
 
     assert result["ok"] is False
-    assert result["run"]["returncode"] == 1
+    assert result["run"]["returncode"] == 0
     assert result["image_materialization"]["downloaded_images"] == 0
     assert result["image_materialization"]["retryable_failures"] == 1
     manifest_path = Path(result["image_materialization"]["manifest_paths"][0])
@@ -319,13 +319,79 @@ def test_image_failure_keeps_page_and_candidate_unseen(monkeypatch, tmp_path: Pa
 
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "runtime_failed"
-    assert stopped["details"]["stop_detail"] == "bilibili_article_image_failed"
+    deferred = [event for event in events if event["type"] == "candidate_deferred"]
+    assert deferred[0]["details"]["identity"] == "123"
+    assert deferred[0]["details"]["attempts"] == 3
+    assert stopped["details"]["stop_reason"] == "deferred_retry_pending"
+    assert stopped["details"]["stop_detail"] == "retryable_candidate_failures"
     assert stopped["details"]["resume_page"] == 1
     assert stopped["details"]["batch_complete"] is False
-    assert stopped["details"]["failed_candidate_id"] == "123"
     assert stopped["details"]["candidate_identities"] == []
-    assert stopped["details"]["image_error_code"] == "image_download_retryable"
+    assert stopped["details"]["deferred_retryable_count"] == 1
+
+
+def test_image_failure_does_not_block_later_bilibili_candidate(
+    monkeypatch, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "posts.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE web_posts (platform_key TEXT, platform_post_id TEXT, canonical_url TEXT)"
+        )
+    state_path = tmp_path / "state.json"
+    mediacrawler_crawl.FrozenExecutionState.create(
+        state_path,
+        run_id="run-continue",
+        job_key="bili-image-continue",
+        site_key="bilibili",
+        job_kind="mediacrawler_search",
+        plan={},
+        frozen_inputs=[],
+    )
+    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
+    install_successful_run_mocks(monkeypatch)
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_article_page",
+        lambda keyword, page, **kwargs: (
+            [search_item("123"), search_item("124")] if page == 1 else []
+        ),
+    )
+
+    def selective_image(source_url: str, post_id: str, cookie_header: str):
+        if post_id == "123":
+            raise mediacrawler_crawl.RemoteImageFetchError(
+                "HTTP 503",
+                http_status=503,
+                retryable=True,
+            )
+        return mediacrawler_crawl.RemoteImagePreview(
+            content=png_bytes(),
+            media_type="image/png",
+            final_url=source_url,
+            http_status=200,
+        )
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_image_bytes",
+        selective_image,
+    )
+    result = mediacrawler_crawl.run_bilibili_article_search(
+        run_args(db_path), tmp_path / "batch"
+    )
+
+    assert result["ok"] is True
+    assert result["image_materialization"]["complete"] is True
+    assert result["image_materialization"]["deferred_retryable_count"] == 1
+    content_jsonl = next((tmp_path / "batch").rglob("search_contents_*.jsonl"))
+    rows = [json.loads(line) for line in content_jsonl.read_text().splitlines()]
+    assert [row["content_id"] for row in rows] == ["124"]
+    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
+    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
+    assert stopped["details"]["stop_reason"] == "target_new_met"
+    assert stopped["details"]["resume_page"] == 1
+    assert stopped["details"]["candidate_identities"] == ["124"]
 
 
 def test_known_post_id_is_skipped_before_detail_or_image_requests(monkeypatch, tmp_path: Path) -> None:

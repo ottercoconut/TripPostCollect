@@ -93,8 +93,9 @@
 下载，整帖检查后原子写入 `<platform_artifact>/data/douyin/images/<aweme_id>/<index>.<real_ext>` 和
 `<platform_artifact>/data/douyin/image_manifest.jsonl`。空响应或超时按单图最多 3 次、1–2 秒随机基数
 指数退避重试，日志和最终 manifest `attempts` 保留实际尝试证据。重试耗尽后才写失败 manifest 并以
-`image_download_failed` 停止当前批次；可恢复项使用 `image_download_retryable`，不得推进
-page/offset/search ID 或写入已处理候选。
+`image_download_failed` 留证；可恢复项使用 `image_download_retryable` 和 `candidate_deferred`，暂时
+跳过整帖并继续后续候选。失败 ID 不写已处理候选，最终 checkpoint 恢复最早失败的
+page/offset/search ID，不能把后续扫描解释为已跨越该安全前沿。
 
 根执行器按 `note_download_url` 重建候选并复验 manifest、SHA/MIME/尺寸。正式运行晋升到
 `data/media/douyin/...` 后才在同一 SQLite 事务写帖子与 `web_post_images`；诊断模式不晋升。

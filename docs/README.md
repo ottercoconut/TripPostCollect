@@ -110,7 +110,10 @@ CLI 不传 `--completion-mode` 时仍默认按配置的 `target_new_posts`、`ca
 验证身份、路径、SHA、真实 MIME、尺寸和解码，正式模式才原子晋升到 `data/media`，并把 URL、
 `local_path` 和字节证据与帖子放在同一 SQLite 事务中。头像、作者主页、封面、搜索预览、视频、
 音乐和知乎公式图在下载前自动排除；作者头像仅可保留 `author_avatar` URL 参考，不下载也不参与
-正文图计数。任何正文图失败都会阻止正式完成，不能降级为只存 URL。
+正文图计数。单帖正文图在有限重试后仍失败时，该候选写失败 manifest 和
+`candidate_deferred` 证据后暂时跳过；失败帖不入库、不进入已处理候选记忆，checkpoint 保留最早
+失败坐标，后续候选继续。只有后续候选使既定完成条件成立时，图片完整的帖子才按正常事务入库；
+否则整轮保持 `deferred_retry_pending` 并保留累计摘要，不能降级为只存 URL，也不能误报来源耗尽。
 
 正常默认模式下，小红书的实际候选量从 0 开始按页增长，只有通过详情前去重的未知候选才占预算；达到
 `target_new_posts` 后立即停止，不会为了配置的 `candidate_hard_limit` 继续抓满。后者只是单次
@@ -147,7 +150,8 @@ child 的安全上限。永久提高目标时应在 `config/xhs_targets.json` �
 `has_more=false` 且页面明确显示无结果，才记录 `verified_empty_first_page`。
 
 五个平台都会在 child 摘要形成后持久记忆视频、有决定性证据的字段无效候选和有效候选；可恢复
-请求失败不属于“已完成处理”。通用平台写
+请求或图片失败不属于“已完成处理”。同一 child 会暂时记住该失败 ID 以免本轮反复请求，跨轮不写
+候选记忆并从最早失败坐标恢复。通用平台写
 `crawl_discovery_seen_candidates`，按 job 与查询指纹隔离；小红书写独立表并额外按人工指定账号隔离。
 正常运行一律让 runner 自动生成恢复参数；人工恢复仅按
 [运行手册](operations-runbook.md) 的限制处理。
