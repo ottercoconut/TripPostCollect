@@ -498,7 +498,9 @@ child 的 `image_materialization.manifest_evidence` 所指 manifest → SQLite �
   `--media-root`，不包含 `--get-media`；
 - `image_materialization.required=true`、`promotion_required=true`、`complete=true`，并满足
   `candidate_posts == complete_posts`、
-  `expected_images == downloaded_images == validated_images == promoted_images + reused_images`；
+  `expected_images == downloaded_images == validated_images`、
+  `unique_images + sha256_duplicate_images == expected_images`、
+  `promoted_images + reused_images == unique_images`；
 - `retryable_failures=0`、`terminal_failures=0`、`failures=[]`，manifest 列表、单文件 SHA 和聚合
   `manifest_sha256` 均被 `artifacts_verified` 复验；
 - SQLite 中作者粉丝量、发布时间和图片关系符合平台 profile；每张正文图具有连续 index、非空

@@ -65,7 +65,8 @@
 ```text
 candidate_posts == complete_posts
 expected_images == downloaded_images == validated_images
-promoted_images + reused_images == expected_images
+unique_images + sha256_duplicate_images == expected_images
+promoted_images + reused_images == unique_images
 retryable_failures == terminal_failures == 0
 failures == []
 ```
