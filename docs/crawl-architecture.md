@@ -136,6 +136,13 @@ runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并�
 详情、作者与媒体处理前跳过。详情请求、空响应或解析等可恢复失败必须记录
 `runtime_failed`，保留原页/游标，且失败 ID 不进入 seen 集合。
 
+正文图片失败使用候选级 deferred 分支：单图有限重试耗尽后，平台先原子追加失败 manifest，再写
+`candidate_deferred`，把该 ID 放入仅当前 child 有效的临时集合并继续后续候选。失败帖不进入正式
+JSONL、SQLite 或跨轮 seen；停止摘要汇总 `deferred_retryable_failures`，checkpoint 回到最早失败的
+page/offset/cursor 且标记批次不完整。默认数量模式若后续有效候选达到目标，可正常导入有效集合；
+否则保存累计摘要并以 `deferred_retry_pending` 等待下轮。显式来源耗尽模式存在 deferred 时不得生成
+`source_exhausted` 完成证据。
+
 小红书独立 runner 不读写通用 checkpoint 表，而是在 `xhs_discovery_checkpoints` 中按目标、账号和
 查询指纹保存 `page + search_id`，在 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID。
 它在冻结时同时纳入累计摘要及其 JSONL，child 摘要形成后才由 `xhs_runner.py` 在同一事务提交

@@ -323,9 +323,11 @@ PY
   不要临时改抓取脚本绕过登录判断或复用其他账号 profile。
 - 字段缺失时，先检查 JSONL 顶层字段、`raw_sample_json` 和平台字段覆盖表；确认来源字段存在但没入库，再改导入映射。
 - 来源字段根本不存在时，先用浏览器或 API 定位字段来源，再补抓取器；不要在入库层造数。
-- 图片失败先读 `summary.json.image_materialization.failures` 和 manifest 对应行，再检查 staging 文件、
-  平台日志尾部及登录态。可恢复下载失败使用原 checkpoint 重试；身份、路径、格式、哈希或尺寸错误
-  必须修复产物链路，禁止删 manifest 行、改摘要或只写 URL。
+- 图片失败先读 `formal_validation.pagination_evidence.stop_event.deferred_retryable_failures`、
+  `candidate_deferred` 和 manifest 对应行，再检查 staging 文件、平台日志尾部及登录态。有限重试仍
+  失败的整帖暂时跳过，失败 ID 不写候选记忆；child 继续后续候选，checkpoint 回到最早失败坐标。
+  若既定完成条件仍未满足，本轮保留累计摘要而不做部分入库。身份、路径、格式、哈希或尺寸错误必须
+  修复产物链路，禁止删 manifest 行、改摘要或只写 URL。
 - 页面级抓取遇到错误页时，保留 `ctf_captures` 和 artifact，导入层过滤 `web_posts`。
 - 默认库需要清理脏数据时，先复制 `data/trippostcollect.sqlite` 到 `data/backups/`，再执行受控 SQL。
 - 若一次路径连续 2-3 次无法拿到目标字段，应换到平台 API、作者主页、已有 artifact 或调度链路，不要反复扩大同一个失败抓取。
@@ -338,7 +340,10 @@ PY
 `image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份，正式运行再晋升到
 `data/media` 并注入统一入库映射。平台显式投影后的全部 manifest 候选均须通过下载与字节复验；
 知乎已知 `zhimg` 尺寸 URL 变体在投影时按资源路径合并，不重复生成 manifest。下载后再仅在同帖内
-按 SHA-256 保留首次来源并记录重复来源证据。任何图片失败都使整帖和正式完成门禁失败。
+按 SHA-256 保留首次来源并记录重复来源证据。任何图片失败都使该整帖失去正式资格，但平台 child
+可在写完 manifest 与 `candidate_deferred` 后继续其他候选。若后续候选达到默认新增目标，只导入
+图片完整的正式有效集合；未达到目标或处于显式来源耗尽模式时，存在 deferred 候选会使本轮保持
+`deferred_retry_pending`，不得入库或宣称来源耗尽。
 微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；`isLongText=true`
 必须用移动详情替换搜索截断文本，失败时不写 JSONL。小红书搜索会补拉
 作者主页指标。知乎回答/文章的原始时间、正文图片和作者粉丝会在清洗前保存并归一化；搜索响应

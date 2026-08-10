@@ -173,6 +173,15 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 视觉上相同但缩放、转码或重新编码后哈希不同的文件，也不跨帖子合并图片关系。任一图片缺失、失败或
 不一致时整帖不得入库；先写 URL、以后再补本地路径不满足本契约。
 
+平台 child 对单张正文图的空响应或超时最多执行 3 次有限指数退避重试。仍失败时必须先把失败行写入
+manifest，再写 `candidate_deferred` 事件，至少包含平台、候选 ID、错误码、实际尝试次数、图片来源
+序号和当前 page/offset/cursor。该整帖不得写入正式 JSONL、数据库或跨轮候选记忆；同一 child 内可
+把该 ID 放入临时 deferred 集合以避免重复请求，并继续处理后续候选。最终停止事件必须携带完整
+`deferred_retryable_failures`，恢复坐标回到本轮最早失败位置且 `batch_complete=false`。后续候选若
+独立达到 `target-new-posts` 既定目标，可以只用图片完整的正式有效集合完成和入库；否则本轮保持
+`deferred_retry_pending` 并保留累计摘要，不做部分入库。`source-exhausted` 模式只要仍有 deferred
+候选，就必须保持 `source_exhausted_met=false`，不得把扫描到末尾解释为来源耗尽完成。
+
 五平台正文来源是正式字段契约，不是调试信息：
 
 | 平台 | 受信任 `content_detail_source` | 正文字段 | 不可降级的来源 |
@@ -270,6 +279,9 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 - `image_materialization_incomplete`：正文图 manifest、staging 字节或晋升校验不完整。可恢复下载
   失败保留当前安全前沿，不把该候选写入已处理记忆；身份、格式、哈希和路径边界错误必须先修复
   代码或产物，不能降级为 URL-only。
+- `deferred_retry_pending`：至少一个候选的正文图已完成有限重试并留证，但整帖尚未满足图片门禁。
+  child 可以继续后续候选，checkpoint 必须回到最早 deferred 坐标，失败 ID 不写 seen；该状态在
+  显式来源耗尽模式下不能完成，在默认数量模式未达到目标时也不能完成。
 
 默认 `target-new-posts` 模式只有 `target_new_met` 可以汇报完成；显式 `source-exhausted` 模式只有
 `source_exhausted` 且 `source_exhausted_met=true` 可以汇报完成。其他停止状态均不能完成。固定 URL
@@ -302,8 +314,9 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 `crawl_discovery_seen_candidates` 已完成处理 ID 和当前 child 已完成 ID；小红书读取独立的
 `xhs_discovery_seen_candidates`。五个平台的视频、已由决定性权威响应证明的字段无效项和有效
 候选，都在 child 摘要形成后获得跨轮记忆。详情请求、空响应、解析或下载等可恢复失败不是
-“已完成处理”；该 ID 不写候选记忆，当前批次不完整，恢复位置保持在原请求页/游标。进程在摘要前
-崩溃的候选也不会被提前标记。两套表的作用域不同：通用平台按 job 与查询
+“已完成处理”；该 ID 不写候选记忆。详情失败停止当前安全批次；正文图下载最终失败写
+`candidate_deferred` 后可继续同一 child 的后续候选，但最终批次仍不完整，恢复位置取最早失败的
+原请求页/游标。进程在摘要前崩溃的候选也不会被提前标记。两套表的作用域不同：通用平台按 job 与查询
 指纹隔离，小红书还按人工指定账号隔离，不能跨账号共享未入库活动。
 
 “字段无效”必须已有决定性来源证据。B站 article、微博长文、小红书笔记和知乎 answer/article
@@ -375,5 +388,7 @@ manifest schema v1 的稳定校验错误包括：`missing_image_manifest`、
 `image_hash_mismatch`、`image_existing_conflict` 和 `image_promotion_conflict`。缺少统一摘要使用
 `image_materialization_missing`，不完整摘要使用 `image_materialization_incomplete`；平台批次停止
 细节使用 `image_download_failed`，下载失败行使用稳定的 `image_download_retryable` 或平台返回的
-终态错误码。晋升/数据库文件一致性错误由 `failures[].code/message`、runner 阶段失败原因和报告共同保留。
+终态错误码。候选级暂缓使用 `candidate_deferred` 事件，存在未清空暂缓项且本轮未满足数量目标时
+停止原因为 `deferred_retry_pending`；事件和停止摘要必须保存 `deferred_retryable_count` 与
+`deferred_retryable_failures`。晋升/数据库文件一致性错误由 `failures[].code/message`、runner 阶段失败原因和报告共同保留。
 操作人不得编辑 manifest、摘要或冻结状态把错误补签为成功。
