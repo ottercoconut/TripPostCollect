@@ -89,6 +89,7 @@ from trippostcollect.core.paths import (
     ensure_dir,
     ensure_parent,
 )
+from trippostcollect.core.scope import require_qingdao_topic_keyword
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.registry import get_site
 from trippostcollect.scheduler.discovery import (
@@ -1238,7 +1239,10 @@ def row_for_record(
     image_items = image_items_for_record(platform_key, record)
     if materialized_images is not None:
         image_items = inject_materialized_images(image_items, materialized_images)
-    keyword_value = str(record.get("source_keyword") or keyword or "")
+    keyword_value = require_qingdao_topic_keyword(
+        record.get("source_keyword") or keyword,
+        field_name="record source keyword",
+    )
     metrics = {
         "liked_count": parse_int(first_value(record, "liked_count", "voteup_count")),
         "favorites_count": parse_int(first_value(record, "collected_count", "video_favorite_count")),
@@ -3823,6 +3827,10 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
 
 def main() -> int:
     args = parse_args()
+    try:
+        args.keyword = require_qingdao_topic_keyword(args.keyword)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if (
         args.target_new_posts < 0
         or args.candidate_hard_limit <= 0

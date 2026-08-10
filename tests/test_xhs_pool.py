@@ -663,6 +663,35 @@ def test_xhs_target_rejects_removed_download_images_option(tmp_path: Path) -> No
         load_target("test", target_path)
 
 
+def test_xhs_target_rejects_keyword_outside_qingdao_scope(tmp_path: Path) -> None:
+    target_path = tmp_path / "targets.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "targets": [
+                    {
+                        "target_key": "test",
+                        "keyword": "济南旅游",
+                        "target_new_posts": 1,
+                        "candidate_hard_limit": 1,
+                        "max_stagnant_batches": 1,
+                        "top_refresh_max_pages": 0,
+                        "timeout_seconds": 30,
+                        "required_fields_profile": "image_post_with_followers_v1",
+                        "followers_policy": "required",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(XhsConfigError, match="must start with one of: 青岛、崂山"):
+        load_target("test", target_path)
+
+
 def test_failed_child_summary_remains_available_for_reporting(tmp_path: Path) -> None:
     path = tmp_path / "summary.json"
     path.write_text(

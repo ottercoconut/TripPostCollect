@@ -79,7 +79,8 @@ python scripts/xhs_accounts.py list
 
 - 操作人已经指定账号，账号状态为 `active`，且没有活动租约；
 - 账号目录与其他账号隔离，`storage_state.enc` 存在且可解密；
-- `target_key` 存在，关键词、有效新增目标、候选硬上限、顶部刷新页数、停滞批次和超时符合本轮要求；
+- `target_key` 存在，关键词以“青岛”或“崂山”开头，有效新增目标、候选硬上限、顶部刷新页数、
+  停滞批次和超时符合本轮要求；
 - `behavior_profile` 为 `xhs_guarded`，有头浏览器已启用；
 - `lease_seconds >= timeout_seconds + 300`；
 - 是否执行评论区访问或点赞已经由操作人明确决定；未明确时必须使用默认 `none`；

@@ -51,8 +51,8 @@ SITES: dict[str, WebSite] = {
     "weibo": WebSite(
         key="weibo",
         name="Weibo mobile",
-        default_url="https://m.weibo.cn/search?containerid=100103type%3D1%26q%3D%E6%B5%8E%E5%8D%97%E6%97%85%E6%B8%B8",
-        login_url="https://passport.weibo.cn/signin/login?entry=mweibo&r=https%3A%2F%2Fm.weibo.cn%2Fsearch%3Fcontainerid%3D100103type%253D1%2526q%253D%25E6%25B5%258E%25E5%258D%2597%25E6%2597%2585%25E6%25B8%25B8",
+        default_url="https://m.weibo.cn/search?containerid=100103type%3D1%26q%3D%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",
+        login_url="https://passport.weibo.cn/signin/login?entry=mweibo&r=https%3A%2F%2Fm.weibo.cn%2Fsearch%3Fcontainerid%3D100103type%253D1%2526q%253D%25E9%259D%2592%25E5%25B2%259B%25E6%2597%2585%25E6%25B8%25B8",
         cookie_domains=("weibo.cn", "weibo.com", "sina.com.cn"),
         login_hosts=("passport.weibo.cn", "passport.weibo.com"),
         recommended_mode="dynamic",
@@ -69,7 +69,7 @@ SITES: dict[str, WebSite] = {
     "xhs": WebSite(
         key="xhs",
         name="Xiaohongshu",
-        default_url="https://www.xiaohongshu.com/search_result?keyword=%E6%B5%8E%E5%8D%97%E6%97%85%E6%B8%B8",
+        default_url="https://www.xiaohongshu.com/search_result?keyword=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",
         login_url="https://www.xiaohongshu.com",
         cookie_domains=("xiaohongshu.com",),
         login_hosts=("www.xiaohongshu.com",),
@@ -88,7 +88,7 @@ SITES: dict[str, WebSite] = {
     "bilibili": WebSite(
         key="bilibili",
         name="Bilibili",
-        default_url="https://www.bilibili.com/opus/917192602541883449",
+        default_url="https://search.bilibili.com/article?keyword=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",
         login_url="https://passport.bilibili.com/login",
         cookie_domains=("bilibili.com",),
         login_hosts=("passport.bilibili.com",),
@@ -107,7 +107,7 @@ SITES: dict[str, WebSite] = {
     "douyin": WebSite(
         key="douyin",
         name="Douyin",
-        default_url="https://www.douyin.com/note/7628472839242454346",
+        default_url="https://www.douyin.com/search/%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",
         login_url="https://www.douyin.com/",
         cookie_domains=("douyin.com", "iesdouyin.com", "amemv.com"),
         login_hosts=("sso.douyin.com", "login.douyin.com"),
@@ -127,8 +127,8 @@ SITES: dict[str, WebSite] = {
     "zhihu": WebSite(
         key="zhihu",
         name="Zhihu",
-        default_url="https://www.zhihu.com/question/538549565",
-        login_url="https://www.zhihu.com/signin?next=%2Fquestion%2F538549565",
+        default_url="https://www.zhihu.com/search?q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8&type=content",
+        login_url="https://www.zhihu.com/signin?next=%2Fsearch%3Fq%3D%25E9%259D%2592%25E5%25B2%259B%25E6%2597%2585%25E6%25B8%25B8%26type%3Dcontent",
         cookie_domains=("zhihu.com",),
         login_hosts=(),
         recommended_mode="stealth",

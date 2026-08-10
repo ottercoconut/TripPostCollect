@@ -265,7 +265,8 @@ page/search ID；同时清空 `last_summary_path`，把 `campaign_candidate_coun
 ### 一次性配置与临时候选预算
 
 新关键词、临时数量、临时平台组合或临时候选扩容使用 `config/one_off/` 下的独立配置，不直接编辑
-`config/crawl_targets.json`。只有用户明确要求改变长期调度标准时才修改主配置。
+`config/crawl_targets.json`。新关键词仍必须以“青岛”或“崂山”开头；配置同步会在平台访问前拒绝
+其他城市或无主题关键词。只有用户明确要求改变长期调度标准时才修改主配置。
 
 通用 one-off 配置必须从当前主配置完整派生：保留 `defaults` 和所有长期 job 原值，再新增一次性
 job，或只在派生副本中调整目标 job。不能只写一次性 job，否则调度同步会禁用未出现在该文件中的

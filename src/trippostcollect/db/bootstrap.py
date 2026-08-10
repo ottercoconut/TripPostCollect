@@ -19,6 +19,7 @@ from trippostcollect.core.paths import (
     XHS_CONTROL_SCHEMA,
     ensure_parent,
 )
+from trippostcollect.core.scope import require_qingdao_topic_keyword
 from trippostcollect.platforms.registry import SITES
 
 
@@ -467,6 +468,10 @@ def sync_config_jobs(conn: sqlite3.Connection, config: dict[str, Any]) -> int:
     count = 0
     for item in jobs:
         job_params = item.get("params") or {}
+        require_qingdao_topic_keyword(
+            job_params.get("keyword"),
+            field_name=f"jobs[{item.get('job_key', '?')}].params.keyword",
+        )
         next_run_at = item.get("next_run_at") or iso()
         row = {
             "job_key": item["job_key"],
