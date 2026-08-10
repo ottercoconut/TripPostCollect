@@ -80,6 +80,18 @@ def test_false_captcha_marker_in_stdout_json_does_not_self_match() -> None:
     assert result["failure_type"] == "tool_error"
 
 
+def test_scalar_record_count_does_not_crash_child_classification() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stdout=json.dumps({"keyword": "青岛旅游", "records": 136}),
+        stderr="BilibiliArticleDetailError: no parseable body",
+    )
+
+    assert result["status"] == "retry_wait"
+    assert result["failure_type"] == "tool_error"
+    assert result["retryable"] is True
+
+
 def test_true_captcha_marker_in_stdout_json_is_detected() -> None:
     result = failure_classifier.classify_attempt(
         exit_code=1,
