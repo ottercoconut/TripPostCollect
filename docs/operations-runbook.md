@@ -523,9 +523,9 @@ child 的 `image_materialization.manifest_evidence` 所指 manifest → SQLite �
 | `missing_image_manifest` / `image_manifest_count_mismatch` | staging/manifest 不完整 | 停止入库，核对 child 实际 artifact 和平台 store；禁止手工补空 manifest |
 | `image_manifest_identity_mismatch` | URL、平台、帖子、顺序、来源字段或稳定键不一致 | 视为代码/产物版本错误，修复后重跑整帖 |
 | `image_path_escape` / `image_file_missing` | 路径边界或文件缺失 | 停止晋升，检查 symlink、清理程序和 artifact 完整性 |
-| `image_non_raster_response` / `image_decode_failed` | 返回 HTML/JSON/视频或损坏图片 | 检查登录/验证和 URL 选择；不得改后缀伪装成图片 |
-| `image_source_unavailable` | 明确的非重试 HTTP 终态（如 404） | 暂存整帖并继续同平台；保留详情与 CDN 证据，最终逐项恢复或由用户批准排除 |
-| `image_too_large` | 单文件或解码像素超过安全上限 | 作为终态失败报告；如需改上限必须走代码、测试和治理变更 |
+| `image_non_raster_response` / `image_decode_failed` | 返回 HTML/JSON/视频或损坏图片 | 写失败 manifest 后以 `runtime_failed` 停在当前来源坐标；检查登录/验证和 URL 选择，不得写 `candidate_deferred` 或改后缀伪装成图片 |
+| `image_source_unavailable` | 明确的非重试 HTTP 终态（如 404） | 写失败 manifest 后停止 child、保留当前前沿与详情/CDN 证据；修复来源或由用户批准排除，不得自动继续或写 seen |
+| `image_too_large` | 单文件或解码像素超过安全上限 | 写失败 manifest 后停止 child；如需改上限必须走代码、测试和治理变更 |
 | `image_hash_mismatch` / `image_manifest_metadata_mismatch` | staging 字节与 manifest 不一致 | 停止并保留证据，排查写入竞态或文件篡改 |
 | `image_existing_conflict` / `image_promotion_conflict` | staging 整帖目录或长期内容寻址目标已有不同字节 | 停止覆盖，保留两侧证据并排查稳定键、旧文件或并发写入 |
 | `image_materialization_missing` / `image_materialization_incomplete` | child 摘要缺少统一图片结果或完成等式失败 | 视为执行器/版本契约错误，不允许 runner 降级完成 |

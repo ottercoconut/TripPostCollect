@@ -337,11 +337,14 @@ PY
 微博、抖音、知乎等通用结构化结果由 `scripts/mediacrawler_crawl.py` 调用 MediaCrawler 后
 导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定账号申请互斥租约并解密会话后调用同一底层执行器。
 五个平台都在当前登录/签名会话中把权威正文图下载到本轮 staging，原子生成 schema v1
-`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份，正式运行再晋升到
-`data/media` 并注入统一入库映射。平台显式投影后的全部 manifest 候选均须通过下载与字节复验；
+`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。只有数量或来源耗尽、
+字段、行为、策略和 staging 图片门禁全部通过，正式运行才晋升到 `data/media` 并注入统一入库映射；
+未完成轮次不得留下长期媒体文件。平台显式投影后的全部 manifest 候选均须通过下载与字节复验；
 知乎已知 `zhimg` 尺寸 URL 变体在投影时按资源路径合并，不重复生成 manifest。下载后再仅在同帖内
-按 SHA-256 保留首次来源并记录重复来源证据。任何图片失败都使该整帖失去正式资格，但平台 child
-可在写完 manifest 与 `candidate_deferred` 后继续其他候选。若后续候选达到默认新增目标，只导入
+按 SHA-256 保留首次来源并记录重复来源证据。任何图片失败都使该整帖失去正式资格。只有有限重试
+耗尽后的 `image_download_retryable` 可在写完 manifest 与 `candidate_deferred` 后继续其他候选；
+格式、解码、大小或明确非重试 HTTP 等终态错误写完失败 manifest 后停止 child 并保留当前前沿。
+若后续候选达到默认新增目标，只导入
 图片完整的正式有效集合；未达到目标或处于显式来源耗尽模式时，存在 deferred 候选会使本轮保持
 `deferred_retry_pending`，不得入库或宣称来源耗尽。
 微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；`isLongText=true`
@@ -584,7 +587,8 @@ MediaCrawler 入库采用去重更新：
 - 更新帖子时在同一 SQLite savepoint 删除并重建该帖子的 `web_post_images` 行；匹配到相同稳定
   资产或源顺序的既有有效文件时可以保留其本地证据，不能因为新 JSONL 只有 URL 而清空路径。
 - 主表更新、图片关系重建任一步异常都会回滚 savepoint，不留下“帖子已更新、图片未完成”的
-  半提交状态。文件晋升采用内容寻址和原子替换；数据库失败后留下的同 SHA 文件可在重试时幂等复用。
+  半提交状态。文件晋升采用内容寻址和原子替换，并且只在所有完成门禁通过后开始；数据库阶段失败
+  后留下的同 SHA 文件可在重试时幂等复用。
 - 原始 JSONL 行完整保留在 `raw_sample_json`，便于后续清洗补字段。
 
 ## B站历史摘要回填

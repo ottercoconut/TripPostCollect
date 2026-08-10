@@ -173,7 +173,8 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 视觉上相同但缩放、转码或重新编码后哈希不同的文件，也不跨帖子合并图片关系。任一图片缺失、失败或
 不一致时整帖不得入库；先写 URL、以后再补本地路径不满足本契约。
 
-平台 child 对单张正文图的空响应或超时最多执行 3 次有限指数退避重试。仍失败时必须先把失败行写入
+平台 child 对单张正文图的空响应、超时或临时请求错误最多执行 3 次有限指数退避重试。仍失败且
+错误码为唯一可暂缓码 `image_download_retryable` 时，必须先把失败行写入
 manifest，再写 `candidate_deferred` 事件，至少包含平台、候选 ID、错误码、实际尝试次数、图片来源
 序号和当前 page/offset/cursor。该整帖不得写入正式 JSONL、数据库或跨轮候选记忆；同一 child 内可
 把该 ID 放入临时 deferred 集合以避免重复请求，并继续处理后续候选。最终停止事件必须携带完整
@@ -181,6 +182,10 @@ manifest，再写 `candidate_deferred` 事件，至少包含平台、候选 ID�
 独立达到 `target-new-posts` 既定目标，可以只用图片完整的正式有效集合完成和入库；否则本轮保持
 `deferred_retry_pending` 并保留累计摘要，不做部分入库。`source-exhausted` 模式只要仍有 deferred
 候选，就必须保持 `source_exhausted_met=false`，不得把扫描到末尾解释为来源耗尽完成。
+停止优先级固定为：运行失败、数量目标达成、待重试候选、候选上限/停滞/来源耗尽；因此 deferred
+恰好用尽候选上限或随后扫描到空页时仍必须报告 `deferred_retry_pending`。格式、解码、大小、明确
+非重试 HTTP 等终态图片错误不得写 `candidate_deferred`；写完失败 manifest 后以 `runtime_failed`
+停在当前 page/offset/cursor，且失败 ID 不写正式 JSONL、SQLite 或 seen。
 
 五平台正文来源是正式字段契约，不是调试信息：
 
@@ -276,7 +281,7 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
   新 ID 数、详情成功数和有效新增数。
 - `login_required` / `captcha_detected`：登录或验证阻断。
 - `runtime_failed`：浏览器或本地运行环境失败。
-- `image_materialization_incomplete`：正文图 manifest、staging 字节或晋升校验不完整。可恢复下载
+- `image_materialization_incomplete`：正文图 manifest 或 staging 字节校验不完整。可恢复下载
   失败保留当前安全前沿，不把该候选写入已处理记忆；身份、格式、哈希和路径边界错误必须先修复
   代码或产物，不能降级为 URL-only。
 - `deferred_retry_pending`：至少一个候选的正文图已完成有限重试并留证，但整帖尚未满足图片门禁。
@@ -370,7 +375,10 @@ checkpoint 并按 `runtime_failed` 停止，不得静默生成新 ID 请求猜�
 - `retryable_failures`、`terminal_failures`、`complete`；
 - `manifest_paths`、`manifest_sha256`、逐文件 `manifest_evidence` 和 `failures`。
 
-产物完整的等式为
+根项目必须先用 `promotion_required=false` 只读复验全部 staging/manifest，并同时完成数量或来源耗尽、
+字段、行为与策略门禁；任何门禁未通过时不得写 `data/media`，摘要写
+`promotion_deferred=true` 和具体 `promotion_deferred_reason`。只有这些门禁全部通过，正式运行才以
+`promotion_required=true` 再次复验并晋升，然后进入 SQLite 事务。产物完整的等式为
 `candidate_posts == complete_posts` 且
 `expected_images == downloaded_images == validated_images`，并且失败数与 `failures` 均为 0。正式
 入库还要求 `unique_images + sha256_duplicate_images == expected_images`、
@@ -387,8 +395,10 @@ manifest schema v1 的稳定校验错误包括：`missing_image_manifest`、
 `image_non_raster_response`、`image_decode_failed`、`image_too_large` 和
 `image_hash_mismatch`、`image_existing_conflict` 和 `image_promotion_conflict`。缺少统一摘要使用
 `image_materialization_missing`，不完整摘要使用 `image_materialization_incomplete`；平台批次停止
-细节使用 `image_download_failed`，下载失败行使用稳定的 `image_download_retryable` 或平台返回的
-终态错误码。候选级暂缓使用 `candidate_deferred` 事件，存在未清空暂缓项且本轮未满足数量目标时
+细节使用 `image_download_failed`，下载失败行使用稳定的 `image_download_retryable` 或
+`image_non_raster_response`、`image_decode_failed`、`image_too_large`、`image_source_unavailable`
+等终态错误码。只有 `image_download_retryable` 可以产生候选级 `candidate_deferred`；终态错误必须
+停止当前 child。存在未清空暂缓项且本轮未满足数量目标时
 停止原因为 `deferred_retry_pending`；事件和停止摘要必须保存 `deferred_retryable_count` 与
 `deferred_retryable_failures`。晋升/数据库文件一致性错误由 `failures[].code/message`、runner 阶段失败原因和报告共同保留。
 操作人不得编辑 manifest、摘要或冻结状态把错误补签为成功。

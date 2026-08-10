@@ -60,9 +60,11 @@
 `<child_artifact>/xhs/data/xhs/images/<note_id>/<index>.<real_ext>` 和
 `<child_artifact>/xhs/data/xhs/image_manifest.jsonl`；来源字段固定为 `image_list`、角色固定为 `content`。
 空响应或超时按单图最多 3 次、1–2 秒随机基数指数退避重试；日志和最终 manifest `attempts` 保留
-实际尝试证据。三次仍失败才记录 `image_download_retryable` 和 `candidate_deferred`，暂时跳过整帖并
+实际尝试证据。三次仍为临时错误才记录 `image_download_retryable` 和 `candidate_deferred`，暂时跳过整帖并
 继续后续候选；失败 ID 不写账号级候选记忆，checkpoint 回到最早失败的 page/search ID。不保存
 该帖成功图片子集为完整帖，也不触发自动换号；其他完整帖子继续参与本轮既定完成条件。
+格式、解码、大小或明确非重试 HTTP 等终态错误写失败 manifest 后停止当前 page/search ID，不写
+deferred，也不继续请求后续候选。
 
 根执行器按相同优先级重建候选，复验 manifest、SHA/MIME/尺寸和路径边界。正式运行晋升到
 `data/media/xhs/...` 后才写 SQLite；`--no-import` 诊断只保留 staging/manifest。本规则是固定合同，

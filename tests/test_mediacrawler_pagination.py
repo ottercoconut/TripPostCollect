@@ -128,6 +128,46 @@ def test_deferred_image_candidate_blocks_source_exhaustion_completion(
     assert evidence["stop_event"]["deferred_retryable_count"] == 1
 
 
+def test_inconsistent_exhaustion_event_is_rejected_when_deferred_count_remains(
+    tmp_path: Path,
+) -> None:
+    pagination = {
+        "stopped": True,
+        "stop_reason": "source_exhausted",
+        "stop_detail": "empty_page",
+        "candidate_count": 1,
+        "stop_event": {
+            "platform": "bilibili",
+            "stop_reason": "source_exhausted",
+            "stop_detail": "empty_page",
+            "source_page": 2,
+            "raw_batch_count": 0,
+            "deferred_retryable_count": 1,
+            "deferred_retryable_failures": [
+                {
+                    "identity": "article-1",
+                    "error_code": "image_download_retryable",
+                    "attempts": 3,
+                }
+            ],
+        },
+    }
+
+    validation, _ = mediacrawler_crawl.collect_formal_records(
+        {"records": []},
+        candidate_hard_limit=10,
+        target_new_posts=0,
+        db_path=tmp_path / "missing.sqlite",
+        pagination_evidence=pagination,
+        completion_mode="source-exhausted",
+    )
+
+    assert validation["deferred_retryable_count"] == 1
+    assert validation["source_exhausted_met"] is False
+    assert validation["completion_met"] is False
+    assert validation["stop_reason"] == "deferred_retry_pending"
+
+
 def test_source_exhaustion_without_stop_event_never_falls_back_to_target_met(
     tmp_path: Path,
 ) -> None:

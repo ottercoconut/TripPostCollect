@@ -569,3 +569,39 @@ def test_formal_cli_requires_project_image_mode(monkeypatch: pytest.MonkeyPatch)
 
     with pytest.raises(SystemExit, match="--download-images"):
         mediacrawler_crawl.main()
+
+
+def test_long_term_image_promotion_requires_all_completion_gates() -> None:
+    behavior_ok = {"ok": True, "behavior_ok": True, "policy_ok": True}
+    image_complete = {"complete": True}
+    incomplete = mediacrawler_crawl.apply_formal_completion_gates(
+        {"completion_met": False, "new_target_met": False, "stop_reason": "runtime_failed"},
+        content_validation={"completion_met": False, "new_target_met": False},
+        image_materialization=image_complete,
+        behavior_validation=behavior_ok,
+        download_images=True,
+    )
+
+    assert mediacrawler_crawl.formal_image_promotion_allowed(
+        download_images=True,
+        no_import=False,
+        validation=incomplete,
+    ) is False
+
+    complete = mediacrawler_crawl.apply_formal_completion_gates(
+        {"completion_met": True, "new_target_met": True, "stop_reason": "target_new_met"},
+        content_validation={"completion_met": True, "new_target_met": True},
+        image_materialization=image_complete,
+        behavior_validation=behavior_ok,
+        download_images=True,
+    )
+    assert mediacrawler_crawl.formal_image_promotion_allowed(
+        download_images=True,
+        no_import=False,
+        validation=complete,
+    ) is True
+    assert mediacrawler_crawl.formal_image_promotion_allowed(
+        download_images=True,
+        no_import=True,
+        validation=complete,
+    ) is False

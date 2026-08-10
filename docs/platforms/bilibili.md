@@ -100,7 +100,7 @@ B站使用项目自有 article 分支下载，不调用 MediaCrawler 视频媒�
 `<platform_data_root>/images/<post_id>/<index>.<real_ext>`；同目录
 `image_manifest.jsonl` 原子记录 URL、稳定键、尝试次数、HTTP 状态、SHA、真实 MIME、尺寸和相对
 staging 路径。搜索 `image_urls`、Opus 封面、作者头像和视频资源不会进入下载函数。失败行只写
-manifest 错误，不留下成功元数据；`image_download_retryable` 记录 `candidate_deferred` 后暂时跳过
+manifest 错误，不留下成功元数据；只有 `image_download_retryable` 记录 `candidate_deferred` 后暂时跳过
 该 article，继续处理后续候选。失败 ID 仅在当前 child 内抑制重复请求，不写持久候选记忆；最终
 checkpoint 回到最早失败页并保持 `last_batch_complete=false`。
 
@@ -108,6 +108,8 @@ checkpoint 回到最早失败页并保持 `last_batch_complete=false`。
 `data/media/bilibili/...` 并在同一帖子事务写入 `web_post_images.local_path` 等字段；
 `--no-import --download-images --media-root temp/<目录>` 只验证 staging，不改长期目录或数据库。
 任一图片不完整时 `image_materialization.complete=false`，不能靠正文和 URL 通过正式门禁。
+格式、解码、大小和明确非重试 HTTP 等终态图片错误写失败 manifest 后以 `runtime_failed` 停在当前
+页，不写 deferred 或 seen；重试、恢复和最终失败均写短日志事件。
 
 ## 请求节奏、失败与安全前沿
 

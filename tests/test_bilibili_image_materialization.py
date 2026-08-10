@@ -76,13 +76,21 @@ def hydrated_record(post_id: str = "123") -> dict:
     )
 
 
-def run_args(db_path: Path, *, download_images: bool = True) -> SimpleNamespace:
+def run_args(
+    db_path: Path,
+    *,
+    download_images: bool = True,
+    candidate_hard_limit: int = 3,
+    target_new_posts: int = 1,
+    completion_mode: str = "target-new-posts",
+) -> SimpleNamespace:
     return SimpleNamespace(
         keyword="青岛旅游",
-        candidate_hard_limit=3,
-        target_new_posts=1,
-        source_candidate_hard_limit=3,
-        source_target_new_posts=1,
+        candidate_hard_limit=candidate_hard_limit,
+        target_new_posts=target_new_posts,
+        source_candidate_hard_limit=candidate_hard_limit,
+        source_target_new_posts=target_new_posts,
+        completion_mode=completion_mode,
         max_stagnant_batches=3,
         db=str(db_path),
         start_page=1,
@@ -178,6 +186,7 @@ def test_retryable_image_failure_writes_only_failed_manifest_status(tmp_path: Pa
     record = hydrated_record()
     calls = 0
     sleeps: list[float] = []
+    logs: list[str] = []
 
     def fetcher(*args):
         nonlocal calls
@@ -194,6 +203,7 @@ def test_retryable_image_failure_writes_only_failed_manifest_status(tmp_path: Pa
         platform_data_root=tmp_path,
         fetcher=fetcher,
         sleep_fn=sleeps.append,
+        log_fn=logs.append,
     )
 
     assert calls == 3
@@ -205,6 +215,8 @@ def test_retryable_image_failure_writes_only_failed_manifest_status(tmp_path: Pa
     assert entries[0].error_code == "image_download_retryable"
     assert entries[0].staging_path is None
     assert list(tmp_path.rglob("*.png")) == []
+    assert sum("[image_download_retry]" in line for line in logs) == 2
+    assert sum("[image_download_retry_exhausted]" in line for line in logs) == 1
 
 
 def test_terminal_http_failure_is_not_mislabeled_retryable(tmp_path: Path) -> None:
@@ -328,6 +340,138 @@ def test_image_failure_keeps_page_and_candidate_unseen(monkeypatch, tmp_path: Pa
     assert stopped["details"]["batch_complete"] is False
     assert stopped["details"]["candidate_identities"] == []
     assert stopped["details"]["deferred_retryable_count"] == 1
+
+
+def test_deferred_candidate_wins_over_empty_page_exhaustion(
+    monkeypatch, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "posts.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE web_posts (platform_key TEXT, platform_post_id TEXT, canonical_url TEXT)"
+        )
+    state_path = tmp_path / "state.json"
+    mediacrawler_crawl.FrozenExecutionState.create(
+        state_path,
+        run_id="run-empty-after-deferred",
+        job_key="bili-empty-after-deferred",
+        site_key="bilibili",
+        job_kind="mediacrawler_search",
+        plan={},
+        frozen_inputs=[],
+    )
+    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
+    install_successful_run_mocks(monkeypatch)
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_article_page",
+        lambda keyword, page, **kwargs: [search_item("123")] if page == 1 else [],
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_image_bytes",
+        lambda *args: (_ for _ in ()).throw(
+            mediacrawler_crawl.RemoteImageFetchError(
+                "HTTP 503", http_status=503, retryable=True
+            )
+        ),
+    )
+
+    result = mediacrawler_crawl.run_bilibili_article_search(
+        run_args(db_path, target_new_posts=2), tmp_path / "batch"
+    )
+
+    assert result["ok"] is False
+    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
+    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
+    assert stopped["details"]["stop_reason"] == "deferred_retry_pending"
+    assert stopped["details"]["stop_detail"] == "retryable_candidate_failures"
+    assert stopped["details"]["resume_page"] == 1
+    assert stopped["details"]["source_has_more"] is True
+    assert stopped["details"]["batch_complete"] is False
+
+
+def test_terminal_image_failure_stops_without_deferring_candidate(
+    monkeypatch, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "posts.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE web_posts (platform_key TEXT, platform_post_id TEXT, canonical_url TEXT)"
+        )
+    state_path = tmp_path / "state.json"
+    mediacrawler_crawl.FrozenExecutionState.create(
+        state_path,
+        run_id="run-terminal-image",
+        job_key="bili-terminal-image",
+        site_key="bilibili",
+        job_kind="mediacrawler_search",
+        plan={},
+        frozen_inputs=[],
+    )
+    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
+    install_successful_run_mocks(monkeypatch)
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_image_bytes",
+        lambda *args: (_ for _ in ()).throw(
+            mediacrawler_crawl.RemoteImageFetchError(
+                "HTTP 404", http_status=404, retryable=False
+            )
+        ),
+    )
+
+    result = mediacrawler_crawl.run_bilibili_article_search(
+        run_args(db_path), tmp_path / "batch"
+    )
+
+    assert result["ok"] is False
+    assert result["run"]["returncode"] == 1
+    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
+    assert not [event for event in events if event["type"] == "candidate_deferred"]
+    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
+    assert stopped["details"]["stop_reason"] == "runtime_failed"
+    assert stopped["details"]["image_error_code"] == "image_source_unavailable"
+    assert stopped["details"]["candidate_identities"] == []
+
+
+def test_deferred_candidate_wins_when_it_exactly_hits_hard_limit(
+    monkeypatch, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "posts.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE web_posts (platform_key TEXT, platform_post_id TEXT, canonical_url TEXT)"
+        )
+    state_path = tmp_path / "state.json"
+    mediacrawler_crawl.FrozenExecutionState.create(
+        state_path,
+        run_id="run-deferred-limit",
+        job_key="bili-deferred-limit",
+        site_key="bilibili",
+        job_kind="mediacrawler_search",
+        plan={},
+        frozen_inputs=[],
+    )
+    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
+    install_successful_run_mocks(monkeypatch)
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_image_bytes",
+        lambda *args: (_ for _ in ()).throw(
+            mediacrawler_crawl.RemoteImageFetchError(
+                "HTTP 503", http_status=503, retryable=True
+            )
+        ),
+    )
+
+    mediacrawler_crawl.run_bilibili_article_search(
+        run_args(db_path, candidate_hard_limit=1), tmp_path / "batch"
+    )
+
+    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
+    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
+    assert stopped["details"]["stop_reason"] == "deferred_retry_pending"
 
 
 def test_image_failure_does_not_block_later_bilibili_candidate(

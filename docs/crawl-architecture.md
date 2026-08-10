@@ -136,11 +136,14 @@ runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并�
 详情、作者与媒体处理前跳过。详情请求、空响应或解析等可恢复失败必须记录
 `runtime_failed`，保留原页/游标，且失败 ID 不进入 seen 集合。
 
-正文图片失败使用候选级 deferred 分支：单图有限重试耗尽后，平台先原子追加失败 manifest，再写
-`candidate_deferred`，把该 ID 放入仅当前 child 有效的临时集合并继续后续候选。失败帖不进入正式
+正文图片失败分为两支：只有空响应、超时或临时请求错误在单图有限重试耗尽后生成
+`image_download_retryable`，平台先原子追加失败 manifest，再写 `candidate_deferred`，把该 ID 放入仅
+当前 child 有效的临时集合并继续后续候选。格式、解码、大小或明确非重试 HTTP 等终态错误只写失败
+manifest，随后以 `runtime_failed` 停在当前来源坐标。两类失败帖都不进入正式
 JSONL、SQLite 或跨轮 seen；停止摘要汇总 `deferred_retryable_failures`，checkpoint 回到最早失败的
 page/offset/cursor 且标记批次不完整。默认数量模式若后续有效候选达到目标，可正常导入有效集合；
-否则保存累计摘要并以 `deferred_retry_pending` 等待下轮。显式来源耗尽模式存在 deferred 时不得生成
+否则保存累计摘要并以 `deferred_retry_pending` 等待下轮；该状态优先于候选上限、停滞和来源耗尽。
+显式来源耗尽模式存在 deferred 时不得生成
 `source_exhausted` 完成证据。
 
 小红书独立 runner 不读写通用 checkpoint 表，而是在 `xhs_discovery_checkpoints` 中按目标、账号和
@@ -163,7 +166,8 @@ page/offset/cursor 且标记批次不完整。默认数量模式若后续有效�
 结构化执行器先生成 JSONL 与图片 staging/manifest，再按正式 profile 过滤视频、去重、校验
 权威正文、`content_detail_status/content_detail_source`、正文图/时间/作者/粉丝和互动字段。标题或搜索摘要
 不能替代正文。根项目对有效集合逐帖核对 manifest 和文件；只有本轮完成模式、
-行为/策略、字段和本地图片门禁同时成立才晋升并入库。导入报告区分处理、新增和更新；更新已有帖
+行为/策略、字段和本地图片门禁同时成立才执行第二次复验、晋升并入库；未完成轮次只保留
+staging/manifest，不写长期媒体。导入报告区分处理、新增和更新；更新已有帖
 时会优先匹配并保留仍有效的既有本地图片证据，新的整帖图片集合仍在同一事务重建。
 
 `artifacts_verified` 对 `image_materialization` 的 manifest 哈希和计数等式负责；

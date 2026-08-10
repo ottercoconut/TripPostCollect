@@ -48,9 +48,11 @@
 首次 URL 并连续编号；原始 `image_list` 继续保留全部 URL 证据，被合并变体不重复下载或写 manifest。
 该规则只识别知乎稳定 URL 语义，不做感知哈希或视觉相似比较。失败行使用
 `image_download_retryable` 或具体格式错误码。空响应或超时先按单图最多 3 次、1–2 秒随机基数指数
-退避重试；日志逐次记录，成功或最终失败的 manifest `attempts` 保存实际请求次数。三次仍失败时写
+退避重试；日志逐次记录，成功或最终失败的 manifest `attempts` 保存实际请求次数。只有三次后仍为
+`image_download_retryable` 时写
 `candidate_deferred`，暂时跳过该回答/文章并继续后续候选；失败 ID 不进入候选记忆，checkpoint 回到
 最早失败页。该帖不得把详情失败、部分成功或公式图排除解释成图片完成。
+格式、解码、大小或明确非重试 HTTP 等终态错误写失败 manifest 后停止当前页，不写 deferred。
 
 根执行器按 `image_list` 投影后的候选顺序复验 manifest 和文件，正式运行晋升到 `data/media/zhihu/...`
 前仍在同一帖子内按验证后的 SHA-256 做字节级兜底去重并连续重编号；随后在同一 SQLite 事务写

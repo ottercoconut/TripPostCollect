@@ -96,6 +96,8 @@
 `image_download_failed` 留证；可恢复项使用 `image_download_retryable` 和 `candidate_deferred`，暂时
 跳过整帖并继续后续候选。失败 ID 不写已处理候选，最终 checkpoint 恢复最早失败的
 page/offset/search ID，不能把后续扫描解释为已跨越该安全前沿。
+格式、解码、大小或明确非重试 HTTP 等终态错误不写 deferred，必须停止并保留当前
+page/offset/search ID。
 
 根执行器按 `note_download_url` 重建候选并复验 manifest、SHA/MIME/尺寸。正式运行晋升到
 `data/media/douyin/...` 后才在同一 SQLite 事务写帖子与 `web_post_images`；诊断模式不晋升。

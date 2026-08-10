@@ -107,13 +107,16 @@ CLI 不传 `--completion-mode` 时仍默认按配置的 `target_new_posts`、`ca
 
 五个平台正式 child 都由 runner 固定开启 `--download-images`，只下载平台详情/正文结构中显式
 投影的正文图，并保持视频媒体关闭。平台会话先写本轮 staging 和 `image_manifest.jsonl`，根项目再
-验证身份、路径、SHA、真实 MIME、尺寸和解码，正式模式才原子晋升到 `data/media`，并把 URL、
+验证身份、路径、SHA、真实 MIME、尺寸和解码；只有完成模式、字段、行为、策略和本地图片门禁全部
+通过后，正式模式才原子晋升到 `data/media`，并把 URL、
 `local_path` 和字节证据与帖子放在同一 SQLite 事务中。头像、作者主页、封面、搜索预览、视频、
 音乐和知乎公式图在下载前自动排除；作者头像仅可保留 `author_avatar` URL 参考，不下载也不参与
-正文图计数。单帖正文图在有限重试后仍失败时，该候选写失败 manifest 和
-`candidate_deferred` 证据后暂时跳过；失败帖不入库、不进入已处理候选记忆，checkpoint 保留最早
+正文图计数。单帖正文图的空响应、超时或临时请求错误在有限重试后仍失败时，该候选写
+`image_download_retryable` 失败 manifest 和 `candidate_deferred` 证据后暂时跳过；失败帖不入库、不进入已处理候选记忆，checkpoint 保留最早
 失败坐标，后续候选继续。只有后续候选使既定完成条件成立时，图片完整的帖子才按正常事务入库；
 否则整轮保持 `deferred_retry_pending` 并保留累计摘要，不能降级为只存 URL，也不能误报来源耗尽。
+图片格式、解码、大小、明确非重试 HTTP 等终态错误只写失败 manifest，不写 `candidate_deferred`；
+child 必须以 `runtime_failed` 停在当前来源坐标，修复或人工处置后重跑。
 
 正常默认模式下，小红书的实际候选量从 0 开始按页增长，只有通过详情前去重的未知候选才占预算；达到
 `target_new_posts` 后立即停止，不会为了配置的 `candidate_hard_limit` 继续抓满。后者只是单次

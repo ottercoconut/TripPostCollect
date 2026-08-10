@@ -39,7 +39,8 @@
 再原子写入本轮 `<platform_artifact>/data/weibo/images/<weibo_id>/<index>.<real_ext>`，并更新
 `<platform_artifact>/data/weibo/image_manifest.jsonl`。空响应或超时按单图最多 3 次、1–2 秒随机基数
 指数退避重试；日志逐次记录重试，成功或最终失败的 manifest 都记录实际 `attempts`。三次仍失败才使用
-`image_download_retryable`，写 `candidate_deferred` 后暂时跳过整帖并继续本页后续候选。失败 ID 不写
+`image_download_retryable`，写 `candidate_deferred` 后暂时跳过整帖并继续本页后续候选。格式、解码、
+大小或明确非重试 HTTP 等终态错误写失败 manifest 后立即停止当前页，不写 deferred。失败 ID 不写
 持久候选记忆，checkpoint 回到最早失败页；该帖不允许只保留成功图片子集，后续完整帖子继续参与
 本轮既定完成条件。
 

@@ -117,6 +117,7 @@ BILIBILI_DETAIL_PACING_SECONDS = (1.5, 3.0)
 BILIBILI_DETAIL_RETRYABLE_CODES = frozenset({-509, -412, -352})
 BILIBILI_IMAGE_MAX_ATTEMPTS = 3
 BILIBILI_IMAGE_RETRY_DELAY_SECONDS = (1.0, 2.0)
+RETRYABLE_IMAGE_ERROR_CODES = frozenset({"image_download_retryable"})
 BILIBILI_TRUSTED_DETAIL_SOURCES = frozenset({"article_view_api"})
 BILIBILI_BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -164,6 +165,10 @@ class BilibiliImageDownloadError(RuntimeError):
         self.retryable = entry.error_code == "image_download_retryable"
         self.attempts = entry.attempts
         self.http_status = entry.http_status
+
+
+def is_retryable_image_error(code: str | None) -> bool:
+    return str(code or "") in RETRYABLE_IMAGE_ERROR_CODES
 
 PLATFORMS: dict[str, dict[str, str]] = {
     "bilibili": {"mediacrawler": "bili", "label": "B站"},
@@ -1820,6 +1825,11 @@ def collect_formal_records(
     candidate_count = max(candidate_count, run_candidate_count)
     new_target_met = target_new_posts <= 0 or valid_new_count >= target_new_posts
     stop_event = pagination_evidence.get("stop_event") or {}
+    deferred_retryable_count = max(
+        int(pagination_evidence.get("deferred_retryable_count") or 0),
+        int(stop_event.get("deferred_retryable_count") or 0),
+        len(stop_event.get("deferred_retryable_failures") or []),
+    )
     unverified_douyin_first_page_empty = bool(
         stop_event.get("platform") == "douyin"
         and stop_event.get("stop_reason") == "source_exhausted"
@@ -1833,6 +1843,7 @@ def collect_formal_records(
         pagination_evidence.get("stopped")
         and pagination_evidence.get("stop_reason") == "source_exhausted"
         and not unverified_douyin_first_page_empty
+        and deferred_retryable_count == 0
     )
     completion_met = (
         source_exhausted_met
@@ -1841,14 +1852,16 @@ def collect_formal_records(
     )
     if unverified_douyin_first_page_empty:
         stop_reason = "runtime_failed"
-    elif completion_mode == "source-exhausted" and pagination_evidence.get("stopped"):
-        stop_reason = str(pagination_evidence.get("stop_reason") or "runtime_failed")
     elif (
         completion_mode == "target-new-posts"
         and new_target_met
         and target_new_posts > 0
     ):
         stop_reason = "target_new_met"
+    elif deferred_retryable_count > 0:
+        stop_reason = "deferred_retry_pending"
+    elif completion_mode == "source-exhausted" and pagination_evidence.get("stopped"):
+        stop_reason = str(pagination_evidence.get("stop_reason") or "runtime_failed")
     elif quantity_limits_enforced and (
         run_candidate_count >= candidate_hard_limit
         or (enforce_candidate_limit and candidate_count >= candidate_hard_limit)
@@ -1878,6 +1891,7 @@ def collect_formal_records(
         "valid_total_count": len(selected),
         "new_target_met": new_target_met,
         "source_exhausted_met": source_exhausted_met,
+        "deferred_retryable_count": deferred_retryable_count,
         "completion_met": completion_met,
         "local_images_required": require_local_images,
         "local_images_complete": (
@@ -2560,6 +2574,7 @@ def download_bilibili_record_images(
     platform_data_root: Path,
     fetcher: Any | None = None,
     sleep_fn: Any | None = None,
+    log_fn: Any | None = None,
     max_attempts: int = BILIBILI_IMAGE_MAX_ATTEMPTS,
 ) -> list[ImageManifestEntry]:
     """Download only detail-observed Bilibili article images into staging."""
@@ -2570,6 +2585,10 @@ def download_bilibili_record_images(
         )
     fetch = fetcher or fetch_bilibili_image_bytes
     wait = sleep_fn or time.sleep
+    def default_log(message: str) -> None:
+        print(message, file=sys.stderr, flush=True)
+
+    emit = log_fn or default_log
     root = platform_data_root.expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     entries: list[ImageManifestEntry] = []
@@ -2615,20 +2634,59 @@ def download_bilibili_record_images(
                         error_code=None,
                     )
                 )
+                if attempts > 1:
+                    emit(
+                        "[image_download_retry_recovered] "
+                        f"platform=bilibili post_id={candidate.platform_post_id} "
+                        f"source_index={candidate.source_index}, attempts={attempts}"
+                    )
                 break
             except RemoteImageFetchError as exc:
                 http_status = exc.http_status
                 error_code = remote_image_failure_code(exc)
                 if exc.retryable and attempts < max_attempts:
-                    wait(random.uniform(*BILIBILI_IMAGE_RETRY_DELAY_SECONDS) * (2 ** (attempts - 1)))
+                    delay = random.uniform(*BILIBILI_IMAGE_RETRY_DELAY_SECONDS) * (
+                        2 ** (attempts - 1)
+                    )
+                    emit(
+                        "[image_download_retry] "
+                        f"platform=bilibili post_id={candidate.platform_post_id} "
+                        f"source_index={candidate.source_index}, "
+                        f"attempt={attempts}/{max_attempts}, "
+                        f"next_delay_seconds={delay:.3f}"
+                    )
+                    wait(delay)
                     continue
             except ImageMaterializationError as exc:
                 error_code = exc.code
             except (OSError, TimeoutError):
                 error_code = "image_download_retryable"
                 if attempts < max_attempts:
-                    wait(random.uniform(*BILIBILI_IMAGE_RETRY_DELAY_SECONDS) * (2 ** (attempts - 1)))
+                    delay = random.uniform(*BILIBILI_IMAGE_RETRY_DELAY_SECONDS) * (
+                        2 ** (attempts - 1)
+                    )
+                    emit(
+                        "[image_download_retry] "
+                        f"platform=bilibili post_id={candidate.platform_post_id} "
+                        f"source_index={candidate.source_index}, "
+                        f"attempt={attempts}/{max_attempts}, "
+                        f"next_delay_seconds={delay:.3f}"
+                    )
+                    wait(delay)
                     continue
+            if is_retryable_image_error(error_code):
+                emit(
+                    "[image_download_retry_exhausted] "
+                    f"platform=bilibili post_id={candidate.platform_post_id} "
+                    f"source_index={candidate.source_index}, attempts={attempts}"
+                )
+            else:
+                emit(
+                    "[image_download_terminal] "
+                    f"platform=bilibili post_id={candidate.platform_post_id} "
+                    f"source_index={candidate.source_index}, attempts={attempts}, "
+                    f"error_code={error_code}"
+                )
             entries.append(
                 ImageManifestEntry(
                     schema_version=1,
@@ -2989,6 +3047,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 )
                 if not page_items:
                     if discovery_phase == "frontier" and state_path:
+                        deferred_pending = bool(deferred_retryable_failures)
                         FrozenExecutionState(state_path).append_event(
                             "adaptive_search_stopped",
                             {
@@ -3001,17 +3060,31 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                                 "completion_mode": completion_mode,
                                 "quantity_limits_enforced": not exhaustion_mode,
                                 "stagnant_batches": stagnant_pages,
-                                "stop_reason": "source_exhausted",
-                                "stop_detail": "empty_page",
+                                "stop_reason": (
+                                    "deferred_retry_pending"
+                                    if deferred_pending
+                                    else "source_exhausted"
+                                ),
+                                "stop_detail": (
+                                    "retryable_candidate_failures"
+                                    if deferred_pending
+                                    else "empty_page"
+                                ),
                                 "source_page": page,
-                                "resume_page": page,
-                                "source_has_more": False,
-                                "batch_complete": True,
+                                "resume_page": deferred_resume_page or page,
+                                "source_has_more": deferred_pending,
+                                "batch_complete": not deferred_pending,
                                 "discovery_phase": discovery_phase,
                                 "raw_batch_count": 0,
                                 "raw_response_count": 0,
                                 "stagnation_basis": "candidate_identity",
                                 "candidate_identities": sorted(seen_ids),
+                                "deferred_retryable_count": len(
+                                    deferred_retryable_failures
+                                ),
+                                "deferred_retryable_failures": list(
+                                    deferred_retryable_failures
+                                ),
                             },
                         )
                     break
@@ -3123,6 +3196,19 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                             None,
                         )
                         if failed_image is not None:
+                            image_error = BilibiliImageDownloadError(failed_image)
+                            if not is_retryable_image_error(image_error.code):
+                                batch_runtime_error = image_error
+                                batch_complete = False
+                                returncode = 1
+                                stderr = (
+                                    "BilibiliImageDownloadError("
+                                    f"post_id={post_id!r}, attempts={image_error.attempts}, "
+                                    f"code={image_error.code!r}, "
+                                    f"http_status={image_error.http_status!r}): "
+                                    f"{image_error}"
+                                )
+                                break
                             failure = {
                                 "platform": platform_key,
                                 "identity": post_id,
@@ -3197,7 +3283,11 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 elif not exhaustion_mode and valid_new_count >= target_new:
                     batch_stop_reason = "target_new_met"
                 elif not exhaustion_mode and candidate_count >= max_records:
-                    batch_stop_reason = "candidate_hard_limit_reached"
+                    batch_stop_reason = (
+                        "deferred_retry_pending"
+                        if deferred_retryable_failures
+                        else "candidate_hard_limit_reached"
+                    )
                 elif (
                     not exhaustion_mode
                     and
@@ -4054,6 +4144,46 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def apply_formal_completion_gates(
+    validation: dict[str, Any],
+    *,
+    content_validation: dict[str, Any],
+    image_materialization: dict[str, Any],
+    behavior_validation: dict[str, Any],
+    download_images: bool,
+) -> dict[str, Any]:
+    """Apply all read-only evidence gates before persistent writes."""
+
+    gated = dict(validation)
+    gated["content_new_target_met"] = bool(content_validation.get("new_target_met"))
+    gated["content_completion_met"] = bool(content_validation.get("completion_met"))
+    gated["image_materialization_complete"] = bool(image_materialization.get("complete"))
+    gated["behavior_evidence_ok"] = bool(behavior_validation.get("behavior_ok"))
+    gated["policy_evidence_ok"] = bool(behavior_validation.get("policy_ok"))
+    if download_images and not image_materialization.get("complete"):
+        gated["new_target_met"] = False
+        gated["completion_met"] = False
+        gated["stop_reason"] = "image_materialization_incomplete"
+    if not behavior_validation.get("ok"):
+        gated["new_target_met"] = False
+        gated["completion_met"] = False
+        gated["stop_reason"] = (
+            "behavior_evidence_failed"
+            if not behavior_validation.get("behavior_ok")
+            else "crawl_policy_evidence_failed"
+        )
+    return gated
+
+
+def formal_image_promotion_allowed(
+    *,
+    download_images: bool,
+    no_import: bool,
+    validation: dict[str, Any],
+) -> bool:
+    return bool(download_images and not no_import and validation.get("completion_met"))
+
+
 def main() -> int:
     args = parse_args()
     if (
@@ -4259,13 +4389,13 @@ def main() -> int:
     if args.download_images:
         (
             image_materialization,
-            materialized_images_by_identity,
+            _,
             localized_identities,
         ) = materialize_formal_record_images(
             content_valid_records,
             project_root=PROJECT_ROOT,
             media_root=media_root,
-            promote=not args.no_import,
+            promote=False,
         )
         validation, valid_records = collect_formal_records(
             summary,
@@ -4279,7 +4409,6 @@ def main() -> int:
             completion_mode=args.completion_mode,
             require_local_images=True,
             localized_identities=localized_identities,
-            materialized_images_by_identity=materialized_images_by_identity,
         )
     else:
         image_materialization = {
@@ -4307,26 +4436,53 @@ def main() -> int:
             "failures": [],
         }
         validation, valid_records = content_validation, content_valid_records
-    summary["image_materialization"] = image_materialization
-    validation["content_new_target_met"] = bool(content_validation.get("new_target_met"))
-    validation["content_completion_met"] = bool(content_validation.get("completion_met"))
-    validation["image_materialization_complete"] = bool(
-        image_materialization.get("complete")
+    validation = apply_formal_completion_gates(
+        validation,
+        content_validation=content_validation,
+        image_materialization=image_materialization,
+        behavior_validation=behavior_validation,
+        download_images=args.download_images,
     )
-    validation["behavior_evidence_ok"] = bool(behavior_validation.get("behavior_ok"))
-    validation["policy_evidence_ok"] = bool(behavior_validation.get("policy_ok"))
-    if args.download_images and not image_materialization["complete"]:
-        validation["new_target_met"] = False
-        validation["completion_met"] = False
-        validation["stop_reason"] = "image_materialization_incomplete"
-    if not behavior_validation["ok"]:
-        validation["new_target_met"] = False
-        validation["completion_met"] = False
-        validation["stop_reason"] = (
-            "behavior_evidence_failed"
-            if not behavior_validation["behavior_ok"]
-            else "crawl_policy_evidence_failed"
+    if formal_image_promotion_allowed(
+        download_images=args.download_images,
+        no_import=args.no_import,
+        validation=validation,
+    ):
+        (
+            image_materialization,
+            materialized_images_by_identity,
+            localized_identities,
+        ) = materialize_formal_record_images(
+            content_valid_records,
+            project_root=PROJECT_ROOT,
+            media_root=media_root,
+            promote=True,
         )
+        validation, valid_records = collect_formal_records(
+            summary,
+            candidate_hard_limit=candidate_hard_limit,
+            target_new_posts=target_new_posts,
+            db_path=args.db,
+            pagination_evidence=pagination_evidence,
+            enforce_candidate_limit=(
+                args.completion_mode == "target-new-posts" and not bool(resume_info)
+            ),
+            completion_mode=args.completion_mode,
+            require_local_images=True,
+            localized_identities=localized_identities,
+            materialized_images_by_identity=materialized_images_by_identity,
+        )
+        validation = apply_formal_completion_gates(
+            validation,
+            content_validation=content_validation,
+            image_materialization=image_materialization,
+            behavior_validation=behavior_validation,
+            download_images=True,
+        )
+    elif args.download_images and not args.no_import:
+        image_materialization["promotion_deferred"] = True
+        image_materialization["promotion_deferred_reason"] = validation["stop_reason"]
+    summary["image_materialization"] = image_materialization
     summary["required_fields_profile"] = args.required_fields_profile
     summary["formal_validation"] = validation
     if args.no_import:
