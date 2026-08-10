@@ -324,7 +324,7 @@ PY
   不要临时改抓取脚本绕过登录判断或复用其他账号 profile。
 - 字段缺失时，先检查 JSONL 顶层字段、`raw_sample_json` 和平台字段覆盖表；确认来源字段存在但没入库，再改导入映射。
 - 来源字段根本不存在时，先用浏览器或 API 定位字段来源，再补抓取器；不要在入库层造数。
-- 图片失败先读 `formal_validation.pagination_evidence.stop_event.deferred_retryable_failures`、
+- 图片失败先读 `formal_validation.pagination_evidence.stop_event.deferred_image_failures`、
   `candidate_deferred` 和 manifest 对应行，再检查 staging 文件、平台日志尾部及登录态。有限重试仍
   失败的整帖暂时跳过，失败 ID 不写候选记忆；child 继续后续候选，checkpoint 回到最早失败坐标。
   若既定完成条件仍未满足，本轮保留累计摘要而不做部分入库。身份、路径、格式、哈希或尺寸错误必须
@@ -342,9 +342,9 @@ PY
 字段、行为、策略和 staging 图片门禁全部通过，正式运行才晋升到 `data/media` 并注入统一入库映射；
 门禁未通过、晋升失败或已确认发生在提交前的 SQLite 导入回滚时，不得留下本轮新建的无引用长期媒体文件。平台显式投影后的全部 manifest 候选均须通过下载与字节复验；
 知乎已知 `zhimg` 尺寸 URL 变体在投影时按资源路径合并，不重复生成 manifest。下载后再仅在同帖内
-按 SHA-256 保留首次来源并记录重复来源证据。任何图片失败都使该整帖失去正式资格。只有有限重试
-耗尽后的 `image_download_retryable` 可在写完 manifest 与 `candidate_deferred` 后继续其他候选；
-格式、解码、大小或明确非重试 HTTP 等终态错误写完失败 manifest 后停止 child 并保留当前前沿。
+按 SHA-256 保留首次来源并记录重复来源证据。任何图片失败都使该整帖失去正式资格。有限重试耗尽后
+的 `image_download_retryable` 与格式、解码、大小或明确非重试 HTTP 等终态错误，都在写完 manifest
+与 `candidate_deferred` 后继续其他候选；终态错误保留 `retryable=false` 且不补做无意义请求。
 若后续候选达到默认新增目标，只导入
 图片完整的正式有效集合；未达到目标或处于显式来源耗尽模式时，存在 deferred 候选会使本轮保持
 `deferred_retry_pending`，不得入库或宣称来源耗尽。

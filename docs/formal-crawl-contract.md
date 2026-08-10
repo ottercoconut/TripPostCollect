@@ -175,19 +175,21 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 
 平台 child 对单张正文图的 `None`、HTTP 200 空字节、超时或临时请求错误最多执行 3 次有限指数
 退避重试。客户端不得把 `raise_for_status()` 的 HTTP 状态折叠为 `None`：明确终态状态至少保存真实
-`http_status` 和 `image_source_unavailable`，临时状态在耗尽后保存 `image_download_retryable`。仍失败且
-错误码为唯一可暂缓码 `image_download_retryable` 时，必须先把失败行写入
-manifest，再写 `candidate_deferred` 事件，至少包含平台、候选 ID、错误码、实际尝试次数、图片来源
-序号和当前 page/offset/cursor。该整帖不得写入正式 JSONL、数据库或跨轮候选记忆；同一 child 内可
-把该 ID 放入临时 deferred 集合以避免重复请求，并继续处理后续候选。最终停止事件必须携带完整
-`deferred_retryable_failures`，恢复坐标回到本轮最早失败位置且 `batch_complete=false`。后续候选若
+`http_status` 和 `image_source_unavailable`，临时状态在耗尽后保存 `image_download_retryable`；明确
+非重试 HTTP、非图片、解码失败或过大等终态错误不做无意义重试。任一图片在适用尝试结束后仍失败，
+必须先把失败行写入 manifest，再写 `candidate_deferred` 事件，至少包含平台、候选 ID、错误码、是否
+可重试、实际尝试次数、图片来源序号和当前 page/offset/cursor。该整帖不得写入正式 JSONL、数据库或
+跨轮候选记忆；同一 child 内把该 ID 放入临时 deferred 集合以避免重复请求，并继续处理后续候选。
+最终停止事件必须携带完整 `deferred_image_failures`，恢复坐标回到本轮最早失败位置且
+`batch_complete=false`。后续候选若
 独立达到 `target-new-posts` 既定目标，可以只用图片完整的正式有效集合完成和入库；否则本轮保持
 `deferred_retry_pending` 并保留累计摘要，不做部分入库。`source-exhausted` 模式只要仍有 deferred
 候选，就必须保持 `source_exhausted_met=false`，不得把扫描到末尾解释为来源耗尽完成。
-停止优先级固定为：运行失败、数量目标达成、待重试候选、候选上限/停滞/来源耗尽；因此 deferred
+停止优先级固定为：运行失败、数量目标达成、暂缓图片候选、候选上限/停滞/来源耗尽；因此 deferred
 恰好用尽候选上限或随后扫描到空页时仍必须报告 `deferred_retry_pending`。格式、解码、大小、明确
-非重试 HTTP 等终态图片错误不得写 `candidate_deferred`；写完失败 manifest 后以 `runtime_failed`
-停在当前 page/offset/cursor，且失败 ID 不写正式 JSONL、SQLite 或 seen。
+非重试 HTTP 等终态图片错误同样写 `candidate_deferred`，但保留终态错误码和 `retryable=false`，不
+强行补足 3 次请求；失败 ID 不写正式 JSONL、SQLite 或 seen。若终态候选跨轮持续失败，只能由操作人
+明确批准排除，runner 不得自动把它写入 seen 或伪造来源耗尽。
 分页证据为 `runtime_failed`、`login_required`、`captcha_detected`，或本轮任一目标 child 未成功完成时，
 运行失败门禁必须覆盖已经达到的数量目标：`completion_met=false`，不得晋升图片或进入 SQLite 事务。
 组合门禁失败时也必须保留这一优先级：已有 `runtime_failed`、`login_required` 或
@@ -417,8 +419,9 @@ manifest schema v1 的稳定校验错误包括：`missing_image_manifest`、
 `image_materialization_missing`，不完整摘要使用 `image_materialization_incomplete`；平台批次停止
 细节使用 `image_download_failed`，下载失败行使用稳定的 `image_download_retryable` 或
 `image_non_raster_response`、`image_decode_failed`、`image_too_large`、`image_source_unavailable`
-等终态错误码。只有 `image_download_retryable` 可以产生候选级 `candidate_deferred`；终态错误必须
-停止当前 child。存在未清空暂缓项且本轮未满足数量目标时
-停止原因为 `deferred_retry_pending`；事件和停止摘要必须保存 `deferred_retryable_count` 与
-`deferred_retryable_failures`。晋升/数据库文件一致性错误由 `failures[].code/message`、runner 阶段失败原因和报告共同保留。
+等终态错误码。所有在适用尝试结束后仍失败的图片候选都产生候选级 `candidate_deferred` 并继续当前
+child；只有 `image_download_retryable` 标记 `retryable=true`，其余终态错误标记 `retryable=false`。
+存在未清空暂缓项且本轮未满足数量目标时停止原因为 `deferred_retry_pending`；事件和停止摘要必须保存
+`deferred_image_count` 与 `deferred_image_failures`，并按错误码分别汇总 retryable/terminal 计数。
+晋升/数据库文件一致性错误由 `failures[].code/message`、runner 阶段失败原因和报告共同保留。
 操作人不得编辑 manifest、摘要或冻结状态把错误补签为成功。

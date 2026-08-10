@@ -52,7 +52,8 @@
 `image_download_retryable` 时写
 `candidate_deferred`，暂时跳过该回答/文章并继续后续候选；失败 ID 不进入候选记忆，checkpoint 回到
 最早失败页。该帖不得把详情失败、部分成功或公式图排除解释成图片完成。
-格式、解码、大小或明确非重试 HTTP 等终态错误写失败 manifest 后停止当前页，不写 deferred。
+格式、解码、大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样写失败 manifest 与
+`candidate_deferred` 后继续后续候选。
 客户端必须保留真实 HTTP 状态；HTTP 200 空字节继续有限重试，流式响应超过字节上限直接使用
 `image_too_large`，不得折叠为可重试空响应。
 

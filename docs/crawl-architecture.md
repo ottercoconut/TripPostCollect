@@ -136,11 +136,11 @@ runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并�
 详情、作者与媒体处理前跳过。详情请求、空响应或解析等可恢复失败必须记录
 `runtime_failed`，保留原页/游标，且失败 ID 不进入 seen 集合。
 
-正文图片失败分为两支：只有空响应、超时或临时请求错误在单图有限重试耗尽后生成
-`image_download_retryable`，平台先原子追加失败 manifest，再写 `candidate_deferred`，把该 ID 放入仅
-当前 child 有效的临时集合并继续后续候选。格式、解码、大小或明确非重试 HTTP 等终态错误只写失败
-manifest，随后以 `runtime_failed` 停在当前来源坐标。两类失败帖都不进入正式
-JSONL、SQLite 或跨轮 seen；停止摘要汇总 `deferred_retryable_failures`，checkpoint 回到最早失败的
+正文图片失败分为两支：空响应、超时或临时请求错误在单图有限重试耗尽后生成
+`image_download_retryable`；格式、解码、大小或明确非重试 HTTP 等终态错误保留具体错误码且不做
+无意义重试。两类都先原子追加失败 manifest，再写 `candidate_deferred`，把该 ID 放入仅当前 child
+有效的临时集合并继续后续候选。两类失败帖都不进入正式 JSONL、SQLite 或跨轮 seen；停止摘要汇总
+`deferred_image_failures`，checkpoint 回到最早失败的
 page/offset/cursor 且标记批次不完整。默认数量模式若后续有效候选达到目标，可正常导入有效集合；
 否则保存累计摘要并以 `deferred_retry_pending` 等待下轮；该状态优先于候选上限、停滞和来源耗尽。
 显式来源耗尽模式存在 deferred 时不得生成

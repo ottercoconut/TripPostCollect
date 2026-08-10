@@ -96,8 +96,8 @@
 `image_download_failed` 留证；可恢复项使用 `image_download_retryable` 和 `candidate_deferred`，暂时
 跳过整帖并继续后续候选。失败 ID 不写已处理候选，最终 checkpoint 恢复最早失败的
 page/offset/search ID，不能把后续扫描解释为已跨越该安全前沿。
-格式、解码、大小或明确非重试 HTTP 等终态错误不写 deferred，必须停止并保留当前
-page/offset/search ID。
+格式、解码、大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样写 `candidate_deferred`，
+暂时跳过整帖并继续，checkpoint 仍保留最早失败的 page/offset/search ID。
 客户端必须保留真实 HTTP 状态；HTTP 200 空字节由共享 helper 继续有限重试，不得折叠成第一次成功。
 
 根执行器按 `note_download_url` 重建候选并复验 manifest、SHA/MIME/尺寸。正式运行晋升到

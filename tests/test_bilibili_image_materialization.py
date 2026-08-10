@@ -353,7 +353,7 @@ def test_image_failure_keeps_page_and_candidate_unseen(monkeypatch, tmp_path: Pa
     result = mediacrawler_crawl.run_bilibili_article_search(run_args(db_path), tmp_path / "batch")
 
     assert result["ok"] is False
-    assert result["run"]["returncode"] == 0
+    assert result["run"]["returncode"] == 0, result["run"]["stderr_tail"]
     assert result["image_materialization"]["downloaded_images"] == 0
     assert result["image_materialization"]["retryable_failures"] == 1
     manifest_path = Path(result["image_materialization"]["manifest_paths"][0])
@@ -368,11 +368,11 @@ def test_image_failure_keeps_page_and_candidate_unseen(monkeypatch, tmp_path: Pa
     assert deferred[0]["details"]["identity"] == "123"
     assert deferred[0]["details"]["attempts"] == 3
     assert stopped["details"]["stop_reason"] == "deferred_retry_pending"
-    assert stopped["details"]["stop_detail"] == "retryable_candidate_failures"
+    assert stopped["details"]["stop_detail"] == "image_candidate_failures"
     assert stopped["details"]["resume_page"] == 1
     assert stopped["details"]["batch_complete"] is False
     assert stopped["details"]["candidate_identities"] == []
-    assert stopped["details"]["deferred_retryable_count"] == 1
+    assert stopped["details"]["deferred_image_count"] == 1
 
 
 def test_deferred_candidate_wins_over_empty_page_exhaustion(
@@ -418,13 +418,13 @@ def test_deferred_candidate_wins_over_empty_page_exhaustion(
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
     assert stopped["details"]["stop_reason"] == "deferred_retry_pending"
-    assert stopped["details"]["stop_detail"] == "retryable_candidate_failures"
+    assert stopped["details"]["stop_detail"] == "image_candidate_failures"
     assert stopped["details"]["resume_page"] == 1
     assert stopped["details"]["source_has_more"] is True
     assert stopped["details"]["batch_complete"] is False
 
 
-def test_terminal_image_failure_stops_without_deferring_candidate(
+def test_terminal_image_failure_is_deferred_and_later_candidate_continues(
     monkeypatch, tmp_path: Path
 ) -> None:
     db_path = tmp_path / "posts.sqlite"
@@ -444,13 +444,27 @@ def test_terminal_image_failure_stops_without_deferring_candidate(
     )
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
     install_successful_run_mocks(monkeypatch)
-    monkeypatch.setattr(
-        mediacrawler_crawl,
-        "fetch_bilibili_image_bytes",
-        lambda *args: (_ for _ in ()).throw(
-            mediacrawler_crawl.RemoteImageFetchError(
+    calls = 0
+
+    def fetch_image(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise mediacrawler_crawl.RemoteImageFetchError(
                 "HTTP 404", http_status=404, retryable=False
             )
+        return mediacrawler_crawl.RemoteImagePreview(
+            content=png_bytes(),
+            media_type="image/png",
+            final_url="https://i0.hdslb.com/bfs/article/body.png",
+        )
+
+    monkeypatch.setattr(mediacrawler_crawl, "fetch_bilibili_image_bytes", fetch_image)
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_article_page",
+        lambda keyword, page, **kwargs: (
+            [search_item("123"), search_item("456")] if page == 1 else []
         ),
     )
 
@@ -458,14 +472,14 @@ def test_terminal_image_failure_stops_without_deferring_candidate(
         run_args(db_path), tmp_path / "batch"
     )
 
-    assert result["ok"] is False
-    assert result["run"]["returncode"] == 1
+    assert result["run"]["returncode"] == 0, result["run"]["stderr_tail"]
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    assert not [event for event in events if event["type"] == "candidate_deferred"]
+    deferred = [event for event in events if event["type"] == "candidate_deferred"]
+    assert deferred[0]["details"]["identity"] == "123"
+    assert deferred[0]["details"]["retryable"] is False
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "runtime_failed"
-    assert stopped["details"]["image_error_code"] == "image_source_unavailable"
-    assert stopped["details"]["candidate_identities"] == []
+    assert stopped["details"]["stop_reason"] == "target_new_met"
+    assert stopped["details"]["candidate_identities"] == ["456"]
 
 
 def test_deferred_candidate_wins_when_it_exactly_hits_hard_limit(
@@ -560,7 +574,7 @@ def test_image_failure_does_not_block_later_bilibili_candidate(
 
     assert result["ok"] is True
     assert result["image_materialization"]["complete"] is True
-    assert result["image_materialization"]["deferred_retryable_count"] == 1
+    assert result["image_materialization"]["deferred_image_count"] == 1
     content_jsonl = next((tmp_path / "batch").rglob("search_contents_*.jsonl"))
     rows = [json.loads(line) for line in content_jsonl.read_text().splitlines()]
     assert [row["content_id"] for row in rows] == ["124"]

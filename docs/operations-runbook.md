@@ -521,13 +521,13 @@ child 的 `image_materialization.manifest_evidence` 所指 manifest → SQLite �
 | 信号 | 分类 | 处理 |
 |---|---|---|
 | `image_download_retryable` | 单图已在同一 child 内完成最多 3 次指数退避重试，平台会话、临时网络或响应仍失败 | 核对 manifest `attempts=3`、`candidate_deferred` 与平台重试日志；暂时跳过整帖并继续后续候选，失败 ID 不写已处理记忆，checkpoint 回到最早失败坐标；若后续候选仍未满足完成条件，整轮保持 `deferred_retry_pending` 并从累计摘要恢复 |
-| `deferred_retry_pending` | 本轮存在至少一个已留证但尚未成功的图片候选 | 不得解释为 `source_exhausted`；读取 `deferred_retryable_failures`，从 runner 新开一轮按 checkpoint 重试。永久失败需另行取得排除授权，不能自动写 seen |
+| `deferred_retry_pending` | 本轮存在至少一个已留证但尚未成功的图片候选 | 不得解释为 `source_exhausted`；读取 `deferred_image_failures`，从 runner 新开一轮按 checkpoint 重试。永久失败需另行取得排除授权，不能自动写 seen |
 | `missing_image_manifest` / `image_manifest_count_mismatch` | staging/manifest 不完整 | 停止入库，核对 child 实际 artifact 和平台 store；禁止手工补空 manifest |
 | `image_manifest_identity_mismatch` | URL、平台、帖子、顺序、来源字段或稳定键不一致 | 视为代码/产物版本错误，修复后重跑整帖 |
 | `image_path_escape` / `image_file_missing` | 路径边界或文件缺失 | 停止晋升，检查 symlink、清理程序和 artifact 完整性 |
-| `image_non_raster_response` / `image_decode_failed` | 返回 HTML/JSON/视频或损坏图片 | 写失败 manifest 后以 `runtime_failed` 停在当前来源坐标；检查登录/验证和 URL 选择，不得写 `candidate_deferred` 或改后缀伪装成图片 |
-| `image_source_unavailable` | 明确的非重试 HTTP 终态（如 404） | 写失败 manifest 后停止 child、保留当前前沿与详情/CDN 证据；修复来源或由用户批准排除，不得自动继续或写 seen |
-| `image_too_large` | 单文件或解码像素超过安全上限 | 写失败 manifest 后停止 child；如需改上限必须走代码、测试和治理变更 |
+| `image_non_raster_response` / `image_decode_failed` | 返回 HTML/JSON/视频或损坏图片 | 写失败 manifest 与 `candidate_deferred`，不做无意义重试，暂时跳过整帖并继续；检查登录/验证和 URL 选择，不得改后缀伪装成图片 |
+| `image_source_unavailable` | 明确的非重试 HTTP 终态（如 400/404） | 保存真实状态并写失败 manifest 与 `candidate_deferred`，不做无意义重试，暂时跳过整帖并继续；持续失败时修复来源或由用户批准排除，不得自动写 seen |
+| `image_too_large` | 单文件或解码像素超过安全上限 | 写失败 manifest 与 `candidate_deferred`，暂时跳过整帖并继续；如需改上限必须走代码、测试和治理变更 |
 | `image_hash_mismatch` / `image_manifest_metadata_mismatch` | staging 字节与 manifest 不一致 | 停止并保留证据，排查写入竞态或文件篡改 |
 | `image_existing_conflict` / `image_promotion_conflict` | staging 整帖目录或长期内容寻址目标已有不同字节 | 停止覆盖，保留两侧证据并排查稳定键、旧文件或并发写入 |
 | 晋升期间 `KeyboardInterrupt` / `SystemExit` | 可捕获进程中断 | 执行器先回滚本轮已晋升的 `reused=false` 文件再传播中断；核对长期目录无新孤儿后按原 checkpoint 重跑。`SIGKILL`/掉电需人工核对 SQLite 引用与内容寻址文件 |

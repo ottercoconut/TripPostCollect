@@ -93,13 +93,13 @@ def test_deferred_image_candidate_blocks_source_exhaustion_completion(
                     "candidate_count": 1,
                     "valid_new_count": 0,
                     "stop_reason": "deferred_retry_pending",
-                    "stop_detail": "retryable_candidate_failures",
+                    "stop_detail": "image_candidate_failures",
                     "resume_page": 2,
                     "resume_cursor": "search-id",
                     "source_has_more": True,
                     "batch_complete": False,
-                    "deferred_retryable_count": 1,
-                    "deferred_retryable_failures": [
+                    "deferred_image_count": 1,
+                    "deferred_image_failures": [
                         {
                             "identity": "note-1",
                             "error_code": "image_download_retryable",
@@ -125,7 +125,7 @@ def test_deferred_image_candidate_blocks_source_exhaustion_completion(
     assert validation["source_exhausted_met"] is False
     assert validation["completion_met"] is False
     assert validation["stop_reason"] == "deferred_retry_pending"
-    assert evidence["stop_event"]["deferred_retryable_count"] == 1
+    assert evidence["stop_event"]["deferred_image_count"] == 1
 
 
 def test_inconsistent_exhaustion_event_is_rejected_when_deferred_count_remains(
@@ -142,8 +142,8 @@ def test_inconsistent_exhaustion_event_is_rejected_when_deferred_count_remains(
             "stop_detail": "empty_page",
             "source_page": 2,
             "raw_batch_count": 0,
-            "deferred_retryable_count": 1,
-            "deferred_retryable_failures": [
+            "deferred_image_count": 1,
+            "deferred_image_failures": [
                 {
                     "identity": "article-1",
                     "error_code": "image_download_retryable",
@@ -162,10 +162,48 @@ def test_inconsistent_exhaustion_event_is_rejected_when_deferred_count_remains(
         completion_mode="source-exhausted",
     )
 
-    assert validation["deferred_retryable_count"] == 1
+    assert validation["deferred_image_count"] == 1
     assert validation["source_exhausted_met"] is False
     assert validation["completion_met"] is False
     assert validation["stop_reason"] == "deferred_retry_pending"
+
+
+def test_deferred_image_failures_are_reflected_in_materialization_summary() -> None:
+    materialization = {
+        "retryable_failures": 0,
+        "terminal_failures": 0,
+        "complete": True,
+    }
+    pagination = {
+        "stop_event": {
+            "deferred_image_count": 2,
+            "deferred_image_failures": [
+                {
+                    "identity": "retryable",
+                    "error_code": "image_download_retryable",
+                    "retryable": True,
+                    "attempts": 3,
+                },
+                {
+                    "identity": "terminal",
+                    "error_code": "image_source_unavailable",
+                    "retryable": False,
+                    "attempts": 1,
+                },
+            ],
+        }
+    }
+
+    summary = mediacrawler_crawl.attach_deferred_image_evidence(
+        materialization,
+        pagination,
+    )
+
+    assert summary["complete"] is True
+    assert summary["deferred_image_count"] == 2
+    assert summary["retryable_failures"] == 1
+    assert summary["terminal_failures"] == 1
+    assert len(summary["deferred_image_failures"]) == 2
 
 
 def test_source_exhaustion_without_stop_event_never_falls_back_to_target_met(

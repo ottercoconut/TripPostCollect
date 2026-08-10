@@ -63,8 +63,8 @@
 实际尝试证据。三次仍为临时错误才记录 `image_download_retryable` 和 `candidate_deferred`，暂时跳过整帖并
 继续后续候选；失败 ID 不写账号级候选记忆，checkpoint 回到最早失败的 page/search ID。不保存
 该帖成功图片子集为完整帖，也不触发自动换号；其他完整帖子继续参与本轮既定完成条件。
-格式、解码、大小或明确非重试 HTTP 等终态错误写失败 manifest 后停止当前 page/search ID，不写
-deferred，也不继续请求后续候选。
+格式、解码、大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样写失败 manifest 与
+`candidate_deferred`，暂时跳过整帖并继续后续候选。
 客户端必须保留真实 HTTP 状态；HTTP 200 空字节由共享 helper 继续有限重试，不得折叠成第一次成功。
 
 根执行器按相同优先级重建候选，复验 manifest、SHA/MIME/尺寸和路径边界。正式运行晋升到
@@ -309,7 +309,7 @@ python scripts/xhs_runner.py \
 | 搜索连续性登录/图片验证 | 暂停当前搜索批次 | 保持当前页置前，等待操作人处理；通过后继续，600 秒超时则失败且不入库 |
 | 搜索 API 返回登录已过期 | 暂停原请求 | 解开重试器包装后的内层错误，刷新当前可见页但不关闭任何标签页，置前最新的小红书页并等待人工恢复；可见登录 UI 与 self-info API 均恢复后刷新 Cookie/storage state 并重试同一来源页，600 秒超时才写 `login_required`，checkpoint 不推进 |
 | 搜索 API 461/471 验证 | 暂停原 API 请求 | 用响应的 `Verifyuuid`、`Verifytype` 打开平台人工验证页；通过后刷新 Cookie 并重试原请求 |
-| 正文图下载可恢复失败 | 该帖暂缓、整轮待重试 | 从 `candidate_deferred`、`deferred_retryable_failures` 和 manifest 定位图片；继续本轮后续候选，失败 ID 不写 seen，checkpoint 保持最早失败 page/search ID；未满足既定完成条件时保留累计摘要而不做部分入库 |
+| 正文图最终失败 | 该帖暂缓、整轮待重试 | 从 `candidate_deferred`、`deferred_image_failures` 和 manifest 定位图片；继续本轮后续候选，失败 ID 不写 seen，checkpoint 保持最早失败 page/search ID；未满足既定完成条件时保留累计摘要而不做部分入库 |
 | manifest 身份、格式、哈希或路径错误 | 失败，不入库 | 停止晋升和 checkpoint；修复代码/产物链路后重跑，禁止删行或只保留 URL |
 | 作者页二维码安全验证 | 暂停当前作者补全 | 保持验证页置前，等待操作人扫码；通过后继续，600 秒超时则失败且不入库 |
 | 守卫安装后出现任意新标签页 | 进入无条件保护期 | 无论平台弹出还是 crawler 受控创建，均立即置前并从出现时起至少保留 30 秒；滚动无位移、所有代码关闭和浏览器退出都必须等待，不能因未识别出验证标记而立即关闭 |
