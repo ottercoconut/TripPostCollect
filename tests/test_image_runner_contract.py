@@ -221,6 +221,8 @@ def test_runner_revalidates_sqlite_relations_and_long_term_bytes(tmp_path: Path)
         "checked_posts": 1,
         "checked_images": 1,
         "expected_images": 1,
+        "source_images": 1,
+        "sha256_duplicate_images": 0,
         "quick_check": "ok",
         "foreign_key_check": "ok",
         "reason": "",

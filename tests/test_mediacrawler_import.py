@@ -13,6 +13,7 @@ from PIL import Image
 import pytest
 
 from trippostcollect.artifacts.image_candidates import content_image_candidates
+from trippostcollect.artifacts.image_completion import verify_image_artifacts
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
 from trippostcollect.artifacts.image_materialization import write_staging_image
 from trippostcollect.db.bootstrap import bootstrap_connection
@@ -82,6 +83,8 @@ def staged_selection(
     project_root: Path,
     platform_key: str,
     record: dict,
+    *,
+    image_payloads: list[bytes] | None = None,
 ) -> tuple[dict, Path, Path]:
     data_root = project_root / "temp" / "batch" / platform_key / "data"
     manifest_path = data_root / platform_key / "image_manifest.jsonl"
@@ -96,8 +99,13 @@ def staged_selection(
             )
         )
         staging_root = manifest_path.parent if platform_key == "bilibili" else data_root
+        payload = (
+            image_payloads[candidate.source_index]
+            if image_payloads is not None
+            else png_bytes((candidate.source_index + 1, 4, 5))
+        )
         staged = write_staging_image(
-            [png_bytes((candidate.source_index + 1, 4, 5))],
+            [payload],
             staging_root=staging_root,
             relative_stem=relative_stem,
         )
@@ -271,10 +279,18 @@ def test_five_platform_manifests_share_root_verification_promotion_and_import(
             promote=True,
         )
     )
+    artifact_evidence = verify_image_artifacts(
+        {"image_materialization": report},
+        project_root=project_root,
+        expect_promotion=True,
+    )
 
     assert report["complete"] is True
     assert report["candidate_posts"] == report["complete_posts"] == 5
     assert report["expected_images"] == report["validated_images"] == 5
+    assert artifact_evidence["ok"] is True
+    assert artifact_evidence["unique_images"] == 5
+    assert artifact_evidence["sha256_duplicate_images"] == 0
     assert report["promoted_images"] == 5
     assert report["reused_images"] == 0
     assert complete_identities == set(materialized)
@@ -331,6 +347,93 @@ def test_five_platform_manifests_share_root_verification_promotion_and_import(
     assert quick_check == "ok"
     assert foreign_keys == []
     assert len(list(media_root.rglob("*.png"))) == 5
+
+
+def test_same_post_images_are_deduplicated_by_verified_sha256_before_import(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    media_root = project_root / "temp" / "formal-media"
+    record = {
+        "content_id": "zhihu-sha-dedupe",
+        "content": "body",
+        "image_list": [
+            "https://pic1.zhimg.com/v2-asset-a_r.jpg",
+            "https://pic1.zhimg.com/v2-asset-a_1440w.jpg",
+            "https://pic1.zhimg.com/v2-asset-b_r.jpg",
+        ],
+    }
+    duplicate_payload = png_bytes((10, 20, 30))
+    item, _, _ = staged_selection(
+        project_root,
+        "zhihu",
+        record,
+        image_payloads=[duplicate_payload, duplicate_payload, png_bytes((40, 50, 60))],
+    )
+
+    report, materialized, complete_identities = (
+        mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=media_root,
+            promote=True,
+        )
+    )
+    artifact_evidence = verify_image_artifacts(
+        {"image_materialization": report},
+        project_root=project_root,
+        expect_promotion=True,
+    )
+    retained = materialized[item["identity"]]
+    item["materialized_images"] = retained
+    summary = {
+        "captured_at": "2026-08-10T00:00:00+00:00",
+        "keyword": "青岛旅游",
+        "batch_dir": str(project_root / "temp" / "batch"),
+    }
+    db_path = project_root / "temp" / "formal.sqlite"
+    result = mediacrawler_crawl.import_valid_records(
+        summary,
+        [item],
+        db_path,
+        project_root=project_root,
+        media_root=media_root,
+        require_local_images=True,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        post_images_count = conn.execute(
+            "SELECT post_images_count FROM web_posts WHERE platform_post_id=?",
+            ("zhihu-sha-dedupe",),
+        ).fetchone()[0]
+        images = conn.execute(
+            """
+            SELECT image_index, image_url, sha256, raw_image_json
+            FROM web_post_images
+            WHERE image_role='content'
+            ORDER BY image_index
+            """
+        ).fetchall()
+
+    assert report["complete"] is True
+    assert report["expected_images"] == report["validated_images"] == 3
+    assert report["unique_images"] == report["promoted_images"] == 2
+    assert report["sha256_duplicate_images"] == 1
+    assert artifact_evidence["ok"] is True
+    assert artifact_evidence["expected_images"] == 3
+    assert artifact_evidence["unique_images"] == 2
+    assert artifact_evidence["sha256_duplicate_images"] == 1
+    assert complete_identities == {item["identity"]}
+    assert [image.source_index for image in retained] == [0, 1]
+    assert [image.manifest_source_index for image in retained] == [0, 2]
+    assert retained[0].sha256_duplicate_sources[0].source_index == 1
+    assert result["inserted_rows"] == 1
+    assert post_images_count == 2
+    assert [row[0] for row in images] == [0, 1]
+    assert len({row[2] for row in images}) == 2
+    assert "sha256_duplicate_sources" in images[0][3]
+    assert len(list(media_root.rglob("*.png"))) == 2
 
 
 def test_no_import_image_verification_never_promotes_or_creates_sqlite(

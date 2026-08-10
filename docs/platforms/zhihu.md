@@ -48,6 +48,9 @@
 把详情失败、部分成功或公式图排除解释成图片完成。
 
 根执行器按最终 `image_list` 顺序复验 manifest 和文件，正式运行晋升到 `data/media/zhihu/...`
-并在同一 SQLite 事务写本地证据。`request_failed`、`parse_failed` 和
+前在同一帖子内按验证后的 SHA-256 保留首次来源并连续重编号；同哈希的 `_r`、`_1440w` 等 URL
+变体不重复落长期文件或图片关系，但其 URL、资产键和 manifest 行保留为首项的重复来源证据。
+不同尺寸或编码导致 SHA-256 不同的变体仍分别保留。随后在同一 SQLite 事务写本地证据。
+`request_failed`、`parse_failed` 和
 `content_detail_unobserved` 均不能进入成功态；`--no-import` 只保留 staging/manifest，不写长期
 目录或数据库。

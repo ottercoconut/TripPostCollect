@@ -72,6 +72,16 @@ class ValidatedImage:
 
 
 @dataclass(frozen=True, slots=True)
+class Sha256DuplicateSource:
+    source_index: int
+    source_key: str
+    source_asset_key: str
+    source_url: str
+    manifest_path: str
+    manifest_line: int
+
+
+@dataclass(frozen=True, slots=True)
 class MaterializedImage:
     platform_key: str
     platform_post_id: str
@@ -87,8 +97,10 @@ class MaterializedImage:
     height: int
     sha256: str
     reused: bool
+    manifest_source_index: int | None = None
     manifest_path: str | None = None
     manifest_line: int | None = None
+    sha256_duplicate_sources: tuple[Sha256DuplicateSource, ...] = ()
 
 
 def _magic_mime(header: bytes) -> str | None:

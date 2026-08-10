@@ -161,8 +161,11 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 每条进入正式有效集合的记录还必须满足整帖图片原子条件：所有权威正文图都已使用当前平台会话
 下载到 staging；`image_manifest.jsonl` 的平台、帖子、角色、顺序、来源字段、稳定资产键和 URL 与
 根项目投影完全一致；根项目重新验证文件边界、SHA-256、真实 MIME、后缀、尺寸和解码；正式模式
-全部晋升到 `data/media/<platform>/<safe_post_id>/<index>-<asset_hash>.<ext>`，并在同一 SQLite
-事务写入帖子和带 `local_path/width/height/mime_type/sha256` 的图片关系。任一图片缺失、失败或
+在同一帖子内按验证后的文件 SHA-256 保留源顺序首次出现项，重复来源仍保留在 manifest 和首项的
+`local_file.sha256_duplicate_sources` 证据中；保留项从 0 连续重编号后晋升到
+`data/media/<platform>/<safe_post_id>/<index>-<asset_hash>.<ext>`，并在同一 SQLite 事务写入帖子和带
+`local_path/width/height/mime_type/sha256` 的图片关系。SHA-256 去重只表示字节完全相同，不合并仅在
+视觉上相同但缩放、转码或重新编码后哈希不同的文件，也不跨帖子合并图片关系。任一图片缺失、失败或
 不一致时整帖不得入库；先写 URL、以后再补本地路径不满足本契约。
 
 五平台正文来源是正式字段契约，不是调试信息：
@@ -344,14 +347,17 @@ checkpoint 并按 `runtime_failed` 停止，不得静默生成新 ID 请求猜�
 执行器 `summary.json.image_materialization` 是五平台统一的公开图片结果，必须包含：
 
 - `required`、`promotion_required`、`candidate_posts`、`complete_posts`；
-- `expected_images`、`downloaded_images`、`validated_images`、`reused_images`、`promoted_images`；
+- `expected_images`、`downloaded_images`、`validated_images`、`unique_images`、
+  `sha256_duplicate_images`、`sha256_duplicates`、`reused_images`、`promoted_images`；
 - `retryable_failures`、`terminal_failures`、`complete`；
 - `manifest_paths`、`manifest_sha256`、逐文件 `manifest_evidence` 和 `failures`。
 
 产物完整的等式为
 `candidate_posts == complete_posts` 且
 `expected_images == downloaded_images == validated_images`，并且失败数与 `failures` 均为 0。正式
-入库还要求 `promoted_images + reused_images == expected_images`；诊断模式要求
+入库还要求 `unique_images + sha256_duplicate_images == expected_images`、
+`len(sha256_duplicates) == sha256_duplicate_images`，以及
+`promoted_images + reused_images == unique_images`；诊断模式要求
 `promotion_required=false`，两项长期文件计数保持 0。执行器同时写
 `formal_validation.image_materialization_complete=true`；多平台收集的正式校验必须满足
 `local_images_complete=true`、`local_image_failure_count=0`。以上谓词还要与原数量/来源耗尽、

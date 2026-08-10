@@ -71,7 +71,8 @@ article API；微博、抖音和知乎在各自 MediaCrawler 浏览器内执行 
   -> 原子写 image_manifest.jsonl（URL + 稳定资产键 + SHA/MIME/尺寸）
   -> 根项目重建同一候选集合并逐项核对 manifest 身份
   -> 根项目重新读取并解码文件，验证路径边界、SHA、MIME、后缀、尺寸
-  -> 正式模式以内容寻址文件名原子晋升 data/media；已存在同 SHA 文件幂等复用
+  -> 同帖按验证后的 SHA-256 保留首次来源，重复来源保留 manifest/别名证据，保留项连续重编号
+  -> 正式模式以内容寻址文件名原子晋升 data/media；已存在同路径同 SHA 文件幂等复用
   -> MaterializedImage 注入统一入库映射
   -> web_posts 与 web_post_images 在同一 SQLite savepoint 中提交
 ```
@@ -82,7 +83,9 @@ article API；微博、抖音和知乎在各自 MediaCrawler 浏览器内执行 
 作者头像可以在统一入库层保留为 `author_avatar` URL 参考，但它没有通向下载、manifest 或
 `data/media` 的边，也不参与正文图计数。
 各平台 store 只负责当前会话下载、staging 和 manifest，不拥有长期路径或 SQLite schema；根项目
-统一拥有安全复验、晋升与事务持久化，因此没有五套互不一致的本地路径实现。
+统一拥有安全复验、同帖 SHA-256 去重、晋升与事务持久化，因此没有五套互不一致的本地路径实现。
+这里的去重是字节级且仅限同帖：视觉相同但不同编码/分辨率的文件哈希不同则分别保留；跨帖子即使
+哈希相同也各自保留图片关系和帖子目录证据。
 
 正式 runner 固定向 child 传 `--download-images --media-root <data/media>`，冻结计划写
 `local_image_storage_required=true`。诊断执行器可把媒体根限制到项目 `temp/`，但

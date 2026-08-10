@@ -19,7 +19,10 @@ data/media/<platform_key>/<safe_platform_post_id>/<source_index>-<asset_hash>.<r
 `web_post_images.local_path` 只保存项目相对路径；对应行还必须保存 `width`、`height`、真实
 `mime_type` 和文件 `sha256`。URL 继续作为来源与重试证据保存在 `image_url`，但 URL 本身不再满足
 正式图片持久化。`outputs/mediacrawler_runs/.../<platform>/` 或 XHS child artifact 中的图片只是本轮
-staging；正式文件只有在根项目复验后才能原子晋升到 `data/media`。
+staging；正式文件只有在根项目复验后才能原子晋升到 `data/media`。同一帖子内复验后 SHA-256
+相同的正文图只保留源顺序第一项，重复 URL/资产键/manifest 行写入该保留项
+`raw_image_json.local_file.sha256_duplicate_sources`；保留项重新从 0 连续编号。该规则不跨帖子，且
+不把视觉近似但字节哈希不同的缩放或转码文件合并。
 
 相关 schema：
 
@@ -196,7 +199,8 @@ python scripts/import_ctf_captures.py \
   `(platform_key, platform_post_id)`，平台 ID 缺失时按 `(platform_key, canonical_url)`；
   本轮覆盖主表字段并删除后重建该帖的 `web_post_images`，不增加主表总行数。
 - 新增/更新记录出现在 `web_posts`；每张正文图在 `web_post_images` 同时具有来源 URL、角色、连续
-  顺序、非空 `local_path`、尺寸、真实 MIME 和 SHA-256，且路径对应 `data/media` 内有效文件。
+  顺序、非空 `local_path`、尺寸、真实 MIME 和 SHA-256，且路径对应 `data/media` 内有效文件；同帖
+  正文图 SHA-256 必须唯一。
 - 页面级证据出现在 `ctf_captures`，成功且内容就绪的详情页同步生成 `web_posts`。
 - 关键字段符合平台能力表：文本/标题、平台原始 ID/URL、发布时间、作者字段、图片 URL、互动指标按平台应有尽有。
 - 明确视频记录只计入跳过，不作为失败记录写入内容主表。
@@ -329,7 +333,9 @@ PY
 导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定账号申请互斥租约并解密会话后调用同一底层执行器。
 五个平台都在当前登录/签名会话中把权威正文图下载到本轮 staging，原子生成 schema v1
 `image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份，正式运行再晋升到
-`data/media` 并注入统一入库映射。任何图片失败都使整帖和正式完成门禁失败。
+`data/media` 并注入统一入库映射。全部 manifest 来源均须先通过下载与字节复验；随后仅在同帖内按
+SHA-256 保留首次来源并记录重复来源证据，不能以去重为由跳过下载或校验。任何图片失败都使整帖和
+正式完成门禁失败。
 微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；`isLongText=true`
 必须用移动详情替换搜索截断文本，失败时不写 JSONL。小红书搜索会补拉
 作者主页指标。知乎回答/文章的原始时间、正文图片和作者粉丝会在清洗前保存并归一化；搜索响应
@@ -359,10 +365,10 @@ PY
 | `post_shares_count` | `share_count`、`shared_count` 等分享字段 |
 | `post_views_count` | `view_count`、`play_count` 等浏览字段 |
 | `web_post_images.image_url`（`content`） | 只来自权威正文图投影：B站详情 `image_urls`、微博 `mblog.pics` 归一后的 `image_list`、小红书详情 `image_list`、抖音图文 `note_download_url`、知乎正文/详情 `image_list`；作者主页、封面、搜索预览、视频、音乐和公式图不进入正文映射 |
-| `web_post_images.image_role/image_index` | 固定 `content`；按去重后源顺序从 0 连续编号 |
+| `web_post_images.image_role/image_index` | 固定 `content`；URL/资产候选归一后仍全部下载复验，再在同帖内按 SHA-256 保留首次来源并从 0 连续编号 |
 | `web_post_images.local_path` | 根项目复验并晋升后的 `data/media/...` 项目相对路径；正式新记录不能为空 |
 | `web_post_images.width/height/mime_type/sha256` | 根项目重新读取本地文件得到并与 manifest 相等的字节证据 |
-| `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；不混入头像等非正文对象 |
+| `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；同 SHA 重复来源写入 `local_file.sha256_duplicate_sources`，不混入头像等非正文对象 |
 | `web_post_images`（`author_avatar`） | 可选作者头像 URL 参考；`local_path` 等本地字段为空，不下载、不进 manifest、不计入 `post_images_count` 或正文图完整性 |
 | `raw_sample_json` | MediaCrawler 原始 JSONL 行；正式记录必须含 `content_detail_status` 和 `content_detail_source` |
 
@@ -411,7 +417,17 @@ B站还要按本轮 `artifact_dir` 检查 `raw_sample_json.content_detail_status
     "expected_images": 240,
     "downloaded_images": 240,
     "validated_images": 240,
-    "promoted_images": 220,
+    "unique_images": 235,
+    "sha256_duplicate_images": 5,
+    "sha256_duplicates": [
+      {
+        "identity": "weibo:id:<id>",
+        "sha256": "<sha256>",
+        "retained_source_index": 0,
+        "duplicate_source_index": 1
+      }
+    ],
+    "promoted_images": 215,
     "reused_images": 20,
     "retryable_failures": 0,
     "terminal_failures": 0,

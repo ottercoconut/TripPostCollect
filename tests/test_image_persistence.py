@@ -87,6 +87,7 @@ def materialize_record(
         result.append(
             replace(
                 promoted,
+                manifest_source_index=candidate.source_index,
                 manifest_path=f"temp/staging/{platform_key}/image_manifest.jsonl",
                 manifest_line=candidate.source_index + 1,
             )
@@ -166,6 +167,7 @@ def test_new_post_persists_complete_content_relationships_and_url_only_avatar(tm
     assert raw["local_file"] == {
         "manifest_line": 1,
         "manifest_path": "temp/staging/xhs/image_manifest.jsonl",
+        "manifest_source_index": 0,
         "size_bytes": materialized[0].size_bytes,
         "source": "formal_image_materialization_v1",
         "source_url": materialized[0].source_url,

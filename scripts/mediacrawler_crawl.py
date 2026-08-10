@@ -30,6 +30,7 @@ from urllib.request import Request, urlopen
 from playwright.async_api import async_playwright
 
 from trippostcollect.artifacts.image_candidates import (
+    ImageCandidate,
     content_image_candidates,
     image_items_for_record,
     normalize_image_url,
@@ -46,7 +47,9 @@ from trippostcollect.artifacts.image_materialization import (
     DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
     ImageMaterializationError,
     MaterializedImage,
+    Sha256DuplicateSource,
     SUPPORTED_IMAGE_MIME_TYPES,
+    ValidatedImage,
     promote_validated_image,
     safe_platform_post_id,
     validate_image_file,
@@ -1174,13 +1177,56 @@ def inject_materialized_images(
 ) -> list[dict[str, Any]]:
     """Attach complete local-file evidence to every authoritative content image."""
 
-    materialized = {(item.image_role, item.source_index): item for item in materialized_images}
-    if len(materialized) != len(materialized_images):
-        raise ImagePersistenceError("duplicate materialized image identity")
+    def source_identity(
+        *,
+        platform_key: str,
+        platform_post_id: str,
+        source_index: int,
+        source_key: str,
+        source_asset_key: str,
+        source_url: str,
+    ) -> tuple[str, str, int, str, str, str]:
+        return (
+            platform_key,
+            platform_post_id,
+            source_index,
+            source_key,
+            source_asset_key,
+            source_url,
+        )
+
+    materialized: dict[tuple[str, str, int, str, str, str], MaterializedImage] = {}
+    duplicate_identities: set[tuple[str, str, int, str, str, str]] = set()
+    for local in materialized_images:
+        if local.manifest_source_index is None:
+            raise ImagePersistenceError("materialized image lacks manifest source index")
+        identity = source_identity(
+            platform_key=local.platform_key,
+            platform_post_id=local.platform_post_id,
+            source_index=local.manifest_source_index,
+            source_key=local.source_key,
+            source_asset_key=local.source_asset_key,
+            source_url=local.source_url,
+        )
+        if identity in materialized:
+            raise ImagePersistenceError("duplicate materialized image identity")
+        materialized[identity] = local
+        for duplicate in local.sha256_duplicate_sources:
+            duplicate_identity = source_identity(
+                platform_key=local.platform_key,
+                platform_post_id=local.platform_post_id,
+                source_index=duplicate.source_index,
+                source_key=duplicate.source_key,
+                source_asset_key=duplicate.source_asset_key,
+                source_url=duplicate.source_url,
+            )
+            if duplicate_identity in materialized or duplicate_identity in duplicate_identities:
+                raise ImagePersistenceError("duplicate SHA-256 source identity")
+            duplicate_identities.add(duplicate_identity)
     content_items = [item for item in image_items if item.get("role") == "content"]
-    if len(materialized) != len(content_items):
+    if len(materialized) + len(duplicate_identities) != len(content_items):
         raise ImagePersistenceError(
-            f"materialized image count mismatch: got={len(materialized)} expected={len(content_items)}"
+            "materialized and SHA-256 duplicate image count does not match source candidates"
         )
 
     result: list[dict[str, Any]] = []
@@ -1189,29 +1235,44 @@ def inject_materialized_images(
         if item.get("role") != "content":
             result.append(item)
             continue
-        identity = (str(item["role"]), int(item["source_index"]))
+        identity = source_identity(
+            platform_key=str(item.get("platform_key") or ""),
+            platform_post_id=str(item.get("platform_post_id") or ""),
+            source_index=int(item["source_index"]),
+            source_key=str(item.get("source_key") or ""),
+            source_asset_key=str(item.get("source_asset_key") or ""),
+            source_url=str(item.get("url") or ""),
+        )
         local = materialized.get(identity)
-        if local is None or any(
-            (
-                local.platform_key != item.get("platform_key"),
-                local.platform_post_id != item.get("platform_post_id"),
-                local.source_key != item.get("source_key"),
-                local.source_asset_key != item.get("source_asset_key"),
-                local.source_url != item.get("url"),
-            )
-        ):
+        if local is None:
+            if identity in duplicate_identities:
+                continue
             raise ImagePersistenceError(f"materialized image identity mismatch: {identity}")
         local_file = {
             "source": "formal_image_materialization_v1",
             "source_url": local.source_url,
             "size_bytes": local.size_bytes,
+            "manifest_source_index": local.manifest_source_index,
         }
         if local.manifest_path:
             local_file["manifest_path"] = local.manifest_path
         if local.manifest_line is not None:
             local_file["manifest_line"] = local.manifest_line
+        if local.sha256_duplicate_sources:
+            local_file["sha256_duplicate_sources"] = [
+                {
+                    "source_index": duplicate.source_index,
+                    "source_key": duplicate.source_key,
+                    "source_asset_key": duplicate.source_asset_key,
+                    "source_url": duplicate.source_url,
+                    "manifest_path": duplicate.manifest_path,
+                    "manifest_line": duplicate.manifest_line,
+                }
+                for duplicate in local.sha256_duplicate_sources
+            ]
         item.update(
             {
+                "source_index": local.source_index,
                 "local_path": local.local_path,
                 "width": local.width,
                 "height": local.height,
@@ -1221,6 +1282,13 @@ def inject_materialized_images(
             }
         )
         result.append(item)
+    retained_content = [item for item in result if item.get("role") == "content"]
+    if len(retained_content) != len(materialized_images):
+        raise ImagePersistenceError("retained materialized image count mismatch")
+    if [int(item["source_index"]) for item in retained_content] != list(
+        range(len(retained_content))
+    ):
+        raise ImagePersistenceError("retained materialized image indices are not continuous")
     return result
 
 
@@ -1937,10 +2005,13 @@ def materialize_formal_record_images(
     expected_images = 0
     downloaded_images = 0
     validated_images = 0
+    unique_images = 0
+    sha256_duplicate_images = 0
     promoted_images = 0
     reused_images = 0
     retryable_failures = 0
     terminal_failures = 0
+    sha256_duplicates: list[dict[str, Any]] = []
 
     for item in selected:
         identity = str(item.get("identity") or "")
@@ -1999,7 +2070,9 @@ def materialize_formal_record_images(
                 entry.source_index: (manifest_path, line_number)
                 for entry, manifest_path, line_number in post_manifest_rows
             }
-            post_materialized: list[MaterializedImage] = []
+            validated_rows: list[
+                tuple[ImageCandidate, ValidatedImage, Path, int, Path]
+            ] = []
             for candidate, entry in zip(candidates, ordered_entries, strict=True):
                 manifest_path, manifest_line = evidence_by_index[entry.source_index]
                 staging_root = _staging_root_for_manifest_entry(manifest_path, entry)
@@ -2024,30 +2097,110 @@ def materialize_formal_record_images(
                         f"manifest byte metadata does not match staging file for {identity}",
                     )
                 validated_images += 1
-                if not promote:
+                validated_rows.append(
+                    (candidate, validated, manifest_path, manifest_line, staging_root)
+                )
+
+            retained_rows: list[
+                tuple[ImageCandidate, ValidatedImage, Path, int, Path]
+            ] = []
+            retained_by_sha256: dict[str, int] = {}
+            duplicate_sources_by_retained: dict[int, list[Sha256DuplicateSource]] = {}
+            for (
+                candidate,
+                validated,
+                manifest_path,
+                manifest_line,
+                staging_root,
+            ) in validated_rows:
+                retained_position = retained_by_sha256.get(validated.sha256)
+                if retained_position is None:
+                    retained_by_sha256[validated.sha256] = len(retained_rows)
+                    retained_rows.append(
+                        (
+                            candidate,
+                            validated,
+                            manifest_path,
+                            manifest_line,
+                            staging_root,
+                        )
+                    )
                     continue
+                (
+                    retained_candidate,
+                    _,
+                    retained_manifest_path,
+                    retained_manifest_line,
+                    _,
+                ) = retained_rows[retained_position]
+                duplicate = Sha256DuplicateSource(
+                    source_index=candidate.source_index,
+                    source_key=candidate.source_key,
+                    source_asset_key=candidate.source_asset_key,
+                    source_url=candidate.source_url,
+                    manifest_path=_project_relative_evidence_path(manifest_path, root),
+                    manifest_line=manifest_line,
+                )
+                duplicate_sources_by_retained.setdefault(retained_position, []).append(
+                    duplicate
+                )
+                sha256_duplicate_images += 1
+                sha256_duplicates.append(
+                    {
+                        "identity": identity,
+                        "sha256": validated.sha256,
+                        "retained_source_index": retained_candidate.source_index,
+                        "retained_source_url": retained_candidate.source_url,
+                        "retained_manifest_path": _project_relative_evidence_path(
+                            retained_manifest_path,
+                            root,
+                        ),
+                        "retained_manifest_line": retained_manifest_line,
+                        "duplicate_source_index": candidate.source_index,
+                        "duplicate_source_url": candidate.source_url,
+                        "duplicate_manifest_path": duplicate.manifest_path,
+                        "duplicate_manifest_line": duplicate.manifest_line,
+                    }
+                )
+            unique_images += len(retained_rows)
+
+            post_materialized: list[MaterializedImage] = []
+            if not promote:
+                complete_identities.add(identity)
+                continue
+            for retained_index, (
+                candidate,
+                validated,
+                manifest_path,
+                manifest_line,
+                staging_root,
+            ) in enumerate(retained_rows):
+                persistence_candidate = replace(candidate, source_index=retained_index)
                 promoted = promote_validated_image(
                     validated,
-                    candidate,
+                    persistence_candidate,
                     staging_root=staging_root,
                     media_root=resolved_media_root,
                     project_root=root,
                 )
                 promoted = replace(
                     promoted,
+                    manifest_source_index=candidate.source_index,
                     manifest_path=_project_relative_evidence_path(manifest_path, root),
                     manifest_line=manifest_line,
+                    sha256_duplicate_sources=tuple(
+                        duplicate_sources_by_retained.get(retained_index, [])
+                    ),
                 )
                 post_materialized.append(promoted)
                 reused_images += int(promoted.reused)
                 promoted_images += int(not promoted.reused)
-            if promote and len(post_materialized) != len(candidates):
+            if len(post_materialized) != len(retained_rows):
                 raise ImageMaterializationError(
                     "image_manifest_count_mismatch",
-                    f"promoted image count does not match candidates for {identity}",
+                    f"promoted image count does not match SHA-256 unique images for {identity}",
                 )
-            if promote:
-                materialized_by_identity[identity] = post_materialized
+            materialized_by_identity[identity] = post_materialized
             complete_identities.add(identity)
         except (ImageManifestError, ImageMaterializationError, OSError, UnicodeError) as exc:
             code = getattr(exc, "code", "missing_image_manifest")
@@ -2090,6 +2243,9 @@ def materialize_formal_record_images(
         "expected_images": expected_images,
         "downloaded_images": downloaded_images,
         "validated_images": validated_images,
+        "unique_images": unique_images,
+        "sha256_duplicate_images": sha256_duplicate_images,
+        "sha256_duplicates": sha256_duplicates,
         "reused_images": reused_images,
         "promoted_images": promoted_images,
         "retryable_failures": retryable_failures,
@@ -3790,6 +3946,8 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
                 f"- 预期正文图：`{image_materialization.get('expected_images', 0)}`",
                 f"- staging 下载：`{image_materialization.get('downloaded_images', 0)}`",
                 f"- 根项目字节复验：`{image_materialization.get('validated_images', 0)}`",
+                f"- SHA-256 唯一正文图：`{image_materialization.get('unique_images', 0)}`",
+                f"- SHA-256 重复来源：`{image_materialization.get('sha256_duplicate_images', 0)}`",
                 f"- 新晋升文件：`{image_materialization.get('promoted_images', 0)}`",
                 f"- 复用文件：`{image_materialization.get('reused_images', 0)}`",
                 f"- 可恢复失败：`{image_materialization.get('retryable_failures', 0)}`",
@@ -4060,6 +4218,9 @@ def main() -> int:
             ),
             "downloaded_images": 0,
             "validated_images": 0,
+            "unique_images": 0,
+            "sha256_duplicate_images": 0,
+            "sha256_duplicates": [],
             "reused_images": 0,
             "promoted_images": 0,
             "retryable_failures": 0,

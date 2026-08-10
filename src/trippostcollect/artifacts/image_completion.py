@@ -51,6 +51,8 @@ def verify_image_artifacts(
         "candidate_posts": 0,
         "expected_images": 0,
         "validated_images": 0,
+        "unique_images": 0,
+        "sha256_duplicate_images": 0,
         "verified_manifests": 0,
         "reason": "image_materialization_missing",
     }
@@ -65,16 +67,25 @@ def verify_image_artifacts(
         expected_images = int(image.get("expected_images") or 0)
         downloaded_images = int(image.get("downloaded_images") or 0)
         validated_images = int(image.get("validated_images") or 0)
+        unique_images = int(image.get("unique_images") or 0)
+        sha256_duplicate_images = int(image.get("sha256_duplicate_images") or 0)
         promoted_images = int(image.get("promoted_images") or 0)
         reused_images = int(image.get("reused_images") or 0)
         retryable_failures = int(image.get("retryable_failures") or 0)
         terminal_failures = int(image.get("terminal_failures") or 0)
+        sha256_duplicates = image.get("sha256_duplicates")
         manifest_items = image.get("manifest_evidence")
         manifest_paths = image.get("manifest_paths")
         if not isinstance(manifest_items, list) or not isinstance(manifest_paths, list):
             raise ValueError("manifest evidence must be lists")
         if any(not isinstance(item, dict) for item in manifest_items):
             raise ValueError("manifest evidence row must be an object")
+        if not isinstance(sha256_duplicates, list) or any(
+            not isinstance(item, dict) for item in sha256_duplicates
+        ):
+            raise ValueError("SHA-256 duplicate evidence must be a list of objects")
+        if len(sha256_duplicates) != sha256_duplicate_images:
+            raise ValueError("SHA-256 duplicate evidence count does not match summary")
 
         verified_items: list[dict[str, str]] = []
         for item in manifest_items:
@@ -108,12 +119,16 @@ def verify_image_artifacts(
             raise ValueError("complete post count does not match candidates")
         if expected_images != downloaded_images or expected_images != validated_images:
             raise ValueError("downloaded/validated image count does not match candidates")
+        if unique_images + sha256_duplicate_images != expected_images:
+            raise ValueError("SHA-256 unique/duplicate image count does not match candidates")
+        if unique_images > expected_images:
+            raise ValueError("SHA-256 unique image count exceeds candidates")
         if retryable_failures or terminal_failures or image.get("failures"):
             raise ValueError("image materialization contains failures")
         if expected_images > 0 and not verified_items:
             raise ValueError("non-empty image set has no manifest evidence")
-        if expect_promotion and promoted_images + reused_images != expected_images:
-            raise ValueError("promoted/reused image count does not match candidates")
+        if expect_promotion and promoted_images + reused_images != unique_images:
+            raise ValueError("promoted/reused image count does not match SHA-256 unique images")
     except (OSError, TypeError, ValueError) as exc:
         evidence["reason"] = str(exc)
         return evidence
@@ -127,6 +142,8 @@ def verify_image_artifacts(
             "candidate_posts": candidate_posts,
             "expected_images": expected_images,
             "validated_images": validated_images,
+            "unique_images": unique_images,
+            "sha256_duplicate_images": sha256_duplicate_images,
             "verified_manifests": len(verified_items),
             "manifest_sha256": aggregate_sha256,
             "reason": "",
@@ -181,7 +198,7 @@ def verify_image_persistence(
     if not artifact_evidence["ok"]:
         evidence["reason"] = str(artifact_evidence["reason"])
         return evidence
-    if int(artifact_evidence["expected_images"]) > 0 and not media.is_dir():
+    if int(artifact_evidence["unique_images"]) > 0 and not media.is_dir():
         evidence["reason"] = "formal media root is missing"
         return evidence
     if summary.get("import_completion_met") is not True:
@@ -223,6 +240,9 @@ def verify_image_persistence(
                     raise ValueError(f"post image count mismatch: {identity}")
                 if [int(row[0]) for row in images] != list(range(len(images))):
                     raise ValueError(f"post image indices are not continuous: {identity}")
+                image_hashes = [str(row[5] or "") for row in images]
+                if len(image_hashes) != len(set(image_hashes)):
+                    raise ValueError(f"post contains duplicate content image SHA-256: {identity}")
                 for _, local_path, width, height, mime_type, expected_sha256 in images:
                     path_value = str(local_path or "")
                     if Path(path_value).is_absolute():
@@ -249,7 +269,7 @@ def verify_image_persistence(
         evidence["reason"] = str(exc)
         return evidence
 
-    if checked_images != int(artifact_evidence["expected_images"]):
+    if checked_images != int(artifact_evidence["unique_images"]):
         evidence["reason"] = "persisted image count does not match materialization"
         return evidence
     evidence.update(
@@ -257,7 +277,11 @@ def verify_image_persistence(
             "ok": True,
             "checked_posts": len(identities),
             "checked_images": checked_images,
-            "expected_images": int(artifact_evidence["expected_images"]),
+            "expected_images": int(artifact_evidence["unique_images"]),
+            "source_images": int(artifact_evidence["expected_images"]),
+            "sha256_duplicate_images": int(
+                artifact_evidence["sha256_duplicate_images"]
+            ),
             "quick_check": "ok",
             "foreign_key_check": "ok",
             "reason": "",
