@@ -379,27 +379,40 @@ def promote_validated_image(
         promoted = existing
     else:
         part_path = target_dir / f".{target.name}.{secrets.token_hex(8)}.part"
-        with current.path.open("rb") as source, part_path.open("xb") as destination:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                destination.write(chunk)
-            destination.flush()
-            os.fsync(destination.fileno())
-        copied = validate_image_file(
-            part_path,
-            allowed_root=media,
-            expected_sha256=current.sha256,
-            max_bytes=max_bytes,
-            max_pixels=max_pixels,
-        )
-        os.replace(part_path, target)
-        _fsync_directory(target_dir)
-        promoted = validate_image_file(
-            target,
-            allowed_root=media,
-            expected_sha256=copied.sha256,
-            max_bytes=max_bytes,
-            max_pixels=max_pixels,
-        )
+        created_target = False
+        try:
+            with current.path.open("rb") as source, part_path.open("xb") as destination:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    destination.write(chunk)
+                destination.flush()
+                os.fsync(destination.fileno())
+            copied = validate_image_file(
+                part_path,
+                allowed_root=media,
+                expected_sha256=current.sha256,
+                max_bytes=max_bytes,
+                max_pixels=max_pixels,
+            )
+            os.replace(part_path, target)
+            created_target = True
+            _fsync_directory(target_dir)
+            promoted = validate_image_file(
+                target,
+                allowed_root=media,
+                expected_sha256=copied.sha256,
+                max_bytes=max_bytes,
+                max_pixels=max_pixels,
+            )
+        except BaseException:
+            part_path.unlink(missing_ok=True)
+            if created_target:
+                target.unlink(missing_ok=True)
+            for directory in (target_dir, resolved_platform_dir):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            raise
 
     return MaterializedImage(
         platform_key=candidate.platform_key,

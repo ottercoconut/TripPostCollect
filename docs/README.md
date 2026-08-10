@@ -117,6 +117,9 @@ CLI 不传 `--completion-mode` 时仍默认按配置的 `target_new_posts`、`ca
 否则整轮保持 `deferred_retry_pending` 并保留累计摘要，不能降级为只存 URL，也不能误报来源耗尽。
 图片格式、解码、大小、明确非重试 HTTP 等终态错误只写失败 manifest，不写 `candidate_deferred`；
 child 必须以 `runtime_failed` 停在当前来源坐标，修复或人工处置后重跑。
+客户端必须把真实 HTTP 状态传到 manifest；HTTP 200 空字节也属于可恢复空响应，不能在第一次请求后
+误判为格式终态。晋升或 SQLite 导入失败时删除本轮新建但尚未形成数据库引用的长期文件；既有复用
+文件不删除。
 
 正常默认模式下，小红书的实际候选量从 0 开始按页增长，只有通过详情前去重的未知候选才占预算；达到
 `target_new_posts` 后立即停止，不会为了配置的 `candidate_hard_limit` 继续抓满。后者只是单次

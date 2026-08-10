@@ -53,6 +53,8 @@
 `candidate_deferred`，暂时跳过该回答/文章并继续后续候选；失败 ID 不进入候选记忆，checkpoint 回到
 最早失败页。该帖不得把详情失败、部分成功或公式图排除解释成图片完成。
 格式、解码、大小或明确非重试 HTTP 等终态错误写失败 manifest 后停止当前页，不写 deferred。
+客户端必须保留真实 HTTP 状态；HTTP 200 空字节继续有限重试，流式响应超过字节上限直接使用
+`image_too_large`，不得折叠为可重试空响应。
 
 根执行器按 `image_list` 投影后的候选顺序复验 manifest 和文件，正式运行晋升到 `data/media/zhihu/...`
 前仍在同一帖子内按验证后的 SHA-256 做字节级兜底去重并连续重编号；随后在同一 SQLite 事务写

@@ -257,6 +257,33 @@ def test_existing_long_term_hash_path_with_different_bytes_is_a_conflict(tmp_pat
     assert exc_info.value.code == "image_promotion_conflict"
 
 
+def test_promotion_failure_after_replace_removes_new_target(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    staging_root = project_root / "temp" / "staging"
+    media_root = project_root / "data" / "media"
+    project_root.mkdir()
+    staged = write_staging_image(
+        [image_bytes("PNG")],
+        staging_root=staging_root,
+        relative_stem="xhs/images/post-rollback/000",
+    )
+
+    with mock.patch(
+        "trippostcollect.artifacts.image_materialization._fsync_directory",
+        side_effect=OSError("simulated fsync failure"),
+    ):
+        with pytest.raises(OSError, match="simulated fsync failure"):
+            promote_validated_image(
+                staged,
+                candidate(post_id="post-rollback"),
+                staging_root=staging_root,
+                media_root=media_root,
+                project_root=project_root,
+            )
+
+    assert not list(media_root.rglob("*.*"))
+
+
 def test_interrupted_staging_replace_leaves_only_identifiable_part(tmp_path: Path) -> None:
     with mock.patch(
         "trippostcollect.artifacts.image_materialization.os.replace",

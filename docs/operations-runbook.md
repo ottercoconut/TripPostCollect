@@ -528,5 +528,6 @@ child 的 `image_materialization.manifest_evidence` 所指 manifest → SQLite �
 | `image_too_large` | 单文件或解码像素超过安全上限 | 写失败 manifest 后停止 child；如需改上限必须走代码、测试和治理变更 |
 | `image_hash_mismatch` / `image_manifest_metadata_mismatch` | staging 字节与 manifest 不一致 | 停止并保留证据，排查写入竞态或文件篡改 |
 | `image_existing_conflict` / `image_promotion_conflict` | staging 整帖目录或长期内容寻址目标已有不同字节 | 停止覆盖，保留两侧证据并排查稳定键、旧文件或并发写入 |
+| `rolled_back_images>0` / `image_promotion_rollback` 日志 | 晋升或 SQLite 导入失败，执行器已删除本轮新建的无引用文件 | 核对长期目录没有 `reused=false` 遗留；不得删除 `reused=true` 既有文件。若 SQLite 已成功提交而 checkpoint 失败，保留数据库引用文件并恢复控制面 |
 | `image_materialization_missing` / `image_materialization_incomplete` | child 摘要缺少统一图片结果或完成等式失败 | 视为执行器/版本契约错误，不允许 runner 降级完成 |
 | `persistence_verified` 失败 | 晋升文件与 SQLite 路径、SHA、MIME、尺寸或计数不一致 | 不 finalize、不推进 checkpoint；从摘要身份逐帖修复并重新执行正式事务 |

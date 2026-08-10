@@ -167,7 +167,8 @@ page/offset/cursor 且标记批次不完整。默认数量模式若后续有效�
 权威正文、`content_detail_status/content_detail_source`、正文图/时间/作者/粉丝和互动字段。标题或搜索摘要
 不能替代正文。根项目对有效集合逐帖核对 manifest 和文件；只有本轮完成模式、
 行为/策略、字段和本地图片门禁同时成立才执行第二次复验、晋升并入库；未完成轮次只保留
-staging/manifest，不写长期媒体。导入报告区分处理、新增和更新；更新已有帖
+staging/manifest，不写长期媒体。晋升或 SQLite 事务中途失败会删除本轮新建文件，内容寻址复用文件
+保持不变；SQLite 成功提交后文件已有正式引用，后续 checkpoint 失败只恢复控制面。导入报告区分处理、新增和更新；更新已有帖
 时会优先匹配并保留仍有效的既有本地图片证据，新的整帖图片集合仍在同一事务重建。
 
 `artifacts_verified` 对 `image_materialization` 的 manifest 哈希和计数等式负责；

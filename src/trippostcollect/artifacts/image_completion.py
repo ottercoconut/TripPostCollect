@@ -70,6 +70,7 @@ def verify_image_artifacts(
         unique_images = int(image.get("unique_images") or 0)
         sha256_duplicate_images = int(image.get("sha256_duplicate_images") or 0)
         promoted_images = int(image.get("promoted_images") or 0)
+        rolled_back_images = int(image.get("rolled_back_images") or 0)
         reused_images = int(image.get("reused_images") or 0)
         retryable_failures = int(image.get("retryable_failures") or 0)
         terminal_failures = int(image.get("terminal_failures") or 0)
@@ -125,6 +126,8 @@ def verify_image_artifacts(
             raise ValueError("SHA-256 unique image count exceeds candidates")
         if retryable_failures or terminal_failures or image.get("failures"):
             raise ValueError("image materialization contains failures")
+        if rolled_back_images:
+            raise ValueError("image materialization required promotion rollback")
         if expected_images > 0 and not verified_items:
             raise ValueError("non-empty image set has no manifest evidence")
         if expect_promotion and promoted_images + reused_images != unique_images:

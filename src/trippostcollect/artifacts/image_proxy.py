@@ -29,10 +29,12 @@ class RemoteImageFetchError(ValueError):
         *,
         http_status: int | None = None,
         retryable: bool = False,
+        code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.http_status = http_status
         self.retryable = retryable
+        self.code = code
 
 
 def remote_image_failure_code(error: RemoteImageFetchError) -> str:
@@ -40,6 +42,8 @@ def remote_image_failure_code(error: RemoteImageFetchError) -> str:
 
     if error.retryable:
         return "image_download_retryable"
+    if error.code:
+        return error.code
     if error.http_status is not None:
         return "image_source_unavailable"
     return "image_non_raster_response"
@@ -125,7 +129,9 @@ def validate_remote_image_response(
         if declared_size < 0:
             raise RemoteImageFetchError("remote image returned negative Content-Length")
         if declared_size > max_bytes:
-            raise RemoteImageFetchError(f"remote image exceeds {max_bytes} bytes")
+            raise RemoteImageFetchError(
+                f"remote image exceeds {max_bytes} bytes", code="image_too_large"
+            )
     return media_type
 
 
@@ -134,7 +140,9 @@ def read_limited_response(response: Any, *, max_bytes: int) -> bytes:
 
     content = response.read(max_bytes + 1)
     if len(content) > max_bytes:
-        raise RemoteImageFetchError(f"remote image exceeds {max_bytes} bytes")
+        raise RemoteImageFetchError(
+            f"remote image exceeds {max_bytes} bytes", code="image_too_large"
+        )
     return content
 
 
@@ -177,6 +185,11 @@ def fetch_remote_image_bytes(
                     allowed_media_types=allowed_media_types,
                 )
                 content = read_limited_response(response, max_bytes=max_bytes)
+                if not content:
+                    raise RemoteImageFetchError(
+                        "remote image returned an empty response",
+                        retryable=True,
+                    )
                 return RemoteImagePreview(
                     content=content,
                     media_type=media_type,

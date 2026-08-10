@@ -43,6 +43,7 @@
 大小或明确非重试 HTTP 等终态错误写失败 manifest 后立即停止当前页，不写 deferred。失败 ID 不写
 持久候选记忆，checkpoint 回到最早失败页；该帖不允许只保留成功图片子集，后续完整帖子继续参与
 本轮既定完成条件。
+客户端必须保留真实 HTTP 状态；HTTP 200 空字节由共享 helper 继续有限重试，不得折叠成第一次成功。
 
 根执行器重新按 `image_list` 顺序核对 manifest 身份、SHA/MIME/尺寸和 staging 文件。正式 runner
 固定开启正文图下载并晋升到 `data/media/weibo/...`，随后在帖子与图片同一 SQLite 事务保存 URL、

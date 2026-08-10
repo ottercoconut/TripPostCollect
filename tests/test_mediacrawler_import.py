@@ -468,6 +468,102 @@ def test_no_import_image_verification_never_promotes_or_creates_sqlite(
     assert not db_path.exists()
 
 
+def test_failed_multi_image_promotion_rolls_back_new_long_term_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    record = {
+        "content_id": "bili-promotion-rollback",
+        "content_text": "body",
+        "content_images_detail_status": "detail_observed",
+        "image_urls": [
+            "https://i0.hdslb.com/bfs/article/first.png",
+            "https://i0.hdslb.com/bfs/article/second.png",
+        ],
+    }
+    item, _, _ = staged_selection(project_root, "bilibili", record)
+    media_root = project_root / "temp" / "formal-media"
+    original = mediacrawler_crawl.promote_validated_image
+    calls = 0
+
+    def fail_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise mediacrawler_crawl.ImageMaterializationError(
+                "image_promotion_conflict", "injected second-image failure"
+            )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "promote_validated_image",
+        fail_second,
+    )
+
+    report, materialized, complete_identities = (
+        mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=media_root,
+            promote=True,
+        )
+    )
+
+    assert report["complete"] is False
+    assert report["failures"][0]["code"] == "image_promotion_conflict"
+    assert report["rolled_back_images"] == 1
+    assert report["promoted_images"] == 0
+    assert materialized == {}
+    assert complete_identities == set()
+    assert not list(media_root.rglob("*.*"))
+
+
+def test_sqlite_import_failure_rolls_back_newly_promoted_files(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    item, _, _ = staged_selection(
+        project_root,
+        "xhs",
+        five_platform_image_records()["xhs"],
+    )
+    media_root = project_root / "temp" / "formal-media"
+    report, materialized, _ = mediacrawler_crawl.materialize_formal_record_images(
+        [item],
+        project_root=project_root,
+        media_root=media_root,
+        promote=True,
+    )
+    assert len(list(media_root.rglob("*.png"))) == 1
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "import_valid_records",
+        lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.Error("injected")),
+    )
+
+    with pytest.raises(sqlite3.Error, match="injected"):
+        mediacrawler_crawl.import_valid_records_with_media_rollback(
+            {"keyword": "青岛旅游"},
+            [item],
+            project_root / "temp" / "formal.sqlite",
+            materialized_images_by_identity=materialized,
+            image_materialization=report,
+            project_root=project_root,
+            media_root=media_root,
+        )
+
+    assert report["rolled_back_images"] == 1
+    assert report["promoted_images"] == 0
+    assert not list(media_root.rglob("*.*"))
+    assert "reason=sqlite_import_failed removed_new_files=1" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "failure_case,expected_code",
     [

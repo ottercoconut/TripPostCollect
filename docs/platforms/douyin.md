@@ -98,6 +98,7 @@
 page/offset/search ID，不能把后续扫描解释为已跨越该安全前沿。
 格式、解码、大小或明确非重试 HTTP 等终态错误不写 deferred，必须停止并保留当前
 page/offset/search ID。
+客户端必须保留真实 HTTP 状态；HTTP 200 空字节由共享 helper 继续有限重试，不得折叠成第一次成功。
 
 根执行器按 `note_download_url` 重建候选并复验 manifest、SHA/MIME/尺寸。正式运行晋升到
 `data/media/douyin/...` 后才在同一 SQLite 事务写帖子与 `web_post_images`；诊断模式不晋升。

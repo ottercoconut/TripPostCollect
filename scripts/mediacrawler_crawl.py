@@ -1994,6 +1994,42 @@ def _staging_root_for_manifest_entry(
     return manifest_path.parent
 
 
+def rollback_newly_promoted_images(
+    materialized_by_identity: dict[str, list[MaterializedImage]],
+    *,
+    project_root: str | Path = PROJECT_ROOT,
+    media_root: str | Path = LOCAL_MEDIA_ROOT,
+) -> int:
+    """Remove only files created by the current promotion attempt."""
+
+    root = Path(project_root).expanduser().resolve(strict=True)
+    media = Path(media_root).expanduser().resolve()
+    if media != root and root not in media.parents:
+        raise ImagePersistenceError("media root escapes project root")
+    removed = 0
+    candidate_dirs: set[Path] = set()
+    for images in materialized_by_identity.values():
+        for item in images:
+            if item.reused:
+                continue
+            path = (root / item.local_path).resolve()
+            if path != media and media not in path.parents:
+                raise ImagePersistenceError("promoted image escapes media root")
+            candidate_dirs.add(path.parent)
+            if path.is_file():
+                path.unlink()
+                removed += 1
+    for directory in sorted(candidate_dirs, key=lambda value: len(value.parts), reverse=True):
+        current = directory
+        while current != media and media in current.parents:
+            try:
+                current.rmdir()
+            except OSError:
+                break
+            current = current.parent
+    return removed
+
+
 def materialize_formal_record_images(
     selected: list[dict[str, Any]],
     *,
@@ -2030,6 +2066,7 @@ def materialize_formal_record_images(
     retryable_failures = 0
     terminal_failures = 0
     sha256_duplicates: list[dict[str, Any]] = []
+    rolled_back_images = 0
 
     for item in selected:
         identity = str(item.get("identity") or "")
@@ -2186,6 +2223,7 @@ def materialize_formal_record_images(
             if not promote:
                 complete_identities.add(identity)
                 continue
+            materialized_by_identity[identity] = post_materialized
             for retained_index, (
                 candidate,
                 validated,
@@ -2218,7 +2256,6 @@ def materialize_formal_record_images(
                     "image_manifest_count_mismatch",
                     f"promoted image count does not match SHA-256 unique images for {identity}",
                 )
-            materialized_by_identity[identity] = post_materialized
             complete_identities.add(identity)
         except (ImageManifestError, ImageMaterializationError, OSError, UnicodeError) as exc:
             code = getattr(exc, "code", "missing_image_manifest")
@@ -2253,6 +2290,16 @@ def materialize_formal_record_images(
         and validated_images == expected_images
         and not failures
     )
+    if promote and not complete:
+        rolled_back_images = rollback_newly_promoted_images(
+            materialized_by_identity,
+            project_root=root,
+            media_root=resolved_media_root,
+        )
+        materialized_by_identity = {}
+        complete_identities = set()
+        promoted_images = 0
+        reused_images = 0
     report = {
         "required": True,
         "promotion_required": promote,
@@ -2266,6 +2313,7 @@ def materialize_formal_record_images(
         "sha256_duplicates": sha256_duplicates,
         "reused_images": reused_images,
         "promoted_images": promoted_images,
+        "rolled_back_images": rolled_back_images,
         "retryable_failures": retryable_failures,
         "terminal_failures": terminal_failures,
         "complete": complete,
@@ -2398,6 +2446,46 @@ def import_valid_records(
         "skipped_video": 0,
         "parse_errors": 0,
     }
+
+
+def import_valid_records_with_media_rollback(
+    summary: dict[str, Any],
+    selected: list[dict[str, Any]],
+    db_path: Path,
+    *,
+    materialized_images_by_identity: dict[str, list[MaterializedImage]],
+    image_materialization: dict[str, Any],
+    project_root: str | Path = PROJECT_ROOT,
+    media_root: str | Path = LOCAL_MEDIA_ROOT,
+) -> dict[str, Any]:
+    """Import one formal batch and remove its new media if SQLite rolls back."""
+
+    try:
+        return import_valid_records(
+            summary,
+            selected,
+            db_path,
+            project_root=project_root,
+            media_root=media_root,
+            require_local_images=True,
+        )
+    except BaseException:
+        rolled_back = rollback_newly_promoted_images(
+            materialized_images_by_identity,
+            project_root=project_root,
+            media_root=media_root,
+        )
+        image_materialization["rolled_back_images"] = int(
+            image_materialization.get("rolled_back_images") or 0
+        ) + rolled_back
+        image_materialization["promoted_images"] = 0
+        print(
+            "[image_promotion_rollback] "
+            f"reason=sqlite_import_failed removed_new_files={rolled_back}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
 
 
 def normalize_bilibili_article_record(item: dict[str, Any], keyword: str) -> dict[str, Any] | None:
@@ -2601,6 +2689,12 @@ def download_bilibili_record_images(
             try:
                 response = fetch(candidate.source_url, candidate.platform_post_id, cookie_header)
                 http_status = response.http_status
+                if not response.content:
+                    raise RemoteImageFetchError(
+                        "Bilibili image returned an empty response",
+                        http_status=http_status,
+                        retryable=True,
+                    )
                 staged = write_staging_image(
                     [response.content],
                     staging_root=root,
@@ -4114,6 +4208,7 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
                 f"- SHA-256 唯一正文图：`{image_materialization.get('unique_images', 0)}`",
                 f"- SHA-256 重复来源：`{image_materialization.get('sha256_duplicate_images', 0)}`",
                 f"- 新晋升文件：`{image_materialization.get('promoted_images', 0)}`",
+                f"- 失败回滚文件：`{image_materialization.get('rolled_back_images', 0)}`",
                 f"- 复用文件：`{image_materialization.get('reused_images', 0)}`",
                 f"- 可恢复失败：`{image_materialization.get('retryable_failures', 0)}`",
                 f"- 终态失败：`{image_materialization.get('terminal_failures', 0)}`",
@@ -4386,6 +4481,7 @@ def main() -> int:
         ),
         completion_mode=args.completion_mode,
     )
+    materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}
     if args.download_images:
         (
             image_materialization,
@@ -4427,6 +4523,7 @@ def main() -> int:
             "sha256_duplicates": [],
             "reused_images": 0,
             "promoted_images": 0,
+            "rolled_back_images": 0,
             "retryable_failures": 0,
             "terminal_failures": 0,
             "complete": True,
@@ -4479,6 +4576,18 @@ def main() -> int:
             behavior_validation=behavior_validation,
             download_images=True,
         )
+        if not validation["completion_met"]:
+            rolled_back = rollback_newly_promoted_images(
+                materialized_images_by_identity,
+                project_root=PROJECT_ROOT,
+                media_root=media_root,
+            )
+            image_materialization["rolled_back_images"] = int(
+                image_materialization.get("rolled_back_images") or 0
+            ) + rolled_back
+            image_materialization["promoted_images"] = 0
+            materialized_images_by_identity = {}
+            valid_records = []
     elif args.download_images and not args.no_import:
         image_materialization["promotion_deferred"] = True
         image_materialization["promotion_deferred_reason"] = validation["stop_reason"]
@@ -4496,13 +4605,14 @@ def main() -> int:
             "updated_rows": 0,
         }
     else:
-        summary["import_result"] = import_valid_records(
+        summary["import_result"] = import_valid_records_with_media_rollback(
             summary,
             valid_records,
             Path(args.db).expanduser(),
+            materialized_images_by_identity=materialized_images_by_identity,
+            image_materialization=image_materialization,
             project_root=PROJECT_ROOT,
             media_root=media_root,
-            require_local_images=True,
         )
     inserted = int((summary.get("import_result") or {}).get("inserted_rows") or 0)
     summary["target_new_posts"] = target_new_posts

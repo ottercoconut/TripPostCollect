@@ -173,7 +173,9 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 视觉上相同但缩放、转码或重新编码后哈希不同的文件，也不跨帖子合并图片关系。任一图片缺失、失败或
 不一致时整帖不得入库；先写 URL、以后再补本地路径不满足本契约。
 
-平台 child 对单张正文图的空响应、超时或临时请求错误最多执行 3 次有限指数退避重试。仍失败且
+平台 child 对单张正文图的 `None`、HTTP 200 空字节、超时或临时请求错误最多执行 3 次有限指数
+退避重试。客户端不得把 `raise_for_status()` 的 HTTP 状态折叠为 `None`：明确终态状态至少保存真实
+`http_status` 和 `image_source_unavailable`，临时状态在耗尽后保存 `image_download_retryable`。仍失败且
 错误码为唯一可暂缓码 `image_download_retryable` 时，必须先把失败行写入
 manifest，再写 `candidate_deferred` 事件，至少包含平台、候选 ID、错误码、实际尝试次数、图片来源
 序号和当前 page/offset/cursor。该整帖不得写入正式 JSONL、数据库或跨轮候选记忆；同一 child 内可
@@ -371,14 +373,18 @@ checkpoint 并按 `runtime_failed` 停止，不得静默生成新 ID 请求猜�
 
 - `required`、`promotion_required`、`candidate_posts`、`complete_posts`；
 - `expected_images`、`downloaded_images`、`validated_images`、`unique_images`、
-  `sha256_duplicate_images`、`sha256_duplicates`、`reused_images`、`promoted_images`；
+  `sha256_duplicate_images`、`sha256_duplicates`、`reused_images`、`promoted_images`、
+  `rolled_back_images`；
 - `retryable_failures`、`terminal_failures`、`complete`；
 - `manifest_paths`、`manifest_sha256`、逐文件 `manifest_evidence` 和 `failures`。
 
 根项目必须先用 `promotion_required=false` 只读复验全部 staging/manifest，并同时完成数量或来源耗尽、
 字段、行为与策略门禁；任何门禁未通过时不得写 `data/media`，摘要写
 `promotion_deferred=true` 和具体 `promotion_deferred_reason`。只有这些门禁全部通过，正式运行才以
-`promotion_required=true` 再次复验并晋升，然后进入 SQLite 事务。产物完整的等式为
+`promotion_required=true` 再次复验并晋升，然后进入 SQLite 事务。晋升函数在当前文件写入失败时
+删除该文件；整轮后续图片或 SQLite 导入失败时，根执行器回滚本轮所有 `reused=false` 的新文件，
+不得删除此前已存在且 `reused=true` 的内容寻址文件。SQLite 成功提交后，长期文件已形成正式引用；
+后续 checkpoint 或报告验证失败不得删除这些数据库引用文件，而应保留并恢复控制面状态。产物完整的等式为
 `candidate_posts == complete_posts` 且
 `expected_images == downloaded_images == validated_images`，并且失败数与 `failures` 均为 0。正式
 入库还要求 `unique_images + sha256_duplicate_images == expected_images`、

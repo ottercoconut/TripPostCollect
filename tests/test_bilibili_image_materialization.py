@@ -246,6 +246,39 @@ def test_terminal_http_failure_is_not_mislabeled_retryable(tmp_path: Path) -> No
     assert entries[0].error_code == "image_source_unavailable"
 
 
+def test_empty_image_response_retries_and_recovers(tmp_path: Path) -> None:
+    record = hydrated_record()
+    responses = [b"", b"", png_bytes(), png_bytes()]
+
+    def fetcher(source_url: str, post_id: str, cookie_header: str):
+        return mediacrawler_crawl.RemoteImagePreview(
+            content=responses.pop(0),
+            media_type="image/png",
+            final_url=source_url,
+            http_status=200,
+        )
+
+    entries = mediacrawler_crawl.download_bilibili_record_images(
+        record,
+        cookie_header="",
+        platform_data_root=tmp_path,
+        fetcher=fetcher,
+        sleep_fn=lambda _value: None,
+    )
+
+    assert [entry.attempts for entry in entries] == [3, 1]
+    assert all(entry.fetch_status == "downloaded" for entry in entries)
+
+
+def test_remote_size_failure_uses_unified_error_code() -> None:
+    error = mediacrawler_crawl.RemoteImageFetchError(
+        "remote image exceeds 20 bytes",
+        code="image_too_large",
+    )
+
+    assert mediacrawler_crawl.remote_image_failure_code(error) == "image_too_large"
+
+
 def test_bilibili_run_writes_manifest_and_never_downloads_preview(monkeypatch, tmp_path: Path) -> None:
     db_path = tmp_path / "posts.sqlite"
     with sqlite3.connect(db_path) as conn:

@@ -110,6 +110,8 @@ checkpoint 回到最早失败页并保持 `last_batch_complete=false`。
 任一图片不完整时 `image_materialization.complete=false`，不能靠正文和 URL 通过正式门禁。
 格式、解码、大小和明确非重试 HTTP 等终态图片错误写失败 manifest 后以 `runtime_failed` 停在当前
 页，不写 deferred 或 seen；重试、恢复和最终失败均写短日志事件。
+HTTP 200 空 body 也按空响应重试；明确非重试 HTTP 保留状态码。响应头或流式字节超过统一上限时
+错误码固定为 `image_too_large`。
 
 ## 请求节奏、失败与安全前沿
 
