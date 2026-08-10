@@ -67,6 +67,7 @@ article API；微博、抖音和知乎在各自 MediaCrawler 浏览器内执行 
 ```text
 平台详情/正文结构
   -> 平台显式 ImageCandidate（只允许 role=content）
+  -> 知乎仅按 zhimg 资源路径归一已知尺寸后缀并保留首次 URL（不做视觉识别）
   -> 使用当前登录/签名会话下载到本轮 staging
   -> 原子写 image_manifest.jsonl（URL + 稳定资产键 + SHA/MIME/尺寸）
   -> 根项目重建同一候选集合并逐项核对 manifest 身份
@@ -80,6 +81,8 @@ article API；微博、抖音和知乎在各自 MediaCrawler 浏览器内执行 
 显式投影边界分别是 B站详情 `image_urls`、微博 `image_list`、XHS `image_list`、抖音
 `note_download_url` 和知乎 `image_list`。头像、作者主页、搜索预览、封面、视频、音乐和知乎公式
 图片没有从平台对象进入正文候选的边；这项过滤发生在下载前，不依赖下载后文件名或尺寸猜测。
+知乎在同一候选边界额外按 `zhimg.com` 资源路径归一 `_r`、`_<width>w` 等已知变换后缀，避免同一
+平台资源的尺寸 URL 变体重复下载；规则不扩展到外部域名，也不引入感知哈希或视觉相似判断。
 作者头像可以在统一入库层保留为 `author_avatar` URL 参考，但它没有通向下载、manifest 或
 `data/media` 的边，也不参与正文图计数。
 各平台 store 只负责当前会话下载、staging 和 manifest，不拥有长期路径或 SQLite schema；根项目

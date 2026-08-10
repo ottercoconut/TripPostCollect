@@ -33,7 +33,9 @@ search ID、深层耗尽状态、已完成处理候选 ID 和累计摘要，并�
 五个平台的正式新记录都要求 `image_materialization.complete=true`。每个权威正文图必须在
 `web_post_images` 保存 `image_role=content`、连续 `image_index`、来源 URL、项目相对
 `local_path`、`width/height/mime_type/sha256`，且本地文件通过根项目复验；只有 URL 不算覆盖。
-所有来源候选先完成 manifest 和字节复验，再在同一帖子内按 SHA-256 保留源顺序首次出现项；重复
+显式投影后的所有候选先完成 manifest 和字节复验，再在同一帖子内按 SHA-256 保留源顺序首次出现项；重复
 来源保留在 manifest 和首项别名证据中。该规则不跨帖子，也不合并哈希不同的视觉近似变体。
+知乎在此之前仅按 `zhimg.com` 稳定资源路径合并 `_r`、`_<width>w` 等已知 URL 变体，不使用视觉
+识别；被合并变体保留在内容原始证据中而不重复下载。
 筛除头像等无用资源依赖上表的显式字段投影，不使用递归 URL 扫描或图片尺寸启发式，因此被排除
 资源不会触发下载。

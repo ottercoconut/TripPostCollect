@@ -360,8 +360,8 @@ def test_same_post_images_are_deduplicated_by_verified_sha256_before_import(
         "content": "body",
         "image_list": [
             "https://pic1.zhimg.com/v2-asset-a_r.jpg",
-            "https://pic1.zhimg.com/v2-asset-a_1440w.jpg",
             "https://pic1.zhimg.com/v2-asset-b_r.jpg",
+            "https://pic1.zhimg.com/v2-asset-c_r.jpg",
         ],
     }
     duplicate_payload = png_bytes((10, 20, 30))

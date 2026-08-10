@@ -43,14 +43,16 @@
 
 图片字节请求复用当前知乎登录会话。每帖全部图片经真实格式、解码和大小检查后原子写入
 `<platform_artifact>/data/zhihu/images/<content_id>/<index>.<real_ext>`，manifest 位于
-`<platform_artifact>/data/zhihu/image_manifest.jsonl`，来源字段为 `image_list`、角色为 `content`；zhimg 变换
-后缀归一后形成稳定资产键。失败行使用 `image_download_retryable` 或具体格式错误码，当前批次不得
+`<platform_artifact>/data/zhihu/image_manifest.jsonl`，来源字段为 `image_list`、角色为 `content`。
+同帖 `zhimg.com` URL 先按去除 `_r`、`_720w`、`_1440w` 等已知变换后缀的资源路径去重，保留
+首次 URL 并连续编号；原始 `image_list` 继续保留全部 URL 证据，被合并变体不重复下载或写 manifest。
+该规则只识别知乎稳定 URL 语义，不做感知哈希或视觉相似比较。失败行使用
+`image_download_retryable` 或具体格式错误码，当前批次不得
 把详情失败、部分成功或公式图排除解释成图片完成。
 
-根执行器按最终 `image_list` 顺序复验 manifest 和文件，正式运行晋升到 `data/media/zhihu/...`
-前在同一帖子内按验证后的 SHA-256 保留首次来源并连续重编号；同哈希的 `_r`、`_1440w` 等 URL
-变体不重复落长期文件或图片关系，但其 URL、资产键和 manifest 行保留为首项的重复来源证据。
-不同尺寸或编码导致 SHA-256 不同的变体仍分别保留。随后在同一 SQLite 事务写本地证据。
+根执行器按 `image_list` 投影后的候选顺序复验 manifest 和文件，正式运行晋升到 `data/media/zhihu/...`
+前仍在同一帖子内按验证后的 SHA-256 做字节级兜底去重并连续重编号；随后在同一 SQLite 事务写
+本地证据。
 `request_failed`、`parse_failed` 和
 `content_detail_unobserved` 均不能进入成功态；`--no-import` 只保留 staging/manifest，不写长期
 目录或数据库。

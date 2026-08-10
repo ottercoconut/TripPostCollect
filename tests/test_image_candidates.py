@@ -10,6 +10,7 @@ from trippostcollect.artifacts.image_candidates import (
     author_avatar_reference,
     content_image_candidates,
     normalize_image_url,
+    source_asset_key_for_image,
 )
 
 
@@ -135,6 +136,31 @@ def test_zhihu_excludes_formula_author_and_profile_urls() -> None:
         "https://pic1.zhimg.com/v2-body-a.jpg",
         "https://pic2.zhimg.com/v2-body-b.webp",
     ]
+
+
+def test_zhihu_deduplicates_known_zhimg_transform_variants_by_asset_path() -> None:
+    first = "https://pic1.zhimg.com/v2-body-a_r.jpg"
+    record = {
+        "content_id": "answer-variants",
+        "image_list": [
+            first,
+            "https://pic2.zhimg.com/v2-body-a_1440w.jpg",
+            "https://pic3.zhimg.com/v2-body-a_720w.webp?source=answer",
+            "https://external.test/v2-body-a_1440w.jpg",
+        ],
+    }
+
+    candidates = content_image_candidates("zhihu", record)
+
+    assert [item.source_url for item in candidates] == [
+        first,
+        "https://external.test/v2-body-a_1440w.jpg",
+    ]
+    assert [item.source_index for item in candidates] == [0, 1]
+    assert candidates[0].source_asset_key == source_asset_key_for_image(
+        "zhihu",
+        "https://pic2.zhimg.com/v2-body-a_1440w.jpg",
+    )
 
 
 @pytest.mark.parametrize(

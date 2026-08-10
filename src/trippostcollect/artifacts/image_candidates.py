@@ -12,7 +12,8 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 XHS_STABLE_PATH_MARKERS = ("/notes_pre_post/", "/notes_post/", "/notes/")
 ZHIMG_TRANSFORM_SUFFIX_RE = re.compile(
-    r"_(?:b|r|qhd|hd|xs|s|m|l|xl|xxl|original|watermark)\.(?:avif|gif|jpe?g|png|webp)$",
+    r"_(?:[1-9]\d{1,4}w|b|r|qhd|hd|xs|s|m|l|xl|xxl|original|watermark)"
+    r"\.(?:avif|gif|jpe?g|png|webp)$",
     re.IGNORECASE,
 )
 RASTER_SUFFIX_RE = re.compile(r"\.(?:avif|gif|jpe?g|png|webp)$", re.IGNORECASE)
@@ -134,9 +135,22 @@ def _xhs_path_identity(source_url: str) -> str:
     return f"{parsed.netloc.lower()}{parsed.path}"
 
 
+def _zhihu_asset_path(source_url: str) -> str | None:
+    parsed = urlsplit(source_url)
+    hostname = (parsed.hostname or "").lower()
+    if hostname != "zhimg.com" and not hostname.endswith(".zhimg.com"):
+        return None
+    logical_path = ZHIMG_TRANSFORM_SUFFIX_RE.sub("", unquote(parsed.path))
+    return RASTER_SUFFIX_RE.sub("", logical_path)
+
+
 def _dedupe_identity(platform_key: str, source_url: str) -> str:
     if platform_key == "xhs":
         return _xhs_path_identity(source_url)
+    if platform_key == "zhihu":
+        logical_path = _zhihu_asset_path(source_url)
+        if logical_path is not None:
+            return f"zhihu:path:{logical_path}"
     return source_url
 
 
@@ -195,11 +209,10 @@ def source_asset_key_for_image(
         return _fallback_key(platform_key, path)
 
     if platform_key == "zhihu":
-        logical_path = ZHIMG_TRANSFORM_SUFFIX_RE.sub("", path)
-        if parsed.hostname.lower().endswith("zhimg.com"):
-            logical_path = RASTER_SUFFIX_RE.sub("", logical_path)
+        logical_path = _zhihu_asset_path(normalized)
+        if logical_path is not None:
             return _fallback_key(platform_key, logical_path)
-        return _fallback_key(platform_key, f"{parsed.hostname.lower()}{logical_path}")
+        return _fallback_key(platform_key, f"{parsed.hostname.lower()}{path}")
 
     raise ValueError(f"unsupported image candidate platform: {platform_key}")
 

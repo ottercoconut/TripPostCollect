@@ -118,6 +118,9 @@ checkpoint。摘要或其 JSONL 缺失时冻结失败，不能静默丢弃活动
   使用被禁用的 `--get-media`，也不得关闭图片要求完成 URL-only 入库。
 - 图片候选只来自平台权威正文图字段。头像、作者主页、封面、搜索预览、视频、音乐和知乎公式图
   在下载前排除；不得靠下载后尺寸、文件名或人工清理作为正式过滤手段。
+- 知乎仅对 `zhimg.com` 已知 URL 变换后缀按稳定资源路径去重，例如同 token 的 `_r`、`_720w`、
+  `_1440w`；同帖保留首次 URL，原始变体仍在内容原始证据中。该平台规则不使用视觉相似度，也不
+  作用于外部域名。
 - 正式运行前用 `df -h data` 检查数据库、staging 和长期图片目录所在卷的可用空间。容量不足时在
   child 前停止；不得在图片部分晋升后继续勉强入库。
 - `published_at` 必须来自平台原始发帖时间；缺明确证据时保持 NULL，不能用 `captured_at` 或导入时间补。
@@ -333,9 +336,9 @@ PY
 导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定账号申请互斥租约并解密会话后调用同一底层执行器。
 五个平台都在当前登录/签名会话中把权威正文图下载到本轮 staging，原子生成 schema v1
 `image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份，正式运行再晋升到
-`data/media` 并注入统一入库映射。全部 manifest 来源均须先通过下载与字节复验；随后仅在同帖内按
-SHA-256 保留首次来源并记录重复来源证据，不能以去重为由跳过下载或校验。任何图片失败都使整帖和
-正式完成门禁失败。
+`data/media` 并注入统一入库映射。平台显式投影后的全部 manifest 候选均须通过下载与字节复验；
+知乎已知 `zhimg` 尺寸 URL 变体在投影时按资源路径合并，不重复生成 manifest。下载后再仅在同帖内
+按 SHA-256 保留首次来源并记录重复来源证据。任何图片失败都使整帖和正式完成门禁失败。
 微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；`isLongText=true`
 必须用移动详情替换搜索截断文本，失败时不写 JSONL。小红书搜索会补拉
 作者主页指标。知乎回答/文章的原始时间、正文图片和作者粉丝会在清洗前保存并归一化；搜索响应
@@ -365,7 +368,7 @@ SHA-256 保留首次来源并记录重复来源证据，不能以去重为由跳
 | `post_shares_count` | `share_count`、`shared_count` 等分享字段 |
 | `post_views_count` | `view_count`、`play_count` 等浏览字段 |
 | `web_post_images.image_url`（`content`） | 只来自权威正文图投影：B站详情 `image_urls`、微博 `mblog.pics` 归一后的 `image_list`、小红书详情 `image_list`、抖音图文 `note_download_url`、知乎正文/详情 `image_list`；作者主页、封面、搜索预览、视频、音乐和公式图不进入正文映射 |
-| `web_post_images.image_role/image_index` | 固定 `content`；URL/资产候选归一后仍全部下载复验，再在同帖内按 SHA-256 保留首次来源并从 0 连续编号 |
+| `web_post_images.image_role/image_index` | 固定 `content`；知乎先按 `zhimg` 资源路径合并已知尺寸 URL 变体，投影后的候选全部下载复验，再在同帖内按 SHA-256 保留首次来源并从 0 连续编号 |
 | `web_post_images.local_path` | 根项目复验并晋升后的 `data/media/...` 项目相对路径；正式新记录不能为空 |
 | `web_post_images.width/height/mime_type/sha256` | 根项目重新读取本地文件得到并与 manifest 相等的字节证据 |
 | `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；同 SHA 重复来源写入 `local_file.sha256_duplicate_sources`，不混入头像等非正文对象 |
