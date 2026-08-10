@@ -24,6 +24,15 @@ staging；正式文件只有在根项目复验后才能原子晋升到 `data/med
 `raw_image_json.local_file.sha256_duplicate_sources`；保留项重新从 0 连续编号。该规则不跨帖子，且
 不把视觉近似但字节哈希不同的缩放或转码文件合并。
 
+知乎语义资产归一上线前的恢复摘要可能仍引用同一 `zhimg.com` 资产的 `_r`、`_720w`、`_1440w`
+旧 manifest 多行。根项目只在同一个 manifest 内的这些旧行 URL 各不相同、全部下载成功、归一到
+同一真实 zhimg 逻辑路径，且每个 staging 文件的路径、元数据和 SHA-256 复验后完全相同时，将其
+重验为当前一个候选；每行 `source_asset_key` 仅允许当前逻辑键或仓库历史版本实际生成过的旧算法
+键，任意其他键保持失败。成功重验时在 `image_materialization` 写
+`legacy_manifest_reconciled_images` 和逐行 `legacy_manifest_reconciliations`。这些旧冗余行不增加当前
+`expected_images`；同一 manifest 的路径别名先解析去重，不制造旧变体证据；跨 manifest、同 URL
+重复、不同 SHA、外部域名、失败行或跨逻辑资产一律保持 mismatch，等待候选重新抓取。
+
 相关 schema：
 
 | 文件 | 表 |

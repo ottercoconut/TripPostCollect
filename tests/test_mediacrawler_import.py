@@ -4,10 +4,12 @@ from dataclasses import replace
 from hashlib import sha256
 import io
 import json
+import re
 import sqlite3
 import sys
 from importlib import import_module
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from PIL import Image
 import pytest
@@ -79,6 +81,24 @@ def five_platform_image_records() -> dict[str, dict]:
     }
 
 
+def legacy_zhihu_asset_key(source_url: str) -> str:
+    path = urlsplit(source_url).path
+    logical_path = re.sub(
+        r"_(?:b|r|qhd|hd|xs|s|m|l|xl|xxl|original|watermark)"
+        r"\.(?:avif|gif|jpe?g|png|webp)$",
+        "",
+        path,
+        flags=re.IGNORECASE,
+    )
+    identity = re.sub(
+        r"\.(?:avif|gif|jpe?g|png|webp)$",
+        "",
+        logical_path,
+        flags=re.IGNORECASE,
+    )
+    return f"zhihu:urlsha256:{sha256(identity.encode('utf-8')).hexdigest()}"
+
+
 def staged_selection(
     project_root: Path,
     platform_key: str,
@@ -146,6 +166,317 @@ def staged_selection(
         manifest_path,
         data_root,
     )
+
+
+def legacy_zhihu_variant_selection(
+    project_root: Path,
+    *,
+    duplicate_payloads: bool,
+    source_urls: list[str] | None = None,
+) -> dict:
+    record = {
+        "content_id": "zhihu-legacy-variant",
+        "content": "body",
+        "image_list": source_urls
+        or [
+            "https://picx.zhimg.com/v2-legacy-asset_r.jpg",
+            "https://picx.zhimg.com/v2-legacy-asset_1440w.jpg",
+        ],
+    }
+    data_root = project_root / "temp" / "legacy" / "zhihu" / "data"
+    manifest_path = data_root / "zhihu" / "image_manifest.jsonl"
+    payloads = [png_bytes((10, 20, 30)), png_bytes((10, 20, 30))]
+    if not duplicate_payloads:
+        payloads[1] = png_bytes((40, 50, 60))
+    entries: list[ImageManifestEntry] = []
+    for source_index, (source_url, payload) in enumerate(
+        zip(record["image_list"], payloads, strict=True)
+    ):
+        staged = write_staging_image(
+            [payload],
+            staging_root=data_root,
+            relative_stem=(
+                f"zhihu/images/{record['content_id']}/{source_index:03d}"
+            ),
+        )
+        entries.append(
+            ImageManifestEntry(
+                schema_version=1,
+                platform_key="zhihu",
+                platform_post_id=record["content_id"],
+                image_role="content",
+                source_index=source_index,
+                source_key="image_list",
+                source_asset_key=legacy_zhihu_asset_key(source_url),
+                source_url=source_url,
+                fetch_status="downloaded",
+                attempts=1,
+                http_status=200,
+                staging_path=staged.path.relative_to(data_root).as_posix(),
+                size_bytes=staged.size_bytes,
+                mime_type=staged.mime_type,
+                width=staged.width,
+                height=staged.height,
+                sha256=staged.sha256,
+                error_code=None,
+            )
+        )
+    write_manifest_atomic(manifest_path, entries)
+    return {
+        "platform": "zhihu",
+        "record": record,
+        "identity": mediacrawler_crawl.formal_record_identity("zhihu", record),
+        "source_path": str(data_root / "jsonl" / "contents.jsonl"),
+        "line_number": 1,
+        "is_new": True,
+        "manifest_paths": [str(manifest_path)],
+    }
+
+
+def test_legacy_zhihu_same_sha_variants_reconcile_to_current_projection(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    item = legacy_zhihu_variant_selection(project_root, duplicate_payloads=True)
+
+    report, materialized, complete_identities = (
+        mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=project_root / "temp" / "media",
+            promote=False,
+        )
+    )
+
+    assert report["complete"] is True
+    assert report["candidate_posts"] == report["complete_posts"] == 1
+    assert report["expected_images"] == report["downloaded_images"] == 1
+    assert report["validated_images"] == report["unique_images"] == 1
+    assert report["legacy_manifest_reconciled_images"] == 1
+    assert len(report["legacy_manifest_reconciliations"]) == 1
+    assert report["failures"] == []
+    assert materialized == {}
+    assert complete_identities == {item["identity"]}
+
+
+def test_legacy_zhihu_different_sha_variants_still_fail_closed(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    item = legacy_zhihu_variant_selection(project_root, duplicate_payloads=False)
+
+    report, materialized, complete_identities = (
+        mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=project_root / "temp" / "media",
+            promote=False,
+        )
+    )
+
+    assert report["complete"] is False
+    assert report["legacy_manifest_reconciled_images"] == 0
+    assert report["failures"][0]["code"] == "image_manifest_count_mismatch"
+    assert materialized == {}
+    assert complete_identities == set()
+
+
+def test_legacy_zhihu_external_duplicate_rows_still_fail_closed(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    external_url = "https://cdn.example/legacy-asset.jpg"
+    item = legacy_zhihu_variant_selection(
+        project_root,
+        duplicate_payloads=True,
+        source_urls=[external_url, external_url],
+    )
+
+    report, _, complete_identities = (
+        mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=project_root / "temp" / "media",
+            promote=False,
+        )
+    )
+
+    assert report["complete"] is False
+    assert report["legacy_manifest_reconciled_images"] == 0
+    assert report["failures"][0]["code"] == "image_manifest_count_mismatch"
+    assert complete_identities == set()
+
+
+def test_legacy_zhihu_random_asset_key_still_fails_closed(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    item = legacy_zhihu_variant_selection(project_root, duplicate_payloads=True)
+    manifest_path = Path(item["manifest_paths"][0])
+    entries = list(mediacrawler_crawl.parse_manifest(manifest_path.read_bytes()))
+    entries[1] = replace(
+        entries[1],
+        source_asset_key=f"zhihu:urlsha256:{'0' * 64}",
+    )
+    write_manifest_atomic(manifest_path, entries)
+
+    report, _, complete_identities = (
+        mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=project_root / "temp" / "media",
+            promote=False,
+        )
+    )
+
+    assert report["complete"] is False
+    assert report["legacy_manifest_reconciled_images"] == 0
+    assert report["failures"][0]["code"] == "image_manifest_count_mismatch"
+    assert complete_identities == set()
+
+
+def test_legacy_zhihu_same_url_rows_still_fail_closed(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    source_url = "https://picx.zhimg.com/v2-same-asset_r.jpg"
+    item = legacy_zhihu_variant_selection(
+        project_root,
+        duplicate_payloads=True,
+        source_urls=[source_url, source_url],
+    )
+
+    report, _, complete_identities = (
+        mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=project_root / "temp" / "media",
+            promote=False,
+        )
+    )
+
+    assert report["complete"] is False
+    assert report["legacy_manifest_reconciled_images"] == 0
+    assert report["failures"][0]["code"] == "image_manifest_count_mismatch"
+    assert complete_identities == set()
+
+
+def test_legacy_zhihu_failed_row_still_fails_closed(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    item = legacy_zhihu_variant_selection(project_root, duplicate_payloads=True)
+    manifest_path = Path(item["manifest_paths"][0])
+    entries = list(mediacrawler_crawl.parse_manifest(manifest_path.read_bytes()))
+    entries[1] = replace(
+        entries[1],
+        fetch_status="failed",
+        staging_path=None,
+        size_bytes=None,
+        mime_type=None,
+        width=None,
+        height=None,
+        sha256=None,
+        error_code="image_download_retryable",
+    )
+    write_manifest_atomic(manifest_path, entries)
+
+    report, _, complete_identities = (
+        mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=project_root / "temp" / "media",
+            promote=False,
+        )
+    )
+
+    assert report["complete"] is False
+    assert report["legacy_manifest_reconciled_images"] == 0
+    assert report["failures"][0]["code"] == "image_manifest_count_mismatch"
+    assert complete_identities == set()
+
+
+@pytest.mark.parametrize("failure_case", ["missing", "tampered"])
+def test_legacy_zhihu_duplicate_file_is_revalidated(
+    tmp_path: Path,
+    failure_case: str,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    item = legacy_zhihu_variant_selection(project_root, duplicate_payloads=True)
+    manifest_path = Path(item["manifest_paths"][0])
+    entries = list(mediacrawler_crawl.parse_manifest(manifest_path.read_bytes()))
+    duplicate_path = manifest_path.parents[1] / str(entries[1].staging_path)
+    if failure_case == "missing":
+        duplicate_path.unlink()
+    else:
+        duplicate_path.write_bytes(png_bytes((90, 80, 70)))
+
+    report, _, complete_identities = (
+        mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=project_root / "temp" / "media",
+            promote=False,
+        )
+    )
+
+    assert report["complete"] is False
+    assert report["legacy_manifest_reconciled_images"] == 0
+    assert report["failures"][0]["code"] in {
+        "image_file_missing",
+        "image_hash_mismatch",
+    }
+    assert complete_identities == set()
+
+
+def test_legacy_zhihu_rows_across_manifests_still_fail_closed(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    item = legacy_zhihu_variant_selection(project_root, duplicate_payloads=True)
+    first_manifest = Path(item["manifest_paths"][0])
+    entries = list(mediacrawler_crawl.parse_manifest(first_manifest.read_bytes()))
+    second_manifest = first_manifest.with_name("image_manifest_legacy_part2.jsonl")
+    write_manifest_atomic(first_manifest, entries[:1])
+    write_manifest_atomic(second_manifest, entries[1:])
+    item["manifest_paths"] = [str(first_manifest), str(second_manifest)]
+
+    report, _, complete_identities = (
+        mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=project_root / "temp" / "media",
+            promote=False,
+        )
+    )
+
+    assert report["complete"] is False
+    assert report["legacy_manifest_reconciled_images"] == 0
+    assert report["failures"][0]["code"] == "image_manifest_count_mismatch"
+    assert complete_identities == set()
+
+
+def test_manifest_path_alias_does_not_duplicate_rows(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    item, manifest_path, _ = staged_selection(
+        project_root,
+        "zhihu",
+        five_platform_image_records()["zhihu"],
+    )
+    item["manifest_paths"] = [
+        str(manifest_path),
+        manifest_path.relative_to(project_root).as_posix(),
+    ]
+
+    report, _, complete_identities = (
+        mediacrawler_crawl.materialize_formal_record_images(
+            [item],
+            project_root=project_root,
+            media_root=project_root / "temp" / "media",
+            promote=False,
+        )
+    )
+
+    assert report["complete"] is True
+    assert report["legacy_manifest_reconciled_images"] == 0
+    assert complete_identities == {item["identity"]}
 
 
 def test_content_import_bootstrap_preserves_parent_runner_jobs() -> None:

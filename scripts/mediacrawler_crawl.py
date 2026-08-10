@@ -36,6 +36,7 @@ from trippostcollect.artifacts.image_candidates import (
     content_image_candidates,
     image_items_for_record,
     normalize_image_url,
+    source_asset_key_for_image,
 )
 from trippostcollect.artifacts.image_manifest import (
     ImageManifestEntry,
@@ -121,6 +122,15 @@ BILIBILI_DETAIL_RETRYABLE_CODES = frozenset({-509, -412, -352})
 BILIBILI_IMAGE_MAX_ATTEMPTS = 3
 BILIBILI_IMAGE_RETRY_DELAY_SECONDS = (1.0, 2.0)
 RETRYABLE_IMAGE_ERROR_CODES = frozenset({"image_download_retryable"})
+LEGACY_ZHIHU_TRANSFORM_SUFFIX_RE = re.compile(
+    r"_(?:b|r|qhd|hd|xs|s|m|l|xl|xxl|original|watermark)"
+    r"\.(?:avif|gif|jpe?g|png|webp)$",
+    re.IGNORECASE,
+)
+RASTER_IMAGE_SUFFIX_RE = re.compile(
+    r"\.(?:avif|gif|jpe?g|png|webp)$",
+    re.IGNORECASE,
+)
 BILIBILI_TRUSTED_DETAIL_SOURCES = frozenset({"article_view_api"})
 BILIBILI_BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -2174,6 +2184,154 @@ def formal_media_persistence_lock(
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _validated_manifest_rows_for_post(
+    post_manifest_rows: list[tuple[ImageManifestEntry, Path, int]],
+    candidates: list[ImageCandidate],
+    *,
+    project_root: Path,
+) -> tuple[
+    list[tuple[ImageCandidate, ImageManifestEntry, Path, int]],
+    list[dict[str, Any]],
+    list[tuple[ImageManifestEntry, Path, int]],
+]:
+    """Match current candidates to exact or safely reconcilable legacy manifest rows."""
+
+    entries = [row[0] for row in post_manifest_rows]
+    try:
+        ordered_entries = validate_post_manifest(
+            entries,
+            candidates,
+            require_downloaded=True,
+        )
+    except ImageManifestError as original_error:
+        if (
+            not candidates
+            or any(candidate.platform_key != "zhihu" for candidate in candidates)
+            or original_error.code != "image_manifest_count_mismatch"
+        ):
+            raise
+
+        if len({manifest_path.resolve() for _, manifest_path, _ in post_manifest_rows}) != 1:
+            raise original_error
+
+        def is_real_zhimg_url(source_url: str) -> bool:
+            hostname = (urlparse(source_url).hostname or "").lower()
+            return hostname == "zhimg.com" or hostname.endswith(".zhimg.com")
+
+        def legacy_zhihu_asset_key(source_url: str) -> str:
+            path = urlparse(source_url).path
+            logical_path = LEGACY_ZHIHU_TRANSFORM_SUFFIX_RE.sub("", path)
+            legacy_identity = RASTER_IMAGE_SUFFIX_RE.sub("", logical_path)
+            digest = sha256(legacy_identity.encode("utf-8")).hexdigest()
+            return f"zhihu:urlsha256:{digest}"
+
+        if any(not is_real_zhimg_url(candidate.source_url) for candidate in candidates):
+            raise original_error
+
+        evidence_by_entry_id = {
+            id(entry): (manifest_path, line_number)
+            for entry, manifest_path, line_number in post_manifest_rows
+        }
+        expected_by_asset = {
+            candidate.source_asset_key: candidate for candidate in candidates
+        }
+        if len(expected_by_asset) != len(candidates):
+            raise original_error
+
+        entries_by_asset: dict[str, list[ImageManifestEntry]] = {}
+        for entry in entries:
+            if (
+                entry.platform_key != "zhihu"
+                or entry.image_role != "content"
+                or entry.fetch_status != "downloaded"
+                or entry.sha256 is None
+                or not is_real_zhimg_url(entry.source_url)
+            ):
+                raise original_error
+            canonical_asset_key = source_asset_key_for_image(
+                "zhihu",
+                entry.source_url,
+            )
+            if entry.source_asset_key not in {
+                canonical_asset_key,
+                legacy_zhihu_asset_key(entry.source_url),
+            }:
+                raise original_error
+            entries_by_asset.setdefault(canonical_asset_key, []).append(entry)
+        if set(entries_by_asset) != set(expected_by_asset):
+            raise original_error
+
+        matched_rows: list[tuple[ImageCandidate, ImageManifestEntry, Path, int]] = []
+        reconciliations: list[dict[str, Any]] = []
+        reconciliation_rows: list[tuple[ImageManifestEntry, Path, int]] = []
+        for candidate in candidates:
+            grouped_entries = entries_by_asset[candidate.source_asset_key]
+            if any(
+                entry.platform_post_id != candidate.platform_post_id
+                or entry.source_key != candidate.source_key
+                or source_asset_key_for_image("zhihu", entry.source_url)
+                != candidate.source_asset_key
+                for entry in grouped_entries
+            ):
+                raise original_error
+            sha256_values = {entry.sha256 for entry in grouped_entries}
+            if len(sha256_values) != 1 or len(
+                {entry.source_url for entry in grouped_entries}
+            ) != len(grouped_entries):
+                raise original_error
+            retained_entry = min(
+                grouped_entries,
+                key=lambda entry: (
+                    entry.source_url != candidate.source_url,
+                    entry.source_index,
+                ),
+            )
+            manifest_path, line_number = evidence_by_entry_id[id(retained_entry)]
+            matched_rows.append(
+                (candidate, retained_entry, manifest_path, line_number)
+            )
+            for duplicate_entry in grouped_entries:
+                if duplicate_entry is retained_entry:
+                    continue
+                duplicate_path, duplicate_line = evidence_by_entry_id[id(duplicate_entry)]
+                reconciliation_rows.append(
+                    (duplicate_entry, duplicate_path, duplicate_line)
+                )
+                reconciliations.append(
+                    {
+                        "identity": (
+                            f"{candidate.platform_key}:id:{candidate.platform_post_id}"
+                        ),
+                        "sha256": str(retained_entry.sha256),
+                        "retained_source_index": retained_entry.source_index,
+                        "retained_source_url": retained_entry.source_url,
+                        "retained_manifest_path": _project_relative_evidence_path(
+                            manifest_path,
+                            project_root,
+                        ),
+                        "retained_manifest_line": line_number,
+                        "duplicate_source_index": duplicate_entry.source_index,
+                        "duplicate_source_url": duplicate_entry.source_url,
+                        "duplicate_manifest_path": _project_relative_evidence_path(
+                            duplicate_path,
+                            project_root,
+                        ),
+                        "duplicate_manifest_line": duplicate_line,
+                    }
+                )
+        return matched_rows, reconciliations, reconciliation_rows
+
+    evidence_by_entry_id = {
+        id(entry): (manifest_path, line_number)
+        for entry, manifest_path, line_number in post_manifest_rows
+    }
+    matched_rows = []
+    for candidate, entry in zip(candidates, ordered_entries, strict=True):
+        manifest_path, line_number = evidence_by_entry_id[id(entry)]
+        matched_rows.append((candidate, entry, manifest_path, line_number))
+    return matched_rows, [], []
+
+
 def materialize_formal_record_images(
     selected: list[dict[str, Any]],
     *,
@@ -2210,6 +2368,7 @@ def materialize_formal_record_images(
     retryable_failures = 0
     terminal_failures = 0
     sha256_duplicates: list[dict[str, Any]] = []
+    legacy_manifest_reconciliations: list[dict[str, Any]] = []
     rolled_back_images = 0
 
     for item in selected:
@@ -2223,7 +2382,19 @@ def materialize_formal_record_images(
             tuple[ImageManifestEntry, Path, int]
         ] = []
         try:
-            manifest_values = list(dict.fromkeys(item.get("manifest_paths") or []))
+            manifest_values: list[Path] = []
+            seen_manifest_paths: set[Path] = set()
+            for path_value in item.get("manifest_paths") or []:
+                unresolved_path = Path(path_value).expanduser()
+                resolved_path = (
+                    unresolved_path.resolve()
+                    if unresolved_path.is_absolute()
+                    else (root / unresolved_path).resolve()
+                )
+                if resolved_path in seen_manifest_paths:
+                    continue
+                seen_manifest_paths.add(resolved_path)
+                manifest_values.append(resolved_path)
             if not manifest_values:
                 raise ImageManifestError(
                     "missing_image_manifest",
@@ -2257,23 +2428,23 @@ def materialize_formal_record_images(
                             )
                         )
 
-            ordered_entries = validate_post_manifest(
-                [row[0] for row in post_manifest_rows],
+            (
+                matched_manifest_rows,
+                post_reconciliations,
+                reconciliation_rows,
+            ) = _validated_manifest_rows_for_post(
+                post_manifest_rows,
                 candidates,
-                require_downloaded=True,
+                project_root=root,
             )
             downloaded_images += sum(
-                entry.fetch_status == "downloaded" for entry in ordered_entries
+                entry.fetch_status == "downloaded"
+                for _, entry, _, _ in matched_manifest_rows
             )
-            evidence_by_index = {
-                entry.source_index: (manifest_path, line_number)
-                for entry, manifest_path, line_number in post_manifest_rows
-            }
             validated_rows: list[
                 tuple[ImageCandidate, ValidatedImage, Path, int, Path]
             ] = []
-            for candidate, entry in zip(candidates, ordered_entries, strict=True):
-                manifest_path, manifest_line = evidence_by_index[entry.source_index]
+            for candidate, entry, manifest_path, manifest_line in matched_manifest_rows:
                 staging_root = _staging_root_for_manifest_entry(manifest_path, entry)
                 staged_path = staging_root / str(entry.staging_path)
                 validated = validate_image_file(
@@ -2299,6 +2470,31 @@ def materialize_formal_record_images(
                 validated_rows.append(
                     (candidate, validated, manifest_path, manifest_line, staging_root)
                 )
+
+            for entry, manifest_path, _ in reconciliation_rows:
+                staging_root = _staging_root_for_manifest_entry(manifest_path, entry)
+                staged_path = staging_root / str(entry.staging_path)
+                validated = validate_image_file(
+                    staged_path,
+                    allowed_root=staging_root,
+                    expected_sha256=entry.sha256,
+                    max_bytes=DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
+                    require_suffix_match=True,
+                )
+                if any(
+                    (
+                        validated.size_bytes != entry.size_bytes,
+                        validated.mime_type != entry.mime_type,
+                        validated.width != entry.width,
+                        validated.height != entry.height,
+                    )
+                ):
+                    raise ImageMaterializationError(
+                        "image_manifest_metadata_mismatch",
+                        "legacy manifest byte metadata does not match staging "
+                        f"file for {identity}",
+                    )
+            legacy_manifest_reconciliations.extend(post_reconciliations)
 
             retained_rows: list[
                 tuple[ImageCandidate, ValidatedImage, Path, int, Path]
@@ -2467,6 +2663,8 @@ def materialize_formal_record_images(
         "unique_images": unique_images,
         "sha256_duplicate_images": sha256_duplicate_images,
         "sha256_duplicates": sha256_duplicates,
+        "legacy_manifest_reconciled_images": len(legacy_manifest_reconciliations),
+        "legacy_manifest_reconciliations": legacy_manifest_reconciliations,
         "reused_images": reused_images,
         "promoted_images": promoted_images,
         "rolled_back_images": rolled_back_images,

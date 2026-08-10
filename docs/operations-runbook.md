@@ -503,6 +503,10 @@ child 的 `image_materialization.manifest_evidence` 所指 manifest → SQLite �
   `promoted_images + reused_images == unique_images`；
 - `retryable_failures=0`、`terminal_failures=0`、`failures=[]`，manifest 列表、单文件 SHA 和聚合
   `manifest_sha256` 均被 `artifacts_verified` 复验；
+- 若恢复摘要包含 `legacy_manifest_reconciled_images>0`，只允许同一 manifest 内知乎真实 zhimg 同逻辑
+  资产且 URL 各不相同的旧变体行；每个 staging 文件都必须复验，且
+  `legacy_manifest_reconciliations` 中每组 SHA-256 完全相同；跨 manifest、同 URL、不同 SHA 或外部
+  域名不得折叠，`source_asset_key` 只允许当前键或仓库历史版本生成过的旧键；
 - SQLite 中作者粉丝量、发布时间和图片关系符合平台 profile；每张正文图具有连续 index、非空
   项目相对 `local_path`、尺寸、真实 MIME、SHA，实际文件位于 `data/media` 且哈希相等；
 - 头像、作者主页、封面、搜索预览、视频、音乐和知乎公式图不出现在正文 manifest、长期目录或

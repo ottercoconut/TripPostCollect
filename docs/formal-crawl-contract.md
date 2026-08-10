@@ -415,6 +415,18 @@ SAVEPOINT 只允许隔离单帖写入，不能因 `RELEASE SAVEPOINT` 提前提�
 `local_images_complete=true`、`local_image_failure_count=0`。以上谓词还要与原数量/来源耗尽、
 字段、行为、策略、分页和真实入库谓词同时成立，不能相互替代。
 
+恢复摘要可能引用知乎语义资产归一上线前生成的 manifest。只有同一个旧 manifest 的额外行全部属于
+真实 `zhimg.com` 或其子域名的同一逻辑资产、URL 各不相同、均为已下载正文图，并且每个 staging
+文件的路径、元数据与 SHA-256 重新复验后完全相同时，根项目才可继续；每行
+`source_asset_key` 还必须等于当前逻辑键或仓库历史版本确实生成过的旧算法键，任意格式合法但无来源
+的键不得放行。满足这些条件后，根项目
+才可按当前单候选投影保留源顺序第一行；折叠数量与逐行来源写入
+`legacy_manifest_reconciled_images` / `legacy_manifest_reconciliations`，但不计入当前
+`expected_images` 或 `sha256_duplicate_images`。同一 manifest 的相对/绝对路径别名先解析为同一输入，
+不得制造额外行；跨 manifest、同 URL 重复、任一外链、失败行、逻辑资产不同或 SHA-256 不同仍按
+`image_manifest_count_mismatch` / `image_manifest_identity_mismatch` 失败关闭，不能靠旧 `seen` 记忆
+跳过后把错误摘要永久继承。
+
 manifest schema v1 的稳定校验错误包括：`missing_image_manifest`、
 `image_manifest_identity_mismatch`、`image_manifest_count_mismatch`、
 `image_manifest_metadata_mismatch`、`image_path_escape`、`image_file_missing`、
