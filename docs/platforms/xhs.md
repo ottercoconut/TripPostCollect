@@ -63,9 +63,11 @@
 实际尝试证据。三次仍为临时错误才记录 `image_download_retryable` 和
 `candidate_skipped(failure_scope=image)`，跳过整帖并继续后续候选；失败 ID 写账号级候选记忆，
 checkpoint 按完整批次推进。不保存该帖成功图片子集为完整帖，也不触发自动换号。
-格式、解码、大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样写失败 manifest 与
+格式、解码、大小或 HTTP 400/404 等候选自身终态错误不补做无意义重试，但同样写失败 manifest 与
 `candidate_skipped`，跳过整帖并继续后续候选。笔记详情或作者必需字段完成适用重试仍失败时采用
 `candidate_skipped(failure_scope=post)`；安全限制、登录、验证码和频控仍立即停止。
+HTTP 401/403、429 与平台 300011/300012 分别作为登录、频控、安全限制或 IP 阻断停止运行，
+不得写 `candidate_skipped` 或 seen。
 客户端必须保留真实 HTTP 状态；HTTP 200 空字节由共享 helper 继续有限重试，不得折叠成第一次成功。
 
 根执行器按相同优先级重建候选，复验 manifest、SHA/MIME/尺寸和路径边界。正式运行晋升到
@@ -263,9 +265,9 @@ python scripts/xhs_runner.py \
   候选预算在页中耗尽时保存当前页，下轮重取边界页并靠 ID 去重，避免跳过未处理卡片。
 - 正式图文必须来自笔记详情的非空 `desc`，并保存
   `content_detail_status=detail_observed` 与 `content_detail_source=note_detail`。标题或搜索卡片
-  摘要不能单独通过。详情 API 与 HTML 回退都为空、请求失败或解析失败时，
-  记录 `note_detail_unavailable`/请求失败，保留当前 `page + search_id`；该 ID 不写入
-  `xhs_discovery_seen_candidates`。
+  摘要不能单独通过。详情 API 与 HTML 回退都为空、请求失败或解析失败时，完成适用有限重试后
+  记录 `candidate_skipped`，该 ID 写入 `xhs_discovery_seen_candidates`，完整批次继续；安全限制、
+  登录、验证码、账号/IP 阻断或频控仍保留当前 `page + search_id` 且不写 seen。
 - 每批记录真实页码、`search_id`、可恢复页码、批次完整性、发现阶段、原始返回数、`has_more`、
   候选数、有效新增数和停止原因。顶部刷新事件不能覆盖深层 checkpoint，也不累计深层停滞。
 - 连续停滞按“该批没有新增有效记录”累计；出现新的无效候选不能重置停滞计数。

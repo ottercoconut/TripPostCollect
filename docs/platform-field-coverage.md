@@ -15,8 +15,8 @@
 `followers_observed=true` 缺一不可。真实 0 粉丝有效，缺失后由模型默认生成的 0 无效。
 抖音和小红书必须使用作者主页来源，不能用搜索结果中的占位 0 通过校验。
 B站搜索结果的 `desc` 和 `image_urls` 只是摘要与预览，必须取得
-`content_detail_status=detail_observed` 后才能通过正文完整性门禁；可恢复详情失败不能持久化为
-已处理候选。
+`content_detail_status=detail_observed` 后才能通过正文完整性门禁；候选自身详情失败在有限重试后
+记录 `candidate_skipped` 并进入已处理记忆，登录、风控或频控信号仍停止运行且不写 seen。
 五平台都必须同时保存 `content_detail_status=detail_observed` 和上表受信任正文来源；
 任何标题或搜索摘要回退都不能使正式记录有效。
 小红书笔记 `xsec_token` 不能作为作者主页凭据；作者页出现验证、频控或封禁时运行失败，

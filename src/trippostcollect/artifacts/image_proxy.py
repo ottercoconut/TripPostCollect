@@ -40,10 +40,10 @@ class RemoteImageFetchError(ValueError):
 def remote_image_failure_code(error: RemoteImageFetchError) -> str:
     """Map transport evidence to a stable materialization failure code."""
 
-    if error.retryable:
-        return "image_download_retryable"
     if error.code:
         return error.code
+    if error.retryable:
+        return "image_download_retryable"
     if error.http_status is not None:
         return "image_source_unavailable"
     return "image_non_raster_response"
@@ -206,10 +206,17 @@ def fetch_remote_image_bytes(
                     ) from exc
                 current_url = validate_remote_image_url(urljoin(current_url, location))
                 continue
+            if exc.code in {401, 403}:
+                code = "image_auth_required"
+            elif exc.code == 429:
+                code = "image_rate_limited"
+            else:
+                code = None
             raise RemoteImageFetchError(
                 f"remote image returned HTTP {exc.code}",
                 http_status=exc.code,
-                retryable=exc.code in {401, 403, 408, 425, 429} or exc.code >= 500,
+                retryable=exc.code in {408, 425} or exc.code >= 500,
+                code=code,
             ) from exc
         except (URLError, TimeoutError, socket.timeout, ssl.SSLError) as exc:
             raise RemoteImageFetchError(

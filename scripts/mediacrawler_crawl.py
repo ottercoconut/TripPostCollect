@@ -119,9 +119,13 @@ BILIBILI_DETAIL_MAX_ATTEMPTS = 3
 BILIBILI_DETAIL_RETRY_DELAY_SECONDS = (4.0, 7.0)
 BILIBILI_DETAIL_PACING_SECONDS = (1.5, 3.0)
 BILIBILI_DETAIL_RETRYABLE_CODES = frozenset({-509, -412, -352})
+BILIBILI_RUNTIME_BLOCKING_CODES = frozenset({-101, -509, -412, -352})
 BILIBILI_IMAGE_MAX_ATTEMPTS = 3
 BILIBILI_IMAGE_RETRY_DELAY_SECONDS = (1.0, 2.0)
 RETRYABLE_IMAGE_ERROR_CODES = frozenset({"image_download_retryable"})
+RUNTIME_BLOCKING_IMAGE_ERROR_CODES = frozenset(
+    {"image_auth_required", "image_rate_limited"}
+)
 LEGACY_ZHIHU_TRANSFORM_SUFFIX_RE = re.compile(
     r"_(?:b|r|qhd|hd|xs|s|m|l|xl|xxl|original|watermark)"
     r"\.(?:avif|gif|jpe?g|png|webp)$",
@@ -151,7 +155,7 @@ BILIBILI_WBI_MIXIN_TABLE = (
 
 
 class BilibiliArticleDetailError(RuntimeError):
-    """A detail request that must not advance the Bilibili search frontier."""
+    """A classified Bilibili article-detail failure."""
 
     def __init__(
         self,
@@ -161,16 +165,47 @@ class BilibiliArticleDetailError(RuntimeError):
         code: int | None = None,
         attempts: int = 1,
         retry_wait_seconds: float = 0.0,
+        runtime_blocking: bool = False,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.code = code
         self.attempts = attempts
         self.retry_wait_seconds = retry_wait_seconds
+        self.runtime_blocking = runtime_blocking
+
+
+class BilibiliFollowerFetchError(RuntimeError):
+    """A classified Bilibili creator-stat failure."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: int | None,
+        retryable: bool,
+        runtime_blocking: bool,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.runtime_blocking = runtime_blocking
+
+
+class BilibiliRuntimeBlocked(RuntimeError):
+    """A run-level Bilibili login, risk-control, or rate-limit signal."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
 
 
 def is_retryable_image_error(code: str | None) -> bool:
     return str(code or "") in RETRYABLE_IMAGE_ERROR_CODES
+
+
+def is_runtime_blocking_image_error(code: str | None) -> bool:
+    return str(code or "") in RUNTIME_BLOCKING_IMAGE_ERROR_CODES
 
 PLATFORMS: dict[str, dict[str, str]] = {
     "bilibili": {"mediacrawler": "bili", "label": "B站"},
@@ -3192,6 +3227,7 @@ def fetch_bilibili_article_detail(post_id: str, cookie_header: str = "") -> dict
             f"bilibili article detail HTTP {exc.code}",
             retryable=exc.code == 429 or exc.code >= 500,
             code=exc.code,
+            runtime_blocking=exc.code in {401, 403, 429},
         ) from exc
     except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         raise BilibiliArticleDetailError(
@@ -3213,6 +3249,7 @@ def fetch_bilibili_article_detail(post_id: str, cookie_header: str = "") -> dict
             f"bilibili article detail failed: {code} {payload.get('message')}",
             retryable=code in BILIBILI_DETAIL_RETRYABLE_CODES,
             code=code,
+            runtime_blocking=code in BILIBILI_RUNTIME_BLOCKING_CODES,
         )
     detail = payload.get("data")
     if not isinstance(detail, dict):
@@ -3389,10 +3426,27 @@ def fetch_bilibili_follower_count(creator_id: str, cookie_header: str = "") -> i
         BILIBILI_RELATION_STAT_URL + "?" + urlencode({"vmid": creator_id}),
         headers=headers,
     )
-    with urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8", errors="replace"))
-    if payload.get("code") != 0:
-        return None
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except HTTPError as exc:
+        raise BilibiliFollowerFetchError(
+            f"bilibili relation stat HTTP {exc.code}",
+            code=exc.code,
+            retryable=exc.code == 429 or exc.code >= 500,
+            runtime_blocking=exc.code in {401, 403, 429},
+        ) from exc
+    try:
+        code = int(payload.get("code"))
+    except (TypeError, ValueError):
+        code = None
+    if code != 0:
+        raise BilibiliFollowerFetchError(
+            f"bilibili relation stat failed: {code} {payload.get('message')}",
+            code=code,
+            retryable=code in BILIBILI_DETAIL_RETRYABLE_CODES,
+            runtime_blocking=code in BILIBILI_RUNTIME_BLOCKING_CODES,
+        )
     value = (payload.get("data") or {}).get("follower")
     try:
         return int(value) if value not in (None, "") else None
@@ -3626,6 +3680,10 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                                 ),
                             }
                         )
+                        if exc.runtime_blocking:
+                            raise BilibiliRuntimeBlocked(
+                                f"bilibili_article_detail_blocked:{exc.code}"
+                            ) from exc
                         failure = {
                             "platform": platform_key,
                             "identity": post_id,
@@ -3687,6 +3745,12 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                             failure["retryable"] = is_retryable_image_error(
                                 failure["error_code"]
                             )
+                            if is_runtime_blocking_image_error(
+                                failure["error_code"]
+                            ):
+                                raise BilibiliRuntimeBlocked(
+                                    str(failure["error_code"])
+                                )
                             skipped_candidate_failures.append(failure)
                             skipped_candidate_ids.add(post_id)
                             seen_ids.add(post_id)
@@ -3703,6 +3767,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     if creator_id:
                         if creator_id not in follower_cache:
                             follower_count: int | None = None
+                            follower_error: BilibiliFollowerFetchError | None = None
                             for follower_attempt in range(
                                 1,
                                 BILIBILI_DETAIL_MAX_ATTEMPTS + 1,
@@ -3713,7 +3778,13 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                                         creator_id,
                                         cookie_header,
                                     )
+                                except BilibiliFollowerFetchError as exc:
+                                    follower_error = exc
+                                    follower_count = None
+                                    if not exc.retryable:
+                                        break
                                 except Exception:
+                                    follower_error = None
                                     follower_count = None
                                 if follower_count is not None:
                                     break
@@ -3724,6 +3795,10 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                                         )
                                         * follower_attempt
                                     )
+                            if follower_error and follower_error.runtime_blocking:
+                                raise BilibiliRuntimeBlocked(
+                                    f"bilibili_relation_stat_blocked:{follower_error.code}"
+                                ) from follower_error
                             follower_cache[creator_id] = follower_count
                             time.sleep(0.15)
                         follower_count = follower_cache[creator_id]
@@ -3889,7 +3964,11 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "quantity_limits_enforced": completion_mode != "source-exhausted",
                     "stagnant_batches": stagnant_pages,
                     "stop_reason": "runtime_failed",
-                    "stop_detail": type(exc).__name__,
+                    "stop_detail": (
+                        exc.detail
+                        if isinstance(exc, BilibiliRuntimeBlocked)
+                        else type(exc).__name__
+                    ),
                     "source_page": locals().get("page"),
                     "resume_page": locals().get("page"),
                     "source_has_more": True,

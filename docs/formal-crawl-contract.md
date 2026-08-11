@@ -173,7 +173,7 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 视觉上相同但缩放、转码或重新编码后哈希不同的文件，也不跨帖子合并图片关系。任一图片缺失、失败或
 不一致时整帖不得入库；先写 URL、以后再补本地路径不满足本契约。
 
-平台 child 对单张正文图的 `None`、HTTP 200 空字节、超时或临时请求错误最多执行 3 次有限指数
+平台 child 对单张正文图的 `None`、HTTP 200 空字节、超时、HTTP 408/425/5xx 或其他临时请求错误最多执行 3 次有限指数
 退避重试。客户端不得把 `raise_for_status()` 的 HTTP 状态折叠为 `None`：明确终态状态至少保存真实
 `http_status` 和 `image_source_unavailable`，临时状态在耗尽后保存 `image_download_retryable`；明确
 非重试 HTTP、非图片、解码失败或过大等终态错误不做无意义重试。候选帖详情、作者必需字段或任一
@@ -183,7 +183,9 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 图片子集解释为完整帖子；失败 ID 作为“已处理但未成功”写入同作用域 seen，child 继续后续候选，
 checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有效新增数，但不阻断后续
 `target_new_met`、候选上限、停滞或真实 `adaptive_search_stopped(source_exhausted)`。
-格式、解码、大小、明确非重试 HTTP 等终态图片错误保留具体错误码和 `retryable=false`，不强行补足
+其中 HTTP 401/403 属于登录或授权阻断，HTTP 429 属于频控阻断，必须保存为运行级
+`image_auth_required` / `image_rate_limited` 并立即停止，不能写 `candidate_skipped` 或 seen。HTTP 400/404、
+格式、解码、大小等候选自身终态图片错误保留具体错误码和 `retryable=false`，不强行补足
 3 次请求；临时请求错误完成有限重试后保留 `retryable=true`。操作人批准的预请求排除必须精确到平台、job、
 查询指纹和候选 ID，并把原因、授权 run 与既有失败证据写入独立的
 `crawl_discovery_candidate_exclusions`；该表不属于内容或已处理候选记忆。后续 child 仅在昂贵详情、
@@ -216,7 +218,9 @@ store。小红书笔记详情与知乎回答/文章详情采用相同规则：�
 B站 article 还必须满足详情完整性门禁：搜索结果中的 `desc` 只允许作为发现摘要保存在原始证据，
 不得作为 `content_text`；正式记录必须保存 `content_detail_status=detail_observed` 和受信任的 article
 详情来源。正文图片必须经过详情响应或详情页正文结构检查，不能仅凭搜索 `image_urls` 宣布完整。
-详情请求限流、超时、HTTP/业务失败或解析失败先有限重试；仍失败则按候选跳过，不是字段永久无效。
+候选自身的详情超时、HTTP 5xx、空响应或解析失败先有限重试；仍失败则按候选跳过，不是字段永久无效。
+HTTP 401/403、429，B站 `-101/-509/-412/-352` 等登录、授权、频控或风控信号属于运行级阻断，
+适用重试结束后必须停止 child，不能把该 ID 写成已处理候选。
 
 B站、微博、小红书、抖音、知乎使用 `followers_policy=required`。粉丝量为 `0` 只有在
 平台响应明确出现该值且保存了 `followers_observed=true` 时有效；缺失值不得转换为
@@ -286,8 +290,9 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
   `stagnation_basis`、新候选 ID 数和有效新增数，供区分“结果类型不合格”与“页面实际重复”。
   B站自有 article 实现是另一明确例外：它按页面是否出现不在数据库、累计摘要、
   `crawl_discovery_seen_candidates` 或本次已完成集合中的 article ID 判断来源是否仍有新候选。
-  未知 ID 只有在详情与字段处理得到决定性结果后才算完成处理；详情限流、超时、请求或解析失败
-  必须停止当前 child、保留本页且不持久化该 ID，不能靠摘要非空重置停滞并继续跨页。详情已观察后
+  未知 ID 只有在详情与字段处理得到决定性结果后才算完成处理。候选自身的详情空响应、超时、
+  HTTP 5xx 或解析失败完成有限重试后写 `candidate_skipped` 并继续；登录、授权、频控或风控信号
+  必须停止当前 child、保留本页且不持久化该 ID。详情已观察后
   才确定的永久无效候选可以重置停滞。该例外不放宽完成标准；判断 B站是否值得扩容时必须同时读取
   新 ID 数、详情成功数和有效新增数。
 - `login_required` / `captcha_detected`：登录或验证阻断。
@@ -435,8 +440,9 @@ manifest schema v1 的稳定校验错误包括：`missing_image_manifest`、
 `image_materialization_missing`，不完整摘要使用 `image_materialization_incomplete`；平台批次停止
 细节使用 `image_download_failed`，下载失败行使用稳定的 `image_download_retryable` 或
 `image_non_raster_response`、`image_decode_failed`、`image_too_large`、`image_source_unavailable`
-等终态错误码。所有在适用尝试结束后仍失败的帖子或图片候选都产生候选级 `candidate_skipped` 并继续
-当前 child；图片临时错误 `image_download_retryable` 标记 `retryable=true`，其余终态错误标记
+等终态错误码。除登录、授权、频控、风控、安全限制等运行级阻断外，在适用尝试结束后仍失败的
+帖子或图片候选都产生候选级 `candidate_skipped` 并继续当前 child；图片临时错误
+`image_download_retryable` 标记 `retryable=true`，其余候选自身终态错误标记
 `retryable=false`。事件和停止摘要必须保存 `skipped_candidate_count` 与
 `skipped_candidate_failures`，图片摘要仍按错误码分别汇总 retryable/terminal 计数，但跳过项不作为
 图片完整集合的失败行参与晋升。

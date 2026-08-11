@@ -229,6 +229,109 @@ def test_detail_invalid_json_is_retryable(monkeypatch) -> None:
         raise AssertionError("invalid JSON must not be accepted")
 
 
+def test_relation_stat_rate_limit_is_run_level_failure(monkeypatch) -> None:
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            self.close()
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "urlopen",
+        lambda request, timeout: Response(
+            json.dumps({"code": -509, "message": "频繁"}).encode()
+        ),
+    )
+
+    try:
+        mediacrawler_crawl.fetch_bilibili_follower_count("456")
+    except mediacrawler_crawl.BilibiliFollowerFetchError as exc:
+        assert exc.code == -509
+        assert exc.retryable is True
+        assert exc.runtime_blocking is True
+    else:
+        raise AssertionError("Bilibili rate limit must not become a missing follower value")
+
+
+def test_rate_limit_detail_stops_run_without_marking_candidate_seen(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "posts.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE web_posts (platform_key TEXT, platform_post_id TEXT, canonical_url TEXT)"
+        )
+    state_path = tmp_path / "state.json"
+    mediacrawler_crawl.FrozenExecutionState.create(
+        state_path,
+        run_id="run-blocked",
+        job_key="bili-detail-blocked",
+        site_key="bilibili",
+        job_kind="mediacrawler_search",
+        plan={},
+        frozen_inputs=[],
+    )
+    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "run_bilibili_behavior_session",
+        AsyncMock(return_value=({"cookie_header": ""}, {"ok": True})),
+    )
+    monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
+    monkeypatch.setattr(
+        mediacrawler_crawl, "fetch_bilibili_wbi_keys", lambda value: ("a", "b")
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_article_page",
+        lambda keyword, page, **kwargs: [search_item("blocked")],
+    )
+
+    def blocked_detail(post_id, cookie_header):
+        raise mediacrawler_crawl.BilibiliArticleDetailError(
+            "rate limited",
+            retryable=True,
+            code=-509,
+            attempts=3,
+            runtime_blocking=True,
+        )
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_article_detail_with_retry",
+        blocked_detail,
+    )
+    monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
+    args = SimpleNamespace(
+        keyword="青岛旅游",
+        candidate_hard_limit=3,
+        target_new_posts=1,
+        source_candidate_hard_limit=3,
+        source_target_new_posts=1,
+        max_stagnant_batches=3,
+        db=str(db_path),
+        start_page=1,
+        top_refresh_max_pages=0,
+        discovery_source_exhausted=False,
+        discovery_job_id=None,
+        discovery_query_fingerprint="",
+        resume_identities_path=None,
+    )
+
+    result = mediacrawler_crawl.run_bilibili_article_search(args, tmp_path / "batch")
+
+    assert result["ok"] is False
+    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
+    assert not [event for event in events if event["type"] == "candidate_skipped"]
+    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
+    assert stopped["details"]["stop_reason"] == "runtime_failed"
+    assert stopped["details"]["stop_detail"] == "bilibili_article_detail_blocked:-509"
+    assert stopped["details"]["candidate_identities"] == []
+
+
 def test_detail_failure_is_recorded_seen_and_next_post_continues(monkeypatch, tmp_path: Path) -> None:
     db_path = tmp_path / "posts.sqlite"
     with sqlite3.connect(db_path) as conn:
@@ -264,9 +367,9 @@ def test_detail_failure_is_recorded_seen_and_next_post_continues(monkeypatch, tm
     def fail_detail(post_id, cookie_header):
         if post_id == "failed":
             raise mediacrawler_crawl.BilibiliArticleDetailError(
-                "still rate limited",
+                "detail remained unparsable",
                 retryable=True,
-                code=-509,
+                code=0,
                 attempts=3,
             )
         return (

@@ -96,9 +96,10 @@
 `image_download_failed` 留证；可恢复项使用 `image_download_retryable`，并以
 `candidate_skipped(failure_scope=image)` 跳过整帖继续后续候选；失败 ID 写入已处理
 候选，最终 checkpoint 按完整批次的 page/offset/search ID 推进。
-格式、解码、大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样记录后跳过整帖并继续。
+格式、解码、大小或 HTTP 400/404 等候选自身终态错误不补做无意义重试，但同样记录后跳过整帖并继续。
 作者必需字段补拉完成有限重试仍失败时使用 `candidate_skipped(failure_scope=post)`。
 客户端必须保留真实 HTTP 状态；HTTP 200 空字节由共享 helper 继续有限重试，不得折叠成第一次成功。
+HTTP 401/403、429 或明确账号封禁属于运行级阻断，不得降级为图片/作者候选跳过或写 seen。
 
 根执行器按 `note_download_url` 重建候选并复验 manifest、SHA/MIME/尺寸。正式运行晋升到
 `data/media/douyin/...` 后才在同一 SQLite 事务写帖子与 `web_post_images`；诊断模式不晋升。

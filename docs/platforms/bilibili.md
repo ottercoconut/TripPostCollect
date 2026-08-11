@@ -100,7 +100,7 @@ B站使用项目自有 article 分支下载，不调用 MediaCrawler 视频媒�
 `<platform_data_root>/images/<post_id>/<index>.<real_ext>`；同目录
 `image_manifest.jsonl` 原子记录 URL、稳定键、尝试次数、HTTP 状态、SHA、真实 MIME、尺寸和相对
 staging 路径。搜索 `image_urls`、Opus 封面、作者头像和视频资源不会进入下载函数。失败行只写
-manifest 错误，不留下成功元数据；`image_download_retryable` 与终态图片错误都记录
+manifest 错误，不留下成功元数据；`image_download_retryable` 与候选自身终态图片错误都记录
 `candidate_skipped(failure_scope=image)` 后跳过该 article，继续处理后续候选，终态错误不补做无意义
 重试。失败 ID 写入持久候选记忆，整帖不写内容库、不计成功；完整批次的 checkpoint 正常推进。
 操作人另行批准的精确排除仅用于在请求前跳过指定 job、查询指纹和 article ID，不是普通重试耗尽的
@@ -110,9 +110,10 @@ manifest 错误，不留下成功元数据；`image_download_retryable` 与终�
 `data/media/bilibili/...` 并在同一帖子事务写入 `web_post_images.local_path` 等字段；
 `--no-import --download-images --media-root temp/<目录>` 只验证 staging，不改长期目录或数据库。
 任一图片不完整时 `image_materialization.complete=false`，不能靠正文和 URL 通过正式门禁。
-格式、解码、大小和明确非重试 HTTP 等终态图片错误写失败 manifest 和 `candidate_skipped`，不补做
+格式、解码、大小和 HTTP 400/404 等候选自身终态图片错误写失败 manifest 和 `candidate_skipped`，不补做
 无意义重试；重试、跳过和最终停止均写短日志事件。
-HTTP 200 空 body 也按空响应重试；明确非重试 HTTP 保留状态码。响应头或流式字节超过统一上限时
+HTTP 200 空 body 也按空响应重试；HTTP 401/403、429 按登录/频控运行级阻断停止且不写 seen，
+其他明确非重试 HTTP 保留状态码。响应头或流式字节超过统一上限时
 错误码固定为 `image_too_large`。
 
 ## 请求节奏、失败与安全前沿
@@ -120,10 +121,11 @@ HTTP 200 空 body 也按空响应重试；明确非重试 HTTP 保留状态码�
 article 搜索前必须在 MediaCrawler 持久 profile 执行共享行为阶段，并让搜索、详情和关系统计请求
 复用同一会话 cookie。行为与请求策略证据缺失时不得入库。
 
-详情请求必须串行或按经验证的低并发执行，并记录随机等待、重试次数和业务状态。`-509`、HTTP
-失败、超时和无法解析的详情先有限退避重试；仍失败时写
+详情请求必须串行或按经验证的低并发执行，并记录随机等待、重试次数和业务状态。候选自身的
+HTTP 5xx、空响应、超时和无法解析详情先有限退避重试；仍失败时写
 `candidate_skipped(failure_scope=post)`，失败 article ID 写入 `crawl_discovery_seen_candidates`，不进入
-内容或成功累计，并继续当前批次后续候选。登录、频控、搜索请求或浏览器整体失败仍停止 child。
+内容或成功累计，并继续当前批次后续候选。HTTP 401/403/429、业务码 `-101/-509/-412/-352`，以及
+登录、授权、频控、风控、搜索请求或浏览器整体失败仍停止 child，失败 ID 不写 seen。
 
 无人值守历史修复不能只凭 Cookie 文件存在判断已登录。每个修复批次开始和会话间隔结束后，必须用
 同一 Cookie 调用 `/x/web-interface/nav`，只有 `code=0` 且 `data.isLogin=true` 才能继续；快照缺失、
@@ -139,6 +141,7 @@ article 搜索前必须在 MediaCrawler 持久 profile 执行共享行为阶段�
 - 详情和正式字段全部成功，成为有效记录；
 - 详情已获得决定性证据，但内容类型或字段永久不符合正式 profile；
 - 平台明确证明 article 已删除、私密或不存在。
+- 候选自身的详情、作者必需字段或正文图在适用有限重试后仍失败并写出 `candidate_skipped`。
 
 首次运行从第 1 页开始；有 checkpoint 时先刷新 `top_refresh_max_pages` 个顶部页，再从
 `resume_page` 继续。数据库、累计摘要、已完成候选记忆和本轮已完成集合中的 ID 在昂贵详情前跳过。

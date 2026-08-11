@@ -40,10 +40,11 @@
 `<platform_artifact>/data/weibo/image_manifest.jsonl`。空响应或超时按单图最多 3 次、1–2 秒随机基数
 指数退避重试；日志逐次记录重试，成功或最终失败的 manifest 都记录实际 `attempts`。三次仍失败才使用
 `image_download_retryable`，写 `candidate_skipped(failure_scope=image)` 后跳过整帖并继续本页后续候选。
-格式、解码、大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样记录并继续。失败 ID 写入
+格式、解码、大小或 HTTP 400/404 等候选自身终态错误不补做无意义重试，但同样记录并继续。失败 ID 写入
 持久候选记忆，checkpoint 按完整批次推进；该帖不允许只保留成功图片子集，也不计有效结果。
 长文详情完成有限重试仍失败时采用 `candidate_skipped(failure_scope=post)`，不得保存搜索截断正文。
 客户端必须保留真实 HTTP 状态；HTTP 200 空字节由共享 helper 继续有限重试，不得折叠成第一次成功。
+HTTP 401/403 使用 `image_auth_required`、HTTP 429 使用 `image_rate_limited`，属于运行级阻断且不写 seen。
 
 根执行器重新按 `image_list` 顺序核对 manifest 身份、SHA/MIME/尺寸和 staging 文件。正式 runner
 固定开启正文图下载并晋升到 `data/media/weibo/...`，随后在帖子与图片同一 SQLite 事务保存 URL、

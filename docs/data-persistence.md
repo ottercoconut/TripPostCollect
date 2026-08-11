@@ -69,9 +69,10 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 建立新前沿并把 checkpoint 恢复为 `active`。checkpoint 只能在 child 摘要形成后提交；诊断
 `--no-import` 不得更新它。内容仍只在
 完整目标达到后写入 `web_posts` / `web_post_images`。通用已完成处理候选表按 job 与查询指纹保存
-视频、有决定性证据的字段无效候选和有效候选 ID；它只用于发现去重，不把无效候选变成内容记录。
-可恢复请求失败不属于已完成处理，尤其不能把 B站详情失败 ID 写入该表。
-反复失败也不能按次数自动升级为已处理。只有操作人明确授权某个平台、job、查询指纹和候选 ID
+视频、有决定性证据的字段无效候选、有效候选，以及详情、作者或正文图在适用有限重试后仍失败并
+形成 `candidate_skipped` 的候选 ID；它只用于发现去重，不把失败或无效候选变成内容记录。
+登录、授权、验证码、安全限制、账号/IP 封禁、频控、搜索请求或浏览器整体故障属于运行级失败，
+不得写入该表。只有操作人明确授权某个平台、job、查询指纹和候选 ID
 永久跳过时，才把该 ID、原因、证据与授权 run 写入 `crawl_discovery_candidate_exclusions`。正式 child
 会在详情、作者和图片等昂贵请求前将它与 seen 一并作为已知 ID 跳过；排除行不创建内容记录、不增加
 成功或有效候选计数，也不代替来源末页停止证据。撤销排除必须显式删除对应精确作用域的排除行，
@@ -338,10 +339,11 @@ PY
   不要临时改抓取脚本绕过登录判断或复用其他账号 profile。
 - 字段缺失时，先检查 JSONL 顶层字段、`raw_sample_json` 和平台字段覆盖表；确认来源字段存在但没入库，再改导入映射。
 - 来源字段根本不存在时，先用浏览器或 API 定位字段来源，再补抓取器；不要在入库层造数。
-- 候选详情或图片失败先读 `formal_validation.pagination_evidence.skipped_candidate_failures`、
+- 候选详情、作者或图片失败先读 `formal_validation.pagination_evidence.skipped_candidate_failures`、
   `candidate_skipped` 和 manifest 对应行，再检查 staging 文件、平台日志尾部及登录态。有限重试仍
   失败的整帖记录后跳过，失败 ID 写候选记忆；child 继续后续候选，checkpoint 按最后完整批次推进。
-  身份、路径、格式、哈希或尺寸错误必须修复产物链路，禁止删 manifest 行、改摘要或只写 URL。
+  HTTP 401/403、429 或平台登录/风控码按运行级失败保留当前前沿，不得候选跳过；身份、路径、格式、
+  哈希或尺寸错误必须修复产物链路，禁止删 manifest 行、改摘要或只写 URL。
   child 若在写出 `candidate_skipped` 后预算超时、没有最终停止事件，仍按事件流聚合失败；checkpoint
   保留最后完整批次，不因跳过候选回卷，也不得越过未完成尾批。
 - 页面级抓取遇到错误页时，保留 `ctf_captures` 和 artifact，导入层过滤 `web_posts`。
@@ -358,10 +360,11 @@ PY
 门禁未通过、晋升失败或已确认发生在提交前的 SQLite 导入回滚时，不得留下本轮新建的无引用长期媒体文件。平台显式投影后的全部 manifest 候选均须通过下载与字节复验；
 知乎已知 `zhimg` 尺寸 URL 变体在投影时按资源路径合并，不重复生成 manifest。下载后再仅在同帖内
 按 SHA-256 保留首次来源并记录重复来源证据。任何图片失败都使该整帖失去正式资格。有限重试耗尽后
-的 `image_download_retryable` 与格式、解码、大小或明确非重试 HTTP 等终态错误，都在写完 manifest
+的 `image_download_retryable` 与格式、解码、大小或 HTTP 400/404 等候选自身终态错误，都在写完 manifest
 与 `candidate_skipped(failure_scope=image)` 后继续其他候选；终态错误保留 `retryable=false` 且不补做
 无意义请求。跳过候选不进入正式有效集合、不增加新增数，但不会阻断后续数量完成或真实来源耗尽。
-分页证据或任一 child 表明 `runtime_failed`、登录或验证码阻断时，即使有效新增数已经达到目标，也必须
+HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁或频控信号必须形成运行级阻断，
+不能写 `candidate_skipped`。分页证据或任一 child 表明 `runtime_failed`、登录或验证码阻断时，即使有效新增数已经达到目标，也必须
 保持 `completion_met=false`，不得晋升或入库；运行失败优先于数量完成，也不得被图片、行为或策略
 门禁的停止原因覆盖。
 微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；`isLongText=true`

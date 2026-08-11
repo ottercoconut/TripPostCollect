@@ -21,7 +21,8 @@
 - 正文来源：搜索对象同时含非空完整 `content` 和正文图时保存
   `content_detail_source=search_content`；否则必须请求详情并保存 `answer_detail` 或
   `article_detail`。`title`、`desc/excerpt` 不能单独通过。详情请求或解析失败记录
-  `content_detail_failed`，保留原页；该内容 ID 不进入 `crawl_discovery_seen_candidates`。
+  `content_detail_failed`；候选自身失败完成有限重试后写 `candidate_skipped` 并进入
+  `crawl_discovery_seen_candidates`，完整批次可继续推进。登录、授权或频控信号仍停止运行且不写 seen。
 - 去重键：内容 ID；answer URL 同时包含 question ID。
 - 有 checkpoint 时先刷新配置的顶部页，再从保存页码继续。已知内容 ID 不再写入当前 JSONL；
   完整页保存下一页，页面中途停止保存当前页，顶部刷新不推进深层 checkpoint。
@@ -52,11 +53,13 @@
 `image_download_retryable` 时写
 `candidate_skipped(failure_scope=image)`，跳过该回答/文章并继续后续候选；失败 ID 进入候选记忆，
 checkpoint 按完整批次推进。该帖不得把详情失败、部分成功或公式图排除解释成图片完成。
-格式、解码、大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样写失败 manifest 与
+格式、解码、大小或 HTTP 400/404 等候选自身终态错误不补做无意义重试，但同样写失败 manifest 与
 `candidate_skipped` 后继续后续候选。回答/文章详情完成有限重试仍失败时采用
 `candidate_skipped(failure_scope=post)`。操作人精确排除仍可用于请求前跳过，但普通失败无需写排除表。
 客户端必须保留真实 HTTP 状态；HTTP 200 空字节继续有限重试，流式响应超过字节上限直接使用
 `image_too_large`，不得折叠为可重试空响应。
+HTTP 401/403 使用 `image_auth_required`、HTTP 429 使用 `image_rate_limited`，两者属于运行级阻断，
+不得写 `candidate_skipped` 或 seen。
 
 根执行器按 `image_list` 投影后的候选顺序复验 manifest 和文件，正式运行晋升到 `data/media/zhihu/...`
 前仍在同一帖子内按验证后的 SHA-256 做字节级兜底去重并连续重编号；随后在同一 SQLite 事务写

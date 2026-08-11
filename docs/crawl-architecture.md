@@ -144,13 +144,15 @@ runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并�
 真实末页才能报告来源耗尽。
 
 正文图片失败分为两支：空响应、超时或临时请求错误在单图有限重试耗尽后生成
-`image_download_retryable`；格式、解码、大小或明确非重试 HTTP 等终态错误保留具体错误码且不做
+`image_download_retryable`；格式、解码、大小或 HTTP 400/404 等候选自身终态错误保留具体错误码且不做
 无意义重试。两类都先原子追加失败 manifest，再写 `candidate_skipped(failure_scope=image)`，把该 ID
 写入已处理候选并继续后续候选。失败帖不进入正式 JSONL 或内容 SQLite；停止摘要汇总
 `skipped_candidate_failures`，checkpoint 按最后完整批次推进。默认数量模式只计算有效候选；显式来源
 耗尽模式可在跳过候选后继续到真实末页并生成 `source_exhausted` 证据。即使预算超时使 child 没来得及
 写最终停止事件，根执行器也从既有 `candidate_skipped` 事件重建审计集合；摘要保持运行不完整，
 checkpoint 不越过未完成尾批，但不因已记录跳过候选回卷。
+HTTP 401/403、429 与平台登录、验证码、安全限制、账号/IP 封禁或频控码属于运行级阻断，必须保留
+当前安全前沿且不写 `candidate_skipped` 或 seen。
 
 小红书独立 runner 不读写通用 checkpoint 表，而是在 `xhs_discovery_checkpoints` 中按目标、账号和
 查询指纹保存 `page + search_id`，在 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID。
