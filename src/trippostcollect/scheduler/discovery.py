@@ -186,6 +186,100 @@ def load_seen_candidates(
     }
 
 
+def save_candidate_exclusion(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    platform_key: str,
+    query_fingerprint_value: str,
+    platform_post_id: str,
+    reason: str,
+    authorized_run_id: str,
+    evidence: Mapping[str, Any] | None = None,
+) -> None:
+    identity = str(platform_post_id).strip()
+    platform = str(platform_key).strip()
+    fingerprint = str(query_fingerprint_value).strip()
+    reason_value = str(reason).strip()
+    run_id = str(authorized_run_id).strip()
+    if not identity:
+        raise ValueError("platform_post_id must not be empty")
+    if not platform:
+        raise ValueError("candidate exclusion platform_key must not be empty")
+    if not fingerprint:
+        raise ValueError("candidate exclusion query_fingerprint must not be empty")
+    if not reason_value:
+        raise ValueError("candidate exclusion reason must not be empty")
+    if not run_id:
+        raise ValueError("candidate exclusion authorized_run_id must not be empty")
+    conn.execute(
+        """
+        INSERT INTO crawl_discovery_candidate_exclusions (
+            job_id, platform_key, query_fingerprint, platform_post_id,
+            reason, evidence_json, authorized_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_id, query_fingerprint, platform_post_id)
+        DO UPDATE SET
+            platform_key=excluded.platform_key,
+            reason=excluded.reason,
+            evidence_json=excluded.evidence_json,
+            authorized_run_id=excluded.authorized_run_id,
+            updated_at=datetime('now')
+        """,
+        (
+            int(job_id),
+            platform,
+            fingerprint,
+            identity,
+            reason_value,
+            canonical_json(dict(evidence or {})),
+            run_id,
+        ),
+    )
+
+
+def load_candidate_exclusions(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    platform_key: str,
+    query_fingerprint_value: str,
+) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT platform_post_id
+        FROM crawl_discovery_candidate_exclusions
+        WHERE job_id=? AND platform_key=? AND query_fingerprint=?
+        """,
+        (job_id, platform_key, query_fingerprint_value),
+    ).fetchall()
+    return {
+        str(row[0]).strip()
+        for row in rows
+        if row[0] is not None and str(row[0]).strip()
+    }
+
+
+def load_skipped_candidates(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    platform_key: str,
+    query_fingerprint_value: str,
+) -> set[str]:
+    return load_seen_candidates(
+        conn,
+        job_id=job_id,
+        platform_key=platform_key,
+        query_fingerprint_value=query_fingerprint_value,
+    ) | load_candidate_exclusions(
+        conn,
+        job_id=job_id,
+        platform_key=platform_key,
+        query_fingerprint_value=query_fingerprint_value,
+    )
+
+
 def update_campaign(
     conn: sqlite3.Connection,
     *,

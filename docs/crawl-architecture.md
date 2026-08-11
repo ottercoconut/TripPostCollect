@@ -9,6 +9,7 @@ config/crawl_targets.json
   -> scripts/crawl_runner.py
       -> SQLite crawl_discovery_checkpoints
       -> SQLite crawl_discovery_seen_candidates
+      -> SQLite crawl_discovery_candidate_exclusions
       -> data/runtime/crawl_execution_states/<run_id>/<job>.json
       -> scripts/mediacrawler_crawl.py
           -> scripts/crawl_policy.py
@@ -135,6 +136,10 @@ runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并�
 `crawl_discovery_seen_candidates` 保存视频、已有决定性权威证据的字段无效项和有效候选，跨轮在
 详情、作者与媒体处理前跳过。详情请求、空响应或解析等可恢复失败必须记录
 `runtime_failed`，保留原页/游标，且失败 ID 不进入 seen 集合。
+操作人对跨轮持续失败的精确候选明确授权跳过时，独立写入
+`crawl_discovery_candidate_exclusions`，记录 job、查询指纹、候选 ID、原因、证据和授权 run。
+通用 child 在昂贵处理前把排除 ID 与 seen ID 合并为已知集合，但排除不写内容、不计成功，也不
+自动推进 checkpoint。系统不得按失败次数自行生成排除；下一轮仍须扫描到真实末页才能报告来源耗尽。
 
 正文图片失败分为两支：空响应、超时或临时请求错误在单图有限重试耗尽后生成
 `image_download_retryable`；格式、解码、大小或明确非重试 HTTP 等终态错误保留具体错误码且不做

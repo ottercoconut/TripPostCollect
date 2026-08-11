@@ -11,9 +11,12 @@ from unittest.mock import AsyncMock
 
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.scheduler.discovery import (
+    load_candidate_exclusions,
     load_checkpoint,
+    load_skipped_candidates,
     load_seen_candidates,
     query_fingerprint,
+    save_candidate_exclusion,
     save_checkpoint,
     save_seen_candidates,
 )
@@ -92,6 +95,51 @@ def test_checkpoint_round_trip_preserves_page_offset_and_cursor(tmp_path: Path) 
     assert checkpoint["resume_offset"] == 150
     assert checkpoint["resume_cursor"] == "cursor-10"
     assert checkpoint["status"] == "active"
+
+
+def test_operator_candidate_exclusion_is_auditable_and_loaded_as_skipped(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "exclusion.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        bootstrap_connection(conn, sync_content=False, sync_jobs=False)
+        row = insert_job(conn, {"platform": "zhihu", "keyword": "青岛旅游"})
+        fingerprint = query_fingerprint("zhihu", "青岛旅游", {})
+        save_candidate_exclusion(
+            conn,
+            job_id=int(row["id"]),
+            platform_key="zhihu",
+            query_fingerprint_value=fingerprint,
+            platform_post_id="answer-persistent-failure",
+            reason="operator_excluded_after_repeated_image_failure",
+            authorized_run_id="operator-run-1",
+            evidence={"attempts_per_round": 3, "rounds": 2},
+        )
+        conn.commit()
+
+        assert load_candidate_exclusions(
+            conn,
+            job_id=int(row["id"]),
+            platform_key="zhihu",
+            query_fingerprint_value=fingerprint,
+        ) == {"answer-persistent-failure"}
+        assert load_skipped_candidates(
+            conn,
+            job_id=int(row["id"]),
+            platform_key="zhihu",
+            query_fingerprint_value=fingerprint,
+        ) == {"answer-persistent-failure"}
+        exclusion = conn.execute(
+            "SELECT * FROM crawl_discovery_candidate_exclusions"
+        ).fetchone()
+
+    assert exclusion is not None
+    assert exclusion["reason"] == "operator_excluded_after_repeated_image_failure"
+    assert json.loads(exclusion["evidence_json"]) == {
+        "attempts_per_round": 3,
+        "rounds": 2,
+    }
 
 
 def test_executor_commits_cursor_from_durable_pagination_evidence(tmp_path: Path) -> None:
@@ -625,6 +673,21 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE crawl_discovery_candidate_exclusions (
+                job_id INTEGER NOT NULL,
+                platform_key TEXT NOT NULL,
+                query_fingerprint TEXT NOT NULL,
+                platform_post_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                authorized_run_id TEXT NOT NULL,
+                updated_at TEXT,
+                PRIMARY KEY (job_id, query_fingerprint, platform_post_id)
+            )
+            """
+        )
         save_seen_candidates(
             conn,
             job_id=7,
@@ -632,6 +695,15 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
             query_fingerprint_value="bili-fingerprint",
             platform_post_ids=["remembered"],
             run_id="prior-run",
+        )
+        save_candidate_exclusion(
+            conn,
+            job_id=7,
+            platform_key="bilibili",
+            query_fingerprint_value="bili-fingerprint",
+            platform_post_id="operator-excluded",
+            reason="operator_excluded_after_repeated_detail_failure",
+            authorized_run_id="operator-run-1",
         )
     state_path = tmp_path / "state.json"
     mediacrawler_crawl.FrozenExecutionState.create(
@@ -682,6 +754,19 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
                 "view": 3,
                 "author": "remembered-author",
                 "mid": "remembered-author-id",
+            },
+            {
+                "id": "operator-excluded",
+                "title": "operator-excluded",
+                "desc": "body",
+                "arcurl": "https://www.bilibili.com/read/cvoperator-excluded/",
+                "image_urls": ["https://example.test/operator-excluded.jpg"],
+                "pubdate": 1_700_000_000,
+                "like": 1,
+                "reply": 2,
+                "view": 3,
+                "author": "excluded-author",
+                "mid": "excluded-author-id",
             },
             {
                 "id": "new",

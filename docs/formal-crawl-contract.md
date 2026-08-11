@@ -189,7 +189,12 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 恰好用尽候选上限或随后扫描到空页时仍必须报告 `deferred_retry_pending`。格式、解码、大小、明确
 非重试 HTTP 等终态图片错误同样写 `candidate_deferred`，但保留终态错误码和 `retryable=false`，不
 强行补足 3 次请求；失败 ID 不写正式 JSONL、SQLite 或 seen。若终态候选跨轮持续失败，只能由操作人
-明确批准排除，runner 不得自动把它写入 seen 或伪造来源耗尽。
+明确批准排除，runner 不得自动把它写入 seen 或伪造来源耗尽。操作人批准必须精确到平台、job、
+查询指纹和候选 ID，并把原因、授权 run 与既有失败证据写入独立的
+`crawl_discovery_candidate_exclusions`；该表不属于内容或已处理候选记忆。后续 child 仅在昂贵详情、
+作者或图片请求前把对应 ID 视为已知并跳过，不生成 `web_posts`、不增加成功数，也不单独构成
+`source_exhausted` 证据。禁止仅按尝试次数自动创建排除；只有继续扫描取得真实
+`adaptive_search_stopped(source_exhausted)`，来源耗尽模式才可完成。
 若 child 在预算超时或可捕获中断前已经写出 `candidate_deferred`，但来不及写最终
 `adaptive_search_stopped`，根执行器仍必须从事件流聚合 `deferred_image_failures`；正式摘要保留
 `runtime_failed`，checkpoint 强制回到最早 frontier 失败坐标并标记 `batch_complete=false`，不得被
@@ -319,8 +324,9 @@ URL 和检查错误，不保存完整响应或整页文本。
 ## 持久化发现记忆与跨次累计
 
 B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用调度器自动维护发现记忆。SQLite
-`crawl_discovery_checkpoints` 与 `crawl_discovery_seen_candidates` 均以
-`job_id + query_fingerprint` 隔离；前者保存安全前沿，后者保存已完成处理的候选 ID。小红书由独立 runner
+`crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates` 与操作人授权的
+`crawl_discovery_candidate_exclusions` 均以 `job_id + query_fingerprint` 隔离；前者保存安全前沿，
+第二张表保存已完成处理的候选 ID，第三张表保存精确、可审计且不计成功的排除 ID。小红书由独立 runner
 维护 `xhs_discovery_checkpoints`，以 `target_key + account_id + query_fingerprint` 唯一定位，
 并在同一作用域的 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID；两者不与通用任务或
 其他账号共享未入库活动。指纹包含平台、关键词和影响来源结果的查询参数，
@@ -328,10 +334,12 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 记忆，不得误用旧游标。
 
 通用平台在昂贵处理前跳过 `web_posts` 已有 ID、累计摘要中的有效 ID、
-`crawl_discovery_seen_candidates` 已完成处理 ID 和当前 child 已完成 ID；小红书读取独立的
+`crawl_discovery_seen_candidates` 已完成处理 ID、`crawl_discovery_candidate_exclusions` 中经操作人
+明确授权的 ID 和当前 child 已完成 ID；小红书读取独立的
 `xhs_discovery_seen_candidates`。五个平台的视频、已由决定性权威响应证明的字段无效项和有效
 候选，都在 child 摘要形成后获得跨轮记忆。详情请求、空响应、解析或下载等可恢复失败不是
-“已完成处理”；该 ID 不写候选记忆。详情失败停止当前安全批次；正文图下载最终失败写
+“已完成处理”；该 ID 不写 seen。仅当操作人对反复失败的精确候选另行授权时，才写入排除表；
+排除不会回填内容、伪装字段无效或增加完成计数。详情失败停止当前安全批次；正文图下载最终失败写
 `candidate_deferred` 后可继续同一 child 的后续候选，但最终批次仍不完整，恢复位置取最早失败的
 原请求页/游标。进程在摘要前崩溃的候选也不会被提前标记。两套表的作用域不同：通用平台按 job 与查询
 指纹隔离，小红书还按人工指定账号隔离，不能跨账号共享未入库活动。

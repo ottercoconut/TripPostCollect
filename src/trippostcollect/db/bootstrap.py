@@ -253,6 +253,10 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
                 conn,
                 "crawl_discovery_seen_candidates",
             )
+            has_candidate_exclusions = table_exists(
+                conn,
+                "crawl_discovery_candidate_exclusions",
+            )
             if has_attempts:
                 conn.execute("ALTER TABLE crawl_attempts RENAME TO crawl_attempts_old")
             if has_checkpoints:
@@ -263,6 +267,11 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
                 conn.execute(
                     "ALTER TABLE crawl_discovery_seen_candidates "
                     "RENAME TO crawl_discovery_seen_candidates_old"
+                )
+            if has_candidate_exclusions:
+                conn.execute(
+                    "ALTER TABLE crawl_discovery_candidate_exclusions "
+                    "RENAME TO crawl_discovery_candidate_exclusions_old"
                 )
             conn.execute("ALTER TABLE crawl_jobs RENAME TO crawl_jobs_old")
             conn.executescript(CRAWL_SCHEDULER_SCHEMA.read_text(encoding="utf-8"))
@@ -323,6 +332,24 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
                     """
                 )
                 conn.execute("DROP TABLE crawl_discovery_seen_candidates_old")
+            if has_candidate_exclusions:
+                conn.execute(
+                    """
+                    INSERT INTO crawl_discovery_candidate_exclusions (
+                        job_id, platform_key, query_fingerprint, platform_post_id,
+                        reason, evidence_json, authorized_run_id, authorized_at, updated_at
+                    )
+                    SELECT
+                        exclusion.job_id, exclusion.platform_key,
+                        exclusion.query_fingerprint, exclusion.platform_post_id,
+                        exclusion.reason, exclusion.evidence_json,
+                        exclusion.authorized_run_id, exclusion.authorized_at,
+                        exclusion.updated_at
+                    FROM crawl_discovery_candidate_exclusions_old AS exclusion
+                    JOIN crawl_jobs AS jobs ON jobs.id=exclusion.job_id
+                    """
+                )
+                conn.execute("DROP TABLE crawl_discovery_candidate_exclusions_old")
             conn.execute("DROP TABLE crawl_jobs_old")
             conn.executescript(CRAWL_SCHEDULER_SCHEMA.read_text(encoding="utf-8"))
             conn.commit()
@@ -353,6 +380,10 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
         (15, "crawl_discovery_stop_detail"),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
+        (16, "crawl_discovery_candidate_exclusions"),
     )
 
 

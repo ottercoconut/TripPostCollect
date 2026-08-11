@@ -104,6 +104,9 @@ manifest 错误，不留下成功元数据；`image_download_retryable` 与终�
 `candidate_deferred` 后暂时跳过该 article，继续处理后续候选，终态错误不补做无意义重试。失败 ID
 仅在当前 child 内抑制重复请求，不写持久候选记忆；最终
 checkpoint 回到最早失败页并保持 `last_batch_complete=false`。
+若同一 article 跨轮完成有限重试后仍持续失败，只有操作人明确批准该精确 job、查询指纹和 article
+ID 排除时，才写入 `crawl_discovery_candidate_exclusions`。下一轮仍从原页恢复，但在详情请求前跳过
+该 ID 并继续处理同页后续候选；不得自动按失败次数排除、写 seen、手工推进页码或把排除计为成功。
 
 根执行器按同一详情投影逐项核对 manifest 和字节。正式运行才把文件晋升到
 `data/media/bilibili/...` 并在同一帖子事务写入 `web_post_images.local_path` 等字段；
@@ -123,6 +126,7 @@ article 搜索前必须在 MediaCrawler 持久 profile 执行共享行为阶段�
 失败、超时和无法解析的详情属于可恢复运行错误：允许有限退避重试；仍失败时停止当前 child，当前
 页标记 `last_batch_complete=false`，恢复页保持为本次请求页。失败 article ID 不得写入
 `crawl_discovery_seen_candidates`，也不得因搜索摘要非空而进入累计摘要。
+操作人另行授权的精确排除只写独立排除表，不改变上述失败默认语义。
 
 无人值守历史修复不能只凭 Cookie 文件存在判断已登录。每个修复批次开始和会话间隔结束后，必须用
 同一 Cookie 调用 `/x/web-interface/nav`，只有 `code=0` 且 `data.isLogin=true` 才能继续；快照缺失、

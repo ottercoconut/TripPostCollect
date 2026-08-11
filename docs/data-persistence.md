@@ -40,7 +40,7 @@ staging；正式文件只有在根项目复验后才能原子晋升到 `data/med
 | `db/source_platforms.sql` | `source_platforms` |
 | `db/web_posts.sql` | `web_posts`、`web_post_images` |
 | `db/ctf_captures.sql` | `ctf_captures`、`ctf_capture_images` |
-| `db/crawl_scheduler.sql` | `crawl_jobs`、`crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates`、`crawl_attempts`、`crawl_run_reports`、`profile_health_checks`；任务类型包含通用搜索和页面证据 |
+| `db/crawl_scheduler.sql` | `crawl_jobs`、`crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates`、`crawl_discovery_candidate_exclusions`、`crawl_attempts`、`crawl_run_reports`、`profile_health_checks`；任务类型包含通用搜索和页面证据 |
 | `db/xhs_control.sql` | `xhs_accounts`、`xhs_account_events`、`xhs_account_leases`、`xhs_runs`、`xhs_discovery_checkpoints`、`xhs_discovery_seen_candidates` |
 
 `trippostcollect.db.bootstrap` 是统一实现。通用 runner、小红书 runner、MediaCrawler 入库和
@@ -59,8 +59,8 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 和导入器不按关键词文本设置硬门禁。“崂山攻略”等不含“青岛”字样但明确属于青岛范围的关键词
 可以正常入库。
 
-`crawl_discovery_checkpoints` 和 `crawl_discovery_seen_candidates` 是 B站、微博、抖音和知乎正式
-搜索的控制面记忆，不是内容表。
+`crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates` 和
+`crawl_discovery_candidate_exclusions` 是 B站、微博、抖音和知乎正式搜索的控制面记忆，不是内容表。
 `job_id + query_fingerprint` 唯一定位同一来源查询；`resume_page` 保存下一安全页，抖音同时使用
 `resume_offset` 和 `resume_cursor`，`last_stop_reason` 与 `last_stop_detail` 保存停止分类，
 `last_summary_path` 指向尚未达到目标的累计摘要，
@@ -71,6 +71,11 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 完整目标达到后写入 `web_posts` / `web_post_images`。通用已完成处理候选表按 job 与查询指纹保存
 视频、有决定性证据的字段无效候选和有效候选 ID；它只用于发现去重，不把无效候选变成内容记录。
 可恢复请求失败不属于已完成处理，尤其不能把 B站详情失败 ID 写入该表。
+反复失败也不能按次数自动升级为已处理。只有操作人明确授权某个平台、job、查询指纹和候选 ID
+永久跳过时，才把该 ID、原因、证据与授权 run 写入 `crawl_discovery_candidate_exclusions`。正式 child
+会在详情、作者和图片等昂贵请求前将它与 seen 一并作为已知 ID 跳过；排除行不创建内容记录、不增加
+成功或有效候选计数，也不代替来源末页停止证据。撤销排除必须显式删除对应精确作用域的排除行，
+不能清空整张 seen 或 checkpoint 表。
 
 `web_posts` 是统一内容主表，面向用户查询和后续数据使用。`ctf_captures` 是证据和调试底座，面向程序脚本或 Agent 排查抓取过程。页面级抓取成功后，也会归一化生成 `web_posts` 行，并通过 `web_posts.source_capture_id` 关联对应 `ctf_captures.id`。
 

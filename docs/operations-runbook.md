@@ -167,6 +167,13 @@ sqlite3 data/trippostcollect.sqlite \
   "SELECT job_id, platform_key, query_fingerprint, COUNT(*) AS seen_candidates FROM crawl_discovery_seen_candidates GROUP BY job_id, platform_key, query_fingerprint ORDER BY job_id;"
 ```
 
+检查操作人授权的通用候选排除；这里只展示审计字段，不展开失败证据 JSON：
+
+```bash
+sqlite3 data/trippostcollect.sqlite \
+  "SELECT job_id, platform_key, query_fingerprint, platform_post_id, reason, authorized_run_id, authorized_at FROM crawl_discovery_candidate_exclusions ORDER BY authorized_at, job_id, platform_post_id;"
+```
+
 检查小红书账号级记忆：
 
 ```bash
@@ -226,6 +233,13 @@ B站 article、微博长文、小红书笔记和知乎 answer/article 的安全�
 则写 `candidate_deferred`，在同一 child 暂时跳过该 ID 并继续后续候选，checkpoint 最终回到最早
 失败页（抖音同时保留 offset/search ID，小红书同时保留 search ID），且
 `last_batch_complete=false`。不要通过删除 checkpoint 或扩大候选预算绕过失败。
+
+同一精确候选跨轮完成有限重试后仍持续失败时，系统仍不得按次数自动跳过。只有用户明确批准排除，
+才可在核对 job、平台、查询指纹、候选 ID 与既有失败摘要后写入
+`crawl_discovery_candidate_exclusions`，同时保存原因、证据和授权 run。下一轮从原 checkpoint 恢复，
+在昂贵请求前跳过该 ID 并继续扫描；不得手工推进页码。排除项不进入 `web_posts` 或 seen、不计成功，
+也不等于来源耗尽；仍须取得真实 `adaptive_search_stopped(source_exhausted)` 才能完成。撤销时只删除
+精确作用域的排除行，并再次从安全前沿恢复。
 
 抖音新鲜游标链在第 1 页收到 `data=[]、has_more=false` 时，不直接创建耗尽 checkpoint。
 执行器必须检查当前可见搜索页：存在 `/video/`、`/note/` 或搜索结果卡片时停止为

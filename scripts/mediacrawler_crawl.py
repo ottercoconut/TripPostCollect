@@ -100,7 +100,7 @@ from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.registry import get_site
 from trippostcollect.scheduler.discovery import (
     load_checkpoint,
-    load_seen_candidates,
+    load_skipped_candidates,
     save_checkpoint,
     save_seen_candidates,
 )
@@ -3491,7 +3491,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
         if discovery_job_id is not None and discovery_fingerprint:
             with sqlite3.connect(Path(args.db).expanduser()) as conn:
                 known_post_ids.update(
-                    load_seen_candidates(
+                    load_skipped_candidates(
                         conn,
                         job_id=int(discovery_job_id),
                         platform_key=platform_key,

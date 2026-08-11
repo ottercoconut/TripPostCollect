@@ -115,8 +115,10 @@ CLI 不传 `--completion-mode` 时仍默认按配置的 `target_new_posts`、`ca
 `image_download_retryable` 失败 manifest 和 `candidate_deferred` 证据后暂时跳过；失败帖不入库、不进入已处理候选记忆，checkpoint 保留最早
 失败坐标，后续候选继续。只有后续候选使既定完成条件成立时，图片完整的帖子才按正常事务入库；
 否则整轮保持 `deferred_retry_pending` 并保留累计摘要，不能降级为只存 URL，也不能误报来源耗尽。
-图片格式、解码、大小、明确非重试 HTTP 等终态错误只写失败 manifest，不写 `candidate_deferred`；
-child 必须以 `runtime_failed` 停在当前来源坐标，修复或人工处置后重跑。
+图片格式、解码、大小、明确非重试 HTTP 等终态错误不补做无意义重试，但同样写失败 manifest 与
+`candidate_deferred`，暂时跳过整帖并继续后续候选；失败帖不入库、不进入 seen，checkpoint 仍回到
+最早失败坐标。跨轮持续失败时，只有操作人明确授权精确候选排除，才可写入独立排除记忆；不得按
+尝试次数自动排除。
 分页证据或任一 child 已失败时，即使新增数量达标也不得晋升或入库；运行失败门禁优先。
 客户端必须把真实 HTTP 状态传到 manifest；HTTP 200 空字节也属于可恢复空响应，不能在第一次请求后
 误判为格式终态。晋升或确认发生在 SQLite 提交前的导入失败删除本轮新建且无数据库引用的长期文件，
@@ -143,8 +145,8 @@ child 的安全上限。永久提高目标时应在 `config/xhs_targets.json` �
 
 | 平台 | 控制面记忆 | 保存的深层前沿 | 跨轮详情前去重 |
 |---|---|---|---|
-| B站、微博、知乎 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | 下一安全页 | SQLite 已入库 ID、累计摘要 ID、`crawl_discovery_seen_candidates` 中所有已完成处理候选 ID |
-| 抖音 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | page、offset、响应 search ID 必须成组恢复 | SQLite 已入库 ID、累计摘要 ID、`crawl_discovery_seen_candidates` 中所有已完成处理候选 ID |
+| B站、微博、知乎 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | 下一安全页 | SQLite 已入库 ID、累计摘要 ID、`crawl_discovery_seen_candidates` 中所有已完成处理候选 ID，以及操作人明确授权的 `crawl_discovery_candidate_exclusions` |
+| 抖音 | `crawl_discovery_checkpoints`，按 job 与查询指纹隔离 | page、offset、响应 search ID 必须成组恢复 | SQLite 已入库 ID、累计摘要 ID、`crawl_discovery_seen_candidates` 中所有已完成处理候选 ID，以及操作人明确授权的 `crawl_discovery_candidate_exclusions` |
 | 小红书 | `xhs_discovery_checkpoints`，按目标、人工指定账号与查询指纹隔离 | page 与 client search ID 必须成组恢复 | SQLite 已入库 ID、累计摘要 ID，以及 `xhs_discovery_seen_candidates` 中所有已完成处理候选 ID |
 
 首次运行从第一页开始且顶部刷新页数为 0；存在 checkpoint 后才先刷新配置限定的顶部页，再从
@@ -163,6 +165,8 @@ child 的安全上限。永久提高目标时应在 `config/xhs_targets.json` �
 请求或图片失败不属于“已完成处理”。同一 child 会暂时记住该失败 ID 以免本轮反复请求，跨轮不写
 候选记忆并从最早失败坐标恢复。通用平台写
 `crawl_discovery_seen_candidates`，按 job 与查询指纹隔离；小红书写独立表并额外按人工指定账号隔离。
+通用平台另有 `crawl_discovery_candidate_exclusions`，只保存操作人明确批准、精确到作用域与 ID 的
+排除；它不表示候选成功或字段无效，也不能替代 `adaptive_search_stopped(source_exhausted)`。
 正常运行一律让 runner 自动生成恢复参数；人工恢复仅按
 [运行手册](operations-runbook.md) 的限制处理。
 
