@@ -60,11 +60,12 @@
 `<child_artifact>/xhs/data/xhs/images/<note_id>/<index>.<real_ext>` 和
 `<child_artifact>/xhs/data/xhs/image_manifest.jsonl`；来源字段固定为 `image_list`、角色固定为 `content`。
 空响应或超时按单图最多 3 次、1–2 秒随机基数指数退避重试；日志和最终 manifest `attempts` 保留
-实际尝试证据。三次仍为临时错误才记录 `image_download_retryable` 和 `candidate_deferred`，暂时跳过整帖并
-继续后续候选；失败 ID 不写账号级候选记忆，checkpoint 回到最早失败的 page/search ID。不保存
-该帖成功图片子集为完整帖，也不触发自动换号；其他完整帖子继续参与本轮既定完成条件。
+实际尝试证据。三次仍为临时错误才记录 `image_download_retryable` 和
+`candidate_skipped(failure_scope=image)`，跳过整帖并继续后续候选；失败 ID 写账号级候选记忆，
+checkpoint 按完整批次推进。不保存该帖成功图片子集为完整帖，也不触发自动换号。
 格式、解码、大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样写失败 manifest 与
-`candidate_deferred`，暂时跳过整帖并继续后续候选。
+`candidate_skipped`，跳过整帖并继续后续候选。笔记详情或作者必需字段完成适用重试仍失败时采用
+`candidate_skipped(failure_scope=post)`；安全限制、登录、验证码和频控仍立即停止。
 客户端必须保留真实 HTTP 状态；HTTP 200 空字节由共享 helper 继续有限重试，不得折叠成第一次成功。
 
 根执行器按相同优先级重建候选，复验 manifest、SHA/MIME/尺寸和路径边界。正式运行晋升到
@@ -313,7 +314,7 @@ python scripts/xhs_runner.py \
 | 搜索连续性登录/图片验证 | 暂停当前搜索批次 | 保持当前页置前，等待操作人处理；通过后继续，600 秒超时则失败且不入库 |
 | 搜索 API 返回登录已过期 | 暂停原请求 | 解开重试器包装后的内层错误，刷新当前可见页但不关闭任何标签页，置前最新的小红书页并等待人工恢复；可见登录 UI 与 self-info API 均恢复后刷新 Cookie/storage state 并重试同一来源页，600 秒超时才写 `login_required`，checkpoint 不推进 |
 | 搜索 API 461/471 验证 | 暂停原 API 请求 | 用响应的 `Verifyuuid`、`Verifytype` 打开平台人工验证页；通过后刷新 Cookie 并重试原请求 |
-| 正文图最终失败 | 该帖暂缓、整轮待重试 | 从 `candidate_deferred`、`deferred_image_failures` 和 manifest 定位图片；继续本轮后续候选，失败 ID 不写 seen，checkpoint 保持最早失败 page/search ID；未满足既定完成条件时保留累计摘要而不做部分入库 |
+| 帖子详情、作者字段或正文图最终失败 | 记录并跳过该帖 | 从 `candidate_skipped`、`skipped_candidate_failures` 和图片 manifest 定位原因；失败 ID 写 seen，checkpoint 按完整批次推进，该帖不入内容库、不计有效结果，继续后续候选 |
 | manifest 身份、格式、哈希或路径错误 | 失败，不入库 | 停止晋升和 checkpoint；修复代码/产物链路后重跑，禁止删行或只保留 URL |
 | 作者页二维码安全验证 | 暂停当前作者补全 | 保持验证页置前，等待操作人扫码；通过后继续，600 秒超时则失败且不入库 |
 | 守卫安装后出现任意新标签页 | 进入无条件保护期 | 无论平台弹出还是 crawler 受控创建，均立即置前并从出现时起至少保留 30 秒；滚动无位移、所有代码关闭和浏览器退出都必须等待，不能因未识别出验证标记而立即关闭 |
@@ -330,14 +331,14 @@ python scripts/xhs_runner.py \
 | 互动控件失败且无阻断 | 互动失败、抓取可继续 | 只报告 `post_interaction.ok=false`，仍按正式字段和入库判据决定结果 |
 
 小红书不向操作人开放手工 `--resume-summary`、`--start-page` 或 `--start-cursor`；正常续跑全部由
-`xhs_runner.py` 从 SQLite 生成。图片失败轮次提交最早失败前沿并保存其他完整帖的累计摘要，但在
-既定完成条件未满足时不做部分入库；失败帖本身不入库、不写 seen。默认数量模式下，下轮同一账号
-合并累计摘要继续达到完整 `target_new_posts`。显式来源耗尽模式只有清空 deferred 并取得完整耗尽
-证据后完成。
+`xhs_runner.py` 从 SQLite 生成。候选级失败记录后跳过并写 seen；失败帖本身不入库、不计有效结果，
+其他完整帖继续参与既定完成条件。默认数量模式继续达到完整 `target_new_posts`；显式来源耗尽模式仍
+必须取得真实耗尽证据，但不因已记录跳过候选而回卷。
 `candidate_hard_limit` 是正常模式每次 child 的未知候选预算，不从历史累计数扣减。
 `--no-import` 不写 checkpoint，也不能作为正式完成证据。
 child 摘要为 `import_result.reason=sqlite_import_failed` 时与 `--no-import` 一样不提交 discovery；
-runner 调用前和 `commit_child_discovery()` 内部都执行该门禁，失败候选必须留给下一轮重试。
+runner 调用前和 `commit_child_discovery()` 内部都执行该门禁；这里的导入失败属于运行级失败，不按
+候选跳过。
 
 若 `target_new_met` 在页面中途触发并成功入库，checkpoint 仍保留当前 page/search ID，
 `last_batch_complete=false`；来源未耗尽时 `status=active`。成功入库会清空

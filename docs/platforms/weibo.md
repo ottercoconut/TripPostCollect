@@ -14,8 +14,8 @@
 - 正文来源：非长文使用完整搜索 `mblog.text`，保存
   `content_detail_status=detail_observed` 和 `content_detail_source=search_mblog_complete`；
   `isLongText=true` 必须请求移动端详情并保存 `content_detail_source=mobile_detail`。
-  详情失败记录 `full_text_request_failed`，阻断当前批次并保留原页；截断文本不写 JSONL、
-  不入库、不进入已处理候选记忆。
+  详情完成有限重试仍失败时记录 `candidate_skipped(failure_scope=post)`；截断文本不写 JSONL、
+  不入库，失败 ID 进入已处理候选记忆并继续后续候选。
 - 图片来源：`mblog.pics`；没有正文图片的记录不是有效图文。
 - 去重键：微博 ID。
 - 粉丝量为 0 时，只有原始 user 对象明确包含粉丝字段才有效。
@@ -39,10 +39,10 @@
 再原子写入本轮 `<platform_artifact>/data/weibo/images/<weibo_id>/<index>.<real_ext>`，并更新
 `<platform_artifact>/data/weibo/image_manifest.jsonl`。空响应或超时按单图最多 3 次、1–2 秒随机基数
 指数退避重试；日志逐次记录重试，成功或最终失败的 manifest 都记录实际 `attempts`。三次仍失败才使用
-`image_download_retryable`，写 `candidate_deferred` 后暂时跳过整帖并继续本页后续候选。格式、解码、
-大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样写 `candidate_deferred` 并继续。失败 ID 不写
-持久候选记忆，checkpoint 回到最早失败页；该帖不允许只保留成功图片子集，后续完整帖子继续参与
-本轮既定完成条件。
+`image_download_retryable`，写 `candidate_skipped(failure_scope=image)` 后跳过整帖并继续本页后续候选。
+格式、解码、大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样记录并继续。失败 ID 写入
+持久候选记忆，checkpoint 按完整批次推进；该帖不允许只保留成功图片子集，也不计有效结果。
+长文详情完成有限重试仍失败时采用 `candidate_skipped(failure_scope=post)`，不得保存搜索截断正文。
 客户端必须保留真实 HTTP 状态；HTTP 200 空字节由共享 helper 继续有限重试，不得折叠成第一次成功。
 
 根执行器重新按 `image_list` 顺序核对 manifest 身份、SHA/MIME/尺寸和 staging 文件。正式 runner

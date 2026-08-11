@@ -6,10 +6,10 @@
 | 平台 | 图文/正文来源 | 权威正文图字段 | 本地存储与排除 | 发布时间 | 作者 | 粉丝量 | 互动 | 当前说明 |
 |---|---|---|---|---|---|---|---|---|
 | B站 article | `article_view_api` 详情正文 | 详情观察后的 `image_urls` | 当前会话 staging → manifest → `data/media`；搜索预览/封面/头像排除 | 结构化 | ID/昵称 | 作者关系统计 | 赞/评/浏览 | 正常正式入口使用已验收的详情实现；当前默认库 3,006 条历史记录全部具有详情观察证据 |
-| 微博 | `search_mblog_complete` / `mobile_detail` | `mblog.pics` → `image_list` | 当前会话 staging → manifest → `data/media`；头像/封面排除 | 结构化 | ID/昵称 | `mblog.user` | 赞/评/转 | 长文详情失败阻断，禁止保存截断正文 |
-| 小红书 | `note_detail` 非空 `desc` | 笔记详情 `image_list` | 每个图片对象选择一个正文 URL，staging → manifest → `data/media`；头像/视频排除 | 结构化 | ID/昵称/主页 | 登录会话作者主页 | 赞/藏/评/分享 | 可恢复详情失败不进候选记忆 |
+| 微博 | `search_mblog_complete` / `mobile_detail` | `mblog.pics` → `image_list` | 当前会话 staging → manifest → `data/media`；头像/封面排除 | 结构化 | ID/昵称 | `mblog.user` | 赞/评/转 | 长文详情重试耗尽后记录并跳过，禁止保存截断正文 |
+| 小红书 | `note_detail` 非空 `desc` | 笔记详情 `image_list` | 每个图片对象选择一个正文 URL，staging → manifest → `data/media`；头像/视频排除 | 结构化 | ID/昵称/主页 | 登录会话作者主页 | 赞/藏/评/分享 | 详情或作者补全重试耗尽后记录并跳过 |
 | 抖音 | `aweme_detail` 非空 `desc` | `note_download_url` | 保留 `images[].uri` 稳定键，staging → manifest → `data/media`；封面/视频/音乐/头像排除 | 结构化 | ID/昵称/主页 | 作者主页 | 赞/藏/评/分享 | 标题和预览文本不能代替正文 |
-| 知乎 | `search_content` / `answer_detail` / `article_detail` | 正文/详情 `image_list` | 当前会话 staging → manifest → `data/media`；公式/头像/作者主页/zvideo 排除 | 结构化 | ID/昵称/主页 | search author/member | 赞/评 | 详情失败不进候选记忆，标题/摘要不能通过 |
+| 知乎 | `search_content` / `answer_detail` / `article_detail` | 正文/详情 `image_list` | 当前会话 staging → manifest → `data/media`；公式/头像/作者主页/zvideo 排除 | 结构化 | ID/昵称/主页 | search author/member | 赞/评 | 详情重试耗尽后记录并跳过，标题/摘要不能通过 |
 
 五个结构化平台都配置 `followers_policy=required`：数值、来源和
 `followers_observed=true` 缺一不可。真实 0 粉丝有效，缺失后由模型默认生成的 0 无效。

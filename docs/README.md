@@ -111,14 +111,13 @@ CLI 不传 `--completion-mode` 时仍默认按配置的 `target_new_posts`、`ca
 通过后，正式模式才原子晋升到 `data/media`，并把 URL、
 `local_path` 和字节证据与帖子放在同一 SQLite 事务中。头像、作者主页、封面、搜索预览、视频、
 音乐和知乎公式图在下载前自动排除；作者头像仅可保留 `author_avatar` URL 参考，不下载也不参与
-正文图计数。单帖正文图的空响应、超时或临时请求错误在有限重试后仍失败时，该候选写
-`image_download_retryable` 失败 manifest 和 `candidate_deferred` 证据后暂时跳过；失败帖不入库、不进入已处理候选记忆，checkpoint 保留最早
-失败坐标，后续候选继续。只有后续候选使既定完成条件成立时，图片完整的帖子才按正常事务入库；
-否则整轮保持 `deferred_retry_pending` 并保留累计摘要，不能降级为只存 URL，也不能误报来源耗尽。
+正文图计数。候选帖子详情、作者必需字段或正文图的空响应、超时或临时请求错误在有限重试后仍失败
+时，写 `candidate_skipped` 证据；图片失败还写 `image_download_retryable` manifest。失败整帖不入内容
+库、不算有效结果，但进入已处理候选记忆，checkpoint 按最后完整批次推进，child 继续后续候选。
 图片格式、解码、大小、明确非重试 HTTP 等终态错误不补做无意义重试，但同样写失败 manifest 与
-`candidate_deferred`，暂时跳过整帖并继续后续候选；失败帖不入库、不进入 seen，checkpoint 仍回到
-最早失败坐标。跨轮持续失败时，只有操作人明确授权精确候选排除，才可写入独立排除记忆；不得按
-尝试次数自动排除。
+`candidate_skipped`。跳过候选不阻断后续数量目标或真实来源耗尽；登录、验证码、安全限制、频控、
+搜索请求或浏览器整体失败仍按运行错误停机。操作人授权的精确候选排除只用于请求前跳过，不是普通
+重试耗尽的必经路径。
 分页证据或任一 child 已失败时，即使新增数量达标也不得晋升或入库；运行失败门禁优先。
 客户端必须把真实 HTTP 状态传到 manifest；HTTP 200 空字节也属于可恢复空响应，不能在第一次请求后
 误判为格式终态。晋升或确认发生在 SQLite 提交前的导入失败删除本轮新建且无数据库引用的长期文件，
@@ -161,9 +160,9 @@ child 的安全上限。永久提高目标时应在 `config/xhs_targets.json` �
 明确“无结果”提示时按运行异常保留第 1 页，不能建立耗尽 checkpoint；只有 API 业务状态正常、
 `has_more=false` 且页面明确显示无结果，才记录 `verified_empty_first_page`。
 
-五个平台都会在 child 摘要形成后持久记忆视频、有决定性证据的字段无效候选和有效候选；可恢复
-请求或图片失败不属于“已完成处理”。同一 child 会暂时记住该失败 ID 以免本轮反复请求，跨轮不写
-候选记忆并从最早失败坐标恢复。通用平台写
+五个平台都会在 child 摘要形成后持久记忆视频、有决定性证据的字段无效候选、有效候选，以及
+详情/作者/图片在适用重试后仍失败的 `candidate_skipped`。跳过候选表示“已处理但未成功”，不生成
+内容记录也不增加有效数。通用平台写
 `crawl_discovery_seen_candidates`，按 job 与查询指纹隔离；小红书写独立表并额外按人工指定账号隔离。
 通用平台另有 `crawl_discovery_candidate_exclusions`，只保存操作人明确批准、精确到作用域与 ID 的
 排除；它不表示候选成功或字段无效，也不能替代 `adaptive_search_stopped(source_exhausted)`。

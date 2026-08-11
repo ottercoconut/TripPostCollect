@@ -1514,13 +1514,14 @@ PAGINATION_EVENT_FIELDS = (
     "stop_reason",
     "stop_detail",
     "candidate_identities",
-    "deferred_image_count",
-    "deferred_image_failures",
+    "skipped_candidate_count",
+    "skipped_candidate_failures",
 )
 
-DEFERRED_IMAGE_EVENT_FIELDS = (
+SKIPPED_CANDIDATE_EVENT_FIELDS = (
     "platform",
     "identity",
+    "failure_scope",
     "detail",
     "error_code",
     "retryable",
@@ -1569,29 +1570,7 @@ def effective_discovery_checkpoint_event(
     )
     if not isinstance(event, dict):
         return None
-    event = dict(event)
-    frontier_failures = [
-        failure
-        for failure in pagination_evidence.get("deferred_image_failures") or []
-        if failure.get("discovery_phase") != "refresh"
-    ]
-    if frontier_failures:
-        earliest_failure = frontier_failures[0]
-        for target_key, source_key in (
-            ("resume_page", "source_page"),
-            ("resume_offset", "source_offset"),
-            ("resume_cursor", "source_cursor"),
-        ):
-            if earliest_failure.get(source_key) not in (None, ""):
-                event[target_key] = earliest_failure[source_key]
-        event["batch_complete"] = False
-        event["source_has_more"] = True
-        event["deferred_image_count"] = len(frontier_failures)
-        event["deferred_image_failures"] = frontier_failures
-        if not pagination_evidence.get("stopped"):
-            event["stop_reason"] = "runtime_failed"
-            event["stop_detail"] = "deferred_image_pending_after_incomplete_run"
-    return event
+    return dict(event)
 
 
 def persist_discovery_checkpoint(
@@ -1734,7 +1713,7 @@ def load_pagination_evidence(state_path: str | Path | None) -> dict[str, Any]:
     batches = []
     stopped_details: dict[str, Any] | None = None
     frontier_reseeds: list[dict[str, Any]] = []
-    deferred_image_failures: list[dict[str, Any]] = []
+    skipped_candidate_failures: list[dict[str, Any]] = []
     for event in payload.get("events") or []:
         if not isinstance(event, dict):
             continue
@@ -1754,11 +1733,11 @@ def load_pagination_evidence(state_path: str | Path | None) -> dict[str, Any]:
                     if key in details
                 }
             )
-        elif event.get("type") == "candidate_deferred":
-            deferred_image_failures.append(
+        elif event.get("type") == "candidate_skipped":
+            skipped_candidate_failures.append(
                 {
                     key: details.get(key)
-                    for key in DEFERRED_IMAGE_EVENT_FIELDS
+                    for key in SKIPPED_CANDIDATE_EVENT_FIELDS
                     if key in details
                 }
             )
@@ -1774,42 +1753,45 @@ def load_pagination_evidence(state_path: str | Path | None) -> dict[str, Any]:
         "stop_detail": str((stopped_details or {}).get("stop_detail") or ""),
         "batches": batches,
         "frontier_reseeds": frontier_reseeds,
-        "deferred_image_count": len(deferred_image_failures),
-        "deferred_image_failures": deferred_image_failures,
+        "skipped_candidate_count": len(skipped_candidate_failures),
+        "skipped_candidate_failures": skipped_candidate_failures,
         "stop_event": stopped_details,
     }
 
 
-def attach_deferred_image_evidence(
+def attach_skipped_candidate_evidence(
     image_materialization: dict[str, Any],
     pagination_evidence: dict[str, Any],
 ) -> dict[str, Any]:
-    """Expose skipped image failures without invalidating complete later candidates."""
+    """Expose skipped post/image failures without blocking complete candidates."""
 
     stop_event = pagination_evidence.get("stop_event") or {}
     failures = list(
-        stop_event.get("deferred_image_failures")
-        or pagination_evidence.get("deferred_image_failures")
+        stop_event.get("skipped_candidate_failures")
+        or pagination_evidence.get("skipped_candidate_failures")
         or []
     )
     result = dict(image_materialization)
-    result["deferred_image_count"] = max(
-        int(stop_event.get("deferred_image_count") or 0),
-        int(pagination_evidence.get("deferred_image_count") or 0),
+    result["skipped_candidate_count"] = max(
+        int(stop_event.get("skipped_candidate_count") or 0),
+        int(pagination_evidence.get("skipped_candidate_count") or 0),
         len(failures),
     )
-    result["deferred_image_failures"] = failures
+    result["skipped_candidate_failures"] = failures
+    image_failures = [
+        failure for failure in failures if failure.get("failure_scope") == "image"
+    ]
     result["retryable_failures"] = int(result.get("retryable_failures") or 0) + sum(
         bool(failure.get("retryable"))
         or failure.get("error_code") == "image_download_retryable"
-        for failure in failures
+        for failure in image_failures
     )
     result["terminal_failures"] = int(result.get("terminal_failures") or 0) + sum(
         not (
             bool(failure.get("retryable"))
             or failure.get("error_code") == "image_download_retryable"
         )
-        for failure in failures
+        for failure in image_failures
     )
     return result
 
@@ -1917,10 +1899,10 @@ def collect_formal_records(
     candidate_count = max(candidate_count, run_candidate_count)
     new_target_met = target_new_posts <= 0 or valid_new_count >= target_new_posts
     stop_event = pagination_evidence.get("stop_event") or {}
-    deferred_image_count = max(
-        int(pagination_evidence.get("deferred_image_count") or 0),
-        int(stop_event.get("deferred_image_count") or 0),
-        len(stop_event.get("deferred_image_failures") or []),
+    skipped_candidate_count = max(
+        int(pagination_evidence.get("skipped_candidate_count") or 0),
+        int(stop_event.get("skipped_candidate_count") or 0),
+        len(stop_event.get("skipped_candidate_failures") or []),
     )
     unverified_douyin_first_page_empty = bool(
         stop_event.get("platform") == "douyin"
@@ -1935,7 +1917,6 @@ def collect_formal_records(
         pagination_evidence.get("stopped")
         and pagination_evidence.get("stop_reason") == "source_exhausted"
         and not unverified_douyin_first_page_empty
-        and deferred_image_count == 0
     )
     pagination_stop_reason = str(pagination_evidence.get("stop_reason") or "")
     pagination_incomplete = bool(
@@ -1963,8 +1944,6 @@ def collect_formal_records(
         and target_new_posts > 0
     ):
         stop_reason = "target_new_met"
-    elif deferred_image_count > 0:
-        stop_reason = "deferred_retry_pending"
     elif completion_mode == "source-exhausted" and pagination_evidence.get("stopped"):
         stop_reason = str(pagination_evidence.get("stop_reason") or "runtime_failed")
     elif quantity_limits_enforced and (
@@ -1976,7 +1955,6 @@ def collect_formal_records(
         "source_exhausted",
         "stagnated",
         "runtime_failed",
-        "deferred_retry_pending",
         "login_required",
         "captcha_detected",
     }:
@@ -1998,7 +1976,10 @@ def collect_formal_records(
         "source_exhausted_met": source_exhausted_met,
         "pagination_runtime_blocked": pagination_runtime_blocked,
         "pagination_incomplete": pagination_incomplete,
-        "deferred_image_count": deferred_image_count,
+        "skipped_candidate_count": skipped_candidate_count,
+        "skipped_candidate_failures": list(
+            pagination_evidence.get("skipped_candidate_failures") or []
+        ),
         "completion_met": completion_met,
         "local_images_required": require_local_images,
         "local_images_complete": (
@@ -3451,6 +3432,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     records: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     follower_cache: dict[str, int | None] = {}
+    follower_attempts: dict[str, int] = {}
     valid_seen: set[str] = set()
     valid_new_count = 0
     valid_existing_count = 0
@@ -3460,9 +3442,8 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     detail_request_pacing_events: list[dict[str, Any]] = []
     image_manifest_entries: list[ImageManifestEntry] = []
     image_candidate_posts: set[str] = set()
-    deferred_image_post_ids: set[str] = set()
-    deferred_image_failures: list[dict[str, Any]] = []
-    deferred_resume_page: int | None = None
+    skipped_candidate_ids: set[str] = set()
+    skipped_candidate_failures: list[dict[str, Any]] = []
     state_path = os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()
     stderr = ""
     returncode = 0
@@ -3532,7 +3513,6 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 )
                 if not page_items:
                     if discovery_phase == "frontier" and state_path:
-                        deferred_pending = bool(deferred_image_failures)
                         FrozenExecutionState(state_path).append_event(
                             "adaptive_search_stopped",
                             {
@@ -3545,30 +3525,22 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                                 "completion_mode": completion_mode,
                                 "quantity_limits_enforced": not exhaustion_mode,
                                 "stagnant_batches": stagnant_pages,
-                                "stop_reason": (
-                                    "deferred_retry_pending"
-                                    if deferred_pending
-                                    else "source_exhausted"
-                                ),
-                                "stop_detail": (
-                                    "image_candidate_failures"
-                                    if deferred_pending
-                                    else "empty_page"
-                                ),
+                                "stop_reason": "source_exhausted",
+                                "stop_detail": "empty_page",
                                 "source_page": page,
-                                "resume_page": deferred_resume_page or page,
-                                "source_has_more": deferred_pending,
-                                "batch_complete": not deferred_pending,
+                                "resume_page": page,
+                                "source_has_more": False,
+                                "batch_complete": True,
                                 "discovery_phase": discovery_phase,
                                 "raw_batch_count": 0,
                                 "raw_response_count": 0,
                                 "stagnation_basis": "candidate_identity",
                                 "candidate_identities": sorted(seen_ids),
-                                "deferred_image_count": len(
-                                    deferred_image_failures
+                                "skipped_candidate_count": len(
+                                    skipped_candidate_failures
                                 ),
-                                "deferred_image_failures": list(
-                                    deferred_image_failures
+                                "skipped_candidate_failures": list(
+                                    skipped_candidate_failures
                                 ),
                             },
                         )
@@ -3577,13 +3549,12 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 seen_before = len(seen_ids)
                 processed_in_batch = 0
                 batch_complete = True
-                batch_runtime_error: BilibiliArticleDetailError | None = None
                 for item_index, item in enumerate(page_items):
                     post_id = str(item.get("id") or "").strip()
                     if post_id and (
                         post_id in known_post_ids
                         or post_id in seen_ids
-                        or post_id in deferred_image_post_ids
+                        or post_id in skipped_candidate_ids
                     ):
                         continue
                     if not exhaustion_mode and candidate_count >= max_records:
@@ -3655,14 +3626,30 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                                 ),
                             }
                         )
-                        batch_runtime_error = exc
-                        batch_complete = False
-                        returncode = 1
-                        stderr = (
-                            f"BilibiliArticleDetailError(post_id={post_id!r}, "
-                            f"attempts={exc.attempts}, code={exc.code!r}): {exc}"
-                        )
-                        break
+                        failure = {
+                            "platform": platform_key,
+                            "identity": post_id,
+                            "failure_scope": "post",
+                            "detail": "bilibili_article_detail_failed",
+                            "error_code": str(exc.code or "detail_request_failed"),
+                            "attempts": max(1, int(exc.attempts or 1)),
+                            "retryable": bool(exc.retryable),
+                            "source_index": None,
+                            "source_page": page,
+                            "source_offset": None,
+                            "source_cursor": None,
+                            "discovery_phase": discovery_phase,
+                        }
+                        skipped_candidate_failures.append(failure)
+                        skipped_candidate_ids.add(post_id)
+                        seen_ids.add(post_id)
+                        known_post_ids.add(post_id)
+                        if state_path:
+                            FrozenExecutionState(state_path).append_event(
+                                "candidate_skipped",
+                                failure,
+                            )
+                        continue
                     if download_images:
                         image_candidate_posts.add(post_id)
                         post_image_entries = download_bilibili_record_images(
@@ -3684,6 +3671,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                             failure = {
                                 "platform": platform_key,
                                 "identity": post_id,
+                                "failure_scope": "image",
                                 "detail": "image_download_failed",
                                 "error_code": str(
                                     failed_image.error_code
@@ -3699,34 +3687,74 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                             failure["retryable"] = is_retryable_image_error(
                                 failure["error_code"]
                             )
-                            deferred_image_failures.append(failure)
-                            deferred_image_post_ids.add(post_id)
-                            deferred_resume_page = (
-                                page
-                                if deferred_resume_page is None
-                                else min(deferred_resume_page, page)
-                            )
+                            skipped_candidate_failures.append(failure)
+                            skipped_candidate_ids.add(post_id)
+                            seen_ids.add(post_id)
+                            known_post_ids.add(post_id)
                             if state_path:
                                 FrozenExecutionState(state_path).append_event(
-                                    "candidate_deferred",
+                                    "candidate_skipped",
                                     failure,
                                 )
                             if not exhaustion_mode and candidate_count >= max_records:
-                                batch_complete = False
                                 break
                             continue
                     creator_id = str(normalized.get("user_id") or "")
                     if creator_id:
                         if creator_id not in follower_cache:
-                            try:
-                                follower_cache[creator_id] = fetch_bilibili_follower_count(
-                                    creator_id,
-                                    cookie_header,
-                                )
-                            except Exception:
-                                follower_cache[creator_id] = None
+                            follower_count: int | None = None
+                            for follower_attempt in range(
+                                1,
+                                BILIBILI_DETAIL_MAX_ATTEMPTS + 1,
+                            ):
+                                follower_attempts[creator_id] = follower_attempt
+                                try:
+                                    follower_count = fetch_bilibili_follower_count(
+                                        creator_id,
+                                        cookie_header,
+                                    )
+                                except Exception:
+                                    follower_count = None
+                                if follower_count is not None:
+                                    break
+                                if follower_attempt < BILIBILI_DETAIL_MAX_ATTEMPTS:
+                                    time.sleep(
+                                        random.uniform(
+                                            *BILIBILI_DETAIL_RETRY_DELAY_SECONDS
+                                        )
+                                        * follower_attempt
+                                    )
+                            follower_cache[creator_id] = follower_count
                             time.sleep(0.15)
                         follower_count = follower_cache[creator_id]
+                        if follower_count is None:
+                            failure = {
+                                "platform": platform_key,
+                                "identity": post_id,
+                                "failure_scope": "post",
+                                "detail": "creator_profile_failed",
+                                "error_code": "relation_stat_unavailable",
+                                "attempts": follower_attempts.get(
+                                    creator_id,
+                                    BILIBILI_DETAIL_MAX_ATTEMPTS,
+                                ),
+                                "retryable": True,
+                                "source_index": None,
+                                "source_page": page,
+                                "source_offset": None,
+                                "source_cursor": None,
+                                "discovery_phase": discovery_phase,
+                            }
+                            skipped_candidate_failures.append(failure)
+                            skipped_candidate_ids.add(post_id)
+                            seen_ids.add(post_id)
+                            known_post_ids.add(post_id)
+                            if state_path:
+                                FrozenExecutionState(state_path).append_event(
+                                    "candidate_skipped",
+                                    failure,
+                                )
+                            continue
                         normalized["followers_observed"] = follower_count is not None
                         normalized["author_followers_source"] = (
                             "relation_stat" if follower_count is not None else "missing"
@@ -3753,33 +3781,20 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 candidate_identities_added = len(seen_ids) - seen_before
                 if discovery_phase == "frontier":
                     stagnant_pages = stagnant_pages + 1 if candidate_identities_added == 0 else 0
-                if batch_runtime_error is not None:
-                    batch_stop_reason = "runtime_failed"
-                elif not exhaustion_mode and valid_new_count >= target_new:
+                if not exhaustion_mode and valid_new_count >= target_new:
                     batch_stop_reason = "target_new_met"
                 elif not exhaustion_mode and candidate_count >= max_records:
-                    batch_stop_reason = (
-                        "deferred_retry_pending"
-                        if deferred_image_failures
-                        else "candidate_hard_limit_reached"
-                    )
+                    batch_stop_reason = "candidate_hard_limit_reached"
                 elif (
                     not exhaustion_mode
                     and
                     discovery_phase == "frontier"
                     and stagnant_pages >= max(1, args.max_stagnant_batches)
                 ):
-                    batch_stop_reason = (
-                        "deferred_retry_pending"
-                        if deferred_image_failures
-                        else "stagnated"
-                    )
+                    batch_stop_reason = "stagnated"
                 else:
                     batch_stop_reason = "continue"
                 resume_page = page + 1 if batch_complete else page
-                if deferred_resume_page is not None:
-                    resume_page = deferred_resume_page
-                    batch_complete = False
                 event_details = {
                     "platform": platform_key,
                     "batch_no": page,
@@ -3795,42 +3810,22 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "completion_mode": completion_mode,
                     "quantity_limits_enforced": not exhaustion_mode,
                     "stop_reason": batch_stop_reason,
-                    "stop_detail": (
-                        "bilibili_article_detail_failed"
-                        if isinstance(batch_runtime_error, BilibiliArticleDetailError)
-                        else "image_candidate_failures"
-                        if deferred_image_failures
-                        else None
-                    ),
+                    "stop_detail": None,
                     "source_page": page,
                     "resume_page": resume_page,
-                    "source_has_more": (
-                        True
-                        if batch_runtime_error is not None
-                        or deferred_resume_page is not None
-                        else None
-                    ),
+                    "source_has_more": None,
                     "batch_complete": batch_complete,
                     "discovery_phase": discovery_phase,
                     "raw_batch_count": processed_in_batch,
                     "raw_response_count": len(page_items),
                     "candidate_identities": sorted(seen_ids),
-                    "deferred_image_count": len(
-                        deferred_image_failures
+                    "skipped_candidate_count": len(
+                        skipped_candidate_failures
                     ),
-                    "deferred_image_failures": list(
-                        deferred_image_failures
+                    "skipped_candidate_failures": list(
+                        skipped_candidate_failures
                     ),
                 }
-                if batch_runtime_error is not None:
-                    event_details["failed_candidate_id"] = post_id
-                    event_details.update(
-                        {
-                            "detail_error_code": batch_runtime_error.code,
-                            "detail_error_attempts": batch_runtime_error.attempts,
-                            "detail_error_retryable": batch_runtime_error.retryable,
-                        }
-                    )
                 if state_path:
                     frozen_state = FrozenExecutionState(state_path)
                     frozen_state.append_event("adaptive_batch_completed", event_details)
@@ -3854,30 +3849,22 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "completion_mode": completion_mode,
                     "quantity_limits_enforced": not exhaustion_mode,
                     "stagnant_batches": stagnant_pages,
-                    "stop_reason": (
-                        "deferred_retry_pending"
-                        if deferred_image_failures
-                        else "source_exhausted"
-                    ),
-                    "stop_detail": (
-                        "image_candidate_failures"
-                        if deferred_image_failures
-                        else "saved_source_exhausted"
-                    ),
+                    "stop_reason": "source_exhausted",
+                    "stop_detail": "saved_source_exhausted",
                     "source_page": frontier_start,
-                    "resume_page": deferred_resume_page or frontier_start,
-                    "source_has_more": bool(deferred_image_failures),
-                    "batch_complete": not bool(deferred_image_failures),
+                    "resume_page": frontier_start,
+                    "source_has_more": False,
+                    "batch_complete": True,
                     "discovery_phase": "frontier",
                     "raw_batch_count": 0,
                     "raw_response_count": 0,
                     "stagnation_basis": "candidate_identity",
                     "candidate_identities": sorted(seen_ids),
-                    "deferred_image_count": len(
-                        deferred_image_failures
+                    "skipped_candidate_count": len(
+                        skipped_candidate_failures
                     ),
-                    "deferred_image_failures": list(
-                        deferred_image_failures
+                    "skipped_candidate_failures": list(
+                        skipped_candidate_failures
                     ),
                 },
             )
@@ -3946,7 +3933,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     active_image_manifest_entries = [
         entry
         for entry in image_manifest_entries
-        if entry.platform_post_id not in deferred_image_post_ids
+        if entry.platform_post_id not in skipped_candidate_ids
     ]
     successful_expected_image_count = sum(
         len(content_image_candidates(platform_key, record)) for record in records
@@ -3995,8 +3982,8 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 for entry in image_manifest_entries
             ),
             "complete": images_complete,
-            "deferred_image_count": len(deferred_image_failures),
-            "deferred_image_failures": deferred_image_failures,
+            "skipped_candidate_count": len(skipped_candidate_failures),
+            "skipped_candidate_failures": skipped_candidate_failures,
             "manifest_paths": [str(manifest_path)] if download_images else [],
             "manifest_sha256": (
                 manifest_sha256(image_manifest_entries) if download_images else None
@@ -4545,7 +4532,7 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
                 f"- 停止细节：`{validation.get('stop_detail', '')}`",
                 f"- 已处理分页批次：`{pagination.get('batch_count', 0)}`",
                 f"- 正常停止事件：`{pagination.get('stopped', False)}`",
-                f"- 暂缓图片失败候选：`{stop_event.get('deferred_image_count', 0)}`",
+                f"- 已记录跳过候选：`{stop_event.get('skipped_candidate_count', 0)}`",
                 f"- 无效原因计数：`{json.dumps(validation.get('invalid_reason_counts') or {}, ensure_ascii=False, sort_keys=True)}`",
                 "",
             ]
@@ -4878,7 +4865,7 @@ def main() -> int:
             media_root=media_root,
             promote=False,
         )
-        image_materialization = attach_deferred_image_evidence(
+        image_materialization = attach_skipped_candidate_evidence(
             image_materialization,
             pagination_evidence,
         )
@@ -4921,7 +4908,7 @@ def main() -> int:
             "manifest_evidence": [],
             "failures": [],
         }
-        image_materialization = attach_deferred_image_evidence(
+        image_materialization = attach_skipped_candidate_evidence(
             image_materialization,
             pagination_evidence,
         )
@@ -4951,7 +4938,7 @@ def main() -> int:
                 media_root=media_root,
                 promote=True,
             )
-            image_materialization = attach_deferred_image_evidence(
+            image_materialization = attach_skipped_candidate_evidence(
                 image_materialization,
                 pagination_evidence,
             )

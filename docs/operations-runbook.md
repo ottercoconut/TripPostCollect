@@ -225,21 +225,16 @@ checkpoint 记录了非空 `last_summary_path` 但文件丢失时，runner 必�
 保持不变。
 `--no-import` 自动禁用 checkpoint 写入，因此诊断不会污染正式记忆。
 
-B站 article、微博长文、小红书笔记和知乎 answer/article 的安全前沿都取决于详情处理是否完成。
-搜索页返回未知 ID 后，只有权威详情成功并完成
-正式字段判断，或详情明确证明内容已删除、私密、永久不可用时，该 ID 才能写入
-`crawl_discovery_seen_candidates` 或小红书独立候选表。详情限流、HTTP/业务错误、空响应、超时或解析失败经过有限退避仍
-未恢复时，失败 ID 不进入累计摘要或候选记忆。详情失败仍停止当前安全批次；正文图下载最终失败
-则写 `candidate_deferred`，在同一 child 暂时跳过该 ID 并继续后续候选，checkpoint 最终回到最早
-失败页（抖音同时保留 offset/search ID，小红书同时保留 search ID），且
-`last_batch_complete=false`。不要通过删除 checkpoint 或扩大候选预算绕过失败。
+B站 article、微博长文、小红书笔记和知乎 answer/article 的权威详情，以及五个平台的作者必需字段和
+正文图，都先执行各自有限重试。仍失败时统一写 `candidate_skipped`，包含 `failure_scope=post|image`、
+错误码、实际尝试次数和来源坐标；图片另写失败 manifest。失败整帖不进入 `web_posts`、不计成功，
+但 ID 写入同作用域 seen，child 继续后续候选，checkpoint 按最后完整批次推进。登录、验证码、安全
+限制、频控、搜索请求或浏览器整体失败仍停机，不得按候选跳过。
 
-同一精确候选跨轮完成有限重试后仍持续失败时，系统仍不得按次数自动跳过。只有用户明确批准排除，
-才可在核对 job、平台、查询指纹、候选 ID 与既有失败摘要后写入
-`crawl_discovery_candidate_exclusions`，同时保存原因、证据和授权 run。下一轮从原 checkpoint 恢复，
-在昂贵请求前跳过该 ID 并继续扫描；不得手工推进页码。排除项不进入 `web_posts` 或 seen、不计成功，
-也不等于来源耗尽；仍须取得真实 `adaptive_search_stopped(source_exhausted)` 才能完成。撤销时只删除
-精确作用域的排除行，并再次从安全前沿恢复。
+`crawl_discovery_candidate_exclusions` 保留为操作人授权的预请求精确排除：核对 job、平台、查询指纹、
+候选 ID 与既有证据后，可在昂贵请求前跳过；它不进入 `web_posts` 或 seen、不计成功，也不等于来源
+耗尽。普通重试耗尽直接使用 `candidate_skipped`，无需先建立排除记录。无论哪种跳过，来源耗尽模式仍
+须取得真实 `adaptive_search_stopped(source_exhausted)` 才能完成。
 
 抖音新鲜游标链在第 1 页收到 `data=[]、has_more=false` 时，不直接创建耗尽 checkpoint。
 执行器必须检查当前可见搜索页：存在 `/video/`、`/note/` 或搜索结果卡片时停止为
@@ -538,14 +533,14 @@ child 的 `image_materialization.manifest_evidence` 所指 manifest → SQLite �
 
 | 信号 | 分类 | 处理 |
 |---|---|---|
-| `image_download_retryable` | 单图已在同一 child 内完成最多 3 次指数退避重试，平台会话、临时网络或响应仍失败 | 核对 manifest `attempts=3`、`candidate_deferred` 与平台重试日志；暂时跳过整帖并继续后续候选，失败 ID 不写已处理记忆，checkpoint 回到最早失败坐标；若后续候选仍未满足完成条件，整轮保持 `deferred_retry_pending` 并从累计摘要恢复 |
-| `deferred_retry_pending` | 本轮存在至少一个已留证但尚未成功的图片候选 | 不得解释为 `source_exhausted`；读取 `deferred_image_failures`，从 runner 新开一轮按 checkpoint 重试。即使预算超时导致没有最终停止事件，也必须从 `candidate_deferred` 重建失败集合并回卷最早 frontier 坐标。永久失败需另行取得排除授权，不能自动写 seen |
+| `image_download_retryable` | 单图已在同一 child 内完成最多 3 次指数退避重试，平台会话、临时网络或响应仍失败 | 核对 manifest `attempts=3`、`candidate_skipped` 与平台重试日志；记录后跳过整帖并继续后续候选，失败 ID 写已处理记忆，checkpoint 按完整批次推进 |
+| `candidate_skipped` | 帖子详情、作者必需字段或正文图完成适用重试后仍失败 | 读取 `skipped_candidate_failures` 的范围、错误码、尝试次数和来源坐标；确认该帖不入库、不计有效结果且已写 seen。它不阻断后续数量完成或真实来源耗尽 |
 | `missing_image_manifest` / `image_manifest_count_mismatch` | staging/manifest 不完整 | 停止入库，核对 child 实际 artifact 和平台 store；禁止手工补空 manifest |
 | `image_manifest_identity_mismatch` | URL、平台、帖子、顺序、来源字段或稳定键不一致 | 视为代码/产物版本错误，修复后重跑整帖 |
 | `image_path_escape` / `image_file_missing` | 路径边界或文件缺失 | 停止晋升，检查 symlink、清理程序和 artifact 完整性 |
-| `image_non_raster_response` / `image_decode_failed` | 返回 HTML/JSON/视频或损坏图片 | 写失败 manifest 与 `candidate_deferred`，不做无意义重试，暂时跳过整帖并继续；检查登录/验证和 URL 选择，不得改后缀伪装成图片 |
-| `image_source_unavailable` | 明确的非重试 HTTP 终态（如 400/404） | 保存真实状态并写失败 manifest 与 `candidate_deferred`，不做无意义重试，暂时跳过整帖并继续；持续失败时修复来源或由用户批准排除，不得自动写 seen |
-| `image_too_large` | 单文件或解码像素超过安全上限 | 写失败 manifest 与 `candidate_deferred`，暂时跳过整帖并继续；如需改上限必须走代码、测试和治理变更 |
+| `image_non_raster_response` / `image_decode_failed` | 返回 HTML/JSON/视频或损坏图片 | 写失败 manifest 与 `candidate_skipped`，不做无意义重试，跳过整帖并继续；检查登录/验证和 URL 选择，不得改后缀伪装成图片 |
+| `image_source_unavailable` | 明确的非重试 HTTP 终态（如 400/404） | 保存真实状态并写失败 manifest 与 `candidate_skipped`，不做无意义重试，跳过整帖并继续 |
+| `image_too_large` | 单文件或解码像素超过安全上限 | 写失败 manifest 与 `candidate_skipped`，跳过整帖并继续；如需改上限必须走代码、测试和治理变更 |
 | `image_hash_mismatch` / `image_manifest_metadata_mismatch` | staging 字节与 manifest 不一致 | 停止并保留证据，排查写入竞态或文件篡改 |
 | `image_existing_conflict` / `image_promotion_conflict` | staging 整帖目录或长期内容寻址目标已有不同字节 | 停止覆盖，保留两侧证据并排查稳定键、旧文件或并发写入 |
 | 晋升期间 `KeyboardInterrupt` / `SystemExit` | 可捕获进程中断 | 执行器先回滚本轮已晋升的 `reused=false` 文件再传播中断；核对长期目录无新孤儿后按原 checkpoint 重跑。`SIGKILL`/掉电需人工核对 SQLite 引用与内容寻址文件 |

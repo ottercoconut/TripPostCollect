@@ -37,7 +37,7 @@
    `hydrate_bilibili_article_record()` 和作者关系统计补全。详情正文和正文图片在这一步替换空的正式
    正文字段；搜索 `desc` 与预览图只保留为原始证据。
 5. `validate_formal_record()` 强制检查 `detail_observed`、`article_view_api`、详情图片状态、作者、
-   发布时间、至少一张正文图和 `relation_stat` 粉丝来源；任何详情失败都在入库前停止或判无效。
+   发布时间、至少一张正文图和 `relation_stat` 粉丝来源；详情失败候选记录后跳过，不进入正式集合。
 6. 只有正式完成谓词、行为/策略证据和上述字段门禁同时通过，`import_valid_records()` 才把记录写入
    `web_posts` / `web_post_images`，runner 再完成持久化状态并提交发现记忆。
 
@@ -101,19 +101,17 @@ B站使用项目自有 article 分支下载，不调用 MediaCrawler 视频媒�
 `image_manifest.jsonl` 原子记录 URL、稳定键、尝试次数、HTTP 状态、SHA、真实 MIME、尺寸和相对
 staging 路径。搜索 `image_urls`、Opus 封面、作者头像和视频资源不会进入下载函数。失败行只写
 manifest 错误，不留下成功元数据；`image_download_retryable` 与终态图片错误都记录
-`candidate_deferred` 后暂时跳过该 article，继续处理后续候选，终态错误不补做无意义重试。失败 ID
-仅在当前 child 内抑制重复请求，不写持久候选记忆；最终
-checkpoint 回到最早失败页并保持 `last_batch_complete=false`。
-若同一 article 跨轮完成有限重试后仍持续失败，只有操作人明确批准该精确 job、查询指纹和 article
-ID 排除时，才写入 `crawl_discovery_candidate_exclusions`。下一轮仍从原页恢复，但在详情请求前跳过
-该 ID 并继续处理同页后续候选；不得自动按失败次数排除、写 seen、手工推进页码或把排除计为成功。
+`candidate_skipped(failure_scope=image)` 后跳过该 article，继续处理后续候选，终态错误不补做无意义
+重试。失败 ID 写入持久候选记忆，整帖不写内容库、不计成功；完整批次的 checkpoint 正常推进。
+操作人另行批准的精确排除仅用于在请求前跳过指定 job、查询指纹和 article ID，不是普通重试耗尽的
+必经路径，也不计成功。
 
 根执行器按同一详情投影逐项核对 manifest 和字节。正式运行才把文件晋升到
 `data/media/bilibili/...` 并在同一帖子事务写入 `web_post_images.local_path` 等字段；
 `--no-import --download-images --media-root temp/<目录>` 只验证 staging，不改长期目录或数据库。
 任一图片不完整时 `image_materialization.complete=false`，不能靠正文和 URL 通过正式门禁。
-格式、解码、大小和明确非重试 HTTP 等终态图片错误写失败 manifest 后以 `runtime_failed` 停在当前
-页，不写 deferred 或 seen；重试、恢复和最终失败均写短日志事件。
+格式、解码、大小和明确非重试 HTTP 等终态图片错误写失败 manifest 和 `candidate_skipped`，不补做
+无意义重试；重试、跳过和最终停止均写短日志事件。
 HTTP 200 空 body 也按空响应重试；明确非重试 HTTP 保留状态码。响应头或流式字节超过统一上限时
 错误码固定为 `image_too_large`。
 
@@ -123,10 +121,9 @@ article 搜索前必须在 MediaCrawler 持久 profile 执行共享行为阶段�
 复用同一会话 cookie。行为与请求策略证据缺失时不得入库。
 
 详情请求必须串行或按经验证的低并发执行，并记录随机等待、重试次数和业务状态。`-509`、HTTP
-失败、超时和无法解析的详情属于可恢复运行错误：允许有限退避重试；仍失败时停止当前 child，当前
-页标记 `last_batch_complete=false`，恢复页保持为本次请求页。失败 article ID 不得写入
-`crawl_discovery_seen_candidates`，也不得因搜索摘要非空而进入累计摘要。
-操作人另行授权的精确排除只写独立排除表，不改变上述失败默认语义。
+失败、超时和无法解析的详情先有限退避重试；仍失败时写
+`candidate_skipped(failure_scope=post)`，失败 article ID 写入 `crawl_discovery_seen_candidates`，不进入
+内容或成功累计，并继续当前批次后续候选。登录、频控、搜索请求或浏览器整体失败仍停止 child。
 
 无人值守历史修复不能只凭 Cookie 文件存在判断已登录。每个修复批次开始和会话间隔结束后，必须用
 同一 Cookie 调用 `/x/web-interface/nav`，只有 `code=0` 且 `data.isLogin=true` 才能继续；快照缺失、
@@ -149,8 +146,9 @@ article 搜索前必须在 MediaCrawler 持久 profile 执行共享行为阶段�
 候选去重。空页才保存 `status=exhausted`。默认数量模式未达标不单独入库；显式来源耗尽模式也
 必须先满足全部详情门禁，不能用搜索来源耗尽替代详情成功。
 
-B站停滞仍按是否发现未知 article ID 判断，但“未知”不等于“完成处理”：可恢复详情失败必须停止并
-保留安全前沿，不能用它重置停滞后继续跨页。判断是否扩容时同时检查新 ID、详情成功数和有效新增数。
+B站停滞仍按是否发现未知 article ID 判断；详情完成有限重试仍失败时记录 `candidate_skipped` 并作为
+已处理候选继续跨页，但不增加有效新增数。判断是否扩容时同时检查新 ID、详情成功数、跳过数和有效
+新增数。
 
 ## 历史摘要记录回填
 

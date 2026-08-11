@@ -50,13 +50,11 @@
 `image_download_retryable` 或具体格式错误码。空响应或超时先按单图最多 3 次、1–2 秒随机基数指数
 退避重试；日志逐次记录，成功或最终失败的 manifest `attempts` 保存实际请求次数。只有三次后仍为
 `image_download_retryable` 时写
-`candidate_deferred`，暂时跳过该回答/文章并继续后续候选；失败 ID 不进入候选记忆，checkpoint 回到
-最早失败页。该帖不得把详情失败、部分成功或公式图排除解释成图片完成。
+`candidate_skipped(failure_scope=image)`，跳过该回答/文章并继续后续候选；失败 ID 进入候选记忆，
+checkpoint 按完整批次推进。该帖不得把详情失败、部分成功或公式图排除解释成图片完成。
 格式、解码、大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样写失败 manifest 与
-`candidate_deferred` 后继续后续候选。
-同一内容图片跨轮完成有限重试后仍持续失败时，只有操作人明确批准精确 job、查询指纹和内容 ID
-排除，才写入 `crawl_discovery_candidate_exclusions`。下一轮仍从原页恢复，在详情/图片请求前跳过该
-ID 并继续扫描；不得自动按失败次数排除、写 seen、手工推进页码或把排除计为有效内容。
+`candidate_skipped` 后继续后续候选。回答/文章详情完成有限重试仍失败时采用
+`candidate_skipped(failure_scope=post)`。操作人精确排除仍可用于请求前跳过，但普通失败无需写排除表。
 客户端必须保留真实 HTTP 状态；HTTP 200 空字节继续有限重试，流式响应超过字节上限直接使用
 `image_too_large`，不得折叠为可重试空响应。
 

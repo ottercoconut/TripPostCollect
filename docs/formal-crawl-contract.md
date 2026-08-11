@@ -176,29 +176,23 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 平台 child 对单张正文图的 `None`、HTTP 200 空字节、超时或临时请求错误最多执行 3 次有限指数
 退避重试。客户端不得把 `raise_for_status()` 的 HTTP 状态折叠为 `None`：明确终态状态至少保存真实
 `http_status` 和 `image_source_unavailable`，临时状态在耗尽后保存 `image_download_retryable`；明确
-非重试 HTTP、非图片、解码失败或过大等终态错误不做无意义重试。任一图片在适用尝试结束后仍失败，
-必须先把失败行写入 manifest，再写 `candidate_deferred` 事件，至少包含平台、候选 ID、错误码、是否
-可重试、实际尝试次数、图片来源序号和当前 page/offset/cursor。该整帖不得写入正式 JSONL、数据库或
-跨轮候选记忆；同一 child 内把该 ID 放入临时 deferred 集合以避免重复请求，并继续处理后续候选。
-最终停止事件必须携带完整 `deferred_image_failures`，恢复坐标回到本轮最早失败位置且
-`batch_complete=false`。后续候选若
-独立达到 `target-new-posts` 既定目标，可以只用图片完整的正式有效集合完成和入库；否则本轮保持
-`deferred_retry_pending` 并保留累计摘要，不做部分入库。`source-exhausted` 模式只要仍有 deferred
-候选，就必须保持 `source_exhausted_met=false`，不得把扫描到末尾解释为来源耗尽完成。
-停止优先级固定为：运行失败、数量目标达成、暂缓图片候选、候选上限/停滞/来源耗尽；因此 deferred
-恰好用尽候选上限或随后扫描到空页时仍必须报告 `deferred_retry_pending`。格式、解码、大小、明确
-非重试 HTTP 等终态图片错误同样写 `candidate_deferred`，但保留终态错误码和 `retryable=false`，不
-强行补足 3 次请求；失败 ID 不写正式 JSONL、SQLite 或 seen。若终态候选跨轮持续失败，只能由操作人
-明确批准排除，runner 不得自动把它写入 seen 或伪造来源耗尽。操作人批准必须精确到平台、job、
+非重试 HTTP、非图片、解码失败或过大等终态错误不做无意义重试。候选帖详情、作者必需字段或任一
+正文图在适用尝试结束后仍失败时，必须写 `candidate_skipped` 事件；图片失败还必须先写失败 manifest。
+事件至少包含平台、候选 ID、`failure_scope=post|image`、错误码、是否可重试、实际尝试次数、可用的
+图片来源序号和当前 page/offset/cursor。该整帖不得写入正式 JSONL 或内容数据库，也不得把已成功的
+图片子集解释为完整帖子；失败 ID 作为“已处理但未成功”写入同作用域 seen，child 继续后续候选，
+checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有效新增数，但不阻断后续
+`target_new_met`、候选上限、停滞或真实 `adaptive_search_stopped(source_exhausted)`。
+格式、解码、大小、明确非重试 HTTP 等终态图片错误保留具体错误码和 `retryable=false`，不强行补足
+3 次请求；临时请求错误完成有限重试后保留 `retryable=true`。操作人批准的预请求排除必须精确到平台、job、
 查询指纹和候选 ID，并把原因、授权 run 与既有失败证据写入独立的
 `crawl_discovery_candidate_exclusions`；该表不属于内容或已处理候选记忆。后续 child 仅在昂贵详情、
 作者或图片请求前把对应 ID 视为已知并跳过，不生成 `web_posts`、不增加成功数，也不单独构成
-`source_exhausted` 证据。禁止仅按尝试次数自动创建排除；只有继续扫描取得真实
-`adaptive_search_stopped(source_exhausted)`，来源耗尽模式才可完成。
-若 child 在预算超时或可捕获中断前已经写出 `candidate_deferred`，但来不及写最终
-`adaptive_search_stopped`，根执行器仍必须从事件流聚合 `deferred_image_failures`；正式摘要保留
-`runtime_failed`，checkpoint 强制回到最早 frontier 失败坐标并标记 `batch_complete=false`，不得被
-随后已完成批次的 resume 坐标覆盖。refresh 阶段失败由下一轮顶部刷新自然重试，不把深层前沿改成第 1 页。
+`source_exhausted` 证据。普通重试耗尽使用自动 `candidate_skipped`，不自动创建排除表记录；排除表只用于
+操作人希望在请求前精确阻止某候选的场景。若 child 在预算超时或可捕获中断前已经写出
+`candidate_skipped`，根执行器仍必须从事件流聚合 `skipped_candidate_failures`；正式摘要保留
+`runtime_failed`，checkpoint 只采用最后一个完整分页批次，不因已记录跳过候选回卷，也不得越过未完成
+尾批。refresh 阶段记录的跳过候选同样进入 seen，不把深层前沿改成第 1 页。
 分页证据为 `runtime_failed`、`login_required`、`captcha_detected`，或本轮任一目标 child 未成功完成时，
 运行失败门禁必须覆盖已经达到的数量目标：`completion_met=false`，不得晋升图片或进入 SQLite 事务。
 组合门禁失败时也必须保留这一优先级：已有 `runtime_failed`、`login_required` 或
@@ -215,14 +209,14 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 | 知乎 | `search_content`、`answer_detail`、`article_detail` | `content_text/content` | `title`、`desc/excerpt` |
 
 微博 `isLongText=true` 时必须取得移动端详情正文后才能写 JSONL；详情请求、
-响应或解析失败立即以 `full_text_request_failed` 阻断当前批次，保留原页为恢复
-前沿，禁止把截断搜索文本交给 store。小红书笔记详情与知乎回答/文章详情的可恢复
-请求、空响应或解析失败同样阻断当前批次，失败 ID 不得进入已处理候选记忆。
+响应或解析失败完成有限重试后写 `candidate_skipped(failure_scope=post)`，禁止把截断搜索文本交给
+store。小红书笔记详情与知乎回答/文章详情采用相同规则：失败 ID 写入已处理候选记忆，整帖不进入
+内容集合，当前批次继续。
 
 B站 article 还必须满足详情完整性门禁：搜索结果中的 `desc` 只允许作为发现摘要保存在原始证据，
 不得作为 `content_text`；正式记录必须保存 `content_detail_status=detail_observed` 和受信任的 article
 详情来源。正文图片必须经过详情响应或详情页正文结构检查，不能仅凭搜索 `image_urls` 宣布完整。
-详情请求限流、超时、HTTP/业务失败或解析失败属于可恢复运行错误，不是字段永久无效。
+详情请求限流、超时、HTTP/业务失败或解析失败先有限重试；仍失败则按候选跳过，不是字段永久无效。
 
 B站、微博、小红书、抖音、知乎使用 `followers_policy=required`。粉丝量为 `0` 只有在
 平台响应明确出现该值且保存了 `followers_observed=true` 时有效；缺失值不得转换为
@@ -298,12 +292,9 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
   新 ID 数、详情成功数和有效新增数。
 - `login_required` / `captcha_detected`：登录或验证阻断。
 - `runtime_failed`：浏览器或本地运行环境失败。
-- `image_materialization_incomplete`：正文图 manifest 或 staging 字节校验不完整。可恢复下载
-  失败保留当前安全前沿，不把该候选写入已处理记忆；身份、格式、哈希和路径边界错误必须先修复
-  代码或产物，不能降级为 URL-only。
-- `deferred_retry_pending`：至少一个候选的正文图已完成有限重试并留证，但整帖尚未满足图片门禁。
-  child 可以继续后续候选，checkpoint 必须回到最早 deferred 坐标，失败 ID 不写 seen；该状态在
-  显式来源耗尽模式下不能完成，在默认数量模式未达到目标时也不能完成。
+- `image_materialization_incomplete`：已选入正式有效集合的正文图 manifest 或 staging 字节校验不完整。
+  身份、格式、哈希和路径边界错误必须先修复代码或产物，不能降级为 URL-only；候选请求阶段已完成
+  适用重试的帖子或图片失败不进入该集合，而是记录 `candidate_skipped` 后继续。
 
 默认 `target-new-posts` 模式只有 `target_new_met` 可以汇报完成；显式 `source-exhausted` 模式只有
 `source_exhausted` 且 `source_exhausted_met=true` 可以汇报完成。其他停止状态均不能完成。固定 URL
@@ -336,26 +327,27 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 通用平台在昂贵处理前跳过 `web_posts` 已有 ID、累计摘要中的有效 ID、
 `crawl_discovery_seen_candidates` 已完成处理 ID、`crawl_discovery_candidate_exclusions` 中经操作人
 明确授权的 ID 和当前 child 已完成 ID；小红书读取独立的
-`xhs_discovery_seen_candidates`。五个平台的视频、已由决定性权威响应证明的字段无效项和有效
-候选，都在 child 摘要形成后获得跨轮记忆。详情请求、空响应、解析或下载等可恢复失败不是
-“已完成处理”；该 ID 不写 seen。仅当操作人对反复失败的精确候选另行授权时，才写入排除表；
-排除不会回填内容、伪装字段无效或增加完成计数。详情失败停止当前安全批次；正文图下载最终失败写
-`candidate_deferred` 后可继续同一 child 的后续候选，但最终批次仍不完整，恢复位置取最早失败的
-原请求页/游标。进程在摘要前崩溃的候选也不会被提前标记。两套表的作用域不同：通用平台按 job 与查询
+`xhs_discovery_seen_candidates`。五个平台的视频、已由决定性权威响应证明的字段无效项、有效候选，
+以及详情、作者或正文图在适用重试结束后仍失败的 `candidate_skipped`，都在 child 摘要形成后获得跨轮
+记忆。跳过候选不回填内容、不伪装字段无效、不增加完成计数；它只表示该来源候选已按本轮策略处理。
+操作人若需在请求前阻止精确候选，可另写排除表；排除同样不增加完成计数。进程在写出候选级决定性
+事件前崩溃的候选不会被提前标记；已写出的 `candidate_skipped` 只有在所属批次完整时才随分页证据
+提交，未完成尾批仍允许保守重取。两套表的作用域不同：通用平台按 job 与查询
 指纹隔离，小红书还按人工指定账号隔离，不能跨账号共享未入库活动。
 
 “字段无效”必须已有决定性来源证据。B站 article、微博长文、小红书笔记和知乎 answer/article
-的详情限流、超时、请求失败、空响应或解析失败表示候选尚未完成处理：失败 ID 不得进入候选
-记忆，失败页不得推进为下一页。旧累计摘要缺少正文状态/来源时不做兼容放行；其中的 ID 不进入有效恢复
-去重集，续跑时重新取得权威正文证据。数据库已有 ID 的历史内容修复仍必须走平台文档定义的独立流程。
+的详情请求、空响应或解析失败先完成平台规定的有限重试；仍失败即记录 `candidate_skipped` 并写入候选
+记忆，失败页可在批次完整后推进，但该 ID 永远不进入有效内容集合。登录、验证码、安全限制、频控、
+搜索请求失败或浏览器整体故障仍是运行级失败，不得按候选跳过。数据库已有 ID 的历史内容修复仍必须
+走平台文档定义的独立流程。
 
 首次执行从来源第一页开始，不做顶部刷新。每个完整前沿批次把下一页写入状态事件；抖音还必须
 同时写入下一 offset 和响应 search ID，小红书保存本次搜索使用的 client search ID。对应根执行器
 在 child 摘要形成后才把状态事件提交到 SQLite，不得由底层循环提前推进数据库游标。中途停止的
 批次保存当前请求位置，下一次允许重取该批次，依靠已知 ID 提前去重；这样可以重复少量边界
 数据，但不能跳过未持久化候选。小红书只有在 child 摘要形成后才把本轮候选 ID 与前沿一起提交；
-视频、已有决定性证据的字段无效项和有效候选都会获得发现记忆；可恢复详情失败不会。进程在摘要前
-崩溃的候选也不会被提前标记为已处理。
+视频、已有决定性证据的字段无效项、有效候选和 `candidate_skipped` 都会获得发现记忆。进程在候选级
+决定性事件或摘要形成前崩溃的候选不会被提前标记为已处理。
 
 存在 checkpoint 时，runner 自动把保存位置传给 child；有未完成累计摘要时再传入上一份
 `summary.json`。child 先刷新
@@ -443,9 +435,10 @@ manifest schema v1 的稳定校验错误包括：`missing_image_manifest`、
 `image_materialization_missing`，不完整摘要使用 `image_materialization_incomplete`；平台批次停止
 细节使用 `image_download_failed`，下载失败行使用稳定的 `image_download_retryable` 或
 `image_non_raster_response`、`image_decode_failed`、`image_too_large`、`image_source_unavailable`
-等终态错误码。所有在适用尝试结束后仍失败的图片候选都产生候选级 `candidate_deferred` 并继续当前
-child；只有 `image_download_retryable` 标记 `retryable=true`，其余终态错误标记 `retryable=false`。
-存在未清空暂缓项且本轮未满足数量目标时停止原因为 `deferred_retry_pending`；事件和停止摘要必须保存
-`deferred_image_count` 与 `deferred_image_failures`，并按错误码分别汇总 retryable/terminal 计数。
+等终态错误码。所有在适用尝试结束后仍失败的帖子或图片候选都产生候选级 `candidate_skipped` 并继续
+当前 child；图片临时错误 `image_download_retryable` 标记 `retryable=true`，其余终态错误标记
+`retryable=false`。事件和停止摘要必须保存 `skipped_candidate_count` 与
+`skipped_candidate_failures`，图片摘要仍按错误码分别汇总 retryable/terminal 计数，但跳过项不作为
+图片完整集合的失败行参与晋升。
 晋升/数据库文件一致性错误由 `failures[].code/message`、runner 阶段失败原因和报告共同保留。
 操作人不得编辑 manifest、摘要或冻结状态把错误补签为成功。

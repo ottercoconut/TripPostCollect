@@ -79,7 +79,7 @@ def test_unfinished_pagination_is_not_reported_as_source_exhausted(tmp_path: Pat
     assert validation["stop_reason"] == "runtime_failed"
 
 
-def test_deferred_image_candidate_blocks_source_exhaustion_completion(
+def test_skipped_image_candidate_does_not_block_source_exhaustion_completion(
     tmp_path: Path,
 ) -> None:
     state_path = tmp_path / "state.json"
@@ -92,21 +92,22 @@ def test_deferred_image_candidate_blocks_source_exhaustion_completion(
                     "platform": "xhs",
                     "candidate_count": 1,
                     "valid_new_count": 0,
-                    "stop_reason": "deferred_retry_pending",
-                    "stop_detail": "image_candidate_failures",
-                    "resume_page": 2,
+                    "stop_reason": "source_exhausted",
+                    "stop_detail": "empty_page",
+                    "resume_page": 3,
                     "resume_cursor": "search-id",
-                    "source_has_more": True,
-                    "batch_complete": False,
-                    "deferred_image_count": 1,
-                    "deferred_image_failures": [
+                    "source_has_more": False,
+                    "batch_complete": True,
+                    "skipped_candidate_count": 1,
+                    "skipped_candidate_failures": [
                         {
                             "identity": "note-1",
+                            "failure_scope": "image",
                             "error_code": "image_download_retryable",
                             "attempts": 3,
                         }
                     ],
-                    "candidate_identities": [],
+                    "candidate_identities": ["note-1"],
                 },
             }
         ],
@@ -122,13 +123,13 @@ def test_deferred_image_candidate_blocks_source_exhaustion_completion(
         completion_mode="source-exhausted",
     )
 
-    assert validation["source_exhausted_met"] is False
-    assert validation["completion_met"] is False
-    assert validation["stop_reason"] == "deferred_retry_pending"
-    assert evidence["stop_event"]["deferred_image_count"] == 1
+    assert validation["source_exhausted_met"] is True
+    assert validation["completion_met"] is True
+    assert validation["stop_reason"] == "source_exhausted"
+    assert evidence["stop_event"]["skipped_candidate_count"] == 1
 
 
-def test_inconsistent_exhaustion_event_is_rejected_when_deferred_count_remains(
+def test_exhaustion_event_accepts_recorded_skipped_candidate(
     tmp_path: Path,
 ) -> None:
     pagination = {
@@ -142,10 +143,11 @@ def test_inconsistent_exhaustion_event_is_rejected_when_deferred_count_remains(
             "stop_detail": "empty_page",
             "source_page": 2,
             "raw_batch_count": 0,
-            "deferred_image_count": 1,
-            "deferred_image_failures": [
+            "skipped_candidate_count": 1,
+            "skipped_candidate_failures": [
                 {
                     "identity": "article-1",
+                    "failure_scope": "image",
                     "error_code": "image_download_retryable",
                     "attempts": 3,
                 }
@@ -162,13 +164,13 @@ def test_inconsistent_exhaustion_event_is_rejected_when_deferred_count_remains(
         completion_mode="source-exhausted",
     )
 
-    assert validation["deferred_image_count"] == 1
-    assert validation["source_exhausted_met"] is False
-    assert validation["completion_met"] is False
-    assert validation["stop_reason"] == "deferred_retry_pending"
+    assert validation["skipped_candidate_count"] == 1
+    assert validation["source_exhausted_met"] is True
+    assert validation["completion_met"] is True
+    assert validation["stop_reason"] == "source_exhausted"
 
 
-def test_deferred_image_failures_are_reflected_in_materialization_summary() -> None:
+def test_skipped_candidate_failures_are_reflected_in_materialization_summary() -> None:
     materialization = {
         "retryable_failures": 0,
         "terminal_failures": 0,
@@ -176,37 +178,46 @@ def test_deferred_image_failures_are_reflected_in_materialization_summary() -> N
     }
     pagination = {
         "stop_event": {
-            "deferred_image_count": 2,
-            "deferred_image_failures": [
+            "skipped_candidate_count": 3,
+            "skipped_candidate_failures": [
                 {
                     "identity": "retryable",
+                    "failure_scope": "image",
                     "error_code": "image_download_retryable",
                     "retryable": True,
                     "attempts": 3,
                 },
                 {
                     "identity": "terminal",
+                    "failure_scope": "image",
                     "error_code": "image_source_unavailable",
                     "retryable": False,
                     "attempts": 1,
+                },
+                {
+                    "identity": "detail",
+                    "failure_scope": "post",
+                    "error_code": "detail_request_failed",
+                    "retryable": True,
+                    "attempts": 3,
                 },
             ],
         }
     }
 
-    summary = mediacrawler_crawl.attach_deferred_image_evidence(
+    summary = mediacrawler_crawl.attach_skipped_candidate_evidence(
         materialization,
         pagination,
     )
 
     assert summary["complete"] is True
-    assert summary["deferred_image_count"] == 2
+    assert summary["skipped_candidate_count"] == 3
     assert summary["retryable_failures"] == 1
     assert summary["terminal_failures"] == 1
-    assert len(summary["deferred_image_failures"]) == 2
+    assert len(summary["skipped_candidate_failures"]) == 3
 
 
-def test_incomplete_run_rewinds_checkpoint_to_earliest_deferred_image(
+def test_incomplete_run_keeps_latest_safe_batch_after_candidate_skip(
     tmp_path: Path,
 ) -> None:
     state_path = tmp_path / "state.json"
@@ -214,10 +225,11 @@ def test_incomplete_run_rewinds_checkpoint_to_earliest_deferred_image(
         state_path,
         [
             {
-                "type": "candidate_deferred",
+                "type": "candidate_skipped",
                 "details": {
                     "platform": "weibo",
                     "identity": "failed-post",
+                    "failure_scope": "image",
                     "detail": "image_download_failed",
                     "error_code": "image_source_unavailable",
                     "retryable": False,
@@ -234,10 +246,10 @@ def test_incomplete_run_rewinds_checkpoint_to_earliest_deferred_image(
                     "candidate_count": 10,
                     "valid_new_count": 5,
                     "source_page": 10,
-                    "resume_page": 10,
-                    "batch_complete": False,
+                    "resume_page": 11,
+                    "batch_complete": True,
                     "stop_reason": "continue",
-                    "candidate_identities": ["success-10"],
+                    "candidate_identities": ["failed-post", "success-10"],
                 },
             },
             {
@@ -250,7 +262,11 @@ def test_incomplete_run_rewinds_checkpoint_to_earliest_deferred_image(
                     "resume_page": 12,
                     "batch_complete": True,
                     "stop_reason": "continue",
-                    "candidate_identities": ["success-10", "success-11"],
+                    "candidate_identities": [
+                        "failed-post",
+                        "success-10",
+                        "success-11",
+                    ],
                 },
             },
         ],
@@ -270,18 +286,14 @@ def test_incomplete_run_rewinds_checkpoint_to_earliest_deferred_image(
     )
 
     assert evidence["stopped"] is False
-    assert evidence["deferred_image_count"] == 1
-    assert evidence["deferred_image_failures"][0]["identity"] == "failed-post"
+    assert evidence["skipped_candidate_count"] == 1
+    assert evidence["skipped_candidate_failures"][0]["identity"] == "failed-post"
     assert checkpoint_event is not None
-    assert checkpoint_event["resume_page"] == 10
-    assert checkpoint_event["batch_complete"] is False
-    assert checkpoint_event["source_has_more"] is True
-    assert checkpoint_event["stop_reason"] == "runtime_failed"
-    assert checkpoint_event["stop_detail"] == (
-        "deferred_image_pending_after_incomplete_run"
-    )
+    assert checkpoint_event["resume_page"] == 12
+    assert checkpoint_event["batch_complete"] is True
+    assert checkpoint_event["stop_reason"] == "continue"
     assert validation["pagination_incomplete"] is True
-    assert validation["deferred_image_count"] == 1
+    assert validation["skipped_candidate_count"] == 1
     assert validation["stop_reason"] == "runtime_failed"
     assert validation["completion_met"] is False
 

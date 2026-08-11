@@ -229,7 +229,7 @@ def test_detail_invalid_json_is_retryable(monkeypatch) -> None:
         raise AssertionError("invalid JSON must not be accepted")
 
 
-def test_detail_failure_keeps_current_page_and_failed_id_unseen(monkeypatch, tmp_path: Path) -> None:
+def test_detail_failure_is_recorded_seen_and_next_post_continues(monkeypatch, tmp_path: Path) -> None:
     db_path = tmp_path / "posts.sqlite"
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -256,15 +256,28 @@ def test_detail_failure_keeps_current_page_and_failed_id_unseen(monkeypatch, tmp
     monkeypatch.setattr(
         mediacrawler_crawl,
         "fetch_bilibili_article_page",
-        lambda keyword, page, **kwargs: [search_item("failed")],
+        lambda keyword, page, **kwargs: (
+            [search_item("failed")] if page == 1 else [search_item("success")]
+        ),
     )
 
     def fail_detail(post_id, cookie_header):
-        raise mediacrawler_crawl.BilibiliArticleDetailError(
-            "still rate limited",
-            retryable=True,
-            code=-509,
-            attempts=3,
+        if post_id == "failed":
+            raise mediacrawler_crawl.BilibiliArticleDetailError(
+                "still rate limited",
+                retryable=True,
+                code=-509,
+                attempts=3,
+            )
+        return (
+            {
+                "title": "详情标题",
+                "content": "可用的完整正文",
+                "image_urls": ["https://example.test/body.jpg"],
+                "opus": {"content": {"paragraphs": []}},
+            },
+            1,
+            0.0,
         )
 
     monkeypatch.setattr(
@@ -272,6 +285,12 @@ def test_detail_failure_keeps_current_page_and_failed_id_unseen(monkeypatch, tmp
         "fetch_bilibili_article_detail_with_retry",
         fail_detail,
     )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_follower_count",
+        lambda creator_id, cookie_header: 100,
+    )
+    monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
     args = SimpleNamespace(
         keyword="青岛西海岸旅游攻略",
         candidate_hard_limit=3,
@@ -290,15 +309,116 @@ def test_detail_failure_keeps_current_page_and_failed_id_unseen(monkeypatch, tmp
 
     result = mediacrawler_crawl.run_bilibili_article_search(args, tmp_path / "batch")
 
-    assert result["ok"] is False
-    assert result["run"]["returncode"] == 1
+    assert result["ok"] is True
+    assert result["run"]["returncode"] == 0
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
+    skipped = [event for event in events if event["type"] == "candidate_skipped"]
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "runtime_failed"
-    assert stopped["details"]["resume_page"] == 1
-    assert stopped["details"]["batch_complete"] is False
-    assert stopped["details"]["failed_candidate_id"] == "failed"
-    assert stopped["details"]["candidate_identities"] == []
+    assert skipped[0]["details"]["identity"] == "failed"
+    assert skipped[0]["details"]["failure_scope"] == "post"
+    assert skipped[0]["details"]["attempts"] == 3
+    assert stopped["details"]["stop_reason"] == "target_new_met"
+    assert stopped["details"]["candidate_identities"] == ["failed", "success"]
+
+
+def test_follower_failure_retries_then_records_skip_and_continues(
+    monkeypatch, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "posts.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE web_posts (platform_key TEXT, platform_post_id TEXT, canonical_url TEXT)"
+        )
+    state_path = tmp_path / "state.json"
+    mediacrawler_crawl.FrozenExecutionState.create(
+        state_path,
+        run_id="run-followers",
+        job_key="bili-follower-failure",
+        site_key="bilibili",
+        job_kind="mediacrawler_search",
+        plan={},
+        frozen_inputs=[],
+    )
+    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "run_bilibili_behavior_session",
+        AsyncMock(return_value=({"cookie_header": ""}, {"ok": True})),
+    )
+    monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
+    monkeypatch.setattr(mediacrawler_crawl, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
+
+    failed = search_item("failed-followers")
+    failed["mid"] = "creator-failed"
+    success = search_item("success-followers")
+    success["mid"] = "creator-success"
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_article_page",
+        lambda keyword, page, **kwargs: [failed, success],
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_article_detail_with_retry",
+        lambda post_id, cookie_header: (
+            {
+                "title": "详情标题",
+                "content": "可用的完整正文",
+                "image_urls": ["https://example.test/body.jpg"],
+                "opus": {"content": {"paragraphs": []}},
+            },
+            1,
+            0.0,
+        ),
+    )
+    follower_calls: list[str] = []
+
+    def follower_count(creator_id, cookie_header):
+        follower_calls.append(creator_id)
+        return None if creator_id == "creator-failed" else 100
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "fetch_bilibili_follower_count",
+        follower_count,
+    )
+    monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
+    args = SimpleNamespace(
+        keyword="青岛西海岸旅游攻略",
+        candidate_hard_limit=3,
+        target_new_posts=1,
+        source_candidate_hard_limit=3,
+        source_target_new_posts=1,
+        max_stagnant_batches=3,
+        db=str(db_path),
+        start_page=1,
+        top_refresh_max_pages=0,
+        discovery_source_exhausted=False,
+        discovery_job_id=None,
+        discovery_query_fingerprint="",
+        resume_identities_path=None,
+    )
+
+    result = mediacrawler_crawl.run_bilibili_article_search(args, tmp_path / "batch")
+
+    assert result["ok"] is True
+    assert follower_calls == [
+        "creator-failed",
+        "creator-failed",
+        "creator-failed",
+        "creator-success",
+    ]
+    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
+    skipped = [event for event in events if event["type"] == "candidate_skipped"]
+    assert skipped[0]["details"]["identity"] == "failed-followers"
+    assert skipped[0]["details"]["detail"] == "creator_profile_failed"
+    assert skipped[0]["details"]["attempts"] == 3
+    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
+    assert stopped["details"]["stop_reason"] == "target_new_met"
+    assert stopped["details"]["candidate_identities"] == [
+        "failed-followers",
+        "success-followers",
+    ]
 
 
 def test_reimporting_repaired_record_updates_without_duplication(tmp_path: Path) -> None:

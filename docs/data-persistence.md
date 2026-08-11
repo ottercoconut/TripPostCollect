@@ -338,13 +338,12 @@ PY
   不要临时改抓取脚本绕过登录判断或复用其他账号 profile。
 - 字段缺失时，先检查 JSONL 顶层字段、`raw_sample_json` 和平台字段覆盖表；确认来源字段存在但没入库，再改导入映射。
 - 来源字段根本不存在时，先用浏览器或 API 定位字段来源，再补抓取器；不要在入库层造数。
-- 图片失败先读 `formal_validation.pagination_evidence.stop_event.deferred_image_failures`、
-  `candidate_deferred` 和 manifest 对应行，再检查 staging 文件、平台日志尾部及登录态。有限重试仍
-  失败的整帖暂时跳过，失败 ID 不写候选记忆；child 继续后续候选，checkpoint 回到最早失败坐标。
-  若既定完成条件仍未满足，本轮保留累计摘要而不做部分入库。身份、路径、格式、哈希或尺寸错误必须
-  修复产物链路，禁止删 manifest 行、改摘要或只写 URL。
-  child 若在写出 `candidate_deferred` 后预算超时、没有最终停止事件，仍按事件流聚合图片失败并把
-  checkpoint 回卷到最早 frontier 失败坐标；不得用后续完整批次覆盖该恢复点。
+- 候选详情或图片失败先读 `formal_validation.pagination_evidence.skipped_candidate_failures`、
+  `candidate_skipped` 和 manifest 对应行，再检查 staging 文件、平台日志尾部及登录态。有限重试仍
+  失败的整帖记录后跳过，失败 ID 写候选记忆；child 继续后续候选，checkpoint 按最后完整批次推进。
+  身份、路径、格式、哈希或尺寸错误必须修复产物链路，禁止删 manifest 行、改摘要或只写 URL。
+  child 若在写出 `candidate_skipped` 后预算超时、没有最终停止事件，仍按事件流聚合失败；checkpoint
+  保留最后完整批次，不因跳过候选回卷，也不得越过未完成尾批。
 - 页面级抓取遇到错误页时，保留 `ctf_captures` 和 artifact，导入层过滤 `web_posts`。
 - 默认库需要清理脏数据时，先复制 `data/trippostcollect.sqlite` 到 `data/backups/`，再执行受控 SQL。
 - 若一次路径连续 2-3 次无法拿到目标字段，应换到平台 API、作者主页、已有 artifact 或调度链路，不要反复扩大同一个失败抓取。
@@ -360,10 +359,8 @@ PY
 知乎已知 `zhimg` 尺寸 URL 变体在投影时按资源路径合并，不重复生成 manifest。下载后再仅在同帖内
 按 SHA-256 保留首次来源并记录重复来源证据。任何图片失败都使该整帖失去正式资格。有限重试耗尽后
 的 `image_download_retryable` 与格式、解码、大小或明确非重试 HTTP 等终态错误，都在写完 manifest
-与 `candidate_deferred` 后继续其他候选；终态错误保留 `retryable=false` 且不补做无意义请求。
-若后续候选达到默认新增目标，只导入
-图片完整的正式有效集合；未达到目标或处于显式来源耗尽模式时，存在 deferred 候选会使本轮保持
-`deferred_retry_pending`，不得入库或宣称来源耗尽。
+与 `candidate_skipped(failure_scope=image)` 后继续其他候选；终态错误保留 `retryable=false` 且不补做
+无意义请求。跳过候选不进入正式有效集合、不增加新增数，但不会阻断后续数量完成或真实来源耗尽。
 分页证据或任一 child 表明 `runtime_failed`、登录或验证码阻断时，即使有效新增数已经达到目标，也必须
 保持 `completion_met=false`，不得晋升或入库；运行失败优先于数量完成，也不得被图片、行为或策略
 门禁的停止原因覆盖。

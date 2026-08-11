@@ -133,25 +133,24 @@ runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并�
 执行器完成摘要构造后，在同一事务提交下一恢复位置和本轮已处理候选 ID，runner 再把本次摘要
 路径写回 checkpoint。这个提交顺序保证游标和候选记忆不会先于可累计产物前移。默认模式达到完整
 入库目标，或显式来源耗尽模式取得完整耗尽证据并入库后，只清空累计摘要，不删除发现位置或候选记忆。通用控制面用
-`crawl_discovery_seen_candidates` 保存视频、已有决定性权威证据的字段无效项和有效候选，跨轮在
-详情、作者与媒体处理前跳过。详情请求、空响应或解析等可恢复失败必须记录
-`runtime_failed`，保留原页/游标，且失败 ID 不进入 seen 集合。
+`crawl_discovery_seen_candidates` 保存视频、已有决定性权威证据的字段无效项、有效候选，以及详情、
+作者或正文图在适用重试结束后仍失败的跳过候选，跨轮在详情、作者与媒体处理前跳过。候选级失败写
+`candidate_skipped` 并进入 seen；搜索请求、登录、验证、安全限制、频控或浏览器整体故障仍记录
+`runtime_failed` 并保留安全前沿。
 操作人对跨轮持续失败的精确候选明确授权跳过时，独立写入
 `crawl_discovery_candidate_exclusions`，记录 job、查询指纹、候选 ID、原因、证据和授权 run。
 通用 child 在昂贵处理前把排除 ID 与 seen ID 合并为已知集合，但排除不写内容、不计成功，也不
-自动推进 checkpoint。系统不得按失败次数自行生成排除；下一轮仍须扫描到真实末页才能报告来源耗尽。
+自动推进 checkpoint。普通重试耗尽不生成排除表记录，而是使用 `candidate_skipped`；下一轮仍须扫描到
+真实末页才能报告来源耗尽。
 
 正文图片失败分为两支：空响应、超时或临时请求错误在单图有限重试耗尽后生成
 `image_download_retryable`；格式、解码、大小或明确非重试 HTTP 等终态错误保留具体错误码且不做
-无意义重试。两类都先原子追加失败 manifest，再写 `candidate_deferred`，把该 ID 放入仅当前 child
-有效的临时集合并继续后续候选。两类失败帖都不进入正式 JSONL、SQLite 或跨轮 seen；停止摘要汇总
-`deferred_image_failures`，checkpoint 回到最早失败的
-page/offset/cursor 且标记批次不完整。默认数量模式若后续有效候选达到目标，可正常导入有效集合；
-否则保存累计摘要并以 `deferred_retry_pending` 等待下轮；该状态优先于候选上限、停滞和来源耗尽。
-显式来源耗尽模式存在 deferred 时不得生成
-`source_exhausted` 完成证据。
-即使预算超时使 child 没来得及写最终停止事件，根执行器也从既有 `candidate_deferred` 事件重建失败
-集合；摘要保持运行不完整，checkpoint 不得越过最早 frontier 图片失败坐标。
+无意义重试。两类都先原子追加失败 manifest，再写 `candidate_skipped(failure_scope=image)`，把该 ID
+写入已处理候选并继续后续候选。失败帖不进入正式 JSONL 或内容 SQLite；停止摘要汇总
+`skipped_candidate_failures`，checkpoint 按最后完整批次推进。默认数量模式只计算有效候选；显式来源
+耗尽模式可在跳过候选后继续到真实末页并生成 `source_exhausted` 证据。即使预算超时使 child 没来得及
+写最终停止事件，根执行器也从既有 `candidate_skipped` 事件重建审计集合；摘要保持运行不完整，
+checkpoint 不越过未完成尾批，但不因已记录跳过候选回卷。
 
 小红书独立 runner 不读写通用 checkpoint 表，而是在 `xhs_discovery_checkpoints` 中按目标、账号和
 查询指纹保存 `page + search_id`，在 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID。

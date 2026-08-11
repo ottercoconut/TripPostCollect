@@ -93,11 +93,11 @@
 下载，整帖检查后原子写入 `<platform_artifact>/data/douyin/images/<aweme_id>/<index>.<real_ext>` 和
 `<platform_artifact>/data/douyin/image_manifest.jsonl`。空响应或超时按单图最多 3 次、1–2 秒随机基数
 指数退避重试，日志和最终 manifest `attempts` 保留实际尝试证据。重试耗尽后才写失败 manifest 并以
-`image_download_failed` 留证；可恢复项使用 `image_download_retryable` 和 `candidate_deferred`，暂时
-跳过整帖并继续后续候选。失败 ID 不写已处理候选，最终 checkpoint 恢复最早失败的
-page/offset/search ID，不能把后续扫描解释为已跨越该安全前沿。
-格式、解码、大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样写 `candidate_deferred`，
-暂时跳过整帖并继续，checkpoint 仍保留最早失败的 page/offset/search ID。
+`image_download_failed` 留证；可恢复项使用 `image_download_retryable`，并以
+`candidate_skipped(failure_scope=image)` 跳过整帖继续后续候选；失败 ID 写入已处理
+候选，最终 checkpoint 按完整批次的 page/offset/search ID 推进。
+格式、解码、大小或明确非重试 HTTP 等终态错误不补做无意义重试，但同样记录后跳过整帖并继续。
+作者必需字段补拉完成有限重试仍失败时使用 `candidate_skipped(failure_scope=post)`。
 客户端必须保留真实 HTTP 状态；HTTP 200 空字节由共享 helper 继续有限重试，不得折叠成第一次成功。
 
 根执行器按 `note_download_url` 重建候选并复验 manifest、SHA/MIME/尺寸。正式运行晋升到
