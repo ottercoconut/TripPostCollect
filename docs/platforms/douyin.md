@@ -1,106 +1,84 @@
 # 抖音
 
-- 登录确认后先进入本轮真实关键词搜索页，再执行共享行为阶段并刷新 API 客户端 cookie；
-  行为证据 URL 不是该搜索页，或行为与请求策略证据缺失时，不得入库。
-  API 客户端在进入关键词页之前监听浏览器搜索响应；搜索循环优先复用浏览器已经取得的首页和
-  行为滚动分页，避免对同一 offset/search ID 重复请求。只有超过浏览器已加载前沿时才发出后续
-  API 请求。同一关键词、offset 和 search ID 若观察到多条响应，视为预取/预测与正式响应竞态：
-  合并去重并优先使用最新的非 `verify_check` 响应；只有全部响应均为验证信号时才按风控失败停止。
-  后续目标 offset 尚未出现在监听缓存时，先在有头搜索页执行最多 8 次低频可见滚轮并等待浏览器
-  自己的搜索响应；命中同一关键词、offset 和稳定 search ID 后再消费。滚动仍无法取得目标响应时
-  才允许回退到 API 请求并按其结果失败，不能把“浏览器尚未加载”解释成来源耗尽。
-  首页流响应无法读取或额外首页请求返回 `verify_check` 时，只有页面至少存在 10 个可见
-  `waterfall_item_*` 作品卡、且浏览器已取得同一关键词 offset 10 的健康响应和非空 search ID，
-  才允许用前 10 个可见作品 ID 的详情重建首页，并从该 search ID 继续。任一证据不足仍按风控
-  失败停止，不能跳过首页或猜测 cursor。
+抖音正式抓取服从[正式抓取执行契约](../formal-crawl-contract.md)。本文只维护浏览器响应监听、
+offset/search ID、详情和严格图文资产差异。
+
+## 入口与字段
 
 - 正式入口：`crawl_runner.py` 调用 MediaCrawler 抖音搜索。
-- 完成模式服从正式契约：正常默认使用 `target-new-posts`；只有用户明确要求某一轮直到来源耗尽时，
-  才在该轮命令临时使用 `source-exhausted`，不修改长期配置。
-- 默认正式数量只读取 `config/crawl_targets.json` 中该 job 的 `target_new_posts` 和
-  `candidate_hard_limit`：达到有效新增目标即提前停止，否则最多累计候选硬上限后结束本轮。
-- 只接受图文作品；视频作品计入跳过候选。
-- 粉丝来源：图文作者主页，搜索作者对象只在原始字段明确存在时作为来源。
-- 作者补全预算必须随候选硬上限传入，不得使用固定 30 作者上限。
-- 粉丝量为 0 只有 `followers_observed=true` 才有效；旧版可疑 0 不得通过校验。
-- 图片来源：图文作品的 note/image 列表。
-- 去重键：`aweme_id`。
-- 默认模式的自适应循环持续分页，直到有效目标、候选硬上限、数据源耗尽或连续停滞。
-- 搜索接口当前使用站内单列搜索契约：新鲜首页调用 `/general/search/stream/`，后续携带 search ID
-  的分页调用 `/general/search/single/`。首页响应可能保留原始 HTTP chunk 边界，必须重组所有 chunk
-  后再解析 JSON。两类请求均使用 `count=10`、`list_type=single`、
-  `search_source=normal_search`；每次请求 10 条，offset 必须按 10 递增。首页以浏览器 offset 10
-  请求携带的 search ID 建链；可正常解析首页流时，也可用其 `extra.logid` 建链。后续页始终复用
-  已建立的 search ID，不把每页响应的轮换 `logid` 当作新 cursor。不得复用旧版固定
-  `from_group_id` 或 `count=15/list_type=multi` 组合，否则接口可能
-  返回空数组，而同一浏览器搜索页仍显示结果。
-  页级状态记录 page、offset/search ID、原始返回条数和 `has_more`。响应缺少 `data` 是
-  运行/风控失败，不得写成数据源耗尽。
-- 搜索 JSON 必须通过业务 envelope 校验：非成功 `status_code`、`data` 不是列表、缺失或非法
-  `has_more`，以及 `has_more=true` 但没有下一 `logid`，都停止为 `runtime_failed`。状态文件只保存
-  `status_code`、数据条数、`has_more` 和 `logid` 是否存在等脱敏元数据，不保存完整响应。
-  响应体在 JSON/chunk 重组阶段产生的 `SearchResponseError` 必须保留其具体 reason 传到分页停止
-  证据，不能被通用 `DataFetchError` 吞并成 `search_request_failed`；浏览器监听日志也只记录该
-  reason，不输出完整响应体。
-  `search_nil_info.search_nil_type=verify_check` 是显式风控信号，必须停止为
-  `search_verify_check`，不得解释成来源耗尽。
-- 新鲜游标链的第 1 页（page 1、offset 0、空 search ID）若返回
-  `data=[]、has_more=false`，必须检查当前可见搜索页。存在作品链接或搜索结果卡片时停止为
-  `empty_api_response_with_visible_results`；新版无作品链接的 `.search-result-card` 和
-  `waterfall_item_*` 瀑布流节点也属于可见卡片。既无卡片也无明确可见“无结果”文案时停止为
-  `ambiguous_empty_first_page`。这两种情况均为运行/风控失败，checkpoint 保持第 1 页不前移。
-  只有可见页面明确显示无结果，才允许 `verified_empty_first_page` 证明来源耗尽。
-- SQLite checkpoint 同时保存下一 page、offset 和稳定 search ID。自动恢复必须把三者一起传给
-  child。这里的 search ID 是首页建链后浏览器后续请求持续复用的会话 ID，不是每页响应随请求
-  变化的 `extra.logid`；后续页必须保留请求携带的原 search ID。旧失败摘要若已把轮换 log ID
-  写入 checkpoint，runner 只允许从冻结摘要第一个 frontier batch 的建链证据纠正，且在 dry-run
-  中标记 `resume_cursor_corrected_from_summary=true`。只有 `--start-page` 或 offset、但 search ID
-  为空时执行器直接拒绝，不能把这种深页
-  请求的空结果解释为来源耗尽。
-- 有 checkpoint 时先用空 cursor 从顶部刷新配置页数，再进入保存的深层 page/offset。抖音
-  search ID 是浏览器搜索会话级 cursor，不能跨进程照搬：只有本轮顶部刷新已经取得健康后页、
-  `has_more=true` 和非空稳定 search ID，才用该 ID 重新绑定深层前沿。若顶部刷新尚未覆盖保存的
-  offset，原 page/offset 必须保留；若本轮刷新已完整处理到或越过该 offset，则 frontier 从刷新
-  完成后的下一 page/offset 开始，避免重复消费已用缓存。两种情况都写
-  `douyin_frontier_cursor_rebound` 证据。没有健康刷新链时保持旧 checkpoint 并失败，不能猜 ID。
-  已知 `aweme_id` 在作者主页补全和媒体处理前跳过。
-- `status=exhausted` 只证明已保存 search ID 的游标链结束。顶部刷新若观察到至少一个不在数据库、
-  累计摘要或 `crawl_discovery_seen_candidates` 中的新 `aweme_id`，并且最后一页返回
-  `has_more=true` 与非空稳定 search ID，从刷新链下一页
-  建立新 cursor 前沿，写 `discovery_frontier_reseeded` 证据并由新三元组替换旧耗尽 checkpoint。
-  没有新候选 ID 或连续游标时保持耗尽，仅刷新顶部。新前沿遇到历史视频、字段无效项或有效项时
-  由持久候选集合在作者主页和媒体处理前跳过，不消耗候选预算。
-  顶部刷新本身已经 `target_new_met` 时不 reseed，立即结束并保留旧耗尽 checkpoint。
-- 完整响应保存下一 page、`offset + 10` 和稳定 search ID；在目标或候选上限处中途停止时保存当前
-  请求三元组，下一次重取边界批次。未达标摘要自动累计，正常 workflow 不使用人工恢复参数。
-- `data=[]` 但 `has_more=1` 是可继续的空批次，必须携带已建立的稳定 search ID 请求下一页并计入连续
-  停滞；深层页的 `has_more=false` 可以证明当前游标链耗尽。缺失继续游标属于响应异常；新鲜第
-  1 页的 `has_more=false` 还必须满足上面的可见无结果门禁，不能只凭接口空数组停止。
+- 登录后先进入本轮关键词页，再执行共享行为阶段并刷新 API Cookie。
+- 只接受图文作品；视频计入已处理候选但不进入内容或媒体下载。
+- 正文只接受 aweme 详情非空 `desc`，保存
+  `content_detail_status=detail_observed`、`content_detail_source=aweme_detail`。
+- 正文图片来自 `note_download_url`；`images[].uri` 形成 `douyin:uri:<uri>` 稳定资产键。
+- 作者粉丝来自图文作者主页，要求 `followers_observed=true`；搜索作者对象的占位 0 不能通过。
+- 作者补全预算随候选硬上限传入，不使用固定作者数量上限。
+- 去重键为 `aweme_id`。
 
-## 正文图片本地化与严格 images-only
+## 搜索响应与游标
 
-抖音图文的正文只接受 aweme 详情 `desc`，JSONL 固定写
-`content_detail_status=detail_observed` 和 `content_detail_source=aweme_detail`。标题、封面或搜索预览
-文本不能替代非空 `desc` 通过正式门禁。
+API 客户端在进入关键词页前开始监听浏览器搜索响应。搜索优先消费浏览器已取得的首页和滚动分页，
+只有超过可见前沿时才发后续请求。同一关键词、offset 和 search ID 有多条响应时，合并去重并优先
+最新的非 `verify_check` 响应；全部为验证信号时按风控失败。
 
-抖音只有已确认的图文作品会进入图片入口，权威字段固定为 `note_download_url`。store 同时保留
-原始 `images[].uri`，优先生成 `douyin:uri:<uri>` 稳定资产键；签名 URL 的查询参数刷新不会改变
-同一图片身份。`cover_url`、动态/静态封面、`video_download_url`、音乐 URL、作者头像和搜索卡片
-预览都不属于正文候选。
+目标 offset 未进入监听缓存时，先在有头搜索页最多执行 8 次低频可见滚轮。仍未取得目标响应才回退
+到 API 请求，不能把“浏览器尚未加载”解释为耗尽。首页流无法读取或额外首页请求返回验证时，只有
+页面至少有 10 个可见 `waterfall_item_*` 卡片，并且浏览器已取得 offset 10 的健康响应和非空 search
+ID，才允许用前 10 个可见作品 ID 的详情重建首页；证据不足必须停止。
 
-图片入口是严格 images-only：图片列表为空直接返回，视频候选直接跳过；不会调用
-`get_aweme_video()`、视频 store 或音乐下载。图片使用当前 `dy_client` 会话和新鲜签名 URL 串行
-下载，整帖检查后原子写入 `<platform_artifact>/data/douyin/images/<aweme_id>/<index>.<real_ext>` 和
-`<platform_artifact>/data/douyin/image_manifest.jsonl`。空响应或超时按单图最多 3 次、1–2 秒随机基数
-指数退避重试，日志和最终 manifest `attempts` 保留实际尝试证据。重试耗尽后才写失败 manifest 并以
-`image_download_failed` 留证；可恢复项使用 `image_download_retryable`，并以
-`candidate_skipped(failure_scope=image)` 跳过整帖继续后续候选；失败 ID 写入已处理
-候选，最终 checkpoint 按完整批次的 page/offset/search ID 推进。
-格式、解码、大小或 HTTP 400/404 等候选自身终态错误不补做无意义重试，但同样记录后跳过整帖并继续。
-作者必需字段补拉完成有限重试仍失败时使用 `candidate_skipped(failure_scope=post)`。
-客户端必须保留真实 HTTP 状态；HTTP 200 空字节由共享 helper 继续有限重试，不得折叠成第一次成功。
-HTTP 401/403、429 或明确账号封禁属于运行级阻断，不得降级为图片/作者候选跳过或写 seen。
+搜索接口契约：
 
-根执行器按 `note_download_url` 重建候选并复验 manifest、SHA/MIME/尺寸。正式运行晋升到
-`data/media/douyin/...` 后才在同一 SQLite 事务写帖子与 `web_post_images`；诊断模式不晋升。
-视频、音乐或封面文件计数必须始终为 0，正文图任一项不完整时任务不能以 URL-only 完成。
+- 新鲜首页使用 `/general/search/stream/`，后续使用 `/general/search/single/`；
+- `count=10`、`list_type=single`、`search_source=normal_search`，offset 按 10 递增；
+- 首页流可能保留 HTTP chunk 边界，解析前必须重组全部 chunk；
+- 首页可由浏览器 offset 10 请求携带的 search ID 建链，也可在健康首页流中使用 `extra.logid`；
+- 后续页始终复用已经建立的 search ID，不把每页轮换 `logid` 当作新 cursor；
+- 禁止旧 `from_group_id` 或 `count=15/list_type=multi` 组合。
+
+非成功 `status_code`、`data` 非列表、`has_more` 缺失/非法，或 `has_more=true` 但没有下一 `logid`，
+均为 `runtime_failed`。`SearchResponseError` 的具体 reason 必须进入停止证据；状态只保存脱敏元数据，
+不保存完整响应。`search_nil_info.search_nil_type=verify_check` 固定为 `search_verify_check`。
+
+## 空首页门禁
+
+新鲜 page 1、offset 0、空 search ID 返回 `data=[]、has_more=false` 时，必须核对当前可见页面：
+
+- 存在作品链接、`.search-result-card` 或 `waterfall_item_*`：
+  `empty_api_response_with_visible_results`；
+- 没有卡片，也没有明确可见“无结果”：`ambiguous_empty_first_page`；
+- 只有页面明确显示无结果：`verified_empty_first_page`，可以证明当前链耗尽。
+
+前两项属于运行失败，checkpoint 保持 page 1、offset 0、空 search ID。
+
+## checkpoint 与重新建链
+
+checkpoint 必须成组保存下一 page、offset 和稳定 search ID。深层恢复缺任一项都直接拒绝。旧摘要
+误存轮换 log ID 时，runner 只允许从冻结摘要首个 frontier batch 的建链证据纠正，并在 dry-run 写
+`resume_cursor_corrected_from_summary=true`。
+
+有 checkpoint 时先用空 cursor 刷新顶部。search ID 不能跨进程照搬：只有本轮刷新取得健康后页、
+`has_more=true` 和非空稳定 ID，才用新 ID 重新绑定深层前沿，并写
+`douyin_frontier_cursor_rebound`。刷新未覆盖旧 offset 时保留原 page/offset；已经覆盖时从刷新后的
+下一 offset 继续。没有健康刷新链时保留旧 checkpoint 并失败。
+
+耗尽状态只证明旧 search ID 链结束。顶部刷新同时发现未知 `aweme_id`、`has_more=true` 和非空稳定
+search ID 时，从刷新链下一页写 `discovery_frontier_reseeded` 并替换旧前沿；否则保持耗尽。顶部刷新
+已经达到本轮新增目标时不 reseed。
+
+完整响应保存下一 page、`offset + 10` 和稳定 ID；页中途停止保存当前三元组。`data=[]` 且
+`has_more=true` 是可继续空批次；深层 `has_more=false` 可以结束当前链，但新鲜首页仍必须满足上面的
+可见无结果门禁。
+
+连续停滞使用 `stagnation_basis=valid_new`：只有批次没有新增满足正式字段 profile、且数据库中不存在
+的有效记录时才累计；新无效候选、重复候选和数据库已有记录都不能重置停滞计数。
+
+## 严格 images-only
+
+只有确认的图文作品进入图片入口。`cover_url`、封面、`video_download_url`、音乐、头像和搜索预览
+均不可达；代码不得调用 `get_aweme_video()`、视频 store 或音乐下载。平台层使用当前 `dy_client`
+会话和新鲜签名 URL 写 staging/manifest，根项目按 `note_download_url` 重建候选并执行通用字节复验、
+同帖去重、晋升和 SQLite 事务。
+
+共享的有限重试、`candidate_skipped`、运行级阻断和媒体失败语义见
+[正式契约](../formal-crawl-contract.md)。视频、音乐和封面文件计数必须始终为 0，正文图不完整时不能
+URL-only 完成。

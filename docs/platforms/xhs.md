@@ -1,103 +1,65 @@
 # 小红书正式抓取 Workflow
 
-本文是小红书账号、登录、抓取和失败恢复的操作权威。数量与机器成功语义服从
-[`formal-crawl-contract.md`](../formal-crawl-contract.md)，当前数值只从 `config/xhs_targets.json`
-和 `config/xhs_pool.json` 读取，不在文档中复制。
-
-> B站、微博、抖音、知乎和小红书五个平台默认均可运行。小红书因账号隔离由操作人显式执行本文
-> 独立 runner，配置 schema v2 不设 `enabled` 字段；这是入口架构，不是特殊启停策略。正常运行仍
-> 受 `config/xhs_targets.json` 和 `config/xhs_pool.json` 的数量边界约束。只有用户明确要求某一轮
-> 直到来源耗尽时，才临时传 `--completion-mode source-exhausted`，不修改永久配置。
+本文是小红书账号、登录、执行和恢复的操作权威。完成谓词、候选跳过、媒体事务等共享机器语义见
+[正式抓取执行契约](../formal-crawl-contract.md)；数值只从 `config/xhs_targets.json` 和
+`config/xhs_pool.json` 读取。
 
 ## 硬边界
 
-- 正式抓取只运行 `scripts/xhs_runner.py`。
-- 完成模式服从正式契约：正常默认使用 `target-new-posts`；只有用户明确要求某一轮直到来源耗尽时，
-  才在该轮命令临时使用 `source-exhausted`，不修改长期配置。
-- 小红书的会话预算、请求节奏、验证和失败恢复由独立 runner 与 `xhs_guarded` 管理，不读写通用
-  `scrapling_throttle.json` 冷却；发现旧 XHS 通用策略状态时由正式入口删除。
-- 账号登记和人工状态变更只运行 `scripts/xhs_accounts.py`；登录只运行 `scripts/xhs_login.py`。
-- 不把小红书放入 `crawl_runner.py`、`login_warmup.py`、`config/crawl_targets.json` 或
-  `info_collection_benchmark.py`。
-- 不直接运行 MediaCrawler 完成正式任务，不复用旧 `browser_data` 或明文 storage state。
-- `xhs_runner.py --no-import` 只用于诊断；即使顶层状态显示 `completed`，也不满足正式完成判据。
-- 必须人工传入 `--account-id`；同一正式轮次不自动选号、换号、解验证、重试或放宽字段。
-- 本地正文图片存储固定为必需能力，没有 target 级开关；正式 child 始终带
-  `--download-images --media-root <data/media>`。视频跳过；图文必须保存全部正文图片关系和本地
-  文件证据。数据库已有记录只能更新，不计新增目标。
-- 缺少粉丝数值、观测标记或可信来源的候选无效，不能用默认 `0`、昵称字段或旧缓存降级。
+- 正式抓取只运行 `scripts/xhs_runner.py`；账号管理和登录分别只运行 `xhs_accounts.py`、
+  `xhs_login.py`。
+- 不把小红书放入通用 runner、warmup、`crawl_targets.json`、benchmark 或通用策略冷却。
+- pool/target 使用 schema v2，没有 `enabled` 或图片开关；显式 runner 命令是唯一启动动作。
+- 必须人工传 `--account-id`；一轮内不自动选号、换号、绕过验证或放宽字段。
+- 正式 child 固定下载正文图片并真实入库；`--no-import` 只用于诊断。
+- 账号 profile、加密状态、租约、checkpoint、seen 和累计摘要都按账号隔离。
 
-## 唯一执行流
+## 执行流
 
 ```text
-检查配置和账号
-  -> 必要时登记账号
-  -> 在账号互斥租约内人工登录并完成关闭/重开复验
-  -> dry-run 冻结计划
-  -> 人工确认本轮账号、目标、数量和互动副作用
-  -> 正式运行并申请单账号互斥租约
-  -> xhs_guarded 行为阶段
-  -> 有 checkpoint 时刷新顶部，再恢复 page + search_id 深层前沿
-  -> 已知 ID 详情前去重、自适应搜索、详情、作者粉丝补全和分页
-  -> API 登录过期时保留全部标签页，人工恢复后重试同一来源页
-  -> 正式字段校验
-  -> 当前会话下载全部正文图，原子生成 staging 和 image_manifest.jsonl
-  -> 默认累计达到有效新增目标，或本轮显式来源耗尽后，根项目复验并晋升 data/media
-  -> 帖子/图片在同一事务写 SQLite，形成 child 摘要
-  -> runner 根据 child 摘要提交账号级 checkpoint；成功入库后清空累计摘要，SQLite 导入失败则不写 checkpoint/seen/campaign
-  -> 加密最新 storage state、删除临时明文、释放租约
-  -> 检查顶层摘要、child summary、冻结状态和 SQLite
+检查配置与账号
+  -> 必要时登记并人工登录、关闭重开复验
+  -> dry-run 冻结账号、目标、互动和发现计划
+  -> 人工确认
+  -> 正式运行并申请账号租约
+  -> xhs_guarded、顶部刷新和深层 page + search_id
+  -> 详情、作者粉丝和正文图片
+  -> 根项目复验、媒体晋升和 SQLite 批次事务
+  -> 成功后提交账号级 checkpoint/seen/campaign
+  -> 加密最新状态、删除明文、释放租约
+  -> 检查顶层摘要、状态、child 摘要和 SQLite
 ```
 
-## 正文图片本地化
+## 正文与图片差异
 
-小红书只把笔记详情 `image_list` 作为权威正文图。每个图片对象按 `url_default`、`url`、`url_pre`
-优先级选择一个可用 URL，并以稳定的 notes 路径生成 `source_asset_key`；同一图片的多个 CDN/尺寸
-变体不会重复下载。作者头像、作者主页资源、封面、搜索卡片预览和视频字段不会进入候选。
-
-图片请求复用当前隔离账号的 BrowserContext/API Cookie，不解密第二份会话，也不调用
-`get_notice_video()` 或视频 store。整帖图片通过真实格式、解码和大小检查后，原子写入
-`<child_artifact>/xhs/data/xhs/images/<note_id>/<index>.<real_ext>` 和
-`<child_artifact>/xhs/data/xhs/image_manifest.jsonl`；来源字段固定为 `image_list`、角色固定为 `content`。
-空响应或超时按单图最多 3 次、1–2 秒随机基数指数退避重试；日志和最终 manifest `attempts` 保留
-实际尝试证据。三次仍为临时错误才记录 `image_download_retryable` 和
-`candidate_skipped(failure_scope=image)`，跳过整帖并继续后续候选；失败 ID 写账号级候选记忆，
-checkpoint 按完整批次推进。不保存该帖成功图片子集为完整帖，也不触发自动换号。
-格式、解码、大小或 HTTP 400/404 等候选自身终态错误不补做无意义重试，但同样写失败 manifest 与
-`candidate_skipped`，跳过整帖并继续后续候选。笔记详情或作者必需字段完成适用重试仍失败时采用
-`candidate_skipped(failure_scope=post)`；安全限制、登录、验证码和频控仍立即停止。
-HTTP 401/403、429 与平台 300011/300012 分别作为登录、频控、安全限制或 IP 阻断停止运行，
-不得写 `candidate_skipped` 或 seen。
-客户端必须保留真实 HTTP 状态；HTTP 200 空字节由共享 helper 继续有限重试，不得折叠成第一次成功。
-
-根执行器按相同优先级重建候选，复验 manifest、SHA/MIME/尺寸和路径边界。正式运行晋升到
-`data/media/xhs/...` 后才写 SQLite；`--no-import` 诊断只保留 staging/manifest。本规则是固定合同，
-`config/xhs_targets.json` 不接受旧 `download_images` 字段，也没有兼容分支。
+- 正文必须来自笔记详情非空 `desc`，保存
+  `content_detail_status=detail_observed`、`content_detail_source=note_detail`。
+- 正文图只来自详情 `image_list`；每个对象按 `url_default`、`url`、`url_pre` 选择一个 URL，并用稳定
+  notes 路径生成资产键。头像、作者主页、封面、搜索预览和视频不可达。
+- 图片请求复用当前隔离账号的 BrowserContext/API Cookie，不解密第二份会话，不调用视频 store。
+- 作者粉丝必须来自当前登录会话的作者主页，保存数值、`followers_observed=true` 和
+  `author_followers_source=creator_profile`。笔记 `xsec_token` 不能作为作者主页凭据。
+- 平台层写 `<child_artifact>/xhs/data/xhs/` 下的 staging/manifest；根项目负责通用字节复验、晋升和
+  SQLite。共享重试和失败分类不在本文重复。
 
 ## 1. 执行前检查
-
-先查看账号，不启动抓取：
 
 ```bash
 source .venv/bin/activate
 python scripts/xhs_accounts.py list
 ```
 
-继续执行必须同时满足：
+继续前逐项确认：
 
-- 操作人已经指定账号，账号状态为 `active`，且没有活动租约；
-- 账号目录与其他账号隔离，`storage_state.enc` 存在且可解密；
-- `target_key` 存在，操作人已确认关键词与青岛相关，有效新增目标、候选硬上限、顶部刷新页数、
-  停滞批次和超时符合本轮要求；关键词范围不由配置解析器硬编码判断；
-- `behavior_profile` 为 `xhs_guarded`，有头浏览器已启用；
-- `lease_seconds >= timeout_seconds + 300`；
-- 是否执行评论区访问或点赞已经由操作人明确决定；未明确时必须使用默认 `none`；
-- pool 与 target 配置使用 schema v2，已删除 `enabled` 字段；出现旧字段必须在冻结前失败，不保留
-  兼容门禁。只有显式执行 `xhs_runner.py` 才会启动抓取；读取配置本身不会调度任务。
-- 若该目标和账号已有 checkpoint，其累计摘要及摘要引用的全部 JSONL 必须仍存在；缺失时停止，
-  不得丢弃历史成果后推进前沿。
+- 操作人已指定账号；状态为 `active`，没有活动租约；`storage_state.enc` 存在且可解密。
+- `target_key` 存在且关键词属于青岛；目标、候选上限、顶部刷新、停滞批次和超时符合本轮要求。
+- `behavior_profile=xhs_guarded` 且使用有头浏览器。
+- `lease_seconds >= timeout_seconds + 300`。
+- 互动未明确时为 `none`；点赞等真实副作用必须由操作人明确选择。
+- schema v2 配置没有旧 `enabled` 或 `download_images` 字段。
+- checkpoint 引用的累计摘要及全部 JSONL 仍存在。
 
-缺少任一前提时停止，不用底层 MediaCrawler 探测登录态，也不临时修改代码绕过门禁。
+缺少任一前提即停止，不直接调用 MediaCrawler 探测或绕过门禁。
 
 ## 2. 登记与登录
 
@@ -109,7 +71,7 @@ python scripts/xhs_accounts.py enroll \
   --account-id xhs-a01
 ```
 
-账号未登录、状态为 `login_required`，或操作人要求复验时运行：
+未登录、`login_required` 或需要复验时：
 
 ```bash
 source .venv/bin/activate
@@ -118,29 +80,19 @@ python scripts/xhs_login.py \
   --timeout-seconds 600
 ```
 
-登录必须在该账号的桌面 profile 中人工完成。成功不是“出现 Cookie”，而是：
+登录成功必须同时完成：可见“我”与稳定身份、保存 Cookie/localStorage、关闭重开同一 profile 后仍是
+同一身份、AES-GCM 写入 `storage_state.enc`、账号状态变为 `active`。
 
-1. 页面可见“我”链接并得到稳定平台身份；
-2. 保存 Cookie、localStorage 和运行时 storage state；
-3. 关闭并重开同一 profile；
-4. 重开后仍识别为同一身份；
-5. 将快照以 AES-GCM 写入该账号的 `storage_state.enc`，账号状态变为 `active`。
+登录工具在整个登录和复验阶段持有与正式抓取相同的账号租约；忙碌只返回 `blocked`。可见验证页
+必须置前并等待操作人，标记消失且身份恢复后才继续；每阶段最多等待命令指定超时，不自动识别或
+绕过验证。`retired` 不可重新登录，`quarantine` 只能人工复验后 activate。同一平台身份不能登记到
+两个槽位。
 
-`xhs_login.py` 在打开浏览器前申请与正式抓取相同的账号租约，登录与关闭/重开复验结束后在
-`finally` 路径释放。账号已有活动租约时登录返回 `blocked`，不得把忙碌误写为 `login_required`。
-登录工具只保留一个浏览器标签页并复用 profile 中已有页面；它的目的仅是完成登录和持久化复验，
-不安装正式抓取的新标签页守卫。初次登录或关闭重开复验出现可见安全验证/验证码时，检测本身
-不能结束等待或触发浏览器清理；工具必须把当前单页置前，在每个阶段按 `--timeout-seconds` 最长
-等待操作人处理，只有验证标记消失且同一身份重新可见后才继续。超时后才允许截图、失败并关闭
-context；不自动点击、识别或绕过验证。登录租约覆盖初次登录、关闭重开复验两段完整等待及清理
-时间。正式抓取开始后才按下一节执行统一的 30 秒新标签页保护规则。
-
-同一平台身份不能登记到两个槽位。`retired` 账号不能重新登录；`quarantine` 账号只有人工
-复验后才能执行 `activate`。不要用正式抓取顺便完成登录。
+`xhs_login.py` 是单页工具，不安装正式抓取的新标签页守卫，也不顺便抓内容。
 
 ## 3. 冻结计划
 
-dry-run 必须先于正式运行，且使用即将正式运行的同一个账号、目标和互动参数：
+dry-run 必须使用正式轮相同的账号、目标、互动参数和完成模式：
 
 ```bash
 source .venv/bin/activate
@@ -151,31 +103,21 @@ python scripts/xhs_runner.py \
   --completion-mode target-new-posts
 ```
 
-dry-run 通过的判据：
+确认：
 
-- 顶层状态为 `planned`；
-- `plan_frozen=completed`，其余阶段保持 `frozen`；
-- 冻结输入包含 pool、target 和正式契约的 SHA-256；
-- 计划中的账号、关键词、有效新增目标、候选硬上限、行为 profile 和互动模式正确；
-- `plan.preflight` 明确记录账号为 `active`、没有活动租约、加密状态文件存在且可读，以及
-  `lease_seconds >= timeout_seconds + 300`；`plan.headed=true`。密文的实际解密仍在正式执行构造
-  child 命令前完成，解密失败不得启动抓取；
-- 计划中的 `discovery` 与 `xhs_discovery_checkpoints` 一致：首次运行从第 1 页开始且顶部刷新为
-  0；续跑包含保存的页码、非空 `search_id`、顶部刷新页数及可选累计摘要；
-- 加密状态存在且账号仍为 `active`。
+- 顶层为 `planned`，只有 `plan_frozen=completed`，其余阶段为 `frozen`；
+- pool、target、正式契约及其 SHA-256 已冻结；
+- 账号、关键词、数量、候选上限、profile、互动和有头模式正确；
+- preflight 证明账号 active、无租约、密文可读且租约覆盖超时；
+- discovery 与该账号 checkpoint 一致：首次 page 1、顶部刷新 0；续跑有保存的 page、非空 search ID、
+  顶部刷新页数及可选累计摘要。
 
-dry-run 的 `frozen` 后续阶段不是失败。dry-run 不访问内容、不申请正式租约、不写内容表，也不
-构造依赖临时解密 storage state 的实际 child 命令；正式命令只出现在真实运行的
-`command_executed.evidence.command`。小红书 dry-run 顶层摘要没有 `import_result`，不能把字段缺席
-误读成已入库。
+dry-run 不申请正式租约、不解密运行时明文、不构造 child 命令，也没有 `import_result`；这些缺席不是
+失败或入库证据。
 
 ## 4. 正式运行
 
-dry-run 经人工确认后，直接用相同账号、目标和互动参数执行正式命令。正式启动不再修改
-`config/xhs_pool.json` 或 `config/xhs_targets.json`；这两个文件仍作为数量、行为和发现计划的冻结
-输入，运行中不得修改。schema v2 不接受 `enabled` 字段，不存在运行后恢复开关的步骤。
-
-无互动副作用：
+无互动：
 
 ```bash
 source .venv/bin/activate
@@ -185,7 +127,7 @@ python scripts/xhs_runner.py \
   --completion-mode target-new-posts
 ```
 
-显式请求一轮最多一次的帖子互动：
+显式互动在一轮最多一次：
 
 ```bash
 source .venv/bin/activate
@@ -196,174 +138,97 @@ python scripts/xhs_runner.py \
   --post-interaction comment-scroll
 ```
 
-- `comment-scroll`：访问本轮首个可用图文的评论区并滚动，不采集评论。
-- `like-one`：只检查首个可用图文；未点赞时点击一次，已点赞或状态不明时不点击。
-- `random`：在上述两项中随机选择；可能产生真实点赞副作用。
+`comment-scroll` 只访问并滚动评论区，不采集评论；`like-one` 只在明确未点赞时点击一次；`random` 在
+两者中随机选择并可能产生点赞副作用。控件普通失败只影响互动证据，频控、封禁或验证仍终止运行。
 
-互动默认 `none`。普通控件查找失败只记录证据，不否定抓取；页面出现频控或封禁时必须终止
-本轮。搜索连续性阶段出现可见登录要求或图片验证时，按下一节保留页面等待人工处理。运行结束
-后直接进入摘要、状态、SQLite 和租约验收，不修改配置。
+运行中不得修改 pool/target。只有用户明确要求抓完来源时，dry-run 和正式轮一起改为
+`source-exhausted`；不写回配置。
 
 ## 5. 抓取中的固定行为
 
-- 正式抓取 BrowserContext 必须监听所有新标签页。守卫安装后出现的页面无论由平台自行弹出，还是
-  由 crawler 为作者主页回退、互动或验证辅助而创建，一律立即置前，并从页面出现时起至少保留
-  30 秒；不得依赖验证码文案识别结果、滚动位移或创建来源。正常返回、异常分支、Playwright 退出
-  和最终 BrowserContext/CDP 清理都必须等待该保护期，禁止直接 `page.close()` 或绕过 crawler 的
-  安全关闭入口。浏览器启动时保留的首个主页面可以豁免；启动时已经存在的额外页仍必须保护。
-  其他路径明确识别出的登录、扫码或验证码页继续按本节既有规则最多等待 600 秒，不能用 30 秒
-  最低保护期替代人工验证等待。独立登录工具不在此 BrowserContext 守卫范围内。
-- `xhs_guarded` 在真实关键词页检查可见阻断；长停留期间每 5 秒复查一次可见页面。行为开始前
-  发现登录要求时按启动失败留证，由同一账号执行 `xhs_login.py` 后开始新轮次；行为开始后，
-  搜索批次间的连续性检查发现可见登录要求或图片验证时，保持当前标签页并置前，最多等待人工
-  处理 600 秒。频控或封禁始终立即留证并停止。行为开始前必须确认登录 UI 已就绪、关键词页
-  存在搜索卡片和作者链接；未就绪期间只等待，不在登录页面执行模拟行为。
-- 页面正文出现“安全限制”“账号异常”“Account exception, please retry later”或错误码 `300011`，
-  或 URL 进入 `/website-login/error` 时，属于平台账号安全限制而不是可人工完成的验证码。必须立即
-  写入 `platform_security_limit` 可见标记和运行失败证据，停止本轮，不等待操作人、不推进 checkpoint、
-  不入库或晋升媒体；下一轮只能从最后耐久 checkpoint 保守恢复。
-- 前置行为执行少量鼠标移动和低次数桌面滚轮，不使用触摸行为，不扫描隐藏 HTML 关键词。
-  滚轮调用后必须观测到窗口或实际滚动容器位置变化；只有调用事件但页面没有位移时，行为
-  证据无效。
-- 运行时指纹不仅保存，还必须通过门禁：`navigator.webdriver` 不得暴露，语言、平台、UA、
-  可见状态和 viewport 必须完整。XHS API 请求头从当前 Chromium 会话生成，UA 与 UA Client
-  Hints 主版本不一致时立即失败，禁止使用固定旧版本请求头。
-- MediaCrawler 搜索并发固定为 1。搜索结果、笔记详情、作者主页和翻页分别执行随机等待，实际
-  秒数写入 `behavior_evidence.request_pacing_events`。
-- 每批搜索结果和翻页等待后继续执行短停留与鼠标移动，并写入
-  `behavior_evidence.continuity_events`；不能只在抓取开始前执行一次页面行为。
-- 搜索连续性阶段等待人工验证时立即写入
-  `behavior_evidence.operator_verification_events`，状态依次为 `waiting_for_operator` 与
-  `completed` 或 `failed`；验证标记消失后才恢复抓取。等待过程不自动点击、识别或绕过验证，
-  600 秒超时则本轮失败且不入库。
-- 搜索 API 返回 461/471 和 `Verifyuuid`、`Verifytype` 时，不得让 MediaCrawler 直接退出；使用
-  同一 BrowserContext 打开 `/website-login/captcha` 人工验证页并置前，等待规则和证据字段同上。
-  操作人完成验证并回到原关键词页后刷新客户端 Cookie，再重试原请求；不得调用验证码识别或
-  自动生成滑动轨迹。
-- 搜索页、帖子互动和作者主页浏览器导航使用绝对 deadline。导航事件超时但关键词 URL 已提交
-  时交给可见页面就绪门禁判断；URL 未提交或页面调用超过 deadline 时按运行失败停止。
-- 作者粉丝补全先请求当前登录会话的无 token 作者主页。空结果时随机等待，再用同一已登录
-  BrowserContext 打开无 token 作者页并解析。
-- 笔记 `xsec_token` 只属于笔记访问上下文，不能当作作者主页凭据。
-- 作者主页浏览器回退出现二维码安全验证时保持该标签页并置前，暂停最多 600 秒供操作人扫码；
-  可见验证检查必须先于页面滚动和内嵌状态解析，即使底层 HTML 已包含作者数据也不能提前关闭；
-  标记消失且作者数据可读后才关闭页面并继续。等待超时、限流或封禁标记仍抛出运行错误，不能
-  静默保存为缺粉丝候选。
-- 成功作者结果按作者 ID 缓存；缓存只减少本轮重复请求，不替代当前轮的来源和观测证据。
-- 首轮自适应搜索为关键词生成一个 `search_id` 并递增 `page`。后续正式轮先用新 `search_id`
-  刷新最多 `top_refresh_max_pages` 个顶部页面，再用 checkpoint 保存的 `page + search_id` 恢复
-  深层前沿；深层来源已耗尽时只刷新顶部。
-- 实际候选量从 0 开始按页增长，只有完成详情前去重的未知候选才占预算。默认
-  `target-new-posts` 模式达到 `target_new_posts` 后立即停止，不会为了 `candidate_hard_limit` 继续抓满；
-  候选硬上限、停滞批次、顶部刷新和超时共同构成单次运行的安全边界。显式
-  `source-exhausted` 模式只对当前进程生效，忽略数量和停滞停止条件，直到平台给出来源耗尽证据或
-  发生运行阻断。永久提高正式目标时必须同步核对这些配置以及
-  `lease_seconds >= timeout_seconds + 300`，但不得清空原账号的 checkpoint 或候选记忆。
-- 搜索卡片 ID 在笔记详情、作者粉丝和媒体处理前与数据库、账号级已处理候选、累计摘要及本轮
-  已见集合去重；已知 ID 不占 `candidate_hard_limit`。视频或已由决定性详情证据证明的字段无效候选也在 child 摘要形成后
-  写入 `xhs_discovery_seen_candidates`，不靠内容入库才能获得记忆。完整处理一页才保存下一页，
-  候选预算在页中耗尽时保存当前页，下轮重取边界页并靠 ID 去重，避免跳过未处理卡片。
-- 正式图文必须来自笔记详情的非空 `desc`，并保存
-  `content_detail_status=detail_observed` 与 `content_detail_source=note_detail`。标题或搜索卡片
-  摘要不能单独通过。详情 API 与 HTML 回退都为空、请求失败或解析失败时，完成适用有限重试后
-  记录 `candidate_skipped`，该 ID 写入 `xhs_discovery_seen_candidates`，完整批次继续；安全限制、
-  登录、验证码、账号/IP 阻断或频控仍保留当前 `page + search_id` 且不写 seen。
-- 每批记录真实页码、`search_id`、可恢复页码、批次完整性、发现阶段、原始返回数、`has_more`、
-  候选数、有效新增数和停止原因。顶部刷新事件不能覆盖深层 checkpoint，也不累计深层停滞。
-- 连续停滞按“该批没有新增有效记录”累计；出现新的无效候选不能重置停滞计数。
+### 标签页与人工验证
 
-## 6. 完成判据
+- 正式 BrowserContext 守卫安装后出现的任何新标签页都立即置前，并从出现起至少保留 30 秒；平台
+  弹页、作者主页回退、互动和验证辅助页一视同仁。正常返回、异常、Playwright 退出和最终清理都
+  不得绕过。首个主页面可豁免，启动时已有的额外页仍受保护。
+- 明确登录、扫码或验证码页继续执行最长 600 秒人工等待，30 秒保护期不能缩短它。
+- 搜索连续性出现登录要求或图片验证时，保持当前页并写
+  `operator_verification_events`；完成后刷新会话并继续，超时失败。
+- 搜索 API 461/471 使用响应 `Verifyuuid`、`Verifytype` 在同一 BrowserContext 打开平台人工验证页；
+  通过后刷新 Cookie 并重试原请求。
+- 搜索 API 明确登录过期时暂停原请求，保留全部标签页并置前最新 XHS 页；可见登录 UI 与 self-info
+  API 都恢复后刷新 Cookie/storage state，并重试同一来源页。
+- “安全限制”、账号异常、`300011/300012`、`/website-login/error`、频控或封禁属于运行级阻断，
+  立即停止，不能进入人工验证码等待或候选跳过。
 
-所有模式都先满足以下共同条件：
+### 行为、作者与发现
 
-- 顶层 `run_summary.json` 状态为 `completed`，且账号租约已经释放；
-- 冻结状态的五个阶段全部为 `completed`，`persistence_verified` 不得因 `--no-import` 跳过；
-- child summary 中 `behavior_validation.ok=true`；
-- 顶层摘要 `discovery.skipped=false` 且没有 checkpoint 写入错误；
-- `behavior_validation.platforms.xhs.continuity_ok=true`，且至少覆盖 `search_results`；
-- `formal_validation.behavior_evidence_ok=true`、`policy_evidence_ok=true`；
-- 顶层计划与摘要 `local_image_storage_required=true`，child
-  `image_materialization.complete=true`；`artifacts_verified` 已核对 manifest，
-  `persistence_verified` 已核对 SQLite 与 `data/media` 文件；
-- `valid_existing_count` 和 `updated_rows` 只单独报告，没有计入新增目标；
-- 每条入库图文都有平台原始发布时间、作者 ID/昵称、完整图片关系，以及
-  `followers_count`、`followers_observed=true`、`author_followers_source=creator_profile`，以及
-  `content_detail_status=detail_observed`、`content_detail_source=note_detail` 和非空详情 `desc`；
-- 视频只出现在跳过计数中；帖子互动结果单独报告，不冒充抓取成功。
+- `xhs_guarded` 只在真实关键词页执行；使用少量桌面滚轮并验证实际位移，不扫描隐藏 HTML 文本。
+- 运行指纹必须完整，`navigator.webdriver` 不得暴露，Chromium UA 与 API Client Hints 主版本一致。
+- 搜索并发为 1；搜索、详情、作者主页、翻页分别随机等待并写 `request_pacing_events`，批次间继续写
+  `continuity_events`。
+- 作者补全先用登录会话的无 token 请求；空结果后随机等待，再用同一 BrowserContext 打开无 token
+  作者页。二维码验证先等待操作人，不能因为 HTML 已有作者数据而提前关闭。
+- 成功作者结果只在本轮按作者 ID 缓存，不替代来源证据。
+- 有 checkpoint 时用新 search ID 刷新顶部，再用保存的 `page + search_id` 恢复深层；顶部刷新不
+  覆盖深层位置。深层耗尽后只刷新顶部。
+- 未知笔记 ID 才占候选预算；数据库、账号 seen、累计摘要和本轮已见 ID 在详情前过滤。完整页保存
+  下一页，页中途停止保存当前页。
+- 默认模式达到有效新增目标立即停止；候选上限不是预定抓取量。连续停滞按“本批没有有效新增”累计。
 
-完成门禁再按本轮模式二选一：
+## 6. 完成检查
 
-- 默认 `target-new-posts`：`formal_validation.new_target_met=true`、
-  `valid_new_count >= target_new_posts`、`import_result.inserted_rows >= target_new_posts` 且
-  `import_new_target_met=true`。
-- 显式 `source-exhausted`：`formal_validation.source_exhausted_met=true`，停止原因为
-  `source_exhausted`，并完成真实入库；新增数可以低于配置目标甚至为 0，此时
-  `new_target_met` / `import_new_target_met` 不作为门禁。
+先按[正式契约](../formal-crawl-contract.md)核对五阶段、完成模式、行为/策略、图片和真实新增。小红书
+还必须确认：
 
-检查顺序固定为：
+- 顶层 `run_summary.json` 为 `completed`，账号租约已经释放；
+- `discovery.skipped=false`，checkpoint/seen/campaign 没有提交错误；
+- `continuity_ok=true` 且至少覆盖 `search_results`；
+- 每条记录具有 note detail 正文、原始发布时间、作者 ID/昵称、creator profile 粉丝证据和完整
+  本地正文图片；
+- 视频和互动只在各自报告中，不计抓取成功；
+- `--no-import`、`sqlite_import_failed` 或持久化阶段 skipped 均不能完成正式轮次。
 
-1. `data/runtime/xhs/runs/<run_id>/run_summary.json`；
-2. `data/runtime/xhs/execution_states/<run_id>/<target_key>.json`；
-3. 顶层摘要指向的 child `summary.json`；
-4. SQLite 新增行数、粉丝字段、发布时间和图片关系计数；
-5. 必要时才看标准输出/错误尾部，不全文展开日志或 JSONL。
+读取顺序：
+
+1. `data/runtime/xhs/runs/<run_id>/run_summary.json`
+2. `data/runtime/xhs/execution_states/<run_id>/<target_key>.json`
+3. 顶层摘要指向的 child `summary.json`
+4. SQLite 新增、字段和图片关系
+5. 必要时日志最后 40 行
 
 ## 7. 失败分流
 
-| 信号 | 本轮结论 | 下一步 |
-|---|---|---|
-| 启动前 `login_required` | 失败，不入库 | 对同一账号运行 `xhs_login.py` 人工复验；复验成功后开始新轮次 |
-| 搜索连续性登录/图片验证 | 暂停当前搜索批次 | 保持当前页置前，等待操作人处理；通过后继续，600 秒超时则失败且不入库 |
-| 搜索 API 返回登录已过期 | 暂停原请求 | 解开重试器包装后的内层错误，刷新当前可见页但不关闭任何标签页，置前最新的小红书页并等待人工恢复；可见登录 UI 与 self-info API 均恢复后刷新 Cookie/storage state 并重试同一来源页，600 秒超时才写 `login_required`，checkpoint 不推进 |
-| 搜索 API 461/471 验证 | 暂停原 API 请求 | 用响应的 `Verifyuuid`、`Verifytype` 打开平台人工验证页；通过后刷新 Cookie 并重试原请求 |
-| 帖子详情、作者字段或正文图最终失败 | 记录并跳过该帖 | 从 `candidate_skipped`、`skipped_candidate_failures` 和图片 manifest 定位原因；失败 ID 写 seen，checkpoint 按完整批次推进，该帖不入内容库、不计有效结果，继续后续候选 |
-| manifest 身份、格式、哈希或路径错误 | 失败，不入库 | 停止晋升和 checkpoint；修复代码/产物链路后重跑，禁止删行或只保留 URL |
-| 作者页二维码安全验证 | 暂停当前作者补全 | 保持验证页置前，等待操作人扫码；通过后继续，600 秒超时则失败且不入库 |
-| 守卫安装后出现任意新标签页 | 进入无条件保护期 | 无论平台弹出还是 crawler 受控创建，均立即置前并从出现时起至少保留 30 秒；滚动无位移、所有代码关闭和浏览器退出都必须等待，不能因未识别出验证标记而立即关闭 |
-| 频控、拒绝访问、环境异常、`安全限制/300011` | 失败，不入库 | 保留可见文本、URL、页面实际提供的错误码和截图并立即停止请求；由操作人决定隔离、等待或下一轮切号，平台安全限制不得进入人工验证码等待 |
-| `browser_launch_failed` / `runtime_permission_error` | 运行环境失败 | 按运行手册修复 Chrome、HOME、Crashpad 或权限，再重新 dry-run |
-| `browser_target_closed` | 页面、context 或浏览器在启动成功后关闭 | 核对是否人工关闭或浏览器崩溃，不自动重试 |
-| 缺粉丝数值、来源或观测标记 | 字段补全失败 | 检查作者补全是否启用、是否逐条调用、无 token 请求和浏览器回退；禁止放宽 profile |
-| `candidate_hard_limit_reached` | 默认数量模式未达到正式目标 | 本轮失败但保留累计摘要和安全前沿；下轮同账号自动续跑，必要时再调整单轮候选预算 |
-| `stagnated` | 默认数量模式连续批次无新增有效记录 | 检查无效原因和分页证据；不能把新无效候选解释为进展 |
-| `source_exhausted` | 默认数量模式未达目标；显式来源耗尽模式可完成 | 只有深层阶段空响应或 `has_more=false` 且 `source_exhausted_met=true` 才接受；checkpoint 保留，下一轮只刷新顶部 |
-| 超时或缺少停止事件 | `runtime_failed` | 读取 child summary 和日志尾部；不能推断为来源耗尽 |
-| 保存的 `search_id` 恢复请求失败 | `runtime_failed` | checkpoint 保持原位置；保留失败证据，不自动换新 ID 猜测深页，不删除 checkpoint |
-| checkpoint 累计摘要或 JSONL 缺失 | 冻结前失败 | 从原运行产物恢复文件或停止；不得清空路径后继续 |
-| 互动控件失败且无阻断 | 互动失败、抓取可继续 | 只报告 `post_interaction.ok=false`，仍按正式字段和入库判据决定结果 |
+| 信号 | 处理 |
+|---|---|
+| 启动前 `login_required` | 对同一账号运行 `xhs_login.py`，成功后开始新轮 |
+| 连续性登录/图片验证、461/471 | 保持页面、人工处理、刷新会话并重试原请求；600 秒超时失败 |
+| 作者页二维码 | 保持作者页置前，人工扫码后继续；超时失败 |
+| 任意新标签页 | 立即置前且至少保留 30 秒；明确验证页继续最长 600 秒 |
+| 详情、作者或正文图候选级失败 | 核对 `candidate_skipped` 和 manifest；整帖不入库，ID 写账号 seen，继续候选 |
+| 登录、频控、安全限制、封禁 | 运行级失败；保留 page/search ID，不写候选 seen |
+| manifest 身份、哈希或路径错误 | 停止晋升和 checkpoint，修复代码/产物后重跑 |
+| `candidate_hard_limit_reached` / `stagnated` | 默认数量模式未完成；保留累计摘要和安全前沿 |
+| `source_exhausted` | 默认数量模式未达标时仍未完成；显式耗尽模式按正式契约判断 |
+| 超时或缺少停止事件 | `runtime_failed`，不能推断来源耗尽 |
+| 保存的 search ID 恢复失败 | 保留 checkpoint，不生成新 ID 猜测深页 |
+| 累计摘要或 JSONL 缺失 | 冻结前失败；恢复原文件或停止，不清空路径继续 |
+| `sqlite_import_failed` | 不提交 checkpoint、seen 或 campaign；核对数据库和媒体回滚 |
 
-小红书不向操作人开放手工 `--resume-summary`、`--start-page` 或 `--start-cursor`；正常续跑全部由
-`xhs_runner.py` 从 SQLite 生成。候选级失败记录后跳过并写 seen；失败帖本身不入库、不计有效结果，
-其他完整帖继续参与既定完成条件。默认数量模式继续达到完整 `target_new_posts`；显式来源耗尽模式仍
-必须取得真实耗尽证据，但不因已记录跳过候选而回卷。
-`candidate_hard_limit` 是正常模式每次 child 的未知候选预算，不从历史累计数扣减。
-`--no-import` 不写 checkpoint，也不能作为正式完成证据。
-child 摘要为 `import_result.reason=sqlite_import_failed` 时与 `--no-import` 一样不提交 discovery；
-runner 调用前和 `commit_child_discovery()` 内部都执行该门禁；这里的导入失败属于运行级失败，不按
-候选跳过。
+小红书不向操作人开放手工 `--resume-summary`、`--start-page` 或 `--start-cursor`。checkpoint/seen 以
+`target_key + account_id + query_fingerprint` 隔离；换号不是原账号续跑。SQLite
+`resume_search_id`、dry-run `plan.discovery.resume_search_id`、child `--start-cursor` 和分页事件
+cursor 表示同一个 client search ID。
 
-若 `target_new_met` 在页面中途触发并成功入库，checkpoint 仍保留当前 page/search ID，
-`last_batch_complete=false`；来源未耗尽时 `status=active`。成功入库会清空
-`last_summary_path` 并把 `campaign_candidate_count` 重置为 0，但不会删除前沿或已处理候选。
-
-checkpoint 与已处理候选集合均以 `target_key + account_id + query_fingerprint` 定位。更换账号会
-开始该账号自己的发现记忆，不共享尚未入库的累计摘要或已处理集合，也不能解释为原账号轮次的
-续跑；已经进入 `web_posts` 的 ID 仍会在所有账号的详情请求前跳过。平台若不接受跨进程复用旧
-`search_id`，该轮按 `runtime_failed` 停止且不推进位置，不设计猜页、静默换游标或从第一页大量
-重抓的降级路径。
-
-字段和命令映射固定为：SQLite `resume_search_id`、dry-run
-`plan.discovery.resume_search_id`、child `--start-cursor` 及分页事件
-`source_cursor/resume_cursor` 都表示同一个 client search ID。操作人只检查映射，不手工传参。
+页面中途 `target_new_met` 且入库成功时，checkpoint 保留当前 page/search ID，
+`last_batch_complete=false`、来源未耗尽时 `status=active`；清空累计摘要但不删除前沿或 seen。
 
 ## 8. 账号与状态存储
 
-- 每个账号固定使用权限 `0700` 的 `data/xhs_accounts/<account_id>/profile/`，不同账号禁止共享。
-- profile 是 Chrome 持久目录，不宣称整个目录经过应用层加密。
-- Cookie、localStorage 和运行时 storage state 使用 AES-GCM 保存为 `storage_state.enc`。
-- 密钥优先读取 `TRIPPOSTCOLLECT_XHS_SNAPSHOT_KEY`，默认使用 macOS Keychain 服务
+- 每个账号使用权限 `0700` 的 `data/xhs_accounts/<account_id>/profile/`，不同账号不得共享。
+- profile 是持久 Chrome 目录，不宣称整个目录应用层加密。
+- Cookie、localStorage 和运行时 storage state 以 AES-GCM 保存为 `storage_state.enc`。
+- 密钥优先读取 `TRIPPOSTCOLLECT_XHS_SNAPSHOT_KEY`，否则使用 macOS Keychain 服务
   `TripPostCollect.XHS`。
-- 运行时明文只存在于 `data/runtime/xhs/sessions/<run_id>/`，退出时必须删除。
-- SQLite 租约只阻止同一账号并发使用，不实施日预算、最短间隔、自动冷却、健康分或全池熔断。
-- 除确认登录失效可将账号置为 `login_required` 外，Runner 不自动改变账号状态；`quarantine`、
-  `activate`、`retire` 和账号切换都由操作人明确执行。
+- 运行时明文只存在于 `data/runtime/xhs/sessions/<run_id>/`，退出必须删除。
+- SQLite 租约只防同账号并发；账号切换、quarantine、activate 和 retire 均由操作人决定。

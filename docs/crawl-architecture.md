@@ -2,212 +2,135 @@
 
 > **受限冻结：** 本文件属于治理基线；普通抓取、排障或顺手同步不得修改，只有用户明确授权治理变更，并同步核验对应代码、测试与关联文档时才允许更新。
 
-## 组件关系
+本文只描述组件边界和数据流。完成谓词、错误分类和候选记忆语义见
+[正式抓取执行契约](formal-crawl-contract.md)，操作步骤见[运行手册](operations-runbook.md)，表结构、
+媒体事务和校验见[数据持久化](data-persistence.md)。
+
+## 入口与组件
 
 ```text
 config/crawl_targets.json
   -> scripts/crawl_runner.py
-      -> SQLite crawl_discovery_checkpoints
-      -> SQLite crawl_discovery_seen_candidates
-      -> SQLite crawl_discovery_candidate_exclusions
+      -> 通用 SQLite checkpoint / seen / exclusion
       -> data/runtime/crawl_execution_states/<run_id>/<job>.json
       -> scripts/mediacrawler_crawl.py
           -> scripts/crawl_policy.py
           -> scripts/mediacrawler_behavior.py
-          -> tools/MediaCrawler
-              -> platform session image download
-              -> <artifact>/<platform>/image_manifest.jsonl + staging files
-          -> formal_validation
-          -> explicit content-image projection + manifest/byte verification
-          -> data/media/<platform>/<post>/<index>-<asset_hash>.<ext>
-          -> web_posts / web_post_images (same SQLite transaction)
-      -> scripts/ctf_resource_crawl.py
-          -> ctf_captures / ctf_capture_images
-          -> scripts/import_ctf_captures.py
-          -> web_posts / web_post_images
+          -> tools/MediaCrawler 或项目自有 B站 article 分支
+          -> JSONL + image_manifest.jsonl + staging 图片
+          -> 根项目字段、manifest 和字节复验
+          -> data/media + SQLite 批次事务
+
 config/xhs_pool.json + config/xhs_targets.json
   -> scripts/xhs_runner.py
-      -> explicit --account-id
-      -> SQLite xhs_accounts / xhs_account_leases / xhs_account_events / xhs_runs
-      -> SQLite xhs_discovery_checkpoints / xhs_discovery_seen_candidates
+      -> 明确 --account-id、账号租约和加密 storage state
+      -> 独立 XHS checkpoint / seen / campaign
       -> data/runtime/xhs/execution_states/<run_id>/<target>.json
-      -> decrypt account storage state into an ephemeral runtime file
       -> scripts/mediacrawler_crawl.py --platforms xhs --behavior-profile xhs_guarded
-          -> tools/MediaCrawler top refresh + page/search ID frontier
-          -> known-ID pre-detail filtering
-          -> signed-in no-token creator request
-          -> signed-in BrowserContext creator fallback
-          -> signed-in body-image download + staging manifest
-          -> formal_validation
-          -> root verification + data/media promotion
-          -> web_posts / web_post_images (same SQLite transaction)
-      -> encrypt refreshed storage state and remove runtime plaintext
+      -> 与通用平台相同的根项目复验、媒体晋升和 SQLite 入库层
 ```
 
-`crawl_runner.py` 是通用平台正式入口；`xhs_runner.py` 是小红书唯一正式入口。两者负责
-选择任务、冻结计划、执行逐步门禁和生成报告，执行器不能绕过状态文件宣布完成。
+`crawl_runner.py` 是 B站、微博、抖音和知乎的唯一正式入口；`xhs_runner.py` 是小红书唯一正式入口。
+runner 负责选择任务、冻结计划、调用 child、验证产物、持久化和生成报告。child 只负责平台会话、
+发现、字段补全与 staging，不能独立宣布正式任务完成。
 
-青岛主题范围由操作人或 Agent 在计划冻结时核对，不在通用配置同步、小红书 target 读取、恢复
-参数、结构化诊断或页面证据导入中设置关键词硬门禁。数据库不增加城市列，正文内容也不参与
-城市启发式判定。
+青岛主题由操作人在配置和执行前确认。配置解析、抓取、导入和数据库不按关键词或正文地名增加
+城市硬门禁，也不恢复 `web_posts.city_name`。
 
-结构化平台进入搜索前统一经过两层强制门禁：父执行器用 `crawl_policy.py` 维护平台会话
-间隔、随机抖动、预算和冷却；MediaCrawler 使用已经完成登录确认的当前浏览器页调用
-`mediacrawler_behavior.py`，执行随机停留、鼠标和滚动并写出证据。B站 article 是项目的
-自定义 API 搜索，因此先在同一持久 profile 完成行为会话并导出该会话 cookie，再执行原
-article API；微博、抖音和知乎在各自 MediaCrawler 浏览器内执行 `social_high_risk`；
-小红书在独立账号 profile 内执行更慢的 `xhs_guarded`，并在交互前后检查可见挑战。
+## 正式生命周期
 
-行为阶段只包围现有抓取逻辑，不修改分页、候选累计、粉丝补全、视频过滤或入库映射。
-行为和策略证据任何一项缺失时，JSONL 可以保留用于诊断，但不得进入 SQLite。
+通用平台和小红书共用下面的逻辑阶段：
 
-## 正文图片本地化数据流
+```text
+冻结配置与计划
+  -> 登录、请求策略与行为证据
+  -> 搜索/顶部刷新/深层发现
+  -> 已知 ID 前置过滤
+  -> 详情、作者和权威正文图补全
+  -> child JSONL、分页事件、manifest 与 staging
+  -> 根项目正式字段和本地图片只读复验
+  -> 完成模式与运行状态门禁
+  -> 长期媒体晋升
+  -> SQLite 整批事务
+  -> checkpoint / seen / campaign 提交
+  -> 最终报告
+```
 
-五个平台共用一条由平台会话到根项目的单向链路：
+行为或策略证据缺失、平台运行失败、字段失败、图片集合不完整、入库失败都会阻断后续阶段。具体
+优先级和 `candidate_skipped`、`runtime_failed` 等稳定语义只由正式契约定义。
+
+## 正文图片数据流
 
 ```text
 平台详情/正文结构
-  -> 平台显式 ImageCandidate（只允许 role=content）
-  -> 知乎仅按 zhimg 资源路径归一已知尺寸后缀并保留首次 URL（不做视觉识别）
-  -> 使用当前登录/签名会话下载到本轮 staging
-  -> 原子写 image_manifest.jsonl（URL + 稳定资产键 + SHA/MIME/尺寸）
-  -> 根项目重建同一候选集合并逐项核对 manifest 身份
-  -> 根项目重新读取并解码文件，验证路径边界、SHA、MIME、后缀、尺寸
-  -> 同帖按验证后的 SHA-256 保留首次来源，重复来源保留 manifest/别名证据，保留项连续重编号
-  -> 正式模式以内容寻址文件名原子晋升 data/media；已存在同路径同 SHA 文件幂等复用
-  -> MaterializedImage 注入统一入库映射
-  -> web_posts 与 web_post_images 在同一 SQLite savepoint 中提交
+  -> 显式 ImageCandidate(role=content)
+  -> 当前登录/签名会话下载到本轮 staging
+  -> 原子追加 image_manifest.jsonl
+  -> 根项目按同一投影核对身份和数量
+  -> 验证路径、SHA-256、MIME、后缀、尺寸与解码
+  -> 同帖按已验证 SHA-256 保留首次来源并连续重编号
+  -> 原子晋升 data/media/<platform>/<post>/...
+  -> web_posts 与 web_post_images 在同一批次事务提交
 ```
 
-显式投影边界分别是 B站详情 `image_urls`、微博 `image_list`、XHS `image_list`、抖音
-`note_download_url` 和知乎 `image_list`。头像、作者主页、搜索预览、封面、视频、音乐和知乎公式
-图片没有从平台对象进入正文候选的边；这项过滤发生在下载前，不依赖下载后文件名或尺寸猜测。
-知乎在同一候选边界额外按 `zhimg.com` 资源路径归一 `_r`、`_<width>w` 等已知变换后缀，避免同一
-平台资源的尺寸 URL 变体重复下载；规则不扩展到外部域名，也不引入感知哈希或视觉相似判断。
-作者头像可以在统一入库层保留为 `author_avatar` URL 参考，但它没有通向下载、manifest 或
-`data/media` 的边，也不参与正文图计数。
-各平台 store 只负责当前会话下载、staging 和 manifest，不拥有长期路径或 SQLite schema；根项目
-统一拥有安全复验、同帖 SHA-256 去重、晋升与事务持久化，因此没有五套互不一致的本地路径实现。
-这里的去重是字节级且仅限同帖：视觉相同但不同编码/分辨率的文件哈希不同则分别保留；跨帖子即使
-哈希相同也各自保留图片关系和帖子目录证据。
+平台 store 只拥有当前会话下载、staging 和 manifest；根项目拥有路径安全、字节复验、同帖去重、
+长期文件和 SQLite。头像、作者主页、搜索预览、封面、视频、音乐及知乎公式图在显式字段投影阶段
+就没有进入正文图片链路。作者头像可作为 URL 参考保存，但不下载、不进入正文图计数。
 
-正式 runner 固定向 child 传 `--download-images --media-root <data/media>`，冻结计划写
-`local_image_storage_required=true`。诊断执行器可把媒体根限制到项目 `temp/`，但
-`--no-import` 不执行晋升。`--get-media` 被拒绝，MediaCrawler 的视频 store、音乐和视频下载路径
-不会因正文图片功能变得可达。
+正式 runner 固定启用 `--download-images`。`--no-import` 诊断只做到 staging 和只读复验，不晋升
+长期文件或写 SQLite；视频 store 与旧 `--get-media` 路径不可达。图片格式、事务等式和失败恢复见
+[数据持久化](data-persistence.md)。
 
-`crawl_policy.py` 的 `session_count` 表示连续活跃会话，不是永久累计值：跨 UTC 日或距最后一次
-请求完成已达到站点 `cooldown_minutes` 时开始新会话并清零。`max_requests_per_session` 产生的
-自动冷却遵循同一空闲重置规则；验证码、频控、封禁等显式冷却仍保持到 `cooldown_until`，
-不能被空闲或会话计数重置绕过。
+## 状态与发现记忆
 
-Runner、执行器和登录/诊断输出的 UTC 运行标识统一包含六位微秒
-（`YYYYMMDDTHHMMSSffffff+0000`），避免同一秒并发子会话共享输出目录或状态目录。
+每个任务的冻结状态固定包含五个业务阶段：
 
-## 冻结状态
+1. `plan_frozen`
+2. `command_executed`
+3. `artifacts_verified`
+4. `persistence_verified`
+5. `task_finalized`
 
-调度器为每个任务冻结配置、执行契约、任务参数和命令。业务阶段固定为计划、命令、
-产物、持久化和最终确认。每次进入下一阶段都重新读取磁盘状态并校验 SHA-256；失败
-后的阶段保持冻结。
+runner 在进入下一阶段前重新读取状态并校验冻结输入。dry-run 只完成第一阶段；正式运行必须在前一
+阶段完成后才能推进，失败后的阶段保持 `frozen`。
 
-MediaCrawler 的自适应分页会向同一状态文件追加批次事件，包括实际候选、有效唯一数、
-本批新增、连续停滞次数、平台页码、游标/search ID、下一恢复位置、批次完整性、发现阶段、
-原始返回条数和 `has_more`。循环按
-实际候选累计，不按名义页大小预先换算最大页数。空页、明确缺失继续 cursor 或 `has_more=false` 才能生成
-`source_exhausted`；请求异常生成 `runtime_failed`；缺少停止事件时执行器不得猜测数据源
-已经耗尽。抖音旧 cursor 耗尽后，只有顶部刷新同时发现持久记忆中不存在的新候选 ID、
-`has_more=true` 和非空连续 cursor 才建立新
-前沿，并记录 reseed 事件。抖音、知乎和小红书按本批没有新增有效且数据库中不存在的记录计算
-连续停滞；微博按是否出现不在数据库、累计摘要、`crawl_discovery_seen_candidates` 和本 child 已见集合中的新微博 ID 计算，避免综合搜索连续出现纯文本/视频时
-过早停止。状态事件会写 `stagnation_basis`；最终成功仍以正式校验和数据库验证为准。
+通用控制面使用：
 
-候选硬上限只限制单次 child 可进入昂贵处理的未知候选，不是预先抓满的页数或记录数。小红书
-从 0 开始按页增加实际候选，先做数据库、账号级候选记忆、累计摘要和本轮集合去重，达到有效
-新增目标后立即停止；提高目标只改变运行预算，不创建新查询指纹，也不重置已有前沿。这是正常
-默认的 `target-new-posts` 模式。用户针对单轮显式指定 `source-exhausted` 时，执行器临时忽略新增
-目标、候选硬上限和停滞停止条件，直到可验证来源耗尽或运行阻断；该模式不写回配置。
+- `crawl_discovery_checkpoints` 保存 job 与查询指纹作用域内的安全深层前沿；
+- `crawl_discovery_seen_candidates` 保存已有决定性处理结果的候选 ID；
+- `crawl_discovery_candidate_exclusions` 保存操作人明确授权的精确排除。
 
-通用结构化任务的发现位置保存在 `crawl_discovery_checkpoints`，唯一键是任务 ID 与查询指纹。
-runner 启动 child 前读取 checkpoint，自动冻结上一份累计摘要并传入页码；抖音额外传入 offset
-和 opaque search ID。child 先做有限顶部刷新，再走深层前沿；顶部刷新不覆盖 checkpoint。
-执行器完成摘要构造后，在同一事务提交下一恢复位置和本轮已处理候选 ID，runner 再把本次摘要
-路径写回 checkpoint。这个提交顺序保证游标和候选记忆不会先于可累计产物前移。默认模式达到完整
-入库目标，或显式来源耗尽模式取得完整耗尽证据并入库后，只清空累计摘要，不删除发现位置或候选记忆。通用控制面用
-`crawl_discovery_seen_candidates` 保存视频、已有决定性权威证据的字段无效项、有效候选，以及详情、
-作者或正文图在适用重试结束后仍失败的跳过候选，跨轮在详情、作者与媒体处理前跳过。候选级失败写
-`candidate_skipped` 并进入 seen；搜索请求、登录、验证、安全限制、频控或浏览器整体故障仍记录
-`runtime_failed` 并保留安全前沿。
-操作人对跨轮持续失败的精确候选明确授权跳过时，独立写入
-`crawl_discovery_candidate_exclusions`，记录 job、查询指纹、候选 ID、原因、证据和授权 run。
-通用 child 在昂贵处理前把排除 ID 与 seen ID 合并为已知集合，但排除不写内容、不计成功，也不
-自动推进 checkpoint。普通重试耗尽不生成排除表记录，而是使用 `candidate_skipped`；下一轮仍须扫描到
-真实末页才能报告来源耗尽。
+小红书使用独立的 `xhs_discovery_checkpoints` 和 `xhs_discovery_seen_candidates`，并额外按人工选择的
+账号隔离。两套控制面都在 child 摘要与批次证据形成后才提交；媒体或 SQLite 失败不得提前推进。
 
-正文图片失败分为两支：空响应、超时或临时请求错误在单图有限重试耗尽后生成
-`image_download_retryable`；格式、解码、大小或 HTTP 400/404 等候选自身终态错误保留具体错误码且不做
-无意义重试。两类都先原子追加失败 manifest，再写 `candidate_skipped(failure_scope=image)`，把该 ID
-写入已处理候选并继续后续候选。失败帖不进入正式 JSONL 或内容 SQLite；停止摘要汇总
-`skipped_candidate_failures`，checkpoint 按最后完整批次推进。默认数量模式只计算有效候选；显式来源
-耗尽模式可在跳过候选后继续到真实末页并生成 `source_exhausted` 证据。即使预算超时使 child 没来得及
-写最终停止事件，根执行器也从既有 `candidate_skipped` 事件重建审计集合；摘要保持运行不完整，
-checkpoint 不越过未完成尾批，但不因已记录跳过候选回卷。
-HTTP 401/403、429 与平台登录、验证码、安全限制、账号/IP 封禁或频控码属于运行级阻断，必须保留
-当前安全前沿且不写 `candidate_skipped` 或 seen。
+存在 checkpoint 时先有限刷新顶部，再从深层前沿继续。顶部刷新不推进深层位置；边界页允许重取，
+已知 ID 在详情、作者和媒体请求前过滤。平台 cursor 组成和重新建链规则只写在对应平台文档。
 
-小红书独立 runner 不读写通用 checkpoint 表，而是在 `xhs_discovery_checkpoints` 中按目标、账号和
-查询指纹保存 `page + search_id`，在 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID。
-它在冻结时同时纳入累计摘要及其 JSONL，child 摘要形成后才由 `xhs_runner.py` 在同一事务提交
-安全前沿、候选 ID 和活动摘要。顶部刷新使用新 search ID 且不覆盖深层位置；深层续跑复用保存
-的 search ID，详情请求前跳过数据库、已处理候选、累计摘要和本轮已见 ID。换号产生独立活动，
-不共享尚未入库的摘要或候选集合。
+## 平台拓扑
 
-## 结构化平台
+| 平台 | 平台层入口 | 独有组件 | 文档 |
+|---|---|---|---|
+| B站 article | 项目自有 article 搜索/详情分支 | article API、详情正文门禁 | [B站](platforms/bilibili.md) |
+| 微博 | MediaCrawler 搜索 | 移动端登录与长文详情 | [微博](platforms/weibo.md) |
+| 抖音 | MediaCrawler 搜索 | 浏览器响应监听、offset/search ID | [抖音](platforms/douyin.md) |
+| 知乎 | MediaCrawler 搜索 | answer/article 详情、zhimg 资产键 | [知乎](platforms/zhihu.md) |
+| 小红书 | 独立 runner + MediaCrawler | 账号租约、加密状态、标签页保护 | [小红书](platforms/xhs.md) |
 
-| 平台 | 入口 | 平台文档 |
-|---|---|---|
-| B站 article | `mediacrawler_crawl.py --platforms bilibili` | [B站](platforms/bilibili.md) |
-| 微博 | MediaCrawler 搜索 | [微博](platforms/weibo.md) |
-| 小红书 | `xhs_runner.py` 人工选择隔离账号 + MediaCrawler 搜索/作者主页 | [小红书](platforms/xhs.md) |
-| 抖音 | MediaCrawler 搜索 + 图文作者主页 | [抖音](platforms/douyin.md) |
-| 知乎 | MediaCrawler 搜索 | [知乎](platforms/zhihu.md) |
+平台层产出统一 JSONL、分页事件和图片 manifest，根项目使用同一正式校验和持久化层，避免五套长期
+路径、事务或完成判据。
 
-结构化执行器先生成 JSONL 与图片 staging/manifest，再按正式 profile 过滤视频、去重、校验
-权威正文、`content_detail_status/content_detail_source`、正文图/时间/作者/粉丝和互动字段。标题或搜索摘要
-不能替代正文。根项目对有效集合逐帖核对 manifest 和文件；只有本轮完成模式、
-行为/策略、字段和本地图片门禁同时成立才执行第二次复验、晋升并入库；未完成轮次只保留
-staging/manifest，不写长期媒体。分页运行失败或任一 child 失败优先于数量目标，直接阻断晋升。
-图片、行为和策略门禁只能补充证据，不能覆盖已有运行失败停止原因。
-晋升或已确认发生在 SQLite 提交前的事务失败会删除本轮新建文件，内容寻址复用文件保持不变，并在
-摘要写入 `sqlite_import_failed` 后跳过 checkpoint；SQLite 已成功提交或提交结果不确定时保留可能
-已有正式引用的文件，核对数据库后只恢复控制面。正式媒体晋升到提交/回滚使用全局跨进程锁，回滚
-还会按当前 SQLite `local_path` 引用二次保护；晋升阶段的可捕获中断会先回滚本轮已晋升新文件再传播，
-SQLite 外层事务开始后、提交前的中断则整批回滚并转成 `sqlite_import_failed` 结果，
-避免一轮删除另一成功轮次已引用的内容寻址文件或遗留无引用长期文件。
-XHS runner 与 discovery 提交函数都把 `sqlite_import_failed` 视为不写 checkpoint/seen/campaign 的
-硬门禁。SQLite schema bootstrap 后显式开启批次外层事务，逐帖 SAVEPOINT 始终嵌套其中；任一帖
-失败会回滚整批，只有外层提交成功才形成正式引用。导入报告区分处理、新增和更新；更新已有帖
-时会优先匹配并保留仍有效的既有本地图片证据，新的整帖图片集合仍在同一事务重建。
+## 页面证据
 
-`artifacts_verified` 对 `image_materialization` 的 manifest 哈希和计数等式负责；
-`persistence_verified` 对 SQLite 行、`data/media` 文件、SHA/MIME/尺寸、连续图片序号、数据库完整性
-负责。任一步失败，后续阶段保持 `frozen`，checkpoint 只停在最后安全前沿，不能用 URL-only 记录
-推进。
-
-## 页面证据平台
-
-固定 URL 页面证据由 `ctf_resource_crawl.py` 生成并写入证据层；内容就绪的页面可由
-`import_ctf_captures.py` 归一化到 `web_posts`。页面错误、搜索页、中间页和验证码页只保留证据，
-单页成功不代表平台批量目标完成。当前 `config/crawl_targets.json` 没有
-`ctf_resource_crawl` 正式任务，因此直接运行页面执行器只属于开发或诊断验证；以后若新增固定
-URL 正式任务，必须在该配置中声明并从 `crawl_runner.py` 进入。详细限制见
+固定 URL 页面由 `ctf_resource_crawl.py` 写入 `ctf_captures` / `ctf_capture_images`，内容就绪时再由
+`import_ctf_captures.py` 归一化到用户内容表。当前正式配置没有页面证据任务，直接运行只用于开发或
+诊断；以后若配置正式任务，仍必须从 `crawl_runner.py` 进入。详见
 [页面证据平台](platforms/page-evidence.md)。
 
 ## 辅助入口
 
-- `login_warmup.py`：验证并按需刷新 B站、微博、抖音和知乎登录态；不包含小红书，也不覆盖
-  页面证据执行器的独立 profile。
-- `xhs_accounts.py`、`xhs_login.py`：小红书账号登记、人工状态管理、隔离登录和持久状态复验。
-- `mediacrawler_login_warmup.py`：统一入口调用的底层平台实现。
-- `info_collection_benchmark.py`：通用平台性能和容量评估。
+- `login_warmup.py`：验证或刷新 B站、微博、抖音和知乎登录态。
+- `xhs_accounts.py`、`xhs_login.py`：小红书账号登记、隔离登录和状态复验。
+- `mediacrawler_login_warmup.py`：通用登录入口调用的平台实现。
+- `info_collection_benchmark.py`：通用平台诊断和容量评估，不是正式完成证据。
 
-辅助入口不创建完整正式阶段，不能替代对应平台的正式 runner。
+辅助入口不创建完整正式阶段，不能替代 runner。

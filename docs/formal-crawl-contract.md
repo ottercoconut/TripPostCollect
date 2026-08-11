@@ -72,22 +72,10 @@ B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
 `formal_validation.policy_evidence_ok=true` 才能进入入库；文件缺失、事件不完整、验证码、
 频控或阻断都必须失败，不能用内容 JSONL 或退出码补签。
 
-小红书在此门禁外再强制执行独立控制面：账号和浏览器 profile 一一绑定；storage state
-静态保存为 AES-GCM 密文，只在运行目录短暂解密；操作人必须通过 `--account-id` 选择账号；
-单账号租约只防止同一账号并发使用，不实施自动账号轮换、日预算、冷却或全池熔断。启动前
-登录失效进入 `login_required`。有头正式抓取中，搜索 API 明确返回登录已过期时，当前
-请求必须暂停，所有标签页保持打开并置前最新的小红书页，最长等待 600 秒由操作人手工恢复；
-只有可见登录 UI 与 self-info API 都重新确认有效后，才刷新 Cookie 和 storage state 并重试同一
-来源页。超时才进入 `login_required`，不得推进 checkpoint。其他验证和频控信号只记录证据，
-后续重试、隔离、恢复和切号由操作人决定。小红书只允许 `xhs_guarded`，不自动点击、识别或
-绕过验证，不在失败中途切换账号。搜索结果、笔记
-详情、作者主页和翻页必须产生分阶段随机等待证据，不能退回固定短等待。完整操作顺序只在
-[`platforms/xhs.md`](platforms/xhs.md) 维护，本文只定义机器门禁。
-
-小红书可由操作人显式请求一轮最多一次的 `comment-scroll`、`like-one` 或 `random` 帖子互动。
-互动默认关闭，运行在独立详情页标签，结果写入 `behavior_evidence.post_interactions`；互动失败
-默认不否定抓取和入库契约，只有页面明确出现验证码、频控、封禁或登录失效时终止当前轮。
-点赞会产生真实平台副作用，只有显式参数才能启用。
+小红书额外使用账号隔离、加密 storage state、单账号租约和 `xhs_guarded` 行为门禁；不自动换号、
+绕过验证或把登录/频控/封禁降级为候选失败。互动默认关闭，点赞等真实副作用只有操作人显式启用。
+登录恢复、标签页保护、等待时间和互动证据的唯一操作说明见
+[`platforms/xhs.md`](platforms/xhs.md)，其机器结果仍必须满足本文的运行级阻断和冻结状态门禁。
 
 通用平台的验证码、频控或拒绝访问会写入站点冷却，后续任务由同一策略门禁停止；小红书只
 记录本轮证据，等待操作人指挥。断点续跑只校验本次新执行记录的行为与策略证据，不要求历史
@@ -158,10 +146,8 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 可以作为独立 `image_role=author_avatar` 的 URL-only 参考关系保留，但不下载、不计入
 `post_images_count`，也不参与本地图片完整性等式。
 
-知乎是唯一使用平台 URL 语义去重的正文图投影：仅对 `zhimg.com` 已知变换后缀（如 `_r`、
-`_720w`、`_1440w`）归一化为同一资源路径，同帖保留首次出现 URL 后再生成下载任务。这是确定性的
-平台资产键规则，不使用感知哈希、相似度或视觉模型；非 `zhimg.com` URL 不应用该规则。原始
-`image_list` 仍在内容原始证据中保留，投影后被合并的变体不重复生成 manifest 行。
+平台特有的 URL/资产键归一规则写在对应平台文档；所有平台都必须保留原始来源证据，且不得使用
+感知哈希或视觉相似度改变正式候选集合。
 
 每条进入正式有效集合的记录还必须满足整帖图片原子条件：所有权威正文图都已使用当前平台会话
 下载到 staging；`image_manifest.jsonl` 的平台、帖子、角色、顺序、来源字段、稳定资产键和 URL 与
@@ -210,31 +196,11 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 | 抖音 | `aweme_detail` | `desc` | 标题、封面或预览文本 |
 | 知乎 | `search_content`、`answer_detail`、`article_detail` | `content_text/content` | `title`、`desc/excerpt` |
 
-微博 `isLongText=true` 时必须取得移动端详情正文后才能写 JSONL；详情请求、
-响应或解析失败完成有限重试后写 `candidate_skipped(failure_scope=post)`，禁止把截断搜索文本交给
-store。小红书笔记详情与知乎回答/文章详情采用相同规则：失败 ID 写入已处理候选记忆，整帖不进入
-内容集合，当前批次继续。
-
-B站 article 还必须满足详情完整性门禁：搜索结果中的 `desc` 只允许作为发现摘要保存在原始证据，
-不得作为 `content_text`；正式记录必须保存 `content_detail_status=detail_observed` 和受信任的 article
-详情来源。正文图片必须经过详情响应或详情页正文结构检查，不能仅凭搜索 `image_urls` 宣布完整。
-候选自身的详情超时、HTTP 5xx、空响应或解析失败先有限重试；仍失败则按候选跳过，不是字段永久无效。
-HTTP 401/403、429，B站 `-101/-509/-412/-352` 等登录、授权、频控或风控信号属于运行级阻断，
-适用重试结束后必须停止 child，不能把该 ID 写成已处理候选。
-
-B站、微博、小红书、抖音、知乎使用 `followers_policy=required`。粉丝量为 `0` 只有在
-平台响应明确出现该值且保存了 `followers_observed=true` 时有效；缺失值不得转换为
-`0`。不提供粉丝量的平台使用 `followers_policy=ignored`，必须由配置声明，不能由
-Agent 临场判断。
-
-粉丝来源同时受平台 profile 限制：B站只接受 `relation_stat`，微博和知乎接受
-`search_author`，小红书和抖音只接受 `creator_profile`。抖音搜索作者对象中的占位 0
-不能替代作者主页结果。
-
-小红书必须为每条候选图文取得当前作者主页证据：先使用登录会话的无 token 作者页请求，
-空结果才允许在随机等待后通过同一已登录 BrowserContext 打开无 token 作者页。笔记
-`xsec_token` 不能作为作者主页凭据。作者页仍为空时该候选无效；页面出现验证、频控或封禁
-标记时本轮运行失败，不能把阻断降级为普通缺字段。
+平台详情、作者与粉丝的具体来源由 `required_fields_profile`、
+[`platform-field-coverage.md`](platform-field-coverage.md) 和对应平台文档共同限定。五个平台当前均为
+`followers_policy=required`；真实 0 必须同时具有原始字段与 `followers_observed=true`，缺失值不得
+转换为 0。详情或作者候选级失败服从上面的 `candidate_skipped` 规则，登录、授权、频控、验证码和
+风控仍属于运行级阻断。
 
 ## 冻结执行状态
 
@@ -283,18 +249,10 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
   `verified_empty_first_page`。可见页仍有作品或页面状态不明确时必须写
   `runtime_failed`，分别使用 `empty_api_response_with_visible_results` 或
   `ambiguous_empty_first_page`，并保留第 1 页、offset 0、空 search ID 供下轮重取。
-- `stagnated`：抖音、知乎和小红书按连续配置批次没有新增满足正式字段 profile 且数据库中
-  不存在的唯一记录累计；新的无效候选、重复候选和数据库已有记录都不能重置停滞计数。微博
-  按是否出现不在数据库、累计摘要、`crawl_discovery_seen_candidates` 和本 child 已见集合中的候选 ID 累计停滞：综合搜索连续出现纯文本或视频时仍推进扫描，
-  只有连续批次没有新 ID 才停；正式完成仍只计算有效新增图文。批次事件记录
-  `stagnation_basis`、新候选 ID 数和有效新增数，供区分“结果类型不合格”与“页面实际重复”。
-  B站自有 article 实现是另一明确例外：它按页面是否出现不在数据库、累计摘要、
-  `crawl_discovery_seen_candidates` 或本次已完成集合中的 article ID 判断来源是否仍有新候选。
-  未知 ID 只有在详情与字段处理得到决定性结果后才算完成处理。候选自身的详情空响应、超时、
-  HTTP 5xx 或解析失败完成有限重试后写 `candidate_skipped` 并继续；登录、授权、频控或风控信号
-  必须停止当前 child、保留本页且不持久化该 ID。详情已观察后
-  才确定的永久无效候选可以重置停滞。该例外不放宽完成标准；判断 B站是否值得扩容时必须同时读取
-  新 ID 数、详情成功数和有效新增数。
+- `stagnated`：连续配置批次没有产生平台定义的新候选或有效新增。批次必须记录
+  `stagnation_basis`、新候选 ID 数和有效新增数；B站、微博、抖音、知乎和小红书各自的候选身份、
+  cursor 与停滞例外只在对应平台文档维护。停滞永远不能代替 `target_new_met` 或
+  `source_exhausted`。
 - `login_required` / `captcha_detected`：登录或验证阻断。
 - `runtime_failed`：浏览器或本地运行环境失败。
 - `image_materialization_incomplete`：已选入正式有效集合的正文图 manifest 或 staging 字节校验不完整。
@@ -420,17 +378,8 @@ SAVEPOINT 只允许隔离单帖写入，不能因 `RELEASE SAVEPOINT` 提前提�
 `local_images_complete=true`、`local_image_failure_count=0`。以上谓词还要与原数量/来源耗尽、
 字段、行为、策略、分页和真实入库谓词同时成立，不能相互替代。
 
-恢复摘要可能引用知乎语义资产归一上线前生成的 manifest。只有同一个旧 manifest 的额外行全部属于
-真实 `zhimg.com` 或其子域名的同一逻辑资产、URL 各不相同、均为已下载正文图，并且每个 staging
-文件的路径、元数据与 SHA-256 重新复验后完全相同时，根项目才可继续；每行
-`source_asset_key` 还必须等于当前逻辑键或仓库历史版本确实生成过的旧算法键，任意格式合法但无来源
-的键不得放行。满足这些条件后，根项目
-才可按当前单候选投影保留源顺序第一行；折叠数量与逐行来源写入
-`legacy_manifest_reconciled_images` / `legacy_manifest_reconciliations`，但不计入当前
-`expected_images` 或 `sha256_duplicate_images`。同一 manifest 的相对/绝对路径别名先解析为同一输入，
-不得制造额外行；跨 manifest、同 URL 重复、任一外链、失败行、逻辑资产不同或 SHA-256 不同仍按
-`image_manifest_count_mismatch` / `image_manifest_identity_mismatch` 失败关闭，不能靠旧 `seen` 记忆
-跳过后把错误摘要永久继承。
+历史 manifest 的平台兼容只属于入库复验，不改变当前图片契约；现行条件与失败关闭规则见
+[`data-persistence.md`](data-persistence.md) 和对应平台文档。
 
 manifest schema v1 的稳定校验错误包括：`missing_image_manifest`、
 `image_manifest_identity_mismatch`、`image_manifest_count_mismatch`、
