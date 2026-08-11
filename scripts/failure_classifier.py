@@ -36,6 +36,10 @@ TIMEOUT_PATTERNS = re.compile(r"Timeout|timeout|ETIMEDOUT|Navigation timeout|net
 NO_IMAGE_PATTERNS = re.compile(r"No image-bearing|no_content_images|skipped_no_image", re.I)
 PARSE_PATTERNS = re.compile(r"JSONDecodeError|parse_failed|Selector|KeyError|ValueError", re.I)
 BLOCK_PATTERNS = re.compile(r"forbidden|access denied|拒绝访问|blocked_detected|blocked_by_policy", re.I)
+PLATFORM_SECURITY_LIMIT_PATTERNS = re.compile(
+    r"\bplatform_security_limit(?:_300011)?\b",
+    re.I,
+)
 
 
 def extract_stdout_json(stdout: str) -> dict[str, Any]:
@@ -66,7 +70,10 @@ def _without_false_security_markers(value: Any) -> Any:
         return {
             key: _without_false_security_markers(item)
             for key, item in value.items()
-            if not (key in {"captcha", "captcha_or_verify"} and item is False)
+            if not (
+                key in {"captcha", "captcha_or_verify", "platform_security_limit"}
+                and item is False
+            )
         }
     if isinstance(value, list):
         return [_without_false_security_markers(item) for item in value]
@@ -190,6 +197,15 @@ def classify_attempt(
             "retryable": True,
             "wait_seconds": 60,
             "reason": "chromium_or_playwright_launch_failed",
+        }
+
+    if bool(markers.get("platform_security_limit")) or PLATFORM_SECURITY_LIMIT_PATTERNS.search(text):
+        return {
+            "status": "blocked",
+            "failure_type": "platform_security_limit",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": "platform_security_limit_300011",
         }
 
     if bool(markers.get("captcha_or_verify")) or CAPTCHA_PATTERNS.search(text):

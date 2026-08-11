@@ -60,6 +60,41 @@ def test_false_captcha_marker_key_does_not_self_match() -> None:
     assert result["failure_type"] == "tool_error"
 
 
+def test_false_platform_security_limit_marker_key_does_not_self_match() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        meta={"structured_markers": {"platform_security_limit": False}},
+    )
+
+    assert result["status"] == "retry_wait"
+    assert result["failure_type"] == "tool_error"
+
+
+def test_platform_security_limit_runtime_error_is_blocked() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr="RuntimeError: xhs_creator_profile_visible_block:platform_security_limit",
+    )
+
+    assert result == {
+        "status": "blocked",
+        "failure_type": "platform_security_limit",
+        "retryable": False,
+        "wait_seconds": 0,
+        "reason": "platform_security_limit_300011",
+    }
+
+
+def test_generic_retry_later_text_is_not_xhs_platform_security_limit() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr="upstream account exception, please retry later",
+    )
+
+    assert result["status"] == "retry_wait"
+    assert result["failure_type"] == "tool_error"
+
+
 def test_false_captcha_marker_in_stdout_json_does_not_self_match() -> None:
     result = failure_classifier.classify_attempt(
         exit_code=1,

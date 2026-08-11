@@ -42,7 +42,12 @@ from trippostcollect.xhs.sessions import (
 
 XHS_HOME_URL = "https://www.xiaohongshu.com"
 PROFILE_ID_RE = re.compile(r"/user/profile/([^/?#]+)")
-CHALLENGE_RE = re.compile(r"安全验证|请完成验证|请通过验证|操作频繁|环境异常|访问受限")
+CHALLENGE_RE = re.compile(
+    r"安全验证|请完成验证|请通过验证|操作频繁|环境异常|访问受限|安全限制|账号异常|"
+    r"account exception(?:\s*,?\s*please retry later)?|\b300011\b",
+    re.I,
+)
+PLATFORM_SECURITY_LIMIT_URL_RE = re.compile(r"/website-login/error(?:[?#]|$)", re.I)
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,14 +88,28 @@ async def xhs_page_state(page: Page) -> dict[str, Any]:
         except Exception:
             continue
     profile_ids = sorted(set(profile_ids))
-    challenge_markers = sorted(set(CHALLENGE_RE.findall(" ".join(text.split()))))
+    normalized_text = " ".join(text.split())
+    page_url = str(page.url or "")
+    platform_security_limit = bool(
+        re.search(
+            r"安全限制|账号异常|account exception(?:\s*,?\s*please retry later)?|\b300011\b",
+            normalized_text,
+            re.I,
+        )
+        or PLATFORM_SECURITY_LIMIT_URL_RE.search(page_url)
+    )
+    challenge_markers = sorted(set(CHALLENGE_RE.findall(normalized_text)))
+    if PLATFORM_SECURITY_LIMIT_URL_RE.search(page_url):
+        challenge_markers.append("website-login/error")
+        challenge_markers = sorted(set(challenge_markers))
     return {
         "ok": bool(me_visible and profile_ids),
         "url": page.url,
         "me_visible": me_visible,
         "profile_ids": profile_ids,
+        "platform_security_limit": platform_security_limit,
         "challenge_markers": challenge_markers,
-        "visible_text_sample": " ".join(text.split())[:360],
+        "visible_text_sample": normalized_text[:360],
     }
 
 
@@ -110,6 +129,16 @@ async def wait_for_login(
         observed_challenge_markers.update(challenge_markers)
         state["challenge_observed"] = bool(observed_challenge_markers)
         state["observed_challenge_markers"] = sorted(observed_challenge_markers)
+        if state.get("platform_security_limit"):
+            try:
+                await page.bring_to_front()
+            except Exception:
+                pass
+            print(
+                f"[xhs-login] {phase}检测到平台安全限制，终止本轮。",
+                flush=True,
+            )
+            return state
         # A stale signed-in navigation shell can remain visible behind a
         # verification overlay.  Current challenge evidence therefore wins
         # over the profile marker and keeps the operator window open.

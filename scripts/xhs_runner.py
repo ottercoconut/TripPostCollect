@@ -56,7 +56,20 @@ from trippostcollect.xhs.sessions import (
 
 
 ROOT = PROJECT_ROOT
-CHALLENGE_MARKERS = ("captcha", "安全验证", "请完成验证", "请通过验证", "操作频繁", "环境异常", "访问受限")
+CHALLENGE_MARKERS = (
+    "captcha",
+    "安全验证",
+    "请完成验证",
+    "请通过验证",
+    "操作频繁",
+    "环境异常",
+    "访问受限",
+    "安全限制",
+    "账号异常",
+    "account exception",
+    "300011",
+    "platform_security_limit",
+)
 LOGIN_MARKERS = ("login_required", "扫码登录", "登录后查看", "missing_xhs_storage_state")
 
 
@@ -209,12 +222,14 @@ def _structured_failure_text(record: dict[str, Any]) -> str:
 
 def _challenge_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -> str:
     records = _structured_failure_records(stdout, child_summary)
-    for record in records:
+    for record in records[-1:]:
         behavior = record.get("behavior_evidence") or {}
         markers = {
             **(behavior.get("initial_visible_markers") or {}),
             **(behavior.get("visible_markers") or {}),
         }
+        if bool(markers.get("platform_security_limit")):
+            return "platform_security_limit_300011"
         if bool(markers.get("captcha_or_verify")) or bool(markers.get("captcha")):
             return "captcha"
         if bool(markers.get("rate_limited")):
@@ -222,6 +237,8 @@ def _challenge_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -
         if bool(markers.get("blocked")):
             return "访问受限"
         failure_text = _structured_failure_text(record)
+        if "platform_security_limit" in failure_text:
+            return "platform_security_limit_300011"
         reason = next((marker for marker in CHALLENGE_MARKERS if marker.lower() in failure_text), "")
         if reason:
             return reason
@@ -233,7 +250,7 @@ def _challenge_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -
 
 def _login_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -> str:
     records = _structured_failure_records(stdout, child_summary)
-    for record in records:
+    for record in records[-1:]:
         behavior = record.get("behavior_evidence") or {}
         markers = {
             **(behavior.get("initial_visible_markers") or {}),

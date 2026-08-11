@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from playwright.async_api import Page
 
@@ -38,6 +38,11 @@ CAPTCHA_VISIBLE_RE = re.compile(
 )
 RATE_LIMIT_VISIBLE_RE = re.compile(r"访问过于频繁|请求过于频繁|操作频繁|too many requests|rate limit", re.I)
 BLOCKED_VISIBLE_RE = re.compile(r"拒绝访问|access denied|forbidden|访问受限", re.I)
+XHS_PLATFORM_SECURITY_LIMIT_RE = re.compile(
+    r"安全限制|账号异常|account exception(?:\s*,?\s*please retry later)?|\b300011\b",
+    re.I,
+)
+XHS_PLATFORM_SECURITY_LIMIT_URL_RE = re.compile(r"/website-login/error(?:[?#]|$)", re.I)
 LOGIN_VISIBLE_RE = re.compile(r"请先登录|登录后查看|需要登录|login_required", re.I)
 XHS_COMMENT_SELECTORS = (
     "[class*='comments-container']",
@@ -94,7 +99,17 @@ async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
     except Exception:
         text = ""
     normalized = " ".join(text.split())
+    page_url = str(getattr(page, "url", "") or "")
+    hostname = (urlparse(page_url).hostname or "").lower()
+    is_xhs_page = hostname == "xiaohongshu.com" or hostname.endswith(".xiaohongshu.com")
     markers = {
+        "platform_security_limit": bool(
+            is_xhs_page
+            and (
+                XHS_PLATFORM_SECURITY_LIMIT_RE.search(normalized)
+                or XHS_PLATFORM_SECURITY_LIMIT_URL_RE.search(page_url)
+            )
+        ),
         "captcha_or_verify": bool(CAPTCHA_VISIBLE_RE.search(normalized)),
         "rate_limited": bool(RATE_LIMIT_VISIBLE_RE.search(normalized)),
         "blocked": bool(BLOCKED_VISIBLE_RE.search(normalized)),
@@ -107,11 +122,79 @@ def visible_challenge(markers: dict[str, bool]) -> str:
     return next(
         (
             key
-            for key in ("captcha_or_verify", "rate_limited", "blocked", "login_required")
+            for key in (
+                "platform_security_limit",
+                "captcha_or_verify",
+                "rate_limited",
+                "blocked",
+                "login_required",
+            )
             if markers.get(key)
         ),
         "",
     )
+
+
+async def record_xhs_platform_security_limit(
+    page: Page,
+    *,
+    evidence_path: str | Path,
+    stage: str,
+    visible_text_sample: str,
+    visible_markers: dict[str, bool],
+) -> dict[str, Any]:
+    """Persist a terminal XHS account restriction before its page is closed."""
+    path = Path(evidence_path).expanduser()
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot update XHS platform security evidence: {exc}") from exc
+
+    safe_stage = re.sub(r"[^a-zA-Z0-9_-]", "_", stage)[:80] or "unknown"
+    screenshot_path = path.with_name(f"{path.stem}.security-limit.{safe_stage}.png")
+    screenshot_error = ""
+    try:
+        await page.screenshot(
+            path=str(screenshot_path),
+            full_page=False,
+            timeout=10_000,
+            animations="disabled",
+        )
+    except Exception as exc:
+        screenshot_error = f"{type(exc).__name__}: {exc}"
+
+    event = {
+        "at": utc_now(),
+        "stage": stage,
+        "challenge": "platform_security_limit",
+        "classification": "platform_security_limit",
+        "observed_error_code": (
+            "300011"
+            if re.search(
+                r"\b300011\b",
+                f"{visible_text_sample}\n{str(getattr(page, 'url', '') or '')}",
+            )
+            else ""
+        ),
+        "url": str(getattr(page, "url", "") or ""),
+        "visible_text_sample": visible_text_sample[:360],
+        "visible_markers": visible_markers,
+        "screenshot": str(screenshot_path) if not screenshot_error else "",
+        "screenshot_error": screenshot_error,
+    }
+    events = evidence.setdefault("platform_security_limit_events", [])
+    events.append(event)
+    evidence["platform_security_limit_events"] = events[-20:]
+    evidence.update(
+        {
+            "status": "failed",
+            "challenge": "platform_security_limit",
+            "visible_text_sample": visible_text_sample[:360],
+            "visible_markers": visible_markers,
+        }
+    )
+    write_evidence(path, evidence)
+    return event
 
 
 def runtime_fingerprint_valid(fingerprint: dict[str, Any] | None) -> bool:
@@ -273,7 +356,13 @@ def behavior_evidence_valid(evidence: dict[str, Any] | None) -> bool:
     challenge = any(
         bool(marker_set.get(key))
         for marker_set in (initial_markers, markers)
-        for key in ("captcha_or_verify", "rate_limited", "blocked", "login_required")
+        for key in (
+            "platform_security_limit",
+            "captcha_or_verify",
+            "rate_limited",
+            "blocked",
+            "login_required",
+        )
     )
     base_ok = REQUIRED_BEHAVIOR_EVENTS.issubset(event_names) and not challenge
     if evidence.get("profile") != "xhs_guarded":
@@ -992,7 +1081,13 @@ async def run_page_behavior(
                 visible_text_sample = initial_visible_text_sample
                 visible_markers = initial_visible_markers
                 reason = str(page_readiness.get("reason") or "search_results_not_ready")
-                if reason not in {"captcha_or_verify", "rate_limited", "blocked", "login_required"}:
+                if reason not in {
+                    "platform_security_limit",
+                    "captcha_or_verify",
+                    "rate_limited",
+                    "blocked",
+                    "login_required",
+                }:
                     raise RuntimeError(f"xhs_page_not_ready:{reason}")
 
         if behavior_ready:

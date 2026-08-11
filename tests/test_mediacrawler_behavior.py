@@ -181,6 +181,118 @@ async def test_visible_challenge_fails_behavior_gate(tmp_path: Path, monkeypatch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "url"),
+    [
+        ("安全限制 Account exception, please retry later 300011", "https://www.xiaohongshu.com/explore"),
+        ("", "https://www.xiaohongshu.com/website-login/error?redirectPath=%2Fuser%2Fprofile%2Fabc"),
+    ],
+)
+async def test_xhs_platform_security_limit_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+    url: str,
+) -> None:
+    monkeypatch.setattr(mediacrawler_behavior, "dwell_on_list", fake_dwell_on_list)
+    evidence_path = tmp_path / "behavior.json"
+    page = FakePage(text)
+    page.url = url
+
+    with pytest.raises(RuntimeError, match="platform_security_limit_detected"):
+        await mediacrawler_behavior.run_page_behavior(
+            page,
+            platform_key="xhs",
+            evidence_path=evidence_path,
+            profile_name="xhs_guarded",
+        )
+
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["status"] == "failed"
+    assert evidence["challenge"] == "platform_security_limit"
+    assert evidence["visible_markers"]["platform_security_limit"] is True
+    assert mediacrawler_behavior.behavior_evidence_valid(evidence) is False
+
+
+@pytest.mark.asyncio
+async def test_non_xhs_retry_text_does_not_set_xhs_security_limit() -> None:
+    page = FakePage("Account exception, please retry later")
+    page.url = "https://example.test/search"
+
+    _, markers = await mediacrawler_behavior.visible_page_state(page)
+
+    assert markers["platform_security_limit"] is False
+
+
+@pytest.mark.asyncio
+async def test_xhs_retry_later_without_account_exception_is_not_security_limit() -> None:
+    page = FakePage("Please retry later")
+    page.url = "https://www.xiaohongshu.com/explore"
+
+    _, markers = await mediacrawler_behavior.visible_page_state(page)
+
+    assert markers["platform_security_limit"] is False
+
+
+@pytest.mark.asyncio
+async def test_xhs_platform_security_limit_writer_preserves_page_evidence(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "behavior.json"
+    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
+    page = FakePage("安全限制 Account exception, please retry later 300011")
+    page.url = "https://www.xiaohongshu.com/website-login/error?redirectPath=%2Fuser%2Fprofile%2Fabc"
+    markers = {
+        "platform_security_limit": True,
+        "captcha_or_verify": False,
+        "rate_limited": False,
+        "blocked": False,
+        "login_required": False,
+    }
+
+    event = await mediacrawler_behavior.record_xhs_platform_security_limit(
+        page,
+        evidence_path=evidence_path,
+        stage="creator_profile:abc:arrival",
+        visible_text_sample=page.text,
+        visible_markers=markers,
+    )
+
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["status"] == "failed"
+    assert evidence["challenge"] == "platform_security_limit"
+    assert evidence["platform_security_limit_events"] == [event]
+    assert event["classification"] == "platform_security_limit"
+    assert event["observed_error_code"] == "300011"
+    assert event["url"] == page.url
+    assert Path(event["screenshot"]).is_file()
+
+
+@pytest.mark.asyncio
+async def test_xhs_url_only_security_limit_does_not_invent_error_code(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "behavior.json"
+    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
+    page = FakePage("")
+    page.url = "https://www.xiaohongshu.com/website-login/error?redirectPath=%2Fuser%2Fprofile%2Fabc"
+    markers = {
+        "platform_security_limit": True,
+        "captcha_or_verify": False,
+        "rate_limited": False,
+        "blocked": False,
+        "login_required": False,
+    }
+
+    event = await mediacrawler_behavior.record_xhs_platform_security_limit(
+        page,
+        evidence_path=evidence_path,
+        stage="creator_profile:abc:arrival",
+        visible_text_sample="",
+        visible_markers=markers,
+    )
+
+    assert event["classification"] == "platform_security_limit"
+    assert event["observed_error_code"] == ""
+
+
+@pytest.mark.asyncio
 async def test_xhs_dwell_stops_when_rate_limit_appears(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

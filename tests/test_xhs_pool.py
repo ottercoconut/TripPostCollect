@@ -197,6 +197,55 @@ def test_manual_xhs_login_challenge_overrides_stale_signed_in_shell(
     assert page.waits == 1
 
 
+def test_manual_xhs_login_platform_security_limit_stops_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.brought_to_front = 0
+            self.waits = 0
+
+        async def bring_to_front(self) -> None:
+            self.brought_to_front += 1
+
+        async def wait_for_timeout(self, timeout_ms: int) -> None:
+            self.waits += 1
+
+    async def fake_page_state(page: FakePage) -> dict:
+        nonlocal calls
+        calls += 1
+        return {
+            "ok": False,
+            "platform_security_limit": True,
+            "challenge_markers": ["安全限制", "300011"],
+        }
+
+    monkeypatch.setattr(xhs_login, "xhs_page_state", fake_page_state)
+    page = FakePage()
+
+    state = asyncio.run(
+        xhs_login.wait_for_login(
+            page,
+            600,
+            phase="测试登录",
+        )
+    )
+
+    assert state["platform_security_limit"] is True
+    assert state["challenge_observed"] is True
+    assert state["observed_challenge_markers"] == ["300011", "安全限制"]
+    assert calls == 1
+    assert page.brought_to_front == 1
+    assert page.waits == 0
+
+
+def test_xhs_login_does_not_treat_bare_retry_later_as_security_limit() -> None:
+    assert xhs_login.CHALLENGE_RE.search("Please retry later") is None
+    assert xhs_login.CHALLENGE_RE.search("Account exception, please retry later") is not None
+
+
 def test_manual_xhs_login_lease_covers_both_operator_waits() -> None:
     assert xhs_login.login_lease_seconds(600) == 1_500
 
@@ -242,6 +291,77 @@ def test_xhs_runner_reads_challenge_from_structured_child_summary() -> None:
     }
 
     assert xhs_runner._challenge_reason("", "", child_summary) == "captcha"
+
+
+def test_xhs_runner_classifies_platform_security_limit_300011() -> None:
+    child_summary = {
+        "records": [
+            {
+                "failure_classification": {
+                    "status": "blocked",
+                    "failure_type": "visible_page_blocked",
+                },
+                "behavior_evidence": {
+                    "status": "failed",
+                    "visible_markers": {"platform_security_limit": True},
+                    "visible_text_sample": "安全限制 Account exception, please retry later 300011",
+                },
+            }
+        ]
+    }
+
+    assert xhs_runner._challenge_reason("", "", child_summary) == "platform_security_limit_300011"
+
+
+def test_xhs_runner_classifies_platform_security_limit_from_current_record_error() -> None:
+    child_summary = {
+        "records": [
+            {
+                "failure_classification": {
+                    "status": "blocked",
+                    "failure_type": "platform_security_limit",
+                    "reason": "platform_security_limit_300011",
+                },
+                "behavior_evidence": {
+                    "status": "failed",
+                    "error": "xhs_creator_profile_visible_block:platform_security_limit",
+                    "visible_markers": {},
+                },
+            }
+        ]
+    }
+
+    assert xhs_runner._challenge_reason("", "", child_summary) == "platform_security_limit_300011"
+
+
+def test_xhs_runner_ignores_prior_resume_challenge_when_latest_record_is_clean() -> None:
+    child_summary = {
+        "records": [
+            {
+                "failure_classification": {"status": "captcha_detected"},
+                "behavior_evidence": {
+                    "status": "failed",
+                    "visible_markers": {"captcha_or_verify": True},
+                },
+            },
+            {
+                "failure_classification": {"status": "completed", "failure_type": "success"},
+                "behavior_evidence": {
+                    "status": "completed",
+                    "challenge": "",
+                    "visible_markers": {
+                        "platform_security_limit": False,
+                        "captcha_or_verify": False,
+                        "rate_limited": False,
+                        "blocked": False,
+                        "login_required": False,
+                    },
+                },
+            },
+        ]
+    }
+
+    assert xhs_runner._challenge_reason("", "", child_summary) == ""
 
 
 def test_xhs_runner_does_not_treat_false_marker_names_as_failures() -> None:
