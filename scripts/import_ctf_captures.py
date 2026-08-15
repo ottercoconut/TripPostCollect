@@ -14,6 +14,7 @@ from typing import Any
 
 from trippostcollect.core.paths import DEFAULT_DB, OUTPUTS_ROOT, PROJECT_ROOT, ensure_parent
 from trippostcollect.db.bootstrap import bootstrap_connection
+from trippostcollect.records.sanitization import sanitize_author_avatar_data
 
 
 ROOT = PROJECT_ROOT
@@ -246,6 +247,10 @@ def artifact_value(meta: dict[str, Any], key: str) -> str | None:
 
 def normalize_meta(path: Path) -> dict[str, Any]:
     meta = load_json(path)
+    sanitized_meta = sanitize_author_avatar_data(meta).value
+    if not isinstance(sanitized_meta, dict):
+        raise ValueError(f"capture metadata must remain an object after sanitization: {path}")
+    meta = sanitized_meta
     kind = infer_capture_kind(path)
     target = meta.get("target") or {}
     navigation = meta.get("navigation") or {}
@@ -376,22 +381,13 @@ def validate_images(meta: dict[str, Any]) -> dict[str, Any]:
     if failed_path and Path(str(failed_path)).exists():
         failed_images = load_json(Path(str(failed_path)))
     computed = {
-        "total_requests": len(images) + len(failed_images),
-        "successful_responses": sum(1 for item in images if item.get("ok")),
-        "http_failed_responses": sum(1 for item in images if not item.get("ok")),
-        "request_failed": len(failed_images),
-        "saved_images": sum(1 for item in images if item.get("saved_path")),
-        "missing_saved_files": [],
+        "unclassified_image_records": len(images),
+        "unclassified_failed_image_records": len(failed_images),
     }
-    for item in images:
-        saved_path = item.get("saved_path")
-        if saved_path and not Path(str(saved_path)).exists():
-            computed["missing_saved_files"].append(saved_path)
-    for key in ("total_requests", "successful_responses", "http_failed_responses", "request_failed", "saved_images"):
-        if image_summary and int(image_summary.get(key) or 0) != computed[key]:
-            result["warnings"].append(f"image_summary_mismatch:{key}")
-    if computed["missing_saved_files"]:
-        result["warnings"].append("missing_saved_image_files")
+    if images or failed_images:
+        result["warnings"].append("legacy_unclassified_image_records_ignored")
+    if int(image_summary.get("saved_images") or 0) != 0:
+        result["warnings"].append("legacy_saved_image_count_ignored")
     result["checked"] = True
     result["computed"] = computed
     return result
@@ -431,37 +427,10 @@ def upsert_capture(conn: sqlite3.Connection, row: dict[str, Any]) -> int:
     return int(capture_id[0])
 
 
-def replace_capture_images(conn: sqlite3.Connection, capture_id: int, images_json_path: str | None) -> int:
+def replace_capture_images(conn: sqlite3.Connection, capture_id: int, _images_json_path: str | None) -> int:
+    """Remove legacy unclassified response images instead of importing them as evidence."""
     conn.execute("DELETE FROM ctf_capture_images WHERE ctf_capture_id = ?", (capture_id,))
-    if not images_json_path or not Path(images_json_path).exists():
-        return 0
-    images = load_json(Path(images_json_path))
-    inserted = 0
-    for index, item in enumerate(images):
-        conn.execute(
-            """
-            INSERT INTO ctf_capture_images (
-                ctf_capture_id, image_index, image_url, status, ok, content_type,
-                resource_type, saved_path, bytes, error, raw_image_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                capture_id,
-                index,
-                str(item.get("url") or ""),
-                item.get("status"),
-                int(bool(item.get("ok"))),
-                item.get("content_type"),
-                item.get("resource_type"),
-                item.get("saved_path"),
-                item.get("bytes"),
-                item.get("error"),
-                json_dump(item),
-            ),
-        )
-        inserted += 1
-    return inserted
+    return 0
 
 
 def capture_post_id(site_key: str, capture_id: int) -> str:
@@ -480,6 +449,11 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
     keyword = keyword_from_capture(row)
     if not content_text:
         return None
+    try:
+        raw_sample = json.loads(row.get("raw_meta_json") or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError("capture raw_meta_json must be valid JSON") from exc
+    sanitized_raw_sample = sanitize_author_avatar_data(raw_sample).value
     metrics = {
         "capture_kind": row.get("capture_kind"),
         "body_text_length": row.get("body_text_length"),
@@ -504,7 +478,6 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
         "author_display_name": None,
         "author_platform_id": None,
         "author_profile_url": None,
-        "author_avatar_url": None,
         "author_description": None,
         "author_followers_count": None,
         "author_following_count": None,
@@ -523,10 +496,10 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
         "post_shares_count": None,
         "post_reposts_count": None,
         "post_views_count": None,
-        "post_images_count": int(row.get("image_count") or row.get("saved_images") or 0),
+        "post_images_count": 0,
         "metrics_json": json_dump(metrics),
         "author_json": json_dump(author),
-        "raw_sample_json": row["raw_meta_json"],
+        "raw_sample_json": json_dump(sanitized_raw_sample),
         "artifact_dir": row["artifact_dir"],
         "capture_method": "import",
         "status": "captured" if row["ok"] else "partial",
@@ -570,38 +543,11 @@ def upsert_web_post_from_capture(conn: sqlite3.Connection, row: dict[str, Any]) 
 def replace_web_post_images_from_capture(
     conn: sqlite3.Connection,
     web_post_id: int,
-    images_json_path: str | None,
+    _images_json_path: str | None,
 ) -> int:
+    """Reject legacy unclassified page responses; only explicit future roles may persist."""
     conn.execute("DELETE FROM web_post_images WHERE web_post_id=?", (web_post_id,))
-    if not images_json_path or not Path(images_json_path).exists():
-        return 0
-    images = load_json(Path(images_json_path))
-    inserted = 0
-    for item in images:
-        if not item.get("ok") and not item.get("saved_path"):
-            continue
-        image_url = str(item.get("url") or "")
-        if not image_url:
-            continue
-        conn.execute(
-            """
-            INSERT INTO web_post_images (
-                web_post_id, image_index, image_url, image_role, local_path, mime_type, raw_image_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                web_post_id,
-                inserted,
-                image_url,
-                "page",
-                item.get("saved_path"),
-                item.get("content_type"),
-                json_dump(item),
-            ),
-        )
-        inserted += 1
-    return inserted
+    return 0
 
 
 def main() -> int:
@@ -652,7 +598,10 @@ def main() -> int:
                 else:
                     updated_rows += 1
                 inserted_post_images = replace_web_post_images_from_capture(conn, web_post_id, row.get("images_json_path"))
-                conn.execute("UPDATE web_posts SET post_images_count=?, updated_at=datetime('now') WHERE id=?", (inserted_post_images, web_post_id))
+                conn.execute(
+                    "UPDATE web_posts SET post_images_count=0, updated_at=datetime('now') WHERE id=?",
+                    (web_post_id,),
+                )
                 post_image_rows += inserted_post_images
                 post_rows += 1
             imported += 1

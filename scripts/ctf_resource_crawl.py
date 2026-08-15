@@ -14,7 +14,6 @@ from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Page, Request, Response, TimeoutError as PlaywrightTimeoutError
 
@@ -36,15 +35,6 @@ ROOT = PROJECT_ROOT
 DEFAULT_OUTPUT = CTF_RESOURCE_OUTPUT
 DEFAULT_PROFILE_ROOT = CTF_BROWSER_PROFILE_ROOT
 RANDOM = random.SystemRandom()
-IMAGE_EXTENSIONS = {
-    "image/jpeg": ".jpg",
-    "image/jpg": ".jpg",
-    "image/png": ".png",
-    "image/webp": ".webp",
-    "image/gif": ".gif",
-    "image/svg+xml": ".svg",
-    "image/avif": ".avif",
-}
 TEXT_CONTENT_PREFIXES = (
     "text/",
     "application/json",
@@ -237,7 +227,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Output root.")
     parser.add_argument("--headless", action="store_true", help="Run browser headless.")
-    parser.add_argument("--max-image-save", type=int, default=30, help="Maximum image bodies saved per target.")
     parser.add_argument("--max-scrolls", type=int, default=6, help="Maximum scroll passes per target.")
     parser.add_argument("--behavior-profile", default="", help="Human-flow behavior profile name. Defaults to each site profile.")
     parser.add_argument("--timeout", type=int, default=60_000, help="Navigation timeout in milliseconds.")
@@ -380,14 +369,6 @@ def is_text_response(response: Response) -> bool:
     return any(ctype.startswith(prefix) for prefix in TEXT_CONTENT_PREFIXES)
 
 
-def image_extension(response: Response, url: str) -> str:
-    ctype = content_type_base(response.headers.get("content-type", ""))
-    if ctype in IMAGE_EXTENSIONS:
-        return IMAGE_EXTENSIONS[ctype]
-    path_suffix = Path(urlparse(url).path).suffix.lower()
-    return path_suffix if path_suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".avif"} else ".img"
-
-
 async def open_context(playwright, target: dict[str, Any], args: argparse.Namespace) -> BrowserContext:
     profile_dir = profile_dir_for_target(target)
     ensure_dir(profile_dir)
@@ -489,11 +470,13 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
     url = str(target["url"])
     target_dir = batch_dir / f"{site_key}_{slug(url)}"
     image_dir = target_dir / "images"
-    ensure_dir(image_dir)
     site_policy = get_site(site_key) if target.get("configured") else None
 
-    image_records: list[dict[str, Any]] = []
-    failed_image_records: list[dict[str, Any]] = []
+    image_counts = {
+        "successful_responses": 0,
+        "http_failed_responses": 0,
+        "request_failed": 0,
+    }
     text_flags: list[dict[str, Any]] = []
     policy_events: list[dict[str, Any]] = []
     cookie_events: list[dict[str, Any]] = []
@@ -511,8 +494,6 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
     )
     behavior_events: list[dict[str, Any]] = []
     pending_tasks: set[asyncio.Task] = set()
-    image_save_lock = asyncio.Lock()
-    saved_images = 0
 
     douyin_target = is_douyin_target(site_key, url)
     profile_dir = profile_dir_for_target(target)
@@ -621,11 +602,9 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
 
     async def record_request_failed(request: Request) -> None:
         if request.resource_type == "image":
-            failure = request.failure or ""
-            failed_image_records.append({"url": request.url, "resource_type": request.resource_type, "failure": failure})
+            image_counts["request_failed"] += 1
 
     async def record_response(response: Response) -> None:
-        nonlocal saved_images
         try:
             if is_video_response(response):
                 if len(media_policy["video_responses"]) < 40:
@@ -639,26 +618,10 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
                     )
                 return
             if is_image_response(response):
-                record: dict[str, Any] = {
-                    "url": response.url,
-                    "status": response.status,
-                    "ok": response.ok,
-                    "content_type": response.headers.get("content-type", ""),
-                    "resource_type": response.request.resource_type,
-                    "saved_path": "",
-                    "bytes": None,
-                }
                 if response.ok:
-                    async with image_save_lock:
-                        if saved_images < args.max_image_save:
-                            body = await response.body()
-                            digest = hashlib.sha1(response.url.encode("utf-8")).hexdigest()[:12]
-                            out_path = image_dir / f"image_{saved_images + 1:03d}_{digest}{image_extension(response, response.url)}"
-                            out_path.write_bytes(body)
-                            record["saved_path"] = str(out_path)
-                            record["bytes"] = len(body)
-                            saved_images += 1
-                image_records.append(record)
+                    image_counts["successful_responses"] += 1
+                else:
+                    image_counts["http_failed_responses"] += 1
                 return
             if is_text_response(response):
                 body = await response.body()
@@ -666,9 +629,9 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
                 flags = extract_flags_from_text(text)
                 if flags:
                     text_flags.append({"url": response.url, "status": response.status, "flags": flags})
-        except Exception as exc:
+        except Exception:
             if is_image_response(response):
-                image_records.append({"url": response.url, "status": response.status, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+                image_counts["http_failed_responses"] += 1
 
     context.on("requestfailed", lambda request: track_task(record_request_failed(request)))
     context.on("response", lambda response: track_task(record_response(response)))
@@ -741,9 +704,7 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
     if douyin_target and args.douyin_cookie_cleanup != "off":
         cookie_events.append(clean_douyin_profile_cookies(profile_dir))
 
-    total_image_requests = len(image_records) + len(failed_image_records)
-    image_success = sum(1 for item in image_records if item.get("ok"))
-    image_http_fail = sum(1 for item in image_records if not item.get("ok"))
+    total_image_requests = sum(image_counts.values())
     summary = {
         "site": site_key,
         "url": url,
@@ -766,11 +727,11 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
         "artifact_errors": artifact_errors,
         "image_summary": {
             "total_requests": total_image_requests,
-            "successful_responses": image_success,
-            "http_failed_responses": image_http_fail,
-            "request_failed": len(failed_image_records),
-            "saved_images": saved_images,
-            "image_dir": str(image_dir),
+            "successful_responses": image_counts["successful_responses"],
+            "http_failed_responses": image_counts["http_failed_responses"],
+            "request_failed": image_counts["request_failed"],
+            "saved_images": 0,
+            "image_dir": "",
         },
         "flags": sorted(set(flags + [flag for item in text_flags for flag in item.get("flags", [])])),
         "artifact_dir": str(target_dir),
@@ -784,8 +745,8 @@ async def crawl_one(playwright, target: dict[str, Any], batch_dir: Path, args: a
     }
     (target_dir / "rendered.html").write_text(rendered_html, encoding="utf-8")
     (target_dir / "visible_text.txt").write_text(visible_text, encoding="utf-8")
-    (target_dir / "images.json").write_text(json.dumps(image_records, ensure_ascii=False, indent=2), encoding="utf-8")
-    (target_dir / "failed_images.json").write_text(json.dumps(failed_image_records, ensure_ascii=False, indent=2), encoding="utf-8")
+    (target_dir / "images.json").write_text("[]", encoding="utf-8")
+    (target_dir / "failed_images.json").write_text("[]", encoding="utf-8")
     (target_dir / "capture_meta.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
 

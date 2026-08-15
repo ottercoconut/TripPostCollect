@@ -272,8 +272,6 @@ def run_ctf_resource_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         str(ctf_output),
         "--scrapling-preflight",
         str(params.get("scrapling_preflight") or "auto"),
-        "--max-image-save",
-        str(int(params.get("max_image_save") or 3)),
         "--max-scrolls",
         str(int(params.get("max_scrolls") or 2)),
         "--timeout",
