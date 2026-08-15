@@ -154,11 +154,18 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 | `web_post_images.local_path` | 根项目复验并晋升后的 `data/media/...` 项目相对路径；正式新记录不能为空 |
 | `web_post_images.width/height/mime_type/sha256` | 根项目重新读取本地文件得到并与 manifest 相等的字节证据 |
 | `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；同 SHA 重复来源写入 `local_file.sha256_duplicate_sources`，不混入头像等非正文对象 |
-| `web_post_images`（`author_avatar`） | 可选作者头像 URL 参考；`local_path` 等本地字段为空，不下载、不进 manifest、不计入 `post_images_count` 或正文图完整性 |
-| `raw_sample_json` | MediaCrawler 原始 JSONL 行；正式记录必须含 `content_detail_status` 和 `content_detail_source` |
+| `raw_sample_json` | MediaCrawler 记录经头像清除后的结构化样本；正式记录必须含 `content_detail_status` 和 `content_detail_source` |
 
 代码在下载前用五个平台显式投影识别正文图，在导入边界识别其他同类字段差异；内部持久化结构
 统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
+
+schema v17 删除 `web_posts.author_avatar_url`，并把 `web_post_images.image_role` 约束为 `content` 或
+页面证据使用的 `page`。迁移在单一事务中删除旧头像关系、递归清理所有 schema 声明的 JSON 列并
+重建图片表；正文图片、逐帖 `post_images_count` 和非头像作者字段的数量与哈希必须保持不变。
+先用 `scripts/migrate_author_avatar_data.py --dry-run` 在临时副本演练，再去掉 `--dry-run` 迁移正式库；
+正式命令会在 `data/backups/author_avatar_removal/` 建一致性备份，并把审计摘要写入
+`outputs/database_migrations/<run_id>/author_avatar_removal.json`。既有历史备份与运行产物只报告残留，
+不由该命令删除或改写。
 
 显式使用 `--recovery-keyword` 人工续跑时，最终摘要会合并旧、新两轮记录，
 正常记录的 `web_posts.keyword` 会逐条保存真实来源，因此同一个最终 `artifact_dir` 可以同时
@@ -233,7 +240,17 @@ B站还要按本轮 `artifact_dir` 检查 `raw_sample_json.content_detail_status
 
 ## 页面级抓取结果入库
 
-B站 Opus 详情页由 `ctf_resource_crawl.py` 保存页面证据，再由 `import_ctf_captures.py` 同步写入两层数据：`ctf_captures` / `ctf_capture_images` 作为证据和调试底座，`web_posts` / `web_post_images` 作为用户使用的统一内容主表。页面级抓取会从 `article:published_time`、JSON-LD、`time[datetime]` 等明确页面元数据中提取 `published_at`，并在抓取元数据中直接保存为 Asia/Shanghai ISO 字符串；B站 Opus/图文页还会从可见文本中的明确日期行提取。没有明确证据时保持为空，不用抓取时间替代。截图属于证据附件，截图失败会记录到 `artifact_errors`，但只要页面内容、文本和图片资源已成功采集，不应把整条内容标成抓取失败。
+B站 Opus 详情页由 `ctf_resource_crawl.py` 保存页面文本、HTML、截图和请求聚合证据，再由
+`import_ctf_captures.py` 写入 `ctf_captures` 与 `web_posts`。页面级抓取会从
+`article:published_time`、JSON-LD、`time[datetime]` 等明确页面元数据中提取 `published_at`，并在
+抓取元数据中直接保存为 Asia/Shanghai ISO 字符串；B站 Opus/图文页还会从可见文本中的明确日期行
+提取。没有明确证据时保持为空，不用抓取时间替代。截图属于整页证据附件，截图失败会记录到
+`artifact_errors`，但页面内容和文本已成功采集时不单独把内容标成失败。
+
+页面证据没有可证明的正文图片角色，因此不读取或保存任意图片响应 URL/响应体，图片请求只保留
+非识别聚合计数，`images.json` 和 `failed_images.json` 固定为空数组。导入新旧产物时均不创建
+`ctf_capture_images` 或 `web_post_images.image_role=page`，并删除同一 capture/post 的既有未分类
+图片行；截图不拆分为图片关系。页面元数据仍须在 JSON/SQLite 序列化前执行共享头像清除器。
 
 当前 `config/crawl_targets.json` 没有页面证据正式任务，以下直接命令只用于开发或诊断验证。
 该执行器使用独立浏览器 profile，`login_warmup.py --targets all` 不验证它。若以后新增固定 URL
@@ -247,7 +264,6 @@ python scripts/ctf_resource_crawl.py \
   --sites bilibili \
   --keyword 崂山攻略 \
   --headless \
-  --max-image-save 3 \
   --max-scrolls 2
 ```
 
@@ -348,7 +364,8 @@ LIMIT 10;
 
 - `site_key`、`target_url`、`artifact_dir` 必须存在。
 - `capture_meta.json`、`rendered.html`、`visible_text.txt`、`images.json` 等引用文件应存在。
-- `images.json` 中的图片统计要和 `image_summary` 对得上。
+- 新产物的 `images.json` 与 `failed_images.json` 必须为空，`image_summary.saved_images=0`；历史未分类
+  图片记录只产生忽略警告，不检查文件、不导入关系。
 - flag-like 文本只做格式校验，不在抓取阶段清洗。
 - `skipped=true` 的视频跳过产物只保留为运行证据，不导入 `ctf_captures`，也不生成 `web_posts`。
 
@@ -375,7 +392,8 @@ MediaCrawler 入库采用去重更新：
   等可捕获进程中断必须先回滚此前已晋升的新文件，再继续传播中断。进入 SQLite 批次事务后、成功
   提交前的同类中断按提交前导入失败处理：整批数据库与新媒体回滚，返回 `sqlite_import_failed`
   摘要而不再传播；提交成功后的中断继续传播并保留引用文件。不可捕获的 `SIGKILL` 不作完成承诺。
-- 原始 JSONL 行完整保留在 `raw_sample_json`，便于后续清洗补字段。
+- 除已知头像键及同记录内经这些键证明的重复头像 URL 外，清除后的 JSONL 结构完整保存在
+  `raw_sample_json`，便于后续清洗补字段。
 
 ## 历史数据说明
 
@@ -389,8 +407,9 @@ B站 2026-08-02 正文完整性事件已经完成回填和清理，当前入库�
 - 当前规则禁止视频功能。项目侧 `--get-media` 会直接失败；五平台正式 runner 全部强制
   `--download-images`，同时保持 MediaCrawler 视频保存关闭，抖音图片路径不会回退到视频或音乐下载。
 - 正式新记录只下载并以 `content` 角色导入显式投影的正文图。头像、作者主页、封面、搜索预览、
-  视频、音乐和知乎公式图会在下载前自动忽略，不进入 manifest 或 `data/media`；作者头像可以保留
-  为 `author_avatar` URL 参考关系，但本地字段为空且不参与正文图完整性。
+  视频、音乐和知乎公式图会在下载前自动忽略，不进入 manifest、`data/media`、项目 JSONL、摘要
+  子进程日志或 SQLite；历史未清除产物在恢复读取时也必须先在内存中清除头像数据。非结构化
+  stdout/stderr 出现任一已知头像键时整段丢弃为审计标记，不按 URL 域名或路径猜测。
 - 知乎当前是 MediaCrawler 入库路径；页面级产物只作为临时排障证据，不作为默认调度链路。
 - 正式有效性过滤在入库前完成；业务清洗、低质量分级和 flag-like 误报处理仍放在 SQL 视图或下游清洗层。
 - `outputs/` 不是长期图片主存储。结构化内容、作者、互动数、URL、本地路径、状态和摘要应进入

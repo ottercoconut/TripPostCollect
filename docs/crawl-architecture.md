@@ -17,6 +17,7 @@ config/crawl_targets.json
           -> scripts/crawl_policy.py
           -> scripts/mediacrawler_behavior.py
           -> tools/MediaCrawler 或项目自有 B站 article 分支
+          -> 共享头像清除器（失败关闭）
           -> JSONL + image_manifest.jsonl + staging 图片
           -> 根项目字段、manifest 和字节复验
           -> data/media + SQLite 批次事务
@@ -47,6 +48,7 @@ runner 负责选择任务、冻结计划、调用 child、验证产物、持久�
   -> 搜索/顶部刷新/深层发现
   -> 已知 ID 前置过滤
   -> 详情、作者和权威正文图补全
+  -> 头像清除器（失败关闭）
   -> child JSONL、分页事件、manifest 与 staging
   -> 根项目正式字段和本地图片只读复验
   -> 完成模式与运行状态门禁
@@ -75,11 +77,17 @@ runner 负责选择任务、冻结计划、调用 child、验证产物、持久�
 
 平台 store 只拥有当前会话下载、staging 和 manifest；根项目拥有路径安全、字节复验、同帖去重、
 长期文件和 SQLite。头像、作者主页、搜索预览、封面、视频、音乐及知乎公式图在显式字段投影阶段
-就没有进入正文图片链路。作者头像可作为 URL 参考保存，但不下载、不进入正文图计数。
+就没有进入正文图片链路。平台响应可在内存中含头像字段，但共享导出清除器会在任何项目 JSONL、
+摘要或 SQLite 序列化前递归删除已知头像键和同记录内经这些键证明的重复 URL；子进程 stdout/stderr
+一旦出现已知头像键则整段替换为审计标记，避免日志或摘要尾部泄漏同一头像 URL。清除失败时不落盘。
 
 正式 runner 固定启用 `--download-images`。`--no-import` 诊断只做到 staging 和只读复验，不晋升
 长期文件或写 SQLite；视频 store 与旧 `--get-media` 路径不可达。图片格式、事务等式和失败恢复见
 [数据持久化](data-persistence.md)。
+
+固定 URL 页面证据不使用正文图片投影。执行器只记录图片请求的非识别聚合计数，不保存任意图片
+响应 URL 或响应体；截图作为整页证据附件保留，但不形成 `ctf_capture_images`、正文图片或 `page`
+关系。历史 `images.json` 在恢复导入时也不得重新生成未分类图片行。
 
 ## 状态与发现记忆
 
@@ -121,9 +129,10 @@ runner 在进入下一阶段前重新读取状态并校验冻结输入。dry-run
 
 ## 页面证据
 
-固定 URL 页面由 `ctf_resource_crawl.py` 写入 `ctf_captures` / `ctf_capture_images`，内容就绪时再由
-`import_ctf_captures.py` 归一化到用户内容表。当前正式配置没有页面证据任务，直接运行只用于开发或
-诊断；以后若配置正式任务，仍必须从 `crawl_runner.py` 进入。详见
+固定 URL 页面由 `ctf_resource_crawl.py` 写页面级产物，`import_ctf_captures.py` 导入
+`ctf_captures`，内容就绪时再归一化到用户内容表；任意图片响应不写 `ctf_capture_images` 或图片关系。
+当前正式配置没有页面证据任务，直接运行只用于开发或诊断；以后若配置正式任务，仍必须从
+`crawl_runner.py` 进入。详见
 [页面证据平台](platforms/page-evidence.md)。
 
 ## 辅助入口

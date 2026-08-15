@@ -262,9 +262,13 @@ runner run_summary.json
 - `image_materialization.required/promotion_required/complete` 均为 true，失败数组和失败计数为空；
 - manifest 身份、SHA 与计数已由 `artifacts_verified` 复验；
 - SQLite 正文图片具有连续 index、项目相对路径、尺寸、MIME、SHA，文件位于 `data/media`；
+- 本轮新 JSONL、摘要、child stdout/stderr 和活库不含已知头像键、经这些键证明的头像 URL 或头像
+  关系；子进程输出若触发整段头像审计标记属于正确清除结果。只核对本轮产物与活库，不为日常验收
+  宽泛扫描历史 `outputs/`、备份或冻结证据；
 - 分页证据包含停止事件；只有批次事件而无停止事件时按运行失败处理。
 
-固定 URL 页面任务成功只代表该页面证据完成，不代表平台批量目标完成。
+固定 URL 页面任务成功只代表该页面证据完成，不代表平台批量目标完成。页面证据执行器只记录图片
+请求聚合计数，不保存任意图片响应 URL 或响应体；截图仍是整页证据附件，不拆分为图片关系。
 
 ### 常见失败分流
 

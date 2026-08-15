@@ -142,9 +142,11 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 `image_urls`、微博 `mblog.pics` 归一后的 `image_list`、小红书笔记详情 `image_list`、抖音图文
 `note_download_url`、知乎正文/详情 `image_list`。通用递归 URL 搜索不属于正式能力。作者头像、作者
 主页资源、搜索预览、封面、视频、音乐和知乎公式图片均不得生成正文候选、下载任务、manifest
-行、长期文件或 `image_role=content` 的图片关系；B站搜索预览图尤其不能替代详情正文图。作者头像
-可以作为独立 `image_role=author_avatar` 的 URL-only 参考关系保留，但不下载、不计入
-`post_images_count`，也不参与本地图片完整性等式。
+行、长期文件或任何图片关系；B站搜索预览图尤其不能替代详情正文图。作者头像不是可选图片角色，
+不得形成下载请求、JSONL/摘要字段、子进程日志内容、`web_posts` 字段、JSON 值或
+`web_post_images` 关系。导出与入库边界必须递归删除 `avatar_url`、`author_avatar`、
+`author_avatar_url`、`avatar`、`user_avatar`，并删除
+同一记录内与这些键下 URL 完全相同的重复值；不得按域名、路径或文件名推测头像。
 
 平台特有的 URL/资产键归一规则写在对应平台文档；所有平台都必须保留原始来源证据，且不得使用
 感知哈希或视觉相似度改变正式候选集合。

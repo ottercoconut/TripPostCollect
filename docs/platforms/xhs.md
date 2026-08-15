@@ -35,7 +35,8 @@
 - 正文必须来自笔记详情非空 `desc`，保存
   `content_detail_status=detail_observed`、`content_detail_source=note_detail`。
 - 正文图只来自详情 `image_list`；每个对象按 `url_default`、`url`、`url_pre` 选择一个 URL，并用稳定
-  notes 路径生成资产键。头像、作者主页、封面、搜索预览和视频不可达。
+  notes 路径生成资产键。头像、作者主页图片、封面、搜索预览和视频不进入图片候选或下载链；作者
+  主页仍只用于观察粉丝量等研究所需作者指标。
 - 图片请求复用当前隔离账号的 BrowserContext/API Cookie，不解密第二份会话，不调用视频 store。
 - 作者粉丝必须来自当前登录会话的作者主页，保存数值、`followers_observed=true` 和
   `author_followers_source=creator_profile`。笔记 `xsec_token` 不能作为作者主页凭据。

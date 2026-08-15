@@ -75,7 +75,7 @@ search ID 时，从刷新链下一页写 `discovery_frontier_reseeded` 并替换
 ## 严格 images-only
 
 只有确认的图文作品进入图片入口。`cover_url`、封面、`video_download_url`、音乐、头像和搜索预览
-均不可达；代码不得调用 `get_aweme_video()`、视频 store 或音乐下载。平台层使用当前 `dy_client`
+均不进入 `ImageCandidate`、staging 或 manifest；代码不得调用 `get_aweme_video()`、视频 store 或音乐下载。平台层使用当前 `dy_client`
 会话和新鲜签名 URL 写 staging/manifest，根项目按 `note_download_url` 重建候选并执行通用字节复验、
 同帖去重、晋升和 SQLite 事务。
 
