@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
 from typing import Any, Iterable
 from urllib.parse import urlsplit
@@ -17,6 +18,17 @@ AUTHOR_AVATAR_KEYS = frozenset(
         "user_avatar",
     }
 )
+# XHS serializes its creator profile as a JSON string.  These are documented
+# profile-field paths, not host/path/filename inference: ``imageb`` and
+# ``images`` are the avatar fields beneath the exported ``basicInfo`` object.
+XHS_SERIALIZED_PROFILE_AVATAR_PATHS = {
+    "creator_profile_json": frozenset(
+        {
+            ("basicInfo", "imageb"),
+            ("basicInfo", "images"),
+        }
+    )
+}
 AUTHOR_AVATAR_TEXT_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:avatar_url|author_avatar|author_avatar_url|avatar|user_avatar)(?![A-Za-z0-9_])",
     re.IGNORECASE,
@@ -52,6 +64,31 @@ def _is_avatar_key(value: Any) -> bool:
     return isinstance(value, str) and value.casefold() in AUTHOR_AVATAR_KEYS
 
 
+def serialized_avatar_profile_keys() -> frozenset[str]:
+    """Return exported fields containing an explicitly mapped JSON profile."""
+
+    return frozenset(XHS_SERIALIZED_PROFILE_AVATAR_PATHS)
+
+
+def _serialized_avatar_paths(key: Any) -> frozenset[tuple[str, ...]]:
+    if not isinstance(key, str):
+        return frozenset()
+    return XHS_SERIALIZED_PROFILE_AVATAR_PATHS.get(key.casefold(), frozenset())
+
+
+def _parse_serialized_json(value: Any) -> Any | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or candidate[0] not in "[{":
+        return None
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, (dict, list)) else None
+
+
 def _evidenced_url(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -85,16 +122,27 @@ def discover_author_avatar_urls(value: Any) -> frozenset[str]:
 
     discovered: set[str] = set()
 
-    def visit(node: Any) -> None:
+    def visit(
+        node: Any,
+        *,
+        avatar_paths: frozenset[tuple[str, ...]] = frozenset(),
+        path: tuple[str, ...] = (),
+    ) -> None:
         if isinstance(node, dict):
             for key, nested in node.items():
-                if _is_avatar_key(key):
+                nested_path = path + (str(key),)
+                if _is_avatar_key(key) or nested_path in avatar_paths:
                     _collect_urls(nested, discovered)
                 else:
-                    visit(nested)
+                    nested_avatar_paths = _serialized_avatar_paths(key)
+                    serialized = _parse_serialized_json(nested) if nested_avatar_paths else None
+                    if serialized is not None:
+                        visit(serialized, avatar_paths=nested_avatar_paths)
+                    else:
+                        visit(nested, avatar_paths=avatar_paths, path=nested_path)
         elif isinstance(node, (list, tuple)):
             for nested in node:
-                visit(nested)
+                visit(nested, avatar_paths=avatar_paths, path=path)
 
     visit(value)
     return frozenset(discovered)
@@ -124,15 +172,42 @@ def sanitize_author_avatar_data(
     removed_keys = 0
     removed_values = 0
 
-    def clean(node: Any) -> Any:
+    def clean(
+        node: Any,
+        *,
+        avatar_paths: frozenset[tuple[str, ...]] = frozenset(),
+        path: tuple[str, ...] = (),
+    ) -> Any:
         nonlocal removed_keys, removed_values
         if isinstance(node, dict):
             cleaned: dict[Any, Any] = {}
             for key, nested in node.items():
-                if _is_avatar_key(key):
+                nested_path = path + (str(key),)
+                if _is_avatar_key(key) or nested_path in avatar_paths:
                     removed_keys += 1
                     continue
-                cleaned_value = clean(nested)
+                nested_avatar_paths = _serialized_avatar_paths(key)
+                serialized = _parse_serialized_json(nested) if nested_avatar_paths else None
+                if serialized is not None:
+                    before_changes = removed_keys + removed_values
+                    cleaned_serialized = clean(
+                        serialized,
+                        avatar_paths=nested_avatar_paths,
+                    )
+                    if removed_keys + removed_values == before_changes:
+                        cleaned_value = nested
+                    else:
+                        cleaned_value = json.dumps(
+                            cleaned_serialized,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                else:
+                    cleaned_value = clean(
+                        nested,
+                        avatar_paths=avatar_paths,
+                        path=nested_path,
+                    )
                 if cleaned_value is _REMOVED:
                     continue
                 cleaned[key] = cleaned_value
@@ -140,14 +215,14 @@ def sanitize_author_avatar_data(
         if isinstance(node, list):
             cleaned_list: list[Any] = []
             for nested in node:
-                cleaned_value = clean(nested)
+                cleaned_value = clean(nested, avatar_paths=avatar_paths, path=path)
                 if cleaned_value is not _REMOVED:
                     cleaned_list.append(cleaned_value)
             return cleaned_list
         if isinstance(node, tuple):
             cleaned_items: list[Any] = []
             for nested in node:
-                cleaned_value = clean(nested)
+                cleaned_value = clean(nested, avatar_paths=avatar_paths, path=path)
                 if cleaned_value is not _REMOVED:
                     cleaned_items.append(cleaned_value)
             return tuple(cleaned_items)

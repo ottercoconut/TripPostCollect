@@ -159,9 +159,11 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 代码在下载前用五个平台显式投影识别正文图，在导入边界识别其他同类字段差异；内部持久化结构
 统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
 
-schema v17 删除 `web_posts.author_avatar_url`，并把 `web_post_images.image_role` 约束为 `content` 或
-页面证据使用的 `page`。迁移在单一事务中删除旧头像关系、递归清理所有 schema 声明的 JSON 列并
-重建图片表；正文图片、逐帖 `post_images_count` 和非头像作者字段的数量与哈希必须保持不变。
+schema v18 删除 `web_posts.author_avatar_url`，并把 `web_post_images.image_role` 约束为 `content` 或
+页面证据使用的 `page`。迁移在单一事务中删除旧头像关系、递归清理所有 schema 声明的 JSON 列，并
+按小红书导出结构明确清理序列化 `creator_profile_json.basicInfo.imageb/images` 头像字段；不按 URL
+域名、路径或文件名推断头像。随后重建图片表；正文图片、逐帖 `post_images_count` 和非头像作者字段的
+数量与哈希必须保持不变。
 先用 `scripts/migrate_author_avatar_data.py --dry-run` 在临时副本演练，再去掉 `--dry-run` 迁移正式库；
 正式命令会在 `data/backups/author_avatar_removal/` 建一致性备份，并把审计摘要写入
 `outputs/database_migrations/<run_id>/author_avatar_removal.json`。既有历史备份与运行产物只报告残留，

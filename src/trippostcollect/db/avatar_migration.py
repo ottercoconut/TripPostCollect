@@ -1,4 +1,4 @@
-"""Idempotent schema-v17 migration removing persisted author-avatar data."""
+"""Idempotent schema-v18 migration removing persisted author-avatar data."""
 
 from __future__ import annotations
 
@@ -12,11 +12,12 @@ from trippostcollect.records.sanitization import (
     AUTHOR_AVATAR_KEYS,
     discover_author_avatar_urls,
     sanitize_author_avatar_data,
+    serialized_avatar_profile_keys,
 )
 
 
-MIGRATION_VERSION = 17
-MIGRATION_NAME = "remove_author_avatars"
+MIGRATION_VERSION = 18
+MIGRATION_NAME = "remove_author_avatars_and_serialized_xhs_profiles"
 
 
 class AvatarMigrationError(RuntimeError):
@@ -164,8 +165,9 @@ def _iter_json_payloads(
     conn: sqlite3.Connection,
 ) -> Iterable[tuple[str, str, int, str, Any]]:
     for table, column in _json_columns(conn):
+        evidence_keys = sorted(AUTHOR_AVATAR_KEYS | serialized_avatar_profile_keys())
         alias_predicate = " OR ".join(
-            f"INSTR(LOWER({_quote(column)}), ?) > 0" for _ in AUTHOR_AVATAR_KEYS
+            f"INSTR(LOWER({_quote(column)}), ?) > 0" for _ in evidence_keys
         )
         sql = (
             f"SELECT rowid, {_quote(column)} FROM {_quote(table)} "
@@ -174,7 +176,7 @@ def _iter_json_payloads(
         )
         cursor = conn.execute(
             sql,
-            [f'"{alias.casefold()}"' for alias in AUTHOR_AVATAR_KEYS],
+            [f'"{alias.casefold()}"' for alias in evidence_keys],
         )
         while rows := cursor.fetchmany(200):
             for rowid, raw_value in rows:
@@ -259,7 +261,7 @@ def _sanitize_json_columns(
 def _rebuild_image_table(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
-        CREATE TABLE web_post_images_v17 (
+        CREATE TABLE web_post_images_v18 (
             id INTEGER PRIMARY KEY,
             web_post_id INTEGER NOT NULL REFERENCES web_posts(id) ON DELETE CASCADE,
             image_index INTEGER NOT NULL,
@@ -278,7 +280,7 @@ def _rebuild_image_table(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
-        INSERT INTO web_post_images_v17 (
+        INSERT INTO web_post_images_v18 (
             id, web_post_id, image_index, image_url, image_role, local_path,
             width, height, mime_type, sha256, raw_image_json, created_at
         )
@@ -290,7 +292,7 @@ def _rebuild_image_table(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("DROP TABLE web_post_images")
-    conn.execute("ALTER TABLE web_post_images_v17 RENAME TO web_post_images")
+    conn.execute("ALTER TABLE web_post_images_v18 RENAME TO web_post_images")
     conn.execute(
         """
         CREATE UNIQUE INDEX idx_web_post_images_unique
@@ -345,7 +347,7 @@ def _assert_clean(residuals: dict[str, Any]) -> None:
 
 
 def migrate_remove_author_avatars(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Apply schema v17 inside the caller's transaction or savepoint."""
+    """Apply schema v18 inside the caller's transaction or savepoint."""
 
     already_applied = _migration_applied(conn)
     _validate_json_columns(conn)
@@ -384,7 +386,7 @@ def migrate_remove_author_avatars(conn: sqlite3.Connection) -> dict[str, Any]:
     }
     _assert_no_content_url_conflicts(conn, avatar_urls)
 
-    conn.execute("SAVEPOINT remove_author_avatars_v17")
+    conn.execute("SAVEPOINT remove_author_avatars_v18")
     try:
         json_changes = _sanitize_json_columns(conn)
         _rebuild_image_table(conn)
@@ -407,10 +409,10 @@ def migrate_remove_author_avatars(conn: sqlite3.Connection) -> dict[str, Any]:
         residuals = _avatar_residuals(conn, avatar_urls)
         _assert_clean(residuals)
     except BaseException:
-        conn.execute("ROLLBACK TO SAVEPOINT remove_author_avatars_v17")
-        conn.execute("RELEASE SAVEPOINT remove_author_avatars_v17")
+        conn.execute("ROLLBACK TO SAVEPOINT remove_author_avatars_v18")
+        conn.execute("RELEASE SAVEPOINT remove_author_avatars_v18")
         raise
-    conn.execute("RELEASE SAVEPOINT remove_author_avatars_v17")
+    conn.execute("RELEASE SAVEPOINT remove_author_avatars_v18")
     return {
         "version": MIGRATION_VERSION,
         "name": MIGRATION_NAME,

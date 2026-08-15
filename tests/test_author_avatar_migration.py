@@ -120,7 +120,7 @@ def insert_legacy_post(conn: sqlite3.Connection, post_id: int, platform_key: str
     )
 
 
-def test_v17_migration_removes_avatar_data_and_is_idempotent() -> None:
+def test_v18_migration_removes_avatar_data_and_is_idempotent() -> None:
     with legacy_connection() as conn:
         insert_legacy_post(conn, 1, "xhs")
         insert_legacy_post(conn, 2, "zhihu")
@@ -194,7 +194,7 @@ def test_v17_migration_removes_avatar_data_and_is_idempotent() -> None:
             )
 
 
-def test_v17_migration_refuses_avatar_content_url_overlap_without_changes() -> None:
+def test_v18_migration_refuses_avatar_content_url_overlap_without_changes() -> None:
     with legacy_connection() as conn:
         insert_legacy_post(conn, 1, "xhs")
         conn.execute(
@@ -212,15 +212,15 @@ def test_v17_migration_refuses_avatar_content_url_overlap_without_changes() -> N
             "SELECT COUNT(*) FROM web_post_images WHERE image_role='author_avatar'"
         ).fetchone()[0] == 1
         assert conn.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version=17"
+            "SELECT COUNT(*) FROM schema_migrations WHERE version=18"
         ).fetchone()[0] == 0
 
 
-def test_fresh_bootstrap_uses_clean_v17_schema() -> None:
+def test_fresh_bootstrap_uses_clean_v18_schema() -> None:
     with sqlite3.connect(":memory:") as conn:
         result = bootstrap_connection(conn, sync_jobs=False)
 
-        assert result["avatar_migration"]["version"] == 17
+        assert result["avatar_migration"]["version"] == 18
         assert "author_avatar_url" not in {
             row[1] for row in conn.execute("PRAGMA table_info(web_posts)")
         }
@@ -228,3 +228,50 @@ def test_fresh_bootstrap_uses_clean_v17_schema() -> None:
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='web_post_images'"
         ).fetchone()[0]
         assert "author_avatar" not in table_sql
+
+
+def test_v18_migration_removes_xhs_serialized_creator_profile_avatar_fields() -> None:
+    profile_avatar = "https://sns.example.test/avatar/profile.jpg"
+    with legacy_connection() as conn:
+        insert_legacy_post(conn, 1, "xhs")
+        conn.execute(
+            "UPDATE web_posts SET raw_sample_json=? WHERE id=1",
+            (
+                json.dumps(
+                    {
+                        "creator_profile_json": json.dumps(
+                            {
+                                "basicInfo": {
+                                    "imageb": profile_avatar,
+                                    "images": [profile_avatar],
+                                    "nickname": "作者",
+                                },
+                                "redId": "xhs-author-1",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        "copied_profile_avatar": profile_avatar,
+                        "title": "青岛亲子游",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        report = migrate_remove_author_avatars(conn)
+        raw_sample = json.loads(
+            conn.execute("SELECT raw_sample_json FROM web_posts WHERE id=1").fetchone()[0]
+        )
+
+        assert report["version"] == 18
+        assert raw_sample == {
+            "creator_profile_json": json.dumps(
+                {
+                    "basicInfo": {"nickname": "作者"},
+                    "redId": "xhs-author-1",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "title": "青岛亲子游",
+        }

@@ -24,7 +24,7 @@
     },
     {
       "path": "docs/data-persistence.md",
-      "sha256": "7aa04f7b49718289140e3401a1f52e8cdf0fb1cf94780b5e2ba0e93ac3ae65c9",
+      "sha256": "453c006f8b371b286563aa315da97d5f8b6eba6681ab3b89c4f5cd095b0bc6c7",
       "reason": "用户授权更新并重新冻结的正文图片本地路径、事务和校验规范",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true

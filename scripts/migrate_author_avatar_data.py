@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply the audited schema-v17 author-avatar removal migration."""
+"""Apply the audited schema-v18 author-avatar removal migration."""
 
 from __future__ import annotations
 

@@ -80,6 +80,48 @@ def test_non_url_avatar_value_does_not_remove_matching_research_text() -> None:
     assert result.avatar_urls == frozenset()
 
 
+def test_xhs_serialized_creator_profile_removes_only_mapped_avatar_fields() -> None:
+    profile_avatar = "https://sns.example.test/avatar/profile.jpg"
+    payload = {
+        "creator_profile_json": json.dumps(
+            {
+                "basicInfo": {
+                    "imageb": profile_avatar,
+                    "images": [profile_avatar],
+                    "nickname": "青岛亲子游作者",
+                },
+                "author_id": "red-1",
+            },
+            ensure_ascii=False,
+        ),
+        "copied_profile_avatar": profile_avatar,
+        "followers_count": 42,
+    }
+
+    result = sanitize_author_avatar_data(payload)
+
+    assert json.loads(result.value["creator_profile_json"]) == {
+        "basicInfo": {"nickname": "青岛亲子游作者"},
+        "author_id": "red-1",
+    }
+    assert result.value == {
+        "creator_profile_json": result.value["creator_profile_json"],
+        "followers_count": 42,
+    }
+    assert result.avatar_urls == frozenset({profile_avatar})
+    assert result.removed_keys == 2
+    assert result.removed_values == 1
+
+
+def test_unmapped_serialized_json_is_not_interpreted_as_avatar_profile() -> None:
+    payload = {
+        "other_json": json.dumps({"basicInfo": {"imageb": AVATAR_URL}}),
+        "author_id": "author-1",
+    }
+
+    assert sanitize_author_avatar_data(payload).value == payload
+
+
 def test_unstructured_child_output_with_avatar_key_is_discarded_whole() -> None:
     output = (
         'record={"avatar_url": "https://avatar.test/author.jpg"}\n'
