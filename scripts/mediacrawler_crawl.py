@@ -98,6 +98,11 @@ from trippostcollect.core.paths import (
 )
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.registry import get_site
+from trippostcollect.records.sanitization import (
+    AUTHOR_AVATAR_LOG_REDACTION,
+    redact_author_avatar_text,
+    sanitize_author_avatar_data,
+)
 from trippostcollect.scheduler.discovery import (
     load_checkpoint,
     load_skipped_candidates,
@@ -969,6 +974,10 @@ def run_command(
             stdout += decode_text(extra_stdout)
             stderr += decode_text(extra_stderr)
 
+    _, avatar_output_detected = redact_author_avatar_text(f"{stdout}\n{stderr}")
+    if avatar_output_detected:
+        stdout = AUTHOR_AVATAR_LOG_REDACTION
+        stderr = AUTHOR_AVATAR_LOG_REDACTION
     stdout_log = log_dir / "stdout.log"
     stderr_log = log_dir / "stderr.log"
     command_log = log_dir / "command.txt"
@@ -1343,6 +1352,10 @@ def row_for_record(
     keyword: str,
     materialized_images: list[MaterializedImage] | None = None,
 ) -> dict[str, Any]:
+    sanitized_record = sanitize_author_avatar_data(record).value
+    if not isinstance(sanitized_record, dict):
+        raise ValueError("sanitized record must remain an object")
+    record = sanitized_record
     content_text = content_text_for_record(platform_key, record)
     canonical_url = canonical_url_for_record(platform_key, record)
     image_items = image_items_for_record(platform_key, record)
@@ -1360,14 +1373,6 @@ def row_for_record(
     author = {
         "nickname": first_value(record, "nickname", "user_nickname", "user_name", "author_name"),
         "creator_hash": first_value(record, "user_id", "creator_id", "creator_hash", "author_id"),
-        "avatar_url": first_value(
-            record,
-            "avatar_url",
-            "author_avatar",
-            "author_avatar_url",
-            "avatar",
-            "user_avatar",
-        ),
         "followers_count": parse_int(
             first_value(
                 record,
@@ -1395,7 +1400,6 @@ def row_for_record(
         "author_display_name": author["nickname"],
         "author_platform_id": author["creator_hash"],
         "author_profile_url": first_value(record, "author_profile_url", "user_link", "profile_url", "user_url"),
-        "author_avatar_url": author["avatar_url"],
         "author_description": first_value(record, "author_desc", "user_desc"),
         "author_followers_count": author["followers_count"],
         "author_following_count": author["following_count"],
@@ -1888,6 +1892,11 @@ def collect_formal_records(
                     if not isinstance(record, dict):
                         reason_counts["invalid_record_type"] += 1
                         continue
+                    sanitized_record = sanitize_author_avatar_data(record).value
+                    if not isinstance(sanitized_record, dict):
+                        reason_counts["invalid_record_type"] += 1
+                        continue
+                    record = sanitized_record
                     validation = validate_formal_record(platform_key, record, seen)
                     if not validation["valid"]:
                         reason_counts.update(validation["reasons"])
@@ -3839,6 +3848,10 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                             normalized["author_followers_count"] = follower_count
                     seen_ids.add(post_id)
                     known_post_ids.add(post_id)
+                    sanitized_record = sanitize_author_avatar_data(normalized).value
+                    if not isinstance(sanitized_record, dict):
+                        raise RuntimeError("sanitized Bilibili record must remain an object")
+                    normalized = sanitized_record
                     records.append(normalized)
                     validation = validate_formal_record(platform_key, normalized, valid_seen)
                     if validation["valid"]:
@@ -4102,7 +4115,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "uv",
         "run",
         "python",
-        "main.py",
+        str(ROOT / "scripts" / "mediacrawler_export_entrypoint.py"),
         "--platform",
         platform["mediacrawler"],
         "--lt",
@@ -4135,6 +4148,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
     if getattr(args, "zhihu_detail_urls", []):
         cmd.extend(["--specified_id", ",".join(args.zhihu_detail_urls)])
     extra_env: dict[str, str] = {
+        "TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS": "1",
         "TRIPPOSTCOLLECT_TARGET_NEW_POSTS": str(max(1, source_target_new_posts)),
         "TRIPPOSTCOLLECT_CANDIDATE_HARD_LIMIT": str(source_candidate_hard_limit),
         "TRIPPOSTCOLLECT_MAX_STAGNANT_BATCHES": str(max(1, args.max_stagnant_batches)),

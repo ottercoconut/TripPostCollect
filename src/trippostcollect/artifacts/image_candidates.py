@@ -302,26 +302,10 @@ def content_image_candidates(platform_key: str, record: dict[str, Any]) -> list[
     ]
 
 
-def author_avatar_reference(record: dict[str, Any]) -> dict[str, Any] | None:
-    """Keep an optional remote avatar relationship outside body-image candidates."""
-
-    for source_key in ("avatar_url", "author_avatar", "author_avatar_url", "avatar", "user_avatar"):
-        source_url = normalize_image_url(record.get(source_key))
-        if source_url:
-            return {
-                "url": source_url,
-                "role": "author_avatar",
-                "source_key": source_key,
-                "source_index": 0,
-            }
-    return None
-
-
 def image_items_for_record(platform_key: str, record: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build explicit persistence items while keeping avatars URL-only."""
+    """Build persistence items from authoritative post-body images only."""
 
-    items = [candidate.as_image_item() for candidate in content_image_candidates(platform_key, record)]
-    avatar = author_avatar_reference(record)
-    if avatar:
-        items.append(avatar)
-    return items
+    return [
+        candidate.as_image_item()
+        for candidate in content_image_candidates(platform_key, record)
+    ]

@@ -16,7 +16,6 @@ CREATE TABLE IF NOT EXISTS web_posts (
     author_display_name TEXT,
     author_platform_id TEXT,
     author_profile_url TEXT,
-    author_avatar_url TEXT,
     author_description TEXT,
     author_followers_count INTEGER,
     author_following_count INTEGER,
@@ -72,7 +71,7 @@ CREATE TABLE IF NOT EXISTS web_post_images (
     sha256 TEXT,
     raw_image_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    CHECK (image_role IN ('content', 'page', 'author_avatar'))
+    CHECK (image_role IN ('content', 'page'))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_web_post_images_unique

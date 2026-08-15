@@ -17,6 +17,7 @@ from trippostcollect.artifacts.image_materialization import (
     promote_validated_image,
     write_staging_image,
 )
+from trippostcollect.artifacts.image_persistence import normalize_persistence_items
 from trippostcollect.db.bootstrap import bootstrap_connection
 
 
@@ -40,6 +41,19 @@ def png_bytes(color: tuple[int, int, int]) -> bytes:
 
 def test_pillow_mpo_decoder_is_treated_as_jpeg_bytes() -> None:
     assert PIL_FORMAT_MIME["MPO"] == "image/jpeg"
+
+
+def test_persistence_contract_rejects_author_avatar_role() -> None:
+    with pytest.raises(ImagePersistenceError, match="invalid image role"):
+        normalize_persistence_items(
+            [
+                {
+                    "role": "author_avatar",
+                    "source_index": 0,
+                    "url": "https://avatar.test/author.jpg",
+                }
+            ]
+        )
 
 
 def xhs_record(urls: list[str], *, title: str = "title") -> dict:
@@ -124,7 +138,7 @@ def strict_upsert(
     )
 
 
-def test_new_post_persists_complete_content_relationships_and_url_only_avatar(tmp_path: Path) -> None:
+def test_new_post_persists_complete_content_relationships_without_avatar(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     record = xhs_record(
@@ -156,11 +170,10 @@ def test_new_post_persists_complete_content_relationships_and_url_only_avatar(tm
         foreign_keys = conn.execute("PRAGMA foreign_key_check").fetchall()
 
     content = [row for row in images if row[1] == "content"]
-    avatar = [row for row in images if row[1] == "author_avatar"]
     assert post_images_count == len(content) == sum(bool(row[2]) for row in content) == 2
     assert [row[0] for row in content] == [0, 1]
     assert all(row[3:7] == (5, 4, "image/png", materialized[row[0]].sha256) for row in content)
-    assert len(avatar) == 1 and avatar[0][0] == 0 and avatar[0][2] is None
+    assert len(images) == len(content)
     raw = json.loads(content[0][7])
     assert raw["source_asset_key"].startswith("xhs:path:")
     assert raw["source_index"] == 0

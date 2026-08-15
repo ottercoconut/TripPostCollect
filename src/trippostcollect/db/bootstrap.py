@@ -19,6 +19,7 @@ from trippostcollect.core.paths import (
     XHS_CONTROL_SCHEMA,
     ensure_parent,
 )
+from trippostcollect.db.avatar_migration import migrate_remove_author_avatars
 from trippostcollect.platforms.registry import SITES
 
 
@@ -212,7 +213,7 @@ def ensure_source_platforms(conn: sqlite3.Connection) -> int:
     return len(SITES)
 
 
-def ensure_content_schema(conn: sqlite3.Connection) -> int:
+def ensure_content_schema(conn: sqlite3.Connection) -> tuple[int, dict[str, Any]]:
     platform_count = ensure_source_platforms(conn)
     conn.executescript(WEB_POSTS_SCHEMA.read_text(encoding="utf-8"))
     conn.execute("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", (4, "web_posts"))
@@ -224,7 +225,8 @@ def ensure_content_schema(conn: sqlite3.Connection) -> int:
     migrate_remove_city_name(conn)
     conn.execute("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", (7, "published_at_fields"))
     conn.execute("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", (8, "capture_to_posts"))
-    return platform_count
+    avatar_migration = migrate_remove_author_avatars(conn)
+    return platform_count, avatar_migration
 
 
 def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
@@ -566,7 +568,10 @@ def bootstrap_connection(
     sync_jobs: bool = True,
 ) -> dict[str, Any]:
     conn.execute("PRAGMA foreign_keys = ON")
-    platform_count = ensure_content_schema(conn) if sync_content else 0
+    platform_count = 0
+    avatar_migration: dict[str, Any] | None = None
+    if sync_content:
+        platform_count, avatar_migration = ensure_content_schema(conn)
     if sync_scheduler:
         ensure_scheduler_schema(conn)
         ensure_xhs_control_schema(conn)
@@ -577,6 +582,7 @@ def bootstrap_connection(
     conn.commit()
     return {
         "source_platforms": platform_count,
+        "avatar_migration": avatar_migration,
         "scheduler_schema": bool(sync_scheduler),
         "synced_jobs": synced_jobs,
     }

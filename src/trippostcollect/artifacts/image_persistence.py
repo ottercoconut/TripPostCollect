@@ -42,7 +42,7 @@ def normalize_persistence_items(image_items: list[dict[str, Any]]) -> list[dict[
     for raw_item in image_items:
         item = dict(raw_item)
         role = str(item.get("role") or "")
-        if role not in {"content", "author_avatar", "page"}:
+        if role not in {"content", "page"}:
             raise ImagePersistenceError(f"invalid image role: {role!r}")
         source_index = item.get("source_index")
         if source_index is None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from importlib import import_module
 from pathlib import Path
@@ -7,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from trippostcollect.artifacts.image_candidates import (
-    author_avatar_reference,
     content_image_candidates,
     normalize_image_url,
     source_asset_key_for_image,
@@ -192,7 +192,7 @@ def test_non_content_fields_never_become_content_candidates(
     assert content_image_candidates(platform_key, record) == []
 
 
-def test_avatar_is_kept_as_a_separate_url_only_reference() -> None:
+def test_avatar_is_removed_from_row_and_image_relationships() -> None:
     record = {
         "note_id": "xhs-2",
         "image_list": "https://example.test/body.jpg",
@@ -208,22 +208,11 @@ def test_avatar_is_kept_as_a_separate_url_only_reference() -> None:
     )
 
     assert row["post_images_count"] == 1
-    assert [item["role"] for item in row["_image_items"]] == ["content", "author_avatar"]
+    assert [item["role"] for item in row["_image_items"]] == ["content"]
     assert row["_image_items"][0]["source_index"] == 0
-    assert row["_image_items"][1] == {
-        "url": "https://example.test/avatar.jpg",
-        "role": "author_avatar",
-        "source_key": "avatar_url",
-        "source_index": 0,
-    }
-    assert author_avatar_reference(record) == row["_image_items"][1]
-
-    assert author_avatar_reference({"author_avatar": "https://example.test/legacy-avatar.jpg"}) == {
-        "url": "https://example.test/legacy-avatar.jpg",
-        "role": "author_avatar",
-        "source_key": "author_avatar",
-        "source_index": 0,
-    }
+    assert "author_avatar_url" not in row
+    assert "avatar_url" not in json.loads(row["author_json"])
+    assert "avatar_url" not in json.loads(row["raw_sample_json"])
 
 
 def test_normalize_image_url_rejects_non_http_values() -> None:
