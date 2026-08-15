@@ -52,6 +52,7 @@ RECORD_SELECT = """
     LEFT JOIN (
         SELECT web_post_id, COUNT(*) AS image_count
         FROM web_post_images
+        WHERE image_role = 'content'
         GROUP BY web_post_id
     ) img ON img.web_post_id = p.id
 """
@@ -108,7 +109,7 @@ class RecordRepository:
             """
             SELECT *
             FROM web_post_images
-            WHERE web_post_id = ?
+            WHERE web_post_id = ? AND image_role = 'content'
             ORDER BY image_index ASC, id ASC
             """,
             (record_id,),
@@ -121,7 +122,7 @@ class RecordRepository:
             SELECT i.*, p.platform_key, p.id AS record_id
             FROM web_post_images i
             JOIN web_posts p ON p.id = i.web_post_id
-            WHERE i.id = ?
+            WHERE i.id = ? AND i.image_role = 'content'
             """,
             (image_id,),
         ).fetchone()

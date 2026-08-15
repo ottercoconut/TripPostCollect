@@ -44,7 +44,7 @@ export type RecordImage = {
   web_post_id: number;
   image_index: number;
   image_url: string;
-  image_role: string;
+  image_role: "content";
   local_path?: string | null;
   mime_type?: string | null;
 };
@@ -83,7 +83,6 @@ export type RecordContext = {
     display_name?: string | null;
     platform_id?: string | null;
     profile_url?: string | null;
-    avatar_url?: string | null;
     description?: string | null;
     followers_count?: number | null;
     following_count?: number | null;

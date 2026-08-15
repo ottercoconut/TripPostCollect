@@ -17,7 +17,10 @@
 ## 产品边界
 
 - 以 `web_posts` 为内容主表，以 `web_post_images` 为正文图片子表。
-- `ctf_captures` 和 `ctf_capture_images` 只作为证据与调试上下文展示。
+- 作者头像不属于管理端数据契约；列表计数、详情列表和图片代理只读取 `image_role=content`，旧的
+  `page` 或头像关系 ID 不能通过正文图片代理访问。
+- `ctf_captures` 作为页面证据与调试上下文展示；`ctf_capture_images` 仅兼容读取历史证据，现行页面
+  执行器和导入器不再新增任意图片响应记录。
 - 不提供记录或图片的创建、修改、隐藏、排序、删除和重导入。
 - 不从浏览器触发抓取、调度同步、数据库维护或 shell 命令。
 - 不编辑 `source_platforms`、`crawl_jobs` 或抓取配置。
@@ -112,7 +115,7 @@ Compose 会把数据库和配置解析为宿主机绝对路径，再以只读方
 |---|---|
 | `/api/health`、`/api/meta` | 服务、数据库和运行元数据 |
 | `/api/records` | 记录列表、详情上下文和原始字段 |
-| `/api/images` | 正文图片代理 |
+| `/api/images` | 仅限 `image_role=content` 的正文图片代理 |
 | `/api/captures` | 页面证据、证据图片和白名单 artifact |
 | `/api/overview` | 计数、字段缺口和近期运行 |
 | `/api/platforms` | 平台元数据 |

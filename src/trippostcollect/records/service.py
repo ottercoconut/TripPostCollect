@@ -103,7 +103,6 @@ class RecordService:
                 "display_name": record.get("author_display_name"),
                 "platform_id": record.get("author_platform_id"),
                 "profile_url": record.get("author_profile_url"),
-                "avatar_url": record.get("author_avatar_url"),
                 "description": record.get("author_description"),
                 "followers_count": record.get("author_followers_count"),
                 "following_count": record.get("author_following_count"),

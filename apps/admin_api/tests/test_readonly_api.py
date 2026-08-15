@@ -174,6 +174,13 @@ class ReadonlyAdminApiTest(unittest.TestCase):
                     """,
                     (cls.post_id, str(cls.symlink_path)),
                 ).lastrowid
+            cls.page_image_id = conn.execute(
+                """
+                INSERT INTO web_post_images(web_post_id, image_index, image_url, image_role, local_path, raw_image_json)
+                VALUES (?, 0, 'https://example.test/page.png', 'page', ?, '{}')
+                """,
+                (cls.post_id, str(cls.image_path)),
+            ).lastrowid
             cls.capture_image_id = conn.execute(
                 """
                 INSERT INTO ctf_capture_images(ctf_capture_id, image_index, image_url, ok, content_type, saved_path, raw_image_json)
@@ -192,6 +199,7 @@ class ReadonlyAdminApiTest(unittest.TestCase):
         detail = self.client.get(f"/api/records/{self.post_id}")
         self.assertEqual(detail.status_code, 200, detail.text)
         self.assertEqual(detail.json()["data"]["author"]["followers_count"], 42)
+        self.assertNotIn("avatar_url", detail.json()["data"]["author"])
 
         context = self.client.get(f"/api/records/{self.post_id}/context")
         self.assertEqual(context.status_code, 200, context.text)
@@ -224,6 +232,10 @@ class ReadonlyAdminApiTest(unittest.TestCase):
 
     def test_images_and_capture_artifacts_enforce_readonly_path_boundaries(self) -> None:
         self.assertEqual(self.client.get(f"/api/records/{self.post_id}/images").status_code, 200)
+        listed_images = self.client.get(f"/api/records/{self.post_id}/images").json()["data"]
+        self.assertTrue(listed_images)
+        self.assertEqual({item["image_role"] for item in listed_images}, {"content"})
+        self.assertEqual(self.client.get(f"/api/images/{self.page_image_id}/preview").status_code, 404)
         self.assertEqual(self.client.get(f"/api/images/{self.local_image_id}/preview").status_code, 200)
         with mock.patch("apps.admin_api.app.routers.images.fetch_remote_image_preview") as fetch_preview:
             fetch_preview.return_value = RemoteImagePreview(
