@@ -72,8 +72,6 @@ def verify_image_artifacts(
         promoted_images = int(image.get("promoted_images") or 0)
         rolled_back_images = int(image.get("rolled_back_images") or 0)
         reused_images = int(image.get("reused_images") or 0)
-        retryable_failures = int(image.get("retryable_failures") or 0)
-        terminal_failures = int(image.get("terminal_failures") or 0)
         sha256_duplicates = image.get("sha256_duplicates")
         manifest_items = image.get("manifest_evidence")
         manifest_paths = image.get("manifest_paths")
@@ -124,7 +122,10 @@ def verify_image_artifacts(
             raise ValueError("SHA-256 unique/duplicate image count does not match candidates")
         if unique_images > expected_images:
             raise ValueError("SHA-256 unique image count exceeds candidates")
-        if retryable_failures or terminal_failures or image.get("failures"):
+        # Failure counters include candidates skipped before formal selection.
+        # They remain audit evidence, but only a selected image failure makes a
+        # complete materialization artifact invalid.
+        if image.get("failures"):
             raise ValueError("image materialization contains failures")
         if rolled_back_images:
             raise ValueError("image materialization required promotion rollback")

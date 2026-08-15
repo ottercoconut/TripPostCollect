@@ -191,6 +191,29 @@ def test_runner_rehashes_manifests_and_rejects_tampering(tmp_path: Path) -> None
     assert "SHA-256 mismatch" in rejected["reason"]
 
 
+def test_runner_accepts_complete_selected_images_with_skipped_candidates(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    summary, _, _ = complete_xhs_summary(project_root)
+    summary["image_materialization"].update(
+        {
+            "retryable_failures": 2,
+            "terminal_failures": 3,
+            "failures": [],
+        }
+    )
+
+    verified = verify_image_artifacts(
+        summary,
+        project_root=project_root,
+        expect_promotion=True,
+    )
+
+    assert verified["ok"] is True
+
+
 def test_runner_revalidates_sqlite_relations_and_long_term_bytes(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
