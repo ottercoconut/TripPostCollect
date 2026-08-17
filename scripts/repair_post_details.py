@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from urllib.parse import urlparse
 
 from execution_state import FORMAL_STEPS, FrozenExecutionState
 from failure_classifier import extract_stdout_json
+from mediacrawler_behavior import HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS
 from trippostcollect.artifacts.image_completion import (
     verify_image_artifacts,
     verify_image_persistence,
@@ -311,6 +313,58 @@ def load_child_summary(path_value: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def run_repair_child(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Run a detail child with the same process-group timeout contract as formal crawls."""
+
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        env=os.environ.copy(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        return {
+            "returncode": int(process.returncode or 0),
+            "stdout": stdout or "",
+            "stderr": stderr or "",
+            "timed_out": False,
+            "timeout_seconds": timeout_seconds,
+        }
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            extra_stdout, extra_stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            extra_stdout, extra_stderr = process.communicate()
+        stdout += extra_stdout or ""
+        stderr += extra_stderr or ""
+        return {
+            "returncode": 124,
+            "stdout": stdout,
+            "stderr": stderr,
+            "timed_out": True,
+            "timeout_seconds": timeout_seconds,
+        }
+
+
 def repaired_rows(
     conn: sqlite3.Connection,
     platform: str,
@@ -588,29 +642,34 @@ def main() -> int:
         backup = create_sqlite_backup(db_path, backup_path)
         state.begin("command_executed")
         for batch_plan in batch_plans:
-            completed = subprocess.run(
+            child_run = run_repair_child(
                 batch_plan["command"],
                 cwd=PROJECT_ROOT,
-                env=os.environ.copy(),
-                capture_output=True,
-                text=True,
-                timeout=args.timeout_per_batch + 120,
-                check=False,
+                timeout_seconds=(
+                    args.timeout_per_batch + HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS
+                ),
             )
-            stdout = completed.stdout or ""
-            stderr = completed.stderr or ""
+            stdout = child_run["stdout"]
+            stderr = child_run["stderr"]
             stdout_json = extract_stdout_json(stdout)
             child_summary_path = str(stdout_json.get("summary") or "")
             child_summary = load_child_summary(child_summary_path)
             child_error = ""
-            if not child_summary:
-                child_error = f"missing_child_summary_exit_{completed.returncode}"
+            if child_run["timed_out"]:
+                child_error = (
+                    "post_detail_repair_batch_timeout:"
+                    f"{child_run['timeout_seconds']}"
+                )
+            elif not child_summary:
+                child_error = f"missing_child_summary_exit_{child_run['returncode']}"
             else:
                 child_error = _fatal_child_failure(child_summary)
             batch_result = {
                 "batch": batch_plan["batch"],
                 "target_count": batch_plan["target_count"],
-                "exit_code": int(completed.returncode),
+                "exit_code": int(child_run["returncode"]),
+                "timed_out": bool(child_run["timed_out"]),
+                "timeout_seconds": int(child_run["timeout_seconds"]),
                 "summary": child_summary_path,
                 "import_completion_met": bool(child_summary.get("import_completion_met")),
                 "valid_total_count": int(

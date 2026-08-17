@@ -136,6 +136,10 @@ python scripts/repair_post_details.py \
 微博和知乎只替换 `--platform`。单轮会按 `--batch-size` 扫描当前所有可执行待修复记录；
 `--max-items N` 用于小批试跑，`--post-id ID` 用于精确重试。详情或图片候选失败只留下该旧记录继续
 待修复，成功子集可以入库；登录、验证码、频控、策略、SQLite 或持久化验证失败会停止后续批次。
+`--timeout-per-batch` 是传给 MediaCrawler 的基础平台预算；修复总控会在此基础上额外保留正式抓取同款
+`HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS` 行为预算（当前 240 秒），并对整个进程组执行先 `SIGTERM`、
+后 `SIGKILL` 的收束。这样浏览器行为预算不会被父进程过早截断；微博等慢平台可显式提高该参数，
+例如 `--timeout-per-batch 1800`，但不得绕过批次、备份和状态门禁。
 摘要状态 `completed_with_remaining` 表示本轮已有可验证进展但选中目标仍有残留，不表示库存清零；
 继续运行同一平台，直到摘要同时满足 `status=completed`、`all_selected_targets_recovered=true` 和
 `remaining_pending_count=0`。若一轮 `recovered_count=0`，程序失败退出，先按摘要排障，不做无限循环。

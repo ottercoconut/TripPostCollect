@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import signal
+import subprocess
 import sys
 from importlib import import_module
 from pathlib import Path
@@ -376,3 +378,46 @@ def test_partial_generic_repair_can_commit_valid_subset() -> None:
         image_materialization={"complete": True},
         behavior_validation={"ok": True},
     ) is False
+
+
+def test_run_repair_child_timeout_uses_formal_process_group_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, int, int | None]] = []
+
+    class FakeProcess:
+        pid = 4242
+        returncode = None
+
+        def communicate(self, *, timeout: int | None = None) -> tuple[str, str]:
+            if timeout == 17:
+                raise subprocess.TimeoutExpired(
+                    ["child"], timeout, output="before", stderr="warning"
+                )
+            self.returncode = 124
+            return "after", "tail"
+
+    process = FakeProcess()
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        del command
+        events.append(("popen", int(kwargs["start_new_session"]), int(kwargs["text"])))
+        return process
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        events.append(("killpg", pid, sig))
+
+    monkeypatch.setattr(repair.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(repair.os, "killpg", fake_killpg)
+
+    result = repair.run_repair_child(
+        ["child"],
+        cwd=ROOT,
+        timeout_seconds=17,
+    )
+
+    assert result["timed_out"] is True
+    assert result["returncode"] == 124
+    assert result["stdout"] == "beforeafter"
+    assert result["stderr"] == "warningtail"
+    assert events == [("popen", 1, 1), ("killpg", 4242, signal.SIGTERM)]
