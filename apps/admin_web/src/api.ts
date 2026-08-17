@@ -1,6 +1,7 @@
 import type {
   ApiEnvelope,
   Capture,
+  KeywordUsage,
   Meta,
   Platform,
   RecordContext,
@@ -58,6 +59,7 @@ function query(params: Record<string, string | number | undefined>): string {
 export const api = {
   meta: () => request<Meta>("/api/meta"),
   platforms: () => request<Platform[]>("/api/platforms"),
+  keywords: () => request<KeywordUsage[]>("/api/records/keywords"),
   records: (filters: RecordFilters) =>
     requestWithMeta<RecordSummary[]>(
       `/api/records${query({

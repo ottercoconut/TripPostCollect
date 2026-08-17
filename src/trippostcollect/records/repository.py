@@ -97,6 +97,18 @@ class RecordRepository:
             },
         )
 
+    def list_keywords(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT keyword, COUNT(*) AS record_count
+            FROM web_posts
+            WHERE keyword IS NOT NULL AND TRIM(keyword) <> ''
+            GROUP BY keyword
+            ORDER BY record_count DESC, keyword ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_record(self, record_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
             f"{RECORD_SELECT} WHERE p.id = ?",

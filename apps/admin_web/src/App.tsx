@@ -20,7 +20,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, type RecordFilters } from "./api";
-import type { Meta, Platform, RecordContext, RecordRaw, RecordSummary, Report } from "./types";
+import type { KeywordUsage, Meta, Platform, RecordContext, RecordRaw, RecordSummary, Report } from "./types";
 
 type View = "records" | "quality" | "reports";
 
@@ -45,6 +45,7 @@ export function App() {
   const view = viewFromPath(location.pathname);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [platforms, setPlatforms] = useState<Platform[]>([]);
+  const [keywords, setKeywords] = useState<KeywordUsage[]>([]);
   const [filters, setFilters] = useState<RecordFilters>(emptyFilters);
   const [records, setRecords] = useState<RecordSummary[]>([]);
   const [recordsMeta, setRecordsMeta] = useState<Record<string, unknown>>({});
@@ -59,9 +60,10 @@ export function App() {
     setLoading(true);
     setError(null);
     try {
-      const [metaData, platformData, recordsPayload, reportsData, gapsData, missingImages, missingPublished, missingFollowers] = await Promise.all([
+      const [metaData, platformData, keywordData, recordsPayload, reportsData, gapsData, missingImages, missingPublished, missingFollowers] = await Promise.all([
         api.meta(),
         api.platforms(),
+        api.keywords(),
         api.records(filters),
         api.reports(),
         api.overviewGaps(),
@@ -71,6 +73,7 @@ export function App() {
       ]);
       setMeta(metaData);
       setPlatforms(platformData);
+      setKeywords(keywordData);
       setRecords(recordsPayload.data);
       setRecordsMeta(recordsPayload.meta);
       setReports(reportsData);
@@ -162,6 +165,7 @@ export function App() {
                 filters={filters}
                 setFilters={setFilters}
                 platforms={platforms}
+                keywords={keywords}
                 records={records}
                 recordsMeta={recordsMeta}
                 fieldGaps={fieldGaps}
@@ -184,13 +188,14 @@ function RecordWorkbench(props: {
   filters: RecordFilters;
   setFilters: (filters: RecordFilters) => void;
   platforms: Platform[];
+  keywords: KeywordUsage[];
   records: RecordSummary[];
   recordsMeta: Record<string, unknown>;
   fieldGaps: Record<string, number | null>;
   locateIssue: (missingField: string, recordId?: number) => void;
   openRecord: (recordId: number) => void;
 }) {
-  const { filters, setFilters, platforms, records, recordsMeta } = props;
+  const { filters, setFilters, platforms, keywords, records, recordsMeta } = props;
   const total = Number(recordsMeta.total ?? records.length);
   const page = Number(filters.page ?? recordsMeta.page ?? 1);
   const pageSize = Number(filters.page_size ?? recordsMeta.page_size ?? 50);
@@ -216,7 +221,17 @@ function RecordWorkbench(props: {
             </select>
           </Field>
           <Field label="关键词">
-            <input value={filters.keyword} onChange={(event) => setFilters({ ...filters, keyword: event.target.value, page: 1 })} />
+            <input
+              list="record-keyword-options"
+              value={filters.keyword}
+              onChange={(event) => setFilters({ ...filters, keyword: event.target.value, page: 1 })}
+              placeholder="输入或选择关键词"
+            />
+            <datalist id="record-keyword-options">
+              {keywords.map((item) => (
+                <option key={item.keyword} value={item.keyword} />
+              ))}
+            </datalist>
           </Field>
           <Field label="状态">
             <select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value, page: 1 })}>
@@ -241,6 +256,33 @@ function RecordWorkbench(props: {
               <input value={filters.q} onChange={(event) => setFilters({ ...filters, q: event.target.value, page: 1 })} />
             </div>
           </Field>
+        </div>
+        <div className="keyword-browser">
+          <div className="keyword-browser-label">
+            <span>全部关键词</span>
+            <strong>{keywords.length}</strong>
+          </div>
+          <div className="keyword-browser-list">
+            {keywords.length > 0 ? (
+              keywords.map((item) => {
+                const active = filters.keyword === item.keyword;
+                return (
+                  <button
+                    type="button"
+                    key={item.keyword}
+                    className={active ? "keyword-filter active" : "keyword-filter"}
+                    aria-pressed={active}
+                    onClick={() => setFilters({ ...filters, keyword: active ? "" : item.keyword, page: 1 })}
+                  >
+                    <span>{item.keyword}</span>
+                    <small>{item.record_count}</small>
+                  </button>
+                );
+              })
+            ) : (
+              <span className="keyword-browser-empty">暂无关键词</span>
+            )}
+          </div>
         </div>
       </div>
 

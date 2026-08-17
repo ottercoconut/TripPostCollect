@@ -26,6 +26,9 @@ class RecordService:
             meta=result.meta,
         )
 
+    def list_keywords(self) -> list[dict[str, Any]]:
+        return self.repository.list_keywords()
+
     def get_record_detail(self, record_id: int) -> dict[str, Any] | None:
         record = self.repository.get_record(record_id)
         if record is None:

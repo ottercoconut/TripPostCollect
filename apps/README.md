@@ -114,7 +114,7 @@ Compose 会把数据库和配置解析为宿主机绝对路径，再以只读方
 | 前缀 | 内容 |
 |---|---|
 | `/api/health`、`/api/meta` | 服务、数据库和运行元数据 |
-| `/api/records` | 记录列表、详情上下文和原始字段 |
+| `/api/records` | 记录列表、已使用关键词聚合、详情上下文和原始字段 |
 | `/api/images` | 仅限 `image_role=content` 的正文图片代理 |
 | `/api/captures` | 页面证据、证据图片和白名单 artifact |
 | `/api/overview` | 计数、字段缺口和近期运行 |

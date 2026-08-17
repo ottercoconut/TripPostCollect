@@ -230,6 +230,13 @@ class ReadonlyAdminApiTest(unittest.TestCase):
         latest = self.client.get("/api/records")
         self.assertEqual(latest.json()["meta"]["total"], 2)
 
+        keywords = self.client.get("/api/records/keywords")
+        self.assertEqual(keywords.status_code, 200, keywords.text)
+        self.assertEqual(
+            keywords.json()["data"],
+            [{"keyword": "青岛旅游", "record_count": 2}],
+        )
+
     def test_images_and_capture_artifacts_enforce_readonly_path_boundaries(self) -> None:
         self.assertEqual(self.client.get(f"/api/records/{self.post_id}/images").status_code, 200)
         listed_images = self.client.get(f"/api/records/{self.post_id}/images").json()["data"]

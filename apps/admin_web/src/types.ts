@@ -39,6 +39,11 @@ export type RecordSummary = {
   status?: string;
 };
 
+export type KeywordUsage = {
+  keyword: string;
+  record_count: number;
+};
+
 export type RecordImage = {
   id: number;
   web_post_id: number;

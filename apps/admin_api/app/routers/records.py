@@ -58,6 +58,11 @@ def list_records(
     return ok(result.items, result.meta)
 
 
+@router.get("/keywords")
+def list_keywords(service: RecordService = Depends(record_service)) -> dict:
+    return ok(service.list_keywords())
+
+
 @router.get("/{record_id}")
 def get_record(record_id: int, service: RecordService = Depends(record_service)) -> dict:
     record = service.get_record_detail(record_id)
