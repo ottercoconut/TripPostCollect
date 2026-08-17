@@ -25,7 +25,7 @@ from email.utils import parsedate_to_datetime
 from hashlib import md5, sha256
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import quote, unquote, urlencode, urlparse
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -396,6 +396,19 @@ def parse_args() -> argparse.Namespace:
         "--zhihu-detail-urls-file",
         help="Diagnostic-only JSON array of Zhihu answer/article URLs to inspect via detail mode.",
     )
+    parser.add_argument(
+        "--xhs-detail-urls-file",
+        help="Existing XHS note URLs to inspect via detail mode; only allowed with --xhs-repair.",
+    )
+    parser.add_argument(
+        "--xhs-repair-target-ids-file",
+        help="JSON array of existing XHS post IDs allowed in --xhs-repair mode.",
+    )
+    parser.add_argument(
+        "--xhs-repair",
+        action="store_true",
+        help="Repair existing XHS rows from specified note detail URLs without discovery writes.",
+    )
     return parser.parse_args()
 
 
@@ -438,6 +451,48 @@ def load_zhihu_detail_urls(path_value: str | Path) -> list[str]:
     if not urls:
         raise SystemExit("Zhihu detail URL file contains no answer/article URLs")
     return urls
+
+
+def load_xhs_detail_urls(path_value: str | Path) -> list[str]:
+    path = Path(path_value).expanduser().resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid XHS detail URL file: {path}: {exc}") from exc
+    if not isinstance(payload, list):
+        raise SystemExit("XHS detail URL file must contain a JSON array")
+
+    urls: list[str] = []
+    for value in payload:
+        raw_url = str(value or "").strip()
+        parsed = urlparse(raw_url)
+        if parsed.scheme != "https" or parsed.hostname not in {"xiaohongshu.com", "www.xiaohongshu.com"}:
+            raise SystemExit(f"unsupported XHS detail URL: {raw_url!r}")
+        if not re.fullmatch(r"/explore/[^/]+/?", parsed.path):
+            raise SystemExit(f"unsupported XHS detail URL path: {raw_url!r}")
+        query = dict(parse_qsl(parsed.query))
+        if not query.get("xsec_token") or not query.get("xsec_source"):
+            raise SystemExit(f"XHS detail URL must contain xsec_token and xsec_source: {raw_url!r}")
+        normalized = parsed._replace(fragment="").geturl()
+        if normalized not in urls:
+            urls.append(normalized)
+    if not urls:
+        raise SystemExit("XHS detail URL file contains no URLs")
+    return urls
+
+
+def load_xhs_repair_target_ids(path_value: str | Path) -> set[str]:
+    path = Path(path_value).expanduser().resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid XHS repair target ID file: {path}: {exc}") from exc
+    if not isinstance(payload, list):
+        raise SystemExit("XHS repair target ID file must contain a JSON array")
+    values = {str(value).strip() for value in payload if str(value).strip()}
+    if not values:
+        raise SystemExit("XHS repair target ID file contains no post IDs")
+    return values
 
 
 def ensure_prerequisites() -> None:
@@ -1847,6 +1902,8 @@ def collect_formal_records(
     require_local_images: bool = False,
     localized_identities: set[str] | None = None,
     materialized_images_by_identity: dict[str, list[MaterializedImage]] | None = None,
+    allowed_identities: set[str] | None = None,
+    repair_mode: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if completion_mode not in {"target-new-posts", "source-exhausted"}:
         raise ValueError(f"unsupported completion mode: {completion_mode}")
@@ -1902,6 +1959,9 @@ def collect_formal_records(
                         reason_counts.update(validation["reasons"])
                         continue
                     identity = str(validation["identity"])
+                    if allowed_identities is not None and identity not in allowed_identities:
+                        reason_counts["repair_target_not_allowed"] += 1
+                        continue
                     if require_local_images and identity not in localized:
                         reason_counts["local_images_incomplete"] += 1
                         local_image_failure_count += 1
@@ -1976,12 +2036,19 @@ def collect_formal_records(
         if completion_mode == "source-exhausted"
         else new_target_met
     ) and not pagination_runtime_blocked and not pagination_incomplete
+    if repair_mode:
+        new_target_met = bool(selected)
+        completion_met = bool(selected) and not pagination_runtime_blocked and not pagination_incomplete
     if unverified_douyin_first_page_empty:
         stop_reason = "runtime_failed"
     elif pagination_runtime_blocked or pagination_incomplete:
         stop_reason = pagination_stop_reason
         if not stop_reason:
             stop_reason = "runtime_failed"
+    elif repair_mode and selected:
+        stop_reason = "repair_targets_processed"
+    elif repair_mode:
+        stop_reason = "repair_no_valid_detail"
     elif (
         completion_mode == "target-new-posts"
         and new_target_met
@@ -2008,6 +2075,7 @@ def collect_formal_records(
     validation_summary = {
         "candidate_hard_limit": candidate_hard_limit,
         "completion_mode": completion_mode,
+        "repair_mode": repair_mode,
         "quantity_limits_enforced": quantity_limits_enforced,
         "candidate_count": candidate_count,
         "run_candidate_count": run_candidate_count,
@@ -4121,7 +4189,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "--lt",
         args.login_type,
         "--type",
-        "detail" if getattr(args, "zhihu_detail_urls", []) else "search",
+        "detail" if (getattr(args, "zhihu_detail_urls", []) or getattr(args, "xhs_detail_urls", [])) else "search",
         "--keywords",
         args.keyword,
         "--get_comment",
@@ -4145,8 +4213,11 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "--enable_ip_proxy",
         "false",
     ]
-    if getattr(args, "zhihu_detail_urls", []):
-        cmd.extend(["--specified_id", ",".join(args.zhihu_detail_urls)])
+    specified_detail_urls = list(getattr(args, "zhihu_detail_urls", [])) + list(
+        getattr(args, "xhs_detail_urls", [])
+    )
+    if specified_detail_urls:
+        cmd.extend(["--specified_id", ",".join(specified_detail_urls)])
     extra_env: dict[str, str] = {
         "TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS": "1",
         "TRIPPOSTCOLLECT_TARGET_NEW_POSTS": str(max(1, source_target_new_posts)),
@@ -4235,6 +4306,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
                     args.xhs_discovery_query_fingerprint
                 ),
                 "TRIPPOSTCOLLECT_XHS_POST_INTERACTION": str(args.xhs_post_interaction),
+                "TRIPPOSTCOLLECT_XHS_REPAIR": "1" if getattr(args, "xhs_repair", False) else "0",
                 "TRIPPOSTCOLLECT_XHS_INITIAL_SETTLE_SECONDS": "12",
                 "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS": (
                     str(XHS_OPERATOR_LOGIN_WAIT_SECONDS) if args.headed else "0"
@@ -4450,6 +4522,7 @@ def collect_behavior_validation(
     platforms: list[str],
     keyword: str,
     xhs_post_interaction: str = "none",
+    repair_mode: bool = False,
 ) -> dict[str, Any]:
     latest_by_platform: dict[str, dict[str, Any]] = {}
     for record in reversed(records):
@@ -4480,14 +4553,18 @@ def collect_behavior_validation(
             for item in continuity_events
             if item.get("status") == "completed"
         }
-        required_pacing_stages = (
-            {"search_results", "note_detail", "creator_profile"}
-            if platform_key == "xhs"
-            else set()
-        )
+        required_pacing_stages = set()
+        if platform_key == "xhs":
+            required_pacing_stages = (
+                {"note_detail", "creator_profile"}
+                if repair_mode
+                else {"search_results", "note_detail", "creator_profile"}
+            )
         pacing_ok = required_pacing_stages.issubset(pacing_stages)
         continuity_ok = (
-            platform_key != "xhs" or "search_results" in continuity_stages
+            platform_key != "xhs"
+            or repair_mode
+            or "search_results" in continuity_stages
         )
         post_interactions = [
             item
@@ -4755,12 +4832,15 @@ def main() -> int:
         and target_new_posts > candidate_hard_limit
     ):
         raise SystemExit("--target-new-posts cannot exceed --candidate-hard-limit")
+    if args.xhs_repair and args.target_new_posts != 0:
+        raise SystemExit("XHS repair mode requires --target-new-posts 0")
     if args.required_fields_profile != "image_post_with_followers_v1":
         raise SystemExit(f"unsupported required fields profile: {args.required_fields_profile}")
     if (
         args.completion_mode == "target-new-posts"
         and not args.no_import
         and target_new_posts <= 0
+        and not args.xhs_repair
     ):
         raise SystemExit("--target-new-posts must be positive unless --no-import is used")
     if args.start_page <= 0:
@@ -4811,6 +4891,23 @@ def main() -> int:
             raise SystemExit(
                 "--candidate-hard-limit must cover every URL in --zhihu-detail-urls-file"
             )
+    args.xhs_detail_urls = []
+    args.xhs_repair_target_ids = set()
+    if args.xhs_detail_urls_file:
+        if platforms != ["xhs"] or not args.xhs_repair:
+            raise SystemExit("--xhs-detail-urls-file requires --platforms xhs --xhs-repair")
+        if args.resume_summary or args.start_page != 1 or args.discovery_job_id is not None:
+            raise SystemExit("XHS repair cannot use discovery resume arguments")
+        if not args.xhs_repair_target_ids_file:
+            raise SystemExit("XHS repair requires --xhs-repair-target-ids-file")
+        args.xhs_detail_urls = load_xhs_detail_urls(args.xhs_detail_urls_file)
+        args.xhs_repair_target_ids = load_xhs_repair_target_ids(args.xhs_repair_target_ids_file)
+        if len(args.xhs_detail_urls) > candidate_hard_limit:
+            raise SystemExit("--candidate-hard-limit must cover every XHS repair URL")
+        if len(args.xhs_detail_urls) != len(args.xhs_repair_target_ids):
+            raise SystemExit("XHS repair URL and target ID files must contain the same number of items")
+    elif args.xhs_repair or args.xhs_repair_target_ids_file:
+        raise SystemExit("XHS repair requires both detail URL and target ID files")
     if "douyin" in platforms and args.start_page > 1 and not args.start_cursor:
         raise SystemExit(
             "Douyin continuation requires --start-cursor together with --start-page"
@@ -4820,11 +4917,13 @@ def main() -> int:
             raise SystemExit("XHS must run alone through scripts/xhs_runner.py")
         if not args.xhs_account_id or not args.xhs_profile_dir or not args.xhs_storage_state:
             raise SystemExit("XHS requires --xhs-account-id, --xhs-profile-dir and --xhs-storage-state")
-        if not args.xhs_discovery_target_key or not args.xhs_discovery_query_fingerprint:
+        if not args.xhs_repair and (
+            not args.xhs_discovery_target_key or not args.xhs_discovery_query_fingerprint
+        ):
             raise SystemExit("XHS requires runner-managed discovery target and query fingerprint")
         if args.behavior_profile != "xhs_guarded":
             raise SystemExit("XHS requires --behavior-profile xhs_guarded")
-        if args.start_page > 1 and not args.start_cursor:
+        if not args.xhs_repair and args.start_page > 1 and not args.start_cursor:
             raise SystemExit("XHS continuation requires --start-cursor together with --start-page")
         if not Path(args.xhs_profile_dir).expanduser().is_dir():
             raise SystemExit("XHS isolated profile directory does not exist")
@@ -4927,13 +5026,26 @@ def main() -> int:
         platforms,
         args.keyword,
         args.xhs_post_interaction,
+        repair_mode=args.xhs_repair,
     )
     summary["behavior_validation"] = behavior_validation
     if resume_info:
         summary["resume"] = resume_info
-    pagination_evidence = load_pagination_evidence(
-        os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()
-    )
+    if args.xhs_repair:
+        pagination_evidence = {
+            "available": True,
+            "stopped": True,
+            "stop_reason": "repair_targets_processed",
+            "stop_detail": "specified_detail_urls",
+            "candidate_count": len(args.xhs_detail_urls),
+            "batches": [],
+            "skipped_candidate_count": 0,
+            "skipped_candidate_failures": [],
+        }
+    else:
+        pagination_evidence = load_pagination_evidence(
+            os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()
+        )
     summary["pagination_evidence"] = pagination_evidence
     content_validation, content_valid_records = collect_formal_records(
         summary,
@@ -4945,6 +5057,10 @@ def main() -> int:
             args.completion_mode == "target-new-posts" and not bool(resume_info)
         ),
         completion_mode=args.completion_mode,
+        allowed_identities={f"xhs:id:{value}" for value in args.xhs_repair_target_ids}
+        if args.xhs_repair
+        else None,
+        repair_mode=args.xhs_repair,
     )
     materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}
     if args.download_images:
@@ -4974,6 +5090,10 @@ def main() -> int:
             completion_mode=args.completion_mode,
             require_local_images=True,
             localized_identities=localized_identities,
+            allowed_identities={f"xhs:id:{value}" for value in args.xhs_repair_target_ids}
+            if args.xhs_repair
+            else None,
+            repair_mode=args.xhs_repair,
         )
     else:
         image_materialization = {
@@ -5048,6 +5168,10 @@ def main() -> int:
                 require_local_images=True,
                 localized_identities=localized_identities,
                 materialized_images_by_identity=materialized_images_by_identity,
+                allowed_identities={f"xhs:id:{value}" for value in args.xhs_repair_target_ids}
+                if args.xhs_repair
+                else None,
+                repair_mode=args.xhs_repair,
             )
             validation = apply_formal_completion_gates(
                 validation,
