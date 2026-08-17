@@ -421,3 +421,20 @@ def test_run_repair_child_timeout_uses_formal_process_group_contract(
     assert result["stdout"] == "beforeafter"
     assert result["stderr"] == "warningtail"
     assert events == [("popen", 1, 1), ("killpg", 4242, signal.SIGTERM)]
+
+
+@pytest.mark.parametrize(
+    ("error", "strict"),
+    [
+        ("post_detail_repair_batch_timeout:2040", False),
+        ("missing_child_summary_exit_2", False),
+        ("runtime_failed", False),
+        ("repair_no_valid_detail", False),
+        ("login_required", True),
+        ("captcha_detected", True),
+        ("crawl_policy_evidence_failed", True),
+        ("sqlite_import_failed", True),
+    ],
+)
+def test_strict_batch_blocker_only_stops_unattended_repair(error: str, strict: bool) -> None:
+    assert repair._strict_batch_blocker(error) is strict

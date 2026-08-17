@@ -140,6 +140,9 @@ python scripts/repair_post_details.py \
 `HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS` 行为预算（当前 240 秒），并对整个进程组执行先 `SIGTERM`、
 后 `SIGKILL` 的收束。这样浏览器行为预算不会被父进程过早截断；微博等慢平台可显式提高该参数，
 例如 `--timeout-per-batch 1800`，但不得绕过批次、备份和状态门禁。
+无人值守模式下，单批超时、child 缺摘要、普通详情运行失败或 `repair_no_valid_detail` 只记录在
+批次结果中并跳过该批，随后继续清单中的后续批次；只有登录失效、验证码/安全策略阻断、SQLite 导入
+失败或媒体/持久化一致性失败才会停止该平台总控。
 摘要状态 `completed_with_remaining` 表示本轮已有可验证进展但选中目标仍有残留，不表示库存清零；
 继续运行同一平台，直到摘要同时满足 `status=completed`、`all_selected_targets_recovered=true` 和
 `remaining_pending_count=0`。若一轮 `recovered_count=0`，程序失败退出，先按摘要排障，不做无限循环。

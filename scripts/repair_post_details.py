@@ -452,6 +452,25 @@ def _fatal_child_failure(summary: dict[str, Any]) -> str:
     return ""
 
 
+def _strict_batch_blocker(error: str) -> bool:
+    """Return whether a child error must stop unattended platform repair."""
+
+    if not error:
+        return False
+    if error.startswith("post_detail_repair_batch_timeout:"):
+        return False
+    if error.startswith("missing_child_summary_exit_"):
+        return False
+    return error in {
+        "login_required",
+        "captcha_detected",
+        "crawl_policy_evidence_failed",
+        "sqlite_import_failed",
+        "post_detail_repair_image_artifacts_incomplete",
+        "post_detail_repair_persistence_not_verified",
+    }
+
+
 def _state_fail_open(state: FrozenExecutionState | None, error: str) -> None:
     if state is None:
         return
@@ -684,7 +703,7 @@ def main() -> int:
             if child_summary:
                 child_summaries.append(child_summary)
             state.append_event("post_detail_repair_batch_finished", batch_result)
-            if child_error:
+            if child_error and _strict_batch_blocker(child_error):
                 fatal_error = f"batch_{batch_plan['batch']}:{child_error}"
                 break
 
