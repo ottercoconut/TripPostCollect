@@ -140,3 +140,21 @@ def test_repair_behavior_gate_does_not_require_search_pacing(monkeypatch) -> Non
 
     assert result["ok"] is True
     assert result["platforms"]["xhs"]["request_pacing_ok"] is True
+
+
+def test_partial_xhs_repair_can_commit_valid_records() -> None:
+    assert mediacrawler.repair_partial_child_execution_allowed(
+        repair_mode=True,
+        child_execution_ok=False,
+        validation={"valid_total_count": 2},
+        image_materialization={"complete": True},
+        behavior_validation={"ok": True},
+    ) is True
+
+    assert mediacrawler.repair_partial_child_execution_allowed(
+        repair_mode=True,
+        child_execution_ok=False,
+        validation={"valid_total_count": 0},
+        image_materialization={"complete": True},
+        behavior_validation={"ok": True},
+    ) is False

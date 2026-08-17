@@ -4817,6 +4817,26 @@ def formal_image_promotion_allowed(
     return bool(download_images and not no_import and validation.get("completion_met"))
 
 
+def repair_partial_child_execution_allowed(
+    *,
+    repair_mode: bool,
+    child_execution_ok: bool,
+    validation: dict[str, Any],
+    image_materialization: dict[str, Any],
+    behavior_validation: dict[str, Any],
+) -> bool:
+    """Allow valid XHS repair records through when another target is unavailable."""
+
+    if child_execution_ok:
+        return True
+    return bool(
+        repair_mode
+        and int(validation.get("valid_total_count") or 0) > 0
+        and bool(image_materialization.get("complete"))
+        and bool(behavior_validation.get("ok"))
+    )
+
+
 def main() -> int:
     args = parse_args()
     if (
@@ -5132,7 +5152,13 @@ def main() -> int:
         image_materialization=image_materialization,
         behavior_validation=behavior_validation,
         download_images=args.download_images,
-        child_execution_ok=child_execution_ok,
+        child_execution_ok=repair_partial_child_execution_allowed(
+            repair_mode=args.xhs_repair,
+            child_execution_ok=child_execution_ok,
+            validation=validation,
+            image_materialization=image_materialization,
+            behavior_validation=behavior_validation,
+        ),
     )
     promotion_allowed = formal_image_promotion_allowed(
         download_images=args.download_images,
@@ -5179,7 +5205,13 @@ def main() -> int:
                 image_materialization=image_materialization,
                 behavior_validation=behavior_validation,
                 download_images=True,
-                child_execution_ok=child_execution_ok,
+                child_execution_ok=repair_partial_child_execution_allowed(
+                    repair_mode=args.xhs_repair,
+                    child_execution_ok=child_execution_ok,
+                    validation=validation,
+                    image_materialization=image_materialization,
+                    behavior_validation=behavior_validation,
+                ),
             )
             if not validation["completion_met"]:
                 rolled_back = rollback_newly_promoted_images(
@@ -5280,11 +5312,17 @@ def main() -> int:
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     write_markdown(summary, report_path)
     print(json.dumps({"summary": str(summary_path), "report": str(report_path), "batch_dir": str(batch_dir), **summary}, ensure_ascii=False, indent=2))
+    partial_repair_import_ok = bool(
+        args.xhs_repair
+        and summary["import_completion_met"]
+        and int((summary.get("formal_validation") or {}).get("valid_total_count") or 0) > 0
+    )
     return (
         0
-        if summary["failed_count"] == 0
-        and summary["import_completion_met"]
-        and checkpoint_ok
+        if (
+            (summary["failed_count"] == 0 and summary["import_completion_met"] and checkpoint_ok)
+            or (partial_repair_import_ok and checkpoint_ok)
+        )
         else 2
     )
 
