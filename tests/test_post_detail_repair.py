@@ -71,7 +71,13 @@ def test_select_targets_excludes_observed_and_reports_bad_urls(tmp_path: Path) -
             canonical_url TEXT,
             keyword TEXT,
             raw_sample_json TEXT,
-            artifact_dir TEXT
+            artifact_dir TEXT,
+            published_at TEXT,
+            author_followers_count INTEGER,
+            author_display_name TEXT,
+            author_platform_id TEXT,
+            author_profile_url TEXT,
+            author_description TEXT
         )
         """
     )
@@ -108,6 +114,71 @@ def test_select_targets_excludes_observed_and_reports_bad_urls(tmp_path: Path) -
     assert [item["platform_post_id"] for item in targets] == ["1"]
     assert rejected[0]["platform_post_id"] == "3"
     assert rejected[0]["reason"] == "invalid_douyin_canonical_url"
+    conn.close()
+
+
+def test_select_targets_carries_existing_repair_metadata(tmp_path: Path) -> None:
+    conn = sqlite3.connect(tmp_path / "repair.sqlite")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE web_posts(
+            id INTEGER PRIMARY KEY,
+            platform_key TEXT,
+            platform_post_id TEXT,
+            canonical_url TEXT,
+            keyword TEXT,
+            raw_sample_json TEXT,
+            artifact_dir TEXT,
+            published_at TEXT,
+            author_followers_count INTEGER,
+            author_display_name TEXT,
+            author_platform_id TEXT,
+            author_profile_url TEXT,
+            author_description TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO web_posts(
+            id, platform_key, platform_post_id, canonical_url, keyword,
+            raw_sample_json, artifact_dir, published_at, author_followers_count,
+            author_display_name, author_platform_id, author_profile_url,
+            author_description
+        ) VALUES (1, 'zhihu', 'answer-1',
+            'https://www.zhihu.com/question/1/answer/answer-1', '青岛旅游', ?, '',
+            '2026-07-13T12:00:00+08:00', 123, '作者', 'author-1',
+            'https://www.zhihu.com/people/author-1', '简介')
+        """,
+        (
+            json.dumps(
+                {
+                    "content_type": "answer",
+                    "created_time": 1780000000,
+                    "followers_count": 123,
+                    "followers_observed": True,
+                    "author_followers_source": "search_author",
+                    "creator_hash": "hash-1",
+                    "user_nickname": "作***",
+                }
+            ),
+        ),
+    )
+    conn.commit()
+
+    targets, rejected, pending = repair.select_targets(
+        conn,
+        platform="zhihu",
+        post_ids=[],
+        max_items=0,
+    )
+
+    assert pending == 1
+    assert not rejected
+    assert targets[0]["repair_fallback"]["published_at"] == "2026-07-13T12:00:00+08:00"
+    assert targets[0]["repair_fallback"]["followers_observed"] is True
+    assert targets[0]["repair_fallback"]["author_followers_source"] == "search_author"
     conn.close()
 
 
@@ -161,6 +232,41 @@ def test_load_post_repair_targets_rejects_cross_id_target(tmp_path: Path) -> Non
 
     with pytest.raises(SystemExit, match="does not match douyin ID 123"):
         mediacrawler.load_post_repair_targets(path, "douyin")
+
+
+def test_repair_fallback_makes_sparse_zhihu_detail_formally_valid() -> None:
+    detail = {
+        "content_id": "answer-1",
+        "content_type": "answer",
+        "content_url": "https://www.zhihu.com/question/1/answer/answer-1",
+        "content_text": "完整正文",
+        "content_detail_status": "detail_observed",
+        "content_detail_source": "answer_detail",
+        "image_list": ["https://example.test/body.jpg"],
+        "creator_hash": "hash-1",
+        "user_nickname": "作***",
+        "followers_count": 0,
+        "followers_observed": False,
+        "author_followers_source": "missing",
+        "voteup_count": 1,
+        "comment_count": 2,
+    }
+    merged = mediacrawler.merge_repair_fallback_metadata(
+        "zhihu",
+        detail,
+        {
+            "published_at": "2026-07-13T12:00:00+08:00",
+            "followers_count": 123,
+            "author_followers_count": 123,
+            "followers_observed": True,
+            "author_followers_source": "search_author",
+        },
+    )
+
+    validation = mediacrawler.validate_formal_record("zhihu", merged, set())
+    assert validation["valid"] is True
+    assert merged["content_detail_source"] == "answer_detail"
+    assert merged["content_text"] == "完整正文"
 
 
 def test_build_child_command_disables_discovery_writes(tmp_path: Path) -> None:

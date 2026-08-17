@@ -510,10 +510,74 @@ def load_xhs_repair_target_ids(path_value: str | Path) -> set[str]:
     return values
 
 
+def load_post_repair_fallbacks(
+    db_path: str | Path | None,
+    platform_key: str,
+    post_ids: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Load trusted pre-repair metadata without replacing detail payloads."""
+
+    if not db_path or not post_ids:
+        return {}
+    path = Path(db_path).expanduser().resolve()
+    if not path.is_file():
+        return {}
+    placeholders = ",".join("?" for _ in post_ids)
+    try:
+        with sqlite3.connect(path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"""
+                SELECT platform_post_id, published_at, author_followers_count,
+                       author_display_name, author_platform_id, author_profile_url,
+                       author_description, raw_sample_json
+                FROM web_posts
+                WHERE platform_key=? AND platform_post_id IN ({placeholders})
+                """,
+                [platform_key, *sorted(post_ids)],
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+
+    fallbacks: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        raw: dict[str, Any] = {}
+        try:
+            parsed = json.loads(str(row["raw_sample_json"] or ""))
+            if isinstance(parsed, dict):
+                raw = parsed
+        except (TypeError, json.JSONDecodeError):
+            pass
+        fallback = {
+            key: value
+            for key, value in {
+                "published_at": row["published_at"],
+                "author_followers_count": row["author_followers_count"],
+                "author_display_name": row["author_display_name"],
+                "author_platform_id": row["author_platform_id"],
+                "author_profile_url": row["author_profile_url"],
+                "author_description": row["author_description"],
+                "created_time": raw.get("created_time"),
+                "updated_time": raw.get("updated_time"),
+                "creator_hash": raw.get("creator_hash"),
+                "creator_url_token": raw.get("creator_url_token"),
+                "user_nickname": raw.get("user_nickname"),
+                "author_followers_source": raw.get("author_followers_source"),
+                "followers_observed": raw.get("followers_observed"),
+                "followers_count": raw.get("followers_count"),
+            }.items()
+            if value not in (None, "")
+        }
+        fallbacks[str(row["platform_post_id"])] = fallback
+    return fallbacks
+
+
 def load_post_repair_targets(
     path_value: str | Path,
     platform_key: str,
-) -> list[dict[str, str]]:
+    *,
+    db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
     """Load and strictly bind generic detail targets to existing platform IDs."""
 
     if platform_key not in {"douyin", "weibo", "zhihu"}:
@@ -526,8 +590,9 @@ def load_post_repair_targets(
     if not isinstance(payload, list):
         raise SystemExit("post repair target file must contain a JSON array")
 
-    targets: list[dict[str, str]] = []
+    targets: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    raw_targets: list[tuple[str, str, str, dict[str, Any]]] = []
     for index, value in enumerate(payload):
         if not isinstance(value, dict):
             raise SystemExit(f"post repair target {index} must be an object")
@@ -569,13 +634,30 @@ def load_post_repair_targets(
                 f"post repair target does not match {platform_key} ID {post_id}: {detail_target!r}"
             )
         seen_ids.add(post_id)
-        targets.append(
-            {
-                "platform_post_id": post_id,
-                "detail_target": detail_target,
-                "keyword": keyword,
-            }
+        payload_fallback = value.get("repair_fallback")
+        raw_targets.append(
+            (
+                post_id,
+                detail_target,
+                keyword,
+                payload_fallback if isinstance(payload_fallback, dict) else {},
+            )
         )
+    fallbacks = load_post_repair_fallbacks(
+        db_path,
+        platform_key,
+        {post_id for post_id, _, _, _ in raw_targets},
+    )
+    for post_id, detail_target, keyword, payload_fallback in raw_targets:
+        value = {
+            "platform_post_id": post_id,
+            "detail_target": detail_target,
+            "keyword": keyword,
+        }
+        merged_fallback = {**payload_fallback, **fallbacks.get(post_id, {})}
+        if merged_fallback:
+            value["repair_fallback"] = merged_fallback
+        targets.append(value)
     if not targets:
         raise SystemExit("post repair target file contains no targets")
     return targets
@@ -1027,6 +1109,68 @@ def published_at_for_record(record: dict[str, Any]) -> str | None:
         if parsed:
             return parsed
     return None
+
+
+def merge_repair_fallback_metadata(
+    platform_key: str,
+    record: dict[str, Any],
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge pre-repair evidence while keeping the fetched detail authoritative."""
+
+    if not metadata:
+        return record
+    merged = dict(record)
+
+    # A detail page may omit a publication timestamp even though the existing
+    # search record has one.  Only fill this gap; never replace an observed
+    # timestamp from the fresh detail payload.
+    if not published_at_for_record(merged):
+        for key in ("published_at", "created_time"):
+            value = metadata.get(key)
+            if value not in (None, ""):
+                merged["published_at" if key == "published_at" else key] = value
+                if published_at_for_record(merged):
+                    break
+
+    # Zhihu detail author objects commonly omit follower statistics.  The
+    # original search response is the trusted source for this field, so use it
+    # only when the fresh detail payload did not observe follower evidence.
+    fallback_observed = metadata.get("followers_observed") is True
+    current_observed = merged.get("followers_observed") is True
+    if fallback_observed and not current_observed:
+        for key in (
+            "followers_count",
+            "author_followers_count",
+            "followers_observed",
+            "author_followers_source",
+        ):
+            if metadata.get(key) not in (None, ""):
+                merged[key] = metadata[key]
+    else:
+        for key in (
+            "followers_count",
+            "author_followers_count",
+            "author_followers_source",
+        ):
+            if merged.get(key) in (None, "", 0) and metadata.get(key) not in (None, ""):
+                merged[key] = metadata[key]
+
+    # Preserve identity fields if the detail response is sparse.  These are
+    # metadata fallbacks only; the detail body/status/source remain untouched.
+    for key in (
+        "creator_hash",
+        "creator_url_token",
+        "user_nickname",
+        "author_profile_url",
+        "author_description",
+        "author_display_name",
+        "author_platform_id",
+    ):
+        if merged.get(key) in (None, "") and metadata.get(key) not in (None, ""):
+            merged[key] = metadata[key]
+
+    return merged
 
 
 def is_video_record(platform_key: str, record: dict[str, Any]) -> bool:
@@ -2041,6 +2185,19 @@ def collect_formal_records(
                         reason_counts["invalid_record_type"] += 1
                         continue
                     record = sanitized_record
+                    repair_identity = formal_record_identity(platform_key, record)
+                    repair_metadata = (
+                        (repair_metadata_by_identity or {}).get(repair_identity) or {}
+                    )
+                    if repair_mode and repair_metadata:
+                        record = merge_repair_fallback_metadata(
+                            platform_key,
+                            record,
+                            repair_metadata,
+                        )
+                        record["source_keyword"] = str(
+                            repair_metadata.get("keyword") or record.get("source_keyword") or ""
+                        )
                     validation = validate_formal_record(platform_key, record, seen)
                     if not validation["valid"]:
                         reason_counts.update(validation["reasons"])
@@ -2049,12 +2206,6 @@ def collect_formal_records(
                     if allowed_identities is not None and identity not in allowed_identities:
                         reason_counts["repair_target_not_allowed"] += 1
                         continue
-                    repair_metadata = (repair_metadata_by_identity or {}).get(identity) or {}
-                    if repair_mode and repair_metadata:
-                        record = dict(record)
-                        record["source_keyword"] = str(
-                            repair_metadata.get("keyword") or record.get("source_keyword") or ""
-                        )
                     if require_local_images and identity not in localized:
                         reason_counts["local_images_incomplete"] += 1
                         local_image_failure_count += 1
@@ -5067,6 +5218,7 @@ def main() -> int:
         args.post_repair_targets = load_post_repair_targets(
             args.repair_targets_file,
             platform_key,
+            db_path=args.db,
         )
         if len(args.post_repair_targets) > candidate_hard_limit:
             raise SystemExit("--candidate-hard-limit must cover every post repair target")
@@ -5077,7 +5229,10 @@ def main() -> int:
             item["platform_post_id"] for item in args.post_repair_targets
         }
         args.post_repair_metadata_by_identity = {
-            f"{platform_key}:id:{item['platform_post_id']}": {"keyword": item["keyword"]}
+            f"{platform_key}:id:{item['platform_post_id']}": {
+                "keyword": item["keyword"],
+                **(item.get("repair_fallback") or {}),
+            }
             for item in args.post_repair_targets
         }
     elif args.repair_targets_file:

@@ -104,6 +104,11 @@ shasum -a 256 data/backups/trippostcollect-before-<run_id>.sqlite
 图片 staging/manifest、行为策略、长期媒体晋升和 SQLite 事务门禁。修复时逐条保留原记录的关键词，
 不会把本轮行为搜索词冒充原始发现词。
 
+知乎 detail 页可能不返回作者粉丝或 answer 创建时间。修复 child 会按平台 ID 从同一 SQLite 旧行读取
+已持久化的 `published_at`、`followers_observed`、`author_followers_source` 和粉丝数，仅补齐详情载荷
+缺失的元数据；正文、图片和 `answer_detail`/`article_detail` 来源仍必须来自本次详情访问。若补齐后仍无
+有效详情，child 以 `repair_no_valid_detail` 失败并停止后续批次，不得把搜索载荷直接当作详情成功。
+
 先检查通用平台登录，再按平台分别冻结计划。三个平台必须使用三个独立进程；不要在一个命令中混合：
 
 ```bash

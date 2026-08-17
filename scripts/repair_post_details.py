@@ -166,7 +166,10 @@ def select_targets(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     rows = conn.execute(
         """
-        SELECT id, platform_post_id, canonical_url, keyword, artifact_dir
+        SELECT id, platform_post_id, canonical_url, keyword, artifact_dir,
+               published_at, author_followers_count, author_display_name,
+               author_platform_id, author_profile_url, author_description,
+               raw_sample_json
         FROM web_posts
         WHERE platform_key=?
           AND COALESCE(
@@ -191,12 +194,40 @@ def select_targets(
             post_id,
             str(row["canonical_url"] or ""),
         )
+        raw_sample: dict[str, Any] = {}
+        try:
+            parsed_raw = json.loads(str(row["raw_sample_json"] or ""))
+            if isinstance(parsed_raw, dict):
+                raw_sample = parsed_raw
+        except (TypeError, json.JSONDecodeError):
+            raw_sample = {}
+        repair_fallback = {
+            key: value
+            for key, value in {
+                "published_at": row["published_at"],
+                "author_followers_count": row["author_followers_count"],
+                "author_display_name": row["author_display_name"],
+                "author_platform_id": row["author_platform_id"],
+                "author_profile_url": row["author_profile_url"],
+                "author_description": row["author_description"],
+                "created_time": raw_sample.get("created_time"),
+                "updated_time": raw_sample.get("updated_time"),
+                "creator_hash": raw_sample.get("creator_hash"),
+                "creator_url_token": raw_sample.get("creator_url_token"),
+                "user_nickname": raw_sample.get("user_nickname"),
+                "author_followers_source": raw_sample.get("author_followers_source"),
+                "followers_observed": raw_sample.get("followers_observed"),
+                "followers_count": raw_sample.get("followers_count"),
+            }.items()
+            if value not in (None, "")
+        }
         item = {
             "web_post_id": int(row["id"]),
             "platform_post_id": post_id,
             "detail_target": detail_target,
             "keyword": str(row["keyword"] or ""),
             "artifact_dir": str(row["artifact_dir"] or ""),
+            "repair_fallback": repair_fallback,
             "reason": reason,
         }
         if not post_id:
@@ -449,6 +480,7 @@ def main() -> int:
                 "platform_post_id": item["platform_post_id"],
                 "detail_target": item["detail_target"],
                 "keyword": item["keyword"],
+                "repair_fallback": item.get("repair_fallback") or {},
             }
             for item in batch
         ]
