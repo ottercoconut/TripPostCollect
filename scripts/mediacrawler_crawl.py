@@ -409,6 +409,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Repair existing XHS rows from specified note detail URLs without discovery writes.",
     )
+    parser.add_argument(
+        "--post-repair",
+        action="store_true",
+        help=(
+            "Repair an explicit allowlist of existing Douyin, Weibo, or Zhihu rows "
+            "through platform detail mode without discovery writes."
+        ),
+    )
+    parser.add_argument(
+        "--repair-targets-file",
+        help=(
+            "Frozen JSON array of repair target objects containing platform_post_id, "
+            "detail_target, and keyword; requires --post-repair."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -493,6 +508,77 @@ def load_xhs_repair_target_ids(path_value: str | Path) -> set[str]:
     if not values:
         raise SystemExit("XHS repair target ID file contains no post IDs")
     return values
+
+
+def load_post_repair_targets(
+    path_value: str | Path,
+    platform_key: str,
+) -> list[dict[str, str]]:
+    """Load and strictly bind generic detail targets to existing platform IDs."""
+
+    if platform_key not in {"douyin", "weibo", "zhihu"}:
+        raise SystemExit(f"unsupported post repair platform: {platform_key}")
+    path = Path(path_value).expanduser().resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid post repair target file: {path}: {exc}") from exc
+    if not isinstance(payload, list):
+        raise SystemExit("post repair target file must contain a JSON array")
+
+    targets: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for index, value in enumerate(payload):
+        if not isinstance(value, dict):
+            raise SystemExit(f"post repair target {index} must be an object")
+        post_id = str(value.get("platform_post_id") or "").strip()
+        detail_target = str(value.get("detail_target") or "").strip()
+        keyword = str(value.get("keyword") or "").strip()
+        if not post_id or not detail_target or not keyword:
+            raise SystemExit(
+                f"post repair target {index} requires platform_post_id, detail_target, and keyword"
+            )
+        if post_id in seen_ids:
+            raise SystemExit(f"duplicate post repair platform_post_id: {post_id}")
+
+        if platform_key == "weibo":
+            valid = detail_target == post_id and bool(re.fullmatch(r"[0-9A-Za-z]+", post_id))
+        else:
+            parsed = urlparse(detail_target.split("#", 1)[0].split("?", 1)[0])
+            if platform_key == "douyin":
+                valid = bool(
+                    parsed.scheme == "https"
+                    and parsed.hostname in {"douyin.com", "www.douyin.com"}
+                    and re.fullmatch(rf"/(?:video|note)/{re.escape(post_id)}/?", parsed.path)
+                )
+            else:
+                answer = bool(
+                    parsed.hostname in {"zhihu.com", "www.zhihu.com"}
+                    and re.fullmatch(
+                        rf"/question/[^/]+/answer/{re.escape(post_id)}/?",
+                        parsed.path,
+                    )
+                )
+                article = bool(
+                    parsed.hostname == "zhuanlan.zhihu.com"
+                    and re.fullmatch(rf"/p/{re.escape(post_id)}/?", parsed.path)
+                )
+                valid = bool(parsed.scheme == "https" and (answer or article))
+        if not valid:
+            raise SystemExit(
+                f"post repair target does not match {platform_key} ID {post_id}: {detail_target!r}"
+            )
+        seen_ids.add(post_id)
+        targets.append(
+            {
+                "platform_post_id": post_id,
+                "detail_target": detail_target,
+                "keyword": keyword,
+            }
+        )
+    if not targets:
+        raise SystemExit("post repair target file contains no targets")
+    return targets
 
 
 def ensure_prerequisites() -> None:
@@ -1903,6 +1989,7 @@ def collect_formal_records(
     localized_identities: set[str] | None = None,
     materialized_images_by_identity: dict[str, list[MaterializedImage]] | None = None,
     allowed_identities: set[str] | None = None,
+    repair_metadata_by_identity: dict[str, dict[str, str]] | None = None,
     repair_mode: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if completion_mode not in {"target-new-posts", "source-exhausted"}:
@@ -1962,6 +2049,12 @@ def collect_formal_records(
                     if allowed_identities is not None and identity not in allowed_identities:
                         reason_counts["repair_target_not_allowed"] += 1
                         continue
+                    repair_metadata = (repair_metadata_by_identity or {}).get(identity) or {}
+                    if repair_mode and repair_metadata:
+                        record = dict(record)
+                        record["source_keyword"] = str(
+                            repair_metadata.get("keyword") or record.get("source_keyword") or ""
+                        )
                     if require_local_images and identity not in localized:
                         reason_counts["local_images_incomplete"] += 1
                         local_image_failure_count += 1
@@ -4189,7 +4282,13 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "--lt",
         args.login_type,
         "--type",
-        "detail" if (getattr(args, "zhihu_detail_urls", []) or getattr(args, "xhs_detail_urls", [])) else "search",
+        "detail"
+        if (
+            getattr(args, "zhihu_detail_urls", [])
+            or getattr(args, "xhs_detail_urls", [])
+            or getattr(args, "post_repair_detail_targets", [])
+        )
+        else "search",
         "--keywords",
         args.keyword,
         "--get_comment",
@@ -4215,7 +4314,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
     ]
     specified_detail_urls = list(getattr(args, "zhihu_detail_urls", [])) + list(
         getattr(args, "xhs_detail_urls", [])
-    )
+    ) + list(getattr(args, "post_repair_detail_targets", []))
     if specified_detail_urls:
         cmd.extend(["--specified_id", ",".join(specified_detail_urls)])
     extra_env: dict[str, str] = {
@@ -4307,6 +4406,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
                 ),
                 "TRIPPOSTCOLLECT_XHS_POST_INTERACTION": str(args.xhs_post_interaction),
                 "TRIPPOSTCOLLECT_XHS_REPAIR": "1" if getattr(args, "xhs_repair", False) else "0",
+                "TRIPPOSTCOLLECT_POST_REPAIR": "1" if getattr(args, "post_repair", False) else "0",
                 "TRIPPOSTCOLLECT_XHS_INITIAL_SETTLE_SECONDS": "12",
                 "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS": (
                     str(XHS_OPERATOR_LOGIN_WAIT_SECONDS) if args.headed else "0"
@@ -4821,12 +4921,15 @@ def repair_partial_child_execution_allowed(
     *,
     repair_mode: bool,
     child_execution_ok: bool,
+    runtime_blocked: bool = False,
     validation: dict[str, Any],
     image_materialization: dict[str, Any],
     behavior_validation: dict[str, Any],
 ) -> bool:
-    """Allow valid XHS repair records through when another target is unavailable."""
+    """Allow a valid allowlisted repair subset through when other targets are unavailable."""
 
+    if runtime_blocked:
+        return False
     if child_execution_ok:
         return True
     return bool(
@@ -4839,6 +4942,9 @@ def repair_partial_child_execution_allowed(
 
 def main() -> int:
     args = parse_args()
+    if args.xhs_repair and args.post_repair:
+        raise SystemExit("--xhs-repair and --post-repair are mutually exclusive")
+    repair_mode = bool(args.xhs_repair or args.post_repair)
     if (
         args.target_new_posts < 0
         or args.candidate_hard_limit <= 0
@@ -4852,17 +4958,19 @@ def main() -> int:
         and target_new_posts > candidate_hard_limit
     ):
         raise SystemExit("--target-new-posts cannot exceed --candidate-hard-limit")
-    if args.xhs_repair and args.target_new_posts != 0:
-        raise SystemExit("XHS repair mode requires --target-new-posts 0")
+    if repair_mode and args.target_new_posts != 0:
+        raise SystemExit("post repair mode requires --target-new-posts 0")
     if args.required_fields_profile != "image_post_with_followers_v1":
         raise SystemExit(f"unsupported required fields profile: {args.required_fields_profile}")
     if (
         args.completion_mode == "target-new-posts"
         and not args.no_import
         and target_new_posts <= 0
-        and not args.xhs_repair
+        and not repair_mode
     ):
-        raise SystemExit("--target-new-posts must be positive unless --no-import is used")
+        raise SystemExit(
+            "--target-new-posts must be positive unless --no-import or post repair mode is used"
+        )
     if args.start_page <= 0:
         raise SystemExit("--start-page must be positive")
     if args.start_offset < 0 or args.top_refresh_max_pages < 0:
@@ -4877,6 +4985,8 @@ def main() -> int:
     ):
         raise SystemExit("discovery job id, query fingerprint and run id must be supplied together")
     if args.no_import:
+        args.no_checkpoint_write = True
+    if repair_mode:
         args.no_checkpoint_write = True
     xhs_managed_resume = bool(args.xhs_account_id and args.start_cursor)
     if (
@@ -4928,6 +5038,50 @@ def main() -> int:
             raise SystemExit("XHS repair URL and target ID files must contain the same number of items")
     elif args.xhs_repair or args.xhs_repair_target_ids_file:
         raise SystemExit("XHS repair requires both detail URL and target ID files")
+    args.post_repair_targets = []
+    args.post_repair_detail_targets = []
+    args.post_repair_target_ids = set()
+    args.post_repair_metadata_by_identity = {}
+    if args.post_repair:
+        if len(platforms) != 1 or platforms[0] not in {"douyin", "weibo", "zhihu"}:
+            raise SystemExit(
+                "--post-repair requires exactly one of --platforms douyin, weibo, or zhihu"
+            )
+        if not args.repair_targets_file:
+            raise SystemExit("--post-repair requires --repair-targets-file")
+        if args.zhihu_detail_urls_file or args.xhs_detail_urls_file:
+            raise SystemExit("--post-repair cannot be combined with another detail target mode")
+        if (
+            args.resume_summary
+            or args.start_page != 1
+            or args.start_offset != 0
+            or args.start_cursor
+            or args.discovery_job_id is not None
+            or args.top_refresh_max_pages != 0
+            or args.discovery_source_exhausted
+        ):
+            raise SystemExit("post repair cannot use discovery or resume arguments")
+        if args.completion_mode != "target-new-posts":
+            raise SystemExit("post repair requires --completion-mode target-new-posts")
+        platform_key = platforms[0]
+        args.post_repair_targets = load_post_repair_targets(
+            args.repair_targets_file,
+            platform_key,
+        )
+        if len(args.post_repair_targets) > candidate_hard_limit:
+            raise SystemExit("--candidate-hard-limit must cover every post repair target")
+        args.post_repair_detail_targets = [
+            item["detail_target"] for item in args.post_repair_targets
+        ]
+        args.post_repair_target_ids = {
+            item["platform_post_id"] for item in args.post_repair_targets
+        }
+        args.post_repair_metadata_by_identity = {
+            f"{platform_key}:id:{item['platform_post_id']}": {"keyword": item["keyword"]}
+            for item in args.post_repair_targets
+        }
+    elif args.repair_targets_file:
+        raise SystemExit("--repair-targets-file requires --post-repair")
     if "douyin" in platforms and args.start_page > 1 and not args.start_cursor:
         raise SystemExit(
             "Douyin continuation requires --start-cursor together with --start-page"
@@ -5014,6 +5168,21 @@ def main() -> int:
             "start_page": args.start_page,
         }
 
+    repair_allowed_identities: set[str] | None = None
+    repair_metadata_by_identity: dict[str, dict[str, str]] = {}
+    repair_target_count = 0
+    if args.xhs_repair:
+        repair_allowed_identities = {
+            f"xhs:id:{value}" for value in args.xhs_repair_target_ids
+        }
+        repair_target_count = len(args.xhs_detail_urls)
+    elif args.post_repair:
+        repair_allowed_identities = {
+            f"{platforms[0]}:id:{value}" for value in args.post_repair_target_ids
+        }
+        repair_metadata_by_identity = dict(args.post_repair_metadata_by_identity)
+        repair_target_count = len(args.post_repair_targets)
+
     batch_dir = ensure_dir(Path(args.output_dir).expanduser() / utc_stamp()).resolve()
     args.resume_identities_path = None
     if resume_identity_values:
@@ -5034,6 +5203,25 @@ def main() -> int:
         result_counts["failed_count"] == 0
         and result_counts["ok_count"] == len(platforms)
     )
+    repair_runtime_blocked = bool(
+        repair_mode
+        and any(
+            str((record.get("failure_classification") or {}).get("failure_type") or "")
+            in {
+                "policy_blocked",
+                "platform_security_limit",
+                "captcha_detected",
+                "login_required",
+                "rate_limited",
+                "blocked_or_forbidden",
+                "runtime_permission_error",
+                "browser_launch_failed",
+                "browser_target_closed",
+            }
+            for record in records
+            if isinstance(record, dict) and record.get("platform") in platforms
+        )
+    )
     summary = {
         "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "keyword": args.keyword,
@@ -5046,18 +5234,18 @@ def main() -> int:
         platforms,
         args.keyword,
         args.xhs_post_interaction,
-        repair_mode=args.xhs_repair,
+        repair_mode=repair_mode,
     )
     summary["behavior_validation"] = behavior_validation
     if resume_info:
         summary["resume"] = resume_info
-    if args.xhs_repair:
+    if repair_mode:
         pagination_evidence = {
             "available": True,
             "stopped": True,
             "stop_reason": "repair_targets_processed",
-            "stop_detail": "specified_detail_urls",
-            "candidate_count": len(args.xhs_detail_urls),
+            "stop_detail": "specified_detail_targets",
+            "candidate_count": repair_target_count,
             "batches": [],
             "skipped_candidate_count": 0,
             "skipped_candidate_failures": [],
@@ -5077,10 +5265,9 @@ def main() -> int:
             args.completion_mode == "target-new-posts" and not bool(resume_info)
         ),
         completion_mode=args.completion_mode,
-        allowed_identities={f"xhs:id:{value}" for value in args.xhs_repair_target_ids}
-        if args.xhs_repair
-        else None,
-        repair_mode=args.xhs_repair,
+        allowed_identities=repair_allowed_identities,
+        repair_metadata_by_identity=repair_metadata_by_identity,
+        repair_mode=repair_mode,
     )
     materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}
     if args.download_images:
@@ -5110,10 +5297,9 @@ def main() -> int:
             completion_mode=args.completion_mode,
             require_local_images=True,
             localized_identities=localized_identities,
-            allowed_identities={f"xhs:id:{value}" for value in args.xhs_repair_target_ids}
-            if args.xhs_repair
-            else None,
-            repair_mode=args.xhs_repair,
+            allowed_identities=repair_allowed_identities,
+            repair_metadata_by_identity=repair_metadata_by_identity,
+            repair_mode=repair_mode,
         )
     else:
         image_materialization = {
@@ -5153,8 +5339,9 @@ def main() -> int:
         behavior_validation=behavior_validation,
         download_images=args.download_images,
         child_execution_ok=repair_partial_child_execution_allowed(
-            repair_mode=args.xhs_repair,
+            repair_mode=repair_mode,
             child_execution_ok=child_execution_ok,
+            runtime_blocked=repair_runtime_blocked,
             validation=validation,
             image_materialization=image_materialization,
             behavior_validation=behavior_validation,
@@ -5194,10 +5381,9 @@ def main() -> int:
                 require_local_images=True,
                 localized_identities=localized_identities,
                 materialized_images_by_identity=materialized_images_by_identity,
-                allowed_identities={f"xhs:id:{value}" for value in args.xhs_repair_target_ids}
-                if args.xhs_repair
-                else None,
-                repair_mode=args.xhs_repair,
+                allowed_identities=repair_allowed_identities,
+                repair_metadata_by_identity=repair_metadata_by_identity,
+                repair_mode=repair_mode,
             )
             validation = apply_formal_completion_gates(
                 validation,
@@ -5206,8 +5392,9 @@ def main() -> int:
                 behavior_validation=behavior_validation,
                 download_images=True,
                 child_execution_ok=repair_partial_child_execution_allowed(
-                    repair_mode=args.xhs_repair,
+                    repair_mode=repair_mode,
                     child_execution_ok=child_execution_ok,
+                    runtime_blocked=repair_runtime_blocked,
                     validation=validation,
                     image_materialization=image_materialization,
                     behavior_validation=behavior_validation,
@@ -5313,7 +5500,7 @@ def main() -> int:
     write_markdown(summary, report_path)
     print(json.dumps({"summary": str(summary_path), "report": str(report_path), "batch_dir": str(batch_dir), **summary}, ensure_ascii=False, indent=2))
     partial_repair_import_ok = bool(
-        args.xhs_repair
+        repair_mode
         and summary["import_completion_met"]
         and int((summary.get("formal_validation") or {}).get("valid_total_count") or 0) > 0
     )

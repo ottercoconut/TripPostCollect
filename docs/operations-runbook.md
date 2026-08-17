@@ -96,6 +96,55 @@ sqlite3 data/trippostcollect.sqlite ".backup 'data/backups/trippostcollect-befor
 shasum -a 256 data/backups/trippostcollect-before-<run_id>.sqlite
 ```
 
+## 通用平台历史详情修复
+
+`scripts/repair_post_details.py` 只处理抖音、微博或知乎中已经存在、但
+`raw_sample_json.content_detail_status != detail_observed` 的记录。它不是新内容发现入口：每个 child
+只接收冻结清单中的平台 ID 和详情入口，强制 `--no-checkpoint-write`，成功子集仍经过正文、作者粉丝、
+图片 staging/manifest、行为策略、长期媒体晋升和 SQLite 事务门禁。修复时逐条保留原记录的关键词，
+不会把本轮行为搜索词冒充原始发现词。
+
+先检查通用平台登录，再按平台分别冻结计划。三个平台必须使用三个独立进程；不要在一个命令中混合：
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform douyin \
+  --keyword 青岛旅游 \
+  --batch-size 20 \
+  --dry-run
+```
+
+dry-run 会列出当前可执行目标数、拒绝目标样本、批次数、每批 child 命令和冻结状态，但不访问平台、
+不备份或写内容。正式运行默认写 `data/trippostcollect.sqlite`，必须显式确认；程序会在第一个 child
+前自动建立 SQLite 一致性备份并记录 SHA-256：
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform douyin \
+  --keyword 青岛旅游 \
+  --batch-size 20 \
+  --confirm-default-db-repair
+```
+
+微博和知乎只替换 `--platform`。单轮会按 `--batch-size` 扫描当前所有可执行待修复记录；
+`--max-items N` 用于小批试跑，`--post-id ID` 用于精确重试。详情或图片候选失败只留下该旧记录继续
+待修复，成功子集可以入库；登录、验证码、频控、策略、SQLite 或持久化验证失败会停止后续批次。
+摘要状态 `completed_with_remaining` 表示本轮已有可验证进展但选中目标仍有残留，不表示库存清零；
+继续运行同一平台，直到摘要同时满足 `status=completed`、`all_selected_targets_recovered=true` 和
+`remaining_pending_count=0`。若一轮 `recovered_count=0`，程序失败退出，先按摘要排障，不做无限循环。
+
+控制面产物位于：
+
+- `outputs/post_detail_repair/<platform>-<run_id>/run_summary.json`
+- `data/runtime/post_detail_repair/<platform>-<run_id>/execution_state.json`
+- `data/backups/post_detail_repair/<platform>-<run_id>/trippostcollect.sqlite`
+
+三个独立平台进程可以并行访问平台。长期媒体晋升和 SQLite 导入仍使用项目全局跨进程锁，因此写入
+阶段会自动串行；不得绕过该锁或手工改 execution state。小红书继续使用独立的
+`scripts/repair_xhs_posts.py`，不能放入此入口。
+
 ## 自动恢复与检查
 
 正常 workflow 不手工传页码、cursor 或摘要。runner 按 job/目标、查询指纹及小红书账号自动读取

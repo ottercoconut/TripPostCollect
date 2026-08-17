@@ -47,3 +47,8 @@ workflow 不手工传 `--start-page` 或 `--resume-summary`。
 重新核验一组已知 answer/article URL 时，使用根执行器的
 `--zhihu-detail-urls-file <JSON数组文件> --no-import` 诊断模式。它不写正式 checkpoint 或数据库，
 也不能作为正式轮次完成证据；不要直接运行第三方内部命令。
+
+需要正式修复历史库中非 `detail_observed` 的既有行时，改用
+`scripts/repair_post_details.py --platform zhihu`。总控清单把既有内容 ID 与 answer/article HTTPS URL
+严格绑定，detail 结果仍必须取得 `answer_detail` 或 `article_detail`、搜索作者粉丝证据和完整正文图，
+再走媒体晋升与 SQLite 事务。该修复入口不写搜索 checkpoint，完成含义只覆盖清单中的旧行。

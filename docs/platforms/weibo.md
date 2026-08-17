@@ -36,3 +36,9 @@
 
 有 checkpoint 时先刷新顶部，再从保存页码继续。数据库、累计摘要、seen、人工排除和本轮已见 ID
 在长文详情与图片请求前过滤；完整页保存下一页，页中途停止保存当前页，顶部刷新不推进深层位置。
+
+历史库中缺少 `content_detail_status=detail_observed` 的既有记录，从根项目
+`scripts/repair_post_details.py --platform weibo` 分批修复。清单把既有微博 ID 与
+`https://m.weibo.cn/detail/<id>` 严格绑定；detail 模式先在本轮青岛关键词移动搜索页完成人类行为
+证据，再从移动详情标记 `content_detail_source=mobile_detail` 并下载 `mblog.pics` 正文图。该入口
+不写搜索 checkpoint，完成含义只覆盖清单中的旧行。
