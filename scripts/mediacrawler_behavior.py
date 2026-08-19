@@ -43,6 +43,7 @@ XHS_PLATFORM_SECURITY_LIMIT_RE = re.compile(
     re.I,
 )
 XHS_PLATFORM_SECURITY_LIMIT_URL_RE = re.compile(r"/website-login/error(?:[?#]|$)", re.I)
+XHS_CAPTCHA_URL_RE = re.compile(r"/website-login/captcha(?:[?#]|$)", re.I)
 LOGIN_VISIBLE_RE = re.compile(r"请先登录|登录后查看|需要登录|login_required", re.I)
 XHS_COMMENT_SELECTORS = (
     "[class*='comments-container']",
@@ -110,7 +111,10 @@ async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
                 or XHS_PLATFORM_SECURITY_LIMIT_URL_RE.search(page_url)
             )
         ),
-        "captcha_or_verify": bool(CAPTCHA_VISIBLE_RE.search(normalized)),
+        "captcha_or_verify": bool(
+            CAPTCHA_VISIBLE_RE.search(normalized)
+            or (is_xhs_page and XHS_CAPTCHA_URL_RE.search(page_url))
+        ),
         "rate_limited": bool(RATE_LIMIT_VISIBLE_RE.search(normalized)),
         "blocked": bool(BLOCKED_VISIBLE_RE.search(normalized)),
         "login_required": bool(LOGIN_VISIBLE_RE.search(normalized)),
@@ -228,18 +232,43 @@ async def wait_for_xhs_search_ready(
     *,
     timeout_seconds: float = XHS_SEARCH_READY_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Wait for a logged-in result page without performing behavior on login UI."""
+    """Wait for a logged-in result page, including operator verification.
+
+    A search navigation can commit to ``/website-login/captcha`` while the
+    account is still logged in.  That page is an operator checkpoint, not an
+    immediate runtime failure: keep the headed page in front until the
+    verification disappears, then give the result page a fresh readiness
+    window.
+    """
     started = time.monotonic()
     deadline = started + max(0.1, float(timeout_seconds))
+    verification_deadline: float | None = None
+    operator_verification_events: list[dict[str, Any]] = []
     last_text = ""
     last_markers: dict[str, bool] = {}
     card_count = 0
     profile_count = 0
 
     while True:
-        remaining = deadline - time.monotonic()
+        active_deadline = verification_deadline or deadline
+        remaining = active_deadline - time.monotonic()
         if remaining <= 0:
-            reason = "login_required" if last_markers.get("login_required") else "search_results_not_ready"
+            challenge = visible_challenge(last_markers)
+            pending_event = operator_verification_events[-1] if operator_verification_events else None
+            if pending_event and pending_event.get("status") == "waiting_for_operator":
+                pending_event.update(
+                    {
+                        "finished_at": utc_now(),
+                        "status": "failed",
+                        "challenge": challenge or pending_event.get("initial_challenge"),
+                        "visible_markers": last_markers,
+                        "visible_text_sample": last_text,
+                        "error": "operator_verification_timeout",
+                    }
+                )
+            reason = challenge or (
+                "login_required" if last_markers.get("login_required") else "search_results_not_ready"
+            )
             return {
                 "ready": False,
                 "reason": reason,
@@ -249,6 +278,7 @@ async def wait_for_xhs_search_ready(
                 "markers": last_markers,
                 "visible_text_sample": last_text,
                 "url": page.url,
+                "operator_verification_events": operator_verification_events,
             }
 
         try:
@@ -285,6 +315,66 @@ async def wait_for_xhs_search_ready(
                     "markers": last_markers,
                 }
             )
+
+            if challenge in {"captcha_or_verify", "login_required"}:
+                pending_event = operator_verification_events[-1] if operator_verification_events else None
+                if not pending_event or pending_event.get("status") != "waiting_for_operator":
+                    verification_deadline = time.monotonic() + max(
+                        0.1,
+                        float(XHS_CONTINUITY_VERIFY_WAIT_SECONDS),
+                    )
+                    verification_event = {
+                        "stage": "pre_search_human_behavior",
+                        "started_at": utc_now(),
+                        "finished_at": None,
+                        "status": "waiting_for_operator",
+                        "initial_challenge": challenge,
+                        "challenge": challenge,
+                        "visible_markers": last_markers,
+                        "visible_text_sample": last_text,
+                        "timeout_seconds": round(
+                            verification_deadline - time.monotonic(), 3
+                        ),
+                        "url": page.url,
+                    }
+                    operator_verification_events.append(verification_event)
+                    try:
+                        await page.bring_to_front()
+                    except Exception as exc:
+                        verification_event.update(
+                            {
+                                "finished_at": utc_now(),
+                                "status": "failed",
+                                "error": f"bring_to_front_failed:{type(exc).__name__}:{exc}",
+                            }
+                        )
+                        verification_deadline = time.monotonic()
+                await asyncio.sleep(
+                    min(
+                        max(0.1, float(XHS_CONTINUITY_VERIFY_POLL_SECONDS)),
+                        max(0.0, verification_deadline - time.monotonic())
+                        if verification_deadline is not None
+                        else 0.0,
+                    )
+                )
+                continue
+
+            if operator_verification_events:
+                pending_event = operator_verification_events[-1]
+                if pending_event.get("status") == "waiting_for_operator":
+                    pending_event.update(
+                        {
+                            "finished_at": utc_now(),
+                            "status": "completed",
+                            "challenge": "",
+                            "visible_markers": last_markers,
+                            "visible_text_sample": last_text,
+                            "url": page.url,
+                        }
+                    )
+                verification_deadline = None
+                deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+
             if ready:
                 return {
                     "ready": True,
@@ -295,8 +385,9 @@ async def wait_for_xhs_search_ready(
                     "markers": last_markers,
                     "visible_text_sample": last_text,
                     "url": page.url,
+                    "operator_verification_events": operator_verification_events,
                 }
-            if challenge and challenge != "login_required":
+            if challenge:
                 return {
                     "ready": False,
                     "reason": challenge,
@@ -306,6 +397,7 @@ async def wait_for_xhs_search_ready(
                     "markers": last_markers,
                     "visible_text_sample": last_text,
                     "url": page.url,
+                    "operator_verification_events": operator_verification_events,
                 }
 
         await asyncio.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
@@ -1125,6 +1217,7 @@ async def run_page_behavior(
         "events": events,
         "runtime_fingerprint": fingerprint,
         "page_readiness": page_readiness,
+        "operator_verification_events": page_readiness.get("operator_verification_events") or [],
         "initial_visible_markers": initial_visible_markers,
         "initial_visible_text_sample": initial_visible_text_sample,
         "visible_markers": visible_markers,

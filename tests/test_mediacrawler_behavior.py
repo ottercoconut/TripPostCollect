@@ -161,8 +161,55 @@ async def test_behavior_stage_writes_complete_evidence(tmp_path: Path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_xhs_search_verification_wait_keeps_page_open_until_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    states = iter(
+        [
+            (
+                "Scan with logged-in REDnote App",
+                {
+                    "platform_security_limit": False,
+                    "captcha_or_verify": True,
+                    "rate_limited": False,
+                    "blocked": False,
+                    "login_required": False,
+                },
+            ),
+            (
+                "正常搜索内容",
+                {
+                    "platform_security_limit": False,
+                    "captcha_or_verify": False,
+                    "rate_limited": False,
+                    "blocked": False,
+                    "login_required": False,
+                },
+            ),
+        ]
+    )
+
+    async def changing_page_state(page):
+        return next(states)
+
+    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", changing_page_state)
+    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.001)
+    page = FakePage(card_count=1, profile_count=1)
+    events: list[dict] = []
+
+    readiness = await mediacrawler_behavior.wait_for_xhs_search_ready(page, events)
+
+    assert readiness["ready"] is True
+    assert page.brought_to_front == 1
+    assert readiness["operator_verification_events"][0]["status"] == "completed"
+    assert readiness["operator_verification_events"][0]["initial_challenge"] == "captcha_or_verify"
+
+
+@pytest.mark.asyncio
 async def test_visible_challenge_fails_behavior_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mediacrawler_behavior, "dwell_on_list", fake_dwell_on_list)
+    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_WAIT_SECONDS", 0.1)
     evidence_path = tmp_path / "behavior.json"
 
     with pytest.raises(RuntimeError, match="captcha_or_verify_detected"):
@@ -170,13 +217,15 @@ async def test_visible_challenge_fails_behavior_gate(tmp_path: Path, monkeypatch
             FakePage("请完成安全验证"),
             platform_key="xhs",
             evidence_path=evidence_path,
+            profile_name="xhs_guarded",
         )
 
     evidence = json.loads(evidence_path.read_text())
     assert evidence["status"] == "failed"
-    assert evidence["events"] == []
+    assert any(event["event"] == "page_readiness_check" for event in evidence["events"])
     assert evidence["initial_visible_markers"]["captcha_or_verify"] is True
     assert evidence["visible_markers"]["captcha_or_verify"] is True
+    assert evidence["operator_verification_events"][0]["status"] == "failed"
     assert mediacrawler_behavior.behavior_evidence_valid(evidence) is False
 
 
@@ -222,6 +271,16 @@ async def test_non_xhs_retry_text_does_not_set_xhs_security_limit() -> None:
     _, markers = await mediacrawler_behavior.visible_page_state(page)
 
     assert markers["platform_security_limit"] is False
+
+
+@pytest.mark.asyncio
+async def test_xhs_captcha_url_is_a_visible_verification_challenge() -> None:
+    page = FakePage("Scan with logged-in REDnote App", card_count=0, profile_count=0)
+    page.url = "https://www.xiaohongshu.com/website-login/captcha?verifyUuid=test"
+
+    _, markers = await mediacrawler_behavior.visible_page_state(page)
+
+    assert markers["captcha_or_verify"] is True
 
 
 @pytest.mark.asyncio
