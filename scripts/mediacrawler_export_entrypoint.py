@@ -193,6 +193,23 @@ def install_douyin_browser_detail_fallback() -> None:
         return
     original_get_video_by_id = client_class.get_video_by_id
 
+    def find_detail(value: Any, aweme_id: str, *, depth: int = 0) -> dict[str, Any] | None:
+        if depth > 12:
+            return None
+        if isinstance(value, dict):
+            if str(value.get("aweme_id") or "") == str(aweme_id):
+                return value
+            for nested in value.values():
+                found = find_detail(nested, aweme_id, depth=depth + 1)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = find_detail(nested, aweme_id, depth=depth + 1)
+                if found is not None:
+                    return found
+        return None
+
     async def browser_detail(self: Any, aweme_id: str) -> Any:
         page = getattr(self, "playwright_page", None)
         if page is None:
@@ -213,10 +230,58 @@ def install_douyin_browser_detail_fallback() -> None:
             ) as response_info:
                 await page.goto(detail_url, wait_until="domcontentloaded", timeout=timeout_ms)
             response = await response_info.value
-            payload = decode_douyin_json_body(await response.body())
-        detail = payload.get("aweme_detail") if isinstance(payload, dict) else None
+            try:
+                payload = decode_douyin_json_body(await response.body())
+            except Exception as exc:
+                douyin_client.utils.logger.warning(
+                    f"[TripPostCollect] Browser Douyin detail body unavailable for aweme_id:{aweme_id}; "
+                    f"reason:{type(exc).__name__}"
+                )
+                payload = None
+        detail = find_detail(payload, aweme_id)
+        if detail is None:
+            try:
+                page_state = await page.evaluate(
+                    """(targetId) => {
+                        const roots = [
+                            window.__UNIVERSAL_DATA_FOR_REHYDRATION__,
+                            window._ROUTER_DATA,
+                            window.__INITIAL_STATE__,
+                            window.__NEXT_DATA__,
+                        ];
+                        const seen = new WeakSet();
+                        const walk = (value, depth) => {
+                            if (depth > 12 || value === null || value === undefined) return null;
+                            if (typeof value !== 'object') return null;
+                            if (seen.has(value)) return null;
+                            seen.add(value);
+                            if (String(value.aweme_id || '') === String(targetId)) return value;
+                            for (const nested of Object.values(value)) {
+                                const found = walk(nested, depth + 1);
+                                if (found) return found;
+                            }
+                            return null;
+                        };
+                        for (const root of roots) {
+                            const found = walk(root, 0);
+                            if (found) return found;
+                        }
+                        return null;
+                    }""",
+                    aweme_id,
+                )
+                detail = find_detail(page_state, aweme_id)
+            except Exception as exc:
+                douyin_client.utils.logger.warning(
+                    f"[TripPostCollect] Browser Douyin page-state extraction failed for aweme_id:{aweme_id}; "
+                    f"reason:{type(exc).__name__}"
+                )
         if not isinstance(detail, dict) or not detail.get("aweme_id"):
-            raise RuntimeError("browser detail response did not contain aweme_detail")
+            payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
+            raise RuntimeError(
+                "browser detail response did not contain aweme_detail; "
+                f"payload_keys={payload_keys}"
+            )
         return detail
 
     async def resilient_get_video_by_id(self: Any, aweme_id: str) -> Any:
