@@ -298,9 +298,9 @@ def install_douyin_browser_detail_fallback() -> None:
                 f"[TripPostCollect] Used browser-native Douyin detail fallback for aweme_id:{aweme_id}"
             )
             return result
-        except Exception:
+        except Exception as fallback_error:
             if original_error is not None:
-                raise original_error
+                raise fallback_error from original_error
             raise
 
     client_class.get_video_by_id = resilient_get_video_by_id
