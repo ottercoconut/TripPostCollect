@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import runpy
 import sys
@@ -172,12 +173,82 @@ def install_xhs_repair_resilience() -> None:
     crawler_class._trippostcollect_repair_resilience = True
 
 
+def install_douyin_browser_detail_fallback() -> None:
+    """Use the signed, logged-in browser request when HTTP detail fetch is blocked.
+
+    Douyin's Argus signature is bound to the browser runtime.  The MediaCrawler
+    client normally reproduces the request with httpx, which can intermittently
+    receive a plain-text ``Blocked by ArgusSecurityPlugin`` response even when
+    the browser session is healthy.  A detail-page navigation lets Chromium
+    issue the same request with its current cookies and browser-bound signature.
+    """
+
+    if os.environ.get("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK") != "1":
+        return
+    from media_platform.douyin import client as douyin_client
+    from media_platform.douyin.search_safety import decode_douyin_json_body
+
+    client_class = douyin_client.DouYinClient
+    if getattr(client_class, "_trippostcollect_browser_detail_fallback", False):
+        return
+    original_get_video_by_id = client_class.get_video_by_id
+
+    async def browser_detail(self: Any, aweme_id: str) -> Any:
+        page = getattr(self, "playwright_page", None)
+        if page is None:
+            raise RuntimeError("Douyin browser detail fallback requires a Playwright page")
+        timeout_ms = max(
+            5_000,
+            int(os.environ.get("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_TIMEOUT_MS", "30000")),
+        )
+        lock = getattr(self, "_trippostcollect_browser_detail_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._trippostcollect_browser_detail_lock = lock
+        detail_url = f"https://www.douyin.com/video/{aweme_id}"
+        async with lock:
+            async with page.expect_response(
+                lambda response: "/aweme/v1/web/aweme/detail/" in response.url,
+                timeout=timeout_ms,
+            ) as response_info:
+                await page.goto(detail_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            response = await response_info.value
+            payload = decode_douyin_json_body(await response.body())
+        detail = payload.get("aweme_detail") if isinstance(payload, dict) else None
+        if not isinstance(detail, dict) or not detail.get("aweme_id"):
+            raise RuntimeError("browser detail response did not contain aweme_detail")
+        return detail
+
+    async def resilient_get_video_by_id(self: Any, aweme_id: str) -> Any:
+        original_error: Exception | None = None
+        try:
+            detail = await original_get_video_by_id(self, aweme_id)
+            if isinstance(detail, dict) and detail.get("aweme_id"):
+                return detail
+        except Exception as exc:
+            original_error = exc
+        try:
+            result = await browser_detail(self, aweme_id)
+            douyin_client.utils.logger.warning(
+                f"[TripPostCollect] Used browser-native Douyin detail fallback for aweme_id:{aweme_id}"
+            )
+            return result
+        except Exception:
+            if original_error is not None:
+                raise original_error
+            raise
+
+    client_class.get_video_by_id = resilient_get_video_by_id
+    client_class._trippostcollect_browser_detail_fallback = True
+
+
 def main() -> None:
     main_path = MEDIACRAWLER_ROOT / "main.py"
     if not main_path.is_file():
         raise RuntimeError(f"MediaCrawler main module is missing: {main_path}")
     install_export_hook()
     install_xhs_repair_resilience()
+    install_douyin_browser_detail_fallback()
     runpy.run_path(str(main_path), run_name="__main__")
 
 

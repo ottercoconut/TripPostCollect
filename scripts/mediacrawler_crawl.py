@@ -4589,6 +4589,10 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
                     else str(source_candidate_hard_limit)
                 ),
                 "TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS": "0.25",
+                "TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK": (
+                    "1" if getattr(args, "post_repair", False) else "0"
+                ),
+                "TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_TIMEOUT_MS": "30000",
             }
         )
     if platform_key in {"xhs", "zhihu"}:
