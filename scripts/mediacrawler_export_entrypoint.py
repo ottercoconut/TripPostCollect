@@ -193,11 +193,21 @@ def install_douyin_browser_detail_fallback() -> None:
         return
     original_get_video_by_id = client_class.get_video_by_id
 
+    def is_detail_object(value: Any, aweme_id: str) -> bool:
+        if not isinstance(value, dict) or str(value.get("aweme_id") or "") != str(aweme_id):
+            return False
+        # Search cards and route metadata can contain only aweme_id.  Require
+        # at least one detail-shaped field before allowing persistence.
+        return any(
+            key in value
+            for key in ("desc", "author", "statistics", "images", "video", "create_time")
+        )
+
     def find_detail(value: Any, aweme_id: str, *, depth: int = 0) -> dict[str, Any] | None:
         if depth > 12:
             return None
         if isinstance(value, dict):
-            if str(value.get("aweme_id") or "") == str(aweme_id):
+            if is_detail_object(value, aweme_id):
                 return value
             for nested in value.values():
                 found = find_detail(nested, aweme_id, depth=depth + 1)
@@ -255,7 +265,10 @@ def install_douyin_browser_detail_fallback() -> None:
                             if (typeof value !== 'object') return null;
                             if (seen.has(value)) return null;
                             seen.add(value);
-                            if (String(value.aweme_id || '') === String(targetId)) return value;
+                            const hasDetailShape = [
+                                'desc', 'author', 'statistics', 'images', 'video', 'create_time'
+                            ].some(key => Object.prototype.hasOwnProperty.call(value, key));
+                            if (hasDetailShape && String(value.aweme_id || '') === String(targetId)) return value;
                             for (const nested of Object.values(value)) {
                                 const found = walk(nested, depth + 1);
                                 if (found) return found;
