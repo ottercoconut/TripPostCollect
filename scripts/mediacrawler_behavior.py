@@ -44,6 +44,7 @@ XHS_PLATFORM_SECURITY_LIMIT_RE = re.compile(
 )
 XHS_PLATFORM_SECURITY_LIMIT_URL_RE = re.compile(r"/website-login/error(?:[?#]|$)", re.I)
 XHS_CAPTCHA_URL_RE = re.compile(r"/website-login/captcha(?:[?#]|$)", re.I)
+XHS_LOGIN_URL_RE = re.compile(r"/(?:login|website-login)(?:[/?#]|$)", re.I)
 LOGIN_VISIBLE_RE = re.compile(r"请先登录|登录后查看|需要登录|login_required", re.I)
 XHS_COMMENT_SELECTORS = (
     "[class*='comments-container']",
@@ -117,7 +118,10 @@ async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
         ),
         "rate_limited": bool(RATE_LIMIT_VISIBLE_RE.search(normalized)),
         "blocked": bool(BLOCKED_VISIBLE_RE.search(normalized)),
-        "login_required": bool(LOGIN_VISIBLE_RE.search(normalized)),
+        "login_required": bool(
+            LOGIN_VISIBLE_RE.search(normalized)
+            or (is_xhs_page and XHS_LOGIN_URL_RE.search(page_url))
+        ),
     }
     return normalized[:360], markers
 

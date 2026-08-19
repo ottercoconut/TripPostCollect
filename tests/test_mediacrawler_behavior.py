@@ -284,6 +284,16 @@ async def test_xhs_captcha_url_is_a_visible_verification_challenge() -> None:
 
 
 @pytest.mark.asyncio
+async def test_xhs_login_url_is_a_visible_login_challenge() -> None:
+    page = FakePage("", card_count=0, profile_count=0)
+    page.url = "https://www.xiaohongshu.com/login?redirectPath=%2Fuser%2Fprofile%2Fauthor"
+
+    _, markers = await mediacrawler_behavior.visible_page_state(page)
+
+    assert markers["login_required"] is True
+
+
+@pytest.mark.asyncio
 async def test_xhs_retry_later_without_account_exception_is_not_security_limit() -> None:
     page = FakePage("Please retry later")
     page.url = "https://www.xiaohongshu.com/explore"
