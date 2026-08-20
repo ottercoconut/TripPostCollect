@@ -380,6 +380,27 @@ def test_partial_generic_repair_can_commit_valid_subset() -> None:
     ) is False
 
 
+def test_clean_zero_output_repair_is_not_misclassified_as_runtime_failure() -> None:
+    records = [
+        {
+            "platform": "douyin",
+            "status": "failed",
+            "run": {"returncode": 0, "timed_out": False},
+            "failure_classification": {"failure_type": "success"},
+            "output": {"content_records": 0},
+        }
+    ]
+
+    assert mediacrawler.repair_candidate_execution_completed(records, ["douyin"])
+
+    records[0]["failure_classification"] = {"failure_type": "rate_limited"}
+    assert not mediacrawler.repair_candidate_execution_completed(records, ["douyin"])
+
+    records[0]["failure_classification"] = {"failure_type": "success"}
+    records[0]["run"].pop("returncode")
+    assert not mediacrawler.repair_candidate_execution_completed(records, ["douyin"])
+
+
 def test_run_repair_child_timeout_uses_formal_process_group_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -4470,6 +4470,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         cmd.extend(["--specified_id", ",".join(specified_detail_urls)])
     extra_env: dict[str, str] = {
         "TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS": "1",
+        "TRIPPOSTCOLLECT_POST_REPAIR": "1" if getattr(args, "post_repair", False) else "0",
         "TRIPPOSTCOLLECT_TARGET_NEW_POSTS": str(max(1, source_target_new_posts)),
         "TRIPPOSTCOLLECT_CANDIDATE_HARD_LIMIT": str(source_candidate_hard_limit),
         "TRIPPOSTCOLLECT_MAX_STAGNANT_BATCHES": str(max(1, args.max_stagnant_batches)),
@@ -4557,7 +4558,6 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
                 ),
                 "TRIPPOSTCOLLECT_XHS_POST_INTERACTION": str(args.xhs_post_interaction),
                 "TRIPPOSTCOLLECT_XHS_REPAIR": "1" if getattr(args, "xhs_repair", False) else "0",
-                "TRIPPOSTCOLLECT_POST_REPAIR": "1" if getattr(args, "post_repair", False) else "0",
                 "TRIPPOSTCOLLECT_XHS_INITIAL_SETTLE_SECONDS": "12",
                 "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS": (
                     str(XHS_OPERATOR_LOGIN_WAIT_SECONDS) if args.headed else "0"
@@ -5095,6 +5095,37 @@ def repair_partial_child_execution_allowed(
     )
 
 
+def repair_candidate_execution_completed(
+    records: list[dict[str, Any]],
+    platforms: list[str],
+) -> bool:
+    """Recognize a clean repair process that produced no valid candidate rows."""
+
+    repair_records = [
+        record
+        for record in records
+        if isinstance(record, dict) and record.get("platform") in platforms
+    ]
+
+    def clean_process(record: dict[str, Any]) -> bool:
+        run = record.get("run")
+        return bool(
+            isinstance(run, dict)
+            and run.get("returncode") == 0
+            and not bool(run.get("timed_out"))
+            and str(
+                (record.get("failure_classification") or {}).get("failure_type")
+                or ""
+            )
+            == "success"
+        )
+
+    return bool(
+        len(repair_records) == len(platforms)
+        and all(clean_process(record) for record in repair_records)
+    )
+
+
 def main() -> int:
     args = parse_args()
     if args.xhs_repair and args.post_repair:
@@ -5381,6 +5412,8 @@ def main() -> int:
             if isinstance(record, dict) and record.get("platform") in platforms
         )
     )
+    if repair_mode and not repair_runtime_blocked and not child_execution_ok:
+        child_execution_ok = repair_candidate_execution_completed(records, platforms)
     summary = {
         "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "keyword": args.keyword,

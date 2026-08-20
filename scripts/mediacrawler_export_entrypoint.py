@@ -25,6 +25,80 @@ EXPORT_METHODS = (
 )
 
 
+def _find_nested_platform_record(
+    value: Any,
+    target_id: str,
+    *,
+    id_keys: tuple[str, ...],
+    shape_keys: tuple[str, ...],
+    depth: int = 0,
+) -> dict[str, Any] | None:
+    """Find one target-bound detail object without accepting ID-only shells."""
+
+    if depth > 12:
+        return None
+    if isinstance(value, dict):
+        identity = next(
+            (
+                str(value.get(key) or "")
+                for key in id_keys
+                if value.get(key) not in (None, "")
+            ),
+            "",
+        )
+        if identity == str(target_id) and any(key in value for key in shape_keys):
+            return value
+        for nested in value.values():
+            found = _find_nested_platform_record(
+                nested,
+                target_id,
+                id_keys=id_keys,
+                shape_keys=shape_keys,
+                depth=depth + 1,
+            )
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _find_nested_platform_record(
+                nested,
+                target_id,
+                id_keys=id_keys,
+                shape_keys=shape_keys,
+                depth=depth + 1,
+            )
+            if found is not None:
+                return found
+    return None
+
+
+def _douyin_detail_urls(aweme_id: str) -> tuple[str, str]:
+    """Try the image-note route before the legacy video route for repair fallbacks."""
+
+    return (
+        f"https://www.douyin.com/note/{aweme_id}",
+        f"https://www.douyin.com/video/{aweme_id}",
+    )
+
+
+def _find_douyin_detail(value: Any, aweme_id: str) -> dict[str, Any] | None:
+    return _find_nested_platform_record(
+        value,
+        aweme_id,
+        id_keys=("aweme_id",),
+        shape_keys=("desc", "author", "statistics", "images", "video", "create_time"),
+    )
+
+
+def _find_weibo_detail(value: Any, note_id: str) -> dict[str, Any] | None:
+    return _find_nested_platform_record(
+        value,
+        note_id,
+        id_keys=("id", "idstr", "mid"),
+        shape_keys=("text", "pics", "user", "created_at", "isLongText"),
+    )
+
+
 def sanitize_export_item(item: dict[str, Any]) -> dict[str, Any]:
     """Sanitize one item immediately before MediaCrawler serializes it."""
     if os.environ.get("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS") != "1":
@@ -193,33 +267,6 @@ def install_douyin_browser_detail_fallback() -> None:
         return
     original_get_video_by_id = client_class.get_video_by_id
 
-    def is_detail_object(value: Any, aweme_id: str) -> bool:
-        if not isinstance(value, dict) or str(value.get("aweme_id") or "") != str(aweme_id):
-            return False
-        # Search cards and route metadata can contain only aweme_id.  Require
-        # at least one detail-shaped field before allowing persistence.
-        return any(
-            key in value
-            for key in ("desc", "author", "statistics", "images", "video", "create_time")
-        )
-
-    def find_detail(value: Any, aweme_id: str, *, depth: int = 0) -> dict[str, Any] | None:
-        if depth > 12:
-            return None
-        if isinstance(value, dict):
-            if is_detail_object(value, aweme_id):
-                return value
-            for nested in value.values():
-                found = find_detail(nested, aweme_id, depth=depth + 1)
-                if found is not None:
-                    return found
-        elif isinstance(value, list):
-            for nested in value:
-                found = find_detail(nested, aweme_id, depth=depth + 1)
-                if found is not None:
-                    return found
-        return None
-
     async def browser_detail(self: Any, aweme_id: str) -> Any:
         page = getattr(self, "playwright_page", None)
         if page is None:
@@ -232,27 +279,34 @@ def install_douyin_browser_detail_fallback() -> None:
         if lock is None:
             lock = asyncio.Lock()
             self._trippostcollect_browser_detail_lock = lock
-        detail_url = f"https://www.douyin.com/video/{aweme_id}"
+        attempts: list[str] = []
         async with lock:
-            async with page.expect_response(
-                lambda response: "/aweme/v1/web/aweme/detail/" in response.url,
-                timeout=timeout_ms,
-            ) as response_info:
-                await page.goto(detail_url, wait_until="domcontentloaded", timeout=timeout_ms)
-            response = await response_info.value
-            try:
-                payload = decode_douyin_json_body(await response.body())
-            except Exception as exc:
-                douyin_client.utils.logger.warning(
-                    f"[TripPostCollect] Browser Douyin detail body unavailable for aweme_id:{aweme_id}; "
-                    f"reason:{type(exc).__name__}"
-                )
-                payload = None
-        detail = find_detail(payload, aweme_id)
-        if detail is None:
-            try:
-                page_state = await page.evaluate(
-                    """(targetId) => {
+            for detail_url in _douyin_detail_urls(aweme_id):
+                payload: Any = None
+                response_reason = ""
+                try:
+                    async with page.expect_response(
+                        lambda response: "/aweme/v1/web/aweme/detail/" in response.url,
+                        timeout=timeout_ms,
+                    ) as response_info:
+                        await page.goto(
+                            detail_url,
+                            wait_until="domcontentloaded",
+                            timeout=timeout_ms,
+                        )
+                    response = await response_info.value
+                    try:
+                        payload = decode_douyin_json_body(await response.body())
+                    except Exception as exc:
+                        response_reason = f"response_body:{type(exc).__name__}"
+                except PlaywrightError as exc:
+                    response_reason = f"navigation_or_response:{type(exc).__name__}"
+
+                detail = _find_douyin_detail(payload, aweme_id)
+                if detail is None:
+                    try:
+                        page_state = await page.evaluate(
+                            """(targetId) => {
                         const roots = [
                             window.__UNIVERSAL_DATA_FOR_REHYDRATION__,
                             window._ROUTER_DATA,
@@ -279,23 +333,35 @@ def install_douyin_browser_detail_fallback() -> None:
                             const found = walk(root, 0);
                             if (found) return found;
                         }
+                        for (const script of document.querySelectorAll('script[type="application/json"]')) {
+                            try {
+                                const found = walk(JSON.parse(script.textContent || ''), 0);
+                                if (found) return found;
+                            } catch (_) {
+                                continue;
+                            }
+                        }
                         return null;
                     }""",
-                    aweme_id,
+                            aweme_id,
+                        )
+                        detail = _find_douyin_detail(page_state, aweme_id)
+                    except Exception as exc:
+                        if not response_reason:
+                            response_reason = f"page_state:{type(exc).__name__}"
+                if detail is not None:
+                    return detail
+
+                route = "note" if "/note/" in detail_url else "video"
+                payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
+                attempts.append(
+                    f"{route}:reason={response_reason or 'empty_detail'}:payload_keys={payload_keys}"
                 )
-                detail = find_detail(page_state, aweme_id)
-            except Exception as exc:
-                douyin_client.utils.logger.warning(
-                    f"[TripPostCollect] Browser Douyin page-state extraction failed for aweme_id:{aweme_id}; "
-                    f"reason:{type(exc).__name__}"
-                )
-        if not isinstance(detail, dict) or not detail.get("aweme_id"):
-            payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
-            raise RuntimeError(
-                "browser detail response did not contain aweme_detail; "
-                f"payload_keys={payload_keys}"
-            )
-        return detail
+
+        raise RuntimeError(
+            "browser detail response did not contain aweme_detail; "
+            f"attempts={attempts}"
+        )
 
     async def resilient_get_video_by_id(self: Any, aweme_id: str) -> Any:
         original_error: Exception | None = None
@@ -320,6 +386,116 @@ def install_douyin_browser_detail_fallback() -> None:
     client_class._trippostcollect_browser_detail_fallback = True
 
 
+def install_weibo_browser_detail_fallback() -> None:
+    """Recover repair-only detail pages whose HTML no longer exposes $render_data."""
+
+    if os.environ.get("TRIPPOSTCOLLECT_POST_REPAIR") != "1":
+        return
+    from media_platform.weibo import client as weibo_client
+
+    client_class = weibo_client.WeiboClient
+    if getattr(client_class, "_trippostcollect_browser_detail_fallback", False):
+        return
+    original_get_note_info_by_id = client_class.get_note_info_by_id
+
+    async def resilient_get_note_info_by_id(self: Any, note_id: str) -> dict[str, Any]:
+        original_error: Exception | None = None
+        try:
+            result = await original_get_note_info_by_id(self, note_id)
+            original_detail = _find_weibo_detail(result, note_id)
+            if original_detail is not None and str(original_detail.get("text") or "").strip():
+                return {"mblog": original_detail}
+        except weibo_client.DataFetchError as exc:
+            original_error = exc
+
+        page = getattr(self, "playwright_page", None)
+        if page is None:
+            if original_error is not None:
+                raise original_error
+            raise weibo_client.DataFetchError(
+                "get weibo detail err: browser detail fallback has no Playwright page"
+            )
+        timeout_ms = max(
+            5_000,
+            int(os.environ.get("TRIPPOSTCOLLECT_WEIBO_BROWSER_DETAIL_TIMEOUT_MS", "30000")),
+        )
+        lock = getattr(self, "_trippostcollect_browser_detail_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._trippostcollect_browser_detail_lock = lock
+        try:
+            async with lock:
+                await page.goto(
+                    f"https://m.weibo.cn/detail/{note_id}",
+                    wait_until="domcontentloaded",
+                    timeout=timeout_ms,
+                )
+                await page.wait_for_timeout(min(2_000, timeout_ms))
+                page_state = await page.evaluate(
+                    """(targetId) => {
+                        const roots = [
+                            window.$render_data,
+                            window.__INITIAL_STATE__,
+                            window.__NEXT_DATA__,
+                        ];
+                        const seen = new WeakSet();
+                        const walk = (value, depth) => {
+                            if (depth > 12 || value === null || value === undefined) return null;
+                            if (typeof value !== 'object') return null;
+                            if (seen.has(value)) return null;
+                            seen.add(value);
+                            const identity = String(value.id || value.idstr || value.mid || '');
+                            const shaped = ['text', 'pics', 'user', 'created_at', 'isLongText']
+                                .some(key => Object.prototype.hasOwnProperty.call(value, key));
+                            if (identity === String(targetId) && shaped) return value;
+                            for (const nested of Object.values(value)) {
+                                const found = walk(nested, depth + 1);
+                                if (found) return found;
+                            }
+                            return null;
+                        };
+                        for (const root of roots) {
+                            const found = walk(root, 0);
+                            if (found) return found;
+                        }
+                        for (const script of document.querySelectorAll('script')) {
+                            const text = (script.textContent || '').trim();
+                            if (!text || (!text.startsWith('{') && !text.startsWith('['))) continue;
+                            try {
+                                const found = walk(JSON.parse(text), 0);
+                                if (found) return found;
+                            } catch (_) {
+                                continue;
+                            }
+                        }
+                        return null;
+                    }""",
+                    note_id,
+                )
+        except PlaywrightError as exc:
+            raise weibo_client.DataFetchError(
+                "get weibo detail err: browser detail navigation failed "
+                f"({type(exc).__name__})"
+            ) from (original_error or exc)
+
+        detail = _find_weibo_detail(page_state, note_id)
+        if detail is None or not str(detail.get("text") or "").strip():
+            if original_error is not None:
+                raise original_error
+            raise weibo_client.DataFetchError(
+                "get weibo detail err: browser page state has no matching full mblog"
+            )
+        detail = dict(detail)
+        detail["id"] = str(detail.get("id") or detail.get("idstr") or note_id)
+        weibo_client.utils.logger.warning(
+            f"[TripPostCollect] Used browser-native Weibo detail fallback for note_id:{note_id}"
+        )
+        return {"mblog": detail}
+
+    client_class.get_note_info_by_id = resilient_get_note_info_by_id
+    client_class._trippostcollect_browser_detail_fallback = True
+
+
 def main() -> None:
     main_path = MEDIACRAWLER_ROOT / "main.py"
     if not main_path.is_file():
@@ -327,6 +503,7 @@ def main() -> None:
     install_export_hook()
     install_xhs_repair_resilience()
     install_douyin_browser_detail_fallback()
+    install_weibo_browser_detail_fallback()
     runpy.run_path(str(main_path), run_name="__main__")
 
 

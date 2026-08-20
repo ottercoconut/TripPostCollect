@@ -82,7 +82,10 @@ search ID 时，从刷新链下一页写 `discovery_frontier_reseeded` 并替换
 历史库中缺少 `content_detail_status=detail_observed` 的既有图文记录，从根项目
 `scripts/repair_post_details.py --platform douyin` 分批修复。清单只接受与既有 `aweme_id` 完全匹配的
 `/video/<id>` 或 `/note/<id>` HTTPS 入口；detail 模式先在本轮青岛关键词搜索页完成人类行为证据，
-再请求 `aweme_detail`、作者主页和正文图。该入口不写搜索 checkpoint，完成含义只覆盖清单中的旧行。
+再请求 `aweme_detail`、作者主页和正文图。HTTP detail 返回空壳时，修复入口依次打开目标
+`/note/<id>` 与 `/video/<id>`，只接受浏览器详情响应或页面结构化状态中 ID 完全一致、且含详情形状
+字段的 aweme 对象；ID-only 路由状态和搜索卡片仍不能补签。该入口不写搜索 checkpoint，完成含义只
+覆盖清单中的旧行。
 
 共享的有限重试、`candidate_skipped`、运行级阻断和媒体失败语义见
 [正式契约](../formal-crawl-contract.md)。视频、音乐和封面文件计数必须始终为 0，正文图不完整时不能

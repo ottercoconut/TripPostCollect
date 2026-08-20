@@ -40,5 +40,8 @@
 历史库中缺少 `content_detail_status=detail_observed` 的既有记录，从根项目
 `scripts/repair_post_details.py --platform weibo` 分批修复。清单把既有微博 ID 与
 `https://m.weibo.cn/detail/<id>` 严格绑定；detail 模式先在本轮青岛关键词移动搜索页完成人类行为
-证据，再从移动详情标记 `content_detail_source=mobile_detail` 并下载 `mblog.pics` 正文图。该入口
-不写搜索 checkpoint，完成含义只覆盖清单中的旧行。
+证据，再从移动详情标记 `content_detail_source=mobile_detail` 并下载 `mblog.pics` 正文图。旧式
+`$render_data` 不存在时，修复入口可以从同一登录浏览器打开的精确 detail 页读取结构化页面状态，
+但仍要求目标 ID 完全一致且正文非空。新浪原图经代理失败、超限或旧 URL 已经带 `i1.wp.com` 时，
+图片客户端只在规范代理 URL 与原始新浪 `large` URL 间有限回退，禁止重复包装代理地址。该入口不写
+搜索 checkpoint，完成含义只覆盖清单中的旧行。
