@@ -11,6 +11,7 @@ from scripts.mediacrawler_export_entrypoint import (
     _douyin_detail_urls,
     _find_douyin_detail,
     _find_weibo_detail,
+    _weibo_detail_api_url,
 )
 
 
@@ -39,6 +40,10 @@ def test_weibo_nested_detail_is_bound_to_requested_id() -> None:
     assert _find_weibo_detail(payload, "456") == target
     assert _find_weibo_detail(payload, "wrong")["text"] == "其他微博"
     assert _find_weibo_detail({"id": "456"}, "456") is None
+
+
+def test_weibo_browser_api_is_bound_to_requested_id() -> None:
+    assert _weibo_detail_api_url("456") == "https://m.weibo.cn/statuses/show?id=456"
 
 
 def test_weibo_repair_hook_recovers_exact_browser_detail(

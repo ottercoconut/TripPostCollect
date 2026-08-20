@@ -99,6 +99,12 @@ def _find_weibo_detail(value: Any, note_id: str) -> dict[str, Any] | None:
     )
 
 
+def _weibo_detail_api_url(note_id: str) -> str:
+    """Return the exact logged-in mobile detail API used by the detail page."""
+
+    return f"https://m.weibo.cn/statuses/show?id={note_id}"
+
+
 def sanitize_export_item(item: dict[str, Any]) -> dict[str, Any]:
     """Sanitize one item immediately before MediaCrawler serializes it."""
     if os.environ.get("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS") != "1":
@@ -423,8 +429,48 @@ def install_weibo_browser_detail_fallback() -> None:
         if lock is None:
             lock = asyncio.Lock()
             self._trippostcollect_browser_detail_lock = lock
+        attempts: list[str] = []
         try:
             async with lock:
+                request_context = getattr(page, "request", None)
+                if request_context is not None:
+                    try:
+                        api_response = await request_context.get(
+                            _weibo_detail_api_url(note_id),
+                            headers={"Referer": f"https://m.weibo.cn/detail/{note_id}"},
+                            timeout=timeout_ms,
+                        )
+                        api_status = int(api_response.status)
+                        if api_status in {401, 403}:
+                            raise weibo_client.PlatformRuntimeError(
+                                f"get weibo browser detail HTTP {api_status}",
+                                code="login_required",
+                            )
+                        if api_status == 429:
+                            raise weibo_client.PlatformRuntimeError(
+                                "get weibo browser detail HTTP 429",
+                                code="rate_limited",
+                            )
+                        api_payload = await api_response.json() if api_status == 200 else None
+                        api_detail = _find_weibo_detail(api_payload, note_id)
+                        if api_detail is not None and str(
+                            api_detail.get("text") or ""
+                        ).strip():
+                            detail = dict(api_detail)
+                            detail["id"] = str(
+                                detail.get("id") or detail.get("idstr") or note_id
+                            )
+                            weibo_client.utils.logger.warning(
+                                "[TripPostCollect] Used browser-context Weibo detail API "
+                                f"for note_id:{note_id}"
+                            )
+                            return {"mblog": detail}
+                        attempts.append(f"browser_api:http_{api_status}:empty_detail")
+                    except weibo_client.PlatformRuntimeError:
+                        raise
+                    except Exception as exc:
+                        attempts.append(f"browser_api:{type(exc).__name__}")
+
                 await page.goto(
                     f"https://m.weibo.cn/detail/{note_id}",
                     wait_until="domcontentloaded",
@@ -472,6 +518,7 @@ def install_weibo_browser_detail_fallback() -> None:
                     }""",
                     note_id,
                 )
+                attempts.append("page_state:empty_detail")
         except PlaywrightError as exc:
             raise weibo_client.DataFetchError(
                 "get weibo detail err: browser detail navigation failed "
@@ -480,11 +527,10 @@ def install_weibo_browser_detail_fallback() -> None:
 
         detail = _find_weibo_detail(page_state, note_id)
         if detail is None or not str(detail.get("text") or "").strip():
-            if original_error is not None:
-                raise original_error
             raise weibo_client.DataFetchError(
-                "get weibo detail err: browser page state has no matching full mblog"
-            )
+                "get weibo detail err: browser fallbacks have no matching full mblog; "
+                f"attempts={attempts}"
+            ) from original_error
         detail = dict(detail)
         detail["id"] = str(detail.get("id") or detail.get("idstr") or note_id)
         weibo_client.utils.logger.warning(
