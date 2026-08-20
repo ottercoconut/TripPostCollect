@@ -439,7 +439,18 @@ def pending_count(conn: sqlite3.Connection, platform: str) -> int:
 def _fatal_child_failure(summary: dict[str, Any]) -> str:
     validation = summary.get("formal_validation") or {}
     stop_reason = str(validation.get("stop_reason") or "")
-    if stop_reason in {"runtime_failed", "login_required", "captcha_detected"}:
+    if stop_reason in {
+        "runtime_failed",
+        "login_required",
+        "captcha_detected",
+        "rate_limited",
+        "platform_security_limit",
+        "policy_blocked",
+        "blocked_or_forbidden",
+        "runtime_permission_error",
+        "browser_launch_failed",
+        "browser_target_closed",
+    }:
         return stop_reason
     behavior = summary.get("behavior_validation") or {}
     if behavior and not behavior.get("behavior_ok"):
@@ -464,6 +475,14 @@ def _strict_batch_blocker(error: str) -> bool:
     return error in {
         "login_required",
         "captcha_detected",
+        "rate_limited",
+        "platform_security_limit",
+        "policy_blocked",
+        "blocked_or_forbidden",
+        "runtime_permission_error",
+        "browser_launch_failed",
+        "browser_target_closed",
+        "behavior_evidence_failed",
         "crawl_policy_evidence_failed",
         "sqlite_import_failed",
         "post_detail_repair_image_artifacts_incomplete",

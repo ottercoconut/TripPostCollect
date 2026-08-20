@@ -1333,3 +1333,17 @@ def test_long_term_image_promotion_requires_all_completion_gates() -> None:
     assert runtime_with_lower_priority_failures["completion_met"] is False
     assert runtime_with_lower_priority_failures["new_target_met"] is False
     assert runtime_with_lower_priority_failures["stop_reason"] == "runtime_failed"
+
+    rate_limited = mediacrawler_crawl.apply_formal_completion_gates(
+        {
+            "completion_met": False,
+            "new_target_met": False,
+            "stop_reason": "rate_limited",
+        },
+        content_validation={"completion_met": False, "new_target_met": False},
+        image_materialization=image_complete,
+        behavior_validation=behavior_ok,
+        download_images=True,
+        child_execution_ok=False,
+    )
+    assert rate_limited["stop_reason"] == "rate_limited"

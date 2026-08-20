@@ -5041,7 +5041,18 @@ def apply_formal_completion_gates(
     runtime_stop_reason = (
         str(gated.get("stop_reason"))
         if str(gated.get("stop_reason") or "")
-        in {"runtime_failed", "login_required", "captcha_detected"}
+        in {
+            "runtime_failed",
+            "login_required",
+            "captcha_detected",
+            "rate_limited",
+            "platform_security_limit",
+            "policy_blocked",
+            "blocked_or_forbidden",
+            "runtime_permission_error",
+            "browser_launch_failed",
+            "browser_target_closed",
+        }
         else ""
     )
     if download_images and not image_materialization.get("complete"):
@@ -5124,6 +5135,34 @@ def repair_candidate_execution_completed(
         len(repair_records) == len(platforms)
         and all(clean_process(record) for record in repair_records)
     )
+
+
+def repair_runtime_stop_reason(
+    records: list[dict[str, Any]],
+    platforms: list[str],
+) -> str:
+    """Preserve a structured run-level blocker from one repair child."""
+
+    blocking_types = {
+        "policy_blocked",
+        "platform_security_limit",
+        "captcha_detected",
+        "login_required",
+        "rate_limited",
+        "blocked_or_forbidden",
+        "runtime_permission_error",
+        "browser_launch_failed",
+        "browser_target_closed",
+    }
+    for record in records:
+        if not isinstance(record, dict) or record.get("platform") not in platforms:
+            continue
+        failure_type = str(
+            (record.get("failure_classification") or {}).get("failure_type") or ""
+        )
+        if failure_type in blocking_types:
+            return failure_type
+    return ""
 
 
 def main() -> int:
@@ -5393,25 +5432,10 @@ def main() -> int:
         result_counts["failed_count"] == 0
         and result_counts["ok_count"] == len(platforms)
     )
-    repair_runtime_blocked = bool(
-        repair_mode
-        and any(
-            str((record.get("failure_classification") or {}).get("failure_type") or "")
-            in {
-                "policy_blocked",
-                "platform_security_limit",
-                "captcha_detected",
-                "login_required",
-                "rate_limited",
-                "blocked_or_forbidden",
-                "runtime_permission_error",
-                "browser_launch_failed",
-                "browser_target_closed",
-            }
-            for record in records
-            if isinstance(record, dict) and record.get("platform") in platforms
-        )
+    repair_runtime_reason = (
+        repair_runtime_stop_reason(records, platforms) if repair_mode else ""
     )
+    repair_runtime_blocked = bool(repair_runtime_reason)
     if repair_mode and not repair_runtime_blocked and not child_execution_ok:
         child_execution_ok = repair_candidate_execution_completed(records, platforms)
     summary = {
@@ -5524,6 +5548,8 @@ def main() -> int:
             pagination_evidence,
         )
         validation, valid_records = content_validation, content_valid_records
+    if repair_runtime_reason:
+        validation = {**validation, "stop_reason": repair_runtime_reason}
     validation = apply_formal_completion_gates(
         validation,
         content_validation=content_validation,

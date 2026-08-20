@@ -107,7 +107,8 @@ shasum -a 256 data/backups/trippostcollect-before-<run_id>.sqlite
 知乎 detail 页可能不返回作者粉丝或 answer 创建时间。修复 child 会按平台 ID 从同一 SQLite 旧行读取
 已持久化的 `published_at`、`followers_observed`、`author_followers_source` 和粉丝数，仅补齐详情载荷
 缺失的元数据；正文、图片和 `answer_detail`/`article_detail` 来源仍必须来自本次详情访问。若补齐后仍无
-有效详情，child 以 `repair_no_valid_detail` 失败并停止后续批次，不得把搜索载荷直接当作详情成功。
+有效详情，child 将本批标记为 `repair_no_valid_detail` 且不得把搜索载荷直接当作详情成功；无人值守总控
+按下文规则记录该批失败并继续后续批次，只有运行级阻断才停止平台总控。
 
 先检查通用平台登录，再按平台分别冻结计划。三个平台必须使用三个独立进程；不要在一个命令中混合：
 
@@ -135,14 +136,15 @@ python scripts/repair_post_details.py \
 
 微博和知乎只替换 `--platform`。单轮会按 `--batch-size` 扫描当前所有可执行待修复记录；
 `--max-items N` 用于小批试跑，`--post-id ID` 用于精确重试。详情或图片候选失败只留下该旧记录继续
-待修复，成功子集可以入库；登录、验证码、频控、策略、SQLite 或持久化验证失败会停止后续批次。
+待修复，成功子集可以入库；运行级阻断（登录、验证码、频控、安全或策略、浏览器整体失败、运行权限
+或行为证据失败）以及 SQLite、媒体持久化一致性失败会停止后续批次。
 `--timeout-per-batch` 是传给 MediaCrawler 的基础平台预算；修复总控会在此基础上额外保留正式抓取同款
 `HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS` 行为预算（当前 240 秒），并对整个进程组执行先 `SIGTERM`、
 后 `SIGKILL` 的收束。这样浏览器行为预算不会被父进程过早截断；微博等慢平台可显式提高该参数，
 例如 `--timeout-per-batch 1800`，但不得绕过批次、备份和状态门禁。
 无人值守模式下，单批超时、child 缺摘要、普通详情运行失败或 `repair_no_valid_detail` 只记录在
-批次结果中并跳过该批，随后继续清单中的后续批次；只有登录失效、验证码/安全策略阻断、SQLite 导入
-失败或媒体/持久化一致性失败才会停止该平台总控。
+批次结果中并跳过该批，随后继续清单中的后续批次；只有上述运行级阻断以及 SQLite、媒体持久化
+一致性失败才会停止该平台总控。
 摘要状态 `completed_with_remaining` 表示本轮已有可验证进展但选中目标仍有残留，不表示库存清零；
 继续运行同一平台，直到摘要同时满足 `status=completed`、`all_selected_targets_recovered=true` 和
 `remaining_pending_count=0`。若一轮 `recovered_count=0`，程序失败退出，先按摘要排障，不做无限循环。

@@ -401,6 +401,18 @@ def test_clean_zero_output_repair_is_not_misclassified_as_runtime_failure() -> N
     assert not mediacrawler.repair_candidate_execution_completed(records, ["douyin"])
 
 
+def test_repair_runtime_stop_reason_preserves_structured_blocker() -> None:
+    records = [
+        {
+            "platform": "weibo",
+            "failure_classification": {"failure_type": "rate_limited"},
+        }
+    ]
+
+    assert mediacrawler.repair_runtime_stop_reason(records, ["weibo"]) == "rate_limited"
+    assert mediacrawler.repair_runtime_stop_reason(records, ["douyin"]) == ""
+
+
 def test_run_repair_child_timeout_uses_formal_process_group_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -453,9 +465,38 @@ def test_run_repair_child_timeout_uses_formal_process_group_contract(
         ("repair_no_valid_detail", False),
         ("login_required", True),
         ("captcha_detected", True),
+        ("rate_limited", True),
+        ("platform_security_limit", True),
+        ("policy_blocked", True),
+        ("blocked_or_forbidden", True),
+        ("runtime_permission_error", True),
+        ("browser_launch_failed", True),
+        ("browser_target_closed", True),
+        ("behavior_evidence_failed", True),
         ("crawl_policy_evidence_failed", True),
         ("sqlite_import_failed", True),
     ],
 )
 def test_strict_batch_blocker_only_stops_unattended_repair(error: str, strict: bool) -> None:
     assert repair._strict_batch_blocker(error) is strict
+
+
+@pytest.mark.parametrize(
+    "stop_reason",
+    [
+        "rate_limited",
+        "platform_security_limit",
+        "policy_blocked",
+        "blocked_or_forbidden",
+        "runtime_permission_error",
+        "browser_launch_failed",
+        "browser_target_closed",
+    ],
+)
+def test_fatal_child_failure_preserves_structured_stop_reason(stop_reason: str) -> None:
+    assert (
+        repair._fatal_child_failure(
+            {"formal_validation": {"stop_reason": stop_reason}}
+        )
+        == stop_reason
+    )
