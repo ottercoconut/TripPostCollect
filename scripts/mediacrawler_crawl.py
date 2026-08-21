@@ -415,6 +415,12 @@ def parse_args() -> argparse.Namespace:
         help="Repair existing XHS rows from specified note detail URLs without discovery writes.",
     )
     parser.add_argument(
+        "--xhs-repair-batch-size",
+        type=int,
+        default=5,
+        help="Number of isolated XHS repair candidates processed per in-browser batch.",
+    )
+    parser.add_argument(
         "--post-repair",
         action="store_true",
         help=(
@@ -2085,6 +2091,57 @@ def load_pagination_evidence(state_path: str | Path | None) -> dict[str, Any]:
         "skipped_candidate_count": len(skipped_candidate_failures),
         "skipped_candidate_failures": skipped_candidate_failures,
         "stop_event": stopped_details,
+    }
+
+
+def load_xhs_repair_report(path_value: str | Path | None) -> dict[str, Any]:
+    if not path_value:
+        return {}
+    path = Path(path_value).expanduser()
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def xhs_repair_pagination_evidence(
+    records: list[dict[str, Any]],
+    *,
+    target_count: int,
+) -> dict[str, Any]:
+    reports = [
+        record.get("repair_report")
+        for record in records
+        if isinstance(record, dict)
+        and record.get("platform") == "xhs"
+        and isinstance(record.get("repair_report"), dict)
+    ]
+    batches: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    successful_ids: set[str] = set()
+    for report in reports:
+        batches.extend(
+            value for value in report.get("batches") or [] if isinstance(value, dict)
+        )
+        failures.extend(
+            value
+            for value in report.get("candidate_failures") or []
+            if isinstance(value, dict)
+        )
+        successful_ids.update(
+            str(value) for value in report.get("successful_ids") or [] if str(value)
+        )
+    return {
+        "available": True,
+        "stopped": True,
+        "stop_reason": "repair_targets_processed",
+        "stop_detail": "specified_detail_targets",
+        "candidate_count": target_count,
+        "batches": batches,
+        "successful_candidate_count": len(successful_ids),
+        "skipped_candidate_count": len(failures),
+        "skipped_candidate_failures": failures,
     }
 
 
@@ -4564,6 +4621,10 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
                 ),
                 "TRIPPOSTCOLLECT_XHS_POST_INTERACTION": str(args.xhs_post_interaction),
                 "TRIPPOSTCOLLECT_XHS_REPAIR": "1" if getattr(args, "xhs_repair", False) else "0",
+                "TRIPPOSTCOLLECT_XHS_REPAIR_BATCH_SIZE": str(args.xhs_repair_batch_size),
+                "TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH": str(
+                    log_dir / "repair_report.json"
+                ),
                 "TRIPPOSTCOLLECT_XHS_INITIAL_SETTLE_SECONDS": "12",
                 "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS": (
                     str(XHS_OPERATOR_LOGIN_WAIT_SECONDS) if args.headed else "0"
@@ -4646,6 +4707,11 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         extra_env=extra_env,
     )
     behavior_evidence = load_behavior_evidence(behavior_evidence_path)
+    repair_report = (
+        load_xhs_repair_report(log_dir / "repair_report.json")
+        if platform_key == "xhs" and getattr(args, "xhs_repair", False)
+        else {}
+    )
     output = summarize_output(save_path, args.keyword)
     status = (
         "completed"
@@ -4673,7 +4739,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         status = "runtime_failed"
     if not behavior_evidence_valid(behavior_evidence):
         status = "behavior_failed"
-    return {
+    result = {
         "platform": platform_key,
         "label": platform["label"],
         "status": status,
@@ -4685,6 +4751,9 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "run": run,
         "output": output,
     }
+    if repair_report:
+        result["repair_report"] = repair_report
+    return result
 
 
 def effective_attempt_exit_code(record: dict[str, Any]) -> int:
@@ -5159,6 +5228,9 @@ def repair_runtime_stop_reason(
         "runtime_permission_error",
         "browser_launch_failed",
         "browser_target_closed",
+        "browser_runtime_failed",
+        "verification_timeout",
+        "ip_blocked",
     }
     for record in records:
         if not isinstance(record, dict) or record.get("platform") not in platforms:
@@ -5168,6 +5240,11 @@ def repair_runtime_stop_reason(
         )
         if failure_type in blocking_types:
             return failure_type
+        repair_report = record.get("repair_report") or {}
+        runtime_blocker = repair_report.get("runtime_blocker") or {}
+        blocker_code = str(runtime_blocker.get("error_code") or "")
+        if blocker_code in blocking_types or blocker_code == "runtime_failed":
+            return blocker_code
     return ""
 
 
@@ -5180,8 +5257,12 @@ def main() -> int:
         args.target_new_posts < 0
         or args.candidate_hard_limit <= 0
         or args.max_stagnant_batches <= 0
+        or args.xhs_repair_batch_size <= 0
     ):
-        raise SystemExit("--candidate-hard-limit must be positive; other record limits cannot be negative")
+        raise SystemExit(
+            "--candidate-hard-limit, --max-stagnant-batches, and "
+            "--xhs-repair-batch-size must be positive; other record limits cannot be negative"
+        )
     target_new_posts = args.target_new_posts
     candidate_hard_limit = args.candidate_hard_limit
     if (
@@ -5462,16 +5543,23 @@ def main() -> int:
     if resume_info:
         summary["resume"] = resume_info
     if repair_mode:
-        pagination_evidence = {
-            "available": True,
-            "stopped": True,
-            "stop_reason": "repair_targets_processed",
-            "stop_detail": "specified_detail_targets",
-            "candidate_count": repair_target_count,
-            "batches": [],
-            "skipped_candidate_count": 0,
-            "skipped_candidate_failures": [],
-        }
+        pagination_evidence = (
+            xhs_repair_pagination_evidence(
+                records,
+                target_count=repair_target_count,
+            )
+            if args.xhs_repair
+            else {
+                "available": True,
+                "stopped": True,
+                "stop_reason": "repair_targets_processed",
+                "stop_detail": "specified_detail_targets",
+                "candidate_count": repair_target_count,
+                "batches": [],
+                "skipped_candidate_count": 0,
+                "skipped_candidate_failures": [],
+            }
+        )
     else:
         pagination_evidence = load_pagination_evidence(
             os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()

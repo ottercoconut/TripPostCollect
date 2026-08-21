@@ -144,6 +144,24 @@ python scripts/xhs_runner.py \
 `comment-scroll` 只访问并滚动评论区，不采集评论；`like-one` 只在明确未点赞时点击一次；`random` 在
 两者中随机选择并可能产生点赞副作用。控件普通失败只影响互动证据，频控、封禁或验证仍终止运行。
 
+已有不完整记录只能使用独立修复入口；默认最多选 20 条，并在同一 BrowserContext 内每 5 条分批，
+避免为每批重启浏览器和制造新设备会话：
+
+```bash
+source .venv/bin/activate
+python scripts/repair_xhs_posts.py \
+  --target-key qingdao_travel \
+  --account-id xhs-a01 \
+  --max-items 20 \
+  --batch-size 5
+```
+
+详情 API、HTML 回退、作者资料与图片各自沿用有界请求重试；最终失败会记录真实 `attempts`、
+`failure_scope` 和 `error_code`。普通候选失败不序列化空壳记录，不阻塞同批成功记录，也不阻止下一批；
+登录、验证码、频控、封禁、安全限制和浏览器整体失败仍立即停止。child `summary.json` 的
+`pagination_evidence.skipped_candidate_failures` 与平台记录的 `repair_report` 是失败清单，顶层
+`repair_xhs_posts.py` 摘要也会转存该报告。
+
 运行中不得修改 pool/target。只有用户明确要求抓完来源时，dry-run 和正式轮一起改为
 `source-exhausted`；不写回配置。
 

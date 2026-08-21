@@ -157,7 +157,10 @@ python scripts/repair_post_details.py \
 
 三个独立平台进程可以并行访问平台。长期媒体晋升和 SQLite 导入仍使用项目全局跨进程锁，因此写入
 阶段会自动串行；不得绕过该锁或手工改 execution state。小红书继续使用独立的
-`scripts/repair_xhs_posts.py`，不能放入此入口。
+`scripts/repair_xhs_posts.py`，不能放入此入口。小红书修复入口使用 `--batch-size` 在同一个浏览器会话
+内分批；候选的详情、作者或图片重试耗尽后写入 `repair_report` 并继续同批成功项及后续批次。
+登录/验证码/频控/安全限制/浏览器整体失败仍停止整轮；SQLite 或媒体一致性门禁也不会因部分成功而
+放宽。
 
 ## 自动恢复与检查
 

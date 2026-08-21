@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import runpy
 import sys
@@ -182,8 +183,102 @@ def _repair_exception_is_blocking(crawler: Any, exc: BaseException) -> bool:
     )
 
 
+def _xhs_repair_failure(
+    *,
+    note_id: str,
+    batch: int,
+    failure_scope: str,
+    exc: BaseException | None = None,
+    error_code: str = "",
+    attempts: int = 1,
+    retryable: bool | None = None,
+) -> dict[str, Any]:
+    """Build a token-free, structured record for one exhausted repair candidate."""
+
+    normalized_code = str(error_code or getattr(exc, "code", "") or "candidate_failed")
+    if retryable is None:
+        retryable = normalized_code not in {
+            "note_not_found",
+            "video_skipped",
+            "image_decode_failed",
+            "unsupported_media_type",
+        }
+    error_type = type(exc).__name__ if exc is not None else ""
+    return {
+        "platform": "xhs",
+        "identity": f"xhs:id:{note_id}",
+        "platform_post_id": str(note_id),
+        "batch": int(batch),
+        "failure_scope": str(failure_scope),
+        "detail": error_type,
+        "error_type": error_type,
+        "error_code": normalized_code,
+        "attempts": max(1, int(getattr(exc, "attempts", attempts) or attempts)),
+        "retryable": bool(retryable),
+    }
+
+
+def _write_xhs_repair_report(report: dict[str, Any]) -> None:
+    """Persist progress after every batch so an interrupted child still leaves evidence."""
+
+    raw_path = os.environ.get("TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH", "").strip()
+    if not raw_path:
+        return
+    path = Path(raw_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _xhs_repair_failure_scope(exc: BaseException) -> str:
+    name = type(exc).__name__
+    if name == "XHSCreatorProfileUnavailable":
+        return "creator"
+    if name in {"XHSImageDownloadError", "ImageDownloadFetchError"}:
+        return "image"
+    return "candidate"
+
+
+def _xhs_repair_blocker(crawler: Any, exc: BaseException) -> dict[str, str]:
+    """Reduce a fatal exception to a stable code without persisting response text."""
+
+    request_failure = exc
+    request_failure_factory = getattr(crawler, "_request_failure_exception", None)
+    if callable(request_failure_factory):
+        try:
+            request_failure = request_failure_factory(exc)
+        except Exception:
+            request_failure = exc
+    error_type = type(request_failure).__name__
+    code = str(getattr(request_failure, "code", "") or "")
+    text = str(request_failure).lower()
+    if not code and error_type == "IPBlockError":
+        code = "ip_blocked"
+    if not code and (
+        isinstance(request_failure, PlaywrightError) or isinstance(exc, PlaywrightError)
+    ):
+        code = "browser_runtime_failed"
+    if not code:
+        for marker, normalized in (
+            ("platform_security_limit", "platform_security_limit"),
+            ("captcha", "captcha_detected"),
+            ("rate_limit", "rate_limited"),
+            ("login_required", "login_required"),
+            ("verification_timeout", "verification_timeout"),
+            ("browser_context_closed", "browser_target_closed"),
+        ):
+            if marker in text:
+                code = normalized
+                break
+    return {"error_type": error_type, "error_code": code or "runtime_failed"}
+
+
 def install_xhs_repair_resilience() -> None:
-    """Make specified-note repair skip ordinary candidate failures independently."""
+    """Process specified-note repair in isolated batches with durable failures."""
 
     if os.environ.get("TRIPPOSTCOLLECT_XHS_REPAIR") != "1":
         return
@@ -194,60 +289,141 @@ def install_xhs_repair_resilience() -> None:
         return
 
     async def resilient_get_specified_notes(self: Any) -> None:
-        detail_tasks = []
-        detail_semaphore = Semaphore(xhs_core.config.MAX_CONCURRENCY_NUM)
-        for full_note_url in xhs_core.config.XHS_SPECIFIED_NOTE_URL_LIST:
-            note_url_info = xhs_core.parse_note_info_from_note_url(full_note_url)
-            xhs_core.utils.logger.info(
-                "[TripPostCollect] Queue specified XHS repair note: "
-                f"{note_url_info.note_id}"
-            )
-            detail_tasks.append(
-                self.get_note_detail_async_task(
-                    note_id=note_url_info.note_id,
-                    xsec_source=note_url_info.xsec_source,
-                    xsec_token=note_url_info.xsec_token,
-                    semaphore=detail_semaphore,
-                )
-            )
-
-        note_details = await gather(*detail_tasks, return_exceptions=True)
+        note_targets = [
+            xhs_core.parse_note_info_from_note_url(full_note_url)
+            for full_note_url in xhs_core.config.XHS_SPECIFIED_NOTE_URL_LIST
+        ]
+        batch_size = max(
+            1,
+            int(os.environ.get("TRIPPOSTCOLLECT_XHS_REPAIR_BATCH_SIZE", "5")),
+        )
+        report: dict[str, Any] = {
+            "schema_version": 1,
+            "platform": "xhs",
+            "target_count": len(note_targets),
+            "batch_size": batch_size,
+            "batch_count": (len(note_targets) + batch_size - 1) // batch_size,
+            "batches": [],
+            "candidate_failures": [],
+            "successful_ids": [],
+            "runtime_blocker": None,
+        }
         note_ids: list[str] = []
         xsec_tokens: list[str] = []
-        for note_detail in note_details:
-            if isinstance(note_detail, BaseException):
-                if not isinstance(note_detail, Exception):
-                    raise note_detail
-                if _repair_exception_is_blocking(self, note_detail):
-                    raise note_detail
-                xhs_core.utils.logger.warning(
-                    "[TripPostCollect] Skip failed XHS repair detail candidate: "
-                    f"{type(note_detail).__name__}"
-                )
-                continue
-            if not note_detail:
-                continue
-            if self.is_video_note(note_detail):
-                xhs_core.utils.logger.info(
-                    "[TripPostCollect] Skip video XHS repair candidate: "
-                    f"{note_detail.get('note_id')}"
-                )
-                continue
-            try:
-                await self.enrich_note_creator(note_detail)
-                await xhs_core.xhs_store.update_xhs_note(note_detail)
-                await self.get_notice_media(note_detail)
-            except Exception as exc:
-                if _repair_exception_is_blocking(self, exc):
-                    raise
-                xhs_core.utils.logger.warning(
-                    "[TripPostCollect] Skip failed XHS repair enrichment candidate: "
-                    f"{type(exc).__name__}"
-                )
-                continue
-            note_ids.append(str(note_detail.get("note_id") or ""))
-            xsec_tokens.append(str(note_detail.get("xsec_token") or ""))
-        await self.batch_get_note_comments(note_ids, xsec_tokens)
+        _write_xhs_repair_report(report)
+        try:
+            for offset in range(0, len(note_targets), batch_size):
+                batch_number = offset // batch_size + 1
+                batch_targets = note_targets[offset : offset + batch_size]
+                detail_semaphore = Semaphore(xhs_core.config.MAX_CONCURRENCY_NUM)
+                detail_tasks = []
+                for note_url_info in batch_targets:
+                    xhs_core.utils.logger.info(
+                        "[TripPostCollect] Queue specified XHS repair note: "
+                        f"batch={batch_number} note_id={note_url_info.note_id}"
+                    )
+                    detail_tasks.append(
+                        self.get_note_detail_async_task(
+                            note_id=note_url_info.note_id,
+                            xsec_source=note_url_info.xsec_source,
+                            xsec_token=note_url_info.xsec_token,
+                            semaphore=detail_semaphore,
+                        )
+                    )
+
+                batch_result = {
+                    "batch": batch_number,
+                    "batch_no": batch_number,
+                    "target_count": len(batch_targets),
+                    "batch_complete": True,
+                    "successful_ids": [],
+                    "failed_ids": [],
+                }
+                note_details = await gather(*detail_tasks, return_exceptions=True)
+                for note_url_info, note_detail in zip(batch_targets, note_details, strict=True):
+                    note_id = str(note_url_info.note_id)
+                    if isinstance(note_detail, BaseException):
+                        if not isinstance(note_detail, Exception):
+                            raise note_detail
+                        if _repair_exception_is_blocking(self, note_detail):
+                            raise note_detail
+                        failure = _xhs_repair_failure(
+                            note_id=note_id,
+                            batch=batch_number,
+                            failure_scope="detail",
+                            exc=note_detail,
+                        )
+                        report["candidate_failures"].append(failure)
+                        batch_result["failed_ids"].append(note_id)
+                        xhs_core.utils.logger.warning(
+                            "[TripPostCollect] Skip failed XHS repair detail candidate: "
+                            f"note_id={note_id} error={failure['error_code']} "
+                            f"attempts={failure['attempts']}"
+                        )
+                        continue
+                    if not note_detail:
+                        failure = _xhs_repair_failure(
+                            note_id=note_id,
+                            batch=batch_number,
+                            failure_scope="detail",
+                            error_code="note_not_found",
+                            retryable=False,
+                        )
+                        report["candidate_failures"].append(failure)
+                        batch_result["failed_ids"].append(note_id)
+                        continue
+                    if self.is_video_note(note_detail):
+                        failure = _xhs_repair_failure(
+                            note_id=note_id,
+                            batch=batch_number,
+                            failure_scope="content_policy",
+                            error_code="video_skipped",
+                            retryable=False,
+                        )
+                        report["candidate_failures"].append(failure)
+                        batch_result["failed_ids"].append(note_id)
+                        xhs_core.utils.logger.info(
+                            "[TripPostCollect] Skip video XHS repair candidate: "
+                            f"{note_id}"
+                        )
+                        continue
+                    try:
+                        await self.enrich_note_creator(note_detail)
+                        # Do not serialize a record until every authoritative image
+                        # has completed, so a failed candidate cannot leave a shell.
+                        await self.get_notice_media(note_detail)
+                        await xhs_core.xhs_store.update_xhs_note(note_detail)
+                    except Exception as exc:
+                        if _repair_exception_is_blocking(self, exc):
+                            raise
+                        failure = _xhs_repair_failure(
+                            note_id=note_id,
+                            batch=batch_number,
+                            failure_scope=_xhs_repair_failure_scope(exc),
+                            exc=exc,
+                        )
+                        report["candidate_failures"].append(failure)
+                        batch_result["failed_ids"].append(note_id)
+                        xhs_core.utils.logger.warning(
+                            "[TripPostCollect] Skip failed XHS repair candidate: "
+                            f"note_id={note_id} scope={failure['failure_scope']} "
+                            f"error={failure['error_code']} attempts={failure['attempts']}"
+                        )
+                        continue
+                    note_ids.append(note_id)
+                    xsec_tokens.append(str(note_detail.get("xsec_token") or ""))
+                    report["successful_ids"].append(note_id)
+                    batch_result["successful_ids"].append(note_id)
+                report["batches"].append(batch_result)
+                _write_xhs_repair_report(report)
+            await self.batch_get_note_comments(note_ids, xsec_tokens)
+        except BaseException as exc:
+            report["runtime_blocker"] = _xhs_repair_blocker(self, exc)
+            raise
+        finally:
+            report["successful_count"] = len(report["successful_ids"])
+            report["failed_count"] = len(report["candidate_failures"])
+            _write_xhs_repair_report(report)
 
     crawler_class.get_specified_notes = resilient_get_specified_notes
     crawler_class._trippostcollect_repair_resilience = True

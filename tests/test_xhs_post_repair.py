@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import types
 from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +18,7 @@ if str(SCRIPTS) not in sys.path:
 
 repair = import_module("repair_xhs_posts")
 mediacrawler = import_module("mediacrawler_crawl")
+entrypoint = import_module("mediacrawler_export_entrypoint")
 
 
 def test_detail_url_preserves_authoritative_xsec_query() -> None:
@@ -158,3 +161,138 @@ def test_partial_xhs_repair_can_commit_valid_records() -> None:
         image_materialization={"complete": True},
         behavior_validation={"ok": True},
     ) is False
+
+
+def test_xhs_repair_pagination_exposes_candidate_failures() -> None:
+    evidence = mediacrawler.xhs_repair_pagination_evidence(
+        [
+            {
+                "platform": "xhs",
+                "repair_report": {
+                    "batches": [{"batch": 1, "target_count": 2}],
+                    "successful_ids": ["note-2"],
+                    "candidate_failures": [
+                        {
+                            "platform_post_id": "note-1",
+                            "failure_scope": "detail",
+                            "error_code": "api_and_html_empty",
+                            "attempts": 3,
+                            "retryable": True,
+                        }
+                    ],
+                },
+            }
+        ],
+        target_count=2,
+    )
+
+    assert evidence["candidate_count"] == 2
+    assert evidence["successful_candidate_count"] == 1
+    assert evidence["skipped_candidate_count"] == 1
+    assert evidence["skipped_candidate_failures"][0]["attempts"] == 3
+
+
+def test_xhs_repair_report_preserves_run_level_blocker() -> None:
+    reason = mediacrawler.repair_runtime_stop_reason(
+        [
+            {
+                "platform": "xhs",
+                "failure_classification": {"failure_type": "runtime_failed"},
+                "repair_report": {
+                    "runtime_blocker": {"error_code": "login_required"}
+                },
+            }
+        ],
+        ["xhs"],
+    )
+
+    assert reason == "login_required"
+
+
+@pytest.mark.asyncio
+async def test_xhs_repair_continues_same_and_later_batches_after_candidate_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored: list[str] = []
+    requested: list[str] = []
+
+    class FakeCrawler:
+        async def get_note_detail_async_task(self, *, note_id, **_kwargs):
+            requested.append(note_id)
+            if note_id == "note-1":
+                error = RuntimeError("detail exhausted")
+                error.code = "api_and_html_empty"
+                error.attempts = 3
+                raise error
+            return {
+                "note_id": note_id,
+                "xsec_token": f"token-{note_id}",
+                "type": "normal",
+            }
+
+        async def enrich_note_creator(self, _note_detail):
+            return None
+
+        async def get_notice_media(self, _note_detail):
+            return None
+
+        async def batch_get_note_comments(self, _note_ids, _tokens):
+            return None
+
+        @staticmethod
+        def is_video_note(_note_detail):
+            return False
+
+    async def update_xhs_note(note_detail):
+        stored.append(note_detail["note_id"])
+
+    fake_core = types.ModuleType("media_platform.xhs.core")
+    fake_core.XiaoHongShuCrawler = FakeCrawler
+    fake_core.config = SimpleNamespace(
+        MAX_CONCURRENCY_NUM=1,
+        XHS_SPECIFIED_NOTE_URL_LIST=["note-1", "note-2", "note-3"],
+    )
+    fake_core.parse_note_info_from_note_url = lambda value: SimpleNamespace(
+        note_id=value,
+        xsec_source="pc_search",
+        xsec_token=f"token-{value}",
+    )
+    fake_core.utils = SimpleNamespace(
+        logger=SimpleNamespace(info=lambda *_args: None, warning=lambda *_args: None)
+    )
+    fake_core.xhs_store = SimpleNamespace(update_xhs_note=update_xhs_note)
+    fake_xhs = types.ModuleType("media_platform.xhs")
+    fake_xhs.core = fake_core
+    fake_platform = types.ModuleType("media_platform")
+    fake_platform.xhs = fake_xhs
+    monkeypatch.setitem(sys.modules, "media_platform", fake_platform)
+    monkeypatch.setitem(sys.modules, "media_platform.xhs", fake_xhs)
+    monkeypatch.setitem(sys.modules, "media_platform.xhs.core", fake_core)
+    report_path = tmp_path / "repair_report.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR", "1")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_BATCH_SIZE", "2")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH", str(report_path))
+
+    entrypoint.install_xhs_repair_resilience()
+    await FakeCrawler().get_specified_notes()
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert requested == ["note-1", "note-2", "note-3"]
+    assert stored == ["note-2", "note-3"]
+    assert [batch["batch"] for batch in report["batches"]] == [1, 2]
+    assert report["successful_ids"] == ["note-2", "note-3"]
+    assert report["candidate_failures"] == [
+        {
+            "platform": "xhs",
+            "identity": "xhs:id:note-1",
+            "platform_post_id": "note-1",
+            "batch": 1,
+            "failure_scope": "detail",
+            "detail": "RuntimeError",
+            "error_type": "RuntimeError",
+            "error_code": "api_and_html_empty",
+            "attempts": 3,
+            "retryable": True,
+        }
+    ]

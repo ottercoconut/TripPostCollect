@@ -71,6 +71,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pool-config", default=str(XHS_POOL_CONFIG))
     parser.add_argument("--keyword", help="Visible behavior-search keyword; defaults to target keyword.")
     parser.add_argument("--max-items", type=int, default=20)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=5,
+        help="Candidates per isolated in-browser repair batch.",
+    )
     parser.add_argument("--post-id", action="append", dest="post_ids", default=[])
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -172,6 +178,7 @@ def build_child_command(
     ids_path: Path,
     keyword: str,
     post_interaction: str,
+    batch_size: int,
 ) -> list[str]:
     urls = json.loads(urls_path.read_text(encoding="utf-8"))
     command = [
@@ -212,6 +219,8 @@ def build_child_command(
         "--xhs-repair-target-ids-file",
         str(ids_path),
         "--xhs-repair",
+        "--xhs-repair-batch-size",
+        str(batch_size),
         "--xhs-post-interaction",
         post_interaction,
         "--download-images",
@@ -265,8 +274,8 @@ def _state_fail_open(state: FrozenExecutionState | None, error: str) -> None:
 
 def main() -> int:
     args = parse_args()
-    if args.max_items < 0:
-        raise SystemExit("--max-items cannot be negative")
+    if args.max_items < 0 or args.batch_size <= 0:
+        raise SystemExit("--max-items cannot be negative; --batch-size must be positive")
     target = load_target(args.target_key, args.target_config)
     pool = load_pool_config(args.pool_config)
     if int(pool["lease_seconds"]) < int(target["timeout_seconds"]) + 300:
@@ -302,6 +311,8 @@ def main() -> int:
         "account_id": account["account_id"],
         "keyword": keyword,
         "target_count": len(targets),
+        "batch_size": args.batch_size,
+        "batch_count": (len(targets) + args.batch_size - 1) // args.batch_size,
         "target_ids": [item["platform_post_id"] for item in targets],
         "rejected_count": len(rejected),
         "timeout_seconds": target["timeout_seconds"],
@@ -420,6 +431,7 @@ def main() -> int:
                 ids_path=ids_path,
                 keyword=keyword,
                 post_interaction=args.post_interaction,
+                batch_size=args.batch_size,
             )
             state.begin("command_executed")
             env = os.environ.copy()
@@ -544,6 +556,18 @@ def main() -> int:
             )
             conn.commit()
 
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        final_statuses = repaired_rows(
+            conn,
+            [item["platform_post_id"] for item in targets],
+        )
+    recovered_ids = sorted(
+        post_id for post_id, value in final_statuses.items() if value["recovered"]
+    )
+    remaining_ids = sorted(
+        {item["platform_post_id"] for item in targets} - set(recovered_ids)
+    )
     summary = {
         **base_summary,
         "status": outcome,
@@ -554,6 +578,19 @@ def main() -> int:
         "login_reason": _login_reason(stdout, stderr, child_summary),
         "storage_state_refreshed": storage_state_refreshed,
         "import_result": child_summary.get("import_result") or {},
+        "repair_report": next(
+            (
+                record.get("repair_report")
+                for record in child_summary.get("records") or []
+                if isinstance(record, dict) and record.get("platform") == "xhs"
+            ),
+            {},
+        ),
+        "recovered_count": len(recovered_ids),
+        "recovered_ids": recovered_ids,
+        "remaining_target_count": len(remaining_ids),
+        "remaining_target_ids": remaining_ids,
+        "all_selected_targets_recovered": not remaining_ids,
         "stdout_tail": tail(stdout),
         "stderr_tail": tail(stderr),
         "finished_at": utc_iso(),
