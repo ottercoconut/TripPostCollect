@@ -539,9 +539,7 @@ def load_post_repair_fallbacks(
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 f"""
-                SELECT platform_post_id, published_at, author_followers_count,
-                       author_display_name, author_platform_id, author_profile_url,
-                       author_description, raw_sample_json
+                SELECT *
                 FROM web_posts
                 WHERE platform_key=? AND platform_post_id IN ({placeholders})
                 """,
@@ -552,9 +550,17 @@ def load_post_repair_fallbacks(
 
     fallbacks: dict[str, dict[str, Any]] = {}
     for row in rows:
+        columns = set(row.keys())
+
+        def row_value(key: str) -> Any:
+            return row[key] if key in columns else None
+
+        def available(*values: Any) -> Any:
+            return next((value for value in values if value not in (None, "")), None)
+
         raw: dict[str, Any] = {}
         try:
-            parsed = json.loads(str(row["raw_sample_json"] or ""))
+            parsed = json.loads(str(row_value("raw_sample_json") or ""))
             if isinstance(parsed, dict):
                 raw = parsed
         except (TypeError, json.JSONDecodeError):
@@ -562,12 +568,13 @@ def load_post_repair_fallbacks(
         fallback = {
             key: value
             for key, value in {
-                "published_at": row["published_at"],
-                "author_followers_count": row["author_followers_count"],
-                "author_display_name": row["author_display_name"],
-                "author_platform_id": row["author_platform_id"],
-                "author_profile_url": row["author_profile_url"],
-                "author_description": row["author_description"],
+                "keyword": row_value("keyword"),
+                "published_at": row_value("published_at"),
+                "author_followers_count": row_value("author_followers_count"),
+                "author_display_name": row_value("author_display_name"),
+                "author_platform_id": row_value("author_platform_id"),
+                "author_profile_url": row_value("author_profile_url"),
+                "author_description": row_value("author_description"),
                 "created_time": raw.get("created_time"),
                 "updated_time": raw.get("updated_time"),
                 "creator_hash": raw.get("creator_hash"),
@@ -576,6 +583,25 @@ def load_post_repair_fallbacks(
                 "author_followers_source": raw.get("author_followers_source"),
                 "followers_observed": raw.get("followers_observed"),
                 "followers_count": raw.get("followers_count"),
+                "liked_count": available(
+                    row_value("post_likes_count"),
+                    raw.get("liked_count"),
+                ),
+                "collected_count": available(
+                    row_value("post_favorites_count"),
+                    raw.get("collected_count"),
+                    raw.get("favorites_count"),
+                ),
+                "comment_count": available(
+                    row_value("post_comments_count"),
+                    raw.get("comment_count"),
+                    raw.get("comments_count"),
+                ),
+                "share_count": available(
+                    row_value("post_shares_count"),
+                    raw.get("share_count"),
+                    raw.get("shares_count"),
+                ),
             }.items()
             if value not in (None, "")
         }
@@ -1180,6 +1206,25 @@ def merge_repair_fallback_metadata(
     ):
         if merged.get(key) in (None, "") and metadata.get(key) not in (None, ""):
             merged[key] = metadata[key]
+
+    # XHS repair refreshes authoritative content, author and image evidence, but
+    # the detail endpoint may omit an aggregate metric that the existing row
+    # already observed. Preserve that trusted value only when the fresh detail
+    # omitted it; an observed zero is authoritative and is never overwritten.
+    if platform_key == "xhs":
+        metric_fallbacks: dict[str, dict[str, Any]] = {}
+        for key in ("liked_count", "collected_count", "comment_count", "share_count"):
+            if first_value(merged, key) is None and metadata.get(key) not in (None, ""):
+                merged[key] = metadata[key]
+                metric_fallbacks[key] = {
+                    "source": "existing_web_posts_metric",
+                    "value": metadata[key],
+                }
+        if metric_fallbacks:
+            prior_evidence = merged.get("repair_fallback_evidence")
+            evidence = dict(prior_evidence) if isinstance(prior_evidence, dict) else {}
+            evidence["metrics"] = metric_fallbacks
+            merged["repair_fallback_evidence"] = evidence
 
     return merged
 
@@ -2195,7 +2240,7 @@ def collect_formal_records(
     localized_identities: set[str] | None = None,
     materialized_images_by_identity: dict[str, list[MaterializedImage]] | None = None,
     allowed_identities: set[str] | None = None,
-    repair_metadata_by_identity: dict[str, dict[str, str]] | None = None,
+    repair_metadata_by_identity: dict[str, dict[str, Any]] | None = None,
     repair_mode: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if completion_mode not in {"target-new-posts", "source-exhausted"}:
@@ -5485,11 +5530,20 @@ def main() -> int:
         }
 
     repair_allowed_identities: set[str] | None = None
-    repair_metadata_by_identity: dict[str, dict[str, str]] = {}
+    repair_metadata_by_identity: dict[str, dict[str, Any]] = {}
     repair_target_count = 0
     if args.xhs_repair:
         repair_allowed_identities = {
             f"xhs:id:{value}" for value in args.xhs_repair_target_ids
+        }
+        xhs_repair_fallbacks = load_post_repair_fallbacks(
+            args.db,
+            "xhs",
+            args.xhs_repair_target_ids,
+        )
+        repair_metadata_by_identity = {
+            f"xhs:id:{post_id}": metadata
+            for post_id, metadata in xhs_repair_fallbacks.items()
         }
         repair_target_count = len(args.xhs_detail_urls)
     elif args.post_repair:

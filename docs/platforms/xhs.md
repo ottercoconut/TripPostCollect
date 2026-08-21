@@ -162,6 +162,11 @@ python scripts/repair_xhs_posts.py \
 `pagination_evidence.skipped_candidate_failures` 与平台记录的 `repair_report` 是失败清单，顶层
 `repair_xhs_posts.py` 摘要也会转存该报告。
 
+修复详情若省略点赞、收藏、评论或分享聚合数，只在 XHS repair 路径保留 `web_posts` 已有的对应
+标准化数值；fresh detail 非空值（包括真实 `0`）始终优先。回填字段必须在记录中写
+`repair_fallback_evidence.metrics.<field>.source=existing_web_posts_metric`，不能据此放宽普通新抓取
+门禁，也不能用旧标题、搜索摘要或旧正文替代详情正文。
+
 运行中不得修改 pool/target。只有用户明确要求抓完来源时，dry-run 和正式轮一起改为
 `source-exhausted`；不写回配置。
 

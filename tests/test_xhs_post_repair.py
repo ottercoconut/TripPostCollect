@@ -117,6 +117,146 @@ def test_select_targets_excludes_observed_rows_and_limits_batch(tmp_path: Path) 
     conn.close()
 
 
+def test_load_xhs_repair_fallbacks_includes_existing_metrics(tmp_path: Path) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE web_posts(
+            platform_key TEXT,
+            platform_post_id TEXT,
+            keyword TEXT,
+            raw_sample_json TEXT,
+            post_likes_count INTEGER,
+            post_favorites_count INTEGER,
+            post_comments_count INTEGER,
+            post_shares_count INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO web_posts VALUES(
+            'xhs', 'note-1', '青岛旅游', '{}', 11, 12, 0, 13
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    fallbacks = mediacrawler.load_post_repair_fallbacks(
+        db_path,
+        "xhs",
+        {"note-1"},
+    )
+
+    assert fallbacks["note-1"] == {
+        "keyword": "青岛旅游",
+        "liked_count": 11,
+        "collected_count": 12,
+        "comment_count": 0,
+        "share_count": 13,
+    }
+
+
+def test_xhs_repair_preserves_existing_metric_without_overwriting_fresh_zero() -> None:
+    detail = {
+        "note_id": "note-1",
+        "desc": "完整正文",
+        "content_detail_status": "detail_observed",
+        "content_detail_source": "note_detail",
+        "time": 1_786_000_000,
+        "image_list": [{"url_default": "https://example.test/body.jpg"}],
+        "user_id": "author-1",
+        "nickname": "作者",
+        "author_followers_count": 10,
+        "followers_observed": True,
+        "author_followers_source": "creator_profile",
+        "liked_count": 0,
+        "collected_count": 2,
+        "comment_count": "",
+        "share_count": 3,
+    }
+
+    merged = mediacrawler.merge_repair_fallback_metadata(
+        "xhs",
+        detail,
+        {"liked_count": 99, "comment_count": 1},
+    )
+
+    validation = mediacrawler.validate_formal_record("xhs", merged, set())
+    assert validation["valid"] is True
+    assert merged["liked_count"] == 0
+    assert merged["comment_count"] == 1
+    assert merged["repair_fallback_evidence"] == {
+        "metrics": {
+            "comment_count": {
+                "source": "existing_web_posts_metric",
+                "value": 1,
+            }
+        }
+    }
+
+
+def test_xhs_invalid_candidate_does_not_block_valid_repair_subset(tmp_path: Path) -> None:
+    contents_path = tmp_path / "xhs" / "detail_contents_test.jsonl"
+    contents_path.parent.mkdir(parents=True)
+    base = {
+        "content_detail_status": "detail_observed",
+        "content_detail_source": "note_detail",
+        "time": 1_786_000_000,
+        "image_list": [{"url_default": "https://example.test/body.jpg"}],
+        "user_id": "author-1",
+        "nickname": "作者",
+        "author_followers_count": 10,
+        "followers_observed": True,
+        "author_followers_source": "creator_profile",
+        "liked_count": 1,
+        "collected_count": 2,
+        "comment_count": "",
+        "share_count": 3,
+    }
+    contents_path.write_text(
+        "\n".join(
+            json.dumps(value, ensure_ascii=False)
+            for value in (
+                {**base, "note_id": "missing-body", "desc": ""},
+                {**base, "note_id": "valid-note", "desc": "完整正文"},
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    summary = {
+        "records": [
+            {
+                "platform": "xhs",
+                "output": {
+                    "jsonl_files": [str(contents_path)],
+                    "image_manifest_paths": [],
+                },
+            }
+        ]
+    }
+
+    validation, records = mediacrawler.collect_formal_records(
+        summary,
+        candidate_hard_limit=2,
+        target_new_posts=0,
+        db_path=None,
+        allowed_identities={"xhs:id:missing-body", "xhs:id:valid-note"},
+        repair_metadata_by_identity={
+            "xhs:id:missing-body": {"comment_count": 1},
+            "xhs:id:valid-note": {"comment_count": 1},
+        },
+        repair_mode=True,
+    )
+
+    assert validation["valid_total_count"] == 1
+    assert validation["invalid_reason_counts"] == {"missing_content": 1}
+    assert [item["identity"] for item in records] == ["xhs:id:valid-note"]
+
+
 def test_repair_behavior_gate_does_not_require_search_pacing(monkeypatch) -> None:
     monkeypatch.setattr(mediacrawler, "behavior_evidence_valid", lambda value: True)
     result = mediacrawler.collect_behavior_validation(
