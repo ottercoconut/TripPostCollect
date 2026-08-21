@@ -32,8 +32,10 @@
 
 ## 正文与图片差异
 
-- 正文必须来自笔记详情非空 `desc`，保存
-  `content_detail_status=detail_observed`、`content_detail_source=note_detail`。
+- 普通新增抓取的正文必须来自笔记详情非空 `desc`，保存
+  `content_detail_status=detail_observed`、`content_detail_source=note_detail`。既有记录修复另允许平台原生的
+  无 `desc` 图文笔记：必须由本轮 `note_detail` 同时观察到非空 `title` 和至少一张详情 `image_list`
+  正文图；标题仍只写 `title`，不得复制到 `content_text`，也不得使用搜索卡片标题或摘要补正文。
 - 正文图只来自详情 `image_list`；每个对象按 `url_default`、`url`、`url_pre` 选择一个 URL，并用稳定
   notes 路径生成资产键。头像、作者主页图片、封面、搜索预览和视频不进入图片候选或下载链；作者
   主页仍只用于观察粉丝量等研究所需作者指标。

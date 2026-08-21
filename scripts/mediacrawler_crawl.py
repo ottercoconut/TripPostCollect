@@ -1789,7 +1789,13 @@ def formal_database_identities(platform_key: str, record: dict[str, Any]) -> set
     return identities
 
 
-def validate_formal_record(platform_key: str, record: dict[str, Any], seen: set[str]) -> dict[str, Any]:
+def validate_formal_record(
+    platform_key: str,
+    record: dict[str, Any],
+    seen: set[str],
+    *,
+    allow_xhs_title_image_only: bool = False,
+) -> dict[str, Any]:
     identity = formal_record_identity(platform_key, record)
     reasons: list[str] = []
     if not identity:
@@ -1798,10 +1804,18 @@ def validate_formal_record(platform_key: str, record: dict[str, Any], seen: set[
         reasons.append("duplicate_identity")
     if is_video_record(platform_key, record):
         reasons.append("video_record")
-    if not content_body_for_record(platform_key, record):
-        reasons.append("missing_content")
     detail_status = str(record.get("content_detail_status") or "")
     detail_source = str(record.get("content_detail_source") or "")
+    xhs_title_image_only = bool(
+        allow_xhs_title_image_only
+        and platform_key == "xhs"
+        and str(first_value(record, "title") or "").strip()
+        and detail_status == "detail_observed"
+        and detail_source == "note_detail"
+        and content_image_candidates(platform_key, record)
+    )
+    if not content_body_for_record(platform_key, record) and not xhs_title_image_only:
+        reasons.append("missing_content")
     if detail_status != "detail_observed":
         reasons.append("content_detail_unobserved")
     if detail_source not in TRUSTED_CONTENT_DETAIL_SOURCES.get(platform_key, frozenset()):
@@ -2305,7 +2319,12 @@ def collect_formal_records(
                         record["source_keyword"] = str(
                             repair_metadata.get("keyword") or record.get("source_keyword") or ""
                         )
-                    validation = validate_formal_record(platform_key, record, seen)
+                    validation = validate_formal_record(
+                        platform_key,
+                        record,
+                        seen,
+                        allow_xhs_title_image_only=repair_mode,
+                    )
                     if not validation["valid"]:
                         reason_counts.update(validation["reasons"])
                         continue

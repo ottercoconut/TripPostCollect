@@ -117,6 +117,89 @@ def test_select_targets_excludes_observed_rows_and_limits_batch(tmp_path: Path) 
     conn.close()
 
 
+def test_select_targets_skips_recorded_failure_but_explicit_retry_overrides(
+    tmp_path: Path,
+) -> None:
+    conn = sqlite3.connect(tmp_path / "repair.sqlite")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE web_posts(
+            id INTEGER PRIMARY KEY,
+            platform_key TEXT,
+            platform_post_id TEXT,
+            canonical_url TEXT,
+            keyword TEXT,
+            raw_sample_json TEXT,
+            artifact_dir TEXT
+        );
+        CREATE TABLE xhs_runs(
+            run_id TEXT PRIMARY KEY,
+            target_key TEXT,
+            status TEXT,
+            started_at TEXT,
+            report_json TEXT
+        );
+        """
+    )
+    for index in (1, 2):
+        post_id = f"note-{index}"
+        conn.execute(
+            """
+            INSERT INTO web_posts VALUES(
+                ?, 'xhs', ?, ?, '青岛旅游', '{}', ?
+            )
+            """,
+            (
+                index,
+                post_id,
+                f"https://www.xiaohongshu.com/explore/{post_id}?"
+                f"xsec_token=token-{index}&xsec_source=pc_search",
+                f"artifact/{post_id}",
+            ),
+        )
+    conn.execute(
+        "INSERT INTO xhs_runs VALUES(?, ?, ?, ?, ?)",
+        (
+            "run-1",
+            "xhs_repair:qingdao_travel",
+            "completed",
+            "2026-08-21T00:00:00+00:00",
+            json.dumps(
+                {
+                    "repair_report": {
+                        "candidate_failures": [
+                            {
+                                "platform_post_id": "note-1",
+                                "failure_scope": "detail",
+                                "error_code": "note_not_found",
+                                "attempts": 1,
+                                "retryable": False,
+                            }
+                        ]
+                    }
+                }
+            ),
+        ),
+    )
+    conn.commit()
+
+    targets, rejected = repair.select_targets(conn, post_ids=[], max_items=20)
+    assert [item["platform_post_id"] for item in targets] == ["note-2"]
+    assert rejected[0]["platform_post_id"] == "note-1"
+    assert rejected[0]["reason"] == "previous_repair_failure"
+    assert rejected[0]["previous_failure"]["error_code"] == "note_not_found"
+
+    targets, rejected = repair.select_targets(
+        conn,
+        post_ids=["note-1"],
+        max_items=20,
+    )
+    assert [item["platform_post_id"] for item in targets] == ["note-1"]
+    assert rejected == []
+    conn.close()
+
+
 def test_load_xhs_repair_fallbacks_includes_existing_metrics(tmp_path: Path) -> None:
     db_path = tmp_path / "repair.sqlite"
     conn = sqlite3.connect(db_path)
@@ -198,7 +281,7 @@ def test_xhs_repair_preserves_existing_metric_without_overwriting_fresh_zero() -
     }
 
 
-def test_xhs_invalid_candidate_does_not_block_valid_repair_subset(tmp_path: Path) -> None:
+def test_xhs_repair_accepts_authoritative_title_and_image_without_desc(tmp_path: Path) -> None:
     contents_path = tmp_path / "xhs" / "detail_contents_test.jsonl"
     contents_path.parent.mkdir(parents=True)
     base = {
@@ -220,8 +303,18 @@ def test_xhs_invalid_candidate_does_not_block_valid_repair_subset(tmp_path: Path
         "\n".join(
             json.dumps(value, ensure_ascii=False)
             for value in (
-                {**base, "note_id": "missing-body", "desc": ""},
-                {**base, "note_id": "valid-note", "desc": "完整正文"},
+                {
+                    **base,
+                    "note_id": "missing-body",
+                    "title": "只有标题的图文笔记",
+                    "desc": "",
+                },
+                {
+                    **base,
+                    "note_id": "valid-note",
+                    "title": "正文笔记",
+                    "desc": "完整正文",
+                },
             )
         )
         + "\n",
@@ -252,9 +345,66 @@ def test_xhs_invalid_candidate_does_not_block_valid_repair_subset(tmp_path: Path
         repair_mode=True,
     )
 
-    assert validation["valid_total_count"] == 1
+    assert validation["valid_total_count"] == 2
+    assert validation["invalid_reason_counts"] == {}
+    assert [item["identity"] for item in records] == [
+        "xhs:id:missing-body",
+        "xhs:id:valid-note",
+    ]
+
+
+def test_xhs_repair_still_rejects_empty_title_and_desc(tmp_path: Path) -> None:
+    contents_path = tmp_path / "xhs" / "detail_contents_test.jsonl"
+    contents_path.parent.mkdir(parents=True)
+    contents_path.write_text(
+        json.dumps(
+            {
+                "note_id": "empty-note",
+                "title": "",
+                "desc": "",
+                "content_detail_status": "detail_observed",
+                "content_detail_source": "note_detail",
+                "time": 1_786_000_000,
+                "image_list": [{"url_default": "https://example.test/body.jpg"}],
+                "user_id": "author-1",
+                "nickname": "作者",
+                "author_followers_count": 10,
+                "followers_observed": True,
+                "author_followers_source": "creator_profile",
+                "liked_count": 1,
+                "collected_count": 2,
+                "comment_count": 3,
+                "share_count": 4,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    summary = {
+        "records": [
+            {
+                "platform": "xhs",
+                "output": {
+                    "jsonl_files": [str(contents_path)],
+                    "image_manifest_paths": [],
+                },
+            }
+        ]
+    }
+
+    validation, records = mediacrawler.collect_formal_records(
+        summary,
+        candidate_hard_limit=1,
+        target_new_posts=0,
+        db_path=None,
+        allowed_identities={"xhs:id:empty-note"},
+        repair_mode=True,
+    )
+
+    assert validation["valid_total_count"] == 0
     assert validation["invalid_reason_counts"] == {"missing_content": 1}
-    assert [item["identity"] for item in records] == ["xhs:id:valid-note"]
+    assert records == []
 
 
 def test_repair_behavior_gate_does_not_require_search_pacing(monkeypatch) -> None:
@@ -347,6 +497,44 @@ def test_xhs_repair_report_preserves_run_level_blocker() -> None:
     )
 
     assert reason == "login_required"
+
+
+def test_candidate_only_child_failure_does_not_hide_runtime_or_media_blockers() -> None:
+    summary = {
+        "formal_validation": {
+            "stop_reason": "repair_no_valid_detail",
+            "valid_total_count": 0,
+            "local_image_failure_count": 0,
+            "pagination_runtime_blocked": False,
+            "pagination_incomplete": False,
+            "behavior_evidence_ok": True,
+            "policy_evidence_ok": True,
+        },
+        "records": [
+            {
+                "platform": "xhs",
+                "repair_report": {
+                    "runtime_blocker": None,
+                    "candidate_failures": [
+                        {
+                            "platform_post_id": "note-1",
+                            "error_code": "note_not_found",
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    assert repair.candidate_only_child_failure(summary) is True
+
+    summary["formal_validation"]["local_image_failure_count"] = 1
+    assert repair.candidate_only_child_failure(summary) is False
+    summary["formal_validation"]["local_image_failure_count"] = 0
+    summary["records"][0]["repair_report"]["runtime_blocker"] = {
+        "error_code": "login_required"
+    }
+    assert repair.candidate_only_child_failure(summary) is False
 
 
 @pytest.mark.asyncio

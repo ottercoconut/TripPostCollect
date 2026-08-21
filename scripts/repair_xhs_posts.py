@@ -124,6 +124,54 @@ def _detail_url(row: sqlite3.Row) -> tuple[str | None, str]:
     return None, "missing_xsec_token_or_source"
 
 
+def previous_repair_failures(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """Return targets whose finite repair attempt already ended in a recorded failure."""
+
+    failures: dict[str, dict[str, Any]] = {}
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='xhs_runs'"
+    ).fetchone():
+        return failures
+    rows = conn.execute(
+        """
+        SELECT run_id, report_json
+        FROM xhs_runs
+        WHERE target_key LIKE 'xhs_repair:%'
+          AND status IN ('completed', 'failed')
+        ORDER BY started_at, run_id
+        """
+    ).fetchall()
+    for row in rows:
+        report = _raw_object(row["report_json"])
+        repair_report = report.get("repair_report") or {}
+        if isinstance(repair_report, dict):
+            for failure in repair_report.get("candidate_failures") or []:
+                if not isinstance(failure, dict):
+                    continue
+                post_id = str(failure.get("platform_post_id") or "").strip()
+                if not post_id:
+                    continue
+                failures[post_id] = {
+                    "run_id": str(row["run_id"] or ""),
+                    "failure_scope": str(failure.get("failure_scope") or "detail"),
+                    "error_code": str(failure.get("error_code") or "candidate_failed"),
+                    "attempts": int(failure.get("attempts") or 1),
+                    "retryable": bool(failure.get("retryable")),
+                }
+        for post_id_value in report.get("validation_failed_ids") or []:
+            post_id = str(post_id_value or "").strip()
+            if not post_id:
+                continue
+            failures[post_id] = {
+                "run_id": str(row["run_id"] or ""),
+                "failure_scope": "formal_validation",
+                "error_code": "formal_validation_failed",
+                "attempts": 1,
+                "retryable": False,
+            }
+    return failures
+
+
 def select_targets(
     conn: sqlite3.Connection,
     *,
@@ -141,6 +189,7 @@ def select_targets(
         """
     ).fetchall()
     requested = {str(value).strip() for value in post_ids if str(value).strip()}
+    prior_failures = previous_repair_failures(conn) if not requested else {}
     targets: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in rows:
@@ -158,7 +207,13 @@ def select_targets(
             "reason": reason,
         }
         if detail_url:
-            targets.append(item)
+            previous_failure = prior_failures.get(post_id)
+            if previous_failure:
+                item["reason"] = "previous_repair_failure"
+                item["previous_failure"] = previous_failure
+                rejected.append(item)
+            else:
+                targets.append(item)
         else:
             rejected.append(item)
     if max_items > 0:
@@ -270,6 +325,37 @@ def _state_fail_open(state: FrozenExecutionState | None, error: str) -> None:
                 return
     except Exception:
         return
+
+
+def _repair_report(child_summary: dict[str, Any]) -> dict[str, Any]:
+    return next(
+        (
+            record.get("repair_report")
+            for record in child_summary.get("records") or []
+            if isinstance(record, dict)
+            and record.get("platform") == "xhs"
+            and isinstance(record.get("repair_report"), dict)
+        ),
+        {},
+    )
+
+
+def candidate_only_child_failure(child_summary: dict[str, Any]) -> bool:
+    """Identify an exhausted candidate set that must not stop later repair work."""
+
+    validation = child_summary.get("formal_validation") or {}
+    report = _repair_report(child_summary)
+    return bool(
+        child_summary
+        and validation.get("stop_reason") == "repair_no_valid_detail"
+        and int(validation.get("valid_total_count") or 0) == 0
+        and int(validation.get("local_image_failure_count") or 0) == 0
+        and validation.get("pagination_runtime_blocked") is False
+        and validation.get("pagination_incomplete") is False
+        and validation.get("behavior_evidence_ok") is True
+        and validation.get("policy_evidence_ok") is True
+        and not report.get("runtime_blocker")
+    )
 
 
 def main() -> int:
@@ -391,6 +477,7 @@ def main() -> int:
     outcome = "failed"
     state_error = ""
     storage_state_refreshed = False
+    candidate_only_failure = False
     try:
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -460,7 +547,12 @@ def main() -> int:
             stdout_json = extract_stdout_json(stdout)
             child_summary_path = str(stdout_json.get("summary") or "")
             child_summary = load_child_summary(child_summary_path)
-            if exit_code != 0 or not child_summary:
+            candidate_only_failure = bool(
+                candidate_only_child_failure(child_summary)
+                and not _challenge_reason(stdout, stderr, child_summary)
+                and not _login_reason(stdout, stderr, child_summary)
+            )
+            if not child_summary or (exit_code != 0 and not candidate_only_failure):
                 state_error = f"xhs_repair_child_exit_{exit_code}"
                 state.fail(
                     "command_executed",
@@ -468,53 +560,108 @@ def main() -> int:
                     evidence={"stdout_tail": tail(stdout), "stderr_tail": tail(stderr)},
                 )
             else:
-                state.complete("command_executed", evidence={"summary": child_summary_path})
-                state.begin("artifacts_verified")
-                artifact_evidence = verify_image_artifacts(
-                    child_summary,
-                    project_root=ROOT,
-                    expect_promotion=True,
+                state.complete(
+                    "command_executed",
+                    evidence={
+                        "summary": child_summary_path,
+                        "child_exit_code": exit_code,
+                        "candidate_only_failure": candidate_only_failure,
+                    },
                 )
-                if not artifact_evidence["ok"]:
-                    state_error = "xhs_repair_image_artifacts_incomplete"
-                    state.fail("artifacts_verified", error=state_error, evidence=artifact_evidence)
-                else:
-                    state.complete("artifacts_verified", evidence=artifact_evidence)
-                    state.begin("persistence_verified")
-                    image_persistence = verify_image_persistence(
-                        child_summary,
-                        db_path,
-                        project_root=ROOT,
-                        media_root=LOCAL_MEDIA_ROOT,
-                    )
-                    with sqlite3.connect(db_path) as conn:
-                        conn.row_factory = sqlite3.Row
-                        statuses = repaired_rows(
-                            conn,
-                            [item["platform_post_id"] for item in targets],
+                state.begin("artifacts_verified")
+                if candidate_only_failure:
+                    skipped_evidence = {
+                        "skipped": True,
+                        "reason": "repair_no_valid_detail",
+                        "candidate_failures": _repair_report(child_summary).get(
+                            "candidate_failures"
                         )
-                    recovered_ids = sorted(
-                        post_id for post_id, value in statuses.items() if value["recovered"]
-                    )
-                    persistence_evidence = {
-                        "image_persistence": image_persistence,
-                        "target_statuses": statuses,
-                        "recovered_ids": recovered_ids,
-                        "recovered_count": len(recovered_ids),
-                        "child_import_result": child_summary.get("import_result") or {},
+                        or [],
                     }
-                    import_ok = bool(child_summary.get("import_completion_met"))
-                    persistence_ok = bool(import_ok and image_persistence["ok"] and recovered_ids)
-                    if not persistence_ok:
-                        state_error = "xhs_repair_persistence_not_verified"
-                        state.fail("persistence_verified", error=state_error, evidence=persistence_evidence)
-                    else:
-                        state.complete("persistence_verified", evidence=persistence_evidence)
-                        state.finalize(
-                            outcome="completed",
-                            evidence={"summary": child_summary_path, **persistence_evidence},
+                    state.complete(
+                        "artifacts_verified",
+                        evidence=skipped_evidence,
+                        skipped=True,
+                    )
+                    state.begin("persistence_verified")
+                    state.complete(
+                        "persistence_verified",
+                        evidence=skipped_evidence,
+                        skipped=True,
+                    )
+                    state.finalize(
+                        outcome="completed",
+                        evidence={
+                            "summary": child_summary_path,
+                            "candidate_only_failure": True,
+                            "recovered_count": 0,
+                        },
+                    )
+                    outcome = "completed"
+                else:
+                    artifact_evidence = verify_image_artifacts(
+                        child_summary,
+                        project_root=ROOT,
+                        expect_promotion=True,
+                    )
+                    if not artifact_evidence["ok"]:
+                        state_error = "xhs_repair_image_artifacts_incomplete"
+                        state.fail(
+                            "artifacts_verified",
+                            error=state_error,
+                            evidence=artifact_evidence,
                         )
-                        outcome = "completed"
+                    else:
+                        state.complete("artifacts_verified", evidence=artifact_evidence)
+                        state.begin("persistence_verified")
+                        image_persistence = verify_image_persistence(
+                            child_summary,
+                            db_path,
+                            project_root=ROOT,
+                            media_root=LOCAL_MEDIA_ROOT,
+                        )
+                        with sqlite3.connect(db_path) as conn:
+                            conn.row_factory = sqlite3.Row
+                            statuses = repaired_rows(
+                                conn,
+                                [item["platform_post_id"] for item in targets],
+                            )
+                        recovered_ids = sorted(
+                            post_id
+                            for post_id, value in statuses.items()
+                            if value["recovered"]
+                        )
+                        persistence_evidence = {
+                            "image_persistence": image_persistence,
+                            "target_statuses": statuses,
+                            "recovered_ids": recovered_ids,
+                            "recovered_count": len(recovered_ids),
+                            "child_import_result": child_summary.get("import_result") or {},
+                        }
+                        import_ok = bool(child_summary.get("import_completion_met"))
+                        persistence_ok = bool(
+                            import_ok and image_persistence["ok"] and recovered_ids
+                        )
+                        if not persistence_ok:
+                            state_error = "xhs_repair_persistence_not_verified"
+                            state.fail(
+                                "persistence_verified",
+                                error=state_error,
+                                evidence=persistence_evidence,
+                            )
+                        else:
+                            state.complete(
+                                "persistence_verified",
+                                evidence=persistence_evidence,
+                            )
+                            state.finalize(
+                                outcome="completed",
+                                evidence={
+                                    "summary": child_summary_path,
+                                    **persistence_evidence,
+                                },
+                            )
+                            outcome = "completed"
     except (OSError, sqlite3.Error, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
         state_error = f"xhs_repair_exception:{type(exc).__name__}:{exc}"
         stderr = f"{stderr}\n{state_error}".strip()
@@ -568,6 +715,17 @@ def main() -> int:
     remaining_ids = sorted(
         {item["platform_post_id"] for item in targets} - set(recovered_ids)
     )
+    repair_report = _repair_report(child_summary)
+    validation_failed_ids = sorted(
+        set(repair_report.get("successful_ids") or []) - set(recovered_ids)
+    )
+    candidate_failed_ids = sorted(
+        {
+            str(item.get("platform_post_id") or "")
+            for item in repair_report.get("candidate_failures") or []
+            if isinstance(item, dict) and str(item.get("platform_post_id") or "")
+        }
+    )
     summary = {
         **base_summary,
         "status": outcome,
@@ -578,14 +736,10 @@ def main() -> int:
         "login_reason": _login_reason(stdout, stderr, child_summary),
         "storage_state_refreshed": storage_state_refreshed,
         "import_result": child_summary.get("import_result") or {},
-        "repair_report": next(
-            (
-                record.get("repair_report")
-                for record in child_summary.get("records") or []
-                if isinstance(record, dict) and record.get("platform") == "xhs"
-            ),
-            {},
-        ),
+        "repair_report": repair_report,
+        "candidate_only_failure": candidate_only_failure,
+        "candidate_failed_ids": candidate_failed_ids,
+        "validation_failed_ids": validation_failed_ids,
         "recovered_count": len(recovered_ids),
         "recovered_ids": recovered_ids,
         "remaining_target_count": len(remaining_ids),
