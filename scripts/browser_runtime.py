@@ -8,6 +8,10 @@ from pathlib import Path
 from trippostcollect.core.paths import BROWSER_RUNTIME_HOME, CHROME_CRASH_DUMPS, ensure_dir
 
 
+XHS_NATIVE_WINDOW_SIZE = (1450, 900)
+XHS_WINDOW_SIZE_ENV = "TRIPPOSTCOLLECT_XHS_WINDOW_SIZE"
+
+
 def browser_launch_environment() -> dict[str, str]:
     """Keep Chromium support files inside the project writable runtime tree."""
     original_home = Path.home()
@@ -26,3 +30,7 @@ def browser_runtime_args() -> list[str]:
         f"--crash-dumps-dir={crash_dir}",
         "--use-mock-keychain",
     ]
+
+
+def xhs_window_size_value() -> str:
+    return f"{XHS_NATIVE_WINDOW_SIZE[0]},{XHS_NATIVE_WINDOW_SIZE[1]}"

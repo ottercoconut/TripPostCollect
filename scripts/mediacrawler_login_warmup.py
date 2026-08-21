@@ -168,7 +168,13 @@ def browser_path_for(args: argparse.Namespace) -> str | None:
     return discover_cdp_browser_path()
 
 
-async def launch_login_context(playwright, profile_dir: Path, browser_path: str | None) -> BrowserContext:
+async def launch_login_context(
+    playwright,
+    profile_dir: Path,
+    browser_path: str | None,
+    *,
+    native_window_size: tuple[int, int] | None = None,
+) -> BrowserContext:
     kwargs: dict[str, Any] = {
         "user_data_dir": str(profile_dir),
         "headless": False,
@@ -191,6 +197,11 @@ async def launch_login_context(playwright, profile_dir: Path, browser_path: str 
         ],
         "env": browser_launch_environment(),
     }
+    if native_window_size:
+        width, height = native_window_size
+        kwargs.pop("viewport")
+        kwargs["no_viewport"] = True
+        kwargs["args"].append(f"--window-size={width},{height}")
     if browser_path:
         kwargs["executable_path"] = browser_path
     return await playwright.chromium.launch_persistent_context(**kwargs)

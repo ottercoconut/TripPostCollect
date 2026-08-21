@@ -48,9 +48,9 @@ from trippostcollect.xhs.discovery import (
     resolve_discovery_plan,
 )
 from trippostcollect.xhs.sessions import (
-    encrypt_storage_state,
     load_snapshot_key,
     materialized_storage_state,
+    refresh_encrypted_storage_state,
     snapshot_sha256,
 )
 
@@ -649,6 +649,7 @@ def main() -> int:
     stdout = ""
     stderr = ""
     exit_code = 1
+    storage_state_refreshed = False
     discovery_commit: dict[str, Any] = {"skipped": True, "reason": "child_not_started"}
     try:
         key = load_snapshot_key(create=False)
@@ -692,6 +693,13 @@ def main() -> int:
                 stdout = str(exc.stdout or "")
                 stderr = str(exc.stderr or "")
                 exit_code = 124
+            storage_state_refreshed = refresh_encrypted_storage_state(
+                storage_state,
+                encrypted_state,
+                account_id=str(account["account_id"]),
+                identity_hash=str(account["identity_hash"]),
+                key=key,
+            )
             stdout_json = extract_stdout_json(stdout)
             child_summary_path = str(stdout_json.get("summary") or "")
             child_summary = load_child_summary(child_summary_path)
@@ -805,13 +813,6 @@ def main() -> int:
                                 evidence=import_result,
                             )
                     if state.load()["steps"]["persistence_verified"]["status"] in {"completed", "skipped"}:
-                        updated_state = json.loads(storage_state.read_text(encoding="utf-8"))
-                        encrypt_storage_state(
-                            updated_state,
-                            encrypted_state,
-                            account_id=account["account_id"],
-                            key=key,
-                        )
                         state.finalize(
                             outcome="completed",
                             evidence={
@@ -866,6 +867,7 @@ def main() -> int:
         "exit_code": exit_code,
         "challenge": challenge,
         "login_reason": login_reason,
+        "storage_state_refreshed": storage_state_refreshed,
         "post_interaction": {
             "requested_mode": args.post_interaction,
             "ok": (

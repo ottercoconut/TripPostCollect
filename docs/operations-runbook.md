@@ -284,6 +284,11 @@ python scripts/xhs_runner.py \
 确认计划后，用相同账号、目标、互动参数和完成模式移除 `--dry-run`。不得在轮次中途自动换号、关闭
 验证页或手工修改账号级 checkpoint。
 
+小红书的短 Cookie 不能脱离设备连续性单独续期。`xhs_login.py` 与 `xhs_runner.py` 必须复用同一账号
+profile、加密 storage state、原生窗口参数和 Chrome 运行环境；关闭前快照还必须包含平台的
+sessionStorage 设备标识。启动时 profile 的现存状态优先，快照只补缺，避免旧短 Cookie 把刚刷新
+的 profile 回滚成“新设备”会话。
+
 ## 浏览器与行为证据
 
 Chrome HOME、Crashpad 和缓存由 `scripts/browser_runtime.py` 放在 `data/runtime/`，Chromium 使用 mock

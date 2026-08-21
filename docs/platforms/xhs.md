@@ -81,8 +81,10 @@ python scripts/xhs_login.py \
   --timeout-seconds 600
 ```
 
-登录成功必须同时完成：可见“我”与稳定身份、保存 Cookie/localStorage、关闭重开同一 profile 后仍是
-同一身份、AES-GCM 写入 `storage_state.enc`、账号状态变为 `active`。
+登录成功必须同时完成：可见“我”与稳定身份、保存 Cookie/localStorage 以及平台写入 sessionStorage
+的标签页设备 ID/运行时指纹、关闭重开同一 profile 后仍是同一身份、AES-GCM 写入
+`storage_state.enc`、账号状态变为 `active`。独立登录和正式运行使用同一真实 Chrome、原生窗口尺寸、
+语言、时区、mock keychain HOME 和账号 profile；不得在两个入口间切换固定 viewport 与最大化窗口。
 
 登录工具在整个登录和复验阶段持有与正式抓取相同的账号租约；忙碌只返回 `blocked`。可见验证页
 必须置前并等待操作人，标记消失且身份恢复后才继续；每阶段最多等待命令指定超时，不自动识别或
@@ -228,7 +230,11 @@ cursor 表示同一个 client search ID。
 
 - 每个账号使用权限 `0700` 的 `data/xhs_accounts/<account_id>/profile/`，不同账号不得共享。
 - profile 是持久 Chrome 目录，不宣称整个目录应用层加密。
-- Cookie、localStorage 和运行时 storage state 以 AES-GCM 保存为 `storage_state.enc`。
+- Cookie、localStorage、sessionStorage 设备标识和运行时 storage state 以 AES-GCM 保存为
+  `storage_state.enc`；明文 `metadata.json` 只保存账号绑定信息，不保存设备标识或 Cookie。
+- 持久 profile 中仍有效的 Cookie/localStorage 是当前状态；解密快照只补充 profile 缺失项，不能用
+  较旧短 Cookie 覆盖 profile。所有启动过浏览器的轮次都在关闭页面前原子刷新快照，并由 runner
+  校验账号绑定和必需 Cookie 后重新加密；内容抓取失败不等于丢弃已正常刷新的会话。
 - 密钥优先读取 `TRIPPOSTCOLLECT_XHS_SNAPSHOT_KEY`，否则使用 macOS Keychain 服务
   `TripPostCollect.XHS`。
 - 运行时明文只存在于 `data/runtime/xhs/sessions/<run_id>/`，退出必须删除。

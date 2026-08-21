@@ -17,7 +17,14 @@ from trippostcollect.xhs import accounts
 from trippostcollect.xhs.accounts import XhsAccountUnavailable
 from trippostcollect.xhs.config import load_pool_config, load_target
 from trippostcollect.xhs.config import XhsConfigError
-from trippostcollect.xhs.sessions import decrypt_storage_state, encrypt_storage_state, load_snapshot_key
+from trippostcollect.xhs.sessions import (
+    capture_context_state,
+    decrypt_storage_state,
+    encrypt_storage_state,
+    load_snapshot_key,
+    refresh_encrypted_storage_state,
+    restore_context_state,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -415,6 +422,128 @@ def test_storage_state_encryption_round_trip(tmp_path: Path, monkeypatch: pytest
     assert path.stat().st_mode & 0o777 == 0o600
     with pytest.raises(Exception):
         decrypt_storage_state(path, account_id="xhs-a02", key=loaded)
+
+
+def test_restore_state_keeps_profile_cookie_and_restores_session_device_id() -> None:
+    class FakeContext:
+        def __init__(self) -> None:
+            self.added_cookies: list[dict] = []
+            self.init_script = ""
+
+        async def cookies(self) -> list[dict]:
+            return [{"name": "web_session", "domain": ".xiaohongshu.com", "path": "/"}]
+
+        async def add_cookies(self, cookies: list[dict]) -> None:
+            self.added_cookies = cookies
+
+        async def add_init_script(self, script: str) -> None:
+            self.init_script = script
+
+    context = FakeContext()
+    asyncio.run(
+        restore_context_state(
+            context,
+            {
+                "cookies": [
+                    {
+                        "name": "web_session",
+                        "value": "stale",
+                        "domain": ".xiaohongshu.com",
+                        "path": "/",
+                    },
+                    {
+                        "name": "a1",
+                        "value": "fallback",
+                        "domain": ".xiaohongshu.com",
+                        "path": "/",
+                    },
+                ],
+                "origins": [],
+                "trippostcollect": {
+                    "runtime_storage": [
+                        {
+                            "origin": "https://www.xiaohongshu.com",
+                            "localStorage": {},
+                            "sessionStorage": {"XHS_TAB_DEVICE_ID": "device-1"},
+                        }
+                    ]
+                },
+            },
+        )
+    )
+
+    assert [cookie["name"] for cookie in context.added_cookies] == ["a1"]
+    assert "XHS_TAB_DEVICE_ID" in context.init_script
+    assert "sessionStorage.getItem(key) === null" in context.init_script
+
+
+def test_capture_and_refresh_storage_state_preserves_runtime_device_identity(
+    tmp_path: Path,
+) -> None:
+    class FakePage:
+        url = "https://www.xiaohongshu.com/explore"
+
+        def is_closed(self) -> bool:
+            return False
+
+        async def evaluate(self, script: str) -> dict:
+            assert "sessionStorage" in script
+            return {
+                "origin": "https://www.xiaohongshu.com",
+                "url": self.url,
+                "localStorage": {"b1": "stable-browser"},
+                "sessionStorage": {
+                    "XHS_RWP_FINGERPRINT": "fingerprint-1",
+                    "XHS_TAB_DEVICE_ID": "device-1",
+                },
+            }
+
+    class FakeContext:
+        pages = [FakePage()]
+
+        async def storage_state(self) -> dict:
+            return {
+                "cookies": [
+                    {"name": "a1", "value": "a", "domain": ".xiaohongshu.com"},
+                    {"name": "webId", "value": "w", "domain": ".xiaohongshu.com"},
+                    {
+                        "name": "web_session",
+                        "value": "s",
+                        "domain": ".xiaohongshu.com",
+                    },
+                ],
+                "origins": [],
+            }
+
+    key = b"r" * 32
+    encrypted_path = tmp_path / "state.enc"
+    runtime_path = tmp_path / "state.json"
+    old_state = asyncio.run(
+        capture_context_state(
+            FakeContext(),
+            account_id="xhs-a01",
+            identity_hash="identity-1",
+        )
+    )
+    encrypt_storage_state(old_state, encrypted_path, account_id="xhs-a01", key=key)
+    refreshed = json.loads(json.dumps(old_state))
+    refreshed["cookies"][2]["value"] = "s-refreshed"
+    runtime_path.write_text(json.dumps(refreshed), encoding="utf-8")
+
+    assert refresh_encrypted_storage_state(
+        runtime_path,
+        encrypted_path,
+        account_id="xhs-a01",
+        identity_hash="identity-1",
+        key=key,
+    )
+    saved = decrypt_storage_state(encrypted_path, account_id="xhs-a01", key=key)
+    assert saved["trippostcollect"]["schema_version"] == 2
+    assert saved["trippostcollect"]["account_id"] == "xhs-a01"
+    assert saved["trippostcollect"]["runtime_storage"][0]["sessionStorage"] == {
+        "XHS_RWP_FINGERPRINT": "fingerprint-1",
+        "XHS_TAB_DEVICE_ID": "device-1",
+    }
 
 
 def test_account_lease_requires_explicit_account_and_only_blocks_same_account(

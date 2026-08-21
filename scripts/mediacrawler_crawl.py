@@ -109,7 +109,12 @@ from trippostcollect.scheduler.discovery import (
     save_checkpoint,
     save_seen_candidates,
 )
-from browser_runtime import browser_launch_environment, browser_runtime_args
+from browser_runtime import (
+    XHS_WINDOW_SIZE_ENV,
+    browser_launch_environment,
+    browser_runtime_args,
+    xhs_window_size_value,
+)
 
 
 ROOT = PROJECT_ROOT
@@ -4550,6 +4555,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
                 "TRIPPOSTCOLLECT_XHS_STORAGE_STATE_PATH": str(xhs_storage_path),
                 "TRIPPOSTCOLLECT_XHS_PROFILE_DIR": str(Path(args.xhs_profile_dir).expanduser().resolve()),
                 "TRIPPOSTCOLLECT_XHS_ACCOUNT_ID": str(args.xhs_account_id),
+                XHS_WINDOW_SIZE_ENV: xhs_window_size_value(),
                 "TRIPPOSTCOLLECT_XHS_DISCOVERY_TARGET_KEY": str(
                     args.xhs_discovery_target_key
                 ),

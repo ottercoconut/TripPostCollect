@@ -16,6 +16,7 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, async_playwright
 
+from browser_runtime import XHS_NATIVE_WINDOW_SIZE
 from mediacrawler_crawl import discover_cdp_browser_path
 from mediacrawler_login_warmup import launch_login_context
 from trippostcollect.core.paths import DEFAULT_DB, XHS_LOGIN_OUTPUT, ensure_dir
@@ -33,6 +34,7 @@ from trippostcollect.xhs.accounts import (
     validate_account_id,
 )
 from trippostcollect.xhs.sessions import (
+    capture_context_state,
     decrypt_storage_state,
     encrypt_storage_state,
     load_snapshot_key,
@@ -167,7 +169,12 @@ def login_lease_seconds(timeout_seconds: int) -> int:
 
 
 async def open_account_context(playwright: Any, profile_dir: Path, browser_path: str | None) -> BrowserContext:
-    return await launch_login_context(playwright, profile_dir, browser_path or discover_cdp_browser_path())
+    return await launch_login_context(
+        playwright,
+        profile_dir,
+        browser_path or discover_cdp_browser_path(),
+        native_window_size=XHS_NATIVE_WINDOW_SIZE,
+    )
 
 
 async def single_login_page(context: BrowserContext) -> Page:
@@ -223,17 +230,24 @@ async def _run_login_session(
             else:
                 platform_id = str(initial_state["profile_ids"][0])
                 identity_hash = hashlib.sha256(platform_id.encode("utf-8")).hexdigest()
-                storage_state = await context.storage_state()
-                storage_state["trippostcollect"] = {
-                    "schema_version": 1,
-                    "platform": "xhs",
-                    "account_id": account_id,
-                    "identity_hash": identity_hash,
-                    "captured_at": utc_iso(),
-                }
+                storage_state = await capture_context_state(
+                    context,
+                    account_id=account_id,
+                    identity_hash=identity_hash,
+                )
                 encrypt_storage_state(storage_state, paths["encrypted_state"], account_id=account_id, key=key)
+                public_metadata = {
+                    key: storage_state["trippostcollect"].get(key)
+                    for key in (
+                        "schema_version",
+                        "platform",
+                        "account_id",
+                        "identity_hash",
+                        "captured_at",
+                    )
+                }
                 paths["metadata"].write_text(
-                    json.dumps(storage_state["trippostcollect"], ensure_ascii=False, indent=2),
+                    json.dumps(public_metadata, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
                 paths["metadata"].chmod(0o600)
@@ -263,6 +277,24 @@ async def _run_login_session(
                         path=str(screenshot_path),
                         full_page=False,
                         timeout=10_000,
+                    )
+                if (
+                    persisted_state.get("ok")
+                    and persisted_state.get("profile_ids", [None])[0]
+                    == initial_state.get("profile_ids", [None])[0]
+                ):
+                    platform_id = str(persisted_state["profile_ids"][0])
+                    identity_hash = hashlib.sha256(platform_id.encode("utf-8")).hexdigest()
+                    storage_state = await capture_context_state(
+                        verify_context,
+                        account_id=account_id,
+                        identity_hash=identity_hash,
+                    )
+                    encrypt_storage_state(
+                        storage_state,
+                        paths["encrypted_state"],
+                        account_id=account_id,
+                        key=key,
                     )
             finally:
                 await verify_context.close()

@@ -40,10 +40,9 @@ from trippostcollect.xhs.accounts import (
 )
 from trippostcollect.xhs.config import load_pool_config, load_target
 from trippostcollect.xhs.sessions import (
-    encrypt_storage_state,
     load_snapshot_key,
     materialized_storage_state,
-    snapshot_sha256,
+    refresh_encrypted_storage_state,
 )
 from xhs_runner import (
     _challenge_reason,
@@ -380,6 +379,7 @@ def main() -> int:
     exit_code = 1
     outcome = "failed"
     state_error = ""
+    storage_state_refreshed = False
     try:
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -402,7 +402,6 @@ def main() -> int:
         encrypted_state = Path(str(account["encrypted_state_path"])).expanduser().resolve()
         if not encrypted_state.is_file():
             raise RuntimeError("missing_encrypted_xhs_storage_state")
-        encrypted_sha = snapshot_sha256(encrypted_state)
         key = load_snapshot_key(create=False)
         with materialized_storage_state(
             encrypted_state,
@@ -425,15 +424,24 @@ def main() -> int:
             state.begin("command_executed")
             env = os.environ.copy()
             env["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(state_path)
-            completed = subprocess.run(
-                command,
-                cwd=ROOT,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=int(target["timeout_seconds"]) + 300,
-                check=False,
-            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=ROOT,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=int(target["timeout_seconds"]) + 300,
+                    check=False,
+                )
+            finally:
+                storage_state_refreshed = refresh_encrypted_storage_state(
+                    storage_state,
+                    encrypted_state,
+                    account_id=str(account["account_id"]),
+                    identity_hash=str(account["identity_hash"]),
+                    key=key,
+                )
             exit_code = int(completed.returncode)
             stdout = completed.stdout or ""
             stderr = completed.stderr or ""
@@ -490,9 +498,6 @@ def main() -> int:
                         state.fail("persistence_verified", error=state_error, evidence=persistence_evidence)
                     else:
                         state.complete("persistence_verified", evidence=persistence_evidence)
-                        if snapshot_sha256(encrypted_state) != encrypted_sha:
-                            updated_state = json.loads(storage_state.read_text(encoding="utf-8"))
-                            encrypt_storage_state(updated_state, encrypted_state, account_id=account["account_id"], key=key)
                         state.finalize(
                             outcome="completed",
                             evidence={"summary": child_summary_path, **persistence_evidence},
@@ -547,6 +552,7 @@ def main() -> int:
         "error": state_error,
         "challenge": _challenge_reason(stdout, stderr, child_summary),
         "login_reason": _login_reason(stdout, stderr, child_summary),
+        "storage_state_refreshed": storage_state_refreshed,
         "import_result": child_summary.get("import_result") or {},
         "stdout_tail": tail(stdout),
         "stderr_tail": tail(stderr),

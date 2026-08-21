@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -21,6 +22,7 @@ MAGIC = b"TPCXHS1\0"
 KEY_ENV = "TRIPPOSTCOLLECT_XHS_SNAPSHOT_KEY"
 KEYCHAIN_SERVICE = "TripPostCollect.XHS"
 KEYCHAIN_ACCOUNT = "snapshot-key"
+REQUIRED_SESSION_COOKIES = frozenset({"a1", "webId", "web_session"})
 
 
 def _decode_key(value: str) -> bytes:
@@ -103,6 +105,85 @@ def snapshot_sha256(path: str | Path) -> str:
     return hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
 
 
+def utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def prepare_account_storage_state(
+    state: dict[str, Any],
+    *,
+    account_id: str,
+    identity_hash: str,
+) -> dict[str, Any]:
+    """Bind a browser snapshot to one enrolled account without discarding runtime state."""
+    prepared = dict(state)
+    metadata = dict(prepared.get("trippostcollect") or {})
+    metadata.update(
+        {
+            "schema_version": 2,
+            "platform": "xhs",
+            "account_id": account_id,
+            "identity_hash": identity_hash,
+        }
+    )
+    metadata.setdefault("captured_at", utc_iso())
+    prepared["trippostcollect"] = metadata
+    return prepared
+
+
+def storage_state_is_usable(state: dict[str, Any], *, account_id: str | None = None) -> bool:
+    cookie_names = {
+        str(item.get("name"))
+        for item in state.get("cookies", [])
+        if isinstance(item, dict) and item.get("name") and item.get("value")
+    }
+    if not REQUIRED_SESSION_COOKIES.issubset(cookie_names):
+        return False
+    metadata = state.get("trippostcollect") or {}
+    if account_id and metadata.get("account_id") not in {None, "", account_id}:
+        return False
+    return True
+
+
+def refresh_encrypted_storage_state(
+    runtime_path: str | Path,
+    encrypted_path: str | Path,
+    *,
+    account_id: str,
+    identity_hash: str,
+    key: bytes,
+) -> bool:
+    """Persist a child browser's refreshed snapshot when it is valid and changed."""
+    source = Path(runtime_path).expanduser()
+    try:
+        value = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("invalid refreshed XHS storage state") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("refreshed XHS storage state is not an object")
+    prepared = prepare_account_storage_state(
+        value,
+        account_id=account_id,
+        identity_hash=identity_hash,
+    )
+    if not storage_state_is_usable(prepared, account_id=account_id):
+        raise RuntimeError("refreshed XHS storage state is missing required session cookies")
+    existing = decrypt_storage_state(
+        encrypted_path,
+        account_id=account_id,
+        key=key,
+    )
+    if prepared == existing:
+        return False
+    encrypt_storage_state(
+        prepared,
+        encrypted_path,
+        account_id=account_id,
+        key=key,
+    )
+    return True
+
+
 @contextlib.contextmanager
 def materialized_storage_state(
     encrypted_path: str | Path,
@@ -127,6 +208,15 @@ def materialized_storage_state(
 
 async def restore_context_state(context: Any, state: dict[str, Any]) -> None:
     allowed_cookie_keys = {"name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite"}
+    existing_cookies = {
+        (
+            str(item.get("name") or ""),
+            str(item.get("domain") or ""),
+            str(item.get("path") or "/"),
+        )
+        for item in await context.cookies()
+        if isinstance(item, dict)
+    }
     cookies = []
     for item in state.get("cookies", []):
         if not isinstance(item, dict) or not item.get("name") or not item.get("value"):
@@ -134,24 +224,98 @@ async def restore_context_state(context: Any, state: dict[str, Any]) -> None:
         cookie = {key: value for key, value in item.items() if key in allowed_cookie_keys and value is not None}
         if cookie.get("expires") == -1:
             cookie.pop("expires", None)
+        cookie_key = (
+            str(cookie.get("name") or ""),
+            str(cookie.get("domain") or ""),
+            str(cookie.get("path") or "/"),
+        )
+        if cookie_key in existing_cookies:
+            continue
         cookies.append(cookie)
     if cookies:
         await context.add_cookies(cookies)
-    origins: dict[str, dict[str, str]] = {}
+    origins: dict[str, dict[str, dict[str, str]]] = {}
     for item in state.get("origins", []):
         if not isinstance(item, dict) or not item.get("origin"):
             continue
-        origins[str(item["origin"])] = {
-            str(entry["name"]): str(entry["value"])
-            for entry in item.get("localStorage", [])
-            if isinstance(entry, dict) and entry.get("name") is not None
-        }
+        bucket = origins.setdefault(
+            str(item["origin"]),
+            {"localStorage": {}, "sessionStorage": {}},
+        )
+        bucket["localStorage"].update(
+            {
+                str(entry["name"]): str(entry["value"])
+                for entry in item.get("localStorage", [])
+                if isinstance(entry, dict) and entry.get("name") is not None
+            }
+        )
+    for item in (state.get("trippostcollect") or {}).get("runtime_storage", []):
+        if not isinstance(item, dict) or not item.get("origin"):
+            continue
+        bucket = origins.setdefault(
+            str(item["origin"]),
+            {"localStorage": {}, "sessionStorage": {}},
+        )
+        for storage_key in ("localStorage", "sessionStorage"):
+            values = item.get(storage_key)
+            if isinstance(values, dict):
+                bucket[storage_key].update(
+                    {str(key): str(value) for key, value in values.items() if value is not None}
+                )
     if origins:
         encoded = json.dumps(origins, ensure_ascii=False)
         await context.add_init_script(
             f"""() => {{
                 const origins = {encoded};
-                const values = origins[location.origin] || {{}};
-                for (const [key, value] of Object.entries(values)) localStorage.setItem(key, value);
+                const state = origins[location.origin] || {{}};
+                for (const [key, value] of Object.entries(state.localStorage || {{}})) {{
+                    if (localStorage.getItem(key) === null) localStorage.setItem(key, value);
+                }}
+                for (const [key, value] of Object.entries(state.sessionStorage || {{}})) {{
+                    if (sessionStorage.getItem(key) === null) sessionStorage.setItem(key, value);
+                }}
             }}"""
         )
+
+
+async def capture_context_state(
+    context: Any,
+    *,
+    account_id: str,
+    identity_hash: str,
+) -> dict[str, Any]:
+    """Capture cookies, local storage, and XHS per-tab device state before shutdown."""
+    state = await context.storage_state()
+    runtime_storage: list[dict[str, Any]] = []
+    for page in [page for page in context.pages if not page.is_closed()]:
+        url = str(page.url or "")
+        if "xiaohongshu.com" not in url and "rednote.com" not in url:
+            continue
+        try:
+            storage = await page.evaluate(
+                """
+                () => ({
+                  origin: location.origin,
+                  url: location.href,
+                  localStorage: Object.fromEntries(Object.entries(window.localStorage || {})),
+                  sessionStorage: Object.fromEntries(Object.entries(window.sessionStorage || {}))
+                })
+                """
+            )
+        except Exception as exc:
+            storage = {"url": url, "error": f"{type(exc).__name__}: {exc}"}
+        if isinstance(storage, dict):
+            runtime_storage.append(storage)
+    metadata = dict(state.get("trippostcollect") or {})
+    metadata.update(
+        {
+            "schema_version": 2,
+            "platform": "xhs",
+            "account_id": account_id,
+            "identity_hash": identity_hash,
+            "captured_at": utc_iso(),
+            "runtime_storage": runtime_storage,
+        }
+    )
+    state["trippostcollect"] = metadata
+    return state
