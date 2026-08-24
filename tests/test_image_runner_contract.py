@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from hashlib import sha256
 import io
 import json
@@ -163,8 +164,37 @@ def test_generic_dry_run_freezes_image_contract_for_all_four_platforms(
         assert plan["discovery"]["media_root"] == plan["media_root"]
         assert "--download-images" in command
         assert command[command.index("--media-root") + 1] == plan["media_root"]
+        assert command[command.index("--behavior-profile") + 1] == "social_high_risk"
         assert "--get-media" not in command
         assert state["steps"]["command_executed"]["status"] == "frozen"
+
+
+def test_generic_runner_rejects_non_formal_behavior_profile() -> None:
+    row = {
+        "id": 1,
+        "job_key": "invalid_profile_job",
+        "site_key": "weibo",
+        "target_url": "",
+        "job_kind": "mediacrawler_search",
+        "behavior_profile_json": json.dumps({"name": "media_crawler_low_frequency"}),
+        "params_json": json.dumps(
+            {
+                "platform": "weibo",
+                "candidate_hard_limit": 20,
+                "target_new_posts": 1,
+                "max_stagnant_batches": 3,
+                "required_fields_profile": "image_post_with_followers_v1",
+                "followers_policy": "required",
+            }
+        ),
+    }
+
+    try:
+        crawl_runner.build_command(row, argparse.Namespace())
+    except ValueError as exc:
+        assert "must use social_high_risk" in str(exc)
+    else:
+        raise AssertionError("invalid formal behavior profile was accepted")
 
 
 def test_runner_rehashes_manifests_and_rejects_tampering(tmp_path: Path) -> None:

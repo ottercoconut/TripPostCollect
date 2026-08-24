@@ -278,6 +278,10 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
         platform = str(params.get("platform") or site)
         if platform == "xhs":
             raise ValueError("XHS formal jobs must use scripts/xhs_runner.py")
+        if profile != "social_high_risk":
+            raise ValueError(
+                f"Generic MediaCrawler formal job must use social_high_risk: {row['job_key']}"
+            )
         if "candidate_hard_limit" not in params:
             raise ValueError(f"Missing candidate_hard_limit for formal job {row['job_key']}")
         candidate_hard_limit = int(params["candidate_hard_limit"])
@@ -305,6 +309,7 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
         add_flag(command, "--completion-mode", args.completion_mode)
         add_flag(command, "--max-stagnant-batches", max_stagnant_batches)
         add_flag(command, "--required-fields-profile", required_fields_profile)
+        add_flag(command, "--behavior-profile", profile)
         add_flag(command, "--login-type", params.get("login_type", "cookie"))
         add_flag(command, "--db", args.db)
         command.append("--download-images")

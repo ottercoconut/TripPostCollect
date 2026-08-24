@@ -14,6 +14,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 | 调度器、执行器和数据流 | [抓取架构](crawl-architecture.md) |
 | MediaCrawler 上游同步和本地改造 | [MediaCrawler fork 维护](mediacrawler-fork-maintenance.md) |
 | SQLite、媒体文件、事务和入库校验 | [数据持久化](data-persistence.md) |
+| 面向研究使用的帖子、作者、互动与图片字段 | [抓取结果数据字典](crawl-result-data-dictionary.md) |
 | 五个平台的字段能力 | [平台字段覆盖](platform-field-coverage.md) |
 | 小红书账号、登录、抓取和恢复 | [小红书 Workflow](platforms/xhs.md) |
 | B站 article 详情与正文完整性 | [B站 article](platforms/bilibili.md) |
@@ -31,6 +32,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 - 运行手册只给出可执行命令、人工步骤、恢复动作和检查方法。
 - 架构文档只描述组件、状态流和数据流。
 - 持久化文档只描述 schema、事务、文件归属、导入与验证。
+- 结果数据字典只描述用户查询字段和表间关系，不冻结会随抓取变化的数据库数量。
 - 平台文档只描述该平台独有的登录、API、字段、游标和失败信号；共享规则直接引用正式契约。
 
 新行为不得只写进 README、历史提交说明或 Skill。共享语义变化优先修改正式契约、代码和测试，

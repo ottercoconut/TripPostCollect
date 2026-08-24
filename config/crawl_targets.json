@@ -28,7 +28,7 @@
         "headless": false
       },
       "behavior_profile": {
-        "name": "media_crawler_low_frequency"
+        "name": "social_high_risk"
       }
     },
     {
@@ -54,7 +54,7 @@
         "headless": false
       },
       "behavior_profile": {
-        "name": "media_crawler_low_frequency"
+        "name": "social_high_risk"
       }
     },
     {
