@@ -58,6 +58,20 @@ WHERE canonical_url IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_web_posts_platform_captured
 ON web_posts(platform_key, captured_at DESC);
 
+CREATE TABLE IF NOT EXISTS post_detail_repair_waivers (
+    id INTEGER PRIMARY KEY,
+    web_post_id INTEGER NOT NULL UNIQUE REFERENCES web_posts(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    authorized_by TEXT NOT NULL,
+    authorized_at TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_post_detail_repair_waivers_reason
+ON post_detail_repair_waivers(reason, authorized_at);
+
 CREATE TABLE IF NOT EXISTS web_post_images (
     id INTEGER PRIMARY KEY,
     web_post_id INTEGER NOT NULL REFERENCES web_posts(id) ON DELETE CASCADE,

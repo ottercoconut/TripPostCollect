@@ -157,6 +157,14 @@ python scripts/repair_post_details.py \
 `post_detail_repair_no_progress` 并失败退出；先按候选失败样本排障，不做无限循环。只有 child 声称成功
 入库但 SQLite 或媒体复验不一致时才使用 `post_detail_repair_persistence_not_verified`。
 
+用户在复核有限重试证据后明确表示某些微博、知乎或抖音帖子“不再修复”时，保留原帖和真实详情状态，
+把精确帖子登记到 `post_detail_repair_waivers`。登记前必须备份默认 SQLite，并在单一事务中保存原因、
+`authorized_by=user`、授权时间及来源 repair run；不得改 `content_detail_status` 或借用 discovery 排除表。
+后续自动选择和显式 `--post-id` 都把这些记录以 `post_detail_repair_waived` 拒绝。若本次范围全部已豁免，
+摘要为 `no_actionable_repair_targets_all_waived` no-op；监督程序读取
+`remaining_waived_pending_count` 与 `remaining_unwaived_pending_count`，不得把 waiver 数量解释为修复成功数。
+撤销 waiver 需要用户重新明确指定精确平台帖子 ID，不能批量清空整表。
+
 控制面产物位于：
 
 - `outputs/post_detail_repair/<platform>-<run_id>/run_summary.json`

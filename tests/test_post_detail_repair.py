@@ -184,6 +184,60 @@ def test_select_targets_carries_existing_repair_metadata(tmp_path: Path) -> None
     conn.close()
 
 
+def test_user_waiver_keeps_unobserved_post_but_removes_it_from_targets(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    repair.bootstrap_database(db_path, sync_jobs=False)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            INSERT INTO web_posts(
+                platform_key, platform_post_id, source_type, source_url,
+                canonical_url, captured_at, keyword, raw_sample_json
+            ) VALUES (
+                'weibo', 'waived-1', 'search',
+                'https://m.weibo.cn/detail/waived-1',
+                'https://m.weibo.cn/detail/waived-1',
+                '2026-08-24T20:00:00+08:00', '青岛旅游', '{}'
+            )
+            """
+        )
+        waived = repair.waive_post_detail_repairs(
+            conn,
+            platform="weibo",
+            post_ids=["waived-1"],
+            reason="user_waived_after_bounded_retry",
+            authorized_by="user",
+            evidence_by_post_id={"waived-1": {"run_id": "weibo-test"}},
+        )
+        conn.commit()
+
+        targets, rejected, pending = repair.select_targets(
+            conn,
+            platform="weibo",
+            post_ids=[],
+            max_items=0,
+        )
+
+        assert waived == ["waived-1"]
+        assert pending == 1
+        assert targets == []
+        assert rejected[0]["reason"] == "post_detail_repair_waived"
+        assert rejected[0]["repair_waiver"]["evidence"] == {
+            "run_id": "weibo-test"
+        }
+        assert repair.waived_pending_count(conn, "weibo") == 1
+        assert repair.all_rejected_targets_waived(rejected) is True
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=19"
+            ).fetchone()[0]
+            == 1
+        )
+
+
 @pytest.mark.parametrize(
     ("platform", "detail_target"),
     [

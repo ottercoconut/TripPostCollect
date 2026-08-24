@@ -159,6 +159,107 @@ def _detail_target(platform: str, post_id: str, canonical_url: str) -> tuple[str
     return None, "invalid_zhihu_canonical_url"
 
 
+def load_post_detail_repair_waivers(
+    conn: sqlite3.Connection,
+    platform: str,
+) -> dict[str, dict[str, Any]]:
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='post_detail_repair_waivers'"
+    ).fetchone():
+        return {}
+    rows = conn.execute(
+        """
+        SELECT p.platform_post_id, w.reason, w.authorized_by,
+               w.authorized_at, w.evidence_json
+        FROM post_detail_repair_waivers AS w
+        JOIN web_posts AS p ON p.id=w.web_post_id
+        WHERE p.platform_key=?
+        """,
+        (platform,),
+    ).fetchall()
+    waivers: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        post_id = str(row["platform_post_id"] or "")
+        try:
+            evidence = json.loads(str(row["evidence_json"] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            evidence = {}
+        waivers[post_id] = {
+            "reason": str(row["reason"] or ""),
+            "authorized_by": str(row["authorized_by"] or ""),
+            "authorized_at": str(row["authorized_at"] or ""),
+            "evidence": evidence if isinstance(evidence, dict) else {},
+        }
+    return waivers
+
+
+def waive_post_detail_repairs(
+    conn: sqlite3.Connection,
+    *,
+    platform: str,
+    post_ids: list[str],
+    reason: str,
+    authorized_by: str,
+    evidence_by_post_id: dict[str, dict[str, Any]] | None = None,
+) -> list[str]:
+    normalized_ids = sorted({str(value).strip() for value in post_ids if str(value).strip()})
+    if not normalized_ids:
+        raise ValueError("post detail repair waiver requires at least one platform post ID")
+    if not reason.strip() or not authorized_by.strip():
+        raise ValueError("post detail repair waiver requires reason and authorized_by")
+    placeholders = ",".join("?" for _ in normalized_ids)
+    rows = conn.execute(
+        f"""
+        SELECT id, platform_post_id,
+               COALESCE(
+                   CASE WHEN json_valid(raw_sample_json)
+                        THEN json_extract(raw_sample_json, '$.content_detail_status') END,
+                   ''
+               ) AS detail_status
+        FROM web_posts
+        WHERE platform_key=? AND platform_post_id IN ({placeholders})
+        """,
+        (platform, *normalized_ids),
+    ).fetchall()
+    by_id = {str(row["platform_post_id"]): row for row in rows}
+    missing = sorted(set(normalized_ids) - set(by_id))
+    if missing:
+        raise ValueError(f"post detail repair waiver targets not found: {missing}")
+    already_observed = sorted(
+        post_id
+        for post_id, row in by_id.items()
+        if str(row["detail_status"] or "") == "detail_observed"
+    )
+    if already_observed:
+        raise ValueError(
+            f"post detail repair waiver targets are already detail_observed: {already_observed}"
+        )
+    authorized_at = utc_iso()
+    for post_id in normalized_ids:
+        evidence = (evidence_by_post_id or {}).get(post_id) or {}
+        conn.execute(
+            """
+            INSERT INTO post_detail_repair_waivers(
+                web_post_id, reason, authorized_by, authorized_at, evidence_json
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(web_post_id) DO UPDATE SET
+                reason=excluded.reason,
+                authorized_by=excluded.authorized_by,
+                authorized_at=excluded.authorized_at,
+                evidence_json=excluded.evidence_json,
+                updated_at=datetime('now')
+            """,
+            (
+                int(by_id[post_id]["id"]),
+                reason.strip(),
+                authorized_by.strip(),
+                authorized_at,
+                json.dumps(evidence, ensure_ascii=False, separators=(",", ":")),
+            ),
+        )
+    return normalized_ids
+
+
 def select_targets(
     conn: sqlite3.Connection,
     *,
@@ -185,6 +286,7 @@ def select_targets(
     ).fetchall()
     pending_count = len(rows)
     requested = {str(value).strip() for value in post_ids if str(value).strip()}
+    waivers = load_post_detail_repair_waivers(conn, platform)
     targets: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in rows:
@@ -232,7 +334,11 @@ def select_targets(
             "repair_fallback": repair_fallback,
             "reason": reason,
         }
-        if not post_id:
+        if post_id in waivers:
+            item["reason"] = "post_detail_repair_waived"
+            item["repair_waiver"] = waivers[post_id]
+            rejected.append(item)
+        elif not post_id:
             item["reason"] = "missing_platform_post_id"
             rejected.append(item)
         elif not item["keyword"]:
@@ -249,6 +355,12 @@ def select_targets(
 
 def chunked(values: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+def all_rejected_targets_waived(rejected: list[dict[str, Any]]) -> bool:
+    return bool(rejected) and all(
+        item.get("reason") == "post_detail_repair_waived" for item in rejected
+    )
 
 
 def build_child_command(
@@ -436,6 +548,28 @@ def pending_count(conn: sqlite3.Connection, platform: str) -> int:
     return int(row[0] or 0)
 
 
+def waived_pending_count(conn: sqlite3.Connection, platform: str) -> int:
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='post_detail_repair_waivers'"
+    ).fetchone():
+        return 0
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM post_detail_repair_waivers AS w
+        JOIN web_posts AS p ON p.id=w.web_post_id
+        WHERE p.platform_key=?
+          AND COALESCE(
+                CASE WHEN json_valid(p.raw_sample_json)
+                     THEN json_extract(p.raw_sample_json, '$.content_detail_status') END,
+                ''
+              ) <> 'detail_observed'
+        """,
+        (platform,),
+    ).fetchone()
+    return int(row[0] or 0)
+
+
 def _fatal_child_failure(summary: dict[str, Any]) -> str:
     validation = summary.get("formal_validation") or {}
     stop_reason = str(validation.get("stop_reason") or "")
@@ -579,6 +713,10 @@ def main() -> int:
             post_ids=args.post_ids,
             max_items=args.max_items,
         )
+        initial_waived_pending = waived_pending_count(conn, args.platform)
+    selected_waived = [
+        item for item in rejected if item.get("reason") == "post_detail_repair_waived"
+    ]
 
     manifest_path = write_json(
         run_dir / "targets.json",
@@ -634,6 +772,9 @@ def main() -> int:
         "target_count": len(targets),
         "rejected_count": len(rejected),
         "initial_pending_count": initial_pending,
+        "initial_waived_pending_count": initial_waived_pending,
+        "initial_unwaived_pending_count": max(0, initial_pending - initial_waived_pending),
+        "selected_waived_count": len(selected_waived),
         "batch_size": args.batch_size,
         "batch_count": len(batch_plans),
         "timeout_per_batch": args.timeout_per_batch,
@@ -672,6 +813,30 @@ def main() -> int:
         return 0
 
     if not targets:
+        if all_rejected_targets_waived(rejected):
+            reason = "no_actionable_repair_targets_all_waived"
+            _complete_no_op(state, reason=reason)
+            summary = {
+                **base_summary,
+                "status": "completed",
+                "no_op": True,
+                "no_op_reason": reason,
+                "remaining_pending_count": initial_pending,
+                "remaining_waived_pending_count": initial_waived_pending,
+                "remaining_unwaived_pending_count": max(
+                    0, initial_pending - initial_waived_pending
+                ),
+                "finished_at": utc_iso(),
+            }
+            write_json(summary_path, summary)
+            print(
+                json.dumps(
+                    {**summary, "summary": str(summary_path)},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
         if rejected:
             error = "no_actionable_repair_targets"
             state.begin("command_executed")
@@ -690,6 +855,10 @@ def main() -> int:
             "status": "completed",
             "no_op": True,
             "remaining_pending_count": initial_pending,
+            "remaining_waived_pending_count": initial_waived_pending,
+            "remaining_unwaived_pending_count": max(
+                0, initial_pending - initial_waived_pending
+            ),
             "finished_at": utc_iso(),
         }
         write_json(summary_path, summary)
@@ -812,6 +981,9 @@ def main() -> int:
                     conn.row_factory = sqlite3.Row
                     statuses = repaired_rows(conn, args.platform, target_ids)
                     remaining_pending = pending_count(conn, args.platform)
+                    remaining_waived_pending = waived_pending_count(
+                        conn, args.platform
+                    )
                 recovered_ids = sorted(
                     post_id for post_id, value in statuses.items() if value["recovered"]
                 )
@@ -825,6 +997,10 @@ def main() -> int:
                     "remaining_target_count": len(remaining_target_ids),
                     "remaining_target_ids_sample": remaining_target_ids[:20],
                     "remaining_pending_count": remaining_pending,
+                    "remaining_waived_pending_count": remaining_waived_pending,
+                    "remaining_unwaived_pending_count": max(
+                        0, remaining_pending - remaining_waived_pending
+                    ),
                     "candidate_failure_count": len(candidate_failures),
                     "candidate_failures_sample": candidate_failures[:20],
                 }
@@ -863,6 +1039,7 @@ def main() -> int:
             [item["platform_post_id"] for item in targets],
         )
         final_pending = pending_count(conn, args.platform)
+        final_waived_pending = waived_pending_count(conn, args.platform)
     recovered_ids = sorted(
         post_id for post_id, value in final_statuses.items() if value["recovered"]
     )
@@ -880,6 +1057,10 @@ def main() -> int:
         "remaining_target_count": len(remaining_ids),
         "remaining_target_ids_sample": remaining_ids[:20],
         "remaining_pending_count": final_pending,
+        "remaining_waived_pending_count": final_waived_pending,
+        "remaining_unwaived_pending_count": max(
+            0, final_pending - final_waived_pending
+        ),
         "all_selected_targets_recovered": not remaining_ids,
         "candidate_failure_count": len(candidate_failures),
         "candidate_failures_sample": candidate_failures[:20],

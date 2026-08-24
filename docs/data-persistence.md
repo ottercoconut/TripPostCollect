@@ -38,7 +38,7 @@ staging；正式文件只有在根项目复验后才能原子晋升到 `data/med
 | 文件 | 表 |
 |---|---|
 | `db/source_platforms.sql` | `source_platforms` |
-| `db/web_posts.sql` | `web_posts`、`web_post_images` |
+| `db/web_posts.sql` | `web_posts`、`web_post_images`、`post_detail_repair_waivers` |
 | `db/ctf_captures.sql` | `ctf_captures`、`ctf_capture_images` |
 | `db/crawl_scheduler.sql` | `crawl_jobs`、`crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates`、`crawl_discovery_candidate_exclusions`、`crawl_attempts`、`crawl_run_reports`、`profile_health_checks`；任务类型包含通用搜索和页面证据 |
 | `db/xhs_control.sql` | `xhs_accounts`、`xhs_account_events`、`xhs_account_leases`、`xhs_runs`、`xhs_discovery_checkpoints`、`xhs_discovery_seen_candidates` |
@@ -79,6 +79,12 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 不能清空整张 seen 或 checkpoint 表。
 
 `web_posts` 是统一内容主表，面向用户查询和后续数据使用。`ctf_captures` 是证据和调试底座，面向程序脚本或 Agent 排查抓取过程。页面级抓取成功后，也会归一化生成 `web_posts` 行，并通过 `web_posts.source_capture_id` 关联对应 `ctf_captures.id`。
+
+`post_detail_repair_waivers` 是既有帖子历史详情修复的独立操作审计表。它以 `web_post_id` 唯一关联
+`web_posts`，只保存用户明确授权的放弃原因、授权主体、授权时间和短证据 JSON。该表不改变
+`raw_sample_json.content_detail_status`，不属于 discovery checkpoint、seen 或候选排除，也不把未观察
+详情变成有效详情。帖子删除时 waiver 随外键级联删除；普通修复、抓取和导入不得自动创建或撤销 waiver。
+schema migration `19/post_detail_repair_waivers` 记录该表已进入现行内容 schema。
 
 当前结构不再保留“只入 `ctf_captures`、不入 `web_posts`”的内容形态。已有成功且内容就绪的页面级证据记录，应通过 `import_ctf_captures.py` 重新导入或同步，使用户查询统一落在 `web_posts` 上。
 

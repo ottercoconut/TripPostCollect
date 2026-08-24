@@ -217,6 +217,10 @@ def ensure_content_schema(conn: sqlite3.Connection) -> tuple[int, dict[str, Any]
     platform_count = ensure_source_platforms(conn)
     conn.executescript(WEB_POSTS_SCHEMA.read_text(encoding="utf-8"))
     conn.execute("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", (4, "web_posts"))
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
+        (19, "post_detail_repair_waivers"),
+    )
     ensure_column(conn, "web_posts", "published_at", "TEXT")
     ensure_column(conn, "web_posts", "source_capture_id", "INTEGER REFERENCES ctf_captures(id) ON DELETE SET NULL")
     conn.executescript(CTF_CAPTURES_SCHEMA.read_text(encoding="utf-8"))

@@ -193,6 +193,15 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 `candidate_failure_count`；整轮零恢复且没有运行级或持久化阻断时使用
 `post_detail_repair_no_progress`，不得误报为 `post_detail_repair_persistence_not_verified`。
 
+用户在有限重试及证据复核后可以明确放弃某些既有帖子的后续历史详情修复。该决定只写独立的
+`post_detail_repair_waivers` 审计表，保存精确 `web_post_id`、原因、授权人、授权时间和既有运行证据；
+不得把原帖状态改成 `detail_observed`、删除原帖或写 discovery 排除/seen。通用修复自动选择必须排除
+有效 waiver，并以 `post_detail_repair_waived` 列入 rejected 证据；显式 `--post-id` 也不能静默绕过。
+全部待选项均已 waiver 时入口以 `no_actionable_repair_targets_all_waived` no-op，不启动平台 child。
+`remaining_pending_count` 仍包含这些未获得权威详情的帖子，同时另报
+`remaining_waived_pending_count` 和 `remaining_unwaived_pending_count`；waiver 表示“无需再尝试”，不表示
+详情已修复或平台历史库存已清零。撤销 waiver 也必须由用户针对精确帖子明确授权。
+
 分页证据为 `runtime_failed`、`login_required`、`captcha_detected`，或本轮任一目标 child 未成功完成时，
 运行失败门禁必须覆盖已经达到的数量目标：`completion_met=false`，不得晋升图片或进入 SQLite 事务。
 组合门禁失败时也必须保留这一优先级：已有 `runtime_failed`、`login_required` 或
