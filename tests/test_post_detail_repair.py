@@ -236,6 +236,38 @@ def test_load_post_repair_targets_rejects_cross_id_target(tmp_path: Path) -> Non
         mediacrawler.load_post_repair_targets(path, "douyin")
 
 
+def test_generic_repair_evidence_accounts_for_every_unrecovered_target() -> None:
+    evidence = mediacrawler.post_repair_pagination_evidence(
+        [
+            {"platform_post_id": "ok"},
+            {"platform_post_id": "missing-detail"},
+            {"platform_post_id": "bad-image"},
+        ],
+        platform="weibo",
+        successful_identities={"weibo:id:ok"},
+        materialization_failures=[
+            {
+                "identity": "weibo:id:bad-image",
+                "code": "image_too_large",
+                "message": "oversized image",
+                "attempts": 1,
+            }
+        ],
+    )
+
+    assert evidence["successful_candidate_count"] == 1
+    assert evidence["skipped_candidate_count"] == 2
+    failures = {
+        item["platform_post_id"]: item
+        for item in evidence["skipped_candidate_failures"]
+    }
+    assert failures["missing-detail"]["error_code"] == "repair_target_no_valid_output"
+    assert failures["missing-detail"]["evidence_source"] == "repair_target_output_difference"
+    assert failures["bad-image"]["failure_scope"] == "image"
+    assert failures["bad-image"]["error_code"] == "image_too_large"
+    assert all(item["terminal_for_run"] for item in failures.values())
+
+
 def test_repair_fallback_makes_sparse_zhihu_detail_formally_valid() -> None:
     detail = {
         "content_id": "answer-1",
@@ -269,6 +301,59 @@ def test_repair_fallback_makes_sparse_zhihu_detail_formally_valid() -> None:
     assert validation["valid"] is True
     assert merged["content_detail_source"] == "answer_detail"
     assert merged["content_text"] == "完整正文"
+
+
+def test_partial_repair_separates_import_gate_from_full_completion(tmp_path: Path) -> None:
+    db_path = tmp_path / "posts.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE web_posts(platform_key TEXT, platform_post_id TEXT, canonical_url TEXT)"
+        )
+        conn.execute("INSERT INTO web_posts VALUES ('weibo', 'ok', '')")
+    record = {
+        "note_id": "ok",
+        "content": "微博完整正文",
+        "content_detail_status": "detail_observed",
+        "content_detail_source": "mobile_detail",
+        "image_list_source": "mblog.pics",
+        "image_list": ["https://wx1.sinaimg.cn/large/body.jpg"],
+        "create_time": 1_700_000_000,
+        "creator_hash": "author-weibo",
+        "nickname": "author",
+        "followers_count": 10,
+        "followers_observed": True,
+        "author_followers_source": "search_author",
+        "liked_count": 1,
+        "comments_count": 2,
+        "shared_count": 3,
+    }
+    jsonl_path = (
+        tmp_path / "weibo" / "data" / "weibo" / "jsonl" / "detail_contents_1.jsonl"
+    )
+    jsonl_path.parent.mkdir(parents=True)
+    jsonl_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    evidence = mediacrawler.post_repair_pagination_evidence(
+        [{"platform_post_id": "ok"}, {"platform_post_id": "missing"}],
+        platform="weibo",
+        successful_identities={"weibo:id:ok"},
+    )
+
+    validation, selected = mediacrawler.collect_formal_records(
+        {"records": [{"output": {"jsonl_files": [str(jsonl_path)]}}]},
+        candidate_hard_limit=2,
+        target_new_posts=0,
+        db_path=db_path,
+        pagination_evidence=evidence,
+        allowed_identities={"weibo:id:ok", "weibo:id:missing"},
+        repair_mode=True,
+    )
+
+    assert len(selected) == 1
+    assert validation["repair_import_met"] is True
+    assert validation["completion_met"] is False
+    assert validation["all_repair_targets_valid"] is False
+    assert validation["skipped_candidate_count"] == 1
+    assert validation["stop_reason"] == "repair_targets_partially_processed"
 
 
 def test_build_child_command_disables_discovery_writes(tmp_path: Path) -> None:
@@ -378,6 +463,36 @@ def test_partial_generic_repair_can_commit_valid_subset() -> None:
         image_materialization={"complete": True},
         behavior_validation={"ok": True},
     ) is False
+
+    validation = {
+        "repair_mode": True,
+        "repair_import_met": True,
+        "completion_met": False,
+    }
+    assert mediacrawler.formal_import_gate_met(validation) is True
+    assert mediacrawler.formal_image_promotion_allowed(
+        download_images=True,
+        no_import=False,
+        validation=validation,
+    ) is True
+
+
+def test_zero_progress_is_distinct_from_persistence_failure() -> None:
+    assert repair.repair_persistence_failure_reason(
+        recovered_ids=[],
+        successful_child_summaries=[],
+        persistence_checks=[],
+    ) == "post_detail_repair_no_progress"
+    assert repair.repair_persistence_failure_reason(
+        recovered_ids=[],
+        successful_child_summaries=[{"import_completion_met": True}],
+        persistence_checks=[{"ok": True}],
+    ) == "post_detail_repair_persistence_not_verified"
+    assert repair.repair_persistence_failure_reason(
+        recovered_ids=["post-1"],
+        successful_child_summaries=[{"import_completion_met": True}],
+        persistence_checks=[{"ok": True}],
+    ) == ""
 
 
 def test_clean_zero_output_repair_is_not_misclassified_as_runtime_failure() -> None:

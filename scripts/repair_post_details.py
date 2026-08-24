@@ -463,6 +463,31 @@ def _fatal_child_failure(summary: dict[str, Any]) -> str:
     return ""
 
 
+def child_candidate_failures(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return sanitized structured candidate failures from a repair child."""
+
+    validation = summary.get("formal_validation") or {}
+    failures = validation.get("skipped_candidate_failures") or []
+    return [dict(item) for item in failures if isinstance(item, dict)]
+
+
+def repair_persistence_failure_reason(
+    *,
+    recovered_ids: list[str],
+    successful_child_summaries: list[dict[str, Any]],
+    persistence_checks: list[dict[str, Any]],
+) -> str:
+    if not recovered_ids and not successful_child_summaries:
+        return "post_detail_repair_no_progress"
+    if not (
+        recovered_ids
+        and successful_child_summaries
+        and all(check.get("ok") for check in persistence_checks)
+    ):
+        return "post_detail_repair_persistence_not_verified"
+    return ""
+
+
 def _strict_batch_blocker(error: str) -> bool:
     """Return whether a child error must stop unattended platform repair."""
 
@@ -674,6 +699,7 @@ def main() -> int:
     backup: dict[str, Any] = {}
     batch_results: list[dict[str, Any]] = []
     child_summaries: list[dict[str, Any]] = []
+    candidate_failures: list[dict[str, Any]] = []
     fatal_error = ""
     outcome = "failed"
     try:
@@ -702,6 +728,8 @@ def main() -> int:
                 child_error = f"missing_child_summary_exit_{child_run['returncode']}"
             else:
                 child_error = _fatal_child_failure(child_summary)
+            batch_candidate_failures = child_candidate_failures(child_summary)
+            candidate_failures.extend(batch_candidate_failures)
             batch_result = {
                 "batch": batch_plan["batch"],
                 "target_count": batch_plan["target_count"],
@@ -713,6 +741,8 @@ def main() -> int:
                 "valid_total_count": int(
                     (child_summary.get("formal_validation") or {}).get("valid_total_count") or 0
                 ),
+                "candidate_failure_count": len(batch_candidate_failures),
+                "candidate_failures_sample": batch_candidate_failures[:20],
                 "import_result": child_summary.get("import_result") or {},
                 "error": child_error,
                 "stdout_tail": tail(stdout),
@@ -795,14 +825,16 @@ def main() -> int:
                     "remaining_target_count": len(remaining_target_ids),
                     "remaining_target_ids_sample": remaining_target_ids[:20],
                     "remaining_pending_count": remaining_pending,
+                    "candidate_failure_count": len(candidate_failures),
+                    "candidate_failures_sample": candidate_failures[:20],
                 }
-                persistence_ok = bool(
-                    recovered_ids
-                    and successful
-                    and all(check["ok"] for check in persistence_checks)
+                persistence_failure = repair_persistence_failure_reason(
+                    recovered_ids=recovered_ids,
+                    successful_child_summaries=successful,
+                    persistence_checks=persistence_checks,
                 )
-                if not persistence_ok:
-                    fatal_error = "post_detail_repair_persistence_not_verified"
+                if persistence_failure:
+                    fatal_error = persistence_failure
                     state.fail(
                         "persistence_verified",
                         error=fatal_error,
@@ -849,6 +881,8 @@ def main() -> int:
         "remaining_target_ids_sample": remaining_ids[:20],
         "remaining_pending_count": final_pending,
         "all_selected_targets_recovered": not remaining_ids,
+        "candidate_failure_count": len(candidate_failures),
+        "candidate_failures_sample": candidate_failures[:20],
         "finished_at": utc_iso(),
     }
     write_json(summary_path, summary)

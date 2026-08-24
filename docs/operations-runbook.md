@@ -145,9 +145,17 @@ python scripts/repair_post_details.py \
 无人值守模式下，单批超时、child 缺摘要、普通详情运行失败或 `repair_no_valid_detail` 只记录在
 批次结果中并跳过该批，随后继续清单中的后续批次；只有上述运行级阻断以及 SQLite、媒体持久化
 一致性失败才会停止该平台总控。
+通用修复 child 会按冻结目标集合和最终有效集合的差集写
+`formal_validation.skipped_candidate_failures`；父摘要同步提供 `candidate_failure_count` 和最多 20 条
+`candidate_failures_sample`。`repair_target_no_valid_output` 表示平台子进程没有产生可正式入库的目标记录，
+`evidence_source=repair_target_output_difference` 表示不能从现有结构化产物可靠细分为详情或图片原因，
+监督程序不得猜测更具体错误。
 摘要状态 `completed_with_remaining` 表示本轮已有可验证进展但选中目标仍有残留，不表示库存清零；
 继续运行同一平台，直到摘要同时满足 `status=completed`、`all_selected_targets_recovered=true` 和
-`remaining_pending_count=0`。若一轮 `recovered_count=0`，程序失败退出，先按摘要排障，不做无限循环。
+`remaining_pending_count=0`。child 的 `repair_import_met=true` 只允许成功子集入库，不能代替
+`completion_met=true` 或父摘要的完整完成条件。若一轮 `recovered_count=0`，父摘要使用
+`post_detail_repair_no_progress` 并失败退出；先按候选失败样本排障，不做无限循环。只有 child 声称成功
+入库但 SQLite 或媒体复验不一致时才使用 `post_detail_repair_persistence_not_verified`。
 
 控制面产物位于：
 

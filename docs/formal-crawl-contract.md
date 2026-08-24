@@ -183,6 +183,16 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 `candidate_skipped`，根执行器仍必须从事件流聚合 `skipped_candidate_failures`；正式摘要保留
 `runtime_failed`，checkpoint 只采用最后一个完整分页批次，不因已记录跳过候选回卷，也不得越过未完成
 尾批。refresh 阶段记录的跳过候选同样进入 seen，不把深层前沿改成第 1 页。
+
+历史详情修复不写 discovery 事件或 seen，但必须提供同等可审计的逐目标失败证据。通用修复 child 以
+冻结目标集合减去最终正式有效集合生成 `skipped_candidate_failures`，至少保存平台、平台帖子 ID、
+稳定错误码、失败范围、当前轮实际目标尝试次数和 `evidence_source`；平台子进程没有暴露更细错误时使用
+`repair_target_no_valid_output` 与 `repair_target_output_difference`，不得伪造详情或图片错误原因。
+`repair_import_met=true` 只允许已经通过全部字段、图片和行为门禁的成功子集入库；只有冻结目标全部有效、
+失败清单为空时 `completion_met=true`。父入口必须再次按 SQLite 状态计算恢复数与残留数，并汇总
+`candidate_failure_count`；整轮零恢复且没有运行级或持久化阻断时使用
+`post_detail_repair_no_progress`，不得误报为 `post_detail_repair_persistence_not_verified`。
+
 分页证据为 `runtime_failed`、`login_required`、`captcha_detected`，或本轮任一目标 child 未成功完成时，
 运行失败门禁必须覆盖已经达到的数量目标：`completion_met=false`，不得晋升图片或进入 SQLite 事务。
 组合门禁失败时也必须保留这一优先级：已有 `runtime_failed`、`login_required` 或

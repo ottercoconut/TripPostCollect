@@ -1915,6 +1915,7 @@ PAGINATION_EVENT_FIELDS = (
 SKIPPED_CANDIDATE_EVENT_FIELDS = (
     "platform",
     "identity",
+    "platform_post_id",
     "failure_scope",
     "detail",
     "error_code",
@@ -2204,6 +2205,84 @@ def xhs_repair_pagination_evidence(
     }
 
 
+def post_repair_pagination_evidence(
+    targets: list[dict[str, Any]],
+    *,
+    platform: str,
+    successful_identities: set[str],
+    materialization_failures: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Describe every explicit generic repair target as recovered or skipped."""
+
+    target_ids = {
+        str(target.get("platform_post_id") or "")
+        for target in targets
+        if str(target.get("platform_post_id") or "")
+    }
+    successful_ids = {
+        identity.rsplit(":id:", 1)[-1]
+        for identity in successful_identities
+        if identity.startswith(f"{platform}:id:")
+    } & target_ids
+    failure_by_id: dict[str, dict[str, Any]] = {}
+    for failure in materialization_failures or []:
+        identity = str(failure.get("identity") or "")
+        post_id = identity.rsplit(":id:", 1)[-1] if ":id:" in identity else identity
+        if post_id:
+            failure_by_id[post_id] = failure
+
+    failures: list[dict[str, Any]] = []
+    for target in targets:
+        post_id = str(target.get("platform_post_id") or "")
+        if not post_id or post_id in successful_ids:
+            continue
+        materialization_failure = failure_by_id.get(post_id) or {}
+        error_code = str(
+            materialization_failure.get("error_code")
+            or materialization_failure.get("code")
+            or "repair_target_no_valid_output"
+        )
+        detail = str(
+            materialization_failure.get("detail")
+            or materialization_failure.get("message")
+            or "explicit repair target produced no formally valid persisted detail record"
+        )
+        failure_scope = str(
+            materialization_failure.get("failure_scope")
+            or ("image" if materialization_failure else "post")
+        )
+        failures.append(
+            {
+                "platform": platform,
+                "identity": f"{platform}:id:{post_id}",
+                "platform_post_id": post_id,
+                "failure_scope": failure_scope,
+                "detail": detail,
+                "error_code": error_code,
+                "retryable": bool(materialization_failure.get("retryable", False)),
+                "attempts": max(1, int(materialization_failure.get("attempts") or 1)),
+                "source_index": materialization_failure.get("source_index"),
+                "terminal_for_run": True,
+                "evidence_source": (
+                    "image_materialization"
+                    if materialization_failure
+                    else "repair_target_output_difference"
+                ),
+            }
+        )
+    return {
+        "available": True,
+        "stopped": True,
+        "stop_reason": "repair_targets_processed",
+        "stop_detail": "specified_detail_targets",
+        "candidate_count": len(targets),
+        "batches": [],
+        "successful_candidate_count": len(successful_ids),
+        "skipped_candidate_count": len(failures),
+        "skipped_candidate_failures": failures,
+    }
+
+
 def attach_skipped_candidate_evidence(
     image_materialization: dict[str, Any],
     pagination_evidence: dict[str, Any],
@@ -2406,17 +2485,30 @@ def collect_formal_records(
         if completion_mode == "source-exhausted"
         else new_target_met
     ) and not pagination_runtime_blocked and not pagination_incomplete
+    repair_import_met = False
     if repair_mode:
         new_target_met = bool(selected)
-        completion_met = bool(selected) and not pagination_runtime_blocked and not pagination_incomplete
+        repair_import_met = (
+            bool(selected)
+            and not pagination_runtime_blocked
+            and not pagination_incomplete
+        )
+        completion_met = bool(
+            repair_import_met
+            and run_candidate_count > 0
+            and len(selected) == run_candidate_count
+            and skipped_candidate_count == 0
+        )
     if unverified_douyin_first_page_empty:
         stop_reason = "runtime_failed"
     elif pagination_runtime_blocked or pagination_incomplete:
         stop_reason = pagination_stop_reason
         if not stop_reason:
             stop_reason = "runtime_failed"
-    elif repair_mode and selected:
+    elif repair_mode and completion_met:
         stop_reason = "repair_targets_processed"
+    elif repair_mode and selected:
+        stop_reason = "repair_targets_partially_processed"
     elif repair_mode:
         stop_reason = "repair_no_valid_detail"
     elif (
@@ -2462,6 +2554,8 @@ def collect_formal_records(
         "skipped_candidate_failures": list(
             pagination_evidence.get("skipped_candidate_failures") or []
         ),
+        "repair_import_met": repair_import_met,
+        "all_repair_targets_valid": completion_met if repair_mode else None,
         "completion_met": completion_met,
         "local_images_required": require_local_images,
         "local_images_complete": (
@@ -5091,6 +5185,8 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
                 f"- 有效旧记录：`{validation.get('valid_existing_count', 0)}`（只更新，不计目标）",
                 f"- 有效新增目标达成：`{validation.get('new_target_met', False)}`",
                 f"- 来源耗尽达成：`{validation.get('source_exhausted_met', False)}`",
+                f"- 修复成功子集可入库：`{validation.get('repair_import_met', False)}`",
+                f"- 修复选中目标全部有效：`{validation.get('all_repair_targets_valid')}`",
                 f"- 本轮完成门禁达成：`{validation.get('completion_met', False)}`",
                 f"- 停止原因：`{validation.get('stop_reason', '')}`",
                 f"- 停止细节：`{validation.get('stop_detail', '')}`",
@@ -5173,6 +5269,9 @@ def apply_formal_completion_gates(
     gated = dict(validation)
     gated["content_new_target_met"] = bool(content_validation.get("new_target_met"))
     gated["content_completion_met"] = bool(content_validation.get("completion_met"))
+    gated["content_repair_import_met"] = bool(
+        content_validation.get("repair_import_met")
+    )
     gated["image_materialization_complete"] = bool(image_materialization.get("complete"))
     gated["behavior_evidence_ok"] = bool(behavior_validation.get("behavior_ok"))
     gated["policy_evidence_ok"] = bool(behavior_validation.get("policy_ok"))
@@ -5197,10 +5296,12 @@ def apply_formal_completion_gates(
     if download_images and not image_materialization.get("complete"):
         gated["new_target_met"] = False
         gated["completion_met"] = False
+        gated["repair_import_met"] = False
         gated["stop_reason"] = "image_materialization_incomplete"
     if not behavior_validation.get("ok"):
         gated["new_target_met"] = False
         gated["completion_met"] = False
+        gated["repair_import_met"] = False
         gated["stop_reason"] = (
             "behavior_evidence_failed"
             if not behavior_validation.get("behavior_ok")
@@ -5209,8 +5310,17 @@ def apply_formal_completion_gates(
     if runtime_stop_reason or not child_execution_ok:
         gated["new_target_met"] = False
         gated["completion_met"] = False
+        gated["repair_import_met"] = False
         gated["stop_reason"] = runtime_stop_reason or "runtime_failed"
     return gated
+
+
+def formal_import_gate_met(validation: dict[str, Any]) -> bool:
+    """Separate partial repair importability from full target completion."""
+
+    if validation.get("repair_mode"):
+        return bool(validation.get("repair_import_met"))
+    return bool(validation.get("completion_met"))
 
 
 def formal_image_promotion_allowed(
@@ -5219,7 +5329,7 @@ def formal_image_promotion_allowed(
     no_import: bool,
     validation: dict[str, Any],
 ) -> bool:
-    return bool(download_images and not no_import and validation.get("completion_met"))
+    return bool(download_images and not no_import and formal_import_gate_met(validation))
 
 
 def repair_partial_child_execution_allowed(
@@ -5622,16 +5732,11 @@ def main() -> int:
                 target_count=repair_target_count,
             )
             if args.xhs_repair
-            else {
-                "available": True,
-                "stopped": True,
-                "stop_reason": "repair_targets_processed",
-                "stop_detail": "specified_detail_targets",
-                "candidate_count": repair_target_count,
-                "batches": [],
-                "skipped_candidate_count": 0,
-                "skipped_candidate_failures": [],
-            }
+            else post_repair_pagination_evidence(
+                args.post_repair_targets,
+                platform=platforms[0],
+                successful_identities=set(),
+            )
         )
     else:
         pagination_evidence = load_pagination_evidence(
@@ -5652,6 +5757,27 @@ def main() -> int:
         repair_metadata_by_identity=repair_metadata_by_identity,
         repair_mode=repair_mode,
     )
+    if args.post_repair:
+        pagination_evidence = post_repair_pagination_evidence(
+            args.post_repair_targets,
+            platform=platforms[0],
+            successful_identities=set(content_validation.get("existing_identities") or []),
+        )
+        summary["pagination_evidence"] = pagination_evidence
+        content_validation, content_valid_records = collect_formal_records(
+            summary,
+            candidate_hard_limit=candidate_hard_limit,
+            target_new_posts=target_new_posts,
+            db_path=args.db,
+            pagination_evidence=pagination_evidence,
+            enforce_candidate_limit=(
+                args.completion_mode == "target-new-posts" and not bool(resume_info)
+            ),
+            completion_mode=args.completion_mode,
+            allowed_identities=repair_allowed_identities,
+            repair_metadata_by_identity=repair_metadata_by_identity,
+            repair_mode=True,
+        )
     materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}
     if args.download_images:
         (
@@ -5715,6 +5841,34 @@ def main() -> int:
             pagination_evidence,
         )
         validation, valid_records = content_validation, content_valid_records
+    if args.post_repair:
+        pagination_evidence = post_repair_pagination_evidence(
+            args.post_repair_targets,
+            platform=platforms[0],
+            successful_identities=set(validation.get("existing_identities") or []),
+            materialization_failures=list(image_materialization.get("failures") or []),
+        )
+        summary["pagination_evidence"] = pagination_evidence
+        image_materialization = attach_skipped_candidate_evidence(
+            image_materialization,
+            pagination_evidence,
+        )
+        validation, valid_records = collect_formal_records(
+            summary,
+            candidate_hard_limit=candidate_hard_limit,
+            target_new_posts=target_new_posts,
+            db_path=args.db,
+            pagination_evidence=pagination_evidence,
+            enforce_candidate_limit=(
+                args.completion_mode == "target-new-posts" and not bool(resume_info)
+            ),
+            completion_mode=args.completion_mode,
+            require_local_images=args.download_images,
+            localized_identities=(localized_identities if args.download_images else None),
+            allowed_identities=repair_allowed_identities,
+            repair_metadata_by_identity=repair_metadata_by_identity,
+            repair_mode=True,
+        )
     if repair_runtime_reason:
         validation = {**validation, "stop_reason": repair_runtime_reason}
     validation = apply_formal_completion_gates(
@@ -5785,7 +5939,7 @@ def main() -> int:
                     behavior_validation=behavior_validation,
                 ),
             )
-            if not validation["completion_met"]:
+            if not formal_import_gate_met(validation):
                 rolled_back = rollback_newly_promoted_images(
                     materialized_images_by_identity,
                     project_root=PROJECT_ROOT,
@@ -5806,7 +5960,7 @@ def main() -> int:
         summary["formal_validation"] = validation
         if args.no_import:
             summary["import_result"] = {"skipped": True, "reason": "no_import"}
-        elif not validation["completion_met"]:
+        elif not formal_import_gate_met(validation):
             summary["import_result"] = {
                 "skipped": True,
                 "reason": validation["stop_reason"],
@@ -5837,7 +5991,7 @@ def main() -> int:
         for key in ("processed_rows", "inserted_rows", "updated_rows")
     ) and not bool(import_result_value.get("reason"))
     summary["import_completion_met"] = bool(
-        validation["completion_met"]
+        formal_import_gate_met(validation)
         and (not image_materialization["required"] or image_materialization["complete"])
         and (
             args.no_import
