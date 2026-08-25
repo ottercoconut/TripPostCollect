@@ -796,7 +796,7 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
         return (
             {
                 "title": "new detail title",
-                "content": "完整正文",
+                    "content": "青岛完整正文",
                 "image_urls": ["https://example.test/new-detail.jpg"],
                 "opus": {"content": {"paragraphs": []}},
             },

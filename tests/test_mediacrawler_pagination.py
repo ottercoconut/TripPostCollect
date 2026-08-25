@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from importlib import import_module
 from pathlib import Path
@@ -26,7 +27,7 @@ def bilibili_record(post_id: str) -> dict:
         "content_type": "article",
         "title": f"title-{post_id}",
         "desc": "body",
-        "content_text": "detail body",
+        "content_text": "青岛 detail body",
         "content_detail_status": "detail_observed",
         "content_detail_source": "article_view_api",
         "content_images_detail_status": "detail_observed",
@@ -41,6 +42,71 @@ def bilibili_record(post_id: str) -> dict:
         "comment_count": 2,
         "view_count": 3,
     }
+
+
+def test_irrelevant_structural_record_is_selected_but_does_not_advance_target(
+    tmp_path: Path,
+) -> None:
+    record = bilibili_record("irrelevant")
+    record["title"] = "普通标题"
+    record["content_text"] = "普通正文"
+    record["source_keyword"] = "青岛旅游"
+    jsonl_path = tmp_path / "bili" / "jsonl" / "search_contents_2026-08-26.jsonl"
+    jsonl_path.parent.mkdir(parents=True)
+    jsonl_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    validation, selected = mediacrawler_crawl.collect_formal_records(
+        {
+            "keyword": "回退关键词",
+            "records": [{"output": {"jsonl_files": [str(jsonl_path)]}}],
+        },
+        candidate_hard_limit=10,
+        target_new_posts=1,
+        db_path=tmp_path / "missing.sqlite",
+        pagination_evidence={
+            "stopped": True,
+            "stop_reason": "source_exhausted",
+            "stop_detail": "empty_page",
+            "candidate_count": 1,
+            "candidate_identities": ["irrelevant"],
+        },
+        completion_mode="source-exhausted",
+    )
+
+    assert len(selected) == 1
+    assert selected[0]["topic_relevant"] is False
+    assert validation["valid_new_count"] == 0
+    assert validation["topic_irrelevant_new_count"] == 1
+    assert validation["source_exhausted_met"] is True
+    assert validation["completion_met"] is True
+
+
+def test_import_reports_related_and_unrelated_atomic_counts(tmp_path: Path) -> None:
+    relevant = bilibili_record("relevant-import")
+    irrelevant = bilibili_record("irrelevant-import")
+    irrelevant["title"] = "普通标题"
+    irrelevant["content_text"] = "普通正文"
+    irrelevant["source_keyword"] = "青岛旅游"
+    result = mediacrawler_crawl.import_valid_records(
+        {
+            "captured_at": "2026-08-26T00:00:00+08:00",
+            "keyword": "青岛旅游",
+            "batch_dir": str(tmp_path),
+        },
+        [
+            {"platform": "bilibili", "record": relevant},
+            {"platform": "bilibili", "record": irrelevant},
+        ],
+        tmp_path / "posts.sqlite",
+    )
+
+    assert result["inserted_rows"] == 2
+    assert result["topic_relevant_inserted_rows"] == 1
+    assert result["topic_irrelevant_inserted_rows"] == 1
+    with sqlite3.connect(tmp_path / "posts.sqlite") as conn:
+        assert conn.execute(
+            "SELECT GROUP_CONCAT(topic_relevant, '') FROM web_posts ORDER BY platform_post_id"
+        ).fetchone()[0] in {"01", "10"}
 
 
 def test_unfinished_pagination_is_not_reported_as_source_exhausted(tmp_path: Path) -> None:

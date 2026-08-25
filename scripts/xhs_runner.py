@@ -800,7 +800,12 @@ def main() -> int:
                             and image_persistence["ok"]
                             and (
                                 args.completion_mode == "source-exhausted"
-                                or int(import_result.get("inserted_rows") or 0)
+                                or int(
+                                    import_result.get(
+                                        "topic_relevant_inserted_rows"
+                                    )
+                                    or 0
+                                )
                                 >= int(target["target_new_posts"])
                             )
                         )

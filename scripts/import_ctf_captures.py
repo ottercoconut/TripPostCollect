@@ -15,6 +15,7 @@ from typing import Any
 from trippostcollect.core.paths import DEFAULT_DB, OUTPUTS_ROOT, PROJECT_ROOT, ensure_parent
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.records.sanitization import sanitize_author_avatar_data
+from trippostcollect.records.topic_relevance import is_topic_relevant
 
 
 ROOT = PROJECT_ROOT
@@ -488,6 +489,9 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
         "published_at": row.get("published_at"),
         "captured_at": row["captured_at"],
         "keyword": keyword,
+        "topic_relevant": int(
+            is_topic_relevant(title=title, content_text=content_text, keyword=keyword)
+        ),
         "content_text": content_text,
         "content_length": len(content_text),
         "post_likes_count": None,

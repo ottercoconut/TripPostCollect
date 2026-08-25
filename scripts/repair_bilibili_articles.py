@@ -37,6 +37,7 @@ from trippostcollect.core.paths import (
     ensure_dir,
     ensure_parent,
 )
+from trippostcollect.records.topic_relevance import is_topic_relevant
 
 
 UTC = timezone.utc
@@ -1063,7 +1064,8 @@ def apply_repaired_record(
             """
             UPDATE web_posts
             SET title=?, content_text=?, content_length=?, post_images_count=?,
-                raw_sample_json=?, status='captured', updated_at=datetime('now')
+                topic_relevant=?, raw_sample_json=?, status='captured',
+                updated_at=datetime('now')
             WHERE id=? AND platform_key='bilibili'
             """,
             (
@@ -1071,6 +1073,13 @@ def apply_repaired_record(
                 hydrated["content_text"],
                 len(str(hydrated["content_text"])),
                 len(detail_urls),
+                int(
+                    is_topic_relevant(
+                        title=hydrated.get("title"),
+                        content_text=hydrated["content_text"],
+                        keyword=target_row["keyword"],
+                    )
+                ),
                 json_text(hydrated),
                 web_post_id,
             ),

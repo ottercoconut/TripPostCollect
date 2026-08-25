@@ -52,6 +52,7 @@ POST_DETAIL_REPAIR_BACKUP_ROOT = DATA_ROOT / "backups" / "post_detail_repair"
 BILIBILI_REPAIR_RUNTIME_ROOT = RUNTIME_ROOT / "bilibili_article_repair"
 BILIBILI_REPAIR_BACKUP_ROOT = DATA_ROOT / "backups" / "bilibili_article_repair"
 AUTHOR_AVATAR_REMOVAL_BACKUP_ROOT = DATA_ROOT / "backups" / "author_avatar_removal"
+TOPIC_RELEVANCE_BACKUP_ROOT = DATA_ROOT / "backups" / "topic_relevance"
 
 BROWSER_PROFILE_ROOT = DATA_ROOT / "browser_profiles"
 BROWSER_STATE_ROOT = DATA_ROOT / "browser_state"

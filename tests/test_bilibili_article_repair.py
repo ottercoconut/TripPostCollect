@@ -139,7 +139,7 @@ def fake_detail(post_id: str, cookie_header: str):
     return (
         {
             "title": f"详情标题-{post_id}",
-            "content": f"第一段完整正文-{post_id}\n第二段完整正文",
+            "content": f"第一段完整正文-{post_id}\n第二段青岛完整正文",
             "image_urls": [f"https://example.test/detail-{post_id}.jpg"],
             "opus": {"content": {"paragraphs": []}},
         },
@@ -427,7 +427,7 @@ def test_apply_updates_same_rows_and_is_idempotent(monkeypatch, tmp_path: Path) 
         rows = connection.execute(
             """
             SELECT platform_post_id, keyword, artifact_dir, content_text,
-                   post_images_count, capture_method,
+                   post_images_count, capture_method, topic_relevant,
                    json_extract(raw_sample_json, '$.content_detail_status')
             FROM web_posts ORDER BY id
             """
@@ -439,7 +439,7 @@ def test_apply_updates_same_rows_and_is_idempotent(monkeypatch, tmp_path: Path) 
     assert all(row[1] == "青岛旅游" for row in rows)
     assert all(row[2] == "/original/artifact" for row in rows)
     assert all(row[3].startswith("第一段完整正文") for row in rows)
-    assert all(row[4:] == (1, "import", "detail_observed") for row in rows)
+    assert all(row[4:] == (1, "import", 1, "detail_observed") for row in rows)
     assert images == [
         ("https://example.test/detail-1001.jpg",),
         ("https://example.test/detail-1002.jpg",),

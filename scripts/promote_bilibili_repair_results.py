@@ -313,7 +313,7 @@ def promote_successes(
                         """
                         UPDATE web_posts
                         SET title=?, content_text=?, content_length=?,
-                            post_images_count=?, raw_sample_json=?, status=?,
+                            post_images_count=?, topic_relevant=?, raw_sample_json=?, status=?,
                             updated_at=?
                         WHERE id=? AND platform_key='bilibili'
                         """,
@@ -322,6 +322,7 @@ def promote_successes(
                             staged_row["content_text"],
                             staged_row["content_length"],
                             staged_row["post_images_count"],
+                            staged_row["topic_relevant"],
                             staged_row["raw_sample_json"],
                             staged_row["status"],
                             staged_row["updated_at"],

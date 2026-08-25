@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS web_posts (
     published_at TEXT,
     captured_at TEXT NOT NULL,
     keyword TEXT,
+    topic_relevant INTEGER NOT NULL DEFAULT 0,
     content_text TEXT,
     content_length INTEGER NOT NULL DEFAULT 0,
     post_likes_count INTEGER,
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS web_posts (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     CHECK (capture_method IN ('scrapling', 'manual', 'import')),
+    CHECK (topic_relevant IN (0, 1)),
     CHECK (status IN ('captured', 'partial', 'failed', 'skipped'))
 );
 

@@ -722,6 +722,9 @@ def main() -> None:
     main_path = MEDIACRAWLER_ROOT / "main.py"
     if not main_path.is_file():
         raise RuntimeError(f"MediaCrawler main module is missing: {main_path}")
+    source_text = str(SOURCE_ROOT)
+    if source_text not in sys.path:
+        sys.path.insert(0, source_text)
     install_export_hook()
     install_xhs_repair_resilience()
     install_douyin_browser_detail_fallback()

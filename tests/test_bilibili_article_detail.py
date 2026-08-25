@@ -375,7 +375,7 @@ def test_detail_failure_is_recorded_seen_and_next_post_continues(monkeypatch, tm
         return (
             {
                 "title": "详情标题",
-                "content": "可用的完整正文",
+                    "content": "青岛可用的完整正文",
                 "image_urls": ["https://example.test/body.jpg"],
                 "opus": {"content": {"paragraphs": []}},
             },
@@ -466,7 +466,7 @@ def test_follower_failure_retries_then_records_skip_and_continues(
         lambda post_id, cookie_header: (
             {
                 "title": "详情标题",
-                "content": "可用的完整正文",
+                    "content": "青岛可用的完整正文",
                 "image_urls": ["https://example.test/body.jpg"],
                 "opus": {"content": {"paragraphs": []}},
             },

@@ -46,7 +46,7 @@ def search_item(post_id: str = "123") -> dict:
 def detail_payload() -> dict:
     return {
         "title": "详情标题",
-        "content": "第一段完整正文。\n图片\n第二段完整正文。",
+        "content": "第一段青岛完整正文。\n图片\n第二段完整正文。",
         "image_urls": ["https://cover.test/detail-cover.jpg"],
         "opus": {
             "content": {

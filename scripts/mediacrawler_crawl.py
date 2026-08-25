@@ -103,6 +103,10 @@ from trippostcollect.records.sanitization import (
     redact_author_avatar_text,
     sanitize_author_avatar_data,
 )
+from trippostcollect.records.topic_relevance import (
+    effective_source_keyword,
+    is_topic_relevant,
+)
 from trippostcollect.scheduler.discovery import (
     load_checkpoint,
     load_skipped_candidates,
@@ -1702,7 +1706,8 @@ def row_for_record(
     image_items = image_items_for_record(platform_key, record)
     if materialized_images is not None:
         image_items = inject_materialized_images(image_items, materialized_images)
-    keyword_value = str(record.get("source_keyword") or keyword or "")
+    keyword_value = effective_source_keyword(record, keyword)
+    title = first_value(record, "title")
     metrics = {
         "liked_count": parse_int(first_value(record, "liked_count", "voteup_count")),
         "favorites_count": parse_int(first_value(record, "collected_count", "video_favorite_count")),
@@ -1737,7 +1742,7 @@ def row_for_record(
         "source_type": "mediacrawler_search",
         "source_url": canonical_url or "",
         "canonical_url": canonical_url,
-        "title": first_value(record, "title"),
+        "title": title,
         "author_display_name": author["nickname"],
         "author_platform_id": author["creator_hash"],
         "author_profile_url": first_value(record, "author_profile_url", "user_link", "profile_url", "user_url"),
@@ -1751,6 +1756,13 @@ def row_for_record(
         "published_at": published_at_for_record(record),
         "captured_at": captured_at,
         "keyword": keyword_value,
+        "topic_relevant": int(
+            is_topic_relevant(
+                title=title,
+                content_text=content_text,
+                keyword=keyword_value,
+            )
+        ),
         "content_text": content_text,
         "content_length": len(content_text),
         "post_likes_count": metrics["liked_count"],
@@ -2346,6 +2358,10 @@ def collect_formal_records(
     existing_identities = load_existing_formal_identities(db_path)
     valid_new_count = 0
     valid_existing_count = 0
+    topic_relevant_new_count = 0
+    topic_relevant_existing_count = 0
+    topic_irrelevant_new_count = 0
+    topic_irrelevant_existing_count = 0
     reason_counts: Counter[str] = Counter()
     candidate_count = 0
     parse_errors = 0
@@ -2420,8 +2436,23 @@ def collect_formal_records(
                         formal_database_identities(platform_key, record)
                         & existing_identities
                     )
-                    valid_existing_count += int(is_existing)
-                    valid_new_count += int(not is_existing)
+                    effective_keyword = effective_source_keyword(
+                        record,
+                        summary.get("keyword"),
+                    )
+                    topic_relevant = is_topic_relevant(
+                        title=first_value(record, "title"),
+                        content_text=content_text_for_record(platform_key, record),
+                        keyword=effective_keyword,
+                    )
+                    if topic_relevant:
+                        valid_existing_count += int(is_existing)
+                        valid_new_count += int(not is_existing)
+                        topic_relevant_existing_count += int(is_existing)
+                        topic_relevant_new_count += int(not is_existing)
+                    else:
+                        topic_irrelevant_existing_count += int(is_existing)
+                        topic_irrelevant_new_count += int(not is_existing)
                     selected.append(
                         {
                             "platform": platform_key,
@@ -2430,6 +2461,7 @@ def collect_formal_records(
                             "source_path": str(path),
                             "line_number": line_number,
                             "is_new": not is_existing,
+                            "topic_relevant": topic_relevant,
                             "manifest_paths": list((output or {}).get("image_manifest_paths") or []),
                             "materialized_images": materialized.get(identity),
                         }
@@ -2546,6 +2578,10 @@ def collect_formal_records(
         "valid_new_count": valid_new_count,
         "valid_existing_count": valid_existing_count,
         "valid_total_count": len(selected),
+        "topic_relevant_new_count": topic_relevant_new_count,
+        "topic_relevant_existing_count": topic_relevant_existing_count,
+        "topic_irrelevant_new_count": topic_irrelevant_new_count,
+        "topic_irrelevant_existing_count": topic_irrelevant_existing_count,
         "new_target_met": new_target_met,
         "source_exhausted_met": source_exhausted_met,
         "pagination_runtime_blocked": pagination_runtime_blocked,
@@ -2573,6 +2609,16 @@ def collect_formal_records(
         "invalid_reason_counts": dict(sorted(reason_counts.items())),
         "new_identities": [item["identity"] for item in selected if item["is_new"]],
         "existing_identities": [item["identity"] for item in selected if not item["is_new"]],
+        "topic_relevant_new_identities": [
+            item["identity"]
+            for item in selected
+            if item["is_new"] and item["topic_relevant"]
+        ],
+        "topic_irrelevant_new_identities": [
+            item["identity"]
+            for item in selected
+            if item["is_new"] and not item["topic_relevant"]
+        ],
         "valid_new_samples": [
             {
                 "identity": item["identity"],
@@ -2580,7 +2626,7 @@ def collect_formal_records(
                 "line_number": item["line_number"],
             }
             for item in selected
-            if item["is_new"]
+            if item["is_new"] and item["topic_relevant"]
         ][:5],
         "valid_existing_samples": [
             {
@@ -2589,7 +2635,7 @@ def collect_formal_records(
                 "line_number": item["line_number"],
             }
             for item in selected
-            if not item["is_new"]
+            if not item["is_new"] and item["topic_relevant"]
         ][:5],
     }
     return validation_summary, selected
@@ -3337,6 +3383,8 @@ def import_valid_records(
     captured_at = str(summary.get("captured_at") or datetime.now(timezone.utc).isoformat(timespec="seconds"))
     keyword = str(summary.get("keyword") or "")
     processed = inserted = updated = 0
+    relevant_inserted = relevant_updated = 0
+    irrelevant_inserted = irrelevant_updated = 0
     conn = sqlite3.connect(db_path)
     commit_started = False
     try:
@@ -3363,6 +3411,11 @@ def import_valid_records(
             processed += 1
             inserted += int(was_inserted)
             updated += int(not was_inserted)
+            relevant = bool(row["topic_relevant"])
+            relevant_inserted += int(relevant and was_inserted)
+            relevant_updated += int(relevant and not was_inserted)
+            irrelevant_inserted += int(not relevant and was_inserted)
+            irrelevant_updated += int(not relevant and not was_inserted)
         commit_started = True
         commit_formal_import(conn)
     except BaseException as exc:
@@ -3378,6 +3431,10 @@ def import_valid_records(
         "processed_rows": processed,
         "inserted_rows": inserted,
         "updated_rows": updated,
+        "topic_relevant_inserted_rows": relevant_inserted,
+        "topic_relevant_updated_rows": relevant_updated,
+        "topic_irrelevant_inserted_rows": irrelevant_inserted,
+        "topic_irrelevant_updated_rows": irrelevant_updated,
         "skipped": 0,
         "skipped_video": 0,
         "parse_errors": 0,
@@ -3427,6 +3484,10 @@ def import_valid_records_with_media_rollback(
             "processed_rows": 0,
             "inserted_rows": 0,
             "updated_rows": 0,
+            "topic_relevant_inserted_rows": 0,
+            "topic_relevant_updated_rows": 0,
+            "topic_irrelevant_inserted_rows": 0,
+            "topic_irrelevant_updated_rows": 0,
             "skipped": len(selected),
             "skipped_video": 0,
             "parse_errors": 0,
@@ -4389,10 +4450,16 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     if validation["valid"]:
                         identity = str(validation["identity"])
                         valid_seen.add(identity)
-                        if formal_database_identities(platform_key, normalized) & existing_identities:
-                            valid_existing_count += 1
-                        else:
-                            valid_new_count += 1
+                        topic_relevant = is_topic_relevant(
+                            title=first_value(normalized, "title"),
+                            content_text=content_text_for_record(platform_key, normalized),
+                            keyword=effective_source_keyword(normalized, args.keyword),
+                        )
+                        if topic_relevant:
+                            if formal_database_identities(platform_key, normalized) & existing_identities:
+                                valid_existing_count += 1
+                            else:
+                                valid_new_count += 1
                     if not exhaustion_mode and (
                         candidate_count >= max_records or valid_new_count >= target_new
                     ):
@@ -5181,8 +5248,10 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
                 f"- 完成模式：`{validation.get('completion_mode', 'target-new-posts')}`",
                 f"- 数量与停滞停止门禁启用：`{validation.get('quantity_limits_enforced', True)}`",
                 f"- 实际候选：`{validation.get('candidate_count', 0)}` / 硬上限 `{validation.get('candidate_hard_limit', 0)}`",
-                f"- 有效新增图文：`{validation.get('valid_new_count', 0)}` / 目标 `{validation.get('target_new_posts', 0)}`",
-                f"- 有效旧记录：`{validation.get('valid_existing_count', 0)}`（只更新，不计目标）",
+                f"- 主题相关有效新增图文：`{validation.get('valid_new_count', 0)}` / 目标 `{validation.get('target_new_posts', 0)}`",
+                f"- 主题相关有效旧记录：`{validation.get('valid_existing_count', 0)}`（只更新，不计目标）",
+                f"- 主题不相关结构有效新增：`{validation.get('topic_irrelevant_new_count', 0)}`（入库审计，不计目标）",
+                f"- 主题不相关结构有效旧记录：`{validation.get('topic_irrelevant_existing_count', 0)}`",
                 f"- 有效新增目标达成：`{validation.get('new_target_met', False)}`",
                 f"- 来源耗尽达成：`{validation.get('source_exhausted_met', False)}`",
                 f"- 修复成功子集可入库：`{validation.get('repair_import_met', False)}`",
@@ -5245,6 +5314,8 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
                 f"- 处理行：`{import_result.get('processed_rows', 0)}`",
                 f"- 新增行：`{import_result.get('inserted_rows', 0)}`",
                 f"- 更新行：`{import_result.get('updated_rows', 0)}`",
+                f"- 相关新增/更新：`{import_result.get('topic_relevant_inserted_rows', 0)}` / `{import_result.get('topic_relevant_updated_rows', 0)}`",
+                f"- 不相关新增/更新：`{import_result.get('topic_irrelevant_inserted_rows', 0)}` / `{import_result.get('topic_irrelevant_updated_rows', 0)}`",
                 f"- 跳过记录：`{import_result.get('skipped', 0)}`",
                 f"- 跳过视频记录：`{import_result.get('skipped_video', 0)}`",
                 f"- 解析错误：`{import_result.get('parse_errors', 0)}`",
@@ -5967,6 +6038,10 @@ def main() -> int:
                 "processed_rows": 0,
                 "inserted_rows": 0,
                 "updated_rows": 0,
+                "topic_relevant_inserted_rows": 0,
+                "topic_relevant_updated_rows": 0,
+                "topic_irrelevant_inserted_rows": 0,
+                "topic_irrelevant_updated_rows": 0,
             }
         else:
             summary["import_result"] = import_valid_records_with_media_rollback(
@@ -5978,7 +6053,9 @@ def main() -> int:
                 project_root=PROJECT_ROOT,
                 media_root=media_root,
             )
-    inserted = int((summary.get("import_result") or {}).get("inserted_rows") or 0)
+    inserted = int(
+        (summary.get("import_result") or {}).get("topic_relevant_inserted_rows") or 0
+    )
     summary["target_new_posts"] = target_new_posts
     summary["completion_mode"] = args.completion_mode
     summary["import_new_target_met"] = (
