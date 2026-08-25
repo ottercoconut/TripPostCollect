@@ -19,60 +19,55 @@ mediacrawler_crawl = import_module("mediacrawler_crawl")
 
 
 @pytest.mark.parametrize(
-    ("title", "content", "keyword", "expected"),
+    ("content", "keyword", "expected"),
     [
-        ("青岛散步", "正文", "别的词", True),
-        ("标题", "去青岛看海", "别的词", True),
-        ("崂山攻略", "完整关键词在正文：崂山徒步攻略", "崂山徒步攻略", True),
-        ("ＡＢＣ  攻略", "正文", "abc 攻略", True),
-        ("标题", "正文", "", False),
-        ("标题", "正文", "青岛旅游", False),
-        ("青 岛", "正文", "", False),
+        ("去青岛看海", "别的词", True),
+        ("完整关键词在正文：崂山徒步攻略", "崂山徒步攻略", True),
+        ("正文包含 ＡＢＣ  攻略", "abc 攻略", True),
+        ("正文", "", False),
+        ("正文", "青岛旅游", False),
+        ("青 岛", "", False),
     ],
 )
 def test_topic_relevance_normalized_literal_matching(
-    title: str,
     content: str,
     keyword: str,
     expected: bool,
 ) -> None:
-    assert is_topic_relevant(title=title, content_text=content, keyword=keyword) is expected
+    assert is_topic_relevant(content_text=content, keyword=keyword) is expected
+
+
+def test_title_is_not_an_independent_topic_source() -> None:
+    assert is_topic_relevant(content_text="普通正文", keyword="青岛旅游") is False
 
 
 def test_raw_json_is_outside_classifier_inputs() -> None:
     raw_sample_json = '{"source_keyword":"青岛旅游"}'
     assert "青岛" in raw_sample_json
-    assert is_topic_relevant(title="普通标题", content_text="普通正文", keyword="") is False
+    assert is_topic_relevant(content_text="普通正文", keyword="") is False
 
 
 @pytest.mark.parametrize(
-    ("platform", "root_record", "child_title", "child_body"),
+    ("platform", "record", "expected_content_text", "expected"),
     [
-        ("bilibili", {"title": "普通", "content_text": "青岛正文"}, "普通", "青岛正文"),
-        ("weibo", {"content": "青岛正文"}, "", "青岛正文"),
-        ("douyin", {"title": "青岛标题", "desc": "正文"}, "青岛标题", "正文"),
-        ("xhs", {"title": "标题", "desc": "含崂山徒步"}, "标题", "含崂山徒步"),
-        ("zhihu", {"title": "标题", "content_text": "含崂山徒步"}, "标题", "含崂山徒步"),
+        ("bilibili", {"title": "普通", "content_text": "青岛正文"}, "青岛正文", True),
+        ("weibo", {"content": "青岛正文"}, "青岛正文", True),
+        ("douyin", {"title": "青岛标题", "desc": "正文"}, "正文", False),
+        ("xhs", {"title": "青岛标题", "desc": "正文"}, "青岛标题\n正文", True),
+        ("zhihu", {"title": "标题", "content_text": "含崂山徒步"}, "标题\n含崂山徒步", True),
     ],
 )
-def test_five_platform_child_projection_matches_root_classifier(
+def test_five_platform_web_post_content_projection_is_the_only_classifier_input(
     platform: str,
-    root_record: dict[str, str],
-    child_title: str,
-    child_body: str,
+    record: dict[str, str],
+    expected_content_text: str,
+    expected: bool,
 ) -> None:
     keyword = "崂山徒步"
-    root_result = is_topic_relevant(
-        title=root_record.get("title"),
-        content_text=mediacrawler_crawl.content_text_for_record(platform, root_record),
-        keyword=keyword,
-    )
-    child_result = is_topic_relevant(
-        title=child_title,
-        content_text=child_body,
-        keyword=keyword,
-    )
-    assert child_result is root_result
+    content_text = mediacrawler_crawl.content_text_for_record(platform, record)
+    assert content_text == mediacrawler_crawl.web_post_content_text(platform, record)
+    assert content_text == expected_content_text
+    assert is_topic_relevant(content_text=content_text, keyword=keyword) is expected
 
 
 def test_schema_v20_backfills_history_and_is_idempotent() -> None:
@@ -88,12 +83,12 @@ def test_schema_v20_backfills_history_and_is_idempotent() -> None:
         ) VALUES ('bilibili', ?, 'test', ?, ?, '2026-08-26T00:00:00+08:00', ?, 0, ?, ?, '{}', '{}', 'import', 'captured')
         """,
         [
-            ("relevant", "https://example.test/relevant", "青岛标题", "别的词", "正文", "{}"),
+            ("relevant", "https://example.test/relevant", "标题", "别的词", "青岛正文", "{}"),
             ("keyword", "https://example.test/keyword", "标题", "崂山徒步", "包含崂山徒步的正文", "{}"),
             (
                 "irrelevant",
                 "https://example.test/irrelevant",
-                "标题",
+                "青岛标题",
                 "青岛旅游",
                 "普通正文",
                 '{"source_keyword":"青岛旅游"}',

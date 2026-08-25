@@ -9,6 +9,13 @@ from typing import Any, Mapping
 
 _WHITESPACE_RE = re.compile(r"\s+")
 PRIMARY_TOPIC_LITERAL = "青岛"
+CONTENT_BODY_FIELDS = {
+    "bilibili": ("content_text", "content"),
+    "weibo": ("content_text", "content"),
+    "xhs": ("desc",),
+    "douyin": ("desc",),
+    "zhihu": ("content_text", "content"),
+}
 
 
 def normalize_topic_text(value: Any) -> str:
@@ -20,13 +27,12 @@ def normalize_topic_text(value: Any) -> str:
 
 def is_topic_relevant(
     *,
-    title: Any,
     content_text: Any,
     keyword: Any,
 ) -> bool:
-    """Return whether title/body contains Qingdao or the complete search keyword."""
+    """Classify only the exact text persisted as ``web_posts.content_text``."""
 
-    searchable = normalize_topic_text(f"{title or ''}\n{content_text or ''}")
+    searchable = normalize_topic_text(content_text)
     if normalize_topic_text(PRIMARY_TOPIC_LITERAL) in searchable:
         return True
     normalized_keyword = normalize_topic_text(keyword)
@@ -39,18 +45,15 @@ def effective_source_keyword(record: Mapping[str, Any], fallback_keyword: Any) -
     return str(record.get("source_keyword") or fallback_keyword or "")
 
 
-def topic_relevant_for_record(
-    record: Mapping[str, Any],
-    *,
-    content_text: Any,
-    fallback_keyword: Any,
-    title_keys: tuple[str, ...] = ("title",),
-) -> bool:
-    """Classify a crawler record using only its title and authoritative body."""
+def web_post_content_text(platform_key: str, record: Mapping[str, Any]) -> str:
+    """Project the exact authoritative text persisted to ``web_posts.content_text``."""
 
-    title = next((record.get(key) for key in title_keys if record.get(key)), "")
-    return is_topic_relevant(
-        title=title,
-        content_text=content_text,
-        keyword=effective_source_keyword(record, fallback_keyword),
+    fields = CONTENT_BODY_FIELDS.get(platform_key, ("content_text", "content"))
+    body = next(
+        (str(record.get(key)).strip() for key in fields if record.get(key) not in (None, "")),
+        "",
     )
+    if platform_key in {"xhs", "zhihu"}:
+        title = str(record.get("title") or "").strip()
+        return "\n".join(dict.fromkeys(part for part in (title, body) if part))
+    return body

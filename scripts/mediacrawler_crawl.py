@@ -104,8 +104,10 @@ from trippostcollect.records.sanitization import (
     sanitize_author_avatar_data,
 )
 from trippostcollect.records.topic_relevance import (
+    CONTENT_BODY_FIELDS,
     effective_source_keyword,
     is_topic_relevant,
+    web_post_content_text,
 )
 from trippostcollect.scheduler.discovery import (
     load_checkpoint,
@@ -234,13 +236,6 @@ TRUSTED_CONTENT_DETAIL_SOURCES = {
     "xhs": frozenset({"note_detail"}),
     "douyin": frozenset({"aweme_detail"}),
     "zhihu": frozenset({"search_content", "answer_detail", "article_detail"}),
-}
-CONTENT_BODY_FIELDS = {
-    "bilibili": ("content_text", "content"),
-    "weibo": ("content_text", "content"),
-    "xhs": ("desc",),
-    "douyin": ("desc",),
-    "zhihu": ("content_text", "content"),
 }
 FOLLOWERS_REQUIRED_PLATFORMS = frozenset(PLATFORMS)
 REQUIRED_FOLLOWER_SOURCES = {
@@ -1559,12 +1554,7 @@ def content_body_for_record(platform_key: str, record: dict[str, Any]) -> str:
 
 
 def content_text_for_record(platform_key: str, record: dict[str, Any]) -> str:
-    title = str(first_value(record, "title") or "").strip()
-    body = content_body_for_record(platform_key, record)
-    if platform_key in {"xhs", "zhihu"}:
-        parts = [part for part in (title, body) if part]
-        return "\n".join(dict.fromkeys(parts))
-    return body
+    return web_post_content_text(platform_key, record)
 
 
 def inject_materialized_images(
@@ -1758,7 +1748,6 @@ def row_for_record(
         "keyword": keyword_value,
         "topic_relevant": int(
             is_topic_relevant(
-                title=title,
                 content_text=content_text,
                 keyword=keyword_value,
             )
@@ -2441,7 +2430,6 @@ def collect_formal_records(
                         summary.get("keyword"),
                     )
                     topic_relevant = is_topic_relevant(
-                        title=first_value(record, "title"),
                         content_text=content_text_for_record(platform_key, record),
                         keyword=effective_keyword,
                     )
@@ -4451,7 +4439,6 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                         identity = str(validation["identity"])
                         valid_seen.add(identity)
                         topic_relevant = is_topic_relevant(
-                            title=first_value(normalized, "title"),
                             content_text=content_text_for_record(platform_key, normalized),
                             keyword=effective_source_keyword(normalized, args.keyword),
                         )
