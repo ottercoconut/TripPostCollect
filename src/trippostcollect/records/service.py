@@ -26,8 +26,8 @@ class RecordService:
             meta=result.meta,
         )
 
-    def list_keywords(self) -> list[dict[str, Any]]:
-        return self.repository.list_keywords()
+    def list_keywords(self, topic_scope: str = "relevant") -> list[dict[str, Any]]:
+        return self.repository.list_keywords(topic_scope)
 
     def get_record_detail(self, record_id: int) -> dict[str, Any] | None:
         record = self.repository.get_record(record_id)
@@ -84,6 +84,7 @@ class RecordService:
             "published_at": record.get("published_at"),
             "captured_at": record.get("captured_at"),
             "keyword": record.get("keyword"),
+            "topic_relevant": bool(record.get("topic_relevant")),
             "content_text": record.get("content_text"),
             "post_images_count": int(record.get("image_count") or record.get("post_images_count") or 0),
             "post_likes_count": record.get("post_likes_count"),

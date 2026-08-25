@@ -9,6 +9,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class RecordFilters:
+    topic_scope: str = "relevant"
     platform_key: str | None = None
     source_type: str | None = None
     status: str | None = None
@@ -97,15 +98,18 @@ class RecordRepository:
             },
         )
 
-    def list_keywords(self) -> list[dict[str, Any]]:
+    def list_keywords(self, topic_scope: str = "relevant") -> list[dict[str, Any]]:
+        topic_clause, topic_params = self._topic_scope(topic_scope)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT keyword, COUNT(*) AS record_count
             FROM web_posts
             WHERE keyword IS NOT NULL AND TRIM(keyword) <> ''
+              {topic_clause}
             GROUP BY keyword
             ORDER BY record_count DESC, keyword ASC
-            """
+            """,
+            topic_params,
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -165,6 +169,10 @@ class RecordRepository:
     def _where(self, filters: RecordFilters) -> tuple[str, list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
+        topic_clause, topic_params = self._topic_scope(filters.topic_scope, prefix="p.")
+        if topic_clause:
+            clauses.append(topic_clause.removeprefix("AND "))
+            params.extend(topic_params)
         self._add_equal(clauses, params, "p.platform_key", filters.platform_key)
         self._add_equal(clauses, params, "p.source_type", filters.source_type)
         self._add_equal(clauses, params, "p.status", filters.status)
@@ -196,6 +204,19 @@ class RecordRepository:
         if not clauses:
             return "", params
         return "WHERE " + " AND ".join(clauses), params
+
+    @staticmethod
+    def _topic_scope(
+        topic_scope: str,
+        *,
+        prefix: str = "",
+    ) -> tuple[str, list[Any]]:
+        if topic_scope == "all":
+            return "", []
+        if topic_scope not in {"relevant", "irrelevant"}:
+            raise ValueError(f"unsupported topic scope: {topic_scope}")
+        value = 1 if topic_scope == "relevant" else 0
+        return f"AND {prefix}topic_relevant = ?", [value]
 
     @staticmethod
     def _add_equal(clauses: list[str], params: list[Any], column: str, value: str | None) -> None:

@@ -25,6 +25,7 @@ import type { KeywordUsage, Meta, Platform, RecordContext, RecordRaw, RecordSumm
 type View = "records" | "quality" | "reports";
 
 const emptyFilters: RecordFilters = {
+  topic_scope: "relevant",
   platform_key: "",
   keyword: "",
   status: "",
@@ -63,7 +64,7 @@ export function App() {
       const [metaData, platformData, keywordData, recordsPayload, reportsData, gapsData, missingImages, missingPublished, missingFollowers] = await Promise.all([
         api.meta(),
         api.platforms(),
-        api.keywords(),
+        api.keywords(filters.topic_scope),
         api.records(filters),
         api.reports(),
         api.overviewGaps(),
@@ -77,7 +78,7 @@ export function App() {
       setRecords(recordsPayload.data);
       setRecordsMeta(recordsPayload.meta);
       setReports(reportsData);
-      setFieldGaps(gapsData);
+      setFieldGaps(gapsData as Record<string, number | null>);
       setQualityGroups({
         images: missingImages.data,
         published_at: missingPublished.data,
@@ -210,6 +211,23 @@ function RecordWorkbench(props: {
     <section className="content">
       <div className="filter-panel">
         <div className="filter-grid">
+          <Field label="主题范围">
+            <select
+              value={filters.topic_scope}
+              onChange={(event) =>
+                setFilters({
+                  ...filters,
+                  topic_scope: event.target.value as RecordFilters["topic_scope"],
+                  keyword: "",
+                  page: 1
+                })
+              }
+            >
+              <option value="relevant">相关</option>
+              <option value="irrelevant">不相关</option>
+              <option value="all">全部</option>
+            </select>
+          </Field>
           <Field label="平台">
             <select value={filters.platform_key} onChange={(event) => setFilters({ ...filters, platform_key: event.target.value, page: 1 })}>
               <option value="">全部平台</option>
@@ -342,7 +360,9 @@ function RecordWorkbench(props: {
                     <td className="platform-cell">{record.platform_name ?? record.platform_key}</td>
                     <td>
                       <div className="record-title">{record.title || record.content_text || record.source_url}</div>
-                      <div className="record-sub">{record.source_type}</div>
+                      <div className="record-sub">
+                        {record.source_type} · <TopicBadge relevant={record.topic_relevant} />
+                      </div>
                     </td>
                     <td>
                       <span className="keyword-tag" title={record.keyword || "无关键词"}>
@@ -494,6 +514,7 @@ function RecordDetailPage() {
                 <span>{record.platform_name ?? record.platform_key}</span>
                 <span>{formatDate(record.published_at)}</span>
                 <span>{record.status || "unknown"}</span>
+                <TopicBadge relevant={record.topic_relevant} />
               </div>
             </div>
             <div className="record-hero-stats">
@@ -646,6 +667,7 @@ function ContentPanel({ record }: { record: RecordSummary }) {
     <div className="content-panel">
       <div className="kv-grid">
         <KV label="关键词" value={record.keyword} />
+        <KV label="主题相关性" value={record.topic_relevant ? "相关" : "不相关"} />
         <KV label="发布时间" value={record.published_at} />
         <KV label="抓取时间" value={record.captured_at} />
         <KV wide label="来源 URL" value={record.canonical_url || record.source_url} />
@@ -708,6 +730,14 @@ function Metric(props: { label: string; value?: number | null }) {
       <div className="metric-value">{compactNumber(props.value)}</div>
       <div className="metric-label">{props.label}</div>
     </div>
+  );
+}
+
+function TopicBadge({ relevant }: { relevant: boolean }) {
+  return (
+    <span className={`tag ${relevant ? "green" : "amber"}`}>
+      {relevant ? "相关" : "不相关"}
+    </span>
   );
 }
 

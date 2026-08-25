@@ -115,7 +115,7 @@ class ReadonlyAdminApiTest(unittest.TestCase):
                     platform_key, source_capture_id, platform_post_id, source_type,
                     source_url, canonical_url, title, author_display_name,
                     author_platform_id, author_followers_count, published_at,
-                    captured_at, keyword, content_text, content_length,
+                    captured_at, keyword, topic_relevant, content_text, content_length,
                     post_likes_count, post_comments_count, post_images_count,
                     metrics_json, author_json, raw_sample_json, artifact_dir,
                     capture_method, status
@@ -124,7 +124,7 @@ class ReadonlyAdminApiTest(unittest.TestCase):
                     'https://example.test/opus/1', 'https://example.test/opus/1',
                     '青岛记录', '作者A', 'author-a', 42,
                     '2026-07-08T12:00:00+08:00', '2026-07-09T08:00:00+08:00',
-                    '青岛旅游', '正文内容', 4,
+                    '青岛旅游', 1, '正文内容', 4,
                     10, 2, 4, ?, ?, ?, ?,
                     'import', 'captured'
                 )
@@ -136,6 +136,20 @@ class ReadonlyAdminApiTest(unittest.TestCase):
                     json.dumps({"source": "test"}, ensure_ascii=False),
                     str(cls.root / "capture"),
                 ),
+            ).lastrowid
+            cls.irrelevant_post_id = conn.execute(
+                """
+                INSERT INTO web_posts (
+                    platform_key, platform_post_id, source_type, source_url, title,
+                    captured_at, keyword, topic_relevant, content_text, content_length,
+                    raw_sample_json, metrics_json, author_json, capture_method, status
+                ) VALUES (
+                    'bilibili', 'off-topic-1', 'mediacrawler',
+                    'https://example.test/off-topic-1', '普通记录',
+                    '2026-07-09T08:00:30+08:00', '青岛旅游', 0, '普通正文', 4,
+                    '{"source_keyword":"青岛旅游"}', '{}', '{}', 'import', 'captured'
+                )
+                """
             ).lastrowid
             cls.local_image_id = conn.execute(
                 """
@@ -217,11 +231,11 @@ class ReadonlyAdminApiTest(unittest.TestCase):
                 """
                 INSERT INTO web_posts (
                     platform_key, platform_post_id, source_type, source_url, title,
-                    captured_at, keyword, content_text, content_length,
+                    captured_at, keyword, topic_relevant, content_text, content_length,
                     raw_sample_json, metrics_json, author_json, capture_method, status
                 ) VALUES (
                     'weibo', 'wb-live', 'mediacrawler', 'https://example.test/wb-live', '新增记录',
-                    '2026-07-09T08:01:00+08:00', '青岛旅游', '新正文', 3,
+                    '2026-07-09T08:01:00+08:00', '青岛旅游', 1, '新正文', 3,
                     '{}', '{}', '{}', 'import', 'captured'
                 )
                 """
@@ -295,6 +309,12 @@ class ReadonlyAdminApiTest(unittest.TestCase):
         self.assertEqual(len(self.client.get("/api/scheduler/config").json()["data"]["jobs"]), configured_job_count)
         self.assertEqual(len(self.client.get("/api/scheduler/jobs").json()["data"]), configured_job_count)
 
+        overview = self.client.get("/api/overview/counts").json()["data"]
+        self.assertEqual(overview["records"], 1)
+        self.assertEqual(overview["topic_relevant_records"], 1)
+        self.assertEqual(overview["topic_irrelevant_records"], 1)
+        self.assertEqual(overview["all_records"], 2)
+
     def test_no_write_or_command_routes_and_no_command_execution(self) -> None:
         paths = self.app.openapi()["paths"]
         write_routes = [
@@ -320,6 +340,33 @@ class ReadonlyAdminApiTest(unittest.TestCase):
         for method_name in ["post", "patch", "delete"]:
             response = getattr(self.client, method_name)(f"/api/records/{self.post_id}")
             self.assertIn(response.status_code, {404, 405})
+
+    def test_topic_scope_defaults_filters_and_direct_detail(self) -> None:
+        relevant = self.client.get("/api/records").json()
+        irrelevant = self.client.get(
+            "/api/records", params={"topic_scope": "irrelevant"}
+        ).json()
+        all_records = self.client.get(
+            "/api/records", params={"topic_scope": "all"}
+        ).json()
+
+        self.assertEqual(relevant["meta"]["total"], 2)
+        self.assertEqual(irrelevant["meta"]["total"], 1)
+        self.assertEqual(all_records["meta"]["total"], 3)
+        self.assertTrue(all(item["topic_relevant"] for item in relevant["data"]))
+        self.assertFalse(irrelevant["data"][0]["topic_relevant"])
+
+        detail = self.client.get(f"/api/records/{self.irrelevant_post_id}")
+        self.assertEqual(detail.status_code, 200, detail.text)
+        self.assertFalse(detail.json()["data"]["record"]["topic_relevant"])
+
+        irrelevant_keywords = self.client.get(
+            "/api/records/keywords", params={"topic_scope": "irrelevant"}
+        ).json()["data"]
+        self.assertEqual(
+            irrelevant_keywords,
+            [{"keyword": "青岛旅游", "record_count": 1}],
+        )
 
 
 if __name__ == "__main__":

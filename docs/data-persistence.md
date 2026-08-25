@@ -55,9 +55,9 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 
 `web_posts` 不再建模城市。迁移 `13/remove_city_name` 使用旧库原有的 `city_name` 完成一次性历史
 数据清理，随后移除该列、城市索引和 `cities` 表；迁移 `14/configured_scheduler_scope` 删除不在
-当前配置中的历史调度任务。现行项目范围由操作人或 Agent 在计划冻结时核对；配置解析器、抓取器
-和导入器不按关键词文本设置硬门禁。“崂山攻略”等不含“青岛”字样但明确属于青岛范围的关键词
-可以正常入库。
+当前配置中的历史调度任务。现行项目范围由操作人或 Agent 在计划冻结时核对；配置解析器不按关键词
+前缀拒绝启动。“崂山攻略”等不含“青岛”字样但明确属于青岛范围的完整检索词，仍可由正文命中该
+完整词而标为相关；没有任何命中时记录仍正常入库但标为不相关。
 
 `crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates` 和
 `crawl_discovery_candidate_exclusions` 是 B站、微博、抖音和知乎正式搜索的控制面记忆，不是内容表。
@@ -69,7 +69,7 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 建立新前沿并把 checkpoint 恢复为 `active`。checkpoint 只能在 child 摘要形成后提交；诊断
 `--no-import` 不得更新它。内容仍只在
 完整目标达到后写入 `web_posts` / `web_post_images`。通用已完成处理候选表按 job 与查询指纹保存
-视频、有决定性证据的字段无效候选、有效候选，以及详情、作者或正文图在适用有限重试后仍失败并
+视频、有决定性证据的字段无效候选、结构有效候选（含主题不相关），以及详情、作者或正文图在适用有限重试后仍失败并
 形成 `candidate_skipped` 的候选 ID；它只用于发现去重，不把失败或无效候选变成内容记录。
 登录、授权、验证码、安全限制、账号/IP 封禁、频控、搜索请求或浏览器整体故障属于运行级失败，
 不得写入该表。只有操作人明确授权某个平台、job、查询指纹和候选 ID
@@ -79,6 +79,10 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 不能清空整张 seen 或 checkpoint 表。
 
 `web_posts` 是统一内容主表，面向用户查询和后续数据使用。`ctf_captures` 是证据和调试底座，面向程序脚本或 Agent 排查抓取过程。页面级抓取成功后，也会归一化生成 `web_posts` 行，并通过 `web_posts.source_capture_id` 关联对应 `ctf_captures.id`。
+
+schema v20 为 `web_posts` 增加失败关闭的
+`topic_relevant INTEGER NOT NULL DEFAULT 0 CHECK(topic_relevant IN (0,1))`。所有首方写入显式赋值；
+结构完整但不相关的帖子保留在主表供审计，默认用户查询只取 `topic_relevant=1`。
 
 `post_detail_repair_waivers` 是既有帖子历史详情修复的独立操作审计表。它以 `web_post_id` 唯一关联
 `web_posts`，只保存用户明确授权的放弃原因、授权主体、授权时间和短证据 JSON。该表不改变
@@ -94,8 +98,8 @@ schema migration `19/post_detail_repair_waivers` 记录该表已进入现行内�
 原文和加密密钥不写 SQLite。`xhs_discovery_checkpoints` 按目标、账号和查询指纹保存下一安全页、
 该深层搜索的 `search_id`、耗尽状态、停止原因和未完成累计摘要路径；它不保存 Cookie，也不跨
 账号共享未入库活动。`xhs_discovery_seen_candidates` 在相同作用域保存已经完成处理的笔记 ID，
-包括因视频或正式字段不足而不进入累计摘要的候选，避免它们跨轮反复触发详情和作者请求。
-小红书有效图文仍写入 `web_posts` / `web_post_images`。
+包括因视频或正式字段不足而不进入累计摘要的候选，以及结构有效但主题不相关的候选，避免它们跨轮
+反复触发详情和作者请求。小红书全部结构有效图文仍写入 `web_posts` / `web_post_images`。
 
 小红书 checkpoint 与通用表遵守同一提交边界：只有 child `summary.json` 已形成且含分页证据时，
 `xhs_runner.py` 才在同一事务提交前沿与已处理候选 ID；未达到目标时 `last_summary_path` 指向
@@ -122,7 +126,8 @@ checkpoint、seen 与 campaign 更新。摘要或其 JSONL 缺失时冻结失败
 按 SHA-256 保留首次来源并记录重复来源证据。任何图片失败都使该整帖失去正式资格。有限重试耗尽后
 的 `image_download_retryable` 与格式、解码、大小或 HTTP 400/404 等候选自身终态错误，都在写完 manifest
 与 `candidate_skipped(failure_scope=image)` 后继续其他候选；终态错误保留 `retryable=false` 且不补做
-无意义请求。跳过候选不进入正式有效集合、不增加新增数，但不会阻断后续数量完成或真实来源耗尽。
+无意义请求。跳过候选不进入结构有效集合、不增加新增数，但不会阻断后续数量完成或真实来源耗尽。
+结构有效但主题不相关的记录不是跳过：它照常保存、进入 seen 和 checkpoint，只是不增加目标计数。
 HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁或频控信号必须形成运行级阻断，
 不能写 `candidate_skipped`。分页证据或任一 child 表明 `runtime_failed`、登录或验证码阻断时，即使有效新增数已经达到目标，也必须
 保持 `completion_met=false`，不得晋升或入库；运行失败优先于数量完成，也不得被图片、行为或策略
@@ -150,6 +155,7 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 | `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎搜索结果 `author.follower_count` 归一后的 `followers_count` |
 | `published_at` | 发帖时间，统一保存为 Asia/Shanghai ISO 字符串，如 `2024-04-06T15:35:00+08:00`。优先取平台原始发布时间字段，如 `create_time`、`publish_time`、`time`、`datePublished`；`captured_at` 只表示本项目抓取时间 |
 | `keyword` | 优先保存每条记录的 `source_keyword`；缺失时回退到最终执行摘要的 `keyword`，即本次 child 命令实际使用的检索词。当前通用结构化 store 会逐条写入 `source_keyword`；自动 checkpoint 延续同一查询词，显式 `--recovery-keyword` 才会产生恢复词。旧记录缺少该字段时，回退值不能作为其原始检索词证据 |
+| `topic_relevant` | 使用与 `keyword` 相同的实际检索词，仅检查 `title +` 权威 `content_text`。Unicode NFKC、大小写和空白归一后包含“青岛”或完整检索词为 1，否则为 0；不扫描 raw JSON、作者、URL 或其他元数据 |
 | `post_likes_count` | `liked_count`、知乎 `voteup_count` |
 | `post_favorites_count` | `collected_count` 等收藏字段 |
 | `post_comments_count` | `comment_count`、`comments_count` 等评论字段 |
@@ -175,13 +181,20 @@ schema v18 删除 `web_posts.author_avatar_url`，并把 `web_post_images.image_
 `outputs/database_migrations/<run_id>/author_avatar_removal.json`。既有历史备份与运行产物只报告残留，
 不由该命令删除或改写。
 
+schema v20 `topic_relevance` 在单一事务中回填所有历史帖子并建立默认筛选索引；重复执行只报告现有
+分布，不重复改写。迁移不改变帖子总数、图片关系、媒体文件、正文或作者字段，并报告总量以及平台、
+关键词的相关/不相关分布。先在临时库运行
+`python scripts/migrate_topic_relevance.py --db <临时库> --dry-run`；正式迁移必须另行授权，命令会先在
+`data/backups/topic_relevance/<run_id>/` 建 SQLite 一致性备份，再提交并把报告写到
+`outputs/database_migrations/<run_id>/topic_relevance.json`。
+
 显式使用 `--recovery-keyword` 人工续跑时，最终摘要会合并旧、新两轮记录，
 正常记录的 `web_posts.keyword` 会逐条保存真实来源，因此同一个最终 `artifact_dir` 可以同时
 出现原关键词和恢复关键词。若旧记录缺少 `source_keyword`，必须结合原摘要和 JSONL 审计，
 不能把回退到最终摘要的值解释成原始检索词。
 
-系统不再保存 `city_name`，也不做城市别名解析、关键词硬门禁或正文地名推断。项目范围以该轮
-冻结的任务配置和操作审计为准。
+系统不再保存 `city_name`，也不做城市别名解析、分词或正文地理推断；主题标记只按上文的两个完整
+字符串包含规则计算。项目范围仍以该轮冻结的任务配置和操作审计为准。
 原正式任务意图以该轮冻结 execution state 的 `plan.job_params`、
 `plan.command` 和递归 resume 摘要链为准；`crawl_jobs` 当前值只用于核对现行调度配置，不能
 单独证明历史轮次意图，也不能仅用内容行的 `keyword` 反推整轮唯一任务关键词。
@@ -205,6 +218,8 @@ B站还要按本轮 `artifact_dir` 检查 `raw_sample_json.content_detail_status
     "candidate_count": 80,
     "valid_new_count": 50,
     "valid_existing_count": 15,
+    "topic_relevant_new_count": 50,
+    "topic_irrelevant_new_count": 6,
     "new_target_met": true,
     "stop_reason": "target_new_met",
     "image_materialization_complete": true
@@ -212,8 +227,8 @@ B站还要按本轮 `artifact_dir` 检查 `raw_sample_json.content_detail_status
   "image_materialization": {
     "required": true,
     "promotion_required": true,
-    "candidate_posts": 65,
-    "complete_posts": 65,
+    "candidate_posts": 71,
+    "complete_posts": 71,
     "expected_images": 240,
     "downloaded_images": 240,
     "validated_images": 240,
@@ -239,9 +254,13 @@ B站还要按本轮 `artifact_dir` 检查 `raw_sample_json.content_detail_status
   },
   "import_result": {
     "db": "data/trippostcollect.sqlite",
-    "processed_rows": 65,
-    "inserted_rows": 50,
-    "updated_rows": 15
+    "processed_rows": 71,
+    "inserted_rows": 56,
+    "updated_rows": 15,
+    "topic_relevant_inserted_rows": 50,
+    "topic_relevant_updated_rows": 15,
+    "topic_irrelevant_inserted_rows": 6,
+    "topic_irrelevant_updated_rows": 0
   }
 }
 ```

@@ -18,9 +18,10 @@ config/crawl_targets.json
           -> scripts/mediacrawler_behavior.py
           -> tools/MediaCrawler 或项目自有 B站 article 分支
           -> 共享头像清除器（失败关闭）
+          -> 共享主题相关性分类（只读标题 + 权威正文 + 实际关键词）
           -> JSONL + image_manifest.jsonl + staging 图片
           -> 根项目字段、manifest 和字节复验
-          -> data/media + SQLite 批次事务
+          -> data/media + SQLite 批次事务（全部结构有效记录）
 
 config/xhs_pool.json + config/xhs_targets.json
   -> scripts/xhs_runner.py
@@ -35,8 +36,9 @@ config/xhs_pool.json + config/xhs_targets.json
 runner 负责选择任务、冻结计划、调用 child、验证产物、持久化和生成报告。child 只负责平台会话、
 发现、字段补全与 staging，不能独立宣布正式任务完成。
 
-青岛主题由操作人在配置和执行前确认。配置解析、抓取、导入和数据库不按关键词或正文地名增加
-城市硬门禁，也不恢复 `web_posts.city_name`。
+青岛主题由操作人在配置和执行前确认。配置解析不按关键词前缀拒绝启动，也不恢复
+`web_posts.city_name`；child 与根执行器共享主题分类纯函数，结构有效记录无论相关性均入库，只有
+标题或权威正文包含“青岛”或实际完整关键词的新增记录推动数量目标。
 
 ## 正式生命周期
 
@@ -51,6 +53,7 @@ runner 负责选择任务、冻结计划、调用 child、验证产物、持久�
   -> 头像清除器（失败关闭）
   -> child JSONL、分页事件、manifest 与 staging
   -> 根项目正式字段和本地图片只读复验
+  -> 根项目复算 topic_relevant，相关新增满足数量或确认来源耗尽
   -> 完成模式与运行状态门禁
   -> 长期媒体晋升
   -> SQLite 整批事务
@@ -105,7 +108,8 @@ runner 在进入下一阶段前重新读取状态并校验冻结输入。dry-run
 通用控制面使用：
 
 - `crawl_discovery_checkpoints` 保存 job 与查询指纹作用域内的安全深层前沿；
-- `crawl_discovery_seen_candidates` 保存已有决定性处理结果的候选 ID；
+- `crawl_discovery_seen_candidates` 保存已有决定性处理结果的候选 ID，包括主题不相关但结构有效且已
+  形成 JSONL 的记录；相关性为 false 不产生 `candidate_skipped`；
 - `crawl_discovery_candidate_exclusions` 保存操作人明确授权的精确排除。
 
 小红书使用独立的 `xhs_discovery_checkpoints` 和 `xhs_discovery_seen_candidates`，并额外按人工选择的

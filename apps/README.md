@@ -17,6 +17,8 @@
 ## 产品边界
 
 - 以 `web_posts` 为内容主表，以 `web_post_images` 为正文图片子表。
+- 记录工作台默认只显示 `topic_relevant=true`；“相关 / 不相关 / 全部”筛选用于审计，列表和详情均
+  显示相关性徽标，按 ID 直接打开不相关记录仍可用。
 - 作者头像不属于管理端数据契约；列表计数、详情列表和图片代理只读取 `image_role=content`，旧的
   `page` 或头像关系 ID 不能通过正文图片代理访问。
 - `ctf_captures` 作为页面证据与调试上下文展示；`ctf_capture_images` 仅兼容读取历史证据，现行页面
@@ -114,10 +116,10 @@ Compose 会把数据库和配置解析为宿主机绝对路径，再以只读方
 | 前缀 | 内容 |
 |---|---|
 | `/api/health`、`/api/meta` | 服务、数据库和运行元数据 |
-| `/api/records` | 记录列表、已使用关键词聚合、详情上下文和原始字段 |
+| `/api/records` | 记录列表、已使用关键词聚合、详情上下文和原始字段；列表与关键词支持 `topic_scope=relevant|irrelevant|all`，默认 `relevant` |
 | `/api/images` | 仅限 `image_role=content` 的正文图片代理 |
 | `/api/captures` | 页面证据、证据图片和白名单 artifact |
-| `/api/overview` | 计数、字段缺口和近期运行 |
+| `/api/overview` | 计数、字段缺口和近期运行；默认质量口径为相关记录，counts 同时公开相关、不相关和全部总数 |
 | `/api/platforms` | 平台元数据 |
 | `/api/scheduler` | 配置、任务和运行报告的只读视图 |
 | `/api/maintenance/schema-status` | schema 状态检查 |

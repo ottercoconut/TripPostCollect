@@ -23,9 +23,12 @@
 证据任务时，应确认关键词与青岛相关，通常使用“青岛…”或“崂山…”。平台 registry 的诊断默认面
 和带回跳参数的登录落点使用青岛检索面；纯登录页本身不承担主题表达。
 
-主题范围是操作约定，不是配置解析器、抓取器或导入器中的关键词硬门禁。代码不根据关键词前缀、
-包含关系或正文地名拒绝执行，也不恢复 `web_posts.city_name`。平台检索可能返回噪声，保留与否仍
-服从正式字段、图文类型和来源证据门禁；固定 URL 页面证据由操作人确认 URL 与所声明主题相符。
+主题范围不是配置解析器的启动硬门禁，代码不根据关键词前缀拒绝执行，也不恢复
+`web_posts.city_name`。平台检索噪声在结构校验之后统一标记：仅检查标题与权威
+`content_text`，经 Unicode NFKC、大小写和空白归一后，包含“青岛”或该记录实际完整检索词即
+`topic_relevant=true`，否则为 `false`。不得扫描 `raw_sample_json`、作者、URL 或其他元数据，
+也不做分词、同义词、城市别名或地理推断。不相关的结构完整记录仍保留入库供审计，但不增加数量
+目标；固定 URL 页面证据同样显式计算该标记。
 
 ## 唯一入口
 
@@ -39,7 +42,7 @@
 
 任何入口使用 `--no-import` 都是诊断运行。即使摘要或冻结状态因执行与产物校验通过而显示
 `completed`，没有执行真实 SQLite 持久化就不满足正式完成契约。默认数量模式必须核对实际
-`inserted_rows` 达标；显式来源耗尽模式允许 `inserted_rows=0`，但仍须核对持久化阶段完成和实际
+`topic_relevant_inserted_rows` 达标；显式来源耗尽模式允许相关新增为 0，但仍须核对持久化阶段完成和实际
 计数。不得用 `import_new_target_met`、退出码或状态文件替代对应校验。
 
 五个平台的正式结构化 child 命令必须由 runner 固定注入 `--download-images` 和
@@ -100,15 +103,21 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 - `candidate_hard_limit`：单次 child 执行允许进入字段校验的未知原始候选上限，不是跨多次
   续跑活动的总预算，也不是底层请求参数的同义词。数据库、当前累计摘要、对应平台的持久候选
   记忆表或本次已见集合中已知的平台 ID 会在详情、作者补全和媒体处理前跳过，不消耗该预算。
-- `target_new_posts`：正常默认模式下，本轮必须取得并实际新增到 SQLite 的唯一有效图文数。
+- `target_new_posts`：正常默认模式下，本轮必须取得并实际新增到 SQLite 的唯一、结构有效且
+  `topic_relevant=true` 的图文数。
 - `valid_new_count`：完成视频过滤、平台 ID 去重、必需字段校验和作者字段补全后，且
-  SQLite 中不存在相同平台 ID（缺失时按规范 URL）的记录数。
-- `valid_existing_count`：本次产物中完成字段校验、但 SQLite 已有对应记录的数量；它们不计入
+  主题相关、SQLite 中不存在相同平台 ID（缺失时按规范 URL）的记录数。它等于
+  `topic_relevant_new_count`，继续保留为数量完成的稳定字段。
+- `valid_existing_count`：本次产物中完成字段校验、主题相关、但 SQLite 已有对应记录的数量；它们不计入
   `target_new_posts`。发现阶段提前识别并跳过的已知 ID 不进入本计数。
+- `topic_irrelevant_new_count` / `topic_irrelevant_existing_count`：结构完整但主题不相关的新增/既有
+  记录数；它们进入正式入库集合但不推动目标。
 - `processed_rows`：执行过入库 upsert 的行数，不表示新增数或有效数。
 - `inserted_rows` / `updated_rows`：数据库新增和更新数量，必须分别报告。
   `updated_rows` 表示相同平台 ID（缺失时用规范 URL）已存在，本轮用最新字段覆盖该行并
   重建其图片关系；它不是额外新增记录，也不表示平台内容一定发生过编辑。
+- `topic_relevant_inserted_rows` / `topic_relevant_updated_rows` 与对应的
+  `topic_irrelevant_*` 字段：实际事务结果的主题分项。数量模式只用相关 inserted 分项验收。
 
 候选累计从 0 开始，按平台实际分页逐个增加。正常默认模式在达到 `target_new_posts`、来源明确
 耗尽、连续停滞、运行超时或触及 `candidate_hard_limit` 时停止；临时 `source-exhausted` 模式忽略
@@ -119,7 +128,7 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 但必须通过新的 dry-run 冻结并核对实际计划。
 
 正常默认模式只有 `valid_new_count >= target_new_posts` 才能进入入库阶段，并且实际
-`inserted_rows >= target_new_posts` 才能标记 `import_new_target_met=true`。显式
+`topic_relevant_inserted_rows >= target_new_posts` 才能标记 `import_new_target_met=true`。显式
 `source-exhausted` 模式只有 `formal_validation.source_exhausted_met=true` 才进入入库；此时新增数
 可以低于目标甚至为 0，`new_target_met` / `import_new_target_met` 不作为完成门禁，但仍必须真实执行
 持久化阶段并分别报告处理、新增和更新。任何模式都不能用退出码、`processed_rows`、
@@ -127,7 +136,7 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 
 ## 有效记录
 
-结构化图文记录至少满足：
+结构有效与主题相关是两个独立判断。结构化图文记录至少满足：
 
 - 有平台原始 ID 或规范 URL，且本轮唯一；
 - 不是视频记录；
@@ -137,6 +146,10 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 - 有作者平台 ID 和作者昵称；
 - 有至少一个正文图片 URL；
 - 满足任务配置指定的作者粉丝量策略和平台字段 profile。
+
+结构有效记录无论主题标记真假都保留正文、作者、图片和事务门禁并进入正式入库集合。
+`topic_relevant=false` 不是失败，不得写 `candidate_skipped`；五个平台 child 必须使用与根校验相同的
+纯函数，仅以“结构有效且主题相关”驱动 adaptive accumulator 的有效新增数。
 
 “正文图片”只能由以下平台权威字段显式投影，顺序去重后每项角色固定为 `content`：B站详情
 `image_urls`、微博 `mblog.pics` 归一后的 `image_list`、小红书笔记详情 `image_list`、抖音图文
@@ -311,7 +324,8 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 通用平台在昂贵处理前跳过 `web_posts` 已有 ID、累计摘要中的有效 ID、
 `crawl_discovery_seen_candidates` 已完成处理 ID、`crawl_discovery_candidate_exclusions` 中经操作人
 明确授权的 ID 和当前 child 已完成 ID；小红书读取独立的
-`xhs_discovery_seen_candidates`。五个平台的视频、已由决定性权威响应证明的字段无效项、有效候选，
+`xhs_discovery_seen_candidates`。五个平台的视频、已由决定性权威响应证明的字段无效项、结构有效候选
+（包括主题不相关记录），
 以及详情、作者或正文图在适用重试结束后仍失败的 `candidate_skipped`，都在 child 摘要形成后获得跨轮
 记忆。跳过候选不回填内容、不伪装字段无效、不增加完成计数；它只表示该来源候选已按本轮策略处理。
 操作人若需在请求前阻止精确候选，可另写排除表；排除同样不增加完成计数。进程在写出候选级决定性
@@ -330,7 +344,7 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 在 child 摘要形成后才把状态事件提交到 SQLite，不得由底层循环提前推进数据库游标。中途停止的
 批次保存当前请求位置，下一次允许重取该批次，依靠已知 ID 提前去重；这样可以重复少量边界
 数据，但不能跳过未持久化候选。小红书只有在 child 摘要形成后才把本轮候选 ID 与前沿一起提交；
-视频、已有决定性证据的字段无效项、有效候选和 `candidate_skipped` 都会获得发现记忆。进程在候选级
+视频、已有决定性证据的字段无效项、结构有效候选（含主题不相关）和 `candidate_skipped` 都会获得发现记忆。进程在候选级
 决定性事件或摘要形成前崩溃的候选不会被提前标记为已处理。
 
 存在 checkpoint 时，runner 自动把保存位置传给 child；有未完成累计摘要时再传入上一份
@@ -343,8 +357,9 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 
 默认数量模式下，未达到目标的产物不单独入库。runner 保存其摘要路径，下一次将历史与本次 JSONL
 合并校验，并只向底层下发剩余新增目标；`candidate_hard_limit` 每次 child 执行重新提供完整预算，
-不从历史候选数中扣减。累计 `valid_new_count` 达到完整 `target_new_posts` 后才一次性入库并清空累计
-摘要。显式来源耗尽模式改为在本轮取得可验证耗尽证据后入库，不等待数量目标。checkpoint 本身
+不从历史候选数中扣减。累计主题相关 `valid_new_count` 达到完整 `target_new_posts` 后，才把累计中
+全部结构有效记录（含不相关记录）一次性原子入库并清空摘要。显式来源耗尽模式改为在本轮取得可
+验证耗尽证据后入库全部结构有效记录，不等待数量目标。checkpoint 本身
 保留，供下一次定时任务继续向后发现。前沿推进但默认模式本次尚未达标时不增加连续失败，下一次
 按任务正常调度间隔运行；无推进的运行错误仍按重试策略处理。
 

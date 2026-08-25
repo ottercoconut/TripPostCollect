@@ -30,6 +30,7 @@ checkpoint、失败恢复或迁移字段；实时规模应直接查询 SQLite。
 | `title` | TEXT | 是 | 平台标题；没有独立标题的平台可以为空 |
 | `published_at` | TEXT | 是 | 平台原始发帖时间，保存为 Asia/Shanghai ISO |
 | `keyword` | TEXT | 是 | 发现该帖时实际使用的检索词 |
+| `topic_relevant` | INTEGER/布尔 | 否 | 标题或权威正文是否包含“青岛”或该记录的完整实际检索词；0 仍保留供审计 |
 | `content_text` | TEXT | 是 | 权威详情页或详情接口取得的正文 |
 | `content_length` | INTEGER | 否 | `content_text` 的字符长度 |
 | `post_images_count` | INTEGER | 否 | 关联的权威正文图片数量 |
@@ -131,6 +132,7 @@ SQLite 字段或图片关系中，也不保留 URL-only 参考关系。
 ```sql
 SELECT platform_key, COUNT(*) AS posts
 FROM web_posts
+WHERE topic_relevant = 1
 GROUP BY platform_key
 ORDER BY platform_key;
 
@@ -139,5 +141,6 @@ FROM web_post_images
 WHERE image_role = 'content';
 ```
 
-结果查询以 `web_posts` 为主，图片通过 `web_post_images` 关联；视频记录不进入结果主表，
+面向研究的默认查询应加 `topic_relevant=1`；审计时可显式查询 0 或全部。结果查询以 `web_posts` 为主，
+图片通过 `web_post_images` 关联；视频记录不进入结果主表，
 `published_at` 不得使用抓取时间代替。

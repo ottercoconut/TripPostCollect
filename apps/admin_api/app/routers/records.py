@@ -21,6 +21,7 @@ def record_service(conn: sqlite3.Connection = Depends(get_db)) -> RecordService:
 
 @router.get("")
 def list_records(
+    topic_scope: str = Query(default="relevant", pattern="^(relevant|irrelevant|all)$"),
     platform_key: str | None = None,
     source_type: str | None = None,
     status: str | None = None,
@@ -40,6 +41,7 @@ def list_records(
     service: RecordService = Depends(record_service),
 ) -> dict:
     filters = RecordFilters(
+        topic_scope=topic_scope,
         platform_key=platform_key,
         source_type=source_type,
         status=status,
@@ -59,8 +61,11 @@ def list_records(
 
 
 @router.get("/keywords")
-def list_keywords(service: RecordService = Depends(record_service)) -> dict:
-    return ok(service.list_keywords())
+def list_keywords(
+    topic_scope: str = Query(default="relevant", pattern="^(relevant|irrelevant|all)$"),
+    service: RecordService = Depends(record_service),
+) -> dict:
+    return ok(service.list_keywords(topic_scope))
 
 
 @router.get("/{record_id}")

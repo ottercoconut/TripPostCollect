@@ -11,6 +11,7 @@ import type {
 } from "./types";
 
 export type RecordFilters = {
+  topic_scope?: "relevant" | "irrelevant" | "all";
   platform_key?: string;
   keyword?: string;
   status?: string;
@@ -59,10 +60,14 @@ function query(params: Record<string, string | number | undefined>): string {
 export const api = {
   meta: () => request<Meta>("/api/meta"),
   platforms: () => request<Platform[]>("/api/platforms"),
-  keywords: () => request<KeywordUsage[]>("/api/records/keywords"),
+  keywords: (topicScope: RecordFilters["topic_scope"] = "relevant") =>
+    request<KeywordUsage[]>(
+      `/api/records/keywords${query({ topic_scope: topicScope })}`
+    ),
   records: (filters: RecordFilters) =>
     requestWithMeta<RecordSummary[]>(
       `/api/records${query({
+        topic_scope: filters.topic_scope,
         platform_key: filters.platform_key,
         keyword: filters.keyword,
         status: filters.status,
@@ -80,6 +85,8 @@ export const api = {
   context: (id: number) => request<RecordContext>(`/api/records/${id}/context`),
   raw: (id: number) => request<RecordRaw>(`/api/records/${id}/raw`),
   reports: () => request<Report[]>("/api/scheduler/reports?limit=8"),
-  overviewGaps: () =>
-    request<Record<string, number | null>>("/api/overview/field-gaps")
+  overviewGaps: (topicScope: RecordFilters["topic_scope"] = "relevant") =>
+    request<Record<string, number | string | null>>(
+      `/api/overview/field-gaps${query({ topic_scope: topicScope })}`
+    )
 };

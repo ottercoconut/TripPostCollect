@@ -15,13 +15,19 @@ router = APIRouter(prefix="/api/overview", tags=["overview"])
 
 
 @router.get("/counts")
-def get_counts(conn: sqlite3.Connection = Depends(get_db)) -> dict:
-    return ok(counts(conn))
+def get_counts(
+    topic_scope: str = Query(default="relevant", pattern="^(relevant|irrelevant|all)$"),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    return ok(counts(conn, topic_scope=topic_scope))
 
 
 @router.get("/field-gaps")
-def get_field_gaps(conn: sqlite3.Connection = Depends(get_db)) -> dict:
-    return ok(field_gaps(conn))
+def get_field_gaps(
+    topic_scope: str = Query(default="relevant", pattern="^(relevant|irrelevant|all)$"),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    return ok(field_gaps(conn, topic_scope=topic_scope))
 
 
 @router.get("/recent-runs")

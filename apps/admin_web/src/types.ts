@@ -32,6 +32,7 @@ export type RecordSummary = {
   published_at?: string;
   captured_at?: string;
   keyword?: string;
+  topic_relevant: boolean;
   content_text?: string;
   post_images_count: number;
   post_likes_count?: number | null;
