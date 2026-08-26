@@ -25,10 +25,11 @@
 
 主题范围不是配置解析器的启动硬门禁，代码不根据关键词前缀拒绝执行，也不恢复
 `web_posts.city_name`。平台检索噪声在结构校验之后统一标记：五个平台先使用共享投影生成最终将
-写入 `web_posts.content_text` 的字符串，分类器只检查这个字符串。经 Unicode NFKC、大小写和空白归一后，
-包含“青岛”或该记录实际完整检索词即
+写入 `web_posts.title` 与 `web_posts.content_text` 的两个字段，分类器分别检查这两个字符串。任一字段经
+Unicode NFKC、大小写和空白归一后包含“青岛”或该记录实际完整检索词即
 `topic_relevant=true`，否则为 `false`。不得扫描 `raw_sample_json`、作者、URL 或其他元数据，
-也不得把独立 `title` 或平台清洗前正文作为分类输入；不做分词、同义词、城市别名或地理推断。
+也不得把平台清洗前标题或正文作为分类输入；两个字段不拼接，不允许关键词跨标题与正文边界命中；
+不做分词、同义词、城市别名或地理推断。
 不相关的结构完整记录仍保留入库供审计，但不增加数量
 目标；固定 URL 页面证据同样显式计算该标记。
 
@@ -151,8 +152,9 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 
 结构有效记录无论主题标记真假都保留正文、作者、图片和事务门禁并进入正式入库集合。
 `topic_relevant=false` 不是失败，不得写 `candidate_skipped`；五个平台 child 必须使用与根校验相同的
-正文投影和分类纯函数，仅以“结构有效且主题相关”驱动 adaptive accumulator 的有效新增数。根校验、
-历史迁移、repair/upsert 和管理端看到的正文必须以同一 `web_posts.content_text` 值为事实依据。
+标题/正文投影和分类纯函数，仅以“结构有效且主题相关”驱动 adaptive accumulator 的有效新增数。根校验、
+历史迁移、repair/upsert 必须以管理端最终看到的同一 `web_posts.title` 与 `web_posts.content_text`
+值为事实依据。
 
 “正文图片”只能由以下平台权威字段显式投影，顺序去重后每项角色固定为 `content`：B站详情
 `image_urls`、微博 `mblog.pics` 归一后的 `image_list`、小红书笔记详情 `image_list`、抖音图文

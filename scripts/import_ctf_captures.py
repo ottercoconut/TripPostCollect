@@ -490,7 +490,7 @@ def web_post_for_capture(row: dict[str, Any], capture_id: int) -> dict[str, Any]
         "captured_at": row["captured_at"],
         "keyword": keyword,
         "topic_relevant": int(
-            is_topic_relevant(content_text=content_text, keyword=keyword)
+            is_topic_relevant(title=title, content_text=content_text, keyword=keyword)
         ),
         "content_text": content_text,
         "content_length": len(content_text),

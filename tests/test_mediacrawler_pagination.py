@@ -81,6 +81,40 @@ def test_irrelevant_structural_record_is_selected_but_does_not_advance_target(
     assert validation["completion_met"] is True
 
 
+def test_bilibili_final_title_alone_advances_relevant_target(tmp_path: Path) -> None:
+    record = bilibili_record("title-relevant")
+    record["title"] = "青岛老城散步"
+    record["content_text"] = "普通但结构完整的正文"
+    record["source_keyword"] = "别的检索词"
+    jsonl_path = tmp_path / "bili" / "jsonl" / "search_contents_2026-08-26.jsonl"
+    jsonl_path.parent.mkdir(parents=True)
+    jsonl_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    validation, selected = mediacrawler_crawl.collect_formal_records(
+        {
+            "keyword": "回退关键词",
+            "records": [{"output": {"jsonl_files": [str(jsonl_path)]}}],
+        },
+        candidate_hard_limit=10,
+        target_new_posts=1,
+        db_path=tmp_path / "missing.sqlite",
+        pagination_evidence={
+            "stopped": True,
+            "stop_reason": "target_new_met",
+            "candidate_count": 1,
+            "candidate_identities": ["title-relevant"],
+        },
+        completion_mode="target-new-posts",
+    )
+
+    assert len(selected) == 1
+    assert selected[0]["topic_relevant"] is True
+    assert validation["valid_new_count"] == 1
+    assert validation["topic_relevant_new_count"] == 1
+    assert validation["new_target_met"] is True
+    assert validation["completion_met"] is True
+
+
 def test_import_reports_related_and_unrelated_atomic_counts(tmp_path: Path) -> None:
     relevant = bilibili_record("relevant-import")
     irrelevant = bilibili_record("irrelevant-import")

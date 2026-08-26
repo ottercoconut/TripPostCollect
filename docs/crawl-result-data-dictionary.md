@@ -30,7 +30,7 @@ checkpoint、失败恢复或迁移字段；实时规模应直接查询 SQLite。
 | `title` | TEXT | 是 | 平台标题；没有独立标题的平台可以为空 |
 | `published_at` | TEXT | 是 | 平台原始发帖时间，保存为 Asia/Shanghai ISO |
 | `keyword` | TEXT | 是 | 发现该帖时实际使用的检索词 |
-| `topic_relevant` | INTEGER/布尔 | 否 | 最终 `content_text` 是否包含“青岛”或该记录的完整实际检索词；独立标题不参与，0 仍保留供审计 |
+| `topic_relevant` | INTEGER/布尔 | 否 | 最终 `title` 或最终 `content_text` 是否包含“青岛”或该记录的完整实际检索词；两字段分别判定，0 仍保留供审计 |
 | `content_text` | TEXT | 是 | 权威详情页或详情接口取得的正文 |
 | `content_length` | INTEGER | 否 | `content_text` 的字符长度 |
 | `post_images_count` | INTEGER | 否 | 关联的权威正文图片数量 |

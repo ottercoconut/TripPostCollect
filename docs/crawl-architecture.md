@@ -18,7 +18,7 @@ config/crawl_targets.json
           -> scripts/mediacrawler_behavior.py
           -> tools/MediaCrawler 或项目自有 B站 article 分支
           -> 共享头像清除器（失败关闭）
-          -> 共享正文投影与主题相关性分类（只读最终 web_posts.content_text + 实际关键词）
+          -> 共享标题/正文投影与主题相关性分类（只读最终 web_posts.title、content_text + 实际关键词）
           -> JSONL + image_manifest.jsonl + staging 图片
           -> 根项目字段、manifest 和字节复验
           -> data/media + SQLite 批次事务（全部结构有效记录）
@@ -38,8 +38,8 @@ runner 负责选择任务、冻结计划、调用 child、验证产物、持久�
 
 青岛主题由操作人在配置和执行前确认。配置解析不按关键词前缀拒绝启动，也不恢复
 `web_posts.city_name`；child 与根执行器共享主题分类纯函数，结构有效记录无论相关性均入库，只有
-最终 `web_posts.content_text` 包含“青岛”或实际完整关键词的新增记录推动数量目标。平台原始标题和
-清洗前正文不直接参与分类。
+最终 `web_posts.title` 或 `web_posts.content_text` 包含“青岛”或实际完整关键词的新增记录推动数量
+目标。两个字段分别判断、不跨边界拼接；平台清洗前标题和正文不直接参与分类。
 
 ## 正式生命周期
 

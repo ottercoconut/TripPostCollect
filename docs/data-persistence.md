@@ -155,7 +155,7 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 | `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎搜索结果 `author.follower_count` 归一后的 `followers_count` |
 | `published_at` | 发帖时间，统一保存为 Asia/Shanghai ISO 字符串，如 `2024-04-06T15:35:00+08:00`。优先取平台原始发布时间字段，如 `create_time`、`publish_time`、`time`、`datePublished`；`captured_at` 只表示本项目抓取时间 |
 | `keyword` | 优先保存每条记录的 `source_keyword`；缺失时回退到最终执行摘要的 `keyword`，即本次 child 命令实际使用的检索词。当前通用结构化 store 会逐条写入 `source_keyword`；自动 checkpoint 延续同一查询词，显式 `--recovery-keyword` 才会产生恢复词。旧记录缺少该字段时，回退值不能作为其原始检索词证据 |
-| `topic_relevant` | 使用与 `keyword` 相同的实际检索词，仅检查最终写入 `web_posts.content_text` 的字符串。Unicode NFKC、大小写和空白归一后包含“青岛”或完整检索词为 1，否则为 0；独立 `title`、平台清洗前正文、raw JSON、作者、URL 或其他元数据均不参与 |
+| `topic_relevant` | 使用与 `keyword` 相同的实际检索词，分别检查最终写入 `web_posts.title` 与 `web_posts.content_text` 的字符串。任一字段经 Unicode NFKC、大小写和空白归一后包含“青岛”或完整检索词为 1，否则为 0；字段之间不拼接，平台清洗前文本、raw JSON、作者、URL 或其他元数据均不参与 |
 | `post_likes_count` | `liked_count`、知乎 `voteup_count` |
 | `post_favorites_count` | `collected_count` 等收藏字段 |
 | `post_comments_count` | `comment_count`、`comments_count` 等评论字段 |

@@ -111,10 +111,11 @@ def migrate_topic_relevance(conn: sqlite3.Connection) -> dict[str, Any]:
     )
     rows_updated = 0
     if not applied:
-        for row_id, content_text, keyword in conn.execute(
-            "SELECT id, content_text, keyword FROM web_posts ORDER BY id"
+        for row_id, title, content_text, keyword in conn.execute(
+            "SELECT id, title, content_text, keyword FROM web_posts ORDER BY id"
         ).fetchall():
             relevant = is_topic_relevant(
+                title=title,
                 content_text=content_text,
                 keyword=keyword,
             )

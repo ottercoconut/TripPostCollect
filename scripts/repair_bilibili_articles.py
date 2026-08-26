@@ -1075,6 +1075,7 @@ def apply_repaired_record(
                 len(detail_urls),
                 int(
                     is_topic_relevant(
+                        title=hydrated.get("title"),
                         content_text=hydrated["content_text"],
                         keyword=target_row["keyword"],
                     )

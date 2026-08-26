@@ -27,16 +27,24 @@ def normalize_topic_text(value: Any) -> str:
 
 def is_topic_relevant(
     *,
+    title: Any,
     content_text: Any,
     keyword: Any,
 ) -> bool:
-    """Classify only the exact text persisted as ``web_posts.content_text``."""
+    """Classify the final ``web_posts.title`` and ``content_text`` fields."""
 
-    searchable = normalize_topic_text(content_text)
-    if normalize_topic_text(PRIMARY_TOPIC_LITERAL) in searchable:
+    searchable_fields = (
+        normalize_topic_text(title),
+        normalize_topic_text(content_text),
+    )
+    primary_topic = normalize_topic_text(PRIMARY_TOPIC_LITERAL)
+    if any(primary_topic in field for field in searchable_fields):
         return True
     normalized_keyword = normalize_topic_text(keyword)
-    return bool(normalized_keyword and normalized_keyword in searchable)
+    return bool(
+        normalized_keyword
+        and any(normalized_keyword in field for field in searchable_fields)
+    )
 
 
 def effective_source_keyword(record: Mapping[str, Any], fallback_keyword: Any) -> str:
@@ -57,3 +65,31 @@ def web_post_content_text(platform_key: str, record: Mapping[str, Any]) -> str:
         title = str(record.get("title") or "").strip()
         return "\n".join(dict.fromkeys(part for part in (title, body) if part))
     return body
+
+
+def web_post_title(platform_key: str, record: Mapping[str, Any]) -> Any:
+    """Project the exact value persisted to ``web_posts.title``."""
+
+    title = record.get("title")
+    if title not in (None, ""):
+        return title
+    if platform_key == "douyin":
+        return record.get("desc") or ""
+    if platform_key == "xhs":
+        return str(record.get("desc") or "")[:255]
+    return ""
+
+
+def topic_relevant_for_web_post(
+    platform_key: str,
+    record: Mapping[str, Any],
+    *,
+    fallback_keyword: Any,
+) -> bool:
+    """Classify a crawler record from its final persisted title and body."""
+
+    return is_topic_relevant(
+        title=web_post_title(platform_key, record),
+        content_text=web_post_content_text(platform_key, record),
+        keyword=effective_source_keyword(record, fallback_keyword),
+    )

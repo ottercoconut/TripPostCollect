@@ -107,7 +107,9 @@ from trippostcollect.records.topic_relevance import (
     CONTENT_BODY_FIELDS,
     effective_source_keyword,
     is_topic_relevant,
+    topic_relevant_for_web_post,
     web_post_content_text,
+    web_post_title,
 )
 from trippostcollect.scheduler.discovery import (
     load_checkpoint,
@@ -1697,7 +1699,7 @@ def row_for_record(
     if materialized_images is not None:
         image_items = inject_materialized_images(image_items, materialized_images)
     keyword_value = effective_source_keyword(record, keyword)
-    title = first_value(record, "title")
+    title = web_post_title(platform_key, record)
     metrics = {
         "liked_count": parse_int(first_value(record, "liked_count", "voteup_count")),
         "favorites_count": parse_int(first_value(record, "collected_count", "video_favorite_count")),
@@ -1748,6 +1750,7 @@ def row_for_record(
         "keyword": keyword_value,
         "topic_relevant": int(
             is_topic_relevant(
+                title=title,
                 content_text=content_text,
                 keyword=keyword_value,
             )
@@ -2429,9 +2432,10 @@ def collect_formal_records(
                         record,
                         summary.get("keyword"),
                     )
-                    topic_relevant = is_topic_relevant(
-                        content_text=content_text_for_record(platform_key, record),
-                        keyword=effective_keyword,
+                    topic_relevant = topic_relevant_for_web_post(
+                        platform_key,
+                        record,
+                        fallback_keyword=effective_keyword,
                     )
                     if topic_relevant:
                         valid_existing_count += int(is_existing)
@@ -4438,9 +4442,10 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     if validation["valid"]:
                         identity = str(validation["identity"])
                         valid_seen.add(identity)
-                        topic_relevant = is_topic_relevant(
-                            content_text=content_text_for_record(platform_key, normalized),
-                            keyword=effective_source_keyword(normalized, args.keyword),
+                        topic_relevant = topic_relevant_for_web_post(
+                            platform_key,
+                            normalized,
+                            fallback_keyword=args.keyword,
                         )
                         if topic_relevant:
                             if formal_database_identities(platform_key, normalized) & existing_identities:
