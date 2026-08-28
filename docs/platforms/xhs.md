@@ -176,6 +176,12 @@ python scripts/repair_xhs_posts.py \
 
 ### 标签页与人工验证
 
+- 正式浏览器启动后先打开 `/explore` 并确认页面壳已可见，再进入真实关键词搜索页。搜索页在导航
+  `commit` 后持续无可见文本时，程序只允许执行一次受控恢复：回到 `/explore` 确认渲染，再重新进入
+  同一关键词搜索页；恢复仍为空白则按 `runtime_failed` 停止，不刷新账号 profile、不换号，也不推进
+  checkpoint。启动导航会把 `readyState`、DOM/正文长度、主文档状态、页面脚本错误和失败资源的紧凑
+  摘要写入 behavior evidence 同目录的 `behavior_evidence.navigation.json`，白屏超时不得只凭外部关闭
+  后的 `TargetClosedError` 分类。
 - 正式 BrowserContext 守卫安装后出现的任何新标签页都立即置前，并从出现起至少保留 30 秒；平台
   弹页、作者主页回退、互动和验证辅助页一视同仁。正常返回、异常、Playwright 退出和最终清理都
   不得绕过。首个主页面可豁免，启动时已有的额外页仍受保护。
@@ -183,7 +189,9 @@ python scripts/repair_xhs_posts.py \
 - 搜索连续性出现登录要求或图片验证时，保持当前页并写
   `operator_verification_events`；完成后刷新会话并继续，超时失败。
 - 搜索 API 461/471 使用响应 `Verifyuuid`、`Verifytype` 在同一 BrowserContext 打开平台人工验证页；
-  通过后刷新 Cookie 并重试原请求。
+  可见状态必须同时检查顶层页与子 frame；通过后还需连续两次确认已回到原路由且有可见文本，
+  再刷新 Cookie 并重试原请求。`Requests too frequent` 等可见频控优先于验证页标题分类，
+  立即按运行级阻断停止，不点击刷新绕过。
 - 搜索 API 明确登录过期时暂停原请求，保留全部标签页并置前最新 XHS 页；可见登录 UI 与 self-info
   API 都恢复后刷新 Cookie/storage state，并重试同一来源页。
 - “安全限制”、账号异常、`300011/300012`、`/website-login/error`、频控或封禁属于运行级阻断，

@@ -33,10 +33,15 @@ REQUEST_RANDOM = random.SystemRandom()
 XHS_POST_INTERACTION_MODES = frozenset({"comment-scroll", "like-one", "random"})
 REQUIRED_BEHAVIOR_EVENTS = frozenset({"pause", "mouse_moves", "human_scroll_complete"})
 CAPTCHA_VISIBLE_RE = re.compile(
-    r"人机验证|安全验证|请完成验证|请通过验证|图形验证码|滑块验证码|拖动滑块|captcha|geetest",
+    r"人机验证|安全验证|请完成验证|请通过验证|图形验证码|滑块验证码|拖动滑块|security verification|captcha|geetest",
     re.I,
 )
-RATE_LIMIT_VISIBLE_RE = re.compile(r"访问过于频繁|请求过于频繁|操作频繁|too many requests|rate limit", re.I)
+RATE_LIMIT_VISIBLE_RE = re.compile(
+    r"访问(?:过于)?频繁|请求(?:过于)?频繁|操作频繁|"
+    r"requests?\s+(?:are\s+)?too\s+frequent|too many requests|rate limit|"
+    r"try again after\s+\d+\s+minutes?",
+    re.I,
+)
 BLOCKED_VISIBLE_RE = re.compile(r"拒绝访问|access denied|forbidden|访问受限", re.I)
 XHS_PLATFORM_SECURITY_LIMIT_RE = re.compile(
     r"安全限制|账号异常|account exception(?:\s*,?\s*please retry later)?|\b300011\b",
@@ -96,11 +101,32 @@ async def runtime_fingerprint(page: Page) -> dict[str, Any]:
 
 
 async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
+    text_parts: list[str] = []
     try:
         text = await page.locator("body").inner_text(timeout=5_000)
     except Exception:
         text = ""
-    normalized = " ".join(text.split())
+    normalized_main = " ".join(text.split())
+    if normalized_main:
+        text_parts.append(normalized_main)
+
+    # XHS renders some security/verification dialogs in child frames.  Reading
+    # only the top-level body can therefore report a healthy search shell while
+    # a visible iframe says that requests are too frequent.  ``inner_text`` is
+    # still a rendered-text observation; this does not scan hidden page source.
+    main_frame = getattr(page, "main_frame", None)
+    for frame in list(getattr(page, "frames", ()) or ())[:8]:
+        if frame is main_frame:
+            continue
+        try:
+            frame_text = await frame.locator("body").inner_text(timeout=1_500)
+        except Exception:
+            continue
+        normalized_frame = " ".join(frame_text.split())
+        if normalized_frame and normalized_frame not in text_parts:
+            text_parts.append(normalized_frame)
+
+    normalized = " ".join(text_parts)
     page_url = str(getattr(page, "url", "") or "")
     hostname = (urlparse(page_url).hostname or "").lower()
     is_xhs_page = hostname == "xiaohongshu.com" or hostname.endswith(".xiaohongshu.com")
@@ -132,9 +158,9 @@ def visible_challenge(markers: dict[str, bool]) -> str:
             key
             for key in (
                 "platform_security_limit",
-                "captcha_or_verify",
                 "rate_limited",
                 "blocked",
+                "captcha_or_verify",
                 "login_required",
             )
             if markers.get(key)
@@ -729,6 +755,7 @@ async def run_xhs_api_captcha_verification(
 
     latest_text = ""
     latest_markers: dict[str, bool] = {"captcha_or_verify": True}
+    ready_observations = 0
     while True:
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
@@ -768,11 +795,22 @@ async def run_xhs_api_captcha_verification(
                 "url": current_url,
             }
         )
-        if (
+        redirect = urlparse(redirect_url)
+        current = urlparse(current_url)
+        returned_to_redirect_route = bool(
+            current.hostname == redirect.hostname
+            and current.path.rstrip("/") == redirect.path.rstrip("/")
+        )
+        page_ready = bool(
             "/website-login/captcha" not in current_url
+            and returned_to_redirect_route
+            and latest_text.strip()
             and not latest_markers.get("captcha_or_verify")
             and not latest_markers.get("login_required")
-        ):
+        )
+        ready_observations = ready_observations + 1 if page_ready else 0
+        event["ready_observations"] = ready_observations
+        if ready_observations >= 2:
             event.update(
                 {
                     "finished_at": utc_now(),

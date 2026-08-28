@@ -97,6 +97,15 @@ class FakeLocator:
         return self.text
 
 
+class FakeFrame:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def locator(self, selector: str) -> FakeLocator:
+        assert selector == "body"
+        return FakeLocator(self.text)
+
+
 class FakePage:
     def __init__(self, text: str = "正常搜索内容", *, card_count: int = 1, profile_count: int = 1) -> None:
         self.url = "https://example.test/search"
@@ -104,6 +113,8 @@ class FakePage:
         self.card_count = card_count
         self.profile_count = profile_count
         self.brought_to_front = 0
+        self.main_frame = FakeFrame(text)
+        self.frames = [self.main_frame]
 
     def locator(self, selector: str) -> FakeLocator:
         assert selector == "body"
@@ -281,6 +292,22 @@ async def test_xhs_captcha_url_is_a_visible_verification_challenge() -> None:
     _, markers = await mediacrawler_behavior.visible_page_state(page)
 
     assert markers["captcha_or_verify"] is True
+
+
+@pytest.mark.asyncio
+async def test_xhs_nested_security_frame_prioritizes_rate_limit() -> None:
+    page = FakePage("正常搜索内容")
+    page.url = "https://www.xiaohongshu.com/search_result?keyword=青岛八大关"
+    page.frames.append(
+        FakeFrame("Security Verification Requests too frequent. Try again after 1 minute.")
+    )
+
+    text, markers = await mediacrawler_behavior.visible_page_state(page)
+
+    assert "Requests too frequent" in text
+    assert markers["captcha_or_verify"] is True
+    assert markers["rate_limited"] is True
+    assert mediacrawler_behavior.visible_challenge(markers) == "rate_limited"
 
 
 @pytest.mark.asyncio
@@ -671,6 +698,45 @@ async def test_xhs_api_captcha_opens_operator_page_and_resumes(
     assert "verifyUuid=test-uuid" in event["captcha_url"]
     assert persisted["operator_verification_events"][0]["status"] == "completed"
     assert persisted["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_xhs_api_captcha_does_not_complete_on_blank_redirect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = FakePage()
+    redirect_url = page.url
+    observations = iter(("", "正常搜索内容", "正常搜索内容"))
+    normal_markers = {
+        "captcha_or_verify": False,
+        "rate_limited": False,
+        "blocked": False,
+        "login_required": False,
+    }
+
+    async def redirecting_page_state(current_page):
+        current_page.url = redirect_url
+        return next(observations), normal_markers
+
+    async def no_sleep(seconds):
+        return None
+
+    evidence_path = tmp_path / "behavior.json"
+    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
+    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", redirecting_page_state)
+    monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", no_sleep)
+
+    event = await mediacrawler_behavior.run_xhs_api_captcha_verification(
+        page,
+        evidence_path=evidence_path,
+        verify_type="216",
+        verify_uuid="test-uuid",
+        verify_biz=461,
+    )
+
+    assert event["status"] == "completed"
+    assert event["ready_observations"] == 2
 
 
 @pytest.mark.asyncio

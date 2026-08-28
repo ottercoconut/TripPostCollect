@@ -330,7 +330,11 @@ keychain。浏览器失败需区分：
 通用平台使用 `social_high_risk`，小红书使用 `xhs_guarded`。正常摘要至少要求
 `behavior_validation.ok=true`，并包含事件、运行时指纹、可见阻断标记、截图和策略证据。验证码判断
 使用可见页面状态，不扫描整页 HTML 中的隐藏脚本字符串。小红书的标签页保护、人工验证等待和互动
-证据细节只在其平台文档维护。
+证据细节只在其平台文档维护。监督进程不得在小红书内部搜索页就绪门禁完成前，仅因窗口仍在加载就
+关闭浏览器；白屏先读取 behavior evidence 同目录的 `behavior_evidence.navigation.json`。正式启动会先
+预热 `/explore`，搜索页面壳持续为空时只做一次同路由恢复，仍失败再由 runner 正常写摘要并释放租约。
+搜索 API 的 461/471 人工验证页同时检查子 frame 可见文本；英文 `Requests too frequent`
+按频控处理，不得因顶层 body 为空或验证标题消失而误判通过。
 
 ## 结果检查
 
