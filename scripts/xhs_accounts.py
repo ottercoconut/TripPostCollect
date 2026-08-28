@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sqlite3
+import subprocess
 from pathlib import Path
 
-from trippostcollect.core.paths import DEFAULT_DB
+from trippostcollect.core.paths import DEFAULT_DB, XHS_EXECUTION_STATE_ROOT
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs.accounts import (
     account_paths,
@@ -19,6 +21,7 @@ from trippostcollect.xhs.accounts import (
     iso,
     list_accounts,
     record_event,
+    recover_orphaned_account_lease,
     set_account_status,
     validate_account_id,
 )
@@ -46,6 +49,14 @@ def parse_args() -> argparse.Namespace:
     activate = subparsers.add_parser("activate", help="Manually make a previously blocked account selectable.")
     activate.add_argument("--account-id", required=True)
     activate.add_argument("--reason", required=True)
+
+    recover = subparsers.add_parser(
+        "recover-orphan-lease",
+        help="Release one exact lease after proving its failed runtime has no live process.",
+    )
+    recover.add_argument("--account-id", required=True)
+    recover.add_argument("--run-id", required=True)
+    recover.add_argument("--target-key", required=True)
     return parser.parse_args()
 
 
@@ -55,6 +66,45 @@ def public_account(record: dict) -> dict:
         for key, value in record.items()
         if key not in {"identity_hash"}
     }
+
+
+def execution_state_path(run_id: str, target_key: str) -> Path:
+    component_re = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+:-]{0,127}\Z")
+    if not component_re.fullmatch(run_id):
+        raise ValueError("run_id contains unsupported path characters")
+    if not component_re.fullmatch(target_key):
+        raise ValueError("target_key contains unsupported path characters")
+    return XHS_EXECUTION_STATE_ROOT / run_id / f"{target_key}.json"
+
+
+def live_xhs_process_evidence(*, profile_dir: Path) -> list[dict[str, object]]:
+    completed = subprocess.run(
+        ["ps", "-axo", "pid=,state=,command="],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    matches: list[dict[str, object]] = []
+    profile_marker = str(profile_dir.resolve())
+    for line in completed.stdout.splitlines():
+        parts = line.strip().split(maxsplit=2)
+        if len(parts) != 3:
+            continue
+        pid_text, state, command = parts
+        if "Z" in state:
+            continue
+        evidence_type = None
+        if "scripts/xhs_runner.py" in command:
+            evidence_type = "xhs_runner"
+        elif "mediacrawler_crawl.py" in command and "xhs" in command:
+            evidence_type = "xhs_child"
+        elif "mediacrawler_export_entrypoint.py" in command and "xhs" in command:
+            evidence_type = "xhs_exporter"
+        elif profile_marker in command:
+            evidence_type = "account_profile"
+        if evidence_type:
+            matches.append({"pid": int(pid_text), "type": evidence_type})
+    return matches
 
 
 def main() -> int:
@@ -91,6 +141,25 @@ def main() -> int:
         account = get_account(conn, account_id)
         if not account:
             raise SystemExit(f"XHS account is not enrolled: {account_id}")
+        if args.command == "recover-orphan-lease":
+            state_path = execution_state_path(args.run_id, args.target_key)
+            if not state_path.is_file():
+                raise SystemExit(f"XHS execution state does not exist: {state_path}")
+            try:
+                execution_state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise SystemExit(f"Cannot read XHS execution state: {exc}") from exc
+            process_evidence = live_xhs_process_evidence(profile_dir=Path(account["profile_dir"]))
+            result = recover_orphaned_account_lease(
+                conn,
+                account_id=account_id,
+                run_id=args.run_id,
+                execution_state=execution_state,
+                live_processes=process_evidence,
+                state_path=state_path,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         lease = conn.execute(
             "SELECT run_id, expires_at FROM xhs_account_leases WHERE account_id=?",
             (account_id,),

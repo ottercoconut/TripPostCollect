@@ -30,6 +30,10 @@ class XhsAccountUnavailable(RuntimeError):
         super().__init__(f"{reason}: wait_seconds={self.wait_seconds}")
 
 
+class XhsOrphanLeaseRecoveryRefused(RuntimeError):
+    """Raised when an account lease cannot be proven to be orphaned safely."""
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -285,3 +289,106 @@ def release_account_lease(
     conn.execute("DELETE FROM xhs_account_leases WHERE account_id=? AND run_id=?", (value, run_id))
     record_event(conn, account_id=value, run_id=run_id, event_type="lease_released", details={"outcome": outcome})
     conn.commit()
+
+
+def recover_orphaned_account_lease(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str,
+    run_id: str,
+    execution_state: dict[str, Any],
+    live_processes: list[dict[str, Any]],
+    state_path: Path,
+    now: datetime | None = None,
+    grace_seconds: int = 300,
+) -> dict[str, Any]:
+    """Release an exact active lease only after its failed runtime is proven dead.
+
+    This intentionally does not mutate the execution state, discovery checkpoint,
+    cursor, staged output, or account health. The caller must supply process evidence
+    collected immediately before this transaction.
+    """
+    value = validate_account_id(account_id)
+    current = now or utc_now()
+    if grace_seconds < 60:
+        raise ValueError("grace_seconds must be at least 60")
+    if not run_id.strip():
+        raise ValueError("run_id must not be empty")
+    if live_processes:
+        raise XhsOrphanLeaseRecoveryRefused("live XHS process evidence still exists")
+    if execution_state.get("run_id") != run_id:
+        raise XhsOrphanLeaseRecoveryRefused("execution state run_id does not match the lease")
+    if execution_state.get("status") != "running":
+        raise XhsOrphanLeaseRecoveryRefused("execution state is not an abandoned running state")
+    plan = execution_state.get("plan")
+    if not isinstance(plan, dict) or plan.get("account_id") != value:
+        raise XhsOrphanLeaseRecoveryRefused("execution state account_id does not match the lease")
+    events = execution_state.get("events")
+    last_event = events[-1] if isinstance(events, list) and events else None
+    if not isinstance(last_event, dict) or last_event.get("type") != "adaptive_search_stopped":
+        raise XhsOrphanLeaseRecoveryRefused("last execution event is not adaptive_search_stopped")
+    details = last_event.get("details")
+    if not isinstance(details, dict):
+        raise XhsOrphanLeaseRecoveryRefused("terminal execution event has no details")
+    if details.get("stop_reason") != "runtime_failed" or details.get("batch_complete") is not False:
+        raise XhsOrphanLeaseRecoveryRefused("terminal event is not an incomplete runtime failure")
+    stopped_at = parse_iso(last_event.get("at"))
+    if stopped_at is None:
+        raise XhsOrphanLeaseRecoveryRefused("terminal event has no valid timestamp")
+    terminal_age_seconds = int((current - stopped_at).total_seconds())
+    if terminal_age_seconds < grace_seconds:
+        raise XhsOrphanLeaseRecoveryRefused(
+            f"terminal failure is too recent: age={terminal_age_seconds}s grace={grace_seconds}s"
+        )
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        lease = conn.execute(
+            "SELECT run_id, acquired_at, expires_at FROM xhs_account_leases WHERE account_id=?",
+            (value,),
+        ).fetchone()
+        if lease is None:
+            raise XhsOrphanLeaseRecoveryRefused("no lease exists for the requested account")
+        if lease["run_id"] != run_id:
+            raise XhsOrphanLeaseRecoveryRefused("active lease run_id does not match the requested run")
+        expires_at = parse_iso(lease["expires_at"])
+        if expires_at is None:
+            raise XhsOrphanLeaseRecoveryRefused("active lease has no valid expiry")
+        if expires_at <= current:
+            raise XhsOrphanLeaseRecoveryRefused(
+                "lease is already expired; normal lease acquisition will remove it"
+            )
+        deleted = conn.execute(
+            "DELETE FROM xhs_account_leases WHERE account_id=? AND run_id=?",
+            (value, run_id),
+        )
+        if deleted.rowcount != 1:
+            raise XhsOrphanLeaseRecoveryRefused("exact lease disappeared before recovery")
+        audit = {
+            "state_path": str(state_path.resolve()),
+            "terminal_event_at": iso(stopped_at),
+            "terminal_age_seconds": terminal_age_seconds,
+            "stop_reason": details["stop_reason"],
+            "stop_detail": details.get("stop_detail"),
+            "batch_complete": details["batch_complete"],
+            "checkpoint_mutated": False,
+            "staged_outputs_mutated": False,
+        }
+        record_event(
+            conn,
+            account_id=value,
+            run_id=run_id,
+            event_type="orphan_lease_recovered",
+            details=audit,
+        )
+        conn.commit()
+        return {
+            "account_id": value,
+            "run_id": run_id,
+            "lease_acquired_at": lease["acquired_at"],
+            "lease_expires_at": lease["expires_at"],
+            **audit,
+        }
+    except Exception:
+        conn.rollback()
+        raise

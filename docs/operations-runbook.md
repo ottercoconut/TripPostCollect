@@ -234,6 +234,20 @@ python scripts/crawl_runner.py \
 - 未完成尾批不得推进；边界页允许下轮重取并依靠已知 ID 前置过滤。
 - `--no-import` 不得写 checkpoint。
 
+若系统中已无任何小红书进程，但硬中止运行仍持有未过期租约，不得直接改 SQLite。先确认 state
+最后事件是超过五分钟的 `adaptive_search_stopped/runtime_failed` 且 `batch_complete=false`，再执行：
+
+```bash
+source .venv/bin/activate
+python scripts/xhs_accounts.py recover-orphan-lease \
+  --account-id <account_id> \
+  --run-id <run_id> \
+  --target-key <target_key>
+```
+
+该入口会再次检查精确租约、execution state 和所有相关进程，只回收租约并保留 checkpoint、cursor、
+state 与 staging；随后必须先用同账号、同配置、同完成模式 dry-run，再正式恢复。
+
 `--start-page`、`--resume-summary` 和 `--recovery-keyword` 只用于用户明确批准的人工恢复。优先修复
 自动 checkpoint；不得删除数据库记录后猜页码续跑。平台 cursor 细节见对应平台文档。
 

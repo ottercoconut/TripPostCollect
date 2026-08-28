@@ -64,6 +64,23 @@ python scripts/xhs_accounts.py list
 
 缺少任一前提即停止，不直接调用 MediaCrawler 探测或绕过门禁。
 
+若宿主或终端被硬中止，可能留下仍未过期的账号租约。仅当精确 execution state 的最后事件为
+`adaptive_search_stopped/runtime_failed`、尾批未完成、失败已超过安全等待期，且系统中没有任何
+小红书 runner、child、exporter 或该账号 profile 的 Chrome 进程时，才允许通过受审计入口回收：
+
+```bash
+source .venv/bin/activate
+python scripts/xhs_accounts.py recover-orphan-lease \
+  --account-id <account_id> \
+  --run-id <run_id> \
+  --target-key <target_key>
+```
+
+命令必须精确匹配租约和 state，只删除该条租约并写入 `orphan_lease_recovered` 事件；它不得修改
+execution state、checkpoint、cursor、账号状态或 staging 产物。任何进程证据、字段不一致、完整尾批、
+过近的失败时间或已过期租约都会拒绝执行。回收后仍须重新 dry-run，并由正式 runner 从 SQLite 的
+最后安全 checkpoint 恢复；孤儿运行没有最终摘要的 staging 不得直接晋升或导入。
+
 ## 2. 登记与登录
 
 新账号只登记一次：
