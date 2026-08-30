@@ -185,7 +185,7 @@ def test_system_process_identity_uses_platform_exact_start_token() -> None:
         assert identity.process_start_token.startswith("linux:")
 
 
-def test_legacy_identityless_active_lease_blocks_schema_migration(tmp_path: Path) -> None:
+def test_obsolete_lease_is_discarded_during_exact_schema_cutover(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy.sqlite"
     with sqlite3.connect(db_path) as conn:
         conn.executescript(
@@ -217,14 +217,34 @@ def test_legacy_identityless_active_lease_blocks_schema_migration(tmp_path: Path
             );
             """
         )
-        with pytest.raises(RuntimeError, match="identity-less leases"):
-            accounts.ensure_xhs_schema(conn)
+        accounts.ensure_xhs_schema(conn)
+
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+        event = conn.execute(
+            """
+            SELECT account_id, run_id, event_type, details_json
+            FROM xhs_account_events
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        assert tuple(event[:3]) == (
+            "xhs-a01",
+            "legacy-run",
+            "lease_schema_cutover_discarded",
+        )
+        assert json.loads(event[3]) == {
+            "reason": "unsupported_lease_schema",
+            "migration_version": 21,
+            "legacy_acquired_at": "2026-08-30",
+            "legacy_expires_at": "2026-08-31",
+        }
         assert conn.execute(
-            "SELECT run_id FROM xhs_account_leases"
-        ).fetchone()[0] == "legacy-run"
+            "SELECT status FROM xhs_accounts WHERE account_id='xhs-a01'"
+        ).fetchone()[0] == "active"
 
 
-def test_empty_legacy_lease_migration_preserves_discovery_memory(
+def test_obsolete_lease_cutover_preserves_discovery_memory(
     control_db: Path,
 ) -> None:
     with connect(control_db) as conn:
@@ -258,6 +278,12 @@ def test_empty_legacy_lease_migration_preserves_discovery_memory(
             )
             """
         )
+        conn.execute(
+            """
+            INSERT INTO xhs_account_leases(account_id, run_id, acquired_at, expires_at)
+            VALUES ('xhs-a01', 'obsolete-run', '2026-08-30', '2026-08-31')
+            """
+        )
         conn.execute("DELETE FROM schema_migrations WHERE version=21")
         conn.commit()
         conn.execute("PRAGMA foreign_keys = ON")
@@ -279,6 +305,13 @@ def test_empty_legacy_lease_migration_preserves_discovery_memory(
             "SELECT platform_post_id FROM xhs_discovery_seen_candidates"
         ).fetchone()[0] == "post-9"
         assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+        assert conn.execute(
+            """
+            SELECT event_type FROM xhs_account_events
+            WHERE run_id='obsolete-run'
+            """
+        ).fetchone()[0] == "lease_schema_cutover_discarded"
 
 
 def test_xhs_control_bootstrap_does_not_create_content_or_scheduler_tables(

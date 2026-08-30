@@ -234,10 +234,10 @@ python scripts/crawl_runner.py \
 - 未完成尾批不得推进；边界页允许下轮重取并依靠已知 ID 前置过滤。
 - `--no-import` 不得写 checkpoint。
 
-硬中止后无论 TTL 是否已过期，都不得直接改 SQLite。若升级检查报告
-`legacy identity-less leases exist`，说明控制库仍有旧格式活动租约。新 CLI 会拒绝迁移，
-不会替它补造 owner 身份或按 TTL 清理；先让已知旧 runner 正常结束并清空旧租约。旧 owner 已硬中止时
-无法满足精确证明，停止自动恢复并取得该遗留事故的人工处置授权。
+旧租约 schema 不提供运行时兼容。版本切换前先确认全部旧 runner、child、exporter 和账号 profile
+Chrome 已退出；控制库初始化随后重建空的精确租约表，并为每条被丢弃的旧互斥行写入
+`lease_schema_cutover_discarded`。不要迁移旧 owner、等待其 TTL 或把该切换当成 orphan release；抓取恢复
+仍只读取 SQLite checkpoint 及其引用的安全累计摘要。
 
 对已采用精确租约的控制库，先列出租约；`list` 不公开 owner token，只显示其 SHA-256 供审计：
 

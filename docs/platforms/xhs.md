@@ -72,10 +72,10 @@ ID、owner PID、owner 进程启动时间和启动 token、PGID、execution stat
 PID/启动 token/PGID；账号目录下的 `lease.lock` 用 `flock` 加强同机互斥，但 SQLite owner token 仍是
 事实源。
 
-升级到精确租约 schema 时采用 fail-closed 迁移：旧格式 `xhs_account_leases` 只要还有任意行，就拒绝
-重建表，也不按 TTL 删除。应先让已知旧 runner 按旧生命周期正常退出并清空旧租约，再重新执行控制库
-初始化；空旧表重建不会改 checkpoint、cursor、seen 或账号状态。若旧 owner 已硬中止，旧行本身没有
-启动 token，无法由新机制补造“精确死亡证明”，必须停止并作为单独事故取得人工处置授权。
+精确租约 schema 是一次不兼容切换。部署新代码前须收束全部旧 runner、child、exporter 和账号 profile
+Chrome；初始化时直接丢弃不受支持的旧格式租约，并写入 `lease_schema_cutover_discarded` 审计事件，
+不迁移、续期或补造旧 owner 身份。租约只是账号互斥，不承载抓取进度，因此切换不会修改 checkpoint、
+cursor、seen、staging、SQLite 内容数据或账号状态；切换后由新 runner 获取全新的精确租约。
 
 若宿主、终端或 runner 被硬中止，先运行 `list` 取得精确 `account_id/run_id/lease_id`，再使用受审计
 入口对账：

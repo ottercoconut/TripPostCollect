@@ -64,6 +64,12 @@ XHS_EXACT_LEASE_COLUMNS = {
     "root_finalize_budget_seconds",
     "identity_version",
 }
+XHS_OBSOLETE_LEASE_AUDIT_COLUMNS = (
+    "account_id",
+    "run_id",
+    "acquired_at",
+    "expires_at",
+)
 
 
 def qmarks(values: set[str] | list[str]) -> str:
@@ -96,6 +102,52 @@ def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
         (table_name,),
     ).fetchone()
     return bool(row)
+
+
+def obsolete_xhs_lease_snapshots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Capture non-secret identifiers before replacing an unsupported lease schema."""
+
+    if not table_exists(conn, "xhs_account_leases"):
+        return []
+    columns = table_columns(conn, "xhs_account_leases")
+    selected = [name for name in XHS_OBSOLETE_LEASE_AUDIT_COLUMNS if name in columns]
+    if not selected:
+        return []
+    rows = conn.execute(
+        f"SELECT {', '.join(selected)} FROM xhs_account_leases ORDER BY rowid"
+    ).fetchall()
+    return [dict(zip(selected, row, strict=True)) for row in rows]
+
+
+def record_xhs_lease_schema_cutover(
+    conn: sqlite3.Connection,
+    snapshots: list[dict[str, Any]],
+) -> None:
+    """Audit discarded mutex rows without treating them as recoverable owners."""
+
+    if not snapshots or not table_exists(conn, "xhs_account_events"):
+        return
+    created_at = iso()
+    for snapshot in snapshots:
+        details = {
+            "reason": "unsupported_lease_schema",
+            "migration_version": 21,
+            "legacy_acquired_at": snapshot.get("acquired_at"),
+            "legacy_expires_at": snapshot.get("expires_at"),
+        }
+        conn.execute(
+            """
+            INSERT INTO xhs_account_events(
+                account_id, run_id, event_type, details_json, created_at
+            ) VALUES (?, ?, 'lease_schema_cutover_discarded', ?, ?)
+            """,
+            (
+                snapshot.get("account_id"),
+                snapshot.get("run_id"),
+                json_dump(details),
+                created_at,
+            ),
+        )
 
 
 def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> bool:
@@ -427,15 +479,7 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
         and bool(table_columns(conn, "xhs_accounts") & legacy_account_columns)
     ) or table_exists(conn, "xhs_platform_state")
     if requires_v10_migration:
-        legacy_lease_count = (
-            int(conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0])
-            if table_exists(conn, "xhs_account_leases")
-            else 0
-        )
-        if legacy_lease_count:
-            raise RuntimeError(
-                "cannot migrate XHS control schema while legacy identity-less leases exist"
-            )
+        obsolete_leases = obsolete_xhs_lease_snapshots(conn)
         conn.commit()
         conn.execute("PRAGMA foreign_keys = OFF")
         try:
@@ -461,10 +505,6 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
                 CREATE TEMP TABLE xhs_account_events_v9_backup AS
                 SELECT id, account_id, run_id, event_type, details_json, created_at
                 FROM xhs_account_events;
-
-                CREATE TEMP TABLE xhs_account_leases_v9_backup AS
-                SELECT account_id, run_id, acquired_at, expires_at
-                FROM xhs_account_leases;
 
                 CREATE TEMP TABLE xhs_runs_v9_backup AS
                 SELECT
@@ -495,10 +535,6 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
                 SELECT id, account_id, run_id, event_type, details_json, created_at
                 FROM xhs_account_events_v9_backup;
 
-                INSERT INTO xhs_account_leases(account_id, run_id, acquired_at, expires_at)
-                SELECT account_id, run_id, acquired_at, expires_at
-                FROM xhs_account_leases_v9_backup;
-
                 INSERT INTO xhs_runs(
                     run_id, target_key, account_id, status, started_at, finished_at,
                     execution_state_path, child_summary_path, report_json
@@ -510,10 +546,10 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
 
                 DROP TABLE xhs_accounts_v9_backup;
                 DROP TABLE xhs_account_events_v9_backup;
-                DROP TABLE xhs_account_leases_v9_backup;
                 DROP TABLE xhs_runs_v9_backup;
                 """
             )
+            record_xhs_lease_schema_cutover(conn, obsolete_leases)
             conn.commit()
         finally:
             conn.execute("PRAGMA foreign_keys = ON")
@@ -523,19 +559,14 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
         else set()
     )
     if lease_columns and not XHS_EXACT_LEASE_COLUMNS.issubset(lease_columns):
-        legacy_lease_count = int(
-            conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0]
-        )
-        if legacy_lease_count:
-            raise RuntimeError(
-                "cannot migrate XHS control schema while legacy identity-less leases exist"
-            )
+        obsolete_leases = obsolete_xhs_lease_snapshots(conn)
         conn.commit()
         conn.execute("PRAGMA foreign_keys = OFF")
         try:
             conn.execute("DROP TABLE IF EXISTS xhs_lease_processes")
             conn.execute("DROP TABLE xhs_account_leases")
             conn.executescript(XHS_CONTROL_SCHEMA.read_text(encoding="utf-8"))
+            record_xhs_lease_schema_cutover(conn, obsolete_leases)
             conn.commit()
         finally:
             conn.execute("PRAGMA foreign_keys = ON")
