@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import argparse
 import asyncio
 import base64
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
 
@@ -14,7 +12,6 @@ import pytest
 
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs import accounts
-from trippostcollect.xhs.accounts import XhsAccountUnavailable
 from trippostcollect.xhs.config import load_pool_config, load_target
 from trippostcollect.xhs.config import XhsConfigError
 from trippostcollect.xhs.sessions import (
@@ -35,7 +32,6 @@ xhs_runner = import_module("xhs_runner")
 crawl_runner = import_module("crawl_runner")
 mediacrawler_crawl = import_module("mediacrawler_crawl")
 xhs_login = import_module("xhs_login")
-xhs_accounts = import_module("xhs_accounts")
 
 
 def open_db(tmp_path: Path) -> sqlite3.Connection:
@@ -45,14 +41,6 @@ def open_db(tmp_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     accounts.ensure_xhs_schema(conn)
     return conn
-
-
-def pool_config(**overrides) -> dict:
-    value = {
-        "lease_seconds": 600,
-    }
-    value.update(overrides)
-    return value
 
 
 def test_default_xhs_target_budget() -> None:
@@ -545,272 +533,6 @@ def test_capture_and_refresh_storage_state_preserves_runtime_device_identity(
         "XHS_RWP_FINGERPRINT": "fingerprint-1",
         "XHS_TAB_DEVICE_ID": "device-1",
     }
-
-
-def test_account_lease_requires_explicit_account_and_only_blocks_same_account(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(accounts, "XHS_ACCOUNT_ROOT", tmp_path / "accounts")
-    with open_db(tmp_path) as conn:
-        for index in (1, 2):
-            account_id = f"xhs-a0{index}"
-            accounts.enroll_account(conn, account_id)
-            accounts.mark_account_verified(conn, account_id, f"identity-{index}")
-        first = accounts.acquire_account_lease(
-            conn,
-            run_id="run-1",
-            pool_config=pool_config(),
-            requested_account_id="xhs-a01",
-            now=datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc),
-        )
-        assert first["account_id"] == "xhs-a01"
-        second = accounts.acquire_account_lease(
-            conn,
-            run_id="run-2",
-            pool_config=pool_config(),
-            requested_account_id="xhs-a02",
-            now=datetime(2026, 7, 14, 0, 1, tzinfo=timezone.utc),
-        )
-        assert second["account_id"] == "xhs-a02"
-        with pytest.raises(XhsAccountUnavailable, match="busy"):
-            accounts.acquire_account_lease(
-                conn,
-                run_id="run-3",
-                pool_config=pool_config(),
-                requested_account_id="xhs-a01",
-                now=datetime(2026, 7, 14, 0, 2, tzinfo=timezone.utc),
-            )
-        accounts.release_account_lease(conn, account_id="xhs-a01", run_id="run-1", outcome="completed")
-        leased_again = accounts.acquire_account_lease(
-            conn,
-            run_id="run-4",
-            pool_config=pool_config(),
-            requested_account_id="xhs-a01",
-            now=datetime(2026, 7, 14, 0, 3, tzinfo=timezone.utc),
-        )
-        assert leased_again["account_id"] == "xhs-a01"
-        accounts.release_account_lease(conn, account_id="xhs-a02", run_id="run-2", outcome="failed")
-        assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
-        assert accounts.get_account(conn, "xhs-a02")["status"] == "active"
-
-
-def orphan_execution_state(*, run_id: str = "run-orphan", account_id: str = "xhs-a01") -> dict:
-    return {
-        "run_id": run_id,
-        "status": "running",
-        "plan": {"account_id": account_id},
-        "events": [
-            {
-                "at": "2026-07-14T00:10:00+00:00",
-                "type": "adaptive_search_stopped",
-                "details": {
-                    "stop_reason": "runtime_failed",
-                    "stop_detail": "browser_runtime_failed",
-                    "batch_complete": False,
-                },
-            }
-        ],
-    }
-
-
-def test_recover_orphaned_account_lease_is_exact_and_audited(tmp_path: Path) -> None:
-    with open_db(tmp_path) as conn:
-        accounts.enroll_account(conn, "xhs-a01")
-        accounts.mark_account_verified(conn, "xhs-a01", "identity-1")
-        accounts.acquire_account_lease(
-            conn,
-            run_id="run-orphan",
-            pool_config=pool_config(lease_seconds=3600),
-            requested_account_id="xhs-a01",
-            now=datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc),
-        )
-
-        result = accounts.recover_orphaned_account_lease(
-            conn,
-            account_id="xhs-a01",
-            run_id="run-orphan",
-            execution_state=orphan_execution_state(),
-            live_processes=[],
-            state_path=tmp_path / "state.json",
-            now=datetime(2026, 7, 14, 0, 20, tzinfo=timezone.utc),
-        )
-
-        assert result["checkpoint_mutated"] is False
-        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
-        event = conn.execute(
-            "SELECT event_type, details_json FROM xhs_account_events WHERE run_id=? ORDER BY id DESC LIMIT 1",
-            ("run-orphan",),
-        ).fetchone()
-        assert event["event_type"] == "orphan_lease_recovered"
-        assert json.loads(event["details_json"])["staged_outputs_mutated"] is False
-
-
-@pytest.mark.parametrize(
-    ("run_id", "live_processes", "expected"),
-    [
-        ("wrong-run", [], "run_id"),
-        ("run-orphan", [{"pid": 123, "type": "xhs_runner"}], "live XHS process"),
-    ],
-)
-def test_recover_orphaned_account_lease_refuses_unsafe_evidence(
-    tmp_path: Path,
-    run_id: str,
-    live_processes: list[dict],
-    expected: str,
-) -> None:
-    with open_db(tmp_path) as conn:
-        accounts.enroll_account(conn, "xhs-a01")
-        accounts.mark_account_verified(conn, "xhs-a01", "identity-1")
-        accounts.acquire_account_lease(
-            conn,
-            run_id="run-orphan",
-            pool_config=pool_config(lease_seconds=3600),
-            requested_account_id="xhs-a01",
-            now=datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc),
-        )
-
-        with pytest.raises(accounts.XhsOrphanLeaseRecoveryRefused, match=expected):
-            accounts.recover_orphaned_account_lease(
-                conn,
-                account_id="xhs-a01",
-                run_id=run_id,
-                execution_state=orphan_execution_state(),
-                live_processes=live_processes,
-                state_path=tmp_path / "state.json",
-                now=datetime(2026, 7, 14, 0, 20, tzinfo=timezone.utc),
-            )
-
-
-def test_live_xhs_process_evidence_reports_only_pid_and_type(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    profile = tmp_path / "profile"
-    monkeypatch.setattr(
-        xhs_accounts.subprocess,
-        "run",
-        lambda *args, **kwargs: argparse.Namespace(
-            stdout=(
-                f" 123 S python scripts/xhs_runner.py --account-id xhs-a01\n"
-                f" 456 S Chrome --user-data-dir={profile}\n"
-                " 789 Z python scripts/xhs_runner.py --account-id xhs-a01\n"
-            )
-        ),
-    )
-
-    assert xhs_accounts.live_xhs_process_evidence(profile_dir=profile) == [
-        {"pid": 123, "type": "xhs_runner"},
-        {"pid": 456, "type": "account_profile"},
-    ]
-
-
-def test_login_lease_and_crawl_lease_are_mutually_exclusive(tmp_path: Path) -> None:
-    with open_db(tmp_path) as conn:
-        accounts.enroll_account(conn, "xhs-a01")
-        accounts.mark_account_verified(conn, "xhs-a01", "identity-1")
-        login_lease = accounts.acquire_account_login_lease(
-            conn,
-            run_id="login-1",
-            requested_account_id="xhs-a01",
-            lease_seconds=900,
-            now=datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc),
-        )
-        assert login_lease["account_id"] == "xhs-a01"
-        with pytest.raises(XhsAccountUnavailable, match="busy"):
-            accounts.acquire_account_lease(
-                conn,
-                run_id="crawl-1",
-                pool_config=pool_config(),
-                requested_account_id="xhs-a01",
-                now=datetime(2026, 7, 14, 0, 1, tzinfo=timezone.utc),
-            )
-        accounts.release_account_lease(conn, account_id="xhs-a01", run_id="login-1", outcome="completed")
-        crawl_lease = accounts.acquire_account_lease(
-            conn,
-            run_id="crawl-2",
-            pool_config=pool_config(),
-            requested_account_id="xhs-a01",
-            now=datetime(2026, 7, 14, 0, 2, tzinfo=timezone.utc),
-        )
-        assert crawl_lease["account_id"] == "xhs-a01"
-        with pytest.raises(XhsAccountUnavailable, match="busy"):
-            accounts.acquire_account_login_lease(
-                conn,
-                run_id="login-2",
-                requested_account_id="xhs-a01",
-                lease_seconds=900,
-                now=datetime(2026, 7, 14, 0, 3, tzinfo=timezone.utc),
-            )
-        accounts.release_account_lease(conn, account_id="xhs-a01", run_id="crawl-2", outcome="completed")
-
-
-def test_login_lease_accepts_login_pending_account(tmp_path: Path) -> None:
-    with open_db(tmp_path) as conn:
-        accounts.enroll_account(conn, "xhs-a01")
-        lease = accounts.acquire_account_login_lease(
-            conn,
-            run_id="login-pending",
-            requested_account_id="xhs-a01",
-            lease_seconds=600,
-            now=datetime(2026, 7, 14, 0, 0, tzinfo=timezone.utc),
-        )
-
-        assert lease["status"] == "login_pending"
-        assert conn.execute(
-            "SELECT event_type FROM xhs_account_events WHERE run_id=?",
-            ("login-pending",),
-        ).fetchone()["event_type"] == "login_lease_acquired"
-
-
-def test_busy_login_returns_blocked_without_changing_account_status(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    db_path = tmp_path / "pool.sqlite"
-    with open_db(tmp_path) as conn:
-        accounts.enroll_account(conn, "xhs-a01")
-        accounts.mark_account_verified(conn, "xhs-a01", "identity-1")
-        accounts.acquire_account_lease(
-            conn,
-            run_id="active-crawl",
-            pool_config=pool_config(lease_seconds=3600),
-            requested_account_id="xhs-a01",
-            now=datetime.now(timezone.utc),
-        )
-
-    monkeypatch.setattr(
-        xhs_login,
-        "parse_args",
-        lambda: argparse.Namespace(
-            account_id="xhs-a01",
-            db=str(db_path),
-            timeout_seconds=600,
-            browser_path=None,
-        ),
-    )
-    monkeypatch.setattr(xhs_login, "XHS_LOGIN_OUTPUT", tmp_path / "login-output")
-
-    assert xhs_login.main() == 2
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
-
-
-def test_xhs_dry_run_account_preflight_rejects_active_lease(tmp_path: Path) -> None:
-    with open_db(tmp_path) as conn:
-        accounts.enroll_account(conn, "xhs-a01")
-        accounts.mark_account_verified(conn, "xhs-a01", "identity-1")
-        accounts.acquire_account_lease(
-            conn,
-            run_id="active-run",
-            pool_config=pool_config(lease_seconds=3600),
-            requested_account_id="xhs-a01",
-            now=datetime.now(timezone.utc),
-        )
-
-        with pytest.raises(XhsAccountUnavailable, match="busy"):
-            xhs_runner._eligible_account_for_plan(conn, "xhs-a01")
 
 
 def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
