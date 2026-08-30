@@ -40,7 +40,6 @@ def verify_image_artifacts(
     expect_promotion: bool,
 ) -> dict[str, Any]:
     """Re-hash manifest evidence and enforce the formal image completion contract."""
-
     root = Path(project_root).expanduser().resolve(strict=True)
     image = summary.get("image_materialization")
     evidence: dict[str, Any] = {
@@ -182,7 +181,6 @@ def verify_image_persistence(
     media_root: str | Path = LOCAL_MEDIA_ROOT,
 ) -> dict[str, Any]:
     """Verify every formally selected post/image relation against immutable bytes."""
-
     root = Path(project_root).expanduser().resolve(strict=True)
     media = Path(media_root).expanduser().resolve()
     evidence: dict[str, Any] = {

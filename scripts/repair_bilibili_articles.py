@@ -623,7 +623,6 @@ def fetch_repair_article_detail(
     cookie_header: str,
 ) -> tuple[dict[str, Any], int, float]:
     """Make one detail request so a rate-limit response freezes the whole run."""
-
     return fetch_bilibili_article_detail(post_id, cookie_header), 1, 0.0
 
 
@@ -1811,7 +1810,6 @@ def operator_exclude_retryable_items(
     confirm_default_db_repair: bool,
 ) -> dict[str, Any]:
     """Terminalize explicitly approved retryables without changing target rows."""
-
     requested_ids = sorted(
         {str(value).strip() for value in platform_post_ids if str(value).strip()}
     )

@@ -54,7 +54,6 @@ def redact_author_avatar_text(value: str) -> tuple[str, bool]:
     Whole-output redaction prevents an evidenced avatar URL from surviving on
     another line and avoids guessing from hostnames, paths, or filenames.
     """
-
     if AUTHOR_AVATAR_TEXT_TOKEN_RE.search(value):
         return AUTHOR_AVATAR_LOG_REDACTION, True
     return value, False
@@ -66,7 +65,6 @@ def _is_avatar_key(value: Any) -> bool:
 
 def serialized_avatar_profile_keys() -> frozenset[str]:
     """Return exported fields containing an explicitly mapped JSON profile."""
-
     return frozenset(XHS_SERIALIZED_PROFILE_AVATAR_PATHS)
 
 
@@ -119,7 +117,6 @@ def _collect_urls(value: Any, destination: set[str]) -> None:
 
 def discover_author_avatar_urls(value: Any) -> frozenset[str]:
     """Collect URLs found only beneath explicitly known avatar keys."""
-
     discovered: set[str] = set()
 
     def visit(
@@ -162,7 +159,6 @@ def sanitize_author_avatar_data(
     caller from explicit database avatar fields/relationships. No hostname,
     path, or filename heuristics are used.
     """
-
     avatar_urls = set(discover_author_avatar_urls(value))
     avatar_urls.update(
         candidate

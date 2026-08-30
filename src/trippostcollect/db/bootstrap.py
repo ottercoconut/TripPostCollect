@@ -106,7 +106,6 @@ def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
 
 def obsolete_xhs_lease_snapshots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Capture non-secret identifiers before replacing an unsupported lease schema."""
-
     if not table_exists(conn, "xhs_account_leases"):
         return []
     columns = table_columns(conn, "xhs_account_leases")
@@ -124,7 +123,6 @@ def record_xhs_lease_schema_cutover(
     snapshots: list[dict[str, Any]],
 ) -> None:
     """Audit discarded mutex rows without treating them as recoverable owners."""
-
     if not snapshots or not table_exists(conn, "xhs_account_events"):
         return
     created_at = iso()

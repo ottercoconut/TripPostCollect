@@ -99,7 +99,6 @@ def crawl_lease_budget(*, timeout_seconds: int, configured_lease_seconds: int) -
 
 def login_lease_budget(timeout_seconds: int) -> LeaseBudget:
     """Cover both operator waits plus child/browser shutdown and root finalization."""
-
     return LeaseBudget(runtime_seconds=int(timeout_seconds) * 2)
 
 
@@ -279,7 +278,6 @@ class SystemProcessInspector:
 
     def process_presence(self, pid: int) -> bool | None:
         """Return false only when an exact PID is absent or already a zombie."""
-
         if sys.platform.startswith("linux") and Path("/proc").is_dir():
             try:
                 raw = (Path("/proc") / str(int(pid)) / "stat").read_text(encoding="utf-8")
@@ -962,7 +960,6 @@ def recover_orphaned_account_lease(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Release only mutual exclusion after two exact dead-process reconciliations."""
-
     value = validate_account_id(account_id)
     if not run_id.strip() or not lease_id.strip():
         raise ValueError("run_id and lease_id must not be empty")
@@ -1308,7 +1305,6 @@ class LeaseGuard:
 
     def _terminate_unregistered_process_group(self, proc: subprocess.Popen[str]) -> None:
         """Bound and reap a new-session child when exact registry insertion fails."""
-
         if proc.poll() is not None:
             proc.communicate()
             return

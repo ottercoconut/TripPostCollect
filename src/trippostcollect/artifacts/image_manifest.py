@@ -189,7 +189,6 @@ def write_manifest_atomic(
     entries: Iterable[ImageManifestEntry],
 ) -> tuple[Path, str]:
     """Validate and atomically replace one deterministic UTF-8 JSONL manifest."""
-
     target = Path(path).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = serialize_manifest(entries)

@@ -348,7 +348,6 @@ def _assert_clean(residuals: dict[str, Any]) -> None:
 
 def migrate_remove_author_avatars(conn: sqlite3.Connection) -> dict[str, Any]:
     """Apply schema v18 inside the caller's transaction or savepoint."""
-
     already_applied = _migration_applied(conn)
     _validate_json_columns(conn)
     avatar_urls = _explicit_avatar_urls(conn)
