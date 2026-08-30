@@ -97,6 +97,7 @@ from trippostcollect.core.paths import (
     ensure_parent,
 )
 from trippostcollect.db.bootstrap import bootstrap_connection
+from trippostcollect.db.connection import connect_db
 from trippostcollect.platforms.registry import get_site
 from trippostcollect.records.sanitization import (
     AUTHOR_AVATAR_LOG_REDACTION,
@@ -136,6 +137,7 @@ ROOT = PROJECT_ROOT
 DEFAULT_OUTPUT = MEDIACRAWLER_RUNS_OUTPUT
 COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
 XHS_OPERATOR_LOGIN_WAIT_SECONDS = 600
+FORMAL_SQLITE_BUSY_TIMEOUT_MS = 60_000
 BILIBILI_ARTICLE_SEARCH_URL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
 BILIBILI_ARTICLE_DETAIL_URL = "https://api.bilibili.com/x/article/view"
 BILIBILI_RELATION_STAT_URL = "https://api.bilibili.com/x/relation/stat"
@@ -517,7 +519,6 @@ def load_post_repair_fallbacks(
     post_ids: set[str],
 ) -> dict[str, dict[str, Any]]:
     """Load trusted pre-repair metadata without replacing detail payloads."""
-
     if not db_path or not post_ids:
         return {}
     path = Path(db_path).expanduser().resolve()
@@ -606,7 +607,6 @@ def load_post_repair_targets(
     db_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """Load and strictly bind generic detail targets to existing platform IDs."""
-
     if platform_key not in {"douyin", "weibo", "zhihu"}:
         raise SystemExit(f"unsupported post repair platform: {platform_key}")
     path = Path(path_value).expanduser().resolve()
@@ -1144,7 +1144,6 @@ def merge_repair_fallback_metadata(
     metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Merge pre-repair evidence while keeping the fetched detail authoritative."""
-
     if not metadata:
         return record
     merged = dict(record)
@@ -2038,8 +2037,10 @@ def persist_discovery_checkpoint(
         None if source_has_more_value is None else bool(source_has_more_value)
     )
     stop_detail = str(event.get("stop_detail") or "")
-    with sqlite3.connect(Path(args.db).expanduser()) as conn:
-        conn.row_factory = sqlite3.Row
+    with connect_db(
+        Path(args.db).expanduser(),
+        busy_timeout_ms=FORMAL_SQLITE_BUSY_TIMEOUT_MS,
+    ) as conn:
         bootstrap_connection(conn, sync_content=False, sync_jobs=False)
         existing_checkpoint = load_checkpoint(
             conn,
@@ -2239,7 +2240,6 @@ def post_repair_pagination_evidence(
     materialization_failures: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Describe every explicit generic repair target as recovered or skipped."""
-
     target_ids = {
         str(target.get("platform_post_id") or "")
         for target in targets
@@ -2314,7 +2314,6 @@ def attach_skipped_candidate_evidence(
     pagination_evidence: dict[str, Any],
 ) -> dict[str, Any]:
     """Expose skipped post/image failures without blocking complete candidates."""
-
     stop_event = pagination_evidence.get("stop_event") or {}
     failures = list(
         stop_event.get("skipped_candidate_failures")
@@ -2611,7 +2610,6 @@ def resolve_media_root(
     default_media_root: str | Path = LOCAL_MEDIA_ROOT,
 ) -> Path:
     """Allow the formal media root or an explicit project ``temp/`` override."""
-
     root = Path(project_root).expanduser().resolve(strict=True)
     media_root = Path(value).expanduser().resolve()
     formal_root = Path(default_media_root).expanduser().resolve()
@@ -2660,7 +2658,6 @@ def _staging_root_for_manifest_entry(
     entry: ImageManifestEntry,
 ) -> Path:
     """Resolve both supported layouts without platform-specific persistence code."""
-
     staging_path = Path(str(entry.staging_path))
     if staging_path.parts and staging_path.parts[0] == manifest_path.parent.name:
         return manifest_path.parent.parent
@@ -2675,7 +2672,6 @@ def rollback_newly_promoted_images(
     db_path: str | Path | None = None,
 ) -> int:
     """Remove current-run files unless SQLite already references their paths."""
-
     root = Path(project_root).expanduser().resolve(strict=True)
     media = Path(media_root).expanduser().resolve()
     if media != root and root not in media.parents:
@@ -2737,7 +2733,6 @@ def formal_media_persistence_lock(
     lock_path: str | Path = FORMAL_MEDIA_PERSISTENCE_LOCK,
 ) -> Iterator[None]:
     """Serialize formal media promotion through SQLite commit or rollback."""
-
     if not enabled:
         yield
         return
@@ -2761,7 +2756,6 @@ def _validated_manifest_rows_for_post(
     list[tuple[ImageManifestEntry, Path, int]],
 ]:
     """Match current candidates to exact or safely reconcilable legacy manifest rows."""
-
     entries = [row[0] for row in post_manifest_rows]
     try:
         ordered_entries = validate_post_manifest(
@@ -2906,7 +2900,6 @@ def materialize_formal_record_images(
     promote: bool,
 ) -> tuple[dict[str, Any], dict[str, list[MaterializedImage]], set[str]]:
     """Verify selected post manifests and optionally promote immutable image files."""
-
     root = Path(project_root).expanduser().resolve(strict=True)
     resolved_media_root = Path(media_root).expanduser().resolve()
     if resolved_media_root != root and root not in resolved_media_root.parents:
@@ -3329,7 +3322,6 @@ class FormalImportBeforeCommitError(RuntimeError):
 
 def commit_formal_import(conn: sqlite3.Connection) -> None:
     """Commit a formal import behind a testable transaction boundary."""
-
     conn.commit()
 
 
@@ -3348,7 +3340,7 @@ def import_valid_records(
     processed = inserted = updated = 0
     relevant_inserted = relevant_updated = 0
     irrelevant_inserted = irrelevant_updated = 0
-    conn = sqlite3.connect(db_path)
+    conn = connect_db(db_path, busy_timeout_ms=FORMAL_SQLITE_BUSY_TIMEOUT_MS)
     commit_started = False
     try:
         db_sync = ensure_web_schema(conn)
@@ -3415,7 +3407,6 @@ def import_valid_records_with_media_rollback(
     media_root: str | Path = LOCAL_MEDIA_ROOT,
 ) -> dict[str, Any]:
     """Import one formal batch and remove its new media if SQLite rolls back."""
-
     try:
         return import_valid_records(
             summary,
@@ -3504,7 +3495,6 @@ def normalize_bilibili_article_record(item: dict[str, Any], keyword: str) -> dic
 
 def clean_bilibili_article_body(value: Any) -> str:
     """Normalize a detail body without flattening its paragraph boundaries."""
-
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(r"(?i)</(?:p|div|li|blockquote|h[1-6]|section|article)\s*>", "\n", text)
@@ -3525,7 +3515,6 @@ def normalize_bilibili_detail_image_url(value: Any) -> str | None:
 
 def extract_bilibili_detail_images(detail: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Return only images observed in article detail, never search previews."""
-
     images: list[str] = []
     sources: list[str] = []
     seen: set[str] = set()
@@ -3638,7 +3627,6 @@ def download_bilibili_record_images(
     max_attempts: int = BILIBILI_IMAGE_MAX_ATTEMPTS,
 ) -> list[ImageManifestEntry]:
     """Download only detail-observed Bilibili article images into staging."""
-
     if not 1 <= max_attempts <= BILIBILI_IMAGE_MAX_ATTEMPTS:
         raise ValueError(
             f"max_attempts must be between 1 and {BILIBILI_IMAGE_MAX_ATTEMPTS}"
@@ -5220,7 +5208,6 @@ def apply_formal_completion_gates(
     child_execution_ok: bool = True,
 ) -> dict[str, Any]:
     """Apply all read-only evidence gates before persistent writes."""
-
     gated = dict(validation)
     gated["content_completion_met"] = bool(content_validation.get("completion_met"))
     gated["content_repair_import_met"] = bool(
@@ -5268,7 +5255,6 @@ def apply_formal_completion_gates(
 
 def formal_import_gate_met(validation: dict[str, Any]) -> bool:
     """Separate partial repair importability from full target completion."""
-
     if validation.get("repair_mode"):
         return bool(validation.get("repair_import_met"))
     return bool(validation.get("completion_met"))
@@ -5293,7 +5279,6 @@ def repair_partial_child_execution_allowed(
     behavior_validation: dict[str, Any],
 ) -> bool:
     """Allow a valid allowlisted repair subset through when other targets are unavailable."""
-
     if runtime_blocked:
         return False
     if child_execution_ok:
@@ -5311,7 +5296,6 @@ def repair_candidate_execution_completed(
     platforms: list[str],
 ) -> bool:
     """Recognize a clean repair process that produced no valid candidate rows."""
-
     repair_records = [
         record
         for record in records
@@ -5342,7 +5326,6 @@ def repair_runtime_stop_reason(
     platforms: list[str],
 ) -> str:
     """Preserve a structured run-level blocker from one repair child."""
-
     blocking_types = {
         "policy_blocked",
         "platform_security_limit",
@@ -5889,11 +5872,12 @@ def main() -> int:
         summary["failure_reason"] = "sqlite_import_failed"
     else:
         try:
-            summary["discovery_checkpoint"] = persist_discovery_checkpoint(
-                args,
-                platforms[0],
-                pagination_evidence,
-            )
+            with formal_media_persistence_lock(enabled=True):
+                summary["discovery_checkpoint"] = persist_discovery_checkpoint(
+                    args,
+                    platforms[0],
+                    pagination_evidence,
+                )
         except (OSError, sqlite3.Error, ValueError) as exc:
             checkpoint_ok = False
             summary["discovery_checkpoint"] = {

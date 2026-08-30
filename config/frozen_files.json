@@ -10,14 +10,14 @@
     },
     {
       "path": "docs/formal-crawl-contract.md",
-      "sha256": "10ea457ca2d1ad98a3e86d5f4d2a1096552aa7550759cffc580b34b19ff5d1e6",
+      "sha256": "1fc720a7312813c05dba3d639302621931aa6d7fd3c19e4491e8a8f122754e90",
       "reason": "用户授权更新并重新冻结的五平台正式抓取与正文图片本地化机器契约",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
     },
     {
       "path": "docs/crawl-architecture.md",
-      "sha256": "451fd8c6c2bba5dabc4ff676d44e511bc726efd84df063a5074a3abe2bb616c9",
+      "sha256": "4b712a3a54f695f9a25a0a9864aa26c91358abec379f5e94bdcb63df6ad5c0d9",
       "reason": "用户授权更新并重新冻结的五平台抓取与正文图片本地化架构基线",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true

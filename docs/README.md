@@ -45,7 +45,8 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 候选硬上限、停滞停止和完成模式选择均不再提供。完整完成判据见
 [正式抓取执行契约](formal-crawl-contract.md)。
 
-B站、微博、抖音和知乎从通用 runner 进入。先检查登录态：
+B站、微博、抖音和知乎从通用 runner 进入。runner 默认把本轮选中的不同平台放入最多 4 个并行通道，
+同一平台 job 保持串行；小红书仍不参与该调度。先检查登录态：
 
 ```bash
 source .venv/bin/activate

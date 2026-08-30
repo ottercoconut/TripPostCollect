@@ -50,6 +50,25 @@ Unicode NFKC、大小写和空白归一后包含“青岛”或该记录实际�
 和根项目字节复验，不晋升长期文件、不写 SQLite、不提交发现 checkpoint。正式入库未显式启用
 `--download-images` 必须在访问平台前拒绝，任何平台都不能完成 URL-only 正式任务。
 
+## 通用多平台并行
+
+通用 runner 把本轮选中的 job 按实际平台键划分为执行通道，默认最多同时运行 4 个不同平台通道；
+`--max-jobs` 仍只限制本轮选中任务数，不表示并发数。同一平台的多个 job 必须在同一通道内保持
+调度顺序串行执行，避免同时驱动同一平台 profile、登录态或平台级策略状态。需要诊断性串行时可显式
+传 `--max-parallel-platforms 1`，不得通过改 checkpoint、配置 enabled 或完成谓词实现串行。
+
+每个执行通道使用独立 SQLite 连接和明确的 busy timeout。job 启动前必须在 `BEGIN IMMEDIATE` 中
+原子校验并写入 scheduler lease 与 attempt；同一 job 已被其他 runner 标记为 `leased` 时，本轮写
+`scheduler_lease_conflict` 并阻断该 job，不得启动第二个 child。不同平台的登录、行为、搜索、详情、
+作者和 staging 阶段可以并行；长期媒体晋升至 SQLite 提交/回滚，以及随后 checkpoint/seen 的提交，
+仍分别通过同一全局跨进程锁串行，不能因为发现阶段并行而放宽原子持久化门禁。
+
+一个平台的普通失败、阻断或 runner 内部异常只终止该 job 的后续阶段，其他平台通道继续。根摘要
+必须按原确定性选中顺序排列记录，并公开通道键、通道数、并发上限、计划 worker 数和实际有效
+worker 数。dry-run 的计划 worker 可大于 1，但 `execution_started=false`、有效 worker 为 0；它不创建
+attempt 或 worker，只冻结与正式运行相同的通道计划。小红书继续使用独立 `xhs_runner.py` 和账号
+租约，不加入通用 runner 的并行通道。
+
 ## 行为与策略门禁
 
 B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
@@ -232,6 +251,7 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 - 任务参数；通用 runner 同时冻结实际 child 命令。小红书在 dry-run 时只冻结账号、目标、互动
   参数和发现计划，正式执行解密临时 storage state 后才构造 child 命令，并把命令写入
   `command_executed` 阶段证据；不得要求小红书 dry-run 预先包含不存在的临时路径或实际命令；
+- 通用 runner 的平台通道键、并发模式和 `max_parallel_platforms`；
 - 自动或人工跨次累计时使用的上一轮 `summary.json` 及其全部内容 JSONL。
 
 阶段固定为：

@@ -32,13 +32,28 @@ python scripts/crawl_runner.py \
 
 dry-run 会同步调度表并写报告和 execution state，但不访问平台或写内容表。预期只有
 `plan_frozen=completed`，其余四阶段保持 `frozen`，任务状态为 `planned`。确认配置、关键词、
-来源耗尽策略、自动恢复位置和 child 命令后再正式执行：
+来源耗尽策略、自动恢复位置、child 命令及 `scheduling` 后再正式执行：
 
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \
   --max-jobs 3
 ```
+
+通用 runner 默认使用 `--max-parallel-platforms 4`：本轮选中的不同平台并行，同一平台 job 串行；
+`--max-jobs` 只控制选择数量。根摘要的 `scheduling.platform_lane_count`、`planned_workers`、
+`effective_workers`、`execution_started`、`parallel_execution` 和 `lane_keys` 必须与冻结计划及运行类型
+一致；dry-run 的 `effective_workers=0`、`execution_started=false`。资源诊断或逐平台排障需要串行时使用：
+
+```bash
+source .venv/bin/activate
+python scripts/crawl_runner.py \
+  --max-jobs 3 \
+  --max-parallel-platforms 1
+```
+
+并行只覆盖 B站、微博、抖音和知乎通用入口；不得把小红书命令、账号租约或 profile 加入同一调用。
+一个平台失败时读取该任务状态并停止其后续阶段，其他平台继续，最终摘要仍按调度选择顺序排列。
 
 指定 job 时，正式命令使用与 dry-run 相同的 `--job-key`。正式结构化抓取固定抓到可验证来源耗尽，
 不接受数量目标、候选硬上限、停滞停止或完成模式选择参数。

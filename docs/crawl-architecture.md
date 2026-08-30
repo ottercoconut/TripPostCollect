@@ -11,6 +11,7 @@
 ```text
 config/crawl_targets.json
   -> scripts/crawl_runner.py
+      -> 按平台分执行通道（默认最多 4 个通道并行，同平台 job 串行）
       -> 通用 SQLite checkpoint / seen / exclusion
       -> data/runtime/crawl_execution_states/<run_id>/<job>.json
       -> scripts/mediacrawler_crawl.py
@@ -35,6 +36,16 @@ config/xhs_pool.json + config/xhs_targets.json
 `crawl_runner.py` 是 B站、微博、抖音和知乎的唯一正式入口；`xhs_runner.py` 是小红书唯一正式入口。
 runner 负责选择任务、冻结计划、调用 child、验证产物、持久化和生成报告。child 只负责平台会话、
 发现、字段补全与 staging，不能独立宣布正式任务完成。
+
+通用 runner 在冻结全部选中计划后，按实际平台键建立执行通道。不同平台通道默认并行，同一平台的
+多个 job 在通道内按调度顺序串行；`--max-parallel-platforms` 默认 4，设为 1 时只改变执行并发度，
+不改变选中范围、来源耗尽、checkpoint 或完成判据。每个通道持有独立 SQLite 连接，job attempt 通过
+短事务原子抢占。child 的网络发现和 staging 可以重叠，正式媒体晋升、SQLite 内容事务与发现记忆
+提交继续通过同一全局跨进程锁串行。小红书独立 runner 不进入这些通道。
+
+一个通道失败不会取消其他平台通道。每任务 execution state 独立推进，根 `run_summary.json` 在全部
+通道收束后按原调度选择顺序汇总，而不是按线程完成顺序排列；摘要同时记录通道列表、计划/有效
+worker、是否启动执行和并发上限，便于区分 dry-run 计划与正式运行的实际调度形态。
 
 青岛主题由操作人在配置和执行前确认。配置解析不按关键词前缀拒绝启动，也不恢复
 `web_posts.city_name`；child 与根执行器共享主题分类纯函数，结构有效记录无论相关性均入库，只有
@@ -105,7 +116,8 @@ runner 负责选择任务、冻结计划、调用 child、验证产物、持久�
 5. `task_finalized`
 
 runner 在进入下一阶段前重新读取状态并校验冻结输入。dry-run 只完成第一阶段；正式运行必须在前一
-阶段完成后才能推进，失败后的阶段保持 `frozen`。
+阶段完成后才能推进，失败后的阶段保持 `frozen`。通用计划还冻结平台通道键、并行模式和并发上限；
+dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启动并行 worker。
 
 通用控制面使用：
 

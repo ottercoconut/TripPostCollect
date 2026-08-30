@@ -12,11 +12,15 @@ import re
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from trippostcollect.db.bootstrap import bootstrap_connection
+from trippostcollect.db.connection import connect_db
 from trippostcollect.artifacts.image_completion import (
     verify_image_artifacts,
     verify_image_persistence,
@@ -46,12 +50,48 @@ ROOT = PROJECT_ROOT
 DEFAULT_RUN_ROOT = CRAWL_RUNNER_RUNTIME
 RANDOM = random.SystemRandom()
 CRAWL_CONFIG_SCHEMA_VERSION = 2
+DEFAULT_MAX_PARALLEL_PLATFORMS = 4
+RUNNER_SQLITE_BUSY_TIMEOUT_MS = 60_000
 REMOVED_FORMAL_QUANTITY_FIELDS = frozenset(
     {"candidate_hard_limit", "max_stagnant_batches", "target_new_posts"}
 )
 
+JobRow = Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class PreparedJob:
+    """Frozen scheduler inputs for one selected crawl job.
+
+    Attributes:
+        selection_index: Position in the deterministic scheduler selection.
+        row: Snapshot of the selected ``crawl_jobs`` row.
+        command: Frozen child command.
+        discovery_plan: Resolved checkpoint and discovery inputs, when applicable.
+        state_path: Per-job frozen execution-state path.
+        lane_key: Platform-local serialization lane.
+
+    """
+
+    selection_index: int
+    row: JobRow
+    command: list[str]
+    discovery_plan: dict[str, Any] | None
+    state_path: Path
+    lane_key: str
+
+
+class JobLeaseConflict(RuntimeError):
+    """Raised when another runner already owns a selected scheduler job."""
+
 
 def parse_args() -> argparse.Namespace:
+    """Parse crawl-runner command-line arguments.
+
+    Returns:
+        Parsed command-line arguments.
+
+    """
     parser = argparse.ArgumentParser(description="Run configured crawl jobs with deterministic scheduling.")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path.")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Crawl target config JSON.")
@@ -62,6 +102,14 @@ def parse_args() -> argparse.Namespace:
         help="Directory for frozen per-job execution states.",
     )
     parser.add_argument("--max-jobs", type=int, default=3, help="Maximum due jobs to run in this invocation.")
+    parser.add_argument(
+        "--max-parallel-platforms",
+        type=int,
+        default=DEFAULT_MAX_PARALLEL_PLATFORMS,
+        help=(
+            "Maximum platform lanes to execute concurrently; jobs in the same platform lane remain serial."
+        ),
+    )
     parser.add_argument("--site", help="Optional site_key filter.")
     parser.add_argument("--kind", help="Optional job_kind filter.")
     parser.add_argument("--job-key", help="Run one specific job key.")
@@ -79,22 +127,55 @@ def parse_args() -> argparse.Namespace:
 
 
 def utc_now() -> datetime:
+    """Return the current timezone-aware UTC time."""
     return datetime.now(timezone.utc)
 
 
 def utc_stamp() -> str:
+    """Return a collision-resistant UTC run identifier."""
     return utc_now().strftime("%Y%m%dT%H%M%S%f%z")
 
 
 def iso(value: datetime | None = None) -> str:
+    """Format a datetime as a seconds-precision ISO timestamp.
+
+    Args:
+        value: Datetime to format, or the current UTC time when omitted.
+
+    Returns:
+        ISO-formatted timestamp.
+
+    """
     return (value or utc_now()).isoformat(timespec="seconds")
 
 
 def load_json(path: Path) -> Any:
+    """Load a UTF-8 JSON document.
+
+    Args:
+        path: JSON file to read.
+
+    Returns:
+        Decoded JSON value.
+
+    """
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def validate_crawl_config(config: Any, path: Path) -> dict[str, Any]:
+    """Validate the active source-exhaustion crawl configuration.
+
+    Args:
+        config: Decoded configuration value.
+        path: Source path used in validation errors.
+
+    Returns:
+        Validated configuration mapping.
+
+    Raises:
+        ValueError: If the schema or a formal job uses removed quantity fields.
+
+    """
     if not isinstance(config, dict) or config.get("schema_version") != CRAWL_CONFIG_SCHEMA_VERSION:
         raise ValueError(
             f"unsupported crawl config schema in {path}; "
@@ -114,14 +195,26 @@ def validate_crawl_config(config: Any, path: Path) -> dict[str, Any]:
 
 
 def json_dump(value: Any) -> str:
+    """Serialize a compact UTF-8-safe JSON value."""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def tail(text: str, limit: int = 6000) -> str:
+    """Return at most the final ``limit`` characters of text."""
     return text[-limit:] if len(text) > limit else text
 
 
-def select_due_jobs(conn: sqlite3.Connection, args: argparse.Namespace) -> list[sqlite3.Row]:
+def select_due_jobs(conn: sqlite3.Connection, args: argparse.Namespace) -> list[JobRow]:
+    """Select enabled due jobs in deterministic scheduler order.
+
+    Args:
+        conn: Initialized scheduler database connection.
+        args: Runner filters and selection limit.
+
+    Returns:
+        Detached job-row snapshots safe to pass between worker threads.
+
+    """
     clauses = ["enabled = 1"]
     params: list[Any] = []
     if args.job_key:
@@ -144,21 +237,40 @@ def select_due_jobs(conn: sqlite3.Connection, args: argparse.Namespace) -> list[
         LIMIT ?
     """
     params.append(max(1, args.max_jobs))
-    return list(conn.execute(query, params).fetchall())
+    return [dict(row) for row in conn.execute(query, params).fetchall()]
 
 
-def behavior_profile_name(row: sqlite3.Row) -> str:
+def behavior_profile_name(row: JobRow) -> str:
+    """Resolve a job's configured behavior profile name."""
     data = json.loads(row["behavior_profile_json"] or "{}")
     return str(data.get("name") or row["site_key"] or "conservative")
 
 
-def params_for(row: sqlite3.Row) -> dict[str, Any]:
+def params_for(row: JobRow) -> dict[str, Any]:
+    """Decode a job's parameter JSON."""
     return json.loads(row["params_json"] or "{}")
+
+
+def platform_lane_key(row: JobRow) -> str:
+    """Return the platform-local serialization key for a job.
+
+    Args:
+        row: Selected scheduler job.
+
+    Returns:
+        Platform key for structured jobs, otherwise the configured site key.
+
+    """
+    params = params_for(row)
+    if row["job_kind"] == "mediacrawler_search":
+        return str(params.get("platform") or row["site_key"])
+    return str(row["site_key"])
 
 
 def is_unverified_douyin_first_page_checkpoint(
     checkpoint: dict[str, Any] | None,
 ) -> bool:
+    """Return whether an old Douyin first-page exhaustion lacks visible proof."""
     if not checkpoint:
         return False
     return bool(
@@ -173,6 +285,15 @@ def is_unverified_douyin_first_page_checkpoint(
 
 
 def stable_douyin_search_id_from_summary(summary: dict[str, Any]) -> str:
+    """Recover the last stable Douyin search ID from pagination evidence.
+
+    Args:
+        summary: Prior child summary.
+
+    Returns:
+        Stable search ID, or an empty string when unavailable.
+
+    """
     pagination = summary.get("pagination_evidence") or {}
     for batch in pagination.get("batches") or []:
         if not isinstance(batch, dict) or batch.get("platform") != "douyin":
@@ -190,11 +311,26 @@ def stable_douyin_search_id_from_summary(summary: dict[str, Any]) -> str:
 
 def resolve_discovery_args(
     conn: sqlite3.Connection,
-    row: sqlite3.Row,
+    row: JobRow,
     args: argparse.Namespace,
     *,
     run_id: str,
 ) -> tuple[argparse.Namespace, dict[str, Any] | None]:
+    """Resolve automatic checkpoint recovery for one selected job.
+
+    Args:
+        conn: Scheduler database connection.
+        row: Selected scheduler job.
+        args: Invocation-level runner arguments.
+        run_id: Current root-run identifier.
+
+    Returns:
+        Per-job arguments and a frozen discovery plan, when applicable.
+
+    Raises:
+        RuntimeError: If a checkpoint references a missing campaign summary.
+
+    """
     job_args = copy.copy(args)
     if row["job_kind"] != "mediacrawler_search":
         return job_args, None
@@ -275,12 +411,26 @@ def resolve_discovery_args(
 
 
 def add_flag(command: list[str], flag: str, value: Any | None = None) -> None:
+    """Append a CLI flag and optional value to a command."""
     command.append(flag)
     if value is not None:
         command.append(str(value))
 
 
-def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
+def build_command(row: JobRow, args: argparse.Namespace) -> list[str]:
+    """Build the formal child command for one scheduler job.
+
+    Args:
+        row: Selected scheduler job.
+        args: Resolved per-job runner arguments.
+
+    Returns:
+        Child command as an argument vector.
+
+    Raises:
+        ValueError: If the job violates the active formal crawl contract.
+
+    """
     params = params_for(row)
     site = row["site_key"]
     url = row["target_url"]
@@ -375,28 +525,73 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
 
 
 def latest_attempt_no(conn: sqlite3.Connection, job_id: int) -> int:
+    """Return the next attempt number for one scheduler job."""
     row = conn.execute("SELECT max(attempt_no) FROM crawl_attempts WHERE job_id = ?", (job_id,)).fetchone()
     return int(row[0] or 0) + 1
 
 
-def insert_attempt(conn: sqlite3.Connection, row: sqlite3.Row, run_id: str, command: list[str]) -> int:
-    attempt_no = latest_attempt_no(conn, int(row["id"]))
-    started_at = iso()
-    cur = conn.execute(
-        """
-        INSERT INTO crawl_attempts (
-            job_id, run_id, attempt_no, status, command_json, started_at
+def insert_attempt(conn: sqlite3.Connection, row: JobRow, run_id: str, command: list[str]) -> int:
+    """Atomically lease a job and create its running attempt.
+
+    Args:
+        conn: Scheduler database connection.
+        row: Selected scheduler job.
+        run_id: Current root-run identifier.
+        command: Frozen child command.
+
+    Returns:
+        Inserted attempt identifier.
+
+    Raises:
+        JobLeaseConflict: If another runner already leased or disabled the job.
+
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        leased = conn.execute(
+            """
+            UPDATE crawl_jobs
+            SET status='leased', updated_at=datetime('now')
+            WHERE id=? AND enabled=1 AND status=? AND last_attempt_id IS ?
+            """,
+            (row["id"], row["status"], row["last_attempt_id"]),
         )
-        VALUES (?, ?, ?, 'running', ?, ?)
-        """,
-        (row["id"], run_id, attempt_no, json_dump(command), started_at),
-    )
-    conn.execute("UPDATE crawl_jobs SET status='leased', updated_at=datetime('now') WHERE id=?", (row["id"],))
-    conn.commit()
-    return int(cur.lastrowid)
+        if leased.rowcount != 1:
+            raise JobLeaseConflict(
+                f"scheduler job changed, is already leased, or was disabled: {row['job_key']}"
+            )
+        attempt_no = latest_attempt_no(conn, int(row["id"]))
+        started_at = iso()
+        cur = conn.execute(
+            """
+            INSERT INTO crawl_attempts (
+                job_id, run_id, attempt_no, status, command_json, started_at
+            )
+            VALUES (?, ?, ?, 'running', ?, ?)
+            """,
+            (row["id"], run_id, attempt_no, json_dump(command), started_at),
+        )
+        attempt_id = cur.lastrowid
+        if attempt_id is None:
+            raise RuntimeError(f"scheduler attempt ID was not returned: {row['job_key']}")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return int(attempt_id)
 
 
-def find_artifact_paths(stdout: str, row: sqlite3.Row) -> tuple[str, list[str], str | None]:
+def find_artifact_paths(stdout: str, row: JobRow) -> tuple[str, list[str], str | None]:
+    """Discover child artifact and summary paths from bounded stdout metadata.
+
+    Args:
+        stdout: Child standard output.
+        row: Executed scheduler job.
+
+    Returns:
+        Primary artifact directory, capture metadata paths, and summary path.
+
+    """
     stdout_json = extract_stdout_json(stdout)
     artifact_dirs: list[str] = []
     summary_path: str | None = None
@@ -449,6 +644,7 @@ def find_artifact_paths(stdout: str, row: sqlite3.Row) -> tuple[str, list[str], 
 
 
 def load_first_meta(paths: list[str]) -> dict[str, Any]:
+    """Load the first capture metadata document when available."""
     if not paths:
         return {}
     try:
@@ -458,6 +654,16 @@ def load_first_meta(paths: list[str]) -> dict[str, Any]:
 
 
 def import_capture_results(paths: list[str], db_path: Path) -> dict[str, Any]:
+    """Import fixed-URL capture metadata through the project importer.
+
+    Args:
+        paths: Capture metadata paths emitted by the child.
+        db_path: Destination SQLite database.
+
+    Returns:
+        Structured importer result and bounded output tails.
+
+    """
     if not paths:
         return {"skipped": True, "reason": "no_capture_meta_paths"}
     command = [
@@ -480,7 +686,18 @@ def import_capture_results(paths: list[str], db_path: Path) -> dict[str, Any]:
     }
 
 
-def next_run_time(row: sqlite3.Row, classification: dict[str, Any], config: dict[str, Any]) -> str | None:
+def next_run_time(row: JobRow, classification: dict[str, Any], config: dict[str, Any]) -> str | None:
+    """Calculate the next eligible run time from a classified attempt.
+
+    Args:
+        row: Executed scheduler job.
+        classification: Stable attempt classification.
+        config: Active crawl configuration.
+
+    Returns:
+        Next ISO timestamp, or ``None`` for an operator-blocked job.
+
+    """
     status = classification["status"]
     if status in {"blocked", "login_required", "captcha_detected", "failed_final"}:
         return None
@@ -497,7 +714,7 @@ def next_run_time(row: sqlite3.Row, classification: dict[str, Any], config: dict
 def finalize_attempt(
     conn: sqlite3.Connection,
     *,
-    row: sqlite3.Row,
+    row: JobRow,
     attempt_id: int,
     completed: subprocess.CompletedProcess[str] | None,
     classification: dict[str, Any],
@@ -506,6 +723,20 @@ def finalize_attempt(
     import_result: dict[str, Any],
     config: dict[str, Any],
 ) -> None:
+    """Persist a terminal scheduler attempt and update its job status.
+
+    Args:
+        conn: Scheduler database connection.
+        row: Executed scheduler job.
+        attempt_id: Running attempt identifier.
+        completed: Child process result, when one was launched.
+        classification: Stable attempt classification.
+        artifact_dir: Primary child artifact directory.
+        capture_meta_paths: Fixed-URL capture metadata paths.
+        import_result: Persistence verification or import result.
+        config: Active crawl configuration.
+
+    """
     exit_code = completed.returncode if completed is not None else None
     stdout_tail = tail(completed.stdout if completed is not None else "")
     stderr_tail = tail(completed.stderr if completed is not None else "")
@@ -565,6 +796,8 @@ def finalize_attempt(
 
 
 def markdown_report(summary: dict[str, Any]) -> str:
+    """Render a compact Markdown report for one root run."""
+    scheduling = summary.get("scheduling") or {}
     lines = [
         "# 抓取运行摘要",
         "",
@@ -575,6 +808,10 @@ def markdown_report(summary: dict[str, Any]) -> str:
         f"- 完成：`{summary['completed_count']}`",
         f"- 失败：`{summary['failed_count']}`",
         f"- 阻断/需人工：`{summary['blocked_count']}`",
+        f"- 平台执行通道：`{scheduling.get('platform_lane_count', 0)}`",
+        f"- 计划并行 worker：`{scheduling.get('planned_workers', 0)}`",
+        f"- 有效并行 worker：`{scheduling.get('effective_workers', 0)}`",
+        f"- 并行执行：`{str(bool(scheduling.get('parallel_execution'))).lower()}`",
         "",
         "## 任务结果",
         "",
@@ -603,6 +840,7 @@ def markdown_report(summary: dict[str, Any]) -> str:
 
 
 def create_run_report(conn: sqlite3.Connection, run_id: str) -> None:
+    """Create the running root-report row."""
     conn.execute(
         "INSERT OR REPLACE INTO crawl_run_reports(run_id, started_at, status) VALUES (?, ?, 'running')",
         (run_id, iso()),
@@ -611,6 +849,7 @@ def create_run_report(conn: sqlite3.Connection, run_id: str) -> None:
 
 
 def finish_run_report(conn: sqlite3.Connection, run_id: str, summary: dict[str, Any], report_path: Path) -> None:
+    """Finalize the root-report row with its immutable summary."""
     run_status = "failed" if summary["failed_count"] else ("blocked" if summary["blocked_count"] else "completed")
     conn.execute(
         """
@@ -634,98 +873,215 @@ def finish_run_report(conn: sqlite3.Connection, run_id: str, summary: dict[str, 
     conn.commit()
 
 
-def main() -> int:
-    args = parse_args()
-    if (args.start_page is not None or args.resume_summary or args.recovery_keyword) and not args.job_key:
-        raise SystemExit("recovery options require --job-key")
-    if args.recovery_keyword and not args.resume_summary:
-        raise SystemExit("--recovery-keyword requires --resume-summary")
-    if args.start_page is not None and args.start_page <= 0:
-        raise SystemExit("--start-page must be positive")
-    db_path = Path(args.db).expanduser()
-    config_path = Path(args.config).expanduser()
-    config = validate_crawl_config(load_json(config_path), config_path)
-    run_id = utc_stamp()
-    run_dir = ensure_dir(Path(args.run_root).expanduser() / run_id)
-    state_dir = ensure_dir(Path(args.execution_state_root).expanduser() / run_id)
-    contract_path = FORMAL_CRAWL_CONTRACT
+def prepare_job(
+    conn: sqlite3.Connection,
+    row: JobRow,
+    args: argparse.Namespace,
+    *,
+    selection_index: int,
+    run_id: str,
+    config_path: Path,
+    db_path: Path,
+    state_dir: Path,
+    contract_path: Path,
+) -> PreparedJob:
+    """Resolve and freeze one selected job before any child starts.
 
-    ensure_parent(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        bootstrap = bootstrap_connection(conn, config=config, sync_jobs=not args.no_sync_config)
-        synced = int(bootstrap["synced_jobs"])
-        if args.sync_only:
-            print(json.dumps({"db": str(db_path), **bootstrap}, ensure_ascii=False, indent=2))
-            return 0
+    Args:
+        conn: Scheduler database connection.
+        row: Selected scheduler job.
+        args: Invocation-level runner arguments.
+        selection_index: Deterministic selection position.
+        run_id: Current root-run identifier.
+        config_path: Active configuration path.
+        db_path: Active SQLite database path.
+        state_dir: Root directory for this run's execution states.
+        contract_path: Formal crawl contract path.
 
-        create_run_report(conn, run_id)
-        jobs = select_due_jobs(conn, args)
-        records: list[dict[str, Any]] = []
-        for row in jobs:
-            job_args, discovery_plan = resolve_discovery_args(conn, row, args, run_id=run_id)
-            command = build_command(row, job_args)
-            frozen_inputs = [config_path, contract_path]
-            if getattr(job_args, "resume_summary", None):
-                resume_path = Path(job_args.resume_summary).expanduser().resolve()
-                resume_summary = load_json(resume_path)
-                frozen_inputs.append(resume_path)
-                for record in resume_summary.get("records") or []:
-                    output = record.get("output") if isinstance(record, dict) else {}
-                    for path_value in (output or {}).get("jsonl_files") or []:
-                        frozen_inputs.append(Path(path_value).expanduser().resolve())
-            state_path = state_dir / f"{row['job_key']}.json"
-            state = FrozenExecutionState.create(
-                state_path,
-                run_id=run_id,
-                job_key=str(row["job_key"]),
-                site_key=str(row["site_key"]),
-                job_kind=str(row["job_kind"]),
-                plan={
-                    "contract_path": str(contract_path.resolve()),
-                    "config_path": str(config_path.resolve()),
-                    "database_path": str(db_path.resolve()),
-                    "job_params": params_for(row),
-                    "completion_policy": "source_exhausted",
-                    "local_image_storage_required": row["job_kind"] == "mediacrawler_search",
-                    "media_root": (
-                        str(LOCAL_MEDIA_ROOT.resolve())
-                        if row["job_kind"] == "mediacrawler_search"
-                        else None
-                    ),
-                    "command": command,
-                    "discovery": discovery_plan,
-                    "no_import": bool(args.no_import),
-                    "dry_run": bool(args.dry_run),
-                },
-                frozen_inputs=frozen_inputs,
-                dry_run=args.dry_run,
-            )
-            if args.dry_run:
-                records.append(
-                    {
-                        "job_key": row["job_key"],
-                        "site_key": row["site_key"],
-                        "job_kind": row["job_kind"],
-                        "status": "planned",
-                        "failure_type": "",
-                        "retryable": False,
-                        "artifact_dir": "",
-                        "capture_meta_paths": [],
-                        "command": command,
-                        "execution_state": str(state_path),
-                        "import_result": {"skipped": True, "reason": "dry_run"},
-                    }
-                )
-                continue
-            attempt_id = insert_attempt(conn, row, run_id, command)
+    Returns:
+        Frozen job ready for dry-run reporting or execution.
+
+    """
+    job_args, discovery_plan = resolve_discovery_args(conn, row, args, run_id=run_id)
+    command = build_command(row, job_args)
+    frozen_inputs = [config_path, contract_path]
+    if getattr(job_args, "resume_summary", None):
+        resume_path = Path(job_args.resume_summary).expanduser().resolve()
+        resume_summary = load_json(resume_path)
+        frozen_inputs.append(resume_path)
+        for record in resume_summary.get("records") or []:
+            output = record.get("output") if isinstance(record, dict) else {}
+            for path_value in (output or {}).get("jsonl_files") or []:
+                frozen_inputs.append(Path(path_value).expanduser().resolve())
+    lane_key = platform_lane_key(row)
+    state_path = state_dir / f"{row['job_key']}.json"
+    FrozenExecutionState.create(
+        state_path,
+        run_id=run_id,
+        job_key=str(row["job_key"]),
+        site_key=str(row["site_key"]),
+        job_kind=str(row["job_kind"]),
+        plan={
+            "contract_path": str(contract_path.resolve()),
+            "config_path": str(config_path.resolve()),
+            "database_path": str(db_path.resolve()),
+            "job_params": params_for(row),
+            "completion_policy": "source_exhausted",
+            "scheduling": {
+                "mode": "parallel_platform_lanes",
+                "lane_key": lane_key,
+                "max_parallel_platforms": int(args.max_parallel_platforms),
+            },
+            "local_image_storage_required": row["job_kind"] == "mediacrawler_search",
+            "media_root": (
+                str(LOCAL_MEDIA_ROOT.resolve())
+                if row["job_kind"] == "mediacrawler_search"
+                else None
+            ),
+            "command": command,
+            "discovery": discovery_plan,
+            "no_import": bool(args.no_import),
+            "dry_run": bool(args.dry_run),
+        },
+        frozen_inputs=frozen_inputs,
+        dry_run=args.dry_run,
+    )
+    return PreparedJob(
+        selection_index=selection_index,
+        row=row,
+        command=command,
+        discovery_plan=discovery_plan,
+        state_path=state_path,
+        lane_key=lane_key,
+    )
+
+
+def build_result_record(
+    job: PreparedJob,
+    classification: Mapping[str, Any],
+    *,
+    completed: subprocess.CompletedProcess[str] | None = None,
+    artifact_dir: str = "",
+    capture_meta_paths: Sequence[str] = (),
+    import_result: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build one stable per-job root-report record.
+
+    Args:
+        job: Prepared scheduler job.
+        classification: Stable scheduler classification.
+        completed: Child process result, when launched.
+        artifact_dir: Primary child artifact directory.
+        capture_meta_paths: Fixed-URL capture metadata paths.
+        import_result: Persistence verification or import result.
+
+    Returns:
+        JSON-serializable result record.
+
+    """
+    return {
+        "job_key": job.row["job_key"],
+        "site_key": job.row["site_key"],
+        "job_kind": job.row["job_kind"],
+        "platform_lane": job.lane_key,
+        "status": classification["status"],
+        "failure_type": classification.get("failure_type", ""),
+        "retryable": bool(classification.get("retryable")),
+        "reason": classification.get("reason", ""),
+        "exit_code": completed.returncode if completed is not None else None,
+        "stdout_tail": tail(completed.stdout, 2000) if completed is not None else "",
+        "stderr_tail": tail(completed.stderr, 2000) if completed is not None else "",
+        "artifact_dir": artifact_dir,
+        "capture_meta_paths": list(capture_meta_paths),
+        "command": job.command,
+        "execution_state": str(job.state_path),
+        "import_result": dict(import_result or {}),
+    }
+
+
+def planned_record(job: PreparedJob) -> dict[str, Any]:
+    """Build a dry-run record without starting a child or scheduler attempt."""
+    return build_result_record(
+        job,
+        {"status": "planned", "failure_type": "", "retryable": False},
+        import_result={"skipped": True, "reason": "dry_run"},
+    )
+
+
+def fail_open_execution_step(
+    state: FrozenExecutionState,
+    *,
+    error: str,
+    evidence: Mapping[str, Any],
+) -> str | None:
+    """Fail the first active execution step after an internal runner error.
+
+    Args:
+        state: Frozen state for the affected job.
+        error: Stable state error code.
+        evidence: Bounded diagnostic evidence.
+
+    Returns:
+        State-update error text when the failure could not be recorded.
+
+    """
+    try:
+        payload = state.load()
+        for step_name in (
+            "command_executed",
+            "artifacts_verified",
+            "persistence_verified",
+            "task_finalized",
+        ):
+            status = str((payload.get("steps") or {}).get(step_name, {}).get("status") or "")
+            if status in {"pending", "in_progress"}:
+                state.fail(step_name, error=error, evidence=dict(evidence))
+                return None
+            if status == "failed":
+                return None
+    except Exception as exc:
+        return repr(exc)
+    return None
+
+
+def execute_prepared_job(
+    job: PreparedJob,
+    *,
+    args: argparse.Namespace,
+    db_path: Path,
+    config: dict[str, Any],
+    run_id: str,
+) -> dict[str, Any]:
+    """Execute and finalize one prepared job with failure isolation.
+
+    Args:
+        job: Frozen job plan.
+        args: Invocation-level runner arguments.
+        db_path: Active SQLite database path.
+        config: Active crawl configuration.
+        run_id: Current root-run identifier.
+
+    Returns:
+        Per-job report record. Internal errors are converted to job failures so
+        other platform lanes continue.
+
+    """
+    row = job.row
+    state = FrozenExecutionState(job.state_path)
+    attempt_id: int | None = None
+    completed: subprocess.CompletedProcess[str] | None = None
+    artifact_dir = ""
+    capture_meta_paths: list[str] = []
+    import_result: dict[str, Any] = {"skipped": True, "reason": "command_not_completed"}
+    try:
+        with connect_db(db_path, busy_timeout_ms=RUNNER_SQLITE_BUSY_TIMEOUT_MS) as conn:
+            attempt_id = insert_attempt(conn, row, run_id, job.command)
             state.begin("command_executed")
             child_env = os.environ.copy()
-            child_env["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(state_path)
+            child_env["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(job.state_path)
             try:
                 completed = subprocess.run(
-                    command,
+                    job.command,
                     cwd=ROOT,
                     text=True,
                     capture_output=True,
@@ -734,7 +1090,7 @@ def main() -> int:
                 )
             except OSError as exc:
                 completed = subprocess.CompletedProcess(
-                    args=command,
+                    args=job.command,
                     returncode=127,
                     stdout="",
                     stderr=f"subprocess_launch_failed: {exc!r}",
@@ -749,12 +1105,8 @@ def main() -> int:
             )
             child_summary: dict[str, Any] = {}
             checkpoint_progress = False
-            if (
-                discovery_plan
-                and summary_path
-                and Path(summary_path).is_file()
-                and not args.no_import
-            ):
+            discovery_plan = job.discovery_plan
+            if discovery_plan and summary_path and Path(summary_path).is_file() and not args.no_import:
                 try:
                     child_summary = load_json(Path(summary_path))
                 except (OSError, json.JSONDecodeError, TypeError):
@@ -767,18 +1119,9 @@ def main() -> int:
                 checkpoint_before = discovery_plan.get("checkpoint_before") or {}
                 if checkpoint_after and checkpoint_after.get("last_run_id") == run_id:
                     before_position = (
-                        checkpoint_before.get(
-                            "resume_page",
-                            discovery_plan.get("resume_page"),
-                        ),
-                        checkpoint_before.get(
-                            "resume_offset",
-                            discovery_plan.get("resume_offset"),
-                        ),
-                        checkpoint_before.get(
-                            "resume_cursor",
-                            discovery_plan.get("resume_cursor"),
-                        ),
+                        checkpoint_before.get("resume_page", discovery_plan.get("resume_page")),
+                        checkpoint_before.get("resume_offset", discovery_plan.get("resume_offset")),
+                        checkpoint_before.get("resume_cursor", discovery_plan.get("resume_cursor")),
                     )
                     after_position = (
                         checkpoint_after.get("resume_page"),
@@ -822,9 +1165,7 @@ def main() -> int:
                             job_id=int(row["id"]),
                             query_fingerprint_value=str(discovery_plan["query_fingerprint"]),
                             summary_path=str(Path(summary_path).resolve()),
-                            campaign_candidate_count=int(
-                                formal_validation.get("candidate_count") or 0
-                            ),
+                            campaign_candidate_count=int(formal_validation.get("candidate_count") or 0),
                         )
                     conn.commit()
             if checkpoint_progress:
@@ -842,7 +1183,6 @@ def main() -> int:
                     evidence=command_evidence,
                 )
 
-            import_result: dict[str, Any] = {"skipped": True, "reason": "command_not_completed"}
             ready_to_finalize_state = False
             if classification.get("status") == "completed":
                 state.begin("artifacts_verified")
@@ -866,11 +1206,18 @@ def main() -> int:
                     }
                 else:
                     artifact_ok = bool(capture_meta_paths)
-                    artifact_evidence = {"capture_meta_paths": capture_meta_paths, "count": len(capture_meta_paths)}
+                    artifact_evidence = {
+                        "capture_meta_paths": capture_meta_paths,
+                        "count": len(capture_meta_paths),
+                    }
                 if artifact_ok:
                     state.complete("artifacts_verified", evidence=artifact_evidence)
                 else:
-                    state.fail("artifacts_verified", error="required_artifacts_missing", evidence=artifact_evidence)
+                    state.fail(
+                        "artifacts_verified",
+                        error="required_artifacts_missing",
+                        evidence=artifact_evidence,
+                    )
                     classification = {
                         "status": "retry_wait",
                         "failure_type": "artifact_missing",
@@ -889,7 +1236,11 @@ def main() -> int:
                     if import_result.get("ok"):
                         state.complete("persistence_verified", evidence=import_result)
                     else:
-                        state.fail("persistence_verified", error="capture_import_failed", evidence=import_result)
+                        state.fail(
+                            "persistence_verified",
+                            error="capture_import_failed",
+                            evidence=import_result,
+                        )
                 elif row["job_kind"] == "mediacrawler_search":
                     if not child_summary:
                         child_summary = load_json(Path(str(summary_path)))
@@ -926,50 +1277,237 @@ def main() -> int:
                     }
                 else:
                     ready_to_finalize_state = True
-            try:
-                finalize_attempt(
-                    conn,
-                    row=row,
-                    attempt_id=attempt_id,
-                    completed=completed,
-                    classification=classification,
-                    artifact_dir=artifact_dir,
-                    capture_meta_paths=capture_meta_paths,
-                    import_result=import_result,
-                    config=config,
-                )
-            except Exception as exc:
-                if ready_to_finalize_state:
-                    state.begin("task_finalized")
-                    state.fail(
-                        "task_finalized",
-                        error="scheduler_finalize_failed",
-                        evidence={"error": repr(exc)},
-                    )
-                raise
+            finalize_attempt(
+                conn,
+                row=row,
+                attempt_id=attempt_id,
+                completed=completed,
+                classification=classification,
+                artifact_dir=artifact_dir,
+                capture_meta_paths=capture_meta_paths,
+                import_result=import_result,
+                config=config,
+            )
             if ready_to_finalize_state:
                 state.finalize(
                     outcome="completed",
                     evidence={"classification": classification, "import_result": import_result},
                 )
-            records.append(
-                {
-                    "job_key": row["job_key"],
-                    "site_key": row["site_key"],
-                    "job_kind": row["job_kind"],
-                    "status": classification["status"],
-                    "failure_type": classification.get("failure_type", ""),
-                    "retryable": bool(classification.get("retryable")),
-                    "reason": classification.get("reason", ""),
-                    "exit_code": completed.returncode,
-                    "stdout_tail": tail(completed.stdout, 2000),
-                    "stderr_tail": tail(completed.stderr, 2000),
-                    "artifact_dir": artifact_dir,
-                    "capture_meta_paths": capture_meta_paths,
-                    "command": command,
-                    "execution_state": str(state_path),
-                    "import_result": import_result,
-                }
+            return build_result_record(
+                job,
+                classification,
+                completed=completed,
+                artifact_dir=artifact_dir,
+                capture_meta_paths=capture_meta_paths,
+                import_result=import_result,
+            )
+    except JobLeaseConflict as exc:
+        classification = {
+            "status": "blocked",
+            "failure_type": "scheduler_lease_conflict",
+            "retryable": False,
+            "reason": str(exc),
+        }
+        state_error = fail_open_execution_step(
+            state,
+            error="scheduler_lease_conflict",
+            evidence={"error": str(exc)},
+        )
+        if state_error:
+            classification["reason"] = f"{classification['reason']}; state_update_failed={state_error}"
+        return build_result_record(job, classification, import_result=import_result)
+    except Exception as exc:
+        classification = {
+            "status": "retry_wait",
+            "failure_type": "scheduler_internal_error",
+            "retryable": True,
+            "wait_seconds": 600,
+            "reason": repr(exc),
+        }
+        state_error = fail_open_execution_step(
+            state,
+            error="scheduler_internal_error",
+            evidence={"error": repr(exc)},
+        )
+        if state_error:
+            classification["reason"] = f"{classification['reason']}; state_update_failed={state_error}"
+        if attempt_id is not None:
+            try:
+                with connect_db(db_path, busy_timeout_ms=RUNNER_SQLITE_BUSY_TIMEOUT_MS) as recovery_conn:
+                    finalize_attempt(
+                        recovery_conn,
+                        row=row,
+                        attempt_id=attempt_id,
+                        completed=completed,
+                        classification=classification,
+                        artifact_dir=artifact_dir,
+                        capture_meta_paths=capture_meta_paths,
+                        import_result=import_result,
+                        config=config,
+                    )
+            except Exception as finalize_exc:
+                classification["reason"] = (
+                    f"{classification['reason']}; scheduler_finalize_failed={finalize_exc!r}"
+                )
+        return build_result_record(
+            job,
+            classification,
+            completed=completed,
+            artifact_dir=artifact_dir,
+            capture_meta_paths=capture_meta_paths,
+            import_result=import_result,
+        )
+
+
+def _run_platform_lane(
+    jobs: Sequence[PreparedJob],
+    execute_job: Callable[[PreparedJob], dict[str, Any]],
+) -> list[tuple[int, dict[str, Any]]]:
+    """Execute one platform lane serially and retain selection indexes."""
+    return [(job.selection_index, execute_job(job)) for job in jobs]
+
+
+def execute_platform_lanes(
+    jobs: Sequence[PreparedJob],
+    *,
+    max_parallel_platforms: int,
+    execute_job: Callable[[PreparedJob], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Execute different platform lanes concurrently and each lane serially.
+
+    Args:
+        jobs: Prepared jobs in deterministic scheduler order.
+        max_parallel_platforms: Maximum number of concurrent platform lanes.
+        execute_job: Failure-isolating single-job executor.
+
+    Returns:
+        Per-job records restored to deterministic scheduler order.
+
+    Raises:
+        ValueError: If the parallel-platform limit is not positive.
+
+    """
+    if max_parallel_platforms <= 0:
+        raise ValueError("max_parallel_platforms must be positive")
+    lanes: dict[str, list[PreparedJob]] = {}
+    for job in jobs:
+        lanes.setdefault(job.lane_key, []).append(job)
+    if not lanes:
+        return []
+
+    indexed_records: list[tuple[int, dict[str, Any]]] = []
+    worker_count = min(max_parallel_platforms, len(lanes))
+    if worker_count == 1:
+        for lane_jobs in lanes.values():
+            indexed_records.extend(_run_platform_lane(lane_jobs, execute_job))
+    else:
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="crawl-platform",
+        ) as executor:
+            futures = [
+                executor.submit(_run_platform_lane, lane_jobs, execute_job)
+                for lane_jobs in lanes.values()
+            ]
+            for future in as_completed(futures):
+                indexed_records.extend(future.result())
+    indexed_records.sort(key=lambda item: item[0])
+    return [record for _, record in indexed_records]
+
+
+def scheduling_summary(
+    jobs: Sequence[PreparedJob],
+    *,
+    max_parallel_platforms: int,
+    execution_enabled: bool,
+) -> dict[str, Any]:
+    """Summarize the platform-lane schedule for audit reports.
+
+    Args:
+        jobs: Prepared jobs in deterministic scheduler order.
+        max_parallel_platforms: Configured concurrency ceiling.
+        execution_enabled: Whether this invocation may start workers.
+
+    Returns:
+        JSON-serializable scheduling metadata.
+
+    """
+    lane_keys = list(dict.fromkeys(job.lane_key for job in jobs))
+    planned_workers = min(max_parallel_platforms, len(lane_keys)) if lane_keys else 0
+    effective_workers = planned_workers if execution_enabled else 0
+    return {
+        "mode": "parallel_platform_lanes",
+        "max_parallel_platforms": max_parallel_platforms,
+        "platform_lane_count": len(lane_keys),
+        "planned_workers": planned_workers,
+        "effective_workers": effective_workers,
+        "parallel_execution": effective_workers > 1,
+        "execution_started": bool(execution_enabled and jobs),
+        "lane_keys": lane_keys,
+    }
+
+
+def main() -> int:
+    """Run due crawl jobs and write deterministic root reports."""
+    args = parse_args()
+    if (args.start_page is not None or args.resume_summary or args.recovery_keyword) and not args.job_key:
+        raise SystemExit("recovery options require --job-key")
+    if args.recovery_keyword and not args.resume_summary:
+        raise SystemExit("--recovery-keyword requires --resume-summary")
+    if args.start_page is not None and args.start_page <= 0:
+        raise SystemExit("--start-page must be positive")
+    if args.max_parallel_platforms <= 0:
+        raise SystemExit("--max-parallel-platforms must be positive")
+    db_path = Path(args.db).expanduser()
+    config_path = Path(args.config).expanduser()
+    config = validate_crawl_config(load_json(config_path), config_path)
+    run_id = utc_stamp()
+    run_dir = ensure_dir(Path(args.run_root).expanduser() / run_id)
+    state_dir = ensure_dir(Path(args.execution_state_root).expanduser() / run_id)
+    contract_path = FORMAL_CRAWL_CONTRACT
+
+    ensure_parent(db_path)
+    with connect_db(db_path, busy_timeout_ms=RUNNER_SQLITE_BUSY_TIMEOUT_MS) as conn:
+        bootstrap = bootstrap_connection(conn, config=config, sync_jobs=not args.no_sync_config)
+        synced = int(bootstrap["synced_jobs"])
+        if args.sync_only:
+            print(json.dumps({"db": str(db_path), **bootstrap}, ensure_ascii=False, indent=2))
+            return 0
+
+        create_run_report(conn, run_id)
+        jobs = select_due_jobs(conn, args)
+        prepared_jobs = [
+            prepare_job(
+                conn,
+                row,
+                args,
+                selection_index=index,
+                run_id=run_id,
+                config_path=config_path,
+                db_path=db_path,
+                state_dir=state_dir,
+                contract_path=contract_path,
+            )
+            for index, row in enumerate(jobs)
+        ]
+        schedule = scheduling_summary(
+            prepared_jobs,
+            max_parallel_platforms=args.max_parallel_platforms,
+            execution_enabled=not args.dry_run,
+        )
+        if args.dry_run:
+            records = [planned_record(job) for job in prepared_jobs]
+        else:
+            records = execute_platform_lanes(
+                prepared_jobs,
+                max_parallel_platforms=args.max_parallel_platforms,
+                execute_job=lambda job: execute_prepared_job(
+                    job,
+                    args=args,
+                    db_path=db_path,
+                    config=config,
+                    run_id=run_id,
+                ),
             )
 
         blocked_statuses = {"blocked", "login_required", "captcha_detected"}
@@ -982,6 +1520,7 @@ def main() -> int:
             "config": str(config_path),
             "completion_mode": "source-exhausted",
             "execution_state_dir": str(state_dir),
+            "scheduling": schedule,
             "synced_jobs": synced,
             "jobs_selected": len(jobs),
             "completed_count": sum(1 for item in records if item["status"] == "completed"),
