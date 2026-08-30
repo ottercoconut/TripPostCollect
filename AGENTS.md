@@ -29,6 +29,8 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
   平台响应可以在内存中含头像，但必须在首次项目序列化前递归清除已知头像键及同记录内经这些键
   证明的重复 URL；视频目标、视频媒体请求和明确视频记录跳过，不作为失败。
 - `web_posts` 是用户使用的统一内容主表；`ctf_captures` 是程序和智能代理（Agent）使用的证据/调试底座。
+- 只读管理端属于同级独立项目 `../TripPostAdmin`；本仓库不再包含管理端 API、Web、Docker 或管理端
+  读模型，也不得让管理端导入采集包。两者只通过 SQLite schema、只读配置及媒体/证据文件契约协作。
 - `published_at` 必须来自平台原始发帖时间，入库保存为 Asia/Shanghai ISO；不要用抓取时间冒充发帖时间。
 - 通用正式任务从 `scripts/crawl_runner.py` 进入；小红书只从 `scripts/xhs_runner.py` 进入，禁止放回通用 job 或登录流程。
 - 通用抓取配置使用 schema v2；小红书 pool 使用 schema v2、target 使用 schema v3。小红书不再有
@@ -57,7 +59,7 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
   哈希、重新执行 `chflags uchg` 和完整验证。
 - 大型抓取产物优先看 `summary.json`、`summary.md`、`run_summary.json`、计数、字段列表、样本和标准输出/标准错误尾部摘要；不要全文展开 JSONL、HTML、过长 JSON 或截图元数据。
 - 输出包含 3 个及以上参数、长路径、JSON、环境变量或多个 `--xxx` 选项的命令时，必须用反斜杠 `\` 分行展示；每个参数或逻辑参数组单独一行，避免压缩成长单行。命令很短且参数简单时可以保持单行。
-- Python 测试使用 `pytest`，当前测试目录是 `tests/` 和 `apps/admin_api/tests/`；开发依赖通过 `python -m pip install -e '.[dev]'` 安装。
+- Python 测试使用 `pytest`，当前测试目录是 `tests/`；开发依赖通过 `python -m pip install -e '.[dev]'` 安装。
 - 模型输出尽量用中文。
 - `info_collection_benchmark.py` 只用于通用平台诊断/开发，不能作为正式轮次完成证据，也不接受小红书。
 

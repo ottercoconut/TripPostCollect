@@ -22,7 +22,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 | 微博长文与图片字段 | [微博](platforms/weibo.md) |
 | 知乎回答、文章与图片字段 | [知乎](platforms/zhihu.md) |
 | 固定 URL 页面证据 | [页面证据平台](platforms/page-evidence.md) |
-| 本地只读管理端 | [管理端维护文档](../apps/README.md) |
+| 独立只读管理端 | [TripPostAdmin](../../TripPostAdmin/README.md) |
 
 ## 内容归属
 
