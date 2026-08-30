@@ -202,6 +202,41 @@ python scripts/xhs_runner.py \
 `comment-scroll` 只访问并滚动评论区，不采集评论；`like-one` 只在明确未点赞时点击一次；`random` 在
 两者中随机选择并可能产生点赞副作用。控件普通失败只影响互动证据，频控、封禁或验证仍终止运行。
 
+### 4.1 `300011` 定时续跑
+
+已经完成同账号、同配置、同完成模式 dry-run 后，可以为可捕获的 `300011` 运行级安全限制启动专用
+控制器：
+
+```bash
+source .venv/bin/activate
+python scripts/xhs_runner.py \
+  --target-key qingdao_travel \
+  --account-id xhs-a01 \
+  --completion-mode source-exhausted \
+  --retry-on-300011
+```
+
+`--retry-on-300011` 不能与 `--dry-run` 同用。它按触发运行的 `finished_at + 30 分钟` 计算下一次执行，
+不是缩短租约 TTL，也不是固定墙钟 cron。等待期间不持有账号租约；每次到期都调用完整正式 runner，
+重新取得独立精确租约，并保持原 target、账号、配置、互动参数和完成模式。相同
+`target_key + account_id` 的控制器使用独立非阻塞 `flock`，避免重复计时。
+
+只有以下证据全部成立才进入或继续循环：最新正式终态为 `failed` 且 challenge 精确等于
+`platform_security_limit_300011`；child 摘要含完整
+`adaptive_search_stopped(runtime_failed, stop_detail=platform_security_limit_300011,
+batch_complete=false)`；SQLite checkpoint 的 run、摘要、未完成尾批和停止原因与之精确一致；同一
+`lease_id` 存在 owner-token 摘要和 `process_check.safe_to_release=true` 的 `lease_released` 审计；账号
+当前没有租约。behavior evidence、PID 文件、TTL 或宽泛进程匹配都不能单独触发重试。
+
+重试再次产生同样的完整 `300011` 终态时，从该轮结束再等待 30 分钟；正式轮完成且精确释放租约后，
+控制器以成功结束。登录、验证码、其他频控、配置错误、产物/SQLite 错误或任何证据不完整都会停止
+控制器并保留原状态，不换号、不补写终态、不导入失败轮产物，也不改变账号健康状态。中断控制器后
+可用同一命令重启；它从 SQLite 最新终态重新计算截止时间，不会因为重启立即重试。
+
+控制状态写入 `data/runtime/xhs/retry_states/<account_id>/<target-hash>.json`；SQLite 审计事件依次使用
+`security_limit_retry_scheduled`、`security_limit_retry_attempt_started`、
+`security_limit_retry_completed` 或 `security_limit_retry_stopped`。
+
 已有不完整记录只能使用独立修复入口；默认最多选 20 条，并在同一 BrowserContext 内每 5 条分批，
 避免为每批重启浏览器和制造新设备会话：
 
@@ -299,6 +334,7 @@ python scripts/repair_xhs_posts.py \
 | 任意新标签页 | 立即置前且至少保留 30 秒；明确验证页继续最长 600 秒 |
 | 详情、作者或正文图候选级失败 | 核对 `candidate_skipped` 和 manifest；整帖不入库，ID 写账号 seen，继续候选 |
 | 登录、频控、安全限制、封禁 | 运行级失败；保留 page/search ID，不写候选 seen |
+| 完整 `300011` 且已精确释放租约 | 可显式用 `--retry-on-300011` 每 30 分钟同账号续跑；其他阻断不自动重试 |
 | manifest 身份、哈希或路径错误 | 停止晋升和 checkpoint，修复代码/产物后重跑 |
 | `candidate_hard_limit_reached` / `stagnated` | 默认数量模式未完成；保留累计摘要和安全前沿 |
 | `source_exhausted` | 默认数量模式未达标时仍未完成；显式耗尽模式按正式契约判断 |

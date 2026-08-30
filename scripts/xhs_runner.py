@@ -4,13 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from execution_state import FORMAL_STEPS, FrozenExecutionState
 from failure_classifier import extract_stdout_json
@@ -25,6 +27,7 @@ from trippostcollect.core.paths import (
     PROJECT_ROOT,
     XHS_EXECUTION_STATE_ROOT,
     XHS_POOL_CONFIG,
+    XHS_RETRY_STATE_ROOT,
     XHS_RUNS_OUTPUT,
     XHS_RUNTIME_ROOT,
     XHS_TARGET_CONFIG,
@@ -51,7 +54,9 @@ from trippostcollect.xhs.sessions import (
     snapshot_sha256,
 )
 from trippostcollect.xhs.leases import (
+    AccountLeaseFileLock,
     LeaseGuard,
+    SystemProcessInspector,
     XhsLeaseSignal,
     crawl_lease_budget,
 )
@@ -59,6 +64,9 @@ from trippostcollect.xhs.leases import (
 
 ROOT = PROJECT_ROOT
 _ACTIVE_LEASE_GUARD: LeaseGuard | None = None
+PLATFORM_SECURITY_LIMIT_300011 = "platform_security_limit_300011"
+SECURITY_LIMIT_RETRY_SECONDS = 30 * 60
+RETRY_STATE_SCHEMA_VERSION = 1
 CHALLENGE_MARKERS = (
     "captcha",
     "安全验证",
@@ -92,6 +100,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-import", action="store_true")
     parser.add_argument(
+        "--retry-on-300011",
+        action="store_true",
+        help=(
+            "Release each attempt lease, wait 30 minutes after a complete "
+            "platform_security_limit_300011 terminal state, and retry until success."
+        ),
+    )
+    parser.add_argument(
         "--completion-mode",
         choices=("target-new-posts", "source-exhausted"),
         default="target-new-posts",
@@ -100,7 +116,10 @@ def parse_args() -> argparse.Namespace:
             "stagnation stops and imports only after explicit source exhaustion."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.dry_run and args.retry_on_300011:
+        parser.error("--retry-on-300011 cannot be combined with --dry-run")
+    return args
 
 
 def utc_stamp() -> str:
@@ -109,6 +128,237 @@ def utc_stamp() -> str:
 
 def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _retry_state_path(args: argparse.Namespace) -> Path:
+    account_id = validate_account_id(args.account_id)
+    digest = hashlib.sha256(
+        f"{account_id}\0{args.target_key}".encode("utf-8")
+    ).hexdigest()[:16]
+    return XHS_RETRY_STATE_ROOT / account_id / f"{digest}.json"
+
+
+def _write_retry_state(path: Path, payload: dict[str, Any]) -> None:
+    ensure_dir(path.parent)
+    document = {
+        "schema_version": RETRY_STATE_SCHEMA_VERSION,
+        **payload,
+        "updated_at": utc_iso(),
+    }
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+
+
+def _latest_terminal_xhs_run(
+    db_path: Path,
+    *,
+    target_key: str,
+    account_id: str,
+) -> dict[str, Any] | None:
+    if not db_path.is_file():
+        return None
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        row = conn.execute(
+            """
+            SELECT run_id, status, started_at, finished_at, report_json
+            FROM xhs_runs
+            WHERE target_key=? AND account_id=?
+              AND status IN ('completed', 'failed', 'blocked')
+            ORDER BY started_at DESC, run_id DESC
+            LIMIT 1
+            """,
+            (target_key, validate_account_id(account_id)),
+        ).fetchone()
+        release_row = None
+        if row is not None:
+            release_row = conn.execute(
+                """
+                SELECT details_json
+                FROM xhs_account_events
+                WHERE run_id=? AND account_id=? AND event_type='lease_released'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (str(row["run_id"]), validate_account_id(account_id)),
+            ).fetchone()
+    if row is None:
+        return None
+    try:
+        report = json.loads(str(row["report_json"] or "{}"))
+    except json.JSONDecodeError:
+        report = {}
+    if not isinstance(report, dict):
+        report = {}
+    release_verified = False
+    if release_row is not None:
+        try:
+            release_details = json.loads(str(release_row["details_json"] or "{}"))
+        except json.JSONDecodeError:
+            release_details = {}
+        process_check = release_details.get("process_check") or {}
+        release_verified = bool(
+            report.get("lease_id")
+            and release_details.get("lease_id") == report.get("lease_id")
+            and release_details.get("owner_token_sha256")
+            and process_check.get("safe_to_release") is True
+            and not process_check.get("blocking")
+        )
+    return {
+        **report,
+        "run_id": str(row["run_id"]),
+        "status": str(row["status"]),
+        "started_at": report.get("started_at") or row["started_at"],
+        "finished_at": report.get("finished_at") or row["finished_at"],
+        "lease_released": release_verified,
+    }
+
+
+def _security_limit_retry_evidence(report: dict[str, Any]) -> tuple[bool, str]:
+    if report.get("status") != "failed":
+        return False, "latest_terminal_run_not_failed"
+    if report.get("challenge") != PLATFORM_SECURITY_LIMIT_300011:
+        return False, "latest_terminal_run_not_300011"
+    if report.get("lease_released") is not True:
+        return False, "triggering_run_lease_not_released"
+    discovery = report.get("discovery") or {}
+    if discovery.get("last_stop_reason") != "runtime_failed":
+        return False, "triggering_run_discovery_not_runtime_failed"
+    child_summary_path = Path(str(report.get("child_summary") or ""))
+    if not child_summary_path.is_file():
+        return False, "triggering_run_child_summary_missing"
+    try:
+        child_summary = json.loads(child_summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, "triggering_run_child_summary_invalid"
+    pagination = child_summary.get("pagination_evidence") or {}
+    stop_event = pagination.get("stop_event") or {}
+    if not bool(pagination.get("stopped")):
+        return False, "triggering_run_stop_event_missing"
+    if pagination.get("stop_reason") != "runtime_failed":
+        return False, "triggering_run_stop_reason_mismatch"
+    if pagination.get("stop_detail") != PLATFORM_SECURITY_LIMIT_300011:
+        return False, "triggering_run_stop_detail_mismatch"
+    if stop_event.get("batch_complete") is not False:
+        return False, "triggering_run_incomplete_boundary_missing"
+    return True, "complete_300011_terminal"
+
+
+def _security_limit_retry_checkpoint_ready(
+    db_path: Path,
+    *,
+    target_key: str,
+    account_id: str,
+    report: dict[str, Any],
+) -> tuple[bool, str]:
+    child_summary = Path(str(report.get("child_summary") or "")).resolve()
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        active_lease = conn.execute(
+            "SELECT 1 FROM xhs_account_leases WHERE account_id=?",
+            (validate_account_id(account_id),),
+        ).fetchone()
+        checkpoint = conn.execute(
+            """
+            SELECT last_run_id, last_summary_path, last_batch_complete, last_stop_reason
+            FROM xhs_discovery_checkpoints
+            WHERE target_key=? AND account_id=? AND last_run_id=?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (target_key, validate_account_id(account_id), report.get("run_id")),
+        ).fetchone()
+    if active_lease is not None:
+        return False, "account_lease_still_present"
+    if checkpoint is None:
+        return False, "triggering_run_checkpoint_missing"
+    if int(checkpoint["last_batch_complete"]) != 0:
+        return False, "triggering_run_checkpoint_not_incomplete"
+    if checkpoint["last_stop_reason"] != "runtime_failed":
+        return False, "triggering_run_checkpoint_stop_reason_mismatch"
+    if not checkpoint["last_summary_path"]:
+        return False, "triggering_run_checkpoint_summary_missing"
+    if Path(str(checkpoint["last_summary_path"])).resolve() != child_summary:
+        return False, "triggering_run_checkpoint_summary_mismatch"
+    return True, "safe_checkpoint_ready"
+
+
+def _security_limit_retry_due_at(report: dict[str, Any]) -> datetime | None:
+    finished_at = _parse_utc(report.get("finished_at"))
+    if finished_at is None:
+        return None
+    return finished_at + timedelta(seconds=SECURITY_LIMIT_RETRY_SECONDS)
+
+
+def _terminal_release_ready(
+    db_path: Path,
+    *,
+    account_id: str,
+    report: dict[str, Any],
+) -> tuple[bool, str]:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA query_only = ON")
+        active_lease = conn.execute(
+            "SELECT 1 FROM xhs_account_leases WHERE account_id=?",
+            (validate_account_id(account_id),),
+        ).fetchone()
+    if active_lease is not None:
+        return False, "account_lease_still_present"
+    if report.get("lease_released") is not True:
+        return False, "terminal_run_exact_release_missing"
+    return True, "terminal_exact_release_verified"
+
+
+def _sleep_until(
+    due_at: datetime,
+    *,
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    while True:
+        remaining = (due_at - now()).total_seconds()
+        if remaining <= 0:
+            return
+        sleep(min(60.0, remaining))
+
+
+def _record_retry_event(
+    db_path: Path,
+    *,
+    args: argparse.Namespace,
+    event_type: str,
+    details: dict[str, Any],
+) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_xhs_schema(conn)
+        record_event(
+            conn,
+            account_id=args.account_id,
+            run_id=details.get("run_id"),
+            event_type=event_type,
+            details=details,
+        )
+        conn.commit()
 
 
 def tail(value: str, limit: int = 6000) -> str:
@@ -432,9 +682,9 @@ def record_preexecution_failure(
     return 2
 
 
-def _run_main() -> int:
+def _run_main(args: argparse.Namespace | None = None) -> int:
     global _ACTIVE_LEASE_GUARD
-    args = parse_args()
+    args = args or parse_args()
     target = load_target(args.target_key, args.target_config)
     pool = load_pool_config(args.pool_config)
     try:
@@ -897,23 +1147,272 @@ def _run_main() -> int:
         summary["status"] = "failed"
         summary["reason"] = "lease_release_deferred_live_processes"
     write_summary(run_dir, summary)
-    if not lease_released:
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            ensure_xhs_schema(conn)
-            upsert_run(
-                conn,
-                run_id=run_id,
-                target_key=args.target_key,
-                account_id=account["account_id"],
-                status="failed",
-                state_path=state_path,
-                child_summary_path=child_summary_path or None,
-                report=summary,
-                finished=True,
-            )
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_xhs_schema(conn)
+        upsert_run(
+            conn,
+            run_id=run_id,
+            target_key=args.target_key,
+            account_id=account["account_id"],
+            status="completed" if summary["status"] == "completed" else "failed",
+            state_path=state_path,
+            child_summary_path=child_summary_path or None,
+            report=summary,
+            finished=True,
+        )
     print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
     return 0 if summary["status"] == "completed" else 2
+
+
+def _run_security_limit_retry_controller(args: argparse.Namespace) -> int:
+    global _ACTIVE_LEASE_GUARD
+    db_path = Path(args.db).expanduser().resolve()
+    bootstrap_database(db_path, sync_jobs=False)
+    state_path = _retry_state_path(args)
+    controller_lock = AccountLeaseFileLock(state_path.with_suffix(".lock"))
+    try:
+        controller_lock.acquire()
+    except XhsAccountUnavailable as exc:
+        raise SystemExit(
+            "XHS 300011 retry controller is already active for "
+            f"account={args.account_id} target={args.target_key}: {exc.reason}"
+        ) from exc
+
+    controller = SystemProcessInspector().current_identity().public()
+    base_state = {
+        "target_key": args.target_key,
+        "account_id": validate_account_id(args.account_id),
+        "completion_mode": args.completion_mode,
+        "retry_reason": PLATFORM_SECURITY_LIMIT_300011,
+        "retry_interval_seconds": SECURITY_LIMIT_RETRY_SECONDS,
+        "controller": controller,
+    }
+    attempt_count = 0
+    scheduled_run_id = ""
+
+    def update_state(status: str, **details: Any) -> None:
+        _write_retry_state(
+            state_path,
+            {
+                **base_state,
+                "status": status,
+                "attempt_count": attempt_count,
+                **details,
+            },
+        )
+
+    def stop_for_other_outcome(
+        *,
+        report: dict[str, Any] | None,
+        reason: str,
+        exit_code: int = 2,
+    ) -> int:
+        run_id = str((report or {}).get("run_id") or "")
+        update_state(
+            "stopped",
+            last_run_id=run_id,
+            last_challenge=(report or {}).get("challenge") or "",
+            stop_reason=reason,
+            next_retry_at=None,
+        )
+        _record_retry_event(
+            db_path,
+            args=args,
+            event_type="security_limit_retry_stopped",
+            details={
+                "run_id": run_id or None,
+                "reason": reason,
+                "attempt_count": attempt_count,
+            },
+        )
+        return exit_code
+
+    try:
+        while True:
+            latest = _latest_terminal_xhs_run(
+                db_path,
+                target_key=args.target_key,
+                account_id=args.account_id,
+            )
+            if latest and latest.get("status") == "completed":
+                release_ok, release_reason = _terminal_release_ready(
+                    db_path,
+                    account_id=args.account_id,
+                    report=latest,
+                )
+                if release_reason == "account_lease_still_present":
+                    update_state(
+                        "waiting_for_account",
+                        last_run_id=latest.get("run_id"),
+                        last_challenge="",
+                        stop_reason=release_reason,
+                        next_retry_at=None,
+                    )
+                    time.sleep(60)
+                    continue
+                if not release_ok:
+                    return stop_for_other_outcome(
+                        report=latest,
+                        reason=release_reason,
+                    )
+                run_id = str(latest.get("run_id") or "")
+                update_state(
+                    "completed",
+                    last_run_id=run_id,
+                    last_challenge="",
+                    stop_reason="formal_run_completed",
+                    next_retry_at=None,
+                )
+                _record_retry_event(
+                    db_path,
+                    args=args,
+                    event_type="security_limit_retry_completed",
+                    details={
+                        "run_id": run_id,
+                        "attempt_count": attempt_count,
+                    },
+                )
+                return 0
+
+            evidence_ok = False
+            evidence_reason = "no_prior_terminal_run"
+            checkpoint_ok = False
+            checkpoint_reason = "no_prior_terminal_run"
+            if latest:
+                evidence_ok, evidence_reason = _security_limit_retry_evidence(latest)
+                if evidence_ok:
+                    checkpoint_ok, checkpoint_reason = _security_limit_retry_checkpoint_ready(
+                        db_path,
+                        target_key=args.target_key,
+                        account_id=args.account_id,
+                        report=latest,
+                    )
+
+            if evidence_ok and checkpoint_reason == "account_lease_still_present":
+                update_state(
+                    "waiting_for_account",
+                    last_run_id=latest.get("run_id"),
+                    last_challenge=latest.get("challenge"),
+                    stop_reason=checkpoint_reason,
+                    next_retry_at=None,
+                )
+                time.sleep(60)
+                continue
+
+            if evidence_ok and not checkpoint_ok:
+                return stop_for_other_outcome(
+                    report=latest,
+                    reason=checkpoint_reason,
+                )
+
+            if evidence_ok and checkpoint_ok:
+                due_at = _security_limit_retry_due_at(latest)
+                if due_at is None:
+                    return stop_for_other_outcome(
+                        report=latest,
+                        reason="triggering_run_finished_at_invalid",
+                    )
+                current = datetime.now(timezone.utc)
+                if due_at > current:
+                    run_id = str(latest.get("run_id") or "")
+                    update_state(
+                        "waiting",
+                        last_run_id=run_id,
+                        last_challenge=latest.get("challenge"),
+                        stop_reason="scheduled_after_300011",
+                        next_retry_at=due_at.isoformat(timespec="seconds"),
+                    )
+                    if scheduled_run_id != run_id:
+                        scheduled_run_id = run_id
+                        _record_retry_event(
+                            db_path,
+                            args=args,
+                            event_type="security_limit_retry_scheduled",
+                            details={
+                                "run_id": run_id,
+                                "retry_interval_seconds": SECURITY_LIMIT_RETRY_SECONDS,
+                                "next_retry_at": due_at.isoformat(timespec="seconds"),
+                                "controller": controller,
+                            },
+                        )
+                        print(
+                            json.dumps(
+                                {
+                                    "status": "waiting",
+                                    "reason": PLATFORM_SECURITY_LIMIT_300011,
+                                    "triggering_run_id": run_id,
+                                    "next_retry_at": due_at.isoformat(timespec="seconds"),
+                                    "retry_state": str(state_path),
+                                },
+                                ensure_ascii=False,
+                            ),
+                            flush=True,
+                        )
+                    _sleep_until(due_at)
+                    continue
+
+            if attempt_count and not evidence_ok:
+                return stop_for_other_outcome(
+                    report=latest,
+                    reason=evidence_reason,
+                )
+
+            triggering_run_id = str((latest or {}).get("run_id") or "")
+            attempt_count += 1
+            update_state(
+                "running",
+                last_run_id=triggering_run_id,
+                last_challenge=(latest or {}).get("challenge") or "",
+                stop_reason="retry_attempt_running",
+                next_retry_at=None,
+            )
+            _record_retry_event(
+                db_path,
+                args=args,
+                event_type="security_limit_retry_attempt_started",
+                details={
+                    "run_id": triggering_run_id or None,
+                    "attempt_count": attempt_count,
+                    "controller": controller,
+                },
+            )
+            exit_code = _run_main(args)
+            current = _latest_terminal_xhs_run(
+                db_path,
+                target_key=args.target_key,
+                account_id=args.account_id,
+            )
+            if current and current.get("lease_released") is True:
+                _ACTIVE_LEASE_GUARD = None
+            if current is None or current.get("run_id") == triggering_run_id:
+                return stop_for_other_outcome(
+                    report=current,
+                    reason="retry_attempt_terminal_report_missing",
+                    exit_code=exit_code or 2,
+                )
+            if exit_code == 0 and current.get("status") == "completed":
+                continue
+            current_evidence_ok, current_reason = _security_limit_retry_evidence(current)
+            if exit_code == 2 and current_evidence_ok:
+                current_checkpoint_ok, current_checkpoint_reason = (
+                    _security_limit_retry_checkpoint_ready(
+                        db_path,
+                        target_key=args.target_key,
+                        account_id=args.account_id,
+                        report=current,
+                    )
+                )
+                if current_checkpoint_ok:
+                    continue
+                current_reason = current_checkpoint_reason
+            return stop_for_other_outcome(
+                report=current,
+                reason=current_reason,
+                exit_code=exit_code or 2,
+            )
+    finally:
+        controller_lock.release()
 
 
 def main() -> int:
@@ -922,9 +1421,15 @@ def main() -> int:
     code = 2
     try:
         try:
-            code = _run_main()
+            args = parse_args()
+            if args.retry_on_300011:
+                code = _run_security_limit_retry_controller(args)
+            else:
+                code = _run_main(args)
         except XhsLeaseSignal as exc:
             code = 128 + exc.signum
+        except KeyboardInterrupt:
+            code = 130
     finally:
         guard = _ACTIVE_LEASE_GUARD
         _ACTIVE_LEASE_GUARD = None

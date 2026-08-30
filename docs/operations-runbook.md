@@ -343,6 +343,24 @@ python scripts/xhs_runner.py \
 确认计划后，用相同账号、目标、互动参数和完成模式移除 `--dry-run`。不得在轮次中途自动换号、关闭
 验证页或手工修改账号级 checkpoint。
 
+若正式轮以完整的 `platform_security_limit_300011` 终态停止，且精确租约释放审计和 SQLite
+checkpoint 对账均通过，可启动 30 分钟定时续跑：
+
+```bash
+source .venv/bin/activate
+python scripts/xhs_runner.py \
+  --target-key qingdao_travel \
+  --account-id xhs-a01 \
+  --completion-mode source-exhausted \
+  --retry-on-300011
+```
+
+等待期间不占账号租约；到期后的每次尝试都是完整正式轮并取得新租约。再次出现同样的完整 300011
+时，从该轮结束再等 30 分钟，正式轮成功且精确释放后停止。其他错误、终态/停止事件不完整、checkpoint
+不一致或租约仍存在时立即停止，不自动换号、补状态或导入失败产物。`--retry-on-300011` 不得与
+`--dry-run` 同用；重启同一命令会按 SQLite 最新终态的 `finished_at` 恢复计时。控制状态位于
+`data/runtime/xhs/retry_states/`，相同 target/account 由控制器 `flock` 保证单实例。
+
 小红书的短 Cookie 不能脱离设备连续性单独续期。`xhs_login.py` 与 `xhs_runner.py` 必须复用同一账号
 profile、加密 storage state、原生窗口参数和 Chrome 运行环境；关闭前快照还必须包含平台的
 sessionStorage 设备标识。启动时 profile 的现存状态优先，快照只补缺，避免旧短 Cookie 把刚刷新

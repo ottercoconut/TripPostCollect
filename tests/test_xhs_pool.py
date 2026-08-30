@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import base64
 import json
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from pathlib import Path
 
@@ -328,6 +330,480 @@ def test_xhs_runner_classifies_platform_security_limit_from_current_record_error
     }
 
     assert xhs_runner._challenge_reason("", "", child_summary) == "platform_security_limit_300011"
+
+
+def _prepare_300011_retry_database(
+    tmp_path: Path,
+    *,
+    finished_at: datetime,
+) -> tuple[Path, Path]:
+    db_path = tmp_path / "retry.sqlite"
+    bootstrap_database(db_path, sync_jobs=False)
+    child_summary_path = tmp_path / "child_summary.json"
+    child_summary_path.write_text(
+        json.dumps(
+            {
+                "pagination_evidence": {
+                    "stopped": True,
+                    "stop_reason": "runtime_failed",
+                    "stop_detail": "platform_security_limit_300011",
+                    "stop_event": {
+                        "source_page": 42,
+                        "resume_page": 42,
+                        "batch_complete": False,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_id = "security-limit-run"
+    report = {
+        "status": "failed",
+        "run_id": run_id,
+        "account_id": "xhs-a01",
+        "lease_id": "lease-security-limit",
+        "challenge": "platform_security_limit_300011",
+        "child_summary": str(child_summary_path),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "discovery": {
+            "last_stop_reason": "runtime_failed",
+            "resume_page": 42,
+        },
+    }
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO xhs_accounts(
+                account_id, status, profile_dir, encrypted_state_path,
+                created_at, updated_at
+            ) VALUES ('xhs-a01', 'active', ?, ?, ?, ?)
+            """,
+            (
+                str(tmp_path / "profile"),
+                str(tmp_path / "state.enc"),
+                finished_at.isoformat(timespec="seconds"),
+                finished_at.isoformat(timespec="seconds"),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO xhs_runs(
+                run_id, target_key, account_id, status, started_at, finished_at,
+                execution_state_path, child_summary_path, report_json
+            ) VALUES (?, 'target', 'xhs-a01', 'failed', ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                (finished_at - timedelta(minutes=1)).isoformat(timespec="seconds"),
+                finished_at.isoformat(timespec="seconds"),
+                str(tmp_path / "state.json"),
+                str(child_summary_path),
+                json.dumps(report),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO xhs_discovery_checkpoints(
+                target_key, account_id, keyword, query_fingerprint,
+                resume_page, resume_search_id, last_batch_complete,
+                last_stop_reason, last_run_id, last_summary_path,
+                campaign_candidate_count
+            ) VALUES (
+                'target', 'xhs-a01', '青岛旅游', 'fingerprint',
+                42, 'cursor-42', 0, 'runtime_failed', ?, ?, 577
+            )
+            """,
+            (run_id, str(child_summary_path)),
+        )
+        conn.execute(
+            """
+            INSERT INTO xhs_account_events(
+                account_id, run_id, event_type, details_json, created_at
+            ) VALUES ('xhs-a01', ?, 'lease_released', ?, ?)
+            """,
+            (
+                run_id,
+                json.dumps(
+                    {
+                        "lease_id": "lease-security-limit",
+                        "owner_token_sha256": "owner-token-digest",
+                        "outcome": "failed",
+                        "process_check": {
+                            "safe_to_release": True,
+                            "checks": [],
+                            "blocking": [],
+                        },
+                    }
+                ),
+                finished_at.isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+    return db_path, child_summary_path
+
+
+def _retry_args(db_path: Path) -> argparse.Namespace:
+    return argparse.Namespace(
+        db=str(db_path),
+        target_key="target",
+        account_id="xhs-a01",
+        completion_mode="source-exhausted",
+        retry_on_300011=True,
+        dry_run=False,
+    )
+
+
+def test_xhs_runner_retries_only_complete_300011_terminal(tmp_path: Path) -> None:
+    finished_at = datetime(2026, 8, 30, 10, 0, tzinfo=timezone.utc)
+    db_path, child_summary_path = _prepare_300011_retry_database(
+        tmp_path,
+        finished_at=finished_at,
+    )
+    report = xhs_runner._latest_terminal_xhs_run(
+        db_path,
+        target_key="target",
+        account_id="xhs-a01",
+    )
+    assert report is not None
+    assert xhs_runner._security_limit_retry_evidence(report) == (
+        True,
+        "complete_300011_terminal",
+    )
+    assert xhs_runner._security_limit_retry_checkpoint_ready(
+        db_path,
+        target_key="target",
+        account_id="xhs-a01",
+        report=report,
+    ) == (True, "safe_checkpoint_ready")
+    assert xhs_runner._security_limit_retry_due_at(report) == finished_at + timedelta(
+        minutes=30
+    )
+
+    child_summary_path.write_text(
+        json.dumps(
+            {
+                "pagination_evidence": {
+                    "stopped": True,
+                    "stop_reason": "runtime_failed",
+                    "stop_detail": "platform_security_limit_300011",
+                    "stop_event": {"batch_complete": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert xhs_runner._security_limit_retry_evidence(report) == (
+        False,
+        "triggering_run_incomplete_boundary_missing",
+    )
+
+
+def test_xhs_runner_300011_retry_requires_exact_release_audit(tmp_path: Path) -> None:
+    db_path, _ = _prepare_300011_retry_database(
+        tmp_path,
+        finished_at=datetime(2026, 8, 30, 10, 0, tzinfo=timezone.utc),
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE xhs_account_events
+            SET details_json=?
+            WHERE event_type='lease_released'
+            """,
+            (
+                json.dumps(
+                    {
+                        "lease_id": "wrong-lease",
+                        "owner_token_sha256": "owner-token-digest",
+                        "process_check": {
+                            "safe_to_release": True,
+                            "blocking": [],
+                        },
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    report = xhs_runner._latest_terminal_xhs_run(
+        db_path,
+        target_key="target",
+        account_id="xhs-a01",
+    )
+    assert report is not None
+    assert report["lease_released"] is False
+    assert xhs_runner._security_limit_retry_evidence(report) == (
+        False,
+        "triggering_run_lease_not_released",
+    )
+
+
+def test_xhs_runner_300011_controller_waits_without_lease_then_stops_on_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    finished_at = datetime.now(timezone.utc).replace(microsecond=0)
+    db_path, _ = _prepare_300011_retry_database(
+        tmp_path,
+        finished_at=finished_at,
+    )
+    monkeypatch.setattr(xhs_runner, "XHS_RETRY_STATE_ROOT", tmp_path / "retry_states")
+    observed_due: list[datetime] = []
+
+    def complete_externally(due_at: datetime) -> None:
+        observed_due.append(due_at)
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+            completed_at = (finished_at + timedelta(seconds=1)).isoformat(timespec="seconds")
+            conn.execute(
+                """
+                INSERT INTO xhs_runs(
+                    run_id, target_key, account_id, status, started_at, finished_at,
+                    execution_state_path, report_json
+                ) VALUES (
+                    'completed-run', 'target', 'xhs-a01', 'completed',
+                    ?, ?, ?, ?
+                )
+                """,
+                (
+                    completed_at,
+                    completed_at,
+                    str(tmp_path / "completed-state.json"),
+                    json.dumps(
+                        {
+                            "status": "completed",
+                            "run_id": "completed-run",
+                            "lease_id": "completed-lease",
+                            "finished_at": completed_at,
+                        }
+                    ),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO xhs_account_events(
+                    account_id, run_id, event_type, details_json, created_at
+                ) VALUES ('xhs-a01', 'completed-run', 'lease_released', ?, ?)
+                """,
+                (
+                    json.dumps(
+                        {
+                            "lease_id": "completed-lease",
+                            "owner_token_sha256": "completed-owner-digest",
+                            "outcome": "completed",
+                            "process_check": {
+                                "safe_to_release": True,
+                                "checks": [],
+                                "blocking": [],
+                            },
+                        }
+                    ),
+                    completed_at,
+                ),
+            )
+            conn.commit()
+
+    monkeypatch.setattr(xhs_runner, "_sleep_until", complete_externally)
+    monkeypatch.setattr(
+        xhs_runner,
+        "_run_main",
+        lambda _args: pytest.fail("controller must not run before the 30-minute timer"),
+    )
+
+    assert xhs_runner._run_security_limit_retry_controller(_retry_args(db_path)) == 0
+    assert observed_due == [finished_at + timedelta(minutes=30)]
+    state_files = list((tmp_path / "retry_states").glob("**/*.json"))
+    assert len(state_files) == 1
+    state = json.loads(state_files[0].read_text(encoding="utf-8"))
+    assert state["status"] == "completed"
+    assert state["attempt_count"] == 0
+    with sqlite3.connect(db_path) as conn:
+        event_types = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT event_type FROM xhs_account_events
+                WHERE event_type LIKE 'security_limit_retry_%'
+                """
+            )
+        }
+    assert event_types == {
+        "security_limit_retry_scheduled",
+        "security_limit_retry_completed",
+    }
+
+
+def test_xhs_runner_300011_controller_retries_repeated_limit_until_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    db_path, _ = _prepare_300011_retry_database(
+        tmp_path,
+        finished_at=now - timedelta(minutes=95),
+    )
+    monkeypatch.setattr(xhs_runner, "XHS_RETRY_STATE_ROOT", tmp_path / "retry_states")
+    monkeypatch.setattr(
+        xhs_runner,
+        "_sleep_until",
+        lambda _due_at: pytest.fail("both synthetic retry deadlines are already due"),
+    )
+    attempts: list[int] = []
+
+    def run_attempt(_args: argparse.Namespace) -> int:
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            run_id = "second-security-limit-run"
+            lease_id = "second-security-limit-lease"
+            finished_at = now - timedelta(minutes=65)
+            child_summary = tmp_path / "second_child_summary.json"
+            child_summary.write_text(
+                json.dumps(
+                    {
+                        "pagination_evidence": {
+                            "stopped": True,
+                            "stop_reason": "runtime_failed",
+                            "stop_detail": "platform_security_limit_300011",
+                            "stop_event": {"batch_complete": False},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = {
+                "status": "failed",
+                "run_id": run_id,
+                "lease_id": lease_id,
+                "challenge": "platform_security_limit_300011",
+                "child_summary": str(child_summary),
+                "finished_at": finished_at.isoformat(timespec="seconds"),
+                "discovery": {"last_stop_reason": "runtime_failed"},
+            }
+            status = "failed"
+            exit_code = 2
+        else:
+            run_id = "completed-retry-run"
+            lease_id = "completed-retry-lease"
+            finished_at = now - timedelta(minutes=1)
+            child_summary = None
+            report = {
+                "status": "completed",
+                "run_id": run_id,
+                "lease_id": lease_id,
+                "finished_at": finished_at.isoformat(timespec="seconds"),
+            }
+            status = "completed"
+            exit_code = 0
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO xhs_runs(
+                    run_id, target_key, account_id, status, started_at,
+                    finished_at, execution_state_path, child_summary_path,
+                    report_json
+                ) VALUES (?, 'target', 'xhs-a01', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    status,
+                    finished_at.isoformat(timespec="seconds"),
+                    finished_at.isoformat(timespec="seconds"),
+                    str(tmp_path / f"{run_id}-state.json"),
+                    str(child_summary) if child_summary else None,
+                    json.dumps(report),
+                ),
+            )
+            if child_summary is not None:
+                conn.execute(
+                    """
+                    UPDATE xhs_discovery_checkpoints
+                    SET last_run_id=?, last_summary_path=?,
+                        last_batch_complete=0, last_stop_reason='runtime_failed'
+                    WHERE target_key='target' AND account_id='xhs-a01'
+                    """,
+                    (run_id, str(child_summary)),
+                )
+            conn.execute(
+                """
+                INSERT INTO xhs_account_events(
+                    account_id, run_id, event_type, details_json, created_at
+                ) VALUES ('xhs-a01', ?, 'lease_released', ?, ?)
+                """,
+                (
+                    run_id,
+                    json.dumps(
+                        {
+                            "lease_id": lease_id,
+                            "owner_token_sha256": f"{lease_id}-owner-digest",
+                            "outcome": status,
+                            "process_check": {
+                                "safe_to_release": True,
+                                "checks": [],
+                                "blocking": [],
+                            },
+                        }
+                    ),
+                    finished_at.isoformat(timespec="seconds"),
+                ),
+            )
+            conn.commit()
+        return exit_code
+
+    monkeypatch.setattr(xhs_runner, "_run_main", run_attempt)
+    assert xhs_runner._run_security_limit_retry_controller(_retry_args(db_path)) == 0
+    assert attempts == [1, 2]
+    state_file = next((tmp_path / "retry_states").glob("**/*.json"))
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state["status"] == "completed"
+    assert state["attempt_count"] == 2
+    with sqlite3.connect(db_path) as conn:
+        attempt_events = conn.execute(
+            """
+            SELECT COUNT(*) FROM xhs_account_events
+            WHERE event_type='security_limit_retry_attempt_started'
+            """
+        ).fetchone()[0]
+    assert attempt_events == 2
+
+
+def test_xhs_runner_300011_controller_rejects_duplicate_timer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _ = _prepare_300011_retry_database(
+        tmp_path,
+        finished_at=datetime.now(timezone.utc).replace(microsecond=0),
+    )
+    monkeypatch.setattr(xhs_runner, "XHS_RETRY_STATE_ROOT", tmp_path / "retry_states")
+    args = _retry_args(db_path)
+    state_path = xhs_runner._retry_state_path(args)
+    lock = xhs_runner.AccountLeaseFileLock(state_path.with_suffix(".lock"))
+    lock.acquire()
+    try:
+        with pytest.raises(SystemExit, match="retry controller is already active"):
+            xhs_runner._run_security_limit_retry_controller(args)
+    finally:
+        lock.release()
+
+
+def test_xhs_runner_rejects_retry_timer_in_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "xhs_runner.py",
+            "--target-key",
+            "target",
+            "--account-id",
+            "xhs-a01",
+            "--dry-run",
+            "--retry-on-300011",
+        ],
+    )
+    with pytest.raises(SystemExit):
+        xhs_runner.parse_args()
 
 
 def test_xhs_runner_ignores_prior_resume_challenge_when_latest_record_is_clean() -> None:
