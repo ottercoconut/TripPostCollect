@@ -85,6 +85,21 @@ def test_platform_security_limit_runtime_error_is_blocked() -> None:
     }
 
 
+def test_structured_platform_security_limit_beats_zero_exit_code() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=0,
+        meta={"structured_markers": {"platform_security_limit": True}},
+    )
+
+    assert result == {
+        "status": "blocked",
+        "failure_type": "platform_security_limit",
+        "retryable": False,
+        "wait_seconds": 0,
+        "reason": "platform_security_limit_300011",
+    }
+
+
 def test_generic_retry_later_text_is_not_xhs_platform_security_limit() -> None:
     result = failure_classifier.classify_attempt(
         exit_code=1,

@@ -152,6 +152,15 @@ def classify_attempt(
             "reason": stdout_json.get("reason") or "policy_blocked",
         }
 
+    if bool(markers.get("platform_security_limit")):
+        return {
+            "status": "blocked",
+            "failure_type": "platform_security_limit",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": "platform_security_limit_300011",
+        }
+
     if exit_code == 0 and not meta.get("blocked_detected"):
         return {
             "status": "completed",
@@ -199,7 +208,7 @@ def classify_attempt(
             "reason": "chromium_or_playwright_launch_failed",
         }
 
-    if bool(markers.get("platform_security_limit")) or PLATFORM_SECURITY_LIMIT_PATTERNS.search(text):
+    if PLATFORM_SECURITY_LIMIT_PATTERNS.search(text):
         return {
             "status": "blocked",
             "failure_type": "platform_security_limit",

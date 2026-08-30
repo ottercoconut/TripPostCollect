@@ -81,6 +81,10 @@ execution state、checkpoint、cursor、账号状态或 staging 产物。任何�
 过近的失败时间或已过期租约都会拒绝执行。回收后仍须重新 dry-run，并由正式 runner 从 SQLite 的
 最后安全 checkpoint 恢复；孤儿运行没有最终摘要的 staging 不得直接晋升或导入。
 
+搜索或作者补全阶段发现的 `300011` 运行级限制必须在进程退出前先写入
+`adaptive_search_stopped(runtime_failed, stop_detail=platform_security_limit_300011, batch_complete=false)`；
+单独的 behavior evidence 不能授权孤儿租约回收，也不能推进 checkpoint。
+
 ## 2. 登记与登录
 
 新账号只登记一次：
