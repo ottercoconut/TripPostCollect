@@ -1,6 +1,6 @@
 # 正式抓取运行手册
 
-本文只维护操作命令、恢复动作和检查顺序。完成模式、成功谓词、错误分类与候选记忆语义以
+本文只维护操作命令、恢复动作和检查顺序。来源耗尽成功谓词、错误分类与候选记忆语义以
 [正式抓取执行契约](formal-crawl-contract.md)为准；平台特有步骤以 `docs/platforms/` 为准。
 
 ## 通用平台执行顺序
@@ -18,7 +18,6 @@ python scripts/login_warmup.py --targets all
 source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
-  --completion-mode target-new-posts \
   --max-jobs 5
 ```
 
@@ -28,24 +27,21 @@ python scripts/crawl_runner.py \
 source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
-  --job-key <job_key> \
-  --completion-mode target-new-posts
+  --job-key <job_key>
 ```
 
 dry-run 会同步调度表并写报告和 execution state，但不访问平台或写内容表。预期只有
-`plan_frozen=completed`，其余四阶段保持 `frozen`，任务状态为 `planned`。确认配置、关键词、完成模式、
-目标、候选上限、自动恢复位置和 child 命令后再正式执行：
+`plan_frozen=completed`，其余四阶段保持 `frozen`，任务状态为 `planned`。确认配置、关键词、
+来源耗尽策略、自动恢复位置和 child 命令后再正式执行：
 
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \
-  --completion-mode target-new-posts \
   --max-jobs 3
 ```
 
-指定 job 时，正式命令使用与 dry-run 相同的 `--job-key` 和 `--completion-mode`。只有用户明确要求
-抓完当前关键词结果时，才把两条命令都改为 `--completion-mode source-exhausted`；不得用超大目标或
-候选上限模拟来源耗尽。
+指定 job 时，正式命令使用与 dry-run 相同的 `--job-key`。正式结构化抓取固定抓到可验证来源耗尽，
+不接受数量目标、候选硬上限、停滞停止或完成模式选择参数。
 
 只同步主配置：
 
@@ -65,8 +61,7 @@ source .venv/bin/activate
 python scripts/mediacrawler_crawl.py \
   --platforms weibo \
   --keyword 青岛旅游 \
-  --candidate-hard-limit 20 \
-  --target-new-posts 0 \
+  --timeout-per-platform 120 \
   --download-images \
   --media-root temp/diagnostic_media \
   --no-import
@@ -87,7 +82,7 @@ du -sh data/media outputs/mediacrawler_runs 2>/dev/null
 
 空间不足时在 child 启动前停止，不要删除本轮 staging 或长期文件来勉强继续。
 
-普通新增抓取依赖事务和内容寻址幂等，不要求每轮复制整库。批量修复、清理或人工 SQL 写默认库前，
+正式来源耗尽抓取依赖事务和内容寻址幂等，不要求每轮复制整库。批量修复、清理或人工 SQL 写默认库前，
 必须建立 SQLite 一致性备份并记录 SHA-256：
 
 ```bash
@@ -182,7 +177,7 @@ python scripts/repair_post_details.py \
 
 小红书既有记录修复允许一种平台原生完整形态：本轮 `note_detail` 已同时观察到非空 `title` 和至少一张
 详情 `image_list` 正文图时，`desc` 为空不记为 `missing_content`。该例外只作用于 repair 模式，不把
-标题复制成正文，也不放宽普通新增抓取的正文契约；标题、正文和图片都为空仍是内容缺失。
+标题复制成正文，也不放宽正式发现抓取的正文契约；标题、正文和图片都为空仍是内容缺失。
 
 ## 自动恢复与检查
 
@@ -221,8 +216,7 @@ source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
   --no-sync-config \
-  --job-key <job_key> \
-  --completion-mode target-new-posts
+  --job-key <job_key>
 ```
 
 核对规则：
@@ -266,14 +260,14 @@ execution state 是否存在、是否含 `adaptive_search_stopped`、尾批和�
 能否释放账号互斥。即使 state 缺失或没有停止事件，只要旧 runner/child/exporter/profile Chrome 已被
 精确证明全部死亡，也允许写 `orphan_lease_reconciled` 并只回收该租约。该动作不得补写 state、推进
 checkpoint/cursor/seen/campaign、导入或删除旧 staging、写内容 SQLite，或改变账号状态。随后必须先用
-同账号、同配置、同完成模式 dry-run，再由新正式轮从最后安全 checkpoint 恢复。
+同账号、同配置 dry-run，再由新正式轮从最后安全 checkpoint 恢复。
 
 `--start-page`、`--resume-summary` 和 `--recovery-keyword` 只用于用户明确批准的人工恢复。优先修复
 自动 checkpoint；不得删除数据库记录后猜页码续跑。平台 cursor 细节见对应平台文档。
 
 ## 一次性配置
 
-新关键词、临时数量、平台组合或候选扩容使用 `config/one_off/` 的派生配置，不直接修改长期主配置。
+新关键词、平台组合、顶部刷新或超时调整使用 `config/one_off/` 的派生配置，不直接修改长期主配置。
 派生文件必须保留主配置的 defaults 和全部长期 job；否则同步会禁用遗漏的任务。
 
 1. 确认关键词属于青岛范围，记录目标 job 原值。
@@ -297,11 +291,10 @@ checkpoint/cursor/seen/campaign、导入或删除旧 staging、写内容 SQLite�
      --config config/one_off/<task-config>.json \
      --dry-run \
      --no-sync-config \
-     --job-key <job_key> \
-     --completion-mode target-new-posts
+     --job-key <job_key>
    ```
 
-4. 正式轮使用完全相同的配置、job 和完成模式，只移除 `--dry-run`。
+4. 正式轮使用完全相同的配置和 job，只移除 `--dry-run`。
 5. 验收后执行主配置 `python scripts/crawl_runner.py --sync-only` 恢复长期调度范围。
 
 派生配置从首次同步至验收完成不得修改，并作为该轮冻结证据保留；不要复用旧 one-off job key。
@@ -336,11 +329,10 @@ python scripts/xhs_login.py \
 python scripts/xhs_runner.py \
   --dry-run \
   --target-key qingdao_travel \
-  --account-id xhs-a01 \
-  --completion-mode target-new-posts
+  --account-id xhs-a01
 ```
 
-确认计划后，用相同账号、目标、互动参数和完成模式移除 `--dry-run`。不得在轮次中途自动换号、关闭
+确认计划后，用相同账号、目标和互动参数移除 `--dry-run`。不得在轮次中途自动换号、关闭
 验证页或手工修改账号级 checkpoint。
 
 若正式轮以完整的 `platform_security_limit_300011` 终态停止，且精确租约释放审计和 SQLite
@@ -351,7 +343,6 @@ source .venv/bin/activate
 python scripts/xhs_runner.py \
   --target-key qingdao_travel \
   --account-id xhs-a01 \
-  --completion-mode source-exhausted \
   --retry-on-300011
 ```
 
@@ -404,9 +395,9 @@ runner run_summary.json
 正式任务至少确认：
 
 - 顶层任务为 `completed`，五个冻结阶段全部 `completed`；
-- 完成模式对应的 `new_target_met` 或 `source_exhausted_met` 为 true；
+- `source_exhausted_met=true`，并存在对应的 `adaptive_search_stopped(source_exhausted)`；
 - `behavior_validation.ok`、行为和策略门禁通过；
-- `processed_rows`、`inserted_rows`、`updated_rows` 分开报告，数量模式实际新增达到目标；
+- `processed_rows`、`inserted_rows`、`updated_rows` 分开报告，并与 SQLite 实际事务结果一致；
 - 未使用 `--no-import`，`persistence_verified` 没有被诊断性 `skipped` 代替；
 - `image_materialization.required/promotion_required/complete` 均为 true，失败数组和失败计数为空；
 - manifest 身份、SHA 与计数已由 `artifacts_verified` 复验；
@@ -416,7 +407,7 @@ runner run_summary.json
   宽泛扫描历史 `outputs/`、备份或冻结证据；
 - 分页证据包含停止事件；只有批次事件而无停止事件时按运行失败处理。
 
-固定 URL 页面任务成功只代表该页面证据完成，不代表平台批量目标完成。页面证据执行器只记录图片
+固定 URL 页面任务成功只代表该页面证据完成，不代表平台批量来源耗尽。页面证据执行器只记录图片
 请求聚合计数，不保存任意图片响应 URL 或响应体；截图仍是整页证据附件，不拆分为图片关系。
 
 ### 常见失败分流

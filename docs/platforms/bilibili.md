@@ -1,6 +1,6 @@
 # B站 article
 
-B站正式能力只抓取 article/专栏图文。完成模式、候选失败、图片重试、事务和 checkpoint 的共享语义
+B站正式能力只抓取 article/专栏图文。来源耗尽、候选失败、图片重试、事务和 checkpoint 的共享语义
 见[正式抓取执行契约](../formal-crawl-contract.md)；本文只记录 B站差异。
 
 ## 入口
@@ -17,11 +17,10 @@ B站正式能力只抓取 article/专栏图文。完成模式、候选失败、�
 source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
-  --job-key mc_bilibili_qingdao_laoshan_guide_article \
-  --completion-mode target-new-posts
+  --job-key mc_bilibili_qingdao_laoshan_guide_article
 ```
 
-计划必须包含 `--platforms bilibili`、正式字段 profile、正文图片参数和本轮完成模式。
+计划必须包含 `--platforms bilibili`、正式字段 profile、正文图片参数和来源耗尽策略。
 
 ## 详情与字段来源
 
@@ -62,9 +61,9 @@ Cookie。HTTP 401/403/429、业务码 `-101/-509/-412/-352`、登录、授权、
 首次从第 1 页开始；有 checkpoint 时先刷新顶部，再从 `resume_page` 继续。数据库、累计摘要、seen、
 人工排除和本轮已处理集合中的 ID 在详情前跳过。完整深层页保存下一页；页中途停止保留当前页。
 
-B站停滞以是否发现未知 article ID 为基础，而不是有效图文数量。详情或图片候选级失败形成
-`candidate_skipped` 后可作为已处理候选继续跨页，但不增加有效新增数。判断是否扩容时同时查看新 ID、
-详情成功、候选跳过和有效新增数。
+批次仍按是否发现未知 article ID 记录停滞诊断，而不是按有效图文数量；该诊断不触发停止。详情或
+图片候选级失败形成 `candidate_skipped` 后可作为已处理候选继续跨页，但不增加有效记录数。排障时
+同时查看新 ID、详情成功、候选跳过和有效记录数，正式完成仍只接受来源耗尽。
 
 ## 历史事件
 

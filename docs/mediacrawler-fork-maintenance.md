@@ -35,7 +35,7 @@ TripPostCollect 的授权、低频、图文限定、证据保存和 SQLite 入�
 4. 在 MediaCrawler 自身 `.venv` 中运行测试；Redis、MongoDB 等外部依赖不可用时，分别报告环境跳过
    或失败，不能把排除后的套件冒充完整全绿。
 5. 在根项目 `.venv` 中运行受影响文件的 Ruff、编译、根项目全量测试和冻结文件校验。
-6. 通过根项目 `scripts/mediacrawler_crawl.py --no-import` 做青岛相关、候选上限明确、媒体根位于
+6. 通过根项目 `scripts/mediacrawler_crawl.py --no-import` 做青岛相关、超时边界明确、媒体根位于
    `temp/` 的真实低频诊断。诊断不写 SQLite、不推进 checkpoint，也不作为正式抓取完成证据。
 7. 所有门禁通过后，先快进 MediaCrawler 本地 `main`，再提交和快进根项目 `main`；不得只合并其中
    一个仓库。

@@ -9,7 +9,7 @@
 - 正式抓取只运行 `scripts/xhs_runner.py`；账号管理和登录分别只运行 `xhs_accounts.py`、
   `xhs_login.py`。
 - 不把小红书放入通用 runner、warmup、`crawl_targets.json`、benchmark 或通用策略冷却。
-- pool/target 使用 schema v2，没有 `enabled` 或图片开关；显式 runner 命令是唯一启动动作。
+- pool 使用 schema v2、target 使用 schema v3，没有 `enabled` 或图片开关；显式 runner 命令是唯一启动动作。
 - 必须人工传 `--account-id`；一轮内不自动选号、换号、绕过验证或放宽字段。
 - 正式 child 固定下载正文图片并真实入库；`--no-import` 只用于诊断。
 - 账号 profile、加密状态、租约、checkpoint、seen 和累计摘要都按账号隔离。
@@ -32,7 +32,7 @@
 
 ## 正文与图片差异
 
-- 普通新增抓取的正文必须来自笔记详情非空 `desc`，保存
+- 正式发现抓取的正文必须来自笔记详情非空 `desc`，保存
   `content_detail_status=detail_observed`、`content_detail_source=note_detail`。既有记录修复另允许平台原生的
   无 `desc` 图文笔记：必须由本轮 `note_detail` 同时观察到非空 `title` 和至少一张详情 `image_list`
   正文图；标题仍只写 `title`，不得复制到 `content_text`，也不得使用搜索卡片标题或摘要补正文。
@@ -55,12 +55,12 @@ python scripts/xhs_accounts.py list
 继续前逐项确认：
 
 - 操作人已指定账号；状态为 `active`，没有活动租约；`storage_state.enc` 存在且可解密。
-- `target_key` 存在且关键词属于青岛；目标、候选上限、顶部刷新、停滞批次和超时符合本轮要求。
+- `target_key` 存在且关键词属于青岛；顶部刷新和超时符合本轮要求。
 - `behavior_profile=xhs_guarded` 且使用有头浏览器。
 - pool 的 `lease_seconds` 是租期上限，必须覆盖动态租期：目标 `timeout_seconds`、30 秒 child 进程组
   关闭预算和 270 秒根层加密、验证、摘要与数据库收尾预算之和；正式租约只写本目标实际所需时长。
 - 互动未明确时为 `none`；点赞等真实副作用必须由操作人明确选择。
-- schema v2 配置没有旧 `enabled` 或 `download_images` 字段。
+- pool schema v2 与 target schema v3 配置没有旧开关或数量控制字段。
 - checkpoint 引用的累计摘要及全部 JSONL 仍存在。
 
 缺少任一前提即停止，不直接调用 MediaCrawler 探测或绕过门禁。
@@ -153,22 +153,21 @@ python scripts/xhs_login.py \
 
 ## 3. 冻结计划
 
-dry-run 必须使用正式轮相同的账号、目标、互动参数和完成模式：
+dry-run 必须使用正式轮相同的账号、目标和互动参数：
 
 ```bash
 source .venv/bin/activate
 python scripts/xhs_runner.py \
   --dry-run \
   --target-key qingdao_travel \
-  --account-id xhs-a01 \
-  --completion-mode target-new-posts
+  --account-id xhs-a01
 ```
 
 确认：
 
 - 顶层为 `planned`，只有 `plan_frozen=completed`，其余阶段为 `frozen`；
 - pool、target、正式契约及其 SHA-256 已冻结；
-- 账号、关键词、数量、候选上限、profile、互动和有头模式正确；
+- 账号、关键词、来源耗尽策略、profile、互动和有头模式正确；
 - preflight 证明账号 active、无租约、密文可读且租约覆盖超时；
 - discovery 与该账号 checkpoint 一致：首次 page 1、顶部刷新 0；续跑有保存的 page、非空 search ID、
   顶部刷新页数及可选累计摘要。
@@ -184,8 +183,7 @@ dry-run 不申请正式租约、不解密运行时明文、不构造 child 命�
 source .venv/bin/activate
 python scripts/xhs_runner.py \
   --target-key qingdao_travel \
-  --account-id xhs-a01 \
-  --completion-mode target-new-posts
+  --account-id xhs-a01
 ```
 
 显式互动在一轮最多一次：
@@ -195,7 +193,6 @@ source .venv/bin/activate
 python scripts/xhs_runner.py \
   --target-key qingdao_travel \
   --account-id xhs-a01 \
-  --completion-mode target-new-posts \
   --post-interaction comment-scroll
 ```
 
@@ -204,7 +201,7 @@ python scripts/xhs_runner.py \
 
 ### 4.1 `300011` 定时续跑
 
-已经完成同账号、同配置、同完成模式 dry-run 后，可以为可捕获的 `300011` 运行级安全限制启动专用
+已经完成同账号、同配置 dry-run 后，可以为可捕获的 `300011` 运行级安全限制启动专用
 控制器：
 
 ```bash
@@ -212,13 +209,12 @@ source .venv/bin/activate
 python scripts/xhs_runner.py \
   --target-key qingdao_travel \
   --account-id xhs-a01 \
-  --completion-mode source-exhausted \
   --retry-on-300011
 ```
 
 `--retry-on-300011` 不能与 `--dry-run` 同用。它按触发运行的 `finished_at + 30 分钟` 计算下一次执行，
 不是缩短租约 TTL，也不是固定墙钟 cron。等待期间不持有账号租约；每次到期都调用完整正式 runner，
-重新取得独立精确租约，并保持原 target、账号、配置、互动参数和完成模式。相同
+重新取得独立精确租约，并保持原 target、账号、配置和互动参数。相同
 `target_key + account_id` 的控制器使用独立非阻塞 `flock`，避免重复计时。
 
 只有以下证据全部成立才进入或继续循环：最新正式终态为 `failed` 且 challenge 精确等于
@@ -260,8 +256,7 @@ python scripts/repair_xhs_posts.py \
 `repair_fallback_evidence.metrics.<field>.source=existing_web_posts_metric`，不能据此放宽普通新抓取
 门禁，也不能用旧标题、搜索摘要或旧正文替代详情正文。
 
-运行中不得修改 pool/target。只有用户明确要求抓完来源时，dry-run 和正式轮一起改为
-`source-exhausted`；不写回配置。
+运行中不得修改 pool/target。正式轮固定抓到可验证来源耗尽，不提供数量或完成模式切换。
 
 ## 5. 抓取中的固定行为
 
@@ -299,13 +294,14 @@ python scripts/repair_xhs_posts.py \
 - 成功作者结果只在本轮按作者 ID 缓存，不替代来源证据。
 - 有 checkpoint 时用新 search ID 刷新顶部，再用保存的 `page + search_id` 恢复深层；顶部刷新不
   覆盖深层位置。深层耗尽后只刷新顶部。
-- 未知笔记 ID 才占候选预算；数据库、账号 seen、累计摘要和本轮已见 ID 在详情前过滤。完整页保存
+- 只有未知笔记 ID 才进入候选处理；数据库、账号 seen、累计摘要和本轮已见 ID 在详情前过滤。完整页保存
   下一页，页中途停止保存当前页。
-- 默认模式达到有效新增目标立即停止；候选上限不是预定抓取量。连续停滞按“本批没有有效新增”累计。
+- `stagnant_batches` 按“本批没有有效新增”累计，仅作诊断；它不触发停止。正常停止只接受可验证的
+  `source_exhausted`，运行级阻断按失败处理。
 
 ## 6. 完成检查
 
-先按[正式契约](../formal-crawl-contract.md)核对五阶段、完成模式、行为/策略、图片和真实新增。小红书
+先按[正式契约](../formal-crawl-contract.md)核对五阶段、来源耗尽、行为/策略、图片和真实持久化。小红书
 还必须确认：
 
 - 顶层 `run_summary.json` 为 `completed`，账号租约已经释放；
@@ -336,8 +332,8 @@ python scripts/repair_xhs_posts.py \
 | 登录、频控、安全限制、封禁 | 运行级失败；保留 page/search ID，不写候选 seen |
 | 完整 `300011` 且已精确释放租约 | 可显式用 `--retry-on-300011` 每 30 分钟同账号续跑；其他阻断不自动重试 |
 | manifest 身份、哈希或路径错误 | 停止晋升和 checkpoint，修复代码/产物后重跑 |
-| `candidate_hard_limit_reached` / `stagnated` | 默认数量模式未完成；保留累计摘要和安全前沿 |
-| `source_exhausted` | 默认数量模式未达标时仍未完成；显式耗尽模式按正式契约判断 |
+| 连续批次没有新有效记录 | 只核对诊断计数并继续；不能据此停止或推断耗尽 |
+| `source_exhausted` | 只有停止事件、`source_exhausted_met` 与正式持久化门禁全部通过才完成 |
 | 超时或缺少停止事件 | `runtime_failed`，不能推断来源耗尽 |
 | 保存的 search ID 恢复失败 | 保留 checkpoint，不生成新 ID 猜测深页 |
 | 累计摘要或 JSONL 缺失 | 冻结前失败；恢复原文件或停止，不清空路径继续 |
@@ -358,8 +354,8 @@ python scripts/repair_xhs_posts.py \
 `resume_search_id`、dry-run `plan.discovery.resume_search_id`、child `--start-cursor` 和分页事件
 cursor 表示同一个 client search ID。
 
-页面中途 `target_new_met` 且入库成功时，checkpoint 保留当前 page/search ID，
-`last_batch_complete=false`、来源未耗尽时 `status=active`；清空累计摘要但不删除前沿或 seen。
+来源耗尽且入库成功时，checkpoint 保存耗尽坐标、完整停止证据和本轮摘要身份；后续轮次只做顶部
+刷新，只有平台提供新的可验证来源链时才重建深层前沿。seen 保留，累计摘要在成功提交后清空。
 
 ## 8. 账号与状态存储
 

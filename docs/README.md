@@ -8,7 +8,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 
 | 任务 | 必读文档 |
 |---|---|
-| 正式抓取、数量、成功和失败语义 | [正式抓取执行契约](formal-crawl-contract.md) |
+| 正式抓取、来源耗尽、成功和失败语义 | [正式抓取执行契约](formal-crawl-contract.md) |
 | 命令、登录、恢复和结果检查 | [正式抓取运行手册](operations-runbook.md) |
 | 抖音、微博、知乎历史详情修复 | [正式抓取运行手册](operations-runbook.md#通用平台历史详情修复) |
 | 调度器、执行器和数据流 | [抓取架构](crawl-architecture.md) |
@@ -40,8 +40,10 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 
 ## 正式入口
 
-普通抓取、新增 N 条或达到配置目标使用 `target-new-posts`；只有用户明确要求抓完当前关键词结果时
-才使用 `source-exhausted`。完整完成判据见[正式抓取执行契约](formal-crawl-contract.md)。
+正式结构化抓取只保留全量来源耗尽流程。runner 持续处理未知候选，只有取得可验证的
+`source_exhausted` 停止证据并完成字段、行为、正文图片和 SQLite 持久化门禁后才算完成。数量目标、
+候选硬上限、停滞停止和完成模式选择均不再提供。完整完成判据见
+[正式抓取执行契约](formal-crawl-contract.md)。
 
 B站、微博、抖音和知乎从通用 runner 进入。先检查登录态：
 
@@ -56,7 +58,6 @@ python scripts/login_warmup.py --targets all
 source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
-  --completion-mode target-new-posts \
   --max-jobs 5
 ```
 
@@ -65,7 +66,6 @@ python scripts/crawl_runner.py \
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \
-  --completion-mode target-new-posts \
   --max-jobs 3
 ```
 

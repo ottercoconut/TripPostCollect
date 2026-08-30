@@ -31,15 +31,14 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - `web_posts` 是用户使用的统一内容主表；`ctf_captures` 是程序和智能代理（Agent）使用的证据/调试底座。
 - `published_at` 必须来自平台原始发帖时间，入库保存为 Asia/Shanghai ISO；不要用抓取时间冒充发帖时间。
 - 通用正式任务从 `scripts/crawl_runner.py` 进入；小红书只从 `scripts/xhs_runner.py` 进入，禁止放回通用 job 或登录流程。
-- 小红书配置使用 schema v2，不再有 pool/target `enabled` 开关；显式 `xhs_runner.py` 命令是唯一启动动作，不为每轮修改或恢复配置开关，旧字段直接视为配置错误。
+- 通用抓取配置使用 schema v2；小红书 pool 使用 schema v2、target 使用 schema v3。小红书不再有
+  pool/target `enabled` 开关；显式 `xhs_runner.py` 命令是唯一启动动作，不为每轮修改或恢复配置开关，
+  旧字段直接视为配置错误。
 - 通用状态写入 `data/runtime/crawl_execution_states/`；小红书状态写入 `data/runtime/xhs/execution_states/`。进入下一阶段前重新读取状态并确认上一阶段完成，不得手工解冻或补签。
-- 正常正式抓取默认使用 `target-new-posts` 完成模式，以 `candidate_hard_limit`、
-  `target_new_posts` 和 `required_fields_profile` 为准；数据库已有记录只算更新，未达到
-  `valid_new_count` 新增目标不得汇报完成。`source-exhausted` 只能由用户针对某一轮显式要求，
-  是不写回配置的临时完成模式；dry-run 与正式命令必须使用相同的 `--completion-mode`。
-- `candidate_hard_limit` 是未知候选的安全上限，不是预定抓取量；实际候选从 0 按页增长并在达到
-  `target_new_posts` 时立即停止。永久提高小红书目标时必须同步核对候选上限、停滞批次、顶部刷新、
-  超时与账号租约，并用独立 dry-run 冻结验证。
+- 正式结构化抓取只保留来源耗尽语义：持续处理未知候选，直到平台返回可验证的来源耗尽证据，或
+  遇到运行级阻断。数量目标、候选硬上限和停滞停止条件均已删除；旧配置字段和旧 CLI 参数直接
+  视为错误，不保留兼容层。`required_fields_profile`、行为/策略、正文图片和 SQLite 持久化门禁仍然
+  全部生效。
 - 五个正式结构化搜索平台都由 runner 自动维护 SQLite 抓取记忆：首次从第一页开始，续跑先有限刷新顶部再恢复深层前沿；正常 workflow 不手工传页码、摘要或游标。通用平台按 job 与查询指纹保存安全前沿、有效累计摘要和所有已处理候选 ID；小红书使用独立表并额外按人工指定账号隔离所有已处理候选 ID。
 - 通用 `--dry-run` 不访问平台内容，但默认会同步调度表并写 run report、摘要和 execution state；小红书 dry-run 不构造 child 命令且没有 `import_result`，以后四阶段保持 `frozen` 证明未执行。
 - B站、微博、小红书、抖音、知乎粉丝量为必需字段；数值、来源和 `followers_observed=true` 必须同时存在，平台不提供时只能由配置声明 `ignored`。
@@ -91,24 +90,20 @@ python scripts/crawl_runner.py --sync-only
 source .venv/bin/activate
 python scripts/crawl_runner.py \
   --dry-run \
-  --completion-mode target-new-posts \
   --max-jobs 5
 ```
 
 ```bash
 source .venv/bin/activate
 python scripts/crawl_runner.py \
-  --completion-mode target-new-posts \
   --max-jobs 3
 ```
 
 ## 任务路由
 
-- 正式抓取必须同时使用共享核心 `trippostcollect-crawl`，并选择恰好一个完成模式 Skill：用户要求
-  新增数量、达到配置目标或普通正式抓取时使用 `trippostcollect-crawl-to-target`；只有用户明确要求
-  当前关键词来源耗尽、不设数量限制或抓完结果时使用
-  `trippostcollect-crawl-to-source-exhaustion`。二者不得同时用于同一任务。
-- 通用正式抓取、数量、停止和成功：读 `docs/formal-crawl-contract.md`、`config/crawl_targets.json`、`scripts/crawl_runner.py`。
+- 正式抓取必须同时使用共享核心 `trippostcollect-crawl` 和唯一正式模式 Skill
+  `trippostcollect-crawl-to-source-exhaustion`；普通执行、恢复和“抓完结果”都走同一来源耗尽流程。
+- 通用正式抓取、停止和成功：读 `docs/formal-crawl-contract.md`、`config/crawl_targets.json`、`scripts/crawl_runner.py`。
 - 小红书账号、登录、抓取和失败恢复：先完整执行 `docs/platforms/xhs.md` 的阶段清单，再读
   `config/xhs_*.json` 和对应的 `scripts/xhs_accounts.py`、`scripts/xhs_login.py`、`scripts/xhs_runner.py`；
   不得把小红书放入通用 runner、warmup、benchmark 或中途自动换号。
@@ -129,8 +124,8 @@ python scripts/crawl_runner.py \
 - 冻结资产：运行 `python scripts/verify_frozen_files.py`，确保正文与 `config/frozen_files.json` 的
   SHA-256 基线一致。
 - 调度改动至少做 `--dry-run` 试运行或小范围运行验证。
-- 默认 `target-new-posts` 模式未达目标时必须检查页级状态；即使来源耗尽也不能汇报数量目标完成。
-  显式 `source-exhausted` 模式只有在 `source_exhausted_met=true` 且存在对应
-  `adaptive_search_stopped` 证据时才完成；没有停止证据仍按 `runtime_failed` 继续排查。
+- 正式结构化抓取只有在 `source_exhausted_met=true` 且存在对应
+  `adaptive_search_stopped(source_exhausted)` 证据时才完成；没有停止证据仍按 `runtime_failed`
+  继续排查，不能按候选数、页数或停滞推断耗尽。
 - 入库或数据库结构改动使用临时 SQLite 验证，并用 SQL 检查行数和关键字段。
 - 最终说明变更文件、验证命令和关键产物路径；不要粘贴大段日志或原始 JSON。

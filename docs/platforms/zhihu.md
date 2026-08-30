@@ -41,8 +41,9 @@
 有 checkpoint 时先刷新顶部，再从保存页码继续；完整页保存下一页，页中途停止保留当前页。正常
 workflow 不手工传 `--start-page` 或 `--resume-summary`。
 
-连续停滞使用 `stagnation_basis=valid_new`：只有批次没有新增满足正式字段 profile、且数据库中不存在
-的有效记录时才累计；新无效候选、重复候选和数据库已有记录都不能重置停滞计数。
+批次使用 `stagnation_basis=valid_new` 记录诊断计数：只有批次没有新增满足正式字段 profile、且
+数据库中不存在的有效记录时才累计；新无效候选、重复候选和数据库已有记录都不能重置该计数。
+该计数不触发停止，正式完成只接受来源耗尽。
 
 重新核验一组已知 answer/article URL 时，使用根执行器的
 `--zhihu-detail-urls-file <JSON数组文件> --no-import` 诊断模式。它不写正式 checkpoint 或数据库，

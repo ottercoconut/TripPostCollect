@@ -2,20 +2,17 @@
 
 > **受限冻结：** 本文件属于治理基线；普通抓取、排障或顺手同步不得修改，只有用户明确授权治理变更，并同步核验对应代码、测试与关联文档时才允许更新。
 
-本文定义正式抓取的机器语义。数量、平台参数和必需字段 profile：通用平台在
+本文定义正式抓取的机器语义。平台参数和必需字段 profile：通用平台在
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
 `config/xhs_pool.json` 中配置。本文不重复平台数值。
 
 > B站、微博、抖音、知乎和小红书五个平台默认均可运行。通用 runner 只选择当前配置中
 > `enabled=true` 的 job；小红书因账号隔离由操作人显式运行独立 runner。两类入口服从相同的
-> 完成模式和正式证据门禁。
+> 来源耗尽完成谓词和正式证据门禁。
 
-操作层使用 `trippostcollect-crawl` 作为共享核心，并为每个正式任务选择且只选择一个模式 Skill：
-
-- `trippostcollect-crawl-to-target` 固定使用 `target-new-posts`；
-- `trippostcollect-crawl-to-source-exhaustion` 固定使用 `source-exhausted`，且只能由用户明确要求触发。
-
-模式 Skill 只负责选择 runner 参数与完成谓词，不拥有第二套平台、分页、登录或入库实现。
+操作层对每个正式任务同时使用共享核心 `trippostcollect-crawl` 和唯一正式模式 Skill
+`trippostcollect-crawl-to-source-exhaustion`。普通正式执行、恢复和抓完当前结果都使用同一套平台、
+分页、登录、来源耗尽与入库实现；不存在可选的数量完成模式。
 
 ## 项目主题范围
 
@@ -30,8 +27,7 @@ Unicode NFKC、大小写和空白归一后包含“青岛”或该记录实际�
 `topic_relevant=true`，否则为 `false`。不得扫描 `raw_sample_json`、作者、URL 或其他元数据，
 也不得把平台清洗前标题或正文作为分类输入；两个字段不拼接，不允许关键词跨标题与正文边界命中；
 不做分词、同义词、城市别名或地理推断。
-不相关的结构完整记录仍保留入库供审计，但不增加数量
-目标；固定 URL 页面证据同样显式计算该标记。
+不相关的结构完整记录仍保留入库供审计；固定 URL 页面证据同样显式计算该标记。
 
 ## 唯一入口
 
@@ -44,9 +40,8 @@ Unicode NFKC、大小写和空白归一后包含“青岛”或该记录实际�
   开发或诊断验证；以后若配置 `job_kind=ctf_resource_crawl`，正式执行必须由调度器调用。
 
 任何入口使用 `--no-import` 都是诊断运行。即使摘要或冻结状态因执行与产物校验通过而显示
-`completed`，没有执行真实 SQLite 持久化就不满足正式完成契约。默认数量模式必须核对实际
-`topic_relevant_inserted_rows` 达标；显式来源耗尽模式允许相关新增为 0，但仍须核对持久化阶段完成和实际
-计数。不得用 `import_new_target_met`、退出码或状态文件替代对应校验。
+`completed`，没有执行真实 SQLite 持久化就不满足正式完成契约。来源耗尽允许相关新增为 0，但仍须
+核对持久化阶段完成和实际处理、新增、更新计数。不得用退出码或状态文件替代对应校验。
 
 五个平台的正式结构化 child 命令必须由 runner 固定注入 `--download-images` 和
 `--media-root <项目内 data/media 的绝对路径>`。`--download-images` 表示“下载并验证权威正文图”，
@@ -67,7 +62,7 @@ B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
 5. 汇总行为证据、分页证据和字段校验后决定是否入库。
 
 请求预算的计量单位是一次正式平台抓取会话，不按页面加载产生的每个图片、脚本或底层 API
-请求重复计数。该门禁不改变原平台分页大小、候选上限、字段映射或去重规则。
+请求重复计数。该门禁不改变原平台分页大小、字段映射或去重规则。
 
 每个平台本轮摘要必须包含 `policy_events` 和 `behavior_evidence`。行为证据至少包含
 `pause`、`mouse_moves`、`human_scroll_complete`、运行时指纹、可见页面阻断标记，以及截图
@@ -87,55 +82,40 @@ B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
 记录本轮证据，等待操作人指挥。断点续跑只校验本次新执行记录的行为与策略证据，不要求历史
 摘要补造新字段。
 
-## 数量定义
+## 来源耗尽与计数字段
 
-完成模式分为两种：
+正式结构化发现抓取只有 `source-exhausted` 一种完成语义，runner 不提供完成模式选择参数。通用配置
+schema v2 与小红书 target schema v3 都拒绝旧数量控制字段，执行器也拒绝旧数量 CLI 参数，不保留
+运行时兼容。分页循环持续处理未知候选，只有平台返回可验证的来源耗尽证据，或出现超时、登录/
+验证、频控及其他运行级阻断时才停止。候选数量、连续无新增批次和名义页数只能作为审计指标，不能
+触发正常停止，也不能证明来源耗尽。
 
-- `target-new-posts` 是正常默认模式。数量目标、候选硬上限和停滞批次均生效，只有新增与实际入库
-  达到配置目标才完成。
-- `source-exhausted` 是用户明确要求某一轮时才启用的临时模式。它只由 runner 的
-  `--completion-mode source-exhausted` 注入当前进程，不写回配置；dry-run 与正式运行必须使用相同
-  参数。该模式不以 `target_new_posts`、`candidate_hard_limit` 或停滞批次作为完成/停止门禁，而以
-  平台返回可验证的来源耗尽证据为完成条件。超时、登录/验证阻断、字段 profile、行为/策略证据和
-  实际入库要求仍然有效。
+历史详情修复按用户授权后冻结的精确帖子清单验收 `repair_import_met`，不发现新候选，也不复用来源
+耗尽谓词；它不是另一种按数量停止的发现模式。
 
-CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和正式运行中显式传入选定值，
-便于冻结状态审计。`completion_mode` 不属于来源查询参数，不进入查询指纹；两种模式切换时继承
-同一任务的 checkpoint、累计摘要和候选记忆，不得清空进度或重扫已处理候选。
-
-- `candidate_hard_limit`：单次 child 执行允许进入字段校验的未知原始候选上限，不是跨多次
-  续跑活动的总预算，也不是底层请求参数的同义词。数据库、当前累计摘要、对应平台的持久候选
-  记忆表或本次已见集合中已知的平台 ID 会在详情、作者补全和媒体处理前跳过，不消耗该预算。
-- `target_new_posts`：正常默认模式下，本轮必须取得并实际新增到 SQLite 的唯一、结构有效且
-  `topic_relevant=true` 的图文数。
-- `valid_new_count`：完成视频过滤、平台 ID 去重、必需字段校验和作者字段补全后，且
-  主题相关、SQLite 中不存在相同平台 ID（缺失时按规范 URL）的记录数。它等于
-  `topic_relevant_new_count`，继续保留为数量完成的稳定字段。
-- `valid_existing_count`：本次产物中完成字段校验、主题相关、但 SQLite 已有对应记录的数量；它们不计入
-  `target_new_posts`。发现阶段提前识别并跳过的已知 ID 不进入本计数。
+- `candidate_count`：本轮完成候选级处理的原始候选计数，仅用于审计。数据库、当前累计摘要、对应
+  平台的持久候选记忆表或本次已见集合中已知的平台 ID 会在详情、作者补全和媒体处理前跳过。
+- `valid_new_count`：完成视频过滤、平台 ID 去重、必需字段校验和作者字段补全后，且主题相关、
+  SQLite 中不存在相同平台 ID（缺失时按规范 URL）的记录数。它等于
+  `topic_relevant_new_count`，是结果统计而不是完成门禁。
+- `valid_existing_count`：本次产物中完成字段校验、主题相关、但 SQLite 已有对应记录的数量。
+  发现阶段提前识别并跳过的已知 ID 不进入本计数。
 - `topic_irrelevant_new_count` / `topic_irrelevant_existing_count`：结构完整但主题不相关的新增/既有
-  记录数；它们进入正式入库集合但不推动目标。
+  记录数；它们进入正式入库集合并单独统计。
 - `processed_rows`：执行过入库 upsert 的行数，不表示新增数或有效数。
 - `inserted_rows` / `updated_rows`：数据库新增和更新数量，必须分别报告。
   `updated_rows` 表示相同平台 ID（缺失时用规范 URL）已存在，本轮用最新字段覆盖该行并
   重建其图片关系；它不是额外新增记录，也不表示平台内容一定发生过编辑。
 - `topic_relevant_inserted_rows` / `topic_relevant_updated_rows` 与对应的
-  `topic_irrelevant_*` 字段：实际事务结果的主题分项。数量模式只用相关 inserted 分项验收。
+  `topic_irrelevant_*` 字段：实际事务结果的主题分项。
 
-候选累计从 0 开始，按平台实际分页逐个增加。正常默认模式在达到 `target_new_posts`、来源明确
-耗尽、连续停滞、运行超时或触及 `candidate_hard_limit` 时停止；临时 `source-exhausted` 模式忽略
-新增目标、候选硬上限和停滞停止条件，只在来源明确耗尽或出现运行阻断时停止。`candidate_hard_limit` 不是要求底层
-预取或处理的固定数量。小红书提高永久正式目标时必须同时核对候选上限、`max_stagnant_batches`、
-`top_refresh_max_pages`、`timeout_seconds` 和账号 `lease_seconds`；租约必须至少覆盖超时加 300 秒。
-这些运行预算不属于查询来源参数，调整后继续使用原目标、账号和查询指纹对应的 checkpoint，
-但必须通过新的 dry-run 冻结并核对实际计划。
+小红书必须同时核对 `top_refresh_max_pages`、`timeout_seconds` 与账号 `lease_seconds`；租期由目标超时、
+child 进程组关闭和根层收尾预算动态计算，pool 值是允许的上限。这些运行预算不属于查询来源参数，
+调整后继续使用原目标、账号和查询指纹对应的 checkpoint，但必须通过新的 dry-run 冻结并核对计划。
 
-正常默认模式只有 `valid_new_count >= target_new_posts` 才能进入入库阶段，并且实际
-`topic_relevant_inserted_rows >= target_new_posts` 才能标记 `import_new_target_met=true`。显式
-`source-exhausted` 模式只有 `formal_validation.source_exhausted_met=true` 才进入入库；此时新增数
-可以低于目标甚至为 0，`new_target_met` / `import_new_target_met` 不作为完成门禁，但仍必须真实执行
-持久化阶段并分别报告处理、新增和更新。任何模式都不能用退出码、`processed_rows`、
-`updated_rows`、少量样本或历史数据库总量替代相应门禁。
+发现抓取只有 `formal_validation.source_exhausted_met=true` 才能进入正式持久化；此时新增数可以为 0，
+但仍必须真实执行持久化阶段并分别报告处理、新增和更新。不能用退出码、`processed_rows`、
+`updated_rows`、候选数、少量样本或历史数据库总量替代来源耗尽和持久化门禁。
 
 ## 有效记录
 
@@ -188,7 +168,7 @@ CLI 省略参数时仍默认 `target-new-posts`；模式 Skill 在 dry-run 和�
 图片来源序号和当前 page/offset/cursor。该整帖不得写入正式 JSONL 或内容数据库，也不得把已成功的
 图片子集解释为完整帖子；失败 ID 作为“已处理但未成功”写入同作用域 seen，child 继续后续候选，
 checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有效新增数，但不阻断后续
-`target_new_met`、候选上限、停滞或真实 `adaptive_search_stopped(source_exhausted)`。
+真实 `adaptive_search_stopped(source_exhausted)`。
 其中 HTTP 401/403 属于登录或授权阻断，HTTP 429 属于频控阻断，必须保存为运行级
 `image_auth_required` / `image_rate_limited` 并立即停止，不能写 `candidate_skipped` 或 seen。HTTP 400/404、
 格式、解码、大小等候选自身终态图片错误保留具体错误码和 `retryable=false`，不强行补足
@@ -221,7 +201,7 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 详情已修复或平台历史库存已清零。撤销 waiver 也必须由用户针对精确帖子明确授权。
 
 分页证据为 `runtime_failed`、`login_required`、`captcha_detected`，或本轮任一目标 child 未成功完成时，
-运行失败门禁必须覆盖已经达到的数量目标：`completion_met=false`，不得晋升图片或进入 SQLite 事务。
+必须保持 `completion_met=false`，不得晋升图片或进入 SQLite 事务。
 组合门禁失败时也必须保留这一优先级：已有 `runtime_failed`、`login_required` 或
 `captcha_detected` 不得被图片不完整、行为证据或策略证据的较低级停止原因覆盖。
 
@@ -280,27 +260,22 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 
 ## 停止状态
 
-- `target_new_met`：有效新增图文达到目标。
-- `candidate_hard_limit_reached`：实际候选达到硬上限但目标未达成。
 - `source_exhausted`：平台明确返回空页、空游标或 `has_more=false`，且状态文件存在对应
   `adaptive_search_stopped` 证据。抖音新鲜游标链的第 1 页是例外：`data=[]` 与
   `has_more=false` 不能单独证明耗尽；还必须由当前可见搜索页明确显示无结果，停止细节写为
   `verified_empty_first_page`。可见页仍有作品或页面状态不明确时必须写
   `runtime_failed`，分别使用 `empty_api_response_with_visible_results` 或
   `ambiguous_empty_first_page`，并保留第 1 页、offset 0、空 search ID 供下轮重取。
-- `stagnated`：连续配置批次没有产生平台定义的新候选或有效新增。批次必须记录
-  `stagnation_basis`、新候选 ID 数和有效新增数；B站、微博、抖音、知乎和小红书各自的候选身份、
-  cursor 与停滞例外只在对应平台文档维护。停滞永远不能代替 `target_new_met` 或
-  `source_exhausted`。
+- 批次中的 `stagnant_batches` 与 `stagnation_basis` 仅供审计。无论连续多少批没有新候选或有效记录，
+  都不能停止正式分页，也不能代替 `source_exhausted`。
 - `login_required` / `captcha_detected`：登录或验证阻断。
 - `runtime_failed`：浏览器或本地运行环境失败。
 - `image_materialization_incomplete`：已选入正式有效集合的正文图 manifest 或 staging 字节校验不完整。
   身份、格式、哈希和路径边界错误必须先修复代码或产物，不能降级为 URL-only；候选请求阶段已完成
   适用重试的帖子或图片失败不进入该集合，而是记录 `candidate_skipped` 后继续。
 
-默认 `target-new-posts` 模式只有 `target_new_met` 可以汇报完成；显式 `source-exhausted` 模式只有
-`source_exhausted` 且 `source_exhausted_met=true` 可以汇报完成。其他停止状态均不能完成。固定 URL
-页面任务的成功仍只代表该页面证据完成，不代表平台批量目标完成。
+只有 `source_exhausted` 且 `source_exhausted_met=true` 可以汇报正式结构化抓取完成。其他停止状态均
+不能完成。固定 URL 页面任务的成功仍只代表该页面证据完成，不代表平台批量来源已经耗尽。
 
 每个分页批次必须记录平台页码、请求游标或 search ID（平台提供时）、下一游标、可恢复的
 下一页/offset/cursor、批次是否完整、发现阶段、原始返回条数和 `has_more`（平台提供时）。
@@ -310,9 +285,8 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 新鲜第 1 页为空时另存 `douyin_empty_first_page_checked`，只记录计数、匹配到的可见无结果标记、
 URL 和检查错误，不保存完整响应或整页文本。
 仅有一条或多条 `adaptive_batch_completed`、但没有
-`adaptive_search_stopped` 的任务，不得推断为 `source_exhausted`；任何模式都按 `runtime_failed`
-处理。默认数量模式的分页循环以实际候选累计到 `candidate_hard_limit` 为边界，不得用
-“页数 × 名义页大小”提前截断；显式来源耗尽模式不使用该数量边界。
+`adaptive_search_stopped` 的任务，不得推断为 `source_exhausted`；一律按 `runtime_failed`
+处理。不得用“页数 × 名义页大小”、候选累计数或连续停滞批次数提前截断。
 
 ## 持久化发现记忆与跨次累计
 
@@ -323,7 +297,7 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 维护 `xhs_discovery_checkpoints`，以 `target_key + account_id + query_fingerprint` 唯一定位，
 并在同一作用域的 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID；两者不与通用任务或
 其他账号共享未入库活动。指纹包含平台、关键词和影响来源结果的查询参数，
-不包含候选上限、目标数、超时、登录和顶部刷新页数。关键词或来源查询参数改变时必须形成新
+不包含超时、登录和顶部刷新页数。关键词或来源查询参数改变时必须形成新
 记忆，不得误用旧游标。
 
 通用平台在昂贵处理前跳过 `web_posts` 已有 ID、累计摘要中的有效 ID、
@@ -355,26 +329,21 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 存在 checkpoint 时，runner 自动把保存位置传给 child；有未完成累计摘要时再传入上一份
 `summary.json`。child 先刷新
 配置的 `top_refresh_max_pages` 个顶部页面，再从保存前沿继续。顶部刷新用于发现新近发布内容，
-不推进深层 checkpoint，也不累计前沿停滞；已知 ID 在详情、粉丝和媒体处理前跳过。深层批次
+不推进深层 checkpoint；已知 ID 在详情、粉丝和媒体处理前跳过。深层批次
 完整结束才推进到下一页；抖音恢复命令必须同时包含 `--start-page`、`--start-offset` 和非空
 `--start-cursor`，小红书深页恢复必须同时包含 `--start-page` 和非空 `--start-cursor`。只有
 页码没有 search ID 的请求是无效恢复。
 
-默认数量模式下，未达到目标的产物不单独入库。runner 保存其摘要路径，下一次将历史与本次 JSONL
-合并校验，并只向底层下发剩余新增目标；`candidate_hard_limit` 每次 child 执行重新提供完整预算，
-不从历史候选数中扣减。累计主题相关 `valid_new_count` 达到完整 `target_new_posts` 后，才把累计中
-全部结构有效记录（含不相关记录）一次性原子入库并清空摘要。显式来源耗尽模式改为在本轮取得可
-验证耗尽证据后入库全部结构有效记录，不等待数量目标。checkpoint 本身
-保留，供下一次定时任务继续向后发现。前沿推进但默认模式本次尚未达标时不增加连续失败，下一次
-按任务正常调度间隔运行；无推进的运行错误仍按重试策略处理。
+运行级阻断或未取得停止证据的产物不单独入库。runner 保存安全摘要引用，下一次将历史与本次
+JSONL 合并校验并从最后完整前沿继续；只有取得可验证耗尽证据后，才把累计中全部结构有效记录
+（含主题不相关记录）一次性原子入库并清空累计摘要。checkpoint 本身保留，供下一次定时任务先刷新
+顶部，再判断是否出现新的来源链。运行错误仍按重试策略处理。
 
 `source_exhausted` checkpoint 默认不再盲目请求原深页，只执行顶部刷新。抖音的耗尽只证明旧
 search ID 游标链结束：若顶部刷新同时观察到至少一个不在数据库、累计摘要或持久候选集合中的
 新候选 ID、最新响应 `has_more=true`
 且带非空下一 search ID，child 必须记录 `discovery_frontier_reseeded`，从该刷新链的下一组三元组
 建立新前沿并替换旧耗尽 checkpoint；任一条件缺失时保持耗尽，只做顶部刷新，避免每轮盲扫旧结果。
-若顶部刷新已经达到 `target_new_met`，本轮立即结束且不建立新前沿，旧耗尽 checkpoint 保持不变；
-下一次正式轮次再按相同双重证据判断是否需要建立新 cursor 前沿。
 来源重新出现未知内容时仍可累计。`--no-import` 诊断自动禁用 checkpoint 写入。通用 runner 的显式 `--resume-summary`、
 `--start-page` 和 `--recovery-keyword` 仅用于人工恢复，不是正常 workflow；使用显式参数时调度器
 不自动混入旧 checkpoint。小红书不开放这些人工恢复参数，全部由独立 runner 从账号级 checkpoint
@@ -392,7 +361,7 @@ checkpoint 并按 `runtime_failed` 停止，不得静默生成新 ID 请求猜�
 - `retryable_failures`、`terminal_failures`、`complete`；
 - `manifest_paths`、`manifest_sha256`、逐文件 `manifest_evidence` 和 `failures`。
 
-根项目必须先用 `promotion_required=false` 只读复验全部 staging/manifest，并同时完成数量或来源耗尽、
+根项目必须先用 `promotion_required=false` 只读复验全部 staging/manifest，并同时完成来源耗尽、
 字段、行为与策略门禁；任何门禁未通过时不得写 `data/media`，摘要写
 `promotion_deferred=true` 和具体 `promotion_deferred_reason`。只有这些门禁全部通过，正式运行才以
 `promotion_required=true` 再次复验并晋升，然后进入 SQLite 事务。晋升函数在当前文件写入失败时
@@ -416,7 +385,7 @@ SAVEPOINT 只允许隔离单帖写入，不能因 `RELEASE SAVEPOINT` 提前提�
 `promoted_images + reused_images == unique_images`；诊断模式要求
 `promotion_required=false`，两项长期文件计数保持 0。执行器同时写
 `formal_validation.image_materialization_complete=true`；多平台收集的正式校验必须满足
-`local_images_complete=true`、`local_image_failure_count=0`。以上谓词还要与原数量/来源耗尽、
+`local_images_complete=true`、`local_image_failure_count=0`。以上谓词还要与来源耗尽、
 字段、行为、策略、分页和真实入库谓词同时成立，不能相互替代。
 
 历史 manifest 的平台兼容只属于入库复验，不改变当前图片契约；现行条件与失败关闭规则见

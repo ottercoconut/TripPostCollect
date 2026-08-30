@@ -63,12 +63,12 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 `crawl_discovery_candidate_exclusions` 是 B站、微博、抖音和知乎正式搜索的控制面记忆，不是内容表。
 `job_id + query_fingerprint` 唯一定位同一来源查询；`resume_page` 保存下一安全页，抖音同时使用
 `resume_offset` 和 `resume_cursor`，`last_stop_reason` 与 `last_stop_detail` 保存停止分类，
-`last_summary_path` 指向尚未达到目标的累计摘要，
+`last_summary_path` 指向尚未取得完整来源耗尽证据的累计摘要，
 `campaign_candidate_count` 保存累计报告数。`status=exhausted` 表示已保存深层前沿明确耗尽，
 后续默认只做顶部刷新；抖音若刷新同时证明存在持久记忆中没有的新候选 ID、`has_more=true` 与可继续的新 search ID，则从刷新链
 建立新前沿并把 checkpoint 恢复为 `active`。checkpoint 只能在 child 摘要形成后提交；诊断
-`--no-import` 不得更新它。内容仍只在
-完整目标达到后写入 `web_posts` / `web_post_images`。通用已完成处理候选表按 job 与查询指纹保存
+`--no-import` 不得更新它。内容仍只在取得可验证来源耗尽证据后写入
+`web_posts` / `web_post_images`。通用已完成处理候选表按 job 与查询指纹保存
 视频、有决定性证据的字段无效候选、结构有效候选（含主题不相关），以及详情、作者或正文图在适用有限重试后仍失败并
 形成 `candidate_skipped` 的候选 ID；它只用于发现去重，不把失败或无效候选变成内容记录。
 登录、授权、验证码、安全限制、账号/IP 封禁、频控、搜索请求或浏览器整体故障属于运行级失败，
@@ -102,8 +102,8 @@ schema migration `19/post_detail_repair_waivers` 记录该表已进入现行内�
 反复触发详情和作者请求。小红书全部结构有效图文仍写入 `web_posts` / `web_post_images`。
 
 小红书 checkpoint 与通用表遵守同一提交边界：只有 child `summary.json` 已形成且含分页证据时，
-`xhs_runner.py` 才在同一事务提交前沿与已处理候选 ID；未达到目标时 `last_summary_path` 指向
-合并活动的最新摘要，达到完整目标并成功入库后清空摘要路径但保留深层前沿。
+`xhs_runner.py` 才在同一事务提交前沿与已处理候选 ID；来源尚未耗尽时 `last_summary_path` 指向
+合并活动的最新摘要，取得完整耗尽证据并成功入库后清空摘要路径但保留深层前沿。
 `status=exhausted` 后只刷新顶部；`--no-import` 不更新
 checkpoint。`import_result.reason=sqlite_import_failed` 时 runner 和 discovery 提交函数都必须跳过
 checkpoint、seen 与 campaign 更新。摘要或其 JSONL 缺失时冻结失败，不能静默丢弃活动。
@@ -119,18 +119,18 @@ checkpoint、seen 与 campaign 更新。摘要或其 JSONL 缺失时冻结失败
 微博、抖音、知乎等通用结构化结果由 `scripts/mediacrawler_crawl.py` 调用 MediaCrawler 后
 导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定账号申请互斥租约并解密会话后调用同一底层执行器。
 五个平台都在当前登录/签名会话中把权威正文图下载到本轮 staging，原子生成 schema v1
-`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。只有数量或来源耗尽、
+`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。只有来源耗尽、
 字段、行为、策略和 staging 图片门禁全部通过，正式运行才晋升到 `data/media` 并注入统一入库映射；
 门禁未通过、晋升失败或已确认发生在提交前的 SQLite 导入回滚时，不得留下本轮新建的无引用长期媒体文件。平台显式投影后的全部 manifest 候选均须通过下载与字节复验；
 知乎已知 `zhimg` 尺寸 URL 变体在投影时按资源路径合并，不重复生成 manifest。下载后再仅在同帖内
 按 SHA-256 保留首次来源并记录重复来源证据。任何图片失败都使该整帖失去正式资格。有限重试耗尽后
 的 `image_download_retryable` 与格式、解码、大小或 HTTP 400/404 等候选自身终态错误，都在写完 manifest
 与 `candidate_skipped(failure_scope=image)` 后继续其他候选；终态错误保留 `retryable=false` 且不补做
-无意义请求。跳过候选不进入结构有效集合、不增加新增数，但不会阻断后续数量完成或真实来源耗尽。
-结构有效但主题不相关的记录不是跳过：它照常保存、进入 seen 和 checkpoint，只是不增加目标计数。
+无意义请求。跳过候选不进入结构有效集合，但不会阻断后续真实来源耗尽。
+结构有效但主题不相关的记录不是跳过：它照常保存、进入 seen 和 checkpoint，并单独统计。
 HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁或频控信号必须形成运行级阻断，
-不能写 `candidate_skipped`。分页证据或任一 child 表明 `runtime_failed`、登录或验证码阻断时，即使有效新增数已经达到目标，也必须
-保持 `completion_met=false`，不得晋升或入库；运行失败优先于数量完成，也不得被图片、行为或策略
+不能写 `candidate_skipped`。分页证据或任一 child 表明 `runtime_failed`、登录或验证码阻断时，无论
+已经处理或形成多少有效记录，都必须保持 `completion_met=false`，不得晋升或入库；运行失败优先，且不得被图片、行为或策略
 门禁的停止原因覆盖。
 微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；`isLongText=true`
 必须用移动详情替换搜索截断文本，失败时不写 JSONL。小红书搜索会补拉
@@ -220,8 +220,8 @@ B站还要按本轮 `artifact_dir` 检查 `raw_sample_json.content_detail_status
     "valid_existing_count": 15,
     "topic_relevant_new_count": 50,
     "topic_irrelevant_new_count": 6,
-    "new_target_met": true,
-    "stop_reason": "target_new_met",
+    "source_exhausted_met": true,
+    "stop_reason": "source_exhausted",
     "image_materialization_complete": true
   },
   "image_materialization": {

@@ -12,7 +12,7 @@ offset/search ID、详情和严格图文资产差异。
   `content_detail_status=detail_observed`、`content_detail_source=aweme_detail`。
 - 正文图片来自 `note_download_url`；`images[].uri` 形成 `douyin:uri:<uri>` 稳定资产键。
 - 作者粉丝来自图文作者主页，要求 `followers_observed=true`；搜索作者对象的占位 0 不能通过。
-- 作者补全预算随候选硬上限传入，不使用固定作者数量上限。
+- 作者补全覆盖本轮全部未知图文候选，不使用固定作者数量上限。
 - 去重键为 `aweme_id`。
 
 ## 搜索响应与游标
@@ -62,15 +62,15 @@ checkpoint 必须成组保存下一 page、offset 和稳定 search ID。深层�
 下一 offset 继续。没有健康刷新链时保留旧 checkpoint 并失败。
 
 耗尽状态只证明旧 search ID 链结束。顶部刷新同时发现未知 `aweme_id`、`has_more=true` 和非空稳定
-search ID 时，从刷新链下一页写 `discovery_frontier_reseeded` 并替换旧前沿；否则保持耗尽。顶部刷新
-已经达到本轮新增目标时不 reseed。
+search ID 时，从刷新链下一页写 `discovery_frontier_reseeded` 并替换旧前沿；否则保持耗尽。
 
 完整响应保存下一 page、`offset + 10` 和稳定 ID；页中途停止保存当前三元组。`data=[]` 且
 `has_more=true` 是可继续空批次；深层 `has_more=false` 可以结束当前链，但新鲜首页仍必须满足上面的
 可见无结果门禁。
 
-连续停滞使用 `stagnation_basis=valid_new`：只有批次没有新增满足正式字段 profile、且数据库中不存在
-的有效记录时才累计；新无效候选、重复候选和数据库已有记录都不能重置停滞计数。
+批次继续使用 `stagnation_basis=valid_new` 记录诊断计数：只有批次没有新增满足正式字段 profile、且
+数据库中不存在的有效记录时才累计；新无效候选、重复候选和数据库已有记录都不能重置该计数。
+无论计数多高都继续分页，不能触发停止或代替来源耗尽。
 
 ## 严格 images-only
 
