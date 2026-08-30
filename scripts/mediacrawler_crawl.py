@@ -363,23 +363,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--headed", action="store_true", help="Run browser with visible UI.")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path for web_posts import.")
-    parser.add_argument(
-        "--target-new-posts",
-        type=int,
-        default=0,
-        help="Required field-valid records not already present in SQLite.",
-    )
-    parser.add_argument(
-        "--completion-mode",
-        choices=("target-new-posts", "source-exhausted"),
-        default="target-new-posts",
-        help=(
-            "Completion gate. source-exhausted is an explicit one-off mode that "
-            "ignores quantity and stagnation stops and imports only after durable "
-            "source exhaustion evidence."
-        ),
-    )
-    parser.add_argument("--candidate-hard-limit", type=int, required=True, help="Maximum actual content candidates processed for validation.")
     parser.add_argument("--required-fields-profile", default="image_post_with_followers_v1")
     parser.add_argument("--behavior-profile", default="social_high_risk")
     parser.add_argument("--xhs-account-id", help="Required isolated account id for the XHS low-level executor.")
@@ -393,7 +376,6 @@ def parse_args() -> argparse.Namespace:
         default="none",
         help="Optional one-post visible XHS interaction selected by xhs_runner.py.",
     )
-    parser.add_argument("--max-stagnant-batches", type=int, default=3)
     parser.add_argument("--start-page", type=int, default=1, help="Recovery-only first platform page.")
     parser.add_argument("--start-offset", type=int, default=0, help="Saved platform offset for the discovery frontier.")
     parser.add_argument("--start-cursor", default="", help="Saved opaque platform cursor for the discovery frontier.")
@@ -2367,12 +2349,8 @@ def attach_skipped_candidate_evidence(
 def collect_formal_records(
     summary: dict[str, Any],
     *,
-    candidate_hard_limit: int,
-    target_new_posts: int,
     db_path: str | Path | None,
     pagination_evidence: dict[str, Any] | None = None,
-    enforce_candidate_limit: bool = True,
-    completion_mode: str = "target-new-posts",
     require_local_images: bool = False,
     localized_identities: set[str] | None = None,
     materialized_images_by_identity: dict[str, list[MaterializedImage]] | None = None,
@@ -2380,9 +2358,6 @@ def collect_formal_records(
     repair_metadata_by_identity: dict[str, dict[str, Any]] | None = None,
     repair_mode: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    if completion_mode not in {"target-new-posts", "source-exhausted"}:
-        raise ValueError(f"unsupported completion mode: {completion_mode}")
-    quantity_limits_enforced = completion_mode == "target-new-posts"
     localized = localized_identities or set()
     materialized = materialized_images_by_identity or {}
     seen: set[str] = set()
@@ -2398,7 +2373,6 @@ def collect_formal_records(
     candidate_count = 0
     parse_errors = 0
     local_image_failure_count = 0
-    stop = False
     for platform_record in summary.get("records") or []:
         output = platform_record.get("output") if isinstance(platform_record, dict) else {}
         for path_value in (output or {}).get("jsonl_files") or []:
@@ -2408,13 +2382,6 @@ def collect_formal_records(
             platform_key = platform_from_path(path)
             with path.open("r", encoding="utf-8", errors="replace") as handle:
                 for line_number, line in enumerate(handle, start=1):
-                    if (
-                        quantity_limits_enforced
-                        and enforce_candidate_limit
-                        and candidate_count >= candidate_hard_limit
-                    ):
-                        stop = True
-                        break
                     text = line.strip()
                     if not text:
                         continue
@@ -2498,23 +2465,11 @@ def collect_formal_records(
                             "materialized_images": materialized.get(identity),
                         }
                     )
-                    if (
-                        quantity_limits_enforced
-                        and target_new_posts > 0
-                        and valid_new_count >= target_new_posts
-                    ):
-                        stop = True
-                        break
-            if stop:
-                break
-        if stop:
-            break
 
     output_record_count = candidate_count
     pagination_evidence = pagination_evidence or {}
     run_candidate_count = int(pagination_evidence.get("candidate_count") or 0)
     candidate_count = max(candidate_count, run_candidate_count)
-    new_target_met = target_new_posts <= 0 or valid_new_count >= target_new_posts
     stop_event = pagination_evidence.get("stop_event") or {}
     skipped_candidate_count = max(
         int(pagination_evidence.get("skipped_candidate_count") or 0),
@@ -2546,12 +2501,11 @@ def collect_formal_records(
     )
     completion_met = (
         source_exhausted_met
-        if completion_mode == "source-exhausted"
-        else new_target_met
-    ) and not pagination_runtime_blocked and not pagination_incomplete
+        and not pagination_runtime_blocked
+        and not pagination_incomplete
+    )
     repair_import_met = False
     if repair_mode:
-        new_target_met = bool(selected)
         repair_import_met = (
             bool(selected)
             and not pagination_runtime_blocked
@@ -2575,38 +2529,16 @@ def collect_formal_records(
         stop_reason = "repair_targets_partially_processed"
     elif repair_mode:
         stop_reason = "repair_no_valid_detail"
-    elif (
-        completion_mode == "target-new-posts"
-        and new_target_met
-        and target_new_posts > 0
-    ):
-        stop_reason = "target_new_met"
-    elif completion_mode == "source-exhausted" and pagination_evidence.get("stopped"):
+    elif pagination_evidence.get("stopped"):
         stop_reason = str(pagination_evidence.get("stop_reason") or "runtime_failed")
-    elif quantity_limits_enforced and (
-        run_candidate_count >= candidate_hard_limit
-        or (enforce_candidate_limit and candidate_count >= candidate_hard_limit)
-    ):
-        stop_reason = "candidate_hard_limit_reached"
-    elif pagination_evidence.get("stopped") and pagination_evidence.get("stop_reason") in {
-        "source_exhausted",
-        "stagnated",
-        "runtime_failed",
-        "login_required",
-        "captcha_detected",
-    }:
-        stop_reason = str(pagination_evidence["stop_reason"])
     else:
         stop_reason = "runtime_failed"
     validation_summary = {
-        "candidate_hard_limit": candidate_hard_limit,
-        "completion_mode": completion_mode,
+        "completion_mode": "source-exhausted",
         "repair_mode": repair_mode,
-        "quantity_limits_enforced": quantity_limits_enforced,
         "candidate_count": candidate_count,
         "run_candidate_count": run_candidate_count,
         "output_record_count": output_record_count,
-        "target_new_posts": target_new_posts,
         "valid_new_count": valid_new_count,
         "valid_existing_count": valid_existing_count,
         "valid_total_count": len(selected),
@@ -2614,7 +2546,6 @@ def collect_formal_records(
         "topic_relevant_existing_count": topic_relevant_existing_count,
         "topic_irrelevant_new_count": topic_irrelevant_new_count,
         "topic_irrelevant_existing_count": topic_irrelevant_existing_count,
-        "new_target_met": new_target_met,
         "source_exhausted_met": source_exhausted_met,
         "pagination_runtime_blocked": pagination_runtime_blocked,
         "pagination_incomplete": pagination_incomplete,
@@ -4090,7 +4021,6 @@ def fetch_bilibili_follower_count(creator_id: str, cookie_header: str = "") -> i
 
 def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> dict[str, Any]:
     platform_key = "bilibili"
-    completion_mode = str(getattr(args, "completion_mode", "target-new-posts"))
     platform = PLATFORMS[platform_key]
     platform_data_root = ensure_dir(
         batch_dir / platform_key / "data" / platform["mediacrawler"]
@@ -4108,10 +4038,6 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
         "bilibili_article_search",
         "--keyword",
         args.keyword,
-        "--candidate-hard-limit",
-        str(args.candidate_hard_limit),
-        "--completion-mode",
-        completion_mode,
     ]
     if download_images:
         command.append("--download-images")
@@ -4139,14 +4065,6 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     try:
         if download_images:
             write_manifest_atomic(manifest_path, image_manifest_entries)
-        exhaustion_mode = completion_mode == "source-exhausted"
-        max_records = int(
-            getattr(args, "source_candidate_hard_limit", args.candidate_hard_limit)
-        )
-        target_new = max(
-            1,
-            int(getattr(args, "source_target_new_posts", args.target_new_posts) or max_records),
-        )
         existing_identities = load_existing_formal_identities(args.db)
         known_post_ids = {
             identity.split(":id:", 1)[1]
@@ -4189,10 +4107,9 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
         if not args.discovery_source_exhausted:
             phases.append(("frontier", frontier_start, None))
 
-        stop_all = False
         for discovery_phase, phase_start, phase_end in phases:
             page = phase_start
-            while not stop_all and (phase_end is None or page <= phase_end):
+            while phase_end is None or page <= phase_end:
                 page_items = fetch_bilibili_article_page(
                     args.keyword,
                     page,
@@ -4208,10 +4125,6 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                                 "candidate_count": candidate_count,
                                 "valid_new_count": valid_new_count,
                                 "valid_existing_count": valid_existing_count,
-                                "target_new": target_new,
-                                "hard_limit": max_records,
-                                "completion_mode": completion_mode,
-                                "quantity_limits_enforced": not exhaustion_mode,
                                 "stagnant_batches": stagnant_pages,
                                 "stop_reason": "source_exhausted",
                                 "stop_detail": "empty_page",
@@ -4237,7 +4150,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 seen_before = len(seen_ids)
                 processed_in_batch = 0
                 batch_complete = True
-                for item_index, item in enumerate(page_items):
+                for item in page_items:
                     post_id = str(item.get("id") or "").strip()
                     if post_id and (
                         post_id in known_post_ids
@@ -4245,9 +4158,6 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                         or post_id in skipped_candidate_ids
                     ):
                         continue
-                    if not exhaustion_mode and candidate_count >= max_records:
-                        batch_complete = False
-                        break
                     candidate_count += 1
                     processed_in_batch += 1
                     normalized = normalize_bilibili_article_record(item, args.keyword)
@@ -4394,8 +4304,6 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                                     "candidate_skipped",
                                     failure,
                                 )
-                            if not exhaustion_mode and candidate_count >= max_records:
-                                break
                             continue
                     creator_id = str(normalized.get("user_id") or "")
                     if creator_id:
@@ -4492,27 +4400,10 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                                 valid_existing_count += 1
                             else:
                                 valid_new_count += 1
-                    if not exhaustion_mode and (
-                        candidate_count >= max_records or valid_new_count >= target_new
-                    ):
-                        batch_complete = item_index == len(page_items) - 1
-                        break
                 candidate_identities_added = len(seen_ids) - seen_before
                 if discovery_phase == "frontier":
                     stagnant_pages = stagnant_pages + 1 if candidate_identities_added == 0 else 0
-                if not exhaustion_mode and valid_new_count >= target_new:
-                    batch_stop_reason = "target_new_met"
-                elif not exhaustion_mode and candidate_count >= max_records:
-                    batch_stop_reason = "candidate_hard_limit_reached"
-                elif (
-                    not exhaustion_mode
-                    and
-                    discovery_phase == "frontier"
-                    and stagnant_pages >= max(1, args.max_stagnant_batches)
-                ):
-                    batch_stop_reason = "stagnated"
-                else:
-                    batch_stop_reason = "continue"
+                batch_stop_reason = "continue"
                 resume_page = page + 1 if batch_complete else page
                 event_details = {
                     "platform": platform_key,
@@ -4524,10 +4415,6 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "batch_candidate_identity_count": candidate_identities_added,
                     "stagnant_batches": stagnant_pages,
                     "stagnation_basis": "candidate_identity",
-                    "target_new": target_new,
-                    "hard_limit": max_records,
-                    "completion_mode": completion_mode,
-                    "quantity_limits_enforced": not exhaustion_mode,
                     "stop_reason": batch_stop_reason,
                     "stop_detail": None,
                     "source_page": page,
@@ -4548,14 +4435,9 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                 if state_path:
                     frozen_state = FrozenExecutionState(state_path)
                     frozen_state.append_event("adaptive_batch_completed", event_details)
-                    if batch_stop_reason != "continue":
-                        frozen_state.append_event("adaptive_search_stopped", event_details)
-                if batch_stop_reason != "continue":
-                    stop_all = True
-                    break
                 page += 1
 
-        if (not phases or (args.discovery_source_exhausted and not stop_all)) and state_path:
+        if (not phases or args.discovery_source_exhausted) and state_path:
             FrozenExecutionState(state_path).append_event(
                 "adaptive_search_stopped",
                 {
@@ -4563,10 +4445,6 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "candidate_count": candidate_count,
                     "valid_new_count": valid_new_count,
                     "valid_existing_count": valid_existing_count,
-                    "target_new": target_new,
-                    "hard_limit": max_records,
-                    "completion_mode": completion_mode,
-                    "quantity_limits_enforced": not exhaustion_mode,
                     "stagnant_batches": stagnant_pages,
                     "stop_reason": "source_exhausted",
                     "stop_detail": "saved_source_exhausted",
@@ -4599,13 +4477,6 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
                     "candidate_count": candidate_count,
                     "valid_new_count": valid_new_count,
                     "valid_existing_count": valid_existing_count,
-                    "target_new": locals().get(
-                        "target_new",
-                        max(1, int(args.target_new_posts or args.candidate_hard_limit)),
-                    ),
-                    "hard_limit": locals().get("max_records", args.candidate_hard_limit),
-                    "completion_mode": completion_mode,
-                    "quantity_limits_enforced": completion_mode != "source-exhausted",
                     "stagnant_batches": stagnant_pages,
                     "stop_reason": "runtime_failed",
                     "stop_detail": (
@@ -4678,7 +4549,7 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
         if returncode == 0
         and behavior_evidence_valid(behavior_evidence)
         and images_complete
-        and (bool(records) or completion_mode == "source-exhausted")
+        and (bool(records) or returncode == 0)
         else "failed"
     )
     return {
@@ -4734,14 +4605,13 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         return run_bilibili_article_search(args, batch_dir)
 
     platform = PLATFORMS[platform_key]
-    source_candidate_hard_limit = int(
-        getattr(args, "source_candidate_hard_limit", args.candidate_hard_limit)
-    )
-    source_target_new_posts = int(getattr(args, "source_target_new_posts", args.target_new_posts))
     save_path = batch_dir / platform_key / "data"
     log_dir = batch_dir / "logs" / platform_key
     behavior_evidence_path = log_dir / "behavior_evidence.json"
     image_download_enabled = bool(args.download_images)
+    specified_detail_urls = list(getattr(args, "zhihu_detail_urls", [])) + list(
+        getattr(args, "xhs_detail_urls", [])
+    ) + list(getattr(args, "post_repair_detail_targets", []))
     cmd = [
         "uv",
         "run",
@@ -4773,8 +4643,6 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "jsonl",
         "--save_data_path",
         str(save_path),
-        "--crawler_max_notes_count",
-        str(source_candidate_hard_limit),
         "--start",
         str(args.start_page),
         "--max_concurrency_num",
@@ -4782,18 +4650,11 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "--enable_ip_proxy",
         "false",
     ]
-    specified_detail_urls = list(getattr(args, "zhihu_detail_urls", [])) + list(
-        getattr(args, "xhs_detail_urls", [])
-    ) + list(getattr(args, "post_repair_detail_targets", []))
     if specified_detail_urls:
         cmd.extend(["--specified_id", ",".join(specified_detail_urls)])
     extra_env: dict[str, str] = {
         "TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS": "1",
         "TRIPPOSTCOLLECT_POST_REPAIR": "1" if getattr(args, "post_repair", False) else "0",
-        "TRIPPOSTCOLLECT_TARGET_NEW_POSTS": str(max(1, source_target_new_posts)),
-        "TRIPPOSTCOLLECT_CANDIDATE_HARD_LIMIT": str(source_candidate_hard_limit),
-        "TRIPPOSTCOLLECT_MAX_STAGNANT_BATCHES": str(max(1, args.max_stagnant_batches)),
-        "TRIPPOSTCOLLECT_COMPLETION_MODE": args.completion_mode,
         "TRIPPOSTCOLLECT_DB_PATH": str(Path(args.db).expanduser().resolve()),
         **behavior_environment(behavior_evidence_path, args.behavior_profile),
     }
@@ -4907,11 +4768,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
             {
                 "TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS": "1",
                 "TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES": "1",
-                "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": (
-                    "-1"
-                    if args.completion_mode == "source-exhausted"
-                    else str(source_candidate_hard_limit)
-                ),
+                "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": "-1",
                 "TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS": "0.25",
                 "TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK": (
                     "1" if getattr(args, "post_repair", False) else "0"
@@ -4975,10 +4832,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         if output["parse_errors"] == 0
         and (
             output["non_video_content_records"] > 0
-            or (
-                args.completion_mode == "source-exhausted"
-                and run.get("returncode") == 0
-            )
+            or run.get("returncode") == 0
         )
         else "failed"
     )
@@ -5277,14 +5131,12 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
             [
                 "## 正式校验",
                 "",
-                f"- 完成模式：`{validation.get('completion_mode', 'target-new-posts')}`",
-                f"- 数量与停滞停止门禁启用：`{validation.get('quantity_limits_enforced', True)}`",
-                f"- 实际候选：`{validation.get('candidate_count', 0)}` / 硬上限 `{validation.get('candidate_hard_limit', 0)}`",
-                f"- 主题相关有效新增图文：`{validation.get('valid_new_count', 0)}` / 目标 `{validation.get('target_new_posts', 0)}`",
-                f"- 主题相关有效旧记录：`{validation.get('valid_existing_count', 0)}`（只更新，不计目标）",
-                f"- 主题不相关结构有效新增：`{validation.get('topic_irrelevant_new_count', 0)}`（入库审计，不计目标）",
+                "- 完成策略：`source-exhausted`（唯一正式策略）",
+                f"- 实际候选：`{validation.get('candidate_count', 0)}`",
+                f"- 主题相关有效新增图文：`{validation.get('valid_new_count', 0)}`",
+                f"- 主题相关有效旧记录：`{validation.get('valid_existing_count', 0)}`（更新统计）",
+                f"- 主题不相关结构有效新增：`{validation.get('topic_irrelevant_new_count', 0)}`（入库审计）",
                 f"- 主题不相关结构有效旧记录：`{validation.get('topic_irrelevant_existing_count', 0)}`",
-                f"- 有效新增目标达成：`{validation.get('new_target_met', False)}`",
                 f"- 来源耗尽达成：`{validation.get('source_exhausted_met', False)}`",
                 f"- 修复成功子集可入库：`{validation.get('repair_import_met', False)}`",
                 f"- 修复选中目标全部有效：`{validation.get('all_repair_targets_valid')}`",
@@ -5370,7 +5222,6 @@ def apply_formal_completion_gates(
     """Apply all read-only evidence gates before persistent writes."""
 
     gated = dict(validation)
-    gated["content_new_target_met"] = bool(content_validation.get("new_target_met"))
     gated["content_completion_met"] = bool(content_validation.get("completion_met"))
     gated["content_repair_import_met"] = bool(
         content_validation.get("repair_import_met")
@@ -5397,12 +5248,10 @@ def apply_formal_completion_gates(
         else ""
     )
     if download_images and not image_materialization.get("complete"):
-        gated["new_target_met"] = False
         gated["completion_met"] = False
         gated["repair_import_met"] = False
         gated["stop_reason"] = "image_materialization_incomplete"
     if not behavior_validation.get("ok"):
-        gated["new_target_met"] = False
         gated["completion_met"] = False
         gated["repair_import_met"] = False
         gated["stop_reason"] = (
@@ -5411,7 +5260,6 @@ def apply_formal_completion_gates(
             else "crawl_policy_evidence_failed"
         )
     if runtime_stop_reason or not child_execution_ok:
-        gated["new_target_met"] = False
         gated["completion_met"] = False
         gated["repair_import_met"] = False
         gated["stop_reason"] = runtime_stop_reason or "runtime_failed"
@@ -5530,36 +5378,10 @@ def main() -> int:
     if args.xhs_repair and args.post_repair:
         raise SystemExit("--xhs-repair and --post-repair are mutually exclusive")
     repair_mode = bool(args.xhs_repair or args.post_repair)
-    if (
-        args.target_new_posts < 0
-        or args.candidate_hard_limit <= 0
-        or args.max_stagnant_batches <= 0
-        or args.xhs_repair_batch_size <= 0
-    ):
-        raise SystemExit(
-            "--candidate-hard-limit, --max-stagnant-batches, and "
-            "--xhs-repair-batch-size must be positive; other record limits cannot be negative"
-        )
-    target_new_posts = args.target_new_posts
-    candidate_hard_limit = args.candidate_hard_limit
-    if (
-        args.completion_mode == "target-new-posts"
-        and target_new_posts > candidate_hard_limit
-    ):
-        raise SystemExit("--target-new-posts cannot exceed --candidate-hard-limit")
-    if repair_mode and args.target_new_posts != 0:
-        raise SystemExit("post repair mode requires --target-new-posts 0")
+    if args.xhs_repair_batch_size <= 0:
+        raise SystemExit("--xhs-repair-batch-size must be positive")
     if args.required_fields_profile != "image_post_with_followers_v1":
         raise SystemExit(f"unsupported required fields profile: {args.required_fields_profile}")
-    if (
-        args.completion_mode == "target-new-posts"
-        and not args.no_import
-        and target_new_posts <= 0
-        and not repair_mode
-    ):
-        raise SystemExit(
-            "--target-new-posts must be positive unless --no-import or post repair mode is used"
-        )
     if args.start_page <= 0:
         raise SystemExit("--start-page must be positive")
     if args.start_offset < 0 or args.top_refresh_max_pages < 0:
@@ -5606,10 +5428,6 @@ def main() -> int:
         if args.resume_summary or args.start_page != 1 or args.discovery_job_id is not None:
             raise SystemExit("Zhihu detail diagnosis cannot use discovery resume arguments")
         args.zhihu_detail_urls = load_zhihu_detail_urls(args.zhihu_detail_urls_file)
-        if len(args.zhihu_detail_urls) > candidate_hard_limit:
-            raise SystemExit(
-                "--candidate-hard-limit must cover every URL in --zhihu-detail-urls-file"
-            )
     args.xhs_detail_urls = []
     args.xhs_repair_target_ids = set()
     if args.xhs_detail_urls_file:
@@ -5621,8 +5439,6 @@ def main() -> int:
             raise SystemExit("XHS repair requires --xhs-repair-target-ids-file")
         args.xhs_detail_urls = load_xhs_detail_urls(args.xhs_detail_urls_file)
         args.xhs_repair_target_ids = load_xhs_repair_target_ids(args.xhs_repair_target_ids_file)
-        if len(args.xhs_detail_urls) > candidate_hard_limit:
-            raise SystemExit("--candidate-hard-limit must cover every XHS repair URL")
         if len(args.xhs_detail_urls) != len(args.xhs_repair_target_ids):
             raise SystemExit("XHS repair URL and target ID files must contain the same number of items")
     elif args.xhs_repair or args.xhs_repair_target_ids_file:
@@ -5650,16 +5466,12 @@ def main() -> int:
             or args.discovery_source_exhausted
         ):
             raise SystemExit("post repair cannot use discovery or resume arguments")
-        if args.completion_mode != "target-new-posts":
-            raise SystemExit("post repair requires --completion-mode target-new-posts")
         platform_key = platforms[0]
         args.post_repair_targets = load_post_repair_targets(
             args.repair_targets_file,
             platform_key,
             db_path=args.db,
         )
-        if len(args.post_repair_targets) > candidate_hard_limit:
-            raise SystemExit("--candidate-hard-limit must cover every post repair target")
         args.post_repair_detail_targets = [
             item["detail_target"] for item in args.post_repair_targets
         ]
@@ -5703,8 +5515,6 @@ def main() -> int:
     resume_records: list[dict[str, Any]] = []
     resume_info: dict[str, Any] | None = None
     resume_identity_values: list[str] = []
-    args.source_target_new_posts = max(1, target_new_posts or candidate_hard_limit)
-    args.source_candidate_hard_limit = candidate_hard_limit
     if args.resume_summary:
         resume_path = Path(args.resume_summary).expanduser().resolve()
         try:
@@ -5720,10 +5530,7 @@ def main() -> int:
             raise SystemExit("--resume-summary has no records for the selected platform")
         resume_validation, _ = collect_formal_records(
             {"records": resume_records},
-            candidate_hard_limit=candidate_hard_limit,
-            target_new_posts=0,
             db_path=args.db,
-            enforce_candidate_limit=False,
         )
         prior_new_count = int(resume_validation.get("valid_new_count") or 0)
         resume_identity_values = [
@@ -5741,23 +5548,11 @@ def main() -> int:
             int(resume_validation.get("candidate_count") or 0),
             previous_candidate_count,
         )
-        remaining_target = max(0, target_new_posts - prior_new_count)
-        if args.completion_mode == "target-new-posts" and remaining_target == 0:
-            raise SystemExit("--resume-summary already meets the configured new-post target")
-        args.source_target_new_posts = int(
-            remaining_target
-            if args.completion_mode == "target-new-posts"
-            else max(1, target_new_posts)
-        )
-        args.source_candidate_hard_limit = candidate_hard_limit
         resume_info = {
             "summary_path": str(resume_path),
             "valid_new_count": prior_new_count,
             "candidate_count": consumed_candidates,
-            "remaining_target_new_posts": remaining_target,
-            "run_candidate_hard_limit": candidate_hard_limit,
-            "completion_mode": args.completion_mode,
-            "quantity_limits_enforced": args.completion_mode == "target-new-posts",
+            "completion_mode": "source-exhausted",
             "start_page": args.start_page,
         }
 
@@ -5848,14 +5643,8 @@ def main() -> int:
     summary["pagination_evidence"] = pagination_evidence
     content_validation, content_valid_records = collect_formal_records(
         summary,
-        candidate_hard_limit=candidate_hard_limit,
-        target_new_posts=target_new_posts,
         db_path=args.db,
         pagination_evidence=pagination_evidence,
-        enforce_candidate_limit=(
-            args.completion_mode == "target-new-posts" and not bool(resume_info)
-        ),
-        completion_mode=args.completion_mode,
         allowed_identities=repair_allowed_identities,
         repair_metadata_by_identity=repair_metadata_by_identity,
         repair_mode=repair_mode,
@@ -5869,14 +5658,8 @@ def main() -> int:
         summary["pagination_evidence"] = pagination_evidence
         content_validation, content_valid_records = collect_formal_records(
             summary,
-            candidate_hard_limit=candidate_hard_limit,
-            target_new_posts=target_new_posts,
             db_path=args.db,
             pagination_evidence=pagination_evidence,
-            enforce_candidate_limit=(
-                args.completion_mode == "target-new-posts" and not bool(resume_info)
-            ),
-            completion_mode=args.completion_mode,
             allowed_identities=repair_allowed_identities,
             repair_metadata_by_identity=repair_metadata_by_identity,
             repair_mode=True,
@@ -5899,14 +5682,8 @@ def main() -> int:
         )
         validation, valid_records = collect_formal_records(
             summary,
-            candidate_hard_limit=candidate_hard_limit,
-            target_new_posts=target_new_posts,
             db_path=args.db,
             pagination_evidence=pagination_evidence,
-            enforce_candidate_limit=(
-                args.completion_mode == "target-new-posts" and not bool(resume_info)
-            ),
-            completion_mode=args.completion_mode,
             require_local_images=True,
             localized_identities=localized_identities,
             allowed_identities=repair_allowed_identities,
@@ -5958,14 +5735,8 @@ def main() -> int:
         )
         validation, valid_records = collect_formal_records(
             summary,
-            candidate_hard_limit=candidate_hard_limit,
-            target_new_posts=target_new_posts,
             db_path=args.db,
             pagination_evidence=pagination_evidence,
-            enforce_candidate_limit=(
-                args.completion_mode == "target-new-posts" and not bool(resume_info)
-            ),
-            completion_mode=args.completion_mode,
             require_local_images=args.download_images,
             localized_identities=(localized_identities if args.download_images else None),
             allowed_identities=repair_allowed_identities,
@@ -6012,14 +5783,8 @@ def main() -> int:
             )
             validation, valid_records = collect_formal_records(
                 summary,
-                candidate_hard_limit=candidate_hard_limit,
-                target_new_posts=target_new_posts,
                 db_path=args.db,
                 pagination_evidence=pagination_evidence,
-                enforce_candidate_limit=(
-                    args.completion_mode == "target-new-posts" and not bool(resume_info)
-                ),
-                completion_mode=args.completion_mode,
                 require_local_images=True,
                 localized_identities=localized_identities,
                 materialized_images_by_identity=materialized_images_by_identity,
@@ -6085,15 +5850,7 @@ def main() -> int:
                 project_root=PROJECT_ROOT,
                 media_root=media_root,
             )
-    inserted = int(
-        (summary.get("import_result") or {}).get("topic_relevant_inserted_rows") or 0
-    )
-    summary["target_new_posts"] = target_new_posts
-    summary["completion_mode"] = args.completion_mode
-    summary["import_new_target_met"] = (
-        validation["new_target_met"]
-        and (args.no_import or target_new_posts <= 0 or inserted >= target_new_posts)
-    )
+    summary["completion_mode"] = "source-exhausted"
     import_result_value = summary.get("import_result") or {}
     import_performed = all(
         key in import_result_value
@@ -6110,8 +5867,8 @@ def main() -> int:
     if not summary["import_completion_met"]:
         summary["failure_reason"] = (
             "import_completion_not_met: "
-            f"completion_mode={args.completion_mode} "
-            f"valid_new={validation['valid_new_count']} required={target_new_posts} "
+            "completion_mode=source-exhausted "
+            f"valid_new={validation['valid_new_count']} "
             f"stop_reason={validation['stop_reason']} "
             f"behavior_ok={behavior_validation['behavior_ok']} "
             f"policy_ok={behavior_validation['policy_ok']}"

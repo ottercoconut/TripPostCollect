@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark configured crawl targets importing into web_posts."""
+"""Benchmark source-exhaustive configured crawls importing into web_posts."""
 
 from __future__ import annotations
 
@@ -33,18 +33,6 @@ DEFAULT_OUTPUT = runtime_dir("info_collection_benchmarks")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run crawl/import benchmark for configured targets.")
     parser.add_argument("--keyword", default="青岛旅游", help="Qingdao keyword for structured-search targets.")
-    parser.add_argument(
-        "--per-target",
-        type=int,
-        default=0,
-        help="Override the formal new-post target. 0 reads target_new_posts from crawl_targets.json.",
-    )
-    parser.add_argument(
-        "--fetch-multiplier",
-        type=int,
-        default=0,
-        help="Override candidate hard limit. 0 reads candidate_hard_limit from crawl_targets.json.",
-    )
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path.")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Crawl target config JSON.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Benchmark output root.")
@@ -144,12 +132,6 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
     platform = str(params.get("platform") or job["site_key"])
     if platform == "xhs":
         raise ValueError("XHS is independently orchestrated; use scripts/xhs_runner.py")
-    target_count = int(args.per_target or params.get("target_new_posts") or 0)
-    if target_count <= 0:
-        raise ValueError(f"Missing formal target_new_posts for {job['job_key']}")
-    candidate_hard_limit = int(params.get("candidate_hard_limit") or target_count)
-    if args.fetch_multiplier > 0:
-        candidate_hard_limit = max(target_count, target_count * args.fetch_multiplier)
     timeout = max(int(params.get("timeout_per_platform") or 180), int(args.timeout_per_target))
     target_dir = ensure_dir(batch_dir / job["job_key"])
     logs_dir = ensure_dir(target_dir / "logs")
@@ -164,10 +146,6 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         platform,
         "--keyword",
         args.keyword,
-        "--candidate-hard-limit",
-        str(candidate_hard_limit),
-        "--target-new-posts",
-        str(target_count),
         "--timeout-per-platform",
         str(timeout),
         "--login-type",
@@ -218,17 +196,15 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
     average = round(elapsed / imported, 3) if imported else None
     db_average = round(elapsed / db_written, 3) if db_written else None
     valid_new = int(formal_validation.get("valid_new_count") or 0)
-    new_target_met = bool(formal_validation.get("new_target_met")) and valid_new >= target_count and not timed_out
+    completion_met = bool(summary.get("import_completion_met")) and not timed_out
     return {
         "job_key": job["job_key"],
         "site_key": job["site_key"],
         "platform": platform,
         "job_kind": job["job_kind"],
-        "status": "completed" if new_target_met else ("timed_out" if timed_out else "new_target_not_met"),
-        "ok": bool(record.get("ok")) and new_target_met,
-        "requested_new_records": target_count,
+        "status": "completed" if completion_met else ("timed_out" if timed_out else "source_not_exhausted"),
+        "ok": bool(record.get("ok")) and completion_met,
         "record_mode": "keyword_search_post",
-        "candidate_hard_limit": candidate_hard_limit,
         "processed_import_rows": imported,
         "valid_new_records": valid_new,
         "formal_stop_reason": str(formal_validation.get("stop_reason") or ""),
@@ -374,7 +350,7 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
         "# 信息收集入库效率基准测试",
         "",
         f"- 结构化搜索关键词：`{summary['keyword']}`",
-        f"- 结构化搜索每目标覆盖值：`{summary['per_target_override'] or '读取正式配置'}`",
+        "- 结构化搜索完成策略：`source-exhausted`",
         f"- 数据库：`{summary['db']}`",
         "",
         "| 目标 | 类型 | 模式 | 状态 | DB新增 | 处理行 | 非视频内容 | 跳过视频 | 用时(s) | 平均(s/处理条) |",
@@ -401,8 +377,6 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
 
 def main() -> int:
     args = parse_args()
-    if args.per_target < 0 or args.fetch_multiplier < 0:
-        raise SystemExit("--per-target and --fetch-multiplier must be zero or positive")
     db_path = ensure_parent(Path(args.db).expanduser())
     bootstrap_database(db_path)
     config = load_json(Path(args.config).expanduser())
@@ -422,7 +396,7 @@ def main() -> int:
         "started_at": batch_dir.name,
         "finished_at": utc_now(),
         "keyword": args.keyword,
-        "per_target_override": args.per_target or None,
+        "completion_mode": "source-exhausted",
         "db": str(db_path),
         "batch_dir": str(batch_dir),
         "target_count": len(records),
@@ -443,7 +417,7 @@ def main() -> int:
         "report": str(report_path),
         "db": str(db_path),
         "keyword": args.keyword,
-        "per_target_override": args.per_target or None,
+        "completion_mode": "source-exhausted",
         "total_imported_records": total_imported,
         "total_processed_records": total_processed,
         "overall_avg_seconds_per_imported_record": summary["overall_avg_seconds_per_imported_record"],

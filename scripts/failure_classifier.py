@@ -175,14 +175,14 @@ def classify_attempt(
         return child_classification
 
     formal_validation = stdout_json.get("formal_validation") or {}
-    if stdout_json.get("import_new_target_met") is False and isinstance(formal_validation, dict):
-        stop_reason = str(formal_validation.get("stop_reason") or "new_target_not_met")
+    if stdout_json.get("import_completion_met") is False and isinstance(formal_validation, dict):
+        stop_reason = str(formal_validation.get("stop_reason") or "source_not_exhausted")
         return {
             "status": "retry_wait",
-            "failure_type": "import_new_target_not_met",
+            "failure_type": "source_exhaustion_not_persisted",
             "retryable": True,
             "wait_seconds": 600,
-            "reason": f"formal_import_new_target_not_reached:{stop_reason}",
+            "reason": f"formal_source_exhaustion_not_persisted:{stop_reason}",
         }
 
     runtime_permission = RUNTIME_PERMISSION_PATTERNS.search(text)

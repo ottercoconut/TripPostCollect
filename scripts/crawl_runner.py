@@ -45,6 +45,10 @@ from trippostcollect.core.paths import (
 ROOT = PROJECT_ROOT
 DEFAULT_RUN_ROOT = CRAWL_RUNNER_RUNTIME
 RANDOM = random.SystemRandom()
+CRAWL_CONFIG_SCHEMA_VERSION = 2
+REMOVED_FORMAL_QUANTITY_FIELDS = frozenset(
+    {"candidate_hard_limit", "max_stagnant_batches", "target_new_posts"}
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,16 +71,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sync-only", action="store_true", help="Only sync config into crawl_jobs.")
     parser.add_argument("--no-sync-config", action="store_true", help="Do not sync config before selecting jobs.")
     parser.add_argument("--dry-run", action="store_true", help="Plan jobs and commands without executing them.")
-    parser.add_argument(
-        "--completion-mode",
-        choices=("target-new-posts", "source-exhausted"),
-        default="target-new-posts",
-        help=(
-            "Runtime-only completion gate. source-exhausted ignores quantity and "
-            "stagnation stops for this invocation and imports only after explicit "
-            "source exhaustion evidence."
-        ),
-    )
     parser.add_argument("--headless", action="store_true", help="Pass headless mode to browser jobs.")
     parser.add_argument("--headful", action="store_true", help="Pass headed mode to browser jobs when supported.")
     parser.add_argument("--no-throttle", action="store_true", help="Forward --no-throttle to child scripts.")
@@ -98,6 +92,25 @@ def iso(value: datetime | None = None) -> str:
 
 def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def validate_crawl_config(config: Any, path: Path) -> dict[str, Any]:
+    if not isinstance(config, dict) or config.get("schema_version") != CRAWL_CONFIG_SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported crawl config schema in {path}; "
+            f"expected {CRAWL_CONFIG_SCHEMA_VERSION}"
+        )
+    for item in config.get("jobs") or []:
+        if not isinstance(item, dict) or item.get("job_kind") != "mediacrawler_search":
+            continue
+        params = item.get("params") or {}
+        stale_fields = sorted(REMOVED_FORMAL_QUANTITY_FIELDS & params.keys())
+        if stale_fields:
+            raise ValueError(
+                f"removed quantity fields remain in job {item.get('job_key')}: "
+                f"{', '.join(stale_fields)}"
+            )
+    return config
 
 
 def json_dump(value: Any) -> str:
@@ -282,17 +295,14 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
             raise ValueError(
                 f"Generic MediaCrawler formal job must use social_high_risk: {row['job_key']}"
             )
-        if "candidate_hard_limit" not in params:
-            raise ValueError(f"Missing candidate_hard_limit for formal job {row['job_key']}")
-        candidate_hard_limit = int(params["candidate_hard_limit"])
-        target_new_posts = int(params.get("target_new_posts") or 0)
-        max_stagnant_batches = int(params.get("max_stagnant_batches") or 0)
+        stale_fields = sorted(REMOVED_FORMAL_QUANTITY_FIELDS & params.keys())
+        if stale_fields:
+            raise ValueError(
+                f"Removed quantity fields remain in job {row['job_key']}: "
+                f"{', '.join(stale_fields)}"
+            )
         required_fields_profile = str(params.get("required_fields_profile") or "")
         followers_policy = str(params.get("followers_policy") or "")
-        if candidate_hard_limit <= 0 or target_new_posts <= 0 or max_stagnant_batches <= 0:
-            raise ValueError(f"Invalid formal limits for job {row['job_key']}")
-        if target_new_posts > candidate_hard_limit:
-            raise ValueError(f"target_new_posts exceeds candidate_hard_limit for job {row['job_key']}")
         if required_fields_profile != "image_post_with_followers_v1":
             raise ValueError(f"Unsupported required_fields_profile for job {row['job_key']}")
         if followers_policy != "required":
@@ -304,10 +314,6 @@ def build_command(row: sqlite3.Row, args: argparse.Namespace) -> list[str]:
         command = [sys.executable, str(ROOT / "scripts" / "mediacrawler_crawl.py"), "--platforms", platform]
         add_flag(command, "--keyword", args.recovery_keyword or params.get("keyword", "青岛旅游"))
         add_flag(command, "--timeout-per-platform", params.get("timeout_per_platform", 180))
-        add_flag(command, "--candidate-hard-limit", candidate_hard_limit)
-        add_flag(command, "--target-new-posts", target_new_posts)
-        add_flag(command, "--completion-mode", args.completion_mode)
-        add_flag(command, "--max-stagnant-batches", max_stagnant_batches)
         add_flag(command, "--required-fields-profile", required_fields_profile)
         add_flag(command, "--behavior-profile", profile)
         add_flag(command, "--login-type", params.get("login_type", "cookie"))
@@ -638,7 +644,7 @@ def main() -> int:
         raise SystemExit("--start-page must be positive")
     db_path = Path(args.db).expanduser()
     config_path = Path(args.config).expanduser()
-    config = load_json(config_path)
+    config = validate_crawl_config(load_json(config_path), config_path)
     run_id = utc_stamp()
     run_dir = ensure_dir(Path(args.run_root).expanduser() / run_id)
     state_dir = ensure_dir(Path(args.execution_state_root).expanduser() / run_id)
@@ -681,10 +687,7 @@ def main() -> int:
                     "config_path": str(config_path.resolve()),
                     "database_path": str(db_path.resolve()),
                     "job_params": params_for(row),
-                    "runtime_overrides": {
-                        "completion_mode": args.completion_mode,
-                        "quantity_limits_enforced": args.completion_mode == "target-new-posts",
-                    },
+                    "completion_policy": "source_exhausted",
                     "local_image_storage_required": row["job_kind"] == "mediacrawler_search",
                     "media_root": (
                         str(LOCAL_MEDIA_ROOT.resolve())
@@ -801,8 +804,6 @@ def main() -> int:
                     )
                     imported_completion = bool(
                         child_summary.get("import_completion_met")
-                        if "import_completion_met" in child_summary
-                        else child_summary.get("import_new_target_met")
                     ) and not bool(import_result_value.get("reason"))
                     imported_completion = bool(
                         imported_completion
@@ -885,7 +886,6 @@ def main() -> int:
                     state.complete("persistence_verified", evidence=import_result, skipped=True)
                 elif row["job_kind"] == "ctf_resource_crawl" and not meta.get("skipped"):
                     import_result = import_capture_results(capture_meta_paths, db_path)
-                    import_result["import_new_target_met"] = True
                     if import_result.get("ok"):
                         state.complete("persistence_verified", evidence=import_result)
                     else:
@@ -894,11 +894,7 @@ def main() -> int:
                     if not child_summary:
                         child_summary = load_json(Path(str(summary_path)))
                     import_result = dict(child_summary.get("import_result") or {})
-                    import_completion_ok = bool(
-                        child_summary.get("import_completion_met")
-                        if "import_completion_met" in child_summary
-                        else child_summary.get("import_new_target_met")
-                    )
+                    import_completion_ok = bool(child_summary.get("import_completion_met"))
                     image_persistence = verify_image_persistence(
                         child_summary,
                         db_path,
@@ -984,7 +980,7 @@ def main() -> int:
             "finished_at": iso(),
             "db": str(db_path),
             "config": str(config_path),
-            "completion_mode": args.completion_mode,
+            "completion_mode": "source-exhausted",
             "execution_state_dir": str(state_dir),
             "synced_jobs": synced,
             "jobs_selected": len(jobs),

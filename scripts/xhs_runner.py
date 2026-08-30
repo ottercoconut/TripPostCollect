@@ -107,15 +107,6 @@ def parse_args() -> argparse.Namespace:
             "platform_security_limit_300011 terminal state, and retry until success."
         ),
     )
-    parser.add_argument(
-        "--completion-mode",
-        choices=("target-new-posts", "source-exhausted"),
-        default="target-new-posts",
-        help=(
-            "Runtime-only completion gate. source-exhausted ignores quantity and "
-            "stagnation stops and imports only after explicit source exhaustion."
-        ),
-    )
     args = parser.parse_args()
     if args.dry_run and args.retry_on_300011:
         parser.error("--retry-on-300011 cannot be combined with --dry-run")
@@ -390,7 +381,6 @@ def build_child_command(
     no_import: bool,
     post_interaction: str,
     discovery: dict[str, Any],
-    completion_mode: str = "target-new-posts",
 ) -> list[str]:
     command = [
         sys.executable,
@@ -403,14 +393,6 @@ def build_child_command(
         str(output_root),
         "--timeout-per-platform",
         str(int(target["timeout_seconds"])),
-        "--candidate-hard-limit",
-        str(int(target["candidate_hard_limit"])),
-        "--target-new-posts",
-        str(int(target["target_new_posts"])),
-        "--completion-mode",
-        completion_mode,
-        "--max-stagnant-batches",
-        str(int(target["max_stagnant_batches"])),
         "--start-page",
         str(int(discovery["resume_page"])),
         "--top-refresh-max-pages",
@@ -626,10 +608,7 @@ def record_preexecution_failure(
         "profile_dir": account["profile_dir"],
         "encrypted_state_path": account["encrypted_state_path"],
         "keyword": target["keyword"],
-        "target_new_posts": target["target_new_posts"],
-        "candidate_hard_limit": target["candidate_hard_limit"],
-        "completion_mode": args.completion_mode,
-        "quantity_limits_enforced": args.completion_mode == "target-new-posts",
+        "completion_policy": "source_exhausted",
         "behavior_profile": pool["behavior_profile"],
         "local_image_storage_required": True,
         "media_root": str(LOCAL_MEDIA_ROOT.resolve()),
@@ -724,10 +703,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                     "target_key": args.target_key,
                     "account_id": args.account_id,
                     "keyword": target["keyword"],
-                    "target_new_posts": target["target_new_posts"],
-                    "candidate_hard_limit": target["candidate_hard_limit"],
-                    "completion_mode": args.completion_mode,
-                    "quantity_limits_enforced": args.completion_mode == "target-new-posts",
+                    "completion_policy": "source_exhausted",
                     "behavior_profile": pool["behavior_profile"],
                     "local_image_storage_required": True,
                     "media_root": str(LOCAL_MEDIA_ROOT.resolve()),
@@ -819,11 +795,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
         "encrypted_state_path": str(encrypted_state),
         "encrypted_state_sha256": encrypted_state_sha256,
         "keyword": target["keyword"],
-        "target_new_posts": target["target_new_posts"],
-        "candidate_hard_limit": target["candidate_hard_limit"],
-        "max_stagnant_batches": target["max_stagnant_batches"],
-        "completion_mode": args.completion_mode,
-        "quantity_limits_enforced": args.completion_mode == "target-new-posts",
+        "completion_policy": "source_exhausted",
         "timeout_seconds": target["timeout_seconds"],
         "lease_seconds": lease_budget.lease_seconds,
         "configured_lease_ceiling_seconds": pool["lease_seconds"],
@@ -910,7 +882,6 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                 no_import=args.no_import,
                 post_interaction=args.post_interaction,
                 discovery=discovery_plan,
-                completion_mode=args.completion_mode,
             )
             state.begin("command_executed")
             env = os.environ.copy()
@@ -1013,11 +984,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                 if state.load()["steps"]["artifacts_verified"]["status"] == "completed":
                     state.begin("persistence_verified")
                     import_result = dict(child_summary.get("import_result") or {})
-                    import_completion_ok = bool(
-                        child_summary.get("import_completion_met")
-                        if "import_completion_met" in child_summary
-                        else child_summary.get("import_new_target_met")
-                    )
+                    import_completion_ok = bool(child_summary.get("import_completion_met"))
                     if args.no_import:
                         state.complete("persistence_verified", evidence=import_result, skipped=True)
                     else:
@@ -1029,18 +996,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                         )
                         import_result["local_images"] = image_persistence
                         persistence_ok = bool(
-                            import_completion_ok
-                            and image_persistence["ok"]
-                            and (
-                                args.completion_mode == "source-exhausted"
-                                or int(
-                                    import_result.get(
-                                        "topic_relevant_inserted_rows"
-                                    )
-                                    or 0
-                                )
-                                >= int(target["target_new_posts"])
-                            )
+                            import_completion_ok and image_persistence["ok"]
                         )
                         if persistence_ok:
                             state.complete("persistence_verified", evidence=import_result)
@@ -1120,7 +1076,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                 .get("post_interactions", [])
             )[-1:],
         },
-        "completion_mode": args.completion_mode,
+        "completion_mode": "source-exhausted",
         "import_result": child_summary.get("import_result") or {},
         "stdout_tail": tail(stdout),
         "stderr_tail": tail(stderr),
@@ -1183,7 +1139,7 @@ def _run_security_limit_retry_controller(args: argparse.Namespace) -> int:
     base_state = {
         "target_key": args.target_key,
         "account_id": validate_account_id(args.account_id),
-        "completion_mode": args.completion_mode,
+        "completion_policy": "source_exhausted",
         "retry_reason": PLATFORM_SECURITY_LIMIT_300011,
         "retry_interval_seconds": SECURITY_LIMIT_RETRY_SECONDS,
         "controller": controller,

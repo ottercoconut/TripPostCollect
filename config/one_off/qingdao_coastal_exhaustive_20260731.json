@@ -1,4 +1,5 @@
 {
+  "schema_version": 2,
   "defaults": {
     "headless": false,
     "import_results": true,
@@ -17,10 +18,7 @@
       "params": {
         "platform": "weibo",
         "keyword": "青岛海滨旅游",
-        "candidate_hard_limit": 1000,
-        "max_stagnant_batches": 100,
         "top_refresh_max_pages": 5,
-        "target_new_posts": 1000,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
         "timeout_per_platform": 28800,
@@ -43,10 +41,7 @@
       "params": {
         "platform": "douyin",
         "keyword": "青岛海滨旅游",
-        "candidate_hard_limit": 1000,
-        "max_stagnant_batches": 100,
         "top_refresh_max_pages": 5,
-        "target_new_posts": 1000,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
         "timeout_per_platform": 28800,
@@ -69,10 +64,7 @@
       "params": {
         "platform": "bilibili",
         "keyword": "青岛海滨旅游",
-        "candidate_hard_limit": 1000,
-        "max_stagnant_batches": 100,
         "top_refresh_max_pages": 5,
-        "target_new_posts": 1000,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
         "timeout_per_platform": 28800,
@@ -95,10 +87,7 @@
       "params": {
         "platform": "zhihu",
         "keyword": "青岛海滨旅游",
-        "candidate_hard_limit": 1000,
-        "max_stagnant_batches": 100,
         "top_refresh_max_pages": 5,
-        "target_new_posts": 1000,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
         "timeout_per_platform": 28800,

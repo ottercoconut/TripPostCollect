@@ -13,19 +13,23 @@ class XhsConfigError(ValueError):
     pass
 
 
-def _read_object(path: str | Path) -> tuple[Path, dict[str, Any]]:
+def _read_object(
+    path: str | Path,
+    *,
+    expected_schema: int,
+) -> tuple[Path, dict[str, Any]]:
     resolved = Path(path).expanduser().resolve()
     try:
         value = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise XhsConfigError(f"cannot read XHS config {resolved}: {exc}") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != 2:
+    if not isinstance(value, dict) or value.get("schema_version") != expected_schema:
         raise XhsConfigError(f"unsupported XHS config schema: {resolved}")
     return resolved, value
 
 
 def load_pool_config(path: str | Path = XHS_POOL_CONFIG) -> dict[str, Any]:
-    resolved, value = _read_object(path)
+    resolved, value = _read_object(path, expected_schema=2)
     removed_automatic_controls = {
         "enabled",
         "max_parallel",
@@ -51,7 +55,7 @@ def load_pool_config(path: str | Path = XHS_POOL_CONFIG) -> dict[str, Any]:
 
 
 def load_target(target_key: str, path: str | Path = XHS_TARGET_CONFIG) -> dict[str, Any]:
-    resolved, value = _read_object(path)
+    resolved, value = _read_object(path, expected_schema=3)
     targets = value.get("targets") or []
     matches = [item for item in targets if isinstance(item, dict) and item.get("target_key") == target_key]
     if len(matches) != 1:
@@ -65,14 +69,20 @@ def load_target(target_key: str, path: str | Path = XHS_TARGET_CONFIG) -> dict[s
         raise XhsConfigError(
             f"removed XHS target download_images option remains in {resolved}: {target_key}"
         )
-    target_new = int(target.get("target_new_posts") or 0)
-    candidates = int(target.get("candidate_hard_limit") or 0)
-    stagnant = int(target.get("max_stagnant_batches") or 0)
+    removed_quantity_fields = {
+        "candidate_hard_limit",
+        "max_stagnant_batches",
+        "target_new_posts",
+    }
+    stale_fields = sorted(removed_quantity_fields & target.keys())
+    if stale_fields:
+        raise XhsConfigError(
+            f"removed quantity fields remain in XHS target {target_key}: "
+            f"{', '.join(stale_fields)}"
+        )
     if "top_refresh_max_pages" not in target:
         raise XhsConfigError(f"XHS target {target_key} must define top_refresh_max_pages")
     top_refresh = int(target.get("top_refresh_max_pages") or 0)
-    if target_new <= 0 or candidates < target_new or stagnant <= 0:
-        raise XhsConfigError(f"invalid formal limits for XHS target {target_key}")
     if top_refresh < 0:
         raise XhsConfigError(f"top_refresh_max_pages cannot be negative for XHS target {target_key}")
     if target.get("required_fields_profile") != "image_post_with_followers_v1":

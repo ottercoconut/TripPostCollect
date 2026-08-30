@@ -238,7 +238,6 @@ def build_child_command(
     post_interaction: str,
     batch_size: int,
 ) -> list[str]:
-    urls = json.loads(urls_path.read_text(encoding="utf-8"))
     command = [
         sys.executable,
         str(ROOT / "scripts" / "mediacrawler_crawl.py"),
@@ -250,14 +249,6 @@ def build_child_command(
         str(output_root),
         "--timeout-per-platform",
         str(int(target["timeout_seconds"])),
-        "--candidate-hard-limit",
-        str(max(1, len(urls))),
-        "--target-new-posts",
-        "0",
-        "--completion-mode",
-        "target-new-posts",
-        "--max-stagnant-batches",
-        "1",
         "--required-fields-profile",
         str(target["required_fields_profile"]),
         "--behavior-profile",

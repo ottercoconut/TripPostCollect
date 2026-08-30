@@ -9,13 +9,10 @@ from typing import Any, Mapping
 
 
 NON_SOURCE_PARAM_KEYS = {
-    "candidate_hard_limit",
     "followers_policy",
     "headless",
     "login_type",
-    "max_stagnant_batches",
     "required_fields_profile",
-    "target_new_posts",
     "top_refresh_max_pages",
     "timeout_per_platform",
 }
