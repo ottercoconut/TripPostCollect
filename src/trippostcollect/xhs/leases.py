@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import fcntl
 import hashlib
 import json
@@ -9,7 +11,6 @@ import os
 import secrets
 import shlex
 import signal
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -121,6 +122,33 @@ class ProcessSnapshot:
     argv: tuple[str, ...]
 
 
+class _DarwinProcBsdInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
 @dataclass(frozen=True)
 class LeaseSubprocessResult:
     args: list[str]
@@ -151,16 +179,33 @@ def _sysctl_value(name: str) -> str:
     return result.stdout.strip()
 
 
+def _darwin_platform_uuid() -> str:
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    for line in result.stdout.splitlines():
+        key, separator, raw_value = line.partition("=")
+        if separator and key.strip() == '"IOPlatformUUID"':
+            return raw_value.strip().strip('"')
+    return ""
+
+
 def system_host_id() -> str:
     value = _read_nonempty(Path("/etc/machine-id")) or _read_nonempty(
         Path("/var/lib/dbus/machine-id")
     )
     if not value and sys.platform == "darwin":
-        value = _sysctl_value("kern.uuid")
+        value = _darwin_platform_uuid()
     if value:
         return value.lower()
-    fallback = f"{socket.gethostname()}:{os.uname().sysname}:{os.uname().machine}"
-    return f"fallback-{hashlib.sha256(fallback.encode('utf-8')).hexdigest()}"
+    raise RuntimeError("cannot determine a stable host identity for exact XHS leases")
 
 
 def system_boot_id() -> str:
@@ -170,9 +215,9 @@ def system_boot_id() -> str:
     if value:
         return value.lower()
     boot_marker = _sysctl_value("kern.boottime")
-    if not boot_marker:
-        boot_marker = f"unknown:{system_host_id()}"
-    return f"fallback-{hashlib.sha256(boot_marker.encode('utf-8')).hexdigest()}"
+    if boot_marker:
+        return f"fallback-{hashlib.sha256(boot_marker.encode('utf-8')).hexdigest()}"
+    raise RuntimeError("cannot determine a boot identity for exact XHS leases")
 
 
 def _wall_time_iso(epoch_seconds: float) -> str:
@@ -185,6 +230,24 @@ class SystemProcessInspector:
     def __init__(self) -> None:
         self.host_id = system_host_id()
         self.boot_id = system_boot_id()
+        self._darwin_libproc: Any = None
+        if sys.platform == "darwin":
+            try:
+                library = ctypes.CDLL(
+                    ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib",
+                    use_errno=True,
+                )
+                library.proc_pidinfo.argtypes = [
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_uint64,
+                    ctypes.c_void_p,
+                    ctypes.c_int,
+                ]
+                library.proc_pidinfo.restype = ctypes.c_int
+                self._darwin_libproc = library
+            except (AttributeError, OSError):
+                self._darwin_libproc = None
 
     def _linux_identity(self, pid: int) -> ProcessIdentity | None:
         stat_path = Path("/proc") / str(pid) / "stat"
@@ -214,41 +277,79 @@ class SystemProcessInspector:
             pgid=pgid,
         )
 
-    def _ps_identity(self, pid: int) -> ProcessIdentity | None:
+    def process_presence(self, pid: int) -> bool | None:
+        """Return false only when an exact PID is absent or already a zombie."""
+
+        if sys.platform.startswith("linux") and Path("/proc").is_dir():
+            try:
+                raw = (Path("/proc") / str(int(pid)) / "stat").read_text(encoding="utf-8")
+                close_paren = raw.rfind(")")
+                state = raw[close_paren + 2 :].split()[0]
+            except FileNotFoundError:
+                return False
+            except PermissionError:
+                return None
+            except (OSError, IndexError):
+                return None
+            return state != "Z"
         try:
             result = subprocess.run(
-                ["ps", "-p", str(int(pid)), "-o", "pid=,pgid=,lstart=,state="],
-                check=True,
+                ["ps", "-p", str(int(pid)), "-o", "state="],
+                check=False,
                 capture_output=True,
                 text=True,
                 env={**os.environ, "LC_ALL": "C"},
             )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        parts = result.stdout.strip().split()
-        if len(parts) < 8 or "Z" in parts[7]:
-            return None
+        except OSError:
+            result = None
+        if result is not None and result.returncode == 0:
+            state = result.stdout.strip()
+            return bool(state) and not state.startswith("Z")
+        if result is not None and result.returncode == 1:
+            return False
         try:
-            actual_pid = int(parts[0])
-            pgid = int(parts[1])
-            start_text = " ".join(parts[2:7])
-            started = datetime.strptime(start_text, "%a %b %d %H:%M:%S %Y")
-        except (ValueError, IndexError):
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
             return None
-        started = started.astimezone().astimezone(timezone.utc)
+        return True
+
+    def _darwin_identity(self, pid: int) -> ProcessIdentity | None:
+        if self._darwin_libproc is None:
+            return None
+        info = _DarwinProcBsdInfo()
+        received = self._darwin_libproc.proc_pidinfo(
+            int(pid),
+            3,
+            0,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if received != ctypes.sizeof(info) or int(info.pbi_pid) != int(pid):
+            return None
+        if int(info.pbi_status) == 5:
+            return None
+        started_epoch = float(info.pbi_start_tvsec) + float(info.pbi_start_tvusec) / 1_000_000
         return ProcessIdentity(
             host_id=self.host_id,
             boot_id=self.boot_id,
-            pid=actual_pid,
-            process_started_at=started.isoformat(timespec="seconds"),
-            process_start_token=f"ps-lstart:{start_text}",
-            pgid=pgid,
+            pid=int(info.pbi_pid),
+            process_started_at=_wall_time_iso(started_epoch),
+            process_start_token=(
+                f"darwin:{int(info.pbi_start_tvsec)}:{int(info.pbi_start_tvusec)}"
+            ),
+            pgid=int(info.pbi_pgid),
         )
 
     def identity(self, pid: int) -> ProcessIdentity | None:
         if sys.platform.startswith("linux") and Path("/proc").is_dir():
             return self._linux_identity(int(pid))
-        return self._ps_identity(int(pid))
+        if sys.platform == "darwin":
+            return self._darwin_identity(int(pid))
+        return None
 
     def current_identity(self) -> ProcessIdentity:
         identity = self.identity(os.getpid())
@@ -279,7 +380,7 @@ class SystemProcessInspector:
     def _ps_snapshots(self) -> list[ProcessSnapshot]:
         try:
             result = subprocess.run(
-                ["ps", "-axo", "pid=,pgid=,lstart=,state=,command="],
+                ["ps", "-ww", "-axo", "pid=,state=,command="],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -289,27 +390,21 @@ class SystemProcessInspector:
             return []
         snapshots: list[ProcessSnapshot] = []
         for line in result.stdout.splitlines():
-            parts = line.strip().split(maxsplit=8)
-            if len(parts) < 9 or "Z" in parts[7]:
+            parts = line.strip().split(maxsplit=2)
+            if len(parts) < 2 or parts[1].startswith("Z"):
                 continue
             try:
                 pid = int(parts[0])
-                pgid = int(parts[1])
-                start_text = " ".join(parts[2:7])
-                started = datetime.strptime(start_text, "%a %b %d %H:%M:%S %Y")
-                argv = tuple(shlex.split(parts[8]))
-            except (ValueError, IndexError):
+            except ValueError:
                 continue
-            identity = ProcessIdentity(
-                host_id=self.host_id,
-                boot_id=self.boot_id,
-                pid=pid,
-                process_started_at=started.astimezone().astimezone(timezone.utc).isoformat(
-                    timespec="seconds"
-                ),
-                process_start_token=f"ps-lstart:{start_text}",
-                pgid=pgid,
-            )
+            command = parts[2] if len(parts) == 3 else ""
+            try:
+                argv = tuple(shlex.split(command))
+            except ValueError:
+                argv = (command,)
+            identity = self.identity(pid)
+            if identity is None:
+                continue
             snapshots.append(ProcessSnapshot(identity=identity, argv=argv))
         return snapshots
 
@@ -698,7 +793,12 @@ def _identity_assessment(
         return {**evidence, "reason": "different_boot_proves_old_process_dead"}
     observed = inspector.identity(stored.pid)
     if observed is None:
-        return {**evidence, "reason": "pid_absent"}
+        presence_reader = getattr(inspector, "process_presence", None)
+        presence = presence_reader(stored.pid) if callable(presence_reader) else False
+        evidence["pid_presence"] = presence
+        if presence is False:
+            return {**evidence, "reason": "pid_absent"}
+        return {**evidence, "live": None, "reason": "exact_process_identity_unavailable"}
     evidence["observed"] = observed.public()
     if (
         observed.process_start_token != stored.process_start_token
@@ -744,7 +844,8 @@ def assess_lease_runtime(
             blocking.append(assessment)
             continue
         if (
-            stored.host_id == inspector.host_id
+            row["process_role"] in {"child", "exporter"}
+            and stored.host_id == inspector.host_id
             and stored.boot_id == inspector.boot_id
             and assessment["reason"] == "pid_absent"
         ):
@@ -1012,6 +1113,8 @@ class LeaseGuard:
         self.signal_received: int | None = None
         self._previous_handlers: dict[int, Any] = {}
         self._closed = False
+        self._closing = False
+        self._released = False
 
     def acquire(self) -> dict[str, Any]:
         if self.account is not None:
@@ -1087,6 +1190,8 @@ class LeaseGuard:
 
     def _signal_handler(self, signum: int, _frame: FrameType | None) -> None:
         self.signal_received = int(signum)
+        if self._closing:
+            return
         raise XhsLeaseSignal(signum)
 
     def register_process(self, pid: int, role: str) -> ProcessIdentity:
@@ -1144,7 +1249,11 @@ class LeaseGuard:
             text=True,
             start_new_session=True,
         )
-        identity = self.register_process(proc.pid, "child")
+        try:
+            identity = self.register_process(proc.pid, "child")
+        except BaseException:
+            self._terminate_unregistered_process_group(proc)
+            raise
         timed_out = False
         stdout = ""
         stderr = ""
@@ -1197,6 +1306,29 @@ class LeaseGuard:
         except ProcessLookupError:
             pass
 
+    def _terminate_unregistered_process_group(self, proc: subprocess.Popen[str]) -> None:
+        """Bound and reap a new-session child when exact registry insertion fails."""
+
+        if proc.poll() is not None:
+            proc.communicate()
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        half_budget = max(1, self.budget.child_shutdown_seconds // 2)
+        try:
+            proc.communicate(timeout=half_budget)
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.communicate(
+            timeout=max(1, self.budget.child_shutdown_seconds - half_budget)
+        )
+
     def _current_lease(self, conn: sqlite3.Connection) -> dict[str, Any]:
         row = conn.execute(
             "SELECT * FROM xhs_account_leases WHERE lease_id=? AND owner_token=?",
@@ -1227,6 +1359,7 @@ class LeaseGuard:
         initial = self._runtime_assessment()
         if initial["safe_to_release"]:
             return initial
+
         def targets(assessment: Mapping[str, Any]) -> set[tuple[str, int]]:
             result: set[tuple[str, int]] = set()
             for item in assessment["blocking"]:
@@ -1276,13 +1409,13 @@ class LeaseGuard:
 
     def close(self) -> bool:
         if self._closed:
-            return True
-        self._restore_signal_handlers()
-        if self.account is None:
-            self.file_lock.release()
-            self._closed = True
-            return True
+            return self._released
+        self._closing = True
         try:
+            if self.account is None:
+                self._closed = True
+                self._released = True
+                return True
             process_check = self.terminate_owned_processes()
             if not process_check["safe_to_release"]:
                 with sqlite3.connect(self.db_path) as conn:
@@ -1318,6 +1451,10 @@ class LeaseGuard:
                     },
                 )
             self._closed = True
+            self._released = True
             return True
         finally:
-            self.file_lock.release()
+            self._restore_signal_handlers()
+            self._closing = False
+            if self._closed:
+                self.file_lock.release()

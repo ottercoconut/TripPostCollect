@@ -25,10 +25,10 @@ from trippostcollect.core.paths import (
     XHS_LOGIN_OUTPUT,
     ensure_dir,
 )
-from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs.accounts import (
     XhsAccountUnavailable,
     account_paths,
+    bootstrap_xhs_control_database,
     ensure_xhs_schema,
     get_account,
     mark_account_verified,
@@ -376,8 +376,7 @@ async def _run_login_session(
 
 async def run_login(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     account_id = validate_account_id(args.account_id)
-    db_path = Path(args.db).expanduser().resolve()
-    bootstrap_database(db_path, sync_jobs=False)
+    db_path = bootstrap_xhs_control_database(args.db)
     run_id = f"xhs-login-{account_id}-{utc_stamp()}"
     budget = login_lease_budget(args.timeout_seconds)
     output_dir = ensure_dir(XHS_LOGIN_OUTPUT / run_id)
@@ -519,8 +518,7 @@ def main() -> int:
     except Exception as exc:
         account_id = validate_account_id(args.account_id)
         error = f"xhs_login_runtime_failed:{type(exc).__name__}:{exc}"
-        db_path = Path(args.db).expanduser()
-        bootstrap_database(db_path, sync_jobs=False)
+        db_path = bootstrap_xhs_control_database(args.db)
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             ensure_xhs_schema(conn)

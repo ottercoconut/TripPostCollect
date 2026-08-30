@@ -7,12 +7,11 @@ import argparse
 import json
 import shutil
 import sqlite3
-from pathlib import Path
 
 from trippostcollect.core.paths import DEFAULT_DB
-from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs.accounts import (
     account_paths,
+    bootstrap_xhs_control_database,
     enroll_account,
     ensure_xhs_schema,
     get_account,
@@ -71,8 +70,7 @@ def public_account(record: dict) -> dict:
 
 def main() -> int:
     args = parse_args()
-    db_path = Path(args.db).expanduser()
-    bootstrap_database(db_path, sync_jobs=False)
+    db_path = bootstrap_xhs_control_database(args.db)
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         ensure_xhs_schema(conn)

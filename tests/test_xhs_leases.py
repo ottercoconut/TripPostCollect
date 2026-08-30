@@ -45,6 +45,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 xhs_accounts_cli = import_module("xhs_accounts")
+xhs_login_cli = import_module("xhs_login")
+xhs_runner_cli = import_module("xhs_runner")
 OWNER = ProcessIdentity(
     host_id="host-a",
     boot_id="boot-a",
@@ -62,17 +64,24 @@ class FakeInspector:
         host_id: str = "host-a",
         boot_id: str = "boot-a",
         identities: dict[int, ProcessIdentity] | None = None,
+        presences: dict[int, bool | None] | None = None,
         groups: dict[int, list[ProcessSnapshot]] | None = None,
         profile_processes: list[ProcessSnapshot] | None = None,
     ):
         self.host_id = host_id
         self.boot_id = boot_id
         self.identities = identities or {}
+        self.presences = presences or {}
         self.groups = groups or {}
         self.profiles = profile_processes or []
 
     def identity(self, pid: int) -> ProcessIdentity | None:
         return self.identities.get(int(pid))
+
+    def process_presence(self, pid: int) -> bool | None:
+        if int(pid) in self.presences:
+            return self.presences[int(pid)]
+        return int(pid) in self.identities
 
     def group_members(self, pgid: int) -> list[ProcessSnapshot]:
         return list(self.groups.get(int(pgid), []))
@@ -166,6 +175,16 @@ def test_xhs_exact_lease_schema_and_dynamic_budgets(control_db: Path) -> None:
         crawl_lease_budget(timeout_seconds=7_200, configured_lease_seconds=7_499)
 
 
+def test_system_process_identity_uses_platform_exact_start_token() -> None:
+    identity = SystemProcessInspector().current_identity()
+    assert identity.pid == os.getpid()
+    assert identity.pgid == os.getpgid(os.getpid())
+    if sys.platform == "darwin":
+        assert identity.process_start_token.startswith("darwin:")
+    elif sys.platform.startswith("linux"):
+        assert identity.process_start_token.startswith("linux:")
+
+
 def test_legacy_identityless_active_lease_blocks_schema_migration(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy.sqlite"
     with sqlite3.connect(db_path) as conn:
@@ -203,6 +222,80 @@ def test_legacy_identityless_active_lease_blocks_schema_migration(tmp_path: Path
         assert conn.execute(
             "SELECT run_id FROM xhs_account_leases"
         ).fetchone()[0] == "legacy-run"
+
+
+def test_empty_legacy_lease_migration_preserves_discovery_memory(
+    control_db: Path,
+) -> None:
+    with connect(control_db) as conn:
+        conn.execute(
+            """
+            INSERT INTO xhs_discovery_checkpoints(
+                target_key, account_id, keyword, query_fingerprint,
+                resume_page, resume_search_id, last_run_id
+            ) VALUES ('target', 'xhs-a01', '青岛旅游', 'fingerprint', 9, 'cursor-9', 'safe-run')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO xhs_discovery_seen_candidates(
+                target_key, account_id, query_fingerprint, platform_post_id,
+                first_run_id, last_run_id
+            ) VALUES ('target', 'xhs-a01', 'fingerprint', 'post-9', 'safe-run', 'safe-run')
+            """
+        )
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DROP TABLE xhs_lease_processes")
+        conn.execute("DROP TABLE xhs_account_leases")
+        conn.execute(
+            """
+            CREATE TABLE xhs_account_leases(
+                account_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL UNIQUE,
+                acquired_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("DELETE FROM schema_migrations WHERE version=21")
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = ON")
+
+        accounts.ensure_xhs_schema(conn)
+
+        assert "owner_process_start_token" in {
+            row[1] for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
+        }
+        assert tuple(
+            conn.execute(
+                """
+                SELECT resume_page, resume_search_id, last_run_id
+                FROM xhs_discovery_checkpoints
+                """
+            ).fetchone()
+        ) == (9, "cursor-9", "safe-run")
+        assert conn.execute(
+            "SELECT platform_post_id FROM xhs_discovery_seen_candidates"
+        ).fetchone()[0] == "post-9"
+        assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
+
+
+def test_xhs_control_bootstrap_does_not_create_content_or_scheduler_tables(
+    tmp_path: Path,
+) -> None:
+    db_path = accounts.bootstrap_xhs_control_database(tmp_path / "control-only.sqlite")
+    with connect(db_path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "xhs_account_leases" in tables
+    assert "xhs_lease_processes" in tables
+    assert "web_posts" not in tables
+    assert "crawl_jobs" not in tables
 
 
 def test_normal_end_releases_exact_lease(control_db: Path, tmp_path: Path) -> None:
@@ -253,6 +346,66 @@ def test_ordinary_exception_releases_without_changing_health(
     with connect(control_db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
         assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
+
+
+def test_guard_repeated_close_preserves_deferred_release_result(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id="deferred-close",
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "deferred-close.json",
+        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=1),
+    )
+    guard.acquire()
+    deferred = {
+        "safe_to_release": False,
+        "checks": [],
+        "blocking": [{"role": "child", "reason": "test_live_child"}],
+    }
+    monkeypatch.setattr(guard, "terminate_owned_processes", lambda: deferred)
+    assert guard.close() is False
+    assert guard.close() is False
+    with connect(control_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 1
+
+
+def test_child_registration_failure_stops_untracked_process_group(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id="registration-failure",
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "registration-failure.json",
+        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=1),
+    )
+    child_pid: list[int] = []
+
+    def fail_registration(pid: int, _role: str) -> ProcessIdentity:
+        child_pid.append(pid)
+        raise RuntimeError("registry unavailable")
+
+    with pytest.raises(RuntimeError, match="registry unavailable"):
+        with guard:
+            monkeypatch.setattr(guard, "register_process", fail_registration)
+            guard.run_subprocess(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                cwd=tmp_path,
+                env={},
+                timeout_seconds=5,
+            )
+    assert child_pid
+    assert SystemProcessInspector().process_presence(child_pid[0]) is False
+    with connect(control_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
 
 
 def test_expired_ttl_does_not_authorize_implicit_release(
@@ -347,6 +500,106 @@ def test_login_and_crawl_share_one_exact_account_mutex(
             owner_token=crawl["owner_token"],
             outcome="completed",
         )
+
+
+def test_exact_leases_only_block_the_same_account(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    acquire_test_lease(
+        control_db,
+        run_id="account-one",
+        state_path=tmp_path / "account-one.json",
+    )
+    with connect(control_db) as conn:
+        accounts.enroll_account(conn, "xhs-a02")
+        accounts.mark_account_verified(conn, "xhs-a02", "identity-2")
+        second = acquire_exact_account_lease(
+            conn,
+            run_id="account-two",
+            lease_kind="crawl",
+            requested_account_id="xhs-a02",
+            execution_state_path=tmp_path / "account-two.json",
+            budget=LeaseBudget(runtime_seconds=60),
+            owner=ProcessIdentity(
+                "host-a", "boot-a", 222, "2026-08-30T00:02:00+00:00", "owner-222", 222
+            ),
+        )
+        assert second["account_id"] == "xhs-a02"
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 2
+
+
+def test_login_lease_accepts_login_pending_account(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    with connect(control_db) as conn:
+        accounts.enroll_account(conn, "xhs-a02")
+        lease = acquire_exact_account_lease(
+            conn,
+            run_id="login-pending",
+            lease_kind="login",
+            requested_account_id="xhs-a02",
+            execution_state_path=tmp_path / "login-pending.json",
+            budget=LeaseBudget(runtime_seconds=60),
+            owner=ProcessIdentity(
+                "host-a", "boot-a", 222, "2026-08-30T00:02:00+00:00", "owner-222", 222
+            ),
+        )
+        assert lease["status"] == "login_pending"
+        assert conn.execute(
+            "SELECT event_type FROM xhs_account_events WHERE run_id='login-pending'"
+        ).fetchone()[0] == "login_lease_acquired"
+
+
+def test_dry_run_preflight_treats_expired_row_as_busy(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    acquire_test_lease(
+        control_db,
+        run_id="dry-run-owner",
+        state_path=tmp_path / "dry-run-owner.json",
+        now=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    with connect(control_db) as conn:
+        with pytest.raises(XhsAccountUnavailable, match="busy"):
+            xhs_runner_cli._eligible_account_for_plan(conn, "xhs-a01")
+
+
+def test_busy_login_is_blocked_without_changing_account_health(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    acquire_test_lease(
+        control_db,
+        run_id="busy-login-owner",
+        state_path=tmp_path / "busy-login-owner.json",
+    )
+    monkeypatch.setattr(
+        xhs_login_cli,
+        "parse_args",
+        lambda: argparse.Namespace(
+            account_id="xhs-a01",
+            db=str(control_db),
+            timeout_seconds=600,
+            browser_path=None,
+        ),
+    )
+    monkeypatch.setattr(xhs_login_cli, "XHS_LOGIN_OUTPUT", tmp_path / "login-output")
+    monkeypatch.setattr(
+        xhs_login_cli,
+        "XHS_LOGIN_EXECUTION_STATE_ROOT",
+        tmp_path / "login-states",
+    )
+    assert xhs_login_cli.main() == 2
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "blocked"
+    assert summary["error"] == "requested_xhs_account_busy"
+    with connect(control_db) as conn:
+        assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
 
 
 def test_wrong_owner_token_cannot_release(control_db: Path, tmp_path: Path) -> None:
@@ -506,6 +759,27 @@ def test_pid_reuse_is_not_mistaken_for_old_owner(control_db: Path, tmp_path: Pat
     assert owner_check["live"] is False
 
 
+def test_live_pid_with_unavailable_exact_identity_blocks_reconciliation(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    lease = acquire_test_lease(
+        control_db,
+        run_id="identity-unavailable",
+        state_path=tmp_path / "identity-unavailable.json",
+    )
+    with connect(control_db) as conn:
+        with pytest.raises(XhsOrphanLeaseRecoveryRefused, match="still live"):
+            recover_orphaned_account_lease(
+                conn,
+                account_id="xhs-a01",
+                run_id="identity-unavailable",
+                lease_id=lease["lease_id"],
+                inspector=FakeInspector(presences={OWNER.pid: True}),
+            )
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 1
+
+
 def test_residual_registered_child_group_blocks_reconciliation(
     control_db: Path,
     tmp_path: Path,
@@ -599,6 +873,52 @@ def test_exact_account_profile_chrome_blocks_reconciliation(
             lease_id=lease["lease_id"],
             inspector=inspector,
         )
+
+
+def test_dead_registered_browser_does_not_claim_the_owner_process_group(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    lease = acquire_test_lease(
+        control_db,
+        run_id="dead-browser",
+        state_path=tmp_path / "dead-browser-state.json",
+    )
+    browser = ProcessIdentity(
+        host_id="host-a",
+        boot_id="boot-a",
+        pid=334,
+        process_started_at="2026-08-30T00:03:00+00:00",
+        process_start_token="browser-334",
+        pgid=OWNER.pgid,
+    )
+    unrelated_owner_group_member = ProcessSnapshot(
+        identity=ProcessIdentity(
+            host_id="host-a",
+            boot_id="boot-a",
+            pid=335,
+            process_started_at="2026-08-30T00:03:01+00:00",
+            process_start_token="unrelated-335",
+            pgid=OWNER.pgid,
+        ),
+        argv=("shell-helper",),
+    )
+    with connect(control_db) as conn:
+        register_lease_process(
+            conn,
+            lease_id=lease["lease_id"],
+            owner_token=lease["owner_token"],
+            process_role="browser",
+            identity=browser,
+        )
+        result = recover_orphaned_account_lease(
+            conn,
+            account_id="xhs-a01",
+            run_id="dead-browser",
+            lease_id=lease["lease_id"],
+            inspector=FakeInspector(groups={OWNER.pgid: [unrelated_owner_group_member]}),
+        )
+    assert result["release_scope"] == "account_mutex_only"
 
 
 def test_profile_detection_uses_exact_user_data_dir_argument(

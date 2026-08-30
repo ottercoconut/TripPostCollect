@@ -234,8 +234,12 @@ python scripts/crawl_runner.py \
 - 未完成尾批不得推进；边界页允许下轮重取并依靠已知 ID 前置过滤。
 - `--no-import` 不得写 checkpoint。
 
-硬中止后无论 TTL 是否已过期，都不得直接改 SQLite。先列出精确租约；`list` 不公开 owner token，
-只显示其 SHA-256 供审计：
+硬中止后无论 TTL 是否已过期，都不得直接改 SQLite。若升级检查报告
+`legacy identity-less leases exist`，说明控制库仍有旧格式活动租约。新 CLI 会拒绝迁移，
+不会替它补造 owner 身份或按 TTL 清理；先让已知旧 runner 正常结束并清空旧租约。旧 owner 已硬中止时
+无法满足精确证明，停止自动恢复并取得该遗留事故的人工处置授权。
+
+对已采用精确租约的控制库，先列出租约；`list` 不公开 owner token，只显示其 SHA-256 供审计：
 
 ```bash
 source .venv/bin/activate
@@ -255,7 +259,8 @@ python scripts/xhs_accounts.py recover-orphan-lease \
 该入口取得每账号 `flock`，核对 lease owner 的 host/boot、PID、启动时间/token 和 PGID，再核对登记的
 child/exporter 进程组以及 argv 中 `--user-data-dir` 精确等于该账号 profile 的 Chrome；随后在
 `BEGIN IMMEDIATE` 内再次核对并用 `account_id/run_id/lease_id/owner_token` 删除，rowcount 必须为 1。
-不同 host、任一精确残留进程、错误身份、错误 owner 或并发漂移都会拒绝。
+不同 host、任一精确残留进程、PID 存在但启动身份不可读、错误身份、错误 owner 或并发漂移都会拒绝；
+不得降级使用秒级 `ps lstart`、TTL 或 PID 文件推断死亡。
 
 execution state 是否存在、是否含 `adaptive_search_stopped`、尾批和终态是否完整只写入审计，不再决定
 能否释放账号互斥。即使 state 缺失或没有停止事件，只要旧 runner/child/exporter/profile Chrome 已被

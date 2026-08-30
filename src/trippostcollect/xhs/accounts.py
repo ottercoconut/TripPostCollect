@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from trippostcollect.core.paths import XHS_ACCOUNT_ROOT, ensure_dir
+from trippostcollect.core.paths import XHS_ACCOUNT_ROOT, ensure_dir, ensure_parent
 from trippostcollect.db.bootstrap import ensure_xhs_control_schema
 
 
@@ -73,6 +73,16 @@ def ensure_xhs_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
     ensure_xhs_control_schema(conn)
     conn.commit()
+
+
+def bootstrap_xhs_control_database(db_path: str | Path) -> Path:
+    """Initialize only XHS control tables, without touching content or scheduler state."""
+
+    resolved = ensure_parent(Path(db_path).expanduser().resolve())
+    with sqlite3.connect(resolved) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_xhs_schema(conn)
+    return resolved
 
 
 def _row(conn: sqlite3.Connection, account_id: str) -> sqlite3.Row | None:

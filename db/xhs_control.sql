@@ -1,3 +1,9 @@
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS xhs_accounts (
     account_id TEXT PRIMARY KEY,
     status TEXT NOT NULL DEFAULT 'login_pending',

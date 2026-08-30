@@ -1315,7 +1315,14 @@ def run_command(
                     os.killpg(proc.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
-                proc.communicate()
+                try:
+                    proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    proc.communicate(timeout=5)
                 raise
         stdout_data, stderr_data = proc.communicate(timeout=timeout)
         stdout = decode_text(stdout_data)

@@ -72,6 +72,11 @@ ID、owner PID、owner 进程启动时间和启动 token、PGID、execution stat
 PID/启动 token/PGID；账号目录下的 `lease.lock` 用 `flock` 加强同机互斥，但 SQLite owner token 仍是
 事实源。
 
+升级到精确租约 schema 时采用 fail-closed 迁移：旧格式 `xhs_account_leases` 只要还有任意行，就拒绝
+重建表，也不按 TTL 删除。应先让已知旧 runner 按旧生命周期正常退出并清空旧租约，再重新执行控制库
+初始化；空旧表重建不会改 checkpoint、cursor、seen 或账号状态。若旧 owner 已硬中止，旧行本身没有
+启动 token，无法由新机制补造“精确死亡证明”，必须停止并作为单独事故取得人工处置授权。
+
 若宿主、终端或 runner 被硬中止，先运行 `list` 取得精确 `account_id/run_id/lease_id`，再使用受审计
 入口对账：
 
@@ -87,7 +92,8 @@ python scripts/xhs_accounts.py recover-orphan-lease \
 事实全部成立才删除租约：当前 host 与租约 host 一致；boot 已变化，或同一 boot 下 owner PID 已不存在/
 启动 token 或 PGID 已不匹配；登记的 child/exporter 及其进程组全部消失；不存在 argv 中
 `--user-data-dir` 精确等于该账号 profile 的 Chrome。PID 已重用只证明旧 owner 死亡，不把新 PID 当作
-旧进程，也不向它发信号；不同 host 无法本机证明时拒绝回收。
+旧进程，也不向它发信号；不同 host 或 PID 存在但无法取得精确启动身份时拒绝回收。macOS 使用稳定的
+platform UUID、boot session UUID 和 `libproc` 微秒级启动时间，不以秒级 `ps lstart` 代替精确身份。
 
 execution state、最后事件、`adaptive_search_stopped` 和尾批完整性只形成独立的终态审计，不参与账号
 互斥释放判定。因此 execution state 缺失、不可读或没有 `adaptive_search_stopped` 时，只要上述精确
@@ -102,7 +108,8 @@ checkpoint、cursor、seen、campaign，不得晋升/删除/导入旧 staging，
 
 正式抓取、历史修复和登录都由同一个 `LeaseGuard` 覆盖从 acquire 到根层摘要/数据库收尾的完整生命
 周期。runner 启动 child 时创建独立进程组，child 启动 exporter 后立即用相同 owner token 登记 exporter
-进程组。普通结束和普通异常都先关闭/等待登记进程与精确 profile Chrome，再由 Guard 在 `finally` 中
+进程组；child/exporter 启动后若精确登记失败，须在继续抛错前有界 TERM/KILL 并回收该新进程组。普通
+结束和普通异常都先关闭/等待登记进程与精确 profile Chrome，再由 Guard 在 `finally` 中
 释放。收到 `SIGINT/SIGTERM` 时先向完整登记进程组发 `SIGTERM`，在 child 关闭预算内等待，仍存活才发
 `SIGKILL`；复核进程与 profile 全部消失后才能删除租约。复核仍有残留时保留 SQLite 租约并写
 `lease_release_deferred_live_processes`，不能为了退出码干净而强制释放。`SIGKILL` 和掉电无法执行
@@ -305,6 +312,7 @@ python scripts/repair_xhs_posts.py \
 | 系统重启 | 同 host 且 boot ID 已变化可证明旧 PID 全部死亡；仍需确认当前没有精确 profile Chrome |
 | execution state 缺失或无停止事件 | 只降低终态完整性；精确运行树已死亡时允许 `account_mutex_only` 回收 |
 | PID 数值被重用 | 启动 token/启动时间/PGID 不匹配即视为新进程；不误杀、不把它当旧 owner 存活 |
+| PID 存在但精确启动身份不可读 | 无法证明旧进程死亡，拒绝对账；不得降级为秒级 `ps` 或 TTL 判定 |
 | 残留 child/exporter/账号 Chrome | 无论 TTL 或 state 如何都拒绝释放，先让精确残留进程结束 |
 | 两个恢复命令并发 | 同账号 `flock` 与 `BEGIN IMMEDIATE` 串行化；只有精确 DELETE rowcount=1 的一个成功 |
 | 错误 lease/run/owner | 删除谓词不匹配并失败关闭；不得写成功恢复事件或改变账号健康 |
