@@ -19,19 +19,28 @@ from playwright.async_api import BrowserContext, Page, TimeoutError as Playwrigh
 from browser_runtime import XHS_NATIVE_WINDOW_SIZE
 from mediacrawler_crawl import discover_cdp_browser_path
 from mediacrawler_login_warmup import launch_login_context
-from trippostcollect.core.paths import DEFAULT_DB, XHS_LOGIN_OUTPUT, ensure_dir
+from trippostcollect.core.paths import (
+    DEFAULT_DB,
+    XHS_LOGIN_EXECUTION_STATE_ROOT,
+    XHS_LOGIN_OUTPUT,
+    ensure_dir,
+)
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs.accounts import (
     XhsAccountUnavailable,
-    acquire_account_login_lease,
     account_paths,
     ensure_xhs_schema,
     get_account,
     mark_account_verified,
     record_event,
-    release_account_lease,
     set_account_status,
     validate_account_id,
+)
+from trippostcollect.xhs.leases import (
+    LeaseGuard,
+    XhsLeaseProcessesAlive,
+    XhsLeaseSignal,
+    login_lease_budget,
 )
 from trippostcollect.xhs.sessions import (
     capture_context_state,
@@ -165,7 +174,17 @@ async def wait_for_login(
 
 def login_lease_seconds(timeout_seconds: int) -> int:
     """Cover full operator waits for initial login and reopen verification."""
-    return max(timeout_seconds * 2 + 300, 600)
+    return login_lease_budget(timeout_seconds).lease_seconds
+
+
+def write_login_execution_state(path: Path, value: dict[str, Any]) -> None:
+    ensure_dir(path.parent)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
 
 
 async def open_account_context(playwright: Any, profile_dir: Path, browser_path: str | None) -> BrowserContext:
@@ -194,10 +213,11 @@ async def _run_login_session(
     account_id: str,
     db_path: Path,
     run_id: str,
+    output_dir: Path,
+    lease_guard: LeaseGuard,
 ) -> tuple[int, dict[str, Any]]:
     paths = account_paths(account_id)
     ensure_dir(paths["profile"])
-    output_dir = ensure_dir(XHS_LOGIN_OUTPUT / utc_stamp())
     screenshot_path = output_dir / "challenge.png"
     key = load_snapshot_key(create=True)
     initial_state: dict[str, Any] = {}
@@ -207,6 +227,7 @@ async def _run_login_session(
 
     async with async_playwright() as playwright:
         context = await open_account_context(playwright, paths["profile"], args.browser_path)
+        lease_guard.observe_profile_processes()
         if paths["encrypted_state"].is_file():
             await restore_context_state(
                 context,
@@ -258,6 +279,7 @@ async def _run_login_session(
 
         if not error:
             verify_context = await open_account_context(playwright, paths["profile"], args.browser_path)
+            lease_guard.observe_profile_processes()
             await restore_context_state(
                 verify_context,
                 decrypt_storage_state(paths["encrypted_state"], account_id=account_id, key=key),
@@ -354,10 +376,12 @@ async def _run_login_session(
 
 async def run_login(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     account_id = validate_account_id(args.account_id)
-    db_path = Path(args.db).expanduser()
+    db_path = Path(args.db).expanduser().resolve()
     bootstrap_database(db_path, sync_jobs=False)
     run_id = f"xhs-login-{account_id}-{utc_stamp()}"
-    lease_seconds = login_lease_seconds(args.timeout_seconds)
+    budget = login_lease_budget(args.timeout_seconds)
+    output_dir = ensure_dir(XHS_LOGIN_OUTPUT / run_id)
+    state_path = ensure_dir(XHS_LOGIN_EXECUTION_STATE_ROOT) / f"{run_id}.json"
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -367,33 +391,82 @@ async def run_login(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             raise SystemExit(f"XHS account is not enrolled: {account_id}")
         if account["status"] == "retired":
             raise SystemExit(f"XHS account is retired: {account_id}")
-        acquire_account_login_lease(
-            conn,
-            run_id=run_id,
-            requested_account_id=account_id,
-            lease_seconds=lease_seconds,
-        )
 
-    succeeded = False
-    try:
-        code, summary = await _run_login_session(
-            args,
-            account_id=account_id,
-            db_path=db_path,
-            run_id=run_id,
-        )
-        succeeded = code == 0
-        return code, summary
-    finally:
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            ensure_xhs_schema(conn)
-            release_account_lease(
-                conn,
+    guard = LeaseGuard(
+        db_path=db_path,
+        account_id=account_id,
+        run_id=run_id,
+        lease_kind="login",
+        execution_state_path=state_path,
+        budget=budget,
+    )
+    with guard:
+        running_state = {
+            "run_id": run_id,
+            "status": "running",
+            "plan": {
+                "account_id": account_id,
+                "lease_kind": "login",
+                "lease_budget": budget.public(),
+            },
+            "steps": {"task_finalized": {"status": "frozen"}},
+            "events": [{"at": utc_iso(), "type": "login_started"}],
+        }
+        write_login_execution_state(state_path, running_state)
+        try:
+            code, summary = await _run_login_session(
+                args,
                 account_id=account_id,
+                db_path=db_path,
                 run_id=run_id,
-                outcome="completed" if succeeded else "failed",
+                output_dir=output_dir,
+                lease_guard=guard,
             )
+        except Exception as exc:
+            failed_state = {
+                **running_state,
+                "status": "failed",
+                "steps": {"task_finalized": {"status": "failed"}},
+                "events": [
+                    *running_state["events"],
+                    {
+                        "at": utc_iso(),
+                        "type": "login_failed",
+                        "details": {"error": f"{type(exc).__name__}: {exc}"},
+                    },
+                ],
+            }
+            write_login_execution_state(state_path, failed_state)
+            raise
+        outcome = "completed" if code == 0 else "failed"
+        guard.set_outcome(outcome)
+        terminal_state = {
+            **running_state,
+            "status": outcome,
+            "steps": {"task_finalized": {"status": outcome}},
+            "events": [
+                *running_state["events"],
+                {"at": utc_iso(), "type": "login_finished", "details": {"outcome": outcome}},
+            ],
+        }
+        write_login_execution_state(state_path, terminal_state)
+        summary["lease_id"] = guard.lease_id
+        summary["lease_budget"] = budget.public()
+        summary["execution_state"] = str(state_path)
+        Path(summary["summary"]).write_text(
+            json.dumps({key: value for key, value in summary.items() if key != "summary"}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    summary["lease_released"] = True
+    Path(summary["summary"]).write_text(
+        json.dumps(
+            {key: value for key, value in summary.items() if key != "summary"},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return code, summary
 
 
 def main() -> int:
@@ -402,6 +475,33 @@ def main() -> int:
         raise SystemExit("--timeout-seconds must be positive")
     try:
         code, summary = asyncio.run(run_login(args))
+    except XhsLeaseSignal as exc:
+        account_id = validate_account_id(args.account_id)
+        output_dir = ensure_dir(XHS_LOGIN_OUTPUT / utc_stamp())
+        summary = {
+            "status": "interrupted",
+            "account_id": account_id,
+            "signal": exc.signum,
+            "finished_at": utc_iso(),
+        }
+        summary_path = output_dir / "summary.json"
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        summary["summary"] = str(summary_path)
+        code = 128 + exc.signum
+    except XhsLeaseProcessesAlive as exc:
+        account_id = validate_account_id(args.account_id)
+        output_dir = ensure_dir(XHS_LOGIN_OUTPUT / utc_stamp())
+        summary = {
+            "status": "failed",
+            "account_id": account_id,
+            "error": f"xhs_login_lease_retained:{exc}",
+            "account_health_mutated": False,
+            "finished_at": utc_iso(),
+        }
+        summary_path = output_dir / "summary.json"
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        summary["summary"] = str(summary_path)
+        code = 2
     except XhsAccountUnavailable as exc:
         account_id = validate_account_id(args.account_id)
         output_dir = ensure_dir(XHS_LOGIN_OUTPUT / utc_stamp())

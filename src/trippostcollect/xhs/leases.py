@@ -1170,6 +1170,10 @@ class LeaseGuard:
                 stdout += str(extra_stdout or "")
                 stderr += str(extra_stderr or "")
                 returncode = 124
+                self.terminate_owned_processes()
+            except BaseException:
+                self.terminate_owned_processes()
+                raise
         finally:
             if proc.poll() is not None:
                 try:
@@ -1223,22 +1227,29 @@ class LeaseGuard:
         initial = self._runtime_assessment()
         if initial["safe_to_release"]:
             return initial
-        term_targets: set[tuple[str, int]] = set()
-        for item in initial["blocking"]:
-            observed = item.get("observed") if isinstance(item, dict) else None
-            if item.get("role") in {"child", "exporter", "child_process_group", "exporter_process_group"}:
-                pgid = int(item.get("pgid") or (observed or {}).get("pgid") or 0)
-                if pgid and (self.owner is None or pgid != self.owner.pgid):
-                    term_targets.add(("pgid", pgid))
-            elif observed and int(observed.get("pid") or 0) != os.getpid():
-                term_targets.add(("pid", int(observed["pid"])))
-            for member in item.get("members") or []:
-                pgid = int(member.get("pgid") or 0)
-                if pgid and (self.owner is None or pgid != self.owner.pgid):
-                    term_targets.add(("pgid", pgid))
+        def targets(assessment: Mapping[str, Any]) -> set[tuple[str, int]]:
+            result: set[tuple[str, int]] = set()
+            for item in assessment["blocking"]:
+                observed = item.get("observed") if isinstance(item, dict) else None
+                if item.get("role") in {
+                    "child",
+                    "exporter",
+                    "child_process_group",
+                    "exporter_process_group",
+                }:
+                    pgid = int(item.get("pgid") or (observed or {}).get("pgid") or 0)
+                    if pgid and (self.owner is None or pgid != self.owner.pgid):
+                        result.add(("pgid", pgid))
+                elif observed and int(observed.get("pid") or 0) != os.getpid():
+                    result.add(("pid", int(observed["pid"])))
+                for member in item.get("members") or []:
+                    pgid = int(member.get("pgid") or 0)
+                    if pgid and (self.owner is None or pgid != self.owner.pgid):
+                        result.add(("pgid", pgid))
+            return result
 
-        def send(signum: int) -> None:
-            for target_type, value in sorted(term_targets):
+        def send(signum: int, assessment: Mapping[str, Any]) -> None:
+            for target_type, value in sorted(targets(assessment)):
                 try:
                     if target_type == "pgid":
                         os.killpg(value, signum)
@@ -1248,7 +1259,7 @@ class LeaseGuard:
                     continue
 
         half_budget = max(1, self.budget.child_shutdown_seconds // 2)
-        send(signal.SIGTERM)
+        send(signal.SIGTERM, initial)
         deadline = time.monotonic() + half_budget
         assessment = self._runtime_assessment()
         while not assessment["safe_to_release"] and time.monotonic() < deadline:
@@ -1256,7 +1267,7 @@ class LeaseGuard:
             assessment = self._runtime_assessment()
         if assessment["safe_to_release"]:
             return assessment
-        send(signal.SIGKILL)
+        send(signal.SIGKILL, assessment)
         deadline = time.monotonic() + max(1, self.budget.child_shutdown_seconds - half_budget)
         while not assessment["safe_to_release"] and time.monotonic() < deadline:
             time.sleep(0.1)
@@ -1289,6 +1300,7 @@ class LeaseGuard:
                         },
                     )
                     conn.commit()
+                self._closed = True
                 return False
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row

@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,11 +33,9 @@ from trippostcollect.core.paths import (
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs.accounts import (
     XhsAccountUnavailable,
-    acquire_account_lease,
     ensure_xhs_schema,
     get_account,
     record_event,
-    release_account_lease,
     set_account_status,
     validate_account_id,
 )
@@ -53,9 +50,15 @@ from trippostcollect.xhs.sessions import (
     refresh_encrypted_storage_state,
     snapshot_sha256,
 )
+from trippostcollect.xhs.leases import (
+    LeaseGuard,
+    XhsLeaseSignal,
+    crawl_lease_budget,
+)
 
 
 ROOT = PROJECT_ROOT
+_ACTIVE_LEASE_GUARD: LeaseGuard | None = None
 CHALLENGE_MARKERS = (
     "captcha",
     "安全验证",
@@ -118,8 +121,8 @@ def _eligible_account_for_plan(conn: sqlite3.Connection, requested: str) -> dict
     if not account or account["status"] != "active":
         raise XhsAccountUnavailable("requested_xhs_account_not_active")
     active_lease = conn.execute(
-        "SELECT expires_at FROM xhs_account_leases WHERE account_id=? AND expires_at>?",
-        (account_id, utc_iso()),
+        "SELECT expires_at FROM xhs_account_leases WHERE account_id=?",
+        (account_id,),
     ).fetchone()
     if active_lease:
         raise XhsAccountUnavailable("requested_xhs_account_busy")
@@ -364,7 +367,6 @@ def record_preexecution_failure(
     run_dir: Path,
     state_path: Path,
     reason: str,
-    lease_acquired: bool,
     login_required: bool,
 ) -> int:
     plan = {
@@ -409,8 +411,6 @@ def record_preexecution_failure(
         ensure_xhs_schema(conn)
         if login_required:
             set_account_status(conn, account["account_id"], "login_required", reason=reason)
-        if lease_acquired:
-            release_account_lease(conn, account_id=account["account_id"], run_id=run_id, outcome="failed")
         record_event(
             conn,
             account_id=account["account_id"],
@@ -432,19 +432,24 @@ def record_preexecution_failure(
     return 2
 
 
-def main() -> int:
+def _run_main() -> int:
+    global _ACTIVE_LEASE_GUARD
     args = parse_args()
     target = load_target(args.target_key, args.target_config)
     pool = load_pool_config(args.pool_config)
-    if int(pool["lease_seconds"]) < int(target["timeout_seconds"]) + 300:
-        raise SystemExit("XHS lease_seconds must cover timeout_seconds plus a 300-second cleanup buffer")
+    try:
+        lease_budget = crawl_lease_budget(
+            timeout_seconds=int(target["timeout_seconds"]),
+            configured_lease_seconds=int(pool["lease_seconds"]),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     db_path = Path(args.db).expanduser().resolve()
     bootstrap_database(db_path, sync_jobs=False)
     run_id = utc_stamp()
     run_dir = ensure_dir(XHS_RUNTIME_ROOT / "runs" / run_id)
     state_path = ensure_dir(XHS_EXECUTION_STATE_ROOT / run_id) / f"{args.target_key}.json"
 
-    lease_acquired = False
     discovery_plan: dict[str, Any]
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -452,13 +457,17 @@ def main() -> int:
         if args.dry_run:
             account = _eligible_account_for_plan(conn, args.account_id)
         else:
+            guard = LeaseGuard(
+                db_path=db_path,
+                account_id=args.account_id,
+                run_id=run_id,
+                lease_kind="crawl",
+                execution_state_path=state_path,
+                budget=lease_budget,
+            )
+            _ACTIVE_LEASE_GUARD = guard
             try:
-                account = acquire_account_lease(
-                    conn,
-                    run_id=run_id,
-                    pool_config=pool,
-                    requested_account_id=args.account_id,
-                )
+                account = guard.acquire()
             except XhsAccountUnavailable as exc:
                 blocked_plan = {
                     "run_id": run_id,
@@ -515,23 +524,11 @@ def main() -> int:
                 )
                 print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
                 return 2
-            lease_acquired = True
-        try:
-            discovery_plan = resolve_discovery_plan(
-                conn,
-                target=target,
-                account_id=str(account["account_id"]),
-            )
-        except Exception:
-            if lease_acquired:
-                release_account_lease(
-                    conn,
-                    account_id=str(account["account_id"]),
-                    run_id=run_id,
-                    outcome="failed",
-                )
-                lease_acquired = False
-            raise
+        discovery_plan = resolve_discovery_plan(
+            conn,
+            target=target,
+            account_id=str(account["account_id"]),
+        )
 
     encrypted_state = Path(str(account["encrypted_state_path"]))
     if not encrypted_state.is_file():
@@ -545,7 +542,6 @@ def main() -> int:
             run_dir=run_dir,
             state_path=state_path,
             reason="missing_encrypted_xhs_storage_state",
-            lease_acquired=lease_acquired,
             login_required=not args.dry_run,
         )
 
@@ -562,7 +558,6 @@ def main() -> int:
             run_dir=run_dir,
             state_path=state_path,
             reason=f"unreadable_encrypted_xhs_storage_state:{type(exc).__name__}",
-            lease_acquired=lease_acquired,
             login_required=not args.dry_run,
         )
 
@@ -580,7 +575,9 @@ def main() -> int:
         "completion_mode": args.completion_mode,
         "quantity_limits_enforced": args.completion_mode == "target-new-posts",
         "timeout_seconds": target["timeout_seconds"],
-        "lease_seconds": pool["lease_seconds"],
+        "lease_seconds": lease_budget.lease_seconds,
+        "configured_lease_ceiling_seconds": pool["lease_seconds"],
+        "lease_budget": lease_budget.public(),
         "behavior_profile": pool["behavior_profile"],
         "local_image_storage_required": True,
         "media_root": str(LOCAL_MEDIA_ROOT.resolve()),
@@ -592,9 +589,7 @@ def main() -> int:
             "active_lease": False,
             "encrypted_state_exists": True,
             "encrypted_state_readable": True,
-            "lease_covers_timeout_cleanup": (
-                int(pool["lease_seconds"]) >= int(target["timeout_seconds"]) + 300
-            ),
+            "lease_covers_timeout_cleanup": True,
         },
         "discovery": discovery_plan,
     }
@@ -629,12 +624,6 @@ def main() -> int:
     except Exception as exc:
         if state is not None and not args.dry_run:
             fail_open_step(state, error=f"xhs_run_initialization_failed:{type(exc).__name__}")
-        if lease_acquired:
-            with sqlite3.connect(db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                ensure_xhs_schema(conn)
-                release_account_lease(conn, account_id=account["account_id"], run_id=run_id, outcome="failed")
-            lease_acquired = False
         raise
 
     if args.dry_run:
@@ -677,29 +666,23 @@ def main() -> int:
             env = os.environ.copy()
             env["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(state_path)
             try:
-                completed = subprocess.run(
+                completed = guard.run_subprocess(
                     command,
                     cwd=ROOT,
                     env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=int(target["timeout_seconds"]) + 300,
-                    check=False,
+                    timeout_seconds=int(target["timeout_seconds"]),
                 )
                 exit_code = completed.returncode
                 stdout = completed.stdout
                 stderr = completed.stderr
-            except subprocess.TimeoutExpired as exc:
-                stdout = str(exc.stdout or "")
-                stderr = str(exc.stderr or "")
-                exit_code = 124
-            storage_state_refreshed = refresh_encrypted_storage_state(
-                storage_state,
-                encrypted_state,
-                account_id=str(account["account_id"]),
-                identity_hash=str(account["identity_hash"]),
-                key=key,
-            )
+            finally:
+                storage_state_refreshed = refresh_encrypted_storage_state(
+                    storage_state,
+                    encrypted_state,
+                    account_id=str(account["account_id"]),
+                    identity_hash=str(account["identity_hash"]),
+                    key=key,
+                )
             stdout_json = extract_stdout_json(stdout)
             child_summary_path = str(stdout_json.get("summary") or "")
             child_summary = load_child_summary(child_summary_path)
@@ -850,8 +833,6 @@ def main() -> int:
             )
         elif login_reason:
             set_account_status(conn, account["account_id"], "login_required", reason=f"xhs_login:{login_reason}")
-        release_account_lease(conn, account_id=account["account_id"], run_id=run_id, outcome=outcome)
-        lease_acquired = False
         record_event(
             conn,
             account_id=account["account_id"],
@@ -860,12 +841,15 @@ def main() -> int:
             details={"outcome": outcome, "exit_code": exit_code, "challenge": challenge, "login_reason": login_reason},
         )
         conn.commit()
+    guard.set_outcome(outcome)
 
     summary = {
         "status": outcome,
         "run_id": run_id,
         "target_key": args.target_key,
         "account_id": account["account_id"],
+        "lease_id": guard.lease_id,
+        "lease_budget": lease_budget.public(),
         "execution_state": str(state_path),
         "child_summary": child_summary_path,
         "discovery": discovery_commit,
@@ -907,8 +891,46 @@ def main() -> int:
             report=summary,
             finished=True,
         )
+    lease_released = guard.close()
+    summary["lease_released"] = lease_released
+    if not lease_released:
+        summary["status"] = "failed"
+        summary["reason"] = "lease_release_deferred_live_processes"
+    write_summary(run_dir, summary)
+    if not lease_released:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_xhs_schema(conn)
+            upsert_run(
+                conn,
+                run_id=run_id,
+                target_key=args.target_key,
+                account_id=account["account_id"],
+                status="failed",
+                state_path=state_path,
+                child_summary_path=child_summary_path or None,
+                report=summary,
+                finished=True,
+            )
     print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
-    return 0 if outcome == "completed" else 2
+    return 0 if summary["status"] == "completed" else 2
+
+
+def main() -> int:
+    global _ACTIVE_LEASE_GUARD
+    _ACTIVE_LEASE_GUARD = None
+    code = 2
+    try:
+        try:
+            code = _run_main()
+        except XhsLeaseSignal as exc:
+            code = 128 + exc.signum
+    finally:
+        guard = _ACTIVE_LEASE_GUARD
+        _ACTIVE_LEASE_GUARD = None
+        if guard is not None and not guard.close():
+            code = 2
+    return code
 
 
 if __name__ == "__main__":

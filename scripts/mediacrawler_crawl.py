@@ -111,6 +111,13 @@ from trippostcollect.records.topic_relevance import (
     web_post_content_text,
     web_post_title,
 )
+from trippostcollect.xhs.leases import (
+    LEASE_DB_ENV,
+    LEASE_ID_ENV,
+    LEASE_OWNER_TOKEN_ENV,
+    mark_lease_process_exited_from_environment,
+    register_lease_process_from_environment,
+)
 from trippostcollect.scheduler.discovery import (
     load_checkpoint,
     load_skipped_candidates,
@@ -1282,6 +1289,11 @@ def run_command(
     returncode = 0
     timed_out = False
     proc: subprocess.Popen[bytes] | None = None
+    lease_process_identity = None
+    lease_registration_enabled = all(
+        str(env.get(key) or "")
+        for key in (LEASE_DB_ENV, LEASE_ID_ENV, LEASE_OWNER_TOKEN_ENV)
+    )
     try:
         proc = subprocess.Popen(
             cmd,
@@ -1291,6 +1303,20 @@ def run_command(
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
+        if lease_registration_enabled:
+            try:
+                lease_process_identity = register_lease_process_from_environment(
+                    pid=proc.pid,
+                    process_role="exporter",
+                    environ=env,
+                )
+            except Exception:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                proc.communicate()
+                raise
         stdout_data, stderr_data = proc.communicate(timeout=timeout)
         stdout = decode_text(stdout_data)
         stderr = decode_text(stderr_data)
@@ -1315,6 +1341,13 @@ def run_command(
                 extra_stdout, extra_stderr = proc.communicate()
             stdout += decode_text(extra_stdout)
             stderr += decode_text(extra_stderr)
+    finally:
+        if lease_process_identity is not None and proc is not None and proc.returncode is not None:
+            mark_lease_process_exited_from_environment(
+                identity=lease_process_identity,
+                process_role="exporter",
+                environ=env,
+            )
 
     _, avatar_output_detected = redact_author_avatar_text(f"{stdout}\n{stderr}")
     if avatar_output_detected:

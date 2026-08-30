@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -32,10 +31,8 @@ from trippostcollect.core.paths import (
 )
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs.accounts import (
-    acquire_account_lease,
     ensure_xhs_schema,
     record_event,
-    release_account_lease,
     set_account_status,
 )
 from trippostcollect.xhs.config import load_pool_config, load_target
@@ -43,6 +40,11 @@ from trippostcollect.xhs.sessions import (
     load_snapshot_key,
     materialized_storage_state,
     refresh_encrypted_storage_state,
+)
+from trippostcollect.xhs.leases import (
+    LeaseGuard,
+    XhsLeaseSignal,
+    crawl_lease_budget,
 )
 from xhs_runner import (
     _challenge_reason,
@@ -58,6 +60,7 @@ from xhs_runner import (
 
 
 ROOT = PROJECT_ROOT
+_ACTIVE_LEASE_GUARD: LeaseGuard | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -358,14 +361,20 @@ def candidate_only_child_failure(child_summary: dict[str, Any]) -> bool:
     )
 
 
-def main() -> int:
+def _run_main() -> int:
+    global _ACTIVE_LEASE_GUARD
     args = parse_args()
     if args.max_items < 0 or args.batch_size <= 0:
         raise SystemExit("--max-items cannot be negative; --batch-size must be positive")
     target = load_target(args.target_key, args.target_config)
     pool = load_pool_config(args.pool_config)
-    if int(pool["lease_seconds"]) < int(target["timeout_seconds"]) + 300:
-        raise SystemExit("XHS lease_seconds must cover timeout_seconds plus a 300-second cleanup buffer")
+    try:
+        lease_budget = crawl_lease_budget(
+            timeout_seconds=int(target["timeout_seconds"]),
+            configured_lease_seconds=int(pool["lease_seconds"]),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     keyword = str(args.keyword or target["keyword"])
     db_path = Path(args.db).expanduser().resolve()
     bootstrap_database(db_path, sync_jobs=False)
@@ -402,7 +411,9 @@ def main() -> int:
         "target_ids": [item["platform_post_id"] for item in targets],
         "rejected_count": len(rejected),
         "timeout_seconds": target["timeout_seconds"],
-        "lease_seconds": pool["lease_seconds"],
+        "lease_seconds": lease_budget.lease_seconds,
+        "configured_lease_ceiling_seconds": pool["lease_seconds"],
+        "lease_budget": lease_budget.public(),
         "behavior_profile": pool["behavior_profile"],
         "headed": pool["headed"],
         "discovery_writes": False,
@@ -468,7 +479,6 @@ def main() -> int:
         print(json.dumps({**base_summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
         return 0
 
-    lease_acquired = False
     child_summary: dict[str, Any] = {}
     child_summary_path = ""
     stdout = ""
@@ -478,17 +488,20 @@ def main() -> int:
     state_error = ""
     storage_state_refreshed = False
     candidate_only_failure = False
+    guard = LeaseGuard(
+        db_path=db_path,
+        account_id=args.account_id,
+        run_id=run_id,
+        lease_kind="repair",
+        execution_state_path=state_path,
+        budget=lease_budget,
+    )
+    _ACTIVE_LEASE_GUARD = guard
     try:
+        account = guard.acquire()
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             ensure_xhs_schema(conn)
-            account = acquire_account_lease(
-                conn,
-                run_id=run_id,
-                pool_config=pool,
-                requested_account_id=args.account_id,
-            )
-            lease_acquired = True
             upsert_run(
                 conn,
                 run_id=run_id,
@@ -524,14 +537,11 @@ def main() -> int:
             env = os.environ.copy()
             env["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(state_path)
             try:
-                completed = subprocess.run(
+                completed = guard.run_subprocess(
                     command,
                     cwd=ROOT,
                     env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=int(target["timeout_seconds"]) + 300,
-                    check=False,
+                    timeout_seconds=int(target["timeout_seconds"]),
                 )
             finally:
                 storage_state_refreshed = refresh_encrypted_storage_state(
@@ -662,7 +672,7 @@ def main() -> int:
                                 },
                             )
                             outcome = "completed"
-    except (OSError, sqlite3.Error, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+    except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
         state_error = f"xhs_repair_exception:{type(exc).__name__}:{exc}"
         stderr = f"{stderr}\n{state_error}".strip()
         _state_fail_open(state, state_error)
@@ -687,13 +697,6 @@ def main() -> int:
                     "login_required",
                     reason=f"xhs_repair_login:{login_reason}",
                 )
-            if lease_acquired:
-                release_account_lease(
-                    conn,
-                    account_id=account["account_id"],
-                    run_id=run_id,
-                    outcome=outcome,
-                )
             record_event(
                 conn,
                 account_id=account["account_id"],
@@ -702,6 +705,7 @@ def main() -> int:
                 details={"outcome": outcome, "exit_code": exit_code, "error": state_error},
             )
             conn.commit()
+    guard.set_outcome(outcome)
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -729,6 +733,8 @@ def main() -> int:
     summary = {
         **base_summary,
         "status": outcome,
+        "lease_id": guard.lease_id,
+        "lease_budget": lease_budget.public(),
         "child_summary": child_summary_path,
         "exit_code": exit_code,
         "error": state_error,
@@ -764,8 +770,46 @@ def main() -> int:
             report=summary,
             finished=True,
         )
+    lease_released = guard.close()
+    summary["lease_released"] = lease_released
+    if not lease_released:
+        summary["status"] = "failed"
+        summary["error"] = "lease_release_deferred_live_processes"
+    write_summary(run_dir, summary)
+    if not lease_released:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_xhs_schema(conn)
+            upsert_run(
+                conn,
+                run_id=run_id,
+                target_key=f"xhs_repair:{args.target_key}",
+                account_id=account["account_id"],
+                status="failed",
+                state_path=state_path,
+                child_summary_path=child_summary_path or None,
+                report=summary,
+                finished=True,
+            )
     print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
-    return 0 if outcome == "completed" else 2
+    return 0 if summary["status"] == "completed" else 2
+
+
+def main() -> int:
+    global _ACTIVE_LEASE_GUARD
+    _ACTIVE_LEASE_GUARD = None
+    code = 2
+    try:
+        try:
+            code = _run_main()
+        except XhsLeaseSignal as exc:
+            code = 128 + exc.signum
+    finally:
+        guard = _ACTIVE_LEASE_GUARD
+        _ACTIVE_LEASE_GUARD = None
+        if guard is not None and not guard.close():
+            code = 2
+    return code
 
 
 if __name__ == "__main__":
