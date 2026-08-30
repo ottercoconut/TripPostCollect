@@ -47,6 +47,23 @@ CRAWL_ATTEMPT_COLUMNS = (
     "classification_json",
     "created_at",
 )
+XHS_EXACT_LEASE_COLUMNS = {
+    "lease_id",
+    "owner_token",
+    "lease_kind",
+    "owner_host_id",
+    "owner_boot_id",
+    "owner_pid",
+    "owner_process_started_at",
+    "owner_process_start_token",
+    "owner_pgid",
+    "execution_state_path",
+    "heartbeat_at",
+    "lease_duration_seconds",
+    "child_shutdown_budget_seconds",
+    "root_finalize_budget_seconds",
+    "identity_version",
+}
 
 
 def qmarks(values: set[str] | list[str]) -> str:
@@ -410,6 +427,15 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
         and bool(table_columns(conn, "xhs_accounts") & legacy_account_columns)
     ) or table_exists(conn, "xhs_platform_state")
     if requires_v10_migration:
+        legacy_lease_count = (
+            int(conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0])
+            if table_exists(conn, "xhs_account_leases")
+            else 0
+        )
+        if legacy_lease_count:
+            raise RuntimeError(
+                "cannot migrate XHS control schema while legacy identity-less leases exist"
+            )
         conn.commit()
         conn.execute("PRAGMA foreign_keys = OFF")
         try:
@@ -491,6 +517,28 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
             conn.commit()
         finally:
             conn.execute("PRAGMA foreign_keys = ON")
+    lease_columns = (
+        table_columns(conn, "xhs_account_leases")
+        if table_exists(conn, "xhs_account_leases")
+        else set()
+    )
+    if lease_columns and not XHS_EXACT_LEASE_COLUMNS.issubset(lease_columns):
+        legacy_lease_count = int(
+            conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0]
+        )
+        if legacy_lease_count:
+            raise RuntimeError(
+                "cannot migrate XHS control schema while legacy identity-less leases exist"
+            )
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.execute("DROP TABLE IF EXISTS xhs_lease_processes")
+            conn.execute("DROP TABLE xhs_account_leases")
+            conn.executescript(XHS_CONTROL_SCHEMA.read_text(encoding="utf-8"))
+            conn.commit()
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(XHS_CONTROL_SCHEMA.read_text(encoding="utf-8"))
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
@@ -499,6 +547,10 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
         (12, "xhs_discovery_checkpoints"),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
+        (21, "xhs_exact_lease_identity"),
     )
 
 

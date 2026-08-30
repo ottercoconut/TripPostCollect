@@ -30,10 +30,52 @@ ON xhs_account_events(account_id, id DESC);
 
 CREATE TABLE IF NOT EXISTS xhs_account_leases (
     account_id TEXT PRIMARY KEY REFERENCES xhs_accounts(account_id) ON DELETE CASCADE,
+    lease_id TEXT NOT NULL UNIQUE,
+    owner_token TEXT NOT NULL UNIQUE,
     run_id TEXT NOT NULL UNIQUE,
+    lease_kind TEXT NOT NULL,
+    owner_host_id TEXT NOT NULL,
+    owner_boot_id TEXT NOT NULL,
+    owner_pid INTEGER NOT NULL,
+    owner_process_started_at TEXT NOT NULL,
+    owner_process_start_token TEXT NOT NULL,
+    owner_pgid INTEGER NOT NULL,
+    execution_state_path TEXT NOT NULL,
     acquired_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    heartbeat_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    lease_duration_seconds INTEGER NOT NULL,
+    child_shutdown_budget_seconds INTEGER NOT NULL,
+    root_finalize_budget_seconds INTEGER NOT NULL,
+    identity_version INTEGER NOT NULL DEFAULT 1,
+    CHECK (lease_kind IN ('crawl', 'login', 'repair')),
+    CHECK (owner_pid > 0),
+    CHECK (owner_pgid > 0),
+    CHECK (lease_duration_seconds > 0),
+    CHECK (child_shutdown_budget_seconds >= 0),
+    CHECK (root_finalize_budget_seconds >= 0),
+    CHECK (identity_version = 1)
 );
+
+CREATE TABLE IF NOT EXISTS xhs_lease_processes (
+    lease_id TEXT NOT NULL REFERENCES xhs_account_leases(lease_id) ON DELETE CASCADE,
+    process_role TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    boot_id TEXT NOT NULL,
+    pid INTEGER NOT NULL,
+    process_started_at TEXT NOT NULL,
+    process_start_token TEXT NOT NULL,
+    pgid INTEGER NOT NULL,
+    registered_at TEXT NOT NULL,
+    exited_at TEXT,
+    PRIMARY KEY (lease_id, process_role, pid, process_start_token),
+    CHECK (process_role IN ('child', 'exporter', 'browser')),
+    CHECK (pid > 0),
+    CHECK (pgid > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_xhs_lease_processes_live
+ON xhs_lease_processes(lease_id, exited_at, process_role);
 
 CREATE TABLE IF NOT EXISTS xhs_runs (
     run_id TEXT PRIMARY KEY,
