@@ -67,12 +67,14 @@ def account_paths(account_id: str) -> dict[str, Path]:
     return {
         "root": root,
         "profile": root / "profile",
+        "lease_lock": root / "lease.lock",
         "encrypted_state": root / "storage_state.enc",
         "metadata": root / "metadata.json",
     }
 
 
 def ensure_xhs_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA foreign_keys = ON")
     ensure_xhs_control_schema(conn)
     conn.commit()
 
