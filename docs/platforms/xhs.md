@@ -57,33 +57,61 @@ python scripts/xhs_accounts.py list
 - 操作人已指定账号；状态为 `active`，没有活动租约；`storage_state.enc` 存在且可解密。
 - `target_key` 存在且关键词属于青岛；目标、候选上限、顶部刷新、停滞批次和超时符合本轮要求。
 - `behavior_profile=xhs_guarded` 且使用有头浏览器。
-- `lease_seconds >= timeout_seconds + 300`。
+- pool 的 `lease_seconds` 是租期上限，必须覆盖动态租期：目标 `timeout_seconds`、30 秒 child 进程组
+  关闭预算和 270 秒根层加密、验证、摘要与数据库收尾预算之和；正式租约只写本目标实际所需时长。
 - 互动未明确时为 `none`；点赞等真实副作用必须由操作人明确选择。
 - schema v2 配置没有旧 `enabled` 或 `download_images` 字段。
 - checkpoint 引用的累计摘要及全部 JSONL 仍存在。
 
 缺少任一前提即停止，不直接调用 MediaCrawler 探测或绕过门禁。
 
-若宿主或终端被硬中止，可能留下仍未过期的账号租约。仅当精确 execution state 的最后事件为
-`adaptive_search_stopped/runtime_failed`、尾批未完成、失败已超过安全等待期，且系统中没有任何
-小红书 runner、child、exporter 或该账号 profile 的 Chrome 进程时，才允许通过受审计入口回收：
+`xhs_account_leases` 同时记录 `lease_id`、不可公开的 `owner_token`、账号、run、租约类型、host/boot
+ID、owner PID、owner 进程启动时间和启动 token、PGID、execution state 路径，以及取得、心跳、计划
+到期和分项预算时间。TTL 只表示计划期限；过期行不会被下次 acquire 自动删除，仍须证明精确 owner
+及其运行树已死亡。`xhs_lease_processes` 另外登记 child、exporter 和登录期 profile Chrome 的精确
+PID/启动 token/PGID；账号目录下的 `lease.lock` 用 `flock` 加强同机互斥，但 SQLite owner token 仍是
+事实源。
+
+若宿主、终端或 runner 被硬中止，先运行 `list` 取得精确 `account_id/run_id/lease_id`，再使用受审计
+入口对账：
 
 ```bash
 source .venv/bin/activate
 python scripts/xhs_accounts.py recover-orphan-lease \
   --account-id <account_id> \
   --run-id <run_id> \
-  --target-key <target_key>
+  --lease-id <lease_id>
 ```
 
-命令必须精确匹配租约和 state，只删除该条租约并写入 `orphan_lease_recovered` 事件；它不得修改
-execution state、checkpoint、cursor、账号状态或 staging 产物。任何进程证据、字段不一致、完整尾批、
-过近的失败时间或已过期租约都会拒绝执行。回收后仍须重新 dry-run，并由正式 runner 从 SQLite 的
-最后安全 checkpoint 恢复；孤儿运行没有最终摘要的 staging 不得直接晋升或导入。
+命令先取得同账号非阻塞 `flock`，再执行两次精确进程对账；第二次位于 `BEGIN IMMEDIATE` 内。只有下列
+事实全部成立才删除租约：当前 host 与租约 host 一致；boot 已变化，或同一 boot 下 owner PID 已不存在/
+启动 token 或 PGID 已不匹配；登记的 child/exporter 及其进程组全部消失；不存在 argv 中
+`--user-data-dir` 精确等于该账号 profile 的 Chrome。PID 已重用只证明旧 owner 死亡，不把新 PID 当作
+旧进程，也不向它发信号；不同 host 无法本机证明时拒绝回收。
 
-搜索或作者补全阶段发现的 `300011` 运行级限制必须在进程退出前先写入
+execution state、最后事件、`adaptive_search_stopped` 和尾批完整性只形成独立的终态审计，不参与账号
+互斥释放判定。因此 execution state 缺失、不可读或没有 `adaptive_search_stopped` 时，只要上述精确
+进程死亡事实成立，也允许删除这一条精确租约。删除必须同时匹配 `account_id/run_id/lease_id/owner_token`
+且 `DELETE rowcount=1`，并在同一事务写 `orphan_lease_reconciled`；错误 owner、字段漂移或并发恢复只能
+有一个成功。
+
+孤儿对账的变更范围固定为 `account_mutex_only`：不得补写 execution state 或停止事件，不得提交或推进
+checkpoint、cursor、seen、campaign，不得晋升/删除/导入旧 staging，不得写内容 SQLite，也不得改变
+账号健康状态。审计事件逐项写明这些 mutation 均为 `false`。回收后仍须重新 dry-run，并由正式 runner
+从 SQLite 最后安全 checkpoint 开始新轮；旧孤儿产物不能作为新轮完成证据。
+
+正式抓取、历史修复和登录都由同一个 `LeaseGuard` 覆盖从 acquire 到根层摘要/数据库收尾的完整生命
+周期。runner 启动 child 时创建独立进程组，child 启动 exporter 后立即用相同 owner token 登记 exporter
+进程组。普通结束和普通异常都先关闭/等待登记进程与精确 profile Chrome，再由 Guard 在 `finally` 中
+释放。收到 `SIGINT/SIGTERM` 时先向完整登记进程组发 `SIGTERM`，在 child 关闭预算内等待，仍存活才发
+`SIGKILL`；复核进程与 profile 全部消失后才能删除租约。复核仍有残留时保留 SQLite 租约并写
+`lease_release_deferred_live_processes`，不能为了退出码干净而强制释放。`SIGKILL` 和掉电无法执行
+`finally`，由上面的孤儿对账恢复。
+
+正常可捕获的搜索或作者补全 `300011` 运行级限制仍必须在进程退出前先写入
 `adaptive_search_stopped(runtime_failed, stop_detail=platform_security_limit_300011, batch_complete=false)`；
-单独的 behavior evidence 不能授权孤儿租约回收，也不能推进 checkpoint。
+单独的 behavior evidence 不能推进 checkpoint。硬中止导致该事件来不及写入时，只影响终态完整性，
+不再让已经精确证实死亡的 owner 永久占用账号互斥。
 
 ## 2. 登记与登录
 
@@ -271,6 +299,15 @@ python scripts/repair_xhs_posts.py \
 | 保存的 search ID 恢复失败 | 保留 checkpoint，不生成新 ID 猜测深页 |
 | 累计摘要或 JSONL 缺失 | 冻结前失败；恢复原文件或停止，不清空路径继续 |
 | `sqlite_import_failed` | 不提交 checkpoint、seen 或 campaign；核对数据库和媒体回滚 |
+| 正常结束或可捕获普通异常 | `LeaseGuard` 收束登记进程，精确 token 删除且 rowcount 必须为 1；异常不伪装成功 |
+| `SIGINT` / `SIGTERM` | 先 TERM/KILL child、exporter 与精确 profile Chrome，确认消失后释放；状态可保持不完整 |
+| runner 被 `SIGKILL` | 租约与未完成 state 原样保留；child/Chrome 存活时孤儿对账必须拒绝 |
+| 系统重启 | 同 host 且 boot ID 已变化可证明旧 PID 全部死亡；仍需确认当前没有精确 profile Chrome |
+| execution state 缺失或无停止事件 | 只降低终态完整性；精确运行树已死亡时允许 `account_mutex_only` 回收 |
+| PID 数值被重用 | 启动 token/启动时间/PGID 不匹配即视为新进程；不误杀、不把它当旧 owner 存活 |
+| 残留 child/exporter/账号 Chrome | 无论 TTL 或 state 如何都拒绝释放，先让精确残留进程结束 |
+| 两个恢复命令并发 | 同账号 `flock` 与 `BEGIN IMMEDIATE` 串行化；只有精确 DELETE rowcount=1 的一个成功 |
+| 错误 lease/run/owner | 删除谓词不匹配并失败关闭；不得写成功恢复事件或改变账号健康 |
 
 小红书不向操作人开放手工 `--resume-summary`、`--start-page` 或 `--start-cursor`。checkpoint/seen 以
 `target_key + account_id + query_fingerprint` 隔离；换号不是原账号续跑。SQLite
@@ -292,4 +329,5 @@ cursor 表示同一个 client search ID。
 - 密钥优先读取 `TRIPPOSTCOLLECT_XHS_SNAPSHOT_KEY`，否则使用 macOS Keychain 服务
   `TripPostCollect.XHS`。
 - 运行时明文只存在于 `data/runtime/xhs/sessions/<run_id>/`，退出必须删除。
-- SQLite 租约只防同账号并发；账号切换、quarantine、activate 和 retire 均由操作人决定。
+- SQLite 精确租约是同账号互斥事实源；每账号 `flock` 只增强同机竞争保护，不能替代 owner token、
+  进程启动身份或 SQLite rowcount。账号切换、quarantine、activate 和 retire 均由操作人决定。

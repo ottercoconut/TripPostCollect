@@ -234,19 +234,34 @@ python scripts/crawl_runner.py \
 - 未完成尾批不得推进；边界页允许下轮重取并依靠已知 ID 前置过滤。
 - `--no-import` 不得写 checkpoint。
 
-若系统中已无任何小红书进程，但硬中止运行仍持有未过期租约，不得直接改 SQLite。先确认 state
-最后事件是超过五分钟的 `adaptive_search_stopped/runtime_failed` 且 `batch_complete=false`，再执行：
+硬中止后无论 TTL 是否已过期，都不得直接改 SQLite。先列出精确租约；`list` 不公开 owner token，
+只显示其 SHA-256 供审计：
+
+```bash
+source .venv/bin/activate
+python scripts/xhs_accounts.py list
+```
+
+从输出复制同一行的 `account_id`、`run_id` 和 `lease_id`，再执行：
 
 ```bash
 source .venv/bin/activate
 python scripts/xhs_accounts.py recover-orphan-lease \
   --account-id <account_id> \
   --run-id <run_id> \
-  --target-key <target_key>
+  --lease-id <lease_id>
 ```
 
-该入口会再次检查精确租约、execution state 和所有相关进程，只回收租约并保留 checkpoint、cursor、
-state 与 staging；随后必须先用同账号、同配置、同完成模式 dry-run，再正式恢复。
+该入口取得每账号 `flock`，核对 lease owner 的 host/boot、PID、启动时间/token 和 PGID，再核对登记的
+child/exporter 进程组以及 argv 中 `--user-data-dir` 精确等于该账号 profile 的 Chrome；随后在
+`BEGIN IMMEDIATE` 内再次核对并用 `account_id/run_id/lease_id/owner_token` 删除，rowcount 必须为 1。
+不同 host、任一精确残留进程、错误身份、错误 owner 或并发漂移都会拒绝。
+
+execution state 是否存在、是否含 `adaptive_search_stopped`、尾批和终态是否完整只写入审计，不再决定
+能否释放账号互斥。即使 state 缺失或没有停止事件，只要旧 runner/child/exporter/profile Chrome 已被
+精确证明全部死亡，也允许写 `orphan_lease_reconciled` 并只回收该租约。该动作不得补写 state、推进
+checkpoint/cursor/seen/campaign、导入或删除旧 staging、写内容 SQLite，或改变账号状态。随后必须先用
+同账号、同配置、同完成模式 dry-run，再由新正式轮从最后安全 checkpoint 恢复。
 
 `--start-page`、`--resume-summary` 和 `--recovery-keyword` 只用于用户明确批准的人工恢复。优先修复
 自动 checkpoint；不得删除数据库记录后猜页码续跑。平台 cursor 细节见对应平台文档。
