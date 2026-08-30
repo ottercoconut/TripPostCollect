@@ -49,9 +49,8 @@ def test_enabled_bilibili_job_routes_to_formal_detail_executor(tmp_path: Path) -
         assert row is not None
         command = crawl_runner.build_command(
             row,
-            SimpleNamespace(
-                recovery_keyword=None,
-                completion_mode="target-new-posts",
+                SimpleNamespace(
+                    recovery_keyword=None,
                 db=str(tmp_path / "posts.sqlite"),
                 start_page=None,
                 resume_summary=None,
@@ -75,7 +74,9 @@ def test_enabled_bilibili_job_routes_to_formal_detail_executor(tmp_path: Path) -
     assert command_value(command, "--required-fields-profile") == (
         "image_post_with_followers_v1"
     )
-    assert command_value(command, "--completion-mode") == "target-new-posts"
+    assert "--completion-mode" not in command
+    assert "--target-new-posts" not in command
+    assert "--candidate-hard-limit" not in command
     assert "--download-images" in command
     assert command_value(command, "--media-root") == str(
         crawl_runner.LOCAL_MEDIA_ROOT.resolve()

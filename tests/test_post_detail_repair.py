@@ -394,8 +394,6 @@ def test_partial_repair_separates_import_gate_from_full_completion(tmp_path: Pat
 
     validation, selected = mediacrawler.collect_formal_records(
         {"records": [{"output": {"jsonl_files": [str(jsonl_path)]}}]},
-        candidate_hard_limit=2,
-        target_new_posts=0,
         db_path=db_path,
         pagination_evidence=evidence,
         allowed_identities={"weibo:id:ok", "weibo:id:missing"},
@@ -417,13 +415,14 @@ def test_build_child_command_disables_discovery_writes(tmp_path: Path) -> None:
         db_path=tmp_path / "db.sqlite",
         output_root=tmp_path / "output",
         targets_path=tmp_path / "targets.json",
-        target_count=4,
         timeout_seconds=600,
         headless=False,
     )
 
     assert command[command.index("--platforms") + 1] == "weibo"
-    assert command[command.index("--candidate-hard-limit") + 1] == "4"
+    assert "--candidate-hard-limit" not in command
+    assert "--target-new-posts" not in command
+    assert "--completion-mode" not in command
     assert "--post-repair" in command
     assert "--repair-targets-file" in command
     assert "--download-images" in command

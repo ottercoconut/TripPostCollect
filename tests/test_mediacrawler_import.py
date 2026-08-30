@@ -1254,10 +1254,6 @@ def test_formal_cli_requires_project_image_mode(monkeypatch: pytest.MonkeyPatch)
             "mediacrawler_crawl.py",
             "--platforms",
             "bilibili",
-            "--candidate-hard-limit",
-            "1",
-            "--target-new-posts",
-            "1",
         ],
     )
 
@@ -1269,8 +1265,8 @@ def test_long_term_image_promotion_requires_all_completion_gates() -> None:
     behavior_ok = {"ok": True, "behavior_ok": True, "policy_ok": True}
     image_complete = {"complete": True}
     incomplete = mediacrawler_crawl.apply_formal_completion_gates(
-        {"completion_met": False, "new_target_met": False, "stop_reason": "runtime_failed"},
-        content_validation={"completion_met": False, "new_target_met": False},
+        {"completion_met": False, "stop_reason": "runtime_failed"},
+        content_validation={"completion_met": False},
         image_materialization=image_complete,
         behavior_validation=behavior_ok,
         download_images=True,
@@ -1283,8 +1279,8 @@ def test_long_term_image_promotion_requires_all_completion_gates() -> None:
     ) is False
 
     complete = mediacrawler_crawl.apply_formal_completion_gates(
-        {"completion_met": True, "new_target_met": True, "stop_reason": "target_new_met"},
-        content_validation={"completion_met": True, "new_target_met": True},
+        {"completion_met": True, "stop_reason": "source_exhausted"},
+        content_validation={"completion_met": True},
         image_materialization=image_complete,
         behavior_validation=behavior_ok,
         download_images=True,
@@ -1301,15 +1297,14 @@ def test_long_term_image_promotion_requires_all_completion_gates() -> None:
     ) is False
 
     failed_child = mediacrawler_crawl.apply_formal_completion_gates(
-        {"completion_met": True, "new_target_met": True, "stop_reason": "target_new_met"},
-        content_validation={"completion_met": True, "new_target_met": True},
+        {"completion_met": True, "stop_reason": "source_exhausted"},
+        content_validation={"completion_met": True},
         image_materialization=image_complete,
         behavior_validation=behavior_ok,
         download_images=True,
         child_execution_ok=False,
     )
     assert failed_child["completion_met"] is False
-    assert failed_child["new_target_met"] is False
     assert failed_child["stop_reason"] == "runtime_failed"
     assert mediacrawler_crawl.formal_image_promotion_allowed(
         download_images=True,
@@ -1321,26 +1316,23 @@ def test_long_term_image_promotion_requires_all_completion_gates() -> None:
         mediacrawler_crawl.apply_formal_completion_gates(
             {
                 "completion_met": False,
-                "new_target_met": True,
                 "stop_reason": "runtime_failed",
             },
-            content_validation={"completion_met": False, "new_target_met": True},
+            content_validation={"completion_met": False},
             image_materialization={"complete": False},
             behavior_validation={"ok": False, "behavior_ok": False, "policy_ok": False},
             download_images=True,
         )
     )
     assert runtime_with_lower_priority_failures["completion_met"] is False
-    assert runtime_with_lower_priority_failures["new_target_met"] is False
     assert runtime_with_lower_priority_failures["stop_reason"] == "runtime_failed"
 
     rate_limited = mediacrawler_crawl.apply_formal_completion_gates(
         {
             "completion_met": False,
-            "new_target_met": False,
             "stop_reason": "rate_limited",
         },
-        content_validation={"completion_met": False, "new_target_met": False},
+        content_validation={"completion_met": False},
         image_materialization=image_complete,
         behavior_validation=behavior_ok,
         download_images=True,

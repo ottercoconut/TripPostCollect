@@ -334,8 +334,6 @@ def test_xhs_repair_accepts_authoritative_title_and_image_without_desc(tmp_path:
 
     validation, records = mediacrawler.collect_formal_records(
         summary,
-        candidate_hard_limit=2,
-        target_new_posts=0,
         db_path=None,
         allowed_identities={"xhs:id:missing-body", "xhs:id:valid-note"},
         repair_metadata_by_identity={
@@ -395,8 +393,6 @@ def test_xhs_repair_still_rejects_empty_title_and_desc(tmp_path: Path) -> None:
 
     validation, records = mediacrawler.collect_formal_records(
         summary,
-        candidate_hard_limit=1,
-        target_new_posts=0,
         db_path=None,
         allowed_identities={"xhs:id:empty-note"},
         repair_mode=True,

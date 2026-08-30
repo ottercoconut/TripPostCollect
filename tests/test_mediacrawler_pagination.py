@@ -44,7 +44,7 @@ def bilibili_record(post_id: str) -> dict:
     }
 
 
-def test_irrelevant_structural_record_is_selected_but_does_not_advance_target(
+def test_irrelevant_structural_record_is_selected_but_not_counted_relevant(
     tmp_path: Path,
 ) -> None:
     record = bilibili_record("irrelevant")
@@ -60,8 +60,6 @@ def test_irrelevant_structural_record_is_selected_but_does_not_advance_target(
             "keyword": "回退关键词",
             "records": [{"output": {"jsonl_files": [str(jsonl_path)]}}],
         },
-        candidate_hard_limit=10,
-        target_new_posts=1,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence={
             "stopped": True,
@@ -70,7 +68,6 @@ def test_irrelevant_structural_record_is_selected_but_does_not_advance_target(
             "candidate_count": 1,
             "candidate_identities": ["irrelevant"],
         },
-        completion_mode="source-exhausted",
     )
 
     assert len(selected) == 1
@@ -81,7 +78,7 @@ def test_irrelevant_structural_record_is_selected_but_does_not_advance_target(
     assert validation["completion_met"] is True
 
 
-def test_bilibili_final_title_alone_advances_relevant_target(tmp_path: Path) -> None:
+def test_bilibili_final_title_alone_marks_record_relevant(tmp_path: Path) -> None:
     record = bilibili_record("title-relevant")
     record["title"] = "青岛老城散步"
     record["content_text"] = "普通但结构完整的正文"
@@ -95,23 +92,20 @@ def test_bilibili_final_title_alone_advances_relevant_target(tmp_path: Path) -> 
             "keyword": "回退关键词",
             "records": [{"output": {"jsonl_files": [str(jsonl_path)]}}],
         },
-        candidate_hard_limit=10,
-        target_new_posts=1,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence={
             "stopped": True,
-            "stop_reason": "target_new_met",
+            "stop_reason": "source_exhausted",
             "candidate_count": 1,
             "candidate_identities": ["title-relevant"],
         },
-        completion_mode="target-new-posts",
     )
 
     assert len(selected) == 1
     assert selected[0]["topic_relevant"] is True
     assert validation["valid_new_count"] == 1
     assert validation["topic_relevant_new_count"] == 1
-    assert validation["new_target_met"] is True
+    assert validation["source_exhausted_met"] is True
     assert validation["completion_met"] is True
 
 
@@ -167,8 +161,6 @@ def test_unfinished_pagination_is_not_reported_as_source_exhausted(tmp_path: Pat
     evidence = mediacrawler_crawl.load_pagination_evidence(state_path)
     validation, _ = mediacrawler_crawl.collect_formal_records(
         {"records": []},
-        candidate_hard_limit=300,
-        target_new_posts=50,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence=evidence,
     )
@@ -216,11 +208,8 @@ def test_skipped_image_candidate_does_not_block_source_exhaustion_completion(
     evidence = mediacrawler_crawl.load_pagination_evidence(state_path)
     validation, _ = mediacrawler_crawl.collect_formal_records(
         {"records": []},
-        candidate_hard_limit=10,
-        target_new_posts=0,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence=evidence,
-        completion_mode="source-exhausted",
     )
 
     assert validation["source_exhausted_met"] is True
@@ -257,11 +246,8 @@ def test_exhaustion_event_accepts_recorded_skipped_candidate(
 
     validation, _ = mediacrawler_crawl.collect_formal_records(
         {"records": []},
-        candidate_hard_limit=10,
-        target_new_posts=0,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence=pagination,
-        completion_mode="source-exhausted",
     )
 
     assert validation["skipped_candidate_count"] == 1
@@ -378,11 +364,8 @@ def test_incomplete_run_keeps_latest_safe_batch_after_candidate_skip(
     )
     validation, _ = mediacrawler_crawl.collect_formal_records(
         {"records": []},
-        candidate_hard_limit=300,
-        target_new_posts=0,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence=evidence,
-        completion_mode="source-exhausted",
     )
 
     assert evidence["stopped"] is False
@@ -398,7 +381,7 @@ def test_incomplete_run_keeps_latest_safe_batch_after_candidate_skip(
     assert validation["completion_met"] is False
 
 
-def test_source_exhaustion_without_stop_event_never_falls_back_to_target_met(
+def test_valid_records_without_stop_event_never_complete_discovery(
     tmp_path: Path,
 ) -> None:
     jsonl_path = tmp_path / "bili" / "jsonl" / "search_contents_2026-07-13.jsonl"
@@ -424,20 +407,18 @@ def test_source_exhaustion_without_stop_event_never_falls_back_to_target_met(
 
     validation, _ = mediacrawler_crawl.collect_formal_records(
         {"records": [{"output": {"jsonl_files": [str(jsonl_path)]}}]},
-        candidate_hard_limit=100,
-        target_new_posts=1,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence=pagination,
-        completion_mode="source-exhausted",
     )
 
-    assert validation["new_target_met"] is True
+    assert validation["valid_new_count"] == 1
+    assert "new_target_met" not in validation
     assert validation["source_exhausted_met"] is False
     assert validation["completion_met"] is False
     assert validation["stop_reason"] == "runtime_failed"
 
 
-def test_runtime_failed_pagination_overrides_reached_target(tmp_path: Path) -> None:
+def test_runtime_failed_pagination_overrides_valid_records(tmp_path: Path) -> None:
     jsonl_path = tmp_path / "bili" / "jsonl" / "search_contents_test.jsonl"
     jsonl_path.parent.mkdir(parents=True)
     jsonl_path.write_text(
@@ -460,11 +441,8 @@ def test_runtime_failed_pagination_overrides_reached_target(tmp_path: Path) -> N
 
     validation, selected = mediacrawler_crawl.collect_formal_records(
         {"records": [{"output": {"jsonl_files": [str(jsonl_path)]}}]},
-        candidate_hard_limit=10,
-        target_new_posts=1,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence=pagination,
-        completion_mode="target-new-posts",
     )
 
     assert len(selected) == 1
@@ -499,8 +477,6 @@ def test_explicit_empty_page_proves_source_exhaustion(tmp_path: Path) -> None:
     evidence = mediacrawler_crawl.load_pagination_evidence(state_path)
     validation, _ = mediacrawler_crawl.collect_formal_records(
         {"records": []},
-        candidate_hard_limit=1000,
-        target_new_posts=50,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence=evidence,
     )
@@ -538,11 +514,8 @@ def test_unverified_douyin_first_page_empty_is_runtime_failure(tmp_path: Path) -
     evidence = mediacrawler_crawl.load_pagination_evidence(state_path)
     validation, _ = mediacrawler_crawl.collect_formal_records(
         {"records": []},
-        candidate_hard_limit=1000,
-        target_new_posts=50,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence=evidence,
-        completion_mode="source-exhausted",
     )
 
     assert validation["source_exhausted_met"] is False
@@ -570,11 +543,8 @@ def test_verified_douyin_first_page_empty_can_prove_exhaustion(tmp_path: Path) -
 
     validation, _ = mediacrawler_crawl.collect_formal_records(
         {"records": []},
-        candidate_hard_limit=1000,
-        target_new_posts=50,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence=pagination,
-        completion_mode="source-exhausted",
     )
 
     assert validation["source_exhausted_met"] is True
@@ -583,7 +553,7 @@ def test_verified_douyin_first_page_empty_can_prove_exhaustion(tmp_path: Path) -
     assert validation["stop_detail"] == "verified_empty_first_page"
 
 
-def test_source_exhausted_completion_ignores_configured_quantity_limits(tmp_path: Path) -> None:
+def test_source_exhausted_completion_keeps_all_discovered_records(tmp_path: Path) -> None:
     jsonl_path = tmp_path / "bili" / "jsonl" / "search_contents_2026-07-13.jsonl"
     jsonl_path.parent.mkdir(parents=True)
     jsonl_path.write_text(
@@ -603,19 +573,15 @@ def test_source_exhausted_completion_ignores_configured_quantity_limits(tmp_path
 
     validation, selected = mediacrawler_crawl.collect_formal_records(
         {"records": [{"output": {"jsonl_files": [str(jsonl_path)]}}]},
-        candidate_hard_limit=1,
-        target_new_posts=1,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence=pagination,
-        completion_mode="source-exhausted",
     )
 
     assert len(selected) == 2
     assert validation["candidate_count"] == 2
-    assert validation["new_target_met"] is True
     assert validation["source_exhausted_met"] is True
     assert validation["completion_met"] is True
-    assert validation["quantity_limits_enforced"] is False
+    assert "quantity_limits_enforced" not in validation
 
 
 def test_pagination_evidence_keeps_douyin_frontier_reseed_event(tmp_path: Path) -> None:
@@ -657,7 +623,7 @@ def test_pagination_evidence_keeps_douyin_frontier_reseed_event(tmp_path: Path) 
     ]
 
 
-def test_existing_valid_record_is_update_not_valid_new_target(tmp_path: Path) -> None:
+def test_existing_valid_record_is_reported_as_update(tmp_path: Path) -> None:
     db_path = tmp_path / "posts.sqlite"
     existing = bilibili_record("existing")
     new = bilibili_record("new")
@@ -683,8 +649,6 @@ def test_existing_valid_record_is_update_not_valid_new_target(tmp_path: Path) ->
 
     validation, selected = mediacrawler_crawl.collect_formal_records(
         summary,
-        candidate_hard_limit=10,
-        target_new_posts=1,
         db_path=db_path,
     )
     imported = mediacrawler_crawl.import_valid_records(import_summary, selected, db_path)
@@ -692,7 +656,7 @@ def test_existing_valid_record_is_update_not_valid_new_target(tmp_path: Path) ->
     assert validation["valid_new_count"] == 1
     assert validation["valid_existing_count"] == 1
     assert validation["valid_total_count"] == 2
-    assert validation["new_target_met"] is True
+    assert "new_target_met" not in validation
     assert imported["inserted_rows"] == 1
     assert imported["updated_rows"] == 1
 
@@ -757,7 +721,7 @@ def test_load_zhihu_detail_urls_accepts_only_answer_and_article(tmp_path: Path) 
         mediacrawler_crawl.load_zhihu_detail_urls(path)
 
 
-def test_campaign_records_may_exceed_each_run_candidate_budget(tmp_path: Path) -> None:
+def test_campaign_validation_keeps_all_cross_run_records(tmp_path: Path) -> None:
     first_path = tmp_path / "first" / "bili" / "jsonl" / "search_contents_1.jsonl"
     second_path = tmp_path / "second" / "bili" / "jsonl" / "search_contents_2.jsonl"
     first_path.parent.mkdir(parents=True)
@@ -778,16 +742,13 @@ def test_campaign_records_may_exceed_each_run_candidate_budget(tmp_path: Path) -
                 {"output": {"jsonl_files": [str(second_path)]}},
             ]
         },
-        candidate_hard_limit=3,
-        target_new_posts=6,
         db_path=tmp_path / "missing.sqlite",
         pagination_evidence={"candidate_count": 3, "stopped": True},
-        enforce_candidate_limit=False,
     )
 
     assert validation["candidate_count"] == 6
     assert validation["run_candidate_count"] == 3
-    assert validation["new_target_met"] is True
+    assert "candidate_hard_limit" not in validation
     assert len(selected) == 6
 
 
@@ -811,8 +772,6 @@ def test_local_image_completeness_is_part_of_formal_record_selection(
 
     validation, selected = mediacrawler_crawl.collect_formal_records(
         summary,
-        candidate_hard_limit=1,
-        target_new_posts=1,
         db_path=tmp_path / "missing.sqlite",
         require_local_images=True,
         localized_identities=set(),

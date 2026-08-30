@@ -307,11 +307,6 @@ def test_rate_limit_detail_stops_run_without_marking_candidate_seen(
     monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
     args = SimpleNamespace(
         keyword="青岛旅游",
-        candidate_hard_limit=3,
-        target_new_posts=1,
-        source_candidate_hard_limit=3,
-        source_target_new_posts=1,
-        max_stagnant_batches=3,
         db=str(db_path),
         start_page=1,
         top_refresh_max_pages=0,
@@ -360,7 +355,9 @@ def test_detail_failure_is_recorded_seen_and_next_post_continues(monkeypatch, tm
         mediacrawler_crawl,
         "fetch_bilibili_article_page",
         lambda keyword, page, **kwargs: (
-            [search_item("failed")] if page == 1 else [search_item("success")]
+            [search_item("failed")]
+            if page == 1
+            else ([search_item("success")] if page == 2 else [])
         ),
     )
 
@@ -396,11 +393,6 @@ def test_detail_failure_is_recorded_seen_and_next_post_continues(monkeypatch, tm
     monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
     args = SimpleNamespace(
         keyword="青岛西海岸旅游攻略",
-        candidate_hard_limit=3,
-        target_new_posts=1,
-        source_candidate_hard_limit=3,
-        source_target_new_posts=1,
-        max_stagnant_batches=3,
         db=str(db_path),
         start_page=1,
         top_refresh_max_pages=0,
@@ -420,7 +412,7 @@ def test_detail_failure_is_recorded_seen_and_next_post_continues(monkeypatch, tm
     assert skipped[0]["details"]["identity"] == "failed"
     assert skipped[0]["details"]["failure_scope"] == "post"
     assert skipped[0]["details"]["attempts"] == 3
-    assert stopped["details"]["stop_reason"] == "target_new_met"
+    assert stopped["details"]["stop_reason"] == "source_exhausted"
     assert stopped["details"]["candidate_identities"] == ["failed", "success"]
 
 
@@ -458,7 +450,7 @@ def test_follower_failure_retries_then_records_skip_and_continues(
     monkeypatch.setattr(
         mediacrawler_crawl,
         "fetch_bilibili_article_page",
-        lambda keyword, page, **kwargs: [failed, success],
+        lambda keyword, page, **kwargs: [failed, success] if page == 1 else [],
     )
     monkeypatch.setattr(
         mediacrawler_crawl,
@@ -488,11 +480,6 @@ def test_follower_failure_retries_then_records_skip_and_continues(
     monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
     args = SimpleNamespace(
         keyword="青岛西海岸旅游攻略",
-        candidate_hard_limit=3,
-        target_new_posts=1,
-        source_candidate_hard_limit=3,
-        source_target_new_posts=1,
-        max_stagnant_batches=3,
         db=str(db_path),
         start_page=1,
         top_refresh_max_pages=0,
@@ -517,7 +504,7 @@ def test_follower_failure_retries_then_records_skip_and_continues(
     assert skipped[0]["details"]["detail"] == "creator_profile_failed"
     assert skipped[0]["details"]["attempts"] == 3
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "target_new_met"
+    assert stopped["details"]["stop_reason"] == "source_exhausted"
     assert stopped["details"]["candidate_identities"] == [
         "failed-followers",
         "success-followers",

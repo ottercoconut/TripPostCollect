@@ -80,18 +80,9 @@ def run_args(
     db_path: Path,
     *,
     download_images: bool = True,
-    candidate_hard_limit: int = 3,
-    target_new_posts: int = 1,
-    completion_mode: str = "target-new-posts",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         keyword="青岛旅游",
-        candidate_hard_limit=candidate_hard_limit,
-        target_new_posts=target_new_posts,
-        source_candidate_hard_limit=candidate_hard_limit,
-        source_target_new_posts=target_new_posts,
-        completion_mode=completion_mode,
-        max_stagnant_batches=3,
         db=str(db_path),
         start_page=1,
         top_refresh_max_pages=0,
@@ -114,7 +105,7 @@ def install_successful_run_mocks(monkeypatch) -> None:
     monkeypatch.setattr(
         mediacrawler_crawl,
         "fetch_bilibili_article_page",
-        lambda keyword, page, **kwargs: [search_item("123")],
+        lambda keyword, page, **kwargs: [search_item("123")] if page == 1 else [],
     )
     monkeypatch.setattr(
         mediacrawler_crawl,
@@ -352,7 +343,7 @@ def test_image_failure_is_recorded_seen_without_blocking_pages(monkeypatch, tmp_
     monkeypatch.setattr(mediacrawler_crawl, "fetch_bilibili_image_bytes", fail_image)
     result = mediacrawler_crawl.run_bilibili_article_search(run_args(db_path), tmp_path / "batch")
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     assert result["run"]["returncode"] == 0, result["run"]["stderr_tail"]
     assert result["image_materialization"]["downloaded_images"] == 0
     assert result["image_materialization"]["retryable_failures"] == 1
@@ -368,7 +359,7 @@ def test_image_failure_is_recorded_seen_without_blocking_pages(monkeypatch, tmp_
     assert skipped[0]["details"]["identity"] == "123"
     assert skipped[0]["details"]["failure_scope"] == "image"
     assert skipped[0]["details"]["attempts"] == 3
-    assert stopped["details"]["stop_reason"] == "stagnated"
+    assert stopped["details"]["stop_reason"] == "source_exhausted"
     assert stopped["details"]["candidate_identities"] == ["123"]
     assert stopped["details"]["skipped_candidate_count"] == 1
 
@@ -409,10 +400,10 @@ def test_skipped_candidate_allows_empty_page_exhaustion(
     )
 
     result = mediacrawler_crawl.run_bilibili_article_search(
-        run_args(db_path, target_new_posts=2), tmp_path / "batch"
+        run_args(db_path), tmp_path / "batch"
     )
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
     assert stopped["details"]["stop_reason"] == "source_exhausted"
@@ -476,11 +467,11 @@ def test_terminal_image_failure_is_skipped_and_later_candidate_continues(
     assert skipped[0]["details"]["identity"] == "123"
     assert skipped[0]["details"]["retryable"] is False
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "target_new_met"
+    assert stopped["details"]["stop_reason"] == "source_exhausted"
     assert stopped["details"]["candidate_identities"] == ["123", "456"]
 
 
-def test_skipped_candidate_at_hard_limit_stops_by_candidate_limit(
+def test_skipped_candidate_continues_until_source_exhaustion(
     monkeypatch, tmp_path: Path
 ) -> None:
     db_path = tmp_path / "posts.sqlite"
@@ -511,12 +502,12 @@ def test_skipped_candidate_at_hard_limit_stops_by_candidate_limit(
     )
 
     mediacrawler_crawl.run_bilibili_article_search(
-        run_args(db_path, candidate_hard_limit=1), tmp_path / "batch"
+        run_args(db_path), tmp_path / "batch"
     )
 
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "candidate_hard_limit_reached"
+    assert stopped["details"]["stop_reason"] == "source_exhausted"
 
 
 def test_image_failure_does_not_block_later_bilibili_candidate(
@@ -578,7 +569,7 @@ def test_image_failure_does_not_block_later_bilibili_candidate(
     assert [row["content_id"] for row in rows] == ["124"]
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "target_new_met"
+    assert stopped["details"]["stop_reason"] == "source_exhausted"
     assert stopped["details"]["resume_page"] == 2
     assert stopped["details"]["candidate_identities"] == ["123", "124"]
 
@@ -619,7 +610,7 @@ def test_known_post_id_is_skipped_before_detail_or_image_requests(monkeypatch, t
 
     result = mediacrawler_crawl.run_bilibili_article_search(run_args(db_path), tmp_path / "batch")
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     assert requested_pages == [1, 2]
     assert result["image_materialization"]["candidate_posts"] == 0
     assert result["image_materialization"]["expected_images"] == 0

@@ -180,9 +180,6 @@ def test_generic_runner_rejects_non_formal_behavior_profile() -> None:
         "params_json": json.dumps(
             {
                 "platform": "weibo",
-                "candidate_hard_limit": 20,
-                "target_new_posts": 1,
-                "max_stagnant_batches": 3,
                 "required_fields_profile": "image_post_with_followers_v1",
                 "followers_policy": "required",
             }

@@ -14,14 +14,13 @@ if str(SCRIPTS) not in sys.path:
 failure_classifier = import_module("failure_classifier")
 
 
-def test_formal_target_failure_beats_incidental_rate_text() -> None:
+def test_source_exhaustion_failure_beats_incidental_rate_text() -> None:
     stdout = json.dumps(
         {
-            "import_new_target_met": False,
-            "failure_reason": "import_new_target_not_met",
+            "import_completion_met": False,
+            "failure_reason": "source_exhaustion_not_persisted",
             "formal_validation": {
-                "new_target_met": False,
-                "stop_reason": "stagnated",
+                "stop_reason": "source_not_exhausted",
                 "invalid_reason_counts": {"raw_text_containing_429": 1},
             },
         }
@@ -30,8 +29,8 @@ def test_formal_target_failure_beats_incidental_rate_text() -> None:
     result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout)
 
     assert result["status"] == "retry_wait"
-    assert result["failure_type"] == "import_new_target_not_met"
-    assert result["reason"] == "formal_import_new_target_not_reached:stagnated"
+    assert result["failure_type"] == "source_exhaustion_not_persisted"
+    assert result["reason"] == "formal_source_exhaustion_not_persisted:source_not_exhausted"
 
 
 def test_sms_code_login_text_is_login_required_not_captcha() -> None:
@@ -175,8 +174,8 @@ def test_strong_platform_classification_beats_formal_count_failure() -> None:
                     }
                 }
             ],
-            "import_new_target_met": False,
-            "formal_validation": {"new_target_met": False, "stop_reason": "behavior_evidence_failed"},
+            "import_completion_met": False,
+            "formal_validation": {"stop_reason": "behavior_evidence_failed"},
         }
     )
 
@@ -209,9 +208,8 @@ def test_latest_policy_block_preserves_child_cooldown() -> None:
                     }
                 },
             ],
-            "import_new_target_met": False,
+            "import_completion_met": False,
             "formal_validation": {
-                "new_target_met": False,
                 "stop_reason": "behavior_evidence_failed",
             },
         }

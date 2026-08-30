@@ -45,13 +45,13 @@ def open_db(tmp_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def test_default_xhs_target_budget() -> None:
+def test_default_xhs_target_uses_exhaustion_schema() -> None:
     target = load_target("qingdao_travel")
     pool = load_pool_config()
 
-    assert target["target_new_posts"] == 50
-    assert target["candidate_hard_limit"] == 300
-    assert target["max_stagnant_batches"] == 8
+    assert "target_new_posts" not in target
+    assert "candidate_hard_limit" not in target
+    assert "max_stagnant_batches" not in target
     assert target["top_refresh_max_pages"] == 5
     assert target["timeout_seconds"] == 7200
     assert target["local_image_storage_required"] is True
@@ -60,14 +60,11 @@ def test_default_xhs_target_budget() -> None:
     assert pool["lease_seconds"] >= target["timeout_seconds"] + 300
 
 
-def test_exhaustive_xhs_target_budget() -> None:
+def test_long_xhs_target_uses_time_budget_only() -> None:
     target = load_target("qingdao_free_travel_exhaustive")
     pool = load_pool_config()
 
     assert target["keyword"] == "青岛自由行"
-    assert target["target_new_posts"] == 1000
-    assert target["candidate_hard_limit"] == 1000
-    assert target["max_stagnant_batches"] == 50
     assert target["top_refresh_max_pages"] == 5
     assert target["timeout_seconds"] == 28800
     assert pool["lease_seconds"] >= target["timeout_seconds"] + 300
@@ -448,7 +445,6 @@ def _retry_args(db_path: Path) -> argparse.Namespace:
         db=str(db_path),
         target_key="target",
         account_id="xhs-a01",
-        completion_mode="source-exhausted",
         retry_on_300011=True,
         dry_run=False,
     )
@@ -1017,14 +1013,11 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
     target_path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "targets": [
                     {
                         "target_key": "test",
                         "keyword": "青岛旅游",
-                        "target_new_posts": 5,
-                        "candidate_hard_limit": 50,
-                        "max_stagnant_batches": 3,
                         "top_refresh_max_pages": 3,
                         "timeout_seconds": 1800,
                         "required_fields_profile": "image_post_with_followers_v1",
@@ -1058,7 +1051,6 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
         output_root=tmp_path / "output",
         no_import=False,
         post_interaction="comment-scroll",
-        completion_mode="source-exhausted",
         discovery={
             "resume_page": 7,
             "resume_search_id": "saved-search-id",
@@ -1078,7 +1070,10 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
     )
     assert command[command.index("--behavior-profile") + 1] == "xhs_guarded"
     assert command[command.index("--xhs-post-interaction") + 1] == "comment-scroll"
-    assert command[command.index("--completion-mode") + 1] == "source-exhausted"
+    assert "--completion-mode" not in command
+    assert "--target-new-posts" not in command
+    assert "--candidate-hard-limit" not in command
+    assert "--max-stagnant-batches" not in command
     assert command[command.index("--start-page") + 1] == "7"
     assert command[command.index("--start-cursor") + 1] == "saved-search-id"
     assert command[command.index("--top-refresh-max-pages") + 1] == "3"
@@ -1168,7 +1163,7 @@ def test_xhs_config_rejects_removed_enabled_gates(tmp_path: Path) -> None:
     target_path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "targets": [{"target_key": "test", "enabled": False}],
             }
         ),
@@ -1197,14 +1192,11 @@ def test_xhs_target_rejects_removed_download_images_option(tmp_path: Path) -> No
     target_path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "targets": [
                     {
                         "target_key": "test",
                         "keyword": "青岛旅游",
-                        "target_new_posts": 1,
-                        "candidate_hard_limit": 1,
-                        "max_stagnant_batches": 1,
                         "top_refresh_max_pages": 0,
                         "timeout_seconds": 30,
                         "required_fields_profile": "image_post_with_followers_v1",
@@ -1218,6 +1210,32 @@ def test_xhs_target_rejects_removed_download_images_option(tmp_path: Path) -> No
     )
 
     with pytest.raises(XhsConfigError, match="removed XHS target download_images"):
+        load_target("test", target_path)
+
+
+def test_xhs_target_rejects_removed_quantity_fields(tmp_path: Path) -> None:
+    target_path = tmp_path / "targets.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "targets": [
+                    {
+                        "target_key": "test",
+                        "keyword": "青岛旅游",
+                        "top_refresh_max_pages": 0,
+                        "timeout_seconds": 30,
+                        "required_fields_profile": "image_post_with_followers_v1",
+                        "followers_policy": "required",
+                        "target_new_posts": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(XhsConfigError, match="removed quantity fields"):
         load_target("test", target_path)
 
 
@@ -1245,7 +1263,7 @@ def test_failed_child_summary_remains_available_for_reporting(tmp_path: Path) ->
 
 
 def test_generic_entrypoints_do_not_select_xhs(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["mediacrawler_crawl.py", "--candidate-hard-limit", "1", "--no-import"])
+    monkeypatch.setattr(sys, "argv", ["mediacrawler_crawl.py", "--no-import"])
     assert "xhs" not in mediacrawler_crawl.parse_args().platforms
 
     with sqlite3.connect(":memory:") as conn:
@@ -1262,6 +1280,83 @@ def test_generic_entrypoints_do_not_select_xhs(monkeypatch: pytest.MonkeyPatch) 
             crawl_runner.build_command(row, object())
 
 
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("--candidate-hard-limit", "1"),
+        ("--target-new-posts", "1"),
+        ("--max-stagnant-batches", "1"),
+        ("--completion-mode", "source-exhausted"),
+    ],
+)
+def test_mediacrawler_rejects_removed_quantity_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    flag: str,
+    value: str,
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["mediacrawler_crawl.py", flag, value])
+    with pytest.raises(SystemExit):
+        mediacrawler_crawl.parse_args()
+
+
+def test_crawl_runner_rejects_removed_completion_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["crawl_runner.py", "--completion-mode", "source-exhausted"],
+    )
+
+    with pytest.raises(SystemExit):
+        crawl_runner.parse_args()
+
+
+def test_xhs_runner_rejects_removed_completion_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "xhs_runner.py",
+            "--target-key",
+            "qingdao_travel",
+            "--account-id",
+            "xhs-a01",
+            "--completion-mode",
+            "source-exhausted",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        xhs_runner.parse_args()
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"schema_version": 1, "jobs": []},
+        {
+            "schema_version": 2,
+            "jobs": [
+                {
+                    "job_key": "removed-quantity-field",
+                    "job_kind": "mediacrawler_search",
+                    "params": {"target_new_posts": 1},
+                }
+            ],
+        },
+    ],
+)
+def test_crawl_config_rejects_pre_exhaustion_schema_and_fields(
+    tmp_path: Path,
+    config: dict,
+) -> None:
+    with pytest.raises(ValueError):
+        crawl_runner.validate_crawl_config(config, tmp_path / "crawl.json")
+
+
 def test_xhs_runner_requires_operator_selected_account(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["xhs_runner.py", "--target-key", "qingdao_travel", "--dry-run"])
 
@@ -1275,11 +1370,9 @@ def test_low_level_xhs_rejects_missing_account_context(monkeypatch: pytest.Monke
         "argv",
         [
             "mediacrawler_crawl.py",
-            "--platforms",
-            "xhs",
-            "--candidate-hard-limit",
-            "1",
-            "--no-import",
+                "--platforms",
+                "xhs",
+                "--no-import",
         ],
     )
     monkeypatch.setattr(mediacrawler_crawl, "ensure_prerequisites", lambda: None)

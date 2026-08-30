@@ -18,14 +18,9 @@ from trippostcollect.xhs.discovery import (
 
 
 def target(**overrides: object) -> dict[str, object]:
-    # Deliberately use a small unit-test budget; production values live only in
-    # config/xhs_targets.json and are covered by test_default_xhs_target_budget.
     return {
         "target_key": "qingdao_travel",
         "keyword": "青岛旅游",
-        "target_new_posts": 20,
-        "candidate_hard_limit": 150,
-        "max_stagnant_batches": 3,
         "top_refresh_max_pages": 3,
         **overrides,
     }
@@ -48,14 +43,9 @@ def prepare_connection(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def test_query_fingerprint_tracks_source_but_not_run_budget() -> None:
+def test_query_fingerprint_tracks_source_but_not_refresh_budget() -> None:
     base = target()
-    changed_budget = target(
-        target_new_posts=50,
-        candidate_hard_limit=300,
-        max_stagnant_batches=8,
-        top_refresh_max_pages=5,
-    )
+    changed_budget = target(top_refresh_max_pages=5)
     changed_source = target(target_key="qingdao_food")
 
     assert xhs_query_fingerprint(base) == xhs_query_fingerprint(changed_budget)
@@ -77,7 +67,7 @@ def test_checkpoint_isolated_per_account_and_resolves_campaign(tmp_path: Path) -
         resume_search_id="search-a01",
         source_has_more=True,
         last_batch_complete=True,
-        last_stop_reason="candidate_hard_limit_reached",
+        last_stop_reason="runtime_failed",
         last_run_id="run-1",
     )
     update_campaign(
@@ -172,13 +162,13 @@ def test_refresh_commit_preserves_exhausted_frontier(tmp_path: Path) -> None:
                     "source_has_more": True,
                     "batch_complete": True,
                     "discovery_phase": "refresh",
-                    "stop_reason": "target_new_met",
+                    "stop_reason": "continue",
                     "candidate_identities": ["top-note", "video-note"],
                 }
             },
             "formal_validation": {"candidate_count": 4},
-            "import_result": {"skipped": True, "reason": "target_not_met"},
-            "import_new_target_met": False,
+            "import_result": {"skipped": True, "reason": "source_not_exhausted"},
+            "import_completion_met": False,
         },
     )
     checkpoint = load_checkpoint(
@@ -221,15 +211,15 @@ def test_frontier_commit_advances_and_clears_completed_campaign(tmp_path: Path) 
                     "source_page": 4,
                     "resume_page": 5,
                     "resume_cursor": "stable-search-id",
-                    "source_has_more": True,
+                    "source_has_more": False,
                     "batch_complete": True,
                     "discovery_phase": "frontier",
-                    "stop_reason": "target_new_met",
+                    "stop_reason": "source_exhausted",
                 }
             },
             "formal_validation": {"candidate_count": 20},
             "import_result": {"inserted_rows": 20},
-            "import_new_target_met": True,
+            "import_completion_met": True,
         },
     )
     fingerprint = xhs_query_fingerprint(target())
@@ -242,7 +232,7 @@ def test_frontier_commit_advances_and_clears_completed_campaign(tmp_path: Path) 
     conn.close()
 
     assert result["resume_page"] == 5
-    assert result["imported_target"] is True
+    assert result["imported_completion"] is True
     assert checkpoint is not None
     assert checkpoint["resume_search_id"] == "stable-search-id"
     assert checkpoint["last_summary_path"] is None
@@ -268,10 +258,10 @@ def test_image_persistence_failure_preserves_campaign_summary(tmp_path: Path) ->
                     "source_page": 4,
                     "resume_page": 5,
                     "resume_cursor": "stable-search-id",
-                    "source_has_more": True,
+                    "source_has_more": False,
                     "batch_complete": True,
                     "discovery_phase": "frontier",
-                    "stop_reason": "target_new_met",
+                    "stop_reason": "source_exhausted",
                 }
             },
             "formal_validation": {"candidate_count": 20},
@@ -289,7 +279,7 @@ def test_image_persistence_failure_preserves_campaign_summary(tmp_path: Path) ->
     )
     conn.close()
 
-    assert result["imported_target"] is False
+    assert result["imported_completion"] is False
     assert checkpoint is not None
     assert checkpoint["last_summary_path"] == str(child_path.resolve())
     assert checkpoint["campaign_candidate_count"] == 20
@@ -318,7 +308,7 @@ def test_sqlite_import_failure_skips_checkpoint_seen_and_campaign(tmp_path: Path
                     "source_has_more": True,
                     "batch_complete": True,
                     "discovery_phase": "frontier",
-                    "stop_reason": "target_new_met",
+                    "stop_reason": "source_exhausted",
                     "candidate_identities": ["not-imported-note"],
                 }
             },
@@ -370,13 +360,13 @@ def test_incomplete_last_page_does_not_mark_frontier_exhausted(tmp_path: Path) -
                     "source_has_more": False,
                     "batch_complete": False,
                     "discovery_phase": "frontier",
-                    "stop_reason": "candidate_hard_limit_reached",
+                    "stop_reason": "runtime_failed",
                     "candidate_identities": ["processed-on-boundary"],
                 }
             },
             "formal_validation": {"candidate_count": 1},
             "import_result": {"skipped": True},
-            "import_new_target_met": False,
+            "import_completion_met": False,
         },
     )
     fingerprint = xhs_query_fingerprint(target())

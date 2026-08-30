@@ -44,15 +44,15 @@ def insert_job(conn: sqlite3.Connection, params: dict) -> sqlite3.Row:
     return conn.execute("SELECT * FROM crawl_jobs WHERE job_key='weibo-test'").fetchone()
 
 
-def test_query_fingerprint_ignores_run_budget_but_tracks_source_options() -> None:
+def test_query_fingerprint_ignores_runtime_budget_but_tracks_source_options() -> None:
     base = {
         "platform": "weibo",
         "keyword": "青岛旅游",
-        "candidate_hard_limit": 300,
-        "target_new_posts": 50,
+        "top_refresh_max_pages": 3,
+        "timeout_per_platform": 1200,
         "search_type": "default",
     }
-    changed_budget = {**base, "candidate_hard_limit": 600, "target_new_posts": 80}
+    changed_budget = {**base, "top_refresh_max_pages": 5, "timeout_per_platform": 2400}
     changed_source = {**base, "search_type": "real_time"}
 
     assert query_fingerprint("weibo", "青岛旅游", base) == query_fingerprint(
@@ -81,7 +81,7 @@ def test_checkpoint_round_trip_preserves_page_offset_and_cursor(tmp_path: Path) 
             resume_cursor="cursor-10",
             source_has_more=True,
             last_batch_complete=True,
-            last_stop_reason="candidate_hard_limit_reached",
+            last_stop_reason="runtime_failed",
             last_run_id="run-1",
         )
         checkpoint = load_checkpoint(
@@ -172,8 +172,8 @@ def test_executor_commits_cursor_from_durable_pagination_evidence(tmp_path: Path
                 "source_has_more": True,
                 "batch_complete": True,
                 "discovery_phase": "frontier",
-                "stop_reason": "candidate_hard_limit_reached",
-                "stop_detail": "candidate_hard_limit",
+                "stop_reason": "runtime_failed",
+                "stop_detail": "process_interrupted",
                 "candidate_identities": ["video-1", "image-1"],
             }
         },
@@ -192,7 +192,7 @@ def test_executor_commits_cursor_from_durable_pagination_evidence(tmp_path: Path
     assert checkpoint["resume_offset"] == 150
     assert checkpoint["resume_cursor"] == "next-cursor"
     assert checkpoint["last_run_id"] == "run-2"
-    assert checkpoint["last_stop_detail"] == "candidate_hard_limit"
+    assert checkpoint["last_stop_detail"] == "process_interrupted"
 
 
 def test_executor_keeps_first_douyin_search_id_when_response_logids_rotate(
@@ -366,7 +366,7 @@ def test_top_refresh_keeps_saved_douyin_frontier(tmp_path: Path) -> None:
                 "source_has_more": True,
                 "batch_complete": True,
                 "discovery_phase": "refresh",
-                "stop_reason": "target_new_met",
+                "stop_reason": "continue",
             }
         },
     )
@@ -489,7 +489,7 @@ def test_reseeded_douyin_frontier_replaces_exhausted_cursor(tmp_path: Path) -> N
                 "source_has_more": True,
                 "batch_complete": True,
                 "discovery_phase": "frontier",
-                "stop_reason": "candidate_hard_limit_reached",
+                "stop_reason": "continue",
                 "candidate_identities": ["video-1", "image-1"],
             }
         },
@@ -528,9 +528,7 @@ def test_runner_auto_resumes_only_matching_query(tmp_path: Path) -> None:
     params = {
         "platform": "weibo",
         "keyword": "青岛旅游",
-        "candidate_hard_limit": 300,
-        "target_new_posts": 50,
-        "max_stagnant_batches": 3,
+        "top_refresh_max_pages": 3,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
     }
@@ -550,7 +548,7 @@ def test_runner_auto_resumes_only_matching_query(tmp_path: Path) -> None:
             resume_cursor=None,
             source_has_more=True,
             last_batch_complete=True,
-            last_stop_reason="candidate_hard_limit_reached",
+            last_stop_reason="runtime_failed",
             last_run_id="run-1",
         )
         conn.execute(
@@ -728,6 +726,8 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
 
     def fetch_page(keyword, page, **kwargs):
         requested_pages.append(page)
+        if page > 4:
+            return []
         return [
             {
                 "id": "known",
@@ -818,11 +818,6 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
     monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
     args = SimpleNamespace(
         keyword="青岛旅游",
-        candidate_hard_limit=10,
-        target_new_posts=1,
-        source_candidate_hard_limit=10,
-        source_target_new_posts=1,
-        max_stagnant_batches=3,
         db=str(db_path),
         start_page=4,
         top_refresh_max_pages=0,
@@ -835,7 +830,7 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
     result = mediacrawler_crawl.run_bilibili_article_search(args, tmp_path / "batch")
 
     assert result["ok"] is True
-    assert requested_pages == [4]
+    assert requested_pages == [4, 5]
     assert detail_ids == ["new"]
     assert follower_ids == ["new-author-id"]
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
@@ -878,7 +873,7 @@ def test_checkpoint_progress_resets_failure_counter(tmp_path: Path) -> None:
             completed=subprocess.CompletedProcess([], 2, "", ""),
             classification={
                 "status": "retry_wait",
-                "failure_type": "target_not_met",
+                "failure_type": "source_exhaustion_not_persisted",
                 "retryable": True,
                 "wait_seconds": 60,
                 "checkpoint_progress": True,

@@ -14,13 +14,10 @@ if str(MEDIACRAWLER_TOOLS) not in sys.path:
 trippostcollect_adaptive = import_module("trippostcollect_adaptive")
 
 
-def test_stagnation_counts_batches_without_new_valid_records(monkeypatch) -> None:
+def test_stagnation_is_diagnostic_and_never_stops_discovery(monkeypatch) -> None:
     monkeypatch.setattr(trippostcollect_adaptive, "append_execution_event", lambda *args, **kwargs: None)
     accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
         platform="xhs",
-        hard_limit=20,
-        target_new=5,
-        max_stagnant_batches=2,
     )
 
     accumulator.begin_batch()
@@ -30,17 +27,16 @@ def test_stagnation_counts_batches_without_new_valid_records(monkeypatch) -> Non
 
     accumulator.begin_batch()
     accumulator.consider("candidate-2", valid=False)
-    assert accumulator.finish_batch(source_page=2) is True
-    assert accumulator.stop_reason == "stagnated"
+    assert accumulator.finish_batch(source_page=2) is False
+    assert accumulator.stagnant_batches == 2
+    assert accumulator.stop_reason == ""
+    assert accumulator.can_continue is True
 
 
 def test_new_valid_record_resets_stagnation(monkeypatch) -> None:
     monkeypatch.setattr(trippostcollect_adaptive, "append_execution_event", lambda *args, **kwargs: None)
     accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
         platform="xhs",
-        hard_limit=20,
-        target_new=5,
-        max_stagnant_batches=3,
     )
 
     accumulator.begin_batch()
@@ -53,7 +49,7 @@ def test_new_valid_record_resets_stagnation(monkeypatch) -> None:
     assert accumulator.stagnant_batches == 0
 
 
-def test_xhs_target_stops_before_candidate_hard_limit(monkeypatch) -> None:
+def test_candidate_and_valid_counts_never_stop_before_source_exhaustion(monkeypatch) -> None:
     monkeypatch.setattr(
         trippostcollect_adaptive,
         "append_execution_event",
@@ -61,32 +57,27 @@ def test_xhs_target_stops_before_candidate_hard_limit(monkeypatch) -> None:
     )
     accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
         platform="xhs",
-        hard_limit=300,
-        target_new=50,
-        max_stagnant_batches=8,
     )
 
-    for index in range(49):
+    for index in range(500):
         assert accumulator.consider(f"candidate-{index}", valid=True) is False
 
-    assert accumulator.consider("candidate-49", valid=True) is True
-    assert accumulator.candidate_count == 50
-    assert accumulator.candidate_count < accumulator.hard_limit
-    assert accumulator.stop_reason == "target_new_met"
+    assert accumulator.candidate_count == 500
+    assert accumulator.stop_reason == ""
+    assert accumulator.can_continue is True
 
 
-def test_source_exhausted_mode_ignores_quantity_and_stagnation_stops(monkeypatch) -> None:
+def test_legacy_quantity_environment_cannot_restore_quantity_stops(monkeypatch) -> None:
     monkeypatch.setattr(
         trippostcollect_adaptive,
         "append_execution_event",
         lambda *args, **kwargs: None,
     )
-    monkeypatch.setenv("TRIPPOSTCOLLECT_COMPLETION_MODE", "source-exhausted")
-    accumulator = trippostcollect_adaptive.AdaptiveAccumulator.from_environment(
-        "xhs",
-        hard_limit=1,
-    )
-    accumulator.max_stagnant_batches = 1
+    monkeypatch.setenv("TRIPPOSTCOLLECT_COMPLETION_MODE", "target-new-posts")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_TARGET_NEW_POSTS", "1")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_CANDIDATE_HARD_LIMIT", "1")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_MAX_STAGNANT_BATCHES", "1")
+    accumulator = trippostcollect_adaptive.AdaptiveAccumulator.from_environment("xhs")
 
     accumulator.begin_batch()
     assert accumulator.consider("candidate-1", valid=True) is False
@@ -99,7 +90,10 @@ def test_source_exhausted_mode_ignores_quantity_and_stagnation_stops(monkeypatch
     accumulator.mark_source_exhausted("empty_page", source_page=2)
     assert accumulator.stop_reason == "source_exhausted"
     assert accumulator.can_continue is False
-    assert accumulator.summary()["quantity_limits_enforced"] is False
+    summary = accumulator.summary()
+    assert "target_new" not in summary
+    assert "hard_limit" not in summary
+    assert "completion_mode" not in summary
 
 
 def test_completed_batch_event_keeps_candidate_identities_for_failed_run_resume(monkeypatch) -> None:
@@ -111,9 +105,6 @@ def test_completed_batch_event_keeps_candidate_identities_for_failed_run_resume(
     )
     accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
         platform="xhs",
-        hard_limit=20,
-        target_new=10,
-        max_stagnant_batches=3,
     )
 
     accumulator.begin_batch()
@@ -123,15 +114,14 @@ def test_completed_batch_event_keeps_candidate_identities_for_failed_run_resume(
 
     assert events[-1][0] == "adaptive_batch_completed"
     assert events[-1][1]["candidate_identities"] == ["invalid-note", "valid-note"]
+    assert "target_new" not in events[-1][1]
+    assert "hard_limit" not in events[-1][1]
 
 
 def test_weibo_stagnation_tracks_candidate_identity_progress(monkeypatch) -> None:
     monkeypatch.setattr(trippostcollect_adaptive, "append_execution_event", lambda *args, **kwargs: None)
     accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
         platform="weibo",
-        hard_limit=20,
-        target_new=5,
-        max_stagnant_batches=2,
         stagnation_basis="candidate_identity",
     )
 
@@ -143,8 +133,9 @@ def test_weibo_stagnation_tracks_candidate_identity_progress(monkeypatch) -> Non
     accumulator.begin_batch()
     assert accumulator.finish_batch(source_page=2) is False
     accumulator.begin_batch()
-    assert accumulator.finish_batch(source_page=3) is True
-    assert accumulator.stop_reason == "stagnated"
+    assert accumulator.finish_batch(source_page=3) is False
+    assert accumulator.stagnant_batches == 2
+    assert accumulator.stop_reason == ""
 
 
 def test_douyin_exhausted_cursor_reseed_requires_new_candidate_continuation() -> None:
@@ -199,9 +190,6 @@ def test_common_persisted_seen_candidate_is_loaded_before_detail(monkeypatch, tm
     monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_JOB_ID", "24")
     monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT", "fingerprint")
 
-    accumulator = trippostcollect_adaptive.AdaptiveAccumulator.from_environment(
-        "douyin",
-        hard_limit=10,
-    )
+    accumulator = trippostcollect_adaptive.AdaptiveAccumulator.from_environment("douyin")
 
     assert accumulator.is_known("seen-video") is True
