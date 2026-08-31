@@ -22,7 +22,6 @@ BILIBILI_TRANSFORM_RE = re.compile(r"@.*$")
 
 @dataclass(frozen=True, slots=True)
 class ImageCandidate:
-    """One authoritative body image in source order."""
 
     platform_key: str
     platform_post_id: str
@@ -33,7 +32,6 @@ class ImageCandidate:
     source_asset_key: str
 
     def as_image_item(self) -> dict[str, Any]:
-        """Return the shape persisted in ``web_post_images.raw_image_json``."""
         payload = asdict(self)
         payload["url"] = payload.pop("source_url")
         payload["role"] = payload.pop("image_role")
@@ -41,7 +39,6 @@ class ImageCandidate:
 
 
 def normalize_image_url(value: Any) -> str | None:
-    """Normalize a single HTTP(S) image URL without discarding its query."""
     if value in (None, ""):
         return None
     text = str(value).strip().rstrip("\t\r\n ).];,，")
@@ -175,7 +172,6 @@ def source_asset_key_for_image(
     source_item: Any = None,
     asset_metadata: Any = None,
 ) -> str:
-    """Return the stable, non-random platform identity for one source image."""
     normalized = normalize_image_url(source_url)
     if not normalized:
         raise ValueError("source image URL must be HTTP(S)")
@@ -256,7 +252,6 @@ def _is_zhihu_formula(source_url: str) -> bool:
 
 
 def content_image_candidates(platform_key: str, record: dict[str, Any]) -> list[ImageCandidate]:
-    """Project only authoritative post-body images for one supported platform."""
     source_key, raw_values = _authoritative_values(platform_key, record)
     platform_post_id = _platform_post_id(platform_key, record)
     seen: set[str] = set()
@@ -299,7 +294,6 @@ def content_image_candidates(platform_key: str, record: dict[str, Any]) -> list[
 
 
 def image_items_for_record(platform_key: str, record: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build persistence items from authoritative post-body images only."""
     return [
         candidate.as_image_item()
         for candidate in content_image_candidates(platform_key, record)

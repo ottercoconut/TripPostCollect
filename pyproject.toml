@@ -36,6 +36,10 @@ addopts = "-ra"
 target-version = "py311"
 line-length = 120
 
+[tool.ruff.lint.per-file-ignores]
+"tests/test_bilibili_image_materialization.py" = ["E402"]
+"tests/test_image_persistence.py" = ["E402"]
+
 [tool.mypy]
 python_version = "3.11"
 check_untyped_defs = true

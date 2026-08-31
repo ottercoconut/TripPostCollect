@@ -34,7 +34,6 @@ def _find_nested_platform_record(
     shape_keys: tuple[str, ...],
     depth: int = 0,
 ) -> dict[str, Any] | None:
-    """Find one target-bound detail object without accepting ID-only shells."""
     if depth > 12:
         return None
     if isinstance(value, dict):
@@ -73,7 +72,6 @@ def _find_nested_platform_record(
 
 
 def _douyin_detail_urls(aweme_id: str) -> tuple[str, str]:
-    """Try the image-note route before the legacy video route for repair fallbacks."""
     return (
         f"https://www.douyin.com/note/{aweme_id}",
         f"https://www.douyin.com/video/{aweme_id}",
@@ -99,12 +97,10 @@ def _find_weibo_detail(value: Any, note_id: str) -> dict[str, Any] | None:
 
 
 def _weibo_detail_api_url(note_id: str) -> str:
-    """Return the exact logged-in mobile detail API used by the detail page."""
     return f"https://m.weibo.cn/statuses/show?id={note_id}"
 
 
 def sanitize_export_item(item: dict[str, Any]) -> dict[str, Any]:
-    """Sanitize one item immediately before MediaCrawler serializes it."""
     if os.environ.get("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS") != "1":
         raise RuntimeError("TripPostCollect MediaCrawler export sanitizer is not enabled")
     source_text = str(SOURCE_ROOT)
@@ -119,7 +115,6 @@ def sanitize_export_item(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def install_export_hook() -> None:
-    """Wrap every MediaCrawler structured-data writer before loading its main module."""
     media_root_text = str(MEDIACRAWLER_ROOT)
     if media_root_text not in sys.path:
         sys.path.insert(0, media_root_text)
@@ -145,7 +140,6 @@ def install_export_hook() -> None:
 
 
 def _repair_exception_is_blocking(crawler: Any, exc: BaseException) -> bool:
-    """Keep platform-wide failures fatal while isolating one repair candidate."""
     request_failure = exc
     request_failure_factory = getattr(crawler, "_request_failure_exception", None)
     if callable(request_failure_factory):
@@ -189,7 +183,6 @@ def _xhs_repair_failure(
     attempts: int = 1,
     retryable: bool | None = None,
 ) -> dict[str, Any]:
-    """Build a token-free, structured record for one exhausted repair candidate."""
     normalized_code = str(error_code or getattr(exc, "code", "") or "candidate_failed")
     if retryable is None:
         retryable = normalized_code not in {
@@ -214,7 +207,6 @@ def _xhs_repair_failure(
 
 
 def _write_xhs_repair_report(report: dict[str, Any]) -> None:
-    """Persist progress after every batch so an interrupted child still leaves evidence."""
     raw_path = os.environ.get("TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH", "").strip()
     if not raw_path:
         return
@@ -238,7 +230,6 @@ def _xhs_repair_failure_scope(exc: BaseException) -> str:
 
 
 def _xhs_repair_blocker(crawler: Any, exc: BaseException) -> dict[str, str]:
-    """Reduce a fatal exception to a stable code without persisting response text."""
     request_failure = exc
     request_failure_factory = getattr(crawler, "_request_failure_exception", None)
     if callable(request_failure_factory):
@@ -271,7 +262,6 @@ def _xhs_repair_blocker(crawler: Any, exc: BaseException) -> dict[str, str]:
 
 
 def install_xhs_repair_resilience() -> None:
-    """Process specified-note repair in isolated batches with durable failures."""
     if os.environ.get("TRIPPOSTCOLLECT_XHS_REPAIR") != "1":
         return
     from media_platform.xhs import core as xhs_core
@@ -381,8 +371,6 @@ def install_xhs_repair_resilience() -> None:
                         continue
                     try:
                         await self.enrich_note_creator(note_detail)
-                        # Do not serialize a record until every authoritative image
-                        # has completed, so a failed candidate cannot leave a shell.
                         await self.get_notice_media(note_detail)
                         await xhs_core.xhs_store.update_xhs_note(note_detail)
                     except Exception as exc:
@@ -422,14 +410,6 @@ def install_xhs_repair_resilience() -> None:
 
 
 def install_douyin_browser_detail_fallback() -> None:
-    """Use the signed, logged-in browser request when HTTP detail fetch is blocked.
-
-    Douyin's Argus signature is bound to the browser runtime.  The MediaCrawler
-    client normally reproduces the request with httpx, which can intermittently
-    receive a plain-text ``Blocked by ArgusSecurityPlugin`` response even when
-    the browser session is healthy.  A detail-page navigation lets Chromium
-    issue the same request with its current cookies and browser-bound signature.
-    """
     if os.environ.get("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK") != "1":
         return
     from media_platform.douyin import client as douyin_client
@@ -560,7 +540,6 @@ def install_douyin_browser_detail_fallback() -> None:
 
 
 def install_weibo_browser_detail_fallback() -> None:
-    """Recover repair-only detail pages whose HTML no longer exposes $render_data."""
     if os.environ.get("TRIPPOSTCOLLECT_POST_REPAIR") != "1":
         return
     from media_platform.weibo import client as weibo_client

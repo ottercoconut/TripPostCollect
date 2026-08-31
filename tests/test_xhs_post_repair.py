@@ -1,3 +1,5 @@
+"""TripPostCollect tests for xhs post repair."""
+
 from __future__ import annotations
 
 import json

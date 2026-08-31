@@ -1,3 +1,5 @@
+"""TripPostCollect tests for login warmup."""
+
 from __future__ import annotations
 
 import argparse

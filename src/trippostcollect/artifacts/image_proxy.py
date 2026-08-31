@@ -17,11 +17,10 @@ from trippostcollect.artifacts.paths import require_existing_project_file
 
 
 class UnsafeImageUrl(ValueError):
-    """Raised when a stored remote image URL is not safe to expose."""
+    pass
 
 
 class RemoteImageFetchError(ValueError):
-    """Raised when a stored remote image cannot be fetched as an image."""
 
     def __init__(
         self,
@@ -38,7 +37,6 @@ class RemoteImageFetchError(ValueError):
 
 
 def remote_image_failure_code(error: RemoteImageFetchError) -> str:
-    """Map transport evidence to a stable materialization failure code."""
     if error.code:
         return error.code
     if error.retryable:
@@ -95,7 +93,6 @@ def validate_remote_image_url(url: str | None) -> str:
 
 
 def remote_image_media_type(content_type: str | None, url: str) -> str:
-    """Normalize a remote response MIME, falling back to the URL suffix."""
     if content_type:
         media_type = content_type.split(";", 1)[0].strip().lower()
         return {"image/jpg": "image/jpeg"}.get(media_type, media_type)
@@ -110,7 +107,6 @@ def validate_remote_image_response(
     max_bytes: int,
     allowed_media_types: Collection[str] | None = None,
 ) -> str:
-    """Validate headers before a bounded image response body is consumed."""
     media_type = remote_image_media_type(content_type, url)
     if allowed_media_types is None:
         if not media_type.startswith("image/"):
@@ -133,7 +129,6 @@ def validate_remote_image_response(
 
 
 def read_limited_response(response: Any, *, max_bytes: int) -> bytes:
-    """Read no more than one byte beyond the configured response limit."""
     content = response.read(max_bytes + 1)
     if len(content) > max_bytes:
         raise RemoteImageFetchError(
@@ -165,7 +160,6 @@ def fetch_remote_image_bytes(
     timeout_seconds: int,
     allowed_media_types: Collection[str] | None = None,
 ) -> RemoteImagePreview:
-    """Fetch bounded bytes while revalidating every manual redirect target."""
     current_url = validate_remote_image_url(url)
     opener = build_opener(_NoRedirectHandler)
     for _attempt in range(4):
@@ -259,5 +253,5 @@ def _remote_image_headers(platform_key: str | None) -> dict[str, str]:
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None

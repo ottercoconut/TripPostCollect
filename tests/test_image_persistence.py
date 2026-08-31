@@ -1,3 +1,5 @@
+"""TripPostCollect tests for image persistence."""
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -26,7 +28,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from mediacrawler_crawl import (  # noqa: E402
+from mediacrawler_crawl import (
     ImagePersistenceError,
     row_for_record,
     upsert_web_post,

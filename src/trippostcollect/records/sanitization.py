@@ -18,9 +18,6 @@ AUTHOR_AVATAR_KEYS = frozenset(
         "user_avatar",
     }
 )
-# XHS serializes its creator profile as a JSON string.  These are documented
-# profile-field paths, not host/path/filename inference: ``imageb`` and
-# ``images`` are the avatar fields beneath the exported ``basicInfo`` object.
 XHS_SERIALIZED_PROFILE_AVATAR_PATHS = {
     "creator_profile_json": frozenset(
         {
@@ -49,11 +46,6 @@ class AvatarSanitizationResult:
 
 
 def redact_author_avatar_text(value: str) -> tuple[str, bool]:
-    """Discard unstructured child output when it exposes a known avatar field.
-
-    Whole-output redaction prevents an evidenced avatar URL from surviving on
-    another line and avoids guessing from hostnames, paths, or filenames.
-    """
     if AUTHOR_AVATAR_TEXT_TOKEN_RE.search(value):
         return AUTHOR_AVATAR_LOG_REDACTION, True
     return value, False
@@ -64,7 +56,6 @@ def _is_avatar_key(value: Any) -> bool:
 
 
 def serialized_avatar_profile_keys() -> frozenset[str]:
-    """Return exported fields containing an explicitly mapped JSON profile."""
     return frozenset(XHS_SERIALIZED_PROFILE_AVATAR_PATHS)
 
 
@@ -116,7 +107,6 @@ def _collect_urls(value: Any, destination: set[str]) -> None:
 
 
 def discover_author_avatar_urls(value: Any) -> frozenset[str]:
-    """Collect URLs found only beneath explicitly known avatar keys."""
     discovered: set[str] = set()
 
     def visit(
@@ -153,12 +143,6 @@ def sanitize_author_avatar_data(
     *,
     known_avatar_urls: Iterable[str] = (),
 ) -> AvatarSanitizationResult:
-    """Remove avatar keys and exact, evidenced duplicate avatar URL values.
-
-    URLs are discovered exclusively from known avatar keys or supplied by the
-    caller from explicit database avatar fields/relationships. No hostname,
-    path, or filename heuristics are used.
-    """
     avatar_urls = set(discover_author_avatar_urls(value))
     avatar_urls.update(
         candidate

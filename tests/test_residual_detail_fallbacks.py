@@ -1,3 +1,5 @@
+"""TripPostCollect tests for residual detail fallbacks."""
+
 from __future__ import annotations
 
 import asyncio
@@ -74,14 +76,14 @@ def test_weibo_repair_hook_recovers_exact_browser_detail(
             raise FakeDataFetchError("missing $render_data")
 
     fake_media_platform = types.ModuleType("media_platform")
-    fake_media_platform.__path__ = []  # type: ignore[attr-defined]
+    fake_media_platform.__path__ = []
     fake_weibo_package = types.ModuleType("media_platform.weibo")
-    fake_weibo_package.__path__ = []  # type: ignore[attr-defined]
+    fake_weibo_package.__path__ = []
     fake_client_module = types.ModuleType("media_platform.weibo.client")
-    fake_client_module.WeiboClient = FakeClient  # type: ignore[attr-defined]
-    fake_client_module.DataFetchError = FakeDataFetchError  # type: ignore[attr-defined]
-    fake_client_module.utils = types.SimpleNamespace(logger=FakeLogger())  # type: ignore[attr-defined]
-    fake_weibo_package.client = fake_client_module  # type: ignore[attr-defined]
+    fake_client_module.WeiboClient = FakeClient
+    fake_client_module.DataFetchError = FakeDataFetchError
+    fake_client_module.utils = types.SimpleNamespace(logger=FakeLogger())
+    fake_weibo_package.client = fake_client_module
     monkeypatch.setitem(sys.modules, "media_platform", fake_media_platform)
     monkeypatch.setitem(sys.modules, "media_platform.weibo", fake_weibo_package)
     monkeypatch.setitem(sys.modules, "media_platform.weibo.client", fake_client_module)
@@ -89,8 +91,8 @@ def test_weibo_repair_hook_recovers_exact_browser_detail(
 
     entrypoint.install_weibo_browser_detail_fallback()
     client = FakeClient()
-    client.playwright_page = FakePage()  # type: ignore[attr-defined]
+    client.playwright_page = FakePage()
     result = asyncio.run(client.get_note_info_by_id("456"))
 
     assert result == {"mblog": {"idstr": "456", "text": "浏览器详情正文", "id": "456"}}
-    assert client.playwright_page.goto_urls == ["https://m.weibo.cn/detail/456"]  # type: ignore[attr-defined]
+    assert client.playwright_page.goto_urls == ["https://m.weibo.cn/detail/456"]

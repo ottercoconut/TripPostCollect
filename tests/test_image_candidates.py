@@ -1,3 +1,5 @@
+"""TripPostCollect tests for image candidates."""
+
 from __future__ import annotations
 
 import json

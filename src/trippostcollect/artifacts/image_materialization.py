@@ -53,7 +53,6 @@ SAFE_COMPONENT_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
 class ImageMaterializationError(ValueError):
-    """Image validation or promotion error with a stable report code."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -173,7 +172,6 @@ def validate_image_file(
     max_pixels: int = DEFAULT_ARCHIVE_IMAGE_MAX_PIXELS,
     require_suffix_match: bool = True,
 ) -> ValidatedImage:
-    """Verify bounds, raster magic, decoder format, dimensions, and SHA-256."""
     candidate = Path(path).expanduser()
     if not candidate.exists() or not candidate.is_file():
         raise ImageMaterializationError("image_file_missing", f"image file does not exist: {candidate}")
@@ -245,7 +243,6 @@ def write_staging_image(
     max_bytes: int = DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
     max_pixels: int = DEFAULT_ARCHIVE_IMAGE_MAX_PIXELS,
 ) -> ValidatedImage:
-    """Stream one bounded image to ``.part`` and atomically publish it in staging."""
     if content_type is not None or content_length is not None:
         try:
             validate_remote_image_response(
@@ -329,7 +326,6 @@ def promote_validated_image(
     max_bytes: int = DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
     max_pixels: int = DEFAULT_ARCHIVE_IMAGE_MAX_PIXELS,
 ) -> MaterializedImage:
-    """Copy a verified staging file to its immutable content-hash path."""
     current = validate_image_file(
         validated.path,
         allowed_root=staging_root,

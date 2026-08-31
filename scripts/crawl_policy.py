@@ -22,7 +22,6 @@ RANDOM = random.SystemRandom()
 
 
 class CrawlPolicyBlocked(RuntimeError):
-    """Raised when a site request is blocked by budget or cooldown policy."""
 
     def __init__(self, event: dict[str, Any]) -> None:
         self.event = event
@@ -70,7 +69,6 @@ def save_policy_state(state: dict[str, Any], path: Path | None = None) -> None:
 
 
 def clear_site_policy_state(site_key: str) -> dict[str, Any] | None:
-    """Remove obsolete shared-policy state for a platform with an independent scheduler."""
     with site_policy_lock(site_key):
         state = load_policy_state()
         removed = state.pop(site_key, None)

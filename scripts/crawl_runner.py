@@ -61,17 +61,6 @@ JobRow = Mapping[str, Any]
 
 @dataclass(frozen=True)
 class PreparedJob:
-    """Frozen scheduler inputs for one selected crawl job.
-
-    Attributes:
-        selection_index: Position in the deterministic scheduler selection.
-        row: Snapshot of the selected ``crawl_jobs`` row.
-        command: Frozen child command.
-        discovery_plan: Resolved checkpoint and discovery inputs, when applicable.
-        state_path: Per-job frozen execution-state path.
-        lane_key: Platform-local serialization lane.
-
-    """
 
     selection_index: int
     row: JobRow
@@ -82,16 +71,10 @@ class PreparedJob:
 
 
 class JobLeaseConflict(RuntimeError):
-    """Raised when another runner already owns a selected scheduler job."""
+    pass
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse crawl-runner command-line arguments.
-
-    Returns:
-        Parsed command-line arguments.
-
-    """
     parser = argparse.ArgumentParser(description="Run configured crawl jobs with deterministic scheduling.")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path.")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Crawl target config JSON.")
@@ -127,55 +110,22 @@ def parse_args() -> argparse.Namespace:
 
 
 def utc_now() -> datetime:
-    """Return the current timezone-aware UTC time."""
     return datetime.now(timezone.utc)
 
 
 def utc_stamp() -> str:
-    """Return a collision-resistant UTC run identifier."""
     return utc_now().strftime("%Y%m%dT%H%M%S%f%z")
 
 
 def iso(value: datetime | None = None) -> str:
-    """Format a datetime as a seconds-precision ISO timestamp.
-
-    Args:
-        value: Datetime to format, or the current UTC time when omitted.
-
-    Returns:
-        ISO-formatted timestamp.
-
-    """
     return (value or utc_now()).isoformat(timespec="seconds")
 
 
 def load_json(path: Path) -> Any:
-    """Load a UTF-8 JSON document.
-
-    Args:
-        path: JSON file to read.
-
-    Returns:
-        Decoded JSON value.
-
-    """
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def validate_crawl_config(config: Any, path: Path) -> dict[str, Any]:
-    """Validate the active source-exhaustion crawl configuration.
-
-    Args:
-        config: Decoded configuration value.
-        path: Source path used in validation errors.
-
-    Returns:
-        Validated configuration mapping.
-
-    Raises:
-        ValueError: If the schema or a formal job uses removed quantity fields.
-
-    """
     if not isinstance(config, dict) or config.get("schema_version") != CRAWL_CONFIG_SCHEMA_VERSION:
         raise ValueError(
             f"unsupported crawl config schema in {path}; "
@@ -195,26 +145,14 @@ def validate_crawl_config(config: Any, path: Path) -> dict[str, Any]:
 
 
 def json_dump(value: Any) -> str:
-    """Serialize a compact UTF-8-safe JSON value."""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def tail(text: str, limit: int = 6000) -> str:
-    """Return at most the final ``limit`` characters of text."""
     return text[-limit:] if len(text) > limit else text
 
 
 def select_due_jobs(conn: sqlite3.Connection, args: argparse.Namespace) -> list[JobRow]:
-    """Select enabled due jobs in deterministic scheduler order.
-
-    Args:
-        conn: Initialized scheduler database connection.
-        args: Runner filters and selection limit.
-
-    Returns:
-        Detached job-row snapshots safe to pass between worker threads.
-
-    """
     clauses = ["enabled = 1"]
     params: list[Any] = []
     if args.job_key:
@@ -241,26 +179,15 @@ def select_due_jobs(conn: sqlite3.Connection, args: argparse.Namespace) -> list[
 
 
 def behavior_profile_name(row: JobRow) -> str:
-    """Resolve a job's configured behavior profile name."""
     data = json.loads(row["behavior_profile_json"] or "{}")
     return str(data.get("name") or row["site_key"] or "conservative")
 
 
 def params_for(row: JobRow) -> dict[str, Any]:
-    """Decode a job's parameter JSON."""
     return json.loads(row["params_json"] or "{}")
 
 
 def platform_lane_key(row: JobRow) -> str:
-    """Return the platform-local serialization key for a job.
-
-    Args:
-        row: Selected scheduler job.
-
-    Returns:
-        Platform key for structured jobs, otherwise the configured site key.
-
-    """
     params = params_for(row)
     if row["job_kind"] == "mediacrawler_search":
         return str(params.get("platform") or row["site_key"])
@@ -270,7 +197,6 @@ def platform_lane_key(row: JobRow) -> str:
 def is_unverified_douyin_first_page_checkpoint(
     checkpoint: dict[str, Any] | None,
 ) -> bool:
-    """Return whether an old Douyin first-page exhaustion lacks visible proof."""
     if not checkpoint:
         return False
     return bool(
@@ -285,15 +211,6 @@ def is_unverified_douyin_first_page_checkpoint(
 
 
 def stable_douyin_search_id_from_summary(summary: dict[str, Any]) -> str:
-    """Recover the last stable Douyin search ID from pagination evidence.
-
-    Args:
-        summary: Prior child summary.
-
-    Returns:
-        Stable search ID, or an empty string when unavailable.
-
-    """
     pagination = summary.get("pagination_evidence") or {}
     for batch in pagination.get("batches") or []:
         if not isinstance(batch, dict) or batch.get("platform") != "douyin":
@@ -316,21 +233,6 @@ def resolve_discovery_args(
     *,
     run_id: str,
 ) -> tuple[argparse.Namespace, dict[str, Any] | None]:
-    """Resolve automatic checkpoint recovery for one selected job.
-
-    Args:
-        conn: Scheduler database connection.
-        row: Selected scheduler job.
-        args: Invocation-level runner arguments.
-        run_id: Current root-run identifier.
-
-    Returns:
-        Per-job arguments and a frozen discovery plan, when applicable.
-
-    Raises:
-        RuntimeError: If a checkpoint references a missing campaign summary.
-
-    """
     job_args = copy.copy(args)
     if row["job_kind"] != "mediacrawler_search":
         return job_args, None
@@ -411,26 +313,12 @@ def resolve_discovery_args(
 
 
 def add_flag(command: list[str], flag: str, value: Any | None = None) -> None:
-    """Append a CLI flag and optional value to a command."""
     command.append(flag)
     if value is not None:
         command.append(str(value))
 
 
 def build_command(row: JobRow, args: argparse.Namespace) -> list[str]:
-    """Build the formal child command for one scheduler job.
-
-    Args:
-        row: Selected scheduler job.
-        args: Resolved per-job runner arguments.
-
-    Returns:
-        Child command as an argument vector.
-
-    Raises:
-        ValueError: If the job violates the active formal crawl contract.
-
-    """
     params = params_for(row)
     site = row["site_key"]
     url = row["target_url"]
@@ -525,27 +413,11 @@ def build_command(row: JobRow, args: argparse.Namespace) -> list[str]:
 
 
 def latest_attempt_no(conn: sqlite3.Connection, job_id: int) -> int:
-    """Return the next attempt number for one scheduler job."""
     row = conn.execute("SELECT max(attempt_no) FROM crawl_attempts WHERE job_id = ?", (job_id,)).fetchone()
     return int(row[0] or 0) + 1
 
 
 def insert_attempt(conn: sqlite3.Connection, row: JobRow, run_id: str, command: list[str]) -> int:
-    """Atomically lease a job and create its running attempt.
-
-    Args:
-        conn: Scheduler database connection.
-        row: Selected scheduler job.
-        run_id: Current root-run identifier.
-        command: Frozen child command.
-
-    Returns:
-        Inserted attempt identifier.
-
-    Raises:
-        JobLeaseConflict: If another runner already leased or disabled the job.
-
-    """
     conn.execute("BEGIN IMMEDIATE")
     try:
         leased = conn.execute(
@@ -582,16 +454,6 @@ def insert_attempt(conn: sqlite3.Connection, row: JobRow, run_id: str, command: 
 
 
 def find_artifact_paths(stdout: str, row: JobRow) -> tuple[str, list[str], str | None]:
-    """Discover child artifact and summary paths from bounded stdout metadata.
-
-    Args:
-        stdout: Child standard output.
-        row: Executed scheduler job.
-
-    Returns:
-        Primary artifact directory, capture metadata paths, and summary path.
-
-    """
     stdout_json = extract_stdout_json(stdout)
     artifact_dirs: list[str] = []
     summary_path: str | None = None
@@ -644,7 +506,6 @@ def find_artifact_paths(stdout: str, row: JobRow) -> tuple[str, list[str], str |
 
 
 def load_first_meta(paths: list[str]) -> dict[str, Any]:
-    """Load the first capture metadata document when available."""
     if not paths:
         return {}
     try:
@@ -654,16 +515,6 @@ def load_first_meta(paths: list[str]) -> dict[str, Any]:
 
 
 def import_capture_results(paths: list[str], db_path: Path) -> dict[str, Any]:
-    """Import fixed-URL capture metadata through the project importer.
-
-    Args:
-        paths: Capture metadata paths emitted by the child.
-        db_path: Destination SQLite database.
-
-    Returns:
-        Structured importer result and bounded output tails.
-
-    """
     if not paths:
         return {"skipped": True, "reason": "no_capture_meta_paths"}
     command = [
@@ -687,17 +538,6 @@ def import_capture_results(paths: list[str], db_path: Path) -> dict[str, Any]:
 
 
 def next_run_time(row: JobRow, classification: dict[str, Any], config: dict[str, Any]) -> str | None:
-    """Calculate the next eligible run time from a classified attempt.
-
-    Args:
-        row: Executed scheduler job.
-        classification: Stable attempt classification.
-        config: Active crawl configuration.
-
-    Returns:
-        Next ISO timestamp, or ``None`` for an operator-blocked job.
-
-    """
     status = classification["status"]
     if status in {"blocked", "login_required", "captcha_detected", "failed_final"}:
         return None
@@ -723,20 +563,6 @@ def finalize_attempt(
     import_result: dict[str, Any],
     config: dict[str, Any],
 ) -> None:
-    """Persist a terminal scheduler attempt and update its job status.
-
-    Args:
-        conn: Scheduler database connection.
-        row: Executed scheduler job.
-        attempt_id: Running attempt identifier.
-        completed: Child process result, when one was launched.
-        classification: Stable attempt classification.
-        artifact_dir: Primary child artifact directory.
-        capture_meta_paths: Fixed-URL capture metadata paths.
-        import_result: Persistence verification or import result.
-        config: Active crawl configuration.
-
-    """
     exit_code = completed.returncode if completed is not None else None
     stdout_tail = tail(completed.stdout if completed is not None else "")
     stderr_tail = tail(completed.stderr if completed is not None else "")
@@ -796,7 +622,6 @@ def finalize_attempt(
 
 
 def markdown_report(summary: dict[str, Any]) -> str:
-    """Render a compact Markdown report for one root run."""
     scheduling = summary.get("scheduling") or {}
     lines = [
         "# 抓取运行摘要",
@@ -840,7 +665,6 @@ def markdown_report(summary: dict[str, Any]) -> str:
 
 
 def create_run_report(conn: sqlite3.Connection, run_id: str) -> None:
-    """Create the running root-report row."""
     conn.execute(
         "INSERT OR REPLACE INTO crawl_run_reports(run_id, started_at, status) VALUES (?, ?, 'running')",
         (run_id, iso()),
@@ -849,7 +673,6 @@ def create_run_report(conn: sqlite3.Connection, run_id: str) -> None:
 
 
 def finish_run_report(conn: sqlite3.Connection, run_id: str, summary: dict[str, Any], report_path: Path) -> None:
-    """Finalize the root-report row with its immutable summary."""
     run_status = "failed" if summary["failed_count"] else ("blocked" if summary["blocked_count"] else "completed")
     conn.execute(
         """
@@ -885,23 +708,6 @@ def prepare_job(
     state_dir: Path,
     contract_path: Path,
 ) -> PreparedJob:
-    """Resolve and freeze one selected job before any child starts.
-
-    Args:
-        conn: Scheduler database connection.
-        row: Selected scheduler job.
-        args: Invocation-level runner arguments.
-        selection_index: Deterministic selection position.
-        run_id: Current root-run identifier.
-        config_path: Active configuration path.
-        db_path: Active SQLite database path.
-        state_dir: Root directory for this run's execution states.
-        contract_path: Formal crawl contract path.
-
-    Returns:
-        Frozen job ready for dry-run reporting or execution.
-
-    """
     job_args, discovery_plan = resolve_discovery_args(conn, row, args, run_id=run_id)
     command = build_command(row, job_args)
     frozen_inputs = [config_path, contract_path]
@@ -965,20 +771,6 @@ def build_result_record(
     capture_meta_paths: Sequence[str] = (),
     import_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build one stable per-job root-report record.
-
-    Args:
-        job: Prepared scheduler job.
-        classification: Stable scheduler classification.
-        completed: Child process result, when launched.
-        artifact_dir: Primary child artifact directory.
-        capture_meta_paths: Fixed-URL capture metadata paths.
-        import_result: Persistence verification or import result.
-
-    Returns:
-        JSON-serializable result record.
-
-    """
     return {
         "job_key": job.row["job_key"],
         "site_key": job.row["site_key"],
@@ -1000,7 +792,6 @@ def build_result_record(
 
 
 def planned_record(job: PreparedJob) -> dict[str, Any]:
-    """Build a dry-run record without starting a child or scheduler attempt."""
     return build_result_record(
         job,
         {"status": "planned", "failure_type": "", "retryable": False},
@@ -1014,17 +805,6 @@ def fail_open_execution_step(
     error: str,
     evidence: Mapping[str, Any],
 ) -> str | None:
-    """Fail the first active execution step after an internal runner error.
-
-    Args:
-        state: Frozen state for the affected job.
-        error: Stable state error code.
-        evidence: Bounded diagnostic evidence.
-
-    Returns:
-        State-update error text when the failure could not be recorded.
-
-    """
     try:
         payload = state.load()
         for step_name in (
@@ -1052,20 +832,6 @@ def execute_prepared_job(
     config: dict[str, Any],
     run_id: str,
 ) -> dict[str, Any]:
-    """Execute and finalize one prepared job with failure isolation.
-
-    Args:
-        job: Frozen job plan.
-        args: Invocation-level runner arguments.
-        db_path: Active SQLite database path.
-        config: Active crawl configuration.
-        run_id: Current root-run identifier.
-
-    Returns:
-        Per-job report record. Internal errors are converted to job failures so
-        other platform lanes continue.
-
-    """
     row = job.row
     state = FrozenExecutionState(job.state_path)
     attempt_id: int | None = None
@@ -1363,7 +1129,6 @@ def _run_platform_lane(
     jobs: Sequence[PreparedJob],
     execute_job: Callable[[PreparedJob], dict[str, Any]],
 ) -> list[tuple[int, dict[str, Any]]]:
-    """Execute one platform lane serially and retain selection indexes."""
     return [(job.selection_index, execute_job(job)) for job in jobs]
 
 
@@ -1373,20 +1138,6 @@ def execute_platform_lanes(
     max_parallel_platforms: int,
     execute_job: Callable[[PreparedJob], dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Execute different platform lanes concurrently and each lane serially.
-
-    Args:
-        jobs: Prepared jobs in deterministic scheduler order.
-        max_parallel_platforms: Maximum number of concurrent platform lanes.
-        execute_job: Failure-isolating single-job executor.
-
-    Returns:
-        Per-job records restored to deterministic scheduler order.
-
-    Raises:
-        ValueError: If the parallel-platform limit is not positive.
-
-    """
     if max_parallel_platforms <= 0:
         raise ValueError("max_parallel_platforms must be positive")
     lanes: dict[str, list[PreparedJob]] = {}
@@ -1421,17 +1172,6 @@ def scheduling_summary(
     max_parallel_platforms: int,
     execution_enabled: bool,
 ) -> dict[str, Any]:
-    """Summarize the platform-lane schedule for audit reports.
-
-    Args:
-        jobs: Prepared jobs in deterministic scheduler order.
-        max_parallel_platforms: Configured concurrency ceiling.
-        execution_enabled: Whether this invocation may start workers.
-
-    Returns:
-        JSON-serializable scheduling metadata.
-
-    """
     lane_keys = list(dict.fromkeys(job.lane_key for job in jobs))
     planned_workers = min(max_parallel_platforms, len(lane_keys)) if lane_keys else 0
     effective_workers = planned_workers if execution_enabled else 0
@@ -1448,7 +1188,6 @@ def scheduling_summary(
 
 
 def main() -> int:
-    """Run due crawl jobs and write deterministic root reports."""
     args = parse_args()
     if (args.start_page is not None or args.resume_summary or args.recovery_keyword) and not args.job_key:
         raise SystemExit("recovery options require --job-key")

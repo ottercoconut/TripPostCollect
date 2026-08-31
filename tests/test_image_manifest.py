@@ -1,3 +1,5 @@
+"""TripPostCollect tests for image manifest."""
+
 from __future__ import annotations
 
 from dataclasses import replace

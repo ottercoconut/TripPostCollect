@@ -200,7 +200,6 @@ def commit_child_discovery(
     child_summary: Mapping[str, Any],
     imported_completion_verified: bool | None = None,
 ) -> dict[str, Any]:
-    """Commit a durable frontier only from child pagination evidence."""
     import_result = child_summary.get("import_result") or {}
     if import_result.get("reason") == "sqlite_import_failed":
         return {"skipped": True, "reason": "sqlite_import_failed"}

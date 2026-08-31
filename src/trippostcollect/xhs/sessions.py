@@ -115,7 +115,6 @@ def prepare_account_storage_state(
     account_id: str,
     identity_hash: str,
 ) -> dict[str, Any]:
-    """Bind a browser snapshot to one enrolled account without discarding runtime state."""
     prepared = dict(state)
     metadata = dict(prepared.get("trippostcollect") or {})
     metadata.update(
@@ -153,7 +152,6 @@ def refresh_encrypted_storage_state(
     identity_hash: str,
     key: bytes,
 ) -> bool:
-    """Persist a child browser's refreshed snapshot when it is valid and changed."""
     source = Path(runtime_path).expanduser()
     try:
         value = json.loads(source.read_text(encoding="utf-8"))
@@ -284,7 +282,6 @@ async def capture_context_state(
     account_id: str,
     identity_hash: str,
 ) -> dict[str, Any]:
-    """Capture cookies, local storage, and XHS per-tab device state before shutdown."""
     state = await context.storage_state()
     runtime_storage: list[dict[str, Any]] = []
     for page in [page for page in context.pages if not page.is_closed()]:

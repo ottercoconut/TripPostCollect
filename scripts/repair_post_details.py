@@ -422,7 +422,6 @@ def run_repair_child(
     cwd: Path,
     timeout_seconds: int,
 ) -> dict[str, Any]:
-    """Run a detail child with the same process-group timeout contract as formal crawls."""
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -588,7 +587,6 @@ def _fatal_child_failure(summary: dict[str, Any]) -> str:
 
 
 def child_candidate_failures(summary: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return sanitized structured candidate failures from a repair child."""
     validation = summary.get("formal_validation") or {}
     failures = validation.get("skipped_candidate_failures") or []
     return [dict(item) for item in failures if isinstance(item, dict)]
@@ -612,7 +610,6 @@ def repair_persistence_failure_reason(
 
 
 def _strict_batch_blocker(error: str) -> bool:
-    """Return whether a child error must stop unattended platform repair."""
     if not error:
         return False
     if error.startswith("post_detail_repair_batch_timeout:"):

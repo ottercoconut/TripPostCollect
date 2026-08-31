@@ -1,3 +1,5 @@
+"""TripPostCollect tests for bilibili article repair."""
+
 from __future__ import annotations
 
 import json

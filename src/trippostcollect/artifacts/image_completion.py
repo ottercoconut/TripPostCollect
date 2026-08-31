@@ -39,7 +39,6 @@ def verify_image_artifacts(
     project_root: str | Path = PROJECT_ROOT,
     expect_promotion: bool,
 ) -> dict[str, Any]:
-    """Re-hash manifest evidence and enforce the formal image completion contract."""
     root = Path(project_root).expanduser().resolve(strict=True)
     image = summary.get("image_materialization")
     evidence: dict[str, Any] = {
@@ -121,9 +120,6 @@ def verify_image_artifacts(
             raise ValueError("SHA-256 unique/duplicate image count does not match candidates")
         if unique_images > expected_images:
             raise ValueError("SHA-256 unique image count exceeds candidates")
-        # Failure counters include candidates skipped before formal selection.
-        # They remain audit evidence, but only a selected image failure makes a
-        # complete materialization artifact invalid.
         if image.get("failures"):
             raise ValueError("image materialization contains failures")
         if rolled_back_images:
@@ -180,7 +176,6 @@ def verify_image_persistence(
     project_root: str | Path = PROJECT_ROOT,
     media_root: str | Path = LOCAL_MEDIA_ROOT,
 ) -> dict[str, Any]:
-    """Verify every formally selected post/image relation against immutable bytes."""
     root = Path(project_root).expanduser().resolve(strict=True)
     media = Path(media_root).expanduser().resolve()
     evidence: dict[str, Any] = {

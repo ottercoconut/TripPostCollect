@@ -1,3 +1,5 @@
+"""TripPostCollect tests for xhs pool."""
+
 from __future__ import annotations
 
 import argparse

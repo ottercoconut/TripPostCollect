@@ -26,17 +26,6 @@ crawl_runner = import_module("crawl_runner")
 
 
 def prepared_job(index: int, lane_key: str, job_key: str) -> crawl_runner.PreparedJob:
-    """Build a minimal prepared job for scheduler-only tests.
-
-    Args:
-        index: Deterministic selection index.
-        lane_key: Platform serialization lane.
-        job_key: Stable job key.
-
-    Returns:
-        Prepared job without filesystem or database dependencies.
-
-    """
     row = {
         "id": index + 1,
         "job_key": job_key,
@@ -54,7 +43,6 @@ def prepared_job(index: int, lane_key: str, job_key: str) -> crawl_runner.Prepar
 
 
 def test_parallel_platform_limit_is_enabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify an ordinary invocation defaults to multiple platform workers."""
     monkeypatch.setattr(sys, "argv", ["crawl_runner.py"])
 
     args = crawl_runner.parse_args()
@@ -63,7 +51,6 @@ def test_parallel_platform_limit_is_enabled_by_default(monkeypatch: pytest.Monke
 
 
 def test_different_platform_lanes_overlap_and_results_keep_selection_order() -> None:
-    """Verify platform lanes overlap without making report order nondeterministic."""
     jobs = [
         prepared_job(0, "weibo", "weibo-job"),
         prepared_job(1, "douyin", "douyin-job"),
@@ -86,7 +73,6 @@ def test_different_platform_lanes_overlap_and_results_keep_selection_order() -> 
 
 
 def test_jobs_in_the_same_platform_lane_never_overlap() -> None:
-    """Verify one platform profile is never driven by two jobs concurrently."""
     jobs = [
         prepared_job(0, "weibo", "weibo-first"),
         prepared_job(1, "weibo", "weibo-second"),
@@ -118,7 +104,6 @@ def test_jobs_in_the_same_platform_lane_never_overlap() -> None:
 
 
 def test_atomic_job_lease_rejects_a_second_runner(tmp_path: Path) -> None:
-    """Verify scheduler leasing has a single winner for the same job."""
     db_path = tmp_path / "lease.sqlite"
     with connect_db(db_path) as conn:
         bootstrap_connection(conn, sync_content=False, sync_jobs=False)
@@ -151,7 +136,6 @@ def test_internal_job_error_becomes_an_isolated_retry_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify an internal platform error is recorded instead of escaping its lane."""
     frozen_input = tmp_path / "contract.md"
     frozen_input.write_text("contract", encoding="utf-8")
     state_path = tmp_path / "weibo-state.json"
@@ -197,7 +181,6 @@ def test_dry_run_freezes_and_reports_parallel_platform_schedule(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify dry-run exposes the exact platform-lane plan without attempts."""
     db_path = tmp_path / "dry-run.sqlite"
     run_root = tmp_path / "runs"
     state_root = tmp_path / "states"

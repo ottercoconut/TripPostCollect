@@ -150,9 +150,6 @@ async def wait_for_login(
                 flush=True,
             )
             return state
-        # A stale signed-in navigation shell can remain visible behind a
-        # verification overlay.  Current challenge evidence therefore wins
-        # over the profile marker and keeps the operator window open.
         if state["ok"] and not challenge_markers:
             return state
         if challenge_markers and not challenge_announced:
@@ -173,7 +170,6 @@ async def wait_for_login(
 
 
 def login_lease_seconds(timeout_seconds: int) -> int:
-    """Cover full operator waits for initial login and reopen verification."""
     return login_lease_budget(timeout_seconds).lease_seconds
 
 
@@ -197,7 +193,6 @@ async def open_account_context(playwright: Any, profile_dir: Path, browser_path:
 
 
 async def single_login_page(context: BrowserContext) -> Page:
-    """Reuse one existing page and close stale pages while a user is logging in."""
     pages = [page for page in context.pages if not page.is_closed()]
     page = pages[0] if pages else await context.new_page()
     for other_page in pages:

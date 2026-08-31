@@ -76,7 +76,6 @@ def ensure_xhs_schema(conn: sqlite3.Connection) -> None:
 
 
 def bootstrap_xhs_control_database(db_path: str | Path) -> Path:
-    """Initialize only XHS control tables, without touching content or scheduler state."""
     resolved = ensure_parent(Path(db_path).expanduser().resolve())
     with sqlite3.connect(resolved) as conn:
         conn.row_factory = sqlite3.Row

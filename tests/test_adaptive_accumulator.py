@@ -1,3 +1,5 @@
+"""TripPostCollect tests for adaptive accumulator."""
+
 from __future__ import annotations
 
 import sqlite3

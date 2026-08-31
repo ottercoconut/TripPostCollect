@@ -30,7 +30,6 @@ def is_douyin_target(site_key: str | None, url: str) -> bool:
 
 
 def clean_douyin_profile_cookies(profile_dir: Path) -> dict[str, Any]:
-    """Remove Douyin-related persistent cookies before/after a sandbox capture."""
     event: dict[str, Any] = {
         "target": "douyin",
         "strategy": "sqlite_cookie_rotation",
@@ -71,7 +70,6 @@ def clean_douyin_profile_cookies(profile_dir: Path) -> dict[str, Any]:
 
 
 async def clear_douyin_context_cookies(context: BrowserContext) -> dict[str, Any]:
-    """Best-effort runtime fallback when the persistent cookie DB could not be edited."""
     event: dict[str, Any] = {
         "target": "douyin",
         "strategy": "runtime_context_clear_cookies",

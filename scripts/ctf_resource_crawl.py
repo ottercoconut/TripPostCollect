@@ -102,7 +102,6 @@ def extract_flags_from_text(text: str) -> list[str]:
 
 
 async def extract_published_at(page: Page) -> dict[str, Any]:
-    """Extract post publication time from common page metadata without scraping video media."""
     return await page.evaluate(
         """() => {
             const candidates = [];

@@ -8,7 +8,7 @@ from trippostcollect.core.paths import PROJECT_ROOT
 
 
 class UnsafeArtifactPath(ValueError):
-    """Raised when a stored artifact path escapes the project boundary."""
+    pass
 
 
 def resolve_project_path(value: str | Path | None) -> Path:

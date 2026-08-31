@@ -33,7 +33,6 @@ ERROR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{1,127}")
 
 
 class ImageManifestError(ValueError):
-    """Manifest validation error carrying a stable report code."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -188,7 +187,6 @@ def write_manifest_atomic(
     path: str | Path,
     entries: Iterable[ImageManifestEntry],
 ) -> tuple[Path, str]:
-    """Validate and atomically replace one deterministic UTF-8 JSONL manifest."""
     target = Path(path).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = serialize_manifest(entries)

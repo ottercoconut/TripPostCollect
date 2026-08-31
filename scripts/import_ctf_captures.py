@@ -429,7 +429,6 @@ def upsert_capture(conn: sqlite3.Connection, row: dict[str, Any]) -> int:
 
 
 def replace_capture_images(conn: sqlite3.Connection, capture_id: int, _images_json_path: str | None) -> int:
-    """Remove legacy unclassified response images instead of importing them as evidence."""
     conn.execute("DELETE FROM ctf_capture_images WHERE ctf_capture_id = ?", (capture_id,))
     return 0
 
@@ -549,7 +548,6 @@ def replace_web_post_images_from_capture(
     web_post_id: int,
     _images_json_path: str | None,
 ) -> int:
-    """Reject legacy unclassified page responses; only explicit future roles may persist."""
     conn.execute("DELETE FROM web_post_images WHERE web_post_id=?", (web_post_id,))
     return 0
 

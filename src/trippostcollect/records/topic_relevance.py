@@ -19,7 +19,6 @@ CONTENT_BODY_FIELDS = {
 
 
 def normalize_topic_text(value: Any) -> str:
-    """Normalize text without tokenization or geographic inference."""
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
     return _WHITESPACE_RE.sub(" ", text).strip()
 
@@ -30,7 +29,6 @@ def is_topic_relevant(
     content_text: Any,
     keyword: Any,
 ) -> bool:
-    """Classify the final ``web_posts.title`` and ``content_text`` fields."""
     searchable_fields = (
         normalize_topic_text(title),
         normalize_topic_text(content_text),
@@ -46,12 +44,10 @@ def is_topic_relevant(
 
 
 def effective_source_keyword(record: Mapping[str, Any], fallback_keyword: Any) -> str:
-    """Choose the value that must also be persisted to ``web_posts.keyword``."""
     return str(record.get("source_keyword") or fallback_keyword or "")
 
 
 def web_post_content_text(platform_key: str, record: Mapping[str, Any]) -> str:
-    """Project the exact authoritative text persisted to ``web_posts.content_text``."""
     fields = CONTENT_BODY_FIELDS.get(platform_key, ("content_text", "content"))
     body = next(
         (str(record.get(key)).strip() for key in fields if record.get(key) not in (None, "")),
@@ -64,7 +60,6 @@ def web_post_content_text(platform_key: str, record: Mapping[str, Any]) -> str:
 
 
 def web_post_title(platform_key: str, record: Mapping[str, Any]) -> Any:
-    """Project the exact value persisted to ``web_posts.title``."""
     title = record.get("title")
     if title not in (None, ""):
         return title
@@ -81,7 +76,6 @@ def topic_relevant_for_web_post(
     *,
     fallback_keyword: Any,
 ) -> bool:
-    """Classify a crawler record from its final persisted title and body."""
     return is_topic_relevant(
         title=web_post_title(platform_key, record),
         content_text=web_post_content_text(platform_key, record),

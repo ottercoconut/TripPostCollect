@@ -110,10 +110,6 @@ async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
     if normalized_main:
         text_parts.append(normalized_main)
 
-    # XHS renders some security/verification dialogs in child frames.  Reading
-    # only the top-level body can therefore report a healthy search shell while
-    # a visible iframe says that requests are too frequent.  ``inner_text`` is
-    # still a rendered-text observation; this does not scan hidden page source.
     main_frame = getattr(page, "main_frame", None)
     for frame in list(getattr(page, "frames", ()) or ())[:8]:
         if frame is main_frame:
@@ -177,7 +173,6 @@ async def record_xhs_platform_security_limit(
     visible_text_sample: str,
     visible_markers: dict[str, bool],
 ) -> dict[str, Any]:
-    """Persist a terminal XHS account restriction before its page is closed."""
     path = Path(evidence_path).expanduser()
     try:
         evidence = json.loads(path.read_text(encoding="utf-8"))
@@ -262,14 +257,6 @@ async def wait_for_xhs_search_ready(
     *,
     timeout_seconds: float = XHS_SEARCH_READY_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Wait for a logged-in result page, including operator verification.
-
-    A search navigation can commit to ``/website-login/captcha`` while the
-    account is still logged in.  That page is an operator checkpoint, not an
-    immediate runtime failure: keep the headed page in front until the
-    verification disappears, then give the result page a fresh readiness
-    window.
-    """
     started = time.monotonic()
     deadline = started + max(0.1, float(timeout_seconds))
     verification_deadline: float | None = None
@@ -438,7 +425,6 @@ async def dwell_on_list_with_checks(
     profile: Any,
     events: list[dict[str, Any]],
 ) -> tuple[str, dict[str, bool]]:
-    """Run the XHS list dwell while periodically checking visible block state."""
     dwell_task = asyncio.create_task(dwell_on_list(page, profile, log=events))
     try:
         while True:
@@ -539,7 +525,6 @@ async def wait_for_xhs_continuity_verification(
     timeout_seconds: float | None = None,
     poll_seconds: float | None = None,
 ) -> tuple[str, dict[str, bool], dict[str, Any]]:
-    """Keep an XHS search page open while an operator completes visible verification."""
     if initial_challenge not in {"captcha_or_verify", "login_required"}:
         raise RuntimeError(f"unsupported_xhs_operator_verification:{initial_challenge}")
 
@@ -676,7 +661,6 @@ async def run_xhs_api_captcha_verification(
     timeout_seconds: float | None = None,
     poll_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Open an API-issued XHS captcha in the current browser for manual verification."""
     path = Path(evidence_path).expanduser()
     try:
         evidence = json.loads(path.read_text(encoding="utf-8"))

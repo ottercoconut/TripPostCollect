@@ -1,3 +1,5 @@
+"""TripPostCollect tests for author avatar migration."""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,5 @@
+"""TripPostCollect tests for frozen files."""
+
 from scripts.verify_frozen_files import verify_frozen_files
 
 

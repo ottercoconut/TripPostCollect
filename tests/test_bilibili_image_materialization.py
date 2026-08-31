@@ -1,3 +1,5 @@
+"""TripPostCollect tests for bilibili image materialization."""
+
 from __future__ import annotations
 
 import io
@@ -18,7 +20,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import mediacrawler_crawl  # noqa: E402
+import mediacrawler_crawl
 
 
 def png_bytes() -> bytes:

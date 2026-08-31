@@ -1,3 +1,5 @@
+"""TripPostCollect tests for mediacrawler import."""
+
 from __future__ import annotations
 
 from dataclasses import replace

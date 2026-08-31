@@ -44,19 +44,18 @@ LEASE_OWNER_TOKEN_ENV = "TRIPPOSTCOLLECT_XHS_LEASE_OWNER_TOKEN"
 
 
 class XhsLeaseOwnershipError(RuntimeError):
-    """Raised when a release or registry write does not own the exact lease."""
+    pass
 
 
 class XhsLeaseProcessesAlive(RuntimeError):
-    """Raised when tracked runtime processes prevent safe lease release."""
+    pass
 
 
 class XhsOrphanLeaseRecoveryRefused(RuntimeError):
-    """Raised when an account lease cannot be proven orphaned safely."""
+    pass
 
 
 class XhsLeaseSignal(BaseException):
-    """Interrupt raised after recording SIGINT/SIGTERM for guarded cleanup."""
 
     def __init__(self, signum: int):
         self.signum = int(signum)
@@ -98,7 +97,6 @@ def crawl_lease_budget(*, timeout_seconds: int, configured_lease_seconds: int) -
 
 
 def login_lease_budget(timeout_seconds: int) -> LeaseBudget:
-    """Cover both operator waits plus child/browser shutdown and root finalization."""
     return LeaseBudget(runtime_seconds=int(timeout_seconds) * 2)
 
 
@@ -224,7 +222,6 @@ def _wall_time_iso(epoch_seconds: float) -> str:
 
 
 class SystemProcessInspector:
-    """Read exact PID/start/PGID identity without command-substring ownership guesses."""
 
     def __init__(self) -> None:
         self.host_id = system_host_id()
@@ -277,7 +274,6 @@ class SystemProcessInspector:
         )
 
     def process_presence(self, pid: int) -> bool | None:
-        """Return false only when an exact PID is absent or already a zombie."""
         if sys.platform.startswith("linux") and Path("/proc").is_dir():
             try:
                 raw = (Path("/proc") / str(int(pid)) / "stat").read_text(encoding="utf-8")
@@ -436,7 +432,6 @@ class SystemProcessInspector:
 
 
 class AccountLeaseFileLock:
-    """Best-effort same-host mutex; SQLite exact ownership remains authoritative."""
 
     def __init__(self, path: Path):
         self.path = path
@@ -959,7 +954,6 @@ def recover_orphaned_account_lease(
     inspector: SystemProcessInspector | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Release only mutual exclusion after two exact dead-process reconciliations."""
     value = validate_account_id(account_id)
     if not run_id.strip() or not lease_id.strip():
         raise ValueError("run_id and lease_id must not be empty")
@@ -1081,7 +1075,6 @@ def recover_orphaned_account_lease(
 
 
 class LeaseGuard:
-    """Own one exact SQLite lease, local flock, signals, and runtime processes."""
 
     def __init__(
         self,
@@ -1304,7 +1297,6 @@ class LeaseGuard:
             pass
 
     def _terminate_unregistered_process_group(self, proc: subprocess.Popen[str]) -> None:
-        """Bound and reap a new-session child when exact registry insertion fails."""
         if proc.poll() is not None:
             proc.communicate()
             return

@@ -56,11 +56,11 @@ BILIBILI_NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
 
 
 class BilibiliRepairLoginRequiredError(RuntimeError):
-    """The saved Bilibili session is no longer authenticated."""
+    pass
 
 
 class BilibiliRepairLoginCheckError(RuntimeError):
-    """The unattended repair could not prove that login is still valid."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -622,7 +622,6 @@ def fetch_repair_article_detail(
     post_id: str,
     cookie_header: str,
 ) -> tuple[dict[str, Any], int, float]:
-    """Make one detail request so a rate-limit response freezes the whole run."""
     return fetch_bilibili_article_detail(post_id, cookie_header), 1, 0.0
 
 
@@ -1809,7 +1808,6 @@ def operator_exclude_retryable_items(
     apply: bool,
     confirm_default_db_repair: bool,
 ) -> dict[str, Any]:
-    """Terminalize explicitly approved retryables without changing target rows."""
     requested_ids = sorted(
         {str(value).strip() for value in platform_post_ids if str(value).strip()}
     )

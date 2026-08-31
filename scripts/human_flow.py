@@ -146,7 +146,6 @@ async def page_size(page: Page) -> tuple[int, int]:
 
 
 async def scroll_position(page: Page) -> dict[str, int]:
-    """Return compact scroll state so emitted input can be verified."""
     try:
         async with asyncio.timeout(5):
             value = await page.evaluate(

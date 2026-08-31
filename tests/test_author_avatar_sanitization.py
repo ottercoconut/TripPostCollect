@@ -1,3 +1,5 @@
+"""TripPostCollect tests for author avatar sanitization."""
+
 from __future__ import annotations
 
 import asyncio
@@ -216,9 +218,9 @@ def test_mediacrawler_export_hook_wraps_writer_before_persistence(
             return item
 
     fake_tools = types.ModuleType("tools")
-    fake_tools.__path__ = []  # type: ignore[attr-defined]
+    fake_tools.__path__ = []
     fake_writer_module = types.ModuleType("tools.async_file_writer")
-    fake_writer_module.AsyncFileWriter = FakeWriter  # type: ignore[attr-defined]
+    fake_writer_module.AsyncFileWriter = FakeWriter
     monkeypatch.setitem(sys.modules, "tools", fake_tools)
     monkeypatch.setitem(sys.modules, "tools.async_file_writer", fake_writer_module)
     monkeypatch.setenv("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS", "1")

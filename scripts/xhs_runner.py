@@ -535,7 +535,6 @@ def frozen_discovery_inputs(discovery: dict[str, Any]) -> list[Path]:
 
 
 def fail_open_step(state: FrozenExecutionState, *, error: str, evidence: dict[str, Any] | None = None) -> None:
-    """Fail the currently actionable step without masking the original exception."""
     try:
         payload = state.load()
         if payload.get("status") in {"completed", "failed"}:

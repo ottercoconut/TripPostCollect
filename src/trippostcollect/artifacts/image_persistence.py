@@ -16,7 +16,7 @@ from trippostcollect.artifacts.image_materialization import validate_image_file
 
 
 class ImagePersistenceError(ValueError):
-    """Raised before a partial post/image relationship can be committed."""
+    pass
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -34,7 +34,6 @@ def _json_dump(value: Any) -> str:
 
 
 def normalize_persistence_items(image_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Validate role/index/URL identities before preparing SQLite rows."""
     role_counters: Counter[str] = Counter()
     identities: set[tuple[str, int]] = set()
     normalized: list[dict[str, Any]] = []
@@ -122,7 +121,6 @@ def _verified_local_metadata(
 
 
 def existing_image_records(conn: sqlite3.Connection, post_id: int) -> list[dict[str, Any]]:
-    """Return persisted image rows in the item shape used by the shared matcher."""
     records: list[dict[str, Any]] = []
     for row in conn.execute(
         """
@@ -199,7 +197,6 @@ def prepare_image_rows(
     media_root: Path,
     require_local_images: bool,
 ) -> list[dict[str, Any]]:
-    """Attach only verified local metadata and serialize rows for SQLite."""
     prepared: list[dict[str, Any]] = []
     used_ids: set[int] = set()
     for item in image_items:
@@ -255,7 +252,6 @@ def replace_image_rows(
     *,
     roles: frozenset[str] | None = None,
 ) -> int:
-    """Replace all or selected image roles using the shared SQLite row contract."""
     rows = list(prepared_images)
     if roles is None:
         conn.execute("DELETE FROM web_post_images WHERE web_post_id=?", (post_id,))

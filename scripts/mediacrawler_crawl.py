@@ -182,7 +182,6 @@ BILIBILI_WBI_MIXIN_TABLE = (
 
 
 class BilibiliArticleDetailError(RuntimeError):
-    """A classified Bilibili article-detail failure."""
 
     def __init__(
         self,
@@ -203,7 +202,6 @@ class BilibiliArticleDetailError(RuntimeError):
 
 
 class BilibiliFollowerFetchError(RuntimeError):
-    """A classified Bilibili creator-stat failure."""
 
     def __init__(
         self,
@@ -220,7 +218,6 @@ class BilibiliFollowerFetchError(RuntimeError):
 
 
 class BilibiliRuntimeBlocked(RuntimeError):
-    """A run-level Bilibili login, risk-control, or rate-limit signal."""
 
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
@@ -518,7 +515,6 @@ def load_post_repair_fallbacks(
     platform_key: str,
     post_ids: set[str],
 ) -> dict[str, dict[str, Any]]:
-    """Load trusted pre-repair metadata without replacing detail payloads."""
     if not db_path or not post_ids:
         return {}
     path = Path(db_path).expanduser().resolve()
@@ -606,7 +602,6 @@ def load_post_repair_targets(
     *,
     db_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Load and strictly bind generic detail targets to existing platform IDs."""
     if platform_key not in {"douyin", "weibo", "zhihu"}:
         raise SystemExit(f"unsupported post repair platform: {platform_key}")
     path = Path(path_value).expanduser().resolve()
@@ -1143,14 +1138,10 @@ def merge_repair_fallback_metadata(
     record: dict[str, Any],
     metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Merge pre-repair evidence while keeping the fetched detail authoritative."""
     if not metadata:
         return record
     merged = dict(record)
 
-    # A detail page may omit a publication timestamp even though the existing
-    # search record has one.  Only fill this gap; never replace an observed
-    # timestamp from the fresh detail payload.
     if not published_at_for_record(merged):
         for key in ("published_at", "created_time"):
             value = metadata.get(key)
@@ -1159,9 +1150,6 @@ def merge_repair_fallback_metadata(
                 if published_at_for_record(merged):
                     break
 
-    # Zhihu detail author objects commonly omit follower statistics.  The
-    # original search response is the trusted source for this field, so use it
-    # only when the fresh detail payload did not observe follower evidence.
     fallback_observed = metadata.get("followers_observed") is True
     current_observed = merged.get("followers_observed") is True
     if fallback_observed and not current_observed:
@@ -1182,8 +1170,6 @@ def merge_repair_fallback_metadata(
             if merged.get(key) in (None, "", 0) and metadata.get(key) not in (None, ""):
                 merged[key] = metadata[key]
 
-    # Preserve identity fields if the detail response is sparse.  These are
-    # metadata fallbacks only; the detail body/status/source remain untouched.
     for key in (
         "creator_hash",
         "creator_url_token",
@@ -1196,10 +1182,6 @@ def merge_repair_fallback_metadata(
         if merged.get(key) in (None, "") and metadata.get(key) not in (None, ""):
             merged[key] = metadata[key]
 
-    # XHS repair refreshes authoritative content, author and image evidence, but
-    # the detail endpoint may omit an aggregate metric that the existing row
-    # already observed. Preserve that trusted value only when the fresh detail
-    # omitted it; an observed zero is authoritative and is never overwritten.
     if platform_key == "xhs":
         metric_fallbacks: dict[str, dict[str, Any]] = {}
         for key in ("liked_count", "collected_count", "comment_count", "share_count"):
@@ -1584,7 +1566,6 @@ def inject_materialized_images(
     image_items: list[dict[str, Any]],
     materialized_images: list[MaterializedImage],
 ) -> list[dict[str, Any]]:
-    """Attach complete local-file evidence to every authoritative content image."""
 
     def source_identity(
         *,
@@ -1967,7 +1948,6 @@ DISCOVERY_RESEED_EVENT_FIELDS = (
 
 
 def stable_douyin_search_id(pagination_evidence: dict[str, Any]) -> str:
-    """Return the session search ID, not per-response request log IDs."""
     for batch in pagination_evidence.get("batches") or []:
         if not isinstance(batch, dict) or batch.get("platform") != "douyin":
             continue
@@ -2239,7 +2219,6 @@ def post_repair_pagination_evidence(
     successful_identities: set[str],
     materialization_failures: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Describe every explicit generic repair target as recovered or skipped."""
     target_ids = {
         str(target.get("platform_post_id") or "")
         for target in targets
@@ -2313,7 +2292,6 @@ def attach_skipped_candidate_evidence(
     image_materialization: dict[str, Any],
     pagination_evidence: dict[str, Any],
 ) -> dict[str, Any]:
-    """Expose skipped post/image failures without blocking complete candidates."""
     stop_event = pagination_evidence.get("stop_event") or {}
     failures = list(
         stop_event.get("skipped_candidate_failures")
@@ -2609,7 +2587,6 @@ def resolve_media_root(
     project_root: str | Path = PROJECT_ROOT,
     default_media_root: str | Path = LOCAL_MEDIA_ROOT,
 ) -> Path:
-    """Allow the formal media root or an explicit project ``temp/`` override."""
     root = Path(project_root).expanduser().resolve(strict=True)
     media_root = Path(value).expanduser().resolve()
     formal_root = Path(default_media_root).expanduser().resolve()
@@ -2657,7 +2634,6 @@ def _staging_root_for_manifest_entry(
     manifest_path: Path,
     entry: ImageManifestEntry,
 ) -> Path:
-    """Resolve both supported layouts without platform-specific persistence code."""
     staging_path = Path(str(entry.staging_path))
     if staging_path.parts and staging_path.parts[0] == manifest_path.parent.name:
         return manifest_path.parent.parent
@@ -2671,7 +2647,6 @@ def rollback_newly_promoted_images(
     media_root: str | Path = LOCAL_MEDIA_ROOT,
     db_path: str | Path | None = None,
 ) -> int:
-    """Remove current-run files unless SQLite already references their paths."""
     root = Path(project_root).expanduser().resolve(strict=True)
     media = Path(media_root).expanduser().resolve()
     if media != root and root not in media.parents:
@@ -2732,7 +2707,6 @@ def formal_media_persistence_lock(
     enabled: bool,
     lock_path: str | Path = FORMAL_MEDIA_PERSISTENCE_LOCK,
 ) -> Iterator[None]:
-    """Serialize formal media promotion through SQLite commit or rollback."""
     if not enabled:
         yield
         return
@@ -2755,7 +2729,6 @@ def _validated_manifest_rows_for_post(
     list[dict[str, Any]],
     list[tuple[ImageManifestEntry, Path, int]],
 ]:
-    """Match current candidates to exact or safely reconcilable legacy manifest rows."""
     entries = [row[0] for row in post_manifest_rows]
     try:
         ordered_entries = validate_post_manifest(
@@ -2899,7 +2872,6 @@ def materialize_formal_record_images(
     media_root: str | Path = LOCAL_MEDIA_ROOT,
     promote: bool,
 ) -> tuple[dict[str, Any], dict[str, list[MaterializedImage]], set[str]]:
-    """Verify selected post manifests and optionally promote immutable image files."""
     root = Path(project_root).expanduser().resolve(strict=True)
     resolved_media_root = Path(media_root).expanduser().resolve()
     if resolved_media_root != root and root not in resolved_media_root.parents:
@@ -3313,7 +3285,6 @@ def upsert_web_post(
 
 
 class FormalImportBeforeCommitError(RuntimeError):
-    """A persistence failure proven to have occurred before SQLite commit."""
 
     def __init__(self, cause: BaseException) -> None:
         super().__init__(f"{type(cause).__name__}: {cause}")
@@ -3321,7 +3292,6 @@ class FormalImportBeforeCommitError(RuntimeError):
 
 
 def commit_formal_import(conn: sqlite3.Connection) -> None:
-    """Commit a formal import behind a testable transaction boundary."""
     conn.commit()
 
 
@@ -3406,7 +3376,6 @@ def import_valid_records_with_media_rollback(
     project_root: str | Path = PROJECT_ROOT,
     media_root: str | Path = LOCAL_MEDIA_ROOT,
 ) -> dict[str, Any]:
-    """Import one formal batch and remove its new media if SQLite rolls back."""
     try:
         return import_valid_records(
             summary,
@@ -3494,7 +3463,6 @@ def normalize_bilibili_article_record(item: dict[str, Any], keyword: str) -> dic
 
 
 def clean_bilibili_article_body(value: Any) -> str:
-    """Normalize a detail body without flattening its paragraph boundaries."""
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(r"(?i)</(?:p|div|li|blockquote|h[1-6]|section|article)\s*>", "\n", text)
@@ -3514,7 +3482,6 @@ def normalize_bilibili_detail_image_url(value: Any) -> str | None:
 
 
 def extract_bilibili_detail_images(detail: dict[str, Any]) -> tuple[list[str], list[str]]:
-    """Return only images observed in article detail, never search previews."""
     images: list[str] = []
     sources: list[str] = []
     seen: set[str] = set()
@@ -3558,9 +3525,6 @@ def extract_bilibili_detail_images(detail: dict[str, Any]) -> tuple[list[str], l
             else:
                 add(item, f"detail_{key}")
 
-    # Current opus articles expose their cover through image_urls, while legacy
-    # articles use that same field for inline body images. Use it only when no
-    # richer inline representation was observed.
     if not images:
         for key in ("origin_image_urls", "image_urls"):
             values = detail.get(key)
@@ -3626,7 +3590,6 @@ def download_bilibili_record_images(
     log_fn: Any | None = None,
     max_attempts: int = BILIBILI_IMAGE_MAX_ATTEMPTS,
 ) -> list[ImageManifestEntry]:
-    """Download only detail-observed Bilibili article images into staging."""
     if not 1 <= max_attempts <= BILIBILI_IMAGE_MAX_ATTEMPTS:
         raise ValueError(
             f"max_attempts must be between 1 and {BILIBILI_IMAGE_MAX_ATTEMPTS}"
@@ -5207,7 +5170,6 @@ def apply_formal_completion_gates(
     download_images: bool,
     child_execution_ok: bool = True,
 ) -> dict[str, Any]:
-    """Apply all read-only evidence gates before persistent writes."""
     gated = dict(validation)
     gated["content_completion_met"] = bool(content_validation.get("completion_met"))
     gated["content_repair_import_met"] = bool(
@@ -5254,7 +5216,6 @@ def apply_formal_completion_gates(
 
 
 def formal_import_gate_met(validation: dict[str, Any]) -> bool:
-    """Separate partial repair importability from full target completion."""
     if validation.get("repair_mode"):
         return bool(validation.get("repair_import_met"))
     return bool(validation.get("completion_met"))
@@ -5278,7 +5239,6 @@ def repair_partial_child_execution_allowed(
     image_materialization: dict[str, Any],
     behavior_validation: dict[str, Any],
 ) -> bool:
-    """Allow a valid allowlisted repair subset through when other targets are unavailable."""
     if runtime_blocked:
         return False
     if child_execution_ok:
@@ -5295,7 +5255,6 @@ def repair_candidate_execution_completed(
     records: list[dict[str, Any]],
     platforms: list[str],
 ) -> bool:
-    """Recognize a clean repair process that produced no valid candidate rows."""
     repair_records = [
         record
         for record in records
@@ -5325,7 +5284,6 @@ def repair_runtime_stop_reason(
     records: list[dict[str, Any]],
     platforms: list[str],
 ) -> str:
-    """Preserve a structured run-level blocker from one repair child."""
     blocking_types = {
         "policy_blocked",
         "platform_security_limit",

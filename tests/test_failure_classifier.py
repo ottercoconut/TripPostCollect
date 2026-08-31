@@ -1,3 +1,5 @@
+"""TripPostCollect tests for failure classifier."""
+
 from __future__ import annotations
 
 import json

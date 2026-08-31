@@ -1,3 +1,5 @@
+"""TripPostCollect tests for mediacrawler pagination."""
+
 from __future__ import annotations
 
 import json

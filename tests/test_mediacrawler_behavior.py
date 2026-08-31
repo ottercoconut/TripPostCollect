@@ -1,3 +1,5 @@
+"""TripPostCollect tests for mediacrawler behavior."""
+
 from __future__ import annotations
 
 import asyncio

@@ -16,7 +16,7 @@ MIGRATION_NAME = "topic_relevance"
 
 
 class TopicRelevanceMigrationError(RuntimeError):
-    """Raised when schema-v20 cannot preserve the persistence contract."""
+    pass
 
 
 def _hash_rows(conn: sqlite3.Connection, sql: str) -> str:
@@ -89,7 +89,6 @@ def topic_relevance_distribution(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def migrate_topic_relevance(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Add/backfill topic relevance in the caller's current transaction."""
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(web_posts)")}
     before = _invariants(conn)
     column_added = "topic_relevant" not in columns

@@ -1,3 +1,5 @@
+"""TripPostCollect tests for bilibili formal route."""
+
 from __future__ import annotations
 
 import json

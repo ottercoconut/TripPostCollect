@@ -128,7 +128,6 @@ def _detail_url(row: sqlite3.Row) -> tuple[str | None, str]:
 
 
 def previous_repair_failures(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
-    """Return targets whose finite repair attempt already ended in a recorded failure."""
     failures: dict[str, dict[str, Any]] = {}
     if not conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='xhs_runs'"
@@ -334,7 +333,6 @@ def _repair_report(child_summary: dict[str, Any]) -> dict[str, Any]:
 
 
 def candidate_only_child_failure(child_summary: dict[str, Any]) -> bool:
-    """Identify an exhausted candidate set that must not stop later repair work."""
     validation = child_summary.get("formal_validation") or {}
     report = _repair_report(child_summary)
     return bool(

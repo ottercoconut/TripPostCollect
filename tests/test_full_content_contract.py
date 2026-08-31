@@ -1,3 +1,5 @@
+"""TripPostCollect tests for full content contract."""
+
 from __future__ import annotations
 
 import sys

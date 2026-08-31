@@ -13,7 +13,6 @@ XHS_WINDOW_SIZE_ENV = "TRIPPOSTCOLLECT_XHS_WINDOW_SIZE"
 
 
 def browser_launch_environment() -> dict[str, str]:
-    """Keep Chromium support files inside the project writable runtime tree."""
     original_home = Path.home()
     env = os.environ.copy()
     env["HOME"] = str(ensure_dir(BROWSER_RUNTIME_HOME))

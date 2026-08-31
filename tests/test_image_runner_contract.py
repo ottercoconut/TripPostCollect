@@ -1,3 +1,5 @@
+"""TripPostCollect tests for image runner contract."""
+
 from __future__ import annotations
 
 import argparse
