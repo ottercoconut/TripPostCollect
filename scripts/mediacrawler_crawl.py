@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from hashlib import md5, sha256
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -138,6 +138,9 @@ DEFAULT_OUTPUT = MEDIACRAWLER_RUNS_OUTPUT
 COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
 XHS_OPERATOR_LOGIN_WAIT_SECONDS = 600
 FORMAL_SQLITE_BUSY_TIMEOUT_MS = 60_000
+PROCESS_PROGRESS_POLL_SECONDS = 5.0
+PROCESS_CLEANUP_GRACE_SECONDS = 20.0
+PROCESS_FINAL_REAP_SECONDS = 5.0
 BILIBILI_ARTICLE_SEARCH_URL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
 BILIBILI_ARTICLE_DETAIL_URL = "https://api.bilibili.com/x/article/view"
 BILIBILI_RELATION_STAT_URL = "https://api.bilibili.com/x/relation/stat"
@@ -347,7 +350,12 @@ def parse_args() -> argparse.Namespace:
         help="bilibili weibo douyin zhihu; XHS is a low-level target selected only by xhs_runner.py",
     )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Output root.")
-    parser.add_argument("--timeout-per-platform", type=int, default=180, help="Timeout per MediaCrawler platform.")
+    parser.add_argument(
+        "--timeout-per-platform",
+        type=int,
+        default=180,
+        help="Maximum seconds without durable MediaCrawler progress.",
+    )
     parser.add_argument("--login-type", default="cookie", choices=("cookie", "qrcode", "phone"), help="MediaCrawler login type.")
     parser.add_argument("--get-media", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -1231,13 +1239,141 @@ def is_video_record(platform_key: str, record: dict[str, Any]) -> bool:
     return False
 
 
+def progress_path_signature(paths: Iterable[Path]) -> tuple[tuple[str, int, int], ...]:
+    files: set[Path] = set()
+    for raw_path in paths:
+        path = Path(raw_path).expanduser()
+        try:
+            if path.is_dir():
+                files.update(candidate for candidate in path.rglob("*.jsonl") if candidate.is_file())
+            elif path.is_file():
+                files.add(path)
+        except OSError:
+            continue
+    signature: list[tuple[str, int, int]] = []
+    for path in sorted(files):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signature.append((str(path), int(stat.st_size), int(stat.st_mtime_ns)))
+    return tuple(signature)
+
+
+def process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def terminate_managed_process(
+    proc: subprocess.Popen[bytes],
+    *,
+    grace_seconds: float,
+) -> tuple[bytes | None, bytes | None, bool]:
+    partial_stdout: bytes | None = None
+    partial_stderr: bytes | None = None
+    complete_stdout: bytes | None = None
+    complete_stderr: bytes | None = None
+    forced = False
+    deadline = time.monotonic() + max(0.0, grace_seconds)
+    if proc.poll() is None:
+        proc.terminate()
+    remaining = max(0.01, deadline - time.monotonic())
+    try:
+        complete_stdout, complete_stderr = proc.communicate(timeout=remaining)
+    except subprocess.TimeoutExpired as exc:
+        partial_stdout = exc.stdout
+        partial_stderr = exc.stderr
+    while process_group_exists(proc.pid) and time.monotonic() < deadline:
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    if process_group_exists(proc.pid):
+        forced = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if complete_stdout is None or complete_stderr is None:
+        try:
+            final_stdout, final_stderr = proc.communicate(
+                timeout=PROCESS_FINAL_REAP_SECONDS
+            )
+        except subprocess.TimeoutExpired as exc:
+            final_stdout = exc.stdout
+            final_stderr = exc.stderr
+        complete_stdout = final_stdout if final_stdout is not None else partial_stdout
+        complete_stderr = final_stderr if final_stderr is not None else partial_stderr
+    return complete_stdout, complete_stderr, forced
+
+
+def append_no_progress_timeout_event(
+    state_path: str | Path | None,
+    *,
+    platform_key: str,
+    start_page: int,
+    start_offset: int | None,
+    start_cursor: str | None,
+    inactivity_timeout_seconds: float,
+    last_progress_age_seconds: float,
+) -> dict[str, Any]:
+    if not state_path:
+        return {"skipped": True, "reason": "execution_state_unavailable"}
+    state = FrozenExecutionState(state_path)
+    try:
+        payload = state.load()
+        events = [event for event in payload.get("events") or [] if isinstance(event, dict)]
+        if any(event.get("type") == "adaptive_search_stopped" for event in events):
+            return {"skipped": True, "reason": "terminal_event_already_present"}
+        latest_batch: dict[str, Any] = {}
+        for event in events:
+            if event.get("type") != "adaptive_batch_completed":
+                continue
+            details = event.get("details")
+            if isinstance(details, dict):
+                latest_batch = details
+        details = {
+            key: latest_batch.get(key)
+            for key in PAGINATION_EVENT_FIELDS
+            if key in latest_batch
+        }
+        details.update(
+            {
+                "platform": platform_key,
+                "source_page": latest_batch.get("source_page", start_page),
+                "source_offset": latest_batch.get("source_offset", start_offset),
+                "source_cursor": latest_batch.get("source_cursor", start_cursor),
+                "resume_page": latest_batch.get("resume_page", start_page),
+                "resume_offset": latest_batch.get("resume_offset", start_offset),
+                "resume_cursor": latest_batch.get("resume_cursor", start_cursor),
+                "source_has_more": True,
+                "batch_complete": False,
+                "stop_reason": "runtime_failed",
+                "stop_detail": "no_progress_timeout",
+                "inactivity_timeout_seconds": round(inactivity_timeout_seconds, 3),
+                "last_progress_age_seconds": round(last_progress_age_seconds, 3),
+            }
+        )
+        state.append_event("adaptive_search_stopped", details)
+    except Exception as exc:
+        return {"skipped": False, "error": f"{type(exc).__name__}: {exc}"}
+    return {"skipped": False, "event": "adaptive_search_stopped", "details": details}
+
+
 def run_command(
     cmd: list[str],
     cwd: Path,
-    timeout: int,
+    timeout: float,
     log_dir: Path,
     *,
     extra_env: dict[str, str] | None = None,
+    progress_paths: Iterable[Path] | None = None,
+    startup_grace_seconds: float = 0.0,
+    poll_seconds: float = PROCESS_PROGRESS_POLL_SECONDS,
+    cleanup_grace_seconds: float = PROCESS_CLEANUP_GRACE_SECONDS,
 ) -> dict[str, Any]:
     log_dir = ensure_dir(log_dir)
     env = browser_launch_environment()
@@ -1251,6 +1387,15 @@ def run_command(
     stderr = ""
     returncode = 0
     timed_out = False
+    timeout_reason: str | None = None
+    forced_termination = False
+    progress_observed = False
+    last_progress_at = started
+    last_progress_age_seconds = 0.0
+    tracked_paths = tuple(progress_paths) if progress_paths is not None else None
+    progress_signature = (
+        progress_path_signature(tracked_paths) if tracked_paths is not None else ()
+    )
     proc: subprocess.Popen[bytes] | None = None
     lease_process_identity = None
     lease_registration_enabled = all(
@@ -1274,43 +1419,81 @@ def run_command(
                     environ=env,
                 )
             except Exception:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    proc.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    proc.communicate(timeout=5)
+                terminate_managed_process(
+                    proc,
+                    grace_seconds=cleanup_grace_seconds,
+                )
                 raise
-        stdout_data, stderr_data = proc.communicate(timeout=timeout)
-        stdout = decode_text(stdout_data)
-        stderr = decode_text(stderr_data)
-        returncode = int(proc.returncode or 0)
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        returncode = 124
-        stdout = decode_text(exc.stdout)
-        stderr = decode_text(exc.stderr)
-        if proc is not None:
+        while True:
+            now = time.monotonic()
+            if tracked_paths is not None:
+                current_signature = progress_path_signature(tracked_paths)
+                if current_signature != progress_signature:
+                    progress_signature = current_signature
+                    progress_observed = True
+                    last_progress_at = now
+                current_budget = timeout + (
+                    0.0 if progress_observed else max(0.0, startup_grace_seconds)
+                )
+                remaining = current_budget - (now - last_progress_at)
+                communicate_timeout = min(max(0.01, poll_seconds), max(0.01, remaining))
+            else:
+                remaining = timeout
+                communicate_timeout = timeout
+            if remaining <= 0:
+                timed_out = True
+                returncode = 124
+                timeout_reason = (
+                    "no_progress_timeout"
+                    if tracked_paths is not None
+                    else "wall_clock_timeout"
+                )
+                last_progress_age_seconds = max(0.0, now - last_progress_at)
+                stdout_data, stderr_data, forced_termination = terminate_managed_process(
+                    proc,
+                    grace_seconds=cleanup_grace_seconds,
+                )
+                stdout = decode_text(stdout_data)
+                stderr = decode_text(stderr_data)
+                break
             try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                extra_stdout, extra_stderr = proc.communicate(timeout=5)
+                stdout_data, stderr_data = proc.communicate(timeout=communicate_timeout)
             except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                extra_stdout, extra_stderr = proc.communicate()
-            stdout += decode_text(extra_stdout)
-            stderr += decode_text(extra_stderr)
+                if tracked_paths is None:
+                    timed_out = True
+                    returncode = 124
+                    timeout_reason = "wall_clock_timeout"
+                    last_progress_age_seconds = max(
+                        0.0,
+                        time.monotonic() - last_progress_at,
+                    )
+                    (
+                        stdout_data,
+                        stderr_data,
+                        forced_termination,
+                    ) = terminate_managed_process(
+                        proc,
+                        grace_seconds=cleanup_grace_seconds,
+                    )
+                    stdout = decode_text(stdout_data)
+                    stderr = decode_text(stderr_data)
+                    break
+                continue
+            stdout = decode_text(stdout_data)
+            stderr = decode_text(stderr_data)
+            returncode = int(proc.returncode or 0)
+            last_progress_age_seconds = max(0.0, time.monotonic() - last_progress_at)
+            break
+    except BaseException:
+        if proc is not None and getattr(proc, "poll", lambda: proc.returncode)() is None:
+            try:
+                terminate_managed_process(
+                    proc,
+                    grace_seconds=cleanup_grace_seconds,
+                )
+            except Exception:
+                pass
+        raise
     finally:
         if lease_process_identity is not None and proc is not None and proc.returncode is not None:
             mark_lease_process_exited_from_environment(
@@ -1334,6 +1517,15 @@ def run_command(
         "command_text": shlex.join(cmd),
         "returncode": returncode,
         "timed_out": timed_out,
+        "timeout_reason": timeout_reason,
+        "inactivity_timeout_seconds": timeout if tracked_paths is not None else None,
+        "startup_grace_seconds": (
+            startup_grace_seconds if tracked_paths is not None else None
+        ),
+        "progress_observed": progress_observed,
+        "last_progress_age_seconds": round(last_progress_age_seconds, 2),
+        "forced_termination": forced_termination,
+        "cleanup_grace_seconds": cleanup_grace_seconds,
         "elapsed_seconds": round(time.monotonic() - started, 2),
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
@@ -4764,13 +4956,36 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         timeout = max(timeout, 420)
     if platform_key == "zhihu":
         timeout = max(timeout, 300)
+    execution_state_path = os.environ.get(
+        "TRIPPOSTCOLLECT_EXECUTION_STATE_PATH",
+        "",
+    ).strip()
+    progress_paths = [save_path, behavior_evidence_path]
+    if execution_state_path:
+        progress_paths.append(Path(execution_state_path).expanduser())
     run = run_command(
         cmd,
         MEDIACRAWLER_DIR,
-        timeout + HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS,
+        timeout,
         log_dir,
         extra_env=extra_env,
+        progress_paths=progress_paths,
+        startup_grace_seconds=HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS,
     )
+    if run.get("timeout_reason") == "no_progress_timeout":
+        run["timeout_state_event"] = append_no_progress_timeout_event(
+            execution_state_path,
+            platform_key=platform_key,
+            start_page=int(args.start_page),
+            start_offset=(
+                int(args.start_offset) if args.start_offset is not None else None
+            ),
+            start_cursor=str(args.start_cursor or "") or None,
+            inactivity_timeout_seconds=float(timeout),
+            last_progress_age_seconds=float(
+                run.get("last_progress_age_seconds") or 0.0
+            ),
+        )
     behavior_evidence = load_behavior_evidence(behavior_evidence_path)
     repair_report = (
         load_xhs_repair_report(log_dir / "repair_report.json")
@@ -4795,8 +5010,8 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         and "skip video" in str(run.get("stderr_tail") or "").lower()
     ):
         status = "skipped_video_only"
-    if run["timed_out"] and output["non_video_content_records"] > 0:
-        status = "partial_completed"
+    if run["timed_out"]:
+        status = "runtime_failed"
     elif int(run.get("returncode") or 0) != 0:
         status = "runtime_failed"
     if not behavior_evidence_valid(behavior_evidence):
@@ -4805,7 +5020,7 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         "platform": platform_key,
         "label": platform["label"],
         "status": status,
-        "ok": status in {"completed", "partial_completed", "skipped_video_only"},
+        "ok": status in {"completed", "skipped_video_only"},
         "media_enabled": image_download_enabled,
         "video_enabled": False,
         "login_state": login_state,

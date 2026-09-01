@@ -37,6 +37,11 @@
 有 checkpoint 时先刷新顶部，再从保存页码继续。数据库、累计摘要、seen、人工排除和本轮已见 ID
 在长文详情与图片请求前过滤；完整页保存下一页，页中途停止保存当前页，顶部刷新不推进深层位置。
 
+微博来源耗尽轮常因正文图片数量大而长时间运行。`timeout_per_platform` 只限制 execution state、内容
+JSONL、图片 manifest 和行为证据同时无变化的持续时间，不限制整轮总时长；持续完成候选或图片时不得
+仅因累计运行时长结束进程。触发 `no_progress_timeout` 时只保留最后完整批次的安全恢复位置，旧 staging
+不得导入，账号健康状态也不得据此改变。
+
 历史库中缺少 `content_detail_status=detail_observed` 的既有记录，从根项目
 `scripts/repair_post_details.py --platform weibo` 分批修复。清单把既有微博 ID 与
 `https://m.weibo.cn/detail/<id>` 严格绑定；detail 模式先在本轮青岛关键词移动搜索页完成人类行为

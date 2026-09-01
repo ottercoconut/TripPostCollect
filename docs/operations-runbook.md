@@ -58,6 +58,14 @@ python scripts/crawl_runner.py \
 指定 job 时，正式命令使用与 dry-run 相同的 `--job-key`。正式结构化抓取固定抓到可验证来源耗尽，
 不接受数量目标、候选硬上限、停滞停止或完成模式选择参数。
 
+`timeout_per_platform` / `--timeout-per-platform` 是“无持久进展看门狗”，不是从进程启动累计的总运行
+时限。execution state 事件、内容 JSONL、图片 manifest 或行为证据任一发生变化都会重置计时；因此只要
+来源耗尽抓取仍在推进，就允许总运行时间超过该值。启动阶段另保留行为预算。所有受监控证据持续不变
+达到阈值时才记录 `adaptive_search_stopped(runtime_failed, no_progress_timeout)`，尾批标记为不完整，禁止
+导入并从最后完整批次恢复。看门狗收束先只向监督进程发送一次 SIGTERM，最多等待 20 秒让 child、
+exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中的 `timeout_reason`、
+`last_progress_age_seconds`、`forced_termination` 和 `timeout_state_event` 用于复核该路径。
+
 只同步主配置：
 
 ```bash
@@ -282,7 +290,7 @@ checkpoint/cursor/seen/campaign、导入或删除旧 staging、写内容 SQLite�
 
 ## 一次性配置
 
-新关键词、平台组合、顶部刷新或超时调整使用 `config/one_off/` 的派生配置，不直接修改长期主配置。
+新关键词、平台组合、顶部刷新或无进展看门狗调整使用 `config/one_off/` 的派生配置，不直接修改长期主配置。
 派生文件必须保留主配置的 defaults 和全部长期 job；否则同步会禁用遗漏的任务。
 
 1. 确认关键词属于青岛范围，记录目标 job 原值。
