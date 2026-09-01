@@ -503,6 +503,38 @@ def _login_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -> st
     return next((marker for marker in LOGIN_MARKERS if marker.lower() in combined), "")
 
 
+def _storage_refresh_block_reason(
+    *,
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    child_summary: dict[str, Any],
+) -> str:
+    if not child_summary:
+        return "child_summary_missing"
+    challenge = _challenge_reason(stdout, stderr, child_summary)
+    if challenge:
+        return f"challenge:{challenge}"
+    login_reason = _login_reason(stdout, stderr, child_summary)
+    if login_reason:
+        return f"login:{login_reason}"
+    pagination = child_summary.get("pagination_evidence") or {}
+    stop_detail = str(pagination.get("stop_detail") or "")
+    if stop_detail in {
+        "browser_context_closed",
+        "browser_runtime_failed",
+        "browser_target_closed",
+        "login_required",
+    }:
+        return f"runtime:{stop_detail}"
+    combined = f"{tail(stdout, 3000)}\n{tail(stderr, 3000)}".lower()
+    if "targetclosederror" in combined or "context or browser has been closed" in combined:
+        return "runtime:browser_target_closed"
+    if exit_code < 0 or exit_code >= 128:
+        return f"process_exit:{exit_code}"
+    return ""
+
+
 def write_summary(run_dir: Path, summary: dict[str, Any]) -> Path:
     path = run_dir / "run_summary.json"
     path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -860,6 +892,10 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
     stderr = ""
     exit_code = 1
     storage_state_refreshed = False
+    storage_state_refresh: dict[str, Any] = {
+        "status": "skipped",
+        "reason": "child_not_started",
+    }
     discovery_commit: dict[str, Any] = {"skipped": True, "reason": "child_not_started"}
     try:
         key = load_snapshot_key(create=False)
@@ -885,27 +921,43 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             state.begin("command_executed")
             env = os.environ.copy()
             env["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(state_path)
-            try:
-                completed = guard.run_subprocess(
-                    command,
-                    cwd=ROOT,
-                    env=env,
-                    timeout_seconds=int(target["timeout_seconds"]),
-                )
-                exit_code = completed.returncode
-                stdout = completed.stdout
-                stderr = completed.stderr
-            finally:
+            env["TRIPPOSTCOLLECT_XHS_RUN_ID"] = run_id
+            completed = guard.run_subprocess(
+                command,
+                cwd=ROOT,
+                env=env,
+                timeout_seconds=int(target["timeout_seconds"]),
+            )
+            exit_code = completed.returncode
+            stdout = completed.stdout
+            stderr = completed.stderr
+            stdout_json = extract_stdout_json(stdout)
+            child_summary_path = str(stdout_json.get("summary") or "")
+            child_summary = load_child_summary(child_summary_path)
+            refresh_block_reason = _storage_refresh_block_reason(
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
+                child_summary=child_summary,
+            )
+            if refresh_block_reason:
+                storage_state_refresh = {
+                    "status": "skipped",
+                    "reason": refresh_block_reason,
+                }
+            else:
                 storage_state_refreshed = refresh_encrypted_storage_state(
                     storage_state,
                     encrypted_state,
                     account_id=str(account["account_id"]),
                     identity_hash=str(account["identity_hash"]),
+                    expected_run_id=run_id,
                     key=key,
                 )
-            stdout_json = extract_stdout_json(stdout)
-            child_summary_path = str(stdout_json.get("summary") or "")
-            child_summary = load_child_summary(child_summary_path)
+                storage_state_refresh = {
+                    "status": "promoted" if storage_state_refreshed else "verified_unchanged",
+                    "reason": "current_run_session_verified",
+                }
             child_import_result = child_summary.get("import_result") or {}
             if args.no_import:
                 discovery_commit = {"skipped": True, "reason": "no_import"}
@@ -1062,6 +1114,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
         "challenge": challenge,
         "login_reason": login_reason,
         "storage_state_refreshed": storage_state_refreshed,
+        "storage_state_refresh": storage_state_refresh,
         "post_interaction": {
             "requested_mode": args.post_interaction,
             "ok": (

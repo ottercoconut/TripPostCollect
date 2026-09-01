@@ -377,8 +377,12 @@ python scripts/xhs_runner.py \
 
 小红书的短 Cookie 不能脱离设备连续性单独续期。`xhs_login.py` 与 `xhs_runner.py` 必须复用同一账号
 profile、加密 storage state、原生窗口参数和 Chrome 运行环境；关闭前快照还必须包含平台的
-sessionStorage 设备标识。启动时 profile 的现存状态优先，快照只补缺，避免旧短 Cookie 把刚刷新
-的 profile 回滚成“新设备”会话。
+sessionStorage 设备标识。snapshot schema v3 只把保存的主标签页 sessionStorage 补到新一轮主标签页，
+不能按 origin 注入所有窗口；localStorage 仍按 origin 补缺。启动时 profile 的现存状态优先，快照只
+补缺，避免旧短 Cookie 把刚刷新 profile 回滚成“新设备”会话。登录工具必须等待可见身份、self-info、
+Cookie 和设备字段连续稳定，再执行关闭重开复验；初次候选不能覆盖最后一次已验证密文。正式 child
+只有写入匹配当前 run ID 的 self-info 验证标记且未出现登录、验证或浏览器关闭阻断时，runner 才晋升
+新快照。
 
 ## 浏览器与行为证据
 

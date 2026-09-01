@@ -12,6 +12,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -23,6 +24,8 @@ KEY_ENV = "TRIPPOSTCOLLECT_XHS_SNAPSHOT_KEY"
 KEYCHAIN_SERVICE = "TripPostCollect.XHS"
 KEYCHAIN_ACCOUNT = "snapshot-key"
 REQUIRED_SESSION_COOKIES = frozenset({"a1", "webId", "web_session"})
+SNAPSHOT_SCHEMA_VERSION = 3
+VERIFIED_SESSION_STATUS = "verified"
 
 
 def _decode_key(value: str) -> bytes:
@@ -119,7 +122,7 @@ def prepare_account_storage_state(
     metadata = dict(prepared.get("trippostcollect") or {})
     metadata.update(
         {
-            "schema_version": 2,
+            "schema_version": SNAPSHOT_SCHEMA_VERSION,
             "platform": "xhs",
             "account_id": account_id,
             "identity_hash": identity_hash,
@@ -150,6 +153,7 @@ def refresh_encrypted_storage_state(
     *,
     account_id: str,
     identity_hash: str,
+    expected_run_id: str,
     key: bytes,
 ) -> bool:
     source = Path(runtime_path).expanduser()
@@ -159,6 +163,13 @@ def refresh_encrypted_storage_state(
         raise RuntimeError("invalid refreshed XHS storage state") from exc
     if not isinstance(value, dict):
         raise RuntimeError("refreshed XHS storage state is not an object")
+    runtime_metadata = value.get("trippostcollect") or {}
+    if not isinstance(runtime_metadata, dict):
+        raise RuntimeError("refreshed XHS storage state has invalid account metadata")
+    if runtime_metadata.get("account_id") != account_id:
+        raise RuntimeError("refreshed XHS storage state account does not match the lease")
+    if runtime_metadata.get("identity_hash") != identity_hash:
+        raise RuntimeError("refreshed XHS storage state identity does not match the account")
     prepared = prepare_account_storage_state(
         value,
         account_id=account_id,
@@ -166,6 +177,14 @@ def refresh_encrypted_storage_state(
     )
     if not storage_state_is_usable(prepared, account_id=account_id):
         raise RuntimeError("refreshed XHS storage state is missing required session cookies")
+    metadata = prepared.get("trippostcollect") or {}
+    verification = metadata.get("session_verification") or {}
+    if not isinstance(verification, dict):
+        raise RuntimeError("refreshed XHS storage state has invalid session verification")
+    if verification.get("status") != VERIFIED_SESSION_STATUS:
+        raise RuntimeError("refreshed XHS storage state is not session-verified")
+    if verification.get("run_id") != expected_run_id:
+        raise RuntimeError("refreshed XHS storage state verification belongs to another run")
     existing = decrypt_storage_state(
         encrypted_path,
         account_id=account_id,
@@ -204,7 +223,42 @@ def materialized_storage_state(
             pass
 
 
-async def restore_context_state(context: Any, state: dict[str, Any]) -> None:
+def _origin_for_url(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return ""
+
+
+def _primary_runtime_storage(
+    state: dict[str, Any],
+    *,
+    primary_page: Any | None,
+) -> dict[str, Any]:
+    items = [
+        item
+        for item in (state.get("trippostcollect") or {}).get("runtime_storage", [])
+        if isinstance(item, dict)
+        and item.get("origin")
+        and isinstance(item.get("sessionStorage"), dict)
+    ]
+    if not items:
+        return {}
+    primary_origin = _origin_for_url(str(getattr(primary_page, "url", "") or ""))
+    matching_origin = [item for item in items if item.get("origin") == primary_origin]
+    candidates = matching_origin or items
+    return next(
+        (item for item in candidates if item.get("page_role") == "primary"),
+        candidates[0],
+    )
+
+
+async def restore_context_state(
+    context: Any,
+    state: dict[str, Any],
+    *,
+    primary_page: Any | None = None,
+) -> None:
     allowed_cookie_keys = {"name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite"}
     existing_cookies = {
         (
@@ -232,15 +286,12 @@ async def restore_context_state(context: Any, state: dict[str, Any]) -> None:
         cookies.append(cookie)
     if cookies:
         await context.add_cookies(cookies)
-    origins: dict[str, dict[str, dict[str, str]]] = {}
+    local_storage_by_origin: dict[str, dict[str, str]] = {}
     for item in state.get("origins", []):
         if not isinstance(item, dict) or not item.get("origin"):
             continue
-        bucket = origins.setdefault(
-            str(item["origin"]),
-            {"localStorage": {}, "sessionStorage": {}},
-        )
-        bucket["localStorage"].update(
+        bucket = local_storage_by_origin.setdefault(str(item["origin"]), {})
+        bucket.update(
             {
                 str(entry["name"]): str(entry["value"])
                 for entry in item.get("localStorage", [])
@@ -250,26 +301,33 @@ async def restore_context_state(context: Any, state: dict[str, Any]) -> None:
     for item in (state.get("trippostcollect") or {}).get("runtime_storage", []):
         if not isinstance(item, dict) or not item.get("origin"):
             continue
-        bucket = origins.setdefault(
-            str(item["origin"]),
-            {"localStorage": {}, "sessionStorage": {}},
-        )
-        for storage_key in ("localStorage", "sessionStorage"):
-            values = item.get(storage_key)
-            if isinstance(values, dict):
-                bucket[storage_key].update(
-                    {str(key): str(value) for key, value in values.items() if value is not None}
-                )
-    if origins:
-        encoded = json.dumps(origins, ensure_ascii=False)
+        values = item.get("localStorage")
+        if isinstance(values, dict):
+            local_storage_by_origin.setdefault(str(item["origin"]), {}).update(
+                {str(key): str(value) for key, value in values.items() if value is not None}
+            )
+    if local_storage_by_origin:
+        encoded = json.dumps(local_storage_by_origin, ensure_ascii=False)
         await context.add_init_script(
             f"""() => {{
                 const origins = {encoded};
                 const state = origins[location.origin] || {{}};
-                for (const [key, value] of Object.entries(state.localStorage || {{}})) {{
+                for (const [key, value] of Object.entries(state)) {{
                     if (localStorage.getItem(key) === null) localStorage.setItem(key, value);
                 }}
-                for (const [key, value] of Object.entries(state.sessionStorage || {{}})) {{
+            }}"""
+        )
+    primary_storage = _primary_runtime_storage(state, primary_page=primary_page)
+    session_storage = primary_storage.get("sessionStorage") or {}
+    if primary_page is not None and isinstance(session_storage, dict) and session_storage:
+        encoded = json.dumps(
+            {str(key): str(value) for key, value in session_storage.items() if value is not None},
+            ensure_ascii=False,
+        )
+        await primary_page.add_init_script(
+            f"""() => {{
+                const state = {encoded};
+                for (const [key, value] of Object.entries(state)) {{
                     if (sessionStorage.getItem(key) === null) sessionStorage.setItem(key, value);
                 }}
             }}"""
@@ -281,6 +339,8 @@ async def capture_context_state(
     *,
     account_id: str,
     identity_hash: str,
+    primary_page: Any | None = None,
+    session_verification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     state = await context.storage_state()
     runtime_storage: list[dict[str, Any]] = []
@@ -302,11 +362,12 @@ async def capture_context_state(
         except Exception as exc:
             storage = {"url": url, "error": f"{type(exc).__name__}: {exc}"}
         if isinstance(storage, dict):
+            storage["page_role"] = "primary" if page is primary_page else "secondary"
             runtime_storage.append(storage)
     metadata = dict(state.get("trippostcollect") or {})
     metadata.update(
         {
-            "schema_version": 2,
+            "schema_version": SNAPSHOT_SCHEMA_VERSION,
             "platform": "xhs",
             "account_id": account_id,
             "identity_hash": identity_hash,
@@ -314,5 +375,7 @@ async def capture_context_state(
             "runtime_storage": runtime_storage,
         }
     )
+    if session_verification is not None:
+        metadata["session_verification"] = dict(session_verification)
     state["trippostcollect"] = metadata
     return state

@@ -139,10 +139,14 @@ python scripts/xhs_login.py \
   --timeout-seconds 600
 ```
 
-登录成功必须同时完成：可见“我”与稳定身份、保存 Cookie/localStorage 以及平台写入 sessionStorage
-的标签页设备 ID/运行时指纹、关闭重开同一 profile 后仍是同一身份、AES-GCM 写入
-`storage_state.enc`、账号状态变为 `active`。独立登录和正式运行使用同一真实 Chrome、原生窗口尺寸、
-语言、时区、mock keychain HOME 和账号 profile；不得在两个入口间切换固定 viewport 与最大化窗口。
+登录成功必须同时完成：可见“我”与稳定身份、`/api/sns/web/v1/user/selfinfo` 返回成功、必需 Cookie、
+localStorage 及当前主标签页的设备 ID/运行时指纹连续四次保持一致，每次间隔 5 秒；随后关闭重开同一
+profile，再通过相同门禁且仍是同一身份，才原子写入 AES-GCM `storage_state.enc` 并把账号状态变为
+`active`。初次登录得到的状态只作为内存候选供重开复验补缺，不能提前覆盖最后一次已验证密文；复验
+失败保留原密文不变。平台在登录或复验期间关闭原页并打开同域窗口时，工具接管最新窗口继续等待，
+不能凭旧 `Page` 的 `TargetClosedError` 立即关掉整个 Chrome。独立登录和正式运行使用同一真实 Chrome、
+原生窗口尺寸、语言、时区、mock keychain HOME 和账号 profile；不得在两个入口间切换固定 viewport
+与最大化窗口。
 
 登录工具在整个登录和复验阶段持有与正式抓取相同的账号租约；忙碌只返回 `blocked`。可见验证页
 必须置前并等待操作人，标记消失且身份恢复后才继续；每阶段最多等待命令指定超时，不自动识别或
@@ -268,6 +272,10 @@ python scripts/repair_xhs_posts.py \
   checkpoint。启动导航会把 `readyState`、DOM/正文长度、主文档状态、页面脚本错误和失败资源的紧凑
   摘要写入 behavior evidence 同目录的 `behavior_evidence.navigation.json`，白屏超时不得只凭外部关闭
   后的 `TargetClosedError` 分类。
+- 搜索卡片和作者链接在匿名页面也可能存在；可见的精确“登录”按钮优先判定为 `login_required`，
+  不得仅凭卡片数或作者链接数把匿名页面判为 ready。主页面在搜索导航或行为阶段被平台替换时，正式
+  child 最多接管一次最新同域窗口并重新执行当前门禁；接管后仍须刷新 Cookie、通过 self-info API，
+  才能继续搜索。
 - 正式 BrowserContext 守卫安装后出现的任何新标签页都立即置前，并从出现起至少保留 30 秒；平台
   弹页、作者主页回退、互动和验证辅助页一视同仁。正常返回、异常、Playwright 退出和最终清理都
   不得绕过。首个主页面可豁免，启动时已有的额外页仍受保护。
@@ -361,11 +369,14 @@ cursor 表示同一个 client search ID。
 
 - 每个账号使用权限 `0700` 的 `data/xhs_accounts/<account_id>/profile/`，不同账号不得共享。
 - profile 是持久 Chrome 目录，不宣称整个目录应用层加密。
-- Cookie、localStorage、sessionStorage 设备标识和运行时 storage state 以 AES-GCM 保存为
-  `storage_state.enc`；明文 `metadata.json` 只保存账号绑定信息，不保存设备标识或 Cookie。
+- Cookie、localStorage、sessionStorage 设备标识和运行时 storage state 使用 snapshot schema v3，
+  以 AES-GCM 保存为 `storage_state.enc`；明文 `metadata.json` 只保存账号绑定信息，不保存设备标识或
+  Cookie。localStorage 按 origin 补缺；sessionStorage 保留每个页面的角色，只把主标签页快照恢复到
+  新一轮主标签页，不把 `XHS_TAB_DEVICE_ID` 注入其他窗口，新标签页由平台生成自己的标签页设备 ID。
 - 持久 profile 中仍有效的 Cookie/localStorage 是当前状态；解密快照只补充 profile 缺失项，不能用
-  较旧短 Cookie 覆盖 profile。所有启动过浏览器的轮次都在关闭页面前原子刷新快照，并由 runner
-  校验账号绑定和必需 Cookie 后重新加密；内容抓取失败不等于丢弃已正常刷新的会话。
+  较旧短 Cookie 覆盖 profile。child 只有在本轮 self-info API 已验证并写入匹配 run ID 的验证标记后，
+  runner 才能晋升快照；登录、验证码、安全限制、浏览器关闭、信号中止或缺少 child 摘要时保留最后
+  一次已验证密文。普通内容候选失败不等于会话失效，满足上述当前轮验证门禁时仍可刷新会话。
 - 密钥优先读取 `TRIPPOSTCOLLECT_XHS_SNAPSHOT_KEY`，否则使用 macOS Keychain 服务
   `TripPostCollect.XHS`。
 - 运行时明文只存在于 `data/runtime/xhs/sessions/<run_id>/`，退出必须删除。

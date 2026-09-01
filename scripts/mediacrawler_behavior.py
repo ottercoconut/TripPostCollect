@@ -126,6 +126,25 @@ async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
     page_url = str(getattr(page, "url", "") or "")
     hostname = (urlparse(page_url).hostname or "").lower()
     is_xhs_page = hostname == "xiaohongshu.com" or hostname.endswith(".xiaohongshu.com")
+    xhs_login_control_visible = False
+    if is_xhs_page:
+        try:
+            xhs_login_control_visible = bool(
+                await page.evaluate(
+                    """() => Array.from(
+                        document.querySelectorAll("a, button, [role='button']")
+                    ).some((element) => {
+                        const text = (element.innerText || element.textContent || "").trim();
+                        const style = window.getComputedStyle(element);
+                        return text === "登录"
+                            && style.display !== "none"
+                            && style.visibility !== "hidden"
+                            && element.getClientRects().length > 0;
+                    })"""
+                )
+            )
+        except Exception:
+            xhs_login_control_visible = False
     markers = {
         "platform_security_limit": bool(
             is_xhs_page
@@ -143,6 +162,7 @@ async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
         "login_required": bool(
             LOGIN_VISIBLE_RE.search(normalized)
             or (is_xhs_page and XHS_LOGIN_URL_RE.search(page_url))
+            or xhs_login_control_visible
         ),
     }
     return normalized[:360], markers

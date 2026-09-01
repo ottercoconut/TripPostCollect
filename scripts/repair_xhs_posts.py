@@ -50,6 +50,7 @@ from xhs_runner import (
     _challenge_reason,
     _eligible_account_for_plan,
     _login_reason,
+    _storage_refresh_block_reason,
     load_child_summary,
     tail,
     upsert_run,
@@ -474,6 +475,10 @@ def _run_main() -> int:
     outcome = "failed"
     state_error = ""
     storage_state_refreshed = False
+    storage_state_refresh: dict[str, Any] = {
+        "status": "skipped",
+        "reason": "child_not_started",
+    }
     candidate_only_failure = False
     guard = LeaseGuard(
         db_path=db_path,
@@ -523,27 +528,43 @@ def _run_main() -> int:
             state.begin("command_executed")
             env = os.environ.copy()
             env["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(state_path)
-            try:
-                completed = guard.run_subprocess(
-                    command,
-                    cwd=ROOT,
-                    env=env,
-                    timeout_seconds=int(target["timeout_seconds"]),
-                )
-            finally:
-                storage_state_refreshed = refresh_encrypted_storage_state(
-                    storage_state,
-                    encrypted_state,
-                    account_id=str(account["account_id"]),
-                    identity_hash=str(account["identity_hash"]),
-                    key=key,
-                )
+            env["TRIPPOSTCOLLECT_XHS_RUN_ID"] = run_id
+            completed = guard.run_subprocess(
+                command,
+                cwd=ROOT,
+                env=env,
+                timeout_seconds=int(target["timeout_seconds"]),
+            )
             exit_code = int(completed.returncode)
             stdout = completed.stdout or ""
             stderr = completed.stderr or ""
             stdout_json = extract_stdout_json(stdout)
             child_summary_path = str(stdout_json.get("summary") or "")
             child_summary = load_child_summary(child_summary_path)
+            refresh_block_reason = _storage_refresh_block_reason(
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
+                child_summary=child_summary,
+            )
+            if refresh_block_reason:
+                storage_state_refresh = {
+                    "status": "skipped",
+                    "reason": refresh_block_reason,
+                }
+            else:
+                storage_state_refreshed = refresh_encrypted_storage_state(
+                    storage_state,
+                    encrypted_state,
+                    account_id=str(account["account_id"]),
+                    identity_hash=str(account["identity_hash"]),
+                    expected_run_id=run_id,
+                    key=key,
+                )
+                storage_state_refresh = {
+                    "status": "promoted" if storage_state_refreshed else "verified_unchanged",
+                    "reason": "current_run_session_verified",
+                }
             candidate_only_failure = bool(
                 candidate_only_child_failure(child_summary)
                 and not _challenge_reason(stdout, stderr, child_summary)
@@ -728,6 +749,7 @@ def _run_main() -> int:
         "challenge": _challenge_reason(stdout, stderr, child_summary),
         "login_reason": _login_reason(stdout, stderr, child_summary),
         "storage_state_refreshed": storage_state_refreshed,
+        "storage_state_refresh": storage_state_refresh,
         "import_result": child_summary.get("import_result") or {},
         "repair_report": repair_report,
         "candidate_only_failure": candidate_only_failure,

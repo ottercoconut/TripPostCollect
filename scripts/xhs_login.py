@@ -59,6 +59,51 @@ CHALLENGE_RE = re.compile(
     re.I,
 )
 PLATFORM_SECURITY_LIMIT_URL_RE = re.compile(r"/website-login/error(?:[?#]|$)", re.I)
+SELF_INFO_PATH = "/api/sns/web/v1/user/selfinfo"
+LOGIN_STABILITY_CONFIRMATIONS = 4
+LOGIN_STABILITY_POLL_MS = 5_000
+REQUIRED_LOGIN_COOKIES = frozenset({"a1", "webId", "web_session"})
+REQUIRED_SESSION_STORAGE = frozenset({"XHS_RWP_FINGERPRINT", "XHS_TAB_DEVICE_ID"})
+LOGIN_LOCAL_STORAGE_KEYS = frozenset({"RWP_LOGIN_TOKEN", "b1", "webSsk"})
+
+
+class SelfInfoMonitor:
+    def __init__(self) -> None:
+        self.observed = 0
+        self.ok = False
+        self.last_status: int | None = None
+        self.last_observed_at = ""
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    def attach(self, context: BrowserContext) -> None:
+        context.on("response", self._on_response)
+
+    def _on_response(self, response: Any) -> None:
+        if SELF_INFO_PATH not in str(getattr(response, "url", "") or ""):
+            return
+        task = asyncio.create_task(self._consume(response))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _consume(self, response: Any) -> None:
+        self.observed += 1
+        self.last_status = int(getattr(response, "status", 0) or 0)
+        self.last_observed_at = utc_iso()
+        try:
+            payload = await response.json()
+        except Exception:
+            self.ok = False
+            return
+        result = ((payload or {}).get("data") or {}).get("result") or {}
+        self.ok = bool(self.last_status == 200 and result.get("success"))
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "observed": self.observed,
+            "last_status": self.last_status,
+            "last_observed_at": self.last_observed_at,
+        }
 
 
 def parse_args() -> argparse.Namespace:
@@ -113,6 +158,66 @@ async def xhs_page_state(page: Page) -> dict[str, Any]:
     if PLATFORM_SECURITY_LIMIT_URL_RE.search(page_url):
         challenge_markers.append("website-login/error")
         challenge_markers = sorted(set(challenge_markers))
+    continuity: dict[str, Any]
+    try:
+        cookies = await page.context.cookies([XHS_HOME_URL])
+        cookie_values = {
+            str(item.get("name") or ""): str(item.get("value") or "")
+            for item in cookies
+            if isinstance(item, dict) and item.get("name") and item.get("value")
+        }
+        storage = await page.evaluate(
+            """
+            () => ({
+              localStorage: Object.fromEntries(Object.entries(window.localStorage || {})),
+              sessionStorage: Object.fromEntries(Object.entries(window.sessionStorage || {}))
+            })
+            """
+        )
+        local_storage = dict((storage or {}).get("localStorage") or {})
+        session_storage = dict((storage or {}).get("sessionStorage") or {})
+        present_cookies = sorted(REQUIRED_LOGIN_COOKIES.intersection(cookie_values))
+        present_local = sorted(LOGIN_LOCAL_STORAGE_KEYS.intersection(local_storage))
+        present_session = sorted(REQUIRED_SESSION_STORAGE.intersection(session_storage))
+        continuity_ready = bool(
+            len(present_cookies) == len(REQUIRED_LOGIN_COOKIES)
+            and present_local
+            and len(present_session) == len(REQUIRED_SESSION_STORAGE)
+        )
+        continuity_token = hashlib.sha256(
+            json.dumps(
+                {
+                    "cookies": {key: cookie_values.get(key, "") for key in sorted(REQUIRED_LOGIN_COOKIES)},
+                    "localStorage": {
+                        key: local_storage.get(key, "")
+                        for key in sorted(LOGIN_LOCAL_STORAGE_KEYS)
+                    },
+                    "sessionStorage": {
+                        key: session_storage.get(key, "")
+                        for key in sorted(REQUIRED_SESSION_STORAGE)
+                    },
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        continuity = {
+            "ready": continuity_ready,
+            "required_cookies": present_cookies,
+            "local_storage_markers": present_local,
+            "session_storage_markers": present_session,
+            "_token": continuity_token,
+        }
+    except Exception as exc:
+        continuity = {
+            "ready": False,
+            "required_cookies": [],
+            "local_storage_markers": [],
+            "session_storage_markers": [],
+            "error": f"{type(exc).__name__}: {exc}",
+            "_token": "",
+        }
     return {
         "ok": bool(me_visible and profile_ids),
         "url": page.url,
@@ -120,8 +225,54 @@ async def xhs_page_state(page: Page) -> dict[str, Any]:
         "profile_ids": profile_ids,
         "platform_security_limit": platform_security_limit,
         "challenge_markers": challenge_markers,
+        "continuity": continuity,
         "visible_text_sample": normalized_text[:360],
     }
+
+
+def _public_login_state(state: dict[str, Any]) -> dict[str, Any]:
+    public = dict(state)
+    continuity = dict(public.get("continuity") or {})
+    continuity.pop("_token", None)
+    public["continuity"] = continuity
+    return public
+
+
+async def latest_xhs_page(context: BrowserContext, fallback: Page) -> Page:
+    try:
+        pages = [page for page in context.pages if not page.is_closed()]
+    except Exception:
+        pages = []
+    for candidate in reversed(pages):
+        url = str(getattr(candidate, "url", "") or "")
+        if "xiaohongshu.com" in url or "rednote.com" in url:
+            return candidate
+    if fallback in pages:
+        return fallback
+    return pages[-1] if pages else fallback
+
+
+def _target_closed_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return bool(
+        exc.__class__.__name__ == "TargetClosedError"
+        or "target page, context or browser has been closed" in text
+        or "targetclosederror" in text
+    )
+
+
+async def navigate_login_page(context: BrowserContext, page: Page) -> Page:
+    try:
+        await page.goto(XHS_HOME_URL, wait_until="domcontentloaded", timeout=60_000)
+        return page
+    except Exception as exc:
+        if not _target_closed_error(exc):
+            raise
+    replacement = await latest_xhs_page(context, page)
+    if replacement is page or replacement.is_closed():
+        raise RuntimeError("xhs_login_target_closed_without_replacement")
+    await replacement.bring_to_front()
+    return replacement
 
 
 async def wait_for_login(
@@ -129,32 +280,78 @@ async def wait_for_login(
     timeout_seconds: int,
     *,
     phase: str,
-) -> dict[str, Any]:
+    context: BrowserContext | None = None,
+    self_info_monitor: SelfInfoMonitor | None = None,
+) -> tuple[Page, dict[str, Any]]:
     started = time.monotonic()
     state: dict[str, Any] = {}
     observed_challenge_markers: set[str] = set()
     challenge_announced = False
+    stable_key: tuple[str, str] | None = None
+    stable_confirmations = 0
+    page_replacements = 0
+    active_page = page
     while time.monotonic() - started < timeout_seconds:
-        state = await xhs_page_state(page)
+        if context is not None:
+            candidate = await latest_xhs_page(context, active_page)
+            if candidate is not active_page:
+                page_replacements += 1
+                active_page = candidate
+        try:
+            state = await xhs_page_state(active_page)
+        except Exception as exc:
+            if context is None or not _target_closed_error(exc):
+                raise
+            candidate = await latest_xhs_page(context, active_page)
+            if candidate is active_page or candidate.is_closed():
+                raise
+            page_replacements += 1
+            active_page = candidate
+            continue
         challenge_markers = set(state.get("challenge_markers") or [])
         observed_challenge_markers.update(challenge_markers)
         state["challenge_observed"] = bool(observed_challenge_markers)
         state["observed_challenge_markers"] = sorted(observed_challenge_markers)
+        state["page_replacements"] = page_replacements
+        state["ui_ok"] = bool(state.get("ok"))
+        self_info = self_info_monitor.public() if self_info_monitor is not None else {"ok": True}
+        state["self_info"] = self_info
+        continuity = state.get("continuity") or {}
+        candidate_key = (
+            str((state.get("profile_ids") or [""])[0]),
+            str(continuity.get("_token") or ""),
+        )
+        session_ready = bool(
+            state["ui_ok"]
+            and continuity.get("ready")
+            and self_info.get("ok")
+            and not challenge_markers
+            and all(candidate_key)
+        )
+        if session_ready:
+            stable_confirmations = stable_confirmations + 1 if candidate_key == stable_key else 1
+            stable_key = candidate_key
+        else:
+            stable_key = None
+            stable_confirmations = 0
+        state["stability_confirmations"] = stable_confirmations
+        state["stability_required"] = LOGIN_STABILITY_CONFIRMATIONS
+        state["ok"] = bool(session_ready and stable_confirmations >= LOGIN_STABILITY_CONFIRMATIONS)
         if state.get("platform_security_limit"):
             try:
-                await page.bring_to_front()
+                await active_page.bring_to_front()
             except Exception:
                 pass
             print(
                 f"[xhs-login] {phase}检测到平台安全限制，终止本轮。",
                 flush=True,
             )
-            return state
-        if state["ok"] and not challenge_markers:
-            return state
+            return active_page, _public_login_state(state)
+        if state["ok"]:
+            return active_page, _public_login_state(state)
         if challenge_markers and not challenge_announced:
             try:
-                await page.bring_to_front()
+                await active_page.bring_to_front()
             except Exception:
                 pass
             print(
@@ -163,10 +360,12 @@ async def wait_for_login(
                 flush=True,
             )
             challenge_announced = True
-        await page.wait_for_timeout(2_000)
+        await active_page.wait_for_timeout(LOGIN_STABILITY_POLL_MS)
     state["challenge_observed"] = bool(observed_challenge_markers)
     state["observed_challenge_markers"] = sorted(observed_challenge_markers)
-    return state
+    state["ok"] = False
+    state["page_replacements"] = page_replacements
+    return active_page, _public_login_state(state)
 
 
 def login_lease_seconds(timeout_seconds: int) -> int:
@@ -217,24 +416,30 @@ async def _run_login_session(
     key = load_snapshot_key(create=True)
     initial_state: dict[str, Any] = {}
     persisted_state: dict[str, Any] = {}
+    initial_storage_state: dict[str, Any] = {}
     error = ""
     challenge_phases: list[str] = []
 
     async with async_playwright() as playwright:
         context = await open_account_context(playwright, paths["profile"], args.browser_path)
         lease_guard.observe_profile_processes()
+        page = await single_login_page(context)
         if paths["encrypted_state"].is_file():
             await restore_context_state(
                 context,
                 decrypt_storage_state(paths["encrypted_state"], account_id=account_id, key=key),
+                primary_page=page,
             )
-        page = await single_login_page(context)
+        initial_self_info = SelfInfoMonitor()
+        initial_self_info.attach(context)
         try:
-            await page.goto(XHS_HOME_URL, wait_until="domcontentloaded", timeout=60_000)
-            initial_state = await wait_for_login(
+            page = await navigate_login_page(context, page)
+            page, initial_state = await wait_for_login(
                 page,
                 args.timeout_seconds,
                 phase="初次登录",
+                context=context,
+                self_info_monitor=initial_self_info,
             )
             if initial_state.get("challenge_observed"):
                 challenge_phases.append("initial_login")
@@ -246,27 +451,19 @@ async def _run_login_session(
             else:
                 platform_id = str(initial_state["profile_ids"][0])
                 identity_hash = hashlib.sha256(platform_id.encode("utf-8")).hexdigest()
-                storage_state = await capture_context_state(
+                initial_storage_state = await capture_context_state(
                     context,
                     account_id=account_id,
                     identity_hash=identity_hash,
+                    primary_page=page,
+                    session_verification={
+                        "status": "verified",
+                        "run_id": run_id,
+                        "source": "stable_ui_storage_and_selfinfo",
+                        "phase": "initial_login",
+                        "verified_at": utc_iso(),
+                    },
                 )
-                encrypt_storage_state(storage_state, paths["encrypted_state"], account_id=account_id, key=key)
-                public_metadata = {
-                    key: storage_state["trippostcollect"].get(key)
-                    for key in (
-                        "schema_version",
-                        "platform",
-                        "account_id",
-                        "identity_hash",
-                        "captured_at",
-                    )
-                }
-                paths["metadata"].write_text(
-                    json.dumps(public_metadata, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                paths["metadata"].chmod(0o600)
         except PlaywrightTimeoutError as exc:
             error = f"navigation_timeout:{exc}"
         finally:
@@ -275,17 +472,22 @@ async def _run_login_session(
         if not error:
             verify_context = await open_account_context(playwright, paths["profile"], args.browser_path)
             lease_guard.observe_profile_processes()
+            verify_page = await single_login_page(verify_context)
             await restore_context_state(
                 verify_context,
-                decrypt_storage_state(paths["encrypted_state"], account_id=account_id, key=key),
+                initial_storage_state,
+                primary_page=verify_page,
             )
-            verify_page = await single_login_page(verify_context)
+            persisted_self_info = SelfInfoMonitor()
+            persisted_self_info.attach(verify_context)
             try:
-                await verify_page.goto(XHS_HOME_URL, wait_until="domcontentloaded", timeout=60_000)
-                persisted_state = await wait_for_login(
+                verify_page = await navigate_login_page(verify_context, verify_page)
+                verify_page, persisted_state = await wait_for_login(
                     verify_page,
                     args.timeout_seconds,
                     phase="关闭重开复验",
+                    context=verify_context,
+                    self_info_monitor=persisted_self_info,
                 )
                 if persisted_state.get("challenge_observed"):
                     challenge_phases.append("reopen_verification")
@@ -306,6 +508,14 @@ async def _run_login_session(
                         verify_context,
                         account_id=account_id,
                         identity_hash=identity_hash,
+                        primary_page=verify_page,
+                        session_verification={
+                            "status": "verified",
+                            "run_id": run_id,
+                            "source": "stable_ui_storage_and_selfinfo",
+                            "phase": "reopen_verification",
+                            "verified_at": utc_iso(),
+                        },
                     )
                     encrypt_storage_state(
                         storage_state,
@@ -313,6 +523,21 @@ async def _run_login_session(
                         account_id=account_id,
                         key=key,
                     )
+                    public_metadata = {
+                        key: storage_state["trippostcollect"].get(key)
+                        for key in (
+                            "schema_version",
+                            "platform",
+                            "account_id",
+                            "identity_hash",
+                            "captured_at",
+                        )
+                    }
+                    paths["metadata"].write_text(
+                        json.dumps(public_metadata, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    paths["metadata"].chmod(0o600)
             finally:
                 await verify_context.close()
             if not persisted_state.get("ok"):
