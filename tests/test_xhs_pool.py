@@ -1116,6 +1116,8 @@ def test_restore_state_keeps_profile_cookie_and_scopes_session_device_id_to_prim
     assert "XHS_TAB_DEVICE_ID" not in context.init_script
     assert "XHS_TAB_DEVICE_ID" in page.init_script
     assert "sessionStorage.getItem(key) === null" in page.init_script
+    assert context.init_script.strip().startswith("(() =>")
+    assert page.init_script.strip().startswith("(() =>")
 
 
 def test_restore_state_does_not_merge_two_tab_device_ids() -> None:

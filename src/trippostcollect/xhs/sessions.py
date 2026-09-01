@@ -309,13 +309,13 @@ async def restore_context_state(
     if local_storage_by_origin:
         encoded = json.dumps(local_storage_by_origin, ensure_ascii=False)
         await context.add_init_script(
-            f"""() => {{
+            f"""(() => {{
                 const origins = {encoded};
                 const state = origins[location.origin] || {{}};
                 for (const [key, value] of Object.entries(state)) {{
                     if (localStorage.getItem(key) === null) localStorage.setItem(key, value);
                 }}
-            }}"""
+            }})();"""
         )
     primary_storage = _primary_runtime_storage(state, primary_page=primary_page)
     session_storage = primary_storage.get("sessionStorage") or {}
@@ -325,12 +325,12 @@ async def restore_context_state(
             ensure_ascii=False,
         )
         await primary_page.add_init_script(
-            f"""() => {{
+            f"""(() => {{
                 const state = {encoded};
                 for (const [key, value] of Object.entries(state)) {{
                     if (sessionStorage.getItem(key) === null) sessionStorage.setItem(key, value);
                 }}
-            }}"""
+            }})();"""
         )
 
 
