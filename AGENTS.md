@@ -32,7 +32,9 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 只读管理端属于同级独立项目 `../TripPostAdmin`；本仓库不再包含管理端 API、Web、Docker 或管理端
   读模型，也不得让管理端导入采集包。两者只通过 SQLite schema、只读配置及媒体/证据文件契约协作。
 - `published_at` 必须来自平台原始发帖时间，入库保存为 Asia/Shanghai ISO；不要用抓取时间冒充发帖时间。
-- 通用正式任务从 `scripts/crawl_runner.py` 进入；小红书只从 `scripts/xhs_runner.py` 进入，禁止放回通用 job 或登录流程。
+- 通用正式任务从 `scripts/crawl_runner.py` 进入；小红书的正式抓取与轮内扫码登录只从
+  `scripts/xhs_runner.py` 进入，禁止放回通用 job、warmup 或独立登录流程。`xhs_accounts.py` 只管理
+  非秘密逻辑槽位与精确租约，不保存平台登录态。
 - 通用抓取配置使用 schema v2；小红书 pool 使用 schema v2、target 使用 schema v3。小红书不再有
   pool/target `enabled` 开关；显式 `xhs_runner.py` 命令是唯一启动动作，不为每轮修改或恢复配置开关，
   旧字段直接视为配置错误。
@@ -42,6 +44,18 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
   视为错误，不保留兼容层。`required_fields_profile`、行为/策略、正文图片和 SQLite 持久化门禁仍然
   全部生效。
 - 五个正式结构化搜索平台都由 runner 自动维护 SQLite 抓取记忆：首次从第一页开始，续跑先有限刷新顶部再恢复深层前沿；正常 workflow 不手工传页码、摘要或游标。通用平台按 job 与查询指纹保存安全前沿、有效累计摘要和所有已处理候选 ID；小红书使用独立表并额外按人工指定账号隔离所有已处理候选 ID。
+- 每个小红书正式轮次创建空的临时 profile 并要求人工扫码，不读取或保存跨轮登录态。轮初纯未扫码
+  页面明确显示二维码过期时，只允许在连续两次确认仍无登录进展后点击二维码组件内的刷新控件；新
+  二维码出现后重新计算 180 秒整页 reload 下限。未过期二维码所在页面至少等待 180 秒才允许 reload。
+  一旦观察到已扫码、手机确认、验证码或安全验证状态，本轮登录等待即锁存，两种刷新都禁用，人工
+  处理总预算为 600 秒。普通新标签页至少保留 30 秒，登录或验证标签页必须置前并最长保留 600 秒。
+- 一个小红书正式轮次只允许一个临时 profile、一次 Chrome 启动和一个 BrowserContext；登录、验证
+  或业务阶段不得轮内重启浏览器。初始 CDP 启动失败，或运行中 page/context/browser 被关闭时直接让
+  本轮失败，不得 fallback 到第二个浏览器。`--retry-on-300011` 只能在上轮精确清理后启动新的正式
+  轮次、新 profile 和新二维码。
+- 小红书 runner 收到可捕获的 SIGINT/SIGTERM 时，必须写 `runtime_failed/operator_interrupt` execution
+  state 与 `run_summary.json`，再精确收束进程、删除临时 session、释放租约；不得只清资源却把状态
+  留在 `running`，也不得推进 discovery checkpoint 或伪造来源耗尽。
 - 通用 `--dry-run` 不访问平台内容，但默认会同步调度表并写 run report、摘要和 execution state；小红书 dry-run 不构造 child 命令且没有 `import_result`，以后四阶段保持 `frozen` 证明未执行。
 - B站、微博、小红书、抖音、知乎粉丝量为必需字段；数值、来源和 `followers_observed=true` 必须同时存在，平台不提供时只能由配置声明 `ignored`。
 - 路径定义集中在 `trippostcollect.core.paths`；新增代码不要硬编码 `outputs/`、`data/runtime/`、浏览器配置目录等目录。
@@ -106,8 +120,8 @@ python scripts/crawl_runner.py \
 - 正式抓取必须同时使用共享核心 `trippostcollect-crawl` 和唯一正式模式 Skill
   `trippostcollect-crawl-to-source-exhaustion`；普通执行、恢复和“抓完结果”都走同一来源耗尽流程。
 - 通用正式抓取、停止和成功：读 `docs/formal-crawl-contract.md`、`config/crawl_targets.json`、`scripts/crawl_runner.py`。
-- 小红书账号、登录、抓取和失败恢复：先完整执行 `docs/platforms/xhs.md` 的阶段清单，再读
-  `config/xhs_*.json` 和对应的 `scripts/xhs_accounts.py`、`scripts/xhs_login.py`、`scripts/xhs_runner.py`；
+- 小红书逻辑槽位、轮内登录、抓取和失败恢复：先完整执行 `docs/platforms/xhs.md` 的阶段清单，再读
+  `config/xhs_*.json` 和对应的 `scripts/xhs_accounts.py`、`scripts/xhs_runner.py`；
   不得把小红书放入通用 runner、warmup、benchmark 或中途自动换号。
 - 登录、Chrome、阻断恢复：读 `docs/operations-runbook.md`；通用入口是 `scripts/login_warmup.py`，小红书不得使用该入口。
 - MediaCrawler 平台实现：读 `docs/platforms/<platform>.md`、`scripts/mediacrawler_crawl.py`，必要时只读对应第三方精确文件。

@@ -26,16 +26,24 @@ config/crawl_targets.json
 
 config/xhs_pool.json + config/xhs_targets.json
   -> scripts/xhs_runner.py
-      -> 明确 --account-id、账号租约和加密 storage state
+      -> 明确 --account-id、精确账号租约和本轮临时 profile
       -> 独立 XHS checkpoint / seen / campaign
       -> data/runtime/xhs/execution_states/<run_id>/<target>.json
       -> scripts/mediacrawler_crawl.py --platforms xhs --behavior-profile xhs_guarded
+          -> 本轮一次浏览器启动、一个 BrowserContext、轮内二维码登录
       -> 与通用平台相同的根项目复验、媒体晋升和 SQLite 入库层
 ```
 
 `crawl_runner.py` 是 B站、微博、抖音和知乎的唯一正式入口；`xhs_runner.py` 是小红书唯一正式入口。
 runner 负责选择任务、冻结计划、调用 child、验证产物、持久化和生成报告。child 只负责平台会话、
 发现、字段补全与 staging，不能独立宣布正式任务完成。
+
+小红书每个 `run_id` 只创建一个临时 profile、启动一次浏览器并持有一个 BrowserContext。扫码、行为、
+搜索、详情、作者、图片和人工验证只允许在该 Context 内切换 Page；CDP 启动失败或 Context 关闭直接
+结束本轮，不回退到另一浏览器模式。`300011` 定时重试只有在上一轮精确释放租约并删除临时 session
+后才创建新的 `run_id`、profile、二维码和 Context。纯二维码过期只刷新组件；整页 reload 受每张新
+二维码 180 秒下限约束，人工验证出现后两种刷新均锁死。SIGINT/SIGTERM 在同一 runner 收尾路径写
+`runtime_failed/operator_interrupt` state 与摘要、收束运行树并释放租约，不产生 discovery 提交。
 
 通用 runner 在冻结全部选中计划后，按实际平台键建立执行通道。不同平台通道默认并行，同一平台的
 多个 job 在通道内按调度顺序串行；`--max-parallel-platforms` 默认 4，设为 1 时只改变执行并发度，
@@ -140,7 +148,7 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 | 微博 | MediaCrawler 搜索 | 移动端登录与长文详情 | [微博](platforms/weibo.md) |
 | 抖音 | MediaCrawler 搜索 | 浏览器响应监听、offset/search ID | [抖音](platforms/douyin.md) |
 | 知乎 | MediaCrawler 搜索 | answer/article 详情、zhimg 资产键 | [知乎](platforms/zhihu.md) |
-| 小红书 | 独立 runner + MediaCrawler | 账号租约、加密状态、标签页保护 | [小红书](platforms/xhs.md) |
+| 小红书 | 独立 runner + MediaCrawler | 逻辑账号租约、轮内扫码、标签页保护 | [小红书](platforms/xhs.md) |
 
 平台层产出统一 JSONL、分页事件和图片 manifest，根项目使用同一正式校验和持久化层，避免五套长期
 路径、事务或完成判据。
@@ -156,7 +164,7 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 ## 辅助入口
 
 - `login_warmup.py`：验证或刷新 B站、微博、抖音和知乎登录态。
-- `xhs_accounts.py`、`xhs_login.py`：小红书账号登记、隔离登录和状态复验。
+- `xhs_accounts.py`：管理小红书逻辑槽位、精确租约和孤儿租约恢复；平台登录只在正式 runner 轮内完成。
 - `mediacrawler_login_warmup.py`：通用登录入口调用的平台实现。
 - `info_collection_benchmark.py`：通用平台诊断和容量评估，不是正式完成证据。
 

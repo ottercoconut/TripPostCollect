@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from pathlib import Path
@@ -195,3 +197,26 @@ def test_clear_site_policy_state_removes_only_requested_platform(
     assert event["prior_cooldown_reason"] == "captcha_detected"
     assert "xhs" not in persisted
     assert persisted["weibo"] == {"daily_count": 2}
+
+
+def test_parallel_platform_guards_preserve_shared_policy_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_path = tmp_path / "policy.json"
+    monkeypatch.setattr(crawl_policy, "POLICY_STATE", state_path)
+    monkeypatch.setattr(crawl_policy, "LOCK_DIR", tmp_path / "locks")
+    sites = [replace(policy_site(), key=f"site-{index}") for index in range(8)]
+
+    def run_guard(site: WebSite) -> None:
+        with crawl_policy.site_request_guard(site, label="parallel-test"):
+            return
+
+    with ThreadPoolExecutor(max_workers=len(sites)) as executor:
+        list(executor.map(run_guard, sites))
+
+    state = crawl_policy.load_policy_state()
+    assert set(state) == {site.key for site in sites}
+    assert all(state[site.key]["daily_count"] == 1 for site in sites)
+    assert all(state[site.key]["session_count"] == 1 for site in sites)
+    assert not list(tmp_path.glob(".*.tmp"))

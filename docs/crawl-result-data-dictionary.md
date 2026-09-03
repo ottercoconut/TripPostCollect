@@ -117,7 +117,7 @@ SQLite 字段或图片关系中，也不保留 URL-only 参考关系。
 
 - 调度、运行和重试：`crawl_jobs`、`crawl_attempts`、`crawl_run_reports`、`collection_batches`；
 - 发现前沿和候选记忆：`crawl_discovery_*`、`xhs_discovery_*`；
-- 小红书账号控制面：`xhs_accounts`、`xhs_account_leases`、`xhs_account_events`、`xhs_runs`；
+- 小红书逻辑槽位与运行控制面：`xhs_accounts`、`xhs_account_leases`、`xhs_account_events`、`xhs_runs`；
 - 页面调试证据：`ctf_captures`、`ctf_capture_images`；
 - 登录健康、迁移和历史排除：`profile_health_checks`、`schema_migrations`、
   `historical_image_exclusions`；

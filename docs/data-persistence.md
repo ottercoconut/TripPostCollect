@@ -92,14 +92,21 @@ schema migration `19/post_detail_repair_waivers` 记录该表已进入现行内�
 
 当前结构不再保留“只入 `ctf_captures`、不入 `web_posts`”的内容形态。已有成功且内容就绪的页面级证据记录，应通过 `import_ctf_captures.py` 重新导入或同步，使用户查询统一落在 `web_posts` 上。
 
-`xhs_*` 表只保存小红书控制面和审计信息，不替代内容主表：`xhs_accounts` 保存账号状态、
-隔离 profile 路径、加密状态路径和身份哈希；`xhs_account_leases` 只防止同一账号并发使用；
-`xhs_account_events`、`xhs_runs` 保存人工状态变化、挑战信号和运行摘要。Cookie、localStorage
-原文和加密密钥不写 SQLite。`xhs_discovery_checkpoints` 按目标、账号和查询指纹保存下一安全页、
+`xhs_*` 表只保存小红书控制面和审计信息，不替代内容主表：`xhs_accounts` 只保存逻辑槽位 ID、状态及
+审计时间；`xhs_account_leases` 防止同一逻辑槽位并发使用，并记录本轮临时 profile 路径及精确 owner/
+进程身份；`xhs_account_events`、`xhs_runs` 保存人工状态变化、挑战信号和运行摘要。项目不持久化小红书
+Cookie、localStorage、sessionStorage、独立浏览器快照、平台身份哈希或加密密钥；本轮临时 profile
+只在租约生命周期内存在，精确收束运行树后删除。`xhs_discovery_checkpoints` 按目标、账号和查询指纹保存下一安全页、
 该深层搜索的 `search_id`、耗尽状态、停止原因和未完成累计摘要路径；它不保存 Cookie，也不跨
 账号共享未入库活动。`xhs_discovery_seen_candidates` 在相同作用域保存已经完成处理的笔记 ID，
 包括因视频或正式字段不足而不进入累计摘要的候选，以及结构有效但主题不相关的候选，避免它们跨轮
 反复触发详情和作者请求。小红书全部结构有效图文仍写入 `web_posts` / `web_post_images`。
+
+可捕获的 SIGINT/SIGTERM 不提交 `xhs_discovery_checkpoints` 或 `xhs_discovery_seen_candidates`；runner
+必须先把 execution state 与 `xhs_runs` 终结为 `runtime_failed/operator_interrupt`，写顶层
+`run_summary.json`，再记录包含精确 `lease_id`、signal 和 `process_check.safe_to_release` 的
+`lease_cleanup`。只有 `runtime_session_removed=true`、`lease_released=true` 和
+`lease_cleanup.ok=true` 同时成立，才证明该中断轮的控制面与运行树已完整收束。
 
 小红书 checkpoint 与通用表遵守同一提交边界：只有 child `summary.json` 已形成且含分页证据时，
 `xhs_runner.py` 才在同一事务提交前沿与已处理候选 ID；来源尚未耗尽时 `last_summary_path` 指向
@@ -117,7 +124,8 @@ checkpoint、seen 与 campaign 更新。摘要或其 JSONL 缺失时冻结失败
 ## MediaCrawler 结果入库
 
 微博、抖音、知乎等通用结构化结果由 `scripts/mediacrawler_crawl.py` 调用 MediaCrawler 后
-导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定账号申请互斥租约并解密会话后调用同一底层执行器。
+导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定逻辑账号申请互斥租约、创建本轮临时 profile，
+再调用同一底层执行器并在该轮唯一 BrowserContext 中完成人工登录。
 五个平台都在当前登录/签名会话中把权威正文图下载到本轮 staging，原子生成 schema v1
 `image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。只有来源耗尽、
 字段、行为、策略和 staging 图片门禁全部通过，正式运行才晋升到 `data/media` 并注入统一入库映射；

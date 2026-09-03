@@ -1,0 +1,201 @@
+{
+  "defaults": {
+    "headless": false,
+    "import_results": true,
+    "schedule_jitter_ratio": 0.18
+  },
+  "jobs": [
+    {
+      "job_key": "mc_weibo_qingdao_laoshan_guide_search",
+      "site_key": "weibo",
+      "target_url": "https://m.weibo.cn/search?containerid=100103type%3D1%26q%3D%E9%9D%92%E5%B2%9B%E5%B4%82%E5%B1%B1%E6%97%85%E6%B8%B8%E6%94%BB%E7%95%A5",
+      "job_kind": "mediacrawler_search",
+      "enabled": true,
+      "priority": 20,
+      "schedule_seconds": 43200,
+      "max_attempts": 2,
+      "params": {
+        "platform": "weibo",
+        "keyword": "青岛崂山旅游攻略",
+        "candidate_hard_limit": 300,
+        "max_stagnant_batches": 3,
+        "top_refresh_max_pages": 3,
+        "target_new_posts": 50,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "behavior_profile": {"name": "media_crawler_low_frequency"}
+    },
+    {
+      "job_key": "mc_douyin_qingdao_laoshan_guide_search",
+      "site_key": "douyin",
+      "target_url": "https://www.douyin.com/search/%E9%9D%92%E5%B2%9B%E5%B4%82%E5%B1%B1%E6%97%85%E6%B8%B8%E6%94%BB%E7%95%A5",
+      "job_kind": "mediacrawler_search",
+      "enabled": true,
+      "priority": 30,
+      "schedule_seconds": 43200,
+      "max_attempts": 2,
+      "params": {
+        "platform": "douyin",
+        "keyword": "青岛崂山旅游攻略",
+        "candidate_hard_limit": 1000,
+        "max_stagnant_batches": 67,
+        "top_refresh_max_pages": 3,
+        "target_new_posts": 50,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "behavior_profile": {"name": "media_crawler_low_frequency"}
+    },
+    {
+      "job_key": "mc_bilibili_qingdao_laoshan_guide_article",
+      "site_key": "bilibili",
+      "target_url": "https://search.bilibili.com/article?keyword=%E9%9D%92%E5%B2%9B%E5%B4%82%E5%B1%B1%E6%97%85%E6%B8%B8%E6%94%BB%E7%95%A5",
+      "job_kind": "mediacrawler_search",
+      "enabled": true,
+      "priority": 50,
+      "schedule_seconds": 172800,
+      "max_attempts": 1,
+      "params": {
+        "platform": "bilibili",
+        "keyword": "青岛崂山旅游攻略",
+        "candidate_hard_limit": 300,
+        "max_stagnant_batches": 3,
+        "top_refresh_max_pages": 3,
+        "target_new_posts": 50,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "behavior_profile": {"name": "social_high_risk"}
+    },
+    {
+      "job_key": "mc_zhihu_qingdao_laoshan_guide_search",
+      "site_key": "zhihu",
+      "target_url": "https://www.zhihu.com/search?q=%E9%9D%92%E5%B2%9B%E5%B4%82%E5%B1%B1%E6%97%85%E6%B8%B8%E6%94%BB%E7%95%A5&type=content",
+      "job_kind": "mediacrawler_search",
+      "enabled": true,
+      "priority": 60,
+      "schedule_seconds": 129600,
+      "max_attempts": 1,
+      "params": {
+        "platform": "zhihu",
+        "keyword": "青岛崂山旅游攻略",
+        "candidate_hard_limit": 200,
+        "max_stagnant_batches": 3,
+        "top_refresh_max_pages": 3,
+        "target_new_posts": 50,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "behavior_profile": {"name": "social_high_risk"}
+    },
+    {
+      "job_key": "once_20260812_weibo_qingdao_old_city_exhaustive",
+      "site_key": "weibo",
+      "target_url": "https://m.weibo.cn/search?containerid=100103type%3D1%26q%3D%E9%9D%92%E5%B2%9B%E8%80%81%E5%9F%8E%E6%97%85%E6%B8%B8",
+      "job_kind": "mediacrawler_search",
+      "enabled": true,
+      "priority": 21,
+      "schedule_seconds": 43200,
+      "max_attempts": 2,
+      "params": {
+        "platform": "weibo",
+        "keyword": "青岛老城旅游",
+        "candidate_hard_limit": 300,
+        "max_stagnant_batches": 3,
+        "top_refresh_max_pages": 3,
+        "target_new_posts": 50,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "behavior_profile": {"name": "media_crawler_low_frequency"}
+    },
+    {
+      "job_key": "once_20260812_douyin_qingdao_old_city_exhaustive",
+      "site_key": "douyin",
+      "target_url": "https://www.douyin.com/search/%E9%9D%92%E5%B2%9B%E8%80%81%E5%9F%8E%E6%97%85%E6%B8%B8",
+      "job_kind": "mediacrawler_search",
+      "enabled": true,
+      "priority": 31,
+      "schedule_seconds": 43200,
+      "max_attempts": 2,
+      "params": {
+        "platform": "douyin",
+        "keyword": "青岛老城旅游",
+        "candidate_hard_limit": 1000,
+        "max_stagnant_batches": 67,
+        "top_refresh_max_pages": 3,
+        "target_new_posts": 50,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "behavior_profile": {"name": "media_crawler_low_frequency"}
+    },
+    {
+      "job_key": "once_20260812_bilibili_qingdao_old_city_exhaustive",
+      "site_key": "bilibili",
+      "target_url": "https://search.bilibili.com/article?keyword=%E9%9D%92%E5%B2%9B%E8%80%81%E5%9F%8E%E6%97%85%E6%B8%B8",
+      "job_kind": "mediacrawler_search",
+      "enabled": true,
+      "priority": 51,
+      "schedule_seconds": 172800,
+      "max_attempts": 1,
+      "params": {
+        "platform": "bilibili",
+        "keyword": "青岛老城旅游",
+        "candidate_hard_limit": 300,
+        "max_stagnant_batches": 3,
+        "top_refresh_max_pages": 3,
+        "target_new_posts": 50,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "behavior_profile": {"name": "social_high_risk"}
+    },
+    {
+      "job_key": "once_20260812_zhihu_qingdao_old_city_exhaustive",
+      "site_key": "zhihu",
+      "target_url": "https://www.zhihu.com/search?q=%E9%9D%92%E5%B2%9B%E8%80%81%E5%9F%8E%E6%97%85%E6%B8%B8&type=content",
+      "job_kind": "mediacrawler_search",
+      "enabled": true,
+      "priority": 61,
+      "schedule_seconds": 129600,
+      "max_attempts": 1,
+      "params": {
+        "platform": "zhihu",
+        "keyword": "青岛老城旅游",
+        "candidate_hard_limit": 200,
+        "max_stagnant_batches": 3,
+        "top_refresh_max_pages": 3,
+        "target_new_posts": 50,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "behavior_profile": {"name": "social_high_risk"}
+    }
+  ]
+}

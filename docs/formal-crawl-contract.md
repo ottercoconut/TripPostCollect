@@ -92,10 +92,20 @@ B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
 `formal_validation.policy_evidence_ok=true` 才能进入入库；文件缺失、事件不完整、验证码、
 频控或阻断都必须失败，不能用内容 JSONL 或退出码补签。
 
-小红书额外使用账号隔离、加密 storage state、单账号租约和 `xhs_guarded` 行为门禁；不自动换号、
-绕过验证或把登录/频控/封禁降级为候选失败。互动默认关闭，点赞等真实副作用只有操作人显式启用。
+小红书额外使用逻辑账号隔离、精确单账号租约、本轮临时 profile 和 `xhs_guarded` 行为门禁；不自动
+换号、绕过验证或把登录/频控/封禁降级为候选失败。每个正式 `run_id` 只允许一次浏览器启动和一个
+BrowserContext，登录、行为、搜索、详情、作者和图片阶段只能在该 Context 内更换 Page；CDP 启动失败
+或 Context 关闭时本轮直接 `runtime_failed`，不得切换浏览器模式或重建 Context。纯二维码组件明确
+过期时，只允许在连续两次确认无登录进展后点击组件内刷新控件；新二维码可用后重新计算 180 秒整页
+reload 下限。当前页未满该下限不得 reload。扫码、确认、验证码或安全验证一旦出现，本轮登录窗口内
+组件刷新与整页 reload 都必须禁用。可捕获的 SIGINT/SIGTERM 必须形成
+`runtime_failed/operator_interrupt` state、顶层摘要和精确 lease/session 清理证据，不得推进发现记忆。
+互动默认关闭，点赞等真实副作用只有操作人显式启用。
 登录恢复、标签页保护、等待时间和互动证据的唯一操作说明见
 [`platforms/xhs.md`](platforms/xhs.md)，其机器结果仍必须满足本文的运行级阻断和冻结状态门禁。
+
+`--retry-on-300011` 的每次尝试都是新的正式轮次，必须使用新的 `run_id`、临时 profile、二维码和
+BrowserContext；只有触发轮的精确租约已经释放且 `runtime_session_removed=true` 才能开始下一轮。
 
 通用平台的验证码、频控或拒绝访问会写入站点冷却，后续任务由同一策略门禁停止；小红书只
 记录本轮证据，等待操作人指挥。断点续跑只校验本次新执行记录的行为与策略证据，不要求历史
@@ -248,8 +258,8 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 
 - 当前配置文件；
 - 本执行契约；
-- 任务参数；通用 runner 同时冻结实际 child 命令。小红书在 dry-run 时只冻结账号、目标、互动
-  参数和发现计划，正式执行解密临时 storage state 后才构造 child 命令，并把命令写入
+- 任务参数；通用 runner 同时冻结实际 child 命令。小红书在 dry-run 时只冻结逻辑账号、目标、互动
+  参数和发现计划，正式执行取得租约并创建本轮临时 profile 后才构造 child 命令，并把命令写入
   `command_executed` 阶段证据；不得要求小红书 dry-run 预先包含不存在的临时路径或实际命令；
 - 通用 runner 的平台通道键、并发模式和 `max_parallel_platforms`；
 - 自动或人工跨次累计时使用的上一轮 `summary.json` 及其全部内容 JSONL。
