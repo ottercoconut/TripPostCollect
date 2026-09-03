@@ -70,8 +70,9 @@ python scripts/crawl_runner.py \
   --max-jobs 3
 ```
 
-小红书只从 `scripts/xhs_runner.py` 进入，使用独立账号、登录态、租约、配置和执行状态。运行前必须
-完整执行[小红书 Workflow](platforms/xhs.md)，不得放入通用 runner、warmup 或 benchmark。
+小红书只从 `scripts/xhs_runner.py` 进入，使用独立逻辑账号槽位、租约、配置和执行状态。每个正式
+轮次创建空临时 profile 并在轮内人工扫码，不读取或保存跨轮登录态。运行前必须完整执行
+[小红书 Workflow](platforms/xhs.md)，不得放入通用 runner、warmup、独立登录命令或 benchmark。
 
 ## 不可跨越的边界
 

@@ -251,12 +251,7 @@ python scripts/crawl_runner.py \
 - 未完成尾批不得推进；边界页允许下轮重取并依靠已知 ID 前置过滤。
 - `--no-import` 不得写 checkpoint。
 
-旧租约 schema 不提供运行时兼容。版本切换前先确认全部旧 runner、child、exporter 和账号 profile
-Chrome 已退出；控制库初始化随后重建空的精确租约表，并为每条被丢弃的旧互斥行写入
-`lease_schema_cutover_discarded`。不要迁移旧 owner、等待其 TTL 或把该切换当成 orphan release；抓取恢复
-仍只读取 SQLite checkpoint 及其引用的安全累计摘要。
-
-对已采用精确租约的控制库，先列出租约；`list` 不公开 owner token，只显示其 SHA-256 供审计：
+先列出精确租约；`list` 不公开 owner token，只显示其 SHA-256 供审计：
 
 ```bash
 source .venv/bin/activate
@@ -274,13 +269,13 @@ python scripts/xhs_accounts.py recover-orphan-lease \
 ```
 
 该入口取得每账号 `flock`，核对 lease owner 的 host/boot、PID、启动时间/token 和 PGID，再核对登记的
-child/exporter 进程组以及 argv 中 `--user-data-dir` 精确等于该账号 profile 的 Chrome；随后在
+child/exporter 进程组以及 argv 中 `--user-data-dir` 精确等于该 run 临时 profile 的 Chrome；随后在
 `BEGIN IMMEDIATE` 内再次核对并用 `account_id/run_id/lease_id/owner_token` 删除，rowcount 必须为 1。
 不同 host、任一精确残留进程、PID 存在但启动身份不可读、错误身份、错误 owner 或并发漂移都会拒绝；
 不得降级使用秒级 `ps lstart`、TTL 或 PID 文件推断死亡。
 
 execution state 是否存在、是否含 `adaptive_search_stopped`、尾批和终态是否完整只写入审计，不再决定
-能否释放账号互斥。即使 state 缺失或没有停止事件，只要旧 runner/child/exporter/profile Chrome 已被
+能否释放账号互斥。即使 state 缺失或没有停止事件，只要旧 runner/child/exporter/本轮 Chrome 已被
 精确证明全部死亡，也允许写 `orphan_lease_reconciled` 并只回收该租约。该动作不得补写 state、推进
 checkpoint/cursor/seen/campaign、导入或删除旧 staging、写内容 SQLite，或改变账号状态。随后必须先用
 同账号、同配置 dry-run，再由新正式轮从最后安全 checkpoint 恢复。
@@ -341,22 +336,23 @@ python scripts/login_warmup.py \
 
 ### 小红书
 
-小红书不使用通用 warmup。完整流程见[小红书 Workflow](platforms/xhs.md)，这里只给出入口：
+小红书不使用通用 warmup，也没有独立登录命令。逻辑账号槽位不保存平台身份；首次使用前必须显式
+登记，runner 不会自动创建。完整流程见[小红书 Workflow](platforms/xhs.md)，这里只给出入口：
 
 ```bash
 source .venv/bin/activate
+python scripts/xhs_accounts.py ensure-slot \
+  --account-id xhs-a01
 python scripts/xhs_accounts.py list
-python scripts/xhs_login.py \
-  --account-id xhs-a01 \
-  --timeout-seconds 600
 python scripts/xhs_runner.py \
   --dry-run \
   --target-key qingdao_travel \
   --account-id xhs-a01
 ```
 
-确认计划后，用相同账号、目标和互动参数移除 `--dry-run`。不得在轮次中途自动换号、关闭
-验证页或手工修改账号级 checkpoint。
+确认计划后，用相同账号、目标和互动参数移除 `--dry-run`。正式轮创建空临时 profile，并在唯一
+Chrome/BrowserContext 内显示二维码供操作人登录；不得读取或保存跨轮 Cookie/storage state，不得在
+轮次中途重启浏览器、自动换号、关闭验证页或手工修改账号级 checkpoint。
 
 若正式轮以完整的 `platform_security_limit_300011` 终态停止，且精确租约释放审计和 SQLite
 checkpoint 对账均通过，可启动 30 分钟定时续跑：
@@ -369,20 +365,24 @@ python scripts/xhs_runner.py \
   --retry-on-300011
 ```
 
-等待期间不占账号租约；到期后的每次尝试都是完整正式轮并取得新租约。再次出现同样的完整 300011
-时，从该轮结束再等 30 分钟，正式轮成功且精确释放后停止。其他错误、终态/停止事件不完整、checkpoint
+等待期间不占账号租约；到期后的每次尝试都是完整正式轮，取得新租约并创建空 profile 与新二维码，
+不是在原轮次内重启浏览器。再次出现同样的完整 300011 时，从该轮结束再等 30 分钟，正式轮成功且
+精确释放后停止。其他错误、终态/停止事件不完整、checkpoint
 不一致或租约仍存在时立即停止，不自动换号、补状态或导入失败产物。`--retry-on-300011` 不得与
 `--dry-run` 同用；重启同一命令会按 SQLite 最新终态的 `finished_at` 恢复计时。控制状态位于
 `data/runtime/xhs/retry_states/`，相同 target/account 由控制器 `flock` 保证单实例。
 
-小红书的短 Cookie 不能脱离设备连续性单独续期。`xhs_login.py` 与 `xhs_runner.py` 必须复用同一账号
-profile、加密 storage state、原生窗口参数和 Chrome 运行环境；关闭前快照还必须包含平台的
-sessionStorage 设备标识。snapshot schema v3 只把保存的主标签页 sessionStorage 补到新一轮主标签页，
-不能按 origin 注入所有窗口；localStorage 仍按 origin 补缺。启动时 profile 的现存状态优先，快照只
-补缺，避免旧短 Cookie 把刚刷新 profile 回滚成“新设备”会话。登录工具必须等待可见身份、self-info、
-Cookie 和设备字段连续稳定，再执行关闭重开复验；初次候选不能覆盖最后一次已验证密文。正式 child
-只有写入匹配当前 run ID 的 self-info 验证标记且未出现登录、验证或浏览器关闭阻断时，runner 才晋升
-新快照。
+二维码、手机确认、短信验证码、搜索 API 461/471 与作者页验证共享同一个单调 600 秒人工处理预算；
+切换验证页面或验证类型不会重新计时。只有轮初纯未扫码状态下明确显示二维码过期，且连续两次确认
+没有登录进展时，程序才可点击二维码组件内刷新控件；一旦观察到扫码、手机确认、短信或安全验证，
+人工处理中状态即锁存，本轮禁止二维码组件刷新和整页 reload。程序不打开二维码截图或任何操作系统
+图片预览窗口。
+
+短时网络中断不会创建新会话：当前 Chrome、BrowserContext 和 Page 保持不变，原操作在同一页面内
+以最短 2 秒、最长 30 秒退避重试。runner 固定下发 600 秒网络恢复预算，不受调用者环境覆盖；恢复后
+继续原操作，耗尽则以
+`network_recovery_timeout` 明确失败并保留最后安全 checkpoint。page、context 或 browser 真实关闭是
+终端错误，本轮不得启动第二个浏览器。
 
 ## 浏览器与行为证据
 
@@ -394,6 +394,9 @@ keychain。浏览器失败需区分：
 | `runtime_permission_error` | 运行目录或进程权限错误 |
 | `browser_launch_failed` | Chrome/CDP 启动失败 |
 | `browser_target_closed` | 启动后页面、context 或浏览器关闭 |
+| `network_paused` | 可恢复网络中断；同一页面内退避，浏览器保持运行 |
+| `network_recovery_timeout` | 600 秒内未恢复；本轮失败并保留安全 checkpoint |
+| `runtime_status_startup_timeout` / `runtime_status_stale` | 认证心跳未按监督窗口推进 |
 | `login_required` | 平台明确要求登录 |
 | `captcha_detected` | 平台安全验证或验证码 |
 
@@ -405,6 +408,12 @@ keychain。浏览器失败需区分：
 预热 `/explore`，搜索页面壳持续为空时只做一次同路由恢复，仍失败再由 runner 正常写摘要并释放租约。
 搜索 API 的 461/471 人工验证页同时检查子 frame 可见文本；英文 `Requests too frequent`
 按频控处理，不得因顶层 body 为空或验证标题消失而误判通过。
+
+小红书父层不设置整轮墙钟超时；它只监督 child 写出的认证心跳。启动宽限为 120 秒，心跳陈旧阈值
+为 60 秒，每 5 秒检查一次；长调度间隙只允许同一 sequence 一次 30 秒恢复宽限。网络暂停和最终摘要
+写入期间也必须继续心跳，避免把仍健康的 child 误杀。正常结束、可捕获异常和 SIGINT/SIGTERM 均须
+在摘要中保留精确 child/exporter/Chrome 生命周期、临时 session 删除及租约释放证据；无法证明进程
+消失或目录已删除时保留租约并明确延期清理。
 
 ## 结果检查
 

@@ -6,27 +6,30 @@
 
 ## 硬边界
 
-- 正式抓取只运行 `scripts/xhs_runner.py`；账号管理和登录分别只运行 `xhs_accounts.py`、
-  `xhs_login.py`。
+- 正式抓取与人工登录都只运行 `scripts/xhs_runner.py`；`xhs_accounts.py` 只管理非秘密逻辑槽位与精确
+  租约，没有独立登录入口。
 - 不把小红书放入通用 runner、warmup、`crawl_targets.json`、benchmark 或通用策略冷却。
 - pool 使用 schema v2、target 使用 schema v3，没有 `enabled` 或图片开关；显式 runner 命令是唯一启动动作。
 - 必须人工传 `--account-id`；一轮内不自动选号、换号、绕过验证或放宽字段。
 - 正式 child 固定下载正文图片并真实入库；`--no-import` 只用于诊断。
-- 账号 profile、加密状态、租约、checkpoint、seen 和累计摘要都按账号隔离。
+- 逻辑账号槽位、租约、checkpoint、seen 和累计摘要按账号 ID 隔离；槽位不保存平台身份、profile、
+  Cookie、storage state 或其他登录快照。
+- 每个正式轮创建一个空临时 profile，只允许一次 Chrome 启动和一个 BrowserContext；登录、验证与
+  业务阶段不得轮内重启。page/context/browser 真关闭时本轮失败，不得 fallback 到第二个浏览器。
 
 ## 执行流
 
 ```text
-检查配置与账号
-  -> 必要时登记并人工登录、关闭重开复验
+检查配置与已显式登记的逻辑账号槽位
   -> dry-run 冻结账号、目标、互动和发现计划
   -> 人工确认
   -> 正式运行并申请账号租约
+  -> 创建本轮空临时 profile，启动唯一 Chrome/BrowserContext，人工扫码
   -> xhs_guarded、顶部刷新和深层 page + search_id
   -> 详情、作者粉丝和正文图片
   -> 根项目复验、媒体晋升和 SQLite 批次事务
   -> 成功后提交账号级 checkpoint/seen/campaign
-  -> 加密最新状态、删除明文、释放租约
+  -> 精确收束进程、删除本轮临时 session、释放租约
   -> 检查顶层摘要、状态、child 摘要和 SQLite
 ```
 
@@ -39,7 +42,7 @@
 - 正文图只来自详情 `image_list`；每个对象按 `url_default`、`url`、`url_pre` 选择一个 URL，并用稳定
   notes 路径生成资产键。头像、作者主页图片、封面、搜索预览和视频不进入图片候选或下载链；作者
   主页仍只用于观察粉丝量等研究所需作者指标。
-- 图片请求复用当前隔离账号的 BrowserContext/API Cookie，不解密第二份会话，不调用视频 store。
+- 图片请求复用本轮 BrowserContext/API Cookie，不创建或恢复第二份会话，不调用视频 store。
 - 作者粉丝必须来自当前登录会话的作者主页，保存数值、`followers_observed=true` 和
   `author_followers_source=creator_profile`。笔记 `xsec_token` 不能作为作者主页凭据。
 - 平台层写 `<child_artifact>/xhs/data/xhs/` 下的 staging/manifest；根项目负责通用字节复验、晋升和
@@ -54,11 +57,12 @@ python scripts/xhs_accounts.py list
 
 继续前逐项确认：
 
-- 操作人已指定账号；状态为 `active`，没有活动租约；`storage_state.enc` 存在且可解密。
+- 操作人已显式登记并指定逻辑账号槽位；状态为 `active`，没有活动租约。runner 不会自动创建槽位。
 - `target_key` 存在且关键词属于青岛；顶部刷新和超时符合本轮要求。
 - `behavior_profile=xhs_guarded` 且使用有头浏览器。
-- pool 的 `lease_seconds` 是租期上限，必须覆盖动态租期：目标 `timeout_seconds`、30 秒 child 进程组
-  关闭预算和 270 秒根层加密、验证、摘要与数据库收尾预算之和；正式租约只写本目标实际所需时长。
+- pool 的 `lease_seconds` 是租期上限，必须覆盖动态租期：目标声明的 runtime 预算、30 秒 child 进程组
+  关闭预算和 270 秒根层验证、摘要与数据库收尾预算之和；正式租约只写本目标实际所需时长。该计划
+  到期时间用于互斥审计，不是父层整轮墙钟 kill。
 - 互动未明确时为 `none`；点赞等真实副作用必须由操作人明确选择。
 - pool schema v2 与 target schema v3 配置没有旧开关或数量控制字段。
 - checkpoint 引用的累计摘要及全部 JSONL 仍存在。
@@ -68,14 +72,9 @@ python scripts/xhs_accounts.py list
 `xhs_account_leases` 同时记录 `lease_id`、不可公开的 `owner_token`、账号、run、租约类型、host/boot
 ID、owner PID、owner 进程启动时间和启动 token、PGID、execution state 路径，以及取得、心跳、计划
 到期和分项预算时间。TTL 只表示计划期限；过期行不会被下次 acquire 自动删除，仍须证明精确 owner
-及其运行树已死亡。`xhs_lease_processes` 另外登记 child、exporter 和登录期 profile Chrome 的精确
+及其运行树已死亡。`xhs_lease_processes` 另外登记 child、exporter 和本轮临时 profile Chrome 的精确
 PID/启动 token/PGID；账号目录下的 `lease.lock` 用 `flock` 加强同机互斥，但 SQLite owner token 仍是
 事实源。
-
-精确租约 schema 是一次不兼容切换。部署新代码前须收束全部旧 runner、child、exporter 和账号 profile
-Chrome；初始化时直接丢弃不受支持的旧格式租约，并写入 `lease_schema_cutover_discarded` 审计事件，
-不迁移、续期或补造旧 owner 身份。租约只是账号互斥，不承载抓取进度，因此切换不会修改 checkpoint、
-cursor、seen、staging、SQLite 内容数据或账号状态；切换后由新 runner 获取全新的精确租约。
 
 若宿主、终端或 runner 被硬中止，先运行 `list` 取得精确 `account_id/run_id/lease_id`，再使用受审计
 入口对账：
@@ -91,7 +90,7 @@ python scripts/xhs_accounts.py recover-orphan-lease \
 命令先取得同账号非阻塞 `flock`，再执行两次精确进程对账；第二次位于 `BEGIN IMMEDIATE` 内。只有下列
 事实全部成立才删除租约：当前 host 与租约 host 一致；boot 已变化，或同一 boot 下 owner PID 已不存在/
 启动 token 或 PGID 已不匹配；登记的 child/exporter 及其进程组全部消失；不存在 argv 中
-`--user-data-dir` 精确等于该账号 profile 的 Chrome。PID 已重用只证明旧 owner 死亡，不把新 PID 当作
+`--user-data-dir` 精确等于该 run 临时 profile 的 Chrome。PID 已重用只证明旧 owner 死亡，不把新 PID 当作
 旧进程，也不向它发信号；不同 host 或 PID 存在但无法取得精确启动身份时拒绝回收。macOS 使用稳定的
 platform UUID、boot session UUID 和 `libproc` 微秒级启动时间，不以秒级 `ps lstart` 代替精确身份。
 
@@ -106,54 +105,55 @@ checkpoint、cursor、seen、campaign，不得晋升/删除/导入旧 staging，
 账号健康状态。审计事件逐项写明这些 mutation 均为 `false`。回收后仍须重新 dry-run，并由正式 runner
 从 SQLite 最后安全 checkpoint 开始新轮；旧孤儿产物不能作为新轮完成证据。
 
-正式抓取、历史修复和登录都由同一个 `LeaseGuard` 覆盖从 acquire 到根层摘要/数据库收尾的完整生命
+正式抓取和历史修复都由同一个 `LeaseGuard` 覆盖从 acquire 到根层摘要/数据库收尾的完整生命
 周期。runner 启动 child 时创建独立进程组，child 启动 exporter 后立即用相同 owner token 登记 exporter
 进程组；child/exporter 启动后若精确登记失败，须在继续抛错前有界 TERM/KILL 并回收该新进程组。普通
-结束和普通异常都先关闭/等待登记进程与精确 profile Chrome，再由 Guard 在 `finally` 中
+结束和普通异常都先关闭/等待登记进程与本轮精确 profile Chrome，再由 Guard 在 `finally` 中
 释放。收到 `SIGINT/SIGTERM` 时先向完整登记进程组发 `SIGTERM`，在 child 关闭预算内等待，仍存活才发
 `SIGKILL`；复核进程与 profile 全部消失后才能删除租约。复核仍有残留时保留 SQLite 租约并写
 `lease_release_deferred_live_processes`，不能为了退出码干净而强制释放。`SIGKILL` 和掉电无法执行
 `finally`，由上面的孤儿对账恢复。
+
+父层不按整轮墙钟强制结束 child，而是验证 child 的认证心跳：启动宽限 120 秒、陈旧阈值 60 秒、
+每 5 秒检查一次；长调度间隙只给同一 sequence 一次 30 秒恢复宽限。心跳须覆盖登录、网络暂停、抓取
+和最终摘要写入。认证失败、sequence 回退/复用或超时会形成明确监督证据；不能把单纯“运行较久”当作
+关闭 Chrome 的理由。
 
 正常可捕获的搜索或作者补全 `300011` 运行级限制仍必须在进程退出前先写入
 `adaptive_search_stopped(runtime_failed, stop_detail=platform_security_limit_300011, batch_complete=false)`；
 单独的 behavior evidence 不能推进 checkpoint。硬中止导致该事件来不及写入时，只影响终态完整性，
 不再让已经精确证实死亡的 owner 永久占用账号互斥。
 
-## 2. 登记与登录
+## 2. 登记与轮内登录
 
-新账号只登记一次：
+首次使用某个逻辑账号 ID 时先显式登记槽位；正式 runner 对未知槽位失败关闭，不会顺手创建：
 
 ```bash
 source .venv/bin/activate
-python scripts/xhs_accounts.py enroll \
+python scripts/xhs_accounts.py ensure-slot \
   --account-id xhs-a01
 ```
 
-未登录、`login_required` 或需要复验时：
+槽位仅是操作人选择的非秘密协调标识；`retired` 不可运行，`quarantined` 只有操作人显式
+`activate` 后才可用。它不声明或校验某个长期平台身份，也不保存 profile、Cookie、localStorage、
+sessionStorage 或设备指纹。
 
-```bash
-source .venv/bin/activate
-python scripts/xhs_login.py \
-  --account-id xhs-a01 \
-  --timeout-seconds 600
-```
+登录只发生在正式 `xhs_runner.py` 轮次中。runner 取得租约后创建
+`data/runtime/xhs/sessions/<run_id>/profile/` 空临时目录，启动唯一 Chrome/BrowserContext，并固定传
+`--login-type qrcode`。登录成功由可见身份与 self-info API 共同确认；二维码消失或 Cookie 变化不能
+单独放行。本轮 API 签名和图片下载可在内存中复用当前 BrowserContext Cookie，但结束时不把任何登录
+状态晋升为跨轮资产。
 
-登录成功必须同时完成：可见“我”与稳定身份、`/api/sns/web/v1/user/selfinfo` 返回成功、必需 Cookie、
-localStorage 及当前主标签页的设备 ID/运行时指纹连续四次保持一致，每次间隔 5 秒；随后关闭重开同一
-profile，再通过相同门禁且仍是同一身份，才原子写入 AES-GCM `storage_state.enc` 并把账号状态变为
-`active`。初次登录得到的状态只作为内存候选供重开复验补缺，不能提前覆盖最后一次已验证密文；复验
-失败保留原密文不变。平台在登录或复验期间关闭原页并打开同域窗口时，工具接管最新窗口继续等待，
-不能凭旧 `Page` 的 `TargetClosedError` 立即关掉整个 Chrome。独立登录和正式运行使用同一真实 Chrome、
-原生窗口尺寸、语言、时区、mock keychain HOME 和账号 profile；不得在两个入口间切换固定 viewport
-与最大化窗口。
+轮初纯未扫码页面明确显示二维码过期时，只有连续两次确认仍无扫码、手机确认、短信或安全验证进展，
+才可点击二维码组件内刷新控件。新二维码出现后重新计算 180 秒整页 reload 下限；未过期二维码页面
+至少等待 180 秒才允许 reload。一旦观察到扫码、手机确认、短信验证码或安全验证，人工处理中状态即
+锁存，组件刷新和整页 reload 都禁用，直到登录成功或人工预算耗尽。程序只在现有 Chrome 页面显示
+二维码，不打开二维码截图或任何操作系统图片预览窗口。
 
-登录工具在整个登录和复验阶段持有与正式抓取相同的账号租约；忙碌只返回 `blocked`。可见验证页
-必须置前并等待操作人，标记消失且身份恢复后才继续；每阶段最多等待命令指定超时，不自动识别或
-绕过验证。`retired` 不可重新登录，`quarantine` 只能人工复验后 activate。同一平台身份不能登记到
-两个槽位。
-
-`xhs_login.py` 是单页工具，不安装正式抓取的新标签页守卫，也不顺便抓内容。
+同一正式轮的二维码、手机确认、短信验证码、搜索连续性登录、461/471 和作者页验证共享一个单调
+600 秒人工处理预算；在不同 checkpoint 间切换不会重新计时，重叠等待只按实际墙钟计一次。普通抓取
+和网络暂停不消耗该人工预算。耗尽时固定以 `xhs_manual_checkpoint_budget_exhausted` 结束本轮，不自动
+发送短信、不读取 Redis，也不切换 mobile/cookie 登录模式。
 
 ## 3. 冻结计划
 
@@ -171,12 +171,12 @@ python scripts/xhs_runner.py \
 
 - 顶层为 `planned`，只有 `plan_frozen=completed`，其余阶段为 `frozen`；
 - pool、target、正式契约及其 SHA-256 已冻结；
-- 账号、关键词、来源耗尽策略、profile、互动和有头模式正确；
-- preflight 证明账号 active、无租约、密文可读且租约覆盖超时；
+- 逻辑账号槽位、关键词、来源耗尽策略、互动和有头模式正确；
+- preflight 证明槽位已显式登记且 active、无租约，并且租约覆盖动态预算；
 - discovery 与该账号 checkpoint 一致：首次 page 1、顶部刷新 0；续跑有保存的 page、非空 search ID、
   顶部刷新页数及可选累计摘要。
 
-dry-run 不申请正式租约、不解密运行时明文、不构造 child 命令，也没有 `import_result`；这些缺席不是
+dry-run 不申请正式租约、不创建临时 profile、不构造 child 命令，也没有 `import_result`；这些缺席不是
 失败或入库证据。
 
 ## 4. 正式运行
@@ -189,6 +189,11 @@ python scripts/xhs_runner.py \
   --target-key qingdao_travel \
   --account-id xhs-a01
 ```
+
+命令取得精确租约后创建本轮空临时 profile，并且只启动一次 Chrome 和一个 BrowserContext。初始 CDP
+启动失败时直接失败；登录、验证、网络恢复、搜索、详情和作者阶段都不得关闭后重启浏览器。正常完成、
+可捕获异常或操作人中断都要先写终态，再精确收束 child/exporter/Chrome、删除临时 session 并释放
+租约；任一清理事实无法证明时保留租约并在摘要中明确延期。
 
 显式互动在一轮最多一次：
 
@@ -218,7 +223,8 @@ python scripts/xhs_runner.py \
 
 `--retry-on-300011` 不能与 `--dry-run` 同用。它按触发运行的 `finished_at + 30 分钟` 计算下一次执行，
 不是缩短租约 TTL，也不是固定墙钟 cron。等待期间不持有账号租约；每次到期都调用完整正式 runner，
-重新取得独立精确租约，并保持原 target、账号、配置和互动参数。相同
+重新取得独立精确租约、新 run、空 profile 和新二维码，并保持原 target、账号、配置和互动参数；这
+不是在原轮次内重启浏览器。相同
 `target_key + account_id` 的控制器使用独立非阻塞 `flock`，避免重复计时。
 
 只有以下证据全部成立才进入或继续循环：最新正式终态为 `failed` 且 challenge 精确等于
@@ -264,11 +270,11 @@ python scripts/repair_xhs_posts.py \
 
 ## 5. 抓取中的固定行为
 
-### 标签页与人工验证
+### 标签页、网络与人工验证
 
 - 正式浏览器启动后先打开 `/explore` 并确认页面壳已可见，再进入真实关键词搜索页。搜索页在导航
   `commit` 后持续无可见文本时，程序只允许执行一次受控恢复：回到 `/explore` 确认渲染，再重新进入
-  同一关键词搜索页；恢复仍为空白则按 `runtime_failed` 停止，不刷新账号 profile、不换号，也不推进
+  同一关键词搜索页；恢复仍为空白则按 `runtime_failed` 停止，不重启浏览器、不换号，也不推进
   checkpoint。启动导航会把 `readyState`、DOM/正文长度、主文档状态、页面脚本错误和失败资源的紧凑
   摘要写入 behavior evidence 同目录的 `behavior_evidence.navigation.json`，白屏超时不得只凭外部关闭
   后的 `TargetClosedError` 分类。
@@ -279,17 +285,25 @@ python scripts/repair_xhs_posts.py \
 - 正式 BrowserContext 守卫安装后出现的任何新标签页都立即置前，并从出现起至少保留 30 秒；平台
   弹页、作者主页回退、互动和验证辅助页一视同仁。正常返回、异常、Playwright 退出和最终清理都
   不得绕过。首个主页面可豁免，启动时已有的额外页仍受保护。
-- 明确登录、扫码或验证码页继续执行最长 600 秒人工等待，30 秒保护期不能缩短它。
+- 明确登录、扫码或验证码页置前并进入本轮共享的 600 秒人工处理预算，30 秒保护期不能缩短它，切换
+  页面也不能重新计时。
 - 搜索连续性出现登录要求或图片验证时，保持当前页并写
-  `operator_verification_events`；完成后刷新会话并继续，超时失败。
+  `operator_verification_events`；完成后刷新当前内存 Cookie 并继续，人工预算耗尽时失败。
 - 搜索 API 461/471 使用响应 `Verifyuuid`、`Verifytype` 在同一 BrowserContext 打开平台人工验证页；
   可见状态必须同时检查顶层页与子 frame；通过后还需连续两次确认已回到原路由且有可见文本，
   再刷新 Cookie 并重试原请求。`Requests too frequent` 等可见频控优先于验证页标题分类，
   立即按运行级阻断停止，不点击刷新绕过。
 - 搜索 API 明确登录过期时暂停原请求，保留全部标签页并置前最新 XHS 页；可见登录 UI 与 self-info
-  API 都恢复后刷新 Cookie/storage state，并重试同一来源页。
+  API 都恢复后刷新当前内存 Cookie，并重试同一来源页。
 - “安全限制”、账号异常、`300011/300012`、`/website-login/error`、频控或封禁属于运行级阻断，
   立即停止，不能进入人工验证码等待或候选跳过。
+- 可识别的短时网络错误只进入 `network_paused`，保留同一 Chrome、BrowserContext、Page 和原操作，
+  在原处以最短 2 秒、最长 30 秒退避重试；父层继续验证认证心跳，不因网络中断或整轮运行较久主动
+  关闭浏览器。runner 固定下发 600 秒网络恢复预算，不受调用者环境覆盖；恢复后继续原请求，预算耗尽
+  时写 `network_recovery_timeout` 并保留最后安全 checkpoint，不重启 Chrome、不创建新 Context 或新
+  页面重放。
+- page、context 或 browser 实际关闭以及 CDP 断开均为终端浏览器错误；生命周期证据必须区分计划关闭
+  与非计划关闭，本轮不得启动第二个 Chrome 或 BrowserContext。
 
 ### 行为、作者与发现
 
@@ -332,10 +346,13 @@ python scripts/repair_xhs_posts.py \
 
 | 信号 | 处理 |
 |---|---|
-| 启动前 `login_required` | 对同一账号运行 `xhs_login.py`，成功后开始新轮 |
-| 连续性登录/图片验证、461/471 | 保持页面、人工处理、刷新会话并重试原请求；600 秒超时失败 |
-| 作者页二维码 | 保持作者页置前，人工扫码后继续；超时失败 |
-| 任意新标签页 | 立即置前且至少保留 30 秒；明确验证页继续最长 600 秒 |
+| 轮初二维码 | 保持本轮唯一 Chrome；只在纯未扫码且明确过期、连续两次无进展时刷新组件 |
+| 连续性登录/图片验证、461/471 | 保持页面、人工处理、刷新当前内存 Cookie 并重试原请求；共用单调 600 秒人工预算 |
+| 作者页二维码 | 保持作者页置前，人工扫码后继续；计入同一人工预算 |
+| 任意新标签页 | 立即置前且至少保留 30 秒；明确验证页按本轮剩余人工预算等待 |
+| 短时网络中断 | 同一 Chrome/Context/Page 内暂停并退避；恢复后继续原操作，默认 600 秒 |
+| `network_recovery_timeout` | 运行级失败并保留最后安全 checkpoint；不得启动第二个浏览器 |
+| page/context/browser 关闭或 CDP 断开 | 终端浏览器失败；记录非计划关闭证据，不得轮内重启 |
 | 详情、作者或正文图候选级失败 | 核对 `candidate_skipped` 和 manifest；整帖不入库，ID 写账号 seen，继续候选 |
 | 登录、频控、安全限制、封禁 | 运行级失败；保留 page/search ID，不写候选 seen |
 | 完整 `300011` 且已精确释放租约 | 可显式用 `--retry-on-300011` 每 30 分钟同账号续跑；其他阻断不自动重试 |
@@ -347,13 +364,13 @@ python scripts/repair_xhs_posts.py \
 | 累计摘要或 JSONL 缺失 | 冻结前失败；恢复原文件或停止，不清空路径继续 |
 | `sqlite_import_failed` | 不提交 checkpoint、seen 或 campaign；核对数据库和媒体回滚 |
 | 正常结束或可捕获普通异常 | `LeaseGuard` 收束登记进程，精确 token 删除且 rowcount 必须为 1；异常不伪装成功 |
-| `SIGINT` / `SIGTERM` | 先 TERM/KILL child、exporter 与精确 profile Chrome，确认消失后释放；状态可保持不完整 |
+| `SIGINT` / `SIGTERM` | 写 `runtime_failed/operator_interrupt` 终态，再精确收束 child、exporter 与本轮 Chrome；确认 session 删除后释放租约 |
 | runner 被 `SIGKILL` | 租约与未完成 state 原样保留；child/Chrome 存活时孤儿对账必须拒绝 |
-| 系统重启 | 同 host 且 boot ID 已变化可证明旧 PID 全部死亡；仍需确认当前没有精确 profile Chrome |
+| 系统重启 | 同 host 且 boot ID 已变化可证明旧 PID 全部死亡；仍需确认当前没有该 run 临时 profile Chrome |
 | execution state 缺失或无停止事件 | 只降低终态完整性；精确运行树已死亡时允许 `account_mutex_only` 回收 |
 | PID 数值被重用 | 启动 token/启动时间/PGID 不匹配即视为新进程；不误杀、不把它当旧 owner 存活 |
 | PID 存在但精确启动身份不可读 | 无法证明旧进程死亡，拒绝对账；不得降级为秒级 `ps` 或 TTL 判定 |
-| 残留 child/exporter/账号 Chrome | 无论 TTL 或 state 如何都拒绝释放，先让精确残留进程结束 |
+| 残留 child/exporter/本轮 Chrome | 无论 TTL 或 state 如何都拒绝释放，先让精确残留进程结束 |
 | 两个恢复命令并发 | 同账号 `flock` 与 `BEGIN IMMEDIATE` 串行化；只有精确 DELETE rowcount=1 的一个成功 |
 | 错误 lease/run/owner | 删除谓词不匹配并失败关闭；不得写成功恢复事件或改变账号健康 |
 
@@ -365,20 +382,16 @@ cursor 表示同一个 client search ID。
 来源耗尽且入库成功时，checkpoint 保存耗尽坐标、完整停止证据和本轮摘要身份；后续轮次只做顶部
 刷新，只有平台提供新的可验证来源链时才重建深层前沿。seen 保留，累计摘要在成功提交后清空。
 
-## 8. 账号与状态存储
+## 8. 逻辑槽位与临时会话
 
-- 每个账号使用权限 `0700` 的 `data/xhs_accounts/<account_id>/profile/`，不同账号不得共享。
-- profile 是持久 Chrome 目录，不宣称整个目录应用层加密。
-- Cookie、localStorage、sessionStorage 设备标识和运行时 storage state 使用 snapshot schema v3，
-  以 AES-GCM 保存为 `storage_state.enc`；明文 `metadata.json` 只保存账号绑定信息，不保存设备标识或
-  Cookie。localStorage 按 origin 补缺；sessionStorage 保留每个页面的角色，只把主标签页快照恢复到
-  新一轮主标签页，不把 `XHS_TAB_DEVICE_ID` 注入其他窗口，新标签页由平台生成自己的标签页设备 ID。
-- 持久 profile 中仍有效的 Cookie/localStorage 是当前状态；解密快照只补充 profile 缺失项，不能用
-  较旧短 Cookie 覆盖 profile。child 只有在本轮 self-info API 已验证并写入匹配 run ID 的验证标记后，
-  runner 才能晋升快照；登录、验证码、安全限制、浏览器关闭、信号中止或缺少 child 摘要时保留最后
-  一次已验证密文。普通内容候选失败不等于会话失效，满足上述当前轮验证门禁时仍可刷新会话。
-- 密钥优先读取 `TRIPPOSTCOLLECT_XHS_SNAPSHOT_KEY`，否则使用 macOS Keychain 服务
-  `TripPostCollect.XHS`。
-- 运行时明文只存在于 `data/runtime/xhs/sessions/<run_id>/`，退出必须删除。
+- `xhs_accounts` 只保存逻辑槽位 ID、操作状态和租约审计字段；槽位必须由操作人显式
+  `xhs_accounts.py ensure-slot` 创建，runner 对未知槽位失败关闭。
+- 每个正式 run 只在 `data/runtime/xhs/sessions/<run_id>/profile/` 创建权限受限的空临时 profile。
+  不读取或保存跨轮 Cookie、localStorage、sessionStorage、storage state、设备标识或平台身份。
+- 本轮 Chrome、BrowserContext 与 API 客户端可以在内存中共享当前 Cookie 供登录验证、签名和图片
+  下载；这些值不得写成下一轮登录输入。下一正式轮仍以空 profile 和新二维码开始。
+- 正常完成、可捕获异常和 SIGINT/SIGTERM 都须留下精确浏览器生命周期与清理证据。只有登记进程及
+  进程组已消失、临时 session 已删除且 owner token 精确删除成功，才能报告
+  `runtime_session_removed=true`、`lease_released=true` 和 `lease_cleanup.ok=true`。
 - SQLite 精确租约是同账号互斥事实源；每账号 `flock` 只增强同机竞争保护，不能替代 owner token、
-  进程启动身份或 SQLite rowcount。账号切换、quarantine、activate 和 retire 均由操作人决定。
+  进程启动身份或 SQLite rowcount。槽位的 quarantine、activate 和 retire 均由操作人决定。
