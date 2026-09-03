@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
-import base64
 import json
 import sqlite3
 import sys
@@ -18,14 +16,9 @@ from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs import accounts
 from trippostcollect.xhs.config import load_pool_config, load_target
 from trippostcollect.xhs.config import XhsConfigError
-from trippostcollect.xhs.sessions import (
-    capture_context_state,
-    decrypt_storage_state,
-    encrypt_storage_state,
-    load_snapshot_key,
-    refresh_encrypted_storage_state,
-    restore_context_state,
-    snapshot_sha256,
+from trippostcollect.xhs.runtime import (
+    prepare_runtime_session,
+    remove_runtime_session,
 )
 
 
@@ -36,7 +29,6 @@ if str(SCRIPTS) not in sys.path:
 xhs_runner = import_module("xhs_runner")
 crawl_runner = import_module("crawl_runner")
 mediacrawler_crawl = import_module("mediacrawler_crawl")
-xhs_login = import_module("xhs_login")
 
 
 def open_db(tmp_path: Path) -> sqlite3.Connection:
@@ -73,315 +65,245 @@ def test_long_xhs_target_uses_time_budget_only() -> None:
     assert pool["lease_seconds"] >= target["timeout_seconds"] + 300
 
 
-def test_manual_xhs_login_keeps_one_existing_tab() -> None:
-    class FakePage:
-        def __init__(self) -> None:
-            self.closed = False
-
-        def is_closed(self) -> bool:
-            return self.closed
-
-        async def close(self) -> None:
-            self.closed = True
-
-    class FakeContext:
-        def __init__(self, pages: list[FakePage]) -> None:
-            self.pages = pages
-
-        async def new_page(self) -> FakePage:
-            page = FakePage()
-            self.pages.append(page)
-            return page
-
-    first, second, third = FakePage(), FakePage(), FakePage()
-    context = FakeContext([first, second, third])
-
-    page = asyncio.run(xhs_login.single_login_page(context))
-
-    assert page is first
-    assert not first.closed
-    assert second.closed
-    assert third.closed
-
-
-def test_manual_xhs_login_waits_through_visible_challenge(
+def test_xhs_runtime_session_has_only_profile_and_is_removable(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(xhs_login, "LOGIN_STABILITY_CONFIRMATIONS", 2)
-    monkeypatch.setattr(xhs_login, "LOGIN_STABILITY_POLL_MS", 1)
-    states = [
-        {
-            "ok": False,
-            "challenge_markers": ["安全验证"],
-            "continuity": {"ready": False, "_token": ""},
-        },
-        {
-            "ok": True,
-            "challenge_markers": [],
-            "profile_ids": ["profile-1"],
-            "continuity": {"ready": True, "_token": "stable"},
-        },
-        {
-            "ok": True,
-            "challenge_markers": [],
-            "profile_ids": ["profile-1"],
-            "continuity": {"ready": True, "_token": "stable"},
-        },
+    monkeypatch.setattr(
+        "trippostcollect.xhs.runtime.XHS_SESSION_ROOT",
+        tmp_path / "sessions",
+    )
+    paths = prepare_runtime_session("run-1")
+
+    assert set(paths) == {"root", "profile"}
+    assert paths["profile"].is_dir()
+    assert not (paths["root"] / "storage_state.json").exists()
+    assert remove_runtime_session(paths["root"]) is True
+    assert not paths["root"].exists()
+
+
+def test_xhs_guarded_runtime_session_removes_login_material(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "trippostcollect.xhs.runtime.XHS_SESSION_ROOT",
+        tmp_path / "sessions",
+    )
+
+    class FakeGuard:
+        def terminate_owned_processes(self) -> dict:
+            return {"safe_to_release": True, "checks": [], "blocking": []}
+
+    with xhs_runner.guarded_runtime_session("run-2", FakeGuard()) as paths:
+        (paths["profile"] / "Cookies").write_text("secret", encoding="utf-8")
+        root = paths["root"]
+        assert root.exists()
+        assert not (root / "storage_state.json").exists()
+
+    assert not root.exists()
+    assert xhs_runner._ACTIVE_SESSION_ROOT is None
+
+
+@pytest.mark.parametrize("interrupt_kind", ["lease_signal", "keyboard_interrupt"])
+def test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt_kind: str,
+) -> None:
+    target_path = tmp_path / "targets.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "targets": [
+                    {
+                        "target_key": "test",
+                        "keyword": "青岛旅游",
+                        "top_refresh_max_pages": 1,
+                        "timeout_seconds": 1800,
+                        "required_fields_profile": "image_post_with_followers_v1",
+                        "followers_policy": "required",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    pool_path = tmp_path / "pool.json"
+    pool_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "lease_seconds": 2400,
+                "behavior_profile": "xhs_guarded",
+                "headed": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "content.sqlite"
+    run_id = "operator-interrupt-run"
+    runtime_root = tmp_path / "runtime"
+    execution_root = tmp_path / "execution"
+    session_root = tmp_path / "sessions"
+    monkeypatch.setattr(xhs_runner, "XHS_RUNTIME_ROOT", runtime_root)
+    monkeypatch.setattr(xhs_runner, "XHS_EXECUTION_STATE_ROOT", execution_root)
+    monkeypatch.setattr(xhs_runner, "XHS_RUNS_OUTPUT", tmp_path / "outputs")
+    monkeypatch.setattr(xhs_runner, "utc_stamp", lambda: run_id)
+    monkeypatch.setattr(
+        "trippostcollect.xhs.runtime.XHS_SESSION_ROOT",
+        session_root,
+    )
+    monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
+
+    def interrupt_child(self, *_args, **_kwargs):
+        if interrupt_kind == "lease_signal":
+            self.signal_received = int(xhs_runner.signal.SIGINT)
+            raise xhs_runner.XhsLeaseSignal(xhs_runner.signal.SIGINT)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(xhs_runner.LeaseGuard, "run_subprocess", interrupt_child)
+    args = argparse.Namespace(
+        target_key="test",
+        account_id="xhs-a01",
+        post_interaction="none",
+        db=str(db_path),
+        target_config=str(target_path),
+        pool_config=str(pool_path),
+        dry_run=False,
+        no_import=False,
+        retry_on_300011=False,
+    )
+
+    assert xhs_runner._run_main(args) == 130
+
+    summary_path = runtime_root / "runs" / run_id / "run_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["status"] == "failed"
+    assert summary["failure_type"] == "runtime_failed"
+    assert summary["stop_reason"] == "runtime_failed"
+    assert summary["reason"] == "operator_interrupt"
+    assert summary["interrupt"] == {
+        "reason": "operator_interrupt",
+        "source": interrupt_kind,
+        "signum": int(xhs_runner.signal.SIGINT),
+        "signal": "SIGINT",
+        "exit_code": 130,
+    }
+    assert summary["runtime_session_removed"] is True
+    assert summary["lease_released"] is True
+    assert summary["lease_cleanup"]["ok"] is True
+    assert summary["lease_cleanup"]["event_type"] == "lease_released"
+    assert summary["lease_cleanup"]["signal"] == int(xhs_runner.signal.SIGINT)
+    assert summary["lease_cleanup"]["process_check"]["safe_to_release"] is True
+    assert not (session_root / run_id).exists()
+
+    state_path = execution_root / run_id / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert (
+        state["steps"]["command_executed"]["error"]
+        == "xhs_runtime_failed:operator_interrupt:SIGINT"
+    )
+    assert state["steps"]["command_executed"]["evidence"]["interrupt"] == summary[
+        "interrupt"
     ]
+    assert "adaptive_search_stopped" not in {
+        event.get("type") for event in state.get("events", [])
+    }
 
-    class FakePage:
-        def __init__(self) -> None:
-            self.brought_to_front = 0
-            self.waits = 0
-
-        async def bring_to_front(self) -> None:
-            self.brought_to_front += 1
-
-        async def wait_for_timeout(self, timeout_ms: int) -> None:
-            assert timeout_ms == 1
-            self.waits += 1
-
-    async def fake_page_state(page: FakePage) -> dict:
-        return states.pop(0)
-
-    monkeypatch.setattr(xhs_login, "xhs_page_state", fake_page_state)
-    page = FakePage()
-
-    _, state = asyncio.run(
-        xhs_login.wait_for_login(
-            page,
-            600,
-            phase="测试登录",
-        )
-    )
-
-    assert state["ok"] is True
-    assert state["challenge_observed"] is True
-    assert state["observed_challenge_markers"] == ["安全验证"]
-    assert state["stability_confirmations"] == 2
-    assert page.brought_to_front == 1
-    assert page.waits == 2
-
-
-def test_manual_xhs_login_challenge_overrides_stale_signed_in_shell(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(xhs_login, "LOGIN_STABILITY_CONFIRMATIONS", 2)
-    monkeypatch.setattr(xhs_login, "LOGIN_STABILITY_POLL_MS", 1)
-    states = [
-        {
-            "ok": True,
-            "challenge_markers": ["安全验证"],
-            "profile_ids": ["profile-1"],
-            "continuity": {"ready": True, "_token": "stable"},
-        },
-        {
-            "ok": True,
-            "challenge_markers": [],
-            "profile_ids": ["profile-1"],
-            "continuity": {"ready": True, "_token": "stable"},
-        },
-        {
-            "ok": True,
-            "challenge_markers": [],
-            "profile_ids": ["profile-1"],
-            "continuity": {"ready": True, "_token": "stable"},
-        },
-    ]
-
-    class FakePage:
-        def __init__(self) -> None:
-            self.waits = 0
-
-        async def bring_to_front(self) -> None:
-            return None
-
-        async def wait_for_timeout(self, timeout_ms: int) -> None:
-            assert timeout_ms == 1
-            self.waits += 1
-
-    async def fake_page_state(page: FakePage) -> dict:
-        return states.pop(0)
-
-    monkeypatch.setattr(xhs_login, "xhs_page_state", fake_page_state)
-    page = FakePage()
-
-    _, state = asyncio.run(
-        xhs_login.wait_for_login(
-            page,
-            600,
-            phase="测试登录",
-        )
-    )
-
-    assert state["ok"] is True
-    assert state["challenge_observed"] is True
-    assert page.waits == 2
-
-
-def test_manual_xhs_login_platform_security_limit_stops_immediately(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = 0
-
-    class FakePage:
-        def __init__(self) -> None:
-            self.brought_to_front = 0
-            self.waits = 0
-
-        async def bring_to_front(self) -> None:
-            self.brought_to_front += 1
-
-        async def wait_for_timeout(self, timeout_ms: int) -> None:
-            self.waits += 1
-
-    async def fake_page_state(page: FakePage) -> dict:
-        nonlocal calls
-        calls += 1
-        return {
-            "ok": False,
-            "platform_security_limit": True,
-            "challenge_markers": ["安全限制", "300011"],
-        }
-
-    monkeypatch.setattr(xhs_login, "xhs_page_state", fake_page_state)
-    page = FakePage()
-
-    _, state = asyncio.run(
-        xhs_login.wait_for_login(
-            page,
-            600,
-            phase="测试登录",
-        )
-    )
-
-    assert state["platform_security_limit"] is True
-    assert state["challenge_observed"] is True
-    assert state["observed_challenge_markers"] == ["300011", "安全限制"]
-    assert calls == 1
-    assert page.brought_to_front == 1
-    assert page.waits == 0
-
-
-def test_manual_xhs_login_requires_selfinfo_before_stable_success(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(xhs_login, "LOGIN_STABILITY_CONFIRMATIONS", 1)
-    monkeypatch.setattr(xhs_login, "LOGIN_STABILITY_POLL_MS", 1)
-
-    class FakePage:
-        def __init__(self) -> None:
-            self.waits = 0
-
-        async def wait_for_timeout(self, timeout_ms: int) -> None:
-            assert timeout_ms == 1
-            self.waits += 1
-
-    class FakeMonitor:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def public(self) -> dict:
-            self.calls += 1
-            return {"ok": self.calls >= 2, "observed": self.calls}
-
-    async def fake_page_state(page: FakePage) -> dict:
-        return {
-            "ok": True,
-            "profile_ids": ["profile-1"],
-            "challenge_markers": [],
-            "continuity": {"ready": True, "_token": "stable"},
-        }
-
-    monkeypatch.setattr(xhs_login, "xhs_page_state", fake_page_state)
-    page = FakePage()
-    _, state = asyncio.run(
-        xhs_login.wait_for_login(
-            page,
-            600,
-            phase="测试登录",
-            self_info_monitor=FakeMonitor(),
-        )
-    )
-
-    assert state["ok"] is True
-    assert state["self_info"]["ok"] is True
-    assert page.waits == 1
-
-
-def test_manual_xhs_login_adopts_replacement_page(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(xhs_login, "LOGIN_STABILITY_CONFIRMATIONS", 1)
-
-    class FakePage:
-        def __init__(self, url: str, *, closed: bool) -> None:
-            self.url = url
-            self.closed = closed
-
-        def is_closed(self) -> bool:
-            return self.closed
-
-        async def wait_for_timeout(self, timeout_ms: int) -> None:
-            raise AssertionError(timeout_ms)
-
-    class FakeContext:
-        def __init__(self, pages: list[FakePage]) -> None:
-            self.pages = pages
-
-    async def fake_page_state(page: FakePage) -> dict:
-        assert page.url.endswith("/replacement")
-        return {
-            "ok": True,
-            "profile_ids": ["profile-1"],
-            "challenge_markers": [],
-            "continuity": {"ready": True, "_token": "stable"},
-        }
-
-    monkeypatch.setattr(xhs_login, "xhs_page_state", fake_page_state)
-    original = FakePage("https://www.xiaohongshu.com/explore", closed=True)
-    replacement = FakePage("https://www.xiaohongshu.com/replacement", closed=False)
-    selected, state = asyncio.run(
-        xhs_login.wait_for_login(
-            original,
-            600,
-            phase="测试登录",
-            context=FakeContext([original, replacement]),
-        )
-    )
-
-    assert selected is replacement
-    assert state["ok"] is True
-    assert state["page_replacements"] == 1
-
-
-def test_xhs_login_does_not_treat_bare_retry_later_as_security_limit() -> None:
-    assert xhs_login.CHALLENGE_RE.search("Please retry later") is None
-    assert xhs_login.CHALLENGE_RE.search("Account exception, please retry later") is not None
-
-
-@pytest.mark.asyncio
-async def test_xhs_selfinfo_monitor_requires_successful_backend_result() -> None:
-    class FakeResponse:
-        url = "https://edith.xiaohongshu.com/api/sns/web/v1/user/selfinfo"
-        status = 200
-
-        async def json(self) -> dict:
-            return {"data": {"result": {"success": True}}}
-
-    monitor = xhs_login.SelfInfoMonitor()
-    await monitor._consume(FakeResponse())
-
-    assert monitor.public()["ok"] is True
-    assert monitor.public()["observed"] == 1
-
-
-def test_manual_xhs_login_lease_covers_both_operator_waits() -> None:
-    assert xhs_login.login_lease_seconds(600) == 1_500
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM xhs_lease_processes").fetchone()[0] == 0
+        row = conn.execute(
+            "SELECT status, finished_at, report_json FROM xhs_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "failed"
+        assert row[1]
+        assert json.loads(row[2])["lease_cleanup"]["ok"] is True
 
 
 def test_formal_xhs_operator_login_wait_matches_documented_window() -> None:
     assert mediacrawler_crawl.XHS_OPERATOR_LOGIN_WAIT_SECONDS == 600
+
+
+def test_xhs_low_level_cli_has_no_storage_state_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["mediacrawler_crawl.py"])
+
+    args = mediacrawler_crawl.parse_args()
+
+    assert not hasattr(args, "xhs_storage_state")
+
+
+def test_xhs_low_level_executor_marks_fresh_run_scoped_login(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_command(*args: object, **kwargs: object) -> dict[str, object]:
+        captured["extra_env"] = kwargs["extra_env"]
+        return {
+            "returncode": 0,
+            "timed_out": False,
+            "stdout_tail": "",
+            "stderr_tail": "",
+        }
+
+    monkeypatch.setattr(mediacrawler_crawl, "run_command", fake_run_command)
+    monkeypatch.setattr(mediacrawler_crawl, "discover_cdp_browser_path", lambda: None)
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "summarize_output",
+        lambda *_args: {
+            "parse_errors": 0,
+            "content_records": 0,
+            "non_video_content_records": 0,
+            "video_like_records": 0,
+        },
+    )
+
+    args = argparse.Namespace(
+        behavior_profile="xhs_guarded",
+        db=str(tmp_path / "content.sqlite"),
+        discovery_job_id=None,
+        discovery_source_exhausted=False,
+        download_images=True,
+        headed=True,
+        keyword="青岛旅游",
+        login_type="qrcode",
+        post_repair_detail_targets=[],
+        resume_identities_path=None,
+        start_cursor="",
+        start_offset=0,
+        start_page=1,
+        timeout_per_platform=7200,
+        top_refresh_max_pages=5,
+        xhs_account_id="xhs-a01",
+        xhs_detail_urls=[],
+        xhs_discovery_query_fingerprint="fingerprint",
+        xhs_discovery_target_key="target",
+        xhs_post_interaction="none",
+        xhs_profile_dir=str(tmp_path / "profile"),
+        xhs_repair=False,
+        xhs_repair_batch_size=5,
+        zhihu_detail_urls=[],
+    )
+
+    result = mediacrawler_crawl._run_platform_without_policy("xhs", args, tmp_path)
+
+    extra_env = captured["extra_env"]
+    assert isinstance(extra_env, dict)
+    assert extra_env["TRIPPOSTCOLLECT_XHS_RUN_SCOPED_LOGIN"] == "1"
+    assert "TRIPPOSTCOLLECT_XHS_STORAGE_STATE_PATH" not in extra_env
+    assert not hasattr(mediacrawler_crawl, "xhs_storage_snapshot_info")
+    assert result["login_state"] is None
 
 
 def test_xhs_runner_reads_login_required_from_structured_child_summary() -> None:
@@ -495,6 +417,7 @@ def _prepare_300011_retry_database(
         "run_id": run_id,
         "account_id": "xhs-a01",
         "lease_id": "lease-security-limit",
+        "runtime_session_removed": True,
         "challenge": "platform_security_limit_300011",
         "child_summary": str(child_summary_path),
         "finished_at": finished_at.isoformat(timespec="seconds"),
@@ -507,13 +430,10 @@ def _prepare_300011_retry_database(
         conn.execute(
             """
             INSERT INTO xhs_accounts(
-                account_id, status, profile_dir, encrypted_state_path,
-                created_at, updated_at
-            ) VALUES ('xhs-a01', 'active', ?, ?, ?, ?)
+                account_id, status, created_at, updated_at
+            ) VALUES ('xhs-a01', 'active', ?, ?)
             """,
             (
-                str(tmp_path / "profile"),
-                str(tmp_path / "state.enc"),
                 finished_at.isoformat(timespec="seconds"),
                 finished_at.isoformat(timespec="seconds"),
             ),
@@ -669,6 +589,37 @@ def test_xhs_runner_300011_retry_requires_exact_release_audit(tmp_path: Path) ->
     )
 
 
+@pytest.mark.parametrize("runtime_session_state", [False, "missing"])
+def test_xhs_runner_300011_retry_requires_removed_runtime_session(
+    tmp_path: Path,
+    runtime_session_state: bool | str,
+) -> None:
+    db_path, _ = _prepare_300011_retry_database(
+        tmp_path,
+        finished_at=datetime(2026, 8, 30, 10, 0, tzinfo=timezone.utc),
+    )
+    report = xhs_runner._latest_terminal_xhs_run(
+        db_path,
+        target_key="target",
+        account_id="xhs-a01",
+    )
+    assert report is not None
+    if runtime_session_state == "missing":
+        report.pop("runtime_session_removed")
+    else:
+        report["runtime_session_removed"] = runtime_session_state
+
+    assert xhs_runner._security_limit_retry_evidence(report) == (
+        False,
+        "triggering_run_runtime_session_not_removed",
+    )
+    assert xhs_runner._terminal_release_ready(
+        db_path,
+        account_id="xhs-a01",
+        report=report,
+    ) == (False, "terminal_run_runtime_session_not_removed")
+
+
 def test_xhs_runner_300011_controller_waits_without_lease_then_stops_on_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -705,6 +656,7 @@ def test_xhs_runner_300011_controller_waits_without_lease_then_stops_on_success(
                             "status": "completed",
                             "run_id": "completed-run",
                             "lease_id": "completed-lease",
+                            "runtime_session_removed": True,
                             "finished_at": completed_at,
                         }
                     ),
@@ -805,6 +757,7 @@ def test_xhs_runner_300011_controller_retries_repeated_limit_until_success(
                 "status": "failed",
                 "run_id": run_id,
                 "lease_id": lease_id,
+                "runtime_session_removed": True,
                 "challenge": "platform_security_limit_300011",
                 "child_summary": str(child_summary),
                 "finished_at": finished_at.isoformat(timespec="seconds"),
@@ -821,6 +774,7 @@ def test_xhs_runner_300011_controller_retries_repeated_limit_until_success(
                 "status": "completed",
                 "run_id": run_id,
                 "lease_id": lease_id,
+                "runtime_session_removed": True,
                 "finished_at": finished_at.isoformat(timespec="seconds"),
             }
             status = "completed"
@@ -1002,309 +956,10 @@ def test_xhs_runner_does_not_treat_false_marker_names_as_failures() -> None:
 
 def test_xhs_runner_uses_raw_failure_text_without_structured_records() -> None:
     assert xhs_runner._challenge_reason("请完成验证", "", {}) == "请完成验证"
-    assert xhs_runner._login_reason("", "missing_xhs_storage_state", {}) == "missing_xhs_storage_state"
+    assert xhs_runner._login_reason("", "扫码登录", {}) == "扫码登录"
 
 
-def test_xhs_runner_does_not_promote_target_closed_session_snapshot() -> None:
-    child_summary = {
-        "pagination_evidence": {
-            "stop_reason": "runtime_failed",
-            "stop_detail": "browser_context_closed",
-        }
-    }
-
-    assert xhs_runner._storage_refresh_block_reason(
-        exit_code=2,
-        stdout="",
-        stderr="TargetClosedError: context or browser has been closed",
-        child_summary=child_summary,
-    ) == "runtime:browser_context_closed"
-
-
-def test_xhs_runner_can_promote_verified_session_after_content_failure() -> None:
-    child_summary = {
-        "pagination_evidence": {
-            "stop_reason": "runtime_failed",
-            "stop_detail": "search_or_detail_request_failed",
-        }
-    }
-
-    assert xhs_runner._storage_refresh_block_reason(
-        exit_code=2,
-        stdout="",
-        stderr="detail request failed",
-        child_summary=child_summary,
-    ) == ""
-
-
-def test_storage_state_encryption_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    key = b"k" * 32
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_SNAPSHOT_KEY", base64.urlsafe_b64encode(key).decode("ascii"))
-    loaded = load_snapshot_key()
-    path = tmp_path / "state.enc"
-    state = {"cookies": [{"name": "web_session", "value": "secret"}], "origins": []}
-
-    encrypt_storage_state(state, path, account_id="xhs-a01", key=loaded)
-
-    assert decrypt_storage_state(path, account_id="xhs-a01", key=loaded) == state
-    assert path.stat().st_mode & 0o777 == 0o600
-    with pytest.raises(Exception):
-        decrypt_storage_state(path, account_id="xhs-a02", key=loaded)
-
-
-def test_restore_state_keeps_profile_cookie_and_scopes_session_device_id_to_primary_page() -> None:
-    class FakePage:
-        url = "about:blank"
-
-        def __init__(self) -> None:
-            self.init_script = ""
-
-        async def add_init_script(self, script: str) -> None:
-            self.init_script = script
-
-    class FakeContext:
-        def __init__(self) -> None:
-            self.added_cookies: list[dict] = []
-            self.init_script = ""
-
-        async def cookies(self) -> list[dict]:
-            return [{"name": "web_session", "domain": ".xiaohongshu.com", "path": "/"}]
-
-        async def add_cookies(self, cookies: list[dict]) -> None:
-            self.added_cookies = cookies
-
-        async def add_init_script(self, script: str) -> None:
-            self.init_script = script
-
-    context = FakeContext()
-    page = FakePage()
-    asyncio.run(
-        restore_context_state(
-            context,
-            {
-                "cookies": [
-                    {
-                        "name": "web_session",
-                        "value": "stale",
-                        "domain": ".xiaohongshu.com",
-                        "path": "/",
-                    },
-                    {
-                        "name": "a1",
-                        "value": "fallback",
-                        "domain": ".xiaohongshu.com",
-                        "path": "/",
-                    },
-                ],
-                "origins": [],
-                "trippostcollect": {
-                    "runtime_storage": [
-                        {
-                            "origin": "https://www.xiaohongshu.com",
-                            "page_role": "primary",
-                            "localStorage": {},
-                            "sessionStorage": {"XHS_TAB_DEVICE_ID": "device-1"},
-                        }
-                    ]
-                },
-                },
-                primary_page=page,
-            )
-        )
-
-    assert [cookie["name"] for cookie in context.added_cookies] == ["a1"]
-    assert "XHS_TAB_DEVICE_ID" not in context.init_script
-    assert "XHS_TAB_DEVICE_ID" in page.init_script
-    assert "sessionStorage.getItem(key) === null" in page.init_script
-    assert context.init_script.strip().startswith("(() =>")
-    assert page.init_script.strip().startswith("(() =>")
-
-
-def test_restore_state_does_not_merge_two_tab_device_ids() -> None:
-    class FakePage:
-        url = "https://www.xiaohongshu.com/explore"
-
-        def __init__(self) -> None:
-            self.init_script = ""
-
-        async def add_init_script(self, script: str) -> None:
-            self.init_script = script
-
-    class FakeContext:
-        def __init__(self) -> None:
-            self.init_script = ""
-
-        async def cookies(self) -> list[dict]:
-            return []
-
-        async def add_cookies(self, cookies: list[dict]) -> None:
-            raise AssertionError(cookies)
-
-        async def add_init_script(self, script: str) -> None:
-            self.init_script = script
-
-    page = FakePage()
-    context = FakeContext()
-    asyncio.run(
-        restore_context_state(
-            context,
-            {
-                "cookies": [],
-                "origins": [],
-                "trippostcollect": {
-                    "runtime_storage": [
-                        {
-                            "origin": "https://www.xiaohongshu.com",
-                            "page_role": "primary",
-                            "localStorage": {},
-                            "sessionStorage": {"XHS_TAB_DEVICE_ID": "device-primary"},
-                        },
-                        {
-                            "origin": "https://www.xiaohongshu.com",
-                            "page_role": "secondary",
-                            "localStorage": {},
-                            "sessionStorage": {"XHS_TAB_DEVICE_ID": "device-secondary"},
-                        },
-                    ]
-                },
-            },
-            primary_page=page,
-        )
-    )
-
-    assert "device-primary" in page.init_script
-    assert "device-secondary" not in page.init_script
-    assert "XHS_TAB_DEVICE_ID" not in context.init_script
-
-
-def test_capture_and_refresh_storage_state_preserves_runtime_device_identity(
-    tmp_path: Path,
-) -> None:
-    class FakePage:
-        url = "https://www.xiaohongshu.com/explore"
-
-        def is_closed(self) -> bool:
-            return False
-
-        async def evaluate(self, script: str) -> dict:
-            assert "sessionStorage" in script
-            return {
-                "origin": "https://www.xiaohongshu.com",
-                "url": self.url,
-                "localStorage": {"b1": "stable-browser"},
-                "sessionStorage": {
-                    "XHS_RWP_FINGERPRINT": "fingerprint-1",
-                    "XHS_TAB_DEVICE_ID": "device-1",
-                },
-            }
-
-    class FakeContext:
-        pages = [FakePage()]
-
-        async def storage_state(self) -> dict:
-            return {
-                "cookies": [
-                    {"name": "a1", "value": "a", "domain": ".xiaohongshu.com"},
-                    {"name": "webId", "value": "w", "domain": ".xiaohongshu.com"},
-                    {
-                        "name": "web_session",
-                        "value": "s",
-                        "domain": ".xiaohongshu.com",
-                    },
-                ],
-                "origins": [],
-            }
-
-    key = b"r" * 32
-    encrypted_path = tmp_path / "state.enc"
-    runtime_path = tmp_path / "state.json"
-    context = FakeContext()
-    old_state = asyncio.run(
-        capture_context_state(
-            context,
-            account_id="xhs-a01",
-            identity_hash="identity-1",
-            primary_page=context.pages[0],
-        )
-    )
-    encrypt_storage_state(old_state, encrypted_path, account_id="xhs-a01", key=key)
-    refreshed = json.loads(json.dumps(old_state))
-    refreshed["cookies"][2]["value"] = "s-refreshed"
-    refreshed["trippostcollect"]["session_verification"] = {
-        "status": "verified",
-        "run_id": "run-1",
-        "source": "xhs_selfinfo",
-    }
-    runtime_path.write_text(json.dumps(refreshed), encoding="utf-8")
-
-    assert refresh_encrypted_storage_state(
-        runtime_path,
-        encrypted_path,
-        account_id="xhs-a01",
-        identity_hash="identity-1",
-        expected_run_id="run-1",
-        key=key,
-    )
-    saved = decrypt_storage_state(encrypted_path, account_id="xhs-a01", key=key)
-    assert saved["trippostcollect"]["schema_version"] == 3
-    assert saved["trippostcollect"]["account_id"] == "xhs-a01"
-    assert saved["trippostcollect"]["runtime_storage"][0]["sessionStorage"] == {
-        "XHS_RWP_FINGERPRINT": "fingerprint-1",
-        "XHS_TAB_DEVICE_ID": "device-1",
-    }
-    assert saved["trippostcollect"]["runtime_storage"][0]["page_role"] == "primary"
-
-
-def test_refresh_storage_state_rejects_unverified_failed_run(tmp_path: Path) -> None:
-    key = b"s" * 32
-    encrypted_path = tmp_path / "state.enc"
-    runtime_path = tmp_path / "state.json"
-    existing = {
-        "cookies": [
-            {"name": "a1", "value": "a", "domain": ".xiaohongshu.com"},
-            {"name": "webId", "value": "w", "domain": ".xiaohongshu.com"},
-            {"name": "web_session", "value": "last-good", "domain": ".xiaohongshu.com"},
-        ],
-        "origins": [],
-        "trippostcollect": {
-            "schema_version": 3,
-            "account_id": "xhs-a01",
-            "identity_hash": "identity-1",
-            "session_verification": {
-                "status": "verified",
-                "run_id": "last-good-run",
-            },
-        },
-    }
-    encrypt_storage_state(existing, encrypted_path, account_id="xhs-a01", key=key)
-    before = snapshot_sha256(encrypted_path)
-    failed = json.loads(json.dumps(existing))
-    failed["cookies"][2]["value"] = "failed-run"
-    failed["trippostcollect"]["session_verification"] = {
-        "status": "verified",
-        "run_id": "other-run",
-    }
-    runtime_path.write_text(json.dumps(failed), encoding="utf-8")
-
-    with pytest.raises(RuntimeError, match="belongs to another run"):
-        refresh_encrypted_storage_state(
-            runtime_path,
-            encrypted_path,
-            account_id="xhs-a01",
-            identity_hash="identity-1",
-            expected_run_id="failed-run",
-            key=key,
-        )
-
-    assert snapshot_sha256(encrypted_path) == before
-    assert decrypt_storage_state(
-        encrypted_path,
-        account_id="xhs-a01",
-        key=key,
-    )["cookies"][2]["value"] == "last-good"
-
-
-def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
+def test_config_and_child_command_use_run_scoped_login_paths(tmp_path: Path) -> None:
     target_path = tmp_path / "targets.json"
     pool_path = tmp_path / "pool.json"
     target_path.write_text(
@@ -1342,8 +997,8 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
     command = xhs_runner.build_child_command(
         target=target,
         pool=pool,
-        account={"account_id": "xhs-a01", "profile_dir": str(tmp_path / "profile")},
-        storage_state=tmp_path / "runtime-state.json",
+        account={"account_id": "xhs-a01"},
+        profile_dir=tmp_path / "profile",
         db_path=tmp_path / "db.sqlite",
         output_root=tmp_path / "output",
         no_import=False,
@@ -1366,6 +1021,11 @@ def test_config_and_child_command_freeze_account_paths(tmp_path: Path) -> None:
         == "test-fingerprint"
     )
     assert command[command.index("--behavior-profile") + 1] == "xhs_guarded"
+    assert command[command.index("--login-type") + 1] == "qrcode"
+    assert command[command.index("--xhs-profile-dir") + 1] == str(
+        tmp_path / "profile"
+    )
+    assert "--xhs-storage-state" not in command
     assert command[command.index("--xhs-post-interaction") + 1] == "comment-scroll"
     assert "--completion-mode" not in command
     assert "--target-new-posts" not in command
@@ -1399,25 +1059,60 @@ def test_xhs_pool_requires_headed_browser(tmp_path: Path) -> None:
         load_pool_config(pool_path)
 
 
-def test_xhs_schema_migrates_automatic_budget_and_breaker_fields(tmp_path: Path) -> None:
+def test_xhs_schema_removes_persistent_account_profile_fields(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy.sqlite"
     with sqlite3.connect(db_path) as conn:
         conn.execute("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL)")
-        legacy_schema = (ROOT / "db" / "xhs_control.sql").read_text(encoding="utf-8")
-        legacy_schema = legacy_schema.replace(
-            "identity_hash TEXT UNIQUE,",
-            "identity_hash TEXT UNIQUE, health_score INTEGER, consecutive_failures INTEGER, "
-            "daily_date TEXT, daily_runs INTEGER, cooldown_until TEXT,",
+        conn.execute(
+            """
+            CREATE TABLE xhs_accounts(
+                account_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                profile_dir TEXT NOT NULL UNIQUE,
+                encrypted_state_path TEXT NOT NULL UNIQUE,
+                identity_hash TEXT UNIQUE,
+                last_verified_at TEXT,
+                last_used_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
         )
-        conn.executescript(legacy_schema)
+        conn.execute(
+            """
+            INSERT INTO xhs_accounts VALUES(
+                'xhs-a01', 'login_required', '/profile', '/state.enc',
+                'identity', NULL, NULL, datetime('now'), datetime('now')
+            )
+            """
+        )
         conn.execute(
             "CREATE TABLE xhs_platform_state(site_key TEXT PRIMARY KEY, status TEXT, daily_runs INTEGER)"
         )
         accounts.ensure_xhs_schema(conn)
 
         columns = {row[1] for row in conn.execute("PRAGMA table_info(xhs_accounts)")}
-        assert "daily_runs" not in columns
-        assert "cooldown_until" not in columns
+        assert columns == {
+            "account_id",
+            "status",
+            "last_used_at",
+            "created_at",
+            "updated_at",
+        }
+        assert conn.execute(
+            "SELECT status FROM xhs_accounts WHERE account_id='xhs-a01'"
+        ).fetchone()[0] == "active"
+        accounts.record_event(
+            conn,
+            account_id="xhs-a01",
+            event_type="login_persisted",
+            details={"identity_hash": "legacy-identity"},
+        )
+        conn.commit()
+        accounts.ensure_xhs_schema(conn)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_events WHERE event_type='login_persisted'"
+        ).fetchone()[0] == 0
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='xhs_platform_state'"
         ).fetchone() is None

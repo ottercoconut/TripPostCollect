@@ -16,7 +16,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 | SQLite、媒体文件、事务和入库校验 | [数据持久化](data-persistence.md) |
 | 面向研究使用的帖子、作者、互动与图片字段 | [抓取结果数据字典](crawl-result-data-dictionary.md) |
 | 五个平台的字段能力 | [平台字段覆盖](platform-field-coverage.md) |
-| 小红书账号、登录、抓取和恢复 | [小红书 Workflow](platforms/xhs.md) |
+| 小红书逻辑槽位、轮内登录、抓取和恢复 | [小红书 Workflow](platforms/xhs.md) |
 | B站 article 详情与正文完整性 | [B站 article](platforms/bilibili.md) |
 | 抖音搜索游标与图文详情 | [抖音](platforms/douyin.md) |
 | 微博长文与图片字段 | [微博](platforms/weibo.md) |
@@ -70,8 +70,14 @@ python scripts/crawl_runner.py \
   --max-jobs 3
 ```
 
-小红书只从 `scripts/xhs_runner.py` 进入，使用独立账号、登录态、租约、配置和执行状态。运行前必须
-完整执行[小红书 Workflow](platforms/xhs.md)，不得放入通用 runner、warmup 或 benchmark。
+小红书只从 `scripts/xhs_runner.py` 进入，每个正式轮次使用临时 profile 完成人工登录，不保留跨轮平台
+登录态或 Chrome profile；逻辑账号 ID 只隔离租约和 checkpoint。运行前必须完整执行
+[小红书 Workflow](platforms/xhs.md)，不得放入通用 runner、warmup 或 benchmark。
+纯未扫码二维码明确过期时只点击组件内刷新控件；新二维码出现后重新计算 180 秒整页 reload 下限。
+扫码、手机确认、验证码或安全验证一旦出现，页面进入最长 600 秒的人工处理期，组件刷新和整页
+reload 都禁用。登录与后续抓取共用本轮唯一一次 Chrome 启动和唯一 BrowserContext；浏览器关闭或
+初始 CDP 启动失败直接结束本轮，不在同一轮 fallback 或重新拉起。可捕获中断必须写失败终态、摘要
+和精确清理证据，不得只清理 Chrome 后留下 `running` 状态。
 
 ## 不可跨越的边界
 

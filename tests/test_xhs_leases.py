@@ -32,7 +32,6 @@ from trippostcollect.xhs.leases import (
     XhsOrphanLeaseRecoveryRefused,
     acquire_exact_account_lease,
     crawl_lease_budget,
-    login_lease_budget,
     public_lease,
     recover_orphaned_account_lease,
     register_lease_process,
@@ -40,6 +39,7 @@ from trippostcollect.xhs.leases import (
     system_boot_id,
     system_host_id,
 )
+from trippostcollect.xhs.runtime import prepare_runtime_session
 
 
 UTC = timezone.utc
@@ -47,7 +47,6 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 xhs_accounts_cli = import_module("xhs_accounts")
-xhs_login_cli = import_module("xhs_login")
 xhs_runner_cli = import_module("xhs_runner")
 OWNER = ProcessIdentity(
     host_id="host-a",
@@ -94,14 +93,13 @@ class FakeInspector:
 
 @pytest.fixture
 def control_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(accounts, "XHS_ACCOUNT_ROOT", tmp_path / "accounts")
+    monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
     db_path = tmp_path / "control.sqlite"
     bootstrap_database(db_path, sync_jobs=False)
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         accounts.ensure_xhs_schema(conn)
-        accounts.enroll_account(conn, "xhs-a01")
-        accounts.mark_account_verified(conn, "xhs-a01", "identity-1")
+        accounts.register_account_slot(conn, "xhs-a01")
     return db_path
 
 
@@ -121,6 +119,7 @@ def acquire_test_lease(
     lease_id: str | None = None,
     owner_token: str | None = None,
     lease_kind: str = "crawl",
+    runtime_profile_dir: Path | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     exact_lease_id = lease_id or f"lease-{run_id}"
@@ -132,6 +131,7 @@ def acquire_test_lease(
             lease_kind=lease_kind,
             requested_account_id="xhs-a01",
             execution_state_path=state_path,
+            runtime_profile_dir=runtime_profile_dir,
             budget=LeaseBudget(runtime_seconds=60),
             owner=owner,
             now=now or datetime(2026, 8, 30, 0, 0, tzinfo=UTC),
@@ -158,6 +158,7 @@ def test_xhs_exact_lease_schema_and_dynamic_budgets(control_db: Path) -> None:
             "owner_process_start_token",
             "owner_pgid",
             "execution_state_path",
+            "runtime_profile_dir",
             "heartbeat_at",
         } <= lease_columns
         assert {"process_role", "process_start_token", "pgid", "exited_at"} <= process_columns
@@ -172,7 +173,6 @@ def test_xhs_exact_lease_schema_and_dynamic_budgets(control_db: Path) -> None:
         "root_finalize_seconds": 270,
         "lease_seconds": 7_500,
     }
-    assert login_lease_budget(600).lease_seconds == 1_500
     with pytest.raises(ValueError, match="does not cover"):
         crawl_lease_budget(timeout_seconds=7_200, configured_lease_seconds=7_499)
 
@@ -237,7 +237,7 @@ def test_obsolete_lease_is_discarded_during_exact_schema_cutover(tmp_path: Path)
         )
         assert json.loads(event[3]) == {
             "reason": "unsupported_lease_schema",
-            "migration_version": 21,
+            "migration_version": 22,
             "legacy_acquired_at": "2026-08-30",
             "legacy_expires_at": "2026-08-31",
         }
@@ -476,15 +476,15 @@ def test_expired_ttl_does_not_authorize_implicit_release(
         assert conn.execute("SELECT run_id FROM xhs_account_leases").fetchone()[0] == "expired-owner"
 
 
-def test_login_and_crawl_share_one_exact_account_mutex(
+def test_repair_and_crawl_share_one_exact_account_mutex(
     control_db: Path,
     tmp_path: Path,
 ) -> None:
-    login = acquire_test_lease(
+    repair = acquire_test_lease(
         control_db,
-        run_id="login-owner",
-        state_path=tmp_path / "login-state.json",
-        lease_kind="login",
+        run_id="repair-owner",
+        state_path=tmp_path / "repair-state.json",
+        lease_kind="repair",
     )
     with connect(control_db) as conn:
         with pytest.raises(XhsAccountUnavailable, match="busy"):
@@ -502,9 +502,9 @@ def test_login_and_crawl_share_one_exact_account_mutex(
         release_exact_account_lease(
             conn,
             account_id="xhs-a01",
-            run_id="login-owner",
-            lease_id=login["lease_id"],
-            owner_token=login["owner_token"],
+            run_id="repair-owner",
+            lease_id=repair["lease_id"],
+            owner_token=repair["owner_token"],
             outcome="completed",
         )
 
@@ -518,10 +518,10 @@ def test_login_and_crawl_share_one_exact_account_mutex(
         with pytest.raises(XhsAccountUnavailable, match="busy"):
             acquire_exact_account_lease(
                 conn,
-                run_id="login-contender",
-                lease_kind="login",
+                run_id="repair-contender",
+                lease_kind="repair",
                 requested_account_id="xhs-a01",
-                execution_state_path=tmp_path / "login-contender.json",
+                execution_state_path=tmp_path / "repair-contender.json",
                 budget=LeaseBudget(runtime_seconds=60),
                 owner=ProcessIdentity(
                     "host-a", "boot-a", 333, "2026-08-30T00:03:00+00:00", "owner-333", 333
@@ -547,8 +547,7 @@ def test_exact_leases_only_block_the_same_account(
         state_path=tmp_path / "account-one.json",
     )
     with connect(control_db) as conn:
-        accounts.enroll_account(conn, "xhs-a02")
-        accounts.mark_account_verified(conn, "xhs-a02", "identity-2")
+        accounts.register_account_slot(conn, "xhs-a02")
         second = acquire_exact_account_lease(
             conn,
             run_id="account-two",
@@ -564,29 +563,6 @@ def test_exact_leases_only_block_the_same_account(
         assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 2
 
 
-def test_login_lease_accepts_login_pending_account(
-    control_db: Path,
-    tmp_path: Path,
-) -> None:
-    with connect(control_db) as conn:
-        accounts.enroll_account(conn, "xhs-a02")
-        lease = acquire_exact_account_lease(
-            conn,
-            run_id="login-pending",
-            lease_kind="login",
-            requested_account_id="xhs-a02",
-            execution_state_path=tmp_path / "login-pending.json",
-            budget=LeaseBudget(runtime_seconds=60),
-            owner=ProcessIdentity(
-                "host-a", "boot-a", 222, "2026-08-30T00:02:00+00:00", "owner-222", 222
-            ),
-        )
-        assert lease["status"] == "login_pending"
-        assert conn.execute(
-            "SELECT event_type FROM xhs_account_events WHERE run_id='login-pending'"
-        ).fetchone()[0] == "login_lease_acquired"
-
-
 def test_dry_run_preflight_treats_expired_row_as_busy(
     control_db: Path,
     tmp_path: Path,
@@ -600,41 +576,6 @@ def test_dry_run_preflight_treats_expired_row_as_busy(
     with connect(control_db) as conn:
         with pytest.raises(XhsAccountUnavailable, match="busy"):
             xhs_runner_cli._eligible_account_for_plan(conn, "xhs-a01")
-
-
-def test_busy_login_is_blocked_without_changing_account_health(
-    control_db: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    acquire_test_lease(
-        control_db,
-        run_id="busy-login-owner",
-        state_path=tmp_path / "busy-login-owner.json",
-    )
-    monkeypatch.setattr(
-        xhs_login_cli,
-        "parse_args",
-        lambda: argparse.Namespace(
-            account_id="xhs-a01",
-            db=str(control_db),
-            timeout_seconds=600,
-            browser_path=None,
-        ),
-    )
-    monkeypatch.setattr(xhs_login_cli, "XHS_LOGIN_OUTPUT", tmp_path / "login-output")
-    monkeypatch.setattr(
-        xhs_login_cli,
-        "XHS_LOGIN_EXECUTION_STATE_ROOT",
-        tmp_path / "login-states",
-    )
-    assert xhs_login_cli.main() == 2
-    summary = json.loads(capsys.readouterr().out)
-    assert summary["status"] == "blocked"
-    assert summary["error"] == "requested_xhs_account_busy"
-    with connect(control_db) as conn:
-        assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
 
 
 def test_wrong_owner_token_cannot_release(control_db: Path, tmp_path: Path) -> None:
@@ -696,6 +637,36 @@ def test_reboot_allows_mutex_only_reconciliation_without_terminal_state(
             "account_health": False,
         }
         assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
+
+
+def test_orphan_reconciliation_removes_run_scoped_profile(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "trippostcollect.xhs.runtime.XHS_SESSION_ROOT",
+        tmp_path / "sessions",
+    )
+    paths = prepare_runtime_session("orphan-session")
+    lease = acquire_test_lease(
+        control_db,
+        run_id="orphan-session",
+        state_path=tmp_path / "missing-state.json",
+        runtime_profile_dir=paths["profile"],
+    )
+
+    with connect(control_db) as conn:
+        result = recover_orphaned_account_lease(
+            conn,
+            account_id="xhs-a01",
+            run_id="orphan-session",
+            lease_id=lease["lease_id"],
+            inspector=FakeInspector(),
+        )
+
+    assert result["runtime_session_removed"] is True
+    assert not paths["root"].exists()
 
 
 def test_missing_adaptive_event_does_not_mutate_state_or_discovery(
@@ -870,7 +841,7 @@ def test_residual_registered_child_group_blocks_reconciliation(
         )
 
 
-def test_exact_account_profile_chrome_blocks_reconciliation(
+def test_exact_runtime_profile_chrome_blocks_reconciliation(
     control_db: Path,
     tmp_path: Path,
 ) -> None:
@@ -888,7 +859,7 @@ def test_exact_account_profile_chrome_blocks_reconciliation(
             process_start_token="chrome-333",
             pgid=333,
         ),
-        argv=("Chromium", f"--user-data-dir={accounts.account_paths('xhs-a01')['profile']}"),
+        argv=("Chromium", f"--user-data-dir={lease['runtime_profile_dir']}"),
     )
     inspector = FakeInspector(profile_processes=[chrome])
     with connect(control_db) as conn:
@@ -1024,7 +995,7 @@ from trippostcollect.xhs.leases import LeaseBudget, LeaseGuard, XhsLeaseSignal
 
 root = Path(sys.argv[1])
 run_id = sys.argv[2]
-accounts.XHS_ACCOUNT_ROOT = root / "accounts"
+accounts.XHS_LOCK_ROOT = root / "locks"
 guard = LeaseGuard(
     db_path=root / "control.sqlite",
     account_id="xhs-a01",
@@ -1205,4 +1176,4 @@ def test_recovery_cli_uses_lease_id_and_accepts_missing_terminal_state(
     assert xhs_accounts_cli.main() == 0
     listing = json.loads(capsys.readouterr().out)
     assert listing["leases"] == []
-    assert listing["accounts"][0]["status"] == "active"
+    assert listing["slots"][0]["status"] == "active"

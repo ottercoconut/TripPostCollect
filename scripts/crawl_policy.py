@@ -6,8 +6,10 @@ import contextlib
 import fcntl
 import json
 import math
+import os
 import random
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -50,8 +52,19 @@ def parse_iso_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def load_policy_state(path: Path | None = None) -> dict[str, Any]:
-    path = path or POLICY_STATE
+@contextlib.contextmanager
+def policy_state_lock(path: Path | None = None) -> Iterator[None]:
+    state_path = path or POLICY_STATE
+    lock_path = ensure_parent(state_path.with_suffix(state_path.suffix + ".lock"))
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _load_policy_state_unlocked(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
@@ -60,21 +73,41 @@ def load_policy_state(path: Path | None = None) -> dict[str, Any]:
         return {}
 
 
+def load_policy_state(path: Path | None = None) -> dict[str, Any]:
+    state_path = path or POLICY_STATE
+    with policy_state_lock(state_path):
+        return _load_policy_state_unlocked(state_path)
+
+
+def _save_policy_state_unlocked(state: dict[str, Any], path: Path) -> None:
+    state_path = ensure_parent(path)
+    temporary = state_path.with_name(
+        f".{state_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        temporary.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(state_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def save_policy_state(state: dict[str, Any], path: Path | None = None) -> None:
-    path = path or POLICY_STATE
-    path = ensure_parent(path)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
+    state_path = path or POLICY_STATE
+    with policy_state_lock(state_path):
+        _save_policy_state_unlocked(state, state_path)
 
 
 def clear_site_policy_state(site_key: str) -> dict[str, Any] | None:
     with site_policy_lock(site_key):
-        state = load_policy_state()
-        removed = state.pop(site_key, None)
-        if removed is None:
-            return None
-        save_policy_state(state)
+        with policy_state_lock():
+            state = _load_policy_state_unlocked(POLICY_STATE)
+            removed = state.pop(site_key, None)
+            if removed is None:
+                return None
+            _save_policy_state_unlocked(state, POLICY_STATE)
         return {
             "site": site_key,
             "cleared": True,
@@ -244,67 +277,68 @@ def site_request_guard(
         return
 
     with site_policy_lock(site.key):
-        state = load_policy_state()
-        now = utc_now()
-        entry = _normalize_entry(dict(state.get(site.key, {})), site, now)
+        with policy_state_lock():
+            state = _load_policy_state_unlocked(POLICY_STATE)
+            now = utc_now()
+            entry = _normalize_entry(dict(state.get(site.key, {})), site, now)
 
-        cooldown_until = parse_iso_timestamp(entry.get("cooldown_until"))
-        if cooldown_until and cooldown_until > now:
-            event = _blocked_event(
-                site,
-                reason=str(entry.get("cooldown_reason") or "cooldown_active"),
-                wait_seconds=_ceil_positive_seconds(cooldown_until - now),
-                label=label,
-                entry=entry,
-            )
-            entry["last_policy_event"] = event
-            state[site.key] = entry
-            save_policy_state(state)
-            raise CrawlPolicyBlocked(event)
+            cooldown_until = parse_iso_timestamp(entry.get("cooldown_until"))
+            if cooldown_until and cooldown_until > now:
+                event = _blocked_event(
+                    site,
+                    reason=str(entry.get("cooldown_reason") or "cooldown_active"),
+                    wait_seconds=_ceil_positive_seconds(cooldown_until - now),
+                    label=label,
+                    entry=entry,
+                )
+                entry["last_policy_event"] = event
+                state[site.key] = entry
+                _save_policy_state_unlocked(state, POLICY_STATE)
+                raise CrawlPolicyBlocked(event)
 
-        if site.daily_request_budget <= 0:
-            event = _blocked_event(
-                site,
-                reason="daily_request_budget_disabled",
-                wait_seconds=_seconds_until_next_utc_day(now),
-                label=label,
-                entry=entry,
-            )
-            entry["last_policy_event"] = event
-            state[site.key] = entry
-            save_policy_state(state)
-            raise CrawlPolicyBlocked(event)
+            if site.daily_request_budget <= 0:
+                event = _blocked_event(
+                    site,
+                    reason="daily_request_budget_disabled",
+                    wait_seconds=_seconds_until_next_utc_day(now),
+                    label=label,
+                    entry=entry,
+                )
+                entry["last_policy_event"] = event
+                state[site.key] = entry
+                _save_policy_state_unlocked(state, POLICY_STATE)
+                raise CrawlPolicyBlocked(event)
 
-        if int(entry.get("daily_count") or 0) >= site.daily_request_budget:
-            event = _blocked_event(
-                site,
-                reason="daily_request_budget_exhausted",
-                wait_seconds=_seconds_until_next_utc_day(now),
-                label=label,
-                entry=entry,
-            )
-            entry["last_policy_event"] = event
-            state[site.key] = entry
-            save_policy_state(state)
-            raise CrawlPolicyBlocked(event)
+            if int(entry.get("daily_count") or 0) >= site.daily_request_budget:
+                event = _blocked_event(
+                    site,
+                    reason="daily_request_budget_exhausted",
+                    wait_seconds=_seconds_until_next_utc_day(now),
+                    label=label,
+                    entry=entry,
+                )
+                entry["last_policy_event"] = event
+                state[site.key] = entry
+                _save_policy_state_unlocked(state, POLICY_STATE)
+                raise CrawlPolicyBlocked(event)
 
-        if site.max_requests_per_session > 0 and int(entry.get("session_count") or 0) >= site.max_requests_per_session:
-            cooldown_until = _automatic_session_cooldown_until(site, entry, now)
-            entry["cooldown_until"] = isoformat(cooldown_until)
-            entry["cooldown_reason"] = "max_requests_per_session"
-            event = _blocked_event(
-                site,
-                reason="max_requests_per_session",
-                wait_seconds=_ceil_positive_seconds(cooldown_until - now),
-                label=label,
-                entry=entry,
-            )
-            entry["last_policy_event"] = event
-            state[site.key] = entry
-            save_policy_state(state)
-            raise CrawlPolicyBlocked(event)
+            if site.max_requests_per_session > 0 and int(entry.get("session_count") or 0) >= site.max_requests_per_session:
+                cooldown_until = _automatic_session_cooldown_until(site, entry, now)
+                entry["cooldown_until"] = isoformat(cooldown_until)
+                entry["cooldown_reason"] = "max_requests_per_session"
+                event = _blocked_event(
+                    site,
+                    reason="max_requests_per_session",
+                    wait_seconds=_ceil_positive_seconds(cooldown_until - now),
+                    label=label,
+                    entry=entry,
+                )
+                entry["last_policy_event"] = event
+                state[site.key] = entry
+                _save_policy_state_unlocked(state, POLICY_STATE)
+                raise CrawlPolicyBlocked(event)
 
-        wait_seconds, base_wait_seconds, jitter_seconds = _compute_pacing_wait(site, entry, now)
+            wait_seconds, base_wait_seconds, jitter_seconds = _compute_pacing_wait(site, entry, now)
         if wait_seconds > 0:
             print(
                 f"Policy pacing {site.key}: sleeping {wait_seconds:.1f}s "
@@ -313,65 +347,72 @@ def site_request_guard(
             )
             time.sleep(wait_seconds)
 
-        started_at = utc_now()
-        entry["daily_count"] = int(entry.get("daily_count") or 0) + 1
-        entry["session_count"] = int(entry.get("session_count") or 0) + 1
-        entry["last_request_started_at"] = isoformat(started_at)
-        entry["last_request_at"] = isoformat(started_at)
-        entry["last_request_label"] = label
+        with policy_state_lock():
+            state = _load_policy_state_unlocked(POLICY_STATE)
+            started_at = utc_now()
+            entry = _normalize_entry(dict(state.get(site.key, {})), site, started_at)
+            entry["daily_count"] = int(entry.get("daily_count") or 0) + 1
+            entry["session_count"] = int(entry.get("session_count") or 0) + 1
+            entry["last_request_started_at"] = isoformat(started_at)
+            entry["last_request_at"] = isoformat(started_at)
+            entry["last_request_label"] = label
 
-        event = {
-            "site": site.key,
-            "label": label,
-            "allowed": True,
-            "disabled": False,
-            "started_at": isoformat(started_at),
-            "wait_seconds": round(wait_seconds, 3),
-            "base_wait_seconds": round(base_wait_seconds, 3),
-            "jitter_seconds": round(jitter_seconds, 3),
-            "daily_count": entry["daily_count"],
-            "daily_request_budget": site.daily_request_budget,
-            "session_count": entry["session_count"],
-            "max_requests_per_session": site.max_requests_per_session,
-            "cooldown_minutes": site.cooldown_minutes,
-            "state_path": str(POLICY_STATE),
-        }
-        entry["last_policy_event"] = event
-        state[site.key] = entry
-        save_policy_state(state)
+            event = {
+                "site": site.key,
+                "label": label,
+                "allowed": True,
+                "disabled": False,
+                "started_at": isoformat(started_at),
+                "wait_seconds": round(wait_seconds, 3),
+                "base_wait_seconds": round(base_wait_seconds, 3),
+                "jitter_seconds": round(jitter_seconds, 3),
+                "daily_count": entry["daily_count"],
+                "daily_request_budget": site.daily_request_budget,
+                "session_count": entry["session_count"],
+                "max_requests_per_session": site.max_requests_per_session,
+                "cooldown_minutes": site.cooldown_minutes,
+                "state_path": str(POLICY_STATE),
+            }
+            entry["last_policy_event"] = event
+            state[site.key] = entry
+            _save_policy_state_unlocked(state, POLICY_STATE)
 
         try:
             yield event
         finally:
-            finished_at = utc_now()
-            entry["last_request_finished_at"] = isoformat(finished_at)
-            entry["last_request_at"] = isoformat(finished_at)
-            event["finished_at"] = isoformat(finished_at)
-            entry["last_policy_event"] = event
-            state[site.key] = entry
-            save_policy_state(state)
+            with policy_state_lock():
+                state = _load_policy_state_unlocked(POLICY_STATE)
+                finished_at = utc_now()
+                entry = _normalize_entry(dict(state.get(site.key, {})), site, finished_at)
+                entry["last_request_finished_at"] = isoformat(finished_at)
+                entry["last_request_at"] = isoformat(finished_at)
+                event["finished_at"] = isoformat(finished_at)
+                entry["last_policy_event"] = event
+                state[site.key] = entry
+                _save_policy_state_unlocked(state, POLICY_STATE)
 
 
 def record_site_cooldown(site: WebSite | None, *, reason: str, evidence: Any = None) -> dict[str, Any] | None:
     if site is None:
         return None
     with site_policy_lock(site.key):
-        state = load_policy_state()
-        now = utc_now()
-        entry = _normalize_entry(dict(state.get(site.key, {})), site, now)
-        cooldown_until = now + timedelta(minutes=site.cooldown_minutes)
-        event = {
-            "site": site.key,
-            "allowed": False,
-            "reason": reason,
-            "evidence": evidence or [],
-            "cooldown_until": isoformat(cooldown_until),
-            "cooldown_minutes": site.cooldown_minutes,
-            "state_path": str(POLICY_STATE),
-        }
-        entry["cooldown_until"] = event["cooldown_until"]
-        entry["cooldown_reason"] = reason
-        entry["last_policy_event"] = event
-        state[site.key] = entry
-        save_policy_state(state)
-        return event
+        with policy_state_lock():
+            state = _load_policy_state_unlocked(POLICY_STATE)
+            now = utc_now()
+            entry = _normalize_entry(dict(state.get(site.key, {})), site, now)
+            cooldown_until = now + timedelta(minutes=site.cooldown_minutes)
+            event = {
+                "site": site.key,
+                "allowed": False,
+                "reason": reason,
+                "evidence": evidence or [],
+                "cooldown_until": isoformat(cooldown_until),
+                "cooldown_minutes": site.cooldown_minutes,
+                "state_path": str(POLICY_STATE),
+            }
+            entry["cooldown_until"] = event["cooldown_until"]
+            entry["cooldown_reason"] = reason
+            entry["last_policy_event"] = event
+            state[site.key] = entry
+            _save_policy_state_unlocked(state, POLICY_STATE)
+            return event

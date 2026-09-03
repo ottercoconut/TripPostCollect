@@ -1,4 +1,8 @@
-"""SQLite-backed Xiaohongshu account registry and explicit leases."""
+"""SQLite-backed Xiaohongshu runtime slots and audit events.
+
+The slot id isolates leases and discovery checkpoints. It deliberately stores no
+platform identity, cookie snapshot, or browser profile path.
+"""
 
 from __future__ import annotations
 
@@ -9,18 +13,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from trippostcollect.core.paths import XHS_ACCOUNT_ROOT, ensure_dir, ensure_parent
+from trippostcollect.core.paths import XHS_LOCK_ROOT, ensure_parent
 from trippostcollect.db.bootstrap import ensure_xhs_control_schema
 
 
 ACCOUNT_ID_RE = re.compile(r"xhs-[a-z0-9][a-z0-9_-]{1,31}\Z")
-ACCOUNT_STATUSES = {
-    "login_pending",
-    "active",
-    "login_required",
-    "quarantined",
-    "retired",
-}
+ACCOUNT_STATUSES = {"active", "quarantined", "retired"}
 
 
 class XhsAccountUnavailable(RuntimeError):
@@ -57,16 +55,8 @@ def validate_account_id(account_id: str) -> str:
     return value
 
 
-def account_paths(account_id: str) -> dict[str, Path]:
-    value = validate_account_id(account_id)
-    root = XHS_ACCOUNT_ROOT / value
-    return {
-        "root": root,
-        "profile": root / "profile",
-        "lease_lock": root / "lease.lock",
-        "encrypted_state": root / "storage_state.enc",
-        "metadata": root / "metadata.json",
-    }
+def account_lock_path(account_id: str) -> Path:
+    return XHS_LOCK_ROOT / f"{validate_account_id(account_id)}.lock"
 
 
 def ensure_xhs_schema(conn: sqlite3.Connection) -> None:
@@ -84,7 +74,10 @@ def bootstrap_xhs_control_database(db_path: str | Path) -> Path:
 
 
 def _row(conn: sqlite3.Connection, account_id: str) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM xhs_accounts WHERE account_id=?", (account_id,)).fetchone()
+    return conn.execute(
+        "SELECT * FROM xhs_accounts WHERE account_id=?",
+        (account_id,),
+    ).fetchone()
 
 
 def get_account(conn: sqlite3.Connection, account_id: str) -> dict[str, Any] | None:
@@ -94,7 +87,12 @@ def get_account(conn: sqlite3.Connection, account_id: str) -> dict[str, Any] | N
 
 
 def list_accounts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    return [dict(row) for row in conn.execute("SELECT * FROM xhs_accounts ORDER BY account_id").fetchall()]
+    return [
+        dict(row)
+        for row in conn.execute(
+            "SELECT * FROM xhs_accounts ORDER BY account_id"
+        ).fetchall()
+    ]
 
 
 def record_event(
@@ -110,29 +108,34 @@ def record_event(
         INSERT INTO xhs_account_events(account_id, run_id, event_type, details_json, created_at)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (account_id, run_id, event_type, json.dumps(details or {}, ensure_ascii=False), iso()),
+        (
+            account_id,
+            run_id,
+            event_type,
+            json.dumps(details or {}, ensure_ascii=False),
+            iso(),
+        ),
     )
 
 
-def enroll_account(conn: sqlite3.Connection, account_id: str) -> dict[str, Any]:
+def register_account_slot(conn: sqlite3.Connection, account_id: str) -> dict[str, Any]:
+    """Ensure a non-secret coordination slot exists for a user-selected account id."""
+
     value = validate_account_id(account_id)
-    paths = account_paths(value)
-    ensure_dir(paths["profile"])
-    paths["root"].chmod(0o700)
-    paths["profile"].chmod(0o700)
-    conn.execute(
+    inserted = conn.execute(
         """
-        INSERT INTO xhs_accounts(account_id, status, profile_dir, encrypted_state_path)
-        VALUES (?, 'login_pending', ?, ?)
+        INSERT INTO xhs_accounts(account_id, status)
+        VALUES (?, 'active')
         ON CONFLICT(account_id) DO NOTHING
         """,
-        (value, str(paths["profile"]), str(paths["encrypted_state"])),
-    )
-    record_event(conn, account_id=value, event_type="account_enrolled")
+        (value,),
+    ).rowcount
+    if inserted:
+        record_event(conn, account_id=value, event_type="account_slot_registered")
     conn.commit()
     result = get_account(conn, value)
     if result is None:
-        raise RuntimeError(f"failed to enroll XHS account {value}")
+        raise RuntimeError(f"failed to register XHS account slot {value}")
     return result
 
 
@@ -146,7 +149,7 @@ def set_account_status(
     value = validate_account_id(account_id)
     if status not in ACCOUNT_STATUSES:
         raise ValueError(f"unsupported XHS account status: {status}")
-    conn.execute(
+    updated = conn.execute(
         """
         UPDATE xhs_accounts
         SET status=?, updated_at=datetime('now')
@@ -154,30 +157,12 @@ def set_account_status(
         """,
         (status, value),
     )
+    if updated.rowcount != 1:
+        raise ValueError(f"XHS account slot does not exist: {value}")
     record_event(
         conn,
         account_id=value,
         event_type="account_status_changed",
         details={"status": status, "reason": reason},
     )
-    conn.commit()
-
-
-def mark_account_verified(conn: sqlite3.Connection, account_id: str, identity_hash: str) -> None:
-    value = validate_account_id(account_id)
-    existing = conn.execute(
-        "SELECT account_id FROM xhs_accounts WHERE identity_hash=? AND account_id<>?",
-        (identity_hash, value),
-    ).fetchone()
-    if existing:
-        raise ValueError(f"platform identity already belongs to {existing[0]}")
-    conn.execute(
-        """
-        UPDATE xhs_accounts
-        SET status='active', identity_hash=?, last_verified_at=?, updated_at=datetime('now')
-        WHERE account_id=?
-        """,
-        (identity_hash, iso(), value),
-    )
-    record_event(conn, account_id=value, event_type="login_persisted", details={"identity_hash": identity_hash})
     conn.commit()

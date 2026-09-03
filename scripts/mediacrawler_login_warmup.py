@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
         "--platforms",
         nargs="+",
         default=["douyin", "zhihu"],
-        help="Platforms to warm up: douyin zhihu weibo bilibili, or all. XHS uses scripts/xhs_login.py.",
+        help="Platforms to warm up: douyin zhihu weibo bilibili, or all. XHS logs in inside each xhs_runner.py run.",
     )
     parser.add_argument("--timeout-seconds", type=int, default=600, help="Maximum wait per platform.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Output root for login verification records.")

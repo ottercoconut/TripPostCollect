@@ -36,6 +36,7 @@ CAPTCHA_VISIBLE_RE = re.compile(
     r"人机验证|安全验证|请完成验证|请通过验证|图形验证码|滑块验证码|拖动滑块|security verification|captcha|geetest",
     re.I,
 )
+XHS_SMS_VERIFICATION_RE = re.compile(r"sms verification|parameter error", re.I)
 RATE_LIMIT_VISIBLE_RE = re.compile(
     r"访问(?:过于)?频繁|请求(?:过于)?频繁|操作频繁|"
     r"requests?\s+(?:are\s+)?too\s+frequent|too many requests|rate limit|"
@@ -126,25 +127,6 @@ async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
     page_url = str(getattr(page, "url", "") or "")
     hostname = (urlparse(page_url).hostname or "").lower()
     is_xhs_page = hostname == "xiaohongshu.com" or hostname.endswith(".xiaohongshu.com")
-    xhs_login_control_visible = False
-    if is_xhs_page:
-        try:
-            xhs_login_control_visible = bool(
-                await page.evaluate(
-                    """() => Array.from(
-                        document.querySelectorAll("a, button, [role='button']")
-                    ).some((element) => {
-                        const text = (element.innerText || element.textContent || "").trim();
-                        const style = window.getComputedStyle(element);
-                        return text === "登录"
-                            && style.display !== "none"
-                            && style.visibility !== "hidden"
-                            && element.getClientRects().length > 0;
-                    })"""
-                )
-            )
-        except Exception:
-            xhs_login_control_visible = False
     markers = {
         "platform_security_limit": bool(
             is_xhs_page
@@ -155,6 +137,7 @@ async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
         ),
         "captcha_or_verify": bool(
             CAPTCHA_VISIBLE_RE.search(normalized)
+            or (is_xhs_page and XHS_SMS_VERIFICATION_RE.search(normalized))
             or (is_xhs_page and XHS_CAPTCHA_URL_RE.search(page_url))
         ),
         "rate_limited": bool(RATE_LIMIT_VISIBLE_RE.search(normalized)),
@@ -162,7 +145,6 @@ async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
         "login_required": bool(
             LOGIN_VISIBLE_RE.search(normalized)
             or (is_xhs_page and XHS_LOGIN_URL_RE.search(page_url))
-            or xhs_login_control_visible
         ),
     }
     return normalized[:360], markers

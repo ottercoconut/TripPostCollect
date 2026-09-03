@@ -109,20 +109,11 @@ class FakeFrame:
 
 
 class FakePage:
-    def __init__(
-        self,
-        text: str = "正常搜索内容",
-        *,
-        card_count: int = 1,
-        profile_count: int = 1,
-        url: str = "https://example.test/search",
-        login_control_visible: bool = False,
-    ) -> None:
-        self.url = url
+    def __init__(self, text: str = "正常搜索内容", *, card_count: int = 1, profile_count: int = 1) -> None:
+        self.url = "https://example.test/search"
         self.text = text
         self.card_count = card_count
         self.profile_count = profile_count
-        self.login_control_visible = login_control_visible
         self.brought_to_front = 0
         self.main_frame = FakeFrame(text)
         self.frames = [self.main_frame]
@@ -132,8 +123,6 @@ class FakePage:
         return FakeLocator(self.text)
 
     async def evaluate(self, script: str) -> dict:
-        if 'querySelectorAll("a, button' in script:
-            return self.login_control_visible
         if "card_count:" in script:
             return {
                 "card_count": self.card_count,
@@ -149,29 +138,6 @@ class FakePage:
 
     async def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
         self.url = url
-
-
-@pytest.mark.asyncio
-async def test_xhs_bare_visible_login_control_blocks_search_readiness(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.001)
-    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_WAIT_SECONDS", 0.01)
-    page = FakePage(
-        "创作中心 发现 通知 消息 登录 热门内容",
-        card_count=90,
-        profile_count=30,
-        url="https://www.xiaohongshu.com/search_result?keyword=test",
-        login_control_visible=True,
-    )
-
-    visible_text, markers = await mediacrawler_behavior.visible_page_state(page)
-    readiness = await mediacrawler_behavior.wait_for_xhs_search_ready(page, [])
-
-    assert "登录" in visible_text
-    assert markers["login_required"] is True
-    assert readiness["ready"] is False
-    assert readiness["reason"] == "login_required"
 
 
 async def fake_dwell_on_list(page, profile, log) -> None:
@@ -324,6 +290,16 @@ async def test_non_xhs_retry_text_does_not_set_xhs_security_limit() -> None:
 async def test_xhs_captcha_url_is_a_visible_verification_challenge() -> None:
     page = FakePage("Scan with logged-in REDnote App", card_count=0, profile_count=0)
     page.url = "https://www.xiaohongshu.com/website-login/captcha?verifyUuid=test"
+
+    _, markers = await mediacrawler_behavior.visible_page_state(page)
+
+    assert markers["captcha_or_verify"] is True
+
+
+@pytest.mark.asyncio
+async def test_xhs_english_sms_parameter_error_is_verification_challenge() -> None:
+    page = FakePage("SMS Verification Parameter error Refresh")
+    page.url = "https://www.xiaohongshu.com/explore"
 
     _, markers = await mediacrawler_behavior.visible_page_state(page)
 

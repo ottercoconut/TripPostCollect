@@ -7,12 +7,14 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from execution_state import FORMAL_STEPS, FrozenExecutionState
 from failure_classifier import extract_stdout_json
@@ -39,19 +41,13 @@ from trippostcollect.xhs.accounts import (
     ensure_xhs_schema,
     get_account,
     record_event,
-    set_account_status,
+    register_account_slot,
     validate_account_id,
 )
 from trippostcollect.xhs.config import load_pool_config, load_target
 from trippostcollect.xhs.discovery import (
     commit_child_discovery,
     resolve_discovery_plan,
-)
-from trippostcollect.xhs.sessions import (
-    load_snapshot_key,
-    materialized_storage_state,
-    refresh_encrypted_storage_state,
-    snapshot_sha256,
 )
 from trippostcollect.xhs.leases import (
     AccountLeaseFileLock,
@@ -60,10 +56,16 @@ from trippostcollect.xhs.leases import (
     XhsLeaseSignal,
     crawl_lease_budget,
 )
+from trippostcollect.xhs.runtime import (
+    prepare_runtime_session,
+    remove_runtime_session,
+    runtime_session_paths,
+)
 
 
 ROOT = PROJECT_ROOT
 _ACTIVE_LEASE_GUARD: LeaseGuard | None = None
+_ACTIVE_SESSION_ROOT: Path | None = None
 PLATFORM_SECURITY_LIMIT_300011 = "platform_security_limit_300011"
 SECURITY_LIMIT_RETRY_SECONDS = 30 * 60
 RETRY_STATE_SCHEMA_VERSION = 1
@@ -81,13 +83,36 @@ CHALLENGE_MARKERS = (
     "300011",
     "platform_security_limit",
 )
-LOGIN_MARKERS = ("login_required", "扫码登录", "登录后查看", "missing_xhs_storage_state")
+LOGIN_MARKERS = ("login_required", "扫码登录", "登录后查看")
+
+
+@contextmanager
+def guarded_runtime_session(
+    run_id: str,
+    guard: LeaseGuard,
+) -> Iterator[dict[str, Path]]:
+    """Keep login material inside one guarded run and remove it before release."""
+
+    global _ACTIVE_SESSION_ROOT
+    paths = prepare_runtime_session(run_id)
+    _ACTIVE_SESSION_ROOT = paths["root"]
+    try:
+        yield paths
+    finally:
+        process_check = guard.terminate_owned_processes()
+        if process_check["safe_to_release"]:
+            remove_runtime_session(paths["root"])
+            _ACTIVE_SESSION_ROOT = None
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one independently orchestrated Xiaohongshu target.")
     parser.add_argument("--target-key", required=True)
-    parser.add_argument("--account-id", required=True, help="Explicit active account selected by the operator.")
+    parser.add_argument(
+        "--account-id",
+        required=True,
+        help="Logical checkpoint/lease slot; it does not retain a login profile.",
+    )
     parser.add_argument(
         "--post-interaction",
         choices=("none", "comment-scroll", "like-one", "random"),
@@ -230,6 +255,8 @@ def _security_limit_retry_evidence(report: dict[str, Any]) -> tuple[bool, str]:
         return False, "latest_terminal_run_not_300011"
     if report.get("lease_released") is not True:
         return False, "triggering_run_lease_not_released"
+    if report.get("runtime_session_removed") is not True:
+        return False, "triggering_run_runtime_session_not_removed"
     discovery = report.get("discovery") or {}
     if discovery.get("last_stop_reason") != "runtime_failed":
         return False, "triggering_run_discovery_not_runtime_failed"
@@ -316,6 +343,8 @@ def _terminal_release_ready(
         return False, "account_lease_still_present"
     if report.get("lease_released") is not True:
         return False, "terminal_run_exact_release_missing"
+    if report.get("runtime_session_removed") is not True:
+        return False, "terminal_run_runtime_session_not_removed"
     return True, "terminal_exact_release_verified"
 
 
@@ -356,17 +385,23 @@ def tail(value: str, limit: int = 6000) -> str:
     return value[-limit:] if len(value) > limit else value
 
 
-def _eligible_account_for_plan(conn: sqlite3.Connection, requested: str) -> dict[str, Any]:
+def _eligible_account_for_plan(
+    conn: sqlite3.Connection,
+    requested: str,
+    *,
+    check_lease: bool = True,
+) -> dict[str, Any]:
     account_id = validate_account_id(requested)
-    account = get_account(conn, account_id)
-    if not account or account["status"] != "active":
+    account = get_account(conn, account_id) or register_account_slot(conn, account_id)
+    if account["status"] != "active":
         raise XhsAccountUnavailable("requested_xhs_account_not_active")
-    active_lease = conn.execute(
-        "SELECT expires_at FROM xhs_account_leases WHERE account_id=?",
-        (account_id,),
-    ).fetchone()
-    if active_lease:
-        raise XhsAccountUnavailable("requested_xhs_account_busy")
+    if check_lease:
+        active_lease = conn.execute(
+            "SELECT expires_at FROM xhs_account_leases WHERE account_id=?",
+            (account_id,),
+        ).fetchone()
+        if active_lease:
+            raise XhsAccountUnavailable("requested_xhs_account_busy")
     return account
 
 
@@ -375,7 +410,7 @@ def build_child_command(
     target: dict[str, Any],
     pool: dict[str, Any],
     account: dict[str, Any],
-    storage_state: Path,
+    profile_dir: Path,
     db_path: Path,
     output_root: Path,
     no_import: bool,
@@ -402,7 +437,7 @@ def build_child_command(
         "--behavior-profile",
         str(pool["behavior_profile"]),
         "--login-type",
-        "cookie",
+        "qrcode",
         "--db",
         str(db_path),
         "--xhs-account-id",
@@ -412,9 +447,7 @@ def build_child_command(
         "--xhs-discovery-query-fingerprint",
         str(discovery["query_fingerprint"]),
         "--xhs-profile-dir",
-        str(account["profile_dir"]),
-        "--xhs-storage-state",
-        str(storage_state),
+        str(profile_dir),
         "--xhs-post-interaction",
         post_interaction,
     ]
@@ -503,42 +536,60 @@ def _login_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -> st
     return next((marker for marker in LOGIN_MARKERS if marker.lower() in combined), "")
 
 
-def _storage_refresh_block_reason(
-    *,
-    exit_code: int,
-    stdout: str,
-    stderr: str,
-    child_summary: dict[str, Any],
-) -> str:
-    if not child_summary:
-        return "child_summary_missing"
-    challenge = _challenge_reason(stdout, stderr, child_summary)
-    if challenge:
-        return f"challenge:{challenge}"
-    login_reason = _login_reason(stdout, stderr, child_summary)
-    if login_reason:
-        return f"login:{login_reason}"
-    pagination = child_summary.get("pagination_evidence") or {}
-    stop_detail = str(pagination.get("stop_detail") or "")
-    if stop_detail in {
-        "browser_context_closed",
-        "browser_runtime_failed",
-        "browser_target_closed",
-        "login_required",
-    }:
-        return f"runtime:{stop_detail}"
-    combined = f"{tail(stdout, 3000)}\n{tail(stderr, 3000)}".lower()
-    if "targetclosederror" in combined or "context or browser has been closed" in combined:
-        return "runtime:browser_target_closed"
-    if exit_code < 0 or exit_code >= 128:
-        return f"process_exit:{exit_code}"
-    return ""
-
-
 def write_summary(run_dir: Path, summary: dict[str, Any]) -> Path:
     path = run_dir / "run_summary.json"
     path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def lease_cleanup_evidence(
+    db_path: Path,
+    *,
+    account_id: str,
+    run_id: str,
+    lease_id: str,
+) -> dict[str, Any]:
+    """Return the exact release/defer audit written by ``LeaseGuard.close``."""
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT event_type, details_json
+            FROM xhs_account_events
+            WHERE account_id=? AND run_id=?
+              AND event_type IN (
+                'lease_released',
+                'lease_release_deferred_live_processes'
+              )
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (validate_account_id(account_id), run_id),
+        ).fetchone()
+    if row is None:
+        return {
+            "ok": False,
+            "event_type": "missing",
+            "reason": "lease_cleanup_event_missing",
+        }
+    try:
+        details = json.loads(str(row["details_json"] or "{}"))
+    except json.JSONDecodeError:
+        details = {}
+    if not isinstance(details, dict):
+        details = {}
+    event_type = str(row["event_type"])
+    return {
+        "ok": bool(
+            event_type == "lease_released"
+            and details.get("lease_id") == lease_id
+            and (details.get("process_check") or {}).get("safe_to_release") is True
+            and not (details.get("process_check") or {}).get("blocking")
+        ),
+        "event_type": event_type,
+        **details,
+    }
 
 
 def load_child_summary(path_value: str) -> dict[str, Any]:
@@ -619,81 +670,8 @@ def upsert_run(
     conn.commit()
 
 
-def record_preexecution_failure(
-    *,
-    args: argparse.Namespace,
-    target: dict[str, Any],
-    pool: dict[str, Any],
-    account: dict[str, Any],
-    db_path: Path,
-    run_id: str,
-    run_dir: Path,
-    state_path: Path,
-    reason: str,
-    login_required: bool,
-) -> int:
-    plan = {
-        "run_id": run_id,
-        "target_key": args.target_key,
-        "account_id": account["account_id"],
-        "profile_dir": account["profile_dir"],
-        "encrypted_state_path": account["encrypted_state_path"],
-        "keyword": target["keyword"],
-        "completion_policy": "source_exhausted",
-        "behavior_profile": pool["behavior_profile"],
-        "local_image_storage_required": True,
-        "media_root": str(LOCAL_MEDIA_ROOT.resolve()),
-        "preexecution_failure": reason,
-    }
-    state = FrozenExecutionState.create(
-        state_path,
-        run_id=run_id,
-        job_key=args.target_key,
-        site_key="xhs",
-        job_kind="xhs_account_search",
-        plan=plan,
-        frozen_inputs=[Path(target["path"]), Path(pool["path"]), FORMAL_CRAWL_CONTRACT],
-        dry_run=False,
-    )
-    state.fail("command_executed", error=reason)
-    summary = {
-        "status": "failed",
-        "run_id": run_id,
-        "target_key": args.target_key,
-        "account_id": account["account_id"],
-        "execution_state": str(state_path),
-        "reason": reason,
-        "finished_at": utc_iso(),
-    }
-    summary_path = write_summary(run_dir, summary)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        ensure_xhs_schema(conn)
-        if login_required:
-            set_account_status(conn, account["account_id"], "login_required", reason=reason)
-        record_event(
-            conn,
-            account_id=account["account_id"],
-            run_id=run_id,
-            event_type="formal_run_preexecution_failed",
-            details={"reason": reason},
-        )
-        upsert_run(
-            conn,
-            run_id=run_id,
-            target_key=args.target_key,
-            account_id=account["account_id"],
-            status="failed",
-            state_path=state_path,
-            report=summary,
-            finished=True,
-        )
-    print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
-    return 2
-
-
 def _run_main(args: argparse.Namespace | None = None) -> int:
-    global _ACTIVE_LEASE_GUARD
+    global _ACTIVE_LEASE_GUARD, _ACTIVE_SESSION_ROOT
     args = args or parse_args()
     target = load_target(args.target_key, args.target_config)
     pool = load_pool_config(args.pool_config)
@@ -709,20 +687,25 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
     run_id = utc_stamp()
     run_dir = ensure_dir(XHS_RUNTIME_ROOT / "runs" / run_id)
     state_path = ensure_dir(XHS_EXECUTION_STATE_ROOT / run_id) / f"{args.target_key}.json"
+    session_paths = runtime_session_paths(run_id)
 
     discovery_plan: dict[str, Any]
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         ensure_xhs_schema(conn)
-        if args.dry_run:
-            account = _eligible_account_for_plan(conn, args.account_id)
-        else:
+        account = _eligible_account_for_plan(
+            conn,
+            args.account_id,
+            check_lease=args.dry_run,
+        )
+        if not args.dry_run:
             guard = LeaseGuard(
                 db_path=db_path,
                 account_id=args.account_id,
                 run_id=run_id,
                 lease_kind="crawl",
                 execution_state_path=state_path,
+                runtime_profile_dir=session_paths["profile"],
                 budget=lease_budget,
             )
             _ACTIVE_LEASE_GUARD = guard
@@ -787,44 +770,13 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             account_id=str(account["account_id"]),
         )
 
-    encrypted_state = Path(str(account["encrypted_state_path"]))
-    if not encrypted_state.is_file():
-        return record_preexecution_failure(
-            args=args,
-            target=target,
-            pool=pool,
-            account=account,
-            db_path=db_path,
-            run_id=run_id,
-            run_dir=run_dir,
-            state_path=state_path,
-            reason="missing_encrypted_xhs_storage_state",
-            login_required=not args.dry_run,
-        )
-
-    try:
-        encrypted_state_sha256 = snapshot_sha256(encrypted_state)
-    except OSError as exc:
-        return record_preexecution_failure(
-            args=args,
-            target=target,
-            pool=pool,
-            account=account,
-            db_path=db_path,
-            run_id=run_id,
-            run_dir=run_dir,
-            state_path=state_path,
-            reason=f"unreadable_encrypted_xhs_storage_state:{type(exc).__name__}",
-            login_required=not args.dry_run,
-        )
-
     plan = {
         "run_id": run_id,
         "target_key": args.target_key,
         "account_id": account["account_id"],
-        "profile_dir": account["profile_dir"],
-        "encrypted_state_path": str(encrypted_state),
-        "encrypted_state_sha256": encrypted_state_sha256,
+        "login_mode": "per_run_qrcode",
+        "session_retention": "none",
+        "runtime_profile_dir": str(session_paths["profile"]),
         "keyword": target["keyword"],
         "completion_policy": "source_exhausted",
         "timeout_seconds": target["timeout_seconds"],
@@ -840,8 +792,8 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
         "preflight": {
             "account_status": account["status"],
             "active_lease": False,
-            "encrypted_state_exists": True,
-            "encrypted_state_readable": True,
+            "persistent_account_profile": False,
+            "persistent_login_state": False,
             "lease_covers_timeout_cleanup": True,
         },
         "discovery": discovery_plan,
@@ -891,27 +843,15 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
     stdout = ""
     stderr = ""
     exit_code = 1
-    storage_state_refreshed = False
-    storage_state_refresh: dict[str, Any] = {
-        "status": "skipped",
-        "reason": "child_not_started",
-    }
+    interrupt: dict[str, Any] | None = None
     discovery_commit: dict[str, Any] = {"skipped": True, "reason": "child_not_started"}
     try:
-        key = load_snapshot_key(create=False)
-        if snapshot_sha256(encrypted_state) != plan["encrypted_state_sha256"]:
-            raise RuntimeError("encrypted XHS storage state changed after plan freeze")
-        with materialized_storage_state(
-            encrypted_state,
-            ensure_dir(XHS_RUNTIME_ROOT / "sessions" / run_id),
-            account_id=account["account_id"],
-            key=key,
-        ) as storage_state:
+        with guarded_runtime_session(run_id, guard) as runtime_session:
             command = build_child_command(
                 target=target,
                 pool=pool,
                 account=account,
-                storage_state=storage_state,
+                profile_dir=runtime_session["profile"],
                 db_path=db_path,
                 output_root=ensure_dir(XHS_RUNS_OUTPUT / run_id),
                 no_import=args.no_import,
@@ -921,7 +861,6 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             state.begin("command_executed")
             env = os.environ.copy()
             env["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(state_path)
-            env["TRIPPOSTCOLLECT_XHS_RUN_ID"] = run_id
             completed = guard.run_subprocess(
                 command,
                 cwd=ROOT,
@@ -934,30 +873,6 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             stdout_json = extract_stdout_json(stdout)
             child_summary_path = str(stdout_json.get("summary") or "")
             child_summary = load_child_summary(child_summary_path)
-            refresh_block_reason = _storage_refresh_block_reason(
-                exit_code=exit_code,
-                stdout=stdout,
-                stderr=stderr,
-                child_summary=child_summary,
-            )
-            if refresh_block_reason:
-                storage_state_refresh = {
-                    "status": "skipped",
-                    "reason": refresh_block_reason,
-                }
-            else:
-                storage_state_refreshed = refresh_encrypted_storage_state(
-                    storage_state,
-                    encrypted_state,
-                    account_id=str(account["account_id"]),
-                    identity_hash=str(account["identity_hash"]),
-                    expected_run_id=run_id,
-                    key=key,
-                )
-                storage_state_refresh = {
-                    "status": "promoted" if storage_state_refreshed else "verified_unchanged",
-                    "reason": "current_run_session_verified",
-                }
             child_import_result = child_summary.get("import_result") or {}
             if args.no_import:
                 discovery_commit = {"skipped": True, "reason": "no_import"}
@@ -1067,13 +982,50 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                             },
                         )
                         outcome = "completed"
-    except Exception as exc:
-        stderr = f"{stderr}\n{type(exc).__name__}: {exc}".strip()
-        fail_open_step(
-            state,
-            error=f"xhs_runner_exception:{type(exc).__name__}",
-            evidence={"stderr_tail": tail(stderr)},
-        )
+    except BaseException as exc:
+        if isinstance(exc, (XhsLeaseSignal, KeyboardInterrupt)):
+            signum = (
+                int(exc.signum)
+                if isinstance(exc, XhsLeaseSignal)
+                else int(signal.SIGINT)
+            )
+            signal_name = signal.Signals(signum).name
+            exit_code = 128 + signum
+            guard.signal_received = signum
+            interrupt = {
+                "reason": "operator_interrupt",
+                "source": (
+                    "lease_signal"
+                    if isinstance(exc, XhsLeaseSignal)
+                    else "keyboard_interrupt"
+                ),
+                "signum": signum,
+                "signal": signal_name,
+                "exit_code": exit_code,
+            }
+            discovery_commit = {
+                **discovery_commit,
+                "skipped": True,
+                "reason": "operator_interrupt",
+                "interrupt": interrupt,
+            }
+            failure_error = f"xhs_runtime_failed:operator_interrupt:{signal_name}"
+            stderr = f"{stderr}\n{failure_error}".strip()
+            fail_open_step(
+                state,
+                error=failure_error,
+                evidence={
+                    "interrupt": interrupt,
+                    "stderr_tail": tail(stderr),
+                },
+            )
+        else:
+            stderr = f"{stderr}\n{type(exc).__name__}: {exc}".strip()
+            fail_open_step(
+                state,
+                error=f"xhs_runner_exception:{type(exc).__name__}",
+                evidence={"stderr_tail": tail(stderr)},
+            )
 
     challenge = _challenge_reason(stdout, stderr, child_summary)
     login_reason = _login_reason(stdout, stderr, child_summary)
@@ -1089,13 +1041,28 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                 details={"reason": f"xhs_challenge:{challenge}"},
             )
         elif login_reason:
-            set_account_status(conn, account["account_id"], "login_required", reason=f"xhs_login:{login_reason}")
+            record_event(
+                conn,
+                account_id=account["account_id"],
+                run_id=run_id,
+                event_type="run_scoped_login_failed",
+                details={"reason": f"xhs_login:{login_reason}"},
+            )
         record_event(
             conn,
             account_id=account["account_id"],
             run_id=run_id,
             event_type="formal_run_finished",
-            details={"outcome": outcome, "exit_code": exit_code, "challenge": challenge, "login_reason": login_reason},
+            details={
+                "outcome": outcome,
+                "exit_code": exit_code,
+                "challenge": challenge,
+                "login_reason": login_reason,
+                "failure_type": "runtime_failed" if interrupt else "",
+                "stop_reason": "runtime_failed" if interrupt else "",
+                "reason": "operator_interrupt" if interrupt else "",
+                "interrupt": interrupt,
+            },
         )
         conn.commit()
     guard.set_outcome(outcome)
@@ -1113,8 +1080,13 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
         "exit_code": exit_code,
         "challenge": challenge,
         "login_reason": login_reason,
-        "storage_state_refreshed": storage_state_refreshed,
-        "storage_state_refresh": storage_state_refresh,
+        "login_mode": "per_run_qrcode",
+        "persistent_account_profile": False,
+        "runtime_session_removed": not session_paths["root"].exists(),
+        "failure_type": "runtime_failed" if interrupt else "",
+        "stop_reason": "runtime_failed" if interrupt else "",
+        "reason": "operator_interrupt" if interrupt else "",
+        "interrupt": interrupt,
         "post_interaction": {
             "requested_mode": args.post_interaction,
             "ok": (
@@ -1153,7 +1125,32 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
     summary["lease_released"] = lease_released
     if not lease_released:
         summary["status"] = "failed"
-        summary["reason"] = "lease_release_deferred_live_processes"
+        if not interrupt:
+            summary["reason"] = "lease_release_deferred_live_processes"
+        summary["cleanup_error"] = "lease_release_deferred_live_processes"
+        summary["runtime_session_removed"] = False
+    else:
+        try:
+            summary["runtime_session_removed"] = remove_runtime_session(
+                session_paths["root"]
+            )
+            _ACTIVE_SESSION_ROOT = None
+        except OSError as exc:
+            summary["status"] = "failed"
+            if not interrupt:
+                summary["reason"] = (
+                    f"runtime_session_cleanup_failed:{type(exc).__name__}"
+                )
+            summary["cleanup_error"] = (
+                f"runtime_session_cleanup_failed:{type(exc).__name__}"
+            )
+            summary["runtime_session_removed"] = False
+    summary["lease_cleanup"] = lease_cleanup_evidence(
+        db_path,
+        account_id=str(account["account_id"]),
+        run_id=run_id,
+        lease_id=guard.lease_id,
+    )
     write_summary(run_dir, summary)
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -1170,6 +1167,13 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             finished=True,
         )
     print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
+    if (
+        summary.get("lease_released") is not True
+        or summary.get("runtime_session_removed") is not True
+    ):
+        return 2
+    if interrupt:
+        return int(interrupt["exit_code"])
     return 0 if summary["status"] == "completed" else 2
 
 
@@ -1424,8 +1428,9 @@ def _run_security_limit_retry_controller(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    global _ACTIVE_LEASE_GUARD
+    global _ACTIVE_LEASE_GUARD, _ACTIVE_SESSION_ROOT
     _ACTIVE_LEASE_GUARD = None
+    _ACTIVE_SESSION_ROOT = None
     code = 2
     try:
         try:
@@ -1441,8 +1446,16 @@ def main() -> int:
     finally:
         guard = _ACTIVE_LEASE_GUARD
         _ACTIVE_LEASE_GUARD = None
-        if guard is not None and not guard.close():
+        released = guard is None or guard.close()
+        if not released:
             code = 2
+        session_root = _ACTIVE_SESSION_ROOT
+        _ACTIVE_SESSION_ROOT = None
+        if released and session_root is not None:
+            try:
+                remove_runtime_session(session_root)
+            except OSError:
+                code = 2
     return code
 
 
