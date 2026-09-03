@@ -127,6 +127,40 @@ def test_runtime_status_is_fixed_atomic_authenticated_0600_and_run_scoped(
     assert "owner_token" not in observed
 
 
+def test_optional_read_and_public_projection_keep_missing_and_secrets_distinct(
+    session_paths: dict[str, Path],
+) -> None:
+    assert runtime.read_runtime_status_if_present(
+        session_paths["status"],
+        auth_key=AUTH_KEY,
+        expected_run_id="run-1",
+        expected_account_id="xhs-a01",
+        expected_lease_id="lease-1",
+        expected_writer_identity=SUPERVISOR,
+    ) is None
+
+    write_status(session_paths["status"])
+    observed = read_status(session_paths["status"])
+    public = runtime.public_runtime_status(observed)
+
+    assert public == {
+        "writer_role": "mediacrawler_supervisor",
+        "sequence": 1,
+        "heartbeat_at": NOW.isoformat(),
+        "phase": "running",
+        "network_state": "online",
+        "network_reason": "",
+    }
+    assert not {
+        "auth_tag",
+        "run_id",
+        "account_id",
+        "lease_id",
+        "writer_pid",
+        "writer_process_start_token",
+    } & set(public)
+
+
 def test_runtime_session_removal_naturally_removes_status(
     session_paths: dict[str, Path],
 ) -> None:

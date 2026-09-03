@@ -59,6 +59,14 @@ RUNTIME_STATUS_SIGNED_FIELDS = frozenset(
     }
 )
 RUNTIME_STATUS_FIELDS = RUNTIME_STATUS_SIGNED_FIELDS | frozenset({"auth_tag"})
+PUBLIC_RUNTIME_STATUS_FIELDS = (
+    "writer_role",
+    "sequence",
+    "heartbeat_at",
+    "phase",
+    "network_state",
+    "network_reason",
+)
 AUTH_TAG_RE = re.compile(r"[0-9a-f]{64}\Z")
 SENSITIVE_REASON_RE = re.compile(
     r"authorization|cookie|owner[_ -]?token|storage[_ -]?state|web[_ -]?session",
@@ -68,6 +76,10 @@ SENSITIVE_REASON_RE = re.compile(
 
 class RuntimeStatusValidationError(ValueError):
     """Raised when an ephemeral runtime status crosses its strict boundary."""
+
+
+class RuntimeStatusNotFound(RuntimeStatusValidationError):
+    """Raised only when the exact runtime status file does not yet exist."""
 
 
 def _validated_run_id(run_id: str) -> str:
@@ -496,6 +508,8 @@ def _read_runtime_status_file(target: Path) -> str:
             ) from exc
     except RuntimeStatusValidationError:
         raise
+    except FileNotFoundError as exc:
+        raise RuntimeStatusNotFound("runtime status does not exist") from exc
     except OSError as exc:
         raise RuntimeStatusValidationError(
             f"runtime status cannot be read: {type(exc).__name__}"
@@ -533,6 +547,41 @@ def read_runtime_status(
         expected_writer_identity=expected_writer_identity,
         previous_sequence=previous_sequence,
     )
+
+
+def read_runtime_status_if_present(
+    path: str | Path,
+    *,
+    auth_key: bytes,
+    expected_run_id: str,
+    expected_writer_identity: object,
+    expected_account_id: str | None = None,
+    expected_lease_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return ``None`` only while the exact status file has not been created."""
+
+    try:
+        return read_runtime_status(
+            path,
+            auth_key=auth_key,
+            expected_run_id=expected_run_id,
+            expected_account_id=expected_account_id,
+            expected_lease_id=expected_lease_id,
+            expected_writer_identity=expected_writer_identity,
+        )
+    except RuntimeStatusNotFound:
+        return None
+
+
+def public_runtime_status(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a validated runtime status onto its non-secret audit fields."""
+
+    missing = [field for field in PUBLIC_RUNTIME_STATUS_FIELDS if field not in payload]
+    if missing:
+        raise RuntimeStatusValidationError(
+            f"runtime status public projection is missing fields: {missing}"
+        )
+    return {field: payload[field] for field in PUBLIC_RUNTIME_STATUS_FIELDS}
 
 
 def write_runtime_status_atomic(

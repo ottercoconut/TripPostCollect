@@ -7,6 +7,7 @@ import ctypes.util
 import fcntl
 import hashlib
 import json
+import math
 import os
 import secrets
 import shlex
@@ -32,6 +33,13 @@ from trippostcollect.xhs.accounts import (
     parse_iso,
     record_event,
     validate_account_id,
+)
+from trippostcollect.xhs.runtime import (
+    RUNTIME_STATUS_AUTH_KEY_ENV,
+    RuntimeStatusValidationError,
+    public_runtime_status,
+    read_runtime_status_if_present,
+    runtime_status_path,
 )
 
 
@@ -153,6 +161,118 @@ class LeaseSubprocessResult:
     stdout: str
     stderr: str
     timed_out: bool
+    termination_reason: str | None = None
+    runtime_status: dict[str, Any] | None = None
+    watchdog_resume_grace_used: bool = False
+
+
+@dataclass(frozen=True)
+class RuntimeStatusWatchdogPolicy:
+    """Parent-side liveness bounds; status is never durable crawl progress."""
+
+    startup_grace_seconds: float
+    stale_after_seconds: float
+    poll_seconds: float = 5.0
+    resume_grace_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        values = {
+            "startup_grace_seconds": self.startup_grace_seconds,
+            "stale_after_seconds": self.stale_after_seconds,
+            "poll_seconds": self.poll_seconds,
+            "resume_grace_seconds": self.resume_grace_seconds,
+        }
+        normalized: dict[str, float] = {}
+        for field, raw_value in values.items():
+            if (
+                isinstance(raw_value, bool)
+                or not isinstance(raw_value, (int, float))
+                or not math.isfinite(float(raw_value))
+            ):
+                raise ValueError(f"{field} must be a finite number")
+            normalized[field] = float(raw_value)
+            object.__setattr__(self, field, normalized[field])
+        if normalized["startup_grace_seconds"] < 0:
+            raise ValueError("startup_grace_seconds cannot be negative")
+        if normalized["stale_after_seconds"] <= 0:
+            raise ValueError("stale_after_seconds must be positive")
+        if normalized["poll_seconds"] <= 0:
+            raise ValueError("poll_seconds must be positive")
+        if normalized["poll_seconds"] > normalized["stale_after_seconds"]:
+            raise ValueError("poll_seconds cannot exceed stale_after_seconds")
+        if not 0 <= normalized["resume_grace_seconds"] <= normalized["stale_after_seconds"]:
+            raise ValueError(
+                "resume_grace_seconds must be between zero and stale_after_seconds"
+            )
+
+
+@dataclass
+class _ParentRuntimeWatchdogState:
+    policy: RuntimeStatusWatchdogPolicy
+    started_at: float
+    last_poll_at: float
+    last_sequence: int | None = None
+    last_sequence_received_at: float | None = None
+    last_status: dict[str, Any] | None = None
+    resume_granted_sequence: int | None = None
+    resume_deadline: float | None = None
+
+    def observe(
+        self,
+        status: Mapping[str, Any] | None,
+        *,
+        received_at: float,
+    ) -> str | None:
+        if received_at < self.last_poll_at:
+            return "parent_monotonic_regressed"
+        poll_gap = received_at - self.last_poll_at
+        self.last_poll_at = received_at
+        if status is None and self.last_sequence is not None:
+            return "runtime_status_missing_after_observation"
+        if status is not None:
+            sequence = int(status["sequence"])
+            observed = dict(status)
+            if self.last_sequence is None or sequence > self.last_sequence:
+                self.last_sequence = sequence
+                self.last_sequence_received_at = received_at
+                self.last_status = observed
+                self.resume_deadline = None
+                return None
+            if sequence < self.last_sequence:
+                return "runtime_status_sequence_regressed"
+            if observed != self.last_status:
+                return "runtime_status_sequence_reused"
+
+        deadline = (
+            self.started_at + self.policy.startup_grace_seconds
+            if self.last_sequence_received_at is None
+            else self.last_sequence_received_at + self.policy.stale_after_seconds
+        )
+        if received_at <= deadline:
+            return None
+        current_sequence = self.last_sequence or 0
+        if (
+            self.policy.resume_grace_seconds > 0
+            and poll_gap > self.policy.stale_after_seconds
+            and self.resume_granted_sequence != current_sequence
+        ):
+            self.resume_granted_sequence = current_sequence
+            self.resume_deadline = received_at + self.policy.resume_grace_seconds
+            return None
+        if self.resume_deadline is not None and received_at <= self.resume_deadline:
+            return None
+        return (
+            "runtime_status_startup_timeout"
+            if self.last_sequence is None
+            else "runtime_status_stale"
+        )
+
+    def public_status(self) -> dict[str, Any] | None:
+        return (
+            public_runtime_status(self.last_status)
+            if self.last_status is not None
+            else None
+        )
 
 
 def _read_nonempty(path: Path) -> str:
@@ -1228,8 +1348,15 @@ class LeaseGuard:
         cwd: Path,
         env: Mapping[str, str],
         timeout_seconds: int,
+        runtime_watchdog: RuntimeStatusWatchdogPolicy | None = None,
     ) -> LeaseSubprocessResult:
         child_env = self.child_environment(env)
+        runtime_auth_key: bytes | None = None
+        if runtime_watchdog is not None:
+            runtime_auth_key = secrets.token_bytes(32)
+            if type(runtime_auth_key) is not bytes or len(runtime_auth_key) != 32:
+                raise RuntimeError("runtime watchdog key generation failed")
+            child_env[RUNTIME_STATUS_AUTH_KEY_ENV] = runtime_auth_key.hex()
         proc = subprocess.Popen(
             list(command),
             cwd=str(cwd),
@@ -1239,40 +1366,112 @@ class LeaseGuard:
             text=True,
             start_new_session=True,
         )
+        watchdog_started_at = time.monotonic()
         try:
             identity = self.register_process(proc.pid, "child")
         except BaseException:
             self._terminate_unregistered_process_group(proc)
             raise
+        watchdog_state = (
+            _ParentRuntimeWatchdogState(
+                policy=runtime_watchdog,
+                started_at=watchdog_started_at,
+                last_poll_at=watchdog_started_at,
+            )
+            if runtime_watchdog is not None
+            else None
+        )
         timed_out = False
+        termination_reason: str | None = None
         stdout = ""
         stderr = ""
         returncode = 1
         try:
-            try:
-                stdout, stderr = proc.communicate(timeout=int(timeout_seconds))
-                returncode = int(proc.returncode or 0)
-            except subprocess.TimeoutExpired as exc:
-                timed_out = True
-                stdout = str(exc.stdout or "")
-                stderr = str(exc.stderr or "")
-                self._signal_registered_group(identity, signal.SIGTERM)
+            if runtime_watchdog is None:
                 try:
-                    extra_stdout, extra_stderr = proc.communicate(
-                        timeout=max(1, self.budget.child_shutdown_seconds // 2)
+                    stdout, stderr = proc.communicate(timeout=int(timeout_seconds))
+                    returncode = int(proc.returncode or 0)
+                except subprocess.TimeoutExpired as exc:
+                    timed_out = True
+                    termination_reason = "absolute_timeout"
+                    stdout = str(exc.stdout or "")
+                    stderr = str(exc.stderr or "")
+                    self._signal_registered_group(identity, signal.SIGTERM)
+                    try:
+                        extra_stdout, extra_stderr = proc.communicate(
+                            timeout=max(1, self.budget.child_shutdown_seconds // 2)
+                        )
+                    except subprocess.TimeoutExpired:
+                        self._signal_registered_group(identity, signal.SIGKILL)
+                        extra_stdout, extra_stderr = proc.communicate(
+                            timeout=max(1, self.budget.child_shutdown_seconds // 2)
+                        )
+                    stdout += str(extra_stdout or "")
+                    stderr += str(extra_stderr or "")
+                    returncode = 124
+                    self.terminate_owned_processes()
+            else:
+                assert runtime_auth_key is not None
+                assert watchdog_state is not None
+                status_path = runtime_status_path(self.run_id)
+                while True:
+                    if proc.poll() is not None:
+                        stdout, stderr = proc.communicate()
+                        returncode = int(proc.returncode or 0)
+                        break
+                    if self.inspector.identity(proc.pid) != identity:
+                        if proc.poll() is not None:
+                            stdout, stderr = proc.communicate()
+                            returncode = int(proc.returncode or 0)
+                        else:
+                            termination_reason = "child_process_identity_changed"
+                            self.terminate_owned_processes()
+                        break
+                    try:
+                        status = read_runtime_status_if_present(
+                            status_path,
+                            auth_key=runtime_auth_key,
+                            expected_run_id=self.run_id,
+                            expected_account_id=self.account_id,
+                            expected_lease_id=self.lease_id,
+                            expected_writer_identity=identity,
+                        )
+                    except RuntimeStatusValidationError:
+                        termination_reason = "runtime_status_invalid"
+                        returncode = 1
+                        stdout, stderr = self._terminate_registered_subprocess(
+                            proc,
+                            identity,
+                        )
+                        self.terminate_owned_processes()
+                        break
+                    termination_reason = watchdog_state.observe(
+                        status,
+                        received_at=time.monotonic(),
                     )
-                except subprocess.TimeoutExpired:
-                    self._signal_registered_group(identity, signal.SIGKILL)
-                    extra_stdout, extra_stderr = proc.communicate(
-                        timeout=max(1, self.budget.child_shutdown_seconds // 2)
-                    )
-                stdout += str(extra_stdout or "")
-                stderr += str(extra_stderr or "")
-                returncode = 124
-                self.terminate_owned_processes()
-            except BaseException:
-                self.terminate_owned_processes()
-                raise
+                    if termination_reason is not None:
+                        timed_out = termination_reason in {
+                            "runtime_status_startup_timeout",
+                            "runtime_status_stale",
+                        }
+                        returncode = 124 if timed_out else 1
+                        stdout, stderr = self._terminate_registered_subprocess(
+                            proc,
+                            identity,
+                        )
+                        self.terminate_owned_processes()
+                        break
+                    try:
+                        stdout, stderr = proc.communicate(
+                            timeout=runtime_watchdog.poll_seconds
+                        )
+                    except subprocess.TimeoutExpired:
+                        continue
+                    returncode = int(proc.returncode or 0)
+                    break
+        except BaseException:
+            self.terminate_owned_processes()
+            raise
         finally:
             if proc.poll() is not None:
                 try:
@@ -1285,7 +1484,36 @@ class LeaseGuard:
             stdout=stdout,
             stderr=stderr,
             timed_out=timed_out,
+            termination_reason=termination_reason,
+            runtime_status=(
+                watchdog_state.public_status()
+                if watchdog_state is not None
+                else None
+            ),
+            watchdog_resume_grace_used=bool(
+                watchdog_state is not None
+                and watchdog_state.resume_granted_sequence is not None
+            ),
         )
+
+    def _terminate_registered_subprocess(
+        self,
+        proc: subprocess.Popen[str],
+        identity: ProcessIdentity,
+    ) -> tuple[str, str]:
+        if proc.poll() is not None:
+            stdout, stderr = proc.communicate()
+            return str(stdout or ""), str(stderr or "")
+        if self.inspector.identity(proc.pid) != identity:
+            return "", ""
+        self._signal_registered_group(identity, signal.SIGTERM)
+        half_budget = max(1, self.budget.child_shutdown_seconds // 2)
+        try:
+            stdout, stderr = proc.communicate(timeout=half_budget)
+        except subprocess.TimeoutExpired:
+            self._signal_registered_group(identity, signal.SIGKILL)
+            stdout, stderr = proc.communicate(timeout=half_budget)
+        return str(stdout or ""), str(stderr or "")
 
     def _signal_registered_group(self, identity: ProcessIdentity, signum: int) -> None:
         if identity.pgid == (self.owner.pgid if self.owner else None):
