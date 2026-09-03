@@ -1627,6 +1627,8 @@ class LeaseGuard:
         self._previous_handlers.clear()
 
     def _signal_handler(self, signum: int, _frame: FrameType | None) -> None:
+        if self.signal_received is not None:
+            return
         self.signal_received = int(signum)
         if self._closing:
             return

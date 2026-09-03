@@ -170,15 +170,42 @@ def test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup(
         "XHS_LEGACY_ACCOUNT_ROOT",
         tmp_path / "legacy-accounts",
     )
+    previous_handlers = {
+        signum: xhs_runner.signal.getsignal(signum)
+        for signum in (xhs_runner.signal.SIGINT, xhs_runner.signal.SIGTERM)
+    }
+    secondary_signals = []
+    original_fail_open_step = xhs_runner.fail_open_step
+    original_terminate_owned_processes = (
+        xhs_runner.LeaseGuard.terminate_owned_processes
+    )
 
     def interrupt_child(self, *_args, **_kwargs):
         watchdogs.append(_kwargs.get("runtime_watchdog"))
         if interrupt_kind == "lease_signal":
-            self.signal_received = int(xhs_runner.signal.SIGINT)
-            raise xhs_runner.XhsLeaseSignal(xhs_runner.signal.SIGINT)
+            self._signal_handler(xhs_runner.signal.SIGINT, None)
         raise KeyboardInterrupt
 
+    def fail_open_with_secondary_signal(*args, **kwargs):
+        guard = xhs_runner._ACTIVE_LEASE_GUARD
+        assert guard is not None
+        guard._signal_handler(xhs_runner.signal.SIGTERM, None)
+        secondary_signals.append(("terminal_write", guard.signal_received))
+        return original_fail_open_step(*args, **kwargs)
+
+    def terminate_with_secondary_signal(self):
+        assert self._closing is True
+        self._signal_handler(xhs_runner.signal.SIGTERM, None)
+        secondary_signals.append(("close", self.signal_received))
+        return original_terminate_owned_processes(self)
+
     monkeypatch.setattr(xhs_runner.LeaseGuard, "run_subprocess", interrupt_child)
+    monkeypatch.setattr(xhs_runner, "fail_open_step", fail_open_with_secondary_signal)
+    monkeypatch.setattr(
+        xhs_runner.LeaseGuard,
+        "terminate_owned_processes",
+        terminate_with_secondary_signal,
+    )
     args = argparse.Namespace(
         target_key="test",
         account_id="xhs-a01",
@@ -192,6 +219,14 @@ def test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup(
     )
 
     assert xhs_runner._run_main(args) == 130
+    assert secondary_signals == [
+        ("terminal_write", int(xhs_runner.signal.SIGINT)),
+        ("close", int(xhs_runner.signal.SIGINT)),
+    ]
+    assert {
+        signum: xhs_runner.signal.getsignal(signum)
+        for signum in (xhs_runner.signal.SIGINT, xhs_runner.signal.SIGTERM)
+    } == previous_handlers
     assert len(watchdogs) == 1
     assert watchdogs[0].startup_grace_seconds == 120.0
     assert watchdogs[0].stale_after_seconds == 60.0

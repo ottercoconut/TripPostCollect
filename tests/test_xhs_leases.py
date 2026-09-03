@@ -30,6 +30,7 @@ from trippostcollect.xhs.leases import (
     ProcessSnapshot,
     SystemProcessInspector,
     XhsLeaseOwnershipError,
+    XhsLeaseSignal,
     XhsOrphanLeaseRecoveryRefused,
     acquire_exact_account_lease,
     crawl_lease_budget,
@@ -2529,6 +2530,103 @@ def test_profile_detection_uses_exact_user_data_dir_argument(
     inspector.boot_id = "boot"
     monkeypatch.setattr(inspector, "snapshots", lambda: [exact, other_account, misleading_text])
     assert inspector.profile_processes(expected) == [exact]
+
+
+def test_signal_handler_latches_first_signal_and_restores_handlers(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    run_id = "signal-latch"
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "signal-latch.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10),
+        inspector=FakeInspector(),
+    )
+    previous = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    guard._install_signal_handlers()
+    try:
+        with pytest.raises(XhsLeaseSignal) as first:
+            guard._signal_handler(signal.SIGINT, None)
+        assert first.value.signum == signal.SIGINT
+        assert guard.signal_received == signal.SIGINT
+
+        guard._signal_handler(signal.SIGTERM, None)
+        assert guard.signal_received == signal.SIGINT
+
+        guard._closing = True
+        guard._signal_handler(signal.SIGTERM, None)
+        assert guard.signal_received == signal.SIGINT
+    finally:
+        guard._closing = False
+        guard.close()
+
+    assert guard._previous_handlers == {}
+    assert {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    } == previous
+
+
+def test_signal_latch_survives_deferred_close_and_restores_handlers(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "signal-latch-deferred-close"
+    previous = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "signal-latch-deferred-close.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10),
+        inspector=FakeInspector(current=OWNER),
+    )
+    guard.acquire()
+    with pytest.raises(XhsLeaseSignal):
+        guard._signal_handler(signal.SIGINT, None)
+
+    def block_release() -> dict[str, Any]:
+        assert guard._closing is True
+        guard._signal_handler(signal.SIGTERM, None)
+        return {
+            "safe_to_release": False,
+            "checks": [],
+            "blocking": [{"reason": "test_process_still_live"}],
+        }
+
+    monkeypatch.setattr(guard, "terminate_owned_processes", block_release)
+
+    assert guard.close() is False
+    assert guard.signal_received == signal.SIGINT
+    assert guard._previous_handlers == {}
+    assert {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    } == previous
+    with connect(control_db) as conn:
+        row = conn.execute(
+            """
+            SELECT details_json FROM xhs_account_events
+            WHERE run_id=? AND event_type='lease_release_deferred_live_processes'
+            """,
+            (run_id,),
+        ).fetchone()
+        assert row is not None
+        assert json.loads(row[0])["signal"] == signal.SIGINT
 
 
 def test_concurrent_orphan_reconciliation_has_one_winner(
