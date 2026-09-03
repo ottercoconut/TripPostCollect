@@ -64,6 +64,7 @@ from trippostcollect.xhs.supervision import (
 )
 from trippostcollect.xhs.terminal import (
     XhsRunTerminalizer,
+    XhsTerminalSignal,
     atomic_write_json,
 )
 
@@ -1651,7 +1652,7 @@ def main() -> int:
                 code = _run_security_limit_retry_controller(args)
             else:
                 code = _run_main(args)
-        except XhsLeaseSignal as exc:
+        except (XhsLeaseSignal, XhsTerminalSignal) as exc:
             code = 128 + exc.signum
         except KeyboardInterrupt:
             code = 130

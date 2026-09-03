@@ -50,7 +50,7 @@ from trippostcollect.xhs.supervision import (
     run_supervised_xhs_subprocess,
     runtime_watchdog_evidence,
 )
-from trippostcollect.xhs.terminal import XhsRunTerminalizer
+from trippostcollect.xhs.terminal import XhsRunTerminalizer, XhsTerminalSignal
 from xhs_runner import (
     _challenge_reason,
     _eligible_account_for_plan,
@@ -1008,7 +1008,7 @@ def main() -> int:
     try:
         try:
             code = _run_main()
-        except XhsLeaseSignal as exc:
+        except (XhsLeaseSignal, XhsTerminalSignal) as exc:
             code = 128 + exc.signum
         except KeyboardInterrupt:
             code = 130
