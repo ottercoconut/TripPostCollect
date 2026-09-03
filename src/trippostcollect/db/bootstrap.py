@@ -71,6 +71,14 @@ XHS_OBSOLETE_LEASE_AUDIT_COLUMNS = (
     "acquired_at",
     "expires_at",
 )
+XHS_SCHEMA_MIGRATIONS = (
+    (10, "xhs_manual_account_selection"),
+    (12, "xhs_discovery_checkpoints"),
+    (21, "xhs_exact_lease_identity"),
+    (22, "xhs_run_scoped_login_state"),
+)
+
+
 def qmarks(values: set[str] | list[str]) -> str:
     return ",".join("?" for _ in values)
 
@@ -142,6 +150,49 @@ def record_xhs_lease_schema_cutover(
                 json_dump(details),
                 created_at,
             ),
+        )
+
+
+def _sqlite_script_statements(script: str) -> tuple[str, ...]:
+    """Split a SQLite script without executing sqlite3's implicit COMMIT."""
+
+    statements: list[str] = []
+    pending: list[str] = []
+    for character in script:
+        pending.append(character)
+        if character != ";":
+            continue
+        candidate = "".join(pending)
+        if sqlite3.complete_statement(candidate):
+            statements.append(candidate)
+            pending.clear()
+    remainder = "".join(pending).strip()
+    if remainder:
+        raise RuntimeError("SQLite schema script has an incomplete trailing statement")
+    return tuple(statements)
+
+
+def _execute_sqlite_statements(
+    conn: sqlite3.Connection,
+    statements: tuple[str, ...],
+) -> None:
+    for statement in statements:
+        conn.execute(statement)
+
+
+def _assert_xhs_foreign_keys(conn: sqlite3.Connection) -> None:
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(
+            f"XHS schema cutover foreign-key check failed: {violations[:3]!r}"
+        )
+
+
+def _record_xhs_schema_migrations(conn: sqlite3.Connection) -> None:
+    for version, name in XHS_SCHEMA_MIGRATIONS:
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
+            (version, name),
         )
 
 
@@ -462,6 +513,9 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
 
 
 def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
+    schema_statements = _sqlite_script_statements(
+        XHS_CONTROL_SCHEMA.read_text(encoding="utf-8")
+    )
     account_columns = (
         table_columns(conn, "xhs_accounts")
         if table_exists(conn, "xhs_accounts")
@@ -474,86 +528,74 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
         "created_at",
         "updated_at",
     }
-    obsolete_leases: list[dict[str, Any]] = []
-    if account_columns and account_columns != runtime_only_account_columns:
-        obsolete_leases = obsolete_xhs_lease_snapshots(conn)
-        last_used = "last_used_at" if "last_used_at" in account_columns else "NULL"
-        created = "created_at" if "created_at" in account_columns else "datetime('now')"
-        updated = "updated_at" if "updated_at" in account_columns else "datetime('now')"
-        conn.commit()
-        conn.execute("PRAGMA foreign_keys = OFF")
-        try:
-            conn.execute("DROP TABLE IF EXISTS xhs_lease_processes")
-            conn.execute("DROP TABLE IF EXISTS xhs_account_leases")
-            conn.execute("DROP INDEX IF EXISTS idx_xhs_accounts_eligible")
-            conn.execute(
-                f"""
-                CREATE TEMP TABLE xhs_accounts_runtime_backup AS
-                SELECT
-                    account_id,
-                    CASE
-                        WHEN status='retired' THEN 'retired'
-                        WHEN status='quarantined' THEN 'quarantined'
-                        ELSE 'active'
-                    END AS status,
-                    {last_used} AS last_used_at,
-                    {created} AS created_at,
-                    {updated} AS updated_at
-                FROM xhs_accounts
-                """
-            )
-            conn.execute("DROP TABLE xhs_accounts")
-            conn.executescript(XHS_CONTROL_SCHEMA.read_text(encoding="utf-8"))
-            conn.execute(
-                """
-                INSERT INTO xhs_accounts(
-                    account_id, status, last_used_at, created_at, updated_at
-                )
-                SELECT account_id, status, last_used_at, created_at, updated_at
-                FROM xhs_accounts_runtime_backup
-                """
-            )
-            conn.execute("DROP TABLE xhs_accounts_runtime_backup")
-            conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
-            record_xhs_lease_schema_cutover(conn, obsolete_leases)
-            conn.commit()
-        finally:
-            conn.execute("PRAGMA foreign_keys = ON")
+    rebuild_accounts = bool(
+        account_columns and account_columns != runtime_only_account_columns
+    )
     lease_columns = (
         table_columns(conn, "xhs_account_leases")
         if table_exists(conn, "xhs_account_leases")
         else set()
     )
-    if lease_columns and not XHS_EXACT_LEASE_COLUMNS.issubset(lease_columns):
-        obsolete_leases = obsolete_xhs_lease_snapshots(conn)
+    rebuild_leases = bool(
+        lease_columns and not XHS_EXACT_LEASE_COLUMNS.issubset(lease_columns)
+    )
+    if rebuild_accounts or rebuild_leases:
+        last_used = "last_used_at" if "last_used_at" in account_columns else "NULL"
+        created = "created_at" if "created_at" in account_columns else "datetime('now')"
+        updated = "updated_at" if "updated_at" in account_columns else "datetime('now')"
         conn.commit()
-        conn.execute("PRAGMA foreign_keys = OFF")
         try:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("BEGIN IMMEDIATE")
+            obsolete_leases = obsolete_xhs_lease_snapshots(conn)
+            if rebuild_accounts:
+                conn.execute(
+                    f"""
+                    CREATE TEMP TABLE xhs_accounts_runtime_backup AS
+                    SELECT
+                        account_id,
+                        CASE
+                            WHEN status='retired' THEN 'retired'
+                            WHEN status='quarantined' THEN 'quarantined'
+                            ELSE 'active'
+                        END AS status,
+                        {last_used} AS last_used_at,
+                        {created} AS created_at,
+                        {updated} AS updated_at
+                    FROM xhs_accounts
+                    """
+                )
             conn.execute("DROP TABLE IF EXISTS xhs_lease_processes")
-            conn.execute("DROP TABLE xhs_account_leases")
-            conn.executescript(XHS_CONTROL_SCHEMA.read_text(encoding="utf-8"))
+            conn.execute("DROP TABLE IF EXISTS xhs_account_leases")
+            if rebuild_accounts:
+                conn.execute("DROP INDEX IF EXISTS idx_xhs_accounts_eligible")
+                conn.execute("DROP TABLE xhs_accounts")
+            _execute_sqlite_statements(conn, schema_statements)
+            if rebuild_accounts:
+                conn.execute(
+                    """
+                    INSERT INTO xhs_accounts(
+                        account_id, status, last_used_at, created_at, updated_at
+                    )
+                    SELECT account_id, status, last_used_at, created_at, updated_at
+                    FROM xhs_accounts_runtime_backup
+                    """
+                )
+                conn.execute("DROP TABLE xhs_accounts_runtime_backup")
+            conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
             record_xhs_lease_schema_cutover(conn, obsolete_leases)
+            _record_xhs_schema_migrations(conn)
+            _assert_xhs_foreign_keys(conn)
             conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         finally:
             conn.execute("PRAGMA foreign_keys = ON")
+        return
     conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
-    conn.executescript(XHS_CONTROL_SCHEMA.read_text(encoding="utf-8"))
-    conn.execute(
-        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
-        (10, "xhs_manual_account_selection"),
-    )
-    conn.execute(
-        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
-        (12, "xhs_discovery_checkpoints"),
-    )
-    conn.execute(
-        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
-        (21, "xhs_exact_lease_identity"),
-    )
-    conn.execute(
-        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
-        (22, "xhs_run_scoped_login_state"),
-    )
+    _execute_sqlite_statements(conn, schema_statements)
+    _record_xhs_schema_migrations(conn)
 
 
 def sync_config_jobs(conn: sqlite3.Connection, config: dict[str, Any]) -> int:

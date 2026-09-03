@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from trippostcollect.db import bootstrap as db_bootstrap
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs import accounts, leases as xhs_leases, runtime
 from trippostcollect.xhs.accounts import XhsAccountUnavailable
@@ -111,6 +112,418 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def create_v21_xhs_database(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.executescript(
+            """
+            CREATE TABLE schema_migrations(
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT INTO schema_migrations(version, name)
+            VALUES (21, 'xhs_exact_lease_identity');
+
+            CREATE TABLE xhs_accounts(
+                account_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                profile_dir TEXT NOT NULL UNIQUE,
+                encrypted_state_path TEXT NOT NULL UNIQUE,
+                identity_hash TEXT UNIQUE,
+                last_verified_at TEXT,
+                last_used_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK (status IN (
+                    'login_pending', 'active', 'login_required',
+                    'quarantined', 'retired'
+                ))
+            );
+            CREATE INDEX idx_xhs_accounts_eligible
+            ON xhs_accounts(status, account_id);
+
+            CREATE TABLE xhs_account_events(
+                id INTEGER PRIMARY KEY,
+                account_id TEXT REFERENCES xhs_accounts(account_id) ON DELETE SET NULL,
+                run_id TEXT,
+                event_type TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE xhs_account_leases(
+                account_id TEXT PRIMARY KEY REFERENCES xhs_accounts(account_id) ON DELETE CASCADE,
+                lease_id TEXT NOT NULL UNIQUE,
+                owner_token TEXT NOT NULL UNIQUE,
+                run_id TEXT NOT NULL UNIQUE,
+                lease_kind TEXT NOT NULL,
+                owner_host_id TEXT NOT NULL,
+                owner_boot_id TEXT NOT NULL,
+                owner_pid INTEGER NOT NULL,
+                owner_process_started_at TEXT NOT NULL,
+                owner_process_start_token TEXT NOT NULL,
+                owner_pgid INTEGER NOT NULL,
+                execution_state_path TEXT NOT NULL,
+                acquired_at TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                lease_duration_seconds INTEGER NOT NULL,
+                child_shutdown_budget_seconds INTEGER NOT NULL,
+                root_finalize_budget_seconds INTEGER NOT NULL,
+                identity_version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE xhs_lease_processes(
+                lease_id TEXT NOT NULL REFERENCES xhs_account_leases(lease_id) ON DELETE CASCADE,
+                process_role TEXT NOT NULL,
+                host_id TEXT NOT NULL,
+                boot_id TEXT NOT NULL,
+                pid INTEGER NOT NULL,
+                process_started_at TEXT NOT NULL,
+                process_start_token TEXT NOT NULL,
+                pgid INTEGER NOT NULL,
+                registered_at TEXT NOT NULL,
+                exited_at TEXT,
+                PRIMARY KEY (lease_id, process_role, pid, process_start_token)
+            );
+
+            CREATE TABLE xhs_runs(
+                run_id TEXT PRIMARY KEY,
+                target_key TEXT NOT NULL,
+                account_id TEXT REFERENCES xhs_accounts(account_id) ON DELETE SET NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                execution_state_path TEXT NOT NULL,
+                child_summary_path TEXT,
+                report_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE xhs_discovery_checkpoints(
+                id INTEGER PRIMARY KEY,
+                target_key TEXT NOT NULL,
+                account_id TEXT NOT NULL REFERENCES xhs_accounts(account_id) ON DELETE CASCADE,
+                keyword TEXT NOT NULL,
+                query_fingerprint TEXT NOT NULL,
+                resume_page INTEGER NOT NULL DEFAULT 1,
+                resume_search_id TEXT,
+                source_has_more INTEGER,
+                status TEXT NOT NULL DEFAULT 'active',
+                last_batch_complete INTEGER NOT NULL DEFAULT 1,
+                last_stop_reason TEXT NOT NULL DEFAULT '',
+                last_run_id TEXT,
+                last_summary_path TEXT,
+                campaign_candidate_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(target_key, account_id, query_fingerprint)
+            );
+            CREATE TABLE xhs_discovery_seen_candidates(
+                target_key TEXT NOT NULL,
+                account_id TEXT NOT NULL REFERENCES xhs_accounts(account_id) ON DELETE CASCADE,
+                query_fingerprint TEXT NOT NULL,
+                platform_post_id TEXT NOT NULL,
+                first_run_id TEXT NOT NULL,
+                last_run_id TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY (
+                    target_key, account_id, query_fingerprint, platform_post_id
+                )
+            );
+            CREATE TABLE xhs_platform_state(
+                site_key TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                daily_runs INTEGER NOT NULL
+            );
+
+            INSERT INTO xhs_accounts VALUES
+                ('xhs-a01', 'login_required', '/profile-a', '/state-a', 'identity-a',
+                 NULL, '2026-08-30T00:00:00+00:00', '2026-08-01', '2026-08-30'),
+                ('xhs-a02', 'quarantined', '/profile-b', '/state-b', 'identity-b',
+                 NULL, NULL, '2026-08-02', '2026-08-29'),
+                ('xhs-a03', 'retired', '/profile-c', '/state-c', 'identity-c',
+                 NULL, NULL, '2026-08-03', '2026-08-28');
+            INSERT INTO xhs_account_events VALUES(
+                41, 'xhs-a01', 'legacy-run', 'login_persisted',
+                '{"identity_hash":"identity-a"}', '2026-08-30T00:00:00+00:00'
+            );
+            INSERT INTO xhs_account_leases VALUES(
+                'xhs-a01', 'legacy-lease', 'legacy-owner', 'legacy-run', 'crawl',
+                'host-a', 'boot-a', 111, '2026-08-30T00:00:00+00:00',
+                'start-111', 111, '/execution.json',
+                '2026-08-30T00:00:00+00:00', '2026-08-30T00:01:00+00:00',
+                '2026-08-30T01:00:00+00:00', 3600, 30, 270, 1
+            );
+            INSERT INTO xhs_lease_processes VALUES(
+                'legacy-lease', 'child', 'host-a', 'boot-a', 222,
+                '2026-08-30T00:02:00+00:00', 'start-222', 222,
+                '2026-08-30T00:02:00+00:00', NULL
+            );
+            INSERT INTO xhs_runs VALUES(
+                'legacy-run', 'target', 'xhs-a01', 'running',
+                '2026-08-30T00:00:00+00:00', NULL, '/execution.json', NULL, '{}'
+            );
+            INSERT INTO xhs_discovery_checkpoints VALUES(
+                7, 'target', 'xhs-a01', '青岛旅游', 'fingerprint', 9, 'cursor-9',
+                1, 'active', 1, 'safe_boundary', 'safe-run', '/summary.json', 23,
+                '2026-08-01T00:00:00+00:00', '2026-08-30T00:00:00+00:00'
+            );
+            INSERT INTO xhs_discovery_seen_candidates VALUES(
+                'target', 'xhs-a01', 'fingerprint', 'post-9', 'safe-run',
+                'safe-run', '2026-08-01T00:00:00+00:00',
+                '2026-08-30T00:00:00+00:00'
+            );
+            INSERT INTO xhs_platform_state VALUES('xhs', 'active', 3);
+            """
+        )
+
+
+class FaultingConnection:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        fail_after_sql: str | None = None,
+        fail_final_commit: bool = False,
+    ):
+        self.connection = connection
+        self.fail_after_sql = fail_after_sql
+        self.fail_final_commit = fail_final_commit
+        self.triggered = False
+        self.commit_armed = False
+
+    def execute(
+        self,
+        sql: str,
+        parameters: Any = (),
+    ) -> sqlite3.Cursor:
+        cursor = self.connection.execute(sql, parameters)
+        normalized = " ".join(sql.split())
+        if (
+            self.fail_final_commit
+            and normalized.startswith("INSERT OR IGNORE INTO schema_migrations")
+            and tuple(parameters) == (22, "xhs_run_scoped_login_state")
+        ):
+            self.commit_armed = True
+        if (
+            not self.triggered
+            and self.fail_after_sql
+            and self.fail_after_sql in normalized
+        ):
+            self.triggered = True
+            raise sqlite3.OperationalError("database or disk is full")
+        return cursor
+
+    def commit(self) -> None:
+        if self.commit_armed:
+            self.commit_armed = False
+            self.triggered = True
+            raise sqlite3.OperationalError("database or disk is full")
+        self.connection.commit()
+
+    def rollback(self) -> None:
+        self.connection.rollback()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.connection, name)
+
+
+LEGACY_ACCOUNT_COLUMNS = {
+    "account_id",
+    "status",
+    "profile_dir",
+    "encrypted_state_path",
+    "identity_hash",
+    "last_verified_at",
+    "last_used_at",
+    "created_at",
+    "updated_at",
+}
+
+
+def xhs_database_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
+    schema = [
+        tuple(row)
+        for row in conn.execute(
+            """
+            SELECT type, name, tbl_name, sql
+            FROM sqlite_master
+            WHERE name='schema_migrations' OR name LIKE 'xhs_%'
+            ORDER BY type, name
+            """
+        ).fetchall()
+    ]
+    tables = [
+        row[1]
+        for row in schema
+        if row[0] == "table"
+    ]
+    return {
+        "schema": schema,
+        "rows": {
+            table_name: [
+                tuple(row)
+                for row in conn.execute(
+                    f'SELECT * FROM "{table_name}" ORDER BY rowid'
+                ).fetchall()
+            ]
+            for table_name in tables
+        },
+    }
+
+
+def assert_v21_xhs_database_restored(conn: sqlite3.Connection) -> None:
+    assert {row[1] for row in conn.execute("PRAGMA table_info(xhs_accounts)")} == (
+        LEGACY_ACCOUNT_COLUMNS
+    )
+    assert conn.execute(
+        "SELECT account_id, status FROM xhs_accounts ORDER BY account_id"
+    ).fetchall() == [
+        ("xhs-a01", "login_required"),
+        ("xhs-a02", "quarantined"),
+        ("xhs-a03", "retired"),
+    ]
+    assert conn.execute(
+        "SELECT lease_id, owner_token, run_id FROM xhs_account_leases"
+    ).fetchone() == ("legacy-lease", "legacy-owner", "legacy-run")
+    assert conn.execute(
+        "SELECT lease_id, process_role, pid FROM xhs_lease_processes"
+    ).fetchone() == ("legacy-lease", "child", 222)
+    assert conn.execute(
+        "SELECT id, account_id, run_id, event_type FROM xhs_account_events"
+    ).fetchone() == (41, "xhs-a01", "legacy-run", "login_persisted")
+    assert conn.execute(
+        "SELECT run_id, status, account_id FROM xhs_runs"
+    ).fetchone() == ("legacy-run", "running", "xhs-a01")
+    assert conn.execute(
+        "SELECT id, resume_page, resume_search_id FROM xhs_discovery_checkpoints"
+    ).fetchone() == (7, 9, "cursor-9")
+    assert conn.execute(
+        "SELECT platform_post_id FROM xhs_discovery_seen_candidates"
+    ).fetchone() == ("post-9",)
+    assert conn.execute("SELECT * FROM xhs_platform_state").fetchone() == (
+        "xhs",
+        "active",
+        3,
+    )
+    assert conn.execute(
+        "SELECT 1 FROM schema_migrations WHERE version=22"
+    ).fetchone() is None
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def assert_v22_xhs_history_preserved(conn: sqlite3.Connection) -> None:
+    assert {row[1] for row in conn.execute("PRAGMA table_info(xhs_accounts)")} == {
+        "account_id",
+        "status",
+        "last_used_at",
+        "created_at",
+        "updated_at",
+    }
+    assert conn.execute("SELECT * FROM xhs_accounts ORDER BY account_id").fetchall() == [
+        (
+            "xhs-a01",
+            "active",
+            "2026-08-30T00:00:00+00:00",
+            "2026-08-01",
+            "2026-08-30",
+        ),
+        ("xhs-a02", "quarantined", None, "2026-08-02", "2026-08-29"),
+        ("xhs-a03", "retired", None, "2026-08-03", "2026-08-28"),
+    ]
+    assert conn.execute(
+        """
+        SELECT id, account_id, run_id, event_type, details_json, created_at
+        FROM xhs_account_events
+        WHERE id=41
+        """
+    ).fetchone() == (
+        41,
+        "xhs-a01",
+        "legacy-run",
+        "login_persisted",
+        '{"identity_hash":"identity-a"}',
+        "2026-08-30T00:00:00+00:00",
+    )
+    assert conn.execute(
+        """
+        SELECT run_id, target_key, account_id, status, started_at,
+               finished_at, execution_state_path, child_summary_path, report_json
+        FROM xhs_runs
+        """
+    ).fetchone() == (
+        "legacy-run",
+        "target",
+        "xhs-a01",
+        "running",
+        "2026-08-30T00:00:00+00:00",
+        None,
+        "/execution.json",
+        None,
+        "{}",
+    )
+    assert conn.execute(
+        """
+        SELECT id, target_key, account_id, keyword, query_fingerprint,
+               resume_page, resume_search_id, source_has_more, status,
+               last_batch_complete, last_stop_reason, last_run_id,
+               last_summary_path, campaign_candidate_count, created_at, updated_at
+        FROM xhs_discovery_checkpoints
+        """
+    ).fetchone() == (
+        7,
+        "target",
+        "xhs-a01",
+        "青岛旅游",
+        "fingerprint",
+        9,
+        "cursor-9",
+        1,
+        "active",
+        1,
+        "safe_boundary",
+        "safe-run",
+        "/summary.json",
+        23,
+        "2026-08-01T00:00:00+00:00",
+        "2026-08-30T00:00:00+00:00",
+    )
+    assert conn.execute(
+        """
+        SELECT target_key, account_id, query_fingerprint, platform_post_id,
+               first_run_id, last_run_id, first_seen_at, last_seen_at
+        FROM xhs_discovery_seen_candidates
+        """
+    ).fetchone() == (
+        "target",
+        "xhs-a01",
+        "fingerprint",
+        "post-9",
+        "safe-run",
+        "safe-run",
+        "2026-08-01T00:00:00+00:00",
+        "2026-08-30T00:00:00+00:00",
+    )
+    assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM xhs_lease_processes").fetchone()[0] == 0
+    assert conn.execute(
+        """
+        SELECT account_id, run_id, event_type
+        FROM xhs_account_events
+        WHERE event_type='lease_schema_cutover_discarded'
+        """
+    ).fetchall() == [
+        ("xhs-a01", "legacy-run", "lease_schema_cutover_discarded")
+    ]
+    assert conn.execute(
+        "SELECT name FROM schema_migrations WHERE version=22"
+    ).fetchone() == ("xhs_run_scoped_login_state",)
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='xhs_platform_state'"
+    ).fetchone() is None
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def acquire_test_lease(
     db_path: Path,
     *,
@@ -188,6 +601,214 @@ def test_system_process_identity_uses_platform_exact_start_token() -> None:
         assert identity.process_start_token.startswith("darwin:")
     elif sys.platform.startswith("linux"):
         assert identity.process_start_token.startswith("linux:")
+
+
+def test_xhs_v22_cutover_is_atomic_and_preserves_control_history(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "legacy-v21.sqlite"
+    create_v21_xhs_database(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        db_bootstrap.ensure_xhs_control_schema(conn)
+        conn.commit()
+        assert_v22_xhs_history_preserved(conn)
+
+        db_bootstrap.ensure_xhs_control_schema(conn)
+        conn.commit()
+        assert_v22_xhs_history_preserved(conn)
+
+    with sqlite3.connect(db_path) as conn:
+        assert_v22_xhs_history_preserved(conn)
+
+
+@pytest.mark.parametrize(
+    ("fail_after_sql", "fail_final_commit"),
+    [
+        ("PRAGMA foreign_keys = OFF", False),
+        ("BEGIN IMMEDIATE", False),
+        ("CREATE TEMP TABLE xhs_accounts_runtime_backup", False),
+        ("DROP TABLE IF EXISTS xhs_account_leases", False),
+        ("DROP TABLE xhs_accounts", False),
+        ("CREATE TABLE IF NOT EXISTS xhs_account_leases", False),
+        ("INSERT INTO xhs_accounts(", False),
+        ("DROP TABLE xhs_accounts_runtime_backup", False),
+        ("DROP TABLE IF EXISTS xhs_platform_state", False),
+        ("INSERT INTO xhs_account_events(", False),
+        ("INSERT OR IGNORE INTO schema_migrations", False),
+        ("PRAGMA foreign_key_check", False),
+        (None, True),
+    ],
+    ids=[
+        "foreign-keys-disabled",
+        "transaction-started",
+        "backup-created",
+        "leases-dropped",
+        "accounts-dropped",
+        "new-schema-created",
+        "accounts-restored",
+        "backup-dropped",
+        "obsolete-state-dropped",
+        "cutover-event-recorded",
+        "version-recorded",
+        "foreign-key-check",
+        "commit",
+    ],
+)
+def test_xhs_v22_cutover_rolls_back_every_mutation_on_disk_full(
+    tmp_path: Path,
+    fail_after_sql: str | None,
+    fail_final_commit: bool,
+) -> None:
+    db_path = tmp_path / "legacy-v21.sqlite"
+    create_v21_xhs_database(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        before = xhs_database_snapshot(conn)
+        faulting_conn = FaultingConnection(
+            conn,
+            fail_after_sql=fail_after_sql,
+            fail_final_commit=fail_final_commit,
+        )
+
+        with pytest.raises(sqlite3.OperationalError, match="database or disk is full"):
+            db_bootstrap.ensure_xhs_control_schema(faulting_conn)
+
+        assert faulting_conn.triggered is True
+        assert conn.in_transaction is False
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert xhs_database_snapshot(conn) == before
+        assert_v21_xhs_database_restored(conn)
+
+    with sqlite3.connect(db_path) as conn:
+        assert xhs_database_snapshot(conn) == before
+        assert_v21_xhs_database_restored(conn)
+        conn.execute("PRAGMA foreign_keys = ON")
+        db_bootstrap.ensure_xhs_control_schema(conn)
+        conn.commit()
+        assert_v22_xhs_history_preserved(conn)
+
+    with sqlite3.connect(db_path) as conn:
+        assert_v22_xhs_history_preserved(conn)
+
+
+def test_xhs_v22_lease_only_cutover_rolls_back_schema_and_row(
+    control_db: Path,
+) -> None:
+    with sqlite3.connect(control_db) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DROP TABLE xhs_lease_processes")
+        conn.execute("DROP TABLE xhs_account_leases")
+        conn.execute(
+            """
+            CREATE TABLE xhs_account_leases(
+                account_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL UNIQUE,
+                acquired_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO xhs_account_leases(account_id, run_id, acquired_at, expires_at)
+            VALUES ('xhs-a01', 'obsolete-run', '2026-08-30', '2026-08-31')
+            """
+        )
+        conn.execute("DELETE FROM schema_migrations WHERE version=22")
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = ON")
+        before = xhs_database_snapshot(conn)
+
+        faulting_conn = FaultingConnection(
+            conn,
+            fail_after_sql="CREATE TABLE IF NOT EXISTS xhs_account_leases",
+        )
+        with pytest.raises(sqlite3.OperationalError, match="database or disk is full"):
+            db_bootstrap.ensure_xhs_control_schema(faulting_conn)
+
+        assert faulting_conn.triggered is True
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert xhs_database_snapshot(conn) == before
+        assert {row[1] for row in conn.execute(
+            "PRAGMA table_info(xhs_account_leases)"
+        )} == {"account_id", "run_id", "acquired_at", "expires_at"}
+        assert conn.execute(
+            "SELECT account_id, run_id, acquired_at, expires_at FROM xhs_account_leases"
+        ).fetchone() == ("xhs-a01", "obsolete-run", "2026-08-30", "2026-08-31")
+        assert conn.execute(
+            "SELECT status FROM xhs_accounts WHERE account_id='xhs-a01'"
+        ).fetchone() == ("active",)
+        assert conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version=22"
+        ).fetchone() is None
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+        db_bootstrap.ensure_xhs_control_schema(conn)
+        conn.commit()
+        assert "runtime_profile_dir" in {
+            row[1] for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
+        }
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT name FROM schema_migrations WHERE version=22"
+        ).fetchone() == ("xhs_run_scoped_login_state",)
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_xhs_v22_cutover_rejects_foreign_key_corruption_without_committing(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "legacy-v21.sqlite"
+    create_v21_xhs_database(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute(
+            """
+            INSERT INTO xhs_account_events(
+                id, account_id, run_id, event_type, details_json, created_at
+            ) VALUES (42, 'missing-account', 'bad-run', 'legacy-corruption', '{}', '2026-08-30')
+            """
+        )
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = ON")
+        before = xhs_database_snapshot(conn)
+
+        with pytest.raises(RuntimeError, match="foreign-key check failed"):
+            db_bootstrap.ensure_xhs_control_schema(conn)
+
+        assert conn.in_transaction is False
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert xhs_database_snapshot(conn) == before
+        assert {row[1] for row in conn.execute("PRAGMA table_info(xhs_accounts)")} == (
+            LEGACY_ACCOUNT_COLUMNS
+        )
+        assert conn.execute(
+            "SELECT lease_id FROM xhs_account_leases"
+        ).fetchone() == ("legacy-lease",)
+        assert conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version=22"
+        ).fetchone() is None
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == [
+            ("xhs_account_events", 42, "xhs_accounts", 0)
+        ]
+
+
+def test_xhs_schema_statements_do_not_implicitly_commit() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        statements = db_bootstrap._sqlite_script_statements(
+            db_bootstrap.XHS_CONTROL_SCHEMA.read_text(encoding="utf-8")
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        db_bootstrap._execute_sqlite_statements(conn, statements)
+
+        assert conn.in_transaction is True
+        conn.rollback()
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='xhs_accounts'"
+        ).fetchone() is None
 
 
 def test_obsolete_lease_is_discarded_during_exact_schema_cutover(tmp_path: Path) -> None:
