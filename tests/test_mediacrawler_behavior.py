@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -91,6 +93,67 @@ def test_failed_process_cannot_be_classified_as_success_when_output_exists(
     assert exit_code == 1
 
 
+def test_xhs_sms_terminal_failure_runs_one_platform_session_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    @contextmanager
+    def fake_guard(*args, **kwargs):
+        yield {}
+
+    def fake_run(
+        platform_key,
+        args,
+        batch_dir,
+        *,
+        runtime_reporter=None,
+    ):
+        nonlocal calls
+        assert runtime_reporter is None
+        calls += 1
+        return {
+            "platform": platform_key,
+            "label": "小红书",
+            "status": "failed",
+            "ok": False,
+            "behavior_evidence": {
+                "visible_markers": {"sms_verification_terminal": True}
+            },
+            "run": {
+                "returncode": 1,
+                "stdout_tail": "",
+                "stderr_tail": "Navigation timeout",
+            },
+            "output": {},
+        }
+
+    monkeypatch.setattr(mediacrawler_crawl, "site_request_guard", fake_guard)
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "clear_site_policy_state",
+        lambda site_key: {},
+    )
+    monkeypatch.setattr(mediacrawler_crawl, "_run_platform_without_policy", fake_run)
+
+    record = mediacrawler_crawl.run_platform(
+        "xhs",
+        SimpleNamespace(keyword="青岛旅行"),
+        tmp_path,
+    )
+
+    assert calls == 1
+    assert record["failure_classification"] == {
+        "status": "blocked",
+        "failure_type": "sms_verification_terminal",
+        "retryable": False,
+        "wait_seconds": 0,
+        "reason": "xhs_sms_verification_terminal",
+    }
+    assert "cooldown_event" not in record
+
+
 class FakeLocator:
     def __init__(self, text: str) -> None:
         self.text = text
@@ -124,6 +187,7 @@ class FakePage:
         self.profile_count = profile_count
         self.login_control_visible = login_control_visible
         self.brought_to_front = 0
+        self.goto_calls: list[str] = []
         self.main_frame = FakeFrame(text)
         self.frames = [self.main_frame]
 
@@ -148,6 +212,7 @@ class FakePage:
         self.brought_to_front += 1
 
     async def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        self.goto_calls.append(url)
         self.url = url
 
 
@@ -253,6 +318,58 @@ async def test_xhs_search_verification_wait_keeps_page_open_until_cleared(
 
 
 @pytest.mark.asyncio
+async def test_xhs_search_login_wait_stops_on_sms_terminal_without_reopening_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    states = iter(
+        [
+            (
+                "手机号登录 获取验证码",
+                {
+                    "sms_verification_terminal": False,
+                    "captcha_or_verify": False,
+                    "rate_limited": False,
+                    "blocked": False,
+                    "login_required": True,
+                },
+            ),
+            (
+                "SMS Verification Parameter error",
+                {
+                    "sms_verification_terminal": True,
+                    "captcha_or_verify": False,
+                    "rate_limited": False,
+                    "blocked": False,
+                    "login_required": False,
+                },
+            ),
+        ]
+    )
+
+    async def changing_page_state(page):
+        return next(states)
+
+    async def no_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", changing_page_state)
+    monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", no_sleep)
+    page = FakePage(url="https://www.xiaohongshu.com/login")
+
+    readiness = await mediacrawler_behavior.wait_for_xhs_search_ready(page, [])
+
+    verification = readiness["operator_verification_events"][0]
+    assert readiness["ready"] is False
+    assert readiness["reason"] == "sms_verification_terminal"
+    assert verification["status"] == "failed"
+    assert verification["error"] == (
+        "sms_verification_terminal_during_operator_verification"
+    )
+    assert page.brought_to_front == 1
+    assert page.goto_calls == []
+
+
+@pytest.mark.asyncio
 async def test_visible_challenge_fails_behavior_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mediacrawler_behavior, "dwell_on_list", fake_dwell_on_list)
     monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.001)
@@ -328,6 +445,53 @@ async def test_xhs_captcha_url_is_a_visible_verification_challenge() -> None:
     _, markers = await mediacrawler_behavior.visible_page_state(page)
 
     assert markers["captcha_or_verify"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("main_text", "frame_text"),
+    [
+        ("SMS Verification Parameter error Refresh", ""),
+        ("短信验证：参数错误，请刷新", ""),
+        ("今日短信验证码次数已达上限", ""),
+        ("Daily SMS quota exhausted", ""),
+        ("正常搜索内容", "SMS verification requests are too frequent"),
+    ],
+)
+async def test_xhs_sms_terminal_challenge_is_detected_in_page_or_frame(
+    main_text: str,
+    frame_text: str,
+) -> None:
+    page = FakePage(main_text, url="https://www.xiaohongshu.com/explore")
+    if frame_text:
+        page.frames.append(FakeFrame(frame_text))
+
+    text, markers = await mediacrawler_behavior.visible_page_state(page)
+
+    assert "SMS" in text or "短信" in text
+    assert markers["sms_verification_terminal"] is True
+    assert (
+        mediacrawler_behavior.visible_challenge(markers)
+        == "sms_verification_terminal"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "SMS Verification Enter verification code",
+        "Parameter error while parsing an unrelated query",
+        "今天可以获取验证码",
+        "频繁旅行不代表请求验证码受限",
+    ],
+)
+async def test_similar_xhs_sms_text_is_not_a_terminal_challenge(text: str) -> None:
+    page = FakePage(text, url="https://www.xiaohongshu.com/explore")
+
+    _, markers = await mediacrawler_behavior.visible_page_state(page)
+
+    assert markers["sms_verification_terminal"] is False
 
 
 @pytest.mark.asyncio
@@ -647,6 +811,64 @@ async def test_xhs_continuity_waits_for_operator_login_and_continues(
     assert verification["status"] == "completed"
     assert continuity["status"] == "completed"
     assert persisted["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_xhs_manual_login_stops_on_sms_terminal_without_page_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normal_markers = {
+        "platform_security_limit": False,
+        "sms_verification_terminal": False,
+        "captcha_or_verify": False,
+        "rate_limited": False,
+        "blocked": False,
+        "login_required": False,
+    }
+    states = iter(
+        [
+            (
+                "手机号登录 获取验证码",
+                {**normal_markers, "login_required": True},
+            ),
+            (
+                "SMS Verification Parameter error",
+                {**normal_markers, "sms_verification_terminal": True},
+            ),
+        ]
+    )
+
+    async def changing_page_state(page):
+        return next(states)
+
+    async def no_sleep(seconds):
+        return None
+
+    page = FakePage(url="https://www.xiaohongshu.com/login")
+    evidence_path = tmp_path / "behavior.json"
+    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
+    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", changing_page_state)
+    monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(RuntimeError, match="sms_verification_terminal_detected"):
+        await mediacrawler_behavior.run_xhs_continuity_behavior(
+            page,
+            evidence_path=evidence_path,
+            stage="search_results",
+        )
+
+    persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
+    verification = persisted["operator_verification_events"][0]
+    assert page.brought_to_front == 1
+    assert page.goto_calls == []
+    assert verification["status"] == "failed"
+    assert verification["challenge"] == "sms_verification_terminal"
+    assert verification["error"] == (
+        "sms_verification_terminal_during_operator_verification"
+    )
+    assert persisted["status"] == "failed"
+    assert persisted["challenge"] == "sms_verification_terminal"
 
 
 @pytest.mark.asyncio

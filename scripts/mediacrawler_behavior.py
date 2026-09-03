@@ -15,6 +15,7 @@ from urllib.parse import urlencode, urlparse
 
 from playwright.async_api import Page
 
+from failure_classifier import is_xhs_sms_terminal_text
 from human_flow import (
     dwell_on_list,
     human_pause,
@@ -31,6 +32,7 @@ XHS_CONTINUITY_VERIFY_WAIT_SECONDS = 600.0
 XHS_CONTINUITY_VERIFY_POLL_SECONDS = 2.0
 REQUEST_RANDOM = random.SystemRandom()
 XHS_POST_INTERACTION_MODES = frozenset({"comment-scroll", "like-one", "random"})
+XHS_OPERATOR_CHALLENGES = frozenset({"captcha_or_verify", "login_required"})
 REQUIRED_BEHAVIOR_EVENTS = frozenset({"pause", "mouse_moves", "human_scroll_complete"})
 CAPTCHA_VISIBLE_RE = re.compile(
     r"人机验证|安全验证|请完成验证|请通过验证|图形验证码|滑块验证码|拖动滑块|security verification|captcha|geetest",
@@ -157,6 +159,9 @@ async def visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
             CAPTCHA_VISIBLE_RE.search(normalized)
             or (is_xhs_page and XHS_CAPTCHA_URL_RE.search(page_url))
         ),
+        "sms_verification_terminal": bool(
+            is_xhs_page and is_xhs_sms_terminal_text(normalized)
+        ),
         "rate_limited": bool(RATE_LIMIT_VISIBLE_RE.search(normalized)),
         "blocked": bool(BLOCKED_VISIBLE_RE.search(normalized)),
         "login_required": bool(
@@ -174,6 +179,7 @@ def visible_challenge(markers: dict[str, bool]) -> str:
             key
             for key in (
                 "platform_security_limit",
+                "sms_verification_terminal",
                 "rate_limited",
                 "blocked",
                 "captcha_or_verify",
@@ -353,7 +359,7 @@ async def wait_for_xhs_search_ready(
                 }
             )
 
-            if challenge in {"captcha_or_verify", "login_required"}:
+            if challenge in XHS_OPERATOR_CHALLENGES:
                 pending_event = operator_verification_events[-1] if operator_verification_events else None
                 if not pending_event or pending_event.get("status") != "waiting_for_operator":
                     verification_deadline = time.monotonic() + max(
@@ -396,6 +402,36 @@ async def wait_for_xhs_search_ready(
                 )
                 continue
 
+            if challenge:
+                pending_event = (
+                    operator_verification_events[-1]
+                    if operator_verification_events
+                    else None
+                )
+                if pending_event and pending_event.get("status") == "waiting_for_operator":
+                    pending_event.update(
+                        {
+                            "finished_at": utc_now(),
+                            "status": "failed",
+                            "challenge": challenge,
+                            "visible_markers": last_markers,
+                            "visible_text_sample": last_text,
+                            "url": page.url,
+                            "error": f"{challenge}_during_operator_verification",
+                        }
+                    )
+                return {
+                    "ready": False,
+                    "reason": challenge,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "card_count": card_count,
+                    "profile_count": profile_count,
+                    "markers": last_markers,
+                    "visible_text_sample": last_text,
+                    "url": page.url,
+                    "operator_verification_events": operator_verification_events,
+                }
+
             if operator_verification_events:
                 pending_event = operator_verification_events[-1]
                 if pending_event.get("status") == "waiting_for_operator":
@@ -424,19 +460,6 @@ async def wait_for_xhs_search_ready(
                     "url": page.url,
                     "operator_verification_events": operator_verification_events,
                 }
-            if challenge:
-                return {
-                    "ready": False,
-                    "reason": challenge,
-                    "elapsed_seconds": round(time.monotonic() - started, 3),
-                    "card_count": card_count,
-                    "profile_count": profile_count,
-                    "markers": last_markers,
-                    "visible_text_sample": last_text,
-                    "url": page.url,
-                    "operator_verification_events": operator_verification_events,
-                }
-
         await asyncio.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
 
 
@@ -486,6 +509,7 @@ def behavior_evidence_valid(evidence: dict[str, Any] | None) -> bool:
         for marker_set in (initial_markers, markers)
         for key in (
             "platform_security_limit",
+            "sms_verification_terminal",
             "captcha_or_verify",
             "rate_limited",
             "blocked",
@@ -545,7 +569,7 @@ async def wait_for_xhs_continuity_verification(
     timeout_seconds: float | None = None,
     poll_seconds: float | None = None,
 ) -> tuple[str, dict[str, bool], dict[str, Any]]:
-    if initial_challenge not in {"captcha_or_verify", "login_required"}:
+    if initial_challenge not in XHS_OPERATOR_CHALLENGES:
         raise RuntimeError(f"unsupported_xhs_operator_verification:{initial_challenge}")
 
     timeout = max(
@@ -649,7 +673,7 @@ async def wait_for_xhs_continuity_verification(
             event.update({"finished_at": utc_now(), "status": "completed"})
             write_evidence(evidence_path, evidence)
             return latest_text, latest_markers, event
-        if latest_challenge in {"rate_limited", "blocked"}:
+        if latest_challenge not in XHS_OPERATOR_CHALLENGES:
             event.update(
                 {
                     "finished_at": utc_now(),
@@ -809,6 +833,7 @@ async def run_xhs_api_captcha_verification(
             "/website-login/captcha" not in current_url
             and returned_to_redirect_route
             and latest_text.strip()
+            and not visible
             and not latest_markers.get("captcha_or_verify")
             and not latest_markers.get("login_required")
         )
@@ -824,7 +849,7 @@ async def run_xhs_api_captcha_verification(
             )
             write_evidence(path, evidence)
             return event
-        if visible in {"rate_limited", "blocked"}:
+        if visible and visible not in XHS_OPERATOR_CHALLENGES:
             event.update(
                 {
                     "finished_at": utc_now(),
@@ -903,7 +928,7 @@ async def run_xhs_continuity_behavior(
     observed_initial_markers = initial_markers
     challenge = visible_challenge(initial_markers)
     if challenge:
-        if challenge in {"captcha_or_verify", "login_required"}:
+        if challenge in XHS_OPERATOR_CHALLENGES:
             initial_text, initial_markers, _ = await wait_for_xhs_continuity_verification(
                 page,
                 evidence=evidence,
@@ -934,7 +959,7 @@ async def run_xhs_continuity_behavior(
     await random_mouse_moves(page, profile, events)
     final_text, final_markers = await visible_page_state(page)
     final_challenge = visible_challenge(final_markers)
-    if final_challenge in {"captcha_or_verify", "login_required"}:
+    if final_challenge in XHS_OPERATOR_CHALLENGES:
         final_text, final_markers, _ = await wait_for_xhs_continuity_verification(
             page,
             evidence=evidence,
@@ -1221,6 +1246,7 @@ async def run_page_behavior(
                 reason = str(page_readiness.get("reason") or "search_results_not_ready")
                 if reason not in {
                     "platform_security_limit",
+                    "sms_verification_terminal",
                     "captcha_or_verify",
                     "rate_limited",
                     "blocked",

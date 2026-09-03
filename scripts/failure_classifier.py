@@ -32,14 +32,75 @@ TARGET_CLOSED_PATTERNS = re.compile(
 )
 IMPORT_TARGET_PATTERNS = re.compile(r"import_new_target_not_met", re.I)
 RATE_PATTERNS = re.compile(r"429|too many requests|rate limit|访问过于频繁|请求过于频繁|操作频繁", re.I)
+XHS_FREQUENT_CHALLENGE_PATTERNS = re.compile(
+    r"访问(?:过于)?频繁|请求(?:过于)?频繁|操作(?:过于)?频繁|"
+    r"requests?\s+(?:are\s+)?too\s+frequent|too many requests|rate limit",
+    re.I,
+)
 TIMEOUT_PATTERNS = re.compile(r"Timeout|timeout|ETIMEDOUT|Navigation timeout|net::ERR_TIMED_OUT", re.I)
 NO_IMAGE_PATTERNS = re.compile(r"No image-bearing|no_content_images|skipped_no_image", re.I)
 PARSE_PATTERNS = re.compile(r"JSONDecodeError|parse_failed|Selector|KeyError|ValueError", re.I)
 BLOCK_PATTERNS = re.compile(r"forbidden|access denied|拒绝访问|blocked_detected|blocked_by_policy", re.I)
 PLATFORM_SECURITY_LIMIT_PATTERNS = re.compile(
-    r"\bplatform_security_limit(?:_300011)?\b",
+    r"(?:^|[^A-Za-z0-9])(?:xhs_)?platform_security_limit(?:_300011)?\b",
     re.I,
 )
+XHS_SECURITY_300011_PATTERNS = re.compile(
+    r"(?:error(?:[_\s-]?code)?|错误码|异常码)\s*[:=]?\s*[\"']?300011\b|"
+    r"(?:安全限制|账号异常|account exception).{0,80}\b300011\b|"
+    r"\b300011\b.{0,80}(?:安全限制|账号异常|account exception)",
+    re.I,
+)
+_XHS_SMS_CONTEXT = r"\bsms\b|短信|验证码|verification\s+code"
+_XHS_SMS_VERIFICATION = r"sms\s+verification|短信验证|短信验证码"
+_XHS_SMS_PARAMETER_ERROR = r"parameter\s+error|参数错误"
+_XHS_DAILY = r"今日|今天|当日|today(?:'s)?|daily"
+_XHS_LIMIT = r"上限|限制|已用完|用完|耗尽|limit|quota|maximum|used\s+up|exhausted"
+XHS_SMS_PARAMETER_TERMINAL_PATTERNS = re.compile(
+    rf"(?:{_XHS_SMS_VERIFICATION}).{{0,64}}(?:{_XHS_SMS_PARAMETER_ERROR})|"
+    rf"(?:{_XHS_SMS_PARAMETER_ERROR}).{{0,64}}(?:{_XHS_SMS_VERIFICATION})",
+    re.I,
+)
+XHS_SMS_DAILY_LIMIT_PATTERNS = re.compile(
+    rf"(?:{_XHS_DAILY}).{{0,48}}(?:{_XHS_SMS_CONTEXT}).{{0,48}}(?:{_XHS_LIMIT})|"
+    rf"(?:{_XHS_SMS_CONTEXT}).{{0,48}}(?:{_XHS_DAILY}).{{0,48}}(?:{_XHS_LIMIT})|"
+    rf"(?:{_XHS_SMS_CONTEXT}).{{0,48}}(?:{_XHS_LIMIT}).{{0,48}}(?:{_XHS_DAILY})|"
+    rf"(?:{_XHS_LIMIT}).{{0,48}}(?:{_XHS_DAILY}).{{0,48}}(?:{_XHS_SMS_CONTEXT})",
+    re.I,
+)
+XHS_SMS_FREQUENCY_PATTERNS = re.compile(
+    rf"(?:{_XHS_SMS_CONTEXT}).{{0,48}}"
+    r"(?:过于频繁|太频繁|操作(?:过于)?频繁|请求(?:过于)?频繁|too\s+frequent|"
+    r"too\s+many\s+(?:requests|attempts)|rate\s+limit)|"
+    r"(?:过于频繁|太频繁|操作(?:过于)?频繁|请求(?:过于)?频繁|too\s+frequent|"
+    rf"too\s+many\s+(?:requests|attempts)|rate\s+limit).{{0,48}}"
+    rf"(?:{_XHS_SMS_CONTEXT})",
+    re.I,
+)
+
+
+def is_xhs_sms_terminal_text(text: str) -> bool:
+    """Return whether visible/error text proves a terminal XHS SMS challenge."""
+
+    normalized = " ".join(str(text or "").split())
+    return bool(
+        XHS_SMS_PARAMETER_TERMINAL_PATTERNS.search(normalized)
+        or XHS_SMS_DAILY_LIMIT_PATTERNS.search(normalized)
+        or XHS_SMS_FREQUENCY_PATTERNS.search(normalized)
+    )
+
+
+def _platform_security_limit_detected(
+    *,
+    text: str,
+    markers: dict[str, Any],
+    platform: str,
+) -> bool:
+    if bool(markers.get("platform_security_limit")):
+        return True
+    if PLATFORM_SECURITY_LIMIT_PATTERNS.search(text):
+        return True
+    return platform == "xhs" and bool(XHS_SECURITY_300011_PATTERNS.search(text))
 
 
 def extract_stdout_json(stdout: str) -> dict[str, Any]:
@@ -90,6 +151,22 @@ def _stdout_without_json_payload(stdout: str, stdout_json: dict[str, Any]) -> st
     return f"{stdout[:start]}\n{stdout[end + 1:]}"
 
 
+def _terminal_stdout_payload(stdout_json: dict[str, Any]) -> dict[str, Any]:
+    records = stdout_json.get("records")
+    if not isinstance(records, list):
+        return stdout_json
+    latest_record = next(
+        (record for record in reversed(records) if isinstance(record, dict)),
+        {},
+    )
+    return {
+        "record": latest_record,
+        "failure_reason": stdout_json.get("failure_reason"),
+        "pagination_evidence": stdout_json.get("pagination_evidence"),
+        "runtime_blocker": stdout_json.get("runtime_blocker"),
+    }
+
+
 def _strong_child_classification(stdout_json: dict[str, Any]) -> dict[str, Any] | None:
     strong_statuses = {"captcha_detected", "login_required", "blocked", "failed_final"}
     records = stdout_json.get("records")
@@ -117,6 +194,7 @@ def classify_attempt(
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     meta = meta or {}
+    platform = str(meta.get("platform") or "").strip().lower()
     stdout_json = extract_stdout_json(stdout)
     markers = _meta_markers(meta)
     text_meta = dict(meta)
@@ -126,11 +204,21 @@ def classify_attempt(
         text_meta["scrapling_preflight"] = {
             key: value for key, value in preflight.items() if key != "structured_markers"
         }
+    stdout_without_payload = _stdout_without_json_payload(stdout, stdout_json)
     text = _text_blob(
-        _stdout_without_json_payload(stdout, stdout_json),
+        stdout_without_payload,
         stderr,
         json.dumps(text_meta, ensure_ascii=False),
         json.dumps(_without_false_security_markers(stdout_json), ensure_ascii=False),
+    )
+    terminal_text = _text_blob(
+        stdout_without_payload,
+        stderr,
+        json.dumps(text_meta, ensure_ascii=False),
+        json.dumps(
+            _without_false_security_markers(_terminal_stdout_payload(stdout_json)),
+            ensure_ascii=False,
+        ),
     )
 
     if meta.get("skipped") and str(meta.get("skip_reason") or "").startswith("video_"):
@@ -142,6 +230,42 @@ def classify_attempt(
             "reason": meta.get("skip_reason") or "video_target_ignored",
         }
 
+    if _platform_security_limit_detected(
+        text=terminal_text,
+        markers=markers,
+        platform=platform,
+    ):
+        return {
+            "status": "blocked",
+            "failure_type": "platform_security_limit",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": "platform_security_limit_300011",
+        }
+
+    if bool(markers.get("sms_verification_terminal")) or (
+        platform == "xhs" and is_xhs_sms_terminal_text(terminal_text)
+    ):
+        return {
+            "status": "blocked",
+            "failure_type": "sms_verification_terminal",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": "xhs_sms_verification_terminal",
+        }
+
+    if platform == "xhs" and (
+        bool(markers.get("rate_limited"))
+        or XHS_FREQUENT_CHALLENGE_PATTERNS.search(terminal_text)
+    ):
+        return {
+            "status": "blocked",
+            "failure_type": "rate_limited",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": "xhs_rate_limited_terminal",
+        }
+
     if stdout_json.get("blocked_by_policy") or meta.get("blocked_by_policy"):
         wait_seconds = int(stdout_json.get("wait_seconds") or 0)
         return {
@@ -150,15 +274,6 @@ def classify_attempt(
             "retryable": True,
             "wait_seconds": max(60, wait_seconds),
             "reason": stdout_json.get("reason") or "policy_blocked",
-        }
-
-    if bool(markers.get("platform_security_limit")):
-        return {
-            "status": "blocked",
-            "failure_type": "platform_security_limit",
-            "retryable": False,
-            "wait_seconds": 0,
-            "reason": "platform_security_limit_300011",
         }
 
     if exit_code == 0 and not meta.get("blocked_detected"):
@@ -206,15 +321,6 @@ def classify_attempt(
             "retryable": True,
             "wait_seconds": 60,
             "reason": "chromium_or_playwright_launch_failed",
-        }
-
-    if PLATFORM_SECURITY_LIMIT_PATTERNS.search(text):
-        return {
-            "status": "blocked",
-            "failure_type": "platform_security_limit",
-            "retryable": False,
-            "wait_seconds": 0,
-            "reason": "platform_security_limit_300011",
         }
 
     if bool(markers.get("captcha_or_verify")) or CAPTCHA_PATTERNS.search(text):

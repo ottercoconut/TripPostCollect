@@ -5617,11 +5617,15 @@ def run_platform(
     run = record.get("run") or {}
     evidence = record.get("behavior_evidence") or {}
     effective_exit_code = effective_attempt_exit_code(record)
+    structured_markers = {
+        **(evidence.get("initial_visible_markers") or {}),
+        **(evidence.get("visible_markers") or {}),
+    }
     classification = classify_attempt(
         exit_code=effective_exit_code,
         stdout=str(run.get("stdout_tail") or ""),
         stderr=str(run.get("stderr_tail") or ""),
-        meta={"structured_markers": evidence.get("visible_markers") or {}},
+        meta={"platform": platform_key, "structured_markers": structured_markers},
     )
     record["failure_classification"] = classification
     if platform_key != "xhs" and classification.get("failure_type") in {
@@ -5914,6 +5918,7 @@ def apply_formal_completion_gates(
             "runtime_failed",
             "login_required",
             "captcha_detected",
+            "sms_verification_terminal",
             "rate_limited",
             "platform_security_limit",
             "policy_blocked",
@@ -6015,6 +6020,7 @@ def repair_runtime_stop_reason(
     blocking_types = {
         "policy_blocked",
         "platform_security_limit",
+        "sms_verification_terminal",
         "captcha_detected",
         "login_required",
         "rate_limited",
