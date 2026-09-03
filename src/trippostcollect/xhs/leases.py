@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import FrameType
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from trippostcollect.core.paths import ensure_dir
 from trippostcollect.xhs.accounts import (
@@ -1775,6 +1775,15 @@ class LeaseGuard:
         self.runtime_session_cleanup_complete = self.runtime_session_actually_absent
         self.runtime_session_removed = False
         self._runtime_session_prepare_attempted = False
+        self._signal_sink: Callable[[int], Any] | None = None
+        self._active_child_identity: ProcessIdentity | None = None
+
+    def route_signals_to(self, sink: Callable[[int], Any]) -> None:
+        """Route signals to a run-level first-wins latch before acquisition."""
+
+        if self.account is not None:
+            raise RuntimeError("XHS signal routing must be configured before acquire")
+        self._signal_sink = sink
 
     def acquire(self) -> dict[str, Any]:
         if self.account is not None:
@@ -1841,6 +1850,13 @@ class LeaseGuard:
 
     def set_outcome(self, outcome: str) -> None:
         self.outcome = outcome
+
+    def begin_terminalization(self) -> None:
+        """Latch later signals without raising while terminal evidence is published."""
+
+        if self.account is None:
+            raise RuntimeError("XHS LeaseGuard is not acquired")
+        self._closing = True
 
     def child_environment(self, base: Mapping[str, str] | None = None) -> dict[str, str]:
         if not self.lease_id or not self.owner_token:
@@ -1949,6 +1965,15 @@ class LeaseGuard:
                 self._shorten_finalize_deadline()
             return
         self.signal_received = int(signum)
+        if self._signal_sink is not None:
+            self._signal_sink(int(signum))
+            identity = self._active_child_identity
+            if identity is not None:
+                try:
+                    self._signal_registered_group(identity, signal.SIGTERM)
+                except (OSError, RuntimeError):
+                    pass
+            return
         if self._closing:
             return
         raise XhsLeaseSignal(signum)
@@ -2053,6 +2078,7 @@ class LeaseGuard:
             if deferred_signals.signal_received is not None:
                 raise XhsLeaseSignal(deferred_signals.signal_received)
             identity = self.register_process(proc.pid, "child")
+            self._active_child_identity = identity
             if deferred_signals.signal_received is not None:
                 raise XhsLeaseSignal(deferred_signals.signal_received)
             gated.release()
@@ -2072,6 +2098,8 @@ class LeaseGuard:
                     except XhsLeaseOwnershipError:
                         pass
             finally:
+                if self._active_child_identity == identity:
+                    self._active_child_identity = None
                 deferred_signals.restore()
                 if deferred_signals.signal_received is not None:
                     deferred_signals.replay()
@@ -2101,6 +2129,8 @@ class LeaseGuard:
                 try:
                     stdout, stderr = proc.communicate(timeout=int(timeout_seconds))
                     returncode = int(proc.returncode or 0)
+                    if self.signal_received is not None:
+                        raise XhsLeaseSignal(self.signal_received)
                 except subprocess.TimeoutExpired as exc:
                     timed_out = True
                     termination_reason = "absolute_timeout"
@@ -2125,6 +2155,12 @@ class LeaseGuard:
                 assert watchdog_state is not None
                 status_path = runtime_status_path(self.run_id)
                 while True:
+                    if self.signal_received is not None:
+                        stdout, stderr = self._terminate_registered_subprocess(
+                            proc,
+                            identity,
+                        )
+                        raise XhsLeaseSignal(self.signal_received)
                     if proc.poll() is not None:
                         stdout, stderr = proc.communicate()
                         returncode = int(proc.returncode or 0)
@@ -2193,6 +2229,8 @@ class LeaseGuard:
             self.terminate_owned_processes()
             raise
         finally:
+            if self._active_child_identity == identity:
+                self._active_child_identity = None
             if proc.poll() is not None:
                 try:
                     self.mark_process_exited(identity, "child")

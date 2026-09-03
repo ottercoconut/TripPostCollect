@@ -11,7 +11,7 @@ import sqlite3
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from execution_state import FORMAL_STEPS, FrozenExecutionState
@@ -33,6 +33,7 @@ from trippostcollect.core.paths import (
 )
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs.accounts import (
+    XhsAccountUnavailable,
     ensure_xhs_schema,
     record_event,
 )
@@ -49,6 +50,7 @@ from trippostcollect.xhs.supervision import (
     run_supervised_xhs_subprocess,
     runtime_watchdog_evidence,
 )
+from trippostcollect.xhs.terminal import XhsRunTerminalizer
 from xhs_runner import (
     _challenge_reason,
     _eligible_account_for_plan,
@@ -65,6 +67,8 @@ from xhs_runner import (
 
 ROOT = PROJECT_ROOT
 _ACTIVE_LEASE_GUARD: LeaseGuard | None = None
+_ACTIVE_TERMINALIZER: XhsRunTerminalizer | None = None
+_TERMINAL_PHASE_HOOK: Callable[[str, XhsRunTerminalizer], None] | None = None
 
 
 @contextmanager
@@ -370,7 +374,7 @@ def candidate_only_child_failure(child_summary: dict[str, Any]) -> bool:
 
 
 def _run_main() -> int:
-    global _ACTIVE_LEASE_GUARD
+    global _ACTIVE_LEASE_GUARD, _ACTIVE_TERMINALIZER
     args = parse_args()
     if args.max_items < 0 or args.batch_size <= 0:
         raise SystemExit("--max-items cannot be negative; --batch-size must be positive")
@@ -501,6 +505,7 @@ def _run_main() -> int:
     state_error = ""
     interrupt: dict[str, Any] | None = None
     candidate_only_failure = False
+    final_state_evidence: dict[str, Any] | None = None
     guard = LeaseGuard(
         db_path=db_path,
         account_id=args.account_id,
@@ -511,8 +516,68 @@ def _run_main() -> int:
         budget=lease_budget,
     )
     _ACTIVE_LEASE_GUARD = guard
+    terminalizer = XhsRunTerminalizer(
+        db_path=db_path,
+        run_id=run_id,
+        phase_hook=_TERMINAL_PHASE_HOOK,
+    )
+    _ACTIVE_TERMINALIZER = terminalizer
+    terminalizer.bind_guard(guard)
+    terminalizer.install()
+    acquire_exception: BaseException | None = None
     try:
         account = guard.acquire()
+        terminalizer.phase("after_acquire")
+    except XhsAccountUnavailable as exc:
+        terminalizer.restore()
+        state_error = f"xhs_repair_pool_blocked:{exc.reason}"
+        _state_fail_open(
+            state,
+            state_error,
+            evidence={"wait_seconds": exc.wait_seconds},
+        )
+        blocked_summary = {
+            **base_summary,
+            "status": "blocked",
+            "error": state_error,
+            "reason": exc.reason,
+            "wait_seconds": exc.wait_seconds,
+            "finished_at": utc_iso(),
+        }
+        summary_path = write_summary(run_dir, blocked_summary)
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_xhs_schema(conn)
+            upsert_run(
+                conn,
+                run_id=run_id,
+                target_key=f"xhs_repair:{args.target_key}",
+                account_id=account["account_id"],
+                status="blocked",
+                state_path=state_path,
+                report=blocked_summary,
+                finished=True,
+            )
+        _ACTIVE_LEASE_GUARD = None
+        _ACTIVE_TERMINALIZER = None
+        print(
+            json.dumps(
+                {**blocked_summary, "summary": str(summary_path)},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 2
+    except BaseException as exc:
+        if guard.account is None:
+            terminalizer.restore()
+            raise
+        account = guard.account
+        acquire_exception = exc
+    try:
+        if acquire_exception is not None:
+            raise acquire_exception
+        terminalizer.raise_if_interrupted()
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             ensure_xhs_schema(conn)
@@ -524,7 +589,9 @@ def _run_main() -> int:
                 status="running",
                 state_path=state_path,
             )
+        terminalizer.phase("before_session_prepare")
         with guarded_runtime_session(run_id, guard) as runtime_session:
+            terminalizer.phase("after_session_prepare")
             command = build_child_command(
                 target=target,
                 pool=pool,
@@ -549,6 +616,7 @@ def _run_main() -> int:
                 env=env,
                 timeout_seconds=int(target["timeout_seconds"]),
             )
+            terminalizer.phase("after_child_exit")
             exit_code = int(completed.returncode)
             stdout = completed.stdout or ""
             stderr = completed.stderr or ""
@@ -608,14 +676,11 @@ def _run_main() -> int:
                         evidence=skipped_evidence,
                         skipped=True,
                     )
-                    state.finalize(
-                        outcome="completed",
-                        evidence={
-                            "summary": child_summary_path,
-                            "candidate_only_failure": True,
-                            "recovered_count": 0,
-                        },
-                    )
+                    final_state_evidence = {
+                        "summary": child_summary_path,
+                        "candidate_only_failure": True,
+                        "recovered_count": 0,
+                    }
                     outcome = "completed"
                 else:
                     artifact_evidence = verify_image_artifacts(
@@ -673,87 +738,136 @@ def _run_main() -> int:
                                 "persistence_verified",
                                 evidence=persistence_evidence,
                             )
-                            state.finalize(
-                                outcome="completed",
-                                evidence={
-                                    "summary": child_summary_path,
-                                    **persistence_evidence,
-                                },
-                            )
+                            final_state_evidence = {
+                                "summary": child_summary_path,
+                                **persistence_evidence,
+                            }
                             outcome = "completed"
-    except (XhsLeaseSignal, KeyboardInterrupt) as exc:
-        signum = (
-            int(exc.signum)
-            if isinstance(exc, XhsLeaseSignal)
-            else int(signal.SIGINT)
-        )
-        signal_name = signal.Signals(signum).name
-        exit_code = 128 + signum
-        guard.signal_received = signum
-        interrupt = {
-            "reason": "operator_interrupt",
-            "source": (
-                "lease_signal"
-                if isinstance(exc, XhsLeaseSignal)
-                else "keyboard_interrupt"
-            ),
-            "signum": signum,
-            "signal": signal_name,
-            "exit_code": exit_code,
-        }
-        state_error = f"xhs_repair_runtime_failed:operator_interrupt:{signal_name}"
-        stderr = f"{stderr}\n{state_error}".strip()
-        _state_fail_open(
-            state,
-            state_error,
-            evidence={
-                "interrupt": interrupt,
-                "stderr_tail": tail(stderr),
-            },
-        )
-    except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
-        state_error = f"xhs_repair_exception:{type(exc).__name__}:{exc}"
-        stderr = f"{stderr}\n{state_error}".strip()
-        _state_fail_open(state, state_error)
-    finally:
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            ensure_xhs_schema(conn)
-            challenge = _challenge_reason(stdout, stderr, child_summary)
-            login_reason = _login_reason(stdout, stderr, child_summary)
-            if challenge:
-                record_event(
-                    conn,
-                    account_id=account["account_id"],
-                    run_id=run_id,
-                    event_type="xhs_post_repair_challenge_detected",
-                    details={"reason": challenge},
-                )
-            elif login_reason:
-                record_event(
-                    conn,
-                    account_id=account["account_id"],
-                    run_id=run_id,
-                    event_type="xhs_post_repair_run_scoped_login_failed",
-                    details={"reason": login_reason},
-                )
+    except BaseException as exc:
+        if terminalizer.is_interrupt(exc):
+            signum = terminalizer.capture_interrupt(
+                exc,
+                guard_signal=guard.signal_received,
+            )
+            signal_name = signal.Signals(signum).name
+            exit_code = 128 + signum
+            guard.signal_received = signum
+            interrupt = {
+                "reason": "operator_interrupt",
+                "source": terminalizer.interrupt_source or "operator_interrupt",
+                "signum": signum,
+                "signal": signal_name,
+                "exit_code": exit_code,
+            }
+            state_error = f"xhs_repair_runtime_failed:operator_interrupt:{signal_name}"
+            stderr = f"{stderr}\n{state_error}".strip()
+            _state_fail_open(
+                state,
+                state_error,
+                evidence={
+                    "interrupt": interrupt,
+                    "stderr_tail": tail(stderr),
+                },
+            )
+        else:
+            state_error = f"xhs_repair_exception:{type(exc).__name__}:{exc}"
+            stderr = f"{stderr}\n{state_error}".strip()
+            _state_fail_open(state, state_error)
+
+    challenge = _challenge_reason(stdout, stderr, child_summary)
+    login_reason = _login_reason(stdout, stderr, child_summary)
+
+    def terminal_mutation(conn: sqlite3.Connection, token: str) -> None:
+        ensure_xhs_schema(conn)
+        if challenge:
             record_event(
                 conn,
                 account_id=account["account_id"],
                 run_id=run_id,
-                event_type="xhs_post_repair_finished",
-                details={
-                    "outcome": outcome,
-                    "exit_code": exit_code,
-                    "error": state_error,
-                    "failure_type": "runtime_failed" if interrupt else "",
-                    "stop_reason": "runtime_failed" if interrupt else "",
-                    "reason": "operator_interrupt" if interrupt else "",
-                    "interrupt": interrupt,
-                },
+                event_type="xhs_post_repair_challenge_detected",
+                details={"reason": challenge},
             )
-            conn.commit()
-    guard.set_outcome(outcome)
+        elif login_reason:
+            record_event(
+                conn,
+                account_id=account["account_id"],
+                run_id=run_id,
+                event_type="xhs_post_repair_run_scoped_login_failed",
+                details={"reason": login_reason},
+            )
+        record_event(
+            conn,
+            account_id=account["account_id"],
+            run_id=run_id,
+            event_type="xhs_post_repair_finished",
+            details={
+                "outcome": outcome,
+                "exit_code": exit_code,
+                "error": state_error,
+                "failure_type": "runtime_failed" if interrupt else "",
+                "stop_reason": "runtime_failed" if interrupt else "",
+                "reason": "operator_interrupt" if interrupt else "",
+                "interrupt": interrupt,
+                "terminal_token": token,
+            },
+        )
+        upsert_run(
+            conn,
+            run_id=run_id,
+            target_key=f"xhs_repair:{args.target_key}",
+            account_id=account["account_id"],
+            status=outcome,
+            state_path=state_path,
+            child_summary_path=child_summary_path or None,
+            report={
+                "terminal_commit": {
+                    "token": token,
+                    "outcome": outcome,
+                    "committed": True,
+                    "finalization_confirmed": False,
+                },
+                "interrupt": interrupt,
+            },
+            finished=True,
+            commit=False,
+        )
+
+    try:
+        terminalizer.linearize(
+            outcome=outcome,
+            mutation=terminal_mutation,
+            allow_interrupted_failure=interrupt is not None,
+        )
+    except BaseException as exc:
+        if terminalizer.is_interrupt(exc):
+            signum = terminalizer.capture_interrupt(
+                exc,
+                guard_signal=guard.signal_received,
+            )
+            signal_name = signal.Signals(signum).name
+            exit_code = 128 + signum
+            guard.signal_received = signum
+            interrupt = {
+                "reason": "operator_interrupt",
+                "source": terminalizer.interrupt_source or "operator_interrupt",
+                "signum": signum,
+                "signal": signal_name,
+                "exit_code": exit_code,
+            }
+            outcome = "failed"
+            state_error = f"xhs_repair_runtime_failed:operator_interrupt:{signal_name}"
+            _state_fail_open(state, state_error, evidence={"interrupt": interrupt})
+            terminalizer.linearize(
+                outcome="failed",
+                mutation=terminal_mutation,
+                allow_interrupted_failure=True,
+            )
+        else:
+            outcome = "failed"
+            exit_code = 2
+            state_error = f"xhs_repair_terminal_commit_failed:{type(exc).__name__}"
+            _state_fail_open(state, state_error)
+            terminalizer.linearize(outcome="failed", mutation=terminal_mutation)
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -810,55 +924,71 @@ def _run_main() -> int:
         "stderr_tail": tail(stderr),
         "finished_at": utc_iso(),
     }
-    summary_path = write_summary(run_dir, summary)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        ensure_xhs_schema(conn)
-        upsert_run(
-            conn,
+    summary_path = run_dir / "run_summary.json"
+
+    def publish_state() -> None:
+        if outcome == "completed":
+            payload = state.load()
+            if payload.get("status") != "completed":
+                state.finalize(
+                    outcome="completed",
+                    evidence={
+                        **(final_state_evidence or {}),
+                        "terminal_token": terminalizer.token,
+                    },
+                )
+        else:
+            payload = state.load()
+            if payload.get("status") not in {"failed", "completed"}:
+                _state_fail_open(state, "xhs_repair_terminal_failure")
+            state.finalize_failure(
+                error=state_error or "xhs_repair_terminal_failure",
+                evidence={
+                    "terminal_token": terminalizer.token,
+                    "interrupt": interrupt,
+                },
+            )
+
+    def publish_run(document: Any) -> None:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_xhs_schema(conn)
+            upsert_run(
+                conn,
+                run_id=run_id,
+                target_key=f"xhs_repair:{args.target_key}",
+                account_id=account["account_id"],
+                status=(
+                    "completed" if document.get("status") == "completed" else "failed"
+                ),
+                state_path=state_path,
+                child_summary_path=child_summary_path or None,
+                report=dict(document),
+                finished=True,
+            )
+
+    finish = terminalizer.finish(
+        outcome=outcome,
+        summary=summary,
+        summary_path=summary_path,
+        state_publish=publish_state,
+        run_publish=publish_run,
+        guard=guard,
+        cleanup_evidence=lambda: lease_cleanup_evidence(
+            db_path,
+            account_id=str(account["account_id"]),
             run_id=run_id,
-            target_key=f"xhs_repair:{args.target_key}",
-            account_id=account["account_id"],
-            status=outcome,
-            state_path=state_path,
-            child_summary_path=child_summary_path or None,
-            report=summary,
-            finished=True,
-        )
-    lease_released = guard.close()
-    cleanup_evidence = lease_cleanup_evidence(
-        db_path,
-        account_id=str(account["account_id"]),
-        run_id=run_id,
-        lease_id=guard.lease_id,
+            lease_id=guard.lease_id,
+        ),
     )
-    summary["lease_released"] = lease_released
-    summary.update(guard.runtime_session_cleanup_evidence())
-    if not lease_released:
-        summary["status"] = "failed"
-        summary["error"] = (
-            "lease_release_deferred_live_processes"
-            if cleanup_evidence.get("event_type")
-            == "lease_release_deferred_live_processes"
-            else "runtime_session_cleanup_failed"
-        )
-    summary["lease_cleanup"] = cleanup_evidence
-    write_summary(run_dir, summary)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        ensure_xhs_schema(conn)
-        upsert_run(
-            conn,
-            run_id=run_id,
-            target_key=f"xhs_repair:{args.target_key}",
-            account_id=account["account_id"],
-            status=summary["status"],
-            state_path=state_path,
-            child_summary_path=child_summary_path or None,
-            report=summary,
-            finished=True,
-        )
+    summary = finish.summary
+    terminalizer.restore()
+    if finish.confirmed:
+        _ACTIVE_LEASE_GUARD = None
+        _ACTIVE_TERMINALIZER = None
     print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
+    if not finish.confirmed:
+        return 2
     if (
         summary.get("lease_released") is not True
         or summary.get("runtime_session_cleanup_complete") is not True
@@ -871,20 +1001,30 @@ def _run_main() -> int:
 
 
 def main() -> int:
-    global _ACTIVE_LEASE_GUARD
+    global _ACTIVE_LEASE_GUARD, _ACTIVE_TERMINALIZER
     _ACTIVE_LEASE_GUARD = None
+    _ACTIVE_TERMINALIZER = None
     code = 2
     try:
         try:
             code = _run_main()
         except XhsLeaseSignal as exc:
             code = 128 + exc.signum
+        except KeyboardInterrupt:
+            code = 130
     finally:
         guard = _ACTIVE_LEASE_GUARD
+        terminalizer = _ACTIVE_TERMINALIZER
         _ACTIVE_LEASE_GUARD = None
-        released = guard is None or guard.close()
-        if not released:
+        _ACTIVE_TERMINALIZER = None
+        if guard is not None:
+            try:
+                guard.terminate_owned_processes()
+            except BaseException:
+                pass
             code = 2
+        if terminalizer is not None:
+            terminalizer.restore()
     return code
 
 

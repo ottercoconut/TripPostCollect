@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -50,9 +51,22 @@ def sha256_file(path: Path) -> str:
 
 def _atomic_write(path: Path, value: dict[str, Any]) -> None:
     target = ensure_parent(path)
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(target)
+    temporary = target.with_name(
+        f".{target.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    )
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    except BaseException:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 class FrozenExecutionState:
@@ -207,5 +221,40 @@ class FrozenExecutionState:
         payload = self.complete("task_finalized", evidence=evidence or {})
         payload["status"] = outcome
         payload["updated_at"] = utc_iso()
+        _atomic_write(self.path, payload)
+        return payload
+
+    def finalize_failure(
+        self,
+        *,
+        error: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Idempotently make a failed run terminal without erasing its first failure."""
+
+        payload = self.load()
+        self._validate_frozen(payload)
+        if payload.get("status") == "completed":
+            raise ExecutionStateError("completed execution state cannot become failed")
+        steps = payload.get("steps") or {}
+        finalized = steps.get("task_finalized")
+        if not isinstance(finalized, dict):
+            raise ExecutionStateError("execution state has no task_finalized step")
+        if finalized.get("status") == "failed":
+            return payload
+        if finalized.get("status") in {"completed", "skipped"}:
+            raise ExecutionStateError("terminal execution state cannot become failed")
+        now = utc_iso()
+        finalized.update(
+            {
+                "status": "failed",
+                "started_at": finalized.get("started_at") or now,
+                "finished_at": now,
+                "evidence": evidence or {},
+                "error": error,
+            }
+        )
+        payload["status"] = "failed"
+        payload["updated_at"] = now
         _atomic_write(self.path, payload)
         return payload

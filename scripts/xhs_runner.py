@@ -62,10 +62,16 @@ from trippostcollect.xhs.supervision import (
     run_supervised_xhs_subprocess,
     runtime_watchdog_evidence,
 )
+from trippostcollect.xhs.terminal import (
+    XhsRunTerminalizer,
+    atomic_write_json,
+)
 
 
 ROOT = PROJECT_ROOT
 _ACTIVE_LEASE_GUARD: LeaseGuard | None = None
+_ACTIVE_TERMINALIZER: XhsRunTerminalizer | None = None
+_TERMINAL_PHASE_HOOK: Callable[[str, XhsRunTerminalizer], None] | None = None
 PLATFORM_SECURITY_LIMIT_300011 = "platform_security_limit_300011"
 SECURITY_LIMIT_RETRY_SECONDS = 30 * 60
 RETRY_STATE_SCHEMA_VERSION = 1
@@ -557,8 +563,7 @@ def _login_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -> st
 
 def write_summary(run_dir: Path, summary: dict[str, Any]) -> Path:
     path = run_dir / "run_summary.json"
-    path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    return atomic_write_json(path, summary)
 
 
 def lease_cleanup_evidence(
@@ -619,15 +624,6 @@ def lease_cleanup_evidence(
     }
 
 
-def lease_cleanup_failure_reason(cleanup_evidence: dict[str, Any]) -> str:
-    event_type = cleanup_evidence.get("event_type")
-    if event_type == "lease_release_deferred_live_processes":
-        return "lease_release_deferred_live_processes"
-    if event_type == "lease_release_deferred_finalize_timeout":
-        return "lease_release_deferred_finalize_timeout"
-    return "runtime_session_cleanup_failed"
-
-
 def load_child_summary(path_value: str) -> dict[str, Any]:
     path = Path(path_value).expanduser() if path_value else None
     if path is None or not path.is_file():
@@ -677,6 +673,7 @@ def upsert_run(
     child_summary_path: str | None = None,
     report: dict[str, Any] | None = None,
     finished: bool = False,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         """
@@ -703,11 +700,12 @@ def upsert_run(
             json.dumps(report or {}, ensure_ascii=False),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def _run_main(args: argparse.Namespace | None = None) -> int:
-    global _ACTIVE_LEASE_GUARD
+    global _ACTIVE_LEASE_GUARD, _ACTIVE_TERMINALIZER
     args = args or parse_args()
     target = load_target(args.target_key, args.target_config)
     pool = load_pool_config(args.pool_config)
@@ -735,18 +733,8 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             check_lease=args.dry_run,
         )
         if not args.dry_run:
-            guard = LeaseGuard(
-                db_path=db_path,
-                account_id=args.account_id,
-                run_id=run_id,
-                lease_kind="crawl",
-                execution_state_path=state_path,
-                runtime_profile_dir=session_paths["profile"],
-                budget=lease_budget,
-            )
-            _ACTIVE_LEASE_GUARD = guard
             try:
-                account = guard.acquire()
+                _eligible_account_for_plan(conn, args.account_id, check_lease=True)
             except XhsAccountUnavailable as exc:
                 blocked_plan = {
                     "run_id": run_id,
@@ -873,6 +861,70 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
         print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
         return 0
 
+    guard = LeaseGuard(
+        db_path=db_path,
+        account_id=args.account_id,
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=state_path,
+        runtime_profile_dir=session_paths["profile"],
+        budget=lease_budget,
+    )
+    _ACTIVE_LEASE_GUARD = guard
+    terminalizer = XhsRunTerminalizer(
+        db_path=db_path,
+        run_id=run_id,
+        phase_hook=_TERMINAL_PHASE_HOOK,
+    )
+    _ACTIVE_TERMINALIZER = terminalizer
+    terminalizer.bind_guard(guard)
+    terminalizer.install()
+    acquire_exception: BaseException | None = None
+    try:
+        account = guard.acquire()
+        terminalizer.phase("after_acquire")
+    except XhsAccountUnavailable as exc:
+        terminalizer.restore()
+        fail_open_step(
+            state,
+            error=f"xhs_pool_blocked:{exc.reason}",
+            evidence={"wait_seconds": exc.wait_seconds},
+        )
+        summary = {
+            "status": "blocked",
+            "run_id": run_id,
+            "target_key": args.target_key,
+            "account_id": args.account_id,
+            "execution_state": str(state_path),
+            "reason": exc.reason,
+            "wait_seconds": exc.wait_seconds,
+            "finished_at": utc_iso(),
+        }
+        summary_path = write_summary(run_dir, summary)
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_xhs_schema(conn)
+            upsert_run(
+                conn,
+                run_id=run_id,
+                target_key=args.target_key,
+                account_id=args.account_id,
+                status="blocked",
+                state_path=state_path,
+                report=summary,
+                finished=True,
+            )
+        _ACTIVE_LEASE_GUARD = None
+        _ACTIVE_TERMINALIZER = None
+        print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
+        return 2
+    except BaseException as exc:
+        if guard.account is None:
+            terminalizer.restore()
+            raise
+        account = guard.account
+        acquire_exception = exc
+
     outcome = "failed"
     child_summary: dict[str, Any] = {}
     child_summary_path = ""
@@ -882,8 +934,15 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
     completed = None
     interrupt: dict[str, Any] | None = None
     discovery_commit: dict[str, Any] = {"skipped": True, "reason": "child_not_started"}
+    discovery_commit_request: dict[str, Any] | None = None
+    final_state_evidence: dict[str, Any] | None = None
     try:
+        if acquire_exception is not None:
+            raise acquire_exception
+        terminalizer.raise_if_interrupted()
+        terminalizer.phase("before_session_prepare")
         with guarded_runtime_session(run_id, guard) as runtime_session:
+            terminalizer.phase("after_session_prepare")
             command = build_child_command(
                 target=target,
                 pool=pool,
@@ -906,6 +965,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                 env=env,
                 timeout_seconds=int(target["timeout_seconds"]),
             )
+            terminalizer.phase("after_child_exit")
             exit_code = completed.returncode
             stdout = completed.stdout
             stderr = completed.stderr
@@ -930,22 +990,17 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                         project_root=ROOT,
                         media_root=LOCAL_MEDIA_ROOT,
                     )
-                    with sqlite3.connect(db_path) as conn:
-                        conn.row_factory = sqlite3.Row
-                        ensure_xhs_schema(conn)
-                        discovery_commit = commit_child_discovery(
-                            conn,
-                            target=target,
-                            account_id=str(account["account_id"]),
-                            run_id=run_id,
-                            discovery_plan=discovery_plan,
-                            child_summary_path=child_summary_path,
-                            child_summary=child_summary,
-                            imported_completion_verified=bool(
-                                discovery_image_artifacts["ok"]
-                                and discovery_image_persistence["ok"]
-                            ),
+                    discovery_commit_request = {
+                        "imported_completion_verified": bool(
+                            discovery_image_artifacts["ok"]
+                            and discovery_image_persistence["ok"]
                         )
+                    }
+                    discovery_commit = {
+                        "skipped": True,
+                        "reason": "terminal_commit_pending",
+                    }
+                    terminalizer.phase("after_discovery_prepare")
                 except (OSError, sqlite3.Error, TypeError, ValueError, RuntimeError) as exc:
                     discovery_commit = {
                         "skipped": False,
@@ -1030,21 +1085,17 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                                 evidence=import_result,
                             )
                     if state.load()["steps"]["persistence_verified"]["status"] in {"completed", "skipped"}:
-                        state.finalize(
-                            outcome="completed",
-                            evidence={
-                                "account_id": account["account_id"],
-                                "summary_path": child_summary_path,
-                                "import_result": import_result,
-                            },
-                        )
+                        final_state_evidence = {
+                            "account_id": account["account_id"],
+                            "summary_path": child_summary_path,
+                            "import_result": import_result,
+                        }
                         outcome = "completed"
     except BaseException as exc:
-        if isinstance(exc, (XhsLeaseSignal, KeyboardInterrupt)):
-            signum = (
-                int(exc.signum)
-                if isinstance(exc, XhsLeaseSignal)
-                else int(signal.SIGINT)
+        if terminalizer.is_interrupt(exc):
+            signum = terminalizer.capture_interrupt(
+                exc,
+                guard_signal=guard.signal_received,
             )
             signal_name = signal.Signals(signum).name
             exit_code = 128 + signum
@@ -1052,9 +1103,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             interrupt = {
                 "reason": "operator_interrupt",
                 "source": (
-                    "lease_signal"
-                    if isinstance(exc, XhsLeaseSignal)
-                    else "keyboard_interrupt"
+                    terminalizer.interrupt_source or "operator_interrupt"
                 ),
                 "signum": signum,
                 "signal": signal_name,
@@ -1086,9 +1135,24 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
 
     challenge = _challenge_reason(stdout, stderr, child_summary)
     login_reason = _login_reason(stdout, stderr, child_summary)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+
+    def terminal_mutation(conn: sqlite3.Connection, token: str) -> None:
+        nonlocal discovery_commit
         ensure_xhs_schema(conn)
+        if discovery_commit_request is not None and interrupt is None:
+            discovery_commit = commit_child_discovery(
+                conn,
+                target=target,
+                account_id=str(account["account_id"]),
+                run_id=run_id,
+                discovery_plan=discovery_plan,
+                child_summary_path=child_summary_path,
+                child_summary=child_summary,
+                imported_completion_verified=bool(
+                    discovery_commit_request["imported_completion_verified"]
+                ),
+                commit=False,
+            )
         if challenge:
             record_event(
                 conn,
@@ -1119,10 +1183,82 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                 "stop_reason": "runtime_failed" if interrupt else "",
                 "reason": "operator_interrupt" if interrupt else "",
                 "interrupt": interrupt,
+                "terminal_token": token,
             },
         )
-        conn.commit()
-    guard.set_outcome(outcome)
+        terminal_report = {
+            "terminal_commit": {
+                "token": token,
+                "outcome": outcome,
+                "committed": True,
+                "finalization_confirmed": False,
+            },
+            "discovery": discovery_commit,
+            "interrupt": interrupt,
+        }
+        upsert_run(
+            conn,
+            run_id=run_id,
+            target_key=args.target_key,
+            account_id=account["account_id"],
+            status="completed" if outcome == "completed" else "failed",
+            state_path=state_path,
+            child_summary_path=child_summary_path or None,
+            report=terminal_report,
+            finished=True,
+            commit=False,
+        )
+
+    try:
+        terminalizer.linearize(
+            outcome=outcome,
+            mutation=terminal_mutation,
+            allow_interrupted_failure=interrupt is not None,
+        )
+    except BaseException as exc:
+        if terminalizer.is_interrupt(exc):
+            signum = terminalizer.capture_interrupt(
+                exc,
+                guard_signal=guard.signal_received,
+            )
+            signal_name = signal.Signals(signum).name
+            exit_code = 128 + signum
+            guard.signal_received = signum
+            interrupt = {
+                "reason": "operator_interrupt",
+                "source": terminalizer.interrupt_source or "operator_interrupt",
+                "signum": signum,
+                "signal": signal_name,
+                "exit_code": exit_code,
+            }
+            outcome = "failed"
+            discovery_commit_request = None
+            discovery_commit = {
+                "skipped": True,
+                "reason": "operator_interrupt",
+                "interrupt": interrupt,
+            }
+            failure_error = f"xhs_runtime_failed:operator_interrupt:{signal_name}"
+            fail_open_step(state, error=failure_error, evidence={"interrupt": interrupt})
+            terminalizer.linearize(
+                outcome="failed",
+                mutation=terminal_mutation,
+                allow_interrupted_failure=True,
+            )
+        else:
+            discovery_commit_request = None
+            discovery_commit = {
+                "skipped": True,
+                "reason": "terminal_commit_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            outcome = "failed"
+            exit_code = 2
+            fail_open_step(
+                state,
+                error=f"xhs_terminal_commit_failed:{type(exc).__name__}",
+            )
+            terminalizer.linearize(outcome="failed", mutation=terminal_mutation)
 
     summary = {
         "status": outcome,
@@ -1164,53 +1300,73 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
         "stderr_tail": tail(stderr),
         "finished_at": utc_iso(),
     }
-    summary_path = write_summary(run_dir, summary)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        ensure_xhs_schema(conn)
-        upsert_run(
-            conn,
+    summary_path = run_dir / "run_summary.json"
+
+    def publish_state() -> None:
+        if outcome == "completed":
+            payload = state.load()
+            if payload.get("status") != "completed":
+                state.finalize(
+                    outcome="completed",
+                    evidence={
+                        **(final_state_evidence or {}),
+                        "terminal_token": terminalizer.token,
+                    },
+                )
+        else:
+            payload = state.load()
+            if payload.get("status") not in {"failed", "completed"}:
+                fail_open_step(state, error="xhs_terminal_failure")
+            state.finalize_failure(
+                error=(
+                    f"xhs_runtime_failed:operator_interrupt:{interrupt['signal']}"
+                    if interrupt
+                    else "xhs_terminal_failure"
+                ),
+                evidence={
+                    "terminal_token": terminalizer.token,
+                    "interrupt": interrupt,
+                },
+            )
+
+    def publish_run(document: Any) -> None:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_xhs_schema(conn)
+            upsert_run(
+                conn,
+                run_id=run_id,
+                target_key=args.target_key,
+                account_id=account["account_id"],
+                status="completed" if document.get("status") == "completed" else "failed",
+                state_path=state_path,
+                child_summary_path=child_summary_path or None,
+                report=dict(document),
+                finished=True,
+            )
+
+    finish = terminalizer.finish(
+        outcome=outcome,
+        summary=summary,
+        summary_path=summary_path,
+        state_publish=publish_state,
+        run_publish=publish_run,
+        guard=guard,
+        cleanup_evidence=lambda: lease_cleanup_evidence(
+            db_path,
+            account_id=str(account["account_id"]),
             run_id=run_id,
-            target_key=args.target_key,
-            account_id=account["account_id"],
-            status="completed" if outcome == "completed" else "failed",
-            state_path=state_path,
-            child_summary_path=child_summary_path or None,
-            report=summary,
-            finished=True,
-        )
-    lease_released = guard.close()
-    cleanup_evidence = lease_cleanup_evidence(
-        db_path,
-        account_id=str(account["account_id"]),
-        run_id=run_id,
-        lease_id=guard.lease_id,
+            lease_id=guard.lease_id,
+        ),
     )
-    summary["lease_released"] = lease_released
-    summary.update(guard.runtime_session_cleanup_evidence())
-    if not lease_released:
-        summary["status"] = "failed"
-        cleanup_error = lease_cleanup_failure_reason(cleanup_evidence)
-        if not interrupt:
-            summary["reason"] = cleanup_error
-        summary["cleanup_error"] = cleanup_error
-    summary["lease_cleanup"] = cleanup_evidence
-    write_summary(run_dir, summary)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        ensure_xhs_schema(conn)
-        upsert_run(
-            conn,
-            run_id=run_id,
-            target_key=args.target_key,
-            account_id=account["account_id"],
-            status="completed" if summary["status"] == "completed" else "failed",
-            state_path=state_path,
-            child_summary_path=child_summary_path or None,
-            report=summary,
-            finished=True,
-        )
+    summary = finish.summary
+    terminalizer.restore()
+    if finish.confirmed:
+        _ACTIVE_LEASE_GUARD = None
+        _ACTIVE_TERMINALIZER = None
     print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
+    if not finish.confirmed:
+        return 2
     if (
         summary.get("lease_released") is not True
         or summary.get("runtime_session_cleanup_complete") is not True
@@ -1473,8 +1629,9 @@ def _run_security_limit_retry_controller(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    global _ACTIVE_LEASE_GUARD
+    global _ACTIVE_LEASE_GUARD, _ACTIVE_TERMINALIZER
     _ACTIVE_LEASE_GUARD = None
+    _ACTIVE_TERMINALIZER = None
     code = 2
     try:
         try:
@@ -1489,9 +1646,20 @@ def main() -> int:
             code = 130
     finally:
         guard = _ACTIVE_LEASE_GUARD
+        terminalizer = _ACTIVE_TERMINALIZER
         _ACTIVE_LEASE_GUARD = None
-        released = guard is None or guard.close()
-        if not released:
+        _ACTIVE_TERMINALIZER = None
+        if guard is not None:
+            # Never perform an evidence-free close from the outer fallback.
+            # The shared terminalizer is the only owner of exact lease release.
+            try:
+                guard.terminate_owned_processes()
+            except BaseException:
+                pass
+            code = 2
+        if terminalizer is not None:
+            terminalizer.restore()
+        if guard is not None and terminalizer is None:
             code = 2
     return code
 

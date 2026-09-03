@@ -199,6 +199,7 @@ def commit_child_discovery(
     child_summary_path: str | Path,
     child_summary: Mapping[str, Any],
     imported_completion_verified: bool | None = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     import_result = child_summary.get("import_result") or {}
     if import_result.get("reason") == "sqlite_import_failed":
@@ -288,7 +289,8 @@ def commit_child_discovery(
         summary_path=campaign_summary_path,
         candidate_count=campaign_candidate_count,
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return {
         "skipped": False,
         "refresh_only": refresh_only,
