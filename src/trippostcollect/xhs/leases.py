@@ -2178,27 +2178,6 @@ class LeaseGuard:
         except ProcessLookupError:
             pass
 
-    def _terminate_unregistered_process_group(self, proc: subprocess.Popen[str]) -> None:
-        if proc.poll() is not None:
-            proc.communicate()
-            return
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        half_budget = max(1, self.budget.child_shutdown_seconds // 2)
-        try:
-            proc.communicate(timeout=half_budget)
-            return
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        proc.communicate(
-            timeout=max(1, self.budget.child_shutdown_seconds - half_budget)
-        )
-
     def _current_lease(self, conn: sqlite3.Connection) -> dict[str, Any]:
         row = conn.execute(
             "SELECT * FROM xhs_account_leases WHERE lease_id=? AND owner_token=?",

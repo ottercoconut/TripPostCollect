@@ -2604,6 +2604,10 @@ def test_spawn_gate_exec_preserves_exact_process_identity(
         gate.cancel(grace_seconds=2)
 
 
+def test_spawn_gate_removes_the_unregistered_direct_child_fallback() -> None:
+    assert not hasattr(LeaseGuard, "_terminate_unregistered_process_group")
+
+
 def test_spawn_gate_closes_both_pipe_fds_when_popen_raises_keyboard_interrupt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
