@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+import time
+from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +22,566 @@ if str(SCRIPTS) not in sys.path:
 
 mediacrawler_crawl = import_module("mediacrawler_crawl")
 FrozenExecutionState = import_module("execution_state").FrozenExecutionState
+runtime = import_module("trippostcollect.xhs.runtime")
+ProcessIdentity = import_module("trippostcollect.xhs.leases").ProcessIdentity
+
+AUTH_KEY_HEX = "ab" * 32
+AUTH_KEY = bytes.fromhex(AUTH_KEY_HEX)
+NOW = datetime(2026, 9, 3, 8, 0, 0, tzinfo=timezone.utc)
+
+
+class StaticInspector:
+    def __init__(self, identity: object) -> None:
+        self.current = identity
+
+    def identity(self, _pid: int) -> object:
+        return self.current
+
+    def current_identity(self) -> object:
+        return self.current
+
+
+def process_identity(
+    *,
+    pid: int = 4321,
+    process_start_token: str = "token-1",
+) -> object:
+    return ProcessIdentity(
+        host_id="host-1",
+        boot_id="boot-1",
+        pid=pid,
+        process_started_at="2026-09-03T08:00:00+00:00",
+        process_start_token=process_start_token,
+        pgid=pid,
+    )
+
+
+@pytest.fixture
+def runtime_reporter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[object, dict[str, Path], object]:
+    monkeypatch.setattr(runtime, "XHS_SESSION_ROOT", tmp_path / "sessions")
+    paths = runtime.prepare_runtime_session("run-1")
+    identity = process_identity()
+    reporter = mediacrawler_crawl.XhsSupervisorRuntimeReporter(
+        run_id="run-1",
+        account_id="xhs-a01",
+        lease_id="lease-1",
+        status_path=runtime.runtime_status_path("run-1"),
+        auth_key=AUTH_KEY,
+        writer_identity=identity,
+        inspector=StaticInspector(identity),
+    )
+    reporter.checkpoint()
+    return reporter, {**paths, "status": runtime.runtime_status_path("run-1")}, identity
+
+
+def read_reporter_status(path: Path, identity: object) -> dict[str, object]:
+    return runtime.read_runtime_status(
+        path,
+        auth_key=AUTH_KEY,
+        expected_run_id="run-1",
+        expected_account_id="xhs-a01",
+        expected_lease_id="lease-1",
+        expected_writer_identity=identity,
+    )
+
+
+def reporter_environment(*, auth_key: str | None = AUTH_KEY_HEX) -> dict[str, str]:
+    environ = {
+        mediacrawler_crawl.LEASE_DB_ENV: "/tmp/xhs-control.sqlite",
+        mediacrawler_crawl.LEASE_ID_ENV: "lease-1",
+        mediacrawler_crawl.LEASE_OWNER_TOKEN_ENV: "owner-token",
+        mediacrawler_crawl.XHS_RUNTIME_STATUS_RUN_ID_ENV: "run-1",
+    }
+    if auth_key is not None:
+        environ[runtime.RUNTIME_STATUS_AUTH_KEY_ENV] = auth_key
+    return environ
+
+
+@pytest.mark.parametrize(
+    ("auth_key", "error"),
+    [
+        (None, "incomplete XHS runtime reporter environment"),
+        ("AB" * 32, "64 lowercase hexadecimal"),
+        ("ab" * 31, "64 lowercase hexadecimal"),
+    ],
+)
+def test_xhs_runtime_key_is_required_and_validated_before_main_or_popen(
+    auth_key: str | None,
+    error: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime, "XHS_SESSION_ROOT", tmp_path / "sessions")
+    paths = runtime.prepare_runtime_session("run-1")
+    args = SimpleNamespace(
+        xhs_account_id="xhs-a01",
+        xhs_profile_dir=str(paths["profile"]),
+    )
+    environ = reporter_environment(auth_key=auth_key)
+    for key, value in environ.items():
+        monkeypatch.setenv(key, value)
+    if auth_key is None:
+        monkeypatch.delenv(runtime.RUNTIME_STATUS_AUTH_KEY_ENV, raising=False)
+    monkeypatch.setattr(mediacrawler_crawl, "parse_args", lambda: args)
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("main body and Popen must not run")
+
+    monkeypatch.setattr(mediacrawler_crawl, "_run_main", forbidden)
+    monkeypatch.setattr(mediacrawler_crawl.subprocess, "Popen", forbidden)
+
+    with pytest.raises(runtime.RuntimeStatusValidationError, match=error):
+        mediacrawler_crawl.main()
+    assert runtime.RUNTIME_STATUS_AUTH_KEY_ENV not in os.environ
+
+
+def test_runtime_reporter_consumes_key_and_uses_registered_supervisor_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime, "XHS_SESSION_ROOT", tmp_path / "sessions")
+    paths = runtime.prepare_runtime_session("run-1")
+    identity = process_identity()
+    environ = reporter_environment()
+    reporter = mediacrawler_crawl.xhs_supervisor_runtime_reporter_from_context(
+        SimpleNamespace(
+            xhs_account_id="xhs-a01",
+            xhs_profile_dir=str(paths["profile"]),
+        ),
+        environ=environ,
+        inspector=StaticInspector(identity),
+    )
+
+    assert reporter is not None
+    assert runtime.RUNTIME_STATUS_AUTH_KEY_ENV not in environ
+    assert environ[mediacrawler_crawl.LEASE_OWNER_TOKEN_ENV] == "owner-token"
+    status = read_reporter_status(runtime.runtime_status_path("run-1"), identity)
+    assert status["writer_pid"] == identity.pid
+    assert status["writer_process_start_token"] == identity.process_start_token
+    assert status["phase"] == "starting"
+
+
+@pytest.mark.parametrize("run_id", [None, "run-2"])
+def test_runtime_reporter_requires_exact_run_id_environment(
+    run_id: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime, "XHS_SESSION_ROOT", tmp_path / "sessions")
+    paths = runtime.prepare_runtime_session("run-1")
+    environ = reporter_environment()
+    if run_id is None:
+        environ.pop(mediacrawler_crawl.XHS_RUNTIME_STATUS_RUN_ID_ENV)
+    else:
+        environ[mediacrawler_crawl.XHS_RUNTIME_STATUS_RUN_ID_ENV] = run_id
+
+    with pytest.raises(runtime.RuntimeStatusValidationError, match="run id|missing"):
+        mediacrawler_crawl.xhs_supervisor_runtime_reporter_from_context(
+            SimpleNamespace(
+                xhs_account_id="xhs-a01",
+                xhs_profile_dir=str(paths["profile"]),
+            ),
+            environ=environ,
+            inspector=StaticInspector(process_identity()),
+        )
+    assert runtime.RUNTIME_STATUS_AUTH_KEY_ENV not in environ
+
+
+def test_no_xhs_runtime_environment_is_a_noop() -> None:
+    reporter = mediacrawler_crawl.xhs_supervisor_runtime_reporter_from_context(
+        SimpleNamespace(xhs_account_id=None, xhs_profile_dir=None),
+        environ={},
+    )
+
+    assert reporter is None
+
+
+def test_runtime_auth_key_is_never_forwarded_to_exporter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "browser_launch_environment",
+        lambda: {runtime.RUNTIME_STATUS_AUTH_KEY_ENV: AUTH_KEY_HEX},
+    )
+    child = (
+        "import os; "
+        f"print(os.environ.get('{runtime.RUNTIME_STATUS_AUTH_KEY_ENV}', 'missing'))"
+    )
+
+    result = mediacrawler_crawl.run_command(
+        [sys.executable, "-c", child],
+        tmp_path,
+        2,
+        tmp_path / "logs",
+    )
+
+    assert result["returncode"] == 0
+    assert result["stdout_tail"].strip() == "missing"
+    assert AUTH_KEY_HEX not in (tmp_path / "logs" / "command.txt").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_network_diagnostics_require_fresh_explicit_transport_recovery(
+    tmp_path: Path,
+) -> None:
+    diagnostic_path = tmp_path / "behavior_evidence.navigation.json"
+
+    def write_event(
+        *,
+        at: datetime,
+        outcome: str = "network_paused",
+        error: str = "ConnectTimeout: request failed",
+        include_error: bool = True,
+    ) -> None:
+        event: dict[str, object] = {
+            "at": at.isoformat(),
+            "stage": "search",
+            "outcome": outcome,
+        }
+        if include_error:
+            event["error"] = error
+        diagnostic_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "platform": "xhs",
+                    "updated_at": at.isoformat(),
+                    "events": [event],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_event(
+        at=NOW,
+        error="ConnectTimeout: cookie=secret owner_token=forbidden",
+    )
+    assert mediacrawler_crawl.xhs_network_state_from_diagnostics(
+        diagnostic_path,
+        now=NOW,
+    ) == ("network_paused", "transport_timeout")
+
+    write_event(at=NOW, error="SMS Verification parameter error cookie=secret")
+    assert mediacrawler_crawl.xhs_network_state_from_diagnostics(
+        diagnostic_path,
+        now=NOW,
+    ) == ("unknown", "")
+
+    write_event(at=NOW - timedelta(seconds=91))
+    assert mediacrawler_crawl.xhs_network_state_from_diagnostics(
+        diagnostic_path,
+        now=NOW,
+    ) == ("unknown", "")
+
+    write_event(at=NOW, include_error=False)
+    assert mediacrawler_crawl.xhs_network_state_from_diagnostics(
+        diagnostic_path,
+        now=NOW,
+    ) == ("unknown", "")
+
+    diagnostic_path.write_text("{", encoding="utf-8")
+    assert mediacrawler_crawl.xhs_network_state_from_diagnostics(
+        diagnostic_path,
+        now=NOW,
+    ) == ("unknown", "")
+
+
+def test_runtime_reporter_sequence_finalizing_and_no_background_keepalive(
+    runtime_reporter: tuple[object, dict[str, Path], object],
+) -> None:
+    reporter, paths, identity = runtime_reporter
+    assert reporter.checkpoint(
+        phase="running",
+        network_state="network_paused",
+        network_reason="transport_timeout",
+    )
+    running = read_reporter_status(paths["status"], identity)
+    assert running["sequence"] == 2
+    assert running["network_reason"] == "transport_timeout"
+
+    assert reporter.enter_finalizing()
+    finalizing = read_reporter_status(paths["status"], identity)
+    assert finalizing["sequence"] == 3
+    assert finalizing["phase"] == "finalizing"
+    assert finalizing["network_state"] == "unknown"
+    assert not {
+        "checkpoint",
+        "completion_met",
+        "source_exhausted",
+    } & set(finalizing)
+
+    time.sleep(0.03)
+    unchanged = read_reporter_status(paths["status"], identity)
+    assert unchanged["sequence"] == 3
+
+
+def test_runtime_status_write_failure_is_terminal(
+    runtime_reporter: tuple[object, dict[str, Path], object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reporter, paths, identity = runtime_reporter
+
+    def fail_write(*_args: object, **_kwargs: object) -> object:
+        raise OSError("synthetic write failure")
+
+    monkeypatch.setattr(mediacrawler_crawl, "write_runtime_status_atomic", fail_write)
+    with pytest.raises(
+        mediacrawler_crawl.XhsRuntimeSupervisionError,
+        match="runtime_status_write_failed",
+    ):
+        reporter.checkpoint(phase="running")
+
+    status = read_reporter_status(paths["status"], identity)
+    assert status["sequence"] == 1
+    assert reporter.snapshot()["write_failures"] == 1
+
+
+def test_exporter_start_token_change_stops_heartbeat_and_terminates_process(
+    runtime_reporter: tuple[object, dict[str, Path], object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reporter, paths, writer_identity = runtime_reporter
+    registered: dict[str, object] = {}
+
+    def register_exporter(*, pid: int, **_kwargs: object) -> object:
+        identity = process_identity(pid=pid, process_start_token="exporter-original")
+        registered["identity"] = identity
+        return identity
+
+    class ChangedExporterInspector:
+        def identity(self, pid: int) -> object:
+            return process_identity(pid=pid, process_start_token="exporter-reused")
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "browser_launch_environment",
+        reporter_environment,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "register_lease_process_from_environment",
+        register_exporter,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "mark_lease_process_exited_from_environment",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "SystemProcessInspector",
+        ChangedExporterInspector,
+    )
+    started = time.monotonic()
+
+    with pytest.raises(
+        mediacrawler_crawl.XhsRuntimeSupervisionError,
+        match="exporter_process_identity_changed",
+    ):
+        mediacrawler_crawl.run_command(
+            [sys.executable, "-c", "import time; time.sleep(10)"],
+            tmp_path,
+            5,
+            tmp_path / "identity-logs",
+            progress_paths=[],
+            runtime_reporter=reporter,
+            poll_seconds=0.02,
+            cleanup_grace_seconds=1,
+        )
+
+    assert registered["identity"].process_start_token == "exporter-original"
+    assert time.monotonic() - started < 2
+    assert read_reporter_status(paths["status"], writer_identity)["sequence"] == 1
+
+
+def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    exporter_identity = process_identity(pid=9911, process_start_token="exporter-1")
+
+    class FakeProcess:
+        pid = 9911
+        returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def communicate(self, *, timeout: float) -> tuple[bytes, bytes]:
+            raise subprocess.TimeoutExpired(["fake"], timeout)
+
+    class CountingReporter:
+        def __init__(self, status_path: Path) -> None:
+            self.calls = 0
+            self.status_path = status_path
+
+        def checkpoint_from_diagnostics(
+            self,
+            _path: object,
+            *,
+            phase: str,
+        ) -> bool:
+            assert phase == "running"
+            self.calls += 1
+            return True
+
+        def snapshot(self) -> dict[str, object]:
+            return {"enabled": True, "calls": self.calls}
+
+    fake_process = FakeProcess()
+    reporter = CountingReporter(tmp_path / "runtime_status.json")
+    monotonic_values = iter((0.0, 0.0, 1.0, 1.0))
+
+    def terminate(
+        proc: FakeProcess,
+        *,
+        grace_seconds: float,
+    ) -> tuple[bytes, bytes, bool]:
+        assert grace_seconds == 1
+        proc.returncode = -15
+        return b"", b"", False
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "browser_launch_environment",
+        reporter_environment,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: fake_process,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "register_lease_process_from_environment",
+        lambda **_kwargs: exporter_identity,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "mark_lease_process_exited_from_environment",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "SystemProcessInspector",
+        lambda: StaticInspector(exporter_identity),
+    )
+    monkeypatch.setattr(mediacrawler_crawl, "terminate_managed_process", terminate)
+    monkeypatch.setattr(
+        mediacrawler_crawl.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    result = mediacrawler_crawl.run_command(
+        ["fake"],
+        tmp_path,
+        0.5,
+        tmp_path / "expiry-logs",
+        progress_paths=[reporter.status_path],
+        runtime_reporter=reporter,
+        poll_seconds=0.1,
+        cleanup_grace_seconds=1,
+    )
+
+    assert result["returncode"] == 124
+    assert result["timeout_reason"] == "no_progress_timeout"
+    assert result["progress_observed"] is False
+    assert reporter.calls == 1
+
+
+def test_runtime_reporter_requires_progress_tracking_before_popen(
+    runtime_reporter: tuple[object, dict[str, Path], object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reporter, _, _ = runtime_reporter
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "browser_launch_environment",
+        reporter_environment,
+    )
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Popen must not run without progress paths")
+
+    monkeypatch.setattr(mediacrawler_crawl.subprocess, "Popen", forbidden)
+    with pytest.raises(
+        mediacrawler_crawl.XhsRuntimeSupervisionError,
+        match="requires progress tracking",
+    ):
+        mediacrawler_crawl.run_command(
+            ["fake"],
+            tmp_path,
+            1,
+            tmp_path / "missing-progress-logs",
+            runtime_reporter=reporter,
+        )
+
+
+def test_child_exit_then_main_control_flow_enters_finalizing(
+    runtime_reporter: tuple[object, dict[str, Path], object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reporter, paths, writer_identity = runtime_reporter
+    registered: dict[str, object] = {}
+
+    def register_exporter(*, pid: int, **_kwargs: object) -> object:
+        identity = process_identity(pid=pid, process_start_token="exporter-live")
+        registered["identity"] = identity
+        return identity
+
+    class StableExporterInspector:
+        def identity(self, _pid: int) -> object:
+            return registered.get("identity")
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "browser_launch_environment",
+        reporter_environment,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "register_lease_process_from_environment",
+        register_exporter,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "mark_lease_process_exited_from_environment",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "SystemProcessInspector",
+        StableExporterInspector,
+    )
+
+    result = mediacrawler_crawl.run_command(
+        [sys.executable, "-c", "import time; time.sleep(0.08)"],
+        tmp_path,
+        1,
+        tmp_path / "child-exit-logs",
+        progress_paths=[],
+        runtime_reporter=reporter,
+        poll_seconds=0.01,
+        cleanup_grace_seconds=1,
+    )
+    running = read_reporter_status(paths["status"], writer_identity)
+    assert result["returncode"] == 0
+    assert running["phase"] == "running"
+
+    reporter.enter_finalizing()
+    finalizing = read_reporter_status(paths["status"], writer_identity)
+    assert finalizing["sequence"] > running["sequence"]
+    assert finalizing["phase"] == "finalizing"
 
 
 def test_durable_progress_allows_runtime_longer_than_watchdog(

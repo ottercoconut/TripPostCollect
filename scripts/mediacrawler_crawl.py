@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from hashlib import md5, sha256
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, MutableMapping
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -116,8 +116,19 @@ from trippostcollect.xhs.leases import (
     LEASE_DB_ENV,
     LEASE_ID_ENV,
     LEASE_OWNER_TOKEN_ENV,
+    ProcessIdentity,
+    SystemProcessInspector,
     mark_lease_process_exited_from_environment,
     register_lease_process_from_environment,
+)
+from trippostcollect.xhs.runtime import (
+    RUNTIME_STATUS_AUTH_KEY_ENV,
+    RUNTIME_STATUS_SCHEMA_VERSION,
+    RuntimeStatusValidationError,
+    runtime_session_paths,
+    runtime_status_path,
+    sign_runtime_status,
+    write_runtime_status_atomic,
 )
 from trippostcollect.scheduler.discovery import (
     load_checkpoint,
@@ -141,6 +152,10 @@ FORMAL_SQLITE_BUSY_TIMEOUT_MS = 60_000
 PROCESS_PROGRESS_POLL_SECONDS = 5.0
 PROCESS_CLEANUP_GRACE_SECONDS = 20.0
 PROCESS_FINAL_REAP_SECONDS = 5.0
+XHS_NETWORK_DIAGNOSTIC_MAX_AGE_SECONDS = 90.0
+XHS_NETWORK_DIAGNOSTIC_MAX_BYTES = 512 * 1024
+XHS_RUNTIME_STATUS_AUTH_KEY_RE = re.compile(r"[0-9a-f]{64}\Z")
+XHS_RUNTIME_STATUS_RUN_ID_ENV = "TRIPPOSTCOLLECT_XHS_RUN_ID"
 BILIBILI_ARTICLE_SEARCH_URL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
 BILIBILI_ARTICLE_DETAIL_URL = "https://api.bilibili.com/x/article/view"
 BILIBILI_RELATION_STAT_URL = "https://api.bilibili.com/x/relation/stat"
@@ -1239,6 +1254,379 @@ def is_video_record(platform_key: str, record: dict[str, Any]) -> bool:
     return False
 
 
+_XHS_TRANSPORT_MARKER_REASONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "internet_disconnected",
+        (
+            "net::err_internet_disconnected",
+            "network is unreachable",
+            "no route to host",
+        ),
+    ),
+    (
+        "dns_unreachable",
+        (
+            "net::err_name_not_resolved",
+            "temporary failure in name resolution",
+            "name or service not known",
+        ),
+    ),
+    ("network_changed", ("net::err_network_changed",)),
+    (
+        "connection_reset",
+        (
+            "net::err_connection_reset",
+            "net::err_connection_closed",
+            "connection reset by peer",
+        ),
+    ),
+    (
+        "connection_refused",
+        ("net::err_connection_refused", "connection refused"),
+    ),
+    (
+        "address_unreachable",
+        ("net::err_address_unreachable",),
+    ),
+    (
+        "proxy_unreachable",
+        (
+            "net::err_proxy_connection_failed",
+            "net::err_tunnel_connection_failed",
+        ),
+    ),
+    ("transport_timeout", ("net::err_timed_out",)),
+)
+_XHS_TRANSPORT_ERROR_TYPE_REASONS = {
+    "ConnectError": "internet_disconnected",
+    "ConnectTimeout": "transport_timeout",
+    "NetworkError": "internet_disconnected",
+    "PlaywrightTimeoutError": "transport_timeout",
+    "PoolTimeout": "transport_timeout",
+    "ProxyError": "proxy_unreachable",
+    "ReadError": "connection_reset",
+    "ReadTimeout": "transport_timeout",
+    "RemoteProtocolError": "connection_reset",
+    "TimeoutError": "transport_timeout",
+    "WriteError": "connection_reset",
+    "WriteTimeout": "transport_timeout",
+}
+
+
+def _diagnostic_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _fresh_diagnostic_timestamp(
+    value: object,
+    *,
+    now: datetime,
+    max_age_seconds: float,
+) -> bool:
+    parsed = _diagnostic_timestamp(value)
+    return bool(
+        parsed is not None
+        and parsed <= now + timedelta(seconds=5)
+        and parsed >= now - timedelta(seconds=max_age_seconds)
+    )
+
+
+def _sanitized_transport_reason(error: str) -> str:
+    detail = error.casefold()
+    for reason, markers in _XHS_TRANSPORT_MARKER_REASONS:
+        if any(marker in detail for marker in markers):
+            return reason
+    error_type, separator, _ = error.partition(":")
+    if not separator:
+        return ""
+    return _XHS_TRANSPORT_ERROR_TYPE_REASONS.get(error_type.strip(), "")
+
+
+def xhs_network_state_from_diagnostics(
+    path: str | Path | None,
+    *,
+    now: datetime | None = None,
+    max_age_seconds: float = XHS_NETWORK_DIAGNOSTIC_MAX_AGE_SECONDS,
+) -> tuple[str, str]:
+    """Return only a fresh, explicitly recoverable XHS transport state."""
+
+    if path is None or max_age_seconds <= 0:
+        return "unknown", ""
+    observed_at = now or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("network diagnostic reference time must be timezone-aware")
+    observed_at = observed_at.astimezone(timezone.utc)
+    candidate = Path(path).expanduser()
+    try:
+        if candidate.is_symlink():
+            return "unknown", ""
+        file_stat = candidate.stat()
+        if not candidate.is_file() or file_stat.st_size > XHS_NETWORK_DIAGNOSTIC_MAX_BYTES:
+            return "unknown", ""
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        return "unknown", ""
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "platform", "updated_at", "events"}
+        or type(payload.get("schema_version")) is not int
+        or payload.get("schema_version") != 1
+        or payload.get("platform") != "xhs"
+        or not _fresh_diagnostic_timestamp(
+            payload.get("updated_at"),
+            now=observed_at,
+            max_age_seconds=max_age_seconds,
+        )
+    ):
+        return "unknown", ""
+    events = payload.get("events")
+    if (
+        not isinstance(events, list)
+        or not events
+        or len(events) > 30
+        or not isinstance(events[-1], dict)
+    ):
+        return "unknown", ""
+    event = events[-1]
+    if not isinstance(event.get("stage"), str) or not event["stage"].strip():
+        return "unknown", ""
+    if not _fresh_diagnostic_timestamp(
+        event.get("at"),
+        now=observed_at,
+        max_age_seconds=max_age_seconds,
+    ):
+        return "unknown", ""
+    outcome = event.get("outcome")
+    error = event.get("error")
+    if outcome == "network_recovered" and error in (None, ""):
+        return "online", ""
+    if (
+        outcome != "network_paused"
+        or not isinstance(error, str)
+        or not error
+        or len(error) > 500
+    ):
+        return "unknown", ""
+    reason = _sanitized_transport_reason(error)
+    return ("network_paused", reason) if reason else ("unknown", "")
+
+
+class XhsRuntimeSupervisionError(RuntimeError):
+    """Raised when authenticated XHS runtime supervision can no longer continue."""
+
+
+class XhsSupervisorRuntimeReporter:
+    """Synchronous, single-writer status reporter owned by this supervisor."""
+
+    _PHASE_ORDER = {"starting": 0, "running": 1, "finalizing": 2}
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        account_id: str,
+        lease_id: str,
+        status_path: Path,
+        auth_key: bytes,
+        writer_identity: ProcessIdentity,
+        inspector: SystemProcessInspector,
+    ) -> None:
+        self.run_id = run_id
+        self.account_id = account_id
+        self.lease_id = lease_id
+        self.status_path = status_path
+        self._auth_key = auth_key
+        self.writer_identity = writer_identity
+        self._inspector = inspector
+        self._phase = "starting"
+        self._sequence = 0
+        self._last_written_sequence = 0
+        self._write_failures = 0
+        self._last_write_error = ""
+
+    @property
+    def phase(self) -> str:
+        return self._phase
+
+    def _writer_identity_is_current(self) -> bool:
+        return self._inspector.identity(self.writer_identity.pid) == self.writer_identity
+
+    def checkpoint(
+        self,
+        *,
+        phase: str | None = None,
+        network_state: str = "unknown",
+        network_reason: str = "",
+    ) -> bool:
+        requested_phase = phase or self._phase
+        if requested_phase not in self._PHASE_ORDER:
+            raise ValueError(f"unsupported runtime status phase: {requested_phase}")
+        if self._PHASE_ORDER[requested_phase] < self._PHASE_ORDER[self._phase]:
+            raise ValueError("runtime status phase cannot move backwards")
+        if not self._writer_identity_is_current():
+            self._write_failures += 1
+            self._last_write_error = "writer_identity_changed"
+            raise XhsRuntimeSupervisionError(
+                "xhs_runtime_status_writer_identity_changed"
+            )
+        self._phase = requested_phase
+        self._sequence += 1
+        identity = self.writer_identity
+        unsigned = {
+            "schema_version": RUNTIME_STATUS_SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "account_id": self.account_id,
+            "lease_id": self.lease_id,
+            "writer_role": "mediacrawler_supervisor",
+            "writer_host_id": identity.host_id,
+            "writer_boot_id": identity.boot_id,
+            "writer_pid": identity.pid,
+            "writer_process_started_at": identity.process_started_at,
+            "writer_process_start_token": identity.process_start_token,
+            "writer_pgid": identity.pgid,
+            "sequence": self._sequence,
+            "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+            "phase": self._phase,
+            "network_state": network_state,
+            "network_reason": network_reason,
+        }
+        try:
+            signed = sign_runtime_status(unsigned, auth_key=self._auth_key)
+            write_runtime_status_atomic(
+                self.status_path,
+                signed,
+                auth_key=self._auth_key,
+            )
+        except (OSError, RuntimeStatusValidationError) as exc:
+            self._write_failures += 1
+            self._last_write_error = "runtime_status_write_failed"
+            raise XhsRuntimeSupervisionError(
+                "xhs_runtime_status_write_failed"
+            ) from exc
+        self._last_written_sequence = self._sequence
+        self._last_write_error = ""
+        return True
+
+    def checkpoint_from_diagnostics(
+        self,
+        path: str | Path | None,
+        *,
+        phase: str | None = None,
+    ) -> bool:
+        network_state, network_reason = xhs_network_state_from_diagnostics(path)
+        return self.checkpoint(
+            phase=phase,
+            network_state=network_state,
+            network_reason=network_reason,
+        )
+
+    def enter_finalizing(self) -> bool:
+        return self.checkpoint(phase="finalizing")
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "status_path": str(self.status_path),
+            "phase": self._phase,
+            "attempted_sequence": self._sequence,
+            "last_written_sequence": self._last_written_sequence,
+            "write_failures": self._write_failures,
+            "last_write_error": self._last_write_error,
+        }
+
+
+def xhs_supervisor_runtime_reporter_from_context(
+    args: argparse.Namespace,
+    *,
+    environ: MutableMapping[str, str] | None = None,
+    inspector: SystemProcessInspector | None = None,
+) -> XhsSupervisorRuntimeReporter | None:
+    """Consume the one-run auth key and construct the exact child reporter."""
+
+    source = os.environ if environ is None else environ
+    raw_auth_key = source.pop(RUNTIME_STATUS_AUTH_KEY_ENV, "")
+    lease_values = {
+        LEASE_DB_ENV: str(source.get(LEASE_DB_ENV) or ""),
+        LEASE_ID_ENV: str(source.get(LEASE_ID_ENV) or ""),
+        LEASE_OWNER_TOKEN_ENV: str(source.get(LEASE_OWNER_TOKEN_ENV) or ""),
+        XHS_RUNTIME_STATUS_RUN_ID_ENV: str(
+            source.get(XHS_RUNTIME_STATUS_RUN_ID_ENV) or ""
+        ),
+    }
+    runtime_markers = [raw_auth_key, *lease_values.values()]
+    if not any(runtime_markers):
+        return None
+    missing = [
+        key
+        for key, value in {
+            RUNTIME_STATUS_AUTH_KEY_ENV: raw_auth_key,
+            **lease_values,
+        }.items()
+        if not value
+    ]
+    if missing:
+        raise RuntimeStatusValidationError(
+            f"incomplete XHS runtime reporter environment: missing={sorted(missing)}"
+        )
+    if not XHS_RUNTIME_STATUS_AUTH_KEY_RE.fullmatch(raw_auth_key):
+        raise RuntimeStatusValidationError(
+            "XHS runtime status auth key must be exactly 64 lowercase hexadecimal characters"
+        )
+    account_id = str(getattr(args, "xhs_account_id", "") or "")
+    profile_value = str(getattr(args, "xhs_profile_dir", "") or "")
+    if not account_id or not profile_value:
+        raise RuntimeStatusValidationError(
+            "XHS runtime reporter requires account and run-scoped profile arguments"
+        )
+    profile = Path(profile_value).expanduser()
+    if profile.name != "profile" or profile.is_symlink():
+        raise RuntimeStatusValidationError(
+            "XHS runtime reporter requires the exact non-symlink run profile"
+        )
+    profile = profile.resolve()
+    run_id = profile.parent.name
+    paths = runtime_session_paths(run_id)
+    if (
+        profile != paths["profile"].expanduser().resolve()
+        or not paths["root"].is_dir()
+        or paths["root"].is_symlink()
+        or not profile.is_dir()
+    ):
+        raise RuntimeStatusValidationError(
+            "XHS runtime reporter profile does not match its exact runtime session"
+        )
+    environment_run_id = lease_values[XHS_RUNTIME_STATUS_RUN_ID_ENV]
+    if environment_run_id != run_id:
+        raise RuntimeStatusValidationError(
+            "XHS runtime reporter run id does not match its exact runtime session"
+        )
+    process_inspector = inspector or SystemProcessInspector()
+    reporter = XhsSupervisorRuntimeReporter(
+        run_id=run_id,
+        account_id=account_id,
+        lease_id=lease_values[LEASE_ID_ENV],
+        status_path=runtime_status_path(run_id),
+        auth_key=bytes.fromhex(raw_auth_key),
+        writer_identity=process_inspector.current_identity(),
+        inspector=process_inspector,
+    )
+    reporter.checkpoint()
+    return reporter
+
+
+def _runtime_progress(callback: Callable[[], object] | None) -> None:
+    if callback is not None:
+        callback()
+
+
 def progress_path_signature(paths: Iterable[Path]) -> tuple[tuple[str, int, int], ...]:
     files: set[Path] = set()
     for raw_path in paths:
@@ -1371,6 +1759,8 @@ def run_command(
     *,
     extra_env: dict[str, str] | None = None,
     progress_paths: Iterable[Path] | None = None,
+    runtime_reporter: XhsSupervisorRuntimeReporter | None = None,
+    network_diagnostics_path: str | Path | None = None,
     startup_grace_seconds: float = 0.0,
     poll_seconds: float = PROCESS_PROGRESS_POLL_SECONDS,
     cleanup_grace_seconds: float = PROCESS_CLEANUP_GRACE_SECONDS,
@@ -1382,6 +1772,7 @@ def run_command(
     env.setdefault("UV_CACHE_DIR", str(ensure_dir(UV_CACHE_ROOT)))
     if extra_env:
         env.update(extra_env)
+    env.pop(RUNTIME_STATUS_AUTH_KEY_ENV, None)
     started = time.monotonic()
     stdout = ""
     stderr = ""
@@ -1393,14 +1784,33 @@ def run_command(
     last_progress_at = started
     last_progress_age_seconds = 0.0
     tracked_paths = tuple(progress_paths) if progress_paths is not None else None
+    if runtime_reporter is not None and tracked_paths is not None:
+        runtime_status_file = runtime_reporter.status_path.expanduser().absolute()
+        tracked_paths = tuple(
+            path
+            for path in tracked_paths
+            if Path(path).expanduser().absolute() != runtime_status_file
+        )
     progress_signature = (
         progress_path_signature(tracked_paths) if tracked_paths is not None else ()
     )
     proc: subprocess.Popen[bytes] | None = None
     lease_process_identity = None
+    exporter_identity_mismatch = False
     lease_registration_enabled = all(
         str(env.get(key) or "")
         for key in (LEASE_DB_ENV, LEASE_ID_ENV, LEASE_OWNER_TOKEN_ENV)
+    )
+    if runtime_reporter is not None and (
+        tracked_paths is None or not lease_registration_enabled
+    ):
+        raise XhsRuntimeSupervisionError(
+            "XHS runtime reporter requires progress tracking and lease registration"
+        )
+    process_inspector = (
+        SystemProcessInspector()
+        if lease_registration_enabled or runtime_reporter is not None
+        else None
     )
     try:
         proc = subprocess.Popen(
@@ -1417,6 +1827,7 @@ def run_command(
                     pid=proc.pid,
                     process_role="exporter",
                     environ=env,
+                    inspector=process_inspector,
                 )
             except Exception:
                 terminate_managed_process(
@@ -1424,6 +1835,14 @@ def run_command(
                     grace_seconds=cleanup_grace_seconds,
                 )
                 raise
+        if runtime_reporter is not None and lease_process_identity is None:
+            terminate_managed_process(
+                proc,
+                grace_seconds=cleanup_grace_seconds,
+            )
+            raise XhsRuntimeSupervisionError(
+                "XHS runtime reporter requires an exact registered exporter identity"
+            )
         while True:
             now = time.monotonic()
             if tracked_paths is not None:
@@ -1440,6 +1859,28 @@ def run_command(
             else:
                 remaining = timeout
                 communicate_timeout = timeout
+            if runtime_reporter is not None and remaining > 0:
+                exporter_alive = proc.poll() is None
+                exporter_identity_current = bool(
+                    exporter_alive
+                    and lease_process_identity is not None
+                    and process_inspector is not None
+                    and process_inspector.identity(proc.pid) == lease_process_identity
+                )
+                if exporter_identity_current:
+                    runtime_reporter.checkpoint_from_diagnostics(
+                        network_diagnostics_path,
+                        phase="running",
+                    )
+                elif exporter_alive:
+                    exporter_identity_mismatch = True
+                    terminate_managed_process(
+                        proc,
+                        grace_seconds=cleanup_grace_seconds,
+                    )
+                    raise XhsRuntimeSupervisionError(
+                        "xhs_exporter_process_identity_changed"
+                    )
             if remaining <= 0:
                 timed_out = True
                 returncode = 124
@@ -1526,6 +1967,10 @@ def run_command(
         "last_progress_age_seconds": round(last_progress_age_seconds, 2),
         "forced_termination": forced_termination,
         "cleanup_grace_seconds": cleanup_grace_seconds,
+        "exporter_identity_mismatch": exporter_identity_mismatch,
+        "runtime_status": (
+            runtime_reporter.snapshot() if runtime_reporter is not None else None
+        ),
         "elapsed_seconds": round(time.monotonic() - started, 2),
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
@@ -2526,7 +2971,9 @@ def collect_formal_records(
     allowed_identities: set[str] | None = None,
     repair_metadata_by_identity: dict[str, dict[str, Any]] | None = None,
     repair_mode: bool = False,
+    progress_callback: Callable[[], object] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    _runtime_progress(progress_callback)
     localized = localized_identities or set()
     materialized = materialized_images_by_identity or {}
     seen: set[str] = set()
@@ -2555,6 +3002,8 @@ def collect_formal_records(
                     if not text:
                         continue
                     candidate_count += 1
+                    if candidate_count % 64 == 1:
+                        _runtime_progress(progress_callback)
                     try:
                         record = json.loads(text)
                     except json.JSONDecodeError:
@@ -2634,6 +3083,7 @@ def collect_formal_records(
                             "materialized_images": materialized.get(identity),
                         }
                     )
+            _runtime_progress(progress_callback)
 
     output_record_count = candidate_count
     pagination_evidence = pagination_evidence or {}
@@ -2770,6 +3220,7 @@ def collect_formal_records(
             if not item["is_new"] and item["topic_relevant"]
         ][:5],
     }
+    _runtime_progress(progress_callback)
     return validation_summary, selected
 
 
@@ -2838,7 +3289,9 @@ def rollback_newly_promoted_images(
     project_root: str | Path = PROJECT_ROOT,
     media_root: str | Path = LOCAL_MEDIA_ROOT,
     db_path: str | Path | None = None,
+    progress_callback: Callable[[], object] | None = None,
 ) -> int:
+    _runtime_progress(progress_callback)
     root = Path(project_root).expanduser().resolve(strict=True)
     media = Path(media_root).expanduser().resolve()
     if media != root and root not in media.parents:
@@ -2870,6 +3323,7 @@ def rollback_newly_promoted_images(
     removed = 0
     candidate_dirs: set[Path] = set()
     for images in materialized_by_identity.values():
+        _runtime_progress(progress_callback)
         for item in images:
             if item.reused:
                 continue
@@ -2883,6 +3337,7 @@ def rollback_newly_promoted_images(
                 path.unlink()
                 removed += 1
     for directory in sorted(candidate_dirs, key=lambda value: len(value.parts), reverse=True):
+        _runtime_progress(progress_callback)
         current = directory
         while current != media and media in current.parents:
             try:
@@ -2898,13 +3353,24 @@ def formal_media_persistence_lock(
     *,
     enabled: bool,
     lock_path: str | Path = FORMAL_MEDIA_PERSISTENCE_LOCK,
+    progress_callback: Callable[[], object] | None = None,
 ) -> Iterator[None]:
     if not enabled:
         yield
         return
     resolved_lock = ensure_parent(lock_path)
     with resolved_lock.open("a+b") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        if progress_callback is None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        else:
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    _runtime_progress(progress_callback)
+                    time.sleep(min(1.0, PROCESS_PROGRESS_POLL_SECONDS))
+            _runtime_progress(progress_callback)
         try:
             yield
         finally:
@@ -3063,7 +3529,9 @@ def materialize_formal_record_images(
     project_root: str | Path = PROJECT_ROOT,
     media_root: str | Path = LOCAL_MEDIA_ROOT,
     promote: bool,
+    progress_callback: Callable[[], object] | None = None,
 ) -> tuple[dict[str, Any], dict[str, list[MaterializedImage]], set[str]]:
+    _runtime_progress(progress_callback)
     root = Path(project_root).expanduser().resolve(strict=True)
     resolved_media_root = Path(media_root).expanduser().resolve()
     if resolved_media_root != root and root not in resolved_media_root.parents:
@@ -3095,6 +3563,7 @@ def materialize_formal_record_images(
     rolled_back_images = 0
 
     for item in selected:
+        _runtime_progress(progress_callback)
         identity = str(item.get("identity") or "")
         platform_key = str(item.get("platform") or "")
         record = item.get("record") if isinstance(item.get("record"), dict) else {}
@@ -3168,6 +3637,7 @@ def materialize_formal_record_images(
                 tuple[ImageCandidate, ValidatedImage, Path, int, Path]
             ] = []
             for candidate, entry, manifest_path, manifest_line in matched_manifest_rows:
+                _runtime_progress(progress_callback)
                 staging_root = _staging_root_for_manifest_entry(manifest_path, entry)
                 staged_path = staging_root / str(entry.staging_path)
                 validated = validate_image_file(
@@ -3195,6 +3665,7 @@ def materialize_formal_record_images(
                 )
 
             for entry, manifest_path, _ in reconciliation_rows:
+                _runtime_progress(progress_callback)
                 staging_root = _staging_root_for_manifest_entry(manifest_path, entry)
                 staged_path = staging_root / str(entry.staging_path)
                 validated = validate_image_file(
@@ -3294,6 +3765,7 @@ def materialize_formal_record_images(
                 manifest_line,
                 staging_root,
             ) in enumerate(retained_rows):
+                _runtime_progress(progress_callback)
                 persistence_candidate = replace(candidate, source_index=retained_index)
                 promoted = promote_validated_image(
                     validated,
@@ -3331,6 +3803,7 @@ def materialize_formal_record_images(
                         materialized_by_identity,
                         project_root=root,
                         media_root=resolved_media_root,
+                        progress_callback=progress_callback,
                     )
                 raise
             code = getattr(exc, "code", "missing_image_manifest")
@@ -3370,6 +3843,7 @@ def materialize_formal_record_images(
             materialized_by_identity,
             project_root=root,
             media_root=resolved_media_root,
+            progress_callback=progress_callback,
         )
         materialized_by_identity = {}
         complete_identities = set()
@@ -3399,6 +3873,7 @@ def materialize_formal_record_images(
         "manifest_evidence": manifest_items,
         "failures": failures,
     }
+    _runtime_progress(progress_callback)
     return report, materialized_by_identity, complete_identities
 
 
@@ -3495,7 +3970,9 @@ def import_valid_records(
     project_root: str | Path = PROJECT_ROOT,
     media_root: str | Path = LOCAL_MEDIA_ROOT,
     require_local_images: bool = False,
+    progress_callback: Callable[[], object] | None = None,
 ) -> dict[str, Any]:
+    _runtime_progress(progress_callback)
     db_path = ensure_parent(db_path)
     captured_at = str(summary.get("captured_at") or datetime.now(timezone.utc).isoformat(timespec="seconds"))
     keyword = str(summary.get("keyword") or "")
@@ -3508,6 +3985,7 @@ def import_valid_records(
         db_sync = ensure_web_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
         for item in selected:
+            _runtime_progress(progress_callback)
             record = item["record"]
             platform_key = str(item["platform"])
             row = row_for_record(
@@ -3534,7 +4012,11 @@ def import_valid_records(
             irrelevant_inserted += int(not relevant and was_inserted)
             irrelevant_updated += int(not relevant and not was_inserted)
         commit_started = True
+        _runtime_progress(progress_callback)
         commit_formal_import(conn)
+    except XhsRuntimeSupervisionError:
+        conn.rollback()
+        raise
     except BaseException as exc:
         if commit_started and not conn.in_transaction:
             raise
@@ -3567,6 +4049,7 @@ def import_valid_records_with_media_rollback(
     image_materialization: dict[str, Any],
     project_root: str | Path = PROJECT_ROOT,
     media_root: str | Path = LOCAL_MEDIA_ROOT,
+    progress_callback: Callable[[], object] | None = None,
 ) -> dict[str, Any]:
     try:
         return import_valid_records(
@@ -3576,6 +4059,7 @@ def import_valid_records_with_media_rollback(
             project_root=project_root,
             media_root=media_root,
             require_local_images=True,
+            progress_callback=progress_callback,
         )
     except FormalImportBeforeCommitError as exc:
         rolled_back = rollback_newly_promoted_images(
@@ -3583,6 +4067,7 @@ def import_valid_records_with_media_rollback(
             project_root=project_root,
             media_root=media_root,
             db_path=db_path,
+            progress_callback=progress_callback,
         )
         image_materialization["rolled_back_images"] = int(
             image_materialization.get("rolled_back_images") or 0
@@ -4743,7 +5228,13 @@ def run_bilibili_article_search(args: argparse.Namespace, batch_dir: Path) -> di
     }
 
 
-def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, batch_dir: Path) -> dict[str, Any]:
+def _run_platform_without_policy(
+    platform_key: str,
+    args: argparse.Namespace,
+    batch_dir: Path,
+    *,
+    runtime_reporter: XhsSupervisorRuntimeReporter | None = None,
+) -> dict[str, Any]:
     if platform_key == "bilibili":
         return run_bilibili_article_search(args, batch_dir)
 
@@ -4751,6 +5242,9 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
     save_path = batch_dir / platform_key / "data"
     log_dir = batch_dir / "logs" / platform_key
     behavior_evidence_path = log_dir / "behavior_evidence.json"
+    navigation_diagnostics_path = behavior_evidence_path.with_name(
+        f"{behavior_evidence_path.stem}.navigation.json"
+    )
     image_download_enabled = bool(args.download_images)
     specified_detail_urls = list(getattr(args, "zhihu_detail_urls", [])) + list(
         getattr(args, "xhs_detail_urls", [])
@@ -4970,8 +5464,14 @@ def _run_platform_without_policy(platform_key: str, args: argparse.Namespace, ba
         log_dir,
         extra_env=extra_env,
         progress_paths=progress_paths,
+        runtime_reporter=runtime_reporter,
+        network_diagnostics_path=(
+            navigation_diagnostics_path if platform_key == "xhs" else None
+        ),
         startup_grace_seconds=HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS,
     )
+    if runtime_reporter is not None:
+        runtime_reporter.enter_finalizing()
     if run.get("timeout_reason") == "no_progress_timeout":
         run["timeout_state_event"] = append_no_progress_timeout_event(
             execution_state_path,
@@ -5041,7 +5541,13 @@ def effective_attempt_exit_code(record: dict[str, Any]) -> int:
     return 0 if record.get("ok") else 1
 
 
-def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -> dict[str, Any]:
+def run_platform(
+    platform_key: str,
+    args: argparse.Namespace,
+    batch_dir: Path,
+    *,
+    runtime_reporter: XhsSupervisorRuntimeReporter | None = None,
+) -> dict[str, Any]:
     platform = PLATFORMS[platform_key]
     site = get_site(platform_key)
     log_dir = batch_dir / "logs" / platform_key
@@ -5058,7 +5564,14 @@ def run_platform(platform_key: str, args: argparse.Namespace, batch_dir: Path) -
             if policy_cleanup:
                 event["obsolete_policy_state_cleared"] = policy_cleanup
             policy_events.append(event)
-            record = _run_platform_without_policy(platform_key, args, batch_dir)
+            record = _run_platform_without_policy(
+                platform_key,
+                args,
+                batch_dir,
+                runtime_reporter=runtime_reporter,
+            )
+    except XhsRuntimeSupervisionError:
+        raise
     except CrawlPolicyBlocked as exc:
         policy_events.append(exc.event)
         reason = json.dumps(exc.event, ensure_ascii=False, sort_keys=True)
@@ -5529,8 +6042,14 @@ def repair_runtime_stop_reason(
     return ""
 
 
-def main() -> int:
-    args = parse_args()
+def _run_main(
+    args: argparse.Namespace,
+    runtime_reporter: XhsSupervisorRuntimeReporter | None,
+) -> int:
+    progress_callback = (
+        runtime_reporter.checkpoint if runtime_reporter is not None else None
+    )
+    _runtime_progress(progress_callback)
     if args.xhs_repair and args.post_repair:
         raise SystemExit("--xhs-repair and --post-repair are mutually exclusive")
     repair_mode = bool(args.xhs_repair or args.post_repair)
@@ -5569,6 +6088,7 @@ def main() -> int:
         )
     ensure_prerequisites()
     platforms = selected_platforms(args.platforms)
+    _runtime_progress(progress_callback)
     if not args.no_import and not args.download_images:
         raise SystemExit("正式入库模式必须显式启用 --download-images")
     try:
@@ -5687,6 +6207,7 @@ def main() -> int:
         resume_validation, _ = collect_formal_records(
             {"records": resume_records},
             db_path=args.db,
+            progress_callback=progress_callback,
         )
         prior_new_count = int(resume_validation.get("valid_new_count") or 0)
         resume_identity_values = [
@@ -5737,6 +6258,7 @@ def main() -> int:
         repair_target_count = len(args.post_repair_targets)
 
     batch_dir = ensure_dir(Path(args.output_dir).expanduser() / utc_stamp()).resolve()
+    _runtime_progress(progress_callback)
     args.resume_identities_path = None
     if resume_identity_values:
         resume_identities_path = batch_dir / "resume_identities.json"
@@ -5749,7 +6271,17 @@ def main() -> int:
     records = list(resume_records)
     for platform_key in platforms:
         print(f"[mediacrawler] {platform_key}", flush=True)
-        records.append(run_platform(platform_key, args, batch_dir))
+        records.append(
+            run_platform(
+                platform_key,
+                args,
+                batch_dir,
+                runtime_reporter=runtime_reporter,
+            )
+        )
+
+    if runtime_reporter is not None:
+        runtime_reporter.enter_finalizing()
 
     result_counts = latest_platform_result_counts(records, platforms)
     child_execution_ok = bool(
@@ -5776,6 +6308,7 @@ def main() -> int:
         args.xhs_post_interaction,
         repair_mode=repair_mode,
     )
+    _runtime_progress(progress_callback)
     summary["behavior_validation"] = behavior_validation
     if resume_info:
         summary["resume"] = resume_info
@@ -5804,6 +6337,7 @@ def main() -> int:
         allowed_identities=repair_allowed_identities,
         repair_metadata_by_identity=repair_metadata_by_identity,
         repair_mode=repair_mode,
+        progress_callback=progress_callback,
     )
     if args.post_repair:
         pagination_evidence = post_repair_pagination_evidence(
@@ -5819,6 +6353,7 @@ def main() -> int:
             allowed_identities=repair_allowed_identities,
             repair_metadata_by_identity=repair_metadata_by_identity,
             repair_mode=True,
+            progress_callback=progress_callback,
         )
     materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}
     if args.download_images:
@@ -5831,6 +6366,7 @@ def main() -> int:
             project_root=PROJECT_ROOT,
             media_root=media_root,
             promote=False,
+            progress_callback=progress_callback,
         )
         image_materialization = attach_skipped_candidate_evidence(
             image_materialization,
@@ -5845,6 +6381,7 @@ def main() -> int:
             allowed_identities=repair_allowed_identities,
             repair_metadata_by_identity=repair_metadata_by_identity,
             repair_mode=repair_mode,
+            progress_callback=progress_callback,
         )
     else:
         image_materialization = {
@@ -5898,6 +6435,7 @@ def main() -> int:
             allowed_identities=repair_allowed_identities,
             repair_metadata_by_identity=repair_metadata_by_identity,
             repair_mode=True,
+            progress_callback=progress_callback,
         )
     if repair_runtime_reason:
         validation = {**validation, "stop_reason": repair_runtime_reason}
@@ -5921,7 +6459,10 @@ def main() -> int:
         no_import=args.no_import,
         validation=validation,
     )
-    with formal_media_persistence_lock(enabled=promotion_allowed):
+    with formal_media_persistence_lock(
+        enabled=promotion_allowed,
+        progress_callback=progress_callback,
+    ):
         if promotion_allowed:
             (
                 image_materialization,
@@ -5932,6 +6473,7 @@ def main() -> int:
                 project_root=PROJECT_ROOT,
                 media_root=media_root,
                 promote=True,
+                progress_callback=progress_callback,
             )
             image_materialization = attach_skipped_candidate_evidence(
                 image_materialization,
@@ -5947,6 +6489,7 @@ def main() -> int:
                 allowed_identities=repair_allowed_identities,
                 repair_metadata_by_identity=repair_metadata_by_identity,
                 repair_mode=repair_mode,
+                progress_callback=progress_callback,
             )
             validation = apply_formal_completion_gates(
                 validation,
@@ -5969,6 +6512,7 @@ def main() -> int:
                     project_root=PROJECT_ROOT,
                     media_root=media_root,
                     db_path=args.db,
+                    progress_callback=progress_callback,
                 )
                 image_materialization["rolled_back_images"] = int(
                     image_materialization.get("rolled_back_images") or 0
@@ -6005,6 +6549,7 @@ def main() -> int:
                 image_materialization=image_materialization,
                 project_root=PROJECT_ROOT,
                 media_root=media_root,
+                progress_callback=progress_callback,
             )
     summary["completion_mode"] = "source-exhausted"
     import_result_value = summary.get("import_result") or {}
@@ -6045,7 +6590,11 @@ def main() -> int:
         summary["failure_reason"] = "sqlite_import_failed"
     else:
         try:
-            with formal_media_persistence_lock(enabled=True):
+            with formal_media_persistence_lock(
+                enabled=True,
+                progress_callback=progress_callback,
+            ):
+                _runtime_progress(progress_callback)
                 summary["discovery_checkpoint"] = persist_discovery_checkpoint(
                     args,
                     platforms[0],
@@ -6059,7 +6608,9 @@ def main() -> int:
             }
             summary["failure_reason"] = "discovery_checkpoint_write_failed"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    _runtime_progress(progress_callback)
     write_markdown(summary, report_path)
+    _runtime_progress(progress_callback)
     print(json.dumps({"summary": str(summary_path), "report": str(report_path), "batch_dir": str(batch_dir), **summary}, ensure_ascii=False, indent=2))
     partial_repair_import_ok = bool(
         repair_mode
@@ -6074,6 +6625,12 @@ def main() -> int:
         )
         else 2
     )
+
+
+def main() -> int:
+    args = parse_args()
+    runtime_reporter = xhs_supervisor_runtime_reporter_from_context(args)
+    return _run_main(args, runtime_reporter)
 
 
 if __name__ == "__main__":
