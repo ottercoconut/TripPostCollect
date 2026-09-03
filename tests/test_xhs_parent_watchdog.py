@@ -192,9 +192,20 @@ def install_process_harness(
         "owned_cleanup_calls": 0,
     }
 
-    def popen(*_args: object, **kwargs: object) -> FakeProcess:
+    class FakeGate:
+        def __init__(self) -> None:
+            self.process = process
+
+        def release(self) -> None:
+            observed["gate_released"] = True
+
+        def cancel(self, *, grace_seconds: float) -> None:
+            observed["gate_cancel_grace"] = grace_seconds
+            process.returncode = -signal.SIGTERM
+
+    def spawn(*_args: object, **kwargs: object) -> FakeGate:
         observed["popen_env"] = dict(kwargs["env"])
-        return process
+        return FakeGate()
 
     def register(pid: int, role: str) -> ProcessIdentity:
         assert (pid, role) == (CHILD.pid, "child")
@@ -213,7 +224,7 @@ def install_process_harness(
         observed["owned_cleanup_calls"] += 1
         return {"safe_to_release": True, "checks": [], "blocking": []}
 
-    monkeypatch.setattr(leases.subprocess, "Popen", popen)
+    monkeypatch.setattr(leases, "spawn_gated_subprocess", spawn)
     monkeypatch.setattr(guard, "register_process", register)
     monkeypatch.setattr(guard, "mark_process_exited", mark)
     monkeypatch.setattr(guard, "_signal_registered_group", signal_group)
@@ -426,7 +437,7 @@ for sequence in range(1, 41):
     )
 
     assert time.monotonic() - started > 1
-    assert result.returncode == 0
+    assert result.returncode == 0, (result.stdout, result.stderr)
     assert result.timed_out is False
     assert result.termination_reason is None
     assert 1 <= result.runtime_status["sequence"] <= 40

@@ -113,6 +113,8 @@ from trippostcollect.records.topic_relevance import (
     web_post_title,
 )
 from trippostcollect.xhs.leases import (
+    DeferredTerminationSignals,
+    GatedSubprocess,
     LEASE_DB_ENV,
     LEASE_ID_ENV,
     LEASE_OWNER_TOKEN_ENV,
@@ -120,6 +122,7 @@ from trippostcollect.xhs.leases import (
     SystemProcessInspector,
     mark_lease_process_exited_from_environment,
     register_lease_process_from_environment,
+    spawn_gated_subprocess,
 )
 from trippostcollect.xhs.runtime import (
     RUNTIME_STATUS_AUTH_KEY_ENV,
@@ -1777,6 +1780,7 @@ def run_command(
         progress_path_signature(tracked_paths) if tracked_paths is not None else ()
     )
     proc: subprocess.Popen[bytes] | None = None
+    gated: GatedSubprocess | None = None
     lease_process_identity = None
     exporter_identity_mismatch = False
     lease_registration_enabled = all(
@@ -1795,36 +1799,74 @@ def run_command(
         else None
     )
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd),
-            env=child_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        if lease_registration_enabled:
+        if not lease_registration_enabled:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(cwd),
+                env=child_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        else:
+            deferred_signals = DeferredTerminationSignals()
+            deferred_signals.install()
             try:
+                gated = spawn_gated_subprocess(
+                    cmd,
+                    cwd=cwd,
+                    env=child_env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                proc = gated.process
+                if deferred_signals.signal_received is not None:
+                    raise InterruptedError(
+                        "termination signal received before exporter registration"
+                    )
                 lease_process_identity = register_lease_process_from_environment(
                     pid=proc.pid,
                     process_role="exporter",
                     environ=registration_env,
                     inspector=process_inspector,
                 )
-            except Exception:
-                terminate_managed_process(
-                    proc,
-                    grace_seconds=cleanup_grace_seconds,
-                )
+                if runtime_reporter is not None and lease_process_identity is None:
+                    raise XhsRuntimeSupervisionError(
+                        "XHS runtime reporter requires an exact registered exporter identity"
+                    )
+                if deferred_signals.signal_received is not None:
+                    raise InterruptedError(
+                        "termination signal received before exporter gate release"
+                    )
+                gated.release()
+                if deferred_signals.signal_received is not None:
+                    raise InterruptedError(
+                        "termination signal received during exporter gate release"
+                    )
+            except BaseException:
+                try:
+                    if gated is not None:
+                        gated.cancel(grace_seconds=cleanup_grace_seconds)
+                    if (
+                        lease_process_identity is not None
+                        and proc is not None
+                        and proc.poll() is not None
+                    ):
+                        mark_lease_process_exited_from_environment(
+                            identity=lease_process_identity,
+                            process_role="exporter",
+                            environ=registration_env,
+                        )
+                        lease_process_identity = None
+                finally:
+                    deferred_signals.restore()
+                    if deferred_signals.signal_received is not None:
+                        deferred_signals.replay()
                 raise
-        if runtime_reporter is not None and lease_process_identity is None:
-            terminate_managed_process(
-                proc,
-                grace_seconds=cleanup_grace_seconds,
-            )
-            raise XhsRuntimeSupervisionError(
-                "XHS runtime reporter requires an exact registered exporter identity"
-            )
+            deferred_signals.restore()
+            if deferred_signals.signal_received is not None:
+                deferred_signals.replay()
+        assert proc is not None
         while True:
             now = time.monotonic()
             if tracked_paths is not None:

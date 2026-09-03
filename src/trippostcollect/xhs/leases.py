@@ -54,6 +54,23 @@ LEASE_DB_ENV = "TRIPPOSTCOLLECT_XHS_LEASE_DB"
 LEASE_ID_ENV = "TRIPPOSTCOLLECT_XHS_LEASE_ID"
 LEASE_OWNER_TOKEN_ENV = "TRIPPOSTCOLLECT_XHS_LEASE_OWNER_TOKEN"
 _IDENTITY_PROBE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+_GATED_SUBPROCESS_RELEASE = b"G"
+_GATED_SUBPROCESS_WRAPPER = """
+import os
+import signal
+import sys
+
+gate_fd = int(sys.argv[1])
+try:
+    release = os.read(gate_fd, 1)
+finally:
+    os.close(gate_fd)
+if release != b"G":
+    os._exit(125)
+for signum in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(signum, signal.SIG_DFL)
+os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
+"""
 
 
 class XhsLeaseOwnershipError(RuntimeError):
@@ -73,6 +90,167 @@ class XhsLeaseSignal(BaseException):
     def __init__(self, signum: int):
         self.signum = int(signum)
         super().__init__(f"XHS lease owner interrupted by signal {self.signum}")
+
+
+class DeferredTerminationSignals:
+    """Latch termination signals while a gated child is not yet registered."""
+
+    def __init__(self) -> None:
+        self.signal_received: int | None = None
+        self._previous_handlers: dict[int, Any] = {}
+        self._installed = False
+
+    def __enter__(self) -> DeferredTerminationSignals:
+        return self.install()
+
+    def install(self) -> DeferredTerminationSignals:
+        if self._installed:
+            raise RuntimeError("termination signal deferral is already installed")
+        signums = {signal.SIGINT, signal.SIGTERM}
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, signums)
+        try:
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    previous = signal.getsignal(signum)
+                    if previous == signal.SIG_IGN:
+                        continue
+                    signal.signal(signum, self._handle)
+                except (ValueError, OSError):
+                    continue
+                self._previous_handlers[signum] = previous
+            self._installed = True
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _traceback: FrameType | None,
+    ) -> bool:
+        self.restore()
+        return False
+
+    def _handle(self, signum: int, _frame: FrameType | None) -> None:
+        if self.signal_received is None:
+            self.signal_received = int(signum)
+
+    def restore(self) -> None:
+        if not self._installed:
+            return
+        signums = {signal.SIGINT, signal.SIGTERM}
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, signums)
+        try:
+            for signum, handler in self._previous_handlers.items():
+                try:
+                    signal.signal(signum, handler)
+                except (ValueError, OSError):
+                    pass
+            self._installed = False
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+    def replay(self) -> None:
+        signum = self.signal_received
+        if signum is None:
+            return
+        previous = self._previous_handlers.get(signum, signal.SIG_DFL)
+        self.restore()
+        if previous == signal.SIG_IGN:
+            return
+        if previous == signal.SIG_DFL:
+            signal.raise_signal(signum)
+            return
+        previous(signum, None)
+
+
+@dataclass
+class GatedSubprocess:
+    """A new process group whose target command cannot exec before release."""
+
+    process: subprocess.Popen[Any]
+    _release_fd: int | None
+    released: bool = False
+
+    def release(self) -> None:
+        if self.released or self._release_fd is None:
+            raise RuntimeError("gated subprocess has no releasable gate")
+        release_fd = self._release_fd
+        self._release_fd = None
+        try:
+            written = os.write(release_fd, _GATED_SUBPROCESS_RELEASE)
+        finally:
+            os.close(release_fd)
+        if written != len(_GATED_SUBPROCESS_RELEASE):
+            raise RuntimeError("gated subprocess release was incomplete")
+        self.released = True
+
+    def cancel(self, *, grace_seconds: float) -> None:
+        if self._release_fd is not None:
+            os.close(self._release_fd)
+            self._release_fd = None
+        proc = self.process
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        first_budget = max(0.01, float(grace_seconds) / 2)
+        try:
+            proc.communicate(timeout=first_budget)
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.communicate(timeout=max(0.01, float(grace_seconds) - first_budget))
+
+
+def spawn_gated_subprocess(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    stdout: Any,
+    stderr: Any,
+    text: bool = False,
+) -> GatedSubprocess:
+    """Spawn a blocked wrapper; the target command starts only after ``release``."""
+
+    if os.name != "posix":
+        raise RuntimeError("gated subprocesses require POSIX pass_fds and process groups")
+    normalized_command = [os.fspath(part) for part in command]
+    if not normalized_command:
+        raise ValueError("gated subprocess command must not be empty")
+    interpreter = os.path.realpath(sys.executable)
+    if not os.path.isabs(interpreter) or not os.access(interpreter, os.X_OK):
+        raise RuntimeError("current Python interpreter is not an executable absolute path")
+    read_fd, write_fd = os.pipe()
+    try:
+        proc = subprocess.Popen(
+            [
+                interpreter,
+                "-c",
+                _GATED_SUBPROCESS_WRAPPER,
+                str(read_fd),
+                *normalized_command,
+            ],
+            cwd=str(cwd),
+            env=dict(env),
+            stdout=stdout,
+            stderr=stderr,
+            text=text,
+            start_new_session=True,
+            pass_fds=(read_fd,),
+        )
+    except BaseException:
+        os.close(read_fd)
+        os.close(write_fd)
+        raise
+    os.close(read_fd)
+    return GatedSubprocess(process=proc, _release_fd=write_fd)
 
 
 @dataclass(frozen=True)
@@ -1688,6 +1866,8 @@ class LeaseGuard:
         timeout_seconds: int,
         runtime_watchdog: RuntimeStatusWatchdogPolicy | None = None,
     ) -> LeaseSubprocessResult:
+        if self.signal_received is not None:
+            raise XhsLeaseSignal(self.signal_received)
         child_env = self.child_environment(env)
         runtime_auth_key: bytes | None = None
         if runtime_watchdog is not None:
@@ -1695,21 +1875,50 @@ class LeaseGuard:
             if type(runtime_auth_key) is not bytes or len(runtime_auth_key) != 32:
                 raise RuntimeError("runtime watchdog key generation failed")
             child_env[RUNTIME_STATUS_AUTH_KEY_ENV] = runtime_auth_key.hex()
-        proc = subprocess.Popen(
-            list(command),
-            cwd=str(cwd),
-            env=child_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
-        watchdog_started_at = time.monotonic()
+        gated: GatedSubprocess | None = None
+        identity: ProcessIdentity | None = None
+        deferred_signals = DeferredTerminationSignals()
+        deferred_signals.install()
         try:
+            gated = spawn_gated_subprocess(
+                command,
+                cwd=cwd,
+                env=child_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            proc = gated.process
+            watchdog_started_at = time.monotonic()
+            if deferred_signals.signal_received is not None:
+                raise XhsLeaseSignal(deferred_signals.signal_received)
             identity = self.register_process(proc.pid, "child")
+            if deferred_signals.signal_received is not None:
+                raise XhsLeaseSignal(deferred_signals.signal_received)
+            gated.release()
+            if deferred_signals.signal_received is not None:
+                raise XhsLeaseSignal(deferred_signals.signal_received)
         except BaseException:
-            self._terminate_unregistered_process_group(proc)
+            try:
+                if gated is not None:
+                    gated.cancel(grace_seconds=self.budget.child_shutdown_seconds)
+                if (
+                    identity is not None
+                    and gated is not None
+                    and gated.process.poll() is not None
+                ):
+                    try:
+                        self.mark_process_exited(identity, "child")
+                    except XhsLeaseOwnershipError:
+                        pass
+            finally:
+                deferred_signals.restore()
+                if deferred_signals.signal_received is not None:
+                    deferred_signals.replay()
             raise
+        assert gated is not None
+        assert identity is not None
+        proc = gated.process
         watchdog_state = (
             _ParentRuntimeWatchdogState(
                 policy=runtime_watchdog,
@@ -1725,6 +1934,9 @@ class LeaseGuard:
         stderr = ""
         returncode = 1
         try:
+            deferred_signals.restore()
+            if deferred_signals.signal_received is not None:
+                deferred_signals.replay()
             if runtime_watchdog is None:
                 try:
                     stdout, stderr = proc.communicate(timeout=int(timeout_seconds))

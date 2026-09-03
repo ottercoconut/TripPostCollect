@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -295,20 +296,15 @@ def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    captured: dict[str, object] = {"terminate_calls": 0, "mark_calls": 0}
+    captured: dict[str, object] = {"mark_calls": 0}
+    target_side_effect = tmp_path / "exporter-started"
+    original_spawn = mediacrawler_crawl.spawn_gated_subprocess
 
-    class FakeProcess:
-        pid = 7744
-        returncode: int | None = None
-
-        def poll(self) -> int | None:
-            return self.returncode
-
-    fake_process = FakeProcess()
-
-    def popen(*_args: object, **kwargs: object) -> FakeProcess:
+    def capture_spawn(*args: object, **kwargs: object) -> object:
         captured["child_env"] = dict(kwargs["env"])
-        return fake_process
+        gate = original_spawn(*args, **kwargs)
+        captured["pid"] = gate.process.pid
+        return gate
 
     def fail_registration(
         *,
@@ -318,16 +314,6 @@ def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
         captured["registration_env"] = dict(environ)
         raise RuntimeError("synthetic registration failure")
 
-    def terminate(
-        proc: FakeProcess,
-        *,
-        grace_seconds: float,
-    ) -> tuple[bytes, bytes, bool]:
-        assert grace_seconds == 1
-        captured["terminate_calls"] = int(captured["terminate_calls"]) + 1
-        proc.returncode = -15
-        return b"", b"", False
-
     def mark_exit(**_kwargs: object) -> None:
         captured["mark_calls"] = int(captured["mark_calls"]) + 1
 
@@ -336,7 +322,7 @@ def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
         "browser_launch_environment",
         reporter_environment,
     )
-    monkeypatch.setattr(mediacrawler_crawl.subprocess, "Popen", popen)
+    monkeypatch.setattr(mediacrawler_crawl, "spawn_gated_subprocess", capture_spawn)
     monkeypatch.setattr(
         mediacrawler_crawl,
         "register_lease_process_from_environment",
@@ -347,16 +333,18 @@ def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
         "mark_lease_process_exited_from_environment",
         mark_exit,
     )
-    monkeypatch.setattr(
-        mediacrawler_crawl,
-        "SystemProcessInspector",
-        lambda: StaticInspector(process_identity(pid=fake_process.pid)),
-    )
-    monkeypatch.setattr(mediacrawler_crawl, "terminate_managed_process", terminate)
 
     with pytest.raises(RuntimeError, match="synthetic registration failure"):
         mediacrawler_crawl.run_command(
-            ["fake"],
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; import time; "
+                    f"Path({str(target_side_effect)!r}).write_text('started'); "
+                    "time.sleep(60)"
+                ),
+            ],
             tmp_path,
             1,
             tmp_path / "registration-failure-logs",
@@ -369,9 +357,351 @@ def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
     assert isinstance(registration_env, dict)
     assert not set(PRIVATE_EXPORTER_ENV_KEYS) & set(child_env)
     assert registration_env[mediacrawler_crawl.LEASE_OWNER_TOKEN_ENV] == "owner-token"
-    assert captured["terminate_calls"] == 1
     assert captured["mark_calls"] == 0
-    assert fake_process.returncode == -15
+    assert not target_side_effect.exists()
+    assert (
+        mediacrawler_crawl.SystemProcessInspector().process_presence(
+            int(captured["pid"])
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("first_signal", "later_signal"),
+    [
+        (signal.SIGINT, signal.SIGTERM),
+        (signal.SIGTERM, signal.SIGINT),
+    ],
+)
+def test_signal_after_exporter_popen_cancels_gate_before_registration_or_exec(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    first_signal: int,
+    later_signal: int,
+) -> None:
+    class ReplayedSignal(BaseException):
+        def __init__(self, signum: int) -> None:
+            self.signum = signum
+
+    target_side_effect = tmp_path / f"unregistered-exporter-{first_signal}"
+    captured: dict[str, object] = {"registration_calls": 0}
+    original_spawn = mediacrawler_crawl.spawn_gated_subprocess
+    original_handlers = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    def replayed(signum: int, _frame: object) -> None:
+        raise ReplayedSignal(signum)
+
+    def spawn_then_interrupt(*args: object, **kwargs: object) -> object:
+        gate = original_spawn(*args, **kwargs)
+        captured["gate"] = gate
+        captured["pid"] = gate.process.pid
+        os.kill(os.getpid(), first_signal)
+        os.kill(os.getpid(), later_signal)
+        return gate
+
+    def forbidden_registration(**_kwargs: object) -> object:
+        captured["registration_calls"] = int(captured["registration_calls"]) + 1
+        raise AssertionError("registration must not run after a latched pre-register signal")
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "browser_launch_environment",
+        reporter_environment,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "spawn_gated_subprocess",
+        spawn_then_interrupt,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "register_lease_process_from_environment",
+        forbidden_registration,
+    )
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, replayed)
+    try:
+        with pytest.raises(ReplayedSignal) as interrupted:
+            mediacrawler_crawl.run_command(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        f"Path({str(target_side_effect)!r}).write_text('started')"
+                    ),
+                ],
+                tmp_path,
+                1,
+                tmp_path / f"pre-register-signal-{first_signal}",
+                cleanup_grace_seconds=1,
+            )
+        assert interrupted.value.signum == first_signal
+        assert captured["registration_calls"] == 0
+        assert not target_side_effect.exists()
+        assert (
+            mediacrawler_crawl.SystemProcessInspector().process_presence(
+                int(captured["pid"])
+            )
+            is False
+        )
+        gate = captured["gate"]
+        assert getattr(gate, "_release_fd") is None
+        assert all(
+            signal.getsignal(signum) is replayed
+            for signum in (signal.SIGINT, signal.SIGTERM)
+        )
+    finally:
+        for signum, handler in original_handlers.items():
+            signal.signal(signum, handler)
+
+
+@pytest.mark.parametrize("injected", [KeyboardInterrupt(), RuntimeError("register failed")])
+def test_exporter_registration_exception_cancels_gate_without_target_exec(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    injected: BaseException,
+) -> None:
+    target_side_effect = tmp_path / f"registration-exception-{type(injected).__name__}"
+    captured: dict[str, object] = {}
+    original_spawn = mediacrawler_crawl.spawn_gated_subprocess
+
+    def capture_spawn(*args: object, **kwargs: object) -> object:
+        gate = original_spawn(*args, **kwargs)
+        captured["gate"] = gate
+        captured["pid"] = gate.process.pid
+        return gate
+
+    def fail_registration(**_kwargs: object) -> object:
+        raise injected
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "browser_launch_environment",
+        reporter_environment,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "spawn_gated_subprocess",
+        capture_spawn,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "register_lease_process_from_environment",
+        fail_registration,
+    )
+
+    expected_message = str(injected)
+    raises_kwargs = {"match": expected_message} if expected_message else {}
+    with pytest.raises(type(injected), **raises_kwargs):
+        mediacrawler_crawl.run_command(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    f"Path({str(target_side_effect)!r}).write_text('started')"
+                ),
+            ],
+            tmp_path,
+            1,
+            tmp_path / f"registration-exception-{type(injected).__name__}-logs",
+            cleanup_grace_seconds=1,
+        )
+
+    assert not target_side_effect.exists()
+    assert (
+        mediacrawler_crawl.SystemProcessInspector().process_presence(
+            int(captured["pid"])
+        )
+        is False
+    )
+    assert getattr(captured["gate"], "_release_fd") is None
+
+
+def test_exporter_gate_release_failure_marks_registered_wrapper_exited(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target_side_effect = tmp_path / "release-failed-exporter"
+    captured: dict[str, object] = {"mark_calls": 0}
+    original_spawn = mediacrawler_crawl.spawn_gated_subprocess
+
+    def capture_spawn(*args: object, **kwargs: object) -> object:
+        gate = original_spawn(*args, **kwargs)
+        captured["gate"] = gate
+        captured["pid"] = gate.process.pid
+        return gate
+
+    def register_exporter(*, pid: int, **_kwargs: object) -> object:
+        identity = mediacrawler_crawl.SystemProcessInspector().identity(pid)
+        assert identity is not None
+        captured["identity"] = identity
+        return identity
+
+    def mark_exporter(**kwargs: object) -> None:
+        captured["mark_calls"] = int(captured["mark_calls"]) + 1
+        captured["marked_identity"] = kwargs["identity"]
+
+    def fail_before_write(_gate: object) -> None:
+        raise OSError("synthetic exporter release failure")
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "browser_launch_environment",
+        reporter_environment,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "spawn_gated_subprocess",
+        capture_spawn,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "register_lease_process_from_environment",
+        register_exporter,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "mark_lease_process_exited_from_environment",
+        mark_exporter,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl.GatedSubprocess,
+        "release",
+        fail_before_write,
+    )
+
+    with pytest.raises(OSError, match="synthetic exporter release failure"):
+        mediacrawler_crawl.run_command(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    f"Path({str(target_side_effect)!r}).write_text('started')"
+                ),
+            ],
+            tmp_path,
+            1,
+            tmp_path / "release-failure-logs",
+            cleanup_grace_seconds=1,
+        )
+
+    assert not target_side_effect.exists()
+    assert captured["mark_calls"] == 1
+    assert captured["marked_identity"] == captured["identity"]
+    assert (
+        mediacrawler_crawl.SystemProcessInspector().process_presence(
+            int(captured["pid"])
+        )
+        is False
+    )
+    assert getattr(captured["gate"], "_release_fd") is None
+
+
+def test_signal_after_exporter_registration_reaps_exact_released_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class ReplayedSignal(BaseException):
+        pass
+
+    target_side_effect = tmp_path / "registered-signal-exporter"
+    captured: dict[str, object] = {"mark_calls": 0}
+    original_spawn = mediacrawler_crawl.spawn_gated_subprocess
+    original_release = mediacrawler_crawl.GatedSubprocess.release
+    original_handlers = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    def replayed(signum: int, _frame: object) -> None:
+        raise ReplayedSignal(signum)
+
+    def capture_spawn(*args: object, **kwargs: object) -> object:
+        gate = original_spawn(*args, **kwargs)
+        captured["gate"] = gate
+        captured["pid"] = gate.process.pid
+        return gate
+
+    def register_exporter(*, pid: int, **_kwargs: object) -> object:
+        identity = mediacrawler_crawl.SystemProcessInspector().identity(pid)
+        assert identity is not None
+        captured["identity"] = identity
+        return identity
+
+    def release_then_interrupt(gate: object) -> None:
+        original_release(gate)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def mark_exporter(**kwargs: object) -> None:
+        captured["mark_calls"] = int(captured["mark_calls"]) + 1
+        captured["marked_identity"] = kwargs["identity"]
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "browser_launch_environment",
+        reporter_environment,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "spawn_gated_subprocess",
+        capture_spawn,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "register_lease_process_from_environment",
+        register_exporter,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "mark_lease_process_exited_from_environment",
+        mark_exporter,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl.GatedSubprocess,
+        "release",
+        release_then_interrupt,
+    )
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, replayed)
+    try:
+        with pytest.raises(ReplayedSignal):
+            mediacrawler_crawl.run_command(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; import time; "
+                        f"Path({str(target_side_effect)!r}).write_text('started'); "
+                        "time.sleep(60)"
+                    ),
+                ],
+                tmp_path,
+                1,
+                tmp_path / "registered-signal-logs",
+                cleanup_grace_seconds=1,
+            )
+        assert captured["mark_calls"] == 1
+        assert captured["marked_identity"] == captured["identity"]
+        assert (
+            mediacrawler_crawl.SystemProcessInspector().process_presence(
+                int(captured["pid"])
+            )
+            is False
+        )
+        assert all(
+            signal.getsignal(signum) is replayed
+            for signum in (signal.SIGINT, signal.SIGTERM)
+        )
+    finally:
+        for signum, handler in original_handlers.items():
+            signal.signal(signum, handler)
 
 
 def test_network_diagnostics_require_fresh_explicit_transport_recovery(
@@ -808,9 +1138,19 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
         proc.returncode = -15
         return b"", b"", False
 
-    def popen(*_args: object, **kwargs: object) -> FakeProcess:
+    class FakeGate:
+        def __init__(self, process: FakeProcess) -> None:
+            self.process = process
+
+        def release(self) -> None:
+            captured["released"] = True
+
+        def cancel(self, *, grace_seconds: float) -> None:
+            terminate(self.process, grace_seconds=grace_seconds)
+
+    def spawn(*_args: object, **kwargs: object) -> FakeGate:
         captured["child_env"] = dict(kwargs["env"])
-        return fake_process
+        return FakeGate(fake_process)
 
     def register_exporter(
         *,
@@ -835,9 +1175,9 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
         reporter_environment,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl.subprocess,
-        "Popen",
-        popen,
+        mediacrawler_crawl,
+        "spawn_gated_subprocess",
+        spawn,
     )
     monkeypatch.setattr(
         mediacrawler_crawl,

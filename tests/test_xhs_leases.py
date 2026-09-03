@@ -2128,6 +2128,7 @@ def test_child_registration_failure_stops_untracked_process_group(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    target_side_effect = tmp_path / "target-started"
     guard = LeaseGuard(
         db_path=control_db,
         account_id="xhs-a01",
@@ -2147,15 +2148,309 @@ def test_child_registration_failure_stops_untracked_process_group(
         with guard:
             monkeypatch.setattr(guard, "register_process", fail_registration)
             guard.run_subprocess(
-                [sys.executable, "-c", "import time; time.sleep(60)"],
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; import time; "
+                        f"Path({str(target_side_effect)!r}).write_text('started'); "
+                        "time.sleep(60)"
+                    ),
+                ],
                 cwd=tmp_path,
                 env={},
                 timeout_seconds=5,
             )
     assert child_pid
+    assert not target_side_effect.exists()
     assert SystemProcessInspector().process_presence(child_pid[0]) is False
     with connect(control_db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("first_signal", "later_signal"),
+    [
+        (signal.SIGINT, signal.SIGTERM),
+        (signal.SIGTERM, signal.SIGINT),
+    ],
+)
+def test_signal_during_child_registration_cancels_gate_before_target_exec(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_signal: int,
+    later_signal: int,
+) -> None:
+    run_id = f"registration-signal-{first_signal}"
+    target_side_effect = tmp_path / f"target-started-{first_signal}"
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(
+            runtime_seconds=10,
+            child_shutdown_seconds=2,
+            root_finalize_seconds=1,
+        ),
+    )
+    child_pid: list[int] = []
+
+    with guard:
+        handlers_before = {
+            signum: signal.getsignal(signum)
+            for signum in (signal.SIGINT, signal.SIGTERM)
+        }
+        original_register = guard.register_process
+
+        def register_then_interrupt(pid: int, role: str) -> ProcessIdentity:
+            identity = original_register(pid, role)
+            child_pid.append(pid)
+            os.kill(os.getpid(), first_signal)
+            os.kill(os.getpid(), later_signal)
+            return identity
+
+        monkeypatch.setattr(guard, "register_process", register_then_interrupt)
+        with pytest.raises(XhsLeaseSignal) as interrupted:
+            guard.run_subprocess(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; import time; "
+                        f"Path({str(target_side_effect)!r}).write_text('started'); "
+                        "time.sleep(60)"
+                    ),
+                ],
+                cwd=tmp_path,
+                env={},
+                timeout_seconds=5,
+            )
+
+        assert interrupted.value.signum == first_signal
+        assert guard.signal_received == first_signal
+        assert not target_side_effect.exists()
+        assert child_pid
+        assert SystemProcessInspector().process_presence(child_pid[0]) is False
+        assert {
+            signum: signal.getsignal(signum)
+            for signum in (signal.SIGINT, signal.SIGTERM)
+        } == handlers_before
+
+
+def test_keyboard_interrupt_during_child_registration_never_execs_target(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "registration-keyboard-interrupt"
+    target_side_effect = tmp_path / "keyboard-target-started"
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2),
+    )
+    child_pid: list[int] = []
+
+    with pytest.raises(KeyboardInterrupt):
+        with guard:
+            original_register = guard.register_process
+
+            def register_then_interrupt(pid: int, role: str) -> ProcessIdentity:
+                identity = original_register(pid, role)
+                child_pid.append(identity.pid)
+                raise KeyboardInterrupt
+
+            monkeypatch.setattr(guard, "register_process", register_then_interrupt)
+            guard.run_subprocess(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        f"Path({str(target_side_effect)!r}).write_text('started')"
+                    ),
+                ],
+                cwd=tmp_path,
+                env={},
+                timeout_seconds=5,
+            )
+
+    assert not target_side_effect.exists()
+    assert child_pid
+    assert SystemProcessInspector().process_presence(child_pid[0]) is False
+
+
+def test_child_gate_release_failure_never_execs_target_or_leaves_process(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "registration-release-failure"
+    target_side_effect = tmp_path / "release-target-started"
+    child_pid: list[int] = []
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2),
+    )
+    original_register = guard.register_process
+
+    def capture_registration(pid: int, role: str) -> ProcessIdentity:
+        child_pid.append(pid)
+        return original_register(pid, role)
+
+    def fail_before_release(_gate: object) -> None:
+        raise OSError("synthetic gate release failure")
+
+    monkeypatch.setattr(guard, "register_process", capture_registration)
+    monkeypatch.setattr(xhs_leases.GatedSubprocess, "release", fail_before_release)
+    with pytest.raises(OSError, match="synthetic gate release failure"):
+        with guard:
+            guard.run_subprocess(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        f"Path({str(target_side_effect)!r}).write_text('started')"
+                    ),
+                ],
+                cwd=tmp_path,
+                env={},
+                timeout_seconds=5,
+            )
+
+    assert not target_side_effect.exists()
+    assert child_pid
+    assert SystemProcessInspector().process_presence(child_pid[0]) is False
+
+
+def test_gated_child_keeps_registered_pid_and_process_group_after_exec(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    run_id = "registration-identity-stable"
+    target_identity_path = tmp_path / "target-identity.json"
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2),
+    )
+    registered: list[ProcessIdentity] = []
+
+    with guard:
+        original_register = guard.register_process
+
+        def capture_registration(pid: int, role: str) -> ProcessIdentity:
+            identity = original_register(pid, role)
+            registered.append(identity)
+            return identity
+
+        guard.register_process = capture_registration  # type: ignore[method-assign]
+        result = guard.run_subprocess(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import json, os; from pathlib import Path; "
+                    f"Path({str(target_identity_path)!r}).write_text("
+                    "json.dumps({'pid': os.getpid(), 'pgid': os.getpgid(0)}))"
+                ),
+            ],
+            cwd=tmp_path,
+            env={},
+            timeout_seconds=5,
+        )
+
+    assert result.returncode == 0
+    assert len(registered) == 1
+    target_identity = json.loads(target_identity_path.read_text(encoding="utf-8"))
+    assert target_identity == {
+        "pid": registered[0].pid,
+        "pgid": registered[0].pgid,
+    }
+
+
+def test_spawn_gate_exec_preserves_exact_process_identity(
+    tmp_path: Path,
+) -> None:
+    target_started = tmp_path / "identity-target-started"
+    gate = xhs_leases.spawn_gated_subprocess(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; import time; "
+                f"Path({str(target_started)!r}).write_text('started'); time.sleep(60)"
+            ),
+        ],
+        cwd=tmp_path,
+        env=os.environ,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    inspector = SystemProcessInspector()
+    before_exec = inspector.identity(gate.process.pid)
+    assert before_exec is not None
+    time.sleep(0.1)
+    assert not target_started.exists()
+
+    gate.release()
+    deadline = time.monotonic() + 3
+    while not target_started.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    after_exec = inspector.identity(gate.process.pid)
+    try:
+        assert target_started.exists()
+        assert after_exec == before_exec
+    finally:
+        gate.cancel(grace_seconds=2)
+
+
+def test_spawn_gate_closes_both_pipe_fds_when_popen_raises_keyboard_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_fd, write_fd = os.pipe()
+
+    def fixed_pipe() -> tuple[int, int]:
+        return read_fd, write_fd
+
+    def interrupt_popen(*_args: object, **_kwargs: object) -> object:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(xhs_leases.os, "pipe", fixed_pipe)
+    monkeypatch.setattr(xhs_leases.subprocess, "Popen", interrupt_popen)
+
+    with pytest.raises(KeyboardInterrupt):
+        xhs_leases.spawn_gated_subprocess(
+            [sys.executable, "-c", "raise AssertionError('must not execute')"],
+            cwd=tmp_path,
+            env=os.environ,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    with pytest.raises(OSError):
+        os.fstat(read_fd)
+    with pytest.raises(OSError):
+        os.fstat(write_fd)
 
 
 def test_expired_ttl_does_not_authorize_implicit_release(
