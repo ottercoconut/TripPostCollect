@@ -411,6 +411,7 @@ def test_target_closed_after_page_launch_is_not_browser_launch_failure() -> None
         "xhs_browser_process_exited",
         "xhs_cdp_disconnected_unexpected",
         "xhs_browser_context_closed_unexpected",
+        "xhs_main_page_closed_unexpected",
     ],
 )
 def test_xhs_stable_cdp_lifecycle_code_is_terminal(code: str) -> None:
@@ -436,6 +437,7 @@ def test_xhs_stable_cdp_lifecycle_code_is_terminal(code: str) -> None:
         "xhs_browser_process_exited_extra",
         "xhs_cdp_disconnected_unexpectedly",
         "prefix_xhs_browser_context_closed_unexpected",
+        "xhs_main_page_closed_unexpectedly",
         "browser disconnected while the network was unavailable",
     ],
 )

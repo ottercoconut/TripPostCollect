@@ -34,7 +34,8 @@ XHS_CDP_LIFECYCLE_CODE_PATTERNS = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
     r"xhs_browser_process_exited|"
     r"xhs_cdp_disconnected_unexpected|"
-    r"xhs_browser_context_closed_unexpected"
+    r"xhs_browser_context_closed_unexpected|"
+    r"xhs_main_page_closed_unexpected"
     r")(?![A-Za-z0-9_])",
     re.I,
 )

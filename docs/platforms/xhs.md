@@ -279,9 +279,9 @@ python scripts/repair_xhs_posts.py \
   摘要写入 behavior evidence 同目录的 `behavior_evidence.navigation.json`，白屏超时不得只凭外部关闭
   后的 `TargetClosedError` 分类。
 - 搜索卡片和作者链接在匿名页面也可能存在；可见的精确“登录”按钮优先判定为 `login_required`，
-  不得仅凭卡片数或作者链接数把匿名页面判为 ready。主页面在搜索导航或行为阶段被平台替换时，正式
-  child 最多接管一次最新同域窗口并重新执行当前门禁；接管后仍须刷新 Cookie、通过 self-info API，
-  才能继续搜索。
+  不得仅凭卡片数或作者链接数把匿名页面判为 ready。主页面在搜索导航或行为阶段意外关闭时立即以
+  `xhs_main_page_closed_unexpected` 终止本轮；即使 BrowserContext 中另有同域页面，也不得接管、重试
+  当前阶段或重新启动 Chrome。原主页面仍存活时，平台主动打开的普通新页继续只由新页守卫管理。
 - 正式 BrowserContext 守卫安装后出现的任何新标签页都立即置前，并从出现起至少保留 30 秒；平台
   弹页、作者主页回退、互动和验证辅助页一视同仁。正常返回、异常、Playwright 退出和最终清理都
   不得绕过。首个主页面可豁免，启动时已有的额外页仍受保护。
