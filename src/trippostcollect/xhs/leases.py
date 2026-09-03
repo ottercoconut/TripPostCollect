@@ -2165,14 +2165,46 @@ class LeaseGuard:
                         stdout, stderr = proc.communicate()
                         returncode = int(proc.returncode or 0)
                         break
-                    if self.inspector.identity(proc.pid) != identity:
-                        if proc.poll() is not None:
-                            stdout, stderr = proc.communicate()
-                            returncode = int(proc.returncode or 0)
+                    observed_identity = self.inspector.identity(proc.pid)
+                    if observed_identity is None:
+                        # A platform probe may briefly lose sight of a live
+                        # child, and a just-exited child may already be a
+                        # zombie before ``Popen.poll`` reaps it.  The Popen
+                        # handle still names our exact child, so first give it
+                        # one bounded interval to exit.  If it remains live,
+                        # its authenticated status must still pass below.
+                        try:
+                            stdout, stderr = proc.communicate(
+                                timeout=runtime_watchdog.poll_seconds
+                            )
+                        except subprocess.TimeoutExpired:
+                            pass
                         else:
-                            termination_reason = "child_process_identity_changed"
-                            self.terminate_owned_processes()
-                        break
+                            returncode = int(proc.returncode or 0)
+                            break
+                    elif observed_identity != identity:
+                        # The exact process probe can observe the child as a
+                        # zombie just before ``Popen.poll`` reaps it.  Give
+                        # that exit race one bounded watchdog interval before
+                        # deciding that the PID belongs to a different live
+                        # process.  This does not grant liveness: a still-live
+                        # child must prove the original exact identity again.
+                        try:
+                            stdout, stderr = proc.communicate(
+                                timeout=runtime_watchdog.poll_seconds
+                            )
+                        except subprocess.TimeoutExpired:
+                            reproved_identity = self.inspector.identity(proc.pid)
+                            if (
+                                reproved_identity is not None
+                                and reproved_identity != identity
+                            ):
+                                termination_reason = "child_process_identity_changed"
+                                self.terminate_owned_processes()
+                                break
+                        else:
+                            returncode = int(proc.returncode or 0)
+                            break
                     try:
                         status = read_runtime_status_if_present(
                             status_path,

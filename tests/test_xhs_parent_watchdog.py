@@ -445,6 +445,77 @@ for sequence in range(1, 41):
     assert marked == [(registered[0], "child")]
 
 
+def test_identity_probe_exit_race_preserves_real_child_returncode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    inspector = FakeInspector()
+    inspector.current = None
+    guard = configured_guard(tmp_path, inspector)
+    process = FakeProcess(clock, exit_at=0.03)
+    observed = install_process_harness(monkeypatch, guard, process)
+    monkeypatch.setattr(leases.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(leases.secrets, "token_bytes", lambda _size: AUTH_KEY)
+
+    def forbidden_status_read(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("an exit race must be reaped before status inspection")
+
+    monkeypatch.setattr(
+        leases,
+        "read_runtime_status_if_present",
+        forbidden_status_read,
+    )
+
+    result = run_watchdog(
+        guard,
+        policy=RuntimeStatusWatchdogPolicy(0.2, 0.2, 0.05, 0.05),
+    )
+
+    assert result.returncode == 0
+    assert result.termination_reason is None
+    assert result.timed_out is False
+    assert clock.value == pytest.approx(0.05)
+    assert observed["marked"] == [(CHILD, "child")]
+    assert observed["owned_cleanup_calls"] == 0
+
+
+def test_transient_identity_probe_failure_must_reprove_exact_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    inspector = FakeInspector()
+    guard = configured_guard(tmp_path, inspector)
+    process = FakeProcess(clock, exit_at=0.12)
+    observed = install_process_harness(monkeypatch, guard, process)
+    monkeypatch.setattr(leases.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(leases.secrets, "token_bytes", lambda _size: AUTH_KEY)
+    def identity(_pid: int) -> ProcessIdentity | None:
+        inspector.identity_calls += 1
+        return None
+
+    monkeypatch.setattr(inspector, "identity", identity)
+    sequences = iter(range(1, 20))
+    monkeypatch.setattr(
+        leases,
+        "read_runtime_status_if_present",
+        lambda *_args, **_kwargs: status_payload(next(sequences)),
+    )
+
+    result = run_watchdog(
+        guard,
+        policy=RuntimeStatusWatchdogPolicy(0.2, 0.2, 0.05, 0.05),
+    )
+
+    assert result.returncode == 0
+    assert result.termination_reason is None
+    assert result.timed_out is False
+    assert inspector.identity_calls >= 2
+    assert observed["marked"] == [(CHILD, "child")]
+    assert observed["owned_cleanup_calls"] == 0
+
+
 def test_reused_child_identity_stops_before_status_without_signalling_reused_pid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -824,7 +824,11 @@ def _read_runtime_status_file(target: Path) -> str:
             raise RuntimeStatusValidationError(
                 "runtime status must be owned by the current user"
             )
-        if file_stat.st_nlink != 1:
+        # Atomic replacement can unlink the old inode after ``open`` and
+        # before ``fstat``.  Link count zero is therefore a safe, signed old
+        # snapshot from the exact target path.  Multiple links remain a hard
+        # failure because they allow the inode to be addressed elsewhere.
+        if file_stat.st_nlink not in {0, 1}:
             raise RuntimeStatusValidationError(
                 "runtime status must have exactly one filesystem link"
             )

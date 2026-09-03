@@ -532,6 +532,27 @@ def test_hardlink_and_wrong_owner_are_rejected(
         read_status(session_paths["status"])
 
 
+def test_reader_accepts_signed_inode_unlinked_by_atomic_replace(
+    session_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_status(session_paths["status"])
+    real_fstat = runtime.os.fstat
+
+    def replaced_inode(descriptor: int) -> SimpleNamespace:
+        observed = real_fstat(descriptor)
+        return SimpleNamespace(
+            st_mode=observed.st_mode,
+            st_uid=observed.st_uid,
+            st_nlink=0,
+            st_size=observed.st_size,
+        )
+
+    monkeypatch.setattr(runtime.os, "fstat", replaced_inode)
+
+    assert read_status(session_paths["status"])["sequence"] == 1
+
+
 def test_oversized_and_invalid_utf8_files_are_rejected(
     session_paths: dict[str, Path],
 ) -> None:
