@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from trippostcollect.db import bootstrap as db_bootstrap
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs import accounts
 from trippostcollect.xhs.config import load_pool_config, load_target
@@ -165,11 +166,6 @@ def test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup(
     )
     monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
     watchdogs = []
-    monkeypatch.setattr(
-        accounts,
-        "XHS_LEGACY_ACCOUNT_ROOT",
-        tmp_path / "legacy-accounts",
-    )
     previous_handlers = {
         signum: xhs_runner.signal.getsignal(signum)
         for signum in (xhs_runner.signal.SIGINT, xhs_runner.signal.SIGTERM)
@@ -1273,7 +1269,7 @@ def test_xhs_schema_removes_persistent_fields_without_erasing_history_or_files(
 ) -> None:
     monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
     monkeypatch.setattr(
-        accounts,
+        db_bootstrap,
         "XHS_LEGACY_ACCOUNT_ROOT",
         tmp_path / "legacy-accounts-root",
     )

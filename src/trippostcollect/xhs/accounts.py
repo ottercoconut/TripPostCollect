@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from trippostcollect.core.paths import (
-    XHS_LEGACY_ACCOUNT_ROOT,
     XHS_LOCK_ROOT,
     ensure_parent,
 )
@@ -61,22 +60,6 @@ def validate_account_id(account_id: str) -> str:
 
 def account_lock_path(account_id: str) -> Path:
     return XHS_LOCK_ROOT / f"{validate_account_id(account_id)}.lock"
-
-
-def legacy_account_lock_path(account_id: str) -> Path:
-    """Return the historical lock still used by pre-cutover runners."""
-
-    return XHS_LEGACY_ACCOUNT_ROOT / validate_account_id(account_id) / "lease.lock"
-
-
-def legacy_account_profile_path(account_id: str) -> Path:
-    return XHS_LEGACY_ACCOUNT_ROOT / validate_account_id(account_id) / "profile"
-
-
-def account_lock_paths(account_id: str) -> tuple[Path, Path]:
-    """Acquire legacy first so old and current runners share one mutex boundary."""
-
-    return legacy_account_lock_path(account_id), account_lock_path(account_id)
 
 
 def ensure_xhs_schema(

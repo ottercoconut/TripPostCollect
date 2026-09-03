@@ -102,6 +102,7 @@ class FakeInspector:
         self.presences = presences or {}
         self.groups = groups or {}
         self.profiles = profile_processes or []
+        self.profile_calls: list[Path] = []
         self.current = current
 
     def identity(self, pid: int) -> ProcessIdentity | None:
@@ -115,7 +116,8 @@ class FakeInspector:
     def group_members(self, pgid: int) -> list[ProcessSnapshot]:
         return list(self.groups.get(int(pgid), []))
 
-    def profile_processes(self, _profile_dir: Path) -> list[ProcessSnapshot]:
+    def profile_processes(self, profile_dir: Path) -> list[ProcessSnapshot]:
+        self.profile_calls.append(Path(profile_dir).expanduser().resolve())
         return list(self.profiles)
 
     def current_identity(self) -> ProcessIdentity:
@@ -159,7 +161,7 @@ class NoPresenceInspector:
 def control_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
     monkeypatch.setattr(
-        accounts,
+        db_bootstrap,
         "XHS_LEGACY_ACCOUNT_ROOT",
         tmp_path / "legacy-accounts",
     )
@@ -370,7 +372,7 @@ def configure_test_lock_roots(
 ) -> None:
     monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", root / "locks")
     monkeypatch.setattr(
-        accounts,
+        db_bootstrap,
         "XHS_LEGACY_ACCOUNT_ROOT",
         root / "legacy-accounts",
     )
@@ -975,7 +977,7 @@ def test_xhs_v22_cutover_rolls_back_every_mutation_on_disk_full(
         assert xhs_database_snapshot(conn) == before
         assert_v21_xhs_database_restored(conn)
         for lock_path in (
-            accounts.legacy_account_lock_path("xhs-a01"),
+            db_bootstrap._xhs_legacy_account_dir("xhs-a01") / "lease.lock",
             accounts.account_lock_path("xhs-a01"),
             tmp_path / "legacy-account-1" / "lease.lock",
         ):
@@ -1004,7 +1006,7 @@ def test_xhs_v22_cutover_holds_every_legacy_lock_until_rollback(
     db_path = tmp_path / "legacy-v21.sqlite"
     create_v21_xhs_database(db_path)
     lock_paths = (
-        accounts.legacy_account_lock_path("xhs-a01"),
+        db_bootstrap._xhs_legacy_account_dir("xhs-a01") / "lease.lock",
         accounts.account_lock_path("xhs-a01"),
         tmp_path / "legacy-account-1" / "lease.lock",
     )
@@ -1439,7 +1441,7 @@ def test_identityless_legacy_lease_blocks_schema_cutover(
 ) -> None:
     monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
     monkeypatch.setattr(
-        accounts,
+        db_bootstrap,
         "XHS_LEGACY_ACCOUNT_ROOT",
         tmp_path / "legacy-accounts",
     )
@@ -1677,7 +1679,7 @@ def test_legacy_cutover_refuses_live_registered_child_after_owner_dies(
 def test_legacy_flock_blocks_schema_cutover_even_when_owner_is_dead(
     control_db: Path,
 ) -> None:
-    legacy_lock = accounts.legacy_account_lock_path("xhs-a01")
+    legacy_lock = db_bootstrap._xhs_legacy_account_dir("xhs-a01") / "lease.lock"
     holder = start_legacy_lock_holder(legacy_lock)
     try:
         with connect(control_db) as conn:
@@ -1709,7 +1711,7 @@ def test_stored_legacy_account_lock_blocks_account_schema_cutover(
 ) -> None:
     monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
     monkeypatch.setattr(
-        accounts,
+        db_bootstrap,
         "XHS_LEGACY_ACCOUNT_ROOT",
         tmp_path / "legacy-accounts-root",
     )
@@ -1763,34 +1765,81 @@ def test_stored_legacy_account_lock_blocks_account_schema_cutover(
         holder.communicate("\n", timeout=5)
 
 
-def test_current_guard_and_legacy_runner_share_the_historical_flock(
+def test_current_schema_guard_uses_only_current_lock_without_legacy_path_side_effects(
     control_db: Path,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run_id = "dual-lock-guard"
+    legacy_root = db_bootstrap.XHS_LEGACY_ACCOUNT_ROOT
+    legacy_profile = legacy_root / "xhs-a01" / "profile"
+    assert not legacy_root.exists()
+
+    def reject_legacy_path_calculation(_account_id: str) -> Path:
+        raise AssertionError("current schema must not calculate a legacy account path")
+
+    monkeypatch.setattr(
+        db_bootstrap,
+        "_xhs_legacy_account_dir",
+        reject_legacy_path_calculation,
+    )
+    inspector = FakeInspector(current=OWNER)
+    run_id = "current-lock-only"
     guard = LeaseGuard(
         db_path=control_db,
         account_id="xhs-a01",
         run_id=run_id,
         lease_kind="crawl",
-        execution_state_path=tmp_path / "dual-lock.json",
+        execution_state_path=tmp_path / "current-lock-only.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
         budget=LeaseBudget(runtime_seconds=10),
+        inspector=inspector,
     )
-    legacy_lock = accounts.legacy_account_lock_path("xhs-a01")
-    holder = start_legacy_lock_holder(legacy_lock)
+
+    acquired = guard.acquire()
+    try:
+        assert acquired["account_id"] == "xhs-a01"
+        assert inspector.profile_calls == []
+        assert guard.file_lock.paths == (accounts.account_lock_path("xhs-a01"),)
+        assert probe_file_lock(accounts.account_lock_path("xhs-a01")) == "busy"
+        assert not legacy_root.exists()
+    finally:
+        assert guard.close() is True
+    assert legacy_profile.resolve() not in inspector.profile_calls
+    assert not legacy_root.exists()
+
+
+def test_current_schema_guard_fails_closed_on_current_lock_without_legacy_fallback(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    current_lock = accounts.account_lock_path("xhs-a01")
+    legacy_root = db_bootstrap.XHS_LEGACY_ACCOUNT_ROOT
+    holder = start_legacy_lock_holder(current_lock)
+    run_id = "current-lock-busy"
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "current-lock-busy.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10),
+        inspector=FakeInspector(current=OWNER),
+    )
     try:
         with pytest.raises(XhsAccountUnavailable, match="local_lock_busy"):
             guard.acquire()
+        assert guard.file_lock._handles == []
+        assert not legacy_root.exists()
+        with connect(control_db) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM xhs_account_leases"
+            ).fetchone()[0] == 0
     finally:
         holder.communicate("\n", timeout=5)
 
-    guard.acquire()
-    assert probe_file_lock(legacy_lock) == "busy"
-    assert guard.close() is True
 
-
-def test_guard_migrates_legacy_schema_before_taking_its_own_dual_flock(
+def test_migrated_schema_ignores_obsolete_lock_and_profile_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1806,30 +1855,57 @@ def test_guard_migrates_legacy_schema_before_taking_its_own_dual_flock(
         process_start_token="runner-start-333",
         pgid=333,
     )
-    inspector = FakeInspector(
-        identities={runner.pid: runner},
-        presences={111: False, 222: False},
-        current=runner,
+    with sqlite3.connect(db_path) as conn:
+        db_bootstrap.ensure_xhs_control_schema(
+            conn,
+            cutover_inspector=dead_v21_inspector(),
+        )
+        conn.commit()
+
+    legacy_profile = tmp_path / "legacy-account-1" / "profile"
+    browser = ProcessSnapshot(
+        identity=ProcessIdentity(
+            host_id="host-a",
+            boot_id="boot-a",
+            pid=444,
+            process_started_at="2026-09-03T00:00:00+00:00",
+            process_start_token="obsolete-browser-444",
+            pgid=444,
+        ),
+        argv=("Chromium", f"--user-data-dir={legacy_profile}"),
     )
-    run_id = "guard-cutover-no-self-deadlock"
+
+    class ObsoleteProfileInspector(FakeInspector):
+        def profile_processes(self, profile_dir: Path) -> list[ProcessSnapshot]:
+            resolved = Path(profile_dir).expanduser().resolve()
+            self.profile_calls.append(resolved)
+            return [browser] if resolved == legacy_profile.resolve() else []
+
+    inspector = ObsoleteProfileInspector(current=runner)
+    legacy_lock = db_bootstrap._xhs_legacy_account_dir("xhs-a01") / "lease.lock"
+    holder = start_legacy_lock_holder(legacy_lock)
+    run_id = "migrated-current-only"
     guard = LeaseGuard(
         db_path=db_path,
         account_id="xhs-a01",
         run_id=run_id,
         lease_kind="crawl",
-        execution_state_path=tmp_path / "guard-cutover.json",
+        execution_state_path=tmp_path / "migrated-current-only.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
         budget=LeaseBudget(runtime_seconds=10),
         inspector=inspector,
     )
 
-    acquired = guard.acquire()
     try:
+        acquired = guard.acquire()
         assert acquired["account_id"] == "xhs-a01"
-        assert guard.lease_id
-        assert probe_file_lock(accounts.legacy_account_lock_path("xhs-a01")) == "busy"
+        assert inspector.profile_calls == []
+        assert probe_file_lock(legacy_lock) == "busy"
+        assert probe_file_lock(accounts.account_lock_path("xhs-a01")) == "busy"
     finally:
         assert guard.close() is True
+        holder.communicate("\n", timeout=5)
+    assert legacy_profile.resolve() not in inspector.profile_calls
     with connect(db_path) as conn:
         assert "runtime_profile_dir" in {
             row[1] for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
@@ -1843,26 +1919,14 @@ def test_guard_migrates_legacy_schema_before_taking_its_own_dual_flock(
         ).fetchone()[0] == 1
 
 
-def test_dual_lock_rolls_back_legacy_lock_when_current_lock_is_busy(
-    control_db: Path,
-) -> None:
-    current_lock = accounts.account_lock_path("xhs-a01")
-    current_holder = start_legacy_lock_holder(current_lock)
-    dual_lock = xhs_leases.AccountLeaseFileLock(
-        accounts.account_lock_paths("xhs-a01")
-    )
-    try:
-        with pytest.raises(XhsAccountUnavailable, match="local_lock_busy"):
-            dual_lock.acquire()
-        assert probe_file_lock(accounts.legacy_account_lock_path("xhs-a01")) == "acquired"
-    finally:
-        current_holder.communicate("\n", timeout=5)
-
-
-def test_current_guard_refuses_orphan_browser_using_legacy_profile(
-    control_db: Path,
+def test_legacy_schema_cutover_refuses_live_profile_browser_without_mutation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    configure_test_lock_roots(monkeypatch, tmp_path)
+    db_path = tmp_path / "legacy-v21-live-browser.sqlite"
+    create_v21_xhs_database(db_path)
+    legacy_profile = tmp_path / "legacy-account-1" / "profile"
     browser = ProcessSnapshot(
         identity=ProcessIdentity(
             host_id="host-a",
@@ -1874,25 +1938,28 @@ def test_current_guard_refuses_orphan_browser_using_legacy_profile(
         ),
         argv=(
             "Chromium",
-            f"--user-data-dir={accounts.legacy_account_profile_path('xhs-a01')}",
+            f"--user-data-dir={legacy_profile}",
         ),
     )
-    run_id = "legacy-browser-blocked"
-    guard = LeaseGuard(
-        db_path=control_db,
-        account_id="xhs-a01",
-        run_id=run_id,
-        lease_kind="crawl",
-        execution_state_path=tmp_path / "legacy-browser.json",
-        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
-        inspector=FakeInspector(profile_processes=[browser]),
+    inspector = FakeInspector(
+        presences={111: False, 222: False},
+        profile_processes=[browser],
     )
-
-    with pytest.raises(XhsAccountUnavailable, match="legacy_browser_alive"):
-        guard.acquire()
-    with connect(control_db) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+    with sqlite3.connect(db_path) as conn:
+        before = xhs_database_snapshot(conn)
+        with pytest.raises(
+            XhsLeaseCutoverBlocked,
+            match="legacy_profile_chrome_alive",
+        ):
+            db_bootstrap.ensure_xhs_control_schema(
+                conn,
+                cutover_inspector=inspector,
+            )
+        assert xhs_database_snapshot(conn) == before
+        assert_v21_xhs_database_restored(conn)
+        assert conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version=22"
+        ).fetchone() is None
 
 
 def test_xhs_control_bootstrap_does_not_create_content_or_scheduler_tables(
@@ -3367,6 +3434,69 @@ def test_reboot_allows_mutex_only_reconciliation_without_terminal_state(
         assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
 
 
+def test_current_orphan_recovery_ignores_obsolete_lock_and_profile_browser(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "recover-current-lock-only"
+    lease = acquire_test_lease(
+        control_db,
+        run_id=run_id,
+        state_path=tmp_path / "missing-current-recovery.json",
+    )
+    legacy_profile = (
+        db_bootstrap._xhs_legacy_account_dir("xhs-a01") / "profile"
+    ).resolve()
+    legacy_lock = legacy_profile.parent / "lease.lock"
+    browser = ProcessSnapshot(
+        identity=ProcessIdentity(
+            host_id="host-a",
+            boot_id="boot-a",
+            pid=777,
+            process_started_at="2026-09-03T00:00:00+00:00",
+            process_start_token="obsolete-browser-777",
+            pgid=777,
+        ),
+        argv=("Chromium", f"--user-data-dir={legacy_profile}"),
+    )
+
+    class ObsoleteProfileInspector(FakeInspector):
+        def profile_processes(self, profile_dir: Path) -> list[ProcessSnapshot]:
+            resolved = Path(profile_dir).expanduser().resolve()
+            self.profile_calls.append(resolved)
+            return [browser] if resolved == legacy_profile else []
+
+    inspector = ObsoleteProfileInspector()
+    holder = start_legacy_lock_holder(legacy_lock)
+
+    def reject_legacy_path_calculation(_account_id: str) -> Path:
+        raise AssertionError("orphan recovery must not calculate a legacy account path")
+
+    monkeypatch.setattr(
+        db_bootstrap,
+        "_xhs_legacy_account_dir",
+        reject_legacy_path_calculation,
+    )
+    try:
+        with connect(control_db) as conn:
+            result = recover_orphaned_account_lease(
+                conn,
+                account_id="xhs-a01",
+                run_id=run_id,
+                lease_id=lease["lease_id"],
+                inspector=inspector,
+            )
+            assert conn.execute(
+                "SELECT COUNT(*) FROM xhs_account_leases"
+            ).fetchone()[0] == 0
+    finally:
+        holder.communicate("\n", timeout=5)
+
+    assert result["release_scope"] == "account_mutex_only"
+    assert legacy_profile not in inspector.profile_calls
+
+
 def test_orphan_reconciliation_removes_run_scoped_profile(
     control_db: Path,
     tmp_path: Path,
@@ -3932,7 +4062,6 @@ from trippostcollect.xhs.leases import LeaseBudget, LeaseGuard, XhsLeaseSignal
 root = Path(sys.argv[1])
 run_id = sys.argv[2]
 accounts.XHS_LOCK_ROOT = root / "locks"
-accounts.XHS_LEGACY_ACCOUNT_ROOT = root / "legacy-accounts"
 runtime.XHS_SESSION_ROOT = root / "sessions"
 guard = LeaseGuard(
     db_path=root / "control.sqlite",

@@ -590,11 +590,6 @@ def test_formal_os_signal_immediately_after_acquire_has_one_failed_terminal_comm
     monkeypatch.setattr(xhs_runner, "utc_stamp", lambda: run_id)
     monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
     monkeypatch.setattr(
-        accounts,
-        "XHS_LEGACY_ACCOUNT_ROOT",
-        tmp_path / "legacy-accounts",
-    )
-    monkeypatch.setattr(
         "trippostcollect.xhs.runtime.XHS_SESSION_ROOT",
         tmp_path / "sessions",
     )

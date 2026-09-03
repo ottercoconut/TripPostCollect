@@ -18,6 +18,7 @@ from trippostcollect.core.paths import (
     SOURCE_PLATFORMS_SCHEMA,
     WEB_POSTS_SCHEMA,
     XHS_CONTROL_SCHEMA,
+    XHS_LEGACY_ACCOUNT_ROOT,
     ensure_parent,
 )
 from trippostcollect.db.avatar_migration import migrate_remove_author_avatars
@@ -206,8 +207,15 @@ def _record_xhs_schema_migrations(conn: sqlite3.Connection) -> None:
         )
 
 
+def _xhs_legacy_account_dir(account_id: str) -> Path:
+    """Historical account directory used only while cutting over an old schema."""
+
+    from trippostcollect.xhs.accounts import validate_account_id
+
+    return XHS_LEGACY_ACCOUNT_ROOT / validate_account_id(account_id)
+
+
 def _xhs_cutover_accounts(conn: sqlite3.Connection) -> dict[str, Path]:
-    from trippostcollect.xhs.accounts import legacy_account_lock_path
 
     profiles: dict[str, Path] = {}
     if table_exists(conn, "xhs_accounts"):
@@ -226,7 +234,7 @@ def _xhs_cutover_accounts(conn: sqlite3.Connection) -> dict[str, Path]:
             profiles[account_id] = (
                 Path(profile_value).expanduser().absolute()
                 if profile_value
-                else legacy_account_lock_path(account_id).parent / "profile"
+                else _xhs_legacy_account_dir(account_id) / "profile"
             )
     if table_exists(conn, "xhs_account_leases"):
         lease_columns = table_columns(conn, "xhs_account_leases")
@@ -237,7 +245,7 @@ def _xhs_cutover_accounts(conn: sqlite3.Connection) -> dict[str, Path]:
                 account_id = str(row[0])
                 profiles.setdefault(
                     account_id,
-                    legacy_account_lock_path(account_id).parent / "profile",
+                    _xhs_legacy_account_dir(account_id) / "profile",
                 )
     return profiles
 
@@ -253,7 +261,6 @@ def _guard_xhs_legacy_cutover(
     from trippostcollect.xhs.accounts import (
         XhsAccountUnavailable,
         account_lock_path,
-        legacy_account_lock_path,
     )
     from trippostcollect.xhs.leases import (
         AccountLeaseFileLock,
@@ -265,7 +272,7 @@ def _guard_xhs_legacy_cutover(
     for account_id, profile_dir in profiles.items():
         lock_paths.extend(
             (
-                legacy_account_lock_path(account_id),
+                _xhs_legacy_account_dir(account_id) / "lease.lock",
                 profile_dir.parent / "lease.lock",
                 account_lock_path(account_id),
             )

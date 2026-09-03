@@ -26,11 +26,10 @@ from typing import Any, Callable, Mapping, Sequence
 from trippostcollect.core.paths import ensure_dir
 from trippostcollect.xhs.accounts import (
     XhsAccountUnavailable,
-    account_lock_paths,
+    account_lock_path,
     ensure_xhs_schema,
     get_account,
     iso,
-    legacy_account_profile_path,
     parse_iso,
     record_event,
     validate_account_id,
@@ -1552,7 +1551,7 @@ def recover_orphaned_account_lease(
         raise XhsOrphanLeaseRecoveryRefused(
             "requested XHS coordination slot does not exist"
         )
-    lock = AccountLeaseFileLock(account_lock_paths(value))
+    lock = AccountLeaseFileLock(account_lock_path(value))
     try:
         lock.acquire()
     except XhsAccountUnavailable as exc:
@@ -1747,7 +1746,7 @@ class LeaseGuard:
         )
         self.budget = budget
         self.inspector = inspector or SystemProcessInspector()
-        self.file_lock = AccountLeaseFileLock(account_lock_paths(self.account_id))
+        self.file_lock = AccountLeaseFileLock(account_lock_path(self.account_id))
         self.account: dict[str, Any] | None = None
         self.lease_id = ""
         self.owner_token = ""
@@ -1788,26 +1787,14 @@ class LeaseGuard:
     def acquire(self) -> dict[str, Any]:
         if self.account is not None:
             raise RuntimeError("XHS LeaseGuard is already acquired")
-        # A legacy schema cutover takes both the historical and current flock
-        # itself.  Perform that one-time transition before this guard owns the
-        # same locks, otherwise a process can deadlock against its own flock.
+        # A legacy schema cutover owns its historical locks internally. Perform
+        # that one-time transition before taking the current runtime lock so the
+        # migration cannot deadlock against this process.
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             ensure_xhs_schema(conn, cutover_inspector=self.inspector)
         self.file_lock.acquire()
         try:
-            try:
-                legacy_browsers = self.inspector.profile_processes(
-                    legacy_account_profile_path(self.account_id)
-                )
-            except (OSError, RuntimeError) as exc:
-                raise XhsAccountUnavailable(
-                    "requested_xhs_account_legacy_browser_unverifiable"
-                ) from exc
-            if legacy_browsers:
-                raise XhsAccountUnavailable(
-                    "requested_xhs_account_legacy_browser_alive"
-                )
             self.owner = self.inspector.current_identity()
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
