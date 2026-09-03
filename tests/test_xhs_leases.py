@@ -785,6 +785,48 @@ def test_dry_run_preflight_treats_expired_row_as_busy(
             xhs_runner_cli._eligible_account_for_plan(conn, "xhs-a01")
 
 
+def test_preflight_rejects_missing_slot_without_implicit_database_writes(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "missing-slot.sqlite"
+    bootstrap_database(db_path, sync_jobs=False)
+
+    with connect(db_path) as conn:
+        before_changes = conn.total_changes
+        with pytest.raises(
+            XhsAccountUnavailable,
+            match="requested_xhs_account_missing",
+        ):
+            xhs_runner_cli._eligible_account_for_plan(conn, "xhs-a01")
+
+        assert conn.total_changes == before_changes
+        assert conn.execute("SELECT COUNT(*) FROM xhs_accounts").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_events").fetchone()[0] == 0
+
+
+def test_preflight_typo_does_not_fork_checkpoint_namespace(
+    control_db: Path,
+) -> None:
+    with connect(control_db) as conn:
+        accounts.register_account_slot(conn, "xhs-a02")
+        before_accounts = conn.execute(
+            "SELECT account_id FROM xhs_accounts ORDER BY account_id"
+        ).fetchall()
+
+        with pytest.raises(
+            XhsAccountUnavailable,
+            match="requested_xhs_account_missing",
+        ):
+            xhs_runner_cli._eligible_account_for_plan(conn, "xhs-a03")
+
+        assert conn.execute(
+            "SELECT account_id FROM xhs_accounts ORDER BY account_id"
+        ).fetchall() == before_accounts
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_events WHERE account_id='xhs-a03'"
+        ).fetchone()[0] == 0
+
+
 def test_wrong_owner_token_cannot_release(control_db: Path, tmp_path: Path) -> None:
     lease = acquire_test_lease(
         control_db,

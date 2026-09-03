@@ -41,7 +41,6 @@ from trippostcollect.xhs.accounts import (
     ensure_xhs_schema,
     get_account,
     record_event,
-    register_account_slot,
     validate_account_id,
 )
 from trippostcollect.xhs.config import load_pool_config, load_target
@@ -386,7 +385,9 @@ def _eligible_account_for_plan(
     check_lease: bool = True,
 ) -> dict[str, Any]:
     account_id = validate_account_id(requested)
-    account = get_account(conn, account_id) or register_account_slot(conn, account_id)
+    account = get_account(conn, account_id)
+    if account is None:
+        raise XhsAccountUnavailable("requested_xhs_account_missing")
     if account["status"] != "active":
         raise XhsAccountUnavailable("requested_xhs_account_not_active")
     if check_lease:

@@ -146,6 +146,11 @@ def test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup(
         encoding="utf-8",
     )
     db_path = tmp_path / "content.sqlite"
+    bootstrap_database(db_path, sync_jobs=False)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        accounts.ensure_xhs_schema(conn)
+        accounts.register_account_slot(conn, "xhs-a01")
     run_id = "operator-interrupt-run"
     runtime_root = tmp_path / "runtime"
     execution_root = tmp_path / "execution"
