@@ -5440,7 +5440,6 @@ def _run_platform_without_policy(
                 "TRIPPOSTCOLLECT_SHARE_CDP_PROFILE": "1",
                 "TRIPPOSTCOLLECT_XHS_PROFILE_DIR": str(Path(args.xhs_profile_dir).expanduser().resolve()),
                 "TRIPPOSTCOLLECT_XHS_ACCOUNT_ID": str(args.xhs_account_id),
-                "TRIPPOSTCOLLECT_XHS_RUN_SCOPED_LOGIN": "1",
                 XHS_WINDOW_SIZE_ENV: xhs_window_size_value(),
                 "TRIPPOSTCOLLECT_XHS_DISCOVERY_TARGET_KEY": str(
                     args.xhs_discovery_target_key

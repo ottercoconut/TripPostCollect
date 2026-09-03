@@ -295,7 +295,7 @@ def test_xhs_low_level_cli_has_no_storage_state_option(
     assert not hasattr(args, "xhs_storage_state")
 
 
-def test_xhs_low_level_executor_marks_fresh_run_scoped_login(
+def test_xhs_low_level_executor_uses_profile_contract_without_legacy_login_switch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -354,7 +354,11 @@ def test_xhs_low_level_executor_marks_fresh_run_scoped_login(
 
     extra_env = captured["extra_env"]
     assert isinstance(extra_env, dict)
-    assert extra_env["TRIPPOSTCOLLECT_XHS_RUN_SCOPED_LOGIN"] == "1"
+    assert extra_env["TRIPPOSTCOLLECT_XHS_PROFILE_DIR"] == str(
+        (tmp_path / "profile").resolve()
+    )
+    assert extra_env["TRIPPOSTCOLLECT_XHS_ACCOUNT_ID"] == "xhs-a01"
+    assert "TRIPPOSTCOLLECT_XHS_RUN_SCOPED_LOGIN" not in extra_env
     assert "TRIPPOSTCOLLECT_XHS_STORAGE_STATE_PATH" not in extra_env
     assert not hasattr(mediacrawler_crawl, "xhs_storage_snapshot_info")
     assert result["login_state"] is None
