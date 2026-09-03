@@ -44,6 +44,10 @@ from trippostcollect.xhs.leases import (
 from trippostcollect.xhs.runtime import (
     runtime_session_paths,
 )
+from trippostcollect.xhs.supervision import (
+    run_supervised_xhs_subprocess,
+    runtime_watchdog_evidence,
+)
 from xhs_runner import (
     _challenge_reason,
     _eligible_account_for_plan,
@@ -486,6 +490,7 @@ def _run_main() -> int:
     stdout = ""
     stderr = ""
     exit_code = 1
+    completed = None
     outcome = "failed"
     state_error = ""
     candidate_only_failure = False
@@ -530,7 +535,8 @@ def _run_main() -> int:
             env = os.environ.copy()
             env["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(state_path)
             env["TRIPPOSTCOLLECT_XHS_RUN_ID"] = run_id
-            completed = guard.run_subprocess(
+            completed = run_supervised_xhs_subprocess(
+                guard,
                 command,
                 cwd=ROOT,
                 env=env,
@@ -548,11 +554,21 @@ def _run_main() -> int:
                 and not _login_reason(stdout, stderr, child_summary)
             )
             if not child_summary or (exit_code != 0 and not candidate_only_failure):
-                state_error = f"xhs_repair_child_exit_{exit_code}"
+                watchdog = runtime_watchdog_evidence(completed)
+                termination_reason = str(watchdog.get("termination_reason") or "")
+                state_error = (
+                    f"xhs_repair_runtime_watchdog:{termination_reason}"
+                    if termination_reason
+                    else f"xhs_repair_child_exit_{exit_code}"
+                )
                 state.fail(
                     "command_executed",
                     error=state_error,
-                    evidence={"stdout_tail": tail(stdout), "stderr_tail": tail(stderr)},
+                    evidence={
+                        "stdout_tail": tail(stdout),
+                        "stderr_tail": tail(stderr),
+                        "runtime_watchdog": watchdog,
+                    },
                 )
             else:
                 state.complete(
@@ -561,6 +577,7 @@ def _run_main() -> int:
                         "summary": child_summary_path,
                         "child_exit_code": exit_code,
                         "candidate_only_failure": candidate_only_failure,
+                        "runtime_watchdog": runtime_watchdog_evidence(completed),
                     },
                 )
                 state.begin("artifacts_verified")
@@ -729,6 +746,7 @@ def _run_main() -> int:
         "login_mode": "per_run_qrcode",
         "persistent_account_profile": False,
         "runtime_session_removed": not session_paths["root"].exists(),
+        "runtime_watchdog": runtime_watchdog_evidence(completed),
         "import_result": child_summary.get("import_result") or {},
         "repair_report": repair_report,
         "candidate_only_failure": candidate_only_failure,

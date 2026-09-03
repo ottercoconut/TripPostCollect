@@ -59,6 +59,10 @@ from trippostcollect.xhs.leases import (
 from trippostcollect.xhs.runtime import (
     runtime_session_paths,
 )
+from trippostcollect.xhs.supervision import (
+    run_supervised_xhs_subprocess,
+    runtime_watchdog_evidence,
+)
 
 
 ROOT = PROJECT_ROOT
@@ -835,6 +839,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
     stdout = ""
     stderr = ""
     exit_code = 1
+    completed = None
     interrupt: dict[str, Any] | None = None
     discovery_commit: dict[str, Any] = {"skipped": True, "reason": "child_not_started"}
     try:
@@ -854,7 +859,8 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             env = os.environ.copy()
             env["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(state_path)
             env["TRIPPOSTCOLLECT_XHS_RUN_ID"] = run_id
-            completed = guard.run_subprocess(
+            completed = run_supervised_xhs_subprocess(
+                guard,
                 command,
                 cwd=ROOT,
                 env=env,
@@ -912,13 +918,31 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             else:
                 discovery_commit = {"skipped": True, "reason": "child_summary_missing"}
             if exit_code != 0:
+                watchdog = runtime_watchdog_evidence(completed)
+                failure_reason = str(watchdog.get("termination_reason") or "")
                 state.fail(
                     "command_executed",
-                    error=f"xhs_child_exit_{exit_code}",
-                    evidence={"command": command, "stdout_tail": tail(stdout), "stderr_tail": tail(stderr)},
+                    error=(
+                        f"xhs_runtime_watchdog:{failure_reason}"
+                        if failure_reason
+                        else f"xhs_child_exit_{exit_code}"
+                    ),
+                    evidence={
+                        "command": command,
+                        "stdout_tail": tail(stdout),
+                        "stderr_tail": tail(stderr),
+                        "runtime_watchdog": watchdog,
+                    },
                 )
             else:
-                state.complete("command_executed", evidence={"command": command, "exit_code": exit_code})
+                state.complete(
+                    "command_executed",
+                    evidence={
+                        "command": command,
+                        "exit_code": exit_code,
+                        "runtime_watchdog": runtime_watchdog_evidence(completed),
+                    },
+                )
                 state.begin("artifacts_verified")
                 if not child_summary_path or not Path(child_summary_path).is_file():
                     state.fail("artifacts_verified", error="xhs_child_summary_missing")
@@ -1076,6 +1100,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
         "login_mode": "per_run_qrcode",
         "persistent_account_profile": False,
         "runtime_session_removed": not session_paths["root"].exists(),
+        "runtime_watchdog": runtime_watchdog_evidence(completed),
         "failure_type": "runtime_failed" if interrupt else "",
         "stop_reason": "runtime_failed" if interrupt else "",
         "reason": "operator_interrupt" if interrupt else "",

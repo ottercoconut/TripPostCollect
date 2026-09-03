@@ -159,8 +159,10 @@ def test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup(
         session_root,
     )
     monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
+    watchdogs = []
 
     def interrupt_child(self, *_args, **_kwargs):
+        watchdogs.append(_kwargs.get("runtime_watchdog"))
         if interrupt_kind == "lease_signal":
             self.signal_received = int(xhs_runner.signal.SIGINT)
             raise xhs_runner.XhsLeaseSignal(xhs_runner.signal.SIGINT)
@@ -180,6 +182,11 @@ def test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup(
     )
 
     assert xhs_runner._run_main(args) == 130
+    assert len(watchdogs) == 1
+    assert watchdogs[0].startup_grace_seconds == 120.0
+    assert watchdogs[0].stale_after_seconds == 60.0
+    assert watchdogs[0].poll_seconds == 5.0
+    assert watchdogs[0].resume_grace_seconds == 30.0
 
     summary_path = runtime_root / "runs" / run_id / "run_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))

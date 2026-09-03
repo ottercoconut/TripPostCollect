@@ -161,6 +161,7 @@ def configured_guard(tmp_path: Path, inspector: Any) -> LeaseGuard:
         run_id="run-1",
         lease_kind="crawl",
         execution_state_path=tmp_path / "state.json",
+        runtime_profile_dir=runtime.runtime_session_paths("run-1")["profile"],
         budget=LeaseBudget(
             runtime_seconds=30,
             child_shutdown_seconds=2,
@@ -378,7 +379,7 @@ from trippostcollect.xhs.leases import SystemProcessInspector
 runtime.XHS_SESSION_ROOT = Path(sys.argv[1])
 auth_key = bytes.fromhex(os.environ.pop(runtime.RUNTIME_STATUS_AUTH_KEY_ENV))
 identity = SystemProcessInspector().current_identity()
-for sequence in range(1, 26):
+for sequence in range(1, 41):
     heartbeat_at = (
         "2126-09-03T12:00:00+00:00"
         if sequence % 2
@@ -428,7 +429,7 @@ for sequence in range(1, 26):
     assert result.returncode == 0
     assert result.timed_out is False
     assert result.termination_reason is None
-    assert 1 <= result.runtime_status["sequence"] <= 25
+    assert 1 <= result.runtime_status["sequence"] <= 40
     assert registered
     assert marked == [(registered[0], "child")]
 
