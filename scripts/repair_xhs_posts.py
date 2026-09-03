@@ -8,8 +8,9 @@ import json
 import os
 import sqlite3
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from execution_state import FORMAL_STEPS, FrozenExecutionState
@@ -33,24 +34,22 @@ from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs.accounts import (
     ensure_xhs_schema,
     record_event,
-    set_account_status,
 )
 from trippostcollect.xhs.config import load_pool_config, load_target
-from trippostcollect.xhs.sessions import (
-    load_snapshot_key,
-    materialized_storage_state,
-    refresh_encrypted_storage_state,
-)
 from trippostcollect.xhs.leases import (
     LeaseGuard,
     XhsLeaseSignal,
     crawl_lease_budget,
 )
+from trippostcollect.xhs.runtime import (
+    prepare_runtime_session,
+    remove_runtime_session,
+    runtime_session_paths,
+)
 from xhs_runner import (
     _challenge_reason,
     _eligible_account_for_plan,
     _login_reason,
-    _storage_refresh_block_reason,
     load_child_summary,
     tail,
     upsert_run,
@@ -62,6 +61,24 @@ from xhs_runner import (
 
 ROOT = PROJECT_ROOT
 _ACTIVE_LEASE_GUARD: LeaseGuard | None = None
+_ACTIVE_SESSION_ROOT: Path | None = None
+
+
+@contextmanager
+def guarded_runtime_session(
+    run_id: str,
+    guard: LeaseGuard,
+) -> Iterator[dict[str, Path]]:
+    global _ACTIVE_SESSION_ROOT
+    paths = prepare_runtime_session(run_id)
+    _ACTIVE_SESSION_ROOT = paths["root"]
+    try:
+        yield paths
+    finally:
+        process_check = guard.terminate_owned_processes()
+        if process_check["safe_to_release"]:
+            remove_runtime_session(paths["root"])
+            _ACTIVE_SESSION_ROOT = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,7 +86,11 @@ def parse_args() -> argparse.Namespace:
         description="Recover existing XHS web_posts rows without touching discovery state."
     )
     parser.add_argument("--target-key", default="qingdao_travel")
-    parser.add_argument("--account-id", required=True)
+    parser.add_argument(
+        "--account-id",
+        required=True,
+        help="Logical checkpoint/lease slot; it does not retain a login profile.",
+    )
     parser.add_argument("--db", default=str(DEFAULT_DB))
     parser.add_argument("--target-config", default=str(XHS_TARGET_CONFIG))
     parser.add_argument("--pool-config", default=str(XHS_POOL_CONFIG))
@@ -228,7 +249,7 @@ def build_child_command(
     target: dict[str, Any],
     pool: dict[str, Any],
     account: dict[str, Any],
-    storage_state: Path,
+    profile_dir: Path,
     db_path: Path,
     output_root: Path,
     urls_path: Path,
@@ -253,15 +274,13 @@ def build_child_command(
         "--behavior-profile",
         str(pool["behavior_profile"]),
         "--login-type",
-        "cookie",
+        "qrcode",
         "--db",
         str(db_path),
         "--xhs-account-id",
         str(account["account_id"]),
         "--xhs-profile-dir",
-        str(account["profile_dir"]),
-        "--xhs-storage-state",
-        str(storage_state),
+        str(profile_dir),
         "--xhs-detail-urls-file",
         str(urls_path),
         "--xhs-repair-target-ids-file",
@@ -350,7 +369,7 @@ def candidate_only_child_failure(child_summary: dict[str, Any]) -> bool:
 
 
 def _run_main() -> int:
-    global _ACTIVE_LEASE_GUARD
+    global _ACTIVE_LEASE_GUARD, _ACTIVE_SESSION_ROOT
     args = parse_args()
     if args.max_items < 0 or args.batch_size <= 0:
         raise SystemExit("--max-items cannot be negative; --batch-size must be positive")
@@ -370,6 +389,7 @@ def _run_main() -> int:
     run_dir = ensure_dir(XHS_REPAIR_OUTPUT / run_id)
     runtime_dir = ensure_dir(XHS_REPAIR_RUNTIME_ROOT / run_id)
     state_path = runtime_dir / "execution_state.json"
+    session_paths = runtime_session_paths(run_id)
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -403,6 +423,9 @@ def _run_main() -> int:
         "configured_lease_ceiling_seconds": pool["lease_seconds"],
         "lease_budget": lease_budget.public(),
         "behavior_profile": pool["behavior_profile"],
+        "login_mode": "per_run_qrcode",
+        "session_retention": "none",
+        "runtime_profile_dir": str(session_paths["profile"]),
         "headed": pool["headed"],
         "discovery_writes": False,
         "local_image_storage_required": True,
@@ -474,11 +497,6 @@ def _run_main() -> int:
     exit_code = 1
     outcome = "failed"
     state_error = ""
-    storage_state_refreshed = False
-    storage_state_refresh: dict[str, Any] = {
-        "status": "skipped",
-        "reason": "child_not_started",
-    }
     candidate_only_failure = False
     guard = LeaseGuard(
         db_path=db_path,
@@ -486,6 +504,7 @@ def _run_main() -> int:
         run_id=run_id,
         lease_kind="repair",
         execution_state_path=state_path,
+        runtime_profile_dir=session_paths["profile"],
         budget=lease_budget,
     )
     _ACTIVE_LEASE_GUARD = guard
@@ -502,21 +521,12 @@ def _run_main() -> int:
                 status="running",
                 state_path=state_path,
             )
-        encrypted_state = Path(str(account["encrypted_state_path"])).expanduser().resolve()
-        if not encrypted_state.is_file():
-            raise RuntimeError("missing_encrypted_xhs_storage_state")
-        key = load_snapshot_key(create=False)
-        with materialized_storage_state(
-            encrypted_state,
-            ensure_dir(runtime_dir / "session"),
-            account_id=account["account_id"],
-            key=key,
-        ) as storage_state:
+        with guarded_runtime_session(run_id, guard) as runtime_session:
             command = build_child_command(
                 target=target,
                 pool=pool,
                 account=account,
-                storage_state=storage_state,
+                profile_dir=runtime_session["profile"],
                 db_path=db_path,
                 output_root=run_dir / "child",
                 urls_path=urls_path,
@@ -541,30 +551,6 @@ def _run_main() -> int:
             stdout_json = extract_stdout_json(stdout)
             child_summary_path = str(stdout_json.get("summary") or "")
             child_summary = load_child_summary(child_summary_path)
-            refresh_block_reason = _storage_refresh_block_reason(
-                exit_code=exit_code,
-                stdout=stdout,
-                stderr=stderr,
-                child_summary=child_summary,
-            )
-            if refresh_block_reason:
-                storage_state_refresh = {
-                    "status": "skipped",
-                    "reason": refresh_block_reason,
-                }
-            else:
-                storage_state_refreshed = refresh_encrypted_storage_state(
-                    storage_state,
-                    encrypted_state,
-                    account_id=str(account["account_id"]),
-                    identity_hash=str(account["identity_hash"]),
-                    expected_run_id=run_id,
-                    key=key,
-                )
-                storage_state_refresh = {
-                    "status": "promoted" if storage_state_refreshed else "verified_unchanged",
-                    "reason": "current_run_session_verified",
-                }
             candidate_only_failure = bool(
                 candidate_only_child_failure(child_summary)
                 and not _challenge_reason(stdout, stderr, child_summary)
@@ -699,11 +685,12 @@ def _run_main() -> int:
                     details={"reason": challenge},
                 )
             elif login_reason:
-                set_account_status(
+                record_event(
                     conn,
-                    account["account_id"],
-                    "login_required",
-                    reason=f"xhs_repair_login:{login_reason}",
+                    account_id=account["account_id"],
+                    run_id=run_id,
+                    event_type="xhs_post_repair_run_scoped_login_failed",
+                    details={"reason": login_reason},
                 )
             record_event(
                 conn,
@@ -748,8 +735,9 @@ def _run_main() -> int:
         "error": state_error,
         "challenge": _challenge_reason(stdout, stderr, child_summary),
         "login_reason": _login_reason(stdout, stderr, child_summary),
-        "storage_state_refreshed": storage_state_refreshed,
-        "storage_state_refresh": storage_state_refresh,
+        "login_mode": "per_run_qrcode",
+        "persistent_account_profile": False,
+        "runtime_session_removed": not session_paths["root"].exists(),
         "import_result": child_summary.get("import_result") or {},
         "repair_report": repair_report,
         "candidate_only_failure": candidate_only_failure,
@@ -779,34 +767,40 @@ def _run_main() -> int:
             report=summary,
             finished=True,
         )
-    lease_released = guard.close()
+    runtime_session_removed = _ACTIVE_SESSION_ROOT is None
+    lease_released = guard.close() if runtime_session_removed else False
     summary["lease_released"] = lease_released
+    summary["runtime_session_removed"] = runtime_session_removed
     if not lease_released:
         summary["status"] = "failed"
-        summary["error"] = "lease_release_deferred_live_processes"
+        summary["error"] = (
+            "lease_release_deferred_live_processes"
+            if runtime_session_removed
+            else "runtime_session_cleanup_failed"
+        )
     write_summary(run_dir, summary)
-    if not lease_released:
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            ensure_xhs_schema(conn)
-            upsert_run(
-                conn,
-                run_id=run_id,
-                target_key=f"xhs_repair:{args.target_key}",
-                account_id=account["account_id"],
-                status="failed",
-                state_path=state_path,
-                child_summary_path=child_summary_path or None,
-                report=summary,
-                finished=True,
-            )
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_xhs_schema(conn)
+        upsert_run(
+            conn,
+            run_id=run_id,
+            target_key=f"xhs_repair:{args.target_key}",
+            account_id=account["account_id"],
+            status=summary["status"],
+            state_path=state_path,
+            child_summary_path=child_summary_path or None,
+            report=summary,
+            finished=True,
+        )
     print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
     return 0 if summary["status"] == "completed" else 2
 
 
 def main() -> int:
-    global _ACTIVE_LEASE_GUARD
+    global _ACTIVE_LEASE_GUARD, _ACTIVE_SESSION_ROOT
     _ACTIVE_LEASE_GUARD = None
+    _ACTIVE_SESSION_ROOT = None
     code = 2
     try:
         try:
@@ -816,8 +810,11 @@ def main() -> int:
     finally:
         guard = _ACTIVE_LEASE_GUARD
         _ACTIVE_LEASE_GUARD = None
-        if guard is not None and not guard.close():
+        session_pending = _ACTIVE_SESSION_ROOT is not None
+        released = (guard is None) or (not session_pending and guard.close())
+        if not released:
             code = 2
+        _ACTIVE_SESSION_ROOT = None
     return code
 
 

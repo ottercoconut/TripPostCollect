@@ -35,11 +35,10 @@ def prepare_connection(db_path: Path) -> sqlite3.Connection:
     for account_id in ("xhs-a01", "xhs-a02"):
         conn.execute(
             """
-            INSERT INTO xhs_accounts(
-                account_id, status, profile_dir, encrypted_state_path
-            ) VALUES (?, 'active', ?, ?)
+            INSERT INTO xhs_accounts(account_id, status)
+            VALUES (?, 'active')
             """,
-            (account_id, f"/profiles/{account_id}", f"/states/{account_id}.enc"),
+            (account_id,),
         )
     conn.commit()
     return conn

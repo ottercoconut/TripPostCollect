@@ -58,6 +58,7 @@ XHS_EXACT_LEASE_COLUMNS = {
     "owner_process_start_token",
     "owner_pgid",
     "execution_state_path",
+    "runtime_profile_dir",
     "heartbeat_at",
     "lease_duration_seconds",
     "child_shutdown_budget_seconds",
@@ -70,8 +71,6 @@ XHS_OBSOLETE_LEASE_AUDIT_COLUMNS = (
     "acquired_at",
     "expires_at",
 )
-
-
 def qmarks(values: set[str] | list[str]) -> str:
     return ",".join("?" for _ in values)
 
@@ -127,7 +126,7 @@ def record_xhs_lease_schema_cutover(
     for snapshot in snapshots:
         details = {
             "reason": "unsupported_lease_schema",
-            "migration_version": 21,
+            "migration_version": 22,
             "legacy_acquired_at": snapshot.get("acquired_at"),
             "legacy_expires_at": snapshot.get("expires_at"),
         }
@@ -463,88 +462,59 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
 
 
 def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
-    legacy_account_columns = {
-        "health_score",
-        "consecutive_failures",
-        "daily_date",
-        "daily_runs",
-        "cooldown_until",
+    account_columns = (
+        table_columns(conn, "xhs_accounts")
+        if table_exists(conn, "xhs_accounts")
+        else set()
+    )
+    runtime_only_account_columns = {
+        "account_id",
+        "status",
+        "last_used_at",
+        "created_at",
+        "updated_at",
     }
-    requires_v10_migration = (
-        table_exists(conn, "xhs_accounts")
-        and bool(table_columns(conn, "xhs_accounts") & legacy_account_columns)
-    ) or table_exists(conn, "xhs_platform_state")
-    if requires_v10_migration:
+    obsolete_leases: list[dict[str, Any]] = []
+    if account_columns and account_columns != runtime_only_account_columns:
         obsolete_leases = obsolete_xhs_lease_snapshots(conn)
+        last_used = "last_used_at" if "last_used_at" in account_columns else "NULL"
+        created = "created_at" if "created_at" in account_columns else "datetime('now')"
+        updated = "updated_at" if "updated_at" in account_columns else "datetime('now')"
         conn.commit()
         conn.execute("PRAGMA foreign_keys = OFF")
         try:
-            conn.executescript(
-                """
-                CREATE TEMP TABLE xhs_accounts_v9_backup AS
+            conn.execute("DROP TABLE IF EXISTS xhs_lease_processes")
+            conn.execute("DROP TABLE IF EXISTS xhs_account_leases")
+            conn.execute("DROP INDEX IF EXISTS idx_xhs_accounts_eligible")
+            conn.execute(
+                f"""
+                CREATE TEMP TABLE xhs_accounts_runtime_backup AS
                 SELECT
                     account_id,
                     CASE
-                        WHEN status IN ('active', 'cooling', 'challenge') THEN 'active'
-                        WHEN status IN ('login_pending', 'login_required', 'quarantined', 'retired') THEN status
-                        ELSE 'login_pending'
+                        WHEN status='retired' THEN 'retired'
+                        WHEN status='quarantined' THEN 'quarantined'
+                        ELSE 'active'
                     END AS status,
-                    profile_dir,
-                    encrypted_state_path,
-                    identity_hash,
-                    last_verified_at,
-                    last_used_at,
-                    created_at,
-                    updated_at
-                FROM xhs_accounts;
-
-                CREATE TEMP TABLE xhs_account_events_v9_backup AS
-                SELECT id, account_id, run_id, event_type, details_json, created_at
-                FROM xhs_account_events;
-
-                CREATE TEMP TABLE xhs_runs_v9_backup AS
-                SELECT
-                    run_id, target_key, account_id, status, started_at, finished_at,
-                    execution_state_path, child_summary_path, report_json
-                FROM xhs_runs;
-
-                DROP TABLE xhs_account_leases;
-                DROP TABLE xhs_account_events;
-                DROP TABLE xhs_runs;
-                DROP TABLE xhs_platform_state;
-                DROP TABLE xhs_accounts;
+                    {last_used} AS last_used_at,
+                    {created} AS created_at,
+                    {updated} AS updated_at
+                FROM xhs_accounts
                 """
             )
+            conn.execute("DROP TABLE xhs_accounts")
             conn.executescript(XHS_CONTROL_SCHEMA.read_text(encoding="utf-8"))
-            conn.executescript(
+            conn.execute(
                 """
                 INSERT INTO xhs_accounts(
-                    account_id, status, profile_dir, encrypted_state_path, identity_hash,
-                    last_verified_at, last_used_at, created_at, updated_at
+                    account_id, status, last_used_at, created_at, updated_at
                 )
-                SELECT
-                    account_id, status, profile_dir, encrypted_state_path, identity_hash,
-                    last_verified_at, last_used_at, created_at, updated_at
-                FROM xhs_accounts_v9_backup;
-
-                INSERT INTO xhs_account_events(id, account_id, run_id, event_type, details_json, created_at)
-                SELECT id, account_id, run_id, event_type, details_json, created_at
-                FROM xhs_account_events_v9_backup;
-
-                INSERT INTO xhs_runs(
-                    run_id, target_key, account_id, status, started_at, finished_at,
-                    execution_state_path, child_summary_path, report_json
-                )
-                SELECT
-                    run_id, target_key, account_id, status, started_at, finished_at,
-                    execution_state_path, child_summary_path, report_json
-                FROM xhs_runs_v9_backup;
-
-                DROP TABLE xhs_accounts_v9_backup;
-                DROP TABLE xhs_account_events_v9_backup;
-                DROP TABLE xhs_runs_v9_backup;
+                SELECT account_id, status, last_used_at, created_at, updated_at
+                FROM xhs_accounts_runtime_backup
                 """
             )
+            conn.execute("DROP TABLE xhs_accounts_runtime_backup")
+            conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
             record_xhs_lease_schema_cutover(conn, obsolete_leases)
             conn.commit()
         finally:
@@ -566,6 +536,7 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
             conn.commit()
         finally:
             conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
     conn.executescript(XHS_CONTROL_SCHEMA.read_text(encoding="utf-8"))
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
@@ -578,6 +549,10 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
         (21, "xhs_exact_lease_identity"),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
+        (22, "xhs_run_scoped_login_state"),
     )
 
 

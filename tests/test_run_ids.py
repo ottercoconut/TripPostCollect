@@ -21,7 +21,6 @@ STAMP_FUNCTIONS = (
     ("login_warmup", "utc_stamp"),
     ("mediacrawler_crawl", "utc_stamp"),
     ("mediacrawler_login_warmup", "utc_stamp"),
-    ("xhs_login", "utc_stamp"),
     ("xhs_runner", "utc_stamp"),
     ("info_collection_benchmark", "run_id"),
 )

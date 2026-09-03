@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""Manage the independent Xiaohongshu account pool."""
+"""Manage non-secret Xiaohongshu runtime slots and orphan leases."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sqlite3
 
 from trippostcollect.core.paths import DEFAULT_DB
 from trippostcollect.xhs.accounts import (
-    account_paths,
     bootstrap_xhs_control_database,
-    enroll_account,
     ensure_xhs_schema,
     get_account,
     list_accounts,
     record_event,
+    register_account_slot,
     set_account_status,
     validate_account_id,
 )
@@ -28,25 +26,26 @@ from trippostcollect.xhs.leases import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Manage isolated Xiaohongshu crawl accounts.")
+    parser = argparse.ArgumentParser(description="Manage Xiaohongshu crawl coordination slots.")
     parser.add_argument("--db", default=str(DEFAULT_DB))
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    enroll = subparsers.add_parser("enroll", help="Create an isolated account slot before login.")
-    enroll.add_argument("--account-id", required=True)
+    ensure_slot = subparsers.add_parser(
+        "ensure-slot",
+        help="Create a non-secret checkpoint and lease namespace.",
+    )
+    ensure_slot.add_argument("--account-id", required=True)
 
-    subparsers.add_parser("list", help="List account health without secrets.")
+    subparsers.add_parser("list", help="List coordination slots and active leases.")
 
-    retire = subparsers.add_parser("retire", help="Retire an account and optionally purge its local secrets.")
+    retire = subparsers.add_parser("retire", help="Retire a coordination slot.")
     retire.add_argument("--account-id", required=True)
-    retire.add_argument("--purge-profile", action="store_true")
-    retire.add_argument("--yes", action="store_true", help="Required with --purge-profile.")
 
-    quarantine = subparsers.add_parser("quarantine", help="Manually quarantine an account.")
+    quarantine = subparsers.add_parser("quarantine", help="Manually quarantine a coordination slot.")
     quarantine.add_argument("--account-id", required=True)
     quarantine.add_argument("--reason", required=True)
 
-    activate = subparsers.add_parser("activate", help="Manually make a previously blocked account selectable.")
+    activate = subparsers.add_parser("activate", help="Make a previously blocked slot selectable.")
     activate.add_argument("--account-id", required=True)
     activate.add_argument("--reason", required=True)
 
@@ -60,23 +59,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def public_account(record: dict) -> dict:
-    return {
-        key: value
-        for key, value in record.items()
-        if key not in {"identity_hash"}
-    }
-
-
 def main() -> int:
     args = parse_args()
     db_path = bootstrap_xhs_control_database(args.db)
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         ensure_xhs_schema(conn)
-        if args.command == "enroll":
-            result = enroll_account(conn, args.account_id)
-            print(json.dumps(public_account(result), ensure_ascii=False, indent=2))
+        if args.command == "ensure-slot":
+            result = register_account_slot(conn, args.account_id)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         if args.command == "list":
             leases = [
@@ -89,7 +80,7 @@ def main() -> int:
                 json.dumps(
                     {
                         "leases": leases,
-                        "accounts": [public_account(item) for item in list_accounts(conn)],
+                        "slots": list_accounts(conn),
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -99,7 +90,7 @@ def main() -> int:
         account_id = validate_account_id(args.account_id)
         account = get_account(conn, account_id)
         if not account:
-            raise SystemExit(f"XHS account is not enrolled: {account_id}")
+            raise SystemExit(f"XHS coordination slot does not exist: {account_id}")
         if args.command == "recover-orphan-lease":
             try:
                 result = recover_orphaned_account_lease(
@@ -118,7 +109,7 @@ def main() -> int:
         ).fetchone()
         if lease:
             raise SystemExit(
-                "XHS account has a lease: "
+                "XHS coordination slot has a lease: "
                 f"lease_id={lease['lease_id']} run_id={lease['run_id']} "
                 f"expires_at={lease['expires_at']}"
             )
@@ -127,24 +118,14 @@ def main() -> int:
             print(json.dumps({"account_id": account_id, "status": "quarantined"}, ensure_ascii=False, indent=2))
             return 0
         if args.command == "activate":
-            if not account.get("identity_hash"):
-                raise SystemExit(f"XHS account has no verified identity: {account_id}; run xhs_login.py first")
             set_account_status(conn, account_id, "active", reason=args.reason)
             print(json.dumps({"account_id": account_id, "status": "active"}, ensure_ascii=False, indent=2))
             return 0
         if args.command == "retire":
-            if args.purge_profile and not args.yes:
-                raise SystemExit("--purge-profile requires --yes")
             set_account_status(conn, account_id, "retired", reason="manual_retirement")
-            purged = False
-            if args.purge_profile:
-                root = account_paths(account_id)["root"]
-                if root.is_dir():
-                    shutil.rmtree(root)
-                    purged = True
-                record_event(conn, account_id=account_id, event_type="account_secrets_purged")
-                conn.commit()
-            print(json.dumps({"account_id": account_id, "status": "retired", "purged": purged}, ensure_ascii=False, indent=2))
+            record_event(conn, account_id=account_id, event_type="account_slot_retired")
+            conn.commit()
+            print(json.dumps({"account_id": account_id, "status": "retired"}, ensure_ascii=False, indent=2))
             return 0
     return 1
 

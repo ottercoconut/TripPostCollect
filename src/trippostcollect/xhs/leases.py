@@ -26,7 +26,7 @@ from typing import Any, Mapping, Sequence
 from trippostcollect.core.paths import ensure_dir
 from trippostcollect.xhs.accounts import (
     XhsAccountUnavailable,
-    account_paths,
+    account_lock_path,
     ensure_xhs_schema,
     get_account,
     iso,
@@ -39,6 +39,7 @@ from trippostcollect.xhs.runtime import (
     RuntimeStatusValidationError,
     public_runtime_status,
     read_runtime_status_if_present,
+    remove_runtime_session_for_profile,
     runtime_status_path,
 )
 
@@ -102,10 +103,6 @@ def crawl_lease_budget(*, timeout_seconds: int, configured_lease_seconds: int) -
             "configured XHS lease ceiling does not cover runtime, child shutdown, and root finalization"
         )
     return budget
-
-
-def login_lease_budget(timeout_seconds: int) -> LeaseBudget:
-    return LeaseBudget(runtime_seconds=int(timeout_seconds) * 2)
 
 
 @dataclass(frozen=True)
@@ -602,11 +599,12 @@ def acquire_exact_account_lease(
     execution_state_path: Path,
     budget: LeaseBudget,
     owner: ProcessIdentity,
+    runtime_profile_dir: Path | None = None,
     now: datetime | None = None,
     lease_id: str | None = None,
     owner_token: str | None = None,
 ) -> dict[str, Any]:
-    if lease_kind not in {"crawl", "login", "repair"}:
+    if lease_kind not in {"crawl", "repair"}:
         raise ValueError(f"unsupported XHS lease kind: {lease_kind}")
     if not run_id.strip():
         raise ValueError("run_id must not be empty")
@@ -616,6 +614,9 @@ def acquire_exact_account_lease(
     exact_lease_id = lease_id or uuid.uuid4().hex
     exact_owner_token = owner_token or secrets.token_urlsafe(32)
     expires_at = iso(current + timedelta(seconds=budget.lease_seconds))
+    resolved_runtime_profile = (
+        runtime_profile_dir or execution_state_path.parent / "runtime-profile"
+    ).expanduser().resolve()
 
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -624,17 +625,9 @@ def acquire_exact_account_lease(
             (requested,),
         ).fetchone()
         if not account:
-            reason = (
-                "requested_xhs_account_not_enrolled"
-                if lease_kind == "login"
-                else "requested_xhs_account_not_active"
-            )
-            raise XhsAccountUnavailable(reason)
+            raise XhsAccountUnavailable("requested_xhs_account_not_active")
         account_data = dict(account)
-        if lease_kind == "login":
-            if account_data["status"] == "retired":
-                raise XhsAccountUnavailable("requested_xhs_account_retired")
-        elif account_data["status"] != "active":
+        if account_data["status"] != "active":
             raise XhsAccountUnavailable("requested_xhs_account_not_active")
         existing = conn.execute(
             "SELECT expires_at FROM xhs_account_leases WHERE account_id=?",
@@ -651,10 +644,10 @@ def acquire_exact_account_lease(
                 account_id, lease_id, owner_token, run_id, lease_kind,
                 owner_host_id, owner_boot_id, owner_pid, owner_process_started_at,
                 owner_process_start_token, owner_pgid, execution_state_path,
-                acquired_at, heartbeat_at, expires_at, lease_duration_seconds,
+                runtime_profile_dir, acquired_at, heartbeat_at, expires_at, lease_duration_seconds,
                 child_shutdown_budget_seconds, root_finalize_budget_seconds,
                 identity_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 requested,
@@ -669,6 +662,7 @@ def acquire_exact_account_lease(
                 owner.process_start_token,
                 owner.pgid,
                 str(execution_state_path.expanduser().resolve()),
+                str(resolved_runtime_profile),
                 current_iso,
                 current_iso,
                 expires_at,
@@ -678,23 +672,22 @@ def acquire_exact_account_lease(
                 LEASE_IDENTITY_VERSION,
             ),
         )
-        if lease_kind != "login":
-            conn.execute(
-                "UPDATE xhs_accounts SET last_used_at=?, updated_at=datetime('now') WHERE account_id=?",
-                (current_iso, requested),
-            )
-        event_type = "login_lease_acquired" if lease_kind == "login" else "lease_acquired"
+        conn.execute(
+            "UPDATE xhs_accounts SET last_used_at=?, updated_at=datetime('now') WHERE account_id=?",
+            (current_iso, requested),
+        )
         record_event(
             conn,
             account_id=requested,
             run_id=run_id,
-            event_type=event_type,
+            event_type="lease_acquired",
             details={
                 "lease_id": exact_lease_id,
                 "lease_kind": lease_kind,
                 "owner_token_sha256": _owner_token_digest(exact_owner_token),
                 "owner": owner.public(),
                 "execution_state_path": str(execution_state_path.expanduser().resolve()),
+                "runtime_profile_dir": str(resolved_runtime_profile),
                 "budget": budget.public(),
                 "expires_at": expires_at,
             },
@@ -705,6 +698,7 @@ def acquire_exact_account_lease(
             "lease_id": exact_lease_id,
             "owner_token": exact_owner_token,
             "lease_expires_at": expires_at,
+            "runtime_profile_dir": str(resolved_runtime_profile),
             "lease_budget": budget.public(),
             "owner": owner.public(),
         }
@@ -977,9 +971,9 @@ def assess_lease_runtime(
     profile_processes = inspector.profile_processes(profile_dir)
     for snapshot in profile_processes:
         evidence = {
-            "role": "account_profile_chrome",
+            "role": "runtime_profile_chrome",
             "live": True,
-            "reason": "exact_profile_argument_alive",
+            "reason": "exact_runtime_profile_argument_alive",
             "observed": snapshot.identity.public(),
         }
         checks.append(evidence)
@@ -1079,8 +1073,10 @@ def recover_orphaned_account_lease(
         raise ValueError("run_id and lease_id must not be empty")
     account = get_account(conn, value)
     if not account:
-        raise XhsOrphanLeaseRecoveryRefused("requested XHS account is not enrolled")
-    lock = AccountLeaseFileLock(account_paths(value)["lease_lock"])
+        raise XhsOrphanLeaseRecoveryRefused(
+            "requested XHS coordination slot does not exist"
+        )
+    lock = AccountLeaseFileLock(account_lock_path(value))
     try:
         lock.acquire()
     except XhsAccountUnavailable as exc:
@@ -1097,13 +1093,13 @@ def recover_orphaned_account_lease(
         first_process_check = assess_lease_runtime(
             conn,
             lease=lease,
-            profile_dir=Path(str(account["profile_dir"])),
+            profile_dir=Path(str(lease["runtime_profile_dir"])),
             inspector=process_inspector,
             include_owner=True,
         )
         if not first_process_check["safe_to_release"]:
             raise XhsOrphanLeaseRecoveryRefused(
-                "exact owner, child, exporter, or account-profile Chrome is still live"
+                "exact owner, child, exporter, or runtime-profile Chrome is still live"
             )
         terminal = execution_terminal_assessment(
             Path(str(lease["execution_state_path"])),
@@ -1126,7 +1122,7 @@ def recover_orphaned_account_lease(
             second_process_check = assess_lease_runtime(
                 conn,
                 lease=locked_lease,
-                profile_dir=Path(str(account["profile_dir"])),
+                profile_dir=Path(str(locked_lease["runtime_profile_dir"])),
                 inspector=process_inspector,
                 include_owner=True,
             )
@@ -1134,6 +1130,12 @@ def recover_orphaned_account_lease(
                 raise XhsOrphanLeaseRecoveryRefused(
                     "runtime process appeared during orphan reconciliation"
                 )
+            runtime_profile = Path(str(locked_lease["runtime_profile_dir"]))
+            runtime_session_removed = (
+                True
+                if not runtime_profile.exists()
+                else remove_runtime_session_for_profile(runtime_profile)
+            )
             deleted = conn.execute(
                 """
                 DELETE FROM xhs_account_leases
@@ -1163,6 +1165,7 @@ def recover_orphaned_account_lease(
                 "process_checks": [first_process_check, second_process_check],
                 "terminal_assessment": terminal,
                 "release_scope": "account_mutex_only",
+                "runtime_session_removed": runtime_session_removed,
                 "mutations": {
                     "execution_state": False,
                     "checkpoint": False,
@@ -1184,6 +1187,7 @@ def recover_orphaned_account_lease(
             return {
                 "account_id": value,
                 "run_id": run_id,
+                "runtime_profile_dir": locked_lease["runtime_profile_dir"],
                 "lease_acquired_at": locked_lease["acquired_at"],
                 **audit,
             }
@@ -1205,6 +1209,7 @@ class LeaseGuard:
         lease_kind: str,
         execution_state_path: Path,
         budget: LeaseBudget,
+        runtime_profile_dir: Path | None = None,
         inspector: SystemProcessInspector | None = None,
     ):
         self.db_path = db_path.expanduser().resolve()
@@ -1212,9 +1217,12 @@ class LeaseGuard:
         self.run_id = run_id
         self.lease_kind = lease_kind
         self.execution_state_path = execution_state_path.expanduser().resolve()
+        self.runtime_profile_dir = (
+            runtime_profile_dir or self.execution_state_path.parent / "runtime-profile"
+        ).expanduser().resolve()
         self.budget = budget
         self.inspector = inspector or SystemProcessInspector()
-        self.file_lock = AccountLeaseFileLock(account_paths(self.account_id)["lease_lock"])
+        self.file_lock = AccountLeaseFileLock(account_lock_path(self.account_id))
         self.account: dict[str, Any] | None = None
         self.lease_id = ""
         self.owner_token = ""
@@ -1241,6 +1249,7 @@ class LeaseGuard:
                     lease_kind=self.lease_kind,
                     requested_account_id=self.account_id,
                     execution_state_path=self.execution_state_path,
+                    runtime_profile_dir=self.runtime_profile_dir,
                     budget=self.budget,
                     owner=self.owner,
                 )
@@ -1336,7 +1345,7 @@ class LeaseGuard:
         if not self.account:
             raise RuntimeError("XHS LeaseGuard is not acquired")
         observed: list[ProcessIdentity] = []
-        for snapshot in self.inspector.profile_processes(Path(str(self.account["profile_dir"]))):
+        for snapshot in self.inspector.profile_processes(self.runtime_profile_dir):
             self.register_process(snapshot.identity.pid, "browser")
             observed.append(snapshot.identity)
         return observed
@@ -1574,7 +1583,7 @@ class LeaseGuard:
             return assess_lease_runtime(
                 conn,
                 lease=lease,
-                profile_dir=Path(str(self.account["profile_dir"])),
+                profile_dir=self.runtime_profile_dir,
                 inspector=self.inspector,
                 include_owner=False,
             )

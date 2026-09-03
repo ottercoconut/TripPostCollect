@@ -1,4 +1,4 @@
--- TripPostCollect Xiaohongshu account and lease schema.
+-- TripPostCollect Xiaohongshu runtime-slot and lease schema.
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -8,17 +8,11 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 CREATE TABLE IF NOT EXISTS xhs_accounts (
     account_id TEXT PRIMARY KEY,
-    status TEXT NOT NULL DEFAULT 'login_pending',
-    profile_dir TEXT NOT NULL UNIQUE,
-    encrypted_state_path TEXT NOT NULL UNIQUE,
-    identity_hash TEXT UNIQUE,
-    last_verified_at TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
     last_used_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    CHECK (status IN (
-        'login_pending', 'active', 'login_required', 'quarantined', 'retired'
-    ))
+    CHECK (status IN ('active', 'quarantined', 'retired'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_xhs_accounts_eligible
@@ -49,6 +43,7 @@ CREATE TABLE IF NOT EXISTS xhs_account_leases (
     owner_process_start_token TEXT NOT NULL,
     owner_pgid INTEGER NOT NULL,
     execution_state_path TEXT NOT NULL,
+    runtime_profile_dir TEXT NOT NULL,
     acquired_at TEXT NOT NULL,
     heartbeat_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
@@ -56,7 +51,7 @@ CREATE TABLE IF NOT EXISTS xhs_account_leases (
     child_shutdown_budget_seconds INTEGER NOT NULL,
     root_finalize_budget_seconds INTEGER NOT NULL,
     identity_version INTEGER NOT NULL DEFAULT 1,
-    CHECK (lease_kind IN ('crawl', 'login', 'repair')),
+    CHECK (lease_kind IN ('crawl', 'repair')),
     CHECK (owner_pid > 0),
     CHECK (owner_pgid > 0),
     CHECK (lease_duration_seconds > 0),

@@ -388,8 +388,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--required-fields-profile", default="image_post_with_followers_v1")
     parser.add_argument("--behavior-profile", default="social_high_risk")
     parser.add_argument("--xhs-account-id", help="Required isolated account id for the XHS low-level executor.")
-    parser.add_argument("--xhs-profile-dir", help="Required isolated persistent profile for XHS.")
-    parser.add_argument("--xhs-storage-state", help="Required per-run decrypted XHS storage state.")
+    parser.add_argument("--xhs-profile-dir", help="Required run-scoped browser profile for XHS.")
     parser.add_argument("--xhs-discovery-target-key", help=argparse.SUPPRESS)
     parser.add_argument("--xhs-discovery-query-fingerprint", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -770,45 +769,6 @@ def required_cookie_names(platform_key: str) -> tuple[str, ...]:
     if platform_key == "zhihu":
         return ("d_c0", "z_c0")
     return ()
-
-
-def xhs_storage_snapshot_info(path: Path) -> dict[str, Any]:
-    info: dict[str, Any] = {
-        "path": str(path),
-        "exists": path.is_file(),
-        "ok": False,
-        "cookie_names": [],
-        "origin_count": 0,
-        "runtime_storage_count": 0,
-        "saved_at": None,
-        "reason": "",
-    }
-    if not path.is_file():
-        info["reason"] = "missing_snapshot"
-        return info
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        info["reason"] = f"read_failed:{type(exc).__name__}"
-        info["error"] = str(exc)
-        return info
-    cookies = state.get("cookies") if isinstance(state, dict) else []
-    origins = state.get("origins") if isinstance(state, dict) else []
-    marker = state.get("trippostcollect") if isinstance(state, dict) else {}
-    cookie_names = sorted({item.get("name", "") for item in cookies if isinstance(item, dict) and item.get("name")})
-    origin_count = len(origins) if isinstance(origins, list) else 0
-    runtime_storage = marker.get("runtime_storage") if isinstance(marker, dict) else []
-    info.update(
-        {
-            "ok": bool(cookie_names or origin_count),
-            "cookie_names": cookie_names,
-            "origin_count": origin_count,
-            "runtime_storage_count": len(runtime_storage) if isinstance(runtime_storage, list) else 0,
-            "saved_at": marker.get("saved_at") or marker.get("captured_at") if isinstance(marker, dict) else None,
-            "reason": "ready" if cookie_names or origin_count else "empty_snapshot",
-        }
-    )
-    return info
 
 
 def cookie_names_from_header(cookie_header: str) -> list[str]:
@@ -5340,37 +5300,15 @@ def _run_platform_without_policy(
         extra_env["TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH"] = args.resume_identities_path
     login_state: dict[str, Any] | None = None
     if platform_key == "xhs":
-        xhs_storage_path = Path(str(args.xhs_storage_state)).expanduser().resolve()
-        xhs_storage_info = xhs_storage_snapshot_info(xhs_storage_path)
-        login_state = {"ok": bool(xhs_storage_info.get("ok")), "storage_snapshot": xhs_storage_info}
-        if args.login_type == "cookie" and not xhs_storage_info.get("ok"):
-            reason = "missing_xhs_storage_state: run scripts/xhs_login.py for the selected account"
-            run = skipped_command(cmd, log_dir, reason)
-            output = summarize_output(save_path, args.keyword)
-            return {
-                "platform": platform_key,
-                "label": platform["label"],
-                "status": "failed",
-                "ok": False,
-                "media_enabled": image_download_enabled,
-                "video_enabled": False,
-                "login_state": {
-                    "ok": False,
-                    "reason": "missing_storage_snapshot",
-                    "storage_snapshot": xhs_storage_info,
-                },
-                "run": run,
-                "output": output,
-            }
         cmd.extend(["--enable_cdp_mode", "true"])
         extra_env.update(
             {
                 "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": "1",
                 "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",
                 "TRIPPOSTCOLLECT_SHARE_CDP_PROFILE": "1",
-                "TRIPPOSTCOLLECT_XHS_STORAGE_STATE_PATH": str(xhs_storage_path),
                 "TRIPPOSTCOLLECT_XHS_PROFILE_DIR": str(Path(args.xhs_profile_dir).expanduser().resolve()),
                 "TRIPPOSTCOLLECT_XHS_ACCOUNT_ID": str(args.xhs_account_id),
+                "TRIPPOSTCOLLECT_XHS_RUN_SCOPED_LOGIN": "1",
                 XHS_WINDOW_SIZE_ENV: xhs_window_size_value(),
                 "TRIPPOSTCOLLECT_XHS_DISCOVERY_TARGET_KEY": str(
                     args.xhs_discovery_target_key
@@ -5391,8 +5329,7 @@ def _run_platform_without_policy(
                 "TRIPPOSTCOLLECT_XHS_NAVIGATION_DEADLINE_SECONDS": "60",
                 "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS": "600",
                 "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_POLL_SECONDS": "2",
-                "TRIPPOSTCOLLECT_XHS_QR_REFRESH_SECONDS": "90",
-                "TRIPPOSTCOLLECT_XHS_QR_ATTEMPTS": "5",
+                "TRIPPOSTCOLLECT_XHS_QR_REFRESH_SECONDS": "180",
             }
         )
     elif platform_key == "zhihu":
@@ -6180,8 +6117,10 @@ def _run_main(
     if "xhs" in platforms:
         if len(platforms) != 1:
             raise SystemExit("XHS must run alone through scripts/xhs_runner.py")
-        if not args.xhs_account_id or not args.xhs_profile_dir or not args.xhs_storage_state:
-            raise SystemExit("XHS requires --xhs-account-id, --xhs-profile-dir and --xhs-storage-state")
+        if not args.xhs_account_id or not args.xhs_profile_dir:
+            raise SystemExit("XHS requires --xhs-account-id and --xhs-profile-dir")
+        if args.login_type != "qrcode":
+            raise SystemExit("XHS requires --login-type qrcode for per-run login")
         if not args.xhs_repair and (
             not args.xhs_discovery_target_key or not args.xhs_discovery_query_fingerprint
         ):
@@ -6192,8 +6131,6 @@ def _run_main(
             raise SystemExit("XHS continuation requires --start-cursor together with --start-page")
         if not Path(args.xhs_profile_dir).expanduser().is_dir():
             raise SystemExit("XHS isolated profile directory does not exist")
-        if not Path(args.xhs_storage_state).expanduser().is_file():
-            raise SystemExit("XHS decrypted storage state does not exist")
     elif args.xhs_post_interaction != "none":
         raise SystemExit("--xhs-post-interaction is only supported for XHS")
     elif args.behavior_profile != "social_high_risk":
