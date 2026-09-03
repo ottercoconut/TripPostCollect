@@ -624,6 +624,17 @@ def lease_cleanup_evidence(
     }
 
 
+def lease_cleanup_failure_reason(cleanup_evidence: dict[str, Any]) -> str:
+    """Map the exact deferred-cleanup event to its stable run failure reason."""
+
+    event_type = cleanup_evidence.get("event_type")
+    if event_type == "lease_release_deferred_live_processes":
+        return "lease_release_deferred_live_processes"
+    if event_type == "lease_release_deferred_finalize_timeout":
+        return "lease_release_deferred_finalize_timeout"
+    return "runtime_session_cleanup_failed"
+
+
 def load_child_summary(path_value: str) -> dict[str, Any]:
     path = Path(path_value).expanduser() if path_value else None
     if path is None or not path.is_file():
