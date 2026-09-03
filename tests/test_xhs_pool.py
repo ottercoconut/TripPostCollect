@@ -82,7 +82,7 @@ def test_xhs_runtime_session_has_only_profile_and_is_removable(
     assert not paths["root"].exists()
 
 
-def test_xhs_guarded_runtime_session_removes_login_material(
+def test_xhs_guarded_runtime_session_delegates_creation_to_lease_guard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -92,8 +92,10 @@ def test_xhs_guarded_runtime_session_removes_login_material(
     )
 
     class FakeGuard:
-        def terminate_owned_processes(self) -> dict:
-            return {"safe_to_release": True, "checks": [], "blocking": []}
+        run_id = "run-2"
+
+        def prepare_runtime_session(self) -> dict[str, Path]:
+            return prepare_runtime_session(self.run_id)
 
     with xhs_runner.guarded_runtime_session("run-2", FakeGuard()) as paths:
         (paths["profile"] / "Cookies").write_text("secret", encoding="utf-8")
@@ -101,8 +103,8 @@ def test_xhs_guarded_runtime_session_removes_login_material(
         assert root.exists()
         assert not (root / "storage_state.json").exists()
 
-    assert not root.exists()
-    assert xhs_runner._ACTIVE_SESSION_ROOT is None
+    assert root.exists()
+    assert remove_runtime_session(root) is True
 
 
 @pytest.mark.parametrize("interrupt_kind", ["lease_signal", "keyboard_interrupt"])

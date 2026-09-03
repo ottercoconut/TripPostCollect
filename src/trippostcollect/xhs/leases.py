@@ -37,6 +37,8 @@ from trippostcollect.xhs.accounts import (
 from trippostcollect.xhs.runtime import (
     RUNTIME_STATUS_AUTH_KEY_ENV,
     RuntimeStatusValidationError,
+    canonical_runtime_profile_dir,
+    prepare_runtime_session as create_runtime_session,
     public_runtime_status,
     read_runtime_status_if_present,
     remove_runtime_session_for_profile,
@@ -597,9 +599,9 @@ def acquire_exact_account_lease(
     lease_kind: str,
     requested_account_id: str,
     execution_state_path: Path,
+    runtime_profile_dir: Path,
     budget: LeaseBudget,
     owner: ProcessIdentity,
-    runtime_profile_dir: Path | None = None,
     now: datetime | None = None,
     lease_id: str | None = None,
     owner_token: str | None = None,
@@ -614,9 +616,10 @@ def acquire_exact_account_lease(
     exact_lease_id = lease_id or uuid.uuid4().hex
     exact_owner_token = owner_token or secrets.token_urlsafe(32)
     expires_at = iso(current + timedelta(seconds=budget.lease_seconds))
-    resolved_runtime_profile = (
-        runtime_profile_dir or execution_state_path.parent / "runtime-profile"
-    ).expanduser().resolve()
+    resolved_runtime_profile = canonical_runtime_profile_dir(
+        run_id,
+        runtime_profile_dir,
+    )
 
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -1090,10 +1093,19 @@ def recover_orphaned_account_lease(
             run_id=run_id,
             lease_id=lease_id,
         )
+        try:
+            runtime_profile = canonical_runtime_profile_dir(
+                run_id,
+                str(lease["runtime_profile_dir"]),
+            )
+        except ValueError as exc:
+            raise XhsOrphanLeaseRecoveryRefused(
+                "lease runtime profile is not the exact run-scoped path"
+            ) from exc
         first_process_check = assess_lease_runtime(
             conn,
             lease=lease,
-            profile_dir=Path(str(lease["runtime_profile_dir"])),
+            profile_dir=runtime_profile,
             inspector=process_inspector,
             include_owner=True,
         )
@@ -1119,10 +1131,19 @@ def recover_orphaned_account_lease(
                 raise XhsOrphanLeaseRecoveryRefused(
                     "lease owner changed during orphan reconciliation"
                 )
+            try:
+                locked_runtime_profile = canonical_runtime_profile_dir(
+                    run_id,
+                    str(locked_lease["runtime_profile_dir"]),
+                )
+            except ValueError as exc:
+                raise XhsOrphanLeaseRecoveryRefused(
+                    "lease runtime profile changed to a noncanonical path"
+                ) from exc
             second_process_check = assess_lease_runtime(
                 conn,
                 lease=locked_lease,
-                profile_dir=Path(str(locked_lease["runtime_profile_dir"])),
+                profile_dir=locked_runtime_profile,
                 inspector=process_inspector,
                 include_owner=True,
             )
@@ -1130,12 +1151,14 @@ def recover_orphaned_account_lease(
                 raise XhsOrphanLeaseRecoveryRefused(
                     "runtime process appeared during orphan reconciliation"
                 )
-            runtime_profile = Path(str(locked_lease["runtime_profile_dir"]))
-            runtime_session_removed = (
-                True
-                if not runtime_profile.exists()
-                else remove_runtime_session_for_profile(runtime_profile)
+            runtime_session_removed = remove_runtime_session_for_profile(
+                locked_runtime_profile,
+                expected_run_id=run_id,
             )
+            if not runtime_session_removed:
+                raise XhsOrphanLeaseRecoveryRefused(
+                    "runtime session still exists after cleanup"
+                )
             deleted = conn.execute(
                 """
                 DELETE FROM xhs_account_leases
@@ -1208,8 +1231,8 @@ class LeaseGuard:
         run_id: str,
         lease_kind: str,
         execution_state_path: Path,
+        runtime_profile_dir: Path,
         budget: LeaseBudget,
-        runtime_profile_dir: Path | None = None,
         inspector: SystemProcessInspector | None = None,
     ):
         self.db_path = db_path.expanduser().resolve()
@@ -1217,9 +1240,10 @@ class LeaseGuard:
         self.run_id = run_id
         self.lease_kind = lease_kind
         self.execution_state_path = execution_state_path.expanduser().resolve()
-        self.runtime_profile_dir = (
-            runtime_profile_dir or self.execution_state_path.parent / "runtime-profile"
-        ).expanduser().resolve()
+        self.runtime_profile_dir = canonical_runtime_profile_dir(
+            run_id,
+            runtime_profile_dir,
+        )
         self.budget = budget
         self.inspector = inspector or SystemProcessInspector()
         self.file_lock = AccountLeaseFileLock(account_lock_path(self.account_id))
@@ -1233,6 +1257,8 @@ class LeaseGuard:
         self._closed = False
         self._closing = False
         self._released = False
+        self.runtime_session_removed = False
+        self._runtime_session_prepared = False
 
     def acquire(self) -> dict[str, Any]:
         if self.account is not None:
@@ -1290,6 +1316,26 @@ class LeaseGuard:
         result[LEASE_ID_ENV] = self.lease_id
         result[LEASE_OWNER_TOKEN_ENV] = self.owner_token
         return result
+
+    def prepare_runtime_session(self) -> dict[str, Path]:
+        """Create and claim the fresh session that this exact lease may remove."""
+
+        if not self.account:
+            raise RuntimeError("XHS LeaseGuard is not acquired")
+        if self._runtime_session_prepared:
+            raise RuntimeError("XHS runtime session is already prepared")
+        session_root = self.runtime_profile_dir.parent
+        existed_before = session_root.exists()
+        try:
+            paths = create_runtime_session(self.run_id)
+        except BaseException:
+            if not existed_before and session_root.exists():
+                self._runtime_session_prepared = True
+            raise
+        self._runtime_session_prepared = True
+        if paths["profile"] != self.runtime_profile_dir:
+            raise RuntimeError("prepared XHS runtime profile changed unexpectedly")
+        return paths
 
     def _install_signal_handlers(self) -> None:
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -1665,6 +1711,46 @@ class LeaseGuard:
                             "lease_id": self.lease_id,
                             "signal": self.signal_received,
                             "process_check": process_check,
+                            "runtime_profile_dir": str(self.runtime_profile_dir),
+                            "runtime_session_removed": False,
+                        },
+                    )
+                    conn.commit()
+                self._closed = True
+                return False
+            cleanup_error = ""
+            if not self._runtime_session_prepared:
+                self.runtime_session_removed = True
+            else:
+                try:
+                    self.runtime_session_removed = (
+                        remove_runtime_session_for_profile(
+                            self.runtime_profile_dir,
+                            expected_run_id=self.run_id,
+                        )
+                    )
+                except (OSError, ValueError) as exc:
+                    cleanup_error = f"{type(exc).__name__}: {exc}"
+                    self.runtime_session_removed = False
+            if not self.runtime_session_removed:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    ensure_xhs_schema(conn)
+                    record_event(
+                        conn,
+                        account_id=self.account_id,
+                        run_id=self.run_id,
+                        event_type=(
+                            "lease_release_deferred_runtime_session_cleanup"
+                        ),
+                        details={
+                            "lease_id": self.lease_id,
+                            "signal": self.signal_received,
+                            "process_check": process_check,
+                            "runtime_profile_dir": str(self.runtime_profile_dir),
+                            "runtime_session_removed": False,
+                            "cleanup_error": cleanup_error
+                            or "runtime_session_still_exists",
                         },
                     )
                     conn.commit()
@@ -1683,6 +1769,8 @@ class LeaseGuard:
                     details={
                         "signal": self.signal_received,
                         "process_check": process_check,
+                        "runtime_profile_dir": str(self.runtime_profile_dir),
+                        "runtime_session_removed": True,
                     },
                 )
             self._closed = True

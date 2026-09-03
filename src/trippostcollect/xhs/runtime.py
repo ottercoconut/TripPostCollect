@@ -248,6 +248,29 @@ def runtime_session_paths(run_id: str) -> dict[str, Path]:
     }
 
 
+def canonical_runtime_profile_dir(run_id: str, profile_dir: str | Path) -> Path:
+    """Validate the one fixed, non-symlinked profile path for ``run_id``."""
+
+    candidate_input = Path(profile_dir).expanduser()
+    if not candidate_input.is_absolute():
+        raise ValueError("XHS runtime profile path must be absolute")
+    candidate = Path(os.path.abspath(candidate_input))
+    expected = Path(os.path.abspath(runtime_session_paths(run_id)["profile"]))
+    if candidate != expected:
+        raise ValueError(
+            f"XHS runtime profile must match its exact run session: {expected}"
+        )
+    session_root = expected.parent
+    configured_root = session_root.parent
+    if (
+        configured_root.is_symlink()
+        or session_root.is_symlink()
+        or expected.is_symlink()
+    ):
+        raise ValueError("XHS runtime profile path must not contain a session symlink")
+    return expected
+
+
 def runtime_status_path(run_id: str) -> Path:
     """Return the sole allowed watchdog status path for one runtime session."""
 
@@ -673,8 +696,10 @@ def remove_runtime_session(session_root: Path) -> bool:
     return not root.exists()
 
 
-def remove_runtime_session_for_profile(profile_dir: Path) -> bool:
-    profile = Path(profile_dir).expanduser().resolve()
-    if profile.name != "profile":
-        raise ValueError(f"invalid XHS runtime profile path: {profile}")
+def remove_runtime_session_for_profile(
+    profile_dir: Path,
+    *,
+    expected_run_id: str,
+) -> bool:
+    profile = canonical_runtime_profile_dir(expected_run_id, profile_dir)
     return remove_runtime_session(profile.parent)

@@ -42,14 +42,13 @@ from trippostcollect.xhs.leases import (
     crawl_lease_budget,
 )
 from trippostcollect.xhs.runtime import (
-    prepare_runtime_session,
-    remove_runtime_session,
     runtime_session_paths,
 )
 from xhs_runner import (
     _challenge_reason,
     _eligible_account_for_plan,
     _login_reason,
+    lease_cleanup_evidence,
     load_child_summary,
     tail,
     upsert_run,
@@ -61,7 +60,6 @@ from xhs_runner import (
 
 ROOT = PROJECT_ROOT
 _ACTIVE_LEASE_GUARD: LeaseGuard | None = None
-_ACTIVE_SESSION_ROOT: Path | None = None
 
 
 @contextmanager
@@ -69,16 +67,9 @@ def guarded_runtime_session(
     run_id: str,
     guard: LeaseGuard,
 ) -> Iterator[dict[str, Path]]:
-    global _ACTIVE_SESSION_ROOT
-    paths = prepare_runtime_session(run_id)
-    _ACTIVE_SESSION_ROOT = paths["root"]
-    try:
-        yield paths
-    finally:
-        process_check = guard.terminate_owned_processes()
-        if process_check["safe_to_release"]:
-            remove_runtime_session(paths["root"])
-            _ACTIVE_SESSION_ROOT = None
+    if run_id != guard.run_id:
+        raise ValueError("runtime session run_id does not match its lease")
+    yield guard.prepare_runtime_session()
 
 
 def parse_args() -> argparse.Namespace:
@@ -369,7 +360,7 @@ def candidate_only_child_failure(child_summary: dict[str, Any]) -> bool:
 
 
 def _run_main() -> int:
-    global _ACTIVE_LEASE_GUARD, _ACTIVE_SESSION_ROOT
+    global _ACTIVE_LEASE_GUARD
     args = parse_args()
     if args.max_items < 0 or args.batch_size <= 0:
         raise SystemExit("--max-items cannot be negative; --batch-size must be positive")
@@ -767,17 +758,25 @@ def _run_main() -> int:
             report=summary,
             finished=True,
         )
-    runtime_session_removed = _ACTIVE_SESSION_ROOT is None
-    lease_released = guard.close() if runtime_session_removed else False
+    lease_released = guard.close()
+    runtime_session_removed = guard.runtime_session_removed
+    cleanup_evidence = lease_cleanup_evidence(
+        db_path,
+        account_id=str(account["account_id"]),
+        run_id=run_id,
+        lease_id=guard.lease_id,
+    )
     summary["lease_released"] = lease_released
     summary["runtime_session_removed"] = runtime_session_removed
     if not lease_released:
         summary["status"] = "failed"
         summary["error"] = (
             "lease_release_deferred_live_processes"
-            if runtime_session_removed
+            if cleanup_evidence.get("event_type")
+            == "lease_release_deferred_live_processes"
             else "runtime_session_cleanup_failed"
         )
+    summary["lease_cleanup"] = cleanup_evidence
     write_summary(run_dir, summary)
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -798,9 +797,8 @@ def _run_main() -> int:
 
 
 def main() -> int:
-    global _ACTIVE_LEASE_GUARD, _ACTIVE_SESSION_ROOT
+    global _ACTIVE_LEASE_GUARD
     _ACTIVE_LEASE_GUARD = None
-    _ACTIVE_SESSION_ROOT = None
     code = 2
     try:
         try:
@@ -810,11 +808,9 @@ def main() -> int:
     finally:
         guard = _ACTIVE_LEASE_GUARD
         _ACTIVE_LEASE_GUARD = None
-        session_pending = _ACTIVE_SESSION_ROOT is not None
-        released = (guard is None) or (not session_pending and guard.close())
+        released = guard is None or guard.close()
         if not released:
             code = 2
-        _ACTIVE_SESSION_ROOT = None
     return code
 
 
