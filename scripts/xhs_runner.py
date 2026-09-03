@@ -218,18 +218,35 @@ def _latest_terminal_xhs_run(
     if not isinstance(report, dict):
         report = {}
     release_verified = False
+    release_cleanup: dict[str, Any] = {}
     if release_row is not None:
         try:
             release_details = json.loads(str(release_row["details_json"] or "{}"))
         except json.JSONDecodeError:
             release_details = {}
+        if not isinstance(release_details, dict):
+            release_details = {}
         process_check = release_details.get("process_check") or {}
+        if not isinstance(process_check, dict):
+            process_check = {}
+        release_cleanup = {
+            field: release_details.get(field)
+            for field in (
+                "runtime_session_owned",
+                "runtime_session_cleanup_required",
+                "runtime_session_actually_absent",
+                "runtime_session_cleanup_complete",
+                "runtime_session_removed",
+            )
+        }
         release_verified = bool(
             report.get("lease_id")
             and release_details.get("lease_id") == report.get("lease_id")
             and release_details.get("owner_token_sha256")
             and process_check.get("safe_to_release") is True
             and not process_check.get("blocking")
+            and release_cleanup.get("runtime_session_actually_absent") is True
+            and release_cleanup.get("runtime_session_cleanup_complete") is True
         )
     return {
         **report,
@@ -237,6 +254,7 @@ def _latest_terminal_xhs_run(
         "status": str(row["status"]),
         "started_at": report.get("started_at") or row["started_at"],
         "finished_at": report.get("finished_at") or row["finished_at"],
+        **release_cleanup,
         "lease_released": release_verified,
     }
 
@@ -248,8 +266,11 @@ def _security_limit_retry_evidence(report: dict[str, Any]) -> tuple[bool, str]:
         return False, "latest_terminal_run_not_300011"
     if report.get("lease_released") is not True:
         return False, "triggering_run_lease_not_released"
-    if report.get("runtime_session_removed") is not True:
-        return False, "triggering_run_runtime_session_not_removed"
+    if (
+        report.get("runtime_session_cleanup_complete") is not True
+        or report.get("runtime_session_actually_absent") is not True
+    ):
+        return False, "triggering_run_runtime_session_cleanup_incomplete"
     discovery = report.get("discovery") or {}
     if discovery.get("last_stop_reason") != "runtime_failed":
         return False, "triggering_run_discovery_not_runtime_failed"
@@ -336,8 +357,11 @@ def _terminal_release_ready(
         return False, "account_lease_still_present"
     if report.get("lease_released") is not True:
         return False, "terminal_run_exact_release_missing"
-    if report.get("runtime_session_removed") is not True:
-        return False, "terminal_run_runtime_session_not_removed"
+    if (
+        report.get("runtime_session_cleanup_complete") is not True
+        or report.get("runtime_session_actually_absent") is not True
+    ):
+        return False, "terminal_run_runtime_session_cleanup_incomplete"
     return True, "terminal_exact_release_verified"
 
 
@@ -576,16 +600,21 @@ def lease_cleanup_evidence(
     if not isinstance(details, dict):
         details = {}
     event_type = str(row["event_type"])
+    process_check = details.get("process_check") or {}
+    if not isinstance(process_check, dict):
+        process_check = {}
+    cleanup_ok = bool(
+        event_type == "lease_released"
+        and details.get("lease_id") == lease_id
+        and process_check.get("safe_to_release") is True
+        and not process_check.get("blocking")
+        and details.get("runtime_session_actually_absent") is True
+        and details.get("runtime_session_cleanup_complete") is True
+    )
     return {
-        "ok": bool(
-            event_type == "lease_released"
-            and details.get("lease_id") == lease_id
-            and (details.get("process_check") or {}).get("safe_to_release") is True
-            and not (details.get("process_check") or {}).get("blocking")
-            and details.get("runtime_session_removed") is True
-        ),
-        "event_type": event_type,
         **details,
+        "ok": cleanup_ok,
+        "event_type": event_type,
     }
 
 
@@ -1100,7 +1129,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
         "login_reason": login_reason,
         "login_mode": "per_run_qrcode",
         "persistent_account_profile": False,
-        "runtime_session_removed": not session_paths["root"].exists(),
+        **guard.runtime_session_cleanup_evidence(),
         "runtime_watchdog": runtime_watchdog_evidence(completed),
         "failure_type": "runtime_failed" if interrupt else "",
         "stop_reason": "runtime_failed" if interrupt else "",
@@ -1141,7 +1170,6 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             finished=True,
         )
     lease_released = guard.close()
-    runtime_session_removed = guard.runtime_session_removed
     cleanup_evidence = lease_cleanup_evidence(
         db_path,
         account_id=str(account["account_id"]),
@@ -1149,7 +1177,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
         lease_id=guard.lease_id,
     )
     summary["lease_released"] = lease_released
-    summary["runtime_session_removed"] = runtime_session_removed
+    summary.update(guard.runtime_session_cleanup_evidence())
     if not lease_released:
         summary["status"] = "failed"
         cleanup_error = (
@@ -1180,7 +1208,8 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
     print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
     if (
         summary.get("lease_released") is not True
-        or summary.get("runtime_session_removed") is not True
+        or summary.get("runtime_session_cleanup_complete") is not True
+        or summary.get("runtime_session_actually_absent") is not True
     ):
         return 2
     if interrupt:
@@ -1375,7 +1404,7 @@ def _run_security_limit_retry_controller(args: argparse.Namespace) -> int:
                     _sleep_until(due_at)
                     continue
 
-            if attempt_count and not evidence_ok:
+            if latest is not None and not evidence_ok:
                 return stop_for_other_outcome(
                     report=latest,
                     reason=evidence_reason,

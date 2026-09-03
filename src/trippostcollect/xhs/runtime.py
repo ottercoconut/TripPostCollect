@@ -72,6 +72,21 @@ SENSITIVE_REASON_RE = re.compile(
     r"authorization|cookie|owner[_ -]?token|storage[_ -]?state|web[_ -]?session",
     re.I,
 )
+RUNTIME_SESSION_CLAIM_SCHEMA_VERSION = 1
+RUNTIME_SESSION_CLAIM_FILENAME = ".session_claim.json"
+RUNTIME_SESSION_CLAIM_MAX_BYTES = 4 * 1024
+RUNTIME_SESSION_CLAIM_SIGNED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "run_id",
+        "account_id",
+        "lease_id",
+        "owner_token_sha256",
+    }
+)
+RUNTIME_SESSION_CLAIM_FIELDS = RUNTIME_SESSION_CLAIM_SIGNED_FIELDS | frozenset(
+    {"auth_tag"}
+)
 
 
 class RuntimeStatusValidationError(ValueError):
@@ -80,6 +95,10 @@ class RuntimeStatusValidationError(ValueError):
 
 class RuntimeStatusNotFound(RuntimeStatusValidationError):
     """Raised only when the exact runtime status file does not yet exist."""
+
+
+class RuntimeSessionClaimError(ValueError):
+    """Raised when a run directory is not owned by the expected exact lease."""
 
 
 def _validated_run_id(run_id: str) -> str:
@@ -248,6 +267,282 @@ def runtime_session_paths(run_id: str) -> dict[str, Path]:
     }
 
 
+def runtime_session_claim_path(run_id: str) -> Path:
+    """Return the fixed ownership marker for one run-scoped session."""
+
+    return runtime_session_paths(run_id)["root"] / RUNTIME_SESSION_CLAIM_FILENAME
+
+
+def runtime_session_actually_absent(run_id: str) -> bool:
+    """Return whether the exact run root has no filesystem directory entry."""
+
+    root = runtime_session_paths(run_id)["root"]
+    return not os.path.lexists(root)
+
+
+def _validated_owner_token(owner_token: object) -> str:
+    if not isinstance(owner_token, str):
+        raise RuntimeSessionClaimError("runtime session owner token is invalid")
+    value = owner_token.strip()
+    if (
+        value != owner_token
+        or not value
+        or len(value) > 1024
+        or any(ord(char) < 32 for char in value)
+    ):
+        raise RuntimeSessionClaimError("runtime session owner token is invalid")
+    return value
+
+
+def _canonical_session_claim_bytes(payload: Mapping[str, Any]) -> bytes:
+    signed_payload = {
+        field: payload[field]
+        for field in sorted(RUNTIME_SESSION_CLAIM_SIGNED_FIELDS)
+    }
+    return json.dumps(
+        signed_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _session_claim_auth_tag(
+    payload: Mapping[str, Any],
+    *,
+    owner_token: str,
+) -> str:
+    return hmac.new(
+        owner_token.encode("utf-8"),
+        _canonical_session_claim_bytes(payload),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def build_runtime_session_claim(
+    *,
+    run_id: str,
+    account_id: str,
+    lease_id: str,
+    owner_token: str,
+) -> dict[str, Any]:
+    """Build a marker that reveals no reusable exact lease credential."""
+
+    try:
+        exact_run_id = _validated_run_id(run_id)
+        exact_account_id = validate_account_id(account_id)
+        exact_lease_id = _validated_lease_id(lease_id)
+    except (ValueError, RuntimeStatusValidationError) as exc:
+        raise RuntimeSessionClaimError(str(exc)) from exc
+    exact_owner_token = _validated_owner_token(owner_token)
+    unsigned = {
+        "schema_version": RUNTIME_SESSION_CLAIM_SCHEMA_VERSION,
+        "run_id": exact_run_id,
+        "account_id": exact_account_id,
+        "lease_id": exact_lease_id,
+        "owner_token_sha256": hashlib.sha256(
+            exact_owner_token.encode("utf-8")
+        ).hexdigest(),
+    }
+    return {
+        **unsigned,
+        "auth_tag": _session_claim_auth_tag(
+            unsigned,
+            owner_token=exact_owner_token,
+        ),
+    }
+
+
+def validate_runtime_session_claim(
+    payload: Mapping[str, Any],
+    *,
+    expected_run_id: str,
+    expected_account_id: str,
+    expected_lease_id: str,
+    expected_owner_token: str,
+) -> dict[str, Any]:
+    """Validate that a marker belongs to one exact run and lease owner."""
+
+    if not isinstance(payload, Mapping):
+        raise RuntimeSessionClaimError("runtime session claim must be an object")
+    fields = frozenset(payload)
+    if fields != RUNTIME_SESSION_CLAIM_FIELDS:
+        raise RuntimeSessionClaimError(
+            "runtime session claim fields must match the fixed schema"
+        )
+    expected = build_runtime_session_claim(
+        run_id=expected_run_id,
+        account_id=expected_account_id,
+        lease_id=expected_lease_id,
+        owner_token=expected_owner_token,
+    )
+    schema_version = payload.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != RUNTIME_SESSION_CLAIM_SCHEMA_VERSION
+    ):
+        raise RuntimeSessionClaimError(
+            "runtime session claim schema_version is unsupported"
+        )
+    for field in (
+        "run_id",
+        "account_id",
+        "lease_id",
+        "owner_token_sha256",
+    ):
+        if payload.get(field) != expected[field]:
+            raise RuntimeSessionClaimError(
+                "runtime session claim does not match the exact lease"
+            )
+    auth_tag = payload.get("auth_tag")
+    if (
+        not isinstance(auth_tag, str)
+        or not AUTH_TAG_RE.fullmatch(auth_tag)
+        or not hmac.compare_digest(auth_tag, expected["auth_tag"])
+    ):
+        raise RuntimeSessionClaimError(
+            "runtime session claim authentication failed"
+        )
+    return dict(expected)
+
+
+def _write_runtime_session_claim(path: Path, claim: Mapping[str, Any]) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise RuntimeSessionClaimError(
+            "runtime session claim writes require O_NOFOLLOW"
+        )
+    flags |= no_follow
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        os.fchmod(descriptor, 0o600)
+        encoded = (
+            json.dumps(claim, ensure_ascii=False, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        if len(encoded) > RUNTIME_SESSION_CLAIM_MAX_BYTES:
+            raise RuntimeSessionClaimError(
+                "runtime session claim exceeds the fixed size limit"
+            )
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise RuntimeSessionClaimError(
+                    "runtime session claim write made no progress"
+                )
+            offset += written
+        os.fsync(descriptor)
+    except RuntimeSessionClaimError:
+        raise
+    except OSError as exc:
+        raise RuntimeSessionClaimError(
+            f"runtime session claim cannot be written: {type(exc).__name__}"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _read_runtime_session_claim(path: Path) -> dict[str, Any]:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    non_blocking = getattr(os, "O_NONBLOCK", None)
+    if no_follow is None or non_blocking is None:
+        raise RuntimeSessionClaimError(
+            "runtime session claim reads require O_NOFOLLOW and O_NONBLOCK"
+        )
+    flags = os.O_RDONLY | no_follow | non_blocking
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise RuntimeSessionClaimError(
+                "runtime session claim must be a regular file"
+            )
+        if file_stat.st_uid != os.getuid():
+            raise RuntimeSessionClaimError(
+                "runtime session claim must be owned by the current user"
+            )
+        if file_stat.st_nlink != 1:
+            raise RuntimeSessionClaimError(
+                "runtime session claim must have exactly one filesystem link"
+            )
+        if stat.S_IMODE(file_stat.st_mode) != 0o600:
+            raise RuntimeSessionClaimError(
+                "runtime session claim mode must be exactly 0600"
+            )
+        if file_stat.st_size > RUNTIME_SESSION_CLAIM_MAX_BYTES:
+            raise RuntimeSessionClaimError(
+                "runtime session claim exceeds the fixed size limit"
+            )
+        raw = os.read(descriptor, RUNTIME_SESSION_CLAIM_MAX_BYTES + 1)
+        if len(raw) > RUNTIME_SESSION_CLAIM_MAX_BYTES:
+            raise RuntimeSessionClaimError(
+                "runtime session claim exceeds the fixed size limit"
+            )
+        try:
+            text = raw.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise RuntimeSessionClaimError(
+                "runtime session claim is not valid UTF-8"
+            ) from exc
+        try:
+            payload = json.loads(text)
+        except (ValueError, RecursionError) as exc:
+            raise RuntimeSessionClaimError(
+                "runtime session claim is not valid JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RuntimeSessionClaimError(
+                "runtime session claim must be an object"
+            )
+        return payload
+    except RuntimeSessionClaimError:
+        raise
+    except OSError as exc:
+        raise RuntimeSessionClaimError(
+            f"runtime session claim cannot be read: {type(exc).__name__}"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def verify_runtime_session_claim(
+    profile_dir: Path,
+    *,
+    expected_run_id: str,
+    expected_account_id: str,
+    expected_lease_id: str,
+    expected_owner_token: str,
+) -> dict[str, Any]:
+    """Read and verify the fixed marker without following session symlinks."""
+
+    profile = canonical_runtime_profile_dir(expected_run_id, profile_dir)
+    root = profile.parent
+    if not root.is_dir() or root.is_symlink():
+        raise RuntimeSessionClaimError(
+            "runtime session claim requires the exact session directory"
+        )
+    payload = _read_runtime_session_claim(
+        root / RUNTIME_SESSION_CLAIM_FILENAME
+    )
+    return validate_runtime_session_claim(
+        payload,
+        expected_run_id=expected_run_id,
+        expected_account_id=expected_account_id,
+        expected_lease_id=expected_lease_id,
+        expected_owner_token=expected_owner_token,
+    )
+
+
 def canonical_runtime_profile_dir(run_id: str, profile_dir: str | Path) -> Path:
     """Validate the one fixed, non-symlinked profile path for ``run_id``."""
 
@@ -277,14 +572,48 @@ def runtime_status_path(run_id: str) -> Path:
     return runtime_session_paths(run_id)["root"] / RUNTIME_STATUS_FILENAME
 
 
-def prepare_runtime_session(run_id: str) -> dict[str, Path]:
+def prepare_runtime_session(
+    run_id: str,
+    *,
+    account_id: str | None = None,
+    lease_id: str | None = None,
+    owner_token: str | None = None,
+) -> dict[str, Path]:
     """Create a fresh browser profile for exactly one run."""
 
     paths = runtime_session_paths(run_id)
-    if paths["root"].exists():
+    claim_values = (account_id, lease_id, owner_token)
+    if any(value is not None for value in claim_values) and not all(
+        value is not None for value in claim_values
+    ):
+        raise RuntimeSessionClaimError(
+            "runtime session claim requires account, lease, and owner identities"
+        )
+    claim = (
+        build_runtime_session_claim(
+            run_id=run_id,
+            account_id=str(account_id),
+            lease_id=str(lease_id),
+            owner_token=str(owner_token),
+        )
+        if account_id is not None
+        else None
+    )
+    ensure_dir(paths["root"].parent)
+    if paths["root"].parent.is_symlink():
+        raise RuntimeSessionClaimError(
+            "XHS runtime session root must not be a symlink"
+        )
+    if os.path.lexists(paths["root"]):
         raise RuntimeError(f"XHS runtime session already exists: {paths['root']}")
-    ensure_dir(paths["profile"])
+    os.mkdir(paths["root"], mode=0o700)
     paths["root"].chmod(0o700)
+    if claim is not None:
+        _write_runtime_session_claim(
+            paths["root"] / RUNTIME_SESSION_CLAIM_FILENAME,
+            claim,
+        )
+    os.mkdir(paths["profile"], mode=0o700)
     paths["profile"].chmod(0o700)
     return paths
 
@@ -686,20 +1015,47 @@ def write_runtime_status_atomic(
 def remove_runtime_session(session_root: Path) -> bool:
     """Remove one exact run directory after its guarded process tree is dead."""
 
-    root = Path(session_root).expanduser().resolve()
-    expected_parent = XHS_SESSION_ROOT.expanduser().resolve()
+    root_input = Path(session_root).expanduser()
+    if not root_input.is_absolute():
+        raise ValueError("XHS runtime session path must be absolute")
+    root = Path(os.path.abspath(root_input))
+    expected_parent = Path(os.path.abspath(XHS_SESSION_ROOT.expanduser()))
+    if expected_parent.is_symlink():
+        raise ValueError("refusing to remove through a symlinked XHS session root")
     if root.parent != expected_parent or not RUN_ID_RE.fullmatch(root.name):
         raise ValueError(f"refusing to remove non-XHS runtime session path: {root}")
-    if not root.exists():
+    if not os.path.lexists(root):
         return True
+    if root.is_symlink():
+        raise ValueError("refusing to remove a symlinked XHS runtime session")
     shutil.rmtree(root)
-    return not root.exists()
+    return not os.path.lexists(root)
 
 
 def remove_runtime_session_for_profile(
     profile_dir: Path,
     *,
     expected_run_id: str,
+    expected_account_id: str | None = None,
+    expected_lease_id: str | None = None,
+    expected_owner_token: str | None = None,
 ) -> bool:
     profile = canonical_runtime_profile_dir(expected_run_id, profile_dir)
+    claim_values = (
+        expected_account_id,
+        expected_lease_id,
+        expected_owner_token,
+    )
+    if any(value is not None for value in claim_values):
+        if not all(value is not None for value in claim_values):
+            raise RuntimeSessionClaimError(
+                "runtime session cleanup requires every exact lease identity"
+            )
+        verify_runtime_session_claim(
+            profile,
+            expected_run_id=expected_run_id,
+            expected_account_id=str(expected_account_id),
+            expected_lease_id=str(expected_lease_id),
+            expected_owner_token=str(expected_owner_token),
+        )
     return remove_runtime_session(profile.parent)

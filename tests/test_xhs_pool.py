@@ -481,6 +481,10 @@ def _prepare_300011_retry_database(
         "run_id": run_id,
         "account_id": "xhs-a01",
         "lease_id": "lease-security-limit",
+        "runtime_session_owned": True,
+        "runtime_session_cleanup_required": True,
+        "runtime_session_actually_absent": True,
+        "runtime_session_cleanup_complete": True,
         "runtime_session_removed": True,
         "challenge": "platform_security_limit_300011",
         "child_summary": str(child_summary_path),
@@ -545,6 +549,11 @@ def _prepare_300011_retry_database(
                         "lease_id": "lease-security-limit",
                         "owner_token_sha256": "owner-token-digest",
                         "outcome": "failed",
+                        "runtime_session_owned": True,
+                        "runtime_session_cleanup_required": True,
+                        "runtime_session_actually_absent": True,
+                        "runtime_session_cleanup_complete": True,
+                        "runtime_session_removed": True,
                         "process_check": {
                             "safe_to_release": True,
                             "checks": [],
@@ -653,9 +662,65 @@ def test_xhs_runner_300011_retry_requires_exact_release_audit(tmp_path: Path) ->
     )
 
 
-@pytest.mark.parametrize("runtime_session_state", [False, "missing"])
-def test_xhs_runner_300011_retry_requires_removed_runtime_session(
+def test_xhs_runner_controller_does_not_restart_after_incomplete_session_cleanup(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _ = _prepare_300011_retry_database(
+        tmp_path,
+        finished_at=datetime(2026, 8, 30, 10, 0, tzinfo=timezone.utc),
+    )
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT details_json FROM xhs_account_events "
+            "WHERE event_type='lease_released'"
+        ).fetchone()
+        details = json.loads(row[0])
+        details["runtime_session_actually_absent"] = False
+        details["runtime_session_cleanup_complete"] = False
+        details["ok"] = True
+        details["event_type"] = "forged_release"
+        conn.execute(
+            "UPDATE xhs_account_events SET details_json=? "
+            "WHERE event_type='lease_released'",
+            (json.dumps(details),),
+        )
+        conn.commit()
+    cleanup = xhs_runner.lease_cleanup_evidence(
+        db_path,
+        account_id="xhs-a01",
+        run_id="security-limit-run",
+        lease_id="lease-security-limit",
+    )
+    assert cleanup["ok"] is False
+    assert cleanup["event_type"] == "lease_released"
+    monkeypatch.setattr(xhs_runner, "XHS_RETRY_STATE_ROOT", tmp_path / "retry_states")
+    monkeypatch.setattr(
+        xhs_runner,
+        "_run_main",
+        lambda _args: pytest.fail("incomplete cleanup must not start another run"),
+    )
+
+    assert xhs_runner._run_security_limit_retry_controller(_retry_args(db_path)) == 2
+    state_file = next((tmp_path / "retry_states").glob("**/*.json"))
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state["status"] == "stopped"
+    assert state["stop_reason"] == "triggering_run_lease_not_released"
+    assert state["attempt_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "runtime_session_state"),
+    [
+        ("runtime_session_cleanup_complete", False),
+        ("runtime_session_cleanup_complete", "missing"),
+        ("runtime_session_actually_absent", False),
+        ("runtime_session_actually_absent", "missing"),
+    ],
+)
+def test_xhs_runner_300011_retry_requires_complete_runtime_session_cleanup(
+    tmp_path: Path,
+    field: str,
     runtime_session_state: bool | str,
 ) -> None:
     db_path, _ = _prepare_300011_retry_database(
@@ -669,19 +734,53 @@ def test_xhs_runner_300011_retry_requires_removed_runtime_session(
     )
     assert report is not None
     if runtime_session_state == "missing":
-        report.pop("runtime_session_removed")
+        report.pop(field)
     else:
-        report["runtime_session_removed"] = runtime_session_state
+        report[field] = runtime_session_state
 
     assert xhs_runner._security_limit_retry_evidence(report) == (
         False,
-        "triggering_run_runtime_session_not_removed",
+        "triggering_run_runtime_session_cleanup_incomplete",
     )
     assert xhs_runner._terminal_release_ready(
         db_path,
         account_id="xhs-a01",
         report=report,
-    ) == (False, "terminal_run_runtime_session_not_removed")
+    ) == (False, "terminal_run_runtime_session_cleanup_incomplete")
+
+
+def test_xhs_runner_cleanup_does_not_require_a_false_deletion_claim(
+    tmp_path: Path,
+) -> None:
+    db_path, _ = _prepare_300011_retry_database(
+        tmp_path,
+        finished_at=datetime(2026, 8, 30, 10, 0, tzinfo=timezone.utc),
+    )
+    report = xhs_runner._latest_terminal_xhs_run(
+        db_path,
+        target_key="target",
+        account_id="xhs-a01",
+    )
+    assert report is not None
+    report.update(
+        {
+            "runtime_session_owned": False,
+            "runtime_session_cleanup_required": False,
+            "runtime_session_actually_absent": True,
+            "runtime_session_cleanup_complete": True,
+            "runtime_session_removed": False,
+        }
+    )
+
+    assert xhs_runner._security_limit_retry_evidence(report) == (
+        True,
+        "complete_300011_terminal",
+    )
+    assert xhs_runner._terminal_release_ready(
+        db_path,
+        account_id="xhs-a01",
+        report=report,
+    ) == (True, "terminal_exact_release_verified")
 
 
 def test_xhs_runner_300011_controller_waits_without_lease_then_stops_on_success(
@@ -718,9 +817,13 @@ def test_xhs_runner_300011_controller_waits_without_lease_then_stops_on_success(
                     json.dumps(
                         {
                             "status": "completed",
-                            "run_id": "completed-run",
-                            "lease_id": "completed-lease",
-                            "runtime_session_removed": True,
+                                "run_id": "completed-run",
+                                "lease_id": "completed-lease",
+                                "runtime_session_owned": True,
+                                "runtime_session_cleanup_required": True,
+                                "runtime_session_actually_absent": True,
+                                "runtime_session_cleanup_complete": True,
+                                "runtime_session_removed": True,
                             "finished_at": completed_at,
                         }
                     ),
@@ -738,6 +841,11 @@ def test_xhs_runner_300011_controller_waits_without_lease_then_stops_on_success(
                             "lease_id": "completed-lease",
                             "owner_token_sha256": "completed-owner-digest",
                             "outcome": "completed",
+                            "runtime_session_owned": True,
+                            "runtime_session_cleanup_required": True,
+                            "runtime_session_actually_absent": True,
+                            "runtime_session_cleanup_complete": True,
+                            "runtime_session_removed": True,
                             "process_check": {
                                 "safe_to_release": True,
                                 "checks": [],
@@ -821,6 +929,10 @@ def test_xhs_runner_300011_controller_retries_repeated_limit_until_success(
                 "status": "failed",
                 "run_id": run_id,
                 "lease_id": lease_id,
+                "runtime_session_owned": True,
+                "runtime_session_cleanup_required": True,
+                "runtime_session_actually_absent": True,
+                "runtime_session_cleanup_complete": True,
                 "runtime_session_removed": True,
                 "challenge": "platform_security_limit_300011",
                 "child_summary": str(child_summary),
@@ -838,6 +950,10 @@ def test_xhs_runner_300011_controller_retries_repeated_limit_until_success(
                 "status": "completed",
                 "run_id": run_id,
                 "lease_id": lease_id,
+                "runtime_session_owned": True,
+                "runtime_session_cleanup_required": True,
+                "runtime_session_actually_absent": True,
+                "runtime_session_cleanup_complete": True,
                 "runtime_session_removed": True,
                 "finished_at": finished_at.isoformat(timespec="seconds"),
             }
@@ -885,6 +1001,11 @@ def test_xhs_runner_300011_controller_retries_repeated_limit_until_success(
                             "lease_id": lease_id,
                             "owner_token_sha256": f"{lease_id}-owner-digest",
                             "outcome": status,
+                            "runtime_session_owned": True,
+                            "runtime_session_cleanup_required": True,
+                            "runtime_session_actually_absent": True,
+                            "runtime_session_cleanup_complete": True,
+                            "runtime_session_removed": True,
                             "process_check": {
                                 "safe_to_release": True,
                                 "checks": [],

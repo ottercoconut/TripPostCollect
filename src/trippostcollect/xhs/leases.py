@@ -43,7 +43,9 @@ from trippostcollect.xhs.runtime import (
     public_runtime_status,
     read_runtime_status_if_present,
     remove_runtime_session_for_profile,
+    runtime_session_actually_absent,
     runtime_status_path,
+    verify_runtime_session_claim,
 )
 
 
@@ -1592,11 +1594,35 @@ def recover_orphaned_account_lease(
                 raise XhsOrphanLeaseRecoveryRefused(
                     "runtime process appeared during orphan reconciliation"
                 )
-            runtime_session_removed = remove_runtime_session_for_profile(
-                locked_runtime_profile,
-                expected_run_id=run_id,
+            runtime_session_cleanup_required = not runtime_session_actually_absent(
+                run_id
             )
-            if not runtime_session_removed:
+            runtime_session_owned = False
+            runtime_session_removed = False
+            if runtime_session_cleanup_required:
+                try:
+                    verify_runtime_session_claim(
+                        locked_runtime_profile,
+                        expected_run_id=run_id,
+                        expected_account_id=value,
+                        expected_lease_id=lease_id,
+                        expected_owner_token=str(locked_lease["owner_token"]),
+                    )
+                    runtime_session_owned = True
+                    runtime_session_removed = remove_runtime_session_for_profile(
+                        locked_runtime_profile,
+                        expected_run_id=run_id,
+                        expected_account_id=value,
+                        expected_lease_id=lease_id,
+                        expected_owner_token=str(locked_lease["owner_token"]),
+                    )
+                except (OSError, ValueError) as exc:
+                    raise XhsOrphanLeaseRecoveryRefused(
+                        "runtime session is not owned by the exact lease"
+                    ) from exc
+            runtime_session_absent = runtime_session_actually_absent(run_id)
+            runtime_session_cleanup_complete = runtime_session_absent
+            if not runtime_session_cleanup_complete:
                 raise XhsOrphanLeaseRecoveryRefused(
                     "runtime session still exists after cleanup"
                 )
@@ -1629,6 +1655,10 @@ def recover_orphaned_account_lease(
                 "process_checks": [first_process_check, second_process_check],
                 "terminal_assessment": terminal,
                 "release_scope": "account_mutex_only",
+                "runtime_session_owned": runtime_session_owned,
+                "runtime_session_cleanup_required": runtime_session_cleanup_required,
+                "runtime_session_actually_absent": runtime_session_absent,
+                "runtime_session_cleanup_complete": runtime_session_cleanup_complete,
                 "runtime_session_removed": runtime_session_removed,
                 "mutations": {
                     "execution_state": False,
@@ -1698,8 +1728,16 @@ class LeaseGuard:
         self._closed = False
         self._closing = False
         self._released = False
+        self.runtime_session_owned = False
+        self.runtime_session_actually_absent = runtime_session_actually_absent(
+            self.run_id
+        )
+        self.runtime_session_cleanup_required = (
+            not self.runtime_session_actually_absent
+        )
+        self.runtime_session_cleanup_complete = self.runtime_session_actually_absent
         self.runtime_session_removed = False
-        self._runtime_session_prepared = False
+        self._runtime_session_prepare_attempted = False
 
     def acquire(self) -> dict[str, Any]:
         if self.account is not None:
@@ -1781,20 +1819,76 @@ class LeaseGuard:
 
         if not self.account:
             raise RuntimeError("XHS LeaseGuard is not acquired")
-        if self._runtime_session_prepared:
-            raise RuntimeError("XHS runtime session is already prepared")
+        if self._runtime_session_prepare_attempted:
+            raise RuntimeError("XHS runtime session preparation was already attempted")
+        self._runtime_session_prepare_attempted = True
         session_root = self.runtime_profile_dir.parent
-        existed_before = session_root.exists()
+        existed_before = os.path.lexists(session_root)
+        if existed_before:
+            self.runtime_session_cleanup_required = True
+            self.runtime_session_actually_absent = False
+            self.runtime_session_cleanup_complete = False
         try:
-            paths = create_runtime_session(self.run_id)
+            paths = create_runtime_session(
+                self.run_id,
+                account_id=self.account_id,
+                lease_id=self.lease_id,
+                owner_token=self.owner_token,
+            )
         except BaseException:
-            if not existed_before and session_root.exists():
-                self._runtime_session_prepared = True
+            self._refresh_runtime_session_cleanup_state()
+            if not existed_before and not self.runtime_session_actually_absent:
+                try:
+                    verify_runtime_session_claim(
+                        self.runtime_profile_dir,
+                        expected_run_id=self.run_id,
+                        expected_account_id=self.account_id,
+                        expected_lease_id=self.lease_id,
+                        expected_owner_token=self.owner_token,
+                    )
+                except (OSError, ValueError):
+                    self.runtime_session_owned = False
+                else:
+                    self.runtime_session_owned = True
             raise
-        self._runtime_session_prepared = True
+        verify_runtime_session_claim(
+            self.runtime_profile_dir,
+            expected_run_id=self.run_id,
+            expected_account_id=self.account_id,
+            expected_lease_id=self.lease_id,
+            expected_owner_token=self.owner_token,
+        )
+        self.runtime_session_owned = True
+        self.runtime_session_cleanup_required = True
+        self.runtime_session_actually_absent = False
+        self.runtime_session_cleanup_complete = False
         if paths["profile"] != self.runtime_profile_dir:
             raise RuntimeError("prepared XHS runtime profile changed unexpectedly")
         return paths
+
+    def _refresh_runtime_session_cleanup_state(self) -> None:
+        self.runtime_session_actually_absent = runtime_session_actually_absent(
+            self.run_id
+        )
+        if not self.runtime_session_actually_absent:
+            self.runtime_session_cleanup_required = True
+        self.runtime_session_cleanup_complete = self.runtime_session_actually_absent
+
+    def runtime_session_cleanup_evidence(self) -> dict[str, bool]:
+        """Return non-secret cleanup facts without turning absence into deletion.
+
+        ``cleanup_required`` is latched once any exact root is observed, while
+        ``actually_absent`` and ``cleanup_complete`` describe the last refresh.
+        ``removed`` is true only after this guard's verified removal is observed.
+        """
+
+        return {
+            "runtime_session_owned": self.runtime_session_owned,
+            "runtime_session_cleanup_required": self.runtime_session_cleanup_required,
+            "runtime_session_actually_absent": self.runtime_session_actually_absent,
+            "runtime_session_cleanup_complete": self.runtime_session_cleanup_complete,
+            "runtime_session_removed": self.runtime_session_removed,
+        }
 
     def _install_signal_handlers(self) -> None:
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -2194,6 +2288,7 @@ class LeaseGuard:
                 return True
             process_check = self.terminate_owned_processes()
             if not process_check["safe_to_release"]:
+                self._refresh_runtime_session_cleanup_state()
                 with sqlite3.connect(self.db_path) as conn:
                     conn.row_factory = sqlite3.Row
                     ensure_xhs_schema(conn)
@@ -2207,27 +2302,39 @@ class LeaseGuard:
                             "signal": self.signal_received,
                             "process_check": process_check,
                             "runtime_profile_dir": str(self.runtime_profile_dir),
-                            "runtime_session_removed": False,
+                            **self.runtime_session_cleanup_evidence(),
                         },
                     )
                     conn.commit()
                 self._closed = True
                 return False
             cleanup_error = ""
-            if not self._runtime_session_prepared:
-                self.runtime_session_removed = True
-            else:
+            self._refresh_runtime_session_cleanup_state()
+            if (
+                self.runtime_session_cleanup_required
+                and not self.runtime_session_actually_absent
+                and self.runtime_session_owned
+            ):
                 try:
-                    self.runtime_session_removed = (
-                        remove_runtime_session_for_profile(
-                            self.runtime_profile_dir,
-                            expected_run_id=self.run_id,
-                        )
+                    removal_reported = remove_runtime_session_for_profile(
+                        self.runtime_profile_dir,
+                        expected_run_id=self.run_id,
+                        expected_account_id=self.account_id,
+                        expected_lease_id=self.lease_id,
+                        expected_owner_token=self.owner_token,
                     )
                 except (OSError, ValueError) as exc:
                     cleanup_error = f"{type(exc).__name__}: {exc}"
                     self.runtime_session_removed = False
-            if not self.runtime_session_removed:
+                    self._refresh_runtime_session_cleanup_state()
+                else:
+                    self._refresh_runtime_session_cleanup_state()
+                    self.runtime_session_removed = bool(
+                        removal_reported and self.runtime_session_actually_absent
+                    )
+            elif not self.runtime_session_actually_absent:
+                cleanup_error = "runtime_session_not_owned"
+            if not self.runtime_session_cleanup_complete:
                 with sqlite3.connect(self.db_path) as conn:
                     conn.row_factory = sqlite3.Row
                     ensure_xhs_schema(conn)
@@ -2243,7 +2350,7 @@ class LeaseGuard:
                             "signal": self.signal_received,
                             "process_check": process_check,
                             "runtime_profile_dir": str(self.runtime_profile_dir),
-                            "runtime_session_removed": False,
+                            **self.runtime_session_cleanup_evidence(),
                             "cleanup_error": cleanup_error
                             or "runtime_session_still_exists",
                         },
@@ -2265,7 +2372,7 @@ class LeaseGuard:
                         "signal": self.signal_received,
                         "process_check": process_check,
                         "runtime_profile_dir": str(self.runtime_profile_dir),
-                        "runtime_session_removed": True,
+                        **self.runtime_session_cleanup_evidence(),
                     },
                 )
             self._closed = True

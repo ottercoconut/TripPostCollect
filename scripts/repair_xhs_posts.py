@@ -790,7 +790,7 @@ def _run_main() -> int:
         "login_reason": _login_reason(stdout, stderr, child_summary),
         "login_mode": "per_run_qrcode",
         "persistent_account_profile": False,
-        "runtime_session_removed": not session_paths["root"].exists(),
+        **guard.runtime_session_cleanup_evidence(),
         "runtime_watchdog": runtime_watchdog_evidence(completed),
         "failure_type": "runtime_failed" if interrupt else "",
         "stop_reason": "runtime_failed" if interrupt else "",
@@ -826,7 +826,6 @@ def _run_main() -> int:
             finished=True,
         )
     lease_released = guard.close()
-    runtime_session_removed = guard.runtime_session_removed
     cleanup_evidence = lease_cleanup_evidence(
         db_path,
         account_id=str(account["account_id"]),
@@ -834,7 +833,7 @@ def _run_main() -> int:
         lease_id=guard.lease_id,
     )
     summary["lease_released"] = lease_released
-    summary["runtime_session_removed"] = runtime_session_removed
+    summary.update(guard.runtime_session_cleanup_evidence())
     if not lease_released:
         summary["status"] = "failed"
         summary["error"] = (
@@ -862,7 +861,8 @@ def _run_main() -> int:
     print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
     if (
         summary.get("lease_released") is not True
-        or summary.get("runtime_session_removed") is not True
+        or summary.get("runtime_session_cleanup_complete") is not True
+        or summary.get("runtime_session_actually_absent") is not True
     ):
         return 2
     if interrupt:

@@ -1860,6 +1860,10 @@ def test_normal_end_releases_exact_lease(control_db: Path, tmp_path: Path) -> No
     )
     with guard:
         paths = guard.prepare_runtime_session()
+        claim_path = runtime.runtime_session_claim_path("normal-end")
+        claim_bytes = claim_path.read_bytes()
+        assert guard.owner_token.encode("utf-8") not in claim_bytes
+        assert claim_path.stat().st_mode & 0o777 == 0o600
         (paths["profile"] / "Cookies").write_bytes(b"run-secret")
         result = guard.run_subprocess(
             [sys.executable, "-c", "print('ok')"],
@@ -1872,6 +1876,10 @@ def test_normal_end_releases_exact_lease(control_db: Path, tmp_path: Path) -> No
         guard.set_outcome("completed")
 
     assert guard.runtime_session_removed is True
+    assert guard.runtime_session_owned is True
+    assert guard.runtime_session_cleanup_required is True
+    assert guard.runtime_session_actually_absent is True
+    assert guard.runtime_session_cleanup_complete is True
     assert not paths["root"].exists()
     with connect(control_db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
@@ -1882,6 +1890,10 @@ def test_normal_end_releases_exact_lease(control_db: Path, tmp_path: Path) -> No
         details = json.loads(event["details_json"])
         assert details["outcome"] == "completed"
         assert details["runtime_session_removed"] is True
+        assert details["runtime_session_owned"] is True
+        assert details["runtime_session_cleanup_required"] is True
+        assert details["runtime_session_actually_absent"] is True
+        assert details["runtime_session_cleanup_complete"] is True
 
 
 def test_guard_removes_runtime_session_before_releasing_database_lease(
@@ -1932,9 +1944,34 @@ def test_ordinary_exception_releases_without_changing_health(
         with guard:
             raise RuntimeError("ordinary failure")
 
+    assert guard.runtime_session_cleanup_evidence() == {
+        "runtime_session_owned": False,
+        "runtime_session_cleanup_required": False,
+        "runtime_session_actually_absent": True,
+        "runtime_session_cleanup_complete": True,
+        "runtime_session_removed": False,
+    }
+    cleanup_evidence = xhs_runner_cli.lease_cleanup_evidence(
+        control_db,
+        account_id="xhs-a01",
+        run_id="ordinary-error",
+        lease_id=guard.lease_id,
+    )
+    assert cleanup_evidence["ok"] is True
+    assert cleanup_evidence["runtime_session_removed"] is False
+    assert cleanup_evidence["runtime_session_actually_absent"] is True
     with connect(control_db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
         assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
+        details = json.loads(
+            conn.execute(
+                "SELECT details_json FROM xhs_account_events "
+                "WHERE event_type='lease_released' ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+        )
+        assert details["runtime_session_removed"] is False
+        assert details["runtime_session_actually_absent"] is True
+        assert details["runtime_session_cleanup_complete"] is True
 
 
 def test_guard_repeated_close_preserves_deferred_release_result(
@@ -1962,6 +1999,10 @@ def test_guard_repeated_close_preserves_deferred_release_result(
     monkeypatch.setattr(guard, "terminate_owned_processes", lambda: deferred)
     assert guard.close() is False
     assert guard.close() is False
+    assert guard.runtime_session_owned is True
+    assert guard.runtime_session_cleanup_required is True
+    assert guard.runtime_session_actually_absent is False
+    assert guard.runtime_session_cleanup_complete is False
     assert paths["root"].exists()
     with connect(control_db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 1
@@ -1969,7 +2010,12 @@ def test_guard_repeated_close_preserves_deferred_release_result(
             "SELECT event_type, details_json FROM xhs_account_events ORDER BY id DESC LIMIT 1"
         ).fetchone()
         assert event["event_type"] == "lease_release_deferred_live_processes"
-        assert json.loads(event["details_json"])["runtime_session_removed"] is False
+        details = json.loads(event["details_json"])
+        assert details["runtime_session_removed"] is False
+        assert details["runtime_session_owned"] is True
+        assert details["runtime_session_cleanup_required"] is True
+        assert details["runtime_session_actually_absent"] is False
+        assert details["runtime_session_cleanup_complete"] is False
 
 
 def test_runtime_session_cleanup_failure_retains_exact_lease(
@@ -2016,10 +2062,12 @@ def test_runtime_session_cleanup_failure_retains_exact_lease(
         assert details["cleanup_error"].startswith("PermissionError:")
 
 
+@pytest.mark.parametrize("reported_removed", [False, True])
 def test_incomplete_runtime_session_removal_retains_exact_lease(
     control_db: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    reported_removed: bool,
 ) -> None:
     run_id = "cleanup-incomplete"
     guard = LeaseGuard(
@@ -2036,10 +2084,12 @@ def test_incomplete_runtime_session_removal_retains_exact_lease(
     monkeypatch.setattr(
         xhs_leases,
         "remove_runtime_session_for_profile",
-        lambda *_args, **_kwargs: False,
+        lambda *_args, **_kwargs: reported_removed,
     )
 
     assert guard.close() is False
+    assert guard.runtime_session_removed is False
+    assert guard.runtime_session_actually_absent is False
     assert paths["root"].exists()
     with connect(control_db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 1
@@ -2056,7 +2106,12 @@ def test_guard_does_not_delete_session_it_failed_to_create(
     tmp_path: Path,
 ) -> None:
     run_id = "preexisting-session"
-    paths = prepare_runtime_session(run_id)
+    paths = prepare_runtime_session(
+        run_id,
+        account_id="xhs-a01",
+        lease_id="foreign-lease",
+        owner_token="foreign-owner-token",
+    )
     marker = paths["profile"] / "Cookies"
     marker.write_bytes(b"not-owned-by-guard")
     guard = LeaseGuard(
@@ -2072,9 +2127,135 @@ def test_guard_does_not_delete_session_it_failed_to_create(
 
     with pytest.raises(RuntimeError, match="already exists"):
         guard.prepare_runtime_session()
+    with pytest.raises(RuntimeError, match="already attempted"):
+        guard.prepare_runtime_session()
+    assert guard.close() is False
+    assert guard.runtime_session_cleanup_evidence() == {
+        "runtime_session_owned": False,
+        "runtime_session_cleanup_required": True,
+        "runtime_session_actually_absent": False,
+        "runtime_session_cleanup_complete": False,
+        "runtime_session_removed": False,
+    }
+    assert marker.read_bytes() == b"not-owned-by-guard"
+    with connect(control_db) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_leases WHERE run_id=?",
+            (run_id,),
+        ).fetchone()[0] == 1
+        event = conn.execute(
+            "SELECT event_type, details_json FROM xhs_account_events "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert event["event_type"] == "lease_release_deferred_runtime_session_cleanup"
+        assert json.loads(event["details_json"])["cleanup_error"] == (
+            "runtime_session_not_owned"
+        )
+
+
+def test_guard_owns_and_removes_session_after_mid_creation_failure(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "partial-claimed-session"
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "partial-claimed-session.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10),
+    )
+    guard.acquire()
+    create_session = xhs_leases.create_runtime_session
+
+    def fail_after_creation(*args: Any, **kwargs: Any) -> None:
+        create_session(*args, **kwargs)
+        raise RuntimeError("synthetic failure after claim")
+
+    monkeypatch.setattr(xhs_leases, "create_runtime_session", fail_after_creation)
+
+    with pytest.raises(RuntimeError, match="synthetic failure"):
+        guard.prepare_runtime_session()
+    assert guard.runtime_session_owned is True
+    assert guard.runtime_session_cleanup_required is True
+    assert guard.runtime_session_actually_absent is False
     assert guard.close() is True
     assert guard.runtime_session_removed is True
-    assert marker.read_bytes() == b"not-owned-by-guard"
+    assert guard.runtime_session_actually_absent is True
+    assert guard.runtime_session_cleanup_complete is True
+
+
+@pytest.mark.parametrize("marker_kind", ["tampered", "symlink"])
+def test_guard_retains_claimed_session_when_marker_no_longer_matches(
+    control_db: Path,
+    tmp_path: Path,
+    marker_kind: str,
+) -> None:
+    run_id = f"mismatched-marker-{marker_kind}"
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10),
+    )
+    guard.acquire()
+    paths = guard.prepare_runtime_session()
+    claim_path = runtime.runtime_session_claim_path(run_id)
+    if marker_kind == "tampered":
+        payload = json.loads(claim_path.read_text(encoding="utf-8"))
+        payload["lease_id"] = "foreign-lease"
+        claim_path.write_text(json.dumps(payload), encoding="utf-8")
+        claim_path.chmod(0o600)
+    else:
+        claim_path.unlink()
+        foreign = tmp_path / "foreign-claim.json"
+        foreign.write_text("{}", encoding="utf-8")
+        claim_path.symlink_to(foreign)
+
+    assert guard.close() is False
+    assert guard.runtime_session_owned is True
+    assert guard.runtime_session_removed is False
+    assert guard.runtime_session_actually_absent is False
+    assert paths["root"].exists()
+    if marker_kind == "symlink":
+        assert foreign.read_text(encoding="utf-8") == "{}"
+
+
+def test_guard_does_not_follow_preexisting_session_root_symlink(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    run_id = "preexisting-root-symlink"
+    paths = runtime_session_paths(run_id)
+    foreign = tmp_path / "foreign-session"
+    foreign.mkdir()
+    foreign_marker = foreign / "keep.txt"
+    foreign_marker.write_text("keep", encoding="utf-8")
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=paths["profile"],
+        budget=LeaseBudget(runtime_seconds=10),
+    )
+    guard.acquire()
+    paths["root"].parent.mkdir(parents=True, exist_ok=True)
+    paths["root"].symlink_to(foreign, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        guard.prepare_runtime_session()
+    assert guard.close() is False
+    assert guard.runtime_session_owned is False
+    assert guard.runtime_session_actually_absent is False
+    assert foreign_marker.read_text(encoding="utf-8") == "keep"
 
 
 @pytest.mark.parametrize(
@@ -2704,12 +2885,16 @@ def test_orphan_reconciliation_removes_run_scoped_profile(
         "trippostcollect.xhs.runtime.XHS_SESSION_ROOT",
         tmp_path / "sessions",
     )
-    paths = prepare_runtime_session("orphan-session")
     lease = acquire_test_lease(
         control_db,
         run_id="orphan-session",
         state_path=tmp_path / "missing-state.json",
-        runtime_profile_dir=paths["profile"],
+    )
+    paths = prepare_runtime_session(
+        "orphan-session",
+        account_id="xhs-a01",
+        lease_id=str(lease["lease_id"]),
+        owner_token=str(lease["owner_token"]),
     )
 
     with connect(control_db) as conn:
@@ -2722,6 +2907,10 @@ def test_orphan_reconciliation_removes_run_scoped_profile(
         )
 
     assert result["runtime_session_removed"] is True
+    assert result["runtime_session_owned"] is True
+    assert result["runtime_session_cleanup_required"] is True
+    assert result["runtime_session_actually_absent"] is True
+    assert result["runtime_session_cleanup_complete"] is True
     assert not paths["root"].exists()
 
 
@@ -2766,15 +2955,20 @@ def test_orphan_reconciliation_removes_partial_session_without_profile(
     tmp_path: Path,
 ) -> None:
     run_id = "partial-session"
-    paths = runtime_session_paths(run_id)
-    paths["root"].mkdir(parents=True)
-    status_file = paths["root"] / "runtime_status.json"
-    status_file.write_bytes(b"partial-runtime-material")
     lease = acquire_test_lease(
         control_db,
         run_id=run_id,
         state_path=tmp_path / "missing-state.json",
     )
+    paths = prepare_runtime_session(
+        run_id,
+        account_id="xhs-a01",
+        lease_id=str(lease["lease_id"]),
+        owner_token=str(lease["owner_token"]),
+    )
+    paths["profile"].rmdir()
+    status_file = paths["root"] / "runtime_status.json"
+    status_file.write_bytes(b"partial-runtime-material")
 
     with connect(control_db) as conn:
         result = recover_orphaned_account_lease(
@@ -2787,6 +2981,40 @@ def test_orphan_reconciliation_removes_partial_session_without_profile(
 
     assert result["runtime_session_removed"] is True
     assert not paths["root"].exists()
+
+
+def test_orphan_reconciliation_refuses_markerless_runtime_session(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    run_id = "markerless-orphan-session"
+    paths = runtime_session_paths(run_id)
+    paths["root"].mkdir(parents=True)
+    foreign = paths["root"] / "foreign.txt"
+    foreign.write_text("keep", encoding="utf-8")
+    lease = acquire_test_lease(
+        control_db,
+        run_id=run_id,
+        state_path=tmp_path / "missing-state.json",
+    )
+
+    with connect(control_db) as conn:
+        with pytest.raises(
+            XhsOrphanLeaseRecoveryRefused,
+            match="not owned by the exact lease",
+        ):
+            recover_orphaned_account_lease(
+                conn,
+                account_id="xhs-a01",
+                run_id=run_id,
+                lease_id=lease["lease_id"],
+                inspector=FakeInspector(),
+            )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_leases WHERE lease_id=?",
+            (lease["lease_id"],),
+        ).fetchone()[0] == 1
+    assert foreign.read_text(encoding="utf-8") == "keep"
 
 
 def test_missing_adaptive_event_does_not_mutate_state_or_discovery(
