@@ -30,6 +30,14 @@ TARGET_CLOSED_PATTERNS = re.compile(
     r"TargetClosedError|Target page, context or browser has been closed",
     re.I,
 )
+XHS_CDP_LIFECYCLE_CODE_PATTERNS = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    r"xhs_browser_process_exited|"
+    r"xhs_cdp_disconnected_unexpected|"
+    r"xhs_browser_context_closed_unexpected"
+    r")(?![A-Za-z0-9_])",
+    re.I,
+)
 IMPORT_TARGET_PATTERNS = re.compile(r"import_new_target_not_met", re.I)
 RATE_PATTERNS = re.compile(r"429|too many requests|rate limit|访问过于频繁|请求过于频繁|操作频繁", re.I)
 XHS_FREQUENT_CHALLENGE_PATTERNS = re.compile(
@@ -321,6 +329,16 @@ def classify_attempt(
             "retryable": True,
             "wait_seconds": 60,
             "reason": "chromium_or_playwright_launch_failed",
+        }
+
+    xhs_cdp_lifecycle = XHS_CDP_LIFECYCLE_CODE_PATTERNS.search(text)
+    if xhs_cdp_lifecycle:
+        return {
+            "status": "failed_final",
+            "failure_type": "browser_target_closed",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": xhs_cdp_lifecycle.group(0).lower(),
         }
 
     if bool(markers.get("captcha_or_verify")) or CAPTCHA_PATTERNS.search(text):

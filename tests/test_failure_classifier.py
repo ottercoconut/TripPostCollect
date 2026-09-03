@@ -405,6 +405,50 @@ def test_target_closed_after_page_launch_is_not_browser_launch_failure() -> None
     assert result["retryable"] is False
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "xhs_browser_process_exited",
+        "xhs_cdp_disconnected_unexpected",
+        "xhs_browser_context_closed_unexpected",
+    ],
+)
+def test_xhs_stable_cdp_lifecycle_code_is_terminal(code: str) -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr=f"RuntimeError: {code}:search_after_network_pause\n扫码登录",
+        meta={"platform": "xhs"},
+    )
+
+    assert result == {
+        "status": "failed_final",
+        "failure_type": "browser_target_closed",
+        "retryable": False,
+        "wait_seconds": 0,
+        "reason": code,
+    }
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "not_xhs_browser_process_exited",
+        "xhs_browser_process_exited_extra",
+        "xhs_cdp_disconnected_unexpectedly",
+        "prefix_xhs_browser_context_closed_unexpected",
+        "browser disconnected while the network was unavailable",
+    ],
+)
+def test_similar_text_is_not_a_stable_xhs_cdp_lifecycle_code(message: str) -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr=message,
+        meta={"platform": "xhs"},
+    )
+
+    assert result["failure_type"] != "browser_target_closed"
+
+
 def test_rate_limit_beats_target_closed_after_operator_closes_page() -> None:
     result = failure_classifier.classify_attempt(
         exit_code=1,
