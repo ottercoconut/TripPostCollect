@@ -834,6 +834,43 @@ def test_network_timeout_diagnostic_is_fresh_explicit_terminal_observation(
     ) == ("network_recovery_timeout", "transport_timeout")
 
 
+@pytest.mark.parametrize(
+    ("run", "expected"),
+    [
+        ({"timeout_reason": "no_progress_timeout"}, "no_progress_timeout"),
+        (
+            {"timeout_reason": "parent_network_pause_timeout"},
+            "parent_network_pause_timeout",
+        ),
+        (
+            {"timeout_reason": "parent_network_terminal_unwind_timeout"},
+            "parent_network_terminal_unwind_timeout",
+        ),
+        (
+            {
+                "timeout_reason": None,
+                "network_terminal_observed": True,
+                "network_terminal_reason": "network_recovery_timeout",
+            },
+            "network_recovery_timeout",
+        ),
+        (
+            {
+                "timeout_reason": None,
+                "network_terminal_observed": False,
+                "network_terminal_reason": "network_recovery_timeout",
+            },
+            "",
+        ),
+    ],
+)
+def test_runtime_watchdog_stop_detail_is_closed_and_explicit(
+    run: dict[str, object],
+    expected: str,
+) -> None:
+    assert mediacrawler_crawl.runtime_watchdog_stop_detail(run) == expected
+
+
 def test_parent_network_pause_clock_freezes_remaining_without_resetting_it() -> None:
     clock = mediacrawler_crawl.XhsParentNetworkPauseClock(ceiling_seconds=10)
 
@@ -1703,7 +1740,7 @@ def test_no_progress_timeout_appends_incomplete_terminal_audit_event(
         },
     )
 
-    result = mediacrawler_crawl.append_runtime_timeout_event(
+    result = mediacrawler_crawl.append_runtime_watchdog_stop_event(
         state_path,
         timeout_reason="no_progress_timeout",
         platform_key="weibo",
@@ -1728,11 +1765,12 @@ def test_no_progress_timeout_appends_incomplete_terminal_audit_event(
 @pytest.mark.parametrize(
     "timeout_reason",
     [
+        "network_recovery_timeout",
         "parent_network_pause_timeout",
         "parent_network_terminal_unwind_timeout",
     ],
 )
-def test_parent_network_timeout_appends_exact_runtime_failed_terminal_event(
+def test_network_watchdog_stop_appends_exact_runtime_failed_terminal_event(
     timeout_reason: str,
     tmp_path: Path,
 ) -> None:
@@ -1749,7 +1787,7 @@ def test_parent_network_timeout_appends_exact_runtime_failed_terminal_event(
         frozen_inputs=[frozen_input],
     )
 
-    result = mediacrawler_crawl.append_runtime_timeout_event(
+    result = mediacrawler_crawl.append_runtime_watchdog_stop_event(
         state_path,
         timeout_reason=timeout_reason,
         platform_key="xhs",
@@ -1802,7 +1840,7 @@ def test_watchdog_does_not_replace_existing_terminal_event(tmp_path: Path) -> No
         },
     )
 
-    result = mediacrawler_crawl.append_runtime_timeout_event(
+    result = mediacrawler_crawl.append_runtime_watchdog_stop_event(
         state_path,
         timeout_reason="no_progress_timeout",
         platform_key="weibo",

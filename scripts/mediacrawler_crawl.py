@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from hashlib import md5, sha256
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, MutableMapping
+from typing import Any, Callable, Iterable, Iterator, Mapping, MutableMapping
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -173,6 +173,9 @@ SUPERVISOR_RUNTIME_TIMEOUT_REASONS = frozenset(
         "parent_network_terminal_unwind_timeout",
     }
 )
+RUNTIME_WATCHDOG_STOP_DETAILS = SUPERVISOR_RUNTIME_TIMEOUT_REASONS | {
+    "network_recovery_timeout"
+}
 XHS_RUNTIME_STATUS_AUTH_KEY_RE = re.compile(r"[0-9a-f]{64}\Z")
 XHS_RUNTIME_STATUS_RUN_ID_ENV = "TRIPPOSTCOLLECT_XHS_RUN_ID"
 BILIBILI_ARTICLE_SEARCH_URL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
@@ -1738,7 +1741,19 @@ def terminate_managed_process(
     return complete_stdout, complete_stderr, forced
 
 
-def append_runtime_timeout_event(
+def runtime_watchdog_stop_detail(run: Mapping[str, Any]) -> str:
+    timeout_reason = str(run.get("timeout_reason") or "")
+    if timeout_reason in SUPERVISOR_RUNTIME_TIMEOUT_REASONS:
+        return timeout_reason
+    if (
+        run.get("network_terminal_observed") is True
+        and run.get("network_terminal_reason") == "network_recovery_timeout"
+    ):
+        return "network_recovery_timeout"
+    return ""
+
+
+def append_runtime_watchdog_stop_event(
     state_path: str | Path | None,
     *,
     timeout_reason: str,
@@ -1752,8 +1767,8 @@ def append_runtime_timeout_event(
     network_pause_ceiling_seconds: float | None = None,
     network_terminal_grace_seconds: float | None = None,
 ) -> dict[str, Any]:
-    if timeout_reason not in SUPERVISOR_RUNTIME_TIMEOUT_REASONS:
-        raise ValueError(f"unsupported supervisor timeout reason: {timeout_reason}")
+    if timeout_reason not in RUNTIME_WATCHDOG_STOP_DETAILS:
+        raise ValueError(f"unsupported runtime watchdog stop detail: {timeout_reason}")
     if not state_path:
         return {"skipped": True, "reason": "execution_state_unavailable"}
     state = FrozenExecutionState(state_path)
@@ -5799,11 +5814,11 @@ def _run_platform_without_policy(
     )
     if runtime_reporter is not None:
         runtime_reporter.enter_finalizing()
-    supervisor_timeout_reason = str(run.get("timeout_reason") or "")
-    if supervisor_timeout_reason in SUPERVISOR_RUNTIME_TIMEOUT_REASONS:
-        run["timeout_state_event"] = append_runtime_timeout_event(
+    runtime_stop_detail = runtime_watchdog_stop_detail(run)
+    if runtime_stop_detail in RUNTIME_WATCHDOG_STOP_DETAILS:
+        run["timeout_state_event"] = append_runtime_watchdog_stop_event(
             execution_state_path,
-            timeout_reason=supervisor_timeout_reason,
+            timeout_reason=runtime_stop_detail,
             platform_key=platform_key,
             start_page=int(args.start_page),
             start_offset=(
