@@ -300,6 +300,9 @@ def test_xhs_low_level_executor_uses_profile_contract_without_legacy_login_switc
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_WAIT_SECONDS", "0")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MIN_SECONDS", "999")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MAX_SECONDS", "0")
 
     def fake_run_command(*args: object, **kwargs: object) -> dict[str, object]:
         captured["extra_env"] = kwargs["extra_env"]
@@ -358,6 +361,9 @@ def test_xhs_low_level_executor_uses_profile_contract_without_legacy_login_switc
         (tmp_path / "profile").resolve()
     )
     assert extra_env["TRIPPOSTCOLLECT_XHS_ACCOUNT_ID"] == "xhs-a01"
+    assert extra_env["TRIPPOSTCOLLECT_XHS_NETWORK_WAIT_SECONDS"] == "600"
+    assert extra_env["TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MIN_SECONDS"] == "2"
+    assert extra_env["TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MAX_SECONDS"] == "30"
     assert "TRIPPOSTCOLLECT_XHS_RUN_SCOPED_LOGIN" not in extra_env
     assert "TRIPPOSTCOLLECT_XHS_STORAGE_STATE_PATH" not in extra_env
     assert not hasattr(mediacrawler_crawl, "xhs_storage_snapshot_info")
