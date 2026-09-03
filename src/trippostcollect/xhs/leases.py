@@ -26,10 +26,11 @@ from typing import Any, Mapping, Sequence
 from trippostcollect.core.paths import ensure_dir
 from trippostcollect.xhs.accounts import (
     XhsAccountUnavailable,
-    account_lock_path,
+    account_lock_paths,
     ensure_xhs_schema,
     get_account,
     iso,
+    legacy_account_profile_path,
     parse_iso,
     record_event,
     validate_account_id,
@@ -499,8 +500,8 @@ class SystemProcessInspector:
                 text=True,
                 env={**os.environ, "LC_ALL": "C"},
             )
-        except (OSError, subprocess.SubprocessError):
-            return []
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError("cannot enumerate processes for XHS lease safety") from exc
         snapshots: list[ProcessSnapshot] = []
         for line in result.stdout.splitlines():
             parts = line.strip().split(maxsplit=2)
@@ -552,28 +553,58 @@ class SystemProcessInspector:
 
 class AccountLeaseFileLock:
 
-    def __init__(self, path: Path):
-        self.path = path
-        self._handle: Any = None
+    def __init__(self, path: Path | Sequence[Path]):
+        values = (path,) if isinstance(path, Path) else tuple(path)
+        if not values:
+            raise ValueError("at least one XHS lock path is required")
+        unique: list[Path] = []
+        for value in values:
+            normalized = Path(value).expanduser().absolute()
+            if normalized not in unique:
+                unique.append(normalized)
+        self.paths = tuple(unique)
+        self.path = self.paths[-1]
+        self._handles: list[Any] = []
 
     def acquire(self) -> None:
-        ensure_dir(self.path.parent)
-        handle = self.path.open("a+b")
+        if self._handles:
+            raise RuntimeError("XHS account lock is already acquired")
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for path in self.paths:
+                ensure_dir(path.parent)
+                handle = path.open("a+b")
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BaseException:
+                    handle.close()
+                    raise
+                self._handles.append(handle)
         except BlockingIOError:
-            handle.close()
-            raise XhsAccountUnavailable("requested_xhs_account_local_lock_busy") from None
-        self._handle = handle
+            self.release()
+            raise XhsAccountUnavailable(
+                "requested_xhs_account_local_lock_busy"
+            ) from None
+        except BaseException:
+            self.release()
+            raise
 
     def release(self) -> None:
-        if self._handle is None:
-            return
-        try:
-            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            self._handle.close()
-            self._handle = None
+        first_error: BaseException | None = None
+        while self._handles:
+            handle = self._handles.pop()
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+            finally:
+                try:
+                    handle.close()
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+        if first_error is not None:
+            raise first_error
 
 
 def _seconds_until(value: datetime | None, now: datetime) -> int:
@@ -904,7 +935,7 @@ def _identity_assessment(
     observed = inspector.identity(stored.pid)
     if observed is None:
         presence_reader = getattr(inspector, "process_presence", None)
-        presence = presence_reader(stored.pid) if callable(presence_reader) else False
+        presence = presence_reader(stored.pid) if callable(presence_reader) else None
         evidence["pid_presence"] = presence
         if presence is False:
             return {**evidence, "reason": "pid_absent"}
@@ -917,6 +948,230 @@ def _identity_assessment(
     ):
         return {**evidence, "reason": "pid_reused_or_identity_changed"}
     return {**evidence, "live": True, "reason": "exact_process_identity_alive"}
+
+
+def _query_dicts(conn: sqlite3.Connection, query: str) -> list[dict[str, Any]]:
+    cursor = conn.execute(query)
+    columns = [str(item[0]) for item in cursor.description or ()]
+    return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+
+def assess_legacy_lease_cutover(
+    conn: sqlite3.Connection,
+    *,
+    account_profiles: Mapping[str, Path],
+    inspector: SystemProcessInspector | None = None,
+) -> dict[str, Any]:
+    """Prove that pre-run-scoped owners and browser processes are gone."""
+
+    process_inspector = inspector or SystemProcessInspector()
+    checks: list[dict[str, Any]] = []
+    blocking: list[dict[str, Any]] = []
+    lease_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
+    }
+    lease_rows = (
+        _query_dicts(conn, "SELECT * FROM xhs_account_leases ORDER BY rowid")
+        if lease_columns
+        else []
+    )
+    owner_columns = {
+        "account_id",
+        "lease_id",
+        "owner_host_id",
+        "owner_boot_id",
+        "owner_pid",
+        "owner_process_started_at",
+        "owner_process_start_token",
+        "owner_pgid",
+        "identity_version",
+    }
+    process_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(xhs_lease_processes)")
+    }
+    required_process_columns = {
+        "lease_id",
+        "process_role",
+        "host_id",
+        "boot_id",
+        "pid",
+        "process_started_at",
+        "process_start_token",
+        "pgid",
+        "exited_at",
+    }
+
+    if lease_rows and not owner_columns.issubset(lease_columns):
+        blocking.append(
+            {
+                "role": "legacy_lease_schema",
+                "live": None,
+                "reason": "legacy_owner_identity_unavailable",
+                "missing_columns": sorted(owner_columns - lease_columns),
+            }
+        )
+    elif lease_rows and not required_process_columns.issubset(process_columns):
+        blocking.append(
+            {
+                "role": "legacy_process_registry",
+                "live": None,
+                "reason": "legacy_process_registry_unavailable",
+                "missing_columns": sorted(required_process_columns - process_columns),
+            }
+        )
+    else:
+        for lease in lease_rows:
+            try:
+                if int(lease.get("identity_version") or 0) != LEASE_IDENTITY_VERSION:
+                    raise ValueError("unsupported identity version")
+                stored = _stored_identity(lease, prefix="owner_")
+                if not all(
+                    (
+                        stored.host_id,
+                        stored.boot_id,
+                        stored.process_started_at,
+                        stored.process_start_token,
+                    )
+                ) or stored.pid <= 0 or stored.pgid <= 0:
+                    raise ValueError("incomplete owner identity")
+            except (KeyError, TypeError, ValueError) as exc:
+                blocking.append(
+                    {
+                        "role": "legacy_lease_owner",
+                        "account_id": lease.get("account_id"),
+                        "lease_id": lease.get("lease_id"),
+                        "live": None,
+                        "reason": "legacy_owner_identity_invalid",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
+            owner_check = {
+                "role": "legacy_lease_owner",
+                "account_id": lease["account_id"],
+                "lease_id": lease["lease_id"],
+                **_identity_assessment(stored, process_inspector),
+            }
+            checks.append(owner_check)
+            if owner_check["live"] is not False:
+                blocking.append(owner_check)
+
+        if lease_rows and not blocking:
+            for row in _query_dicts(
+                conn,
+                "SELECT * FROM xhs_lease_processes ORDER BY lease_id, process_role, pid",
+            ):
+                try:
+                    stored = _stored_identity(row)
+                    if not all(
+                        (
+                            stored.host_id,
+                            stored.boot_id,
+                            stored.process_started_at,
+                            stored.process_start_token,
+                        )
+                    ) or stored.pid <= 0 or stored.pgid <= 0:
+                        raise ValueError("incomplete process identity")
+                except (KeyError, TypeError, ValueError) as exc:
+                    blocking.append(
+                        {
+                            "role": "legacy_registered_process",
+                            "lease_id": row.get("lease_id"),
+                            "live": None,
+                            "reason": "legacy_process_identity_invalid",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    continue
+                process_check = {
+                    "role": str(row["process_role"]),
+                    "lease_id": row["lease_id"],
+                    "exited_at": row.get("exited_at"),
+                    **_identity_assessment(stored, process_inspector),
+                }
+                checks.append(process_check)
+                if process_check["live"] is not False:
+                    blocking.append(process_check)
+                    continue
+                if row["process_role"] in {"child", "exporter"}:
+                    group_reader = getattr(process_inspector, "group_members", None)
+                    if not callable(group_reader):
+                        blocking.append(
+                            {
+                                "role": f"{row['process_role']}_process_group",
+                                "lease_id": row["lease_id"],
+                                "live": None,
+                                "reason": "legacy_process_group_unverifiable",
+                            }
+                        )
+                        continue
+                    try:
+                        members = list(group_reader(stored.pgid))
+                    except (OSError, RuntimeError) as exc:
+                        blocking.append(
+                            {
+                                "role": f"{row['process_role']}_process_group",
+                                "lease_id": row["lease_id"],
+                                "live": None,
+                                "reason": "legacy_process_group_unverifiable",
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
+                        continue
+                    if members:
+                        blocking.append(
+                            {
+                                "role": f"{row['process_role']}_process_group",
+                                "lease_id": row["lease_id"],
+                                "live": True,
+                                "reason": "legacy_process_group_has_members",
+                                "pgid": stored.pgid,
+                            }
+                        )
+
+    profile_reader = getattr(process_inspector, "profile_processes", None)
+    for account_id, profile_dir in sorted(account_profiles.items()):
+        if not callable(profile_reader):
+            blocking.append(
+                {
+                    "role": "legacy_profile_chrome",
+                    "account_id": account_id,
+                    "live": None,
+                    "reason": "legacy_profile_scan_unavailable",
+                }
+            )
+            continue
+        try:
+            profile_processes = list(profile_reader(profile_dir))
+        except (OSError, RuntimeError) as exc:
+            blocking.append(
+                {
+                    "role": "legacy_profile_chrome",
+                    "account_id": account_id,
+                    "live": None,
+                    "reason": "legacy_profile_scan_unavailable",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            continue
+        for snapshot in profile_processes:
+            blocking.append(
+                {
+                    "role": "legacy_profile_chrome",
+                    "account_id": account_id,
+                    "live": True,
+                    "reason": "legacy_profile_chrome_alive",
+                    "observed": snapshot.identity.public(),
+                }
+            )
+
+    return {
+        "safe_to_cutover": not blocking,
+        "current_host_id": process_inspector.host_id,
+        "current_boot_id": process_inspector.boot_id,
+        "checks": checks,
+        "blocking": blocking,
+    }
 
 
 def assess_lease_runtime(
@@ -1079,7 +1334,7 @@ def recover_orphaned_account_lease(
         raise XhsOrphanLeaseRecoveryRefused(
             "requested XHS coordination slot does not exist"
         )
-    lock = AccountLeaseFileLock(account_lock_path(value))
+    lock = AccountLeaseFileLock(account_lock_paths(value))
     try:
         lock.acquire()
     except XhsAccountUnavailable as exc:
@@ -1246,7 +1501,7 @@ class LeaseGuard:
         )
         self.budget = budget
         self.inspector = inspector or SystemProcessInspector()
-        self.file_lock = AccountLeaseFileLock(account_lock_path(self.account_id))
+        self.file_lock = AccountLeaseFileLock(account_lock_paths(self.account_id))
         self.account: dict[str, Any] | None = None
         self.lease_id = ""
         self.owner_token = ""
@@ -1263,8 +1518,26 @@ class LeaseGuard:
     def acquire(self) -> dict[str, Any]:
         if self.account is not None:
             raise RuntimeError("XHS LeaseGuard is already acquired")
+        # A legacy schema cutover takes both the historical and current flock
+        # itself.  Perform that one-time transition before this guard owns the
+        # same locks, otherwise a process can deadlock against its own flock.
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            ensure_xhs_schema(conn, cutover_inspector=self.inspector)
         self.file_lock.acquire()
         try:
+            try:
+                legacy_browsers = self.inspector.profile_processes(
+                    legacy_account_profile_path(self.account_id)
+                )
+            except (OSError, RuntimeError) as exc:
+                raise XhsAccountUnavailable(
+                    "requested_xhs_account_legacy_browser_unverifiable"
+                ) from exc
+            if legacy_browsers:
+                raise XhsAccountUnavailable(
+                    "requested_xhs_account_legacy_browser_alive"
+                )
             self.owner = self.inspector.current_identity()
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row

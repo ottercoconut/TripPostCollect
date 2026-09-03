@@ -165,6 +165,11 @@ def test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup(
     )
     monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
     watchdogs = []
+    monkeypatch.setattr(
+        accounts,
+        "XHS_LEGACY_ACCOUNT_ROOT",
+        tmp_path / "legacy-accounts",
+    )
 
     def interrupt_child(self, *_args, **_kwargs):
         watchdogs.append(_kwargs.get("runtime_watchdog"))
@@ -1075,7 +1080,14 @@ def test_xhs_pool_requires_headed_browser(tmp_path: Path) -> None:
 
 def test_xhs_schema_removes_persistent_fields_without_erasing_history_or_files(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
+    monkeypatch.setattr(
+        accounts,
+        "XHS_LEGACY_ACCOUNT_ROOT",
+        tmp_path / "legacy-accounts-root",
+    )
     db_path = tmp_path / "legacy.sqlite"
     legacy_profile = tmp_path / "legacy-account" / "profile"
     legacy_profile.mkdir(parents=True)

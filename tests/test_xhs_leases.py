@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 
 from trippostcollect.db import bootstrap as db_bootstrap
-from trippostcollect.db.bootstrap import bootstrap_database
+from trippostcollect.db.bootstrap import XhsLeaseCutoverBlocked, bootstrap_database
 from trippostcollect.xhs import accounts, leases as xhs_leases, runtime
 from trippostcollect.xhs.accounts import XhsAccountUnavailable
 from trippostcollect.xhs.leases import (
@@ -69,6 +69,7 @@ class FakeInspector:
         presences: dict[int, bool | None] | None = None,
         groups: dict[int, list[ProcessSnapshot]] | None = None,
         profile_processes: list[ProcessSnapshot] | None = None,
+        current: ProcessIdentity | None = None,
     ):
         self.host_id = host_id
         self.boot_id = boot_id
@@ -76,6 +77,7 @@ class FakeInspector:
         self.presences = presences or {}
         self.groups = groups or {}
         self.profiles = profile_processes or []
+        self.current = current
 
     def identity(self, pid: int) -> ProcessIdentity | None:
         return self.identities.get(int(pid))
@@ -91,10 +93,34 @@ class FakeInspector:
     def profile_processes(self, _profile_dir: Path) -> list[ProcessSnapshot]:
         return list(self.profiles)
 
+    def current_identity(self) -> ProcessIdentity:
+        if self.current is None:
+            raise RuntimeError("fake current process identity was not configured")
+        return self.current
+
+
+class NoPresenceInspector:
+    host_id = "host-a"
+    boot_id = "boot-a"
+
+    def identity(self, _pid: int) -> None:
+        return None
+
+    def group_members(self, _pgid: int) -> list[ProcessSnapshot]:
+        return []
+
+    def profile_processes(self, _profile_dir: Path) -> list[ProcessSnapshot]:
+        return []
+
 
 @pytest.fixture
 def control_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
+    monkeypatch.setattr(
+        accounts,
+        "XHS_LEGACY_ACCOUNT_ROOT",
+        tmp_path / "legacy-accounts",
+    )
     monkeypatch.setattr(runtime, "XHS_SESSION_ROOT", tmp_path / "sessions")
     db_path = tmp_path / "control.sqlite"
     bootstrap_database(db_path, sync_jobs=False)
@@ -276,6 +302,36 @@ def create_v21_xhs_database(db_path: Path) -> None:
             INSERT INTO xhs_platform_state VALUES('xhs', 'active', 3);
             """
         )
+        for index, account_id in enumerate(("xhs-a01", "xhs-a02", "xhs-a03"), 1):
+            profile_dir = db_path.parent / f"legacy-account-{index}" / "profile"
+            conn.execute(
+                """
+                UPDATE xhs_accounts
+                SET profile_dir=?, encrypted_state_path=?
+                WHERE account_id=?
+                """,
+                (
+                    str(profile_dir),
+                    str(profile_dir.parent / "storage_state.enc"),
+                    account_id,
+                ),
+            )
+
+
+def dead_v21_inspector() -> FakeInspector:
+    return FakeInspector(presences={111: False, 222: False})
+
+
+def configure_test_lock_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+) -> None:
+    monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", root / "locks")
+    monkeypatch.setattr(
+        accounts,
+        "XHS_LEGACY_ACCOUNT_ROOT",
+        root / "legacy-accounts",
+    )
 
 
 class FaultingConnection:
@@ -285,10 +341,12 @@ class FaultingConnection:
         *,
         fail_after_sql: str | None = None,
         fail_final_commit: bool = False,
+        before_fault: Any | None = None,
     ):
         self.connection = connection
         self.fail_after_sql = fail_after_sql
         self.fail_final_commit = fail_final_commit
+        self.before_fault = before_fault
         self.triggered = False
         self.commit_armed = False
 
@@ -311,6 +369,8 @@ class FaultingConnection:
             and self.fail_after_sql in normalized
         ):
             self.triggered = True
+            if callable(self.before_fault):
+                self.before_fault()
             raise sqlite3.OperationalError("database or disk is full")
         return cursor
 
@@ -318,6 +378,8 @@ class FaultingConnection:
         if self.commit_armed:
             self.commit_armed = False
             self.triggered = True
+            if callable(self.before_fault):
+                self.before_fault()
             raise sqlite3.OperationalError("database or disk is full")
         self.connection.commit()
 
@@ -556,6 +618,131 @@ def acquire_test_lease(
         )
 
 
+def install_legacy_exact_lease_schema(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    owner: ProcessIdentity = OWNER,
+) -> None:
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.executescript(
+        """
+        DROP TABLE IF EXISTS xhs_lease_processes;
+        DROP TABLE IF EXISTS xhs_account_leases;
+        CREATE TABLE xhs_account_leases(
+            account_id TEXT PRIMARY KEY,
+            lease_id TEXT NOT NULL UNIQUE,
+            owner_token TEXT NOT NULL UNIQUE,
+            run_id TEXT NOT NULL UNIQUE,
+            lease_kind TEXT NOT NULL,
+            owner_host_id TEXT NOT NULL,
+            owner_boot_id TEXT NOT NULL,
+            owner_pid INTEGER NOT NULL,
+            owner_process_started_at TEXT NOT NULL,
+            owner_process_start_token TEXT NOT NULL,
+            owner_pgid INTEGER NOT NULL,
+            execution_state_path TEXT NOT NULL,
+            acquired_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            lease_duration_seconds INTEGER NOT NULL,
+            child_shutdown_budget_seconds INTEGER NOT NULL,
+            root_finalize_budget_seconds INTEGER NOT NULL,
+            identity_version INTEGER NOT NULL
+        );
+        CREATE TABLE xhs_lease_processes(
+            lease_id TEXT NOT NULL,
+            process_role TEXT NOT NULL,
+            host_id TEXT NOT NULL,
+            boot_id TEXT NOT NULL,
+            pid INTEGER NOT NULL,
+            process_started_at TEXT NOT NULL,
+            process_start_token TEXT NOT NULL,
+            pgid INTEGER NOT NULL,
+            registered_at TEXT NOT NULL,
+            exited_at TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO xhs_account_leases(
+            account_id, lease_id, owner_token, run_id, lease_kind,
+            owner_host_id, owner_boot_id, owner_pid, owner_process_started_at,
+            owner_process_start_token, owner_pgid, execution_state_path,
+            acquired_at, heartbeat_at, expires_at, lease_duration_seconds,
+            child_shutdown_budget_seconds, root_finalize_budget_seconds,
+            identity_version
+        ) VALUES (
+            'xhs-a01', ?, 'legacy-owner-token', ?, 'crawl',
+            ?, ?, ?, ?, ?, ?, '/legacy/execution.json',
+            '2026-08-30T00:00:00+00:00', '2026-08-30T00:00:00+00:00',
+            '2026-08-31T00:00:00+00:00', 86400, 30, 270, 1
+        )
+        """,
+        (
+            f"lease-{run_id}",
+            run_id,
+            owner.host_id,
+            owner.boot_id,
+            owner.pid,
+            owner.process_started_at,
+            owner.process_start_token,
+            owner.pgid,
+        ),
+    )
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = ON")
+
+
+def start_legacy_lock_holder(path: Path) -> subprocess.Popen[str]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    script = """
+import fcntl
+import pathlib
+import sys
+
+handle = pathlib.Path(sys.argv[1]).open("a+b")
+fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+print("ready", flush=True)
+sys.stdin.readline()
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == "ready"
+    return process
+
+
+def probe_file_lock(path: Path) -> str:
+    script = """
+import fcntl
+import pathlib
+import sys
+
+handle = pathlib.Path(sys.argv[1]).open("a+b")
+try:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("busy")
+else:
+    print("acquired")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
 def test_xhs_exact_lease_schema_and_dynamic_budgets(control_db: Path) -> None:
     with connect(control_db) as conn:
         lease_columns = {
@@ -605,13 +792,18 @@ def test_system_process_identity_uses_platform_exact_start_token() -> None:
 
 def test_xhs_v22_cutover_is_atomic_and_preserves_control_history(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    configure_test_lock_roots(monkeypatch, tmp_path)
     db_path = tmp_path / "legacy-v21.sqlite"
     create_v21_xhs_database(db_path)
 
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA foreign_keys = ON")
-        db_bootstrap.ensure_xhs_control_schema(conn)
+        db_bootstrap.ensure_xhs_control_schema(
+            conn,
+            cutover_inspector=dead_v21_inspector(),
+        )
         conn.commit()
         assert_v22_xhs_history_preserved(conn)
 
@@ -621,6 +813,60 @@ def test_xhs_v22_cutover_is_atomic_and_preserves_control_history(
 
     with sqlite3.connect(db_path) as conn:
         assert_v22_xhs_history_preserved(conn)
+
+
+def test_xhs_v22_cutover_retries_when_legacy_account_set_expands_before_begin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_test_lock_roots(monkeypatch, tmp_path)
+    db_path = tmp_path / "legacy-v21.sqlite"
+    create_v21_xhs_database(db_path)
+
+    class ExpandingInspector(FakeInspector):
+        def __init__(self) -> None:
+            super().__init__(presences={111: False, 222: False})
+            self.inserted = False
+            self.profile_scans = 0
+
+        def profile_processes(self, profile_dir: Path) -> list[ProcessSnapshot]:
+            self.profile_scans += 1
+            if not self.inserted:
+                self.inserted = True
+                inserted_profile = tmp_path / "legacy-account-4" / "profile"
+                with sqlite3.connect(db_path) as concurrent:
+                    concurrent.execute(
+                        """
+                        INSERT INTO xhs_accounts(
+                            account_id, status, profile_dir, encrypted_state_path,
+                            identity_hash, last_verified_at, last_used_at,
+                            created_at, updated_at
+                        ) VALUES (?, 'active', ?, ?, NULL, NULL, NULL, ?, ?)
+                        """,
+                        (
+                            "xhs-a04",
+                            str(inserted_profile),
+                            str(inserted_profile.parent / "storage_state.enc"),
+                            "2026-09-03",
+                            "2026-09-03",
+                        ),
+                    )
+                    concurrent.commit()
+            return super().profile_processes(profile_dir)
+
+    inspector = ExpandingInspector()
+    with sqlite3.connect(db_path) as conn:
+        db_bootstrap.ensure_xhs_control_schema(
+            conn,
+            cutover_inspector=inspector,
+        )
+        conn.commit()
+
+        assert inspector.profile_scans >= 7
+        assert conn.execute(
+            "SELECT status FROM xhs_accounts WHERE account_id='xhs-a04'"
+        ).fetchone() == ("active",)
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 @pytest.mark.parametrize(
@@ -658,9 +904,11 @@ def test_xhs_v22_cutover_is_atomic_and_preserves_control_history(
 )
 def test_xhs_v22_cutover_rolls_back_every_mutation_on_disk_full(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     fail_after_sql: str | None,
     fail_final_commit: bool,
 ) -> None:
+    configure_test_lock_roots(monkeypatch, tmp_path)
     db_path = tmp_path / "legacy-v21.sqlite"
     create_v21_xhs_database(db_path)
 
@@ -674,52 +922,87 @@ def test_xhs_v22_cutover_rolls_back_every_mutation_on_disk_full(
         )
 
         with pytest.raises(sqlite3.OperationalError, match="database or disk is full"):
-            db_bootstrap.ensure_xhs_control_schema(faulting_conn)
+            db_bootstrap.ensure_xhs_control_schema(
+                faulting_conn,
+                cutover_inspector=dead_v21_inspector(),
+            )
 
         assert faulting_conn.triggered is True
         assert conn.in_transaction is False
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert xhs_database_snapshot(conn) == before
         assert_v21_xhs_database_restored(conn)
+        for lock_path in (
+            accounts.legacy_account_lock_path("xhs-a01"),
+            accounts.account_lock_path("xhs-a01"),
+            tmp_path / "legacy-account-1" / "lease.lock",
+        ):
+            assert probe_file_lock(lock_path) == "acquired"
 
     with sqlite3.connect(db_path) as conn:
         assert xhs_database_snapshot(conn) == before
         assert_v21_xhs_database_restored(conn)
         conn.execute("PRAGMA foreign_keys = ON")
-        db_bootstrap.ensure_xhs_control_schema(conn)
+        db_bootstrap.ensure_xhs_control_schema(
+            conn,
+            cutover_inspector=dead_v21_inspector(),
+        )
         conn.commit()
         assert_v22_xhs_history_preserved(conn)
 
     with sqlite3.connect(db_path) as conn:
         assert_v22_xhs_history_preserved(conn)
+
+
+def test_xhs_v22_cutover_holds_every_legacy_lock_until_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_test_lock_roots(monkeypatch, tmp_path)
+    db_path = tmp_path / "legacy-v21.sqlite"
+    create_v21_xhs_database(db_path)
+    lock_paths = (
+        accounts.legacy_account_lock_path("xhs-a01"),
+        accounts.account_lock_path("xhs-a01"),
+        tmp_path / "legacy-account-1" / "lease.lock",
+    )
+    observed_while_failing: list[list[str]] = []
+
+    def observe_locks() -> None:
+        observed_while_failing.append(
+            [probe_file_lock(lock_path) for lock_path in lock_paths]
+        )
+
+    with sqlite3.connect(db_path) as conn:
+        before = xhs_database_snapshot(conn)
+        faulting_conn = FaultingConnection(
+            conn,
+            fail_after_sql="PRAGMA foreign_key_check",
+            before_fault=observe_locks,
+        )
+
+        with pytest.raises(sqlite3.OperationalError, match="database or disk is full"):
+            db_bootstrap.ensure_xhs_control_schema(
+                faulting_conn,
+                cutover_inspector=dead_v21_inspector(),
+            )
+
+        assert observed_while_failing == [["busy", "busy", "busy"]]
+        assert [probe_file_lock(path) for path in lock_paths] == [
+            "acquired",
+            "acquired",
+            "acquired",
+        ]
+        assert xhs_database_snapshot(conn) == before
 
 
 def test_xhs_v22_lease_only_cutover_rolls_back_schema_and_row(
     control_db: Path,
 ) -> None:
     with sqlite3.connect(control_db) as conn:
-        conn.execute("PRAGMA foreign_keys = OFF")
-        conn.execute("DROP TABLE xhs_lease_processes")
-        conn.execute("DROP TABLE xhs_account_leases")
-        conn.execute(
-            """
-            CREATE TABLE xhs_account_leases(
-                account_id TEXT PRIMARY KEY,
-                run_id TEXT NOT NULL UNIQUE,
-                acquired_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO xhs_account_leases(account_id, run_id, acquired_at, expires_at)
-            VALUES ('xhs-a01', 'obsolete-run', '2026-08-30', '2026-08-31')
-            """
-        )
+        install_legacy_exact_lease_schema(conn, run_id="obsolete-run")
         conn.execute("DELETE FROM schema_migrations WHERE version=22")
         conn.commit()
-        conn.execute("PRAGMA foreign_keys = ON")
         before = xhs_database_snapshot(conn)
 
         faulting_conn = FaultingConnection(
@@ -727,17 +1010,26 @@ def test_xhs_v22_lease_only_cutover_rolls_back_schema_and_row(
             fail_after_sql="CREATE TABLE IF NOT EXISTS xhs_account_leases",
         )
         with pytest.raises(sqlite3.OperationalError, match="database or disk is full"):
-            db_bootstrap.ensure_xhs_control_schema(faulting_conn)
+            db_bootstrap.ensure_xhs_control_schema(
+                faulting_conn,
+                cutover_inspector=dead_v21_inspector(),
+            )
 
         assert faulting_conn.triggered is True
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert xhs_database_snapshot(conn) == before
-        assert {row[1] for row in conn.execute(
-            "PRAGMA table_info(xhs_account_leases)"
-        )} == {"account_id", "run_id", "acquired_at", "expires_at"}
+        legacy_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
+        }
+        assert "runtime_profile_dir" not in legacy_columns
+        assert {
+            "lease_id",
+            "owner_process_start_token",
+            "identity_version",
+        } <= legacy_columns
         assert conn.execute(
-            "SELECT account_id, run_id, acquired_at, expires_at FROM xhs_account_leases"
-        ).fetchone() == ("xhs-a01", "obsolete-run", "2026-08-30", "2026-08-31")
+            "SELECT account_id, run_id, lease_id FROM xhs_account_leases"
+        ).fetchone() == ("xhs-a01", "obsolete-run", "lease-obsolete-run")
         assert conn.execute(
             "SELECT status FROM xhs_accounts WHERE account_id='xhs-a01'"
         ).fetchone() == ("active",)
@@ -746,7 +1038,10 @@ def test_xhs_v22_lease_only_cutover_rolls_back_schema_and_row(
         ).fetchone() is None
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
-        db_bootstrap.ensure_xhs_control_schema(conn)
+        db_bootstrap.ensure_xhs_control_schema(
+            conn,
+            cutover_inspector=dead_v21_inspector(),
+        )
         conn.commit()
         assert "runtime_profile_dir" in {
             row[1] for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
@@ -760,7 +1055,9 @@ def test_xhs_v22_lease_only_cutover_rolls_back_schema_and_row(
 
 def test_xhs_v22_cutover_rejects_foreign_key_corruption_without_committing(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    configure_test_lock_roots(monkeypatch, tmp_path)
     db_path = tmp_path / "legacy-v21.sqlite"
     create_v21_xhs_database(db_path)
     with sqlite3.connect(db_path) as conn:
@@ -777,7 +1074,10 @@ def test_xhs_v22_cutover_rejects_foreign_key_corruption_without_committing(
         before = xhs_database_snapshot(conn)
 
         with pytest.raises(RuntimeError, match="foreign-key check failed"):
-            db_bootstrap.ensure_xhs_control_schema(conn)
+            db_bootstrap.ensure_xhs_control_schema(
+                conn,
+                cutover_inspector=dead_v21_inspector(),
+            )
 
         assert conn.in_transaction is False
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
@@ -811,8 +1111,31 @@ def test_xhs_schema_statements_do_not_implicitly_commit() -> None:
         ).fetchone() is None
 
 
-def test_obsolete_lease_is_discarded_during_exact_schema_cutover(tmp_path: Path) -> None:
+def test_process_enumeration_failure_is_not_treated_as_an_empty_process_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise OSError("ps unavailable")
+
+    monkeypatch.setattr(xhs_leases.subprocess, "run", unavailable)
+    inspector = SystemProcessInspector.__new__(SystemProcessInspector)
+
+    with pytest.raises(RuntimeError, match="cannot enumerate processes"):
+        inspector._ps_snapshots()
+
+
+def test_identityless_legacy_lease_blocks_schema_cutover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
+    monkeypatch.setattr(
+        accounts,
+        "XHS_LEGACY_ACCOUNT_ROOT",
+        tmp_path / "legacy-accounts",
+    )
     db_path = tmp_path / "legacy.sqlite"
+    legacy_profile = tmp_path / "legacy-accounts" / "xhs-a01" / "profile"
     with sqlite3.connect(db_path) as conn:
         conn.executescript(
             """
@@ -834,36 +1157,32 @@ def test_obsolete_lease_is_discarded_during_exact_schema_cutover(tmp_path: Path)
                 acquired_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL
             );
-            INSERT INTO xhs_accounts VALUES(
-                'xhs-a01', 'active', '/profile', '/state', 'identity',
-                NULL, NULL, '2026-08-30', '2026-08-30'
-            );
             INSERT INTO xhs_account_leases VALUES(
                 'xhs-a01', 'legacy-run', '2026-08-30', '2026-08-31'
             );
             """
         )
-        accounts.ensure_xhs_schema(conn)
-
-        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
-        event = conn.execute(
+        conn.execute(
             """
-            SELECT account_id, run_id, event_type, details_json
-            FROM xhs_account_events
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        assert tuple(event[:3]) == (
-            "xhs-a01",
-            "legacy-run",
-            "lease_schema_cutover_discarded",
+            INSERT INTO xhs_accounts VALUES(
+                'xhs-a01', 'active', ?, ?, 'identity',
+                NULL, NULL, '2026-08-30', '2026-08-30'
+            )
+            """,
+            (
+                str(legacy_profile),
+                str(legacy_profile.parent / "storage_state.enc"),
+            ),
         )
-        assert json.loads(event[3]) == {
-            "reason": "unsupported_lease_schema",
-            "migration_version": 22,
-            "legacy_acquired_at": "2026-08-30",
-            "legacy_expires_at": "2026-08-31",
+        with pytest.raises(
+            XhsLeaseCutoverBlocked,
+            match="legacy_owner_identity_unavailable",
+        ):
+            accounts.ensure_xhs_schema(conn, cutover_inspector=FakeInspector())
+
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 1
+        assert "runtime_profile_dir" not in {
+            row[1] for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
         }
         assert conn.execute(
             "SELECT status FROM xhs_accounts WHERE account_id='xhs-a01'"
@@ -891,30 +1210,14 @@ def test_obsolete_lease_cutover_preserves_discovery_memory(
             """
         )
         conn.commit()
-        conn.execute("PRAGMA foreign_keys = OFF")
-        conn.execute("DROP TABLE xhs_lease_processes")
-        conn.execute("DROP TABLE xhs_account_leases")
-        conn.execute(
-            """
-            CREATE TABLE xhs_account_leases(
-                account_id TEXT PRIMARY KEY,
-                run_id TEXT NOT NULL UNIQUE,
-                acquired_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO xhs_account_leases(account_id, run_id, acquired_at, expires_at)
-            VALUES ('xhs-a01', 'obsolete-run', '2026-08-30', '2026-08-31')
-            """
-        )
+        install_legacy_exact_lease_schema(conn, run_id="obsolete-run")
         conn.execute("DELETE FROM schema_migrations WHERE version=21")
         conn.commit()
-        conn.execute("PRAGMA foreign_keys = ON")
 
-        accounts.ensure_xhs_schema(conn)
+        accounts.ensure_xhs_schema(
+            conn,
+            cutover_inspector=FakeInspector(presences={OWNER.pid: False}),
+        )
 
         assert "owner_process_start_token" in {
             row[1] for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
@@ -938,6 +1241,349 @@ def test_obsolete_lease_cutover_preserves_discovery_memory(
             WHERE run_id='obsolete-run'
             """
         ).fetchone()[0] == "lease_schema_cutover_discarded"
+
+
+@pytest.mark.parametrize(
+    ("inspector", "reason"),
+    [
+        (
+            FakeInspector(identities={OWNER.pid: OWNER}),
+            "exact_process_identity_alive",
+        ),
+        (
+            FakeInspector(presences={OWNER.pid: True}),
+            "exact_process_identity_unavailable",
+        ),
+        (
+            NoPresenceInspector(),
+            "exact_process_identity_unavailable",
+        ),
+        (
+            FakeInspector(host_id="other-host", presences={OWNER.pid: False}),
+            "different_host_unverifiable",
+        ),
+    ],
+)
+def test_legacy_cutover_refuses_live_or_unverifiable_owner(
+    control_db: Path,
+    inspector: Any,
+    reason: str,
+) -> None:
+    with connect(control_db) as conn:
+        install_legacy_exact_lease_schema(conn, run_id="blocked-cutover")
+
+        with pytest.raises(XhsLeaseCutoverBlocked, match=reason):
+            accounts.ensure_xhs_schema(conn, cutover_inspector=inspector)
+
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 1
+        assert "runtime_profile_dir" not in {
+            row[1] for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_events WHERE run_id='blocked-cutover'"
+        ).fetchone()[0] == 0
+
+
+def test_legacy_cutover_accepts_exact_pid_reuse_as_old_owner_dead(
+    control_db: Path,
+) -> None:
+    reused = ProcessIdentity(
+        host_id=OWNER.host_id,
+        boot_id=OWNER.boot_id,
+        pid=OWNER.pid,
+        process_started_at="2026-09-03T00:00:00+00:00",
+        process_start_token="reused-process-token",
+        pgid=999,
+    )
+    with connect(control_db) as conn:
+        install_legacy_exact_lease_schema(conn, run_id="pid-reused-cutover")
+
+        accounts.ensure_xhs_schema(
+            conn,
+            cutover_inspector=FakeInspector(identities={OWNER.pid: reused}),
+        )
+
+        assert "runtime_profile_dir" in {
+            row[1] for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
+        }
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+        assert conn.execute(
+            """
+            SELECT event_type FROM xhs_account_events
+            WHERE run_id='pid-reused-cutover'
+            """
+        ).fetchone()[0] == "lease_schema_cutover_discarded"
+
+
+def test_legacy_cutover_refuses_live_registered_child_after_owner_dies(
+    control_db: Path,
+) -> None:
+    child = ProcessIdentity(
+        host_id=OWNER.host_id,
+        boot_id=OWNER.boot_id,
+        pid=222,
+        process_started_at="2026-08-30T00:01:00+00:00",
+        process_start_token="legacy-child-222",
+        pgid=222,
+    )
+    with connect(control_db) as conn:
+        install_legacy_exact_lease_schema(conn, run_id="live-child-cutover")
+        conn.execute(
+            """
+            INSERT INTO xhs_lease_processes(
+                lease_id, process_role, host_id, boot_id, pid,
+                process_started_at, process_start_token, pgid,
+                registered_at, exited_at
+            ) VALUES (
+                'lease-live-child-cutover', 'child', ?, ?, ?, ?, ?, ?,
+                '2026-08-30T00:01:00+00:00', NULL
+            )
+            """,
+            (
+                child.host_id,
+                child.boot_id,
+                child.pid,
+                child.process_started_at,
+                child.process_start_token,
+                child.pgid,
+            ),
+        )
+        conn.commit()
+
+        with pytest.raises(
+            XhsLeaseCutoverBlocked,
+            match="exact_process_identity_alive",
+        ):
+            accounts.ensure_xhs_schema(
+                conn,
+                cutover_inspector=FakeInspector(
+                    identities={child.pid: child},
+                    presences={OWNER.pid: False},
+                ),
+            )
+
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 1
+
+
+def test_legacy_flock_blocks_schema_cutover_even_when_owner_is_dead(
+    control_db: Path,
+) -> None:
+    legacy_lock = accounts.legacy_account_lock_path("xhs-a01")
+    holder = start_legacy_lock_holder(legacy_lock)
+    try:
+        with connect(control_db) as conn:
+            install_legacy_exact_lease_schema(conn, run_id="locked-cutover")
+            with pytest.raises(
+                XhsLeaseCutoverBlocked,
+                match="xhs_legacy_cutover_lock_busy",
+            ):
+                accounts.ensure_xhs_schema(
+                    conn,
+                    cutover_inspector=FakeInspector(
+                        presences={OWNER.pid: False}
+                    ),
+                )
+            assert conn.execute(
+                "SELECT COUNT(*) FROM xhs_account_leases"
+            ).fetchone()[0] == 1
+            assert "runtime_profile_dir" not in {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
+            }
+    finally:
+        holder.communicate("\n", timeout=5)
+
+
+def test_stored_legacy_account_lock_blocks_account_schema_cutover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
+    monkeypatch.setattr(
+        accounts,
+        "XHS_LEGACY_ACCOUNT_ROOT",
+        tmp_path / "legacy-accounts-root",
+    )
+    db_path = tmp_path / "legacy-account.sqlite"
+    legacy_profile = tmp_path / "custom-legacy-account" / "profile"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE xhs_accounts(
+                account_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                profile_dir TEXT NOT NULL,
+                storage_state_path TEXT NOT NULL,
+                platform_identity TEXT,
+                cooldown_until TEXT,
+                last_used_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO xhs_accounts VALUES(
+                'xhs-a01', 'active', ?, ?, NULL,
+                NULL, NULL, '2026-08-30', '2026-08-30'
+            )
+            """,
+            (
+                str(legacy_profile),
+                str(legacy_profile.parent / "storage_state.enc"),
+            ),
+        )
+        conn.commit()
+
+    holder = start_legacy_lock_holder(legacy_profile.parent / "lease.lock")
+    try:
+        with sqlite3.connect(db_path) as conn:
+            with pytest.raises(
+                XhsLeaseCutoverBlocked,
+                match="xhs_legacy_cutover_lock_busy",
+            ):
+                accounts.ensure_xhs_schema(
+                    conn,
+                    cutover_inspector=FakeInspector(),
+                )
+            assert "profile_dir" in {
+                row[1] for row in conn.execute("PRAGMA table_info(xhs_accounts)")
+            }
+    finally:
+        holder.communicate("\n", timeout=5)
+
+
+def test_current_guard_and_legacy_runner_share_the_historical_flock(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    run_id = "dual-lock-guard"
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "dual-lock.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10),
+    )
+    legacy_lock = accounts.legacy_account_lock_path("xhs-a01")
+    holder = start_legacy_lock_holder(legacy_lock)
+    try:
+        with pytest.raises(XhsAccountUnavailable, match="local_lock_busy"):
+            guard.acquire()
+    finally:
+        holder.communicate("\n", timeout=5)
+
+    guard.acquire()
+    assert probe_file_lock(legacy_lock) == "busy"
+    assert guard.close() is True
+
+
+def test_guard_migrates_legacy_schema_before_taking_its_own_dual_flock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_test_lock_roots(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime, "XHS_SESSION_ROOT", tmp_path / "sessions")
+    db_path = tmp_path / "legacy-v21.sqlite"
+    create_v21_xhs_database(db_path)
+    runner = ProcessIdentity(
+        host_id="host-a",
+        boot_id="boot-a",
+        pid=333,
+        process_started_at="2026-09-03T00:00:00+00:00",
+        process_start_token="runner-start-333",
+        pgid=333,
+    )
+    inspector = FakeInspector(
+        identities={runner.pid: runner},
+        presences={111: False, 222: False},
+        current=runner,
+    )
+    run_id = "guard-cutover-no-self-deadlock"
+    guard = LeaseGuard(
+        db_path=db_path,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "guard-cutover.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10),
+        inspector=inspector,
+    )
+
+    acquired = guard.acquire()
+    try:
+        assert acquired["account_id"] == "xhs-a01"
+        assert guard.lease_id
+        assert probe_file_lock(accounts.legacy_account_lock_path("xhs-a01")) == "busy"
+    finally:
+        assert guard.close() is True
+    with connect(db_path) as conn:
+        assert "runtime_profile_dir" in {
+            row[1] for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
+        }
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+        assert conn.execute(
+            """
+            SELECT COUNT(*) FROM xhs_account_events
+            WHERE event_type='lease_schema_cutover_discarded' AND run_id='legacy-run'
+            """
+        ).fetchone()[0] == 1
+
+
+def test_dual_lock_rolls_back_legacy_lock_when_current_lock_is_busy(
+    control_db: Path,
+) -> None:
+    current_lock = accounts.account_lock_path("xhs-a01")
+    current_holder = start_legacy_lock_holder(current_lock)
+    dual_lock = xhs_leases.AccountLeaseFileLock(
+        accounts.account_lock_paths("xhs-a01")
+    )
+    try:
+        with pytest.raises(XhsAccountUnavailable, match="local_lock_busy"):
+            dual_lock.acquire()
+        assert probe_file_lock(accounts.legacy_account_lock_path("xhs-a01")) == "acquired"
+    finally:
+        current_holder.communicate("\n", timeout=5)
+
+
+def test_current_guard_refuses_orphan_browser_using_legacy_profile(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    browser = ProcessSnapshot(
+        identity=ProcessIdentity(
+            host_id="host-a",
+            boot_id="boot-a",
+            pid=444,
+            process_started_at="2026-09-03T00:00:00+00:00",
+            process_start_token="legacy-browser-444",
+            pgid=444,
+        ),
+        argv=(
+            "Chromium",
+            f"--user-data-dir={accounts.legacy_account_profile_path('xhs-a01')}",
+        ),
+    )
+    run_id = "legacy-browser-blocked"
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "legacy-browser.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10),
+        inspector=FakeInspector(profile_processes=[browser]),
+    )
+
+    with pytest.raises(XhsAccountUnavailable, match="legacy_browser_alive"):
+        guard.acquire()
+    with connect(control_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
 
 
 def test_xhs_control_bootstrap_does_not_create_content_or_scheduler_tables(
@@ -1930,6 +2576,7 @@ from trippostcollect.xhs.leases import LeaseBudget, LeaseGuard, XhsLeaseSignal
 root = Path(sys.argv[1])
 run_id = sys.argv[2]
 accounts.XHS_LOCK_ROOT = root / "locks"
+accounts.XHS_LEGACY_ACCOUNT_ROOT = root / "legacy-accounts"
 runtime.XHS_SESSION_ROOT = root / "sessions"
 guard = LeaseGuard(
     db_path=root / "control.sqlite",

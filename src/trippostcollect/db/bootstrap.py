@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,15 @@ XHS_SCHEMA_MIGRATIONS = (
     (21, "xhs_exact_lease_identity"),
     (22, "xhs_run_scoped_login_state"),
 )
+
+
+class XhsLeaseCutoverBlocked(RuntimeError):
+    """Raised before schema mutation when legacy runtime death is unproven."""
+
+    def __init__(self, reason: str, details: dict[str, Any] | None = None):
+        self.reason = reason
+        self.details = details or {}
+        super().__init__(reason)
 
 
 def qmarks(values: set[str] | list[str]) -> str:
@@ -194,6 +204,104 @@ def _record_xhs_schema_migrations(conn: sqlite3.Connection) -> None:
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
             (version, name),
         )
+
+
+def _xhs_cutover_accounts(conn: sqlite3.Connection) -> dict[str, Path]:
+    from trippostcollect.xhs.accounts import legacy_account_lock_path
+
+    profiles: dict[str, Path] = {}
+    if table_exists(conn, "xhs_accounts"):
+        columns = table_columns(conn, "xhs_accounts")
+        selected = (
+            "account_id, profile_dir" if "profile_dir" in columns else "account_id"
+        )
+        cursor = conn.execute(
+            f"SELECT {selected} FROM xhs_accounts ORDER BY account_id"
+        )
+        names = [str(item[0]) for item in cursor.description or ()]
+        rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+        for row in rows:
+            account_id = str(row["account_id"])
+            profile_value = str(row.get("profile_dir") or "")
+            profiles[account_id] = (
+                Path(profile_value).expanduser().absolute()
+                if profile_value
+                else legacy_account_lock_path(account_id).parent / "profile"
+            )
+    if table_exists(conn, "xhs_account_leases"):
+        lease_columns = table_columns(conn, "xhs_account_leases")
+        if "account_id" in lease_columns:
+            for row in conn.execute(
+                "SELECT DISTINCT account_id FROM xhs_account_leases ORDER BY account_id"
+            ):
+                account_id = str(row[0])
+                profiles.setdefault(
+                    account_id,
+                    legacy_account_lock_path(account_id).parent / "profile",
+                )
+    return profiles
+
+
+@contextmanager
+def _guard_xhs_legacy_cutover(
+    conn: sqlite3.Connection,
+    *,
+    inspector: Any | None,
+):
+    """Hold both generations of locks while proving legacy runtimes are dead."""
+
+    from trippostcollect.xhs.accounts import (
+        XhsAccountUnavailable,
+        account_lock_path,
+        legacy_account_lock_path,
+    )
+    from trippostcollect.xhs.leases import (
+        AccountLeaseFileLock,
+        assess_legacy_lease_cutover,
+    )
+
+    profiles = _xhs_cutover_accounts(conn)
+    lock_paths: list[Path] = []
+    for account_id, profile_dir in profiles.items():
+        lock_paths.extend(
+            (
+                legacy_account_lock_path(account_id),
+                profile_dir.parent / "lease.lock",
+                account_lock_path(account_id),
+            )
+        )
+    lock = AccountLeaseFileLock(lock_paths) if lock_paths else None
+    try:
+        if lock is not None:
+            try:
+                lock.acquire()
+            except (OSError, XhsAccountUnavailable) as exc:
+                raise XhsLeaseCutoverBlocked(
+                    (
+                        "xhs_legacy_cutover_lock_busy"
+                        if isinstance(exc, XhsAccountUnavailable)
+                        else "xhs_legacy_cutover_lock_unavailable"
+                    ),
+                    {
+                        "account_ids": sorted(profiles),
+                        "error_type": type(exc).__name__,
+                    },
+                ) from exc
+        assessment = assess_legacy_lease_cutover(
+            conn,
+            account_profiles=profiles,
+            inspector=inspector,
+        )
+        if not assessment["safe_to_cutover"]:
+            reason = str(
+                (assessment.get("blocking") or [{}])[0].get("reason")
+                or "xhs_legacy_runtime_unverifiable"
+            )
+            raise XhsLeaseCutoverBlocked(reason, assessment)
+        yield profiles
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> bool:
@@ -512,10 +620,9 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
-    schema_statements = _sqlite_script_statements(
-        XHS_CONTROL_SCHEMA.read_text(encoding="utf-8")
-    )
+def _xhs_rebuild_state(
+    conn: sqlite3.Connection,
+) -> tuple[set[str], bool, bool]:
     account_columns = (
         table_columns(conn, "xhs_accounts")
         if table_exists(conn, "xhs_accounts")
@@ -539,63 +646,121 @@ def ensure_xhs_control_schema(conn: sqlite3.Connection) -> None:
     rebuild_leases = bool(
         lease_columns and not XHS_EXACT_LEASE_COLUMNS.issubset(lease_columns)
     )
-    if rebuild_accounts or rebuild_leases:
-        last_used = "last_used_at" if "last_used_at" in account_columns else "NULL"
-        created = "created_at" if "created_at" in account_columns else "datetime('now')"
-        updated = "updated_at" if "updated_at" in account_columns else "datetime('now')"
-        conn.commit()
-        try:
-            conn.execute("PRAGMA foreign_keys = OFF")
-            conn.execute("BEGIN IMMEDIATE")
-            obsolete_leases = obsolete_xhs_lease_snapshots(conn)
-            if rebuild_accounts:
-                conn.execute(
-                    f"""
-                    CREATE TEMP TABLE xhs_accounts_runtime_backup AS
-                    SELECT
-                        account_id,
-                        CASE
-                            WHEN status='retired' THEN 'retired'
-                            WHEN status='quarantined' THEN 'quarantined'
-                            ELSE 'active'
-                        END AS status,
-                        {last_used} AS last_used_at,
-                        {created} AS created_at,
-                        {updated} AS updated_at
-                    FROM xhs_accounts
-                    """
-                )
-            conn.execute("DROP TABLE IF EXISTS xhs_lease_processes")
-            conn.execute("DROP TABLE IF EXISTS xhs_account_leases")
-            if rebuild_accounts:
-                conn.execute("DROP INDEX IF EXISTS idx_xhs_accounts_eligible")
-                conn.execute("DROP TABLE xhs_accounts")
-            _execute_sqlite_statements(conn, schema_statements)
-            if rebuild_accounts:
-                conn.execute(
-                    """
-                    INSERT INTO xhs_accounts(
-                        account_id, status, last_used_at, created_at, updated_at
-                    )
-                    SELECT account_id, status, last_used_at, created_at, updated_at
-                    FROM xhs_accounts_runtime_backup
-                    """
-                )
-                conn.execute("DROP TABLE xhs_accounts_runtime_backup")
-            conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
-            record_xhs_lease_schema_cutover(conn, obsolete_leases)
-            _record_xhs_schema_migrations(conn)
-            _assert_xhs_foreign_keys(conn)
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-        finally:
-            conn.execute("PRAGMA foreign_keys = ON")
+    return account_columns, rebuild_accounts, rebuild_leases
+
+
+def ensure_xhs_control_schema(
+    conn: sqlite3.Connection,
+    *,
+    cutover_inspector: Any | None = None,
+) -> None:
+    schema_statements = _sqlite_script_statements(
+        XHS_CONTROL_SCHEMA.read_text(encoding="utf-8")
+    )
+    _, rebuild_accounts, rebuild_leases = _xhs_rebuild_state(conn)
+    if not (rebuild_accounts or rebuild_leases):
+        conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
+        _execute_sqlite_statements(conn, schema_statements)
+        _record_xhs_schema_migrations(conn)
         return
-    conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
-    _execute_sqlite_statements(conn, schema_statements)
-    _record_xhs_schema_migrations(conn)
+    # End any caller transaction before taking filesystem locks.  Every cutover
+    # path then follows the same lock order: flocks first, SQLite write lock next.
+    conn.commit()
+    cutover_retries = 0
+    while True:
+        account_columns, rebuild_accounts, rebuild_leases = _xhs_rebuild_state(conn)
+        if not (rebuild_accounts or rebuild_leases):
+            conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
+            _execute_sqlite_statements(conn, schema_statements)
+            _record_xhs_schema_migrations(conn)
+            return
+        with _guard_xhs_legacy_cutover(
+            conn,
+            inspector=cutover_inspector,
+        ) as locked_profiles:
+            try:
+                conn.execute("PRAGMA foreign_keys = OFF")
+                conn.execute("BEGIN IMMEDIATE")
+                current_profiles = _xhs_cutover_accounts(conn)
+                (
+                    current_account_columns,
+                    current_rebuild_accounts,
+                    current_rebuild_leases,
+                ) = _xhs_rebuild_state(conn)
+                if not (current_rebuild_accounts or current_rebuild_leases):
+                    conn.rollback()
+                    cutover_retries += 1
+                    continue
+                if current_profiles != locked_profiles:
+                    conn.rollback()
+                    cutover_retries += 1
+                    if cutover_retries >= 4:
+                        raise XhsLeaseCutoverBlocked(
+                            "xhs_legacy_cutover_changed_during_lock",
+                            {"attempts": cutover_retries},
+                        )
+                    continue
+                last_used = (
+                    "last_used_at"
+                    if "last_used_at" in current_account_columns
+                    else "NULL"
+                )
+                created = (
+                    "created_at"
+                    if "created_at" in current_account_columns
+                    else "datetime('now')"
+                )
+                updated = (
+                    "updated_at"
+                    if "updated_at" in current_account_columns
+                    else "datetime('now')"
+                )
+                obsolete_leases = obsolete_xhs_lease_snapshots(conn)
+                if current_rebuild_accounts:
+                    conn.execute(
+                        f"""
+                        CREATE TEMP TABLE xhs_accounts_runtime_backup AS
+                        SELECT
+                            account_id,
+                            CASE
+                                WHEN status='retired' THEN 'retired'
+                                WHEN status='quarantined' THEN 'quarantined'
+                                ELSE 'active'
+                            END AS status,
+                            {last_used} AS last_used_at,
+                            {created} AS created_at,
+                            {updated} AS updated_at
+                        FROM xhs_accounts
+                        """
+                    )
+                conn.execute("DROP TABLE IF EXISTS xhs_lease_processes")
+                conn.execute("DROP TABLE IF EXISTS xhs_account_leases")
+                if current_rebuild_accounts:
+                    conn.execute("DROP INDEX IF EXISTS idx_xhs_accounts_eligible")
+                    conn.execute("DROP TABLE xhs_accounts")
+                _execute_sqlite_statements(conn, schema_statements)
+                if current_rebuild_accounts:
+                    conn.execute(
+                        """
+                        INSERT INTO xhs_accounts(
+                            account_id, status, last_used_at, created_at, updated_at
+                        )
+                        SELECT account_id, status, last_used_at, created_at, updated_at
+                        FROM xhs_accounts_runtime_backup
+                        """
+                    )
+                    conn.execute("DROP TABLE xhs_accounts_runtime_backup")
+                conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
+                record_xhs_lease_schema_cutover(conn, obsolete_leases)
+                _record_xhs_schema_migrations(conn)
+                _assert_xhs_foreign_keys(conn)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                conn.execute("PRAGMA foreign_keys = ON")
+        return
 
 
 def sync_config_jobs(conn: sqlite3.Connection, config: dict[str, Any]) -> int:
