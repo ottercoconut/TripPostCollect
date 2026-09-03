@@ -80,6 +80,7 @@ def seed_identity_probe_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def assert_safe_identity_probe_environment(kwargs: dict[str, Any]) -> None:
     assert kwargs["env"] == IDENTITY_PROBE_ENVIRONMENT
+    assert kwargs["timeout"] == xhs_leases.IDENTITY_PROBE_TIMEOUT_SECONDS
     assert not set(IDENTITY_PROBE_SECRET_KEYS).intersection(kwargs["env"])
 
 
@@ -121,6 +122,23 @@ class FakeInspector:
         if self.current is None:
             raise RuntimeError("fake current process identity was not configured")
         return self.current
+
+
+class FakeMonotonicClock:
+    def __init__(self, value: float = 0.0):
+        self.value = float(value)
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.value
+
+    def sleep(self, seconds: float) -> None:
+        assert 0 <= seconds <= 0.1
+        self.sleeps.append(seconds)
+        self.value += seconds
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
 
 
 class NoPresenceInspector:
@@ -1180,6 +1198,7 @@ def test_sysctl_probe_uses_minimal_capability_free_environment(
     [
         OSError("sysctl unavailable"),
         subprocess.CalledProcessError(1, ["sysctl"]),
+        subprocess.TimeoutExpired(["sysctl"], 2),
     ],
 )
 def test_sysctl_probe_failure_does_not_inherit_capabilities(
@@ -1233,6 +1252,7 @@ def test_ioreg_probe_uses_minimal_capability_free_environment(
     [
         OSError("ioreg unavailable"),
         subprocess.CalledProcessError(1, ["/usr/sbin/ioreg"]),
+        subprocess.TimeoutExpired(["/usr/sbin/ioreg"], 2),
     ],
 )
 def test_ioreg_probe_failure_does_not_inherit_capabilities(
@@ -1303,6 +1323,32 @@ def test_process_presence_ps_failure_does_not_inherit_capabilities(
     assert_safe_identity_probe_environment(calls[0])
 
 
+def test_process_presence_ps_timeout_is_unverifiable_without_pid_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    seed_identity_probe_secrets(monkeypatch)
+    monkeypatch.setattr(xhs_leases.sys, "platform", "darwin")
+
+    def timeout(_command: list[str], **kwargs: Any) -> None:
+        calls.append(kwargs)
+        raise subprocess.TimeoutExpired(["ps"], kwargs["timeout"])
+
+    fallback_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(xhs_leases.subprocess, "run", timeout)
+    monkeypatch.setattr(
+        xhs_leases.os,
+        "kill",
+        lambda pid, signum: fallback_calls.append((pid, signum)),
+    )
+    inspector = SystemProcessInspector.__new__(SystemProcessInspector)
+
+    with pytest.raises(xhs_leases.XhsIdentityProbeTimeout):
+        inspector.process_presence(42)
+    assert fallback_calls == []
+    assert_safe_identity_probe_environment(calls[0])
+
+
 def test_process_snapshot_ps_uses_minimal_capability_free_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1365,6 +1411,24 @@ def test_process_snapshot_ps_failure_does_not_inherit_capabilities(
     inspector = SystemProcessInspector.__new__(SystemProcessInspector)
 
     with pytest.raises(RuntimeError, match="cannot enumerate processes"):
+        inspector._ps_snapshots()
+    assert_safe_identity_probe_environment(calls[0])
+
+
+def test_process_snapshot_ps_timeout_has_a_distinct_fail_closed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    seed_identity_probe_secrets(monkeypatch)
+
+    def timeout(_command: list[str], **kwargs: Any) -> None:
+        calls.append(kwargs)
+        raise subprocess.TimeoutExpired(["ps"], kwargs["timeout"])
+
+    monkeypatch.setattr(xhs_leases.subprocess, "run", timeout)
+    inspector = SystemProcessInspector.__new__(SystemProcessInspector)
+
+    with pytest.raises(xhs_leases.XhsIdentityProbeTimeout):
         inspector._ps_snapshots()
     assert_safe_identity_probe_environment(calls[0])
 
@@ -2016,6 +2080,429 @@ def test_guard_repeated_close_preserves_deferred_release_result(
         assert details["runtime_session_cleanup_required"] is True
         assert details["runtime_session_actually_absent"] is False
         assert details["runtime_session_cleanup_complete"] is False
+
+
+@pytest.mark.parametrize("session_exists", [False, True])
+def test_zero_finalize_budget_retains_lease_lock_and_session_without_assessment(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_exists: bool,
+) -> None:
+    run_id = f"zero-finalize-budget-{session_exists}"
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(
+            runtime_seconds=10,
+            child_shutdown_seconds=2,
+            root_finalize_seconds=0,
+        ),
+        inspector=FakeInspector(current=OWNER),
+    )
+    guard.acquire()
+    paths = guard.prepare_runtime_session() if session_exists else runtime_session_paths(run_id)
+    marker = paths["profile"] / "Cookies"
+    if session_exists:
+        marker.write_bytes(b"must-survive-zero-budget")
+    monkeypatch.setattr(
+        guard,
+        "_runtime_assessment",
+        lambda: pytest.fail("zero finalize budget must not begin an identity assessment"),
+    )
+
+    assert guard.close() is False
+    assert guard.close() is False
+    assert bool(guard.file_lock._handles) is True
+    assert paths["root"].exists() is session_exists
+    if session_exists:
+        assert marker.read_bytes() == b"must-survive-zero-budget"
+    with connect(control_db) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_leases WHERE run_id=?",
+            (run_id,),
+        ).fetchone()[0] == 1
+        events = conn.execute(
+            "SELECT details_json FROM xhs_account_events "
+            "WHERE run_id=? AND event_type='lease_release_deferred_finalize_timeout'",
+            (run_id,),
+        ).fetchall()
+    assert len(events) == 1
+    raw_details = str(events[0][0])
+    details = json.loads(raw_details)
+    assert guard.owner_token not in raw_details
+    assert details["root_finalize_budget_seconds"] == 0
+    assert details["root_finalize_deadline_monotonic"] == details[
+        "root_finalize_started_monotonic"
+    ]
+    assert details["finalize_timeout_reason"] == "root_finalize_deadline_exhausted"
+    assert details["finalize_timeout_stage"] == "initial_assessment"
+    assert details["last_safe_assessment"] is None
+    assert details["runtime_session_actually_absent"] is (not session_exists)
+    cleanup = xhs_runner_cli.lease_cleanup_evidence(
+        control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_id=guard.lease_id,
+    )
+    assert cleanup["ok"] is False
+    assert cleanup["event_type"] == "lease_release_deferred_finalize_timeout"
+    assert xhs_runner_cli.lease_cleanup_failure_reason(cleanup) == (
+        "lease_release_deferred_finalize_timeout"
+    )
+
+
+def test_close_identity_probe_timeout_retains_profile_lease_and_file_lock(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "close-identity-probe-timeout"
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10, root_finalize_seconds=1),
+        inspector=FakeInspector(current=OWNER),
+    )
+    guard.acquire()
+    paths = guard.prepare_runtime_session()
+    marker = paths["profile"] / "Cookies"
+    marker.write_bytes(b"probe-timeout-must-not-delete")
+    clock = FakeMonotonicClock()
+    inspector = SystemProcessInspector.__new__(SystemProcessInspector)
+    inspector.host_id = OWNER.host_id
+    inspector.boot_id = OWNER.boot_id
+    inspector._darwin_libproc = None
+    guard.inspector = inspector
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(xhs_leases.sys, "platform", "darwin")
+    monkeypatch.setattr(xhs_leases.time, "monotonic", clock.monotonic)
+
+    def timeout(_command: list[str], **kwargs: Any) -> None:
+        calls.append(kwargs)
+        raise subprocess.TimeoutExpired(["ps"], kwargs["timeout"])
+
+    monkeypatch.setattr(xhs_leases.subprocess, "run", timeout)
+
+    assert guard.close() is False
+    assert bool(guard.file_lock._handles) is True
+    assert marker.read_bytes() == b"probe-timeout-must-not-delete"
+    assert calls[0]["env"] == IDENTITY_PROBE_ENVIRONMENT
+    assert calls[0]["timeout"] == pytest.approx(1.0)
+    assert not set(IDENTITY_PROBE_SECRET_KEYS).intersection(calls[0]["env"])
+    with connect(control_db) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_leases WHERE run_id=?",
+            (run_id,),
+        ).fetchone()[0] == 1
+        raw_details = conn.execute(
+            "SELECT details_json FROM xhs_account_events "
+            "WHERE run_id=? AND event_type='lease_release_deferred_finalize_timeout'",
+            (run_id,),
+        ).fetchone()[0]
+    details = json.loads(raw_details)
+    assert guard.owner_token not in raw_details
+    assert details["finalize_timeout_reason"] == "identity_probe_timeout"
+    assert details["finalize_timeout_stage"] == "initial_assessment"
+    assert details["last_safe_assessment"] is None
+
+
+def test_finalize_timeout_event_write_failure_cannot_release_any_capability(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "finalize-timeout-audit-failure"
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10, root_finalize_seconds=0),
+        inspector=FakeInspector(current=OWNER),
+    )
+    guard.acquire()
+    paths = guard.prepare_runtime_session()
+    marker = paths["profile"] / "Cookies"
+    marker.write_bytes(b"audit-write-failed")
+
+    def fail_event(*_args: Any, **_kwargs: Any) -> None:
+        raise sqlite3.OperationalError("database is busy")
+
+    monkeypatch.setattr(xhs_leases, "record_event", fail_event)
+
+    assert guard.close() is False
+    assert guard.close() is False
+    assert bool(guard.file_lock._handles) is True
+    assert marker.read_bytes() == b"audit-write-failed"
+    with connect(control_db) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_leases WHERE run_id=?",
+            (run_id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_events "
+            "WHERE run_id=? AND event_type='lease_release_deferred_finalize_timeout'",
+            (run_id,),
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("expire_on", "expected_signals", "expected_stage"),
+    [
+        ("sigterm", [signal.SIGTERM], "send_sigterm"),
+        ("sigkill", [signal.SIGTERM, signal.SIGKILL], "send_sigkill"),
+    ],
+)
+def test_root_deadline_bounds_term_and_kill_without_removing_profile(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    expire_on: str,
+    expected_signals: list[int],
+    expected_stage: str,
+) -> None:
+    run_id = f"deadline-during-{expire_on}"
+    clock = FakeMonotonicClock()
+    child = ProcessIdentity(
+        host_id=OWNER.host_id,
+        boot_id=OWNER.boot_id,
+        pid=8123,
+        process_started_at="2026-09-03T01:00:00+00:00",
+        process_start_token="child-8123",
+        pgid=8123,
+    )
+    inspector = FakeInspector(current=OWNER, identities={child.pid: child})
+    root_budget = 2 if expire_on == "sigterm" else 4
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(
+            runtime_seconds=10,
+            child_shutdown_seconds=2,
+            root_finalize_seconds=root_budget,
+        ),
+        inspector=inspector,
+    )
+    guard.acquire()
+    guard.register_process(child.pid, "child")
+    paths = guard.prepare_runtime_session()
+    marker = paths["profile"] / "Cookies"
+    marker.write_bytes(b"live-child-retains-profile")
+    monkeypatch.setattr(xhs_leases.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(xhs_leases.time, "sleep", clock.sleep)
+    delivered: list[int] = []
+
+    def killpg(_pgid: int, signum: int) -> None:
+        delivered.append(signum)
+        if (expire_on == "sigterm" and signum == signal.SIGTERM) or (
+            expire_on == "sigkill" and signum == signal.SIGKILL
+        ):
+            clock.advance(root_budget + 1)
+
+    monkeypatch.setattr(xhs_leases.os, "killpg", killpg)
+
+    assert guard.close() is False
+    assert delivered == expected_signals
+    assert bool(guard.file_lock._handles) is True
+    assert marker.read_bytes() == b"live-child-retains-profile"
+    with connect(control_db) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_leases WHERE run_id=?",
+            (run_id,),
+        ).fetchone()[0] == 1
+        details = json.loads(
+            conn.execute(
+                "SELECT details_json FROM xhs_account_events "
+                "WHERE run_id=? AND event_type='lease_release_deferred_finalize_timeout'",
+                (run_id,),
+            ).fetchone()[0]
+        )
+    assert details["finalize_timeout_stage"] == expected_stage
+    assert details["last_safe_assessment"]["safe_to_release"] is False
+
+
+def test_second_signal_shortens_close_deadline_without_overwriting_or_throwing(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "second-signal-shortens-finalize"
+    clock = FakeMonotonicClock()
+    child = ProcessIdentity(
+        host_id=OWNER.host_id,
+        boot_id=OWNER.boot_id,
+        pid=8124,
+        process_started_at="2026-09-03T01:00:01+00:00",
+        process_start_token="child-8124",
+        pgid=8124,
+    )
+    inspector = FakeInspector(current=OWNER, identities={child.pid: child})
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(
+            runtime_seconds=10,
+            child_shutdown_seconds=8,
+            root_finalize_seconds=10,
+        ),
+        inspector=inspector,
+    )
+    guard.acquire()
+    guard.register_process(child.pid, "child")
+    paths = guard.prepare_runtime_session()
+    marker = paths["profile"] / "Cookies"
+    marker.write_bytes(b"second-signal-retains")
+    guard.signal_received = signal.SIGINT
+    monkeypatch.setattr(xhs_leases.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(xhs_leases.time, "sleep", clock.sleep)
+    delivered: list[int] = []
+
+    def killpg(_pgid: int, signum: int) -> None:
+        delivered.append(signum)
+        if signum == signal.SIGTERM:
+            guard._signal_handler(signal.SIGTERM, None)
+
+    monkeypatch.setattr(xhs_leases.os, "killpg", killpg)
+
+    assert guard.close() is False
+    assert guard.signal_received == signal.SIGINT
+    assert delivered == [signal.SIGTERM]
+    assert guard._finalize_deadline_shortened is True
+    assert guard._finalize_deadline == pytest.approx(1.0)
+    assert bool(guard.file_lock._handles) is True
+    assert marker.read_bytes() == b"second-signal-retains"
+    with connect(control_db) as conn:
+        details = json.loads(
+            conn.execute(
+                "SELECT details_json FROM xhs_account_events "
+                "WHERE run_id=? AND event_type='lease_release_deferred_finalize_timeout'",
+                (run_id,),
+            ).fetchone()[0]
+        )
+    assert details["signal"] == signal.SIGINT
+    assert details["root_finalize_deadline_shortened"] is True
+
+
+def test_safe_assessment_finishing_exactly_at_deadline_still_releases(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "safe-at-finalize-boundary"
+    clock = FakeMonotonicClock()
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10, root_finalize_seconds=2),
+        inspector=FakeInspector(current=OWNER),
+    )
+    guard.acquire()
+    monkeypatch.setattr(xhs_leases.time, "monotonic", clock.monotonic)
+
+    def safe_at_boundary() -> dict[str, Any]:
+        clock.advance(2)
+        return {"safe_to_release": True, "checks": [], "blocking": []}
+
+    monkeypatch.setattr(guard, "_runtime_assessment", safe_at_boundary)
+
+    assert guard.close() is True
+    assert bool(guard.file_lock._handles) is False
+    with connect(control_db) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_leases WHERE run_id=?",
+            (run_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_events "
+            "WHERE run_id=? AND event_type='lease_release_deferred_finalize_timeout'",
+            (run_id,),
+        ).fetchone()[0] == 0
+
+
+def test_pid_reuse_is_not_signalled_during_bounded_close(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "bounded-close-pid-reuse"
+    stored = ProcessIdentity(
+        OWNER.host_id,
+        OWNER.boot_id,
+        8125,
+        "2026-09-03T01:00:02+00:00",
+        "old-process",
+        8125,
+    )
+    reused = ProcessIdentity(
+        OWNER.host_id,
+        OWNER.boot_id,
+        8125,
+        "2026-09-03T01:01:02+00:00",
+        "reused-process",
+        9000,
+    )
+    inspector = FakeInspector(current=OWNER, identities={stored.pid: stored})
+    guard = LeaseGuard(
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id=run_id,
+        lease_kind="crawl",
+        execution_state_path=tmp_path / f"{run_id}.json",
+        runtime_profile_dir=runtime_session_paths(run_id)["profile"],
+        budget=LeaseBudget(runtime_seconds=10, root_finalize_seconds=2),
+        inspector=inspector,
+    )
+    guard.acquire()
+    guard.register_process(stored.pid, "child")
+    inspector.identities[stored.pid] = reused
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        xhs_leases.os,
+        "killpg",
+        lambda pgid, signum: signals.append((pgid, signum)),
+    )
+    monkeypatch.setattr(
+        xhs_leases.os,
+        "kill",
+        lambda pid, signum: signals.append((pid, signum)),
+    )
+
+    assert guard.close() is True
+    assert signals == []
+    with connect(control_db) as conn:
+        details = json.loads(
+            conn.execute(
+                "SELECT details_json FROM xhs_account_events "
+                "WHERE run_id=? AND event_type='lease_released'",
+                (run_id,),
+            ).fetchone()[0]
+        )
+    assert details["process_check"]["checks"][0]["reason"] == (
+        "pid_reused_or_identity_changed"
+    )
 
 
 def test_runtime_session_cleanup_failure_retains_exact_lease(

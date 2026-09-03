@@ -580,7 +580,8 @@ def lease_cleanup_evidence(
               AND event_type IN (
                 'lease_released',
                 'lease_release_deferred_live_processes',
-                'lease_release_deferred_runtime_session_cleanup'
+                'lease_release_deferred_runtime_session_cleanup',
+                'lease_release_deferred_finalize_timeout'
               )
             ORDER BY id DESC
             LIMIT 1
@@ -616,6 +617,15 @@ def lease_cleanup_evidence(
         "ok": cleanup_ok,
         "event_type": event_type,
     }
+
+
+def lease_cleanup_failure_reason(cleanup_evidence: dict[str, Any]) -> str:
+    event_type = cleanup_evidence.get("event_type")
+    if event_type == "lease_release_deferred_live_processes":
+        return "lease_release_deferred_live_processes"
+    if event_type == "lease_release_deferred_finalize_timeout":
+        return "lease_release_deferred_finalize_timeout"
+    return "runtime_session_cleanup_failed"
 
 
 def load_child_summary(path_value: str) -> dict[str, Any]:
@@ -1180,12 +1190,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
     summary.update(guard.runtime_session_cleanup_evidence())
     if not lease_released:
         summary["status"] = "failed"
-        cleanup_error = (
-            "lease_release_deferred_live_processes"
-            if cleanup_evidence.get("event_type")
-            == "lease_release_deferred_live_processes"
-            else "runtime_session_cleanup_failed"
-        )
+        cleanup_error = lease_cleanup_failure_reason(cleanup_evidence)
         if not interrupt:
             summary["reason"] = cleanup_error
         summary["cleanup_error"] = cleanup_error

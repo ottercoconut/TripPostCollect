@@ -56,6 +56,8 @@ LEASE_DB_ENV = "TRIPPOSTCOLLECT_XHS_LEASE_DB"
 LEASE_ID_ENV = "TRIPPOSTCOLLECT_XHS_LEASE_ID"
 LEASE_OWNER_TOKEN_ENV = "TRIPPOSTCOLLECT_XHS_LEASE_OWNER_TOKEN"
 _IDENTITY_PROBE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+IDENTITY_PROBE_TIMEOUT_SECONDS = 2.0
+SECOND_SIGNAL_FINALIZE_GRACE_SECONDS = 1.0
 _GATED_SUBPROCESS_RELEASE = b"G"
 _GATED_SUBPROCESS_WRAPPER = """
 import os
@@ -80,6 +82,10 @@ class XhsLeaseOwnershipError(RuntimeError):
 
 
 class XhsLeaseProcessesAlive(RuntimeError):
+    pass
+
+
+class XhsIdentityProbeTimeout(RuntimeError):
     pass
 
 
@@ -478,6 +484,7 @@ def _sysctl_value(name: str) -> str:
             capture_output=True,
             text=True,
             env=_identity_probe_environment(),
+            timeout=IDENTITY_PROBE_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -492,6 +499,7 @@ def _darwin_platform_uuid() -> str:
             capture_output=True,
             text=True,
             env=_identity_probe_environment(),
+            timeout=IDENTITY_PROBE_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -534,6 +542,7 @@ class SystemProcessInspector:
     def __init__(self) -> None:
         self.host_id = system_host_id()
         self.boot_id = system_boot_id()
+        self._identity_probe_deadline: float | None = None
         self._darwin_libproc: Any = None
         if sys.platform == "darwin":
             try:
@@ -552,6 +561,17 @@ class SystemProcessInspector:
                 self._darwin_libproc = library
             except (AttributeError, OSError):
                 self._darwin_libproc = None
+
+    def _identity_probe_timeout(self) -> float:
+        deadline = getattr(self, "_identity_probe_deadline", None)
+        if deadline is None:
+            return IDENTITY_PROBE_TIMEOUT_SECONDS
+        remaining = float(deadline) - time.monotonic()
+        if remaining <= 0:
+            raise XhsIdentityProbeTimeout(
+                "root finalize deadline expired before identity probe"
+            )
+        return min(IDENTITY_PROBE_TIMEOUT_SECONDS, remaining)
 
     def _linux_identity(self, pid: int) -> ProcessIdentity | None:
         stat_path = Path("/proc") / str(pid) / "stat"
@@ -601,7 +621,12 @@ class SystemProcessInspector:
                 capture_output=True,
                 text=True,
                 env=_identity_probe_environment(),
+                timeout=self._identity_probe_timeout(),
             )
+        except subprocess.TimeoutExpired as exc:
+            raise XhsIdentityProbeTimeout(
+                "process presence probe exceeded its bounded timeout"
+            ) from exc
         except OSError:
             result = None
         if result is not None and result.returncode == 0:
@@ -687,7 +712,12 @@ class SystemProcessInspector:
                 capture_output=True,
                 text=True,
                 env=_identity_probe_environment(),
+                timeout=self._identity_probe_timeout(),
             )
+        except subprocess.TimeoutExpired as exc:
+            raise XhsIdentityProbeTimeout(
+                "process snapshot probe exceeded its bounded timeout"
+            ) from exc
         except (OSError, subprocess.SubprocessError) as exc:
             raise RuntimeError("cannot enumerate processes for XHS lease safety") from exc
         snapshots: list[ProcessSnapshot] = []
@@ -1728,6 +1758,13 @@ class LeaseGuard:
         self._closed = False
         self._closing = False
         self._released = False
+        self._retain_file_lock = False
+        self._finalize_started_at: float | None = None
+        self._finalize_deadline: float | None = None
+        self._finalize_deadline_shortened = False
+        self._finalize_timeout_reason = ""
+        self._finalize_timeout_stage = ""
+        self._last_safe_assessment: dict[str, Any] | None = None
         self.runtime_session_owned = False
         self.runtime_session_actually_absent = runtime_session_actually_absent(
             self.run_id
@@ -1908,11 +1945,40 @@ class LeaseGuard:
 
     def _signal_handler(self, signum: int, _frame: FrameType | None) -> None:
         if self.signal_received is not None:
+            if self._closing:
+                self._shorten_finalize_deadline()
             return
         self.signal_received = int(signum)
         if self._closing:
             return
         raise XhsLeaseSignal(signum)
+
+    def _begin_finalize_deadline(self) -> None:
+        if self._finalize_started_at is not None:
+            return
+        started_at = time.monotonic()
+        self._finalize_started_at = started_at
+        self._finalize_deadline = started_at + self.budget.root_finalize_seconds
+
+    def _shorten_finalize_deadline(self) -> None:
+        if self._finalize_deadline is None:
+            return
+        shortened = time.monotonic() + SECOND_SIGNAL_FINALIZE_GRACE_SECONDS
+        if shortened < self._finalize_deadline:
+            self._finalize_deadline = shortened
+            self._finalize_deadline_shortened = True
+
+    def _finalize_deadline_expired(self) -> bool:
+        if self._finalize_deadline is None:
+            return False
+        if self.budget.root_finalize_seconds == 0:
+            return True
+        return time.monotonic() > self._finalize_deadline
+
+    def _finalize_remaining_seconds(self) -> float:
+        if self._finalize_deadline is None:
+            return math.inf
+        return max(0.0, self._finalize_deadline - time.monotonic())
 
     def register_process(self, pid: int, role: str) -> ProcessIdentity:
         identity = self.inspector.identity(int(pid))
@@ -2202,10 +2268,116 @@ class LeaseGuard:
                 include_owner=False,
             )
 
+    def _finalize_timeout_assessment(
+        self,
+        *,
+        reason: str,
+        stage: str,
+    ) -> dict[str, Any]:
+        self._finalize_timeout_reason = reason
+        self._finalize_timeout_stage = stage
+        return {
+            "safe_to_release": False,
+            "checks": list((self._last_safe_assessment or {}).get("checks") or []),
+            "blocking": [
+                {
+                    "role": "root_finalize",
+                    "live": None,
+                    "reason": reason,
+                    "stage": stage,
+                }
+            ],
+            "finalize_timeout": True,
+            "finalize_timeout_reason": reason,
+            "finalize_timeout_stage": stage,
+        }
+
+    def _bounded_runtime_assessment(self, *, stage: str) -> dict[str, Any]:
+        if self._finalize_remaining_seconds() <= 0:
+            return self._finalize_timeout_assessment(
+                reason="root_finalize_deadline_exhausted",
+                stage=stage,
+            )
+        probe_deadline_supported = isinstance(self.inspector, SystemProcessInspector)
+        previous_probe_deadline = (
+            getattr(self.inspector, "_identity_probe_deadline", None)
+            if probe_deadline_supported
+            else None
+        )
+        if probe_deadline_supported:
+            self.inspector._identity_probe_deadline = self._finalize_deadline
+        try:
+            assessment = self._runtime_assessment()
+        except XhsIdentityProbeTimeout:
+            reason = (
+                "root_finalize_deadline_exhausted"
+                if self._finalize_remaining_seconds() <= 0
+                else "identity_probe_timeout"
+            )
+            return self._finalize_timeout_assessment(
+                reason=reason,
+                stage=stage,
+            )
+        finally:
+            if probe_deadline_supported:
+                self.inspector._identity_probe_deadline = previous_probe_deadline
+        self._last_safe_assessment = assessment
+        if self._finalize_deadline_expired():
+            return self._finalize_timeout_assessment(
+                reason="root_finalize_deadline_exhausted",
+                stage=stage,
+            )
+        return assessment
+
+    def _finalize_timeout_details(
+        self,
+        *,
+        process_check: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "lease_id": self.lease_id,
+            "signal": self.signal_received,
+            "process_check": dict(process_check),
+            "runtime_profile_dir": str(self.runtime_profile_dir),
+            **self.runtime_session_cleanup_evidence(),
+            "root_finalize_budget_seconds": self.budget.root_finalize_seconds,
+            "root_finalize_started_monotonic": self._finalize_started_at,
+            "root_finalize_deadline_monotonic": self._finalize_deadline,
+            "root_finalize_deadline_shortened": self._finalize_deadline_shortened,
+            "finalize_timeout_reason": self._finalize_timeout_reason,
+            "finalize_timeout_stage": self._finalize_timeout_stage,
+            "last_safe_assessment": self._last_safe_assessment,
+        }
+
+    def _defer_finalize_timeout(self, process_check: Mapping[str, Any]) -> bool:
+        self._retain_file_lock = True
+        self._closed = True
+        try:
+            with sqlite3.connect(self.db_path, timeout=0.0) as conn:
+                conn.row_factory = sqlite3.Row
+                ensure_xhs_schema(conn)
+                record_event(
+                    conn,
+                    account_id=self.account_id,
+                    run_id=self.run_id,
+                    event_type="lease_release_deferred_finalize_timeout",
+                    details=self._finalize_timeout_details(
+                        process_check=process_check,
+                    ),
+                )
+                conn.commit()
+        except Exception:
+            # A best-effort audit write must never turn a fail-closed timeout
+            # into an exact lease or file-lock release.
+            pass
+        return False
+
     def terminate_owned_processes(self) -> dict[str, Any]:
         if not self.account:
             return {"safe_to_release": True, "checks": [], "blocking": []}
-        initial = self._runtime_assessment()
+        initial = self._bounded_runtime_assessment(stage="initial_assessment")
+        if initial.get("finalize_timeout"):
+            return initial
         if initial["safe_to_release"]:
             return initial
 
@@ -2230,8 +2402,10 @@ class LeaseGuard:
                         result.add(("pgid", pgid))
             return result
 
-        def send(signum: int, assessment: Mapping[str, Any]) -> None:
+        def send(signum: int, assessment: Mapping[str, Any]) -> bool:
             for target_type, value in sorted(targets(assessment)):
+                if self._finalize_remaining_seconds() <= 0:
+                    return False
                 try:
                     if target_type == "pgid":
                         os.killpg(value, signum)
@@ -2239,34 +2413,73 @@ class LeaseGuard:
                         os.kill(value, signum)
                 except ProcessLookupError:
                     continue
+            return self._finalize_remaining_seconds() > 0
 
         half_budget = max(1, self.budget.child_shutdown_seconds // 2)
-        send(signal.SIGTERM, initial)
-        deadline = time.monotonic() + half_budget
-        assessment = self._runtime_assessment()
-        while not assessment["safe_to_release"] and time.monotonic() < deadline:
-            time.sleep(0.1)
-            assessment = self._runtime_assessment()
+        if not send(signal.SIGTERM, initial):
+            return self._finalize_timeout_assessment(
+                reason="root_finalize_deadline_exhausted",
+                stage="send_sigterm",
+            )
+        term_deadline = min(
+            self._finalize_deadline or math.inf,
+            time.monotonic() + half_budget,
+        )
+        assessment = self._bounded_runtime_assessment(stage="after_sigterm")
+        while not assessment["safe_to_release"] and not assessment.get(
+            "finalize_timeout"
+        ):
+            now = time.monotonic()
+            if now >= term_deadline:
+                break
+            time.sleep(min(0.1, term_deadline - now))
+            assessment = self._bounded_runtime_assessment(stage="wait_after_sigterm")
+        if assessment.get("finalize_timeout"):
+            return assessment
         if assessment["safe_to_release"]:
             return assessment
-        send(signal.SIGKILL, assessment)
-        deadline = time.monotonic() + max(1, self.budget.child_shutdown_seconds - half_budget)
-        while not assessment["safe_to_release"] and time.monotonic() < deadline:
-            time.sleep(0.1)
-            assessment = self._runtime_assessment()
+        if not send(signal.SIGKILL, assessment):
+            return self._finalize_timeout_assessment(
+                reason="root_finalize_deadline_exhausted",
+                stage="send_sigkill",
+            )
+        kill_deadline = min(
+            self._finalize_deadline or math.inf,
+            time.monotonic()
+            + max(1, self.budget.child_shutdown_seconds - half_budget),
+        )
+        assessment = self._bounded_runtime_assessment(stage="after_sigkill")
+        while not assessment["safe_to_release"] and not assessment.get(
+            "finalize_timeout"
+        ):
+            now = time.monotonic()
+            if now >= kill_deadline:
+                break
+            time.sleep(min(0.1, kill_deadline - now))
+            assessment = self._bounded_runtime_assessment(stage="wait_after_sigkill")
         return assessment
 
     def close(self) -> bool:
         if self._closed:
             return self._released
         self._closing = True
+        self._begin_finalize_deadline()
         try:
             if self.account is None:
                 self._closed = True
                 self._released = True
                 return True
             process_check = self.terminate_owned_processes()
+            if process_check.get("finalize_timeout"):
+                return self._defer_finalize_timeout(process_check)
             if not process_check["safe_to_release"]:
+                if self._finalize_remaining_seconds() <= 0:
+                    return self._defer_finalize_timeout(
+                        self._finalize_timeout_assessment(
+                            reason="root_finalize_deadline_exhausted",
+                            stage="after_process_termination",
+                        )
+                    )
                 self._refresh_runtime_session_cleanup_state()
                 with sqlite3.connect(self.db_path) as conn:
                     conn.row_factory = sqlite3.Row
@@ -2287,13 +2500,34 @@ class LeaseGuard:
                     conn.commit()
                 self._closed = True
                 return False
+            if self._finalize_deadline_expired():
+                return self._defer_finalize_timeout(
+                    self._finalize_timeout_assessment(
+                        reason="root_finalize_deadline_exhausted",
+                        stage="before_runtime_session_refresh",
+                    )
+                )
             cleanup_error = ""
             self._refresh_runtime_session_cleanup_state()
+            if self._finalize_deadline_expired():
+                return self._defer_finalize_timeout(
+                    self._finalize_timeout_assessment(
+                        reason="root_finalize_deadline_exhausted",
+                        stage="after_runtime_session_refresh",
+                    )
+                )
             if (
                 self.runtime_session_cleanup_required
                 and not self.runtime_session_actually_absent
                 and self.runtime_session_owned
             ):
+                if self._finalize_deadline_expired():
+                    return self._defer_finalize_timeout(
+                        self._finalize_timeout_assessment(
+                            reason="root_finalize_deadline_exhausted",
+                            stage="before_runtime_session_removal",
+                        )
+                    )
                 try:
                     removal_reported = remove_runtime_session_for_profile(
                         self.runtime_profile_dir,
@@ -2311,9 +2545,23 @@ class LeaseGuard:
                     self.runtime_session_removed = bool(
                         removal_reported and self.runtime_session_actually_absent
                     )
+                if self._finalize_deadline_expired():
+                    return self._defer_finalize_timeout(
+                        self._finalize_timeout_assessment(
+                            reason="root_finalize_deadline_exhausted",
+                            stage="after_runtime_session_removal",
+                        )
+                    )
             elif not self.runtime_session_actually_absent:
                 cleanup_error = "runtime_session_not_owned"
             if not self.runtime_session_cleanup_complete:
+                if self._finalize_remaining_seconds() <= 0:
+                    return self._defer_finalize_timeout(
+                        self._finalize_timeout_assessment(
+                            reason="root_finalize_deadline_exhausted",
+                            stage="after_runtime_session_cleanup",
+                        )
+                    )
                 with sqlite3.connect(self.db_path) as conn:
                     conn.row_factory = sqlite3.Row
                     ensure_xhs_schema(conn)
@@ -2337,6 +2585,13 @@ class LeaseGuard:
                     conn.commit()
                 self._closed = True
                 return False
+            if self._finalize_deadline_expired():
+                return self._defer_finalize_timeout(
+                    self._finalize_timeout_assessment(
+                        reason="root_finalize_deadline_exhausted",
+                        stage="before_lease_release",
+                    )
+                )
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 ensure_xhs_schema(conn)
@@ -2360,5 +2615,5 @@ class LeaseGuard:
         finally:
             self._restore_signal_handlers()
             self._closing = False
-            if self._closed:
+            if self._closed and not self._retain_file_lock:
                 self.file_lock.release()

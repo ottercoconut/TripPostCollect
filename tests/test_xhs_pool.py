@@ -710,6 +710,29 @@ def test_xhs_runner_controller_does_not_restart_after_incomplete_session_cleanup
 
 
 @pytest.mark.parametrize(
+    ("event_type", "expected"),
+    [
+        (
+            "lease_release_deferred_finalize_timeout",
+            "lease_release_deferred_finalize_timeout",
+        ),
+        (
+            "lease_release_deferred_live_processes",
+            "lease_release_deferred_live_processes",
+        ),
+        ("lease_release_deferred_runtime_session_cleanup", "runtime_session_cleanup_failed"),
+        ("missing", "runtime_session_cleanup_failed"),
+        (None, "runtime_session_cleanup_failed"),
+    ],
+)
+def test_xhs_runner_preserves_finalize_timeout_cleanup_reason(
+    event_type: str | None,
+    expected: str,
+) -> None:
+    assert xhs_runner.lease_cleanup_failure_reason({"event_type": event_type}) == expected
+
+
+@pytest.mark.parametrize(
     ("field", "runtime_session_state"),
     [
         ("runtime_session_cleanup_complete", False),
