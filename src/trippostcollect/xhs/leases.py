@@ -53,6 +53,7 @@ DEFAULT_ROOT_FINALIZE_BUDGET_SECONDS = 270
 LEASE_DB_ENV = "TRIPPOSTCOLLECT_XHS_LEASE_DB"
 LEASE_ID_ENV = "TRIPPOSTCOLLECT_XHS_LEASE_ID"
 LEASE_OWNER_TOKEN_ENV = "TRIPPOSTCOLLECT_XHS_LEASE_OWNER_TOKEN"
+_IDENTITY_PROBE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 class XhsLeaseOwnershipError(RuntimeError):
@@ -282,6 +283,13 @@ def _read_nonempty(path: Path) -> str:
         return ""
 
 
+def _identity_probe_environment() -> dict[str, str]:
+    return {
+        "LC_ALL": "C",
+        "PATH": _IDENTITY_PROBE_PATH,
+    }
+
+
 def _sysctl_value(name: str) -> str:
     try:
         result = subprocess.run(
@@ -289,7 +297,7 @@ def _sysctl_value(name: str) -> str:
             check=True,
             capture_output=True,
             text=True,
-            env={**os.environ, "LC_ALL": "C"},
+            env=_identity_probe_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -303,7 +311,7 @@ def _darwin_platform_uuid() -> str:
             check=True,
             capture_output=True,
             text=True,
-            env={**os.environ, "LC_ALL": "C"},
+            env=_identity_probe_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -412,7 +420,7 @@ class SystemProcessInspector:
                 check=False,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "LC_ALL": "C"},
+                env=_identity_probe_environment(),
             )
         except OSError:
             result = None
@@ -498,7 +506,7 @@ class SystemProcessInspector:
                 check=True,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "LC_ALL": "C"},
+                env=_identity_probe_environment(),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise RuntimeError("cannot enumerate processes for XHS lease safety") from exc

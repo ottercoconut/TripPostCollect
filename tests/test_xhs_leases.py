@@ -58,6 +58,29 @@ OWNER = ProcessIdentity(
     process_start_token="owner-start-111",
     pgid=111,
 )
+IDENTITY_PROBE_ENVIRONMENT = {
+    "LC_ALL": "C",
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+}
+IDENTITY_PROBE_SECRET_KEYS = (
+    xhs_leases.LEASE_DB_ENV,
+    xhs_leases.LEASE_ID_ENV,
+    xhs_leases.LEASE_OWNER_TOKEN_ENV,
+    runtime.RUNTIME_STATUS_AUTH_KEY_ENV,
+    "TRIPPOSTCOLLECT_UNRELATED_SECRET",
+)
+
+
+def seed_identity_probe_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    for index, key in enumerate(IDENTITY_PROBE_SECRET_KEYS):
+        monkeypatch.setenv(key, f"secret-{index}")
+    monkeypatch.setenv("LC_ALL", "untrusted-locale")
+    monkeypatch.setenv("PATH", "/tmp/untrusted-bin")
+
+
+def assert_safe_identity_probe_environment(kwargs: dict[str, Any]) -> None:
+    assert kwargs["env"] == IDENTITY_PROBE_ENVIRONMENT
+    assert not set(IDENTITY_PROBE_SECRET_KEYS).intersection(kwargs["env"])
 
 
 class FakeInspector:
@@ -1115,7 +1138,13 @@ def test_xhs_schema_statements_do_not_implicitly_commit() -> None:
 def test_process_enumeration_failure_is_not_treated_as_an_empty_process_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def unavailable(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+    seed_identity_probe_secrets(monkeypatch)
+
+    def unavailable(
+        command: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
         raise OSError("ps unavailable")
 
     monkeypatch.setattr(xhs_leases.subprocess, "run", unavailable)
@@ -1123,6 +1152,221 @@ def test_process_enumeration_failure_is_not_treated_as_an_empty_process_list(
 
     with pytest.raises(RuntimeError, match="cannot enumerate processes"):
         inspector._ps_snapshots()
+    assert calls[0][0] == ["ps", "-ww", "-axo", "pid=,state=,command="]
+    assert_safe_identity_probe_environment(calls[0][1])
+
+
+def test_sysctl_probe_uses_minimal_capability_free_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+    seed_identity_probe_secrets(monkeypatch)
+
+    def completed(
+        command: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="boot-id\n", stderr="")
+
+    monkeypatch.setattr(xhs_leases.subprocess, "run", completed)
+
+    assert xhs_leases._sysctl_value("kern.bootsessionuuid") == "boot-id"
+    assert calls[0][0] == ["sysctl", "-n", "kern.bootsessionuuid"]
+    assert_safe_identity_probe_environment(calls[0][1])
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("sysctl unavailable"),
+        subprocess.CalledProcessError(1, ["sysctl"]),
+    ],
+)
+def test_sysctl_probe_failure_does_not_inherit_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    seed_identity_probe_secrets(monkeypatch)
+
+    def unavailable(_command: list[str], **kwargs: Any) -> None:
+        calls.append(kwargs)
+        raise error
+
+    monkeypatch.setattr(xhs_leases.subprocess, "run", unavailable)
+
+    assert xhs_leases._sysctl_value("kern.bootsessionuuid") == ""
+    assert_safe_identity_probe_environment(calls[0])
+
+
+def test_ioreg_probe_uses_minimal_capability_free_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+    seed_identity_probe_secrets(monkeypatch)
+
+    def completed(
+        command: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='    "IOPlatformUUID" = "platform-id"\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(xhs_leases.subprocess, "run", completed)
+
+    assert xhs_leases._darwin_platform_uuid() == "platform-id"
+    assert calls[0][0] == [
+        "/usr/sbin/ioreg",
+        "-rd1",
+        "-c",
+        "IOPlatformExpertDevice",
+    ]
+    assert_safe_identity_probe_environment(calls[0][1])
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("ioreg unavailable"),
+        subprocess.CalledProcessError(1, ["/usr/sbin/ioreg"]),
+    ],
+)
+def test_ioreg_probe_failure_does_not_inherit_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    seed_identity_probe_secrets(monkeypatch)
+
+    def unavailable(_command: list[str], **kwargs: Any) -> None:
+        calls.append(kwargs)
+        raise error
+
+    monkeypatch.setattr(xhs_leases.subprocess, "run", unavailable)
+
+    assert xhs_leases._darwin_platform_uuid() == ""
+    assert_safe_identity_probe_environment(calls[0])
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [
+        (0, "S+\n", True),
+        (0, "Z\n", False),
+        (1, "", False),
+    ],
+)
+def test_process_presence_ps_uses_minimal_capability_free_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    stdout: str,
+    expected: bool,
+) -> None:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+    seed_identity_probe_secrets(monkeypatch)
+    monkeypatch.setattr(xhs_leases.sys, "platform", "darwin")
+
+    def completed(
+        command: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(xhs_leases.subprocess, "run", completed)
+    inspector = SystemProcessInspector.__new__(SystemProcessInspector)
+
+    assert inspector.process_presence(42) is expected
+    assert calls[0][0] == ["ps", "-p", "42", "-o", "state="]
+    assert_safe_identity_probe_environment(calls[0][1])
+
+
+def test_process_presence_ps_failure_does_not_inherit_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    seed_identity_probe_secrets(monkeypatch)
+    monkeypatch.setattr(xhs_leases.sys, "platform", "darwin")
+
+    def unavailable(_command: list[str], **kwargs: Any) -> None:
+        calls.append(kwargs)
+        raise OSError("ps unavailable")
+
+    monkeypatch.setattr(xhs_leases.subprocess, "run", unavailable)
+    monkeypatch.setattr(xhs_leases.os, "kill", lambda _pid, _signal: None)
+    inspector = SystemProcessInspector.__new__(SystemProcessInspector)
+
+    assert inspector.process_presence(42) is True
+    assert_safe_identity_probe_environment(calls[0])
+
+
+def test_process_snapshot_ps_uses_minimal_capability_free_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+    seed_identity_probe_secrets(monkeypatch)
+
+    def completed(
+        command: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="42 S /usr/bin/python worker.py\n43 Z zombie\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(xhs_leases.subprocess, "run", completed)
+    inspector = SystemProcessInspector.__new__(SystemProcessInspector)
+    monkeypatch.setattr(
+        inspector,
+        "identity",
+        lambda pid: ProcessIdentity(
+            host_id="host-a",
+            boot_id="boot-a",
+            pid=pid,
+            process_started_at="2026-09-03T00:00:00+00:00",
+            process_start_token=f"token-{pid}",
+            pgid=pid,
+        ),
+    )
+
+    snapshots = inspector._ps_snapshots()
+
+    assert [item.identity.pid for item in snapshots] == [42]
+    assert snapshots[0].argv == ("/usr/bin/python", "worker.py")
+    assert calls[0][0] == ["ps", "-ww", "-axo", "pid=,state=,command="]
+    assert_safe_identity_probe_environment(calls[0][1])
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("ps unavailable"),
+        subprocess.CalledProcessError(1, ["ps"]),
+    ],
+)
+def test_process_snapshot_ps_failure_does_not_inherit_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    seed_identity_probe_secrets(monkeypatch)
+
+    def unavailable(_command: list[str], **kwargs: Any) -> None:
+        calls.append(kwargs)
+        raise error
+
+    monkeypatch.setattr(xhs_leases.subprocess, "run", unavailable)
+    inspector = SystemProcessInspector.__new__(SystemProcessInspector)
+
+    with pytest.raises(RuntimeError, match="cannot enumerate processes"):
+        inspector._ps_snapshots()
+    assert_safe_identity_probe_environment(calls[0])
 
 
 def test_identityless_legacy_lease_blocks_schema_cutover(
