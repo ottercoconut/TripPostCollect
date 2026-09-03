@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sqlite3
 import sys
 from contextlib import contextmanager
@@ -320,7 +321,12 @@ def repaired_rows(conn: sqlite3.Connection, target_ids: list[str]) -> dict[str, 
     return result
 
 
-def _state_fail_open(state: FrozenExecutionState | None, error: str) -> None:
+def _state_fail_open(
+    state: FrozenExecutionState | None,
+    error: str,
+    *,
+    evidence: dict[str, Any] | None = None,
+) -> None:
     if state is None:
         return
     try:
@@ -328,7 +334,7 @@ def _state_fail_open(state: FrozenExecutionState | None, error: str) -> None:
         for step in FORMAL_STEPS[1:]:
             status = (payload.get("steps") or {}).get(step, {}).get("status")
             if status in {"pending", "in_progress"}:
-                state.fail(step, error=error)
+                state.fail(step, error=error, evidence=evidence)
                 return
     except Exception:
         return
@@ -493,6 +499,7 @@ def _run_main() -> int:
     completed = None
     outcome = "failed"
     state_error = ""
+    interrupt: dict[str, Any] | None = None
     candidate_only_failure = False
     guard = LeaseGuard(
         db_path=db_path,
@@ -674,6 +681,36 @@ def _run_main() -> int:
                                 },
                             )
                             outcome = "completed"
+    except (XhsLeaseSignal, KeyboardInterrupt) as exc:
+        signum = (
+            int(exc.signum)
+            if isinstance(exc, XhsLeaseSignal)
+            else int(signal.SIGINT)
+        )
+        signal_name = signal.Signals(signum).name
+        exit_code = 128 + signum
+        guard.signal_received = signum
+        interrupt = {
+            "reason": "operator_interrupt",
+            "source": (
+                "lease_signal"
+                if isinstance(exc, XhsLeaseSignal)
+                else "keyboard_interrupt"
+            ),
+            "signum": signum,
+            "signal": signal_name,
+            "exit_code": exit_code,
+        }
+        state_error = f"xhs_repair_runtime_failed:operator_interrupt:{signal_name}"
+        stderr = f"{stderr}\n{state_error}".strip()
+        _state_fail_open(
+            state,
+            state_error,
+            evidence={
+                "interrupt": interrupt,
+                "stderr_tail": tail(stderr),
+            },
+        )
     except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
         state_error = f"xhs_repair_exception:{type(exc).__name__}:{exc}"
         stderr = f"{stderr}\n{state_error}".strip()
@@ -705,7 +742,15 @@ def _run_main() -> int:
                 account_id=account["account_id"],
                 run_id=run_id,
                 event_type="xhs_post_repair_finished",
-                details={"outcome": outcome, "exit_code": exit_code, "error": state_error},
+                details={
+                    "outcome": outcome,
+                    "exit_code": exit_code,
+                    "error": state_error,
+                    "failure_type": "runtime_failed" if interrupt else "",
+                    "stop_reason": "runtime_failed" if interrupt else "",
+                    "reason": "operator_interrupt" if interrupt else "",
+                    "interrupt": interrupt,
+                },
             )
             conn.commit()
     guard.set_outcome(outcome)
@@ -747,6 +792,10 @@ def _run_main() -> int:
         "persistent_account_profile": False,
         "runtime_session_removed": not session_paths["root"].exists(),
         "runtime_watchdog": runtime_watchdog_evidence(completed),
+        "failure_type": "runtime_failed" if interrupt else "",
+        "stop_reason": "runtime_failed" if interrupt else "",
+        "reason": "operator_interrupt" if interrupt else "",
+        "interrupt": interrupt,
         "import_result": child_summary.get("import_result") or {},
         "repair_report": repair_report,
         "candidate_only_failure": candidate_only_failure,
@@ -811,6 +860,13 @@ def _run_main() -> int:
             finished=True,
         )
     print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
+    if (
+        summary.get("lease_released") is not True
+        or summary.get("runtime_session_removed") is not True
+    ):
+        return 2
+    if interrupt:
+        return int(interrupt["exit_code"])
     return 0 if summary["status"] == "completed" else 2
 
 

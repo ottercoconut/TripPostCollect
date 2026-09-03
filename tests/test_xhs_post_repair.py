@@ -12,6 +12,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from trippostcollect.db.bootstrap import bootstrap_database
+from trippostcollect.xhs import accounts
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -21,6 +24,208 @@ if str(SCRIPTS) not in sys.path:
 repair = import_module("repair_xhs_posts")
 mediacrawler = import_module("mediacrawler_crawl")
 entrypoint = import_module("mediacrawler_export_entrypoint")
+
+
+@pytest.mark.parametrize("interrupt_kind", ["lease_signal", "keyboard_interrupt"])
+def test_xhs_repair_interrupt_writes_terminal_audit_before_exact_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt_kind: str,
+) -> None:
+    target_path = tmp_path / "targets.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "targets": [
+                    {
+                        "target_key": "test",
+                        "keyword": "青岛旅游",
+                        "top_refresh_max_pages": 1,
+                        "timeout_seconds": 1800,
+                        "required_fields_profile": "image_post_with_followers_v1",
+                        "followers_policy": "required",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    pool_path = tmp_path / "pool.json"
+    pool_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "lease_seconds": 2400,
+                "behavior_profile": "xhs_guarded",
+                "headed": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "content.sqlite"
+    bootstrap_database(db_path, sync_jobs=False)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        accounts.ensure_xhs_schema(conn)
+        accounts.register_account_slot(conn, "xhs-a01")
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO source_platforms(
+                platform_key, display_name, status, default_url,
+                recommended_scrapling_mode
+            ) VALUES ('xhs', '小红书', 'active', 'https://www.xiaohongshu.com', 'dynamic')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO web_posts(
+                platform_key, platform_post_id, source_type, source_url,
+                canonical_url, captured_at, keyword, raw_sample_json,
+                artifact_dir
+            ) VALUES ('xhs', 'note-1', 'post', ?, ?, ?, '青岛旅游', ?, ?)
+            """,
+            (
+                "https://www.xiaohongshu.com/explore/note-1",
+                "https://www.xiaohongshu.com/explore/note-1?"
+                "xsec_token=token-1&xsec_source=pc_search",
+                "2026-09-03T08:00:00+00:00",
+                json.dumps({"content_detail_status": "search_only"}),
+                "artifacts/note-1",
+            ),
+        )
+        conn.commit()
+
+    run_id = f"repair-{interrupt_kind}"
+    output_root = tmp_path / "outputs"
+    runtime_root = tmp_path / "runtime"
+    session_root = tmp_path / "sessions"
+    monkeypatch.setattr(repair, "XHS_REPAIR_OUTPUT", output_root)
+    monkeypatch.setattr(repair, "XHS_REPAIR_RUNTIME_ROOT", runtime_root)
+    monkeypatch.setattr(repair, "utc_stamp", lambda: run_id)
+    monkeypatch.setattr(
+        "trippostcollect.xhs.runtime.XHS_SESSION_ROOT",
+        session_root,
+    )
+    monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
+    monkeypatch.setattr(
+        repair,
+        "parse_args",
+        lambda: SimpleNamespace(
+            target_key="test",
+            account_id="xhs-a01",
+            db=str(db_path),
+            target_config=str(target_path),
+            pool_config=str(pool_path),
+            keyword=None,
+            max_items=1,
+            batch_size=1,
+            post_ids=["note-1"],
+            dry_run=False,
+            post_interaction="none",
+        ),
+    )
+    watchdogs = []
+    close_observations: list[dict[str, object]] = []
+    original_close = repair.LeaseGuard.close
+
+    def interrupt_child(self, *_args, **kwargs):
+        watchdogs.append(kwargs.get("runtime_watchdog"))
+        if interrupt_kind == "lease_signal":
+            self.signal_received = int(repair.signal.SIGINT)
+            raise repair.XhsLeaseSignal(repair.signal.SIGINT)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(repair.LeaseGuard, "run_subprocess", interrupt_child)
+
+    def observe_close(self):
+        state_value = json.loads(
+            (runtime_root / run_id / "execution_state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        summary_value = json.loads(
+            (output_root / run_id / "run_summary.json").read_text(encoding="utf-8")
+        )
+        with sqlite3.connect(db_path) as conn:
+            run_row = conn.execute(
+                "SELECT status, finished_at FROM xhs_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            finished_events = conn.execute(
+                """
+                SELECT COUNT(*) FROM xhs_account_events
+                WHERE run_id=? AND event_type='xhs_post_repair_finished'
+                """,
+                (run_id,),
+            ).fetchone()[0]
+        close_observations.append(
+            {
+                "state_status": state_value["status"],
+                "summary_reason": summary_value["reason"],
+                "run_row": run_row,
+                "finished_events": finished_events,
+            }
+        )
+        return original_close(self)
+
+    monkeypatch.setattr(repair.LeaseGuard, "close", observe_close)
+
+    assert repair._run_main() == 130
+    assert len(watchdogs) == 1
+    assert watchdogs[0].startup_grace_seconds == 120.0
+    assert watchdogs[0].stale_after_seconds == 60.0
+    assert len(close_observations) == 1
+    close_observation = close_observations[0]
+    assert close_observation["state_status"] == "failed"
+    assert close_observation["summary_reason"] == "operator_interrupt"
+    assert close_observation["finished_events"] == 1
+    assert close_observation["run_row"][0] == "failed"
+    assert close_observation["run_row"][1]
+
+    summary_path = output_root / run_id / "run_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["status"] == "failed"
+    assert summary["failure_type"] == "runtime_failed"
+    assert summary["stop_reason"] == "runtime_failed"
+    assert summary["reason"] == "operator_interrupt"
+    assert summary["interrupt"] == {
+        "reason": "operator_interrupt",
+        "source": interrupt_kind,
+        "signum": int(repair.signal.SIGINT),
+        "signal": "SIGINT",
+        "exit_code": 130,
+    }
+    assert summary["lease_released"] is True
+    assert summary["runtime_session_removed"] is True
+    assert summary["lease_cleanup"]["ok"] is True
+    assert not (session_root / run_id).exists()
+
+    state_path = runtime_root / run_id / "execution_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert (
+        state["steps"]["command_executed"]["error"]
+        == "xhs_repair_runtime_failed:operator_interrupt:SIGINT"
+    )
+    assert state["steps"]["command_executed"]["evidence"]["interrupt"] == summary[
+        "interrupt"
+    ]
+    assert "adaptive_search_stopped" not in {
+        event.get("type") for event in state.get("events", [])
+    }
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+        row = conn.execute(
+            "SELECT status, finished_at, report_json FROM xhs_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "failed"
+        assert row[1]
+        assert json.loads(row[2])["lease_cleanup"]["ok"] is True
 
 
 def test_detail_url_preserves_authoritative_xsec_query() -> None:
