@@ -160,6 +160,19 @@ PROCESS_CLEANUP_GRACE_SECONDS = 20.0
 PROCESS_FINAL_REAP_SECONDS = 5.0
 XHS_NETWORK_DIAGNOSTIC_MAX_AGE_SECONDS = 90.0
 XHS_NETWORK_DIAGNOSTIC_MAX_BYTES = 512 * 1024
+# The nested XHS transport loop owns the fixed 600 second recovery budget.  This
+# supervisor only needs enough additional time to observe that terminal result
+# after the final request/diagnostic write; it must not grant unbounded life to
+# a child that keeps publishing pause events.
+XHS_PARENT_NETWORK_PAUSE_CEILING_SECONDS = 675.0
+XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS = PROCESS_CLEANUP_GRACE_SECONDS
+SUPERVISOR_RUNTIME_TIMEOUT_REASONS = frozenset(
+    {
+        "no_progress_timeout",
+        "parent_network_pause_timeout",
+        "parent_network_terminal_unwind_timeout",
+    }
+)
 XHS_RUNTIME_STATUS_AUTH_KEY_RE = re.compile(r"[0-9a-f]{64}\Z")
 XHS_RUNTIME_STATUS_RUN_ID_ENV = "TRIPPOSTCOLLECT_XHS_RUN_ID"
 BILIBILI_ARTICLE_SEARCH_URL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
@@ -203,6 +216,51 @@ BILIBILI_WBI_MIXIN_TABLE = (
     61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
     36, 20, 34, 44, 52,
 )
+
+
+class XhsParentNetworkPauseClock:
+    """Account only supervisor-observed, fresh XHS transport pauses."""
+
+    def __init__(self, *, ceiling_seconds: float) -> None:
+        if ceiling_seconds <= 0:
+            raise ValueError("network pause ceiling must be positive")
+        self.ceiling_seconds = float(ceiling_seconds)
+        self.active = False
+        self.last_observed_at: float | None = None
+        self.episode_seconds = 0.0
+        self.total_seconds = 0.0
+        self.observed = False
+
+    def observe(self, network_state: str, *, now: float) -> tuple[float, bool]:
+        accounted_delta = 0.0
+        if network_state == "network_paused":
+            self.observed = True
+            if self.active and self.last_observed_at is not None:
+                accounted_delta = max(0.0, now - self.last_observed_at)
+                self.episode_seconds += accounted_delta
+                self.total_seconds += accounted_delta
+            self.active = True
+            self.last_observed_at = now
+        elif network_state == "online" and self.active and self.last_observed_at is not None:
+            accounted_delta = max(0.0, now - self.last_observed_at)
+            self.episode_seconds += accounted_delta
+            self.total_seconds += accounted_delta
+            self.active = False
+            self.last_observed_at = None
+            self.episode_seconds = 0.0
+            return accounted_delta, False
+        elif network_state == "online":
+            self.episode_seconds = 0.0
+            self.active = False
+            self.last_observed_at = None
+            return 0.0, False
+        else:
+            # Unknown includes stale, malformed, and non-transport diagnostics.
+            # None receives watchdog credit, and none can impersonate an
+            # explicit recovery that resets the current episode ceiling.
+            self.active = False
+            self.last_observed_at = None
+        return accounted_delta, self.episode_seconds >= self.ceiling_seconds
 
 
 class BilibiliArticleDetailError(RuntimeError):
@@ -1322,7 +1380,7 @@ def xhs_network_state_from_diagnostics(
     now: datetime | None = None,
     max_age_seconds: float = XHS_NETWORK_DIAGNOSTIC_MAX_AGE_SECONDS,
 ) -> tuple[str, str]:
-    """Return only a fresh, explicitly recoverable XHS transport state."""
+    """Return only a fresh, explicit XHS transport observation."""
 
     if path is None or max_age_seconds <= 0:
         return "unknown", ""
@@ -1375,14 +1433,14 @@ def xhs_network_state_from_diagnostics(
     if outcome == "network_recovered" and error in (None, ""):
         return "online", ""
     if (
-        outcome != "network_paused"
+        outcome not in {"network_paused", "network_recovery_timeout"}
         or not isinstance(error, str)
         or not error
         or len(error) > 500
     ):
         return "unknown", ""
     reason = _sanitized_transport_reason(error)
-    return ("network_paused", reason) if reason else ("unknown", "")
+    return (str(outcome), reason) if reason else ("unknown", "")
 
 
 class XhsRuntimeSupervisionError(RuntimeError):
@@ -1480,19 +1538,6 @@ class XhsSupervisorRuntimeReporter:
         self._last_written_sequence = self._sequence
         self._last_write_error = ""
         return True
-
-    def checkpoint_from_diagnostics(
-        self,
-        path: str | Path | None,
-        *,
-        phase: str | None = None,
-    ) -> bool:
-        network_state, network_reason = xhs_network_state_from_diagnostics(path)
-        return self.checkpoint(
-            phase=phase,
-            network_state=network_state,
-            network_reason=network_reason,
-        )
 
     def enter_finalizing(self) -> bool:
         return self.checkpoint(phase="finalizing")
@@ -1608,15 +1653,29 @@ def _runtime_progress_if_due(
     return time.monotonic()
 
 
-def progress_path_signature(paths: Iterable[Path]) -> tuple[tuple[str, int, int], ...]:
+def progress_path_signature(
+    paths: Iterable[Path],
+    *,
+    excluded_paths: Iterable[Path] = (),
+) -> tuple[tuple[str, int, int], ...]:
+    excluded = {
+        Path(path).expanduser().absolute()
+        for path in excluded_paths
+    }
     files: set[Path] = set()
     for raw_path in paths:
         path = Path(raw_path).expanduser()
         try:
             if path.is_dir():
-                files.update(candidate for candidate in path.rglob("*.jsonl") if candidate.is_file())
+                files.update(
+                    candidate
+                    for candidate in path.rglob("*.jsonl")
+                    if candidate.is_file()
+                    and candidate.expanduser().absolute() not in excluded
+                )
             elif path.is_file():
-                files.add(path)
+                if path.expanduser().absolute() not in excluded:
+                    files.add(path)
         except OSError:
             continue
     signature: list[tuple[str, int, int]] = []
@@ -1679,16 +1738,22 @@ def terminate_managed_process(
     return complete_stdout, complete_stderr, forced
 
 
-def append_no_progress_timeout_event(
+def append_runtime_timeout_event(
     state_path: str | Path | None,
     *,
+    timeout_reason: str,
     platform_key: str,
     start_page: int,
     start_offset: int | None,
     start_cursor: str | None,
     inactivity_timeout_seconds: float,
     last_progress_age_seconds: float,
+    network_pause_total_seconds: float = 0.0,
+    network_pause_ceiling_seconds: float | None = None,
+    network_terminal_grace_seconds: float | None = None,
 ) -> dict[str, Any]:
+    if timeout_reason not in SUPERVISOR_RUNTIME_TIMEOUT_REASONS:
+        raise ValueError(f"unsupported supervisor timeout reason: {timeout_reason}")
     if not state_path:
         return {"skipped": True, "reason": "execution_state_unavailable"}
     state = FrozenExecutionState(state_path)
@@ -1721,9 +1786,15 @@ def append_no_progress_timeout_event(
                 "source_has_more": True,
                 "batch_complete": False,
                 "stop_reason": "runtime_failed",
-                "stop_detail": "no_progress_timeout",
+                "stop_detail": timeout_reason,
                 "inactivity_timeout_seconds": round(inactivity_timeout_seconds, 3),
                 "last_progress_age_seconds": round(last_progress_age_seconds, 3),
+                "network_pause_total_seconds": round(
+                    network_pause_total_seconds,
+                    3,
+                ),
+                "network_pause_ceiling_seconds": network_pause_ceiling_seconds,
+                "network_terminal_grace_seconds": network_terminal_grace_seconds,
             }
         )
         state.append_event("adaptive_search_stopped", details)
@@ -1768,16 +1839,31 @@ def run_command(
     progress_observed = False
     last_progress_at = started
     last_progress_age_seconds = 0.0
+    network_pause_clock = XhsParentNetworkPauseClock(
+        ceiling_seconds=XHS_PARENT_NETWORK_PAUSE_CEILING_SECONDS
+    )
+    network_terminal_grace_started_at: float | None = None
     tracked_paths = tuple(progress_paths) if progress_paths is not None else None
+    excluded_progress_paths: set[Path] = set()
     if runtime_reporter is not None and tracked_paths is not None:
         runtime_status_file = runtime_reporter.status_path.expanduser().absolute()
+        excluded_progress_paths.add(runtime_status_file)
+        if network_diagnostics_path is not None:
+            excluded_progress_paths.add(
+                Path(network_diagnostics_path).expanduser().absolute()
+            )
         tracked_paths = tuple(
             path
             for path in tracked_paths
             if Path(path).expanduser().absolute() != runtime_status_file
         )
     progress_signature = (
-        progress_path_signature(tracked_paths) if tracked_paths is not None else ()
+        progress_path_signature(
+            tracked_paths,
+            excluded_paths=excluded_progress_paths,
+        )
+        if tracked_paths is not None
+        else ()
     )
     proc: subprocess.Popen[bytes] | None = None
     gated: GatedSubprocess | None = None
@@ -1869,11 +1955,16 @@ def run_command(
         assert proc is not None
         while True:
             now = time.monotonic()
+            progress_advanced = False
             if tracked_paths is not None:
-                current_signature = progress_path_signature(tracked_paths)
+                current_signature = progress_path_signature(
+                    tracked_paths,
+                    excluded_paths=excluded_progress_paths,
+                )
                 if current_signature != progress_signature:
                     progress_signature = current_signature
                     progress_observed = True
+                    progress_advanced = True
                     last_progress_at = now
                 current_budget = timeout + (
                     0.0 if progress_observed else max(0.0, startup_grace_seconds)
@@ -1883,7 +1974,9 @@ def run_command(
             else:
                 remaining = timeout
                 communicate_timeout = timeout
-            if runtime_reporter is not None and remaining > 0:
+            network_state = "unknown"
+            network_reason = ""
+            if runtime_reporter is not None:
                 exporter_alive = proc.poll() is None
                 exporter_identity_current = bool(
                     exporter_alive
@@ -1892,10 +1985,30 @@ def run_command(
                     and process_inspector.identity(proc.pid) == lease_process_identity
                 )
                 if exporter_identity_current:
-                    runtime_reporter.checkpoint_from_diagnostics(
-                        network_diagnostics_path,
-                        phase="running",
+                    network_state, network_reason = xhs_network_state_from_diagnostics(
+                        network_diagnostics_path
                     )
+                    runtime_network_state = network_state
+                    runtime_network_reason = network_reason
+                    if network_state == "network_recovery_timeout":
+                        runtime_network_state = "unknown"
+                        runtime_network_reason = ""
+                        if network_terminal_grace_started_at is None:
+                            network_terminal_grace_started_at = now
+                    # Ordinary expiry rounds must not manufacture another
+                    # heartbeat.  A fresh explicit pause is the sole exception:
+                    # it has to be published before the timeout decision below.
+                    # A fresh terminal event gets one final heartbeat while the
+                    # child commits its checkpoint and unwinds.
+                    if remaining > 0 or network_state in {
+                        "network_paused",
+                        "network_recovery_timeout",
+                    }:
+                        runtime_reporter.checkpoint(
+                            phase="running",
+                            network_state=runtime_network_state,
+                            network_reason=runtime_network_reason,
+                        )
                 elif exporter_alive:
                     exporter_identity_mismatch = True
                     terminate_managed_process(
@@ -1905,14 +2018,71 @@ def run_command(
                     raise XhsRuntimeSupervisionError(
                         "xhs_exporter_process_identity_changed"
                     )
-            if remaining <= 0:
-                timed_out = True
-                returncode = 124
-                timeout_reason = (
+
+            pause_ceiling_expired = False
+            if tracked_paths is not None:
+                pause_delta, pause_ceiling_expired = network_pause_clock.observe(
+                    network_state,
+                    now=now,
+                )
+                if not progress_advanced:
+                    last_progress_at += pause_delta
+            if tracked_paths is not None and network_state == "network_paused":
+                current_budget = timeout + (
+                    0.0 if progress_observed else max(0.0, startup_grace_seconds)
+                )
+                remaining = current_budget - (now - last_progress_at)
+                communicate_timeout = max(0.01, poll_seconds)
+            else:
+                if tracked_paths is not None:
+                    current_budget = timeout + (
+                        0.0 if progress_observed else max(0.0, startup_grace_seconds)
+                    )
+                    remaining = current_budget - (now - last_progress_at)
+                    communicate_timeout = min(
+                        max(0.01, poll_seconds), max(0.01, remaining)
+                    )
+
+            expiration_reason: str | None = None
+            terminal_grace_elapsed = (
+                max(0.0, now - network_terminal_grace_started_at)
+                if network_terminal_grace_started_at is not None
+                else None
+            )
+            if terminal_grace_elapsed is not None:
+                if (
+                    terminal_grace_elapsed
+                    >= XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS
+                ):
+                    expiration_reason = "parent_network_terminal_unwind_timeout"
+            elif pause_ceiling_expired:
+                expiration_reason = "parent_network_pause_timeout"
+            elif (
+                remaining <= 0
+                and network_state != "network_paused"
+                and network_terminal_grace_started_at is None
+            ):
+                expiration_reason = (
                     "no_progress_timeout"
                     if tracked_paths is not None
                     else "wall_clock_timeout"
                 )
+            if expiration_reason is not None:
+                # Prefer a child terminal result that won the boundary race.
+                # In particular, do not rewrite its network_recovery_timeout as
+                # a parent watchdog failure merely because both clocks expired
+                # in the same polling round.
+                observed_returncode = proc.poll()
+                if observed_returncode is not None:
+                    stdout_data, stderr_data = proc.communicate()
+                    stdout = decode_text(stdout_data)
+                    stderr = decode_text(stderr_data)
+                    returncode = int(observed_returncode)
+                    last_progress_age_seconds = max(0.0, now - last_progress_at)
+                    break
+                timed_out = True
+                returncode = 124
+                timeout_reason = expiration_reason
                 last_progress_age_seconds = max(0.0, now - last_progress_at)
                 stdout_data, stderr_data, forced_termination = terminate_managed_process(
                     proc,
@@ -1921,6 +2091,15 @@ def run_command(
                 stdout = decode_text(stdout_data)
                 stderr = decode_text(stderr_data)
                 break
+            if network_terminal_grace_started_at is not None:
+                communicate_timeout = min(
+                    max(0.01, poll_seconds),
+                    max(
+                        0.01,
+                        XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS
+                        - float(terminal_grace_elapsed or 0.0),
+                    ),
+                )
             try:
                 stdout_data, stderr_data = proc.communicate(timeout=communicate_timeout)
             except subprocess.TimeoutExpired:
@@ -1989,6 +2168,24 @@ def run_command(
         ),
         "progress_observed": progress_observed,
         "last_progress_age_seconds": round(last_progress_age_seconds, 2),
+        "network_pause_observed": network_pause_clock.observed,
+        "network_pause_total_seconds": round(network_pause_clock.total_seconds, 2),
+        "network_pause_ceiling_seconds": (
+            XHS_PARENT_NETWORK_PAUSE_CEILING_SECONDS
+            if runtime_reporter is not None and tracked_paths is not None
+            else None
+        ),
+        "network_terminal_grace_seconds": (
+            XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS
+            if runtime_reporter is not None and tracked_paths is not None
+            else None
+        ),
+        "network_terminal_observed": network_terminal_grace_started_at is not None,
+        "network_terminal_reason": (
+            "network_recovery_timeout"
+            if network_terminal_grace_started_at is not None
+            else None
+        ),
         "forced_termination": forced_termination,
         "cleanup_grace_seconds": cleanup_grace_seconds,
         "exporter_identity_mismatch": exporter_identity_mismatch,
@@ -5602,9 +5799,11 @@ def _run_platform_without_policy(
     )
     if runtime_reporter is not None:
         runtime_reporter.enter_finalizing()
-    if run.get("timeout_reason") == "no_progress_timeout":
-        run["timeout_state_event"] = append_no_progress_timeout_event(
+    supervisor_timeout_reason = str(run.get("timeout_reason") or "")
+    if supervisor_timeout_reason in SUPERVISOR_RUNTIME_TIMEOUT_REASONS:
+        run["timeout_state_event"] = append_runtime_timeout_event(
             execution_state_path,
+            timeout_reason=supervisor_timeout_reason,
             platform_key=platform_key,
             start_page=int(args.start_page),
             start_offset=(
@@ -5614,6 +5813,19 @@ def _run_platform_without_policy(
             inactivity_timeout_seconds=float(timeout),
             last_progress_age_seconds=float(
                 run.get("last_progress_age_seconds") or 0.0
+            ),
+            network_pause_total_seconds=float(
+                run.get("network_pause_total_seconds") or 0.0
+            ),
+            network_pause_ceiling_seconds=(
+                float(run["network_pause_ceiling_seconds"])
+                if run.get("network_pause_ceiling_seconds") is not None
+                else None
+            ),
+            network_terminal_grace_seconds=(
+                float(run["network_terminal_grace_seconds"])
+                if run.get("network_terminal_grace_seconds") is not None
+                else None
             ),
         )
     behavior_evidence = load_behavior_evidence(behavior_evidence_path)

@@ -110,6 +110,42 @@ def reporter_environment(*, auth_key: str | None = AUTH_KEY_HEX) -> dict[str, st
     return environ
 
 
+def configure_real_supervised_exporter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registered: dict[str, object] = {}
+
+    def register_exporter(*, pid: int, **_kwargs: object) -> object:
+        identity = process_identity(pid=pid, process_start_token="exporter-live")
+        registered["identity"] = identity
+        return identity
+
+    class StableExporterInspector:
+        def identity(self, _pid: int) -> object:
+            return registered.get("identity")
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "browser_launch_environment",
+        reporter_environment,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "register_lease_process_from_environment",
+        register_exporter,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "mark_lease_process_exited_from_environment",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "SystemProcessInspector",
+        StableExporterInspector,
+    )
+
+
 @pytest.mark.parametrize(
     ("auth_key", "error"),
     [
@@ -769,6 +805,78 @@ def test_network_diagnostics_require_fresh_explicit_transport_recovery(
     ) == ("unknown", "")
 
 
+def test_network_timeout_diagnostic_is_fresh_explicit_terminal_observation(
+    tmp_path: Path,
+) -> None:
+    diagnostic_path = tmp_path / "behavior_evidence.navigation.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "platform": "xhs",
+                "updated_at": NOW.isoformat(),
+                "events": [
+                    {
+                        "at": NOW.isoformat(),
+                        "stage": "search",
+                        "outcome": "network_recovery_timeout",
+                        "error": "ConnectTimeout: request failed",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert mediacrawler_crawl.xhs_network_state_from_diagnostics(
+        diagnostic_path,
+        now=NOW,
+    ) == ("network_recovery_timeout", "transport_timeout")
+
+
+def test_parent_network_pause_clock_freezes_remaining_without_resetting_it() -> None:
+    clock = mediacrawler_crawl.XhsParentNetworkPauseClock(ceiling_seconds=10)
+
+    assert clock.observe("network_paused", now=100) == (0.0, False)
+    assert clock.observe("network_paused", now=104) == (4.0, False)
+    # An untrusted gap neither earns credit nor impersonates recovery.
+    assert clock.observe("unknown", now=107) == (0.0, False)
+    assert clock.observe("network_paused", now=109) == (0.0, False)
+    assert clock.observe("network_paused", now=115) == (6.0, True)
+    assert clock.total_seconds == 10
+
+
+def test_parent_network_pause_ceiling_resets_only_after_explicit_recovery() -> None:
+    clock = mediacrawler_crawl.XhsParentNetworkPauseClock(ceiling_seconds=10)
+
+    clock.observe("network_paused", now=0)
+    assert clock.observe("network_paused", now=8) == (8.0, False)
+    assert clock.observe("online", now=9) == (1.0, False)
+    assert clock.observe("network_paused", now=20) == (0.0, False)
+    assert clock.observe("network_paused", now=27) == (7.0, False)
+    assert clock.total_seconds == 16
+
+
+def test_network_diagnostics_never_count_as_business_progress(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    diagnostic_path = data_dir / "navigation.jsonl"
+    business_path = data_dir / "xhs_contents.jsonl"
+    diagnostic_path.write_text("diagnostic", encoding="utf-8")
+
+    assert mediacrawler_crawl.progress_path_signature(
+        [data_dir],
+        excluded_paths=[diagnostic_path],
+    ) == ()
+
+    business_path.write_text("business", encoding="utf-8")
+    signature = mediacrawler_crawl.progress_path_signature(
+        [data_dir],
+        excluded_paths=[diagnostic_path],
+    )
+    assert [Path(item[0]).name for item in signature] == ["xhs_contents.jsonl"]
+
+
 def test_runtime_reporter_sequence_finalizing_and_no_background_keepalive(
     runtime_reporter: tuple[object, dict[str, Path], object],
 ) -> None:
@@ -1112,13 +1220,16 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
             self.calls = 0
             self.status_path = status_path
 
-        def checkpoint_from_diagnostics(
+        def checkpoint(
             self,
-            _path: object,
             *,
             phase: str,
+            network_state: str,
+            network_reason: str,
         ) -> bool:
             assert phase == "running"
+            assert network_state == "unknown"
+            assert network_reason == ""
             self.calls += 1
             return True
 
@@ -1316,6 +1427,117 @@ def test_child_exit_then_main_control_flow_enters_finalizing(
     assert finalizing["phase"] == "finalizing"
 
 
+def test_real_child_survives_no_progress_budget_during_network_pause_then_recovers(
+    runtime_reporter: tuple[object, dict[str, Path], object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reporter, _, _ = runtime_reporter
+    configure_real_supervised_exporter(monkeypatch)
+    observations = [0]
+
+    def network_observation(_path: object) -> tuple[str, str]:
+        observations[0] += 1
+        if observations[0] <= 7:
+            return "network_paused", "transport_timeout"
+        return "online", ""
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "xhs_network_state_from_diagnostics",
+        network_observation,
+    )
+
+    result = mediacrawler_crawl.run_command(
+        [sys.executable, "-c", "import time; time.sleep(0.1)"],
+        tmp_path,
+        0.06,
+        tmp_path / "pause-recovery-logs",
+        progress_paths=[],
+        runtime_reporter=reporter,
+        poll_seconds=0.01,
+        cleanup_grace_seconds=1,
+    )
+
+    assert result["returncode"] == 0
+    assert result["timed_out"] is False
+    assert result["elapsed_seconds"] >= 0.09
+    assert result["network_pause_observed"] is True
+    assert result["network_pause_total_seconds"] >= 0.04
+
+
+def test_network_timeout_event_gets_one_fixed_unwind_grace_for_real_child(
+    runtime_reporter: tuple[object, dict[str, Path], object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reporter, _, _ = runtime_reporter
+    configure_real_supervised_exporter(monkeypatch)
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS",
+        0.2,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "xhs_network_state_from_diagnostics",
+        lambda _path: ("network_recovery_timeout", "transport_timeout"),
+    )
+
+    result = mediacrawler_crawl.run_command(
+        [sys.executable, "-c", "import sys, time; time.sleep(0.08); sys.exit(7)"],
+        tmp_path,
+        0.01,
+        tmp_path / "terminal-unwind-logs",
+        progress_paths=[],
+        runtime_reporter=reporter,
+        poll_seconds=0.01,
+        cleanup_grace_seconds=1,
+    )
+
+    assert result["returncode"] == 7
+    assert result["timed_out"] is False
+    assert result["timeout_reason"] is None
+    assert result["elapsed_seconds"] >= 0.07
+    assert result["network_terminal_observed"] is True
+    assert result["network_terminal_reason"] == "network_recovery_timeout"
+
+
+def test_repeated_network_timeout_event_cannot_extend_unwind_grace(
+    runtime_reporter: tuple[object, dict[str, Path], object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reporter, _, _ = runtime_reporter
+    configure_real_supervised_exporter(monkeypatch)
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "xhs_network_state_from_diagnostics",
+        lambda _path: ("network_recovery_timeout", "transport_timeout"),
+    )
+
+    result = mediacrawler_crawl.run_command(
+        [sys.executable, "-c", "import time; time.sleep(1)"],
+        tmp_path,
+        0.01,
+        tmp_path / "terminal-unwind-timeout-logs",
+        progress_paths=[],
+        runtime_reporter=reporter,
+        poll_seconds=0.01,
+        cleanup_grace_seconds=1,
+    )
+
+    assert result["returncode"] == 124
+    assert result["timed_out"] is True
+    assert result["timeout_reason"] == "parent_network_terminal_unwind_timeout"
+    assert result["elapsed_seconds"] < 0.5
+
+
 def test_durable_progress_allows_runtime_longer_than_watchdog(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1374,7 +1596,16 @@ def test_no_progress_timeout_preserves_output_once_and_allows_cleanup(
     assert stdout.count("terminated") == 1
 
 
+@pytest.mark.parametrize(
+    "timeout_reason",
+    [
+        "no_progress_timeout",
+        "parent_network_pause_timeout",
+        "parent_network_terminal_unwind_timeout",
+    ],
+)
 def test_timeout_with_staged_records_remains_runtime_failure(
+    timeout_reason: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1410,7 +1641,7 @@ def test_timeout_with_staged_records_remains_runtime_failure(
         lambda *_args, **_kwargs: {
             "returncode": 124,
             "timed_out": True,
-            "timeout_reason": "no_progress_timeout",
+            "timeout_reason": timeout_reason,
             "last_progress_age_seconds": 1200,
         },
     )
@@ -1437,6 +1668,10 @@ def test_timeout_with_staged_records_remains_runtime_failure(
 
     assert result["status"] == "runtime_failed"
     assert result["ok"] is False
+    assert result["run"]["timeout_state_event"] == {
+        "skipped": True,
+        "reason": "execution_state_unavailable",
+    }
 
 
 def test_no_progress_timeout_appends_incomplete_terminal_audit_event(
@@ -1468,8 +1703,9 @@ def test_no_progress_timeout_appends_incomplete_terminal_audit_event(
         },
     )
 
-    result = mediacrawler_crawl.append_no_progress_timeout_event(
+    result = mediacrawler_crawl.append_runtime_timeout_event(
         state_path,
+        timeout_reason="no_progress_timeout",
         platform_key="weibo",
         start_page=18,
         start_offset=None,
@@ -1487,6 +1723,57 @@ def test_no_progress_timeout_appends_incomplete_terminal_audit_event(
     assert terminal["details"]["resume_page"] == 42
     assert terminal["details"]["batch_complete"] is False
     assert terminal["details"]["candidate_identities"] == ["post-1"]
+
+
+@pytest.mark.parametrize(
+    "timeout_reason",
+    [
+        "parent_network_pause_timeout",
+        "parent_network_terminal_unwind_timeout",
+    ],
+)
+def test_parent_network_timeout_appends_exact_runtime_failed_terminal_event(
+    timeout_reason: str,
+    tmp_path: Path,
+) -> None:
+    frozen_input = tmp_path / "config.json"
+    frozen_input.write_text("{}\n", encoding="utf-8")
+    state_path = tmp_path / "state.json"
+    FrozenExecutionState.create(
+        state_path,
+        run_id="run-network",
+        job_key="job-network",
+        site_key="xhs",
+        job_kind="xhs_account_search",
+        plan={"keyword": "青岛太平角旅游"},
+        frozen_inputs=[frozen_input],
+    )
+
+    result = mediacrawler_crawl.append_runtime_timeout_event(
+        state_path,
+        timeout_reason=timeout_reason,
+        platform_key="xhs",
+        start_page=18,
+        start_offset=None,
+        start_cursor="search-id",
+        inactivity_timeout_seconds=7200,
+        last_progress_age_seconds=7199,
+        network_pause_total_seconds=675,
+        network_pause_ceiling_seconds=675,
+        network_terminal_grace_seconds=20,
+    )
+
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    terminal = payload["events"][-1]
+    assert result["skipped"] is False
+    assert terminal["type"] == "adaptive_search_stopped"
+    assert terminal["details"]["stop_reason"] == "runtime_failed"
+    assert terminal["details"]["stop_detail"] == timeout_reason
+    assert terminal["details"]["resume_page"] == 18
+    assert terminal["details"]["resume_cursor"] == "search-id"
+    assert terminal["details"]["batch_complete"] is False
+    assert terminal["details"]["network_pause_ceiling_seconds"] == 675
+    assert terminal["details"]["network_terminal_grace_seconds"] == 20
 
 
 def test_watchdog_does_not_replace_existing_terminal_event(tmp_path: Path) -> None:
@@ -1515,8 +1802,9 @@ def test_watchdog_does_not_replace_existing_terminal_event(tmp_path: Path) -> No
         },
     )
 
-    result = mediacrawler_crawl.append_no_progress_timeout_event(
+    result = mediacrawler_crawl.append_runtime_timeout_event(
         state_path,
+        timeout_reason="no_progress_timeout",
         platform_key="weibo",
         start_page=18,
         start_offset=None,
