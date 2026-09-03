@@ -1450,6 +1450,16 @@ class LeaseGuard:
                         received_at=time.monotonic(),
                     )
                     if termination_reason is not None:
+                        if termination_reason in {
+                            "runtime_status_startup_timeout",
+                            "runtime_status_stale",
+                        }:
+                            observed_returncode = proc.poll()
+                            if observed_returncode is not None:
+                                stdout, stderr = proc.communicate()
+                                returncode = int(observed_returncode)
+                                termination_reason = None
+                                break
                         timed_out = termination_reason in {
                             "runtime_status_startup_timeout",
                             "runtime_status_stale",

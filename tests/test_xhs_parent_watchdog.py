@@ -536,6 +536,55 @@ def test_missing_status_obeys_startup_grace_then_times_out(
     assert result.runtime_status is None
 
 
+@pytest.mark.parametrize(
+    "observed_status",
+    [None, status_payload(1)],
+    ids=["startup", "stale"],
+)
+def test_child_exit_at_timeout_boundary_wins_without_parent_signal(
+    observed_status: Mapping[str, Any] | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    guard = configured_guard(tmp_path, FakeInspector())
+    process = FakeProcess(clock)
+    observed = install_process_harness(monkeypatch, guard, process)
+    monkeypatch.setattr(leases.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(leases.secrets, "token_bytes", lambda _size: AUTH_KEY)
+    reads = 0
+
+    def exit_while_parent_reads_status(
+        *_args: object,
+        **_kwargs: object,
+    ) -> Mapping[str, Any] | None:
+        nonlocal reads
+        reads += 1
+        if reads == 1 and observed_status is not None:
+            return observed_status
+        clock.advance(1.0)
+        process.returncode = 7
+        return observed_status
+
+    monkeypatch.setattr(
+        leases,
+        "read_runtime_status_if_present",
+        exit_while_parent_reads_status,
+    )
+
+    result = run_watchdog(
+        guard,
+        policy=RuntimeStatusWatchdogPolicy(0.2, 0.2, 0.05, 0.0),
+    )
+
+    assert result.returncode == 7
+    assert result.timed_out is False
+    assert result.termination_reason is None
+    assert process.signals == []
+    assert observed["owned_cleanup_calls"] == 0
+    assert observed["marked"] == [(CHILD, "child")]
+
+
 def test_tampered_authenticated_file_is_terminal_and_not_echoed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
