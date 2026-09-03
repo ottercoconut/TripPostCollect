@@ -28,6 +28,15 @@ ProcessIdentity = import_module("trippostcollect.xhs.leases").ProcessIdentity
 AUTH_KEY_HEX = "ab" * 32
 AUTH_KEY = bytes.fromhex(AUTH_KEY_HEX)
 NOW = datetime(2026, 9, 3, 8, 0, 0, tzinfo=timezone.utc)
+PRIVATE_LEASE_ENV_KEYS = (
+    mediacrawler_crawl.LEASE_DB_ENV,
+    mediacrawler_crawl.LEASE_ID_ENV,
+    mediacrawler_crawl.LEASE_OWNER_TOKEN_ENV,
+)
+PRIVATE_EXPORTER_ENV_KEYS = (
+    runtime.RUNTIME_STATUS_AUTH_KEY_ENV,
+    *PRIVATE_LEASE_ENV_KEYS,
+)
 
 
 class StaticInspector:
@@ -199,18 +208,60 @@ def test_no_xhs_runtime_environment_is_a_noop() -> None:
     assert reporter is None
 
 
-def test_runtime_auth_key_is_never_forwarded_to_exporter(
+def test_private_runtime_environment_is_not_forwarded_to_exporter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    captured: dict[str, object] = {}
+    original_popen = mediacrawler_crawl.subprocess.Popen
+
+    def capture_popen(*args: object, **kwargs: object) -> object:
+        captured["child_env"] = dict(kwargs["env"])
+        return original_popen(*args, **kwargs)
+
+    def register_exporter(
+        *,
+        pid: int,
+        environ: dict[str, str],
+        **_kwargs: object,
+    ) -> object:
+        captured["registration_env"] = dict(environ)
+        identity = process_identity(pid=pid, process_start_token="exporter-normal")
+        captured["identity"] = identity
+        return identity
+
+    def mark_exporter_exited(
+        *,
+        identity: object,
+        environ: dict[str, str],
+        **_kwargs: object,
+    ) -> None:
+        captured["marked_identity"] = identity
+        captured["exit_env"] = dict(environ)
+
     monkeypatch.setattr(
         mediacrawler_crawl,
         "browser_launch_environment",
-        lambda: {runtime.RUNTIME_STATUS_AUTH_KEY_ENV: AUTH_KEY_HEX},
+        reporter_environment,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl.subprocess,
+        "Popen",
+        capture_popen,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "register_lease_process_from_environment",
+        register_exporter,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "mark_lease_process_exited_from_environment",
+        mark_exporter_exited,
     )
     child = (
-        "import os; "
-        f"print(os.environ.get('{runtime.RUNTIME_STATUS_AUTH_KEY_ENV}', 'missing'))"
+        "import os, sys; "
+        f"sys.exit(any(key in os.environ for key in {PRIVATE_EXPORTER_ENV_KEYS!r}))"
     )
 
     result = mediacrawler_crawl.run_command(
@@ -221,10 +272,106 @@ def test_runtime_auth_key_is_never_forwarded_to_exporter(
     )
 
     assert result["returncode"] == 0
-    assert result["stdout_tail"].strip() == "missing"
-    assert AUTH_KEY_HEX not in (tmp_path / "logs" / "command.txt").read_text(
-        encoding="utf-8"
+    child_env = captured["child_env"]
+    registration_env = captured["registration_env"]
+    exit_env = captured["exit_env"]
+    assert isinstance(child_env, dict)
+    assert isinstance(registration_env, dict)
+    assert isinstance(exit_env, dict)
+    assert not set(PRIVATE_EXPORTER_ENV_KEYS) & set(child_env)
+    for key, expected in reporter_environment(auth_key=None).items():
+        assert registration_env[key] == expected
+        assert exit_env[key] == expected
+    assert runtime.RUNTIME_STATUS_AUTH_KEY_ENV not in registration_env
+    assert captured["marked_identity"] == captured["identity"]
+    logs = "\n".join(
+        path.read_text(encoding="utf-8") for path in (tmp_path / "logs").iterdir()
     )
+    assert AUTH_KEY_HEX not in logs
+    assert "owner-token" not in logs
+
+
+def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {"terminate_calls": 0, "mark_calls": 0}
+
+    class FakeProcess:
+        pid = 7744
+        returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+    fake_process = FakeProcess()
+
+    def popen(*_args: object, **kwargs: object) -> FakeProcess:
+        captured["child_env"] = dict(kwargs["env"])
+        return fake_process
+
+    def fail_registration(
+        *,
+        environ: dict[str, str],
+        **_kwargs: object,
+    ) -> object:
+        captured["registration_env"] = dict(environ)
+        raise RuntimeError("synthetic registration failure")
+
+    def terminate(
+        proc: FakeProcess,
+        *,
+        grace_seconds: float,
+    ) -> tuple[bytes, bytes, bool]:
+        assert grace_seconds == 1
+        captured["terminate_calls"] = int(captured["terminate_calls"]) + 1
+        proc.returncode = -15
+        return b"", b"", False
+
+    def mark_exit(**_kwargs: object) -> None:
+        captured["mark_calls"] = int(captured["mark_calls"]) + 1
+
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "browser_launch_environment",
+        reporter_environment,
+    )
+    monkeypatch.setattr(mediacrawler_crawl.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "register_lease_process_from_environment",
+        fail_registration,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "mark_lease_process_exited_from_environment",
+        mark_exit,
+    )
+    monkeypatch.setattr(
+        mediacrawler_crawl,
+        "SystemProcessInspector",
+        lambda: StaticInspector(process_identity(pid=fake_process.pid)),
+    )
+    monkeypatch.setattr(mediacrawler_crawl, "terminate_managed_process", terminate)
+
+    with pytest.raises(RuntimeError, match="synthetic registration failure"):
+        mediacrawler_crawl.run_command(
+            ["fake"],
+            tmp_path,
+            1,
+            tmp_path / "registration-failure-logs",
+            cleanup_grace_seconds=1,
+        )
+
+    child_env = captured["child_env"]
+    registration_env = captured["registration_env"]
+    assert isinstance(child_env, dict)
+    assert isinstance(registration_env, dict)
+    assert not set(PRIVATE_EXPORTER_ENV_KEYS) & set(child_env)
+    assert registration_env[mediacrawler_crawl.LEASE_OWNER_TOKEN_ENV] == "owner-token"
+    assert captured["terminate_calls"] == 1
+    assert captured["mark_calls"] == 0
+    assert fake_process.returncode == -15
 
 
 def test_network_diagnostics_require_fresh_explicit_transport_recovery(
@@ -349,11 +496,31 @@ def test_exporter_start_token_change_stops_heartbeat_and_terminates_process(
 ) -> None:
     reporter, paths, writer_identity = runtime_reporter
     registered: dict[str, object] = {}
+    original_popen = mediacrawler_crawl.subprocess.Popen
 
-    def register_exporter(*, pid: int, **_kwargs: object) -> object:
+    def capture_popen(*args: object, **kwargs: object) -> object:
+        registered["child_env"] = dict(kwargs["env"])
+        return original_popen(*args, **kwargs)
+
+    def register_exporter(
+        *,
+        pid: int,
+        environ: dict[str, str],
+        **_kwargs: object,
+    ) -> object:
         identity = process_identity(pid=pid, process_start_token="exporter-original")
         registered["identity"] = identity
+        registered["registration_env"] = dict(environ)
         return identity
+
+    def mark_exporter_exited(
+        *,
+        identity: object,
+        environ: dict[str, str],
+        **_kwargs: object,
+    ) -> None:
+        registered["marked_identity"] = identity
+        registered["exit_env"] = dict(environ)
 
     class ChangedExporterInspector:
         def identity(self, pid: int) -> object:
@@ -365,6 +532,11 @@ def test_exporter_start_token_change_stops_heartbeat_and_terminates_process(
         reporter_environment,
     )
     monkeypatch.setattr(
+        mediacrawler_crawl.subprocess,
+        "Popen",
+        capture_popen,
+    )
+    monkeypatch.setattr(
         mediacrawler_crawl,
         "register_lease_process_from_environment",
         register_exporter,
@@ -372,7 +544,7 @@ def test_exporter_start_token_change_stops_heartbeat_and_terminates_process(
     monkeypatch.setattr(
         mediacrawler_crawl,
         "mark_lease_process_exited_from_environment",
-        lambda **_kwargs: None,
+        mark_exporter_exited,
     )
     monkeypatch.setattr(
         mediacrawler_crawl,
@@ -397,6 +569,17 @@ def test_exporter_start_token_change_stops_heartbeat_and_terminates_process(
         )
 
     assert registered["identity"].process_start_token == "exporter-original"
+    child_env = registered["child_env"]
+    registration_env = registered["registration_env"]
+    exit_env = registered["exit_env"]
+    assert isinstance(child_env, dict)
+    assert isinstance(registration_env, dict)
+    assert isinstance(exit_env, dict)
+    assert not set(PRIVATE_EXPORTER_ENV_KEYS) & set(child_env)
+    for key, expected in reporter_environment(auth_key=None).items():
+        assert registration_env[key] == expected
+        assert exit_env[key] == expected
+    assert registered["marked_identity"] == registered["identity"]
     assert time.monotonic() - started < 2
     assert read_reporter_status(paths["status"], writer_identity)["sequence"] == 1
 
@@ -406,6 +589,7 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
     tmp_path: Path,
 ) -> None:
     exporter_identity = process_identity(pid=9911, process_start_token="exporter-1")
+    captured: dict[str, object] = {}
 
     class FakeProcess:
         pid = 9911
@@ -448,6 +632,27 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
         proc.returncode = -15
         return b"", b"", False
 
+    def popen(*_args: object, **kwargs: object) -> FakeProcess:
+        captured["child_env"] = dict(kwargs["env"])
+        return fake_process
+
+    def register_exporter(
+        *,
+        environ: dict[str, str],
+        **_kwargs: object,
+    ) -> object:
+        captured["registration_env"] = dict(environ)
+        return exporter_identity
+
+    def mark_exporter_exited(
+        *,
+        identity: object,
+        environ: dict[str, str],
+        **_kwargs: object,
+    ) -> None:
+        captured["marked_identity"] = identity
+        captured["exit_env"] = dict(environ)
+
     monkeypatch.setattr(
         mediacrawler_crawl,
         "browser_launch_environment",
@@ -456,17 +661,17 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
     monkeypatch.setattr(
         mediacrawler_crawl.subprocess,
         "Popen",
-        lambda *_args, **_kwargs: fake_process,
+        popen,
     )
     monkeypatch.setattr(
         mediacrawler_crawl,
         "register_lease_process_from_environment",
-        lambda **_kwargs: exporter_identity,
+        register_exporter,
     )
     monkeypatch.setattr(
         mediacrawler_crawl,
         "mark_lease_process_exited_from_environment",
-        lambda **_kwargs: None,
+        mark_exporter_exited,
     )
     monkeypatch.setattr(
         mediacrawler_crawl,
@@ -495,6 +700,17 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
     assert result["timeout_reason"] == "no_progress_timeout"
     assert result["progress_observed"] is False
     assert reporter.calls == 1
+    child_env = captured["child_env"]
+    registration_env = captured["registration_env"]
+    exit_env = captured["exit_env"]
+    assert isinstance(child_env, dict)
+    assert isinstance(registration_env, dict)
+    assert isinstance(exit_env, dict)
+    assert not set(PRIVATE_EXPORTER_ENV_KEYS) & set(child_env)
+    for key, expected in reporter_environment(auth_key=None).items():
+        assert registration_env[key] == expected
+        assert exit_env[key] == expected
+    assert captured["marked_identity"] == exporter_identity
 
 
 def test_runtime_reporter_requires_progress_tracking_before_popen(

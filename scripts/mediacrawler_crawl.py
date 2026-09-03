@@ -1773,6 +1773,10 @@ def run_command(
     if extra_env:
         env.update(extra_env)
     env.pop(RUNTIME_STATUS_AUTH_KEY_ENV, None)
+    registration_env = dict(env)
+    child_env = dict(registration_env)
+    for private_lease_key in (LEASE_DB_ENV, LEASE_ID_ENV, LEASE_OWNER_TOKEN_ENV):
+        child_env.pop(private_lease_key, None)
     started = time.monotonic()
     stdout = ""
     stderr = ""
@@ -1798,7 +1802,7 @@ def run_command(
     lease_process_identity = None
     exporter_identity_mismatch = False
     lease_registration_enabled = all(
-        str(env.get(key) or "")
+        str(registration_env.get(key) or "")
         for key in (LEASE_DB_ENV, LEASE_ID_ENV, LEASE_OWNER_TOKEN_ENV)
     )
     if runtime_reporter is not None and (
@@ -1816,7 +1820,7 @@ def run_command(
         proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
-            env=env,
+            env=child_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -1826,7 +1830,7 @@ def run_command(
                 lease_process_identity = register_lease_process_from_environment(
                     pid=proc.pid,
                     process_role="exporter",
-                    environ=env,
+                    environ=registration_env,
                     inspector=process_inspector,
                 )
             except Exception:
@@ -1940,7 +1944,7 @@ def run_command(
             mark_lease_process_exited_from_environment(
                 identity=lease_process_identity,
                 process_role="exporter",
-                environ=env,
+                environ=registration_env,
             )
 
     _, avatar_output_detected = redact_author_avatar_text(f"{stdout}\n{stderr}")
