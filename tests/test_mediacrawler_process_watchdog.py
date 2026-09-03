@@ -468,6 +468,182 @@ def test_runtime_reporter_sequence_finalizing_and_no_background_keepalive(
     assert unchanged["sequence"] == 3
 
 
+def test_finalizing_summary_scan_keeps_advancing_authenticated_heartbeats(
+    runtime_reporter: tuple[object, dict[str, Path], object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reporter, paths, identity = runtime_reporter
+    reporter.enter_finalizing()
+    data_dir = tmp_path / "xhs" / "data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "xhs_contents_1.jsonl").write_text(
+        "\n".join(
+            (
+                json.dumps({"note_id": "one", "title": "青岛"}),
+                "{malformed",
+                json.dumps({"note_id": "two", "title": "青岛"}),
+            )
+        ),
+        encoding="utf-8",
+    )
+    (data_dir / "image.jpg").write_bytes(b"image")
+    clock = [0.0]
+
+    def advancing_monotonic() -> float:
+        clock[0] += 6.0
+        return clock[0]
+
+    monkeypatch.setattr(mediacrawler_crawl.time, "monotonic", advancing_monotonic)
+    before = read_reporter_status(paths["status"], identity)["sequence"]
+
+    output = mediacrawler_crawl.summarize_output(
+        data_dir,
+        "青岛",
+        progress_callback=reporter.checkpoint,
+    )
+
+    after = read_reporter_status(paths["status"], identity)
+    assert output["content_records"] == 3
+    assert output["parse_errors"] == 1
+    assert after["phase"] == "finalizing"
+    assert int(after["sequence"]) >= int(before) + 6
+
+
+def test_finalizing_summary_does_not_swallow_checkpoint_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "xhs" / "data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "xhs_contents_1.jsonl").write_text(
+        json.dumps({"note_id": "one", "title": "青岛"}) + "\n",
+        encoding="utf-8",
+    )
+    clock = [0.0]
+    calls = [0]
+
+    def advancing_monotonic() -> float:
+        clock[0] += 6.0
+        return clock[0]
+
+    def fail_checkpoint() -> None:
+        calls[0] += 1
+        if calls[0] >= 2:
+            raise mediacrawler_crawl.XhsRuntimeSupervisionError("synthetic_stale_writer")
+
+    monkeypatch.setattr(mediacrawler_crawl.time, "monotonic", advancing_monotonic)
+
+    with pytest.raises(
+        mediacrawler_crawl.XhsRuntimeSupervisionError,
+        match="synthetic_stale_writer",
+    ):
+        mediacrawler_crawl.summarize_output(
+            data_dir,
+            "青岛",
+            progress_callback=fail_checkpoint,
+        )
+    assert calls[0] == 2
+
+
+def test_streamed_summary_write_is_atomic_when_heartbeat_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "summary.json"
+    target.write_text('{"status":"old"}', encoding="utf-8")
+    clock = [0.0]
+    calls = [0]
+
+    def advancing_monotonic() -> float:
+        clock[0] += 6.0
+        return clock[0]
+
+    def fail_checkpoint() -> None:
+        calls[0] += 1
+        if calls[0] >= 2:
+            raise mediacrawler_crawl.XhsRuntimeSupervisionError("heartbeat_write_failed")
+
+    monkeypatch.setattr(mediacrawler_crawl.time, "monotonic", advancing_monotonic)
+    payload = {"records": ["x" * (1024 * 1024 + 1), "tail"]}
+
+    with pytest.raises(
+        mediacrawler_crawl.XhsRuntimeSupervisionError,
+        match="heartbeat_write_failed",
+    ):
+        mediacrawler_crawl.write_json_with_progress(
+            target,
+            payload,
+            progress_callback=fail_checkpoint,
+        )
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"status": "old"}
+    assert not (tmp_path / f".summary.json.{os.getpid()}.tmp").exists()
+
+
+def test_large_execution_state_read_propagates_heartbeat_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "execution.json"
+    state_path.write_text(
+        json.dumps({"events": [], "padding": "x" * (2 * 1024 * 1024)}),
+        encoding="utf-8",
+    )
+    clock = [0.0]
+    calls = [0]
+
+    def advancing_monotonic() -> float:
+        clock[0] += 6.0
+        return clock[0]
+
+    def fail_checkpoint() -> None:
+        calls[0] += 1
+        if calls[0] >= 2:
+            raise mediacrawler_crawl.XhsRuntimeSupervisionError("state_heartbeat_failed")
+
+    monkeypatch.setattr(mediacrawler_crawl.time, "monotonic", advancing_monotonic)
+
+    with pytest.raises(
+        mediacrawler_crawl.XhsRuntimeSupervisionError,
+        match="state_heartbeat_failed",
+    ):
+        mediacrawler_crawl.load_pagination_evidence(
+            state_path,
+            progress_callback=fail_checkpoint,
+        )
+    assert calls[0] == 2
+
+
+def test_terminal_stdout_envelope_never_duplicates_large_summary_payload(
+    tmp_path: Path,
+) -> None:
+    summary = {
+        "import_completion_met": False,
+        "failure_reason": "network_recovery_timeout",
+        "records": [{"large": "x" * 100_000}],
+        "import_result": {"rows": list(range(10_000))},
+    }
+
+    envelope = mediacrawler_crawl.terminal_summary_envelope(
+        summary_path=tmp_path / "summary.json",
+        report_path=tmp_path / "summary.md",
+        batch_dir=tmp_path,
+        summary=summary,
+    )
+
+    assert envelope == {
+        "summary": str(tmp_path / "summary.json"),
+        "report": str(tmp_path / "summary.md"),
+        "batch_dir": str(tmp_path),
+        "status": "failed",
+        "import_completion_met": False,
+        "failure_reason": "network_recovery_timeout",
+    }
+    assert "records" not in envelope
+    assert "import_result" not in envelope
+
+
 def test_runtime_status_write_failure_is_terminal(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,

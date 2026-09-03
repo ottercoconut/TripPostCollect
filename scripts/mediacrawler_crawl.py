@@ -1587,6 +1587,21 @@ def _runtime_progress(callback: Callable[[], object] | None) -> None:
         callback()
 
 
+def _runtime_progress_if_due(
+    callback: Callable[[], object] | None,
+    last_checkpoint_at: float,
+    *,
+    interval_seconds: float = 5.0,
+) -> float:
+    if callback is None:
+        return last_checkpoint_at
+    now = time.monotonic()
+    if now - last_checkpoint_at < interval_seconds:
+        return last_checkpoint_at
+    callback()
+    return time.monotonic()
+
+
 def progress_path_signature(paths: Iterable[Path]) -> tuple[tuple[str, int, int], ...]:
     files: set[Path] = set()
     for raw_path in paths:
@@ -1999,7 +2014,12 @@ def extract_sample(record: dict[str, Any]) -> dict[str, str]:
     return sample or {key: truncate(value) for key, value in list(record.items())[:8]}
 
 
-def summarize_jsonl(path: Path, keyword: str) -> dict[str, Any]:
+def summarize_jsonl(
+    path: Path,
+    keyword: str,
+    *,
+    progress_callback: Callable[[], object] | None = None,
+) -> dict[str, Any]:
     item_type = item_type_from_path(path)
     platform_key = platform_from_path(path)
     fields: set[str] = set()
@@ -2010,8 +2030,14 @@ def summarize_jsonl(path: Path, keyword: str) -> dict[str, Any]:
     keyword_hits = 0
     video_like_records = 0
     published_at_records = 0
+    _runtime_progress(progress_callback)
+    last_checkpoint_at = time.monotonic()
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
+            last_checkpoint_at = _runtime_progress_if_due(
+                progress_callback,
+                last_checkpoint_at,
+            )
             text = line.strip()
             if not text:
                 continue
@@ -2035,6 +2061,7 @@ def summarize_jsonl(path: Path, keyword: str) -> dict[str, Any]:
                     published_at_records += 1
                 if item_type == "contents" and len(samples) < 3:
                     samples.append(extract_sample(record))
+    _runtime_progress(progress_callback)
     return {
         "path": str(path),
         "item_type": item_type,
@@ -2049,11 +2076,35 @@ def summarize_jsonl(path: Path, keyword: str) -> dict[str, Any]:
     }
 
 
-def summarize_output(save_path: Path, keyword: str) -> dict[str, Any]:
-    all_jsonl_files = sorted(save_path.rglob("*.jsonl")) if save_path.exists() else []
+def summarize_output(
+    save_path: Path,
+    keyword: str,
+    *,
+    progress_callback: Callable[[], object] | None = None,
+) -> dict[str, Any]:
+    _runtime_progress(progress_callback)
+    last_checkpoint_at = time.monotonic()
+    files: list[Path] = []
+    if save_path.exists():
+        for path in save_path.rglob("*"):
+            last_checkpoint_at = _runtime_progress_if_due(
+                progress_callback,
+                last_checkpoint_at,
+            )
+            if path.is_file():
+                files.append(path)
+    files.sort()
+    all_jsonl_files = [path for path in files if path.suffix.lower() == ".jsonl"]
     image_manifest_paths = [path for path in all_jsonl_files if path.name == "image_manifest.jsonl"]
     jsonl_files = [path for path in all_jsonl_files if path.name != "image_manifest.jsonl"]
-    jsonl = [summarize_jsonl(path, keyword) for path in jsonl_files]
+    jsonl = [
+        summarize_jsonl(
+            path,
+            keyword,
+            progress_callback=progress_callback,
+        )
+        for path in jsonl_files
+    ]
     counts = {"contents": 0, "comments": 0, "creators": 0, "unknown": 0}
     fields: set[str] = set()
     author_like_fields: set[str] = set()
@@ -2063,6 +2114,10 @@ def summarize_output(save_path: Path, keyword: str) -> dict[str, Any]:
     video_like_records = 0
     published_at_records = 0
     for item in jsonl:
+        last_checkpoint_at = _runtime_progress_if_due(
+            progress_callback,
+            last_checkpoint_at,
+        )
         counts[item["item_type"]] = counts.get(item["item_type"], 0) + item["line_count"]
         fields.update(item["top_level_fields"])
         author_like_fields.update(item["author_like_fields"])
@@ -2072,9 +2127,9 @@ def summarize_output(save_path: Path, keyword: str) -> dict[str, Any]:
         published_at_records += int(item.get("published_at_records") or 0)
         samples.extend(item["samples"])
 
-    files = [path for path in save_path.rglob("*") if path.is_file()] if save_path.exists() else []
     image_files = [path for path in files if path.suffix.lower() in IMAGE_SUFFIXES]
     video_files = [path for path in files if path.suffix.lower() in VIDEO_SUFFIXES]
+    _runtime_progress(progress_callback)
     return {
         "save_path": str(save_path),
         "jsonl_files": [str(path) for path in jsonl_files],
@@ -2096,6 +2151,68 @@ def summarize_output(save_path: Path, keyword: str) -> dict[str, Any]:
         "author_like_fields": sorted(author_like_fields),
         "samples": samples[:5],
         "files": jsonl,
+    }
+
+
+def summarize_output_with_progress(
+    save_path: Path,
+    keyword: str,
+    progress_callback: Callable[[], object] | None,
+) -> dict[str, Any]:
+    if progress_callback is None:
+        return summarize_output(save_path, keyword)
+    return summarize_output(
+        save_path,
+        keyword,
+        progress_callback=progress_callback,
+    )
+
+
+def write_json_with_progress(
+    path: Path,
+    value: Any,
+    *,
+    progress_callback: Callable[[], object] | None = None,
+    trailing_newline: bool = False,
+) -> None:
+    """Atomically stream JSON while keeping synchronous supervision alive."""
+
+    ensure_parent(path)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    encoder = json.JSONEncoder(ensure_ascii=False, indent=2)
+    _runtime_progress(progress_callback)
+    last_checkpoint_at = time.monotonic()
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            for chunk in encoder.iterencode(value):
+                for start in range(0, len(chunk), 1024 * 1024):
+                    handle.write(chunk[start : start + 1024 * 1024])
+                    last_checkpoint_at = _runtime_progress_if_due(
+                        progress_callback,
+                        last_checkpoint_at,
+                    )
+            if trailing_newline:
+                handle.write("\n")
+        _runtime_progress(progress_callback)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def terminal_summary_envelope(
+    *,
+    summary_path: Path,
+    report_path: Path,
+    batch_dir: Path,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "summary": str(summary_path),
+        "report": str(report_path),
+        "batch_dir": str(batch_dir),
+        "status": "completed" if summary["import_completion_met"] else "failed",
+        "import_completion_met": summary["import_completion_met"],
+        "failure_reason": summary.get("failure_reason"),
     }
 
 
@@ -2699,12 +2816,27 @@ def load_existing_formal_identities(db_path: str | Path | None) -> set[str]:
     return identities
 
 
-def load_pagination_evidence(state_path: str | Path | None) -> dict[str, Any]:
+def load_pagination_evidence(
+    state_path: str | Path | None,
+    *,
+    progress_callback: Callable[[], object] | None = None,
+) -> dict[str, Any]:
     if not state_path:
         return {"available": False, "stopped": False, "batches": []}
     path = Path(state_path).expanduser()
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        _runtime_progress(progress_callback)
+        chunks: list[str] = []
+        last_checkpoint_at = time.monotonic()
+        with path.open("r", encoding="utf-8") as handle:
+            while chunk := handle.read(1024 * 1024):
+                chunks.append(chunk)
+                last_checkpoint_at = _runtime_progress_if_due(
+                    progress_callback,
+                    last_checkpoint_at,
+                )
+        payload = json.loads("".join(chunks))
+        _runtime_progress(progress_callback)
     except (OSError, json.JSONDecodeError, TypeError):
         return {
             "available": False,
@@ -5367,7 +5499,11 @@ def _run_platform_without_policy(
                     "until d_c0/z_c0 are verified and snapshotted"
                 )
                 run = skipped_command(cmd, log_dir, reason)
-                output = summarize_output(save_path, args.keyword)
+                output = summarize_output_with_progress(
+                    save_path,
+                    args.keyword,
+                    runtime_reporter.checkpoint if runtime_reporter is not None else None,
+                )
                 return {
                     "platform": platform_key,
                     "label": platform["label"],
@@ -5433,7 +5569,11 @@ def _run_platform_without_policy(
         if platform_key == "xhs" and getattr(args, "xhs_repair", False)
         else {}
     )
-    output = summarize_output(save_path, args.keyword)
+    output = summarize_output_with_progress(
+        save_path,
+        args.keyword,
+        runtime_reporter.checkpoint if runtime_reporter is not None else None,
+    )
     status = (
         "completed"
         if output["parse_errors"] == 0
@@ -5537,7 +5677,11 @@ def run_platform(
                 "reason": str(exc.event.get("reason") or "policy_blocked"),
             },
             "run": skipped_command(["crawl_policy", platform_key], log_dir, reason),
-            "output": summarize_output(save_path, args.keyword),
+            "output": summarize_output_with_progress(
+                save_path,
+                args.keyword,
+                runtime_reporter.checkpoint if runtime_reporter is not None else None,
+            ),
         }
     except Exception as exc:
         reason = f"platform_session_failed:{type(exc).__name__}:{exc}"
@@ -5551,7 +5695,11 @@ def run_platform(
             "login_state": None,
             "behavior_evidence": load_behavior_evidence(log_dir / "behavior_evidence.json"),
             "run": skipped_command(["mediacrawler", platform_key], log_dir, reason),
-            "output": summarize_output(save_path, args.keyword),
+            "output": summarize_output_with_progress(
+                save_path,
+                args.keyword,
+                runtime_reporter.checkpoint if runtime_reporter is not None else None,
+            ),
         }
 
     record["policy_events"] = policy_events
@@ -6209,9 +6357,11 @@ def _run_main(
     args.resume_identities_path = None
     if resume_identity_values:
         resume_identities_path = batch_dir / "resume_identities.json"
-        resume_identities_path.write_text(
-            json.dumps(sorted(set(resume_identity_values)), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        write_json_with_progress(
+            resume_identities_path,
+            sorted(set(resume_identity_values)),
+            progress_callback=progress_callback,
+            trailing_newline=True,
         )
         args.resume_identities_path = str(resume_identities_path)
 
@@ -6274,7 +6424,8 @@ def _run_main(
         )
     else:
         pagination_evidence = load_pagination_evidence(
-            os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip()
+            os.environ.get("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", "").strip(),
+            progress_callback=progress_callback,
         )
     summary["pagination_evidence"] = pagination_evidence
     content_validation, content_valid_records = collect_formal_records(
@@ -6523,9 +6674,10 @@ def _run_main(
         )
     summary_path = batch_dir / "summary.json"
     report_path = batch_dir / "summary.md"
-    summary_path.write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    write_json_with_progress(
+        summary_path,
+        summary,
+        progress_callback=progress_callback,
     )
     import_failed = import_result_value.get("reason") == "sqlite_import_failed"
     checkpoint_ok = not import_failed
@@ -6554,11 +6706,26 @@ def _run_main(
                 "error": f"{type(exc).__name__}: {exc}",
             }
             summary["failure_reason"] = "discovery_checkpoint_write_failed"
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_with_progress(
+        summary_path,
+        summary,
+        progress_callback=progress_callback,
+    )
     _runtime_progress(progress_callback)
     write_markdown(summary, report_path)
     _runtime_progress(progress_callback)
-    print(json.dumps({"summary": str(summary_path), "report": str(report_path), "batch_dir": str(batch_dir), **summary}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            terminal_summary_envelope(
+                summary_path=summary_path,
+                report_path=report_path,
+                batch_dir=batch_dir,
+                summary=summary,
+            ),
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
     partial_repair_import_ok = bool(
         repair_mode
         and summary["import_completion_met"]
