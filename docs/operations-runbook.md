@@ -378,11 +378,27 @@ python scripts/xhs_runner.py \
 人工处理中状态即锁存，本轮禁止二维码组件刷新和整页 reload。程序不打开二维码截图或任何操作系统
 图片预览窗口。
 
-短时网络中断不会创建新会话：当前 Chrome、BrowserContext 和 Page 保持不变，原操作在同一页面内
-以最短 2 秒、最长 30 秒退避重试。runner 固定下发 600 秒网络恢复预算，不受调用者环境覆盖；恢复后
-继续原操作，耗尽则以
-`network_recovery_timeout` 明确失败并保留最后安全 checkpoint。page、context 或 browser 真实关闭是
-终端错误，本轮不得启动第二个浏览器。
+可恢复的 API 或导航 transport 中断不会创建新会话、关闭浏览器或重新拉起 Chrome：
+当前 Chrome、BrowserContext 和执行原操作的 Page 必须保持不变。从该操作首次可恢复失败起，
+共用一份不因重试而重置的、固定 600 秒单调恢复预算，按 2、4、8……30 秒上限退避后重试原操作。
+网络恢复后继续同一轮；预算耗尽则由 child 写
+`network_recovery_timeout` 并保留最后安全 checkpoint。
+
+父层只对新鲜、结构有效且来自已核验 exporter 进程的 `network_paused` transport 诊断
+暂停无持久进展看门狗，再将该状态写入通过认证的 runtime status。暂停会冻结
+中断前的剩余量，不会重置为完整时限。同一次连续断网的父层上限为 675 秒，只有明确
+`online` 才结束该暂停段；陈旧、格式错误或非 transport 诊断既不获得看门狗时间，也不能
+冒充恢复信号。child 首次写出 `network_recovery_timeout` 后，父层只给一次 20 秒终态写入和
+进程收束时间；后续同类事件不延长这个窗口。
+
+正文图片字节下载不使用上述 600 秒 API/导航恢复循环，仍按正式契约做候选级有限重试
+（当前最多 3 次）。耗尽后记录 `image_download_retryable` 与 `candidate_skipped`，不得伪称曾等待 600 秒。
+
+网络错误文本本身不证明 CDP 已死亡。只有生命周期监视确认 Chrome 进程退出
+（`xhs_browser_process_exited`）、CDP browser 意外断开（`xhs_cdp_disconnected_unexpected`）或
+BrowserContext 意外关闭（`xhs_browser_context_closed_unexpected`）时，才把对应的 CDP 死亡当作
+终端证据。主 Page 自身确已关闭同样是终端错误；以上任一情况都失败当前轮次，不在轮内
+重启或替换浏览器。
 
 ## 浏览器与行为证据
 
@@ -393,9 +409,11 @@ keychain。浏览器失败需区分：
 |---|---|
 | `runtime_permission_error` | 运行目录或进程权限错误 |
 | `browser_launch_failed` | Chrome/CDP 启动失败 |
-| `browser_target_closed` | 启动后页面、context 或浏览器关闭 |
+| `browser_target_closed` | 已启动的主 Page 真实关闭，或确认 Chrome 进程退出、CDP browser 断开、BrowserContext 关闭；本轮不重启 |
 | `network_paused` | 可恢复网络中断；同一页面内退避，浏览器保持运行 |
 | `network_recovery_timeout` | 600 秒内未恢复；本轮失败并保留安全 checkpoint |
+| `parent_network_pause_timeout` | 同一次连续 `network_paused` 达到 675 秒，父层收束失联 child |
+| `parent_network_terminal_unwind_timeout` | child 首次报告网络恢复耗尽后，20 秒内未完成终态写入和收束 |
 | `runtime_status_startup_timeout` / `runtime_status_stale` | 认证心跳未按监督窗口推进 |
 | `login_required` | 平台明确要求登录 |
 | `captcha_detected` | 平台安全验证或验证码 |
