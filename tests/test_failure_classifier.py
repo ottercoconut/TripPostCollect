@@ -48,17 +48,20 @@ def test_sms_code_login_text_is_login_required_not_captcha() -> None:
 
 
 @pytest.mark.parametrize(
-    "message",
+    ("message", "reason"),
     [
-        "SMS Verification Parameter error Refresh",
-        "短信验证：参数错误，请刷新",
-        "今日短信验证码次数已达上限",
-        "Daily SMS quota exhausted",
-        "获取验证码操作过于频繁，请稍后再试",
-        "SMS verification requests are too frequent",
+        ("SMS Verification Parameter error Refresh", "xhs_sms_verification_parameter_error"),
+        ("短信验证：参数错误，请刷新", "xhs_sms_verification_parameter_error"),
+        ("今日短信验证码次数已达上限", "xhs_sms_verification_daily_limit"),
+        ("Daily SMS quota exhausted", "xhs_sms_verification_daily_limit"),
+        ("获取验证码操作过于频繁，请稍后再试", "xhs_sms_verification_rate_limited"),
+        ("SMS verification requests are too frequent", "xhs_sms_verification_rate_limited"),
     ],
 )
-def test_xhs_sms_terminal_challenges_are_not_retryable(message: str) -> None:
+def test_xhs_sms_terminal_challenges_are_not_retryable(
+    message: str,
+    reason: str,
+) -> None:
     result = failure_classifier.classify_attempt(
         exit_code=1,
         stderr=message,
@@ -70,8 +73,129 @@ def test_xhs_sms_terminal_challenges_are_not_retryable(message: str) -> None:
         "failure_type": "sms_verification_terminal",
         "retryable": False,
         "wait_seconds": 0,
-        "reason": "xhs_sms_verification_terminal",
+        "reason": reason,
     }
+
+
+def test_xhs_stable_parameter_error_beats_incidental_login_trace() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr=(
+            "login_by_qrcode check_login_state_once 手机号登录 验证码\n"
+            "RuntimeError: xhs_login_verification_terminal:Parameter error"
+        ),
+        meta={"platform": "xhs"},
+    )
+
+    assert result == {
+        "status": "blocked",
+        "failure_type": "sms_verification_terminal",
+        "retryable": False,
+        "wait_seconds": 0,
+        "reason": "xhs_sms_verification_parameter_error",
+    }
+
+
+def test_xhs_runtime_terminal_event_beats_incidental_stderr_markers() -> None:
+    stdout = json.dumps(
+        {
+            "runtime_blocker": {
+                "source": "xhs_runtime_terminal",
+                "status": "failed_final",
+                "failure_type": "browser_target_closed",
+                "stop_reason": "runtime_failed",
+                "reason": "xhs_login_browser_pages_closed",
+                "retryable": False,
+            },
+            "records": [
+                {
+                    "failure_classification": {
+                        "status": "login_required",
+                        "failure_type": "login_required",
+                        "reason": "login_or_profile_refresh_required",
+                    }
+                }
+            ],
+        }
+    )
+
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stdout=stdout,
+        stderr="SMS Verification Parameter error 安全限制 300011 扫码登录",
+        meta={"platform": "xhs"},
+    )
+
+    assert result == {
+        "status": "failed_final",
+        "failure_type": "browser_target_closed",
+        "retryable": False,
+        "wait_seconds": 0,
+        "reason": "xhs_login_browser_pages_closed",
+    }
+
+
+@pytest.mark.parametrize(
+    ("numeric_code", "failure_type", "reason"),
+    [
+        ("300011", "platform_security_limit", "platform_security_limit_300011"),
+        ("300012", "ip_blocked", "ip_blocked_300012"),
+    ],
+)
+def test_explicit_numeric_security_code_beats_mixed_sms_text(
+    numeric_code: str,
+    failure_type: str,
+    reason: str,
+) -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr=(
+            "SMS Verification Parameter error; "
+            f"账号异常，错误码 {numeric_code}"
+        ),
+        meta={"platform": "xhs"},
+    )
+
+    assert result["failure_type"] == failure_type
+    assert result["reason"] == reason
+
+
+def test_legacy_terminal_suffix_does_not_consume_next_log_line() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr=(
+            "xhs_login_verification_terminal:Unknown marker\n"
+            "Parameter error while parsing an unrelated payload"
+        ),
+        meta={"platform": "xhs"},
+    )
+
+    assert result["failure_type"] == "sms_verification_terminal"
+    assert result["reason"] == "xhs_sms_verification_terminal"
+
+
+def test_xhs_manual_checkpoint_budget_is_not_a_retryable_tool_error() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr="PlatformRuntimeError: xhs_manual_checkpoint_budget_exhausted",
+        meta={"platform": "xhs"},
+    )
+
+    assert result["status"] == "blocked"
+    assert result["failure_type"] == "manual_checkpoint_timeout"
+    assert result["reason"] == "xhs_manual_checkpoint_budget_exhausted"
+    assert result["retryable"] is False
+
+
+def test_xhs_300012_is_distinct_from_300011() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr="RuntimeError: ip_blocked_300012",
+        meta={"platform": "xhs"},
+    )
+
+    assert result["failure_type"] == "ip_blocked"
+    assert result["reason"] == "ip_blocked_300012"
 
 
 @pytest.mark.parametrize(
@@ -240,7 +364,7 @@ def test_false_platform_security_limit_marker_key_does_not_self_match() -> None:
     assert result["failure_type"] == "tool_error"
 
 
-def test_platform_security_limit_runtime_error_is_blocked() -> None:
+def test_unspecified_platform_security_limit_is_not_claimed_as_300011() -> None:
     result = failure_classifier.classify_attempt(
         exit_code=1,
         stderr="RuntimeError: xhs_creator_profile_visible_block:platform_security_limit",
@@ -251,11 +375,11 @@ def test_platform_security_limit_runtime_error_is_blocked() -> None:
         "failure_type": "platform_security_limit",
         "retryable": False,
         "wait_seconds": 0,
-        "reason": "platform_security_limit_300011",
+        "reason": "xhs_platform_security_limit_unspecified",
     }
 
 
-def test_structured_platform_security_limit_beats_zero_exit_code() -> None:
+def test_structured_unspecified_security_limit_beats_zero_exit_code() -> None:
     result = failure_classifier.classify_attempt(
         exit_code=0,
         meta={"structured_markers": {"platform_security_limit": True}},
@@ -266,7 +390,7 @@ def test_structured_platform_security_limit_beats_zero_exit_code() -> None:
         "failure_type": "platform_security_limit",
         "retryable": False,
         "wait_seconds": 0,
-        "reason": "platform_security_limit_300011",
+        "reason": "xhs_platform_security_limit_unspecified",
     }
 
 

@@ -344,6 +344,34 @@ python scripts/repair_xhs_posts.py \
 
 ## 7. 失败分流
 
+登录与验证终态使用“错误族 + 精确子原因”两层语义。child 在异常离开登录状态机前写
+`xhs_runtime_terminal`，顶层摘要、execution state 和 `formal_run_finished` 原样保留
+`failure_type`、`stop_reason`、`stop_detail`；界面原文只作为 `matched_markers` 证据，不能代替稳定码。
+下表这些阻断的正式 `stop_reason` 均为 `runtime_failed`；`failure_type` 是错误族，`stop_detail` 才是
+本轮的精确终止原因。普通未完成登录与可见验证码仍分别使用正式 `login_required`、
+`captcha_detected`，不得拿错误族替换正式终态。
+当前稳定映射为：
+
+| 场景 | `failure_type` | `stop_detail` |
+|---|---|---|
+| 人工处理总预算耗尽 | `manual_checkpoint_timeout` | `xhs_manual_checkpoint_budget_exhausted`，并附 `checkpoint_kind` |
+| SMS `Parameter error` / `参数错误` | `sms_verification_terminal` | `xhs_sms_verification_parameter_error` |
+| 当日短信验证码次数上限 | `sms_verification_terminal` | `xhs_sms_verification_daily_limit` |
+| 短信验证码请求频控 | `sms_verification_terminal` | `xhs_sms_verification_rate_limited` |
+| 明确错误码 `300011` | `platform_security_limit` | `platform_security_limit_300011` |
+| 明确错误码 `300012` | `ip_blocked` | `ip_blocked_300012` |
+| 无错误码的“安全限制” | `platform_security_limit` | `xhs_platform_security_limit_unspecified` |
+| “账号异常”但没有错误码 | `platform_security_limit` | `xhs_account_exception` |
+| `/website-login/error` 且没有更具体标记 | `platform_security_limit` | `xhs_login_error_page` |
+| 普通平台请求频控 | `rate_limited` | `xhs_rate_limited_terminal` |
+| 登录时 Page 全部关闭或 BrowserContext 不可用 | `browser_target_closed` | `xhs_login_browser_pages_closed` / `xhs_login_browser_context_unavailable` |
+| 登录状态机的其他未识别异常 | `login_runtime_error` | 原始稳定异常文本，空文本时使用异常类型生成稳定码 |
+
+不得把无编号安全限制、账号异常、登录错误页或频控推断成 `300011`；`--retry-on-300011` 仍只接受
+精确 `platform_security_limit_300011` 及完整停止、清理和 checkpoint 对账证据。登录阶段在第一个分页
+事件前被阻断时，顶层 `discovery.reason=runtime_blocked_before_pagination` 且保留原 checkpoint；这不是
+`terminal_commit_failed`。后者只用于真实 SQLite 终态事务或线性化提交失败。
+
 | 信号 | 处理 |
 |---|---|
 | 轮初二维码 | 保持本轮唯一 Chrome；只在纯未扫码且明确过期、连续两次无进展时刷新组件 |

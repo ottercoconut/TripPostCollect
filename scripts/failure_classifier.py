@@ -60,6 +60,42 @@ XHS_SECURITY_300011_PATTERNS = re.compile(
     r"\b300011\b.{0,80}(?:安全限制|账号异常|account exception)",
     re.I,
 )
+XHS_SECURITY_300012_PATTERNS = re.compile(
+    r"(?:error(?:[_\s-]?code)?|错误码|异常码)\s*[:=]?\s*[\"']?300012\b|"
+    r"(?:安全限制|账号异常|account exception).{0,80}\b300012\b|"
+    r"\b300012\b.{0,80}(?:安全限制|账号异常|account exception)",
+    re.I,
+)
+XHS_LEGACY_LOGIN_TERMINAL_PATTERNS = re.compile(
+    r"(?<![A-Za-z0-9_])xhs_login_verification_terminal:([^\r\n]+)",
+    re.I,
+)
+XHS_MANUAL_CHECKPOINT_TIMEOUT_PATTERNS = re.compile(
+    r"(?<![A-Za-z0-9_])xhs_manual_checkpoint_budget_exhausted(?![A-Za-z0-9_])",
+    re.I,
+)
+XHS_RATE_LIMIT_TERMINAL_PATTERNS = re.compile(
+    r"(?<![A-Za-z0-9_])xhs_rate_limited_terminal(?![A-Za-z0-9_])",
+    re.I,
+)
+XHS_BLOCKED_TERMINAL_PATTERNS = re.compile(
+    r"(?<![A-Za-z0-9_])xhs_blocked_terminal(?![A-Za-z0-9_])",
+    re.I,
+)
+XHS_ACCOUNT_EXCEPTION_PATTERNS = re.compile(
+    r"(?<![A-Za-z0-9_])xhs_account_exception(?![A-Za-z0-9_])|"
+    r"账号异常|account exception",
+    re.I,
+)
+XHS_LOGIN_ERROR_PAGE_PATTERNS = re.compile(
+    r"(?<![A-Za-z0-9_])xhs_login_error_page(?![A-Za-z0-9_])|"
+    r"/website-login/error",
+    re.I,
+)
+XHS_UNSPECIFIED_SECURITY_LIMIT_PATTERNS = re.compile(
+    r"(?<![A-Za-z0-9_])xhs_platform_security_limit_unspecified(?![A-Za-z0-9_])",
+    re.I,
+)
 _XHS_SMS_CONTEXT = r"\bsms\b|短信|验证码|verification\s+code"
 _XHS_SMS_VERIFICATION = r"sms\s+verification|短信验证|短信验证码"
 _XHS_SMS_PARAMETER_ERROR = r"parameter\s+error|参数错误"
@@ -88,28 +124,88 @@ XHS_SMS_FREQUENCY_PATTERNS = re.compile(
 )
 
 
+def _xhs_stable_sms_terminal_reason(text: str) -> str:
+    """Read stable codes, including one-line output from the retired emitter."""
+
+    raw = str(text or "")
+    legacy = XHS_LEGACY_LOGIN_TERMINAL_PATTERNS.search(raw)
+    legacy_marker = legacy.group(1).strip() if legacy else ""
+    if re.search(
+        r"(?<![A-Za-z0-9_])xhs_sms_verification_parameter_error(?![A-Za-z0-9_])",
+        raw,
+        re.I,
+    ) or (legacy and re.search(_XHS_SMS_PARAMETER_ERROR, legacy_marker, re.I)):
+        return "xhs_sms_verification_parameter_error"
+    if re.search(
+        r"(?<![A-Za-z0-9_])xhs_sms_verification_daily_limit(?![A-Za-z0-9_])",
+        raw,
+        re.I,
+    ) or (legacy and XHS_SMS_DAILY_LIMIT_PATTERNS.search(legacy_marker)):
+        return "xhs_sms_verification_daily_limit"
+    if re.search(
+        r"(?<![A-Za-z0-9_])xhs_sms_verification_rate_limited(?![A-Za-z0-9_])",
+        raw,
+        re.I,
+    ) or (legacy and XHS_SMS_FREQUENCY_PATTERNS.search(legacy_marker)):
+        return "xhs_sms_verification_rate_limited"
+    if legacy or re.search(
+        r"(?<![A-Za-z0-9_])xhs_sms_verification_terminal(?![A-Za-z0-9_])",
+        raw,
+        re.I,
+    ):
+        return "xhs_sms_verification_terminal"
+    return ""
+
+
+def _xhs_sms_terminal_reason(text: str) -> str:
+    """Return the precise stable subtype for a terminal XHS SMS checkpoint."""
+
+    stable_reason = _xhs_stable_sms_terminal_reason(text)
+    if stable_reason:
+        return stable_reason
+    normalized = " ".join(str(text or "").split())
+    if XHS_SMS_PARAMETER_TERMINAL_PATTERNS.search(normalized):
+        return "xhs_sms_verification_parameter_error"
+    if XHS_SMS_DAILY_LIMIT_PATTERNS.search(normalized):
+        return "xhs_sms_verification_daily_limit"
+    if XHS_SMS_FREQUENCY_PATTERNS.search(normalized):
+        return "xhs_sms_verification_rate_limited"
+    return ""
+
+
 def is_xhs_sms_terminal_text(text: str) -> bool:
     """Return whether visible/error text proves a terminal XHS SMS challenge."""
 
-    normalized = " ".join(str(text or "").split())
-    return bool(
-        XHS_SMS_PARAMETER_TERMINAL_PATTERNS.search(normalized)
-        or XHS_SMS_DAILY_LIMIT_PATTERNS.search(normalized)
-        or XHS_SMS_FREQUENCY_PATTERNS.search(normalized)
-    )
+    return bool(_xhs_sms_terminal_reason(text))
 
 
-def _platform_security_limit_detected(
+def _platform_security_limit_reason(
     *,
     text: str,
     markers: dict[str, Any],
     platform: str,
-) -> bool:
+) -> str:
+    if re.search(
+        r"(?<![A-Za-z0-9_])(?:xhs_)?platform_security_limit_300011(?![A-Za-z0-9_])",
+        text,
+        re.I,
+    ) or (platform == "xhs" and XHS_SECURITY_300011_PATTERNS.search(text)):
+        return "platform_security_limit_300011"
+    if XHS_UNSPECIFIED_SECURITY_LIMIT_PATTERNS.search(text):
+        return "xhs_platform_security_limit_unspecified"
+    if platform == "xhs" and XHS_ACCOUNT_EXCEPTION_PATTERNS.search(text):
+        return "xhs_account_exception"
+    if platform == "xhs" and XHS_LOGIN_ERROR_PAGE_PATTERNS.search(text):
+        return "xhs_login_error_page"
     if bool(markers.get("platform_security_limit")):
-        return True
+        return "xhs_platform_security_limit_unspecified"
     if PLATFORM_SECURITY_LIMIT_PATTERNS.search(text):
-        return True
-    return platform == "xhs" and bool(XHS_SECURITY_300011_PATTERNS.search(text))
+        return (
+            "xhs_platform_security_limit_unspecified"
+            if platform == "xhs" or "xhs_" in text.lower()
+            else "platform_security_limit"
+        )
+    return ""
 
 
 def extract_stdout_json(stdout: str) -> dict[str, Any]:
@@ -181,18 +277,40 @@ def _strong_child_classification(stdout_json: dict[str, Any]) -> dict[str, Any] 
     records = stdout_json.get("records")
     if not isinstance(records, list):
         return None
-    for record in reversed(records):
-        if not isinstance(record, dict):
-            continue
-        classification = record.get("failure_classification") or {}
-        if not isinstance(classification, dict):
-            continue
-        if (
-            classification.get("failure_type") == "policy_blocked"
-            or classification.get("status") in strong_statuses
-        ):
-            return dict(classification)
+    latest_record = next(
+        (record for record in reversed(records) if isinstance(record, dict)),
+        {},
+    )
+    classification = latest_record.get("failure_classification") or {}
+    if not isinstance(classification, dict):
+        return None
+    if (
+        classification.get("failure_type") == "policy_blocked"
+        or classification.get("status") in strong_statuses
+    ):
+        return dict(classification)
     return None
+
+
+def _structured_runtime_blocker(
+    stdout_json: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Normalize the authoritative terminal event projected into child summary."""
+
+    blocker = stdout_json.get("runtime_blocker") or {}
+    if not isinstance(blocker, dict) or blocker.get("source") != "xhs_runtime_terminal":
+        return None
+    failure_type = str(blocker.get("failure_type") or "")
+    reason = str(blocker.get("reason") or "")
+    if not failure_type or not reason:
+        return None
+    return {
+        "status": str(blocker.get("status") or "blocked"),
+        "failure_type": failure_type,
+        "retryable": bool(blocker.get("retryable", False)),
+        "wait_seconds": int(blocker.get("wait_seconds") or 0),
+        "reason": reason,
+    }
 
 
 def classify_attempt(
@@ -239,11 +357,28 @@ def classify_attempt(
             "reason": meta.get("skip_reason") or "video_target_ignored",
         }
 
-    if _platform_security_limit_detected(
-        text=terminal_text,
-        markers=markers,
-        platform=platform,
-    ):
+    structured_runtime_blocker = _structured_runtime_blocker(stdout_json)
+    if structured_runtime_blocker:
+        return structured_runtime_blocker
+
+    if re.search(
+        r"(?<![A-Za-z0-9_])(?:xhs_platform_security_limit_300012|ip_blocked_300012)(?![A-Za-z0-9_])",
+        terminal_text,
+        re.I,
+    ) or (platform == "xhs" and XHS_SECURITY_300012_PATTERNS.search(terminal_text)):
+        return {
+            "status": "blocked",
+            "failure_type": "ip_blocked",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": "ip_blocked_300012",
+        }
+
+    if re.search(
+        r"(?<![A-Za-z0-9_])(?:xhs_)?platform_security_limit_300011(?![A-Za-z0-9_])",
+        terminal_text,
+        re.I,
+    ) or (platform == "xhs" and XHS_SECURITY_300011_PATTERNS.search(terminal_text)):
         return {
             "status": "blocked",
             "failure_type": "platform_security_limit",
@@ -252,15 +387,109 @@ def classify_attempt(
             "reason": "platform_security_limit_300011",
         }
 
-    if bool(markers.get("sms_verification_terminal")) or (
-        platform == "xhs" and is_xhs_sms_terminal_text(terminal_text)
-    ):
+    stable_sms_terminal_reason = (
+        _xhs_stable_sms_terminal_reason(terminal_text)
+        if platform == "xhs" or "xhs_" in terminal_text.lower()
+        else ""
+    )
+    if stable_sms_terminal_reason:
         return {
             "status": "blocked",
             "failure_type": "sms_verification_terminal",
             "retryable": False,
             "wait_seconds": 0,
-            "reason": "xhs_sms_verification_terminal",
+            "reason": stable_sms_terminal_reason,
+        }
+
+    if XHS_MANUAL_CHECKPOINT_TIMEOUT_PATTERNS.search(terminal_text):
+        return {
+            "status": "blocked",
+            "failure_type": "manual_checkpoint_timeout",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": "xhs_manual_checkpoint_budget_exhausted",
+        }
+
+    stable_security_reason = ""
+    for candidate in (
+        "xhs_platform_security_limit_unspecified",
+        "xhs_account_exception",
+        "xhs_login_error_page",
+    ):
+        if re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(candidate)}(?![A-Za-z0-9_])",
+            terminal_text,
+            re.I,
+        ):
+            stable_security_reason = candidate
+            break
+    if stable_security_reason:
+        return {
+            "status": "blocked",
+            "failure_type": "platform_security_limit",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": stable_security_reason,
+        }
+
+    if XHS_RATE_LIMIT_TERMINAL_PATTERNS.search(terminal_text):
+        return {
+            "status": "blocked",
+            "failure_type": "rate_limited",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": "xhs_rate_limited_terminal",
+        }
+
+    if XHS_BLOCKED_TERMINAL_PATTERNS.search(terminal_text):
+        return {
+            "status": "blocked",
+            "failure_type": "blocked_or_forbidden",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": "xhs_blocked_terminal",
+        }
+
+    xhs_cdp_lifecycle = XHS_CDP_LIFECYCLE_CODE_PATTERNS.search(terminal_text)
+    if xhs_cdp_lifecycle:
+        return {
+            "status": "failed_final",
+            "failure_type": "browser_target_closed",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": xhs_cdp_lifecycle.group(0).lower(),
+        }
+
+    child_classification = _strong_child_classification(stdout_json)
+    if child_classification:
+        return child_classification
+
+    sms_terminal_reason = (
+        _xhs_sms_terminal_reason(terminal_text)
+        if platform == "xhs" or "xhs_" in terminal_text.lower()
+        else ""
+    )
+    if bool(markers.get("sms_verification_terminal")) or sms_terminal_reason:
+        return {
+            "status": "blocked",
+            "failure_type": "sms_verification_terminal",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": sms_terminal_reason or "xhs_sms_verification_terminal",
+        }
+
+    platform_security_reason = _platform_security_limit_reason(
+        text=terminal_text,
+        markers=markers,
+        platform=platform,
+    )
+    if platform_security_reason:
+        return {
+            "status": "blocked",
+            "failure_type": "platform_security_limit",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": platform_security_reason,
         }
 
     if platform == "xhs" and (
@@ -294,10 +523,6 @@ def classify_attempt(
             "reason": "completed",
         }
 
-    child_classification = _strong_child_classification(stdout_json)
-    if child_classification:
-        return child_classification
-
     formal_validation = stdout_json.get("formal_validation") or {}
     if stdout_json.get("import_completion_met") is False and isinstance(formal_validation, dict):
         stop_reason = str(formal_validation.get("stop_reason") or "source_not_exhausted")
@@ -330,16 +555,6 @@ def classify_attempt(
             "retryable": True,
             "wait_seconds": 60,
             "reason": "chromium_or_playwright_launch_failed",
-        }
-
-    xhs_cdp_lifecycle = XHS_CDP_LIFECYCLE_CODE_PATTERNS.search(text)
-    if xhs_cdp_lifecycle:
-        return {
-            "status": "failed_final",
-            "failure_type": "browser_target_closed",
-            "retryable": False,
-            "wait_seconds": 0,
-            "reason": xhs_cdp_lifecycle.group(0).lower(),
         }
 
     if bool(markers.get("captcha_or_verify")) or CAPTCHA_PATTERNS.search(text):

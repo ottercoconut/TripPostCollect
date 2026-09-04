@@ -21,7 +21,13 @@ from trippostcollect.xhs.terminal import (
 )
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs import accounts
+from trippostcollect.xhs.discovery import (
+    save_checkpoint,
+    update_campaign,
+    xhs_query_fingerprint,
+)
 from trippostcollect.xhs.leases import execution_terminal_assessment
+from trippostcollect.xhs.leases import LeaseSubprocessResult
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -642,3 +648,202 @@ def test_formal_os_signal_immediately_after_acquire_has_one_failed_terminal_comm
             """,
             (run_id,),
         ).fetchone()[0] == 1
+
+
+def test_sms_terminal_before_pagination_keeps_precise_reason_and_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_path = tmp_path / "targets.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "targets": [
+                    {
+                        "target_key": "test",
+                        "keyword": "青岛旅游",
+                        "top_refresh_max_pages": 1,
+                        "timeout_seconds": 1800,
+                        "required_fields_profile": "image_post_with_followers_v1",
+                        "followers_policy": "required",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    pool_path = tmp_path / "pool.json"
+    pool_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "lease_seconds": 2400,
+                "behavior_profile": "xhs_guarded",
+                "headed": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "content.sqlite"
+    bootstrap_database(db_path, sync_jobs=False)
+    campaign_summary = tmp_path / "campaign_summary.json"
+    campaign_summary.write_text('{"records": []}', encoding="utf-8")
+    target = {"target_key": "test", "keyword": "青岛旅游"}
+    fingerprint = xhs_query_fingerprint(target)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        accounts.ensure_xhs_schema(conn)
+        accounts.register_account_slot(conn, "xhs-a01")
+        save_checkpoint(
+            conn,
+            target_key="test",
+            account_id="xhs-a01",
+            keyword="青岛旅游",
+            query_fingerprint_value=fingerprint,
+            resume_page=44,
+            resume_search_id="safe-search-id",
+            source_has_more=True,
+            last_batch_complete=True,
+            last_stop_reason="continue",
+            last_run_id="safe-run",
+        )
+        update_campaign(
+            conn,
+            target_key="test",
+            account_id="xhs-a01",
+            query_fingerprint_value=fingerprint,
+            summary_path=str(campaign_summary),
+            candidate_count=579,
+        )
+        conn.commit()
+
+    child_summary_path = tmp_path / "child_summary.json"
+    child_summary_path.write_text(
+        json.dumps(
+            {
+                "records": [
+                    {
+                        "platform": "xhs",
+                        "failure_classification": {
+                            "status": "blocked",
+                            "failure_type": "sms_verification_terminal",
+                            "retryable": False,
+                            "reason": "xhs_sms_verification_parameter_error",
+                        },
+                        "behavior_evidence": {"status": "missing"},
+                    }
+                ],
+                "pagination_evidence": {
+                    "available": False,
+                    "stopped": False,
+                    "batches": [],
+                    "stop_event": None,
+                },
+                "formal_validation": {
+                    "completion_met": False,
+                    "source_exhausted_met": False,
+                    "stop_reason": "runtime_failed",
+                    "stop_detail": "xhs_sms_verification_parameter_error",
+                },
+                "behavior_validation": {"platforms": {}},
+                "import_completion_met": False,
+                "import_result": {
+                    "skipped": True,
+                    "reason": "sms_verification_terminal",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    run_id = "sms-terminal-run"
+    runtime_root = tmp_path / "runtime"
+    execution_root = tmp_path / "execution"
+    session_root = tmp_path / "sessions"
+    monkeypatch.setattr(xhs_runner, "XHS_RUNTIME_ROOT", runtime_root)
+    monkeypatch.setattr(xhs_runner, "XHS_EXECUTION_STATE_ROOT", execution_root)
+    monkeypatch.setattr(xhs_runner, "XHS_RUNS_OUTPUT", tmp_path / "outputs")
+    monkeypatch.setattr(xhs_runner, "LOCAL_MEDIA_ROOT", tmp_path / "media")
+    monkeypatch.setattr(xhs_runner, "utc_stamp", lambda: run_id)
+    monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
+    monkeypatch.setattr(
+        "trippostcollect.xhs.runtime.XHS_SESSION_ROOT",
+        session_root,
+    )
+
+    def failed_child(*_args: Any, **_kwargs: Any) -> LeaseSubprocessResult:
+        return LeaseSubprocessResult(
+            args=["mediacrawler_crawl.py"],
+            returncode=2,
+            stdout=json.dumps({"summary": str(child_summary_path)}),
+            stderr=(
+                "RuntimeError: "
+                "xhs_login_verification_terminal:Parameter error"
+            ),
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(xhs_runner, "run_supervised_xhs_subprocess", failed_child)
+    args = Namespace(
+        target_key="test",
+        account_id="xhs-a01",
+        post_interaction="none",
+        db=str(db_path),
+        target_config=str(target_path),
+        pool_config=str(pool_path),
+        dry_run=False,
+        no_import=False,
+        retry_on_300011=False,
+    )
+
+    assert xhs_runner._run_main(args) == 2
+    summary = json.loads(
+        (runtime_root / "runs" / run_id / "run_summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summary["failure_type"] == "sms_verification_terminal"
+    assert summary["stop_reason"] == "runtime_failed"
+    assert summary["stop_detail"] == "xhs_sms_verification_parameter_error"
+    assert summary["reason"] == "xhs_sms_verification_parameter_error"
+    assert summary["challenge"] == "xhs_sms_verification_parameter_error"
+    assert summary["login_reason"] == ""
+    assert summary["exit_code"] == 2
+    assert summary["discovery"] == {
+        "skipped": True,
+        "reason": "runtime_blocked_before_pagination",
+        "checkpoint_preserved": True,
+        "failure_type": "sms_verification_terminal",
+        "stop_reason": "runtime_failed",
+        "stop_detail": "xhs_sms_verification_parameter_error",
+    }
+    assert summary["lease_released"] is True
+    assert summary["runtime_session_removed"] is True
+    assert "terminal_commit_failed" not in json.dumps(summary)
+
+    with sqlite3.connect(db_path) as conn:
+        checkpoint = conn.execute(
+            """
+            SELECT resume_page, resume_search_id, last_run_id,
+                   campaign_candidate_count
+            FROM xhs_discovery_checkpoints
+            WHERE target_key='test' AND account_id='xhs-a01'
+            """
+        ).fetchone()
+        event_row = conn.execute(
+            """
+            SELECT details_json
+            FROM xhs_account_events
+            WHERE run_id=? AND event_type='formal_run_finished'
+            """,
+            (run_id,),
+        ).fetchone()
+    assert checkpoint == (44, "safe-search-id", "safe-run", 579)
+    event = json.loads(event_row[0])
+    assert event["failure_type"] == "sms_verification_terminal"
+    assert event["stop_reason"] == "runtime_failed"
+    assert event["stop_detail"] == "xhs_sms_verification_parameter_error"
+    assert not (session_root / run_id).exists()

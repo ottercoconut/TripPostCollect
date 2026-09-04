@@ -23,6 +23,87 @@ def write_state(path: Path, events: list[dict]) -> None:
     path.write_text(json.dumps({"events": events}), encoding="utf-8")
 
 
+def test_login_runtime_terminal_is_preserved_without_pagination(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+    terminal = {
+        "phase": "login",
+        "failure_type": "sms_verification_terminal",
+        "stop_reason": "runtime_failed",
+        "stop_detail": "xhs_sms_verification_parameter_error",
+        "checkpoint_kind": "sms_verification",
+        "manual_progress_observed": True,
+        "matched_markers": ["Parameter error"],
+        "retryable": False,
+    }
+    write_state(
+        state_path,
+        [{"type": "xhs_runtime_terminal", "details": terminal}],
+    )
+
+    evidence = mediacrawler_crawl.load_pagination_evidence(state_path)
+
+    assert evidence["available"] is False
+    assert evidence["stop_event"] is None
+    assert evidence["runtime_terminal"] == terminal
+    assert mediacrawler_crawl.runtime_blocker_from_terminal_event(terminal) == {
+        "platform": "xhs",
+        "status": "blocked",
+        "failure_type": "sms_verification_terminal",
+        "stop_reason": "runtime_failed",
+        "reason": "xhs_sms_verification_parameter_error",
+        "retryable": False,
+        "source": "xhs_runtime_terminal",
+    }
+
+
+def test_unknown_login_runtime_code_keeps_structured_detail() -> None:
+    terminal = {
+        "phase": "login",
+        "failure_type": "login_runtime_error",
+        "stop_reason": "runtime_failed",
+        "stop_detail": "xhs_future_login_terminal",
+        "retryable": False,
+    }
+
+    assert mediacrawler_crawl.runtime_blocker_from_terminal_event(terminal) == {
+        "platform": "xhs",
+        "status": "blocked",
+        "failure_type": "login_runtime_error",
+        "stop_reason": "runtime_failed",
+        "reason": "xhs_future_login_terminal",
+        "retryable": False,
+        "source": "xhs_runtime_terminal",
+    }
+
+
+def test_runtime_failed_pagination_event_recovers_precise_blocker() -> None:
+    evidence = {
+        "available": True,
+        "stopped": True,
+        "stop_reason": "runtime_failed",
+        "stop_detail": "xhs_sms_verification_daily_limit",
+        "stop_event": {
+            "type": "adaptive_search_stopped",
+            "platform": "xhs",
+            "stop_reason": "runtime_failed",
+            "stop_detail": "xhs_sms_verification_daily_limit",
+        },
+    }
+
+    assert mediacrawler_crawl.runtime_blocker_from_pagination_evidence(
+        evidence,
+        ["xhs"],
+    ) == {
+        "platform": "xhs",
+        "status": "blocked",
+        "failure_type": "sms_verification_terminal",
+        "stop_reason": "runtime_failed",
+        "reason": "xhs_sms_verification_daily_limit",
+        "retryable": False,
+        "source": "adaptive_search_stopped",
+    }
+
+
 def bilibili_record(post_id: str) -> dict:
     return {
         "content_id": post_id,

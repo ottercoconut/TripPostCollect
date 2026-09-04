@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from execution_state import FORMAL_STEPS, FrozenExecutionState
-from failure_classifier import extract_stdout_json
+from failure_classifier import classify_attempt, extract_stdout_json
 from trippostcollect.artifacts.image_completion import (
     verify_image_artifacts,
     verify_image_persistence,
@@ -76,21 +76,38 @@ _TERMINAL_PHASE_HOOK: Callable[[str, XhsRunTerminalizer], None] | None = None
 PLATFORM_SECURITY_LIMIT_300011 = "platform_security_limit_300011"
 SECURITY_LIMIT_RETRY_SECONDS = 30 * 60
 RETRY_STATE_SCHEMA_VERSION = 1
-CHALLENGE_MARKERS = (
-    "captcha",
-    "安全验证",
-    "请完成验证",
-    "请通过验证",
-    "操作频繁",
-    "环境异常",
-    "访问受限",
-    "安全限制",
-    "账号异常",
-    "account exception",
-    "300011",
-    "platform_security_limit",
-)
 LOGIN_MARKERS = ("login_required", "扫码登录", "登录后查看")
+XHS_TERMINAL_FAILURE_TYPES = frozenset(
+    {
+        "runtime_failed",
+        "platform_security_limit",
+        "sms_verification_terminal",
+        "manual_checkpoint_timeout",
+        "captcha_detected",
+        "login_required",
+        "rate_limited",
+        "blocked_or_forbidden",
+        "runtime_permission_error",
+        "browser_launch_failed",
+        "browser_target_closed",
+        "browser_runtime_failed",
+        "login_runtime_error",
+        "verification_timeout",
+        "ip_blocked",
+    }
+)
+XHS_CHALLENGE_FAILURE_TYPES = frozenset(
+    {
+        "platform_security_limit",
+        "sms_verification_terminal",
+        "manual_checkpoint_timeout",
+        "captcha_detected",
+        "rate_limited",
+        "blocked_or_forbidden",
+        "verification_timeout",
+        "ip_blocked",
+    }
+)
 
 
 @contextmanager
@@ -499,6 +516,90 @@ def _structured_failure_records(stdout: str, child_summary: dict[str, Any]) -> l
     return [record for record in records if isinstance(record, dict)]
 
 
+def _latest_failure_classification(
+    stdout: str,
+    child_summary: dict[str, Any],
+) -> dict[str, Any]:
+    records = _structured_failure_records(stdout, child_summary)
+    if not records:
+        return {}
+    classification = records[-1].get("failure_classification") or {}
+    return dict(classification) if isinstance(classification, dict) else {}
+
+
+def _summary_runtime_blocker(child_summary: dict[str, Any]) -> dict[str, Any]:
+    """Return the child's normalized current-attempt blocker, when present."""
+
+    blocker = child_summary.get("runtime_blocker") or {}
+    if not isinstance(blocker, dict):
+        return {}
+    failure_type = str(blocker.get("failure_type") or "")
+    reason = str(blocker.get("reason") or "")
+    if failure_type not in XHS_TERMINAL_FAILURE_TYPES or not reason:
+        return {}
+    return dict(blocker)
+
+
+def _durable_pagination_event(child_summary: dict[str, Any]) -> dict[str, Any] | None:
+    pagination = child_summary.get("pagination_evidence") or {}
+    if not isinstance(pagination, dict):
+        return None
+    event = pagination.get("stop_event") or ((pagination.get("batches") or [None])[-1])
+    return dict(event) if isinstance(event, dict) else None
+
+
+def _terminal_failure_fields(
+    stdout: str,
+    child_summary: dict[str, Any],
+    *,
+    exit_code: int | None = None,
+) -> dict[str, str]:
+    classification = _summary_runtime_blocker(child_summary)
+    if not classification:
+        classification = _latest_failure_classification(stdout, child_summary)
+    failure_type = str(classification.get("failure_type") or "")
+    if failure_type in {"", "success", "skipped_video"}:
+        classification = {}
+        failure_type = ""
+    formal_validation = child_summary.get("formal_validation") or {}
+    formal_stop_reason = (
+        str(formal_validation.get("stop_reason") or "")
+        if isinstance(formal_validation, dict)
+        else ""
+    )
+    formal_stop_detail = (
+        str(formal_validation.get("stop_detail") or "")
+        if isinstance(formal_validation, dict)
+        else ""
+    )
+    structured_stop_reason = str(classification.get("stop_reason") or "")
+    reason = str(classification.get("reason") or formal_stop_detail or failure_type)
+    stop_reason = structured_stop_reason or formal_stop_reason
+    if (
+        not failure_type
+        and formal_stop_reason in {"runtime_failed", "login_required", "captcha_detected"}
+        and formal_stop_detail
+    ):
+        failure_type = formal_stop_reason
+        reason = formal_stop_detail
+    if failure_type and not stop_reason:
+        stop_reason = (
+            failure_type
+            if failure_type in {"login_required", "captcha_detected"}
+            else "runtime_failed"
+        )
+    if not failure_type and exit_code not in {None, 0}:
+        failure_type = "runtime_failed"
+        stop_reason = "runtime_failed"
+        reason = f"xhs_child_exit_{exit_code}"
+    return {
+        "failure_type": failure_type,
+        "stop_reason": stop_reason,
+        "stop_detail": reason or formal_stop_detail,
+        "reason": reason,
+    }
+
+
 def _structured_failure_text(record: dict[str, Any]) -> str:
     classification = record.get("failure_classification") or {}
     behavior = record.get("behavior_evidence") or {}
@@ -510,41 +611,71 @@ def _structured_failure_text(record: dict[str, Any]) -> str:
         behavior.get("challenge"),
         behavior.get("error"),
         behavior.get("reason"),
+        behavior.get("initial_visible_text_sample"),
+        behavior.get("visible_text_sample"),
+        behavior.get("url"),
     ]
     return "\n".join(str(value) for value in values if value).lower()
 
 
 def _challenge_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -> str:
+    runtime_blocker = _summary_runtime_blocker(child_summary)
+    if runtime_blocker:
+        failure_type = str(runtime_blocker.get("failure_type") or "")
+        if failure_type in XHS_CHALLENGE_FAILURE_TYPES:
+            return str(runtime_blocker.get("reason") or failure_type)
+        return ""
     records = _structured_failure_records(stdout, child_summary)
     for record in records[-1:]:
+        classification = record.get("failure_classification") or {}
+        failure_type = str(classification.get("failure_type") or "")
+        if failure_type in {
+            "platform_security_limit",
+            "sms_verification_terminal",
+            "manual_checkpoint_timeout",
+            "rate_limited",
+            "blocked_or_forbidden",
+            "ip_blocked",
+        }:
+            return str(classification.get("reason") or failure_type)
         behavior = record.get("behavior_evidence") or {}
         markers = {
             **(behavior.get("initial_visible_markers") or {}),
             **(behavior.get("visible_markers") or {}),
         }
-        if bool(markers.get("platform_security_limit")):
-            return "platform_security_limit_300011"
-        if bool(markers.get("captcha_or_verify")) or bool(markers.get("captcha")):
-            return "captcha"
-        if bool(markers.get("rate_limited")):
-            return "操作频繁"
-        if bool(markers.get("blocked")):
-            return "访问受限"
         failure_text = _structured_failure_text(record)
-        if "platform_security_limit" in failure_text:
-            return "platform_security_limit_300011"
-        reason = next((marker for marker in CHALLENGE_MARKERS if marker.lower() in failure_text), "")
-        if reason:
-            return reason
+        fallback = classify_attempt(
+            exit_code=1,
+            stderr=failure_text,
+            meta={"platform": "xhs", "structured_markers": markers},
+        )
+        if str(fallback.get("failure_type") or "") in XHS_CHALLENGE_FAILURE_TYPES:
+            return str(fallback.get("reason") or fallback["failure_type"])
     if records:
         return ""
     combined = f"{tail(stdout, 3000)}\n{tail(stderr, 3000)}".lower()
-    return next((marker for marker in CHALLENGE_MARKERS if marker.lower() in combined), "")
+    fallback = classify_attempt(
+        exit_code=1,
+        stderr=combined,
+        meta={"platform": "xhs"},
+    )
+    if str(fallback.get("failure_type") or "") in XHS_CHALLENGE_FAILURE_TYPES:
+        return str(fallback.get("reason") or fallback["failure_type"])
+    return ""
 
 
 def _login_reason(stdout: str, stderr: str, child_summary: dict[str, Any]) -> str:
+    runtime_blocker = _summary_runtime_blocker(child_summary)
+    if runtime_blocker:
+        if runtime_blocker.get("failure_type") != "login_required":
+            return ""
+        return str(runtime_blocker.get("reason") or "login_required")
     records = _structured_failure_records(stdout, child_summary)
     for record in records[-1:]:
+        classification = record.get("failure_classification") or {}
+        failure_type = str(classification.get("failure_type") or "")
+        if failure_type and failure_type != "login_required":
+            return ""
         behavior = record.get("behavior_evidence") or {}
         markers = {
             **(behavior.get("initial_visible_markers") or {}),
@@ -948,6 +1079,12 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
     discovery_commit: dict[str, Any] = {"skipped": True, "reason": "child_not_started"}
     discovery_commit_request: dict[str, Any] | None = None
     final_state_evidence: dict[str, Any] | None = None
+    terminal_fields = {
+        "failure_type": "",
+        "stop_reason": "",
+        "stop_detail": "",
+        "reason": "",
+    }
     try:
         if acquire_exception is not None:
             raise acquire_exception
@@ -984,61 +1121,87 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             stdout_json = extract_stdout_json(stdout)
             child_summary_path = str(stdout_json.get("summary") or "")
             child_summary = load_child_summary(child_summary_path)
+            terminal_fields = _terminal_failure_fields(
+                stdout,
+                child_summary,
+                exit_code=exit_code,
+            )
             child_import_result = child_summary.get("import_result") or {}
             if args.no_import:
                 discovery_commit = {"skipped": True, "reason": "no_import"}
             elif child_import_result.get("reason") == "sqlite_import_failed":
                 discovery_commit = {"skipped": True, "reason": "sqlite_import_failed"}
             elif child_summary_path and child_summary:
-                try:
-                    discovery_image_artifacts = verify_image_artifacts(
-                        child_summary,
-                        project_root=ROOT,
-                        expect_promotion=True,
-                    )
-                    discovery_image_persistence = verify_image_persistence(
-                        child_summary,
-                        db_path,
-                        project_root=ROOT,
-                        media_root=LOCAL_MEDIA_ROOT,
-                    )
-                    discovery_commit_request = {
-                        "imported_completion_verified": bool(
-                            discovery_image_artifacts["ok"]
-                            and discovery_image_persistence["ok"]
-                        )
-                    }
+                if _durable_pagination_event(child_summary) is None:
                     discovery_commit = {
                         "skipped": True,
-                        "reason": "terminal_commit_pending",
+                        "reason": (
+                            "runtime_blocked_before_pagination"
+                            if terminal_fields["failure_type"]
+                            else "no_durable_pagination_evidence"
+                        ),
+                        "checkpoint_preserved": True,
+                        "failure_type": terminal_fields["failure_type"],
+                        "stop_reason": terminal_fields["stop_reason"],
+                        "stop_detail": terminal_fields["stop_detail"],
                     }
-                    terminalizer.phase("after_discovery_prepare")
-                except (OSError, sqlite3.Error, TypeError, ValueError, RuntimeError) as exc:
-                    discovery_commit = {
-                        "skipped": False,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-                    stderr = (
-                        f"{stderr}\nXHS discovery checkpoint write failed: {type(exc).__name__}: {exc}"
-                    ).strip()
-                    exit_code = 2
+                else:
+                    try:
+                        discovery_image_artifacts = verify_image_artifacts(
+                            child_summary,
+                            project_root=ROOT,
+                            expect_promotion=True,
+                        )
+                        discovery_image_persistence = verify_image_persistence(
+                            child_summary,
+                            db_path,
+                            project_root=ROOT,
+                            media_root=LOCAL_MEDIA_ROOT,
+                        )
+                        discovery_commit_request = {
+                            "imported_completion_verified": bool(
+                                discovery_image_artifacts["ok"]
+                                and discovery_image_persistence["ok"]
+                            )
+                        }
+                        discovery_commit = {
+                            "skipped": True,
+                            "reason": "terminal_commit_pending",
+                        }
+                        terminalizer.phase("after_discovery_prepare")
+                    except (OSError, sqlite3.Error, TypeError, ValueError, RuntimeError) as exc:
+                        discovery_commit = {
+                            "skipped": False,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                        stderr = (
+                            f"{stderr}\nXHS discovery checkpoint write failed: {type(exc).__name__}: {exc}"
+                        ).strip()
+                        exit_code = 2
             else:
                 discovery_commit = {"skipped": True, "reason": "child_summary_missing"}
             if exit_code != 0:
                 watchdog = runtime_watchdog_evidence(completed)
                 failure_reason = str(watchdog.get("termination_reason") or "")
+                classified_error = ""
+                if terminal_fields["failure_type"]:
+                    classified_error = (
+                        f"xhs_child_{terminal_fields['failure_type']}:"
+                        f"{terminal_fields['reason']}"
+                    )
                 state.fail(
                     "command_executed",
                     error=(
                         f"xhs_runtime_watchdog:{failure_reason}"
                         if failure_reason
-                        else f"xhs_child_exit_{exit_code}"
+                        else classified_error or f"xhs_child_exit_{exit_code}"
                     ),
                     evidence={
                         "command": command,
                         "stdout_tail": tail(stdout),
                         "stderr_tail": tail(stderr),
                         "runtime_watchdog": watchdog,
+                        "failure_classification": terminal_fields,
                     },
                 )
             else:
@@ -1138,15 +1301,66 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                 },
             )
         else:
+            failure_reason = f"xhs_runner_exception:{type(exc).__name__}"
+            if not terminal_fields["failure_type"]:
+                terminal_fields = {
+                    "failure_type": "runtime_failed",
+                    "stop_reason": "runtime_failed",
+                    "stop_detail": failure_reason,
+                    "reason": failure_reason,
+                }
             stderr = f"{stderr}\n{type(exc).__name__}: {exc}".strip()
             fail_open_step(
                 state,
-                error=f"xhs_runner_exception:{type(exc).__name__}",
-                evidence={"stderr_tail": tail(stderr)},
+                error=(
+                    f"xhs_terminal_failure:{terminal_fields['failure_type']}:"
+                    f"{terminal_fields['reason']}"
+                    if terminal_fields["failure_type"]
+                    else failure_reason
+                ),
+                evidence={
+                    "runner_exception": failure_reason,
+                    "stderr_tail": tail(stderr),
+                    "failure_classification": terminal_fields,
+                },
             )
 
     challenge = _challenge_reason(stdout, stderr, child_summary)
     login_reason = _login_reason(stdout, stderr, child_summary)
+    if interrupt:
+        terminal_fields = {
+            "failure_type": "runtime_failed",
+            "stop_reason": "runtime_failed",
+            "stop_detail": "operator_interrupt",
+            "reason": "operator_interrupt",
+        }
+    elif not terminal_fields["failure_type"]:
+        if challenge:
+            terminal_fields = {
+                "failure_type": "runtime_failed",
+                "stop_reason": "runtime_failed",
+                "stop_detail": challenge,
+                "reason": challenge,
+            }
+        elif login_reason:
+            terminal_fields = {
+                "failure_type": "login_required",
+                "stop_reason": "login_required",
+                "stop_detail": login_reason,
+                "reason": login_reason,
+            }
+        elif outcome != "completed":
+            failure_reason = (
+                "xhs_child_summary_missing"
+                if not child_summary_path
+                else "xhs_runtime_failed_unclassified"
+            )
+            terminal_fields = {
+                "failure_type": "runtime_failed",
+                "stop_reason": "runtime_failed",
+                "stop_detail": failure_reason,
+                "reason": failure_reason,
+            }
 
     def terminal_mutation(conn: sqlite3.Connection, token: str) -> None:
         nonlocal discovery_commit
@@ -1191,9 +1405,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                 "exit_code": exit_code,
                 "challenge": challenge,
                 "login_reason": login_reason,
-                "failure_type": "runtime_failed" if interrupt else "",
-                "stop_reason": "runtime_failed" if interrupt else "",
-                "reason": "operator_interrupt" if interrupt else "",
+                **terminal_fields,
                 "interrupt": interrupt,
                 "terminal_token": token,
             },
@@ -1250,6 +1462,12 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                 "reason": "operator_interrupt",
                 "interrupt": interrupt,
             }
+            terminal_fields = {
+                "failure_type": "runtime_failed",
+                "stop_reason": "runtime_failed",
+                "stop_detail": "operator_interrupt",
+                "reason": "operator_interrupt",
+            }
             failure_error = f"xhs_runtime_failed:operator_interrupt:{signal_name}"
             fail_open_step(state, error=failure_error, evidence={"interrupt": interrupt})
             terminalizer.linearize(
@@ -1258,6 +1476,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                 allow_interrupted_failure=True,
             )
         else:
+            terminal_commit_reason = f"xhs_terminal_commit_failed:{type(exc).__name__}"
             discovery_commit_request = None
             discovery_commit = {
                 "skipped": True,
@@ -1266,9 +1485,15 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             }
             outcome = "failed"
             exit_code = 2
+            terminal_fields = {
+                "failure_type": "terminal_commit_failed",
+                "stop_reason": "runtime_failed",
+                "stop_detail": terminal_commit_reason,
+                "reason": terminal_commit_reason,
+            }
             fail_open_step(
                 state,
-                error=f"xhs_terminal_commit_failed:{type(exc).__name__}",
+                error=terminal_commit_reason,
             )
             terminalizer.linearize(outcome="failed", mutation=terminal_mutation)
 
@@ -1289,9 +1514,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
         "persistent_account_profile": False,
         **guard.runtime_session_cleanup_evidence(),
         "runtime_watchdog": runtime_watchdog_evidence(completed),
-        "failure_type": "runtime_failed" if interrupt else "",
-        "stop_reason": "runtime_failed" if interrupt else "",
-        "reason": "operator_interrupt" if interrupt else "",
+        **terminal_fields,
         "interrupt": interrupt,
         "post_interaction": {
             "requested_mode": args.post_interaction,
@@ -1328,16 +1551,31 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
         else:
             payload = state.load()
             if payload.get("status") not in {"failed", "completed"}:
-                fail_open_step(state, error="xhs_terminal_failure")
+                fail_open_step(
+                    state,
+                    error=(
+                        f"xhs_terminal_failure:{terminal_fields['failure_type']}:"
+                        f"{terminal_fields['reason']}"
+                        if terminal_fields["failure_type"]
+                        else "xhs_terminal_failure"
+                    ),
+                    evidence={"failure_classification": terminal_fields},
+                )
             state.finalize_failure(
                 error=(
                     f"xhs_runtime_failed:operator_interrupt:{interrupt['signal']}"
                     if interrupt
-                    else "xhs_terminal_failure"
+                    else (
+                        f"xhs_terminal_failure:{terminal_fields['failure_type']}:"
+                        f"{terminal_fields['reason']}"
+                        if terminal_fields["failure_type"]
+                        else "xhs_terminal_failure"
+                    )
                 ),
                 evidence={
                     "terminal_token": terminalizer.token,
                     "interrupt": interrupt,
+                    "failure_classification": terminal_fields,
                 },
             )
 

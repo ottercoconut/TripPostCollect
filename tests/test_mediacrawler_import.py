@@ -1340,4 +1340,4 @@ def test_long_term_image_promotion_requires_all_completion_gates() -> None:
         download_images=True,
         child_execution_ok=False,
     )
-    assert rate_limited["stop_reason"] == "rate_limited"
+    assert rate_limited["stop_reason"] == "runtime_failed"

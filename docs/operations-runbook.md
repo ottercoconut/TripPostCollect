@@ -378,6 +378,12 @@ python scripts/xhs_runner.py \
 人工处理中状态即锁存，本轮禁止二维码组件刷新和整页 reload。程序不打开二维码截图或任何操作系统
 图片预览窗口。
 
+登录终态诊断优先读取 child 在异常离开前写出的 `xhs_runtime_terminal`，再读取当次 record 的
+`failure_classification`；不得由 stderr 中偶然出现的“login/扫码”字样覆盖结构化终态。SMS 参数错误、
+当日额度、SMS 频控、`300011`、`300012` 和人工预算耗尽分别保留精确 `stop_detail`，完整映射见
+`docs/platforms/xhs.md`。只有仍停在普通登录/二维码状态且不存在更具体终态时才记为
+`login_required`；只有 SQLite 终态事务或线性化提交真实失败时才记为 `terminal_commit_failed`。
+
 可恢复的 API 或导航 transport 中断不会创建新会话、关闭浏览器或重新拉起 Chrome：
 当前 Chrome、BrowserContext 和执行原操作的 Page 必须保持不变。从该操作首次可恢复失败起，
 共用一份不因重试而重置的、固定 600 秒单调恢复预算，按 2、4、8……30 秒上限退避后重试原操作。

@@ -402,7 +402,214 @@ def test_xhs_runner_reads_challenge_from_structured_child_summary() -> None:
         ]
     }
 
-    assert xhs_runner._challenge_reason("", "", child_summary) == "captcha"
+    assert xhs_runner._challenge_reason("", "", child_summary) == (
+        "captcha_or_security_challenge_detected"
+    )
+
+
+def test_xhs_runner_preserves_sms_terminal_subtype_without_login_fallback() -> None:
+    child_summary = {
+        "formal_validation": {
+            "stop_reason": "runtime_failed",
+            "stop_detail": "xhs_sms_verification_parameter_error",
+        },
+        "pagination_evidence": {"available": False, "batches": []},
+        "records": [
+            {
+                "failure_classification": {
+                    "status": "blocked",
+                    "failure_type": "sms_verification_terminal",
+                    "retryable": False,
+                    "reason": "xhs_sms_verification_parameter_error",
+                },
+                "behavior_evidence": {"status": "missing"},
+            }
+        ],
+    }
+
+    assert (
+        xhs_runner._challenge_reason("", "login_by_qrcode", child_summary)
+        == "xhs_sms_verification_parameter_error"
+    )
+    assert xhs_runner._login_reason("", "login_by_qrcode", child_summary) == ""
+    assert xhs_runner._terminal_failure_fields("", child_summary) == {
+        "failure_type": "sms_verification_terminal",
+        "stop_reason": "runtime_failed",
+        "stop_detail": "xhs_sms_verification_parameter_error",
+        "reason": "xhs_sms_verification_parameter_error",
+    }
+    assert xhs_runner._durable_pagination_event(child_summary) is None
+
+
+def test_xhs_runner_prefers_child_runtime_blocker_over_stale_record_label() -> None:
+    child_summary = {
+        "runtime_blocker": {
+            "platform": "xhs",
+            "status": "blocked",
+            "failure_type": "sms_verification_terminal",
+            "reason": "xhs_sms_verification_parameter_error",
+            "retryable": False,
+            "source": "xhs_runtime_terminal",
+        },
+        "formal_validation": {
+            "stop_reason": "runtime_failed",
+            "stop_detail": "",
+        },
+        "records": [
+            {
+                "failure_classification": {
+                    "status": "login_required",
+                    "failure_type": "login_required",
+                    "reason": "login_or_profile_refresh_required",
+                }
+            }
+        ],
+    }
+
+    assert xhs_runner._terminal_failure_fields("", child_summary) == {
+        "failure_type": "sms_verification_terminal",
+        "stop_reason": "runtime_failed",
+        "stop_detail": "xhs_sms_verification_parameter_error",
+        "reason": "xhs_sms_verification_parameter_error",
+    }
+    assert (
+        xhs_runner._challenge_reason("", "扫码登录", child_summary)
+        == "xhs_sms_verification_parameter_error"
+    )
+    assert xhs_runner._login_reason("", "扫码登录", child_summary) == ""
+
+
+def test_xhs_runner_does_not_report_browser_failure_as_challenge() -> None:
+    child_summary = {
+        "runtime_blocker": {
+            "platform": "xhs",
+            "status": "failed_final",
+            "failure_type": "browser_target_closed",
+            "reason": "xhs_browser_process_exited",
+            "retryable": False,
+        },
+        "records": [
+            {
+                "failure_classification": {
+                    "status": "captcha_detected",
+                    "failure_type": "captcha_detected",
+                    "reason": "captcha_or_security_challenge_detected",
+                }
+            }
+        ],
+    }
+
+    assert xhs_runner._challenge_reason("", "请完成验证", child_summary) == ""
+    assert xhs_runner._login_reason("", "扫码登录", child_summary) == ""
+    assert xhs_runner._terminal_failure_fields("", child_summary)["reason"] == (
+        "xhs_browser_process_exited"
+    )
+
+
+def test_xhs_runner_nonzero_child_without_summary_has_stable_runtime_failure() -> None:
+    assert xhs_runner._terminal_failure_fields(
+        "",
+        {},
+        exit_code=7,
+    ) == {
+        "failure_type": "runtime_failed",
+        "stop_reason": "runtime_failed",
+        "stop_detail": "xhs_child_exit_7",
+        "reason": "xhs_child_exit_7",
+    }
+
+
+def test_xhs_runner_zero_exit_still_honors_child_runtime_blocker() -> None:
+    child_summary = {
+        "runtime_blocker": {
+            "platform": "xhs",
+            "status": "blocked",
+            "failure_type": "sms_verification_terminal",
+            "stop_reason": "runtime_failed",
+            "reason": "xhs_sms_verification_daily_limit",
+            "retryable": False,
+            "source": "adaptive_search_stopped",
+        }
+    }
+
+    fields = xhs_runner._terminal_failure_fields(
+        "",
+        child_summary,
+        exit_code=0,
+    )
+
+    assert fields["failure_type"] == "sms_verification_terminal"
+    assert fields["stop_reason"] == "runtime_failed"
+    assert fields["stop_detail"] == "xhs_sms_verification_daily_limit"
+
+
+def test_latest_runtime_blocker_uses_current_record_not_resumed_history() -> None:
+    records = [
+        {
+            "platform": "xhs",
+            "failure_classification": {
+                "failure_type": "platform_security_limit",
+                "reason": "platform_security_limit_300011",
+            },
+        },
+        {
+            "platform": "xhs",
+            "failure_classification": {
+                "status": "blocked",
+                "failure_type": "sms_verification_terminal",
+                "reason": "xhs_sms_verification_parameter_error",
+                "retryable": False,
+            },
+        },
+    ]
+
+    assert mediacrawler_crawl.latest_runtime_blocker(records, ["xhs"]) == {
+        "platform": "xhs",
+        "status": "blocked",
+        "failure_type": "sms_verification_terminal",
+        "stop_reason": "runtime_failed",
+        "reason": "xhs_sms_verification_parameter_error",
+        "retryable": False,
+    }
+
+    records[-1]["failure_classification"] = {
+        "status": "completed",
+        "failure_type": "success",
+        "reason": "completed",
+    }
+    assert mediacrawler_crawl.latest_runtime_blocker(records, ["xhs"]) == {}
+
+
+def test_sms_runtime_blocker_beats_missing_behavior_and_image_evidence() -> None:
+    blocker = {
+        "platform": "xhs",
+        "status": "blocked",
+        "failure_type": "sms_verification_terminal",
+        "reason": "xhs_sms_verification_parameter_error",
+        "retryable": False,
+    }
+    validation = mediacrawler_crawl.apply_runtime_blocker(
+        {
+            "completion_met": False,
+            "repair_import_met": False,
+            "stop_reason": "runtime_failed",
+            "stop_detail": "",
+        },
+        blocker,
+    )
+    gated = mediacrawler_crawl.apply_formal_completion_gates(
+        validation,
+        content_validation={"completion_met": False},
+        image_materialization={"complete": False},
+        behavior_validation={"ok": False, "behavior_ok": False, "policy_ok": True},
+        download_images=True,
+        child_execution_ok=False,
+    )
+
+    assert gated["pagination_runtime_blocked"] is True
+    assert gated["stop_reason"] == "runtime_failed"
+    assert gated["stop_detail"] == "xhs_sms_verification_parameter_error"
+    assert gated["runtime_blocker"] == blocker
 
 
 def test_xhs_runner_classifies_platform_security_limit_300011() -> None:
@@ -444,6 +651,50 @@ def test_xhs_runner_classifies_platform_security_limit_from_current_record_error
     }
 
     assert xhs_runner._challenge_reason("", "", child_summary) == "platform_security_limit_300011"
+
+
+def test_xhs_runner_generic_security_marker_never_invents_300011() -> None:
+    child_summary = {
+        "records": [
+            {
+                "failure_classification": {
+                    "status": "blocked",
+                    "failure_type": "visible_page_blocked",
+                },
+                "behavior_evidence": {
+                    "status": "failed",
+                    "visible_markers": {"platform_security_limit": True},
+                    "visible_text_sample": "安全限制，请稍后再试",
+                },
+            }
+        ]
+    }
+
+    assert xhs_runner._challenge_reason("", "", child_summary) == (
+        "xhs_platform_security_limit_unspecified"
+    )
+
+
+def test_xhs_runner_fallback_preserves_explicit_300012() -> None:
+    child_summary = {
+        "records": [
+            {
+                "failure_classification": {
+                    "status": "blocked",
+                    "failure_type": "visible_page_blocked",
+                },
+                "behavior_evidence": {
+                    "status": "failed",
+                    "visible_markers": {"platform_security_limit": True},
+                    "visible_text_sample": "账号异常，错误码 300012",
+                },
+            }
+        ]
+    }
+
+    assert xhs_runner._challenge_reason("", "", child_summary) == (
+        "ip_blocked_300012"
+    )
 
 
 def _prepare_300011_retry_database(
@@ -1159,7 +1410,9 @@ def test_xhs_runner_does_not_treat_false_marker_names_as_failures() -> None:
 
 
 def test_xhs_runner_uses_raw_failure_text_without_structured_records() -> None:
-    assert xhs_runner._challenge_reason("请完成验证", "", {}) == "请完成验证"
+    assert xhs_runner._challenge_reason("请完成验证", "", {}) == (
+        "captcha_or_security_challenge_detected"
+    )
     assert xhs_runner._login_reason("", "扫码登录", {}) == "扫码登录"
 
 
