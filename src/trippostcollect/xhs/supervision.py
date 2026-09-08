@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from trippostcollect.xhs.leases import (
     LeaseGuard,
@@ -41,6 +41,7 @@ def run_supervised_xhs_subprocess(
     cwd: Path,
     env: Mapping[str, str],
     timeout_seconds: int,
+    progress_callback: Callable[[], None] | None = None,
 ) -> LeaseSubprocessResult:
     """Run one exact child with authenticated monotonic liveness supervision."""
 
@@ -54,6 +55,7 @@ def run_supervised_xhs_subprocess(
         env=env,
         timeout_seconds=timeout_seconds,
         runtime_watchdog=parent_runtime_watchdog_policy(),
+        **({"progress_callback": progress_callback} if progress_callback is not None else {}),
     )
 
 

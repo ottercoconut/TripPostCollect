@@ -18,6 +18,18 @@ if str(SCRIPTS) not in sys.path:
 failure_classifier = import_module("failure_classifier")
 
 
+@pytest.mark.parametrize("detail", ["xhs_batch_checkpoint_filenotfounderror", "xhs_batch_checkpoint_ack_timeout"])
+def test_checkpoint_failure_beats_incidental_traceback_timeout(detail: str) -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=1,
+        stderr=f"run(main, cleanup_timeout_seconds=15.0)\nRuntimeError: {detail}\n",
+        meta={"platform": "xhs"},
+    )
+    assert result["failure_type"] == "runtime_failed"
+    assert result["reason"] == detail
+    assert result["retryable"] is False
+
+
 def test_source_exhaustion_failure_beats_incidental_rate_text() -> None:
     stdout = json.dumps(
         {

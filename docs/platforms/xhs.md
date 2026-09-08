@@ -27,8 +27,10 @@
   -> 创建本轮空临时 profile，启动唯一 Chrome/BrowserContext，人工扫码
   -> xhs_guarded、顶部刷新和深层 page + search_id
   -> 详情、作者粉丝和正文图片
+  -> 每个完整批次生成不可变 child 恢复摘要，根 runner 校验并提交 checkpoint/seen/campaign
+  -> child 收到根 runner 的提交确认后开始下一批
   -> 根项目复验、媒体晋升和 SQLite 批次事务
-  -> 成功后提交账号级 checkpoint/seen/campaign
+  -> 终态对账账号级 checkpoint/seen/campaign；只有正式成功才清空累计摘要
   -> 精确收束进程、删除本轮临时 session、释放租约
   -> 检查顶层摘要、状态、child 摘要和 SQLite
 ```
@@ -293,8 +295,9 @@ python scripts/repair_xhs_posts.py \
   可见状态必须同时检查顶层页与子 frame；通过后还需连续两次确认已回到原路由且有可见文本，
   再刷新 Cookie 并重试原请求。`Requests too frequent` 等可见频控优先于验证页标题分类，
   立即按运行级阻断停止，不点击刷新绕过。
-- 搜索 API 明确登录过期时暂停原请求，保留全部标签页并置前最新 XHS 页；可见登录 UI 与 self-info
-  API 都恢复后刷新当前内存 Cookie，并重试同一来源页。
+- 搜索 API 明确登录过期时暂停原请求，置前原有抓取页，使用该页已经出现的二维码等待人工登录；
+  不新开登录标签页，也不把最新打开的作者页或辅助页接管为主页面。可见登录 UI 与 self-info API
+  都恢复后刷新当前内存 Cookie，并重试同一来源页。等待期间不导航或刷新原页。
 - “安全限制”、账号异常、`300011/300012`、`/website-login/error`、频控或封禁属于运行级阻断，
   立即停止，不能进入人工验证码等待或候选跳过。
 - 可识别的短时网络错误只进入 `network_paused`，保留同一 Chrome、BrowserContext、Page 和原操作，
@@ -312,7 +315,9 @@ python scripts/repair_xhs_posts.py \
 - 搜索并发为 1；搜索、详情、作者主页、翻页分别随机等待并写 `request_pacing_events`，批次间继续写
   `continuity_events`。
 - 作者补全先用登录会话的无 token 请求；空结果后随机等待，再用同一 BrowserContext 打开无 token
-  作者页。二维码验证先等待操作人，不能因为 HTML 已有作者数据而提前关闭。
+  作者页。打开前先检查原抓取页，原页已出现登录或验证时直接在原页等待，不再创建作者辅助页；
+  作者辅助页遇到登录失效也回到原抓取页恢复会话，成功后重试作者请求。作者专属安全验证仍保留
+  对应页面等待操作人，不能因为 HTML 已有作者数据而提前关闭。
 - 成功作者结果只在本轮按作者 ID 缓存，不替代来源证据。
 - 有 checkpoint 时用新 search ID 刷新顶部，再用保存的 `page + search_id` 恢复深层；顶部刷新不
   覆盖深层位置。深层耗尽后只刷新顶部。
@@ -322,6 +327,39 @@ python scripts/repair_xhs_posts.py \
   `source_exhausted`，运行级阻断按失败处理。
 
 ## 6. 完成检查
+
+### 批次恢复点
+
+正式搜索的完整非耗尽批次在写出 `adaptive_batch_completed` 后，立即固化当前 JSONL 与 manifest
+快照。快照以 `.batch-<sequence>.snapshot` 为后缀保存在源文件旁；后续追加写入原 JSONL 或替换原
+manifest 不会改变已提交快照，manifest 的相对 staging 图片路径保持有效。快照不复制登录 profile、
+Cookie 或浏览器存储。
+
+导出数据目录按首条实际写入记录延迟创建。完整批次没有新增产物时（例如顶部刷新全部命中已知
+候选），允许目录尚不存在，仍提交包含空的本轮文件清单、历史累计产物和分页证据的摘要并等待确认；
+不得虚构内容文件或因此重置深层页码。批次已声明有效记录却找不到内容文件时，按
+`xhs_batch_checkpoint_content_missing` 失败，不把产物丢失当作空批次。
+
+child 批次摘要及提交确认保存在 `data/runtime/xhs/batch_checkpoints/<run_id>/`。根 runner 通过监督
+循环读取摘要，核对精确租约、账号/目标/查询指纹、完整分页事件、JSONL/manifest 哈希与 staging
+图片字节，随后在一个 SQLite 事务中提交 checkpoint、seen、累计摘要引用和
+`batch_checkpoint_committed` 审计事件，再写确认文件。底层搜索循环不写 SQLite。
+
+child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_timeout` 运行级失败结束，不能
+继续后续批次。根 runner 在提交确认前消失时最多重取一个边界批次；已提交批次不依赖最终
+`run_summary.json` 才能恢复。顶部刷新保存累计成果但保留原深层位置。未完成批次不走批次提交，
+来源耗尽批次仍由完整终态门禁处理，不能提前标成耗尽。
+
+批次发布失败会记录 `xhs_runtime_terminal(phase=batch_checkpoint)`，保留具体
+`xhs_batch_checkpoint_*` 子原因，并归类为不可自动重试的 `runtime_failed`。本地文件异常和等待
+提交确认超时不能归为网络超时；已提交的安全恢复点保持有效，不补写来源耗尽。
+
+批次摘要固定为未完成、未入库，只作为后续正式 runner 的恢复输入；下一轮仍重新扫码，重新验证
+累计字段、行为、图片与来源耗尽证据后才可入库。收到中断后不再提交新批次，已确认的恢复点保留。
+`--no-import`、dry-run 和历史详情修复均不启用该握手。旧版本缺少批次快照的孤儿轮次仍遵循前述
+孤儿对账规则，本机制不会自动补签旧终态或把旧产物导入。
+
+### 终态验收
 
 先按[正式契约](../formal-crawl-contract.md)核对五阶段、来源耗尽、行为/策略、图片和真实持久化。小红书
 还必须确认：

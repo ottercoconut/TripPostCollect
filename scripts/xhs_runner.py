@@ -48,6 +48,11 @@ from trippostcollect.xhs.discovery import (
     commit_child_discovery,
     resolve_discovery_plan,
 )
+from trippostcollect.xhs.batch_checkpoint import (
+    ENABLED_ENV,
+    BatchCheckpointCommitter,
+    verify_snapshot_artifacts,
+)
 from trippostcollect.xhs.leases import (
     AccountLeaseFileLock,
     LeaseGuard,
@@ -784,11 +789,16 @@ def frozen_discovery_inputs(discovery: dict[str, Any]) -> list[Path]:
         return []
     summary_path = Path(summary_value).expanduser().resolve()
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if summary.get("batch_checkpoint"):
+        verify_snapshot_artifacts(summary)
     inputs = [summary_path]
     for record in summary.get("records") or []:
         output = record.get("output") if isinstance(record, dict) else {}
         for path_value in (output or {}).get("jsonl_files") or []:
             inputs.append(Path(path_value).expanduser().resolve())
+        if summary.get("batch_checkpoint"):
+            for path_value in (output or {}).get("image_manifest_paths") or []:
+                inputs.append(Path(path_value).expanduser().resolve())
     return inputs
 
 
@@ -1107,12 +1117,18 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             env = os.environ.copy()
             env["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(state_path)
             env["TRIPPOSTCOLLECT_XHS_RUN_ID"] = run_id
+            env[ENABLED_ENV] = "0" if args.no_import else "1"
+            batch_committer = None if args.no_import else BatchCheckpointCommitter(
+                guard=guard, state_path=state_path, target=target,
+                discovery_plan=discovery_plan,
+            )
             completed = run_supervised_xhs_subprocess(
                 guard,
                 command,
                 cwd=ROOT,
                 env=env,
                 timeout_seconds=int(target["timeout_seconds"]),
+                progress_callback=batch_committer,
             )
             terminalizer.phase("after_child_exit")
             exit_code = completed.returncode

@@ -12,6 +12,23 @@ TripPostCollect 的授权、低频、图文限定、证据保存和 SQLite 入�
 
 提交哈希只是本次审计锚点。以后同步前必须重新 `git fetch origin main`，不能把这里的哈希当成永久上游。
 
+## 2026-09-09 小红书恢复版本
+
+本次是本地恢复逻辑修复，没有同步上游。两个仓库使用分支 `codex/xhs-checkpoint-empty-batches`：
+
+- MediaCrawler 配套提交 `d61b6a34bf2451edda6f13ea4e1da312215415eb`：登录失效留在原抓取页，
+  作者辅助页不再接管为主页面。
+- 根项目同分支提交保存逐批 checkpoint、空产物批次握手和精确保存失败原因；具体行为见
+  [小红书批次恢复点](platforms/xhs.md#批次恢复点)。两个仓库需分别保留对应提交，根仓库不会
+  自动记录或恢复 MediaCrawler HEAD。
+- 验证：根项目 `python -m pytest -q` 为 800 项通过；MediaCrawler 在自身虚拟环境设置
+  `PYTHONPATH=../../src` 后运行 `python -m pytest tests -q`，478 项通过。根项目相关文件 Ruff、
+  Python 编译和 `python scripts/verify_frozen_files.py` 均通过。
+- 同账号同配置正式 runner 的 dry-run 已验证，读取 `xhs-a01` 的第 31 页深层边界，后四阶段保持
+  `frozen`。本次未重新启动正式抓取；测试与 dry-run 不代表平台来源耗尽。
+
+提交不包含工作区中独立的通用调度恢复和知乎修改，也不包含运行产物、SQLite 或临时登录状态。
+
 ## 不得被上游覆盖的本地边界
 
 - HTTP 401/403、429、平台安全限制、登录失效、验证码、账号/IP 封禁和浏览器整体失败属于运行级

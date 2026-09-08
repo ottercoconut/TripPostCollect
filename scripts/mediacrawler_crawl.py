@@ -5707,6 +5707,12 @@ def _run_platform_without_policy(
     login_state: dict[str, Any] | None = None
     if platform_key == "xhs":
         cmd.extend(["--enable_cdp_mode", "true"])
+        from trippostcollect.xhs.batch_checkpoint import DATA_ROOT_ENV, ENABLED_ENV, RESUME_ENV
+
+        extra_env[DATA_ROOT_ENV] = str(save_path.resolve())
+        extra_env[RESUME_ENV] = str(getattr(args, "resume_summary", None) or "")
+        if any(getattr(args, key, False) for key in ("no_import", "xhs_repair", "post_repair")):
+            extra_env[ENABLED_ENV] = "0"
         extra_env.update(
             {
                 "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": "1",
@@ -6170,7 +6176,7 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
         output = record["output"]
         lines.append(
             "| {label} | {status} | {contents} | {published_at} | {skipped_videos} | {images} | {videos} | {fields} |".format(
-                label=record["label"],
+                label=record.get("label") or PLATFORMS[record["platform"]]["label"],
                 status=record["status"],
                 contents=output["non_video_content_records"],
                 published_at=output["published_at_records"],
@@ -6182,7 +6188,8 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
         )
     lines.extend(["", "## 样本", ""])
     for record in summary["records"]:
-        lines.append(f"### {record['label']}")
+        label = record.get("label") or PLATFORMS[record["platform"]]["label"]
+        lines.append(f"### {label}")
         samples = record["output"].get("samples") or []
         if not samples:
             lines.append("")

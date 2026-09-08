@@ -137,6 +137,40 @@ def install_export_hook() -> None:
 
         setattr(AsyncFileWriter, method_name, sanitized_writer)
     AsyncFileWriter._trippostcollect_avatar_sanitizer = True
+    install_batch_checkpoint_hook()
+
+
+def install_batch_checkpoint_hook() -> None:
+    from trippostcollect.xhs.batch_checkpoint import ENABLED_ENV, publish_batch
+
+    if os.environ.get(ENABLED_ENV) != "1":
+        return
+    from tools import trippostcollect_adaptive as adaptive
+
+    if getattr(adaptive, "_trippostcollect_batch_checkpoint", False):
+        return
+    original = adaptive.append_execution_event
+
+    def append_and_checkpoint(event_type: str, details: dict[str, Any]) -> None:
+        original(event_type, details)
+        if event_type == "adaptive_batch_completed":
+            try:
+                publish_batch(details)
+            except Exception as exc:
+                detail = str(exc)
+                if not detail.startswith("xhs_batch_checkpoint_"):
+                    detail = f"xhs_batch_checkpoint_{type(exc).__name__.lower()}"
+                original("xhs_runtime_terminal", {
+                    "phase": "batch_checkpoint",
+                    "failure_type": "runtime_failed",
+                    "stop_reason": "runtime_failed",
+                    "stop_detail": detail,
+                    "retryable": False,
+                })
+                raise RuntimeError(detail) from exc
+
+    adaptive.append_execution_event = append_and_checkpoint
+    adaptive._trippostcollect_batch_checkpoint = True
 
 
 def _repair_exception_is_blocking(crawler: Any, exc: BaseException) -> bool:

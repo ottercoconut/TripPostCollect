@@ -2037,6 +2037,7 @@ class LeaseGuard:
         env: Mapping[str, str],
         timeout_seconds: int,
         runtime_watchdog: RuntimeStatusWatchdogPolicy | None = None,
+        progress_callback: Callable[[], None] | None = None,
     ) -> LeaseSubprocessResult:
         if self.signal_received is not None:
             raise XhsLeaseSignal(self.signal_received)
@@ -2152,6 +2153,8 @@ class LeaseGuard:
                         stdout, stderr = proc.communicate()
                         returncode = int(proc.returncode or 0)
                         break
+                    if progress_callback is not None:
+                        progress_callback()
                     observed_identity = self.inspector.identity(proc.pid)
                     if observed_identity is None:
                         # A platform probe may briefly lose sight of a live

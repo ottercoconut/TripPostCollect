@@ -361,6 +361,18 @@ def classify_attempt(
     if structured_runtime_blocker:
         return structured_runtime_blocker
 
+    checkpoint_failure = re.search(
+        r"^RuntimeError: (xhs_batch_checkpoint_[a-z0-9_]+)\s*$", stderr, re.M
+    )
+    if platform == "xhs" and exit_code and checkpoint_failure:
+        return {
+            "status": "failed_final",
+            "failure_type": "runtime_failed",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": checkpoint_failure.group(1),
+        }
+
     if re.search(
         r"(?<![A-Za-z0-9_])(?:xhs_platform_security_limit_300012|ip_blocked_300012)(?![A-Za-z0-9_])",
         terminal_text,
