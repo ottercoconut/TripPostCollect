@@ -4,21 +4,25 @@
 回滚和合并必须分别处理两个仓库。`origin` 指向开源上游 `NanmiCoder/MediaCrawler`，本地长期改造用于
 TripPostCollect 的授权、低频、图文限定、证据保存和 SQLite 入库流程，不应直接推送到上游 `main`。
 
-## 当前同步基线
+日常分支清理、配套版本记录和 Git 备份恢复见[本地分支与版本管理](version-control.md)。
+
+## 2026-08-20 上游同步记录
 
 - 2026-08-20 已获取并合入上游 `origin/main` 的 `d6f7c5b`。
-- 本地 MediaCrawler `main` 与 `codex/generic-post-detail-repair` 均位于整合提交 `b6cbba2`。
+- 当时本地 MediaCrawler `main` 与 `codex/generic-post-detail-repair` 均位于整合提交 `b6cbba2`。
 - 本次上游带入 B站评论分页修复、XHS 原始响应测试和 README 资源更新；XHS 冲突按下述本地边界处理。
 
 提交哈希只是本次审计锚点。以后同步前必须重新 `git fetch origin main`，不能把这里的哈希当成永久上游。
 
 ## 2026-09-09 小红书恢复版本
 
-本次是本地恢复逻辑修复，没有同步上游。两个仓库使用分支 `codex/xhs-checkpoint-empty-batches`：
+该次是本地恢复逻辑修复，没有同步上游。当时两个仓库使用分支 `codex/xhs-checkpoint-empty-batches`；
+分支清理后按以下提交配对追溯：
 
 - MediaCrawler 配套提交 `d61b6a34bf2451edda6f13ea4e1da312215415eb`：登录失效留在原抓取页，
   作者辅助页不再接管为主页面。
-- 根项目同分支提交保存逐批 checkpoint、空产物批次握手和精确保存失败原因；具体行为见
+- 根项目配套提交 `4a7a95d02edaf66cb57320c47eceac551fe5f3b9` 保存逐批 checkpoint、空产物批次握手和
+  精确保存失败原因；具体行为见
   [小红书批次恢复点](platforms/xhs.md#批次恢复点)。两个仓库需分别保留对应提交，根仓库不会
   自动记录或恢复 MediaCrawler HEAD。
 - 验证：根项目 `python -m pytest -q` 为 800 项通过；MediaCrawler 在自身虚拟环境设置

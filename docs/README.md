@@ -13,6 +13,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 | 抖音、微博、知乎历史详情修复 | [正式抓取运行手册](operations-runbook.md#通用平台历史详情修复) |
 | 调度器、执行器和数据流 | [抓取架构](crawl-architecture.md) |
 | MediaCrawler 上游同步和本地改造 | [MediaCrawler fork 维护](mediacrawler-fork-maintenance.md) |
+| 本地分支清理、提交、配套版本和 Git 备份恢复 | [本地分支与版本管理](version-control.md) |
 | SQLite、媒体文件、事务和入库校验 | [数据持久化](data-persistence.md) |
 | 面向研究使用的帖子、作者、互动与图片字段 | [抓取结果数据字典](crawl-result-data-dictionary.md) |
 | 五个平台的字段能力 | [平台字段覆盖](platform-field-coverage.md) |
