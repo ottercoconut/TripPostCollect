@@ -20,6 +20,7 @@
   `content_detail_status=detail_observed`。详情观察后仍无图片才是 `missing_content_image`；
   `request_failed`、`parse_failed` 和旧产物缺状态都属于 `content_detail_unobserved`。
 - `title`、`desc` 和 `excerpt` 不能替代正文。
+- 正文 `content_text` 保留块级换行并剔除 figure/figcaption；图片说明文字不进入正文。
 - 作者粉丝来自搜索 author/member 的 `follower_count`，要求
   `followers_observed=true`、`author_followers_source=search_author`；缺失不能补 0。
 - 详情候选级失败有限重试后写 `candidate_skipped`；登录、授权、频控和验证仍是运行级阻断。

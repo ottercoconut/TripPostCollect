@@ -14,6 +14,22 @@ TripPostCollect 的授权、低频、图文限定、证据保存和 SQLite 入�
 
 提交哈希只是本次审计锚点。以后同步前必须重新 `git fetch origin main`，不能把这里的哈希当成永久上游。
 
+## 2026-09-26 知乎正文段落提取与 main 收敛
+
+- MediaCrawler `main` 快进至 `2bcde689cc9a1b50cbcc7255597e9da1ff1a1b30`：相对旧配对
+  `d61b6a34bf2451edda6f13ea4e1da312215415eb` 仅新增一个知乎提交。answer/article 正文改用
+  `extract_zhihu_content_text`，保留块级换行并剔除 figure/figcaption；`image_list` 仍从原始
+  HTML 提取，`title`/`desc` 保持扁平提取。根项目不改代码，继续直接消费 child 的
+  `content_text`。
+- 新行为使未来知乎记录的 `content_text` 与 `content_length` 不再包含图片说明文字，边界样本的
+  `topic_relevant` 可能变化；存量记录保留旧格式，走历史详情修复时自然升级。
+- 分支收敛：MediaCrawler 本地仅剩 `main`，7 个已整合的 codex 分支删除，引用清单、bundle 与
+  `audit.json` 保存在 `.git/branch-cleanup/20260926-004707/`；根仓库此前已在
+  `20260925-153601-root-consolidation` 收敛。
+- 验证：MediaCrawler 自身 `.venv` 设置 `PYTHONPATH=../../src` 后 `pytest tests -q` 478 项通过；
+  根项目 `python -m pytest` 与 `python scripts/verify_frozen_files.py` 通过。本条目所在根项目
+  提交即根侧配套记录。
+
 ## 2026-09-09 小红书恢复版本
 
 该次是本地恢复逻辑修复，没有同步上游。当时两个仓库使用分支 `codex/xhs-checkpoint-empty-batches`；
