@@ -1471,12 +1471,20 @@ def test_real_child_survives_no_progress_budget_during_network_pause_then_recove
 ) -> None:
     reporter, _, _ = runtime_reporter
     configure_real_supervised_exporter(monkeypatch)
-    observations = [0]
+    ready = tmp_path / "exporter-ready"
+    recovered = tmp_path / "network-recovered"
+    pause_started_at = None
+    inactivity_budget = 0.1
 
     def network_observation(_path: object) -> tuple[str, str]:
-        observations[0] += 1
-        if observations[0] <= 7:
+        nonlocal pause_started_at
+        if not ready.exists():
             return "network_paused", "transport_timeout"
+        if pause_started_at is None:
+            pause_started_at = time.monotonic()
+        if time.monotonic() - pause_started_at < 3 * inactivity_budget:
+            return "network_paused", "transport_timeout"
+        recovered.touch()
         return "online", ""
 
     monkeypatch.setattr(
@@ -1486,11 +1494,26 @@ def test_real_child_survives_no_progress_budget_during_network_pause_then_recove
     )
 
     result = mediacrawler_crawl.run_command(
-        [sys.executable, "-c", "import time; time.sleep(0.1)"],
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path\n"
+            "import sys, time\n"
+            "Path(sys.argv[1]).touch()\n"
+            "deadline = time.monotonic() + 5\n"
+            "while not Path(sys.argv[2]).exists():\n"
+            "    if time.monotonic() >= deadline:\n"
+            "        raise SystemExit(2)\n"
+            "    time.sleep(0.005)\n"
+            "time.sleep(0.02)\n"
+            "print('recovered')\n",
+            str(ready),
+            str(recovered),
+        ],
         tmp_path,
-        0.06,
+        inactivity_budget,
         tmp_path / "pause-recovery-logs",
-        progress_paths=[],
+        progress_paths=[ready],
         runtime_reporter=reporter,
         poll_seconds=0.01,
         cleanup_grace_seconds=1,
@@ -1498,9 +1521,10 @@ def test_real_child_survives_no_progress_budget_during_network_pause_then_recove
 
     assert result["returncode"] == 0
     assert result["timed_out"] is False
-    assert result["elapsed_seconds"] >= 0.09
+    assert recovered.exists()
+    assert result["stdout_tail"].strip() == "recovered"
     assert result["network_pause_observed"] is True
-    assert result["network_pause_total_seconds"] >= 0.04
+    assert result["network_pause_total_seconds"] > inactivity_budget
 
 
 def test_network_timeout_event_gets_one_fixed_unwind_grace_for_real_child(
