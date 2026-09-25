@@ -418,6 +418,8 @@ def latest_attempt_no(conn: sqlite3.Connection, job_id: int) -> int:
 
 
 def insert_attempt(conn: sqlite3.Connection, row: JobRow, run_id: str, command: list[str]) -> int:
+    if row["status"] == "leased":
+        raise JobLeaseConflict(f"scheduler job is already leased: {row['job_key']}")
     conn.execute("BEGIN IMMEDIATE")
     try:
         leased = conn.execute(

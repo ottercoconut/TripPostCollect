@@ -132,6 +132,22 @@ def test_atomic_job_lease_rejects_a_second_runner(tmp_path: Path) -> None:
     assert attempt_count == 1
 
 
+def test_freshly_loaded_leased_job_cannot_start_another_attempt(tmp_path: Path) -> None:
+    with connect_db(tmp_path / "lease.sqlite") as conn:
+        bootstrap_connection(conn, sync_content=False, sync_jobs=False)
+        conn.execute(
+            "INSERT INTO crawl_jobs(job_key,site_key,target_url,job_kind,next_run_at) "
+            "VALUES ('job','weibo','','mediacrawler_search',datetime('now'))"
+        )
+        conn.commit()
+        row = dict(conn.execute("SELECT * FROM crawl_jobs").fetchone())
+        crawl_runner.insert_attempt(conn, row, "first", ["child"])
+        leased = dict(conn.execute("SELECT * FROM crawl_jobs").fetchone())
+        with pytest.raises(crawl_runner.JobLeaseConflict):
+            crawl_runner.insert_attempt(conn, leased, "second", ["child"])
+        assert conn.execute("SELECT count(*) FROM crawl_attempts").fetchone()[0] == 1
+
+
 def test_internal_job_error_becomes_an_isolated_retry_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
