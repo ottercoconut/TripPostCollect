@@ -1,0 +1,406 @@
+"""入口契约单测：不修改防火墙，不启动浏览器，不调用真实进程枚举。"""
+
+import errno
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+import run_lanes
+from support.signal_driver import isolated_signal_test
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/ci"))
+
+
+def test_policy_uses_allow_default_and_resolved_temporary_paths(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(source, target_is_directory=True)
+    policy = run_lanes.sandbox_policy(alias, tmp_path / "output", "component")
+    assert "(allow default)" in policy
+    assert "(deny default)" not in policy
+    assert "(deny network*)" in policy
+    assert str(alias) not in policy
+    assert str(source.resolve()) in policy
+    assert ".ssh" in policy and "Keychains" in policy
+    assert "process-exec" in policy and "/usr/bin/open" in policy
+    assert "network-bind" not in policy
+    assert "network-bind" in run_lanes.sandbox_policy(source, tmp_path, "socket")
+
+
+def test_socket_construction_failure_is_not_a_denial_pass(monkeypatch, tmp_path):
+    def unavailable(*args):
+        raise PermissionError(errno.EPERM, "socket creation denied")
+
+    monkeypatch.setattr(socket, "socket", unavailable)
+    with pytest.raises(PermissionError, match="socket creation"):
+        run_lanes.denied_network_probe(tmp_path, "component")
+    assert not (tmp_path / "network-probes.json").exists()
+
+
+@pytest.mark.parametrize("error", [errno.ECONNREFUSED, errno.ETIMEDOUT, errno.ENETUNREACH])
+def test_seatbelt_does_not_accept_other_layers_errors(monkeypatch, tmp_path, error):
+    class Probe:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def settimeout(self, value):
+            pass
+
+        def connect(self, address):
+            raise OSError(error, "not seatbelt")
+
+    monkeypatch.setattr(socket, "socket", lambda *args: Probe())
+    with pytest.raises(RuntimeError, match="Seatbelt"):
+        run_lanes.denied_network_probe(tmp_path, "component")
+
+
+def test_native_probe_does_not_require_unix_socket_denial(monkeypatch, tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/ci"))
+    import native_macos
+
+    observed = []
+    monkeypatch.setattr(native_macos, "verify_active", observed.append)
+    (tmp_path / "os-policy.json").write_text(json.dumps({
+        "mechanism": "pf+python-execution-guard", "verified_live_listeners": True,
+    }))
+    monkeypatch.setattr(socket, "socket", lambda *args: pytest.fail("not Seatbelt"))
+    run_lanes.denied_network_probe(tmp_path, "os")
+    assert len(observed) == 1
+
+
+@pytest.mark.parametrize("key", ["failed", "errors", "skipped", "xfailed", "xpassed",
+                                 "collection_errors", "exitstatus"])
+def test_pipeline_rejects_nonpassing_outcomes(key):
+    with pytest.raises(RuntimeError):
+        run_lanes.validate_counts({"selected": 1, "passed": 1, key: 1})
+
+
+@pytest.mark.parametrize("counts", [{"selected": 0, "passed": 0},
+                                  {"selected": 2, "passed": 1}])
+def test_pipeline_rejects_empty_or_incomplete_selection(counts):
+    with pytest.raises(RuntimeError):
+        run_lanes.validate_counts(counts)
+
+
+def test_deselected_are_not_counted_as_passed():
+    run_lanes.validate_counts({"selected": 2, "passed": 2, "deselected": 900})
+
+
+def test_native_admin_guard_rejects_private_host(monkeypatch):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/ci"))
+    import native_macos
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.setattr(native_macos.subprocess, "run",
+                        lambda *args, **kwargs: pytest.fail("must not execute sudo"))
+    with pytest.raises(RuntimeError, match="GitHub-hosted"):
+        native_macos.admin("/sbin/pfctl", "-e")
+
+
+@pytest.mark.parametrize("fail_execution", [False, True])
+def test_native_controller_restores_anchor_and_token(monkeypatch, tmp_path,
+                                                                fail_execution):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/ci"))
+    import native_macos
+
+    events = []
+    monkeypatch.setattr(native_macos, "hosted_only", lambda: None)
+    monkeypatch.setenv("GITHUB_RUN_ID", "test")
+
+    def fake_pf(*args):
+        events.append(args)
+        if args == ("-sr",):
+            return 'anchor "com.apple/*" all'
+        if "-vvsr" in args:
+            return "Packets: 4"
+        return ""
+
+    def fake_run(command, **kwargs):
+        if "-E" in command:
+            return SimpleNamespace(stdout="", stderr="Token : 123", returncode=0)
+        if fail_execution:
+            raise RuntimeError("child failure")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(native_macos, "pf", fake_pf)
+    monkeypatch.setattr(native_macos, "listeners", lambda stack: [])
+    monkeypatch.setattr(native_macos, "verify_drop", lambda servers: [])
+    monkeypatch.setattr(native_macos, "verify_connected", lambda servers: [])
+    monkeypatch.setattr(native_macos.subprocess, "run", fake_run)
+    monkeypatch.setattr(native_macos, "run_test_command",
+                        lambda command, *args: fake_run(command).returncode)
+    (tmp_path / "execution-guard.json").write_text(json.dumps({
+        "mechanism": "python-execution-guard", "observations": [{}] * 6,
+    }))
+    with (tmp_path / "log").open("w") as log:
+        if fail_execution:
+            with pytest.raises(RuntimeError, match="child failure"):
+                native_macos.run_isolated(["test"], tmp_path, tmp_path, {}, log)
+        else:
+            assert native_macos.run_isolated(["test"], tmp_path, tmp_path, {}, log) == 0
+    assert ("-a", "com.apple/trippostcollect-tests", "-F", "rules") in events
+    assert ("-X", "123") in events
+    assert json.loads((tmp_path / "os-policy.json").read_text())["restored"] is True
+
+
+def test_native_rejects_receipt_when_kernel_rule_is_missing(monkeypatch):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/ci"))
+    import native_macos
+
+    monkeypatch.setattr(native_macos, "hosted_only", lambda: None)
+    monkeypatch.setattr(native_macos, "pf", lambda *args: "")
+    with pytest.raises(RuntimeError, match="PF 规则不存在"):
+        native_macos.verify_active({"enforced": True})
+
+
+def test_ci_upload_junit_removes_source_and_captured_content(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/ci"))
+    from run_matrix import redact_junit
+
+    report = tmp_path / "pytest.xml"
+    report.write_text('<testsuites><testsuite tests="1" failures="1"><testcase name="case">'
+                      '<failure message="private">source excerpt</failure>'
+                      '<system-out>database row</system-out>'
+                      '</testcase></testsuite></testsuites>')
+    redact_junit(report)
+    safe = (tmp_path / "junit-summary.xml").read_text()
+    assert 'tests="1"' in safe and 'failures="1"' in safe
+    assert "private" not in safe and "source excerpt" not in safe and "database row" not in safe
+    assert "source excerpt" in report.read_text()
+
+
+@isolated_signal_test
+def test_signal_driver_loads_asyncio_with_autoload_disabled(tmp_path, request):
+    # This executes in a real nested pytest, without sending any signal.
+    assert request.config.pluginmanager.hasplugin("pytest_asyncio.plugin")
+    assert request.config.pluginmanager.hasplugin("support.execution_guard")
+    assert Path(__import__("os").environ["TPC_LANE_COUNTS"]).name == "driver-counts.json"
+    guard = json.loads(Path(__import__("os").environ["TPC_EXEC_GUARD_REPORT"]).read_text())
+    assert len(guard["observations"]) == 6
+    assert {item["boundary"] for item in guard["observations"]} == {"subprocess", "exec"}
+    assert tmp_path.is_dir()
+
+
+def test_matrix_uses_outer_runner_and_rejects_inner_runner(tmp_path):
+    from run_matrix import lane_command
+
+    source = tmp_path / "lane"
+    runner = tmp_path / "checkout/tests/run_lanes.py"
+    command = lane_command(runner, source, "component", tmp_path / "report")
+    assert command[1] == str(runner)
+    assert command[3] == str(source)
+    with pytest.raises(RuntimeError, match="外层"):
+        lane_command(source / "tests/run_lanes.py", source, "component", tmp_path)
+
+
+def test_main_launches_execute_from_source(monkeypatch, tmp_path):
+    source = (tmp_path / "source").resolve()
+    source.mkdir()
+    (source / "pyproject.toml").touch()
+    output = tmp_path / "report"
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "argv", ["run_lanes.py", "--source", str(source),
+                                     "-o", str(output), "--lane", "component"])
+
+    def fake_run(command, **kwargs):
+        assert command == [
+            "/usr/bin/sandbox-exec", "-f", str(output / "sandbox.sb"),
+            sys.executable, str(source / "tests/run_lanes.py"),
+            "--source", str(source), "-o", str(output), "--lane", "component", "--execute",
+        ]
+        assert kwargs["cwd"] == source
+        assert kwargs["env"]["PYTHONPATH"].split(os.pathsep) == [
+            str(source / name) for name in ("src", "tests", "scripts")
+        ]
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(run_lanes.subprocess, "run", fake_run)
+    assert run_lanes.main() == 0
+    monkeypatch.setattr(run_lanes, "__file__", str(source / "tests/run_lanes.py"))
+    with pytest.raises(RuntimeError, match="外层"):
+        run_lanes.main()
+
+    monkeypatch.setattr(sys, "argv", [*sys.argv, "--execute"])
+
+    def fake_execute(actual_source, actual_output, lane):
+        assert (actual_source, actual_output, lane) == (source, output, "component")
+        return 0
+
+    monkeypatch.setattr(run_lanes, "execute", fake_execute)
+    assert run_lanes.main() == 0
+
+
+@pytest.mark.parametrize("root_readme", [False, True])
+def test_fresh_sources_never_reuse_data_or_environment(monkeypatch, tmp_path, root_readme):
+    import run_matrix
+
+    pristine = tmp_path / "pristine"
+    pristine.mkdir()
+    for directory in ("src", "scripts", "tests", "config", "db", "docs", "tools"):
+        (pristine / directory).mkdir()
+    for file in ("pyproject.toml", "uv.lock", "AGENTS.md", "docs/README.md"):
+        (pristine / file).write_text("source")
+    if root_readme:
+        (pristine / "README.md").write_text("root readme")
+    for directory in ("data", "outputs", ".venv", "tools/MediaCrawler/.venv",
+                      "tools/MediaCrawler/browser_data"):
+        path = pristine / directory
+        path.mkdir(parents=True)
+        (path / "private").write_text("do not copy")
+    (pristine / "tools/.env").write_text("secret")
+    restored = []
+    monkeypatch.setattr(run_matrix, "restore_frozen", restored.append)
+    first = run_matrix.fresh_source(pristine, tmp_path / "one")
+    (first / "data").mkdir()
+    (first / "data/result").touch()
+    second = run_matrix.fresh_source(pristine, tmp_path / "two")
+    for copied in (first, second):
+        assert (copied / "README.md").exists() is root_readme
+        if root_readme:
+            assert (copied / "README.md").read_text() == "root readme"
+        for file in ("pyproject.toml", "uv.lock", "AGENTS.md", "docs/README.md"):
+            assert (copied / file).read_text() == "source"
+    assert not (second / "data").exists()
+    assert not (second / ".venv").exists()
+    assert not (second / "tools/MediaCrawler/.venv").exists()
+    assert not (second / "tools/MediaCrawler/browser_data").exists()
+    assert not (second / "tools/.env").exists()
+    assert restored == [first, second]
+    assert (pristine / "data/private").read_text() == "do not copy"
+    with pytest.raises(FileExistsError):
+        run_matrix.fresh_source(pristine, second)
+
+
+@pytest.mark.parametrize("executable,args", [
+    ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", []),
+    ("/usr/bin/open", ["open", "https://example.org"]),
+    ("/usr/bin/osascript", []),
+    ("/bin/sh", ["sh", "-c", "open https://example.org"]),
+])
+def test_guard_rejects_browser_boundaries(executable, args):
+    from support.execution_guard import audit
+
+    for event in ("subprocess.Popen", "os.exec", "os.posix_spawn"):
+        with pytest.raises(PermissionError):
+            audit(event, (executable, args, {}))
+
+
+def test_guard_allows_real_signal_and_gate_python_commands():
+    from support.execution_guard import check_command
+
+    check_command(sys.executable, [sys.executable, "-c", "import os; os.kill(123, 15)"])
+    check_command("/bin/ps", ["ps", "-axo", "pid,pgid,command"])
+
+
+@pytest.mark.parametrize("occupied", [True, False])
+def test_pf_dispatcher_only_bootstraps_empty_vm(monkeypatch, tmp_path, occupied):
+    from contextlib import ExitStack
+    import native_macos
+
+    events = []
+    root = "pass all" if occupied else ""
+
+    def fake_pf(*args):
+        nonlocal root
+        events.append(args)
+        if args == ("-sr",):
+            return root
+        if args[0] == "-f":
+            root = Path(args[1]).read_text()
+        return ""
+
+    monkeypatch.setattr(native_macos, "pf", fake_pf)
+    with ExitStack() as stack:
+        if occupied:
+            with pytest.raises(RuntimeError, match="未知策略"):
+                native_macos.prepare_anchor(stack, tmp_path, "test")
+            assert not any(args[0] == "-f" for args in events)
+        else:
+            assert native_macos.prepare_anchor(stack, tmp_path, "test")
+            assert 'anchor "test"' in root
+    assert root == ("pass all" if occupied else "")
+
+
+def test_frozen_copy_hash_is_checked_before_flags(monkeypatch, tmp_path):
+    import run_matrix
+
+    (tmp_path / "config").mkdir()
+    (tmp_path / "frozen.md").write_text("changed")
+    (tmp_path / "config/frozen_files.json").write_text(json.dumps({
+        "schema_version": 1, "files": [{"path": "frozen.md", "sha256": "wrong",
+                                         "require_immutable_flag": True}],
+    }))
+    monkeypatch.setattr(run_matrix.os, "chflags",
+                        lambda *args: pytest.fail("哈希错误不得设置标志"))
+    with pytest.raises(RuntimeError, match="哈希"):
+        run_matrix.restore_frozen(tmp_path)
+
+
+def test_frozen_copy_restores_only_registered_copy(monkeypatch, tmp_path):
+    import hashlib
+    import run_matrix
+
+    (tmp_path / "config").mkdir()
+    target = tmp_path / "frozen.md"
+    target.write_text("content")
+    (tmp_path / "config/frozen_files.json").write_text(json.dumps({
+        "schema_version": 1, "files": [{"path": "frozen.md",
+            "sha256": hashlib.sha256(b"content").hexdigest(), "require_immutable_flag": True}],
+    }))
+    flags = 0
+    original_stat = Path.stat
+
+    def fake_stat(path, *args, **kwargs):
+        if path == target:
+            return SimpleNamespace(st_flags=flags)
+        return original_stat(path, *args, **kwargs)
+
+    def fake_chflags(path, value):
+        nonlocal flags
+        assert path == target
+        flags = value
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    monkeypatch.setattr(run_matrix.os, "chflags", fake_chflags)
+    run_matrix.restore_frozen(tmp_path)
+    assert flags & run_matrix.stat.UF_IMMUTABLE
+
+
+def test_signal_driver_preserves_parent_counts(monkeypatch, tmp_path):
+    from support import signal_driver
+
+    parent_counts = tmp_path / "parent-counts.json"
+    parent_counts.write_text("parent")
+    monkeypatch.setenv("TPC_LANE_COUNTS", str(parent_counts))
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_case.py::test_case (call)")
+    monkeypatch.delenv("TPC_SIGNAL_DRIVER", raising=False)
+
+    def fake_run(command, **kwargs):
+        assert "pytest_asyncio.plugin" in command
+        assert "support.execution_guard" in command
+        assert kwargs["env"]["TPC_LANE_COUNTS"] != str(parent_counts)
+        Path(kwargs["env"]["TPC_LANE_COUNTS"]).write_text("driver")
+        Path(command[command.index("--junitxml") + 1]).write_text(
+            '<testsuites><testsuite tests="1" failures="0" errors="0" skipped="0"/></testsuites>')
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(signal_driver.subprocess, "run", fake_run)
+    isolated_signal_test(lambda **kwargs: pytest.fail("must run in child"))(tmp_path=tmp_path)
+    assert parent_counts.read_text() == "parent"
+
+
+def test_pf_without_real_packet_counts_fails(monkeypatch):
+    import native_macos
+
+    monkeypatch.setattr(native_macos, "pf", lambda *args: "Packets: 0")
+    with pytest.raises(RuntimeError, match="实际阻断计数"):
+        native_macos.checked_counters("test")

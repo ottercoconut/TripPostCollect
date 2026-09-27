@@ -484,11 +484,12 @@ def test_fifo_is_rejected_without_blocking(session_paths: dict[str, Path]) -> No
     assert time.monotonic() - started < 1.0
 
 
-@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Unix socket required")
+@pytest.mark.local_socket
 def test_socket_is_rejected_without_blocking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with tempfile.TemporaryDirectory(prefix="xhsrt-", dir="/tmp") as temporary:
+    assert hasattr(socket, "AF_UNIX"), "本 lane 必须支持 AF_UNIX"
+    with tempfile.TemporaryDirectory(prefix="xhsrt-") as temporary:
         monkeypatch.setattr(runtime, "XHS_SESSION_ROOT", Path(temporary) / "s")
         paths = runtime.prepare_runtime_session("run-1")
         status_path = runtime.runtime_status_path("run-1")

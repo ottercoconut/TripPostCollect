@@ -1,0 +1,87 @@
+name: macOS 隔离测试分组
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'tools/MediaCrawler'
+      - '.github/workflows/macos-test-lanes.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lanes:
+    runs-on: macos-26
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - name: 准备 Node 运行时
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 准备纯源码模板与独立锁定环境
+        shell: bash
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          TPC_WORK=$(mktemp -d /private/tmp/tpc-ci.XXXXXX)
+          mkdir "$TPC_WORK/pristine" "$TPC_WORK/reports"
+          git archive HEAD | tar -x -C "$TPC_WORK/pristine"
+          git -C tools/MediaCrawler archive HEAD | tar -x -C "$TPC_WORK/pristine/tools/MediaCrawler"
+          echo "TPC_WORK=$TPC_WORK" >> "$GITHUB_ENV"
+          cd "$TPC_WORK/pristine"
+          UV_PROJECT_ENVIRONMENT="$TPC_WORK/root-venv" uv sync \
+            --locked \
+            --extra dev \
+            --python "$PYTHON_VERSION"
+          UV_PROJECT_ENVIRONMENT="$TPC_WORK/fork-venv" uv sync \
+            --locked \
+            --project tools/MediaCrawler \
+            --python "$PYTHON_VERSION"
+          command -v node
+          node --version
+      - name: 执行独立副本分组及 fork 静态导入
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          source "$TPC_WORK/root-venv/bin/activate"
+          python scripts/ci/run_matrix.py \
+            --source "$TPC_WORK/pristine" \
+            --reports "$TPC_WORK/reports" \
+            --runner "$GITHUB_WORKSPACE/tests/run_lanes.py" \
+            --fork-python "$TPC_WORK/fork-venv/bin/python"
+      - name: 仅上传计数与脱敏控制证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.python }}-lane-reports
+          path: |
+            ${{ env.TPC_WORK }}/reports/*/result.json
+            ${{ env.TPC_WORK }}/reports/*/counts.json
+            ${{ env.TPC_WORK }}/reports/*/junit-summary.xml
+            ${{ env.TPC_WORK }}/reports/*/network-probes.json
+            ${{ env.TPC_WORK }}/reports/*/os-policy.json
+            ${{ env.TPC_WORK }}/reports/*/execution-guard.json
+            ${{ env.TPC_WORK }}/reports/matrix.json
+          if-no-files-found: error
+          retention-days: 7

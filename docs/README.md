@@ -8,6 +8,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 
 | 任务 | 必读文档 |
 |---|---|
+| 测试分组、临时副本、macOS 隔离与安装验收 | [可复用测试运行](testing.md) |
 | 正式抓取、来源耗尽、成功和失败语义 | [正式抓取执行契约](formal-crawl-contract.md) |
 | 命令、登录、恢复和结果检查 | [正式抓取运行手册](operations-runbook.md) |
 | 抖音、微博、知乎历史详情修复 | [正式抓取运行手册](operations-runbook.md#通用平台历史详情修复) |
