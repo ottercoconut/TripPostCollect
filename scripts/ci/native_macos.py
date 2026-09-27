@@ -10,6 +10,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 
 
 def hosted_only():
@@ -122,23 +123,70 @@ def verify_active(evidence):
             raise RuntimeError("执行期 PF 负例连接成功")
 
 
-def run_test_command(command, source, environment, log):
+def test_process_snapshot(timeout):
+    """Strict, bounded observation; an unreadable table is never an empty group."""
+    result = subprocess.run(["/bin/ps", "-axo", "pid=,pgid=,lstart="],
+                            check=True, capture_output=True, text=True, timeout=timeout,
+                            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+    rows = {}
+    for line in result.stdout.splitlines():
+        pid, pgid, started = line.split(maxsplit=2)
+        rows[int(pid)] = (int(pgid), started)
+    if not rows:
+        raise RuntimeError("CI process observation returned no processes")
+    return rows
+
+
+def run_test_command(command, source, environment, log, *, cleanup=None,
+                     observe=None, clock=None, sleep=None):
+    observe = observe or test_process_snapshot
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    cleanup = cleanup if cleanup is not None else {}
+    cleanup.update(confirmed=False, status="unconfirmed")
     child = subprocess.Popen(command, cwd=source, env=environment, stdout=log,
                              stderr=subprocess.STDOUT, start_new_session=True)
+    owner = None
     try:
+        owner = observe(5).get(child.pid)
+        if owner is None or owner[0] != child.pid:
+            raise RuntimeError("Cannot establish owned CI process group identity")
         return child.wait(timeout=1800)
     finally:
-        # Stop our own still-live process group before releasing the controls.
-        # Never use a supplied PID or signal an unrelated host process.
-        if child.poll() is None:
-            if os.getpgid(child.pid) != child.pid:
-                raise RuntimeError("CI child process group changed unexpectedly")
-            os.killpg(child.pid, signal.SIGTERM)
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait(timeout=5)
+        try:
+            if owner is None or owner[0] != child.pid:
+                raise RuntimeError("CI process group ownership unconfirmed")
+
+            def members(deadline):
+                child.poll()  # Reap the direct child, but do not infer group exit.
+                rows = observe(max(0.001, deadline - clock()))
+                if child.pid in rows and rows[child.pid] != owner:
+                    raise RuntimeError("CI process group identity changed")
+                return [pid for pid, identity in rows.items() if identity[0] == child.pid]
+
+            deadline = clock() + 5
+            remaining = members(deadline)
+            for signum in (signal.SIGTERM, signal.SIGKILL):
+                if not remaining:
+                    break
+                # Only the session/PGID created above is owned. In this trusted
+                # ephemeral VM descendants must remain in that test group.
+                try:
+                    os.killpg(child.pid, signum)
+                except ProcessLookupError:
+                    pass  # Still require a successful empty observation.
+                deadline = clock() + 5
+                while True:
+                    remaining = members(deadline)
+                    if not remaining or clock() >= deadline:
+                        break
+                    sleep(min(0.1, deadline - clock()))
+            if remaining:
+                raise RuntimeError("CI test group still present after SIGKILL")
+            cleanup.update(confirmed=True, status="group_exited")
+        except BaseException as exc:
+            cleanup.update(status="cleanup_failed", error_type=type(exc).__name__)
+            raise
 
 
 def run_isolated(command, source, output, environment, log):
@@ -179,7 +227,9 @@ def run_isolated(command, source, output, environment, log):
             evidence["verified_live_listeners"] = True
             evidence_path.write_text(json.dumps(evidence, indent=2))
             try:
-                returncode = run_test_command(command, source, environment, log)
+                evidence["test_cleanup"] = {"confirmed": False, "status": "unconfirmed"}
+                returncode = run_test_command(command, source, environment, log,
+                                              cleanup=evidence["test_cleanup"])
                 evidence["post_probes"] = verify_drop(servers)
                 evidence["pf_rules_after"] = checked_counters(anchor)
                 guard = json.loads((output / "execution-guard.json").read_text())
@@ -187,6 +237,12 @@ def run_isolated(command, source, output, environment, log):
                     raise RuntimeError("缺少 pytest 执行守卫实测记录")
                 evidence["execution_guard"] = guard
             finally:
+                if not evidence["test_cleanup"]["confirmed"]:
+                    # Disarm automatic restoration too: never release PF while
+                    # owned test resources may survive. VM destruction is required.
+                    stack.pop_all()
+                    evidence["restoration_status"] = "blocked_until_vm_destruction"
+                    raise RuntimeError("CI cleanup unconfirmed; PF retained until VM destruction")
                 stack.close()
                 evidence["restored_probes"] = verify_connected(servers)
                 if pf("-sr") != original_root or pf("-a", anchor, "-sr").strip():

@@ -162,19 +162,23 @@ def test_native_admin_guard_rejects_private_host(monkeypatch):
         native_macos.admin("/sbin/pfctl", "-e")
 
 
-@pytest.mark.parametrize("fail_execution", [False, True])
+@pytest.mark.parametrize("fail_execution", [False, True, "cleanup"])
+@pytest.mark.parametrize("temporary_dispatcher", [False, True])
 def test_native_controller_restores_anchor_and_token(monkeypatch, tmp_path,
-                                                                fail_execution):
+                                                     fail_execution, temporary_dispatcher):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/ci"))
     import native_macos
 
     events = []
     monkeypatch.setattr(native_macos, "hosted_only", lambda: None)
+    monkeypatch.setattr(native_macos.signal, "signal", lambda *args: None)
     monkeypatch.setenv("GITHUB_RUN_ID", "test")
 
     def fake_pf(*args):
         events.append(args)
         if args == ("-sr",):
+            if temporary_dispatcher:
+                return ""
             return 'anchor "com.apple/*" all'
         if "-vvsr" in args:
             return "Packets: 4"
@@ -190,22 +194,157 @@ def test_native_controller_restores_anchor_and_token(monkeypatch, tmp_path,
     monkeypatch.setattr(native_macos, "pf", fake_pf)
     monkeypatch.setattr(native_macos, "listeners", lambda stack: [])
     monkeypatch.setattr(native_macos, "verify_drop", lambda servers: [])
-    monkeypatch.setattr(native_macos, "verify_connected", lambda servers: [])
+    def connected(servers):
+        events.append(("connected",))
+        return []
+
+    def prepare(stack, output, anchor):
+        if temporary_dispatcher:
+            stack.callback(fake_pf, "-f", "original-empty.pf")
+        return temporary_dispatcher
+
+    monkeypatch.setattr(native_macos, "prepare_anchor", prepare)
+    monkeypatch.setattr(native_macos, "verify_connected", connected)
     monkeypatch.setattr(native_macos.subprocess, "run", fake_run)
-    monkeypatch.setattr(native_macos, "run_test_command",
-                        lambda command, *args: fake_run(command).returncode)
+    def fake_test(command, *args, cleanup):
+        if fail_execution == "cleanup":
+            cleanup.update(confirmed=False, status="cleanup_failed")
+            events.append(("cleanup_failed",))
+            raise RuntimeError("group remains")
+        cleanup.update(confirmed=True, status="group_exited")
+        events.append(("group_exited",))
+        return fake_run(command).returncode
+
+    monkeypatch.setattr(native_macos, "run_test_command", fake_test)
     (tmp_path / "execution-guard.json").write_text(json.dumps({
         "mechanism": "python-execution-guard", "observations": [{}] * 6,
     }))
     with (tmp_path / "log").open("w") as log:
         if fail_execution:
-            with pytest.raises(RuntimeError, match="child failure"):
+            message = "PF retained" if fail_execution == "cleanup" else "child failure"
+            with pytest.raises(RuntimeError, match=message):
                 native_macos.run_isolated(["test"], tmp_path, tmp_path, {}, log)
         else:
             assert native_macos.run_isolated(["test"], tmp_path, tmp_path, {}, log) == 0
-    assert ("-a", "com.apple/trippostcollect-tests", "-F", "rules") in events
+    evidence = json.loads((tmp_path / "os-policy.json").read_text())
+    if fail_execution == "cleanup":
+        assert ("-a", "com.apple/trippostcollect-tests", "-F", "rules") not in events
+        assert ("-X", "123") not in events
+        assert ("-f", "original-empty.pf") not in events
+        assert ("connected",) not in events
+        assert evidence["restored"] is False
+        assert evidence["test_cleanup"]["confirmed"] is False
+        assert evidence["restoration_status"] == "blocked_until_vm_destruction"
+        return
+    assert events.index(("group_exited",)) < events.index(
+        ("-a", "com.apple/trippostcollect-tests", "-F", "rules"))
     assert ("-X", "123") in events
+    assert (("-f", "original-empty.pf") in events) == temporary_dispatcher
     assert json.loads((tmp_path / "os-policy.json").read_text())["restored"] is True
+
+
+@pytest.mark.parametrize("scenario", ["empty", "term", "kill", "stuck", "observe_error",
+                                     "reused", "wrong_group", "timeout", "cancel"])
+def test_native_owned_group_cleanup(monkeypatch, scenario):
+    import native_macos
+
+    events = []
+    now = [0.0]
+    state = {"signal": None, "observations": 0}
+    cleanup = {}
+    owner = (410, "owned-start")
+    unrelated = {999: (999, "other-start")}
+
+    def wait(timeout):
+        assert timeout == 1800
+        events.append("wait")
+        if scenario == "timeout":
+            raise native_macos.subprocess.TimeoutExpired("fake", timeout)
+        if scenario == "cancel":
+            raise KeyboardInterrupt()
+        return 0
+
+    def popen(*args, **kwargs):
+        assert kwargs["start_new_session"] is True
+        return SimpleNamespace(pid=410, wait=wait, poll=lambda: 0)
+
+    def observe(timeout):
+        assert 0 < timeout <= 5
+        state["observations"] += 1
+        if state["observations"] == 1:
+            return {**unrelated, 410: owner}
+        if scenario == "observe_error":
+            raise OSError("observation unavailable")
+        if scenario == "reused":
+            return {**unrelated, 410: (410, "different-start")}
+        if scenario == "wrong_group":
+            return {**unrelated, 410: (999, "owned-start")}
+        alive = scenario != "empty"
+        if scenario in ("term", "timeout", "cancel") and state["signal"] is not None:
+            alive = False
+        if scenario == "kill" and state["signal"] == native_macos.signal.SIGKILL:
+            alive = False
+        events.append("members" if alive else "empty")
+        return {**unrelated, **({411: owner} if alive else {})}
+
+    def killpg(pgid, signum):
+        assert pgid == 410
+        state["signal"] = signum
+        events.append(signum)
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    monkeypatch.setattr(native_macos.subprocess, "Popen", popen)
+    monkeypatch.setattr(native_macos.os, "killpg", killpg)
+    monkeypatch.setattr(native_macos, "test_process_snapshot",
+                        lambda *args: pytest.fail("real host observation forbidden"))
+    errors = {"stuck": RuntimeError, "observe_error": OSError, "reused": RuntimeError,
+              "wrong_group": RuntimeError, "timeout": native_macos.subprocess.TimeoutExpired,
+              "cancel": KeyboardInterrupt}
+
+    def run():
+        return native_macos.run_test_command(["fake"], None, {}, None, cleanup=cleanup,
+                                             observe=observe, clock=lambda: now[0], sleep=sleep)
+
+    if scenario in errors:
+        with pytest.raises(errors[scenario]):
+            run()
+    else:
+        assert run() == 0
+    assert now[0] <= 10
+    signals = [event for event in events if isinstance(event, int)]
+    if scenario in ("kill", "stuck"):
+        assert signals == [native_macos.signal.SIGTERM, native_macos.signal.SIGKILL]
+    elif scenario in ("term", "timeout", "cancel"):
+        assert signals == [native_macos.signal.SIGTERM]
+    else:
+        assert signals == []
+    assert cleanup["confirmed"] == (scenario in ("empty", "term", "kill", "timeout", "cancel"))
+    if cleanup["confirmed"]:
+        assert events[-1] == "empty"
+    else:
+        assert cleanup["status"] == "cleanup_failed"
+
+
+@pytest.mark.parametrize("table", ["", "410 invalid start", "410 410", "valid"])
+def test_native_process_observation_is_strict_and_bounded(monkeypatch, table):
+    import native_macos
+
+    def fake_run(command, **kwargs):
+        assert command == ["/bin/ps", "-axo", "pid=,pgid=,lstart="]
+        assert kwargs["check"] is True
+        assert kwargs["timeout"] == 2.5
+        return SimpleNamespace(stdout=("410 410 Mon Sep 28 00:00:00 2026\n"
+                                       if table == "valid" else table))
+
+    monkeypatch.setattr(native_macos.subprocess, "run", fake_run)
+    if table == "valid":
+        assert native_macos.test_process_snapshot(2.5) == {
+            410: (410, "Mon Sep 28 00:00:00 2026")}
+    else:
+        with pytest.raises((ValueError, RuntimeError)):
+            native_macos.test_process_snapshot(2.5)
 
 
 def test_native_rejects_receipt_when_kernel_rule_is_missing(monkeypatch):
