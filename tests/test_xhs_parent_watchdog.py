@@ -348,6 +348,7 @@ def test_authenticated_sequences_use_receive_monotonic_and_outlive_old_timeout(
     assert observed["marked"] == [(CHILD, "child")]
 
 
+@pytest.mark.macos_process
 def test_real_authenticated_heartbeats_keep_a_long_supervisor_alive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

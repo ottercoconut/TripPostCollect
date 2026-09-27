@@ -15,6 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from support.signal_driver import isolated_signal_test
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -245,6 +247,7 @@ def test_no_xhs_runtime_environment_is_a_noop() -> None:
     assert reporter is None
 
 
+@pytest.mark.macos_process
 def test_private_runtime_environment_is_not_forwarded_to_exporter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -328,6 +331,7 @@ def test_private_runtime_environment_is_not_forwarded_to_exporter(
     assert "owner-token" not in logs
 
 
+@pytest.mark.macos_process
 def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -410,6 +414,8 @@ def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
         (signal.SIGTERM, signal.SIGINT),
     ],
 )
+@pytest.mark.macos_process
+@isolated_signal_test
 def test_signal_after_exporter_popen_cancels_gate_before_registration_or_exec(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -497,6 +503,7 @@ def test_signal_after_exporter_popen_cancels_gate_before_registration_or_exec(
 
 
 @pytest.mark.parametrize("injected", [KeyboardInterrupt(), RuntimeError("register failed")])
+@pytest.mark.macos_process
 def test_exporter_registration_exception_cancels_gate_without_target_exec(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -559,6 +566,7 @@ def test_exporter_registration_exception_cancels_gate_without_target_exec(
     assert getattr(captured["gate"], "_release_fd") is None
 
 
+@pytest.mark.macos_process
 def test_exporter_gate_release_failure_marks_registered_wrapper_exited(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -640,6 +648,8 @@ def test_exporter_gate_release_failure_marks_registered_wrapper_exited(
     assert getattr(captured["gate"], "_release_fd") is None
 
 
+@pytest.mark.macos_process
+@isolated_signal_test
 def test_signal_after_exporter_registration_reaps_exact_released_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1140,6 +1150,7 @@ def test_runtime_status_write_failure_is_terminal(
     assert reporter.snapshot()["write_failures"] == 1
 
 
+@pytest.mark.macos_process
 def test_exporter_start_token_change_stops_heartbeat_and_terminates_process(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,
@@ -1235,6 +1246,7 @@ def test_exporter_start_token_change_stops_heartbeat_and_terminates_process(
     assert read_reporter_status(paths["status"], writer_identity)["sequence"] == 1
 
 
+@pytest.mark.macos_process
 def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1406,6 +1418,7 @@ def test_runtime_reporter_requires_progress_tracking_before_popen(
         )
 
 
+@pytest.mark.macos_process
 def test_child_exit_then_main_control_flow_enters_finalizing(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,
@@ -1464,6 +1477,7 @@ def test_child_exit_then_main_control_flow_enters_finalizing(
     assert finalizing["phase"] == "finalizing"
 
 
+@pytest.mark.macos_process
 def test_real_child_survives_no_progress_budget_during_network_pause_then_recovers(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,
@@ -1474,7 +1488,9 @@ def test_real_child_survives_no_progress_budget_during_network_pause_then_recove
     ready = tmp_path / "exporter-ready"
     recovered = tmp_path / "network-recovered"
     pause_started_at = None
-    inactivity_budget = 0.1
+    # 验证暂停不消耗预算，不承诺托管 VM 在 100ms 内完成真实进程调度。
+    # 精确扣时和恢复边界由上面的纯时钟测试覆盖。
+    inactivity_budget = 1.0
 
     def network_observation(_path: object) -> tuple[str, str]:
         nonlocal pause_started_at
@@ -1500,7 +1516,7 @@ def test_real_child_survives_no_progress_budget_during_network_pause_then_recove
             "from pathlib import Path\n"
             "import sys, time\n"
             "Path(sys.argv[1]).touch()\n"
-            "deadline = time.monotonic() + 5\n"
+            "deadline = time.monotonic() + 15\n"
             "while not Path(sys.argv[2]).exists():\n"
             "    if time.monotonic() >= deadline:\n"
             "        raise SystemExit(2)\n"
@@ -1527,6 +1543,7 @@ def test_real_child_survives_no_progress_budget_during_network_pause_then_recove
     assert result["network_pause_total_seconds"] > inactivity_budget
 
 
+@pytest.mark.macos_process
 def test_network_timeout_event_gets_one_fixed_unwind_grace_for_real_child(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,
@@ -1564,6 +1581,7 @@ def test_network_timeout_event_gets_one_fixed_unwind_grace_for_real_child(
     assert result["network_terminal_reason"] == "network_recovery_timeout"
 
 
+@pytest.mark.macos_process
 def test_repeated_network_timeout_event_cannot_extend_unwind_grace(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,
@@ -1599,6 +1617,7 @@ def test_repeated_network_timeout_event_cannot_extend_unwind_grace(
     assert result["elapsed_seconds"] < 0.5
 
 
+@pytest.mark.macos_process
 def test_durable_progress_allows_runtime_longer_than_watchdog(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1627,6 +1646,7 @@ def test_durable_progress_allows_runtime_longer_than_watchdog(
     assert result["elapsed_seconds"] > result["inactivity_timeout_seconds"]
 
 
+@pytest.mark.macos_process
 def test_no_progress_timeout_preserves_output_once_and_allows_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

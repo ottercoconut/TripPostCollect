@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import pytest
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
@@ -26,6 +27,7 @@ STAMP_FUNCTIONS = (
 )
 
 
+@pytest.mark.installation
 def test_all_script_run_ids_include_microseconds() -> None:
     for module_name, function_name in STAMP_FUNCTIONS:
         stamp = getattr(import_module(module_name), function_name)()
