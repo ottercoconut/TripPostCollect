@@ -310,6 +310,7 @@ def test_ack_failure_after_db_commit_is_idempotent(scenario: SimpleNamespace, mo
 
 
 @pytest.mark.parametrize("commit_before_kill", [True, False])
+@pytest.mark.macos_process
 def test_sigkill_preserves_exactly_the_acknowledged_boundary(
     scenario: SimpleNamespace, commit_before_kill: bool
 ) -> None:

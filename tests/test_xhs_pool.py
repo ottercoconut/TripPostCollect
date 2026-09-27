@@ -109,11 +109,14 @@ def test_xhs_guarded_runtime_session_delegates_creation_to_lease_guard(
 
 
 @pytest.mark.parametrize("interrupt_kind", ["lease_signal", "keyboard_interrupt"])
+@pytest.mark.issue1_component
 def test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     interrupt_kind: str,
+    inject_business_guard,
 ) -> None:
+    inject_business_guard(xhs_runner)
     target_path = tmp_path / "targets.json"
     target_path.write_text(
         json.dumps(
@@ -1516,9 +1519,11 @@ def test_xhs_pool_requires_headed_browser(tmp_path: Path) -> None:
         load_pool_config(pool_path)
 
 
+@pytest.mark.issue1_component
 def test_xhs_schema_removes_persistent_fields_without_erasing_history_or_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    business_inspector,
 ) -> None:
     monkeypatch.setattr(accounts, "XHS_LOCK_ROOT", tmp_path / "locks")
     monkeypatch.setattr(
@@ -1584,7 +1589,7 @@ def test_xhs_schema_removes_persistent_fields_without_erasing_history_or_files(
         conn.execute(
             "CREATE TABLE xhs_platform_state(site_key TEXT PRIMARY KEY, status TEXT, daily_runs INTEGER)"
         )
-        accounts.ensure_xhs_schema(conn)
+        accounts.ensure_xhs_schema(conn, cutover_inspector=business_inspector)
 
         columns = {row[1] for row in conn.execute("PRAGMA table_info(xhs_accounts)")}
         assert columns == {
@@ -1598,7 +1603,7 @@ def test_xhs_schema_removes_persistent_fields_without_erasing_history_or_files(
             "SELECT status FROM xhs_accounts WHERE account_id='xhs-a01'"
         ).fetchone()[0] == "active"
         conn.commit()
-        accounts.ensure_xhs_schema(conn)
+        accounts.ensure_xhs_schema(conn, cutover_inspector=business_inspector)
         assert conn.execute(
             """
             SELECT id, account_id, run_id, event_type, details_json, created_at

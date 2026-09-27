@@ -14,6 +14,8 @@ from typing import Any, Mapping
 
 import pytest
 
+from support.signal_driver import isolated_signal_test
+
 from trippostcollect.xhs.terminal import (
     XhsRunTerminalizer,
     XhsTerminalCommitUnconfirmed,
@@ -123,6 +125,8 @@ def test_interrupt_before_linearization_rolls_back_event_and_checkpoint(
     assert terminalizer.business_committed is False
 
 
+@pytest.mark.macos_process
+@isolated_signal_test
 def test_raise_after_sqlite_commit_is_probed_as_known_and_never_replayed(
     tmp_path: Path,
 ) -> None:
@@ -545,6 +549,9 @@ def test_handler_restore_is_exact_even_after_first_wins_signal(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+@pytest.mark.macos_process
+@pytest.mark.issue1_os
+@isolated_signal_test
 def test_formal_os_signal_immediately_after_acquire_has_one_failed_terminal_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -650,10 +657,13 @@ def test_formal_os_signal_immediately_after_acquire_has_one_failed_terminal_comm
         ).fetchone()[0] == 1
 
 
+@pytest.mark.issue1_component
 def test_sms_terminal_before_pagination_keeps_precise_reason_and_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    inject_business_guard,
 ) -> None:
+    inject_business_guard(xhs_runner)
     target_path = tmp_path / "targets.json"
     target_path.write_text(
         json.dumps(

@@ -8,12 +8,15 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from support.signal_driver import isolated_signal_test
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +41,40 @@ PRIVATE_EXPORTER_ENV_KEYS = (
     runtime.RUNTIME_STATUS_AUTH_KEY_ENV,
     *PRIVATE_LEASE_ENV_KEYS,
 )
+
+# Poll sleeps are only yielding; readiness is always an explicit file handshake.
+CHILD_READY_RELEASE = (
+    "from pathlib import Path\n"
+    "import sys, time\n"
+    "Path(sys.argv[1]).touch()\n"
+    "deadline = time.monotonic() + 20\n"
+    "while not Path(sys.argv[2]).exists():\n"
+    "    if time.monotonic() >= deadline:\n"
+    "        raise SystemExit(2)\n"
+    "    time.sleep(0.01)\n"
+)
+
+
+def bounded_ready(ready: Path) -> Callable[[], bool]:
+    deadline = time.monotonic() + 15
+
+    def observed() -> bool:
+        assert time.monotonic() < deadline, "child handshake exceeded outer deadline"
+        return ready.exists()
+
+    return observed
+
+
+def test_ready_wait_is_bounded_even_if_child_never_starts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ticks = iter((0.0, 14.0, 15.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
+    is_ready = bounded_ready(tmp_path / "absent")
+    assert is_ready() is False
+    with pytest.raises(AssertionError, match="outer deadline"):
+        is_ready()
 
 
 class StaticInspector:
@@ -245,6 +282,7 @@ def test_no_xhs_runtime_environment_is_a_noop() -> None:
     assert reporter is None
 
 
+@pytest.mark.macos_process
 def test_private_runtime_environment_is_not_forwarded_to_exporter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -328,6 +366,7 @@ def test_private_runtime_environment_is_not_forwarded_to_exporter(
     assert "owner-token" not in logs
 
 
+@pytest.mark.macos_process
 def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -410,6 +449,8 @@ def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
         (signal.SIGTERM, signal.SIGINT),
     ],
 )
+@pytest.mark.macos_process
+@isolated_signal_test
 def test_signal_after_exporter_popen_cancels_gate_before_registration_or_exec(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -497,6 +538,7 @@ def test_signal_after_exporter_popen_cancels_gate_before_registration_or_exec(
 
 
 @pytest.mark.parametrize("injected", [KeyboardInterrupt(), RuntimeError("register failed")])
+@pytest.mark.macos_process
 def test_exporter_registration_exception_cancels_gate_without_target_exec(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -559,6 +601,7 @@ def test_exporter_registration_exception_cancels_gate_without_target_exec(
     assert getattr(captured["gate"], "_release_fd") is None
 
 
+@pytest.mark.macos_process
 def test_exporter_gate_release_failure_marks_registered_wrapper_exited(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -640,6 +683,8 @@ def test_exporter_gate_release_failure_marks_registered_wrapper_exited(
     assert getattr(captured["gate"], "_release_fd") is None
 
 
+@pytest.mark.macos_process
+@isolated_signal_test
 def test_signal_after_exporter_registration_reaps_exact_released_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1140,6 +1185,7 @@ def test_runtime_status_write_failure_is_terminal(
     assert reporter.snapshot()["write_failures"] == 1
 
 
+@pytest.mark.macos_process
 def test_exporter_start_token_change_stops_heartbeat_and_terminates_process(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,
@@ -1231,16 +1277,24 @@ def test_exporter_start_token_change_stops_heartbeat_and_terminates_process(
         assert registration_env[key] == expected
         assert exit_env[key] == expected
     assert registered["marked_identity"] == registered["identity"]
-    assert time.monotonic() - started < 2
+    assert time.monotonic() - started < 15
     assert read_reporter_status(paths["status"], writer_identity)["sequence"] == 1
 
 
+@pytest.mark.parametrize("terminal", [False, True], ids=["no-progress", "repeated-terminal"])
 def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    terminal: bool,
+    business_inspector: object,
 ) -> None:
     exporter_identity = process_identity(pid=9911, process_start_token="exporter-1")
     captured: dict[str, object] = {}
+
+    def forbidden_popen(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("fake-process clock test must not launch a real child")
+
+    monkeypatch.setattr(mediacrawler_crawl.subprocess, "Popen", forbidden_popen)
 
     class FakeProcess:
         pid = 9911
@@ -1275,7 +1329,18 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
 
     fake_process = FakeProcess()
     reporter = CountingReporter(tmp_path / "runtime_status.json")
-    monotonic_values = iter((0.0, 0.0, 1.0, 1.0))
+    # Repeated observations at 0, .25, .5, .75 and 1 must expire at 1,
+    # even though every observation could incorrectly slide the deadline.
+    ticks = (0.0, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0) if terminal else (0.0, 0.0, 1.0, 1.0)
+    monotonic_values = iter(ticks)
+    observations = []
+
+    def network_observation(_path: object) -> tuple[str, str]:
+        observations.append(True)
+        return ("network_recovery_timeout", "transport_timeout") if terminal else ("unknown", "")
+
+    monkeypatch.setattr(mediacrawler_crawl, "xhs_network_state_from_diagnostics", network_observation)
+    monkeypatch.setattr(mediacrawler_crawl, "XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS", 1.0)
 
     def terminate(
         proc: FakeProcess,
@@ -1361,9 +1426,16 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
     )
 
     assert result["returncode"] == 124
-    assert result["timeout_reason"] == "no_progress_timeout"
+    assert result["timeout_reason"] == (
+        "parent_network_terminal_unwind_timeout" if terminal else "no_progress_timeout"
+    )
+    assert result["timed_out"] is True
+    assert result["elapsed_seconds"] == 1.0
+    assert len(observations) == (5 if terminal else 2)
+    assert result["network_terminal_observed"] is terminal
+    assert result["network_terminal_reason"] == ("network_recovery_timeout" if terminal else None)
     assert result["progress_observed"] is False
-    assert reporter.calls == 1
+    assert reporter.calls == (5 if terminal else 1)
     child_env = captured["child_env"]
     registration_env = captured["registration_env"]
     exit_env = captured["exit_env"]
@@ -1406,6 +1478,7 @@ def test_runtime_reporter_requires_progress_tracking_before_popen(
         )
 
 
+@pytest.mark.macos_process
 def test_child_exit_then_main_control_flow_enters_finalizing(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,
@@ -1413,6 +1486,16 @@ def test_child_exit_then_main_control_flow_enters_finalizing(
 ) -> None:
     reporter, paths, writer_identity = runtime_reporter
     registered: dict[str, object] = {}
+    ready = tmp_path / "ready"
+    release = tmp_path / "release"
+    is_ready = bounded_ready(ready)
+
+    def network_observation(_path: object) -> tuple[str, str]:
+        if is_ready():
+            release.touch()
+        return "unknown", ""
+
+    monkeypatch.setattr(mediacrawler_crawl, "xhs_network_state_from_diagnostics", network_observation)
 
     def register_exporter(*, pid: int, **_kwargs: object) -> object:
         identity = process_identity(pid=pid, process_start_token="exporter-live")
@@ -1445,9 +1528,9 @@ def test_child_exit_then_main_control_flow_enters_finalizing(
     )
 
     result = mediacrawler_crawl.run_command(
-        [sys.executable, "-c", "import time; time.sleep(0.08)"],
+        [sys.executable, "-c", CHILD_READY_RELEASE, str(ready), str(release)],
         tmp_path,
-        1,
+        5,
         tmp_path / "child-exit-logs",
         progress_paths=[],
         runtime_reporter=reporter,
@@ -1456,6 +1539,7 @@ def test_child_exit_then_main_control_flow_enters_finalizing(
     )
     running = read_reporter_status(paths["status"], writer_identity)
     assert result["returncode"] == 0
+    assert ready.exists() and release.exists()
     assert running["phase"] == "running"
 
     reporter.enter_finalizing()
@@ -1464,6 +1548,7 @@ def test_child_exit_then_main_control_flow_enters_finalizing(
     assert finalizing["phase"] == "finalizing"
 
 
+@pytest.mark.macos_process
 def test_real_child_survives_no_progress_budget_during_network_pause_then_recovers(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,
@@ -1474,11 +1559,14 @@ def test_real_child_survives_no_progress_budget_during_network_pause_then_recove
     ready = tmp_path / "exporter-ready"
     recovered = tmp_path / "network-recovered"
     pause_started_at = None
-    inactivity_budget = 0.1
+    is_ready = bounded_ready(ready)
+    # 验证暂停不消耗预算，不承诺托管 VM 在 100ms 内完成真实进程调度。
+    # 精确扣时和恢复边界由上面的纯时钟测试覆盖。
+    inactivity_budget = 1.0
 
     def network_observation(_path: object) -> tuple[str, str]:
         nonlocal pause_started_at
-        if not ready.exists():
+        if not is_ready():
             return "network_paused", "transport_timeout"
         if pause_started_at is None:
             pause_started_at = time.monotonic()
@@ -1497,16 +1585,7 @@ def test_real_child_survives_no_progress_budget_during_network_pause_then_recove
         [
             sys.executable,
             "-c",
-            "from pathlib import Path\n"
-            "import sys, time\n"
-            "Path(sys.argv[1]).touch()\n"
-            "deadline = time.monotonic() + 5\n"
-            "while not Path(sys.argv[2]).exists():\n"
-            "    if time.monotonic() >= deadline:\n"
-            "        raise SystemExit(2)\n"
-            "    time.sleep(0.005)\n"
-            "time.sleep(0.02)\n"
-            "print('recovered')\n",
+            CHILD_READY_RELEASE + "print('recovered')\n",
             str(ready),
             str(recovered),
         ],
@@ -1527,6 +1606,7 @@ def test_real_child_survives_no_progress_budget_during_network_pause_then_recove
     assert result["network_pause_total_seconds"] > inactivity_budget
 
 
+@pytest.mark.macos_process
 def test_network_timeout_event_gets_one_fixed_unwind_grace_for_real_child(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,
@@ -1534,21 +1614,36 @@ def test_network_timeout_event_gets_one_fixed_unwind_grace_for_real_child(
 ) -> None:
     reporter, _, _ = runtime_reporter
     configure_real_supervised_exporter(monkeypatch)
+    ready = tmp_path / "ready"
+    release = tmp_path / "release"
+    is_ready = bounded_ready(ready)
+    terminal_observations = 0
+
+    def network_observation(_path: object) -> tuple[str, str]:
+        nonlocal terminal_observations
+        if not is_ready():
+            return "network_paused", "transport_timeout"
+        terminal_observations += 1
+        # Release only after the parent has consumed the first terminal event.
+        if terminal_observations >= 2:
+            release.touch()
+        return "network_recovery_timeout", "transport_timeout"
+
     monkeypatch.setattr(
         mediacrawler_crawl,
         "XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS",
-        0.2,
+        2.0,
     )
     monkeypatch.setattr(
         mediacrawler_crawl,
         "xhs_network_state_from_diagnostics",
-        lambda _path: ("network_recovery_timeout", "transport_timeout"),
+        network_observation,
     )
 
     result = mediacrawler_crawl.run_command(
-        [sys.executable, "-c", "import sys, time; time.sleep(0.08); sys.exit(7)"],
+        [sys.executable, "-c", CHILD_READY_RELEASE + "sys.exit(7)\n", str(ready), str(release)],
         tmp_path,
-        0.01,
+        1.0,
         tmp_path / "terminal-unwind-logs",
         progress_paths=[],
         runtime_reporter=reporter,
@@ -1559,11 +1654,15 @@ def test_network_timeout_event_gets_one_fixed_unwind_grace_for_real_child(
     assert result["returncode"] == 7
     assert result["timed_out"] is False
     assert result["timeout_reason"] is None
-    assert result["elapsed_seconds"] >= 0.07
+    assert ready.exists() and release.exists()
+    assert terminal_observations >= 2
+    assert result["elapsed_seconds"] < 15
+    assert result["network_terminal_grace_seconds"] == 2.0
     assert result["network_terminal_observed"] is True
     assert result["network_terminal_reason"] == "network_recovery_timeout"
 
 
+@pytest.mark.macos_process
 def test_repeated_network_timeout_event_cannot_extend_unwind_grace(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,
@@ -1571,21 +1670,33 @@ def test_repeated_network_timeout_event_cannot_extend_unwind_grace(
 ) -> None:
     reporter, _, _ = runtime_reporter
     configure_real_supervised_exporter(monkeypatch)
+    ready = tmp_path / "ready"
+    release = tmp_path / "never-release"
+    is_ready = bounded_ready(ready)
+    terminal_observations = 0
+
+    def network_observation(_path: object) -> tuple[str, str]:
+        nonlocal terminal_observations
+        if not is_ready():
+            return "network_paused", "transport_timeout"
+        terminal_observations += 1
+        return "network_recovery_timeout", "transport_timeout"
+
     monkeypatch.setattr(
         mediacrawler_crawl,
         "XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS",
-        0.05,
+        2.0,
     )
     monkeypatch.setattr(
         mediacrawler_crawl,
         "xhs_network_state_from_diagnostics",
-        lambda _path: ("network_recovery_timeout", "transport_timeout"),
+        network_observation,
     )
 
     result = mediacrawler_crawl.run_command(
-        [sys.executable, "-c", "import time; time.sleep(1)"],
+        [sys.executable, "-c", CHILD_READY_RELEASE, str(ready), str(release)],
         tmp_path,
-        0.01,
+        1.0,
         tmp_path / "terminal-unwind-timeout-logs",
         progress_paths=[],
         runtime_reporter=reporter,
@@ -1596,9 +1707,15 @@ def test_repeated_network_timeout_event_cannot_extend_unwind_grace(
     assert result["returncode"] == 124
     assert result["timed_out"] is True
     assert result["timeout_reason"] == "parent_network_terminal_unwind_timeout"
-    assert result["elapsed_seconds"] < 0.5
+    assert 2 <= result["elapsed_seconds"] < 15
+    assert terminal_observations >= 2
+    assert ready.exists() and not release.exists()
+    assert result["network_terminal_observed"] is True
+    assert result["network_terminal_reason"] == "network_recovery_timeout"
+    assert result["network_terminal_grace_seconds"] == 2.0
 
 
+@pytest.mark.macos_process
 def test_durable_progress_allows_runtime_longer_than_watchdog(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1608,15 +1725,16 @@ def test_durable_progress_allows_runtime_longer_than_watchdog(
     child = (
         "from pathlib import Path; import sys, time; "
         "path = Path(sys.argv[1]); "
-        "[(path.write_text(str(index)), time.sleep(0.1)) for index in range(7)]"
+        "[(path.write_text(str(index)), time.sleep(0.25)) for index in range(17)]"
     )
 
     result = mediacrawler_crawl.run_command(
         [sys.executable, "-c", child, str(progress_path)],
         tmp_path,
-        0.3,
+        2.0,
         tmp_path / "logs",
         progress_paths=[progress_path],
+        startup_grace_seconds=10,
         poll_seconds=0.02,
         cleanup_grace_seconds=1.0,
     )
@@ -1625,27 +1743,32 @@ def test_durable_progress_allows_runtime_longer_than_watchdog(
     assert result["timed_out"] is False
     assert result["progress_observed"] is True
     assert result["elapsed_seconds"] > result["inactivity_timeout_seconds"]
+    assert progress_path.read_text() == "16"
 
 
+@pytest.mark.macos_process
 def test_no_progress_timeout_preserves_output_once_and_allows_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(mediacrawler_crawl, "browser_launch_environment", lambda: {})
+    ready = tmp_path / "ready"
     child = (
+        "from pathlib import Path; "
         "import signal, sys, time; "
         "signal.signal(signal.SIGTERM, lambda *_: (print('terminated', flush=True), sys.exit(0))); "
-        "print('once', flush=True); time.sleep(10)"
+        "print('once', flush=True); Path(sys.argv[1]).touch(); time.sleep(30)"
     )
 
     result = mediacrawler_crawl.run_command(
-        [sys.executable, "-c", child],
+        [sys.executable, "-c", child, str(ready)],
         tmp_path,
-        0.15,
+        2.0,
         tmp_path / "logs",
-        progress_paths=[],
+        progress_paths=[ready],
+        startup_grace_seconds=10,
         poll_seconds=0.02,
-        cleanup_grace_seconds=1.0,
+        cleanup_grace_seconds=2.0,
     )
 
     stdout = (tmp_path / "logs" / "stdout.log").read_text(encoding="utf-8")
@@ -1653,6 +1776,8 @@ def test_no_progress_timeout_preserves_output_once_and_allows_cleanup(
     assert result["timed_out"] is True
     assert result["timeout_reason"] == "no_progress_timeout"
     assert result["forced_termination"] is False
+    assert result["progress_observed"] is True
+    assert 2 <= result["elapsed_seconds"] < 15
     assert stdout.count("once") == 1
     assert stdout.count("terminated") == 1
 

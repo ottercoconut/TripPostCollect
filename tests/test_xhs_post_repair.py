@@ -27,11 +27,14 @@ entrypoint = import_module("mediacrawler_export_entrypoint")
 
 
 @pytest.mark.parametrize("interrupt_kind", ["lease_signal", "keyboard_interrupt"])
+@pytest.mark.issue1_component
 def test_xhs_repair_interrupt_writes_terminal_audit_before_exact_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     interrupt_kind: str,
+    inject_business_guard,
 ) -> None:
+    inject_business_guard(repair)
     target_path = tmp_path / "targets.json"
     target_path.write_text(
         json.dumps(

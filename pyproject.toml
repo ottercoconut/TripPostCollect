@@ -30,6 +30,13 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "issue1_component: issue #1 的 17 个显式观测业务节点",
+    "issue1_os: issue #1 的 11 个原生进程节点",
+    "macos_process: 需要独立 macOS 环境的真实进程、信号或文件锁",
+    "local_socket: 仅专用临时目录 AF_UNIX bind",
+    "installation: 根项目完整依赖及 CLI 入口验收",
+]
 
 [tool.ruff]
 target-version = "py311"

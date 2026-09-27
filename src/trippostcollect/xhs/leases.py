@@ -1828,7 +1828,44 @@ class LeaseGuard:
         exc: BaseException | None,
         traceback: FrameType | None,
     ) -> bool:
-        released = self.close()
+        try:
+            released = self.close()
+        except BaseException as cleanup_error:
+            if exc is None:
+                raise
+            try:
+                # Only trusted type labels: exception messages and even custom
+                # class names can contain credentials or other private data.
+                cleanup_type = next(
+                    kind.__name__
+                    for kind in (
+                        XhsLeaseSignal,
+                        XhsIdentityProbeTimeout,
+                        XhsLeaseOwnershipError,
+                        XhsLeaseProcessesAlive,
+                        KeyboardInterrupt,
+                        SystemExit,
+                        OSError,
+                        RuntimeError,
+                        ValueError,
+                        Exception,
+                        BaseException,
+                    )
+                    if isinstance(cleanup_error, kind)
+                )
+                BaseException.add_note(
+                    exc,
+                    f"LeaseGuard.__exit__: close raised {cleanup_type}; "
+                    "primary exception preserved; lease release unconfirmed.",
+                )
+            except BaseException:
+                # Malformed __notes__ or custom attribute hooks can fail even
+                # with the base implementation. Diagnostic failure must never
+                # replace the active exception, including an interrupt.
+                return False
+            # Let the with statement propagate the original object/traceback;
+            # do not reverse the cleanup exception's implicit context chain.
+            return False
         if not released and exc is None:
             raise XhsLeaseProcessesAlive(
                 "XHS lease retained because guarded runtime processes are still live"

@@ -19,6 +19,9 @@ from typing import Any
 
 import pytest
 
+from support.signal_driver import isolated_signal_test
+from support.xhs_process_fakes import OWNER, FakeInspector, FakeMonotonicClock
+
 from trippostcollect.db import bootstrap as db_bootstrap
 from trippostcollect.db.bootstrap import XhsLeaseCutoverBlocked, bootstrap_database
 from trippostcollect.xhs import accounts, leases as xhs_leases, runtime
@@ -38,8 +41,6 @@ from trippostcollect.xhs.leases import (
     recover_orphaned_account_lease,
     register_lease_process,
     release_exact_account_lease,
-    system_boot_id,
-    system_host_id,
 )
 from trippostcollect.xhs.runtime import prepare_runtime_session, runtime_session_paths
 
@@ -50,14 +51,6 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 xhs_accounts_cli = import_module("xhs_accounts")
 xhs_runner_cli = import_module("xhs_runner")
-OWNER = ProcessIdentity(
-    host_id="host-a",
-    boot_id="boot-a",
-    pid=111,
-    process_started_at="2026-08-30T00:00:00+00:00",
-    process_start_token="owner-start-111",
-    pgid=111,
-)
 IDENTITY_PROBE_ENVIRONMENT = {
     "LC_ALL": "C",
     "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -82,65 +75,6 @@ def assert_safe_identity_probe_environment(kwargs: dict[str, Any]) -> None:
     assert kwargs["env"] == IDENTITY_PROBE_ENVIRONMENT
     assert kwargs["timeout"] == xhs_leases.IDENTITY_PROBE_TIMEOUT_SECONDS
     assert not set(IDENTITY_PROBE_SECRET_KEYS).intersection(kwargs["env"])
-
-
-class FakeInspector:
-    def __init__(
-        self,
-        *,
-        host_id: str = "host-a",
-        boot_id: str = "boot-a",
-        identities: dict[int, ProcessIdentity] | None = None,
-        presences: dict[int, bool | None] | None = None,
-        groups: dict[int, list[ProcessSnapshot]] | None = None,
-        profile_processes: list[ProcessSnapshot] | None = None,
-        current: ProcessIdentity | None = None,
-    ):
-        self.host_id = host_id
-        self.boot_id = boot_id
-        self.identities = identities or {}
-        self.presences = presences or {}
-        self.groups = groups or {}
-        self.profiles = profile_processes or []
-        self.profile_calls: list[Path] = []
-        self.current = current
-
-    def identity(self, pid: int) -> ProcessIdentity | None:
-        return self.identities.get(int(pid))
-
-    def process_presence(self, pid: int) -> bool | None:
-        if int(pid) in self.presences:
-            return self.presences[int(pid)]
-        return int(pid) in self.identities
-
-    def group_members(self, pgid: int) -> list[ProcessSnapshot]:
-        return list(self.groups.get(int(pgid), []))
-
-    def profile_processes(self, profile_dir: Path) -> list[ProcessSnapshot]:
-        self.profile_calls.append(Path(profile_dir).expanduser().resolve())
-        return list(self.profiles)
-
-    def current_identity(self) -> ProcessIdentity:
-        if self.current is None:
-            raise RuntimeError("fake current process identity was not configured")
-        return self.current
-
-
-class FakeMonotonicClock:
-    def __init__(self, value: float = 0.0):
-        self.value = float(value)
-        self.sleeps: list[float] = []
-
-    def monotonic(self) -> float:
-        return self.value
-
-    def sleep(self, seconds: float) -> None:
-        assert 0 <= seconds <= 0.1
-        self.sleeps.append(seconds)
-        self.value += seconds
-
-    def advance(self, seconds: float) -> None:
-        self.value += seconds
 
 
 class NoPresenceInspector:
@@ -824,6 +758,7 @@ def test_xhs_exact_lease_schema_and_dynamic_budgets(control_db: Path) -> None:
         crawl_lease_budget(timeout_seconds=7_200, configured_lease_seconds=7_499)
 
 
+@pytest.mark.macos_process
 def test_system_process_identity_uses_platform_exact_start_token() -> None:
     identity = SystemProcessInspector().current_identity()
     assert identity.pid == os.getpid()
@@ -946,6 +881,7 @@ def test_xhs_v22_cutover_retries_when_legacy_account_set_expands_before_begin(
         "commit",
     ],
 )
+@pytest.mark.macos_process
 def test_xhs_v22_cutover_rolls_back_every_mutation_on_disk_full(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -998,6 +934,7 @@ def test_xhs_v22_cutover_rolls_back_every_mutation_on_disk_full(
         assert_v22_xhs_history_preserved(conn)
 
 
+@pytest.mark.macos_process
 def test_xhs_v22_cutover_holds_every_legacy_lock_until_rollback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1676,6 +1613,7 @@ def test_legacy_cutover_refuses_live_registered_child_after_owner_dies(
         assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 1
 
 
+@pytest.mark.macos_process
 def test_legacy_flock_blocks_schema_cutover_even_when_owner_is_dead(
     control_db: Path,
 ) -> None:
@@ -1705,6 +1643,7 @@ def test_legacy_flock_blocks_schema_cutover_even_when_owner_is_dead(
         holder.communicate("\n", timeout=5)
 
 
+@pytest.mark.macos_process
 def test_stored_legacy_account_lock_blocks_account_schema_cutover(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1765,6 +1704,7 @@ def test_stored_legacy_account_lock_blocks_account_schema_cutover(
         holder.communicate("\n", timeout=5)
 
 
+@pytest.mark.macos_process
 def test_current_schema_guard_uses_only_current_lock_without_legacy_path_side_effects(
     control_db: Path,
     tmp_path: Path,
@@ -1808,6 +1748,7 @@ def test_current_schema_guard_uses_only_current_lock_without_legacy_path_side_ef
     assert not legacy_root.exists()
 
 
+@pytest.mark.macos_process
 def test_current_schema_guard_fails_closed_on_current_lock_without_legacy_fallback(
     control_db: Path,
     tmp_path: Path,
@@ -1839,6 +1780,7 @@ def test_current_schema_guard_fails_closed_on_current_lock_without_legacy_fallba
         holder.communicate("\n", timeout=5)
 
 
+@pytest.mark.macos_process
 def test_migrated_schema_ignores_obsolete_lock_and_profile_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1979,6 +1921,8 @@ def test_xhs_control_bootstrap_does_not_create_content_or_scheduler_tables(
     assert "crawl_jobs" not in tables
 
 
+@pytest.mark.macos_process
+@pytest.mark.issue1_os
 def test_normal_end_releases_exact_lease(control_db: Path, tmp_path: Path) -> None:
     guard = LeaseGuard(
         db_path=control_db,
@@ -2027,13 +1971,16 @@ def test_normal_end_releases_exact_lease(control_db: Path, tmp_path: Path) -> No
         assert details["runtime_session_cleanup_complete"] is True
 
 
+@pytest.mark.issue1_component
 def test_guard_removes_runtime_session_before_releasing_database_lease(
     control_db: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    business_inspector: FakeInspector,
 ) -> None:
     run_id = "cleanup-before-release"
     guard = LeaseGuard(
+        inspector=business_inspector,
         db_path=control_db,
         account_id="xhs-a01",
         run_id=run_id,
@@ -2058,11 +2005,95 @@ def test_guard_removes_runtime_session_before_releasing_database_lease(
     assert observed == [True]
 
 
+@pytest.mark.parametrize("observation", ["absent", "alive", "unknown", "scan_error", "exits"])
+def test_guard_cleanup_requires_observed_absence(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    business_inspector: FakeInspector,
+    observation: str,
+) -> None:
+    child = ProcessIdentity(
+        host_id=OWNER.host_id, boot_id=OWNER.boot_id, pid=8129, pgid=8129,
+        process_started_at="2026-09-03T00:00:00+00:00",
+        process_start_token="test-child-8129",
+    )
+    inspector = business_inspector
+    inspector.identities[child.pid] = child
+    guard = LeaseGuard(
+        db_path=control_db, account_id="xhs-a01", run_id="observed-cleanup",
+        lease_kind="crawl", execution_state_path=tmp_path / "state.json",
+        runtime_profile_dir=runtime_session_paths("observed-cleanup")["profile"],
+        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=4),
+        inspector=inspector,
+    )
+    guard.acquire()
+    guard.register_process(child.pid, "child")
+    paths = guard.prepare_runtime_session()
+    marker = paths["profile"] / "Cookies"
+    marker.write_bytes(b"preserve-unless-proven-absent")
+    if observation in {"absent", "unknown"}:
+        inspector.identities.pop(child.pid)
+        inspector.presences[child.pid] = None if observation == "unknown" else False
+    if observation == "scan_error":
+        def fail_scan(_profile):
+            raise PermissionError("synthetic profile scan denied")
+        monkeypatch.setattr(inspector, "profile_processes", fail_scan)
+    clock = FakeMonotonicClock()
+    monkeypatch.setattr(xhs_leases.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(xhs_leases.time, "sleep", clock.sleep)
+    signals = []
+
+    def record_signal(pgid, signum):
+        assert pgid == child.pgid
+        signals.append(signum)
+        if observation == "exits":
+            inspector.identities.pop(child.pid)
+            inspector.presences[child.pid] = False
+
+    monkeypatch.setattr(xhs_leases.os, "killpg", record_signal)
+    # os.kill remains a hard failure from business_inspector.
+    try:
+        if observation == "scan_error":
+            with pytest.raises(PermissionError, match="synthetic profile scan denied"):
+                guard.close()
+            released = False
+        else:
+            released = guard.close()
+        assert released is (observation in {"absent", "exits"})
+        assert marker.exists() is (not released)
+        with connect(control_db) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM xhs_account_leases WHERE lease_id=?",
+                (guard.lease_id,),
+            ).fetchone()[0] == int(not released)
+            release_events = conn.execute(
+                "SELECT details_json FROM xhs_account_events WHERE event_type='lease_released'"
+            ).fetchall()
+        assert len(release_events) == int(released)
+        if released:
+            assert json.loads(release_events[0][0])["process_check"]["safe_to_release"] is True
+            assert inspector.profile_calls
+        if observation == "alive":
+            assert signals == [signal.SIGTERM, signal.SIGKILL]
+        elif observation == "exits":
+            assert signals == [signal.SIGTERM]
+            assert inspector.process_presence(child.pid) is False
+        elif observation in {"absent", "scan_error"}:
+            assert signals == []
+    finally:
+        # Only release this test's in-process file handle; never delete a retained DB lease.
+        guard.file_lock.release()
+
+
+@pytest.mark.issue1_component
 def test_ordinary_exception_releases_without_changing_health(
     control_db: Path,
     tmp_path: Path,
+    business_inspector: FakeInspector,
 ) -> None:
     guard = LeaseGuard(
+        inspector=business_inspector,
         db_path=control_db,
         account_id="xhs-a01",
         run_id="ordinary-error",
@@ -2572,13 +2603,16 @@ def test_pid_reuse_is_not_signalled_during_bounded_close(
     )
 
 
+@pytest.mark.issue1_component
 def test_runtime_session_cleanup_failure_retains_exact_lease(
     control_db: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    business_inspector: FakeInspector,
 ) -> None:
     run_id = "cleanup-failure"
     guard = LeaseGuard(
+        inspector=business_inspector,
         db_path=control_db,
         account_id="xhs-a01",
         run_id=run_id,
@@ -2617,14 +2651,17 @@ def test_runtime_session_cleanup_failure_retains_exact_lease(
 
 
 @pytest.mark.parametrize("reported_removed", [False, True])
+@pytest.mark.issue1_component
 def test_incomplete_runtime_session_removal_retains_exact_lease(
     control_db: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     reported_removed: bool,
+    business_inspector: FakeInspector,
 ) -> None:
     run_id = "cleanup-incomplete"
     guard = LeaseGuard(
+        inspector=business_inspector,
         db_path=control_db,
         account_id="xhs-a01",
         run_id=run_id,
@@ -2655,9 +2692,11 @@ def test_incomplete_runtime_session_removal_retains_exact_lease(
         assert details["cleanup_error"] == "runtime_session_still_exists"
 
 
+@pytest.mark.issue1_component
 def test_guard_does_not_delete_session_it_failed_to_create(
     control_db: Path,
     tmp_path: Path,
+    business_inspector: FakeInspector,
 ) -> None:
     run_id = "preexisting-session"
     paths = prepare_runtime_session(
@@ -2669,6 +2708,7 @@ def test_guard_does_not_delete_session_it_failed_to_create(
     marker = paths["profile"] / "Cookies"
     marker.write_bytes(b"not-owned-by-guard")
     guard = LeaseGuard(
+        inspector=business_inspector,
         db_path=control_db,
         account_id="xhs-a01",
         run_id=run_id,
@@ -2707,13 +2747,16 @@ def test_guard_does_not_delete_session_it_failed_to_create(
         )
 
 
+@pytest.mark.issue1_component
 def test_guard_owns_and_removes_session_after_mid_creation_failure(
     control_db: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    business_inspector: FakeInspector,
 ) -> None:
     run_id = "partial-claimed-session"
     guard = LeaseGuard(
+        inspector=business_inspector,
         db_path=control_db,
         account_id="xhs-a01",
         run_id=run_id,
@@ -2743,13 +2786,16 @@ def test_guard_owns_and_removes_session_after_mid_creation_failure(
 
 
 @pytest.mark.parametrize("marker_kind", ["tampered", "symlink"])
+@pytest.mark.issue1_component
 def test_guard_retains_claimed_session_when_marker_no_longer_matches(
     control_db: Path,
     tmp_path: Path,
     marker_kind: str,
+    business_inspector: FakeInspector,
 ) -> None:
     run_id = f"mismatched-marker-{marker_kind}"
     guard = LeaseGuard(
+        inspector=business_inspector,
         db_path=control_db,
         account_id="xhs-a01",
         run_id=run_id,
@@ -2781,9 +2827,11 @@ def test_guard_retains_claimed_session_when_marker_no_longer_matches(
         assert foreign.read_text(encoding="utf-8") == "{}"
 
 
+@pytest.mark.issue1_component
 def test_guard_does_not_follow_preexisting_session_root_symlink(
     control_db: Path,
     tmp_path: Path,
+    business_inspector: FakeInspector,
 ) -> None:
     run_id = "preexisting-root-symlink"
     paths = runtime_session_paths(run_id)
@@ -2792,6 +2840,7 @@ def test_guard_does_not_follow_preexisting_session_root_symlink(
     foreign_marker = foreign / "keep.txt"
     foreign_marker.write_text("keep", encoding="utf-8")
     guard = LeaseGuard(
+        inspector=business_inspector,
         db_path=control_db,
         account_id="xhs-a01",
         run_id=run_id,
@@ -2858,6 +2907,8 @@ def test_lease_rejects_symlinked_runtime_session(
         )
 
 
+@pytest.mark.macos_process
+@pytest.mark.issue1_os
 def test_child_registration_failure_stops_untracked_process_group(
     control_db: Path,
     tmp_path: Path,
@@ -2910,6 +2961,9 @@ def test_child_registration_failure_stops_untracked_process_group(
         (signal.SIGTERM, signal.SIGINT),
     ],
 )
+@pytest.mark.macos_process
+@pytest.mark.issue1_os
+@isolated_signal_test
 def test_signal_during_child_registration_cancels_gate_before_target_exec(
     control_db: Path,
     tmp_path: Path,
@@ -2976,6 +3030,8 @@ def test_signal_during_child_registration_cancels_gate_before_target_exec(
         } == handlers_before
 
 
+@pytest.mark.macos_process
+@pytest.mark.issue1_os
 def test_keyboard_interrupt_during_child_registration_never_execs_target(
     control_db: Path,
     tmp_path: Path,
@@ -3023,6 +3079,8 @@ def test_keyboard_interrupt_during_child_registration_never_execs_target(
     assert SystemProcessInspector().process_presence(child_pid[0]) is False
 
 
+@pytest.mark.macos_process
+@pytest.mark.issue1_os
 def test_child_gate_release_failure_never_execs_target_or_leaves_process(
     control_db: Path,
     tmp_path: Path,
@@ -3072,6 +3130,8 @@ def test_child_gate_release_failure_never_execs_target_or_leaves_process(
     assert SystemProcessInspector().process_presence(child_pid[0]) is False
 
 
+@pytest.mark.macos_process
+@pytest.mark.issue1_os
 def test_gated_child_keeps_registered_pid_and_process_group_after_exec(
     control_db: Path,
     tmp_path: Path,
@@ -3434,6 +3494,7 @@ def test_reboot_allows_mutex_only_reconciliation_without_terminal_state(
         assert accounts.get_account(conn, "xhs-a01")["status"] == "active"
 
 
+@pytest.mark.macos_process
 def test_current_orphan_recovery_ignores_obsolete_lock_and_profile_browser(
     control_db: Path,
     tmp_path: Path,
@@ -4109,6 +4170,8 @@ def wait_for_guard_process(db_path: Path, run_id: str) -> tuple[dict[str, Any], 
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups and signals required")
+@pytest.mark.macos_process
+@pytest.mark.issue1_os
 def test_sigterm_stops_process_group_before_release(control_db: Path, tmp_path: Path) -> None:
     proc = subprocess.Popen(
         [sys.executable, "-c", GUARD_DRIVER, str(tmp_path), "sigterm-matrix"],
@@ -4144,6 +4207,8 @@ def test_sigterm_stops_process_group_before_release(control_db: Path, tmp_path: 
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups and signals required")
+@pytest.mark.macos_process
+@pytest.mark.issue1_os
 def test_sigkill_keeps_lease_and_live_child_blocks_orphan_recovery(
     control_db: Path,
     tmp_path: Path,
@@ -4201,19 +4266,21 @@ def test_public_lease_hides_owner_token(control_db: Path, tmp_path: Path) -> Non
     assert public["lease_id"] == lease["lease_id"]
 
 
+@pytest.mark.issue1_component
 def test_recovery_cli_uses_lease_id_and_accepts_missing_terminal_state(
     control_db: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    business_inspector: FakeInspector,
 ) -> None:
     lease = acquire_test_lease(
         control_db,
         run_id="cli-orphan",
         state_path=tmp_path / "missing-cli-state.json",
         owner=ProcessIdentity(
-            host_id=system_host_id(),
-            boot_id=system_boot_id(),
+            host_id=OWNER.host_id,
+            boot_id=OWNER.boot_id,
             pid=999_999,
             process_started_at="2026-08-30T00:00:00+00:00",
             process_start_token="missing-cli-owner",
@@ -4230,6 +4297,14 @@ def test_recovery_cli_uses_lease_id_and_accepts_missing_terminal_state(
             run_id="cli-orphan",
             lease_id=lease["lease_id"],
         ),
+    )
+    real_recover = xhs_accounts_cli.recover_orphaned_account_lease
+
+    def recover_with_observations(*args, **kwargs):
+        return real_recover(*args, **kwargs, inspector=business_inspector)
+
+    monkeypatch.setattr(
+        xhs_accounts_cli, "recover_orphaned_account_lease", recover_with_observations,
     )
     assert xhs_accounts_cli.main() == 0
     result = json.loads(capsys.readouterr().out)
