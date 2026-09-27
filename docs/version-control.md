@@ -15,13 +15,16 @@ cherry-pick、rebase 和后续修复已经吸收的改动，以最终实现及�
 
 ## 两个仓库分别管理
 
-根仓库与 `tools/MediaCrawler/` 是两个独立 Git 仓库。后者被根仓库忽略，根仓库的提交、分支、
-标签和 bundle 均不会包含它的本地改造。修改涉及两者时，应分别检查工作区、提交、验证和备份，
-并在合并或发布记录中写明双方完整提交 SHA。相同分支名不能代替提交配对。
+根仓库与 `tools/MediaCrawler/` 是两个独立 Git 仓库；后者以 submodule 形式被根仓库钉住配套
+提交（gitlink），但根仓库的提交、分支、标签和 bundle 均不包含它的内部历史。修改涉及两者时，
+应分别检查工作区、提交、验证和备份，并在合并或发布记录中写明双方完整提交 SHA。相同分支名
+不能代替提交配对；gitlink 只记录已提交的 HEAD，不覆盖子仓未提交改动。
 
-根仓库当前没有远程；MediaCrawler 的 `origin` 是开源上游，`fork` 是个人改造仓库。本地设置
-`remote.pushDefault=fork` 仅选择默认推送目标，显式指定远程仍可覆盖它。上游同步依照
+根仓库远程是 `origin`（`ottercoconut/TripPostCollect`，私有）；MediaCrawler 的 `origin` 是开源
+上游，`fork` 是个人改造备份（`ottercoconut/MediaCrawler`）。本地设置 `remote.pushDefault=fork`
+仅选择默认推送目标，显式指定远程仍可覆盖它。上游同步依照
 [MediaCrawler 维护流程](mediacrawler-fork-maintenance.md)，不向上游 `main` 推送本地改造。
+纯本地参照 `../MediaCrawler-upstream` 是上游只读 clone，不进入任何仓库。
 
 ## 开始与提交
 

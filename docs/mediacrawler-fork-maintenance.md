@@ -1,8 +1,10 @@
 # MediaCrawler 本地改造与上游同步
 
-`tools/MediaCrawler/` 是独立 Git 仓库，不是根项目的 submodule。根项目提交不会记录其 HEAD；发布、
-回滚和合并必须分别处理两个仓库。`origin` 指向开源上游 `NanmiCoder/MediaCrawler`，本地长期改造用于
-TripPostCollect 的授权、低频、图文限定、证据保存和 SQLite 入库流程，不应直接推送到上游 `main`。
+`tools/MediaCrawler/` 是根项目的 submodule，gitlink 钉住当前配套提交，clone 时用
+`git clone --recurse-submodules` 或 `git submodule update --init` 取得可运行完整状态。它仍是独立
+Git 历史：发布、回滚和合并必须分别处理两个仓库。其 `origin` 指向开源上游
+`NanmiCoder/MediaCrawler`，`fork` 指向个人备份 `ottercoconut/MediaCrawler`；本地长期改造用于
+TripPostCollect 的授权、低频、图文限定、证据保存和 SQLite 入库流程，不应推送到上游 `main`。
 
 日常分支清理、配套版本记录和 Git 备份恢复见[本地分支与版本管理](version-control.md)。
 
