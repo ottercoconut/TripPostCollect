@@ -120,6 +120,18 @@ counts.json 的 failure_diagnostics 仅保留失败节点（去掉参数值）�
 阶段与白名单错误类型，不导出异常文本、rawrepr、headers 或局部变量。
 真实 watchdog 暂停恢复集成测试使用 1 秒 inactivity 预算、至少 3 秒暂停和独立 ready/recovered
 握手，验证暂停不消耗预算，不承诺 100ms 调度性能；纯时钟测试继续验证精确扣时和恢复边界。
+watchdog 的真实 terminal 集成先等待 child ready，再观测 terminal；正常 unwind 在父进程
+消费首次事件后才 release，保留退出码 7、非超时及固定原因。重复 terminal 使用 2 秒固定
+grace，child 等待未释放的握手，必须由父进程以 124 停止。父侧握手观测有 15 秒外层上限，
+child 自身有 20 秒等待上限；启动迟到不能无限伪装为 network_paused。这些上限是失败边界，
+不是自动重试。重复事件不得滑动 deadline 的精确边界由同文件假进程与可控时钟验证；假 PID
+的 kill/killpg 被拦截，Popen 被禁止，该用例属于 component。
+持续进度测试保留实际文件更新及运行时间超过 inactivity 预算的关系断言，使用 2 秒预算与
+10 秒首次进度宽限；输出清理测试在安装 SIGTERM 处理器并输出后写 ready，首次进度结束
+启动宽限，之后无进度必须停止且输出各一次。finalizing 测试也用 ready/release 代替 sleep。
+注册失败、gate 取消与信号注入仍验证同步事件次序及资源回收；身份变化测试的耗时上限仅作
+15 秒外层保护，不要求共享 VM 在 2 秒内完成清理。真实信号及这些 native 用例只在 Actions
+OS lane 验收，本地纯时钟通过不能替代两版本真实 OS 结果。
 提交工作流不等于 CI 验收通过；必须由 Actions 的两版本实际产物证明。不要在私人宿主伪造环境变量。
 
 ## issue #1 节点映射
