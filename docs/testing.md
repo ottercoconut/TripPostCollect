@@ -77,11 +77,18 @@ checkout 不保留认证信息。依赖准备阶段联网；根环境使用 `uv 
 所选 submodule 提交在其目录用自己的锁文件创建独立 worker 环境。所有执行使用临时源码副本，
 没有私人源码、账号数据库或浏览器 profile。完整安装 lane 检查根 CLI `--help`，
 worker 静态导入 B站、微博、抖音、知乎、小红书模块，不调用抓取入口。
+fork 的 PYTHONPATH 保留正式 worker 所需的根 src/scripts 与 fork 自身路径。
+随后在独立 worker 环境执行 `run_matrix.FORK_OFFLINE_TESTS` 明确列出的 32 文件、417 个
+原离线用例（四站与共享辅助测试）；数量变化、skip、xfail 或失败均不可验收。
+复用现有 pytest、计数插件与执行守卫，使用同一 Seatbelt 无网络/无浏览器策略和临时产物目录。
+计数/守卫模块复制为独立名称，根 tests 不进入 PYTHONPATH；显式指定 fork 的 pyproject.toml、
+rootdir 和 confcutdir，避免根 conftest、support 或 pytest 配置污染。
 CI 显式 setup-node；执行 PATH 保留检测到的 Node 目录、/usr/local/bin 与 /opt/homebrew/bin。
 B站正式 article 的行为仍由根项目测试覆盖，上游 video 主循环不作为替代。
 
 [scripts/ci/run_matrix.py](../scripts/ci/run_matrix.py) 无论前一 lane 成败都运行全部四个 lane，
-任何失败、缺结果或静态导入失败均使 CI 非零。执行期 root 三个 lane 与 worker 导入使用 Seatbelt。
+任何失败、缺结果、静态导入失败或 fork 离线测试未全过均使 CI 非零。
+执行期 root 三个 lane 与 worker 导入/离线测试使用 Seatbelt。
 OS lane 调用 [scripts/ci/native_macos.py](../scripts/ci/native_macos.py)：每次管理员操作均检查
 GitHub-hosted/macOS/镜像环境标志；优先向已有 Apple wildcard anchor 添加临时 PF 子规则。
 没有 dispatcher 时，只有确认根过滤/NAT规则、anchors、tables、states 全空才加载最小临时
@@ -109,6 +116,10 @@ python tests/run_lanes.py \
 上面的 OS 命令只允许在托管 VM 内使用。`os-policy.json` 记录真实控制层、探针、PF 计数及恢复状态。
 工作流只上传计数、清除 traceback/捕获内容的 JUnit XML、控制证据与 matrix.json，
 不上传源码、原始日志、SQLite 或浏览器存储。
+counts.json 的 failure_diagnostics 仅保留失败节点（去掉参数值）、源码相对文件/行号、
+阶段与白名单错误类型，不导出异常文本、rawrepr、headers 或局部变量。
+真实 watchdog 暂停恢复集成测试使用 1 秒 inactivity 预算、至少 3 秒暂停和独立 ready/recovered
+握手，验证暂停不消耗预算，不承诺 100ms 调度性能；纯时钟测试继续验证精确扣时和恢复边界。
 提交工作流不等于 CI 验收通过；必须由 Actions 的两版本实际产物证明。不要在私人宿主伪造环境变量。
 
 ## issue #1 节点映射

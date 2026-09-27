@@ -17,6 +17,8 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 
+import pytest
+
 
 EXPRESSIONS = {
     "component": "not macos_process and not local_socket and not installation",
@@ -36,7 +38,31 @@ def runtime_path():
 def pytest_configure(config):
     config._lane_counts = dict(collected=0, selected=0, deselected=0, passed=0,
                                failed=0, errors=0, skipped=0, xfailed=0, xpassed=0,
-                               collection_errors=0)
+                               collection_errors=0, failure_diagnostics=[])
+
+
+def failure_diagnostic(item, call):
+    """只导出源码位置和白名单错误类型，不读取异常文本或 locals。"""
+    allowed = {"AssertionError", "TimeoutError", "RuntimeError", "ValueError",
+               "TypeError", "KeyError", "OSError", "PermissionError"}
+    kind = call.excinfo.type.__name__
+    diagnostic = {"node": item.nodeid.split("[", 1)[0],
+                  "error_type": kind if kind in allowed else "OtherError",
+                  "phase": call.when}
+    root = Path(item.config.rootpath).resolve()
+    for entry in reversed(list(call.excinfo.traceback)):
+        path = Path(str(entry.path)).resolve()
+        if path.is_relative_to(root):
+            diagnostic.update(file=str(path.relative_to(root)), line=entry.lineno + 1)
+            break
+    return diagnostic
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    if outcome.get_result().failed and call.excinfo is not None:
+        item.config._lane_counts["failure_diagnostics"].append(failure_diagnostic(item, call))
 
 
 def pytest_deselected(items):

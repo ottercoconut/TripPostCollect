@@ -12,6 +12,38 @@ import sys
 import xml.etree.ElementTree as ET
 
 
+FORK_OFFLINE_TESTS = tuple(f"tests/test_{name}.py" for name in (
+    "cdp_browser", "cdp_browser_lifecycle", "douyin_image_only", "douyin_no_user_info",
+    "douyin_search_safety", "douyin_store", "image_client_http_classification",
+    "image_download_retry", "image_staging_errors", "trippostcollect_adaptive",
+    "weibo_empty_search", "weibo_image_download", "weibo_no_user_info", "weibo_store",
+    "xhs_core_access_error", "xhs_creator_enrichment", "xhs_discovery_memory",
+    "xhs_image_download", "xhs_login_contract", "xhs_manual_wait_budget", "xhs_media_policy",
+    "xhs_midrun_login_recovery", "xhs_network_recovery", "xhs_popup_guard", "xhs_qrcode_login",
+    "xhs_qrcode_preview", "xhs_raw_response_errors", "xhs_shutdown_error_priority",
+    "xhs_store_provenance", "zhihu_detail_images", "zhihu_image_download", "zhihu_search_detail",
+))
+FORK_EXPECTED_TESTS = 417
+
+
+def fork_pythonpath(source, support):
+    # 正式 export entrypoint 注入 src；脚本入口自身也提供 scripts。
+    # 不加入根 tests，避免覆盖 fork 的 support/conftest。
+    return os.pathsep.join(str(path) for path in (
+        source / "tools/MediaCrawler", source / "src", source / "scripts", support,
+    ))
+
+
+def fork_test_command(python, fork, output):
+    return [str(python), "-m", "pytest", *FORK_OFFLINE_TESTS,
+            "-c", str(fork / "pyproject.toml"), "--rootdir", str(fork),
+            "--confcutdir", str(fork), "-p", "pytest_asyncio.plugin",
+            "-p", "ci_lane_report", "-p", "ci_execution_guard",
+            "-o", "xfail_strict=true", "--basetemp", str(output / "t/pytest"),
+            "--junitxml", str(output / "pytest.xml"),
+            "-o", f"cache_dir={output / 'cache'}", "-q"]
+
+
 def fresh_source(pristine, destination):
     """复制源码白名单；不继承运行产物、环境或凭证。"""
     excluded = {".git", ".venv", "venv", "data", "outputs", "temp", "browser_data",
@@ -84,7 +116,7 @@ def main():
     if runner != Path(__file__).resolve().parents[2] / "tests/run_lanes.py":
         raise RuntimeError("必须使用本控制脚本所在外层仓库的 runner")
     sys.path.insert(0, str(runner.parent))
-    from run_lanes import sandbox_policy, runtime_path
+    from run_lanes import sandbox_policy, runtime_path, validate_counts
     from native_macos import hosted_only
 
     hosted_only()
@@ -120,18 +152,50 @@ def main():
     modules = ["media_platform.bilibili", "media_platform.weibo", "media_platform.douyin",
                "media_platform.zhihu", "media_platform.xhs"]
     fork = fork_source / "tools/MediaCrawler"
-    environment["PYTHONPATH"] = os.pathsep.join((str(fork), str(fork_source / "tests")))
+    support = output / "ci_support"
+    support.mkdir()
+    shutil.copyfile(fork_source / "tests/run_lanes.py", support / "ci_lane_report.py")
+    shutil.copyfile(fork_source / "tests/support/execution_guard.py",
+                    support / "ci_execution_guard.py")
+    environment["PYTHONPATH"] = fork_pythonpath(fork_source, support)
+    environment["TPC_LANE_COUNTS"] = str(output / "counts.json")
+    environment["TPC_EXEC_GUARD_REPORT"] = str(output / "execution-guard.json")
     if not shutil.which("node", path=environment["PATH"]):
         raise RuntimeError("完整 fork 导入需要 Node PATH")
     with (output / "imports.log").open("w") as log:
         result = subprocess.run([
             "/usr/bin/sandbox-exec", "-f", str(policy), str(args.fork_python.absolute()),
-            "-c", "from support.execution_guard import install, canary; install(); canary(); import importlib; "
+            "-c", "from ci_execution_guard import install, canary; install(); canary(); "
+            "from ci_lane_report import denied_network_probe; from pathlib import Path; "
+            f"denied_network_probe(Path({str(output)!r}), 'installation'); import importlib; "
             f"[importlib.import_module(name) for name in {modules!r}]",
         ], cwd=fork, env=environment, stdout=log, stderr=subprocess.STDOUT, check=False,
            timeout=120)
     results["fork"] = {"returncode": result.returncode, "static_modules": modules,
                        "count": len(modules) if result.returncode == 0 else 0}
+    with (output / "pytest.log").open("w") as log:
+        offline = subprocess.run([
+            "/usr/bin/sandbox-exec", "-f", str(policy),
+            *fork_test_command(args.fork_python.absolute(), fork, output),
+        ], cwd=fork, env=environment, stdout=log, stderr=subprocess.STDOUT,
+           check=False, timeout=600)
+    results["fork_offline"] = {"returncode": offline.returncode,
+                               "files": len(FORK_OFFLINE_TESTS),
+                               "expected_tests": FORK_EXPECTED_TESTS}
+    counts_path = output / "counts.json"
+    if counts_path.exists():
+        counts = json.loads(counts_path.read_text())
+        results["fork_offline"]["counts"] = counts
+        try:
+            validate_counts(counts)
+            if counts["selected"] != FORK_EXPECTED_TESTS:
+                raise RuntimeError("fork selection count changed")
+        except RuntimeError:
+            results["fork_offline"]["returncode"] = 1
+    else:
+        results["fork_offline"]["status"] = "missing_result"
+    if (output / "pytest.xml").exists():
+        redact_junit(output / "pytest.xml")
     (reports / "matrix.json").write_text(json.dumps(results, indent=2))
     return int(any(value["returncode"] != 0 or value.get("status") == "missing_result"
                    for value in results.values()))

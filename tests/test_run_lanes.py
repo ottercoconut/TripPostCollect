@@ -16,6 +16,62 @@ from support.signal_driver import isolated_signal_test
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/ci"))
 
 
+def test_fork_worker_paths_and_pytest_boundary(tmp_path):
+    from importlib.machinery import PathFinder
+    import run_matrix
+
+    source = tmp_path / "source"
+    support = tmp_path / "reports/ci_support"
+    paths = run_matrix.fork_pythonpath(source, support).split(os.pathsep)
+    assert paths == [str(source / "tools/MediaCrawler"), str(source / "src"),
+                     str(source / "scripts"), str(support)]
+    fork = source / "tools/MediaCrawler"
+    command = run_matrix.fork_test_command(Path("worker-python"), fork, tmp_path)
+    assert command[:3] == ["worker-python", "-m", "pytest"]
+    assert command[command.index("-c") + 1] == str(fork / "pyproject.toml")
+    assert command[command.index("--confcutdir") + 1] == str(fork)
+    assert command[command.index("--rootdir") + 1] == str(fork)
+    assert len(set(run_matrix.FORK_OFFLINE_TESTS)) == 32
+    assert run_matrix.FORK_EXPECTED_TESTS == 417
+    assert "support.execution_guard" not in command
+    assert "ci_execution_guard" in command
+    root = Path(__file__).resolve().parents[1]
+    # 不依赖当前进程已安装的根包：新增路径必须能定位到真实 src 包。
+    spec = PathFinder.find_spec("trippostcollect", run_matrix.fork_pythonpath(root, support).split(os.pathsep))
+    assert Path(spec.origin) == root / "src/trippostcollect/__init__.py"
+    assert all((root / "tools/MediaCrawler" / name).is_file()
+               for name in run_matrix.FORK_OFFLINE_TESTS)
+
+
+@pytest.mark.parametrize("kind, expected", [(AssertionError, "AssertionError"),
+                                          (type("SecretHeader", (Exception,), {}), "OtherError")])
+def test_failure_diagnostic_excludes_exception_text_and_parameter_values(tmp_path, kind, expected):
+    item = SimpleNamespace(nodeid="tests/test_safe.py::test_safe[secret-header]",
+                           config=SimpleNamespace(rootpath=tmp_path))
+    call = SimpleNamespace(when="call", excinfo=SimpleNamespace(
+        type=kind, value=kind("secret-body"), traceback=[
+            SimpleNamespace(path=tmp_path / "tests/test_safe.py", lineno=41)]))
+    result = run_lanes.failure_diagnostic(item, call)
+    assert result == {"node": "tests/test_safe.py::test_safe", "phase": "call",
+                      "error_type": expected, "file": "tests/test_safe.py", "line": 42}
+    assert "secret" not in json.dumps(result).lower()
+
+
+def test_failure_diagnostic_hook_records_only_failed_reports(tmp_path):
+    item = SimpleNamespace(nodeid="tests/test_safe.py::test_safe",
+                           config=SimpleNamespace(rootpath=tmp_path,
+                                                  _lane_counts={"failure_diagnostics": []}))
+    call = SimpleNamespace(when="call", excinfo=SimpleNamespace(
+        type=AssertionError, traceback=[]))
+    for failed in (False, True):
+        hook = run_lanes.pytest_runtest_makereport(item, call)
+        next(hook)
+        with pytest.raises(StopIteration):
+            hook.send(SimpleNamespace(get_result=lambda: SimpleNamespace(failed=failed)))
+    assert item.config._lane_counts["failure_diagnostics"] == [
+        {"node": item.nodeid, "phase": "call", "error_type": "AssertionError"}]
+
+
 def test_policy_uses_allow_default_and_resolved_temporary_paths(tmp_path):
     source = tmp_path / "source"
     source.mkdir()

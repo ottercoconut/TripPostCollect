@@ -1488,7 +1488,9 @@ def test_real_child_survives_no_progress_budget_during_network_pause_then_recove
     ready = tmp_path / "exporter-ready"
     recovered = tmp_path / "network-recovered"
     pause_started_at = None
-    inactivity_budget = 0.1
+    # 验证暂停不消耗预算，不承诺托管 VM 在 100ms 内完成真实进程调度。
+    # 精确扣时和恢复边界由上面的纯时钟测试覆盖。
+    inactivity_budget = 1.0
 
     def network_observation(_path: object) -> tuple[str, str]:
         nonlocal pause_started_at
@@ -1514,7 +1516,7 @@ def test_real_child_survives_no_progress_budget_during_network_pause_then_recove
             "from pathlib import Path\n"
             "import sys, time\n"
             "Path(sys.argv[1]).touch()\n"
-            "deadline = time.monotonic() + 5\n"
+            "deadline = time.monotonic() + 15\n"
             "while not Path(sys.argv[2]).exists():\n"
             "    if time.monotonic() >= deadline:\n"
             "        raise SystemExit(2)\n"
