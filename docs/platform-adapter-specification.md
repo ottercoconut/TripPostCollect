@@ -808,8 +808,8 @@ T12更新root/worker组、静态导入清单、支持插件/fixture隔离和两�
 | 卡／对应主稿阶段 | 文件与符号、交付产物 | 前置／禁止项 | 检查与删除条件／回退 |
 |---|---|---|---|
 | T00／P00后启动 | 在实施基线重跑C8枚举并解释差异；生成F旧node台账、D CLI/env机器展开；确认C8/X11及退出切片“T00核”项 | P00-01–08复核＋实现授权；不是首次建立迁移闭包，不重跑外部选型 | 对新实施基线逐行/节点核对并解释漂移；只撤回准备补丁，不删源码 |
-| T01／P01 | core/resources、paths集中常量；C.ensure_prerequisites/profile_dir_for、W.main_async；JS单一源码迁移 | T00；不读/移真实profile | F10资源路径/旧接口兼容；产物资源manifest；旧定位引用全部切换后才删；回退资源定位 |
-| T02／P01 | P/entry、worker_inputs、RT/browser/launcher/worker/process；替换E.main/M.main装配 | T01；不切解释器、不全注册、不重写关闭 | F06/F10；产物选站启动/清理trace；旧轮仍用旧桥；回退整个选站入口 |
+| T01／P01 | **根依赖先行**：迁入代码所需包按原 worker 环境精确版本写入根 pyproject/uv.lock，根 venv 成为唯一运行环境；core/resources、paths集中常量；C.ensure_prerequisites/profile_dir_for、W.main_async；JS/LICENSE 包内资源；台账冻结于基线并新增 `progress` 迁移进度 | T00；不读/移真实profile；不升级已锁版本 | F10资源路径/旧接口兼容；`symbols --check`、`inputs --check`、`progress` 无 missing；fork libs 在各站切换读取前与包内资源逐字节相同（测试断言），T06/T07/T09 切换后由 T14 删除；回退资源定位 |
+| T02／P01 | P/entry、worker_inputs、RT/browser/launcher/worker/process；替换E.main/M.main装配；**worker 改用根解释器 `sys.executable -m trippostcollect.platforms.entry`，不再 `uv run`、不以 fork 目录为 cwd** | T01；不全注册、不重写关闭 | F06/F10；产物选站启动/清理trace；新轮命令冻结新入口，旧轮仍用旧桥；回退整个选站入口 |
 | T03／P02 | D1–D3输入切片；db/discovery_read、A/candidates；scheduler/XHS scope保持 | T02；不每候选重查、不收紧容错、不全量hash | F01/F09逐读点、0/空、错误集合；产物读点表；所有调用注入后删对应env/config读；单接缝回退 |
 | T04／P02 | records/formal、sanitization出口、artifacts/jsonl/staging/evidence、A/events/failures/policy、RT行为；显式publish接缝 | T03；不将legacy事件默认strict、不改变重试层/分类/冷却 | F02–F05/F07/F09及原failure_classifier/crawl_policy用例；产物wire/事件/IO顺序差分；新出口负例先通过再删hook；出口装配回退 |
 | T05／P01–P03 | C2全部符号→微博目标及F11同批测试 | T04；长文直连与repair fallback范围保持 | F11/F08/F09/F07；产物完整微博fixture trace；search/detail/warmup全部切换才删旧切片；整站入口回退 |
@@ -819,7 +819,7 @@ T12更新root/worker组、静态导入清单、支持插件/fixture隔离和两�
 | T09／P04 | C6全部平台符号＋根runner/repair薄化；原XL/XT/BC/XD仍根所有 | T04及公共链稳定；不第二浏览器/换号/改ACK顺序 | F15/F02/F06/F08/F09；产物生命周期/故障窗口trace；根worker协同验收后删XHS hooks；整条XHS回退，保留已ACK证据 |
 | T10／P03–P04 | C7两warmup、三类repair、B晋升/监督、benchmark/page evidence及readiness/Cookie辅助；获迁入口scripts仅转发 | T05–T09；不扩大修复范围，不把诊断算正式完成 | F07/F08/F10并补页面证据就绪/Cookie场景；产物CLI对照和包内依赖图；全调用方迁完才删脚本业务，保留外部名字；逐入口回退 |
 | T11／P04 | C8卡号T11全部符号：C的收集/门禁/发现提交/内容事务/摘要/运行阻断→collection、reporting、failures、artifacts/formal_images、db/content | T05–T10；不合并ContentCommit/DiscoveryCommit，不改提交不确定清理 | F01/F02/F05/F06临时SQLite/文件故障；产物事务顺序报告；旧函数无引用且保护语义迁完才删；提交接缝回退 |
-| T12／P05 | 根pyproject/lock、资源构建、CI run_matrix/FORK清单、tests台账、testing.md目标分组；解除fork cwd/uv依赖；按C8“退出切片的调用点切断”表删除全部保留代码中的退出分支 | T01–T11；不升级版本、不手工双份资源、不丢辅助依赖 | F10＋全部F；产物wheel/sdist、安装清单、旧新node/lane对账；静态/动态引用与干净安装全过才解除旧环境依赖；回退构建和新轮入口 |
+| T12／P05 | 资源构建、CI run_matrix/FORK清单、tests台账、testing.md目标分组；按C8“退出切片的调用点切断”表删除全部保留代码中的退出分支（依赖合并与解释器切换已前移至 T01/T02） | T01–T11；不升级版本、不手工双份资源、不丢辅助依赖 | F10＋全部F；产物wheel/sdist、安装清单、旧新node/lane对账；静态/动态引用与干净安装全过才解除旧环境依赖；回退构建和新轮入口 |
 | T13／P05 | 五站整合矩阵、component/socket/installation/托管OS双版本、离线故障差分 | T12；单站/总通过数不可替代五站责任，缺能力不得skip | 五站全部F覆盖、原#1/#2保持、静态依赖和资源无悬挂；产物分基线/lane报告；失败停当前阶段保留旧链 |
 | T14／P06 | 旧轮清点、安全终止/完成证据、受影响权威文档同批切换，最后删M/E私有桥及无用registry/DB/GUI | T13＋正式窗口及必要治理授权；不能改半轮冻结命令/删历史数据 | 新轮冻结-m命令；旧轮无存活进程/租约依赖；checkpoint/media/历史产物可读；产物删除审计与切换报告；仅回退旧代码/环境，不改已提交业务状态 |
 
@@ -839,10 +839,10 @@ T01/T12确定的资源与安装策略（T）：JS和LICENSE迁入上述resources
 目标 `MANIFEST.in` 使sdist包含这些真源及构建模块，wheel通过package_data包含生成资源；构建不下载fork、不读取运行状态。
 `core/resources.py` 用importlib.resources读取；需路径时as_file覆盖完整使用寿命；根SQL/契约调用改用资源入口，运行DB/媒体仍走core.paths。
 源码checkout的现有core.paths常量兼容；仓库外入口明确要求工作根（现有TRIPPOST_PROJECT_ROOT），不把site-packages上三级当运行根。
-非XHS通用profile新目标固定为paths集中定义的 `data/runtime/platform_sessions/<platform>/profile` 与同目录cookie_snapshot.json；
+非XHS通用profile新目标固定为paths集中定义的 `data/runtime/platform_sessions/<platform>/profile` 与同目录 `trippostcollect_cookie_snapshot.json`（沿用现名，不改文件名）；
 T14在旧轮结束且独占资源后按清单迁移/校验，再切新轮；XHS仍 `XHS_SESSION_ROOT` 每轮空session，不迁持久登录态。
 历史媒体/manifest相对路径不改；`FONT_PATH/STOP_WORDS_FILE`只属关闭词云，字体/词云文件不列运行安装资源。
-过渡worker仍原锁定环境，先安装新包、仅换内层-m；T12最后合并存活锁定依赖到根安装并固定worker解释器，禁PYTHONPATH/cwd伪补齐。
+依赖与解释器前移（2026-09-29 用户确认）：T01 把迁入代码的直接依赖按原 worker 环境精确版本写入根 pyproject/uv.lock，根 venv 成为唯一运行环境；T02 起 worker 用根解释器运行新入口，禁PYTHONPATH/cwd伪补齐。上游 DB/GUI/词云等退出切片的依赖不进入根。
 根已有Scrapling/Patchright辅助依赖保留；Node/execjs校验保留。所有收编保留版权头、原许可、固定SHA及变更标识。
 
 | 门禁 | 必需证据 | 本轮状态 |

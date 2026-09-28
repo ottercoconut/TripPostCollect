@@ -14,13 +14,19 @@ from typing import Any
 from playwright.async_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, async_playwright
 
 from browser_runtime import browser_launch_environment, browser_runtime_args
-from mediacrawler_crawl import discover_cdp_browser_path
-from trippostcollect.core.paths import MEDIACRAWLER_DIR, MEDIACRAWLER_LOGIN_OUTPUT, PROJECT_ROOT, ensure_dir
+from trippostcollect.core import paths
+from trippostcollect.core.paths import (
+    COOKIE_SNAPSHOT_FILENAME,
+    MEDIACRAWLER_DIR,
+    MEDIACRAWLER_LOGIN_OUTPUT,
+    PROJECT_ROOT,
+    ensure_dir,
+)
+from trippostcollect.runtime.browser_launcher import discover_cdp_browser_path
 
 
 ROOT = PROJECT_ROOT
 DEFAULT_OUTPUT = MEDIACRAWLER_LOGIN_OUTPUT
-COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
 
 PLATFORMS: dict[str, dict[str, Any]] = {
     "douyin": {
@@ -101,8 +107,7 @@ def selected_platforms(values: list[str]) -> list[str]:
 
 
 def profile_dir_for(platform_key: str) -> Path:
-    code = PLATFORMS[platform_key]["code"]
-    return MEDIACRAWLER_DIR / "browser_data" / f"{code}_user_data_dir"
+    return paths.platform_profile_dir(platform_key)
 
 
 def cookie_dict(cookies: list[dict[str, Any]]) -> dict[str, str]:
@@ -116,7 +121,7 @@ def required_cookie_names(platform_key: str) -> tuple[str, ...]:
 
 
 def cookie_snapshot_path(platform_key: str) -> Path:
-    return profile_dir_for(platform_key) / COOKIE_SNAPSHOT_FILENAME
+    return paths.platform_cookie_snapshot_path(platform_key)
 
 
 def cookie_snapshot_info(path: Path, cookies: list[dict[str, Any]], saved_at: str) -> dict[str, Any]:
