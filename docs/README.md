@@ -28,6 +28,11 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 
 ## 内容归属
 
+平台迁移 v0.7：[主设计与历史研究](platform-adapters.md)、[详细迁移规格](platform-adapter-specification.md)、
+[附录 C8 全量符号账](platform-adapter-symbol-ledger.md)、[P00 工作单与证据索引](platform-adapter-preflight.md)。
+详细规格定义迁移清单、接口/读取时点、任务和门禁；C8 逐项处置每个定义；任务卡的执行清单以 GitHub issues 跟踪。
+P00 已完成，四者均不构成实施授权、迁移完成报告或现行操作契约。
+
 为避免同一规则在多篇文档中漂移，文档只维护各自负责的内容：
 
 - 正式契约定义完成谓词、状态、错误分类、候选记忆和正式门禁。

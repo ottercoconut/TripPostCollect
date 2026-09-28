@@ -30,12 +30,13 @@ python scripts/crawl_runner.py \
 - 正文来自成功观察的 article/Opus 详情，保存
   `content_detail_status=detail_observed`、`content_detail_source=article_view_api`。
 - 正文规范化保留段落换行，不使用摘要清洗器把全文压成单行。
-- 新 Opus 优先读取 `opus.content.paragraphs[].pic.pics`；旧 article 优先解析详情 HTML，仅在缺少
-  更明确结构时使用详情响应的 `origin_image_urls` / `image_urls`。
+- 正文图按 `opus.content.paragraphs[].pic.pics`、详情 HTML、`content_pic_list` 顺序合并去重；
+  仅当这些来源都未提取到图片时，才使用详情响应的 `origin_image_urls` / `image_urls`。
 - 搜索预览图、Opus 封面、作者头像与视频资源均不属于正文图。
 - 作者粉丝来自 `mid` 关系统计，要求数值、`followers_observed=true` 和
   `author_followers_source=relation_stat`。
-- 发布时间来自平台原始字段；搜索与详情都有值时使用更明确的详情值。
+- 正式搜索记录的发布时间来自搜索响应原始 `pubdate` / `pub_time`；详情补全保留该值，
+  不以详情时间覆盖，也不以抓取时间补缺。
 - 去重键为 article 内容 ID。
 
 正式记录使用 `image_post_with_followers_v1`。详情已观察且平台明确证明删除、私密或字段永久不符时，
