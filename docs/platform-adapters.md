@@ -1,8 +1,11 @@
-# 平台实现解耦设计：讨论稿 v0.5，未批准实施
+# 平台实现解耦设计：讨论稿 v0.7，未批准实施
 
-> 状态：目标设计，供讨论与评审；不是实施授权、迁移完成报告或现行操作手册。
-> 前期已获准文档、保护性测试及隔离验证；本轮仅修订本文与 P00 工作单，不进入实现，不改变正式路径、数据、测试、配置、依赖、AGENTS 或冻结资产。
+> 状态：P00 已完成（含 P00-08 复核与附录 C8 全量符号账），设计就绪 D 静态部分满足；不是实施授权、迁移完成报告或现行操作手册。
+> v0.6/v0.7 只修改设计文档、导航及B站两处现状说明，不进入实现，不改变正式路径、数据、测试、配置、依赖、AGENTS 或冻结资产，不提交 Git。
 > 本文的“必须”约束未来迁移方案；现行运行仍以权威文档和当前实现为准。
+
+确定目录、逐符号迁移表、接口、配置读取时点、错误映射和任务卡以
+[详细迁移规格 v0.7](platform-adapter-specification.md) 及其[附录 C8](platform-adapter-symbol-ledger.md)为唯一详细定义；本稿保留原则、决策和历史研究。
 
 ## S01｜目标、基线与证据边界
 
@@ -12,9 +15,9 @@
 v0.3 在原 v0.2 上局部修订，增加 2026-09-27 的五站与相似工程复用研究（S23—S27）；v0.4/v0.5 保留全部 30 候选、17 组研究。
 研究确认范围、来源等级和选型建议，不表示已安装依赖、验证端点或批准迁移。
 用户最新确认：首期交付必须五平台全部保持现有正常抓取能力，不能以单平台试点交付代替。
-内部可以分步迁移，但不得逐站减损正式五站功能。助手承担技术评审，新增构件只补明确缺口，
+内部可以分步迁移，但不得逐站减损正式五站功能。技术评审由实施方承担，新增构件只补明确缺口，
 不建平行框架；外部选型本轮不重开、不安装新候选。平台 adapter 重构、真实采集与治理解冻均尚未授权。
-用户另行授权的 #1/#2 修复已验证、关闭并合主线；v0.5 仅同步这些既有结果，不重写修复，不自动宣布 P00 ready。
+用户另行授权的 #1/#2 修复已验证、关闭并合主线；v0.5 同步了既有结果。v0.6 依据三份专项静态审计补齐设计，不重开修复。
 当前准备进度、隔离验证结果与独立评审集中于 [P00 工作单](platform-adapter-preflight.md)。
 本文 B03、S18、S23—S27 的既有审计及“本轮”观察均指 v0.2/v0.3 研究时点，不能代替当前验证记录。
 
@@ -27,12 +30,15 @@ v0.3 在原 v0.2 上局部修订，增加 2026-09-27 的五站与相似工程复
 | B03 | `/tmp/trippostcollect-decoupling.lfAPem/audit.md` | v0.2 起草时只读审计；非全量依赖审计 |
 | B04 | 本稿所列精确源码与权威文档章节 | v0.2/v0.3 研究时仅定向静态读取，未执行测试或平台请求；2026-09-27 隔离测试结果见 P00，不包含平台请求验收 |
 | B05 | main/origin main `b7e52db254530d2dcd7657a0560b0103e4ddb256` | 当前主线修复验收基准；#2 的 `e70843c` 随 PR #3 合入；#1 的 `3e371f4` 等与 PR #4 `209f671` 已合入，不替换 B01 历史基线 |
-| B06 | 准备分支 `chore/platform-adapter-preflight` @ `93f02ebfe8ccfc27f0e54748a60234eba8226583` | 本轮文档起点，已将 main 合入准备分支；fork 仍为 B02；额外 56 个保护用例仅在准备分支 |
+| B06 | 准备分支 `chore/platform-adapter-preflight` @ `93f02ebfe8ccfc27f0e54748a60234eba8226583` | v0.5 文档起点，已将 main 合入准备分支；fork 仍为 B02；额外 56 个保护用例仅在准备分支 |
+| B07 | 根 `fe3e28ac7cc9575968e3279dd0e1c60ad0b7b1c1`，fork B02，main B05 | v0.6/v0.7 静态规格起点；三专项关键证据已收入详细规格，不依赖临时报告存在 |
+| B08 | 上游本地副本 `../MediaCrawler-upstream` @ `380b426000aac3d612837ed72c99808347dc94c9` | v0.7 用于区分fork本地改造与上游原样文件；不作为迁移来源 |
 
 B03 是 v0.2 起草时的外部审阅输入，不作为正式流程必须存在的文件；其关键证据已列入 S15、S18。
 “已定位”表示找到静态调用或测试函数，不表示覆盖完整、测试通过或线上行为已重验。
 未重新核验源文件总行数、配置读取次数及依赖占比；这些数字不作为迁移依据。当前测试数量以 P00 分基线、版本和 lane 的验收记录为准。
-动态导入、异常支路、安装资源和可选依赖的完整闭包仍需 S16、S17 所述工程核验。
+本次补审增加详细规格C0五站十三类闭包，补C1–C7遗漏的helper、错误、动态边和公共核心；
+准备任务与复核结论见P00-01–08；v0.7 附录C8逐项处置1234个定义。静态处置清单不等于运行时全可达图，实施后仍需S17运行与安装核验。
 
 ## S02｜权威来源与不可变范围
 
@@ -86,9 +92,9 @@ application 是逻辑层，可以分别存在于执行器、worker 和 XHS 根�
 
 ## S04｜目标逻辑模块与职责
 
-下表是逻辑职责，不要求建立同名顶层目录或全套新框架。
-优先复用 `core`、`platforms`、`records`、`artifacts`、`db`、`scheduler`、`xhs` 等现有包。
-新文件只在职责确实独立时出现；类名、协议名和最终目录在实现评审中确定。
+下表是逻辑职责；实际目录及每个新模块的唯一责任已由详细规格 B 确定。
+复用 `core`、`platforms`、`records`、`artifacts`、`db`、`scheduler`、`xhs`，应用编排与运行技术分别归 application/runtime。
+窄端口集中 application/contracts.py，不建立巨型 base 或 contracts 目录；不再留类名/接口待定项。
 
 | 逻辑边界 | 应承担 | 禁止承担 |
 |---|---|---|
@@ -108,7 +114,7 @@ application 定义调用顺序和决策；artifacts/db 实现其请求的技术�
 runtime 只抽出确需隔离的启动、借用、等待和清理能力，不重新包装全部 Playwright API。
 用户已确认：统一规则与结果，保留平台特有执行流程，不强迫五站统一完整抓取循环。
 解耦以职责、权限和状态所有权为界；共同规则可复用，各站登录、请求、分页与详情编排可以不同。
-用户同时确认优先复用成熟构件，不自行重写已有可靠基础能力；具体依赖与内部迁移顺序由助手技术评审，
+用户同时确认优先复用成熟构件，不自行重写已有可靠基础能力；具体依赖与内部迁移顺序由实施方技术评审，
 不重复让用户选择试点或审查技术细节；此项职责不授予实施权限。
 
 ## S05｜依赖方向矩阵
@@ -145,7 +151,8 @@ Facade 只设在变化、权限或状态边界，不为每个标准库函数、�
 
 ## S06｜数据类型与现有 wire 协议
 
-以下名称均为示意类型，不宣称代码已存在；不新增 JSONL、manifest、event schema 版本。
+下表保留历史逻辑概念，不是第二套待实现API。详细规格 D4 已以 QueryInput/SourcePosition、窄端口、本站模型及现有事务返回值具体化或取消这些示意类型；不创建同名stub。
+目标代码尚未实现；不新增 JSONL、manifest、event schema 版本。
 内部类型允许改变，外部字段名、字段省略规则、事件顺序和路径由兼容 serializer 保持。
 dataclass、TypedDict 或项目自有 Pydantic 模型均可作为实现选择，不以“纯净”要求排除成熟库。
 外部 SDK 的模型与默认补值不能直接变成本项目契约；Pydantic 类型校验不证明平台来源真实。
@@ -187,13 +194,15 @@ Cookie、签名计算上下文、Page、BrowserContext、browser 实例不进入
 
 refresh 不推进 deep 前沿；抖音正式文档允许的重建链有独立证据和条件，不能被通用抽象抹掉。
 首次从第一页、有限顶部刷新后恢复深层、耗尽后的刷新规则均直接引用正式契约。
-完整批次才允许记忆已处理候选；未完整尾批不得将候选标 seen 或跨过未持久化部分。
+完整批次才允许 XHS 批次 ACK；普通终态失败仍可能按已落事件保存已处理候选，见详细规格 E2。
+未处理候选不可越过；页中断恢复当前页。operator_interrupt 另由 guard 禁止新增终态推进，不能混成“一律不 seen”。
 视频跳过、决定性字段无效、候选级失败和结构有效记录保持不同决策与计数含义。
 
-当前 adaptive 存在直接读取 SQLite 内容与候选记忆的路径，不能假定只是启动时导入一组 ID。
-目标经 `KnownCandidatesReader` 等窄只读端口隔离，端口名称是示意，不新增缓存系统。
-迁移前逐调用记录读取时机、事务边界、当前轮增量、并发写入可见性及排除表读取行为。
-未核验前保持原查询时点与刷新方式；不得擅自改成每轮不可变快照或每候选重查。
+四站 `AdaptiveAccumulator.from_environment` 在每次 search 入口、关键词循环前加载一次已知集合；
+合并平台 web_posts、scope seen、通用 exclusions 与 resume 文件，之后仅轮内增量，不自动观察外部新提交。
+多次 SELECT 没有显式跨表原子快照；B站在执行器行为浏览器前独立加载一次。reader 保留部分 SQLite/文件错误的现行容错。
+目标 `KnownCandidatesReader` 的完整签名、读取与异常表见详细规格 D3/D4/E3；不新增缓存系统或每候选重查。
+runner 准备/收尾、提交前重读与 XHS 逐批重读分别保留，不把不同读取时点合并为单一快照。
 通用 job/query scope 与 XHS target/account/query scope 不合并，历史累计与当前 child 集合也不混淆。
 
 ## S08｜配置、环境与持久状态
@@ -209,13 +218,16 @@ refresh 不推进 deep 前沿；抖音正式文档允许的重建链有独立证
 | 内存会话 | Cookie、client、签名上下文、浏览器对象 | 当前拥有者进程；不混入普通配置输出 |
 | 持久状态 | checkpoint、seen、累计摘要、租约、execution state | 项目持久化接口；不是配置默认值 |
 
-内部代码最终不随处读取 `os.environ` 或全局 `config`；入口间已有 env wire 不等于全局读可保留。
+新内部模块不得任意读取 `os.environ` 或全局 `config`；入口解析与既有 `core.paths` 是登记的边界例外。
+不要求本期重写整个根项目路径入口；运行可变 Cookie、时钟/随机、scope reader 独立注入。
 初期兼容适配可保留原读取行为，但每个调用点必须登记注入替代项与退出阶段，见 S17。
 读取时机也属行为：导入时求值、CLI 赋值后读取、轮内变化不能在机械迁移中悄悄互换。
 默认值、缺值错误、显式 false/0、平台未使用字段的处理均需旧新差分。
 
 `query_fingerprint` 保持原算法、规范化和序列化，不能散列新配置对象的所有字段。
 超时、登录、顶部刷新预算等非来源参数不应因对象扩展意外进入指纹。
+精确排除项仅为 source_query_options 现有六键及 platform/keyword，canonical_json 保持原字节规则。
+`jobs[].behavior_profile` 在顶层不入 FP；`jobs[].params.behavior_profile` 不属排除项，进入 FP，不能一概标为运行参数而去掉。
 既有查询来源参数变化仍形成新 scope；不为“兼容”把真正不同查询归并到旧记忆。
 所有路径继续由 `trippostcollect.core.paths` 等现有路径能力提供，不靠源码 cwd 拼接。
 
@@ -240,14 +252,15 @@ XHS 保持单轮一个临时 profile、一次 Chrome 启动、一个 BrowserCont
 XHS 扫码刷新锁存、二维码时限、人工等待和标签页保留规则以平台文档为准，不重新设预算。
 
 平台有限详情/作者/图片重试、执行器策略、根运行超时分别登记拥有者及包含关系。
-重试层只能消费自己的既有预算；嵌套调用不能各自重新获得全额总预算或形成次数乘法。
+旧路径已有固定嵌套重试时，先保持实际次数、等待、最终异常与预算包含关系；迁移不得新增次数放大。
+“预算不相乘”不作为重写旧行为的理由；统一或缩减预算是另行明确批准的行为变更。
 通用 retry wrapper 不得隐藏重启、fallback、自动换号或重新建链；错误来源必须保持可判别。
 现有已授权的站内请求 fallback 可保留并显式命名，不得借同名机制添加浏览器重启。
-网络等待时钟、ACK 超时、人工等待、lease 与总超时的关系需单独核验，不能统一成一个 timeout。
+网络等待时钟、ACK 超时、人工等待、lease 与总超时的关系按详细规格 D/E 保留，实施按 F09 验证，不能统一成一个 timeout。
 现有 Tenacity 在 XHS、微博、知乎 client 的次数、等待和异常传播不同，逐接缝登记，不统一默认值。
 HTTP 超时/状态异常、Tenacity 最终异常、解析/模型校验异常、Pillow 解码异常分别映射到 S13，
 保留原始阶段和候选级/运行级区别；不可因包装失败降为正常空结果，也不直接输出原异常载荷。
-替换库时须核对库内、平台、执行器与根监督的实际尝试总数和墙钟上限，不能让嵌套预算相乘。
+替换库时须核对库内、平台、执行器与根监督的实际尝试总数和墙钟上限，不能新增嵌套重试放大。
 
 ## S10｜纯解析、清理与证据出口
 
@@ -257,7 +270,8 @@ parser 先以原响应的内存对象解析，可读取识别来源所需的原�
 纯解析指不发请求、不写库、不取全局状态；不要求原响应本身预先改造成新 schema。
 Parsel/Selector 和 Pydantic 可留在解析内部；项目契约接收的是有来源的投影，不是外部库对象。
 HTTP 请求序列化输入也须固定：方法、路径、查询顺序/编码、JSON 或 form 的表示、空值省略规则、
-body 字节及签名所见输入应与实际发送一致；不能改成模型 dump 后悄悄改变签名或请求含义。
+body字节、签名所见输入与实际发送输入分别保持旧trace；抖音urlencode与HTTPX params不能未经验证宣称相等，
+也不能为统一二者或改成模型dump而改变签名/请求含义。
 
 第一次项目序列化前必须强制递归清除已知头像键及同记录中由这些键证明的重复 URL。
 这一出口约束覆盖 JSONL、manifest、events、摘要、stdout/stderr 项目日志与离线 fixtures。
@@ -326,7 +340,8 @@ XHS 当前协议见 `src/trippostcollect/xhs/batch_checkpoint.py`，不得改写
 正式失败不得把未通过最终门禁的累计内容入库，但可保留先前完整批次的合法恢复证据。
 XHS `operator_interrupt` 按当前 guard 禁止新增推进；已合法提交和 ACK 的历史恢复点不回滚。
 guard 的检查与事务线性化竞态必须结合现有 terminalizer 测试核验，不虚构更强信号原子性。
-未完整尾批不 seen、不越过；通用失败后的安全摘要提交与 XHS 信号处理不能合成一个布尔开关。
+未完整尾批不走批次 ACK；终态普通失败与 operator_interrupt 的已处理 ID 保存规则不同，未处理候选不可越过。
+通用失败后的安全摘要提交与 XHS 信号处理不能合成一个布尔开关，详细窗口见规格 E2/E3。
 
 正式契约/架构中概括“中断不推进”的措辞，应理解为不因中断再新增推进，不能用于抹除先前 ACK。
 这是基于更具体的 XHS 批次文档、实现和测试的迁移解释，不是本轮更改冻结规范。
@@ -345,14 +360,16 @@ guard 的检查与事务线性化竞态必须结合现有 terminalizer 测试核
 正文、作者、图片的失败不能互相代替；parse exception 不允许转成 `[]`、`0` 或 has_more=false。
 平台报告错误观测，application 按正式契约和平台细则裁决，db 不根据异常名称自行推进。
 
-影响状态、批次发布、推进或停止的结构化事件必须显式调用、同步完成且允许失败向上传播。
-不能 fire-and-forget，不能只写 stdout 后期待结束扫描补回，也不能由日志 handler 获得提交权。
-observability 日志只辅助诊断；其输出失败如何处理沿现有策略，不发明新的控制信号。
-迁移需逐个区分控制事件与普通日志，保留控制事件顺序、持久化时点及错误传播链。
+结构化事件必须显式同步调用，不能 fire-and-forget、由 stdout 扫描补签或由日志 handler 取得提交权。
+但现行 `M/tools/trippostcollect_adaptive.py:append_execution_event:131` 对无路径以及 OSError/JSONDecodeError/TypeError 直接 return；
+`existing_platform_identities:28` 也有局部集合容错。这些现状不能描述成“全部持久化失败立即传播”。
+XHS 是原 append 后 `publish_batch` 重读已持久 event 的独立强校验，失败保持原 `xhs_batch_checkpoint_*` 终态映射；
+ES 的严格冻结状态接口与 adaptive 宽容出口也不同。详细规格 E3 给出每条新旧映射，首期不默认装配 strict 事件策略。
+未来若强化失败传播，须单列行为变更、错误时点和故障测试；普通诊断继续沿原策略，不借迁移全改 fail-closed。
 
 ## S14｜入口兼容、命名和冻结命令
 
-目标包入口可用 `python -m trippostcollect.platforms.entry` 替代内层 runpy，上述模块名是建议。
+四站目标包入口唯一确定为 `python -m trippostcollect.platforms.entry`，替代内层 runpy；B站仍执行器内调用。
 bootstrap 选平台并装配实现，不再执行上游 main/cmd_arg/config 初始化链。
 外层正式 CLI 可保留薄包装；内部模块不得反向 import scripts，也不靠 cwd/sys.path 注入寻址。
 
@@ -361,7 +378,7 @@ bootstrap 选平台并装配实现，不再执行上游 main/cmd_arg/config 初�
 | crawl_runner / xhs_runner 正式入口 | 保留语义与账号隔离 | 内部装配可迁移 |
 | mediacrawler_crawl 外层执行命令 | 可保留薄包装 | 不再包含平台业务实现 |
 | mediacrawler_export_entrypoint 私有桥 | 被新包入口替代后移除 | 旧未完成轮次已完成或安全终止 |
-| 其他在用辅助 CLI | 先核查调用，再保留转发或另批变更 | 不能承诺“全部脚本名永远保留” |
+| 其他在用辅助 CLI | 详细规格 C7/D2 列出的入口保留薄转发 | 其他旧脚本不自动取得公共兼容承诺 |
 | `job_kind=mediacrawler_search` | 保持 | 现有 schema 与存量行契约 |
 | `outputs/mediacrawler_runs/` 等产物路径 | 保持 | 历史证据及读取方依赖 |
 | 废弃参数/字段 | 继续拒绝 | 不新增兼容层 |
@@ -375,20 +392,34 @@ wire/env、外部字段、目录和现行命令的保留，与私有内部函数
 
 下表 `C` 为 `scripts/mediacrawler_crawl.py`，`E` 为 `scripts/mediacrawler_export_entrypoint.py`，
 `M/` 为 `tools/MediaCrawler/`。仅“已定位活跃接缝”获静态证据，不等于整文件全部存活。
-目标栏表示职责归属建议；函数拆分不得在首次机械迁入时同时更改行为。
+本表保留历史接缝索引；当前精确迁移以详细规格 C 为准。函数拆分不得在首次机械迁入时同时更改行为。
+五站完整类别账本在[详细规格C0](platform-adapter-specification.md#c0五平台迁移闭包总账2026-09-28-补审)，
+覆盖入口、client、signer、login、parser、model、store、helper、JS、动态import、辅助入口、配置和环境；
+公共依赖只登记一份，空能力明确写无或内联，不用目录存在代替调用证据。
+
+| 平台 | 未来adapter拥有的站点边界 | 留在项目核心的能力 |
+|---|---|---|
+| B站article | 原进程article循环、WBI/urllib、详情/作者/图片解析和请求；不迁上游视频crawler | 行为runtime、字段/完成门禁、JSONL/manifest、图片复验与SQLite、修复晋升/监督 |
+| 微博 | 本站搜索、长文、登录判别、图片、repair专属同Page回退 | 调度/冷却、候选决策、净化writer、发现记忆与内容提交 |
+| 抖音 | 浏览器response监听、三元游标、签名、短链详情、作者补取、phone/slider/MEMORY | 统一字段/来源判定、事件、媒体事务、冻结状态；不把图文VideoUrlInfo当视频能力删除 |
+| 知乎 | HTTPX/execjs、精确entity解析、Cookie刷新、作者/正文图、本站登录 | runtime资源、来源/字段裁决、净化与持久化；辅助driver不决定正式driver |
+| 小红书 | 轮内session/login/manual_wait、xhshow签名、导航/恢复、详情/作者/图片 | root账号/租约/临时profile所有权、认证监督、终态、DiscoveryCommit/ACK与SQLite内容提交 |
+
+“核心保留”指职责和权限，不禁止未来把根脚本逻辑搬入项目包。具体共享模块及不迁移清单见详规C0/C1，
+辅助入口逐一见C7；页面证据/benchmark不升级为正式搜索，XHS不新增warmup。
 
 | 编号 | 精确源位置 / 函数 | 状态与目标 |
 |---|---|---|
 | M01 | `C:5020 run_bilibili_article_search`；`:5601 _run_platform_without_policy` | 已定位正式 article 分支；迁入 B站包，原进程调用 |
 | M02 | `C:5622` worker 命令；`E:724 main` | 已定位执行器→worker→runpy；改包入口，保持层级 |
 | M03 | `C:1002 run_bilibili_behavior_session`；`:4780 fetch_bilibili_article_detail`；`:4861 hydrate_bilibili_article_record` | 已定位 article 行为/正文；runtime 与 B站能力分工 |
-| M04 | `C:4630 download_bilibili_record_images`；`:4949 fetch_bilibili_article_page`；`:4979 fetch_bilibili_follower_count` | 已定位图片/搜索/作者；实际请求依赖待闭包核查 |
+| M04 | `C:4630 download_bilibili_record_images`；`:4949 fetch_bilibili_article_page`；`:4979 fetch_bilibili_follower_count` | urllib/WBI/Cookie/图片闭包已定案，详规 C5；保持Context关闭后请求 |
 | M05 | `E:103 sanitize_export_item`；`:117 install_export_hook` | 已定位清理和 writer 替换；records/serializer 显式出口 |
 | M06 | `E:143 install_batch_checkpoint_hook` | 已定位控制 hook；显式事件→publish，不变为日志订阅 |
 | M07 | `E:298 install_xhs_repair_resilience`；`:446 install_douyin_browser_detail_fallback`；`:576 install_weibo_browser_detail_fallback` | 已定位 hook；分别归对应平台，保留修复与正式范围区别 |
-| M08 | `M/media_platform/weibo/core.py:115`、`douyin/core.py:102`、`zhihu/core.py:233`、`xhs/core.py:1662` | 审计定位启动链；core/client/login 闭包逐站核验 |
+| M08 | `M/media_platform/weibo/core.py:115`、`douyin/core.py:102`、`zhihu/core.py:233`、`xhs/core.py:1662` | core/client/login/model/store/条件分支已列详规 C2–C6；动态等价在各站实施卡验证 |
 | M09 | `M/main.py:122` | 已定位正常关闭分派；与父监督一起迁，不只搬 core.close |
-| M10 | `M/media_platform/zhihu/core.py:54`；`M/tools/trippostcollect_behavior.py:28` | 已定位反向依赖；改注入与共享包调用 |
+| M10 | `M/tools/trippostcollect_behavior.py:38/56` | 真正反向 scripts 导入，改注入；知乎 core.py:54 是合法 records.topic_relevance 引用，不列为反向依赖 |
 | M11 | `M/cmd_arg/arg.py:369`；`M/tools/trippostcollect_adaptive.py:28` | 已定位全局配置写、SQLite 读；S07/S08 隔离 |
 | M12 | `M/media_platform/zhihu/client.py:202`；`help.py:254` | 已定位图片会话与 execjs；保留 transport 和 JS 桥 |
 | M13 | `C:2773 validate_formal_record`；`:6289 apply_formal_completion_gates` | 已定位字段与完成门禁；application 保持唯一裁决 |
@@ -397,11 +428,9 @@ wire/env、外部字段、目录和现行命令的保留，与私有内部函数
 | M16 | `src/trippostcollect/xhs/batch_checkpoint.py:86 publish_batch`、`:198 BatchCheckpointCommitter`；`scripts/xhs_runner.py:1121` | 已定位 XHS 发布/提交/安装；最后专项迁移 |
 | M17 | `scripts/mediacrawler_login_warmup.py:517 main_async` | 显式检查 `MEDIACRAWLER_DIR.exists()`；删除运行树前须替换该存活辅助入口的依赖检测，不能仅检查 import 就宣布独立 |
 
-尚待闭包核查：各站 model/constant/helper、browser launcher/CDP、sign JS、异步 writer、store、
-proxy/cache、下载重试、资源装载、动态 import、诊断/详情修复/登录入口和子模块测试依赖。
-不能按旧目录名断言整个 store 可删：其中下载、manifest 和写出能力可能仍属必需角色。
-同理不预判所有 proxy、cache、aiofiles、requests 均可删；只删除已证明无存活引用的实现。
-上游 B站视频/动态代码不是正式 article 替代物；其能否删除仍须辅助入口闭包结论支持。
+各站 model/constant/helper、browser launcher/CDP、sign JS、writer/store、条件proxy/cache、下载重试、资源及辅助入口
+均已在详细规格 C 给出确定归属、前置和测试职责。store的投影/下载/JSONL必须迁，registry/DB/GUI待引用断开才删。
+抖音phone MEMORY cache/slider仍存活；上游B站视频不属article闭包。静态结论不代替删除前动态引用和完整安装门禁。
 
 ## S16｜依赖、安装与第三方来源
 
@@ -416,10 +445,11 @@ proxy/cache、下载重试、资源装载、动态 import、诊断/详情修复/
 迁入的功能角色决定依赖保留，不能照抄上游 requirements 或按包名白/黑名单裁剪。
 不把开区间升级依赖作为搬迁方案；以当前可用版本和锁文件关系评估根 requirements/lock 的合并。
 Python 3.11 兼容性、原 driver 包及 Node/execjs 运行要求按实际闭包和安装测试确认。
-requests 虽有现有声明，存活调用闭包未核验；lxml 的传递关系与独立调用也待核，均不能先判可删。
+专项静态审计确认 requests 直接调用属待退出贴吧支路；lxml 保留知乎Parsel及根Scrapling闭包。依赖实际删除仍过T12引用/安装门禁。
 不为洁净架构重写校验器、HTTP 栈、哈希、SQLite 或原子文件 API；边界适配只处理项目需要的语义。
 
 JS、stealth 等实际存活资源需成为可安装 package_data，装载不依赖仓库相对目录。
+详细规格 G 已选定 resources/js 单一源码，根SQL/必要契约按白名单从唯一真源构建到包资源；不手工维护两份。
 必须在仓库外干净目录安装构建产物，验证选定平台导入、资源读取和根依赖完整性。
 验证环境不得借当前 checkout、子模块 cwd 或隐式 PYTHONPATH 补齐缺失文件。
 逐平台检查未选平台不被初始化；“按需加载”不等于发布包可以漏掉正式支持平台所需依赖。
@@ -429,13 +459,13 @@ JS、stealth 等实际存活资源需成为可安装 package_data，装载不依
 ## S17｜分阶段迁移与退出门禁
 
 以下是内部工程拆分，尚未批准实施；每阶段只在入口可切回、状态兼容清楚后进入下一阶段。
-助手可按闭包与样本条件安排微博、知乎、抖音等内部先后，不再把先行站点作为用户待选事项。
+实施方可按闭包与样本条件安排微博、知乎、抖音等内部先后，不再把先行站点作为用户待选事项。
 首期验收范围始终是五站完整交付，P01 的单路径只用于工程验证，不能作为首期交付或停用其余平台的理由。
 B站 article 的迁移成功不能证明已经脱离 fork，因为它原本就绕过上游 B站 worker。
 
 | 阶段 | 工作范围 | 进入下一阶段的证据 | 代码回退单位 |
 |---|---|---|---|
-| P00 | 保留 B01/B02 历史基线，当前修复验收用 B05/B06；列在用 CLI/env/wire/path/指纹、读取时机、资源与测试清单 | 两 issue 已解决；五站闭包、精确接口及读取时点仍待齐，不自动 ready | 本轮未改运行代码 |
+| P00 | B07下补C0闭包总账、C1–C7符号归属、C8全量符号账、D读取、E错误与wire、F/G实施责任 | P00-01–08准备产物和复核结论（已完成）；不得用旧CI或未来T00代替当前静态清单 | 本轮仅文档、Git只读 |
 | P01 | 机械迁入一条真实通用 worker 路径与必要共享闭包 | 稳定字段/事件/决策差分；原命令可用；无签名/驱动/网络重写 | 单路径入口与迁入实现 |
 | P02 | 逐项显式注入；清理、fallback、控制事件 hook 各自归位 | 每项读取时点、失败传播和门禁保持；反向 scripts 导入清除 | 每个独立接缝 |
 | P03 | 其他通用站点及根 B站 article 分别迁移 | 逐站离线与事务验证；article 仍原进程、完整正文来源正确 | 各站独立切换 |
@@ -451,17 +481,19 @@ P01—P05 未获得该阶段正式切换及治理授权前，只在评审分支/
 过渡 monkeypatch、全局 config/env 读取须列明调用点、行为理由、目标端口及退出门禁。
 P01 可短暂保留既有机制以降低变量；P02 处理首站，P03/P04 处理后续站点。
 P05 前所有存活路径必须消除过渡 hook、内部任意 env/config 读取和 sys.path/runpy 桥。
-兼容旧外部 env 的入口解析仍可保留；这与内部全局读取清除不矛盾。
+兼容旧外部 env 的入口解析与现有 core.paths 根路径入口仍保留；这与新模块禁任意全局读取不矛盾。
 任何门禁失败停在当前阶段，保留旧代码可执行，不以删测试、放宽来源判据或缩减图片门禁过关。
 P00 须对 S27 的每个实际拟采用构件记录真实缺口、许可链、切片闭包、Python 3.11 及副作用；
 P01—P04 逐接缝比较第三方错误映射、缺值/0/空、真实发帖时间和 HTTP 序列化输入。
-离线差分必须禁意外网络；P02 的显式注入不能新增默认重试或使原预算相乘。
+离线差分必须禁意外网络；P02 显式注入不能新增默认重试或放大次数，原嵌套行为按实际trace保持。
+各阶段的可执行文件/符号、前置、禁止项、检查、产物、回退和删除条件见详细规格 G/T00–T14；本表只保留阶段索引。
 这些均为未来门禁；v0.4 的文档、保护性测试及现有代码隔离验证见 P00，不安装新候选、不运行新候选的测试或初始化代码。
 
 ## S18｜验收矩阵与证据强度
 
 以下现有函数和行号来自 v0.2 的 B03 审计；当时只确认定位并阅读部分断言，未执行测试。
 v0.4 的新增测试与 v0.5 同步的实际运行结果见 P00 工作单，不在本表补签历史结果。
+v0.6 的旧node→新职责/文件及CI交接见详细规格 F；下表是历史定位与未来验证义务，不是新包通过记录。
 当前唯一可复用测试方式为 [可复用测试运行](testing.md)；P00 的旧实验命令仅用于追溯。
 main `b7e52db` 的 [36333548215 验收](https://github.com/ottercoconut/TripPostCollect/actions/runs/36333548215)
 在托管 macOS 26.6.2、Python 3.11/3.12 各自通过 component 878、socket 1、installation 1、真实 OS 51，
@@ -487,12 +519,12 @@ main `b7e52db` 的 [36333548215 验收](https://github.com/ottercoconut/TripPost
 | V08 | `tests/test_image_materialization.py:262` `test_promotion_failure_after_replace_removes_new_target`；`tests/test_image_persistence.py:350` `test_one_missing_materialized_file_prevents_new_post_and_sql_failure_rolls_back` | 缺文件阻入库、晋升/SQL 失败；beforecommit、committed、提交不确定及复用文件保护待验证 |
 | V09 | `tests/test_bilibili_article_detail.py:66` `test_search_excerpt_alone_is_not_a_formal_bilibili_record` | 权威正文与搜索摘要区分；迁入 article 路由且不走上游视频/动态待验证 |
 | V10 | `M/tests/test_zhihu_detail_images.py:129` `test_failed_or_unparsed_detail_cannot_enter_image_success` | 失败/未解析不能伪装图片成功；各站正文/作者/图片错误来源矩阵待补 |
-| V11 | `tests/test_xhs_leases.py:1982` `test_normal_end_releases_exact_lease`；`tests/test_xhs_terminalizer.py:93` `test_interrupt_before_linearization_rolls_back_event_and_checkpoint` | 精确租约与线性化前中断；signal 后禁新增推进且保留先前 ACK 的联动待验证 |
+| V11 | `tests/test_xhs_leases.py:1926` `test_normal_end_releases_exact_lease`；`tests/test_xhs_terminalizer.py:95` `test_interrupt_before_linearization_rolls_back_event_and_checkpoint` | 精确租约与线性化前中断；signal 后禁新增推进且保留先前 ACK 的联动待验证 |
 | V12 | 未由 B03 定位具体函数 | 抖音空首屏：健康空 vs 页面仍有内容/受限/含糊响应；page/offset/search ID 不误推进，待补覆盖清单 |
 | V13 | 未由 B03 定位具体函数 | 仓库外安装、package_data、Python 3.11、selected 懒加载与 root dependency；待建验证证据 |
-| V14 | 未由 B03 定位具体函数 | 控制事件写失败必须传播；运行级与候选级不混淆；新旧 CLI/env 默认和旧 command 处置，待补 |
+| V14 | 未由 B03 定位具体函数；v0.6补齐详规 E3/F09 | 分别验证legacy事件吞错、XHS重读强校验、严格冻结状态错误；不得把全部失败传播冒充现状；CLI/env默认与旧command保持 |
 | V15 | v0.3 研究提出，当时未执行 | HTTP/重试/解析/校验/图片异常映射；缺键/null/0/空分开；平台时间不补当前时间；签名前后请求序列化输入一致 |
-| V16 | v0.3 研究提出，当时未执行 | 库内与外层重试总预算不相乘；未匹配 HTTP 请求失败关闭；无 pass-through、空 200 兜底或意外联网；静态依赖约束见 S25 |
+| V16 | v0.3 研究提出，当时未执行；v0.6澄清预算边界 | 库内与外层原嵌套次数/等待/异常等价且不新增放大；未匹配HTTP请求失败关闭；无pass-through、空200兜底或意外联网；静态依赖约束见S25 |
 
 离线 old/new 比较使用相同清理后 fixture，比较稳定字段、来源、事件顺序、候选决策和前沿决策。
 归一白名单仅包含采集时钟元数据、run_id、临时绝对路径，且只可在比较副本中按显式规则处理；
@@ -509,6 +541,8 @@ VCR.py 仅考虑已净化/合成 cassette 的 record_mode=none；工具范围与
 
 未来验证应包括受影响测试、必要根回归、临时 SQLite/文件故障注入、安装资源及冻结校验。
 测试路径迁移按存活角色决定，不能用旧测试文件总数证明覆盖，也不照搬无关依赖测试。
+原fork 417项、32文件及CI静态导入清单必须随模块迁移重分root/worker组；保存旧node→新node→保护语义，
+不永久引用删除后的fork路径，不固定旧数量。缺测、空收集或skip不能作通过；T12同时更新testing.md和CI清单。
 测试必须随模块重构：冻结业务断言，不冻结测试文件、私有函数、旧脚本名或 monkeypatch 架构。
 分为 contract/纯解析、各站 adapter（仅请求/解析/序列化/平台错误的 fixture 差分）、运行控制组件、OS integration、packaging/CLI smoke；run-ID 测稳定纯接口，完整入口导入另测。
 业务测试经已有 inspector 或未来窄端口注入无残留、存活、未知、扫描报错等具体观测，禁止全局放行安全门禁；
@@ -542,7 +576,8 @@ dry-run 仅验证部分计划构造，且通用模式可能写调度表/摘要/s
 ## S20｜治理窗口与资料路径计划
 
 v0.4 前期修改权限限于设计、版本管理、P00 工作单、指定保护性测试与必要讨论导航；其后 #1/#2 的实现及合并单独获准并完成，不扩展为平台重构授权。
-v0.5 本轮仅两份文档的状态与证据同步；文档编辑子任务不执行 Git 写操作，主助手按用户授权审阅并提交；中文 commit/issue/PR 与标准主题分支约束不变，详见 P00 范围。
+v0.5 仅两份文档同步是历史范围；v0.6/v0.7 补主稿/P00/详细规格/C8/导航，并纠正B站时间和图片现状说明，不获运行代码或治理修改权限。
+本轮Git只读，用户明确禁止提交，详见P00范围与起始工作区记录。
 不包含 AGENTS 和以下四个登记资产：
 `docs/admin-client-record-workbench-template.html`、`docs/formal-crawl-contract.md`、
 `docs/crawl-architecture.md`、`docs/data-persistence.md`。
@@ -578,14 +613,14 @@ v0.5 本轮仅两份文档的状态与证据同步；文档编辑子任务不执
 | D06 | 用户已确认 | 统一规则与结果，保留平台特有执行流程，不强迫五站统一完整抓取循环；强调解耦模块化 |
 | D07 | 未来权限门禁；尚未授权 | 先完成适用离线验收；具体正式试跑范围及窗口须另获授权，不是当前待用户解决的技术问题 |
 | D08 | 未来权限门禁；尚未授权 | 治理变更须在迁移 diff 可审阅时获得明确解冻授权，并与目标切换同步；当前不解冻 |
-| D09 | 工程待核验 | 引用闭包、SQLite 读取时点、版本锁/安装资源、ACK 崩溃窗口和各站覆盖缺口 |
+| D09 | 静态闭包已复核，实施待验 | 详规C0–C7与附录C8给出全部定义的唯一归属，P00-08已程序化复核；运行、安装与故障验证在T01–T13，分别记录 |
 | D10 | 用户已确认 | 广泛拆解五站及类似科研采集项目，优先复用成熟构件，不自行重写已有可靠基础能力 |
-| D11 | 助手技术评审 | 模块拆分粒度、窄端口与必要 Facade 的位置由助手依据实际 diff 与证据判断；只补缺口，不建平行框架；测试随模块迁移，保留保护语义而非旧文件/hook，分层及失败复评见 S18/P00 |
+| D11 | 实施方技术评审 | 模块拆分粒度、窄端口与必要 Facade 的位置由实施方依据实际 diff 与证据判断；只补缺口，不建平行框架；测试随模块迁移，保留保护语义而非旧文件/hook，分层及失败复评见 S18/P00 |
 | D12 | 用户已确认 | 首期五平台完整交付并保持正常抓取能力；内部可分步，不交付单站试点，不逐站减损正式功能 |
-| D13 | 助手技术评审；本轮不重开选型 | 保留 S26 研究与采用边界，S27 工程事实仍须补证；新候选不安装，不自动新增依赖 |
-| D14 | 两 issue 已获准、验证并合主线 | #2 随 PR #3、#1 经 PR #4 修复后均关闭；不再是 P00 阻塞。仅这些修复实现获准，平台 adapter 重构仍未授权，P00 完整闭包和精确接口、读取时点仍待核验 |
+| D13 | 技术方案已选定；不重开研究 | 现有成熟库/锁定实现沿用，本期无必需新增包；S27历史候选未采用事项不阻塞本期设计 |
+| D14 | 两issue已关闭；P00状态以本轮工作单为准 | #2随PR #3、#1经PR #4已解决；本轮补审不是重验旧CI或新包，平台重构仍未授权；terminal.finish诊断持久化另案保留 |
 
-D07/D08 的真实采集与治理授权尚无；D09/D11/D13 由助手承担工程核验和技术评审，不要求用户技术评审。
+D07/D08 的真实采集与治理授权尚无；D09/D11/D13 由实施方承担工程核验和技术评审，不要求用户技术评审。
 D12 已确定五站首期范围；本稿及保护性测试完成均不表示实施、上线或治理解冻获准。
 
 ## S22｜一致性检查与本稿验收边界
@@ -620,8 +655,8 @@ S23—S27 的外部方案不能覆盖 S02 唯一真源、S12 ACK 先于最终内
 v0.2/v0.3 审阅范围仅为文档与静态证据，历史“未运行”声明只针对当时；
 v0.4 的授权、测试准备和原验证状态集中见 P00 工作单。2026-09-27 已执行隔离测试；
 原独立复评只读取并复算证据，未重跑测试、dry-run、安装、数据库故障注入、浏览器或正式平台运行。
-v0.5 保留上述历史边界并另列主线修复后新验收；本轮仅两文档同步与文档 diff/链接/冻结验证，不执行测试或抓取。
-静态审阅只能减少显式矛盾，不是零缺陷证明；D09、V01—V16 及 S27 缺口须按 P00—P06 相关门禁逐项关闭。
+v0.5 保留上述历史边界并另列主线修复后验收；v0.6补齐详细规格，本轮仅文档diff/链接/事实符号/冻结验证，不执行测试或抓取。
+设计就绪、实施回归、正式切换门禁分别见详规G；静态就绪不是零缺陷或新包通过证明，V01—V16仍按实施阶段验收。
 开工前需有基线、现有关键契约验证与明确迁移边界；迁移后测试、安装及正式试跑在相应阶段完成，
 不要求先验证尚未实现的代码。全部适用验收证据完备且获得授权后，才可宣布迁移完成；本草案仍未授权实施。
 
@@ -725,6 +760,8 @@ R14 的 B站部分主要是视频能力，不能用跨站覆盖宣传替代 S03/
 | R30 [VCR.py · config.py](https://github.com/kevin1024/vcrpy/blob/c599974b31f3e510df9b98e61513fe6889a50db0/vcr/config.py) | 2026-09-15 | [MIT LICENSE.txt](https://github.com/kevin1024/vcrpy/blob/c599974b31f3e510df9b98e61513fe6889a50db0/LICENSE.txt) | [Python ≥3.10](https://github.com/kevin1024/vcrpy/blob/c599974b31f3e510df9b98e61513fe6889a50db0/pyproject.toml)；E2，config/cassette/filters | 次选离线 HTTP cassette dev 包候选；不覆盖浏览器、不录原始交换 |
 
 ## S25｜接口拆解、项目落点与契约测试
+
+本节T01–T17是历史研究条目；详规G的T00–T14是未来实施卡，本单P00-01–08是准备任务。引用时须带章节，三组编号不互相替代。
 
 下列测试均是后续采用的验收要求，v0.3 研究时没有运行。每组只把有证据的接口及方法落到既有边界；
 包名、类名或相似职责不构成迁移理由，现有实现已经满足时只补对照记录，不重写。
@@ -961,7 +998,7 @@ warcio 主要依赖 six，但默认不验摘要，也不提供头像清理、图
 | pyexecjs/execjs | [知乎 help.py](../tools/MediaCrawler/media_platform/zhihu/help.py)：253；[抖音 client.py](../tools/MediaCrawler/media_platform/douyin/client.py)：388 | 既有 JS 桥和资源；抖音所读接入排除 general/search，不外推所有请求 |
 | 标准库 urllib | [mediacrawler_crawl.py](../scripts/mediacrawler_crawl.py)：4970 | B站 article 原 HTTP 链，不能为统一请求栈改成 HTTPX |
 | Scrapling/Patchright | [ctf_scrapling_preflight.py](../scripts/ctf_scrapling_preflight.py)：217；[ctf_resource_crawl.py](../scripts/ctf_resource_crawl.py)：794 | 既有辅助路径原样保留，不据此称五站正式路径使用它们 |
-| requests/lxml | 现有 requests 声明、Parsel 等依赖线索 | 存活 requests 调用、lxml 传递关系/独立调用未核；不承诺删除或无条件保留全部闭包 |
+| requests/lxml | v0.6专项静态证据：requests属贴吧client；lxml属知乎Parsel与根Scrapling | requests随死支路退出后裁，lxml活跃闭包保留；T12验引用与安装 |
 
 上述有调用证据的构件不是仅测试依赖；声明位置本身也不能证明生产调用或包可删除。
 通用 hashlib、sqlite3、路径/原子替换等继续标准库；已有项目原子写入与目录同步协议保持，
@@ -970,7 +1007,7 @@ warcio 主要依赖 six，但默认不验摘要，也不提供头像清理、图
 | 优先次序/方式 | 具体建议 | 获准实施后才需补的证据 |
 |---|---|---|
 | 1 保留本地 | 上表构件与本地 fork 已有签名/请求/解析/下载能力 | S15 存活闭包与 S18 旧新 fixture 差分；不自动升级 |
-| 2 新 dev 包候选 | Import Linter（R28）；HTTPX 内建 MockTransport 优先，按需 RESPX（R29） | Python 3.11/当前锁兼容、静态图边界、未匹配请求失败关闭 |
+| 2 非必需 dev 候选 | 先用已有AST检查和HTTPX MockTransport；Import Linter（R28）/RESPX（R29）仅确需时另立任务 | 本期不要求新增外部包，不以工具替代接口/保护语义；采用时才验版本/锁/静态图 |
 | 3 条件 dev 候选 | VCR.py（R30），仅现有合成/净化 cassette 确有价值时 | record_mode=none、body 匹配、日志清理及其他网络栈阻断 |
 | 4 小切片候选 | F2 字段路径（R06）、ReaJason 纯解析（R02）、Kris URL/载荷（R13）、ifccod ID 检查（R14） | 真实缺口、精确文件/符号许可链、最小闭包、缺值/时间/头像负例；有现成能力就不重写 |
 | 5 方法借鉴 | R05/R07/R08/R09—R12/R17/R20—R23 等职责与反例 | 不复制未核许可代码，不搬调度、会话池、服务或平台默认循环 |
@@ -1008,7 +1045,7 @@ S24 是研究覆盖表，不是给依赖管理器的输入，不会把 30 个候
 | 版本与运行环境 | 当前锁定版及拟选版、Python 3.11、Node/execjs/原 driver 约束；声明兼容与实际验证分列 |
 | 运行副作用 | import/构造/调用/关闭分别是否联网、读凭证、改全局状态、写文件/SQLite、启浏览器、缓存或启动后台任务 |
 | 替换接缝与所有权 | 替代哪个现有符号，输入输出、错误映射、会话/资源所有者；不增加跨平台直接 import 或提交权 |
-| HTTP 与预算 | 方法/URL/query/body 编码、签名输入、超时与各层重试包含关系；最大尝试与墙钟预算不能相乘 |
+| HTTP 与预算 | 方法/URL/query/body编码、签名输入、超时与各层包含关系；保留旧嵌套实际次数/等待/异常，不新增放大；预算优化另案 |
 | 旧新 fixture 差分 | 同一净化/合成输入的稳定字段、缺/0/空、平台时间、来源、图序、事件、错误、前沿；差异逐项解释 |
 | 禁意外网络 | 未匹配请求 fail-closed；禁 pass-through、空 200、自动录制与真实端点兜底；列出未被 mock 覆盖的栈 |
 | 维护证据 | 关键模块实际改动、问题响应/修复内容、版本发布关系；push 日期、机器人或文档提交不能替代 |
@@ -1024,21 +1061,23 @@ S24 是研究覆盖表，不是给依赖管理器的输入，不会把 30 个候
 对签名库不复制大段算法作“研究成果”；保留来源和接口契约即可，算法更换并非已批准事项。
 对日志/HTTP fixture 同样执行头像与秘密清理，不能为了可重放而放宽 S10 的首次序列化要求。
 
-当前工程缺口及关闭位置：
+v0.6 将当前状态分层；S24/S25未采用外部候选的历史证据缺口保留，不提升为本期设计阻塞：
 
 | 缺口 | 已知边界 | 未来关闭位置 |
 |---|---|---|
-| 本地存活依赖完整性 | requests/lxml、动态加载、安装资源和辅助入口尚未闭包；旧 fork 不是可直接整树删除的死代码 | P00/P05、V13、S15—S16 |
+| 设计准备 | 本轮补五站十三类闭包与遗漏符号/动态边，差异及复核状态见P00-01–08 | 不再以规格存在宣称无缺口；也不把尚未实现的安装/线上结果前置为文档必备 |
+| 实施时验证 | 动态加载/资源/辅助入口已有归属，迁入后的动态等价及安装尚未运行；旧fork当前仍在用 | T01–T13、V13；全门禁通过且旧轮安全处置后才删 |
 | 候选许可链 | dataabc 三仓、ZhihuApis 未确认复制授权；R04 缺独立 LICENSE；R15 MIT/README 表述不一致；GPL/第三方切片另核 | 各采用记录；未核清不收编 |
 | Python/版本 | R03/R07/R08/R13/R15 新快照要求 3.12；包声明、开发分支和本地锁不能混为一谈 | 包/切片评审及获准后的安装验证 |
 | 解析与传输 | R06 缺值 helper、R08 models/transport、R13/R14 session/bridge 等未完整核查；v0.3 研究无端点实测 | V15/V16、对应 T 项；不先替换 |
 | 完成与提交 | 外部 iterator/queue/archive 成功均不证明本项目耗尽、字段或内容事务成功 | V01/V07/V08/V11、S12 |
 | 平台差分与故障 | 旧新 fixture、超时/重试、ACK 崩溃窗口、文件/SQLite 不确定性在 v0.3 研究时均未执行 | S18 的适用矩阵及 P00 当前证据，不用静态结论补签 |
-| 实施准备 | D06/D10/D12 已确认，首期五站完整交付；D14 两 issue 已解决，但迁移闭包、精确接口与读取时点未齐；D11/D13 技术判断由助手负责，平台重构尚未授权 | S21、P00；不重开外部选型，不把主线全绿当 P00 ready 或实施授权 |
+| 另案风险 | terminal.finish诊断持久化、legacy事件严格度、原来源/缺值差异分别见详规H；不随#1/#2宣称解决 | 对应独立行为diff/验证，不能藏入机械搬迁 |
+| 实施准备 | 首期五站完整交付；静态补审状态见P00工作单，平台重构尚未授权 | S21/P00/详规G；主线全绿仅证明旧实现，不自动进入P01 |
 
 采用评审最后与 S22 交叉核验：项目自有 Pydantic 可用；B站 urllib 未换栈；辅助驱动未推广；
 五站规则与结果统一而流程可不同；XHS ACK 仍可早于最终 ContentCommit，DiscoveryCommit 独立，
 XHS 单 Context、无跨轮登录态不变；其它通用平台现有登录态策略不变；无 raw 归档不变。
 S02 仍是唯一真源，S20 仍控制治理切换。
 任何工具或候选若要求破坏这些边界，应保留现有实现或另行评审真实需求，不能通过“复用优先”自动豁免。
-本稿为**讨论稿 v0.5，未批准实施**；研究与保护性测试准备不表示迁移或端点验收完成。
+本稿为**讨论稿 v0.7，P00已完成／未批准实施**；不表示迁移或端点验收完成。
