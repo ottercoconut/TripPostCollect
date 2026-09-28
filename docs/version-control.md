@@ -35,9 +35,12 @@ cherry-pick、rebase 和后续修复已经吸收的改动，以最终实现及�
    `refactor/...` 或 `fix/...`，不要求工具名称前缀。工作区有其他任务的改动且需要
    隔离时使用独立 worktree；不为切换分支执行 `reset --hard` 或 `clean`。
 3. 一个提交只处理一个问题，按文件或补丁暂存，并用 `git diff --cached` 检查内容。标题说明
-   实际行为变化，可使用现有的 `fix(...)`、`feat(...)`、`docs(...)`、`chore(...)` 风格。
-   commit、issue、PR 的标题和正文使用中文，技术标识符可保留原样；一提交一主题。
-   review 由助手检查实际 diff 与测试证据，列明失败、未执行项和剩余缺口，不让用户代做技术评审。
+   实际行为变化，使用 Conventional Commits 格式 `<type>(<scope>): <summary>`，type 取
+   `feat`、`fix`、`docs`、`test`、`refactor`、`chore`、`ci`、`build`，scope 为英文小写模块名。
+   commit 标题与正文主要使用英文：标题为祈使句、小写开头、不加句号、不超过 72 字符；正文说明
+   原因和影响，每行不超过 72 字符。平台名、中文字段名等专有词可保留原文。issue 与 PR 的标题和
+   正文使用中文。一提交一主题；不附加署名行。
+   review 由维护方检查实际 diff 与测试证据，列明失败、未执行项和剩余缺口，不让用户代做技术评审。
 4. 按 [AGENTS.md](../AGENTS.md) 执行对应验证。提交前始终激活根项目虚拟环境并验证冻结资产：
 
    ```bash
@@ -53,9 +56,9 @@ cherry-pick、rebase 和后续修复已经吸收的改动，以最终实现及�
 解冻授权。包版本号只随明确的发布变更更新，清理分支不增加版本号。
 文档或保护性测试完成也不构成采集实现、真实采集、治理解冻、合并或推送授权。
 
-当前平台适配前置任务在 `chore/platform-adapter-preflight` 上进行，原未提交 v0.3 研究须保留并
-增量修订。项目前置准备仅保存已审阅的文档与测试本地提交，不 push、不 merge，
-不创建远程 issue/PR；不触发实现或采集。
+平台适配 P00 在 `chore/platform-adapter-preflight` 上完成，经用户授权推送并以 PR 合入 `main`；
+实施任务卡以 GitHub issues（label `platform-adapter`）跟踪。每张实施卡使用独立任务分支和 PR，
+合入前仍按本节验证。文档与 issue 就绪不触发实现或采集，各卡另需实现授权。
 准备与验证证据见 [P00 工作单](platform-adapter-preflight.md)。
 
 ## 合并与配套版本
