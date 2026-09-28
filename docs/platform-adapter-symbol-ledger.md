@@ -43,11 +43,11 @@
 | X4 | `should_reseed_douyin_frontier` 由抖音 core 调用，决定是否开启新的游标纪元 | 归 `application/candidates.py`，经 `CandidateDecisions` 端口新增只读方法供抖音调用；判定条件逐字不变 |
 | X5 | `AdaptiveAccumulator.from_environment` 对微博使用 `stagnation_basis="candidate_identity"` | 构造时显式传入；停滞计数仍不作停止条件，但事件字段 `stagnation_basis` 值不变 |
 | X6 | `env_int`、各站 `_env_float` 在操作起点读 env | 统一由 `application/worker_inputs.py` 解析为零参 reader，读取时刻与解析失败回默认值的行为不变 |
-| X7 | C 与 W 各有 `profile_dir_for`/`cookie_snapshot_path`/`required_cookie_names`，平台代号字典键名不同（`mediacrawler` vs `code`） | 合并前核对五站代号一致；合并后 C/W 共用 `core.paths` 与 `runtime/cookies.py` |
+| X7 | C 与 W 各有 `profile_dir_for`/`cookie_snapshot_path`/`required_cookie_names`，平台代号字典键名不同（`mediacrawler` vs `code`） | T00 已核：共有平台代号一致（dy/zhihu/wb/bili，W 不含 xhs）；T01 合并为 `core.paths` 与 `runtime/cookies.py` |
 | X8 | `repair_bilibili_articles.py` 从 C 导入 6 个符号；`mediacrawler_login_warmup.py` 导入 `discover_cdp_browser_path` | T08/T10 删除 C 旧函数前，两脚本改为从包内新位置导入 |
 | X9 | `XhsRuntimeSupervisionError` 被执行器事务代码按类型捕获并回滚 | 类型定义进 `application/contracts.py`，`db/content.py` 与 `xhs/supervision.py` 都从 contracts 导入，避免 db→xhs 依赖 |
 | X10 | C 的 `is_retryable_image_error`/`is_runtime_blocking_image_error` 与 fork `image_download_retry` 同名同常量 | 合并为 `runtime/image_retry.py` 单一实现；合并前比对两组错误码集合 |
-| X11 | `repair_runtime_stop_reason` 无生产调用，仅 2 个测试引用 | T00 决定保留或退出；退出前先迁移测试中的保护语义 |
+| X11 | `repair_runtime_stop_reason` 无生产调用，仅 2 个测试引用 | T00 已定：保留，随 T10 迁入 `application/repair.py`，2 个测试不改 |
 | X12 | 知乎指定详情遇 zvideo 时调用 `get_video_info`/`extract_zvideo_content_from_html` | 照迁以保持现行行为；视频仍由根 `is_video_record` 后置过滤，不在迁移中改为提前跳过 |
 | X13 | 上游 2026-09-18/19 修复了抖音 detail 接口的 `uifid/verifyFp/fp` 参数与 `x-tt-argus` 请求头；fork 在公共参数中已有前者，没有后者 | 首期机械迁移不引入；若正式运行出现 “Blocked by ArgusSecurityPlugin”，按独立行为变更处理，见 H/R06 |
 
@@ -286,7 +286,7 @@
 | 6428 | `runtime_blocker_from_terminal_event` | `application/failures.py` | 迁 | T11 | F06/F08 | 运行级阻断裁决 |
 | 6451 | `runtime_blocker_from_pagination_evidence` | `application/failures.py` | 迁 | T11 | F06/F08 | 运行级阻断裁决 |
 | 6494 | `latest_runtime_blocker` | `application/failures.py` | 迁 | T11 | F06/F08 | 运行级阻断裁决 |
-| 6547 | `repair_runtime_stop_reason` | `application/repair.py` | 迁 | T10 | F08 | 生产代码无调用，仅2个测试引用；T00判定保留或退出，删除须先迁保护语义 |
+| 6547 | `repair_runtime_stop_reason` | `application/repair.py` | 迁 | T10 | F08 | 生产代码无调用，仅2个测试引用；T00已定保留，测试不改 |
 | 6556 | `apply_runtime_blocker` | `application/failures.py` | 迁 | T11 | F06/F08 | 运行级阻断裁决 |
 | 6574 | `_run_main` | `application/collection.py` | 迁 | T11 | F01/F03/F05 |  |
 | 7200 | `main` | `scripts/mediacrawler_crawl.py` | 薄 | T11 | F10 | 外部命令名保留，只转发application |
@@ -704,7 +704,7 @@
 | 24 | `DataFetchError` | `platforms/douyin/models.py` | 迁 | T06 | F09 |  |
 | 28 | `SearchResponseError` | `platforms/douyin/models.py` | 迁 | T06 | F09 |  |
 | 31 | `SearchResponseError.__init__` | `platforms/douyin/models.py` | 迁 | T06 | F09 |  |
-| 36 | `IPBlockError` | — | 退 | T12 | — | 闭包内无引用，T00核 |
+| 36 | `IPBlockError` | — | 退 | T12 | — | 闭包内无引用，T00已核 |
 
 ### `M/media_platform/douyin/field.py`（3；迁3）
 
@@ -804,7 +804,7 @@
 | 29 | `DataFetchError` | `platforms/weibo/models.py` | 迁 | T05 | F09 |  |
 | 33 | `PlatformRuntimeError` | `platforms/weibo/models.py` | 迁 | T05 | F09 |  |
 | 36 | `PlatformRuntimeError.__init__` | `platforms/weibo/models.py` | 迁 | T05 | F09 |  |
-| 41 | `IPBlockError` | — | 退 | T12 | — | 闭包内无引用（星号导入不计），T00核 |
+| 41 | `IPBlockError` | — | 退 | T12 | — | 闭包内无引用（星号导入不计），T00已核 |
 
 ### `M/media_platform/weibo/field.py`（1；迁1）
 
@@ -1141,8 +1141,8 @@
 | 24 | `DataFetchError` | `platforms/zhihu/models.py` | 迁 | T07 | F09 |  |
 | 28 | `PlatformRuntimeError` | `platforms/zhihu/models.py` | 迁 | T07 | F09 |  |
 | 31 | `PlatformRuntimeError.__init__` | `platforms/zhihu/models.py` | 迁 | T07 | F09 |  |
-| 36 | `IPBlockError` | — | 退 | T12 | — | 闭包内无引用，T00核 |
-| 39 | `ForbiddenError` | — | 退 | T12 | — | 闭包内无引用，T00核 |
+| 36 | `IPBlockError` | — | 退 | T12 | — | 闭包内无引用，T00已核 |
+| 39 | `ForbiddenError` | — | 退 | T12 | — | 闭包内无引用，T00已核 |
 
 ### `M/media_platform/zhihu/field.py`（3；迁3）
 
@@ -1296,10 +1296,10 @@
 
 | 行 | 定义 | 目标 | 处置 | 卡 | 测 | 备注 |
 |---:|---|---|---|---|---|---|
-| 38 | `SmsNotification` | — | 退 | T12 | F07 | 独立短信接收服务；T00核实无正式/辅助phone登录用法 |
-| 46 | `extract_verification_code` | — | 退 | T12 | F07 | 独立短信接收服务；T00核实无正式/辅助phone登录用法 |
-| 56 | `receive_sms_notification` | — | 退 | T12 | F07 | 独立短信接收服务；T00核实无正式/辅助phone登录用法 |
-| 83 | `not_found` | — | 退 | T12 | F07 | 独立短信接收服务；T00核实无正式/辅助phone登录用法 |
+| 38 | `SmsNotification` | — | 退 | T12 | F07 | 独立短信接收服务；T00已核闭包内无引用 |
+| 46 | `extract_verification_code` | — | 退 | T12 | F07 | 独立短信接收服务；T00已核闭包内无引用 |
+| 56 | `receive_sms_notification` | — | 退 | T12 | F07 | 独立短信接收服务；T00已核闭包内无引用 |
+| 83 | `not_found` | — | 退 | T12 | F07 | 独立短信接收服务；T00已核闭包内无引用 |
 
 ### `M/store/douyin/__init__.py`（20；迁11、退7、拆2）
 
@@ -1835,6 +1835,6 @@
 
 ## 维护规则
 
-- 本附录由 AST 枚举与处置规则生成，不手工增删行。源码基线变化后，T00 必须按新基线重新枚举并解释每处差异。
+- 使用 `python scripts/dev/adapter_ledger.py symbols` 生成本附录与 JSON；使用 `symbols --check` 核对，禁止手工增删行。源码基线变化后，T00 必须解释每处差异。
 - 新增、删除或改名的定义没有规则时，枚举失败即视为账目不完整，不得进入对应实施卡。
 - 处置从“退”改为保留，或从保留改为“退”，属于行为范围变更，须同时修改详细规格对应 C 小节与 G 任务卡。

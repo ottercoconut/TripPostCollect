@@ -823,6 +823,15 @@ T12更新root/worker组、静态导入清单、支持插件/fixture隔离和两�
 | T13／P05 | 五站整合矩阵、component/socket/installation/托管OS双版本、离线故障差分 | T12；单站/总通过数不可替代五站责任，缺能力不得skip | 五站全部F覆盖、原#1/#2保持、静态依赖和资源无悬挂；产物分基线/lane报告；失败停当前阶段保留旧链 |
 | T14／P06 | 旧轮清点、安全终止/完成证据、受影响权威文档同批切换，最后删M/E私有桥及无用registry/DB/GUI | T13＋正式窗口及必要治理授权；不能改半轮冻结命令/删历史数据 | 新轮冻结-m命令；旧轮无存活进程/租约依赖；checkpoint/media/历史产物可读；产物删除审计与切换报告；仅回退旧代码/环境，不改已提交业务状态 |
 
+T00 已交付（2026-09-29，基线见 `docs/adapter-ledger/baseline.json`）：
+- 工具：`scripts/dev/adapter_ledger.py`（子命令 `baseline`、`symbols`、`inputs`、`tests --source <临时副本>`、`make-source`、`all`），
+  规则数据 `scripts/dev/adapter_ledger_rules.py`。`symbols --check`、`inputs --check` 用于每张后续卡的开工与收尾核对。
+- 产物：`docs/adapter-ledger/{baseline,symbols,inputs,tests}.json`，C8 附录由 `symbols` 渲染。`tests.json` 记录 root 1002 个节点
+  （component 949、os 51、socket 1、installation 1）与 fork 417 个节点，每个节点带目标文件、F 责任与卡号；只在临时源码副本中收集。
+- 结论：X7 两处 PLATFORMS 对共有平台代号一致（dy/zhihu/wb/bili，W 不含 xhs），可按 T01 合并；X11 `repair_runtime_stop_reason`
+  保留并随 T10 迁入 `application/repair.py`，其 2 个测试不改；三站 `IPBlockError`/`ForbiddenError` 与 `recv_sms.py` 在闭包内无引用，确认退出。
+- 后续卡开工前运行 `symbols --check` 与 `inputs --check`；源码改动后先更新规则或迁移结果再提交，不手改 JSON。
+
 T01/T12确定的资源与安装策略（T）：JS和LICENSE迁入上述resources目录成为单一源码真源，旧地址过渡只委托resource reader，不留手工双份。
 `db/{source_platforms,web_posts,ctf_captures,crawl_scheduler,xhs_control}.sql` 与必要 `docs/formal-crawl-contract.md`
 继续以仓库现址为唯一编辑真源；目标根 `build_support.py:BuildPy`（setuptools build_py子类，pyproject cmdclass登记）从显式白名单复制到build_lib内

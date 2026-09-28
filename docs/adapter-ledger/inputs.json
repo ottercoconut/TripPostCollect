@@ -1,0 +1,1005 @@
+{
+  "cli": {
+    "scripts/crawl_runner.py": [
+      {
+        "default": "str(DEFAULT_DB)",
+        "flags": [
+          "--db"
+        ]
+      },
+      {
+        "default": "str(DEFAULT_CONFIG)",
+        "flags": [
+          "--config"
+        ]
+      },
+      {
+        "default": "str(DEFAULT_RUN_ROOT)",
+        "flags": [
+          "--run-root"
+        ]
+      },
+      {
+        "default": "str(CRAWL_EXECUTION_STATE_ROOT)",
+        "flags": [
+          "--execution-state-root"
+        ]
+      },
+      {
+        "default": "3",
+        "flags": [
+          "--max-jobs"
+        ],
+        "type": "int"
+      },
+      {
+        "default": "DEFAULT_MAX_PARALLEL_PLATFORMS",
+        "flags": [
+          "--max-parallel-platforms"
+        ],
+        "type": "int"
+      },
+      {
+        "flags": [
+          "--site"
+        ]
+      },
+      {
+        "flags": [
+          "--kind"
+        ]
+      },
+      {
+        "flags": [
+          "--job-key"
+        ]
+      },
+      {
+        "flags": [
+          "--start-page"
+        ],
+        "type": "int"
+      },
+      {
+        "flags": [
+          "--resume-summary"
+        ]
+      },
+      {
+        "flags": [
+          "--recovery-keyword"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--sync-only"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--no-sync-config"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--dry-run"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--headless"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--headful"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--no-throttle"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--no-import"
+        ]
+      }
+    ],
+    "scripts/login_warmup.py": [
+      {
+        "default": "['all']",
+        "flags": [
+          "--targets"
+        ],
+        "nargs": "'+'"
+      },
+      {
+        "default": "600",
+        "flags": [
+          "--timeout-seconds"
+        ],
+        "type": "int"
+      },
+      {
+        "default": "str(LOGIN_WARMUP_OUTPUT)",
+        "flags": [
+          "--output-dir"
+        ]
+      },
+      {
+        "flags": [
+          "--browser-path"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--list-targets"
+        ]
+      }
+    ],
+    "scripts/mediacrawler_crawl.py": [
+      {
+        "default": "'青岛旅游'",
+        "flags": [
+          "--keyword"
+        ]
+      },
+      {
+        "default": "['weibo', 'douyin']",
+        "flags": [
+          "--platforms"
+        ],
+        "nargs": "'+'"
+      },
+      {
+        "default": "str(DEFAULT_OUTPUT)",
+        "flags": [
+          "--output-dir"
+        ]
+      },
+      {
+        "default": "180",
+        "flags": [
+          "--timeout-per-platform"
+        ],
+        "type": "int"
+      },
+      {
+        "choices": "('cookie', 'qrcode', 'phone')",
+        "default": "'cookie'",
+        "flags": [
+          "--login-type"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--get-media"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--download-images"
+        ]
+      },
+      {
+        "default": "str(LOCAL_MEDIA_ROOT)",
+        "flags": [
+          "--media-root"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--headed"
+        ]
+      },
+      {
+        "default": "str(DEFAULT_DB)",
+        "flags": [
+          "--db"
+        ]
+      },
+      {
+        "default": "'image_post_with_followers_v1'",
+        "flags": [
+          "--required-fields-profile"
+        ]
+      },
+      {
+        "default": "'social_high_risk'",
+        "flags": [
+          "--behavior-profile"
+        ]
+      },
+      {
+        "flags": [
+          "--xhs-account-id"
+        ]
+      },
+      {
+        "flags": [
+          "--xhs-profile-dir"
+        ]
+      },
+      {
+        "flags": [
+          "--xhs-discovery-target-key"
+        ]
+      },
+      {
+        "flags": [
+          "--xhs-discovery-query-fingerprint"
+        ]
+      },
+      {
+        "choices": "('none', 'comment-scroll', 'like-one', 'random')",
+        "default": "'none'",
+        "flags": [
+          "--xhs-post-interaction"
+        ]
+      },
+      {
+        "default": "1",
+        "flags": [
+          "--start-page"
+        ],
+        "type": "int"
+      },
+      {
+        "default": "0",
+        "flags": [
+          "--start-offset"
+        ],
+        "type": "int"
+      },
+      {
+        "default": "''",
+        "flags": [
+          "--start-cursor"
+        ]
+      },
+      {
+        "flags": [
+          "--resume-summary"
+        ]
+      },
+      {
+        "flags": [
+          "--discovery-job-id"
+        ],
+        "type": "int"
+      },
+      {
+        "flags": [
+          "--discovery-query-fingerprint"
+        ]
+      },
+      {
+        "flags": [
+          "--discovery-run-id"
+        ]
+      },
+      {
+        "default": "0",
+        "flags": [
+          "--top-refresh-max-pages"
+        ],
+        "type": "int"
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--discovery-source-exhausted"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--no-checkpoint-write"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--no-import"
+        ]
+      },
+      {
+        "flags": [
+          "--zhihu-detail-urls-file"
+        ]
+      },
+      {
+        "flags": [
+          "--xhs-detail-urls-file"
+        ]
+      },
+      {
+        "flags": [
+          "--xhs-repair-target-ids-file"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--xhs-repair"
+        ]
+      },
+      {
+        "default": "5",
+        "flags": [
+          "--xhs-repair-batch-size"
+        ],
+        "type": "int"
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--post-repair"
+        ]
+      },
+      {
+        "flags": [
+          "--repair-targets-file"
+        ]
+      }
+    ],
+    "scripts/mediacrawler_login_warmup.py": [
+      {
+        "default": "['douyin', 'zhihu']",
+        "flags": [
+          "--platforms"
+        ],
+        "nargs": "'+'"
+      },
+      {
+        "default": "600",
+        "flags": [
+          "--timeout-seconds"
+        ],
+        "type": "int"
+      },
+      {
+        "default": "str(DEFAULT_OUTPUT)",
+        "flags": [
+          "--output-dir"
+        ]
+      },
+      {
+        "flags": [
+          "--browser-path"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--no-close-on-success"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--skip-reopen-verify"
+        ]
+      }
+    ],
+    "scripts/repair_post_details.py": [
+      {
+        "choices": "PLATFORMS",
+        "flags": [
+          "--platform"
+        ],
+        "required": "True"
+      },
+      {
+        "default": "str(DEFAULT_DB)",
+        "flags": [
+          "--db"
+        ]
+      },
+      {
+        "default": "'青岛旅游'",
+        "flags": [
+          "--keyword"
+        ]
+      },
+      {
+        "default": "20",
+        "flags": [
+          "--batch-size"
+        ],
+        "type": "int"
+      },
+      {
+        "default": "0",
+        "flags": [
+          "--max-items"
+        ],
+        "type": "int"
+      },
+      {
+        "action": "'append'",
+        "default": "[]",
+        "flags": [
+          "--post-id"
+        ]
+      },
+      {
+        "default": "900",
+        "flags": [
+          "--timeout-per-batch"
+        ],
+        "type": "int"
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--headless"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--dry-run"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--confirm-default-db-repair"
+        ]
+      }
+    ],
+    "scripts/repair_xhs_posts.py": [
+      {
+        "default": "'qingdao_travel'",
+        "flags": [
+          "--target-key"
+        ]
+      },
+      {
+        "flags": [
+          "--account-id"
+        ],
+        "required": "True"
+      },
+      {
+        "default": "str(DEFAULT_DB)",
+        "flags": [
+          "--db"
+        ]
+      },
+      {
+        "default": "str(XHS_TARGET_CONFIG)",
+        "flags": [
+          "--target-config"
+        ]
+      },
+      {
+        "default": "str(XHS_POOL_CONFIG)",
+        "flags": [
+          "--pool-config"
+        ]
+      },
+      {
+        "flags": [
+          "--keyword"
+        ]
+      },
+      {
+        "default": "20",
+        "flags": [
+          "--max-items"
+        ],
+        "type": "int"
+      },
+      {
+        "default": "5",
+        "flags": [
+          "--batch-size"
+        ],
+        "type": "int"
+      },
+      {
+        "action": "'append'",
+        "default": "[]",
+        "flags": [
+          "--post-id"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--dry-run"
+        ]
+      },
+      {
+        "choices": "('none', 'comment-scroll', 'like-one', 'random')",
+        "default": "'none'",
+        "flags": [
+          "--post-interaction"
+        ]
+      }
+    ],
+    "scripts/xhs_runner.py": [
+      {
+        "flags": [
+          "--target-key"
+        ],
+        "required": "True"
+      },
+      {
+        "flags": [
+          "--account-id"
+        ],
+        "required": "True"
+      },
+      {
+        "choices": "('none', 'comment-scroll', 'like-one', 'random')",
+        "default": "'none'",
+        "flags": [
+          "--post-interaction"
+        ]
+      },
+      {
+        "default": "str(DEFAULT_DB)",
+        "flags": [
+          "--db"
+        ]
+      },
+      {
+        "default": "str(XHS_TARGET_CONFIG)",
+        "flags": [
+          "--target-config"
+        ]
+      },
+      {
+        "default": "str(XHS_POOL_CONFIG)",
+        "flags": [
+          "--pool-config"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--dry-run"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--no-import"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--retry-on-300011"
+        ]
+      }
+    ]
+  },
+  "env": {
+    "TRIPPOSTCOLLECT_BROWSER_ARGS_JSON": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/trippostcollect_behavior.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_CLEAN_BROWSER_TABS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/cdp_browser.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_COOKIES": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/config/base_config.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH": {
+      "files": [
+        "scripts/ctf_resource_crawl.py",
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/config/base_config.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DB_PATH": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/trippostcollect_adaptive.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED": {
+      "files": [
+        "scripts/mediacrawler_crawl.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DISCOVERY_JOB_ID": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/trippostcollect_adaptive.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DISCOVERY_KEYWORD": {
+      "files": [
+        "scripts/mediacrawler_crawl.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM": {
+      "files": [
+        "scripts/mediacrawler_crawl.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/trippostcollect_adaptive.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/douyin/core.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/douyin/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE": {
+      "files": [
+        "scripts/mediacrawler_crawl.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID": {
+      "files": [
+        "scripts/mediacrawler_crawl.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/douyin/core.py",
+        "tools/MediaCrawler/media_platform/weibo/core.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py",
+        "tools/MediaCrawler/media_platform/zhihu/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/douyin/core.py",
+        "tools/MediaCrawler/media_platform/weibo/core.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py",
+        "tools/MediaCrawler/media_platform/zhihu/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "scripts/mediacrawler_export_entrypoint.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_TIMEOUT_MS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "scripts/mediacrawler_export_entrypoint.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/douyin/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/douyin/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/douyin/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/douyin/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_EXECUTION_STATE_PATH": {
+      "files": [
+        "scripts/crawl_runner.py",
+        "scripts/mediacrawler_crawl.py",
+        "scripts/repair_xhs_posts.py",
+        "scripts/xhs_runner.py",
+        "src/trippostcollect/xhs/batch_checkpoint.py",
+        "tools/MediaCrawler/tools/trippostcollect_adaptive.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_ENABLED": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/trippostcollect_behavior.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py",
+        "tools/MediaCrawler/tools/trippostcollect_behavior.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_PROFILE": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/trippostcollect_behavior.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_POST_REPAIR": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "scripts/mediacrawler_export_entrypoint.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_PROJECT_SCRIPTS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/trippostcollect_behavior.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/trippostcollect_adaptive.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_SHARE_CDP_PROFILE": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/cdp_browser.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "scripts/mediacrawler_export_entrypoint.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_WEIBO_BROWSER_DETAIL_TIMEOUT_MS": {
+      "files": [
+        "scripts/mediacrawler_export_entrypoint.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_ACCOUNT_ID": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/trippostcollect_adaptive.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_BATCH_CHECKPOINT_ENABLED": {
+      "files": [
+        "src/trippostcollect/xhs/batch_checkpoint.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_BATCH_DATA_ROOT": {
+      "files": [
+        "src/trippostcollect/xhs/batch_checkpoint.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_BATCH_RESUME_SUMMARY": {
+      "files": [
+        "src/trippostcollect/xhs/batch_checkpoint.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_POLL_SECONDS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_DISCOVERY_QUERY_FINGERPRINT": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/trippostcollect_adaptive.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_DISCOVERY_TARGET_KEY": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/tools/trippostcollect_adaptive.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_INITIAL_SETTLE_SECONDS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_INITIAL_SHELL_TIMEOUT_SECONDS": {
+      "files": [
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/store/xhs/__init__.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_LEASE_DB": {
+      "files": [
+        "src/trippostcollect/xhs/leases.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_LEASE_ID": {
+      "files": [
+        "src/trippostcollect/xhs/leases.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_LEASE_OWNER_TOKEN": {
+      "files": [
+        "src/trippostcollect/xhs/leases.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_LOGIN_POLL_SECONDS": {
+      "files": [
+        "tools/MediaCrawler/media_platform/xhs/login.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/xhs/manual_wait.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_NAVIGATION_DEADLINE_SECONDS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MAX_SECONDS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MIN_SECONDS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_NETWORK_WAIT_SECONDS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_POST_INTERACTION": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_PROFILE_DIR": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/xhs/core.py",
+        "tools/MediaCrawler/tools/cdp_browser.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_QR_REFRESH_SECONDS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/xhs/login.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_RECOVERY_SHELL_TIMEOUT_SECONDS": {
+      "files": [
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_REPAIR": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "scripts/mediacrawler_export_entrypoint.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_REPAIR_BATCH_SIZE": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "scripts/mediacrawler_export_entrypoint.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "scripts/mediacrawler_export_entrypoint.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_RUNTIME_STATUS_AUTH_KEY_HEX": {
+      "files": [
+        "src/trippostcollect/xhs/runtime.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_RUN_ID": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "scripts/repair_xhs_posts.py",
+        "scripts/xhs_runner.py",
+        "src/trippostcollect/xhs/batch_checkpoint.py",
+        "src/trippostcollect/xhs/supervision.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_RUN_SCOPED_LOGIN": {
+      "files": [
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_SEARCH_SHELL_TIMEOUT_SECONDS": {
+      "files": [
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_STABLE_LOGIN_SECONDS": {
+      "files": [
+        "tools/MediaCrawler/media_platform/xhs/login.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_STORAGE_STATE_PATH": {
+      "files": [
+        "tools/MediaCrawler/media_platform/xhs/core.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_XHS_WINDOW_SIZE": {
+      "files": [
+        "scripts/browser_runtime.py",
+        "tools/MediaCrawler/tools/browser_launcher.py"
+      ]
+    },
+    "TRIPPOSTCOLLECT_ZHIHU_INITIAL_SETTLE_SECONDS": {
+      "files": [
+        "scripts/mediacrawler_crawl.py",
+        "tools/MediaCrawler/media_platform/zhihu/core.py"
+      ]
+    },
+    "TRIPPOST_PROJECT_ROOT": {
+      "files": [
+        "src/trippostcollect/core/paths.py"
+      ]
+    }
+  }
+}
