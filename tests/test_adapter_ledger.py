@@ -24,10 +24,10 @@ CARDS = {f"T{n:02d}" for n in range(15)}
 # ---------- 符号账：规则与枚举 ----------
 
 def test_current_baseline_has_no_unmapped_definitions() -> None:
-    result = ledger.build_symbols(ROOT)
+    result = ledger.load_symbols(ROOT)
     assert result["unmapped"] == []
     assert result["stat"]["total"] == sum(result["stat"][d] for d in DISPOSITIONS)
-    assert result["stat"]["total"] >= 1234
+    assert result["stat"]["total"] == 1234
 
 
 def test_unmapped_definition_is_reported(tmp_path: Path) -> None:
@@ -43,7 +43,7 @@ def test_unmapped_definition_is_reported(tmp_path: Path) -> None:
 
 
 def test_every_symbol_row_has_complete_fields() -> None:
-    result = ledger.build_symbols(ROOT)
+    result = ledger.load_symbols(ROOT)
     for row in result["rows"]:
         assert set(row) >= {"file", "line", "qualname", "target", "disposition", "card", "tests", "note"}
         assert row["disposition"] in DISPOSITIONS
@@ -56,7 +56,7 @@ def test_every_symbol_row_has_complete_fields() -> None:
 
 def test_exit_references_are_listed() -> None:
     # 退出符号被保留代码引用的位置必须全部列出，供 T12 切断
-    result = ledger.build_symbols(ROOT)
+    result = ledger.load_symbols(ROOT)
     names = {item["symbol"] for item in result["exit_references"]}
     assert {"ProxyRefreshMixin", "AbstractCrawler", "create_ip_pool"} <= names
     for item in result["exit_references"]:
@@ -64,8 +64,9 @@ def test_exit_references_are_listed() -> None:
 
 
 def test_committed_artifacts_are_reproducible() -> None:
-    # 已提交的 JSON 与 C8 附录必须与重新生成的结果逐字节一致
-    assert ledger.main(["symbols", "--check"]) == 0
+    # 已提交的 JSON 渲染 C8 附录，无需 Git 历史且必须逐字节一致。
+    rendered = ledger.render_symbols(ledger.load_symbols(ROOT))
+    assert (ROOT / ledger.SYMBOL_MARKDOWN).read_bytes() == rendered.encode("utf-8")
 
 
 def test_check_mode_detects_stale_artifact(tmp_path: Path) -> None:
@@ -105,10 +106,9 @@ ENTRYPOINTS = {
 
 
 def test_inputs_cover_all_entrypoints_and_match_source() -> None:
-    inputs = json.loads((LEDGER_DIR / "inputs.json").read_text())
+    inputs = ledger.load_inputs(ROOT)
     assert ENTRYPOINTS <= set(inputs["cli"])
-    fresh = ledger.build_inputs(ROOT)
-    assert inputs == fresh
+    assert ledger.build_input_drift(ROOT) == {"cli_changed": {}, "env_added": [], "env_removed": []}
 
 
 def test_cli_defaults_are_preserved_verbatim() -> None:

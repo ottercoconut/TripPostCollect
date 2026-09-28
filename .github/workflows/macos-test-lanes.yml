@@ -28,6 +28,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: false
@@ -59,6 +60,27 @@ jobs:
             --python "$PYTHON_VERSION"
           command -v node
           node --version
+      - name: 核对迁移台账
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          UV_PROJECT_ENVIRONMENT="$TPC_WORK/root-venv" uv run \
+            --locked \
+            --no-sync \
+            python scripts/dev/adapter_ledger.py symbols --check
+          UV_PROJECT_ENVIRONMENT="$TPC_WORK/root-venv" uv run \
+            --locked \
+            --no-sync \
+            python scripts/dev/adapter_ledger.py inputs --check
+          UV_PROJECT_ENVIRONMENT="$TPC_WORK/root-venv" uv run \
+            --locked \
+            --no-sync \
+            python scripts/dev/adapter_ledger.py drift
+          UV_PROJECT_ENVIRONMENT="$TPC_WORK/root-venv" uv run \
+            --locked \
+            --no-sync \
+            python scripts/dev/adapter_ledger.py progress
       - name: 执行独立副本分组及 fork 静态导入
         shell: bash
         run: |

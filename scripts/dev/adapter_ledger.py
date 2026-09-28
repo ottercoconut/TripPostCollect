@@ -38,6 +38,16 @@ def json_text(value):
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
+def load_symbols(root):
+    """读取已提交符号产物，不依赖 Git 历史。"""
+    return json.loads((Path(root) / LEDGER_DIR / "symbols.json").read_text(encoding="utf-8"))
+
+
+def load_inputs(root):
+    """读取已提交输入产物，不依赖 Git 历史。"""
+    return json.loads((Path(root) / LEDGER_DIR / "inputs.json").read_text(encoding="utf-8"))
+
+
 def check_file(path, expected):
     """按 UTF-8 字节比较；缺失的产物同样视为过期。"""
     path = Path(path)
@@ -78,9 +88,36 @@ def fork_python_files(root):
                 yield path.relative_to(root).as_posix()
 
 
-def symbol_files(root):
+def baseline_sources(root):
+    """只从登记提交枚举源码；工作树迁移不能改变冻结台账。"""
+    baseline = json.loads((root / LEDGER_DIR / "baseline.json").read_text(encoding="utf-8"))
+    root_files = git_read(root, "ls-tree", "-r", "--name-only", baseline["root_head"]).splitlines()
+    fork = root / FORK_PREFIX
+    fork_files = git_read(fork, "ls-tree", "-r", "--name-only", baseline["fork_head"]).splitlines()
+    files = root_files + [
+        FORK_PREFIX + name
+        for name in fork_files
+        if name.endswith(".py")
+        and not set(Path(name).parts[:-1]).intersection(FORK_EXCLUDED_DIRS)
+        and not any(platform in name for platform in FORK_EXCLUDED_PLATFORMS)
+    ]
+
+    def read(relative):
+        if relative.startswith(FORK_PREFIX):
+            return git_read(fork, "show", f"{baseline['fork_head']}:{relative.removeprefix(FORK_PREFIX)}", strip=False)
+        return git_read(root, "show", f"{baseline['root_head']}:{relative}", strip=False)
+
+    return files, read
+
+
+def symbol_files(root, source_files=None):
     files = list(SYMBOL_ROOT_FILES)
-    for relative in sorted(fork_python_files(root)):
+    if source_files is None:
+        fork_files = fork_python_files(root)
+    else:
+        files = [relative for relative in files if relative in source_files]
+        fork_files = (relative for relative in source_files if relative.startswith(FORK_PREFIX))
+    for relative in sorted(fork_files):
         local = relative.removeprefix(FORK_PREFIX)
         if local.startswith(("config/", "constant/")) or local == "var.py":
             continue
@@ -90,9 +127,13 @@ def symbol_files(root):
     return files
 
 
-def definitions(path):
+def definitions(path, source=None):
     """与原型一致：只枚举顶层定义及类的直接方法，不枚举局部函数。"""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8") if source is None else source, filename=str(path))
+    yield from tree_definitions(tree)
+
+
+def tree_definitions(tree):
     for node in tree.body:
         if isinstance(node, DEFINITION_TYPES):
             yield node.name, node
@@ -104,10 +145,16 @@ def definitions(path):
 
 def build_symbols(root, files=None):
     root = Path(root)
+    if files is None:
+        source_files, read = baseline_sources(root)
+        files = symbol_files(root, source_files)
+    else:
+        def read(relative):
+            return (root / relative).read_text(encoding="utf-8")
     rows, unmapped, nodes = [], [], []
     rules = [(files.split("|"), re.compile(pattern), rest) for files, pattern, *rest in SYMBOL_RULES]
-    for relative in symbol_files(root) if files is None else files:
-        for qualname, node in definitions(root / relative):
+    for relative in files:
+        for qualname, node in definitions(root / relative, read(relative)):
             row = {"file": relative, "line": node.lineno, "qualname": qualname}
             for matches, pattern, values in rules:
                 if relative in matches and pattern.fullmatch(qualname):
@@ -143,9 +190,15 @@ def build_symbols(root, files=None):
 
 def build_inputs(root):
     root = Path(root)
+    files, read = baseline_sources(root)
+    return extract_inputs(files, read)
+
+
+def extract_inputs(files, read):
+    """共用静态提取规则，调用方决定读取基线提交还是工作树。"""
     cli = {}
     for relative in ENTRYPOINTS:
-        tree = ast.parse((root / relative).read_text(encoding="utf-8"))
+        tree = ast.parse(read(relative))
         arguments = []
         for node in sorted(
             ast.walk(tree), key=lambda node: (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
@@ -164,13 +217,15 @@ def build_inputs(root):
                     argument[keyword.arg] = ast.unparse(keyword.value)
             arguments.append(argument)
         cli[relative] = arguments
-    files = {
-        path.relative_to(root).as_posix() for pattern in ("scripts/*.py", "src/**/*.py") for path in root.glob(pattern)
-    }
-    files.update(fork_python_files(root))
     env = collections.defaultdict(set)
-    for relative in sorted(files):
-        tree = ast.parse((root / relative).read_text(encoding="utf-8"))
+    for relative in sorted(set(files)):
+        path = Path(relative)
+        if not (
+            path.suffix == ".py"
+            and (path.parent == Path("scripts") or relative.startswith(("src/", FORK_PREFIX)))
+        ):
+            continue
+        tree = ast.parse(read(relative))
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 for name in ENV_NAME.findall(node.value):
@@ -178,11 +233,123 @@ def build_inputs(root):
     return {"cli": cli, "env": {name: {"files": sorted(paths)} for name, paths in sorted(env.items())}}
 
 
-def git_read(root, *args):
+def build_input_drift(root):
+    """CLI 比较参数定义，环境变量只比较名字，允许读取点迁移。"""
+    root = Path(root)
+    baseline = load_inputs(root)
+    files = {
+        path.relative_to(root).as_posix() for pattern in ("scripts/*.py", "src/**/*.py") for path in root.glob(pattern)
+    }
+    files.update(fork_python_files(root))
+
+    def read(relative):
+        path = root / relative
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+    current = extract_inputs(files, read)
+    changed = {}
+    for entry in sorted(baseline["cli"].keys() | current["cli"].keys()):
+        before, after = baseline["cli"].get(entry, []), current["cli"].get(entry, [])
+        if before == after:
+            continue
+        details = []
+        for argument in before:
+            if argument not in after:
+                details.append("删除或修改参数定义：" + json.dumps(argument, ensure_ascii=False, sort_keys=True))
+        for argument in after:
+            if argument not in before:
+                details.append("新增或修改参数定义：" + json.dumps(argument, ensure_ascii=False, sort_keys=True))
+        changed[entry] = details or ["参数定义顺序或重复次数发生变化"]
+    return {
+        "cli_changed": changed,
+        "env_added": sorted(current["env"].keys() - baseline["env"].keys()),
+        "env_removed": sorted(baseline["env"].keys() - current["env"].keys()),
+    }
+
+
+def imported_names(tree):
+    """解析模块顶层导入的本地绑定，用于确认薄委托的实际目标。"""
+    result = {}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                result[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                result[alias.asname or alias.name.split(".")[0]] = alias.name if alias.asname else alias.name.split(".")[0]
+    return result
+
+
+def delegated_definition(node, imports, target_module):
+    """只识别单条 return 调用且经导入绑定能定位到目标模块的薄函数。"""
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or len(node.body) != 1:
+        return None
+    statement = node.body[0]
+    if not isinstance(statement, ast.Return) or not isinstance(statement.value, ast.Call):
+        return None
+    function = statement.value.func
+    parts = []
+    while isinstance(function, ast.Attribute):
+        parts.insert(0, function.attr)
+        function = function.value
+    if not isinstance(function, ast.Name) or function.id not in imports:
+        return None
+    resolved = ".".join([imports[function.id], *parts])
+    prefix = target_module + "."
+    return resolved.removeprefix(prefix) if resolved.startswith(prefix) else None
+
+
+def build_progress(root):
+    """逐行对照冻结符号账，不因退出项或合法迁移误报缺失。"""
+    root = Path(root)
+    baseline = load_symbols(root)
+    cache = {}
+
+    def inspect(relative):
+        if relative not in cache:
+            path = root / relative
+            source = path.read_text(encoding="utf-8") if path.is_file() else ""
+            tree = ast.parse(source, filename=str(path))
+            cache[relative] = (dict(tree_definitions(tree)), imported_names(tree))
+        return cache[relative]
+
+    rows = []
+    for original in baseline["rows"]:
+        row = {key: original[key] for key in ("file", "qualname", "card", "disposition", "target")}
+        if row["disposition"] == "退":
+            row["state"] = "exited"
+        else:
+            definitions, imports = inspect(row["file"])
+            target = row["target"]
+            target_path = target if target.startswith("scripts/") else "src/trippostcollect/" + target
+            target_definitions, _ = inspect(target_path)
+            target_module = target_path.removeprefix("src/").removesuffix(".py").replace("/", ".")
+            qualname = row["qualname"]
+            if qualname in definitions:
+                delegated = delegated_definition(definitions[qualname], imports, target_module)
+                row["state"] = "moved" if delegated in target_definitions else "pending"
+            else:
+                imported = imports.get(qualname, "")
+                prefix = target_module + "."
+                imported_definition = imported.removeprefix(prefix) if imported.startswith(prefix) else None
+                row["state"] = (
+                    "moved" if qualname in target_definitions or imported_definition in target_definitions else "missing"
+                )
+        rows.append(row)
+    counts = {state: 0 for state in ("pending", "moved", "exited", "missing")}
+    counts.update(collections.Counter(row["state"] for row in rows))
+    return {"total": len(rows), "counts": counts, "missing": [row for row in rows if row["state"] == "missing"], "rows": rows}
+
+
+def git_read(root, *args, strip=True):
     result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False)
     if result.returncode:
-        raise RuntimeError(f"只读 Git 查询失败：{root}，{' '.join(args)}")
-    return result.stdout.strip()
+        raise RuntimeError(
+            f"只读 Git 查询失败：{root}，{' '.join(args)}。"
+            "请在含 .git 且根历史完整的 checkout 中运行，并确认子模块对象库包含 "
+            "baseline.json 登记的 fork_head；工具不会自动拉取缺失对象。"
+        )
+    return result.stdout.strip() if strip else result.stdout
 
 
 def build_baseline(root):
@@ -356,12 +523,33 @@ def main(argv=None):
     for name in ("symbols", "inputs", "baseline", "all"):
         subparser = commands.add_parser(name, help="生成或校验迁移台账")
         subparser.add_argument("--check", action="store_true", help="只比较磁盘产物，不写文件")
+    progress = commands.add_parser("progress", help="按卡号报告工作树迁移进度")
+    progress.add_argument("--json", action="store_true", help="向标准输出打印完整 JSON 报告")
+    commands.add_parser("drift", help="核对工作树 CLI 与环境变量是否偏离基线")
     collector = commands.add_parser("tests", help="在临时源码副本中收集测试节点")
     collector.add_argument("--source", required=True, type=Path, help="临时源码副本目录")
     copier = commands.add_parser("make-source", help="复制源码白名单，排除运行产物和虚拟环境")
     copier.add_argument("destination", type=Path, help="尚不存在的临时目录")
     args = parser.parse_args(argv)
     try:
+        if args.command == "progress":
+            result = build_progress(ROOT)
+            if args.json:
+                print(json_text(result), end="")
+            else:
+                cards = collections.defaultdict(collections.Counter)
+                for row in result["rows"]:
+                    cards[row["card"]][row["state"]] += 1
+                for card, counts in sorted(cards.items()):
+                    print(f"{card}：" + "、".join(f"{state}={counts[state]}" for state in result["counts"]))
+                print(f"总计 {result['total']}：{result['counts']}")
+                for row in result["missing"]:
+                    print(f"缺失：{row['file']}:{row['qualname']} → {row['target']}")
+            return 1 if result["missing"] else 0
+        if args.command == "drift":
+            result = build_input_drift(ROOT)
+            print(json_text(result), end="")
+            return 1 if any(result.values()) else 0
         if args.command == "make-source":
             source = temporary_source(args.destination)
             load_matrix().fresh_source(ROOT, source)

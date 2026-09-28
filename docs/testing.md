@@ -175,3 +175,23 @@ scan_error、exits。它们保留真实 Guard、文件、SQLite，所有假 PID 
 macos_process；其中真实自发信号也移到 driver。它们计入完整 OS lane，但不改变原 11 节点计数。
 通过 `pytest --collect-only -m macos_process` 可查看当前完整清单，报告必须在仓库外。
 组件新增宿主调用时应先明确其能力归属，不能自动注入空扫描或将其悄悄跳过。
+
+## 迁移台账核对
+
+pytest 只校验已提交的迁移台账产物、由符号 JSON 渲染的 C8 附录，以及当前工作树的输入漂移
+和迁移进度；纯源码副本不需要 `.git`，也不调用 Git 重建基线。
+
+从基线提交逐字节重建符号与输入台账，必须在根 Git 历史完整、且子模块对象库包含
+`docs/adapter-ledger/baseline.json` 登记的 `fork_head` 的 checkout 中执行：
+
+```bash
+source .venv/bin/activate
+python scripts/dev/adapter_ledger.py symbols --check
+python scripts/dev/adapter_ledger.py inputs --check
+python scripts/dev/adapter_ledger.py drift
+python scripts/dev/adapter_ledger.py progress
+```
+
+CI 已在“准备纯源码模板与独立锁定环境”之后加入“核对迁移台账”步骤，使用完整历史的
+checkout 和已创建的 root-venv 执行上述四项核对；独立测试 lane 继续在无 Git 的源码副本中运行。
+缺失基线对象时工具报告错误，不自动拉取历史，也不回退为工作树重建。
