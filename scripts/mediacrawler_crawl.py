@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 import fcntl
 import html
@@ -86,6 +86,7 @@ from mediacrawler_behavior import (
     run_page_behavior,
 )
 from trippostcollect.core.paths import (
+    COOKIE_SNAPSHOT_FILENAME as COOKIE_SNAPSHOT_FILENAME,
     DEFAULT_DB,
     FORMAL_MEDIA_PERSISTENCE_LOCK,
     LOCAL_MEDIA_ROOT,
@@ -96,6 +97,9 @@ from trippostcollect.core.paths import (
     ensure_dir,
     ensure_parent,
 )
+from trippostcollect.core import paths, resources
+from trippostcollect.core.resources import verify_package_resources
+from trippostcollect.runtime.browser_launcher import discover_cdp_browser_path
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.db.connection import connect_db
 from trippostcollect.platforms.registry import get_site
@@ -149,7 +153,6 @@ from browser_runtime import (
 
 ROOT = PROJECT_ROOT
 DEFAULT_OUTPUT = MEDIACRAWLER_RUNS_OUTPUT
-COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
 XHS_OPERATOR_LOGIN_WAIT_SECONDS = 600
 XHS_NETWORK_RECOVERY_WAIT_SECONDS = 600
 XHS_NETWORK_RETRY_MIN_SECONDS = 2
@@ -777,49 +780,15 @@ def load_post_repair_targets(
 def ensure_prerequisites() -> None:
     if not (MEDIACRAWLER_DIR / "pyproject.toml").exists():
         raise SystemExit(f"MediaCrawler is missing or incomplete: {MEDIACRAWLER_DIR}")
-
-
-def discover_cdp_browser_path() -> str | None:
-    for env_key in ("TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH", "CUSTOM_BROWSER_PATH"):
-        value = os.environ.get(env_key)
-        if value and Path(value).is_file():
-            return value
-
-    playwright_cache = Path.home() / "Library" / "Caches" / "ms-playwright"
-    cache_candidates = sorted(
-        playwright_cache.glob(
-            "chromium-*/chrome-*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-        ),
-        key=lambda path: int(match.group(1)) if (match := re.search(r"chromium-(\d+)", str(path))) else -1,
-        reverse=True,
-    )
-    for path in cache_candidates:
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path)
-
-    candidates = [
-        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        Path("/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta"),
-        Path("/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev"),
-        Path("/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"),
-        Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
-        Path("/Applications/Microsoft Edge Beta.app/Contents/MacOS/Microsoft Edge Beta"),
-        Path("/Applications/Microsoft Edge Dev.app/Contents/MacOS/Microsoft Edge Dev"),
-        Path("/Applications/Microsoft Edge Canary.app/Contents/MacOS/Microsoft Edge Canary"),
-    ]
-    for path in candidates:
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path)
-    return None
+    verify_package_resources()
 
 
 def profile_dir_for(platform_key: str) -> Path:
-    code = PLATFORMS[platform_key]["mediacrawler"]
-    return MEDIACRAWLER_DIR / "browser_data" / f"{code}_user_data_dir"
+    return paths.platform_profile_dir(platform_key)
 
 
 def cookie_snapshot_path(platform_key: str) -> Path:
-    return profile_dir_for(platform_key) / COOKIE_SNAPSHOT_FILENAME
+    return paths.platform_cookie_snapshot_path(platform_key)
 
 
 def platform_cookie_url(platform_key: str) -> str:
@@ -1005,7 +974,6 @@ async def run_bilibili_behavior_session(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     browser_path = discover_cdp_browser_path()
     profile_dir = ensure_dir(profile_dir_for("bilibili"))
-    stealth_script = MEDIACRAWLER_DIR / "libs" / "stealth.min.js"
     target_url = "https://search.bilibili.com/article?keyword=" + quote(args.keyword)
 
     async with async_playwright() as playwright:
@@ -1026,8 +994,14 @@ async def run_bilibili_behavior_session(
             ignore_default_args=["--enable-automation"],
         )
         try:
-            if stealth_script.is_file():
-                await context.add_init_script(path=str(stealth_script))
+            with ExitStack() as resource_paths:
+                try:
+                    stealth_script = resource_paths.enter_context(resources.path("js/stealth.min.js"))
+                except FileNotFoundError:
+                    # 只容忍资源缺失，注入阶段的异常仍交给原有清理流程。
+                    stealth_script = None
+                if stealth_script is not None and stealth_script.is_file():
+                    await context.add_init_script(path=str(stealth_script))
             await install_runtime_hints(context)
 
             async def block_video_media(route) -> None:

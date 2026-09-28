@@ -25,6 +25,8 @@ XHS_POOL_CONFIG = CONFIG_ROOT / "xhs_pool.json"
 FORMAL_CRAWL_CONTRACT = DOCS_ROOT / "formal-crawl-contract.md"
 
 MEDIACRAWLER_DIR = TOOLS_ROOT / "MediaCrawler"
+PLATFORM_PROFILE_CODES = {"bilibili": "bili", "weibo": "wb", "douyin": "dy", "zhihu": "zhihu", "xhs": "xhs"}
+COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
 MEDIACRAWLER_RUNS_OUTPUT = OUTPUTS_ROOT / "mediacrawler_runs"
 MEDIACRAWLER_LOGIN_OUTPUT = OUTPUTS_ROOT / "mediacrawler_login_warmup"
 LOGIN_WARMUP_OUTPUT = OUTPUTS_ROOT / "login_warmup"
@@ -67,6 +69,16 @@ WEB_POSTS_SCHEMA = DB_ROOT / "web_posts.sql"
 CTF_CAPTURES_SCHEMA = DB_ROOT / "ctf_captures.sql"
 CRAWL_SCHEDULER_SCHEMA = DB_ROOT / "crawl_scheduler.sql"
 XHS_CONTROL_SCHEMA = DB_ROOT / "xhs_control.sql"
+
+
+def platform_profile_dir(platform_key: str) -> Path:
+    """集中定义迁移期间的旧 profile 位置，不读取登录态。"""
+    code = PLATFORM_PROFILE_CODES[platform_key]
+    return MEDIACRAWLER_DIR / "browser_data" / f"{code}_user_data_dir"
+
+
+def platform_cookie_snapshot_path(platform_key: str) -> Path:
+    return platform_profile_dir(platform_key) / COOKIE_SNAPSHOT_FILENAME
 
 
 def ensure_dir(path: str | Path) -> Path:
