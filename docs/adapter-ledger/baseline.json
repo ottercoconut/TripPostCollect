@@ -1,0 +1,12 @@
+{
+  "fork_head": "2bcde689cc9a1b50cbcc7255597e9da1ff1a1b30",
+  "fork_upstream_merge_base": "d6f7c5bb906b6dac40ddf343ef9e26438a3de092",
+  "resources": {
+    "LICENSE": "aeff21de8609bec9d6e939bbbba7c2914ae0a6e7c9470ea7945c03f7d17a2a33",
+    "libs/douyin.js": "ff5cb3133e2717523ffb3f96679e3f5d23bd31a999411ea604cff9a51da9e26e",
+    "libs/stealth.min.js": "02ae012addcdb30b0ed1a512406feb487699b1b217566e87a8086b54dfcc1d4d",
+    "libs/zhihu.js": "9753572dc21148975600ca8083e92245e69130cd11414a3e3089013b3aaee3f1"
+  },
+  "root_head": "4b6aa84ff9bd669cf35ff2eab04d0ed5badba83a",
+  "upstream_head": "380b426000aac3d612837ed72c99808347dc94c9"
+}
