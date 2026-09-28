@@ -7,11 +7,21 @@ name = "trippostcollect"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    # 平台适配迁入的采集依赖：精确锁定为原 MediaCrawler worker 环境的版本，保证行为等价
+    "aiofiles==23.2.1",
+    "httpx==0.28.1",
+    "numpy==2.3.1",
+    "opencv-python==4.11.0.86",
+    "parsel==1.9.1",
     "patchright>=1.60,<2",
     "pillow>=11.3,<13",
     "playwright>=1.61,<2",
     "pydantic>=2",
+    "pyexecjs==1.5.1",
+    "pyhumps==3.8.0",
     "scrapling[fetchers]>=0.4.9,<1",
+    "tenacity==8.2.2",
+    "xhshow==0.2.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +36,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"trippostcollect.resources" = ["js/*.js", "licenses/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
