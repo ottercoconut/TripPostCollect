@@ -184,9 +184,13 @@ def test_fork_node_count_matches_ci_expectation() -> None:
         "tests/platforms/weibo/test_weibo_image_download.py",
         "tests/platforms/weibo/test_weibo_no_user_info.py",
         "tests/platforms/weibo/test_weibo_store.py",
+        "tests/platforms/douyin/test_douyin_image_only.py",
+        "tests/platforms/douyin/test_douyin_no_user_info.py",
+        "tests/platforms/douyin/test_douyin_search_safety.py",
+        "tests/platforms/douyin/test_douyin_store.py",
     })
     moved = [node for node in data["fork"]["nodes"] if node["target_file"] in moved_files]
-    assert len(moved) == 65
+    assert len(moved) == 106
     for node in moved:
         assert not (ROOT / node["source_file"]).exists()
         assert (ROOT / node["target_file"]).is_file()

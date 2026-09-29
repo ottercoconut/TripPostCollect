@@ -31,6 +31,7 @@ from trippostcollect.runtime import worker
 
 
 _weibo_post_repair = False
+_douyin_browser_detail_fallback = False
 
 
 def configure(argv) -> WorkerInputs:
@@ -49,21 +50,24 @@ def configure(argv) -> WorkerInputs:
 
 
 def install_hooks() -> None:
-    global _weibo_post_repair
+    global _weibo_post_repair, _douyin_browser_detail_fallback
+
     from mediacrawler_export_entrypoint import (
         install_xhs_repair_resilience,
-        install_douyin_browser_detail_fallback,
     )
-    from trippostcollect.application.worker_inputs import weibo_input_readers
+    from trippostcollect.application.worker_inputs import (
+        douyin_browser_detail_fallback_reader,
+        weibo_input_readers,
+    )
 
     from trippostcollect.application.events import configure_batch_checkpoint
     from trippostcollect.xhs.batch_checkpoint import ENABLED_ENV, publish_batch
 
     configure_batch_checkpoint(publish_batch if os.environ.get(ENABLED_ENV) == "1" else None)
     install_xhs_repair_resilience()
-    install_douyin_browser_detail_fallback()
     # 原 hook 在这里读取修复开关；新客户端只接收该布尔值，不修改 fork 类。
     _weibo_post_repair = weibo_input_readers().post_repair()
+    _douyin_browser_detail_fallback = douyin_browser_detail_fallback_reader()()
 
 
 def weibo_dependencies(config, *, post_repair=False):
@@ -155,8 +159,9 @@ def load_crawler(code: str) -> type:
             lambda config: weibo_dependencies(config, post_repair=_weibo_post_repair),
         )
     if code == "dy":
-        from media_platform.douyin import DouYinCrawler
-        return DouYinCrawler
+        worker.init_loging_config()
+        from trippostcollect.platforms.douyin.core import DouYinCrawler
+        return DouYinCrawler.bind(lambda: douyin_dependencies(import_module("config")))
     if code == "zhihu":
         from media_platform.zhihu import ZhihuCrawler
         return ZhihuCrawler
@@ -164,6 +169,108 @@ def load_crawler(code: str) -> type:
         from media_platform.xhs import XiaoHongShuCrawler
         return XiaoHongShuCrawler
     raise ValueError(f"不支持的 worker 平台：{code}")
+
+
+def douyin_dependencies(config):
+    """仅选中抖音时装配；正式写出不经过 fork store 工厂。"""
+    from dataclasses import fields
+    from functools import partial
+    import logging
+    from pathlib import Path
+    import random
+    import time
+
+    from playwright.async_api import async_playwright
+    from trippostcollect.application.contracts import (
+        DouyinSettings, DouyinClientPorts, DouyinLoginPorts, DouyinCrawlerPorts,
+    )
+    from trippostcollect.application.candidates import AdaptiveAccumulator
+    from trippostcollect.application.events import append_worker_execution_event as append_execution_event
+    from trippostcollect.application.worker_inputs import douyin_readers, _enabled
+    from trippostcollect.artifacts.evidence import write_evidence
+    from trippostcollect.artifacts.image_staging import PostImageStager
+    from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
+    from trippostcollect.core.paths import MEDIACRAWLER_DIR
+    from trippostcollect.db.discovery_read import existing_platform_identities
+    from trippostcollect.platforms.douyin.parser import douyin_source_asset_key
+    from trippostcollect.runtime import behavior, login_helpers
+    from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
+    from trippostcollect.runtime.cookies import convert_browser_context_cookies
+    from trippostcollect.runtime.helpers import get_user_agent
+    from trippostcollect.runtime.http import make_async_client
+    from trippostcollect.runtime.image_retry import fetch_image_bytes_with_retry
+
+    values = {field.name: getattr(config, field.name) for field in fields(DouyinSettings)}
+    values["DY_SPECIFIED_ID_LIST"] = tuple(values["DY_SPECIFIED_ID_LIST"])
+    settings = DouyinSettings(**values)
+    browser_settings = CDPBrowserSettings(**{
+        field.name: getattr(config, field.name) for field in fields(CDPBrowserSettings)
+    })
+    client_factory = partial(make_async_client, disable_ssl_verify=settings.DISABLE_SSL_VERIFY)
+
+    def candidates():
+        identities = existing_platform_identities(
+            "douyin", db_path=os.environ.get("TRIPPOSTCOLLECT_DB_PATH", ""),
+            xhs_target_key=os.environ.get("TRIPPOSTCOLLECT_XHS_DISCOVERY_TARGET_KEY", ""),
+            xhs_account_id=os.environ.get("TRIPPOSTCOLLECT_XHS_ACCOUNT_ID", ""),
+            xhs_fingerprint=os.environ.get("TRIPPOSTCOLLECT_XHS_DISCOVERY_QUERY_FINGERPRINT", ""),
+            job_id=os.environ.get("TRIPPOSTCOLLECT_DISCOVERY_JOB_ID", ""),
+            fingerprint=os.environ.get("TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT", ""),
+            resume_identities_path=os.environ.get("TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH", ""),
+        )
+        accumulator = AdaptiveAccumulator.for_platform("douyin", existing_identities=identities)
+        accumulator.event_sink = append_execution_event
+        return accumulator
+
+    async def run_behavior(page, platform_key):
+        if not _enabled():
+            return {"status": "disabled", "platform": platform_key}
+        scripts_dir = Path(os.environ.get("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", "")).expanduser()
+        evidence_path = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()
+        profile_name = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_PROFILE", "social_high_risk").strip()
+        if not scripts_dir.is_dir() or not evidence_path:
+            raise RuntimeError("required TripPostCollect human behavior configuration is incomplete")
+        return await behavior.run_required_human_behavior(
+            page, platform_key=platform_key, evidence_path=evidence_path,
+            profile_name=profile_name, xhs_search_ready=None, write_evidence=write_evidence,
+        )
+
+    def content_sink(crawler_type):
+        return JsonlContentStore(AsyncFileWriter(
+            platform="douyin", crawler_type=crawler_type,
+            save_data_path=lambda: settings.SAVE_DATA_PATH,
+        ), writer_attribute="file_writer")
+
+    def image_stager():
+        return PostImageStager(
+            save_data_root=Path(settings.SAVE_DATA_PATH) if settings.SAVE_DATA_PATH else MEDIACRAWLER_DIR / "data",
+            platform="douyin", source_key="note_download_url",
+            source_asset_key=lambda item: douyin_source_asset_key(item.get("uri"), item["url"]),
+            log_saved=lambda count, aweme_id: logging.getLogger("MediaCrawler").info(
+                f"[DouYinImage.store_post_images] saved {count} body images for aweme {aweme_id}"
+            ),
+        )
+
+    return {
+        "settings": settings,
+        "inputs": douyin_readers(settings.START_PAGE),
+        "ports": DouyinCrawlerPorts(
+            client=DouyinClientPorts(client_factory, convert_browser_context_cookies, random.random),
+            login=DouyinLoginPorts(partial(
+                login_helpers.find_login_qrcode, make_async_client=client_factory,
+                get_user_agent=get_user_agent,
+            ), login_helpers.show_qrcode),
+            browser_detail_fallback=_douyin_browser_detail_fallback,
+            async_playwright=async_playwright,
+            cdp_manager=partial(CDPBrowserManager, browser_settings, project_browser_args=behavior.project_browser_args),
+            project_browser_args=behavior.project_browser_args,
+            run_required_human_behavior=run_behavior,
+            candidates=candidates, append_execution_event=append_execution_event,
+            current_timestamp=lambda: int(time.time() * 1000),
+            content_sink=content_sink, image_stager=image_stager,
+            fetch_image_bytes_with_retry=fetch_image_bytes_with_retry,
+        ),
+    }
 
 
 def main(argv=None) -> int:

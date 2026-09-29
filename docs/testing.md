@@ -80,11 +80,12 @@ checkout 不保留认证信息。依赖准备阶段联网；根环境使用 `uv 
 没有私人源码、账号数据库或浏览器 profile。完整安装 lane 检查根 CLI `--help`，
 fork 离线兼容检查静态导入 B站、微博、抖音、知乎、小红书模块，不调用抓取入口。
 fork 测试的 PYTHONPATH 包含根 src/scripts 与 fork 自身路径。
-随后在独立 fork 环境执行 `run_matrix.FORK_OFFLINE_TESTS` 明确列出的 26 文件、352 个
+随后在独立 fork 环境执行 `run_matrix.FORK_OFFLINE_TESTS` 明确列出的 22 文件、311 个
 原离线用例（四站与共享辅助测试）；数量变化、skip、xfail 或失败均不可验收。
 原浏览器与 CDP 生命周期的 41 个用例已迁入根 `tests/runtime/`，归入 component lane；
 进程、信号和 socket 调用均使用替身，不启动真实浏览器或进程。
 微博的 4 个测试文件、24 个用例已迁入根 `tests/platforms/weibo/`，归入 component lane。
+抖音的 4 个测试文件、41 个用例已迁入根 `tests/platforms/douyin/`，归入 component lane。
 复用现有 pytest、计数插件与执行守卫，使用同一 Seatbelt 无网络/无浏览器策略和临时产物目录。
 计数/守卫模块复制为独立名称，根 tests 不进入 PYTHONPATH；显式指定 fork 的 pyproject.toml、
 rootdir 和 confcutdir，避免根 conftest、support 或 pytest 配置污染。

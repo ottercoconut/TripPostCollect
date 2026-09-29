@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import runpy
@@ -18,13 +17,17 @@ from playwright.async_api import Error as PlaywrightError
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = ROOT / "src"
-# T05 的纯辅助改为真正重导出；脚本直启时先提供根源码路径。
+# 两站的纯辅助直接重导出；脚本直启时先提供根源码路径。
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from trippostcollect.runtime.helpers import _find_nested_platform_record as _find_nested_platform_record  # noqa: E402
 from trippostcollect.platforms.weibo.parser import _find_weibo_detail as _find_weibo_detail  # noqa: E402
 from trippostcollect.platforms.weibo.client import _weibo_detail_api_url as _weibo_detail_api_url  # noqa: E402
+from trippostcollect.platforms.douyin.parser import (  # noqa: E402
+    _douyin_detail_urls as _douyin_detail_urls,
+    _find_douyin_detail as _find_douyin_detail,
+)
 
 MEDIACRAWLER_ROOT = ROOT / "tools" / "MediaCrawler"
 EXPORT_METHODS = (
@@ -32,29 +35,6 @@ EXPORT_METHODS = (
     "write_to_jsonl",
     "write_single_item_to_json",
 )
-
-
-
-
-def _douyin_detail_urls(aweme_id: str) -> tuple[str, str]:
-    return (
-        f"https://www.douyin.com/note/{aweme_id}",
-        f"https://www.douyin.com/video/{aweme_id}",
-    )
-
-
-def _find_douyin_detail(value: Any, aweme_id: str) -> dict[str, Any] | None:
-    return _find_nested_platform_record(
-        value,
-        aweme_id,
-        id_keys=("aweme_id",),
-        shape_keys=("desc", "author", "statistics", "images", "video", "create_time"),
-    )
-
-
-
-
-
 
 def sanitize_export_item(item: dict[str, Any]) -> dict[str, Any]:
     source_text = str(SOURCE_ROOT)
@@ -358,133 +338,12 @@ def install_xhs_repair_resilience() -> None:
 
 
 def install_douyin_browser_detail_fallback() -> None:
-    if os.environ.get("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK") != "1":
-        return
-    from media_platform.douyin import client as douyin_client
-    from media_platform.douyin.search_safety import decode_douyin_json_body
+    # 旧桥只在安装时锁存开关；根 crawler 和 fork client 装配共同消费该值。
+    from trippostcollect.application.worker_inputs import douyin_browser_detail_fallback_reader
+    from trippostcollect.platforms import entry
 
-    client_class = douyin_client.DouYinClient
-    if getattr(client_class, "_trippostcollect_browser_detail_fallback", False):
-        return
-    original_get_video_by_id = client_class.get_video_by_id
-
-    async def browser_detail(self: Any, aweme_id: str) -> Any:
-        page = getattr(self, "playwright_page", None)
-        if page is None:
-            raise RuntimeError("Douyin browser detail fallback requires a Playwright page")
-        timeout_ms = max(
-            5_000,
-            int(os.environ.get("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_TIMEOUT_MS", "30000")),
-        )
-        lock = getattr(self, "_trippostcollect_browser_detail_lock", None)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._trippostcollect_browser_detail_lock = lock
-        attempts: list[str] = []
-        async with lock:
-            for detail_url in _douyin_detail_urls(aweme_id):
-                payload: Any = None
-                response_reason = ""
-                try:
-                    async with page.expect_response(
-                        lambda response: "/aweme/v1/web/aweme/detail/" in response.url,
-                        timeout=timeout_ms,
-                    ) as response_info:
-                        await page.goto(
-                            detail_url,
-                            wait_until="domcontentloaded",
-                            timeout=timeout_ms,
-                        )
-                    response = await response_info.value
-                    try:
-                        payload = decode_douyin_json_body(await response.body())
-                    except Exception as exc:
-                        response_reason = f"response_body:{type(exc).__name__}"
-                except PlaywrightError as exc:
-                    response_reason = f"navigation_or_response:{type(exc).__name__}"
-
-                detail = _find_douyin_detail(payload, aweme_id)
-                if detail is None:
-                    try:
-                        page_state = await page.evaluate(
-                            """(targetId) => {
-                        const roots = [
-                            window.__UNIVERSAL_DATA_FOR_REHYDRATION__,
-                            window._ROUTER_DATA,
-                            window.__INITIAL_STATE__,
-                            window.__NEXT_DATA__,
-                        ];
-                        const seen = new WeakSet();
-                        const walk = (value, depth) => {
-                            if (depth > 12 || value === null || value === undefined) return null;
-                            if (typeof value !== 'object') return null;
-                            if (seen.has(value)) return null;
-                            seen.add(value);
-                            const hasDetailShape = [
-                                'desc', 'author', 'statistics', 'images', 'video', 'create_time'
-                            ].some(key => Object.prototype.hasOwnProperty.call(value, key));
-                            if (hasDetailShape && String(value.aweme_id || '') === String(targetId)) return value;
-                            for (const nested of Object.values(value)) {
-                                const found = walk(nested, depth + 1);
-                                if (found) return found;
-                            }
-                            return null;
-                        };
-                        for (const root of roots) {
-                            const found = walk(root, 0);
-                            if (found) return found;
-                        }
-                        for (const script of document.querySelectorAll('script[type="application/json"]')) {
-                            try {
-                                const found = walk(JSON.parse(script.textContent || ''), 0);
-                                if (found) return found;
-                            } catch (_) {
-                                continue;
-                            }
-                        }
-                        return null;
-                    }""",
-                            aweme_id,
-                        )
-                        detail = _find_douyin_detail(page_state, aweme_id)
-                    except Exception as exc:
-                        if not response_reason:
-                            response_reason = f"page_state:{type(exc).__name__}"
-                if detail is not None:
-                    return detail
-
-                route = "note" if "/note/" in detail_url else "video"
-                payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
-                attempts.append(
-                    f"{route}:reason={response_reason or 'empty_detail'}:payload_keys={payload_keys}"
-                )
-
-        raise RuntimeError(
-            "browser detail response did not contain aweme_detail; "
-            f"attempts={attempts}"
-        )
-
-    async def resilient_get_video_by_id(self: Any, aweme_id: str) -> Any:
-        original_error: Exception | None = None
-        try:
-            detail = await original_get_video_by_id(self, aweme_id)
-            if isinstance(detail, dict) and detail.get("aweme_id"):
-                return detail
-        except Exception as exc:
-            original_error = exc
-        try:
-            result = await browser_detail(self, aweme_id)
-            douyin_client.utils.logger.warning(
-                f"[TripPostCollect] Used browser-native Douyin detail fallback for aweme_id:{aweme_id}"
-            )
-            return result
-        except Exception as fallback_error:
-            if original_error is not None:
-                raise fallback_error from original_error
-            raise
-
-    client_class.get_video_by_id = resilient_get_video_by_id
-    client_class._trippostcollect_browser_detail_fallback = True
+    if douyin_browser_detail_fallback_reader()():
+        entry._douyin_browser_detail_fallback = True
 
 
 def install_weibo_browser_detail_fallback() -> None:
