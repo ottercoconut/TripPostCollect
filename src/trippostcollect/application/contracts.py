@@ -55,6 +55,93 @@ class WeiboLoginPorts:
     show_qrcode: Callable[..., Any]
 
 
+class CandidateDecisions(Protocol):
+    """抖音消费的已有候选累积器；前沿纪元判定仍由应用层负责。"""
+
+    seen_candidate_identities: set[str]
+    stop_reason: str
+
+    @property
+    def can_continue(self) -> bool: ...
+
+    def begin_batch(self) -> None: ...
+
+    def is_known(self, identity: str) -> bool: ...
+
+    def consider(self, identity: str, *, valid: bool) -> bool: ...
+
+    def skip_candidate_failure(self, identity: str, **details: Any) -> bool: ...
+
+    def finish_batch(self, **position: Any) -> bool: ...
+
+    def mark_source_exhausted(self, detail: str, **position: Any) -> None: ...
+
+    def mark_runtime_failed(self, detail: str, **position: Any) -> None: ...
+
+    def should_reseed_frontier(
+        self, *, saved_source_exhausted: bool,
+        refresh_has_more: bool | int | None, refresh_next_cursor: str | None,
+        refresh_new_candidate_count: int,
+    ) -> bool: ...
+
+
+@dataclass(frozen=True)
+class DouyinSettings:
+    """抖音 crawler 构造时从已解析配置提取的不可变切片。"""
+
+    PLATFORM: str
+    LOGIN_TYPE: str
+    COOKIES: str
+    CRAWLER_TYPE: str
+    KEYWORDS: str
+    START_PAGE: int
+    PUBLISH_TIME_TYPE: int
+    DY_SPECIFIED_ID_LIST: tuple[str, ...]
+    MAX_CONCURRENCY_NUM: int
+    CRAWLER_MAX_SLEEP_SEC: float
+    ENABLE_CDP_MODE: bool
+    CDP_HEADLESS: bool
+    HEADLESS: bool
+    SAVE_LOGIN_STATE: bool
+    USER_DATA_DIR: str
+    ENABLE_GET_MEIDAS: bool
+    SAVE_DATA_OPTION: str
+    SAVE_DATA_PATH: str
+    DISABLE_SSL_VERIFY: bool
+
+
+@dataclass(frozen=True)
+class DouyinReaders:
+    """只绑定读取点；值仍在关键词、作者或详情操作开始时读取。"""
+
+    refresh_max_pages: Callable[[], int]
+    source_exhausted: Callable[[], str | None]
+    resume_offset: Callable[[], int]
+    resume_cursor: Callable[[], str]
+    enrich_creators: Callable[[], str | None]
+    enrich_only_images: Callable[[], str]
+    max_creator_enrich: Callable[[], str]
+    creator_sleep_seconds: Callable[[], str]
+    browser_detail_timeout: Callable[[], str]
+
+
+@dataclass(frozen=True)
+class DouyinClientPorts:
+    """HTTP 客户端与当前浏览器 Cookie 的原调用接缝。"""
+
+    make_async_client: Callable[..., Any]
+    convert_browser_context_cookies: Callable[..., Any]
+    random: Callable[[], float]
+
+
+@dataclass(frozen=True)
+class DouyinLoginPorts:
+    """二维码读取和系统展示；不在平台导入时执行。"""
+
+    find_login_qrcode: Callable[..., Any]
+    show_qrcode: Callable[..., Any]
+
+
 @dataclass(frozen=True)
 class WeiboPorts:
     """微博流程的进程内端口；不持有数据库连接或全平台工厂。"""
@@ -74,6 +161,25 @@ class WeiboPorts:
     browser_manager: Callable[..., Any]
     project_browser_args: Callable[..., Any]
     run_required_human_behavior: Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class DouyinCrawlerPorts:
+    """抖音流程借用的进程内能力，不改变 HTTP 和写出顺序。"""
+
+    client: DouyinClientPorts
+    login: DouyinLoginPorts
+    browser_detail_fallback: bool
+    async_playwright: Callable[..., Any]
+    cdp_manager: Callable[..., Any]
+    project_browser_args: Callable[[], list[str]]
+    run_required_human_behavior: Callable[..., Any]
+    candidates: Callable[[], CandidateDecisions]
+    append_execution_event: Callable[..., None]
+    current_timestamp: Callable[[], int]
+    content_sink: Callable[[str], ContentSink]
+    image_stager: Callable[[], ImageStager]
+    fetch_image_bytes_with_retry: Callable[..., Any]
 
 
 class XhsRuntimeSupervisionError(RuntimeError):

@@ -56,6 +56,10 @@ class AdaptiveAccumulator:
     def can_continue(self) -> bool:
         return not self.stop_reason
 
+    def should_reseed_frontier(self, **kwargs) -> bool:
+        """抖音前沿纪元判定端口，保持原四条件。"""
+        return should_reseed_douyin_frontier(**kwargs)
+
     def begin_batch(self) -> None:
         self.batch_no += 1
         self._batch_new_before = len(self.new_valid_identities)
@@ -314,3 +318,20 @@ class AdaptiveAccumulator:
         )
         result["candidate_identities"] = sorted(self.seen_candidate_identities)
         return result
+
+
+# TripPostCollect：T06 从 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303 迁入。
+def should_reseed_douyin_frontier(
+    *,
+    saved_source_exhausted: bool,
+    refresh_has_more: bool | int | None,
+    refresh_next_cursor: str | None,
+    refresh_new_candidate_count: int,
+) -> bool:
+    """Start a new cursor epoch only when refresh proves new identities and continuation."""
+    return bool(
+        saved_source_exhausted
+        and refresh_has_more in (True, 1)
+        and str(refresh_next_cursor or "").strip()
+        and refresh_new_candidate_count > 0
+    )
