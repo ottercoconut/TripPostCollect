@@ -27,9 +27,11 @@ source .venv/bin/activate
 ```
 
 另一份副本使用 3.12。依赖准备阶段允许联网，测试阶段禁止；不运行浏览器安装或平台登录。
-根入口需要 scrapling[fetchers]，不能借用 MediaCrawler 的 worker venv。
-子模块 worker 环境使用子模块自己的锁文件另行安装，本入口只跑根 tests/；
-并未把 fork 的全部测试搬入根套件，worker 测试不能替代根安装验收。
+根入口需要 scrapling[fetchers]。正式 worker 使用根解释器，以
+`sys.executable -P -m trippostcollect.platforms.entry` 启动，cwd 为项目根；
+过渡装载模块显式提供尚未迁出的 fork 与 scripts 路径，不依赖 cwd 或注入 PYTHONPATH。
+fork 独立环境使用子模块锁文件，仅用于 CI 的 fork 离线测试；本入口只跑根 tests/。
+fork 测试不能替代根安装验收。
 
 ## 运行与结果
 
@@ -74,11 +76,11 @@ Linux 通过不能替代 macOS 证据。
 工作流 [.github/workflows/macos-test-lanes.yml](../.github/workflows/macos-test-lanes.yml)
 使用 GitHub-hosted `macos-26`，Python 3.11/3.12 独立矩阵、`contents: read`，不注入 secrets，
 checkout 不保留认证信息。依赖准备阶段联网；根环境使用 `uv sync --locked --extra dev`，
-所选 submodule 提交在其目录用自己的锁文件创建独立 worker 环境。所有执行使用临时源码副本，
+所选 submodule 提交用自己的锁文件创建独立 fork 测试环境。所有执行使用临时源码副本，
 没有私人源码、账号数据库或浏览器 profile。完整安装 lane 检查根 CLI `--help`，
-worker 静态导入 B站、微博、抖音、知乎、小红书模块，不调用抓取入口。
-fork 的 PYTHONPATH 保留正式 worker 所需的根 src/scripts 与 fork 自身路径。
-随后在独立 worker 环境执行 `run_matrix.FORK_OFFLINE_TESTS` 明确列出的 32 文件、417 个
+fork 离线兼容检查静态导入 B站、微博、抖音、知乎、小红书模块，不调用抓取入口。
+fork 测试的 PYTHONPATH 包含根 src/scripts 与 fork 自身路径。
+随后在独立 fork 环境执行 `run_matrix.FORK_OFFLINE_TESTS` 明确列出的 32 文件、417 个
 原离线用例（四站与共享辅助测试）；数量变化、skip、xfail 或失败均不可验收。
 复用现有 pytest、计数插件与执行守卫，使用同一 Seatbelt 无网络/无浏览器策略和临时产物目录。
 计数/守卫模块复制为独立名称，根 tests 不进入 PYTHONPATH；显式指定 fork 的 pyproject.toml、

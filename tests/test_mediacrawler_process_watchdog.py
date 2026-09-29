@@ -25,6 +25,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 mediacrawler_crawl = import_module("mediacrawler_crawl")
+process = import_module("trippostcollect.runtime.process")
 FrozenExecutionState = import_module("execution_state").FrozenExecutionState
 runtime = import_module("trippostcollect.xhs.runtime")
 ProcessIdentity = import_module("trippostcollect.xhs.leases").ProcessIdentity
@@ -33,9 +34,9 @@ AUTH_KEY_HEX = "ab" * 32
 AUTH_KEY = bytes.fromhex(AUTH_KEY_HEX)
 NOW = datetime(2026, 9, 3, 8, 0, 0, tzinfo=timezone.utc)
 PRIVATE_LEASE_ENV_KEYS = (
-    mediacrawler_crawl.LEASE_DB_ENV,
-    mediacrawler_crawl.LEASE_ID_ENV,
-    mediacrawler_crawl.LEASE_OWNER_TOKEN_ENV,
+    process.LEASE_DB_ENV,
+    process.LEASE_ID_ENV,
+    process.LEASE_OWNER_TOKEN_ENV,
 )
 PRIVATE_EXPORTER_ENV_KEYS = (
     runtime.RUNTIME_STATUS_AUTH_KEY_ENV,
@@ -137,9 +138,9 @@ def read_reporter_status(path: Path, identity: object) -> dict[str, object]:
 
 def reporter_environment(*, auth_key: str | None = AUTH_KEY_HEX) -> dict[str, str]:
     environ = {
-        mediacrawler_crawl.LEASE_DB_ENV: "/tmp/xhs-control.sqlite",
-        mediacrawler_crawl.LEASE_ID_ENV: "lease-1",
-        mediacrawler_crawl.LEASE_OWNER_TOKEN_ENV: "owner-token",
+        process.LEASE_DB_ENV: "/tmp/xhs-control.sqlite",
+        process.LEASE_ID_ENV: "lease-1",
+        process.LEASE_OWNER_TOKEN_ENV: "owner-token",
         mediacrawler_crawl.XHS_RUNTIME_STATUS_RUN_ID_ENV: "run-1",
     }
     if auth_key is not None:
@@ -162,22 +163,22 @@ def configure_real_supervised_exporter(
             return registered.get("identity")
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "browser_launch_environment",
         reporter_environment,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "register_lease_process_from_environment",
         register_exporter,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "mark_lease_process_exited_from_environment",
         lambda **_kwargs: None,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "SystemProcessInspector",
         StableExporterInspector,
     )
@@ -214,7 +215,7 @@ def test_xhs_runtime_key_is_required_and_validated_before_main_or_popen(
         raise AssertionError("main body and Popen must not run")
 
     monkeypatch.setattr(mediacrawler_crawl, "_run_main", forbidden)
-    monkeypatch.setattr(mediacrawler_crawl.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(process.subprocess, "Popen", forbidden)
 
     with pytest.raises(runtime.RuntimeStatusValidationError, match=error):
         mediacrawler_crawl.main()
@@ -240,7 +241,7 @@ def test_runtime_reporter_consumes_key_and_uses_registered_supervisor_identity(
 
     assert reporter is not None
     assert runtime.RUNTIME_STATUS_AUTH_KEY_ENV not in environ
-    assert environ[mediacrawler_crawl.LEASE_OWNER_TOKEN_ENV] == "owner-token"
+    assert environ[process.LEASE_OWNER_TOKEN_ENV] == "owner-token"
     status = read_reporter_status(runtime.runtime_status_path("run-1"), identity)
     assert status["writer_pid"] == identity.pid
     assert status["writer_process_start_token"] == identity.process_start_token
@@ -288,7 +289,7 @@ def test_private_runtime_environment_is_not_forwarded_to_exporter(
     tmp_path: Path,
 ) -> None:
     captured: dict[str, object] = {}
-    original_popen = mediacrawler_crawl.subprocess.Popen
+    original_popen = process.subprocess.Popen
 
     def capture_popen(*args: object, **kwargs: object) -> object:
         captured["child_env"] = dict(kwargs["env"])
@@ -315,22 +316,22 @@ def test_private_runtime_environment_is_not_forwarded_to_exporter(
         captured["exit_env"] = dict(environ)
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "browser_launch_environment",
         reporter_environment,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl.subprocess,
+        process.subprocess,
         "Popen",
         capture_popen,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "register_lease_process_from_environment",
         register_exporter,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "mark_lease_process_exited_from_environment",
         mark_exporter_exited,
     )
@@ -339,7 +340,7 @@ def test_private_runtime_environment_is_not_forwarded_to_exporter(
         f"sys.exit(any(key in os.environ for key in {PRIVATE_EXPORTER_ENV_KEYS!r}))"
     )
 
-    result = mediacrawler_crawl.run_command(
+    result = process.run_command(
         [sys.executable, "-c", child],
         tmp_path,
         2,
@@ -373,7 +374,7 @@ def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
 ) -> None:
     captured: dict[str, object] = {"mark_calls": 0}
     target_side_effect = tmp_path / "exporter-started"
-    original_spawn = mediacrawler_crawl.spawn_gated_subprocess
+    original_spawn = process.spawn_gated_subprocess
 
     def capture_spawn(*args: object, **kwargs: object) -> object:
         captured["child_env"] = dict(kwargs["env"])
@@ -393,24 +394,24 @@ def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
         captured["mark_calls"] = int(captured["mark_calls"]) + 1
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "browser_launch_environment",
         reporter_environment,
     )
-    monkeypatch.setattr(mediacrawler_crawl, "spawn_gated_subprocess", capture_spawn)
+    monkeypatch.setattr(process, "spawn_gated_subprocess", capture_spawn)
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "register_lease_process_from_environment",
         fail_registration,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "mark_lease_process_exited_from_environment",
         mark_exit,
     )
 
     with pytest.raises(RuntimeError, match="synthetic registration failure"):
-        mediacrawler_crawl.run_command(
+        process.run_command(
             [
                 sys.executable,
                 "-c",
@@ -431,7 +432,7 @@ def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
     assert isinstance(child_env, dict)
     assert isinstance(registration_env, dict)
     assert not set(PRIVATE_EXPORTER_ENV_KEYS) & set(child_env)
-    assert registration_env[mediacrawler_crawl.LEASE_OWNER_TOKEN_ENV] == "owner-token"
+    assert registration_env[process.LEASE_OWNER_TOKEN_ENV] == "owner-token"
     assert captured["mark_calls"] == 0
     assert not target_side_effect.exists()
     assert (
@@ -463,7 +464,7 @@ def test_signal_after_exporter_popen_cancels_gate_before_registration_or_exec(
 
     target_side_effect = tmp_path / f"unregistered-exporter-{first_signal}"
     captured: dict[str, object] = {"registration_calls": 0}
-    original_spawn = mediacrawler_crawl.spawn_gated_subprocess
+    original_spawn = process.spawn_gated_subprocess
     original_handlers = {
         signum: signal.getsignal(signum)
         for signum in (signal.SIGINT, signal.SIGTERM)
@@ -485,17 +486,17 @@ def test_signal_after_exporter_popen_cancels_gate_before_registration_or_exec(
         raise AssertionError("registration must not run after a latched pre-register signal")
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "browser_launch_environment",
         reporter_environment,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "spawn_gated_subprocess",
         spawn_then_interrupt,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "register_lease_process_from_environment",
         forbidden_registration,
     )
@@ -503,7 +504,7 @@ def test_signal_after_exporter_popen_cancels_gate_before_registration_or_exec(
         signal.signal(signum, replayed)
     try:
         with pytest.raises(ReplayedSignal) as interrupted:
-            mediacrawler_crawl.run_command(
+            process.run_command(
                 [
                     sys.executable,
                     "-c",
@@ -546,7 +547,7 @@ def test_exporter_registration_exception_cancels_gate_without_target_exec(
 ) -> None:
     target_side_effect = tmp_path / f"registration-exception-{type(injected).__name__}"
     captured: dict[str, object] = {}
-    original_spawn = mediacrawler_crawl.spawn_gated_subprocess
+    original_spawn = process.spawn_gated_subprocess
 
     def capture_spawn(*args: object, **kwargs: object) -> object:
         gate = original_spawn(*args, **kwargs)
@@ -558,17 +559,17 @@ def test_exporter_registration_exception_cancels_gate_without_target_exec(
         raise injected
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "browser_launch_environment",
         reporter_environment,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "spawn_gated_subprocess",
         capture_spawn,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "register_lease_process_from_environment",
         fail_registration,
     )
@@ -576,7 +577,7 @@ def test_exporter_registration_exception_cancels_gate_without_target_exec(
     expected_message = str(injected)
     raises_kwargs = {"match": expected_message} if expected_message else {}
     with pytest.raises(type(injected), **raises_kwargs):
-        mediacrawler_crawl.run_command(
+        process.run_command(
             [
                 sys.executable,
                 "-c",
@@ -608,7 +609,7 @@ def test_exporter_gate_release_failure_marks_registered_wrapper_exited(
 ) -> None:
     target_side_effect = tmp_path / "release-failed-exporter"
     captured: dict[str, object] = {"mark_calls": 0}
-    original_spawn = mediacrawler_crawl.spawn_gated_subprocess
+    original_spawn = process.spawn_gated_subprocess
 
     def capture_spawn(*args: object, **kwargs: object) -> object:
         gate = original_spawn(*args, **kwargs)
@@ -630,33 +631,33 @@ def test_exporter_gate_release_failure_marks_registered_wrapper_exited(
         raise OSError("synthetic exporter release failure")
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "browser_launch_environment",
         reporter_environment,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "spawn_gated_subprocess",
         capture_spawn,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "register_lease_process_from_environment",
         register_exporter,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "mark_lease_process_exited_from_environment",
         mark_exporter,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl.GatedSubprocess,
+        process.GatedSubprocess,
         "release",
         fail_before_write,
     )
 
     with pytest.raises(OSError, match="synthetic exporter release failure"):
-        mediacrawler_crawl.run_command(
+        process.run_command(
             [
                 sys.executable,
                 "-c",
@@ -694,8 +695,8 @@ def test_signal_after_exporter_registration_reaps_exact_released_process(
 
     target_side_effect = tmp_path / "registered-signal-exporter"
     captured: dict[str, object] = {"mark_calls": 0}
-    original_spawn = mediacrawler_crawl.spawn_gated_subprocess
-    original_release = mediacrawler_crawl.GatedSubprocess.release
+    original_spawn = process.spawn_gated_subprocess
+    original_release = process.GatedSubprocess.release
     original_handlers = {
         signum: signal.getsignal(signum)
         for signum in (signal.SIGINT, signal.SIGTERM)
@@ -725,27 +726,27 @@ def test_signal_after_exporter_registration_reaps_exact_released_process(
         captured["marked_identity"] = kwargs["identity"]
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "browser_launch_environment",
         reporter_environment,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "spawn_gated_subprocess",
         capture_spawn,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "register_lease_process_from_environment",
         register_exporter,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "mark_lease_process_exited_from_environment",
         mark_exporter,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl.GatedSubprocess,
+        process.GatedSubprocess,
         "release",
         release_then_interrupt,
     )
@@ -753,7 +754,7 @@ def test_signal_after_exporter_registration_reaps_exact_released_process(
         signal.signal(signum, replayed)
     try:
         with pytest.raises(ReplayedSignal):
-            mediacrawler_crawl.run_command(
+            process.run_command(
                 [
                     sys.executable,
                     "-c",
@@ -820,31 +821,31 @@ def test_network_diagnostics_require_fresh_explicit_transport_recovery(
         at=NOW,
         error="ConnectTimeout: cookie=secret owner_token=forbidden",
     )
-    assert mediacrawler_crawl.xhs_network_state_from_diagnostics(
+    assert process.xhs_network_state_from_diagnostics(
         diagnostic_path,
         now=NOW,
     ) == ("network_paused", "transport_timeout")
 
     write_event(at=NOW, error="SMS Verification parameter error cookie=secret")
-    assert mediacrawler_crawl.xhs_network_state_from_diagnostics(
+    assert process.xhs_network_state_from_diagnostics(
         diagnostic_path,
         now=NOW,
     ) == ("unknown", "")
 
     write_event(at=NOW - timedelta(seconds=91))
-    assert mediacrawler_crawl.xhs_network_state_from_diagnostics(
+    assert process.xhs_network_state_from_diagnostics(
         diagnostic_path,
         now=NOW,
     ) == ("unknown", "")
 
     write_event(at=NOW, include_error=False)
-    assert mediacrawler_crawl.xhs_network_state_from_diagnostics(
+    assert process.xhs_network_state_from_diagnostics(
         diagnostic_path,
         now=NOW,
     ) == ("unknown", "")
 
     diagnostic_path.write_text("{", encoding="utf-8")
-    assert mediacrawler_crawl.xhs_network_state_from_diagnostics(
+    assert process.xhs_network_state_from_diagnostics(
         diagnostic_path,
         now=NOW,
     ) == ("unknown", "")
@@ -873,7 +874,7 @@ def test_network_timeout_diagnostic_is_fresh_explicit_terminal_observation(
         encoding="utf-8",
     )
 
-    assert mediacrawler_crawl.xhs_network_state_from_diagnostics(
+    assert process.xhs_network_state_from_diagnostics(
         diagnostic_path,
         now=NOW,
     ) == ("network_recovery_timeout", "transport_timeout")
@@ -913,11 +914,11 @@ def test_runtime_watchdog_stop_detail_is_closed_and_explicit(
     run: dict[str, object],
     expected: str,
 ) -> None:
-    assert mediacrawler_crawl.runtime_watchdog_stop_detail(run) == expected
+    assert process.runtime_watchdog_stop_detail(run) == expected
 
 
 def test_parent_network_pause_clock_freezes_remaining_without_resetting_it() -> None:
-    clock = mediacrawler_crawl.XhsParentNetworkPauseClock(ceiling_seconds=10)
+    clock = process.XhsParentNetworkPauseClock(ceiling_seconds=10)
 
     assert clock.observe("network_paused", now=100) == (0.0, False)
     assert clock.observe("network_paused", now=104) == (4.0, False)
@@ -929,7 +930,7 @@ def test_parent_network_pause_clock_freezes_remaining_without_resetting_it() -> 
 
 
 def test_parent_network_pause_ceiling_resets_only_after_explicit_recovery() -> None:
-    clock = mediacrawler_crawl.XhsParentNetworkPauseClock(ceiling_seconds=10)
+    clock = process.XhsParentNetworkPauseClock(ceiling_seconds=10)
 
     clock.observe("network_paused", now=0)
     assert clock.observe("network_paused", now=8) == (8.0, False)
@@ -946,13 +947,13 @@ def test_network_diagnostics_never_count_as_business_progress(tmp_path: Path) ->
     business_path = data_dir / "xhs_contents.jsonl"
     diagnostic_path.write_text("diagnostic", encoding="utf-8")
 
-    assert mediacrawler_crawl.progress_path_signature(
+    assert process.progress_path_signature(
         [data_dir],
         excluded_paths=[diagnostic_path],
     ) == ()
 
     business_path.write_text("business", encoding="utf-8")
-    signature = mediacrawler_crawl.progress_path_signature(
+    signature = process.progress_path_signature(
         [data_dir],
         excluded_paths=[diagnostic_path],
     )
@@ -1014,7 +1015,7 @@ def test_finalizing_summary_scan_keeps_advancing_authenticated_heartbeats(
         clock[0] += 6.0
         return clock[0]
 
-    monkeypatch.setattr(mediacrawler_crawl.time, "monotonic", advancing_monotonic)
+    monkeypatch.setattr(process.time, "monotonic", advancing_monotonic)
     before = read_reporter_status(paths["status"], identity)["sequence"]
 
     output = mediacrawler_crawl.summarize_output(
@@ -1050,12 +1051,12 @@ def test_finalizing_summary_does_not_swallow_checkpoint_failure(
     def fail_checkpoint() -> None:
         calls[0] += 1
         if calls[0] >= 2:
-            raise mediacrawler_crawl.XhsRuntimeSupervisionError("synthetic_stale_writer")
+            raise process.XhsRuntimeSupervisionError("synthetic_stale_writer")
 
-    monkeypatch.setattr(mediacrawler_crawl.time, "monotonic", advancing_monotonic)
+    monkeypatch.setattr(process.time, "monotonic", advancing_monotonic)
 
     with pytest.raises(
-        mediacrawler_crawl.XhsRuntimeSupervisionError,
+        process.XhsRuntimeSupervisionError,
         match="synthetic_stale_writer",
     ):
         mediacrawler_crawl.summarize_output(
@@ -1082,13 +1083,13 @@ def test_streamed_summary_write_is_atomic_when_heartbeat_fails(
     def fail_checkpoint() -> None:
         calls[0] += 1
         if calls[0] >= 2:
-            raise mediacrawler_crawl.XhsRuntimeSupervisionError("heartbeat_write_failed")
+            raise process.XhsRuntimeSupervisionError("heartbeat_write_failed")
 
-    monkeypatch.setattr(mediacrawler_crawl.time, "monotonic", advancing_monotonic)
+    monkeypatch.setattr(process.time, "monotonic", advancing_monotonic)
     payload = {"records": ["x" * (1024 * 1024 + 1), "tail"]}
 
     with pytest.raises(
-        mediacrawler_crawl.XhsRuntimeSupervisionError,
+        process.XhsRuntimeSupervisionError,
         match="heartbeat_write_failed",
     ):
         mediacrawler_crawl.write_json_with_progress(
@@ -1120,12 +1121,12 @@ def test_large_execution_state_read_propagates_heartbeat_failure(
     def fail_checkpoint() -> None:
         calls[0] += 1
         if calls[0] >= 2:
-            raise mediacrawler_crawl.XhsRuntimeSupervisionError("state_heartbeat_failed")
+            raise process.XhsRuntimeSupervisionError("state_heartbeat_failed")
 
-    monkeypatch.setattr(mediacrawler_crawl.time, "monotonic", advancing_monotonic)
+    monkeypatch.setattr(process.time, "monotonic", advancing_monotonic)
 
     with pytest.raises(
-        mediacrawler_crawl.XhsRuntimeSupervisionError,
+        process.XhsRuntimeSupervisionError,
         match="state_heartbeat_failed",
     ):
         mediacrawler_crawl.load_pagination_evidence(
@@ -1175,7 +1176,7 @@ def test_runtime_status_write_failure_is_terminal(
 
     monkeypatch.setattr(mediacrawler_crawl, "write_runtime_status_atomic", fail_write)
     with pytest.raises(
-        mediacrawler_crawl.XhsRuntimeSupervisionError,
+        process.XhsRuntimeSupervisionError,
         match="runtime_status_write_failed",
     ):
         reporter.checkpoint(phase="running")
@@ -1193,7 +1194,7 @@ def test_exporter_start_token_change_stops_heartbeat_and_terminates_process(
 ) -> None:
     reporter, paths, writer_identity = runtime_reporter
     registered: dict[str, object] = {}
-    original_popen = mediacrawler_crawl.subprocess.Popen
+    original_popen = process.subprocess.Popen
 
     def capture_popen(*args: object, **kwargs: object) -> object:
         registered["child_env"] = dict(kwargs["env"])
@@ -1224,37 +1225,37 @@ def test_exporter_start_token_change_stops_heartbeat_and_terminates_process(
             return process_identity(pid=pid, process_start_token="exporter-reused")
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "browser_launch_environment",
         reporter_environment,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl.subprocess,
+        process.subprocess,
         "Popen",
         capture_popen,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "register_lease_process_from_environment",
         register_exporter,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "mark_lease_process_exited_from_environment",
         mark_exporter_exited,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "SystemProcessInspector",
         ChangedExporterInspector,
     )
     started = time.monotonic()
 
     with pytest.raises(
-        mediacrawler_crawl.XhsRuntimeSupervisionError,
+        process.XhsRuntimeSupervisionError,
         match="exporter_process_identity_changed",
     ):
-        mediacrawler_crawl.run_command(
+        process.run_command(
             [sys.executable, "-c", "import time; time.sleep(10)"],
             tmp_path,
             5,
@@ -1294,7 +1295,7 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
     def forbidden_popen(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("fake-process clock test must not launch a real child")
 
-    monkeypatch.setattr(mediacrawler_crawl.subprocess, "Popen", forbidden_popen)
+    monkeypatch.setattr(process.subprocess, "Popen", forbidden_popen)
 
     class FakeProcess:
         pid = 9911
@@ -1339,8 +1340,8 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
         observations.append(True)
         return ("network_recovery_timeout", "transport_timeout") if terminal else ("unknown", "")
 
-    monkeypatch.setattr(mediacrawler_crawl, "xhs_network_state_from_diagnostics", network_observation)
-    monkeypatch.setattr(mediacrawler_crawl, "XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS", 1.0)
+    monkeypatch.setattr(process, "xhs_network_state_from_diagnostics", network_observation)
+    monkeypatch.setattr(process, "XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS", 1.0)
 
     def terminate(
         proc: FakeProcess,
@@ -1383,38 +1384,38 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
         captured["exit_env"] = dict(environ)
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "browser_launch_environment",
         reporter_environment,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "spawn_gated_subprocess",
         spawn,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "register_lease_process_from_environment",
         register_exporter,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "mark_lease_process_exited_from_environment",
         mark_exporter_exited,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "SystemProcessInspector",
         lambda: StaticInspector(exporter_identity),
     )
-    monkeypatch.setattr(mediacrawler_crawl, "terminate_managed_process", terminate)
+    monkeypatch.setattr(process, "terminate_managed_process", terminate)
     monkeypatch.setattr(
-        mediacrawler_crawl.time,
+        process.time,
         "monotonic",
         lambda: next(monotonic_values),
     )
 
-    result = mediacrawler_crawl.run_command(
+    result = process.run_command(
         ["fake"],
         tmp_path,
         0.5,
@@ -1456,7 +1457,7 @@ def test_runtime_reporter_requires_progress_tracking_before_popen(
 ) -> None:
     reporter, _, _ = runtime_reporter
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "browser_launch_environment",
         reporter_environment,
     )
@@ -1464,12 +1465,12 @@ def test_runtime_reporter_requires_progress_tracking_before_popen(
     def forbidden(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("Popen must not run without progress paths")
 
-    monkeypatch.setattr(mediacrawler_crawl.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(process.subprocess, "Popen", forbidden)
     with pytest.raises(
-        mediacrawler_crawl.XhsRuntimeSupervisionError,
+        process.XhsRuntimeSupervisionError,
         match="requires progress tracking",
     ):
-        mediacrawler_crawl.run_command(
+        process.run_command(
             ["fake"],
             tmp_path,
             1,
@@ -1495,7 +1496,7 @@ def test_child_exit_then_main_control_flow_enters_finalizing(
             release.touch()
         return "unknown", ""
 
-    monkeypatch.setattr(mediacrawler_crawl, "xhs_network_state_from_diagnostics", network_observation)
+    monkeypatch.setattr(process, "xhs_network_state_from_diagnostics", network_observation)
 
     def register_exporter(*, pid: int, **_kwargs: object) -> object:
         identity = process_identity(pid=pid, process_start_token="exporter-live")
@@ -1507,27 +1508,27 @@ def test_child_exit_then_main_control_flow_enters_finalizing(
             return registered.get("identity")
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "browser_launch_environment",
         reporter_environment,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "register_lease_process_from_environment",
         register_exporter,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "mark_lease_process_exited_from_environment",
         lambda **_kwargs: None,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "SystemProcessInspector",
         StableExporterInspector,
     )
 
-    result = mediacrawler_crawl.run_command(
+    result = process.run_command(
         [sys.executable, "-c", CHILD_READY_RELEASE, str(ready), str(release)],
         tmp_path,
         5,
@@ -1576,12 +1577,12 @@ def test_real_child_survives_no_progress_budget_during_network_pause_then_recove
         return "online", ""
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "xhs_network_state_from_diagnostics",
         network_observation,
     )
 
-    result = mediacrawler_crawl.run_command(
+    result = process.run_command(
         [
             sys.executable,
             "-c",
@@ -1630,17 +1631,17 @@ def test_network_timeout_event_gets_one_fixed_unwind_grace_for_real_child(
         return "network_recovery_timeout", "transport_timeout"
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS",
         2.0,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "xhs_network_state_from_diagnostics",
         network_observation,
     )
 
-    result = mediacrawler_crawl.run_command(
+    result = process.run_command(
         [sys.executable, "-c", CHILD_READY_RELEASE + "sys.exit(7)\n", str(ready), str(release)],
         tmp_path,
         1.0,
@@ -1683,17 +1684,17 @@ def test_repeated_network_timeout_event_cannot_extend_unwind_grace(
         return "network_recovery_timeout", "transport_timeout"
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS",
         2.0,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        process,
         "xhs_network_state_from_diagnostics",
         network_observation,
     )
 
-    result = mediacrawler_crawl.run_command(
+    result = process.run_command(
         [sys.executable, "-c", CHILD_READY_RELEASE, str(ready), str(release)],
         tmp_path,
         1.0,
@@ -1720,7 +1721,7 @@ def test_durable_progress_allows_runtime_longer_than_watchdog(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(mediacrawler_crawl, "browser_launch_environment", lambda: {})
+    monkeypatch.setattr(process, "browser_launch_environment", lambda: {})
     progress_path = tmp_path / "progress.json"
     child = (
         "from pathlib import Path; import sys, time; "
@@ -1728,7 +1729,7 @@ def test_durable_progress_allows_runtime_longer_than_watchdog(
         "[(path.write_text(str(index)), time.sleep(0.25)) for index in range(17)]"
     )
 
-    result = mediacrawler_crawl.run_command(
+    result = process.run_command(
         [sys.executable, "-c", child, str(progress_path)],
         tmp_path,
         2.0,
@@ -1751,7 +1752,7 @@ def test_no_progress_timeout_preserves_output_once_and_allows_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(mediacrawler_crawl, "browser_launch_environment", lambda: {})
+    monkeypatch.setattr(process, "browser_launch_environment", lambda: {})
     ready = tmp_path / "ready"
     child = (
         "from pathlib import Path; "
@@ -1760,7 +1761,7 @@ def test_no_progress_timeout_preserves_output_once_and_allows_cleanup(
         "print('once', flush=True); Path(sys.argv[1]).touch(); time.sleep(30)"
     )
 
-    result = mediacrawler_crawl.run_command(
+    result = process.run_command(
         [sys.executable, "-c", child, str(ready)],
         tmp_path,
         2.0,
@@ -1889,7 +1890,7 @@ def test_no_progress_timeout_appends_incomplete_terminal_audit_event(
         },
     )
 
-    result = mediacrawler_crawl.append_runtime_watchdog_stop_event(
+    result = process.append_runtime_watchdog_stop_event(
         state_path,
         timeout_reason="no_progress_timeout",
         platform_key="weibo",
@@ -1936,7 +1937,7 @@ def test_network_watchdog_stop_appends_exact_runtime_failed_terminal_event(
         frozen_inputs=[frozen_input],
     )
 
-    result = mediacrawler_crawl.append_runtime_watchdog_stop_event(
+    result = process.append_runtime_watchdog_stop_event(
         state_path,
         timeout_reason=timeout_reason,
         platform_key="xhs",
@@ -1989,7 +1990,7 @@ def test_watchdog_does_not_replace_existing_terminal_event(tmp_path: Path) -> No
         },
     )
 
-    result = mediacrawler_crawl.append_runtime_watchdog_stop_event(
+    result = process.append_runtime_watchdog_stop_event(
         state_path,
         timeout_reason="no_progress_timeout",
         platform_key="weibo",

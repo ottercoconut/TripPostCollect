@@ -17,7 +17,7 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page, Request, Response, TimeoutError as PlaywrightTimeoutError
 
-from browser_runtime import browser_launch_environment, browser_runtime_args
+from trippostcollect.runtime.browser_runtime import browser_launch_environment, browser_runtime_args
 from ctf_browser_resilience import (
     clean_douyin_profile_cookies,
     clear_douyin_context_cookies,
