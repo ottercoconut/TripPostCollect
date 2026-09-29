@@ -30,6 +30,15 @@ from urllib.request import Request, urlopen
 
 from playwright.async_api import async_playwright
 
+from trippostcollect.runtime.cookies import (
+    platform_cookie_url as platform_cookie_url,
+    required_cookie_names as required_cookie_names,
+    cookie_names_from_header as cookie_names_from_header,
+    cookies_to_header as cookies_to_header,
+    load_cookie_snapshot as load_cookie_snapshot,
+    public_cookie_export as public_cookie_export,
+)
+
 from trippostcollect.artifacts.image_candidates import (
     ImageCandidate,
     content_image_candidates,
@@ -650,80 +659,6 @@ def profile_dir_for(platform_key: str) -> Path:
 
 def cookie_snapshot_path(platform_key: str) -> Path:
     return paths.platform_cookie_snapshot_path(platform_key)
-
-
-def platform_cookie_url(platform_key: str) -> str:
-    return {
-        "bilibili": "https://www.bilibili.com/",
-        "weibo": "https://m.weibo.cn/",
-        "xhs": "https://www.xiaohongshu.com/",
-        "douyin": "https://www.douyin.com/",
-        "zhihu": "https://www.zhihu.com/",
-    }[platform_key]
-
-
-def required_cookie_names(platform_key: str) -> tuple[str, ...]:
-    if platform_key == "zhihu":
-        return ("d_c0", "z_c0")
-    return ()
-
-
-def cookie_names_from_header(cookie_header: str) -> list[str]:
-    names = []
-    for item in cookie_header.split(";"):
-        if "=" not in item:
-            continue
-        name = item.split("=", 1)[0].strip()
-        if name:
-            names.append(name)
-    return sorted(set(names))
-
-
-def cookies_to_header(cookies: list[dict[str, Any]]) -> str:
-    pairs = []
-    now = time.time()
-    for item in cookies:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        value = item.get("value")
-        if not name or value in (None, ""):
-            continue
-        expires = item.get("expires")
-        if isinstance(expires, (int, float)) and expires > 0 and expires < now:
-            continue
-        pairs.append(f"{name}={value}")
-    return ";".join(pairs)
-
-
-def load_cookie_snapshot(platform_key: str) -> dict[str, Any] | None:
-    path = cookie_snapshot_path(platform_key)
-    if not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    cookies = payload.get("cookies")
-    if not isinstance(cookies, list):
-        return None
-    cookie_header = cookies_to_header(cookies)
-    names = cookie_names_from_header(cookie_header)
-    missing = [name for name in required_cookie_names(platform_key) if name not in names]
-    if missing:
-        return None
-    return {
-        "cookie_header": cookie_header,
-        "source": "snapshot",
-        "snapshot_path": str(path),
-        "saved_at": payload.get("saved_at"),
-        "cookie_names": names,
-        "required_cookie_names": list(required_cookie_names(platform_key)),
-    }
-
-
-def public_cookie_export(cookie_export: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in cookie_export.items() if key != "cookie_header"}
 
 
 def export_profile_cookies(platform_key: str, browser_path: str | None) -> dict[str, Any] | None:
