@@ -73,24 +73,26 @@ from trippostcollect.artifacts.image_persistence import (
     prepare_image_rows as _prepare_image_rows,
     replace_image_rows,
 )
+from trippostcollect.artifacts.evidence import write_evidence
 from trippostcollect.artifacts.image_proxy import (
     RemoteImageFetchError,
     RemoteImagePreview,
     remote_image_failure_code,
     fetch_remote_image_bytes,
 )
-from crawl_policy import (
+from trippostcollect.application.policy import (
     CrawlPolicyBlocked,
     clear_site_policy_state,
     record_site_cooldown,
     site_request_guard,
 )
 from execution_state import FrozenExecutionState
-from failure_classifier import classify_attempt
-from human_flow import install_runtime_hints
-from mediacrawler_behavior import (
+from trippostcollect.application.failures import classify_attempt
+from trippostcollect.runtime.human_flow import install_runtime_hints
+from trippostcollect.runtime.behavior import (
     HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS,
     behavior_evidence_valid,
+    load_behavior_evidence as load_behavior_evidence,
     run_page_behavior,
 )
 from trippostcollect.core.paths import (
@@ -737,23 +739,6 @@ raise SystemExit(asyncio.run(main()))
     }
 
 
-def load_behavior_evidence(path: str | Path) -> dict[str, Any]:
-    candidate = Path(path).expanduser()
-    try:
-        value = json.loads(candidate.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {
-            "status": "missing",
-            "evidence_path": str(candidate),
-            "error": "behavior_evidence_missing_or_invalid",
-        }
-    return value if isinstance(value, dict) else {
-        "status": "invalid",
-        "evidence_path": str(candidate),
-        "error": "behavior_evidence_not_an_object",
-    }
-
-
 async def run_bilibili_behavior_session(
     args: argparse.Namespace,
     evidence_path: Path,
@@ -805,6 +790,7 @@ async def run_bilibili_behavior_session(
                 platform_key="bilibili",
                 evidence_path=evidence_path,
                 profile_name="social_high_risk",
+                write_evidence=write_evidence,
             )
             cookies = await context.cookies([platform_cookie_url("bilibili")])
         finally:

@@ -25,8 +25,8 @@ from ctf_browser_resilience import (
     navigate_with_commit_and_readiness,
 )
 from ctf_scrapling_preflight import run_scrapling_static_preflight, should_preflight
-from crawl_policy import CrawlPolicyBlocked, site_request_guard, varied_wait_seconds
-from human_flow import dwell_on_detail, install_runtime_hints, load_behavior_profile
+from trippostcollect.application.policy import CrawlPolicyBlocked, site_request_guard, varied_wait_seconds
+from trippostcollect.runtime.human_flow import dwell_on_detail, install_runtime_hints, load_behavior_profile
 from trippostcollect.core.paths import CTF_BROWSER_PROFILE_ROOT, CTF_RESOURCE_OUTPUT, PROJECT_ROOT, ensure_dir
 from trippostcollect.platforms.registry import SITES, get_site, site_keys
 

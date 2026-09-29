@@ -20,7 +20,8 @@ if str(SCRIPTS) not in sys.path:
 
 mediacrawler_behavior = import_module("mediacrawler_behavior")
 mediacrawler_crawl = import_module("mediacrawler_crawl")
-human_flow = import_module("human_flow")
+runtime_behavior = import_module("trippostcollect.runtime.behavior")
+human_flow = import_module("trippostcollect.runtime.human_flow")
 
 
 def valid_fingerprint(*, webdriver=None) -> dict:
@@ -257,7 +258,7 @@ async def fake_dwell_on_list(page, profile, log) -> None:
 
 @pytest.mark.asyncio
 async def test_behavior_stage_writes_complete_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(mediacrawler_behavior, "dwell_on_list", fake_dwell_on_list)
+    monkeypatch.setattr(runtime_behavior, "dwell_on_list", fake_dwell_on_list)
     evidence_path = tmp_path / "behavior.json"
 
     evidence = await mediacrawler_behavior.run_page_behavior(
@@ -371,7 +372,7 @@ async def test_xhs_search_login_wait_stops_on_sms_terminal_without_reopening_pag
 
 @pytest.mark.asyncio
 async def test_visible_challenge_fails_behavior_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(mediacrawler_behavior, "dwell_on_list", fake_dwell_on_list)
+    monkeypatch.setattr(runtime_behavior, "dwell_on_list", fake_dwell_on_list)
     monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.001)
     monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_WAIT_SECONDS", 0.1)
     evidence_path = tmp_path / "behavior.json"
@@ -407,7 +408,7 @@ async def test_xhs_platform_security_limit_fails_closed(
     text: str,
     url: str,
 ) -> None:
-    monkeypatch.setattr(mediacrawler_behavior, "dwell_on_list", fake_dwell_on_list)
+    monkeypatch.setattr(runtime_behavior, "dwell_on_list", fake_dwell_on_list)
     evidence_path = tmp_path / "behavior.json"
     page = FakePage(text)
     page.url = url
@@ -617,8 +618,9 @@ async def test_xhs_dwell_stops_when_rate_limit_appears(
         await asyncio.Event().wait()
 
     monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", changing_page_state)
-    monkeypatch.setattr(mediacrawler_behavior, "dwell_on_list", blocking_dwell)
-    monkeypatch.setattr(mediacrawler_behavior, "XHS_VISIBLE_CHECK_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(runtime_behavior, "visible_page_state", changing_page_state)
+    monkeypatch.setattr(runtime_behavior, "dwell_on_list", blocking_dwell)
+    monkeypatch.setattr(runtime_behavior, "XHS_VISIBLE_CHECK_INTERVAL_SECONDS", 0.001)
     evidence_path = tmp_path / "behavior.json"
 
     with pytest.raises(RuntimeError, match="rate_limited_detected"):
@@ -640,7 +642,7 @@ async def test_sms_login_code_text_is_not_a_security_challenge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(mediacrawler_behavior, "dwell_on_list", fake_dwell_on_list)
+    monkeypatch.setattr(runtime_behavior, "dwell_on_list", fake_dwell_on_list)
     evidence = await mediacrawler_behavior.run_page_behavior(
         FakePage("手机号登录 获取验证码"),
         platform_key="xhs",
@@ -671,7 +673,7 @@ async def test_xhs_login_required_never_runs_behavior(
         }
 
     monkeypatch.setattr(mediacrawler_behavior, "wait_for_xhs_search_ready", not_ready)
-    monkeypatch.setattr(mediacrawler_behavior, "dwell_on_list", fake_dwell_on_list)
+    monkeypatch.setattr(runtime_behavior, "dwell_on_list", fake_dwell_on_list)
     evidence_path = tmp_path / "behavior.json"
 
     with pytest.raises(RuntimeError, match="login_required_detected"):
@@ -713,7 +715,7 @@ async def test_xhs_guarded_request_pause_is_persisted(tmp_path: Path, monkeypatc
 
     evidence_path = tmp_path / "behavior.json"
     evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
-    monkeypatch.setattr(mediacrawler_behavior, "REQUEST_RANDOM", FixedRandom())
+    monkeypatch.setattr(runtime_behavior, "REQUEST_RANDOM", FixedRandom())
     monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", fake_sleep)
 
     event = await mediacrawler_behavior.run_guarded_request_pause(
