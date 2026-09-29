@@ -1,0 +1,835 @@
+{
+  "__str2bool__": {
+    "false": [
+      "no",
+      "false",
+      "f",
+      "n",
+      "0",
+      "NO",
+      "False",
+      "F",
+      "N"
+    ],
+    "true": [
+      "yes",
+      "true",
+      "t",
+      "y",
+      "1",
+      "YES",
+      "True",
+      "T",
+      "Y"
+    ]
+  },
+  "douyin_post_repair": {
+    "changed": {
+      "CDP_HEADLESS": true,
+      "CRAWLER_TYPE": "detail",
+      "DY_SPECIFIED_ID_LIST": [
+        "7000000000000000001"
+      ],
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "HEADLESS": true,
+      "KEYWORDS": "青岛旅游",
+      "LOGIN_TYPE": "cookie",
+      "PLATFORM": "dy",
+      "SAVE_DATA_PATH": "<TMP>/douyin_post_repair/douyin/data"
+    },
+    "namespace": {
+      "cookies": "",
+      "creator_id": "",
+      "enable_cdp_mode": false,
+      "get_comment": false,
+      "get_media": true,
+      "get_sub_comment": false,
+      "headless": true,
+      "init_db": null,
+      "keywords": "青岛旅游",
+      "lt": "cookie",
+      "platform": "dy",
+      "save_data_option": "jsonl",
+      "specified_id": "7000000000000000001",
+      "start": 1,
+      "type": "detail"
+    },
+    "written": {
+      "BILI_CREATOR_ID_LIST": [
+        "https://space.bilibili.com/434377496?spm_id_from=333.1007.0.0",
+        "20813884"
+      ],
+      "BILI_SPECIFIED_ID_LIST": [
+        "https://www.bilibili.com/video/BV1dwuKzmE26/?spm_id_from=333.1387.homepage.video_card.click",
+        "BV1Sz4y1U77N",
+        "BV14Q4y1n7jz"
+      ],
+      "CDP_HEADLESS": true,
+      "COOKIES": "",
+      "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES": 10,
+      "CRAWLER_MAX_NOTES_COUNT": 15,
+      "CRAWLER_TYPE": "detail",
+      "DY_CREATOR_ID_LIST": [
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main",
+        "MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE"
+      ],
+      "DY_SPECIFIED_ID_LIST": [
+        "7000000000000000001"
+      ],
+      "ENABLE_CDP_MODE": false,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "ENABLE_GET_SUB_COMMENTS": false,
+      "ENABLE_IP_PROXY": false,
+      "HEADLESS": true,
+      "IP_PROXY_POOL_COUNT": 2,
+      "IP_PROXY_PROVIDER_NAME": "kuaidaili",
+      "KEYWORDS": "青岛旅游",
+      "KS_CREATOR_ID_LIST": [
+        "https://www.kuaishou.com/profile/3xf79edg9msa85c",
+        "3x4sm73aye7jq7i"
+      ],
+      "KS_SPECIFIED_ID_LIST": [
+        "https://www.kuaishou.com/short-video/3x3zxz4mjrsc8ke?authorId=3x84qugg4ch9zhs&streamSource=search&area=searchxxnull&searchKey=python",
+        "3xf8enb8dbj6uig"
+      ],
+      "LOGIN_TYPE": "cookie",
+      "MAX_CONCURRENCY_NUM": 1,
+      "PLATFORM": "dy",
+      "SAVE_DATA_OPTION": "jsonl",
+      "SAVE_DATA_PATH": "<TMP>/douyin_post_repair/douyin/data",
+      "START_PAGE": 1,
+      "STATIC_PROXY_URL": "",
+      "TIEBA_CREATOR_URL_LIST": [
+        "https://tieba.baidu.com/home/main/?id=tb.1.7f139e2e.6CyEwxu3VJruH_-QqpCi6g&fr=frs"
+      ],
+      "TIEBA_SPECIFIED_ID_LIST": [],
+      "WEIBO_CREATOR_ID_LIST": [
+        "5756404150"
+      ],
+      "WEIBO_SPECIFIED_ID_LIST": [
+        "4982041758140155"
+      ],
+      "XHS_CREATOR_ID_LIST": [
+        "https://www.xiaohongshu.com/user/profile/5f58bd990000000001003753?xsec_token=ABYVg1evluJZZzpMX-VWzchxQ1qSNVW3r-jOEnKqMcgZw=&xsec_source=pc_search"
+      ],
+      "XHS_SPECIFIED_NOTE_URL_LIST": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ],
+      "ZHIHU_SPECIFIED_ID_LIST": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  },
+  "douyin_search_discovery": {
+    "changed": {
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "KEYWORDS": "青岛旅游",
+      "LOGIN_TYPE": "cookie",
+      "PLATFORM": "dy",
+      "SAVE_DATA_PATH": "<TMP>/douyin_search_discovery/douyin/data",
+      "START_PAGE": 3
+    },
+    "namespace": {
+      "cookies": "",
+      "creator_id": "",
+      "enable_cdp_mode": false,
+      "get_comment": false,
+      "get_media": true,
+      "get_sub_comment": false,
+      "headless": false,
+      "init_db": null,
+      "keywords": "青岛旅游",
+      "lt": "cookie",
+      "platform": "dy",
+      "save_data_option": "jsonl",
+      "specified_id": "",
+      "start": 3,
+      "type": "search"
+    },
+    "written": {
+      "BILI_CREATOR_ID_LIST": [
+        "https://space.bilibili.com/434377496?spm_id_from=333.1007.0.0",
+        "20813884"
+      ],
+      "BILI_SPECIFIED_ID_LIST": [
+        "https://www.bilibili.com/video/BV1dwuKzmE26/?spm_id_from=333.1387.homepage.video_card.click",
+        "BV1Sz4y1U77N",
+        "BV14Q4y1n7jz"
+      ],
+      "CDP_HEADLESS": false,
+      "COOKIES": "",
+      "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES": 10,
+      "CRAWLER_MAX_NOTES_COUNT": 15,
+      "CRAWLER_TYPE": "search",
+      "DY_CREATOR_ID_LIST": [
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main",
+        "MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE"
+      ],
+      "DY_SPECIFIED_ID_LIST": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ],
+      "ENABLE_CDP_MODE": false,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "ENABLE_GET_SUB_COMMENTS": false,
+      "ENABLE_IP_PROXY": false,
+      "HEADLESS": false,
+      "IP_PROXY_POOL_COUNT": 2,
+      "IP_PROXY_PROVIDER_NAME": "kuaidaili",
+      "KEYWORDS": "青岛旅游",
+      "KS_CREATOR_ID_LIST": [
+        "https://www.kuaishou.com/profile/3xf79edg9msa85c",
+        "3x4sm73aye7jq7i"
+      ],
+      "KS_SPECIFIED_ID_LIST": [
+        "https://www.kuaishou.com/short-video/3x3zxz4mjrsc8ke?authorId=3x84qugg4ch9zhs&streamSource=search&area=searchxxnull&searchKey=python",
+        "3xf8enb8dbj6uig"
+      ],
+      "LOGIN_TYPE": "cookie",
+      "MAX_CONCURRENCY_NUM": 1,
+      "PLATFORM": "dy",
+      "SAVE_DATA_OPTION": "jsonl",
+      "SAVE_DATA_PATH": "<TMP>/douyin_search_discovery/douyin/data",
+      "START_PAGE": 3,
+      "STATIC_PROXY_URL": "",
+      "TIEBA_CREATOR_URL_LIST": [
+        "https://tieba.baidu.com/home/main/?id=tb.1.7f139e2e.6CyEwxu3VJruH_-QqpCi6g&fr=frs"
+      ],
+      "TIEBA_SPECIFIED_ID_LIST": [],
+      "WEIBO_CREATOR_ID_LIST": [
+        "5756404150"
+      ],
+      "WEIBO_SPECIFIED_ID_LIST": [
+        "4982041758140155"
+      ],
+      "XHS_CREATOR_ID_LIST": [
+        "https://www.xiaohongshu.com/user/profile/5f58bd990000000001003753?xsec_token=ABYVg1evluJZZzpMX-VWzchxQ1qSNVW3r-jOEnKqMcgZw=&xsec_source=pc_search"
+      ],
+      "XHS_SPECIFIED_NOTE_URL_LIST": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ],
+      "ZHIHU_SPECIFIED_ID_LIST": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  },
+  "weibo_post_repair": {
+    "changed": {
+      "CDP_HEADLESS": true,
+      "CRAWLER_TYPE": "detail",
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "HEADLESS": true,
+      "KEYWORDS": "青岛旅游",
+      "LOGIN_TYPE": "cookie",
+      "PLATFORM": "wb",
+      "SAVE_DATA_PATH": "<TMP>/weibo_post_repair/weibo/data",
+      "WEIBO_SPECIFIED_ID_LIST": [
+        "5000000000000001"
+      ]
+    },
+    "namespace": {
+      "cookies": "",
+      "creator_id": "",
+      "enable_cdp_mode": false,
+      "get_comment": false,
+      "get_media": true,
+      "get_sub_comment": false,
+      "headless": true,
+      "init_db": null,
+      "keywords": "青岛旅游",
+      "lt": "cookie",
+      "platform": "wb",
+      "save_data_option": "jsonl",
+      "specified_id": "5000000000000001",
+      "start": 1,
+      "type": "detail"
+    },
+    "written": {
+      "BILI_CREATOR_ID_LIST": [
+        "https://space.bilibili.com/434377496?spm_id_from=333.1007.0.0",
+        "20813884"
+      ],
+      "BILI_SPECIFIED_ID_LIST": [
+        "https://www.bilibili.com/video/BV1dwuKzmE26/?spm_id_from=333.1387.homepage.video_card.click",
+        "BV1Sz4y1U77N",
+        "BV14Q4y1n7jz"
+      ],
+      "CDP_HEADLESS": true,
+      "COOKIES": "",
+      "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES": 10,
+      "CRAWLER_MAX_NOTES_COUNT": 15,
+      "CRAWLER_TYPE": "detail",
+      "DY_CREATOR_ID_LIST": [
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main",
+        "MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE"
+      ],
+      "DY_SPECIFIED_ID_LIST": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ],
+      "ENABLE_CDP_MODE": false,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "ENABLE_GET_SUB_COMMENTS": false,
+      "ENABLE_IP_PROXY": false,
+      "HEADLESS": true,
+      "IP_PROXY_POOL_COUNT": 2,
+      "IP_PROXY_PROVIDER_NAME": "kuaidaili",
+      "KEYWORDS": "青岛旅游",
+      "KS_CREATOR_ID_LIST": [
+        "https://www.kuaishou.com/profile/3xf79edg9msa85c",
+        "3x4sm73aye7jq7i"
+      ],
+      "KS_SPECIFIED_ID_LIST": [
+        "https://www.kuaishou.com/short-video/3x3zxz4mjrsc8ke?authorId=3x84qugg4ch9zhs&streamSource=search&area=searchxxnull&searchKey=python",
+        "3xf8enb8dbj6uig"
+      ],
+      "LOGIN_TYPE": "cookie",
+      "MAX_CONCURRENCY_NUM": 1,
+      "PLATFORM": "wb",
+      "SAVE_DATA_OPTION": "jsonl",
+      "SAVE_DATA_PATH": "<TMP>/weibo_post_repair/weibo/data",
+      "START_PAGE": 1,
+      "STATIC_PROXY_URL": "",
+      "TIEBA_CREATOR_URL_LIST": [
+        "https://tieba.baidu.com/home/main/?id=tb.1.7f139e2e.6CyEwxu3VJruH_-QqpCi6g&fr=frs"
+      ],
+      "TIEBA_SPECIFIED_ID_LIST": [],
+      "WEIBO_CREATOR_ID_LIST": [
+        "5756404150"
+      ],
+      "WEIBO_SPECIFIED_ID_LIST": [
+        "5000000000000001"
+      ],
+      "XHS_CREATOR_ID_LIST": [
+        "https://www.xiaohongshu.com/user/profile/5f58bd990000000001003753?xsec_token=ABYVg1evluJZZzpMX-VWzchxQ1qSNVW3r-jOEnKqMcgZw=&xsec_source=pc_search"
+      ],
+      "XHS_SPECIFIED_NOTE_URL_LIST": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ],
+      "ZHIHU_SPECIFIED_ID_LIST": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  },
+  "weibo_search": {
+    "changed": {
+      "CDP_HEADLESS": true,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "HEADLESS": true,
+      "KEYWORDS": "青岛旅游",
+      "LOGIN_TYPE": "cookie",
+      "PLATFORM": "wb",
+      "SAVE_DATA_PATH": "<TMP>/weibo_search/weibo/data"
+    },
+    "namespace": {
+      "cookies": "",
+      "creator_id": "",
+      "enable_cdp_mode": false,
+      "get_comment": false,
+      "get_media": true,
+      "get_sub_comment": false,
+      "headless": true,
+      "init_db": null,
+      "keywords": "青岛旅游",
+      "lt": "cookie",
+      "platform": "wb",
+      "save_data_option": "jsonl",
+      "specified_id": "",
+      "start": 1,
+      "type": "search"
+    },
+    "written": {
+      "BILI_CREATOR_ID_LIST": [
+        "https://space.bilibili.com/434377496?spm_id_from=333.1007.0.0",
+        "20813884"
+      ],
+      "BILI_SPECIFIED_ID_LIST": [
+        "https://www.bilibili.com/video/BV1dwuKzmE26/?spm_id_from=333.1387.homepage.video_card.click",
+        "BV1Sz4y1U77N",
+        "BV14Q4y1n7jz"
+      ],
+      "CDP_HEADLESS": true,
+      "COOKIES": "",
+      "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES": 10,
+      "CRAWLER_MAX_NOTES_COUNT": 15,
+      "CRAWLER_TYPE": "search",
+      "DY_CREATOR_ID_LIST": [
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main",
+        "MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE"
+      ],
+      "DY_SPECIFIED_ID_LIST": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ],
+      "ENABLE_CDP_MODE": false,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "ENABLE_GET_SUB_COMMENTS": false,
+      "ENABLE_IP_PROXY": false,
+      "HEADLESS": true,
+      "IP_PROXY_POOL_COUNT": 2,
+      "IP_PROXY_PROVIDER_NAME": "kuaidaili",
+      "KEYWORDS": "青岛旅游",
+      "KS_CREATOR_ID_LIST": [
+        "https://www.kuaishou.com/profile/3xf79edg9msa85c",
+        "3x4sm73aye7jq7i"
+      ],
+      "KS_SPECIFIED_ID_LIST": [
+        "https://www.kuaishou.com/short-video/3x3zxz4mjrsc8ke?authorId=3x84qugg4ch9zhs&streamSource=search&area=searchxxnull&searchKey=python",
+        "3xf8enb8dbj6uig"
+      ],
+      "LOGIN_TYPE": "cookie",
+      "MAX_CONCURRENCY_NUM": 1,
+      "PLATFORM": "wb",
+      "SAVE_DATA_OPTION": "jsonl",
+      "SAVE_DATA_PATH": "<TMP>/weibo_search/weibo/data",
+      "START_PAGE": 1,
+      "STATIC_PROXY_URL": "",
+      "TIEBA_CREATOR_URL_LIST": [
+        "https://tieba.baidu.com/home/main/?id=tb.1.7f139e2e.6CyEwxu3VJruH_-QqpCi6g&fr=frs"
+      ],
+      "TIEBA_SPECIFIED_ID_LIST": [],
+      "WEIBO_CREATOR_ID_LIST": [
+        "5756404150"
+      ],
+      "WEIBO_SPECIFIED_ID_LIST": [
+        "4982041758140155"
+      ],
+      "XHS_CREATOR_ID_LIST": [
+        "https://www.xiaohongshu.com/user/profile/5f58bd990000000001003753?xsec_token=ABYVg1evluJZZzpMX-VWzchxQ1qSNVW3r-jOEnKqMcgZw=&xsec_source=pc_search"
+      ],
+      "XHS_SPECIFIED_NOTE_URL_LIST": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ],
+      "ZHIHU_SPECIFIED_ID_LIST": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  },
+  "xhs_repair": {
+    "changed": {
+      "CDP_HEADLESS": true,
+      "CRAWLER_TYPE": "detail",
+      "ENABLE_CDP_MODE": true,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "HEADLESS": true,
+      "KEYWORDS": "青岛旅游",
+      "LOGIN_TYPE": "cookie",
+      "SAVE_DATA_PATH": "<TMP>/xhs_repair/xhs/data",
+      "XHS_SPECIFIED_NOTE_URL_LIST": [
+        "https://www.xiaohongshu.com/explore/abc"
+      ]
+    },
+    "namespace": {
+      "cookies": "",
+      "creator_id": "",
+      "enable_cdp_mode": true,
+      "get_comment": false,
+      "get_media": true,
+      "get_sub_comment": false,
+      "headless": true,
+      "init_db": null,
+      "keywords": "青岛旅游",
+      "lt": "cookie",
+      "platform": "xhs",
+      "save_data_option": "jsonl",
+      "specified_id": "https://www.xiaohongshu.com/explore/abc",
+      "start": 1,
+      "type": "detail"
+    },
+    "written": {
+      "BILI_CREATOR_ID_LIST": [
+        "https://space.bilibili.com/434377496?spm_id_from=333.1007.0.0",
+        "20813884"
+      ],
+      "BILI_SPECIFIED_ID_LIST": [
+        "https://www.bilibili.com/video/BV1dwuKzmE26/?spm_id_from=333.1387.homepage.video_card.click",
+        "BV1Sz4y1U77N",
+        "BV14Q4y1n7jz"
+      ],
+      "CDP_HEADLESS": true,
+      "COOKIES": "",
+      "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES": 10,
+      "CRAWLER_MAX_NOTES_COUNT": 15,
+      "CRAWLER_TYPE": "detail",
+      "DY_CREATOR_ID_LIST": [
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main",
+        "MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE"
+      ],
+      "DY_SPECIFIED_ID_LIST": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ],
+      "ENABLE_CDP_MODE": true,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "ENABLE_GET_SUB_COMMENTS": false,
+      "ENABLE_IP_PROXY": false,
+      "HEADLESS": true,
+      "IP_PROXY_POOL_COUNT": 2,
+      "IP_PROXY_PROVIDER_NAME": "kuaidaili",
+      "KEYWORDS": "青岛旅游",
+      "KS_CREATOR_ID_LIST": [
+        "https://www.kuaishou.com/profile/3xf79edg9msa85c",
+        "3x4sm73aye7jq7i"
+      ],
+      "KS_SPECIFIED_ID_LIST": [
+        "https://www.kuaishou.com/short-video/3x3zxz4mjrsc8ke?authorId=3x84qugg4ch9zhs&streamSource=search&area=searchxxnull&searchKey=python",
+        "3xf8enb8dbj6uig"
+      ],
+      "LOGIN_TYPE": "cookie",
+      "MAX_CONCURRENCY_NUM": 1,
+      "PLATFORM": "xhs",
+      "SAVE_DATA_OPTION": "jsonl",
+      "SAVE_DATA_PATH": "<TMP>/xhs_repair/xhs/data",
+      "START_PAGE": 1,
+      "STATIC_PROXY_URL": "",
+      "TIEBA_CREATOR_URL_LIST": [
+        "https://tieba.baidu.com/home/main/?id=tb.1.7f139e2e.6CyEwxu3VJruH_-QqpCi6g&fr=frs"
+      ],
+      "TIEBA_SPECIFIED_ID_LIST": [],
+      "WEIBO_CREATOR_ID_LIST": [
+        "5756404150"
+      ],
+      "WEIBO_SPECIFIED_ID_LIST": [
+        "4982041758140155"
+      ],
+      "XHS_CREATOR_ID_LIST": [
+        "https://www.xiaohongshu.com/user/profile/5f58bd990000000001003753?xsec_token=ABYVg1evluJZZzpMX-VWzchxQ1qSNVW3r-jOEnKqMcgZw=&xsec_source=pc_search"
+      ],
+      "XHS_SPECIFIED_NOTE_URL_LIST": [
+        "https://www.xiaohongshu.com/explore/abc"
+      ],
+      "ZHIHU_SPECIFIED_ID_LIST": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  },
+  "xhs_search_qrcode": {
+    "changed": {
+      "ENABLE_CDP_MODE": true,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "KEYWORDS": "青岛旅游",
+      "SAVE_DATA_PATH": "<TMP>/xhs_search_qrcode/xhs/data"
+    },
+    "namespace": {
+      "cookies": "",
+      "creator_id": "",
+      "enable_cdp_mode": true,
+      "get_comment": false,
+      "get_media": true,
+      "get_sub_comment": false,
+      "headless": false,
+      "init_db": null,
+      "keywords": "青岛旅游",
+      "lt": "qrcode",
+      "platform": "xhs",
+      "save_data_option": "jsonl",
+      "specified_id": "",
+      "start": 1,
+      "type": "search"
+    },
+    "written": {
+      "BILI_CREATOR_ID_LIST": [
+        "https://space.bilibili.com/434377496?spm_id_from=333.1007.0.0",
+        "20813884"
+      ],
+      "BILI_SPECIFIED_ID_LIST": [
+        "https://www.bilibili.com/video/BV1dwuKzmE26/?spm_id_from=333.1387.homepage.video_card.click",
+        "BV1Sz4y1U77N",
+        "BV14Q4y1n7jz"
+      ],
+      "CDP_HEADLESS": false,
+      "COOKIES": "",
+      "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES": 10,
+      "CRAWLER_MAX_NOTES_COUNT": 15,
+      "CRAWLER_TYPE": "search",
+      "DY_CREATOR_ID_LIST": [
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main",
+        "MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE"
+      ],
+      "DY_SPECIFIED_ID_LIST": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ],
+      "ENABLE_CDP_MODE": true,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "ENABLE_GET_SUB_COMMENTS": false,
+      "ENABLE_IP_PROXY": false,
+      "HEADLESS": false,
+      "IP_PROXY_POOL_COUNT": 2,
+      "IP_PROXY_PROVIDER_NAME": "kuaidaili",
+      "KEYWORDS": "青岛旅游",
+      "KS_CREATOR_ID_LIST": [
+        "https://www.kuaishou.com/profile/3xf79edg9msa85c",
+        "3x4sm73aye7jq7i"
+      ],
+      "KS_SPECIFIED_ID_LIST": [
+        "https://www.kuaishou.com/short-video/3x3zxz4mjrsc8ke?authorId=3x84qugg4ch9zhs&streamSource=search&area=searchxxnull&searchKey=python",
+        "3xf8enb8dbj6uig"
+      ],
+      "LOGIN_TYPE": "qrcode",
+      "MAX_CONCURRENCY_NUM": 1,
+      "PLATFORM": "xhs",
+      "SAVE_DATA_OPTION": "jsonl",
+      "SAVE_DATA_PATH": "<TMP>/xhs_search_qrcode/xhs/data",
+      "START_PAGE": 1,
+      "STATIC_PROXY_URL": "",
+      "TIEBA_CREATOR_URL_LIST": [
+        "https://tieba.baidu.com/home/main/?id=tb.1.7f139e2e.6CyEwxu3VJruH_-QqpCi6g&fr=frs"
+      ],
+      "TIEBA_SPECIFIED_ID_LIST": [],
+      "WEIBO_CREATOR_ID_LIST": [
+        "5756404150"
+      ],
+      "WEIBO_SPECIFIED_ID_LIST": [
+        "4982041758140155"
+      ],
+      "XHS_CREATOR_ID_LIST": [
+        "https://www.xiaohongshu.com/user/profile/5f58bd990000000001003753?xsec_token=ABYVg1evluJZZzpMX-VWzchxQ1qSNVW3r-jOEnKqMcgZw=&xsec_source=pc_search"
+      ],
+      "XHS_SPECIFIED_NOTE_URL_LIST": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ],
+      "ZHIHU_SPECIFIED_ID_LIST": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  },
+  "zhihu_detail": {
+    "changed": {
+      "CDP_HEADLESS": true,
+      "CRAWLER_TYPE": "detail",
+      "ENABLE_CDP_MODE": true,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "HEADLESS": true,
+      "KEYWORDS": "青岛旅游",
+      "LOGIN_TYPE": "cookie",
+      "PLATFORM": "zhihu",
+      "SAVE_DATA_PATH": "<TMP>/zhihu_detail/zhihu/data",
+      "ZHIHU_SPECIFIED_ID_LIST": [
+        "https://www.zhihu.com/question/1/answer/2"
+      ]
+    },
+    "namespace": {
+      "cookies": "",
+      "creator_id": "",
+      "enable_cdp_mode": true,
+      "get_comment": false,
+      "get_media": true,
+      "get_sub_comment": false,
+      "headless": true,
+      "init_db": null,
+      "keywords": "青岛旅游",
+      "lt": "cookie",
+      "platform": "zhihu",
+      "save_data_option": "jsonl",
+      "specified_id": "https://www.zhihu.com/question/1/answer/2",
+      "start": 1,
+      "type": "detail"
+    },
+    "written": {
+      "BILI_CREATOR_ID_LIST": [
+        "https://space.bilibili.com/434377496?spm_id_from=333.1007.0.0",
+        "20813884"
+      ],
+      "BILI_SPECIFIED_ID_LIST": [
+        "https://www.bilibili.com/video/BV1dwuKzmE26/?spm_id_from=333.1387.homepage.video_card.click",
+        "BV1Sz4y1U77N",
+        "BV14Q4y1n7jz"
+      ],
+      "CDP_HEADLESS": true,
+      "COOKIES": "",
+      "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES": 10,
+      "CRAWLER_MAX_NOTES_COUNT": 15,
+      "CRAWLER_TYPE": "detail",
+      "DY_CREATOR_ID_LIST": [
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main",
+        "MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE"
+      ],
+      "DY_SPECIFIED_ID_LIST": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ],
+      "ENABLE_CDP_MODE": true,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "ENABLE_GET_SUB_COMMENTS": false,
+      "ENABLE_IP_PROXY": false,
+      "HEADLESS": true,
+      "IP_PROXY_POOL_COUNT": 2,
+      "IP_PROXY_PROVIDER_NAME": "kuaidaili",
+      "KEYWORDS": "青岛旅游",
+      "KS_CREATOR_ID_LIST": [
+        "https://www.kuaishou.com/profile/3xf79edg9msa85c",
+        "3x4sm73aye7jq7i"
+      ],
+      "KS_SPECIFIED_ID_LIST": [
+        "https://www.kuaishou.com/short-video/3x3zxz4mjrsc8ke?authorId=3x84qugg4ch9zhs&streamSource=search&area=searchxxnull&searchKey=python",
+        "3xf8enb8dbj6uig"
+      ],
+      "LOGIN_TYPE": "cookie",
+      "MAX_CONCURRENCY_NUM": 1,
+      "PLATFORM": "zhihu",
+      "SAVE_DATA_OPTION": "jsonl",
+      "SAVE_DATA_PATH": "<TMP>/zhihu_detail/zhihu/data",
+      "START_PAGE": 1,
+      "STATIC_PROXY_URL": "",
+      "TIEBA_CREATOR_URL_LIST": [
+        "https://tieba.baidu.com/home/main/?id=tb.1.7f139e2e.6CyEwxu3VJruH_-QqpCi6g&fr=frs"
+      ],
+      "TIEBA_SPECIFIED_ID_LIST": [],
+      "WEIBO_CREATOR_ID_LIST": [
+        "5756404150"
+      ],
+      "WEIBO_SPECIFIED_ID_LIST": [
+        "4982041758140155"
+      ],
+      "XHS_CREATOR_ID_LIST": [
+        "https://www.xiaohongshu.com/user/profile/5f58bd990000000001003753?xsec_token=ABYVg1evluJZZzpMX-VWzchxQ1qSNVW3r-jOEnKqMcgZw=&xsec_source=pc_search"
+      ],
+      "XHS_SPECIFIED_NOTE_URL_LIST": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ],
+      "ZHIHU_SPECIFIED_ID_LIST": [
+        "https://www.zhihu.com/question/1/answer/2"
+      ]
+    }
+  },
+  "zhihu_search": {
+    "changed": {
+      "CDP_HEADLESS": true,
+      "ENABLE_CDP_MODE": true,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "HEADLESS": true,
+      "KEYWORDS": "青岛旅游",
+      "LOGIN_TYPE": "cookie",
+      "PLATFORM": "zhihu",
+      "SAVE_DATA_PATH": "<TMP>/zhihu_search/zhihu/data"
+    },
+    "namespace": {
+      "cookies": "",
+      "creator_id": "",
+      "enable_cdp_mode": true,
+      "get_comment": false,
+      "get_media": true,
+      "get_sub_comment": false,
+      "headless": true,
+      "init_db": null,
+      "keywords": "青岛旅游",
+      "lt": "cookie",
+      "platform": "zhihu",
+      "save_data_option": "jsonl",
+      "specified_id": "",
+      "start": 1,
+      "type": "search"
+    },
+    "written": {
+      "BILI_CREATOR_ID_LIST": [
+        "https://space.bilibili.com/434377496?spm_id_from=333.1007.0.0",
+        "20813884"
+      ],
+      "BILI_SPECIFIED_ID_LIST": [
+        "https://www.bilibili.com/video/BV1dwuKzmE26/?spm_id_from=333.1387.homepage.video_card.click",
+        "BV1Sz4y1U77N",
+        "BV14Q4y1n7jz"
+      ],
+      "CDP_HEADLESS": true,
+      "COOKIES": "",
+      "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES": 10,
+      "CRAWLER_MAX_NOTES_COUNT": 15,
+      "CRAWLER_TYPE": "search",
+      "DY_CREATOR_ID_LIST": [
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main",
+        "MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE"
+      ],
+      "DY_SPECIFIED_ID_LIST": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ],
+      "ENABLE_CDP_MODE": true,
+      "ENABLE_GET_COMMENTS": false,
+      "ENABLE_GET_MEIDAS": true,
+      "ENABLE_GET_SUB_COMMENTS": false,
+      "ENABLE_IP_PROXY": false,
+      "HEADLESS": true,
+      "IP_PROXY_POOL_COUNT": 2,
+      "IP_PROXY_PROVIDER_NAME": "kuaidaili",
+      "KEYWORDS": "青岛旅游",
+      "KS_CREATOR_ID_LIST": [
+        "https://www.kuaishou.com/profile/3xf79edg9msa85c",
+        "3x4sm73aye7jq7i"
+      ],
+      "KS_SPECIFIED_ID_LIST": [
+        "https://www.kuaishou.com/short-video/3x3zxz4mjrsc8ke?authorId=3x84qugg4ch9zhs&streamSource=search&area=searchxxnull&searchKey=python",
+        "3xf8enb8dbj6uig"
+      ],
+      "LOGIN_TYPE": "cookie",
+      "MAX_CONCURRENCY_NUM": 1,
+      "PLATFORM": "zhihu",
+      "SAVE_DATA_OPTION": "jsonl",
+      "SAVE_DATA_PATH": "<TMP>/zhihu_search/zhihu/data",
+      "START_PAGE": 1,
+      "STATIC_PROXY_URL": "",
+      "TIEBA_CREATOR_URL_LIST": [
+        "https://tieba.baidu.com/home/main/?id=tb.1.7f139e2e.6CyEwxu3VJruH_-QqpCi6g&fr=frs"
+      ],
+      "TIEBA_SPECIFIED_ID_LIST": [],
+      "WEIBO_CREATOR_ID_LIST": [
+        "5756404150"
+      ],
+      "WEIBO_SPECIFIED_ID_LIST": [
+        "4982041758140155"
+      ],
+      "XHS_CREATOR_ID_LIST": [
+        "https://www.xiaohongshu.com/user/profile/5f58bd990000000001003753?xsec_token=ABYVg1evluJZZzpMX-VWzchxQ1qSNVW3r-jOEnKqMcgZw=&xsec_source=pc_search"
+      ],
+      "XHS_SPECIFIED_NOTE_URL_LIST": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ],
+      "ZHIHU_SPECIFIED_ID_LIST": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  }
+}

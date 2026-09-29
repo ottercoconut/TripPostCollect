@@ -408,7 +408,7 @@ BrowserContext 意外关闭（`xhs_browser_context_closed_unexpected`）时，�
 
 ## 浏览器与行为证据
 
-Chrome HOME、Crashpad 和缓存由 `scripts/browser_runtime.py` 放在 `data/runtime/`，Chromium 使用 mock
+Chrome HOME、Crashpad 和缓存由 `src/trippostcollect/runtime/browser_runtime.py` 放在 `data/runtime/`，Chromium 使用 mock
 keychain。浏览器失败需区分：
 
 | 状态 | 含义 |

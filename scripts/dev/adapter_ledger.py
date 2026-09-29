@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 
 from adapter_ledger_rules import (
+    CLI_DEFINITION_SOURCES,
     ENTRYPOINTS,
     FORK_EXCLUDED_DIRS,
     FORK_EXCLUDED_PLATFORMS,
@@ -194,15 +195,21 @@ def build_inputs(root):
     return extract_inputs(files, read)
 
 
-def extract_inputs(files, read):
+def extract_inputs(files, read, *, definition_sources=None):
     """共用静态提取规则，调用方决定读取基线提交还是工作树。"""
     cli = {}
     for relative in ENTRYPOINTS:
-        tree = ast.parse(read(relative))
+        sources = (relative, *(definition_sources or {}).get(relative, ()))
+        nodes = [
+            node
+            for source in sources
+            for node in sorted(
+                ast.walk(ast.parse(read(source))),
+                key=lambda node: (getattr(node, "lineno", 0), getattr(node, "col_offset", 0)),
+            )
+        ]
         arguments = []
-        for node in sorted(
-            ast.walk(tree), key=lambda node: (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
-        ):
+        for node in nodes:
             if not (
                 isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"
             ):
@@ -246,7 +253,7 @@ def build_input_drift(root):
         path = root / relative
         return path.read_text(encoding="utf-8") if path.is_file() else ""
 
-    current = extract_inputs(files, read)
+    current = extract_inputs(files, read, definition_sources=CLI_DEFINITION_SOURCES)
     changed = {}
     for entry in sorted(baseline["cli"].keys() | current["cli"].keys()):
         before, after = baseline["cli"].get(entry, []), current["cli"].get(entry, [])
@@ -281,13 +288,18 @@ def imported_names(tree):
 
 
 def delegated_definition(node, imports, target_module):
-    """只识别单条 return 调用且经导入绑定能定位到目标模块的薄函数。"""
+    """只识别单条 return 或 return await 调用，且导入绑定指向目标模块。"""
     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or len(node.body) != 1:
         return None
     statement = node.body[0]
-    if not isinstance(statement, ast.Return) or not isinstance(statement.value, ast.Call):
+    if not isinstance(statement, ast.Return):
         return None
-    function = statement.value.func
+    value = statement.value
+    if isinstance(value, ast.Await):
+        value = value.value
+    if not isinstance(value, ast.Call):
+        return None
+    function = value.func
     parts = []
     while isinstance(function, ast.Attribute):
         parts.insert(0, function.attr)

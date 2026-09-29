@@ -13,7 +13,7 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, async_playwright
 
-from browser_runtime import browser_launch_environment, browser_runtime_args
+from trippostcollect.runtime.browser_runtime import browser_launch_environment, browser_runtime_args
 from trippostcollect.core import paths
 from trippostcollect.core.paths import (
     COOKIE_SNAPSHOT_FILENAME,
