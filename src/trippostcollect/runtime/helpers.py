@@ -26,6 +26,9 @@ import random
 import re
 import time
 import urllib.parse
+from urllib.parse import urlsplit, urlunsplit
+
+from trippostcollect.application.contracts import ImageStagingError
 from datetime import datetime, timezone
 from typing import Callable, Dict
 
@@ -111,3 +114,23 @@ def extract_url_params_to_dict(url: str) -> Dict:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def normalize_image_url(value: str) -> str:
+    text = str(value or "").strip().rstrip("\t\r\n ).];,，")
+    if text.startswith("//"):
+        text = f"https:{text}"
+    try:
+        parsed = urlsplit(text)
+    except ValueError as exc:
+        raise ImageStagingError("image_manifest_identity_mismatch", "invalid source URL") from exc
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ImageStagingError("image_manifest_identity_mismatch", "invalid source URL")
+    return urlunsplit(
+        (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, parsed.query, "")
+    )

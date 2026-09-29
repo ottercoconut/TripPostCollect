@@ -21,6 +21,7 @@
 """根解释器运行的选站 worker 入口。"""
 
 import io
+import os
 import sys
 from importlib import import_module
 
@@ -46,13 +47,15 @@ def configure(argv) -> WorkerInputs:
 
 def install_hooks() -> None:
     from mediacrawler_export_entrypoint import (
-        install_export_hook,
         install_xhs_repair_resilience,
         install_douyin_browser_detail_fallback,
         install_weibo_browser_detail_fallback,
     )
 
-    install_export_hook()
+    from trippostcollect.application.events import configure_batch_checkpoint
+    from trippostcollect.xhs.batch_checkpoint import ENABLED_ENV, publish_batch
+
+    configure_batch_checkpoint(publish_batch if os.environ.get(ENABLED_ENV) == "1" else None)
     install_xhs_repair_resilience()
     install_douyin_browser_detail_fallback()
     install_weibo_browser_detail_fallback()
