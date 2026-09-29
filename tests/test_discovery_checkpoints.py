@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from trippostcollect.platforms.bilibili import core as bilibili_core
+
 import json
 import sqlite3
 import subprocess
@@ -723,7 +725,7 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
         AsyncMock(return_value=({"cookie_header": ""}, behavior)),
     )
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
-    monkeypatch.setattr(mediacrawler_crawl, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
     requested_pages: list[int] = []
 
     def fetch_page(keyword, page, **kwargs):
@@ -806,14 +808,14 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
             0.0,
         )
 
-    monkeypatch.setattr(mediacrawler_crawl, "fetch_bilibili_article_page", fetch_page)
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_article_page", fetch_page)
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        bilibili_core,
         "fetch_bilibili_article_detail_with_retry",
         fetch_detail,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        bilibili_core,
         "fetch_bilibili_follower_count",
         fetch_followers,
     )
