@@ -23,10 +23,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable, Optional, Sequence, Type, TypeVar
+from typing import Callable, Mapping, Iterable, Optional, Sequence, Type, TypeVar
 
 
 class PlatformEnum(str, Enum):
@@ -154,3 +155,21 @@ def apply_to_config(inputs: WorkerInputs, config_module) -> None:
             "wb": "WEIBO_SPECIFIED_ID_LIST", "zhihu": "ZHIHU_SPECIFIED_ID_LIST",
         }[inputs.platform]
         setattr(config_module, field, specified_id_list)
+
+
+def env_int_reader(
+    name: str, default: int, *, environ: Mapping[str, str] = os.environ,
+) -> Callable[[], int]:
+    """绑定输入映射，调用时解析非负整数；不提前缓存操作起点的值。"""
+    def read() -> int:
+        try:
+            return max(0, int(environ.get(name, default)))
+        except (TypeError, ValueError):
+            return max(0, default)
+
+    return read
+
+
+def env_int(name: str, default: int, *, environ: Mapping[str, str]) -> int:
+    """供旧 fork 单条委托使用，读取与原调用发生在同一时点。"""
+    return env_int_reader(name, default, environ=environ)()
