@@ -1,0 +1,21 @@
+{
+  "fork_commit": "5a68eb5098fcd17308c7fe0b9d53916ae839b303",
+  "files": {
+    "media_platform/weibo/__init__.py": "9d09bfb303464cf56fb8882b1826548e5d99186232a9fce676bc2c41fee289fc",
+    "media_platform/weibo/core.py": "21ffe43003a91d34e02a3b8d3f33817b0c836ae614a3164cb13ddbf8a986f523",
+    "media_platform/weibo/client.py": "888cfbc18b6be6d0f96698b6de2904a686528ec89c675d00b3e1bc382a24de31",
+    "media_platform/weibo/exception.py": "064e86b6acff7f86836cfede925ad988a235e7b2313113793542a802a6e73120",
+    "media_platform/weibo/field.py": "0da0314a6d3d3c7ab80c50dbbd35b62e50e2927ae2afaecd03d13ff4e8fafa0f",
+    "media_platform/weibo/help.py": "25e090aa4e5a69c13c3b21af35edc50cb5d7cdffafadbfb8d78a68e520cf82d8",
+    "media_platform/weibo/login.py": "0b71bd0f44b2c006fae2e312b97ec77fbab58a2be8682157e6dfc2ea19deebc8",
+    "store/weibo/__init__.py": "0b1af9267e464aadc4712611ce2e79d4ee9b3576b3399a5b541cb21cdff67a30",
+    "store/weibo/_store_impl.py": "8affd8aa44fcec6d05ba3803c1243c53ce2a23d4122af2c73a2dac0b1c6e65f2",
+    "store/weibo/weibo_store_media.py": "74f275479895e8b870ed1f17cd807e09cfbbc76134645ccb31770d61d5fa3cdb",
+    "tools/image_manifest.py": "d3d2646ebb9117dd273bde445b3ff2ed53efab86603c7cdeb1fe9ff5ecbdb334",
+    "tools/time_util.py": "7aa699e3223529bed7190994c9b27dcf19a3c5291656b5a57a91deaf5ec5605a",
+    "database/models.py": "55ce87dda762dab9b40dbedc07cc3c53acc9ecb8aeffa0bc8b1433874a25419b",
+    "mediacrawler_export_entrypoint.py": "9b468b2f11d8ae5a1ee06398255e9aeb1e204d3353b39460690e44aedf378ff7",
+    "LICENSE": "aeff21de8609bec9d6e939bbbba7c2914ae0a6e7c9470ea7945c03f7d17a2a33"
+  },
+  "root_commit": "f5d85447c6047076908fbbcdd54169297f9881dc"
+}

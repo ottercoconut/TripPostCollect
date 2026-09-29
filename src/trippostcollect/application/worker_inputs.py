@@ -177,3 +177,28 @@ def env_int(name: str, default: int, *, environ: Mapping[str, str]) -> int:
 
 def _enabled() -> bool:
     return os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_ENABLED", "").strip() == "1"
+
+
+def weibo_input_readers(*, environ: Mapping[str, str] = os.environ):
+    """绑定微博原输入映射，各 reader 只在原操作起点读取。"""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        post_repair=lambda: environ.get("TRIPPOSTCOLLECT_POST_REPAIR") == "1",
+        detail_timeout=lambda: max(
+            5_000, int(environ.get("TRIPPOSTCOLLECT_WEIBO_BROWSER_DETAIL_TIMEOUT_MS", "30000")),
+        ),
+        refresh_max_pages=env_int_reader(
+            "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", 0, environ=environ,
+        ),
+        source_exhausted=lambda: environ.get("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED") == "1",
+        identity_scope=lambda: dict(
+            db_path=environ.get("TRIPPOSTCOLLECT_DB_PATH", ""),
+            xhs_target_key=environ.get("TRIPPOSTCOLLECT_XHS_DISCOVERY_TARGET_KEY", ""),
+            xhs_account_id=environ.get("TRIPPOSTCOLLECT_XHS_ACCOUNT_ID", ""),
+            xhs_fingerprint=environ.get("TRIPPOSTCOLLECT_XHS_DISCOVERY_QUERY_FINGERPRINT", ""),
+            job_id=environ.get("TRIPPOSTCOLLECT_DISCOVERY_JOB_ID", ""),
+            fingerprint=environ.get("TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT", ""),
+            resume_identities_path=environ.get("TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH", ""),
+        ),
+    )

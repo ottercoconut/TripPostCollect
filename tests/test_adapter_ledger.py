@@ -179,8 +179,14 @@ def test_fork_node_count_matches_ci_expectation() -> None:
     run_matrix = (ROOT / "scripts" / "ci" / "run_matrix.py").read_text()
     expected = int(run_matrix.split("FORK_EXPECTED_TESTS = ", 1)[1].split("\n", 1)[0])
     moved_files = {"tests/runtime/test_cdp_browser.py", "tests/runtime/test_cdp_browser_lifecycle.py"}
+    moved_files.update({
+        "tests/platforms/weibo/test_weibo_empty_search.py",
+        "tests/platforms/weibo/test_weibo_image_download.py",
+        "tests/platforms/weibo/test_weibo_no_user_info.py",
+        "tests/platforms/weibo/test_weibo_store.py",
+    })
     moved = [node for node in data["fork"]["nodes"] if node["target_file"] in moved_files]
-    assert len(moved) == 41
+    assert len(moved) == 65
     for node in moved:
         assert not (ROOT / node["source_file"]).exists()
         assert (ROOT / node["target_file"]).is_file()
