@@ -30,6 +30,9 @@ from trippostcollect.platforms import _fork_bridge
 from trippostcollect.runtime import worker
 
 
+_weibo_post_repair = False
+
+
 def configure(argv) -> WorkerInputs:
     # 保留上游 UTF-8 包装，避免非 UTF-8 终端输出中文失败。
     if sys.stdout and hasattr(sys.stdout, 'buffer'):
@@ -46,11 +49,12 @@ def configure(argv) -> WorkerInputs:
 
 
 def install_hooks() -> None:
+    global _weibo_post_repair
     from mediacrawler_export_entrypoint import (
         install_xhs_repair_resilience,
         install_douyin_browser_detail_fallback,
-        install_weibo_browser_detail_fallback,
     )
+    from trippostcollect.application.worker_inputs import weibo_input_readers
 
     from trippostcollect.application.events import configure_batch_checkpoint
     from trippostcollect.xhs.batch_checkpoint import ENABLED_ENV, publish_batch
@@ -58,13 +62,98 @@ def install_hooks() -> None:
     configure_batch_checkpoint(publish_batch if os.environ.get(ENABLED_ENV) == "1" else None)
     install_xhs_repair_resilience()
     install_douyin_browser_detail_fallback()
-    install_weibo_browser_detail_fallback()
+    # 原 hook 在这里读取修复开关；新客户端只接收该布尔值，不修改 fork 类。
+    _weibo_post_repair = weibo_input_readers().post_repair()
+
+
+def weibo_dependencies(config, *, post_repair=False):
+    """微博专属装配；配置快照、正式写出与环境读取均经端口提供。"""
+    import logging
+    from dataclasses import fields
+    from pathlib import Path
+
+    from trippostcollect.application.candidates import AdaptiveAccumulator
+    from trippostcollect.application.contracts import WeiboClientPorts, WeiboLoginPorts, WeiboPorts
+    from trippostcollect.application.events import append_worker_execution_event
+    from trippostcollect.application.worker_inputs import weibo_input_readers
+    from trippostcollect.artifacts.image_staging import PostImageStager
+    from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
+    from trippostcollect.core.paths import MEDIACRAWLER_DIR
+    from trippostcollect.db.discovery_read import existing_platform_identities
+    from trippostcollect.platforms.weibo.models import WeiboConfig
+    from trippostcollect.platforms.weibo.parser import weibo_source_asset_key
+    from trippostcollect.runtime import cookies, helpers, http, image_retry, login_helpers
+    from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
+    from trippostcollect.runtime.behavior import project_browser_args
+    # 共享行为桥含尚未迁站的条件调用与 env 读点，保持原位至 T09/T10。
+    from tools.trippostcollect_behavior import run_required_human_behavior
+
+    values = {field.name: getattr(config, field.name) for field in fields(WeiboConfig)}
+    values["WEIBO_SPECIFIED_ID_LIST"] = tuple(values["WEIBO_SPECIFIED_ID_LIST"])
+    options = WeiboConfig(**values)
+    browser_settings = CDPBrowserSettings(**{
+        field.name: getattr(config, field.name) for field in fields(CDPBrowserSettings)
+    })
+    readers = weibo_input_readers()
+    logger = logging.getLogger("MediaCrawler")
+
+    def accumulator():
+        return AdaptiveAccumulator(
+            platform="weibo", stagnation_basis="candidate_identity",
+            existing_identities=existing_platform_identities("weibo", **readers.identity_scope()),
+            event_sink=append_worker_execution_event,
+        )
+
+    return options, WeiboPorts(
+        client=WeiboClientPorts(
+            make_async_client=lambda **kwargs: http.make_async_client(
+                disable_ssl_verify=getattr(config, "DISABLE_SSL_VERIFY", False), **kwargs,
+            ),
+            convert_browser_context_cookies=cookies.convert_browser_context_cookies,
+            image_error=image_retry.ImageDownloadFetchError,
+            classified_http_image_error=image_retry.classified_http_image_error,
+            image_max_bytes=image_retry.IMAGE_DOWNLOAD_MAX_BYTES,
+            detail_timeout=readers.detail_timeout,
+        ),
+        login=WeiboLoginPorts(
+            convert_cookies=cookies.convert_cookies,
+            convert_str_cookie_to_dict=cookies.convert_str_cookie_to_dict,
+            find_login_qrcode=login_helpers.find_login_qrcode,
+            show_qrcode=login_helpers.show_qrcode,
+        ),
+        accumulator=accumulator,
+        refresh_max_pages=readers.refresh_max_pages,
+        source_exhausted=readers.source_exhausted,
+        post_repair=post_repair,
+        store_factory=lambda: JsonlContentStore(AsyncFileWriter(
+            platform="weibo", crawler_type=options.CRAWLER_TYPE,
+            save_data_path=lambda: options.SAVE_DATA_PATH,
+        )),
+        image_stager=lambda: PostImageStager(
+            save_data_root=Path(options.SAVE_DATA_PATH) if options.SAVE_DATA_PATH else MEDIACRAWLER_DIR / "data",
+            platform="weibo", source_key="image_list",
+            source_asset_key=lambda item: weibo_source_asset_key(item.get("pid"), item["url"]),
+            log_saved=lambda count, note_id: logger.info(
+                f"[WeiboImageStoreImplement.store_post_images] saved {count} body images for note {note_id}"
+            ),
+        ),
+        current_timestamp=helpers.get_current_timestamp,
+        fetch_image_bytes_with_retry=image_retry.fetch_image_bytes_with_retry,
+        image_error=image_retry.ImageDownloadFetchError,
+        is_runtime_blocking_image_error=image_retry.is_runtime_blocking_image_error,
+        browser_manager=lambda: CDPBrowserManager(browser_settings, project_browser_args=project_browser_args),
+        project_browser_args=project_browser_args,
+        run_required_human_behavior=run_required_human_behavior,
+    )
 
 
 def load_crawler(code: str) -> type:
     if code == "wb":
-        from media_platform.weibo import WeiboCrawler
-        return WeiboCrawler
+        from trippostcollect.platforms.weibo.core import bind_weibo_crawler
+        return bind_weibo_crawler(
+            import_module("config"),
+            lambda config: weibo_dependencies(config, post_repair=_weibo_post_repair),
+        )
     if code == "dy":
         from media_platform.douyin import DouYinCrawler
         return DouYinCrawler

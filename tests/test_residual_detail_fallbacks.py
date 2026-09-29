@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
-import types
 
 import pytest
 
@@ -51,12 +49,11 @@ def test_weibo_browser_api_is_bound_to_requested_id() -> None:
 def test_weibo_repair_hook_recovers_exact_browser_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeDataFetchError(Exception):
-        pass
+    from test_adapter_t05_bridge import bridge_types
+    from trippostcollect.platforms.weibo.client import WeiboClient
+    from trippostcollect.platforms.weibo.models import DataFetchError
 
-    class FakeLogger:
-        def warning(self, _: str) -> None:
-            pass
+    factory, _, _ = bridge_types(monkeypatch)
 
     class FakePage:
         def __init__(self) -> None:
@@ -71,27 +68,18 @@ def test_weibo_repair_hook_recovers_exact_browser_detail(
         async def evaluate(self, _: str, note_id: str) -> dict[str, str]:
             return {"idstr": note_id, "text": "浏览器详情正文"}
 
-    class FakeClient:
-        async def get_note_info_by_id(self, _: str) -> dict[str, object]:
-            raise FakeDataFetchError("missing $render_data")
+    class FakeClient(WeiboClient):
+        async def _get_note_info_direct(self, _: str) -> dict[str, object]:
+            raise DataFetchError("missing $render_data")
 
-    fake_media_platform = types.ModuleType("media_platform")
-    fake_media_platform.__path__ = []
-    fake_weibo_package = types.ModuleType("media_platform.weibo")
-    fake_weibo_package.__path__ = []
-    fake_client_module = types.ModuleType("media_platform.weibo.client")
-    fake_client_module.WeiboClient = FakeClient
-    fake_client_module.DataFetchError = FakeDataFetchError
-    fake_client_module.utils = types.SimpleNamespace(logger=FakeLogger())
-    fake_weibo_package.client = fake_client_module
-    monkeypatch.setitem(sys.modules, "media_platform", fake_media_platform)
-    monkeypatch.setitem(sys.modules, "media_platform.weibo", fake_weibo_package)
-    monkeypatch.setitem(sys.modules, "media_platform.weibo.client", fake_client_module)
     monkeypatch.setenv("TRIPPOSTCOLLECT_POST_REPAIR", "1")
 
     entrypoint.install_weibo_browser_detail_fallback()
-    client = FakeClient()
-    client.playwright_page = FakePage()
+    crawler = factory.create_crawler("wb")
+    client = FakeClient(
+        headers={}, playwright_page=FakePage(), cookie_dict={},
+        ports=crawler.ports.client, post_repair=crawler.ports.post_repair,
+    )
     result = asyncio.run(client.get_note_info_by_id("456"))
 
     assert result == {"mblog": {"idstr": "456", "text": "浏览器详情正文", "id": "456"}}

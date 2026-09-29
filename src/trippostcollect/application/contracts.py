@@ -33,6 +33,49 @@ class ContentSink(Protocol):
     async def store_content(self, content_item: dict) -> None: ...
 
 
+@dataclass(frozen=True)
+class WeiboClientPorts:
+    """微博请求边界；HTTP 工厂仍在每次请求时读取 TLS 设置。"""
+
+    make_async_client: Callable[..., Any]
+    convert_browser_context_cookies: Callable[..., Any]
+    image_error: type[Exception]
+    classified_http_image_error: Callable[..., Any]
+    image_max_bytes: int
+    detail_timeout: Callable[[], int]
+
+
+@dataclass(frozen=True)
+class WeiboLoginPorts:
+    """微博登录所借用的 Cookie 与二维码能力。"""
+
+    convert_cookies: Callable[..., Any]
+    convert_str_cookie_to_dict: Callable[..., Any]
+    find_login_qrcode: Callable[..., Any]
+    show_qrcode: Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class WeiboPorts:
+    """微博流程的进程内端口；不持有数据库连接或全平台工厂。"""
+
+    client: WeiboClientPorts
+    login: WeiboLoginPorts
+    accumulator: Callable[[], Any]
+    refresh_max_pages: Callable[[], int]
+    source_exhausted: Callable[[], bool]
+    post_repair: bool
+    store_factory: Callable[[], ContentSink]
+    image_stager: Callable[[], ImageStager]
+    current_timestamp: Callable[[], int]
+    fetch_image_bytes_with_retry: Callable[..., Any]
+    image_error: type[Exception]
+    is_runtime_blocking_image_error: Callable[..., bool]
+    browser_manager: Callable[..., Any]
+    project_browser_args: Callable[..., Any]
+    run_required_human_behavior: Callable[..., Any]
+
+
 class XhsRuntimeSupervisionError(RuntimeError):
     """Raised when authenticated XHS runtime supervision can no longer continue."""
 
