@@ -104,3 +104,25 @@ def existing_platform_identities(
             resume_identities = []
         identities.update(str(value) for value in resume_identities if value not in (None, ""))
     return identities
+
+
+def load_existing_formal_identities(db_path: str | Path | None) -> set[str]:
+    if not db_path:
+        return set()
+    try:
+        with sqlite3.connect(Path(db_path).expanduser()) as conn:
+            rows = conn.execute(
+                """
+                SELECT platform_key, platform_post_id, canonical_url
+                FROM web_posts
+                """
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        return set()
+    identities: set[str] = set()
+    for platform_key, platform_post_id, canonical_url in rows:
+        if platform_post_id:
+            identities.add(f"{platform_key}:id:{platform_post_id}")
+        if canonical_url:
+            identities.add(f"{platform_key}:url:{canonical_url}")
+    return identities

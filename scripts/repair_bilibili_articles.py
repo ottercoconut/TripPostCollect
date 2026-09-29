@@ -20,14 +20,14 @@ from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from mediacrawler_crawl import (
-    BILIBILI_DETAIL_PACING_SECONDS,
-    BilibiliArticleDetailError,
-    fetch_bilibili_article_detail,
+from trippostcollect.platforms.bilibili.core import BILIBILI_DETAIL_PACING_SECONDS
+from trippostcollect.platforms.bilibili.models import BilibiliArticleDetailError
+from trippostcollect.platforms.bilibili.client import fetch_bilibili_article_detail
+from trippostcollect.platforms.bilibili.parser import (
     hydrate_bilibili_article_record,
     normalize_bilibili_article_record,
-    validate_formal_record,
 )
+from trippostcollect.application.collection import validate_formal_record
 from trippostcollect.core.paths import (
     BILIBILI_REPAIR_BACKUP_ROOT,
     BILIBILI_REPAIR_OUTPUT,

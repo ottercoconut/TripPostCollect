@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from trippostcollect.platforms.bilibili import core as bilibili_core
+
 import io
 import json
 from pathlib import Path
@@ -103,18 +105,18 @@ def install_successful_run_mocks(monkeypatch) -> None:
         AsyncMock(return_value=({"cookie_header": "SESSDATA=test"}, {"ok": True})),
     )
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
-    monkeypatch.setattr(mediacrawler_crawl, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        bilibili_core,
         "fetch_bilibili_article_page",
         lambda keyword, page, **kwargs: [search_item("123")] if page == 1 else [],
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        bilibili_core,
         "fetch_bilibili_article_detail_with_retry",
         lambda post_id, cookie_header: (detail_payload(), 1, 0.0),
     )
-    monkeypatch.setattr(mediacrawler_crawl, "fetch_bilibili_follower_count", lambda *args: 42)
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_follower_count", lambda *args: 42)
     monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
 
 
@@ -387,7 +389,7 @@ def test_skipped_candidate_allows_empty_page_exhaustion(
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
     install_successful_run_mocks(monkeypatch)
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        bilibili_core,
         "fetch_bilibili_article_page",
         lambda keyword, page, **kwargs: [search_item("123")] if page == 1 else [],
     )
@@ -452,7 +454,7 @@ def test_terminal_image_failure_is_skipped_and_later_candidate_continues(
 
     monkeypatch.setattr(mediacrawler_crawl, "fetch_bilibili_image_bytes", fetch_image)
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        bilibili_core,
         "fetch_bilibili_article_page",
         lambda keyword, page, **kwargs: (
             [search_item("123"), search_item("456")] if page == 1 else []
@@ -533,7 +535,7 @@ def test_image_failure_does_not_block_later_bilibili_candidate(
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
     install_successful_run_mocks(monkeypatch)
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        bilibili_core,
         "fetch_bilibili_article_page",
         lambda keyword, page, **kwargs: (
             [search_item("123"), search_item("124")] if page == 1 else []
@@ -591,16 +593,16 @@ def test_known_post_id_is_skipped_before_detail_or_image_requests(monkeypatch, t
         AsyncMock(return_value=({"cookie_header": ""}, {"ok": True})),
     )
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
-    monkeypatch.setattr(mediacrawler_crawl, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
     requested_pages: list[int] = []
 
     def fetch_page(keyword, page, **kwargs):
         requested_pages.append(page)
         return [search_item("123")] if page == 1 else []
 
-    monkeypatch.setattr(mediacrawler_crawl, "fetch_bilibili_article_page", fetch_page)
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_article_page", fetch_page)
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        bilibili_core,
         "fetch_bilibili_article_detail_with_retry",
         lambda *args: (_ for _ in ()).throw(AssertionError("known post detail requested")),
     )
