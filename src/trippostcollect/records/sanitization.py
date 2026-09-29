@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
+from functools import wraps
 import re
 from typing import Any, Iterable
 from urllib.parse import urlsplit
@@ -220,3 +222,37 @@ def sanitize_author_avatar_data(
         removed_keys=removed_keys,
         removed_values=removed_values,
     )
+
+
+def sanitize_export_item(item: dict[str, Any]) -> dict[str, Any]:
+    if os.environ.get("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS") != "1":
+        raise RuntimeError("TripPostCollect MediaCrawler export sanitizer is not enabled")
+    sanitized = sanitize_author_avatar_data(item).value
+    if not isinstance(sanitized, dict):
+        raise RuntimeError("sanitized MediaCrawler item must remain an object")
+    return sanitized
+
+
+EXPORT_METHODS = ("write_to_csv", "write_to_jsonl", "write_single_item_to_json")
+
+
+def install_export_hook(AsyncFileWriter: Any) -> bool:
+    """仅供在途旧桥包裹退出方法；返回本次是否首次安装。"""
+    if getattr(AsyncFileWriter, "_trippostcollect_avatar_sanitizer", False):
+        return False
+    for method_name in EXPORT_METHODS:
+        original = getattr(AsyncFileWriter, method_name)
+
+        @wraps(original)
+        async def sanitized_writer(
+            self: Any,
+            item: dict[str, Any],
+            item_type: str,
+            *,
+            _original: Any = original,
+        ) -> Any:
+            return await _original(self, sanitize_export_item(item), item_type)
+
+        setattr(AsyncFileWriter, method_name, sanitized_writer)
+    AsyncFileWriter._trippostcollect_avatar_sanitizer = True
+    return True

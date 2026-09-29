@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import re
 from collections.abc import Awaitable, Callable
@@ -11,10 +12,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from playwright.async_api import Page
+from playwright.async_api import BrowserContext, Page
 
 from trippostcollect.records.text_signals import is_xhs_sms_terminal_text
-from trippostcollect.runtime.human_flow import dwell_on_list, load_behavior_profile
+from trippostcollect.runtime.human_flow import dwell_on_list, load_behavior_profile, install_runtime_hints
 from trippostcollect.runtime.helpers import utc_now
 
 
@@ -390,3 +391,37 @@ def load_behavior_evidence(path: str | Path) -> dict[str, Any]:
         "evidence_path": str(candidate),
         "error": "behavior_evidence_not_an_object",
     }
+
+
+def project_browser_args() -> list[str]:
+    try:
+        value = json.loads(os.environ.get("TRIPPOSTCOLLECT_BROWSER_ARGS_JSON", "[]"))
+    except json.JSONDecodeError:
+        return []
+    args = [str(item) for item in value] if isinstance(value, list) else []
+    if not any(item.startswith("--lang=") for item in args):
+        args.append("--lang=zh-CN")
+    return args
+
+
+async def install_project_runtime_hints(context: BrowserContext) -> None:
+    """旧适配在调用前核验启用状态与配置，runtime 直接安装共享提示。"""
+    await install_runtime_hints(context)
+
+
+async def run_required_human_behavior(
+    page: Page, platform_key: str, *,
+    evidence_path: str,
+    profile_name: str,
+    xhs_search_ready: Callable[[Page, list], Awaitable[dict[str, Any]]],
+    write_evidence: Callable[[str | Path, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """依赖由旧适配注入；XHS 等待实现待 T09 迁出 scripts。"""
+    return await run_page_behavior(
+        page,
+        platform_key=platform_key,
+        evidence_path=evidence_path,
+        profile_name=profile_name,
+        xhs_search_ready=xhs_search_ready,
+        write_evidence=write_evidence,
+    )

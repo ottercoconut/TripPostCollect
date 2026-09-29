@@ -141,3 +141,21 @@ def test_inputs_are_unchanged_during_migration() -> None:
     assert report["cli_changed"] == {}
     assert report["env_added"] == []
     assert report["env_removed"] == []
+
+
+@pytest.mark.parametrize("has_constructor", [True, False])
+def test_progress_verifies_reexported_class_member(tmp_path, monkeypatch, has_constructor):
+    """类的一跳重导出必须实际找到成员，不能仅凭类名算迁移完成。"""
+    row = {"file": "old.py", "qualname": "Failure.__init__", "card": "T04",
+           "disposition": "迁", "target": "artifacts/staging.py"}
+    monkeypatch.setattr(ledger, "load_symbols", lambda _: {"rows": [row]})
+    (tmp_path / "old.py").write_text("")
+    target = tmp_path / "src/trippostcollect/artifacts/staging.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("from trippostcollect.application.contracts import Failure\n")
+    implementation = tmp_path / "src/trippostcollect/application/contracts.py"
+    implementation.parent.mkdir(parents=True)
+    body = "    def __init__(self): pass" if has_constructor else "    pass"
+    implementation.write_text(f"class Failure(ValueError):\n{body}\n")
+    report = ledger.build_progress(tmp_path)
+    assert report["rows"][0]["state"] == ("moved" if has_constructor else "missing")
