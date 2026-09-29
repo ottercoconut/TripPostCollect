@@ -17,8 +17,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from execution_state import FORMAL_STEPS, FrozenExecutionState
-from failure_classifier import extract_stdout_json
-from mediacrawler_behavior import HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS
+from trippostcollect.application.failures import extract_stdout_json
+from trippostcollect.runtime.behavior import HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS
 from trippostcollect.artifacts.image_completion import (
     verify_image_artifacts,
     verify_image_persistence,

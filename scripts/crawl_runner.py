@@ -32,7 +32,7 @@ from trippostcollect.scheduler.discovery import (
     update_campaign,
 )
 from execution_state import FrozenExecutionState
-from failure_classifier import classify_attempt, extract_stdout_json
+from trippostcollect.application.failures import classify_attempt, extract_stdout_json
 from trippostcollect.core.paths import (
     CRAWL_EXECUTION_STATE_ROOT,
     CRAWL_RUNNER_RUNTIME,

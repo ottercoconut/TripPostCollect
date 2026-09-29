@@ -19,7 +19,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-crawl_policy = import_module("crawl_policy")
+crawl_policy = import_module("trippostcollect.application.policy")
 
 
 def policy_site() -> WebSite:

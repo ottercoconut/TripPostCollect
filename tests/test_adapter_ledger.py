@@ -217,3 +217,46 @@ def test_async_return_await_delegation_is_moved() -> None:
     assert ledger.delegated_definition(
         tree.body[1], ledger.imported_names(tree), "trippostcollect.runtime.worker"
     ) == "async_cleanup"
+
+
+@pytest.mark.parametrize(
+    ("target_source", "shared_source", "expected"),
+    [
+        ("from trippostcollect.records.x import f as f\n", "def f():\n    return 1\n", "moved"),
+        ("from trippostcollect.records.x import f as f\n", "def other():\n    return 1\n", "missing"),
+        ("from trippostcollect.records.x import f as f\n", "from trippostcollect.records.y import f\n", "missing"),
+        ("from scripts.shared import f as f\n", "def f():\n    return 1\n", "missing"),
+        ("from tools.MediaCrawler.tools.shared import f as f\n", "def f():\n    return 1\n", "missing"),
+        ("import trippostcollect.records.x.f as f\n", "def f():\n    return 1\n", "missing"),
+    ],
+    ids=["defined", "undefined", "second-hop", "scripts", "fork", "module-import"],
+)
+def test_progress_checks_one_package_reexport(
+    tmp_path: Path, target_source: str, shared_source: str, expected: str,
+) -> None:
+    # 原文件只留转发；目标可将纯定义下沉，但不能用多跳或外部导入冒充迁移。
+    files = {
+        "scripts/original.py": "from trippostcollect.application.target import f\n",
+        "src/trippostcollect/application/target.py": target_source,
+        "src/trippostcollect/records/x.py": shared_source,
+        "src/trippostcollect/records/y.py": "def f():\n    return 1\n",
+        "scripts/shared.py": "def f():\n    return 1\n",
+        "tools/MediaCrawler/tools/shared.py": "def f():\n    return 1\n",
+    }
+    for relative, source in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    row = {
+        "file": "scripts/original.py", "qualname": "f", "card": "T04",
+        "disposition": "迁", "target": "application/target.py",
+    }
+    ledger_path = tmp_path / ledger.LEDGER_DIR / "symbols.json"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(ledger.json_text({"rows": [row]}), encoding="utf-8")
+
+    progress = ledger.build_progress(tmp_path)
+
+    assert progress["rows"] == [{**row, "state": expected}]
+    assert progress["counts"][expected] == 1
+    assert progress["counts"]["missing"] == (expected == "missing")

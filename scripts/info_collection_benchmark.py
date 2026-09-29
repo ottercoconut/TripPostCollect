@@ -23,7 +23,7 @@ from trippostcollect.core.paths import (
     runtime_dir,
 )
 from trippostcollect.db.bootstrap import bootstrap_database
-from mediacrawler_behavior import HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS
+from trippostcollect.runtime.behavior import HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS
 
 
 ROOT = PROJECT_ROOT

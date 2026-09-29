@@ -107,3 +107,7 @@ def extract_url_params_to_dict(url: str) -> Dict:
     parsed_url = urllib.parse.urlparse(url)
     url_params_dict = dict(urllib.parse.parse_qsl(parsed_url.query))
     return url_params_dict
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
