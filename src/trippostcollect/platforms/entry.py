@@ -163,8 +163,11 @@ def load_crawler(code: str) -> type:
         from trippostcollect.platforms.douyin.core import DouYinCrawler
         return DouYinCrawler.bind(lambda: douyin_dependencies(import_module("config")))
     if code == "zhihu":
-        from media_platform.zhihu import ZhihuCrawler
-        return ZhihuCrawler
+        worker.init_loging_config()
+        from trippostcollect.platforms.zhihu.core import ZhihuCrawler
+        return ZhihuCrawler.with_dependencies(
+            lambda: _zhihu_dependencies(import_module("config")),
+        )
     if code == "xhs":
         from media_platform.xhs import XiaoHongShuCrawler
         return XiaoHongShuCrawler
@@ -272,6 +275,110 @@ def douyin_dependencies(config):
         ),
     }
 
+
+def _zhihu_dependencies(config):
+    """T07：构造时冻结已解析配置；IO 与环境读取仍留在原操作时点。"""
+    from dataclasses import fields
+    from functools import partial
+    import logging
+    from pathlib import Path
+    import time
+
+    from playwright.async_api import async_playwright
+    from trippostcollect.application.contracts import (
+        ZhihuSettings, ZhihuPorts, ZhihuClientPorts, ZhihuLoginPorts,
+    )
+    from trippostcollect.application.candidates import AdaptiveAccumulator
+    from trippostcollect.application.events import append_worker_execution_event
+    from trippostcollect.application.worker_inputs import zhihu_operation_readers, _enabled
+    from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
+    from trippostcollect.artifacts.image_staging import PostImageStager
+    from trippostcollect.artifacts.evidence import write_evidence
+    from trippostcollect.core.paths import MEDIACRAWLER_DIR
+    from trippostcollect.db.discovery_read import existing_platform_identities
+    from trippostcollect.runtime import behavior, cookies, login_helpers
+    from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
+    from trippostcollect.runtime.http import make_async_client
+    from trippostcollect.runtime.image_retry import fetch_image_bytes_with_retry
+    from trippostcollect.platforms.zhihu.client import ZhiHuClient
+    from trippostcollect.platforms.zhihu.login import ZhiHuLogin
+    from trippostcollect.platforms.zhihu.parser import zhihu_source_asset_key
+
+    values = {field.name: getattr(config, field.name) for field in fields(ZhihuSettings)}
+    values["ZHIHU_SPECIFIED_ID_LIST"] = tuple(values["ZHIHU_SPECIFIED_ID_LIST"])
+    settings = ZhihuSettings(**values)
+    browser_settings = CDPBrowserSettings(**{
+        field.name: getattr(config, field.name) for field in fields(CDPBrowserSettings)
+    })
+    save_data_path = config.SAVE_DATA_PATH
+    initial_cookies = config.COOKIES
+    logger = logging.getLogger("MediaCrawler")
+
+    def accumulator_factory(platform):
+        accumulator = AdaptiveAccumulator.for_platform(
+            platform,
+            existing_identities=existing_platform_identities(
+                platform,
+                db_path=os.environ.get("TRIPPOSTCOLLECT_DB_PATH", ""),
+                job_id=os.environ.get("TRIPPOSTCOLLECT_DISCOVERY_JOB_ID", ""),
+                fingerprint=os.environ.get("TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT", ""),
+                resume_identities_path=os.environ.get("TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH", ""),
+            ),
+        )
+        accumulator.event_sink = append_worker_execution_event
+        return accumulator
+
+    async def run_behavior(page, platform_key):
+        if not _enabled():
+            return {"status": "disabled", "platform": platform_key}
+        scripts_dir = Path(os.environ.get("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", "")).expanduser()
+        evidence_path = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()
+        profile_name = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_PROFILE", "social_high_risk").strip()
+        if not scripts_dir.is_dir() or not evidence_path:
+            raise RuntimeError("required TripPostCollect human behavior configuration is incomplete")
+        return await behavior.run_required_human_behavior(
+            page, platform_key, evidence_path=evidence_path, profile_name=profile_name,
+            xhs_search_ready=None, write_evidence=write_evidence,
+        )
+
+    refresh, exhausted, settle = zhihu_operation_readers()
+    return settings, ZhihuPorts(
+        async_playwright=async_playwright,
+        browser_manager_factory=partial(
+            CDPBrowserManager, browser_settings, project_browser_args=behavior.project_browser_args,
+        ),
+        project_browser_args=behavior.project_browser_args,
+        run_required_human_behavior=run_behavior,
+        client_factory=partial(ZhiHuClient, ports=ZhihuClientPorts(
+            # TLS 开关原本在每次 HTTPX 工厂调用时读取；共享输入暂不提前冻结。
+            make_async_client=lambda **kwargs: make_async_client(
+                disable_ssl_verify=getattr(config, "DISABLE_SSL_VERIFY", False), **kwargs,
+            ),
+            convert_browser_context_cookies=cookies.convert_browser_context_cookies,
+        )),
+        login_factory=partial(ZhiHuLogin, ports=ZhihuLoginPorts(
+            login_helpers.find_qrcode_img_from_canvas, login_helpers.show_qrcode,
+        )),
+        convert_browser_context_cookies=cookies.convert_browser_context_cookies,
+        fetch_image_bytes_with_retry=fetch_image_bytes_with_retry,
+        accumulator_factory=accumulator_factory,
+        refresh_max_pages=refresh, source_exhausted=exhausted, initial_settle_seconds=settle,
+        initial_cookies=lambda: initial_cookies,
+        current_timestamp=lambda: int(time.time() * 1000),
+        content_sink_factory=lambda: JsonlContentStore(AsyncFileWriter(
+            platform="zhihu", crawler_type=settings.CRAWLER_TYPE,
+            save_data_path=lambda: save_data_path,
+        )),
+        image_stager_factory=lambda: PostImageStager(
+            save_data_root=Path(save_data_path) if save_data_path else MEDIACRAWLER_DIR / "data",
+            platform="zhihu", source_key="image_list",
+            source_asset_key=lambda item: zhihu_source_asset_key(item["url"]),
+            log_saved=lambda count, content_id: logger.info(
+                f"[ZhihuStoreImage.store_post_images] saved {count} "
+                f"body images for content {content_id}"
+            ),
+        ),
+    )
 
 def main(argv=None) -> int:
     inputs = configure(argv)

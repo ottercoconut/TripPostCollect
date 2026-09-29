@@ -224,3 +224,23 @@ def douyin_readers(start_page: int, *, environ=os.environ):
         creator_sleep_seconds=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS", "0.25"),
         browser_detail_timeout=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_TIMEOUT_MS", "30000"),
     )
+
+
+def _env_float(name: str, default: float) -> float:
+    """T07：原 ZhihuCrawler reader，保留空值、非法浮点及读取时点。"""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def zhihu_operation_readers():
+    """绑定零参读取器；不在装配时缓存环境值。"""
+    return (
+        env_int_reader("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", 0),
+        lambda: os.environ.get("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED") == "1",
+        lambda: _env_float("TRIPPOSTCOLLECT_ZHIHU_INITIAL_SETTLE_SECONDS", 0.0),
+    )
