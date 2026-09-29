@@ -28,8 +28,22 @@ from typing import Callable, Dict
 
 import aiofiles
 
+from trippostcollect.application.contracts import JsonlWriter
 from trippostcollect.core.paths import MEDIACRAWLER_DIR
 from trippostcollect.records.sanitization import sanitize_export_item
+
+
+class JsonlContentStore:
+    """共用内容出口；保留调用方的 writer 属性名和每次 await 写出时点。"""
+
+    def __init__(self, writer: JsonlWriter, *, writer_attribute: str = "writer"):
+        self._writer_attribute = writer_attribute
+        setattr(self, writer_attribute, writer)
+
+    async def store_content(self, content_item: Dict):
+        await getattr(self, self._writer_attribute).write_to_jsonl(
+            item_type="contents", item=content_item,
+        )
 
 
 def get_current_date() -> str:

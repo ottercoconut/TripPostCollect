@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
-from typing import Iterable, Sequence
+from typing import Callable, Dict, Iterable, List, Sequence
 
 from PIL import Image, UnidentifiedImageError
 
@@ -28,6 +28,68 @@ FORMAT_METADATA = {
     "GIF": ("gif", "image/gif"),
     "AVIF": ("avif", "image/avif"),
 }
+
+
+class PostImageStager:
+    """四站共用的整帖暂存；稳定资产键与日志由原调用方绑定。"""
+
+    def __init__(
+        self, *, save_data_root: Path, platform: str, source_key: str,
+        source_asset_key: Callable[[Dict], str],
+        log_saved: Callable[[int, str], None],
+    ):
+        self.save_data_root = save_data_root
+        self.platform_root = self.save_data_root / platform
+        self.image_store_path = self.platform_root / "images"
+        self.manifest_path = self.platform_root / "image_manifest.jsonl"
+        self._platform = platform
+        self._source_key = source_key
+        self._source_asset_key = source_asset_key
+        self._log_saved = log_saved
+
+    async def store_post_images(
+        self, platform_post_id: str, image_content_items: List[Dict],
+    ) -> list[dict]:
+        assets = [
+            ImageAsset(
+                source_index=int(item["source_index"]),
+                source_asset_key=self._source_asset_key(item),
+                source_url=item["url"],
+                content=item["content"],
+                attempts=int(item.get("attempts") or 1),
+                http_status=int(item.get("http_status") or 200),
+            )
+            for item in image_content_items
+        ]
+        rows = stage_post_images(
+            save_data_root=self.save_data_root,
+            platform_storage_key=self._platform,
+            platform_key=self._platform,
+            platform_post_id=platform_post_id,
+            source_key=self._source_key,
+            assets=assets,
+        )
+        self._log_saved(len(rows), platform_post_id)
+        return rows
+
+    async def record_failure(
+        self, platform_post_id: str, image_content_item: Dict,
+    ) -> dict:
+        row = failed_manifest_row(
+            platform_key=self._platform,
+            platform_post_id=platform_post_id,
+            source_key=self._source_key,
+            source_index=int(image_content_item["source_index"]),
+            source_asset_key=self._source_asset_key(image_content_item),
+            source_url=image_content_item["url"],
+            attempts=int(image_content_item.get("attempts") or 1),
+            error_code=str(
+                image_content_item.get("error_code") or "image_download_retryable"
+            ),
+            http_status=image_content_item.get("http_status"),
+        )
+        upsert_manifest_rows_atomic(self.manifest_path, [row])
+        return row
 
 
 @dataclass(frozen=True, slots=True)
