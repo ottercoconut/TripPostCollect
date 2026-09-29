@@ -121,6 +121,36 @@ def test_cli_defaults_are_preserved_verbatim() -> None:
     assert runner["--max-jobs"]["default"] == "3"
 
 
+def test_moved_cli_definitions_keep_entrypoint_contract(tmp_path: Path) -> None:
+    entry = "scripts/mediacrawler_crawl.py"
+    source = ledger.CLI_DEFINITION_SOURCES[entry][0]
+    definition = 'parser.add_argument("--keyword", default="青岛旅游")\n'
+    baseline = ledger.extract_inputs(
+        [entry], lambda relative: definition if relative == entry else ""
+    )
+    ledger_dir = tmp_path / ledger.LEDGER_DIR
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "inputs.json").write_text(ledger.json_text(baseline), encoding="utf-8")
+    entry_path = tmp_path / entry
+    entry_path.parent.mkdir(parents=True)
+    entry_path.write_text(
+        "from trippostcollect.application.inputs import parse_args\nparse_args()\n",
+        encoding="utf-8",
+    )
+    source_path = tmp_path / source
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(definition, encoding="utf-8")
+    assert ledger.build_input_drift(tmp_path) == {
+        "cli_changed": {}, "env_added": [], "env_removed": [],
+    }
+    source_path.write_text(definition.replace("青岛旅游", "崂山旅游"), encoding="utf-8")
+    drift = ledger.build_input_drift(tmp_path)
+    assert set(drift["cli_changed"]) == {entry}
+    assert len(drift["cli_changed"][entry]) == 2
+    assert all("default" in change for change in drift["cli_changed"][entry])
+    assert drift["env_added"] == drift["env_removed"] == []
+
+
 def test_env_names_have_producers_or_consumers() -> None:
     env = json.loads((LEDGER_DIR / "inputs.json").read_text())["env"]
     assert "TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS" in env
@@ -168,3 +198,16 @@ def test_root_lane_assignment_follows_markers() -> None:
 def test_tests_collector_refuses_production_checkout() -> None:
     with pytest.raises(SystemExit):
         ledger.main(["tests", "--source", str(ROOT)])
+
+
+def test_async_return_await_delegation_is_moved() -> None:
+    import ast
+
+    tree = ast.parse(
+        "from trippostcollect.runtime import worker\n"
+        "async def async_cleanup():\n"
+        "    return await worker.async_cleanup(crawler, config.PLATFORM)\n"
+    )
+    assert ledger.delegated_definition(
+        tree.body[1], ledger.imported_names(tree), "trippostcollect.runtime.worker"
+    ) == "async_cleanup"

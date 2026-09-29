@@ -531,6 +531,11 @@ FORK_EXCLUDED_DIRS = (".venv", "tests", "test", "webui", "api", "docs", "temp", 
 
 FORK_EXCLUDED_PLATFORMS = ("bilibili", "kuaishou", "tieba", "baidu")
 
+# CLI 契约归属于外部入口；仅工作树漂移检查跟随迁出的定义。
+CLI_DEFINITION_SOURCES = {
+    "scripts/mediacrawler_crawl.py": ("src/trippostcollect/application/inputs.py",),
+}
+
 ENTRYPOINTS = (
     "scripts/crawl_runner.py",
     "scripts/login_warmup.py",
