@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from trippostcollect.application import reporting as t11_reporting
+
 import json
 import sqlite3
 import sys
@@ -614,7 +616,7 @@ def test_xhs_repair_still_rejects_empty_title_and_desc(tmp_path: Path) -> None:
 
 
 def test_repair_behavior_gate_does_not_require_search_pacing(monkeypatch) -> None:
-    monkeypatch.setattr(mediacrawler, "behavior_evidence_valid", lambda value: True)
+    monkeypatch.setattr(t11_reporting, "behavior_evidence_valid", lambda value: True)
     result = mediacrawler.collect_behavior_validation(
         [
             {

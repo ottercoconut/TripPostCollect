@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from trippostcollect.db import content as t11_content
+from trippostcollect.artifacts import formal_images as t11_formal_images
+
 from dataclasses import replace
 from hashlib import sha256
 import io
@@ -831,7 +834,7 @@ def test_failed_multi_image_promotion_rolls_back_new_long_term_files(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        t11_formal_images,
         "promote_validated_image",
         fail_second,
     )
@@ -882,7 +885,7 @@ def test_promotion_interrupt_rolls_back_prior_new_long_term_files(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        t11_formal_images,
         "promote_validated_image",
         interrupt_second,
     )
@@ -920,7 +923,7 @@ def test_sqlite_import_failure_rolls_back_newly_promoted_files(
     assert len(list(media_root.rglob("*.png"))) == 1
     item["materialized_images"] = materialized[item["identity"]]
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        t11_content,
         "upsert_web_post",
         lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.Error("injected")),
     )
@@ -969,7 +972,7 @@ def test_postcommit_interrupt_preserves_sqlite_referenced_media(
         raise KeyboardInterrupt("after commit")
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        t11_content,
         "commit_formal_import",
         commit_then_interrupt,
     )
@@ -1025,7 +1028,7 @@ def test_interrupt_before_batch_commit_rolls_back_rows_and_media(
         raise KeyboardInterrupt("before commit")
 
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        t11_content,
         "commit_formal_import",
         interrupt_before_commit,
     )
@@ -1089,7 +1092,7 @@ def test_second_post_failure_rolls_back_entire_batch(
             raise sqlite3.Error("second post failed")
         return real_upsert(*args, **kwargs)
 
-    monkeypatch.setattr(mediacrawler_crawl, "upsert_web_post", fail_second)
+    monkeypatch.setattr(t11_content, "upsert_web_post", fail_second)
     db_path = project_root / "temp" / "formal.sqlite"
     result = mediacrawler_crawl.import_valid_records_with_media_rollback(
         {"keyword": "青岛旅游"},

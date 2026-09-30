@@ -6,6 +6,14 @@ from dataclasses import dataclass
 from typing import Any, Callable, Collection, Protocol, runtime_checkable
 
 
+@dataclass(frozen=True)
+class ExecutorPorts:
+    """执行器借用入口的前置检查与 B站搜索装配能力。"""
+
+    ensure_prerequisites: Callable[..., Any]
+    run_bilibili_article_search: Callable[..., Any]
+
+
 @runtime_checkable
 class ImageStager(Protocol):
     """整帖图片暂存；帖子 ID 按位置传递，各站保留原关键字名称。"""
@@ -193,6 +201,10 @@ PLATFORMS: dict[str, dict[str, str]] = {
     "douyin": {"mediacrawler": "dy", "label": "抖音"},
     "zhihu": {"mediacrawler": "zhihu", "label": "知乎"},
 }
+
+
+class ImagePersistenceError(ValueError):
+    pass
 
 
 class ImageStagingError(ValueError):

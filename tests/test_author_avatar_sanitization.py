@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from trippostcollect.runtime import process as t11_process
+
 import asyncio
 import json
 import os
@@ -162,7 +164,7 @@ def test_mediacrawler_run_command_redacts_logs_and_summary_tail(
                 f"duplicate={AVATAR_URL}\n".encode(),
             )
 
-    monkeypatch.setattr(mediacrawler_crawl, "browser_launch_environment", lambda: {})
+    monkeypatch.setattr(t11_process, "browser_launch_environment", lambda: {})
     monkeypatch.setattr(
         mediacrawler_crawl.subprocess,
         "Popen",

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+
+
 import json
 import re
 from typing import Any
@@ -586,4 +588,169 @@ def classify_attempt(
         "retryable": True,
         "wait_seconds": 600,
         "reason": "nonzero_exit_without_specific_classification",
+    }
+RUNTIME_BLOCKING_FAILURE_TYPES = frozenset(
+    {
+        "runtime_failed",
+        "policy_blocked",
+        "platform_security_limit",
+        "sms_verification_terminal",
+        "manual_checkpoint_timeout",
+        "captcha_detected",
+        "login_required",
+        "rate_limited",
+        "blocked_or_forbidden",
+        "runtime_permission_error",
+        "browser_launch_failed",
+        "browser_target_closed",
+        "browser_runtime_failed",
+        "login_runtime_error",
+        "verification_timeout",
+        "ip_blocked",
+    }
+)
+
+
+def runtime_blocker_stop_reason(failure_type: str) -> str:
+    """Map a diagnostic failure family onto the formal stop-state contract."""
+
+    if failure_type in {"login_required", "captcha_detected"}:
+        return failure_type
+    return "runtime_failed"
+
+
+def runtime_blocker_from_terminal_event(event: Any) -> dict[str, Any]:
+    """Normalize the safe child event written before login exceptions escape."""
+
+    if not isinstance(event, dict):
+        return {}
+    failure_type = str(event.get("failure_type") or "")
+    stop_detail = str(event.get("stop_detail") or "")
+    if failure_type not in RUNTIME_BLOCKING_FAILURE_TYPES or not stop_detail:
+        return {}
+    stop_reason = str(event.get("stop_reason") or "")
+    if stop_reason not in {"runtime_failed", "login_required", "captcha_detected"}:
+        stop_reason = runtime_blocker_stop_reason(failure_type)
+    return {
+        "platform": "xhs",
+        "status": "blocked",
+        "failure_type": failure_type,
+        "stop_reason": stop_reason,
+        "reason": stop_detail,
+        "retryable": bool(event.get("retryable", False)),
+        "source": "xhs_runtime_terminal",
+    }
+
+
+def runtime_blocker_from_pagination_evidence(
+    pagination_evidence: Any,
+    platforms: list[str],
+) -> dict[str, Any]:
+    """Recover a run blocker from the current adaptive stop event."""
+
+    if not isinstance(pagination_evidence, dict):
+        return {}
+    stop_event = pagination_evidence.get("stop_event") or {}
+    if not isinstance(stop_event, dict):
+        return {}
+    stop_reason = str(stop_event.get("stop_reason") or "")
+    if stop_reason not in {"runtime_failed", "login_required", "captcha_detected"}:
+        return {}
+    stop_detail = str(stop_event.get("stop_detail") or stop_reason)
+    platform = str(stop_event.get("platform") or "")
+    if platform not in platforms:
+        platform = platforms[0] if len(platforms) == 1 else ""
+    if not platform:
+        return {}
+    classification = classify_attempt(
+        exit_code=1,
+        stderr=stop_detail,
+        meta={"platform": platform},
+    )
+    failure_type = str(classification.get("failure_type") or "")
+    if failure_type not in RUNTIME_BLOCKING_FAILURE_TYPES:
+        failure_type = (
+            stop_reason
+            if stop_reason in {"login_required", "captcha_detected"}
+            else "runtime_failed"
+        )
+    return {
+        "platform": platform,
+        "status": "blocked",
+        "failure_type": failure_type,
+        "stop_reason": stop_reason,
+        "reason": stop_detail,
+        "retryable": False,
+        "source": "adaptive_search_stopped",
+    }
+
+
+def latest_runtime_blocker(
+    records: list[dict[str, Any]],
+    platforms: list[str],
+) -> dict[str, Any]:
+    """Return only the current attempt's structured blocker per platform.
+
+    ``records`` can start with resumed campaign records.  Reading each
+    platform from the end prevents a historical blocker from contaminating a
+    newer attempt.
+    """
+
+    latest_by_platform: dict[str, dict[str, Any]] = {}
+    for record in reversed(records):
+        if not isinstance(record, dict):
+            continue
+        platform = str(record.get("platform") or "")
+        if platform in platforms and platform not in latest_by_platform:
+            latest_by_platform[platform] = record
+
+    for platform in platforms:
+        record = latest_by_platform.get(platform) or {}
+        repair_report = record.get("repair_report") or {}
+        repair_runtime_blocker = repair_report.get("runtime_blocker") or {}
+        blocker_code = str(repair_runtime_blocker.get("error_code") or "")
+        if blocker_code in RUNTIME_BLOCKING_FAILURE_TYPES:
+            return {
+                "platform": platform,
+                "status": "blocked",
+                "failure_type": blocker_code,
+                "stop_reason": runtime_blocker_stop_reason(blocker_code),
+                "reason": str(
+                    repair_runtime_blocker.get("reason") or blocker_code
+                ),
+                "retryable": bool(
+                    repair_runtime_blocker.get("retryable", False)
+                ),
+            }
+        classification = record.get("failure_classification") or {}
+        failure_type = str(
+            classification.get("failure_type") or ""
+        )
+        if failure_type in RUNTIME_BLOCKING_FAILURE_TYPES:
+            return {
+                "platform": platform,
+                "status": str(classification.get("status") or "blocked"),
+                "failure_type": failure_type,
+                "stop_reason": runtime_blocker_stop_reason(failure_type),
+                "reason": str(classification.get("reason") or failure_type),
+                "retryable": bool(classification.get("retryable", False)),
+            }
+    return {}
+
+
+def apply_runtime_blocker(
+    validation: dict[str, Any],
+    runtime_blocker: dict[str, Any],
+) -> dict[str, Any]:
+    """Project the current attempt's blocker without losing its subtype."""
+
+    if not runtime_blocker:
+        return validation
+    return {
+        **validation,
+        "pagination_runtime_blocked": True,
+        "stop_reason": str(runtime_blocker.get("stop_reason") or "")
+        or runtime_blocker_stop_reason(str(runtime_blocker["failure_type"])),
+        "stop_detail": str(runtime_blocker["reason"]),
+        "runtime_blocker": runtime_blocker,
     }
