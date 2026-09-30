@@ -44,7 +44,20 @@
 ## 4. 验证：卡片闸门
 
 每张卡的复核以闸门脚本（`scripts/dev/card_gate.py`）的输出为准。一条命令跑完，只输出摘要。
-闸门脚本建成之前，协调者按下列各项逐项运行，结论口径相同。
+在工作树激活独立环境后运行下例；省略 `--card` 时自动选择原定义发生变化的台账行。
+基线缓存位于 `<git common dir>/card-gate/baseline-<根提交>-<fork提交>.json`，
+闸门代码或 fork 解释器路径变化会重算，也可用 `--refresh-baseline` 强制刷新。
+退出码为 0（通过）、1（未通过或跳过测试的部分验收）、2（预检、canary 等自身错误）。
+详细 JSON 与摘要写入本次临时目录，`--keep` 可保留源码副本。
+
+```bash
+source .venv/bin/activate
+python scripts/dev/card_gate.py \
+  --base main \
+  --card T09
+```
+
+过渡期逐项运行的做法已由闸门脚本替代，复核项目与结论口径如下。
 
 - **测试**：在临时源码副本（`adapter_ledger.py make-source`）中，于沙箱内运行 component、installation、os 三组，以及 fork 离线测试。
   - 与基线比较的是**失败集合**，不是通过数量：本机沙箱会限制 `ps`，os 组固定有少量失败，只要失败集合不变即可。
@@ -61,7 +74,8 @@
 - 禁止读写本机 Chrome 与 Chrome for Testing 的用户数据目录；
 - 子孙进程继承以上限制。
 
-本机所有 pytest，以及任何可能启动子进程的命令，都必须在沙箱中运行，没有例外。
+本机所有 pytest，以及任何可能启动子进程的命令，都必须在沙箱中运行；
+闸门自身作为编排进程在沙箱外启动，为每个检查子进程套沙箱（只读 Git 查询除外），避免嵌套 Seatbelt。
 （曾因一个 monkeypatch 目标写错、mock 漏拦，真实启动了一次微博 worker；进程内守卫不会被子进程继承。）
 
 ## 5. 审查：审查包与风险分级
