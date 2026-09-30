@@ -286,3 +286,61 @@ class BilibiliSearchPorts:
     summarize_output: Callable[..., Any]
     tail: Callable[..., Any]
     validate_formal_record: Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class ZhihuSettings:
+    """worker 解析完成后、crawler 构造时一次性冻结的本站配置。"""
+
+    CDP_HEADLESS: bool
+    CRAWLER_MAX_SLEEP_SEC: float
+    CRAWLER_TYPE: str
+    ENABLE_CDP_MODE: bool
+    ENABLE_GET_MEIDAS: bool
+    HEADLESS: bool
+    KEYWORDS: str
+    LOGIN_TYPE: str
+    MAX_CONCURRENCY_NUM: int
+    PLATFORM: str
+    SAVE_LOGIN_STATE: bool
+    START_PAGE: int
+    USER_DATA_DIR: str
+    ZHIHU_SPECIFIED_ID_LIST: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ZhihuClientPorts:
+    """借用 HTTPX 工厂和原 BrowserContext Cookie 读取能力。"""
+
+    make_async_client: Callable[..., Any]
+    convert_browser_context_cookies: Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class ZhihuLoginPorts:
+    """二维码提取与显示仍由运行时拥有。"""
+
+    find_qrcode_img_from_canvas: Callable[..., Any]
+    show_qrcode: Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class ZhihuPorts:
+    """知乎编排借用的 IO 能力与操作起点 reader；装配不执行 IO。"""
+
+    async_playwright: Callable[..., Any]
+    browser_manager_factory: Callable[..., Any]
+    project_browser_args: Callable[[], list[str]]
+    run_required_human_behavior: Callable[..., Any]
+    client_factory: Callable[..., Any]
+    login_factory: Callable[..., Any]
+    convert_browser_context_cookies: Callable[..., Any]
+    fetch_image_bytes_with_retry: Callable[..., Any]
+    accumulator_factory: Callable[..., Any]
+    refresh_max_pages: Callable[[], int]
+    source_exhausted: Callable[[], bool]
+    initial_settle_seconds: Callable[[], float]
+    initial_cookies: Callable[[], str]
+    current_timestamp: Callable[[], int]
+    content_sink_factory: Callable[[], ContentSink]
+    image_stager_factory: Callable[[], ImageStager]
