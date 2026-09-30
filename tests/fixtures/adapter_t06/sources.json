@@ -1,0 +1,27 @@
+{
+  "fork_sha": "5a68eb5098fcd17308c7fe0b9d53916ae839b303",
+  "root_sha": "f5d85447c6047076908fbbcdd54169297f9881dc",
+  "files": {
+    "cache/abs_cache.py.txt": "15efbc037b2990cc4f412106d5c60ce88b744f555d37c45b582e7bb65f0fff91",
+    "cache/cache_factory.py.txt": "02a359ed1e62bd7a95e4ee6101a5ee49fdab297a535abbea54b8463d9e1f2f69",
+    "cache/local_cache.py.txt": "1225efd1d90b8802f8691899ffd13428534b43c7dd0b631f5dfeb77abf9ae5ee",
+    "legacy_columns.json": "28b9efb24b613553e1e0422ba0095be7fcaa53de82d9b5341fd8ade2c2390da1",
+    "media_platform/douyin/__init__.py.txt": "fe3bfdfe800ae72ef2660f4a71f6ddc4c9ec7443cee3ea481bd0ea7205919b14",
+    "media_platform/douyin/client.py.txt": "283da73c9eba771e7761df19877e47acd589641c996c0aa76d9aa733256e24ad",
+    "media_platform/douyin/core.py.txt": "29e8bd94571362d5e2b1399b455150135dbb0aa45b80ab0e124c642956a4a25a",
+    "media_platform/douyin/exception.py.txt": "420318ea2f884edd978d8d95eb34ad89c6cf119ce3f45b76062e5c290805a580",
+    "media_platform/douyin/field.py.txt": "965d4c36a2efd03446b13e065c26d020607cf61385d82f9462020f4488ed9c14",
+    "media_platform/douyin/help.py.txt": "964d0ec596006a879107c97ff13b7f574123eaebcba5664405af0d757d8c1f79",
+    "media_platform/douyin/login.py.txt": "fd02c66d650dba54cde9c089dd1722375356ce2d7c3ba509c028fc983d131b2b",
+    "media_platform/douyin/search_safety.py.txt": "be460aea148ef1a057e72ac24f4bb51bbcab506ab25be024dbd30e9e91d6c14e",
+    "mediacrawler_export_entrypoint.py.txt": "9b468b2f11d8ae5a1ee06398255e9aeb1e204d3353b39460690e44aedf378ff7",
+    "model/m_douyin.py.txt": "bbff4edeaa0a7dac8db101b327e4911e0adf430414271591cb07a8de4591f33a",
+    "store/douyin/__init__.py.txt": "73dddfc23af6b1482b5c6560571f77e77b2acc531188cb779daa25641c5980a2",
+    "store/douyin/_store_impl.py.txt": "9509691b32a5a10b571d02bc028e82d4ed7782a8c35489e517379dd5bf654c0e",
+    "store/douyin/douyin_store_media.py.txt": "3bc7b281025a5170494ae2a0513935fa6ee1a22eb01575692fc4aed0c785d628",
+    "tools/easing.py.txt": "8415e41e0e43c3fc12378f5a707a0a1ba5ba4fd5bc15a5adb27401e2c9b394d6",
+    "tools/image_manifest.py.txt": "d3d2646ebb9117dd273bde445b3ff2ed53efab86603c7cdeb1fe9ff5ecbdb334",
+    "tools/slider_util.py.txt": "948cda25b0fc6a1ec43cee1aec0bd4613d39a9390439d4ba99f30a30de17579e",
+    "tools/trippostcollect_adaptive.py.txt": "6518984c3a2c292352d4ea2218ea7a56dcdf2f2f64cf5b18a20a02600678d6f6"
+  }
+}
