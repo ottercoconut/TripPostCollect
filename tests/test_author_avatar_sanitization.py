@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import types
 
@@ -234,3 +236,121 @@ def test_mediacrawler_export_hook_wraps_writer_before_persistence(
     )
 
     assert persisted == {"title": "青岛"}
+
+
+@pytest.mark.parametrize("platform,storage,prefix", [
+    ("wb", "weibo", "Weibo"),
+    ("dy", "douyin", "Douyin"),
+    ("zhihu", "zhihu", "Zhihu"),
+    ("xhs", "xhs", "Xhs"),
+])
+@pytest.mark.parametrize("bridge", ["worker", "legacy"])
+def test_worker_store_files_remove_avatar_before_serialization(
+    tmp_path: Path, platform: str, storage: str, prefix: str, bridge: str,
+) -> None:
+    """真实 store 和 writer 落盘；独立解释器隔离旧 hook 的类级修改。"""
+    source = Path(__file__).resolve().parents[1]
+    code = r'''
+import asyncio
+import importlib
+import json
+import os
+from pathlib import Path
+import sys
+
+from trippostcollect.platforms import entry
+from trippostcollect.records.sanitization import AUTHOR_AVATAR_KEYS
+
+platform, storage, prefix, bridge, destination = sys.argv[1:]
+entry.configure([
+    "--platform", platform, "--lt", "cookie", "--type", "search", "--keywords", "青岛",
+    "--get_comment", "false", "--get_sub_comment", "false", "--get_media", "false",
+    "--headless", "true", "--save_data_option", "jsonl", "--save_data_path", destination,
+    "--start", "1", "--max_concurrency_num", "1", "--enable_ip_proxy", "false",
+])
+if bridge == "worker":
+    entry.install_hooks()
+else:
+    from mediacrawler_export_entrypoint import install_export_hook
+    install_export_hook()
+assert entry.load_crawler(platform)
+import config
+config.SAVE_DATA_PATH = destination
+config.ENABLE_GET_WORDCLOUD = False
+from var import crawler_type_var
+crawler_type_var.set("search")
+store = importlib.import_module(f"store.{storage}._store_impl")
+from tools.async_file_writer import AsyncFileWriter
+url = "https://fixture.test/private-photo.jpg"
+body_url = "https://fixture.test/body.jpg"
+raw = {
+    "title": "青岛", "author": {key: url for key in AUTHOR_AVATAR_KEYS},
+    "copied": url, "images": [url, body_url], "followers_count": 0,
+    "creator_profile_json": json.dumps({"basicInfo": {"imageb": url, "images": [url]}}),
+}
+expected = {"title": "青岛", "author": {}, "images": [body_url],
+            "followers_count": 0, "creator_profile_json": '{"basicInfo":{}}'}
+original_dumps = json.dumps
+serialized = []
+def checked_dumps(value, *args, **kwargs):
+    text = original_dumps(value, *args, **kwargs)
+    assert url not in text
+    assert not any(key in text for key in AUTHOR_AVATAR_KEYS)
+    serialized.append(text)
+    return text
+json.dumps = checked_dumps
+async def write():
+    await getattr(store, f"{prefix}JsonlStoreImplement")().store_content(raw)
+    writer = AsyncFileWriter(storage, "search")
+    await writer.write_single_item_to_json(raw, "contents")
+    await writer.write_to_csv(raw, "contents")
+asyncio.run(write())
+assert len(serialized) >= 2
+files = list(Path(destination).rglob("search_contents_*"))
+assert len(files) == 3
+for path in files:
+    text = path.read_text(encoding="utf-8-sig")
+    assert url not in text
+    assert not any(key in text for key in AUTHOR_AVATAR_KEYS)
+    assert body_url in text
+    if path.suffix == ".jsonl":
+        assert json.loads(text) == expected
+    elif path.suffix == ".json":
+        assert json.loads(text) == [expected]
+assert raw["copied"] == url
+'''
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join((str(source / "src"), str(source / "scripts")))
+    environment["TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS"] = "1"
+    from trippostcollect.xhs.batch_checkpoint import ENABLED_ENV
+    environment.pop(ENABLED_ENV, None)
+    result = subprocess.run(
+        [sys.executable, "-c", code, platform, storage, prefix, bridge, str(tmp_path / "files")],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_root_jsonl_writer_sanitizes_without_hook(monkeypatch, tmp_path):
+    """直接调用根 writer 也必须在首次写文件前净化。"""
+    from trippostcollect.artifacts.jsonl import AsyncFileWriter
+
+    monkeypatch.setenv("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS", "1")
+    writer = AsyncFileWriter("weibo", "search", save_data_path=lambda: str(tmp_path))
+    asyncio.run(writer.write_to_jsonl(
+        {"title": "青岛", "avatar_url": AVATAR_URL, "copied": AVATAR_URL}, "contents",
+    ))
+    paths = list(tmp_path.rglob("*.jsonl"))
+    assert len(paths) == 1
+    assert paths[0].read_text() == '{"title": "青岛"}\n'
+
+
+def test_root_jsonl_sanitizer_failure_precedes_any_file_operation(monkeypatch, tmp_path):
+    from trippostcollect.artifacts.jsonl import AsyncFileWriter
+
+    monkeypatch.delenv("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS", raising=False)
+    destination = tmp_path / "uncreated"
+    writer = AsyncFileWriter("xhs", "search", save_data_path=lambda: str(destination))
+    with pytest.raises(RuntimeError, match="export sanitizer is not enabled"):
+        asyncio.run(writer.write_to_jsonl({"avatar_url": AVATAR_URL}, "contents"))
+    assert not destination.exists()

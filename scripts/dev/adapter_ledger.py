@@ -315,7 +315,7 @@ def build_progress(root):
     """逐行对照冻结符号账，并核验下沉到更低层共享模块的一跳重导出。
 
     原位定义删除后，目标模块可从 trippostcollect 包内源文件重导出定义；
-    只跟踪一条绝对 from 导入，来源必须直接定义该名字，不递归追踪导入。
+    只跟踪一条绝对 from 导入，来源必须直接定义该名字或类成员，不递归追踪导入。
     """
     root = Path(root)
     baseline = load_symbols(root)
@@ -360,11 +360,13 @@ def build_progress(root):
                 prefix = target_module + "."
                 imported_definition = imported.removeprefix(prefix) if imported.startswith(prefix) else None
                 reexported = False
-                binding = target_from_imports.get(qualname)
+                binding_name, separator, member = qualname.partition(".")
+                binding = target_from_imports.get(binding_name)
                 if binding:
                     module, _, name = binding.rpartition(".")
                     source_definitions, _, _ = inspect("src/" + module.replace(".", "/") + ".py")
-                    reexported = name in source_definitions
+                    source_name = f"{name}.{member}" if separator else name
+                    reexported = source_name in source_definitions
                 row["state"] = (
                     "moved" if qualname in target_definitions or imported_definition in target_definitions
                     or reexported else "missing"

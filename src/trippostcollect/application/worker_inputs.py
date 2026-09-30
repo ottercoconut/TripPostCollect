@@ -173,3 +173,7 @@ def env_int_reader(
 def env_int(name: str, default: int, *, environ: Mapping[str, str]) -> int:
     """供旧 fork 单条委托使用，读取与原调用发生在同一时点。"""
     return env_int_reader(name, default, environ=environ)()
+
+
+def _enabled() -> bool:
+    return os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_ENABLED", "").strip() == "1"

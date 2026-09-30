@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
 from collections.abc import Awaitable, Callable
@@ -149,3 +150,19 @@ def force_stop(crawler) -> None:
         launcher.cleanup()
     except Exception:
         pass
+
+
+def init_loging_config():
+    level = logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(name)s %(levelname)s (%(filename)s:%(lineno)d) - %(message)s",
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    _logger = logging.getLogger("MediaCrawler")
+    _logger.setLevel(level)
+
+    # Disable httpx INFO level logs
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    return _logger

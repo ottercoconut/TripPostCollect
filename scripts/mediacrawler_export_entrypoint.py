@@ -9,11 +9,11 @@ import os
 import runpy
 import sys
 from asyncio import Semaphore, gather
-from functools import wraps
 from pathlib import Path
 from typing import Any
 
 from playwright.async_api import Error as PlaywrightError
+
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,17 +101,12 @@ def _weibo_detail_api_url(note_id: str) -> str:
 
 
 def sanitize_export_item(item: dict[str, Any]) -> dict[str, Any]:
-    if os.environ.get("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS") != "1":
-        raise RuntimeError("TripPostCollect MediaCrawler export sanitizer is not enabled")
     source_text = str(SOURCE_ROOT)
     if source_text not in sys.path:
         sys.path.insert(0, source_text)
-    from trippostcollect.records.sanitization import sanitize_author_avatar_data
+    from trippostcollect.records.sanitization import sanitize_export_item as sanitize
 
-    sanitized = sanitize_author_avatar_data(item).value
-    if not isinstance(sanitized, dict):
-        raise RuntimeError("sanitized MediaCrawler item must remain an object")
-    return sanitized
+    return sanitize(item)
 
 
 def install_export_hook() -> None:
@@ -119,25 +114,10 @@ def install_export_hook() -> None:
     if media_root_text not in sys.path:
         sys.path.insert(0, media_root_text)
     from tools.async_file_writer import AsyncFileWriter
+    from trippostcollect.records.sanitization import install_export_hook as install_writer_hook
 
-    if getattr(AsyncFileWriter, "_trippostcollect_avatar_sanitizer", False):
-        return
-    for method_name in EXPORT_METHODS:
-        original = getattr(AsyncFileWriter, method_name)
-
-        @wraps(original)
-        async def sanitized_writer(
-            self: Any,
-            item: dict[str, Any],
-            item_type: str,
-            *,
-            _original: Any = original,
-        ) -> Any:
-            return await _original(self, sanitize_export_item(item), item_type)
-
-        setattr(AsyncFileWriter, method_name, sanitized_writer)
-    AsyncFileWriter._trippostcollect_avatar_sanitizer = True
-    install_batch_checkpoint_hook()
+    if install_writer_hook(AsyncFileWriter):
+        install_batch_checkpoint_hook()
 
 
 def install_batch_checkpoint_hook() -> None:
@@ -146,31 +126,9 @@ def install_batch_checkpoint_hook() -> None:
     if os.environ.get(ENABLED_ENV) != "1":
         return
     from tools import trippostcollect_adaptive as adaptive
+    from trippostcollect.application.events import install_batch_checkpoint_hook as install_legacy_hook
 
-    if getattr(adaptive, "_trippostcollect_batch_checkpoint", False):
-        return
-    original = adaptive.append_execution_event
-
-    def append_and_checkpoint(event_type: str, details: dict[str, Any]) -> None:
-        original(event_type, details)
-        if event_type == "adaptive_batch_completed":
-            try:
-                publish_batch(details)
-            except Exception as exc:
-                detail = str(exc)
-                if not detail.startswith("xhs_batch_checkpoint_"):
-                    detail = f"xhs_batch_checkpoint_{type(exc).__name__.lower()}"
-                original("xhs_runtime_terminal", {
-                    "phase": "batch_checkpoint",
-                    "failure_type": "runtime_failed",
-                    "stop_reason": "runtime_failed",
-                    "stop_detail": detail,
-                    "retryable": False,
-                })
-                raise RuntimeError(detail) from exc
-
-    adaptive.append_execution_event = append_and_checkpoint
-    adaptive._trippostcollect_batch_checkpoint = True
+    install_legacy_hook(adaptive, publish_batch=publish_batch)
 
 
 def _repair_exception_is_blocking(crawler: Any, exc: BaseException) -> bool:
