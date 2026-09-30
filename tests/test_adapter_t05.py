@@ -436,7 +436,7 @@ def test_warmup_requires_mobile_login_and_uid(monkeypatch, login, uid, expected)
     async def api(_):
         return {"ok": True, "login": login, "uid": uid}
 
-    monkeypatch.setattr(warmup, "weibo_api_check", api)
+    monkeypatch.setattr("trippostcollect.application.warmup.weibo_api_check", api)
     state = asyncio.run(warmup.current_state(Context(), SimpleNamespace(url="https://m.weibo.cn"), "weibo"))
     assert state["ok"] is expected
 

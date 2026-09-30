@@ -1,0 +1,11 @@
+{
+  "head": "f8afa057b9402c85f343d79c5c9d6159644add81",
+  "fixtures_sha256": {
+    "mediacrawler_crawl.py.txt": "2e222bc90f9e98a6621798b5b688e4563e8de246b029e4aee95d7cec227e306b",
+    "mediacrawler_login_warmup.py.txt": "bb890b1b47e334a45f770af5ce02d8ec5fdf923ce08f4e7c2ae9fc542e86e283",
+    "required_cookie_names.py.txt": "0b682b8a86b8502dbda67a29b2de13b0fab84f99574d9998dcf9a138564bb47d",
+    "login_warmup.py.txt": "b9b29291b2fa6cd78f698b64023f9fa7a2cca2027c168cf88d51f09ff8028612",
+    "ctf_browser_resilience.py.txt": "44125138dc93d8c627f9413dbe3c7609f85e38b1156561ae8c29a5b9421c5bb0"
+  },
+  "note": "四个入口以 git show HEAD:<原文件> 冻结；执行器只截取 T10 顶层定义。required_cookie_names 取冻结台账 root_head；其 AST 与 HEAD runtime/cookies 中定义相同。"
+}

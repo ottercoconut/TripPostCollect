@@ -3,6 +3,22 @@
 
 from __future__ import annotations
 
+from trippostcollect.application.inputs import (
+    load_zhihu_detail_urls as load_zhihu_detail_urls,
+    load_xhs_detail_urls as load_xhs_detail_urls,
+    load_xhs_repair_target_ids as load_xhs_repair_target_ids,
+)
+from trippostcollect.application.repair import (
+    load_post_repair_fallbacks as load_post_repair_fallbacks,
+    load_post_repair_targets as load_post_repair_targets,
+    load_xhs_repair_report as load_xhs_repair_report,
+    xhs_repair_pagination_evidence as xhs_repair_pagination_evidence,
+    post_repair_pagination_evidence as post_repair_pagination_evidence,
+    repair_partial_child_execution_allowed as repair_partial_child_execution_allowed,
+    repair_candidate_execution_completed as repair_candidate_execution_completed,
+    repair_runtime_stop_reason as _repair_runtime_stop_reason,
+)
+
 import argparse
 from contextlib import contextmanager
 from dataclasses import replace
@@ -21,7 +37,7 @@ from email.utils import parsedate_to_datetime as parsedate_to_datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable, Iterator, MutableMapping
-from urllib.parse import parse_qsl, unquote, urlparse
+from urllib.parse import unquote, urlparse
 
 from playwright.async_api import async_playwright
 
@@ -360,251 +376,14 @@ SAMPLE_KEYS = (
 )
 
 
-def load_zhihu_detail_urls(path_value: str | Path) -> list[str]:
-    path = Path(path_value).expanduser().resolve()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"invalid Zhihu detail URL file: {path}: {exc}") from exc
-    if not isinstance(payload, list):
-        raise SystemExit("Zhihu detail URL file must contain a JSON array")
-
-    urls: list[str] = []
-    for value in payload:
-        url = str(value or "").strip().split("#", 1)[0].split("?", 1)[0]
-        parsed = urlparse(url)
-        answer_url = bool(
-            parsed.hostname in {"zhihu.com", "www.zhihu.com"}
-            and re.fullmatch(r"/question/[^/]+/answer/[^/]+/?", parsed.path)
-        )
-        article_url = bool(
-            parsed.hostname == "zhuanlan.zhihu.com"
-            and re.fullmatch(r"/p/[^/]+/?", parsed.path)
-        )
-        if not (parsed.scheme == "https" and (answer_url or article_url)):
-            raise SystemExit(f"unsupported Zhihu detail URL: {url or value!r}")
-        if url not in urls:
-            urls.append(url)
-    if not urls:
-        raise SystemExit("Zhihu detail URL file contains no answer/article URLs")
-    return urls
 
 
-def load_xhs_detail_urls(path_value: str | Path) -> list[str]:
-    path = Path(path_value).expanduser().resolve()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"invalid XHS detail URL file: {path}: {exc}") from exc
-    if not isinstance(payload, list):
-        raise SystemExit("XHS detail URL file must contain a JSON array")
-
-    urls: list[str] = []
-    for value in payload:
-        raw_url = str(value or "").strip()
-        parsed = urlparse(raw_url)
-        if parsed.scheme != "https" or parsed.hostname not in {"xiaohongshu.com", "www.xiaohongshu.com"}:
-            raise SystemExit(f"unsupported XHS detail URL: {raw_url!r}")
-        if not re.fullmatch(r"/explore/[^/]+/?", parsed.path):
-            raise SystemExit(f"unsupported XHS detail URL path: {raw_url!r}")
-        query = dict(parse_qsl(parsed.query))
-        if not query.get("xsec_token") or not query.get("xsec_source"):
-            raise SystemExit(f"XHS detail URL must contain xsec_token and xsec_source: {raw_url!r}")
-        normalized = parsed._replace(fragment="").geturl()
-        if normalized not in urls:
-            urls.append(normalized)
-    if not urls:
-        raise SystemExit("XHS detail URL file contains no URLs")
-    return urls
 
 
-def load_xhs_repair_target_ids(path_value: str | Path) -> set[str]:
-    path = Path(path_value).expanduser().resolve()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"invalid XHS repair target ID file: {path}: {exc}") from exc
-    if not isinstance(payload, list):
-        raise SystemExit("XHS repair target ID file must contain a JSON array")
-    values = {str(value).strip() for value in payload if str(value).strip()}
-    if not values:
-        raise SystemExit("XHS repair target ID file contains no post IDs")
-    return values
 
 
-def load_post_repair_fallbacks(
-    db_path: str | Path | None,
-    platform_key: str,
-    post_ids: set[str],
-) -> dict[str, dict[str, Any]]:
-    if not db_path or not post_ids:
-        return {}
-    path = Path(db_path).expanduser().resolve()
-    if not path.is_file():
-        return {}
-    placeholders = ",".join("?" for _ in post_ids)
-    try:
-        with sqlite3.connect(path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                f"""
-                SELECT *
-                FROM web_posts
-                WHERE platform_key=? AND platform_post_id IN ({placeholders})
-                """,
-                [platform_key, *sorted(post_ids)],
-            ).fetchall()
-    except sqlite3.Error:
-        return {}
-
-    fallbacks: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        columns = set(row.keys())
-
-        def row_value(key: str) -> Any:
-            return row[key] if key in columns else None
-
-        def available(*values: Any) -> Any:
-            return next((value for value in values if value not in (None, "")), None)
-
-        raw: dict[str, Any] = {}
-        try:
-            parsed = json.loads(str(row_value("raw_sample_json") or ""))
-            if isinstance(parsed, dict):
-                raw = parsed
-        except (TypeError, json.JSONDecodeError):
-            pass
-        fallback = {
-            key: value
-            for key, value in {
-                "keyword": row_value("keyword"),
-                "published_at": row_value("published_at"),
-                "author_followers_count": row_value("author_followers_count"),
-                "author_display_name": row_value("author_display_name"),
-                "author_platform_id": row_value("author_platform_id"),
-                "author_profile_url": row_value("author_profile_url"),
-                "author_description": row_value("author_description"),
-                "created_time": raw.get("created_time"),
-                "updated_time": raw.get("updated_time"),
-                "creator_hash": raw.get("creator_hash"),
-                "creator_url_token": raw.get("creator_url_token"),
-                "user_nickname": raw.get("user_nickname"),
-                "author_followers_source": raw.get("author_followers_source"),
-                "followers_observed": raw.get("followers_observed"),
-                "followers_count": raw.get("followers_count"),
-                "liked_count": available(
-                    row_value("post_likes_count"),
-                    raw.get("liked_count"),
-                ),
-                "collected_count": available(
-                    row_value("post_favorites_count"),
-                    raw.get("collected_count"),
-                    raw.get("favorites_count"),
-                ),
-                "comment_count": available(
-                    row_value("post_comments_count"),
-                    raw.get("comment_count"),
-                    raw.get("comments_count"),
-                ),
-                "share_count": available(
-                    row_value("post_shares_count"),
-                    raw.get("share_count"),
-                    raw.get("shares_count"),
-                ),
-            }.items()
-            if value not in (None, "")
-        }
-        fallbacks[str(row["platform_post_id"])] = fallback
-    return fallbacks
 
 
-def load_post_repair_targets(
-    path_value: str | Path,
-    platform_key: str,
-    *,
-    db_path: str | Path | None = None,
-) -> list[dict[str, Any]]:
-    if platform_key not in {"douyin", "weibo", "zhihu"}:
-        raise SystemExit(f"unsupported post repair platform: {platform_key}")
-    path = Path(path_value).expanduser().resolve()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"invalid post repair target file: {path}: {exc}") from exc
-    if not isinstance(payload, list):
-        raise SystemExit("post repair target file must contain a JSON array")
-
-    targets: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    raw_targets: list[tuple[str, str, str, dict[str, Any]]] = []
-    for index, value in enumerate(payload):
-        if not isinstance(value, dict):
-            raise SystemExit(f"post repair target {index} must be an object")
-        post_id = str(value.get("platform_post_id") or "").strip()
-        detail_target = str(value.get("detail_target") or "").strip()
-        keyword = str(value.get("keyword") or "").strip()
-        if not post_id or not detail_target or not keyword:
-            raise SystemExit(
-                f"post repair target {index} requires platform_post_id, detail_target, and keyword"
-            )
-        if post_id in seen_ids:
-            raise SystemExit(f"duplicate post repair platform_post_id: {post_id}")
-
-        if platform_key == "weibo":
-            valid = detail_target == post_id and bool(re.fullmatch(r"[0-9A-Za-z]+", post_id))
-        else:
-            parsed = urlparse(detail_target.split("#", 1)[0].split("?", 1)[0])
-            if platform_key == "douyin":
-                valid = bool(
-                    parsed.scheme == "https"
-                    and parsed.hostname in {"douyin.com", "www.douyin.com"}
-                    and re.fullmatch(rf"/(?:video|note)/{re.escape(post_id)}/?", parsed.path)
-                )
-            else:
-                answer = bool(
-                    parsed.hostname in {"zhihu.com", "www.zhihu.com"}
-                    and re.fullmatch(
-                        rf"/question/[^/]+/answer/{re.escape(post_id)}/?",
-                        parsed.path,
-                    )
-                )
-                article = bool(
-                    parsed.hostname == "zhuanlan.zhihu.com"
-                    and re.fullmatch(rf"/p/{re.escape(post_id)}/?", parsed.path)
-                )
-                valid = bool(parsed.scheme == "https" and (answer or article))
-        if not valid:
-            raise SystemExit(
-                f"post repair target does not match {platform_key} ID {post_id}: {detail_target!r}"
-            )
-        seen_ids.add(post_id)
-        payload_fallback = value.get("repair_fallback")
-        raw_targets.append(
-            (
-                post_id,
-                detail_target,
-                keyword,
-                payload_fallback if isinstance(payload_fallback, dict) else {},
-            )
-        )
-    fallbacks = load_post_repair_fallbacks(
-        db_path,
-        platform_key,
-        {post_id for post_id, _, _, _ in raw_targets},
-    )
-    for post_id, detail_target, keyword, payload_fallback in raw_targets:
-        value = {
-            "platform_post_id": post_id,
-            "detail_target": detail_target,
-            "keyword": keyword,
-        }
-        merged_fallback = {**payload_fallback, **fallbacks.get(post_id, {})}
-        if merged_fallback:
-            value["repair_fallback"] = merged_fallback
-        targets.append(value)
-    if not targets:
-        raise SystemExit("post repair target file contains no targets")
-    return targets
 
 
 def ensure_prerequisites() -> None:
@@ -1356,131 +1135,10 @@ def load_pagination_evidence(
     }
 
 
-def load_xhs_repair_report(path_value: str | Path | None) -> dict[str, Any]:
-    if not path_value:
-        return {}
-    path = Path(path_value).expanduser()
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        return {}
-    return value if isinstance(value, dict) else {}
 
 
-def xhs_repair_pagination_evidence(
-    records: list[dict[str, Any]],
-    *,
-    target_count: int,
-) -> dict[str, Any]:
-    reports = [
-        record.get("repair_report")
-        for record in records
-        if isinstance(record, dict)
-        and record.get("platform") == "xhs"
-        and isinstance(record.get("repair_report"), dict)
-    ]
-    batches: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
-    successful_ids: set[str] = set()
-    for report in reports:
-        batches.extend(
-            value for value in report.get("batches") or [] if isinstance(value, dict)
-        )
-        failures.extend(
-            value
-            for value in report.get("candidate_failures") or []
-            if isinstance(value, dict)
-        )
-        successful_ids.update(
-            str(value) for value in report.get("successful_ids") or [] if str(value)
-        )
-    return {
-        "available": True,
-        "stopped": True,
-        "stop_reason": "repair_targets_processed",
-        "stop_detail": "specified_detail_targets",
-        "candidate_count": target_count,
-        "batches": batches,
-        "successful_candidate_count": len(successful_ids),
-        "skipped_candidate_count": len(failures),
-        "skipped_candidate_failures": failures,
-    }
 
 
-def post_repair_pagination_evidence(
-    targets: list[dict[str, Any]],
-    *,
-    platform: str,
-    successful_identities: set[str],
-    materialization_failures: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    target_ids = {
-        str(target.get("platform_post_id") or "")
-        for target in targets
-        if str(target.get("platform_post_id") or "")
-    }
-    successful_ids = {
-        identity.rsplit(":id:", 1)[-1]
-        for identity in successful_identities
-        if identity.startswith(f"{platform}:id:")
-    } & target_ids
-    failure_by_id: dict[str, dict[str, Any]] = {}
-    for failure in materialization_failures or []:
-        identity = str(failure.get("identity") or "")
-        post_id = identity.rsplit(":id:", 1)[-1] if ":id:" in identity else identity
-        if post_id:
-            failure_by_id[post_id] = failure
-
-    failures: list[dict[str, Any]] = []
-    for target in targets:
-        post_id = str(target.get("platform_post_id") or "")
-        if not post_id or post_id in successful_ids:
-            continue
-        materialization_failure = failure_by_id.get(post_id) or {}
-        error_code = str(
-            materialization_failure.get("error_code")
-            or materialization_failure.get("code")
-            or "repair_target_no_valid_output"
-        )
-        detail = str(
-            materialization_failure.get("detail")
-            or materialization_failure.get("message")
-            or "explicit repair target produced no formally valid persisted detail record"
-        )
-        failure_scope = str(
-            materialization_failure.get("failure_scope")
-            or ("image" if materialization_failure else "post")
-        )
-        failures.append(
-            {
-                "platform": platform,
-                "identity": f"{platform}:id:{post_id}",
-                "platform_post_id": post_id,
-                "failure_scope": failure_scope,
-                "detail": detail,
-                "error_code": error_code,
-                "retryable": bool(materialization_failure.get("retryable", False)),
-                "attempts": max(1, int(materialization_failure.get("attempts") or 1)),
-                "source_index": materialization_failure.get("source_index"),
-                "terminal_for_run": True,
-                "evidence_source": (
-                    "image_materialization"
-                    if materialization_failure
-                    else "repair_target_output_difference"
-                ),
-            }
-        )
-    return {
-        "available": True,
-        "stopped": True,
-        "stop_reason": "repair_targets_processed",
-        "stop_detail": "specified_detail_targets",
-        "candidate_count": len(targets),
-        "batches": [],
-        "successful_candidate_count": len(successful_ids),
-        "skipped_candidate_count": len(failures),
-        "skipped_candidate_failures": failures,
-    }
 
 
 def attach_skipped_candidate_evidence(
@@ -3470,54 +3128,8 @@ def formal_image_promotion_allowed(
     return bool(download_images and not no_import and formal_import_gate_met(validation))
 
 
-def repair_partial_child_execution_allowed(
-    *,
-    repair_mode: bool,
-    child_execution_ok: bool,
-    runtime_blocked: bool = False,
-    validation: dict[str, Any],
-    image_materialization: dict[str, Any],
-    behavior_validation: dict[str, Any],
-) -> bool:
-    if runtime_blocked:
-        return False
-    if child_execution_ok:
-        return True
-    return bool(
-        repair_mode
-        and int(validation.get("valid_total_count") or 0) > 0
-        and bool(image_materialization.get("complete"))
-        and bool(behavior_validation.get("ok"))
-    )
 
 
-def repair_candidate_execution_completed(
-    records: list[dict[str, Any]],
-    platforms: list[str],
-) -> bool:
-    repair_records = [
-        record
-        for record in records
-        if isinstance(record, dict) and record.get("platform") in platforms
-    ]
-
-    def clean_process(record: dict[str, Any]) -> bool:
-        run = record.get("run")
-        return bool(
-            isinstance(run, dict)
-            and run.get("returncode") == 0
-            and not bool(run.get("timed_out"))
-            and str(
-                (record.get("failure_classification") or {}).get("failure_type")
-                or ""
-            )
-            == "success"
-        )
-
-    return bool(
-        len(repair_records) == len(platforms)
-        and all(clean_process(record) for record in repair_records)
-    )
 
 
 RUNTIME_BLOCKING_FAILURE_TYPES = frozenset(
@@ -3669,13 +3281,8 @@ def latest_runtime_blocker(
     return {}
 
 
-def repair_runtime_stop_reason(
-    records: list[dict[str, Any]],
-    platforms: list[str],
-) -> str:
-    """Keep the repair API while using current-attempt blocker semantics."""
-
-    return str(latest_runtime_blocker(records, platforms).get("failure_type") or "")
+def repair_runtime_stop_reason(records: list[dict[str, Any]], platforms: list[str]) -> str:
+    return _repair_runtime_stop_reason(records, platforms, latest_runtime_blocker=latest_runtime_blocker)
 
 
 def apply_runtime_blocker(

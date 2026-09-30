@@ -534,6 +534,8 @@ FORK_EXCLUDED_PLATFORMS = ("bilibili", "kuaishou", "tieba", "baidu")
 # CLI 契约归属于外部入口；仅工作树漂移检查跟随迁出的定义。
 CLI_DEFINITION_SOURCES = {
     "scripts/mediacrawler_crawl.py": ("src/trippostcollect/application/inputs.py",),
+    "scripts/login_warmup.py": ("src/trippostcollect/application/warmup.py:parse_args",),
+    "scripts/mediacrawler_login_warmup.py": ("src/trippostcollect/application/warmup.py:media_parse_args",),
 }
 
 ENTRYPOINTS = (

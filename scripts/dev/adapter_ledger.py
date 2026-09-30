@@ -200,14 +200,19 @@ def extract_inputs(files, read, *, definition_sources=None):
     cli = {}
     for relative in ENTRYPOINTS:
         sources = (relative, *(definition_sources or {}).get(relative, ()))
-        nodes = [
-            node
-            for source in sources
-            for node in sorted(
-                ast.walk(ast.parse(read(source))),
+        nodes = []
+        for source in sources:
+            path, _, definition = source.partition(":")
+            tree = ast.parse(read(path))
+            if definition:
+                # 同文件承载多个入口时，只核对该入口原有的参数定义。
+                tree = next((node for node in tree.body if isinstance(node, DEFINITION_TYPES) and node.name == definition), None)
+                if tree is None:
+                    continue
+            nodes.extend(sorted(
+                ast.walk(tree),
                 key=lambda node: (getattr(node, "lineno", 0), getattr(node, "col_offset", 0)),
-            )
-        ]
+            ))
         arguments = []
         for node in nodes:
             if not (
@@ -355,6 +360,14 @@ def build_progress(root):
             if qualname in definitions:
                 delegated = delegated_definition(definitions[qualname], imports, target_module)
                 row["state"] = "moved" if delegated in target_definitions else "pending"
+                if row["disposition"] == "薄" and row["state"] == "pending":
+                    # 薄入口的台账目标仍是脚本；验证实际包内委托定义存在。
+                    package_target = delegated_definition(definitions[qualname], imports, "trippostcollect")
+                    if package_target and "." in package_target:
+                        module, _, name = package_target.rpartition(".")
+                        package_definitions, _, _ = inspect("src/trippostcollect/" + module.replace(".", "/") + ".py")
+                        if name in package_definitions:
+                            row["state"] = "moved"
             else:
                 imported = imports.get(qualname, "")
                 prefix = target_module + "."
