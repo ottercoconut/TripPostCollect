@@ -1,0 +1,4 @@
+def required_cookie_names(platform_key: str) -> tuple[str, ...]:
+    if platform_key == "zhihu":
+        return ("d_c0", "z_c0")
+    return ()

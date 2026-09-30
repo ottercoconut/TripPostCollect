@@ -26,9 +26,12 @@ import json
 import time
 import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from trippostcollect.core.paths import (
+    COOKIE_SNAPSHOT_FILENAME,
     platform_cookie_snapshot_path as cookie_snapshot_path,
     platform_profile_dir as profile_dir_for, PROJECT_ROOT as ROOT,
 )
@@ -226,3 +229,51 @@ raise SystemExit(asyncio.run(main()))
         "cookie_names": names,
         "required_cookie_names": list(required_cookie_names(platform_key)),
     }
+
+
+def cookie_dict(cookies: list[dict[str, Any]]) -> dict[str, str]:
+    return {item["name"]: item.get("value", "") for item in cookies}
+
+
+
+def cookie_snapshot_info(path: Path, cookies: list[dict[str, Any]], saved_at: str) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "saved_at": saved_at,
+        "cookie_names": sorted({item["name"] for item in cookies if item.get("name")}),
+    }
+
+
+
+def write_cookie_snapshot(
+    platform_key: str,
+    profile_dir: Path,
+    cookies: list[dict[str, Any]],
+    *,
+    source: str,
+    label: str,
+    urls: list[str],
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    cookie_values = cookie_dict(cookies)
+    missing = [name for name in required_cookie_names(platform_key) if not cookie_values.get(name)]
+    if missing:
+        return None
+    saved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    snapshot_path = profile_dir / COOKIE_SNAPSHOT_FILENAME
+    payload = {
+        "platform": platform_key,
+        "label": label,
+        "saved_at": saved_at,
+        "source": source,
+        "urls": urls,
+        "required_cookie_names": list(required_cookie_names(platform_key)),
+        "state_markers": state.get("markers") if isinstance(state, dict) else {},
+        "cookies": cookies,
+    }
+    snapshot_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        snapshot_path.chmod(0o600)
+    except OSError:
+        pass
+    return cookie_snapshot_info(snapshot_path, cookies, saved_at)

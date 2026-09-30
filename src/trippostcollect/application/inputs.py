@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
+import re
+from pathlib import Path
+from urllib.parse import urlparse, parse_qsl
 
 from trippostcollect.core.paths import DEFAULT_DB, LOCAL_MEDIA_ROOT
 from trippostcollect.core.paths import MEDIACRAWLER_RUNS_OUTPUT as DEFAULT_OUTPUT
@@ -109,4 +113,78 @@ def selected_platforms(values: list[str]) -> list[str]:
     unknown = sorted(set(values) - set(PLATFORMS))
     if unknown:
         raise SystemExit(f"Unsupported MediaCrawler platform in this project: {', '.join(unknown)}")
+    return values
+
+
+def load_zhihu_detail_urls(path_value: str | Path) -> list[str]:
+    path = Path(path_value).expanduser().resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid Zhihu detail URL file: {path}: {exc}") from exc
+    if not isinstance(payload, list):
+        raise SystemExit("Zhihu detail URL file must contain a JSON array")
+
+    urls: list[str] = []
+    for value in payload:
+        url = str(value or "").strip().split("#", 1)[0].split("?", 1)[0]
+        parsed = urlparse(url)
+        answer_url = bool(
+            parsed.hostname in {"zhihu.com", "www.zhihu.com"}
+            and re.fullmatch(r"/question/[^/]+/answer/[^/]+/?", parsed.path)
+        )
+        article_url = bool(
+            parsed.hostname == "zhuanlan.zhihu.com"
+            and re.fullmatch(r"/p/[^/]+/?", parsed.path)
+        )
+        if not (parsed.scheme == "https" and (answer_url or article_url)):
+            raise SystemExit(f"unsupported Zhihu detail URL: {url or value!r}")
+        if url not in urls:
+            urls.append(url)
+    if not urls:
+        raise SystemExit("Zhihu detail URL file contains no answer/article URLs")
+    return urls
+
+
+
+def load_xhs_detail_urls(path_value: str | Path) -> list[str]:
+    path = Path(path_value).expanduser().resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid XHS detail URL file: {path}: {exc}") from exc
+    if not isinstance(payload, list):
+        raise SystemExit("XHS detail URL file must contain a JSON array")
+
+    urls: list[str] = []
+    for value in payload:
+        raw_url = str(value or "").strip()
+        parsed = urlparse(raw_url)
+        if parsed.scheme != "https" or parsed.hostname not in {"xiaohongshu.com", "www.xiaohongshu.com"}:
+            raise SystemExit(f"unsupported XHS detail URL: {raw_url!r}")
+        if not re.fullmatch(r"/explore/[^/]+/?", parsed.path):
+            raise SystemExit(f"unsupported XHS detail URL path: {raw_url!r}")
+        query = dict(parse_qsl(parsed.query))
+        if not query.get("xsec_token") or not query.get("xsec_source"):
+            raise SystemExit(f"XHS detail URL must contain xsec_token and xsec_source: {raw_url!r}")
+        normalized = parsed._replace(fragment="").geturl()
+        if normalized not in urls:
+            urls.append(normalized)
+    if not urls:
+        raise SystemExit("XHS detail URL file contains no URLs")
+    return urls
+
+
+
+def load_xhs_repair_target_ids(path_value: str | Path) -> set[str]:
+    path = Path(path_value).expanduser().resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid XHS repair target ID file: {path}: {exc}") from exc
+    if not isinstance(payload, list):
+        raise SystemExit("XHS repair target ID file must contain a JSON array")
+    values = {str(value).strip() for value in payload if str(value).strip()}
+    if not values:
+        raise SystemExit("XHS repair target ID file contains no post IDs")
     return values

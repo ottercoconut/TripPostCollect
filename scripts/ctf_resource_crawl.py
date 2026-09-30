@@ -18,11 +18,11 @@ from typing import Any
 from playwright.async_api import BrowserContext, Page, Request, Response, TimeoutError as PlaywrightTimeoutError
 
 from trippostcollect.runtime.browser_runtime import browser_launch_environment, browser_runtime_args
-from ctf_browser_resilience import (
+from trippostcollect.runtime.page_readiness import navigate_with_commit_and_readiness
+from trippostcollect.application.page_evidence import (
     clean_douyin_profile_cookies,
     clear_douyin_context_cookies,
     is_douyin_target,
-    navigate_with_commit_and_readiness,
 )
 from ctf_scrapling_preflight import run_scrapling_static_preflight, should_preflight
 from trippostcollect.application.policy import CrawlPolicyBlocked, site_request_guard, varied_wait_seconds

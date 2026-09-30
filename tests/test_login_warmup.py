@@ -38,7 +38,7 @@ def test_run_target_records_failure_and_continues_contract(monkeypatch: pytest.M
     async def fail_warmup(*_args, **_kwargs):
         raise RuntimeError("browser failed")
 
-    monkeypatch.setattr(login_warmup, "warmup_mediacrawler", fail_warmup)
+    monkeypatch.setattr("trippostcollect.application.warmup.warmup_mediacrawler", fail_warmup)
     args = argparse.Namespace(
         timeout_seconds=10,
         output_dir=str(tmp_path),
@@ -79,7 +79,7 @@ def test_markdown_summary_includes_login_refresh_state() -> None:
 
 
 def test_weibo_login_accepts_current_mobile_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    media_login = sys.modules["mediacrawler_login_warmup"]
+    media_login = import_module("mediacrawler_login_warmup")
 
     class FakeContext:
         async def cookies(self, _urls):
@@ -97,8 +97,8 @@ def test_weibo_login_accepts_current_mobile_session(monkeypatch: pytest.MonkeyPa
     async def fake_api(_page):
         return {"ok": True, "login": True, "uid": "123"}
 
-    monkeypatch.setattr(media_login, "safe_local_storage", fake_storage)
-    monkeypatch.setattr(media_login, "weibo_api_check", fake_api)
+    monkeypatch.setattr("trippostcollect.application.warmup.safe_local_storage", fake_storage)
+    monkeypatch.setattr("trippostcollect.application.warmup.weibo_api_check", fake_api)
 
     state = asyncio.run(media_login.current_state(FakeContext(), FakePage(), "weibo"))
 
@@ -108,7 +108,7 @@ def test_weibo_login_accepts_current_mobile_session(monkeypatch: pytest.MonkeyPa
 
 
 def test_weibo_login_rejects_desktop_cookie_without_mobile_api(monkeypatch: pytest.MonkeyPatch) -> None:
-    media_login = sys.modules["mediacrawler_login_warmup"]
+    media_login = import_module("mediacrawler_login_warmup")
 
     class FakeContext:
         async def cookies(self, urls):
@@ -124,8 +124,8 @@ def test_weibo_login_rejects_desktop_cookie_without_mobile_api(monkeypatch: pyte
     async def fake_api(_page):
         return {"ok": True, "login": False, "uid": None}
 
-    monkeypatch.setattr(media_login, "safe_local_storage", fake_storage)
-    monkeypatch.setattr(media_login, "weibo_api_check", fake_api)
+    monkeypatch.setattr("trippostcollect.application.warmup.safe_local_storage", fake_storage)
+    monkeypatch.setattr("trippostcollect.application.warmup.weibo_api_check", fake_api)
 
     state = asyncio.run(media_login.current_state(FakeContext(), FakePage(), "weibo"))
 
@@ -134,7 +134,7 @@ def test_weibo_login_rejects_desktop_cookie_without_mobile_api(monkeypatch: pyte
 
 
 def test_weibo_login_uses_desktop_login_and_mobile_verification() -> None:
-    media_login = sys.modules["mediacrawler_login_warmup"]
+    media_login = import_module("mediacrawler_login_warmup")
     config = media_login.PLATFORMS["weibo"]
 
     assert config["login_url"] == "https://passport.weibo.com/sso/signin?entry=miniblog&source=miniblog"
@@ -143,7 +143,7 @@ def test_weibo_login_uses_desktop_login_and_mobile_verification() -> None:
 
 
 def test_weibo_desktop_login_requires_sso_or_changed_session() -> None:
-    media_login = sys.modules["mediacrawler_login_warmup"]
+    media_login = import_module("mediacrawler_login_warmup")
 
     assert media_login.weibo_desktop_login_completed(
         {"WBPSESS": "anonymous"},
