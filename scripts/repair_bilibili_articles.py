@@ -25,7 +25,6 @@ from mediacrawler_crawl import (
     BilibiliArticleDetailError,
     fetch_bilibili_article_detail,
     hydrate_bilibili_article_record,
-    load_cookie_snapshot,
     normalize_bilibili_article_record,
     validate_formal_record,
 )
@@ -37,6 +36,7 @@ from trippostcollect.core.paths import (
     ensure_dir,
     ensure_parent,
 )
+from trippostcollect.runtime.cookies import load_cookie_snapshot
 from trippostcollect.records.topic_relevance import is_topic_relevant
 
 
