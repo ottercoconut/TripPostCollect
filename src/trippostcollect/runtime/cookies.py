@@ -24,9 +24,15 @@ from __future__ import annotations
 
 import json
 import time
+import subprocess
+import sys
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from trippostcollect.core.paths import platform_cookie_snapshot_path as cookie_snapshot_path
+from trippostcollect.core.paths import (
+    platform_cookie_snapshot_path as cookie_snapshot_path,
+    platform_profile_dir as profile_dir_for, PROJECT_ROOT as ROOT,
+)
+from trippostcollect.runtime.browser_runtime import browser_runtime_args, browser_launch_environment
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Cookie
@@ -143,3 +149,80 @@ def load_cookie_snapshot(platform_key: str) -> dict[str, Any] | None:
 
 def public_cookie_export(cookie_export: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in cookie_export.items() if key != "cookie_header"}
+
+
+# T07：原执行器 Cookie 导出，子进程与 snapshot 优先级保持不变。
+def export_profile_cookies(platform_key: str, browser_path: str | None) -> dict[str, Any] | None:
+    snapshot = load_cookie_snapshot(platform_key)
+    if snapshot:
+        return snapshot
+
+    profile_dir = profile_dir_for(platform_key)
+    if not profile_dir.exists():
+        return None
+    script = r"""
+import asyncio
+import json
+import sys
+from playwright.async_api import async_playwright
+
+async def main() -> int:
+    profile_dir = sys.argv[1]
+    executable_path = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+    target_url = sys.argv[3]
+    runtime_args = json.loads(sys.argv[4])
+    async with async_playwright() as playwright:
+        context = await playwright.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
+            headless=True,
+            executable_path=executable_path,
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            args=["--disable-dev-shm-usage", "--no-sandbox", *runtime_args],
+        )
+        page = context.pages[0] if context.pages else await context.new_page()
+        try:
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1000)
+        cookies = await context.cookies([target_url])
+        await context.close()
+        sys.stdout.write(";".join(f"{item['name']}={item.get('value', '')}" for item in cookies))
+    return 0
+
+raise SystemExit(asyncio.run(main()))
+"""
+    cmd = [sys.executable, "-c", script, str(profile_dir)]
+    if browser_path:
+        cmd.append(browser_path)
+    else:
+        cmd.append("")
+    cmd.append(platform_cookie_url(platform_key))
+    cmd.append(json.dumps(browser_runtime_args()))
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=45,
+            check=False,
+            env=browser_launch_environment(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    cookie_str = result.stdout.strip()
+    names = cookie_names_from_header(cookie_str)
+    missing = [name for name in required_cookie_names(platform_key) if name not in names]
+    if result.returncode != 0 or missing:
+        return None
+    return {
+        "cookie_header": cookie_str,
+        "source": "live_profile",
+        "snapshot_path": str(cookie_snapshot_path(platform_key)),
+        "saved_at": None,
+        "cookie_names": names,
+        "required_cookie_names": list(required_cookie_names(platform_key)),
+    }

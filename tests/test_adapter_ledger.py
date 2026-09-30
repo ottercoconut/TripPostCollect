@@ -188,9 +188,12 @@ def test_fork_node_count_matches_ci_expectation() -> None:
         "tests/platforms/douyin/test_douyin_no_user_info.py",
         "tests/platforms/douyin/test_douyin_search_safety.py",
         "tests/platforms/douyin/test_douyin_store.py",
+        "tests/platforms/zhihu/test_zhihu_detail_images.py",
+        "tests/platforms/zhihu/test_zhihu_image_download.py",
+        "tests/platforms/zhihu/test_zhihu_search_detail.py",
     })
     moved = [node for node in data["fork"]["nodes"] if node["target_file"] in moved_files]
-    assert len(moved) == 106
+    assert len(moved) == 133
     for node in moved:
         assert not (ROOT / node["source_file"]).exists()
         assert (ROOT / node["target_file"]).is_file()

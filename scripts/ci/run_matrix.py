@@ -19,9 +19,9 @@ FORK_OFFLINE_TESTS = tuple(f"tests/test_{name}.py" for name in (
     "xhs_image_download", "xhs_login_contract", "xhs_manual_wait_budget", "xhs_media_policy",
     "xhs_midrun_login_recovery", "xhs_network_recovery", "xhs_popup_guard", "xhs_qrcode_login",
     "xhs_qrcode_preview", "xhs_raw_response_errors", "xhs_shutdown_error_priority",
-    "xhs_store_provenance", "zhihu_detail_images", "zhihu_image_download", "zhihu_search_detail",
+    "xhs_store_provenance",
 ))
-FORK_EXPECTED_TESTS = 311
+FORK_EXPECTED_TESTS = 284
 
 
 def fork_pythonpath(source, support):
