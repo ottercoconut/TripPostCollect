@@ -23,10 +23,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable, Optional, Sequence, Type, TypeVar
+from typing import Callable, Mapping, Iterable, Optional, Sequence, Type, TypeVar
 
 
 class PlatformEnum(str, Enum):
@@ -154,3 +155,92 @@ def apply_to_config(inputs: WorkerInputs, config_module) -> None:
             "wb": "WEIBO_SPECIFIED_ID_LIST", "zhihu": "ZHIHU_SPECIFIED_ID_LIST",
         }[inputs.platform]
         setattr(config_module, field, specified_id_list)
+
+
+def env_int_reader(
+    name: str, default: int, *, environ: Mapping[str, str] = os.environ,
+) -> Callable[[], int]:
+    """绑定输入映射，调用时解析非负整数；不提前缓存操作起点的值。"""
+    def read() -> int:
+        try:
+            return max(0, int(environ.get(name, default)))
+        except (TypeError, ValueError):
+            return max(0, default)
+
+    return read
+
+
+def env_int(name: str, default: int, *, environ: Mapping[str, str]) -> int:
+    """供旧 fork 单条委托使用，读取与原调用发生在同一时点。"""
+    return env_int_reader(name, default, environ=environ)()
+
+
+def _enabled() -> bool:
+    return os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_ENABLED", "").strip() == "1"
+
+
+def weibo_input_readers(*, environ: Mapping[str, str] = os.environ):
+    """绑定微博原输入映射，各 reader 只在原操作起点读取。"""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        post_repair=lambda: environ.get("TRIPPOSTCOLLECT_POST_REPAIR") == "1",
+        detail_timeout=lambda: max(
+            5_000, int(environ.get("TRIPPOSTCOLLECT_WEIBO_BROWSER_DETAIL_TIMEOUT_MS", "30000")),
+        ),
+        refresh_max_pages=env_int_reader(
+            "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", 0, environ=environ,
+        ),
+        source_exhausted=lambda: environ.get("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED") == "1",
+        identity_scope=lambda: dict(
+            db_path=environ.get("TRIPPOSTCOLLECT_DB_PATH", ""),
+            xhs_target_key=environ.get("TRIPPOSTCOLLECT_XHS_DISCOVERY_TARGET_KEY", ""),
+            xhs_account_id=environ.get("TRIPPOSTCOLLECT_XHS_ACCOUNT_ID", ""),
+            xhs_fingerprint=environ.get("TRIPPOSTCOLLECT_XHS_DISCOVERY_QUERY_FINGERPRINT", ""),
+            job_id=environ.get("TRIPPOSTCOLLECT_DISCOVERY_JOB_ID", ""),
+            fingerprint=environ.get("TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT", ""),
+            resume_identities_path=environ.get("TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH", ""),
+        ),
+    )
+
+
+def douyin_browser_detail_fallback_reader(*, environ=os.environ):
+    """在旧 install_hooks 时点读取修复开关，不随详情请求重新取值。"""
+    return lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK") == "1"
+
+
+def douyin_readers(start_page: int, *, environ=os.environ):
+    """保留抖音每个 env 的默认值、转换及读取时点。"""
+    from trippostcollect.application.contracts import DouyinReaders
+
+    return DouyinReaders(
+        refresh_max_pages=env_int_reader("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", 0, environ=environ),
+        source_exhausted=lambda: environ.get("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED"),
+        resume_offset=env_int_reader("TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET", max(0, (start_page - 1) * 10), environ=environ),
+        resume_cursor=lambda: environ.get("TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR", ""),
+        enrich_creators=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS"),
+        enrich_only_images=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES", "1"),
+        max_creator_enrich=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH", "30"),
+        creator_sleep_seconds=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS", "0.25"),
+        browser_detail_timeout=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_TIMEOUT_MS", "30000"),
+    )
+
+
+def _env_float(name: str, default: float) -> float:
+    """T07：原 ZhihuCrawler reader，保留空值、非法浮点及读取时点。"""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def zhihu_operation_readers():
+    """绑定零参读取器；不在装配时缓存环境值。"""
+    return (
+        env_int_reader("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", 0),
+        lambda: os.environ.get("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED") == "1",
+        lambda: _env_float("TRIPPOSTCOLLECT_ZHIHU_INITIAL_SETTLE_SECONDS", 0.0),
+    )

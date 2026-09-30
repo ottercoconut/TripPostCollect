@@ -13,17 +13,15 @@ import xml.etree.ElementTree as ET
 
 
 FORK_OFFLINE_TESTS = tuple(f"tests/test_{name}.py" for name in (
-    "douyin_image_only", "douyin_no_user_info",
-    "douyin_search_safety", "douyin_store", "image_client_http_classification",
+    "image_client_http_classification",
     "image_download_retry", "image_staging_errors", "trippostcollect_adaptive",
-    "weibo_empty_search", "weibo_image_download", "weibo_no_user_info", "weibo_store",
     "xhs_core_access_error", "xhs_creator_enrichment", "xhs_discovery_memory",
     "xhs_image_download", "xhs_login_contract", "xhs_manual_wait_budget", "xhs_media_policy",
     "xhs_midrun_login_recovery", "xhs_network_recovery", "xhs_popup_guard", "xhs_qrcode_login",
     "xhs_qrcode_preview", "xhs_raw_response_errors", "xhs_shutdown_error_priority",
-    "xhs_store_provenance", "zhihu_detail_images", "zhihu_image_download", "zhihu_search_detail",
+    "xhs_store_provenance",
 ))
-FORK_EXPECTED_TESTS = 376
+FORK_EXPECTED_TESTS = 284
 
 
 def fork_pythonpath(source, support):

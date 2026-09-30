@@ -8,13 +8,7 @@ from trippostcollect.core.paths import DEFAULT_DB, LOCAL_MEDIA_ROOT
 from trippostcollect.core.paths import MEDIACRAWLER_RUNS_OUTPUT as DEFAULT_OUTPUT
 
 
-PLATFORMS: dict[str, dict[str, str]] = {
-    "bilibili": {"mediacrawler": "bili", "label": "B站"},
-    "xhs": {"mediacrawler": "xhs", "label": "小红书"},
-    "weibo": {"mediacrawler": "wb", "label": "微博"},
-    "douyin": {"mediacrawler": "dy", "label": "抖音"},
-    "zhihu": {"mediacrawler": "zhihu", "label": "知乎"},
-}
+from trippostcollect.application.contracts import PLATFORMS as PLATFORMS
 
 
 def parse_args() -> argparse.Namespace:

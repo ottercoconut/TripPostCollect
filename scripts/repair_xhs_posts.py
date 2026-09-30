@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterator
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from execution_state import FORMAL_STEPS, FrozenExecutionState
-from failure_classifier import extract_stdout_json
+from trippostcollect.application.failures import extract_stdout_json
 from trippostcollect.artifacts.image_completion import (
     verify_image_artifacts,
     verify_image_persistence,

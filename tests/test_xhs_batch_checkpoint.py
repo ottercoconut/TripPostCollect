@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from importlib import import_module
 import signal
 import shutil
@@ -439,6 +440,151 @@ def test_batch_snapshot_files_do_not_duplicate_live_export_counts(scenario: Simp
     batch.publish_batch(s.event, s.env)
     output = crawler.summarize_output(s.data, "青岛旅行")
     assert output["jsonl_files"] == [str(s.contents)]
+
+
+@pytest.mark.parametrize("bridge", ["worker", "legacy"])
+@pytest.mark.parametrize("enabled", ["1", "0"])
+@pytest.mark.parametrize("failure", ["", "xhs_batch_checkpoint_ack_timeout", "other"])
+def test_worker_checkpoint_exit_order_and_failures(tmp_path, bridge, enabled, failure):
+    """真实 legacy 文件事件出口先写批次，再发布，失败终态与原前缀一致。"""
+    source = Path(__file__).resolve().parents[1]
+    code = r'''
+import json
+import os
+from pathlib import Path
+import sys
+from trippostcollect.platforms import entry
+from trippostcollect.xhs import batch_checkpoint as batch
+
+bridge, enabled, failure = sys.argv[1:]
+state = Path.cwd() / "state.json"
+state.write_text('{"events": []}')
+os.environ["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"] = str(state)
+os.environ[batch.ENABLED_ENV] = enabled
+os.environ["TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS"] = "1"
+published = []
+def publish(details):
+    events = json.loads(state.read_text())["events"]
+    assert [event["type"] for event in events] == ["unrelated", "adaptive_batch_completed"]
+    assert events[-1]["details"] == details
+    published.append(details)
+    if failure:
+        raise ValueError(failure)
+batch.publish_batch = publish
+entry.configure([
+    "--platform", "xhs", "--lt", "qrcode", "--type", "search", "--keywords", "青岛",
+    "--get_comment", "false", "--get_sub_comment", "false", "--get_media", "false",
+    "--headless", "false", "--save_data_option", "jsonl", "--save_data_path", str(Path.cwd()),
+    "--start", "1", "--max_concurrency_num", "1", "--enable_ip_proxy", "false",
+])
+if bridge == "worker":
+    entry.install_hooks()
+else:
+    from mediacrawler_export_entrypoint import install_batch_checkpoint_hook
+    install_batch_checkpoint_hook()
+from tools import trippostcollect_adaptive as adaptive
+adaptive.append_execution_event("unrelated", {})
+details = {"platform": "xhs", "batch_complete": True, "source_has_more": True}
+expected_detail = (failure if failure.startswith("xhs_batch_checkpoint_")
+                   else "xhs_batch_checkpoint_valueerror")
+try:
+    adaptive.append_execution_event("adaptive_batch_completed", details)
+except RuntimeError as exc:
+    assert enabled == "1" and failure
+    assert str(exc) == expected_detail
+else:
+    assert enabled != "1" or not failure
+events = json.loads(state.read_text())["events"]
+assert published == ([details] if enabled == "1" else [])
+assert [event["type"] for event in events[:2]] == ["unrelated", "adaptive_batch_completed"]
+if enabled == "1" and failure:
+    assert len(events) == 3
+    assert events[-1]["type"] == "xhs_runtime_terminal"
+    assert events[-1]["details"] == {
+        "phase": "batch_checkpoint", "failure_type": "runtime_failed",
+        "stop_reason": "runtime_failed", "stop_detail": expected_detail, "retryable": False,
+    }
+else:
+    assert len(events) == 2
+'''
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join((str(source / "src"), str(source / "scripts")))
+    result = subprocess.run(
+        [sys.executable, "-c", code, bridge, enabled, failure],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("payload", [None, "invalid-json", '{"events": []}'])
+def test_legacy_event_write_failures_do_not_become_strict(monkeypatch, tmp_path, payload):
+    from trippostcollect.application.events import append_execution_event
+
+    path = tmp_path / "state.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(path))
+    if payload is not None:
+        path.write_text(payload)
+    # 缺失文件、错误 JSON、不可序列化 details 分别覆盖原三类吞错。
+    append_execution_event("candidate_skipped", {"unserializable": {1}})
+    if payload is not None:
+        assert path.read_text() == payload
+
+
+def test_legacy_unexpected_error_still_propagates(monkeypatch, tmp_path):
+    from trippostcollect.application.events import append_execution_event
+
+    path = tmp_path / "state.json"
+    path.write_text('{"events": null}')
+    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(path))
+    with pytest.raises(AttributeError):
+        append_execution_event("candidate_skipped", {})
+
+
+def test_explicit_publisher_runs_after_legacy_swallowed_failure(monkeypatch):
+    from trippostcollect.application import events
+
+    monkeypatch.delenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", raising=False)
+    published = []
+    monkeypatch.setattr(events, "_batch_publisher", published.append)
+    details = {"platform": "xhs"}
+    events.append_worker_execution_event("adaptive_batch_completed", details)
+    assert published == [details]
+
+
+def test_worker_explicit_checkpoint_uses_real_publisher_and_ack(scenario, monkeypatch):
+    """新装配经真实 publish、临时 SQLite 提交和 ACK 推进安全前沿。"""
+    from scripts import mediacrawler_export_entrypoint as exporter
+    from trippostcollect.application import events
+    from trippostcollect.platforms import entry
+
+    s = scenario
+    s.state["events"] = []
+    s.state_path.write_text(json.dumps(s.state))
+    for key, value in s.env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(events, "_batch_publisher", None)
+
+    def reject_hook():
+        pytest.fail("新 worker 不得安装旧 export/checkpoint hook")
+
+    monkeypatch.setattr(exporter, "install_export_hook", reject_hook)
+    monkeypatch.setattr(exporter, "install_batch_checkpoint_hook", reject_hook)
+    for name in ("install_xhs_repair_resilience", "install_douyin_browser_detail_fallback",
+                 "install_weibo_browser_detail_fallback"):
+        monkeypatch.setattr(exporter, name, lambda: None)
+    entry.install_hooks()
+    events.append_worker_execution_event("adaptive_batch_completed", s.event)
+    plan = saved(s)
+    assert plan["checkpoint_found"] is True
+    assert plan["resume_page"] == 47
+    assert json.loads(s.state_path.read_text())["events"][-1]["details"] == s.event
+    with sqlite3.connect(s.db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM xhs_discovery_checkpoints").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM xhs_discovery_seen_candidates").fetchone()[0] == 1
+    run_dir = batch.XHS_BATCH_CHECKPOINT_ROOT / "run"
+    assert json.loads((run_dir / "batch_checkpoint_ack.json").read_text()) == json.loads(
+        (run_dir / "batch_checkpoint.json").read_text(),
+    )
 
 
 def test_exporter_hook_publishes_only_after_durable_event(

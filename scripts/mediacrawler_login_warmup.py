@@ -15,6 +15,7 @@ from playwright.async_api import BrowserContext, Page, TimeoutError as Playwrigh
 
 from trippostcollect.runtime.browser_runtime import browser_launch_environment, browser_runtime_args
 from trippostcollect.core import paths
+from trippostcollect.runtime.cookies import required_cookie_names
 from trippostcollect.core.paths import (
     COOKIE_SNAPSHOT_FILENAME,
     MEDIACRAWLER_DIR,
@@ -112,12 +113,6 @@ def profile_dir_for(platform_key: str) -> Path:
 
 def cookie_dict(cookies: list[dict[str, Any]]) -> dict[str, str]:
     return {item["name"]: item.get("value", "") for item in cookies}
-
-
-def required_cookie_names(platform_key: str) -> tuple[str, ...]:
-    if platform_key == "zhihu":
-        return ("d_c0", "z_c0")
-    return ()
 
 
 def cookie_snapshot_path(platform_key: str) -> Path:

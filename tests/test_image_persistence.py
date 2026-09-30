@@ -41,6 +41,28 @@ def png_bytes(color: tuple[int, int, int]) -> bytes:
     return output.getvalue()
 
 
+@pytest.mark.parametrize("through_adapter", [False, True])
+def test_formal_image_error_keeps_original_exception_identity(through_adapter):
+    """C 的原 except 必须捕获 formal 中抛出的同一个异常类。"""
+    from types import SimpleNamespace
+    import mediacrawler_crawl as crawl
+    from trippostcollect.artifacts.image_persistence import ImagePersistenceError as OriginalError
+    from trippostcollect.records import formal
+
+    invalid = SimpleNamespace(manifest_source_index=None)
+    assert crawl.ImagePersistenceError is OriginalError
+    try:
+        if through_adapter:
+            crawl.inject_materialized_images([], [invalid])
+        else:
+            formal.inject_materialized_images([], [invalid], ImagePersistenceError=OriginalError)
+    except crawl.ImagePersistenceError as exc:
+        assert type(exc) is OriginalError
+        assert str(exc) == "materialized image lacks manifest source index"
+    else:
+        pytest.fail("缺少 manifest source index 必须抛出原 ImagePersistenceError")
+
+
 def test_pillow_mpo_decoder_is_treated_as_jpeg_bytes() -> None:
     assert PIL_FORMAT_MIME["MPO"] == "image/jpeg"
 

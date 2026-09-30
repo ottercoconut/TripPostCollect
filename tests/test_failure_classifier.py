@@ -15,7 +15,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-failure_classifier = import_module("failure_classifier")
+failure_classifier = import_module("trippostcollect.application.failures")
 
 
 @pytest.mark.parametrize("detail", ["xhs_batch_checkpoint_filenotfounderror", "xhs_batch_checkpoint_ack_timeout"])

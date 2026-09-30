@@ -312,7 +312,11 @@ def delegated_definition(node, imports, target_module):
 
 
 def build_progress(root):
-    """逐行对照冻结符号账，不因退出项或合法迁移误报缺失。"""
+    """逐行对照冻结符号账，并核验下沉到更低层共享模块的一跳重导出。
+
+    原位定义删除后，目标模块可从 trippostcollect 包内源文件重导出定义；
+    只跟踪一条绝对 from 导入，来源必须直接定义该名字或类成员，不递归追踪导入。
+    """
     root = Path(root)
     baseline = load_symbols(root)
     cache = {}
@@ -322,7 +326,18 @@ def build_progress(root):
             path = root / relative
             source = path.read_text(encoding="utf-8") if path.is_file() else ""
             tree = ast.parse(source, filename=str(path))
-            cache[relative] = (dict(tree_definitions(tree)), imported_names(tree))
+            package_from_imports = {
+                alias.asname or alias.name: f"{node.module}.{alias.name}"
+                for node in tree.body
+                if isinstance(node, ast.ImportFrom)
+                and not node.level
+                and node.module
+                and node.module.startswith("trippostcollect.")
+                for alias in node.names
+            }
+            cache[relative] = (
+                dict(tree_definitions(tree)), imported_names(tree), package_from_imports,
+            )
         return cache[relative]
 
     rows = []
@@ -331,10 +346,10 @@ def build_progress(root):
         if row["disposition"] == "退":
             row["state"] = "exited"
         else:
-            definitions, imports = inspect(row["file"])
+            definitions, imports, _ = inspect(row["file"])
             target = row["target"]
             target_path = target if target.startswith("scripts/") else "src/trippostcollect/" + target
-            target_definitions, _ = inspect(target_path)
+            target_definitions, _, target_from_imports = inspect(target_path)
             target_module = target_path.removeprefix("src/").removesuffix(".py").replace("/", ".")
             qualname = row["qualname"]
             if qualname in definitions:
@@ -344,8 +359,17 @@ def build_progress(root):
                 imported = imports.get(qualname, "")
                 prefix = target_module + "."
                 imported_definition = imported.removeprefix(prefix) if imported.startswith(prefix) else None
+                reexported = False
+                binding_name, separator, member = qualname.partition(".")
+                binding = target_from_imports.get(binding_name)
+                if binding:
+                    module, _, name = binding.rpartition(".")
+                    source_definitions, _, _ = inspect("src/" + module.replace(".", "/") + ".py")
+                    source_name = f"{name}.{member}" if separator else name
+                    reexported = source_name in source_definitions
                 row["state"] = (
-                    "moved" if qualname in target_definitions or imported_definition in target_definitions else "missing"
+                    "moved" if qualname in target_definitions or imported_definition in target_definitions
+                    or reexported else "missing"
                 )
         rows.append(row)
     counts = {state: 0 for state in ("pending", "moved", "exited", "missing")}
