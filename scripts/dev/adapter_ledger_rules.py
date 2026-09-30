@@ -58,6 +58,13 @@ TEST_FILE_RULES = {
         "note": "F14 指定平台目标；根路由集成保护语义仍须保留。",
         "spec_explicit": True,
     },
+    "tests/test_card_gate.py": {
+        "target_file": "tests/test_card_gate.py",
+        "protects": "F10",
+        "card": "T00",
+        "note": "卡片闸门工具测试，验证离线沙箱策略、定义定位和失败集合比较。",
+        "spec_explicit": False,
+    },
     "tests/test_crawl_policy.py": {
         "target_file": "tests/application/test_policy.py",
         "protects": "F07",
