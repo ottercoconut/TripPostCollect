@@ -178,7 +178,13 @@ def test_fork_node_count_matches_ci_expectation() -> None:
     data = json.loads((LEDGER_DIR / "tests.json").read_text())
     run_matrix = (ROOT / "scripts" / "ci" / "run_matrix.py").read_text()
     expected = int(run_matrix.split("FORK_EXPECTED_TESTS = ", 1)[1].split("\n", 1)[0])
-    assert len(data["fork"]["nodes"]) == expected
+    moved_files = {"tests/runtime/test_cdp_browser.py", "tests/runtime/test_cdp_browser_lifecycle.py"}
+    moved = [node for node in data["fork"]["nodes"] if node["target_file"] in moved_files]
+    assert len(moved) == 41
+    for node in moved:
+        assert not (ROOT / node["source_file"]).exists()
+        assert (ROOT / node["target_file"]).is_file()
+    assert len(data["fork"]["nodes"]) - len(moved) == expected
 
 
 def test_root_lane_assignment_follows_markers() -> None:
