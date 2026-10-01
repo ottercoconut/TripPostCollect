@@ -6,6 +6,9 @@ commands 为 C 构造的 child 命令/cwd/env/超时；config 为原 typer `pars
 
 from __future__ import annotations
 
+from trippostcollect.application import collection as t11_collection
+from trippostcollect.application import reporting as t11_reporting
+
 import argparse
 import json
 import os
@@ -88,19 +91,19 @@ def _capture_new_commands(monkeypatch: pytest.MonkeyPatch, tmp: Path) -> dict[st
         return {"returncode": 0, "timed_out": False, "stdout_tail": "", "stderr_tail": ""}
 
     monkeypatch.delenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", raising=False)
-    monkeypatch.setattr(crawl, "run_command", fake_run_command)
-    monkeypatch.setattr(crawl, "discover_cdp_browser_path", lambda: "/fake/chrome")
+    monkeypatch.setattr(t11_collection, "run_command", fake_run_command)
+    monkeypatch.setattr(t11_collection, "discover_cdp_browser_path", lambda: "/fake/chrome")
     monkeypatch.setattr(
-        crawl, "export_profile_cookies",
+        t11_collection, "export_profile_cookies",
         lambda *_: {"cookie_header": "d_c0=x; z_c0=y", "cookie_names": ["d_c0", "z_c0"], "source": "fake"},
     )
-    monkeypatch.setattr(crawl, "public_cookie_export", lambda _export: {"source": "fake"})
+    monkeypatch.setattr(t11_collection, "public_cookie_export", lambda _export: {"source": "fake"})
     monkeypatch.setattr(
-        crawl, "summarize_output",
+        t11_reporting, "summarize_output",
         lambda *_: {"parse_errors": 0, "content_records": 0, "non_video_content_records": 0, "video_like_records": 0},
     )
-    monkeypatch.setattr(crawl, "load_behavior_evidence", lambda *_: {"status": "completed"})
-    monkeypatch.setattr(crawl, "behavior_evidence_valid", lambda *_: True)
+    monkeypatch.setattr(t11_collection, "load_behavior_evidence", lambda *_: {"status": "completed"})
+    monkeypatch.setattr(t11_collection, "behavior_evidence_valid", lambda *_: True)
 
     result = {}
     for name in SCENARIOS:

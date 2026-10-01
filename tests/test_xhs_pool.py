@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from trippostcollect.application import collection as t11_collection
+from trippostcollect.application import reporting as t11_reporting
+
 import argparse
 import json
 import sqlite3
@@ -312,10 +315,10 @@ def test_xhs_low_level_executor_uses_profile_contract_without_legacy_login_switc
             "stderr_tail": "",
         }
 
-    monkeypatch.setattr(mediacrawler_crawl, "run_command", fake_run_command)
-    monkeypatch.setattr(mediacrawler_crawl, "discover_cdp_browser_path", lambda: None)
+    monkeypatch.setattr(t11_collection, "run_command", fake_run_command)
+    monkeypatch.setattr(t11_collection, "discover_cdp_browser_path", lambda: None)
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        t11_reporting,
         "summarize_output",
         lambda *_args: {
             "parse_errors": 0,

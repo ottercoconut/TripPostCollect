@@ -1,0 +1,7 @@
+{
+  "head": "aa05043ec2a302fa1c98fc550de144e3cb44eee2",
+  "fixtures_sha256": {
+    "mediacrawler_crawl.py.txt": "a4ef71d6b89426afb709fe3caeed7cd2faad9d7f6026355b5c632cc0222b06ba"
+  },
+  "note": "由 git show HEAD:scripts/mediacrawler_crawl.py 逐字冻结完整源码，不裁剪。"
+}

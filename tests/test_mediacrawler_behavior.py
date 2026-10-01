@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from trippostcollect.application import collection as t11_collection
+
 import asyncio
 import json
 import sys
@@ -175,6 +177,7 @@ def test_xhs_sms_terminal_failure_runs_one_platform_session_without_retry(
         batch_dir,
         *,
         runtime_reporter=None,
+        ports,
     ):
         nonlocal calls
         assert runtime_reporter is None
@@ -195,13 +198,13 @@ def test_xhs_sms_terminal_failure_runs_one_platform_session_without_retry(
             "output": {},
         }
 
-    monkeypatch.setattr(mediacrawler_crawl, "site_request_guard", fake_guard)
+    monkeypatch.setattr(t11_collection, "site_request_guard", fake_guard)
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        t11_collection,
         "clear_site_policy_state",
         lambda site_key: {},
     )
-    monkeypatch.setattr(mediacrawler_crawl, "_run_platform_without_policy", fake_run)
+    monkeypatch.setattr(t11_collection, "_run_platform_without_policy", fake_run)
 
     record = mediacrawler_crawl.run_platform(
         "xhs",

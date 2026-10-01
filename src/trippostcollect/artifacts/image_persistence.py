@@ -15,8 +15,7 @@ from trippostcollect.artifacts.image_candidates import (
 from trippostcollect.artifacts.image_materialization import validate_image_file
 
 
-class ImagePersistenceError(ValueError):
-    pass
+from trippostcollect.application.contracts import ImagePersistenceError as ImagePersistenceError
 
 
 def _json_object(value: Any) -> dict[str, Any]:

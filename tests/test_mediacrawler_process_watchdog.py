@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from trippostcollect.application import collection as t11_collection
+from trippostcollect.application import reporting as t11_reporting
+
 import json
 import os
 import signal
@@ -1798,22 +1801,22 @@ def test_timeout_with_staged_records_remains_runtime_failure(
 ) -> None:
     monkeypatch.delenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", raising=False)
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        t11_collection,
         "behavior_environment",
         lambda *_: {},
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        t11_collection,
         "load_behavior_evidence",
         lambda *_: {"status": "completed"},
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        t11_collection,
         "behavior_evidence_valid",
         lambda *_: True,
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        t11_reporting,
         "summarize_output",
         lambda *_: {
             "parse_errors": 0,
@@ -1823,7 +1826,7 @@ def test_timeout_with_staged_records_remains_runtime_failure(
         },
     )
     monkeypatch.setattr(
-        mediacrawler_crawl,
+        t11_collection,
         "run_command",
         lambda *_args, **_kwargs: {
             "returncode": 124,
