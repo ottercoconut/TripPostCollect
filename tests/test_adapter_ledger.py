@@ -273,3 +273,122 @@ def test_progress_checks_one_package_reexport(
     assert progress["rows"] == [{**row, "state": expected}]
     assert progress["counts"][expected] == 1
     assert progress["counts"]["missing"] == (expected == "missing")
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("direct", "moved"), ("async", "moved"), ("alias", "moved"),
+    ("no-method", "missing"), ("no-inheritance", "missing"),
+    ("wrong-module", "missing"), ("relative", "missing"),
+    ("attribute", "missing"), ("indirect", "missing"),
+    ("no-class-row", "missing"), ("exited-class", "missing"),
+    ("no-class", "missing"), ("second-hop", "missing"),
+    ("pending", "pending"), ("real-t09", "moved"),
+])
+def test_progress_direct_mixin(tmp_path: Path, case: str, expected: str) -> None:
+    # 使用冻结账的真实 T09 方法和组合类行，复现轮前阻塞。
+    rows = ledger.load_symbols(ROOT)["rows"]
+    original = "tools/MediaCrawler/media_platform/xhs/core.py"
+    class_name = "XiaoHongShuCrawler"
+    method = "_get_manual_wait_budget"
+    method_row = next(r for r in rows if r["file"] == original
+                      and r["qualname"] == f"{class_name}.{method}")
+    class_row = next(r.copy() for r in rows if r["file"] == original
+                     and r["qualname"] == class_name)
+    assert method_row["target"] == "platforms/xhs/session.py"
+    assert class_row["target"] == "platforms/xhs/core.py"
+    definition = f"    {'async ' if case == 'async' else ''}def {method}(self):\n        return 1\n"
+    mixin = "class XhsSessionMixin:\n" + definition
+    binding = "from trippostcollect.platforms.xhs.session import XhsSessionMixin\n"
+    base = "XhsSessionMixin"
+    if case == "alias":
+        binding = binding.rstrip() + " as Session\n"
+        base = "Session"
+    elif case == "wrong-module":
+        binding = binding.replace("xhs.session", "xhs.other")
+    elif case == "relative":
+        binding = "from .session import XhsSessionMixin\n"
+    elif case == "attribute":
+        binding = "import trippostcollect.platforms.xhs.session as session\n"
+        base = "session.XhsSessionMixin"
+    elif case == "indirect":
+        binding += "class A(XhsSessionMixin):\n    pass\n"
+        base = "A"
+    elif case == "no-inheritance":
+        base = "object"
+    if case == "no-method":
+        mixin = "class XhsSessionMixin:\n    pass\n"
+    elif case == "second-hop":
+        mixin = "from trippostcollect.platforms.xhs.other import XhsSessionMixin\n"
+    if case == "exited-class":
+        class_row["disposition"] = "退"
+    selected = [method_row] + ([] if case == "no-class-row" else [class_row])
+    files = {
+        original: f"class {class_name}:\n{definition}" if case == "pending" else "",
+        "src/trippostcollect/platforms/xhs/session.py": mixin,
+        "src/trippostcollect/platforms/xhs/other.py": "class XhsSessionMixin:\n" + definition,
+        "src/trippostcollect/platforms/xhs/core.py": binding + (
+            "" if case == "no-class" else f"class {class_name}({base}):\n    pass\n"
+        ),
+        "docs/adapter-ledger/symbols.json": ledger.json_text({"rows": selected}),
+    }
+    for relative, source in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    assert ledger.build_progress(tmp_path)["rows"][0]["state"] == expected
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("own-method", "missing"), ("own-attribute", "missing"),
+    ("earlier-method", "missing"), ("earlier-relative", "missing"),
+    ("earlier-attribute", "missing"), ("earlier-ancestor", "missing"),
+    ("earlier-clean", "moved"), ("earlier-object", "moved"),
+    ("t09-navigation", "moved"), ("target-ancestor", "moved"),
+])
+def test_progress_mixin_shadowing(tmp_path: Path, case: str, expected: str) -> None:
+    original = "tools/MediaCrawler/media_platform/xhs/core.py"
+    method = "navigate"
+    row = {"file": original, "qualname": f"XiaoHongShuCrawler.{method}",
+           "card": "T09", "disposition": "拆", "target": "platforms/xhs/navigation.py"}
+    rows = [row, {**row, "qualname": "XiaoHongShuCrawler", "target": "platforms/xhs/core.py"}]
+    definition = f"    def {method}(self):\n        return 1\n"
+    imports = ("from trippostcollect.platforms.xhs.navigation import XhsNavigationMixin\n"
+               "from trippostcollect.platforms.xhs.session import XhsSessionMixin\n")
+    bases = "XhsSessionMixin, XhsNavigationMixin"
+    session = "class XhsSessionMixin:\n    pass\n"
+    own = "    pass\n"
+    if case == "own-method":
+        own = definition
+    elif case == "own-attribute":
+        own = "    navigate = None\n"
+    elif case == "earlier-method":
+        session = "class XhsSessionMixin:\n" + definition
+    elif case == "earlier-relative":
+        imports = imports.replace("from trippostcollect.platforms.xhs.session", "from .session")
+    elif case == "earlier-attribute":
+        imports += "import trippostcollect.platforms.xhs.session as session\n"
+        bases = "session.XhsSessionMixin, XhsNavigationMixin"
+    elif case == "earlier-ancestor":
+        session = "class Parent:\n" + definition + "class XhsSessionMixin(Parent):\n    pass\n"
+    elif case == "earlier-object":
+        session = session.replace("XhsSessionMixin:", "XhsSessionMixin(object):")
+    elif case == "t09-navigation":
+        imports += "from trippostcollect.platforms.xhs.errors import XhsErrorsMixin as Errors\n"
+        bases = "XhsSessionMixin, Errors, XhsNavigationMixin"
+    navigation = "class XhsNavigationMixin" + ("(Parent)" if case == "target-ancestor" else "")
+    files = {
+        original: "",
+        "src/trippostcollect/platforms/xhs/navigation.py": navigation + ":\n" + definition,
+        "src/trippostcollect/platforms/xhs/session.py": session,
+        "src/trippostcollect/platforms/xhs/errors.py": "class XhsErrorsMixin(object):\n    pass\n",
+        "src/trippostcollect/platforms/xhs/core.py": imports + f"class XiaoHongShuCrawler({bases}):\n" + own,
+        "docs/adapter-ledger/symbols.json": ledger.json_text({"rows": rows}),
+    }
+    for relative, source in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    located = ledger.locate_definition(tmp_path, row, rows=rows)
+    assert located.state == expected
+    if expected == "moved":
+        assert located.qualname == "XhsNavigationMixin.navigate"

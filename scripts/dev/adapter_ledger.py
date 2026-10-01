@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import collections
+from dataclasses import dataclass
 import hashlib
 import importlib.util
 import json
@@ -316,20 +317,20 @@ def delegated_definition(node, imports, target_module):
     return resolved.removeprefix(prefix) if resolved.startswith(prefix) else None
 
 
-def build_progress(root):
-    """逐行对照冻结符号账，并核验下沉到更低层共享模块的一跳重导出。
-
-    原位定义删除后，目标模块可从 trippostcollect 包内源文件重导出定义；
-    只跟踪一条绝对 from 导入，来源必须直接定义该名字或类成员，不递归追踪导入。
-    """
+def definition_inspector(root, reader=None):
+    """按文件缓存定义和导入；可注入基点读取器，默认只读工作树源码。"""
     root = Path(root)
-    baseline = load_symbols(root)
     cache = {}
+
+    if reader is None:
+        def reader(relative):
+            path = root / relative
+            return path.read_text(encoding="utf-8") if path.is_file() else ""
 
     def inspect(relative):
         if relative not in cache:
             path = root / relative
-            source = path.read_text(encoding="utf-8") if path.is_file() else ""
+            source = reader(relative)
             tree = ast.parse(source, filename=str(path))
             package_from_imports = {
                 alias.asname or alias.name: f"{node.module}.{alias.name}"
@@ -345,45 +346,131 @@ def build_progress(root):
             )
         return cache[relative]
 
+    return inspect
+
+
+def target_path(target):
+    """将冻结账目标换算为仓库相对路径。"""
+    return target if target.startswith("scripts/") else "src/trippostcollect/" + target
+
+
+@dataclass(frozen=True)
+class DefinitionLocation:
+    """当前状态及实际定义位置；退出或缺失时没有位置。"""
+
+    state: str
+    file: str | None = None
+    qualname: str | None = None
+    node: ast.AST | None = None
+
+
+def class_defines_member(node, member):
+    """检查类体直接定义或绑定的成员；赋值和导入也可能遮蔽 mixin 方法。"""
+    for statement in node.body:
+        if isinstance(statement, DEFINITION_TYPES) and statement.name == member:
+            return True
+        if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            if any(isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store) and name.id == member
+                   for target in targets for name in ast.walk(target)):
+                return True
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            if any((alias.asname or (alias.name.split(".")[0] if isinstance(statement, ast.Import)
+                                    else alias.name)) == member for alias in statement.names):
+                return True
+    return False
+
+
+def locate_definition(root, row, inspect=None, *, rows=None):
+    """按原位、薄委托、一跳重导出、直接 mixin 基类顺序定位实际定义。
+
+    mixin 仅补充原本 missing 的单层 Class.method：同源类行必须保留，
+    组合类必须直接继承绝对 from 目标模块导入的名字，目标直接定义类和方法。
+    不追踪相对导入、属性基类、多跳重导出或间接继承。
+    保守排除 MRO 遮蔽：组合类不得直接绑定该成员；目标 mixin 之前的每个基类
+    必须由绝对 from 包内模块导入且在源文件直接定义，不绑定该成员，且无基类
+    或唯一基类为 object。无法确认的前置祖先一律不放行；目标 mixin 的祖先不限。
+    """
+    if row["disposition"] == "退":
+        return DefinitionLocation("exited")
+    inspect = inspect or definition_inspector(root)
+    definitions, imports, _ = inspect(row["file"])
+    target = target_path(row["target"])
+    target_definitions, _, target_from_imports = inspect(target)
+    target_module = target.removeprefix("src/").removesuffix(".py").replace("/", ".")
+    qualname = row["qualname"]
+
+    def found(path, name, state="moved"):
+        return DefinitionLocation(state, path, name, inspect(path)[0][name])
+
+    if qualname in definitions:
+        delegated = delegated_definition(definitions[qualname], imports, target_module)
+        if delegated in target_definitions:
+            return found(target, delegated)
+        if row["disposition"] == "薄":
+            package_target = delegated_definition(definitions[qualname], imports, "trippostcollect")
+            if package_target and "." in package_target:
+                module, _, name = package_target.rpartition(".")
+                package_path = "src/trippostcollect/" + module.replace(".", "/") + ".py"
+                if name in inspect(package_path)[0]:
+                    return found(package_path, name)
+        return found(row["file"], qualname, "pending")
+
+    imported = imports.get(qualname, "")
+    prefix = target_module + "."
+    imported_definition = imported.removeprefix(prefix) if imported.startswith(prefix) else None
+    if qualname in target_definitions:
+        return found(target, qualname)
+    if imported_definition in target_definitions:
+        return found(target, imported_definition)
+    binding_name, separator, member = qualname.partition(".")
+    binding = target_from_imports.get(binding_name)
+    if binding:
+        module, _, name = binding.rpartition(".")
+        source_path = "src/" + module.replace(".", "/") + ".py"
+        source_name = f"{name}.{member}" if separator else name
+        if source_name in inspect(source_path)[0]:
+            return found(source_path, source_name)
+
+    if qualname.count(".") == 1:
+        for class_row in rows if rows is not None else load_symbols(root)["rows"]:
+            if (class_row["file"] != row["file"] or class_row["qualname"] != binding_name
+                    or class_row["disposition"] == "退"):
+                continue
+            composition = target_path(class_row["target"])
+            if composition == target:
+                continue
+            class_definitions, _, class_imports = inspect(composition)
+            cls = class_definitions.get(binding_name)
+            if not isinstance(cls, ast.ClassDef) or class_defines_member(cls, member):
+                continue
+            for base in cls.bases:
+                imported = class_imports.get(base.id, "") if isinstance(base, ast.Name) else ""
+                mixin = imported.removeprefix(prefix) if imported.startswith(prefix) else ""
+                if (isinstance(target_definitions.get(mixin), ast.ClassDef)
+                        and f"{mixin}.{member}" in target_definitions):
+                    return found(target, f"{mixin}.{member}")
+                # 未到目标 mixin：必须证明这个前置基类及其祖先不会遮蔽成员。
+                if not imported:
+                    break
+                module, _, name = imported.rpartition(".")
+                prior = inspect("src/" + module.replace(".", "/") + ".py")[0].get(name)
+                if (not isinstance(prior, ast.ClassDef) or class_defines_member(prior, member)
+                        or (prior.bases and not (len(prior.bases) == 1
+                            and isinstance(prior.bases[0], ast.Name) and prior.bases[0].id == "object"))):
+                    break
+    return DefinitionLocation("missing")
+
+
+def build_progress(root):
+    """逐行对照冻结账，复用原位、委托、一跳重导出与直接 mixin 基类定位。"""
+    root = Path(root)
+    baseline = load_symbols(root)
+    inspect = definition_inspector(root)
     rows = []
     for original in baseline["rows"]:
         row = {key: original[key] for key in ("file", "qualname", "card", "disposition", "target")}
-        if row["disposition"] == "退":
-            row["state"] = "exited"
-        else:
-            definitions, imports, _ = inspect(row["file"])
-            target = row["target"]
-            target_path = target if target.startswith("scripts/") else "src/trippostcollect/" + target
-            target_definitions, _, target_from_imports = inspect(target_path)
-            target_module = target_path.removeprefix("src/").removesuffix(".py").replace("/", ".")
-            qualname = row["qualname"]
-            if qualname in definitions:
-                delegated = delegated_definition(definitions[qualname], imports, target_module)
-                row["state"] = "moved" if delegated in target_definitions else "pending"
-                if row["disposition"] == "薄" and row["state"] == "pending":
-                    # 薄入口的台账目标仍是脚本；验证实际包内委托定义存在。
-                    package_target = delegated_definition(definitions[qualname], imports, "trippostcollect")
-                    if package_target and "." in package_target:
-                        module, _, name = package_target.rpartition(".")
-                        package_definitions, _, _ = inspect("src/trippostcollect/" + module.replace(".", "/") + ".py")
-                        if name in package_definitions:
-                            row["state"] = "moved"
-            else:
-                imported = imports.get(qualname, "")
-                prefix = target_module + "."
-                imported_definition = imported.removeprefix(prefix) if imported.startswith(prefix) else None
-                reexported = False
-                binding_name, separator, member = qualname.partition(".")
-                binding = target_from_imports.get(binding_name)
-                if binding:
-                    module, _, name = binding.rpartition(".")
-                    source_definitions, _, _ = inspect("src/" + module.replace(".", "/") + ".py")
-                    source_name = f"{name}.{member}" if separator else name
-                    reexported = source_name in source_definitions
-                row["state"] = (
-                    "moved" if qualname in target_definitions or imported_definition in target_definitions
-                    or reexported else "missing"
-                )
+        row["state"] = locate_definition(root, row, inspect, rows=baseline["rows"]).state
         rows.append(row)
     counts = {state: 0 for state in ("pending", "moved", "exited", "missing")}
     counts.update(collections.Counter(row["state"] for row in rows))
