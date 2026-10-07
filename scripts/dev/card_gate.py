@@ -13,8 +13,8 @@ import json
 import os
 from pathlib import Path
 import shutil
-import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
@@ -26,38 +26,29 @@ ROOT = Path(__file__).resolve().parents[2]
 FORK = "tools/MediaCrawler"
 
 
-def sandbox_policy(temporary, checkouts, home):
-    """纯函数：调用者传入规范路径，只允许临时根与设备目录写入。"""
-    def quote(path):
-        return json.dumps(str(path), ensure_ascii=False)
-
-    rules = ["(version 1)", "(allow default)", "(deny network*)",
-             "(allow network* (remote unix-socket))",
-             '(deny process-exec (literal "/usr/bin/open") (literal "/usr/bin/osascript")',
-             '  (regex #"(?i).*(chrome|chromium|safari|firefox|webkit|msedge|MiniBrowser).*"))']
-    for relative in ("Google/Chrome", "Google/Chrome for Testing", "Google/ChromeForTesting", "Chromium"):
-        path = Path(home) / "Library/Application Support" / relative
-        rules.append(f"(deny file-read* file-write* (subpath {quote(path)}))")
-    for checkout in sorted(set(map(Path, checkouts))):
-        for relative in ("data", "outputs", f"{FORK}/browser_data"):
-            rules.append(f"(deny file-write* (subpath {quote(checkout / relative)}))")
-    rules.extend([
-        "(deny file-write* (require-all",
-        f"  (require-not (subpath {quote(temporary)}))",
-        '  (require-not (subpath "/dev"))))',
-    ])
-    return "\n".join(rules) + "\n"
+def sandbox_backend(platform=None):
+    """按平台选择沙箱后端：macOS 为 Seatbelt（sandbox_macos），Linux 为 bubblewrap（sandbox_linux）。"""
+    platform = platform or sys.platform
+    if platform == "darwin":
+        import sandbox_macos as backend
+    elif platform.startswith("linux"):
+        import sandbox_linux as backend
+    else:
+        raise RuntimeError(f"卡片闸门不支持的平台：{platform}")
+    return backend
 
 
 CANARY = '''
 import errno, json, os, socket, subprocess, sys
 from pathlib import Path
 results = {}
+spec = json.loads(sys.argv[3])
+allowed = set(spec["denied_errnos"])
 def denied(name, operation):
     try:
         operation()
     except OSError as exc:
-        results[name] = {"denied": exc.errno in (errno.EPERM, errno.EACCES), "errno": exc.errno}
+        results[name] = {"denied": exc.errno in allowed, "errno": exc.errno}
     else:
         results[name] = {"denied": False}
 for host, port in (("127.0.0.1", 9), ("192.0.2.1", 443)):
@@ -66,15 +57,19 @@ for host, port in (("127.0.0.1", 9), ("192.0.2.1", 443)):
             connection.settimeout(2)
             connection.connect((host, port))
     denied(host, connect)
-denied("open", lambda: subprocess.run(["/usr/bin/open"], check=False, capture_output=True))
+for index, executable in enumerate(spec["exec"]):
+    denied("exec" if index == 0 else f"exec{index}",
+           lambda executable=executable: subprocess.run([executable], check=False, capture_output=True))
+if not spec["exec"]:
+    results["exec"] = {"denied": True, "absent": True}
 probe = Path(sys.argv[1]) / sys.argv[2]
 def write_probe():
     with probe.open("x") as stream:
         stream.write("canary")
     probe.unlink()
 denied("write", write_probe)
-if sys.argv[4] == "1":
-    denied("profile", lambda: os.listdir(sys.argv[3]))
+if spec["profile_exists"]:
+    denied("profile", lambda: os.listdir(spec["profile"]))
 else:
     results["profile"] = {"denied": True, "absent": True}
 print(json.dumps(results))
@@ -88,6 +83,10 @@ def load_module(path, name):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# macOS uchg 与 Linux chattr +i 的不可变标志实现；只依赖标准库。
+FROZEN_FLAGS = load_module(ROOT / "scripts/ci/frozen_flags.py", "card_gate_frozen_flags")
 
 
 def clean_environment(output, runtime_path):
@@ -104,24 +103,29 @@ def clean_environment(output, runtime_path):
 class Sandbox:
     """所有非 Git 子进程共用一个策略；完整输出落盘，避免终端日志洪泛。"""
 
-    def __init__(self, policy, environment):
+    def __init__(self, backend, policy, environment):
+        self.backend = backend
         self.policy = policy
         self.environment = environment
         self.commands = []
 
     def run(self, command, cwd, log, *, environment=None, timeout=900):
         command = list(map(str, command))
-        wrapped = ["/usr/bin/sandbox-exec", "-f", str(self.policy), *command]
+        wrapped, descriptors = self.backend.wrap(self.policy, command)
         record = {"command": command, "cwd": str(cwd), "log": str(log)}
         self.commands.append(record)
-        with log.open("w", encoding="utf-8") as stream:
-            try:
-                result = subprocess.run(wrapped, cwd=cwd, env=environment or self.environment,
-                                        stdout=stream, stderr=subprocess.STDOUT,
-                                        check=False, timeout=timeout)
-                record["returncode"] = result.returncode
-            except subprocess.TimeoutExpired:
-                record["returncode"] = 124
+        try:
+            with log.open("w", encoding="utf-8") as stream:
+                try:
+                    result = subprocess.run(wrapped, cwd=cwd, env=environment or self.environment,
+                                            stdout=stream, stderr=subprocess.STDOUT,
+                                            check=False, timeout=timeout, pass_fds=descriptors)
+                    record["returncode"] = result.returncode
+                except subprocess.TimeoutExpired:
+                    record["returncode"] = 124
+        finally:
+            for descriptor in descriptors:
+                os.close(descriptor)
         return record["returncode"]
 
 
@@ -271,9 +275,8 @@ def remove_source(path):
     for directory, _, files in os.walk(path):
         for name in files:
             item = Path(directory) / name
-            flags = item.lstat().st_flags
-            if flags & stat.UF_IMMUTABLE:
-                os.chflags(item, flags & ~stat.UF_IMMUTABLE, follow_symlinks=False)
+            if not item.is_symlink() and FROZEN_FLAGS.is_immutable(item):
+                FROZEN_FLAGS.clear_immutable(item)
     shutil.rmtree(path)
 
 
@@ -422,8 +425,10 @@ def main(argv=None):
         fork_base = ledger.git_read(ROOT, "ls-tree", base, FORK).split()[2]
         python = ROOT / ".venv/bin/python"
         fork_python = (args.fork_python or checkout / FORK / ".venv/bin/python").absolute()
-        if not Path("/usr/bin/sandbox-exec").is_file() or not python.is_file():
-            raise RuntimeError("缺少 Seatbelt 或工作树解释器")
+        backend = sandbox_backend()
+        backend.preflight()
+        if not python.is_file():
+            raise RuntimeError("缺少工作树解释器")
         if not args.skip_tests and not fork_python.is_file():
             raise RuntimeError(f"fork 解释器不存在：{fork_python}")
         rows = ledger.load_symbols(ROOT)["rows"]
@@ -439,15 +444,14 @@ def main(argv=None):
                     raise ValueError("--pair 必须使用仓库内相对路径")
             pairs.append((original, target))
         lanes = load_module(ROOT / "tests/run_lanes.py", "card_gate_runtime")
-        policy = output / "sandbox.sb"
-        policy.write_text(sandbox_policy(output, (ROOT, checkout), Path.home().resolve()), encoding="utf-8")
-        sandbox = Sandbox(policy, clean_environment(output / "control", lanes.runtime_path()))
-        report.update(base=base, fork_base=fork_base, commands=sandbox.commands)
-        profile = Path.home() / "Library/Application Support/Google/Chrome"
+        home = Path.home().resolve()
+        policy = backend.prepare(output, (ROOT, checkout), home, lanes.runtime_path())
+        sandbox = Sandbox(backend, policy, clean_environment(output / "control", lanes.runtime_path()))
+        report.update(base=base, fork_base=fork_base, sandbox=backend.NAME, commands=sandbox.commands)
         canary_log = output / "canary.json"
         probe_name = f".card-gate-probe-{output.name}"
-        canary_code = sandbox.run([python, "-c", CANARY, ROOT, probe_name,
-                                   profile, "1" if profile.exists() else "0"], ROOT, canary_log)
+        canary_spec = json.dumps(backend.canary_spec(home, policy), ensure_ascii=False)
+        canary_code = sandbox.run([python, "-c", CANARY, ROOT, probe_name, canary_spec], ROOT, canary_log)
         # 仅在沙箱意外允许创建但拒绝删除时，由编排进程立即清理自己的探针。
         probe = ROOT / probe_name
         if probe.exists():
