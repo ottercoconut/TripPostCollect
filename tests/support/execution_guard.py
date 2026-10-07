@@ -11,15 +11,19 @@ import sys
 
 _installed = False
 _browser = re.compile(r"chrome|chromium|safari|firefox|webkit|msedge|minibrowser", re.I)
+# 桌面打开器：macOS 为 open/osascript；Linux 为 xdg-open 与 Debian 系浏览器别名。
+_openers = {"open", "osascript",
+            "xdg-open", "sensible-browser", "x-www-browser", "gnome-www-browser", "www-browser"}
+_opener_text = re.compile(r"\b(" + "|".join(sorted(map(re.escape, _openers), key=len, reverse=True)) + r")\b")
 
 
 def check_command(executable, arguments=()):
     name = os.fsdecode(executable)
-    if _browser.search(name) or Path(name).name in {"open", "osascript"}:
+    if _browser.search(name) or Path(name).name in _openers:
         raise PermissionError(errno.EACCES, "测试执行守卫拒绝浏览器或桌面启动器")
     if Path(name).name in {"sh", "bash", "zsh", "dash"}:
         text = " ".join(map(os.fsdecode, arguments)) if not isinstance(arguments, str) else arguments
-        if _browser.search(text) or re.search(r"\b(open|osascript)\b", text):
+        if _browser.search(text) or _opener_text.search(text):
             raise PermissionError(errno.EACCES, "测试执行守卫拒绝 shell 浏览器启动")
 
 

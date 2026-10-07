@@ -9,10 +9,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/dev"))
 import card_gate as gate
+import sandbox_linux
+import sandbox_macos
 
 
 def test_policy_covers_all_boundaries():
-    policy = gate.sandbox_policy(Path('/tmp/带 空格/"本轮"'),
+    policy = sandbox_macos.sandbox_policy(Path('/tmp/带 空格/"本轮"'),
                                  [Path("/work/main"), Path("/work/卡 G")], Path("/Users/测试"))
     assert "(deny network*)" in policy
     assert "(allow network* (remote unix-socket))" in policy
@@ -287,3 +289,105 @@ def test_no_production_imports():
     imports = [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
     imports += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
     assert not any(name.startswith("trippostcollect") for name in imports)
+
+
+def run_bpf(program, arch, nr, arg0=0):
+    """最小经典 BPF 解释器：只实现过滤器用到的 LD|W|ABS、JEQ/JGE|K 与 RET|K。"""
+    import struct
+
+    instructions = [struct.unpack("HBBI", program[i:i + 8]) for i in range(0, len(program), 8)]
+    data = struct.pack("<iIQQ", nr, arch, 0, arg0)
+    pc, accumulator = 0, 0
+    while True:
+        code, jt, jf, k = instructions[pc]
+        if code == 0x20:
+            accumulator = struct.unpack_from("<I", data, k)[0]
+            pc += 1
+        elif code in (0x15, 0x35):
+            taken = accumulator == k if code == 0x15 else accumulator >= k
+            pc += 1 + (jt if taken else jf)
+        elif code == 0x06:
+            return k
+        else:
+            raise AssertionError(f"未知指令 {code:#x}")
+
+
+@pytest.mark.parametrize("machine, arch, nr_socket, nr_other, x32", [
+    ("x86_64", 0xC000003E, 41, 0, 0x40000000),
+    ("aarch64", 0xC00000B7, 198, 63, None),
+])
+def test_linux_seccomp_denies_ip_sockets_only(machine, arch, nr_socket, nr_other, x32):
+    # 过滤器面向 Linux 内核 ABI，测试同样使用 Linux 取值，在 macOS 上生成与验证结果一致。
+    af_unix, af_inet, af_inet6, af_netlink, af_packet = 1, 2, 10, 16, 17
+    program = sandbox_linux.seccomp_program(machine)
+    allow, deny = 0x7FFF0000, 0x00050000 | 1  # SECCOMP_RET_ERRNO | EPERM
+    for family in (af_inet, af_inet6, af_packet):
+        assert run_bpf(program, arch, nr_socket, family) == deny
+    for family in (af_unix, af_netlink):
+        assert run_bpf(program, arch, nr_socket, family) == allow
+    assert run_bpf(program, arch, nr_other, af_inet) == allow
+    assert run_bpf(program, arch, 425) == deny  # io_uring_setup
+    assert run_bpf(program, 0x40000003, nr_socket, af_unix) == deny  # i386 兼容调用
+    if x32 is not None:
+        assert run_bpf(program, arch, x32 | nr_socket, af_unix) == deny
+    with pytest.raises(RuntimeError, match="架构"):
+        sandbox_linux.seccomp_program("riscv64")
+
+
+def test_linux_bwrap_arguments_cover_all_boundaries():
+    arguments = sandbox_linux.bwrap_arguments(
+        Path("/tmp/带 空格/本轮"), [(Path("/opt/google/chrome"), True), (Path("/usr/bin/xdg-open"), False)],
+        Path("/deny/dir"), Path("/deny/file"), 7)
+    joined = " ".join(arguments)
+    assert arguments[:5] == ["bwrap", "--ro-bind", "/", "/", "--dev"]
+    assert "--bind /tmp/带 空格/本轮 /tmp/带 空格/本轮" in joined
+    assert "--unshare-net" in arguments and "--die-with-parent" in arguments
+    assert "--ro-bind /deny/dir /opt/google/chrome" in joined
+    assert "--ro-bind /deny/file /usr/bin/xdg-open" in joined
+    assert arguments[-3:] == ["--seccomp", "7", "--"]
+    # 遮蔽必须排在只读根之后，否则会被根绑定覆盖。
+    assert arguments.index("/opt/google/chrome") > arguments.index("/")
+
+
+def test_linux_browser_targets_collapse_to_matching_directories(tmp_path):
+    opt, bin_dir = tmp_path / "opt", tmp_path / "bin"
+    (opt / "google/chrome").mkdir(parents=True)
+    (opt / "google/chrome/chrome").write_text("")
+    (opt / "google/chrome/google-chrome").write_text("")
+    (opt / "editor").mkdir()
+    bin_dir.mkdir()
+    (bin_dir / "xdg-open").write_text("")
+    (bin_dir / "google-chrome").symlink_to(opt / "google/chrome/google-chrome")
+    (bin_dir / "python3").write_text("")
+    targets = sandbox_linux.browser_targets(str(bin_dir), roots=(opt,))
+    assert (opt / "google/chrome").resolve() in targets
+    assert (bin_dir / "xdg-open").resolve() in targets
+    assert not any(path.name in {"python3", "editor"} for path in targets)
+    assert not any((opt / "google/chrome").resolve() in path.parents for path in targets)
+
+
+def test_linux_canary_probes_masked_opener_and_profile(tmp_path):
+    import errno
+
+    policy = {"masked": [(Path("/usr/bin/xdg-open"), False), (Path("/opt/google/chrome"), True),
+                         (Path("/opt/app/chrome-sandbox"), False)]}
+    spec = sandbox_linux.canary_spec(tmp_path, policy)
+    assert spec["exec"] == ["/usr/bin/xdg-open", "/opt/app/chrome-sandbox"]
+    assert spec["profile"] == str(tmp_path / ".config/google-chrome")
+    assert spec["profile_exists"] is False
+    assert errno.EROFS in spec["denied_errnos"]
+    assert sandbox_macos.canary_spec(tmp_path, None)["exec"] == ["/usr/bin/open"]
+    assert errno.EROFS not in sandbox_macos.canary_spec(tmp_path, None)["denied_errnos"]
+
+
+def test_sandbox_backend_follows_platform():
+    assert gate.sandbox_backend("darwin") is sandbox_macos
+    assert gate.sandbox_backend("linux") is sandbox_linux
+    with pytest.raises(RuntimeError, match="不支持的平台"):
+        gate.sandbox_backend("win32")
+
+
+def test_macos_wrap_keeps_seatbelt_command():
+    wrapped, descriptors = sandbox_macos.wrap(Path("/tmp/p.sb"), ["python", "-c", "pass"])
+    assert wrapped == ["/usr/bin/sandbox-exec", "-f", "/tmp/p.sb", "python", "-c", "pass"]
+    assert descriptors == ()

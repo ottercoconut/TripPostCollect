@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
-import stat
 from pathlib import Path
 from typing import Any
 
 from trippostcollect.core.paths import CONFIG_ROOT, PROJECT_ROOT
+
+_FROZEN_FLAGS = importlib.util.spec_from_file_location(
+    "verify_frozen_flags", Path(__file__).resolve().parent / "ci/frozen_flags.py")
+frozen_flags = importlib.util.module_from_spec(_FROZEN_FLAGS)
+_FROZEN_FLAGS.loader.exec_module(frozen_flags)
 
 
 FROZEN_FILES_MANIFEST = CONFIG_ROOT / "frozen_files.json"
@@ -43,9 +48,8 @@ def verify_frozen_files(manifest_path: Path = FROZEN_FILES_MANIFEST) -> list[str
         actual = sha256_file(target)
         if actual != expected:
             errors.append(f"frozen file hash mismatch: {relative_path} expected={expected} actual={actual}")
-        require_immutable = bool(item.get("require_immutable_flag"))
-        immutable_flag = getattr(stat, "UF_IMMUTABLE", 0)
-        if require_immutable and immutable_flag and not (target.stat().st_flags & immutable_flag):
+        # macOS 检查 uchg，Linux 检查 chattr +i；见 scripts/ci/frozen_flags.py。
+        if item.get("require_immutable_flag") and not frozen_flags.is_immutable(target):
             errors.append(f"frozen file is not filesystem-immutable: {relative_path}")
     return errors
 

@@ -2,14 +2,19 @@
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
-import stat
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+
+# 按本文件旁的路径装载，基线副本与当前工作树各用各自的实现。
+_FROZEN_FLAGS = importlib.util.spec_from_file_location("run_matrix_frozen_flags", Path(__file__).with_name("frozen_flags.py"))
+frozen_flags = importlib.util.module_from_spec(_FROZEN_FLAGS)
+_FROZEN_FLAGS.loader.exec_module(frozen_flags)
 
 
 FORK_OFFLINE_TESTS = tuple(f"tests/test_{name}.py" for name in (
@@ -76,9 +81,10 @@ def restore_frozen(source):
         if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
             raise RuntimeError(f"冻结副本哈希不匹配: {item['path']}")
         if item.get("require_immutable_flag"):
-            os.chflags(path, path.stat().st_flags | stat.UF_IMMUTABLE)
-            if not path.stat().st_flags & stat.UF_IMMUTABLE:
-                raise RuntimeError("冻结副本 uchg 未恢复")
+            # macOS 恢复 uchg，Linux 恢复 chattr +i（需 root 或免密 sudo）。
+            frozen_flags.set_immutable(path)
+            if not frozen_flags.is_immutable(path):
+                raise RuntimeError("冻结副本不可变标志未恢复")
 
 
 def lane_command(runner, source, lane, output):
