@@ -184,7 +184,6 @@ from trippostcollect.runtime.behavior import (
 )
 from trippostcollect.core.paths import (
     COOKIE_SNAPSHOT_FILENAME as COOKIE_SNAPSHOT_FILENAME,
-    MEDIACRAWLER_DIR,
     MEDIACRAWLER_RUNS_OUTPUT,
     PROJECT_ROOT,
 )
@@ -375,8 +374,7 @@ DEFAULT_OUTPUT = MEDIACRAWLER_RUNS_OUTPUT
 
 
 def ensure_prerequisites() -> None:
-    if not (MEDIACRAWLER_DIR / "pyproject.toml").exists():
-        raise SystemExit(f"MediaCrawler is missing or incomplete: {MEDIACRAWLER_DIR}")
+    # T12：新 worker 只用根包与包内资源，不再以 fork 源码树存在为前置条件。
     verify_package_resources()
 
 

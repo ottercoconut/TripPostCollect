@@ -233,14 +233,11 @@ def sanitize_export_item(item: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
-EXPORT_METHODS = ("write_to_csv", "write_to_jsonl", "write_single_item_to_json")
-
-
-def install_export_hook(AsyncFileWriter: Any) -> bool:
-    """仅供在途旧桥包裹退出方法；返回本次是否首次安装。"""
+def install_export_hook(AsyncFileWriter: Any, method_names: tuple[str, ...]) -> bool:
+    """仅供在途旧桥包裹写出方法；方法名由旧桥传入，返回本次是否首次安装。"""
     if getattr(AsyncFileWriter, "_trippostcollect_avatar_sanitizer", False):
         return False
-    for method_name in EXPORT_METHODS:
+    for method_name in method_names:
         original = getattr(AsyncFileWriter, method_name)
 
         @wraps(original)
