@@ -10,7 +10,8 @@
 uv.lock，以及固定版本的 tools/MediaCrawler 源码。不能复制原 data、outputs、temp、
 浏览器状态、.env、凭证、.git、旧虚拟环境或历史审计附件。data/outputs 起初必须为空。
 当前未提交的新测试和支持文件也必须复制；不能只 git archive HEAD 而漏掉本轮修改。
-每个副本按自己的冻结登记核验哈希并恢复 uchg；绝不改变原件标志。
+每个副本按自己的冻结登记核验哈希并恢复不可变标志（macOS `uchg`、Linux `chattr +i`，实现见
+[scripts/ci/frozen_flags.py](../scripts/ci/frozen_flags.py)）；绝不改变原件标志。
 CI 保留不运行测试的 pristine 模板，每个 lane 新建独立源码副本，绝不清理或复用前一轮 data。
 根与 fork 的独立锁定环境放在模板外；每个子进程的 PYTHONPATH 绑定自己的源码副本。
 
@@ -202,3 +203,26 @@ python scripts/dev/adapter_ledger.py progress
 CI 已在“准备纯源码模板与独立锁定环境”之后加入“核对迁移台账”步骤，使用完整历史的
 checkout 和已创建的 root-venv 执行上述四项核对；独立测试 lane 继续在无 Git 的源码副本中运行。
 缺失基线对象时工具报告错误，不自动拉取历史，也不回退为工作树重建。
+
+## 本机卡片闸门：macOS 与 Linux 并行
+
+[scripts/dev/card_gate.py](../scripts/dev/card_gate.py) 是开发期复核工具，按运行平台选择沙箱后端：
+macOS 为 Seatbelt（[sandbox_macos.py](../scripts/dev/sandbox_macos.py)），Linux 为 bubblewrap
+（[sandbox_linux.py](../scripts/dev/sandbox_linux.py)）。两者语义逐项对应，子孙进程继承限制；
+闸门编排进程在沙箱外，每个检查子进程单独套沙箱，启动前先跑 canary，任一项未被拒绝即终止。
+
+| 约束 | macOS | Linux |
+|---|---|---|
+| 禁 IP 网络，保留 AF_UNIX | Seatbelt，connect/bind 得 EPERM | 独立网络命名空间 + seccomp，AF_INET/AF_INET6/AF_PACKET 套接字构造得 EPERM，禁 io_uring |
+| 禁浏览器与桌面打开器 | process-exec 路径正则 | 名称匹配同一正则的可执行文件/目录与 xdg-open 等被遮蔽，exec 得 EACCES |
+| 只写临时根与 /dev | file-write* require-not | 根只读绑定，写入得 EROFS |
+| 禁读写本机浏览器用户数据 | `~/Library/Application Support` 下 Chrome 目录 | `~/.config` 下 Chrome/Chromium/Chrome for Testing 目录被 000 空目录遮蔽 |
+| 冻结副本不可变标志 | `chflags uchg`（所有者可设） | `chattr +i`（需 root，非 root 经 `sudo -n`） |
+
+Linux 前置条件：安装 `bubblewrap`；Ubuntu 23.10 起默认限制非特权用户命名空间，需为
+`/usr/bin/bwrap` 放行（AppArmor profile 含 `userns,`）；建立测试副本时设置冻结副本 `chattr +i`
+需免密 sudo。执行守卫在 Linux 额外拒绝 xdg-open、sensible-browser、x-www-browser 等打开器。
+
+两平台的失败集合各自与同平台基线比较。Linux 不限制 `ps`，os 组在本机沙箱下可全部运行；
+这只是开发期复核，正式 OS 结论与 Seatbelt EPERM 证据仍以托管 macOS CI 为准。
+

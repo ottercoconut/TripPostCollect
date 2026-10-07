@@ -60,22 +60,23 @@ python scripts/dev/card_gate.py \
 过渡期逐项运行的做法已由闸门脚本替代，复核项目与结论口径如下。
 
 - **测试**：在临时源码副本（`adapter_ledger.py make-source`）中，于沙箱内运行 component、installation、os 三组，以及 fork 离线测试。
-  - 与基线比较的是**失败集合**，不是通过数量：本机沙箱会限制 `ps`，os 组固定有少量失败，只要失败集合不变即可。
+  - 与基线比较的是**失败集合**，不是通过数量：macOS 本机沙箱会限制 `ps`，os 组固定有少量失败，只要失败集合不变即可；Linux 沙箱不限制 `ps`。
   - 最终的 OS 结论以 CI 托管 VM 为准。
 - **台账四项检查**。
 - **冻结文件校验、`py_compile`、`ruff`**。
 - **迁移定义的 AST 等价比对**：列出有差异的定义名，每一项都必须在审查包中说明。
 
-沙箱要求（闸门脚本内置并自动生成策略，不依赖临时目录中的遗留文件）：
+沙箱要求（闸门脚本内置并自动生成策略，不依赖临时目录中的遗留文件；macOS 用 Seatbelt `scripts/dev/sandbox_macos.py`，
+Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linux 前置条件见 `docs/testing.md`）：
 
 - 禁止网络；
-- 禁止启动任何浏览器进程，以及 `open`、`osascript`；
+- 禁止启动任何浏览器进程，以及桌面打开器（macOS `open`、`osascript`，Linux `xdg-open` 等）；
 - 禁止写入真实的 `tools/MediaCrawler/browser_data`、`data/`、`outputs/`；
 - 禁止读写本机 Chrome 与 Chrome for Testing 的用户数据目录；
 - 子孙进程继承以上限制。
 
 本机所有 pytest，以及任何可能启动子进程的命令，都必须在沙箱中运行；
-闸门自身作为编排进程在沙箱外启动，为每个检查子进程套沙箱（只读 Git 查询除外），避免嵌套 Seatbelt。
+闸门自身作为编排进程在沙箱外启动，为每个检查子进程套沙箱（只读 Git 查询除外），避免嵌套沙箱。
 （曾因一个 monkeypatch 目标写错、mock 漏拦，真实启动了一次微博 worker；进程内守卫不会被子进程继承。）
 
 ## 5. 审查：审查包与风险分级
@@ -121,9 +122,9 @@ python scripts/dev/card_gate.py \
 ## 7. 并行与工作区
 
 - 互不依赖的卡并行进行，每张卡一个 git worktree、一个实施会话。每个 worktree 都要做到：
-  - 独立环境：`uv sync --locked --extra dev`；
+  - 独立环境：`uv sync --locked --extra dev --python 3.12`（与 CI 一致；未指定时 uv 可能选到更高版本）；
   - 子模块初始化后，远端名为 `origin`；
-  - 核对冻结文件哈希一致后，补上不可变标志（`chflags uchg`）。新建的 worktree 不会带这个标志，缺了 pre-commit 会失败。
+  - 核对冻结文件哈希一致后，补上不可变标志：macOS `chflags uchg`，Linux `sudo chattr +i`。新建的 worktree 不会带这个标志，缺了 pre-commit 会失败。
 - 判断能否并行，看台账中两张卡的来源文件是否重叠，以及是否存在跨卡依赖的定义。有重叠就按顺序叠加。
 - **fork 线性化**：后一张卡的 fork 分支基于前一张卡的 fork 提交；fork 分支合入 fork 主线之前不得删除，否则子模块指针会失效。
 - **根 PR 叠加**：后一张卡以前一张卡的分支作为 base，并在 PR 中写明"先合并 #X"。
