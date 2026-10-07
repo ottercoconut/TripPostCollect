@@ -489,6 +489,22 @@ def test_guard_rejects_browser_boundaries(executable, args):
             audit(event, (executable, args, {}))
 
 
+@pytest.mark.parametrize("executable, args", [
+    ("/usr/bin/xdg-open", ["xdg-open", "https://example.org"]),
+    ("/usr/bin/sensible-browser", []),
+    ("/usr/bin/x-www-browser", []),
+    ("/bin/sh", ["sh", "-c", "xdg-open https://example.org"]),
+])
+def test_guard_rejects_linux_desktop_openers(executable, args):
+    from support.execution_guard import audit, check_command
+
+    for event in ("subprocess.Popen", "os.exec", "os.posix_spawn"):
+        with pytest.raises(PermissionError):
+            audit(event, (executable, args, {}))
+    # 词边界匹配：名称中仅包含 open 的普通命令不受影响。
+    check_command("/bin/sh", ["sh", "-c", "openssl version"])
+
+
 def test_guard_allows_real_signal_and_gate_python_commands():
     from support.execution_guard import check_command
 
@@ -534,7 +550,7 @@ def test_frozen_copy_hash_is_checked_before_flags(monkeypatch, tmp_path):
         "schema_version": 1, "files": [{"path": "frozen.md", "sha256": "wrong",
                                          "require_immutable_flag": True}],
     }))
-    monkeypatch.setattr(run_matrix.os, "chflags",
+    monkeypatch.setattr(run_matrix.frozen_flags, "set_immutable",
                         lambda *args: pytest.fail("哈希错误不得设置标志"))
     with pytest.raises(RuntimeError, match="哈希"):
         run_matrix.restore_frozen(tmp_path)
@@ -551,23 +567,16 @@ def test_frozen_copy_restores_only_registered_copy(monkeypatch, tmp_path):
         "schema_version": 1, "files": [{"path": "frozen.md",
             "sha256": hashlib.sha256(b"content").hexdigest(), "require_immutable_flag": True}],
     }))
-    flags = 0
-    original_stat = Path.stat
+    immutable = set()
 
-    def fake_stat(path, *args, **kwargs):
-        if path == target:
-            return SimpleNamespace(st_flags=flags)
-        return original_stat(path, *args, **kwargs)
-
-    def fake_chflags(path, value):
-        nonlocal flags
+    def fake_set(path):
         assert path == target
-        flags = value
+        immutable.add(path)
 
-    monkeypatch.setattr(Path, "stat", fake_stat)
-    monkeypatch.setattr(run_matrix.os, "chflags", fake_chflags)
+    monkeypatch.setattr(run_matrix.frozen_flags, "set_immutable", fake_set)
+    monkeypatch.setattr(run_matrix.frozen_flags, "is_immutable", lambda path: path in immutable)
     run_matrix.restore_frozen(tmp_path)
-    assert flags & run_matrix.stat.UF_IMMUTABLE
+    assert immutable == {target}
 
 
 def test_signal_driver_preserves_parent_counts(monkeypatch, tmp_path):
