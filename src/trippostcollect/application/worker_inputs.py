@@ -244,3 +244,55 @@ def zhihu_operation_readers():
         lambda: os.environ.get("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED") == "1",
         lambda: _env_float("TRIPPOSTCOLLECT_ZHIHU_INITIAL_SETTLE_SECONDS", 0.0),
     )
+
+
+# T09：原 XiaoHongShuCrawler._env_float 方法体逐字迁入；非负钳制，非法值回退默认值，在调用时读取。
+def _env_nonnegative_float(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.environ.get(name, str(default))))
+    except ValueError:
+        return default
+
+
+_XHS_REMOVED_LOGIN_ENV_VARS = (
+    "TRIPPOSTCOLLECT_XHS_RUN_SCOPED_LOGIN",
+    "TRIPPOSTCOLLECT_XHS_STORAGE_STATE_PATH",
+    "TRIPPOSTCOLLECT_COOKIES",
+)
+
+
+# T09：原 XiaoHongShuCrawler 登录契约；配置经参数传入，仍在 start 起点读取 env 与当时的配置。
+def _validate_login_contract(config) -> None:
+    for env_name in _XHS_REMOVED_LOGIN_ENV_VARS:
+        if env_name in os.environ:
+            raise RuntimeError(f"xhs_deprecated_login_input:{env_name}")
+    if config.LOGIN_TYPE != "qrcode":
+        raise RuntimeError("xhs_login_type_must_be_qrcode")
+    if str(config.COOKIES or "").strip():
+        raise RuntimeError("xhs_cookie_login_input_removed")
+
+
+def xhs_repair_reader(*, environ=os.environ):
+    """在原 install_hooks 时点读取小红书历史修复开关。"""
+    return lambda: environ.get("TRIPPOSTCOLLECT_XHS_REPAIR") == "1"
+
+
+def xhs_readers(config):
+    """绑定小红书零参读取器；各值仍在原操作起点读取，不在装配时缓存。"""
+    from functools import partial
+
+    from trippostcollect.application.contracts import XhsReaders
+
+    return XhsReaders(
+        validate_login_contract=partial(_validate_login_contract, config),
+        navigation_deadline_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_NAVIGATION_DEADLINE_SECONDS", 60.0),
+        search_shell_timeout_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_SEARCH_SHELL_TIMEOUT_SECONDS", 30.0),
+        recovery_shell_timeout_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_RECOVERY_SHELL_TIMEOUT_SECONDS", 60.0),
+        initial_settle_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_INITIAL_SETTLE_SECONDS", 12.0),
+        initial_shell_timeout_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_INITIAL_SHELL_TIMEOUT_SECONDS", 30.0),
+        network_wait_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_NETWORK_WAIT_SECONDS", 600.0),
+        network_retry_min_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MIN_SECONDS", 2.0),
+        network_retry_max_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MAX_SECONDS", 30.0),
+        creator_verify_poll_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_POLL_SECONDS", 2.0),
+        refresh_max_pages=env_int_reader("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", 0),
+    )

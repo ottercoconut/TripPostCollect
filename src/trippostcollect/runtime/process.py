@@ -34,7 +34,7 @@ from trippostcollect.xhs.leases import (
 from trippostcollect.xhs.runtime import RUNTIME_STATUS_AUTH_KEY_ENV
 
 if TYPE_CHECKING:
-    from scripts.mediacrawler_crawl import XhsSupervisorRuntimeReporter
+    from trippostcollect.xhs.supervision import XhsSupervisorRuntimeReporter
 
 
 PROCESS_PROGRESS_POLL_SECONDS = 5.0
