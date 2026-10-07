@@ -822,10 +822,6 @@ def _run_platform_without_policy(
                 "TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT": str(
                     args.discovery_query_fingerprint or ""
                 ),
-                "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID": str(args.discovery_run_id or ""),
-                "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM": platform_key,
-                "TRIPPOSTCOLLECT_DISCOVERY_KEYWORD": args.keyword,
-                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE": str(args.start_page),
                 "TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET": str(args.start_offset),
                 "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR": str(args.start_cursor or ""),
                 "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES": str(
@@ -834,15 +830,11 @@ def _run_platform_without_policy(
                 "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED": (
                     "1" if args.discovery_source_exhausted else "0"
                 ),
-                "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED": (
-                    "1" if args.no_checkpoint_write else "0"
-                ),
             }
         )
     if platform_key == "xhs":
         extra_env.update(
             {
-                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE": str(args.start_page),
                 "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR": str(args.start_cursor or ""),
                 "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES": str(
                     args.top_refresh_max_pages
@@ -897,7 +889,6 @@ def _run_platform_without_policy(
                     XHS_NETWORK_RETRY_MAX_SECONDS
                 ),
                 "TRIPPOSTCOLLECT_XHS_NAVIGATION_DEADLINE_SECONDS": "60",
-                "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS": "600",
                 "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_POLL_SECONDS": "2",
                 "TRIPPOSTCOLLECT_XHS_QR_REFRESH_SECONDS": "180",
             }

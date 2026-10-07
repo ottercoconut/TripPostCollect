@@ -1,6 +1,9 @@
 [build-system]
 requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+# 树内后端：build_support 重导出 setuptools.build_meta 的全部 PEP 517/660 钩子，
+# 并提供 cmdclass 登记的 BuildPy；按 PEP 517，backend-path 内的后端模块必须从该目录加载。
+build-backend = "build_support"
+backend-path = ["."]
 
 [project]
 name = "trippostcollect"
@@ -32,7 +35,13 @@ dev = [
     "pytest-asyncio>=0.25,<2",
     "pytest-cov>=6,<8",
     "ruff>=0.11,<1",
+    # 与 [build-system] 同一约束：锁进 dev 环境，供沙箱内离线构建 wheel/sdist。
+    "setuptools>=68",
 ]
+
+[tool.setuptools.cmdclass]
+# SQL 与契约文档以仓库现址为唯一真源，构建时由 build_support.BuildPy 复制进 wheel。
+build_py = "build_support.BuildPy"
 
 [tool.setuptools.packages.find]
 where = ["src"]

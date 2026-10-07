@@ -70,13 +70,19 @@ def executor_patches(source):
     return found
 
 
+# T12 锁定验收以 `if hasattr(crawl, "MEDIACRAWLER_DIR")` 守卫该 patch：名字已随 fork 树检查删除，守卫使其成为
+# 无操作，用于证明前置检查不再依赖 fork 目录。只豁免这一精确的（文件, 名字），其余死 patch 仍判失败。
+GUARDED_REMOVED_NAMES = {("tests/test_adapter_t12.py", "MEDIACRAWLER_DIR")}
+
+
 def test_executor_patches_have_script_readers():
     tree = ast.parse((ROOT / "scripts/mediacrawler_crawl.py").read_text())
     reads = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
     failures = []
     for path in sorted((ROOT / "tests").rglob("*.py")):
+        relative = path.relative_to(ROOT).as_posix()
         for line, name in executor_patches(path.read_text()):
-            if name not in reads:
+            if name not in reads and (relative, name) not in GUARDED_REMOVED_NAMES:
                 failures.append(f"{path.relative_to(ROOT)}:{line}: {name}")
     assert not failures, "脚本没有读取被 patch 的名字：\n" + "\n".join(failures)
 

@@ -27,6 +27,7 @@ import os
 import sys
 from dataclasses import dataclass
 from enum import Enum
+from types import SimpleNamespace
 from typing import Callable, Mapping, Iterable, Optional, Sequence, Type, TypeVar
 
 
@@ -129,8 +130,54 @@ def parse_cmd(argv: Sequence[str] | None = None) -> WorkerInputs:
     return WorkerInputs(**vars(parser.parse_args(_normalize_argv(argv))))
 
 
+def worker_config(*, environ: Mapping[str, str] = os.environ) -> SimpleNamespace:
+    """新 worker 的配置对象，取代 fork config 包。
+
+    只含五站装配实际读取的键，默认值与原 fork config（base_config 及四站配置星号导入后）逐键相同；
+    env 与原模块一样在构造时读取一次。上游示例 ID 不迁入：四站指定 ID 列表默认为空，详情模式由父侧
+    `--specified_id` 写入。上游 DB 凭据、缓存、代理供应商、词云与退出平台配置不进入此对象。
+    """
+    return SimpleNamespace(
+        PLATFORM="xhs",
+        XHS_INTERNATIONAL=False,
+        KEYWORDS="编程副业,编程兼职",
+        LOGIN_TYPE="qrcode",
+        COOKIES=environ.get("TRIPPOSTCOLLECT_COOKIES", ""),
+        CRAWLER_TYPE="search",
+        ENABLE_IP_PROXY=False,
+        HEADLESS=False,
+        SAVE_LOGIN_STATE=True,
+        ENABLE_CDP_MODE=False,
+        CDP_DEBUG_PORT=9222,
+        CUSTOM_BROWSER_PATH=environ.get("TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH") or environ.get("CUSTOM_BROWSER_PATH", ""),
+        CDP_HEADLESS=False,
+        BROWSER_LAUNCH_TIMEOUT=60,
+        CDP_CONNECT_EXISTING=False,
+        AUTO_CLOSE_BROWSER=True,
+        SAVE_DATA_OPTION="jsonl",
+        SAVE_DATA_PATH="",
+        USER_DATA_DIR="%s_user_data_dir",
+        START_PAGE=1,
+        MAX_CONCURRENCY_NUM=1,
+        ENABLE_GET_MEIDAS=False,
+        ENABLE_GET_COMMENTS=True,
+        ENABLE_GET_SUB_COMMENTS=False,
+        CRAWLER_MAX_SLEEP_SEC=2,
+        DISABLE_SSL_VERIFY=False,
+        # 四站配置：原 xhs/dy/weibo/zhihu_config 的同名键。
+        SORT_TYPE="popularity_descending",
+        PUBLISH_TIME_TYPE=0,
+        WEIBO_SEARCH_TYPE="default",
+        ENABLE_WEIBO_FULL_TEXT=True,
+        XHS_SPECIFIED_NOTE_URL_LIST=[],
+        DY_SPECIFIED_ID_LIST=[],
+        WEIBO_SPECIFIED_ID_LIST=[],
+        ZHIHU_SPECIFIED_ID_LIST=[],
+    )
+
+
 def apply_to_config(inputs: WorkerInputs, config_module) -> None:
-    """按旧解析器写回配置；未选平台的 ID 与退出参数保留当前值。"""
+    """按旧解析器写回配置；未选平台的指定 ID 保留当前值。"""
     fields = {
         "PLATFORM": "platform", "LOGIN_TYPE": "lt", "CRAWLER_TYPE": "type",
         "START_PAGE": "start", "KEYWORDS": "keywords",
@@ -142,11 +189,6 @@ def apply_to_config(inputs: WorkerInputs, config_module) -> None:
     }
     for key, field in fields.items():
         setattr(config_module, key, getattr(inputs, field))
-    for key in (
-        "COOKIES", "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES", "CRAWLER_MAX_NOTES_COUNT",
-        "IP_PROXY_POOL_COUNT", "IP_PROXY_PROVIDER_NAME", "STATIC_PROXY_URL",
-    ):
-        setattr(config_module, key, getattr(config_module, key))
     specified_id = inputs.specified_id
     specified_id_list = [id.strip() for id in specified_id.split(",") if id.strip()] if specified_id else []
     if specified_id_list:

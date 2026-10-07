@@ -7,7 +7,8 @@
 ## 准备源码和依赖
 
 使用仅含源码的临时副本，包含 src、scripts、tests、config、db、docs、pyproject.toml、
-uv.lock，以及固定版本的 tools/MediaCrawler 源码。不能复制原 data、outputs、temp、
+uv.lock、build_support.py、MANIFEST.in、`.github/workflows/macos-test-lanes.yml`（工作流配置本身受测），
+以及固定版本的 tools/MediaCrawler 源码。不能复制原 data、outputs、temp、
 浏览器状态、.env、凭证、.git、旧虚拟环境或历史审计附件。data/outputs 起初必须为空。
 当前未提交的新测试和支持文件也必须复制；不能只 git archive HEAD 而漏掉本轮修改。
 每个副本按自己的冻结登记核验哈希并恢复不可变标志（macOS `uchg`、Linux `chattr +i`，实现见
@@ -16,7 +17,7 @@ CI 保留不运行测试的 pristine 模板，每个 lane 新建独立源码副�
 根与 fork 的独立锁定环境放在模板外；每个子进程的 PYTHONPATH 绑定自己的源码副本。
 
 根项目 uv.lock 已核实包含 trippostcollect 的 dev extra：pytest、pytest-asyncio、
-pytest-cov、ruff、mypy、pre-commit。项目只支持 Python 3.12；完整安装用根锁文件，
+pytest-cov、ruff、mypy、pre-commit，以及与 `[build-system]` 同一约束的 setuptools（供测试期离线构建）。项目只支持 Python 3.12；完整安装用根锁文件，
 在 macOS Python 3.12 独立副本中准备环境，例如先切换到对应临时源码目录再执行：
 
 ```bash
@@ -30,9 +31,25 @@ source .venv/bin/activate
 依赖准备阶段允许联网，测试阶段禁止；不运行浏览器安装或平台登录。
 根入口需要 scrapling[fetchers]。正式 worker 使用根解释器，以
 `sys.executable -P -m trippostcollect.platforms.entry` 启动，cwd 为项目根；
-过渡装载模块显式提供尚未迁出的 fork 与 scripts 路径，不依赖 cwd 或注入 PYTHONPATH。
-fork 独立环境使用子模块锁文件，仅用于 CI 的 fork 离线测试；本入口只跑根 tests/。
-fork 测试不能替代根安装验收。
+新入口与五站装配只用根包：配置对象由 `worker_inputs.worker_config()` 提供，不装载 fork 顶层包，
+也不把 fork 或 scripts 插入 `sys.path`。过渡装载模块 `platforms/_fork_bridge.py` 只供旧桥与对照测试
+显式调用，随旧桥在 T14 删除。fork 独立环境使用子模块锁文件，仅用于 CI 的 fork 离线测试；
+本入口只跑根 tests/。fork 测试不能替代根安装验收。
+
+## 构建与仓库外安装
+
+包内资源分两类：JS 与 MediaCrawler LICENSE 位于 `src/trippostcollect/resources/`；SQL（`db/*.sql`）与
+`docs/formal-crawl-contract.md` 以仓库现址为唯一编辑真源，白名单只在 `core/resources.py:GENERATED_RESOURCES`
+定义。构建时 `build_support.BuildPy`（pyproject `cmdclass` 登记）按该白名单复制进 wheel 的
+`trippostcollect/resources/sql/`、`resources/contracts/` 并校验 SHA-256；`MANIFEST.in` 让 sdist 携带真源与构建模块。
+源码树不保存生成副本；源码 checkout（含可编辑安装）直接读真源。建库 SQL 经资源入口读取；契约文档的
+路径与散列记录仍指仓库 `docs/`。
+
+安装包不在源码 checkout 内运行时，必须设置现有 `TRIPPOST_PROJECT_ROOT` 指向工作根，否则导入
+`trippostcollect.core.paths` 明确失败；源码 checkout 未设置时仍以仓库为根。
+installation lane 的 `tests/test_adapter_t12_install.py` 在副本中用锁定环境的 setuptools 离线构建 sdist 与 wheel
+（并由 sdist 再构建 wheel），在仓库外全新 venv 中解包安装，核对资源字节、全部子模块导入、各正式入口 `--help`
+与 main 逐字相同，以及无 fork 目录时四站选站装配。
 
 ## 运行与结果
 
@@ -78,11 +95,13 @@ Linux 通过不能替代 macOS 证据。
 使用 GitHub-hosted `macos-26`，Python 3.12 单一版本、`contents: read`，不注入 secrets，
 checkout 不保留认证信息。依赖准备阶段联网；根环境使用 `uv sync --locked --extra dev`，
 所选 submodule 提交用自己的锁文件创建独立 fork 测试环境。所有执行使用临时源码副本，
-没有私人源码、账号数据库或浏览器 profile。完整安装 lane 检查根 CLI `--help`，
-fork 离线兼容检查静态导入 B站、微博、抖音、知乎、小红书模块，不调用抓取入口。
+没有私人源码、账号数据库或浏览器 profile。完整安装 lane 检查根 CLI `--help`，并构建 wheel/sdist 做仓库外安装验收。
+根环境选站装配检查（matrix 的 `assembly`）在独立副本中导入 B站正式 article 模块
+（`run_matrix.ROOT_ASSEMBLY_MODULES`）并对四站调用 `trippostcollect.platforms.entry.load_crawler`，
+不调用抓取入口，装载任何 fork 顶层包即失败；上游 B站视频主循环不再导入。
 fork 测试的 PYTHONPATH 包含根 src/scripts 与 fork 自身路径。
 随后在独立 fork 环境执行 `run_matrix.FORK_OFFLINE_TESTS` 明确列出的 4 文件、34 个
-原离线用例（共享辅助测试）；数量变化、skip、xfail 或失败均不可验收。
+原离线用例（共享辅助的旧桥出口，T14 随目录删除）；数量变化、skip、xfail 或失败均不可验收。
 原浏览器与 CDP 生命周期的 41 个用例已迁入根 `tests/runtime/`，归入 component lane；
 知乎的 3 文件、27 个用例已迁入根 `tests/platforms/zhihu/`，同样归入 component lane。
 进程、信号和 socket 调用均使用替身，不启动真实浏览器或进程。
@@ -96,8 +115,8 @@ CI 显式 setup-node；执行 PATH 保留检测到的 Node 目录、/usr/local/b
 B站正式 article 的行为仍由根项目测试覆盖，上游 video 主循环不作为替代。
 
 [scripts/ci/run_matrix.py](../scripts/ci/run_matrix.py) 无论前一 lane 成败都运行全部四个 lane，
-任何失败、缺结果、静态导入失败或 fork 离线测试未全过均使 CI 非零。
-执行期 root 三个 lane 与 worker 导入/离线测试使用 Seatbelt。
+任何失败、缺结果、选站装配失败或 fork 离线测试未全过均使 CI 非零。
+执行期 root 三个 lane、选站装配与 fork 离线测试使用 Seatbelt。
 OS lane 调用 [scripts/ci/native_macos.py](../scripts/ci/native_macos.py)：每次管理员操作均检查
 GitHub-hosted/macOS/镜像环境标志；优先向已有 Apple wildcard anchor 添加临时 PF 子规则。
 没有 dispatcher 时，只有确认根过滤/NAT规则、anchors、tables、states 全空才加载最小临时
@@ -172,7 +191,7 @@ OS lane 验收，本地纯时钟通过不能替代两版本真实 OS 结果。
 | `tests/test_xhs_terminalizer.py::test_formal_os_signal_immediately_after_acquire_has_one_failed_terminal_commit` | os | 2 |
 | `tests/test_xhs_terminalizer.py::test_sms_terminal_before_pagination_keeps_precise_reason_and_checkpoint` | component | 1 |
 | `tests/test_xhs_runtime_status.py::test_socket_is_rejected_without_blocking` | socket | 1 |
-| `tests/test_run_ids.py::test_all_script_run_ids_include_microseconds` | installation | 1 |
+| `tests/test_platform_package_resources.py::test_all_script_run_ids_include_microseconds`（原在 `tests/test_run_ids.py`，T12 按台账迁移，名称不变） | installation | 1 |
 
 issue1_component / issue1_os 是原失败节点的精确标签，不是整个 lane 的别名。
 另加 test_guard_cleanup_requires_observed_absence 的 5 个场景：absent、alive、unknown、

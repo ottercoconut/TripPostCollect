@@ -94,6 +94,28 @@ AST_RULES = {
 }
 
 
+# T12 按规格授权的两处改动，在冻结旧定义上做同样的删除后再逐字比较，其余差异仍由 AST 断言拦截：
+# 规格 D2（469/485 行）删除 6 个父发无消费者的 env；规格 C1 以包内资源替代 fork 源码树存在检查。
+T12_REMOVED_ENV = {
+    "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID", "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM", "TRIPPOSTCOLLECT_DISCOVERY_KEYWORD",
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE", "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED",
+    "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
+}
+
+
+def t12_authorized(node):
+    node = deepcopy(node)
+    for child in ast.walk(node):
+        if isinstance(child, ast.Dict):
+            kept = [(key, value) for key, value in zip(child.keys, child.values)
+                    if not (isinstance(key, ast.Constant) and key.value in T12_REMOVED_ENV)]
+            child.keys, child.values = [key for key, _ in kept], [value for _, value in kept]
+    if isinstance(node, ast.FunctionDef) and node.name == "ensure_prerequisites":
+        node.body = [statement for statement in node.body
+                     if not (isinstance(statement, ast.If) and "MEDIACRAWLER_DIR" in ast.unparse(statement.test))]
+    return node
+
+
 def definition(source, qualname):
     node = ast.parse(source)
     for name in qualname.split("."):
@@ -161,7 +183,7 @@ def test_a_migrated_ast(row):
     if row["disposition"] == "薄":
         target = ROOT / "src/trippostcollect/application/collection.py"
     assert target.exists(), f"新定义不存在：{target.relative_to(ROOT)}::{name}"
-    old = definition((FIXTURES / "mediacrawler_crawl.py.txt").read_text(), name)
+    old = t12_authorized(definition((FIXTURES / "mediacrawler_crawl.py.txt").read_text(), name))
     new = definition(target.read_text(), name)
     assert normalized_pair(old, new, AST_RULES[name])[0] == normalized_pair(old, new, AST_RULES[name])[1]
     if row["disposition"] == "薄":
@@ -191,7 +213,7 @@ def test_a_other_top_level_definitions_unchanged():
     assert len(ROWS) == 46 and set(AST_RULES) == {r["qualname"] for r in ROWS}
     for node in old.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name not in names:
-            assert ast.dump(node) == ast.dump(definition(new, node.name)), node.name
+            assert ast.dump(t12_authorized(node)) == ast.dump(definition(new, node.name)), node.name
 
 
 def test_ast_normalization_interface():

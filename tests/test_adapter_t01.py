@@ -136,8 +136,10 @@ def test_progress_detects_moved_definition() -> None:
 
 
 def test_inputs_are_unchanged_during_migration() -> None:
-    # CLI 参数与默认值、env 名称在迁移全程必须与基线一致
+    # CLI 参数与默认值、env 名称在迁移全程必须与基线一致；
+    # 唯一例外是规格 D2 授权删除的 6 个父发名字（ledger.AUTHORIZED_ENV_REMOVALS），已在漂移计算中排除。
     report = ledger.build_input_drift(ROOT)
+    assert set(report) == {"cli_changed", "env_added", "env_removed"}
     assert report["cli_changed"] == {}
     assert report["env_added"] == []
     assert report["env_removed"] == []

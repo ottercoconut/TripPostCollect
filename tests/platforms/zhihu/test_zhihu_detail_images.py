@@ -241,7 +241,6 @@ async def test_image_failure_is_recorded_and_later_zhihu_candidate_continues(
             None,
         ]
     )
-    crawler.batch_get_content_comments = AsyncMock(return_value=None)
     store = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "_store_content", store)
 
@@ -319,7 +318,6 @@ async def test_terminal_image_failure_is_recorded_and_later_candidate_continues(
             None,
         ]
     )
-    crawler.batch_get_content_comments = AsyncMock(return_value=None)
     store = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "_store_content", store)
 

@@ -1,7 +1,7 @@
-"""过渡装载未迁 fork 顶层包及旧导出 hook。
+"""过渡装载 fork 顶层包与 scripts 路径，仅供旧桥与对照测试使用。
 
-仅由 entry.configure 调用，显式补入 fork 与 scripts 路径，不依赖 cwd。
-各站迁完且 E 删除后，在 T12/T14 删除此过渡机制。
+T12 起新入口与五站装配都不再调用；旧桥（E 与 fork main.py/cmd_arg 及薄子类）和对照测试
+需要显式补入 fork 与 scripts 路径时使用，不依赖 cwd。随旧桥在 T14 删除。
 """
 
 import sys

@@ -23,13 +23,12 @@
 import io
 import os
 import sys
-from importlib import import_module
 
-from trippostcollect.application.worker_inputs import WorkerInputs, apply_to_config, parse_cmd
-from trippostcollect.platforms import _fork_bridge
+from trippostcollect.application.worker_inputs import WorkerInputs, apply_to_config, parse_cmd, worker_config
 from trippostcollect.runtime import worker
 
 
+_config = None
 _weibo_post_repair = False
 _douyin_browser_detail_fallback = False
 _xhs_repair = False
@@ -43,11 +42,21 @@ def configure(argv) -> WorkerInputs:
     if sys.stderr and hasattr(sys.stderr, 'buffer'):
         if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
             sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-    _fork_bridge.install()
+    global _config
     inputs = parse_cmd(argv)
-    config = import_module("config")
+    # T12：根侧配置对象取代 fork config 包，不再把 fork 与 scripts 插入 sys.path。
+    config = worker_config()
     apply_to_config(inputs, config)
+    _config = config
     return inputs
+
+
+def current_config():
+    """configure 写回后的配置对象；未经 configure 时按默认值构造一次。"""
+    global _config
+    if _config is None:
+        _config = worker_config()
+    return _config
 
 
 def install_hooks() -> None:
@@ -88,9 +97,10 @@ def weibo_dependencies(config, *, post_repair=False):
     from trippostcollect.platforms.weibo.parser import weibo_source_asset_key
     from trippostcollect.runtime import cookies, helpers, http, image_retry, login_helpers
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
+    from trippostcollect.application.worker_inputs import _enabled
+    from trippostcollect.artifacts.evidence import write_evidence
+    from trippostcollect.runtime import behavior
     from trippostcollect.runtime.behavior import project_browser_args
-    # 共享行为桥含尚未迁站的条件调用与 env 读点，保持原位至 T09/T10。
-    from tools.trippostcollect_behavior import run_required_human_behavior
 
     values = {field.name: getattr(config, field.name) for field in fields(WeiboConfig)}
     values["WEIBO_SPECIFIED_ID_LIST"] = tuple(values["WEIBO_SPECIFIED_ID_LIST"])
@@ -100,6 +110,26 @@ def weibo_dependencies(config, *, post_repair=False):
     })
     readers = weibo_input_readers()
     logger = logging.getLogger("MediaCrawler")
+
+    async def run_required_human_behavior(page, platform_key):
+        # 原 fork 行为桥：调用时读 env；scripts 不再插入 sys.path，xhs 就绪等待与证据写出改由包内同一实现提供。
+        if not _enabled():
+            return {"status": "disabled", "platform": platform_key}
+        scripts_dir = Path(os.environ.get("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", "")).expanduser()
+        evidence_path = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()
+        profile_name = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_PROFILE", "social_high_risk").strip()
+        if not scripts_dir.is_dir() or not evidence_path:
+            raise RuntimeError("required TripPostCollect human behavior configuration is incomplete")
+        from trippostcollect.platforms.xhs.behavior import wait_for_xhs_search_ready
+
+        return await behavior.run_required_human_behavior(
+            page,
+            platform_key=platform_key,
+            xhs_search_ready=wait_for_xhs_search_ready,
+            write_evidence=write_evidence,
+            evidence_path=evidence_path,
+            profile_name=profile_name,
+        )
 
     def accumulator():
         return AdaptiveAccumulator(
@@ -155,23 +185,23 @@ def load_crawler(code: str) -> type:
     if code == "wb":
         from trippostcollect.platforms.weibo.core import bind_weibo_crawler
         return bind_weibo_crawler(
-            import_module("config"),
+            current_config(),
             lambda config: weibo_dependencies(config, post_repair=_weibo_post_repair),
         )
     if code == "dy":
         worker.init_loging_config()
         from trippostcollect.platforms.douyin.core import DouYinCrawler
-        return DouYinCrawler.bind(lambda: douyin_dependencies(import_module("config")))
+        return DouYinCrawler.bind(lambda: douyin_dependencies(current_config()))
     if code == "zhihu":
         worker.init_loging_config()
         from trippostcollect.platforms.zhihu.core import ZhihuCrawler
         return ZhihuCrawler.with_dependencies(
-            lambda: _zhihu_dependencies(import_module("config")),
+            lambda: _zhihu_dependencies(current_config()),
         )
     if code == "xhs":
         worker.init_loging_config()
         from trippostcollect.platforms.xhs.core import XiaoHongShuCrawler
-        return XiaoHongShuCrawler.bind(lambda: xhs_dependencies(import_module("config")))
+        return XiaoHongShuCrawler.bind(lambda: xhs_dependencies(current_config()))
     raise ValueError(f"不支持的 worker 平台：{code}")
 
 

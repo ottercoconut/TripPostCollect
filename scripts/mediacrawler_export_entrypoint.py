@@ -49,7 +49,7 @@ def install_export_hook() -> None:
     from tools.async_file_writer import AsyncFileWriter
     from trippostcollect.records.sanitization import install_export_hook as install_writer_hook
 
-    if install_writer_hook(AsyncFileWriter):
+    if install_writer_hook(AsyncFileWriter, EXPORT_METHODS):
         install_batch_checkpoint_hook()
 
 

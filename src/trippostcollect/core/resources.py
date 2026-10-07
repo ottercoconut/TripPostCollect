@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 from hashlib import sha256
 from importlib import resources
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 RESOURCE_SHA256 = {
@@ -12,6 +12,19 @@ RESOURCE_SHA256 = {
     "js/stealth.min.js": "02ae012addcdb30b0ed1a512406feb487699b1b217566e87a8086b54dfcc1d4d",
     "licenses/MediaCrawler-LICENSE": "aeff21de8609bec9d6e939bbbba7c2914ae0a6e7c9470ea7945c03f7d17a2a33",
 }
+# 构建生成的包内资源 → 仓库内唯一编辑真源。构建模块 build_support.py 读取此表复制进 wheel，
+# 源码树不保存副本；源码 checkout 中包内没有生成副本时直接读真源。
+GENERATED_RESOURCES = {
+    "sql/crawl_scheduler.sql": "db/crawl_scheduler.sql",
+    "sql/ctf_captures.sql": "db/ctf_captures.sql",
+    "sql/source_platforms.sql": "db/source_platforms.sql",
+    "sql/web_posts.sql": "db/web_posts.sql",
+    "sql/xhs_control.sql": "db/xhs_control.sql",
+    "contracts/formal-crawl-contract.md": "docs/formal-crawl-contract.md",
+}
+_RESOURCE_ROOTS = {"js", "licenses", "sql", "contracts"}
+# src 布局下本文件位于 <checkout>/src/trippostcollect/core/resources.py。
+_SOURCE_CHECKOUT = Path(__file__).resolve().parents[3]
 
 
 def _resource(name: str):
@@ -22,13 +35,16 @@ def _resource(name: str):
         or "\\" in name
         or ".." in relative.parts
         or len(relative.parts) < 2
-        or relative.parts[0] not in {"js", "licenses"}
+        or relative.parts[0] not in _RESOURCE_ROOTS
     ):
         raise ValueError(f"非法包资源路径：{name}")
     resource = resources.files("trippostcollect.resources").joinpath(*relative.parts)
-    if not resource.is_file():
-        raise FileNotFoundError(f"包资源不存在：{name}")
-    return resource
+    if resource.is_file():
+        return resource
+    source = GENERATED_RESOURCES.get(name)
+    if source is not None and (_SOURCE_CHECKOUT / source).is_file():
+        return _SOURCE_CHECKOUT / source
+    raise FileNotFoundError(f"包资源不存在：{name}")
 
 
 def read_bytes(name: str) -> bytes:

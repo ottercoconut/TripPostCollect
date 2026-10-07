@@ -22,6 +22,29 @@ FORK_OFFLINE_TESTS = tuple(f"tests/test_{name}.py" for name in (
     "image_download_retry", "image_staging_errors", "trippostcollect_adaptive",
 ))
 FORK_EXPECTED_TESTS = 34
+# 根环境选站装配验收：B站正式 article 路线与四站 worker 选站，均不得装载 fork 顶层包。
+ROOT_ASSEMBLY_MODULES = tuple(f"trippostcollect.platforms.bilibili.{name}" for name in (
+    "core", "client", "parser", "login", "signer",
+))
+WORKER_PLATFORM_CODES = ("wb", "dy", "zhihu", "xhs")
+ASSEMBLY_CHECK = (
+    "import importlib, sys\n"
+    "from pathlib import Path\n"
+    "from ci_execution_guard import install, canary\n"
+    "install(); canary()\n"
+    "from ci_lane_report import denied_network_probe\n"
+    "denied_network_probe(Path(sys.argv[1]), 'installation')\n"
+    "for name in sys.argv[3].split(','):\n"
+    "    importlib.import_module(name)\n"
+    "from trippostcollect.platforms.entry import load_crawler\n"
+    "for code in sys.argv[4].split(','):\n"
+    "    load_crawler(code)\n"
+    "fork = str(Path(sys.argv[2]).resolve())\n"
+    "loaded = sorted({name.split('.')[0] for name, module in list(sys.modules.items())\n"
+    "                 if (getattr(module, '__file__', None) or '').startswith(fork)})\n"
+    "if loaded:\n"
+    "    raise SystemExit('fork packages loaded: ' + ','.join(loaded))\n"
+)
 
 
 def fork_pythonpath(source, support):
@@ -57,8 +80,12 @@ def fresh_source(pristine, destination):
     for name in ("src", "scripts", "tests", "config", "db", "docs", "tools"):
         shutil.copytree(pristine / name, destination / name, ignore=ignore,
                         copy_function=shutil.copyfile)
-    for name in ("pyproject.toml", "uv.lock", "AGENTS.md"):
+    for name in ("pyproject.toml", "uv.lock", "AGENTS.md", "build_support.py", "MANIFEST.in"):
         shutil.copyfile(pristine / name, destination / name)
+    # 工作流本身也是被测配置（路径过滤须覆盖构建输入），只复制这一个文件。
+    workflow = ".github/workflows/macos-test-lanes.yml"
+    (destination / workflow).parent.mkdir(parents=True)
+    shutil.copyfile(pristine / workflow, destination / workflow)
     if (pristine / "README.md").exists():
         shutil.copyfile(pristine / "README.md", destination / "README.md")
     restore_frozen(destination)
@@ -133,8 +160,34 @@ def main():
         junit = reports / lane / "pytest.xml"
         if junit.exists():
             redact_junit(junit)
-    # Worker imports use the fork's own environment; no root environment reuse,
-    # platform requests, browser installs, login or collection commands.
+    # 根环境选站装配：B站 article 与四站 worker 只用根包，不调用抓取入口、不访问平台。
+    assembly = reports / "assembly"
+    assembly_source = fresh_source(source, source.parent / "lane-assembly")
+    assembly.mkdir()
+    for name in ("t", "home", "ci_support"):
+        (assembly / name).mkdir()
+    shutil.copyfile(assembly_source / "tests/run_lanes.py", assembly / "ci_support" / "ci_lane_report.py")
+    shutil.copyfile(assembly_source / "tests/support/execution_guard.py",
+                    assembly / "ci_support" / "ci_execution_guard.py")
+    assembly_policy = assembly / "sandbox.sb"
+    assembly_policy.write_text(sandbox_policy(assembly_source, assembly, "installation"))
+    assembly_environment = {
+        "HOME": str(assembly / "home"), "TMPDIR": str(assembly / "t"), "PATH": runtime_path(),
+        "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONPATH": os.pathsep.join([str(assembly_source / "src"), str(assembly / "ci_support")]),
+        "TPC_LANE_COUNTS": str(assembly / "counts.json"),
+        "TPC_EXEC_GUARD_REPORT": str(assembly / "execution-guard.json"),
+    }
+    with (assembly / "imports.log").open("w") as log:
+        result = subprocess.run([
+            "/usr/bin/sandbox-exec", "-f", str(assembly_policy), sys.executable, "-P", "-c", ASSEMBLY_CHECK,
+            str(assembly), str(assembly_source / "tools/MediaCrawler"),
+            ",".join(ROOT_ASSEMBLY_MODULES), ",".join(WORKER_PLATFORM_CODES),
+        ], cwd=assembly_source, env=assembly_environment, stdout=log, stderr=subprocess.STDOUT,
+           check=False, timeout=120)
+    results["assembly"] = {"returncode": result.returncode, "modules": list(ROOT_ASSEMBLY_MODULES),
+                           "worker_platforms": list(WORKER_PLATFORM_CODES)}
+    # fork 离线用例仍用 fork 自身环境（共享辅助的旧桥出口，T14 随目录删除）。
     output = reports / "fork"
     fork_source = fresh_source(source, source.parent / "lane-fork")
     output.mkdir()
@@ -148,8 +201,6 @@ def main():
         "PYTHONNOUSERSITE": "1",
         "PYTHONDONTWRITEBYTECODE": "1", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
     }
-    modules = ["media_platform.bilibili", "media_platform.weibo", "media_platform.douyin",
-               "media_platform.zhihu", "media_platform.xhs"]
     fork = fork_source / "tools/MediaCrawler"
     support = output / "ci_support"
     support.mkdir()
@@ -160,18 +211,7 @@ def main():
     environment["TPC_LANE_COUNTS"] = str(output / "counts.json")
     environment["TPC_EXEC_GUARD_REPORT"] = str(output / "execution-guard.json")
     if not shutil.which("node", path=environment["PATH"]):
-        raise RuntimeError("完整 fork 导入需要 Node PATH")
-    with (output / "imports.log").open("w") as log:
-        result = subprocess.run([
-            "/usr/bin/sandbox-exec", "-f", str(policy), str(args.fork_python.absolute()),
-            "-c", "from ci_execution_guard import install, canary; install(); canary(); "
-            "from ci_lane_report import denied_network_probe; from pathlib import Path; "
-            f"denied_network_probe(Path({str(output)!r}), 'installation'); import importlib; "
-            f"[importlib.import_module(name) for name in {modules!r}]",
-        ], cwd=fork, env=environment, stdout=log, stderr=subprocess.STDOUT, check=False,
-           timeout=120)
-    results["fork"] = {"returncode": result.returncode, "static_modules": modules,
-                       "count": len(modules) if result.returncode == 0 else 0}
+        raise RuntimeError("fork 离线用例需要 Node PATH")
     with (output / "pytest.log").open("w") as log:
         offline = subprocess.run([
             "/usr/bin/sandbox-exec", "-f", str(policy),

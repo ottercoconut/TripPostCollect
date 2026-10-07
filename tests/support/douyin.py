@@ -1,15 +1,16 @@
 """抖音迁入用例的显式装配；生产实现保持无 fork 依赖。"""
 
+import importlib
 from dataclasses import replace
 from types import SimpleNamespace
 
-from trippostcollect.platforms import entry
+from trippostcollect.platforms import _fork_bridge, entry
 from trippostcollect.platforms.douyin import core, parser
 from trippostcollect.platforms.douyin.client import DouYinClient as Client
 
 
-entry._fork_bridge.install()
-config = entry.import_module("config")
+_fork_bridge.install()
+config = importlib.import_module("config")
 
 
 def make_crawler():

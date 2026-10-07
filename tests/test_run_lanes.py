@@ -442,7 +442,10 @@ def test_fresh_sources_never_reuse_data_or_environment(monkeypatch, tmp_path, ro
     pristine.mkdir()
     for directory in ("src", "scripts", "tests", "config", "db", "docs", "tools"):
         (pristine / directory).mkdir()
-    for file in ("pyproject.toml", "uv.lock", "AGENTS.md", "docs/README.md"):
+    # T12：根级构建输入 build_support.py、MANIFEST.in 同为必拷源码。
+    (pristine / ".github/workflows").mkdir(parents=True)
+    for file in ("pyproject.toml", "uv.lock", "AGENTS.md", "docs/README.md", "build_support.py", "MANIFEST.in",
+                 ".github/workflows/macos-test-lanes.yml"):
         (pristine / file).write_text("source")
     if root_readme:
         (pristine / "README.md").write_text("root readme")
@@ -462,7 +465,8 @@ def test_fresh_sources_never_reuse_data_or_environment(monkeypatch, tmp_path, ro
         assert (copied / "README.md").exists() is root_readme
         if root_readme:
             assert (copied / "README.md").read_text() == "root readme"
-        for file in ("pyproject.toml", "uv.lock", "AGENTS.md", "docs/README.md"):
+        for file in ("pyproject.toml", "uv.lock", "AGENTS.md", "docs/README.md", "build_support.py", "MANIFEST.in",
+                     ".github/workflows/macos-test-lanes.yml"):
             assert (copied / file).read_text() == "source"
     assert not (second / "data").exists()
     assert not (second / ".venv").exists()
