@@ -16,18 +16,18 @@ CI 保留不运行测试的 pristine 模板，每个 lane 新建独立源码副�
 根与 fork 的独立锁定环境放在模板外；每个子进程的 PYTHONPATH 绑定自己的源码副本。
 
 根项目 uv.lock 已核实包含 trippostcollect 的 dev extra：pytest、pytest-asyncio、
-pytest-cov、ruff、mypy、pre-commit。完整安装用根锁文件，分别在 macOS Python 3.11、3.12
-独立副本中准备环境，例如先切换到对应临时源码目录再执行：
+pytest-cov、ruff、mypy、pre-commit。项目只支持 Python 3.12；完整安装用根锁文件，
+在 macOS Python 3.12 独立副本中准备环境，例如先切换到对应临时源码目录再执行：
 
 ```bash
 uv sync \
   --locked \
   --extra dev \
-  --python 3.11
+  --python 3.12
 source .venv/bin/activate
 ```
 
-另一份副本使用 3.12。依赖准备阶段允许联网，测试阶段禁止；不运行浏览器安装或平台登录。
+依赖准备阶段允许联网，测试阶段禁止；不运行浏览器安装或平台登录。
 根入口需要 scrapling[fetchers]。正式 worker 使用根解释器，以
 `sys.executable -P -m trippostcollect.platforms.entry` 启动，cwd 为项目根；
 过渡装载模块显式提供尚未迁出的 fork 与 scripts 路径，不依赖 cwd 或注入 PYTHONPATH。
@@ -75,7 +75,7 @@ pytest driver 执行原函数全部断言，父进程检查退出码和临时 XM
 Linux 通过不能替代 macOS 证据。
 
 工作流 [.github/workflows/macos-test-lanes.yml](../.github/workflows/macos-test-lanes.yml)
-使用 GitHub-hosted `macos-26`，Python 3.11/3.12 独立矩阵、`contents: read`，不注入 secrets，
+使用 GitHub-hosted `macos-26`，Python 3.12 单一版本、`contents: read`，不注入 secrets，
 checkout 不保留认证信息。依赖准备阶段联网；根环境使用 `uv sync --locked --extra dev`，
 所选 submodule 提交用自己的锁文件创建独立 fork 测试环境。所有执行使用临时源码副本，
 没有私人源码、账号数据库或浏览器 profile。完整安装 lane 检查根 CLI `--help`，

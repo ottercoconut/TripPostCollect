@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "trippostcollect"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     # 平台适配迁入的采集依赖：精确锁定为原 MediaCrawler worker 环境的版本，保证行为等价
     "aiofiles==23.2.1",
@@ -52,7 +52,7 @@ markers = [
 ]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint.per-file-ignores]
@@ -60,6 +60,6 @@ line-length = 120
 "tests/test_image_persistence.py" = ["E402"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 check_untyped_defs = true
 warn_unused_ignores = true
