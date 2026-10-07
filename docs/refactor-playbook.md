@@ -112,7 +112,7 @@ Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linu
   - runtime 不得导入 application（`application.contracts` 除外）、artifacts、platforms 或任何 scripts 模块；
   - application 不得导入 platforms 的实现；
   - 遇到反向依赖，用注入回调切断，或把纯函数下沉；不得隐式同步全局变量。
-- 过渡期只允许一个显式装载点把 fork 目录与 scripts 加入 `sys.path`（`platforms/_fork_bridge.py`），各站迁完后删除。
+- 过渡期只允许一个显式装载点把 fork 目录与 scripts 加入 `sys.path`（`platforms/_fork_bridge.py`）；T12 起正式入口与五站装配不再调用，模块仅供旧桥与对照测试使用，T14 随旧桥删除。
   不使用 PYTHONPATH，不依赖 cwd。worker 以根解释器 `-P -m trippostcollect.platforms.entry` 启动，cwd 为项目根。
 - 旧桥（`scripts/mediacrawler_export_entrypoint.py`、fork 的 `main.py` 与 `cmd_arg/`）保留到 T14 才删除，期间行为不得改变。
 - 旧位置保留外部同名入口时，采用薄转发或重导出，调用点尽量零改动；不得在旧位置保留第二份权威实现。

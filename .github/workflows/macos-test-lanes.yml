@@ -9,6 +9,10 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
       - 'uv.lock'
+      - 'build_support.py'
+      - 'MANIFEST.in'
+      - 'db/**'
+      - 'docs/formal-crawl-contract.md'
       - 'tools/MediaCrawler'
       - '.github/workflows/macos-test-lanes.yml'
 

@@ -246,6 +246,19 @@ def extract_inputs(files, read, *, definition_sources=None):
     return {"cli": cli, "env": {name: {"files": sorted(paths)} for name, paths in sorted(env.items())}}
 
 
+# 规格 D2 授权删除的父发 env：docs/platform-adapter-specification.md 第 469 行（DISCOVERY_ 五项，
+# “父发但已审计闭包无消费者；T12移除发出”）与第 485 行（XHS_CREATOR_VERIFY_WAIT_SECONDS，“父发无消费，T12删除”）。
+# 只登记这 6 个确切名字，不通配、不从文件读取；清单外的删除仍计入 env_removed。
+AUTHORIZED_ENV_REMOVALS = frozenset({
+    "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID",
+    "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM",
+    "TRIPPOSTCOLLECT_DISCOVERY_KEYWORD",
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE",
+    "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED",
+    "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
+})
+
+
 def build_input_drift(root):
     """CLI 比较参数定义，环境变量只比较名字，允许读取点迁移。"""
     root = Path(root)
@@ -276,7 +289,7 @@ def build_input_drift(root):
     return {
         "cli_changed": changed,
         "env_added": sorted(current["env"].keys() - baseline["env"].keys()),
-        "env_removed": sorted(baseline["env"].keys() - current["env"].keys()),
+        "env_removed": sorted(baseline["env"].keys() - current["env"].keys() - AUTHORIZED_ENV_REMOVALS),
     }
 
 
