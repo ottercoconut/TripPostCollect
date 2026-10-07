@@ -126,15 +126,15 @@ from trippostcollect.application.repair import (
 )
 
 import argparse
-import os
+import os as os  # T09：小红书监督实现迁出后保留旧入口命名空间，既有测试按名 patch 或作旧基线执行环境。
 import random as random
-import re
+import re as re  # 同上。
 import sqlite3
 import subprocess as subprocess  # 保留现有 run_command 测试与诊断的进程接缝。
-from datetime import datetime, timedelta as timedelta, timezone
+from datetime import datetime as datetime, timedelta as timedelta, timezone as timezone  # 同上。
 from email.utils import parsedate_to_datetime as parsedate_to_datetime
 from pathlib import Path
-from typing import Any, MutableMapping
+from typing import Any, MutableMapping as MutableMapping  # 同上。
 
 from playwright.async_api import async_playwright
 
@@ -198,20 +198,7 @@ from trippostcollect.records.topic_relevance import (
     web_post_title as web_post_title,
 )
 from trippostcollect.xhs.leases import (
-    LEASE_DB_ENV,
-    LEASE_ID_ENV,
-    LEASE_OWNER_TOKEN_ENV,
-    ProcessIdentity,
-    SystemProcessInspector,
-)
-from trippostcollect.xhs.runtime import (
-    RUNTIME_STATUS_AUTH_KEY_ENV,
-    RUNTIME_STATUS_SCHEMA_VERSION,
-    RuntimeStatusValidationError,
-    runtime_session_paths,
-    runtime_status_path,
-    sign_runtime_status,
-    write_runtime_status_atomic,
+    SystemProcessInspector as SystemProcessInspector,
 )
 from trippostcollect.scheduler.discovery import (
     load_skipped_candidates,
@@ -368,8 +355,6 @@ from trippostcollect.platforms.bilibili.signer import (
 
 ROOT = PROJECT_ROOT
 DEFAULT_OUTPUT = MEDIACRAWLER_RUNS_OUTPUT
-XHS_RUNTIME_STATUS_AUTH_KEY_RE = re.compile(r"[0-9a-f]{64}\Z")
-XHS_RUNTIME_STATUS_RUN_ID_ENV = "TRIPPOSTCOLLECT_XHS_RUN_ID"
 
 
 
@@ -429,190 +414,15 @@ async def run_bilibili_behavior_session(
     )
 
 
-class XhsSupervisorRuntimeReporter:
-    """Synchronous, single-writer status reporter owned by this supervisor."""
-
-    _PHASE_ORDER = {"starting": 0, "running": 1, "finalizing": 2}
-
-    def __init__(
-        self,
-        *,
-        run_id: str,
-        account_id: str,
-        lease_id: str,
-        status_path: Path,
-        auth_key: bytes,
-        writer_identity: ProcessIdentity,
-        inspector: SystemProcessInspector,
-    ) -> None:
-        self.run_id = run_id
-        self.account_id = account_id
-        self.lease_id = lease_id
-        self.status_path = status_path
-        self._auth_key = auth_key
-        self.writer_identity = writer_identity
-        self._inspector = inspector
-        self._phase = "starting"
-        self._sequence = 0
-        self._last_written_sequence = 0
-        self._write_failures = 0
-        self._last_write_error = ""
-
-    @property
-    def phase(self) -> str:
-        return self._phase
-
-    def _writer_identity_is_current(self) -> bool:
-        return self._inspector.identity(self.writer_identity.pid) == self.writer_identity
-
-    def checkpoint(
-        self,
-        *,
-        phase: str | None = None,
-        network_state: str = "unknown",
-        network_reason: str = "",
-    ) -> bool:
-        requested_phase = phase or self._phase
-        if requested_phase not in self._PHASE_ORDER:
-            raise ValueError(f"unsupported runtime status phase: {requested_phase}")
-        if self._PHASE_ORDER[requested_phase] < self._PHASE_ORDER[self._phase]:
-            raise ValueError("runtime status phase cannot move backwards")
-        if not self._writer_identity_is_current():
-            self._write_failures += 1
-            self._last_write_error = "writer_identity_changed"
-            raise XhsRuntimeSupervisionError(
-                "xhs_runtime_status_writer_identity_changed"
-            )
-        self._phase = requested_phase
-        self._sequence += 1
-        identity = self.writer_identity
-        unsigned = {
-            "schema_version": RUNTIME_STATUS_SCHEMA_VERSION,
-            "run_id": self.run_id,
-            "account_id": self.account_id,
-            "lease_id": self.lease_id,
-            "writer_role": "mediacrawler_supervisor",
-            "writer_host_id": identity.host_id,
-            "writer_boot_id": identity.boot_id,
-            "writer_pid": identity.pid,
-            "writer_process_started_at": identity.process_started_at,
-            "writer_process_start_token": identity.process_start_token,
-            "writer_pgid": identity.pgid,
-            "sequence": self._sequence,
-            "heartbeat_at": datetime.now(timezone.utc).isoformat(),
-            "phase": self._phase,
-            "network_state": network_state,
-            "network_reason": network_reason,
-        }
-        try:
-            signed = sign_runtime_status(unsigned, auth_key=self._auth_key)
-            write_runtime_status_atomic(
-                self.status_path,
-                signed,
-                auth_key=self._auth_key,
-            )
-        except (OSError, RuntimeStatusValidationError) as exc:
-            self._write_failures += 1
-            self._last_write_error = "runtime_status_write_failed"
-            raise XhsRuntimeSupervisionError(
-                "xhs_runtime_status_write_failed"
-            ) from exc
-        self._last_written_sequence = self._sequence
-        self._last_write_error = ""
-        return True
-
-    def enter_finalizing(self) -> bool:
-        return self.checkpoint(phase="finalizing")
-
-    def snapshot(self) -> dict[str, Any]:
-        return {
-            "enabled": True,
-            "status_path": str(self.status_path),
-            "phase": self._phase,
-            "attempted_sequence": self._sequence,
-            "last_written_sequence": self._last_written_sequence,
-            "write_failures": self._write_failures,
-            "last_write_error": self._last_write_error,
-        }
+# T09：child 侧认证运行状态 reporter 迁入 trippostcollect.xhs.supervision；此处保留同名重导出。
+from trippostcollect.xhs.supervision import (  # noqa: E402
+    XHS_RUNTIME_STATUS_AUTH_KEY_RE as XHS_RUNTIME_STATUS_AUTH_KEY_RE,
+    XHS_RUNTIME_STATUS_RUN_ID_ENV as XHS_RUNTIME_STATUS_RUN_ID_ENV,
+    XhsSupervisorRuntimeReporter as XhsSupervisorRuntimeReporter,
+    xhs_supervisor_runtime_reporter_from_context as xhs_supervisor_runtime_reporter_from_context,
+)
 
 
-def xhs_supervisor_runtime_reporter_from_context(
-    args: argparse.Namespace,
-    *,
-    environ: MutableMapping[str, str] | None = None,
-    inspector: SystemProcessInspector | None = None,
-) -> XhsSupervisorRuntimeReporter | None:
-    """Consume the one-run auth key and construct the exact child reporter."""
-
-    source = os.environ if environ is None else environ
-    raw_auth_key = source.pop(RUNTIME_STATUS_AUTH_KEY_ENV, "")
-    lease_values = {
-        LEASE_DB_ENV: str(source.get(LEASE_DB_ENV) or ""),
-        LEASE_ID_ENV: str(source.get(LEASE_ID_ENV) or ""),
-        LEASE_OWNER_TOKEN_ENV: str(source.get(LEASE_OWNER_TOKEN_ENV) or ""),
-        XHS_RUNTIME_STATUS_RUN_ID_ENV: str(
-            source.get(XHS_RUNTIME_STATUS_RUN_ID_ENV) or ""
-        ),
-    }
-    runtime_markers = [raw_auth_key, *lease_values.values()]
-    if not any(runtime_markers):
-        return None
-    missing = [
-        key
-        for key, value in {
-            RUNTIME_STATUS_AUTH_KEY_ENV: raw_auth_key,
-            **lease_values,
-        }.items()
-        if not value
-    ]
-    if missing:
-        raise RuntimeStatusValidationError(
-            f"incomplete XHS runtime reporter environment: missing={sorted(missing)}"
-        )
-    if not XHS_RUNTIME_STATUS_AUTH_KEY_RE.fullmatch(raw_auth_key):
-        raise RuntimeStatusValidationError(
-            "XHS runtime status auth key must be exactly 64 lowercase hexadecimal characters"
-        )
-    account_id = str(getattr(args, "xhs_account_id", "") or "")
-    profile_value = str(getattr(args, "xhs_profile_dir", "") or "")
-    if not account_id or not profile_value:
-        raise RuntimeStatusValidationError(
-            "XHS runtime reporter requires account and run-scoped profile arguments"
-        )
-    profile = Path(profile_value).expanduser()
-    if profile.name != "profile" or profile.is_symlink():
-        raise RuntimeStatusValidationError(
-            "XHS runtime reporter requires the exact non-symlink run profile"
-        )
-    profile = profile.resolve()
-    run_id = profile.parent.name
-    paths = runtime_session_paths(run_id)
-    if (
-        profile != paths["profile"].expanduser().resolve()
-        or not paths["root"].is_dir()
-        or paths["root"].is_symlink()
-        or not profile.is_dir()
-    ):
-        raise RuntimeStatusValidationError(
-            "XHS runtime reporter profile does not match its exact runtime session"
-        )
-    environment_run_id = lease_values[XHS_RUNTIME_STATUS_RUN_ID_ENV]
-    if environment_run_id != run_id:
-        raise RuntimeStatusValidationError(
-            "XHS runtime reporter run id does not match its exact runtime session"
-        )
-    process_inspector = inspector or SystemProcessInspector()
-    reporter = XhsSupervisorRuntimeReporter(
-        run_id=run_id,
-        account_id=account_id,
-        lease_id=lease_values[LEASE_ID_ENV],
-        status_path=runtime_status_path(run_id),
-        auth_key=bytes.fromhex(raw_auth_key),
-        writer_identity=process_inspector.current_identity(),
-        inspector=process_inspector,
-    )
-    reporter.checkpoint()
-    return reporter
 
 
 

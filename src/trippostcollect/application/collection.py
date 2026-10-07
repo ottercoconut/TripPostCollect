@@ -89,7 +89,7 @@ import sys
 import time
 
 if TYPE_CHECKING:
-    from scripts.mediacrawler_crawl import XhsSupervisorRuntimeReporter
+    from trippostcollect.xhs.supervision import XhsSupervisorRuntimeReporter
     from trippostcollect.artifacts.image_materialization import MaterializedImage
 
 import json

@@ -356,3 +356,84 @@ class ZhihuPorts:
     current_timestamp: Callable[[], int]
     content_sink_factory: Callable[[], ContentSink]
     image_stager_factory: Callable[[], ImageStager]
+
+
+@dataclass(frozen=True)
+class XhsSettings:
+    """worker 解析完成后、crawler 构造时一次性冻结的小红书配置。"""
+
+    CDP_HEADLESS: bool
+    CRAWLER_TYPE: str
+    ENABLE_CDP_MODE: bool
+    ENABLE_GET_MEIDAS: bool
+    HEADLESS: bool
+    KEYWORDS: str
+    LOGIN_TYPE: str
+    MAX_CONCURRENCY_NUM: int
+    SAVE_DATA_OPTION: str
+    SORT_TYPE: str
+    START_PAGE: int
+    XHS_INTERNATIONAL: bool
+    XHS_SPECIFIED_NOTE_URL_LIST: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class XhsReaders:
+    """原 `_env_float`、`env_int` 与登录契约读取点；只在原操作起点调用。"""
+
+    validate_login_contract: Callable[[], None]
+    navigation_deadline_seconds: Callable[[], float]
+    search_shell_timeout_seconds: Callable[[], float]
+    recovery_shell_timeout_seconds: Callable[[], float]
+    initial_settle_seconds: Callable[[], float]
+    initial_shell_timeout_seconds: Callable[[], float]
+    network_wait_seconds: Callable[[], float]
+    network_retry_min_seconds: Callable[[], float]
+    network_retry_max_seconds: Callable[[], float]
+    creator_verify_poll_seconds: Callable[[], float]
+    refresh_max_pages: Callable[[], int]
+
+
+@dataclass(frozen=True)
+class XhsBehaviorPorts:
+    """小红书行为桥的启用判定与证据写出；平台层不导入应用或产物实现。"""
+
+    enabled: Callable[[], bool]
+    write_evidence: Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class XhsClientPorts:
+    """原 HTTPX 短会话工厂（每次调用时读取 TLS 开关）与 API 验证桥。"""
+
+    make_async_client: Callable[..., Any]
+    behavior: XhsBehaviorPorts
+    xhs_international: bool
+
+
+@dataclass(frozen=True)
+class XhsLoginPorts:
+    """二维码提取仍由运行时拥有，HTTPX 工厂与 UA 在装配时绑定。"""
+
+    find_login_qrcode: Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class XhsPorts:
+    """小红书编排借用的 IO 能力；装配不执行 IO，事件出口经此注入。"""
+
+    async_playwright: Callable[..., Any]
+    browser_manager_factory: Callable[..., Any]
+    install_project_runtime_hints: Callable[..., Any]
+    run_required_human_behavior: Callable[..., Any]
+    accumulator_factory: Callable[..., Any]
+    append_execution_event: Callable[[str, dict[str, Any]], None]
+    client: XhsClientPorts
+    login: XhsLoginPorts
+    behavior: XhsBehaviorPorts
+    record_platform_security_limit: Callable[..., Any]
+    current_timestamp: Callable[[], int]
+    content_sink_factory: Callable[[str], ContentSink]
+    image_stager_factory: Callable[[], ImageStager]
+    write_repair_report: Callable[[dict[str, Any]], None]
+    repair: bool

@@ -5,6 +5,7 @@ import json
 import signal
 import subprocess
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
@@ -15,12 +16,17 @@ from importlib import import_module
 
 from support.browser_settings import BROWSER_SETTINGS
 from trippostcollect.platforms import _fork_bridge
+from trippostcollect.platforms.entry import xhs_dependencies
+from trippostcollect.platforms.xhs.core import XiaoHongShuCrawler as RootXiaoHongShuCrawler
 from trippostcollect.runtime.browser_launcher import BrowserLauncher
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError, CDPBrowserManager
 
 
 _fork_bridge.install()
-XiaoHongShuCrawler = import_module("media_platform.xhs.core").XiaoHongShuCrawler
+# T09：小红书 crawler 迁入根包；仍按 fork 运行配置装配，与旧桥构造的依赖一致。
+XiaoHongShuCrawler = RootXiaoHongShuCrawler.bind(
+    lambda: xhs_dependencies(import_module("config"), repair=False)
+)
 
 
 class FakeProcess:
@@ -726,14 +732,7 @@ async def test_start_latches_driver_disconnect_before_later_cleanup(
             browser.connected = False
             browser.emit("disconnected")
 
-    monkeypatch.setattr(
-        "media_platform.xhs.core.async_playwright",
-        DriverLifecycle,
-    )
-    monkeypatch.setattr(
-        "media_platform.xhs.core.config.ENABLE_IP_PROXY",
-        False,
-    )
+    crawler.ports = replace(crawler.ports, async_playwright=DriverLifecycle)
 
     await crawler.start()
 

@@ -192,8 +192,14 @@ def test_fork_node_count_matches_ci_expectation() -> None:
         "tests/platforms/zhihu/test_zhihu_image_download.py",
         "tests/platforms/zhihu/test_zhihu_search_detail.py",
     })
+    moved_files.update(f"tests/platforms/xhs/test_xhs_{name}.py" for name in (
+        "core_access_error", "creator_enrichment", "discovery_memory", "image_download",
+        "login_contract", "manual_wait_budget", "media_policy", "midrun_login_recovery",
+        "network_recovery", "popup_guard", "qrcode_login", "qrcode_preview", "raw_response_errors",
+        "shutdown_error_priority", "store_provenance",
+    ))
     moved = [node for node in data["fork"]["nodes"] if node["target_file"] in moved_files]
-    assert len(moved) == 133
+    assert len(moved) == 383
     for node in moved:
         assert not (ROOT / node["source_file"]).exists()
         assert (ROOT / node["target_file"]).is_file()

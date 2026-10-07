@@ -32,6 +32,7 @@ from trippostcollect.runtime import worker
 
 _weibo_post_repair = False
 _douyin_browser_detail_fallback = False
+_xhs_repair = False
 
 
 def configure(argv) -> WorkerInputs:
@@ -50,21 +51,20 @@ def configure(argv) -> WorkerInputs:
 
 
 def install_hooks() -> None:
-    global _weibo_post_repair, _douyin_browser_detail_fallback
+    global _weibo_post_repair, _douyin_browser_detail_fallback, _xhs_repair
 
-    from mediacrawler_export_entrypoint import (
-        install_xhs_repair_resilience,
-    )
     from trippostcollect.application.worker_inputs import (
         douyin_browser_detail_fallback_reader,
         weibo_input_readers,
+        xhs_repair_reader,
     )
 
     from trippostcollect.application.events import configure_batch_checkpoint
     from trippostcollect.xhs.batch_checkpoint import ENABLED_ENV, publish_batch
 
     configure_batch_checkpoint(publish_batch if os.environ.get(ENABLED_ENV) == "1" else None)
-    install_xhs_repair_resilience()
+    # 原旧桥 hook 在这里读取小红书修复开关；根 crawler 以显式分支选用修复编排。
+    _xhs_repair = xhs_repair_reader()()
     # 原 hook 在这里读取修复开关；新客户端只接收该布尔值，不修改 fork 类。
     _weibo_post_repair = weibo_input_readers().post_repair()
     _douyin_browser_detail_fallback = douyin_browser_detail_fallback_reader()()
@@ -169,8 +169,9 @@ def load_crawler(code: str) -> type:
             lambda: _zhihu_dependencies(import_module("config")),
         )
     if code == "xhs":
-        from media_platform.xhs import XiaoHongShuCrawler
-        return XiaoHongShuCrawler
+        worker.init_loging_config()
+        from trippostcollect.platforms.xhs.core import XiaoHongShuCrawler
+        return XiaoHongShuCrawler.bind(lambda: xhs_dependencies(import_module("config")))
     raise ValueError(f"不支持的 worker 平台：{code}")
 
 
@@ -379,6 +380,126 @@ def _zhihu_dependencies(config):
             ),
         ),
     )
+
+def xhs_dependencies(config, *, repair=None):
+    """T09：仅选中小红书时装配；配置在构造时冻结，env 与 IO 仍在原操作时点读取。"""
+    from dataclasses import fields
+    from functools import partial
+    import logging
+    from pathlib import Path
+
+    from playwright.async_api import async_playwright
+    from trippostcollect.application.candidates import AdaptiveAccumulator
+    from trippostcollect.application.contracts import (
+        XhsBehaviorPorts, XhsClientPorts, XhsLoginPorts, XhsPorts, XhsSettings,
+    )
+    from trippostcollect.application.events import append_worker_execution_event
+    from trippostcollect.application.worker_inputs import _enabled, xhs_readers
+    from trippostcollect.artifacts.evidence import _write_xhs_repair_report, write_evidence
+    from trippostcollect.artifacts.image_staging import PostImageStager
+    from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
+    from trippostcollect.core.paths import MEDIACRAWLER_DIR
+    from trippostcollect.db.discovery_read import existing_platform_identities
+    from trippostcollect.platforms.xhs import behavior as xhs_behavior
+    from trippostcollect.platforms.xhs.behavior import wait_for_xhs_search_ready
+    from trippostcollect.platforms.xhs.parser import xhs_source_asset_key
+    from trippostcollect.runtime import behavior, helpers, http, login_helpers
+    from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
+
+    values = {field.name: getattr(config, field.name) for field in fields(XhsSettings)}
+    values["XHS_SPECIFIED_NOTE_URL_LIST"] = tuple(values["XHS_SPECIFIED_NOTE_URL_LIST"])
+    settings = XhsSettings(**values)
+    browser_settings = CDPBrowserSettings(**{
+        field.name: getattr(config, field.name) for field in fields(CDPBrowserSettings)
+    })
+    save_data_path = config.SAVE_DATA_PATH
+    logger = logging.getLogger("MediaCrawler")
+
+    def make_async_client(**kwargs):
+        # TLS 开关原本在每次 HTTPX 工厂调用时读取；共享输入暂不提前冻结。
+        return http.make_async_client(disable_ssl_verify=getattr(config, "DISABLE_SSL_VERIFY", False), **kwargs)
+
+    def accumulator_factory():
+        accumulator = AdaptiveAccumulator.for_platform(
+            "xhs",
+            existing_identities=existing_platform_identities(
+                "xhs",
+                db_path=os.environ.get("TRIPPOSTCOLLECT_DB_PATH", ""),
+                xhs_target_key=os.environ.get("TRIPPOSTCOLLECT_XHS_DISCOVERY_TARGET_KEY", ""),
+                xhs_account_id=os.environ.get("TRIPPOSTCOLLECT_XHS_ACCOUNT_ID", ""),
+                xhs_fingerprint=os.environ.get("TRIPPOSTCOLLECT_XHS_DISCOVERY_QUERY_FINGERPRINT", ""),
+                job_id=os.environ.get("TRIPPOSTCOLLECT_DISCOVERY_JOB_ID", ""),
+                fingerprint=os.environ.get("TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT", ""),
+                resume_identities_path=os.environ.get("TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH", ""),
+            ),
+        )
+        accumulator.event_sink = append_worker_execution_event
+        return accumulator
+
+    async def install_project_runtime_hints(context):
+        if not _enabled():
+            return
+        scripts_dir = Path(os.environ.get("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", "")).expanduser()
+        if not scripts_dir.is_dir():
+            raise RuntimeError("required TripPostCollect runtime hint configuration is incomplete")
+        await behavior.install_project_runtime_hints(context)
+
+    async def run_behavior(page, platform_key):
+        if not _enabled():
+            return {"status": "disabled", "platform": platform_key}
+        scripts_dir = Path(os.environ.get("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", "")).expanduser()
+        evidence_path = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()
+        profile_name = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_PROFILE", "social_high_risk").strip()
+        if not scripts_dir.is_dir() or not evidence_path:
+            raise RuntimeError("required TripPostCollect human behavior configuration is incomplete")
+        return await behavior.run_required_human_behavior(
+            page, platform_key=platform_key, xhs_search_ready=wait_for_xhs_search_ready,
+            write_evidence=write_evidence, evidence_path=evidence_path, profile_name=profile_name,
+        )
+
+    behavior_ports = XhsBehaviorPorts(enabled=_enabled, write_evidence=write_evidence)
+    return {
+        "settings": settings,
+        "inputs": xhs_readers(config),
+        "ports": XhsPorts(
+            async_playwright=async_playwright,
+            browser_manager_factory=partial(
+                CDPBrowserManager, browser_settings, project_browser_args=behavior.project_browser_args,
+            ),
+            install_project_runtime_hints=install_project_runtime_hints,
+            run_required_human_behavior=run_behavior,
+            accumulator_factory=accumulator_factory,
+            append_execution_event=append_worker_execution_event,
+            client=XhsClientPorts(
+                make_async_client=make_async_client, behavior=behavior_ports,
+                xhs_international=settings.XHS_INTERNATIONAL,
+            ),
+            login=XhsLoginPorts(find_login_qrcode=partial(
+                login_helpers.find_login_qrcode, make_async_client=make_async_client,
+                get_user_agent=helpers.get_user_agent,
+            )),
+            behavior=behavior_ports,
+            record_platform_security_limit=partial(
+                xhs_behavior.record_platform_security_limit, ports=behavior_ports,
+            ),
+            current_timestamp=helpers.get_current_timestamp,
+            content_sink_factory=lambda crawler_type: JsonlContentStore(AsyncFileWriter(
+                platform="xhs", crawler_type=crawler_type, save_data_path=lambda: save_data_path,
+            )),
+            image_stager_factory=lambda: PostImageStager(
+                save_data_root=Path(save_data_path) if save_data_path else MEDIACRAWLER_DIR / "data",
+                platform="xhs", source_key="image_list",
+                source_asset_key=lambda item: xhs_source_asset_key(item["url"]),
+                log_saved=lambda count, note_id: logger.info(
+                    f"[XiaoHongShuImage.store_post_images] saved {count} "
+                    f"body images for note {note_id}"
+                ),
+            ),
+            write_repair_report=_write_xhs_repair_report,
+            repair=_xhs_repair if repair is None else repair,
+        ),
+    }
+
 
 def main(argv=None) -> int:
     inputs = configure(argv)

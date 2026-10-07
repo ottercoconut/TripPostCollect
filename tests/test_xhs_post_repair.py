@@ -5,16 +5,20 @@ from __future__ import annotations
 from trippostcollect.application import reporting as t11_reporting
 
 import json
+from dataclasses import asdict
 import sqlite3
 import sys
-import types
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from support.browser_settings import BROWSER_SETTINGS
 
 from trippostcollect.db.bootstrap import bootstrap_database
+from trippostcollect.platforms import entry as platform_entry
+from trippostcollect.platforms.xhs import repair as xhs_repair
+from trippostcollect.platforms.xhs.core import XiaoHongShuCrawler as RootXiaoHongShuCrawler
 from trippostcollect.xhs import accounts
 
 
@@ -753,7 +757,8 @@ async def test_xhs_repair_continues_same_and_later_batches_after_candidate_failu
     stored: list[str] = []
     requested: list[str] = []
 
-    class FakeCrawler:
+    # T09：修复编排迁入根 crawler；旧 hook 只锁存开关，经 entry 装配进入 crawler 端口。
+    class FakeCrawler(RootXiaoHongShuCrawler):
         async def get_note_detail_async_task(self, *, note_id, **_kwargs):
             requested.append(note_id)
             if note_id == "note-1":
@@ -773,45 +778,38 @@ async def test_xhs_repair_continues_same_and_later_batches_after_candidate_failu
         async def get_notice_media(self, _note_detail):
             return None
 
-        async def batch_get_note_comments(self, _note_ids, _tokens):
-            return None
-
         @staticmethod
         def is_video_note(_note_detail):
             return False
 
-    async def update_xhs_note(note_detail):
-        stored.append(note_detail["note_id"])
+        async def update_xhs_note(self, note_detail):
+            stored.append(note_detail["note_id"])
 
-    fake_core = types.ModuleType("media_platform.xhs.core")
-    fake_core.XiaoHongShuCrawler = FakeCrawler
-    fake_core.config = SimpleNamespace(
+    config = SimpleNamespace(
+        **asdict(BROWSER_SETTINGS),
+        CDP_HEADLESS=False, CRAWLER_TYPE="detail", ENABLE_CDP_MODE=True, ENABLE_GET_MEIDAS=False,
+        HEADLESS=False, KEYWORDS="", LOGIN_TYPE="qrcode", COOKIES="", SAVE_DATA_OPTION="jsonl", SAVE_DATA_PATH="",
+        SORT_TYPE="", START_PAGE=1, XHS_INTERNATIONAL=False,
         MAX_CONCURRENCY_NUM=1,
         XHS_SPECIFIED_NOTE_URL_LIST=["note-1", "note-2", "note-3"],
     )
-    fake_core.parse_note_info_from_note_url = lambda value: SimpleNamespace(
-        note_id=value,
-        xsec_source="pc_search",
-        xsec_token=f"token-{value}",
+    monkeypatch.setattr(
+        xhs_repair,
+        "parse_note_info_from_note_url",
+        lambda value: SimpleNamespace(
+            note_id=value,
+            xsec_source="pc_search",
+            xsec_token=f"token-{value}",
+        ),
     )
-    fake_core.utils = SimpleNamespace(
-        logger=SimpleNamespace(info=lambda *_args: None, warning=lambda *_args: None)
-    )
-    fake_core.xhs_store = SimpleNamespace(update_xhs_note=update_xhs_note)
-    fake_xhs = types.ModuleType("media_platform.xhs")
-    fake_xhs.core = fake_core
-    fake_platform = types.ModuleType("media_platform")
-    fake_platform.xhs = fake_xhs
-    monkeypatch.setitem(sys.modules, "media_platform", fake_platform)
-    monkeypatch.setitem(sys.modules, "media_platform.xhs", fake_xhs)
-    monkeypatch.setitem(sys.modules, "media_platform.xhs.core", fake_core)
+    monkeypatch.setattr(platform_entry, "_xhs_repair", False)
     report_path = tmp_path / "repair_report.json"
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR", "1")
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_BATCH_SIZE", "2")
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH", str(report_path))
 
     entrypoint.install_xhs_repair_resilience()
-    await FakeCrawler().get_specified_notes()
+    await FakeCrawler(**platform_entry.xhs_dependencies(config)).get_specified_notes()
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert requested == ["note-1", "note-2", "note-3"]

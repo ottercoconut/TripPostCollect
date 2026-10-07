@@ -31,8 +31,8 @@ def test_fork_worker_paths_and_pytest_boundary(tmp_path):
     assert command[command.index("-c") + 1] == str(fork / "pyproject.toml")
     assert command[command.index("--confcutdir") + 1] == str(fork)
     assert command[command.index("--rootdir") + 1] == str(fork)
-    assert len(set(run_matrix.FORK_OFFLINE_TESTS)) == 19
-    assert run_matrix.FORK_EXPECTED_TESTS == 284
+    assert len(set(run_matrix.FORK_OFFLINE_TESTS)) == 4
+    assert run_matrix.FORK_EXPECTED_TESTS == 34
     assert "support.execution_guard" not in command
     assert "ci_execution_guard" in command
     root = Path(__file__).resolve().parents[1]
