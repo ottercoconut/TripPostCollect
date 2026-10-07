@@ -182,6 +182,10 @@ def test_a_migrated_ast(row):
 
 def test_a_other_top_level_definitions_unchanged():
     names = {r["qualname"].split(".")[0] for r in ROWS}
+    # T09 按台账迁出的定义（child reporter 等）不再留在脚本，排除台账 card=="T09" 的行。
+    ledger = json.loads((ROOT / "docs/adapter-ledger/symbols.json").read_text())["rows"]
+    names |= {r["qualname"].split(".")[0] for r in ledger
+              if r["card"] == "T09" and r["file"] == "scripts/mediacrawler_crawl.py"}
     old = ast.parse((FIXTURES / "mediacrawler_crawl.py.txt").read_text())
     new = (ROOT / "scripts/mediacrawler_crawl.py").read_text()
     assert len(ROWS) == 46 and set(AST_RULES) == {r["qualname"] for r in ROWS}

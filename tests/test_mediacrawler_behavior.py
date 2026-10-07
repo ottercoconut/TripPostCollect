@@ -23,6 +23,7 @@ if str(SCRIPTS) not in sys.path:
 
 mediacrawler_behavior = import_module("mediacrawler_behavior")
 mediacrawler_crawl = import_module("mediacrawler_crawl")
+xhs_behavior = import_module("trippostcollect.platforms.xhs.behavior")
 runtime_behavior = import_module("trippostcollect.runtime.behavior")
 human_flow = import_module("trippostcollect.runtime.human_flow")
 
@@ -289,8 +290,8 @@ class FakePage:
 async def test_xhs_bare_visible_login_control_blocks_search_readiness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.001)
-    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(xhs_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(xhs_behavior, "XHS_CONTINUITY_VERIFY_WAIT_SECONDS", 0.01)
     page = FakePage(
         "创作中心 发现 通知 消息 登录 热门内容",
         card_count=90,
@@ -373,8 +374,8 @@ async def test_xhs_search_verification_wait_keeps_page_open_until_cleared(
     async def changing_page_state(page):
         return next(states)
 
-    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", changing_page_state)
-    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(xhs_behavior, "visible_page_state", changing_page_state)
+    monkeypatch.setattr(xhs_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.001)
     page = FakePage(card_count=1, profile_count=1)
     events: list[dict] = []
 
@@ -421,8 +422,8 @@ async def test_xhs_search_login_wait_stops_on_sms_terminal_without_reopening_pag
     async def no_sleep(seconds):
         return None
 
-    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", changing_page_state)
-    monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(xhs_behavior, "visible_page_state", changing_page_state)
+    monkeypatch.setattr(xhs_behavior.asyncio, "sleep", no_sleep)
     page = FakePage(url="https://www.xiaohongshu.com/login")
 
     readiness = await mediacrawler_behavior.wait_for_xhs_search_ready(page, [])
@@ -441,8 +442,8 @@ async def test_xhs_search_login_wait_stops_on_sms_terminal_without_reopening_pag
 @pytest.mark.asyncio
 async def test_visible_challenge_fails_behavior_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(runtime_behavior, "dwell_on_list", fake_dwell_on_list)
-    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.001)
-    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_WAIT_SECONDS", 0.1)
+    monkeypatch.setattr(xhs_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(xhs_behavior, "XHS_CONTINUITY_VERIFY_WAIT_SECONDS", 0.1)
     evidence_path = tmp_path / "behavior.json"
 
     with pytest.raises(RuntimeError, match="captcha_or_verify_detected"):
@@ -685,7 +686,7 @@ async def test_xhs_dwell_stops_when_rate_limit_appears(
         log.append({"event": "pause", "reason": "list_dwell_initial", "seconds": 60.0})
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", changing_page_state)
+    monkeypatch.setattr(xhs_behavior, "visible_page_state", changing_page_state)
     monkeypatch.setattr(runtime_behavior, "visible_page_state", changing_page_state)
     monkeypatch.setattr(runtime_behavior, "dwell_on_list", blocking_dwell)
     monkeypatch.setattr(runtime_behavior, "XHS_VISIBLE_CHECK_INTERVAL_SECONDS", 0.001)
@@ -784,7 +785,7 @@ async def test_xhs_guarded_request_pause_is_persisted(tmp_path: Path, monkeypatc
     evidence_path = tmp_path / "behavior.json"
     evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
     monkeypatch.setattr(runtime_behavior, "REQUEST_RANDOM", FixedRandom())
-    monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(xhs_behavior.asyncio, "sleep", fake_sleep)
 
     event = await mediacrawler_behavior.run_guarded_request_pause(
         evidence_path=evidence_path,
@@ -813,8 +814,8 @@ async def test_xhs_continuity_behavior_is_persisted(
 
     evidence_path = tmp_path / "behavior.json"
     evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
-    monkeypatch.setattr(mediacrawler_behavior, "human_pause", fake_pause)
-    monkeypatch.setattr(mediacrawler_behavior, "random_mouse_moves", fake_mouse_moves)
+    monkeypatch.setattr(xhs_behavior, "human_pause", fake_pause)
+    monkeypatch.setattr(xhs_behavior, "random_mouse_moves", fake_mouse_moves)
 
     continuity = await mediacrawler_behavior.run_xhs_continuity_behavior(
         FakePage(),
@@ -863,10 +864,10 @@ async def test_xhs_continuity_waits_for_operator_login_and_continues(
     page = FakePage()
     evidence_path = tmp_path / "behavior.json"
     evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
-    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", changing_page_state)
-    monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", no_sleep)
-    monkeypatch.setattr(mediacrawler_behavior, "human_pause", fake_pause)
-    monkeypatch.setattr(mediacrawler_behavior, "random_mouse_moves", fake_mouse_moves)
+    monkeypatch.setattr(xhs_behavior, "visible_page_state", changing_page_state)
+    monkeypatch.setattr(xhs_behavior.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(xhs_behavior, "human_pause", fake_pause)
+    monkeypatch.setattr(xhs_behavior, "random_mouse_moves", fake_mouse_moves)
 
     continuity = await mediacrawler_behavior.run_xhs_continuity_behavior(
         page,
@@ -918,8 +919,8 @@ async def test_xhs_manual_login_stops_on_sms_terminal_without_page_side_effects(
     page = FakePage(url="https://www.xiaohongshu.com/login")
     evidence_path = tmp_path / "behavior.json"
     evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
-    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", changing_page_state)
-    monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(xhs_behavior, "visible_page_state", changing_page_state)
+    monkeypatch.setattr(xhs_behavior.asyncio, "sleep", no_sleep)
 
     with pytest.raises(RuntimeError, match="sms_verification_terminal_detected"):
         await mediacrawler_behavior.run_xhs_continuity_behavior(
@@ -948,8 +949,8 @@ async def test_xhs_continuity_verification_timeout_is_persisted(
 ) -> None:
     evidence_path = tmp_path / "behavior.json"
     evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
-    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_WAIT_SECONDS", 0.1)
-    monkeypatch.setattr(mediacrawler_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(xhs_behavior, "XHS_CONTINUITY_VERIFY_WAIT_SECONDS", 0.1)
+    monkeypatch.setattr(xhs_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.01)
 
     with pytest.raises(RuntimeError, match="xhs_continuity_verification_timeout"):
         await mediacrawler_behavior.run_xhs_continuity_behavior(
@@ -1007,8 +1008,8 @@ async def test_xhs_api_captcha_opens_operator_page_and_resumes(
 
     evidence_path = tmp_path / "behavior.json"
     evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
-    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", completed_verification)
-    monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(xhs_behavior, "visible_page_state", completed_verification)
+    monkeypatch.setattr(xhs_behavior.asyncio, "sleep", no_sleep)
 
     event = await mediacrawler_behavior.run_xhs_api_captcha_verification(
         page,
@@ -1052,8 +1053,8 @@ async def test_xhs_api_captcha_does_not_complete_on_blank_redirect(
 
     evidence_path = tmp_path / "behavior.json"
     evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
-    monkeypatch.setattr(mediacrawler_behavior, "visible_page_state", redirecting_page_state)
-    monkeypatch.setattr(mediacrawler_behavior.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(xhs_behavior, "visible_page_state", redirecting_page_state)
+    monkeypatch.setattr(xhs_behavior.asyncio, "sleep", no_sleep)
 
     event = await mediacrawler_behavior.run_xhs_api_captcha_verification(
         page,
@@ -1081,8 +1082,8 @@ async def test_xhs_requested_comment_scroll_is_recorded_without_changing_base_ga
 
     evidence_path = tmp_path / "behavior.json"
     evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
-    monkeypatch.setattr(mediacrawler_behavior, "human_pause", fake_pause)
-    monkeypatch.setattr(mediacrawler_behavior, "_run_xhs_comment_scroll", fake_comment_scroll)
+    monkeypatch.setattr(xhs_behavior, "human_pause", fake_pause)
+    monkeypatch.setattr(xhs_behavior, "_run_xhs_comment_scroll", fake_comment_scroll)
 
     interaction = await mediacrawler_behavior.run_xhs_post_interaction(
         FakePage(),
@@ -1138,7 +1139,7 @@ async def test_xhs_like_does_not_click_an_already_liked_control(monkeypatch: pyt
         return None
 
     page = LikePage()
-    monkeypatch.setattr(mediacrawler_behavior, "random_mouse_moves", no_mouse_moves)
+    monkeypatch.setattr(xhs_behavior, "random_mouse_moves", no_mouse_moves)
 
     result = await mediacrawler_behavior._run_xhs_like_once(page, object(), [])
 
@@ -1197,8 +1198,8 @@ async def test_xhs_like_clicks_once_and_verifies_state_change(monkeypatch: pytes
         return None
 
     page = LikePage()
-    monkeypatch.setattr(mediacrawler_behavior, "random_mouse_moves", no_mouse_moves)
-    monkeypatch.setattr(mediacrawler_behavior, "human_pause", no_pause)
+    monkeypatch.setattr(xhs_behavior, "random_mouse_moves", no_mouse_moves)
+    monkeypatch.setattr(xhs_behavior, "human_pause", no_pause)
 
     result = await mediacrawler_behavior._run_xhs_like_once(page, object(), [])
 

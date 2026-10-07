@@ -32,6 +32,7 @@ process = import_module("trippostcollect.runtime.process")
 FrozenExecutionState = import_module("execution_state").FrozenExecutionState
 runtime = import_module("trippostcollect.xhs.runtime")
 ProcessIdentity = import_module("trippostcollect.xhs.leases").ProcessIdentity
+xhs_supervision = import_module("trippostcollect.xhs.supervision")
 
 AUTH_KEY_HEX = "ab" * 32
 AUTH_KEY = bytes.fromhex(AUTH_KEY_HEX)
@@ -1177,7 +1178,7 @@ def test_runtime_status_write_failure_is_terminal(
     def fail_write(*_args: object, **_kwargs: object) -> object:
         raise OSError("synthetic write failure")
 
-    monkeypatch.setattr(mediacrawler_crawl, "write_runtime_status_atomic", fail_write)
+    monkeypatch.setattr(xhs_supervision, "write_runtime_status_atomic", fail_write)
     with pytest.raises(
         process.XhsRuntimeSupervisionError,
         match="runtime_status_write_failed",

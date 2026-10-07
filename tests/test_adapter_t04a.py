@@ -71,7 +71,9 @@ def test_fork_dynamic_imports_and_behavior_injection(tmp_path):
             run_xhs_continuity_behavior, run_xhs_api_captcha_verification,
             record_xhs_platform_security_limit, run_xhs_post_interaction,
         ):
-            assert function is getattr(legacy, function.__name__)
+            # T09：小红书函数在旧入口为绑定证据出口的 partial，按原函数名取同一对象。
+            name = getattr(function, "__name__", None) or function.func.__name__
+            assert function is getattr(legacy, name)
 
         calls = []
         class FakePage:

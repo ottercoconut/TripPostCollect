@@ -241,7 +241,7 @@ def test_selected_platform_is_the_only_fork_platform_loaded(code: str, tmp_path:
         "                  'execjs': 'execjs' in sys.modules}))\n"
     )
     report = _json_tail(_run_python(probe, cwd=tmp_path))
-    assert report["platforms"] == ([] if code in {"wb", "dy", "zhihu"} else ["xhs"])
+    assert report["platforms"] == []  # T09 起小红书也不再装载 fork 平台包
     # 知乎签名 JS 只在首次签名时编译；微博/小红书不装载 execjs
     if code != "zhihu":
         assert report["execjs"] is False

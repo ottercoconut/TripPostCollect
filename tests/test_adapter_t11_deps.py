@@ -23,6 +23,8 @@ ALLOWED = {
         "records.topic_relevance", "runtime.behavior", "runtime.browser_launcher",
         "runtime.browser_runtime", "runtime.cookies", "runtime.helpers", "runtime.process",
         "scheduler.discovery", "xhs.batch_checkpoint",
+        # T09：reporter 注解改由根 xhs/supervision 提供（仅 TYPE_CHECKING）。
+        "xhs.supervision",
     },
     "application/reporting.py": {"records.formal", "runtime.behavior", "runtime.helpers"},
     "application/failures.py": {"records.text_signals"},
