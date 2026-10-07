@@ -21,7 +21,6 @@ from pathlib import Path
 import platform
 import re
 import shutil
-import socket
 import struct
 
 
@@ -39,6 +38,9 @@ _ARCH = {  # uname -m: (AUDIT_ARCH, __NR_socket, __NR_io_uring_setup, x32 位)
     "aarch64": (0xC00000B7, 198, 425, None),
 }
 _LD_ABS_W, _JEQ_K, _JGE_K, _RET_K = 0x20, 0x15, 0x35, 0x06
+# Linux 内核 ABI 的地址族取值；不能用 socket.AF_*，它随生成过滤器的宿主平台变化（macOS 的 AF_INET6 为 30）。
+LINUX_AF_INET, LINUX_AF_INET6, LINUX_AF_PACKET = 2, 10, 17
+LINUX_EPERM = 1
 _ALLOW, _ERRNO = 0x7FFF0000, 0x00050000
 
 
@@ -48,8 +50,8 @@ def seccomp_program(machine=None):
     if machine not in _ARCH:
         raise RuntimeError(f"Linux 沙箱不支持的架构：{machine}")
     arch, nr_socket, nr_uring, x32 = _ARCH[machine]
-    deny = _ERRNO | errno.EPERM
-    families = (socket.AF_INET, socket.AF_INET6, socket.AF_PACKET)
+    deny = _ERRNO | LINUX_EPERM
+    families = (LINUX_AF_INET, LINUX_AF_INET6, LINUX_AF_PACKET)
     program = [(_LD_ABS_W, 0, 0, 4)]                       # A = seccomp_data.arch
     program.append((_JEQ_K, 1, 0, arch))                    # 非本机架构（如 i386 兼容调用）一律拒绝
     program.append((_RET_K, 0, 0, deny))

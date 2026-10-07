@@ -317,20 +317,19 @@ def run_bpf(program, arch, nr, arg0=0):
     ("aarch64", 0xC00000B7, 198, 63, None),
 ])
 def test_linux_seccomp_denies_ip_sockets_only(machine, arch, nr_socket, nr_other, x32):
-    import errno
-    import socket
-
+    # 过滤器面向 Linux 内核 ABI，测试同样使用 Linux 取值，在 macOS 上生成与验证结果一致。
+    af_unix, af_inet, af_inet6, af_netlink, af_packet = 1, 2, 10, 16, 17
     program = sandbox_linux.seccomp_program(machine)
-    allow, deny = 0x7FFF0000, 0x00050000 | errno.EPERM
-    for family in (socket.AF_INET, socket.AF_INET6, socket.AF_PACKET):
+    allow, deny = 0x7FFF0000, 0x00050000 | 1  # SECCOMP_RET_ERRNO | EPERM
+    for family in (af_inet, af_inet6, af_packet):
         assert run_bpf(program, arch, nr_socket, family) == deny
-    for family in (socket.AF_UNIX, socket.AF_NETLINK):
+    for family in (af_unix, af_netlink):
         assert run_bpf(program, arch, nr_socket, family) == allow
-    assert run_bpf(program, arch, nr_other, socket.AF_INET) == allow
+    assert run_bpf(program, arch, nr_other, af_inet) == allow
     assert run_bpf(program, arch, 425) == deny  # io_uring_setup
-    assert run_bpf(program, 0x40000003, nr_socket, socket.AF_UNIX) == deny  # i386 兼容调用
+    assert run_bpf(program, 0x40000003, nr_socket, af_unix) == deny  # i386 兼容调用
     if x32 is not None:
-        assert run_bpf(program, arch, x32 | nr_socket, socket.AF_UNIX) == deny
+        assert run_bpf(program, arch, x32 | nr_socket, af_unix) == deny
     with pytest.raises(RuntimeError, match="架构"):
         sandbox_linux.seccomp_program("riscv64")
 
