@@ -1,0 +1,4 @@
+# sdist 需带上构建扩展与包内资源的唯一真源（白名单见 src/trippostcollect/core/resources.py）。
+include build_support.py
+include db/*.sql
+include docs/formal-crawl-contract.md

@@ -21,6 +21,7 @@ from trippostcollect.core.paths import (
     XHS_LEGACY_ACCOUNT_ROOT,
     ensure_parent,
 )
+from trippostcollect.core import resources
 from trippostcollect.db.avatar_migration import migrate_remove_author_avatars
 from trippostcollect.db.topic_relevance_migration import migrate_topic_relevance
 from trippostcollect.platforms.registry import SITES
@@ -88,6 +89,15 @@ class XhsLeaseCutoverBlocked(RuntimeError):
         self.reason = reason
         self.details = details or {}
         super().__init__(reason)
+
+
+def _schema_sql(schema: Path) -> str:
+    """表结构经包资源入口读取：安装态来自 wheel 内生成副本，源码 checkout 来自仓库 db/ 真源。
+
+    与原 read_text(encoding="utf-8") 相同地做通用换行转换；路径常量只用于确定文件名。
+    """
+    text = resources.read_bytes(f"sql/{schema.name}").decode("utf-8")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def qmarks(values: set[str] | list[str]) -> str:
@@ -364,7 +374,7 @@ def migrate_configured_scheduler_scope(
 
 def ensure_source_platforms(conn: sqlite3.Connection) -> int:
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript(SOURCE_PLATFORMS_SCHEMA.read_text(encoding="utf-8"))
+    conn.executescript(_schema_sql(SOURCE_PLATFORMS_SCHEMA))
     conn.execute("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", (3, "source_platforms"))
     platform_keys = set(SITES)
     for site in SITES.values():
@@ -448,7 +458,7 @@ def ensure_content_schema(
     conn: sqlite3.Connection,
 ) -> tuple[int, dict[str, Any], dict[str, Any]]:
     platform_count = ensure_source_platforms(conn)
-    conn.executescript(WEB_POSTS_SCHEMA.read_text(encoding="utf-8"))
+    conn.executescript(_schema_sql(WEB_POSTS_SCHEMA))
     conn.execute("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", (4, "web_posts"))
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)",
@@ -456,7 +466,7 @@ def ensure_content_schema(
     )
     ensure_column(conn, "web_posts", "published_at", "TEXT")
     ensure_column(conn, "web_posts", "source_capture_id", "INTEGER REFERENCES ctf_captures(id) ON DELETE SET NULL")
-    conn.executescript(CTF_CAPTURES_SCHEMA.read_text(encoding="utf-8"))
+    conn.executescript(_schema_sql(CTF_CAPTURES_SCHEMA))
     conn.execute("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", (5, "ctf_captures"))
     ensure_column(conn, "ctf_captures", "published_at", "TEXT")
     migrate_remove_city_name(conn)
@@ -514,7 +524,7 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
                     "RENAME TO crawl_discovery_candidate_exclusions_old"
                 )
             conn.execute("ALTER TABLE crawl_jobs RENAME TO crawl_jobs_old")
-            conn.executescript(CRAWL_SCHEDULER_SCHEMA.read_text(encoding="utf-8"))
+            conn.executescript(_schema_sql(CRAWL_SCHEDULER_SCHEMA))
             conn.execute(
                 """
                 INSERT INTO crawl_jobs (
@@ -591,14 +601,14 @@ def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
                 )
                 conn.execute("DROP TABLE crawl_discovery_candidate_exclusions_old")
             conn.execute("DROP TABLE crawl_jobs_old")
-            conn.executescript(CRAWL_SCHEDULER_SCHEMA.read_text(encoding="utf-8"))
+            conn.executescript(_schema_sql(CRAWL_SCHEDULER_SCHEMA))
             conn.commit()
         finally:
             conn.execute("PRAGMA foreign_keys = ON")
         violations = conn.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
             raise RuntimeError(f"crawl scheduler foreign-key repair failed: {violations[:3]!r}")
-    conn.executescript(CRAWL_SCHEDULER_SCHEMA.read_text(encoding="utf-8"))
+    conn.executescript(_schema_sql(CRAWL_SCHEDULER_SCHEMA))
     ensure_column(
         conn,
         "crawl_discovery_checkpoints",
@@ -662,7 +672,7 @@ def ensure_xhs_control_schema(
     cutover_inspector: Any | None = None,
 ) -> None:
     schema_statements = _sqlite_script_statements(
-        XHS_CONTROL_SCHEMA.read_text(encoding="utf-8")
+        _schema_sql(XHS_CONTROL_SCHEMA)
     )
     _, rebuild_accounts, rebuild_leases = _xhs_rebuild_state(conn)
     if not (rebuild_accounts or rebuild_leases):

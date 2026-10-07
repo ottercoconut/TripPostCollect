@@ -6,7 +6,23 @@ import os
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(os.getenv("TRIPPOST_PROJECT_ROOT", str(Path(__file__).resolve().parents[3]))).expanduser().resolve()
+def _project_root() -> Path:
+    """源码 checkout 默认以仓库为根；安装态（不在 src 布局内）必须显式给出工作根。
+
+    判定：本文件上三级目录含 pyproject.toml，且其 src/trippostcollect/core/paths.py 就是本文件，即为源码
+    checkout；否则视为安装态，不把 site-packages 的上级目录当作运行根。
+    """
+    configured = os.getenv("TRIPPOST_PROJECT_ROOT")
+    if configured is not None:
+        return Path(configured).expanduser().resolve()
+    here = Path(__file__).resolve()
+    checkout = here.parents[3]
+    if (checkout / "pyproject.toml").is_file() and (checkout / "src/trippostcollect/core/paths.py").resolve() == here:
+        return checkout
+    raise RuntimeError("trippostcollect 以安装包运行时必须设置 TRIPPOST_PROJECT_ROOT 指向项目工作根")
+
+
+PROJECT_ROOT = _project_root()
 SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 CONFIG_ROOT = PROJECT_ROOT / "config"
 DB_ROOT = PROJECT_ROOT / "db"
