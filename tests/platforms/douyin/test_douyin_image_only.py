@@ -225,7 +225,6 @@ async def test_creator_profile_failure_is_recorded_and_later_candidate_continues
 
     crawler.enrich_aweme_creator = enrich
     crawler.get_aweme_images = AsyncMock(return_value=None)
-    crawler.batch_get_note_comments = AsyncMock(return_value=None)
     store = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "update_douyin_aweme", store)
 
@@ -301,7 +300,6 @@ async def test_image_rate_limit_stops_run_without_candidate_skip(
             "retry-aweme", 0, "image_rate_limited", attempts=1
         )
     )
-    crawler.batch_get_note_comments = AsyncMock(return_value=None)
     store = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "update_douyin_aweme", store)
 
@@ -343,7 +341,6 @@ async def test_image_failure_is_recorded_seen_and_later_candidate_continues(
             None,
         ]
     )
-    crawler.batch_get_note_comments = AsyncMock(return_value=None)
     store = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "update_douyin_aweme", store)
 
@@ -394,7 +391,6 @@ async def test_terminal_image_failure_is_recorded_and_later_candidate_continues(
             None,
         ]
     )
-    crawler.batch_get_note_comments = AsyncMock(return_value=None)
     store = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "update_douyin_aweme", store)
 

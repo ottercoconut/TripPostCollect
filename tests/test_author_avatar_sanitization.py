@@ -270,6 +270,9 @@ entry.configure([
     "--headless", "true", "--save_data_option", "jsonl", "--save_data_path", destination,
     "--start", "1", "--max_concurrency_num", "1", "--enable_ip_proxy", "false",
 ])
+# T12：新入口不再装载 fork；fork store 与 writer 经过渡装载点显式加载。
+from trippostcollect.platforms import _fork_bridge
+_fork_bridge.install()
 if bridge == "worker":
     entry.install_hooks()
 else:

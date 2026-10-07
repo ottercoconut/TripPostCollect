@@ -1307,7 +1307,15 @@ async def run_scenario(side, scenario_name: str, workdir: Path, patch) -> dict:
     for name in dir(config):
         if name.isupper():
             patch.setattr(config, name, getattr(config, name))
-    mods.entry.configure(scenario_argv(scenario, out))
+    argv = scenario_argv(scenario, out)
+    mods.entry.configure(argv)
+    # T12：新入口只写根配置对象；旧桥两侧仍读 fork config，按原 configure 语义同步写回。
+    from trippostcollect.application import worker_inputs
+    worker_inputs.apply_to_config(worker_inputs.parse_cmd(argv), config)
+    # fork config 在本进程可能早已导入；按新进程首次导入的语义从当前 env 重读这两个键。
+    patch.setattr(config, "COOKIES", os.environ.get("TRIPPOSTCOLLECT_COOKIES", ""))
+    patch.setattr(config, "CUSTOM_BROWSER_PATH", os.environ.get("TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH")
+                  or os.environ.get("CUSTOM_BROWSER_PATH", ""))
     side.install_hooks(mods)
 
     def publish(details):

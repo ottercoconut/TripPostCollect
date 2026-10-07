@@ -84,7 +84,6 @@ async def test_specified_detail_downloads_images_before_store(monkeypatch):
     note = {"mblog": valid_mblog("detail-note")}
     crawler.get_note_info_task = AsyncMock(return_value=note)
     crawler.get_note_images = AsyncMock()
-    crawler.batch_get_notes_comments = AsyncMock()
     store = AsyncMock()
     monkeypatch.setattr(crawler, "update_weibo_note", store)
 
@@ -234,10 +233,6 @@ def prepare_search(monkeypatch, tmp_path, cards):
     monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
     crawler = make_crawler(config)
     crawler.wb_client = SearchClient(cards)
-    crawler.batch_get_notes_full_text = AsyncMock(
-        side_effect=lambda notes: notes
-    )
-    crawler.batch_get_notes_comments = AsyncMock(return_value=None)
     crawler.get_note_images = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "update_weibo_note", AsyncMock(return_value=None))
     return crawler, state_path

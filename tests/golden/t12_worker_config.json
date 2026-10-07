@@ -1,0 +1,1112 @@
+{
+  "_meta": {
+    "generated_from": "main ca85e82 / fork 3488cf2，T12 实现前；值为五站装配函数收到的配置对象（fork config）"
+  },
+  "douyin_post_repair": {
+    "AUTO_CLOSE_BROWSER": {
+      "type": "bool",
+      "value": true
+    },
+    "BROWSER_LAUNCH_TIMEOUT": {
+      "type": "int",
+      "value": 60
+    },
+    "CDP_CONNECT_EXISTING": {
+      "type": "bool",
+      "value": false
+    },
+    "CDP_DEBUG_PORT": {
+      "type": "int",
+      "value": 9222
+    },
+    "CDP_HEADLESS": {
+      "type": "bool",
+      "value": true
+    },
+    "COOKIES": {
+      "type": "str",
+      "value": ""
+    },
+    "CRAWLER_MAX_SLEEP_SEC": {
+      "type": "int",
+      "value": 2
+    },
+    "CRAWLER_TYPE": {
+      "type": "str",
+      "value": "detail"
+    },
+    "CUSTOM_BROWSER_PATH": {
+      "type": "str",
+      "value": ""
+    },
+    "DISABLE_SSL_VERIFY": {
+      "type": "bool",
+      "value": false
+    },
+    "DY_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "7000000000000000001"
+      ]
+    },
+    "ENABLE_CDP_MODE": {
+      "type": "bool",
+      "value": false
+    },
+    "ENABLE_GET_MEIDAS": {
+      "type": "bool",
+      "value": true
+    },
+    "ENABLE_WEIBO_FULL_TEXT": {
+      "type": "bool",
+      "value": true
+    },
+    "HEADLESS": {
+      "type": "bool",
+      "value": true
+    },
+    "KEYWORDS": {
+      "type": "str",
+      "value": "青岛旅游"
+    },
+    "LOGIN_TYPE": {
+      "type": "str",
+      "value": "cookie"
+    },
+    "MAX_CONCURRENCY_NUM": {
+      "type": "int",
+      "value": 1
+    },
+    "PLATFORM": {
+      "type": "str",
+      "value": "dy"
+    },
+    "PUBLISH_TIME_TYPE": {
+      "type": "int",
+      "value": 0
+    },
+    "SAVE_DATA_OPTION": {
+      "type": "str",
+      "value": "jsonl"
+    },
+    "SAVE_DATA_PATH": {
+      "type": "str",
+      "value": "<TMP>/douyin_post_repair/douyin/data"
+    },
+    "SAVE_LOGIN_STATE": {
+      "type": "bool",
+      "value": true
+    },
+    "SORT_TYPE": {
+      "type": "str",
+      "value": "popularity_descending"
+    },
+    "START_PAGE": {
+      "type": "int",
+      "value": 1
+    },
+    "USER_DATA_DIR": {
+      "type": "str",
+      "value": "%s_user_data_dir"
+    },
+    "WEIBO_SEARCH_TYPE": {
+      "type": "str",
+      "value": "default"
+    },
+    "WEIBO_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "4982041758140155"
+      ]
+    },
+    "XHS_INTERNATIONAL": {
+      "type": "bool",
+      "value": false
+    },
+    "XHS_SPECIFIED_NOTE_URL_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ]
+    },
+    "ZHIHU_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  },
+  "douyin_search_discovery": {
+    "AUTO_CLOSE_BROWSER": {
+      "type": "bool",
+      "value": true
+    },
+    "BROWSER_LAUNCH_TIMEOUT": {
+      "type": "int",
+      "value": 60
+    },
+    "CDP_CONNECT_EXISTING": {
+      "type": "bool",
+      "value": false
+    },
+    "CDP_DEBUG_PORT": {
+      "type": "int",
+      "value": 9222
+    },
+    "CDP_HEADLESS": {
+      "type": "bool",
+      "value": false
+    },
+    "COOKIES": {
+      "type": "str",
+      "value": ""
+    },
+    "CRAWLER_MAX_SLEEP_SEC": {
+      "type": "int",
+      "value": 2
+    },
+    "CRAWLER_TYPE": {
+      "type": "str",
+      "value": "search"
+    },
+    "CUSTOM_BROWSER_PATH": {
+      "type": "str",
+      "value": ""
+    },
+    "DISABLE_SSL_VERIFY": {
+      "type": "bool",
+      "value": false
+    },
+    "DY_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ]
+    },
+    "ENABLE_CDP_MODE": {
+      "type": "bool",
+      "value": false
+    },
+    "ENABLE_GET_MEIDAS": {
+      "type": "bool",
+      "value": true
+    },
+    "ENABLE_WEIBO_FULL_TEXT": {
+      "type": "bool",
+      "value": true
+    },
+    "HEADLESS": {
+      "type": "bool",
+      "value": false
+    },
+    "KEYWORDS": {
+      "type": "str",
+      "value": "青岛旅游"
+    },
+    "LOGIN_TYPE": {
+      "type": "str",
+      "value": "cookie"
+    },
+    "MAX_CONCURRENCY_NUM": {
+      "type": "int",
+      "value": 1
+    },
+    "PLATFORM": {
+      "type": "str",
+      "value": "dy"
+    },
+    "PUBLISH_TIME_TYPE": {
+      "type": "int",
+      "value": 0
+    },
+    "SAVE_DATA_OPTION": {
+      "type": "str",
+      "value": "jsonl"
+    },
+    "SAVE_DATA_PATH": {
+      "type": "str",
+      "value": "<TMP>/douyin_search_discovery/douyin/data"
+    },
+    "SAVE_LOGIN_STATE": {
+      "type": "bool",
+      "value": true
+    },
+    "SORT_TYPE": {
+      "type": "str",
+      "value": "popularity_descending"
+    },
+    "START_PAGE": {
+      "type": "int",
+      "value": 3
+    },
+    "USER_DATA_DIR": {
+      "type": "str",
+      "value": "%s_user_data_dir"
+    },
+    "WEIBO_SEARCH_TYPE": {
+      "type": "str",
+      "value": "default"
+    },
+    "WEIBO_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "4982041758140155"
+      ]
+    },
+    "XHS_INTERNATIONAL": {
+      "type": "bool",
+      "value": false
+    },
+    "XHS_SPECIFIED_NOTE_URL_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ]
+    },
+    "ZHIHU_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  },
+  "weibo_post_repair": {
+    "AUTO_CLOSE_BROWSER": {
+      "type": "bool",
+      "value": true
+    },
+    "BROWSER_LAUNCH_TIMEOUT": {
+      "type": "int",
+      "value": 60
+    },
+    "CDP_CONNECT_EXISTING": {
+      "type": "bool",
+      "value": false
+    },
+    "CDP_DEBUG_PORT": {
+      "type": "int",
+      "value": 9222
+    },
+    "CDP_HEADLESS": {
+      "type": "bool",
+      "value": true
+    },
+    "COOKIES": {
+      "type": "str",
+      "value": ""
+    },
+    "CRAWLER_MAX_SLEEP_SEC": {
+      "type": "int",
+      "value": 2
+    },
+    "CRAWLER_TYPE": {
+      "type": "str",
+      "value": "detail"
+    },
+    "CUSTOM_BROWSER_PATH": {
+      "type": "str",
+      "value": ""
+    },
+    "DISABLE_SSL_VERIFY": {
+      "type": "bool",
+      "value": false
+    },
+    "DY_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ]
+    },
+    "ENABLE_CDP_MODE": {
+      "type": "bool",
+      "value": false
+    },
+    "ENABLE_GET_MEIDAS": {
+      "type": "bool",
+      "value": true
+    },
+    "ENABLE_WEIBO_FULL_TEXT": {
+      "type": "bool",
+      "value": true
+    },
+    "HEADLESS": {
+      "type": "bool",
+      "value": true
+    },
+    "KEYWORDS": {
+      "type": "str",
+      "value": "青岛旅游"
+    },
+    "LOGIN_TYPE": {
+      "type": "str",
+      "value": "cookie"
+    },
+    "MAX_CONCURRENCY_NUM": {
+      "type": "int",
+      "value": 1
+    },
+    "PLATFORM": {
+      "type": "str",
+      "value": "wb"
+    },
+    "PUBLISH_TIME_TYPE": {
+      "type": "int",
+      "value": 0
+    },
+    "SAVE_DATA_OPTION": {
+      "type": "str",
+      "value": "jsonl"
+    },
+    "SAVE_DATA_PATH": {
+      "type": "str",
+      "value": "<TMP>/weibo_post_repair/weibo/data"
+    },
+    "SAVE_LOGIN_STATE": {
+      "type": "bool",
+      "value": true
+    },
+    "SORT_TYPE": {
+      "type": "str",
+      "value": "popularity_descending"
+    },
+    "START_PAGE": {
+      "type": "int",
+      "value": 1
+    },
+    "USER_DATA_DIR": {
+      "type": "str",
+      "value": "%s_user_data_dir"
+    },
+    "WEIBO_SEARCH_TYPE": {
+      "type": "str",
+      "value": "default"
+    },
+    "WEIBO_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "5000000000000001"
+      ]
+    },
+    "XHS_INTERNATIONAL": {
+      "type": "bool",
+      "value": false
+    },
+    "XHS_SPECIFIED_NOTE_URL_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ]
+    },
+    "ZHIHU_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  },
+  "weibo_search": {
+    "AUTO_CLOSE_BROWSER": {
+      "type": "bool",
+      "value": true
+    },
+    "BROWSER_LAUNCH_TIMEOUT": {
+      "type": "int",
+      "value": 60
+    },
+    "CDP_CONNECT_EXISTING": {
+      "type": "bool",
+      "value": false
+    },
+    "CDP_DEBUG_PORT": {
+      "type": "int",
+      "value": 9222
+    },
+    "CDP_HEADLESS": {
+      "type": "bool",
+      "value": true
+    },
+    "COOKIES": {
+      "type": "str",
+      "value": ""
+    },
+    "CRAWLER_MAX_SLEEP_SEC": {
+      "type": "int",
+      "value": 2
+    },
+    "CRAWLER_TYPE": {
+      "type": "str",
+      "value": "search"
+    },
+    "CUSTOM_BROWSER_PATH": {
+      "type": "str",
+      "value": ""
+    },
+    "DISABLE_SSL_VERIFY": {
+      "type": "bool",
+      "value": false
+    },
+    "DY_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ]
+    },
+    "ENABLE_CDP_MODE": {
+      "type": "bool",
+      "value": false
+    },
+    "ENABLE_GET_MEIDAS": {
+      "type": "bool",
+      "value": true
+    },
+    "ENABLE_WEIBO_FULL_TEXT": {
+      "type": "bool",
+      "value": true
+    },
+    "HEADLESS": {
+      "type": "bool",
+      "value": true
+    },
+    "KEYWORDS": {
+      "type": "str",
+      "value": "青岛旅游"
+    },
+    "LOGIN_TYPE": {
+      "type": "str",
+      "value": "cookie"
+    },
+    "MAX_CONCURRENCY_NUM": {
+      "type": "int",
+      "value": 1
+    },
+    "PLATFORM": {
+      "type": "str",
+      "value": "wb"
+    },
+    "PUBLISH_TIME_TYPE": {
+      "type": "int",
+      "value": 0
+    },
+    "SAVE_DATA_OPTION": {
+      "type": "str",
+      "value": "jsonl"
+    },
+    "SAVE_DATA_PATH": {
+      "type": "str",
+      "value": "<TMP>/weibo_search/weibo/data"
+    },
+    "SAVE_LOGIN_STATE": {
+      "type": "bool",
+      "value": true
+    },
+    "SORT_TYPE": {
+      "type": "str",
+      "value": "popularity_descending"
+    },
+    "START_PAGE": {
+      "type": "int",
+      "value": 1
+    },
+    "USER_DATA_DIR": {
+      "type": "str",
+      "value": "%s_user_data_dir"
+    },
+    "WEIBO_SEARCH_TYPE": {
+      "type": "str",
+      "value": "default"
+    },
+    "WEIBO_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "4982041758140155"
+      ]
+    },
+    "XHS_INTERNATIONAL": {
+      "type": "bool",
+      "value": false
+    },
+    "XHS_SPECIFIED_NOTE_URL_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ]
+    },
+    "ZHIHU_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  },
+  "xhs_repair": {
+    "AUTO_CLOSE_BROWSER": {
+      "type": "bool",
+      "value": true
+    },
+    "BROWSER_LAUNCH_TIMEOUT": {
+      "type": "int",
+      "value": 60
+    },
+    "CDP_CONNECT_EXISTING": {
+      "type": "bool",
+      "value": false
+    },
+    "CDP_DEBUG_PORT": {
+      "type": "int",
+      "value": 9222
+    },
+    "CDP_HEADLESS": {
+      "type": "bool",
+      "value": true
+    },
+    "COOKIES": {
+      "type": "str",
+      "value": ""
+    },
+    "CRAWLER_MAX_SLEEP_SEC": {
+      "type": "int",
+      "value": 2
+    },
+    "CRAWLER_TYPE": {
+      "type": "str",
+      "value": "detail"
+    },
+    "CUSTOM_BROWSER_PATH": {
+      "type": "str",
+      "value": "/fake/chrome"
+    },
+    "DISABLE_SSL_VERIFY": {
+      "type": "bool",
+      "value": false
+    },
+    "DY_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ]
+    },
+    "ENABLE_CDP_MODE": {
+      "type": "bool",
+      "value": true
+    },
+    "ENABLE_GET_MEIDAS": {
+      "type": "bool",
+      "value": true
+    },
+    "ENABLE_WEIBO_FULL_TEXT": {
+      "type": "bool",
+      "value": true
+    },
+    "HEADLESS": {
+      "type": "bool",
+      "value": true
+    },
+    "KEYWORDS": {
+      "type": "str",
+      "value": "青岛旅游"
+    },
+    "LOGIN_TYPE": {
+      "type": "str",
+      "value": "cookie"
+    },
+    "MAX_CONCURRENCY_NUM": {
+      "type": "int",
+      "value": 1
+    },
+    "PLATFORM": {
+      "type": "str",
+      "value": "xhs"
+    },
+    "PUBLISH_TIME_TYPE": {
+      "type": "int",
+      "value": 0
+    },
+    "SAVE_DATA_OPTION": {
+      "type": "str",
+      "value": "jsonl"
+    },
+    "SAVE_DATA_PATH": {
+      "type": "str",
+      "value": "<TMP>/xhs_repair/xhs/data"
+    },
+    "SAVE_LOGIN_STATE": {
+      "type": "bool",
+      "value": true
+    },
+    "SORT_TYPE": {
+      "type": "str",
+      "value": "popularity_descending"
+    },
+    "START_PAGE": {
+      "type": "int",
+      "value": 1
+    },
+    "USER_DATA_DIR": {
+      "type": "str",
+      "value": "%s_user_data_dir"
+    },
+    "WEIBO_SEARCH_TYPE": {
+      "type": "str",
+      "value": "default"
+    },
+    "WEIBO_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "4982041758140155"
+      ]
+    },
+    "XHS_INTERNATIONAL": {
+      "type": "bool",
+      "value": false
+    },
+    "XHS_SPECIFIED_NOTE_URL_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.xiaohongshu.com/explore/abc"
+      ]
+    },
+    "ZHIHU_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  },
+  "xhs_search_qrcode": {
+    "AUTO_CLOSE_BROWSER": {
+      "type": "bool",
+      "value": true
+    },
+    "BROWSER_LAUNCH_TIMEOUT": {
+      "type": "int",
+      "value": 60
+    },
+    "CDP_CONNECT_EXISTING": {
+      "type": "bool",
+      "value": false
+    },
+    "CDP_DEBUG_PORT": {
+      "type": "int",
+      "value": 9222
+    },
+    "CDP_HEADLESS": {
+      "type": "bool",
+      "value": false
+    },
+    "COOKIES": {
+      "type": "str",
+      "value": ""
+    },
+    "CRAWLER_MAX_SLEEP_SEC": {
+      "type": "int",
+      "value": 2
+    },
+    "CRAWLER_TYPE": {
+      "type": "str",
+      "value": "search"
+    },
+    "CUSTOM_BROWSER_PATH": {
+      "type": "str",
+      "value": "/fake/chrome"
+    },
+    "DISABLE_SSL_VERIFY": {
+      "type": "bool",
+      "value": false
+    },
+    "DY_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ]
+    },
+    "ENABLE_CDP_MODE": {
+      "type": "bool",
+      "value": true
+    },
+    "ENABLE_GET_MEIDAS": {
+      "type": "bool",
+      "value": true
+    },
+    "ENABLE_WEIBO_FULL_TEXT": {
+      "type": "bool",
+      "value": true
+    },
+    "HEADLESS": {
+      "type": "bool",
+      "value": false
+    },
+    "KEYWORDS": {
+      "type": "str",
+      "value": "青岛旅游"
+    },
+    "LOGIN_TYPE": {
+      "type": "str",
+      "value": "qrcode"
+    },
+    "MAX_CONCURRENCY_NUM": {
+      "type": "int",
+      "value": 1
+    },
+    "PLATFORM": {
+      "type": "str",
+      "value": "xhs"
+    },
+    "PUBLISH_TIME_TYPE": {
+      "type": "int",
+      "value": 0
+    },
+    "SAVE_DATA_OPTION": {
+      "type": "str",
+      "value": "jsonl"
+    },
+    "SAVE_DATA_PATH": {
+      "type": "str",
+      "value": "<TMP>/xhs_search_qrcode/xhs/data"
+    },
+    "SAVE_LOGIN_STATE": {
+      "type": "bool",
+      "value": true
+    },
+    "SORT_TYPE": {
+      "type": "str",
+      "value": "popularity_descending"
+    },
+    "START_PAGE": {
+      "type": "int",
+      "value": 1
+    },
+    "USER_DATA_DIR": {
+      "type": "str",
+      "value": "%s_user_data_dir"
+    },
+    "WEIBO_SEARCH_TYPE": {
+      "type": "str",
+      "value": "default"
+    },
+    "WEIBO_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "4982041758140155"
+      ]
+    },
+    "XHS_INTERNATIONAL": {
+      "type": "bool",
+      "value": false
+    },
+    "XHS_SPECIFIED_NOTE_URL_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ]
+    },
+    "ZHIHU_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  },
+  "zhihu_detail": {
+    "AUTO_CLOSE_BROWSER": {
+      "type": "bool",
+      "value": true
+    },
+    "BROWSER_LAUNCH_TIMEOUT": {
+      "type": "int",
+      "value": 60
+    },
+    "CDP_CONNECT_EXISTING": {
+      "type": "bool",
+      "value": false
+    },
+    "CDP_DEBUG_PORT": {
+      "type": "int",
+      "value": 9222
+    },
+    "CDP_HEADLESS": {
+      "type": "bool",
+      "value": true
+    },
+    "COOKIES": {
+      "type": "str",
+      "value": "d_c0=x; z_c0=y"
+    },
+    "CRAWLER_MAX_SLEEP_SEC": {
+      "type": "int",
+      "value": 2
+    },
+    "CRAWLER_TYPE": {
+      "type": "str",
+      "value": "detail"
+    },
+    "CUSTOM_BROWSER_PATH": {
+      "type": "str",
+      "value": "/fake/chrome"
+    },
+    "DISABLE_SSL_VERIFY": {
+      "type": "bool",
+      "value": false
+    },
+    "DY_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ]
+    },
+    "ENABLE_CDP_MODE": {
+      "type": "bool",
+      "value": true
+    },
+    "ENABLE_GET_MEIDAS": {
+      "type": "bool",
+      "value": true
+    },
+    "ENABLE_WEIBO_FULL_TEXT": {
+      "type": "bool",
+      "value": true
+    },
+    "HEADLESS": {
+      "type": "bool",
+      "value": true
+    },
+    "KEYWORDS": {
+      "type": "str",
+      "value": "青岛旅游"
+    },
+    "LOGIN_TYPE": {
+      "type": "str",
+      "value": "cookie"
+    },
+    "MAX_CONCURRENCY_NUM": {
+      "type": "int",
+      "value": 1
+    },
+    "PLATFORM": {
+      "type": "str",
+      "value": "zhihu"
+    },
+    "PUBLISH_TIME_TYPE": {
+      "type": "int",
+      "value": 0
+    },
+    "SAVE_DATA_OPTION": {
+      "type": "str",
+      "value": "jsonl"
+    },
+    "SAVE_DATA_PATH": {
+      "type": "str",
+      "value": "<TMP>/zhihu_detail/zhihu/data"
+    },
+    "SAVE_LOGIN_STATE": {
+      "type": "bool",
+      "value": true
+    },
+    "SORT_TYPE": {
+      "type": "str",
+      "value": "popularity_descending"
+    },
+    "START_PAGE": {
+      "type": "int",
+      "value": 1
+    },
+    "USER_DATA_DIR": {
+      "type": "str",
+      "value": "%s_user_data_dir"
+    },
+    "WEIBO_SEARCH_TYPE": {
+      "type": "str",
+      "value": "default"
+    },
+    "WEIBO_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "4982041758140155"
+      ]
+    },
+    "XHS_INTERNATIONAL": {
+      "type": "bool",
+      "value": false
+    },
+    "XHS_SPECIFIED_NOTE_URL_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ]
+    },
+    "ZHIHU_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.zhihu.com/question/1/answer/2"
+      ]
+    }
+  },
+  "zhihu_search": {
+    "AUTO_CLOSE_BROWSER": {
+      "type": "bool",
+      "value": true
+    },
+    "BROWSER_LAUNCH_TIMEOUT": {
+      "type": "int",
+      "value": 60
+    },
+    "CDP_CONNECT_EXISTING": {
+      "type": "bool",
+      "value": false
+    },
+    "CDP_DEBUG_PORT": {
+      "type": "int",
+      "value": 9222
+    },
+    "CDP_HEADLESS": {
+      "type": "bool",
+      "value": true
+    },
+    "COOKIES": {
+      "type": "str",
+      "value": "d_c0=x; z_c0=y"
+    },
+    "CRAWLER_MAX_SLEEP_SEC": {
+      "type": "int",
+      "value": 2
+    },
+    "CRAWLER_TYPE": {
+      "type": "str",
+      "value": "search"
+    },
+    "CUSTOM_BROWSER_PATH": {
+      "type": "str",
+      "value": "/fake/chrome"
+    },
+    "DISABLE_SSL_VERIFY": {
+      "type": "bool",
+      "value": false
+    },
+    "DY_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.douyin.com/video/7525538910311632128",
+        "https://v.douyin.com/drIPtQ_WPWY/",
+        "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main&modal_id=7525538910311632128",
+        "7202432992642387233"
+      ]
+    },
+    "ENABLE_CDP_MODE": {
+      "type": "bool",
+      "value": true
+    },
+    "ENABLE_GET_MEIDAS": {
+      "type": "bool",
+      "value": true
+    },
+    "ENABLE_WEIBO_FULL_TEXT": {
+      "type": "bool",
+      "value": true
+    },
+    "HEADLESS": {
+      "type": "bool",
+      "value": true
+    },
+    "KEYWORDS": {
+      "type": "str",
+      "value": "青岛旅游"
+    },
+    "LOGIN_TYPE": {
+      "type": "str",
+      "value": "cookie"
+    },
+    "MAX_CONCURRENCY_NUM": {
+      "type": "int",
+      "value": 1
+    },
+    "PLATFORM": {
+      "type": "str",
+      "value": "zhihu"
+    },
+    "PUBLISH_TIME_TYPE": {
+      "type": "int",
+      "value": 0
+    },
+    "SAVE_DATA_OPTION": {
+      "type": "str",
+      "value": "jsonl"
+    },
+    "SAVE_DATA_PATH": {
+      "type": "str",
+      "value": "<TMP>/zhihu_search/zhihu/data"
+    },
+    "SAVE_LOGIN_STATE": {
+      "type": "bool",
+      "value": true
+    },
+    "SORT_TYPE": {
+      "type": "str",
+      "value": "popularity_descending"
+    },
+    "START_PAGE": {
+      "type": "int",
+      "value": 1
+    },
+    "USER_DATA_DIR": {
+      "type": "str",
+      "value": "%s_user_data_dir"
+    },
+    "WEIBO_SEARCH_TYPE": {
+      "type": "str",
+      "value": "default"
+    },
+    "WEIBO_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "4982041758140155"
+      ]
+    },
+    "XHS_INTERNATIONAL": {
+      "type": "bool",
+      "value": false
+    },
+    "XHS_SPECIFIED_NOTE_URL_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.xiaohongshu.com/explore/64b95d01000000000c034587?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed"
+      ]
+    },
+    "ZHIHU_SPECIFIED_ID_LIST": {
+      "type": "list",
+      "value": [
+        "https://www.zhihu.com/question/826896610/answer/4885821440",
+        "https://zhuanlan.zhihu.com/p/673461588",
+        "https://www.zhihu.com/zvideo/1539542068422144000"
+      ]
+    }
+  }
+}

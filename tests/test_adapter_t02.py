@@ -120,6 +120,13 @@ def _capture_new_commands(monkeypatch: pytest.MonkeyPatch, tmp: Path) -> dict[st
     return result
 
 
+T12_REMOVED_ENV = {
+    "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID", "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM", "TRIPPOSTCOLLECT_DISCOVERY_KEYWORD",
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE", "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED",
+    "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
+}
+
+
 def test_child_command_switches_only_interpreter_entry_and_cwd(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -131,8 +138,11 @@ def test_child_command_switches_only_interpreter_entry_and_cwd(
         expected_cmd = [interpreter, "-P", "-m", ENTRY_MODULE, *old["cmd"][4:]]
         assert new[name]["cmd"] == expected_cmd, name
         assert new[name]["cwd"] == "<ROOT>", name
-        for key in ("extra_env", "timeout", "startup_grace_seconds", "network_diagnostics_path"):
+        for key in ("timeout", "startup_grace_seconds", "network_diagnostics_path"):
             assert new[name][key] == old[key], (name, key)
+        # T12：规格 D2 授权删除父发无消费者的 6 个 env，其余键值不变。
+        expected_env = {key: value for key, value in old["extra_env"].items() if key not in T12_REMOVED_ENV}
+        assert new[name]["extra_env"] == expected_env, name
 
 
 def test_executor_source_no_longer_builds_uv_or_private_bridge_command() -> None:
@@ -210,19 +220,38 @@ def test_worker_inputs_reject_unused_upstream_flags(extra: list[str], tmp_path: 
     assert raised.value.code == 2
 
 
+# T12：configure 写入根配置对象而非 fork config。上游退出平台、creator、评论计数与代理供应商键不再进入
+# 配置对象；四站指定 ID 不迁上游示例，未由父侧传入时为空列表（规格 C0/D1，决策见 T12 审查包）。
+T12_DROPPED_PREFIXES = ("BILI_", "KS_", "TIEBA_", "IP_PROXY_", "STATIC_PROXY_")
+T12_DROPPED_KEYS = {
+    "DY_CREATOR_ID_LIST", "WEIBO_CREATOR_ID_LIST", "XHS_CREATOR_ID_LIST",
+    "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES", "CRAWLER_MAX_NOTES_COUNT",
+}
+SPECIFIED_ID_KEYS = {"dy": "DY_SPECIFIED_ID_LIST", "wb": "WEIBO_SPECIFIED_ID_LIST",
+                     "zhihu": "ZHIHU_SPECIFIED_ID_LIST", "xhs": "XHS_SPECIFIED_NOTE_URL_LIST"}
+
+
 @pytest.mark.parametrize("name", SCENARIOS)
 def test_configure_writes_same_fork_config_as_old_parse_cmd(name: str, tmp_path: Path) -> None:
     written = CONFIG[name]["written"]
+    argv = _old_argv(name, tmp_path)
+    expected = {key: value for key, value in written.items()
+                if not key.startswith(T12_DROPPED_PREFIXES) and key not in T12_DROPPED_KEYS}
+    selected = argv[argv.index("--platform") + 1]
+    for code, key in SPECIFIED_ID_KEYS.items():
+        if not (code == selected and "--specified_id" in argv):
+            expected[key] = []
     code = (
         "import json\n"
-        f"from {ENTRY_MODULE} import configure\n"
-        f"configure({_old_argv(name, tmp_path)!r})\n"
-        "import config\n"
-        f"print(json.dumps({{key: getattr(config, key) for key in {sorted(written)!r}}}, ensure_ascii=False))\n"
+        f"from {ENTRY_MODULE} import configure, current_config\n"
+        f"configure({argv!r})\n"
+        "config = current_config()\n"
+        f"print(json.dumps({{key: getattr(config, key) for key in {sorted(written)!r} if hasattr(config, key)}},"
+        " ensure_ascii=False))\n"
     )
     actual = _json_tail(_run_python(code, cwd=tmp_path))
     actual = json.loads(json.dumps(actual, ensure_ascii=False).replace(str(tmp_path), "<TMP>"))
-    assert actual == written
+    assert actual == expected
 
 
 # ---------- 选站延迟装配（F10） ----------
@@ -433,8 +462,9 @@ def test_fork_signature_js_loads_from_any_cwd(tmp_path: Path) -> None:
     # 真实编译包内 JS（需 Node），不发请求；两站签名均须在非 fork cwd 下得到非空结果
     probe = (
         "import json\n"
-        f"from {ENTRY_MODULE} import configure\n"
-        f"configure({_old_argv('zhihu_search', tmp_path)!r})\n"
+        # T12：新入口不再装载 fork；旧桥签名模块经过渡装载点显式加载。
+        "from trippostcollect.platforms import _fork_bridge\n"
+        "_fork_bridge.install()\n"
         "from media_platform.zhihu import help as zhihu_help\n"
         "from media_platform.douyin import help as douyin_help\n"
         "zhihu = zhihu_help.sign('/api/v4/search_v3?q=test', 'd_c0=AAAA')\n"

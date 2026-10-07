@@ -25,7 +25,7 @@ import pytest
 
 from trippostcollect.application import events
 from trippostcollect.artifacts import jsonl
-from trippostcollect.platforms import entry
+from trippostcollect.platforms import _fork_bridge, entry
 from trippostcollect.platforms.douyin import client, core, login, login_support, parser, signer
 from trippostcollect.runtime import image_retry
 
@@ -38,7 +38,7 @@ KEYWORD = "青岛崂山旅游攻略"
 @contextmanager
 def legacy(tmp_path, monkeypatch):
     """以原模块名加载逐字冻结文件，退出时恢复模块表与包属性。"""
-    entry._fork_bridge.install()
+    _fork_bridge.install()
     with monkeypatch.context() as patch:
         module_names = []
         for path in FIXTURES.rglob("*.py.txt"):

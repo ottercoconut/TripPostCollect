@@ -477,6 +477,9 @@ entry.configure([
     "--headless", "false", "--save_data_option", "jsonl", "--save_data_path", str(Path.cwd()),
     "--start", "1", "--max_concurrency_num", "1", "--enable_ip_proxy", "false",
 ])
+# T12：新入口不再装载 fork；fork 事件出口与旧桥 hook 经过渡装载点显式加载。
+from trippostcollect.platforms import _fork_bridge
+_fork_bridge.install()
 if bridge == "worker":
     entry.install_hooks()
 else:

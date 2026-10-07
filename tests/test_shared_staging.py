@@ -198,6 +198,9 @@ def _exercise(platform, directory):
                 "zhihu": "zhihu_search", "xhs": "xhs_search_qrcode"}[platform]
     argv = [part.replace("<TMP>", str(directory)) for part in commands[scenario]["cmd"][4:]]
     configure(argv)
+    # T12：新入口不再装载 fork；旧桥 store 对照经过渡装载点显式加载。
+    from trippostcollect.platforms import _fork_bridge
+    _fork_bridge.install()
     install_hooks()
     crawler = load_crawler(code)
     assert inspect.isclass(crawler)

@@ -10,7 +10,7 @@ from types import ModuleType
 
 import pytest
 
-from trippostcollect.platforms import entry
+from trippostcollect.platforms import _fork_bridge, entry
 from trippostcollect.platforms.douyin import client, core, login, login_support, parser
 from test_adapter_t06 import SCENARIOS, drive
 
@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def fork_factory():
     """加载真实 fork main.py，但不运行其入口或构造其他平台。"""
-    entry._fork_bridge.install()
+    _fork_bridge.install()
     spec = importlib.util.spec_from_file_location(
         "t06_fork_main", ROOT / "tools/MediaCrawler/main.py",
     )
@@ -108,7 +108,7 @@ def test_fork_exports_root_implementations_and_injection_only():
 
 @pytest.mark.parametrize("fallback", [0, 1])
 def test_old_hook_latches_at_install_and_injects_client(monkeypatch, fallback):
-    entry._fork_bridge.install()
+    _fork_bridge.install()
     repair = importlib.import_module("mediacrawler_export_entrypoint")
     old_client = importlib.import_module("media_platform.douyin.client").DouYinClient
     monkeypatch.setattr(entry, "_douyin_browser_detail_fallback", False)
