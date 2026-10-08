@@ -1,0 +1,2545 @@
+{
+ "schema_version": 1,
+ "description": "T13 五站覆盖守护：F01–F15 × 五站每格声明的现存测试；守护断言其在声明 lane 中被收集且不带 skip/xfail，CI 侧再核对 junit 通过。",
+ "sites": [
+  "bilibili",
+  "weibo",
+  "douyin",
+  "zhihu",
+  "xhs"
+ ],
+ "responsibilities": {
+  "F01": {
+   "semantics": "原FP排除/canonical bytes、一次读取、scope/exclusion、游标三元组、失败前沿、无stop不完成",
+   "shared": [
+    {
+     "function": "tests/test_adaptive_accumulator.py::test_candidate_and_valid_counts_never_stop_before_source_exhaustion",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_adaptive_accumulator.py::test_stagnation_is_diagnostic_and_never_stops_discovery",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_adapter_t03.py::test_resume_subset",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_adapter_t03.py::test_outer_database_errors_preserve_resume",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_adapter_t11.py::test_d_completion_requires_stop_evidence",
+     "lane": "component"
+    },
+    {
+     "file": "tests/test_trippostcollect_adaptive.py",
+     "lane": "fork",
+     "min_functions": 13
+    }
+   ],
+   "cells": {
+    "bilibili": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_bilibili_top_refresh_precedes_saved_frontier",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_bilibili_refresh_failure_is_tagged_as_refresh_phase",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_query_fingerprint_canonical_bytes_are_stable",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_mediacrawler_pagination.py::test_valid_records_without_stop_event_never_complete_discovery",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_mediacrawler_pagination.py::test_runtime_failed_pagination_overrides_valid_records",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_mediacrawler_pagination.py::test_source_exhausted_completion_keeps_all_discovered_records",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_bilibili_image_materialization.py::test_skipped_candidate_continues_until_source_exhaustion",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_bilibili_offline_faults.py::test_later_search_page_failure_keeps_resume_at_failed_page",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t11.py::test_b_full_chain",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      }
+     ]
+    },
+    "weibo": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_query_fingerprint_ignores_runtime_budget_but_tracks_source_options",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_runner_auto_resumes_only_matching_query",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_query_fingerprint_canonical_bytes_are_stable",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_adaptive_accumulator.py::test_weibo_stagnation_tracks_candidate_identity_progress",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_mediacrawler_pagination.py::test_incomplete_run_keeps_latest_safe_batch_after_candidate_skip",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t03.py::test_database_subset",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t03.py::test_factory_loads_known_once",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_top_refresh_precedes_saved_frontier",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t11.py::test_b_full_chain",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      }
+     ]
+    },
+    "douyin": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_checkpoint_round_trip_preserves_page_offset_and_cursor",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_executor_commits_cursor_from_durable_pagination_evidence",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_executor_keeps_first_douyin_search_id_when_response_logids_rotate",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_top_refresh_keeps_saved_douyin_frontier",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_reseeded_douyin_frontier_replaces_exhausted_cursor",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_runner_retries_unverified_douyin_first_page_checkpoint",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_query_fingerprint_canonical_bytes_are_stable",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_mediacrawler_pagination.py::test_unverified_douyin_first_page_empty_is_runtime_failure",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_mediacrawler_pagination.py::test_verified_douyin_first_page_empty_can_prove_exhaustion",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/douyin/test_douyin_search_safety.py::test_deep_frontier_rebinds_to_current_refresh_session_cursor",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adaptive_accumulator.py::test_douyin_exhausted_cursor_reseed_requires_new_candidate_continuation",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t03.py::test_factory_loads_known_once",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t11.py::test_b_full_chain",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      }
+     ]
+    },
+    "zhihu": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_operator_candidate_exclusion_is_auditable_and_loaded_as_skipped",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_query_fingerprint_canonical_bytes_are_stable",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t03.py::test_factory_loads_known_once",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_top_refresh_precedes_saved_frontier",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/zhihu/test_zhihu_detail_images.py::test_detail_failure_is_recorded_seen_and_search_continues",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t11.py::test_b_full_chain",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      }
+     ]
+    },
+    "xhs": {
+     "status": "covered",
+     "entries": [
+      {
+       "file": "tests/test_xhs_discovery.py",
+       "lane": "component",
+       "min_count": 8
+      },
+      {
+       "function": "tests/test_xhs_batch_checkpoint.py::test_top_refresh_retains_deep_frontier",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_discovery_checkpoints.py::test_xhs_query_fingerprint_canonical_bytes_are_stable",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t03.py::test_database_subset",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t03.py::test_incomplete_scope",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_discovery_memory.py",
+       "lane": "component",
+       "min_count": 23
+      },
+      {
+       "function": "tests/test_adapter_t11.py::test_b_full_chain",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      }
+     ]
+    }
+   }
+  },
+  "F02": {
+   "semantics": "append→publish、snapshot、空refresh、DB先ACK、故障前缀、旧ACK与内容提交分离；fsync失败及审计重复边界",
+   "cells": {
+    "bilibili": {
+     "status": "na",
+     "basis": "规格 E2 与 F02 旧 node 只定义小红书批次 checkpoint 的 publish/ACK；通用站发现提交失败归 F01/F05"
+    },
+    "weibo": {
+     "status": "na",
+     "basis": "规格 E2 与 F02 旧 node 只定义小红书批次 checkpoint 的 publish/ACK；通用站发现提交失败归 F01/F05"
+    },
+    "douyin": {
+     "status": "na",
+     "basis": "规格 E2 与 F02 旧 node 只定义小红书批次 checkpoint 的 publish/ACK；通用站发现提交失败归 F01/F05"
+    },
+    "zhihu": {
+     "status": "na",
+     "basis": "规格 E2 与 F02 旧 node 只定义小红书批次 checkpoint 的 publish/ACK；通用站发现提交失败归 F01/F05"
+    },
+    "xhs": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_xhs_batch_checkpoint.py::test_exporter_hook_publishes_only_after_durable_event",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_xhs_batch_checkpoint.py::test_complete_batch_survives_root_loss_and_mutable_export_tail",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_xhs_batch_checkpoint.py::test_empty_refresh_commits_history_without_creating_export_files",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_xhs_batch_checkpoint.py::test_ack_failure_after_db_commit_is_idempotent",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_xhs_batch_checkpoint.py::test_exporter_checkpoint_failure_keeps_precise_terminal_evidence",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_xhs_batch_checkpoint.py::test_ack_directory_fsync_failure_keeps_committed_discovery",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_xhs_batch_checkpoint.py::test_repeated_commit_after_ack_failure_keeps_seen_unique_without_exactly_once_audit",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_xhs_batch_checkpoint.py::test_sigkill_preserves_exactly_the_acknowledged_boundary",
+       "lane": "os"
+      },
+      {
+       "function": "tests/test_adapter_t09_bridge.py::test_e_bridge_publishes_xhs_batch_like_legacy",
+       "lane": "component",
+       "legacy_equivalence": true
+      }
+     ]
+    }
+   }
+  },
+  "F03": {
+   "semantics": "固定五站，真实0/source/observed、时间、正文状态、缺键/null/合法空分别断言",
+   "shared": [
+    {
+     "function": "tests/test_full_content_contract.py::test_formal_contract_covers_exactly_five_platforms",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_full_content_contract.py::test_required_metric_groups_match_formal_contract",
+     "lane": "component"
+    }
+   ],
+   "cells": {
+    "bilibili": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_full_content_contract.py::test_all_platforms_require_trusted_complete_body_provenance",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_title_or_summary_cannot_replace_the_authoritative_body",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_observed_zero_followers_is_valid",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_incomplete_follower_evidence_is_invalid",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_missing_platform_time_cannot_be_replaced_by_capture_time",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_failed_body_status_cannot_pass_with_body_and_trusted_source",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_absent_required_metric_is_invalid",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_observed_zero_metric_is_valid",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_untrusted_followers_source_is_invalid",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_explicit_video_record_is_rejected",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_title_image_only_switch_does_not_relax_other_platforms",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      }
+     ]
+    },
+    "weibo": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_full_content_contract.py::test_all_platforms_require_trusted_complete_body_provenance",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_title_or_summary_cannot_replace_the_authoritative_body",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_observed_zero_followers_is_valid",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_incomplete_follower_evidence_is_invalid",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_missing_platform_time_cannot_be_replaced_by_capture_time",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_failed_body_status_cannot_pass_with_body_and_trusted_source",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_absent_required_metric_is_invalid",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_observed_zero_metric_is_valid",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_untrusted_followers_source_is_invalid",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_explicit_video_record_is_rejected",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_title_image_only_switch_does_not_relax_other_platforms",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      }
+     ]
+    },
+    "douyin": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_full_content_contract.py::test_all_platforms_require_trusted_complete_body_provenance",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_title_or_summary_cannot_replace_the_authoritative_body",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_observed_zero_followers_is_valid",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_incomplete_follower_evidence_is_invalid",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_missing_platform_time_cannot_be_replaced_by_capture_time",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_failed_body_status_cannot_pass_with_body_and_trusted_source",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_absent_required_metric_is_invalid",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_observed_zero_metric_is_valid",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_untrusted_followers_source_is_invalid",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_explicit_video_record_is_rejected",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_title_image_only_switch_does_not_relax_other_platforms",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      }
+     ]
+    },
+    "zhihu": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_full_content_contract.py::test_all_platforms_require_trusted_complete_body_provenance",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_title_or_summary_cannot_replace_the_authoritative_body",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_observed_zero_followers_is_valid",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_incomplete_follower_evidence_is_invalid",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_missing_platform_time_cannot_be_replaced_by_capture_time",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_failed_body_status_cannot_pass_with_body_and_trusted_source",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_absent_required_metric_is_invalid",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_observed_zero_metric_is_valid",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_untrusted_followers_source_is_invalid",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_explicit_video_record_is_rejected",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_title_image_only_switch_does_not_relax_other_platforms",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      }
+     ]
+    },
+    "xhs": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_full_content_contract.py::test_all_platforms_require_trusted_complete_body_provenance",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_title_or_summary_cannot_replace_the_authoritative_body",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_observed_zero_followers_is_valid",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_incomplete_follower_evidence_is_invalid",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_missing_platform_time_cannot_be_replaced_by_capture_time",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_failed_body_status_cannot_pass_with_body_and_trusted_source",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_absent_required_metric_is_invalid",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_observed_zero_metric_is_valid",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_untrusted_followers_source_is_invalid",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_explicit_video_record_is_rejected",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_full_content_contract.py::test_xhs_title_image_only_record_is_valid_only_in_repair_mode",
+       "lane": "component"
+      }
+     ]
+    }
+   }
+  },
+  "F04": {
+   "semantics": "完整payload头像证据到投影、首次JSONL/event/log/manifest清理及同URL重复",
+   "shared": [
+    {
+     "function": "tests/test_author_avatar_sanitization.py::test_sanitizer_recursively_removes_aliases_and_exact_duplicate_urls",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_author_avatar_sanitization.py::test_all_known_avatar_aliases_are_removed",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_author_avatar_sanitization.py::test_mediacrawler_exporter_sanitizes_before_jsonl_serialization",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_author_avatar_sanitization.py::test_unstructured_child_output_with_avatar_key_is_discarded_whole",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_image_persistence.py::test_persistence_contract_rejects_author_avatar_role",
+     "lane": "component"
+    }
+   ],
+   "cells": {
+    "bilibili": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_bilibili_offline_faults.py::test_author_avatar_never_reaches_bilibili_artifacts",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_image_candidates.py::test_bilibili_uses_observed_detail_images_not_search_preview_or_avatar",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_image_candidates.py::test_non_content_fields_never_become_content_candidates",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      }
+     ]
+    },
+    "weibo": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_author_avatar_sanitization.py::test_worker_store_files_remove_avatar_before_serialization",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_author_avatar_sanitization.py::test_root_jsonl_writer_sanitizes_without_hook",
+       "lane": "component"
+      },
+      {
+       "file": "tests/platforms/weibo/test_weibo_no_user_info.py",
+       "lane": "component",
+       "min_count": 3
+      },
+      {
+       "function": "tests/platforms/weibo/test_weibo_store.py::test_note_store_keeps_pid_order_and_ignores_avatar",
+       "lane": "component"
+      }
+     ]
+    },
+    "douyin": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_author_avatar_sanitization.py::test_worker_store_files_remove_avatar_before_serialization",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "file": "tests/platforms/douyin/test_douyin_no_user_info.py",
+       "lane": "component",
+       "min_count": 3
+      },
+      {
+       "function": "tests/test_image_candidates.py::test_non_content_fields_never_become_content_candidates",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      }
+     ]
+    },
+    "zhihu": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_author_avatar_sanitization.py::test_worker_store_files_remove_avatar_before_serialization",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/platforms/zhihu/test_zhihu_image_download.py::test_formula_avatar_profile_and_zvideo_never_request_image_bytes",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_image_candidates.py::test_zhihu_excludes_formula_author_and_profile_urls",
+       "lane": "component"
+      }
+     ]
+    },
+    "xhs": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_author_avatar_sanitization.py::test_worker_store_files_remove_avatar_before_serialization",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_author_avatar_sanitization.py::test_xhs_serialized_creator_profile_removes_only_mapped_avatar_fields",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_author_avatar_sanitization.py::test_root_jsonl_sanitizer_failure_precedes_any_file_operation",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/xhs/test_xhs_media_policy.py::test_xhs_asset_projection_excludes_avatar_and_chooses_one_url",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_image_candidates.py::test_avatar_is_removed_from_row_and_image_relationships",
+       "lane": "component"
+      }
+     ]
+    }
+   }
+  },
+  "F05": {
+   "semantics": "重试、真实格式/字节、失败行、整帖拒绝、晋升后失败、commit确定性与引用保护",
+   "shared": [
+    {
+     "function": "tests/test_mediacrawler_import.py::test_five_platform_manifests_share_root_verification_promotion_and_import",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_mediacrawler_import.py::test_postcommit_interrupt_preserves_sqlite_referenced_media",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_mediacrawler_import.py::test_interrupt_before_batch_commit_rolls_back_rows_and_media",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_mediacrawler_import.py::test_rollback_preserves_file_referenced_by_another_committed_run",
+     "lane": "component"
+    },
+    {
+     "file": "tests/test_image_materialization.py",
+     "lane": "component",
+     "min_count": 22
+    },
+    {
+     "file": "tests/test_image_manifest.py",
+     "lane": "component",
+     "min_count": 15
+    },
+    {
+     "file": "tests/test_image_download_retry.py",
+     "lane": "fork",
+     "min_functions": 6
+    },
+    {
+     "file": "tests/test_image_staging_errors.py",
+     "lane": "fork",
+     "min_functions": 3
+    },
+    {
+     "file": "tests/test_image_client_http_classification.py",
+     "lane": "fork",
+     "min_functions": 8
+    }
+   ],
+   "cells": {
+    "bilibili": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_bilibili_image_materialization.py::test_detail_images_download_in_order_with_current_session_headers",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_bilibili_image_materialization.py::test_retryable_image_failure_writes_only_failed_manifest_status",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_bilibili_image_materialization.py::test_terminal_http_failure_is_not_mislabeled_retryable",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_mediacrawler_import.py::test_failed_multi_image_promotion_rolls_back_new_long_term_files",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_t13_transaction_faults.py::test_content_and_discovery_commit_faults_per_site",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      }
+     ]
+    },
+    "weibo": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/platforms/weibo/test_weibo_image_download.py::test_transient_fetch_recovers_and_records_attempts",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/weibo/test_weibo_image_download.py::test_failed_fetch_writes_only_failed_manifest",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/weibo/test_weibo_store.py::test_store_uses_true_format_post_directory_and_schema_v1_manifest",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/weibo/test_weibo_store.py::test_invalid_second_image_does_not_promote_partial_post",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_t13_transaction_faults.py::test_content_and_discovery_commit_faults_per_site",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      }
+     ]
+    },
+    "douyin": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/platforms/douyin/test_douyin_image_only.py::test_strict_image_entry_requests_only_note_image_and_writes_true_format",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/douyin/test_douyin_image_only.py::test_transient_note_image_failure_recovers_and_records_attempts",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/douyin/test_douyin_image_only.py::test_failed_note_image_writes_failed_manifest_only",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_image_persistence.py::test_signature_change_with_same_asset_key_preserves_verified_local_file",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_t13_transaction_faults.py::test_content_and_discovery_commit_faults_per_site",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      }
+     ]
+    },
+    "zhihu": {
+     "status": "covered",
+     "entries": [
+      {
+       "file": "tests/platforms/zhihu/test_zhihu_image_download.py",
+       "lane": "component",
+       "min_count": 6
+      },
+      {
+       "function": "tests/test_mediacrawler_import.py::test_legacy_zhihu_random_asset_key_still_fails_closed",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_mediacrawler_import.py::test_same_post_images_are_deduplicated_by_verified_sha256_before_import",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_t13_transaction_faults.py::test_content_and_discovery_commit_faults_per_site",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      }
+     ]
+    },
+    "xhs": {
+     "status": "covered",
+     "entries": [
+      {
+       "file": "tests/platforms/xhs/test_xhs_image_download.py",
+       "lane": "component",
+       "min_count": 5
+      },
+      {
+       "function": "tests/test_mediacrawler_import.py::test_manifest_or_staging_failure_blocks_whole_post",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_mediacrawler_import.py::test_sqlite_import_failure_rolls_back_newly_promoted_files",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_t13_transaction_faults.py::test_content_and_discovery_commit_faults_per_site",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      }
+     ]
+    }
+   }
+  },
+  "F06": {
+   "semantics": "#1/#2修复语义、真实信号/gate/身份/精确清理、unknown/scan_error不释放；component/OS/socket分组保留",
+   "shared": [
+    {
+     "file": "tests/test_mediacrawler_process_watchdog.py",
+     "lane": "component",
+     "min_count": 36
+    },
+    {
+     "file": "tests/test_mediacrawler_process_watchdog.py",
+     "lane": "os",
+     "min_count": 15
+    },
+    {
+     "file": "tests/runtime/test_cdp_browser_lifecycle.py",
+     "lane": "component",
+     "min_count": 24
+    },
+    {
+     "function": "tests/runtime/test_cdp_browser.py::test_non_xhs_cdp_profile_behavior_is_unchanged_and_ignores_xhs_env",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_adapter_t02.py::test_entry_main_startup_and_cleanup_trace",
+     "lane": "component"
+    }
+   ],
+   "cells": {
+    "bilibili": {
+     "status": "shared",
+     "basis": "worker 监督、进程组与 CDP 生命周期是平台无关的共享运行时，四个通用站没有本站分支；租约/终态/会话只属小红书 runner（规格 F06）；B站执行器在 mediacrawler_crawl 子进程内自启 Playwright",
+     "entries": [
+      {
+       "file": "tests/test_mediacrawler_process_watchdog.py",
+       "lane": "component",
+       "min_count": 36
+      },
+      {
+       "function": "tests/test_adapter_t08.py::test_formal_request_and_artifact_equivalence",
+       "lane": "component",
+       "params": [
+        "behavior_failed"
+       ],
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_adapter_t12.py::test_bilibili_runs_in_process_without_fork_and_is_not_a_worker",
+       "lane": "component"
+      }
+     ]
+    },
+    "weibo": {
+     "status": "shared",
+     "basis": "worker 监督、进程组与 CDP 生命周期是平台无关的共享运行时，四个通用站没有本站分支；租约/终态/会话只属小红书 runner（规格 F06）",
+     "entries": [
+      {
+       "file": "tests/test_mediacrawler_process_watchdog.py",
+       "lane": "component",
+       "min_count": 36
+      },
+      {
+       "file": "tests/runtime/test_cdp_browser_lifecycle.py",
+       "lane": "component",
+       "min_count": 24
+      },
+      {
+       "function": "tests/runtime/test_cdp_browser.py::test_non_xhs_cdp_profile_behavior_is_unchanged_and_ignores_xhs_env",
+       "lane": "component"
+      }
+     ]
+    },
+    "douyin": {
+     "status": "shared",
+     "basis": "worker 监督、进程组与 CDP 生命周期是平台无关的共享运行时，四个通用站没有本站分支；租约/终态/会话只属小红书 runner（规格 F06）",
+     "entries": [
+      {
+       "file": "tests/test_mediacrawler_process_watchdog.py",
+       "lane": "component",
+       "min_count": 36
+      },
+      {
+       "file": "tests/runtime/test_cdp_browser_lifecycle.py",
+       "lane": "component",
+       "min_count": 24
+      },
+      {
+       "function": "tests/runtime/test_cdp_browser.py::test_non_xhs_cdp_profile_behavior_is_unchanged_and_ignores_xhs_env",
+       "lane": "component"
+      }
+     ]
+    },
+    "zhihu": {
+     "status": "shared",
+     "basis": "worker 监督、进程组与 CDP 生命周期是平台无关的共享运行时，四个通用站没有本站分支；租约/终态/会话只属小红书 runner（规格 F06）",
+     "entries": [
+      {
+       "file": "tests/test_mediacrawler_process_watchdog.py",
+       "lane": "component",
+       "min_count": 36
+      },
+      {
+       "file": "tests/runtime/test_cdp_browser_lifecycle.py",
+       "lane": "component",
+       "min_count": 24
+      },
+      {
+       "function": "tests/runtime/test_cdp_browser.py::test_non_xhs_cdp_profile_behavior_is_unchanged_and_ignores_xhs_env",
+       "lane": "component"
+      }
+     ]
+    },
+    "xhs": {
+     "status": "covered",
+     "entries": [
+      {
+       "file": "tests/test_xhs_leases.py",
+       "lane": "component",
+       "min_count": 89
+      },
+      {
+       "file": "tests/test_xhs_leases.py",
+       "lane": "os",
+       "min_count": 30
+      },
+      {
+       "file": "tests/test_xhs_lease_exit.py",
+       "lane": "component",
+       "min_count": 68
+      },
+      {
+       "file": "tests/test_xhs_terminalizer.py",
+       "lane": "component",
+       "min_count": 18
+      },
+      {
+       "file": "tests/test_xhs_terminalizer.py",
+       "lane": "os",
+       "min_count": 3
+      },
+      {
+       "file": "tests/test_xhs_pool.py",
+       "lane": "component",
+       "min_count": 62
+      },
+      {
+       "file": "tests/test_xhs_runtime_status.py",
+       "lane": "component",
+       "min_count": 53
+      },
+      {
+       "file": "tests/test_xhs_runtime_status.py",
+       "lane": "socket",
+       "min_count": 1
+      },
+      {
+       "file": "tests/test_xhs_supervision.py",
+       "lane": "component",
+       "min_count": 10
+      },
+      {
+       "file": "tests/test_xhs_parent_watchdog.py",
+       "lane": "component",
+       "min_count": 21
+      },
+      {
+       "file": "tests/test_xhs_parent_watchdog.py",
+       "lane": "os",
+       "min_count": 1
+      },
+      {
+       "function": "tests/runtime/test_cdp_browser.py::test_xhs_cdp_rejects_existing_browser_without_a_retry_path",
+       "lane": "component"
+      }
+     ]
+    }
+   }
+  },
+  "F07": {
+   "semantics": "Cookie刷新次序、辅助driver不推广、既有fallback范围、XHS单会话/刷新锁存/页守卫/共享budget",
+   "shared": [
+    {
+     "file": "tests/test_crawl_policy.py",
+     "lane": "component",
+     "min_count": 10
+    },
+    {
+     "file": "tests/test_adapter_t04a.py",
+     "lane": "component",
+     "min_count": 5
+    },
+    {
+     "function": "tests/test_adapter_t03.py::test_cookie_snapshot_matches_baseline",
+     "lane": "component"
+    }
+   ],
+   "cells": {
+    "bilibili": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_login_warmup.py::test_selected_targets_supports_all_aliases_and_deduplication",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_mediacrawler_behavior.py::test_all_selected_platforms_require_behavior_and_policy_evidence",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_mediacrawler_behavior.py::test_behavior_validation_requires_evidence_for_each_generic_platform",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_bilibili_article_repair.py::test_live_login_loss_stops_before_detail_request",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t03.py::test_cookie_pure_functions_match_baseline",
+       "lane": "component",
+       "params": [
+        "bilibili"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t10.py::test_warmup_trace_and_files",
+       "lane": "component",
+       "params": [
+        "unified"
+       ],
+       "site_basis": "test_warmup_trace_and_files 的 unified 入口以 --targets all 驱动 B站/微博/抖音/知乎 warmup，新旧逐字节等价",
+       "legacy_equivalence": true
+      }
+     ]
+    },
+    "weibo": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_login_warmup.py::test_weibo_login_accepts_current_mobile_session",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_login_warmup.py::test_weibo_login_rejects_desktop_cookie_without_mobile_api",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_login_warmup.py::test_weibo_login_uses_desktop_login_and_mobile_verification",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_login_warmup.py::test_weibo_desktop_login_requires_sso_or_changed_session",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t05.py::test_warmup_requires_mobile_login_and_uid",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_mediacrawler_behavior.py::test_behavior_stage_writes_complete_evidence",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_mediacrawler_behavior.py::test_behavior_validation_requires_evidence_for_each_generic_platform",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t03.py::test_cookie_pure_functions_match_baseline",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      }
+     ]
+    },
+    "douyin": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_mediacrawler_behavior.py::test_behavior_validation_requires_evidence_for_each_generic_platform",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t03.py::test_cookie_pure_functions_match_baseline",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t06.py::test_old_new_requests_records_images_events",
+       "lane": "component",
+       "params": [
+        "login_expired"
+       ],
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_adapter_t06.py::test_memory_and_slider_lifecycle_match_baseline",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_adapter_t10.py::test_warmup_trace_and_files",
+       "lane": "component",
+       "params": [
+        "unified"
+       ],
+       "site_basis": "test_warmup_trace_and_files 的 unified 入口以 --targets all 驱动 B站/微博/抖音/知乎 warmup，新旧逐字节等价",
+       "legacy_equivalence": true
+      }
+     ]
+    },
+    "zhihu": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_mediacrawler_behavior.py::test_behavior_validation_rejects_wrong_keyword_url",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_mediacrawler_behavior.py::test_behavior_validation_requires_evidence_for_each_generic_platform",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t03.py::test_cookie_pure_functions_match_baseline",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence",
+       "lane": "component",
+       "params": [
+        "login_expired"
+       ],
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_adapter_t07.py::test_dependency_direction",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_adapter_t10.py::test_warmup_trace_and_files",
+       "lane": "component",
+       "params": [
+        "unified"
+       ],
+       "site_basis": "test_warmup_trace_and_files 的 unified 入口以 --targets all 驱动 B站/微博/抖音/知乎 warmup，新旧逐字节等价",
+       "legacy_equivalence": true
+      }
+     ]
+    },
+    "xhs": {
+     "status": "covered",
+     "entries": [
+      {
+       "file": "tests/platforms/xhs/test_xhs_qrcode_login.py",
+       "lane": "component",
+       "min_count": 29
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_popup_guard.py",
+       "lane": "component",
+       "min_count": 14
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_manual_wait_budget.py",
+       "lane": "component",
+       "min_count": 12
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_midrun_login_recovery.py",
+       "lane": "component",
+       "min_count": 12
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_login_contract.py",
+       "lane": "component",
+       "min_count": 51
+      },
+      {
+       "function": "tests/test_adapter_t09.py::test_manual_wait_budget_charges_overlap_once",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_mediacrawler_behavior.py::test_xhs_search_verification_wait_keeps_page_open_until_cleared",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t03.py::test_cookie_pure_functions_match_baseline",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      }
+     ]
+    }
+   }
+  },
+  "F08": {
+   "semantics": "精确ID、禁发现写、同Page回退、部分成功、XHS signal终态优先、fresh零值不覆盖",
+   "shared": [
+    {
+     "function": "tests/test_adapter_t10.py::test_repair_partial_execution",
+     "lane": "component",
+     "legacy_equivalence": true
+    },
+    {
+     "function": "tests/test_adapter_t10.py::test_repair_completion_and_evidence",
+     "lane": "component",
+     "legacy_equivalence": true
+    },
+    {
+     "function": "tests/test_post_detail_repair.py::test_partial_generic_repair_can_commit_valid_subset",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_post_detail_repair.py::test_zero_progress_is_distinct_from_persistence_failure",
+     "lane": "component"
+    }
+   ],
+   "cells": {
+    "bilibili": {
+     "status": "covered",
+     "entries": [
+      {
+       "file": "tests/test_bilibili_article_repair.py",
+       "lane": "component",
+       "min_count": 18
+      }
+     ]
+    },
+    "weibo": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_post_detail_repair.py::test_repair_fallback_keeps_fresh_observed_zero_followers",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_post_detail_repair.py::test_repair_fallback_restores_unobserved_followers_with_matching_source",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_residual_detail_fallbacks.py::test_weibo_browser_api_is_bound_to_requested_id",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_residual_detail_fallbacks.py::test_weibo_repair_hook_recovers_exact_browser_detail",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_post_detail_repair.py::test_build_child_command_disables_discovery_writes",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_post_detail_repair.py::test_partial_repair_separates_import_gate_from_full_completion",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t05.py::test_repair_attempts_and_exception_chain_match_frozen_hook",
+       "lane": "component",
+       "legacy_equivalence": true
+      }
+     ]
+    },
+    "douyin": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_post_detail_repair.py::test_repair_fallback_keeps_fresh_observed_zero_followers",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_post_detail_repair.py::test_repair_fallback_restores_unobserved_followers_with_matching_source",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_residual_detail_fallbacks.py::test_douyin_repair_fallback_tries_note_before_video",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_residual_detail_fallbacks.py::test_douyin_nested_detail_rejects_id_only_shell",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_post_detail_repair.py::test_load_post_repair_targets_rejects_cross_id_target",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_post_detail_repair.py::test_clean_zero_output_repair_is_not_misclassified_as_runtime_failure",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t06.py::test_repair_exception_chain_matches_baseline",
+       "lane": "component",
+       "legacy_equivalence": true
+      }
+     ]
+    },
+    "zhihu": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_post_detail_repair.py::test_repair_fallback_keeps_fresh_observed_zero_followers",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_post_detail_repair.py::test_repair_fallback_restores_unobserved_followers_with_matching_source",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_post_detail_repair.py::test_repair_fallback_makes_sparse_zhihu_detail_formally_valid",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_post_detail_repair.py::test_select_targets_carries_existing_repair_metadata",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_mediacrawler_pagination.py::test_load_zhihu_detail_urls_accepts_only_answer_and_article",
+       "lane": "component"
+      }
+     ]
+    },
+    "xhs": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_post_detail_repair.py::test_repair_fallback_keeps_fresh_observed_zero_followers",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_post_detail_repair.py::test_repair_fallback_restores_unobserved_followers_with_matching_source",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "file": "tests/test_xhs_post_repair.py",
+       "lane": "component",
+       "min_count": 17
+      },
+      {
+       "function": "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy",
+       "lane": "component",
+       "params": [
+        "repair"
+       ],
+       "legacy_equivalence": true
+      }
+     ]
+    }
+   }
+  },
+  "F09": {
+   "semantics": "同clock/random/Page值比较请求、签名输入、异常/次数/等待trace、容错时点、JSONL字节；未匹配请求失败",
+   "cells": {
+    "bilibili": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_adapter_t08.py::test_formal_request_and_artifact_equivalence",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_bilibili_offline_faults.py::test_search_page_failure_is_runtime_failure_without_exhaustion",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_bilibili_offline_faults.py::test_detail_transport_error_retries_then_skips_candidate",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_bilibili_offline_faults.py::test_follower_transport_error_is_swallowed_retried_then_skips_candidate",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_bilibili_offline_faults.py::test_browser_launch_failure_stops_run_before_any_platform_request",
+       "lane": "component"
+      }
+     ]
+    },
+    "weibo": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_search_transport_error_exhausts_original_retry_budget",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_search_transport_failure_propagates_without_exhaustion",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_long_text_detail_transport_error_skips_candidate_after_three_attempts",
+       "lane": "component"
+      }
+     ]
+    },
+    "douyin": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_adapter_t06.py::test_old_new_requests_records_images_events",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_adapter_t06.py::test_post_form_and_signature_inputs_match_baseline",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/platforms/douyin/test_douyin_offline_faults.py::test_request_transport_error_is_raised_once_without_retry",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/douyin/test_douyin_offline_faults.py::test_search_transport_error_ends_run_without_exhaustion",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/douyin/test_douyin_offline_faults.py::test_creator_profile_transport_error_ends_run_without_retry_or_skip",
+       "lane": "component"
+      }
+     ]
+    },
+    "zhihu": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_request_transport_error_reraises_after_three_attempts",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_unregistered_request_path_fails_instead_of_being_treated_as_detail",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_search_transport_error_ends_run_without_exhaustion",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_detail_transport_error_ends_run_without_candidate_skip",
+       "lane": "component"
+      }
+     ]
+    },
+    "xhs": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy",
+       "lane": "component",
+       "params": [
+        "network_recover",
+        "network_timeout",
+        "cdp_disconnect",
+        "main_page_closed"
+       ],
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_adapter_t09.py::test_legacy_factory_matches_root_entry",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_adapter_t09.py::test_pure_parsers_and_signer",
+       "lane": "component",
+       "legacy_equivalence": true
+      }
+     ]
+    }
+   }
+  },
+  "F10": {
+   "semantics": "wheel/sdist仓库外资源、选站懒加载、无fork/cwd/PYTHONPATH补齐、Node桥、SQL/契约、辅助CLI、未选平台/DB不导入",
+   "shared": [
+    {
+     "file": "tests/test_adapter_t12_install.py",
+     "lane": "installation",
+     "min_count": 11
+    },
+    {
+     "function": "tests/test_t13_selected_platform_loading.py::test_cross_site_imports_in_worker_assembly_are_exactly_registered",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_adapter_t10.py::test_page_readiness_trace",
+     "lane": "component",
+     "legacy_equivalence": true
+    },
+    {
+     "function": "tests/test_adapter_t10.py::test_page_evidence_cookie_cleanup",
+     "lane": "component",
+     "legacy_equivalence": true
+    }
+   ],
+   "cells": {
+    "bilibili": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_adapter_t12.py::test_bilibili_runs_in_process_without_fork_and_is_not_a_worker",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t01.py::test_bilibili_stealth_comes_from_package",
+       "lane": "component"
+      },
+      {
+       "function": "tests/test_adapter_t12.py::test_ci_fork_check_drops_upstream_bilibili_video_and_checks_root_five_site_assembly",
+       "lane": "component"
+      }
+     ]
+    },
+    "weibo": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_adapter_t12_install.py::test_installed_worker_selects_each_platform_without_fork_tree",
+       "lane": "installation",
+       "params": [
+        "wb"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t12.py::test_worker_selection_loads_no_fork_top_level_package",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
+       "lane": "component",
+       "params": [
+        "weibo"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t05.py::test_dependency_direction",
+       "lane": "component",
+       "legacy_equivalence": true
+      }
+     ]
+    },
+    "douyin": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_adapter_t12_install.py::test_installed_worker_selects_each_platform_without_fork_tree",
+       "lane": "installation",
+       "params": [
+        "dy"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t12.py::test_worker_selection_loads_no_fork_top_level_package",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
+       "lane": "component",
+       "params": [
+        "douyin"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t06.py::test_dependency_direction",
+       "lane": "component",
+       "legacy_equivalence": true
+      },
+      {
+       "function": "tests/test_adapter_t02.py::test_fork_signature_js_loads_from_any_cwd",
+       "lane": "installation",
+       "site_basis": "抖音与知乎签名 JS 的 Node 桥从任意 cwd 装载"
+      }
+     ]
+    },
+    "zhihu": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_adapter_t12_install.py::test_installed_worker_selects_each_platform_without_fork_tree",
+       "lane": "installation",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t12.py::test_worker_selection_loads_no_fork_top_level_package",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
+       "lane": "component",
+       "params": [
+        "zhihu"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t07.py::test_worker_assembly_without_fork_zhihu",
+       "lane": "component",
+       "legacy_equivalence": true
+      }
+     ]
+    },
+    "xhs": {
+     "status": "covered",
+     "entries": [
+      {
+       "function": "tests/test_adapter_t12_install.py::test_installed_worker_selects_each_platform_without_fork_tree",
+       "lane": "installation",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_adapter_t12.py::test_worker_selection_loads_no_fork_top_level_package",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      },
+      {
+       "file": "tests/test_adapter_t09_deps.py",
+       "lane": "component",
+       "min_count": 7
+      }
+     ]
+    }
+   }
+  },
+  "F11": {
+   "semantics": "过滤空页、长短文正文来源、阻断不seen、pid图序、无头像/无多余作者请求",
+   "cells": {
+    "bilibili": {
+     "status": "na",
+     "basis": "规格 F11 限定微博 platforms/weibo/ 同名文件"
+    },
+    "douyin": {
+     "status": "na",
+     "basis": "规格 F11 限定微博 platforms/weibo/ 同名文件"
+    },
+    "zhihu": {
+     "status": "na",
+     "basis": "规格 F11 限定微博 platforms/weibo/ 同名文件"
+    },
+    "xhs": {
+     "status": "na",
+     "basis": "规格 F11 限定微博 platforms/weibo/ 同名文件"
+    },
+    "weibo": {
+     "status": "covered",
+     "entries": [
+      {
+       "file": "tests/platforms/weibo/test_weibo_empty_search.py",
+       "lane": "component",
+       "min_count": 1
+      },
+      {
+       "file": "tests/platforms/weibo/test_weibo_image_download.py",
+       "lane": "component",
+       "min_count": 16
+      },
+      {
+       "file": "tests/platforms/weibo/test_weibo_no_user_info.py",
+       "lane": "component",
+       "min_count": 3
+      },
+      {
+       "file": "tests/platforms/weibo/test_weibo_store.py",
+       "lane": "component",
+       "min_count": 4
+      }
+     ]
+    }
+   }
+  },
+  "F12": {
+   "semantics": "请求含空from_group_id、响应复用、健康后页证据、offset/search_id、图文过滤、URI身份",
+   "cells": {
+    "bilibili": {
+     "status": "na",
+     "basis": "规格 F12 限定抖音 platforms/douyin/ 同名文件"
+    },
+    "weibo": {
+     "status": "na",
+     "basis": "规格 F12 限定抖音 platforms/douyin/ 同名文件"
+    },
+    "zhihu": {
+     "status": "na",
+     "basis": "规格 F12 限定抖音 platforms/douyin/ 同名文件"
+    },
+    "xhs": {
+     "status": "na",
+     "basis": "规格 F12 限定抖音 platforms/douyin/ 同名文件"
+    },
+    "douyin": {
+     "status": "covered",
+     "entries": [
+      {
+       "file": "tests/platforms/douyin/test_douyin_image_only.py",
+       "lane": "component",
+       "min_count": 11
+      },
+      {
+       "file": "tests/platforms/douyin/test_douyin_no_user_info.py",
+       "lane": "component",
+       "min_count": 3
+      },
+      {
+       "file": "tests/platforms/douyin/test_douyin_search_safety.py",
+       "lane": "component",
+       "min_count": 25
+      },
+      {
+       "file": "tests/platforms/douyin/test_douyin_store.py",
+       "lane": "component",
+       "min_count": 2
+      }
+     ]
+    }
+   }
+  },
+  "F13": {
+   "semantics": "精确entity/正文块、搜索作者合并、纯快分支、request/parse区别、单semaphore、图片session",
+   "cells": {
+    "bilibili": {
+     "status": "na",
+     "basis": "规格 F13 限定知乎 platforms/zhihu/ 同名文件"
+    },
+    "weibo": {
+     "status": "na",
+     "basis": "规格 F13 限定知乎 platforms/zhihu/ 同名文件"
+    },
+    "douyin": {
+     "status": "na",
+     "basis": "规格 F13 限定知乎 platforms/zhihu/ 同名文件"
+    },
+    "xhs": {
+     "status": "na",
+     "basis": "规格 F13 限定知乎 platforms/zhihu/ 同名文件"
+    },
+    "zhihu": {
+     "status": "covered",
+     "entries": [
+      {
+       "file": "tests/platforms/zhihu/test_zhihu_detail_images.py",
+       "lane": "component",
+       "min_count": 11
+      },
+      {
+       "file": "tests/platforms/zhihu/test_zhihu_image_download.py",
+       "lane": "component",
+       "min_count": 6
+      },
+      {
+       "file": "tests/platforms/zhihu/test_zhihu_search_detail.py",
+       "lane": "component",
+       "min_count": 10
+      },
+      {
+       "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_filtered_empty_search_page_claims_exhaustion_baseline",
+       "lane": "component"
+      }
+     ]
+    }
+   }
+  },
+  "F14": {
+   "semantics": "根article不替fork video、摘要不当正文、详情重试/粉丝skip、顺序/Header与known提前跳过",
+   "cells": {
+    "weibo": {
+     "status": "na",
+     "basis": "规格 F14 限定 B站 article"
+    },
+    "douyin": {
+     "status": "na",
+     "basis": "规格 F14 限定 B站 article"
+    },
+    "zhihu": {
+     "status": "na",
+     "basis": "规格 F14 限定 B站 article"
+    },
+    "xhs": {
+     "status": "na",
+     "basis": "规格 F14 限定 B站 article"
+    },
+    "bilibili": {
+     "status": "covered",
+     "entries": [
+      {
+       "file": "tests/test_bilibili_formal_route.py",
+       "lane": "component",
+       "min_count": 1
+      },
+      {
+       "file": "tests/test_bilibili_article_detail.py",
+       "lane": "component",
+       "min_count": 11
+      },
+      {
+       "file": "tests/test_bilibili_image_materialization.py",
+       "lane": "component",
+       "min_count": 13
+      },
+      {
+       "file": "tests/test_bilibili_offline_faults.py",
+       "lane": "component",
+       "min_count": 8
+      }
+     ]
+    }
+   }
+  },
+  "F15": {
+   "semantics": "小红书原 fork 平台 node 与参数化语义保留；资源/reader/read一次/签名trace",
+   "cells": {
+    "bilibili": {
+     "status": "na",
+     "basis": "规格 F15 限定小红书 platforms/xhs/ 同名文件"
+    },
+    "weibo": {
+     "status": "na",
+     "basis": "规格 F15 限定小红书 platforms/xhs/ 同名文件"
+    },
+    "douyin": {
+     "status": "na",
+     "basis": "规格 F15 限定小红书 platforms/xhs/ 同名文件"
+    },
+    "zhihu": {
+     "status": "na",
+     "basis": "规格 F15 限定小红书 platforms/xhs/ 同名文件"
+    },
+    "xhs": {
+     "status": "covered",
+     "entries": [
+      {
+       "file": "tests/platforms/xhs/test_xhs_core_access_error.py",
+       "lane": "component",
+       "min_count": 3
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_creator_enrichment.py",
+       "lane": "component",
+       "min_count": 22
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_discovery_memory.py",
+       "lane": "component",
+       "min_count": 23
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_image_download.py",
+       "lane": "component",
+       "min_count": 5
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_login_contract.py",
+       "lane": "component",
+       "min_count": 51
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_manual_wait_budget.py",
+       "lane": "component",
+       "min_count": 12
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_media_policy.py",
+       "lane": "component",
+       "min_count": 3
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_midrun_login_recovery.py",
+       "lane": "component",
+       "min_count": 12
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_network_recovery.py",
+       "lane": "component",
+       "min_count": 40
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_popup_guard.py",
+       "lane": "component",
+       "min_count": 14
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_qrcode_login.py",
+       "lane": "component",
+       "min_count": 29
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_qrcode_preview.py",
+       "lane": "component",
+       "min_count": 6
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_raw_response_errors.py",
+       "lane": "component",
+       "min_count": 24
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_shutdown_error_priority.py",
+       "lane": "component",
+       "min_count": 4
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_store_provenance.py",
+       "lane": "component",
+       "min_count": 1
+      },
+      {
+       "function": "tests/test_adapter_t03.py::test_factory_loads_known_once",
+       "lane": "component",
+       "params": [
+        "xhs"
+       ]
+      }
+     ]
+    }
+   }
+  }
+ },
+ "issues": {
+  "1": {
+   "markers": {
+    "issue1_component": {
+     "lane": "component",
+     "count": 17
+    },
+    "issue1_os": {
+     "lane": "os",
+     "count": 11
+    }
+   },
+   "nodes": [
+    {
+     "node": "tests/test_xhs_leases.py::test_guard_removes_runtime_session_before_releasing_database_lease",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_ordinary_exception_releases_without_changing_health",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_runtime_session_cleanup_failure_retains_exact_lease",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_incomplete_runtime_session_removal_retains_exact_lease[False]",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_incomplete_runtime_session_removal_retains_exact_lease[True]",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_guard_does_not_delete_session_it_failed_to_create",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_guard_owns_and_removes_session_after_mid_creation_failure",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_guard_retains_claimed_session_when_marker_no_longer_matches[tampered]",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_guard_retains_claimed_session_when_marker_no_longer_matches[symlink]",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_guard_does_not_follow_preexisting_session_root_symlink",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_recovery_cli_uses_lease_id_and_accepts_missing_terminal_state",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_pool.py::test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup[lease_signal]",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_pool.py::test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup[keyboard_interrupt]",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_pool.py::test_xhs_schema_removes_persistent_fields_without_erasing_history_or_files",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_post_repair.py::test_xhs_repair_interrupt_writes_terminal_audit_before_exact_cleanup[lease_signal]",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_post_repair.py::test_xhs_repair_interrupt_writes_terminal_audit_before_exact_cleanup[keyboard_interrupt]",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_terminalizer.py::test_sms_terminal_before_pagination_keeps_precise_reason_and_checkpoint",
+     "lane": "component",
+     "marker": "issue1_component"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_normal_end_releases_exact_lease",
+     "lane": "os",
+     "marker": "issue1_os"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_child_registration_failure_stops_untracked_process_group",
+     "lane": "os",
+     "marker": "issue1_os"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_signal_during_child_registration_cancels_gate_before_target_exec[2-15]",
+     "lane": "os",
+     "marker": "issue1_os"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_signal_during_child_registration_cancels_gate_before_target_exec[15-2]",
+     "lane": "os",
+     "marker": "issue1_os"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_keyboard_interrupt_during_child_registration_never_execs_target",
+     "lane": "os",
+     "marker": "issue1_os"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_child_gate_release_failure_never_execs_target_or_leaves_process",
+     "lane": "os",
+     "marker": "issue1_os"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_gated_child_keeps_registered_pid_and_process_group_after_exec",
+     "lane": "os",
+     "marker": "issue1_os"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_sigterm_stops_process_group_before_release",
+     "lane": "os",
+     "marker": "issue1_os"
+    },
+    {
+     "node": "tests/test_xhs_leases.py::test_sigkill_keeps_lease_and_live_child_blocks_orphan_recovery",
+     "lane": "os",
+     "marker": "issue1_os"
+    },
+    {
+     "node": "tests/test_xhs_terminalizer.py::test_formal_os_signal_immediately_after_acquire_has_one_failed_terminal_commit[2]",
+     "lane": "os",
+     "marker": "issue1_os"
+    },
+    {
+     "node": "tests/test_xhs_terminalizer.py::test_formal_os_signal_immediately_after_acquire_has_one_failed_terminal_commit[15]",
+     "lane": "os",
+     "marker": "issue1_os"
+    },
+    {
+     "node": "tests/test_xhs_runtime_status.py::test_socket_is_rejected_without_blocking",
+     "lane": "socket"
+    },
+    {
+     "node": "tests/test_platform_package_resources.py::test_all_script_run_ids_include_microseconds",
+     "lane": "installation"
+    }
+   ],
+   "functions": [
+    {
+     "function": "tests/test_xhs_leases.py::test_guard_cleanup_requires_observed_absence",
+     "lane": "component",
+     "params": [
+      "absent",
+      "alive",
+      "unknown",
+      "scan_error",
+      "exits"
+     ]
+    }
+   ]
+  },
+  "2": {
+   "files": [
+    {
+     "file": "tests/test_xhs_lease_exit.py",
+     "lane": "component",
+     "count": 68
+    }
+   ],
+   "functions": [
+    {
+     "function": "tests/test_xhs_leases.py::test_ordinary_exception_releases_without_changing_health",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_xhs_leases.py::test_runtime_session_cleanup_failure_retains_exact_lease",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_xhs_terminalizer.py::test_deferred_close_is_published_as_failed_without_claiming_release",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_xhs_terminalizer.py::test_final_run_publish_failure_does_not_repeat_exact_close",
+     "lane": "component"
+    },
+    {
+     "function": "tests/test_xhs_leases.py::test_child_registration_failure_stops_untracked_process_group",
+     "lane": "os"
+    },
+    {
+     "function": "tests/test_xhs_leases.py::test_keyboard_interrupt_during_child_registration_never_execs_target",
+     "lane": "os"
+    }
+   ]
+  }
+ }
+}
