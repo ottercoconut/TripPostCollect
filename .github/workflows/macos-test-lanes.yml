@@ -13,6 +13,7 @@ on:
       - 'MANIFEST.in'
       - 'db/**'
       - 'docs/formal-crawl-contract.md'
+      # T14 过渡：fork 删除 PR 本身仍以该路径触发；T14-C 合并后删除此行。
       - 'tools/MediaCrawler'
       - '.github/workflows/macos-test-lanes.yml'
 
@@ -31,6 +32,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          # fork gitlink 删除后没有子模块，此项无副作用；T14-C 合并后删除。
           submodules: recursive
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
@@ -51,17 +53,24 @@ jobs:
           TPC_WORK=$(mktemp -d /private/tmp/tpc-ci.XXXXXX)
           mkdir "$TPC_WORK/pristine" "$TPC_WORK/reports"
           git archive HEAD | tar -x -C "$TPC_WORK/pristine"
-          git -C tools/MediaCrawler archive HEAD | tar -x -C "$TPC_WORK/pristine/tools/MediaCrawler"
+          # T14 过渡：仅 fork gitlink 仍存在时导出 fork 并建立 fork 环境；T14-C 合并后删除两段 if。
+          FORK_GITLINK=0
+          if git ls-files -s -- tools/MediaCrawler | grep -q '^160000 '; then
+            FORK_GITLINK=1
+            git -C tools/MediaCrawler archive HEAD | tar -x -C "$TPC_WORK/pristine/tools/MediaCrawler"
+          fi
           echo "TPC_WORK=$TPC_WORK" >> "$GITHUB_ENV"
           cd "$TPC_WORK/pristine"
           UV_PROJECT_ENVIRONMENT="$TPC_WORK/root-venv" uv sync \
             --locked \
             --extra dev \
             --python "$PYTHON_VERSION"
-          UV_PROJECT_ENVIRONMENT="$TPC_WORK/fork-venv" uv sync \
-            --locked \
-            --project tools/MediaCrawler \
-            --python "$PYTHON_VERSION"
+          if [ "$FORK_GITLINK" = 1 ]; then
+            UV_PROJECT_ENVIRONMENT="$TPC_WORK/fork-venv" uv sync \
+              --locked \
+              --project tools/MediaCrawler \
+              --python "$PYTHON_VERSION"
+          fi
           command -v node
           node --version
       - name: 核对迁移台账
@@ -91,11 +100,16 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
           source "$TPC_WORK/root-venv/bin/activate"
+          # T14 过渡：fork lane 只在 gitlink 仍存在时运行；T14-C 合并后删除 FORK_ARGS。
+          FORK_ARGS=()
+          if git ls-files -s -- tools/MediaCrawler | grep -q '^160000 '; then
+            FORK_ARGS=(--fork-python "$TPC_WORK/fork-venv/bin/python")
+          fi
           python scripts/ci/run_matrix.py \
             --source "$TPC_WORK/pristine" \
             --reports "$TPC_WORK/reports" \
             --runner "$GITHUB_WORKSPACE/tests/run_lanes.py" \
-            --fork-python "$TPC_WORK/fork-venv/bin/python"
+            ${FORK_ARGS[@]+"${FORK_ARGS[@]}"}
       - name: 仅上传计数与脱敏控制证据
         if: always()
         uses: actions/upload-artifact@v4

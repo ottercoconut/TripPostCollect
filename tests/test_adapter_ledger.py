@@ -16,6 +16,7 @@ if str(DEV) not in sys.path:
     sys.path.insert(0, str(DEV))
 
 ledger = import_module("adapter_ledger")
+ledger_rules = import_module("adapter_ledger_rules")
 LEDGER_DIR = ROOT / "docs" / "adapter-ledger"
 DISPOSITIONS = {"迁", "拆", "并", "薄", "退"}
 CARDS = {f"T{n:02d}" for n in range(15)}
@@ -84,9 +85,17 @@ def test_baseline_records_three_heads_and_resource_hashes() -> None:
         assert len(baseline[key]) == 40
     resources = baseline["resources"]
     assert set(resources) == {"libs/douyin.js", "libs/zhihu.js", "libs/stealth.min.js", "LICENSE"}
+    # 包内资源是唯一运行期真源；fork 副本只在 fork 删除前逐字节比对（T14-C 后不存在）。
+    package = {"libs/douyin.js": "js/douyin.js", "libs/zhihu.js": "js/zhihu.js",
+               "libs/stealth.min.js": "js/stealth.min.js", "LICENSE": "licenses/MediaCrawler-LICENSE"}
+    from trippostcollect.core import resources as package_resources
+
     fork = ROOT / "tools" / "MediaCrawler"
     for relative, digest in resources.items():
-        assert hashlib.sha256((fork / relative).read_bytes()).hexdigest() == digest
+        assert package_resources.RESOURCE_SHA256[package[relative]] == digest
+        assert hashlib.sha256(package_resources.read_bytes(package[relative])).hexdigest() == digest
+        if fork.is_dir():
+            assert hashlib.sha256((fork / relative).read_bytes()).hexdigest() == digest
 
 
 def test_resource_hashes_match_spec_c0() -> None:
@@ -176,8 +185,8 @@ def test_tests_ledger_schema() -> None:
 
 def test_fork_node_count_matches_ci_expectation() -> None:
     data = json.loads((LEDGER_DIR / "tests.json").read_text())
-    run_matrix = (ROOT / "scripts" / "ci" / "run_matrix.py").read_text()
-    expected = int(run_matrix.split("FORK_EXPECTED_TESTS = ", 1)[1].split("\n", 1)[0])
+    # fork lane 的 34 个用例以 T14 映射为准；fork 删除后 run_matrix 不再声明该常量。
+    expected = json.loads((ROOT / "tests/fixtures/t14_fork_test_mapping.json").read_text())["fork_expected_tests"]
     moved_files = {"tests/runtime/test_cdp_browser.py", "tests/runtime/test_cdp_browser_lifecycle.py"}
     moved_files.update({
         "tests/platforms/weibo/test_weibo_empty_search.py",
@@ -428,3 +437,153 @@ def test_only_spec_authorized_env_removals_are_excluded_from_drift(tmp_path: Pat
     assert ledger.build_input_drift(tmp_path) == {
         "cli_changed": {}, "env_added": [], "env_removed": ["TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_POLL_SECONDS"],
     }
+
+
+# ---------- T14 收口：显式归位、冻结自检与删除批模拟 ----------
+
+def _fork_removed_reader(root: Path):
+    """模拟 T14-C：隐藏 fork、私有桥 E、过渡装载模块，并删去只服务旧桥的根定义。"""
+    import ast
+
+    from adapter_ledger_rules import FORK_BRIDGE_FILES
+
+    hidden = ("tools/MediaCrawler/", *FORK_BRIDGE_FILES)
+    dropped = {
+        "src/trippostcollect/records/identity.py": {"anonymize_user_id", "mask_nickname"},
+        "src/trippostcollect/records/sanitization.py": {"install_export_hook"},
+        "src/trippostcollect/application/events.py": {"install_batch_checkpoint_hook"},
+    }
+
+    def read(relative: str) -> str:
+        path = root / relative
+        if relative.startswith(hidden) or not path.is_file():
+            return ""
+        source = path.read_text(encoding="utf-8")
+        if relative in dropped:
+            tree = ast.parse(source)
+            tree.body = [node for node in tree.body if getattr(node, "name", None) not in dropped[relative]]
+            source = ast.unparse(tree)
+        return source
+
+    return read
+
+
+def test_progress_after_simulated_fork_removal_has_no_pending_or_missing() -> None:
+    current = ledger.build_progress(ROOT)
+    assert current["counts"]["missing"] == 0
+    simulated = ledger.build_progress(ROOT, _fork_removed_reader(ROOT))
+    assert simulated["counts"]["missing"] == simulated["counts"]["pending"] == 0
+    assert simulated["total"] == current["total"] == 1234
+    resolved = {(row["file"], row["qualname"]): row for row in simulated["rows"] if "resolution" in row}
+    # 每条收口规则在删除批都实际生效，且依据写入 progress 行。
+    assert resolved.keys() == ledger.PROGRESS_RESOLUTIONS.keys()
+    exited = {key for key, (kind, _, _) in ledger.PROGRESS_RESOLUTIONS.items() if kind == "退出"}
+    assert {key for key, row in resolved.items() if row["state"] == "exited"} == exited
+    assert ("tools/MediaCrawler/tools/user_hash.py", "anonymize_user_id") in exited
+
+
+def test_progress_resolutions_point_to_frozen_rows_and_existing_targets() -> None:
+    rows = {(row["file"], row["qualname"]): row for row in ledger.load_symbols(ROOT)["rows"]}
+    inspect = ledger.definition_inspector(ROOT)
+    for key, (kind, name, basis) in ledger.PROGRESS_RESOLUTIONS.items():
+        assert key in rows and rows[key]["disposition"] != "退", key
+        assert kind in {"迁至", "退出"} and basis, key
+        if kind == "迁至":
+            assert name in inspect(ledger.target_path(rows[key]["target"]))[0], key
+        else:
+            assert name is None
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("source-references", "moved"), ("source-unrelated", "pending"), ("source-absent", "moved"),
+    ("target-absent", "missing"), ("exit-source-present", "pending"), ("exit-source-absent", "exited"),
+])
+def test_progress_resolution_rules(tmp_path: Path, monkeypatch, case: str, expected: str) -> None:
+    # 子类继承承接类：常规定位不识别（非单条 return 委托），只有显式收口规则能确认引用。
+    original, target = "scripts/original.py", "src/trippostcollect/artifacts/target.py"
+    row = {"file": original, "qualname": "Legacy", "disposition": "拆", "card": "T04",
+           "target": "artifacts/target.py"}
+    kind = "退出" if case.startswith("exit") else "迁至"
+    monkeypatch.setattr(ledger, "PROGRESS_RESOLUTIONS", {
+        (original, "Legacy"): (kind, None if kind == "退出" else "Stager", "依据")})
+    files = {target: "class Stager:\n    pass\n"}
+    if case in ("source-references", "exit-source-present"):
+        files[original] = "from trippostcollect.artifacts.target import Stager\nclass Legacy(Stager):\n    pass\n"
+    elif case == "source-unrelated":
+        files[original] = "class Legacy:\n    pass\n"
+    elif case == "target-absent":
+        files[target] = ""
+    for relative, source in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    located = ledger.locate_definition(tmp_path, row, rows=[row])
+    assert located.state == expected
+    if expected == "moved":
+        assert (located.file, located.qualname, located.basis) == (target, "Stager", "依据")
+    monkeypatch.setattr(ledger, "PROGRESS_RESOLUTIONS", {})
+    assert ledger.locate_definition(tmp_path, row, rows=[row]).state == (
+        "pending" if original in files else "missing")
+
+
+def test_frozen_self_check_passes_and_detects_tampering(tmp_path: Path) -> None:
+    for command in ("symbols", "inputs", "baseline"):
+        assert ledger.frozen_problems(ROOT, command) == []
+    for relative in (*ledger_rules.FROZEN_LEDGER_SHA256, ):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((ROOT / relative).read_bytes())
+    assert ledger.frozen_problems(tmp_path, "symbols") == []
+    markdown = tmp_path / ledger.SYMBOL_MARKDOWN
+    markdown.write_bytes(markdown.read_bytes() + b"\n")
+    assert ledger.frozen_problems(tmp_path, "symbols") == [f"冻结台账散列不符：{ledger.SYMBOL_MARKDOWN}"]
+
+
+def test_check_without_fork_gitlink_never_reads_git_objects(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(ledger, "fork_gitlink", lambda root, revision=None: None)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("fork 删除后 --check 不得访问 Git 对象库")
+
+    monkeypatch.setattr(ledger, "git_read", forbidden)
+    for command in ("symbols", "inputs", "baseline", "all"):
+        assert ledger.main([command, "--check"]) == 0
+    assert ledger.main(["symbols"]) == 1
+    assert "迁移台账已冻结" in capsys.readouterr().out
+
+
+def test_fork_gitlink_reads_index_and_revision(tmp_path: Path) -> None:
+    import subprocess
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    git("init", "-q")
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "base")
+    assert ledger.fork_gitlink(tmp_path) is None
+    commit = "1" * 40
+    git("update-index", "--add", "--cacheinfo", f"160000,{commit},tools/MediaCrawler")
+    assert ledger.fork_gitlink(tmp_path) == commit
+    assert ledger.fork_gitlink(tmp_path, "HEAD") is None
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "fork")
+    assert ledger.fork_gitlink(tmp_path, "HEAD") == commit
+    git("rm", "-q", "--cached", "tools/MediaCrawler")
+    assert ledger.fork_gitlink(tmp_path) is None
+
+
+def test_fork_source_stays_pending_until_deleted(tmp_path: Path, monkeypatch) -> None:
+    # fork/私有桥原位适配在删除批之前保持 pending，即使已直接引用承接定义。
+    original, target = "tools/MediaCrawler/store/demo.py", "src/trippostcollect/artifacts/target.py"
+    row = {"file": original, "qualname": "Legacy", "disposition": "拆", "card": "T04",
+           "target": "artifacts/target.py"}
+    monkeypatch.setattr(ledger, "PROGRESS_RESOLUTIONS", {(original, "Legacy"): ("迁至", "Stager", "依据")})
+    for relative, source in {
+        target: "class Stager:\n    pass\n",
+        original: "from trippostcollect.artifacts.target import Stager\nclass Legacy(Stager):\n    pass\n",
+    }.items():
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text(source, encoding="utf-8")
+    assert ledger.locate_definition(tmp_path, row, rows=[row]).state == "pending"
+    (tmp_path / original).unlink()
+    assert ledger.locate_definition(tmp_path, row, rows=[row]).state == "moved"

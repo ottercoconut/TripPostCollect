@@ -138,11 +138,11 @@ def sandbox_policy(source: Path, output: Path, lane: str) -> str:
             "Documents", "Desktop", "Downloads",
         )
     }
+    # 平台登录资料：T14-A 起位于 data/runtime/platform_sessions；fork 下旧 browser_data 随 T14-C 删除。
+    profiles = ("data/runtime/platform_sessions", "tools/MediaCrawler/browser_data")
     if checkout != source:
-        forbidden.update(checkout / name for name in
-                         ("data", "outputs", "tools/MediaCrawler/browser_data", ".git", ".env"))
-    forbidden.update(source / name for name in
-                     ("tools/MediaCrawler/browser_data", ".git", ".env"))
+        forbidden.update(checkout / name for name in ("data", "outputs", *profiles, ".git", ".env"))
+    forbidden.update(source / name for name in (*profiles, ".git", ".env"))
     rules = ["(version 1)", "(allow default)", "(deny network*)"]
     rules += [f"(deny file-read* file-write* (subpath {json.dumps(str(p.resolve()))}))"
               for p in sorted(forbidden)]

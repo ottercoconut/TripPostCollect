@@ -20,6 +20,9 @@ coverage_report = importlib.util.module_from_spec(_COVERAGE)
 _COVERAGE.loader.exec_module(coverage_report)
 
 
+FORK = "tools/MediaCrawler"
+# T14 过渡：fork gitlink 存在时才运行 fork 离线 lane；34 个用例到根断言的映射见
+# tests/fixtures/t14_fork_test_mapping.json。T14-C 删除 fork 后，本节常量与 fork lane 代码一并删除。
 FORK_OFFLINE_TESTS = tuple(f"tests/test_{name}.py" for name in (
     "image_client_http_classification",
     "image_download_retry", "image_staging_errors", "trippostcollect_adaptive",
@@ -48,6 +51,14 @@ ASSEMBLY_CHECK = (
     "if loaded:\n"
     "    raise SystemExit('fork packages loaded: ' + ','.join(loaded))\n"
 )
+
+
+def fork_gitlink_present(repository):
+    """以外层仓库索引中是否仍有 fork gitlink 判定过渡状态；源码副本没有 .git，不能自行判断。"""
+    result = subprocess.run(["git", "-C", str(repository), "ls-files", "-s", "--", FORK],
+                            capture_output=True, text=True, check=True)
+    return any(line.split()[0] == "160000" and line.endswith("\t" + FORK)
+               for line in result.stdout.splitlines())
 
 
 def fork_pythonpath(source, support):
@@ -81,6 +92,9 @@ def fresh_source(pristine, destination):
 
     destination.mkdir(parents=True, exist_ok=False)
     for name in ("src", "scripts", "tests", "config", "db", "docs", "tools"):
+        # tools/ 只承载 fork 子模块；T14-C 删除后不存在，跳过即可。
+        if name == "tools" and not (pristine / name).exists():
+            continue
         shutil.copytree(pristine / name, destination / name, ignore=ignore,
                         copy_function=shutil.copyfile)
     for name in ("pyproject.toml", "uv.lock", "AGENTS.md", "build_support.py", "MANIFEST.in"):
@@ -138,14 +152,18 @@ def main():
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--reports", required=True, type=Path)
     parser.add_argument("--runner", required=True, type=Path)
-    parser.add_argument("--fork-python", required=True, type=Path)
+    parser.add_argument("--fork-python", type=Path, help="仅 fork gitlink 仍存在时提供（T14 过渡）")
     args = parser.parse_args()
     source, reports = args.source.resolve(), args.reports.resolve()
     runner = args.runner.resolve()
-    if runner != Path(__file__).resolve().parents[2] / "tests/run_lanes.py":
+    repository = Path(__file__).resolve().parents[2]
+    if runner != repository / "tests/run_lanes.py":
         raise RuntimeError("必须使用本控制脚本所在外层仓库的 runner")
+    with_fork = fork_gitlink_present(repository)
+    if with_fork != (source / FORK).is_dir() or with_fork != (args.fork_python is not None):
+        raise RuntimeError("fork gitlink、源码副本中的 fork 与 --fork-python 必须同时存在或同时缺省")
     sys.path.insert(0, str(runner.parent))
-    from run_lanes import sandbox_policy, runtime_path, validate_counts
+    from run_lanes import sandbox_policy, runtime_path
     from native_macos import hosted_only
 
     hosted_only()
@@ -164,6 +182,7 @@ def main():
         if junit.exists():
             redact_junit(junit)
     # 根环境选站装配：B站 article 与四站 worker 只用根包，不调用抓取入口、不访问平台。
+    # fork 删除后传入的 fork 路径不存在，“未装载 fork 包”检查仍然成立。
     assembly = reports / "assembly"
     assembly_source = fresh_source(source, source.parent / "lane-assembly")
     assembly.mkdir()
@@ -190,7 +209,22 @@ def main():
            check=False, timeout=120)
     results["assembly"] = {"returncode": result.returncode, "modules": list(ROOT_ASSEMBLY_MODULES),
                            "worker_platforms": list(WORKER_PLATFORM_CODES)}
-    # fork 离线用例仍用 fork 自身环境（共享辅助的旧桥出口，T14 随目录删除）。
+    if with_fork:
+        results["fork_offline"] = run_fork_offline(source, reports, args.fork_python)
+    # 五站覆盖：按 tests/fixtures/t13_coverage.json 核对各 lane（fork 仍在时含 fork）的 junit，任一声明 node 缺失或未通过即失败。
+    coverage = coverage_report.write_report(source / coverage_report.SPEC_PATH, reports,
+                                            (*coverage_report.ROOT_LANES, *(("fork",) if with_fork else ())))
+    results["coverage"] = {"returncode": int(not coverage["ok"]), "problems": len(coverage["problems"]),
+                           "status_counts": coverage["status_counts"]}
+    (reports / "matrix.json").write_text(json.dumps(results, indent=2))
+    return int(any(value["returncode"] != 0 or value.get("status") == "missing_result"
+                   for value in results.values()))
+
+
+def run_fork_offline(source, reports, fork_python):
+    """fork 离线用例仍用 fork 自身环境（共享辅助的旧桥出口，T14-C 随目录删除）。"""
+    from run_lanes import sandbox_policy, runtime_path, validate_counts
+
     output = reports / "fork"
     fork_source = fresh_source(source, source.parent / "lane-fork")
     output.mkdir()
@@ -218,34 +252,27 @@ def main():
     with (output / "pytest.log").open("w") as log:
         offline = subprocess.run([
             "/usr/bin/sandbox-exec", "-f", str(policy),
-            *fork_test_command(args.fork_python.absolute(), fork, output),
+            *fork_test_command(fork_python.absolute(), fork, output),
         ], cwd=fork, env=environment, stdout=log, stderr=subprocess.STDOUT,
            check=False, timeout=600)
-    results["fork_offline"] = {"returncode": offline.returncode,
-                               "files": len(FORK_OFFLINE_TESTS),
-                               "expected_tests": FORK_EXPECTED_TESTS}
+    result = {"returncode": offline.returncode,
+              "files": len(FORK_OFFLINE_TESTS),
+              "expected_tests": FORK_EXPECTED_TESTS}
     counts_path = output / "counts.json"
     if counts_path.exists():
         counts = json.loads(counts_path.read_text())
-        results["fork_offline"]["counts"] = counts
+        result["counts"] = counts
         try:
             validate_counts(counts)
             if counts["selected"] != FORK_EXPECTED_TESTS:
                 raise RuntimeError("fork selection count changed")
         except RuntimeError:
-            results["fork_offline"]["returncode"] = 1
+            result["returncode"] = 1
     else:
-        results["fork_offline"]["status"] = "missing_result"
+        result["status"] = "missing_result"
     if (output / "pytest.xml").exists():
         redact_junit(output / "pytest.xml")
-    # 五站覆盖：按 tests/fixtures/t13_coverage.json 核对各 lane 与 fork 的 junit，任一声明 node 缺失或未通过即失败。
-    coverage = coverage_report.write_report(source / coverage_report.SPEC_PATH, reports,
-                                            (*coverage_report.ROOT_LANES, "fork"))
-    results["coverage"] = {"returncode": int(not coverage["ok"]), "problems": len(coverage["problems"]),
-                           "status_counts": coverage["status_counts"]}
-    (reports / "matrix.json").write_text(json.dumps(results, indent=2))
-    return int(any(value["returncode"] != 0 or value.get("status") == "missing_result"
-                   for value in results.values()))
+    return result
 
 
 if __name__ == "__main__":

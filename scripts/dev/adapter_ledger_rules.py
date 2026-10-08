@@ -2398,3 +2398,88 @@ SYMBOL_RULES = [
         "四站实现逐行差分；一致部分合并，差异作显式参数",
     ),
 ]
+
+# ---------------------------------------------------------------- T14 收口（progress 显式归位）
+#
+# 冻结账（docs/adapter-ledger/*.json）不改；以下映射只在 progress 定位时使用，键为冻结账的
+# （文件, 限定名）。两类处置：
+# - "迁至"：根中改名或拆分后的承接定义（目标文件沿用冻结账 target，限定名在此显式登记）。原定义已删除
+#   时，目标定义存在即 moved；原定义仍在保留文件（根 scripts）时，只有其 AST 直接引用该承接定义（端口注入
+#   适配）才算 moved；fork 与私有桥 E 的原位定义在 T14-C 删除前一律保持 pending。
+# - "退出"：原定义与目标均不存在时记为 exited，依据写明；原定义仍在时保持 pending，目标仍在时仍按
+#   常规定位为 moved。
+# 只在常规定位得到 pending/missing 时生效，不改变常规定位已为 moved/exited 的行。
+_JSONL = "仅JSONL内容出口；四站同构子类合并为JsonlContentStore单实现，writer属性名作构造参数"
+_STAGER = "四站同构整帖staging子类合并为PostImageStager单实现，资产键/日志作构造参数"
+PROGRESS_RESOLUTIONS = {
+    ("scripts/mediacrawler_crawl.py", "ensure_prerequisites"): (
+        "迁至", "verify_package_resources", "T12起前置检查即包内资源散列核验；C保留端口适配"),
+    ("scripts/mediacrawler_behavior.py", "run_guarded_request_pause"): (
+        "迁至", "run_guarded_request_pause", "外部同名入口只注入证据出口后委托根实现"),
+    ("scripts/mediacrawler_behavior.py", "run_page_behavior"): (
+        "迁至", "run_page_behavior", "外部同名入口只注入小红书等待与证据出口后委托根实现"),
+    ("scripts/mediacrawler_export_entrypoint.py", "install_xhs_repair_resilience"): (
+        "迁至", "run_xhs_repair", "开关读取归worker_inputs.xhs_repair_reader并由entry装配；修复编排为显式分支"),
+    ("scripts/mediacrawler_export_entrypoint.py", "install_douyin_browser_detail_fallback"): (
+        "迁至", "DouYinClient.browser_detail",
+        "开关读取归worker_inputs.douyin_browser_detail_fallback_reader；回退算法为客户端显式方法"),
+    ("scripts/mediacrawler_export_entrypoint.py", "install_weibo_browser_detail_fallback"): (
+        "迁至", "WeiboClient._get_note_info_repair",
+        "开关读取归worker_inputs.weibo_input_readers.post_repair；回退算法为客户端显式方法"),
+    ("scripts/mediacrawler_export_entrypoint.py", "install_export_hook"): (
+        "退出", None, "仅包裹fork写出方法的旧桥hook；根JsonlContentStore在写出前直接净化"),
+    ("scripts/mediacrawler_export_entrypoint.py", "install_batch_checkpoint_hook"): (
+        "退出", None, "仅替换fork模块事件出口的旧桥hook；根worker经显式发布出口append_and_publish"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._env_float"): (
+        "迁至", "_env_nonnegative_float", "T09方法体逐字迁为模块级零参reader工厂"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._validate_login_contract"): (
+        "迁至", "_validate_login_contract", "T09登录契约迁为模块级函数，配置经参数传入"),
+    ("tools/MediaCrawler/media_platform/zhihu/core.py", "ZhihuCrawler._env_float"): (
+        "迁至", "_env_float", "T07方法迁为模块级reader"),
+    ("tools/MediaCrawler/store/douyin/__init__.py", "update_dy_aweme_images"): (
+        "迁至", "DouYinCrawler.update_dy_aweme_images", "改为crawler方法，经ImageStager端口写出"),
+    ("tools/MediaCrawler/store/douyin/__init__.py", "record_dy_aweme_image_failure"): (
+        "迁至", "DouYinCrawler.record_dy_aweme_image_failure", "改为crawler方法，经ImageStager端口写出"),
+    ("tools/MediaCrawler/store/weibo/__init__.py", "update_weibo_note_images"): (
+        "迁至", "WeiboCrawler.update_weibo_note_images", "改为crawler方法，经ImageStager端口写出"),
+    ("tools/MediaCrawler/store/weibo/__init__.py", "record_weibo_note_image_failure"): (
+        "迁至", "WeiboCrawler.record_weibo_note_image_failure", "改为crawler方法，经ImageStager端口写出"),
+    **{
+        (f"tools/MediaCrawler/store/{site}/_store_impl.py", f"{prefix}JsonlStoreImplement{member}"): (
+            "迁至", f"JsonlContentStore{member}", _JSONL)
+        for site, prefix in (("douyin", "Douyin"), ("weibo", "Weibo"), ("xhs", "Xhs"), ("zhihu", "Zhihu"))
+        for member in ("", ".__init__", ".store_content")
+    },
+    ("tools/MediaCrawler/store/xhs/_store_impl.py", "XhsJsonlStoreImplement.flush"): (
+        "退出", None, "AbstractStore接口的空操作且无调用方；JsonlContentStore每次await即写出，无缓冲"),
+    **{
+        (f"tools/MediaCrawler/store/{site}/{site}_store_media.py", f"{name}{member}"): (
+            "迁至", f"PostImageStager{member}", _STAGER)
+        for site, name in (("douyin", "DouYinImage"), ("weibo", "WeiboStoreImage"),
+                           ("xhs", "XiaoHongShuImage"), ("zhihu", "ZhihuStoreImage"))
+        for member in ("", ".__init__", ".store_post_images", ".record_failure")
+    },
+    ("tools/MediaCrawler/tools/trippostcollect_adaptive.py", "AdaptiveAccumulator.from_environment"): (
+        "迁至", "AdaptiveAccumulator.for_platform",
+        "env作用域读取归db.discovery_read并由entry装配，构造与微博stagnation_basis归for_platform"),
+    ("tools/MediaCrawler/tools/user_hash.py", "anonymize_user_id"): (
+        "退出", None, "#51取消用户ID哈希，平台原始值经records.identity.platform_user_id保存；T14随旧桥删除"),
+    ("tools/MediaCrawler/tools/user_hash.py", "mask_nickname"): (
+        "退出", None, "#51取消昵称脱敏，平台原始值经records.identity.platform_nickname保存；T14随旧桥删除"),
+}
+
+# 私有桥 E 与过渡装载模块：T14-C 与 fork 同批删除；card_gate 在 fork 删除批把这些文件中的原位定义
+# 识别为预期退出。T14-C 合并后基线不再含这些文件，可随 fork 分支一并删除。
+FORK_BRIDGE_FILES = (
+    "scripts/mediacrawler_export_entrypoint.py",
+    "src/trippostcollect/platforms/_fork_bridge.py",
+)
+
+# 冻结台账的 SHA-256：fork 对象库不可得时（T14-C 起）`--check` 只做冻结自检，不再重新枚举基线源码。
+FROZEN_LEDGER_SHA256 = {
+    "docs/adapter-ledger/baseline.json": "b62f94305137d05b0e6b81d5bbf1976ca4721b895aec1e14fc7f21791376cfb2",
+    "docs/adapter-ledger/inputs.json": "33f9a23c3cc83dd744d782cf5ff2d0364ec8c7cc68c83c5f39f6af9aede24068",
+    "docs/adapter-ledger/symbols.json": "a47757dc9356c742dc0c68f888e00c65515cd44b016fac03e9339499237ce804",
+    "docs/adapter-ledger/tests.json": "d16068e5192c8ed006b62aece17dbb98464215f5f60347b21ad796494e3c3e44",
+    "docs/platform-adapter-symbol-ledger.md": "047c1cc3d48d9079f375855c1fb0b6d5da66a2dd925e606cf37af203867b20dc",
+}

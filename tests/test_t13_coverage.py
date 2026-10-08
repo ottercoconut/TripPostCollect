@@ -165,6 +165,10 @@ def test_issue_2_lease_exit_nodes_are_complete(collected) -> None:
 
 
 def test_fork_nodes_remain_in_offline_list() -> None:
+    if not FORK.is_dir():
+        # T14-C 删除 fork 后不再有 fork lane：声明中残留的 fork 条目必须一并删除。
+        assert [entry for _, _, entry in report.iter_entries(SPEC) if entry["lane"] == "fork"] == []
+        return
     offline = set(run_matrix.FORK_OFFLINE_TESTS)
     total = 0
     for responsibility, owner, entry in report.iter_entries(SPEC):

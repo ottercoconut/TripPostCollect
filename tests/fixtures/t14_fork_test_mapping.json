@@ -1,0 +1,489 @@
+{
+ "schema_version": 1,
+ "description": "T14：fork 离线 lane 的 34 个用例（run_matrix.FORK_OFFLINE_TESTS）逐项对应到根测试断言。status：equivalent=根测试对根实现断言同一契约；partial=只覆盖部分或经下游/相邻路径；gap=无根断言。fork_dependent=根测试当前仍经 fork 或 _fork_bridge 装载，T14-C 删除 fork 前须移植。passed 数下降不能作为覆盖已迁移的证据。",
+ "fork_expected_tests": 34,
+ "fork_files": [
+  "tests/test_image_client_http_classification.py",
+  "tests/test_image_download_retry.py",
+  "tests/test_image_staging_errors.py",
+  "tests/test_trippostcollect_adaptive.py"
+ ],
+ "nodes": [
+  {
+   "fork_node": "tests/test_image_client_http_classification.py::test_douyin_http_404_preserves_terminal_status",
+   "subject": "DouYinClient.get_aweme_media 对 HTTP 404 抛 ImageDownloadFetchError(image_source_unavailable, http_status=404)",
+   "status": "gap",
+   "root": [
+    {
+     "test": "tests/platforms/douyin/test_douyin_image_only.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
+     "asserts": "下游：已分类 404 错误经根重试循环只尝试 1 次，manifest 保留 error_code/http_status",
+     "fork_dependent": true
+    }
+   ],
+   "gap": "根测试以替身直接抛出已分类错误，没有驱动根 DouYinClient 对真实 404 响应做分类",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_client_http_classification.py::test_weibo_http_404_preserves_terminal_status",
+   "subject": "WeiboClient.get_note_image 对 HTTP 404 抛 ImageDownloadFetchError(image_source_unavailable, http_status=404)",
+   "status": "gap",
+   "root": [
+    {
+     "test": "tests/platforms/weibo/test_weibo_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
+     "asserts": "下游：已分类 404 错误写入 failed manifest 并保留 http_status",
+     "fork_dependent": true
+    }
+   ],
+   "gap": "根 WeiboClient.get_note_image 的 404 分类只在冻结对照 test_adapter_t05（image_failure 场景）中与旧实现比对，无直接断言",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_client_http_classification.py::test_xhs_http_404_preserves_terminal_status",
+   "subject": "XiaoHongShuClient.get_note_media 对 HTTP 404 抛 ImageDownloadFetchError(image_source_unavailable, http_status=404)",
+   "status": "gap",
+   "root": [
+    {
+     "test": "tests/platforms/xhs/test_xhs_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
+     "asserts": "下游：已分类 404 错误只尝试 1 次，manifest 保留 error_code/http_status"
+    }
+   ],
+   "gap": "根测试以替身直接抛出已分类错误，没有驱动根 XiaoHongShuClient.get_note_media 对 404 响应做分类",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_client_http_classification.py::test_xhs_html_response_preserves_run_level_http_status[401-login_required]",
+   "subject": "XiaoHongShuClient.request(return_response=True) 对 HTTP 401 抛 PlatformRuntimeError(code=login_required)",
+   "status": "equivalent",
+   "root": [
+    {
+     "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status",
+     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次"
+    }
+   ]
+  },
+  {
+   "fork_node": "tests/test_image_client_http_classification.py::test_xhs_html_response_preserves_run_level_http_status[403-login_required]",
+   "subject": "XiaoHongShuClient.request(return_response=True) 对 HTTP 403 抛 PlatformRuntimeError(code=login_required)",
+   "status": "equivalent",
+   "root": [
+    {
+     "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status",
+     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次"
+    }
+   ]
+  },
+  {
+   "fork_node": "tests/test_image_client_http_classification.py::test_xhs_html_response_preserves_run_level_http_status[429-rate_limited]",
+   "subject": "XiaoHongShuClient.request(return_response=True) 对 HTTP 429 抛 PlatformRuntimeError(code=rate_limited)",
+   "status": "equivalent",
+   "root": [
+    {
+     "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status",
+     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次"
+    }
+   ]
+  },
+  {
+   "fork_node": "tests/test_image_client_http_classification.py::test_xhs_html_response_preserves_ip_block_business_code",
+   "subject": "200 响应体 code=300012 时 request(return_response=True) 抛 IPBlockError",
+   "status": "equivalent",
+   "root": [
+    {
+     "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block",
+     "asserts": "参数 300012/\"300012\" 在 return_response=True/False 下均抛 IPBlockError，只请求一次"
+    }
+   ]
+  },
+  {
+   "fork_node": "tests/test_image_client_http_classification.py::test_xhs_html_response_preserves_security_limit_business_code",
+   "subject": "200 响应体 code=300011 时 request(return_response=True) 抛 PlatformRuntimeError(platform_security_limit_300011)",
+   "status": "equivalent",
+   "root": [
+    {
+     "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block",
+     "asserts": "参数 300011/\"300011\" 抛 PlatformRuntimeError(code=platform_security_limit_300011)"
+    }
+   ]
+  },
+  {
+   "fork_node": "tests/test_image_client_http_classification.py::test_zhihu_http_404_preserves_terminal_status",
+   "subject": "ZhiHuClient.get_content_image 对 HTTP 404 抛 ImageDownloadFetchError(image_source_unavailable, http_status=404)",
+   "status": "gap",
+   "root": [
+    {
+     "test": "tests/platforms/zhihu/test_zhihu_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
+     "asserts": "下游：已分类 404 错误写入 failed manifest 并保留 http_status"
+    },
+    {
+     "test": "tests/platforms/zhihu/test_zhihu_image_download.py::test_client_image_request_reuses_session_headers_proxy_and_referer",
+     "asserts": "根 ZhiHuClient.get_content_image 的 200 正常路径（会话头、代理、referer）"
+    }
+   ],
+   "gap": "根测试只覆盖 get_content_image 的 200 路径与下游 manifest，没有对 404 响应分类的断言",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_client_http_classification.py::test_zhihu_oversized_response_is_terminal",
+   "subject": "ZhiHuClient.get_content_image 超过 IMAGE_DOWNLOAD_MAX_BYTES 时抛不可重试 image_too_large（http_status=200）",
+   "status": "gap",
+   "root": [
+    {
+     "test": "tests/test_image_materialization.py::test_response_headers_and_stream_limits_fail_before_success",
+     "asserts": "相邻：物化写入阶段 content_length/流超限得 image_too_large（不同模块）"
+    }
+   ],
+   "gap": "根 runtime/image_retry 下载上限只在 fork 用例中断言",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_download_retry.py::test_transient_timeout_and_empty_response_recover_with_attempt_count",
+   "subject": "fetch_image_bytes_with_retry：TimeoutError、None 后成功，attempts=3，warning 2 次、info 1 次",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/platforms/xhs/test_xhs_image_download.py::test_transient_xhs_image_failure_recovers_and_records_attempts",
+     "asserts": "None 一次后成功，manifest attempts=2、fetch await 2 次（经根重试循环）"
+    },
+    {
+     "test": "tests/platforms/zhihu/test_zhihu_image_download.py::test_transient_zhihu_image_failure_recovers_and_records_attempts",
+     "asserts": "同上，知乎"
+    }
+   ],
+   "gap": "TimeoutError 重试分支与日志次数无根断言",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_download_retry.py::test_retry_exhaustion_returns_final_attempt_count",
+   "subject": "fetch_image_bytes_with_retry：三次 None 后返回 (None, 3)，warning 2 次、error 1 次",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/platforms/xhs/test_xhs_image_download.py::test_xhs_failed_image_writes_no_success_file_or_manifest",
+     "asserts": "三次 None 后失败，fetch await 3 次，无成功文件"
+    },
+    {
+     "test": "tests/platforms/douyin/test_douyin_image_only.py::test_failed_note_image_writes_failed_manifest_only",
+     "asserts": "三次 None 后 manifest attempts=3、fetch await 3 次",
+     "fork_dependent": true
+    }
+   ],
+   "gap": "日志次数无根断言",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_download_retry.py::test_empty_bytes_are_retried_instead_of_treated_as_success",
+   "subject": "fetch_image_bytes_with_retry：b\"\" 视为失败并重试，第三次成功 attempts=3",
+   "status": "gap",
+   "root": [],
+   "gap": "空字节不当作成功的重试语义只在 fork 用例中断言",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_download_retry.py::test_terminal_http_error_is_not_retried",
+   "subject": "fetch_image_bytes_with_retry：classified_http_image_error(404) 不重试，attempts=1",
+   "status": "equivalent",
+   "root": [
+    {
+     "test": "tests/platforms/xhs/test_xhs_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
+     "asserts": "不可重试 404 错误经根重试循环只尝试 1 次，manifest error_code=image_source_unavailable、http_status=404、attempts=1"
+    },
+    {
+     "test": "tests/platforms/zhihu/test_zhihu_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
+     "asserts": "同上，知乎"
+    }
+   ]
+  },
+  {
+   "fork_node": "tests/test_image_download_retry.py::test_retryable_http_error_preserves_status_after_exhaustion",
+   "subject": "fetch_image_bytes_with_retry：classified_http_image_error(503) 重试耗尽后保留 image_download_retryable/503/attempts=3",
+   "status": "gap",
+   "root": [],
+   "gap": "503 可重试分类只在冻结对照 test_adapter_t06/t07（image_failed 场景）中与旧实现比对，无直接断言",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_download_retry.py::test_run_level_http_error_is_classified_without_candidate_retry[401-image_auth_required]",
+   "subject": "classified_http_image_error(401) 得 image_auth_required、不可重试、attempts=1，且 is_runtime_blocking_image_error 为真",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/platforms/douyin/test_douyin_image_only.py::test_image_rate_limit_stops_run_without_candidate_skip",
+     "asserts": "下游：image_rate_limited 使整轮 runtime_failed 停止且不跳过候选（替身直接抛已分类错误）",
+     "fork_dependent": true
+    }
+   ],
+   "gap": "HTTP 状态到 image_auth_required/image_rate_limited 的分类、单次尝试与运行级阻断判定无根直接断言",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_download_retry.py::test_run_level_http_error_is_classified_without_candidate_retry[403-image_auth_required]",
+   "subject": "classified_http_image_error(403) 得 image_auth_required、不可重试、attempts=1，且 is_runtime_blocking_image_error 为真",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/platforms/douyin/test_douyin_image_only.py::test_image_rate_limit_stops_run_without_candidate_skip",
+     "asserts": "下游：image_rate_limited 使整轮 runtime_failed 停止且不跳过候选（替身直接抛已分类错误）",
+     "fork_dependent": true
+    }
+   ],
+   "gap": "HTTP 状态到 image_auth_required/image_rate_limited 的分类、单次尝试与运行级阻断判定无根直接断言",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_download_retry.py::test_run_level_http_error_is_classified_without_candidate_retry[429-image_rate_limited]",
+   "subject": "classified_http_image_error(429) 得 image_rate_limited、不可重试、attempts=1，且 is_runtime_blocking_image_error 为真",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/platforms/douyin/test_douyin_image_only.py::test_image_rate_limit_stops_run_without_candidate_skip",
+     "asserts": "下游：image_rate_limited 使整轮 runtime_failed 停止且不跳过候选（替身直接抛已分类错误）",
+     "fork_dependent": true
+    }
+   ],
+   "gap": "HTTP 状态到 image_auth_required/image_rate_limited 的分类、单次尝试与运行级阻断判定无根直接断言",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_staging_errors.py::test_byte_limit_uses_formal_terminal_error_code",
+   "subject": "artifacts.image_staging.inspect_image_bytes 超过 MAX_IMAGE_BYTES 得 image_too_large",
+   "status": "gap",
+   "root": [
+    {
+     "test": "tests/test_image_materialization.py::test_forged_extension_truncation_hash_and_limits_are_rejected",
+     "asserts": "相邻：物化校验 validate_image_file 的 max_bytes 超限得 image_too_large（不同模块）"
+    }
+   ],
+   "gap": "staging 字节上限无根断言",
+   "planned_target": "tests/artifacts/test_staging.py"
+  },
+  {
+   "fork_node": "tests/test_image_staging_errors.py::test_non_image_response_uses_formal_terminal_error_code",
+   "subject": "inspect_image_bytes 对 HTML 字节得 image_non_raster_response",
+   "status": "equivalent",
+   "root": [
+    {
+     "test": "tests/platforms/weibo/test_weibo_store.py::test_invalid_second_image_does_not_promote_partial_post",
+     "asserts": "PostImageStager.store_post_images 经 stage_post_images/inspect_image_bytes 对 HTML 得 image_non_raster_response，且不留部分目录",
+     "fork_dependent": true
+    },
+    {
+     "test": "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup",
+     "asserts": "四站 staging 对 <svg> 得 image_non_raster_response",
+     "fork_dependent": true
+    }
+   ]
+  },
+  {
+   "fork_node": "tests/test_image_staging_errors.py::test_truncated_recognized_raster_uses_decode_error_code",
+   "subject": "inspect_image_bytes 对截断 PNG 得 image_decode_failed",
+   "status": "equivalent",
+   "root": [
+    {
+     "test": "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup",
+     "asserts": "四站 staging 对截断 PNG 得 image_decode_failed，source_index=1 且不留部分目录",
+     "fork_dependent": true
+    }
+   ]
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_batch_event_records_pagination_metadata",
+   "subject": "finish_batch 的 adaptive_batch_completed 事件透传 source_page/source_cursor/source_has_more/raw_batch_count/resume_page/resume_cursor/batch_complete",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/test_adapter_t03.py::test_injected_event_sequence_matches_fork_module_patch",
+     "asserts": "根 AdaptiveAccumulator 经显式 event_sink 产生 adaptive_batch_completed/adaptive_search_stopped，与 fork 事件逐字段相等",
+     "fork_dependent": true
+    },
+    {
+     "test": "tests/test_adaptive_accumulator.py::test_completed_batch_event_keeps_candidate_identities_for_failed_run_resume",
+     "asserts": "adaptive_batch_completed 保留 candidate_identities",
+     "fork_dependent": true
+    }
+   ],
+   "gap": "source_cursor/resume_cursor/source_has_more 在 finish_batch 事件中的透传无根直接断言",
+   "planned_target": "tests/application/test_discovery.py"
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_runtime_failure_has_distinct_stop_reason",
+   "subject": "mark_runtime_failed 写出 stop_reason=runtime_failed、stop_detail 与 source_page",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/platforms/douyin/test_douyin_image_only.py::test_image_rate_limit_stops_run_without_candidate_skip",
+     "asserts": "根 crawler 运行级失败时 adaptive_search_stopped 为 runtime_failed/image_rate_limited",
+     "fork_dependent": true
+    },
+    {
+     "test": "tests/platforms/xhs/test_xhs_discovery_memory.py::test_browser_context_close_is_recorded_as_resumable_runtime_failure",
+     "asserts": "小红书运行级失败记为 runtime_failed 并保留前沿"
+    }
+   ],
+   "gap": "mark_runtime_failed 直接调用及 source_page 透传无根单元断言",
+   "planned_target": "tests/application/test_discovery.py"
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_image_failed_candidate_is_recorded_seen_and_does_not_block_batch",
+   "subject": "skip_candidate_failure 记为已见、不阻断批次，summary 保留 attempts/retryable 等跳过明细",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/platforms/douyin/test_douyin_image_only.py::test_image_failure_is_recorded_seen_and_later_candidate_continues",
+     "asserts": "图片失败候选记为已见并继续后续候选",
+     "fork_dependent": true
+    },
+    {
+     "test": "tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_failure_is_recorded_and_later_xhs_candidate_continues",
+     "asserts": "小红书图片失败候选记录后继续"
+    }
+   ],
+   "gap": "summary.skipped_candidate_failures 的 attempts/retryable 字段无根单元断言",
+   "planned_target": "tests/application/test_discovery.py"
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_source_exhaustion_is_claimed_after_failed_candidate_is_skipped",
+   "subject": "跳过失败候选后 mark_source_exhausted 仍得 source_exhausted，并保留 resume/cursor/has_more",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/platforms/xhs/test_xhs_discovery_memory.py::test_all_unknown_candidates_are_processed_before_exhaustion",
+     "asserts": "小红书处理完全部未知候选后才宣告来源耗尽"
+    },
+    {
+     "test": "tests/test_mediacrawler_pagination.py::test_skipped_image_candidate_does_not_block_source_exhaustion_completion",
+     "asserts": "父侧：已跳过图片候选不阻止来源耗尽完成"
+    }
+   ],
+   "gap": "累加器层“跳过后耗尽”的 summary 字段无根单元断言",
+   "planned_target": "tests/application/test_discovery.py"
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_skipped_candidates_never_trigger_legacy_quantity_stop",
+   "subject": "旧数量 env 存在时 skip_candidate_failure 不触发停止",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/test_adaptive_accumulator.py::test_legacy_quantity_environment_cannot_restore_quantity_stops",
+     "asserts": "旧数量 env 不恢复数量停止（consider/finish_batch 路径）",
+     "fork_dependent": true
+    }
+   ],
+   "gap": "skip_candidate_failure 路径未覆盖",
+   "planned_target": "tests/application/test_discovery.py"
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_existing_database_identity_is_counted_without_stopping",
+   "subject": "from_environment 读取 web_posts 既有身份，consider 计入 existing_valid 而不停止",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/test_adapter_t03.py::test_database_subset",
+     "asserts": "根 db.discovery_read.existing_platform_identities 读取 web_posts 等既有身份",
+     "fork_dependent": true
+    },
+    {
+     "test": "tests/test_adaptive_accumulator.py::test_candidate_and_valid_counts_never_stop_before_source_exhaustion",
+     "asserts": "候选与有效计数不触发停止",
+     "fork_dependent": true
+    }
+   ],
+   "gap": "existing_valid_identities 计数无根断言",
+   "planned_target": "tests/application/test_discovery.py"
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_resume_identity_is_counted_without_stopping",
+   "subject": "from_environment 读取恢复身份文件并计入既有身份",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/test_adapter_t03.py::test_resume_subset",
+     "asserts": "根 discovery_read 读取恢复身份文件的各状态子集",
+     "fork_dependent": true
+    }
+   ],
+   "gap": "恢复身份进入累加器后的计数无根断言",
+   "planned_target": "tests/application/test_discovery.py"
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_known_identity_can_be_skipped_before_detail_fetch",
+   "subject": "existing_identities 中的身份 is_known 为真且不计入候选",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/platforms/xhs/test_xhs_discovery_memory.py::test_known_note_is_skipped_before_detail_request",
+     "asserts": "小红书已知笔记在详情请求前跳过"
+    },
+    {
+     "test": "tests/test_bilibili_image_materialization.py::test_known_post_id_is_skipped_before_detail_or_image_requests",
+     "asserts": "B站已知帖子在详情与图片请求前跳过"
+    }
+   ],
+   "gap": "candidate_count 不变的单元断言缺失",
+   "planned_target": "tests/application/test_discovery.py"
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_xhs_persisted_seen_candidate_is_loaded_before_detail",
+   "subject": "小红书按 target/account/fingerprint 加载持久已见候选",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/test_adapter_t03.py::test_database_subset",
+     "asserts": "根 discovery_read 按账号隔离读取 xhs_discovery_seen_candidates",
+     "fork_dependent": true
+    }
+   ],
+   "gap": "经累加器 is_known 的端到端断言缺失",
+   "planned_target": "tests/application/test_discovery.py"
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_common_operator_exclusion_is_loaded_before_detail",
+   "subject": "通用平台按 job/fingerprint 加载操作人排除候选",
+   "status": "partial",
+   "root": [
+    {
+     "test": "tests/test_discovery_checkpoints.py::test_operator_candidate_exclusion_is_auditable_and_loaded_as_skipped",
+     "asserts": "排除记录可审计并作为已跳过候选加载"
+    },
+    {
+     "test": "tests/test_adapter_t03.py::test_database_subset",
+     "asserts": "根 discovery_read 读取 crawl_discovery_candidate_exclusions",
+     "fork_dependent": true
+    }
+   ],
+   "gap": "经累加器 is_known 的端到端断言缺失",
+   "planned_target": "tests/application/test_discovery.py"
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_refresh_batch_does_not_consume_frontier_stagnation",
+   "subject": "finish_batch(discovery_phase=refresh, count_stagnation=False) 不增加 stagnant_batches",
+   "status": "gap",
+   "root": [],
+   "gap": "count_stagnation=False 无根断言",
+   "planned_target": "tests/application/test_discovery.py"
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_candidate_identity_stagnation_allows_new_invalid_results",
+   "subject": "stagnation_basis=candidate_identity 时新的无效候选也重置停滞",
+   "status": "equivalent",
+   "root": [
+    {
+     "test": "tests/test_adaptive_accumulator.py::test_weibo_stagnation_tracks_candidate_identity_progress",
+     "asserts": "同一构造与断言（stagnant_batches=0），并补充后续批次计数",
+     "fork_dependent": true
+    }
+   ]
+  },
+  {
+   "fork_node": "tests/test_trippostcollect_adaptive.py::test_douyin_reseed_requires_new_candidate_and_cursor",
+   "subject": "should_reseed_douyin_frontier 需要新候选与新游标",
+   "status": "equivalent",
+   "root": [
+    {
+     "test": "tests/test_adaptive_accumulator.py::test_douyin_exhausted_cursor_reseed_requires_new_candidate_continuation",
+     "asserts": "同两组断言，另覆盖 has_more=False 与空游标",
+     "fork_dependent": true
+    }
+   ]
+  }
+ ]
+}
