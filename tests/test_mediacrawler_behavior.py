@@ -1419,3 +1419,40 @@ def test_xhs_interaction_is_reported_but_does_not_invalidate_crawl() -> None:
     assert validation["ok"] is True
     assert validation["platforms"]["xhs"]["post_interaction_requested"] is True
     assert validation["platforms"]["xhs"]["post_interaction_ok"] is False
+
+
+GENERIC_BEHAVIOR_PLATFORMS = ("bilibili", "weibo", "douyin", "zhihu")
+
+
+@pytest.mark.parametrize("missing_platform", GENERIC_BEHAVIOR_PLATFORMS)
+def test_behavior_validation_requires_evidence_for_each_generic_platform(missing_platform: str) -> None:
+    """T13：四个通用站共用非 XHS 行为门禁分支，逐站证明缺证据即失败、其余站不受影响。"""
+    events = [{"event": "pause"}, {"event": "mouse_moves"}, {"event": "human_scroll_complete"}]
+    records = [
+        {
+            "platform": platform,
+            "behavior_evidence": {
+                "status": "completed",
+                "profile": "social_high_risk",
+                "events": events,
+                "visible_markers": {},
+                "url": "https://example.test/search?keyword=青岛旅游",
+            },
+            "policy_events": [{"allowed": True, "disabled": False}],
+        }
+        for platform in GENERIC_BEHAVIOR_PLATFORMS
+    ]
+
+    complete = mediacrawler_crawl.collect_behavior_validation(records, list(GENERIC_BEHAVIOR_PLATFORMS), "青岛旅游")
+    partial = mediacrawler_crawl.collect_behavior_validation(
+        [record for record in records if record["platform"] != missing_platform],
+        list(GENERIC_BEHAVIOR_PLATFORMS),
+        "青岛旅游",
+    )
+
+    assert complete["ok"] is True
+    assert partial["ok"] is False
+    assert partial["platforms"][missing_platform]["behavior_status"] == "missing"
+    for platform in GENERIC_BEHAVIOR_PLATFORMS:
+        if platform != missing_platform:
+            assert partial["platforms"][platform]["behavior_status"] != "missing"

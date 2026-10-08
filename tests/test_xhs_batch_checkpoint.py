@@ -650,3 +650,66 @@ def test_exporter_checkpoint_failure_keeps_precise_terminal_evidence(
     assert blocker["failure_type"] == "runtime_failed"
     assert blocker["reason"] == detail
     assert not saved(s)["checkpoint_found"]
+
+
+def _audit_commits(s: SimpleNamespace) -> int:
+    with sqlite3.connect(s.db) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM xhs_account_events WHERE event_type='batch_checkpoint_committed'"
+        ).fetchone()[0]
+
+
+def test_ack_directory_fsync_failure_keeps_committed_discovery(
+    scenario: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T13：ACK 已写出但目录 fsync 失败时，DB 提交与 ACK 都保留，只是不能宣称掉电级持久。"""
+    s = scenario
+    monkeypatch.setattr(batch, "ACK_TIMEOUT_SECONDS", 0)
+    with pytest.raises(RuntimeError, match="ack_timeout"):
+        batch.publish_batch(s.event, s.env)
+    run_dir = batch.XHS_BATCH_CHECKPOINT_ROOT / "run"
+    original = batch._sync_directory
+
+    def fail_after_ack(path: Path) -> None:
+        if (Path(path) / "batch_checkpoint_ack.json").exists():
+            raise OSError("directory fsync failed")
+        original(path)
+
+    monkeypatch.setattr(batch, "_sync_directory", fail_after_ack)
+    with pytest.raises(OSError, match="directory fsync failed"):
+        s.committer()
+
+    pointer = json.loads((run_dir / "batch_checkpoint.json").read_text())
+    assert json.loads((run_dir / "batch_checkpoint_ack.json").read_text()) == pointer
+    assert saved(s)["resume_page"] == 47
+    assert s.committer.last_sequence == 0
+    with sqlite3.connect(s.db) as conn:
+        assert conn.execute("SELECT platform_post_id FROM xhs_discovery_seen_candidates").fetchall() == [("note1",)]
+
+
+def test_repeated_commit_after_ack_failure_keeps_seen_unique_without_exactly_once_audit(
+    scenario: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T13：ACK 失败后重放提交是 upsert；seen 唯一、前沿不重复推进，审计事件不承诺恰好一次。"""
+    s = scenario
+    monkeypatch.setattr(batch, "ACK_TIMEOUT_SECONDS", 0)
+    with pytest.raises(RuntimeError, match="ack_timeout"):
+        batch.publish_batch(s.event, s.env)
+    original = batch.atomic_write_json
+
+    def fail_ack(path: Path, value: dict) -> None:
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(batch, "atomic_write_json", fail_ack)
+    with pytest.raises(OSError):
+        s.committer()
+    assert _audit_commits(s) == 1
+    monkeypatch.setattr(batch, "atomic_write_json", original)
+    s.committer()
+    s.committer()
+
+    assert s.committer.last_sequence == 1
+    assert saved(s)["resume_page"] == 47
+    assert _audit_commits(s) == 2
+    with sqlite3.connect(s.db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM xhs_discovery_seen_candidates").fetchone()[0] == 1

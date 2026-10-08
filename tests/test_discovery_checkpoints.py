@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.scheduler.discovery import (
     load_candidate_exclusions,
@@ -894,3 +896,139 @@ def test_checkpoint_progress_resets_failure_counter(tmp_path: Path) -> None:
 
     assert updated["status"] == "retry_wait"
     assert updated["consecutive_failures"] == 0
+
+
+# T13 补测：五站查询指纹 canonical 字节固定，及 B站顶部有限刷新后恢复深层前沿。
+FINGERPRINT_GOLDEN = json.loads(
+    (ROOT / "tests" / "golden" / "t13_query_fingerprints.json").read_text(encoding="utf-8")
+)
+
+
+@pytest.mark.parametrize("platform_key", ["bilibili", "weibo", "douyin", "zhihu"])
+def test_query_fingerprint_canonical_bytes_are_stable(platform_key: str) -> None:
+    import hashlib
+
+    from trippostcollect.scheduler.discovery import canonical_json, source_query_options
+
+    golden = FINGERPRINT_GOLDEN["generic"][platform_key]
+    params = golden["params"]
+    payload = {
+        "platform_key": platform_key,
+        "keyword": params["keyword"],
+        "source_options": source_query_options(params),
+    }
+
+    assert canonical_json(payload) == golden["canonical"]
+    assert hashlib.sha256(golden["canonical"].encode("utf-8")).hexdigest() == golden["sha256"]
+    assert query_fingerprint(platform_key, params["keyword"], params) == golden["sha256"]
+
+
+def test_xhs_query_fingerprint_canonical_bytes_are_stable() -> None:
+    import hashlib
+
+    from trippostcollect.xhs.discovery import xhs_query_fingerprint
+
+    golden = FINGERPRINT_GOLDEN["xhs"]
+
+    assert hashlib.sha256(golden["canonical"].encode("utf-8")).hexdigest() == golden["sha256"]
+    assert xhs_query_fingerprint(golden["target"]) == golden["sha256"]
+
+
+def _bilibili_item(post_id: str) -> dict:
+    return {
+        "id": post_id, "title": post_id, "desc": "body",
+        "arcurl": f"https://www.bilibili.com/read/cv{post_id}/",
+        "image_urls": [f"https://example.test/{post_id}.jpg"], "pubdate": 1_700_000_000,
+        "like": 1, "reply": 2, "view": 3, "author": "author", "mid": f"author-{post_id}",
+    }
+
+
+def _run_bilibili_phases(monkeypatch, tmp_path: Path, pages: dict[int, object]):
+    db_path = tmp_path / "posts.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE web_posts (platform_key TEXT, platform_post_id TEXT, canonical_url TEXT)")
+    state_path = tmp_path / "state.json"
+    mediacrawler_crawl.FrozenExecutionState.create(
+        state_path, run_id="t13-refresh", job_key="bili-refresh", site_key="bilibili",
+        job_kind="mediacrawler_search", plan={}, frozen_inputs=[],
+    )
+    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
+    monkeypatch.setattr(mediacrawler_crawl, "run_bilibili_behavior_session",
+                        AsyncMock(return_value=({"cookie_header": ""}, {"ok": True})))
+    monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
+    requested: list[int] = []
+
+    def fetch_page(keyword, page, **kwargs):
+        requested.append(page)
+        value = pages.get(page, [])
+        if isinstance(value, Exception):
+            raise value
+        return [_bilibili_item(post_id) for post_id in value]
+
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_article_page", fetch_page)
+    monkeypatch.setattr(
+        bilibili_core, "fetch_bilibili_article_detail_with_retry",
+        lambda post_id, cookie_header: ({
+            "title": post_id, "content": "青岛完整正文",
+            "image_urls": [f"https://example.test/detail-{post_id}.jpg"],
+            "opus": {"content": {"paragraphs": []}},
+        }, 1, 0.0),
+    )
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_follower_count", lambda creator, cookie: 100)
+    monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
+    args = SimpleNamespace(
+        keyword="青岛旅游", db=str(db_path), start_page=5, top_refresh_max_pages=2,
+        discovery_source_exhausted=False, discovery_job_id=None,
+        discovery_query_fingerprint="", resume_identities_path=None,
+    )
+    result = mediacrawler_crawl.run_bilibili_article_search(args, tmp_path / "batch")
+    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
+    return result, requested, events
+
+
+def test_bilibili_top_refresh_precedes_saved_frontier(monkeypatch, tmp_path: Path) -> None:
+    result, requested, events = _run_bilibili_phases(
+        monkeypatch, tmp_path, {1: ["r1"], 2: [], 5: ["f5"], 6: []},
+    )
+
+    assert result["ok"] is True
+    # 刷新阶段只到 min(start_page-1, top_refresh_max_pages)；刷新空页不宣称耗尽，随后从保存的前沿继续。
+    assert requested == [1, 2, 5, 6]
+    batches = [(event["details"]["source_page"], event["details"]["discovery_phase"])
+               for event in events if event["type"] == "adaptive_batch_completed"]
+    assert batches == [(1, "refresh"), (5, "frontier")]
+    stopped = [event["details"] for event in events if event["type"] == "adaptive_search_stopped"]
+    assert len(stopped) == 1
+    assert stopped[0]["stop_reason"] == "source_exhausted"
+    assert stopped[0]["discovery_phase"] == "frontier"
+    assert stopped[0]["source_page"] == stopped[0]["resume_page"] == 6
+    assert stopped[0]["candidate_identities"] == ["f5", "r1"]
+
+
+def test_bilibili_refresh_failure_is_tagged_as_refresh_phase(monkeypatch, tmp_path: Path) -> None:
+    result, requested, events = _run_bilibili_phases(
+        monkeypatch, tmp_path, {1: ["r1"], 2: RuntimeError("bilibili article search failed: -412 拦截")},
+    )
+
+    assert result["ok"] is False
+    assert requested == [1, 2]
+    stopped = [event["details"] for event in events if event["type"] == "adaptive_search_stopped"]
+    assert [(item["stop_reason"], item["discovery_phase"]) for item in stopped] == [("runtime_failed", "refresh")]
+    # 刷新阶段的停止事件由 persist_discovery_checkpoint 回落到原 start_page，不回退深层前沿。
+    db_path = tmp_path / "checkpoint.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        bootstrap_connection(conn, sync_content=False, sync_jobs=False)
+        row = insert_job(conn, {"platform": "bilibili", "keyword": "青岛旅游"})
+    args = SimpleNamespace(
+        discovery_job_id=int(row["id"]), no_checkpoint_write=False, start_page=5, start_offset=None,
+        start_cursor=None, discovery_source_exhausted=False, db=str(db_path), keyword="青岛旅游",
+        discovery_query_fingerprint="bili-refresh-fp", discovery_run_id="t13-refresh",
+    )
+    mediacrawler_crawl.persist_discovery_checkpoint(args, "bilibili", {"stop_event": stopped[0]})
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        saved = load_checkpoint(conn, job_id=int(row["id"]), query_fingerprint_value="bili-refresh-fp")
+    assert saved["resume_page"] == 5
+    assert saved["last_stop_reason"] == "runtime_failed"

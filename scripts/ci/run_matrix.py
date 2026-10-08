@@ -15,6 +15,9 @@ import xml.etree.ElementTree as ET
 _FROZEN_FLAGS = importlib.util.spec_from_file_location("run_matrix_frozen_flags", Path(__file__).with_name("frozen_flags.py"))
 frozen_flags = importlib.util.module_from_spec(_FROZEN_FLAGS)
 _FROZEN_FLAGS.loader.exec_module(frozen_flags)
+_COVERAGE = importlib.util.spec_from_file_location("run_matrix_coverage_report", Path(__file__).with_name("coverage_report.py"))
+coverage_report = importlib.util.module_from_spec(_COVERAGE)
+_COVERAGE.loader.exec_module(coverage_report)
 
 
 FORK_OFFLINE_TESTS = tuple(f"tests/test_{name}.py" for name in (
@@ -235,6 +238,11 @@ def main():
         results["fork_offline"]["status"] = "missing_result"
     if (output / "pytest.xml").exists():
         redact_junit(output / "pytest.xml")
+    # 五站覆盖：按 tests/fixtures/t13_coverage.json 核对各 lane 与 fork 的 junit，任一声明 node 缺失或未通过即失败。
+    coverage = coverage_report.write_report(source / coverage_report.SPEC_PATH, reports,
+                                            (*coverage_report.ROOT_LANES, "fork"))
+    results["coverage"] = {"returncode": int(not coverage["ok"]), "problems": len(coverage["problems"]),
+                           "status_counts": coverage["status_counts"]}
     (reports / "matrix.json").write_text(json.dumps(results, indent=2))
     return int(any(value["returncode"] != 0 or value.get("status") == "missing_result"
                    for value in results.values()))

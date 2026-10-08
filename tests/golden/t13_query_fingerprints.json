@@ -1,0 +1,71 @@
+{
+  "_note": "T13 采集（scheduler/discovery.py 与 xhs/discovery.py 自重构前 e29767a 起未改动）的查询指纹 canonical 字节；变化即改变续跑前沿归属，不得随手更新。",
+  "generic": {
+    "bilibili": {
+      "params": {
+        "platform": "bilibili",
+        "keyword": "青岛崂山旅游攻略",
+        "top_refresh_max_pages": 3,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "canonical": "{\"keyword\":\"青岛崂山旅游攻略\",\"platform_key\":\"bilibili\",\"source_options\":{}}",
+      "sha256": "6d6505b6487604aa21059879ae98f228c1cef64b7fd0ae68962726589b2f54cf"
+    },
+    "weibo": {
+      "params": {
+        "platform": "weibo",
+        "keyword": "青岛崂山旅游攻略",
+        "top_refresh_max_pages": 3,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false,
+        "search_type": "default"
+      },
+      "canonical": "{\"keyword\":\"青岛崂山旅游攻略\",\"platform_key\":\"weibo\",\"source_options\":{\"search_type\":\"default\"}}",
+      "sha256": "91d7aa04506b323ddf365588321b67fd9f91a14d031657efb5f566026ed9ada2"
+    },
+    "douyin": {
+      "params": {
+        "platform": "douyin",
+        "keyword": "青岛崂山旅游攻略",
+        "top_refresh_max_pages": 3,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false,
+        "publish_time_type": 0
+      },
+      "canonical": "{\"keyword\":\"青岛崂山旅游攻略\",\"platform_key\":\"douyin\",\"source_options\":{\"publish_time_type\":0}}",
+      "sha256": "47e8d2b934a0b0645b42e65441f59c283aa236458f179c8554fa343f49622afc"
+    },
+    "zhihu": {
+      "params": {
+        "platform": "zhihu",
+        "keyword": "青岛崂山旅游攻略",
+        "top_refresh_max_pages": 3,
+        "required_fields_profile": "image_post_with_followers_v1",
+        "followers_policy": "required",
+        "timeout_per_platform": 1200,
+        "login_type": "cookie",
+        "headless": false
+      },
+      "canonical": "{\"keyword\":\"青岛崂山旅游攻略\",\"platform_key\":\"zhihu\",\"source_options\":{}}",
+      "sha256": "13619a62a9ee9c073d0ce763e99d9ec536a9e909943b41f3cdbba1755a075c40"
+    }
+  },
+  "xhs": {
+    "target": {
+      "target_key": "xhs_qingdao_laoshan_guide",
+      "keyword": "青岛崂山旅游攻略"
+    },
+    "canonical": "{\"keyword\":\"青岛崂山旅游攻略\",\"platform_key\":\"xhs\",\"source_options\":{\"target_key\":\"xhs_qingdao_laoshan_guide\"}}",
+    "sha256": "db7d9031b30f60c558397a28015454d027d877353777db0f757e2bb8091e4537"
+  }
+}
