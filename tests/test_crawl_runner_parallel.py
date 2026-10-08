@@ -185,6 +185,8 @@ def test_internal_job_error_becomes_an_isolated_retry_record(
         db_path=tmp_path / "runner.sqlite",
         config={"defaults": {"schedule_jitter_ratio": 0}},
         run_id="run-isolated",
+        run_dir=tmp_path / "run",
+        interrupt_signal=lambda: None,
     )
     state = json.loads(state_path.read_text(encoding="utf-8"))
 

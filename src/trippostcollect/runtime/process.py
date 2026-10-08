@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
 import signal
 import subprocess
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Mapping
+from types import FrameType
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping
 
 from trippostcollect.application.contracts import XhsRuntimeSupervisionError
 from trippostcollect.core.execution_state import FrozenExecutionState
@@ -324,18 +327,116 @@ def process_group_exists(process_group_id: int) -> bool:
     return True
 
 
+class OperatorInterrupt(BaseException):
+    """操作人 SIGTERM 转成的可捕获中断，与 KeyboardInterrupt 走同一收束路径。"""
+
+    def __init__(self, signum: int):
+        self.signum = int(signum)
+        super().__init__(f"operator interrupt by {signal.Signals(self.signum).name}")
+
+
+def operator_interrupt_error(signum: int) -> str:
+    return f"runtime_failed:operator_interrupt:{signal.Signals(int(signum)).name}"
+
+
+def lease_managed_environment(environ: Mapping[str, str] | None = None) -> bool:
+    source = os.environ if environ is None else environ
+    return all(
+        str(source.get(key) or "")
+        for key in (LEASE_DB_ENV, LEASE_ID_ENV, LEASE_OWNER_TOKEN_ENV)
+    )
+
+
+@contextlib.contextmanager
+def sigterm_raises_operator_interrupt() -> Iterator[None]:
+    """首个 SIGTERM 抛出 OperatorInterrupt，之后的重复 SIGTERM 不再打断收束。
+
+    小红书租约进程的 SIGTERM 由 LeaseGuard 精确转发并负责 exporter 收束，保持默认处理，
+    避免对 exporter 发出第二次温和信号。
+    """
+
+    if (
+        lease_managed_environment()
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    if previous == signal.SIG_IGN:
+        yield
+        return
+    raised = False
+
+    def handle(signum: int, _frame: FrameType | None) -> None:
+        nonlocal raised
+        if raised:
+            return
+        raised = True
+        raise OperatorInterrupt(signum)
+
+    signal.signal(signal.SIGTERM, handle)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def merge_process_output(earlier: str, collected: str) -> str:
+    """合并异常前已解码的输出与收束时回收的累计输出，不重复也不丢失。"""
+
+    if not collected or earlier.startswith(collected):
+        return earlier
+    if collected.startswith(earlier):
+        return collected
+    return earlier + collected
+
+
+def write_command_logs(
+    cmd: list[str],
+    log_dir: Path,
+    stdout: str,
+    stderr: str,
+) -> dict[str, str]:
+    """两路输出共享头像证据：任一路命中即两路整体替换，清洗后才写盘。"""
+
+    log_dir = ensure_dir(log_dir)
+    _, avatar_output_detected = redact_author_avatar_text(f"{stdout}\n{stderr}")
+    if avatar_output_detected:
+        stdout = AUTHOR_AVATAR_LOG_REDACTION
+        stderr = AUTHOR_AVATAR_LOG_REDACTION
+    stdout_log = log_dir / "stdout.log"
+    stderr_log = log_dir / "stderr.log"
+    command_log = log_dir / "command.txt"
+    stdout_log.write_text(stdout, encoding="utf-8")
+    stderr_log.write_text(stderr, encoding="utf-8")
+    command_log.write_text(shlex.join(cmd), encoding="utf-8")
+    return {
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+        "command_log": str(command_log),
+    }
+
+
 def terminate_managed_process(
     proc: subprocess.Popen[bytes],
     *,
     grace_seconds: float,
+    signal_process: bool = True,
 ) -> tuple[bytes | None, bytes | None, bool]:
+    """只向直接子进程发一次 SIGTERM，等待整个进程组退出，超时才 SIGKILL 整组。
+
+    ``signal_process=False`` 用于温和信号已经发出的情形，只等待并兜底强杀。
+    """
+
     partial_stdout: bytes | None = None
     partial_stderr: bytes | None = None
     complete_stdout: bytes | None = None
     complete_stderr: bytes | None = None
     forced = False
     deadline = time.monotonic() + max(0.0, grace_seconds)
-    if proc.poll() is None:
+    if signal_process and proc.poll() is None:
         proc.terminate()
     remaining = max(0.01, deadline - time.monotonic())
     try:
@@ -473,6 +574,7 @@ def run_command(
     timed_out = False
     timeout_reason: str | None = None
     forced_termination = False
+    termination_requested = False
     progress_observed = False
     last_progress_at = started
     last_progress_age_seconds = 0.0
@@ -648,6 +750,7 @@ def run_command(
                         )
                 elif exporter_alive:
                     exporter_identity_mismatch = True
+                    termination_requested = True
                     terminate_managed_process(
                         proc,
                         grace_seconds=cleanup_grace_seconds,
@@ -721,6 +824,7 @@ def run_command(
                 returncode = 124
                 timeout_reason = expiration_reason
                 last_progress_age_seconds = max(0.0, now - last_progress_at)
+                termination_requested = True
                 stdout_data, stderr_data, forced_termination = terminate_managed_process(
                     proc,
                     grace_seconds=cleanup_grace_seconds,
@@ -748,6 +852,7 @@ def run_command(
                         0.0,
                         time.monotonic() - last_progress_at,
                     )
+                    termination_requested = True
                     (
                         stdout_data,
                         stderr_data,
@@ -766,11 +871,28 @@ def run_command(
             last_progress_age_seconds = max(0.0, time.monotonic() - last_progress_at)
             break
     except BaseException:
-        if proc is not None and getattr(proc, "poll", lambda: proc.returncode)() is None:
+        if proc is not None:
+            collected_stdout: bytes | None = None
+            collected_stderr: bytes | None = None
             try:
-                terminate_managed_process(
-                    proc,
-                    grace_seconds=cleanup_grace_seconds,
+                if getattr(proc, "poll", lambda: proc.returncode)() is None:
+                    collected_stdout, collected_stderr, _ = terminate_managed_process(
+                        proc,
+                        grace_seconds=cleanup_grace_seconds,
+                        signal_process=not termination_requested,
+                    )
+                else:
+                    collected_stdout, collected_stderr = proc.communicate(
+                        timeout=PROCESS_FINAL_REAP_SECONDS
+                    )
+            except Exception:
+                pass
+            try:
+                write_command_logs(
+                    cmd,
+                    log_dir,
+                    merge_process_output(stdout, decode_text(collected_stdout)),
+                    merge_process_output(stderr, decode_text(collected_stderr)),
                 )
             except Exception:
                 pass
@@ -783,16 +905,9 @@ def run_command(
                 environ=registration_env,
             )
 
-    _, avatar_output_detected = redact_author_avatar_text(f"{stdout}\n{stderr}")
-    if avatar_output_detected:
-        stdout = AUTHOR_AVATAR_LOG_REDACTION
-        stderr = AUTHOR_AVATAR_LOG_REDACTION
-    stdout_log = log_dir / "stdout.log"
-    stderr_log = log_dir / "stderr.log"
-    command_log = log_dir / "command.txt"
-    stdout_log.write_text(stdout, encoding="utf-8")
-    stderr_log.write_text(stderr, encoding="utf-8")
-    command_log.write_text(shlex.join(cmd), encoding="utf-8")
+    logs = write_command_logs(cmd, log_dir, stdout, stderr)
+    stdout = logs["stdout"]
+    stderr = logs["stderr"]
     return {
         "command": cmd,
         "command_text": shlex.join(cmd),
@@ -830,9 +945,9 @@ def run_command(
             runtime_reporter.snapshot() if runtime_reporter is not None else None
         ),
         "elapsed_seconds": round(time.monotonic() - started, 2),
-        "stdout_log": str(stdout_log),
-        "stderr_log": str(stderr_log),
-        "command_log": str(command_log),
+        "stdout_log": logs["stdout_log"],
+        "stderr_log": logs["stderr_log"],
+        "command_log": logs["command_log"],
         "stdout_tail": tail(stdout),
         "stderr_tail": tail(stderr),
     }

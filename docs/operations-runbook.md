@@ -66,6 +66,19 @@ python scripts/crawl_runner.py \
 exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中的 `timeout_reason`、
 `last_progress_age_seconds`、`forced_termination` 和 `timeout_state_event` 用于复核该路径。
 
+操作人中断（终端 Ctrl+C 或对 runner 发 SIGTERM）只锁存首个信号，后续信号不改变原因。
+`mediacrawler_crawl.py` 中间层和 worker 各在独立会话中运行，终端信号只到 runner；runner 只向
+运行中的中间层发一次 SIGTERM，中间层把它转为可捕获异常，再只向 worker 发一次 SIGTERM，worker
+按自身生命周期清理浏览器。中间层最多等 20 秒让 worker 进程组退出，runner 最多等 40 秒让中间层
+进程组退出，超时才对对应进程组 SIGKILL。尚未派发的 job 不再租约或启动 child；已在信号前结束的
+平台结果照常验证并保留。被收束和未派发的 job 均写 `runtime_failed:operator_interrupt:<SIGNAL>`
+并 finalize 为失败终态，调度表记 `retry_wait/runtime_failed`，中断不累计失败次数；不读取摘要、
+不更新 checkpoint/campaign、不写 `adaptive_search_stopped`，下轮从中断前的安全前沿恢复。
+`run_summary.json/.md` 仍写出并标注 `interrupt`，runner 以 `128+signum` 退出。两层 child 的
+stdout/stderr 在中断后同样落盘：runner 层位于 `<run_dir>/jobs/<job_key>/`，worker 层位于 child
+批次的 `logs/<platform>/`，写盘前两路共享头像审计。小红书租约链路保持由 `xhs_runner.py` 的
+LeaseGuard 精确转发，不使用这条中间层 SIGTERM 转换。
+
 只同步主配置：
 
 ```bash

@@ -160,6 +160,12 @@ child 自身有 20 秒等待上限；启动迟到不能无限伪装为 network_p
 注册失败、gate 取消与信号注入仍验证同步事件次序及资源回收；身份变化测试的耗时上限仅作
 15 秒外层保护，不要求共享 VM 在 2 秒内完成清理。真实信号及这些 native 用例只在 Actions
 OS lane 验收，本地纯时钟通过不能替代两版本真实 OS 结果。
+通用 runner 中断用例（`tests/test_crawl_runner_interrupt.py`）用真实进程贯通 runner → 中间层 →
+独立 worker 进程组：runner 驱动只把 child 命令换成 `tests/support/runner_interrupt_fakes.py`，中间层
+与 worker 分别走真实 `collection.main`/`run_command` 与 `runtime.worker.run`。各层写 ready/身份文件
+握手，测试只轮询这些文件和临时 SQLite，不用固定 sleep；断言 SIGINT/SIGTERM 退出码、单次温和
+信号与清理标记、两层 stdout/stderr 各一次、进程组消失、checkpoint/campaign 未推进、并行通道收尾
+与强杀兜底保留首因。只用临时 SQLite 与本地进程，不访问网络或启动浏览器。
 提交工作流不等于 CI 验收通过；必须由 Actions 的两版本实际产物证明。不要在私人宿主伪造环境变量。
 
 ## issue #1 节点映射
