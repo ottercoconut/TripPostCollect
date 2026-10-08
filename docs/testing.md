@@ -160,6 +160,19 @@ child 自身有 20 秒等待上限；启动迟到不能无限伪装为 network_p
 注册失败、gate 取消与信号注入仍验证同步事件次序及资源回收；身份变化测试的耗时上限仅作
 15 秒外层保护，不要求共享 VM 在 2 秒内完成清理。真实信号及这些 native 用例只在 Actions
 OS lane 验收，本地纯时钟通过不能替代两版本真实 OS 结果。
+通用 runner 中断用例（`tests/test_crawl_runner_interrupt.py`）用真实进程贯通 runner → 中间层 →
+独立 worker 进程组，只覆盖 `crawl_runner.py` 通用路径，不覆盖小红书租约链路。runner 驱动经
+`run_cli` 运行，只把生产 child 命令的脚本换成 `tests/support/runner_interrupt_fakes.py`，其余参数照用；
+中间层走真实入口包装 `run_main_with_operator_interrupt`、`collection.main`、生产 `parse_args` 与
+`run_command`，worker 走真实 `runtime.worker.run`，用生产 `AdaptiveAccumulator` 与 worker 事件出口写出
+一批已确认批次和一个未确认尾批；worker 正常结束时中间层用生产 `load_pagination_evidence` 与
+`persist_discovery_checkpoint` 提交，runner 用生产逻辑更新 campaign。平台抓取、正文导入与图片物化
+不在本组证明范围内；B站进程内浏览器、以 `setsid` 启动的 CDP Chrome、对整个 cgroup 同时发信号的
+场景以及小红书租约路径（#58）也不在覆盖内。各层写 ready/身份文件握手，测试只轮询这些文件和临时 SQLite，不用固定 sleep；
+断言 SIGINT/SIGTERM/SIGHUP 退出码、单次温和信号与清理标记、两层 stdout/stderr 各一次、进程组消失、
+未中断对照会推进而中断不推进 checkpoint/seen/campaign、提交后中断保留已提交前沿但不更新 campaign、
+两条通道同时活跃时都被收束、已成功通道保留为成功、排队 job 不派发、强杀兜底同时收束已登记的
+worker 组并保留首因、child 退出晚于锁存被观察到时按中断处理，以及 Popen 期间与收尾阶段的信号。
 提交工作流不等于 CI 验收通过；必须由 Actions 的两版本实际产物证明。不要在私人宿主伪造环境变量。
 
 ## issue #1 节点映射

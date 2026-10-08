@@ -102,8 +102,12 @@ class XhsLeaseSignal(BaseException):
 class DeferredTerminationSignals:
     """Latch termination signals while a gated child is not yet registered."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        signums: Sequence[int] = (signal.SIGINT, signal.SIGTERM),
+    ) -> None:
         self.signal_received: int | None = None
+        self._signums = tuple(signums)
         self._previous_handlers: dict[int, Any] = {}
         self._installed = False
 
@@ -113,10 +117,10 @@ class DeferredTerminationSignals:
     def install(self) -> DeferredTerminationSignals:
         if self._installed:
             raise RuntimeError("termination signal deferral is already installed")
-        signums = {signal.SIGINT, signal.SIGTERM}
+        signums = set(self._signums)
         previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, signums)
         try:
-            for signum in (signal.SIGINT, signal.SIGTERM):
+            for signum in self._signums:
                 try:
                     previous = signal.getsignal(signum)
                     if previous == signal.SIG_IGN:
@@ -146,7 +150,7 @@ class DeferredTerminationSignals:
     def restore(self) -> None:
         if not self._installed:
             return
-        signums = {signal.SIGINT, signal.SIGTERM}
+        signums = set(self._signums)
         previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, signums)
         try:
             for signum, handler in self._previous_handlers.items():

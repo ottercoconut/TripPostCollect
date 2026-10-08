@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
 import signal
 import subprocess
+import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Mapping
+from types import FrameType
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping
 
 from trippostcollect.application.contracts import XhsRuntimeSupervisionError
 from trippostcollect.core.execution_state import FrozenExecutionState
@@ -324,18 +328,221 @@ def process_group_exists(process_group_id: int) -> bool:
     return True
 
 
+class OperatorInterrupt(KeyboardInterrupt):
+    """操作人 SIGTERM 转成的可捕获中断，与 KeyboardInterrupt 走同一收束路径。
+
+    继承 KeyboardInterrupt：信号落在 asyncio Task 步进内时，Task 会把其他 BaseException 存入
+    结果（``gather(return_exceptions=True)`` 或后台任务会吞掉），而 KeyboardInterrupt 会继续向外抛。
+    """
+
+    def __init__(self, signum: int):
+        self.signum = int(signum)
+        super().__init__(f"operator interrupt by {signal.Signals(self.signum).name}")
+
+
+def operator_interrupt_error(signum: int) -> str:
+    return f"runtime_failed:operator_interrupt:{signal.Signals(int(signum)).name}"
+
+
+def lease_managed_environment(environ: Mapping[str, str] | None = None) -> bool:
+    source = os.environ if environ is None else environ
+    return all(
+        str(source.get(key) or "")
+        for key in (LEASE_DB_ENV, LEASE_ID_ENV, LEASE_OWNER_TOKEN_ENV)
+    )
+
+
+@contextlib.contextmanager
+def sigterm_raises_operator_interrupt() -> Iterator[None]:
+    """首个 SIGTERM 抛出 OperatorInterrupt，之后的重复 SIGTERM 不再打断收束。
+
+    小红书租约进程的 SIGTERM 由 LeaseGuard 精确转发并负责 exporter 收束，保持默认处理，
+    避免对 exporter 发出第二次温和信号。
+    """
+
+    if (
+        lease_managed_environment()
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    if previous == signal.SIG_IGN:
+        yield
+        return
+    raised = False
+
+    def handle(signum: int, _frame: FrameType | None) -> None:
+        nonlocal raised
+        if raised:
+            return
+        raised = True
+        raise OperatorInterrupt(signum)
+
+    signal.signal(signal.SIGTERM, handle)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def run_main_with_operator_interrupt(main: Callable[[], int]) -> int:
+    """中间层入口：SIGTERM 经异常路径收束 worker 进程组并落盘日志，不再执行后续导入与 checkpoint。"""
+
+    with sigterm_raises_operator_interrupt():
+        try:
+            return main()
+        except OperatorInterrupt as exc:
+            print(operator_interrupt_error(exc.signum), file=sys.stderr, flush=True)
+            return 128 + exc.signum
+
+
+EXECUTION_STATE_PATH_ENV = "TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"
+CHILD_PROCESS_GROUPS_SUFFIX = ".process-groups.jsonl"
+
+
+def child_process_groups_path(state_path: str | Path) -> Path:
+    """中间层登记其 worker 进程组的旁路文件，与 execution state 同目录。"""
+
+    path = Path(state_path).expanduser()
+    return path.with_name(f"{path.name}{CHILD_PROCESS_GROUPS_SUFFIX}")
+
+
+def record_child_process_group(proc: subprocess.Popen[bytes]) -> None:
+    """通用中间层登记刚启动的 worker 进程组身份，供 runner 超时兜底精确强杀。
+
+    小红书租约进程由 LeaseGuard 登记，不写此文件。登记失败只影响兜底，不改变本轮结果。
+    """
+
+    state_value = os.environ.get(EXECUTION_STATE_PATH_ENV, "").strip()
+    if not state_value or lease_managed_environment():
+        return
+    try:
+        identity = SystemProcessInspector().identity(int(proc.pid))
+        if identity is None:
+            return
+        with child_process_groups_path(state_value).open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(identity.public(), sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        return
+
+
+def kill_recorded_child_process_groups(
+    state_path: str | Path,
+    *,
+    wait_seconds: float = PROCESS_FINAL_REAP_SECONDS,
+) -> list[dict[str, Any]]:
+    """只在中间层超时被强杀后调用：对登记且身份仍匹配的 worker 进程组发 SIGKILL。
+
+    组长仍在时必须与登记的启动标识一致；组长已退出但组仍有成员时，组号在成员存活期间不会
+    被复用，按原组收束。
+    """
+
+    path = child_process_groups_path(state_path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    inspector = SystemProcessInspector()
+    evidence: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            recorded = json.loads(line)
+            pid = int(recorded["pid"])
+            pgid = int(recorded["pgid"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if pgid <= 1 or pgid == os.getpgid(0):
+            continue
+        current = inspector.identity(pid)
+        if current is not None:
+            matched = current.public() == recorded
+        else:
+            matched = process_group_exists(pgid)
+        item: dict[str, Any] = {"pid": pid, "pgid": pgid, "matched": matched, "killed": False}
+        if matched:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+                item["killed"] = True
+            except ProcessLookupError:
+                pass
+            except PermissionError as exc:
+                # 无权限时不能证明已收束：如实记录，交给操作人核查，不中断其余组的兜底。
+                item["error"] = f"{type(exc).__name__}: {exc}"
+        evidence.append(item)
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    for item in evidence:
+        while (
+            item["killed"]
+            and process_group_exists(item["pgid"])
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+        item["group_exists"] = process_group_exists(item["pgid"])
+    return evidence
+
+
+def drain_exited_process(
+    proc: subprocess.Popen[bytes],
+    *,
+    timeout: float = PROCESS_FINAL_REAP_SECONDS,
+) -> tuple[bytes | None, bytes | None]:
+    """回收已退出进程的累计输出；孙进程仍占着管道而超时时，保留 TimeoutExpired 携带的累计输出。"""
+
+    try:
+        return proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        return exc.stdout, exc.stderr
+
+
+def write_command_logs(
+    cmd: list[str],
+    log_dir: Path,
+    stdout: str,
+    stderr: str,
+) -> dict[str, str]:
+    """两路输出共享头像证据：任一路命中即两路整体替换，清洗后才写盘。"""
+
+    log_dir = ensure_dir(log_dir)
+    _, avatar_output_detected = redact_author_avatar_text(f"{stdout}\n{stderr}")
+    if avatar_output_detected:
+        stdout = AUTHOR_AVATAR_LOG_REDACTION
+        stderr = AUTHOR_AVATAR_LOG_REDACTION
+    stdout_log = log_dir / "stdout.log"
+    stderr_log = log_dir / "stderr.log"
+    command_log = log_dir / "command.txt"
+    stdout_log.write_text(stdout, encoding="utf-8")
+    stderr_log.write_text(stderr, encoding="utf-8")
+    command_log.write_text(shlex.join(cmd), encoding="utf-8")
+    return {
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+        "command_log": str(command_log),
+    }
+
+
 def terminate_managed_process(
     proc: subprocess.Popen[bytes],
     *,
     grace_seconds: float,
+    signal_process: bool = True,
 ) -> tuple[bytes | None, bytes | None, bool]:
+    """只向直接子进程发一次 SIGTERM，等待整个进程组退出，超时才 SIGKILL 整组。
+
+    ``signal_process=False`` 用于温和信号已经发出的情形，只等待并兜底强杀。
+    """
+
     partial_stdout: bytes | None = None
     partial_stderr: bytes | None = None
     complete_stdout: bytes | None = None
     complete_stderr: bytes | None = None
     forced = False
     deadline = time.monotonic() + max(0.0, grace_seconds)
-    if proc.poll() is None:
+    if signal_process and proc.poll() is None:
         proc.terminate()
     remaining = max(0.01, deadline - time.monotonic())
     try:
@@ -473,6 +680,7 @@ def run_command(
     timed_out = False
     timeout_reason: str | None = None
     forced_termination = False
+    termination_requested = False
     progress_observed = False
     last_progress_at = started
     last_progress_age_seconds = 0.0
@@ -523,14 +731,24 @@ def run_command(
     )
     try:
         if not lease_registration_enabled:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(cwd),
-                env=child_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-            )
+            # Popen 内部到 proc 赋值之间推迟终止信号，避免独立会话里的 worker 成为孤儿；
+            # proc 赋值并登记后再按原处理重放，由下面的异常分支收束。
+            deferred_signals = DeferredTerminationSignals()
+            deferred_signals.install()
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(cwd),
+                    env=child_env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                record_child_process_group(proc)
+            finally:
+                deferred_signals.restore()
+                if deferred_signals.signal_received is not None:
+                    deferred_signals.replay()
         else:
             deferred_signals = DeferredTerminationSignals()
             deferred_signals.install()
@@ -648,6 +866,7 @@ def run_command(
                         )
                 elif exporter_alive:
                     exporter_identity_mismatch = True
+                    termination_requested = True
                     terminate_managed_process(
                         proc,
                         grace_seconds=cleanup_grace_seconds,
@@ -721,6 +940,7 @@ def run_command(
                 returncode = 124
                 timeout_reason = expiration_reason
                 last_progress_age_seconds = max(0.0, now - last_progress_at)
+                termination_requested = True
                 stdout_data, stderr_data, forced_termination = terminate_managed_process(
                     proc,
                     grace_seconds=cleanup_grace_seconds,
@@ -748,6 +968,7 @@ def run_command(
                         0.0,
                         time.monotonic() - last_progress_at,
                     )
+                    termination_requested = True
                     (
                         stdout_data,
                         stderr_data,
@@ -766,11 +987,31 @@ def run_command(
             last_progress_age_seconds = max(0.0, time.monotonic() - last_progress_at)
             break
     except BaseException:
-        if proc is not None and getattr(proc, "poll", lambda: proc.returncode)() is None:
+        if proc is not None:
+            collected_stdout: bytes | None = None
+            collected_stderr: bytes | None = None
             try:
-                terminate_managed_process(
-                    proc,
-                    grace_seconds=cleanup_grace_seconds,
+                if getattr(proc, "poll", lambda: proc.returncode)() is None:
+                    collected_stdout, collected_stderr, _ = terminate_managed_process(
+                        proc,
+                        grace_seconds=cleanup_grace_seconds,
+                        signal_process=not termination_requested,
+                    )
+                else:
+                    collected_stdout, collected_stderr = drain_exited_process(
+                        proc,
+                        timeout=PROCESS_FINAL_REAP_SECONDS,
+                    )
+            except Exception:
+                pass
+            try:
+                # Popen.communicate 跨 TimeoutExpired 与中断保留已读数据并返回累计输出；本函数只在
+                # 最后一次 communicate 之后才给 stdout/stderr 赋值，所以累计输出即完整输出。
+                write_command_logs(
+                    cmd,
+                    log_dir,
+                    decode_text(collected_stdout),
+                    decode_text(collected_stderr),
                 )
             except Exception:
                 pass
@@ -783,16 +1024,9 @@ def run_command(
                 environ=registration_env,
             )
 
-    _, avatar_output_detected = redact_author_avatar_text(f"{stdout}\n{stderr}")
-    if avatar_output_detected:
-        stdout = AUTHOR_AVATAR_LOG_REDACTION
-        stderr = AUTHOR_AVATAR_LOG_REDACTION
-    stdout_log = log_dir / "stdout.log"
-    stderr_log = log_dir / "stderr.log"
-    command_log = log_dir / "command.txt"
-    stdout_log.write_text(stdout, encoding="utf-8")
-    stderr_log.write_text(stderr, encoding="utf-8")
-    command_log.write_text(shlex.join(cmd), encoding="utf-8")
+    logs = write_command_logs(cmd, log_dir, stdout, stderr)
+    stdout = logs["stdout"]
+    stderr = logs["stderr"]
     return {
         "command": cmd,
         "command_text": shlex.join(cmd),
@@ -830,9 +1064,9 @@ def run_command(
             runtime_reporter.snapshot() if runtime_reporter is not None else None
         ),
         "elapsed_seconds": round(time.monotonic() - started, 2),
-        "stdout_log": str(stdout_log),
-        "stderr_log": str(stderr_log),
-        "command_log": str(command_log),
+        "stdout_log": logs["stdout_log"],
+        "stderr_log": logs["stderr_log"],
+        "command_log": logs["command_log"],
         "stdout_tail": tail(stdout),
         "stderr_tail": tail(stderr),
     }
