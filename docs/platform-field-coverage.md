@@ -11,6 +11,9 @@
 | 抖音 | `aweme_detail` 非空 `desc` | `note_download_url` | 保留 `images[].uri` 稳定键，staging → manifest → `data/media`；封面/视频/音乐/头像排除 | 结构化 | ID/昵称/主页 | 作者主页 | 赞/藏/评/分享 | 标题和预览文本不能代替正文 |
 | 知乎 | `search_content` / `answer_detail` / `article_detail` | 正文/详情 `image_list` | 当前会话 staging → manifest → `data/media`；公式/头像/作者主页/zvideo 排除 | 结构化 | ID/昵称/主页 | search author/member | 赞/评 | 详情重试耗尽后记录并跳过，标题/摘要不能通过 |
 
+作者列中的 ID 与昵称均为平台原始值：作者平台 ID 按字符串保存、不哈希，昵称不脱敏；
+作者头像不采集，性别、IP 归属地等未列出的作者字段也不采集。
+
 五个结构化平台都配置 `followers_policy=required`：数值、来源和
 `followers_observed=true` 缺一不可。真实 0 粉丝有效，缺失后由模型默认生成的 0 无效。
 抖音和小红书必须使用作者主页来源，不能用搜索结果中的占位 0 通过校验。

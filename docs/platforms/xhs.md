@@ -367,8 +367,8 @@ child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_t
 - 顶层 `run_summary.json` 为 `completed`，账号租约已经释放；
 - `discovery.skipped=false`，checkpoint/seen/campaign 没有提交错误；
 - `continuity_ok=true` 且至少覆盖 `search_results`；
-- 每条记录具有 note detail 正文、原始发布时间、作者 ID/昵称、creator profile 粉丝证据和完整
-  本地正文图片；
+- 每条记录具有 note detail 正文、原始发布时间、作者原始 `user_id`/昵称（不哈希、不脱敏）、
+  creator profile 粉丝证据和完整本地正文图片；
 - 视频和互动只在各自报告中，不计抓取成功；
 - `--no-import`、`sqlite_import_failed` 或持久化阶段 skipped 均不能完成正式轮次。
 

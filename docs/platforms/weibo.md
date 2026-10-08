@@ -22,6 +22,8 @@
   封面和视频缩略图不进入正文候选。
 - 作者粉丝来自 `mblog.user` 的明确粉丝字段，保存
   `followers_observed=true`、`author_followers_source=search_author`。原始字段明确为 0 时才接受 0。
+- 作者平台 ID 保存 `mblog.user.id` 原始值（整数归一为字符串，写在 `creator_hash` 键），昵称保存
+  `screen_name` 原文；头像、性别、主页、签名和 IP 归属地不写出。
 - 去重键为微博 ID；没有正文图片的记录不是有效图文。
 
 有 `pid` 时图片稳定资产键为 `weibo:pid:<pid>`，否则回退到规范 URL 哈希。平台层复用移动搜索会话

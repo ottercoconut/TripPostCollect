@@ -13,6 +13,8 @@ offset/search ID、详情和严格图文资产差异。
 - 正文图片来自 `note_download_url`；`images[].uri` 形成 `douyin:uri:<uri>` 稳定资产键。
 - 作者粉丝来自图文作者主页，要求 `followers_observed=true`；搜索作者对象的占位 0 不能通过。
 - 作者补全覆盖本轮全部未知图文候选，不使用固定作者数量上限。
+- 作者平台 ID 保存 `author.uid` 原始值（写在 `creator_hash` 键），昵称保存 `author.nickname` 原文；
+  `sec_uid`、`short_id`、`unique_id`、签名、头像和 IP 归属地不写出。
 - 去重键为 `aweme_id`。
 
 ## 搜索响应与游标

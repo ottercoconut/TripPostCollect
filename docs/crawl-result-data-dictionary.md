@@ -15,7 +15,11 @@ checkpoint、失败恢复或迁移字段；实时规模应直接查询 SQLite。
 
 数据库目前没有独立作者表。同一作者发布多篇帖子时，作者字段重复保存在对应 `web_posts` 行中。
 平台内作者关联键为 `platform_key + author_platform_id`；帖子与图片通过
-`web_posts.id = web_post_images.web_post_id` 关联。
+`web_posts.id = web_post_images.web_post_id` 关联。作者平台 ID 与昵称保存平台原始值：ID 统一按
+字符串归一（整数转字符串、去首尾空白），昵称按原文保存。issue #49 之前入库的微博、抖音、知乎行，
+其作者 ID 为 16 位哈希、昵称为首尾留字的脱敏值，不能与原始 ID 的行按作者关联。正式抓取会在详情
+前跳过库中已知帖子，日常抓取不会更新这些历史行；只有详情修复流程重取作者时以本轮原始值覆盖，
+历史数据修复见 issue #50。
 
 ## `web_posts` 帖子字段
 
@@ -42,8 +46,8 @@ checkpoint、失败恢复或迁移字段；实时规模应直接查询 SQLite。
 
 | 字段 | 类型 | 可空 | 含义 |
 |---|---|---|---|
-| `author_display_name` | TEXT | 是 | 作者昵称或展示名称 |
-| `author_platform_id` | TEXT | 是 | 平台作者 ID；只在同一平台命名空间内关联 |
+| `author_display_name` | TEXT | 是 | 平台原始作者昵称或展示名称，不脱敏 |
+| `author_platform_id` | TEXT | 是 | 平台原始作者用户 ID（不哈希）；只在同一平台命名空间内关联 |
 | `author_profile_url` | TEXT | 是 | 作者主页 URL |
 | `author_description` | TEXT | 是 | 作者简介或主页描述 |
 | `author_followers_count` | INTEGER | 是 | 抓取时观察到的粉丝数；真实 0 有效 |
@@ -64,8 +68,8 @@ SQLite 字段或图片关系中，也不保留 URL-only 参考关系。
 
 | JSON 键 | 类型 | 含义 |
 |---|---|---|
-| `creator_hash` | integer/text | 平台作者原始 ID 或归一化作者键；导出时按字符串处理 |
-| `nickname` | text | 作者昵称 |
+| `creator_hash` | integer/text | 平台作者原始 ID（键名沿用旧名，值不是哈希）；导出时按字符串处理 |
+| `nickname` | text | 平台原始作者昵称 |
 | `followers_count` | integer | 与顶层 `author_followers_count` 对应 |
 | `followers_observed` | boolean | 是否真实观察到粉丝数 |
 | `followers_source` | text | 粉丝数的平台来源或采集来源 |

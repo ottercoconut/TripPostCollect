@@ -23,6 +23,7 @@ import httpx
 from PIL import Image
 import pytest
 
+from support.raw_author_identity import use_raw_author_identity
 from trippostcollect.application import events
 from trippostcollect.artifacts import jsonl
 from trippostcollect.platforms import _fork_bridge, entry
@@ -63,6 +64,8 @@ def legacy(tmp_path, monkeypatch):
         old_core = importlib.import_module("media_platform.douyin.core")
         old_client = importlib.import_module("media_platform.douyin.client")
         old_store = importlib.import_module("store.douyin")
+        # #49：根实现保存作者原始 ID 与昵称，对照只替换旧 store 的身份转换。
+        use_raw_author_identity(patch, old_store)
         repair_path = tmp_path / "repair.py"
         repair_path.write_bytes((FIXTURES / "mediacrawler_export_entrypoint.py.txt").read_bytes())
         spec = importlib.util.spec_from_file_location("t06_legacy_repair", repair_path)

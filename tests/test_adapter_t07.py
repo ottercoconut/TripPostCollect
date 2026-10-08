@@ -21,6 +21,7 @@ import httpx
 from PIL import Image
 import pytest
 
+from support.raw_author_identity import use_raw_author_identity
 from trippostcollect.application import events
 from trippostcollect.artifacts import jsonl
 from trippostcollect.core import resources
@@ -76,6 +77,8 @@ def baseline(tmp_path, monkeypatch):
         if name.startswith(("media_platform.zhihu.", "store.zhihu.")):
             module = sys.modules.pop(name)
             monkeypatch.setitem(sys.modules, name, module)
+    # #49：根实现保存作者原始 ID 与昵称，对照只替换旧解析的身份转换。
+    use_raw_author_identity(monkeypatch, sys.modules["media_platform.zhihu.help"])
     return SimpleNamespace(
         core=importlib.import_module("media_platform.zhihu.core"),
         client=importlib.import_module("media_platform.zhihu.client"),
@@ -434,6 +437,14 @@ def test_settings_are_snapshotted_and_operation_readers_are_lazy(baseline, monke
     assert ports.initial_settle_seconds() == 0
 
 
+ISSUE_49_IDENTITY_REPLACEMENTS = (
+    ("anonymize_user_id(", "platform_user_id("),
+    ("mask_nickname(", "platform_nickname("),
+    ('"Creator anonymized hash"', '"Creator raw platform user ID"'),
+    ('"User nickname (masked)"', '"User raw nickname"'),
+)
+
+
 def test_pure_definitions_keep_original_bodies():
     """模型、签名、解析定义只允许来源模块与 logger 名称替换。"""
     ledger = json.loads((ROOT / "docs/adapter-ledger/symbols.json").read_text())["rows"]
@@ -459,6 +470,9 @@ def test_pure_definitions_keep_original_bodies():
             continue
         original = (FIXTURE / (row["file"].removeprefix("tools/MediaCrawler/") + ".txt")).read_text()
         original = original.replace("utils.logger", "logger")
+        # #49 有意偏离：作者 ID/昵称改存平台原始值，只允许身份转换调用与对应字段描述替换。
+        for old, new in ISSUE_49_IDENTITY_REPLACEMENTS:
+            original = original.replace(old, new)
         current = (ROOT / "src/trippostcollect" / row["target"]).read_text()
         assert ast.dump(definitions(original)[name]) == ast.dump(definitions(current)[name]), name
 

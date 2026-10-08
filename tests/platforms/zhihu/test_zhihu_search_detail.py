@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from unittest.mock import AsyncMock
 
 from .support import config, make_crawler as ZhihuCrawler
 import pytest
@@ -314,3 +315,48 @@ async def test_specified_detail_image_failure_does_not_block_later_candidate(
 
     assert image_calls == ["failed", "success"]
     assert stored == ["success"]
+
+
+@pytest.mark.asyncio
+async def test_candidate_with_missing_raw_nickname_is_not_valid(monkeypatch, tmp_path) -> None:
+    """#49：作者昵称存原始值后，缺昵称不再被脱敏成 "*" 掩盖，知乎候选判为无效、不下载正文图。"""
+    state_path = tmp_path / "state.json"
+    state_path.write_text('{"events": []}', encoding="utf-8")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
+    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", "0")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED", "0")
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    monkeypatch.setattr(config, "START_PAGE", 1)
+    monkeypatch.setattr(config, "KEYWORDS", "青岛旅游")
+
+    def answer(content_id: str, name: str) -> dict:
+        return {"type": "search_result", "object": {
+            "id": content_id, "type": "answer", "question": {"id": "10"}, "created_time": 1_700_000_000,
+            "content": f'<p>青岛完整正文</p><img src="https://pic1.zhimg.com/v2-{content_id}_r.jpg">',
+            "author": {"id": f"author-{content_id}", "url_token": f"token-{content_id}", "name": name,
+                       "follower_count": 3},
+        }}
+
+    contents = ZhihuExtractor().extract_contents_from_search(
+        {"data": [answer("named", "青岛作者"), answer("unnamed", "")]}
+    )
+    assert [item.user_nickname for item in contents] == ["青岛作者", ""]
+
+    def observed(item):
+        item.content_detail_status = "detail_observed"
+        item.content_detail_source = "search_content"
+        return item
+
+    crawler = ZhihuCrawler()
+    crawler.zhihu_client = AsyncMock()
+    crawler.zhihu_client.get_note_by_keyword.side_effect = [contents, []]
+    crawler.enrich_search_content_detail = AsyncMock(side_effect=observed)
+    crawler.get_content_images = AsyncMock(return_value=None)
+    monkeypatch.setattr(crawler, "_store_content", AsyncMock(return_value=None))
+
+    await crawler.search()
+
+    assert [call.args[0].content_id for call in crawler.get_content_images.await_args_list] == ["named"]
+    batches = [event["details"] for event in json.loads(state_path.read_text(encoding="utf-8"))["events"]
+               if event["type"] == "adaptive_batch_completed"]
+    assert batches[0]["valid_new_count"] == 1

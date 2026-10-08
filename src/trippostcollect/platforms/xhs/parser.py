@@ -32,7 +32,7 @@ import humps
 
 from trippostcollect.application.contracts import ImageStagingError
 from trippostcollect.platforms.xhs.models import NoteUrlInfo
-from trippostcollect.records.identity import anonymize_user_id, mask_nickname
+from trippostcollect.records.identity import platform_nickname, platform_user_id
 from trippostcollect.runtime.helpers import extract_url_params_to_dict, normalize_image_url
 
 
@@ -272,7 +272,6 @@ def update_xhs_note(
     source_keyword: str,
     current_timestamp: Callable[[], int],
     save_data_option: str,
-    keep_author_detail: bool,
 ) -> Dict:
     """
     Update Xiaohongshu note
@@ -295,8 +294,8 @@ def update_xhs_note(
     )
 
     video_url = ""
-    raw_user_id = _first_nonempty(user_info.get("user_id"), creator_item.get("user_id"))
-    raw_nickname = _first_nonempty(user_info.get("nickname"), creator_item.get("nickname"))
+    raw_user_id = platform_user_id(_first_nonempty(user_info.get("user_id"), creator_item.get("user_id")))
+    raw_nickname = platform_nickname(_first_nonempty(user_info.get("nickname"), creator_item.get("nickname")))
 
     local_db_item = {
         "note_id": note_item.get("note_id"),  # Note ID
@@ -306,11 +305,11 @@ def update_xhs_note(
         "video_url": video_url,  # Note video url
         "time": note_item.get("time"),  # Note publish time
         "last_update_time": note_item.get("last_update_time", 0),  # Note last update time
-        "creator_hash": anonymize_user_id(raw_user_id),  # Creator anonymous hash.
-        "user_id": raw_user_id if keep_author_detail else "",
-        "nickname": raw_nickname if keep_author_detail else mask_nickname(raw_nickname),
+        "creator_hash": raw_user_id,  # 作者平台原始 user_id
+        "user_id": raw_user_id,
+        "nickname": raw_nickname,
         "author_profile_url": _creator_profile_url(
-            raw_user_id or "",
+            raw_user_id,
             note_item.get("xsec_token", ""),
             note_item.get("xsec_source", "pc_search"),
         ),

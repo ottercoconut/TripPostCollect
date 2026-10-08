@@ -23,6 +23,9 @@
 - 正文 `content_text` 保留块级换行并剔除 figure/figcaption；图片说明文字不进入正文。
 - 作者粉丝来自搜索 author/member 的 `follower_count`，要求
   `followers_observed=true`、`author_followers_source=search_author`；缺失不能补 0。
+- 作者平台 ID 保存 author/member 原始 `id`（写在 `creator_hash` 键），昵称保存 `name` 原文；
+  `url_token` 另存为 `creator_url_token`，只用于拼接主页 `https://www.zhihu.com/people/<url_token>`，
+  不作为平台 ID。
 - 详情候选级失败有限重试后写 `candidate_skipped`；登录、授权、频控和验证仍是运行级阻断。
 
 ## 正文图片与资产键

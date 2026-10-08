@@ -29,7 +29,7 @@ from hashlib import sha256
 from typing import Any, Dict, List
 from urllib.parse import urlsplit
 
-from trippostcollect.records.identity import anonymize_user_id, mask_nickname
+from trippostcollect.records.identity import platform_nickname, platform_user_id
 from trippostcollect.runtime.helpers import (
     _find_nested_platform_record, normalize_image_url,
     rfc2822_to_timestamp, rfc2822_to_china_datetime,
@@ -135,8 +135,7 @@ def update_weibo_note(
         key in user_info and user_info.get(key) not in (None, "")
         for key in ("followers_count", "followers_count_str", "fans_count", "fans_count_str")
     )
-    # 教学版：原始 user_id 匿名化为 creator_hash，昵称脱敏；
-    # 不采集头像/主页链接/性别/IP 归属地等可定位真人的信息。
+    # 作者平台 ID（creator_hash 键）与昵称保存平台原始值；头像、性别、IP 归属地等仍不采集。
     save_content_item = {
         # Weibo information
         "note_id": note_id,
@@ -153,9 +152,9 @@ def update_weibo_note(
         "image_list_source": "mblog.pics",
         "image_assets": image_assets,
 
-        # 创作者信息（匿名化/脱敏，不含原始 user_id/avatar/gender/profile_url/ip_location）
-        "creator_hash": anonymize_user_id(user_info.get("id")),
-        "nickname": mask_nickname(user_info.get("screen_name", "")),
+        # 创作者信息：原始用户 ID 与昵称；不含 avatar/gender/profile_url/ip_location
+        "creator_hash": platform_user_id(user_info.get("id")),
+        "nickname": platform_nickname(user_info.get("screen_name", "")),
         "followers_count": followers_count,
         "fans_count": followers_count,
         "followers_observed": followers_observed,
