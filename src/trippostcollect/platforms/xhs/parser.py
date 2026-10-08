@@ -295,9 +295,9 @@ def _normalized_creator_item(user_id: str, creator: Dict, *, current_timestamp: 
 
 # 运行时作者状态投影白名单。仓库内读取点：_normalized_creator_item、_creator_basic_info、
 # _creator_metric、_interaction_count，以及作者匹配读取的 basicInfo 用户 ID。仓库外读取点：同级
-# TripPostResearch 从 creator_profile_json 读取的 basicInfo.redId、tags[].tagType/name、
-# verifyInfo.redOfficialVerifyType 与 interactions[].i18nCount。头像（imageb、images、avatar*、icon）
-# 与任何凭据或 token 字段都不在白名单中，投影只保留标量值。
+# TripPostResearch 从 creator_profile_json 读取的 tags[].tagType/name、verifyInfo.redOfficialVerifyType
+# 与 interactions[].i18nCount。另保留平台号 basicInfo.redId，与静态路径的完整结构对齐。头像（imageb、
+# images、avatar*、icon）与任何凭据或 token 字段都不在白名单中，投影只保留标量值。
 XHS_CREATOR_METRIC_FIELDS = (
     "fans", "fansCount", "fans_count", "followerCount", "followers_count", "粉丝",
     "follows", "followsCount", "following_count", "follow_count", "关注",

@@ -324,11 +324,12 @@ python scripts/repair_xhs_posts.py \
 - 浏览器回退在到达与滚动检查后进入有界就绪等待，预算 10 秒。`domcontentloaded` 只是前置条件，
   超时记 `page_not_ready` 后继续。随后执行固定脚本，读取页面已执行的
   `window.__INITIAL_STATE__.user.userPageData`。只有自有数据属性 `__v_isRef === true` 的节点才按
-  Vue ref 解包；脚本按白名单只复制标量字段，不序列化整份状态，也不返回 HTML。白名单分两部分：
+  Vue ref 解包；脚本按白名单只复制标量字段，不序列化整份状态，也不返回 HTML。白名单分三部分：
   - 仓库内下游读取的字段：`basicInfo` 的用户 ID、昵称、简介、性别、IP 属地，粉丝、关注、笔记与获赞
     指标键，以及 `interactions` 条目的 `type/name/key/count/num/value`；
-  - 研究项目经 `creator_profile_json` 读取的字段：`basicInfo.redId`、`interactions[].i18nCount`、
-    `tags[].tagType/name`、`verifyInfo.redOfficialVerifyType`。
+  - 研究项目经 `creator_profile_json` 读取的字段：`interactions[].i18nCount`、`tags[].tagType/name`、
+    `verifyInfo.redOfficialVerifyType`；
+  - 平台号 `basicInfo.redId`：保留它是为了与静态路径的完整结构对齐。它是字符串，同样参与头像同值删除。
 
   头像（`imageb`、`images`、`avatar*`、`icon`）与任何凭据或 token 字段都不投影；计数类字段不投影布尔值。
 - 投影前，脚本先在该作者记录内收集头像证据 URL。证据键与路径直接取自 `records.sanitization`：
@@ -344,7 +345,14 @@ python scripts/repair_xhs_posts.py \
   保存（如 `1.2万`）；0 是真实观察值，不补值。仅有 `interactions` 数组不算就绪。每次读取投影后，
   先做生命周期、登录、验证、阻断与封禁检查，然后才接受结果或重试，每 0.5 秒重试一次。出现验证标记时，
   先进入既有验证等待。人工验证完成后，每轮做一次检查，再读取一次：先投影，取不到再走严格静态解析；
-  这一步不会重入就绪等待。取消以及页面、浏览器关闭照常向上传播。
+  这一步不会重入就绪等待。读到结果后、接受之前，依次复查以下各项：
+  - 生命周期：主页面与作者页都必须存活；
+  - 可见状态：再次检查阻断与封禁；
+  - 人工流程：验证重现时丢弃本次结果，在同一 ticket 的预算内继续等待；出现登录要求时转入登录恢复；
+  - ticket 预算：已耗尽时按共享人工预算耗尽（`xhs_manual_checkpoint_budget_exhausted`）失败，不接受
+    超时之后才拿到的数据。
+
+  取消以及页面、浏览器关闭照常向上传播。
 - 页面数据带有作者 ID 且与请求的 `user_id` 不一致时，判为 `creator_mismatch`，不可用。ID 缺失时
   沿用按 `user_id` 打开的作者页和笔记作者 ID，不凭昵称比对。投影在预算内拿不到粉丝时，回退到
   `page.content()` 加严格静态解析。
@@ -357,9 +365,11 @@ python scripts/repair_xhs_posts.py \
 - `creator_profile_parse` 导航诊断的写入时机：
   - 就绪等待结束时写一次，`outcome` 取 `ok`、`ok_static_state` 或原因类别；
   - 就绪等待中转入登录恢复时写 `ok_login_recovery` 或 `login_recovery_empty`；
-  - 验证等待中读到作者资料时写 `ok` 或 `ok_static_state`，判定作者不一致时写 `creator_mismatch`。
+  - 验证等待中读到作者资料、且接受前复查通过时写 `ok` 或 `ok_static_state`；判定作者不一致时写
+    `creator_mismatch`。
 
-  以下情况不写：到达或滚动检查直接转入登录恢复；验证等待因人工预算耗尽而抛错；验证等待中转入登录恢复。
+  以下情况不写：到达或滚动检查直接转入登录恢复；验证等待因人工预算耗尽而抛错，包括复查时才耗尽；
+  验证等待中转入登录恢复；复查时验证重现。
 - 两条路径都失败时，`candidate_skipped.detail` 写为 `creator_profile_failed:api=<原因>;browser=<原因>`，
   `error_code` 仍为 `creator_profile_unavailable`。repair 路径的失败记录不带原因码。原因只含类别：
   - 无 token 请求：`api_request_failed:<异常类型>`；

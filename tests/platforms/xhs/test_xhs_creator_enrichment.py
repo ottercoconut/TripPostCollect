@@ -342,6 +342,8 @@ async def test_creator_browser_fallback_keeps_qr_page_open_until_verified(
             {"captcha_or_verify": True},
             {"captcha_or_verify": True},
             {"captcha_or_verify": False},
+            # #52：接受验证后读到的结果前复查一次可见状态。
+            {"captcha_or_verify": False},
         ]
     )
 

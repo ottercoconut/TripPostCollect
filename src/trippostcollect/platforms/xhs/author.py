@@ -41,6 +41,7 @@ from trippostcollect.platforms.xhs.errors import (
     XHSCreatorProfileUnavailable,
     XHSNetworkRecoveryTimeout,
 )
+from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitTicket
 from trippostcollect.platforms.xhs.parser import (
     creator_runtime_followers_observed,
     creator_profile_user_ids,
@@ -455,36 +456,66 @@ class XhsAuthorMixin:
         page: Page,
         user_id: str,
     ) -> Tuple[Optional[Dict], str]:
-        """读取一次：先运行时投影，取不到再严格静态解析；不做可见状态检查，也不进入验证等待。
+        """读取一次：先运行时投影，取不到再严格静态解析；不做可见状态检查，不进入验证等待，也不写诊断。
 
-        供人工验证完成后的轮询使用；只在得到结论（成功或作者不一致）时写 creator_profile_parse 诊断。
+        成功时原因为 ok 或 ok_static_state；作者不一致时为 creator_mismatch。
         """
         projected, projection_reason = await self._creator_runtime_projection(page, user_id)
         if projected is not None:
-            await self._record_navigation_diagnostic(
-                page,
-                stage="creator_profile_parse",
-                outcome="ok",
-            )
             return projected, "ok"
         if projection_reason == "creator_mismatch":
-            await self._record_navigation_diagnostic(
-                page,
-                stage="creator_profile_parse",
-                outcome=projection_reason,
-            )
             return None, projection_reason
         html_content = await page.content()
         creator_info = self.xhs_client.extract_creator_info_from_html(html_content)
         if creator_info:
-            await self._record_navigation_diagnostic(
-                page,
-                stage="creator_profile_parse",
-                outcome="ok_static_state",
-            )
             return creator_info, "ok_static_state"
         static_reason = self._creator_client_parse_reason() or "unknown"
         return None, f"{projection_reason},static_{static_reason}"
+
+    async def _read_creator_profile_after_verification(
+        self,
+        page: Page,
+        user_id: str,
+        ticket: XHSManualWaitTicket,
+    ) -> Tuple[str, Optional[Dict], str]:
+        """验证标记消失后读取一次，并在接受前复查；返回 (动作, 作者资料, 原因)。
+
+        动作：accept（复查通过）、login（转登录恢复）、wait（未取到或验证重现，在同一 ticket 内继续等）、
+        stop（作者不一致）。接受前依次复查生命周期、可见状态与阻断、人工流程标记和 ticket 预算，全部
+        通过后才写 creator_profile_parse 诊断；超时后才拿到的数据不接受。
+        """
+        creator_info, read_reason = await self._read_creator_profile_snapshot(page, user_id)
+        if read_reason == "creator_mismatch":
+            await self._record_navigation_diagnostic(
+                page,
+                stage="creator_profile_parse",
+                outcome=read_reason,
+            )
+            return "stop", None, read_reason
+        if not creator_info:
+            return "wait", None, read_reason
+        self._assert_primary_page_alive("creator_profile_verification_accept")
+        if self._page_is_closed(page):
+            raise PlaywrightError("Target page, context or browser has been closed")
+        text_sample, markers = await inspect_visible_page_state(page)
+        await self._raise_for_creator_page_terminal(
+            page,
+            user_id=str(user_id),
+            stage="verification_accept",
+            visible_text=text_sample,
+            visible_markers=markers,
+        )
+        if markers.get("login_required"):
+            return "login", None, ""
+        if markers.get("captcha_or_verify"):
+            return "wait", None, "verification_reappeared"
+        ticket.raise_if_exhausted()
+        await self._record_navigation_diagnostic(
+            page,
+            stage="creator_profile_parse",
+            outcome=read_reason,
+        )
+        return "accept", creator_info, read_reason
 
     async def _creator_runtime_projection(
         self,
@@ -528,8 +559,9 @@ class XhsAuthorMixin:
     ) -> Optional[Dict]:
         """Keep a creator page open until manual login or security verification completes.
 
-        验证标记消失后每轮只做“检查 + 读取一次”（_read_creator_profile_snapshot），不会重入就绪
-        等待或本函数；作者不一致时直接结束，其余未取到的情况在共享人工预算内继续等待。
+        验证标记消失后每轮做“检查 + 读取一次 + 接受前复查”（_read_creator_profile_after_verification），
+        不会重入就绪等待或本函数；作者不一致时直接结束，其余未取到或验证重现的情况在同一 ticket 的
+        共享人工预算内继续等待。
         """
         poll_seconds = max(
             1.0,
@@ -561,20 +593,26 @@ class XhsAuthorMixin:
                     return await self._recover_creator_login_on_primary_page(user_id)
                 if not markers.get("captcha_or_verify"):
                     ticket.raise_if_exhausted()
-                    creator_info, read_reason = await self._read_creator_profile_snapshot(
-                        page,
-                        str(user_id),
+                    action, creator_info, read_reason = (
+                        await self._read_creator_profile_after_verification(
+                            page,
+                            str(user_id),
+                            ticket,
+                        )
                     )
+                    if action == "login":
+                        ticket.close()
+                        return await self._recover_creator_login_on_primary_page(user_id)
                     self._creator_browser_reason = (
-                        "" if creator_info else f"verification_wait:{read_reason}"
+                        "" if action == "accept" else f"verification_wait:{read_reason}"
                     )
-                    if creator_info:
+                    if action == "accept":
                         logger.info(
                             "[XiaoHongShuCrawler] Manual creator-profile "
                             f"verification completed: {user_id}"
                         )
                         return creator_info
-                    if read_reason == "creator_mismatch":
+                    if action == "stop":
                         return None
 
                 remaining = ticket.remaining_seconds

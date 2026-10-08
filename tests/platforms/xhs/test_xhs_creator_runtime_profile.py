@@ -20,7 +20,7 @@ import pytest
 import trippostcollect.platforms.xhs.author as xhs_author
 from trippostcollect.platforms.xhs.client import XiaoHongShuClient
 from trippostcollect.platforms.xhs.errors import PlatformRuntimeError, XHSCreatorProfileUnavailable
-from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget
+from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget, XHSManualWaitBudgetExhausted
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.platforms.xhs.parser import (
     XHS_CREATOR_BASIC_FIELDS,
@@ -626,6 +626,7 @@ class CreatorPage:
         self.content_calls = 0
         self.closed = False
         self.brought_to_front = 0
+        self.on_projection = None
 
     async def wait_for_timeout(self, milliseconds):
         return None
@@ -645,6 +646,8 @@ class CreatorPage:
         assert script == xhs_author.XHS_CREATOR_RUNTIME_PROJECTION_SCRIPT
         assert arg == xhs_creator_projection_spec()
         self.projection_calls += 1
+        if self.on_projection is not None:
+            self.on_projection()
         value = self.projections.pop(0) if len(self.projections) > 1 else self.projections[0]
         if isinstance(value, BaseException):
             raise value
@@ -1001,10 +1004,11 @@ async def test_boolean_fans_are_not_ready_and_end_as_followers_unobserved(crawle
 
 @pytest.mark.asyncio
 async def test_zero_fans_runtime_projection_succeeds(crawler):
-    page = CreatorPage([{"fans": 0, "basicInfo": {"nickname": "合成作者"}}])
+    # 只有 {"fans": 0}：旧实现按值真假判空会把它当作空投影。
+    page = CreatorPage([{"fans": 0}])
 
-    assert await open_with(crawler, page) == {"fans": 0, "basicInfo": {"nickname": "合成作者"}}
-    assert crawler.sleeps == []
+    assert await open_with(crawler, page) == {"fans": 0}
+    assert crawler.sleeps == [] and page.content_calls == 0
 
 
 @pytest.mark.asyncio
@@ -1135,6 +1139,122 @@ async def test_readiness_and_verification_never_recurse(crawler):
     assert creator["interactions"][1]["count"] == "128"
     assert depth["read_calls"] == 1 and depth["wait_calls"] == 1
     assert depth["max_read"] == 1 and depth["max_wait"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 人工验证完成后读到结果、接受之前的复查。
+
+
+def start_counter(crawler):
+    """统计共享人工预算开出的 ticket 数，用于证明验证重现时沿用同一 ticket。"""
+    budget = crawler._manual_wait_budget
+    original_start = budget.start
+    tickets = []
+
+    def start(stage):
+        ticket = original_start(stage)
+        tickets.append(ticket)
+        return ticket
+
+    budget.start = start
+    return tickets
+
+
+@pytest.mark.asyncio
+async def test_verification_read_rechecks_primary_page_before_accepting(crawler):
+    page = CreatorPage([creator_state()])
+    page.on_projection = lambda: setattr(crawler.context_page.is_closed, "return_value", True)
+    crawler.visible_markers = [{}, {"captcha_or_verify": True}]
+
+    with pytest.raises(RuntimeError, match="xhs_main_page_closed_unexpected"):
+        await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+
+    assert parse_diagnostics(crawler) == []
+
+
+@pytest.mark.asyncio
+async def test_verification_read_rechecks_creator_page_before_accepting(crawler):
+    page = CreatorPage([creator_state()])
+    page.on_projection = lambda: setattr(page, "closed", True)
+    crawler.visible_markers = [{}]
+
+    with pytest.raises(PlaywrightError, match="has been closed"):
+        await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+
+    assert parse_diagnostics(crawler) == []
+
+
+@pytest.mark.asyncio
+async def test_verification_reappearing_during_read_keeps_waiting_on_same_ticket(crawler):
+    page = CreatorPage([creator_state()])
+    tickets = start_counter(crawler)
+    remaining = []
+    page.on_projection = lambda: remaining.append(tickets[0].remaining_seconds)
+    # 轮询检查干净 → 读取 → 复查时验证重现；睡一轮后再次检查、读取、复查通过。
+    crawler.visible_markers = [{}, {"captcha_or_verify": True}, {}, {}]
+
+    creator = await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+
+    assert creator["interactions"][1]["count"] == "128"
+    assert len(tickets) == 1
+    assert page.projection_calls == 2
+    assert remaining[0] > remaining[1]
+    assert crawler.sleeps == [1.0]
+    assert crawler._manual_wait_budget.manual_elapsed_seconds == pytest.approx(1.0)
+    assert [event["outcome"] for event in parse_diagnostics(crawler)] == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_budget_exhausted_during_read_rejects_late_profile(crawler):
+    clock_start = crawler._popup_monotonic()
+    prior = crawler._manual_wait_budget.start("prior_manual_step")
+    crawler.sleeps.clear()
+    await crawler._popup_sleep(599.0)
+    prior.close()
+    assert crawler._popup_monotonic() - clock_start == pytest.approx(599.0)
+    page = CreatorPage([creator_state()])
+    original_evaluate = page.evaluate
+
+    async def evaluate(script, arg=None):
+        result = await original_evaluate(script, arg)
+        if arg is not None:
+            # 最后一次投影耗时 2 秒（在 5 秒单次上限内），读取结束时共享预算已越过 600 秒。
+            await crawler._popup_sleep(2.0)
+        return result
+
+    page.evaluate = evaluate
+    crawler.visible_markers = [{}, {}]
+
+    with pytest.raises(XHSManualWaitBudgetExhausted):
+        await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+
+    assert page.projection_calls == 1
+    # 599 + 2 秒：读取结束时已超出 600 秒预算，结果不得接受。
+    assert crawler._manual_wait_budget.manual_elapsed_seconds == pytest.approx(601.0)
+    assert parse_diagnostics(crawler) == []
+
+
+@pytest.mark.asyncio
+async def test_login_during_verification_read_uses_login_recovery(crawler):
+    page = CreatorPage([creator_state()])
+    crawler.visible_markers = [{}, {"login_required": True}]
+    crawler._recover_creator_login_on_primary_page = AsyncMock(return_value={"fans": "5"})
+
+    assert await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER) == {"fans": "5"}
+    crawler._recover_creator_login_on_primary_page.assert_awaited_once_with(REQUESTED_USER)
+    assert parse_diagnostics(crawler) == []
+
+
+@pytest.mark.asyncio
+async def test_verification_read_accepts_after_clean_recheck(crawler):
+    page = CreatorPage([creator_state()])
+    crawler.visible_markers = [{}, {}]
+
+    creator = await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+
+    assert creator["interactions"][1]["count"] == "128"
+    assert crawler.visible_markers == []
+    assert [event["outcome"] for event in parse_diagnostics(crawler)] == ["ok"]
 
 
 @pytest.mark.asyncio
