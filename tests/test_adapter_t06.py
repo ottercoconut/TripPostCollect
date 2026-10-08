@@ -25,6 +25,7 @@ import pytest
 
 from support.raw_author_identity import use_raw_author_identity
 from trippostcollect.application import events
+from trippostcollect.core import paths
 from trippostcollect.artifacts import jsonl
 from trippostcollect.platforms import _fork_bridge, entry
 from trippostcollect.platforms.douyin import client, core, login, login_support, parser, signer
@@ -33,6 +34,19 @@ from trippostcollect.runtime import image_retry
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/adapter_t06"
+T14_DOUYIN_PROFILES = {
+    str(ROOT / "tools/MediaCrawler/browser_data/dy_user_data_dir"),
+    str(paths.platform_profile_dir("douyin")),
+}
+
+
+def t14_slider_paths(node):
+    """T14 授权差异：滑块临时图从 fork temp_image（及 cwd 相对路径）改到 DOUYIN_SLIDER_IMAGE_DIR。"""
+    source = ast.unparse(node)
+    source = source.replace(
+        "os.path.join(MEDIACRAWLER_DIR, 'temp_image')", "str(DOUYIN_SLIDER_IMAGE_DIR)",
+    ).replace("f'./temp_image/{img_type}.jpg'", "os.path.join(DOUYIN_SLIDER_IMAGE_DIR, f'{img_type}.jpg')")
+    return ast.parse(source).body[0]
 KEYWORD = "青岛崂山旅游攻略"
 
 
@@ -275,6 +289,9 @@ async def drive(modules, root, patch, scenario, fallback):
             trace.append(("playwright_exit",))
 
         async def launch_persistent_context(self, **kwargs):
+            # T14 授权差异：持久 profile 从 fork browser_data 迁到 core.paths 定义的新位置；两侧归一为同一记号。
+            if kwargs.get("user_data_dir") in T14_DOUYIN_PROFILES:
+                kwargs = {**kwargs, "user_data_dir": "<douyin persistent profile>"}
             trace.append(("launch", kwargs))
             return Context()
 
@@ -491,7 +508,9 @@ def test_unchanged_parser_signer_and_login_support_bodies():
         old = {node.name: node for node in ast.parse((FIXTURES / (name + ".txt")).read_text()).body if hasattr(node, "name")}
         new = {node.name: node for node in ast.parse(Path(module.__file__).read_text()).body if hasattr(node, "name")}
         for symbol in names:
-            assert ast.dump(old[symbol]) == ast.dump(new[symbol]), (name, symbol)
+            expected = t14_slider_paths(old[symbol]) if symbol == "Slide" else old[symbol]
+            actual = ast.parse(ast.unparse(new[symbol])).body[0] if symbol == "Slide" else new[symbol]
+            assert ast.dump(expected) == ast.dump(actual), (name, symbol)
 
 
 @pytest.mark.asyncio

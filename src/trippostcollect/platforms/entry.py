@@ -51,6 +51,23 @@ def configure(argv) -> WorkerInputs:
     return inputs
 
 
+def _save_data_root(save_data_path: str):
+    """正式父进程总是显式传入 --save_data_path；缺省时失败，不再回落到 fork 数据目录。"""
+    from pathlib import Path
+
+    if not save_data_path:
+        raise RuntimeError("worker_save_data_path_required")
+    return Path(save_data_path)
+
+
+def require_persistent_session_migrated(platform_code: str) -> None:
+    """非小红书 worker 建立持久浏览器会话前的 T14 迁移失败关闭检查。"""
+    from trippostcollect.core import paths
+
+    if platform_code != "xhs":
+        paths.require_platform_session_migrated(paths.platform_key_for_profile_code(platform_code))
+
+
 def current_config():
     """configure 写回后的配置对象；未经 configure 时按默认值构造一次。"""
     global _config
@@ -91,7 +108,6 @@ def weibo_dependencies(config, *, post_repair=False):
     from trippostcollect.application.worker_inputs import weibo_input_readers
     from trippostcollect.artifacts.image_staging import PostImageStager
     from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
-    from trippostcollect.core.paths import MEDIACRAWLER_DIR
     from trippostcollect.db.discovery_read import existing_platform_identities
     from trippostcollect.platforms.weibo.models import WeiboConfig
     from trippostcollect.platforms.weibo.parser import weibo_source_asset_key
@@ -164,7 +180,7 @@ def weibo_dependencies(config, *, post_repair=False):
             save_data_path=lambda: options.SAVE_DATA_PATH,
         )),
         image_stager=lambda: PostImageStager(
-            save_data_root=Path(options.SAVE_DATA_PATH) if options.SAVE_DATA_PATH else MEDIACRAWLER_DIR / "data",
+            save_data_root=_save_data_root(options.SAVE_DATA_PATH),
             platform="weibo", source_key="image_list",
             source_asset_key=lambda item: weibo_source_asset_key(item.get("pid"), item["url"]),
             log_saved=lambda count, note_id: logger.info(
@@ -224,7 +240,6 @@ def douyin_dependencies(config):
     from trippostcollect.artifacts.evidence import write_evidence
     from trippostcollect.artifacts.image_staging import PostImageStager
     from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
-    from trippostcollect.core.paths import MEDIACRAWLER_DIR
     from trippostcollect.db.discovery_read import existing_platform_identities
     from trippostcollect.platforms.douyin.parser import douyin_source_asset_key
     from trippostcollect.runtime import behavior, login_helpers
@@ -277,7 +292,7 @@ def douyin_dependencies(config):
 
     def image_stager():
         return PostImageStager(
-            save_data_root=Path(settings.SAVE_DATA_PATH) if settings.SAVE_DATA_PATH else MEDIACRAWLER_DIR / "data",
+            save_data_root=_save_data_root(settings.SAVE_DATA_PATH),
             platform="douyin", source_key="note_download_url",
             source_asset_key=lambda item: douyin_source_asset_key(item.get("uri"), item["url"]),
             log_saved=lambda count, aweme_id: logging.getLogger("MediaCrawler").info(
@@ -325,7 +340,6 @@ def _zhihu_dependencies(config):
     from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
     from trippostcollect.artifacts.image_staging import PostImageStager
     from trippostcollect.artifacts.evidence import write_evidence
-    from trippostcollect.core.paths import MEDIACRAWLER_DIR
     from trippostcollect.db.discovery_read import existing_platform_identities
     from trippostcollect.runtime import behavior, cookies, login_helpers
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
@@ -401,7 +415,7 @@ def _zhihu_dependencies(config):
             save_data_path=lambda: save_data_path,
         )),
         image_stager_factory=lambda: PostImageStager(
-            save_data_root=Path(save_data_path) if save_data_path else MEDIACRAWLER_DIR / "data",
+            save_data_root=_save_data_root(save_data_path),
             platform="zhihu", source_key="image_list",
             source_asset_key=lambda item: zhihu_source_asset_key(item["url"]),
             log_saved=lambda count, content_id: logger.info(
@@ -428,7 +442,6 @@ def xhs_dependencies(config, *, repair=None):
     from trippostcollect.artifacts.evidence import _write_xhs_repair_report, write_evidence
     from trippostcollect.artifacts.image_staging import PostImageStager
     from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
-    from trippostcollect.core.paths import MEDIACRAWLER_DIR
     from trippostcollect.db.discovery_read import existing_platform_identities
     from trippostcollect.platforms.xhs import behavior as xhs_behavior
     from trippostcollect.platforms.xhs.behavior import wait_for_xhs_search_ready
@@ -517,7 +530,7 @@ def xhs_dependencies(config, *, repair=None):
                 platform="xhs", crawler_type=crawler_type, save_data_path=lambda: save_data_path,
             )),
             image_stager_factory=lambda: PostImageStager(
-                save_data_root=Path(save_data_path) if save_data_path else MEDIACRAWLER_DIR / "data",
+                save_data_root=_save_data_root(save_data_path),
                 platform="xhs", source_key="image_list",
                 source_asset_key=lambda item: xhs_source_asset_key(item["url"]),
                 log_saved=lambda count, note_id: logger.info(
@@ -533,6 +546,7 @@ def xhs_dependencies(config, *, repair=None):
 
 def main(argv=None) -> int:
     inputs = configure(argv)
+    require_persistent_session_migrated(inputs.platform)
     install_hooks()
     state = {"crawler": None}
 

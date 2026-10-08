@@ -29,7 +29,6 @@ from typing import Callable, Dict
 import aiofiles
 
 from trippostcollect.application.contracts import JsonlWriter
-from trippostcollect.core.paths import MEDIACRAWLER_DIR
 from trippostcollect.records.sanitization import sanitize_export_item
 
 
@@ -57,7 +56,7 @@ def get_current_date() -> str:
 class AsyncFileWriter:
     def __init__(
         self, platform: str, crawler_type: str, *,
-        save_data_path: Callable[[], str] = lambda: "",
+        save_data_path: Callable[[], str],
         current_date: Callable[[], str] = get_current_date,
         sanitizer: Callable[[dict], dict] = sanitize_export_item,
     ):
@@ -70,10 +69,10 @@ class AsyncFileWriter:
 
     def _get_file_path(self, file_type: str, item_type: str) -> str:
         save_data_path = self._save_data_path()
-        if save_data_path:
-            base_path = f"{save_data_path}/{self.platform}/{file_type}"
-        else:
-            base_path = str(MEDIACRAWLER_DIR / "data" / self.platform / file_type)
+        if not save_data_path:
+            # 正式 worker 总是显式给出输出根；不再回落到 fork 数据目录。
+            raise RuntimeError("jsonl_save_data_path_required")
+        base_path = f"{save_data_path}/{self.platform}/{file_type}"
         pathlib.Path(base_path).mkdir(parents=True, exist_ok=True)
         file_name = f"{self.crawler_type}_{item_type}_{self._current_date()}.{file_type}"
         return f"{base_path}/{file_name}"

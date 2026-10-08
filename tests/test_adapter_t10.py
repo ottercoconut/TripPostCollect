@@ -8,6 +8,7 @@ import asyncio
 from datetime import datetime
 import importlib
 import json
+import re
 from pathlib import Path
 import shutil
 import sqlite3
@@ -19,6 +20,7 @@ from urllib.parse import parse_qsl
 import pytest
 
 from trippostcollect.application import inputs, page_evidence, repair, warmup
+from trippostcollect.core import paths as core_paths
 from trippostcollect.runtime import cookies, page_readiness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +48,35 @@ def function(source, name):
     return next(node for node in ast.parse(source).body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name)
 
 
+def t14_snapshot_writer(source):
+    """T14 授权差异：快照路径由调用方经 platform_cookie_snapshot_path 给出，写前确保同级父目录存在。"""
+    source = source.replace(
+        "def write_cookie_snapshot(\n    platform_key: str,\n    profile_dir: Path,\n",
+        "def write_cookie_snapshot(\n    platform_key: str,\n    snapshot_path: Path,\n",
+    )
+    return source.replace("    snapshot_path = profile_dir / COOKIE_SNAPSHOT_FILENAME\n", "    ensure_parent(snapshot_path)\n")
+
+
+def t14_warmup_one(source):
+    """T14 授权差异：建 profile 前做迁移失败关闭检查；快照写出不再传 profile 目录。"""
+    source = source.replace(
+        "    platform = PLATFORMS[platform_key]\n    profile_dir = profile_dir_for(platform_key)\n",
+        "    platform = PLATFORMS[platform_key]\n    paths.require_platform_session_migrated(platform_key)\n"
+        "    profile_dir = profile_dir_for(platform_key)\n",
+    )
+    return re.sub(r"(write_cookie_snapshot\(\n\s+platform_key,\n)\s+profile_dir,\n", r"\1", source)
+
+
+def t14_without_fork_check(node):
+    """T14 授权差异：入口不再要求 fork 目录存在。"""
+    for child in ast.walk(node):
+        body = getattr(child, "body", None)
+        if isinstance(body, list):
+            child.body = [statement for statement in body
+                          if not (isinstance(statement, ast.If) and "MEDIACRAWLER_DIR" in ast.unparse(statement.test))]
+    return node
+
+
 @pytest.mark.parametrize("row", ROWS, ids=lambda r: f"{Path(r['file']).stem}.{r['qualname']}")
 def test_migrated_ast(row):
     name = row["qualname"]
@@ -68,13 +99,16 @@ def test_migrated_ast(row):
         elif name == "write_cookie_snapshot":
             source = source.replace("    source: str,\n", "    source: str,\n    label: str,\n    urls: list[str],\n")
             source = source.replace('PLATFORMS[platform_key]["label"]', "label").replace('PLATFORMS[platform_key]["urls"]', "urls")
+            source = t14_snapshot_writer(source)
+        elif name == "warmup_one":
+            source = t14_warmup_one(source)
     if row["disposition"] == "薄":
         target = ROOT / "src/trippostcollect/application/warmup.py"
         if row["file"] == "scripts/login_warmup.py":
             target_name = "login_main"
         entry = function((ROOT / row["file"]).read_text(), "main")
         assert len(entry.body) == 1 and isinstance(entry.body[0], ast.Return)
-    old = function(source, name)
+    old = t14_without_fork_check(function(source, name))
     old.name = target_name
     new = function(target.read_text(), target_name)
     if target_name == "repair_runtime_stop_reason":
@@ -178,7 +212,12 @@ def configure(monkeypatch, module, fake, root):
     monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: next(ticks) / 100))
     monkeypatch.setattr(module, "datetime", FixedDatetime)
     monkeypatch.setattr(module, "profile_dir_for", lambda key: root / "profiles" / key)
-    monkeypatch.setattr(module, "MEDIACRAWLER_DIR", root)
+    if hasattr(module, "MEDIACRAWLER_DIR"):
+        monkeypatch.setattr(module, "MEDIACRAWLER_DIR", root)
+    else:
+        # T14：新实现不再检查 fork 目录，快照经 cookie_snapshot_path 写出；对照时落在与旧实现相同的文件。
+        monkeypatch.setattr(module, "cookie_snapshot_path", lambda key: root / "profiles" / key / core_paths.COOKIE_SNAPSHOT_FILENAME)
+        monkeypatch.setattr(core_paths, "LEGACY_FORK_PROFILE_ROOT", root.parent / "no-legacy-fork-profiles")
     monkeypatch.setattr(module, "discover_cdp_browser_path", lambda: None)
     monkeypatch.setattr(module, "browser_runtime_args", lambda: [])
     monkeypatch.setattr(module, "browser_launch_environment", lambda: {})
@@ -211,7 +250,8 @@ def test_warmup_trace_and_files(monkeypatch, tmp_path, entry, scenario):
         else:
             runner = unified if module is old else module
             monkeypatch.setattr(runner, "datetime", FixedDatetime)
-            monkeypatch.setattr(runner, "MEDIACRAWLER_DIR", root)
+            if hasattr(runner, "MEDIACRAWLER_DIR"):
+                monkeypatch.setattr(runner, "MEDIACRAWLER_DIR", root)
             monkeypatch.setattr(runner, "async_playwright", lambda: fake)
             monkeypatch.setattr(sys, "argv", ["login_warmup.py", "--targets", "all", "--output-dir", str(root), "--timeout-seconds", "1"])
             result = runner.main() if module is old else runner.login_main()

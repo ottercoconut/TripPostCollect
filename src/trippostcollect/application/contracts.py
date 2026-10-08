@@ -111,7 +111,6 @@ class DouyinSettings:
     CDP_HEADLESS: bool
     HEADLESS: bool
     SAVE_LOGIN_STATE: bool
-    USER_DATA_DIR: str
     ENABLE_GET_MEIDAS: bool
     SAVE_DATA_OPTION: str
     SAVE_DATA_PATH: str
@@ -316,7 +315,6 @@ class ZhihuSettings:
     PLATFORM: str
     SAVE_LOGIN_STATE: bool
     START_PAGE: int
-    USER_DATA_DIR: str
     ZHIHU_SPECIFIED_ID_LIST: tuple[str, ...]
 
 

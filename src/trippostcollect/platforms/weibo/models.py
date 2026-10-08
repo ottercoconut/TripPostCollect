@@ -48,7 +48,6 @@ class WeiboConfig:
     WEIBO_SPECIFIED_ID_LIST: tuple[str, ...]
     ENABLE_GET_MEIDAS: bool
     SAVE_LOGIN_STATE: bool
-    USER_DATA_DIR: str
     PLATFORM: str
     ENABLE_WEIBO_FULL_TEXT: bool
     SAVE_DATA_OPTION: str

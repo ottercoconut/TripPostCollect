@@ -378,6 +378,12 @@ python scripts/login_warmup.py \
 脚本使用各平台正式持久 profile，必要时等待人工登录，并在关闭、重开同一 profile 后复验。报告位于
 `outputs/login_warmup/<run_id>/summary.json` 和 `summary.md`。它不抓内容或写内容表。
 
+四个通用平台的持久 profile 位于 `data/runtime/platform_sessions/<platform>/profile`（`<platform>` 为
+`bilibili`、`weibo`、`douyin`、`zhihu`），Cookie 快照位于同级的
+`data/runtime/platform_sessions/<platform>/trippostcollect_cookie_snapshot.json`，权限 `0600`；位置只由
+`trippostcollect.core.paths` 定义。旧版放在 `tools/MediaCrawler/browser_data/` 下的 profile 需按下一节迁移，
+未迁移时 warmup、`crawl_runner.py` 与 worker 均以 `platform_session_migration_required:<platform>` 拒绝启动。
+
 微博必须在桌面 SSO 页完成人工登录，再回到移动端刷新 Cookie；最终只有移动接口同时返回
 `login=true` 和有效 `uid` 才成功。`WBPSESS` 不能单独作为成功证据。
 
@@ -452,6 +458,149 @@ python scripts/xhs_runner.py \
 BrowserContext 意外关闭（`xhs_browser_context_closed_unexpected`）时，才把对应的 CDP 死亡当作
 终端证据。主 Page 自身确已关闭同样是终端错误；以上任一情况都失败当前轮次，不在轮内
 重启或替换浏览器。
+
+## T14 非小红书登录资料迁移
+
+T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不再放在 fork 目录。旧目录与新位置一一对应：
+
+| 平台 | 旧 profile（`tools/MediaCrawler/browser_data/`） | 新位置（`data/runtime/platform_sessions/`） |
+|---|---|---|
+| B站 | `bili_user_data_dir` | `bilibili/profile` |
+| 微博 | `wb_user_data_dir` | `weibo/profile` |
+| 抖音 | `dy_user_data_dir` | `douyin/profile` |
+| 知乎 | `zhihu_user_data_dir` | `zhihu/profile` |
+| 任一平台 | `cdp_<code>_user_data_dir`（若存在） | `<platform>/cdp_profile` |
+| 任一平台 | `<code>_user_data_dir/trippostcollect_cookie_snapshot.json`（复制，旧文件保留） | `<platform>/trippostcollect_cookie_snapshot.json` |
+
+`cdp_` 前缀目录只在 CDP 模式且未声明共享 profile 时使用；正式知乎 CDP 共享普通 profile，微博和抖音
+不开 CDP，所以正式轮次只用普通 profile。旧 `cdp_` 目录若存在也要按表迁移，否则同样被失败关闭检查拒绝。
+小红书仍每轮在 `data/runtime/xhs/sessions/` 创建空 session，不在本迁移范围内，也不得迁入任何旧小红书目录。
+
+运行期检查只在“旧目录存在且对应新目录不存在”时拒绝启动；两者都不存在时按首登流程创建新目录，
+新目录已存在时直接使用新目录，不会回退读取旧目录。以下命令在 macOS 项目根执行，全程不打印 Cookie 内容。
+
+1. 前置清点：确认没有正式 runner、executor、worker 或 warmup 在运行，没有 leased 任务，也没有进程
+   打开旧 profile。三条命令都应无输出；任一有输出时先等待或收束对应轮次，不要强行复制。
+
+   ```bash
+   pgrep -fl "crawl_runner.py|mediacrawler_crawl.py|trippostcollect.platforms.entry|login_warmup.py"
+   sqlite3 -readonly data/trippostcollect.sqlite \
+     "SELECT job_key, status FROM crawl_jobs WHERE status = 'leased';"
+   lsof +D tools/MediaCrawler/browser_data 2>/dev/null
+   ```
+
+2. 逐平台迁移：快照与 profile 都只复制、不移动，旧目录（含其中的快照）原样保留为备份。若本批被回退，
+   旧代码仍从旧位置读取快照与 profile，所以旧位置不得缺少任何文件。
+   - 快照用 `cp -p` 复制到新位置同级目录，保留 `0600` 权限、属主与时间。拒绝覆盖的方式是复制前显式
+     `[ -e 目标 ]` 判断：目标已存在时打印提示并跳过，不调用 `cp`（不用 `cp -n`，因为它静默跳过且不报错）。
+   - profile 用 `ditto` 而不是 `cp -Rp`：`ditto` 默认保留权限、时间、扩展属性、ACL 和 Chrome 的
+     `Singleton*` 符号链接，并且语义固定为“把源目录内容复制到目标目录”，不受尾部 `/` 影响。`ditto` 会
+     合并到已存在的目标，所以同样先做 `[ -e 目标 ]` 判断：新 `profile` 已存在时打印提示并跳过，人工核对，不覆盖。
+   - `ditto` 会把旧 profile 内的快照一并复制进新 `profile/`；新代码只读同级快照，这份副本随即从
+     **新** `profile/` 中删除，旧目录不动。
+
+   ```bash
+   snap=trippostcollect_cookie_snapshot.json
+   for pair in bili:bilibili wb:weibo dy:douyin zhihu:zhihu; do
+     code=${pair%%:*}
+     platform=${pair#*:}
+     old=tools/MediaCrawler/browser_data/${code}_user_data_dir
+     new=data/runtime/platform_sessions/${platform}
+     [ -d "$old" ] || { echo "skip $platform: no legacy profile"; continue; }
+     mkdir -p "$new"
+     if [ -f "$old/$snap" ]; then
+       if [ -e "$new/$snap" ]; then
+         echo "skip $platform snapshot: target exists, not overwritten"
+       else
+         cp -p "$old/$snap" "$new/$snap"
+       fi
+     fi
+     if [ -e "$new/profile" ]; then
+       echo "skip $platform profile: target exists, not overwritten"
+     else
+       ditto "$old" "$new/profile"
+       rm -f "$new/profile/$snap"
+     fi
+     legacy_cdp=tools/MediaCrawler/browser_data/cdp_${code}_user_data_dir
+     if [ -d "$legacy_cdp" ] && [ ! -e "$new/cdp_profile" ]; then
+       ditto "$legacy_cdp" "$new/cdp_profile"
+     fi
+   done
+   ```
+
+3. 校验：每对 profile 目录的文件数与字节总数必须一致（旧侧不计快照，因为新 `profile/` 里已删掉该副本）；
+   新旧快照的大小、权限与 SHA-256 必须一致，且新快照权限为 `-rw-------`。快照只输出“一致/不一致”，
+   不打印哈希、大小、权限或任何 Cookie 内容；profile 只输出计数与字节数。
+
+   ```bash
+   snap=trippostcollect_cookie_snapshot.json
+   bytes_of() { find "$1" -type f ! -name "$snap" -exec stat -f %z {} + | awk '{s+=$1} END {print s+0}'; }
+   files_of() { find "$1" -type f ! -name "$snap" | wc -l; }
+   for pair in bili:bilibili wb:weibo dy:douyin zhihu:zhihu; do
+     code=${pair%%:*}
+     platform=${pair#*:}
+     for kind in "${code}_user_data_dir:profile" "cdp_${code}_user_data_dir:cdp_profile"; do
+       old=tools/MediaCrawler/browser_data/${kind%%:*}
+       new=data/runtime/platform_sessions/${platform}/${kind#*:}
+       [ -d "$old" ] || continue
+       echo "$platform ${kind#*:} files: $(files_of "$old") -> $(files_of "$new")"
+       echo "$platform ${kind#*:} bytes: $(bytes_of "$old") -> $(bytes_of "$new")"
+     done
+     old_snap=tools/MediaCrawler/browser_data/${code}_user_data_dir/$snap
+     new_snap=data/runtime/platform_sessions/${platform}/$snap
+     [ -f "$old_snap" ] || continue
+     if [ -f "$new_snap" ] \
+       && [ "$(stat -f '%z %Sp' "$old_snap")" = "$(stat -f '%z %Sp' "$new_snap")" ] \
+       && [ "$(stat -f %Sp "$new_snap")" = "-rw-------" ] \
+       && [ "$(shasum -a 256 < "$old_snap")" = "$(shasum -a 256 < "$new_snap")" ]; then
+       echo "$platform snapshot: 一致"
+     else
+       echo "$platform snapshot: 不一致"
+     fi
+   done
+   ```
+
+   profile 计数或字节不一致时只删除对应新 `profile`/`cdp_profile` 目录后重做第 2 步；快照不一致时只删除
+   **新**快照文件后重做第 2 步。旧目录与旧快照始终不动，可重复复制。
+
+4. 逐平台验证登录仍有效，只看报告中的状态字段：
+
+   ```bash
+   source .venv/bin/activate
+   python scripts/login_warmup.py \
+     --targets weibo zhihu bilibili douyin \
+     --timeout-seconds 600
+   ```
+
+   在 `outputs/login_warmup/<run_id>/summary.md` 中确认每个 target 为 `ok`，profile 列为
+   `data/runtime/platform_sessions/<platform>/profile`。出现 `platform_session_migration_required` 说明该平台
+   旧目录仍未迁到新位置，回到第 2 步。
+
+5. 用通用 dry-run 核对冻结计划仍可生成；dry-run 不启动 worker，计划命令是 executor 调用：
+
+   ```bash
+   source .venv/bin/activate
+   python scripts/crawl_runner.py \
+     --dry-run \
+     --max-jobs 5
+   ```
+
+   worker 命令在正式执行时才构造，首个正式轮结束后在 `logs/<platform>/command.txt` 中确认其为
+   `python -P -m trippostcollect.platforms.entry ...`；profile 位置以第 4 步报告与下列只读输出为准：
+
+   ```bash
+   source .venv/bin/activate
+   python - <<'PY'
+   from trippostcollect.core import paths
+   for key in ("bilibili", "weibo", "douyin", "zhihu"):
+       profile = paths.platform_profile_dir(key)
+       print(key, profile, profile.is_dir())
+   PY
+   ```
+
+6. 旧目录 `tools/MediaCrawler/browser_data/` 保留为备份，新代码不再读取。旧目录中的快照与 profile 一起
+   作为回退备份（回退本批时旧代码仍从这里读取），只有在 T14 删除批合并且迁移后首个正式轮成功后，才与
+   profile 一起删除；删除前再次执行第 1 步的进程检查。
 
 ## 浏览器与行为证据
 
@@ -530,6 +679,7 @@ runner run_summary.json
 | HTTP 401/403、429、验证码、封禁 | 运行级阻断；保留前沿，不写候选 seen |
 | `sqlite_import_failed` | 确认整批数据库和本轮新媒体已回滚，checkpoint/seen/campaign 未推进 |
 | `persistence_verified` 失败 | 不 finalize；从摘要身份逐帖核对 SQLite 与文件 |
+| `platform_session_migration_required:<platform>` | 旧 fork profile 未迁移，任务记为 `failed_final`；按“T14 非小红书登录资料迁移”完成后用 `--job-key <job_key>` 重跑 |
 
 稳定错误码、优先级、重试和媒体事务的完整定义分别见[正式契约](formal-crawl-contract.md)与
 [数据持久化](data-persistence.md)。

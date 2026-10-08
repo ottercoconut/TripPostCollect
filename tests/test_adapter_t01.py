@@ -59,12 +59,11 @@ def test_resource_text_preserves_bom_handling() -> None:
 # ---------- 路径集中 ----------
 
 def test_platform_profile_paths_are_centralized() -> None:
-    # 迁移期保持现有 profile 位置不变（T14 才搬迁），但定义只在 core.paths
-    expected_codes = {"bilibili": "bili", "weibo": "wb", "douyin": "dy", "zhihu": "zhihu", "xhs": "xhs"}
-    for platform, code in expected_codes.items():
-        profile = paths.platform_profile_dir(platform)
-        assert profile == paths.MEDIACRAWLER_DIR / "browser_data" / f"{code}_user_data_dir"
-        assert paths.platform_cookie_snapshot_path(platform) == profile / "trippostcollect_cookie_snapshot.json"
+    # T14：非小红书 profile 定义只在 core.paths，位于 data/runtime/platform_sessions/<platform>/
+    for platform in ("bilibili", "weibo", "douyin", "zhihu"):
+        session = paths.RUNTIME_ROOT / "platform_sessions" / platform
+        assert paths.platform_profile_dir(platform) == session / "profile"
+        assert paths.platform_cookie_snapshot_path(platform) == session / "trippostcollect_cookie_snapshot.json"
 
 
 def test_unknown_platform_profile_is_rejected() -> None:

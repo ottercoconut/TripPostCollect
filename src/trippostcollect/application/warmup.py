@@ -20,7 +20,6 @@ from trippostcollect.runtime.cookies import cookie_dict, cookie_snapshot_info as
 from trippostcollect.runtime.cookies import write_cookie_snapshot as _write_cookie_snapshot
 from trippostcollect.core.paths import (
     LOGIN_WARMUP_OUTPUT,
-    MEDIACRAWLER_DIR,
     MEDIACRAWLER_LOGIN_OUTPUT,
     PROJECT_ROOT,
     ensure_dir,
@@ -310,6 +309,8 @@ def weibo_desktop_login_completed(initial: dict[str, Any], current: dict[str, An
 
 async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
     platform = PLATFORMS[platform_key]
+    # T14：旧 fork profile 未迁移时拒绝启动，避免在新位置建出空 profile。
+    paths.require_platform_session_migrated(platform_key)
     profile_dir = profile_dir_for(platform_key)
     ensure_dir(profile_dir)
     out_path = batch_dir / f"{platform_key}.json"
@@ -410,7 +411,6 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
     if result["ok"] and args.no_close_on_success:
         result["cookie_snapshot"] = write_cookie_snapshot(
             platform_key,
-            profile_dir,
             session_cookies,
             source="session",
             state=state,
@@ -425,7 +425,6 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
     if result["ok"] and args.skip_reopen_verify and not args.no_close_on_success:
         result["cookie_snapshot"] = write_cookie_snapshot(
             platform_key,
-            profile_dir,
             session_cookies,
             source="session_skip_reopen_verify",
             state=state,
@@ -448,7 +447,6 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
         if result["ok"]:
             result["cookie_snapshot"] = write_cookie_snapshot(
                 platform_key,
-                profile_dir,
                 verify_cookies,
                 source="reopen_verify",
                 state=verify_state,
@@ -471,9 +469,6 @@ async def media_main_async() -> int:
     args = media_parse_args()
     platforms = selected_platforms(args.platforms)
     batch_dir = ensure_dir(Path(args.output_dir).expanduser() / media_utc_stamp())
-
-    if not MEDIACRAWLER_DIR.exists():
-        raise SystemExit(f"MediaCrawler is missing: {MEDIACRAWLER_DIR}")
 
     async with async_playwright() as playwright:
         results = []
@@ -499,14 +494,13 @@ def media_main() -> int:
 
 def write_cookie_snapshot(
     platform_key: str,
-    profile_dir: Path,
     cookies: list[dict[str, Any]],
     *,
     source: str,
     state: dict[str, Any],
 ) -> dict[str, Any] | None:
     return _write_cookie_snapshot(
-        platform_key, profile_dir, cookies, source=source, state=state,
+        platform_key, cookie_snapshot_path(platform_key), cookies, source=source, state=state,
         label=PLATFORMS[platform_key]["label"], urls=PLATFORMS[platform_key]["urls"],
     )
 
@@ -647,8 +641,6 @@ async def main_async(args: argparse.Namespace) -> int:
     if args.timeout_seconds <= 0:
         raise SystemExit("--timeout-seconds must be greater than zero")
     targets = selected_targets(args.targets)
-    if any(TARGETS[target]["kind"] == "mediacrawler" for target in targets) and not MEDIACRAWLER_DIR.is_dir():
-        raise SystemExit(f"MediaCrawler is missing: {MEDIACRAWLER_DIR}")
 
     started_at = utc_iso()
     batch_dir = ensure_dir(Path(args.output_dir).expanduser() / utc_stamp())
