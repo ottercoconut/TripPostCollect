@@ -318,6 +318,34 @@ python scripts/repair_xhs_posts.py \
   作者页。打开前先检查原抓取页，原页已出现登录或验证时直接在原页等待，不再创建作者辅助页；
   作者辅助页遇到登录失效也回到原抓取页恢复会话，成功后重试作者请求。作者专属安全验证仍保留
   对应页面等待操作人，不能因为 HTML 已有作者数据而提前关闭。
+- 作者页静态解析只做严格 JSON 解码（`:undefined` 预替换为 `null`）。平台状态里出现
+  `new Set(...)` 等 JS 构造时解码失败，无 token 请求路径因此仍会失败，只能靠浏览器回退取数，
+  这会多一次作者页访问和暂停。
+- 浏览器回退在到达与滚动检查后进入有界就绪等待，预算 10 秒。`domcontentloaded` 只是前置条件，
+  超时记 `page_not_ready` 后继续。随后执行固定脚本，读取页面已执行的
+  `window.__INITIAL_STATE__.user.userPageData`，解开 Vue ref，只按白名单复制标量字段。白名单包括
+  `basicInfo` 的用户 ID、昵称、简介、性别和 IP 属地，以及 `interactions` 条目的
+  `type/name/key/count/num/value`，另加下游读取的粉丝、关注、笔记与获赞指标键。头像（`imageb`、
+  `images`、`avatar*`）与任何凭据或 token 字段都不投影，也不序列化整份状态或返回 HTML。
+- 投影前，脚本先在该作者记录内收集头像证据 URL。证据键与路径直接取自 `records.sanitization`：
+  `AUTHOR_AVATAR_KEYS` 不区分大小写，另加 `basicInfo.imageb`、`basicInfo.images`。收集有深度与节点
+  上限，并检测循环引用。投影后，任何字符串字段去掉首尾空白后若与证据 URL 完全相同即删除；证据
+  集合不返回。脚本只读自有数据属性，不触发 getter 或 `toJSON`。遇到超限、循环引用、访问器属性、
+  函数或未知对象类型时，整个投影被拒绝（`projection_avatar_check_incomplete`），立即回退静态解析。
+- 就绪与成功以下游 `followers_observed` 判定为准：必须观察到粉丝项的非空计数，按原值保存
+  （如 `1.2万`），不补 0。仅有 `interactions` 数组不算就绪。每 0.5 秒重试一次，每次重试前照常
+  检查登录、验证、阻断和封禁；取消以及页面、浏览器关闭照常向上传播。
+- 页面数据带有作者 ID 且与请求的 `user_id` 不一致时，判为 `creator_mismatch`，不可用。ID 缺失时
+  沿用按 `user_id` 打开的作者页和笔记作者 ID，不凭昵称比对。投影在预算内拿不到粉丝时，回退到
+  `page.content()` 加严格静态解析。
+- 浏览器回退每次取数后写一条 `creator_profile_parse` 导航诊断，`outcome` 取 `ok`、
+  `ok_static_state` 或原因类别。两条路径都失败时，`candidate_skipped.detail` 写为
+  `creator_profile_failed:api=<原因>;browser=<原因>`，原因只含类别：`api_request_failed:<异常类型>`、
+  `state_script_missing`、`state_decode_failed:<js_new_expression|js_identifier|invalid_json|truncated>`、
+  `state_null`、`user_missing`、`user_page_data_missing`、`user_page_data_empty`（静态解析原因在浏览器侧
+  加 `static_` 前缀），以及 `page_not_ready`、`runtime_projection_empty`、`runtime_projection_timeout`、
+  `runtime_projection_error`、`projection_avatar_check_incomplete`、`followers_unobserved`、
+  `creator_mismatch`。`error_code` 仍为 `creator_profile_unavailable`。
 - 成功作者结果只在本轮按作者 ID 缓存，不替代来源证据。
 - 有 checkpoint 时用新 search ID 刷新顶部，再用保存的 `page + search_id` 恢复深层；顶部刷新不
   覆盖深层位置。深层耗尽后只刷新顶部。
