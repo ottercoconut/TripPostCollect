@@ -358,7 +358,11 @@ class XiaoHongShuCrawler(
                                     should_stop = accumulator.skip_candidate_failure(
                                         identity,
                                         failure_scope="post",
-                                        detail="creator_profile_failed",
+                                        detail=(
+                                            f"creator_profile_failed:{exc.reason}"
+                                            if exc.reason
+                                            else "creator_profile_failed"
+                                        ),
                                         error_code="creator_profile_unavailable",
                                         attempts=exc.attempts,
                                         retryable=True,

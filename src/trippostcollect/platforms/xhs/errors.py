@@ -126,15 +126,19 @@ class XHSNoteDetailUnavailable(RuntimeError):
 
 
 class XHSCreatorProfileUnavailable(RuntimeError):
-    """An XHS creator profile remained unavailable after observed attempts."""
+    """An XHS creator profile remained unavailable after observed attempts.
 
-    def __init__(self, user_id: str, attempts: int):
+    reason 只含两条取数路径的原因类别（如 ``api=...;browser=...``），不含 HTML、ID 或参数。
+    """
+
+    def __init__(self, user_id: str, attempts: int, reason: str = ""):
         super().__init__(
             "creator_profile_unavailable_after_retry:"
             f"user_id={user_id or '<missing>'}:attempts={attempts}"
         )
         self.user_id = user_id
         self.attempts = max(1, int(attempts))
+        self.reason = str(reason or "")
 
 
 class XHSNetworkRecoveryTimeout(RuntimeError):

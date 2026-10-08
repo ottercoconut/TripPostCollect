@@ -25,7 +25,7 @@ import json
 import random
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import humps
@@ -33,6 +33,7 @@ import humps
 from trippostcollect.application.contracts import ImageStagingError
 from trippostcollect.platforms.xhs.models import NoteUrlInfo
 from trippostcollect.records.identity import platform_nickname, platform_user_id
+from trippostcollect.records.sanitization import AUTHOR_AVATAR_KEYS, XHS_SERIALIZED_PROFILE_AVATAR_PATHS
 from trippostcollect.runtime.helpers import extract_url_params_to_dict, normalize_image_url
 
 
@@ -116,23 +117,47 @@ class XiaoHongShuExtractor:
         Returns:
             Dict: User information dictionary
         """
+        creator_info, _reason = self.extract_creator_info_with_reason(html)
+        return creator_info
+
+    def extract_creator_info_with_reason(self, html: str) -> Tuple[Optional[Dict], str]:
+        """与 extract_creator_info_from_html 同一严格解码，另返回只含类别的原因供诊断。
+
+        原因取值：``ok``、``state_script_missing``、``state_decode_failed:<类别>``、
+        ``state_null``、``user_missing``、``user_page_data_missing``、``user_page_data_empty``；
+        不含 HTML、作者 ID 或请求参数。
+        """
         match = re.search(
             r"<script[^>]*>\s*window\.__INITIAL_STATE__\s*=\s*", html, re.M
         )
         if match is None:
-            return None
-        state_source = html[match.end() :].replace(":undefined", ":null")
+            return None, "state_script_missing"
+        state_source = html[match.end() :].replace(":undefined", ":null").lstrip()
         try:
-            info, _ = json.JSONDecoder(strict=False).raw_decode(state_source.lstrip())
-        except json.JSONDecodeError:
-            return None
+            info, _ = json.JSONDecoder(strict=False).raw_decode(state_source)
+        except json.JSONDecodeError as exc:
+            return None, f"state_decode_failed:{_state_decode_failure_kind(state_source, exc.pos)}"
         if info is None:
-            return None
+            return None, "state_null"
         user_info = info.get("user")
         if not isinstance(user_info, dict):
-            return None
+            return None, "user_missing"
         creator_info = user_info.get("userPageData")
-        return creator_info if isinstance(creator_info, dict) else None
+        if not isinstance(creator_info, dict):
+            return None, "user_page_data_missing"
+        return creator_info, "ok" if creator_info else "user_page_data_empty"
+
+
+def _state_decode_failure_kind(source: str, position: int) -> str:
+    """只按失败位置的首个记号归类，便于区分平台状态里的 JS 构造与普通损坏。"""
+    token = source[position : position + 32]
+    if not token:
+        return "truncated"
+    if re.match(r"new\s+[A-Za-z_$]", token):
+        return "js_new_expression"
+    if re.match(r"[A-Za-z_$]", token):
+        return "js_identifier"
+    return "invalid_json"
 
 
 def xhs_source_asset_key(source_url: str) -> str:
@@ -264,6 +289,115 @@ def _normalized_creator_item(user_id: str, creator: Dict, *, current_timestamp: 
         "creator_profile_json": json.dumps(creator, ensure_ascii=False, sort_keys=True),
         "last_modify_ts": current_timestamp(),
     }
+
+
+# 运行时作者状态投影白名单：逐项对应 _normalized_creator_item、_creator_basic_info、_creator_metric
+# 与 _interaction_count 实际读取的键（另含作者匹配读取的 basicInfo 用户 ID）。头像（imageb、images、
+# avatar*）与任何凭据或 token 字段都不在白名单中，投影只保留标量值。
+XHS_CREATOR_METRIC_FIELDS = (
+    "fans", "fansCount", "fans_count", "followerCount", "followers_count", "粉丝",
+    "follows", "followsCount", "following_count", "follow_count", "关注",
+    "notes", "noteCount", "note_count", "posts_count", "笔记",
+    "interaction", "interactions", "获赞与收藏",
+)
+XHS_CREATOR_TOP_FIELDS = ("nickname", "desc", "gender", "ip_location") + XHS_CREATOR_METRIC_FIELDS
+XHS_CREATOR_BASIC_INFO_KEYS = ("basicInfo", "basic_info", "basic")
+XHS_CREATOR_BASIC_FIELDS = (
+    "userId", "user_id", "nickname", "desc", "description", "gender", "ipLocation", "ip_location",
+) + XHS_CREATOR_METRIC_FIELDS
+XHS_CREATOR_INTERACTION_LIST_KEYS = ("interactions", "interaction", "interactionList", "interaction_list")
+XHS_CREATOR_INTERACTION_ITEM_FIELDS = ("type", "name", "key", "count", "num", "value")
+XHS_CREATOR_INTERACTION_MAX_ITEMS = 32
+# 页面内头像证据检查的上限；超限、循环引用或异常结构时拒绝整个投影。
+XHS_CREATOR_PROJECTION_MAX_DEPTH = 16
+XHS_CREATOR_PROJECTION_MAX_NODES = 4000
+XHS_CREATOR_PROJECTION_REJECTED_REASONS = frozenset({"projection_avatar_check_incomplete"})
+
+
+def xhs_creator_projection_spec() -> Dict[str, Any]:
+    """传给页面固定投影脚本的参数：字段白名单、头像证据键与路径、检查上限。
+
+    头像证据键与路径直接取自 records.sanitization，与首次序列化前的头像清理规则同源。
+    """
+    return {
+        "top_fields": list(XHS_CREATOR_TOP_FIELDS),
+        "basic_keys": list(XHS_CREATOR_BASIC_INFO_KEYS),
+        "basic_fields": list(XHS_CREATOR_BASIC_FIELDS),
+        "list_keys": list(XHS_CREATOR_INTERACTION_LIST_KEYS),
+        "item_fields": list(XHS_CREATOR_INTERACTION_ITEM_FIELDS),
+        "max_items": XHS_CREATOR_INTERACTION_MAX_ITEMS,
+        "avatar_keys": sorted(AUTHOR_AVATAR_KEYS),
+        "avatar_paths": sorted(
+            list(path)
+            for path in XHS_SERIALIZED_PROFILE_AVATAR_PATHS["creator_profile_json"]
+        ),
+        "max_depth": XHS_CREATOR_PROJECTION_MAX_DEPTH,
+        "max_nodes": XHS_CREATOR_PROJECTION_MAX_NODES,
+    }
+
+
+def _scalar_fields(source: Dict, fields: tuple[str, ...]) -> Dict:
+    return {
+        field: source[field]
+        for field in fields
+        if isinstance(source.get(field), (str, int, float))
+    }
+
+
+def read_creator_runtime_projection(result: Any) -> Tuple[Dict, str]:
+    """校验页面投影脚本的返回信封，并按白名单再过滤一次结构与类型。
+
+    头像证据检查只在页面内完成；这里不接收证据集合，只保证返回值不超出固定字段。
+    """
+    if not isinstance(result, dict):
+        return {}, "runtime_projection_error"
+    status = result.get("status")
+    if status == "missing":
+        return {}, "runtime_projection_empty"
+    if status == "rejected":
+        reason = result.get("reason")
+        if reason in XHS_CREATOR_PROJECTION_REJECTED_REASONS:
+            return {}, reason
+        return {}, "runtime_projection_error"
+    creator = result.get("creator")
+    if status != "ok" or not isinstance(creator, dict):
+        return {}, "runtime_projection_error"
+    projected = _scalar_fields(creator, XHS_CREATOR_TOP_FIELDS)
+    for key in XHS_CREATOR_BASIC_INFO_KEYS:
+        basic = creator.get(key)
+        if isinstance(basic, dict):
+            projected[key] = _scalar_fields(basic, XHS_CREATOR_BASIC_FIELDS)
+    for key in XHS_CREATOR_INTERACTION_LIST_KEYS:
+        items = creator.get(key)
+        if isinstance(items, list):
+            projected[key] = [
+                _scalar_fields(item, XHS_CREATOR_INTERACTION_ITEM_FIELDS)
+                for item in items[:XHS_CREATOR_INTERACTION_MAX_ITEMS]
+                if isinstance(item, dict)
+            ]
+    if not any(projected.values()):
+        return {}, "runtime_projection_empty"
+    return projected, "ok"
+
+
+def creator_profile_user_ids(creator: Dict) -> List[str]:
+    """作者资料自带的用户 ID（只看 basicInfo 系键），用于和请求的作者核对。"""
+    user_ids = []
+    for key in XHS_CREATOR_BASIC_INFO_KEYS:
+        basic = creator.get(key)
+        if not isinstance(basic, dict):
+            continue
+        for field in ("userId", "user_id"):
+            value = basic.get(field)
+            if value not in (None, ""):
+                user_ids.append(str(value))
+    return user_ids
+
+
+def creator_followers_observed(user_id: str, creator: Dict) -> bool:
+    """与 update_xhs_note 相同的粉丝观察判定：fans_count 或 fans 有真实值。"""
+    creator_item = _normalized_creator_item(user_id, creator, current_timestamp=lambda: 0)
+    return any(creator_item.get(key) not in (None, "") for key in ("fans_count", "fans"))
 
 
 def update_xhs_note(
