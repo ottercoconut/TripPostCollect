@@ -1004,49 +1004,112 @@ def test_exception_after_child_exit_keeps_output_while_grandchild_holds_pipes(
 
 
 @pytest.mark.macos_process
-@pytest.mark.parametrize("failure", ["final-print-eio", "uncaught-after-latch"])
-@isolated_signal_test
-def test_exit_code_stays_first_signal_when_finishing_fails(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+@pytest.mark.parametrize(
+    ("signum", "fail_finish", "broken_stderr"),
+    [
+        (signal.SIGHUP, False, False),
+        (signal.SIGTERM, True, False),
+        (signal.SIGTERM, True, True),
+    ],
+    ids=["sighup-stdout-hung-up", "uncaught-after-latch", "uncaught-stdout-stderr-hung-up"],
+)
+def test_exit_code_stays_first_signal_when_output_is_hung_up(
     tmp_path: Path,
-    failure: str,
+    signum: int,
+    fail_finish: bool,
+    broken_stderr: bool,
 ) -> None:
+    """终端挂断后输出端失效：真实解释器退出时的 flush 不得把退出码改成 120。"""
+
+    work = tmp_path / "work"
+    work.mkdir()
     config = tmp_path / "crawl_targets.json"
     config.write_text(json.dumps(_config([WEIBO]), ensure_ascii=False), encoding="utf-8")
-    original_planned = crawl_runner.planned_record
-    first = signal.SIGHUP if failure == "final-print-eio" else signal.SIGTERM
+    plan = tmp_path / "plan.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "work": str(work),
+                "modes": {WEIBO: "hang"},
+                "self_signal_while_planning": int(signum),
+                "fail_finish_run_report": fail_finish,
+            }
+        ),
+        encoding="utf-8",
+    )
+    # 读端在启动后立即关闭：写入得到 EPIPE（解释器忽略 SIGPIPE），可靠复现输出端失效。
+    stdout_read, stdout_write = os.pipe()
+    stderr_read, stderr_write = os.pipe()
+    stderr_file = (tmp_path / "stderr.log").open("wb")
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable, str(FAKES), "runner", str(plan), "--",
+                "--db", str(tmp_path / "runner.sqlite"),
+                "--config", str(config),
+                "--run-root", str(tmp_path / "runs"),
+                "--execution-state-root", str(tmp_path / "states"),
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_write,
+            stderr=stderr_write if broken_stderr else stderr_file,
+            start_new_session=True,
+        )
+    finally:
+        for descriptor in (stdout_read, stdout_write, stderr_read, stderr_write):
+            os.close(descriptor)
+        stderr_file.close()
+    exit_code = process.wait(timeout=120)
 
-    def planned_with_signal(job: object) -> dict:
-        os.kill(os.getpid(), first)
-        return original_planned(job)
+    stderr_text = (tmp_path / "stderr.log").read_text(encoding="utf-8", errors="replace")
+    assert exit_code == 128 + signum, stderr_text[-3000:]
+    summary = json.loads(next((tmp_path / "runs").rglob("run_summary.json")).read_text(encoding="utf-8"))
+    assert summary["interrupt"]["signal"] == signal.Signals(signum).name
+    if fail_finish and not broken_stderr:
+        # stderr 可写时 traceback 照常可见。
+        assert "injected finish failure" in stderr_text
 
-    def hung_up_terminal(*_args: object, **_kwargs: object) -> None:
-        raise OSError(5, "Input/output error")
 
-    def broken_finish(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("injected finish failure")
+def test_unrelated_error_after_child_result_keeps_original_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """对照：child 已正常结束后出现与中断无关的错误，即使已锁存信号也不改记为中断。"""
 
-    monkeypatch.setattr(crawl_runner, "planned_record", planned_with_signal)
-    if failure == "final-print-eio":
-        monkeypatch.setattr(crawl_runner, "print", hung_up_terminal, raising=False)
-    else:
-        monkeypatch.setattr(crawl_runner, "finish_run_report", broken_finish)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "crawl_runner.py",
-            "--db", str(tmp_path / "runner.sqlite"),
-            "--config", str(config),
-            "--run-root", str(tmp_path / "runs"),
-            "--execution-state-root", str(tmp_path / "states"),
-            "--dry-run",
-        ],
+    job, db_path = _leased_job(tmp_path)
+    logs = {"stdout": "", "stderr": "", "stdout_log": "", "stderr_log": "", "command_log": ""}
+
+    def completed_child(*_args: object, **_kwargs: object) -> object:
+        return crawl_runner.ChildRun(
+            completed=subprocess.CompletedProcess(["child"], 0, "", ""),
+            raw_stdout="",
+            raw_stderr="",
+            logs=logs,
+            interrupt_signum=None,
+            launched=True,
+            forced_termination=False,
+            killed_child_process_groups=[],
+        )
+
+    def database_locked(*_args: object, **_kwargs: object) -> object:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(crawl_runner, "run_child_command", completed_child)
+    monkeypatch.setattr(crawl_runner, "find_artifact_paths", database_locked)
+    record = crawl_runner.execute_prepared_job(
+        job,
+        args=SimpleNamespace(no_import=False),
+        db_path=db_path,
+        config={"defaults": {"schedule_jitter_ratio": 0}},
+        run_id="run-interrupt",
+        run_dir=tmp_path / "run",
+        interrupt_signal=lambda: int(signal.SIGINT),
     )
 
-    assert crawl_runner.main() == 128 + first
-    summary = json.loads(next((tmp_path / "runs").rglob("run_summary.json")).read_text(encoding="utf-8"))
-    assert summary["interrupt"]["signal"] == signal.Signals(first).name
-    if failure == "uncaught-after-latch":
-        assert "injected finish failure" in capsys.readouterr().err
+    assert record["failure_type"] == "scheduler_internal_error"
+    assert record["interrupt"] is None
+    assert "database is locked" in record["reason"]
+    state = json.loads(job.state_path.read_text(encoding="utf-8"))
+    assert state["steps"]["command_executed"]["error"] == "scheduler_internal_error"

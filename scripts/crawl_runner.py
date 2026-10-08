@@ -1367,8 +1367,9 @@ def execute_prepared_job(
             classification["reason"] = f"{classification['reason']}; state_update_failed={state_error}"
         return build_result_record(job, classification, import_result=import_result)
     except Exception as exc:
-        if interrupt_signum is None:
-            # 判定中断后的收尾（如日志写盘）抛错时，首信号仍是本 job 的终止原因。
+        if interrupt_signum is None and completed is None:
+            # 尚未观察到 child 结果时（如中断判定后日志写盘失败）抛错，首信号仍是终止原因；
+            # child 已正常结束后的无关错误保持原分类。
             interrupt_signum = interrupt_signal()
         if interrupt_signum is not None:
             # 收尾异常不得覆盖首个中断原因。
@@ -1501,6 +1502,19 @@ def scheduling_summary(
     }
 
 
+def discard_hung_up_stream(stream: Any) -> None:
+    """输出端已失效时改接 /dev/null：否则缓冲区在解释器退出时 flush 失败，退出码会被改成 120。"""
+
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, stream.fileno())
+        finally:
+            os.close(devnull)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 def interrupt_exit_code(interrupts: DeferredTerminationSignals, exit_code: int) -> int:
     signum = interrupts.signal_received
     return exit_code if signum is None else 128 + signum
@@ -1521,11 +1535,12 @@ def main(interrupts: DeferredTerminationSignals | None = None) -> int:
         signum = latch.signal_received
         if signum is None:
             raise
-        # 锁存之后的未捕获异常仍以首信号退出；异常写入 stderr，写失败也不改变退出码。
+        # 锁存之后的未捕获异常仍以首信号退出；stderr 可写时照常输出 traceback。
         try:
             traceback.print_exc(file=sys.stderr)
+            sys.stderr.flush()
         except OSError:
-            pass
+            discard_hung_up_stream(sys.stderr)
         return 128 + signum
     finally:
         if owned:
@@ -1642,9 +1657,10 @@ def _main(interrupts: DeferredTerminationSignals) -> int:
 
     try:
         print(json.dumps({"summary": str(summary_path), "report": str(report_path), **summary}, ensure_ascii=False, indent=2))
+        sys.stdout.flush()
     except OSError:
         # SIGHUP 后控制终端已挂断：摘要已落盘，最终输出失败不改变退出码。
-        pass
+        discard_hung_up_stream(sys.stdout)
     return interrupt_exit_code(
         interrupts,
         0 if summary["failed_count"] == 0 and summary["blocked_count"] == 0 else 1,

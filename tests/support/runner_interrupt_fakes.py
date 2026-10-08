@@ -69,6 +69,20 @@ def run_runner(plan_path: Path, runner_args: list[str]) -> int:
         ]
 
     crawl_runner.build_command = fake_command
+    if plan.get("self_signal_while_planning") is not None:
+        # dry-run 计划阶段向自身发信号：确定性地在锁存后进入收尾。
+        original_planned = crawl_runner.planned_record
+
+        def planned_with_signal(job: object) -> dict:
+            os.kill(os.getpid(), int(plan["self_signal_while_planning"]))
+            return original_planned(job)
+
+        crawl_runner.planned_record = planned_with_signal
+    if plan.get("fail_finish_run_report"):
+        def broken_finish(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("injected finish failure")
+
+        crawl_runner.finish_run_report = broken_finish
     _write_json(work / "runner.json", {"pid": os.getpid(), "pgid": os.getpgid(0)})
     sys.argv = ["crawl_runner.py", *runner_args]
     return crawl_runner.run_cli()

@@ -78,10 +78,24 @@ exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中
   20 秒让 worker 进程组退出，runner 最多等 40 秒让中间层进程组退出；超时才对中间层进程组 SIGKILL，
   并按中间层登记在 execution state 旁的 `<job_key>.json.process-groups.jsonl`（含启动标识）对仍匹配的
   worker 进程组 SIGKILL。
-- 遗留风险：CDP Chrome 由 `runtime/browser_launcher.py` 以 `setsid` 自成会话启动，既不在中间层进程组，
-  也不在登记的 worker 组内；B站进程内浏览器同样不在登记范围。走到强杀兜底时，这些 Chrome 只能靠
-  自身检测到控制端断开后退出，需按进程状态核对残留。systemd 等对整个 cgroup 同时发 SIGTERM 的场景，
-  worker 与 Chrome 会直接收到信号，不符合“逐层一次”，worker 可能因第二次信号跳过清理。
+- 遗留风险：CDP Chrome 由 `runtime/browser_launcher.py` 以 `setsid` 自成会话、带 `--remote-debugging-port`
+  启动，stdio 接 `/dev/null`，既不在中间层进程组，也不在登记的 worker 组内。正常收束时由 worker 清理
+  流程关闭；一旦走到强杀兜底，它不会因控制端断开而自行退出，launcher 也不再清理，会一直残留，须
+  人工处理。B站在中间层进程内经 Playwright pipe 启动的浏览器，在中间层被强杀后随 pipe 断开退出。
+  systemd 等对整个 cgroup 同时发 SIGTERM 的场景，worker 与 Chrome 会直接收到信号，不符合“逐层一次”，
+  worker 可能因第二次信号跳过清理。
+- 强杀兜底后的残留核对与清理：先确认没有仍在运行的通用 runner 或 child，再只读列出使用项目
+  `tools/MediaCrawler/browser_data/` 下 profile（`cdp_<平台>_user_data_dir`，共享 profile 时无 `cdp_` 前缀）的
+  Chrome PID，不打印完整命令行：
+
+  ```bash
+  pgrep -f scripts/crawl_runner.py
+  pgrep -f scripts/mediacrawler_crawl.py
+  pgrep -f -- "--user-data-dir=$PWD/tools/MediaCrawler/browser_data/"
+  ```
+
+  前两条无输出时才清理第三条列出的 PID：先 `kill -TERM <pid>...`，再用同一条 `pgrep` 复核，仍有残留
+  才 `kill -KILL <pid>...`。小红书临时 profile 不在该目录，按其平台文档处理，不用此命令。
 - 派发：首信号后排队 job 不再派发，不租约、不写 attempt、不启动 child，`crawl_jobs.status` 保持原值
   （通常为 `pending`），仅 execution state 写成中断终态、run_summary 记录为 `retry_wait`。已派发 job 若
   在启动前看到信号也不启动 child。信号前已结束且已被 runner 观察到的平台结果照常验证并保留；child
