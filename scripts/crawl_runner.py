@@ -13,6 +13,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -38,8 +39,9 @@ from trippostcollect.runtime.process import (
     PROCESS_CLEANUP_GRACE_SECONDS,
     PROCESS_FINAL_REAP_SECONDS,
     decode_text,
-    operator_interrupt_error,
+    drain_exited_process,
     kill_recorded_child_process_groups,
+    operator_interrupt_error,
     terminate_managed_process,
     write_command_logs,
 )
@@ -1040,7 +1042,10 @@ def run_child_command(
                     grace_seconds=RUNNER_CHILD_INTERRUPT_GRACE_SECONDS,
                 )[:2]
             else:
-                collected = proc.communicate(timeout=PROCESS_FINAL_REAP_SECONDS)
+                collected = drain_exited_process(proc, timeout=PROCESS_FINAL_REAP_SECONDS)
+        except Exception:
+            pass
+        try:
             write_command_logs(
                 command,
                 log_dir,
@@ -1362,6 +1367,9 @@ def execute_prepared_job(
             classification["reason"] = f"{classification['reason']}; state_update_failed={state_error}"
         return build_result_record(job, classification, import_result=import_result)
     except Exception as exc:
+        if interrupt_signum is None:
+            # 判定中断后的收尾（如日志写盘）抛错时，首信号仍是本 job 的终止原因。
+            interrupt_signum = interrupt_signal()
         if interrupt_signum is not None:
             # 收尾异常不得覆盖首个中断原因。
             classification = operator_interrupt_classification(interrupt_signum)
@@ -1509,6 +1517,16 @@ def main(interrupts: DeferredTerminationSignals | None = None) -> int:
     latch = interrupts or DeferredTerminationSignals(RUNNER_INTERRUPT_SIGNALS).install()
     try:
         return _main(latch)
+    except Exception:
+        signum = latch.signal_received
+        if signum is None:
+            raise
+        # 锁存之后的未捕获异常仍以首信号退出；异常写入 stderr，写失败也不改变退出码。
+        try:
+            traceback.print_exc(file=sys.stderr)
+        except OSError:
+            pass
+        return 128 + signum
     finally:
         if owned:
             latch.restore()
@@ -1622,7 +1640,11 @@ def _main(interrupts: DeferredTerminationSignals) -> int:
         report_path.write_text(markdown_report(summary), encoding="utf-8")
         finish_run_report(conn, run_id, summary, report_path)
 
-    print(json.dumps({"summary": str(summary_path), "report": str(report_path), **summary}, ensure_ascii=False, indent=2))
+    try:
+        print(json.dumps({"summary": str(summary_path), "report": str(report_path), **summary}, ensure_ascii=False, indent=2))
+    except OSError:
+        # SIGHUP 后控制终端已挂断：摘要已落盘，最终输出失败不改变退出码。
+        pass
     return interrupt_exit_code(
         interrupts,
         0 if summary["failed_count"] == 0 and summary["blocked_count"] == 0 else 1,

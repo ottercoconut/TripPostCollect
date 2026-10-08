@@ -69,13 +69,19 @@ exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中
 通用 runner 的操作人中断（终端 Ctrl+C、对 runner 发 SIGTERM 或终端挂断 SIGHUP）只锁存首个信号，
 锁存保持到进程退出，后续信号不改变原因与退出码；SIGQUIT 不处理。本段只描述 `crawl_runner.py`
 通用路径；小红书租约链路仍由 `xhs_runner.py` 的 LeaseGuard 转发，中间层保持默认 SIGTERM 处理，
-不使用下述转换，其中断日志与收尾另行跟踪。
+不使用下述转换，其中断日志与收尾见 #58。
 
 - 信号路径：`mediacrawler_crawl.py` 中间层和 worker 各在独立会话中运行，终端信号只到 runner。runner
-  只向运行中的中间层发一次 SIGTERM；中间层入口把它转为可捕获异常，再只向 worker 发一次 SIGTERM，
-  worker 按自身生命周期清理浏览器。中间层最多等 20 秒让 worker 进程组退出，runner 最多等 40 秒让
-  中间层进程组退出；超时才对中间层进程组 SIGKILL，并按中间层登记在 execution state 旁的
-  `<job_key>.json.process-groups.jsonl`（含启动标识）对仍匹配的 worker 进程组 SIGKILL。
+  只向运行中的中间层发一次 SIGTERM；中间层入口把它转为可捕获中断（KeyboardInterrupt 子类，落在
+  asyncio 任务内也会向外抛），再只向 worker 发一次 SIGTERM，worker 在自身清理流程中关闭它启动的
+  浏览器。B站在中间层进程内运行，没有 worker，由中间层自身的退出流程关闭浏览器。中间层最多等
+  20 秒让 worker 进程组退出，runner 最多等 40 秒让中间层进程组退出；超时才对中间层进程组 SIGKILL，
+  并按中间层登记在 execution state 旁的 `<job_key>.json.process-groups.jsonl`（含启动标识）对仍匹配的
+  worker 进程组 SIGKILL。
+- 遗留风险：CDP Chrome 由 `runtime/browser_launcher.py` 以 `setsid` 自成会话启动，既不在中间层进程组，
+  也不在登记的 worker 组内；B站进程内浏览器同样不在登记范围。走到强杀兜底时，这些 Chrome 只能靠
+  自身检测到控制端断开后退出，需按进程状态核对残留。systemd 等对整个 cgroup 同时发 SIGTERM 的场景，
+  worker 与 Chrome 会直接收到信号，不符合“逐层一次”，worker 可能因第二次信号跳过清理。
 - 派发：首信号后排队 job 不再派发，不租约、不写 attempt、不启动 child，`crawl_jobs.status` 保持原值
   （通常为 `pending`），仅 execution state 写成中断终态、run_summary 记录为 `retry_wait`。已派发 job 若
   在启动前看到信号也不启动 child。信号前已结束且已被 runner 观察到的平台结果照常验证并保留；child

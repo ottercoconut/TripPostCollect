@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 import time
 
 import pytest
@@ -788,3 +789,264 @@ def test_runner_cli_keeps_signal_latch_until_process_exit() -> None:
     entry = tree.body[-1]
     assert [ast.unparse(statement) for statement in entry.body] == ["raise SystemExit(run_cli())"]
     assert crawl_runner.RUNNER_INTERRUPT_SIGNALS == (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+@pytest.mark.macos_process
+@pytest.mark.parametrize("shape", ["gather-return-exceptions", "background-task"])
+@isolated_signal_test
+def test_operator_interrupt_escapes_asyncio_tasks(tmp_path: Path, shape: str) -> None:
+    """B站在中间层进程内跑 asyncio：信号落在子任务步进内也必须向外抛，不能被 Task 吞掉。"""
+
+    import asyncio
+
+    from trippostcollect.runtime import process
+
+    async def busy_child() -> str:
+        os.kill(os.getpid(), signal.SIGTERM)
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline:
+            pass
+        return "child-finished"
+
+    async def main() -> str:
+        if shape == "gather-return-exceptions":
+            await asyncio.gather(busy_child(), return_exceptions=True)
+        else:
+            asyncio.get_running_loop().create_task(busy_child())
+        await asyncio.sleep(0.5)
+        return "main-finished"
+
+    assert issubclass(process.OperatorInterrupt, KeyboardInterrupt)
+    with process.sigterm_raises_operator_interrupt():
+        with pytest.raises(process.OperatorInterrupt):
+            asyncio.run(main())
+
+
+def _leased_job(tmp_path: Path) -> tuple[object, Path]:
+    db_path = tmp_path / "runner.sqlite"
+    config = _config([WEIBO])
+    with connect_db(db_path) as conn:
+        bootstrap_connection(conn, config=config, sync_jobs=True)
+        row = dict(conn.execute("SELECT * FROM crawl_jobs WHERE job_key=?", (WEIBO,)).fetchone())
+    contract = tmp_path / "contract.md"
+    contract.write_text("contract", encoding="utf-8")
+    state_path = tmp_path / "states" / f"{WEIBO}.json"
+    crawl_runner.FrozenExecutionState.create(
+        state_path,
+        run_id="run-interrupt",
+        job_key=WEIBO,
+        site_key="weibo",
+        job_kind="mediacrawler_search",
+        plan={"scheduling": {"lane_key": "weibo"}},
+        frozen_inputs=[contract],
+    )
+    job = crawl_runner.PreparedJob(
+        selection_index=0,
+        row=row,
+        command=["child"],
+        discovery_plan=None,
+        state_path=state_path,
+        lane_key="weibo",
+    )
+    return job, db_path
+
+
+def test_error_after_interrupt_decision_keeps_operator_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    job, db_path = _leased_job(tmp_path)
+
+    def disk_full(*_args: object, **_kwargs: object) -> object:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(crawl_runner, "run_child_command", disk_full)
+    record = crawl_runner.execute_prepared_job(
+        job,
+        args=SimpleNamespace(no_import=False),
+        db_path=db_path,
+        config={"defaults": {"schedule_jitter_ratio": 0}},
+        run_id="run-interrupt",
+        run_dir=tmp_path / "run",
+        interrupt_signal=lambda: int(signal.SIGTERM),
+    )
+
+    assert record["status"] == "retry_wait"
+    assert record["failure_type"] == "runtime_failed"
+    assert record["interrupt"]["signal"] == "SIGTERM"
+    assert "No space left on device" in record["reason"]
+    state = json.loads(job.state_path.read_text(encoding="utf-8"))
+    assert state["steps"]["command_executed"]["error"] == "runtime_failed:operator_interrupt:SIGTERM"
+    assert state["steps"]["task_finalized"]["status"] == "failed"
+    with sqlite3.connect(db_path) as conn:
+        status, failures = conn.execute(
+            "SELECT status, consecutive_failures FROM crawl_jobs WHERE job_key=?", (WEIBO,)
+        ).fetchone()
+    assert (status, failures) == ("retry_wait", 0)
+
+
+def test_recorded_group_kill_permission_error_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from trippostcollect.runtime import process
+
+    recorded = {
+        "host_id": "host",
+        "boot_id": "boot",
+        "pid": 424242,
+        "process_started_at": "2026-10-08T00:00:00+00:00",
+        "process_start_token": "token",
+        "pgid": 424242,
+    }
+
+    class Identity:
+        def public(self) -> dict:
+            return dict(recorded)
+
+    class Inspector:
+        def identity(self, _pid: int) -> Identity:
+            return Identity()
+
+    def killpg(_pgid: int, signum: int) -> None:
+        if signum == 0:
+            raise ProcessLookupError
+        raise PermissionError(1, "Operation not permitted")
+
+    state_path = tmp_path / "job.json"
+    process.child_process_groups_path(state_path).write_text(json.dumps(recorded) + "\n", encoding="utf-8")
+    monkeypatch.setattr(process, "SystemProcessInspector", Inspector)
+    monkeypatch.setattr(process.os, "killpg", killpg)
+
+    [item] = process.kill_recorded_child_process_groups(state_path, wait_seconds=0)
+
+    assert item["matched"] is True
+    assert item["killed"] is False
+    assert item["error"].startswith("PermissionError")
+
+
+GRANDCHILD_HOLDING_PIPES = r"""
+import os, pathlib, sys, time
+parent = int(sys.argv[2])
+while os.getppid() == parent:
+    time.sleep(0.01)
+pathlib.Path(sys.argv[1]).write_text("parent-exited")
+time.sleep(60)
+"""
+
+CHILD_LEAVING_GRANDCHILD = r"""
+import os, pathlib, subprocess, sys
+print("child-out", flush=True)
+print("child-err", file=sys.stderr, flush=True)
+grandchild = subprocess.Popen(
+    [sys.executable, "-c", sys.argv[3], sys.argv[1], str(os.getpid())],
+    start_new_session=True,
+)
+pathlib.Path(sys.argv[2]).write_text(str(grandchild.pid))
+"""
+
+
+@pytest.mark.macos_process
+@pytest.mark.parametrize("layer", ["run_command", "runner"])
+def test_exception_after_child_exit_keeps_output_while_grandchild_holds_pipes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    layer: str,
+) -> None:
+    from trippostcollect.runtime import process
+
+    exited = tmp_path / "child-exited"
+    pidfile = tmp_path / "grandchild.pid"
+    command = [
+        sys.executable, "-c", CHILD_LEAVING_GRANDCHILD,
+        str(exited), str(pidfile), GRANDCHILD_HOLDING_PIPES,
+    ]
+    log_dir = tmp_path / "logs"
+
+    def fail_after_child_exit(*args: object, **kwargs: object) -> object:
+        if exited.is_file():
+            raise RuntimeError("injected failure after child exit")
+        return original(*args, **kwargs) if original is not None else None
+
+    try:
+        if layer == "run_command":
+            original = process.progress_path_signature
+            progress = tmp_path / "progress"
+            progress.mkdir()
+            monkeypatch.setattr(process, "browser_launch_environment", lambda: dict(os.environ))
+            monkeypatch.setattr(process, "PROCESS_FINAL_REAP_SECONDS", 0.3)
+            monkeypatch.setattr(process, "progress_path_signature", fail_after_child_exit)
+            with pytest.raises(RuntimeError):
+                process.run_command(
+                    command, tmp_path, 3600, log_dir, progress_paths=[progress], poll_seconds=0.05,
+                )
+        else:
+            original = None
+            monkeypatch.setattr(crawl_runner, "RUNNER_CHILD_POLL_SECONDS", 0.05)
+            monkeypatch.setattr(crawl_runner, "PROCESS_FINAL_REAP_SECONDS", 0.3)
+            with pytest.raises(RuntimeError):
+                crawl_runner.run_child_command(
+                    command,
+                    env=dict(os.environ),
+                    log_dir=log_dir,
+                    state_path=tmp_path / "state.json",
+                    interrupt_signal=fail_after_child_exit,
+                )
+    finally:
+        if pidfile.is_file():
+            try:
+                os.killpg(int(pidfile.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    assert (log_dir / "stdout.log").read_text(encoding="utf-8") == "child-out\n"
+    assert (log_dir / "stderr.log").read_text(encoding="utf-8") == "child-err\n"
+
+
+@pytest.mark.macos_process
+@pytest.mark.parametrize("failure", ["final-print-eio", "uncaught-after-latch"])
+@isolated_signal_test
+def test_exit_code_stays_first_signal_when_finishing_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    config = tmp_path / "crawl_targets.json"
+    config.write_text(json.dumps(_config([WEIBO]), ensure_ascii=False), encoding="utf-8")
+    original_planned = crawl_runner.planned_record
+    first = signal.SIGHUP if failure == "final-print-eio" else signal.SIGTERM
+
+    def planned_with_signal(job: object) -> dict:
+        os.kill(os.getpid(), first)
+        return original_planned(job)
+
+    def hung_up_terminal(*_args: object, **_kwargs: object) -> None:
+        raise OSError(5, "Input/output error")
+
+    def broken_finish(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected finish failure")
+
+    monkeypatch.setattr(crawl_runner, "planned_record", planned_with_signal)
+    if failure == "final-print-eio":
+        monkeypatch.setattr(crawl_runner, "print", hung_up_terminal, raising=False)
+    else:
+        monkeypatch.setattr(crawl_runner, "finish_run_report", broken_finish)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "crawl_runner.py",
+            "--db", str(tmp_path / "runner.sqlite"),
+            "--config", str(config),
+            "--run-root", str(tmp_path / "runs"),
+            "--execution-state-root", str(tmp_path / "states"),
+            "--dry-run",
+        ],
+    )
+
+    assert crawl_runner.main() == 128 + first
+    summary = json.loads(next((tmp_path / "runs").rglob("run_summary.json")).read_text(encoding="utf-8"))
+    assert summary["interrupt"]["signal"] == signal.Signals(first).name
+    if failure == "uncaught-after-latch":
+        assert "injected finish failure" in capsys.readouterr().err

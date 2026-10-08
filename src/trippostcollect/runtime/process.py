@@ -328,8 +328,12 @@ def process_group_exists(process_group_id: int) -> bool:
     return True
 
 
-class OperatorInterrupt(BaseException):
-    """操作人 SIGTERM 转成的可捕获中断，与 KeyboardInterrupt 走同一收束路径。"""
+class OperatorInterrupt(KeyboardInterrupt):
+    """操作人 SIGTERM 转成的可捕获中断，与 KeyboardInterrupt 走同一收束路径。
+
+    继承 KeyboardInterrupt：信号落在 asyncio Task 步进内时，Task 会把其他 BaseException 存入
+    结果（``gather(return_exceptions=True)`` 或后台任务会吞掉），而 KeyboardInterrupt 会继续向外抛。
+    """
 
     def __init__(self, signum: int):
         self.signum = int(signum)
@@ -457,13 +461,16 @@ def kill_recorded_child_process_groups(
             matched = current.public() == recorded
         else:
             matched = process_group_exists(pgid)
-        item = {"pid": pid, "pgid": pgid, "matched": matched, "killed": False}
+        item: dict[str, Any] = {"pid": pid, "pgid": pgid, "matched": matched, "killed": False}
         if matched:
             try:
                 os.killpg(pgid, signal.SIGKILL)
                 item["killed"] = True
             except ProcessLookupError:
                 pass
+            except PermissionError as exc:
+                # 无权限时不能证明已收束：如实记录，交给操作人核查，不中断其余组的兜底。
+                item["error"] = f"{type(exc).__name__}: {exc}"
         evidence.append(item)
     deadline = time.monotonic() + max(0.0, wait_seconds)
     for item in evidence:
@@ -475,6 +482,19 @@ def kill_recorded_child_process_groups(
             time.sleep(0.05)
         item["group_exists"] = process_group_exists(item["pgid"])
     return evidence
+
+
+def drain_exited_process(
+    proc: subprocess.Popen[bytes],
+    *,
+    timeout: float = PROCESS_FINAL_REAP_SECONDS,
+) -> tuple[bytes | None, bytes | None]:
+    """回收已退出进程的累计输出；孙进程仍占着管道而超时时，保留 TimeoutExpired 携带的累计输出。"""
+
+    try:
+        return proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        return exc.stdout, exc.stderr
 
 
 def write_command_logs(
@@ -978,8 +998,9 @@ def run_command(
                         signal_process=not termination_requested,
                     )
                 else:
-                    collected_stdout, collected_stderr = proc.communicate(
-                        timeout=PROCESS_FINAL_REAP_SECONDS
+                    collected_stdout, collected_stderr = drain_exited_process(
+                        proc,
+                        timeout=PROCESS_FINAL_REAP_SECONDS,
                     )
             except Exception:
                 pass

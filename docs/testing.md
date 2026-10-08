@@ -167,7 +167,8 @@ OS lane 验收，本地纯时钟通过不能替代两版本真实 OS 结果。
 `run_command`，worker 走真实 `runtime.worker.run`，用生产 `AdaptiveAccumulator` 与 worker 事件出口写出
 一批已确认批次和一个未确认尾批；worker 正常结束时中间层用生产 `load_pagination_evidence` 与
 `persist_discovery_checkpoint` 提交，runner 用生产逻辑更新 campaign。平台抓取、正文导入与图片物化
-不在本组证明范围内。各层写 ready/身份文件握手，测试只轮询这些文件和临时 SQLite，不用固定 sleep；
+不在本组证明范围内；B站进程内浏览器、以 `setsid` 启动的 CDP Chrome、对整个 cgroup 同时发信号的
+场景以及小红书租约路径（#58）也不在覆盖内。各层写 ready/身份文件握手，测试只轮询这些文件和临时 SQLite，不用固定 sleep；
 断言 SIGINT/SIGTERM/SIGHUP 退出码、单次温和信号与清理标记、两层 stdout/stderr 各一次、进程组消失、
 未中断对照会推进而中断不推进 checkpoint/seen/campaign、提交后中断保留已提交前沿但不更新 campaign、
 两条通道同时活跃时都被收束、已成功通道保留为成功、排队 job 不派发、强杀兜底同时收束已登记的
