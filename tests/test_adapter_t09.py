@@ -35,6 +35,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 import pytest
 import tenacity._asyncio
 
+from support.raw_author_identity import XHS_KEEP_AUTHOR_DETAIL_ENV, use_raw_author_identity
 from trippostcollect.application import events
 from trippostcollect.platforms import _fork_bridge
 from trippostcollect.runtime import behavior as runtime_behavior
@@ -139,6 +140,9 @@ class LegacySide:
         for name, relative in LEGACY_MODULES[3:]:
             modules[name] = _load(patch, name, directory / relative)
         _register_new_modules(patch, ("media_platform.xhs.", "store.xhs."))
+        # #49：根实现保存作者原始 ID 与昵称；旧 store 按正式 worker 取值写出原值并替换身份转换。
+        use_raw_author_identity(patch, modules["store.xhs"])
+        patch.setenv(XHS_KEEP_AUTHOR_DETAIL_ENV, "1")
         import trippostcollect.platforms.entry as entry
 
         package = "media_platform.xhs."

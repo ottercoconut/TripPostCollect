@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+from support.raw_author_identity import use_raw_author_identity
 from trippostcollect.platforms import _fork_bridge, entry
 from trippostcollect.platforms.weibo import core, models
 
@@ -79,6 +80,8 @@ def load_baseline(tmp_path, monkeypatch):
     old_manifest = load("tools.image_manifest", "tools/image_manifest.py")
     monkeypatch.setattr(tools, "image_manifest", old_manifest, raising=False)
     store = load("t05_legacy_store", "store/weibo/__init__.py", package=True)
+    # #49：根实现保存作者原始 ID 与昵称，对照只替换旧 store 的身份转换。
+    use_raw_author_identity(monkeypatch, store)
     import store as store_package
     monkeypatch.setattr(store_package, "weibo", store, raising=False)
     package = load("t05_legacy_weibo", "media_platform/weibo/__init__.py", package=True)

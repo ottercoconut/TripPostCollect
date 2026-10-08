@@ -1,4 +1,9 @@
-"""抖音隐私回归：保留原字段断言，SQLite 直接执行冻结旧列契约。"""
+"""抖音作者字段边界回归：SQLite 直接执行冻结旧列契约。
+
+用例名沿用测试台账登记的 node ID。#49 起作品（根实现）的 creator_hash 为平台原始 uid、nickname
+为原始昵称，sec_uid/short_id/unique_id/头像/签名/IP 归属地仍不得写出；评论属 T12 退出切片，
+只经 fork 旧 store 投影，仍断言其旧的哈希/脱敏行为，随旧桥在 T14 删除。
+"""
 import asyncio
 
 import json
@@ -19,7 +24,7 @@ def checked_record(columns, values):
 
 
 
-# 抖音教学版禁用字段(键):不得作为存储 dict 的 key 出现。
+# 抖音禁用字段(键):不得作为存储 dict 的 key 出现；作者平台 ID 只经 creator_hash 写出。
 FORBIDDEN_KEYS = {
     "user_id", "sec_uid", "short_user_id", "user_unique_id",
     "avatar", "user_signature", "ip_location",
@@ -132,8 +137,8 @@ def _assert_no_forbidden(captured: dict, label: str):
 
 
 def _assert_raw_values_absent(captured: dict, raw_values, label: str):
-    """禁用的原始敏感值(uid/sec_uid/头像/签名/IP 等)不得出现在任何存储值里。
-    creator_hash 是由 uid 派生的匿名哈希(已单独断言 ≠ 原文),不参与子串扫描。"""
+    """禁用的原始值(sec_uid/short_id/unique_id/头像/签名/IP 等)不得出现在任何存储值里。
+    creator_hash 单独断言(作品为原始 uid,旧评论投影为哈希),不参与子串扫描。"""
     leaked = []
     for rv in raw_values:
         if not rv:
@@ -153,7 +158,6 @@ def test_douyin_aweme_masks_user_info():
     raw_uid = aweme["author"]["uid"]
     raw_nick = aweme["author"]["nickname"]
     raw_sensitive = [
-        raw_uid,
         aweme["author"]["sec_uid"],
         aweme["author"]["short_id"],
         aweme["author"]["unique_id"],
@@ -176,15 +180,11 @@ def test_douyin_aweme_masks_user_info():
     _assert_no_forbidden(captured, "douyin_aweme")
     # 2. 原始敏感值不泄漏到任何存储值
     _assert_raw_values_absent(captured, raw_sensitive, "douyin_aweme")
-    # 3. creator_hash 存在、≠原 uid、与 anonymize_user_id 一致
-    assert captured.get("creator_hash")
-    assert captured["creator_hash"] != raw_uid
-    assert captured["creator_hash"] == anonymize_user_id(raw_uid)
-    # 4. nickname 保留但脱敏,≠原文,与 mask_nickname 一致
-    assert captured.get("nickname")
-    assert captured["nickname"] != raw_nick
-    assert captured["nickname"] == mask_nickname(raw_nick)
-    # 4.1 作者统计字段保留；这些不是可定位真人的原始 ID/头像/签名。
+    # 3. creator_hash 为平台原始 uid
+    assert captured.get("creator_hash") == raw_uid
+    # 4. nickname 为平台原始昵称
+    assert captured.get("nickname") == raw_nick
+    # 4.1 作者统计字段保留。
     assert captured.get("followers_count") == 12345
     assert captured.get("fans_count") == 12345
     assert captured.get("following_count") == 321
@@ -207,6 +207,7 @@ def test_douyin_aweme_masks_user_info():
 
 
 def test_douyin_comment_masks_user_info():
+    """退出切片的 fork 旧评论投影：不含禁用键，仍按旧行为哈希 uid、脱敏昵称。"""
     aweme_id = "7234567890123456"
     comment = _build_comment_item()
     raw_uid = comment["user"]["uid"]
@@ -272,10 +273,8 @@ def test_douyin_store_end_to_end_sqlite(monkeypatch):
     # 此处证明 captured 的 key 与删列后 ORM 列完全对得上,不抛异常。
     obj = checked_record(LEGACY_COLUMNS["DouyinAweme"], captured)
     assert obj.aweme_id == aweme["aweme_id"]
-    assert obj.creator_hash == anonymize_user_id(raw_uid)
-    assert obj.creator_hash != raw_uid
-    assert obj.nickname == mask_nickname(raw_nick)
-    assert obj.nickname != raw_nick
+    assert obj.creator_hash == raw_uid
+    assert obj.nickname == raw_nick
     assert obj.followers_count == 12345
     assert obj.fans_count == 12345
     assert obj.following_count == 321
@@ -315,10 +314,8 @@ def test_douyin_store_end_to_end_sqlite(monkeypatch):
     # ---- 4. 回读断言 ----
     assert row is not None, "作品未写入 SQLite"
     assert row.aweme_id == aweme["aweme_id"]
-    assert row.creator_hash == anonymize_user_id(raw_uid)
-    assert row.creator_hash != raw_uid
-    assert row.nickname == mask_nickname(raw_nick)
-    assert row.nickname != raw_nick
+    assert row.creator_hash == raw_uid
+    assert row.nickname == raw_nick
     assert row.followers_count == "12345"
     assert row.fans_count == "12345"
     assert row.following_count == "321"
@@ -337,7 +334,7 @@ def test_douyin_store_end_to_end_sqlite(monkeypatch):
         f"captured 含非 ORM 列: {set(captured.keys()) - orm_cols}"
     )
 
-    # 评论同样做一次 ORM 构造校验(证明 comment dict key 对得上)
+    # 评论(fork 旧投影，退出切片)同样做一次 ORM 构造校验(证明 comment dict key 对得上)
     comment = _build_comment_item()
     fake_c = _FakeStore()
     orig_c = _patch_factory(fake_c)

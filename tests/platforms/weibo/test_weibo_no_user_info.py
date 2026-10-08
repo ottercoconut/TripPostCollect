@@ -1,19 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-教学版回归测试(微博 weibo):确保微博存储链路不再持久化可定位真人的用户个人信息。
+微博作者字段边界回归:作者平台 ID 与昵称保存原始值,头像等禁用字段仍不写出。
+
+用例名沿用测试台账登记的 node ID(#49 起 note 用例语义为"保留原始身份、清除禁用字段")。
 
 覆盖:
-1. test_weibo_note_masks_user_info —— 用贴近真实微博结构的 mock note_item 喂
-   store.weibo.update_weibo_note,用 FakeStore 捕获拍平后的存储 dict,断言:
+1. test_weibo_note_masks_user_info —— 用贴近真实微博结构的 mock note_item 喂根实现
+   update_weibo_note,用 FakeStore 捕获拍平后的存储 dict,断言:
    - 不含任何禁用字段键(user_id/avatar/gender/profile_url/ip_location/desc ...)
-   - 含 creator_hash,且不等于原始 user id
-   - nickname 已脱敏且不等于原文
-2. test_weibo_comment_masks_user_info —— 同上,对 update_weibo_note_comment。
-3. test_weibo_store_end_to_end_sqlite —— 端到端:把 update_weibo_note /
-   update_weibo_note_comment 产生的真实 dict 按冻结旧 ORM 的列定义，用 SQLite 内存库走完整
-   写入+查询。sqlite_roundtrip(..., "WeiboNote", captured_dict) 会因 旧模型声明字段对未知
-   关键字的校验,在 dict 含已删列时直接抛 TypeError —— 以此证明 dict 的 key
-   与删列后的 ORM 完全对得上,且表中无禁用列、有 creator_hash。
+   - creator_hash 为平台原始用户 ID(整数 ID 归一为字符串),nickname 为原始昵称
+   - 头像、性别、主页、签名、IP 归属地的原始值不出现在任何存储值里
+2. test_weibo_comment_masks_user_info —— 评论属 T12 退出切片,根实现与正式路径不产出评论;
+   本用例只执行冻结 fixture 中的旧评论投影,仍断言其旧的哈希/脱敏行为,随旧桥在 T14 删除。
+3. test_weibo_store_end_to_end_sqlite —— 端到端:把 note(根实现)与 comment(冻结旧投影)
+   产生的真实 dict 按冻结旧 ORM 的列定义，用 SQLite 内存库走完整写入+查询。
+   sqlite_roundtrip(..., "WeiboNote", captured_dict) 会因 旧模型声明字段对未知关键字的校验,
+   在 dict 含已删列时直接抛 TypeError —— 以此证明 dict 的 key 与删列后的 ORM 完全对得上,
+   且表中无禁用列、有 creator_hash。
 
 说明:微博 note 的正文存于 content 字段,update_weibo_note 不产生 desc 键
 (WeiboNote ORM 亦无 desc 列),故不存在用户 description 被持久化的风险。
@@ -33,7 +36,7 @@ COMMENT_ID = "998877"
 # 合法 RFC2822 时间串(weekday 与日期已对齐:2025-06-14 是周六)
 RFC2822_TIME = "Sat Jun 14 12:00:00 +0800 2025"
 
-# 禁用字段名(键)。昵称字段允许保留,但值必须脱敏。
+# 禁用字段名(键)。作者平台 ID 只经 creator_hash 写出,昵称经 nickname 写出。
 FORBIDDEN_KEYS = {
     "user_id", "sec_uid", "short_user_id", "user_unique_id",
     "avatar", "user_avatar", "face", "sign", "profile_url", "user_link",
@@ -120,10 +123,20 @@ def _restore(wb, orig):
     wb.WeibostoreFactory.create_store = orig
 
 
+def _assert_forbidden_values_absent(captured: dict, user: dict, label: str):
+    """头像、主页、签名、IP 归属地的原始值不得出现在任何存储值里(性别为单字符,只按键检查)。"""
+    raw_values = [user[key] for key in ("avatar_hd", "profile_url", "description", "ip_location") if key in user]
+    leaked = [
+        (key, raw) for raw in raw_values for key, value in captured.items()
+        if isinstance(value, str) and raw in value
+    ]
+    assert not leaked, f"[{label}] 存储 dict 中出现禁用字段原始值: {leaked}"
+
+
 # ----------------------------- 测试 -----------------------------
 
 def test_weibo_note_masks_user_info():
-    """note 拍平后的存储 dict 不含禁用键、creator_hash 不等于原始 user id、昵称已脱敏。"""
+    """note 拍平后的存储 dict 不含禁用键,creator_hash 与昵称为平台原始值。"""
     from support.weibo_privacy import wb
 
     fake = _FakeStore()
@@ -140,18 +153,13 @@ def test_weibo_note_masks_user_info():
     hit = set(captured.keys()) & FORBIDDEN_KEYS
     assert not hit, f"note 存储 dict 仍含禁用字段键: {hit}"
 
-    # 2. creator_hash 存在、是 16 位 hex、不等于原始 user id
-    creator_hash = captured.get("creator_hash")
-    assert creator_hash, "note dict 缺少 creator_hash"
-    assert creator_hash != str(RAW_USER_ID)
-    assert creator_hash != RAW_USER_ID
-    assert len(creator_hash) == 16
+    _assert_forbidden_values_absent(captured, make_mock_note()["mblog"]["user"], "weibo_note")
 
-    # 3. 昵称已脱敏:不等于原文且含星号
-    nickname = captured.get("nickname")
-    assert nickname, "note dict 缺少 nickname"
-    assert nickname != RAW_NICKNAME, "note 昵称未脱敏,仍为原文"
-    assert "*" in nickname, f"note 昵称未脱敏: {nickname}"
+    # 2. creator_hash 为平台原始用户 ID;微博整数 ID 归一为字符串
+    assert captured.get("creator_hash") == str(RAW_USER_ID)
+
+    # 3. 昵称为平台原始昵称
+    assert captured.get("nickname") == RAW_NICKNAME
 
     # 4. 内容字段正确(正文存于 content,不是 desc)
     assert "hello" not in captured  # 确认没误存
@@ -163,7 +171,7 @@ def test_weibo_note_masks_user_info():
 
 
 def test_weibo_comment_masks_user_info():
-    """comment 拍平后的存储 dict 不含禁用键、creator_hash 不等于原始 user id、昵称已脱敏。"""
+    """退出切片的冻结旧评论投影:不含禁用键,仍按旧行为哈希 user id、脱敏昵称。"""
     from support.weibo_privacy import wb
 
     fake = _FakeStore()
@@ -234,15 +242,15 @@ def test_weibo_store_end_to_end_sqlite(monkeypatch):
         # 表结构层面无禁用列
         assert not (note_cols & FORBIDDEN_KEYS), \
             f"WeiboNote 表仍含禁用列: {note_cols & FORBIDDEN_KEYS}"
-        # 行数据层面:creator_hash 正确、昵称脱敏、正文保留
-        assert row.creator_hash and row.creator_hash != str(RAW_USER_ID)
-        assert row.nickname != RAW_NICKNAME and "*" in row.nickname
+        # 行数据层面:creator_hash 与昵称为原始值、正文保留
+        assert row.creator_hash == str(RAW_USER_ID)
+        assert row.nickname == RAW_NICKNAME
         assert row.note_id == NOTE_ID
         assert "今天天气不错" in row.content
         # 确认没有 desc 列存任何用户描述
         assert "desc" not in note_cols
 
-        # ---- 4. comment:同上。ID 已统一为字符串类型,create_time 保持 int ----
+        # ---- 4. comment(冻结旧投影,退出切片):ID 已统一为字符串类型,create_time 保持 int ----
         cc = dict(captured_comment)
         cc["create_time"] = int(cc.get("create_time", 0) or 0)
         crow, comment_cols = sqlite_roundtrip(connection, "WeiboNoteComment", cc)
