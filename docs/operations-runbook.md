@@ -476,38 +476,72 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
 不开 CDP，所以正式轮次只用普通 profile。旧 `cdp_` 目录若存在也要按表迁移，否则同样被失败关闭检查拒绝。
 小红书仍每轮在 `data/runtime/xhs/sessions/` 创建空 session，不在本迁移范围内，也不得迁入任何旧小红书目录。
 
-运行期检查只在“旧目录存在且对应新目录不存在”时拒绝启动；两者都不存在时按首登流程创建新目录，
-新目录已存在时直接使用新目录，不会回退读取旧目录。以下命令在 macOS 项目根执行，全程不打印 Cookie 内容。
+运行期检查在两种情况下拒绝启动：旧目录存在且对应新目录不存在；或新位置留有未完成复制的
+`profile.partial`/`cdp_profile.partial`。两者都不存在时按首登流程创建新目录，新目录已存在且无残留时
+直接使用新目录，不会回退读取旧目录。以下命令在 macOS 项目根执行，全程不打印 Cookie 内容。第 2、3 步
+依赖 bash 语法（进程替换、`read -d ''`），已用 `bash <<'SH' … SH` 包裹，在 macOS 默认的 zsh 中也直接
+整段粘贴执行。
 
 1. 前置清点：确认没有正式 runner、executor、worker 或 warmup 在运行，没有 leased 任务，也没有进程
-   打开旧 profile。三条命令都应无输出；任一有输出时先等待或收束对应轮次，不要强行复制。
+   打开旧 profile。前三条命令都应无输出，第四条应输出 `0`。任一不符时先等待或收束对应轮次，不要
+   强行复制。`Singleton*` 计数非 0 说明旧 profile 有浏览器崩溃残留，需人工确认浏览器确已退出；
+   本手册不自动删除这些文件。
 
    ```bash
    pgrep -fl "crawl_runner.py|mediacrawler_crawl.py|trippostcollect.platforms.entry|login_warmup.py"
    sqlite3 -readonly data/trippostcollect.sqlite \
      "SELECT job_key, status FROM crawl_jobs WHERE status = 'leased';"
    lsof +D tools/MediaCrawler/browser_data 2>/dev/null
+   find tools/MediaCrawler/browser_data -name 'Singleton*' | wc -l
    ```
 
 2. 逐平台迁移：快照与 profile 都只复制、不移动，旧目录（含其中的快照）原样保留为备份。若本批被回退，
    旧代码仍从旧位置读取快照与 profile，所以旧位置不得缺少任何文件。
+   - 新建的 `<platform>` 目录用 `mkdir -p -m 700`：`-m` 只作用于最后一级，即 `<platform>` 本身，
+     不改上级目录；目录已存在时不改动其权限。
    - 快照用 `cp -p` 复制到新位置同级目录，保留 `0600` 权限、属主与时间。拒绝覆盖的方式是复制前显式
      `[ -e 目标 ]` 判断：目标已存在时打印提示并跳过，不调用 `cp`（不用 `cp -n`，因为它静默跳过且不报错）。
    - profile 用 `ditto` 而不是 `cp -Rp`：`ditto` 默认保留权限、时间、扩展属性、ACL 和 Chrome 的
-     `Singleton*` 符号链接，并且语义固定为“把源目录内容复制到目标目录”，不受尾部 `/` 影响。`ditto` 会
-     合并到已存在的目标，所以同样先做 `[ -e 目标 ]` 判断：新 `profile` 已存在时打印提示并跳过，人工核对，不覆盖。
-   - `ditto` 会把旧 profile 内的快照一并复制进新 `profile/`；新代码只读同级快照，这份副本随即从
-     **新** `profile/` 中删除，旧目录不动。
+     `Singleton*` 符号链接，并且语义固定为“把源目录内容复制到目标目录”，不受尾部 `/` 影响。
+   - 原子落地：先 `ditto` 到 `<目标>.partial`，成功后删除其中随之复制进来的快照副本（新代码只读同级
+     快照），再用 `touch -r` 恢复根目录 mtime，最后 `mv` 改名为 `profile`/`cdp_profile`；各步用 `&&`
+     串联，任一步失败都停在 `.partial`。`.partial` 存在时运行期检查拒绝启动，脚本也拒绝继续该目录；
+     按提示删除对应 `.partial` 后重跑本步。目标已存在时打印提示并跳过，不覆盖。
+   - 普通 profile 与 `cdp_` profile 各自独立判断，只有 `cdp_` 旧目录时也会迁移。
 
    ```bash
+   bash <<'SH'
+   set -u
    snap=trippostcollect_cookie_snapshot.json
+   legacy_root=tools/MediaCrawler/browser_data
+   migrate_dir() {
+     local src=$1 dst=$2
+     [ -d "$src" ] || return 0
+     if [ -e "$dst.partial" ]; then
+       echo "stop: $dst.partial exists; delete it and rerun"
+       return 1
+     fi
+     if [ -e "$dst" ]; then
+       echo "skip: $dst exists, not overwritten"
+       return 0
+     fi
+     ditto "$src" "$dst.partial" \
+       && rm -f "$dst.partial/$snap" \
+       && touch -r "$src" "$dst.partial" \
+       && mv "$dst.partial" "$dst" \
+       || { echo "failed: delete $dst.partial and rerun"; return 1; }
+   }
    for pair in bili:bilibili wb:weibo dy:douyin zhihu:zhihu; do
      code=${pair%%:*}
      platform=${pair#*:}
-     old=tools/MediaCrawler/browser_data/${code}_user_data_dir
-     new=data/runtime/platform_sessions/${platform}
-     [ -d "$old" ] || { echo "skip $platform: no legacy profile"; continue; }
-     mkdir -p "$new"
+     old=$legacy_root/${code}_user_data_dir
+     old_cdp=$legacy_root/cdp_${code}_user_data_dir
+     new=data/runtime/platform_sessions/$platform
+     if [ ! -d "$old" ] && [ ! -d "$old_cdp" ]; then
+       echo "skip $platform: no legacy profile"
+       continue
+     fi
+     mkdir -p -m 700 "$new"
      if [ -f "$old/$snap" ]; then
        if [ -e "$new/$snap" ]; then
          echo "skip $platform snapshot: target exists, not overwritten"
@@ -515,42 +549,67 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
          cp -p "$old/$snap" "$new/$snap"
        fi
      fi
-     if [ -e "$new/profile" ]; then
-       echo "skip $platform profile: target exists, not overwritten"
-     else
-       ditto "$old" "$new/profile"
-       rm -f "$new/profile/$snap"
-     fi
-     legacy_cdp=tools/MediaCrawler/browser_data/cdp_${code}_user_data_dir
-     if [ -d "$legacy_cdp" ] && [ ! -e "$new/cdp_profile" ]; then
-       ditto "$legacy_cdp" "$new/cdp_profile"
-     fi
+     migrate_dir "$old" "$new/profile"
+     migrate_dir "$old_cdp" "$new/cdp_profile"
    done
+   SH
    ```
 
-3. 校验：每对 profile 目录的文件数与字节总数必须一致（旧侧不计快照，因为新 `profile/` 里已删掉该副本）；
-   新旧快照的大小、权限与 SHA-256 必须一致，且新快照权限为 `-rw-------`。快照只输出“一致/不一致”，
-   不打印哈希、大小、权限或任何 Cookie 内容；profile 只输出计数与字节数。
+3. 校验：逐相对条目比较每对 profile 目录（旧侧不计快照，因为新目录里已删掉该副本）。条目集合用
+   `find -print0 | sort -z` 比较；每个条目用 BSD `stat -f '%HT %p %z %m %Su:%Sg'` 比较类型、权限、大小、
+   mtime 与属主属组，符号链接再比较 `readlink`，普通文件用 `cmp -s` 逐字节比较；另对照
+   `find <dir> -perm +077 | wc -l` 的 group/other 权限条目数。快照比较大小、权限、mtime、属主属组与
+   SHA-256，并要求新快照为 `-rw-------`。输出只含平台名、目录种类、布尔值和计数，不打印路径、内容、
+   哈希或 Cookie。
 
    ```bash
+   bash <<'SH'
+   set -u
    snap=trippostcollect_cookie_snapshot.json
-   bytes_of() { find "$1" -type f ! -name "$snap" -exec stat -f %z {} + | awk '{s+=$1} END {print s+0}'; }
-   files_of() { find "$1" -type f ! -name "$snap" | wc -l; }
+   legacy_root=tools/MediaCrawler/browser_data
+   entries() {
+     (cd "$1" && find . -mindepth 1 ! -path "./$snap" -print0 | LC_ALL=C sort -z)
+   }
+   compare_tree() {
+     local a=$1 b=$2 same=no total=0 bad=0 rel perm_a perm_b
+     if cmp -s <(entries "$a") <(entries "$b"); then same=yes; fi
+     while IFS= read -r -d '' rel; do
+       total=$((total + 1))
+       if [ ! -e "$b/$rel" ] && [ ! -L "$b/$rel" ]; then
+         bad=$((bad + 1))
+         continue
+       fi
+       if [ "$(stat -f '%HT %p %z %m %Su:%Sg' "$a/$rel")" != "$(stat -f '%HT %p %z %m %Su:%Sg' "$b/$rel")" ]; then
+         bad=$((bad + 1))
+       elif [ -L "$a/$rel" ]; then
+         [ "$(readlink "$a/$rel")" = "$(readlink "$b/$rel")" ] || bad=$((bad + 1))
+       elif [ -f "$a/$rel" ]; then
+         cmp -s "$a/$rel" "$b/$rel" || bad=$((bad + 1))
+       fi
+     done < <(entries "$a")
+     perm_a=$(find "$a" ! -path "$a/$snap" -perm +077 | wc -l | tr -d ' ')
+     perm_b=$(find "$b" -perm +077 | wc -l | tr -d ' ')
+     echo "same_entry_set=$same entries=$total mismatched=$bad group_other_perm=$perm_a/$perm_b"
+   }
    for pair in bili:bilibili wb:weibo dy:douyin zhihu:zhihu; do
      code=${pair%%:*}
      platform=${pair#*:}
      for kind in "${code}_user_data_dir:profile" "cdp_${code}_user_data_dir:cdp_profile"; do
-       old=tools/MediaCrawler/browser_data/${kind%%:*}
-       new=data/runtime/platform_sessions/${platform}/${kind#*:}
+       old=$legacy_root/${kind%%:*}
+       new=data/runtime/platform_sessions/$platform/${kind#*:}
        [ -d "$old" ] || continue
-       echo "$platform ${kind#*:} files: $(files_of "$old") -> $(files_of "$new")"
-       echo "$platform ${kind#*:} bytes: $(bytes_of "$old") -> $(bytes_of "$new")"
+       if [ ! -d "$new" ]; then
+         echo "$platform ${kind#*:}: missing"
+         continue
+       fi
+       printf '%s %s: ' "$platform" "${kind#*:}"
+       compare_tree "$old" "$new"
      done
-     old_snap=tools/MediaCrawler/browser_data/${code}_user_data_dir/$snap
-     new_snap=data/runtime/platform_sessions/${platform}/$snap
+     old_snap=$legacy_root/${code}_user_data_dir/$snap
+     new_snap=data/runtime/platform_sessions/$platform/$snap
      [ -f "$old_snap" ] || continue
      if [ -f "$new_snap" ] \
-       && [ "$(stat -f '%z %Sp' "$old_snap")" = "$(stat -f '%z %Sp' "$new_snap")" ] \
+       && [ "$(stat -f '%z %Sp %m %Su:%Sg' "$old_snap")" = "$(stat -f '%z %Sp %m %Su:%Sg' "$new_snap")" ] \
        && [ "$(stat -f %Sp "$new_snap")" = "-rw-------" ] \
        && [ "$(shasum -a 256 < "$old_snap")" = "$(shasum -a 256 < "$new_snap")" ]; then
        echo "$platform snapshot: 一致"
@@ -558,10 +617,13 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
        echo "$platform snapshot: 不一致"
      fi
    done
+   SH
    ```
 
-   profile 计数或字节不一致时只删除对应新 `profile`/`cdp_profile` 目录后重做第 2 步；快照不一致时只删除
-   **新**快照文件后重做第 2 步。旧目录与旧快照始终不动，可重复复制。
+   每行 profile 结果都应为 `same_entry_set=yes`、`mismatched=0`，且 `group_other_perm` 两侧计数相等；
+   快照应为“一致”。非 root 账号复制时属主或属组可能与旧侧不同；即使只有属组不同，也按“不一致”交人工
+   确认，不得擅自 `chmod`/`chown`。确认是复制错误时，只删除新侧对应的 `profile`/`cdp_profile` 目录或
+   新快照文件后重做第 2 步；旧目录与旧快照始终不动，可重复复制。
 
 4. 逐平台验证登录仍有效，只看报告中的状态字段：
 

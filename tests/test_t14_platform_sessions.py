@@ -8,8 +8,12 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import contextlib
 import json
+import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,12 +28,9 @@ SECRET = "t14-secret-cookie-value"
 
 
 @pytest.fixture
-def session_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
-    legacy = tmp_path / "fork" / "browser_data"
-    sessions = tmp_path / "runtime" / "platform_sessions"
-    monkeypatch.setattr(paths, "LEGACY_FORK_PROFILE_ROOT", legacy)
-    monkeypatch.setattr(paths, "PLATFORM_SESSIONS_ROOT", sessions)
-    return legacy, sessions
+def session_roots(isolated_platform_sessions) -> tuple[Path, Path]:
+    # conftest 的自动隔离已把两个根指向本用例的临时目录。
+    return isolated_platform_sessions.legacy, isolated_platform_sessions.sessions
 
 
 def _legacy_profile(legacy: Path, name: str) -> Path:
@@ -43,8 +44,10 @@ def _legacy_profile(legacy: Path, name: str) -> Path:
 
 # ---------- paths 新布局 ----------
 
-def test_platform_sessions_layout_is_under_runtime_not_fork() -> None:
-    assert paths.PLATFORM_SESSIONS_ROOT == paths.RUNTIME_ROOT / "platform_sessions"
+def test_platform_sessions_layout_is_under_runtime_not_fork(isolated_platform_sessions) -> None:
+    original = isolated_platform_sessions.original
+    assert original.sessions == paths.RUNTIME_ROOT / "platform_sessions"
+    assert original.legacy == paths.MEDIACRAWLER_DIR / "browser_data"
     for platform in GENERIC:
         session = paths.PLATFORM_SESSIONS_ROOT / platform
         assert paths.platform_session_dir(platform) == session
@@ -391,3 +394,127 @@ def test_cdp_manager_profile_follows_share_flag(
     expected = str(sessions / "weibo" / leaf)
     assert manager.launcher.launch_browser.call_args.kwargs["user_data_dir"] == expected
     assert Path(expected).is_dir()
+
+
+# ---------- 未完成的迁移残留（.partial）失败关闭 ----------
+
+@pytest.mark.parametrize("leaf", ["profile", "cdp_profile"])
+@pytest.mark.parametrize("legacy_exists", [True, False])
+def test_partial_copy_is_refused_even_when_target_exists(
+    session_roots: tuple[Path, Path], leaf: str, legacy_exists: bool,
+) -> None:
+    legacy, sessions = session_roots
+    if legacy_exists:
+        _legacy_profile(legacy, "zhihu_user_data_dir")
+        _legacy_profile(legacy, "cdp_zhihu_user_data_dir")
+    (sessions / "zhihu" / "profile").mkdir(parents=True)
+    (sessions / "zhihu" / "cdp_profile").mkdir()
+    (sessions / "zhihu" / f"{leaf}.partial").mkdir()
+    with pytest.raises(RuntimeError, match=rf"^platform_session_migration_required:zhihu .*{leaf}\.partial"):
+        paths.require_platform_session_migrated("zhihu")
+    (sessions / "zhihu" / f"{leaf}.partial").rmdir()
+    paths.require_platform_session_migrated("zhihu")
+
+
+# ---------- entry.main 检查 ----------
+
+def _golden_argv(name: str, tmp: Path) -> list[str]:
+    commands = json.loads((ROOT / "tests/golden/t02_worker_commands.json").read_text(encoding="utf-8"))
+    return [part.replace("<TMP>", str(tmp)) for part in commands[name]["cmd"][4:]]
+
+
+def test_entry_main_refuses_before_hooks_and_crawler(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, session_roots: tuple[Path, Path],
+) -> None:
+    from trippostcollect.platforms import entry
+
+    legacy, _ = session_roots
+    _legacy_profile(legacy, "wb_user_data_dir")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("worker must refuse before hooks or crawler start")
+
+    monkeypatch.setattr(entry, "install_hooks", forbidden)
+    monkeypatch.setattr(entry, "load_crawler", forbidden)
+    monkeypatch.setattr(entry, "_config", None)
+    with pytest.raises(RuntimeError, match="^platform_session_migration_required:weibo "):
+        entry.main(_golden_argv("weibo_search", tmp_path))
+
+
+# ---------- 未迁移 checkout 下测试隔离仍成立 ----------
+
+ENTRY_PROBE = (
+    "import json\n"
+    "{redirect}"
+    "import trippostcollect.platforms.entry as entry\n"
+    "class FakeCrawler:\n"
+    "    browser_context = None\n"
+    "    async def start(self):\n"
+    "        pass\n"
+    "entry.load_crawler = lambda code: FakeCrawler\n"
+    "print(json.dumps({{'code': entry.main({argv!r})}}))\n"
+)
+
+
+def _run_entry_probe(tmp_path: Path, checkout: Path, *, redirect: bool) -> subprocess.CompletedProcess[str]:
+    from support.platform_sessions import child_redirect_source
+
+    environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    environment["PYTHONPATH"] = str(ROOT / "src")
+    environment["PYTHONIOENCODING"] = "utf-8"
+    # 现有工作根机制：子进程的 core.paths 以 fake checkout 为根，其旧 fork 目录模拟 Mac 上尚未迁移的状态。
+    environment["TRIPPOST_PROJECT_ROOT"] = str(checkout)
+    code = ENTRY_PROBE.format(
+        redirect=child_redirect_source(tmp_path / "isolation") if redirect else "",
+        argv=_golden_argv("weibo_search", tmp_path),
+    )
+    return subprocess.run(
+        [sys.executable, "-P", "-c", code], cwd=tmp_path, env=environment,
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+
+
+def test_subprocess_entry_cases_pass_in_unmigrated_checkout(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    _legacy_profile(checkout / "tools/MediaCrawler/browser_data", "wb_user_data_dir")
+    control = _run_entry_probe(tmp_path, checkout, redirect=False)
+    assert control.returncode != 0
+    assert "platform_session_migration_required:weibo" in control.stderr
+    assert SECRET not in control.stderr + control.stdout
+    isolated = _run_entry_probe(tmp_path, checkout, redirect=True)
+    assert isolated.returncode == 0, isolated.stderr[-3000:]
+    assert json.loads(isolated.stdout.strip().splitlines()[-1]) == {"code": 0}
+
+
+def test_in_process_cases_pass_in_unmigrated_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from support.platform_sessions import redirect_platform_session_roots
+    from trippostcollect.application import collection
+
+    class Reached(BaseException):
+        pass
+
+    def reached(*args, **kwargs):
+        raise Reached
+
+    unmigrated = tmp_path / "checkout" / "tools/MediaCrawler/browser_data"
+    for code in GENERIC.values():
+        _legacy_profile(unmigrated, f"{code}_user_data_dir")
+    monkeypatch.setattr(collection, "_run_platform_without_policy", reached)
+
+    @contextlib.contextmanager
+    def no_policy(*args, **kwargs):
+        yield {}
+
+    monkeypatch.setattr(collection, "site_request_guard", no_policy)
+    # 对照：不隔离时（旧根指向未迁移目录）进程内正式入口被拒绝。
+    monkeypatch.setattr(paths, "LEGACY_FORK_PROFILE_ROOT", unmigrated)
+    record = collection.run_platform("douyin", argparse.Namespace(keyword="青岛"), tmp_path / "a", ports=None)
+    assert record["failure_classification"]["reason"] == "platform_session_migration_required:douyin"
+    # conftest 使用的同一重定向恢复隔离后，进程内用例越过检查进入原有流程。
+    redirect_platform_session_roots(monkeypatch, tmp_path / "isolation")
+    for platform in GENERIC:
+        paths.require_platform_session_migrated(platform)
+    with pytest.raises(Reached):
+        collection.run_platform("douyin", argparse.Namespace(keyword="青岛"), tmp_path / "b", ports=None)

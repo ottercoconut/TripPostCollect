@@ -35,6 +35,7 @@ from trippostcollect.core.paths import (
     DEFAULT_DB,
     ensure_dir,
     ensure_parent,
+    require_platform_session_migrated,
 )
 from trippostcollect.runtime.cookies import load_cookie_snapshot
 from trippostcollect.records.topic_relevance import is_topic_relevant
@@ -1422,6 +1423,10 @@ def verify_apply_inputs(config: RepairConfig, meta: dict[str, str]) -> dict[str,
 
 
 def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
+    if config.apply:
+        # T14：apply 会读取新位置的 B站快照；旧 profile 未迁移时先失败关闭，不写状态库，
+        # 也不把“快照不在新位置”误报为 login_required。
+        require_platform_session_migrated("bilibili")
     ensure_parent(config.state_db_path)
     with sqlite_connect(config.state_db_path) as state_connection:
         meta = initialize_repair_state(config.db_path, state_connection, config.report_dir)

@@ -34,10 +34,12 @@ from trippostcollect.runtime import image_retry
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/adapter_t06"
-T14_DOUYIN_PROFILES = {
-    str(ROOT / "tools/MediaCrawler/browser_data/dy_user_data_dir"),
-    str(paths.platform_profile_dir("douyin")),
-}
+def t14_douyin_profiles():
+    """旧侧 fork 固定位置与新侧当前（测试中已重定向的）core.paths 位置；调用时求值。"""
+    return {
+        str(ROOT / "tools/MediaCrawler/browser_data/dy_user_data_dir"),
+        str(paths.platform_profile_dir("douyin")),
+    }
 
 
 def t14_slider_paths(node):
@@ -290,7 +292,7 @@ async def drive(modules, root, patch, scenario, fallback):
 
         async def launch_persistent_context(self, **kwargs):
             # T14 授权差异：持久 profile 从 fork browser_data 迁到 core.paths 定义的新位置；两侧归一为同一记号。
-            if kwargs.get("user_data_dir") in T14_DOUYIN_PROFILES:
+            if kwargs.get("user_data_dir") in t14_douyin_profiles():
                 kwargs = {**kwargs, "user_data_dir": "<douyin persistent profile>"}
             trace.append(("launch", kwargs))
             return Context()

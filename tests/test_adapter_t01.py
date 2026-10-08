@@ -58,10 +58,11 @@ def test_resource_text_preserves_bom_handling() -> None:
 
 # ---------- 路径集中 ----------
 
-def test_platform_profile_paths_are_centralized() -> None:
+def test_platform_profile_paths_are_centralized(isolated_platform_sessions) -> None:
     # T14：非小红书 profile 定义只在 core.paths，位于 data/runtime/platform_sessions/<platform>/
+    assert isolated_platform_sessions.original.sessions == paths.RUNTIME_ROOT / "platform_sessions"
     for platform in ("bilibili", "weibo", "douyin", "zhihu"):
-        session = paths.RUNTIME_ROOT / "platform_sessions" / platform
+        session = paths.PLATFORM_SESSIONS_ROOT / platform
         assert paths.platform_profile_dir(platform) == session / "profile"
         assert paths.platform_cookie_snapshot_path(platform) == session / "trippostcollect_cookie_snapshot.json"
 

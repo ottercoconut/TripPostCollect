@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from support.platform_sessions import child_redirect_source
+
 ROOT = Path(__file__).resolve().parents[1]
 for extra in (ROOT / "scripts", ROOT / "scripts" / "dev"):
     if str(extra) not in sys.path:
@@ -301,8 +303,10 @@ def test_all_worker_platforms_import_in_root_environment_without_exit_slices(tmp
 
 def test_entry_main_startup_and_cleanup_trace(tmp_path: Path) -> None:
     # 产物：选站启动/清理顺序 trace；与原 E.main→M.main→app_runner 顺序一致
+    # T14：子进程不继承 conftest 的进程内重定向；probe 内把登录资料两个根改到 tmp，未迁移的 checkout 不影响本用例。
     probe = (
         "import json\n"
+        + child_redirect_source(tmp_path / "platform_sessions_isolation") +
         f"import {ENTRY_MODULE} as entry\n"
         "from trippostcollect.runtime import worker\n"
         "trace = []\n"

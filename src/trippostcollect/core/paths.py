@@ -136,21 +136,22 @@ def legacy_fork_profile_dirs(platform_key: str) -> tuple[tuple[Path, Path], ...]
 
 
 def require_platform_session_migrated(platform_key: str) -> None:
-    """失败关闭：旧 fork profile 仍在而新 profile 不存在时拒绝启动，不回退旧位置。
+    """失败关闭：旧 fork profile 仍在而新 profile 不存在、或留有未完成的 `.partial` 复制时拒绝启动。
 
-    两者都不存在时按首登流程由调用方创建新目录；新 profile 已存在时直接通过。
+    不回退旧位置。两者都不存在时按首登流程由调用方创建新目录；新 profile 已存在且无残留时直接通过。
     错误只给出平台与目录，不读取或输出任何 Cookie。
     """
-    pending = [
-        (legacy, target)
-        for legacy, target in legacy_fork_profile_dirs(platform_key)
-        if legacy.exists() and not target.exists()
-    ]
-    if pending:
-        detail = "; ".join(f"{legacy} -> {target}" for legacy, target in pending)
+    problems = []
+    for legacy, target in legacy_fork_profile_dirs(platform_key):
+        partial = target.with_name(f"{target.name}.partial")
+        if partial.exists():
+            problems.append(f"未完成的迁移残留 {partial}，删除后重做")
+        elif legacy.exists() and not target.exists():
+            problems.append(f"{legacy} -> {target}")
+    if problems:
         raise RuntimeError(
             f"{PLATFORM_SESSION_MIGRATION_REQUIRED}:{platform_key} "
-            f"(按 docs/operations-runbook.md「T14 非小红书登录资料迁移」迁移：{detail})"
+            f"(按 docs/operations-runbook.md「T14 非小红书登录资料迁移」处理：{'; '.join(problems)})"
         )
 
 
