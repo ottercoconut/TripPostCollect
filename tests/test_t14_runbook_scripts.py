@@ -292,11 +292,11 @@ def test_normal_migration_layout_and_verification(project: Path, root_mode: int)
     out = verify.stdout
     assert "problems=0" in out, detail(verify)
     assert out.count("snapshot: 一致") == 2 and "不一致" not in out, detail(verify)
-    assert out.count("same_entry_set=yes entries=6 mismatched=0") == 3, detail(verify)
+    assert out.count("same_entry_set=yes entries=6 mismatched=0 mismatch_detail=none") == 3, detail(verify)
     assert out.count("root_mode_same=yes") == 3, detail(verify)
     expected_700 = "yes" if root_mode == 0o700 else "no"
     assert out.count(f"root_mode_700={expected_700}") == 3, detail(verify)
-    assert "=no" not in out.replace("root_mode_700=no", ""), detail(verify)
+    assert not re.search(r"=no\b", out.replace("root_mode_700=no", "")), detail(verify)
     assert SNAP not in out and str(project) not in out, detail(verify)
 
 
@@ -316,7 +316,34 @@ def test_content_mismatch_exits_2(project: Path) -> None:
     os.utime(changed, ns=(original.st_atime_ns, original.st_mtime_ns))
     verify = run(project, "step3")
     assert verify_status(verify) == 2, detail(verify)
-    assert "weibo profile: same_entry_set=yes entries=6 mismatched=1" in verify.stdout, detail(verify)
+    assert ("weibo profile: same_entry_set=yes entries=6 mismatched=1 mismatch_detail=file:content=1 "
+            in verify.stdout), detail(verify)
+    assert "problems=1" in verify.stdout, detail(verify)
+
+
+def test_symlink_own_mtime_is_not_compared(project: Path) -> None:
+    # macOS 的 ditto/cp 不保证保留链接自身 mtime（等价于 `touch -h`）；只比较类型、属主与目标。
+    migrated(project)
+    for name in ("link", "SingletonLock"):
+        os.utime(project / SESSIONS / "weibo" / "profile" / name, (OLD_MTIME + 99, OLD_MTIME + 99),
+                 follow_symlinks=False)
+    verify = run(project, "step3")
+    assert verify_status(verify) == 0, detail(verify)
+    assert "weibo profile: same_entry_set=yes entries=6 mismatched=0 mismatch_detail=none" in verify.stdout, \
+        detail(verify)
+
+
+def test_symlink_target_change_is_reported(project: Path) -> None:
+    migrated(project)
+    profile = project / SESSIONS / "weibo" / "profile"
+    root_times = profile.stat()
+    (profile / "SingletonLock").unlink()
+    (profile / "SingletonLock").symlink_to("other-host-99999")
+    os.utime(profile, ns=(root_times.st_atime_ns, root_times.st_mtime_ns))
+    verify = run(project, "step3")
+    assert verify_status(verify) == 2, detail(verify)
+    assert ("weibo profile: same_entry_set=yes entries=6 mismatched=1 mismatch_detail=link:target=1 "
+            in verify.stdout), detail(verify)
     assert "problems=1" in verify.stdout, detail(verify)
 
 

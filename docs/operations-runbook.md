@@ -579,7 +579,12 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
 3. 校验：逐相对条目比较每对 profile 目录。只在旧侧排除快照（新侧已删掉该副本）；新侧不排除，若新
    profile 里残留快照副本会表现为条目集合不同。条目集合用
    `find -print0 | sort -z` 比较；每个条目用 BSD `stat -f '%HT %p %z %m %Su:%Sg'` 比较类型、权限、大小、
-   mtime 与属主属组，符号链接再比较 `readlink`，普通文件用 `cmp -s` 逐字节比较；另对照
+   mtime 与属主属组，普通文件再用 `cmp -s` 逐字节比较。符号链接只比较类型、属主属组与链接目标
+   （`readlink`），不比较链接自身的权限位、大小和 mtime：macOS 上 `ditto`/`cp` 不保证保留链接自身的
+   mtime 与权限位，而 Chrome 只关心链接目标（如 `SingletonLock` 指向的主机与进程），这些属性对 profile
+   没有意义。目录与普通文件仍比较全部字段。每组输出 `mismatch_detail=<类型>:<字段>=<次数>,…`
+   （类型为 file/dir/link，字段为 type/mode/size/mtime/owner/content/target/missing，无不一致时为 `none`），
+   只给分类计数、不含路径。另对照（不计符号链接）
    `find <dir> -perm +077 | wc -l` 的 group/other 权限条目数。profile 根本身单独核对类型、权限、属主与
    mtime：新旧根权限必须相同（`root_mode_same`）；`root_mode_700` 只作信息输出，不计入失败（旧根若是 755，
    `ditto` 会原样复制，不应要求操作人改权限）。快照比较大小、权限、mtime、属主属组与 SHA-256，并要求新快照为
@@ -611,38 +616,64 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
        (cd "$1" && find . -mindepth 1 -print0 | LC_ALL=C sort -z)
      fi
    }
+   kind_of() {
+     if [ -L "$1" ]; then echo link
+     elif [ -d "$1" ]; then echo dir
+     elif [ -f "$1" ]; then echo file
+     else echo other
+     fi
+   }
    compare_tree() {
-     local label=$1 a=$2 b=$3 same=no total=0 bad=0 rel sa sb la lb rc perm_a perm_b
+     local label=$1 a=$2 b=$3 same=no total=0 bad=0 rel kind sa sb la lb rc perm_a perm_b keys entry_bad detail
+     local ta pa za ma oa tb pb zb mb ob
      entries "$a" old > "$work/a" || fail "list old entries"
      entries "$b" new > "$work/b" || fail "list new entries"
      rc=0
      cmp -s "$work/a" "$work/b" || rc=$?
      [ "$rc" -le 1 ] || fail "cmp entry lists"
      if [ "$rc" -eq 0 ]; then same=yes; fi
+     keys=""
      while IFS= read -r -d '' rel; do
        total=$((total + 1))
+       kind=$(kind_of "$a/$rel")
        if [ ! -e "$b/$rel" ] && [ ! -L "$b/$rel" ]; then
          bad=$((bad + 1))
+         keys="$keys$kind:missing "
          continue
        fi
-       sa=$(stat -f '%HT %p %z %m %Su:%Sg' "$a/$rel") || fail "stat old entry"
-       sb=$(stat -f '%HT %p %z %m %Su:%Sg' "$b/$rel") || fail "stat new entry"
-       if [ "$sa" != "$sb" ]; then
-         bad=$((bad + 1))
-       elif [ -L "$a/$rel" ]; then
+       sa=$(stat -f '%HT|%p|%z|%m|%Su:%Sg' "$a/$rel") || fail "stat old entry"
+       sb=$(stat -f '%HT|%p|%z|%m|%Su:%Sg' "$b/$rel") || fail "stat new entry"
+       IFS='|' read -r ta pa za ma oa <<< "$sa"
+       IFS='|' read -r tb pb zb mb ob <<< "$sb"
+       entry_bad=""
+       [ "$ta" = "$tb" ] || entry_bad="$entry_bad$kind:type "
+       [ "$oa" = "$ob" ] || entry_bad="$entry_bad$kind:owner "
+       if [ "$kind" = link ]; then
          la=$(readlink "$a/$rel") || fail "readlink old"
          lb=$(readlink "$b/$rel") || fail "readlink new"
-         [ "$la" = "$lb" ] || bad=$((bad + 1))
-       elif [ -f "$a/$rel" ]; then
-         rc=0
-         cmp -s "$a/$rel" "$b/$rel" || rc=$?
-         [ "$rc" -le 1 ] || fail "cmp entry"
-         [ "$rc" -eq 0 ] || bad=$((bad + 1))
+         [ "$la" = "$lb" ] || entry_bad="$entry_bad$kind:target "
+       else
+         [ "$pa" = "$pb" ] || entry_bad="$entry_bad$kind:mode "
+         [ "$za" = "$zb" ] || entry_bad="$entry_bad$kind:size "
+         [ "$ma" = "$mb" ] || entry_bad="$entry_bad$kind:mtime "
+         if [ "$kind" = file ]; then
+           rc=0
+           cmp -s "$a/$rel" "$b/$rel" || rc=$?
+           [ "$rc" -le 1 ] || fail "cmp entry"
+           [ "$rc" -eq 0 ] || entry_bad="$entry_bad$kind:content "
+         fi
+       fi
+       if [ -n "$entry_bad" ]; then
+         bad=$((bad + 1))
+         keys="$keys$entry_bad"
        fi
      done < "$work/a"
-     perm_a=$(find "$a" ! -path "$a/$snap" -perm +077 | wc -l | tr -d ' ') || fail "find old perms"
-     perm_b=$(find "$b" -perm +077 | wc -l | tr -d ' ') || fail "find new perms"
-     echo "$label: same_entry_set=$same entries=$total mismatched=$bad group_other_perm=$perm_a/$perm_b"
+     detail=$(printf '%s\n' $keys | LC_ALL=C sort | uniq -c | awk 'NF == 2 {printf "%s%s=%s", sep, $2, $1; sep=","}') \
+       || fail "summarize mismatches"
+     [ -n "$detail" ] || detail=none
+     perm_a=$(find "$a" ! -type l ! -path "$a/$snap" -perm +077 | wc -l | tr -d ' ') || fail "find old perms"
+     perm_b=$(find "$b" ! -type l -perm +077 | wc -l | tr -d ' ') || fail "find new perms"
+     echo "$label: same_entry_set=$same entries=$total mismatched=$bad mismatch_detail=$detail group_other_perm=$perm_a/$perm_b"
      if [ "$same" != yes ] || [ "$bad" -ne 0 ] || [ "$perm_a" != "$perm_b" ]; then
        problems=$((problems + 1))
      fi
@@ -709,7 +740,7 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
    <!-- /t14-migrate:step3 -->
 
    通过标准是最后两行为 `problems=0` 与 `exit=0`：此时每行 root 结果除信息项 `root_mode_700` 外均为 `yes`，
-   每行 profile 结果为 `same_entry_set=yes`、`mismatched=0` 且 `group_other_perm` 两侧计数相等，快照为“一致”。
+   每行 profile 结果为 `same_entry_set=yes`、`mismatched=0`、`mismatch_detail=none` 且 `group_other_perm` 两侧计数相等，快照为“一致”。
    `exit=1` 表示某个命令出错（看 `FAILED:` 行），`exit=2` 表示存在不一致。非 root 账号复制时属主或属组可能与旧侧不同；即使只有属组不同，也按“不一致”交人工
    确认，不得擅自 `chmod`/`chown`。确认是复制错误时，只删除新侧对应的 `profile`/`cdp_profile` 目录或
    新快照文件后重做第 2 步；旧目录与旧快照始终不动，可重复复制。
