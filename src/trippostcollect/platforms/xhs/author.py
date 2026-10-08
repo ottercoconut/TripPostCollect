@@ -48,6 +48,7 @@ from trippostcollect.platforms.xhs.parser import (
     read_creator_runtime_projection,
     xhs_creator_projection_spec,
 )
+from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -234,7 +235,8 @@ class XhsAuthorMixin:
             )
             attempts += 1
             api_reason = self._creator_client_parse_reason()
-        except XHSNetworkRecoveryTimeout:
+        except (XHSNetworkRecoveryTimeout, CDPBrowserLifecycleError):
+            # 本轮生命周期与网络恢复失败立即上抛，不等浏览器回退前的停顿。
             raise
         except Exception as exc:
             attempts += self._request_failure_attempts(exc)

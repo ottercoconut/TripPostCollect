@@ -24,6 +24,7 @@ from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
     XHSCreatorProfileUnavailable,
     XHSMainPageClosedUnexpected,
+    XHSNetworkRecoveryTimeout,
 )
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget, XHSManualWaitBudgetExhausted
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
@@ -1267,6 +1268,26 @@ async def test_verification_read_accepts_after_clean_recheck(crawler):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [
+    CDPBrowserLifecycleError({"code": "xhs_browser_context_closed_unexpected"}, stage="creator_profile_api"),
+    XHSMainPageClosedUnexpected(stage="creator_profile_api"),
+    XHSNetworkRecoveryTimeout("creator_profile_api", 600.0),
+])
+async def test_api_stage_run_failure_propagates_before_browser_fallback_pause(crawler, failure):
+    crawler.xhs_client.get_creator_info = AsyncMock(side_effect=failure)
+    crawler._new_guarded_page = AsyncMock()
+    note = {"note_id": "note-a", "user": {"user_id": REQUESTED_USER}}
+
+    with pytest.raises(type(failure)) as exc_info:
+        await crawler.enrich_note_creator(note)
+
+    assert exc_info.value is failure
+    crawler._guarded_pause.assert_not_awaited()
+    crawler._new_guarded_page.assert_not_awaited()
+    assert "creator_profile" not in note
+
+
+@pytest.mark.asyncio
 async def test_candidate_skip_detail_carries_reason_without_html_or_avatar(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     crawler, _, state_path = prepare_crawler(
@@ -1345,6 +1366,8 @@ def main_page_search(monkeypatch, tmp_path):
     instance.get_note_detail_async_task = fetch_detail
     instance.creator_page = CreatorPage([creator_state()])
     instance._new_guarded_page = AsyncMock(return_value=instance.creator_page)
+    # 浏览器与 context 存活：生命周期检查照常执行且不抛错。
+    instance.cdp_manager = Mock(assert_alive=Mock())
     instance.closed_stages = []
     original_assert = instance._assert_primary_page_alive
 
@@ -1431,10 +1454,11 @@ async def test_main_page_closed_during_creator_enrichment_fails_run_not_candidat
     assert completed[0]["batch_complete"] is True
     assert crawler.published_batches == completed
     assert stopped["resume_page"] == 4 and stopped["batch_complete"] is False
-    # 前提：浏览器、context 与作者辅助页仍存活，辅助页照常收束。
-    assert crawler.creator_page.closed is False
+    # 前提：同一阶段先确认浏览器与 context 存活，才判定主页面关闭；作者辅助页打开过就照常收束。
+    crawler.cdp_manager.assert_alive.assert_any_call(stage)
     if close_point == "before_browser_fallback":
         crawler._new_guarded_page.assert_not_awaited()
+        crawler._close_page_with_deadline.assert_not_awaited()
     else:
         crawler._close_page_with_deadline.assert_awaited_once_with(
             crawler.creator_page, reason="creator_profile_cleanup"

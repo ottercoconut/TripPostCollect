@@ -38,6 +38,8 @@ from urllib.parse import quote, urlencode, urlparse
 from playwright.async_api import Page
 
 from trippostcollect.application.contracts import XhsBehaviorPorts
+from trippostcollect.platforms.xhs.errors import XHSNetworkRecoveryTimeout
+from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.runtime import behavior as _behavior
 from trippostcollect.runtime.behavior import (
     REQUEST_RANDOM,
@@ -1169,6 +1171,9 @@ class XhsBehaviorMixin:
             if blocked_markers:
                 raise RuntimeError(f"xhs_post_interaction_visible_block:{','.join(sorted(blocked_markers))}")
         except RuntimeError as exc:
+            # 浏览器生命周期与网络恢复超时是本轮失败；只有互动自身失败才不停抓。
+            if isinstance(exc, (CDPBrowserLifecycleError, XHSNetworkRecoveryTimeout)):
+                raise
             if str(exc).startswith("xhs_post_interaction_visible_block:"):
                 raise
             logger.warning(

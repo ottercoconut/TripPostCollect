@@ -115,6 +115,13 @@ def _xhs_repair_blocker(crawler: Any, exc: BaseException) -> dict[str, str]:
         except Exception:
             request_failure = exc
     error_type = type(request_failure).__name__
+    if isinstance(request_failure, CDPBrowserLifecycleError):
+        # 与失败分类同族：结构化码为 browser_target_closed，具体生命周期码放 reason。
+        return {
+            "error_type": error_type,
+            "error_code": "browser_target_closed",
+            "reason": str(request_failure.event.get("code") or "xhs_cdp_lifecycle_failure"),
+        }
     code = str(getattr(request_failure, "code", "") or "")
     text = str(request_failure).lower()
     if not code and error_type == "IPBlockError":
@@ -130,7 +137,6 @@ def _xhs_repair_blocker(crawler: Any, exc: BaseException) -> dict[str, str]:
             ("rate_limit", "rate_limited"),
             ("login_required", "login_required"),
             ("verification_timeout", "verification_timeout"),
-            ("xhs_main_page_closed_unexpected", "main_page_closed"),
             ("browser_context_closed", "browser_target_closed"),
         ):
             if marker in text:

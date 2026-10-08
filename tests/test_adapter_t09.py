@@ -36,6 +36,7 @@ import pytest
 import tenacity._asyncio
 
 from support.creator_runtime_profile import use_legacy_creator_page_read
+from support.main_page_lifecycle import use_legacy_main_page_closed_name
 from support.raw_author_identity import XHS_KEEP_AUTHOR_DETAIL_ENV, use_raw_author_identity
 from trippostcollect.application import events
 from trippostcollect.platforms import _fork_bridge
@@ -194,12 +195,14 @@ class RootSide:
             modules = {
                 name: importlib.import_module(prefix + name)
                 for name in ("core", "client", "login", "manual_wait", "errors", "repair",
-                             "behavior", "signer", "parser", "models", "author")
+                             "behavior", "signer", "parser", "models", "author", "session")
             }
         finally:
             _register_new_modules(patch, ("trippostcollect.platforms.entry", "trippostcollect.platforms.xhs"))
         # #52：作者页取数改为运行时投影优先；对照时换回旧的 content() + 静态解析，其余逐字节比较。
         use_legacy_creator_page_read(patch, modules["author"])
+        # #55：主页面关闭改为生命周期异常子类；对照时只把其类名记为 RuntimeError，消息逐字比较。
+        use_legacy_main_page_closed_name(patch, modules["errors"], modules["session"])
         return SimpleNamespace(
             side=self,
             entry=entry,
@@ -1294,12 +1297,7 @@ async def capture(awaitable):
     except BaseException as exc:  # noqa: BLE001 - 记录两侧原样异常
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
-        # #55：根实现把主页面关闭改为生命周期异常子类（消息逐字不变），对照按其 RuntimeError 基类名比较；
-        # 根侧模块按对照隔离重新加载，类对象不唯一，故按类名识别。
-        name = type(exc).__name__
-        if name == "XHSMainPageClosedUnexpected" and isinstance(exc, RuntimeError):
-            name = "RuntimeError"
-        return {"type": name, "message": str(exc), "code": getattr(exc, "code", None)}
+        return {"type": type(exc).__name__, "message": str(exc), "code": getattr(exc, "code", None)}
     return None
 
 
