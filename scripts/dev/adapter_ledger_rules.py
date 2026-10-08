@@ -2427,15 +2427,15 @@ PROGRESS_RESOLUTIONS = {
         "迁至", "WeiboClient._get_note_info_repair",
         "开关读取归worker_inputs.weibo_input_readers.post_repair；回退算法为客户端显式方法"),
     ("scripts/mediacrawler_export_entrypoint.py", "install_export_hook"): (
-        "退出", None, "仅包裹fork写出方法的旧桥hook；根JsonlContentStore在写出前直接净化"),
+        "退出", None, "仅包裹fork写出方法的旧桥hook；根AsyncFileWriter.write_to_jsonl以默认sanitizer(sanitize_export_item)在写出前净化"),
     ("scripts/mediacrawler_export_entrypoint.py", "install_batch_checkpoint_hook"): (
         "退出", None, "仅替换fork模块事件出口的旧桥hook；根worker经显式发布出口append_and_publish"),
     ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._env_float"): (
-        "迁至", "_env_nonnegative_float", "T09方法体逐字迁为模块级零参reader工厂"),
+        "迁至", "_env_nonnegative_float", "T09方法体逐字迁为两参模块函数_env_nonnegative_float(name, default)；零参reader由xhs_readers经partial构造"),
     ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._validate_login_contract"): (
         "迁至", "_validate_login_contract", "T09登录契约迁为模块级函数，配置经参数传入"),
     ("tools/MediaCrawler/media_platform/zhihu/core.py", "ZhihuCrawler._env_float"): (
-        "迁至", "_env_float", "T07方法迁为模块级reader"),
+        "迁至", "_env_float", "T07方法迁为两参模块函数_env_float(name, default)；零参reader由zhihu_operation_readers经lambda构造"),
     ("tools/MediaCrawler/store/douyin/__init__.py", "update_dy_aweme_images"): (
         "迁至", "DouYinCrawler.update_dy_aweme_images", "改为crawler方法，经ImageStager端口写出"),
     ("tools/MediaCrawler/store/douyin/__init__.py", "record_dy_aweme_image_failure"): (

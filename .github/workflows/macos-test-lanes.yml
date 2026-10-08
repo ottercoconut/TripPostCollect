@@ -55,7 +55,7 @@ jobs:
           git archive HEAD | tar -x -C "$TPC_WORK/pristine"
           # T14 过渡：仅 fork gitlink 仍存在时导出 fork 并建立 fork 环境；T14-C 合并后删除两段 if。
           FORK_GITLINK=0
-          if git ls-files -s -- tools/MediaCrawler | grep -q '^160000 '; then
+          if [ -n "$(git ls-files -s tools/MediaCrawler)" ]; then
             FORK_GITLINK=1
             git -C tools/MediaCrawler archive HEAD | tar -x -C "$TPC_WORK/pristine/tools/MediaCrawler"
           fi
@@ -102,7 +102,7 @@ jobs:
           source "$TPC_WORK/root-venv/bin/activate"
           # T14 过渡：fork lane 只在 gitlink 仍存在时运行；T14-C 合并后删除 FORK_ARGS。
           FORK_ARGS=()
-          if git ls-files -s -- tools/MediaCrawler | grep -q '^160000 '; then
+          if [ -n "$(git ls-files -s tools/MediaCrawler)" ]; then
             FORK_ARGS=(--fork-python "$TPC_WORK/fork-venv/bin/python")
           fi
           python scripts/ci/run_matrix.py \

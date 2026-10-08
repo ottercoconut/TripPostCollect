@@ -74,6 +74,9 @@ if spec["profile_exists"]:
     denied("profile", lambda: os.listdir(spec["profile"]))
 else:
     results["profile"] = {"denied": True, "absent": True}
+# 项目平台登录资料探针：临时根内按真实布局构造，目录缺失时 listdir 得 ENOENT，同样判未通过。
+for index, path in enumerate(spec.get("project_profiles", [])):
+    denied(f"project_profile{index}", lambda path=path: os.listdir(path))
 print(json.dumps(results))
 sys.exit(0 if all(item["denied"] for item in results.values()) else 2)
 '''
@@ -280,6 +283,29 @@ def cache_identity(root_commit, fork_commit, script_hash, fork_python):
 
 def cache_valid(cached, identity, lanes):
     return cached.get("identity") == identity and set(cached.get("lanes", {})) == set(lanes)
+
+
+def canary_profile_probes(output, stores):
+    """在临时根内按真实相对布局构造探针 checkout，交给后端与真实 checkout 同样遮蔽；不读写真实登录资料。"""
+    checkout = output / "canary-checkout"
+    paths = []
+    for relative in stores:
+        path = checkout / relative
+        path.mkdir(parents=True)
+        (path / "probe").write_text("canary", encoding="utf-8")
+        paths.append(str(path))
+    return checkout, paths
+
+
+def removal_problems(root, progress):
+    """T14-C 删除批的额外门禁：fork 目录须已从磁盘删除（只 git rm --cached 不算），台账不得残留 pending。"""
+    problems = []
+    if (Path(root) / FORK).exists():
+        problems.append(f"fork 删除批要求 {FORK} 目录已从磁盘删除（仅 git rm --cached 不算删除）")
+    pending = progress["counts"].get("pending", 0)
+    if pending:
+        problems.append(f"fork 删除批要求台账 progress 的 pending 为 0，实际 {pending}")
+    return problems
 
 
 def selected_lanes(head_fork):
@@ -507,12 +533,14 @@ def main(argv=None):
             pairs.append((original, target))
         lanes = load_module(ROOT / "tests/run_lanes.py", "card_gate_runtime")
         home = Path.home().resolve()
-        policy = backend.prepare(output, (ROOT, checkout), home, lanes.runtime_path())
+        probe_checkout, profile_probes = canary_profile_probes(output, backend.PROFILE_STORES)
+        policy = backend.prepare(output, (ROOT, checkout, probe_checkout), home, lanes.runtime_path())
         sandbox = Sandbox(backend, policy, clean_environment(output / "control", lanes.runtime_path()))
         report.update(base=base, fork_base=fork_base, sandbox=backend.NAME, commands=sandbox.commands)
         canary_log = output / "canary.json"
         probe_name = f".card-gate-probe-{output.name}"
-        canary_spec = json.dumps(backend.canary_spec(home, policy), ensure_ascii=False)
+        canary_spec = {**backend.canary_spec(home, policy), "project_profiles": profile_probes}
+        canary_spec = json.dumps(canary_spec, ensure_ascii=False)
         canary_code = sandbox.run([python, "-c", CANARY, ROOT, probe_name, canary_spec], ROOT, canary_log)
         # 仅在沙箱意外允许创建但拒绝删除时，由编排进程立即清理自己的探针。
         probe = ROOT / probe_name
@@ -540,6 +568,9 @@ def main(argv=None):
                             and not any(drift.values()) and progress["counts"]["missing"] == 0}
         if not report["ledger"]["passed"]:
             report["errors"].append("台账检查失败")
+        if transition == "removing":
+            report["fork"]["problems"] = removal_problems(ROOT, progress)
+            report["errors"].extend(report["fork"]["problems"])
         report["frozen"] = check("frozen", [python, "scripts/verify_frozen_files.py"])[0] == 0
         if not report["frozen"]:
             report["errors"].append("冻结文件校验失败")

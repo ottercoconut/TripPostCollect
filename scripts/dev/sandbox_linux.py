@@ -103,7 +103,11 @@ def browser_targets(path_env, roots=SEARCH_ROOTS):
 
 
 def profile_targets(home, checkouts=()):
-    """本机浏览器用户数据，以及各 checkout 内现存的项目平台登录资料。"""
+    """本机浏览器用户数据，以及各 checkout 内现存的项目平台登录资料。
+
+    局限：bwrap 只能遮蔽 prepare 时已存在的路径；之后才创建的登录资料目录不会被遮蔽读取，
+    但其写入仍被只读根挡住（临时根除外），可以接受。
+    """
     paths = [Path(home) / relative for relative in PROFILE_DIRS]
     paths += [Path(checkout) / relative for checkout in checkouts for relative in PROFILE_STORES]
     return [path for path in paths if path.exists()]

@@ -524,3 +524,34 @@ def test_macos_wrap_keeps_seatbelt_command():
     wrapped, descriptors = sandbox_macos.wrap(Path("/tmp/p.sb"), ["python", "-c", "pass"])
     assert wrapped == ["/usr/bin/sandbox-exec", "-f", "/tmp/p.sb", "python", "-c", "pass"]
     assert descriptors == ()
+
+
+@pytest.mark.parametrize("fork_dir,pending,expected", [
+    (False, 0, []),
+    (True, 0, ["仅 git rm --cached 不算删除"]),
+    (False, 3, ["pending 为 0，实际 3"]),
+    (True, 1, ["仅 git rm --cached 不算删除", "pending 为 0，实际 1"]),
+])
+def test_removal_batch_requires_deleted_fork_dir_and_no_pending(tmp_path, fork_dir, pending, expected):
+    if fork_dir:
+        (tmp_path / gate.FORK).mkdir(parents=True)
+    problems = gate.removal_problems(tmp_path, {"counts": {"pending": pending, "missing": 0}})
+    assert len(problems) == len(expected)
+    for problem, fragment in zip(problems, expected):
+        assert fragment in problem
+
+
+@pytest.mark.parametrize("backend", [sandbox_macos, sandbox_linux])
+def test_canary_profile_probes_are_masked_by_both_backends(tmp_path, backend):
+    checkout, probes = gate.canary_profile_probes(tmp_path, backend.PROFILE_STORES)
+    assert probes == [str(checkout / relative) for relative in backend.PROFILE_STORES]
+    assert all((Path(path) / "probe").is_file() and Path(path).is_relative_to(tmp_path) for path in probes)
+    if backend is sandbox_macos:
+        policy = sandbox_macos.sandbox_policy(tmp_path, [Path("/work/main"), checkout], Path("/Users/测试"))
+        for path in probes:
+            assert f"(deny file-read* file-write* (subpath {json.dumps(path, ensure_ascii=False)}))" in policy
+    else:
+        targets = sandbox_linux.profile_targets(tmp_path / "home", [Path("/nonexistent-checkout"), checkout])
+        assert [str(path) for path in targets] == probes
+    # canary 脚本逐个探测这些目录，任何一个可读即判未通过。
+    assert 'spec.get("project_profiles", [])' in gate.CANARY

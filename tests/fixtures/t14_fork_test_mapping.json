@@ -1,6 +1,6 @@
 {
  "schema_version": 1,
- "description": "T14：fork 离线 lane 的 34 个用例（run_matrix.FORK_OFFLINE_TESTS）逐项对应到根测试断言。status：equivalent=根测试对根实现断言同一契约；partial=只覆盖部分或经下游/相邻路径；gap=无根断言。fork_dependent=根测试当前仍经 fork 或 _fork_bridge 装载，T14-C 删除 fork 前须移植。passed 数下降不能作为覆盖已迁移的证据。",
+ "description": "T14：fork 离线 lane 的 34 个用例（run_matrix.FORK_OFFLINE_TESTS）逐项对应到根测试断言。status：equivalent=根测试对根实现断言同一契约；partial=只覆盖部分或经下游/相邻路径；gap=无根断言。partial 与 gap 用 missing 写明缺少的断言；fork gitlink 删除后不得再有 gap。fork_dependent=根测试当前仍经 fork 或 _fork_bridge 装载，T14-C 删除 fork 前须移植。passed 数下降不能作为覆盖已迁移的证据。",
  "fork_expected_tests": 34,
  "fork_files": [
   "tests/test_image_client_http_classification.py",
@@ -20,7 +20,7 @@
      "fork_dependent": true
     }
    ],
-   "gap": "根测试以替身直接抛出已分类错误，没有驱动根 DouYinClient 对真实 404 响应做分类",
+   "missing": "根测试以替身直接抛出已分类错误，没有驱动根 DouYinClient 对真实 404 响应做分类",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
@@ -34,7 +34,7 @@
      "fork_dependent": true
     }
    ],
-   "gap": "根 WeiboClient.get_note_image 的 404 分类只在冻结对照 test_adapter_t05（image_failure 场景）中与旧实现比对，无直接断言",
+   "missing": "根 WeiboClient.get_note_image 的 404 分类只在冻结对照 test_adapter_t05（image_failure 场景）中与旧实现比对，无直接断言",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
@@ -47,7 +47,7 @@
      "asserts": "下游：已分类 404 错误只尝试 1 次，manifest 保留 error_code/http_status"
     }
    ],
-   "gap": "根测试以替身直接抛出已分类错误，没有驱动根 XiaoHongShuClient.get_note_media 对 404 响应做分类",
+   "missing": "根测试以替身直接抛出已分类错误，没有驱动根 XiaoHongShuClient.get_note_media 对 404 响应做分类",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
@@ -119,7 +119,7 @@
      "asserts": "根 ZhiHuClient.get_content_image 的 200 正常路径（会话头、代理、referer）"
     }
    ],
-   "gap": "根测试只覆盖 get_content_image 的 200 路径与下游 manifest，没有对 404 响应分类的断言",
+   "missing": "根测试只覆盖 get_content_image 的 200 路径与下游 manifest，没有对 404 响应分类的断言",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
@@ -132,7 +132,7 @@
      "asserts": "相邻：物化写入阶段 content_length/流超限得 image_too_large（不同模块）"
     }
    ],
-   "gap": "根 runtime/image_retry 下载上限只在 fork 用例中断言",
+   "missing": "根 runtime/image_retry 下载上限只在 fork 用例中断言",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
@@ -149,7 +149,7 @@
      "asserts": "同上，知乎"
     }
    ],
-   "gap": "TimeoutError 重试分支与日志次数无根断言",
+   "missing": "TimeoutError 重试分支与日志次数无根断言",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
@@ -167,7 +167,7 @@
      "fork_dependent": true
     }
    ],
-   "gap": "日志次数无根断言",
+   "missing": "日志次数无根断言",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
@@ -175,13 +175,13 @@
    "subject": "fetch_image_bytes_with_retry：b\"\" 视为失败并重试，第三次成功 attempts=3",
    "status": "gap",
    "root": [],
-   "gap": "空字节不当作成功的重试语义只在 fork 用例中断言",
+   "missing": "空字节不当作成功的重试语义只在 fork 用例中断言",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
    "fork_node": "tests/test_image_download_retry.py::test_terminal_http_error_is_not_retried",
    "subject": "fetch_image_bytes_with_retry：classified_http_image_error(404) 不重试，attempts=1",
-   "status": "equivalent",
+   "status": "partial",
    "root": [
     {
      "test": "tests/platforms/xhs/test_xhs_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
@@ -191,14 +191,16 @@
      "test": "tests/platforms/zhihu/test_zhihu_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
      "asserts": "同上，知乎"
     }
-   ]
+   ],
+   "missing": "缺少直接调用被测函数 runtime.image_retry.fetch_image_bytes_with_retry（经 classified_http_image_error(404)）的断言；现有根测试以替身抛出已分类错误，经站点下载流程间接覆盖",
+   "planned_target": "tests/artifacts/test_staging.py"
   },
   {
    "fork_node": "tests/test_image_download_retry.py::test_retryable_http_error_preserves_status_after_exhaustion",
    "subject": "fetch_image_bytes_with_retry：classified_http_image_error(503) 重试耗尽后保留 image_download_retryable/503/attempts=3",
    "status": "gap",
    "root": [],
-   "gap": "503 可重试分类只在冻结对照 test_adapter_t06/t07（image_failed 场景）中与旧实现比对，无直接断言",
+   "missing": "503 可重试分类只在冻结对照 test_adapter_t06/t07（image_failed 场景）中与旧实现比对，无直接断言",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
@@ -212,7 +214,7 @@
      "fork_dependent": true
     }
    ],
-   "gap": "HTTP 状态到 image_auth_required/image_rate_limited 的分类、单次尝试与运行级阻断判定无根直接断言",
+   "missing": "HTTP 状态到 image_auth_required/image_rate_limited 的分类、单次尝试与运行级阻断判定无根直接断言",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
@@ -226,7 +228,7 @@
      "fork_dependent": true
     }
    ],
-   "gap": "HTTP 状态到 image_auth_required/image_rate_limited 的分类、单次尝试与运行级阻断判定无根直接断言",
+   "missing": "HTTP 状态到 image_auth_required/image_rate_limited 的分类、单次尝试与运行级阻断判定无根直接断言",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
@@ -240,7 +242,7 @@
      "fork_dependent": true
     }
    ],
-   "gap": "HTTP 状态到 image_auth_required/image_rate_limited 的分类、单次尝试与运行级阻断判定无根直接断言",
+   "missing": "HTTP 状态到 image_auth_required/image_rate_limited 的分类、单次尝试与运行级阻断判定无根直接断言",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
@@ -253,13 +255,13 @@
      "asserts": "相邻：物化校验 validate_image_file 的 max_bytes 超限得 image_too_large（不同模块）"
     }
    ],
-   "gap": "staging 字节上限无根断言",
+   "missing": "staging 字节上限无根断言",
    "planned_target": "tests/artifacts/test_staging.py"
   },
   {
    "fork_node": "tests/test_image_staging_errors.py::test_non_image_response_uses_formal_terminal_error_code",
    "subject": "inspect_image_bytes 对 HTML 字节得 image_non_raster_response",
-   "status": "equivalent",
+   "status": "partial",
    "root": [
     {
      "test": "tests/platforms/weibo/test_weibo_store.py::test_invalid_second_image_does_not_promote_partial_post",
@@ -271,19 +273,23 @@
      "asserts": "四站 staging 对 <svg> 得 image_non_raster_response",
      "fork_dependent": true
     }
-   ]
+   ],
+   "missing": "缺少直接调用被测函数 artifacts.image_staging.inspect_image_bytes 的断言；现有根测试经 PostImageStager/stage_post_images 间接覆盖",
+   "planned_target": "tests/artifacts/test_staging.py"
   },
   {
    "fork_node": "tests/test_image_staging_errors.py::test_truncated_recognized_raster_uses_decode_error_code",
    "subject": "inspect_image_bytes 对截断 PNG 得 image_decode_failed",
-   "status": "equivalent",
+   "status": "partial",
    "root": [
     {
      "test": "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup",
      "asserts": "四站 staging 对截断 PNG 得 image_decode_failed，source_index=1 且不留部分目录",
      "fork_dependent": true
     }
-   ]
+   ],
+   "missing": "缺少直接调用被测函数 artifacts.image_staging.inspect_image_bytes 的断言；现有根测试经四站 staging 间接覆盖",
+   "planned_target": "tests/artifacts/test_staging.py"
   },
   {
    "fork_node": "tests/test_trippostcollect_adaptive.py::test_batch_event_records_pagination_metadata",
@@ -301,7 +307,7 @@
      "fork_dependent": true
     }
    ],
-   "gap": "source_cursor/resume_cursor/source_has_more 在 finish_batch 事件中的透传无根直接断言",
+   "missing": "source_cursor/resume_cursor/source_has_more 在 finish_batch 事件中的透传无根直接断言",
    "planned_target": "tests/application/test_discovery.py"
   },
   {
@@ -319,7 +325,7 @@
      "asserts": "小红书运行级失败记为 runtime_failed 并保留前沿"
     }
    ],
-   "gap": "mark_runtime_failed 直接调用及 source_page 透传无根单元断言",
+   "missing": "mark_runtime_failed 直接调用及 source_page 透传无根单元断言",
    "planned_target": "tests/application/test_discovery.py"
   },
   {
@@ -337,7 +343,7 @@
      "asserts": "小红书图片失败候选记录后继续"
     }
    ],
-   "gap": "summary.skipped_candidate_failures 的 attempts/retryable 字段无根单元断言",
+   "missing": "summary.skipped_candidate_failures 的 attempts/retryable 字段无根单元断言",
    "planned_target": "tests/application/test_discovery.py"
   },
   {
@@ -354,7 +360,7 @@
      "asserts": "父侧：已跳过图片候选不阻止来源耗尽完成"
     }
    ],
-   "gap": "累加器层“跳过后耗尽”的 summary 字段无根单元断言",
+   "missing": "累加器层“跳过后耗尽”的 summary 字段无根单元断言",
    "planned_target": "tests/application/test_discovery.py"
   },
   {
@@ -368,7 +374,7 @@
      "fork_dependent": true
     }
    ],
-   "gap": "skip_candidate_failure 路径未覆盖",
+   "missing": "skip_candidate_failure 路径未覆盖",
    "planned_target": "tests/application/test_discovery.py"
   },
   {
@@ -387,7 +393,7 @@
      "fork_dependent": true
     }
    ],
-   "gap": "existing_valid_identities 计数无根断言",
+   "missing": "existing_valid_identities 计数无根断言",
    "planned_target": "tests/application/test_discovery.py"
   },
   {
@@ -401,7 +407,7 @@
      "fork_dependent": true
     }
    ],
-   "gap": "恢复身份进入累加器后的计数无根断言",
+   "missing": "恢复身份进入累加器后的计数无根断言",
    "planned_target": "tests/application/test_discovery.py"
   },
   {
@@ -418,7 +424,7 @@
      "asserts": "B站已知帖子在详情与图片请求前跳过"
     }
    ],
-   "gap": "candidate_count 不变的单元断言缺失",
+   "missing": "candidate_count 不变的单元断言缺失",
    "planned_target": "tests/application/test_discovery.py"
   },
   {
@@ -432,7 +438,7 @@
      "fork_dependent": true
     }
    ],
-   "gap": "经累加器 is_known 的端到端断言缺失",
+   "missing": "经累加器 is_known 的端到端断言缺失",
    "planned_target": "tests/application/test_discovery.py"
   },
   {
@@ -450,7 +456,7 @@
      "fork_dependent": true
     }
    ],
-   "gap": "经累加器 is_known 的端到端断言缺失",
+   "missing": "经累加器 is_known 的端到端断言缺失",
    "planned_target": "tests/application/test_discovery.py"
   },
   {
@@ -458,7 +464,7 @@
    "subject": "finish_batch(discovery_phase=refresh, count_stagnation=False) 不增加 stagnant_batches",
    "status": "gap",
    "root": [],
-   "gap": "count_stagnation=False 无根断言",
+   "missing": "count_stagnation=False 无根断言",
    "planned_target": "tests/application/test_discovery.py"
   },
   {
