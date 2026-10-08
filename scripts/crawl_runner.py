@@ -14,7 +14,7 @@ import sqlite3
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +39,7 @@ from trippostcollect.runtime.process import (
     PROCESS_FINAL_REAP_SECONDS,
     decode_text,
     operator_interrupt_error,
+    kill_recorded_child_process_groups,
     terminate_managed_process,
     write_command_logs,
 )
@@ -66,6 +67,9 @@ REMOVED_FORMAL_QUANTITY_FIELDS = frozenset(
     {"candidate_hard_limit", "max_stagnant_batches", "target_new_posts"}
 )
 RUNNER_CHILD_POLL_SECONDS = 0.5
+RUNNER_LANE_WAIT_SECONDS = 0.5
+# SIGHUP（终端挂断）与 SIGINT/SIGTERM 同样锁存，避免独立会话中的 child 成为孤儿；SIGQUIT 不处理。
+RUNNER_INTERRUPT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 # 中间层收到唯一一次 SIGTERM 后，最多用 PROCESS_CLEANUP_GRACE_SECONDS 等 worker 进程组退出，
 # 再用 PROCESS_FINAL_REAP_SECONDS 回收输出；runner 额外留余量后才对中间层进程组 SIGKILL。
 RUNNER_CHILD_INTERRUPT_GRACE_SECONDS = (
@@ -99,7 +103,9 @@ class ChildRun:
     raw_stderr: str
     logs: dict[str, str]
     interrupt_signum: int | None
+    launched: bool
     forced_termination: bool
+    killed_child_process_groups: list[dict[str, Any]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -937,15 +943,54 @@ def interrupted_before_dispatch(job: PreparedJob, signum: int) -> dict[str, Any]
     )
 
 
+def _universal_newlines(value: str) -> str:
+    # 与原 subprocess.run(text=True) 的通用换行一致，摘要定位与分类不受 CRLF 影响。
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def run_child_command(
     command: list[str],
     *,
     env: Mapping[str, str],
     log_dir: Path,
+    state_path: Path,
     interrupt_signal: Callable[[], int | None],
 ) -> ChildRun:
-    """在独立会话中运行中间层；首信号只向它发一次 SIGTERM，超时才强杀整组。"""
+    """在独立会话中运行中间层；首信号只向它发一次 SIGTERM，超时才强杀中间层与其 worker 组。"""
 
+    def finish(
+        returncode: int | None,
+        stdout_data: bytes | None,
+        stderr_data: bytes | None,
+        *,
+        interrupt_signum: int | None,
+        launched: bool = True,
+        forced_termination: bool = False,
+        killed_groups: list[dict[str, Any]] | None = None,
+    ) -> ChildRun:
+        raw_stdout = _universal_newlines(decode_text(stdout_data))
+        raw_stderr = _universal_newlines(decode_text(stderr_data))
+        logs = write_command_logs(command, log_dir, raw_stdout, raw_stderr)
+        return ChildRun(
+            completed=subprocess.CompletedProcess(
+                command,
+                returncode,  # type: ignore[arg-type]
+                logs["stdout"],
+                logs["stderr"],
+            ),
+            raw_stdout=raw_stdout,
+            raw_stderr=raw_stderr,
+            logs=logs,
+            interrupt_signum=interrupt_signum,
+            launched=launched,
+            forced_termination=forced_termination,
+            killed_child_process_groups=list(killed_groups or []),
+        )
+
+    signum = interrupt_signal()
+    if signum is not None:
+        # 租约与状态已建立但信号先到：不再启动 child。
+        return finish(None, b"", b"", interrupt_signum=signum, launched=False)
     try:
         proc = subprocess.Popen(
             command,
@@ -956,23 +1001,20 @@ def run_child_command(
             start_new_session=True,
         )
     except OSError as exc:
-        stderr = f"subprocess_launch_failed: {exc!r}"
-        logs = write_command_logs(command, log_dir, "", stderr)
-        return ChildRun(
-            completed=subprocess.CompletedProcess(command, 127, logs["stdout"], logs["stderr"]),
-            raw_stdout="",
-            raw_stderr=stderr,
-            logs=logs,
+        return finish(
+            127,
+            b"",
+            f"subprocess_launch_failed: {exc!r}".encode("utf-8"),
             interrupt_signum=None,
-            forced_termination=False,
+            launched=False,
         )
     interrupt_signum: int | None = None
     forced_termination = False
+    killed_groups: list[dict[str, Any]] = []
     try:
         while True:
             try:
                 stdout_data, stderr_data = proc.communicate(timeout=RUNNER_CHILD_POLL_SECONDS)
-                break
             except subprocess.TimeoutExpired:
                 signum = interrupt_signal()
                 if signum is None:
@@ -982,7 +1024,13 @@ def run_child_command(
                     proc,
                     grace_seconds=RUNNER_CHILD_INTERRUPT_GRACE_SECONDS,
                 )
+                if forced_termination:
+                    # 中间层被强杀后无法再收束它启动的 worker 组，由 runner 按登记身份兜底。
+                    killed_groups = kill_recorded_child_process_groups(state_path)
                 break
+            # 完成边界再核对一次：首信号若早于这次观察到的退出，按中断处理，不走正常摘要路径。
+            interrupt_signum = interrupt_signal()
+            break
     except BaseException:
         collected: tuple[bytes | None, bytes | None] = (None, None)
         try:
@@ -991,30 +1039,24 @@ def run_child_command(
                     proc,
                     grace_seconds=RUNNER_CHILD_INTERRUPT_GRACE_SECONDS,
                 )[:2]
+            else:
+                collected = proc.communicate(timeout=PROCESS_FINAL_REAP_SECONDS)
             write_command_logs(
                 command,
                 log_dir,
-                decode_text(collected[0]),
-                decode_text(collected[1]),
+                _universal_newlines(decode_text(collected[0])),
+                _universal_newlines(decode_text(collected[1])),
             )
         except Exception:
             pass
         raise
-    raw_stdout = decode_text(stdout_data)
-    raw_stderr = decode_text(stderr_data)
-    logs = write_command_logs(command, log_dir, raw_stdout, raw_stderr)
-    return ChildRun(
-        completed=subprocess.CompletedProcess(
-            command,
-            proc.returncode,
-            logs["stdout"],
-            logs["stderr"],
-        ),
-        raw_stdout=raw_stdout,
-        raw_stderr=raw_stderr,
-        logs=logs,
+    return finish(
+        proc.returncode,
+        stdout_data,
+        stderr_data,
         interrupt_signum=interrupt_signum,
         forced_termination=forced_termination,
+        killed_groups=killed_groups,
     )
 
 
@@ -1047,6 +1089,7 @@ def execute_prepared_job(
                 job.command,
                 env=child_env,
                 log_dir=run_dir / "jobs" / str(row["job_key"]),
+                state_path=job.state_path,
                 interrupt_signal=interrupt_signal,
             )
             completed = child.completed
@@ -1062,8 +1105,10 @@ def execute_prepared_job(
                     evidence={
                         "interrupt": classification["interrupt"],
                         "dispatched": True,
+                        "launched": child.launched,
                         "exit_code": completed.returncode,
                         "forced_termination": child.forced_termination,
+                        "killed_child_process_groups": child.killed_child_process_groups,
                         "child_logs": {
                             key: child_logs[key]
                             for key in ("stdout_log", "stderr_log", "command_log")
@@ -1413,8 +1458,16 @@ def execute_platform_lanes(
                 executor.submit(_run_platform_lane, lane_jobs, execute_job, skip_job)
                 for lane_jobs in lanes.values()
             ]
-            for future in as_completed(futures):
-                indexed_records.extend(future.result())
+            pending = set(futures)
+            while pending:
+                # 带超时轮询，主线程能及时处理锁存信号；运行中的通道靠 child 收束返回。
+                done, pending = wait(
+                    pending,
+                    timeout=RUNNER_LANE_WAIT_SECONDS,
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in done:
+                    indexed_records.extend(future.result())
     indexed_records.sort(key=lambda item: item[0])
     return [record for _, record in indexed_records]
 
@@ -1440,7 +1493,32 @@ def scheduling_summary(
     }
 
 
-def main() -> int:
+def interrupt_exit_code(interrupts: DeferredTerminationSignals, exit_code: int) -> int:
+    signum = interrupts.signal_received
+    return exit_code if signum is None else 128 + signum
+
+
+def main(interrupts: DeferredTerminationSignals | None = None) -> int:
+    """首个 SIGINT/SIGTERM/SIGHUP 只锁存：运行中的 child 由轮询线程收束，排队 job 不再派发，
+    摘要与状态照常写出后以 128+首个信号退出。
+
+    CLI 经 run_cli 安装锁存并保持到进程退出；进程内调用（如测试）未传入时由本函数安装并恢复。
+    """
+
+    owned = interrupts is None
+    latch = interrupts or DeferredTerminationSignals(RUNNER_INTERRUPT_SIGNALS).install()
+    try:
+        return _main(latch)
+    finally:
+        if owned:
+            latch.restore()
+
+
+def run_cli() -> int:
+    return main(DeferredTerminationSignals(RUNNER_INTERRUPT_SIGNALS).install())
+
+
+def _main(interrupts: DeferredTerminationSignals) -> int:
     args = parse_args()
     if (args.start_page is not None or args.resume_summary or args.recovery_keyword) and not args.job_key:
         raise SystemExit("recovery options require --job-key")
@@ -1464,95 +1542,92 @@ def main() -> int:
         synced = int(bootstrap["synced_jobs"])
         if args.sync_only:
             print(json.dumps({"db": str(db_path), **bootstrap}, ensure_ascii=False, indent=2))
-            return 0
+            return interrupt_exit_code(interrupts, 0)
 
-        # 首个 SIGINT/SIGTERM 只锁存：运行中的 child 由轮询线程收束，排队 job 不再派发，
-        # 摘要与状态照常写出后以 128+signum 退出。
-        interrupts = DeferredTerminationSignals()
-        with interrupts:
-            create_run_report(conn, run_id)
-            jobs = select_due_jobs(conn, args)
-            prepared_jobs = [
-                prepare_job(
-                    conn,
-                    row,
-                    args,
-                    selection_index=index,
-                    run_id=run_id,
-                    config_path=config_path,
-                    db_path=db_path,
-                    state_dir=state_dir,
-                    contract_path=contract_path,
-                )
-                for index, row in enumerate(jobs)
-            ]
-            schedule = scheduling_summary(
+        create_run_report(conn, run_id)
+        jobs = select_due_jobs(conn, args)
+        prepared_jobs = [
+            prepare_job(
+                conn,
+                row,
+                args,
+                selection_index=index,
+                run_id=run_id,
+                config_path=config_path,
+                db_path=db_path,
+                state_dir=state_dir,
+                contract_path=contract_path,
+            )
+            for index, row in enumerate(jobs)
+        ]
+        schedule = scheduling_summary(
+            prepared_jobs,
+            max_parallel_platforms=args.max_parallel_platforms,
+            execution_enabled=not args.dry_run,
+        )
+
+        def interrupt_signal() -> int | None:
+            return interrupts.signal_received
+
+        def skip_after_interrupt(job: PreparedJob) -> dict[str, Any] | None:
+            signum = interrupt_signal()
+            return None if signum is None else interrupted_before_dispatch(job, signum)
+
+        if args.dry_run:
+            records = [planned_record(job) for job in prepared_jobs]
+        else:
+            records = execute_platform_lanes(
                 prepared_jobs,
                 max_parallel_platforms=args.max_parallel_platforms,
-                execution_enabled=not args.dry_run,
+                execute_job=lambda job: execute_prepared_job(
+                    job,
+                    args=args,
+                    db_path=db_path,
+                    config=config,
+                    run_id=run_id,
+                    run_dir=run_dir,
+                    interrupt_signal=interrupt_signal,
+                ),
+                skip_job=skip_after_interrupt,
             )
 
-            def interrupt_signal() -> int | None:
-                return interrupts.signal_received
-
-            def skip_after_interrupt(job: PreparedJob) -> dict[str, Any] | None:
-                signum = interrupt_signal()
-                return None if signum is None else interrupted_before_dispatch(job, signum)
-
-            if args.dry_run:
-                records = [planned_record(job) for job in prepared_jobs]
-            else:
-                records = execute_platform_lanes(
-                    prepared_jobs,
-                    max_parallel_platforms=args.max_parallel_platforms,
-                    execute_job=lambda job: execute_prepared_job(
-                        job,
-                        args=args,
-                        db_path=db_path,
-                        config=config,
-                        run_id=run_id,
-                        run_dir=run_dir,
-                        interrupt_signal=interrupt_signal,
-                    ),
-                    skip_job=skip_after_interrupt,
-                )
-
-            interrupt_signum = interrupt_signal()
-            blocked_statuses = {"blocked", "login_required", "captcha_detected"}
-            non_failed_statuses = {"completed", "planned"} | blocked_statuses
-            summary = {
-                "run_id": run_id,
-                "started_at": run_id,
-                "finished_at": iso(),
-                "db": str(db_path),
-                "config": str(config_path),
-                "completion_mode": "source-exhausted",
-                "execution_state_dir": str(state_dir),
-                "scheduling": schedule,
-                "synced_jobs": synced,
-                "jobs_selected": len(jobs),
-                "interrupt": (
-                    operator_interrupt_details(interrupt_signum)
-                    if interrupt_signum is not None
-                    else None
-                ),
-                "interrupted_count": sum(1 for item in records if item.get("interrupt")),
-                "completed_count": sum(1 for item in records if item["status"] == "completed"),
-                "failed_count": sum(1 for item in records if item["status"] not in non_failed_statuses),
-                "blocked_count": sum(1 for item in records if item["status"] in blocked_statuses),
-                "records": records,
-            }
-            summary_path = run_dir / "run_summary.json"
-            report_path = run_dir / "run_summary.md"
-            summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-            report_path.write_text(markdown_report(summary), encoding="utf-8")
-            finish_run_report(conn, run_id, summary, report_path)
+        interrupt_signum = interrupt_signal()
+        blocked_statuses = {"blocked", "login_required", "captcha_detected"}
+        non_failed_statuses = {"completed", "planned"} | blocked_statuses
+        summary = {
+            "run_id": run_id,
+            "started_at": run_id,
+            "finished_at": iso(),
+            "db": str(db_path),
+            "config": str(config_path),
+            "completion_mode": "source-exhausted",
+            "execution_state_dir": str(state_dir),
+            "scheduling": schedule,
+            "synced_jobs": synced,
+            "jobs_selected": len(jobs),
+            "interrupt": (
+                operator_interrupt_details(interrupt_signum)
+                if interrupt_signum is not None
+                else None
+            ),
+            "interrupted_count": sum(1 for item in records if item.get("interrupt")),
+            "completed_count": sum(1 for item in records if item["status"] == "completed"),
+            "failed_count": sum(1 for item in records if item["status"] not in non_failed_statuses),
+            "blocked_count": sum(1 for item in records if item["status"] in blocked_statuses),
+            "records": records,
+        }
+        summary_path = run_dir / "run_summary.json"
+        report_path = run_dir / "run_summary.md"
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        report_path.write_text(markdown_report(summary), encoding="utf-8")
+        finish_run_report(conn, run_id, summary, report_path)
 
     print(json.dumps({"summary": str(summary_path), "report": str(report_path), **summary}, ensure_ascii=False, indent=2))
-    if interrupt_signum is not None:
-        return 128 + interrupt_signum
-    return 0 if summary["failed_count"] == 0 and summary["blocked_count"] == 0 else 1
+    return interrupt_exit_code(
+        interrupts,
+        0 if summary["failed_count"] == 0 and summary["blocked_count"] == 0 else 1,
+    )
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_cli())

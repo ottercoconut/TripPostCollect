@@ -8,12 +8,13 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import FrameType
-from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping
 
 from trippostcollect.application.contracts import XhsRuntimeSupervisionError
 from trippostcollect.core.execution_state import FrozenExecutionState
@@ -381,14 +382,99 @@ def sigterm_raises_operator_interrupt() -> Iterator[None]:
         signal.signal(signal.SIGTERM, previous)
 
 
-def merge_process_output(earlier: str, collected: str) -> str:
-    """合并异常前已解码的输出与收束时回收的累计输出，不重复也不丢失。"""
+def run_main_with_operator_interrupt(main: Callable[[], int]) -> int:
+    """中间层入口：SIGTERM 经异常路径收束 worker 进程组并落盘日志，不再执行后续导入与 checkpoint。"""
 
-    if not collected or earlier.startswith(collected):
-        return earlier
-    if collected.startswith(earlier):
-        return collected
-    return earlier + collected
+    with sigterm_raises_operator_interrupt():
+        try:
+            return main()
+        except OperatorInterrupt as exc:
+            print(operator_interrupt_error(exc.signum), file=sys.stderr, flush=True)
+            return 128 + exc.signum
+
+
+EXECUTION_STATE_PATH_ENV = "TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"
+CHILD_PROCESS_GROUPS_SUFFIX = ".process-groups.jsonl"
+
+
+def child_process_groups_path(state_path: str | Path) -> Path:
+    """中间层登记其 worker 进程组的旁路文件，与 execution state 同目录。"""
+
+    path = Path(state_path).expanduser()
+    return path.with_name(f"{path.name}{CHILD_PROCESS_GROUPS_SUFFIX}")
+
+
+def record_child_process_group(proc: subprocess.Popen[bytes]) -> None:
+    """通用中间层登记刚启动的 worker 进程组身份，供 runner 超时兜底精确强杀。
+
+    小红书租约进程由 LeaseGuard 登记，不写此文件。登记失败只影响兜底，不改变本轮结果。
+    """
+
+    state_value = os.environ.get(EXECUTION_STATE_PATH_ENV, "").strip()
+    if not state_value or lease_managed_environment():
+        return
+    try:
+        identity = SystemProcessInspector().identity(int(proc.pid))
+        if identity is None:
+            return
+        with child_process_groups_path(state_value).open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(identity.public(), sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        return
+
+
+def kill_recorded_child_process_groups(
+    state_path: str | Path,
+    *,
+    wait_seconds: float = PROCESS_FINAL_REAP_SECONDS,
+) -> list[dict[str, Any]]:
+    """只在中间层超时被强杀后调用：对登记且身份仍匹配的 worker 进程组发 SIGKILL。
+
+    组长仍在时必须与登记的启动标识一致；组长已退出但组仍有成员时，组号在成员存活期间不会
+    被复用，按原组收束。
+    """
+
+    path = child_process_groups_path(state_path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    inspector = SystemProcessInspector()
+    evidence: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            recorded = json.loads(line)
+            pid = int(recorded["pid"])
+            pgid = int(recorded["pgid"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if pgid <= 1 or pgid == os.getpgid(0):
+            continue
+        current = inspector.identity(pid)
+        if current is not None:
+            matched = current.public() == recorded
+        else:
+            matched = process_group_exists(pgid)
+        item = {"pid": pid, "pgid": pgid, "matched": matched, "killed": False}
+        if matched:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+                item["killed"] = True
+            except ProcessLookupError:
+                pass
+        evidence.append(item)
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    for item in evidence:
+        while (
+            item["killed"]
+            and process_group_exists(item["pgid"])
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+        item["group_exists"] = process_group_exists(item["pgid"])
+    return evidence
 
 
 def write_command_logs(
@@ -625,14 +711,24 @@ def run_command(
     )
     try:
         if not lease_registration_enabled:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(cwd),
-                env=child_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-            )
+            # Popen 内部到 proc 赋值之间推迟终止信号，避免独立会话里的 worker 成为孤儿；
+            # proc 赋值并登记后再按原处理重放，由下面的异常分支收束。
+            deferred_signals = DeferredTerminationSignals()
+            deferred_signals.install()
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(cwd),
+                    env=child_env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                record_child_process_group(proc)
+            finally:
+                deferred_signals.restore()
+                if deferred_signals.signal_received is not None:
+                    deferred_signals.replay()
         else:
             deferred_signals = DeferredTerminationSignals()
             deferred_signals.install()
@@ -888,11 +984,13 @@ def run_command(
             except Exception:
                 pass
             try:
+                # Popen.communicate 跨 TimeoutExpired 与中断保留已读数据并返回累计输出；本函数只在
+                # 最后一次 communicate 之后才给 stdout/stderr 赋值，所以累计输出即完整输出。
                 write_command_logs(
                     cmd,
                     log_dir,
-                    merge_process_output(stdout, decode_text(collected_stdout)),
-                    merge_process_output(stderr, decode_text(collected_stderr)),
+                    decode_text(collected_stdout),
+                    decode_text(collected_stderr),
                 )
             except Exception:
                 pass

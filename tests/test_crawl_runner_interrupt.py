@@ -1,11 +1,15 @@
 """通用 runner 的操作人中断：真实 runner → 中间层 → 独立 worker 进程组贯通。
 
-只使用临时 SQLite、临时配置与本地替身进程，不访问网络、不启动浏览器。
+只使用临时 SQLite、临时配置与本地替身进程，不访问网络、不启动浏览器。替身覆盖范围见
+``tests/support/runner_interrupt_fakes.py``：批次事件、checkpoint/seen 提交与 campaign 更新走生产代码，
+平台抓取、正文导入与图片物化不在本文件证明范围内。
 """
 
 from __future__ import annotations
 
+import ast
 import copy
+from importlib import import_module
 import json
 import os
 from pathlib import Path
@@ -13,22 +17,36 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
 
+from support.signal_driver import isolated_signal_test
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.db.connection import connect_db
 from trippostcollect.runtime.process import process_group_exists
-from trippostcollect.scheduler.discovery import query_fingerprint, save_checkpoint, update_campaign
+from trippostcollect.scheduler.discovery import (
+    query_fingerprint,
+    save_checkpoint,
+    save_seen_candidates,
+    update_campaign,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 FAKES = ROOT / "tests" / "support" / "runner_interrupt_fakes.py"
 WEIBO = "mc_weibo_qingdao_laoshan_guide_search"
 DOUYIN = "mc_douyin_qingdao_laoshan_guide_search"
 WEIBO_QUEUED = "mc_weibo_qingdao_laoshan_guide_search_queued"
 HANDSHAKE_SECONDS = 90.0
+CONFIRMED = ["confirmed-1", "confirmed-2"]
+TAIL = "tail-1"
+
+crawl_runner = import_module("crawl_runner")
 
 
 def _config(keys: list[str]) -> dict:
@@ -46,6 +64,27 @@ def _config(keys: list[str]) -> dict:
     return {**source, "jobs": jobs}
 
 
+def wait_until(predicate, description: str, *, seconds: float = HANDSHAKE_SECONDS) -> None:
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        if time.monotonic() > deadline:
+            pytest.fail(f"timed out waiting for {description}")
+        time.sleep(0.02)
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def assert_gone(pid: int) -> None:
+    # 被强杀进程的僵尸由其父或 init 回收；只等待回收，不放宽“不得残留”。
+    wait_until(lambda: not pid_alive(pid), f"pid {pid} reaped", seconds=15)
+
+
 class Run:
     def __init__(self, tmp_path: Path, modes: dict[str, str], *, grace_seconds: float | None = None):
         self.tmp = tmp_path
@@ -57,24 +96,21 @@ class Run:
         self.state_root = tmp_path / "states"
         self.modes = modes
         config = _config(list(modes))
-        jobs = config["jobs"]
         self.config.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
-        checkpoint_plan: dict[str, dict] = {"job_ids": {}, "platforms": {}, "fingerprints": {}}
         with connect_db(self.db) as conn:
             bootstrap_connection(conn, config=config, sync_jobs=True)
-            for job in jobs:
-                row = conn.execute(
-                    "SELECT id FROM crawl_jobs WHERE job_key=?", (job["job_key"],)
-                ).fetchone()
+            for job in config["jobs"]:
+                job_id = int(
+                    conn.execute(
+                        "SELECT id FROM crawl_jobs WHERE job_key=?", (job["job_key"],)
+                    ).fetchone()[0]
+                )
                 params = job["params"]
                 fingerprint = query_fingerprint(params["platform"], params["keyword"], params)
-                checkpoint_plan["job_ids"][job["job_key"]] = int(row[0])
-                checkpoint_plan["platforms"][job["job_key"]] = params["platform"]
-                checkpoint_plan["fingerprints"][job["job_key"]] = fingerprint
-                # 已确认的历史前沿与 campaign：中断后必须原样保留。
+                # 历史已确认前沿、seen 与 campaign：中断不得改动。
                 save_checkpoint(
                     conn,
-                    job_id=int(row[0]),
+                    job_id=job_id,
                     platform_key=params["platform"],
                     keyword=params["keyword"],
                     query_fingerprint_value=fingerprint,
@@ -86,17 +122,22 @@ class Run:
                     last_stop_reason="runtime_failed",
                     last_run_id="confirmed-run",
                 )
+                save_seen_candidates(
+                    conn,
+                    job_id=job_id,
+                    platform_key=params["platform"],
+                    query_fingerprint_value=fingerprint,
+                    platform_post_ids=["old-1"],
+                    run_id="confirmed-run",
+                )
                 update_campaign(
                     conn,
-                    job_id=int(row[0]),
+                    job_id=job_id,
                     query_fingerprint_value=fingerprint,
                     summary_path=None,
                     campaign_candidate_count=7,
                 )
             conn.commit()
-        (self.work / "checkpoint.json").write_text(
-            json.dumps({"db": str(self.db), **checkpoint_plan}), encoding="utf-8"
-        )
         self.plan = tmp_path / "plan.json"
         self.plan.write_text(
             json.dumps({"work": str(self.work), "modes": modes, "grace_seconds": grace_seconds}),
@@ -105,20 +146,36 @@ class Run:
         self.before = self.snapshot()
         self.process: subprocess.Popen[bytes] | None = None
 
-    def snapshot(self) -> dict[str, list[tuple]]:
+    def snapshot(self) -> dict[str, dict]:
+        result: dict[str, dict] = {}
         with sqlite3.connect(self.db) as conn:
-            return {
-                "checkpoints": conn.execute(
-                    "SELECT job_id, resume_page, resume_offset, resume_cursor, status, "
-                    "last_batch_complete, last_stop_reason, last_run_id, last_summary_path, "
-                    "campaign_candidate_count, updated_at FROM crawl_discovery_checkpoints ORDER BY job_id"
-                ).fetchall(),
-                "seen": conn.execute(
-                    "SELECT COUNT(*) FROM crawl_discovery_seen_candidates"
-                ).fetchall(),
-            }
+            for job_key in self.modes:
+                row = conn.execute(
+                    "SELECT c.resume_page, c.resume_offset, c.resume_cursor, c.status, "
+                    "c.last_batch_complete, c.last_stop_reason, c.last_run_id, "
+                    "c.last_summary_path, c.campaign_candidate_count, c.updated_at, c.job_id "
+                    "FROM crawl_discovery_checkpoints c JOIN crawl_jobs j ON j.id=c.job_id "
+                    "WHERE j.job_key=?",
+                    (job_key,),
+                ).fetchone()
+                seen = sorted(
+                    value
+                    for (value,) in conn.execute(
+                        "SELECT platform_post_id FROM crawl_discovery_seen_candidates WHERE job_id=?",
+                        (row[-1],),
+                    )
+                )
+                result[job_key] = {
+                    "checkpoint": row[:-1],
+                    "resume_page": row[0],
+                    "last_run_id": row[6],
+                    "last_summary_path": row[7],
+                    "campaign_candidate_count": row[8],
+                    "seen": seen,
+                }
+        return result
 
-    def start(self, *, max_parallel: int) -> None:
+    def start(self, *, max_parallel: int, extra_args: tuple[str, ...] = ()) -> None:
         output = (self.tmp / "runner.out").open("wb")
         self.process = subprocess.Popen(
             [
@@ -130,6 +187,7 @@ class Run:
                 "--max-jobs", "5",
                 "--max-parallel-platforms", str(max_parallel),
                 "--no-sync-config",
+                *extra_args,
             ],
             cwd=ROOT,
             stdin=subprocess.DEVNULL,
@@ -143,14 +201,15 @@ class Run:
         return (self.tmp / "runner.out").read_text(encoding="utf-8", errors="replace")[-4000:]
 
     def wait_for(self, predicate, description: str) -> None:
-        deadline = time.monotonic() + HANDSHAKE_SECONDS
-        while not predicate():
+        def ready() -> bool:
             assert self.process is not None
+            if predicate():
+                return True
             if self.process.poll() is not None:
                 pytest.fail(f"runner exited before {description}: {self.output()}")
-            if time.monotonic() > deadline:
-                pytest.fail(f"timed out waiting for {description}: {self.output()}")
-            time.sleep(0.05)
+            return False
+
+        wait_until(ready, description)
 
     def ready(self, job_key: str) -> None:
         self.wait_for(lambda: (self.work / job_key / "ready").is_file(), f"{job_key} ready")
@@ -208,14 +267,6 @@ class Run:
             ]
 
 
-def pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
 def assert_interrupted_state(state: dict, signame: str, *, dispatched: bool) -> dict:
     error = f"runtime_failed:operator_interrupt:{signame}"
     command = state["steps"]["command_executed"]
@@ -233,15 +284,33 @@ def assert_interrupted_state(state: dict, signame: str, *, dispatched: bool) -> 
     return command["evidence"]
 
 
+def assert_confirmed_batch_only(state: dict) -> None:
+    batches = [event["details"] for event in state["events"] if event["type"] == "adaptive_batch_completed"]
+    assert len(batches) == 1
+    assert batches[0]["batch_complete"] is True
+    assert batches[0]["candidate_identities"] == CONFIRMED
+    assert TAIL not in json.dumps(state["events"])
+
+
 def assert_once(text: str, needle: str) -> None:
     assert text.count(needle) == 1, (needle, text[-2000:])
+
+
+def assert_worker_stopped_once(run: Run, job_key: str) -> None:
+    worker = run.identity(job_key, "worker")
+    for pid in (worker["pid"], worker["grandchild_pid"]):
+        assert_gone(pid)
+    assert not process_group_exists(worker["pgid"])
+    job_dir = run.work / job_key
+    assert (job_dir / "worker-signals").read_text(encoding="utf-8") == "signal\n"
+    assert (job_dir / "cleanup-done").is_file()
 
 
 @pytest.mark.macos_process
 @pytest.mark.parametrize(
     ("signum", "terminal_group"),
-    [(signal.SIGINT, True), (signal.SIGTERM, False)],
-    ids=["sigint-terminal-group", "sigterm-runner"],
+    [(signal.SIGINT, True), (signal.SIGTERM, False), (signal.SIGHUP, False)],
+    ids=["sigint-terminal-group", "sigterm-runner", "sighup-runner"],
 )
 def test_operator_signal_stops_runner_middle_and_worker_group_once(
     tmp_path: Path,
@@ -271,24 +340,19 @@ def test_operator_signal_stops_runner_middle_and_worker_group_once(
     assert record["status"] == "retry_wait"
     assert record["failure_type"] == "runtime_failed"
     assert record["interrupt"]["signal"] == signame
-    evidence = assert_interrupted_state(run.state(WEIBO), signame, dispatched=True)
+    state = run.state(WEIBO)
+    evidence = assert_interrupted_state(state, signame, dispatched=True)
     assert evidence["forced_termination"] is False
+    assert evidence["killed_child_process_groups"] == []
     # 中间层只收到 runner 的一次 SIGTERM，并经可捕获路径以 143 退出。
     assert evidence["exit_code"] == 128 + signal.SIGTERM
-    # 已确认批次事件保留在 execution state。
-    events = run.state(WEIBO)["events"]
-    assert [event["type"] for event in events] == ["adaptive_batch_completed"]
+    # 已确认批次事件保留在 execution state；未确认尾批没有事件。
+    assert_confirmed_batch_only(state)
 
-    # 进程树全部收束：中间层、worker 与其组内孙进程均不存在。
-    for pid in (middle["pid"], worker["pid"], worker["grandchild_pid"]):
-        assert not pid_alive(pid)
+    # 进程树全部收束；worker 只收到一次温和信号且清理完成，未走二次信号的 os._exit(130)。
+    assert_gone(middle["pid"])
     assert not process_group_exists(middle["pgid"])
-    assert not process_group_exists(worker["pgid"])
-
-    # worker 只收到一次温和信号且清理完成，未走二次信号的 os._exit(130)。
-    job_dir = run.work / WEIBO
-    assert (job_dir / "worker-signals").read_text(encoding="utf-8") == "signal\n"
-    assert (job_dir / "cleanup-done").is_file()
+    assert_worker_stopped_once(run, WEIBO)
 
     # 两层日志均落盘：中断前输出与清理尾部输出各出现一次，stdout/stderr 分别断言。
     runner_logs = record["child_logs"]
@@ -298,6 +362,7 @@ def test_operator_signal_stops_runner_middle_and_worker_group_once(
     assert f"{WEIBO}:middle-partial-err" not in middle_stdout
     assert_once(middle_stderr, f"{WEIBO}:middle-partial-err")
     assert_once(middle_stderr, "runtime_failed:operator_interrupt:SIGTERM")
+    job_dir = run.work / WEIBO
     worker_stdout = (job_dir / "worker-logs" / "stdout.log").read_text(encoding="utf-8")
     worker_stderr = (job_dir / "worker-logs" / "stderr.log").read_text(encoding="utf-8")
     assert_once(worker_stdout, f"{WEIBO}:worker-partial-out")
@@ -323,9 +388,76 @@ def test_operator_signal_stops_runner_middle_and_worker_group_once(
 
 
 @pytest.mark.macos_process
-def test_parallel_lanes_keep_finished_results_and_stop_queued_jobs(tmp_path: Path) -> None:
-    run = Run(tmp_path, {WEIBO: "hang", WEIBO_QUEUED: "hang", DOUYIN: "quick"})
+def test_uninterrupted_chain_commits_confirmed_batch_and_campaign(tmp_path: Path) -> None:
+    """对照：同一替身链不被中断时，生产提交路径会推进前沿、seen 与 campaign。"""
+
+    run = Run(tmp_path, {WEIBO: "complete"})
+    run.start(max_parallel=1)
+    exit_code = run.finish()
+
+    assert exit_code == 1, run.output()
+    summary = run.summary()
+    assert summary["interrupt"] is None
+    assert summary["records"][0]["interrupt"] is None
+    after = run.snapshot()[WEIBO]
+    assert after["resume_page"] == 4
+    assert after["last_run_id"] == summary["run_id"]
+    assert after["seen"] == sorted(["old-1", *CONFIRMED])
+    assert after["last_summary_path"] == str((run.work / WEIBO / "summary.json").resolve())
+    assert after["campaign_candidate_count"] == len(CONFIRMED)
+
+
+@pytest.mark.macos_process
+def test_signal_after_middle_commit_keeps_committed_frontier_without_campaign(
+    tmp_path: Path,
+) -> None:
+    """中间层已提交 checkpoint/seen 后才收到信号：提交保留，runner 不更新 campaign。"""
+
+    run = Run(tmp_path, {WEIBO: "persist-hang"})
+    run.start(max_parallel=1)
+    run.wait_for(lambda: (run.work / WEIBO / "persisted.json").is_file(), "checkpoint committed")
+
+    run.interrupt(signal.SIGTERM, terminal_group=False)
+    exit_code = run.finish()
+
+    assert exit_code == 128 + signal.SIGTERM, run.output()
+    summary = run.summary()
+    after = run.snapshot()[WEIBO]
+    before = run.before[WEIBO]
+    assert after["resume_page"] == 4
+    assert after["last_run_id"] == summary["run_id"]
+    assert after["seen"] == sorted(["old-1", *CONFIRMED])
+    assert TAIL not in after["seen"]
+    assert after["last_summary_path"] == before["last_summary_path"]
+    assert after["campaign_candidate_count"] == before["campaign_candidate_count"]
+    assert_interrupted_state(run.state(WEIBO), "SIGTERM", dispatched=True)
+
+
+@pytest.mark.macos_process
+def test_both_active_parallel_lanes_are_stopped(tmp_path: Path) -> None:
+    run = Run(tmp_path, {WEIBO: "hang", DOUYIN: "hang"})
     run.start(max_parallel=2)
+    run.ready(WEIBO)
+    run.ready(DOUYIN)
+
+    run.interrupt(signal.SIGTERM, terminal_group=False)
+    exit_code = run.finish()
+
+    assert exit_code == 128 + signal.SIGTERM, run.output()
+    summary = run.summary()
+    assert summary["scheduling"]["effective_workers"] == 2
+    assert summary["interrupted_count"] == 2
+    for job_key in (WEIBO, DOUYIN):
+        assert_interrupted_state(run.state(job_key), "SIGTERM", dispatched=True)
+        assert_worker_stopped_once(run, job_key)
+        assert run.job_row(job_key)["status"] == "retry_wait"
+    assert run.snapshot() == run.before
+
+
+@pytest.mark.macos_process
+def test_finished_success_lane_is_kept_and_queued_job_is_not_dispatched(tmp_path: Path) -> None:
+    run = Run(tmp_path, {WEIBO: "hang", WEIBO_QUEUED: "hang", DOUYIN: "success"})
+    run.start(max_parallel=2, extra_args=("--no-import",))
     run.ready(WEIBO)
     run.attempt_finished(DOUYIN)
 
@@ -337,47 +469,112 @@ def test_parallel_lanes_keep_finished_results_and_stop_queued_jobs(tmp_path: Pat
     records = {record["job_key"]: record for record in summary["records"]}
     assert [record["job_key"] for record in summary["records"]] == [WEIBO, WEIBO_QUEUED, DOUYIN]
     assert summary["interrupted_count"] == 2
-    # 已完成平台的结果原样保留，不被标为中断。
+    assert summary["completed_count"] == 1
+    # 信号前已成功完成的平台原样保留为成功。
+    assert records[DOUYIN]["status"] == "completed"
     assert records[DOUYIN]["interrupt"] is None
-    assert run.attempts(DOUYIN)[0]["status"] != "running"
-    assert run.state(DOUYIN)["steps"]["command_executed"]["error"] != (
-        "runtime_failed:operator_interrupt:SIGINT"
-    )
+    douyin_state = run.state(DOUYIN)
+    assert douyin_state["status"] == "completed"
+    assert douyin_state["steps"]["task_finalized"]["status"] == "completed"
+    assert run.job_row(DOUYIN)["status"] == "completed"
     # 运行中的通道被收束，排队 job 不再派发：无租约、无 child、状态写成中断终态。
     assert_interrupted_state(run.state(WEIBO), "SIGINT", dispatched=True)
     assert_interrupted_state(run.state(WEIBO_QUEUED), "SIGINT", dispatched=False)
     assert run.attempts(WEIBO_QUEUED) == []
     assert run.job_row(WEIBO_QUEUED)["status"] == "pending"
+    assert records[WEIBO_QUEUED]["status"] == "retry_wait"
     assert not (run.work / WEIBO_QUEUED).exists()
-    assert records[WEIBO_QUEUED]["interrupt"]["signal"] == "SIGINT"
-    worker = run.identity(WEIBO, "worker")
-    assert not process_group_exists(worker["pgid"])
-    assert (run.work / WEIBO / "cleanup-done").is_file()
-    assert run.snapshot()["checkpoints"] == run.before["checkpoints"]
+    assert_worker_stopped_once(run, WEIBO)
 
 
 @pytest.mark.macos_process
-def test_forced_kill_fallback_keeps_first_signal_as_cause(tmp_path: Path) -> None:
+def test_forced_kill_fallback_stops_middle_and_recorded_worker_group(tmp_path: Path) -> None:
     run = Run(tmp_path, {WEIBO: "stubborn"}, grace_seconds=1.0)
     run.start(max_parallel=1)
     run.ready(WEIBO)
     middle = run.identity(WEIBO, "middle")
+    worker = run.identity(WEIBO, "worker")
 
     run.interrupt(signal.SIGINT, terminal_group=True)
     run.interrupt(signal.SIGTERM, terminal_group=False)
     exit_code = run.finish()
 
+    # 重复信号与强杀兜底都不改变首因。
     assert exit_code == 128 + signal.SIGINT, run.output()
     summary = run.summary()
     assert summary["interrupt"]["signal"] == "SIGINT"
     evidence = assert_interrupted_state(run.state(WEIBO), "SIGINT", dispatched=True)
     assert evidence["forced_termination"] is True
     assert evidence["exit_code"] == -signal.SIGKILL
-    assert not pid_alive(middle["pid"])
+    [killed] = evidence["killed_child_process_groups"]
+    assert killed["pgid"] == worker["pgid"]
+    assert killed["matched"] is True and killed["killed"] is True
+    assert killed["group_exists"] is False
+    for pid in (middle["pid"], worker["pid"], worker["grandchild_pid"]):
+        assert_gone(pid)
     assert not process_group_exists(middle["pgid"])
+    assert not process_group_exists(worker["pgid"])
     stdout = Path(summary["records"][0]["child_logs"]["stdout_log"]).read_text(encoding="utf-8")
     assert_once(stdout, f"{WEIBO}:middle-partial-out")
     assert run.snapshot() == run.before
+
+
+@pytest.mark.macos_process
+def test_child_exit_observed_after_latch_is_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    started = tmp_path / "started"
+    release = tmp_path / "release"
+    child = (
+        "import pathlib, time\n"
+        f"pathlib.Path({str(started)!r}).write_text('started')\n"
+        f"while not pathlib.Path({str(release)!r}).exists():\n"
+        "    time.sleep(0.01)\n"
+        "print('child-done', flush=True)\n"
+    )
+    latched: list[int] = []
+
+    def latch_then_release() -> None:
+        wait_until(started.is_file, "child started")
+        latched.append(int(signal.SIGINT))
+        release.write_text("release", encoding="utf-8")
+
+    # 轮询间隔远大于 child 寿命：退出只能在正常 communicate 完成边界被观察到。
+    monkeypatch.setattr(crawl_runner, "RUNNER_CHILD_POLL_SECONDS", 60.0)
+    helper = threading.Thread(target=latch_then_release)
+    helper.start()
+    result = crawl_runner.run_child_command(
+        [sys.executable, "-c", child],
+        env=dict(os.environ),
+        log_dir=tmp_path / "logs",
+        state_path=tmp_path / "state.json",
+        interrupt_signal=lambda: latched[0] if latched else None,
+    )
+    helper.join(timeout=30)
+
+    assert result.interrupt_signum == signal.SIGINT
+    assert result.launched is True
+    assert result.forced_termination is False
+    assert result.completed.returncode == 0
+    assert (tmp_path / "logs" / "stdout.log").read_text(encoding="utf-8") == "child-done\n"
+
+
+def test_latched_signal_before_launch_skips_child(tmp_path: Path) -> None:
+    marker = tmp_path / "launched"
+    result = crawl_runner.run_child_command(
+        [sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"],
+        env=dict(os.environ),
+        log_dir=tmp_path / "logs",
+        state_path=tmp_path / "state.json",
+        interrupt_signal=lambda: int(signal.SIGTERM),
+    )
+
+    assert result.interrupt_signum == signal.SIGTERM
+    assert result.launched is False
+    assert result.completed.returncode is None
+    assert not marker.exists()
+    assert (tmp_path / "logs" / "stdout.log").read_text(encoding="utf-8") == ""
 
 
 CHILD_WITH_CLEANUP = r"""
@@ -405,11 +602,13 @@ while True:
 
 @pytest.mark.macos_process
 @pytest.mark.parametrize("variant", ["plain", "avatar"])
-def test_run_command_interrupt_writes_merged_cleaned_logs(
+def test_run_command_interrupt_writes_cumulative_cleaned_logs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     variant: str,
 ) -> None:
+    """中断前已被 communicate 读走的输出与收束尾部输出合并写盘，各一次。"""
+
     from trippostcollect.records.sanitization import AUTHOR_AVATAR_LOG_REDACTION
     from trippostcollect.runtime import process
 
@@ -417,14 +616,18 @@ def test_run_command_interrupt_writes_merged_cleaned_logs(
     progress = tmp_path / "progress"
     progress.mkdir()
     original_signature = process.progress_path_signature
+    observations = {"ready": 0}
 
-    def interrupt_once_ready(*args: object, **kwargs: object) -> object:
+    def interrupt_after_a_full_read(*args: object, **kwargs: object) -> object:
+        # 第二次看到 ready 时，至少已有一轮 communicate 在 ready 写出后运行，读走了先写出的输出。
         if ready.is_file():
-            raise KeyboardInterrupt
+            observations["ready"] += 1
+            if observations["ready"] >= 2:
+                raise KeyboardInterrupt
         return original_signature(*args, **kwargs)
 
     monkeypatch.setattr(process, "browser_launch_environment", lambda: dict(os.environ))
-    monkeypatch.setattr(process, "progress_path_signature", interrupt_once_ready)
+    monkeypatch.setattr(process, "progress_path_signature", interrupt_after_a_full_read)
     log_dir = tmp_path / "logs"
     with pytest.raises(KeyboardInterrupt):
         process.run_command(
@@ -450,13 +653,89 @@ def test_run_command_interrupt_writes_merged_cleaned_logs(
         assert stderr == "child-partial-err\nchild-cleanup-err\n"
 
 
-def test_merge_process_output_neither_duplicates_nor_drops() -> None:
-    from trippostcollect.runtime.process import merge_process_output
+@pytest.mark.macos_process
+@isolated_signal_test
+def test_sigterm_during_worker_popen_is_replayed_after_proc_is_owned(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from trippostcollect.runtime import process
 
-    assert merge_process_output("a\n", "a\nb\n") == "a\nb\n"
-    assert merge_process_output("a\nb\n", "") == "a\nb\n"
-    assert merge_process_output("a\nb\n", "a\n") == "a\nb\n"
-    assert merge_process_output("a\n", "c\n") == "a\nc\n"
+    spawned: dict[str, int] = {}
+    original_popen = process.subprocess.Popen
+
+    def popen_then_signal(*args: object, **kwargs: object) -> object:
+        proc = original_popen(*args, **kwargs)
+        spawned["pid"] = proc.pid
+        # 落在 Popen 返回与 proc 赋值之间：必须推迟到 proc 归属后再重放。
+        os.kill(os.getpid(), signal.SIGTERM)
+        return proc
+
+    monkeypatch.setattr(process, "browser_launch_environment", lambda: dict(os.environ))
+    monkeypatch.setattr(process.subprocess, "Popen", popen_then_signal)
+    log_dir = tmp_path / "logs"
+    with process.sigterm_raises_operator_interrupt():
+        with pytest.raises(process.OperatorInterrupt) as raised:
+            process.run_command(
+                [sys.executable, "-c", "import time\ntime.sleep(3600)"],
+                tmp_path,
+                3600,
+                log_dir,
+            )
+
+    assert raised.value.signum == signal.SIGTERM
+    assert_gone(spawned["pid"])
+    assert not process_group_exists(spawned["pid"])
+    assert (log_dir / "stdout.log").is_file()
+    assert (log_dir / "stderr.log").is_file()
+
+
+@pytest.mark.macos_process
+@isolated_signal_test
+def test_signals_during_finalize_keep_first_cause_and_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "crawl_targets.json"
+    config.write_text(json.dumps(_config([WEIBO]), ensure_ascii=False), encoding="utf-8")
+    original_planned = crawl_runner.planned_record
+    original_finish = crawl_runner.finish_run_report
+    printed: list[str] = []
+
+    def planned_with_first_signal(job: object) -> dict:
+        os.kill(os.getpid(), signal.SIGTERM)
+        return original_planned(job)
+
+    def finish_with_second_signal(*args: object, **kwargs: object) -> None:
+        os.kill(os.getpid(), signal.SIGINT)
+        original_finish(*args, **kwargs)
+
+    def print_with_third_signal(*args: object, **_kwargs: object) -> None:
+        os.kill(os.getpid(), signal.SIGHUP)
+        printed.append(" ".join(map(str, args)))
+
+    monkeypatch.setattr(crawl_runner, "planned_record", planned_with_first_signal)
+    monkeypatch.setattr(crawl_runner, "finish_run_report", finish_with_second_signal)
+    monkeypatch.setattr(crawl_runner, "print", print_with_third_signal, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "crawl_runner.py",
+            "--db", str(tmp_path / "runner.sqlite"),
+            "--config", str(config),
+            "--run-root", str(tmp_path / "runs"),
+            "--execution-state-root", str(tmp_path / "states"),
+            "--dry-run",
+        ],
+    )
+    handlers = {signum: signal.getsignal(signum) for signum in crawl_runner.RUNNER_INTERRUPT_SIGNALS}
+
+    assert crawl_runner.main() == 128 + signal.SIGTERM
+    summary = json.loads(next((tmp_path / "runs").rglob("run_summary.json")).read_text(encoding="utf-8"))
+    assert summary["interrupt"]["signal"] == "SIGTERM"
+    assert printed
+    assert {signum: signal.getsignal(signum) for signum in handlers} == handlers
 
 
 def test_sigterm_conversion_is_scoped_to_generic_middle_layer(
@@ -486,3 +765,26 @@ def test_sigterm_conversion_is_scoped_to_generic_middle_layer(
         monkeypatch.setenv(key, "lease-value")
     with process.sigterm_raises_operator_interrupt():
         assert signal.getsignal(signal.SIGTERM) is original
+
+
+def test_middle_layer_script_entry_runs_under_operator_interrupt_wrapper() -> None:
+    tree = ast.parse((ROOT / "scripts" / "mediacrawler_crawl.py").read_text(encoding="utf-8"))
+    entry = tree.body[-1]
+    assert isinstance(entry, ast.If) and ast.unparse(entry.test) == "__name__ == '__main__'"
+    assert [ast.unparse(statement) for statement in entry.body] == [
+        "raise SystemExit(run_main_with_operator_interrupt(main))"
+    ]
+    imported = {
+        alias.name: node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert imported["run_main_with_operator_interrupt"] == "trippostcollect.runtime.process"
+
+
+def test_runner_cli_keeps_signal_latch_until_process_exit() -> None:
+    tree = ast.parse((SCRIPTS / "crawl_runner.py").read_text(encoding="utf-8"))
+    entry = tree.body[-1]
+    assert [ast.unparse(statement) for statement in entry.body] == ["raise SystemExit(run_cli())"]
+    assert crawl_runner.RUNNER_INTERRUPT_SIGNALS == (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)

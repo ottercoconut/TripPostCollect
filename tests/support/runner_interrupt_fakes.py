@@ -1,15 +1,20 @@
 """通用 runner 中断用例的真实进程替身：runner 驱动、中间层与独立 worker 进程组。
 
 三层都以真实进程运行且不访问网络：
-- ``runner``：真实 ``crawl_runner.main``，只把 child 命令替换为本文件的 ``middle``；
-- ``middle``：真实 ``collection.main`` 与 ``run_command``，业务体换成假批次；
-- ``worker``：真实 ``runtime.worker.run`` 生命周期，并在本进程组内保留一个孙进程。
+- ``runner``：真实 ``crawl_runner.run_cli``，只把 child 命令的脚本换成本文件的 ``middle``，
+  其余参数仍是生产 ``build_command`` 生成的参数；
+- ``middle``：真实入口包装 ``run_main_with_operator_interrupt``、``collection.main``、生产
+  ``parse_args`` 与 ``run_command``；worker 结束后用生产 ``load_pagination_evidence`` 与
+  ``persist_discovery_checkpoint`` 提交 checkpoint/seen；
+- ``worker``：真实 ``runtime.worker.run`` 生命周期，用生产 ``AdaptiveAccumulator`` 与 worker 事件出口
+  写出一批已确认批次和一个未确认尾批，并在本进程组内保留一个模拟浏览器的孙进程。
 握手与观测都写入 ``work`` 目录下的文件，测试据此同步，不靠固定 sleep 猜时机。
 """
 
 from __future__ import annotations
 
 import asyncio
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -21,6 +26,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 THIS = Path(__file__).resolve()
+CONFIRMED_IDENTITIES = ("confirmed-1", "confirmed-2")
+TAIL_IDENTITY = "tail-1"
 
 
 def _job_dir(work: Path, job_key: str) -> Path:
@@ -35,9 +42,15 @@ def _write_json(path: Path, payload: object) -> None:
     os.replace(temporary, path)
 
 
+def _block_forever() -> None:
+    while True:
+        time.sleep(60)
+
+
 def run_runner(plan_path: Path, runner_args: list[str]) -> int:
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, signal.SIG_DFL)
     signal.signal(signal.SIGINT, signal.default_int_handler)
-    signal.signal(signal.SIGTERM, signal.SIG_DFL)
     sys.path.insert(0, str(ROOT / "scripts"))
     import crawl_runner
 
@@ -45,83 +58,115 @@ def run_runner(plan_path: Path, runner_args: list[str]) -> int:
     work = Path(plan["work"])
     if plan.get("grace_seconds") is not None:
         crawl_runner.RUNNER_CHILD_INTERRUPT_GRACE_SECONDS = float(plan["grace_seconds"])
+    production_command = crawl_runner.build_command
 
-    def fake_command(row: dict, _args: object) -> list[str]:
+    def fake_command(row: dict, args: object) -> list[str]:
+        command = production_command(row, args)
         mode = plan["modes"][str(row["job_key"])]
-        return [sys.executable, str(THIS), "middle", str(work), str(row["job_key"]), mode]
+        return [
+            sys.executable, str(THIS), "middle", str(work), str(row["job_key"]), mode,
+            "--", *command[2:],
+        ]
 
     crawl_runner.build_command = fake_command
     _write_json(work / "runner.json", {"pid": os.getpid(), "pgid": os.getpgid(0)})
     sys.argv = ["crawl_runner.py", *runner_args]
-    return crawl_runner.main()
+    return crawl_runner.run_cli()
 
 
-def run_middle(work: Path, job_key: str, mode: str) -> int:
+def _success_summary(job_dir: Path) -> Path:
+    summary = {
+        "records": [],
+        "formal_validation": {"candidate_count": 0},
+        "import_completion_met": False,
+        "import_result": {"skipped": True, "reason": "no_import"},
+        "image_materialization": {
+            "required": True,
+            "complete": True,
+            "promotion_required": False,
+            "candidate_posts": 0,
+            "complete_posts": 0,
+            "expected_images": 0,
+            "downloaded_images": 0,
+            "validated_images": 0,
+            "unique_images": 0,
+            "sha256_duplicate_images": 0,
+            "sha256_duplicates": [],
+            "manifest_evidence": [],
+            "manifest_paths": [],
+            "manifest_sha256": sha256(json.dumps([], sort_keys=True).encode("utf-8")).hexdigest(),
+        },
+    }
+    path = job_dir / "summary.json"
+    _write_json(path, summary)
+    return path
+
+
+def run_middle(work: Path, job_key: str, mode: str, production_args: list[str]) -> int:
     from trippostcollect.application import collection
-    from trippostcollect.core.execution_state import FrozenExecutionState
-    from trippostcollect.db.connection import connect_db
     from trippostcollect.runtime import process
-    from trippostcollect.scheduler.discovery import save_checkpoint
 
-    # 不创建浏览器运行目录；只替换环境来源，子进程监督与收束仍是真实实现。
+    # 不创建浏览器运行目录；只替换环境来源，子进程监督、登记与收束仍是真实实现。
     process.browser_launch_environment = lambda: dict(os.environ)
     job_dir = _job_dir(work, job_key)
-    identity = {"pid": os.getpid(), "pgid": os.getpgid(0)}
 
-    def fake_run_main(_args: object, _reporter: object) -> int:
+    def parse_args() -> object:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import mediacrawler_crawl
+
+        sys.argv = ["mediacrawler_crawl.py", *production_args]
+        return mediacrawler_crawl.parse_args()
+
+    def fake_run_main(args: object, _reporter: object) -> int:
         print(f"{job_key}:middle-partial-out", flush=True)
         print(f"{job_key}:middle-partial-err", file=sys.stderr, flush=True)
-        if mode == "quick":
-            _write_json(job_dir / "middle.json", identity)
-            print(json.dumps({"job_key": job_key, "quick": True}), flush=True)
+        _write_json(job_dir / "middle.json", {"pid": os.getpid(), "pgid": os.getpgid(0)})
+        if mode == "success":
+            print(json.dumps({"summary": str(_success_summary(job_dir))}), flush=True)
             return 0
         if mode == "stubborn":
+            # 启动 worker 后中间层失去转发能力：只能由 runner 超时兜底强杀两组。
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
-            _write_json(job_dir / "middle.json", identity)
-            (job_dir / "ready").write_text("ready", encoding="utf-8")
-            while True:
-                time.sleep(60)
-        # 已确认批次：中断前写入的批次事件必须保留在 execution state。
-        state = FrozenExecutionState(os.environ["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"])
-        state.append_event(
-            "adaptive_batch_completed",
-            {"batch_no": 1, "batch_complete": True, "resume_page": 2},
-        )
-        _write_json(job_dir / "middle.json", identity)
+        worker_mode = "exit" if mode in {"complete", "persist-hang"} else "hang"
         process.run_command(
-            [sys.executable, str(THIS), "worker", str(work), job_key],
+            [sys.executable, str(THIS), "worker", str(work), job_key, worker_mode],
             ROOT,
             3600,
             job_dir / "worker-logs",
         )
-        # 只有 worker 正常结束才会到达：模拟 collection 推进 checkpoint 的尾批路径。
-        plan = json.loads((work / "checkpoint.json").read_text(encoding="utf-8"))
-        with connect_db(Path(plan["db"])) as conn:
-            save_checkpoint(
-                conn,
-                job_id=int(plan["job_ids"][job_key]),
-                platform_key=str(plan["platforms"][job_key]),
-                keyword="tail-batch",
-                query_fingerprint_value=str(plan["fingerprints"][job_key]),
-                resume_page=99,
-                resume_offset=None,
-                resume_cursor=None,
-                source_has_more=False,
-                last_batch_complete=False,
-                last_stop_reason="source_exhausted",
-                last_run_id="tail-batch",
-            )
-            conn.commit()
-        return 0
+        # 只有 worker 正常结束才会到达：生产 checkpoint/seen 提交路径。
+        state_path = os.environ["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"]
+        evidence = collection.load_pagination_evidence(state_path)
+        platform_key = collection.selected_platforms(args.platforms)[0]
+        result = collection.persist_discovery_checkpoint(args, platform_key, evidence)
+        _write_json(job_dir / "persisted.json", result)
+        if mode == "persist-hang":
+            _block_forever()
+        summary_path = job_dir / "summary.json"
+        _write_json(
+            summary_path,
+            {
+                "records": [],
+                "formal_validation": {"candidate_count": len(CONFIRMED_IDENTITIES)},
+                "import_completion_met": False,
+                "import_result": {},
+            },
+        )
+        print(json.dumps({"summary": str(summary_path)}), flush=True)
+        return 2
 
-    return collection.main(
-        parse_args=lambda: None,
-        xhs_supervisor_runtime_reporter_from_context=lambda _args: None,
-        _run_main=fake_run_main,
+    return process.run_main_with_operator_interrupt(
+        lambda: collection.main(
+            parse_args=parse_args,
+            xhs_supervisor_runtime_reporter_from_context=lambda _args: None,
+            _run_main=fake_run_main,
+        )
     )
 
 
-def run_worker(work: Path, job_key: str) -> None:
+def run_worker(work: Path, job_key: str, mode: str) -> None:
+    from trippostcollect.application.candidates import AdaptiveAccumulator
+    from trippostcollect.application.events import append_worker_execution_event
     from trippostcollect.runtime import worker
 
     job_dir = _job_dir(work, job_key)
@@ -135,6 +180,20 @@ def run_worker(work: Path, job_key: str) -> None:
             stderr=subprocess.DEVNULL,
         )
         grandchild["process"] = process
+        accumulator = AdaptiveAccumulator.for_platform("weibo", existing_identities=set())
+        accumulator.event_sink = append_worker_execution_event
+        accumulator.begin_batch()
+        for identity in CONFIRMED_IDENTITIES:
+            accumulator.consider(identity, valid=True)
+        accumulator.finish_batch(
+            source_page=3,
+            resume_page=4,
+            source_has_more=True,
+            batch_complete=True,
+        )
+        # 未确认尾批：已看到候选但批次未结束，不得写入 checkpoint/seen。
+        accumulator.begin_batch()
+        accumulator.consider(TAIL_IDENTITY, valid=True)
         print(f"{job_key}:worker-partial-out", flush=True)
         print(f"{job_key}:worker-partial-err", file=sys.stderr, flush=True)
         _write_json(
@@ -142,7 +201,8 @@ def run_worker(work: Path, job_key: str) -> None:
             {"pid": os.getpid(), "pgid": os.getpgid(0), "grandchild_pid": process.pid},
         )
         (job_dir / "ready").write_text("ready", encoding="utf-8")
-        await asyncio.sleep(3600)
+        if mode == "hang":
+            await asyncio.sleep(3600)
 
     async def app_cleanup() -> None:
         process = grandchild.get("process")
@@ -168,9 +228,10 @@ def main() -> int:
         separator = sys.argv.index("--")
         return run_runner(Path(sys.argv[2]), sys.argv[separator + 1:])
     if role == "middle":
-        return run_middle(Path(sys.argv[2]), sys.argv[3], sys.argv[4])
+        separator = sys.argv.index("--")
+        return run_middle(Path(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[separator + 1:])
     if role == "worker":
-        run_worker(Path(sys.argv[2]), sys.argv[3])
+        run_worker(Path(sys.argv[2]), sys.argv[3], sys.argv[4])
         return 0
     raise SystemExit(f"unknown role: {role}")
 

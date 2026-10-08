@@ -66,18 +66,31 @@ python scripts/crawl_runner.py \
 exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中的 `timeout_reason`、
 `last_progress_age_seconds`、`forced_termination` 和 `timeout_state_event` 用于复核该路径。
 
-操作人中断（终端 Ctrl+C 或对 runner 发 SIGTERM）只锁存首个信号，后续信号不改变原因。
-`mediacrawler_crawl.py` 中间层和 worker 各在独立会话中运行，终端信号只到 runner；runner 只向
-运行中的中间层发一次 SIGTERM，中间层把它转为可捕获异常，再只向 worker 发一次 SIGTERM，worker
-按自身生命周期清理浏览器。中间层最多等 20 秒让 worker 进程组退出，runner 最多等 40 秒让中间层
-进程组退出，超时才对对应进程组 SIGKILL。尚未派发的 job 不再租约或启动 child；已在信号前结束的
-平台结果照常验证并保留。被收束和未派发的 job 均写 `runtime_failed:operator_interrupt:<SIGNAL>`
-并 finalize 为失败终态，调度表记 `retry_wait/runtime_failed`，中断不累计失败次数；不读取摘要、
-不更新 checkpoint/campaign、不写 `adaptive_search_stopped`，下轮从中断前的安全前沿恢复。
-`run_summary.json/.md` 仍写出并标注 `interrupt`，runner 以 `128+signum` 退出。两层 child 的
-stdout/stderr 在中断后同样落盘：runner 层位于 `<run_dir>/jobs/<job_key>/`，worker 层位于 child
-批次的 `logs/<platform>/`，写盘前两路共享头像审计。小红书租约链路保持由 `xhs_runner.py` 的
-LeaseGuard 精确转发，不使用这条中间层 SIGTERM 转换。
+通用 runner 的操作人中断（终端 Ctrl+C、对 runner 发 SIGTERM 或终端挂断 SIGHUP）只锁存首个信号，
+锁存保持到进程退出，后续信号不改变原因与退出码；SIGQUIT 不处理。本段只描述 `crawl_runner.py`
+通用路径；小红书租约链路仍由 `xhs_runner.py` 的 LeaseGuard 转发，中间层保持默认 SIGTERM 处理，
+不使用下述转换，其中断日志与收尾另行跟踪。
+
+- 信号路径：`mediacrawler_crawl.py` 中间层和 worker 各在独立会话中运行，终端信号只到 runner。runner
+  只向运行中的中间层发一次 SIGTERM；中间层入口把它转为可捕获异常，再只向 worker 发一次 SIGTERM，
+  worker 按自身生命周期清理浏览器。中间层最多等 20 秒让 worker 进程组退出，runner 最多等 40 秒让
+  中间层进程组退出；超时才对中间层进程组 SIGKILL，并按中间层登记在 execution state 旁的
+  `<job_key>.json.process-groups.jsonl`（含启动标识）对仍匹配的 worker 进程组 SIGKILL。
+- 派发：首信号后排队 job 不再派发，不租约、不写 attempt、不启动 child，`crawl_jobs.status` 保持原值
+  （通常为 `pending`），仅 execution state 写成中断终态、run_summary 记录为 `retry_wait`。已派发 job 若
+  在启动前看到信号也不启动 child。信号前已结束且已被 runner 观察到的平台结果照常验证并保留；child
+  退出若在锁存之后才被观察到，按中断处理。
+- 终态：被收束 job 的 execution state 写 `runtime_failed:operator_interrupt:<SIGNAL>` 并 finalize 为失败，
+  调度表记 `retry_wait/runtime_failed`，中断不累计失败次数；runner 不读取摘要、不更新 campaign、
+  不写 `adaptive_search_stopped`。`run_summary.json/.md` 仍写出并标注 `interrupt`，runner 以
+  `128+首个信号` 退出。
+- 中间层已提交的数据：中间层在 worker 正常结束后会自行提交 checkpoint/seen（`persist_discovery_checkpoint`）。
+  信号落在提交之前，checkpoint/seen 不推进，下轮从中断前的安全前沿恢复；落在提交之后、中间层退出
+  之前，已提交的 checkpoint/seen 属于真实确认的数据，下轮从该前沿恢复，但 runner 不再更新 campaign，
+  campaign 累计摘要与候选计数可能少记本轮。runner 判定完成不读取 campaign 计数，正式完成仍须由
+  后续轮次自身取得 `adaptive_search_stopped(source_exhausted)` 证据。
+- 日志：两层 child 的 stdout/stderr 在中断后同样落盘，runner 层位于 `<run_dir>/jobs/<job_key>/`，worker
+  层位于 child 批次的 `logs/<platform>/`；写盘前两路共享头像审计，任一路命中即两路整体替换。
 
 只同步主配置：
 

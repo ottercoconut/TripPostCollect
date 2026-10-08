@@ -73,12 +73,9 @@ from trippostcollect.runtime.helpers import _runtime_progress_if_due as _runtime
 from trippostcollect.runtime.helpers import utc_stamp as utc_stamp
 from trippostcollect.runtime.process import PAGINATION_EVENT_FIELDS as PAGINATION_EVENT_FIELDS
 from trippostcollect.runtime.process import RUNTIME_WATCHDOG_STOP_DETAILS as RUNTIME_WATCHDOG_STOP_DETAILS
-from trippostcollect.runtime.process import OperatorInterrupt
 from trippostcollect.runtime.process import append_runtime_watchdog_stop_event as append_runtime_watchdog_stop_event
-from trippostcollect.runtime.process import operator_interrupt_error
 from trippostcollect.runtime.process import run_command as run_command
 from trippostcollect.runtime.process import runtime_watchdog_stop_detail as runtime_watchdog_stop_detail
-from trippostcollect.runtime.process import sigterm_raises_operator_interrupt
 from trippostcollect.runtime.process import skipped_command as skipped_command
 from trippostcollect.scheduler.discovery import load_checkpoint
 from trippostcollect.scheduler.discovery import save_checkpoint
@@ -1869,13 +1866,6 @@ def _run_main(
 
 
 def main(*, parse_args, xhs_supervisor_runtime_reporter_from_context, _run_main) -> int:
-    # 通用 runner 只向本进程发一次 SIGTERM；转成异常后由 run_command 收束 worker 进程组并落盘日志，
-    # 不再执行后续导入与 checkpoint 写入。
-    with sigterm_raises_operator_interrupt():
-        try:
-            args = parse_args()
-            runtime_reporter = xhs_supervisor_runtime_reporter_from_context(args)
-            return _run_main(args, runtime_reporter)
-        except OperatorInterrupt as exc:
-            print(operator_interrupt_error(exc.signum), file=sys.stderr, flush=True)
-            return 128 + exc.signum
+    args = parse_args()
+    runtime_reporter = xhs_supervisor_runtime_reporter_from_context(args)
+    return _run_main(args, runtime_reporter)

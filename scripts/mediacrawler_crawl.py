@@ -228,6 +228,7 @@ from trippostcollect.runtime.process import (
     runtime_watchdog_stop_detail as runtime_watchdog_stop_detail,
     append_runtime_watchdog_stop_event as append_runtime_watchdog_stop_event,
     run_command as run_command,
+    run_main_with_operator_interrupt,
     skipped_command as skipped_command,
     xhs_network_state_from_diagnostics as xhs_network_state_from_diagnostics,
     _diagnostic_timestamp as _diagnostic_timestamp,
@@ -682,4 +683,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_main_with_operator_interrupt(main))
