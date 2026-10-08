@@ -234,6 +234,18 @@ def merge_repair_fallback_metadata(
 
     fallback_observed = metadata.get("followers_observed") is True
     current_observed = merged.get("followers_observed") is True
+    # 本轮已观测到粉丝数（包括真实 0）时以本轮数值和来源为准，不用旧行覆盖。
+    current_followers_observed = current_observed and parse_int(
+        first_value(
+            merged,
+            "author_followers_count",
+            "followers_count",
+            "follower_count",
+            "fans_count",
+            "fans",
+            "followers",
+        )
+    ) is not None
     if fallback_observed and not current_observed:
         for key in (
             "followers_count",
@@ -243,7 +255,7 @@ def merge_repair_fallback_metadata(
         ):
             if metadata.get(key) not in (None, ""):
                 merged[key] = metadata[key]
-    else:
+    elif not current_followers_observed:
         for key in (
             "followers_count",
             "author_followers_count",

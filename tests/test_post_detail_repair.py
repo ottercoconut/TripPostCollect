@@ -359,6 +359,82 @@ def test_repair_fallback_makes_sparse_zhihu_detail_formally_valid() -> None:
     assert merged["content_text"] == "完整正文"
 
 
+REPAIR_FOLLOWER_SOURCES = {
+    "weibo": "search_author",
+    "douyin": "creator_profile",
+    "zhihu": "search_author",
+    "xhs": "creator_profile",
+}
+
+
+def _repair_follower_fallback(platform: str) -> dict[str, object]:
+    # 与 load_post_repair_fallbacks 从旧 web_posts 行读出的粉丝字段形状一致。
+    return {
+        "published_at": "2026-07-13T12:00:00+08:00",
+        "author_followers_count": 1234,
+        "followers_count": 1234,
+        "followers_observed": True,
+        "author_followers_source": REPAIR_FOLLOWER_SOURCES[platform],
+    }
+
+
+@pytest.mark.parametrize("platform", ["weibo", "douyin", "zhihu", "xhs"])
+def test_repair_fallback_keeps_fresh_observed_zero_followers(platform: str) -> None:
+    fresh_source = REPAIR_FOLLOWER_SOURCES[platform]
+    detail = {
+        "followers_count": 0,
+        "followers_observed": True,
+        "author_followers_source": fresh_source,
+    }
+
+    merged = mediacrawler.merge_repair_fallback_metadata(
+        platform,
+        dict(detail),
+        _repair_follower_fallback(platform),
+    )
+
+    validation = mediacrawler.validate_formal_record(platform, merged, set())
+    assert merged["followers_count"] == 0
+    assert merged.get("author_followers_count") is None
+    assert merged["followers_observed"] is True
+    assert merged["author_followers_source"] == fresh_source
+    assert validation["followers_count"] == 0
+    assert validation["followers_observed"] is True
+    assert validation["followers_source"] == fresh_source
+    assert "missing_followers_count" not in validation["reasons"]
+
+
+@pytest.mark.parametrize("platform", ["weibo", "douyin", "zhihu", "xhs"])
+@pytest.mark.parametrize("fresh_count", [None, "", 0])
+def test_repair_fallback_restores_unobserved_followers_with_matching_source(
+    platform: str,
+    fresh_count: object,
+) -> None:
+    fallback = _repair_follower_fallback(platform)
+    detail = {
+        "followers_count": fresh_count,
+        "followers_observed": False,
+        "author_followers_source": "missing",
+    }
+
+    merged = mediacrawler.merge_repair_fallback_metadata(platform, dict(detail), fallback)
+
+    validation = mediacrawler.validate_formal_record(platform, merged, set())
+    assert merged["followers_count"] == 1234
+    assert merged["author_followers_count"] == 1234
+    assert merged["followers_observed"] is True
+    assert merged["author_followers_source"] == fallback["author_followers_source"]
+    assert validation["followers_count"] == 1234
+    assert validation["followers_observed"] is True
+    assert validation["followers_source"] == fallback["author_followers_source"]
+    assert not {
+        "missing_followers_count",
+        "followers_not_observed",
+        "missing_followers_source",
+        "untrusted_followers_source",
+    } & set(validation["reasons"])
+
+
 def test_partial_repair_separates_import_gate_from_full_completion(tmp_path: Path) -> None:
     db_path = tmp_path / "posts.sqlite"
     with sqlite3.connect(db_path) as conn:
