@@ -142,7 +142,7 @@ python tests/run_lanes.py \
 ```
 
 上面的 OS 命令只允许在托管 VM 内使用。`os-policy.json` 记录真实控制层、探针、PF 计数及恢复状态。
-工作流只上传计数、清除 traceback/捕获内容的 JUnit XML、控制证据与 matrix.json，
+工作流只上传计数、清除 traceback/捕获内容的 JUnit XML、控制证据、matrix.json 与 coverage.json，
 不上传源码、原始日志、SQLite 或浏览器存储。
 counts.json 的 failure_diagnostics 仅保留失败节点（去掉参数值）、源码相对文件/行号、
 阶段与白名单错误类型，不导出异常文本、rawrepr、headers 或局部变量。
@@ -203,6 +203,27 @@ scan_error、exits。它们保留真实 Guard、文件、SQLite，所有假 PID 
 macos_process；其中真实自发信号也移到 driver。它们计入完整 OS lane，但不改变原 11 节点计数。
 通过 `pytest --collect-only -m macos_process` 可查看当前完整清单，报告必须在仓库外。
 组件新增宿主调用时应先明确其能力归属，不能自动注入空扫描或将其悄悄跳过。
+
+## 五站覆盖守护（T13）
+
+[tests/fixtures/t13_coverage.json](../tests/fixtures/t13_coverage.json) 是 F01–F15 × 五站（B站、微博、抖音、知乎、小红书）
+的机器可读覆盖声明：每格为 `covered`（列出本站 node）、`shared`（平台无关的共享实现，写明依据）、
+`na`（规格限定他站，写明依据），不接受其他状态。条目可写精确 `node`、`function`（可带必须出现的 `params` 与本站证据例外
+`site_basis`）或 `file`（`min_count`/`count`）；fork 离线条目用 `min_functions`。
+
+- [tests/test_t13_coverage.py](../tests/test_t13_coverage.py)（component）按 `run_lanes.EXPRESSIONS` 的四个表达式各做一次
+  `--collect-only`，经 `tests/support/coverage_probe.py` 记录标记，断言每个声明 node 只落在声明的 lane、
+  不带 skip/xfail、skipif 条件全为假，并核对每格条目确有本站证据（站点目录、文件或函数名、参数 ID、
+  函数体字面量，或单站卡对照文件）。运行期 `pytest.skip()` 由 lane 计数校验（skipped=0）兜底。
+- 同一用例精确断言 issue #1 的 `issue1_component` 17 项、`issue1_os` 11 项、socket 与 installation 各 1 项，
+  以及 issue #2 的 `tests/test_xhs_lease_exit.py` 68 项。
+- `legacy_equivalence: true` 标记依赖冻结旧实现 fixture 的 T05–T10 对照测试。T14 删除这些测试时守护会
+  因缺失而失败，必须先补上不依赖旧实现的覆盖再改声明，这是预期行为。
+- CI 中 `run_matrix.py` 在全部 lane 与 fork 离线测试后调用
+  [scripts/ci/coverage_report.py](../scripts/ci/coverage_report.py)，按声明读取各 lane 的 junit，
+  写出 `coverage.json`（F×站逐格匹配与通过数、按站×lane 的声明/通过计数、各 lane 总计、每站状态计数）；任一声明 node 缺失、未通过或某 lane 无 junit 都使 CI 非零。报告只含 node 名与计数。
+
+新增或删除承担五站责任的测试时同批更新声明；不得为了让守护变绿而删除声明或改用他站用例。
 
 ## 迁移台账核对
 
