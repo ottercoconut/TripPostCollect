@@ -8,6 +8,7 @@ import copy
 import json
 import re
 import subprocess
+import sys
 from unittest.mock import AsyncMock, Mock
 
 from playwright._impl._driver import compute_driver_executable
@@ -19,6 +20,8 @@ import pytest
 import trippostcollect.platforms.xhs.author as xhs_author
 from trippostcollect.platforms.xhs.client import XiaoHongShuClient
 from trippostcollect.platforms.xhs.errors import PlatformRuntimeError, XHSCreatorProfileUnavailable
+from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget
+from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.platforms.xhs.parser import (
     XHS_CREATOR_BASIC_FIELDS,
     XHS_CREATOR_INTERACTION_ITEM_FIELDS,
@@ -152,11 +155,21 @@ def test_projection_whitelist_matches_downstream_reads_and_excludes_avatar_and_c
     )
     lowered = {key.casefold() for key in every_key}
     assert not lowered & AUTHOR_AVATAR_KEYS
-    for word in ("avatar", "image", "token", "cookie", "xsec", "session", "secret", "sign"):
+    every_key |= {"redOfficialVerifyType", "tagType", "verifyInfo", "tags"}
+    lowered = {key.casefold() for key in every_key}
+    assert not lowered & AUTHOR_AVATAR_KEYS
+    for word in ("avatar", "image", "icon", "token", "cookie", "xsec", "session", "secret", "sign"):
         assert not any(word in key for key in lowered), word
     spec = xhs_creator_projection_spec()
-    assert spec["basic_keys"] == ["basicInfo", "basic_info", "basic"]
-    assert set(spec["basic_fields"]) == set(XHS_CREATOR_BASIC_FIELDS)
+    assert [key for key, _ in spec["object_fields"]] == ["basicInfo", "basic_info", "basic", "verifyInfo"]
+    assert [key for key, _ in spec["list_fields"]] == [
+        "interactions", "interaction", "interactionList", "interaction_list", "tags"]
+    assert set(spec["object_fields"][0][1]) == set(XHS_CREATOR_BASIC_FIELDS)
+    # 研究项目经 creator_profile_json 读取的固定标量路径。
+    assert "redId" in spec["object_fields"][0][1]
+    assert spec["object_fields"][3][1] == ["redOfficialVerifyType"]
+    assert "i18nCount" in spec["list_fields"][0][1]
+    assert spec["list_fields"][4][1] == ["tagType", "name"]
 
 
 def test_projection_spec_takes_avatar_evidence_from_sanitizer():
@@ -180,8 +193,10 @@ def test_python_side_refilters_envelope_and_never_accepts_unknown_reasons():
 
     assert reason == "ok"
     serialized = json.dumps(projected, ensure_ascii=False)
-    for forbidden in ("imageb", "images", "token", "redId", "tags", "icon", "nested", AVATAR_URL):
+    for forbidden in ("imageb", "images", "token", "icon", "nested", AVATAR_URL):
         assert forbidden not in serialized
+    assert projected["basicInfo"]["redId"] == "synthetic-red-id"
+    assert projected["tags"] == [{}]
     assert read_creator_runtime_projection({"status": "missing"}) == ({}, "runtime_projection_empty")
     assert read_creator_runtime_projection({"status": "ok", "creator": {"tags": []}}) == (
         {}, "runtime_projection_empty")
@@ -191,6 +206,41 @@ def test_python_side_refilters_envelope_and_never_accepts_unknown_reasons():
     assert read_creator_runtime_projection({"status": "rejected", "reason": "<html>"}) == (
         {}, "runtime_projection_error")
     assert read_creator_runtime_projection(None) == ({}, "runtime_projection_error")
+
+
+def test_zero_fans_projection_is_kept_and_observed_downstream():
+    projected, reason = read_creator_runtime_projection({"status": "ok", "creator": {"fans": 0}})
+
+    assert (projected, reason) == ({"fans": 0}, "ok")
+    record = update_xhs_note(
+        {"note_id": "synthetic-note", "user": {"user_id": REQUESTED_USER}, "interact_info": {},
+         "creator_profile": projected},
+        source_keyword="青岛", current_timestamp=lambda: 0, save_data_option="jsonl",
+    )
+    assert record["fans_count"] == 0 and record["followers_observed"] is True
+    assert record["author_followers_source"] == "creator_profile"
+    for empty in ({}, {"basicInfo": {}}, {"interactions": []}, {"interactions": [{}]}, {"tags": ["x"]}):
+        assert read_creator_runtime_projection({"status": "ok", "creator": empty}) == (
+            {}, "runtime_projection_empty"), empty
+
+
+def test_python_refilter_drops_boolean_counts_but_static_path_keeps_legacy_behavior():
+    projected, reason = read_creator_runtime_projection({"status": "ok", "creator": {
+        "fans": True, "basicInfo": {"nickname": "合成作者", "fans": True},
+        "interactions": [{"type": "fans", "count": True}],
+    }})
+    assert reason == "ok"
+    assert projected == {"basicInfo": {"nickname": "合成作者"}, "interactions": [{"type": "fans"}]}
+
+    html = json_state_html({"basicInfo": {"nickname": "合成作者", "fans": True}})
+    static = XiaoHongShuExtractor().extract_creator_info_from_html(html)
+    assert static == legacy_extract_creator_info_from_html(html)
+    record = update_xhs_note(
+        {"note_id": "synthetic-note", "user": {"user_id": REQUESTED_USER}, "interact_info": {},
+         "creator_profile": static},
+        source_keyword="青岛", current_timestamp=lambda: 0, save_data_option="jsonl",
+    )
+    assert record["fans_count"] is True and record["followers_observed"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +337,166 @@ def test_script_drops_non_scalar_fields_and_rebuilds_interactions_with_fixed_key
     }"""))
 
     assert output["result"] == {"status": "ok", "creator": {
-        "basicInfo": {"nickname": "合成作者"},
+        "basicInfo": {"nickname": "合成作者", "redId": "synthetic-red"},
         "interactions": [{"type": "fans", "count": "9"}, {"type": "follows"}],
     }}
+
+
+def test_script_keeps_research_fields_and_drops_their_avatar_twins():
+    output = run_projection_script(page_state(f"""{{
+        basicInfo: {{nickname: '合成作者', redId: 'synthetic-red', imageb: '{SYNTHETIC_AVATAR}'}},
+        interactions: [{{type: 'fans', name: '粉丝', count: '12000', i18nCount: '1.2万'}}],
+        tags: [
+            {{icon: 'https://example.test/tag.png', tagType: 'profession', name: '旅行博主'}},
+            {{tagType: 'college', name: '{SYNTHETIC_AVATAR}'}},
+        ],
+        verifyInfo: {{redOfficialVerifyType: 2, icon: 'https://example.test/v.png'}},
+        result: {{success: true}},
+    }}"""))
+
+    assert output["result"] == {"status": "ok", "creator": {
+        "basicInfo": {"nickname": "合成作者", "redId": "synthetic-red"},
+        "interactions": [{"type": "fans", "name": "粉丝", "count": "12000", "i18nCount": "1.2万"}],
+        "tags": [{"tagType": "profession", "name": "旅行博主"}, {"tagType": "college"}],
+        "verifyInfo": {"redOfficialVerifyType": 2},
+    }}
+
+
+@pytest.mark.parametrize("padding", ["\x85", "\u3000", "\x1c", " \t\n"])
+def test_script_strips_python_whitespace_before_comparing_avatar_urls(padding):
+    output = run_projection_script(page_state(
+        "data",
+        prelude=f"""
+        const data = {{basicInfo: {{nickname: '合成作者', imageb: {json.dumps(padding + SYNTHETIC_AVATAR)},
+                                   desc: {json.dumps(SYNTHETIC_AVATAR + padding)}}}}};
+        """,
+    ))
+
+    assert output["result"] == {"status": "ok", "creator": {"basicInfo": {"nickname": "合成作者"}}}
+
+
+def test_script_does_not_strip_bom_unlike_javascript_trim():
+    bom = "\ufeff"
+    output = run_projection_script(page_state(
+        "data",
+        prelude=f"""
+        const data = {{basicInfo: {{nickname: '合成作者', imageb: {json.dumps(SYNTHETIC_AVATAR)},
+                                   desc: {json.dumps(bom + SYNTHETIC_AVATAR)}}}}};
+        """,
+    ))
+
+    # Python 的 strip() 不去 BOM，清理器也不会删除这个值；页面脚本保持同一语义。
+    assert output["result"]["creator"]["basicInfo"]["desc"] == bom + SYNTHETIC_AVATAR
+
+
+def test_strip_set_matches_python_isspace():
+    expected = {chr(code) for code in range(sys.maxunicode + 1) if chr(code).isspace()}
+    assert set(xhs_creator_projection_spec()["strip_chars"]) == expected
+    assert "\x85" in expected and "\ufeff" not in expected
+
+
+# 与 Vue 3.5 响应式结构对应的最小模拟：reactive Proxy（无 getOwnPropertyDescriptor trap）、
+# 集合 Proxy（只有 get trap）、class RefImpl / ComputedRefImpl / Dep。
+VUE_PRELUDE = """
+const rawMap = new WeakMap();
+const isObj = (v) => v !== null && typeof v === 'object';
+const toRaw = (o) => (o && o.__v_raw) ? toRaw(o.__v_raw) : o;
+const baseHandlers = {
+    get(target, key, receiver) {
+        if (key === '__v_raw') return target;
+        if (key === '__v_isReactive') return true;
+        const res = Reflect.get(target, key, receiver);
+        if (isObj(res) && res.__v_isRef) return res.value;
+        return isObj(res) ? reactive(res) : res;
+    },
+    set(target, key, value, receiver) { return Reflect.set(target, key, toRaw(value), receiver); },
+    has(target, key) { return Reflect.has(target, key); },
+    deleteProperty(target, key) { return Reflect.deleteProperty(target, key); },
+    ownKeys(target) { return Reflect.ownKeys(target); },
+};
+const collectionHandlers = {
+    get(target, key) {
+        if (key === '__v_raw') return target;
+        if (key === Symbol.iterator) {
+            return function* () { for (const v of target) yield isObj(v) ? reactive(v) : v; };
+        }
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+    },
+};
+function reactive(target) {
+    if (rawMap.has(target)) return rawMap.get(target);
+    const proxy = new Proxy(
+        target, (target instanceof Set || target instanceof Map) ? collectionHandlers : baseHandlers);
+    rawMap.set(target, proxy);
+    return proxy;
+}
+class Dep { constructor() { this.subs = undefined; this.version = 0; this.map = new Map(); } }
+class RefImpl {
+    constructor(value) {
+        this.dep = new Dep();
+        this.__v_isRef = true;
+        this.__v_isShallow = false;
+        this._rawValue = toRaw(value);
+        this._value = isObj(value) ? reactive(toRaw(value)) : value;
+    }
+    get value() { globalThis.__probes.getter += 1; return this._value; }
+}
+class ProtoRefImpl {
+    constructor(value) { this.dep = new Dep(); this._rawValue = value; this._value = reactive(value); }
+    get value() { globalThis.__probes.getter += 1; return this._value; }
+}
+ProtoRefImpl.prototype.__v_isRef = true;
+class ComputedRefImpl {
+    constructor(fn) { this.fn = fn; this._value = undefined; this.dep = new Dep(); this.__v_isRef = true; }
+    get value() { globalThis.__probes.getter += 1; return this._value = this.fn(); }
+}
+const userData = () => ({
+    basicInfo: {nickname: '合成作者', desc: '合成简介', imageb: 'https://avatar.example.test/a.jpg'},
+    interactions: [{type: 'fans', name: '粉丝', count: '12000', i18nCount: '1.2万'}],
+    tags: [{icon: 'https://example.test/i.png', tagType: 'profession', name: '旅行博主'}],
+});
+"""
+VUE_EXPECTED = {"status": "ok", "creator": {
+    "basicInfo": {"nickname": "合成作者", "desc": "合成简介"},
+    "interactions": [{"type": "fans", "name": "粉丝", "count": "12000", "i18nCount": "1.2万"}],
+    "tags": [{"tagType": "profession", "name": "旅行博主"}],
+}}
+
+
+@pytest.mark.parametrize(("label", "setup", "expected"), [
+    ("reactive_state_with_ref_impl",
+     "window.__INITIAL_STATE__ = reactive({user: {userPageData: new RefImpl(userData())}});", VUE_EXPECTED),
+    ("reactive_user_page_data_proxy",
+     "window.__INITIAL_STATE__ = {user: reactive({userPageData: userData()})};", VUE_EXPECTED),
+    ("ref_with_only_proxy_value",
+     "const r = new RefImpl(userData()); delete r._rawValue; window.__INITIAL_STATE__ = {user: {userPageData: r}};",
+     VUE_EXPECTED),
+    ("nested_reactive_set",
+     "const d = userData(); d.seen = reactive(new Set([reactive({a: 1})]));"
+     " window.__INITIAL_STATE__ = {user: {userPageData: new RefImpl(d)}};", VUE_EXPECTED),
+    # __v_isRef 只在原型上时不是自有数据属性，不按 ref 解包；它是类实例，整个投影被拒绝。
+    ("prototype_ref_marker_is_not_unwrapped",
+     "window.__INITIAL_STATE__ = {user: {userPageData: new ProtoRefImpl(userData())}};",
+     {"status": "missing"}),
+    ("nested_prototype_ref_rejects",
+     "const d = userData(); d.extra = new ProtoRefImpl({a: 1});"
+     " window.__INITIAL_STATE__ = {user: {userPageData: d}};",
+     {"status": "rejected", "reason": "projection_avatar_check_incomplete"}),
+    # 未求值的 computed ref：_value 为 undefined，不调用 getter，按缺失处理，随后由就绪等待回退静态解析。
+    ("unevaluated_computed_ref",
+     "window.__INITIAL_STATE__ = {user: {userPageData: new ComputedRefImpl(() => userData())}};",
+     {"status": "missing"}),
+    ("class_instance_in_user_page_data",
+     "class Tag { constructor() { this.name = 'x'; } } const d = userData(); d.tags.push(new Tag());"
+     " window.__INITIAL_STATE__ = {user: {userPageData: new RefImpl(d)}};",
+     {"status": "rejected", "reason": "projection_avatar_check_incomplete"}),
+])
+def test_script_handles_vue_reactive_structures(label, setup, expected):
+    output = run_projection_script(VUE_PRELUDE + setup)
+
+    assert output["result"] == expected, label
+    assert output["probes"]["getter"] == 0
 
 
 def test_script_unwraps_vue_refs():
@@ -304,6 +511,45 @@ def test_script_unwraps_vue_refs():
     assert output["result"] == {"status": "ok", "creator": {
         "basicInfo": {"nickname": "合成作者"},
         "interactions": [{"type": "fans", "count": "7"}],
+    }}
+
+
+def test_script_scans_plain_objects_with_value_field_instead_of_unwrapping():
+    output = run_projection_script(page_state(f"""{{
+        extraInfo: {{_value: {{}}, avatar_url: '{SYNTHETIC_AVATAR}'}},
+        basicInfo: {{nickname: '合成作者', desc: '{SYNTHETIC_AVATAR}'}},
+        interactions: [{{type: 'fans', count: '3'}}],
+    }}"""))
+
+    assert output["result"] == {"status": "ok", "creator": {
+        "basicInfo": {"nickname": "合成作者"},
+        "interactions": [{"type": "fans", "count": "3"}],
+    }}
+
+
+def test_script_only_unwraps_nodes_marked_as_vue_ref():
+    output = run_projection_script(page_state("""{
+        basicInfo: {_value: {nickname: '被包装的昵称'}, _rawValue: {nickname: '被包装的昵称'}, nickname: '合成作者'},
+        interactions: {__v_isRef: true, dep: {}, _rawValue: [{type: 'fans', count: '4'}]},
+        fansHolder: {__v_isRef: 'true', _value: {fans: '9'}},
+    }"""))
+
+    assert output["result"] == {"status": "ok", "creator": {
+        "basicInfo": {"nickname": "合成作者"},
+        "interactions": [{"type": "fans", "count": "4"}],
+    }}
+
+
+def test_script_does_not_project_boolean_counts():
+    output = run_projection_script(page_state("""{
+        fans: true,
+        basicInfo: {nickname: '合成作者', fans: true, gender: false},
+        interactions: [{type: 'fans', count: true, num: false}],
+    }"""))
+
+    assert output["result"] == {"status": "ok", "creator": {
+        "basicInfo": {"nickname": "合成作者", "gender": False},
+        "interactions": [{"type": "fans"}],
     }}
 
 
@@ -379,9 +625,13 @@ class CreatorPage:
         self.projection_calls = 0
         self.content_calls = 0
         self.closed = False
+        self.brought_to_front = 0
 
     async def wait_for_timeout(self, milliseconds):
         return None
+
+    async def bring_to_front(self):
+        self.brought_to_front += 1
 
     async def wait_for_load_state(self, state, timeout=None):
         self.load_states.append((state, timeout))
@@ -464,6 +714,11 @@ def crawler(monkeypatch, tmp_path):
         return "", markers
 
     monkeypatch.setattr(xhs_author, "inspect_visible_page_state", inspect_state)
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_POLL_SECONDS", "1")
+    instance._manual_wait_budget = XHSManualWaitBudget(
+        limit_seconds=600.0,
+        monotonic=lambda: clock["now"],
+    )
     instance.navigation_path = tmp_path / "behavior_evidence.navigation.json"
     return instance
 
@@ -731,6 +986,155 @@ async def test_api_request_failure_reason_uses_exception_type(crawler):
     assert exc_info.value.reason == (
         "api=api_request_failed:ValueError;browser=runtime_projection_empty,static_state_script_missing"
     )
+
+
+@pytest.mark.asyncio
+async def test_boolean_fans_are_not_ready_and_end_as_followers_unobserved(crawler):
+    page = CreatorPage([{"status": "ok", "creator": {"fans": True, "basicInfo": {"nickname": "合成作者"},
+                                                      "interactions": [{"type": "fans", "count": True}]}}],
+                       html="<html></html>")
+
+    assert await open_with(crawler, page) is None
+    assert sum(crawler.sleeps) == pytest.approx(10.0)
+    assert crawler._creator_browser_reason == "followers_unobserved,static_state_script_missing"
+
+
+@pytest.mark.asyncio
+async def test_zero_fans_runtime_projection_succeeds(crawler):
+    page = CreatorPage([{"fans": 0, "basicInfo": {"nickname": "合成作者"}}])
+
+    assert await open_with(crawler, page) == {"fans": 0, "basicInfo": {"nickname": "合成作者"}}
+    assert crawler.sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_verification_wait_reads_runtime_projection_when_ssr_has_new_set(crawler):
+    page = CreatorPage([creator_state()], html=NEW_SET_BEFORE_USER)
+    crawler.visible_markers = [{"captcha_or_verify": True}, {}]
+
+    creator = await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+
+    assert creator["interactions"][1]["count"] == "128"
+    assert page.projection_calls >= 1 and page.content_calls == 0
+    assert page.brought_to_front == 1
+    assert crawler._manual_wait_budget.manual_elapsed_seconds == pytest.approx(1.0)
+    assert [event["outcome"] for event in parse_diagnostics(crawler)] == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_verification_wait_keeps_static_fallback_and_mismatch_ends_wait(crawler):
+    static_page = CreatorPage([None], html=json_state_html(creator_state()))
+    crawler.visible_markers = [{}]
+    assert await crawler._wait_for_creator_profile_verification(static_page, REQUESTED_USER) == creator_state()
+    assert static_page.content_calls == 1
+
+    mismatch = CreatorPage([creator_state(user_id="synthetic-author-other")], html=NEW_SET_BEFORE_USER)
+    crawler.visible_markers = [{}]
+    assert await crawler._wait_for_creator_profile_verification(mismatch, REQUESTED_USER) is None
+    assert mismatch.content_calls == 0
+    assert crawler._creator_browser_reason == "verification_wait:creator_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_captcha_on_first_check_enters_verification_before_accepting_runtime_data(crawler):
+    page = CreatorPage([creator_state()], html=NEW_SET_BEFORE_USER)
+    # 到达、滚动检查干净；首轮投影已有粉丝，但接受前的检查出现验证码；验证轮询一次后完成。
+    crawler.visible_markers = [{}, {}, {"captcha_or_verify": True}, {"captcha_or_verify": True}, {}]
+    entered = []
+    original_wait = crawler._wait_for_creator_profile_verification
+
+    async def tracked_wait(current_page, user_id):
+        entered.append(len(crawler.visible_markers))
+        return await original_wait(current_page, user_id)
+
+    crawler._wait_for_creator_profile_verification = tracked_wait
+
+    creator = await open_with(crawler, page)
+
+    assert len(entered) == 1
+    assert crawler.visible_markers == []
+    assert page.brought_to_front == 1
+    assert page.projection_calls == 2
+    assert creator["interactions"][1]["count"] == "128"
+    assert crawler._manual_wait_budget.manual_elapsed_seconds == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_login_on_first_check_uses_recovery_even_with_ready_projection(crawler):
+    page = CreatorPage([creator_state()])
+    crawler.visible_markers = [{}, {}, {"login_required": True}]
+    crawler._recover_creator_login_on_primary_page = AsyncMock(return_value={"fans": "1"})
+
+    assert await open_with(crawler, page) == {"fans": "1"}
+    assert page.projection_calls == 1
+    crawler._recover_creator_login_on_primary_page.assert_awaited_once_with(REQUESTED_USER)
+    assert [event["outcome"] for event in parse_diagnostics(crawler)] == ["ok_login_recovery"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [
+    TargetClosedError("Target page, context or browser has been closed"),
+    CDPBrowserLifecycleError(
+        {"event": "context_closed", "detail": "synthetic", "planned": False}, stage="creator_profile"),
+])
+async def test_lifecycle_failure_on_first_check_propagates(crawler, monkeypatch, failure):
+    page = CreatorPage([creator_state()])
+    calls = {"inspect": 0}
+
+    async def inspect_state(current_page):
+        calls["inspect"] += 1
+        if calls["inspect"] == 3 and isinstance(failure, TargetClosedError):
+            raise failure
+        return "", {}
+
+    monkeypatch.setattr(xhs_author, "inspect_visible_page_state", inspect_state)
+    if isinstance(failure, CDPBrowserLifecycleError):
+        def assert_alive(stage):
+            if stage == "creator_profile_runtime_wait":
+                raise failure
+        crawler.cdp_manager = Mock(assert_alive=assert_alive)
+
+    with pytest.raises(type(failure)):
+        await open_with(crawler, page)
+
+    assert page.projection_calls == 1 and page.content_calls == 0
+    crawler._close_page_with_deadline.assert_awaited_once_with(page, reason="creator_profile_cleanup")
+
+
+@pytest.mark.asyncio
+async def test_readiness_and_verification_never_recurse(crawler):
+    page = CreatorPage([None, None, creator_state()], html=NEW_SET_BEFORE_USER)
+    crawler.visible_markers = [{}, {}, {}, {"captcha_or_verify": True}, {"captcha_or_verify": True}, {}]
+    depth = {"read": 0, "wait": 0, "max_read": 0, "max_wait": 0, "read_calls": 0, "wait_calls": 0}
+    original_read = crawler._read_creator_profile_from_page
+    original_wait = crawler._wait_for_creator_profile_verification
+
+    async def tracked_read(*args):
+        depth["read"] += 1
+        depth["read_calls"] += 1
+        depth["max_read"] = max(depth["max_read"], depth["read"])
+        try:
+            return await original_read(*args)
+        finally:
+            depth["read"] -= 1
+
+    async def tracked_wait(*args):
+        depth["wait"] += 1
+        depth["wait_calls"] += 1
+        depth["max_wait"] = max(depth["max_wait"], depth["wait"])
+        try:
+            return await original_wait(*args)
+        finally:
+            depth["wait"] -= 1
+
+    crawler._read_creator_profile_from_page = tracked_read
+    crawler._wait_for_creator_profile_verification = tracked_wait
+
+    creator = await open_with(crawler, page)
+
+    assert creator["interactions"][1]["count"] == "128"
+    assert depth["read_calls"] == 1 and depth["wait_calls"] == 1
+    assert depth["max_read"] == 1 and depth["max_wait"] == 1
 
 
 @pytest.mark.asyncio

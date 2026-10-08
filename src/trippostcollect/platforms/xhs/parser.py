@@ -22,6 +22,7 @@
 """小红书纯解析：URL、INITIAL_STATE、正文图片与作者投影；不含网络或文件 IO。"""
 
 import json
+import math
 import random
 import re
 import time
@@ -32,6 +33,7 @@ import humps
 
 from trippostcollect.application.contracts import ImageStagingError
 from trippostcollect.platforms.xhs.models import NoteUrlInfo
+from trippostcollect.records.formal import parse_int
 from trippostcollect.records.identity import platform_nickname, platform_user_id
 from trippostcollect.records.sanitization import AUTHOR_AVATAR_KEYS, XHS_SERIALIZED_PROFILE_AVATAR_PATHS
 from trippostcollect.runtime.helpers import extract_url_params_to_dict, normalize_image_url
@@ -291,9 +293,11 @@ def _normalized_creator_item(user_id: str, creator: Dict, *, current_timestamp: 
     }
 
 
-# 运行时作者状态投影白名单：逐项对应 _normalized_creator_item、_creator_basic_info、_creator_metric
-# 与 _interaction_count 实际读取的键（另含作者匹配读取的 basicInfo 用户 ID）。头像（imageb、images、
-# avatar*）与任何凭据或 token 字段都不在白名单中，投影只保留标量值。
+# 运行时作者状态投影白名单。仓库内读取点：_normalized_creator_item、_creator_basic_info、
+# _creator_metric、_interaction_count，以及作者匹配读取的 basicInfo 用户 ID。仓库外读取点：同级
+# TripPostResearch 从 creator_profile_json 读取的 basicInfo.redId、tags[].tagType/name、
+# verifyInfo.redOfficialVerifyType 与 interactions[].i18nCount。头像（imageb、images、avatar*、icon）
+# 与任何凭据或 token 字段都不在白名单中，投影只保留标量值。
 XHS_CREATOR_METRIC_FIELDS = (
     "fans", "fansCount", "fans_count", "followerCount", "followers_count", "粉丝",
     "follows", "followsCount", "following_count", "follow_count", "关注",
@@ -303,45 +307,83 @@ XHS_CREATOR_METRIC_FIELDS = (
 XHS_CREATOR_TOP_FIELDS = ("nickname", "desc", "gender", "ip_location") + XHS_CREATOR_METRIC_FIELDS
 XHS_CREATOR_BASIC_INFO_KEYS = ("basicInfo", "basic_info", "basic")
 XHS_CREATOR_BASIC_FIELDS = (
-    "userId", "user_id", "nickname", "desc", "description", "gender", "ipLocation", "ip_location",
+    "userId", "user_id", "redId", "nickname", "desc", "description", "gender", "ipLocation", "ip_location",
 ) + XHS_CREATOR_METRIC_FIELDS
+XHS_CREATOR_VERIFY_FIELDS = ("redOfficialVerifyType",)
 XHS_CREATOR_INTERACTION_LIST_KEYS = ("interactions", "interaction", "interactionList", "interaction_list")
-XHS_CREATOR_INTERACTION_ITEM_FIELDS = ("type", "name", "key", "count", "num", "value")
+XHS_CREATOR_INTERACTION_ITEM_FIELDS = ("type", "name", "key", "count", "num", "value", "i18nCount")
+XHS_CREATOR_TAG_FIELDS = ("tagType", "name")
+# 对象容器与列表容器：(键, 字段白名单)，页面脚本与 Python 再过滤共用。
+XHS_CREATOR_OBJECT_FIELDS = tuple(
+    (key, XHS_CREATOR_BASIC_FIELDS) for key in XHS_CREATOR_BASIC_INFO_KEYS
+) + (("verifyInfo", XHS_CREATOR_VERIFY_FIELDS),)
+XHS_CREATOR_LIST_FIELDS = tuple(
+    (key, XHS_CREATOR_INTERACTION_ITEM_FIELDS) for key in XHS_CREATOR_INTERACTION_LIST_KEYS
+) + (("tags", XHS_CREATOR_TAG_FIELDS),)
+# 计数类字段：运行时投影不接受布尔值（静态解析路径不受影响）。
+XHS_CREATOR_NUMERIC_FIELDS = frozenset(
+    XHS_CREATOR_METRIC_FIELDS + ("count", "num", "value", "i18nCount")
+)
 XHS_CREATOR_INTERACTION_MAX_ITEMS = 32
 # 页面内头像证据检查的上限；超限、循环引用或异常结构时拒绝整个投影。
 XHS_CREATOR_PROJECTION_MAX_DEPTH = 16
 XHS_CREATOR_PROJECTION_MAX_NODES = 4000
 XHS_CREATOR_PROJECTION_REJECTED_REASONS = frozenset({"projection_avatar_check_incomplete"})
+# Python str.strip() 去除的全部空白字符（即 str.isspace() 为真的码点）；页面脚本用同一集合去首尾空白，
+# 与 records.sanitization 的头像 URL 比较语义一致。
+XHS_PYTHON_STRIP_CHARS = (
+    "\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
 
 
 def xhs_creator_projection_spec() -> Dict[str, Any]:
-    """传给页面固定投影脚本的参数：字段白名单、头像证据键与路径、检查上限。
+    """传给页面固定投影脚本的参数：字段白名单、头像证据键与路径、空白集合与检查上限。
 
     头像证据键与路径直接取自 records.sanitization，与首次序列化前的头像清理规则同源。
     """
     return {
         "top_fields": list(XHS_CREATOR_TOP_FIELDS),
-        "basic_keys": list(XHS_CREATOR_BASIC_INFO_KEYS),
-        "basic_fields": list(XHS_CREATOR_BASIC_FIELDS),
-        "list_keys": list(XHS_CREATOR_INTERACTION_LIST_KEYS),
-        "item_fields": list(XHS_CREATOR_INTERACTION_ITEM_FIELDS),
+        "object_fields": [[key, list(fields)] for key, fields in XHS_CREATOR_OBJECT_FIELDS],
+        "list_fields": [[key, list(fields)] for key, fields in XHS_CREATOR_LIST_FIELDS],
         "max_items": XHS_CREATOR_INTERACTION_MAX_ITEMS,
+        "numeric_fields": sorted(XHS_CREATOR_NUMERIC_FIELDS),
         "avatar_keys": sorted(AUTHOR_AVATAR_KEYS),
         "avatar_paths": sorted(
             list(path)
             for path in XHS_SERIALIZED_PROFILE_AVATAR_PATHS["creator_profile_json"]
         ),
+        "strip_chars": XHS_PYTHON_STRIP_CHARS,
         "max_depth": XHS_CREATOR_PROJECTION_MAX_DEPTH,
         "max_nodes": XHS_CREATOR_PROJECTION_MAX_NODES,
     }
 
 
 def _scalar_fields(source: Dict, fields: tuple[str, ...]) -> Dict:
-    return {
-        field: source[field]
-        for field in fields
-        if isinstance(source.get(field), (str, int, float))
-    }
+    projected = {}
+    for field in fields:
+        value = source.get(field)
+        if isinstance(value, bool):
+            if field not in XHS_CREATOR_NUMERIC_FIELDS:
+                projected[field] = value
+        elif isinstance(value, str) or (isinstance(value, (int, float)) and math.isfinite(value)):
+            projected[field] = value
+    return projected
+
+
+def _projection_has_fields(projected: Dict) -> bool:
+    """按结构判断投影是否为空：有任一标量字段、非空对象容器或含字段的列表条目即非空。"""
+    for value in projected.values():
+        if isinstance(value, dict):
+            if value:
+                return True
+        elif isinstance(value, list):
+            if any(value):
+                return True
+        else:
+            return True
+    return False
 
 
 def read_creator_runtime_projection(result: Any) -> Tuple[Dict, str]:
@@ -363,19 +405,19 @@ def read_creator_runtime_projection(result: Any) -> Tuple[Dict, str]:
     if status != "ok" or not isinstance(creator, dict):
         return {}, "runtime_projection_error"
     projected = _scalar_fields(creator, XHS_CREATOR_TOP_FIELDS)
-    for key in XHS_CREATOR_BASIC_INFO_KEYS:
-        basic = creator.get(key)
-        if isinstance(basic, dict):
-            projected[key] = _scalar_fields(basic, XHS_CREATOR_BASIC_FIELDS)
-    for key in XHS_CREATOR_INTERACTION_LIST_KEYS:
+    for key, fields in XHS_CREATOR_OBJECT_FIELDS:
+        container = creator.get(key)
+        if isinstance(container, dict):
+            projected[key] = _scalar_fields(container, fields)
+    for key, fields in XHS_CREATOR_LIST_FIELDS:
         items = creator.get(key)
         if isinstance(items, list):
             projected[key] = [
-                _scalar_fields(item, XHS_CREATOR_INTERACTION_ITEM_FIELDS)
+                _scalar_fields(item, fields)
                 for item in items[:XHS_CREATOR_INTERACTION_MAX_ITEMS]
                 if isinstance(item, dict)
             ]
-    if not any(projected.values()):
+    if not _projection_has_fields(projected):
         return {}, "runtime_projection_empty"
     return projected, "ok"
 
@@ -394,10 +436,14 @@ def creator_profile_user_ids(creator: Dict) -> List[str]:
     return user_ids
 
 
-def creator_followers_observed(user_id: str, creator: Dict) -> bool:
-    """与 update_xhs_note 相同的粉丝观察判定：fans_count 或 fans 有真实值。"""
+def creator_runtime_followers_observed(user_id: str, creator: Dict) -> bool:
+    """运行时投影的就绪判定：沿用 update_xhs_note 的 fans_count/fans 取值，只认非布尔且可按
+    records.formal.parse_int 解析的计数（含“万/亿”单位）；0 是真实观察值。"""
     creator_item = _normalized_creator_item(user_id, creator, current_timestamp=lambda: 0)
-    return any(creator_item.get(key) not in (None, "") for key in ("fans_count", "fans"))
+    return any(
+        not isinstance(value, bool) and parse_int(value) is not None
+        for value in (creator_item.get("fans_count"), creator_item.get("fans"))
+    )
 
 
 def update_xhs_note(

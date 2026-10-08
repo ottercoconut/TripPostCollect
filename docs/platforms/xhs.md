@@ -323,29 +323,53 @@ python scripts/repair_xhs_posts.py \
   这会多一次作者页访问和暂停。
 - 浏览器回退在到达与滚动检查后进入有界就绪等待，预算 10 秒。`domcontentloaded` 只是前置条件，
   超时记 `page_not_ready` 后继续。随后执行固定脚本，读取页面已执行的
-  `window.__INITIAL_STATE__.user.userPageData`，解开 Vue ref，只按白名单复制标量字段。白名单包括
-  `basicInfo` 的用户 ID、昵称、简介、性别和 IP 属地，以及 `interactions` 条目的
-  `type/name/key/count/num/value`，另加下游读取的粉丝、关注、笔记与获赞指标键。头像（`imageb`、
-  `images`、`avatar*`）与任何凭据或 token 字段都不投影，也不序列化整份状态或返回 HTML。
+  `window.__INITIAL_STATE__.user.userPageData`。只有自有数据属性 `__v_isRef === true` 的节点才按
+  Vue ref 解包；脚本按白名单只复制标量字段，不序列化整份状态，也不返回 HTML。白名单分两部分：
+  - 仓库内下游读取的字段：`basicInfo` 的用户 ID、昵称、简介、性别、IP 属地，粉丝、关注、笔记与获赞
+    指标键，以及 `interactions` 条目的 `type/name/key/count/num/value`；
+  - 研究项目经 `creator_profile_json` 读取的字段：`basicInfo.redId`、`interactions[].i18nCount`、
+    `tags[].tagType/name`、`verifyInfo.redOfficialVerifyType`。
+
+  头像（`imageb`、`images`、`avatar*`、`icon`）与任何凭据或 token 字段都不投影；计数类字段不投影布尔值。
 - 投影前，脚本先在该作者记录内收集头像证据 URL。证据键与路径直接取自 `records.sanitization`：
   `AUTHOR_AVATAR_KEYS` 不区分大小写，另加 `basicInfo.imageb`、`basicInfo.images`。收集有深度与节点
-  上限，并检测循环引用。投影后，任何字符串字段去掉首尾空白后若与证据 URL 完全相同即删除；证据
-  集合不返回。脚本只读自有数据属性，不触发 getter 或 `toJSON`。遇到超限、循环引用、访问器属性、
-  函数或未知对象类型时，整个投影被拒绝（`projection_avatar_check_incomplete`），立即回退静态解析。
-- 就绪与成功以下游 `followers_observed` 判定为准：必须观察到粉丝项的非空计数，按原值保存
-  （如 `1.2万`），不补 0。仅有 `interactions` 数组不算就绪。每 0.5 秒重试一次，每次重试前照常
-  检查登录、验证、阻断和封禁；取消以及页面、浏览器关闭照常向上传播。
+  上限，并检测循环引用。投影后，任何字符串字段去掉首尾空白后若与证据 URL 完全相同即删除。空白集合
+  与 Python `str.strip()` 相同（含 `\x85`，不含 BOM）。证据集合不返回，因此同值删除只在该作者记录内
+  生效；笔记级头像仍由 Python 清理器按键删除。
+- 脚本只经属性描述符读取自有数据属性，不读取访问器属性，不调用 `toJSON`；遇到 Proxy 时，其 trap
+  仍可能执行页面代码。遇到超限、循环引用、访问器属性、函数或未知对象类型（Set、Map、Date 除外）时，
+  整个投影被拒绝（`projection_avatar_check_incomplete`），立即回退静态解析。未求值的 computed ref
+  按缺失处理。
+- 就绪与成功条件：粉丝计数必须非布尔，且能按 `records.formal.parse_int` 解析（含“万/亿”）。计数按原值
+  保存（如 `1.2万`）；0 是真实观察值，不补值。仅有 `interactions` 数组不算就绪。每次读取投影后，
+  先做生命周期、登录、验证、阻断与封禁检查，然后才接受结果或重试，每 0.5 秒重试一次。出现验证标记时，
+  先进入既有验证等待。人工验证完成后，每轮做一次检查，再读取一次：先投影，取不到再走严格静态解析；
+  这一步不会重入就绪等待。取消以及页面、浏览器关闭照常向上传播。
 - 页面数据带有作者 ID 且与请求的 `user_id` 不一致时，判为 `creator_mismatch`，不可用。ID 缺失时
   沿用按 `user_id` 打开的作者页和笔记作者 ID，不凭昵称比对。投影在预算内拿不到粉丝时，回退到
   `page.content()` 加严格静态解析。
-- 浏览器回退每次取数后写一条 `creator_profile_parse` 导航诊断，`outcome` 取 `ok`、
-  `ok_static_state` 或原因类别。两条路径都失败时，`candidate_skipped.detail` 写为
-  `creator_profile_failed:api=<原因>;browser=<原因>`，原因只含类别：`api_request_failed:<异常类型>`、
-  `state_script_missing`、`state_decode_failed:<js_new_expression|js_identifier|invalid_json|truncated>`、
-  `state_null`、`user_missing`、`user_page_data_missing`、`user_page_data_empty`（静态解析原因在浏览器侧
-  加 `static_` 前缀），以及 `page_not_ready`、`runtime_projection_empty`、`runtime_projection_timeout`、
-  `runtime_projection_error`、`projection_avatar_check_incomplete`、`followers_unobserved`、
-  `creator_mismatch`。`error_code` 仍为 `creator_profile_unavailable`。
+- `creator_profile_json` 的形状因取数路径而异：
+  - 运行时投影路径写入白名单结构，只含上面列出的字段；
+  - 无 token 请求、静态回退与验证后静态读取路径仍写完整的 `userPageData`，头像由 Python 清理器删除。
+
+  下游如果读取白名单外的字段（例如 `extraInfo`、`tags[].icon`），在投影路径的记录里会缺失。按列做
+  统计时，需要区分记录来自哪条路径，或只使用白名单字段。
+- `creator_profile_parse` 导航诊断的写入时机：
+  - 就绪等待结束时写一次，`outcome` 取 `ok`、`ok_static_state` 或原因类别；
+  - 就绪等待中转入登录恢复时写 `ok_login_recovery` 或 `login_recovery_empty`；
+  - 验证等待中读到作者资料时写 `ok` 或 `ok_static_state`，判定作者不一致时写 `creator_mismatch`。
+
+  以下情况不写：到达或滚动检查直接转入登录恢复；验证等待因人工预算耗尽而抛错；验证等待中转入登录恢复。
+- 两条路径都失败时，`candidate_skipped.detail` 写为 `creator_profile_failed:api=<原因>;browser=<原因>`，
+  `error_code` 仍为 `creator_profile_unavailable`。repair 路径的失败记录不带原因码。原因只含类别：
+  - 无 token 请求：`api_request_failed:<异常类型>`；
+  - 静态解析：`state_script_missing`、
+    `state_decode_failed:<js_new_expression|js_identifier|invalid_json|truncated>`、`state_null`、
+    `user_missing`、`user_page_data_missing`、`user_page_data_empty`，在浏览器侧加 `static_` 前缀；
+  - 运行时投影：`page_not_ready`、`runtime_projection_empty`、`runtime_projection_timeout`、
+    `runtime_projection_error`、`projection_avatar_check_incomplete`、`followers_unobserved`、
+    `creator_mismatch`；
+  - 其他分支：`login_recovery_empty`、`verification_wait:<原因>`。
 - 成功作者结果只在本轮按作者 ID 缓存，不替代来源证据。
 - 有 checkpoint 时用新 search ID 刷新顶部，再用保存的 `page + search_id` 恢复深层；顶部刷新不
   覆盖深层位置。深层耗尽后只刷新顶部。

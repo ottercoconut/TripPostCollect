@@ -42,7 +42,7 @@ from trippostcollect.platforms.xhs.errors import (
     XHSNetworkRecoveryTimeout,
 )
 from trippostcollect.platforms.xhs.parser import (
-    creator_followers_observed,
+    creator_runtime_followers_observed,
     creator_profile_user_ids,
     read_creator_runtime_projection,
     xhs_creator_projection_spec,
@@ -62,7 +62,9 @@ XHS_CREATOR_RUNTIME_FINAL_REASONS = frozenset(
 # 固定的页面投影脚本（page.evaluate 原样使用这一份）：只读取页面已执行的
 # window.__INITIAL_STATE__.user.userPageData。先在该作者记录内有界收集头像证据 URL（键与路径来自
 # records.sanitization），再按白名单只复制标量字段，删除与证据 URL 完全相同的字符串；证据集合不返回。
-# 只读自有数据属性（不触发 getter 或 toJSON），检查做不完时拒绝整个投影。不序列化整份状态，不返回 HTML。
+# 只有自有数据属性 __v_isRef === true 的节点才按 Vue ref 解包，其余对象的全部字段都参与证据扫描。
+# 计数类字段不投影布尔值。只读自有数据属性（不触发 getter 或 toJSON），检查做不完时拒绝整个投影。
+# 不序列化整份状态，不返回 HTML。
 XHS_CREATOR_RUNTIME_PROJECTION_SCRIPT = """(spec) => {
     const INCOMPLETE = 'projection_avatar_check_incomplete';
     const avatarKeys = new Set(spec.avatar_keys);
@@ -74,14 +76,26 @@ XHS_CREATOR_RUNTIME_PROJECTION_SCRIPT = """(spec) => {
         if (!('value' in descriptor)) throw new Error(INCOMPLETE);
         return descriptor.value;
     };
+    const numericFields = new Set(spec.numeric_fields);
+    const stripChars = new Set(Array.from(spec.strip_chars));
+    const pyStrip = (text) => {
+        let start = 0;
+        let end = text.length;
+        while (start < end && stripChars.has(text[start])) start += 1;
+        while (end > start && stripChars.has(text[end - 1])) end -= 1;
+        return text.slice(start, end);
+    };
+    const isRef = (value) => {
+        const marker = Object.getOwnPropertyDescriptor(value, '__v_isRef');
+        return marker !== undefined && 'value' in marker && marker.value === true;
+    };
     const unref = (value) => {
         let current = value;
         for (let depth = 0; depth < 4; depth += 1) {
-            if (!isObject(current)) return current;
+            if (!isObject(current) || !isRef(current)) return current;
             const wrapped = Object.getOwnPropertyDescriptor(current, '_rawValue')
                 || Object.getOwnPropertyDescriptor(current, '_value');
-            if (wrapped === undefined) return current;
-            if (!('value' in wrapped)) throw new Error(INCOMPLETE);
+            if (wrapped === undefined || !('value' in wrapped)) throw new Error(INCOMPLETE);
             current = wrapped.value;
         }
         return current;
@@ -95,8 +109,8 @@ XHS_CREATOR_RUNTIME_PROJECTION_SCRIPT = """(spec) => {
         || avatarKeys.has(key.toUpperCase().toLowerCase());
     const evidencedUrl = (value) => {
         if (typeof value !== 'string') return null;
-        const candidate = value.trim();
-        if (!candidate || candidate.length > 8192) return null;
+        const candidate = pyStrip(value);
+        if (!candidate || (candidate.length > 8192 && Array.from(candidate).length > 8192)) return null;
         const lowered = candidate.toLowerCase();
         let rest = null;
         if (lowered.startsWith('http://')) rest = candidate.slice(7);
@@ -156,8 +170,10 @@ XHS_CREATOR_RUNTIME_PROJECTION_SCRIPT = """(spec) => {
         for (const field of fields) {
             const value = ownValue(source, field);
             if (typeof value === 'string') {
-                if (!evidence.has(value.trim())) result[field] = value;
-            } else if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
+                if (!evidence.has(pyStrip(value))) result[field] = value;
+            } else if (typeof value === 'number' && Number.isFinite(value)) {
+                result[field] = value;
+            } else if (typeof value === 'boolean' && !numericFields.has(field)) {
                 result[field] = value;
             }
         }
@@ -170,18 +186,18 @@ XHS_CREATOR_RUNTIME_PROJECTION_SCRIPT = """(spec) => {
         if (!isPlain(data)) return { status: 'missing' };
         visit(data, [], false, 0);
         const creator = scalarFields(data, spec.top_fields);
-        for (const key of spec.basic_keys) {
-            const basic = unref(ownValue(data, key));
-            if (isPlain(basic)) creator[key] = scalarFields(basic, spec.basic_fields);
+        for (const [key, fields] of spec.object_fields) {
+            const container = unref(ownValue(data, key));
+            if (isPlain(container)) creator[key] = scalarFields(container, fields);
         }
-        for (const key of spec.list_keys) {
+        for (const [key, fields] of spec.list_fields) {
             const items = unref(ownValue(data, key));
             if (!Array.isArray(items)) continue;
             const rebuilt = [];
             const length = Math.min(ownValue(items, 'length'), spec.max_items);
             for (let index = 0; index < length; index += 1) {
                 const item = unref(ownValue(items, String(index)));
-                if (isPlain(item)) rebuilt.push(scalarFields(item, spec.item_fields));
+                if (isPlain(item)) rebuilt.push(scalarFields(item, fields));
             }
             creator[key] = rebuilt;
         }
@@ -358,8 +374,9 @@ class XhsAuthorMixin:
     ) -> Tuple[Optional[Dict], str]:
         """作者页取数：有界等待运行时投影出现粉丝观察，取不到再回退 page.content() 严格静态解析。
 
-        每次重试前沿用登录、验证、阻断与封禁检查；取消、页面与浏览器关闭照常向上传播。
-        返回作者资料与只含类别的原因，并写一次 creator_profile_parse 导航诊断。
+        每次读取投影后、接受或重试之前，都先做生命周期、登录、验证、阻断与封禁检查；出现验证
+        标记时进入既有验证等待（其内部只做“检查 + 读取一次”，不会回到这里）。取消、页面与浏览器
+        关闭照常向上传播。返回作者资料与只含类别的原因，并写一次 creator_profile_parse 导航诊断。
         """
         reasons: List[str] = []
         deadline = self._popup_monotonic() + XHS_CREATOR_RUNTIME_READY_SECONDS
@@ -381,15 +398,7 @@ class XhsAuthorMixin:
                 page,
                 user_id,
             )
-            if projected is not None:
-                creator_info = projected
-                outcome = "ok"
-                break
-            remaining = deadline - self._popup_monotonic()
-            if projection_reason in XHS_CREATOR_RUNTIME_FINAL_REASONS or remaining <= 0:
-                reasons.append(projection_reason)
-                break
-            await self._popup_sleep(min(XHS_CREATOR_RUNTIME_POLL_SECONDS, remaining))
+            self._assert_primary_page_alive("creator_profile_runtime_wait")
             text_sample, markers = await inspect_visible_page_state(page)
             await self._raise_for_creator_page_terminal(
                 page,
@@ -399,9 +408,31 @@ class XhsAuthorMixin:
                 visible_markers=markers,
             )
             if markers.get("login_required"):
-                return await self._recover_creator_login_on_primary_page(user_id), ""
+                creator_info = await self._recover_creator_login_on_primary_page(user_id)
+                await self._record_navigation_diagnostic(
+                    page,
+                    stage="creator_profile_parse",
+                    outcome=(
+                        "ok_login_recovery" if creator_info else "login_recovery_empty"
+                    ),
+                )
+                return creator_info, ("" if creator_info else "login_recovery_empty")
             if markers.get("captcha_or_verify"):
-                return await self._wait_for_creator_profile_verification(page, user_id), ""
+                self._creator_browser_reason = ""
+                creator_info = await self._wait_for_creator_profile_verification(
+                    page,
+                    user_id,
+                )
+                return creator_info, self._creator_browser_reason
+            if projected is not None:
+                creator_info = projected
+                outcome = "ok"
+                break
+            remaining = deadline - self._popup_monotonic()
+            if projection_reason in XHS_CREATOR_RUNTIME_FINAL_REASONS or remaining <= 0:
+                reasons.append(projection_reason)
+                break
+            await self._popup_sleep(min(XHS_CREATOR_RUNTIME_POLL_SECONDS, remaining))
 
         if creator_info is None and "creator_mismatch" not in reasons:
             html_content = await page.content()
@@ -418,6 +449,42 @@ class XhsAuthorMixin:
             outcome=outcome or reason,
         )
         return creator_info, reason
+
+    async def _read_creator_profile_snapshot(
+        self,
+        page: Page,
+        user_id: str,
+    ) -> Tuple[Optional[Dict], str]:
+        """读取一次：先运行时投影，取不到再严格静态解析；不做可见状态检查，也不进入验证等待。
+
+        供人工验证完成后的轮询使用；只在得到结论（成功或作者不一致）时写 creator_profile_parse 诊断。
+        """
+        projected, projection_reason = await self._creator_runtime_projection(page, user_id)
+        if projected is not None:
+            await self._record_navigation_diagnostic(
+                page,
+                stage="creator_profile_parse",
+                outcome="ok",
+            )
+            return projected, "ok"
+        if projection_reason == "creator_mismatch":
+            await self._record_navigation_diagnostic(
+                page,
+                stage="creator_profile_parse",
+                outcome=projection_reason,
+            )
+            return None, projection_reason
+        html_content = await page.content()
+        creator_info = self.xhs_client.extract_creator_info_from_html(html_content)
+        if creator_info:
+            await self._record_navigation_diagnostic(
+                page,
+                stage="creator_profile_parse",
+                outcome="ok_static_state",
+            )
+            return creator_info, "ok_static_state"
+        static_reason = self._creator_client_parse_reason() or "unknown"
+        return None, f"{projection_reason},static_{static_reason}"
 
     async def _creator_runtime_projection(
         self,
@@ -442,7 +509,7 @@ class XhsAuthorMixin:
             return None, reason
         if any(page_user_id != user_id for page_user_id in creator_profile_user_ids(projected)):
             return None, "creator_mismatch"
-        if not creator_followers_observed(user_id, projected):
+        if not creator_runtime_followers_observed(user_id, projected):
             return None, "followers_unobserved"
         return projected, "ok"
 
@@ -459,7 +526,11 @@ class XhsAuthorMixin:
         page: Page,
         user_id: str,
     ) -> Optional[Dict]:
-        """Keep a creator page open until manual login or security verification completes."""
+        """Keep a creator page open until manual login or security verification completes.
+
+        验证标记消失后每轮只做“检查 + 读取一次”（_read_creator_profile_snapshot），不会重入就绪
+        等待或本函数；作者不一致时直接结束，其余未取到的情况在共享人工预算内继续等待。
+        """
         poll_seconds = max(
             1.0,
             self.inputs.creator_verify_poll_seconds(),
@@ -490,9 +561,12 @@ class XhsAuthorMixin:
                     return await self._recover_creator_login_on_primary_page(user_id)
                 if not markers.get("captcha_or_verify"):
                     ticket.raise_if_exhausted()
-                    html_content = await page.content()
-                    creator_info = self.xhs_client.extract_creator_info_from_html(
-                        html_content
+                    creator_info, read_reason = await self._read_creator_profile_snapshot(
+                        page,
+                        str(user_id),
+                    )
+                    self._creator_browser_reason = (
+                        "" if creator_info else f"verification_wait:{read_reason}"
                     )
                     if creator_info:
                         logger.info(
@@ -500,6 +574,8 @@ class XhsAuthorMixin:
                             f"verification completed: {user_id}"
                         )
                         return creator_info
+                    if read_reason == "creator_mismatch":
+                        return None
 
                 remaining = ticket.remaining_seconds
                 if remaining <= 0:
