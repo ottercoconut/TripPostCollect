@@ -111,6 +111,8 @@ class XiaoHongShuClient:
         self.playwright_page = playwright_page
         self.cookie_dict = cookie_dict
         self._extractor = XiaoHongShuExtractor()
+        # 最近一次作者页静态解析的原因类别，供作者补全写诊断。
+        self.last_creator_parse_reason = ""
         self._manual_wait_budget = manual_wait_budget
 
     def _get_manual_wait_budget(self) -> XHSManualWaitBudget:
@@ -510,7 +512,10 @@ class XiaoHongShuClient:
 
     def extract_creator_info_from_html(self, html_content: str) -> Optional[Dict]:
         """Expose creator parsing for HTML loaded through the signed-in browser."""
-        return self._extractor.extract_creator_info_from_html(html_content)
+        creator_info, self.last_creator_parse_reason = (
+            self._extractor.extract_creator_info_with_reason(html_content)
+        )
+        return creator_info
 
     @retry(
         stop=stop_after_attempt(3),

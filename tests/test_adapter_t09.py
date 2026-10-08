@@ -35,6 +35,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 import pytest
 import tenacity._asyncio
 
+from support.creator_runtime_profile import use_legacy_creator_page_read
 from support.raw_author_identity import XHS_KEEP_AUTHOR_DETAIL_ENV, use_raw_author_identity
 from trippostcollect.application import events
 from trippostcollect.platforms import _fork_bridge
@@ -193,10 +194,12 @@ class RootSide:
             modules = {
                 name: importlib.import_module(prefix + name)
                 for name in ("core", "client", "login", "manual_wait", "errors", "repair",
-                             "behavior", "signer", "parser", "models")
+                             "behavior", "signer", "parser", "models", "author")
             }
         finally:
             _register_new_modules(patch, ("trippostcollect.platforms.entry", "trippostcollect.platforms.xhs"))
+        # #52：作者页取数改为运行时投影优先；对照时换回旧的 content() + 静态解析，其余逐字节比较。
+        use_legacy_creator_page_read(patch, modules["author"])
         return SimpleNamespace(
             side=self,
             entry=entry,

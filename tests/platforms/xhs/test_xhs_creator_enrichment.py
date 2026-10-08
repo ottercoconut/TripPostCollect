@@ -320,6 +320,10 @@ async def test_creator_browser_fallback_keeps_qr_page_open_until_verified(
             assert self.inspection_calls >= 3
             return "creator"
 
+        async def evaluate(self, script, arg=None):
+            # #52：验证完成后先读运行时投影；这里页面没有作者状态，回退静态解析。
+            return {"status": "missing"} if arg is not None else {}
+
         async def close(self):
             self.closed = True
 
@@ -337,6 +341,8 @@ async def test_creator_browser_fallback_keeps_qr_page_open_until_verified(
         [
             {"captcha_or_verify": True},
             {"captcha_or_verify": True},
+            {"captcha_or_verify": False},
+            # #52：接受验证后读到的结果前复查一次可见状态。
             {"captcha_or_verify": False},
         ]
     )
@@ -388,6 +394,10 @@ async def test_creator_verification_popups_share_one_remaining_budget(
 
         async def content(self) -> str:
             return "creator" if self.name == "first" else ""
+
+        async def evaluate(self, script, arg=None):
+            # #52：验证完成后先读运行时投影；这里页面没有作者状态，回退静态解析。
+            return {"status": "missing"} if arg is not None else {}
 
     class CreatorHtmlClient:
         @staticmethod
