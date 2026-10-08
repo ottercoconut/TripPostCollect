@@ -109,5 +109,6 @@ jobs:
             ${{ env.TPC_WORK }}/reports/*/os-policy.json
             ${{ env.TPC_WORK }}/reports/*/execution-guard.json
             ${{ env.TPC_WORK }}/reports/matrix.json
+            ${{ env.TPC_WORK }}/reports/coverage.json
           if-no-files-found: error
           retention-days: 7
