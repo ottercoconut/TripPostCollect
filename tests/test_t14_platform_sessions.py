@@ -518,3 +518,15 @@ def test_in_process_cases_pass_in_unmigrated_checkout(
         paths.require_platform_session_migrated(platform)
     with pytest.raises(Reached):
         collection.run_platform("douyin", argparse.Namespace(keyword="青岛"), tmp_path / "b", ports=None)
+
+
+def test_dangling_partial_symlink_is_refused(session_roots: tuple[Path, Path]) -> None:
+    _, sessions = session_roots
+    (sessions / "weibo" / "profile").mkdir(parents=True)
+    partial = sessions / "weibo" / "profile.partial"
+    partial.symlink_to(sessions / "weibo" / "missing-target")
+    assert not partial.exists() and partial.is_symlink()
+    with pytest.raises(RuntimeError, match=r"^platform_session_migration_required:weibo .*profile\.partial"):
+        paths.require_platform_session_migrated("weibo")
+    partial.unlink()
+    paths.require_platform_session_migrated("weibo")

@@ -144,7 +144,8 @@ def require_platform_session_migrated(platform_key: str) -> None:
     problems = []
     for legacy, target in legacy_fork_profile_dirs(platform_key):
         partial = target.with_name(f"{target.name}.partial")
-        if partial.exists():
+        # 悬空符号链接 exists() 为 False，也必须视为残留。
+        if partial.exists() or partial.is_symlink():
             problems.append(f"未完成的迁移残留 {partial}，删除后重做")
         elif legacy.exists() and not target.exists():
             problems.append(f"{legacy} -> {target}")

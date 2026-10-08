@@ -576,14 +576,17 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
    任一步失败时脚本以非零状态停止并打印 `FAILED: <平台> <步骤>`。按提示只删除新侧 `.partial`（以及确认
    为复制错误的新侧目录）后重跑；旧目录与旧快照始终不动。
 
-3. 校验：逐相对条目比较每对 profile 目录（旧侧不计快照，因为新目录里已删掉该副本）。条目集合用
+3. 校验：逐相对条目比较每对 profile 目录。只在旧侧排除快照（新侧已删掉该副本）；新侧不排除，若新
+   profile 里残留快照副本会表现为条目集合不同。条目集合用
    `find -print0 | sort -z` 比较；每个条目用 BSD `stat -f '%HT %p %z %m %Su:%Sg'` 比较类型、权限、大小、
    mtime 与属主属组，符号链接再比较 `readlink`，普通文件用 `cmp -s` 逐字节比较；另对照
-   `find <dir> -perm +077 | wc -l` 的 group/other 权限条目数。profile 根本身单独核对类型、权限（应为
-   `700`）、属主与 mtime。快照比较大小、权限、mtime、属主属组与 SHA-256，并要求新快照为 `-rw-------`。
-   输出只含平台名、目录种类、布尔值和计数，不打印路径、内容、哈希或 Cookie。`stat`、`find`、`cmp`、
-   `readlink`、`shasum` 等任一命令出错都以非零状态停止，不会打印“一致”；全部命令成功但发现任何不一致时，
-   脚本最后以状态 2 退出。
+   `find <dir> -perm +077 | wc -l` 的 group/other 权限条目数。profile 根本身单独核对类型、权限、属主与
+   mtime：新旧根权限必须相同（`root_mode_same`）；`root_mode_700` 只作信息输出，不计入失败（旧根若是 755，
+   `ditto` 会原样复制，不应要求操作人改权限）。快照比较大小、权限、mtime、属主属组与 SHA-256，并要求新快照为
+   `-rw-------`。输出只含平台名、目录种类、布尔值和计数，不打印路径、内容、哈希或 Cookie。
+   `stat`、`find`、`cmp`、`readlink`、`shasum` 等任一命令出错都以非零状态立即停止；此时前面已通过的平台
+   可能已经打印了“一致”，所以 **最终结论只以退出码和最后的 `problems=N` 为准**。全部命令成功时脚本打印
+   `problems=N`（不一致项数），N 不为 0 时以状态 2 退出。脚本结束后紧接着执行 `echo "exit=$?"` 确认退出码。
 
    <!-- t14-migrate:step3 -->
    ```bash
@@ -602,12 +605,16 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
      if [ "$1" = "$2" ]; then echo yes; else echo no; fi
    }
    entries() {
-     (cd "$1" && find . -mindepth 1 ! -path "./$snap" -print0 | LC_ALL=C sort -z)
+     if [ "$2" = old ]; then
+       (cd "$1" && find . -mindepth 1 ! -path "./$snap" -print0 | LC_ALL=C sort -z)
+     else
+       (cd "$1" && find . -mindepth 1 -print0 | LC_ALL=C sort -z)
+     fi
    }
    compare_tree() {
-     local a=$1 b=$2 same=no total=0 bad=0 rel sa sb la lb rc perm_a perm_b
-     entries "$a" > "$work/a" || fail "list old entries"
-     entries "$b" > "$work/b" || fail "list new entries"
+     local label=$1 a=$2 b=$3 same=no total=0 bad=0 rel sa sb la lb rc perm_a perm_b
+     entries "$a" old > "$work/a" || fail "list old entries"
+     entries "$b" new > "$work/b" || fail "list new entries"
      rc=0
      cmp -s "$work/a" "$work/b" || rc=$?
      [ "$rc" -le 1 ] || fail "cmp entry lists"
@@ -635,13 +642,13 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
      done < "$work/a"
      perm_a=$(find "$a" ! -path "$a/$snap" -perm +077 | wc -l | tr -d ' ') || fail "find old perms"
      perm_b=$(find "$b" -perm +077 | wc -l | tr -d ' ') || fail "find new perms"
-     echo "same_entry_set=$same entries=$total mismatched=$bad group_other_perm=$perm_a/$perm_b"
+     echo "$label: same_entry_set=$same entries=$total mismatched=$bad group_other_perm=$perm_a/$perm_b"
      if [ "$same" != yes ] || [ "$bad" -ne 0 ] || [ "$perm_a" != "$perm_b" ]; then
        problems=$((problems + 1))
      fi
    }
    compare_root() {
-     local a=$1 b=$2 ta tb ma mb oa ob ra rb
+     local label=$1 a=$2 b=$3 ta tb ma mb oa ob ra rb
      ta=$(stat -f %HT "$a") || fail "stat old root"
      tb=$(stat -f %HT "$b") || fail "stat new root"
      ma=$(stat -f %Lp "$a") || fail "stat old root"
@@ -650,10 +657,11 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
      ob=$(stat -f %Su "$b") || fail "stat new root"
      ra=$(stat -f %m "$a") || fail "stat old root"
      rb=$(stat -f %m "$b") || fail "stat new root"
-     echo "root_type_same=$(yes_no "$ta" "$tb") root_dir=$([ -d "$b" ] && [ ! -L "$b" ] && echo yes || echo no)" \
-       "root_mode_700=$(yes_no "$ma:$mb" "700:700") root_owner_same=$(yes_no "$oa" "$ob")" \
+     echo "$label: root_type_same=$(yes_no "$ta" "$tb") root_dir=$([ -d "$b" ] && [ ! -L "$b" ] && echo yes || echo no)" \
+       "root_mode_same=$(yes_no "$ma" "$mb") root_mode_700=$(yes_no "$mb" 700)" \
+       "root_owner_same=$(yes_no "$oa" "$ob")" \
        "root_mtime_same=$(yes_no "$ra" "$rb")"
-     if [ "$ta" != "$tb" ] || [ ! -d "$b" ] || [ "$ma:$mb" != "700:700" ] || [ "$oa" != "$ob" ] || [ "$ra" != "$rb" ]; then
+     if [ "$ta" != "$tb" ] || [ ! -d "$b" ] || [ "$ma" != "$mb" ] || [ "$oa" != "$ob" ] || [ "$ra" != "$rb" ]; then
        problems=$((problems + 1))
      fi
    }
@@ -670,10 +678,8 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
          continue
        fi
        # 直接在当前 shell 调用（不放进 $(...)），fail 才能终止整个脚本、计数才能累加。
-       printf '%s %s root: ' "$platform" "${kind#*:}"
-       compare_root "$old" "$new"
-       printf '%s %s: ' "$platform" "${kind#*:}"
-       compare_tree "$old" "$new"
+       compare_root "$platform ${kind#*:} root" "$old" "$new"
+       compare_tree "$platform ${kind#*:}" "$old" "$new"
      done
      old_snap=$legacy_root/${code}_user_data_dir/$snap
      new_snap=data/runtime/platform_sessions/$platform/$snap
@@ -695,13 +701,16 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
        problems=$((problems + 1))
      fi
    done
+   echo "problems=$problems"
    [ "$problems" -eq 0 ] || exit 2
    SH
+   echo "exit=$?"
    ```
    <!-- /t14-migrate:step3 -->
 
-   脚本应以状态 0 结束：每行 root 结果均为 `yes`，每行 profile 结果为 `same_entry_set=yes`、`mismatched=0`，
-   且 `group_other_perm` 两侧计数相等；快照应为“一致”。非 root 账号复制时属主或属组可能与旧侧不同；即使只有属组不同，也按“不一致”交人工
+   通过标准是最后两行为 `problems=0` 与 `exit=0`：此时每行 root 结果除信息项 `root_mode_700` 外均为 `yes`，
+   每行 profile 结果为 `same_entry_set=yes`、`mismatched=0` 且 `group_other_perm` 两侧计数相等，快照为“一致”。
+   `exit=1` 表示某个命令出错（看 `FAILED:` 行），`exit=2` 表示存在不一致。非 root 账号复制时属主或属组可能与旧侧不同；即使只有属组不同，也按“不一致”交人工
    确认，不得擅自 `chmod`/`chown`。确认是复制错误时，只删除新侧对应的 `profile`/`cdp_profile` 目录或
    新快照文件后重做第 2 步；旧目录与旧快照始终不动，可重复复制。
 
