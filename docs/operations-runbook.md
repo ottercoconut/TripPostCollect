@@ -124,7 +124,8 @@ shasum -a 256 data/backups/trippostcollect-before-<run_id>.sqlite
 
 知乎 detail 页可能不返回作者粉丝或 answer 创建时间。修复 child 会按平台 ID 从同一 SQLite 旧行读取
 已持久化的 `published_at`、`followers_observed`、`author_followers_source` 和粉丝数，仅补齐详情载荷
-缺失的元数据；正文、图片和 `answer_detail`/`article_detail` 来源仍必须来自本次详情访问。若补齐后仍无
+缺失的元数据。本轮 `followers_observed=true` 且带有数值的粉丝量（包括真实 `0`）始终优先，不得被旧行
+覆盖；本轮未观测时，旧行的粉丝数、`followers_observed` 和来源整组回填，保证数值与来源一致。正文、图片和 `answer_detail`/`article_detail` 来源仍必须来自本次详情访问。若补齐后仍无
 有效详情，child 将本批标记为 `repair_no_valid_detail` 且不得把搜索载荷直接当作详情成功；无人值守总控
 按下文规则记录该批失败并继续后续批次，只有运行级阻断才停止平台总控。
 
