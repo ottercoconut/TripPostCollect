@@ -23,11 +23,13 @@ import httpx
 from PIL import Image
 import pytest
 
+from support import legacy_expectations as expectations
 from support.raw_author_identity import use_raw_author_identity
 from trippostcollect.application import events
+from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.core import paths
 from trippostcollect.artifacts import jsonl
-from trippostcollect.platforms import _fork_bridge, entry
+from trippostcollect.platforms import entry
 from trippostcollect.platforms.douyin import client, core, login, login_support, parser, signer
 from trippostcollect.runtime import image_retry
 
@@ -54,7 +56,12 @@ KEYWORD = "青岛崂山旅游攻略"
 
 @contextmanager
 def legacy(tmp_path, monkeypatch):
-    """以原模块名加载逐字冻结文件，退出时恢复模块表与包属性。"""
+    """以原模块名加载逐字冻结文件，退出时恢复模块表与包属性。
+
+    冻结文件在 fork 顶层包之上执行，仅供双轨对照与 T14 守卫使用，随 fork 在 T14-C 删除。
+    """
+    from trippostcollect.platforms import _fork_bridge
+
     _fork_bridge.install()
     with monkeypatch.context() as patch:
         module_names = []
@@ -123,7 +130,8 @@ async def drive(modules, root, patch, scenario, fallback):
     root.mkdir()
     trace = []
     counters = Counter()
-    config = importlib.import_module("config")
+    # 旧侧仍改 fork config；根侧用根配置对象（与 fork 默认值逐键相同，见 T12 守护），不加载 fork。
+    config = importlib.import_module("config") if modules is not None else worker_config()
     detail_mode = scenario.startswith("detail")
     for key, value in {
         "PLATFORM": "dy", "LOGIN_TYPE": "cookie", "COOKIES": "sessionid=fixture",
@@ -412,6 +420,10 @@ SCENARIOS = (
 )
 
 
+T14_DRIVE = ("T06", "requests_records_images_events")
+
+
+@expectations.legacy_only
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback", [0, 1])
 @pytest.mark.parametrize("scenario", SCENARIOS)
@@ -422,6 +434,74 @@ async def test_old_new_requests_records_images_events(tmp_path, monkeypatch, sce
     with monkeypatch.context() as patch:
         after = await drive(None, tmp_path / "new", patch, scenario, fallback)
     assert after == before
+    check_drive_result(after, scenario, fallback)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [0, 1])
+@pytest.mark.parametrize("scenario", SCENARIOS)
+async def test_root_matches_frozen_legacy_requests_records_images_events(tmp_path, monkeypatch, scenario, fallback):
+    """T14：根实现与固化的旧实现结果比较（同一 drive、同一 == 语义），不加载 fork 或 E。"""
+    with monkeypatch.context() as patch:
+        after = await drive(None, tmp_path / "new", patch, scenario, fallback)
+    assert expectations.scrub(after, (tmp_path, "<TMP>")) == expectations.load(*T14_DRIVE, f"{scenario}-fallback{fallback}")
+    check_drive_result(after, scenario, fallback)
+
+
+@expectations.legacy_guard
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [0, 1])
+@pytest.mark.parametrize("scenario", SCENARIOS)
+async def test_t14_guard_frozen_legacy_drive(tmp_path, monkeypatch, pytestconfig, scenario, fallback):
+    with legacy(tmp_path / "legacy", monkeypatch) as old:
+        with monkeypatch.context() as patch:
+            before = await drive(old, tmp_path / "old", patch, scenario, fallback)
+    expectations.check_legacy(
+        pytestconfig, *T14_DRIVE, f"{scenario}-fallback{fallback}", expectations.scrub(before, (tmp_path, "<TMP>")),
+        source_test="tests/test_adapter_t06.py::test_old_new_requests_records_images_events",
+    )
+
+
+# 旧桥 fork 工厂与冻结 T06 fixture 的旧侧结果逐字节相同（守卫分别证明），共用一份预期。
+T14_BRIDGE = T14_DRIVE
+
+
+async def drive_entry_assembly(root, patch, scenario, fallback):
+    """新 worker 装配路径：install_hooks 读取兜底开关后由 load_crawler 无参构造；不加载 fork/E。
+
+    与 test_adapter_t06_bridge.py::drive_assembly 的新侧逐项相同，只是不再装载 fork 工厂做类型比对。
+    """
+    new_class = entry.load_crawler("dy")
+    assert issubclass(new_class, core.DouYinCrawler)
+
+    def construct(**dependencies):
+        patch.setattr(entry, "_douyin_browser_detail_fallback", False)
+        entry.install_hooks()
+        assert entry._douyin_browser_detail_fallback is bool(fallback)
+        dependencies["ports"] = replace(
+            dependencies["ports"], browser_detail_fallback=entry._douyin_browser_detail_fallback,
+        )
+        patch.setattr(entry, "douyin_dependencies", lambda config: dependencies)
+        crawler = new_class()
+        assert type(crawler) is new_class
+        return crawler
+
+    patch.setattr(core, "DouYinCrawler", construct)
+    return await drive(None, root, patch, scenario, fallback)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [0, 1])
+@pytest.mark.parametrize("scenario", SCENARIOS)
+async def test_root_entry_assembly_matches_frozen_fork_factory(tmp_path, monkeypatch, scenario, fallback):
+    """T14：替代旧桥工厂对照；根入口装配结果与固化的 fork 工厂结果比较。"""
+    with monkeypatch.context() as patch:
+        new = await drive_entry_assembly(tmp_path / "new", patch, scenario, fallback)
+    assert expectations.scrub(new, (tmp_path, "<TMP>")) == expectations.load(*T14_BRIDGE, f"{scenario}-fallback{fallback}")
+    check_drive_result(new, scenario, fallback)
+
+
+def check_drive_result(after, scenario, fallback):
     assert after["error"] is None or scenario == "login_expired", after["error"]
     trace = after["trace"]
     assert next(i for i, row in enumerate(trace) if row[0] == "listen") < next(
@@ -515,52 +595,94 @@ def test_unchanged_parser_signer_and_login_support_bodies():
             assert ast.dump(expected) == ast.dump(actual), (name, symbol)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("visible_count,offset,search_id,verify", [
+FIRST_PAGE_CASES = [
     (10, 10, "stable", False), (9, 10, "stable", False),
     (10, 10, "", False), (10, 10, "stable", True), (10, 0, "stable", False),
-])
+]
+T14_FIRST_PAGE = ("T06", "first_page_rebuild")
+
+
+@expectations.legacy_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize("visible_count,offset,search_id,verify", FIRST_PAGE_CASES)
 async def test_first_page_rebuild_evidence_matches_baseline(tmp_path, monkeypatch, visible_count, offset, search_id, verify):
-    async def exercise(client_class, *, ports=None):
-        calls = []
-
-        class Page:
-            def on(self, *args):
-                pass
-
-            def locator(self, selector):
-                assert selector == '[id^="waterfall_item_"]:visible'
-                return self
-
-            async def evaluate_all(self, script):
-                return [str(100 + i) for i in range(visible_count)]
-
-        kwargs = {"ports": ports} if ports else {}
-        value = client_class(headers={"User-Agent": "fixture"}, playwright_page=Page(), cookie_dict={}, **kwargs)
-        payload = {"data": [{"aweme_info": aweme(110)}], "has_more": 1, "extra": {"logid": "rotating"}}
-        if verify:
-            payload["search_nil_info"] = {"search_nil_type": "verify_check"}
-        value._observed_search_responses.append({"keyword": KEYWORD, "offset": offset, "search_id": search_id, "payload": payload})
-
-        async def detail(post_id):
-            calls.append(post_id)
-            return aweme(post_id)
-
-        value.get_video_by_id = detail
-        result = await value._build_visible_first_page_fallback(keyword=KEYWORD, offset=0, search_id="")
-        return result, calls
-
+    params = (visible_count, offset, search_id, verify)
     with legacy(tmp_path / "legacy", monkeypatch) as old:
-        before = await exercise(old.client.DouYinClient)
-    ports = entry.douyin_dependencies(importlib.import_module("config"))["ports"].client
-    after = await exercise(client.DouYinClient, ports=ports)
+        before = await first_page_rebuild(old.client.DouYinClient, params)
+    ports = entry.douyin_dependencies(worker_config())["ports"].client
+    after = await first_page_rebuild(client.DouYinClient, params, ports=ports)
     assert after == before
-    if (visible_count, offset, search_id, verify) == (10, 10, "stable", False):
+    check_first_page_rebuild(after, params)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("visible_count,offset,search_id,verify", FIRST_PAGE_CASES)
+async def test_root_first_page_rebuild_matches_frozen_legacy(visible_count, offset, search_id, verify):
+    params = (visible_count, offset, search_id, verify)
+    ports = entry.douyin_dependencies(worker_config())["ports"].client
+    after = await first_page_rebuild(client.DouYinClient, params, ports=ports)
+    assert expectations.scrub(after) == expectations.load(*T14_FIRST_PAGE, first_page_case(params))
+    check_first_page_rebuild(after, params)
+
+
+@expectations.legacy_guard
+@pytest.mark.asyncio
+@pytest.mark.parametrize("visible_count,offset,search_id,verify", FIRST_PAGE_CASES)
+async def test_t14_guard_frozen_legacy_first_page_rebuild(tmp_path, monkeypatch, pytestconfig,
+                                                          visible_count, offset, search_id, verify):
+    params = (visible_count, offset, search_id, verify)
+    with legacy(tmp_path / "legacy", monkeypatch) as old:
+        before = await first_page_rebuild(old.client.DouYinClient, params)
+    expectations.check_legacy(
+        pytestconfig, *T14_FIRST_PAGE, first_page_case(params), expectations.scrub(before),
+        source_test="tests/test_adapter_t06.py::test_first_page_rebuild_evidence_matches_baseline",
+    )
+
+
+def first_page_case(params):
+    visible_count, offset, search_id, verify = params
+    return f"visible{visible_count}-offset{offset}-search_id_{search_id or 'empty'}-verify{int(verify)}"
+
+
+async def first_page_rebuild(client_class, params, *, ports=None):
+    visible_count, offset, search_id, verify = params
+    calls = []
+
+    class Page:
+        def on(self, *args):
+            pass
+
+        def locator(self, selector):
+            assert selector == '[id^="waterfall_item_"]:visible'
+            return self
+
+        async def evaluate_all(self, script):
+            return [str(100 + i) for i in range(visible_count)]
+
+    kwargs = {"ports": ports} if ports else {}
+    value = client_class(headers={"User-Agent": "fixture"}, playwright_page=Page(), cookie_dict={}, **kwargs)
+    payload = {"data": [{"aweme_info": aweme(110)}], "has_more": 1, "extra": {"logid": "rotating"}}
+    if verify:
+        payload["search_nil_info"] = {"search_nil_type": "verify_check"}
+    value._observed_search_responses.append({"keyword": KEYWORD, "offset": offset, "search_id": search_id, "payload": payload})
+
+    async def detail(post_id):
+        calls.append(post_id)
+        return aweme(post_id)
+
+    value.get_video_by_id = detail
+    result = await value._build_visible_first_page_fallback(keyword=KEYWORD, offset=0, search_id="")
+    return result, calls
+
+
+def check_first_page_rebuild(after, params):
+    if params == (10, 10, "stable", False):
         assert len(after[0]["data"]) == 10 and after[0]["extra"]["logid"] == "stable"
     else:
         assert after == (None, [])
 
 
+@expectations.legacy_only
 @pytest.mark.asyncio
 async def test_memory_and_slider_lifecycle_match_baseline(tmp_path, monkeypatch):
     with legacy(tmp_path / "legacy", monkeypatch):
@@ -570,13 +692,39 @@ async def test_memory_and_slider_lifecycle_match_baseline(tmp_path, monkeypatch)
             assert old_slider.get_tracks(137, level) == login_support.get_tracks(137, level)
         values = []
         for cache_class in (old_cache, login_support.ExpiringLocalCache):
-            value = cache_class()
-            value.set("dy_phone", b"123456", 120)
-            values.append((value.get("dy_phone"), value.keys("dy_*"), value.get("absent")))
-            task = value._cron_task
-            value.__del__()
-            assert task.cancelling()
+            values.append(cache_lifecycle(cache_class))
         assert values[0] == values[1] == (b"123456", ["dy_phone"], None)
+
+
+T14_SLIDER = ("T06", "slider_tracks")
+
+
+def cache_lifecycle(cache_class):
+    value = cache_class()
+    value.set("dy_phone", b"123456", 120)
+    result = (value.get("dy_phone"), value.keys("dy_*"), value.get("absent"))
+    task = value._cron_task
+    value.__del__()
+    assert task.cancelling()
+    return result
+
+
+@pytest.mark.asyncio
+async def test_root_slider_tracks_and_cache_match_frozen_legacy():
+    """T14：滑块轨迹与固化旧值比较；缓存生命周期原本就与字面期望比较，此处照旧。"""
+    tracks = {level: login_support.get_tracks(137, level) for level in ("easy", "hard")}
+    assert tracks == expectations.load(*T14_SLIDER, "get_tracks_137")
+    assert cache_lifecycle(login_support.ExpiringLocalCache) == (b"123456", ["dy_phone"], None)
+
+
+@expectations.legacy_guard
+@pytest.mark.asyncio
+async def test_t14_guard_frozen_legacy_slider_tracks(tmp_path, monkeypatch, pytestconfig):
+    with legacy(tmp_path / "legacy", monkeypatch):
+        old_slider = importlib.import_module("tools.slider_util")
+        tracks = {level: old_slider.get_tracks(137, level) for level in ("easy", "hard")}
+    expectations.check_legacy(pytestconfig, *T14_SLIDER, "get_tracks_137", tracks,
+                              source_test="tests/test_adapter_t06.py::test_memory_and_slider_lifecycle_match_baseline")
 
 
 @pytest.mark.parametrize("fallback", ["0", "1"])
@@ -606,9 +754,15 @@ def test_worker_assembly_from_arbitrary_cwd(tmp_path, fallback):
     assert json.loads(result.stdout.splitlines()[-1]) == ["WeiboCrawler", "ZhihuCrawler", "XiaoHongShuCrawler"]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("original_error,page_present", [(False, True), (True, True), (True, False)])
-async def test_repair_exception_chain_matches_baseline(tmp_path, monkeypatch, original_error, page_present):
+REPAIR_CASES = [(False, True), (True, True), (True, False)]
+T14_REPAIR = ("T06", "repair_exception_chain")
+
+
+def repair_case(original_error, page_present):
+    return f"original_error{int(original_error)}-page{int(page_present)}"
+
+
+def repair_inputs(monkeypatch, original_error, page_present):
     from playwright.async_api import Error as PlaywrightError
 
     trace = []
@@ -639,66 +793,131 @@ async def test_repair_exception_chain_matches_baseline(tmp_path, monkeypatch, or
     monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK", "1")
     monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_TIMEOUT_MS", "30000")
     kwargs = {"headers": {}, "playwright_page": Page() if page_present else None, "cookie_dict": {}}
+    return trace, original, capture, kwargs
+
+
+async def legacy_repair_chain(tmp_path, monkeypatch, original_error, page_present):
+    trace, original, capture, kwargs = repair_inputs(monkeypatch, original_error, page_present)
     with legacy(tmp_path / "legacy", monkeypatch) as old:
         monkeypatch.setattr(old.client.DouYinClient, "get_video_by_id", original)
         old.repair.install_douyin_browser_detail_fallback()
-        before = await capture(old.client.DouYinClient(**kwargs))
-    trace.clear()
-    ports = entry.douyin_dependencies(importlib.import_module("config"))["ports"].client
+        return await capture(old.client.DouYinClient(**kwargs))
+
+
+async def root_repair_chain(monkeypatch, original_error, page_present):
+    trace, original, capture, kwargs = repair_inputs(monkeypatch, original_error, page_present)
+    ports = entry.douyin_dependencies(worker_config())["ports"].client
     monkeypatch.setattr(client.DouYinClient, "_get_video_by_id", original)
-    after = await capture(client.DouYinClient(ports=ports, browser_detail_fallback=True, **kwargs))
+    return await capture(client.DouYinClient(ports=ports, browser_detail_fallback=True, **kwargs))
+
+
+@expectations.legacy_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original_error,page_present", REPAIR_CASES)
+async def test_repair_exception_chain_matches_baseline(tmp_path, monkeypatch, original_error, page_present):
+    before = await legacy_repair_chain(tmp_path, monkeypatch, original_error, page_present)
+    after = await root_repair_chain(monkeypatch, original_error, page_present)
     assert after == before
     assert after[2] == ("ValueError" if original_error else "NoneType")
 
 
 @pytest.mark.asyncio
-async def test_post_form_and_signature_inputs_match_baseline(tmp_path, monkeypatch):
-    async def exercise(module, signer_module, patch, *, ports=None):
-        trace = []
+@pytest.mark.parametrize("original_error,page_present", REPAIR_CASES)
+async def test_root_repair_exception_chain_matches_frozen_legacy(monkeypatch, original_error, page_present):
+    after = await root_repair_chain(monkeypatch, original_error, page_present)
+    assert expectations.scrub(after) == expectations.load(*T14_REPAIR, repair_case(original_error, page_present))
+    assert after[2] == ("ValueError" if original_error else "NoneType")
 
-        class Page:
-            def on(self, *args):
-                pass
 
-            async def evaluate(self, script):
-                if script == "() => window.localStorage":
-                    return {"__tea_cache_tokens_1300": '{"web_id":"123"}', "xmst": "fixture"}
-                return {"userAgent": "Chrome/125.0.0.0"}
+@expectations.legacy_guard
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original_error,page_present", REPAIR_CASES)
+async def test_t14_guard_frozen_legacy_repair_chain(tmp_path, monkeypatch, pytestconfig, original_error, page_present):
+    before = await legacy_repair_chain(tmp_path, monkeypatch, original_error, page_present)
+    expectations.check_legacy(
+        pytestconfig, *T14_REPAIR, repair_case(original_error, page_present), expectations.scrub(before),
+        source_test="tests/test_adapter_t06.py::test_repair_exception_chain_matches_baseline",
+    )
 
-        async def sign(url, params, post_data, user_agent, page):
-            trace.append(("sign", url, params, post_data, user_agent))
-            return "fixed+bogus/="
 
-        class Http:
-            async def __aenter__(self):
-                return self
+async def post_form(module, signer_module, patch, *, ports=None):
+    trace = []
 
-            async def __aexit__(self, *args):
-                pass
+    class Page:
+        def on(self, *args):
+            pass
 
-            async def request(self, method, url, **kwargs):
-                request = httpx.Request(method, url, data=kwargs["data"], headers=kwargs["headers"])
-                trace.append(("request", method, str(request.url), request.content, sorted(request.headers.items())))
-                return httpx.Response(200, json={"ok": True}, request=request)
+        async def evaluate(self, script):
+            if script == "() => window.localStorage":
+                return {"__tea_cache_tokens_1300": '{"web_id":"123"}', "xmst": "fixture"}
+            return {"userAgent": "Chrome/125.0.0.0"}
 
-        patch.setattr(module, "get_a_bogus", sign)
-        kwargs = {"headers": {"User-Agent": "Chrome/125.0.0.0", "Cookie": "sessionid=current", "Referer": "https://www.douyin.com/"},
-                  "playwright_page": Page(), "cookie_dict": {"s_v_web_id": "verify", "UIFID": "current"}}
-        if ports:
-            kwargs["ports"] = replace(ports, make_async_client=lambda **kw: Http())
-        else:
-            patch.setattr(module, "make_async_client", lambda **kw: Http())
-        value = module.DouYinClient(**kwargs)
-        assert await value.post("/aweme/v1/web/comment/reply/", {"id": "101", "text": "青岛"}) == {"ok": True}
-        return trace
+    async def sign(url, params, post_data, user_agent, page):
+        trace.append(("sign", url, params, post_data, user_agent))
+        return "fixed+bogus/="
 
-    with legacy(tmp_path / "legacy", monkeypatch) as old:
-        with monkeypatch.context() as patch:
-            before = await exercise(old.client, old.signer, patch)
-    ports = entry.douyin_dependencies(importlib.import_module("config"))["ports"].client
-    with monkeypatch.context() as patch:
-        after = await exercise(client, signer, patch, ports=ports)
-    assert after == before
+    class Http:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def request(self, method, url, **kwargs):
+            request = httpx.Request(method, url, data=kwargs["data"], headers=kwargs["headers"])
+            trace.append(("request", method, str(request.url), request.content, sorted(request.headers.items())))
+            return httpx.Response(200, json={"ok": True}, request=request)
+
+    patch.setattr(module, "get_a_bogus", sign)
+    kwargs = {"headers": {"User-Agent": "Chrome/125.0.0.0", "Cookie": "sessionid=current", "Referer": "https://www.douyin.com/"},
+              "playwright_page": Page(), "cookie_dict": {"s_v_web_id": "verify", "UIFID": "current"}}
+    if ports:
+        kwargs["ports"] = replace(ports, make_async_client=lambda **kw: Http())
+    else:
+        patch.setattr(module, "make_async_client", lambda **kw: Http())
+    value = module.DouYinClient(**kwargs)
+    assert await value.post("/aweme/v1/web/comment/reply/", {"id": "101", "text": "青岛"}) == {"ok": True}
+    return trace
+
+
+def check_post_form(after):
     assert after[0][3] == {}  # 保留旧 post 没有传 request_method 的签名输入。
     assert b"a_bogus=fixed%2Bbogus%2F%3D" in after[1][3]
     assert "x-tt-argus" not in dict(after[1][4])
+
+
+T14_POST_FORM = ("T06", "post_form_signature_inputs")
+
+
+@expectations.legacy_only
+@pytest.mark.asyncio
+async def test_post_form_and_signature_inputs_match_baseline(tmp_path, monkeypatch):
+    with legacy(tmp_path / "legacy", monkeypatch) as old:
+        with monkeypatch.context() as patch:
+            before = await post_form(old.client, old.signer, patch)
+    ports = entry.douyin_dependencies(worker_config())["ports"].client
+    with monkeypatch.context() as patch:
+        after = await post_form(client, signer, patch, ports=ports)
+    assert after == before
+    check_post_form(after)
+
+
+@pytest.mark.asyncio
+async def test_root_post_form_and_signature_inputs_match_frozen_legacy(monkeypatch):
+    ports = entry.douyin_dependencies(worker_config())["ports"].client
+    with monkeypatch.context() as patch:
+        after = await post_form(client, signer, patch, ports=ports)
+    assert expectations.scrub(after) == expectations.load(*T14_POST_FORM, "comment_reply")
+    check_post_form(after)
+
+
+@expectations.legacy_guard
+@pytest.mark.asyncio
+async def test_t14_guard_frozen_legacy_post_form(tmp_path, monkeypatch, pytestconfig):
+    with legacy(tmp_path / "legacy", monkeypatch) as old:
+        with monkeypatch.context() as patch:
+            before = await post_form(old.client, old.signer, patch)
+    expectations.check_legacy(
+        pytestconfig, *T14_POST_FORM, "comment_reply", expectations.scrub(before),
+        source_test="tests/test_adapter_t06.py::test_post_form_and_signature_inputs_match_baseline",
+    )

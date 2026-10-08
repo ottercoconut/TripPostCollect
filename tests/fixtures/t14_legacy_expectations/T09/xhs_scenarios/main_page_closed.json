@@ -1,0 +1,57 @@
+{
+ "files":{
+  "logs/xhs/behavior_evidence.navigation.json":"{\n  \"schema_version\": 1,\n  \"platform\": \"xhs\",\n  \"updated_at\": \"<TS>\",\n  \"events\": [\n    {\n      \"url\": \"https://www.xiaohongshu.com/explore\",\n      \"page_errors\": [],\n      \"request_failures\": [],\n      \"ready_state\": \"complete\",\n      \"title\": \"小红书\",\n      \"dom_length\": 110,\n      \"body_text_length\": 10,\n      \"body_child_element_count\": 3,\n      \"visibility_state\": \"visible\",\n      \"at\": \"<TS>\",\n      \"stage\": \"initial_explore\",\n      \"outcome\": \"navigation_committed\",\n      \"response_status\": 200,\n      \"error\": \"\"\n    },\n    {\n      \"url\": \"https://www.xiaohongshu.com/explore\",\n      \"page_errors\": [],\n      \"request_failures\": [],\n      \"ready_state\": \"complete\",\n      \"title\": \"小红书\",\n      \"dom_length\": 110,\n      \"body_text_length\": 10,\n      \"body_child_element_count\": 3,\n      \"visibility_state\": \"visible\",\n      \"at\": \"<TS>\",\n      \"stage\": \"initial_explore\",\n      \"outcome\": \"visible_shell_ready\",\n      \"response_status\": null,\n      \"error\": \"\"\n    }\n  ]\n}\n",
+  "state.json":"{\"events\": []}\n"
+ },
+ "outcome":{
+  "close":null,
+  "start":{"code":null,"message":"xhs_main_page_closed_unexpected:stage=search_navigation","type":"RuntimeError"}
+ },
+ "state":{
+  "budget_elapsed":0.0,
+  "budget_inits":1,
+  "cdp_manager_cleared":true,
+  "client_shares_budget":true,
+  "context_page":"p0",
+  "creator_cache":[],
+  "launches":1,
+  "login_shares_budget":[],
+  "pages":[["p0","https://www.xiaohongshu.com/explore",true],["p1","https://www.xiaohongshu.com/explore/popup-ad",true]],
+  "session_started":true
+ },
+ "trace":[
+  [0.0,"playwright_enter"],
+  [0.0,"cdp_manager",{"AUTO_CLOSE_BROWSER":true,"BROWSER_LAUNCH_TIMEOUT":60,"CDP_CONNECT_EXISTING":false,"CDP_DEBUG_PORT":9222,"CUSTOM_BROWSER_PATH":"/fake/chrome","PLATFORM":"xhs","SAVE_LOGIN_STATE":true,"USER_DATA_DIR":"%s_user_data_dir"},["--disable-crash-reporter","--crash-dumps-dir=<ROOT>/data/runtime/chrome_crash_dumps","--use-mock-keychain","--lang=zh-CN"]],
+  [0.0,"launch",true,null,null,false],
+  [0.0,"browser_info"],
+  [0.0,"stealth",null],
+  [0.0,"context_on","page"],
+  [0.0,"init_script","541e0c8c880f"],
+  [0.0,"page_on","p0","pageerror"],
+  [0.0,"page_on","p0","requestfailed"],
+  [0.0,"goto","p0","https://www.xiaohongshu.com/explore","commit",60000],
+  [0.0,"evaluate","p0","render","2c6d9b2c0a99"],
+  [0.0,"load_state","p0","domcontentloaded",30000],
+  [0.0,"load_state","p0","networkidle",30000],
+  [0.0,"sleep",12.0],
+  [12.0,"assert_alive","initial_page_settle"],
+  [12.0,"evaluate","p0","render","2c6d9b2c0a99"],
+  [12.0,"evaluate","p0","render","2c6d9b2c0a99"],
+  [12.0,"evaluate","p0","identity","2b67bdb272e0"],
+  [12.0,"cookies",["https://www.xiaohongshu.com"]],
+  [12.0,"xhshow"],
+  [12.0,"sign","GET","/api/sns/web/v1/user/selfinfo","a1=device-a1;webId=web-id-1;web_session=ws-login",{}],
+  [12.0,"http_client",[["disable_ssl_verify",false],["proxy",null]]],
+  [12.0,"http","GET","https://edith.xiaohongshu.com/api/sns/web/v1/user/selfinfo",null,[["Cookie","a1=device-a1;webId=web-id-1;web_session=ws-login"],["X-B3-Traceid","15c3d2edd9a0dffd"],["X-S","XYS_ded4148c6f928d49abbc8f16"],["X-T","1760000012000"],["accept","application/json, text/plain, */*"],["accept-language","zh-CN"],["cache-control","no-cache"],["content-type","application/json;charset=UTF-8"],["origin","https://www.xiaohongshu.com"],["pragma","no-cache"],["priority","u=1, i"],["referer","https://www.xiaohongshu.com/"],["sec-ch-ua","\"Not)A;Brand\";v=\"8\", \"Chromium\";v=\"138\", \"Google Chrome\";v=\"138\""],["sec-ch-ua-mobile","?0"],["sec-ch-ua-platform","\"macOS\""],["sec-fetch-dest","empty"],["sec-fetch-mode","cors"],["sec-fetch-site","same-site"],["user-agent","Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"],["x-S-Common","XSC_43be5249f7e36ace"]],[["timeout",15]]],
+  [12.0,"popup","p1","https://www.xiaohongshu.com/explore/popup-ad"],
+  [12.0,"goto","p0","https://www.xiaohongshu.com/search_result?keyword=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8","commit",60000],
+  [12.0,"assert_alive","search_navigation_primary_page_closed"],
+  [12.0,"bring_to_front","p1"],
+  [12.0,"sleep",30.0],
+  [42.0,"close","p1"],
+  [42.0,"sleep",0.0],
+  [42.0,"planned_cleanup","playwright_context_exit"],
+  [42.0,"playwright_exit"],
+  [42.0,"cleanup",false]
+ ]
+}

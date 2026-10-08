@@ -16,6 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from support import legacy_expectations as expectations
+
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.xhs import batch_checkpoint as batch
 from trippostcollect.xhs.discovery import resolve_discovery_plan
@@ -445,7 +447,7 @@ def test_batch_snapshot_files_do_not_duplicate_live_export_counts(scenario: Simp
     assert output["jsonl_files"] == [str(s.contents)]
 
 
-@pytest.mark.parametrize("bridge", ["worker", "legacy"])
+@pytest.mark.parametrize("bridge", ["worker", pytest.param("legacy", marks=expectations.legacy_only_marks())])
 @pytest.mark.parametrize("enabled", ["1", "0"])
 @pytest.mark.parametrize("failure", ["", "xhs_batch_checkpoint_ack_timeout", "other"])
 def test_worker_checkpoint_exit_order_and_failures(tmp_path, bridge, enabled, failure):
@@ -456,6 +458,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from trippostcollect.platforms import entry
 from trippostcollect.xhs import batch_checkpoint as batch
 
@@ -480,15 +483,18 @@ entry.configure([
     "--headless", "false", "--save_data_option", "jsonl", "--save_data_path", str(Path.cwd()),
     "--start", "1", "--max_concurrency_num", "1", "--enable_ip_proxy", "false",
 ])
-# T12：新入口不再装载 fork；fork 事件出口与旧桥 hook 经过渡装载点显式加载。
-from trippostcollect.platforms import _fork_bridge
-_fork_bridge.install()
 if bridge == "worker":
+    # T14：worker 侧直接用根事件出口（fork tools.trippostcollect_adaptive 原即重导出此函数）。
     entry.install_hooks()
+    from trippostcollect.application.events import append_worker_execution_event
+    adaptive = SimpleNamespace(append_execution_event=append_worker_execution_event)
 else:
+    # 旧桥 E 的 hook 包裹 fork 模块全局出口，经过渡装载点显式加载；T14-C 随旧桥删除。
+    from trippostcollect.platforms import _fork_bridge
+    _fork_bridge.install()
     from mediacrawler_export_entrypoint import install_batch_checkpoint_hook
     install_batch_checkpoint_hook()
-from tools import trippostcollect_adaptive as adaptive
+    from tools import trippostcollect_adaptive as adaptive
 adaptive.append_execution_event("unrelated", {})
 details = {"platform": "xhs", "batch_complete": True, "source_has_more": True}
 expected_detail = (failure if failure.startswith("xhs_batch_checkpoint_")
@@ -559,7 +565,6 @@ def test_explicit_publisher_runs_after_legacy_swallowed_failure(monkeypatch):
 
 def test_worker_explicit_checkpoint_uses_real_publisher_and_ack(scenario, monkeypatch):
     """新装配经真实 publish、临时 SQLite 提交和 ACK 推进安全前沿。"""
-    from scripts import mediacrawler_export_entrypoint as exporter
     from trippostcollect.application import events
     from trippostcollect.platforms import entry
 
@@ -569,15 +574,10 @@ def test_worker_explicit_checkpoint_uses_real_publisher_and_ack(scenario, monkey
     for key, value in s.env.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(events, "_batch_publisher", None)
-
-    def reject_hook():
-        pytest.fail("新 worker 不得安装旧 export/checkpoint hook")
-
-    monkeypatch.setattr(exporter, "install_export_hook", reject_hook)
-    monkeypatch.setattr(exporter, "install_batch_checkpoint_hook", reject_hook)
-    for name in ("install_xhs_repair_resilience", "install_douyin_browser_detail_fallback",
-                 "install_weibo_browser_detail_fallback"):
-        monkeypatch.setattr(exporter, name, lambda: None)
+    # T14：原同时把旧桥 E 的各 hook 换成拒绝桩，证明新 worker 不经 E；E 随 T14 删除，
+    # "根入口不导入 E"由 tests/test_adapter_t12.py 的导入扫描与选站子进程检查承担。
+    for name in ("_weibo_post_repair", "_douyin_browser_detail_fallback", "_xhs_repair"):
+        monkeypatch.setattr(entry, name, getattr(entry, name))
     entry.install_hooks()
     events.append_worker_execution_event("adaptive_batch_completed", s.event)
     plan = saved(s)
@@ -593,6 +593,7 @@ def test_worker_explicit_checkpoint_uses_real_publisher_and_ack(scenario, monkey
     )
 
 
+@expectations.legacy_only
 def test_exporter_hook_publishes_only_after_durable_event(
     scenario: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -618,6 +619,7 @@ def test_exporter_hook_publishes_only_after_durable_event(
     assert saved(s)["resume_page"] == 47
 
 
+@expectations.legacy_only
 @pytest.mark.parametrize("error, detail", [
     (FileNotFoundError("missing export directory"), "xhs_batch_checkpoint_filenotfounderror"),
     (RuntimeError("xhs_batch_checkpoint_ack_timeout"), "xhs_batch_checkpoint_ack_timeout"),

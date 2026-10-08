@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from support import legacy_expectations
 from support.platform_sessions import redirect_platform_session_roots
 from support.xhs_process_fakes import OWNER, FakeInspector
 from trippostcollect.xhs.leases import LeaseGuard
@@ -25,6 +26,27 @@ def isolated_platform_sessions(tmp_path_factory, monkeypatch):
     root = tmp_path_factory.mktemp("platform_sessions_isolation")
     legacy, sessions = redirect_platform_session_roots(monkeypatch, root)
     return SimpleNamespace(root=root, legacy=legacy, sessions=sessions, original=original)
+
+
+def pytest_addoption(parser):
+    # T14：仅守卫测试使用；给出目录时把旧实现当场结果写出而不断言（见 support/legacy_expectations.py）。
+    parser.addoption(legacy_expectations.WRITE_OPTION, default=None, metavar="DIR",
+                     help="T14 守卫测试把旧实现当场结果写到 DIR，供人工审阅后替换固化预期")
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", f"{legacy_expectations.GUARD_MARKER}: T14 守卫——fork/E 存在时旧侧当场结果须与固化预期逐字节一致",
+    )
+    config.addinivalue_line(
+        "markers", f"{legacy_expectations.LEGACY_ONLY_MARKER}: 只测 fork/E 自身行为，T14-C 随旧桥删除",
+    )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    target = session.config.getoption(legacy_expectations.WRITE_OPTION)
+    if target:
+        legacy_expectations.write_manifest(target)
 
 
 @pytest.fixture

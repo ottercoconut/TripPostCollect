@@ -15,6 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from support import legacy_expectations as expectations
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -37,6 +39,7 @@ def _fork_behavior_adapter():
     return module
 
 
+@expectations.legacy_only
 def test_fork_behavior_injects_original_xhs_dependencies_at_call_time(monkeypatch, tmp_path):
     adapter = _fork_behavior_adapter()
     page = object()
@@ -69,6 +72,7 @@ def test_fork_behavior_injects_original_xhs_dependencies_at_call_time(monkeypatc
     }]
 
 
+@expectations.legacy_only
 def test_fork_runtime_hints_keep_guard_without_injecting_scripts_path(monkeypatch, tmp_path):
     adapter = _fork_behavior_adapter()
     context = object()

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from support import legacy_expectations as expectations
 from support.platform_sessions import child_redirect_source
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -450,6 +451,7 @@ FORK_LIVE_SOURCES = (
 )
 
 
+@expectations.legacy_only
 def test_fork_live_sources_have_no_cwd_relative_paths() -> None:
     offenders = []
     for relative in FORK_LIVE_SOURCES:
@@ -461,6 +463,7 @@ def test_fork_live_sources_have_no_cwd_relative_paths() -> None:
     assert offenders == []
 
 
+@expectations.legacy_only
 @pytest.mark.installation
 def test_fork_signature_js_loads_from_any_cwd(tmp_path: Path) -> None:
     # 真实编译包内 JS（需 Node），不发请求；两站签名均须在非 fork cwd 下得到非空结果

@@ -263,3 +263,13 @@ def check_repair_flag_hook(node):
         elif isinstance(child, ast.Constant) and isinstance(child.value, str):
             assert "media_platform" not in child.value and "xhs_core" not in child.value
     assert readers and flag_assignments == 1
+
+
+def test_formal_xhs_accumulator_publishes_through_worker_event_exit():
+    """T14：原 test_adapter_t09_bridge 中正式装配一侧的断言；旧桥一侧随 E 在 T14-C 删除。"""
+    from trippostcollect.application.events import append_worker_execution_event
+    from trippostcollect.application.worker_inputs import worker_config
+    from trippostcollect.platforms import entry
+
+    accumulator = entry.xhs_dependencies(worker_config(), repair=False)["ports"].accumulator_factory()
+    assert accumulator.event_sink is append_worker_execution_event

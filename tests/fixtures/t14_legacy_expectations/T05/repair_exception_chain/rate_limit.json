@@ -1,0 +1,7 @@
+{
+ "$t14":"tuple",
+ "v":[
+  [{"$t14":"tuple","v":["GET","https://m.weibo.cn/detail/123",{"headers":{"Cookie":"SUB=t05"},"timeout":60}]},{"$t14":"tuple","v":["GET","https://m.weibo.cn/detail/123",{"headers":{"Cookie":"SUB=t05"},"timeout":60}]},{"$t14":"tuple","v":["GET","https://m.weibo.cn/detail/123",{"headers":{"Cookie":"SUB=t05"},"timeout":60}]},{"$t14":"tuple","v":["api","https://m.weibo.cn/statuses/show?id=123",{"headers":{"Referer":"https://m.weibo.cn/detail/123"},"timeout":5000}]}],
+  [{"$t14":"tuple","v":["PlatformRuntimeError","get weibo browser detail HTTP 429","rate_limited"]}]
+ ]
+}

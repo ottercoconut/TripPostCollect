@@ -1,0 +1,25 @@
+{
+ "files":{
+  "state.json":"{\"events\": []}\n"
+ },
+ "outcome":{
+  "close":{"code":null,"message":"'XiaoHongShuCrawler' object has no attribute 'browser_context'","type":"AttributeError"},
+  "sessions":[{"message":"xhs_cdp_browser_launch_failed:RuntimeError: Chrome 进程启动后立即退出","type":"RuntimeError"},{"message":"xhs_browser_session_already_started","type":"RuntimeError"}]
+ },
+ "state":{
+  "budget_elapsed":null,
+  "budget_inits":0,
+  "cdp_manager_cleared":true,
+  "client_shares_budget":null,
+  "context_page":null,
+  "creator_cache":[],
+  "launches":1,
+  "login_shares_budget":[],
+  "pages":[],
+  "session_started":true
+ },
+ "trace":[
+  [0.0,"cdp_manager",{"AUTO_CLOSE_BROWSER":true,"BROWSER_LAUNCH_TIMEOUT":60,"CDP_CONNECT_EXISTING":false,"CDP_DEBUG_PORT":9222,"CUSTOM_BROWSER_PATH":"/fake/chrome","PLATFORM":"xhs","SAVE_LOGIN_STATE":true,"USER_DATA_DIR":"%s_user_data_dir"},["--disable-crash-reporter","--crash-dumps-dir=<ROOT>/data/runtime/chrome_crash_dumps","--use-mock-keychain","--lang=zh-CN"]],
+  [0.0,"launch",true,null,null,false]
+ ]
+}

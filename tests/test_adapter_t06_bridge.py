@@ -12,7 +12,12 @@ import pytest
 
 from trippostcollect.platforms import _fork_bridge, entry
 from trippostcollect.platforms.douyin import client, core, login, login_support, parser
-from test_adapter_t06 import SCENARIOS, drive
+from support import legacy_expectations as expectations
+from test_adapter_t06 import SCENARIOS, T14_BRIDGE, drive
+
+
+# T14：本文件只做旧桥（fork 工厂/E）与根的双轨对照或旧桥自测，T14-C 随旧桥整体删除。
+pytestmark = list(expectations.legacy_only_marks())
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +90,20 @@ async def test_fork_factory_matches_new_entry(tmp_path, monkeypatch, scenario, f
         new = await drive_assembly(tmp_path / "new", patch, scenario, fallback, old_bridge=False)
     assert old == new
     assert new["error"] is None or scenario == "login_expired", new["error"]
+
+
+@expectations.legacy_guard
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [0, 1])
+@pytest.mark.parametrize("scenario", SCENARIOS)
+async def test_t14_guard_fork_factory_drive(tmp_path, monkeypatch, pytestconfig, scenario, fallback):
+    """旧桥 fork 工厂当场结果与固化预期逐字节一致；根侧比较见 test_adapter_t06.py。"""
+    with monkeypatch.context() as patch:
+        old = await drive_assembly(tmp_path / "old", patch, scenario, fallback, old_bridge=True)
+    expectations.check_legacy(
+        pytestconfig, *T14_BRIDGE, f"{scenario}-fallback{fallback}", expectations.scrub(old, (tmp_path, "<TMP>")),
+        source_test="tests/test_adapter_t06_bridge.py::test_fork_factory_matches_new_entry",
+    )
 
 
 def test_fork_exports_root_implementations_and_injection_only():

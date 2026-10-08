@@ -12,20 +12,17 @@ from unittest.mock import AsyncMock, MagicMock, call
 import httpx
 import pytest
 
-from importlib import import_module
-
 from support.browser_settings import BROWSER_SETTINGS
-from trippostcollect.platforms import _fork_bridge
+from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.platforms.entry import xhs_dependencies
 from trippostcollect.platforms.xhs.core import XiaoHongShuCrawler as RootXiaoHongShuCrawler
 from trippostcollect.runtime.browser_launcher import BrowserLauncher
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError, CDPBrowserManager
 
 
-_fork_bridge.install()
-# T09：小红书 crawler 迁入根包；仍按 fork 运行配置装配，与旧桥构造的依赖一致。
+# T09：小红书 crawler 迁入根包；T14 起按根配置对象装配（与 fork config 默认值逐键相同，T12 守护）。
 XiaoHongShuCrawler = RootXiaoHongShuCrawler.bind(
-    lambda: xhs_dependencies(import_module("config"), repair=False)
+    lambda: xhs_dependencies(worker_config(), repair=False)
 )
 
 

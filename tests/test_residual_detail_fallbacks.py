@@ -6,13 +6,10 @@ import asyncio
 
 import pytest
 
-from scripts import mediacrawler_export_entrypoint as entrypoint
-from scripts.mediacrawler_export_entrypoint import (
-    _douyin_detail_urls,
-    _find_douyin_detail,
-    _find_weibo_detail,
-    _weibo_detail_api_url,
-)
+# T14：原经旧桥 E 的重导出取用；四个函数本就是根实现（E 中为 `from ... import ... as ...`）。
+from trippostcollect.platforms.douyin.parser import _douyin_detail_urls, _find_douyin_detail
+from trippostcollect.platforms.weibo.client import _weibo_detail_api_url
+from trippostcollect.platforms.weibo.parser import _find_weibo_detail
 
 
 def test_douyin_repair_fallback_tries_note_before_video() -> None:
@@ -49,11 +46,16 @@ def test_weibo_browser_api_is_bound_to_requested_id() -> None:
 def test_weibo_repair_hook_recovers_exact_browser_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from test_adapter_t05_bridge import bridge_types
+    from trippostcollect.application import events
+    from trippostcollect.platforms import entry
     from trippostcollect.platforms.weibo.client import WeiboClient
     from trippostcollect.platforms.weibo.models import DataFetchError
 
-    factory, _, _ = bridge_types(monkeypatch)
+    # T14：原经旧桥 E 锁存修复开关并由 fork 工厂构造；改由正式 worker 的 install_hooks 与
+    # load_crawler 完成同一装配。用例结束时还原 install_hooks 写入的模块级开关。
+    for name in ("_weibo_post_repair", "_douyin_browser_detail_fallback", "_xhs_repair"):
+        monkeypatch.setattr(entry, name, getattr(entry, name))
+    monkeypatch.setattr(events, "_batch_publisher", events._batch_publisher)
 
     class FakePage:
         def __init__(self) -> None:
@@ -74,8 +76,9 @@ def test_weibo_repair_hook_recovers_exact_browser_detail(
 
     monkeypatch.setenv("TRIPPOSTCOLLECT_POST_REPAIR", "1")
 
-    entrypoint.install_weibo_browser_detail_fallback()
-    crawler = factory.create_crawler("wb")
+    entry.install_hooks()
+    crawler = entry.load_crawler("wb")()
+    assert crawler.ports.post_repair is True
     client = FakeClient(
         headers={}, playwright_page=FakePage(), cookie_dict={},
         ports=crawler.ports.client, post_repair=crawler.ports.post_repair,

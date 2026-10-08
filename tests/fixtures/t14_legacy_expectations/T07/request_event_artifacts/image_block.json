@@ -1,0 +1,48 @@
+{
+ "counts":{
+  "/api/v4/me":1,
+  "/api/v4/search_v3":1,
+  "/question/10/answer/101":1,
+  "https://pic1.zhimg.com/v2-101_r.jpg":1
+ },
+ "events":[
+  {"at":"2026-09-30T01:02:03+00:00","details":{"batch_complete":false,"candidate_count":0,"candidate_identities":[],"discovery_phase":"frontier","next_cursor":null,"pages_fetched":1,"platform":"zhihu","raw_batch_count":null,"resume_cursor":null,"resume_offset":null,"resume_page":1,"skipped_candidate_count":0,"skipped_candidate_failures":[],"source_cursor":null,"source_has_more":null,"source_offset":null,"source_page":1,"stagnant_batches":0,"stagnation_basis":"valid_new","stop_detail":"image_auth_required","stop_reason":"runtime_failed","valid_existing_count":0,"valid_new_count":0},"type":"adaptive_search_stopped"},
+  {"at":"2026-09-30T01:02:03+00:00","details":{"batch_candidate_identity_count":0,"batch_complete":true,"batch_new_count":0,"batch_no":1,"candidate_count":0,"candidate_identities":[],"discovery_phase":"frontier","next_cursor":null,"platform":"zhihu","raw_batch_count":1,"resume_cursor":null,"resume_offset":null,"resume_page":2,"source_cursor":null,"source_has_more":null,"source_offset":null,"source_page":1,"stagnant_batches":1,"stagnation_basis":"valid_new","stop_reason":"runtime_failed","valid_existing_count":0,"valid_new_count":0},"type":"adaptive_batch_completed"},
+  {"at":"2026-09-30T01:02:03+00:00","details":{"batch_complete":true,"candidate_count":0,"candidate_identities":[],"discovery_phase":"frontier","next_cursor":null,"pages_fetched":1,"platform":"zhihu","raw_batch_count":1,"resume_cursor":null,"resume_offset":null,"resume_page":2,"skipped_candidate_count":0,"skipped_candidate_failures":[],"source_cursor":null,"source_has_more":null,"source_offset":null,"source_page":1,"stagnant_batches":1,"stagnation_basis":"valid_new","stop_detail":"image_auth_required","stop_reason":"runtime_failed","valid_existing_count":0,"valid_new_count":0},"type":"adaptive_search_stopped"}
+ ],
+ "files":{
+  "zhihu/image_manifest.jsonl":{"$t14":"utf8","v":"{\"attempts\":1,\"error_code\":\"image_auth_required\",\"fetch_status\":\"failed\",\"height\":null,\"http_status\":403,\"image_role\":\"content\",\"mime_type\":null,\"platform_key\":\"zhihu\",\"platform_post_id\":\"101\",\"schema_version\":1,\"sha256\":null,\"size_bytes\":null,\"source_asset_key\":\"zhihu:urlsha256:0a572d2beb49eacbe739cc6a389b1728e5cd828bf9af7ac56a5d00a88224db94\",\"source_index\":0,\"source_key\":\"image_list\",\"source_url\":\"https://pic1.zhimg.com/v2-101_r.jpg\",\"staging_path\":null,\"width\":null}\n"}
+ },
+ "records":[],
+ "trace":[
+  {"$t14":"tuple","v":["launch",{"headless":false,"playwright_proxy":null,"user_agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"}]},
+  {"$t14":"tuple","v":["new_page"]},
+  {"$t14":"tuple","v":["goto","https://www.zhihu.com",{"timeout":30000,"wait_until":"domcontentloaded"}]},
+  {"$t14":"tuple","v":["add_cookies",[{"domain":".zhihu.com","name":"d_c0","path":"/","value":"t07"}]]},
+  {"$t14":"tuple","v":["add_cookies",[{"domain":".zhihu.com","name":"z_c0","path":"/","value":"active"}]]},
+  {"$t14":"tuple","v":["reload",{"timeout":30000,"wait_until":"domcontentloaded"}]},
+  {"$t14":"tuple","v":["ready","domcontentloaded",{"timeout":30000}]},
+  {"$t14":"tuple","v":["ready","networkidle",{"timeout":30000}]},
+  {"$t14":"tuple","v":["cookies",["https://www.zhihu.com"]]},
+  {"$t14":"tuple","v":["compile","9753572dc21148975600ca8083e92245e69130cd11414a3e3089013b3aaee3f1"]},
+  {"$t14":"tuple","v":["sign","/api/v4/me?include=email%2Cis_active%2Cis_bind_phone","d_c0=t07;z_c0=active"]},
+  {"$t14":"tuple","v":["http_client",{"proxy":null}]},
+  {"$t14":"tuple","v":["request","GET","https://www.zhihu.com/api/v4/me?include=email%2Cis_active%2Cis_bind_phone",{"headers":{"accept":"*/*","accept-language":"zh-CN,zh;q=0.9","cookie":"d_c0=t07;z_c0=active","priority":"u=1, i","referer":"https://www.zhihu.com/search?q=python&time_interval=a_year&type=content","user-agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36","x-api-version":"3.0.91","x-app-za":"OS=Web","x-requested-with":"fetch","x-zse-93":"101_3_3.0","x-zse-96":"2.0_KL6JWW+SdBCgyHPV79QcxjvWUlfZWudMLvBYP8RKGQmqnOuA5rQWRBV03N8Q+BHr","x-zst-81":"3_2.0aR_sn77yn6O92wOB8hPZnQr0EMYxc4f18wNBUgpTQ6nxERFZfTY0-4Lm-h3_tufIwJS8gcxTgJS_AuPZNcXCTwxI78YxEM20s4PGDwN8gGcYAupMWufIoLVqr4gxrRPOI0cY7HL8qun9g93mFukyigcmebS_FwOYPRP0E4rZUrN9DDom3hnynAUMnAVPF_PhaueTFH9fQL39OCCqYTxfb0rfi9wfPhSM6vxGDJo_rBHpQGNmBBLqPJHK2_w8C9eTVMO9Z9NOrMtfhGH_DgpM-BNM1DOxScLG3gg1Hre1FCXKQcXKkrSL1r9GWDXMk8wqBLNmbRH96BtOFqVZ7UYG3gC8D9cMS7Y9UrHLVCLZPJO8_CL_6GNCOg_zhJS8PbXmGTcBpgxfkieOPhNfthtf2gC_qD3YOce8nCwG2uwBOqeMoML9NBC1xb9yk6SuJhHLK7SM6LVfCve_3vLKlqcL6TxL_UosDvHLxrHmWgxBQ8Xs"},"timeout":10}]},
+  {"$t14":"tuple","v":["goto","https://www.zhihu.com/search?q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8&type=content",{"timeout":30000,"wait_until":"domcontentloaded"}]},
+  {"$t14":"tuple","v":["sleep",5.0]},
+  {"$t14":"tuple","v":["cookies",["https://www.zhihu.com"]]},
+  {"$t14":"tuple","v":["behavior","https://www.zhihu.com/search?q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8&type=content","zhihu"]},
+  {"$t14":"tuple","v":["sign","/api/v4/search_v3?gk_version=gz-gaokao&t=general&q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8&correction=1&offset=0&limit=20&filter_fields=&lc_idx=0&show_all_topics=0&search_source=Filter&time_interval=&sort=&vertical=","d_c0=t07;z_c0=active"]},
+  {"$t14":"tuple","v":["http_client",{"proxy":null}]},
+  {"$t14":"tuple","v":["request","GET","https://www.zhihu.com/api/v4/search_v3?gk_version=gz-gaokao&t=general&q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8&correction=1&offset=0&limit=20&filter_fields=&lc_idx=0&show_all_topics=0&search_source=Filter&time_interval=&sort=&vertical=",{"headers":{"accept":"*/*","accept-language":"zh-CN,zh;q=0.9","cookie":"d_c0=t07;z_c0=active","priority":"u=1, i","referer":"https://www.zhihu.com/search?q=python&time_interval=a_year&type=content","user-agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36","x-api-version":"3.0.91","x-app-za":"OS=Web","x-requested-with":"fetch","x-zse-93":"101_3_3.0","x-zse-96":"2.0_nlONWO2xYcTkI2MY=LsJskBC90i9iI/deMR0U+XyIMzzOXpk=P21J9O8gVNjFYcD","x-zst-81":"3_2.0aR_sn77yn6O92wOB8hPZnQr0EMYxc4f18wNBUgpTQ6nxERFZfTY0-4Lm-h3_tufIwJS8gcxTgJS_AuPZNcXCTwxI78YxEM20s4PGDwN8gGcYAupMWufIoLVqr4gxrRPOI0cY7HL8qun9g93mFukyigcmebS_FwOYPRP0E4rZUrN9DDom3hnynAUMnAVPF_PhaueTFH9fQL39OCCqYTxfb0rfi9wfPhSM6vxGDJo_rBHpQGNmBBLqPJHK2_w8C9eTVMO9Z9NOrMtfhGH_DgpM-BNM1DOxScLG3gg1Hre1FCXKQcXKkrSL1r9GWDXMk8wqBLNmbRH96BtOFqVZ7UYG3gC8D9cMS7Y9UrHLVCLZPJO8_CL_6GNCOg_zhJS8PbXmGTcBpgxfkieOPhNfthtf2gC_qD3YOce8nCwG2uwBOqeMoML9NBC1xb9yk6SuJhHLK7SM6LVfCve_3vLKlqcL6TxL_UosDvHLxrHmWgxBQ8Xs"},"timeout":10}]},
+  {"$t14":"tuple","v":["sleep",0.0]},
+  {"$t14":"tuple","v":["sign","/question/10/answer/101","d_c0=t07;z_c0=active"]},
+  {"$t14":"tuple","v":["http_client",{"proxy":null}]},
+  {"$t14":"tuple","v":["request","GET","https://www.zhihu.com/question/10/answer/101",{"headers":{"accept":"*/*","accept-language":"zh-CN,zh;q=0.9","cookie":"d_c0=t07;z_c0=active","priority":"u=1, i","referer":"https://www.zhihu.com/search?q=python&time_interval=a_year&type=content","user-agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36","x-api-version":"3.0.91","x-app-za":"OS=Web","x-requested-with":"fetch","x-zse-93":"101_3_3.0","x-zse-96":"2.0_n/2KNrGxPSbfU5TFpfQTbB=154UW02v/Zb58mPlVP/v12U7R+JznLSRS3dgkQ4mf","x-zst-81":"3_2.0aR_sn77yn6O92wOB8hPZnQr0EMYxc4f18wNBUgpTQ6nxERFZfTY0-4Lm-h3_tufIwJS8gcxTgJS_AuPZNcXCTwxI78YxEM20s4PGDwN8gGcYAupMWufIoLVqr4gxrRPOI0cY7HL8qun9g93mFukyigcmebS_FwOYPRP0E4rZUrN9DDom3hnynAUMnAVPF_PhaueTFH9fQL39OCCqYTxfb0rfi9wfPhSM6vxGDJo_rBHpQGNmBBLqPJHK2_w8C9eTVMO9Z9NOrMtfhGH_DgpM-BNM1DOxScLG3gg1Hre1FCXKQcXKkrSL1r9GWDXMk8wqBLNmbRH96BtOFqVZ7UYG3gC8D9cMS7Y9UrHLVCLZPJO8_CL_6GNCOg_zhJS8PbXmGTcBpgxfkieOPhNfthtf2gC_qD3YOce8nCwG2uwBOqeMoML9NBC1xb9yk6SuJhHLK7SM6LVfCve_3vLKlqcL6TxL_UosDvHLxrHmWgxBQ8Xs"},"timeout":10}]},
+  {"$t14":"tuple","v":["sleep",0.0]},
+  {"$t14":"tuple","v":["http_client",{"proxy":null}]},
+  {"$t14":"tuple","v":["image","GET","https://pic1.zhimg.com/v2-101_r.jpg",{"headers":{"accept":"image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8","accept-language":"zh-CN,zh;q=0.9","cookie":"d_c0=t07;z_c0=active","priority":"u=1, i","referer":"https://www.zhihu.com/question/10/answer/101","user-agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36","x-api-version":"3.0.91","x-app-za":"OS=Web","x-requested-with":"fetch","x-zse-93":"101_3_3.0"},"timeout":10}]},
+  {"$t14":"tuple","v":["playwright_exit"]},
+  {"$t14":"tuple","v":["close"]}
+ ]
+}

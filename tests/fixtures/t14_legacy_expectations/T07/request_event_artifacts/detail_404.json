@@ -1,0 +1,39 @@
+{
+ "counts":{
+  "/api/v4/me":1,
+  "/p/102":1,
+  "/question/10/answer/101":1
+ },
+ "events":[],
+ "files":{},
+ "records":[],
+ "trace":[
+  {"$t14":"tuple","v":["launch",{"headless":false,"playwright_proxy":null,"user_agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"}]},
+  {"$t14":"tuple","v":["new_page"]},
+  {"$t14":"tuple","v":["goto","https://www.zhihu.com",{"timeout":30000,"wait_until":"domcontentloaded"}]},
+  {"$t14":"tuple","v":["add_cookies",[{"domain":".zhihu.com","name":"d_c0","path":"/","value":"t07"}]]},
+  {"$t14":"tuple","v":["add_cookies",[{"domain":".zhihu.com","name":"z_c0","path":"/","value":"active"}]]},
+  {"$t14":"tuple","v":["reload",{"timeout":30000,"wait_until":"domcontentloaded"}]},
+  {"$t14":"tuple","v":["ready","domcontentloaded",{"timeout":30000}]},
+  {"$t14":"tuple","v":["ready","networkidle",{"timeout":30000}]},
+  {"$t14":"tuple","v":["cookies",["https://www.zhihu.com"]]},
+  {"$t14":"tuple","v":["compile","9753572dc21148975600ca8083e92245e69130cd11414a3e3089013b3aaee3f1"]},
+  {"$t14":"tuple","v":["sign","/api/v4/me?include=email%2Cis_active%2Cis_bind_phone","d_c0=t07;z_c0=active"]},
+  {"$t14":"tuple","v":["http_client",{"proxy":null}]},
+  {"$t14":"tuple","v":["request","GET","https://www.zhihu.com/api/v4/me?include=email%2Cis_active%2Cis_bind_phone",{"headers":{"accept":"*/*","accept-language":"zh-CN,zh;q=0.9","cookie":"d_c0=t07;z_c0=active","priority":"u=1, i","referer":"https://www.zhihu.com/search?q=python&time_interval=a_year&type=content","user-agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36","x-api-version":"3.0.91","x-app-za":"OS=Web","x-requested-with":"fetch","x-zse-93":"101_3_3.0","x-zse-96":"2.0_KL6JWW+SdBCgyHPV79QcxjvWUlfZWudMLvBYP8RKGQmqnOuA5rQWRBV03N8Q+BHr","x-zst-81":"3_2.0aR_sn77yn6O92wOB8hPZnQr0EMYxc4f18wNBUgpTQ6nxERFZfTY0-4Lm-h3_tufIwJS8gcxTgJS_AuPZNcXCTwxI78YxEM20s4PGDwN8gGcYAupMWufIoLVqr4gxrRPOI0cY7HL8qun9g93mFukyigcmebS_FwOYPRP0E4rZUrN9DDom3hnynAUMnAVPF_PhaueTFH9fQL39OCCqYTxfb0rfi9wfPhSM6vxGDJo_rBHpQGNmBBLqPJHK2_w8C9eTVMO9Z9NOrMtfhGH_DgpM-BNM1DOxScLG3gg1Hre1FCXKQcXKkrSL1r9GWDXMk8wqBLNmbRH96BtOFqVZ7UYG3gC8D9cMS7Y9UrHLVCLZPJO8_CL_6GNCOg_zhJS8PbXmGTcBpgxfkieOPhNfthtf2gC_qD3YOce8nCwG2uwBOqeMoML9NBC1xb9yk6SuJhHLK7SM6LVfCve_3vLKlqcL6TxL_UosDvHLxrHmWgxBQ8Xs"},"timeout":10}]},
+  {"$t14":"tuple","v":["goto","https://www.zhihu.com/search?q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8&type=content",{"timeout":30000,"wait_until":"domcontentloaded"}]},
+  {"$t14":"tuple","v":["sleep",5.0]},
+  {"$t14":"tuple","v":["cookies",["https://www.zhihu.com"]]},
+  {"$t14":"tuple","v":["behavior","https://www.zhihu.com/search?q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8&type=content","zhihu"]},
+  {"$t14":"tuple","v":["sign","/question/10/answer/101","d_c0=t07;z_c0=active"]},
+  {"$t14":"tuple","v":["http_client",{"proxy":null}]},
+  {"$t14":"tuple","v":["request","GET","https://www.zhihu.com/question/10/answer/101",{"headers":{"accept":"*/*","accept-language":"zh-CN,zh;q=0.9","cookie":"d_c0=t07;z_c0=active","priority":"u=1, i","referer":"https://www.zhihu.com/search?q=python&time_interval=a_year&type=content","user-agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36","x-api-version":"3.0.91","x-app-za":"OS=Web","x-requested-with":"fetch","x-zse-93":"101_3_3.0","x-zse-96":"2.0_n/2KNrGxPSbfU5TFpfQTbB=154UW02v/Zb58mPlVP/v12U7R+JznLSRS3dgkQ4mf","x-zst-81":"3_2.0aR_sn77yn6O92wOB8hPZnQr0EMYxc4f18wNBUgpTQ6nxERFZfTY0-4Lm-h3_tufIwJS8gcxTgJS_AuPZNcXCTwxI78YxEM20s4PGDwN8gGcYAupMWufIoLVqr4gxrRPOI0cY7HL8qun9g93mFukyigcmebS_FwOYPRP0E4rZUrN9DDom3hnynAUMnAVPF_PhaueTFH9fQL39OCCqYTxfb0rfi9wfPhSM6vxGDJo_rBHpQGNmBBLqPJHK2_w8C9eTVMO9Z9NOrMtfhGH_DgpM-BNM1DOxScLG3gg1Hre1FCXKQcXKkrSL1r9GWDXMk8wqBLNmbRH96BtOFqVZ7UYG3gC8D9cMS7Y9UrHLVCLZPJO8_CL_6GNCOg_zhJS8PbXmGTcBpgxfkieOPhNfthtf2gC_qD3YOce8nCwG2uwBOqeMoML9NBC1xb9yk6SuJhHLK7SM6LVfCve_3vLKlqcL6TxL_UosDvHLxrHmWgxBQ8Xs"},"timeout":10}]},
+  {"$t14":"tuple","v":["sleep",0.0]},
+  {"$t14":"tuple","v":["sign","/p/102","d_c0=t07;z_c0=active"]},
+  {"$t14":"tuple","v":["http_client",{"proxy":null}]},
+  {"$t14":"tuple","v":["request","GET","https://zhuanlan.zhihu.com/p/102",{"headers":{"accept":"*/*","accept-language":"zh-CN,zh;q=0.9","cookie":"d_c0=t07;z_c0=active","priority":"u=1, i","referer":"https://www.zhihu.com/search?q=python&time_interval=a_year&type=content","user-agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36","x-api-version":"3.0.91","x-app-za":"OS=Web","x-requested-with":"fetch","x-zse-93":"101_3_3.0","x-zse-96":"2.0_18c=NyOSQPSwytIgF=glWQfrZMgPZPxbFeIx4K7HQj32z2/V2/xZm9SMfIGJOpIR","x-zst-81":"3_2.0aR_sn77yn6O92wOB8hPZnQr0EMYxc4f18wNBUgpTQ6nxERFZfTY0-4Lm-h3_tufIwJS8gcxTgJS_AuPZNcXCTwxI78YxEM20s4PGDwN8gGcYAupMWufIoLVqr4gxrRPOI0cY7HL8qun9g93mFukyigcmebS_FwOYPRP0E4rZUrN9DDom3hnynAUMnAVPF_PhaueTFH9fQL39OCCqYTxfb0rfi9wfPhSM6vxGDJo_rBHpQGNmBBLqPJHK2_w8C9eTVMO9Z9NOrMtfhGH_DgpM-BNM1DOxScLG3gg1Hre1FCXKQcXKkrSL1r9GWDXMk8wqBLNmbRH96BtOFqVZ7UYG3gC8D9cMS7Y9UrHLVCLZPJO8_CL_6GNCOg_zhJS8PbXmGTcBpgxfkieOPhNfthtf2gC_qD3YOce8nCwG2uwBOqeMoML9NBC1xb9yk6SuJhHLK7SM6LVfCve_3vLKlqcL6TxL_UosDvHLxrHmWgxBQ8Xs"},"timeout":10}]},
+  {"$t14":"tuple","v":["sleep",0.0]},
+  {"$t14":"tuple","v":["playwright_exit"]},
+  {"$t14":"tuple","v":["close"]}
+ ]
+}

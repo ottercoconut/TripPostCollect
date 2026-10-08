@@ -1,0 +1,7 @@
+{
+ "$t14":"tuple",
+ "v":[
+  [{"$t14":"tuple","v":["GET","https://m.weibo.cn/detail/123",{"headers":{"Cookie":"SUB=t05"},"timeout":60}]},{"$t14":"tuple","v":["GET","https://m.weibo.cn/detail/123",{"headers":{"Cookie":"SUB=t05"},"timeout":60}]},{"$t14":"tuple","v":["GET","https://m.weibo.cn/detail/123",{"headers":{"Cookie":"SUB=t05"},"timeout":60}]}],
+  [{"$t14":"tuple","v":["DataFetchError","get weibo detail err: $render_data value not found",null]}]
+ ]
+}
