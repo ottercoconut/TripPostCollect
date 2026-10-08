@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List
 from urllib.parse import urlsplit
 
 from trippostcollect.application.contracts import ImageStagingError
-from trippostcollect.records.identity import anonymize_user_id, mask_nickname
+from trippostcollect.records.identity import platform_nickname, platform_user_id
 from trippostcollect.runtime.helpers import extract_url_params_to_dict, normalize_image_url
 from trippostcollect.platforms.douyin.models import SearchResponseError, VideoUrlInfo
 
@@ -758,8 +758,8 @@ def update_douyin_aweme(aweme_item: Dict, *, source_keyword: str, current_timest
         "title": aweme_item.get("desc", ""),
         "desc": aweme_item.get("desc", ""),
         "create_time": aweme_item.get("create_time"),
-        "creator_hash": anonymize_user_id(user_info.get("uid")),  # 创作者匿名哈希(不存原始 uid)
-        "nickname": mask_nickname(user_info.get("nickname")),  # 用户昵称(已脱敏)
+        "creator_hash": platform_user_id(user_info.get("uid")),  # 创作者平台原始 uid
+        "nickname": platform_nickname(user_info.get("nickname")),  # 用户原始昵称
         "followers_count": author_stats.get("followers_count"),
         "fans_count": author_stats.get("fans_count"),
         "followers_observed": author_stats.get("followers_observed"),

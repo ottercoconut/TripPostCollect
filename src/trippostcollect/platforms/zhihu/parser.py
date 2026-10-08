@@ -28,7 +28,7 @@ from urllib.parse import urlsplit, unquote
 
 from parsel import Selector
 from trippostcollect.application.contracts import ImageStagingError
-from trippostcollect.records.identity import anonymize_user_id, mask_nickname
+from trippostcollect.records.identity import platform_nickname, platform_user_id
 from trippostcollect.runtime.helpers import extract_text_from_html, normalize_image_url
 from . import models as zhihu_constant
 from .models import ZhihuContent, ZhihuCreator
@@ -403,9 +403,10 @@ class ZhihuExtractor:
                 author = author.get("member")
             if not author:
                 return res
-            res.creator_hash = anonymize_user_id(author.get("id"))
+            # 作者平台 ID 取原始 id；主页链接仍由 url_token 拼接。
+            res.creator_hash = platform_user_id(author.get("id"))
             res.url_token = author.get("url_token") or ""
-            res.user_nickname = mask_nickname(author.get("name"))
+            res.user_nickname = platform_nickname(author.get("name"))
             if res.url_token:
                 res.profile_url = f"{zhihu_constant.ZHIHU_URL}/people/{res.url_token}"
             res.avatar_url = author.get("avatar_url") or ""

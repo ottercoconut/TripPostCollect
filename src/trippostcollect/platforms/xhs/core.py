@@ -771,7 +771,6 @@ async def store_xhs_note(
         source_keyword=source_keyword,
         current_timestamp=current_timestamp,
         save_data_option=save_data_option,
-        keep_author_detail=os.environ.get("TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL") == "1",
     )
     logger.info(f"[store.xhs.update_xhs_note] xhs note: {local_db_item}")
     await content_sink_factory(crawler_type).store_content(local_db_item)

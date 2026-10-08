@@ -2,10 +2,26 @@
 # Copyright (c) 2025 relakkes@gmail.com
 #
 # 本文件为 MediaCrawler 教学版的一部分。
-# 出于教学与防骚扰定位，爬取结果中不保留任何可定位到真人的用户个人信息
-# （用户 ID、IP 归属地、头像、主页链接、签名、性别等一律不采集；
-# 昵称保留但做中间脱敏）。本模块提供匿名化与脱敏工具。
+# TripPostCollect：微博、抖音、知乎、小红书根解析保存作者平台原始用户 ID 与原始昵称，统一经
+# platform_user_id / platform_nickname 做类型归一，不再哈希或脱敏（B站解析本就直接取原始
+# mid/作者名，不经本模块）。
+# anonymize_user_id / mask_nickname 的调用方只剩 fork 旧导入出口 tools/user_hash.py 与冻结
+# 旧投影的测试模块，随旧桥在 T14 删除；根包其他模块不得再调用。
 import hashlib
+
+
+def platform_user_id(user_id) -> str:
+    """平台原始用户 ID 统一为字符串（整数 ID 同样转为字符串）并去首尾空白；缺失为空串。"""
+    if user_id is None:
+        return ""
+    return str(user_id).strip()
+
+
+def platform_nickname(name) -> str:
+    """平台原始昵称按原文保存；缺失为空串，非字符串值转为字符串。"""
+    if name is None:
+        return ""
+    return str(name)
 
 
 def anonymize_user_id(user_id) -> str:
