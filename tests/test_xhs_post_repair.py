@@ -15,9 +15,12 @@ from types import SimpleNamespace
 import pytest
 from support.browser_settings import BROWSER_SETTINGS
 
+from trippostcollect.application.failures import latest_runtime_blocker
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.platforms import entry as platform_entry
 from trippostcollect.platforms.xhs import repair as xhs_repair
+from trippostcollect.platforms.xhs.errors import XHSMainPageClosedUnexpected
+from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.platforms.xhs.core import XiaoHongShuCrawler as RootXiaoHongShuCrawler
 from trippostcollect.xhs import accounts
 
@@ -747,6 +750,91 @@ def test_candidate_only_child_failure_does_not_hide_runtime_or_media_blockers() 
         "error_code": "login_required"
     }
     assert repair.candidate_only_child_failure(summary) is False
+
+
+def repair_crawler_config(note_ids: list[str]) -> SimpleNamespace:
+    return SimpleNamespace(
+        **asdict(BROWSER_SETTINGS),
+        CDP_HEADLESS=False, CRAWLER_TYPE="detail", ENABLE_CDP_MODE=True, ENABLE_GET_MEIDAS=False,
+        HEADLESS=False, KEYWORDS="", LOGIN_TYPE="qrcode", COOKIES="", SAVE_DATA_OPTION="jsonl", SAVE_DATA_PATH="",
+        SORT_TYPE="", START_PAGE=1, XHS_INTERNATIONAL=False,
+        MAX_CONCURRENCY_NUM=1,
+        XHS_SPECIFIED_NOTE_URL_LIST=note_ids,
+    )
+
+
+REPAIR_LIFECYCLE_FAILURES = [
+    CDPBrowserLifecycleError({"code": "xhs_browser_context_closed_unexpected"}, stage="creator"),
+    CDPBrowserLifecycleError({"code": "xhs_browser_process_exited", "pid": 4321}, stage="creator"),
+    CDPBrowserLifecycleError({"code": "xhs_cdp_disconnected_unexpected"}, stage="creator"),
+    XHSMainPageClosedUnexpected(stage="creator_profile_browser"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", REPAIR_LIFECYCLE_FAILURES, ids=lambda failure: failure.event["code"]
+)
+async def test_xhs_repair_stops_on_browser_lifecycle_failure_with_structured_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: CDPBrowserLifecycleError,
+) -> None:
+    requested: list[str] = []
+    enriched: list[str] = []
+    stored: list[str] = []
+
+    class FakeCrawler(RootXiaoHongShuCrawler):
+        async def get_note_detail_async_task(self, *, note_id, **_kwargs):
+            requested.append(note_id)
+            return {"note_id": note_id, "xsec_token": f"token-{note_id}", "type": "normal"}
+
+        async def enrich_note_creator(self, note_detail):
+            enriched.append(note_detail["note_id"])
+            raise failure
+
+        async def get_notice_media(self, _note_detail):
+            return None
+
+        @staticmethod
+        def is_video_note(_note_detail):
+            return False
+
+        async def update_xhs_note(self, note_detail):
+            stored.append(note_detail["note_id"])
+
+    monkeypatch.setattr(
+        xhs_repair,
+        "parse_note_info_from_note_url",
+        lambda value: SimpleNamespace(note_id=value, xsec_source="pc_search", xsec_token=f"token-{value}"),
+    )
+    monkeypatch.setattr(platform_entry, "_xhs_repair", False)
+    report_path = tmp_path / "repair_report.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR", "1")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_BATCH_SIZE", "2")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH", str(report_path))
+    entrypoint.install_xhs_repair_resilience()
+    crawler = FakeCrawler(**platform_entry.xhs_dependencies(repair_crawler_config(["note-1", "note-2", "note-3"])))
+
+    with pytest.raises(type(failure)) as exc_info:
+        await crawler.get_specified_notes()
+
+    assert exc_info.value is failure
+    # 同批后续候选与下一批都不再处理，也不当作候选失败。
+    assert requested == ["note-1", "note-2"]
+    assert enriched == ["note-1"] and stored == []
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["candidate_failures"] == [] and report["successful_ids"] == []
+    code = failure.event["code"]
+    assert report["runtime_blocker"] == {
+        "error_type": type(failure).__name__,
+        "error_code": "browser_target_closed",
+        "reason": code,
+    }
+    blocker = latest_runtime_blocker([{"platform": "xhs", "repair_report": report}], ["xhs"])
+    assert blocker["failure_type"] == "browser_target_closed"
+    assert blocker["reason"] == code
+    assert blocker["status"] == "blocked" and blocker["retryable"] is False
 
 
 @pytest.mark.asyncio

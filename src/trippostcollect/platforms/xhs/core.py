@@ -61,6 +61,25 @@ from trippostcollect.runtime.image_retry import is_runtime_blocking_image_error
 logger = logging.getLogger("MediaCrawler")
 
 
+def _mark_cdp_lifecycle_failed(
+    accumulator, exc: CDPBrowserLifecycleError, *, requested_page, search_id, discovery_phase: str
+) -> None:
+    """浏览器生命周期失败统一记为本页 runtime_failed；页内请求与登录恢复共用。"""
+    detail = xhs_cdp_lifecycle_stop_detail(exc)
+    logger.error(
+        "[XiaoHongShuCrawler.search] CDP lifecycle ended on "
+        f"page {requested_page}: {exc!r}"
+    )
+    accumulator.mark_runtime_failed(
+        detail,
+        source_page=requested_page,
+        source_cursor=search_id,
+        resume_page=requested_page,
+        resume_cursor=search_id,
+        discovery_phase=discovery_phase,
+    )
+
+
 class XiaoHongShuCrawler(
     XhsSessionMixin,
     XhsNavigationMixin,
@@ -623,6 +642,16 @@ class XiaoHongShuCrawler(
                                     discovery_phase=discovery_phase,
                                 )
                                 break
+                            except CDPBrowserLifecycleError as lifecycle_exc:
+                                # 在处理体内抛出，不会落到下方同级的生命周期分支。
+                                _mark_cdp_lifecycle_failed(
+                                    accumulator,
+                                    lifecycle_exc,
+                                    requested_page=requested_page,
+                                    search_id=search_id,
+                                    discovery_phase=discovery_phase,
+                                )
+                                break
                             if recovered:
                                 continue
                             logger.error(
@@ -652,17 +681,11 @@ class XiaoHongShuCrawler(
                         )
                         break
                     except CDPBrowserLifecycleError as exc:
-                        detail = xhs_cdp_lifecycle_stop_detail(exc)
-                        logger.error(
-                            "[XiaoHongShuCrawler.search] CDP lifecycle ended on "
-                            f"page {requested_page}: {exc!r}"
-                        )
-                        accumulator.mark_runtime_failed(
-                            detail,
-                            source_page=requested_page,
-                            source_cursor=search_id,
-                            resume_page=requested_page,
-                            resume_cursor=search_id,
+                        _mark_cdp_lifecycle_failed(
+                            accumulator,
+                            exc,
+                            requested_page=requested_page,
+                            search_id=search_id,
                             discovery_phase=discovery_phase,
                         )
                         break

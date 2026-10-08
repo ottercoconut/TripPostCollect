@@ -208,7 +208,8 @@ python scripts/xhs_runner.py \
 ```
 
 `comment-scroll` 只访问并滚动评论区，不采集评论；`like-one` 只在明确未点赞时点击一次；`random` 在
-两者中随机选择并可能产生点赞副作用。控件普通失败只影响互动证据，频控、封禁或验证仍终止运行。
+两者中随机选择并可能产生点赞副作用。控件普通失败（含互动辅助页自身关闭）只影响互动证据；频控、
+封禁、验证、浏览器生命周期失败和网络恢复超时仍终止运行。
 
 ### 4.1 `300011` 定时续跑
 
@@ -259,7 +260,9 @@ python scripts/repair_xhs_posts.py \
 
 详情 API、HTML 回退、作者资料与图片各自沿用有界请求重试；最终失败会记录真实 `attempts`、
 `failure_scope` 和 `error_code`。普通候选失败不序列化空壳记录，不阻塞同批成功记录，也不阻止下一批；
-登录、验证码、频控、封禁、安全限制和浏览器整体失败仍立即停止。child `summary.json` 的
+登录、验证码、频控、封禁、安全限制和浏览器整体失败仍立即停止；Chrome 进程退出、CDP 断开、
+BrowserContext 或主页面意外关闭写入 `runtime_blocker`，`error_code=browser_target_closed`，具体生命周期码
+在 `reason`。child `summary.json` 的
 `pagination_evidence.skipped_candidate_failures` 与平台记录的 `repair_report` 是失败清单，顶层
 `repair_xhs_posts.py` 摘要也会转存该报告。
 
@@ -281,9 +284,13 @@ python scripts/repair_xhs_posts.py \
   摘要写入 behavior evidence 同目录的 `behavior_evidence.navigation.json`，白屏超时不得只凭外部关闭
   后的 `TargetClosedError` 分类。
 - 搜索卡片和作者链接在匿名页面也可能存在；可见的精确“登录”按钮优先判定为 `login_required`，
-  不得仅凭卡片数或作者链接数把匿名页面判为 ready。主页面在搜索导航或行为阶段意外关闭时立即以
-  `xhs_main_page_closed_unexpected` 终止本轮；即使 BrowserContext 中另有同域页面，也不得接管、重试
-  当前阶段或重新启动 Chrome。原主页面仍存活时，平台主动打开的普通新页继续只由新页守卫管理。
+  不得仅凭卡片数或作者链接数把匿名页面判为 ready。主页面在搜索导航、行为、登录恢复或作者补全
+  等阶段意外关闭时立即以 `xhs_main_page_closed_unexpected` 终止本轮（浏览器生命周期失败；搜索阶段，
+  包括页内登录过期后的恢复等待，记为 `runtime_failed/main_page_closed` 并保留当前页为续跑前沿，不写
+  `candidate_skipped`，不提交未完成批次）；同时观察到
+  Chrome 进程、CDP 或 BrowserContext 的生命周期失败时，仍以后者的代码为准。即使 BrowserContext
+  中另有同域页面，也不得接管、重试当前阶段或重新启动 Chrome。原主页面仍存活时，平台主动打开的
+  普通新页继续只由新页守卫管理。
 - 正式 BrowserContext 守卫安装后出现的任何新标签页都立即置前，并从出现起至少保留 30 秒；平台
   弹页、作者主页回退、互动和验证辅助页一视同仁。正常返回、异常、Playwright 退出和最终清理都
   不得绕过。首个主页面可豁免，启动时已有的额外页仍受保护。

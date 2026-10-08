@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import sqlite3
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 
 from playwright.async_api import Error as PlaywrightError
 from tenacity import Future, RetryError
+from trippostcollect.application import events as app_events
 from trippostcollect.platforms.xhs import core as xhs_core
 from trippostcollect.platforms.xhs.errors import (
     DataFetchError,
@@ -17,7 +18,10 @@ from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
     XHSCreatorProfileUnavailable,
     XHSImageDownloadError,
+    XHSMainPageClosedUnexpected,
+    XHSNetworkRecoveryTimeout,
     XHSNoteDetailUnavailable,
+    xhs_cdp_lifecycle_stop_detail,
 )
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudgetExhausted
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
@@ -601,6 +605,123 @@ async def test_shared_manual_budget_exhaustion_is_a_fixed_runtime_stop(
     assert stopped["details"]["batch_complete"] is False
 
 
+class ConfirmedThenLoginExpiredClient:
+    """第 3 页正常完成并确认；第 4 页登录过期，同时主页面关闭（浏览器仍存活）。"""
+
+    def __init__(self, crawler):
+        self.crawler = crawler
+        self.calls = []
+
+    async def get_note_by_keyword(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs["page"] == 3:
+            return {"items": [{"id": "note-confirmed"}], "has_more": True}
+        self.crawler.context_page.closed = True
+        failure = DataFetchError("登录已过期")
+        raise RetryError(Future.construct(3, failure, has_exception=True))
+
+
+@pytest.mark.asyncio
+async def test_main_page_closed_in_search_login_recovery_stops_at_current_page(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, detail_ids, state_path = prepare_crawler(monkeypatch, tmp_path, items=[])
+    crawler.xhs_client = ConfirmedThenLoginExpiredClient(crawler)
+    page = SimpleNamespace(closed=False)
+    page.is_closed = lambda: page.closed
+    crawler.context_page = page
+    crawler.cdp_manager = Mock(assert_alive=Mock())
+    published = []
+    monkeypatch.setattr(app_events, "_batch_publisher", published.append)
+
+    # 不应逃出 search()：真实登录恢复入口检查主页面并以生命周期失败结束本页。
+    await crawler.search()
+
+    crawler.cdp_manager.assert_alive.assert_any_call("midrun_login_recovery")
+    assert [call["page"] for call in crawler.xhs_client.calls] == [3, 4]
+    assert detail_ids == ["note-confirmed"]
+    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
+    assert not any(event["type"] == "candidate_skipped" for event in events)
+    completed = [event["details"] for event in events if event["type"] == "adaptive_batch_completed"]
+    assert [(batch["source_page"], batch["resume_page"]) for batch in completed] == [(3, 4)]
+    assert published == completed
+    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
+    assert stopped["stop_reason"] == "runtime_failed"
+    assert stopped["stop_detail"] == "main_page_closed"
+    assert stopped["resume_page"] == 4
+    assert stopped["resume_cursor"] == "saved-search-id"
+    assert stopped["batch_complete"] is False
+
+
+POST_INTERACTION_RUN_FAILURES = [
+    (lifecycle_error("xhs_browser_context_closed_unexpected", stage="post_interaction"), "browser_context_closed"),
+    (lifecycle_error("xhs_browser_process_exited", stage="post_interaction"), "browser_process_exited"),
+    (lifecycle_error("xhs_cdp_disconnected_unexpected", stage="post_interaction"), "cdp_disconnected"),
+    (XHSNetworkRecoveryTimeout("post_interaction", 600.0), "network_recovery_timeout"),
+]
+
+
+def prepare_post_interaction(monkeypatch, tmp_path, failure):
+    """真实帖子互动入口；互动辅助页导航按用例抛错，后续互动步骤不会到达。"""
+    crawler, detail_ids, state_path = prepare_crawler(
+        monkeypatch,
+        tmp_path,
+        items=[{"id": "note-interacted", "xsec_token": "token"}],
+    )
+    del crawler._maybe_run_post_interaction
+    crawler.post_interaction_mode = "like"
+    crawler.post_interaction_attempted = False
+    interaction_page = object()
+    crawler._new_guarded_page = AsyncMock(return_value=interaction_page)
+    crawler._goto_with_deadline = AsyncMock(side_effect=failure)
+    crawler._close_page_with_deadline = AsyncMock()
+    return crawler, state_path, interaction_page
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("failure", "stop_detail"), POST_INTERACTION_RUN_FAILURES)
+async def test_post_interaction_lifecycle_or_network_timeout_fails_the_run(
+    monkeypatch, tmp_path, failure, stop_detail
+):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, state_path, interaction_page = prepare_post_interaction(monkeypatch, tmp_path, failure)
+
+    await crawler.search()
+
+    crawler._close_page_with_deadline.assert_awaited_once_with(
+        interaction_page, reason="post_interaction_cleanup"
+    )
+    crawler.enrich_note_creator.assert_not_awaited()
+    crawler.update_xhs_note.assert_not_awaited()
+    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
+    assert not any(event["type"] == "candidate_skipped" for event in events)
+    assert not any(event["type"] == "adaptive_batch_completed" for event in events)
+    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
+    assert stopped["stop_reason"] == "runtime_failed"
+    assert stopped["stop_detail"] == stop_detail
+    assert stopped["resume_page"] == 3
+
+
+@pytest.mark.asyncio
+async def test_post_interaction_helper_page_closure_does_not_stop_crawl(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    failure = PlaywrightError("Target page, context or browser has been closed")
+    crawler, state_path, interaction_page = prepare_post_interaction(monkeypatch, tmp_path, failure)
+
+    await crawler.search()
+
+    crawler._close_page_with_deadline.assert_awaited_once_with(
+        interaction_page, reason="post_interaction_cleanup"
+    )
+    crawler.enrich_note_creator.assert_awaited_once()
+    crawler.update_xhs_note.assert_awaited_once()
+    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
+    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
+    assert stopped["stop_reason"] == "source_exhausted"
+
+
 @pytest.mark.asyncio
 async def test_search_disconnect_retries_same_page_cursor_and_browser_session(
     monkeypatch: pytest.MonkeyPatch,
@@ -685,6 +806,7 @@ async def test_search_disconnect_timeout_preserves_current_recovery_frontier(
         ("xhs_browser_process_exited", "browser_process_exited"),
         ("xhs_browser_context_closed_unexpected", "browser_context_closed"),
         ("xhs_cdp_disconnected_unexpected", "cdp_disconnected"),
+        ("xhs_main_page_closed_unexpected", "main_page_closed"),
     ],
 )
 @pytest.mark.asyncio
@@ -723,6 +845,15 @@ async def test_cdp_lifecycle_failure_preserves_frontier_without_retry_or_relaunc
     assert stopped["details"]["resume_cursor"] == "saved-search-id"
     assert stopped["details"]["batch_complete"] is False
     assert stopped["details"].get("candidate_identities") in (None, [])
+
+
+def test_main_page_closed_is_lifecycle_failure_with_unchanged_message() -> None:
+    exc = XHSMainPageClosedUnexpected(stage="behavior")
+
+    assert isinstance(exc, CDPBrowserLifecycleError)
+    assert str(exc) == "xhs_main_page_closed_unexpected:stage=behavior"
+    assert xhs_cdp_lifecycle_stop_detail(exc) == "main_page_closed"
+    assert xhs_cdp_lifecycle_stop_detail(lifecycle_error("xhs_unknown_lifecycle")) == "browser_runtime_failed"
 
 
 @pytest.mark.asyncio

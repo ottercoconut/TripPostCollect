@@ -30,6 +30,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from trippostcollect.platforms.xhs.errors import IPBlockError, PlatformRuntimeError
 from trippostcollect.platforms.xhs.parser import parse_note_info_from_note_url
+from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -42,7 +43,7 @@ def _repair_exception_is_blocking(crawler: Any, exc: BaseException) -> bool:
             request_failure = request_failure_factory(exc)
         except Exception:
             request_failure = exc
-    blocking_types = (IPBlockError, PlatformRuntimeError)
+    blocking_types = (IPBlockError, PlatformRuntimeError, CDPBrowserLifecycleError)
     if blocking_types and isinstance(request_failure, blocking_types):
         return True
     if isinstance(request_failure, PlaywrightError) or isinstance(exc, PlaywrightError):
@@ -114,6 +115,13 @@ def _xhs_repair_blocker(crawler: Any, exc: BaseException) -> dict[str, str]:
         except Exception:
             request_failure = exc
     error_type = type(request_failure).__name__
+    if isinstance(request_failure, CDPBrowserLifecycleError):
+        # 与失败分类同族：结构化码为 browser_target_closed，具体生命周期码放 reason。
+        return {
+            "error_type": error_type,
+            "error_code": "browser_target_closed",
+            "reason": str(request_failure.event.get("code") or "xhs_cdp_lifecycle_failure"),
+        }
     code = str(getattr(request_failure, "code", "") or "")
     text = str(request_failure).lower()
     if not code and error_type == "IPBlockError":

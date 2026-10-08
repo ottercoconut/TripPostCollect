@@ -50,6 +50,7 @@ from trippostcollect.platforms.xhs.client import (
 )
 from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
+    XHSMainPageClosedUnexpected,
     XHSNetworkRecoveryTimeout,
     is_recoverable_xhs_navigation_failure,
 )
@@ -360,7 +361,7 @@ class XhsSessionMixin:
         """Keep the original business page; auxiliary tabs never become primary."""
         self._assert_cdp_lifecycle_alive(stage)
         if self._page_is_closed(self.context_page):
-            raise RuntimeError(f"xhs_main_page_closed_unexpected:stage={stage}")
+            raise XHSMainPageClosedUnexpected(stage=stage)
 
     @staticmethod
     def _is_target_closed_error(exc: BaseException) -> bool:
@@ -379,9 +380,7 @@ class XhsSessionMixin:
             if not self._is_target_closed_error(exc):
                 raise
             self._assert_cdp_lifecycle_alive("behavior_primary_page_closed")
-            raise RuntimeError(
-                "xhs_main_page_closed_unexpected:stage=behavior"
-            ) from exc
+            raise XHSMainPageClosedUnexpected(stage="behavior") from exc
 
     async def _open_behavior_search_page_on_primary_page(self, keyword: str) -> None:
         """Navigate once; never adopt another tab after the primary page closes."""
@@ -391,9 +390,7 @@ class XhsSessionMixin:
             if not self._is_target_closed_error(exc):
                 raise
             self._assert_cdp_lifecycle_alive("search_navigation_primary_page_closed")
-            raise RuntimeError(
-                "xhs_main_page_closed_unexpected:stage=search_navigation"
-            ) from exc
+            raise XHSMainPageClosedUnexpected(stage="search_navigation") from exc
 
     def _assert_cdp_lifecycle_alive(self, stage: str) -> None:
         """Prefer a manager-observed context/browser lifecycle code when present."""

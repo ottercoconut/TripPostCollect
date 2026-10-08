@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -97,7 +98,9 @@ def scenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace
     committer = batch.BatchCheckpointCommitter(
         guard=guard, state_path=state_path, target=target, discovery_plan=discovery
     )
-    monkeypatch.setattr(batch.time, "sleep", lambda _: committer())
+    # Patch only the exporter's clock: replacing the shared ``time.sleep`` would also run the
+    # committer from pytest itself, e.g. inside ``subprocess.run(timeout=...)`` polling.
+    monkeypatch.setattr(batch, "time", SimpleNamespace(monotonic=time.monotonic, sleep=lambda _: committer()))
     return SimpleNamespace(**locals())
 
 
