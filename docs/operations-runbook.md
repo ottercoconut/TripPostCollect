@@ -497,39 +497,34 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
 
 2. 逐平台迁移：快照与 profile 都只复制、不移动，旧目录（含其中的快照）原样保留为备份。若本批被回退，
    旧代码仍从旧位置读取快照与 profile，所以旧位置不得缺少任何文件。
+   - 脚本用 `set -eu -o pipefail`，但不依赖 `set -e` 在函数和 `&&` 链中的隐式语义：`mkdir`、`ditto`、
+     `rm`、`touch`、`cp`、`mv` 每一步都显式写 `|| fail`，`fail` 打印原因后 `exit 1` 终止整个脚本；
+     第一个出错的平台之后不再处理任何平台。
+   - 每个平台先做前置检查：新位置存在 `profile.partial`、`cdp_profile.partial` 或
+     `trippostcollect_cookie_snapshot.json.partial`（上次中途失败的残留）时，提示删除这些 **新侧**
+     `.partial` 后重跑，并非零退出。目标已存在时打印跳过提示，不覆盖，保持重跑幂等。
    - 新建的 `<platform>` 目录用 `mkdir -p -m 700`：`-m` 只作用于最后一级，即 `<platform>` 本身，
      不改上级目录；目录已存在时不改动其权限。
-   - 快照用 `cp -p` 复制到新位置同级目录，保留 `0600` 权限、属主与时间。拒绝覆盖的方式是复制前显式
-     `[ -e 目标 ]` 判断：目标已存在时打印提示并跳过，不调用 `cp`（不用 `cp -n`，因为它静默跳过且不报错）。
    - profile 用 `ditto` 而不是 `cp -Rp`：`ditto` 默认保留权限、时间、扩展属性、ACL 和 Chrome 的
-     `Singleton*` 符号链接，并且语义固定为“把源目录内容复制到目标目录”，不受尾部 `/` 影响。
-   - 原子落地：先 `ditto` 到 `<目标>.partial`，成功后删除其中随之复制进来的快照副本（新代码只读同级
-     快照），再用 `touch -r` 恢复根目录 mtime，最后 `mv` 改名为 `profile`/`cdp_profile`；各步用 `&&`
-     串联，任一步失败都停在 `.partial`。`.partial` 存在时运行期检查拒绝启动，脚本也拒绝继续该目录；
-     按提示删除对应 `.partial` 后重跑本步。目标已存在时打印提示并跳过，不覆盖。
+     `Singleton*` 符号链接，并且语义固定为“把源目录内容复制到目标目录”，不受尾部 `/` 影响。先复制到
+     `<目标>.partial`，删除随之复制进来的快照副本（新代码只读同级快照），再用 `touch -r` 恢复根目录 mtime。
+   - 快照用 `cp -p` 先复制到同级 `.partial` 再 `mv` 落地，保留 `0600` 权限、属主与时间。拒绝覆盖的方式是
+     显式 `[ -e 目标 ]` 判断后跳过，不调用 `cp`（不用 `cp -n`，因为它静默跳过且不报错）。
+   - 落地顺序：两类 profile 的 `.partial` 与快照全部准备成功、快照先落地，最后才把 `profile.partial`
+     改名为 `profile`。新 `profile` 出现是唯一的“提交点”：之前任何一步失败时 `profile` 都不存在
+     （运行期检查因旧目录仍在或 `.partial` 残留而拒绝启动）；若反过来先落地 profile、后复制快照失败，
+     运行期会接受一个没有快照的新 profile，因此不采用该顺序。
    - 普通 profile 与 `cdp_` profile 各自独立判断，只有 `cdp_` 旧目录时也会迁移。
 
+   <!-- t14-migrate:step2 -->
    ```bash
    bash <<'SH'
-   set -u
+   set -eu -o pipefail
    snap=trippostcollect_cookie_snapshot.json
    legacy_root=tools/MediaCrawler/browser_data
-   migrate_dir() {
-     local src=$1 dst=$2
-     [ -d "$src" ] || return 0
-     if [ -e "$dst.partial" ]; then
-       echo "stop: $dst.partial exists; delete it and rerun"
-       return 1
-     fi
-     if [ -e "$dst" ]; then
-       echo "skip: $dst exists, not overwritten"
-       return 0
-     fi
-     ditto "$src" "$dst.partial" \
-       && rm -f "$dst.partial/$snap" \
-       && touch -r "$src" "$dst.partial" \
-       && mv "$dst.partial" "$dst" \
-       || { echo "failed: delete $dst.partial and rerun"; return 1; }
+   fail() {
+     echo "FAILED: $*" >&2
+     exit 1
    }
    for pair in bili:bilibili wb:weibo dy:douyin zhihu:zhihu; do
      code=${pair%%:*}
@@ -541,55 +536,126 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
        echo "skip $platform: no legacy profile"
        continue
      fi
-     mkdir -p -m 700 "$new"
+     for leftover in "$new/profile.partial" "$new/cdp_profile.partial" "$new/$snap.partial"; do
+       if [ -e "$leftover" ] || [ -L "$leftover" ]; then
+         fail "$platform: $leftover left by an earlier run; delete the new-side .partial entries and rerun"
+       fi
+     done
+     mkdir -p -m 700 "$new" || fail "$platform: mkdir"
+     staged=()
+     for kind in "$old:profile" "$old_cdp:cdp_profile"; do
+       src=${kind%:*}
+       dst=$new/${kind##*:}
+       [ -d "$src" ] || continue
+       if [ -e "$dst" ]; then
+         echo "skip $platform ${kind##*:}: target exists, not overwritten"
+         continue
+       fi
+       ditto "$src" "$dst.partial" || fail "$platform ${kind##*:}: ditto"
+       rm -f "$dst.partial/$snap" || fail "$platform ${kind##*:}: rm snapshot copy"
+       touch -r "$src" "$dst.partial" || fail "$platform ${kind##*:}: touch"
+       staged+=("$dst")
+     done
      if [ -f "$old/$snap" ]; then
        if [ -e "$new/$snap" ]; then
          echo "skip $platform snapshot: target exists, not overwritten"
        else
-         cp -p "$old/$snap" "$new/$snap"
+         cp -p "$old/$snap" "$new/$snap.partial" || fail "$platform snapshot: cp"
+         mv "$new/$snap.partial" "$new/$snap" || fail "$platform snapshot: mv"
        fi
      fi
-     migrate_dir "$old" "$new/profile"
-     migrate_dir "$old_cdp" "$new/cdp_profile"
+     for dst in ${staged[@]+"${staged[@]}"}; do
+       mv "$dst.partial" "$dst" || fail "$platform: mv $dst"
+     done
+     echo "migrated $platform"
    done
    SH
    ```
+   <!-- /t14-migrate:step2 -->
+
+   任一步失败时脚本以非零状态停止并打印 `FAILED: <平台> <步骤>`。按提示只删除新侧 `.partial`（以及确认
+   为复制错误的新侧目录）后重跑；旧目录与旧快照始终不动。
 
 3. 校验：逐相对条目比较每对 profile 目录（旧侧不计快照，因为新目录里已删掉该副本）。条目集合用
    `find -print0 | sort -z` 比较；每个条目用 BSD `stat -f '%HT %p %z %m %Su:%Sg'` 比较类型、权限、大小、
    mtime 与属主属组，符号链接再比较 `readlink`，普通文件用 `cmp -s` 逐字节比较；另对照
-   `find <dir> -perm +077 | wc -l` 的 group/other 权限条目数。快照比较大小、权限、mtime、属主属组与
-   SHA-256，并要求新快照为 `-rw-------`。输出只含平台名、目录种类、布尔值和计数，不打印路径、内容、
-   哈希或 Cookie。
+   `find <dir> -perm +077 | wc -l` 的 group/other 权限条目数。profile 根本身单独核对类型、权限（应为
+   `700`）、属主与 mtime。快照比较大小、权限、mtime、属主属组与 SHA-256，并要求新快照为 `-rw-------`。
+   输出只含平台名、目录种类、布尔值和计数，不打印路径、内容、哈希或 Cookie。`stat`、`find`、`cmp`、
+   `readlink`、`shasum` 等任一命令出错都以非零状态停止，不会打印“一致”；全部命令成功但发现任何不一致时，
+   脚本最后以状态 2 退出。
 
+   <!-- t14-migrate:step3 -->
    ```bash
    bash <<'SH'
-   set -u
+   set -eu -o pipefail
    snap=trippostcollect_cookie_snapshot.json
    legacy_root=tools/MediaCrawler/browser_data
+   work=$(mktemp -d) || exit 1
+   trap 'rm -rf "$work"' EXIT
+   problems=0
+   fail() {
+     echo "FAILED: $*" >&2
+     exit 1
+   }
+   yes_no() {
+     if [ "$1" = "$2" ]; then echo yes; else echo no; fi
+   }
    entries() {
      (cd "$1" && find . -mindepth 1 ! -path "./$snap" -print0 | LC_ALL=C sort -z)
    }
    compare_tree() {
-     local a=$1 b=$2 same=no total=0 bad=0 rel perm_a perm_b
-     if cmp -s <(entries "$a") <(entries "$b"); then same=yes; fi
+     local a=$1 b=$2 same=no total=0 bad=0 rel sa sb la lb rc perm_a perm_b
+     entries "$a" > "$work/a" || fail "list old entries"
+     entries "$b" > "$work/b" || fail "list new entries"
+     rc=0
+     cmp -s "$work/a" "$work/b" || rc=$?
+     [ "$rc" -le 1 ] || fail "cmp entry lists"
+     if [ "$rc" -eq 0 ]; then same=yes; fi
      while IFS= read -r -d '' rel; do
        total=$((total + 1))
        if [ ! -e "$b/$rel" ] && [ ! -L "$b/$rel" ]; then
          bad=$((bad + 1))
          continue
        fi
-       if [ "$(stat -f '%HT %p %z %m %Su:%Sg' "$a/$rel")" != "$(stat -f '%HT %p %z %m %Su:%Sg' "$b/$rel")" ]; then
+       sa=$(stat -f '%HT %p %z %m %Su:%Sg' "$a/$rel") || fail "stat old entry"
+       sb=$(stat -f '%HT %p %z %m %Su:%Sg' "$b/$rel") || fail "stat new entry"
+       if [ "$sa" != "$sb" ]; then
          bad=$((bad + 1))
        elif [ -L "$a/$rel" ]; then
-         [ "$(readlink "$a/$rel")" = "$(readlink "$b/$rel")" ] || bad=$((bad + 1))
+         la=$(readlink "$a/$rel") || fail "readlink old"
+         lb=$(readlink "$b/$rel") || fail "readlink new"
+         [ "$la" = "$lb" ] || bad=$((bad + 1))
        elif [ -f "$a/$rel" ]; then
-         cmp -s "$a/$rel" "$b/$rel" || bad=$((bad + 1))
+         rc=0
+         cmp -s "$a/$rel" "$b/$rel" || rc=$?
+         [ "$rc" -le 1 ] || fail "cmp entry"
+         [ "$rc" -eq 0 ] || bad=$((bad + 1))
        fi
-     done < <(entries "$a")
-     perm_a=$(find "$a" ! -path "$a/$snap" -perm +077 | wc -l | tr -d ' ')
-     perm_b=$(find "$b" -perm +077 | wc -l | tr -d ' ')
+     done < "$work/a"
+     perm_a=$(find "$a" ! -path "$a/$snap" -perm +077 | wc -l | tr -d ' ') || fail "find old perms"
+     perm_b=$(find "$b" -perm +077 | wc -l | tr -d ' ') || fail "find new perms"
      echo "same_entry_set=$same entries=$total mismatched=$bad group_other_perm=$perm_a/$perm_b"
+     if [ "$same" != yes ] || [ "$bad" -ne 0 ] || [ "$perm_a" != "$perm_b" ]; then
+       problems=$((problems + 1))
+     fi
+   }
+   compare_root() {
+     local a=$1 b=$2 ta tb ma mb oa ob ra rb
+     ta=$(stat -f %HT "$a") || fail "stat old root"
+     tb=$(stat -f %HT "$b") || fail "stat new root"
+     ma=$(stat -f %Lp "$a") || fail "stat old root"
+     mb=$(stat -f %Lp "$b") || fail "stat new root"
+     oa=$(stat -f %Su "$a") || fail "stat old root"
+     ob=$(stat -f %Su "$b") || fail "stat new root"
+     ra=$(stat -f %m "$a") || fail "stat old root"
+     rb=$(stat -f %m "$b") || fail "stat new root"
+     echo "root_type_same=$(yes_no "$ta" "$tb") root_dir=$([ -d "$b" ] && [ ! -L "$b" ] && echo yes || echo no)" \
+       "root_mode_700=$(yes_no "$ma:$mb" "700:700") root_owner_same=$(yes_no "$oa" "$ob")" \
+       "root_mtime_same=$(yes_no "$ra" "$rb")"
+     if [ "$ta" != "$tb" ] || [ ! -d "$b" ] || [ "$ma:$mb" != "700:700" ] || [ "$oa" != "$ob" ] || [ "$ra" != "$rb" ]; then
+       problems=$((problems + 1))
+     fi
    }
    for pair in bili:bilibili wb:weibo dy:douyin zhihu:zhihu; do
      code=${pair%%:*}
@@ -600,28 +666,42 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
        [ -d "$old" ] || continue
        if [ ! -d "$new" ]; then
          echo "$platform ${kind#*:}: missing"
+         problems=$((problems + 1))
          continue
        fi
+       # 直接在当前 shell 调用（不放进 $(...)），fail 才能终止整个脚本、计数才能累加。
+       printf '%s %s root: ' "$platform" "${kind#*:}"
+       compare_root "$old" "$new"
        printf '%s %s: ' "$platform" "${kind#*:}"
        compare_tree "$old" "$new"
      done
      old_snap=$legacy_root/${code}_user_data_dir/$snap
      new_snap=data/runtime/platform_sessions/$platform/$snap
      [ -f "$old_snap" ] || continue
-     if [ -f "$new_snap" ] \
-       && [ "$(stat -f '%z %Sp %m %Su:%Sg' "$old_snap")" = "$(stat -f '%z %Sp %m %Su:%Sg' "$new_snap")" ] \
-       && [ "$(stat -f %Sp "$new_snap")" = "-rw-------" ] \
-       && [ "$(shasum -a 256 < "$old_snap")" = "$(shasum -a 256 < "$new_snap")" ]; then
+     if [ ! -f "$new_snap" ]; then
+       echo "$platform snapshot: 不一致"
+       problems=$((problems + 1))
+       continue
+     fi
+     sa=$(stat -f '%z %Sp %m %Su:%Sg' "$old_snap") || fail "stat old snapshot"
+     sb=$(stat -f '%z %Sp %m %Su:%Sg' "$new_snap") || fail "stat new snapshot"
+     mode=$(stat -f %Sp "$new_snap") || fail "stat new snapshot"
+     ha=$(shasum -a 256 < "$old_snap") || fail "hash old snapshot"
+     hb=$(shasum -a 256 < "$new_snap") || fail "hash new snapshot"
+     if [ "$sa" = "$sb" ] && [ "$mode" = "-rw-------" ] && [ "$ha" = "$hb" ]; then
        echo "$platform snapshot: 一致"
      else
        echo "$platform snapshot: 不一致"
+       problems=$((problems + 1))
      fi
    done
+   [ "$problems" -eq 0 ] || exit 2
    SH
    ```
+   <!-- /t14-migrate:step3 -->
 
-   每行 profile 结果都应为 `same_entry_set=yes`、`mismatched=0`，且 `group_other_perm` 两侧计数相等；
-   快照应为“一致”。非 root 账号复制时属主或属组可能与旧侧不同；即使只有属组不同，也按“不一致”交人工
+   脚本应以状态 0 结束：每行 root 结果均为 `yes`，每行 profile 结果为 `same_entry_set=yes`、`mismatched=0`，
+   且 `group_other_perm` 两侧计数相等；快照应为“一致”。非 root 账号复制时属主或属组可能与旧侧不同；即使只有属组不同，也按“不一致”交人工
    确认，不得擅自 `chmod`/`chown`。确认是复制错误时，只删除新侧对应的 `profile`/`cdp_profile` 目录或
    新快照文件后重做第 2 步；旧目录与旧快照始终不动，可重复复制。
 
