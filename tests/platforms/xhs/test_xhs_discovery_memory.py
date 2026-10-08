@@ -17,7 +17,9 @@ from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
     XHSCreatorProfileUnavailable,
     XHSImageDownloadError,
+    XHSMainPageClosedUnexpected,
     XHSNoteDetailUnavailable,
+    xhs_cdp_lifecycle_stop_detail,
 )
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudgetExhausted
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
@@ -685,6 +687,7 @@ async def test_search_disconnect_timeout_preserves_current_recovery_frontier(
         ("xhs_browser_process_exited", "browser_process_exited"),
         ("xhs_browser_context_closed_unexpected", "browser_context_closed"),
         ("xhs_cdp_disconnected_unexpected", "cdp_disconnected"),
+        ("xhs_main_page_closed_unexpected", "main_page_closed"),
     ],
 )
 @pytest.mark.asyncio
@@ -723,6 +726,15 @@ async def test_cdp_lifecycle_failure_preserves_frontier_without_retry_or_relaunc
     assert stopped["details"]["resume_cursor"] == "saved-search-id"
     assert stopped["details"]["batch_complete"] is False
     assert stopped["details"].get("candidate_identities") in (None, [])
+
+
+def test_main_page_closed_is_lifecycle_failure_with_unchanged_message() -> None:
+    exc = XHSMainPageClosedUnexpected(stage="behavior")
+
+    assert isinstance(exc, CDPBrowserLifecycleError)
+    assert str(exc) == "xhs_main_page_closed_unexpected:stage=behavior"
+    assert xhs_cdp_lifecycle_stop_detail(exc) == "main_page_closed"
+    assert xhs_cdp_lifecycle_stop_detail(lifecycle_error("xhs_unknown_lifecycle")) == "browser_runtime_failed"
 
 
 @pytest.mark.asyncio

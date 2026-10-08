@@ -65,7 +65,18 @@ _XHS_CDP_LIFECYCLE_STOP_DETAILS = {
     "xhs_browser_process_exited": "browser_process_exited",
     "xhs_cdp_disconnected_unexpected": "cdp_disconnected",
     "xhs_browser_context_closed_unexpected": "browser_context_closed",
+    "xhs_main_page_closed_unexpected": "main_page_closed",
 }
+
+
+class XHSMainPageClosedUnexpected(CDPBrowserLifecycleError):
+    """The original business page closed while the browser session stayed alive.
+
+    属于本轮浏览器生命周期失败而非候选失败；消息保持 ``xhs_main_page_closed_unexpected:stage=…``。
+    """
+
+    def __init__(self, *, stage: str):
+        super().__init__({"code": "xhs_main_page_closed_unexpected"}, stage=stage)
 
 
 def xhs_cdp_lifecycle_stop_detail(exc: CDPBrowserLifecycleError) -> str:

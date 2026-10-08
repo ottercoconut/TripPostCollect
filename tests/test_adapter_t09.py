@@ -1294,7 +1294,12 @@ async def capture(awaitable):
     except BaseException as exc:  # noqa: BLE001 - 记录两侧原样异常
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
-        return {"type": type(exc).__name__, "message": str(exc), "code": getattr(exc, "code", None)}
+        # #55：根实现把主页面关闭改为生命周期异常子类（消息逐字不变），对照按其 RuntimeError 基类名比较；
+        # 根侧模块按对照隔离重新加载，类对象不唯一，故按类名识别。
+        name = type(exc).__name__
+        if name == "XHSMainPageClosedUnexpected" and isinstance(exc, RuntimeError):
+            name = "RuntimeError"
+        return {"type": name, "message": str(exc), "code": getattr(exc, "code", None)}
     return None
 
 

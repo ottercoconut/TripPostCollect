@@ -18,6 +18,7 @@ from support.browser_settings import BROWSER_SETTINGS
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.platforms import entry as platform_entry
 from trippostcollect.platforms.xhs import repair as xhs_repair
+from trippostcollect.platforms.xhs.errors import XHSMainPageClosedUnexpected
 from trippostcollect.platforms.xhs.core import XiaoHongShuCrawler as RootXiaoHongShuCrawler
 from trippostcollect.xhs import accounts
 
@@ -747,6 +748,17 @@ def test_candidate_only_child_failure_does_not_hide_runtime_or_media_blockers() 
         "error_code": "login_required"
     }
     assert repair.candidate_only_child_failure(summary) is False
+
+
+def test_xhs_repair_treats_closed_main_page_as_runtime_blocker() -> None:
+    crawler = SimpleNamespace()
+    exc = XHSMainPageClosedUnexpected(stage="creator_profile_browser")
+
+    assert xhs_repair._repair_exception_is_blocking(crawler, exc) is True
+    assert xhs_repair._xhs_repair_blocker(crawler, exc) == {
+        "error_type": "XHSMainPageClosedUnexpected",
+        "error_code": "main_page_closed",
+    }
 
 
 @pytest.mark.asyncio

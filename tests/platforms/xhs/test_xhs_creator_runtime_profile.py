@@ -17,9 +17,14 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 import pytest
 
+from trippostcollect.application import events as app_events
 import trippostcollect.platforms.xhs.author as xhs_author
 from trippostcollect.platforms.xhs.client import XiaoHongShuClient
-from trippostcollect.platforms.xhs.errors import PlatformRuntimeError, XHSCreatorProfileUnavailable
+from trippostcollect.platforms.xhs.errors import (
+    PlatformRuntimeError,
+    XHSCreatorProfileUnavailable,
+    XHSMainPageClosedUnexpected,
+)
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget, XHSManualWaitBudgetExhausted
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.platforms.xhs.parser import (
@@ -35,7 +40,7 @@ from trippostcollect.platforms.xhs.parser import (
 from trippostcollect.records.sanitization import AUTHOR_AVATAR_KEYS, XHS_SERIALIZED_PROFILE_AVATAR_PATHS
 
 from .support import XiaoHongShuCrawler, client_ports
-from .test_xhs_discovery_memory import prepare_crawler
+from .test_xhs_discovery_memory import lifecycle_error, prepare_crawler, valid_note
 
 
 REQUESTED_USER = "synthetic-author-a"
@@ -693,7 +698,11 @@ class StaticClient:
 def crawler(monkeypatch, tmp_path):
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS", "1")
     monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior_evidence.json"))
-    instance = XiaoHongShuCrawler()
+    return attach_creator_harness(XiaoHongShuCrawler(), monkeypatch, tmp_path)
+
+
+def attach_creator_harness(instance, monkeypatch, tmp_path):
+    """作者页离线替身：存活的主页面、弹窗检查、合成时钟、可见状态与共享人工预算。"""
     instance._guarded_pause = AsyncMock(return_value=0.0)
     instance.context_page = Mock()
     instance.context_page.is_closed.return_value = False
@@ -1280,3 +1289,194 @@ async def test_candidate_skip_detail_carries_reason_without_html_or_avatar(monke
     assert skipped[0]["attempts"] == 2 and skipped[0]["retryable"] is True
     serialized = json.dumps(skipped[0], ensure_ascii=False)
     assert "avatar" not in serialized and "<html" not in serialized and "author-retry" not in serialized
+
+
+# ---------------------------------------------------------------------------
+# #55 主页面关闭：浏览器、context 与作者辅助页仍存活时，作者补全期间主页面关闭让本轮失败。
+
+# 第 3 页的作者经 API 取到资料并完成批次；第 4 页第一位作者进入浏览器回退，第二位不得被处理。
+MAIN_PAGE_NOTE_AUTHORS = {
+    "note-confirmed": "author-confirmed",
+    "note-closing": REQUESTED_USER,
+    "note-untouched": "author-untouched",
+}
+
+
+class SearchCreatorClient(StaticClient):
+    """两页搜索；作者 API 只认识首页作者，其余作者为空结果并进入浏览器回退。"""
+
+    def __init__(self):
+        super().__init__()
+        self.pages = {
+            3: {"items": [{"id": "note-confirmed"}], "has_more": True},
+            4: {"items": [{"id": "note-closing"}, {"id": "note-untouched"}], "has_more": False},
+        }
+        self.search_pages = []
+        self.on_api_miss = None
+
+    async def get_note_by_keyword(self, **kwargs):
+        self.search_pages.append(kwargs["page"])
+        return copy.deepcopy(self.pages[kwargs["page"]])
+
+    async def get_creator_info(self, **kwargs):
+        self.api_calls.append(kwargs["user_id"])
+        if kwargs["user_id"] == "author-confirmed":
+            return {"fans_count": 100}
+        if self.on_api_miss is not None:
+            self.on_api_miss()
+        return None
+
+
+def main_page_search(monkeypatch, tmp_path):
+    """真实 search → 作者补全路径；主页面关闭点由各用例设置，记录主页面检查抛出的阶段。"""
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS", "1")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior_evidence.json"))
+    instance, _, state_path = prepare_crawler(monkeypatch, tmp_path, items=[])
+    attach_creator_harness(instance, monkeypatch, tmp_path)
+    del instance.enrich_note_creator
+    instance.xhs_client = SearchCreatorClient()
+
+    async def fetch_detail(*, note_id, **kwargs):
+        note = valid_note(note_id)
+        note["user"]["user_id"] = MAIN_PAGE_NOTE_AUTHORS[note_id]
+        return note
+
+    instance.get_note_detail_async_task = fetch_detail
+    instance.creator_page = CreatorPage([creator_state()])
+    instance._new_guarded_page = AsyncMock(return_value=instance.creator_page)
+    instance.closed_stages = []
+    original_assert = instance._assert_primary_page_alive
+
+    def assert_primary_page_alive(stage):
+        try:
+            original_assert(stage)
+        except XHSMainPageClosedUnexpected as exc:
+            instance.closed_stages.append(str(exc))
+            raise
+
+    instance._assert_primary_page_alive = assert_primary_page_alive
+    instance.published_batches = []
+    monkeypatch.setattr(app_events, "_batch_publisher", instance.published_batches.append)
+    return instance, state_path
+
+
+def close_main_page(instance):
+    instance.context_page.is_closed.return_value = True
+
+
+def close_during_midrun_login_recovery(instance):
+    """作者页落地即要求登录；中途登录恢复轮询中主页面关闭（第二次弹窗检查时）。"""
+    instance.visible_markers = [{"login_required": True}]
+    calls = {"count": 0}
+
+    async def popup_state(page):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            close_main_page(instance)
+            return {"manual_markers": ["qrcode"], "visible_text": "扫码登录"}
+        return {}
+
+    instance._popup_checkpoint_state = popup_state
+
+
+MAIN_PAGE_CLOSE_POINTS = {
+    "before_browser_fallback": (
+        lambda instance: setattr(instance.xhs_client, "on_api_miss", lambda: close_main_page(instance)),
+        "creator_profile_browser",
+    ),
+    "after_runtime_projection": (
+        lambda instance: setattr(instance.creator_page, "on_projection", lambda: close_main_page(instance)),
+        "creator_profile_runtime_wait",
+    ),
+    "verification_accept": (
+        lambda instance: (
+            setattr(instance, "visible_markers", [{"captcha_or_verify": True}, {}]),
+            setattr(instance.creator_page, "on_projection", lambda: close_main_page(instance)),
+        ),
+        "creator_profile_verification_accept",
+    ),
+    "midrun_login_recovery": (close_during_midrun_login_recovery, "midrun_login_recovery"),
+}
+
+
+def search_events(state_path):
+    return json.loads(state_path.read_text(encoding="utf-8"))["events"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_point", list(MAIN_PAGE_CLOSE_POINTS))
+async def test_main_page_closed_during_creator_enrichment_fails_run_not_candidate(
+    monkeypatch, tmp_path, close_point
+):
+    crawler, state_path = main_page_search(monkeypatch, tmp_path)
+    arrange, stage = MAIN_PAGE_CLOSE_POINTS[close_point]
+    arrange(crawler)
+
+    await crawler.search()
+
+    assert crawler.closed_stages == [f"xhs_main_page_closed_unexpected:stage={stage}"]
+    events = search_events(state_path)
+    assert not any(event["type"] == "candidate_skipped" for event in events)
+    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
+    assert stopped["stop_reason"] == "runtime_failed"
+    assert stopped["stop_detail"] == "main_page_closed"
+    # 后续候选不处理：第二位作者未请求，只有已确认批次的候选入库。
+    assert crawler.xhs_client.api_calls == ["author-confirmed", REQUESTED_USER]
+    assert [call.args[0]["note_id"] for call in crawler.update_xhs_note.await_args_list] == ["note-confirmed"]
+    assert crawler.xhs_client.search_pages == [3, 4]
+    # 已确认批次保留且只发布一次；未完成的第 4 页不产生批次完成，也不发布 checkpoint。
+    completed = [event["details"] for event in events if event["type"] == "adaptive_batch_completed"]
+    assert [(batch["source_page"], batch["resume_page"]) for batch in completed] == [(3, 4)]
+    assert completed[0]["batch_complete"] is True
+    assert crawler.published_batches == completed
+    assert stopped["resume_page"] == 4 and stopped["batch_complete"] is False
+    # 前提：浏览器、context 与作者辅助页仍存活，辅助页照常收束。
+    assert crawler.creator_page.closed is False
+    if close_point == "before_browser_fallback":
+        crawler._new_guarded_page.assert_not_awaited()
+    else:
+        crawler._close_page_with_deadline.assert_awaited_once_with(
+            crawler.creator_page, reason="creator_profile_cleanup"
+        )
+
+
+@pytest.mark.asyncio
+async def test_context_lifecycle_failure_keeps_priority_over_closed_main_page(monkeypatch, tmp_path):
+    crawler, state_path = main_page_search(monkeypatch, tmp_path)
+    MAIN_PAGE_CLOSE_POINTS["after_runtime_projection"][0](crawler)
+    context_closed = lifecycle_error("xhs_browser_context_closed_unexpected", stage="creator")
+
+    def assert_alive(stage):
+        if crawler.context_page.is_closed.return_value:
+            raise context_closed
+
+    crawler.cdp_manager = Mock(assert_alive=assert_alive)
+
+    await crawler.search()
+
+    assert crawler.closed_stages == []
+    events = search_events(state_path)
+    assert not any(event["type"] == "candidate_skipped" for event in events)
+    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
+    assert stopped["stop_reason"] == "runtime_failed"
+    assert stopped["stop_detail"] == "browser_context_closed"
+    assert stopped["resume_page"] == 4
+
+
+@pytest.mark.asyncio
+async def test_missing_creator_profile_with_live_main_page_still_skips_candidate(monkeypatch, tmp_path):
+    crawler, state_path = main_page_search(monkeypatch, tmp_path)
+    crawler.creator_page.projections = [None]
+    crawler.creator_page.html = NEW_SET_BEFORE_USER
+
+    await crawler.search()
+
+    assert crawler.closed_stages == []
+    events = search_events(state_path)
+    skipped = [event["details"] for event in events if event["type"] == "candidate_skipped"]
+    assert [entry["detail"].split(":", 1)[0] for entry in skipped] == ["creator_profile_failed"] * 2
+    assert {entry["error_code"] for entry in skipped} == {"creator_profile_unavailable"}
+    assert crawler.xhs_client.api_calls == ["author-confirmed", REQUESTED_USER, "author-untouched"]
+    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
+    assert stopped["stop_reason"] == "source_exhausted"

@@ -30,6 +30,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from trippostcollect.platforms.xhs.errors import IPBlockError, PlatformRuntimeError
 from trippostcollect.platforms.xhs.parser import parse_note_info_from_note_url
+from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -42,7 +43,7 @@ def _repair_exception_is_blocking(crawler: Any, exc: BaseException) -> bool:
             request_failure = request_failure_factory(exc)
         except Exception:
             request_failure = exc
-    blocking_types = (IPBlockError, PlatformRuntimeError)
+    blocking_types = (IPBlockError, PlatformRuntimeError, CDPBrowserLifecycleError)
     if blocking_types and isinstance(request_failure, blocking_types):
         return True
     if isinstance(request_failure, PlaywrightError) or isinstance(exc, PlaywrightError):
@@ -129,6 +130,7 @@ def _xhs_repair_blocker(crawler: Any, exc: BaseException) -> dict[str, str]:
             ("rate_limit", "rate_limited"),
             ("login_required", "login_required"),
             ("verification_timeout", "verification_timeout"),
+            ("xhs_main_page_closed_unexpected", "main_page_closed"),
             ("browser_context_closed", "browser_target_closed"),
         ):
             if marker in text:
