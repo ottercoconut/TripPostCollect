@@ -16,7 +16,9 @@ _SPEC = importlib.util.spec_from_file_location("t13_ci_coverage_report", ROOT / 
 report = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(report)
 SPEC = report.load_spec(ROOT / report.SPEC_PATH)
-LANES = (*report.ROOT_LANES, "fork")
+# T14 过渡：声明仍含 fork 条目时才有 fork lane；T14-C 删除这些条目后 LANES 只剩根 lane。
+LANES = (*report.ROOT_LANES, *(("fork",) if any(entry["lane"] == "fork"
+                                                for _, _, entry in report.iter_entries(SPEC)) else ()))
 
 
 def synthetic_nodes() -> dict[str, set[str]]:
@@ -139,3 +141,13 @@ def test_spec_problems_reject_unknown_status_and_bare_na() -> None:
 
     assert any("F01/weibo: 非法状态 partial" in problem for problem in problems)
     assert any("F02/weibo: 不适用必须写依据" in problem for problem in problems)
+
+
+def test_leftover_fork_entries_fail_once_fork_lane_is_gone(tmp_path):
+    spec = {**SPEC, "responsibilities": {**SPEC["responsibilities"]}}
+    spec["responsibilities"]["F01"] = {**spec["responsibilities"]["F01"], "shared": [
+        *spec["responsibilities"]["F01"].get("shared", []),
+        {"file": "tests/test_leftover.py", "lane": "fork", "min_functions": 1}]}
+    result = report.build_report(spec, {lane: {} for lane in report.ROOT_LANES})
+    assert result["ok"] is False
+    assert "F01/shared: fork lane 未运行（fork 已删除），覆盖声明须移除 fork 条目" in result["problems"]

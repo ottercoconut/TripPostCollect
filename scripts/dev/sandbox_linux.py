@@ -8,6 +8,7 @@
 | 禁启动浏览器与桌面打开器 | process-exec 按路径正则拒绝 | 名称匹配同一正则的可执行文件/目录及 xdg-open 等打开器被不可访问文件遮蔽，exec 得 EACCES |
 | 只允许临时根与 /dev 写入 | ``file-write*`` require-not | 根目录只读绑定，仅临时根与 /dev 可写，写入得 EROFS |
 | 禁读写本机浏览器用户数据 | Library/Application Support 下 Chrome 目录 | ``~/.config`` 下 Chrome/Chromium/Chrome for Testing 目录被 000 空目录遮蔽，得 EACCES |
+| 禁读写项目平台登录资料 | checkout 内 ``PROFILE_STORES`` 禁读写 | checkout 内现存的 ``PROFILE_STORES`` 被 000 空目录遮蔽 |
 
 子孙进程继承全部限制；父进程退出时沙箱随之结束。Ubuntu 23.10 起默认限制非特权用户命名空间，
 需为 ``/usr/bin/bwrap`` 放行（AppArmor profile 含 ``userns,``），见 docs/testing.md。
@@ -30,6 +31,8 @@ OPENERS = ("xdg-open", "sensible-browser", "x-www-browser", "gnome-www-browser",
 SEARCH_ROOTS = ("/opt", "/snap/bin", "/usr/lib", "/usr/local/lib")
 PROFILE_DIRS = (".config/google-chrome", ".config/google-chrome-beta", ".config/google-chrome-unstable",
                 ".config/google-chrome-for-testing", ".config/chromium", ".cache/ms-playwright")
+# 与 sandbox_macos.PROFILE_STORES 一致（测试守护）；fork 下旧 browser_data 随 T14-C 删除。
+PROFILE_STORES = ("data/runtime/platform_sessions", "tools/MediaCrawler/browser_data")
 
 # ---------------------------------------------------------------- seccomp（经典 BPF）
 
@@ -99,8 +102,15 @@ def browser_targets(path_env, roots=SEARCH_ROOTS):
     return sorted(path for path in collapsed if not any(other in path.parents for other in collapsed))
 
 
-def profile_targets(home):
-    return [Path(home) / relative for relative in PROFILE_DIRS if (Path(home) / relative).exists()]
+def profile_targets(home, checkouts=()):
+    """本机浏览器用户数据，以及各 checkout 内现存的项目平台登录资料。
+
+    局限：bwrap 只能遮蔽 prepare 时已存在的路径；之后才创建的登录资料目录不会被遮蔽读取，
+    但其写入仍被只读根挡住（临时根除外），可以接受。
+    """
+    paths = [Path(home) / relative for relative in PROFILE_DIRS]
+    paths += [Path(checkout) / relative for checkout in checkouts for relative in PROFILE_STORES]
+    return [path for path in paths if path.exists()]
 
 
 # ---------------------------------------------------------------- 接口（与 sandbox_macos 一致）
@@ -121,7 +131,7 @@ def bwrap_arguments(temporary, masked, deny_dir, deny_file, seccomp_fd):
 
 
 def prepare(output, checkouts, home, path_env):
-    """写出 seccomp 过滤器与遮蔽用的空目录/空文件；checkouts 由只读根统一覆盖。"""
+    """写出 seccomp 过滤器与遮蔽用的空目录/空文件；checkouts 写入由只读根统一覆盖，登录资料另行遮蔽。"""
     state = output / "sandbox-linux"
     state.mkdir()
     deny_dir, deny_file = state / "denied-dir", state / "denied-file"
@@ -131,7 +141,7 @@ def prepare(output, checkouts, home, path_env):
     os.chmod(deny_file, 0)
     seccomp = state / "seccomp.bpf"
     seccomp.write_bytes(seccomp_program())
-    masked = [(path, path.is_dir()) for path in [*browser_targets(path_env), *profile_targets(home)]]
+    masked = [(path, path.is_dir()) for path in [*browser_targets(path_env), *profile_targets(home, checkouts)]]
     return {"temporary": output, "masked": masked, "deny_dir": deny_dir, "deny_file": deny_file,
             "seccomp": seccomp}
 

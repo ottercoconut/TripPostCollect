@@ -19,8 +19,11 @@ from adapter_ledger_rules import (
     CLI_DEFINITION_SOURCES,
     ENTRYPOINTS,
     FORK_EXCLUDED_DIRS,
+    FORK_BRIDGE_FILES,
     FORK_EXCLUDED_PLATFORMS,
     FORK_PREFIX,
+    FROZEN_LEDGER_SHA256,
+    PROGRESS_RESOLUTIONS,
     RESOURCE_FILES,
     SPEC_MERGE_BASE,
     SYMBOL_ROOT_FILES,
@@ -90,8 +93,78 @@ def fork_python_files(root):
                 yield path.relative_to(root).as_posix()
 
 
+def fork_gitlink(root, revision=None):
+    """返回 fork gitlink 登记的提交；revision 为空时读索引（反映当前 checkout 与已暂存删除）。
+
+    T14 过渡判定的唯一依据：head 中没有 gitlink 即视为 fork 已删除。T14-C 合并后基线与 head 都不再含
+    gitlink，本函数及所有 fork 分支可一并删除。
+    """
+    path = FORK_PREFIX.rstrip("/")
+    output = git_read(root, *(("ls-tree", revision, "--", path) if revision else ("ls-files", "-s", "--", path)))
+    for line in output.splitlines():
+        fields, _, name = line.partition("\t")
+        fields = fields.split()
+        if name == path and fields and fields[0] == "160000":
+            return fields[-1] if revision else fields[1]
+    return None
+
+
+def require_fork(root):
+    """生成类命令必须重新枚举 fork 基线；fork 删除后台账冻结，只保留 --check 自检。"""
+    if not fork_gitlink(root):
+        raise RuntimeError("fork gitlink 已删除：迁移台账已冻结，只支持 symbols/inputs/baseline --check 自检")
+
+
+def frozen_problems(root, command):
+    """不访问任何 Git 对象库的冻结自检：登记散列、Markdown 由 JSON 逐字节重现、规则与行一致。"""
+    root = Path(root)
+    names = {"symbols": (LEDGER_DIR / "symbols.json", SYMBOL_MARKDOWN),
+             "inputs": (LEDGER_DIR / "inputs.json",),
+             "baseline": (LEDGER_DIR / "baseline.json", LEDGER_DIR / "tests.json")}[command]
+    problems = []
+    for relative in names:
+        path = root / relative
+        expected = FROZEN_LEDGER_SHA256[relative.as_posix()]
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            problems.append(f"冻结台账散列不符：{relative}")
+    if problems:
+        return problems
+    if command == "symbols":
+        result = load_symbols(root)
+        if (root / SYMBOL_MARKDOWN).read_bytes() != render_symbols(result).encode("utf-8"):
+            problems.append(f"{SYMBOL_MARKDOWN} 不能由 symbols.json 逐字节重现")
+        if result["unmapped"]:
+            problems.append("symbols.json 含未映射定义")
+        stat = collections.Counter(row["disposition"] for row in result["rows"])
+        if {**stat, "total": len(result["rows"])} != result["stat"]:
+            problems.append("symbols.json 统计与行不一致")
+        rules = [(files.split("|"), re.compile(pattern), rest) for files, pattern, *rest in SYMBOL_RULES]
+        for row in result["rows"]:
+            values = next((rest for files, pattern, rest in rules
+                           if row["file"] in files and pattern.fullmatch(row["qualname"])), None)
+            fields = ("target", "disposition", "card", "tests", "note")
+            if values is None or tuple(row[key] for key in fields) != tuple(values):
+                problems.append(f"规则与冻结行不一致：{row['file']}:{row['qualname']}")
+        known = {(row["file"], row["qualname"]) for row in result["rows"]}
+        problems.extend(f"收口规则指向冻结账中不存在的行：{key[0]}:{key[1]}"
+                        for key in sorted(PROGRESS_RESOLUTIONS.keys() - known))
+    elif command == "inputs":
+        result = load_inputs(root)
+        if set(result) != {"cli", "env"} or set(result["cli"]) != set(ENTRYPOINTS):
+            problems.append("inputs.json 结构或入口集合不符")
+    return problems
+
+
+def check_frozen(root, command):
+    problems = frozen_problems(root, command)
+    for problem in problems:
+        print(problem)
+    return not problems
+
+
 def baseline_sources(root):
     """只从登记提交枚举源码；工作树迁移不能改变冻结台账。"""
+    require_fork(root)
     baseline = json.loads((root / LEDGER_DIR / "baseline.json").read_text(encoding="utf-8"))
     root_files = git_read(root, "ls-tree", "-r", "--name-only", baseline["root_head"]).splitlines()
     fork = root / FORK_PREFIX
@@ -375,6 +448,7 @@ class DefinitionLocation:
     file: str | None = None
     qualname: str | None = None
     node: ast.AST | None = None
+    basis: str | None = None  # 经 PROGRESS_RESOLUTIONS 收口时的依据
 
 
 def class_defines_member(node, member):
@@ -427,7 +501,9 @@ def locate_definition(root, row, inspect=None, *, rows=None):
                 package_path = "src/trippostcollect/" + module.replace(".", "/") + ".py"
                 if name in inspect(package_path)[0]:
                     return found(package_path, name)
-        return found(row["file"], qualname, "pending")
+        resolved = resolve_by_rule(row, target, target_definitions, inspect,
+                                   source=(definitions[qualname], imports, target_module))
+        return resolved or found(row["file"], qualname, "pending")
 
     imported = imports.get(qualname, "")
     prefix = target_module + "."
@@ -472,18 +548,60 @@ def locate_definition(root, row, inspect=None, *, rows=None):
                         or (prior.bases and not (len(prior.bases) == 1
                             and isinstance(prior.bases[0], ast.Name) and prior.bases[0].id == "object"))):
                     break
-    return DefinitionLocation("missing")
+    return resolve_by_rule(row, target, target_definitions, inspect) or DefinitionLocation("missing")
 
 
-def build_progress(root):
-    """逐行对照冻结账，复用原位、委托、一跳重导出与直接 mixin 基类定位。"""
+def referenced_names(node, imports):
+    """列出定义体内经顶层导入解析的点分名（Name 与 Attribute 链），用于确认显式引用。"""
+    names = set()
+    for child in ast.walk(node):
+        parts = []
+        while isinstance(child, ast.Attribute):
+            parts.insert(0, child.attr)
+            child = child.value
+        if isinstance(child, ast.Name) and child.id in imports:
+            names.add(".".join([imports[child.id], *parts]))
+    return names
+
+
+def resolve_by_rule(row, target, target_definitions, inspect, *, source=None):
+    """按 PROGRESS_RESOLUTIONS 收口常规定位得到 pending/missing 的行；未登记时返回 None。
+
+    source 为原定义仍在时的（节点, 导入, 目标模块）：只有保留文件中的“迁至”且原定义 AST 直接引用登记的
+    承接定义才计 moved；fork 与私有桥原位定义在删除批之前一律保持 pending，“退出”在原定义仍在时不生效。
+    原定义不存在时，“迁至”要求承接定义存在，“退出”直接记 exited。
+    """
+    resolution = PROGRESS_RESOLUTIONS.get((row["file"], row["qualname"]))
+    if resolution is None or source and (row["file"].startswith(FORK_PREFIX) or row["file"] in FORK_BRIDGE_FILES):
+        return None
+    kind, name, basis = resolution
+    if kind == "退出":
+        return None if source else DefinitionLocation("exited", basis=basis)
+    if name not in target_definitions:
+        return None
+    if source:
+        node, imports, target_module = source
+        wanted = f"{target_module}.{name}"
+        if not any(item == wanted or item.startswith(wanted + ".") for item in referenced_names(node, imports)):
+            return None
+    return DefinitionLocation("moved", target, name, inspect(target)[0][name], basis)
+
+
+def build_progress(root, reader=None):
+    """逐行对照冻结账，复用原位、委托、一跳重导出、直接 mixin 基类定位与显式收口规则。
+
+    reader 仅供测试模拟删除批（例如隐藏 fork 与私有桥），默认读取工作树。
+    """
     root = Path(root)
     baseline = load_symbols(root)
-    inspect = definition_inspector(root)
+    inspect = definition_inspector(root, reader)
     rows = []
     for original in baseline["rows"]:
         row = {key: original[key] for key in ("file", "qualname", "card", "disposition", "target")}
-        row["state"] = locate_definition(root, row, inspect, rows=baseline["rows"]).state
+        location = locate_definition(root, row, inspect, rows=baseline["rows"])
+        row["state"] = location.state
+        if location.basis:
+            row["resolution"] = location.basis
         rows.append(row)
     counts = {state: 0 for state in ("pending", "moved", "exited", "missing")}
     counts.update(collections.Counter(row["state"] for row in rows))
@@ -503,6 +621,7 @@ def git_read(root, *args, strip=True):
 
 def build_baseline(root):
     root = Path(root)
+    require_fork(root)
     fork, upstream = root / FORK_PREFIX, root.parent / "MediaCrawler-upstream"
     if not upstream.is_dir():
         raise RuntimeError(f"上游只读副本不存在：{upstream}")
@@ -625,6 +744,7 @@ def collect_nodes(source, side, matrix, support):
 
 def build_tests(source):
     source = temporary_source(source)
+    require_fork(ROOT)
     matrix = load_matrix()
     files = {path.relative_to(source).as_posix() for path in (source / "tests").rglob("test_*.py")}
     files.update(FORK_PREFIX + name for name in matrix.FORK_OFFLINE_TESTS)
@@ -712,7 +832,13 @@ def main(argv=None):
                 print(f"{side} 收集 {len(result[side]['nodes'])} 个节点，分组：{counts}")
             return 0
         success = True
+        # fork 删除后（无 gitlink）只做冻结自检；fork 仍在时另外按登记提交重新枚举并逐字节比较。
+        regenerate = not args.check or fork_gitlink(ROOT) is not None
         for command in ("baseline", "symbols", "inputs") if args.command == "all" else (args.command,):
+            if args.check:
+                success = check_frozen(ROOT, command) and success
+            if not regenerate:
+                continue
             result = {"baseline": build_baseline, "symbols": build_symbols, "inputs": build_inputs}[command](ROOT)
             if command == "symbols" and result["unmapped"]:
                 print("以下定义没有处置规则：")

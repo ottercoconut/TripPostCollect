@@ -1,7 +1,8 @@
 """卡片闸门的 macOS 沙箱后端：Seatbelt（``/usr/bin/sandbox-exec``）。
 
 与 ``sandbox_linux.py`` 并行，两者对外接口与拒绝语义一一对应：禁网络（AF_UNIX 除外）、禁启动浏览器与
-桌面打开器、只允许临时根与 /dev 写入、禁读写本机 Chrome/Chrome for Testing 用户数据。子孙进程继承策略。
+桌面打开器、只允许临时根与 /dev 写入、禁读写本机 Chrome/Chrome for Testing 用户数据及项目内平台登录资料。
+子孙进程继承策略。
 """
 
 from __future__ import annotations
@@ -13,7 +14,9 @@ from pathlib import Path
 
 NAME = "Seatbelt"
 SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
-FORK = "tools/MediaCrawler"
+# 项目内真实登录资料目录（相对 checkout），禁读写。T14-A 起非小红书 profile 位于 platform_sessions；
+# fork 下旧 browser_data 只在 fork 删除前存在，T14-C 随 fork 删除该项。sandbox_linux 保持同一清单（测试守护）。
+PROFILE_STORES = ("data/runtime/platform_sessions", "tools/MediaCrawler/browser_data")
 
 
 def preflight():
@@ -34,8 +37,10 @@ def sandbox_policy(temporary, checkouts, home):
         path = Path(home) / "Library/Application Support" / relative
         rules.append(f"(deny file-read* file-write* (subpath {quote(path)}))")
     for checkout in sorted(set(map(Path, checkouts))):
-        for relative in ("data", "outputs", f"{FORK}/browser_data"):
+        for relative in ("data", "outputs"):
             rules.append(f"(deny file-write* (subpath {quote(checkout / relative)}))")
+        for relative in PROFILE_STORES:
+            rules.append(f"(deny file-read* file-write* (subpath {quote(checkout / relative)}))")
     rules.extend([
         "(deny file-write* (require-all",
         f"  (require-not (subpath {quote(temporary)}))",

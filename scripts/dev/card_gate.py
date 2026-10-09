@@ -20,10 +20,12 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 import adapter_ledger as ledger
+from adapter_ledger_rules import FORK_BRIDGE_FILES
 
 
 ROOT = Path(__file__).resolve().parents[2]
 FORK = "tools/MediaCrawler"
+ROOT_LANES = ("component", "installation", "os")
 
 
 def sandbox_backend(platform=None):
@@ -72,6 +74,9 @@ if spec["profile_exists"]:
     denied("profile", lambda: os.listdir(spec["profile"]))
 else:
     results["profile"] = {"denied": True, "absent": True}
+# 项目平台登录资料探针：临时根内按真实布局构造，目录缺失时 listdir 得 ENOENT，同样判未通过。
+for index, path in enumerate(spec.get("project_profiles", [])):
+    denied(f"project_profile{index}", lambda path=path: os.listdir(path))
 print(json.dumps(results))
 sys.exit(0 if all(item["denied"] for item in results.values()) else 2)
 '''
@@ -147,12 +152,22 @@ def ast_text(node):
     return ast.dump(node, include_attributes=False) if node is not None else None
 
 
-def ast_review(root, rows, reader, cards=(), pairs=()):
-    """两侧共用按文件缓存的定位器，覆盖本卡迁移和前序已迁实现的变化。"""
+def retired_source(root, path):
+    """fork 删除批中随 fork/私有桥整体删除的原文件；T14-C 合并后基线不再含这些文件，可删除本函数。"""
+    return (path.startswith(FORK + "/") or path in FORK_BRIDGE_FILES) and not (Path(root) / path).exists()
+
+
+def ast_review(root, rows, reader, cards=(), pairs=(), retiring=False):
+    """两侧共用按文件缓存的定位器，覆盖本卡迁移和前序已迁实现的变化。
+
+    retiring 表示基线有 fork gitlink 而本次没有（T14-C）：基线仍在 fork/私有桥原位（pending）的定义
+    随文件整体删除，若本次已由承接定义或收口规则定位（moved/exited），记为预期退出而不逐字对照；
+    本次未定位的仍按“工作树未定位”报错。
+    """
     inspect = ledger.definition_inspector(root)
     base_inspect = ledger.definition_inspector(root, reader)
 
-    result = {"equal": [], "different": [], "missing": [], "pending": [], "exited": [],
+    result = {"equal": [], "different": [], "missing": [], "pending": [], "exited": [], "retired": [],
               "cards": [], "previously_moved": 0}
     selected_cards = set(cards)
 
@@ -185,6 +200,10 @@ def ast_review(root, rows, reader, cards=(), pairs=()):
         result["previously_moved"] += previous.state == "moved"
         item = {"definition": f"{row['file']}:{row['qualname']}",
                 "base_location": position(previous), "location": position(located)}
+        if (retiring and previous.state == "pending" and located.state in ("moved", "exited")
+                and retired_source(root, previous.file)):
+            result["retired"].append(item)
+            continue
         if located.state in ("pending", "exited"):
             result[located.state].append(item.copy())
             # 原位 pending 仍单列；已迁实现退回原位且内容改变时不能掩盖差异。
@@ -259,13 +278,72 @@ def compare_lane(current, baseline, expected=None):
 
 def cache_identity(root_commit, fork_commit, script_hash, fork_python):
     return {"root_commit": root_commit, "fork_commit": fork_commit,
-            "script_hash": script_hash, "fork_python": str(fork_python)}
+            "script_hash": script_hash, "fork_python": str(fork_python) if fork_python else None}
 
 
-def cache_valid(cached, identity):
-    return cached.get("identity") == identity and set(cached.get("lanes", {})) == {
-        "component", "installation", "os", "fork",
-    }
+def cache_valid(cached, identity, lanes):
+    return cached.get("identity") == identity and set(cached.get("lanes", {})) == set(lanes)
+
+
+def canary_profile_probes(output, stores):
+    """在临时根内按真实相对布局构造探针 checkout，交给后端与真实 checkout 同样遮蔽；不读写真实登录资料。"""
+    checkout = output / "canary-checkout"
+    paths = []
+    for relative in stores:
+        path = checkout / relative
+        path.mkdir(parents=True)
+        (path / "probe").write_text("canary", encoding="utf-8")
+        paths.append(str(path))
+    return checkout, paths
+
+
+def removal_problems(root, progress):
+    """T14-C 删除批的额外门禁：fork 目录须已从磁盘删除（只 git rm --cached 不算），台账不得残留 pending。"""
+    problems = []
+    if (Path(root) / FORK).exists():
+        problems.append(f"fork 删除批要求 {FORK} 目录已从磁盘删除（仅 git rm --cached 不算删除）")
+    pending = progress["counts"].get("pending", 0)
+    if pending:
+        problems.append(f"fork 删除批要求台账 progress 的 pending 为 0，实际 {pending}")
+    return problems
+
+
+def selected_lanes(head_fork):
+    """fork lane 只在本次仍有 fork gitlink 时运行；基线与本次使用同一组 lane 才可比较。"""
+    return (*ROOT_LANES, "fork") if head_fork else ROOT_LANES
+
+
+def fork_plan(root, base, checkout, common, fork_python=None):
+    """T14 过渡：按基线与本次（索引）的 fork gitlink 决定 lane、基线对象库与 fork 解释器。
+
+    present：两侧都有 gitlink，行为与 T14 前一致；removing：基线有、本次无（T14-C 本身），跳过 fork lane，
+    基线 fork 源码从仍含该提交的对象库导出；absent：两侧都无。T14-C 合并后只剩 absent，可删除本函数。
+    """
+    fork_base, head_fork = ledger.fork_gitlink(root, base), ledger.fork_gitlink(root)
+    if head_fork and not fork_base:
+        raise RuntimeError("基线没有 fork gitlink，本次不得重新引入 fork")
+    repository = None
+    if fork_base:
+        git_dir = (root / ledger.git_read(root, "rev-parse", "--git-dir")).resolve()
+        repository = fork_repository(
+            [root / FORK] if head_fork else [root / FORK, git_dir / "modules" / FORK,
+                                             checkout / FORK, common / "modules" / FORK],
+            fork_base)
+    return {"base": fork_base, "head": head_fork,
+            "transition": "present" if head_fork else "removing" if fork_base else "absent",
+            "repository": repository, "lanes": selected_lanes(head_fork),
+            "python": (fork_python or checkout / FORK / ".venv/bin/python").absolute() if head_fork else None}
+
+
+def fork_repository(candidates, commit):
+    """在候选对象库中找到含基线 fork 提交者；本次已删除 fork 时可退到主 checkout 或子模块 gitdir。"""
+    for candidate in candidates:
+        if candidate.exists() and subprocess.run(
+                ["git", "-C", str(candidate), "cat-file", "-e", f"{commit}^{{commit}}"],
+                capture_output=True, check=False).returncode == 0:
+            return candidate
+    raise RuntimeError(f"基线含 fork gitlink {commit}，但以下位置均无该提交，无法导出基线："
+                       + "、".join(map(str, candidates)))
 
 
 def remove_source(path):
@@ -280,12 +358,12 @@ def remove_source(path):
     shutil.rmtree(path)
 
 
-def run_tests(pristine, output, sandbox, python, fork_python, sources):
+def run_tests(pristine, output, sandbox, python, fork_python, sources, selected):
     """每组生成独立白名单副本，避免前一组测试留下的修改影响下一组。"""
     matrix = load_module(pristine / "scripts/ci/run_matrix.py", "card_gate_matrix")
     lanes = load_module(pristine / "tests/run_lanes.py", "card_gate_lanes")
     results = {}
-    for lane in ("component", "installation", "os", "fork"):
+    for lane in selected:
         destination = output / f"source-{lane}"
         sources.append(destination)
         source = matrix.fresh_source(pristine, destination)
@@ -330,11 +408,13 @@ def git_bytes(root, *arguments):
     return result.stdout
 
 
-def archive_source(root, base, fork_base, destination):
-    """从两个对象库导出基线，不 checkout、不修改索引或引用。"""
+def archive_source(root, base, fork_base, destination, fork_repo=None):
+    """从对象库导出基线，不 checkout、不修改索引或引用；基线无 fork gitlink 时只导出根。"""
     destination.mkdir(parents=True)
-    for repository, revision, target in ((root, base, destination),
-                                         (root / FORK, fork_base, destination / FORK)):
+    archives = [(root, base, destination)]
+    if fork_base:
+        archives.append((fork_repo or root / FORK, fork_base, destination / FORK))
+    for repository, revision, target in archives:
         target.mkdir(parents=True, exist_ok=True)
         with tarfile.open(fileobj=io.BytesIO(git_bytes(repository, "archive", revision))) as archive:
             archive.extractall(target, filter="data")
@@ -343,6 +423,10 @@ def archive_source(root, base, fork_base, destination):
 def render_summary(report):
     """三态结论始终在最后一行；跳过测试不能成为通过。"""
     lines = ["沙箱 canary：" + ("通过" if report.get("canary", {}).get("passed") else "未通过")]
+    if "fork" in report:
+        lines.append("fork：" + {"present": "基线与本次均有 gitlink（含 fork lane）",
+                                 "removing": "本次删除 gitlink（T14-C 过渡，跳过 fork lane，原位定义按预期退出核对）",
+                                 "absent": "基线与本次均无 gitlink（无 fork lane）"}[report["fork"]["transition"]])
     if "ledger" in report:
         item = report["ledger"]
         lines.append(f"台账：总计 {item['progress']['total']}，{item['progress']['counts']}")
@@ -364,7 +448,8 @@ def render_summary(report):
             return [r["definition"] for r in item[key]]
 
         lines.append(f"AST：逐字 {len(item['equal'])}，差异 {names('different')}，未定位 {names('missing')}；"
-                     f"原位 pending {len(item['pending'])}，退出 {len(item['exited'])}；"
+                     f"原位 pending {len(item['pending'])}，退出 {len(item['exited'])}，"
+                     f"随 fork 删除预期退出 {len(item.get('retired', []))}；"
                      f"其中前序已迁 {item['previously_moved']}")
     if report.get("skip_tests"):
         lines.append("测试：未运行（--skip-tests）")
@@ -422,14 +507,17 @@ def main(argv=None):
         checkout = common.parent
         base = ledger.git_read(ROOT, "rev-parse", "--verify", (args.base or ledger.git_read(
             ROOT, "merge-base", "HEAD", "main")) + "^{commit}")
-        fork_base = ledger.git_read(ROOT, "ls-tree", base, FORK).split()[2]
+        plan = fork_plan(ROOT, base, checkout, common, args.fork_python)
+        fork_base, head_fork, transition = plan["base"], plan["head"], plan["transition"]
+        fork_repo, fork_python, lanes_selected = plan["repository"], plan["python"], plan["lanes"]
+        report["fork"] = {"base": fork_base, "head": head_fork, "transition": transition,
+                          "repository": str(fork_repo) if fork_repo else None, "lanes": list(lanes_selected)}
         python = ROOT / ".venv/bin/python"
-        fork_python = (args.fork_python or checkout / FORK / ".venv/bin/python").absolute()
         backend = sandbox_backend()
         backend.preflight()
         if not python.is_file():
             raise RuntimeError("缺少工作树解释器")
-        if not args.skip_tests and not fork_python.is_file():
+        if not args.skip_tests and fork_python and not fork_python.is_file():
             raise RuntimeError(f"fork 解释器不存在：{fork_python}")
         rows = ledger.load_symbols(ROOT)["rows"]
         if set(args.card) - {r["card"] for r in rows}:
@@ -445,12 +533,14 @@ def main(argv=None):
             pairs.append((original, target))
         lanes = load_module(ROOT / "tests/run_lanes.py", "card_gate_runtime")
         home = Path.home().resolve()
-        policy = backend.prepare(output, (ROOT, checkout), home, lanes.runtime_path())
+        probe_checkout, profile_probes = canary_profile_probes(output, backend.PROFILE_STORES)
+        policy = backend.prepare(output, (ROOT, checkout, probe_checkout), home, lanes.runtime_path())
         sandbox = Sandbox(backend, policy, clean_environment(output / "control", lanes.runtime_path()))
         report.update(base=base, fork_base=fork_base, sandbox=backend.NAME, commands=sandbox.commands)
         canary_log = output / "canary.json"
         probe_name = f".card-gate-probe-{output.name}"
-        canary_spec = json.dumps(backend.canary_spec(home, policy), ensure_ascii=False)
+        canary_spec = {**backend.canary_spec(home, policy), "project_profiles": profile_probes}
+        canary_spec = json.dumps(canary_spec, ensure_ascii=False)
         canary_code = sandbox.run([python, "-c", CANARY, ROOT, probe_name, canary_spec], ROOT, canary_log)
         # 仅在沙箱意外允许创建但拒绝删除时，由编排进程立即清理自己的探针。
         probe = ROOT / probe_name
@@ -478,13 +568,16 @@ def main(argv=None):
                             and not any(drift.values()) and progress["counts"]["missing"] == 0}
         if not report["ledger"]["passed"]:
             report["errors"].append("台账检查失败")
+        if transition == "removing":
+            report["fork"]["problems"] = removal_problems(ROOT, progress)
+            report["errors"].extend(report["fork"]["problems"])
         report["frozen"] = check("frozen", [python, "scripts/verify_frozen_files.py"])[0] == 0
         if not report["frozen"]:
             report["errors"].append("冻结文件校验失败")
         root_names = git_bytes(ROOT, "diff", "--name-only", "-z", base).decode() + git_bytes(
             ROOT, "ls-files", "--others", "--exclude-standard", "-z").decode()
-        fork_names = git_bytes(ROOT / FORK, "diff", "--name-only", "-z", fork_base).decode() + git_bytes(
-            ROOT / FORK, "ls-files", "--others", "--exclude-standard", "-z").decode()
+        fork_names = (git_bytes(ROOT / FORK, "diff", "--name-only", "-z", fork_base).decode() + git_bytes(
+            ROOT / FORK, "ls-files", "--others", "--exclude-standard", "-z").decode()) if head_fork else ""
         files = changed_files(ROOT, root_names, fork_names)
         files["failures"] = []
         for index, path in enumerate(files["compile"]):
@@ -501,11 +594,13 @@ def main(argv=None):
         def reader(path):
             repository, revision, relative = ROOT, base, path
             if path.startswith(FORK + "/"):
-                repository, revision, relative = ROOT / FORK, fork_base, path[len(FORK) + 1:]
+                if not fork_base:
+                    return ""
+                repository, revision, relative = fork_repo, fork_base, path[len(FORK) + 1:]
             names = git_bytes(repository, "ls-tree", "--name-only", revision, "--", relative).decode().splitlines()
             return git_bytes(repository, "show", f"{revision}:{relative}").decode() if relative in names else ""
 
-        report["ast"] = ast_review(ROOT, rows, reader, args.card, pairs)
+        report["ast"] = ast_review(ROOT, rows, reader, args.card, pairs, retiring=transition == "removing")
         counts = defaultdict(Counter)
         for row in progress["rows"]:
             if row["card"] in report["ast"]["cards"]:
@@ -515,13 +610,14 @@ def main(argv=None):
             report["errors"].append("AST 存在差异或未定位定义")
         if not args.skip_tests:
             identity = cache_identity(base, fork_base, hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), fork_python)
-            cache = common / "card-gate" / f"baseline-{base}-{fork_base}.json"
+            cache = common / "card-gate" / f"baseline-{base}-{fork_base or 'nofork'}.json"
             cached = json.loads(cache.read_text()) if cache.is_file() else {}
-            if args.refresh_baseline or not cache_valid(cached, identity):
+            if args.refresh_baseline or not cache_valid(cached, identity, lanes_selected):
                 pristine = output / "baseline-archive"
                 sources.append(pristine)
-                archive_source(ROOT, base, fork_base, pristine)
-                baseline = run_tests(pristine, output / "baseline", sandbox, python, fork_python, sources)
+                archive_source(ROOT, base, fork_base, pristine, fork_repo)
+                baseline = run_tests(pristine, output / "baseline", sandbox, python, fork_python, sources,
+                                     lanes_selected)
                 cached = {"identity": identity, "lanes": baseline}
                 # 缓存是编排进程唯一写入临时根以外的报告，不经子进程执行。
                 cache.parent.mkdir(parents=True, exist_ok=True)
@@ -529,7 +625,7 @@ def main(argv=None):
                 report["cache"] = "重建 " + str(cache)
             else:
                 report["cache"] = "命中 " + str(cache)
-            current = run_tests(ROOT, output / "current", sandbox, python, fork_python, sources)
+            current = run_tests(ROOT, output / "current", sandbox, python, fork_python, sources, lanes_selected)
             report["tests"] = {}
             for lane, result in current.items():
                 baseline = cached["lanes"][lane]

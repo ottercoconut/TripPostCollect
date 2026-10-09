@@ -237,18 +237,46 @@ def test_repair_fallback_never_replaces_raw_identity_with_legacy_values() -> Non
     assert (merged["creator_hash"], merged["user_nickname"]) == (LEGACY_HASH, LEGACY_MASKED)
 
 
+LEGACY_IDENTITY_NAMES = ("anonymize_user_id", "mask_nickname")
+# 迁移台账规则以冻结账的（文件, 限定名）字符串为键登记这两个旧定义的 T14 退出；台账键必须与冻结行逐字一致，
+# 只能是字符串字面量。该文件只豁免字符串字面量，任何代码形式的引用仍判命中。
+LEDGER_RULES = "scripts/dev/adapter_ledger_rules.py"
+
+
+def _legacy_identity_code_references(source: str) -> bool:
+    """去掉普通字符串字面量后按子串判定：名字、属性、导入、注释与 f-string 内容仍计为命中。"""
+    import io
+    import tokenize
+
+    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+    code = " ".join(token.string for token in tokens if token.type != tokenize.STRING)
+    return any(name in code for name in LEGACY_IDENTITY_NAMES)
+
+
 def test_root_package_no_longer_calls_legacy_identity_transforms() -> None:
     """哈希/脱敏函数只为 fork 旧导入出口与冻结旧投影测试保留到 T14；根包与 scripts 不得再引用。"""
     root = Path(__file__).resolve().parents[1]
     identity = root / "src" / "trippostcollect" / "records" / "identity.py"
-    hits = [
-        path.relative_to(root).as_posix()
-        for base in (root / "src" / "trippostcollect", root / "scripts")
-        for path in base.rglob("*.py")
-        if path != identity
-        and any(name in path.read_text(encoding="utf-8") for name in ("anonymize_user_id", "mask_nickname"))
-    ]
+    hits = []
+    for base in (root / "src" / "trippostcollect", root / "scripts"):
+        for path in base.rglob("*.py"):
+            relative = path.relative_to(root).as_posix()
+            source = path.read_text(encoding="utf-8")
+            if path == identity:
+                continue
+            if relative == LEDGER_RULES:
+                if _legacy_identity_code_references(source):
+                    hits.append(relative)
+            elif any(name in source for name in LEGACY_IDENTITY_NAMES):
+                hits.append(relative)
     assert hits == []
+
+
+def test_ledger_rules_exemption_covers_only_string_literals() -> None:
+    assert not _legacy_identity_code_references('KEY = ("tools/x.py", "anonymize_user_id")\n')
+    assert _legacy_identity_code_references("from trippostcollect.records.identity import mask_nickname\n")
+    assert _legacy_identity_code_references("value = identity.anonymize_user_id(raw)\n")
+    assert _legacy_identity_code_references("# 调用 mask_nickname\nvalue = 1\n")
 
 
 @pytest.mark.parametrize("missing_name", [None, ""])

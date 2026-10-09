@@ -25,8 +25,11 @@ def test_policy_covers_all_boundaries():
         path = "/Users/测试/Library/Application Support/" + profile
         assert f"(deny file-read* file-write* (subpath {json.dumps(path, ensure_ascii=False)}))" in policy
     for root in ("/work/main", "/work/卡 G"):
-        for name in ("data", "outputs", "tools/MediaCrawler/browser_data"):
+        for name in ("data", "outputs"):
             assert f'(deny file-write* (subpath "{root}/{name}"))' in policy
+        # 真实平台登录资料禁读写：T14-A 的 platform_sessions 与删除前的 fork browser_data。
+        for name in ("data/runtime/platform_sessions", "tools/MediaCrawler/browser_data"):
+            assert f'(deny file-read* file-write* (subpath "{root}/{name}"))' in policy
     assert "(require-all" in policy
     assert '(require-not (subpath "/dev"))' in policy
     assert '(require-not (subpath "/tmp/带 空格/\\\"本轮\\\""))' in policy
@@ -260,13 +263,134 @@ def test_changed_files_only_existing_python(tmp_path):
     assert result["ruff"] == ["scripts/new.py"]
 
 
-@pytest.mark.parametrize("change", [None, "script_hash", "fork_python", "root_commit", "fork_commit"])
+@pytest.mark.parametrize("change", [None, "script_hash", "fork_python", "root_commit", "fork_commit", "lanes"])
 def test_baseline_cache_identity(change):
     identity = gate.cache_identity("root", "fork", "hash", Path("/env/bin/python"))
-    cached = {"identity": identity.copy(), "lanes": dict.fromkeys(("component", "installation", "os", "fork"))}
-    if change:
+    lanes = gate.selected_lanes("fork-commit")
+    cached = {"identity": identity.copy(), "lanes": dict.fromkeys(lanes)}
+    if change == "lanes":
+        lanes = gate.selected_lanes(None)
+    elif change:
         cached["identity"][change] += "-changed"
-    assert gate.cache_valid(cached, identity) is (change is None)
+    assert gate.cache_valid(cached, identity, lanes) is (change is None)
+
+
+def test_lanes_and_cache_identity_without_fork():
+    assert gate.selected_lanes("abc") == ("component", "installation", "os", "fork")
+    assert gate.selected_lanes(None) == ("component", "installation", "os")
+    identity = gate.cache_identity("root", None, "hash", None)
+    assert identity["fork_commit"] is None and identity["fork_python"] is None
+    assert gate.cache_valid({"identity": identity, "lanes": dict.fromkeys(gate.ROOT_LANES)}, identity, gate.ROOT_LANES)
+
+
+@pytest.mark.parametrize("base_fork,head_fork,transition", [
+    ("f" * 40, "f" * 40, "present"), ("f" * 40, None, "removing"), (None, None, "absent"),
+])
+def test_fork_plan_covers_three_transitions(monkeypatch, tmp_path, base_fork, head_fork, transition):
+    checkout, common = tmp_path / "main", tmp_path / "main/.git"
+    monkeypatch.setattr(gate.ledger, "fork_gitlink",
+                        lambda root, revision=None: base_fork if revision else head_fork)
+    monkeypatch.setattr(gate.ledger, "git_read", lambda root, *args: str(tmp_path / "wt-git"))
+    searched = []
+
+    def repository(candidates, commit):
+        searched.append((candidates, commit))
+        return candidates[-1]
+
+    monkeypatch.setattr(gate, "fork_repository", repository)
+    plan = gate.fork_plan(tmp_path / "wt", "base", checkout, common)
+    assert plan["transition"] == transition
+    assert plan["lanes"] == gate.selected_lanes(head_fork)
+    if transition == "present":
+        assert searched == [([tmp_path / "wt" / gate.FORK], base_fork)]
+        assert plan["python"] == (checkout / gate.FORK / ".venv/bin/python").absolute()
+    elif transition == "removing":
+        # 本次已无 fork：基线 fork 源码改由子模块 gitdir、主 checkout 或公共 modules 提供，不要求 fork 解释器。
+        assert searched == [([tmp_path / "wt" / gate.FORK, tmp_path / "wt-git/modules" / gate.FORK,
+                              checkout / gate.FORK, common / "modules" / gate.FORK], base_fork)]
+        assert plan["python"] is None and plan["repository"] == common / "modules" / gate.FORK
+    else:
+        assert searched == [] and plan["repository"] is None and plan["python"] is None
+
+
+def test_fork_plan_rejects_reintroduced_fork(monkeypatch, tmp_path):
+    monkeypatch.setattr(gate.ledger, "fork_gitlink", lambda root, revision=None: None if revision else "f" * 40)
+    with pytest.raises(RuntimeError, match="不得重新引入"):
+        gate.fork_plan(tmp_path, "base", tmp_path, tmp_path / ".git")
+
+
+def test_fork_repository_requires_commit(tmp_path):
+    import subprocess
+
+    repo = tmp_path / "fork"
+    repo.mkdir()
+    run = lambda *args: subprocess.run(["git", "-C", str(repo), *args], check=True,  # noqa: E731
+                                       capture_output=True, text=True).stdout.strip()
+    run("init", "-q")
+    run("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "x")
+    commit = run("rev-parse", "HEAD")
+    assert gate.fork_repository([tmp_path / "missing", repo], commit) == repo
+    with pytest.raises(RuntimeError, match="无法导出基线"):
+        gate.fork_repository([repo], "0" * 40)
+
+
+@pytest.mark.parametrize("fork_base", [None, "f" * 40])
+def test_archive_source_exports_fork_only_when_base_has_gitlink(monkeypatch, tmp_path, fork_base):
+    import io
+    import tarfile
+
+    calls = []
+
+    def archive(repository, *arguments):
+        calls.append((repository, arguments))
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w"):
+            pass
+        return buffer.getvalue()
+
+    monkeypatch.setattr(gate, "git_bytes", archive)
+    gate.archive_source(tmp_path / "root", "base", fork_base, tmp_path / "out", tmp_path / "modules")
+    expected = [(tmp_path / "root", ("archive", "base"))]
+    if fork_base:
+        expected.append((tmp_path / "modules", ("archive", fork_base)))
+    assert calls == expected
+    assert (tmp_path / "out" / gate.FORK).is_dir() is bool(fork_base)
+
+
+@pytest.mark.parametrize("case,bucket", [
+    ("moved", "retired"), ("exited", "retired"), ("missing", "missing"), ("not-retiring", "different"),
+])
+def test_ast_review_treats_fork_removal_as_expected_exit(tmp_path, monkeypatch, case, bucket):
+    original = gate.FORK + "/store/demo.py"
+    target = "src/trippostcollect/artifacts/staging.py"
+    row = {"file": original, "qualname": "DemoImage.__init__", "disposition": "拆", "card": "T06",
+           "target": "artifacts/staging.py"}
+    old = "class DemoImage:\n    def __init__(self):\n        self.root = 1\n"
+    kind = "退出" if case == "exited" else "迁至"
+    monkeypatch.setattr(gate.ledger, "PROGRESS_RESOLUTIONS", {
+        (original, row["qualname"]): (kind, None if kind == "退出" else "Stager.__init__", "依据")})
+    write_sources(tmp_path, {target: "" if case == "missing" else
+                             "class Stager:\n    def __init__(self, root):\n        self.root = root\n"})
+    result = gate.ast_review(tmp_path, [row], lambda path: old if path == original else "",
+                             retiring=case != "not-retiring")
+    assert [item["definition"] for item in result[bucket]] == [f"{original}:{row['qualname']}"]
+    assert result["cards"] == ["T06"]
+    if bucket == "retired":
+        assert result["retired"][0]["base_location"]["state"] == "pending"
+        assert result["retired"][0]["location"]["state"] == ("exited" if case == "exited" else "moved")
+    summary = gate.render_summary({"ast": result, "canary": {"passed": True}, "report_path": "/tmp/r.json",
+                                   "fork": {"transition": "removing"}})
+    assert f"随 fork 删除预期退出 {len(result['retired'])}" in summary
+    assert "T14-C 过渡" in summary
+
+
+def test_retired_source_only_covers_deleted_fork_and_bridge_files(tmp_path):
+    write_sources(tmp_path, {"scripts/kept.py": ""})
+    assert gate.retired_source(tmp_path, gate.FORK + "/main.py")
+    assert gate.retired_source(tmp_path, "scripts/mediacrawler_export_entrypoint.py")
+    assert not gate.retired_source(tmp_path, "scripts/gone.py")
+    write_sources(tmp_path, {gate.FORK + "/main.py": ""})
+    assert not gate.retired_source(tmp_path, gate.FORK + "/main.py")
 
 
 @pytest.mark.parametrize("skip,errors,conclusion", [
@@ -366,6 +490,15 @@ def test_linux_browser_targets_collapse_to_matching_directories(tmp_path):
     assert not any((opt / "google/chrome").resolve() in path.parents for path in targets)
 
 
+def test_profile_stores_match_and_linux_masks_existing_checkout_profiles(tmp_path):
+    assert sandbox_linux.PROFILE_STORES == sandbox_macos.PROFILE_STORES
+    assert "data/runtime/platform_sessions" in sandbox_linux.PROFILE_STORES
+    checkout = tmp_path / "checkout"
+    (checkout / "data/runtime/platform_sessions").mkdir(parents=True)
+    targets = sandbox_linux.profile_targets(tmp_path / "home", [checkout])
+    assert targets == [checkout / "data/runtime/platform_sessions"]
+
+
 def test_linux_canary_probes_masked_opener_and_profile(tmp_path):
     import errno
 
@@ -391,3 +524,34 @@ def test_macos_wrap_keeps_seatbelt_command():
     wrapped, descriptors = sandbox_macos.wrap(Path("/tmp/p.sb"), ["python", "-c", "pass"])
     assert wrapped == ["/usr/bin/sandbox-exec", "-f", "/tmp/p.sb", "python", "-c", "pass"]
     assert descriptors == ()
+
+
+@pytest.mark.parametrize("fork_dir,pending,expected", [
+    (False, 0, []),
+    (True, 0, ["仅 git rm --cached 不算删除"]),
+    (False, 3, ["pending 为 0，实际 3"]),
+    (True, 1, ["仅 git rm --cached 不算删除", "pending 为 0，实际 1"]),
+])
+def test_removal_batch_requires_deleted_fork_dir_and_no_pending(tmp_path, fork_dir, pending, expected):
+    if fork_dir:
+        (tmp_path / gate.FORK).mkdir(parents=True)
+    problems = gate.removal_problems(tmp_path, {"counts": {"pending": pending, "missing": 0}})
+    assert len(problems) == len(expected)
+    for problem, fragment in zip(problems, expected):
+        assert fragment in problem
+
+
+@pytest.mark.parametrize("backend", [sandbox_macos, sandbox_linux])
+def test_canary_profile_probes_are_masked_by_both_backends(tmp_path, backend):
+    checkout, probes = gate.canary_profile_probes(tmp_path, backend.PROFILE_STORES)
+    assert probes == [str(checkout / relative) for relative in backend.PROFILE_STORES]
+    assert all((Path(path) / "probe").is_file() and Path(path).is_relative_to(tmp_path) for path in probes)
+    if backend is sandbox_macos:
+        policy = sandbox_macos.sandbox_policy(tmp_path, [Path("/work/main"), checkout], Path("/Users/测试"))
+        for path in probes:
+            assert f"(deny file-read* file-write* (subpath {json.dumps(path, ensure_ascii=False)}))" in policy
+    else:
+        targets = sandbox_linux.profile_targets(tmp_path / "home", [Path("/nonexistent-checkout"), checkout])
+        assert [str(path) for path in targets] == probes
+    # canary 脚本逐个探测这些目录，任何一个可读即判未通过。
+    assert 'spec.get("project_profiles", [])' in gate.CANARY

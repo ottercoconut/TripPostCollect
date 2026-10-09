@@ -612,3 +612,61 @@ def test_pf_without_real_packet_counts_fails(monkeypatch):
     monkeypatch.setattr(native_macos, "pf", lambda *args: "Packets: 0")
     with pytest.raises(RuntimeError, match="实际阻断计数"):
         native_macos.checked_counters("test")
+
+
+def test_fresh_source_without_fork_tools_directory(monkeypatch, tmp_path):
+    """T14-C 删除 fork 后没有 tools/：白名单副本跳过该目录而不是失败。"""
+    import run_matrix
+
+    pristine = tmp_path / "pristine"
+    for directory in ("src", "scripts", "tests", "config", "db", "docs", ".github/workflows"):
+        (pristine / directory).mkdir(parents=True)
+    for file in ("pyproject.toml", "uv.lock", "AGENTS.md", "build_support.py", "MANIFEST.in",
+                 ".github/workflows/macos-test-lanes.yml"):
+        (pristine / file).write_text("source")
+    monkeypatch.setattr(run_matrix, "restore_frozen", lambda source: None)
+    copied = run_matrix.fresh_source(pristine, tmp_path / "copy")
+    assert not (copied / "tools").exists()
+    assert (copied / "src").is_dir()
+
+
+def test_fork_gitlink_present_follows_index(tmp_path):
+    import subprocess
+    import run_matrix
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+
+    git("init", "-q")
+    assert run_matrix.fork_gitlink_present(tmp_path) is False
+    git("update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},tools/MediaCrawler")
+    assert run_matrix.fork_gitlink_present(tmp_path) is True
+    git("rm", "-q", "--cached", "tools/MediaCrawler")
+    assert run_matrix.fork_gitlink_present(tmp_path) is False
+
+
+@pytest.mark.parametrize("gitlink,source_fork,fork_python", [
+    (True, False, True), (True, True, False), (False, True, False), (False, False, True),
+])
+def test_matrix_requires_consistent_fork_inputs(monkeypatch, tmp_path, gitlink, source_fork, fork_python):
+    import run_matrix
+
+    source = tmp_path / "pristine"
+    (source / ("tools/MediaCrawler" if source_fork else "src")).mkdir(parents=True)
+    runner = Path(run_matrix.__file__).resolve().parents[2] / "tests/run_lanes.py"
+    argv = ["run_matrix.py", "--source", str(source), "--reports", str(tmp_path / "reports"),
+            "--runner", str(runner)]
+    if fork_python:
+        argv += ["--fork-python", str(tmp_path / "fork-python")]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(run_matrix, "fork_gitlink_present", lambda repository: gitlink)
+    with pytest.raises(RuntimeError, match="同时存在或同时缺省"):
+        run_matrix.main()
+
+
+def test_policy_denies_project_login_profiles(tmp_path):
+    source = (tmp_path / "source").resolve()
+    source.mkdir()
+    policy = run_lanes.sandbox_policy(source, tmp_path / "output", "component")
+    for relative in ("data/runtime/platform_sessions", "tools/MediaCrawler/browser_data"):
+        assert f'(deny file-read* file-write* (subpath {json.dumps(str(source / relative))}))' in policy
