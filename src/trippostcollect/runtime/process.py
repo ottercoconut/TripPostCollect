@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import FrameType
@@ -31,6 +32,7 @@ from trippostcollect.xhs.leases import (
     LEASE_ID_ENV,
     LEASE_OWNER_TOKEN_ENV,
     SystemProcessInspector,
+    close_process_pipes,
     mark_lease_process_exited_from_environment,
     register_lease_process_from_environment,
     spawn_gated_subprocess,
@@ -44,6 +46,12 @@ if TYPE_CHECKING:
 PROCESS_PROGRESS_POLL_SECONDS = 5.0
 PROCESS_CLEANUP_GRACE_SECONDS = 20.0
 PROCESS_FINAL_REAP_SECONDS = 5.0
+# 小红书租约中间层收到操作人中断后等待 exporter 自行退出的上限，超时即对 exporter 组 SIGKILL。
+# 它加上 PROCESS_FINAL_REAP_SECONDS 与收尾余量（日志写盘、SQLite 默认 5 秒 busy 等待下的 exporter
+# 退出登记与进程退出）必须严格小于 LeaseGuard 的 interrupted_child_grace_seconds，保证中间层在被
+# 兜底 SIGKILL 前完成日志落盘并登记 exporter 退出。
+XHS_LEASE_INTERRUPT_EXPORTER_GRACE_SECONDS = 12.0
+XHS_LEASE_INTERRUPT_FINALIZE_MARGIN_SECONDS = 6.0
 XHS_NETWORK_DIAGNOSTIC_MAX_AGE_SECONDS = 90.0
 XHS_NETWORK_DIAGNOSTIC_MAX_BYTES = 512 * 1024
 # 子侧拥有固定的 600 秒网络恢复预算；父侧只留观察终态的额外时间。
@@ -352,49 +360,67 @@ def lease_managed_environment(environ: Mapping[str, str] | None = None) -> bool:
     )
 
 
-@contextlib.contextmanager
-def sigterm_raises_operator_interrupt() -> Iterator[None]:
-    """首个 SIGTERM 抛出 OperatorInterrupt，之后的重复 SIGTERM 不再打断收束。
+class OperatorInterruptLatch:
+    """记录已转成 OperatorInterrupt 的首个 SIGTERM；中断即使按契约被吸收，退出仍以它为准。"""
 
-    小红书租约进程的 SIGTERM 由 LeaseGuard 精确转发并负责 exporter 收束，保持默认处理，
-    避免对 exporter 发出第二次温和信号。
+    def __init__(self) -> None:
+        self.signum: int | None = None
+
+
+@contextlib.contextmanager
+def sigterm_raises_operator_interrupt() -> Iterator[OperatorInterruptLatch]:
+    """首个 SIGTERM 抛出 OperatorInterrupt 并锁存，之后的重复 SIGTERM 不再打断收束。
+
+    通用 runner 与小红书 LeaseGuard 都只向中间层所在进程组发 SIGTERM；exporter/worker 在独立
+    会话中，不会直接收到。中间层经异常路径只向 worker 转发一次，并在退出前把租约中的 exporter
+    标记为已退出，LeaseGuard 随后的收束因此不会再对 worker 发第二次温和信号。
     """
 
-    if (
-        lease_managed_environment()
-        or threading.current_thread() is not threading.main_thread()
-    ):
-        yield
+    latch = OperatorInterruptLatch()
+    if threading.current_thread() is not threading.main_thread():
+        yield latch
         return
     previous = signal.getsignal(signal.SIGTERM)
     if previous == signal.SIG_IGN:
-        yield
+        yield latch
         return
-    raised = False
 
     def handle(signum: int, _frame: FrameType | None) -> None:
-        nonlocal raised
-        if raised:
+        if latch.signum is not None:
             return
-        raised = True
+        latch.signum = int(signum)
         raise OperatorInterrupt(signum)
 
     signal.signal(signal.SIGTERM, handle)
     try:
-        yield
+        yield latch
     finally:
         signal.signal(signal.SIGTERM, previous)
 
 
 def run_main_with_operator_interrupt(main: Callable[[], int]) -> int:
-    """中间层入口：SIGTERM 经异常路径收束 worker 进程组并落盘日志，不再执行后续导入与 checkpoint。"""
+    """中间层入口：SIGTERM 经异常路径收束 worker 进程组并落盘日志，不再执行后续导入与 checkpoint。
 
-    with sigterm_raises_operator_interrupt():
+    中断若被契约规定的边界吸收（SQLite 提交前的中断转成 ``sqlite_import_failed`` 摘要且不再传播），
+    摘要与回滚照常完成，但中间层仍以 128+信号退出并输出同一中断行；锁存后的其他未捕获异常
+    同样不改变首因。
+    """
+
+    with sigterm_raises_operator_interrupt() as latch:
         try:
-            return main()
+            exit_code = main()
         except OperatorInterrupt as exc:
             print(operator_interrupt_error(exc.signum), file=sys.stderr, flush=True)
             return 128 + exc.signum
+        except Exception:
+            if latch.signum is None:
+                raise
+            traceback.print_exc(file=sys.stderr)
+            exit_code = 1
+        if latch.signum is not None:
+            print(operator_interrupt_error(latch.signum), file=sys.stderr, flush=True)
+            return 128 + latch.signum
+        return exit_code
 
 
 EXECUTION_STATE_PATH_ENV = "TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"
@@ -429,15 +455,11 @@ def record_child_process_group(proc: subprocess.Popen[bytes]) -> None:
         return
 
 
-def kill_recorded_child_process_groups(
-    state_path: str | Path,
-    *,
-    wait_seconds: float = PROCESS_FINAL_REAP_SECONDS,
-) -> list[dict[str, Any]]:
-    """只在中间层超时被强杀后调用：对登记且身份仍匹配的 worker 进程组发 SIGKILL。
+def _recorded_child_process_groups(state_path: str | Path) -> list[dict[str, Any]]:
+    """读取登记的 worker 进程组并核对身份。
 
-    组长仍在时必须与登记的启动标识一致；组长已退出但组仍有成员时，组号在成员存活期间不会
-    被复用，按原组收束。
+    组长仍在时必须与登记的启动标识一致（``leader_alive``）；组长已退出但组仍有成员时，组号在
+    成员存活期间不会被复用，按原组处理。
     """
 
     path = child_process_groups_path(state_path)
@@ -446,7 +468,7 @@ def kill_recorded_child_process_groups(
     except OSError:
         return []
     inspector = SystemProcessInspector()
-    evidence: list[dict[str, Any]] = []
+    groups: list[dict[str, Any]] = []
     for line in lines:
         try:
             recorded = json.loads(line)
@@ -459,9 +481,33 @@ def kill_recorded_child_process_groups(
         current = inspector.identity(pid)
         if current is not None:
             matched = current.public() == recorded
+            leader_alive = matched
         else:
             matched = process_group_exists(pgid)
-        item: dict[str, Any] = {"pid": pid, "pgid": pgid, "matched": matched, "killed": False}
+            leader_alive = False
+        groups.append(
+            {"pid": pid, "pgid": pgid, "matched": matched, "leader_alive": leader_alive}
+        )
+    return groups
+
+
+def kill_recorded_child_process_groups(
+    state_path: str | Path,
+    *,
+    wait_seconds: float = PROCESS_FINAL_REAP_SECONDS,
+) -> list[dict[str, Any]]:
+    """只在中间层超时被强杀后调用：对登记且身份仍匹配的 worker 进程组发 SIGKILL。"""
+
+    evidence: list[dict[str, Any]] = []
+    for group in _recorded_child_process_groups(state_path):
+        pgid = int(group["pgid"])
+        matched = bool(group["matched"])
+        item: dict[str, Any] = {
+            "pid": group["pid"],
+            "pgid": pgid,
+            "matched": matched,
+            "killed": False,
+        }
         if matched:
             try:
                 os.killpg(pgid, signal.SIGKILL)
@@ -484,17 +530,119 @@ def kill_recorded_child_process_groups(
     return evidence
 
 
+def _signal_group_target(target: dict[str, Any], signum: int, *, leader_only: bool) -> bool:
+    try:
+        if leader_only:
+            os.kill(int(target["pid"]), signum)
+        else:
+            os.killpg(int(target["pgid"]), signum)
+    except ProcessLookupError:
+        return False
+    except PermissionError as exc:
+        # 无权限时不能证明已收束：如实记录，交给操作人核查，不中断其余目标的收束。
+        target["error"] = f"{type(exc).__name__}: {exc}"
+        return False
+    return True
+
+
+def stop_residual_descendants(
+    proc: subprocess.Popen[Any],
+    *,
+    state_path: str | Path | None = None,
+    grace_seconds: float = PROCESS_CLEANUP_GRACE_SECONDS,
+) -> list[dict[str, Any]]:
+    """直接子进程已退出、其后代仍存活时收束残留：每个目标只发一次温和信号，超时才 SIGKILL。
+
+    目标是子进程自身进程组（以 ``start_new_session`` 启动，组号即其 pid）与 ``state_path`` 旁
+    登记且身份仍匹配的 worker 进程组。登记组长仍在时只向组长发 SIGTERM，由其自身清理流程收束
+    组内进程；组长已不在时向整组发 SIGTERM。
+    """
+
+    own_pgid = int(proc.pid)
+    targets: list[dict[str, Any]] = []
+    if own_pgid > 1 and own_pgid != os.getpgid(0) and process_group_exists(own_pgid):
+        targets.append(
+            {
+                "source": "child_process_group",
+                "pid": own_pgid,
+                "pgid": own_pgid,
+                "leader_alive": False,
+            }
+        )
+    if state_path is not None:
+        for group in _recorded_child_process_groups(state_path):
+            pgid = int(group["pgid"])
+            if not group["matched"] or pgid == own_pgid or not process_group_exists(pgid):
+                continue
+            targets.append(
+                {
+                    "source": "recorded_process_group",
+                    "pid": int(group["pid"]),
+                    "pgid": pgid,
+                    "leader_alive": bool(group["leader_alive"]),
+                }
+            )
+    if not targets:
+        return []
+    for target in targets:
+        target["terminated"] = _signal_group_target(
+            target,
+            signal.SIGTERM,
+            leader_only=bool(target["leader_alive"]),
+        )
+        target["killed"] = False
+    deadline = time.monotonic() + max(0.0, grace_seconds)
+    while (
+        any(process_group_exists(int(target["pgid"])) for target in targets)
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.05)
+    for target in targets:
+        if process_group_exists(int(target["pgid"])):
+            target["killed"] = _signal_group_target(target, signal.SIGKILL, leader_only=False)
+    reap_deadline = time.monotonic() + PROCESS_FINAL_REAP_SECONDS
+    for target in targets:
+        while (
+            target["killed"]
+            and process_group_exists(int(target["pgid"]))
+            and time.monotonic() < reap_deadline
+        ):
+            time.sleep(0.05)
+        target["group_exists"] = process_group_exists(int(target["pgid"]))
+    return targets
+
+
 def drain_exited_process(
     proc: subprocess.Popen[bytes],
     *,
     timeout: float = PROCESS_FINAL_REAP_SECONDS,
-) -> tuple[bytes | None, bytes | None]:
-    """回收已退出进程的累计输出；孙进程仍占着管道而超时时，保留 TimeoutExpired 携带的累计输出。"""
+    grace_seconds: float = PROCESS_CLEANUP_GRACE_SECONDS,
+    state_path: str | Path | None = None,
+) -> tuple[bytes | None, bytes | None, list[dict[str, Any]]]:
+    """回收已退出进程的累计输出，总耗时有界。
+
+    管道在 ``timeout`` 内 EOF 即返回。否则说明后代仍占着管道：先按 ``stop_residual_descendants``
+    收束残留后代，再回收一次；仍不 EOF（后代已自建会话、无从定位）时显式关闭管道。
+    ``communicate`` 跨 TimeoutExpired 保留已读数据，异常携带的即累计输出。
+    """
 
     try:
-        return proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return stdout, stderr, []
     except subprocess.TimeoutExpired as exc:
-        return exc.stdout, exc.stderr
+        stdout, stderr = exc.stdout, exc.stderr
+    residual = stop_residual_descendants(
+        proc,
+        state_path=state_path,
+        grace_seconds=grace_seconds,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if exc.stdout is not None else stdout
+        stderr = exc.stderr if exc.stderr is not None else stderr
+        close_process_pipes(proc)
+    return stdout, stderr, residual
 
 
 def write_command_logs(
@@ -564,8 +712,10 @@ def terminate_managed_process(
                 timeout=PROCESS_FINAL_REAP_SECONDS
             )
         except subprocess.TimeoutExpired as exc:
+            # 进程组外（自建会话）的后代仍占着管道：保留累计输出并显式关闭，不等 GC。
             final_stdout = exc.stdout
             final_stderr = exc.stderr
+            close_process_pipes(proc)
         complete_stdout = final_stdout if final_stdout is not None else partial_stdout
         complete_stderr = final_stderr if final_stderr is not None else partial_stderr
     return complete_stdout, complete_stderr, forced
@@ -714,6 +864,7 @@ def run_command(
     gated: GatedSubprocess | None = None
     lease_process_identity = None
     exporter_identity_mismatch = False
+    residual_process_groups: list[dict[str, Any]] = []
     lease_registration_enabled = all(
         str(registration_env.get(key) or "")
         for key in (LEASE_DB_ENV, LEASE_ID_ENV, LEASE_OWNER_TOKEN_ENV)
@@ -930,7 +1081,11 @@ def run_command(
                 # in the same polling round.
                 observed_returncode = proc.poll()
                 if observed_returncode is not None:
-                    stdout_data, stderr_data = proc.communicate()
+                    stdout_data, stderr_data, residual_process_groups = drain_exited_process(
+                        proc,
+                        timeout=PROCESS_FINAL_REAP_SECONDS,
+                        grace_seconds=cleanup_grace_seconds,
+                    )
                     stdout = decode_text(stdout_data)
                     stderr = decode_text(stderr_data)
                     returncode = int(observed_returncode)
@@ -960,7 +1115,18 @@ def run_command(
             try:
                 stdout_data, stderr_data = proc.communicate(timeout=communicate_timeout)
             except subprocess.TimeoutExpired:
-                if tracked_paths is None:
+                if proc.poll() is not None:
+                    # worker 已退出但后代仍占着管道：有界回收并收束残留后代，不再空等看门狗。
+                    (
+                        stdout_data,
+                        stderr_data,
+                        residual_process_groups,
+                    ) = drain_exited_process(
+                        proc,
+                        timeout=PROCESS_FINAL_REAP_SECONDS,
+                        grace_seconds=cleanup_grace_seconds,
+                    )
+                elif tracked_paths is None:
                     timed_out = True
                     returncode = 124
                     timeout_reason = "wall_clock_timeout"
@@ -980,27 +1146,36 @@ def run_command(
                     stdout = decode_text(stdout_data)
                     stderr = decode_text(stderr_data)
                     break
-                continue
+                else:
+                    continue
             stdout = decode_text(stdout_data)
             stderr = decode_text(stderr_data)
             returncode = int(proc.returncode or 0)
             last_progress_age_seconds = max(0.0, time.monotonic() - last_progress_at)
             break
-    except BaseException:
+    except BaseException as exc:
         if proc is not None:
             collected_stdout: bytes | None = None
             collected_stderr: bytes | None = None
+            interrupt_grace_seconds = cleanup_grace_seconds
+            if lease_registration_enabled and isinstance(exc, OperatorInterrupt):
+                # 嵌套在 LeaseGuard 给中间层的中断宽限之内，见常量说明。
+                interrupt_grace_seconds = min(
+                    cleanup_grace_seconds,
+                    XHS_LEASE_INTERRUPT_EXPORTER_GRACE_SECONDS,
+                )
             try:
                 if getattr(proc, "poll", lambda: proc.returncode)() is None:
                     collected_stdout, collected_stderr, _ = terminate_managed_process(
                         proc,
-                        grace_seconds=cleanup_grace_seconds,
+                        grace_seconds=interrupt_grace_seconds,
                         signal_process=not termination_requested,
                     )
                 else:
-                    collected_stdout, collected_stderr = drain_exited_process(
+                    collected_stdout, collected_stderr, _ = drain_exited_process(
                         proc,
                         timeout=PROCESS_FINAL_REAP_SECONDS,
+                        grace_seconds=cleanup_grace_seconds,
                     )
             except Exception:
                 pass
@@ -1060,6 +1235,7 @@ def run_command(
         "forced_termination": forced_termination,
         "cleanup_grace_seconds": cleanup_grace_seconds,
         "exporter_identity_mismatch": exporter_identity_mismatch,
+        "residual_process_groups": residual_process_groups,
         "runtime_status": (
             runtime_reporter.snapshot() if runtime_reporter is not None else None
         ),

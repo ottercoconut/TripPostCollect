@@ -158,18 +158,30 @@ child 自身有 20 秒等待上限；启动迟到不能无限伪装为 network_p
 15 秒外层保护，不要求共享 VM 在 2 秒内完成清理。真实信号及这些 native 用例只在 Actions
 OS lane 验收，本地纯时钟通过不能替代两版本真实 OS 结果。
 通用 runner 中断用例（`tests/test_crawl_runner_interrupt.py`）用真实进程贯通 runner → 中间层 →
-独立 worker 进程组，只覆盖 `crawl_runner.py` 通用路径，不覆盖小红书租约链路。runner 驱动经
+独立 worker 进程组，只覆盖 `crawl_runner.py` 通用路径；小红书租约链路由
+`tests/test_xhs_runner_interrupt_logs.py` 覆盖（见下）。runner 驱动经
 `run_cli` 运行，只把生产 child 命令的脚本换成 `tests/support/runner_interrupt_fakes.py`，其余参数照用；
 中间层走真实入口包装 `run_main_with_operator_interrupt`、`collection.main`、生产 `parse_args` 与
 `run_command`，worker 走真实 `runtime.worker.run`，用生产 `AdaptiveAccumulator` 与 worker 事件出口写出
 一批已确认批次和一个未确认尾批；worker 正常结束时中间层用生产 `load_pagination_evidence` 与
 `persist_discovery_checkpoint` 提交，runner 用生产逻辑更新 campaign。平台抓取、正文导入与图片物化
-不在本组证明范围内；B站进程内浏览器、以 `setsid` 启动的 CDP Chrome、对整个 cgroup 同时发信号的
-场景以及小红书租约路径（#58）也不在覆盖内。各层写 ready/身份文件握手，测试只轮询这些文件和临时 SQLite，不用固定 sleep；
+不在本组证明范围内；B站进程内浏览器、以 `setsid` 启动的 CDP Chrome 与对整个 cgroup 同时发信号的
+场景也不在覆盖内。各层写 ready/身份文件握手，测试只轮询这些文件和临时 SQLite，不用固定 sleep；
 断言 SIGINT/SIGTERM/SIGHUP 退出码、单次温和信号与清理标记、两层 stdout/stderr 各一次、进程组消失、
 未中断对照会推进而中断不推进 checkpoint/seen/campaign、提交后中断保留已提交前沿但不更新 campaign、
 两条通道同时活跃时都被收束、已成功通道保留为成功、排队 job 不派发、强杀兜底同时收束已登记的
-worker 组并保留首因、child 退出晚于锁存被观察到时按中断处理，以及 Popen 期间与收尾阶段的信号。
+worker 组并保留首因、child 退出晚于锁存被观察到时按中断处理，以及 Popen 期间与收尾阶段的信号；
+另断言信号落在中间层 SQLite 导入事务内时整批回滚、写 `sqlite_import_failed` 且中间层仍以 `128+信号`
+退出，中间层或 worker 退出后后代仍占管道时上层有界结束、按温和信号→SIGKILL 兜底收束残留并落盘日志，
+以及中断终态写入失败在记录、`run_summary` 与 stderr 中可见且退出码仍为 `128+信号`。
+小红书租约中断用例（`tests/test_xhs_runner_interrupt_logs.py`）用真实 `xhs_runner._run_main`、
+LeaseGuard、带租约环境的中间层 `run_command` 与独立 worker 进程组，只把 child 命令换成
+`tests/support/xhs_interrupt_fakes.py`；断言 worker 只收到中间层转发的一次温和信号并完成清理、exporter
+日志经头像清洗落盘（含头像变体）、中间层以 `128+SIGTERM` 退出、`runtime_failed/operator_interrupt`
+终态、租约与 session 清理以及 discovery 不推进；慢 worker 超过中间层等待上限时由中间层 SIGKILL 兜底
+且日志仍落盘；中间层超出 Guard 中断宽限被强杀时 exporter 只收 SIGKILL、不收第二次 SIGTERM（这两例
+经计划缩短预算）；另以常量断言中间层等待上限与收尾余量严格小于 Guard 的中断宽限、且不加长 child
+关闭总预算。浏览器、扫码与真实平台不在覆盖内。
 提交工作流不等于 CI 验收通过；必须由 Actions 的两版本实际产物证明。不要在私人宿主伪造环境变量。
 
 ## issue #1 节点映射

@@ -5,7 +5,9 @@
   其余参数仍是生产 ``build_command`` 生成的参数；
 - ``middle``：真实入口包装 ``run_main_with_operator_interrupt``、``collection.main``、生产
   ``parse_args`` 与 ``run_command``；worker 结束后用生产 ``load_pagination_evidence`` 与
-  ``persist_discovery_checkpoint`` 提交 checkpoint/seen；
+  ``persist_discovery_checkpoint`` 提交 checkpoint/seen；``import-hang`` 模式先进入生产
+  ``import_valid_records_with_media_rollback`` 的导入事务并在提交点阻塞，等待中断，导入失败时
+  与生产一样跳过 checkpoint；
 - ``worker``：真实 ``runtime.worker.run`` 生命周期，用生产 ``AdaptiveAccumulator`` 与 worker 事件出口
   写出一批已确认批次和一个未确认尾批，并在本进程组内保留一个模拟浏览器的孙进程。
 握手与观测都写入 ``work`` 目录下的文件，测试据此同步，不靠固定 sleep 猜时机。
@@ -116,6 +118,33 @@ def _success_summary(job_dir: Path) -> Path:
     return path
 
 
+def _import_until_interrupted(args: object, job_dir: Path) -> dict:
+    """进入生产导入事务：事务内写入探针后在提交点阻塞；提交前中断按契约回滚并转成
+    ``sqlite_import_failed`` 结果。"""
+
+    from trippostcollect.application import collection
+    from trippostcollect.db import content
+
+    def blocking_commit(conn: object) -> None:
+        conn.execute("CREATE TABLE interrupt_import_probe (value TEXT)")
+        conn.execute("INSERT INTO interrupt_import_probe VALUES ('uncommitted')")
+        (job_dir / "importing").write_text("importing", encoding="utf-8")
+        _block_forever()
+
+    content.commit_formal_import = blocking_commit
+    media_root = job_dir / "media"
+    media_root.mkdir(exist_ok=True)
+    return collection.import_valid_records_with_media_rollback(
+        {"captured_at": "2026-10-09T00:00:00+00:00", "keyword": "青岛", "batch_dir": str(job_dir)},
+        [],
+        Path(args.db),
+        materialized_images_by_identity={},
+        image_materialization={},
+        project_root=job_dir,
+        media_root=media_root,
+    )
+
+
 def run_middle(work: Path, job_key: str, mode: str, production_args: list[str]) -> int:
     from trippostcollect.application import collection
     from trippostcollect.runtime import process
@@ -141,13 +170,17 @@ def run_middle(work: Path, job_key: str, mode: str, production_args: list[str]) 
         if mode == "stubborn":
             # 启动 worker 后中间层失去转发能力：只能由 runner 超时兜底强杀两组。
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        worker_mode = "exit" if mode in {"complete", "persist-hang"} else "hang"
+        worker_mode = "exit" if mode in {"complete", "persist-hang", "import-hang"} else "hang"
         process.run_command(
             [sys.executable, str(THIS), "worker", str(work), job_key, worker_mode],
             ROOT,
             3600,
             job_dir / "worker-logs",
         )
+        if mode == "import-hang":
+            # 与生产一致：导入失败（sqlite_import_failed）时不提交 checkpoint，直接以 2 结束。
+            _write_json(job_dir / "import-result.json", _import_until_interrupted(args, job_dir))
+            return 2
         # 只有 worker 正常结束才会到达：生产 checkpoint/seen 提交路径。
         state_path = os.environ["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"]
         evidence = collection.load_pagination_evidence(state_path)

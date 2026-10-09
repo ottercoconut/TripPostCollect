@@ -67,9 +67,9 @@ exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中
 `last_progress_age_seconds`、`forced_termination` 和 `timeout_state_event` 用于复核该路径。
 
 通用 runner 的操作人中断（终端 Ctrl+C、对 runner 发 SIGTERM 或终端挂断 SIGHUP）只锁存首个信号，
-锁存保持到进程退出，后续信号不改变原因与退出码；SIGQUIT 不处理。本段只描述 `crawl_runner.py`
-通用路径；小红书租约链路仍由 `xhs_runner.py` 的 LeaseGuard 转发，中间层保持默认 SIGTERM 处理，
-不使用下述转换，其中断日志与收尾见 #58。
+锁存保持到进程退出，后续信号不改变原因与退出码；SIGQUIT 不处理。本段描述 `crawl_runner.py`
+通用路径；小红书租约链路由 `xhs_runner.py` 的 LeaseGuard 向中间层进程组发 SIGTERM，中间层使用
+同一转换并只向 exporter 转发一次（见 `docs/platforms/xhs.md`）。
 
 - 信号路径：`mediacrawler_crawl.py` 中间层和 worker 各在独立会话中运行，终端信号只到 runner。runner
   只向运行中的中间层发一次 SIGTERM；中间层入口把它转为可捕获中断（KeyboardInterrupt 子类，落在
@@ -78,6 +78,12 @@ exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中
   20 秒让 worker 进程组退出，runner 最多等 40 秒让中间层进程组退出；超时才对中间层进程组 SIGKILL，
   并按中间层登记在 execution state 旁的 `<job_key>.json.process-groups.jsonl`（含启动标识）对仍匹配的
   worker 进程组 SIGKILL。
+- 残留后代：中间层（或 worker）已退出、其后代仍占着上层 stdout/stderr 管道时，无论是否收到信号，
+  上层在 5 秒内仍未读到 EOF 就收束残留：对退出进程自身进程组，以及 runner 侧登记且身份仍匹配的
+  worker 进程组，每个目标只发一次 SIGTERM（登记组长仍在时只发给组长），runner 最多等 40 秒、中间层
+  最多等 20 秒，仍在才 SIGKILL；随后再回收一次输出，仍不 EOF（后代已自建会话）就显式关闭管道。
+  收束证据写入任务记录与 `run_summary.json` 的 `residual_process_groups`，runner stderr 输出
+  `[residual_process_groups]` 行。
 - 遗留风险：CDP Chrome 由 `runtime/browser_launcher.py` 以 `setsid` 自成会话、带 `--remote-debugging-port`
   启动，stdio 接 `/dev/null`，既不在中间层进程组，也不在登记的 worker 组内。正常收束时由 worker 清理
   流程关闭；一旦走到强杀兜底，它不会因控制端断开而自行退出，launcher 也不再清理，会一直残留，须
@@ -105,12 +111,17 @@ exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中
 - 终态：被收束 job 的 execution state 写 `runtime_failed:operator_interrupt:<SIGNAL>` 并 finalize 为失败，
   调度表记 `retry_wait/runtime_failed`，中断不累计失败次数；runner 不读取摘要、不更新 campaign、
   不写 `adaptive_search_stopped`。`run_summary.json/.md` 仍写出并标注 `interrupt`，runner 以
-  `128+首个信号` 退出。
+  `128+首个信号` 退出。中断终态写入 execution state 失败时不静默：任务记录写 `state_update_failed`，
+  `run_summary.json` 的 `state_update_failures` 与报告列出该 job，runner stderr 输出
+  `runtime_failed:operator_interrupt_state_update_failed:<job_key>: <错误>`；退出码仍为 `128+首个信号`
+  （首因仍是操作人中断，保持信号退出约定），该 state 未落成中断终态，须人工核查后再续跑。
 - 中间层已提交的数据：中间层在 worker 正常结束后会自行提交 checkpoint/seen（`persist_discovery_checkpoint`）。
   信号落在提交之前，checkpoint/seen 不推进，下轮从中断前的安全前沿恢复；落在提交之后、中间层退出
   之前，已提交的 checkpoint/seen 属于真实确认的数据，下轮从该前沿恢复，但 runner 不再更新 campaign，
   campaign 累计摘要与候选计数可能少记本轮。runner 判定完成不读取 campaign 计数，正式完成仍须由
-  后续轮次自身取得 `adaptive_search_stopped(source_exhausted)` 证据。
+  后续轮次自身取得 `adaptive_search_stopped(source_exhausted)` 证据。信号落在 SQLite 导入事务内、
+  提交前时，按冻结契约整批回滚并在 child 摘要写 `sqlite_import_failed`，checkpoint/seen 不推进；
+  中间层入口已锁存该信号，因此仍以 `128+信号` 退出并输出 `runtime_failed:operator_interrupt:<SIG>`。
 - 日志：两层 child 的 stdout/stderr 在中断后同样落盘，runner 层位于 `<run_dir>/jobs/<job_key>/`，worker
   层位于 child 批次的 `logs/<platform>/`；写盘前两路共享头像审计，任一路命中即两路整体替换。
 

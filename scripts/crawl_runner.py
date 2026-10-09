@@ -108,6 +108,7 @@ class ChildRun:
     launched: bool
     forced_termination: bool
     killed_child_process_groups: list[dict[str, Any]]
+    residual_process_groups: list[dict[str, Any]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -689,6 +690,11 @@ def markdown_report(summary: dict[str, Any]) -> str:
             f"- 操作人中断：`{interrupt['signal']}`（`{interrupt['error']}`，"
             f"退出码 `{interrupt['exit_code']}`；未派发与被收束任务均记为 runtime_failed）"
         )
+    for failure in summary.get("state_update_failures") or []:
+        lines.append(
+            f"- 中断终态写入失败：`{failure['job_key']}`（`{failure['error']}`；"
+            "execution state 未落成中断终态，须人工核查）"
+        )
     lines += [
         "",
         "## 任务结果",
@@ -828,6 +834,7 @@ def build_result_record(
     capture_meta_paths: Sequence[str] = (),
     import_result: Mapping[str, Any] | None = None,
     child_logs: Mapping[str, str] | None = None,
+    residual_process_groups: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     return {
         "job_key": job.row["job_key"],
@@ -851,6 +858,8 @@ def build_result_record(
             if key in {"stdout_log", "stderr_log", "command_log"}
         },
         "interrupt": dict(classification.get("interrupt") or {}) or None,
+        "state_update_failed": classification.get("state_update_failed") or None,
+        "residual_process_groups": [dict(item) for item in residual_process_groups],
         "import_result": dict(import_result or {}),
     }
 
@@ -927,6 +936,37 @@ def terminalize_interrupted_state(
     return None
 
 
+def print_runner_stderr(line: str) -> None:
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except OSError:
+        discard_hung_up_stream(sys.stderr)
+
+
+def record_interrupt_state_failure(
+    classification: dict[str, Any],
+    *,
+    job_key: str,
+    state_error: str | None,
+) -> None:
+    """中断终态写入失败不得静默：写入分类与 run 摘要，并在 runner stderr 留一行可见错误。"""
+
+    if not state_error:
+        return
+    classification["state_update_failed"] = state_error
+    classification["reason"] = f"{classification['reason']}; state_update_failed={state_error}"
+    print_runner_stderr(
+        f"runtime_failed:operator_interrupt_state_update_failed:{job_key}: {state_error}"
+    )
+
+
+def report_residual_process_groups(log_dir: Path, groups: Sequence[Mapping[str, Any]]) -> None:
+    print_runner_stderr(
+        "[residual_process_groups] "
+        f"log_dir={log_dir} groups={json.dumps(list(groups), sort_keys=True)}"
+    )
+
+
 def interrupted_before_dispatch(job: PreparedJob, signum: int) -> dict[str, Any]:
     """首信号后不再派发的 job：不租约、不启动 child，只把冻结状态写成中断终态。"""
 
@@ -936,8 +976,11 @@ def interrupted_before_dispatch(job: PreparedJob, signum: int) -> dict[str, Any]
         error=operator_interrupt_error(signum),
         evidence={"interrupt": classification["interrupt"], "dispatched": False},
     )
-    if state_error:
-        classification["reason"] = f"operator_interrupt; state_update_failed={state_error}"
+    record_interrupt_state_failure(
+        classification,
+        job_key=str(job.row["job_key"]),
+        state_error=state_error,
+    )
     return build_result_record(
         job,
         classification,
@@ -969,6 +1012,7 @@ def run_child_command(
         launched: bool = True,
         forced_termination: bool = False,
         killed_groups: list[dict[str, Any]] | None = None,
+        residual_groups: list[dict[str, Any]] | None = None,
     ) -> ChildRun:
         raw_stdout = _universal_newlines(decode_text(stdout_data))
         raw_stderr = _universal_newlines(decode_text(stderr_data))
@@ -987,6 +1031,7 @@ def run_child_command(
             launched=launched,
             forced_termination=forced_termination,
             killed_child_process_groups=list(killed_groups or []),
+            residual_process_groups=list(residual_groups or []),
         )
 
     signum = interrupt_signal()
@@ -1013,11 +1058,25 @@ def run_child_command(
     interrupt_signum: int | None = None
     forced_termination = False
     killed_groups: list[dict[str, Any]] = []
+    residual_groups: list[dict[str, Any]] = []
     try:
         while True:
             try:
                 stdout_data, stderr_data = proc.communicate(timeout=RUNNER_CHILD_POLL_SECONDS)
             except subprocess.TimeoutExpired:
+                if proc.poll() is not None:
+                    # 中间层已退出但后代仍占着管道：有界回收，按中间层进程组与登记的 worker 组
+                    # 收束残留后代并关闭管道，不无限重试 communicate；锁存的信号仍按完成边界核对。
+                    stdout_data, stderr_data, residual_groups = drain_exited_process(
+                        proc,
+                        timeout=PROCESS_FINAL_REAP_SECONDS,
+                        grace_seconds=RUNNER_CHILD_INTERRUPT_GRACE_SECONDS,
+                        state_path=state_path,
+                    )
+                    if residual_groups:
+                        report_residual_process_groups(log_dir, residual_groups)
+                    interrupt_signum = interrupt_signal()
+                    break
                 signum = interrupt_signal()
                 if signum is None:
                     continue
@@ -1042,7 +1101,12 @@ def run_child_command(
                     grace_seconds=RUNNER_CHILD_INTERRUPT_GRACE_SECONDS,
                 )[:2]
             else:
-                collected = drain_exited_process(proc, timeout=PROCESS_FINAL_REAP_SECONDS)
+                collected = drain_exited_process(
+                    proc,
+                    timeout=PROCESS_FINAL_REAP_SECONDS,
+                    grace_seconds=RUNNER_CHILD_INTERRUPT_GRACE_SECONDS,
+                    state_path=state_path,
+                )[:2]
         except Exception:
             pass
         try:
@@ -1062,6 +1126,7 @@ def run_child_command(
         interrupt_signum=interrupt_signum,
         forced_termination=forced_termination,
         killed_groups=killed_groups,
+        residual_groups=residual_groups,
     )
 
 
@@ -1114,6 +1179,7 @@ def execute_prepared_job(
                         "exit_code": completed.returncode,
                         "forced_termination": child.forced_termination,
                         "killed_child_process_groups": child.killed_child_process_groups,
+                        "residual_process_groups": child.residual_process_groups,
                         "child_logs": {
                             key: child_logs[key]
                             for key in ("stdout_log", "stderr_log", "command_log")
@@ -1121,10 +1187,11 @@ def execute_prepared_job(
                         "stderr_tail": tail(completed.stderr, 2000),
                     },
                 )
-                if state_error:
-                    classification["reason"] = (
-                        f"operator_interrupt; state_update_failed={state_error}"
-                    )
+                record_interrupt_state_failure(
+                    classification,
+                    job_key=str(row["job_key"]),
+                    state_error=state_error,
+                )
                 classification["forced_termination"] = child.forced_termination
                 finalize_attempt(
                     conn,
@@ -1143,6 +1210,7 @@ def execute_prepared_job(
                     completed=completed,
                     import_result=import_result,
                     child_logs=child_logs,
+                    residual_process_groups=child.residual_process_groups,
                 )
             artifact_dir, capture_meta_paths, summary_path = find_artifact_paths(child.raw_stdout, row)
             meta = load_first_meta(capture_meta_paths)
@@ -1350,6 +1418,7 @@ def execute_prepared_job(
                 capture_meta_paths=capture_meta_paths,
                 import_result=import_result,
                 child_logs=child_logs,
+                residual_process_groups=child.residual_process_groups,
             )
     except JobLeaseConflict as exc:
         classification = {
@@ -1375,10 +1444,15 @@ def execute_prepared_job(
             # 收尾异常不得覆盖首个中断原因。
             classification = operator_interrupt_classification(interrupt_signum)
             classification["reason"] = f"operator_interrupt; scheduler_internal_error={exc!r}"
-            terminalize_interrupted_state(
+            state_error = terminalize_interrupted_state(
                 state,
                 error=operator_interrupt_error(interrupt_signum),
                 evidence={"interrupt": classification["interrupt"], "error": repr(exc)},
+            )
+            record_interrupt_state_failure(
+                classification,
+                job_key=str(row["job_key"]),
+                state_error=state_error,
             )
         else:
             classification = {
@@ -1644,6 +1718,11 @@ def _main(interrupts: DeferredTerminationSignals) -> int:
                 else None
             ),
             "interrupted_count": sum(1 for item in records if item.get("interrupt")),
+            "state_update_failures": [
+                {"job_key": item["job_key"], "error": item["state_update_failed"]}
+                for item in records
+                if item.get("state_update_failed")
+            ],
             "completed_count": sum(1 for item in records if item["status"] == "completed"),
             "failed_count": sum(1 for item in records if item["status"] not in non_failed_statuses),
             "blocked_count": sum(1 for item in records if item["status"] in blocked_statuses),
