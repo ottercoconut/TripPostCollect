@@ -71,7 +71,7 @@ Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linu
 
 - 禁止网络；
 - 禁止启动任何浏览器进程，以及桌面打开器（macOS `open`、`osascript`，Linux `xdg-open` 等）；
-- 禁止写入真实的 `tools/MediaCrawler/browser_data`、`data/`、`outputs/`；
+- 禁止写入真实的 `data/`（含 T14 起的 `data/runtime/platform_sessions/`）、`outputs/`，以及迁移期旧 `tools/MediaCrawler/browser_data`；
 - 禁止读写本机 Chrome 与 Chrome for Testing 的用户数据目录；
 - 子孙进程继承以上限制。
 
@@ -117,7 +117,7 @@ Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linu
 - 旧桥（`scripts/mediacrawler_export_entrypoint.py`、fork 的 `main.py` 与 `cmd_arg/`）保留到 T14 才删除，期间行为不得改变。
 - 旧位置保留外部同名入口时，采用薄转发或重导出，调用点尽量零改动；不得在旧位置保留第二份权威实现。
 - 冻结文件（`config/frozen_files.json` 登记的资产）不得修改；台账 JSON 不得手改；CLI 参数与 `TRIPPOSTCOLLECT_*` 环境变量名不得新增或删除。
-- profile 与 Cookie 快照的位置和文件名（`trippostcollect_cookie_snapshot.json`）不变，T14 才搬迁。不读取、不移动真实 profile 与数据。
+- T14 起非小红书 profile 与 Cookie 快照位于 `core.paths` 定义的 `data/runtime/platform_sessions/<platform>/`，快照文件名（`trippostcollect_cookie_snapshot.json`）不变；真实目录由操作人按运行手册迁移。代码与测试不读取、不移动真实 profile 与数据。
 
 ## 7. 并行与工作区
 

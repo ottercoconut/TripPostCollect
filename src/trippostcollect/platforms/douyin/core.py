@@ -22,14 +22,13 @@
 
 import asyncio
 import logging
-import os
 import random
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 from playwright.async_api import BrowserContext, BrowserType, Page, Playwright
 from trippostcollect.application.contracts import DouyinSettings, DouyinReaders, DouyinCrawlerPorts, ImageStagingError
 from trippostcollect.core import resources
-from trippostcollect.core.paths import MEDIACRAWLER_DIR
+from trippostcollect.core.paths import platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError, is_runtime_blocking_image_error
 from trippostcollect.platforms.douyin import parser
@@ -776,7 +775,7 @@ class DouYinCrawler:
     ) -> BrowserContext:
         """Launch browser and create browser context"""
         if self.settings.SAVE_LOGIN_STATE:
-            user_data_dir = os.path.join(MEDIACRAWLER_DIR, "browser_data", self.settings.USER_DATA_DIR % self.settings.PLATFORM)  # type: ignore
+            user_data_dir = str(platform_profile_dir("douyin"))
             browser_context = await chromium.launch_persistent_context(
                 user_data_dir=user_data_dir,
                 accept_downloads=True,

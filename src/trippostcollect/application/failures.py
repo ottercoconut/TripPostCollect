@@ -56,6 +56,9 @@ XHS_CDP_LIFECYCLE_CODE_PATTERNS = re.compile(
     r")(?![A-Za-z0-9_])",
     re.I,
 )
+PLATFORM_SESSION_MIGRATION_PATTERNS = re.compile(
+    r"(?<![A-Za-z0-9_])platform_session_migration_required:(bilibili|weibo|douyin|zhihu)(?![A-Za-z0-9_])",
+)
 IMPORT_TARGET_PATTERNS = re.compile(r"import_new_target_not_met", re.I)
 RATE_PATTERNS = re.compile(r"429|too many requests|rate limit|访问过于频繁|请求过于频繁|操作频繁", re.I)
 XHS_FREQUENT_CHALLENGE_PATTERNS = re.compile(
@@ -292,6 +295,16 @@ def classify_attempt(
     structured_runtime_blocker = _structured_runtime_blocker(stdout_json)
     if structured_runtime_blocker:
         return structured_runtime_blocker
+
+    session_migration = PLATFORM_SESSION_MIGRATION_PATTERNS.search(terminal_text)
+    if session_migration:
+        return {
+            "status": "failed_final",
+            "failure_type": "platform_session_migration_required",
+            "retryable": False,
+            "wait_seconds": 0,
+            "reason": f"platform_session_migration_required:{session_migration.group(1)}",
+        }
 
     checkpoint_failure = re.search(
         r"^RuntimeError: (xhs_batch_checkpoint_[a-z0-9_]+)\s*$", stderr, re.M

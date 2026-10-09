@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from trippostcollect.core.paths import (
-    COOKIE_SNAPSHOT_FILENAME,
+    ensure_parent,
     platform_cookie_snapshot_path as cookie_snapshot_path,
     platform_profile_dir as profile_dir_for, PROJECT_ROOT as ROOT,
 )
@@ -247,7 +247,7 @@ def cookie_snapshot_info(path: Path, cookies: list[dict[str, Any]], saved_at: st
 
 def write_cookie_snapshot(
     platform_key: str,
-    profile_dir: Path,
+    snapshot_path: Path,
     cookies: list[dict[str, Any]],
     *,
     source: str,
@@ -260,7 +260,8 @@ def write_cookie_snapshot(
     if missing:
         return None
     saved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    snapshot_path = profile_dir / COOKIE_SNAPSHOT_FILENAME
+    # T14：快照与 profile 同属 <platform>/ 目录，路径由调用方经 platform_cookie_snapshot_path 给出。
+    ensure_parent(snapshot_path)
     payload = {
         "platform": platform_key,
         "label": label,

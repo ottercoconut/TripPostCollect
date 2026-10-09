@@ -1032,3 +1032,27 @@ def test_optimistic_lock_conflict_does_not_overwrite(monkeypatch, tmp_path: Path
             "SELECT content_text, capture_method FROM web_posts"
         ).fetchone()
     assert row == ("并发修改", "import")
+
+
+def test_apply_refuses_unmigrated_legacy_profile_before_reading_snapshot(
+    tmp_path: Path, monkeypatch, isolated_platform_sessions,
+) -> None:
+    # T14：未迁移时不能读到新位置的空快照后误报 login_required；失败关闭且不写状态库。
+    (isolated_platform_sessions.legacy / "bili_user_data_dir").mkdir(parents=True)
+    target = tmp_path / "target.sqlite"
+    create_target(target)
+    baseline = repair.sha256_file(target)
+    backup = tmp_path / "backup.sqlite"
+    repair.create_online_backup(target, backup)
+    monkeypatch.setattr(
+        repair, "load_cookie_snapshot",
+        lambda platform: pytest.fail("migration check must precede the snapshot read"),
+    )
+    config = config_for(
+        target, tmp_path / "state.sqlite", backup, tmp_path / "reports",
+        apply=True, expected_sha256=baseline,
+    )
+    with pytest.raises(RuntimeError, match="^platform_session_migration_required:bilibili "):
+        repair.run_repair(config)
+    assert not config.state_db_path.exists()
+    assert repair.sha256_file(target) == baseline

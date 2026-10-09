@@ -116,6 +116,18 @@ def t12_authorized(node):
     return node
 
 
+def t14_authorized(node):
+    """T14 授权差异：run_platform 在预算守卫前对非小红书平台做 profile 迁移失败关闭检查。"""
+    node = deepcopy(node)
+    for child in ast.walk(node):
+        body = getattr(child, "body", None)
+        if isinstance(body, list):
+            child.body = [statement for statement in body
+                          if not (isinstance(statement, ast.If)
+                                  and "require_platform_session_migrated" in ast.unparse(statement))] or body
+    return node
+
+
 def definition(source, qualname):
     node = ast.parse(source)
     for name in qualname.split("."):
@@ -184,7 +196,7 @@ def test_a_migrated_ast(row):
         target = ROOT / "src/trippostcollect/application/collection.py"
     assert target.exists(), f"新定义不存在：{target.relative_to(ROOT)}::{name}"
     old = t12_authorized(definition((FIXTURES / "mediacrawler_crawl.py.txt").read_text(), name))
-    new = definition(target.read_text(), name)
+    new = t14_authorized(definition(target.read_text(), name))
     assert normalized_pair(old, new, AST_RULES[name])[0] == normalized_pair(old, new, AST_RULES[name])[1]
     if row["disposition"] == "薄":
         tree = ast.parse((ROOT / row["file"]).read_text())

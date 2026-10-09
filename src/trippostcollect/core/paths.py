@@ -43,6 +43,9 @@ FORMAL_CRAWL_CONTRACT = DOCS_ROOT / "formal-crawl-contract.md"
 MEDIACRAWLER_DIR = TOOLS_ROOT / "MediaCrawler"
 PLATFORM_PROFILE_CODES = {"bilibili": "bili", "weibo": "wb", "douyin": "dy", "zhihu": "zhihu", "xhs": "xhs"}
 COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
+# 仅用于 T14 迁移失败关闭检查：识别 fork 下尚未迁移的旧非小红书 profile；T14 删除批随 fork 一并移除。
+LEGACY_FORK_PROFILE_ROOT = MEDIACRAWLER_DIR / "browser_data"
+PLATFORM_SESSION_MIGRATION_REQUIRED = "platform_session_migration_required"
 MEDIACRAWLER_RUNS_OUTPUT = OUTPUTS_ROOT / "mediacrawler_runs"
 MEDIACRAWLER_LOGIN_OUTPUT = OUTPUTS_ROOT / "mediacrawler_login_warmup"
 LOGIN_WARMUP_OUTPUT = OUTPUTS_ROOT / "login_warmup"
@@ -60,6 +63,8 @@ LOCK_DIR = RUNTIME_ROOT / "locks"
 FORMAL_MEDIA_PERSISTENCE_LOCK = LOCK_DIR / "formal_media_persistence.lock"
 BROWSER_RUNTIME_HOME = RUNTIME_ROOT / "browser_home"
 CHROME_CRASH_DUMPS = RUNTIME_ROOT / "chrome_crash_dumps"
+PLATFORM_SESSIONS_ROOT = RUNTIME_ROOT / "platform_sessions"
+DOUYIN_SLIDER_IMAGE_DIR = RUNTIME_ROOT / "douyin_slider_images"
 XHS_RUNTIME_ROOT = RUNTIME_ROOT / "xhs"
 XHS_EXECUTION_STATE_ROOT = XHS_RUNTIME_ROOT / "execution_states"
 XHS_SESSION_ROOT = XHS_RUNTIME_ROOT / "sessions"
@@ -86,14 +91,69 @@ CRAWL_SCHEDULER_SCHEMA = DB_ROOT / "crawl_scheduler.sql"
 XHS_CONTROL_SCHEMA = DB_ROOT / "xhs_control.sql"
 
 
+def _persistent_session_platform(platform_key: str) -> str:
+    """非小红书通用平台键；小红书每轮使用 XHS_SESSION_ROOT 下的空 session，不在此布局内。"""
+    if platform_key not in PLATFORM_PROFILE_CODES:
+        raise KeyError(platform_key)
+    if platform_key == "xhs":
+        raise ValueError("xhs uses run-scoped sessions under XHS_SESSION_ROOT, not platform_sessions")
+    return platform_key
+
+
+def platform_key_for_profile_code(code: str) -> str:
+    """worker 配置的平台代号（wb/dy/zhihu/bili）转回项目平台键。"""
+    for platform_key, profile_code in PLATFORM_PROFILE_CODES.items():
+        if profile_code == code:
+            return platform_key
+    raise KeyError(code)
+
+
+def platform_session_dir(platform_key: str) -> Path:
+    return PLATFORM_SESSIONS_ROOT / _persistent_session_platform(platform_key)
+
+
 def platform_profile_dir(platform_key: str) -> Path:
-    """集中定义迁移期间的旧 profile 位置，不读取登录态。"""
-    code = PLATFORM_PROFILE_CODES[platform_key]
-    return MEDIACRAWLER_DIR / "browser_data" / f"{code}_user_data_dir"
+    """非小红书通用平台的持久 profile；只定义位置，不读取登录态。"""
+    return platform_session_dir(platform_key) / "profile"
+
+
+def platform_cdp_profile_dir(platform_key: str) -> Path:
+    """CDP 模式且未声明共享 profile 时的独立 profile，与旧 `cdp_<code>_user_data_dir` 一一对应。"""
+    return platform_session_dir(platform_key) / "cdp_profile"
 
 
 def platform_cookie_snapshot_path(platform_key: str) -> Path:
-    return platform_profile_dir(platform_key) / COOKIE_SNAPSHOT_FILENAME
+    return platform_session_dir(platform_key) / COOKIE_SNAPSHOT_FILENAME
+
+
+def legacy_fork_profile_dirs(platform_key: str) -> tuple[tuple[Path, Path], ...]:
+    """仅供迁移检查：旧 fork profile 与新位置的一一对应（普通、CDP 独立两种）。"""
+    code = PLATFORM_PROFILE_CODES[_persistent_session_platform(platform_key)]
+    return (
+        (LEGACY_FORK_PROFILE_ROOT / f"{code}_user_data_dir", platform_profile_dir(platform_key)),
+        (LEGACY_FORK_PROFILE_ROOT / f"cdp_{code}_user_data_dir", platform_cdp_profile_dir(platform_key)),
+    )
+
+
+def require_platform_session_migrated(platform_key: str) -> None:
+    """失败关闭：旧 fork profile 仍在而新 profile 不存在、或留有未完成的 `.partial` 复制时拒绝启动。
+
+    不回退旧位置。两者都不存在时按首登流程由调用方创建新目录；新 profile 已存在且无残留时直接通过。
+    错误只给出平台与目录，不读取或输出任何 Cookie。
+    """
+    problems = []
+    for legacy, target in legacy_fork_profile_dirs(platform_key):
+        partial = target.with_name(f"{target.name}.partial")
+        # 悬空符号链接 exists() 为 False，也必须视为残留。
+        if partial.exists() or partial.is_symlink():
+            problems.append(f"未完成的迁移残留 {partial}，删除后重做")
+        elif legacy.exists() and not target.exists():
+            problems.append(f"{legacy} -> {target}")
+    if problems:
+        raise RuntimeError(
+            f"{PLATFORM_SESSION_MIGRATION_REQUIRED}:{platform_key} "
+            f"(按 docs/operations-runbook.md「T14 非小红书登录资料迁移」处理：{'; '.join(problems)})"
+        )
 
 
 def ensure_dir(path: str | Path) -> Path:

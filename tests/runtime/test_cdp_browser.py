@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from trippostcollect.core import paths
+
 from dataclasses import replace
 
 from support.browser_settings import BROWSER_SETTINGS
@@ -228,8 +230,15 @@ async def test_non_xhs_cdp_profile_behavior_is_unchanged_and_ignores_xhs_env(
     save_login_state: bool,
     expected_profile: str | None,
 ) -> None:
+    # T14：参数保留旧 fork 目录名作为台账节点 ID；实际落点是 core.paths 中与之一一对应的新位置
+    # （未共享 CDP profile 的 cdp_<code>_user_data_dir -> data/runtime/platform_sessions/<platform>/cdp_profile）。
     xhs_only_path = tmp_path / "must-not-be-used"
-    monkeypatch.setattr("trippostcollect.runtime.browser.PROFILE_BASE_DIR", tmp_path / "browser_data")
+    monkeypatch.setattr("trippostcollect.core.paths.PLATFORM_SESSIONS_ROOT", tmp_path / "platform_sessions")
+    monkeypatch.setattr("trippostcollect.core.paths.LEGACY_FORK_PROFILE_ROOT", tmp_path / "browser_data")
+    legacy_to_new = {
+        str(legacy.relative_to(tmp_path)): str(target)
+        for legacy, target in paths.legacy_fork_profile_dirs("zhihu")
+    }
     settings = replace(BROWSER_SETTINGS, PLATFORM="zhihu", SAVE_LOGIN_STATE=save_login_state, USER_DATA_DIR="%s_user_data_dir")
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_PROFILE_DIR", str(xhs_only_path))
     monkeypatch.delenv("TRIPPOSTCOLLECT_SHARE_CDP_PROFILE", raising=False)
@@ -238,7 +247,7 @@ async def test_non_xhs_cdp_profile_behavior_is_unchanged_and_ignores_xhs_env(
     await manager._launch_browser("/fake/chrome", True)
 
     resolved_profile = (
-        str(tmp_path / expected_profile) if expected_profile is not None else None
+        legacy_to_new[expected_profile] if expected_profile is not None else None
     )
     manager.launcher.launch_browser.assert_called_once_with(
         browser_path="/fake/chrome",

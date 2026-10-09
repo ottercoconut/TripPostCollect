@@ -24,7 +24,7 @@
 保留环境变量读取的原位与时点，T09 随 XHS 迁移改为注入：
 _clean_session_restore_tabs 读取 TRIPPOSTCOLLECT_CLEAN_BROWSER_TABS；
 _launch_browser 读取 TRIPPOSTCOLLECT_XHS_PROFILE_DIR 和
-TRIPPOSTCOLLECT_SHARE_CDP_PROFILE。PROFILE_BASE_DIR 保留 fork 原位置，T14 再迁。
+TRIPPOSTCOLLECT_SHARE_CDP_PROFILE。非小红书持久 profile 位置由 core.paths 集中定义（T14）。
 """
 
 import asyncio
@@ -45,11 +45,14 @@ import httpx
 from playwright.async_api import Browser, BrowserContext, Playwright
 
 from trippostcollect.core import resources
-from trippostcollect.core.paths import MEDIACRAWLER_DIR
+from trippostcollect.core.paths import (
+    platform_cdp_profile_dir,
+    platform_key_for_profile_code,
+    platform_profile_dir,
+)
 from trippostcollect.runtime.browser_launcher import BrowserLauncher
 
 
-PROFILE_BASE_DIR = MEDIACRAWLER_DIR / "browser_data"
 logger = logging.getLogger("MediaCrawler")
 
 
@@ -63,6 +66,8 @@ class CDPBrowserSettings:
     BROWSER_LAUNCH_TIMEOUT: int
     CUSTOM_BROWSER_PATH: str
     SAVE_LOGIN_STATE: bool
+    # 位置已由 core.paths 定义，本字段不再参与路径计算；仅因 fork `tools/_browser_bridge.py` 仍按名构造
+    # 而保留，T14 删除批随 fork 一并移除。
     USER_DATA_DIR: str
     AUTO_CLOSE_BROWSER: bool
 
@@ -542,13 +547,12 @@ class CDPBrowserManager:
                 raise RuntimeError("XHS requires TRIPPOSTCOLLECT_XHS_PROFILE_DIR from xhs_runner.py")
             user_data_dir = os.path.abspath(os.path.expanduser(explicit_profile))
         elif self.settings.SAVE_LOGIN_STATE:
-            profile_name = self.settings.USER_DATA_DIR % self.settings.PLATFORM
-            if not os.environ.get("TRIPPOSTCOLLECT_SHARE_CDP_PROFILE"):
-                profile_name = f"cdp_{profile_name}"
-            user_data_dir = os.path.join(
-                PROFILE_BASE_DIR,
-                profile_name,
-            )
+            # 共享时与 Playwright 持久模式同一 profile；否则使用独立 CDP profile（旧 cdp_ 前缀目录）。
+            platform_key = platform_key_for_profile_code(self.settings.PLATFORM)
+            if os.environ.get("TRIPPOSTCOLLECT_SHARE_CDP_PROFILE"):
+                user_data_dir = str(platform_profile_dir(platform_key))
+            else:
+                user_data_dir = str(platform_cdp_profile_dir(platform_key))
         else:
             user_data_dir = None
 

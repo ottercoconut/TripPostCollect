@@ -26,7 +26,6 @@
 # TripPostCollect T05：迁自 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303；仅拆分职责与注入依赖。
 import asyncio
 import logging
-import os
 from typing import Dict, List, Optional
 from urllib.parse import quote
 
@@ -34,7 +33,7 @@ from playwright.async_api import BrowserContext, BrowserType, Page, Playwright, 
 
 from trippostcollect.application.contracts import ImageStagingError, WeiboPorts
 from trippostcollect.core import resources
-from trippostcollect.core.paths import MEDIACRAWLER_DIR
+from trippostcollect.core.paths import platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.helpers import get_user_agent, get_mobile_user_agent
 from . import parser as weibo_store
@@ -550,7 +549,7 @@ class WeiboCrawler:
         """Launch browser and create browser context"""
         logger.info("[WeiboCrawler.launch_browser] Begin create browser context ...")
         if self.config.SAVE_LOGIN_STATE:
-            user_data_dir = os.path.join(MEDIACRAWLER_DIR, "browser_data", self.config.USER_DATA_DIR % self.config.PLATFORM)  # type: ignore
+            user_data_dir = str(platform_profile_dir("weibo"))
             browser_context = await chromium.launch_persistent_context(
                 user_data_dir=user_data_dir,
                 accept_downloads=True,

@@ -84,18 +84,22 @@ exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中
   人工处理。B站在中间层进程内经 Playwright pipe 启动的浏览器，在中间层被强杀后随 pipe 断开退出。
   systemd 等对整个 cgroup 同时发 SIGTERM 的场景，worker 与 Chrome 会直接收到信号，不符合“逐层一次”，
   worker 可能因第二次信号跳过清理。
-- 强杀兜底后的残留核对与清理：先确认没有仍在运行的通用 runner 或 child，再只读列出使用项目
-  `tools/MediaCrawler/browser_data/` 下 profile（`cdp_<平台>_user_data_dir`，共享 profile 时无 `cdp_` 前缀）的
-  Chrome PID，不打印完整命令行：
+- 强杀兜底后的残留核对与清理：先确认没有仍在运行的通用 runner、executor、worker 或 warmup（复用迁移
+  第 1 步的进程模式，但不加 `-l`，不打印完整命令行），再只读列出使用项目登录资料目录的 Chrome PID。
+  Chrome 收到的 `--user-data-dir` 是 `core.paths` 解析出的物理绝对路径，所以匹配时用 `$(pwd -P)`，
+  不用可能含符号链接的 `$PWD`。T14 迁移后 profile 位于
+  `data/runtime/platform_sessions/<platform>/`（`cdp_profile`，共享 profile 时为 `profile`）；迁移前的旧位置
+  `tools/MediaCrawler/browser_data/`（`cdp_<平台>_user_data_dir`，共享时无 `cdp_` 前缀）并列核对，该旧路径
+  一项在 T14-C 删除 fork 后移除：
 
   ```bash
-  pgrep -f scripts/crawl_runner.py
-  pgrep -f scripts/mediacrawler_crawl.py
-  pgrep -f -- "--user-data-dir=$PWD/tools/MediaCrawler/browser_data/"
+  pgrep -f "crawl_runner.py|mediacrawler_crawl.py|trippostcollect.platforms.entry|login_warmup.py"
+  pgrep -f -- "--user-data-dir=$(pwd -P)/data/runtime/platform_sessions/"
+  pgrep -f -- "--user-data-dir=$(pwd -P)/tools/MediaCrawler/browser_data/"
   ```
 
-  前两条无输出时才清理第三条列出的 PID：先 `kill -TERM <pid>...`，再用同一条 `pgrep` 复核，仍有残留
-  才 `kill -KILL <pid>...`。小红书临时 profile 不在该目录，按其平台文档处理，不用此命令。
+  第一条无输出时才清理后两条列出的 PID：先 `kill -TERM <pid>...`，等待数秒（例如 `sleep 5`）后用同样的
+  `pgrep` 复核，确认仍有残留才 `kill -KILL <pid>...`。小红书临时 profile 不在这些目录，按其平台文档处理，不用此命令。
 - 派发：首信号后排队 job 不再派发，不租约、不写 attempt、不启动 child，`crawl_jobs.status` 保持原值
   （通常为 `pending`），仅 execution state 写成中断终态、run_summary 记录为 `retry_wait`。已派发 job 若
   在启动前看到信号也不启动 child。信号前已结束且已被 runner 观察到的平台结果照常验证并保留；child
@@ -378,6 +382,12 @@ python scripts/login_warmup.py \
 脚本使用各平台正式持久 profile，必要时等待人工登录，并在关闭、重开同一 profile 后复验。报告位于
 `outputs/login_warmup/<run_id>/summary.json` 和 `summary.md`。它不抓内容或写内容表。
 
+四个通用平台的持久 profile 位于 `data/runtime/platform_sessions/<platform>/profile`（`<platform>` 为
+`bilibili`、`weibo`、`douyin`、`zhihu`），Cookie 快照位于同级的
+`data/runtime/platform_sessions/<platform>/trippostcollect_cookie_snapshot.json`，权限 `0600`；位置只由
+`trippostcollect.core.paths` 定义。旧版放在 `tools/MediaCrawler/browser_data/` 下的 profile 需按下一节迁移，
+未迁移时 warmup、`crawl_runner.py` 与 worker 均以 `platform_session_migration_required:<platform>` 拒绝启动。
+
 微博必须在桌面 SSO 页完成人工登录，再回到移动端刷新 Cookie；最终只有移动接口同时返回
 `login=true` 和有效 `uid` 才成功。`WBPSESS` 不能单独作为成功证据。
 
@@ -452,6 +462,377 @@ python scripts/xhs_runner.py \
 BrowserContext 意外关闭（`xhs_browser_context_closed_unexpected`）时，才把对应的 CDP 死亡当作
 终端证据。主 Page 自身确已关闭同样是终端错误；以上任一情况都失败当前轮次，不在轮内
 重启或替换浏览器。
+
+## T14 非小红书登录资料迁移
+
+T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不再放在 fork 目录。旧目录与新位置一一对应：
+
+| 平台 | 旧 profile（`tools/MediaCrawler/browser_data/`） | 新位置（`data/runtime/platform_sessions/`） |
+|---|---|---|
+| B站 | `bili_user_data_dir` | `bilibili/profile` |
+| 微博 | `wb_user_data_dir` | `weibo/profile` |
+| 抖音 | `dy_user_data_dir` | `douyin/profile` |
+| 知乎 | `zhihu_user_data_dir` | `zhihu/profile` |
+| 任一平台 | `cdp_<code>_user_data_dir`（若存在） | `<platform>/cdp_profile` |
+| 任一平台 | `<code>_user_data_dir/trippostcollect_cookie_snapshot.json`（复制，旧文件保留） | `<platform>/trippostcollect_cookie_snapshot.json` |
+
+`cdp_` 前缀目录只在 CDP 模式且未声明共享 profile 时使用；正式知乎 CDP 共享普通 profile，微博和抖音
+不开 CDP，所以正式轮次只用普通 profile。旧 `cdp_` 目录若存在也要按表迁移，否则同样被失败关闭检查拒绝。
+小红书仍每轮在 `data/runtime/xhs/sessions/` 创建空 session，不在本迁移范围内，也不得迁入任何旧小红书目录。
+
+运行期检查在两种情况下拒绝启动：旧目录存在且对应新目录不存在；或新位置留有未完成复制的
+`profile.partial`/`cdp_profile.partial`。两者都不存在时按首登流程创建新目录，新目录已存在且无残留时
+直接使用新目录，不会回退读取旧目录。以下命令在 macOS 项目根执行，全程不打印 Cookie 内容。第 2、3 步
+依赖 bash 语法（进程替换、`read -d ''`），已用 `bash <<'SH' … SH` 包裹，在 macOS 默认的 zsh 中也直接
+整段粘贴执行。
+
+1. 前置清点：确认没有正式 runner、executor、worker 或 warmup 在运行，没有 leased 任务，也没有进程
+   打开旧 profile。前三条命令都应无输出，第四条应输出 `0`。任一不符时先等待或收束对应轮次，不要
+   强行复制。`Singleton*` 计数非 0 说明旧 profile 有浏览器崩溃残留，需人工确认浏览器确已退出；
+   本手册不自动删除这些文件。
+
+   ```bash
+   pgrep -fl "crawl_runner.py|mediacrawler_crawl.py|trippostcollect.platforms.entry|login_warmup.py"
+   sqlite3 -readonly data/trippostcollect.sqlite \
+     "SELECT job_key, status FROM crawl_jobs WHERE status = 'leased';"
+   lsof +D tools/MediaCrawler/browser_data 2>/dev/null
+   find tools/MediaCrawler/browser_data -name 'Singleton*' | wc -l
+   ```
+
+2. 逐平台迁移：快照与 profile 都只复制、不移动，旧目录（含其中的快照）原样保留为备份。若本批被回退，
+   旧代码仍从旧位置读取快照与 profile，所以旧位置不得缺少任何文件。
+   - 脚本用 `set -eu -o pipefail`，但不依赖 `set -e` 在函数和 `&&` 链中的隐式语义：`mkdir`、`ditto`、
+     `rm`、`touch`、`cp`、`mv` 每一步都显式写 `|| fail`，`fail` 打印原因后 `exit 1` 终止整个脚本；
+     第一个出错的平台之后不再处理任何平台。
+   - 每个平台先做前置检查：新位置存在 `profile.partial`、`cdp_profile.partial` 或
+     `trippostcollect_cookie_snapshot.json.partial`（上次中途失败的残留）时，提示删除这些 **新侧**
+     `.partial` 后重跑，并非零退出。目标已存在时打印跳过提示，不覆盖，保持重跑幂等。
+   - 新建的 `<platform>` 目录用 `mkdir -p -m 700`：`-m` 只作用于最后一级，即 `<platform>` 本身，
+     不改上级目录；目录已存在时不改动其权限。
+   - profile 用 `ditto` 而不是 `cp -Rp`：`ditto` 默认保留权限、时间、扩展属性、ACL 和 Chrome 的
+     `Singleton*` 符号链接，并且语义固定为“把源目录内容复制到目标目录”，不受尾部 `/` 影响。先复制到
+     `<目标>.partial`，删除随之复制进来的快照副本（新代码只读同级快照），再用 `touch -r` 恢复根目录 mtime。
+   - 快照用 `cp -p` 先复制到同级 `.partial` 再 `mv` 落地，保留 `0600` 权限、属主与时间。拒绝覆盖的方式是
+     显式 `[ -e 目标 ]` 判断后跳过，不调用 `cp`（不用 `cp -n`，因为它静默跳过且不报错）。
+   - 落地顺序：两类 profile 的 `.partial` 与快照全部准备成功、快照先落地，最后才把 `profile.partial`
+     改名为 `profile`。新 `profile` 出现是唯一的“提交点”：之前任何一步失败时 `profile` 都不存在
+     （运行期检查因旧目录仍在或 `.partial` 残留而拒绝启动）；若反过来先落地 profile、后复制快照失败，
+     运行期会接受一个没有快照的新 profile，因此不采用该顺序。
+   - 普通 profile 与 `cdp_` profile 各自独立判断，只有 `cdp_` 旧目录时也会迁移。
+
+   <!-- t14-migrate:step2 -->
+   ```bash
+   bash <<'SH'
+   set -eu -o pipefail
+   snap=trippostcollect_cookie_snapshot.json
+   legacy_root=tools/MediaCrawler/browser_data
+   fail() {
+     echo "FAILED: $*" >&2
+     exit 1
+   }
+   for pair in bili:bilibili wb:weibo dy:douyin zhihu:zhihu; do
+     code=${pair%%:*}
+     platform=${pair#*:}
+     old=$legacy_root/${code}_user_data_dir
+     old_cdp=$legacy_root/cdp_${code}_user_data_dir
+     new=data/runtime/platform_sessions/$platform
+     if [ ! -d "$old" ] && [ ! -d "$old_cdp" ]; then
+       echo "skip $platform: no legacy profile"
+       continue
+     fi
+     for leftover in "$new/profile.partial" "$new/cdp_profile.partial" "$new/$snap.partial"; do
+       if [ -e "$leftover" ] || [ -L "$leftover" ]; then
+         fail "$platform: $leftover left by an earlier run; delete the new-side .partial entries and rerun"
+       fi
+     done
+     mkdir -p -m 700 "$new" || fail "$platform: mkdir"
+     staged=()
+     for kind in "$old:profile" "$old_cdp:cdp_profile"; do
+       src=${kind%:*}
+       dst=$new/${kind##*:}
+       [ -d "$src" ] || continue
+       if [ -e "$dst" ]; then
+         echo "skip $platform ${kind##*:}: target exists, not overwritten"
+         continue
+       fi
+       ditto "$src" "$dst.partial" || fail "$platform ${kind##*:}: ditto"
+       rm -f "$dst.partial/$snap" || fail "$platform ${kind##*:}: rm snapshot copy"
+       touch -r "$src" "$dst.partial" || fail "$platform ${kind##*:}: touch"
+       staged+=("$dst")
+     done
+     if [ -f "$old/$snap" ]; then
+       if [ -e "$new/$snap" ]; then
+         echo "skip $platform snapshot: target exists, not overwritten"
+       else
+         cp -p "$old/$snap" "$new/$snap.partial" || fail "$platform snapshot: cp"
+         mv "$new/$snap.partial" "$new/$snap" || fail "$platform snapshot: mv"
+       fi
+     fi
+     for dst in ${staged[@]+"${staged[@]}"}; do
+       mv "$dst.partial" "$dst" || fail "$platform: mv $dst"
+     done
+     echo "migrated $platform"
+   done
+   SH
+   ```
+   <!-- /t14-migrate:step2 -->
+
+   任一步失败时脚本以非零状态停止并打印 `FAILED: <平台> <步骤>`。按提示只删除新侧 `.partial`（以及确认
+   为复制错误的新侧目录）后重跑；旧目录与旧快照始终不动。
+
+3. 校验：逐相对条目比较每对 profile 目录。只在旧侧排除快照（新侧已删掉该副本）；新侧不排除，若新
+   profile 里残留快照副本会表现为条目集合不同。条目集合用
+   `find -print0 | sort -z` 比较；每个条目用 BSD `stat -f '%HT %p %z %m %Su:%Sg'` 比较类型、权限、大小、
+   mtime 与属主属组，普通文件再用 `cmp -s` 逐字节比较。符号链接只比较类型、属主属组与链接目标
+   （`readlink`），不比较链接自身的权限位、大小和 mtime：macOS 上 `ditto`/`cp` 不保证保留链接自身的
+   mtime 与权限位，而 Chrome 只关心链接目标（如 `SingletonLock` 指向的主机与进程），这些属性对 profile
+   没有意义。目录与普通文件仍比较全部字段。每组输出 `mismatch_detail=<类型>:<字段>=<次数>,…`
+   （类型为 file/dir/link，字段为 type/mode/size/mtime/owner/content/target/missing，无不一致时为 `none`），
+   只给分类计数、不含路径；类型不同的条目只记 `<类型>:type`，不再比较其余字段，按不一致处理而非命令错误。
+   `extra=N` 是新侧多出的条目数（例如新 profile 里残留的快照副本），N 不为 0 同样计入不一致。
+   `cd`、`find`、`stat`、`cmp`、`readlink`、`shasum` 自身的报错不输出（避免把路径打到终端），出错时只看
+   `FAILED:` 行。全段不使用 here-string 或内层 heredoc（bash 5.1 前二者借临时文件实现）。另对照（不计符号链接）
+   `find <dir> -perm +077 | wc -l` 的 group/other 权限条目数。profile 根本身单独核对类型、权限、属主与
+   mtime：新旧根权限必须相同（`root_mode_same`）；`root_mode_700` 只作信息输出，不计入失败（旧根若是 755，
+   `ditto` 会原样复制，不应要求操作人改权限）。快照比较大小、权限、mtime、属主属组与 SHA-256，并要求新快照为
+   `-rw-------`。输出只含平台名、目录种类、布尔值和计数，不打印路径、内容、哈希或 Cookie。
+   脚本不创建临时文件（条目列表经进程替换读入数组，列表不完整即判失败），只读不写。
+   `stat`、`find`、`cmp`、`readlink`、`shasum` 等任一命令出错都以非零状态立即停止并打印 `FAILED:` 行；此时前面已通过的平台
+   可能已经打印了“一致”，所以 **最终结论只以退出码和最后的 `problems=N` 为准**。全部命令成功时脚本打印
+   `problems=N`（不一致项数），N 不为 0 时以状态 2 退出。脚本结束后紧接着执行 `echo "exit=$?"` 确认退出码。
+
+   <!-- t14-migrate:step3 -->
+   ```bash
+   bash <<'SH'
+   set -eu -o pipefail
+   snap=trippostcollect_cookie_snapshot.json
+   legacy_root=tools/MediaCrawler/browser_data
+   end_mark=__T14_ENTRIES_COMPLETE__
+   problems=0
+   fail() {
+     echo "FAILED: $*" >&2
+     exit 1
+   }
+   yes_no() {
+     if [ "$1" = "$2" ]; then echo yes; else echo no; fi
+   }
+   entries() {
+     if [ "$2" = old ]; then
+       (set -o pipefail; cd "$1" 2>/dev/null && find . -mindepth 1 ! -path "./$snap" -print0 2>/dev/null | LC_ALL=C sort -z)
+     else
+       (set -o pipefail; cd "$1" 2>/dev/null && find . -mindepth 1 -print0 2>/dev/null | LC_ALL=C sort -z)
+     fi
+   }
+   listing() {
+     # 进程替换的退出码不会传给读取方：只有 entries 成功才追加结束标记，读取方据此判定成败。
+     if entries "$1" "$2"; then printf '%s\0' "$end_mark"; fi
+   }
+   load_list() {
+     local rel complete=no
+     loaded=()
+     while IFS= read -r -d '' rel; do
+       if [ "$rel" = "$end_mark" ]; then
+         complete=yes
+       else
+         loaded+=("$rel")
+       fi
+     done < <(listing "$1" "$2")
+     [ "$complete" = yes ] || fail "list $2 entries"
+   }
+   kind_of() {
+     if [ -L "$1" ]; then echo link
+     elif [ -d "$1" ]; then echo dir
+     elif [ -f "$1" ]; then echo file
+     else echo other
+     fi
+   }
+   split_stat() {
+     # 用参数展开拆分 `|` 分隔的字段；不用 here-string（bash 5.1 前借临时文件实现）。
+     local rest=$1
+     f_type=${rest%%|*}; rest=${rest#*|}
+     f_mode=${rest%%|*}; rest=${rest#*|}
+     f_size=${rest%%|*}; rest=${rest#*|}
+     f_mtime=${rest%%|*}; f_owner=${rest#*|}
+   }
+   compare_tree() {
+     local label=$1 a=$2 b=$3 same=yes total=0 bad=0 missing=0 extra i rel kind sa sb la lb rc perm_a perm_b
+     local keys entry_bad detail ta pa za ma oa
+     local -a old_list new_list
+     # 不用临时文件：条目列表经进程替换读入数组，列表不完整时 load_list 已 fail。
+     load_list "$a" old
+     old_list=(${loaded[@]+"${loaded[@]}"})
+     load_list "$b" new
+     new_list=(${loaded[@]+"${loaded[@]}"})
+     if [ "${#old_list[@]}" -ne "${#new_list[@]}" ]; then
+       same=no
+     else
+       i=0
+       while [ "$i" -lt "${#old_list[@]}" ]; do
+         [ "${old_list[$i]}" = "${new_list[$i]}" ] || same=no
+         i=$((i + 1))
+       done
+     fi
+     keys=""
+     for rel in ${old_list[@]+"${old_list[@]}"}; do
+       total=$((total + 1))
+       kind=$(kind_of "$a/$rel") || fail "classify entry"
+       if [ ! -e "$b/$rel" ] && [ ! -L "$b/$rel" ]; then
+         bad=$((bad + 1))
+         missing=$((missing + 1))
+         keys="$keys$kind:missing "
+         continue
+       fi
+       sa=$(stat -f '%HT|%p|%z|%m|%Su:%Sg' "$a/$rel" 2>/dev/null) || fail "stat old entry"
+       sb=$(stat -f '%HT|%p|%z|%m|%Su:%Sg' "$b/$rel" 2>/dev/null) || fail "stat new entry"
+       split_stat "$sa"
+       ta=$f_type; pa=$f_mode; za=$f_size; ma=$f_mtime; oa=$f_owner
+       split_stat "$sb"
+       if [ "$ta" != "$f_type" ]; then
+         # 类型不同是不一致而非命令错误：不再对其做 readlink/cmp。
+         bad=$((bad + 1))
+         keys="$keys$kind:type "
+         continue
+       fi
+       entry_bad=""
+       [ "$oa" = "$f_owner" ] || entry_bad="$entry_bad$kind:owner "
+       if [ "$kind" = link ]; then
+         la=$(readlink "$a/$rel" 2>/dev/null) || fail "readlink old"
+         lb=$(readlink "$b/$rel" 2>/dev/null) || fail "readlink new"
+         [ "$la" = "$lb" ] || entry_bad="$entry_bad$kind:target "
+       else
+         [ "$pa" = "$f_mode" ] || entry_bad="$entry_bad$kind:mode "
+         [ "$za" = "$f_size" ] || entry_bad="$entry_bad$kind:size "
+         [ "$ma" = "$f_mtime" ] || entry_bad="$entry_bad$kind:mtime "
+         if [ "$kind" = file ]; then
+           rc=0
+           cmp -s "$a/$rel" "$b/$rel" 2>/dev/null || rc=$?
+           [ "$rc" -le 1 ] || fail "cmp entry"
+           [ "$rc" -eq 0 ] || entry_bad="$entry_bad$kind:content "
+         fi
+       fi
+       if [ -n "$entry_bad" ]; then
+         bad=$((bad + 1))
+         keys="$keys$entry_bad"
+       fi
+     done
+     # 新侧多出的条目数：新侧总数减去旧侧条目中在新侧存在的数目（新侧不排除快照）。
+     extra=$(( ${#new_list[@]} - (total - missing) ))
+     detail=$(printf '%s\n' $keys | LC_ALL=C sort | uniq -c | awk 'NF == 2 {printf "%s%s=%s", sep, $2, $1; sep=","}') \
+       || fail "summarize mismatches"
+     [ -n "$detail" ] || detail=none
+     perm_a=$(find "$a" ! -type l ! -path "$a/$snap" -perm +077 2>/dev/null | wc -l | tr -d ' ') || fail "find old perms"
+     perm_b=$(find "$b" ! -type l -perm +077 2>/dev/null | wc -l | tr -d ' ') || fail "find new perms"
+     echo "$label: same_entry_set=$same entries=$total mismatched=$bad mismatch_detail=$detail extra=$extra" \
+       "group_other_perm=$perm_a/$perm_b"
+     if [ "$same" != yes ] || [ "$bad" -ne 0 ] || [ "$extra" -ne 0 ] || [ "$perm_a" != "$perm_b" ]; then
+       problems=$((problems + 1))
+     fi
+   }
+   compare_root() {
+     local label=$1 a=$2 b=$3 ta tb ma mb oa ob ra rb
+     ta=$(stat -f %HT "$a" 2>/dev/null) || fail "stat old root"
+     tb=$(stat -f %HT "$b" 2>/dev/null) || fail "stat new root"
+     ma=$(stat -f %Lp "$a" 2>/dev/null) || fail "stat old root"
+     mb=$(stat -f %Lp "$b" 2>/dev/null) || fail "stat new root"
+     oa=$(stat -f %Su "$a" 2>/dev/null) || fail "stat old root"
+     ob=$(stat -f %Su "$b" 2>/dev/null) || fail "stat new root"
+     ra=$(stat -f %m "$a" 2>/dev/null) || fail "stat old root"
+     rb=$(stat -f %m "$b" 2>/dev/null) || fail "stat new root"
+     echo "$label: root_type_same=$(yes_no "$ta" "$tb") root_dir=$([ -d "$b" ] && [ ! -L "$b" ] && echo yes || echo no)" \
+       "root_mode_same=$(yes_no "$ma" "$mb") root_mode_700=$(yes_no "$mb" 700)" \
+       "root_owner_same=$(yes_no "$oa" "$ob")" \
+       "root_mtime_same=$(yes_no "$ra" "$rb")"
+     if [ "$ta" != "$tb" ] || [ ! -d "$b" ] || [ "$ma" != "$mb" ] || [ "$oa" != "$ob" ] || [ "$ra" != "$rb" ]; then
+       problems=$((problems + 1))
+     fi
+   }
+   for pair in bili:bilibili wb:weibo dy:douyin zhihu:zhihu; do
+     code=${pair%%:*}
+     platform=${pair#*:}
+     for kind in "${code}_user_data_dir:profile" "cdp_${code}_user_data_dir:cdp_profile"; do
+       old=$legacy_root/${kind%%:*}
+       new=data/runtime/platform_sessions/$platform/${kind#*:}
+       [ -d "$old" ] || continue
+       if [ ! -d "$new" ]; then
+         echo "$platform ${kind#*:}: missing"
+         problems=$((problems + 1))
+         continue
+       fi
+       # 直接在当前 shell 调用（不放进 $(...)），fail 才能终止整个脚本、计数才能累加。
+       compare_root "$platform ${kind#*:} root" "$old" "$new"
+       compare_tree "$platform ${kind#*:}" "$old" "$new"
+     done
+     old_snap=$legacy_root/${code}_user_data_dir/$snap
+     new_snap=data/runtime/platform_sessions/$platform/$snap
+     [ -f "$old_snap" ] || continue
+     if [ ! -f "$new_snap" ]; then
+       echo "$platform snapshot: 不一致"
+       problems=$((problems + 1))
+       continue
+     fi
+     sa=$(stat -f '%z %Sp %m %Su:%Sg' "$old_snap" 2>/dev/null) || fail "stat old snapshot"
+     sb=$(stat -f '%z %Sp %m %Su:%Sg' "$new_snap" 2>/dev/null) || fail "stat new snapshot"
+     mode=$(stat -f %Sp "$new_snap" 2>/dev/null) || fail "stat new snapshot"
+     ha=$(shasum -a 256 < "$old_snap" 2>/dev/null) || fail "hash old snapshot"
+     hb=$(shasum -a 256 < "$new_snap" 2>/dev/null) || fail "hash new snapshot"
+     if [ "$sa" = "$sb" ] && [ "$mode" = "-rw-------" ] && [ "$ha" = "$hb" ]; then
+       echo "$platform snapshot: 一致"
+     else
+       echo "$platform snapshot: 不一致"
+       problems=$((problems + 1))
+     fi
+   done
+   echo "problems=$problems"
+   [ "$problems" -eq 0 ] || exit 2
+   SH
+   echo "exit=$?"
+   ```
+   <!-- /t14-migrate:step3 -->
+
+   通过标准是最后两行为 `problems=0` 与 `exit=0`：此时每行 root 结果除信息项 `root_mode_700` 外均为 `yes`，
+   每行 profile 结果为 `same_entry_set=yes`、`mismatched=0`、`mismatch_detail=none`、`extra=0` 且 `group_other_perm` 两侧计数相等，快照为“一致”。
+   `exit=1` 表示某个命令出错（看 `FAILED:` 行），`exit=2` 表示存在不一致。非 root 账号复制时属主或属组可能与旧侧不同；即使只有属组不同，也按“不一致”交人工
+   确认，不得擅自 `chmod`/`chown`。确认是复制错误时，只删除新侧对应的 `profile`/`cdp_profile` 目录或
+   新快照文件后重做第 2 步；旧目录与旧快照始终不动，可重复复制。
+
+4. 逐平台验证登录仍有效，只看报告中的状态字段：
+
+   ```bash
+   source .venv/bin/activate
+   python scripts/login_warmup.py \
+     --targets weibo zhihu bilibili douyin \
+     --timeout-seconds 600
+   ```
+
+   在 `outputs/login_warmup/<run_id>/summary.md` 中确认每个 target 为 `ok`，profile 列为
+   `data/runtime/platform_sessions/<platform>/profile`。出现 `platform_session_migration_required` 说明该平台
+   旧目录仍未迁到新位置，回到第 2 步。
+
+5. 用通用 dry-run 核对冻结计划仍可生成；dry-run 不启动 worker，计划命令是 executor 调用：
+
+   ```bash
+   source .venv/bin/activate
+   python scripts/crawl_runner.py \
+     --dry-run \
+     --max-jobs 5
+   ```
+
+   worker 命令在正式执行时才构造，首个正式轮结束后在 `logs/<platform>/command.txt` 中确认其为
+   `python -P -m trippostcollect.platforms.entry ...`；profile 位置以第 4 步报告与下列只读输出为准：
+
+   ```bash
+   source .venv/bin/activate
+   python - <<'PY'
+   from trippostcollect.core import paths
+   for key in ("bilibili", "weibo", "douyin", "zhihu"):
+       profile = paths.platform_profile_dir(key)
+       print(key, profile, profile.is_dir())
+   PY
+   ```
+
+6. 旧目录 `tools/MediaCrawler/browser_data/` 保留为备份，新代码不再读取。旧目录中的快照与 profile 一起
+   作为回退备份（回退本批时旧代码仍从这里读取），只有在 T14 删除批合并且迁移后首个正式轮成功后，才与
+   profile 一起删除；删除前再次执行第 1 步的进程检查。
 
 ## 浏览器与行为证据
 
@@ -530,6 +911,7 @@ runner run_summary.json
 | HTTP 401/403、429、验证码、封禁 | 运行级阻断；保留前沿，不写候选 seen |
 | `sqlite_import_failed` | 确认整批数据库和本轮新媒体已回滚，checkpoint/seen/campaign 未推进 |
 | `persistence_verified` 失败 | 不 finalize；从摘要身份逐帖核对 SQLite 与文件 |
+| `platform_session_migration_required:<platform>` | 旧 fork profile 未迁移，任务记为 `failed_final`；按“T14 非小红书登录资料迁移”完成后用 `--job-key <job_key>` 重跑 |
 
 稳定错误码、优先级、重试和媒体事务的完整定义分别见[正式契约](formal-crawl-contract.md)与
 [数据持久化](data-persistence.md)。
