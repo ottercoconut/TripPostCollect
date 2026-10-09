@@ -5,7 +5,8 @@
 
 ## 入口与类型
 
-- 正式入口：`crawl_runner.py` 调用 MediaCrawler 知乎搜索。
+- 正式入口：`crawl_runner.py` 经 `mediacrawler_crawl.py` 启动根包 worker（`trippostcollect.platforms.entry`）
+  执行知乎搜索，实现位于 `src/trippostcollect/platforms/zhihu/`。
 - 登录态必须具有经关闭重开复验的 `d_c0/z_c0` Cookie snapshot。
 - 只接受 answer 和 article；zvideo 跳过。
 - 去重键为内容 ID，answer URL 同时保留 question ID。
@@ -51,7 +52,7 @@ workflow 不手工传 `--start-page` 或 `--resume-summary`。
 
 重新核验一组已知 answer/article URL 时，使用根执行器的
 `--zhihu-detail-urls-file <JSON数组文件> --no-import` 诊断模式。它不写正式 checkpoint 或数据库，
-也不能作为正式轮次完成证据；不要直接运行第三方内部命令。
+也不能作为正式轮次完成证据；不要绕过根执行器直接运行 worker 入口。
 
 需要正式修复历史库中非 `detail_observed` 的既有行时，改用
 `scripts/repair_post_details.py --platform zhihu`。总控清单把既有内容 ID 与 answer/article HTTPS URL

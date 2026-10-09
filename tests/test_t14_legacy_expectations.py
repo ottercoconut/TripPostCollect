@@ -1,7 +1,7 @@
 """T14 固化旧实现预期的完整性：登记、哈希、规范编码与不含主机路径/头像 URL。
 
-固化目录的来源与再生成方式见 tests/fixtures/t14_legacy_expectations/README.md 与
-tests/support/legacy_expectations.py。本文件不依赖 fork/E，T14-C 之后继续保留。
+固化目录的来源见 tests/fixtures/t14_legacy_expectations/README.md，读取与编码见
+tests/support/legacy_expectations.py。本文件不依赖 fork/E。
 """
 
 from __future__ import annotations
@@ -39,7 +39,8 @@ def test_manifest_records_legacy_provenance():
     assert re.fullmatch(r"[0-9a-f]{64}", MANIFEST["bridge_sha256"])
     assert re.fullmatch(r"[0-9a-f]{64}", MANIFEST["fork_python_sources_sha256"])
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", MANIFEST["generated_on"])
-    assert expectations.WRITE_OPTION in MANIFEST["generation_command"]
+    # 守卫与再生成选项已随 fork/E 在 T14-C 删除；manifest 只留档当时的生成命令。
+    assert "--t14-write-legacy-expectations" in MANIFEST["generation_command"]
 
 
 # 在项目头像键清单之外补充平台常见头像键；小红书作者图片键只在 user/author 等作者子对象内算头像。

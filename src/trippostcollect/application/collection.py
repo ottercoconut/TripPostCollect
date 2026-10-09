@@ -859,7 +859,6 @@ def _run_platform_without_policy(
         extra_env.update(
             {
                 "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": "1",
-                "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",
                 "TRIPPOSTCOLLECT_SHARE_CDP_PROFILE": "1",
                 "TRIPPOSTCOLLECT_XHS_PROFILE_DIR": str(Path(args.xhs_profile_dir).expanduser().resolve()),
                 "TRIPPOSTCOLLECT_XHS_ACCOUNT_ID": str(args.xhs_account_id),
@@ -1084,7 +1083,7 @@ def run_platform(
     policy_cleanup = clear_site_policy_state(site.key) if shared_policy_disabled else None
     try:
         if platform_key != "xhs":
-            # T14 失败关闭：旧 fork profile 未迁移时不消耗站点预算、不启动浏览器或 worker。
+            # T14 失败关闭：迁移中断留下 `.partial` 残留时不消耗站点预算、不启动浏览器或 worker。
             require_platform_session_migrated(platform_key)
         with site_request_guard(
             site,

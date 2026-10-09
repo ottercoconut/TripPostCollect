@@ -9,6 +9,5 @@ BROWSER_SETTINGS = CDPBrowserSettings(
     BROWSER_LAUNCH_TIMEOUT=60,
     CUSTOM_BROWSER_PATH="",
     SAVE_LOGIN_STATE=True,
-    USER_DATA_DIR="%s_user_data_dir",
     AUTO_CLOSE_BROWSER=True,
 )

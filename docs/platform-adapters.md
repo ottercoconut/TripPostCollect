@@ -3,6 +3,7 @@
 > 状态：P00 已完成（含 P00-08 复核与附录 C8 全量符号账），设计就绪 D 静态部分满足；不是实施授权、迁移完成报告或现行操作手册。
 > v0.6/v0.7 只修改设计文档、导航及B站两处现状说明，不进入实现，不改变正式路径、数据、测试、配置、依赖、AGENTS 或冻结资产，不提交 Git。
 > 本文的“必须”约束未来迁移方案；现行运行仍以权威文档和当前实现为准。
+> T14（#19）已执行：五站迁移收口，fork 子模块 `tools/MediaCrawler`、私有桥 E 与过渡装载模块已删除。本稿的“现状”描述及 `M/`、`E` 锚点均指迁移前（B01/B02），现行实现见 `src/trippostcollect/platforms/` 与[文档入口](README.md)所列权威文档。
 
 确定目录、逐符号迁移表、接口、配置读取时点、错误映射和任务卡以
 [详细迁移规格 v0.7](platform-adapter-specification.md) 及其[附录 C8](platform-adapter-symbol-ledger.md)为唯一详细定义；本稿保留原则、决策和历史研究。
@@ -72,6 +73,9 @@ B03 是 v0.2 起草时的外部审阅输入，不作为正式流程必须存在�
                     └─ 微博/抖音/知乎/XHS：export_entrypoint 平台 worker
                          └─ 当前上游 main → 平台 core/client/login/store
 ```
+
+上图为迁移前拓扑。T14 已执行：微博/抖音/知乎/XHS worker 现由根解释器以 `python -m trippostcollect.platforms.entry`
+启动，平台实现位于 `src/trippostcollect/platforms/<platform>/`，不再经 export_entrypoint 或上游运行树。
 
 通用 runner、执行器、平台 worker 是不同角色，不统称同一个 crawler。
 通用命令构造和启动见 `scripts/crawl_runner.py:352、851`；执行器创建 worker 见 S15 的 M02。
@@ -377,7 +381,7 @@ bootstrap 选平台并装配实现，不再执行上游 main/cmd_arg/config 初�
 |---|---|---|
 | crawl_runner / xhs_runner 正式入口 | 保留语义与账号隔离 | 内部装配可迁移 |
 | mediacrawler_crawl 外层执行命令 | 可保留薄包装 | 不再包含平台业务实现 |
-| mediacrawler_export_entrypoint 私有桥 | 被新包入口替代后移除 | 旧未完成轮次已完成或安全终止 |
+| mediacrawler_export_entrypoint 私有桥 | 被新包入口替代后移除（T14 已执行） | 旧未完成轮次已完成或安全终止 |
 | 其他在用辅助 CLI | 详细规格 C7/D2 列出的入口保留薄转发 | 其他旧脚本不自动取得公共兼容承诺 |
 | `job_kind=mediacrawler_search` | 保持 | 现有 schema 与存量行契约 |
 | `outputs/mediacrawler_runs/` 等产物路径 | 保持 | 历史证据及读取方依赖 |
@@ -426,7 +430,7 @@ wire/env、外部字段、目录和现行命令的保留，与私有内部函数
 | M14 | `C:3896 materialize_formal_record_images`；`:4335 import_valid_records`；`:4413 import_valid_records_with_media_rollback` | 已定位复验/事务/回滚；分到 artifacts/db 并保留编排 |
 | M15 | `C:2951 persist_discovery_checkpoint`；`:7153` 调用位置 | 已定位通用发现提交；不能和 XHS signal guard 硬合并 |
 | M16 | `src/trippostcollect/xhs/batch_checkpoint.py:86 publish_batch`、`:198 BatchCheckpointCommitter`；`scripts/xhs_runner.py:1121` | 已定位 XHS 发布/提交/安装；最后专项迁移 |
-| M17 | `scripts/mediacrawler_login_warmup.py:517 main_async` | 显式检查 `MEDIACRAWLER_DIR.exists()`；删除运行树前须替换该存活辅助入口的依赖检测，不能仅检查 import 就宣布独立 |
+| M17 | `scripts/mediacrawler_login_warmup.py:517 main_async` | 显式检查 `MEDIACRAWLER_DIR.exists()`；删除运行树前须替换该存活辅助入口的依赖检测，不能仅检查 import 就宣布独立（T14 已执行：运行树已删除，warmup 不再检测 fork 目录） |
 
 各站 model/constant/helper、browser launcher/CDP、sign JS、writer/store、条件proxy/cache、下载重试、资源及辅助入口
 均已在详细规格 C 给出确定归属、前置和测试职责。store的投影/下载/JSONL必须迁，registry/DB/GUI待引用断开才删。
@@ -590,7 +594,7 @@ v0.5 仅两份文档同步是历史范围；v0.6/v0.7 补主稿/P00/详细规格
 | G01 | `docs/crawl-architecture.md` | 授权后同步实际新拓扑与包职责；不是预先宣布迁移完成 |
 | G02 | `docs/formal-crawl-contract.md`、`docs/data-persistence.md` | 若需澄清批次提交与中断概括措辞，依据 S12 具体协议和测试审阅 |
 | G03 | `docs/operations-runbook.md`、`docs/platforms/*.md` | 同步真实入口、恢复步骤和平台接缝；不重定义共享规则 |
-| G04 | `docs/mediacrawler-fork-maintenance.md` | 切换前仍是现状维护流程；目标生效同批标为历史/只读或移出当前流程 |
+| G04 | `docs/mediacrawler-fork-maintenance.md` | 切换前仍是现状维护流程；目标生效同批标为历史/只读或移出当前流程（T14 已执行：随 fork 删除，历史从 Git 查询） |
 | G05 | `docs/README.md`、字段覆盖/数据字典 | 按实际受影响链接和职责更新；无字段语义变化不扩改 |
 | G06 | `AGENTS.md`、`config/frozen_files.json` | 仅明确治理授权后按对应变更同步核验；本轮不触碰 |
 | G07 | `docs/platform-adapters.md` | 保留设计/批准/实现状态区分；不以静态审阅冒充验收报告 |
@@ -984,20 +988,20 @@ warcio 主要依赖 six，但默认不验摘要，也不提供头像清理、图
 
 ## S26｜具体复用清单与构件分工
 
-以下区分本地静态调用事实与外部选型推断。现有依赖声明见[根 pyproject](../pyproject.toml)和
-[fork pyproject](../tools/MediaCrawler/pyproject.toml)；v0.3 研究时未运行这些调用，不重新验证“现有可用”的用户基线。
+以下区分本地静态调用事实与外部选型推断；`M/` 路径指 B02 时点 fork 文件，T14 后已不在仓库。现有依赖声明见[根 pyproject](../pyproject.toml)和
+fork 的 `M/pyproject.toml`；v0.3 研究时未运行这些调用，不重新验证“现有可用”的用户基线。
 保留是保留本地既有锁定版本和有效行为，不把 S24 的新 HEAD 写入依赖或 lock。
 
 | 构件 | 已定位本地调用 | 拟保留职责与边界 |
 |---|---|---|
-| xhshow | [XHS playwright_sign.py](../tools/MediaCrawler/media_platform/xhs/playwright_sign.py)：51；[client.py](../tools/MediaCrawler/media_platform/xhs/client.py)：152 | 继续签名接口；不顺带启用实验性会话管理 |
-| HTTPX | [httpx_util.py](../tools/MediaCrawler/tools/httpx_util.py)：6；[XHS client.py](../tools/MediaCrawler/media_platform/xhs/client.py)：191 | 原请求工厂/transport，保留 headers、代理、超时和序列化输入 |
-| Parsel | [知乎 help.py](../tools/MediaCrawler/media_platform/zhihu/help.py)：132、155 | Selector/图片解析；外部 Selector 留在 parser 内 |
-| Pydantic | [m_zhihu.py](../tools/MediaCrawler/model/m_zhihu.py)：25；[help.py](../tools/MediaCrawler/media_platform/zhihu/help.py)：326 | 继续模型校验；项目拥有 schema 的模型可作契约，外部模型不直接当项目 wire |
+| xhshow | XHS playwright_sign.py（`M/media_platform/xhs/playwright_sign.py`）：51；client.py（`M/media_platform/xhs/client.py`）：152 | 继续签名接口；不顺带启用实验性会话管理 |
+| HTTPX | httpx_util.py（`M/tools/httpx_util.py`）：6；XHS client.py（`M/media_platform/xhs/client.py`）：191 | 原请求工厂/transport，保留 headers、代理、超时和序列化输入 |
+| Parsel | 知乎 help.py（`M/media_platform/zhihu/help.py`）：132、155 | Selector/图片解析；外部 Selector 留在 parser 内 |
+| Pydantic | m_zhihu.py（`M/model/m_zhihu.py`）：25；help.py（`M/media_platform/zhihu/help.py`）：326 | 继续模型校验；项目拥有 schema 的模型可作契约，外部模型不直接当项目 wire |
 | Pillow | [image_materialization.py](../src/trippostcollect/artifacts/image_materialization.py)：141、156、160 | 图片打开/verify 与项目错误映射，不自写图片解码器 |
-| Tenacity | [XHS client](../tools/MediaCrawler/media_platform/xhs/client.py)：168；[微博 client](../tools/MediaCrawler/media_platform/weibo/client.py)：104；[知乎 client](../tools/MediaCrawler/media_platform/zhihu/client.py)：90 | 保留各自次数/等待/传播，不叠一层全额重试 |
+| Tenacity | XHS client（`M/media_platform/xhs/client.py`）：168；微博 client（`M/media_platform/weibo/client.py`）：104；知乎 client（`M/media_platform/zhihu/client.py`）：90 | 保留各自次数/等待/传播，不叠一层全额重试 |
 | Playwright | [mediacrawler_crawl.py](../scripts/mediacrawler_crawl.py)：1011 | 原 CfT/浏览器行为、登录和借用能力，不重包全部 API |
-| pyexecjs/execjs | [知乎 help.py](../tools/MediaCrawler/media_platform/zhihu/help.py)：253；[抖音 client.py](../tools/MediaCrawler/media_platform/douyin/client.py)：388 | 既有 JS 桥和资源；抖音所读接入排除 general/search，不外推所有请求 |
+| pyexecjs/execjs | 知乎 help.py（`M/media_platform/zhihu/help.py`）：253；抖音 client.py（`M/media_platform/douyin/client.py`）：388 | 既有 JS 桥和资源；抖音所读接入排除 general/search，不外推所有请求 |
 | 标准库 urllib | [mediacrawler_crawl.py](../scripts/mediacrawler_crawl.py)：4970 | B站 article 原 HTTP 链，不能为统一请求栈改成 HTTPX |
 | Scrapling/Patchright | [ctf_scrapling_preflight.py](../scripts/ctf_scrapling_preflight.py)：217；[ctf_resource_crawl.py](../scripts/ctf_resource_crawl.py)：794 | 既有辅助路径原样保留，不据此称五站正式路径使用它们 |
 | requests/lxml | v0.6专项静态证据：requests属贴吧client；lxml属知乎Parsel与根Scrapling | requests随死支路退出后裁，lxml活跃闭包保留；T12验引用与安装 |
@@ -1068,7 +1072,7 @@ v0.6 将当前状态分层；S24/S25未采用外部候选的历史证据缺口�
 | 缺口 | 已知边界 | 未来关闭位置 |
 |---|---|---|
 | 设计准备 | 本轮补五站十三类闭包与遗漏符号/动态边，差异及复核状态见P00-01–08 | 不再以规格存在宣称无缺口；也不把尚未实现的安装/线上结果前置为文档必备 |
-| 实施时验证 | 动态加载/资源/辅助入口已有归属，迁入后的动态等价及安装尚未运行；旧fork当前仍在用 | T01–T13、V13；全门禁通过且旧轮安全处置后才删 |
+| 实施时验证 | 动态加载/资源/辅助入口已有归属，迁入后的动态等价及安装尚未运行；旧fork当前仍在用（T14 已执行：fork 已删除） | T01–T13、V13；全门禁通过且旧轮安全处置后才删 |
 | 候选许可链 | dataabc 三仓、ZhihuApis 未确认复制授权；R04 缺独立 LICENSE；R15 MIT/README 表述不一致；GPL/第三方切片另核 | 各采用记录；未核清不收编 |
 | Python/版本 | R03/R07/R08/R13/R15 新快照要求 3.12；包声明、开发分支和本地锁不能混为一谈 | 包/切片评审及获准后的安装验证 |
 | 解析与传输 | R06 缺值 helper、R08 models/transport、R13/R14 session/bridge 等未完整核查；v0.3 研究无端点实测 | V15/V16、对应 T 项；不先替换 |

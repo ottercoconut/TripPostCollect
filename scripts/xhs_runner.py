@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from execution_state import FORMAL_STEPS, FrozenExecutionState
+from trippostcollect.core.execution_state import FORMAL_STEPS, FrozenExecutionState
 from trippostcollect.application.failures import classify_attempt, extract_stdout_json
 from trippostcollect.artifacts.image_completion import (
     verify_image_artifacts,

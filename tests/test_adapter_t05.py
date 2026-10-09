@@ -1,4 +1,4 @@
-"""微博固定旧实现与根适配器在相同离线边界上的请求、产物和事件对照。"""
+"""微博根适配器在离线边界上的请求、产物和事件，与 T14 固化的固定旧实现结果对照。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from tenacity import RetryError
 
 from support import legacy_expectations as expectations
 from support.stable_png import solid_png
-from support.weibo_adapter import ROOT, load_baseline, settings
+from support.weibo_adapter import ROOT, settings
 from trippostcollect.application import events
 from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
 from trippostcollect.platforms import entry
@@ -50,7 +50,7 @@ def exception_chain(exc):
     return result
 
 
-async def drive(legacy, directory, monkeypatch, scenario, post_repair):
+async def drive(directory, monkeypatch, scenario, post_repair):
     """只替换网络、浏览器、行为出口和时钟；解析、重试与暂存保留真实实现。"""
     directory.mkdir()
     trace = []
@@ -212,35 +212,19 @@ async def drive(legacy, directory, monkeypatch, scenario, post_repair):
         CRAWLER_TYPE="detail" if scenario == "detail" or scenario.startswith("repair_") else "search",
         WEIBO_SPECIFIED_ID_LIST=["long"],
     )
-    if legacy is not None:
-        from tools.async_file_writer import utils as writer_utils
-        for key, value in vars(options).items():
-            monkeypatch.setattr(legacy.core.config, key, value)
-        monkeypatch.setattr(legacy.core.config, "ENABLE_GET_COMMENTS", False)
-        monkeypatch.setattr(legacy.core.config, "ENABLE_IP_PROXY", False)
-        monkeypatch.setattr(legacy.client, "make_async_client", lambda **kwargs: HTTP())
-        monkeypatch.setattr(legacy.client.WeiboClient.request.retry, "sleep", sleep)
-        monkeypatch.setattr(legacy.client.WeiboClient.get_note_info_by_id.retry, "sleep", sleep)
-        monkeypatch.setattr(legacy.core, "async_playwright", Browser)
-        monkeypatch.setattr(legacy.core, "run_required_human_behavior", behavior)
-        monkeypatch.setattr(legacy.utils, "get_current_timestamp", lambda: 1700000000000)
-        monkeypatch.setattr(writer_utils, "get_current_date", lambda: "2026-09-30")
-        legacy.bridge.install_weibo_browser_detail_fallback()
-        crawler = legacy.core.WeiboCrawler()
-    else:
-        config, ports = entry.weibo_dependencies(options, post_repair=bool(post_repair))
-        ports = replace(
-            ports, client=replace(ports.client, make_async_client=lambda **kwargs: HTTP()),
-            run_required_human_behavior=behavior, current_timestamp=lambda: 1700000000000,
-            store_factory=lambda: JsonlContentStore(AsyncFileWriter(
-                "weibo", config.CRAWLER_TYPE, save_data_path=lambda: str(data_root),
-                current_date=lambda: "2026-09-30",
-            )),
-        )
-        monkeypatch.setattr(core, "async_playwright", Browser)
-        monkeypatch.setattr(client.WeiboClient.request.retry, "sleep", sleep)
-        monkeypatch.setattr(client.WeiboClient._get_note_info_direct.retry, "sleep", sleep)
-        crawler = core.WeiboCrawler(config, ports)
+    config, ports = entry.weibo_dependencies(options, post_repair=bool(post_repair))
+    ports = replace(
+        ports, client=replace(ports.client, make_async_client=lambda **kwargs: HTTP()),
+        run_required_human_behavior=behavior, current_timestamp=lambda: 1700000000000,
+        store_factory=lambda: JsonlContentStore(AsyncFileWriter(
+            "weibo", config.CRAWLER_TYPE, save_data_path=lambda: str(data_root),
+            current_date=lambda: "2026-09-30",
+        )),
+    )
+    monkeypatch.setattr(core, "async_playwright", Browser)
+    monkeypatch.setattr(client.WeiboClient.request.retry, "sleep", sleep)
+    monkeypatch.setattr(client.WeiboClient._get_note_info_direct.retry, "sleep", sleep)
+    crawler = core.WeiboCrawler(config, ports)
     failure = []
     try:
         await crawler.start()
@@ -265,21 +249,6 @@ DRIVE_SCENARIOS = [
     "login_expired", "repair_api", "repair_page", "repair_empty", "repair_navigation", "repair_rate_limit",
 ]
 T14_DRIVE = ("T05", "frozen_implementation")
-T14_DRIVE_SOURCE = "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events"
-
-
-@expectations.legacy_only
-@pytest.mark.asyncio
-@pytest.mark.parametrize("post_repair", [0, 1])
-@pytest.mark.parametrize("scenario", DRIVE_SCENARIOS)
-async def test_frozen_implementation_matches_requests_artifacts_and_events(tmp_path, scenario, post_repair):
-    with pytest.MonkeyPatch.context() as patch:
-        legacy = load_baseline(tmp_path / "baseline", patch)
-        old = await drive(legacy, tmp_path / "old", patch, scenario, post_repair)
-    with pytest.MonkeyPatch.context() as patch:
-        new = await drive(None, tmp_path / "new", patch, scenario, post_repair)
-    assert new == old
-    check_drive_result(new, scenario, post_repair)
 
 
 @pytest.mark.asyncio
@@ -288,32 +257,20 @@ async def test_frozen_implementation_matches_requests_artifacts_and_events(tmp_p
 async def test_root_matches_frozen_legacy_requests_artifacts_and_events(tmp_path, scenario, post_repair):
     """T14：根实现与固化的旧实现结果比较（同一 drive、同一 == 语义），不加载 fork 或 E。"""
     with pytest.MonkeyPatch.context() as patch:
-        new = await drive(None, tmp_path / "new", patch, scenario, post_repair)
+        new = await drive(tmp_path / "new", patch, scenario, post_repair)
     assert expectations.scrub(new, (tmp_path, "<TMP>")) == expectations.load(
         *T14_DRIVE, f"{scenario}-repair{post_repair}")
     check_drive_result(new, scenario, post_repair)
 
 
-@expectations.legacy_guard
-@pytest.mark.asyncio
-@pytest.mark.parametrize("post_repair", [0, 1])
-@pytest.mark.parametrize("scenario", DRIVE_SCENARIOS)
-async def test_t14_guard_frozen_legacy_drive(tmp_path, pytestconfig, scenario, post_repair):
-    with pytest.MonkeyPatch.context() as patch:
-        legacy = load_baseline(tmp_path / "baseline", patch)
-        old = await drive(legacy, tmp_path / "old", patch, scenario, post_repair)
-    expectations.check_legacy(pytestconfig, *T14_DRIVE, f"{scenario}-repair{post_repair}",
-                              expectations.scrub(old, (tmp_path, "<TMP>")), source_test=T14_DRIVE_SOURCE)
-
-
-# 旧桥 fork 工厂与冻结 T05 fixture 的旧侧结果逐字节相同（守卫分别证明），共用一份预期。
+# 旧桥 fork 工厂与冻结 T05 fixture 的旧侧结果逐字节相同（T14 删除 fork 前由守卫分别证明），共用一份预期。
 T14_BRIDGE = T14_DRIVE
 
 
 async def drive_entry_assembly(directory, scenario, post_repair):
     """新 worker 装配路径：install_hooks 读取修复开关后由 load_crawler 无参构造；不加载 fork/E。
 
-    与 test_adapter_t05_bridge.py 中新侧构造逐项相同，只是不再装载 fork 工厂做类型比对。
+    与原 test_adapter_t05_bridge.py（T14-C 随旧桥删除）中新侧构造逐项相同，只是不再装载 fork 工厂做类型比对。
     """
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(entry, "_weibo_post_repair", False)
@@ -330,7 +287,7 @@ async def drive_entry_assembly(directory, scenario, post_repair):
             return instance
 
         patch.setattr(core, "WeiboCrawler", construct)
-        return await drive(None, directory, patch, scenario, post_repair)
+        return await drive(directory, patch, scenario, post_repair)
 
 
 @pytest.mark.asyncio
@@ -397,11 +354,10 @@ def test_dependency_direction():
 
 REPAIR_SCENARIOS = ["empty", "api_error", "navigation", "rate_limit", "no_page"]
 T14_REPAIR = ("T05", "repair_exception_chain")
-T14_REPAIR_SOURCE = "tests/test_adapter_t05.py::test_repair_attempts_and_exception_chain_match_frozen_hook"
 
 
-async def repair_chain(legacy, patch, scenario):
-    """同一 fake 下单次修复请求的尝试轨迹与异常链；legacy 为 None 时只运行根实现。"""
+async def repair_chain(patch, scenario):
+    """同一 fake 下根实现单次修复请求的尝试轨迹与异常链。"""
     trace = []
 
     async def sleep(_):
@@ -447,16 +403,10 @@ async def repair_chain(legacy, patch, scenario):
     page = None if scenario == "no_page" else Page()
     patch.setenv("TRIPPOSTCOLLECT_POST_REPAIR", "1")
     patch.setenv("TRIPPOSTCOLLECT_WEIBO_BROWSER_DETAIL_TIMEOUT_MS", "100")
-    if legacy:
-        patch.setattr(legacy.client, "make_async_client", lambda **kwargs: HTTP())
-        patch.setattr(legacy.client.WeiboClient.get_note_info_by_id.retry, "sleep", sleep)
-        legacy.bridge.install_weibo_browser_detail_fallback()
-        instance = legacy.client.WeiboClient(headers={"Cookie": "SUB=t05"}, playwright_page=page, cookie_dict={})
-    else:
-        ports = entry.weibo_dependencies(settings())[1].client
-        ports = replace(ports, make_async_client=lambda **kwargs: HTTP())
-        patch.setattr(client.WeiboClient._get_note_info_direct.retry, "sleep", sleep)
-        instance = client.WeiboClient(headers={"Cookie": "SUB=t05"}, playwright_page=page, cookie_dict={}, ports=ports, post_repair=True)
+    ports = entry.weibo_dependencies(settings())[1].client
+    ports = replace(ports, make_async_client=lambda **kwargs: HTTP())
+    patch.setattr(client.WeiboClient._get_note_info_direct.retry, "sleep", sleep)
+    instance = client.WeiboClient(headers={"Cookie": "SUB=t05"}, playwright_page=page, cookie_dict={}, ports=ports, post_repair=True)
     with pytest.raises(Exception) as error:
         await instance.get_note_info_by_id("123")
     return trace, exception_chain(error.value)
@@ -473,35 +423,13 @@ def check_repair_chain(new, scenario):
         assert next(row for row in trace if row[0] == "api")[2]["timeout"] == 5000
 
 
-@expectations.legacy_only
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", REPAIR_SCENARIOS)
-async def test_repair_attempts_and_exception_chain_match_frozen_hook(tmp_path, scenario):
-    with pytest.MonkeyPatch.context() as patch:
-        old = await repair_chain(load_baseline(tmp_path / "baseline", patch), patch, scenario)
-    with pytest.MonkeyPatch.context() as patch:
-        new = await repair_chain(None, patch, scenario)
-    assert new == old
-    check_repair_chain(new, scenario)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", REPAIR_SCENARIOS)
 async def test_root_repair_attempts_and_exception_chain_match_frozen_legacy(tmp_path, scenario):
     with pytest.MonkeyPatch.context() as patch:
-        new = await repair_chain(None, patch, scenario)
+        new = await repair_chain(patch, scenario)
     assert expectations.scrub(new, (tmp_path, "<TMP>")) == expectations.load(*T14_REPAIR, scenario)
     check_repair_chain(new, scenario)
-
-
-@expectations.legacy_guard
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", REPAIR_SCENARIOS)
-async def test_t14_guard_frozen_legacy_repair_chain(tmp_path, pytestconfig, scenario):
-    with pytest.MonkeyPatch.context() as patch:
-        old = await repair_chain(load_baseline(tmp_path / "baseline", patch), patch, scenario)
-    expectations.check_legacy(pytestconfig, *T14_REPAIR, scenario, expectations.scrub(old, (tmp_path, "<TMP>")),
-                              source_test=T14_REPAIR_SOURCE)
 
 
 @pytest.mark.parametrize("post_repair", ["0", "1"])

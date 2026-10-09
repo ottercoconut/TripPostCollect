@@ -29,7 +29,7 @@ if str(SCRIPTS) not in sys.path:
 
 mediacrawler_crawl = import_module("mediacrawler_crawl")
 process = import_module("trippostcollect.runtime.process")
-FrozenExecutionState = import_module("execution_state").FrozenExecutionState
+FrozenExecutionState = import_module("trippostcollect.core.execution_state").FrozenExecutionState
 runtime = import_module("trippostcollect.xhs.runtime")
 ProcessIdentity = import_module("trippostcollect.xhs.leases").ProcessIdentity
 xhs_supervision = import_module("trippostcollect.xhs.supervision")

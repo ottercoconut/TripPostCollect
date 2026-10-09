@@ -43,7 +43,7 @@ staging；正式文件只有在根项目复验后才能原子晋升到 `data/med
 | `db/crawl_scheduler.sql` | `crawl_jobs`、`crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates`、`crawl_discovery_candidate_exclusions`、`crawl_attempts`、`crawl_run_reports`、`profile_health_checks`；任务类型包含通用搜索和页面证据 |
 | `db/xhs_control.sql` | `xhs_accounts`、`xhs_account_events`、`xhs_account_leases`、`xhs_runs`、`xhs_discovery_checkpoints`、`xhs_discovery_seen_candidates` |
 
-`trippostcollect.db.bootstrap` 是统一实现。通用 runner、小红书 runner、MediaCrawler 入库和
+`trippostcollect.db.bootstrap` 是统一实现。通用 runner、小红书 runner、结构化平台结果入库和
 CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度任务仍只同步到
 `crawl_jobs`，小红书运行与账号状态写入独立 `xhs_*` 表。手工 `--sync-only` 只用于通用
 调度配置的显式刷新或排查。
@@ -121,10 +121,10 @@ checkpoint、seen 与 campaign 更新。摘要或其 JSONL 缺失时冻结失败
 [运行手册](operations-runbook.md)维护。本文件不重复 Agent 执行清单，只定义数据结构、映射、事务和
 持久化验证。
 
-## MediaCrawler 结果入库
+## 结构化平台结果入库
 
-微博、抖音、知乎等通用结构化结果由 `scripts/mediacrawler_crawl.py` 调用 MediaCrawler 后
-导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定逻辑账号申请互斥租约、创建本轮临时 profile，
+微博、抖音、知乎等通用结构化结果由 `scripts/mediacrawler_crawl.py`（脚本名历史沿用）调用根包平台
+适配器 worker（`trippostcollect.platforms.entry`；B站 article 为进程内分支）后导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定逻辑账号申请互斥租约、创建本轮临时 profile，
 再调用同一底层执行器并在该轮唯一 BrowserContext 中完成人工登录。
 五个平台都在当前登录/签名会话中把权威正文图下载到本轮 staging，原子生成 schema v1
 `image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。只有来源耗尽、
@@ -174,7 +174,7 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 | `web_post_images.local_path` | 根项目复验并晋升后的 `data/media/...` 项目相对路径；正式新记录不能为空 |
 | `web_post_images.width/height/mime_type/sha256` | 根项目重新读取本地文件得到并与 manifest 相等的字节证据 |
 | `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；同 SHA 重复来源写入 `local_file.sha256_duplicate_sources`，不混入头像等非正文对象 |
-| `raw_sample_json` | MediaCrawler 记录经头像清除后的结构化样本；正式记录必须含 `content_detail_status` 和 `content_detail_source` |
+| `raw_sample_json` | 平台适配器结构化记录经头像清除后的样本；正式记录必须含 `content_detail_status` 和 `content_detail_source` |
 
 代码在下载前用五个平台显式投影识别正文图，在导入边界识别其他同类字段差异；内部持久化结构
 统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
@@ -314,7 +314,7 @@ python scripts/import_ctf_captures.py \
 
 ## 常用校验 SQL
 
-查看 MediaCrawler 内容入库量：
+查看结构化平台内容入库量：
 
 ```sql
 SELECT platform_key, COUNT(*) AS posts
@@ -404,7 +404,7 @@ LIMIT 10;
 - flag-like 文本只做格式校验，不在抓取阶段清洗。
 - `skipped=true` 的视频跳过产物只保留为运行证据，不导入 `ctf_captures`，也不生成 `web_posts`。
 
-MediaCrawler 入库采用去重更新：
+结构化平台结果入库采用去重更新：
 
 - 优先用 `(platform_key, platform_post_id)` 匹配旧记录。
 - 没有平台 ID 时用 `(platform_key, canonical_url)` 匹配旧记录。
@@ -440,12 +440,12 @@ B站 2026-08-02 正文完整性事件已经完成回填和清理，当前入库�
 ## 目前边界
 
 - 当前规则禁止视频功能。项目侧 `--get-media` 会直接失败；五平台正式 runner 全部强制
-  `--download-images`，同时保持 MediaCrawler 视频保存关闭，抖音图片路径不会回退到视频或音乐下载。
+  `--download-images`，同时保持平台适配器视频保存关闭，抖音图片路径不会回退到视频或音乐下载。
 - 正式新记录只下载并以 `content` 角色导入显式投影的正文图。头像、作者主页、封面、搜索预览、
   视频、音乐和知乎公式图会在下载前自动忽略，不进入 manifest、`data/media`、项目 JSONL、摘要
   子进程日志或 SQLite；历史未清除产物在恢复读取时也必须先在内存中清除头像数据。非结构化
   stdout/stderr 出现任一已知头像键时整段丢弃为审计标记，不按 URL 域名或路径猜测。
-- 知乎当前是 MediaCrawler 入库路径；页面级产物只作为临时排障证据，不作为默认调度链路。
+- 知乎当前是结构化平台适配器入库路径；页面级产物只作为临时排障证据，不作为默认调度链路。
 - 正式有效性过滤在入库前完成；业务清洗、低质量分级和 flag-like 误报处理仍放在 SQL 视图或下游清洗层。
 - `outputs/` 不是长期图片主存储。结构化内容、作者、互动数、URL、本地路径、状态和摘要应进入
   SQLite；正式正文图片长期保存在 `data/media`，`outputs/` 只保留 manifest、必要日志、报告和

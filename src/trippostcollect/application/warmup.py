@@ -309,7 +309,7 @@ def weibo_desktop_login_completed(initial: dict[str, Any], current: dict[str, An
 
 async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
     platform = PLATFORMS[platform_key]
-    # T14：旧 fork profile 未迁移时拒绝启动，避免在新位置建出空 profile。
+    # T14：迁移中断留下 `.partial` 残留时拒绝启动，避免在其旁边建出空 profile。
     paths.require_platform_session_migrated(platform_key)
     profile_dir = profile_dir_for(platform_key)
     ensure_dir(profile_dir)

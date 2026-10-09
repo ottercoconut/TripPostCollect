@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
-from functools import wraps
 import re
 from typing import Any, Iterable
 from urllib.parse import urlsplit
@@ -232,24 +231,3 @@ def sanitize_export_item(item: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("sanitized MediaCrawler item must remain an object")
     return sanitized
 
-
-def install_export_hook(AsyncFileWriter: Any, method_names: tuple[str, ...]) -> bool:
-    """仅供在途旧桥包裹写出方法；方法名由旧桥传入，返回本次是否首次安装。"""
-    if getattr(AsyncFileWriter, "_trippostcollect_avatar_sanitizer", False):
-        return False
-    for method_name in method_names:
-        original = getattr(AsyncFileWriter, method_name)
-
-        @wraps(original)
-        async def sanitized_writer(
-            self: Any,
-            item: dict[str, Any],
-            item_type: str,
-            *,
-            _original: Any = original,
-        ) -> Any:
-            return await _original(self, sanitize_export_item(item), item_type)
-
-        setattr(AsyncFileWriter, method_name, sanitized_writer)
-    AsyncFileWriter._trippostcollect_avatar_sanitizer = True
-    return True

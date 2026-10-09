@@ -14,22 +14,17 @@ cherry-pick、rebase 和后续修复已经吸收的改动，以最终实现及�
 采集工具的版本整理不应顺带改写历史数据、执行状态、日志或数据备份。确有独立的数据删除需求时，
 应另外明确授权范围和证据处置方式；不要把批量销毁历史副本的工具当作日常整理步骤。
 
-## 两个仓库分别管理
+## 仓库与历史 fork
 
-根仓库与 `tools/MediaCrawler/` 是两个独立 Git 仓库；后者以 submodule 形式被根仓库钉住配套
-提交（gitlink），但根仓库的提交、分支、标签和 bundle 均不包含它的内部历史。修改涉及两者时，
-应分别检查工作区、提交、验证和备份，并在合并或发布记录中写明双方完整提交 SHA。相同分支名
-不能代替提交配对；gitlink 只记录已提交的 HEAD，不覆盖子仓未提交改动。
-
-根仓库远程是 `origin`（`ottercoconut/TripPostCollect`，私有）；MediaCrawler 的 `origin` 是开源
-上游，`fork` 是个人改造备份（`ottercoconut/MediaCrawler`）。本地设置 `remote.pushDefault=fork`
-仅选择默认推送目标，显式指定远程仍可覆盖它。上游同步依照
-[MediaCrawler 维护流程](mediacrawler-fork-maintenance.md)，不向上游 `main` 推送本地改造。
-纯本地参照 `../MediaCrawler-upstream` 是上游只读 clone，不进入任何仓库。
+根仓库远程是 `origin`（`ottercoconut/TripPostCollect`，私有）。T14（#19）起根仓库不再包含
+`tools/MediaCrawler/` 子模块：所需 MediaCrawler 派生代码已收编到 `src/trippostcollect/`，保留原版权头，
+原许可随包资源 `resources/licenses/MediaCrawler-LICENSE` 发布。个人改造备份 `ottercoconut/MediaCrawler`
+只作历史存档，不再随根仓库更新或配对；T14 之前的根提交仍钉住其 gitlink，检出这些历史提交时需另行
+取得对应子模块提交。纯本地参照 `../MediaCrawler-upstream` 是上游只读 clone，仅供对照，不进入任何仓库。
 
 ## 开始与提交
 
-1. 分别检查两个仓库的 `git status --short`、`git branch -vv` 和 `git worktree list`。
+1. 检查 `git status --short`、`git branch -vv` 和 `git worktree list`。
    发现已有未提交改动时，先确认归属；不把它们自动暂存、提交、丢弃或带进无关合并。
 2. 新任务通常从已验证的 `main` 创建任务分支，按主题使用 `docs/...`、`test/...`、`chore/...`、
    `refactor/...` 或 `fix/...`，不要求工具名称前缀。工作区有其他任务的改动且需要
@@ -58,16 +53,40 @@ cherry-pick、rebase 和后续修复已经吸收的改动，以最终实现及�
 文档与 issue 就绪不触发实现或采集，各卡另需实现授权。
 准备与验证证据见 [P00 工作单](platform-adapter-preflight.md)。
 
-## 合并与配套版本
+## 合并与版本
 
 - `main` 保存已验证的集成结果。待合并分支必须与对应 `main` 比较，检查独有提交和最终文件树
   差异，不能仅凭分支名称或提交日期判断已完成。
-- 两仓库的工作区准备好、配套验证通过后，按 MediaCrawler 维护流程先更新 MediaCrawler 的
-  `main`，再更新根仓库的 `main`。快进使用 `git merge --ff-only <分支名>`；出现分叉时先在
+- 工作区准备好、验证通过后再更新 `main`。快进使用 `git merge --ff-only <分支名>`；出现分叉时先在
   集成分支处理并重新验证，不自动创建未经检查的合并。
-- 两仓库均设置本地 `pull.ff=only`，使 `git pull` 遇到分叉时停止；`push.default=simple`
-  使用同名分支推送规则。这些设置位于各自 `.git/config`，不会随 clone 复制，且不代替人工核对。
-- 需要保留发布或回滚版本时，在两仓库分别创建同名的带说明标签，记录双方完整 SHA 和验证结果。
+- 本地设置 `pull.ff=only`，使 `git pull` 遇到分叉时停止；`push.default=simple`
+  使用同名分支推送规则。这些设置位于 `.git/config`，不会随 clone 复制，且不代替人工核对。
+- 拉取或快进会改动冻结资产（`config/frozen_files.json` 登记且本机带不可变标志的文件）时，`git pull`
+  无法替换这些文件，快进会中途停下、工作树只更新一部分。先用
+  `git diff --name-only HEAD..origin/main` 确认要变动的冻结文件，再按以下顺序执行（T14-C 的
+  具体文件与迁移前提见 [运行手册](operations-runbook.md)「拉取 T14 删除批（T14-C）」）：
+  1. 确认没有 runner、worker 或 warmup 在运行；拉取 T14-C 前还须已在 T14-A 版本上按运行手册完成并核对
+     非小红书登录资料迁移，并建议把 `tools/MediaCrawler/browser_data` 另行备份到仓库外。
+  2. 在当前 `main` 上运行 `python scripts/verify_frozen_files.py`，必须通过。
+  3. 只对将被改动的冻结文件解除标志（T14-C 为 `docs/crawl-architecture.md` 与
+     `docs/data-persistence.md`）。macOS 与 Linux 分别为：
+
+     ```bash
+     chflags nouchg \
+       docs/crawl-architecture.md \
+       docs/data-persistence.md
+     sudo chattr -i \
+       docs/crawl-architecture.md \
+       docs/data-persistence.md
+     ```
+
+  4. 确认 `git config --get submodule.recurse` 无输出，再执行 `git pull --ff-only`；不带
+     `--recurse-submodules`。拉取失败时先看 `git status --short`，不用 `reset --hard` 或 `clean` 处理。
+  5. 恢复标志（macOS `chflags uchg`，Linux `sudo chattr +i`，对象同第 3 步），再运行
+     `python scripts/verify_frozen_files.py`，必须通过。
+  6. 不要运行 `git submodule deinit tools/MediaCrawler`：它会删除旧子模块工作树及其中的
+     `browser_data` 备份；拉取后残留的 `tools/MediaCrawler/` 已被 `.gitignore` 忽略。
+- 需要保留发布或回滚版本时，创建带说明标签，记录完整 SHA 和验证结果。
   已使用的标签不移动；后续修复使用新标签。标签只覆盖已提交文件，不包含未提交改动和运行数据。
 
 ## 清理分支
@@ -75,7 +94,7 @@ cherry-pick、rebase 和后续修复已经吸收的改动，以最终实现及�
 只把已完整合入本仓库 `main`、未被任何 worktree 占用的任务分支列为直接删除候选。
 当前分支、`main`、明确保留的长期分支和 `safety/*` 备份分支不自动清理。
 
-清理前，在每个仓库内分别保存引用清单和完整 bundle，并验证 bundle：
+清理前保存引用清单和完整 bundle，并验证 bundle：
 
 ```bash
 branch_backup_dir="$(git rev-parse --absolute-git-dir)/branch-cleanup/$(date +%Y%m%d-%H%M%S)"
@@ -104,11 +123,11 @@ git branch \
 当用户明确要求收敛到单一 `main` 时，应逐分支记录原 SHA、科研用途、对应的整合提交及取舍理由。
 确认有效行为已保留、完整历史已经归档且 bundle 可恢复后，才可使用 `git branch -D <分支名>`
 移除不属于 `main` 祖先的旧引用。未提交改动另外保存补丁与文件原件；bundle 无法替代这份备份。
-结束时验证 `refs/heads` 仅有 `main`、当前检出为 `main`，并检查工作区、冻结资产和配套仓库边界。
+结束时验证 `refs/heads` 仅有 `main`、当前检出为 `main`，并检查工作区和冻结资产。
 
 ## 恢复与备份边界
 
-本次整理的备份位于各自 Git 目录的 `branch-cleanup/<时间>/`，其中 `audit.json` 记录完整分支
+本次整理的备份位于 Git 目录的 `branch-cleanup/<时间>/`，其中 `audit.json` 记录完整分支
 SHA、删除清单、工作区校验结果和本地配置变更；`before-cleanup.bundle` 保存清理前的 Git 历史。
 后续手工清理可使用上面的 `branches-before.txt` 作为引用清单。恢复时，先从对应清单取得完整
 提交 SHA，并确认目标分支名尚不存在：
@@ -127,5 +146,5 @@ git branch \
 分支的 SHA 与记录一致。
 
 bundle 不包含未提交或未跟踪文件、Git 配置、hooks、SQLite、图片和登录态。同一磁盘内的
-`.git/branch-cleanup/` 只用于撤销清理；它不是异地备份。需要机器故障恢复时，应另行保存两个
+`.git/branch-cleanup/` 只用于撤销清理；它不是异地备份。需要机器故障恢复时，应另行保存
 仓库的 Git 备份和必要的业务数据，并按各自数据与秘密管理要求处理。

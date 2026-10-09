@@ -7,14 +7,14 @@
 ## 准备源码和依赖
 
 使用仅含源码的临时副本，包含 src、scripts、tests、config、db、docs、pyproject.toml、
-uv.lock、build_support.py、MANIFEST.in、`.github/workflows/macos-test-lanes.yml`（工作流配置本身受测），
-以及固定版本的 tools/MediaCrawler 源码。不能复制原 data、outputs、temp、
+uv.lock、build_support.py、MANIFEST.in、`.github/workflows/macos-test-lanes.yml`（工作流配置本身受测）。
+T14 起仓库不再含 fork 子模块。不能复制原 data、outputs、temp、
 浏览器状态、.env、凭证、.git、旧虚拟环境或历史审计附件。data/outputs 起初必须为空。
 当前未提交的新测试和支持文件也必须复制；不能只 git archive HEAD 而漏掉本轮修改。
 每个副本按自己的冻结登记核验哈希并恢复不可变标志（macOS `uchg`、Linux `chattr +i`，实现见
 [scripts/ci/frozen_flags.py](../scripts/ci/frozen_flags.py)）；绝不改变原件标志。
 CI 保留不运行测试的 pristine 模板，每个 lane 新建独立源码副本，绝不清理或复用前一轮 data。
-根与 fork 的独立锁定环境放在模板外；每个子进程的 PYTHONPATH 绑定自己的源码副本。
+根锁定环境放在模板外；每个子进程的 PYTHONPATH 绑定自己的源码副本。
 
 根项目 uv.lock 已核实包含 trippostcollect 的 dev extra：pytest、pytest-asyncio、
 pytest-cov、ruff、mypy、pre-commit，以及与 `[build-system]` 同一约束的 setuptools（供测试期离线构建）。项目只支持 Python 3.12；完整安装用根锁文件，
@@ -31,10 +31,8 @@ source .venv/bin/activate
 依赖准备阶段允许联网，测试阶段禁止；不运行浏览器安装或平台登录。
 根入口需要 scrapling[fetchers]。正式 worker 使用根解释器，以
 `sys.executable -P -m trippostcollect.platforms.entry` 启动，cwd 为项目根；
-新入口与五站装配只用根包：配置对象由 `worker_inputs.worker_config()` 提供，不装载 fork 顶层包，
-也不把 fork 或 scripts 插入 `sys.path`。过渡装载模块 `platforms/_fork_bridge.py` 只供旧桥与对照测试
-显式调用，随旧桥在 T14 删除。fork 独立环境使用子模块锁文件，仅用于 CI 的 fork 离线测试；
-本入口只跑根 tests/。fork 测试不能替代根安装验收。
+新入口与五站装配只用根包：配置对象由 `worker_inputs.worker_config()` 提供，不把 scripts 插入 `sys.path`。
+原过渡装载模块 `platforms/_fork_bridge.py`、私有桥与 fork 独立环境已在 T14 删除；本入口只跑根 tests/。
 
 ## 构建与仓库外安装
 
@@ -49,7 +47,7 @@ source .venv/bin/activate
 `trippostcollect.core.paths` 明确失败；源码 checkout 未设置时仍以仓库为根。
 installation lane 的 `tests/test_adapter_t12_install.py` 在副本中用锁定环境的 setuptools 离线构建 sdist 与 wheel
 （并由 sdist 再构建 wheel），在仓库外全新 venv 中解包安装，核对资源字节、全部子模块导入、各正式入口 `--help`
-与 main 逐字相同，以及无 fork 目录时四站选站装配。
+与 main 逐字相同，以及仓库外工作根中的四站选站装配。
 
 ## 运行与结果
 
@@ -94,32 +92,27 @@ Linux 通过不能替代 macOS 证据。
 工作流 [.github/workflows/macos-test-lanes.yml](../.github/workflows/macos-test-lanes.yml)
 使用 GitHub-hosted `macos-26`，Python 3.12 单一版本、`contents: read`，不注入 secrets，
 checkout 不保留认证信息。依赖准备阶段联网；根环境使用 `uv sync --locked --extra dev`，
-所选 submodule 提交用自己的锁文件创建独立 fork 测试环境。所有执行使用临时源码副本，
+这是唯一测试环境。所有执行使用临时源码副本，
 没有私人源码、账号数据库或浏览器 profile。完整安装 lane 检查根 CLI `--help`，并构建 wheel/sdist 做仓库外安装验收。
 根环境选站装配检查（matrix 的 `assembly`）在独立副本中导入 B站正式 article 模块
 （`run_matrix.ROOT_ASSEMBLY_MODULES`）并对四站调用 `trippostcollect.platforms.entry.load_crawler`，
-不调用抓取入口，装载任何 fork 顶层包即失败；上游 B站视频主循环不再导入。
-fork 测试的 PYTHONPATH 包含根 src/scripts 与 fork 自身路径。
-fork 离线 lane 只执行 `run_matrix.FORK_OFFLINE_TESTS` 明确列出的 0 文件、0 个原离线用例：T14-B2 起原 4 文件、
-34 个用例已按台账 target_file 原名原断言移植到 `tests/artifacts/test_staging.py` 与
-`tests/application/test_discovery.py`（component lane，映射见 `tests/fixtures/t14_fork_test_mapping.json`）。
-清单为空时即使 fork gitlink 仍在也不运行 fork lane（`run_matrix.fork_lane_enabled` 与 `card_gate.selected_lanes`
-一致），CI 仍可照常传入 `--fork-python`；清单非空时数量变化、skip、xfail 或失败均不可验收。
+不调用抓取入口，也不得装载原 fork 路径下的任何包；上游 B站视频主循环不再导入。
+原 fork 离线用例已全部移植到根 tests：T14-B2 把最后 4 文件、34 个用例按台账 target_file 原名原断言移植到
+`tests/artifacts/test_staging.py` 与 `tests/application/test_discovery.py`（component lane，映射见
+`tests/fixtures/t14_fork_test_mapping.json`）；T14-C 删除 fork 子模块后没有 gitlink，fork 离线 lane 不再运行，CI 也不再
+准备 fork 环境。
 原浏览器与 CDP 生命周期的 41 个用例已迁入根 `tests/runtime/`，归入 component lane；
 知乎的 3 文件、27 个用例已迁入根 `tests/platforms/zhihu/`，同样归入 component lane。
 进程、信号和 socket 调用均使用替身，不启动真实浏览器或进程。
 微博的 4 个测试文件、24 个用例已迁入根 `tests/platforms/weibo/`，归入 component lane。
 抖音的 4 个测试文件、41 个用例已迁入根 `tests/platforms/douyin/`，归入 component lane。
 小红书的 15 个测试文件已迁入根 `tests/platforms/xhs/`，共 249 个用例，归入 component lane。
-复用现有 pytest、计数插件与执行守卫，使用同一 Seatbelt 无网络/无浏览器策略和临时产物目录。
-计数/守卫模块复制为独立名称，根 tests 不进入 PYTHONPATH；显式指定 fork 的 pyproject.toml、
-rootdir 和 confcutdir，避免根 conftest、support 或 pytest 配置污染。
 CI 显式 setup-node；执行 PATH 保留检测到的 Node 目录、/usr/local/bin 与 /opt/homebrew/bin。
 B站正式 article 的行为仍由根项目测试覆盖，上游 video 主循环不作为替代。
 
 [scripts/ci/run_matrix.py](../scripts/ci/run_matrix.py) 无论前一 lane 成败都运行全部四个 lane，
-任何失败、缺结果、选站装配失败或 fork 离线测试未全过均使 CI 非零。
-执行期 root 三个 lane、选站装配与 fork 离线测试使用 Seatbelt。
+任何失败、缺结果或选站装配失败均使 CI 非零。
+执行期 root 三个 lane 与选站装配使用 Seatbelt。
 OS lane 调用 [scripts/ci/native_macos.py](../scripts/ci/native_macos.py)：每次管理员操作均检查
 GitHub-hosted/macOS/镜像环境标志；优先向已有 Apple wildcard anchor 添加临时 PF 子规则。
 没有 dispatcher 时，只有确认根过滤/NAT规则、anchors、tables、states 全空才加载最小临时
@@ -235,7 +228,7 @@ macos_process；其中真实自发信号也移到 driver。它们计入完整 OS
   以及 issue #2 的 `tests/test_xhs_lease_exit.py` 68 项。
 - `legacy_equivalence: true` 标记依赖冻结旧实现 fixture 的 T05–T10 对照测试。T14 删除这些测试时守护会
   因缺失而失败，必须先补上不依赖旧实现的覆盖再改声明，这是预期行为。
-- CI 中 `run_matrix.py` 在全部 lane 与 fork 离线测试后调用
+- CI 中 `run_matrix.py` 在全部 lane 后调用
   [scripts/ci/coverage_report.py](../scripts/ci/coverage_report.py)，按声明读取各 lane 的 junit，
   写出 `coverage.json`（F×站逐格匹配与通过数、按站×lane 的声明/通过计数、各 lane 总计、每站状态计数）；任一声明 node 缺失、未通过或某 lane 无 junit 都使 CI 非零。报告只含 node 名与计数。
 
@@ -246,8 +239,9 @@ macos_process；其中真实自发信号也移到 driver。它们计入完整 OS
 pytest 只校验已提交的迁移台账产物、由符号 JSON 渲染的 C8 附录，以及当前工作树的输入漂移
 和迁移进度；纯源码副本不需要 `.git`，也不调用 Git 重建基线。
 
-从基线提交逐字节重建符号与输入台账，必须在根 Git 历史完整、且子模块对象库包含
-`docs/adapter-ledger/baseline.json` 登记的 `fork_head` 的 checkout 中执行：
+T14 删除 fork 子模块后台账冻结：`symbols`、`inputs`、`baseline` 不带 `--check` 的生成
+以及 `tests` 收集均拒绝运行，不再从基线提交重建；`--check` 只做不访问 Git 对象库的冻结自检（登记散列、C8 附录由 JSON 逐字节重现、
+规则与冻结行一致），不需要子模块对象库。在仓库 checkout 中执行：
 
 ```bash
 source .venv/bin/activate
@@ -257,9 +251,27 @@ python scripts/dev/adapter_ledger.py drift
 python scripts/dev/adapter_ledger.py progress
 ```
 
-CI 已在“准备纯源码模板与独立锁定环境”之后加入“核对迁移台账”步骤，使用完整历史的
-checkout 和已创建的 root-venv 执行上述四项核对；独立测试 lane 继续在无 Git 的源码副本中运行。
-缺失基线对象时工具报告错误，不自动拉取历史，也不回退为工作树重建。
+CI 在“准备纯源码模板与独立锁定环境”之后的“核对迁移台账”步骤用已创建的 root-venv 执行上述四项核对；
+独立测试 lane 继续在无 Git 的源码副本中运行。
+
+## T14-C 删除批的测试偏离登记
+
+fork、私有桥与过渡模块删除后，依赖它们的对照用例按以下登记处理；固化文件与冻结 fixture 均不改字节。
+
+- [tests/support/fork_removal_deviation.py](../tests/support/fork_removal_deviation.py)：T08/T10/T11 冻结旧源码执行前
+  先核对原字节哈希，再把已删除的 `MEDIACRAWLER_DIR` 从 `core.paths` 导入中移除并按原值预置，把
+  `from execution_state import` 改为 `trippostcollect.core.execution_state` 的同名导入，其余源码逐字执行。
+- `tests/support/platform_session_deviation.py` 的 `xhs_cdp_settings_without_user_data_dir`：T09 小红书场景预期中
+  每条 `cdp_manager` 记录先钉住 `USER_DATA_DIR == "%s_user_data_dir"`，再删除该键后与根实现比较。
+- `tests/test_adapter_t12.py` 的 `T14C_DELETED_LEDGER_NODES` 登记 6 个随删除批消失的台账节点（只测旧导出
+  hook 或 fork 评论脱敏的用例）；台账节点对账总数相应扣除。
+- 台账收口规则新增 fork `tools/trippostcollect_adaptive.py:env_int` → `env_int_reader`：T03 迁入的单次读取包装
+  `worker_inputs.env_int` 只供 fork 旧委托，随删除批删除，根实现统一经零参 `env_int_reader` 读取。
+- `TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL` 已登记到 `adapter_ledger.AUTHORIZED_ENV_REMOVALS`，`drift` 不把它计为
+  意外删除。
+
+本机沙箱脚本（如 Linux 工作副本的 `tpc_pytest.sh`）直接在新 worktree 上运行时没有可写 `data/`，t02/t11/t12
+中约 20 个用例会出现环境性失败；这不是代码回归，正式结论以卡片闸门（临时源码副本）和 CI 为准。
 
 ## 本机卡片闸门：macOS 与 Linux 并行
 
@@ -274,7 +286,11 @@ macOS 为 Seatbelt（[sandbox_macos.py](../scripts/dev/sandbox_macos.py)），Li
 | 禁浏览器与桌面打开器 | process-exec 路径正则 | 名称匹配同一正则的可执行文件/目录与 xdg-open 等被遮蔽，exec 得 EACCES |
 | 只写临时根与 /dev | file-write* require-not | 根只读绑定，写入得 EROFS |
 | 禁读写本机浏览器用户数据 | `~/Library/Application Support` 下 Chrome 目录 | `~/.config` 下 Chrome/Chromium/Chrome for Testing 目录被 000 空目录遮蔽 |
+| 禁读写项目平台登录资料 | checkout 内 `data/runtime/platform_sessions` 与 `tools/MediaCrawler/browser_data` 禁读写 | checkout 内现存的这两个目录被 000 空目录遮蔽 |
 | 冻结副本不可变标志 | `chflags uchg`（所有者可设） | `chattr +i`（需 root，非 root 经 `sudo -n`） |
+
+`tools/MediaCrawler/browser_data` 是 T14 迁移前的旧登录资料位置；fork 删除后，操作人保留的回退备份仍可能
+留在磁盘上（已被 `.gitignore` 忽略），因此沙箱继续禁止测试读写。
 
 Linux 前置条件：安装 `bubblewrap`；Ubuntu 23.10 起默认限制非特权用户命名空间，需为
 `/usr/bin/bwrap` 放行（AppArmor profile 含 `userns,`）；建立测试副本时设置冻结副本 `chattr +i`

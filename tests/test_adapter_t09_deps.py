@@ -203,7 +203,7 @@ def test_crawler_methods_live_in_ledger_target_mixins():
 
 
 def test_old_locations_keep_no_second_implementation():
-    """旧 scripts 位置只能薄转发或重导出，不保留第二份权威定义。"""
+    """旧 scripts 位置只能薄转发或重导出，不保留第二份权威定义；私有桥 E 已在 T14-C 整体删除。"""
     moved = {}
     for row in ledger_rows():
         if (row["file"].startswith("scripts/") and "." not in row["qualname"]
@@ -212,57 +212,16 @@ def test_old_locations_keep_no_second_implementation():
     assert set(moved) == {
         "scripts/mediacrawler_behavior.py", "scripts/mediacrawler_export_entrypoint.py", "scripts/mediacrawler_crawl.py",
     }
+    assert not (ROOT / "scripts/mediacrawler_export_entrypoint.py").exists()
     for relative, names in moved.items():
+        if relative == "scripts/mediacrawler_export_entrypoint.py":
+            continue
         tree = ast.parse((ROOT / relative).read_text())
         definitions = {
             node.name: node for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
         }
-        exempt = REPAIR_FLAG_HOOK if relative == "scripts/mediacrawler_export_entrypoint.py" else None
-        assert not (set(definitions) & names) - {exempt}, (relative, sorted(set(definitions) & names))
-        if exempt is not None:
-            # 与 T05/T06 先例一致：旧桥 hook 只读取开关并在 entry 上置标志，台账保持 pending。
-            assert exempt in definitions
-            check_repair_flag_hook(definitions[exempt])
-
-
-REPAIR_FLAG_HOOK = "install_xhs_repair_resilience"
-
-
-def check_repair_flag_hook(node):
-    """旧桥修复 hook 的形态约束：不含修复逻辑、不替换 crawler 方法、不按模块路径字符串查异常。"""
-    assert isinstance(node, ast.FunctionDef) and not node.args.args and not node.decorator_list
-    readers = set()
-    flag_assignments = 0
-    for child in ast.walk(node):
-        if child is node:
-            continue
-        assert not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
-                                      ast.Import, ast.Await, ast.For, ast.While, ast.With, ast.Try)), ast.dump(child)
-        if isinstance(child, ast.ImportFrom):
-            assert child.module in {"trippostcollect.application.worker_inputs", "trippostcollect.platforms"}
-            if child.module == "trippostcollect.platforms":
-                assert [alias.name for alias in child.names] == ["entry"]
-            else:
-                readers.update(alias.asname or alias.name for alias in child.names)
-        elif isinstance(child, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
-            targets = child.targets if isinstance(child, ast.Assign) else [child.target]
-            assert isinstance(child, ast.Assign) and len(targets) == 1
-            target = targets[0]
-            assert isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
-            assert target.value.id == "entry" and target.attr.startswith("_xhs")
-            assert isinstance(child.value, ast.Constant) and child.value.value is True
-            flag_assignments += 1
-        elif isinstance(child, ast.Call):
-            function = child.func.func if isinstance(child.func, ast.Call) else child.func
-            assert isinstance(function, ast.Name) and function.id in readers, ast.dump(child)
-        elif isinstance(child, ast.Name):
-            assert child.id not in {"sys", "setattr", "gather", "Semaphore", "os"}, child.id
-        elif isinstance(child, ast.Attribute):
-            assert child.attr not in {"modules", "get_specified_notes", "XiaoHongShuCrawler", "__dict__"}, child.attr
-        elif isinstance(child, ast.Constant) and isinstance(child.value, str):
-            assert "media_platform" not in child.value and "xhs_core" not in child.value
-    assert readers and flag_assignments == 1
+        assert not set(definitions) & names, (relative, sorted(set(definitions) & names))
 
 
 def test_formal_xhs_accumulator_publishes_through_worker_event_exit():

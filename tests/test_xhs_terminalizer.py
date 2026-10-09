@@ -35,7 +35,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-execution_state = import_module("execution_state")
+execution_state = import_module("trippostcollect.core.execution_state")
 xhs_runner = import_module("xhs_runner")
 
 

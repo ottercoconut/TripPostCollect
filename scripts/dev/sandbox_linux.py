@@ -31,7 +31,7 @@ OPENERS = ("xdg-open", "sensible-browser", "x-www-browser", "gnome-www-browser",
 SEARCH_ROOTS = ("/opt", "/snap/bin", "/usr/lib", "/usr/local/lib")
 PROFILE_DIRS = (".config/google-chrome", ".config/google-chrome-beta", ".config/google-chrome-unstable",
                 ".config/google-chrome-for-testing", ".config/chromium", ".cache/ms-playwright")
-# 与 sandbox_macos.PROFILE_STORES 一致（测试守护）；fork 下旧 browser_data 随 T14-C 删除。
+# 与 sandbox_macos.PROFILE_STORES 一致（测试守护）；fork 删除后旧 browser_data 备份可能仍在磁盘，继续禁读写。
 PROFILE_STORES = ("data/runtime/platform_sessions", "tools/MediaCrawler/browser_data")
 
 # ---------------------------------------------------------------- seccomp（经典 BPF）

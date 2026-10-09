@@ -6,8 +6,8 @@ B站正式能力只抓取 article/专栏图文。来源耗尽、候选失败、�
 ## 入口
 
 - 正式入口：`crawl_runner.py` 调用 `mediacrawler_crawl.py --platforms bilibili`。
-- 配置仍使用 `job_kind=mediacrawler_search`，实际分派到项目自有 `run_bilibili_article_search()`，
-  不进入第三方视频搜索或历史修复入口。
+- 配置仍使用 `job_kind=mediacrawler_search`（历史沿用的值），实际在中间层进程内分派到项目自有
+  `run_bilibili_article_search()`，不启动 worker，也不进入视频搜索或历史修复入口。
 - 单页 Opus 页面证据不代表 B站正式平台轮次。
 - 发现 checkpoint、seen、人工排除和跨次累计复用通用控制面。
 

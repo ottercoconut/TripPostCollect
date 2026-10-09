@@ -3,7 +3,7 @@
 > 2026-09-28 完成 P00-08 静态复核并补齐全量符号账；设计就绪 D 门禁的静态部分已满足，实施另需授权。
 > 本文中的目标文件、类型和接口尚未实现。主设计保留原则与原研究，本文是目录、接口、读取时点和任务卡的唯一详细定义；
 > 逐符号处置见[附录 C8 全量符号账](platform-adapter-symbol-ledger.md)，执行清单以 GitHub issues 跟踪（见 G）。
-> 当前运行仍遵循[正式契约](formal-crawl-contract.md)。
+> 当前运行仍遵循[正式契约](formal-crawl-contract.md)。T14 已执行（#19）：fork 子模块 `tools/MediaCrawler`、私有桥 E、`platforms/_fork_bridge.py` 与 `scripts/execution_state.py` 过渡模块均已删除；下文 F 事实中的 M/E/ES 路径和行号只作历史锚点，不再对应仓库文件。
 
 ## A｜固定基线与证据口径
 
@@ -95,7 +95,7 @@ src/trippostcollect/
   records/
     formal.py             # C 的字段验证、时间/行投影；不发请求
     sanitization.py       # 已有头像键/重复 URL 清理，唯一清理算法
-    identity.py           # 原 user_hash 的脱敏纯函数
+    identity.py           # 原 user_hash 位置；T14 后只做平台原始用户 ID/昵称类型归一，不哈希、不脱敏
   artifacts/
     formal_images.py      # 原C正式图片复验、晋升、回滚与媒体锁；由collection编排
     jsonl.py              # 净化后 JSONL 追加、锁/日期路径/换行
@@ -125,7 +125,7 @@ bootstrap 可延迟引用实现，平台仅调用注入的 application 端口；
 依赖方向唯一例外 X1：`records/formal.py` 仅在 `TYPE_CHECKING` 下引用 `artifacts.image_materialization.MaterializedImage`，
 运行期不导入 artifacts。`XhsRuntimeSupervisionError` 定义在 `application/contracts.py`，`db/content.py` 与 `xhs/supervision.py`
 均从 contracts 导入，避免 db→xhs 依赖。平台 staging 写出经 `contracts.ImageStager` 端口，不直接 import artifacts。
-`scripts` 保留外部同名薄入口；E 是私有桥，T14 满足后删除，不作为永久兼容层。
+`scripts` 保留外部同名薄入口；E 是私有桥，不作为永久兼容层（T14 已执行：E 已删除）。
 
 ## C｜精确迁移清单
 
@@ -400,7 +400,7 @@ reader不得暗读env/config，也不得把TLS每次建client、Cookie显式刷�
 | XHS pool `headed=true/behavior_profile=xhs_guarded/lease_seconds`正int；CLI account_id必需 | X→租约/child；B | 账号独立scope不入FP，profile路径非Cookie |
 | fork `PLATFORM=xhs/LOGIN_TYPE=qrcode/CRAWLER_TYPE=search/START_PAGE=1` | base_config导入本站config→cmd_arg CLI覆盖→core；I/B/S | worker仅保留父生成参数；不把上游示例关键词/ID设成公共默认 |
 | `LOGIN_TYPE` 实例构造回写与begin读取 | WB/login:48→58–62、DY/login:46→63–67、ZH/login:45→68–72；S/L。XHS/login:136拒绝非qrcode，不走该回写 | 目标登录实例保存原构造输入，begin按同一实例值分流；不保留全局赋值，保持单worker/单登录实例现状与拒绝时点 |
-| `HEADLESS/CDP_HEADLESS/ENABLE_CDP_MODE=false`；`SAVE_LOGIN_STATE=true`，`USER_DATA_DIR=%s_user_data_dir` | CLI headless覆盖前两项→runtime；B/S | 浏览器参数切片；XHS不使用长期profile分支 |
+| `HEADLESS/CDP_HEADLESS/ENABLE_CDP_MODE=false`；`SAVE_LOGIN_STATE=true`，`USER_DATA_DIR=%s_user_data_dir` | CLI headless覆盖前两项→runtime；B/S | 浏览器参数切片；XHS不使用长期profile分支；T14-C 已删除 `USER_DATA_DIR` 配置键，非XHS profile 由 core.paths 定位到 `data/runtime/platform_sessions/<platform>/` |
 | `CDP_DEBUG_PORT=9222/BROWSER_LAUNCH_TIMEOUT=60/CDP_CONNECT_EXISTING=false/AUTO_CLOSE_BROWSER=true` | base_config→CDP/launcher；S/F | 浏览器参数切片；XHS拒接已有浏览器 |
 | `MAX_CONCURRENCY_NUM=1/CRAWLER_MAX_SLEEP_SEC=2/SAVE_DATA_OPTION=jsonl/SAVE_DATA_PATH=''` | 父显式并发1、jsonl、本轮路径；B/L | workflow/writer各取所需，不全塞context |
 | `ENABLE_GET_MEIDAS=false/ENABLE_GET_COMMENTS=true/ENABLE_GET_SUB_COMMENTS=false` | 父覆盖图片布尔、评论false/子评论false；B/L | 保留旧拼写wire；不引入视频模式 |
@@ -476,7 +476,7 @@ env表 `E_` 精确展开为 `TRIPPOSTCOLLECT_`；除特别标记均非秘密、F
 | `E_ZHIHU_INITIAL_SETTLE_SECONDS` core默认0、父8 | C→core，登录settle L |
 | `E_XHS_ACCOUNT_ID/E_XHS_DISCOVERY_TARGET_KEY/E_XHS_DISCOVERY_QUERY_FINGERPRINT` | C→reader，S；账号scope，不合并通用scope |
 | `E_XHS_PROFILE_DIR`正式必需；`E_XHS_RUN_ID`根生成；`E_XHS_WINDOW_SIZE=1450,900` | root/C→session/launcher/BC，B/S/L；最小尺寸校验保持 |
-| `E_XHS_POST_INTERACTION=none/E_XHS_ENRICH_CREATORS=1/E_XHS_KEEP_AUTHOR_DETAIL=1` | root/C→core/store，S/L；一次互动latch、作者详情净化 |
+| `E_XHS_POST_INTERACTION=none/E_XHS_ENRICH_CREATORS=1/E_XHS_KEEP_AUTHOR_DETAIL=1` | root/C→core/store，S/L；一次互动latch、作者详情净化（T14-C 已删除 `E_XHS_KEEP_AUTHOR_DETAIL`：根实现恒保存平台原值，无消费者；已登记 `AUTHORIZED_ENV_REMOVALS`） |
 | `E_XHS_REPAIR=0/1/E_XHS_REPAIR_BATCH_SIZE=5/E_XHS_REPAIR_REPORT_PATH` | C→repair，B/F；batch正数，报告仍清理 |
 | `E_XHS_INITIAL_SETTLE_SECONDS=12/INITIAL_SHELL_TIMEOUT_SECONDS=30/SEARCH_SHELL_TIMEOUT_SECONDS=30/RECOVERY_SHELL_TIMEOUT_SECONDS=60/NAVIGATION_DEADLINE_SECONDS=60`（各补E_XHS_） | settle/navigation父覆盖，三shell值继承operator；各操作L取值，导航至少5秒 |
 | `E_XHS_LOGIN_WAIT_SECONDS=600`，C headed600否则0 | C→惰性manual budget，全轮共享；有限值范围0–600 |
@@ -792,7 +792,7 @@ BC snapshot复验不是完整图片解码/权威整帖/SQLite内容门禁；ACK�
 T00实施起步保存机器可读的**旧node→新node→保护语义→lane→前置卡**台账（目标 `tests/adapter_migration_inventory.json`）。
 旧节点来自固定F/M收集，不以报告缩写或省略号冒充node；拆/合节点登记全部来源与新断言位置。
 每站实现时同时迁测试，F09新增场景按站参数化，不能等旧树删除后再补测试归属。
-`scripts/ci/run_matrix.py:FORK_OFFLINE_TESTS:15/FORK_EXPECTED_TESTS:26` 的32文件417项是旧基线，不能永久跑已删除路径。
+`scripts/ci/run_matrix.py:FORK_OFFLINE_TESTS:15/FORK_EXPECTED_TESTS:26` 的32文件417项是旧基线，不能永久跑已删除路径（T14 已执行：T14-B2 移植剩余离线用例后清单清空，T14-C 删除 fork 后 fork lane 不再运行）。
 T12更新root/worker组、静态导入清单、支持插件/fixture隔离和两版本计数基准；删除旧Bili视频import，新增根article＋五站选站装配验收。
 迁移后的计数由职责台账与实际collect核对，不机械固定417；缺测、空收集、skip/xfail/xpass、导入失败不能冒充通过。
 沿用[testing.md](testing.md)现有pytest/marker/lane/托管OS机制；届时同批更新其原fork引用，不把本轮限制变成项目永久规则。
@@ -808,7 +808,7 @@ T12更新root/worker组、静态导入清单、支持插件/fixture隔离和两�
 | 卡／对应主稿阶段 | 文件与符号、交付产物 | 前置／禁止项 | 检查与删除条件／回退 |
 |---|---|---|---|
 | T00／P00后启动 | 在实施基线重跑C8枚举并解释差异；生成F旧node台账、D CLI/env机器展开；确认C8/X11及退出切片“T00核”项 | P00-01–08复核＋实现授权；不是首次建立迁移闭包，不重跑外部选型 | 对新实施基线逐行/节点核对并解释漂移；只撤回准备补丁，不删源码 |
-| T01／P01 | **根依赖先行**：迁入代码所需包按原 worker 环境精确版本写入根 pyproject/uv.lock，根 venv 成为唯一运行环境；core/resources、paths集中常量；C.ensure_prerequisites/profile_dir_for、W.main_async；JS/LICENSE 包内资源；台账冻结于基线并新增 `progress` 迁移进度 | T00；不读/移真实profile；不升级已锁版本 | F10资源路径/旧接口兼容；`symbols --check`、`inputs --check`、`progress` 无 missing；fork libs 在各站切换读取前与包内资源逐字节相同（测试断言），T06/T07/T09 切换后由 T14 删除；回退资源定位 |
+| T01／P01 | **根依赖先行**：迁入代码所需包按原 worker 环境精确版本写入根 pyproject/uv.lock，根 venv 成为唯一运行环境；core/resources、paths集中常量；C.ensure_prerequisites/profile_dir_for、W.main_async；JS/LICENSE 包内资源；台账冻结于基线并新增 `progress` 迁移进度 | T00；不读/移真实profile；不升级已锁版本 | F10资源路径/旧接口兼容；`symbols --check`、`inputs --check`、`progress` 无 missing；fork libs 在各站切换读取前与包内资源逐字节相同（测试断言），T06/T07/T09 切换后由 T14 删除（T14 已执行）；回退资源定位 |
 | T02／P01 | P/entry、worker_inputs、RT/browser/launcher/worker/process；替换E.main/M.main装配；**worker 改用根解释器 `sys.executable -P -m trippostcollect.platforms.entry`，不再 `uv run`，cwd 为项目根**；分两个 PR：A＝入口/输入/worker/process 及 fork 去 cwd 与退出切片延迟导入，B＝browser/launcher/login_helpers 及 41 个 fork 浏览器测试迁根 | T01；不全注册、不重写关闭 | F06/F10；产物选站启动/清理trace；新轮命令冻结新入口，旧轮仍用旧桥；回退整个选站入口 |
 | T03／P02 | D1–D3输入切片；db/discovery_read、A/candidates；scheduler/XHS scope保持 | T02；不每候选重查、不收紧容错、不全量hash | F01/F09逐读点、0/空、错误集合；产物读点表；所有调用注入后删对应env/config读；单接缝回退 |
 | T04／P02 | records/formal、sanitization出口、artifacts/jsonl/staging/evidence、A/events/failures/policy、RT行为；显式publish接缝 | T03；不将legacy事件默认strict、不改变重试层/分类/冷却 | F02–F05/F07/F09及原failure_classifier/crawl_policy用例；产物wire/事件/IO顺序差分；新出口负例先通过再删hook；出口装配回退 |
@@ -831,6 +831,8 @@ T00 已交付（2026-09-29，基线见 `docs/adapter-ledger/baseline.json`）：
 - 结论：X7 两处 PLATFORMS 对共有平台代号一致（dy/zhihu/wb/bili，W 不含 xhs），可按 T01 合并；X11 `repair_runtime_stop_reason`
   保留并随 T10 迁入 `application/repair.py`，其 2 个测试不改；三站 `IPBlockError`/`ForbiddenError` 与 `recv_sms.py` 在闭包内无引用，确认退出。
 - 后续卡开工前运行 `symbols --check` 与 `inputs --check`；源码改动后先更新规则或迁移结果再提交，不手改 JSON。
+- T14 已执行：fork gitlink 删除后台账冻结，`symbols`、`inputs`、`baseline` 不带 `--check` 的生成以及 `tests` 收集均拒绝运行；
+  `symbols/inputs/baseline --check` 只做不访问 Git 对象库的冻结自检（登记散列、C8 附录由 JSON 逐字节重现、规则与冻结行一致）。
 
 T01/T12确定的资源与安装策略（T）：JS和LICENSE迁入上述resources目录成为单一源码真源，旧地址过渡只委托resource reader，不留手工双份。
 `db/{source_platforms,web_posts,ctf_captures,crawl_scheduler,xhs_control}.sql` 与必要 `docs/formal-crawl-contract.md`
@@ -841,12 +843,13 @@ T01/T12确定的资源与安装策略（T）：JS和LICENSE迁入上述resources
 源码checkout的现有core.paths常量兼容；仓库外入口明确要求工作根（现有TRIPPOST_PROJECT_ROOT），不把site-packages上三级当运行根。
 非XHS通用profile新目标固定为paths集中定义的 `data/runtime/platform_sessions/<platform>/profile` 与同目录 `trippostcollect_cookie_snapshot.json`（沿用现名，不改文件名）；
 T14在旧轮结束且独占资源后按清单迁移/校验，再切新轮；XHS仍 `XHS_SESSION_ROOT` 每轮空session，不迁持久登录态。
+T14 已执行：T14-A 起运行期只读写 `platform_sessions`，删除批只去掉“旧 fork 目录存在而新目录不存在”的对照检查，`.partial` 残留检查保留（错误码仍为 `platform_session_migration_required`）；旧目录处置见[运维手册](operations-runbook.md)。
 历史媒体/manifest相对路径不改；`FONT_PATH/STOP_WORDS_FILE`只属关闭词云，字体/词云文件不列运行安装资源。
 依赖与解释器前移（2026-09-29 用户确认）：T01 把迁入代码的直接依赖按原 worker 环境精确版本写入根 pyproject/uv.lock，根 venv 成为唯一运行环境；T02 起 worker 用根解释器运行新入口，禁PYTHONPATH/cwd伪补齐。上游 DB/GUI/词云等退出切片的依赖不进入根。
 T02 过渡装载（2026-09-29 用户确认）：未迁站仍是 fork 顶层包，`platforms/_fork_bridge.py` 是唯一把 fork 目录与 `scripts/` 显式插入 `sys.path` 的位置，
-worker 以 `-P` 启动使 cwd 不入路径；fork 子模块同批去除 cwd 相对路径（JS/stealth 经 core.resources，profile/temp_image 经 core.paths 取与原位置一致的绝对路径），
+worker 以 `-P` 启动使 cwd 不入路径；fork 子模块同批去除 cwd 相对路径（JS/stealth 经 core.resources，profile/temp_image 经 core.paths 取与原位置一致的绝对路径；T14 后 profile 只在 `platform_sessions`，滑块临时图在 `data/runtime/douyin_slider_images`），
 并把 store/var/proxy/词云对 sqlalchemy、aiomysql、motor、redis、jieba、matplotlib、wordcloud 的顶层导入改为用到时导入（不删代码、不改分支）。
-`execution_state` 前移至 `core/execution_state.py`（原属 T04），避免 runtime/process 反向导入 scripts。各站迁完且 E 删除后于 T12/T14 删除该过渡模块。
+`execution_state` 前移至 `core/execution_state.py`（原属 T04），避免 runtime/process 反向导入 scripts。各站迁完且 E 删除后于 T12/T14 删除该过渡模块（T14 已执行：`scripts/execution_state.py` 与 `_fork_bridge.py` 已删除）。
 根已有Scrapling/Patchright辅助依赖保留；Node/execjs校验保留。所有收编保留版权头、原许可、固定SHA及变更标识。
 
 | 门禁 | 必需证据 | 本轮状态 |

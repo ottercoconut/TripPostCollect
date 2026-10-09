@@ -19,7 +19,6 @@ from pathlib import Path
 
 import pytest
 
-from support import legacy_expectations as expectations
 from support.platform_sessions import child_redirect_source
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,7 +30,6 @@ GOLDEN = ROOT / "tests" / "golden"
 COMMANDS = json.loads((GOLDEN / "t02_worker_commands.json").read_text(encoding="utf-8"))
 CONFIG = json.loads((GOLDEN / "t02_worker_config.json").read_text(encoding="utf-8"))
 SCENARIOS = sorted(COMMANDS)
-FORK = ROOT / "tools" / "MediaCrawler"
 ENTRY_MODULE = "trippostcollect.platforms.entry"
 # 退出切片依赖：根环境不安装，四站与入口导入链不得触及。
 EXIT_SLICE_MODULES = ("redis", "sqlalchemy", "aiomysql", "motor", "jieba", "matplotlib", "wordcloud", "typer")
@@ -128,6 +126,8 @@ T12_REMOVED_ENV = {
     "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE", "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED",
     "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
 }
+# T14-C：唯一消费者 fork 旧 store 随 fork 删除，父侧不再发出（ledger.AUTHORIZED_ENV_REMOVALS 同步登记）。
+T14C_REMOVED_ENV = {"TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL"}
 
 
 def test_child_command_switches_only_interpreter_entry_and_cwd(
@@ -143,8 +143,9 @@ def test_child_command_switches_only_interpreter_entry_and_cwd(
         assert new[name]["cwd"] == "<ROOT>", name
         for key in ("timeout", "startup_grace_seconds", "network_diagnostics_path"):
             assert new[name][key] == old[key], (name, key)
-        # T12：规格 D2 授权删除父发无消费者的 6 个 env，其余键值不变。
-        expected_env = {key: value for key, value in old["extra_env"].items() if key not in T12_REMOVED_ENV}
+        # T12：规格 D2 授权删除父发无消费者的 6 个 env；T14-C 再删 1 个，其余键值不变。
+        expected_env = {key: value for key, value in old["extra_env"].items()
+                        if key not in T12_REMOVED_ENV | T14C_REMOVED_ENV}
         assert new[name]["extra_env"] == expected_env, name
 
 
@@ -443,57 +444,7 @@ def test_run_bounds_cleanup_time(capsys: pytest.CaptureFixture[str]) -> None:
     assert "[Main] Cleanup timeout (0.05s)" in capsys.readouterr().out
 
 
-# ---------- fork 不依赖 cwd ----------
-
-FORK_LIVE_SOURCES = (
-    "media_platform/weibo", "media_platform/douyin", "media_platform/zhihu", "media_platform/xhs",
-    "tools", "store/weibo", "store/douyin", "store/zhihu", "store/xhs",
-)
-
-
-@expectations.legacy_only
-def test_fork_live_sources_have_no_cwd_relative_paths() -> None:
-    offenders = []
-    for relative in FORK_LIVE_SOURCES:
-        for path in sorted((FORK / relative).rglob("*.py")):
-            text = path.read_text(encoding="utf-8")
-            for needle in ("os.getcwd()", "Path.cwd()", "\"libs/", "'libs/", "Path(\"data\")", "\"data/{"):
-                if needle in text:
-                    offenders.append(f"{path.relative_to(FORK)}: {needle}")
-    assert offenders == []
-
-
-@expectations.legacy_only
-@pytest.mark.installation
-def test_fork_signature_js_loads_from_any_cwd(tmp_path: Path) -> None:
-    # 真实编译包内 JS（需 Node），不发请求；两站签名均须在非 fork cwd 下得到非空结果
-    probe = (
-        "import json\n"
-        # T12：新入口不再装载 fork；旧桥签名模块经过渡装载点显式加载。
-        "from trippostcollect.platforms import _fork_bridge\n"
-        "_fork_bridge.install()\n"
-        "from media_platform.zhihu import help as zhihu_help\n"
-        "from media_platform.douyin import help as douyin_help\n"
-        "zhihu = zhihu_help.sign('/api/v4/search_v3?q=test', 'd_c0=AAAA')\n"
-        "print(json.dumps({'zhihu': sorted(zhihu), 'douyin': bool(douyin_help.douyin_sign_obj)}))\n"
-    )
-    report = _json_tail(_run_python(probe, cwd=tmp_path, timeout=180))
-    assert report["douyin"] is True
-    assert report["zhihu"] == ["x-zse-96", "x-zst-81"]
-
-
 # ---------- 迁移进度 ----------
-
-# 旧桥在旧轮结束前保留（T14 删），浏览器/二维码运行时在 T02 第二个 PR 迁入
-T02_PENDING_ALLOWED = {
-    "tools/MediaCrawler/cmd_arg/arg.py",
-    "tools/MediaCrawler/main.py",
-    "scripts/mediacrawler_export_entrypoint.py",
-    "tools/MediaCrawler/tools/browser_launcher.py",
-    "tools/MediaCrawler/tools/cdp_browser.py",
-    "tools/MediaCrawler/tools/crawler_util.py",
-}
-
 
 def test_t02_first_batch_definitions_are_moved() -> None:
     ledger = import_module("adapter_ledger")
@@ -501,11 +452,9 @@ def test_t02_first_batch_definitions_are_moved() -> None:
     assert report["missing"] == []
     rows = [row for row in report["rows"] if row["card"] == "T02"]
     assert len(rows) == 81
-    not_moved = sorted(
-        (row["file"], row["qualname"]) for row in rows
-        if row["state"] != "moved" and row["file"] not in T02_PENDING_ALLOWED
-    )
-    assert not_moved == []
+    # T14-C 删除 fork 与旧桥后不再有 pending：每行都已迁入（moved）或随旧桥退出（exited）。
+    unresolved = sorted((row["file"], row["qualname"]) for row in rows if row["state"] not in {"moved", "exited"})
+    assert unresolved == []
 
 
 def test_inputs_still_match_baseline() -> None:

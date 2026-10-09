@@ -5,7 +5,8 @@ offset/search ID、详情和严格图文资产差异。
 
 ## 入口与字段
 
-- 正式入口：`crawl_runner.py` 调用 MediaCrawler 抖音搜索。
+- 正式入口：`crawl_runner.py` 经 `mediacrawler_crawl.py` 启动根包 worker（`trippostcollect.platforms.entry`）
+  执行抖音搜索，实现位于 `src/trippostcollect/platforms/douyin/`。
 - 登录后先进入本轮关键词页，再执行共享行为阶段并刷新 API Cookie。
 - 只接受图文作品；视频计入已处理候选但不进入内容或媒体下载。
 - 正文只接受 aweme 详情非空 `desc`，保存

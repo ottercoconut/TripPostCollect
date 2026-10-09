@@ -33,7 +33,7 @@ from trippostcollect.scheduler.discovery import (
     query_fingerprint,
     update_campaign,
 )
-from execution_state import FrozenExecutionState
+from trippostcollect.core.execution_state import FrozenExecutionState
 from trippostcollect.application.failures import classify_attempt, extract_stdout_json
 from trippostcollect.runtime.process import (
     PROCESS_CLEANUP_GRACE_SECONDS,

@@ -17,7 +17,7 @@ config/crawl_targets.json
       -> scripts/mediacrawler_crawl.py
           -> scripts/crawl_policy.py
           -> scripts/mediacrawler_behavior.py
-          -> tools/MediaCrawler 或项目自有 B站 article 分支
+          -> 根包 worker `python -m trippostcollect.platforms.entry`（微博、抖音、知乎）或进程内 B站 article 分支
           -> 共享头像清除器（失败关闭）
           -> 共享标题/正文投影与主题相关性分类（只读最终 web_posts.title、content_text + 实际关键词）
           -> JSONL + image_manifest.jsonl + staging 图片
@@ -145,10 +145,10 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 | 平台 | 平台层入口 | 独有组件 | 文档 |
 |---|---|---|---|
 | B站 article | 项目自有 article 搜索/详情分支 | article API、详情正文门禁 | [B站](platforms/bilibili.md) |
-| 微博 | MediaCrawler 搜索 | 移动端登录与长文详情 | [微博](platforms/weibo.md) |
-| 抖音 | MediaCrawler 搜索 | 浏览器响应监听、offset/search ID | [抖音](platforms/douyin.md) |
-| 知乎 | MediaCrawler 搜索 | answer/article 详情、zhimg 资产键 | [知乎](platforms/zhihu.md) |
-| 小红书 | 独立 runner + MediaCrawler | 逻辑账号租约、轮内扫码、标签页保护 | [小红书](platforms/xhs.md) |
+| 微博 | 根包平台适配器搜索 | 移动端登录与长文详情 | [微博](platforms/weibo.md) |
+| 抖音 | 根包平台适配器搜索 | 浏览器响应监听、offset/search ID | [抖音](platforms/douyin.md) |
+| 知乎 | 根包平台适配器搜索 | answer/article 详情、zhimg 资产键 | [知乎](platforms/zhihu.md) |
+| 小红书 | 独立 runner + 根包平台适配器 | 逻辑账号租约、轮内扫码、标签页保护 | [小红书](platforms/xhs.md) |
 
 平台层产出统一 JSONL、分页事件和图片 manifest，根项目使用同一正式校验和持久化层，避免五套长期
 路径、事务或完成判据。
@@ -165,7 +165,8 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 
 - `login_warmup.py`：验证或刷新 B站、微博、抖音和知乎登录态。
 - `xhs_accounts.py`：管理小红书逻辑槽位、精确租约和孤儿租约恢复；平台登录只在正式 runner 轮内完成。
-- `mediacrawler_login_warmup.py`：通用登录入口调用的平台实现。
+- `mediacrawler_login_warmup.py`：通用登录入口调用的平台实现（脚本名历史沿用），登录资料位于
+  `data/runtime/platform_sessions/<platform>/`。
 - `info_collection_benchmark.py`：通用平台诊断和容量评估，不是正式完成证据。
 
 辅助入口不创建完整正式阶段，不能替代 runner。

@@ -127,6 +127,8 @@ def test_progress_reports_every_baseline_row() -> None:
     assert set(report["counts"]) <= {"pending", "moved", "exited", "missing"}
     assert sum(report["counts"].values()) == 1234
     assert report["missing"] == []
+    # T14-C 删除 fork、私有桥 E 与过渡模块后迁移收口：不再有 pending 行。
+    assert report["counts"].get("pending", 0) == 0
 
 
 def test_progress_detects_moved_definition() -> None:
@@ -137,7 +139,8 @@ def test_progress_detects_moved_definition() -> None:
 
 def test_inputs_are_unchanged_during_migration() -> None:
     # CLI 参数与默认值、env 名称在迁移全程必须与基线一致；
-    # 唯一例外是规格 D2 授权删除的 6 个父发名字（ledger.AUTHORIZED_ENV_REMOVALS），已在漂移计算中排除。
+    # 唯一例外是规格 D2 授权删除的 6 个父发名字与 T14-C 删除的 XHS_KEEP_AUTHOR_DETAIL
+    # （ledger.AUTHORIZED_ENV_REMOVALS），已在漂移计算中排除。
     report = ledger.build_input_drift(ROOT)
     assert set(report) == {"cli_changed", "env_added", "env_removed"}
     assert report["cli_changed"] == {}

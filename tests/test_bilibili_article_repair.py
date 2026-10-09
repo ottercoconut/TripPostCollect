@@ -1034,11 +1034,11 @@ def test_optimistic_lock_conflict_does_not_overwrite(monkeypatch, tmp_path: Path
     assert row == ("并发修改", "import")
 
 
-def test_apply_refuses_unmigrated_legacy_profile_before_reading_snapshot(
+def test_apply_refuses_partial_migration_residue_before_reading_snapshot(
     tmp_path: Path, monkeypatch, isolated_platform_sessions,
 ) -> None:
-    # T14：未迁移时不能读到新位置的空快照后误报 login_required；失败关闭且不写状态库。
-    (isolated_platform_sessions.legacy / "bili_user_data_dir").mkdir(parents=True)
+    # T14：迁移中断留下 `.partial` 时不能读到新位置的空快照后误报 login_required；失败关闭且不写状态库。
+    (isolated_platform_sessions.sessions / "bilibili" / "profile.partial").mkdir(parents=True)
     target = tmp_path / "target.sqlite"
     create_target(target)
     baseline = repair.sha256_file(target)

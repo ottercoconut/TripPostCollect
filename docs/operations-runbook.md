@@ -87,18 +87,16 @@ exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中
 - 强杀兜底后的残留核对与清理：先确认没有仍在运行的通用 runner、executor、worker 或 warmup（复用迁移
   第 1 步的进程模式，但不加 `-l`，不打印完整命令行），再只读列出使用项目登录资料目录的 Chrome PID。
   Chrome 收到的 `--user-data-dir` 是 `core.paths` 解析出的物理绝对路径，所以匹配时用 `$(pwd -P)`，
-  不用可能含符号链接的 `$PWD`。T14 迁移后 profile 位于
-  `data/runtime/platform_sessions/<platform>/`（`cdp_profile`，共享 profile 时为 `profile`）；迁移前的旧位置
-  `tools/MediaCrawler/browser_data/`（`cdp_<平台>_user_data_dir`，共享时无 `cdp_` 前缀）并列核对，该旧路径
-  一项在 T14-C 删除 fork 后移除：
+  不用可能含符号链接的 `$PWD`。profile 位于
+  `data/runtime/platform_sessions/<platform>/`（`cdp_profile`，共享 profile 时为 `profile`）。T14 删除 fork 后
+  没有进程再使用旧 `tools/MediaCrawler/browser_data/`；该旧备份目录可能仍在磁盘上，不要用于运行：
 
   ```bash
   pgrep -f "crawl_runner.py|mediacrawler_crawl.py|trippostcollect.platforms.entry|login_warmup.py"
   pgrep -f -- "--user-data-dir=$(pwd -P)/data/runtime/platform_sessions/"
-  pgrep -f -- "--user-data-dir=$(pwd -P)/tools/MediaCrawler/browser_data/"
   ```
 
-  第一条无输出时才清理后两条列出的 PID：先 `kill -TERM <pid>...`，等待数秒（例如 `sleep 5`）后用同样的
+  第一条无输出时才清理第二条列出的 PID：先 `kill -TERM <pid>...`，等待数秒（例如 `sleep 5`）后用同样的
   `pgrep` 复核，确认仍有残留才 `kill -KILL <pid>...`。小红书临时 profile 不在这些目录，按其平台文档处理，不用此命令。
 - 派发：首信号后排队 job 不再派发，不租约、不写 attempt、不启动 child，`crawl_jobs.status` 保持原值
   （通常为 `pending`），仅 execution state 写成中断终态、run_summary 记录为 `retry_wait`。已派发 job 若
@@ -207,7 +205,7 @@ python scripts/repair_post_details.py \
 `--max-items N` 用于小批试跑，`--post-id ID` 用于精确重试。详情或图片候选失败只留下该旧记录继续
 待修复，成功子集可以入库；运行级阻断（登录、验证码、频控、安全或策略、浏览器整体失败、运行权限
 或行为证据失败）以及 SQLite、媒体持久化一致性失败会停止后续批次。
-`--timeout-per-batch` 是传给 MediaCrawler 的基础平台预算；修复总控会在此基础上额外保留正式抓取同款
+`--timeout-per-batch` 是传给平台 worker 的基础平台预算；修复总控会在此基础上额外保留正式抓取同款
 `HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS` 行为预算（当前 240 秒），并对整个进程组执行先 `SIGTERM`、
 后 `SIGKILL` 的收束。这样浏览器行为预算不会被父进程过早截断；微博等慢平台可显式提高该参数，
 例如 `--timeout-per-batch 1800`，但不得绕过批次、备份和状态门禁。
@@ -385,8 +383,10 @@ python scripts/login_warmup.py \
 四个通用平台的持久 profile 位于 `data/runtime/platform_sessions/<platform>/profile`（`<platform>` 为
 `bilibili`、`weibo`、`douyin`、`zhihu`），Cookie 快照位于同级的
 `data/runtime/platform_sessions/<platform>/trippostcollect_cookie_snapshot.json`，权限 `0600`；位置只由
-`trippostcollect.core.paths` 定义。旧版放在 `tools/MediaCrawler/browser_data/` 下的 profile 需按下一节迁移，
-未迁移时 warmup、`crawl_runner.py` 与 worker 均以 `platform_session_migration_required:<platform>` 拒绝启动。
+`trippostcollect.core.paths` 定义。旧版放在 `tools/MediaCrawler/browser_data/` 下的 profile 需在首次运行前按
+下一节迁移；运行期不再检测旧目录，未迁移时会在新位置创建空 profile，需要重新人工登录。新位置残留
+迁移中断留下的 `profile.partial`/`cdp_profile.partial` 时，warmup、`crawl_runner.py` 与 worker 仍以
+`platform_session_migration_required:<platform>` 拒绝启动。
 
 微博必须在桌面 SSO 页完成人工登录，再回到移动端刷新 Cookie；最终只有移动接口同时返回
 `login=true` 和有效 `uid` 才成功。`WBPSESS` 不能单独作为成功证据。
@@ -477,12 +477,14 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
 | 任一平台 | `<code>_user_data_dir/trippostcollect_cookie_snapshot.json`（复制，旧文件保留） | `<platform>/trippostcollect_cookie_snapshot.json` |
 
 `cdp_` 前缀目录只在 CDP 模式且未声明共享 profile 时使用；正式知乎 CDP 共享普通 profile，微博和抖音
-不开 CDP，所以正式轮次只用普通 profile。旧 `cdp_` 目录若存在也要按表迁移，否则同样被失败关闭检查拒绝。
+不开 CDP，所以正式轮次只用普通 profile。旧 `cdp_` 目录若存在也要按表迁移。
 小红书仍每轮在 `data/runtime/xhs/sessions/` 创建空 session，不在本迁移范围内，也不得迁入任何旧小红书目录。
 
-运行期检查在两种情况下拒绝启动：旧目录存在且对应新目录不存在；或新位置留有未完成复制的
-`profile.partial`/`cdp_profile.partial`。两者都不存在时按首登流程创建新目录，新目录已存在且无残留时
-直接使用新目录，不会回退读取旧目录。以下命令在 macOS 项目根执行，全程不打印 Cookie 内容。第 2、3 步
+T14-A 曾在运行期对“旧目录存在而新目录不存在”和新位置残留 `profile.partial`/`cdp_profile.partial` 两种情况
+失败关闭。T14 删除批移除了旧目录对照检查，只保留 `.partial` 残留检查（错误码仍为
+`platform_session_migration_required`）。运行期只读写新位置：新 profile 不存在时按首登流程创建空目录，
+不会回退读取旧目录，也不会提示未迁移，所以必须在首次运行 warmup 或正式 runner 之前完成本节；
+若迁移前已生成空的新 profile，第 2 步会因目标已存在而跳过，须先由操作人确认并删除该新 profile 再迁移。以下命令在 macOS 项目根执行，全程不打印 Cookie 内容。第 2、3 步
 依赖 bash 语法（进程替换、`read -d ''`），已用 `bash <<'SH' … SH` 包裹，在 macOS 默认的 zsh 中也直接
 整段粘贴执行。
 
@@ -516,7 +518,8 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
      显式 `[ -e 目标 ]` 判断后跳过，不调用 `cp`（不用 `cp -n`，因为它静默跳过且不报错）。
    - 落地顺序：两类 profile 的 `.partial` 与快照全部准备成功、快照先落地，最后才把 `profile.partial`
      改名为 `profile`。新 `profile` 出现是唯一的“提交点”：之前任何一步失败时 `profile` 都不存在
-     （运行期检查因旧目录仍在或 `.partial` 残留而拒绝启动）；若反过来先落地 profile、后复制快照失败，
+     （有 `.partial` 残留时运行期拒绝启动；尚未生成 `.partial` 时运行期会以空 profile 首登，因此失败后先修复
+     并重跑第 2 步，再运行 warmup 或 runner）；若反过来先落地 profile、后复制快照失败，
      运行期会接受一个没有快照的新 profile，因此不采用该顺序。
    - 普通 profile 与 `cdp_` profile 各自独立判断，只有 `cdp_` 旧目录时也会迁移。
 
@@ -805,8 +808,9 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
    ```
 
    在 `outputs/login_warmup/<run_id>/summary.md` 中确认每个 target 为 `ok`，profile 列为
-   `data/runtime/platform_sessions/<platform>/profile`。出现 `platform_session_migration_required` 说明该平台
-   旧目录仍未迁到新位置，回到第 2 步。
+   `data/runtime/platform_sessions/<platform>/profile`。若某平台要求重新人工登录，说明新 profile 不含旧登录
+   资料（未迁移，或迁移前已生成空 profile），停止该平台并回到第 2 步核对。出现
+   `platform_session_migration_required` 说明新位置残留迁移中断的 `.partial`，删除新侧残留后重做第 2 步。
 
 5. 用通用 dry-run 核对冻结计划仍可生成；dry-run 不启动 worker，计划命令是 executor 调用：
 
@@ -830,9 +834,88 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
    PY
    ```
 
-6. 旧目录 `tools/MediaCrawler/browser_data/` 保留为备份，新代码不再读取。旧目录中的快照与 profile 一起
-   作为回退备份（回退本批时旧代码仍从这里读取），只有在 T14 删除批合并且迁移后首个正式轮成功后，才与
-   profile 一起删除；删除前再次执行第 1 步的进程检查。
+6. 旧目录 `tools/MediaCrawler/browser_data/` 保留为备份，新代码不再读取，也不要用于运行。T14 删除批已合并，
+   fork 子模块不再受 Git 跟踪；拉取后若旧 fork 工作树（含 `browser_data`）仍在磁盘，`.gitignore` 已忽略
+   `/tools/MediaCrawler/`，它仅作回退备份。旧目录中的
+   快照与 profile 一起作为回退备份（回退到 T14 之前的代码时旧代码仍从这里读取）；迁移后各平台首个正式轮
+   成功后，由操作人删除整个旧 `tools/MediaCrawler/` 目录；删除前再次执行第 1 步的进程检查。
+
+### 拉取 T14 删除批（T14-C）
+
+前提：先在 T14-A 版本（仍含 fork gitlink 的 `main`）上按第 1–5 步完成迁移并核对通过，再拉取 T14-C。
+T14-C 同批改动了冻结资产 `docs/crawl-architecture.md` 与 `docs/data-persistence.md`（并更新登记哈希）；本机
+这两份文件带不可变标志（macOS `uchg`，Linux `chattr +i`）时，`git pull` 无法替换它们，fast-forward 会中途
+停下、工作树只更新一部分。按下列顺序执行，不要跳步：
+
+1. 确认没有 runner、executor、worker 或 warmup 在运行（命令应无输出），并确认第 1–5 步已在 T14-A 版本上
+   完成并核对。建议另把旧 profile 备份到仓库外（含登录态，目标目录只允许本人读写，不得放进仓库或同步盘）：
+
+   ```bash
+   pgrep -fl "crawl_runner.py|xhs_runner.py|mediacrawler_crawl.py|trippostcollect.platforms.entry|login_warmup.py"
+   mkdir -m 700 /仓库外绝对路径/tpc-browser-data-backup
+   ditto \
+     tools/MediaCrawler/browser_data \
+     /仓库外绝对路径/tpc-browser-data-backup/browser_data
+   ```
+
+   Linux 没有 `ditto`，用 `cp -a` 代替。
+
+2. 在当前 `main`（拉取前）验证冻结资产，必须通过：
+
+   ```bash
+   source .venv/bin/activate
+   python scripts/verify_frozen_files.py
+   ```
+
+3. 只对这两份文件解除不可变标志。macOS：
+
+   ```bash
+   chflags nouchg \
+     docs/crawl-architecture.md \
+     docs/data-persistence.md
+   ```
+
+   Linux：
+
+   ```bash
+   sudo chattr -i \
+     docs/crawl-architecture.md \
+     docs/data-persistence.md
+   ```
+
+4. 确认未设置 `submodule.recurse`（应无输出；若输出 `true`，先移除该设置再拉取），然后只做快进拉取，
+   不带 `--recurse-submodules`：
+
+   ```bash
+   git config --get submodule.recurse
+   git pull --ff-only
+   ```
+
+   拉取若报错停下，先看 `git status --short`，不要用 `reset --hard`、`clean` 或 `checkout -- .` 处理，
+   把输出交人工确认。
+
+5. 恢复不可变标志并重新验证，必须通过。macOS：
+
+   ```bash
+   chflags uchg \
+     docs/crawl-architecture.md \
+     docs/data-persistence.md
+   source .venv/bin/activate
+   python scripts/verify_frozen_files.py
+   ```
+
+   Linux：
+
+   ```bash
+   sudo chattr +i \
+     docs/crawl-architecture.md \
+     docs/data-persistence.md
+   source .venv/bin/activate
+   python scripts/verify_frozen_files.py
+   ```
+
+6. 不要运行 `git submodule deinit tools/MediaCrawler`：它会删除旧子模块工作树及其中的 `browser_data`
+   备份。拉取后留在磁盘上的 `tools/MediaCrawler/` 已被 `.gitignore` 忽略，按上文第 6 步保留和删除。
 
 ## 浏览器与行为证据
 
@@ -911,7 +994,7 @@ runner run_summary.json
 | HTTP 401/403、429、验证码、封禁 | 运行级阻断；保留前沿，不写候选 seen |
 | `sqlite_import_failed` | 确认整批数据库和本轮新媒体已回滚，checkpoint/seen/campaign 未推进 |
 | `persistence_verified` 失败 | 不 finalize；从摘要身份逐帖核对 SQLite 与文件 |
-| `platform_session_migration_required:<platform>` | 旧 fork profile 未迁移，任务记为 `failed_final`；按“T14 非小红书登录资料迁移”完成后用 `--job-key <job_key>` 重跑 |
+| `platform_session_migration_required:<platform>` | 迁移中断残留 `.partial`，任务记为 `failed_final`；删除新侧残留后重做“T14 非小红书登录资料迁移”第 2 步，再用 `--job-key <job_key>` 重跑 |
 
 稳定错误码、优先级、重试和媒体事务的完整定义分别见[正式契约](formal-crawl-contract.md)与
 [数据持久化](data-persistence.md)。

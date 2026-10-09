@@ -156,7 +156,6 @@ def worker_config(*, environ: Mapping[str, str] = os.environ) -> SimpleNamespace
         AUTO_CLOSE_BROWSER=True,
         SAVE_DATA_OPTION="jsonl",
         SAVE_DATA_PATH="",
-        USER_DATA_DIR="%s_user_data_dir",
         START_PAGE=1,
         MAX_CONCURRENCY_NUM=1,
         ENABLE_GET_MEIDAS=False,
@@ -210,11 +209,6 @@ def env_int_reader(
             return max(0, default)
 
     return read
-
-
-def env_int(name: str, default: int, *, environ: Mapping[str, str]) -> int:
-    """供旧 fork 单条委托使用，读取与原调用发生在同一时点。"""
-    return env_int_reader(name, default, environ=environ)()
 
 
 def _enabled() -> bool:

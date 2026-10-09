@@ -1,4 +1,4 @@
-"""知乎 T07：冻结旧实现与根适配使用同一离线边界，逐项比对请求、事件与字节。"""
+"""知乎 T07：根适配在离线边界下运行，与 T14 固化的冻结旧实现请求、事件与字节逐项比对。"""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ import ast
 from collections import Counter
 from dataclasses import fields, replace
 from hashlib import sha256
-import importlib
-import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -21,7 +19,6 @@ import pytest
 
 from support import legacy_expectations as expectations
 from support.stable_png import solid_png
-from support.raw_author_identity import use_raw_author_identity
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.artifacts import jsonl
@@ -36,69 +33,8 @@ FIXTURE = ROOT / "tests/fixtures/adapter_t07"
 SIGNATURES = {}
 
 
-@pytest.fixture
-def baseline(tmp_path, monkeypatch):
-    """本站旧文件全量恢复到临时包；共享能力沿用已完成迁移的委托。
-
-    冻结文件在 fork 顶层包之上执行，仅供双轨对照与 T14 守卫使用，随 fork 在 T14-C 删除。
-    """
-    from trippostcollect.platforms import _fork_bridge
-
-    _fork_bridge.install()
-    metadata = json.loads((FIXTURE / "baseline.json").read_text())
-    assert metadata["commit"] == "5a68eb5098fcd17308c7fe0b9d53916ae839b303"
-    directory = tmp_path / "baseline"
-    for relative, digest in metadata["files"].items():
-        data = (FIXTURE / (relative + ".txt")).read_bytes()
-        assert sha256(data).hexdigest() == digest, relative
-        path = directory / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-
-    def load(name, relative):
-        path = directory / relative
-        spec = importlib.util.spec_from_file_location(name, path)
-        module = importlib.util.module_from_spec(spec)
-        monkeypatch.setitem(sys.modules, name, module)
-        spec.loader.exec_module(module)
-        parent, _, attr = name.rpartition(".")
-        monkeypatch.setattr(importlib.import_module(parent), attr, module, raising=False)
-        return module
-
-    for parent in ("model", "constant", "tools", "store", "media_platform"):
-        importlib.import_module(parent)
-    for name in list(sys.modules):
-        if name.startswith(("media_platform.zhihu", "store.zhihu")):
-            monkeypatch.delitem(sys.modules, name)
-    for name, relative in (
-        ("model.m_zhihu", "model/m_zhihu.py"),
-        ("constant.zhihu", "constant/zhihu.py"),
-        ("tools.image_manifest", "tools/image_manifest.py"),
-        ("store.zhihu", "store/zhihu/__init__.py"),
-        ("media_platform.zhihu", "media_platform/zhihu/__init__.py"),
-    ):
-        load(name, relative)
-    # 记录递归导入，fixture 结束时恢复原模块，避免污染其他平台用例。
-    for name in list(sys.modules):
-        if name.startswith(("media_platform.zhihu.", "store.zhihu.")):
-            module = sys.modules.pop(name)
-            monkeypatch.setitem(sys.modules, name, module)
-    # #49：根实现保存作者原始 ID 与昵称，对照只替换旧解析的身份转换。
-    use_raw_author_identity(monkeypatch, sys.modules["media_platform.zhihu.help"])
-    return SimpleNamespace(
-        core=importlib.import_module("media_platform.zhihu.core"),
-        client=importlib.import_module("media_platform.zhihu.client"),
-        signer=importlib.import_module("media_platform.zhihu.help"),
-        config=importlib.import_module("config"),
-    )
-
-
-async def drive(baseline, output, patch, scenario, *, migrated, crawler_factory=None):
-    """只替换 HTTP、Playwright、时钟和 JS 随机源，保留业务及全部重试层。
-
-    baseline 为 None 时只运行根实现（migrated 必须为真）：配置取根配置对象，不加载 fork。
-    """
-    assert baseline is not None or migrated
+async def drive(output, patch, scenario, *, crawler_factory=None):
+    """只替换 HTTP、Playwright、时钟和 JS 随机源，保留业务及全部重试层；配置取根配置对象，不加载 fork。"""
     output.mkdir()
     trace = []
     counts = Counter()
@@ -114,11 +50,9 @@ async def drive(baseline, output, patch, scenario, *, migrated, crawler_factory=
     patch.setenv("TRIPPOSTCOLLECT_ZHIHU_INITIAL_SETTLE_SECONDS", "0")
     patch.setattr(events, "_utc_iso", lambda: "2026-09-30T01:02:03+00:00")
     patch.setattr(jsonl.time, "strftime", lambda *args: "2026-09-30")
-    if baseline is not None:
-        patch.setattr(baseline.core.utils, "get_current_timestamp", lambda: 1_700_000_000_000)
     patch.setattr(image_retry, "IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS", (0.0, 0.0))
     # 根配置对象与 fork config 在装配读取的键上逐键相同（T12 守护）；词云等退出键根对象没有。
-    config = baseline.config if baseline is not None else worker_config()
+    config = worker_config()
     for name, value in dict(
         PLATFORM="zhihu", KEYWORDS="青岛旅游", LOGIN_TYPE="cookie", COOKIES="d_c0=t07;z_c0=active",
         CRAWLER_TYPE="detail" if scenario.startswith("detail_") else "search",
@@ -129,15 +63,14 @@ async def drive(baseline, output, patch, scenario, *, migrated, crawler_factory=
         ZHIHU_SPECIFIED_ID_LIST=["https://www.zhihu.com/question/10/answer/101", "https://zhuanlan.zhihu.com/p/102"],
     ).items():
         # 只有词云这一个 fork 退出键在根配置对象上不存在，仅对它放宽；其余键缺失即报错。
-        patch.setattr(config, name, value, raising=baseline is not None or name != "ENABLE_GET_WORDCLOUD")
+        patch.setattr(config, name, value, raising=name != "ENABLE_GET_WORDCLOUD")
 
     async def sleep(seconds):
         trace.append(("sleep", float(seconds)))
 
     patch.setattr(core.asyncio, "sleep", sleep)
     # tenacity 保留 stop/wait/reraise；只截获等待，不改变重试次数。
-    for implementation in (client,) if baseline is None else (baseline.client, client):
-        patch.setattr(implementation.ZhiHuClient.request.retry, "sleep", sleep)
+    patch.setattr(client.ZhiHuClient.request.retry, "sleep", sleep)
 
     class Page:
         url = "about:blank"
@@ -213,7 +146,7 @@ async def drive(baseline, output, patch, scenario, *, migrated, crawler_factory=
         return SimpleNamespace(call=call)
 
     patch.setattr(execjs, "compile", compile_fixed)
-    patch.setattr(signer if migrated else baseline.signer, "ZHIHU_SGIN_JS", None)
+    patch.setattr(signer, "ZHIHU_SGIN_JS", None)
     # 与主机无关的纯色 PNG（见 support/stable_png.py；Pillow 压缩字节随 CPU 不同）。
     image_bytes = solid_png(5, 4, (10, 20, 30))
 
@@ -302,27 +235,20 @@ async def drive(baseline, output, patch, scenario, *, migrated, crawler_factory=
         trace.append(("http_client", kwargs))
         return Http()
 
-    if migrated:
-        settings, ports = entry._zhihu_dependencies(config)
-        client_ports = ports.client_factory.keywords["ports"]
-        ports = replace(
-            ports, async_playwright=Playwright, browser_manager_factory=Browser,
-            run_required_human_behavior=behavior, current_timestamp=lambda: 1_700_000_000_000,
-            client_factory=lambda **kwargs: client.ZhiHuClient(
-                **kwargs, ports=replace(client_ports, make_async_client=http_factory),
-            ),
-        )
-        if crawler_factory is None:
-            crawler = core.ZhihuCrawler(settings, ports)
-        else:
-            patch.setattr(entry, "_zhihu_dependencies", lambda config: (settings, ports))
-            crawler = crawler_factory()
+    settings, ports = entry._zhihu_dependencies(config)
+    client_ports = ports.client_factory.keywords["ports"]
+    ports = replace(
+        ports, async_playwright=Playwright, browser_manager_factory=Browser,
+        run_required_human_behavior=behavior, current_timestamp=lambda: 1_700_000_000_000,
+        client_factory=lambda **kwargs: client.ZhiHuClient(
+            **kwargs, ports=replace(client_ports, make_async_client=http_factory),
+        ),
+    )
+    if crawler_factory is None:
+        crawler = core.ZhihuCrawler(settings, ports)
     else:
-        patch.setattr(baseline.core, "async_playwright", Playwright)
-        patch.setattr(baseline.core, "CDPBrowserManager", Browser)
-        patch.setattr(baseline.core, "run_required_human_behavior", behavior)
-        patch.setattr(baseline.client, "make_async_client", http_factory)
-        crawler = baseline.core.ZhihuCrawler()
+        patch.setattr(entry, "_zhihu_dependencies", lambda config: (settings, ports))
+        crawler = crawler_factory()
     assert not trace
     await crawler.start()
     await crawler.close()
@@ -342,24 +268,12 @@ SCENARIOS = ["success", "navigation_timeout", "search_content", "empty", "search
 T14_DRIVE = ("T07", "request_event_artifacts")
 
 
-@expectations.legacy_only
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", SCENARIOS)
-async def test_request_event_and_artifact_equivalence(baseline, tmp_path, monkeypatch, scenario):
-    with monkeypatch.context() as patch:
-        old = await drive(baseline, tmp_path / "old", patch, scenario, migrated=False)
-    with monkeypatch.context() as patch:
-        new = await drive(baseline, tmp_path / "new", patch, scenario, migrated=True)
-    assert new == old
-    check_drive_result(new, scenario)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", SCENARIOS)
 async def test_root_matches_frozen_legacy_request_event_and_artifacts(tmp_path, monkeypatch, scenario):
     """T14：根实现与固化的旧实现结果比较（同一 drive、同一 == 语义），不加载 fork。"""
     with monkeypatch.context() as patch:
-        new = await drive(None, tmp_path / "new", patch, scenario, migrated=True)
+        new = await drive(tmp_path / "new", patch, scenario)
     assert expectations.scrub(new, (tmp_path, "<TMP>")) == expectations.load(*T14_DRIVE, scenario)
     check_drive_result(new, scenario)
 
@@ -369,21 +283,9 @@ async def test_root_matches_frozen_legacy_request_event_and_artifacts(tmp_path, 
 async def test_root_entry_matches_frozen_legacy_factory(tmp_path, monkeypatch, scenario):
     """T14：替代旧工厂对照；新入口装配结果与固化预期比较。"""
     with monkeypatch.context() as patch:
-        new = await drive(None, tmp_path / "entry", patch, scenario, migrated=True,
+        new = await drive(tmp_path / "entry", patch, scenario,
                           crawler_factory=lambda: entry.load_crawler("zhihu")())
     assert expectations.scrub(new, (tmp_path, "<TMP>")) == expectations.load(*T14_FACTORY, scenario)
-
-
-@expectations.legacy_guard
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", SCENARIOS)
-async def test_t14_guard_frozen_legacy_drive(baseline, tmp_path, monkeypatch, pytestconfig, scenario):
-    with monkeypatch.context() as patch:
-        old = await drive(baseline, tmp_path / "old", patch, scenario, migrated=False)
-    expectations.check_legacy(
-        pytestconfig, *T14_DRIVE, scenario, expectations.scrub(old, (tmp_path, "<TMP>")),
-        source_test="tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence",
-    )
 
 
 def check_drive_result(new, scenario):
@@ -530,113 +432,5 @@ def test_pure_definitions_keep_original_bodies():
         assert ast.dump(definitions(original)[name]) == ast.dump(definitions(current)[name]), name
 
 
-def load_legacy_main(patch):
-    """隔离基线 fixture 的同名模块，实际加载 fork main 的原 CrawlerFactory。"""
-    from trippostcollect.platforms import _fork_bridge
-
-    _fork_bridge.install()
-    for name in list(sys.modules):
-        if name.startswith(("media_platform.zhihu", "store.zhihu")):
-            patch.delitem(sys.modules, name)
-    for parent in ("media_platform", "store"):
-        patch.delattr(importlib.import_module(parent), "zhihu", raising=False)
-    # main 顶层还装载未迁站点、旧参数解析器和数据库入口；本测试不运行这些闭包。
-    # 工厂源码、本站包以及根装配全部真实加载，其他构造器一旦调用立即失败。
-    def unused_crawler():
-        raise AssertionError("知乎对照测试不得构造其他平台")
-
-    patch.setitem(sys.modules, "cmd_arg", SimpleNamespace())
-    patch.setitem(sys.modules, "database", SimpleNamespace(db=SimpleNamespace()))
-    for platform, name in (
-        ("bilibili", "BilibiliCrawler"), ("douyin", "DouYinCrawler"),
-        ("kuaishou", "KuaishouCrawler"), ("tieba", "TieBaCrawler"),
-        ("weibo", "WeiboCrawler"), ("xhs", "XiaoHongShuCrawler"),
-    ):
-        patch.setitem(sys.modules, "media_platform." + platform, SimpleNamespace(**{name: unused_crawler}))
-    spec = importlib.util.spec_from_file_location("t07_legacy_main", ROOT / "tools/MediaCrawler/main.py")
-    module = importlib.util.module_from_spec(spec)
-    patch.setitem(sys.modules, spec.name, module)
-    spec.loader.exec_module(module)
-    # 新导入模块也登记到局部 patch；完成后还原冻结基线环境。
-    for name in list(sys.modules):
-        if name.startswith(("media_platform.zhihu", "store.zhihu")):
-            imported = sys.modules.pop(name)
-            patch.setitem(sys.modules, name, imported)
-    return module
-
-
-@expectations.legacy_only
-def test_legacy_bridge_delegates_crawler_and_store(monkeypatch):
-    """旧桥仅留配置装配；每个业务方法和纯定义都使用根权威对象。"""
-    main = load_legacy_main(monkeypatch)
-    legacy = importlib.import_module("media_platform.zhihu")
-    assert main.CrawlerFactory.CRAWLERS["zhihu"] is legacy.ZhihuCrawler
-    assert issubclass(legacy.ZhihuCrawler, core.ZhihuCrawler)
-    for name, value in vars(core.ZhihuCrawler).items():
-        if callable(value) and name != "__init__":
-            assert getattr(legacy.ZhihuCrawler, name) is value
-    for old_module, new_module, names in (
-        ("client", "client", ["ZhiHuClient"]),
-        ("login", "login", ["ZhiHuLogin"]),
-        ("help", "parser", ["ZhihuExtractor", "_find_target_content_entity", "judge_zhihu_url"]),
-        ("help", "signer", ["sign"]),
-        ("field", "models", ["SearchTime", "SearchType", "SearchSort"]),
-        ("exception", "models", ["DataFetchError", "PlatformRuntimeError"]),
-    ):
-        old = importlib.import_module("media_platform.zhihu." + old_module)
-        new = importlib.import_module("trippostcollect.platforms.zhihu." + new_module)
-        for name in names:
-            assert getattr(old, name) is getattr(new, name)
-    store = importlib.import_module("store.zhihu")
-    assert store.update_zhihu_content.func is core.store_zhihu_content
-    assert store.update_zhihu_content_images.func is core.update_zhihu_content_images
-    assert store.record_zhihu_content_image_failure.func is core.record_zhihu_content_image_failure
-    models = importlib.import_module("trippostcollect.platforms.zhihu.models")
-    old_models = importlib.import_module("model.m_zhihu")
-    assert old_models.ZhihuContent is models.ZhihuContent
-    assert old_models.ZhihuCreator is models.ZhihuCreator
-    constants = importlib.import_module("constant.zhihu")
-    for name in ("ZHIHU_URL", "ZHIHU_ZHUANLAN_URL", "ANSWER_NAME", "ARTICLE_NAME", "VIDEO_NAME"):
-        assert getattr(constants, name) is getattr(models, name)
-
-
-@expectations.legacy_only
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", SCENARIOS)
-async def test_legacy_factory_and_new_entry_equivalence(baseline, tmp_path, monkeypatch, scenario):
-    """同一 fake 驱动旧工厂和新入口；请求、事件、重试及全部产物逐项相等。"""
-    with monkeypatch.context() as patch:
-        main = load_legacy_main(patch)
-        legacy = importlib.import_module("media_platform.zhihu")
-        assert main.CrawlerFactory.CRAWLERS["zhihu"] is legacy.ZhihuCrawler
-        assert issubclass(legacy.ZhihuCrawler, core.ZhihuCrawler)
-        old = await drive(
-            baseline, tmp_path / "legacy", patch, scenario, migrated=True,
-            crawler_factory=lambda: main.CrawlerFactory.create_crawler("zhihu"),
-        )
-    with monkeypatch.context() as patch:
-        new = await drive(
-            baseline, tmp_path / "entry", patch, scenario, migrated=True,
-            crawler_factory=lambda: entry.load_crawler("zhihu")(),
-        )
-    assert old == new
-
-
-# 旧 fork 工厂结果是否与冻结 T07 fixture 结果相同由守卫分别证明；相同则共用一份预期。
+# 旧 fork 工厂结果与冻结 T07 fixture 结果相同已在 T14 删除 fork 前由守卫分别证明，共用一份预期。
 T14_FACTORY = T14_DRIVE
-
-
-@expectations.legacy_guard
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", SCENARIOS)
-async def test_t14_guard_legacy_factory_drive(baseline, tmp_path, monkeypatch, pytestconfig, scenario):
-    with monkeypatch.context() as patch:
-        main = load_legacy_main(patch)
-        old = await drive(
-            baseline, tmp_path / "legacy", patch, scenario, migrated=True,
-            crawler_factory=lambda: main.CrawlerFactory.create_crawler("zhihu"),
-        )
-    expectations.check_legacy(
-        pytestconfig, *T14_FACTORY, scenario, expectations.scrub(old, (tmp_path, "<TMP>")),
-        source_test="tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
-    )

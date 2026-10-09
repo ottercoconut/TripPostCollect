@@ -2,9 +2,8 @@
 
 T14-B2 起 34 个用例已按台账 target_file 原名移植（ported_to），run_matrix 离线清单相应清空。
 
-fork 仍在时按 AST 展开 fork 用例（含 parametrize 自动 id），要求映射恰好覆盖；映射引用的根测试函数必须真实
-存在。fork gitlink 删除后映射成为留档：根测试仍须存在，不得再有依赖 fork 的根测试（T14-C 须先移植），
-也不得再有 gap 条目（须先补测试并改为 equivalent/partial）。
+fork 仍在时曾按 AST 展开 fork 用例（含 parametrize 自动 id）核对映射恰好覆盖；T14-C 删除 fork 后映射成为留档：
+映射引用的根测试函数仍须存在，34 项须全部移植为 equivalent，不得再有依赖 fork 的根测试或 gap 条目。
 card_gate 的 passed 数下降不能作为覆盖已迁移的证据，缺口以 status=gap/partial 显式列出。
 """
 
@@ -16,7 +15,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FORK = ROOT / "tools" / "MediaCrawler"
 FORK_GITLINK = "tools/MediaCrawler"
 MAPPING = json.loads((ROOT / "tests/fixtures/t14_fork_test_mapping.json").read_text(encoding="utf-8"))
 STATUSES = {"equivalent", "partial", "gap"}
@@ -120,32 +118,18 @@ def test_mapped_root_tests_exist() -> None:
             assert function in cache[path], reference["test"]
 
 
-def test_mapping_matches_fork_offline_nodes_while_fork_exists() -> None:
-    if not FORK.is_dir():
-        # fork 已删除：依赖 fork 的根测试必须已移植并清除标记，映射只作留档。
-        assert [reference["test"] for item in MAPPING["nodes"] for reference in item["root"]
-                if reference.get("fork_dependent")] == []
-        return
+def test_mapping_is_complete_archive_after_fork_removal() -> None:
+    """T14-C 删除 fork 后映射只作留档：34 项全部按原名移植且为 equivalent，离线清单为空，无 fork 依赖。"""
     import importlib.util
 
+    assert [reference["test"] for item in MAPPING["nodes"] for reference in item["root"]
+            if reference.get("fork_dependent")] == []
+    assert len(MAPPING["nodes"]) == 34
+    assert all(item.get("ported_to") and item["status"] == "equivalent" for item in MAPPING["nodes"])
     spec = importlib.util.spec_from_file_location("t14_run_matrix", ROOT / "scripts/ci/run_matrix.py")
     run_matrix = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(run_matrix)
-    # T14-B2：已移植（ported_to）的文件退出离线清单；清单只保留仍有未移植用例的原文件。
-    ported_files = {item["fork_node"].split("::")[0] for item in MAPPING["nodes"] if item.get("ported_to")}
-    remaining = [item for item in MAPPING["nodes"] if not item.get("ported_to")]
-    assert run_matrix.FORK_OFFLINE_TESTS == tuple(
-        name for name in MAPPING["fork_files"] if name not in ported_files)
-    assert run_matrix.FORK_EXPECTED_TESTS == len(remaining)
-    expected = set()
-    for relative in MAPPING["fork_files"]:
-        for name, node in _test_functions(FORK / relative).items():
-            if not name.split("::")[-1].startswith("test_"):
-                continue
-            ids = _parametrize_ids(node)
-            expected.update(f"{relative}::{name}" + (f"[{case}]" if ids is not None else "")
-                            for case in (ids if ids is not None else [None]))
-    assert {item["fork_node"] for item in MAPPING["nodes"]} == expected
+    assert run_matrix.FORK_OFFLINE_TESTS == () and run_matrix.FORK_EXPECTED_TESTS == 0
 
 
 def test_ported_nodes_exist_under_same_name_and_parameters() -> None:

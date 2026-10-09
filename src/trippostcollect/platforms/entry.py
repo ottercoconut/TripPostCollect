@@ -61,7 +61,7 @@ def _save_data_root(save_data_path: str):
 
 
 def require_persistent_session_migrated(platform_code: str) -> None:
-    """非小红书 worker 建立持久浏览器会话前的 T14 迁移失败关闭检查。"""
+    """非小红书 worker 建立持久浏览器会话前的失败关闭检查：拒绝 T14 迁移中断留下的 `.partial` 残留。"""
     from trippostcollect.core import paths
 
     if platform_code != "xhs":
