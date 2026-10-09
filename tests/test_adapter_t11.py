@@ -32,6 +32,7 @@ from trippostcollect.core.execution_state import FrozenExecutionState
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.bilibili import core as bilibili_core
 from trippostcollect.runtime import process
+from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/adapter_t11"
@@ -131,6 +132,20 @@ T75_REPLACEMENTS = (
     (T75_OLD_TIMEOUT_SOURCE, ""),
     ("        ROOT,\n        timeout,\n        log_dir,", "        ROOT,\n        NO_PROGRESS_WATCHDOG_SECONDS,\n        log_dir,"),
     ("inactivity_timeout_seconds=float(timeout),", "inactivity_timeout_seconds=NO_PROGRESS_WATCHDOG_SECONDS,"),
+    # 人工等待与网络暂停同样冻结看门狗：小红书额外传入人工等待诊断路径。
+    (
+        "            navigation_diagnostics_path if platform_key == \"xhs\" else None\n"
+        "        ),\n"
+        "        startup_grace_seconds=HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS,",
+        "            navigation_diagnostics_path if platform_key == \"xhs\" else None\n"
+        "        ),\n"
+        "        operator_wait_diagnostics_path=(\n"
+        "            operator_wait_diagnostics_path(behavior_evidence_path)\n"
+        "            if platform_key == \"xhs\"\n"
+        "            else None\n"
+        "        ),\n"
+        "        startup_grace_seconds=HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS,",
+    ),
 )
 
 
@@ -296,6 +311,7 @@ def baseline(monkeypatch):
     # #75 有意偏离：任务级时限删除，旧执行器同样改用统一的无进展看门狗常量。
     text = t75_authorized_source(text)
     namespace["NO_PROGRESS_WATCHDOG_SECONDS"] = process.NO_PROGRESS_WATCHDOG_SECONDS
+    namespace["operator_wait_diagnostics_path"] = operator_wait_diagnostics_path
     vars(module).update(namespace)
     exec(compile(text, module.__file__, "exec"), vars(module))
     return module

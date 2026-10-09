@@ -141,9 +141,12 @@ schema v2 与小红书 target schema v3 都拒绝旧数量控制字段，执行�
 正式抓取不设任务级时长上限：通用 job 不含 `timeout_per_platform`，小红书 target 不含
 `timeout_seconds`，配置中出现任一字段即报错。所有平台（含小红书）的中间层统一使用代码常量 1200 秒的
 无持久进展看门狗：execution state 事件、内容 JSONL、图片 manifest 与行为证据连续 1200 秒都没有变化
-才以 `no_progress_timeout` 运行级失败结束，持续推进时整轮总时长不受限制。小红书必须同时核对
-`top_refresh_max_pages` 与 pool 的 `lease_seconds`；`lease_seconds` 是租约 TTL，由父层认证心跳续期，
-不依赖任务时长。这些参数不属于查询来源参数，调整后继续使用原目标、账号和查询指纹对应的
+才以 `no_progress_timeout` 运行级失败结束，持续推进时整轮总时长不受限制。小红书的网络恢复暂停与
+人工等待（扫码登录、轮中登录恢复、API 验证码、作者页验证、搜索就绪验证与连续性验证）期间，父层只对
+新鲜、结构有效的暂停诊断冻结该计时、结束后恢复，阈值与进展判定不变，600 秒人工预算耗尽仍按人工预算
+耗尽错误失败。小红书必须同时核对 `top_refresh_max_pages` 与 pool 的 `lease_seconds`；
+`lease_seconds` 是租约 TTL，child 运行期间由父层认证心跳续期，child 结束后由父进程保活续期到精确
+释放，不依赖任务时长。这些参数不属于查询来源参数，调整后继续使用原目标、账号和查询指纹对应的
 checkpoint，但必须通过新的 dry-run 冻结并核对计划。
 
 发现抓取只有 `formal_validation.source_exhausted_met=true` 才能进入正式持久化；此时新增数可以为 0，

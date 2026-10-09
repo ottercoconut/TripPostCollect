@@ -62,9 +62,10 @@ python scripts/crawl_runner.py \
 target 出现 `timeout_seconds` 即配置错误，中间层也不再接受 `--timeout-per-platform`。所有平台（含小红书）
 统一使用代码常量 1200 秒的“无持久进展看门狗”，它不是从进程启动累计的总运行时限。execution state
 事件、内容 JSONL、图片 manifest 或行为证据任一发生变化都会重置计时；因此只要来源耗尽抓取仍在推进，
-就允许总运行时间超过该值。首次进展之前另加 240 秒行为预算。所有受监控证据持续不变达到 1200 秒
-时才记录 `adaptive_search_stopped(runtime_failed, no_progress_timeout)`，尾批标记为不完整，禁止
-导入并从最后完整批次恢复。看门狗收束先只向监督进程发送一次 SIGTERM，最多等待 20 秒让 child、
+就允许总运行时间超过该值。首次进展之前另加 240 秒行为预算。小红书网络恢复暂停与人工等待期间暂停
+计时（见“登录”一节的网络恢复与人工等待说明）。所有受监控证据持续不变达到 1200 秒时才记录
+`adaptive_search_stopped(runtime_failed, no_progress_timeout)`，尾批标记为不完整，禁止导入并从最后完整
+批次恢复。看门狗收束先只向监督进程发送一次 SIGTERM，最多等待 20 秒让 child、
 exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中的 `timeout_reason`、
 `last_progress_age_seconds`、`forced_termination` 和 `timeout_state_event` 用于复核该路径。
 
@@ -464,6 +465,13 @@ python scripts/xhs_runner.py \
 `online` 才结束该暂停段；陈旧、格式错误或非 transport 诊断既不获得看门狗时间，也不能
 冒充恢复信号。child 首次写出 `network_recovery_timeout` 后，父层只给一次 20 秒终态写入和
 进程收束时间；后续同类事件不延长这个窗口。
+
+小红书人工等待（扫码登录、轮中登录恢复、API 验证码、作者页验证、搜索就绪验证与连续性验证）期间，
+无持久进展看门狗按同一方式暂停计时：child 在 behavior evidence 同目录写
+`behavior_evidence.operator_wait.json`（`waiting` 每 30 秒刷新，结束写 `ended`），父层只对新鲜、结构
+有效且来自已核验 exporter 的 `waiting` 冻结剩余量，明确 `ended` 才结束暂停段。阈值、启动宽限和进展
+判定不变；600 秒人工预算耗尽时仍按人工预算耗尽错误失败。同一段连续人工等待的父层上限为 675 秒，
+超过时以 `parent_operator_wait_timeout` 收束。
 
 正文图片字节下载不使用上述 600 秒 API/导航恢复循环，仍按正式契约做候选级有限重试
 （当前最多 3 次）。耗尽后记录 `image_download_retryable` 与 `candidate_skipped`，不得伪称曾等待 600 秒。
@@ -957,8 +965,9 @@ keychain。浏览器失败需区分：
 | `network_recovery_timeout` | 600 秒内未恢复；本轮失败并保留安全 checkpoint |
 | `parent_network_pause_timeout` | 同一次连续 `network_paused` 达到 675 秒，父层收束失联 child |
 | `parent_network_terminal_unwind_timeout` | child 首次报告网络恢复耗尽后，20 秒内未完成终态写入和收束 |
+| `parent_operator_wait_timeout` | 同一段连续人工等待达到 675 秒，父层收束失联 child |
 | `runtime_status_startup_timeout` / `runtime_status_stale` | 认证心跳未按监督窗口推进 |
-| `no_progress_timeout` | 受监控证据连续 1200 秒（首次进展前另加 240 秒）无变化；中间层收束 worker，尾批不导入 |
+| `no_progress_timeout` | 受监控证据连续 1200 秒（首次进展前另加 240 秒，网络暂停与人工等待期间不计时）无变化；中间层收束 worker，尾批不导入 |
 | `login_required` | 平台明确要求登录 |
 | `captcha_detected` | 平台安全验证或验证码 |
 
@@ -973,8 +982,8 @@ keychain。浏览器失败需区分：
 
 小红书父层不设置整轮墙钟超时；它只监督 child 写出的认证心跳。启动宽限为 120 秒，心跳陈旧阈值
 为 60 秒，每 5 秒检查一次；长调度间隙只允许同一 sequence 一次 30 秒恢复宽限。网络暂停和最终摘要
-写入期间也必须继续心跳，避免把仍健康的 child 误杀。新鲜心跳同时按 pool `lease_seconds`（TTL）续期
-账号租约，租约不依赖任务时长；心跳只证明进程身份仍在，抓取是否前进由中间层统一的 1200 秒无持久
+写入期间也必须继续心跳，避免把仍健康的 child 误杀。child 运行期间新鲜心跳按 pool `lease_seconds`（TTL）续期
+账号租约，child 结束后由父进程保活续期到精确释放，租约不依赖任务时长；心跳只证明进程身份仍在，抓取是否前进由中间层统一的 1200 秒无持久
 进展看门狗判断。正常结束、可捕获异常和 SIGINT/SIGTERM 均须
 在摘要中保留精确 child/exporter/Chrome 生命周期、临时 session 删除及租约释放证据；无法证明进程
 消失或目录已删除时保留租约并明确延期清理。

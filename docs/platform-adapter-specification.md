@@ -389,15 +389,15 @@ reader不得暗读env/config，也不得把TLS每次建client、Cookie显式刷�
 | `schema_version` 通用2；XHS pool2/target3 | R:`validate_crawl_config`:128；xhs/config:`load_pool_config`:31、`load_target`:57；B | 入口校验；不入FP |
 | `jobs[].enabled` 缺省true，`priority/schedule_seconds/max_attempts` 100/86400/2，`next_run_at` 缺省iso() | db/bootstrap:`sync_config_jobs`→R:`select_due_jobs`:155；B/F | scheduler；不入FP，enabled/到期是通用调度门 |
 | `jobs[].params.platform` 否则site_key；`.keyword` 恢复CLI优先→params值→`青岛旅游` | R:`build_command`:321→C；B | QueryInput；平台/关键词入FP |
-| `jobs[].params.login_type` cookie；`.headless` 显式false且未--headless或--headful才headed | 同上；B/S | 登录/浏览器切片；五排除项内，FP=N |
-| `jobs[].params.timeout_per_platform` 已删除（#75），出现即配置错误；无进展看门狗为代码常量 `NO_PROGRESS_WATCHDOG_SECONDS`=1200，所有平台统一 | R:`validate_crawl_config`/`build_command`拒绝；C:`_run_platform_without_policy`→`run_command`；B/L | 父监督；不入FP，不替换请求timeout |
+| `jobs[].params.login_type` cookie；`.headless` 显式false且未--headless或--headful才headed | 同上；B/S | 登录/浏览器切片；六排除项内，FP=N |
+| `jobs[].params.timeout_per_platform` 180；知乎执行超时至少300；XHS既有场景至少420 | R→C:`_run_platform_without_policy`；B/L | 父监督；FP=N，不替换请求timeout |
 | `jobs[].params.required_fields_profile` / `.followers_policy` 正式必需现值 `image_post_with_followers_v1` / `required` | R:342–351校验→C字段门禁；B/L | application；FP=N |
 | `jobs[].params.top_refresh_max_pages` 续跑int(value or 3)，首次0 | R:`resolve_discovery_args`:229；B/S | DiscoveryInput；FP=N |
 | **`jobs[].behavior_profile`** 字符串或name对象，正式social_high_risk | db/bootstrap→R:`behavior_profile_name`:181；B/L | 行为切片；顶层不入source_query_options，FP=N |
 | **`jobs[].params.behavior_profile`** 或其他非排除params键 | source_query_options直接保留，不因没消费而排除 | FP=Y；不得以新分类“运行项”私自去掉 |
 | `defaults.schedule_jitter_ratio` 缺失/假值0；`defaults.headless/import_results` 此调度链无消费 | R:`next_run_time`:542；F | 前者调度，后二者不新增语义；均不入FP |
-| XHS target `target_key/keyword`；`top_refresh_max_pages` 必需，首次0；`timeout_seconds` 已删除（#75），出现即配置错误 | XD:`resolve_discovery_plan`:40；B | target_key/keyword入FP；顶部刷新不入FP |
-| XHS pool `headed=true/behavior_profile=xhs_guarded`；`lease_seconds` 为父层心跳续期的租约 TTL，至少850；CLI account_id必需 | X→租约/child；B | 账号独立scope不入FP，profile路径非Cookie |
+| XHS target `target_key/keyword`；`timeout_seconds/top_refresh_max_pages` 必需，后者首次0 | XD:`resolve_discovery_plan`:40；B | target_key/keyword入FP；预算不入FP |
+| XHS pool `headed=true/behavior_profile=xhs_guarded/lease_seconds`正int；CLI account_id必需 | X→租约/child；B | 账号独立scope不入FP，profile路径非Cookie |
 | fork `PLATFORM=xhs/LOGIN_TYPE=qrcode/CRAWLER_TYPE=search/START_PAGE=1` | base_config导入本站config→cmd_arg CLI覆盖→core；I/B/S | worker仅保留父生成参数；不把上游示例关键词/ID设成公共默认 |
 | `LOGIN_TYPE` 实例构造回写与begin读取 | WB/login:48→58–62、DY/login:46→63–67、ZH/login:45→68–72；S/L。XHS/login:136拒绝非qrcode，不走该回写 | 目标登录实例保存原构造输入，begin按同一实例值分流；不保留全局赋值，保持单worker/单登录实例现状与拒绝时点 |
 | `HEADLESS/CDP_HEADLESS/ENABLE_CDP_MODE=false`；`SAVE_LOGIN_STATE=true`，`USER_DATA_DIR=%s_user_data_dir` | CLI headless覆盖前两项→runtime；B/S | 浏览器参数切片；XHS不使用长期profile分支；T14-C 已删除 `USER_DATA_DIR` 配置键，非XHS profile 由 core.paths 定位到 `data/runtime/platform_sessions/<platform>/` |
@@ -408,8 +408,8 @@ reader不得暗读env/config，也不得把TLS每次建client、Cookie显式刷�
 | `WEIBO_SEARCH_TYPE=default/ENABLE_WEIBO_FULL_TEXT=true`；`PUBLISH_TIME_TYPE=0`；`SORT_TYPE=popularity_descending/XHS_INTERNATIONAL=false` | weibo_config:25/42、dy_config:22、xhs_config:25、base_config:27→所选平台；S/L | 各站options；原固定值不自动纳入FP，来自params则服从原投影 |
 | fork proxy=false/pool_count=2/provider=kuaidaili/static URL空；词云false、notes15/comments10 | 父禁proxy/评论；关闭分支 | 不迁为正式数量/存储能力；代理URL可能秘密，不输出 |
 
-通用精确算法：`scheduler/discovery.py:source_query_options:25` 仅去掉 `platform/keyword` 和五项
-`followers_policy,headless,login_type,required_fields_profile,top_refresh_max_pages`。
+通用精确算法：`scheduler/discovery.py:source_query_options:25` 仅去掉 `platform/keyword` 和六项
+`followers_policy,headless,login_type,required_fields_profile,top_refresh_max_pages,timeout_per_platform`。
 `query_fingerprint:33` 对 `{platform_key,keyword,source_options}` 用 `canonical_json:21`
 （ensure_ascii=False、sort_keys=True、separators=(',', ':')）编码后SHA-256；禁止对新dataclass全量hash。
 XHS `xhs/discovery.py:xhs_query_fingerprint:12` 仍以platform=xhs、keyword、`{target_key}`投影；account另作表scope。
@@ -432,17 +432,17 @@ HF:96仍按命名profile及原支持的override解析，不能用新总预算替
 | 入口和源码解析锚点 | 保留的参数、类型与默认；生产/消费时点 |
 |---|---|
 | R:`parse_args`:77 | db/config/run-root/execution-state-root=p对应常量；max-jobs=3/max-parallel-platforms=4；site/kind/job-key=?；start-page/resume-summary/recovery-keyword=?；sync-only/no-sync-config/dry-run/headless/headful/no-throttle/no-import=b；B→调度及命令 |
-| C:`parse_args`:425 | keyword=青岛旅游，platforms=weibo,douyin；output-dir/db/media-root=p对应常量；login-type=cookie/required-fields-profile=image_post_with_followers_v1/behavior-profile=social_high_risk；B→执行器 |
+| C:`parse_args`:425 | keyword=青岛旅游，platforms=weibo,douyin；output-dir/db/media-root=p对应常量；timeout-per-platform=180/login-type=cookie/required-fields-profile=image_post_with_followers_v1/behavior-profile=social_high_risk；B→执行器 |
 | 同上恢复/开关 | get-media/download-images/headed/no-checkpoint-write/no-import=b；start-page=1/start-offset=0/start-cursor=''；resume-summary=?/top-refresh-max-pages=0/discovery-source-exhausted=b；get-media解析后拒绝；B→workflow |
 | 同上scope | discovery-job-id:int?、discovery-query-fingerprint/discovery-run-id:str? 三者成组；xhs-account-id/xhs-profile-dir/xhs-discovery-target-key/xhs-discovery-query-fingerprint=?；B→对应独立scope |
 | 同上修复 | zhihu-detail-urls-file/xhs-detail-urls-file/xhs-repair-target-ids-file/repair-targets-file=p?；xhs-repair/post-repair=b且互斥；xhs-repair-batch-size=5；xhs-post-interaction=none（none/comment-scroll/like-one/random）；B/L→本站详情，不启发现写 |
 | `scripts/login_warmup.py:parse_args`:31 / W:parse_args:70 | targets=all / platforms=douyin,zhihu；timeout-seconds=600/output-dir=各自常量/browser-path=?；前者list-targets=b，后者no-close-on-success/skip-reopen-verify=b；B/S/F，不含XHS |
 | X:parse_args:130、Q:parse_args:84 | X:target-key/account-id必需，db/target-config/pool-config=常量，dry-run/no-import/retry-on-300011=b，post-interaction=none；Q:target-key=qingdao_travel、account-id必需、相同路径、keyword=?、max-items=20/batch-size=5/post-id追加[]/dry-run=b/post-interaction=none；B |
 | `scripts/xhs_accounts.py:parse_args`:28 | db；ensure-slot/retire需account-id；quarantine/activate另需reason；recover-orphan-lease需account-id/run-id/lease-id；list；逻辑槽位管理原位保留 |
-| `scripts/repair_post_details.py:parse_args`:48 | platform必需douyin/weibo/zhihu，db，keyword=青岛旅游，batch-size=20/max-items=0/post-id追加[]；headless/dry-run/confirm-default-db-repair=b；B |
+| `scripts/repair_post_details.py:parse_args`:48 | platform必需douyin/weibo/zhihu，db，keyword=青岛旅游，batch-size=20/max-items=0/post-id追加[]/timeout-per-batch=900；headless/dry-run/confirm-default-db-repair=b；B |
 | B:parse_args:2020 | db；state-db/report-dir/create-backup/backup-path/only-ids-file=?；expected-baseline-sha256=''；apply/confirm-default-db-repair=b；max-items/session-size=10；pacing-min/max=原BILIBILI_DETAIL_PACING_SECONDS；session-pause-min/max=8/15；retry-delay-seconds=300/source-limit=0；exclude-retryable-id追加[]/operator-exclusion-reason=?/confirm-operator-exclusion/continuous/stop-when-scope-attempted=b；B/L |
 | `scripts/promote_bilibili_repair_results.py:parse_args`:533 / `scripts/run_bilibili_full_repair_supervisor.py:parse_args`:324 | promotion:target-db默认，其余staged-db/state-db/backup-path/report-dir/expected-target-sha256必需，apply/confirm-default-db-promotion=b；supervisor:pilot-db/pilot-state/source-backup/expected-target-sha256/pre-full-backup/full-state/pilot-report-dir/promotion-report-dir/full-report-dir/supervisor-report必需、target-db默认、confirm-default-db-full-repair=b、source-limit/max-items=100/session-size=1/pacing-min/max=90/120/session-pause-min/max=90/120/retry-delay-seconds=300；B/L |
-| `info_collection_benchmark.py:parse_args`:33 | keyword=青岛旅游；db/config/output-dir常量；sites=?/headless=b；通用诊断B |
+| `info_collection_benchmark.py:parse_args`:33 | keyword=青岛旅游；db/config/output-dir常量；sites=?/timeout-per-target=300/headless=b；通用诊断B |
 | `scripts/ctf_resource_crawl.py:parse_args`:214 | sites/urls=?/site-label=custom/configured-site-urls=b/output-dir常量/keyword=''；headless/no-throttle=b/max-scrolls=6/behavior-profile=''；timeout/commit-timeout/readiness-timeout=60000/12000/15000；settle-min-ms/max-ms=2000/6000；douyin-cookie-cleanup/scrapling-preflight=auto（auto/off）/scrapling-preflight-timeout=30；B/L辅助路径 |
 | C:5622生成→新worker parser | platform/lt/type/keywords/get_comment/get_sub_comment/get_media/headless/save_data_option/save_data_path/start/max_concurrency_num/enable_ip_proxy全部显式传；条件specified_id/enable_cdp_mode；保留str2bool输入集合，不改成根store_true语义 |
 

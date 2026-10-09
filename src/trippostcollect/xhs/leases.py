@@ -15,6 +15,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -62,6 +63,8 @@ SECOND_SIGNAL_FINALIZE_GRACE_SECONDS = 1.0
 CHILD_INTERRUPT_KILL_REAP_SECONDS = 5
 # child 已退出后回收其管道输出的上限：后代仍占着管道时不无限等待，残留进程交给登记进程组收束。
 CHILD_EXIT_PIPE_DRAIN_SECONDS = 5.0
+# child 退出后父侧保活续期遇到 SQLite 忙时的重试间隔（不超过续期间隔本身）。
+PARENT_KEEPALIVE_RETRY_SECONDS = 5.0
 _GATED_SUBPROCESS_RELEASE = b"G"
 _GATED_SUBPROCESS_WRAPPER = """
 import os
@@ -1873,6 +1876,9 @@ class LeaseGuard:
         self.owner: ProcessIdentity | None = None
         self.lease_expires_at = ""
         self._lease_renewed_at: float | None = None
+        self._lease_renewal_lock = threading.Lock()
+        self._parent_keepalive_stop: threading.Event | None = None
+        self._parent_keepalive_thread: threading.Thread | None = None
         self.outcome = "failed"
         self.signal_received: int | None = None
         self._previous_handlers: dict[int, Any] = {}
@@ -2190,15 +2196,16 @@ class LeaseGuard:
 
         if self.account is None:
             raise RuntimeError("XHS LeaseGuard is not acquired")
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            self.lease_expires_at = renew_exact_account_lease(
-                conn,
-                lease_id=self.lease_id,
-                owner_token=self.owner_token,
-                lease_seconds=self.budget.lease_seconds,
-            )
-        self._lease_renewed_at = time.monotonic()
+        with self._lease_renewal_lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                self.lease_expires_at = renew_exact_account_lease(
+                    conn,
+                    lease_id=self.lease_id,
+                    owner_token=self.owner_token,
+                    lease_seconds=self.budget.lease_seconds,
+                )
+            self._lease_renewed_at = time.monotonic()
 
     def _renew_lease_on_heartbeat(self, *, force: bool = False) -> None:
         # 只有已获取的租约才续期；SQLite 忙时留到下一次心跳，属主不符仍按失败收束。
@@ -2213,6 +2220,52 @@ class LeaseGuard:
             self.renew_lease()
         except sqlite3.OperationalError:
             return
+
+    def _start_parent_keepalive(self) -> None:
+        """没有受监督 child 时由父侧保活续期，覆盖 child 退出后的校验与收尾，直到精确释放。"""
+
+        if self.account is None or self._lease_renewed_at is None or self._released:
+            return
+        if self._parent_keepalive_thread is not None:
+            return
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=self._parent_keepalive_loop,
+            args=(stop,),
+            name=f"xhs-lease-keepalive-{self.run_id}",
+            daemon=True,
+        )
+        self._parent_keepalive_stop = stop
+        self._parent_keepalive_thread = thread
+        thread.start()
+
+    def _stop_parent_keepalive(self) -> None:
+        stop, thread = self._parent_keepalive_stop, self._parent_keepalive_thread
+        self._parent_keepalive_stop = None
+        self._parent_keepalive_thread = None
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+
+    def _parent_keepalive_loop(self, stop: threading.Event) -> None:
+        while True:
+            renewed_at = self._lease_renewed_at
+            if renewed_at is None:
+                return
+            delay = max(0.0, renewed_at + self.budget.renew_after_seconds - time.monotonic())
+            if stop.wait(delay):
+                return
+            try:
+                self.renew_lease()
+            except sqlite3.OperationalError:
+                if stop.wait(
+                    min(self.budget.renew_after_seconds, PARENT_KEEPALIVE_RETRY_SECONDS)
+                ):
+                    return
+            except XhsLeaseOwnershipError:
+                # 租约已不属于本 owner：停止续期，由主线程的精确释放报告所有权错误。
+                return
 
     def observe_profile_processes(self) -> list[ProcessIdentity]:
         if not self.account:
@@ -2234,6 +2287,28 @@ class LeaseGuard:
     ) -> LeaseSubprocessResult:
         if self.signal_received is not None:
             raise XhsLeaseSignal(self.signal_received)
+        # child 运行期间改由其认证心跳续期；child 结束后（无论结果）恢复父侧保活。
+        self._stop_parent_keepalive()
+        try:
+            return self._run_supervised_subprocess(
+                command,
+                cwd=cwd,
+                env=env,
+                runtime_watchdog=runtime_watchdog,
+                progress_callback=progress_callback,
+            )
+        finally:
+            self._start_parent_keepalive()
+
+    def _run_supervised_subprocess(
+        self,
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        runtime_watchdog: RuntimeStatusWatchdogPolicy,
+        progress_callback: Callable[[], None] | None,
+    ) -> LeaseSubprocessResult:
         child_env = self.child_environment(env)
         runtime_auth_key = secrets.token_bytes(32)
         if type(runtime_auth_key) is not bytes or len(runtime_auth_key) != 32:
@@ -2423,7 +2498,7 @@ class LeaseGuard:
                 # 不把中断后的退出码当作 child 结果。
                 raise XhsLeaseSignal(self.signal_received)
             if termination_reason is None:
-                # child 正常退出后父侧仍持有租约做校验与收尾，先给出一个完整 TTL。
+                # child 正常退出：先续出完整 TTL，之后由父侧保活接续到精确释放。
                 self._renew_lease_on_heartbeat(force=True)
         except BaseException:
             self.terminate_owned_processes()
@@ -2859,6 +2934,8 @@ class LeaseGuard:
                         stage="before_lease_release",
                     )
                 )
+            # 保活续期一直持续到精确释放之前，避免与释放竞争同一行。
+            self._stop_parent_keepalive()
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 ensure_xhs_schema(conn)
@@ -2880,6 +2957,7 @@ class LeaseGuard:
             self._released = True
             return True
         finally:
+            self._stop_parent_keepalive()
             self._restore_signal_handlers()
             self._closing = False
             if self._closed and not self._retain_file_lock:

@@ -25,6 +25,8 @@ ALLOWED = {
         "scheduler.discovery", "xhs.batch_checkpoint",
         # T09：reporter 注解改由根 xhs/supervision 提供（仅 TYPE_CHECKING）。
         "xhs.supervision",
+        # #75：小红书人工等待诊断路径与 child 写入共用同一定义（只依赖标准库）。
+        "xhs.operator_wait",
     },
     "application/reporting.py": {"records.formal", "runtime.behavior", "runtime.helpers"},
     "application/failures.py": {"records.text_signals"},

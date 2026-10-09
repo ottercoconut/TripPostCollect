@@ -37,6 +37,10 @@ from trippostcollect.xhs.leases import (
     register_lease_process_from_environment,
     spawn_gated_subprocess,
 )
+from trippostcollect.xhs.operator_wait import (
+    OPERATOR_WAIT_SCHEMA_VERSION,
+    OPERATOR_WAIT_STATES,
+)
 from trippostcollect.xhs.runtime import RUNTIME_STATUS_AUTH_KEY_ENV
 
 if TYPE_CHECKING:
@@ -59,11 +63,15 @@ XHS_NETWORK_DIAGNOSTIC_MAX_BYTES = 512 * 1024
 # 子侧拥有固定的 600 秒网络恢复预算；父侧只留观察终态的额外时间。
 XHS_PARENT_NETWORK_PAUSE_CEILING_SECONDS = 675.0
 XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS = PROCESS_CLEANUP_GRACE_SECONDS
+# 子侧拥有共享 600 秒人工预算（耗尽即按人工预算错误失败）；父侧上限与网络暂停留同样余量，
+# 只防 child 失联后持续声称人工等待。
+XHS_PARENT_OPERATOR_WAIT_CEILING_SECONDS = 675.0
 SUPERVISOR_RUNTIME_TIMEOUT_REASONS = frozenset(
     {
         "no_progress_timeout",
         "parent_network_pause_timeout",
         "parent_network_terminal_unwind_timeout",
+        "parent_operator_wait_timeout",
     }
 )
 RUNTIME_WATCHDOG_STOP_DETAILS = SUPERVISOR_RUNTIME_TIMEOUT_REASONS | {
@@ -72,21 +80,33 @@ RUNTIME_WATCHDOG_STOP_DETAILS = SUPERVISOR_RUNTIME_TIMEOUT_REASONS | {
 
 
 class XhsParentNetworkPauseClock:
-    """Account only supervisor-observed, fresh XHS transport pauses."""
+    """Account only supervisor-observed, fresh XHS pauses.
 
-    def __init__(self, *, ceiling_seconds: float) -> None:
+    Defaults track transport pauses; the operator-wait clock reuses the same
+    accounting with ``operator_waiting``/``operator_wait_ended`` states.
+    """
+
+    def __init__(
+        self,
+        *,
+        ceiling_seconds: float,
+        paused_state: str = "network_paused",
+        resumed_state: str = "online",
+    ) -> None:
         if ceiling_seconds <= 0:
-            raise ValueError("network pause ceiling must be positive")
+            raise ValueError("pause ceiling must be positive")
         self.ceiling_seconds = float(ceiling_seconds)
+        self.paused_state = paused_state
+        self.resumed_state = resumed_state
         self.active = False
         self.last_observed_at: float | None = None
         self.episode_seconds = 0.0
         self.total_seconds = 0.0
         self.observed = False
 
-    def observe(self, network_state: str, *, now: float) -> tuple[float, bool]:
+    def observe(self, state: str, *, now: float) -> tuple[float, bool]:
         accounted_delta = 0.0
-        if network_state == "network_paused":
+        if state == self.paused_state:
             self.observed = True
             if self.active and self.last_observed_at is not None:
                 accounted_delta = max(0.0, now - self.last_observed_at)
@@ -94,7 +114,7 @@ class XhsParentNetworkPauseClock:
                 self.total_seconds += accounted_delta
             self.active = True
             self.last_observed_at = now
-        elif network_state == "online" and self.active and self.last_observed_at is not None:
+        elif state == self.resumed_state and self.active and self.last_observed_at is not None:
             accounted_delta = max(0.0, now - self.last_observed_at)
             self.episode_seconds += accounted_delta
             self.total_seconds += accounted_delta
@@ -102,7 +122,7 @@ class XhsParentNetworkPauseClock:
             self.last_observed_at = None
             self.episode_seconds = 0.0
             return accounted_delta, False
-        elif network_state == "online":
+        elif state == self.resumed_state:
             self.episode_seconds = 0.0
             self.active = False
             self.last_observed_at = None
@@ -291,6 +311,51 @@ def xhs_network_state_from_diagnostics(
         return "unknown", ""
     reason = _sanitized_transport_reason(error)
     return (str(outcome), reason) if reason else ("unknown", "")
+
+
+def xhs_operator_wait_state_from_diagnostics(
+    path: str | Path | None,
+    *,
+    now: datetime | None = None,
+    max_age_seconds: float = XHS_NETWORK_DIAGNOSTIC_MAX_AGE_SECONDS,
+) -> str:
+    """Return ``operator_waiting``/``operator_wait_ended`` only for a fresh, exact diagnostic."""
+
+    if path is None or max_age_seconds <= 0:
+        return "unknown"
+    observed_at = now or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("operator wait diagnostic reference time must be timezone-aware")
+    observed_at = observed_at.astimezone(timezone.utc)
+    candidate = Path(path).expanduser()
+    try:
+        if candidate.is_symlink():
+            return "unknown"
+        file_stat = candidate.stat()
+        if not candidate.is_file() or file_stat.st_size > XHS_NETWORK_DIAGNOSTIC_MAX_BYTES:
+            return "unknown"
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        return "unknown"
+    if (
+        not isinstance(payload, dict)
+        or set(payload)
+        != {"schema_version", "platform", "updated_at", "state", "stage", "started_at"}
+        or type(payload.get("schema_version")) is not int
+        or payload.get("schema_version") != OPERATOR_WAIT_SCHEMA_VERSION
+        or payload.get("platform") != "xhs"
+        or payload.get("state") not in OPERATOR_WAIT_STATES
+        or not isinstance(payload.get("stage"), str)
+        or not payload["stage"].strip()
+        or len(payload["stage"]) > 200
+        or not _fresh_diagnostic_timestamp(
+            payload.get("updated_at"),
+            now=observed_at,
+            max_age_seconds=max_age_seconds,
+        )
+    ):
+        return "unknown"
+    return "operator_waiting" if payload["state"] == "waiting" else "operator_wait_ended"
 
 
 def progress_path_signature(
@@ -810,6 +875,7 @@ def run_command(
     progress_paths: Iterable[Path],
     runtime_reporter: XhsSupervisorRuntimeReporter | None = None,
     network_diagnostics_path: str | Path | None = None,
+    operator_wait_diagnostics_path: str | Path | None = None,
     startup_grace_seconds: float = 0.0,
     poll_seconds: float = PROCESS_PROGRESS_POLL_SECONDS,
     cleanup_grace_seconds: float = PROCESS_CLEANUP_GRACE_SECONDS,
@@ -839,16 +905,23 @@ def run_command(
     network_pause_clock = XhsParentNetworkPauseClock(
         ceiling_seconds=XHS_PARENT_NETWORK_PAUSE_CEILING_SECONDS
     )
+    # 人工等待与网络暂停同一套冻结：只对新鲜的“人工等待中”诊断计入暂停，明确 ended 才结束该段。
+    operator_wait_clock = XhsParentNetworkPauseClock(
+        ceiling_seconds=XHS_PARENT_OPERATOR_WAIT_CEILING_SECONDS,
+        paused_state="operator_waiting",
+        resumed_state="operator_wait_ended",
+    )
     network_terminal_grace_started_at: float | None = None
     tracked_paths = tuple(progress_paths)
     excluded_progress_paths: set[Path] = set()
     if runtime_reporter is not None:
         runtime_status_file = runtime_reporter.status_path.expanduser().absolute()
         excluded_progress_paths.add(runtime_status_file)
-        if network_diagnostics_path is not None:
-            excluded_progress_paths.add(
-                Path(network_diagnostics_path).expanduser().absolute()
-            )
+        for diagnostics_path in (network_diagnostics_path, operator_wait_diagnostics_path):
+            if diagnostics_path is not None:
+                excluded_progress_paths.add(
+                    Path(diagnostics_path).expanduser().absolute()
+                )
         tracked_paths = tuple(
             path
             for path in tracked_paths
@@ -973,6 +1046,7 @@ def run_command(
             remaining = current_budget - (now - last_progress_at)
             network_state = "unknown"
             network_reason = ""
+            operator_wait_state = "unknown"
             if runtime_reporter is not None:
                 exporter_alive = proc.poll() is None
                 exporter_identity_current = bool(
@@ -984,6 +1058,9 @@ def run_command(
                 if exporter_identity_current:
                     network_state, network_reason = xhs_network_state_from_diagnostics(
                         network_diagnostics_path
+                    )
+                    operator_wait_state = xhs_operator_wait_state_from_diagnostics(
+                        operator_wait_diagnostics_path
                     )
                     runtime_network_state = network_state
                     runtime_network_reason = network_reason
@@ -997,10 +1074,11 @@ def run_command(
                     # it has to be published before the timeout decision below.
                     # A fresh terminal event gets one final heartbeat while the
                     # child commits its checkpoint and unwinds.
-                    if remaining > 0 or network_state in {
-                        "network_paused",
-                        "network_recovery_timeout",
-                    }:
+                    if (
+                        remaining > 0
+                        or network_state in {"network_paused", "network_recovery_timeout"}
+                        or operator_wait_state == "operator_waiting"
+                    ):
                         runtime_reporter.checkpoint(
                             phase="running",
                             network_state=runtime_network_state,
@@ -1021,13 +1099,22 @@ def run_command(
                 network_state,
                 now=now,
             )
+            operator_wait_delta, operator_wait_ceiling_expired = operator_wait_clock.observe(
+                operator_wait_state,
+                now=now,
+            )
             if not progress_advanced:
-                last_progress_at += pause_delta
+                # 两类暂停重叠时同一段时间只冻结一次。
+                last_progress_at += max(pause_delta, operator_wait_delta)
             current_budget = timeout + (
                 0.0 if progress_observed else max(0.0, startup_grace_seconds)
             )
             remaining = current_budget - (now - last_progress_at)
-            if network_state == "network_paused":
+            watchdog_paused = (
+                network_state == "network_paused"
+                or operator_wait_state == "operator_waiting"
+            )
+            if watchdog_paused:
                 communicate_timeout = max(0.01, poll_seconds)
             else:
                 communicate_timeout = min(
@@ -1048,9 +1135,11 @@ def run_command(
                     expiration_reason = "parent_network_terminal_unwind_timeout"
             elif pause_ceiling_expired:
                 expiration_reason = "parent_network_pause_timeout"
+            elif operator_wait_ceiling_expired:
+                expiration_reason = "parent_operator_wait_timeout"
             elif (
                 remaining <= 0
-                and network_state != "network_paused"
+                and not watchdog_paused
                 and network_terminal_grace_started_at is None
             ):
                 expiration_reason = "no_progress_timeout"
@@ -1181,6 +1270,13 @@ def run_command(
         ),
         "network_terminal_grace_seconds": (
             XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS
+            if runtime_reporter is not None
+            else None
+        ),
+        "operator_wait_observed": operator_wait_clock.observed,
+        "operator_wait_total_seconds": round(operator_wait_clock.total_seconds, 2),
+        "operator_wait_ceiling_seconds": (
+            XHS_PARENT_OPERATOR_WAIT_CEILING_SECONDS
             if runtime_reporter is not None
             else None
         ),

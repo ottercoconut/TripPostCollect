@@ -815,6 +815,9 @@ def test_fresh_heartbeat_renews_lease_after_half_ttl_and_on_child_exit(
         guard._lease_renewed_at = clock.value
 
     monkeypatch.setattr(guard, "renew_lease", renew)
+    keepalive: list[str] = []
+    monkeypatch.setattr(guard, "_stop_parent_keepalive", lambda: keepalive.append("stop"))
+    monkeypatch.setattr(guard, "_start_parent_keepalive", lambda: keepalive.append("start"))
 
     result = run_watchdog(
         guard,
@@ -823,6 +826,8 @@ def test_fresh_heartbeat_renews_lease_after_half_ttl_and_on_child_exit(
 
     assert result.returncode == 0
     assert result.termination_reason is None
+    # child 运行期间由心跳续期，结束后交回父侧保活。
+    assert keepalive == ["stop", "start"]
     # 心跳每 0.1 秒推进；TTL 一半（0.5 秒）后才续期，child 退出时再强制续期一次。
     assert len(renewed_at) >= 3
     assert all(
@@ -852,6 +857,9 @@ def test_stale_heartbeat_never_renews_lease(
     )
     renewed: list[float] = []
     monkeypatch.setattr(guard, "renew_lease", lambda: renewed.append(clock.value))
+    keepalive: list[str] = []
+    monkeypatch.setattr(guard, "_stop_parent_keepalive", lambda: keepalive.append("stop"))
+    monkeypatch.setattr(guard, "_start_parent_keepalive", lambda: keepalive.append("start"))
 
     result = run_watchdog(
         guard,
@@ -860,6 +868,8 @@ def test_stale_heartbeat_never_renews_lease(
 
     assert result.termination_reason == "runtime_status_stale"
     assert renewed == []
+    # 心跳失效收束 child 后，父侧仍在收尾，保活照样接续到精确释放。
+    assert keepalive == ["stop", "start"]
 
 
 def test_run_subprocess_requires_parent_heartbeat_watchdog(tmp_path: Path) -> None:

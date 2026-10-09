@@ -82,6 +82,7 @@ from trippostcollect.runtime.process import skipped_command as skipped_command
 from trippostcollect.scheduler.discovery import load_checkpoint
 from trippostcollect.scheduler.discovery import save_checkpoint
 from trippostcollect.scheduler.discovery import save_seen_candidates
+from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
 from typing import Callable
 from typing import TYPE_CHECKING
 import argparse
@@ -969,6 +970,11 @@ def _run_platform_without_policy(
         runtime_reporter=runtime_reporter,
         network_diagnostics_path=(
             navigation_diagnostics_path if platform_key == "xhs" else None
+        ),
+        operator_wait_diagnostics_path=(
+            operator_wait_diagnostics_path(behavior_evidence_path)
+            if platform_key == "xhs"
+            else None
         ),
         startup_grace_seconds=HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS,
     )

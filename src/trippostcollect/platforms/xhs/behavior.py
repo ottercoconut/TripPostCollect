@@ -48,6 +48,7 @@ from trippostcollect.runtime.behavior import (
     visible_page_state,
 )
 from trippostcollect.runtime.helpers import utc_now
+from trippostcollect.xhs.operator_wait import OperatorWaitEpisode, current_operator_wait_signal
 from trippostcollect.runtime.human_flow import (
     human_pause,
     human_scroll,
@@ -147,6 +148,23 @@ async def wait_for_xhs_search_ready(
     *,
     timeout_seconds: float = XHS_SEARCH_READY_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    # 只有验证码等待段是人工等待；就绪轮询本身仍受无进展看门狗约束。
+    with current_operator_wait_signal().episode("pre_search_verification") as operator_wait:
+        return await _wait_for_xhs_search_ready(
+            page,
+            events,
+            timeout_seconds=timeout_seconds,
+            operator_wait=operator_wait,
+        )
+
+
+async def _wait_for_xhs_search_ready(
+    page: Page,
+    events: list[dict[str, Any]],
+    *,
+    timeout_seconds: float,
+    operator_wait: OperatorWaitEpisode,
+) -> dict[str, Any]:
     started = time.monotonic()
     deadline = started + max(0.1, float(timeout_seconds))
     verification_deadline: float | None = None
@@ -245,6 +263,7 @@ async def wait_for_xhs_search_ready(
                         "url": page.url,
                     }
                     operator_verification_events.append(verification_event)
+                    operator_wait.begin()
                     try:
                         await page.bring_to_front()
                     except Exception as exc:
@@ -309,6 +328,7 @@ async def wait_for_xhs_search_ready(
                             "url": page.url,
                         }
                     )
+                operator_wait.end()
                 verification_deadline = None
                 deadline = time.monotonic() + max(0.1, float(timeout_seconds))
 
@@ -338,6 +358,34 @@ async def wait_for_xhs_continuity_verification(
     initial_markers: dict[str, bool],
     timeout_seconds: float | None = None,
     poll_seconds: float | None = None,
+    write_evidence: Callable[..., Any],
+) -> tuple[str, dict[str, bool], dict[str, Any]]:
+    with current_operator_wait_signal().waiting(f"continuity_verification:{stage}"):
+        return await _wait_for_xhs_continuity_verification(
+            page,
+            evidence=evidence,
+            evidence_path=evidence_path,
+            stage=stage,
+            initial_challenge=initial_challenge,
+            initial_text=initial_text,
+            initial_markers=initial_markers,
+            timeout_seconds=timeout_seconds,
+            poll_seconds=poll_seconds,
+            write_evidence=write_evidence,
+        )
+
+
+async def _wait_for_xhs_continuity_verification(
+    page: Page,
+    *,
+    evidence: dict[str, Any],
+    evidence_path: str | Path,
+    stage: str,
+    initial_challenge: str,
+    initial_text: str,
+    initial_markers: dict[str, bool],
+    timeout_seconds: float | None,
+    poll_seconds: float | None,
     write_evidence: Callable[..., Any],
 ) -> tuple[str, dict[str, bool], dict[str, Any]]:
     if initial_challenge not in XHS_OPERATOR_CHALLENGES:

@@ -3353,8 +3353,10 @@ def test_renewal_advances_heartbeat_and_ttl_only_for_exact_owner(
 def test_guard_renewal_keeps_exact_release_semantics(
     control_db: Path,
     tmp_path: Path,
+    business_inspector: FakeInspector,
 ) -> None:
     guard = LeaseGuard(
+        inspector=business_inspector,
         db_path=control_db,
         account_id="xhs-a01",
         run_id="guard-renewal",
@@ -3378,6 +3380,94 @@ def test_guard_renewal_keeps_exact_release_semantics(
         assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
     with pytest.raises(XhsLeaseOwnershipError, match="renewal rejected"):
         guard.renew_lease()
+
+
+def test_parent_keepalive_renews_after_child_exit_until_exact_release(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    business_inspector: FakeInspector,
+) -> None:
+    guard = LeaseGuard(
+        inspector=business_inspector,
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id="post-child-keepalive",
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "post-child-keepalive.json",
+        runtime_profile_dir=runtime_session_paths("post-child-keepalive")["profile"],
+        budget=LeaseBudget(lease_seconds=1, child_shutdown_seconds=0, root_finalize_seconds=1),
+    )
+    original_renew = xhs_leases.renew_exact_account_lease
+    original_release = xhs_leases.release_exact_account_lease
+    renewals: list[str] = []
+    keepalive_alive_at_release: list[bool] = []
+
+    def counting_renew(conn, **kwargs) -> str:
+        expires_at = original_renew(conn, **kwargs)
+        renewals.append(expires_at)
+        return expires_at
+
+    def observing_release(conn, **kwargs) -> None:
+        keepalive_alive_at_release.append(guard._parent_keepalive_thread is not None)
+        original_release(conn, **kwargs)
+
+    monkeypatch.setattr(xhs_leases, "renew_exact_account_lease", counting_renew)
+    monkeypatch.setattr(xhs_leases, "release_exact_account_lease", observing_release)
+    guard.acquire()
+    # run_subprocess 的 finally 在 child 结束后调用它；这里直接模拟父侧校验与收尾阶段。
+    guard._start_parent_keepalive()
+    deadline = time.monotonic() + 10
+    while len(renewals) < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert len(renewals) >= 2
+    with connect(control_db) as conn:
+        row = conn.execute(
+            "SELECT heartbeat_at, expires_at FROM xhs_account_leases"
+        ).fetchone()
+    assert row["expires_at"] > row["heartbeat_at"]
+
+    guard.set_outcome("completed")
+    assert guard.close() is True
+    assert keepalive_alive_at_release == [False]
+    renewals_at_release = len(renewals)
+    time.sleep(0.8)
+    assert len(renewals) == renewals_at_release
+    with connect(control_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+
+
+def test_parent_keepalive_stops_when_lease_ownership_is_lost(
+    control_db: Path,
+    tmp_path: Path,
+    business_inspector: FakeInspector,
+) -> None:
+    guard = LeaseGuard(
+        inspector=business_inspector,
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id="keepalive-lost",
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "keepalive-lost.json",
+        runtime_profile_dir=runtime_session_paths("keepalive-lost")["profile"],
+        budget=LeaseBudget(lease_seconds=1, child_shutdown_seconds=0, root_finalize_seconds=1),
+    )
+    guard.acquire()
+    with connect(control_db) as conn:
+        conn.execute("UPDATE xhs_account_leases SET owner_token='someone-else'")
+        conn.commit()
+    guard._start_parent_keepalive()
+    thread = guard._parent_keepalive_thread
+    assert thread is not None
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    with connect(control_db) as conn:
+        assert conn.execute(
+            "SELECT owner_token FROM xhs_account_leases"
+        ).fetchone()[0] == "someone-else"
+    guard._stop_parent_keepalive()
+    guard._restore_signal_handlers()
+    guard.file_lock.release()
 
 
 def test_repair_and_crawl_share_one_exact_account_mutex(

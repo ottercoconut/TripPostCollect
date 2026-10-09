@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from typing import Optional
 
 from trippostcollect.platforms.xhs.errors import PlatformRuntimeError
+from trippostcollect.xhs.operator_wait import current_operator_wait_signal
 
 
 XHS_MANUAL_WAIT_BUDGET_ENV = "TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS"
@@ -92,6 +93,7 @@ class XHSManualWaitBudget:
         self._manual_elapsed = 0.0
         self._active_tokens: set[int] = set()
         self._pause_depths: dict[int, int] = {}
+        self._stages: dict[int, str] = {}
         self._charged_since: Optional[float] = None
         self._next_token = 0
 
@@ -124,10 +126,25 @@ class XHSManualWaitBudget:
 
     def _transition(self, mutate: Callable[[], None]) -> None:
         now = self.now()
-        if self._charged_since is not None:
+        was_charging = self._charged_since is not None
+        if was_charging:
             self._manual_elapsed += max(0.0, now - self._charged_since)
         mutate()
-        self._charged_since = now if self._is_charging() else None
+        charging = self._is_charging()
+        self._charged_since = now if charging else None
+        # 计入人工预算的区间同时对父层发出“人工等待中”，父层据此冻结无进展看门狗计时。
+        if charging and not was_charging:
+            current_operator_wait_signal().enter(self._charging_stage())
+        elif was_charging and not charging:
+            current_operator_wait_signal().exit()
+
+    def _charging_stage(self) -> str:
+        charging_tokens = [
+            token
+            for token in self._active_tokens
+            if self._pause_depths.get(token, 0) == 0
+        ]
+        return self._stages.get(max(charging_tokens), "") if charging_tokens else ""
 
     @property
     def manual_elapsed_seconds(self) -> float:
@@ -148,6 +165,7 @@ class XHSManualWaitBudget:
         self.raise_if_exhausted()
         self._next_token += 1
         token = self._next_token
+        self._stages[token] = stage
         self._transition(lambda: self._active_tokens.add(token))
         return XHSManualWaitTicket(self, token, stage)
 
@@ -174,5 +192,6 @@ class XHSManualWaitBudget:
         def mutate() -> None:
             self._active_tokens.discard(token)
             self._pause_depths.pop(token, None)
+            self._stages.pop(token, None)
 
         self._transition(mutate)
