@@ -100,8 +100,11 @@ checkout 不保留认证信息。依赖准备阶段联网；根环境使用 `uv 
 （`run_matrix.ROOT_ASSEMBLY_MODULES`）并对四站调用 `trippostcollect.platforms.entry.load_crawler`，
 不调用抓取入口，装载任何 fork 顶层包即失败；上游 B站视频主循环不再导入。
 fork 测试的 PYTHONPATH 包含根 src/scripts 与 fork 自身路径。
-随后在独立 fork 环境执行 `run_matrix.FORK_OFFLINE_TESTS` 明确列出的 4 文件、34 个
-原离线用例（共享辅助的旧桥出口，T14 随目录删除）；数量变化、skip、xfail 或失败均不可验收。
+fork 离线 lane 只执行 `run_matrix.FORK_OFFLINE_TESTS` 明确列出的 0 文件、0 个原离线用例：T14-B2 起原 4 文件、
+34 个用例已按台账 target_file 原名原断言移植到 `tests/artifacts/test_staging.py` 与
+`tests/application/test_discovery.py`（component lane，映射见 `tests/fixtures/t14_fork_test_mapping.json`）。
+清单为空时即使 fork gitlink 仍在也不运行 fork lane（`run_matrix.fork_lane_enabled` 与 `card_gate.selected_lanes`
+一致），CI 仍可照常传入 `--fork-python`；清单非空时数量变化、skip、xfail 或失败均不可验收。
 原浏览器与 CDP 生命周期的 41 个用例已迁入根 `tests/runtime/`，归入 component lane；
 知乎的 3 文件、27 个用例已迁入根 `tests/platforms/zhihu/`，同样归入 component lane。
 进程、信号和 socket 调用均使用替身，不启动真实浏览器或进程。
@@ -222,7 +225,7 @@ macos_process；其中真实自发信号也移到 driver。它们计入完整 OS
 [tests/fixtures/t13_coverage.json](../tests/fixtures/t13_coverage.json) 是 F01–F15 × 五站（B站、微博、抖音、知乎、小红书）
 的机器可读覆盖声明：每格为 `covered`（列出本站 node）、`shared`（平台无关的共享实现，写明依据）、
 `na`（规格限定他站，写明依据），不接受其他状态。条目可写精确 `node`、`function`（可带必须出现的 `params` 与本站证据例外
-`site_basis`）或 `file`（`min_count`/`count`）；fork 离线条目用 `min_functions`。
+`site_basis`）或 `file`（`min_count`/`count`/`min_functions`）；原 fork 离线条目已随移植改为 component lane 的 `min_functions` 条目。
 
 - [tests/test_t13_coverage.py](../tests/test_t13_coverage.py)（component）按 `run_lanes.EXPRESSIONS` 的四个表达式各做一次
   `--collect-only`，经 `tests/support/coverage_probe.py` 记录标记，断言每个声明 node 只落在声明的 lane、

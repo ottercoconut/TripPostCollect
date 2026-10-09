@@ -266,18 +266,21 @@ def test_changed_files_only_existing_python(tmp_path):
 @pytest.mark.parametrize("change", [None, "script_hash", "fork_python", "root_commit", "fork_commit", "lanes"])
 def test_baseline_cache_identity(change):
     identity = gate.cache_identity("root", "fork", "hash", Path("/env/bin/python"))
-    lanes = gate.selected_lanes("fork-commit")
+    lanes = gate.selected_lanes("fork-commit", ("tests/test_x.py",))
     cached = {"identity": identity.copy(), "lanes": dict.fromkeys(lanes)}
     if change == "lanes":
-        lanes = gate.selected_lanes(None)
+        lanes = gate.selected_lanes(None, ("tests/test_x.py",))
     elif change:
         cached["identity"][change] += "-changed"
     assert gate.cache_valid(cached, identity, lanes) is (change is None)
 
 
 def test_lanes_and_cache_identity_without_fork():
-    assert gate.selected_lanes("abc") == ("component", "installation", "os", "fork")
-    assert gate.selected_lanes(None) == ("component", "installation", "os")
+    assert gate.selected_lanes("abc", ("tests/test_x.py",)) == ("component", "installation", "os", "fork")
+    assert gate.selected_lanes(None, ("tests/test_x.py",)) == ("component", "installation", "os")
+    # T14-B2：离线清单为空时即使 gitlink 仍在也不跑 fork lane，与 run_matrix.fork_lane_enabled 一致。
+    assert gate.selected_lanes("abc", ()) == ("component", "installation", "os")
+    assert gate.matrix_offline_tests() == () and gate.selected_lanes("abc") == gate.ROOT_LANES
     identity = gate.cache_identity("root", None, "hash", None)
     assert identity["fork_commit"] is None and identity["fork_python"] is None
     assert gate.cache_valid({"identity": identity, "lanes": dict.fromkeys(gate.ROOT_LANES)}, identity, gate.ROOT_LANES)
@@ -303,7 +306,8 @@ def test_fork_plan_covers_three_transitions(monkeypatch, tmp_path, base_fork, he
     assert plan["lanes"] == gate.selected_lanes(head_fork)
     if transition == "present":
         assert searched == [([tmp_path / "wt" / gate.FORK], base_fork)]
-        assert plan["python"] == (checkout / gate.FORK / ".venv/bin/python").absolute()
+        # 离线清单为空（T14-B2 起）时不运行 fork lane，也不要求 fork 解释器。
+        assert "fork" not in plan["lanes"] and plan["python"] is None
     elif transition == "removing":
         # 本次已无 fork：基线 fork 源码改由子模块 gitdir、主 checkout 或公共 modules 提供，不要求 fork 解释器。
         assert searched == [([tmp_path / "wt" / gate.FORK, tmp_path / "wt-git/modules" / gate.FORK,

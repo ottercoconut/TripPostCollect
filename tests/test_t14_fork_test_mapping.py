@@ -1,5 +1,7 @@
 """T14 守护：fork 离线 lane 的 34 个用例逐项映射到根测试断言（`tests/fixtures/t14_fork_test_mapping.json`）。
 
+T14-B2 起 34 个用例已按台账 target_file 原名移植（ported_to），run_matrix 离线清单相应清空。
+
 fork 仍在时按 AST 展开 fork 用例（含 parametrize 自动 id），要求映射恰好覆盖；映射引用的根测试函数必须真实
 存在。fork gitlink 删除后映射成为留档：根测试仍须存在，不得再有依赖 fork 的根测试（T14-C 须先移植），
 也不得再有 gap 条目（须先补测试并改为 equivalent/partial）。
@@ -129,8 +131,12 @@ def test_mapping_matches_fork_offline_nodes_while_fork_exists() -> None:
     spec = importlib.util.spec_from_file_location("t14_run_matrix", ROOT / "scripts/ci/run_matrix.py")
     run_matrix = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(run_matrix)
-    assert tuple(MAPPING["fork_files"]) == run_matrix.FORK_OFFLINE_TESTS
-    assert MAPPING["fork_expected_tests"] == run_matrix.FORK_EXPECTED_TESTS
+    # T14-B2：已移植（ported_to）的文件退出离线清单；清单只保留仍有未移植用例的原文件。
+    ported_files = {item["fork_node"].split("::")[0] for item in MAPPING["nodes"] if item.get("ported_to")}
+    remaining = [item for item in MAPPING["nodes"] if not item.get("ported_to")]
+    assert run_matrix.FORK_OFFLINE_TESTS == tuple(
+        name for name in MAPPING["fork_files"] if name not in ported_files)
+    assert run_matrix.FORK_EXPECTED_TESTS == len(remaining)
     expected = set()
     for relative in MAPPING["fork_files"]:
         for name, node in _test_functions(FORK / relative).items():
@@ -140,3 +146,19 @@ def test_mapping_matches_fork_offline_nodes_while_fork_exists() -> None:
             expected.update(f"{relative}::{name}" + (f"[{case}]" if ids is not None else "")
                             for case in (ids if ids is not None else [None]))
     assert {item["fork_node"] for item in MAPPING["nodes"]} == expected
+
+
+def test_ported_nodes_exist_under_same_name_and_parameters() -> None:
+    """ported_to 指向同名根 node：函数在台账目标文件中，参数 id 与原 fork 用例一致，并列为首个根引用。"""
+    for item in MAPPING["nodes"]:
+        if not item.get("ported_to"):
+            continue
+        assert item["status"] == "equivalent", item["fork_node"]
+        fork_name = item["fork_node"].split("::", 1)[1]
+        path, _, name = item["ported_to"].partition("::")
+        assert name == fork_name, item["fork_node"]
+        function, _, case = name.partition("[")
+        node = _test_functions(ROOT / path)[function]
+        ids = _parametrize_ids(node)
+        assert (case.rstrip("]") in ids) if case else ids is None, item["ported_to"]
+        assert item["root"][0]["test"] == f"{path}::{function}", item["fork_node"]

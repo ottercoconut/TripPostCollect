@@ -31,8 +31,9 @@ def test_fork_worker_paths_and_pytest_boundary(tmp_path):
     assert command[command.index("-c") + 1] == str(fork / "pyproject.toml")
     assert command[command.index("--confcutdir") + 1] == str(fork)
     assert command[command.index("--rootdir") + 1] == str(fork)
-    assert len(set(run_matrix.FORK_OFFLINE_TESTS)) == 4
-    assert run_matrix.FORK_EXPECTED_TESTS == 34
+    # T14-B2：34 个原离线用例已原名移植到根，清单为空；fork 仍在也不运行 fork lane。
+    assert run_matrix.FORK_OFFLINE_TESTS == () and run_matrix.FORK_EXPECTED_TESTS == 0
+    assert run_matrix.fork_lane_enabled(True) is False and run_matrix.fork_lane_enabled(False) is False
     assert "support.execution_guard" not in command
     assert "ci_execution_guard" in command
     root = Path(__file__).resolve().parents[1]
