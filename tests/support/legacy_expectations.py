@@ -295,6 +295,30 @@ def root_commit() -> str | None:
     return None
 
 
+def _git_porcelain(*paths: str) -> str | None:
+    import subprocess
+
+    try:
+        result = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--", *paths],
+                                capture_output=True, text=True, check=False, timeout=60)
+    except OSError:
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def root_commit_note(head: str | None) -> str:
+    """按生成时实际情况写明 HEAD、工作区是否有未提交改动、被测 src/ 与 scripts/ 是否与 HEAD 相同。"""
+    if head is None:
+        return "生成时无法读取根检出的 HEAD（git 元数据不可读），root_commit 记为 null。"
+    worktree, tested = _git_porcelain(), _git_porcelain("src", "scripts")
+    if worktree is None or tested is None:
+        return f"生成时根检出 HEAD 为 {head}；无法运行 git 判定工作区是否有未提交改动。"
+    note = f"生成时根检出 HEAD 为 {head}；工作区{'有' if worktree.strip() else '无'}未提交改动；"
+    if tested.strip():
+        return note + "被测 src/、scripts/ 含未提交改动或未跟踪文件，与 root_commit 不同。"
+    return note + "被测 src/、scripts/ 与 root_commit 相同。"
+
+
 def write_manifest(target: str) -> None:
     """再生成会话结束时写出 manifest：来源元数据与各文件哈希。"""
     root = Path(target)
@@ -308,12 +332,13 @@ def write_manifest(target: str) -> None:
         # 分批再生成时保留此前批次登记的原测试名。
         sources = sorted(_written[name]) if name in _written else known.get(name, {}).get("source_tests", [])
         files[name] = {"sha256": sha256(path.read_bytes()).hexdigest(), "source_tests": sources}
+    head = root_commit()
     manifest = {
         "generated_on": date.today().isoformat(),
         "generation_command": GENERATION_COMMAND,
         "fork_commit": fork_commit(),
-        "root_commit": root_commit(),
-        "root_commit_note": "生成时根检出的 HEAD；生成时工作区可能含未提交改动（如本批测试改动）。",
+        "root_commit": head,
+        "root_commit_note": root_commit_note(head),
         **source_digest(),
         "files": files,
     }

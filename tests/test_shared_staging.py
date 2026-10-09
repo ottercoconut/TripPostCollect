@@ -16,7 +16,7 @@ import subprocess
 import sys
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 import pytest
 
 from support import legacy_expectations as expectations
@@ -69,6 +69,20 @@ def _tree(directory):
         path.relative_to(directory).as_posix(): path.read_bytes() if path.is_file() else None
         for path in directory.rglob("*")
     }
+
+
+# 截断后的 PNG：签名 8 字节 + IHDR 块 25 字节 = 33，再留 IDAT 块 8 字节头中的 4 字节，截断落在 IDAT 头内。
+# 签名可识别而 Image.open 抛 UnidentifiedImageError，命中 inspect_image_bytes 的
+# “recognized raster image could not be decoded” 分支（与原 Pillow 压缩 PNG 截一半时相同）。
+# 不能用 len(png)//2：手工 PNG 截一半时 IHDR 完整、open 成功，会改走 verify() 的 payload 分支。
+TRUNCATED_PNG_BYTES = 37
+
+
+def _truncated_png(png):
+    content = png[:TRUNCATED_PNG_BYTES]
+    with pytest.raises(UnidentifiedImageError):
+        Image.open(BytesIO(content))
+    return content
 
 
 def _raster(kind, color="blue"):
@@ -131,13 +145,16 @@ async def _stage_images(make_store, directory, id_keyword, capture_logs):
         # 后一图片拒绝时不能留下前一图片的部分目录。
         for label, content, code in (
             ("unsupported", b"<svg></svg>", "image_non_raster_response"),
-            ("broken", png[:len(png) // 2], "image_decode_failed"),
+            ("broken", _truncated_png(png), "image_decode_failed"),
         ):
             bad = dict(items[1], content=content)
             with pytest.raises(ImageStagingError) as caught:
                 await stage(label, [items[0], bad])
             assert caught.value.code == code
             assert caught.value.source_index == 1
+            if label == "broken":
+                # 截断须命中“签名可识别但 open 失败”的分支，而不是 verify() 的 payload 分支。
+                assert "recognized raster image could not be decoded" in str(caught.value)
             errors.append((type(caught.value).__name__, str(caught.value), code, 1))
             assert not (store.image_store_path / label).exists()
             returned.append(await fail(label, dict(bad, error_code=code)))

@@ -2,8 +2,8 @@
  "generated_on": "2026-10-09",
  "generation_command": "TPC sandbox: pytest -p pytest_asyncio.plugin -m t14_legacy_guard --t14-write-legacy-expectations=<DIR> <对应测试文件>",
  "fork_commit": "3488cf2df2ee6370e8553b157e4d833ff3c0cb8d",
- "root_commit": "a2945c6f5e80e0cb54b66cd4a2e3bb33f6fbeefb",
- "root_commit_note": "生成时根检出的 HEAD；生成时工作区可能含未提交改动（如本批测试改动）。",
+ "root_commit": "ee571915c80f84379fbecd9c71a3b76f09ed5080",
+ "root_commit_note": "生成时根检出 HEAD 为 ee571915c80f84379fbecd9c71a3b76f09ed5080；工作区有未提交改动；被测 src/、scripts/ 与 root_commit 相同。",
  "bridge_sha256": "2a11439f4e5b9df83d67d0a527b37e7803c3ee1498e4901a1f6597015bfe037a",
  "fork_python_sources_sha256": "ad6e4b262cb0119ddfa9115f1d8444aa54eaff8ff14523603ac444c8a06b169d",
  "files": {
@@ -899,25 +899,25 @@
    ]
   },
   "shared_staging/baseline_classes/douyin.json": {
-   "sha256": "f062ccac737438fdbc34fc3d4df760fcfd99bf52a06008b329439fe6338c4b48",
+   "sha256": "bbf0cdbab13b73621a7951245f3f66bb443936b42c86df590817a773cae467ba",
    "source_tests": [
     "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup"
    ]
   },
   "shared_staging/baseline_classes/weibo.json": {
-   "sha256": "7d641924d190d650852fb69cc53020de396c8bfddc7795e06fd190473945044f",
+   "sha256": "c1efb5df249eb44f1a794bba2c3b52c61d2247294eb75ec9e031f97db7417a1c",
    "source_tests": [
     "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup"
    ]
   },
   "shared_staging/baseline_classes/xhs.json": {
-   "sha256": "4b1ac4004009074300806321e2acc69bf79e6eb6c8f8fba83dcac0e87a95087f",
+   "sha256": "7c59c5d58fcff558201c0d54e30d00f6293cdbc1c36217a9e0345ca60927ba0e",
    "source_tests": [
     "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup"
    ]
   },
   "shared_staging/baseline_classes/zhihu.json": {
-   "sha256": "6fb2fa4707eba46e08608665e4b34c33907b034e89f396bf080b14b816475df5",
+   "sha256": "10ec63b2410067b0eddf99b60b270980f49fb5147e7452467311c947bc3a8f4c",
    "source_tests": [
     "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup"
    ]
