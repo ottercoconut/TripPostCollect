@@ -435,6 +435,77 @@ def test_signal_after_middle_commit_keeps_committed_frontier_without_campaign(
 
 
 @pytest.mark.macos_process
+def test_signal_during_middle_import_exits_as_interrupt_without_commit(tmp_path: Path) -> None:
+    """信号落在中间层导入事务内：按冻结契约回滚并写 sqlite_import_failed，但中间层仍以 128+信号退出。"""
+
+    run = Run(tmp_path, {WEIBO: "import-hang"})
+    run.start(max_parallel=1)
+    run.wait_for(lambda: (run.work / WEIBO / "importing").is_file(), "middle inside import transaction")
+
+    run.interrupt(signal.SIGTERM, terminal_group=False)
+    exit_code = run.finish()
+
+    assert exit_code == 128 + signal.SIGTERM, run.output()
+    summary = run.summary()
+    [record] = summary["records"]
+    evidence = assert_interrupted_state(run.state(WEIBO), "SIGTERM", dispatched=True)
+    # 中间层经可捕获路径以 128+SIGTERM 退出，未走强杀兜底。
+    assert evidence["exit_code"] == 128 + signal.SIGTERM
+    assert evidence["forced_termination"] is False
+    middle_stderr = Path(record["child_logs"]["stderr_log"]).read_text(encoding="utf-8")
+    assert_once(middle_stderr, "runtime_failed:operator_interrupt:SIGTERM")
+    assert_once(middle_stderr, "[image_promotion_rollback] reason=sqlite_import_failed removed_new_files=0")
+    # 提交前中断按契约转成 sqlite_import_failed 公开结果；checkpoint/seen/campaign 未推进，
+    # 事务内写入随整批回滚消失。
+    import_result = json.loads((run.work / WEIBO / "import-result.json").read_text(encoding="utf-8"))
+    assert import_result["reason"] == "sqlite_import_failed"
+    assert import_result["error"].startswith("OperatorInterrupt:")
+    assert not (run.work / WEIBO / "persisted.json").exists()
+    assert run.snapshot() == run.before
+    with sqlite3.connect(run.db) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='interrupt_import_probe'"
+        ).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM web_posts").fetchone()[0] == 0
+    middle = run.identity(WEIBO, "middle")
+    assert_gone(middle["pid"])
+    assert not process_group_exists(middle["pgid"])
+
+
+@pytest.mark.parametrize("after_latch", ["absorbed", "unrelated-error", "no-signal"])
+def test_middle_entry_exit_follows_latched_operator_interrupt(
+    capsys: pytest.CaptureFixture[str],
+    after_latch: str,
+) -> None:
+    """中断被契约边界吸收或其后出现无关异常时，中间层退出码与 stderr 仍以锁存的首个信号为准。"""
+
+    from trippostcollect.runtime import process
+
+    def main() -> int:
+        if after_latch == "no-signal":
+            return 2
+        handler = signal.getsignal(signal.SIGTERM)
+        try:
+            handler(signal.SIGTERM, None)
+        except process.OperatorInterrupt:
+            pass
+        if after_latch == "unrelated-error":
+            raise RuntimeError("summary write failed")
+        return 2
+
+    exit_code = process.run_main_with_operator_interrupt(main)
+
+    stderr = capsys.readouterr().err
+    if after_latch == "no-signal":
+        assert exit_code == 2
+        assert "operator_interrupt" not in stderr
+        return
+    assert exit_code == 128 + signal.SIGTERM
+    assert_once(stderr, "runtime_failed:operator_interrupt:SIGTERM")
+    assert ("summary write failed" in stderr) is (after_latch == "unrelated-error")
+
+
+@pytest.mark.macos_process
 def test_both_active_parallel_lanes_are_stopped(tmp_path: Path) -> None:
     run = Run(tmp_path, {WEIBO: "hang", DOUYIN: "hang"})
     run.start(max_parallel=2)
@@ -739,33 +810,34 @@ def test_signals_during_finalize_keep_first_cause_and_exit_code(
     assert {signum: signal.getsignal(signum) for signum in handlers} == handlers
 
 
-def test_sigterm_conversion_is_scoped_to_generic_middle_layer(
+@pytest.mark.parametrize("lease_env", [False, True], ids=["generic", "xhs-lease"])
+def test_sigterm_conversion_covers_generic_and_lease_middle_layer(
     monkeypatch: pytest.MonkeyPatch,
+    lease_env: bool,
 ) -> None:
+    """通用与小红书租约中间层都把首个 SIGTERM 转为可捕获中断，重复信号不再打断收束。"""
+
     from trippostcollect.runtime import process
     from trippostcollect.xhs.leases import LEASE_DB_ENV, LEASE_ID_ENV, LEASE_OWNER_TOKEN_ENV
 
     original = signal.getsignal(signal.SIGTERM)
     for key in (LEASE_DB_ENV, LEASE_ID_ENV, LEASE_OWNER_TOKEN_ENV):
-        monkeypatch.delenv(key, raising=False)
+        if lease_env:
+            monkeypatch.setenv(key, "lease-value")
+        else:
+            monkeypatch.delenv(key, raising=False)
     with process.sigterm_raises_operator_interrupt():
         handler = signal.getsignal(signal.SIGTERM)
         assert callable(handler) and handler is not original
         with pytest.raises(process.OperatorInterrupt) as raised:
             handler(signal.SIGTERM, None)
         assert raised.value.signum == signal.SIGTERM
-        # 首个 SIGTERM 之后的重复信号不再打断收束。
+        # 首个 SIGTERM 之后的重复信号（如 LeaseGuard 收束时再发的一次）不再打断收束。
         handler(signal.SIGTERM, None)
     assert signal.getsignal(signal.SIGTERM) is original
     assert process.operator_interrupt_error(signal.SIGTERM) == (
         "runtime_failed:operator_interrupt:SIGTERM"
     )
-
-    # 小红书租约进程由 LeaseGuard 精确转发，保持原处理，避免对 exporter 发第二次温和信号。
-    for key in (LEASE_DB_ENV, LEASE_ID_ENV, LEASE_OWNER_TOKEN_ENV):
-        monkeypatch.setenv(key, "lease-value")
-    with process.sigterm_raises_operator_interrupt():
-        assert signal.getsignal(signal.SIGTERM) is original
 
 
 def test_middle_layer_script_entry_runs_under_operator_interrupt_wrapper() -> None:
@@ -885,6 +957,110 @@ def test_error_after_interrupt_decision_keeps_operator_interrupt(
     assert (status, failures) == ("retry_wait", 0)
 
 
+def _broken_finalize_failure(*_args: object, **_kwargs: object) -> None:
+    raise OSError(28, "No space left on device")
+
+
+@pytest.mark.parametrize("path", ["child-interrupt", "error-after-interrupt", "before-dispatch"])
+def test_interrupt_state_write_failure_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    path: str,
+) -> None:
+    """中断终态写入失败不得静默：记录、分类原因与 runner stderr 都可见，仍记为操作人中断。"""
+
+    job, db_path = _leased_job(tmp_path)
+    monkeypatch.setattr(crawl_runner.FrozenExecutionState, "finalize_failure", _broken_finalize_failure)
+
+    def interrupted_child(*_args: object, **_kwargs: object) -> object:
+        logs = {"stdout": "", "stderr": "", "stdout_log": "", "stderr_log": "", "command_log": ""}
+        return crawl_runner.ChildRun(
+            completed=subprocess.CompletedProcess(["child"], 128 + signal.SIGTERM, "", ""),
+            raw_stdout="",
+            raw_stderr="",
+            logs=logs,
+            interrupt_signum=int(signal.SIGTERM),
+            launched=True,
+            forced_termination=False,
+            killed_child_process_groups=[],
+            residual_process_groups=[],
+        )
+
+    if path == "before-dispatch":
+        record = crawl_runner.interrupted_before_dispatch(job, int(signal.SIGTERM))
+    else:
+        if path == "child-interrupt":
+            monkeypatch.setattr(crawl_runner, "run_child_command", interrupted_child)
+        else:
+            monkeypatch.setattr(crawl_runner, "run_child_command", _broken_finalize_failure)
+        record = crawl_runner.execute_prepared_job(
+            job,
+            args=SimpleNamespace(no_import=False),
+            db_path=db_path,
+            config={"defaults": {"schedule_jitter_ratio": 0}},
+            run_id="run-interrupt",
+            run_dir=tmp_path / "run",
+            interrupt_signal=lambda: int(signal.SIGTERM),
+        )
+
+    assert record["status"] == "retry_wait"
+    assert record["interrupt"]["signal"] == "SIGTERM"
+    assert record["state_update_failed"].startswith("OSError(28")
+    assert f"state_update_failed={record['state_update_failed']}" in record["reason"]
+    stderr = capsys.readouterr().err
+    assert_once(stderr, f"runtime_failed:operator_interrupt_state_update_failed:{WEIBO}: OSError(28")
+    state = json.loads(job.state_path.read_text(encoding="utf-8"))
+    assert state["steps"]["task_finalized"]["status"] != "failed"
+
+
+@pytest.mark.macos_process
+@isolated_signal_test
+def test_interrupt_state_write_failure_reaches_run_summary_and_keeps_signal_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """终态写入失败时 runner 仍以 128+首个信号退出，并在 run_summary 与报告中列出失败任务。"""
+
+    config = tmp_path / "crawl_targets.json"
+    config.write_text(json.dumps(_config([WEIBO]), ensure_ascii=False), encoding="utf-8")
+    original_schedule = crawl_runner.scheduling_summary
+
+    def schedule_with_signal(*args: object, **kwargs: object) -> dict:
+        # 派发前锁存首信号：排队 job 只写中断终态，不启动 child。
+        os.kill(os.getpid(), signal.SIGTERM)
+        return original_schedule(*args, **kwargs)
+
+    monkeypatch.setattr(crawl_runner, "scheduling_summary", schedule_with_signal)
+    monkeypatch.setattr(crawl_runner.FrozenExecutionState, "finalize_failure", _broken_finalize_failure)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "crawl_runner.py",
+            "--db", str(tmp_path / "runner.sqlite"),
+            "--config", str(config),
+            "--run-root", str(tmp_path / "runs"),
+            "--execution-state-root", str(tmp_path / "states"),
+            "--max-jobs", "1",
+        ],
+    )
+
+    assert crawl_runner.main() == 128 + signal.SIGTERM
+    summary = json.loads(next((tmp_path / "runs").rglob("run_summary.json")).read_text(encoding="utf-8"))
+    assert summary["interrupt"]["signal"] == "SIGTERM"
+    [failure] = summary["state_update_failures"]
+    assert failure["job_key"] == WEIBO
+    assert failure["error"].startswith("OSError(28")
+    report = next((tmp_path / "runs").rglob("run_summary.md")).read_text(encoding="utf-8")
+    assert f"中断终态写入失败：`{WEIBO}`" in report
+    assert_once(
+        capsys.readouterr().err,
+        f"runtime_failed:operator_interrupt_state_update_failed:{WEIBO}: OSError(28",
+    )
+
+
 def test_recorded_group_kill_permission_error_is_reported(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -970,12 +1146,22 @@ def test_exception_after_child_exit_keeps_output_while_grandchild_holds_pipes(
 
     try:
         if layer == "run_command":
-            original = process.progress_path_signature
+            original = None
             progress = tmp_path / "progress"
             progress.mkdir()
+            original_drain = process.drain_exited_process
+            drains: list[int] = []
+
+            def fail_first_drain(*args: object, **kwargs: object) -> object:
+                # 主循环观察到 child 退出后才会回收；异常落在这次有界回收上，由异常分支再回收。
+                drains.append(1)
+                if len(drains) == 1:
+                    raise RuntimeError("injected failure after child exit")
+                return original_drain(*args, **kwargs)
+
             monkeypatch.setattr(process, "browser_launch_environment", lambda: dict(os.environ))
             monkeypatch.setattr(process, "PROCESS_FINAL_REAP_SECONDS", 0.3)
-            monkeypatch.setattr(process, "progress_path_signature", fail_after_child_exit)
+            monkeypatch.setattr(process, "drain_exited_process", fail_first_drain)
             with pytest.raises(RuntimeError):
                 process.run_command(
                     command, tmp_path, 3600, log_dir, progress_paths=[progress], poll_seconds=0.05,
@@ -1001,6 +1187,174 @@ def test_exception_after_child_exit_keeps_output_while_grandchild_holds_pipes(
 
     assert (log_dir / "stdout.log").read_text(encoding="utf-8") == "child-out\n"
     assert (log_dir / "stderr.log").read_text(encoding="utf-8") == "child-err\n"
+
+
+PIPE_HOLDER = r"""
+import json, os, pathlib, signal, sys, time
+work = pathlib.Path(sys.argv[1])
+mode = sys.argv[2]
+
+def on_term(_signum, _frame):
+    with (work / "holder-signals").open("a") as handle:
+        handle.write("term\n")
+    os._exit(0)
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN if mode == "group-stubborn" else on_term)
+print("holder-out", flush=True)
+(work / "holder.json").write_text(json.dumps({"pid": os.getpid(), "pgid": os.getpgid(0)}))
+while True:
+    time.sleep(60)
+"""
+
+CHILD_LEAVING_PIPE_HOLDER = r"""
+import pathlib, subprocess, sys, time
+from trippostcollect.runtime.process import record_child_process_group
+work = pathlib.Path(sys.argv[1])
+mode = sys.argv[2]
+print("child-out", flush=True)
+print("child-err", file=sys.stderr, flush=True)
+# 孙进程继承 stdout/stderr：中间层退出后仍占着上层管道。
+holder = subprocess.Popen(
+    [sys.executable, "-c", sys.argv[3], str(work), mode],
+    start_new_session=mode == "recorded-worker",
+)
+if mode == "recorded-worker":
+    record_child_process_group(holder)
+while not (work / "holder.json").is_file():
+    time.sleep(0.01)
+"""
+
+
+def _run_bounded(target, *, seconds: float = 60.0):
+    """在线程中运行被测调用；超时说明主循环仍在无限等待。"""
+
+    outcome: dict[str, object] = {}
+
+    def call() -> None:
+        try:
+            outcome["value"] = target()
+        except BaseException as exc:  # pragma: no cover - 失败时交给断言展示
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=call, daemon=True)
+    started = time.monotonic()
+    worker.start()
+    worker.join(timeout=seconds)
+    assert not worker.is_alive(), "supervisor kept waiting on pipes held by a descendant"
+    if "error" in outcome:
+        raise outcome["error"]  # type: ignore[misc]
+    return outcome["value"], time.monotonic() - started
+
+
+def _kill_holder(work: Path) -> None:
+    identity = work / "holder.json"
+    if identity.is_file():
+        try:
+            os.killpg(json.loads(identity.read_text())["pgid"], signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _assert_residual_stopped(work: Path, groups: list[dict], mode: str) -> None:
+    holder = json.loads((work / "holder.json").read_text(encoding="utf-8"))
+    assert_gone(holder["pid"])
+    assert not process_group_exists(holder["pgid"])
+    [item] = groups
+    assert item["pgid"] == holder["pgid"]
+    assert item["terminated"] is True
+    assert item["group_exists"] is False
+    if mode == "recorded-worker":
+        # 登记组长仍在：只向组长发一次温和信号。
+        assert item["source"] == "recorded_process_group"
+        assert item["leader_alive"] is True
+    else:
+        assert item["source"] == "child_process_group"
+    if mode == "group-stubborn":
+        # 温和信号被忽略：超时后才 SIGKILL 兜底。
+        assert item["killed"] is True
+        assert not (work / "holder-signals").exists()
+    else:
+        assert item["killed"] is False
+        assert (work / "holder-signals").read_text(encoding="utf-8") == "term\n"
+
+
+@pytest.mark.macos_process
+@pytest.mark.parametrize("mode", ["group-gentle", "group-stubborn", "recorded-worker"])
+def test_runner_stops_descendants_holding_pipes_after_middle_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    """中间层已退出、后代仍占着 runner 管道：未收到信号也在有界时间内结束并收束残留后代。"""
+
+    work = tmp_path / "work"
+    work.mkdir()
+    state_path = tmp_path / "state.json"
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(crawl_runner, "RUNNER_CHILD_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(crawl_runner, "PROCESS_FINAL_REAP_SECONDS", 0.3)
+    monkeypatch.setattr(crawl_runner, "RUNNER_CHILD_INTERRUPT_GRACE_SECONDS", 1.0)
+    try:
+        result, _elapsed = _run_bounded(
+            lambda: crawl_runner.run_child_command(
+                [sys.executable, "-c", CHILD_LEAVING_PIPE_HOLDER, str(work), mode, PIPE_HOLDER],
+                env=dict(os.environ, TRIPPOSTCOLLECT_EXECUTION_STATE_PATH=str(state_path)),
+                log_dir=log_dir,
+                state_path=state_path,
+                interrupt_signal=lambda: None,
+            )
+        )
+    finally:
+        _kill_holder(work)
+
+    assert result.interrupt_signum is None
+    assert result.forced_termination is False
+    assert result.completed.returncode == 0
+    assert (log_dir / "stdout.log").read_text(encoding="utf-8") == "child-out\nholder-out\n"
+    assert (log_dir / "stderr.log").read_text(encoding="utf-8") == "child-err\n"
+    _assert_residual_stopped(work, result.residual_process_groups, mode)
+    assert result.completed.stdout == "child-out\nholder-out\n"
+
+
+@pytest.mark.macos_process
+@pytest.mark.parametrize("mode", ["group-gentle", "group-stubborn"])
+def test_run_command_stops_descendants_holding_pipes_after_worker_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    """worker 已退出、其进程组内后代仍占着中间层管道：不再空等看门狗，有界回收并收束。"""
+
+    from trippostcollect.runtime import process
+
+    work = tmp_path / "work"
+    work.mkdir()
+    progress = tmp_path / "progress"
+    progress.mkdir()
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(process, "browser_launch_environment", lambda: dict(os.environ))
+    monkeypatch.setattr(process, "PROCESS_FINAL_REAP_SECONDS", 0.3)
+    try:
+        run, _elapsed = _run_bounded(
+            lambda: process.run_command(
+                [sys.executable, "-c", CHILD_LEAVING_PIPE_HOLDER, str(work), mode, PIPE_HOLDER],
+                tmp_path,
+                3600,
+                log_dir,
+                progress_paths=[progress],
+                poll_seconds=0.05,
+                cleanup_grace_seconds=1.0,
+            )
+        )
+    finally:
+        _kill_holder(work)
+
+    assert run["returncode"] == 0
+    assert run["timed_out"] is False
+    assert run["forced_termination"] is False
+    assert (log_dir / "stdout.log").read_text(encoding="utf-8") == "child-out\nholder-out\n"
+    assert (log_dir / "stderr.log").read_text(encoding="utf-8") == "child-err\n"
+    _assert_residual_stopped(work, run["residual_process_groups"], mode)
 
 
 @pytest.mark.macos_process
@@ -1091,6 +1445,7 @@ def test_unrelated_error_after_child_result_keeps_original_classification(
             launched=True,
             forced_termination=False,
             killed_child_process_groups=[],
+            residual_process_groups=[],
         )
 
     def database_locked(*_args: object, **_kwargs: object) -> object:

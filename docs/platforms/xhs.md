@@ -115,6 +115,15 @@ checkpoint、cursor、seen、campaign，不得晋升/删除/导入旧 staging，
 `SIGKILL`；复核进程与 profile 全部消失后才能删除租约。复核仍有残留时保留 SQLite 租约并写
 `lease_release_deferred_live_processes`，不能为了退出码干净而强制释放。`SIGKILL` 和掉电无法执行
 `finally`，由上面的孤儿对账恢复。
+信号路径：Guard 只向 child（中间层）进程组发 SIGTERM，exporter 在独立会话中不会直接收到。中间层把
+首个 SIGTERM 转为可捕获中断，只向 exporter 转发一次温和信号，等待其清理后把 exporter 日志经头像清洗
+落盘，并在退出前把 exporter 标记为已退出；Guard 随后的收束因此不会再对 exporter 发第二次温和信号，
+只处理仍存活的登记进程。锁存之后才观察到 child 正常退出时同样按中断处理。预算嵌套：Guard 自转发起
+给 child `child_shutdown_seconds` 减 5 秒（默认 25 秒）自行退出，期间不再发 SIGTERM，超时才 SIGKILL
+并最多回收 5 秒；中间层等待 exporter 至多 12 秒（超时对 exporter 组 SIGKILL），再加 5 秒输出回收与
+6 秒收尾余量，严格小于该宽限，因此正常路径下日志一定在兜底前落盘。中间层仍被强杀时，Guard 对仍存活
+的 exporter 只发 SIGKILL，不发第二次 SIGTERM；watchdog 超时等非中断路径仍保持先 SIGTERM 后 SIGKILL。
+child 退出后回收其管道输出最多等 5 秒，后代仍占管道时显式关闭管道，残留进程按登记进程组收束。
 
 父层不按整轮墙钟强制结束 child，而是验证 child 的认证心跳：启动宽限 120 秒、陈旧阈值 60 秒、
 每 5 秒检查一次；长调度间隙只给同一 sequence 一次 30 秒恢复宽限。心跳须覆盖登录、网络暂停、抓取

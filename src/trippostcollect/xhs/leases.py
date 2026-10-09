@@ -57,6 +57,11 @@ LEASE_OWNER_TOKEN_ENV = "TRIPPOSTCOLLECT_XHS_LEASE_OWNER_TOKEN"
 _IDENTITY_PROBE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 IDENTITY_PROBE_TIMEOUT_SECONDS = 2.0
 SECOND_SIGNAL_FINALIZE_GRACE_SECONDS = 1.0
+# 操作人中断已转发给 child（中间层）后，child 关闭预算中留给 SIGKILL 后回收的上限；其余全部是
+# child 自行收束 exporter、落盘日志并登记 exporter 退出的宽限，期间不再发第二次温和信号。
+CHILD_INTERRUPT_KILL_REAP_SECONDS = 5
+# child 已退出后回收其管道输出的上限：后代仍占着管道时不无限等待，残留进程交给登记进程组收束。
+CHILD_EXIT_PIPE_DRAIN_SECONDS = 5.0
 _GATED_SUBPROCESS_RELEASE = b"G"
 _GATED_SUBPROCESS_WRAPPER = """
 import os
@@ -287,6 +292,49 @@ class LeaseBudget:
             "root_finalize_seconds": self.root_finalize_seconds,
             "lease_seconds": self.lease_seconds,
         }
+
+
+def interrupted_child_kill_reap_seconds(budget: LeaseBudget) -> int:
+    return min(CHILD_INTERRUPT_KILL_REAP_SECONDS, budget.child_shutdown_seconds // 2)
+
+
+def interrupted_child_grace_seconds(budget: LeaseBudget) -> int:
+    """自向 child 转发操作人中断起，child 自行退出的宽限；之后才 SIGKILL 兜底。"""
+
+    return budget.child_shutdown_seconds - interrupted_child_kill_reap_seconds(budget)
+
+
+def close_process_pipes(proc: subprocess.Popen[Any]) -> None:
+    """显式关闭父侧管道，不等 GC；仍持有写端的后代此后写入得到 EPIPE。"""
+
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _text_output(proc: subprocess.Popen[Any], value: Any) -> Any:
+    # TimeoutExpired 携带的累计输出始终是 bytes；文本模式下按 Popen 的编码语义还原。
+    if isinstance(value, bytes) and getattr(proc, "text_mode", False):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def drain_exited_child_output(
+    proc: subprocess.Popen[Any],
+    *,
+    timeout: float = CHILD_EXIT_PIPE_DRAIN_SECONDS,
+) -> tuple[Any, Any]:
+    """有界回收 child 输出；超时说明后代仍占着管道，保留累计输出并显式关闭管道。"""
+
+    try:
+        return proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        close_process_pipes(proc)
+        return _text_output(proc, exc.stdout), _text_output(proc, exc.stderr)
 
 
 def crawl_lease_budget(*, timeout_seconds: int, configured_lease_seconds: int) -> LeaseBudget:
@@ -1780,6 +1828,9 @@ class LeaseGuard:
         self._runtime_session_prepare_attempted = False
         self._signal_sink: Callable[[int], Any] | None = None
         self._active_child_identity: ProcessIdentity | None = None
+        # 已向 child 转发操作人中断的时刻：child 负责只向 exporter 转发一次温和信号，
+        # 此后的兜底对 exporter 只发 SIGKILL。
+        self._interrupt_forwarded_at: float | None = None
 
     def route_signals_to(self, sink: Callable[[int], Any]) -> None:
         """Route signals to a run-level first-wins latch before acquisition."""
@@ -1999,6 +2050,7 @@ class LeaseGuard:
             if identity is not None:
                 try:
                     self._signal_registered_group(identity, signal.SIGTERM)
+                    self._interrupt_forwarded_at = time.monotonic()
                 except (OSError, RuntimeError):
                     pass
             return
@@ -2185,13 +2237,19 @@ class LeaseGuard:
                 status_path = runtime_status_path(self.run_id)
                 while True:
                     if self.signal_received is not None:
-                        stdout, stderr = self._terminate_registered_subprocess(
-                            proc,
-                            identity,
-                        )
+                        if self._interrupt_forwarded_at is not None:
+                            stdout, stderr = self._await_interrupted_subprocess(
+                                proc,
+                                identity,
+                            )
+                        else:
+                            stdout, stderr = self._terminate_registered_subprocess(
+                                proc,
+                                identity,
+                            )
                         raise XhsLeaseSignal(self.signal_received)
                     if proc.poll() is not None:
-                        stdout, stderr = proc.communicate()
+                        stdout, stderr = drain_exited_child_output(proc)
                         returncode = int(proc.returncode or 0)
                         break
                     if progress_callback is not None:
@@ -2265,7 +2323,7 @@ class LeaseGuard:
                         }:
                             observed_returncode = proc.poll()
                             if observed_returncode is not None:
-                                stdout, stderr = proc.communicate()
+                                stdout, stderr = drain_exited_child_output(proc)
                                 returncode = int(observed_returncode)
                                 termination_reason = None
                                 break
@@ -2288,6 +2346,10 @@ class LeaseGuard:
                         continue
                     returncode = int(proc.returncode or 0)
                     break
+                if termination_reason is None and self.signal_received is not None:
+                    # 锁存之后才观察到 child 正常退出（中间层收束 worker 后自行退出）：按中断处理，
+                    # 与无 watchdog 分支一致，不把中断后的退出码当作 child 结果。
+                    raise XhsLeaseSignal(self.signal_received)
         except BaseException:
             self.terminate_owned_processes()
             raise
@@ -2323,7 +2385,7 @@ class LeaseGuard:
         identity: ProcessIdentity,
     ) -> tuple[str, str]:
         if proc.poll() is not None:
-            stdout, stderr = proc.communicate()
+            stdout, stderr = drain_exited_child_output(proc)
             return str(stdout or ""), str(stderr or "")
         if self.inspector.identity(proc.pid) != identity:
             return "", ""
@@ -2333,7 +2395,29 @@ class LeaseGuard:
             stdout, stderr = proc.communicate(timeout=half_budget)
         except subprocess.TimeoutExpired:
             self._signal_registered_group(identity, signal.SIGKILL)
-            stdout, stderr = proc.communicate(timeout=half_budget)
+            stdout, stderr = drain_exited_child_output(proc, timeout=half_budget)
+        return str(stdout or ""), str(stderr or "")
+
+    def _await_interrupted_subprocess(
+        self,
+        proc: subprocess.Popen[str],
+        identity: ProcessIdentity,
+    ) -> tuple[str, str]:
+        """操作人中断已转发给 child：不再发第二次温和信号，只等待其自行收束，超时才 SIGKILL。"""
+
+        assert self._interrupt_forwarded_at is not None
+        deadline = self._interrupt_forwarded_at + interrupted_child_grace_seconds(self.budget)
+        try:
+            stdout, stderr = proc.communicate(
+                timeout=max(0.01, deadline - time.monotonic())
+            )
+        except subprocess.TimeoutExpired:
+            if proc.poll() is None and self.inspector.identity(proc.pid) == identity:
+                self._signal_registered_group(identity, signal.SIGKILL)
+            stdout, stderr = drain_exited_child_output(
+                proc,
+                timeout=max(1, interrupted_child_kill_reap_seconds(self.budget)),
+            )
         return str(stdout or ""), str(stderr or "")
 
     def _signal_registered_group(self, identity: ProcessIdentity, signum: int) -> None:
@@ -2482,9 +2566,22 @@ class LeaseGuard:
         if initial["safe_to_release"]:
             return initial
 
-        def targets(assessment: Mapping[str, Any]) -> set[tuple[str, int]]:
+        # 操作人中断已转发给 child 时，exporter 已由 child 收到唯一一次温和信号；兜底只能 SIGKILL。
+        exporter_gentle_signal_forwarded = self._interrupt_forwarded_at is not None
+
+        def targets(
+            assessment: Mapping[str, Any],
+            *,
+            gentle: bool = False,
+        ) -> set[tuple[str, int]]:
             result: set[tuple[str, int]] = set()
             for item in assessment["blocking"]:
+                if (
+                    gentle
+                    and exporter_gentle_signal_forwarded
+                    and str(item.get("role") or "").startswith("exporter")
+                ):
+                    continue
                 observed = item.get("observed") if isinstance(item, dict) else None
                 if item.get("role") in {
                     "child",
@@ -2504,7 +2601,8 @@ class LeaseGuard:
             return result
 
         def send(signum: int, assessment: Mapping[str, Any]) -> bool:
-            for target_type, value in sorted(targets(assessment)):
+            gentle = signum != signal.SIGKILL
+            for target_type, value in sorted(targets(assessment, gentle=gentle)):
                 if self._finalize_remaining_seconds() <= 0:
                     return False
                 try:
