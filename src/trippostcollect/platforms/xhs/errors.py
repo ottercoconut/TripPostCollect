@@ -86,6 +86,14 @@ def xhs_cdp_lifecycle_stop_detail(exc: CDPBrowserLifecycleError) -> str:
     )
 
 
+def is_xhs_target_closed_failure(exc: BaseException) -> bool:
+    """Playwright 报告 page/context/browser 已关闭；搜索停止细节与 repair 阻断码共用。"""
+    return (
+        exc.__class__.__name__ == "TargetClosedError"
+        or "context or browser has been closed" in str(exc).lower()
+    )
+
+
 def is_recoverable_xhs_navigation_failure(exc: BaseException) -> bool:
     detail = str(exc).casefold()
     if exc.__class__.__name__ == "TargetClosedError" or any(
