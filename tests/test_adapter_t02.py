@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from trippostcollect.application import collection as t11_collection
 from trippostcollect.application import reporting as t11_reporting
+from trippostcollect.runtime.process import NO_PROGRESS_WATCHDOG_SECONDS
 
 import argparse
 import json
@@ -141,8 +142,10 @@ def test_child_command_switches_only_interpreter_entry_and_cwd(
         expected_cmd = [interpreter, "-P", "-m", ENTRY_MODULE, *old["cmd"][4:]]
         assert new[name]["cmd"] == expected_cmd, name
         assert new[name]["cwd"] == "<ROOT>", name
-        for key in ("timeout", "startup_grace_seconds", "network_diagnostics_path"):
+        for key in ("startup_grace_seconds", "network_diagnostics_path"):
             assert new[name][key] == old[key], (name, key)
+        # #75：任务级时限删除，无进展看门狗阈值统一为代码常量，不再沿用基线记录的 180。
+        assert new[name]["timeout"] == NO_PROGRESS_WATCHDOG_SECONDS, name
         # T12：规格 D2 授权删除父发无消费者的 6 个 env；T14-C 再删 1 个，其余键值不变。
         expected_env = {key: value for key, value in old["extra_env"].items()
                         if key not in T12_REMOVED_ENV | T14C_REMOVED_ENV}
@@ -163,7 +166,7 @@ def test_child_environment_does_not_inject_uv_cache_or_pythonpath(
     monkeypatch.delenv("UV_CACHE_DIR", raising=False)
     monkeypatch.delenv("PYTHONPATH", raising=False)
     child = "import os, sys; sys.exit(int('UV_CACHE_DIR' in os.environ or 'PYTHONPATH' in os.environ))"
-    result = process.run_command([sys.executable, "-c", child], tmp_path, 10, tmp_path / "logs")
+    result = process.run_command([sys.executable, "-c", child], tmp_path, 10, tmp_path / "logs", progress_paths=[])
     assert result["returncode"] == 0, result
 
 

@@ -23,7 +23,6 @@ from trippostcollect.core.paths import (
     runtime_dir,
 )
 from trippostcollect.db.bootstrap import bootstrap_database
-from trippostcollect.runtime.behavior import HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS
 
 
 ROOT = PROJECT_ROOT
@@ -37,7 +36,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Crawl target config JSON.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Benchmark output root.")
     parser.add_argument("--sites", nargs="+", help="Optional site_key filter.")
-    parser.add_argument("--timeout-per-target", type=int, default=300, help="Minimum MediaCrawler timeout per target.")
     parser.add_argument("--headless", action="store_true", help="Force MediaCrawler headless mode.")
     return parser.parse_args()
 
@@ -132,7 +130,6 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
     platform = str(params.get("platform") or job["site_key"])
     if platform == "xhs":
         raise ValueError("XHS is independently orchestrated; use scripts/xhs_runner.py")
-    timeout = max(int(params.get("timeout_per_platform") or 180), int(args.timeout_per_target))
     target_dir = ensure_dir(batch_dir / job["job_key"])
     logs_dir = ensure_dir(target_dir / "logs")
     mc_output = ensure_dir(target_dir / "mediacrawler")
@@ -146,8 +143,6 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         platform,
         "--keyword",
         args.keyword,
-        "--timeout-per-platform",
-        str(timeout),
         "--login-type",
         str(params.get("login_type") or "cookie"),
         "--db",
@@ -162,27 +157,16 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         command.append("--headed")
 
     started = time.monotonic()
-    timed_out = False
-    returncode = 0
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=str(ROOT),
-                stdout=stdout,
-                stderr=stderr,
-                text=True,
-                timeout=timeout + HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS + 120,
-                check=False,
-            )
-            returncode = int(completed.returncode)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            returncode = 124
-            stderr.write(
-                f"\n[benchmark] outer timeout after "
-                f"{timeout + HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS + 120}s\n"
-            )
+        completed = subprocess.run(
+            command,
+            cwd=str(ROOT),
+            stdout=stdout,
+            stderr=stderr,
+            text=True,
+            check=False,
+        )
+        returncode = int(completed.returncode)
     elapsed = round(time.monotonic() - started, 2)
     after_count = db_keyword_count(db_path, platform, args.keyword)
     summary_path = latest_summary(mc_output)
@@ -196,13 +180,13 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
     average = round(elapsed / imported, 3) if imported else None
     db_average = round(elapsed / db_written, 3) if db_written else None
     valid_new = int(formal_validation.get("valid_new_count") or 0)
-    completion_met = bool(summary.get("import_completion_met")) and not timed_out
+    completion_met = bool(summary.get("import_completion_met"))
     return {
         "job_key": job["job_key"],
         "site_key": job["site_key"],
         "platform": platform,
         "job_kind": job["job_kind"],
-        "status": "completed" if completion_met else ("timed_out" if timed_out else "source_not_exhausted"),
+        "status": "completed" if completion_met else "source_not_exhausted",
         "ok": bool(record.get("ok")) and completion_met,
         "record_mode": "keyword_search_post",
         "processed_import_rows": imported,
@@ -220,7 +204,6 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         "avg_seconds_per_imported_record": average,
         "avg_seconds_per_db_record": db_average,
         "returncode": returncode,
-        "timed_out": timed_out,
         "summary_path": str(summary_path) if summary_path else "",
         "stdout_log": str(stdout_path),
         "stderr_log": str(stderr_path),
@@ -230,7 +213,6 @@ def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_di
 def run_ctf_resource_job(job: dict[str, Any], args: argparse.Namespace, batch_dir: Path, db_path: Path) -> dict[str, Any]:
     params = job.get("params") or {}
     site = str(job["site_key"])
-    timeout = max(60, int(params.get("timeout_seconds") or args.timeout_per_target))
     target_dir = ensure_dir(batch_dir / job["job_key"])
     logs_dir = ensure_dir(target_dir / "logs")
     ctf_output = ensure_dir(target_dir / "ctf_resource")
@@ -250,9 +232,10 @@ def run_ctf_resource_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         str(params.get("scrapling_preflight") or "auto"),
         "--max-scrolls",
         str(int(params.get("max_scrolls") or 2)),
-        "--timeout",
-        str(timeout * 1000),
     ]
+    if params.get("timeout_seconds"):
+        # 单页导航超时，不是整轮上限。
+        command.extend(["--timeout", str(max(60, int(params["timeout_seconds"])) * 1000)])
     profile = behavior_profile_name(job)
     if profile:
         command.extend(["--behavior-profile", profile])
@@ -260,30 +243,22 @@ def run_ctf_resource_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         command.append("--headless")
 
     started = time.monotonic()
-    timed_out = False
-    returncode = 0
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=str(ROOT),
-                stdout=stdout,
-                stderr=stderr,
-                text=True,
-                timeout=timeout + 120,
-                check=False,
-            )
-            returncode = int(completed.returncode)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            returncode = 124
-            stderr.write(f"\n[benchmark] outer timeout after {timeout + 120}s\n")
+        completed = subprocess.run(
+            command,
+            cwd=str(ROOT),
+            stdout=stdout,
+            stderr=stderr,
+            text=True,
+            check=False,
+        )
+        returncode = int(completed.returncode)
 
     summary_path = latest_summary(ctf_output)
     summary = load_json(summary_path) if summary_path else {}
     capture_paths = ctf_capture_meta_paths(summary)
     import_returncode: int | None = None
-    if capture_paths and not timed_out:
+    if capture_paths:
         import_command = [
             sys.executable,
             str(ROOT / "scripts" / "import_ctf_captures.py"),
@@ -315,8 +290,8 @@ def run_ctf_resource_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         "site_key": site,
         "platform": site,
         "job_kind": job["job_kind"],
-        "status": "timed_out" if timed_out else ("completed" if processed else "no_web_posts_imported"),
-        "ok": bool(processed) and not timed_out,
+        "status": "completed" if processed else "no_web_posts_imported",
+        "ok": bool(processed),
         "requested_records": 1,
         "record_mode": "page_capture_to_post",
         "processed_import_rows": processed,
@@ -335,7 +310,6 @@ def run_ctf_resource_job(job: dict[str, Any], args: argparse.Namespace, batch_di
         "avg_seconds_per_db_record": db_average,
         "returncode": returncode,
         "import_returncode": import_returncode,
-        "timed_out": timed_out,
         "summary_path": str(summary_path) if summary_path else "",
         "capture_meta_paths": capture_paths,
         "stdout_log": str(stdout_path),

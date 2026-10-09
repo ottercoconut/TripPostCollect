@@ -14,7 +14,6 @@ NON_SOURCE_PARAM_KEYS = {
     "login_type",
     "required_fields_profile",
     "top_refresh_max_pages",
-    "timeout_per_platform",
 }
 
 

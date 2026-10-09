@@ -567,7 +567,6 @@ def test_formal_os_signal_immediately_after_acquire_has_one_failed_terminal_comm
                         "target_key": "test",
                         "keyword": "青岛旅游",
                         "top_refresh_max_pages": 1,
-                        "timeout_seconds": 1800,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }
@@ -674,7 +673,6 @@ def test_sms_terminal_before_pagination_keeps_precise_reason_and_checkpoint(
                         "target_key": "test",
                         "keyword": "青岛旅游",
                         "top_refresh_max_pages": 1,
-                        "timeout_seconds": 1800,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }

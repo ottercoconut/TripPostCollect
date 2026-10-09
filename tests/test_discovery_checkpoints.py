@@ -55,10 +55,9 @@ def test_query_fingerprint_ignores_runtime_budget_but_tracks_source_options() ->
         "platform": "weibo",
         "keyword": "青岛旅游",
         "top_refresh_max_pages": 3,
-        "timeout_per_platform": 1200,
         "search_type": "default",
     }
-    changed_budget = {**base, "top_refresh_max_pages": 5, "timeout_per_platform": 2400}
+    changed_budget = {**base, "top_refresh_max_pages": 5}
     changed_source = {**base, "search_type": "real_time"}
 
     assert query_fingerprint("weibo", "青岛旅游", base) == query_fingerprint(

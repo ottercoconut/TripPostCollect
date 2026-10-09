@@ -14,11 +14,13 @@ from trippostcollect.xhs.leases import (
     LEASE_DB_ENV,
     LEASE_ID_ENV,
     LEASE_OWNER_TOKEN_ENV,
+    LeaseBudget,
     LeaseGuard,
     LeaseSubprocessResult,
     ProcessIdentity,
     RuntimeStatusWatchdogPolicy,
     SystemProcessInspector,
+    heartbeat_lease_budget,
 )
 from trippostcollect.xhs.runtime import (
     RUNTIME_STATUS_AUTH_KEY_ENV,
@@ -50,13 +52,21 @@ def parent_runtime_watchdog_policy() -> RuntimeStatusWatchdogPolicy:
     )
 
 
+def parent_heartbeat_lease_budget(configured_lease_seconds: int) -> LeaseBudget:
+    """pool 的 lease_seconds 是父层心跳续期的 TTL，必须覆盖该固定看门狗的静默窗口。"""
+
+    return heartbeat_lease_budget(
+        configured_lease_seconds=configured_lease_seconds,
+        watchdog=parent_runtime_watchdog_policy(),
+    )
+
+
 def run_supervised_xhs_subprocess(
     guard: LeaseGuard,
     command: Sequence[str],
     *,
     cwd: Path,
     env: Mapping[str, str],
-    timeout_seconds: int,
     progress_callback: Callable[[], None] | None = None,
 ) -> LeaseSubprocessResult:
     """Run one exact child with authenticated monotonic liveness supervision."""
@@ -69,7 +79,6 @@ def run_supervised_xhs_subprocess(
         command,
         cwd=cwd,
         env=env,
-        timeout_seconds=timeout_seconds,
         runtime_watchdog=parent_runtime_watchdog_policy(),
         **({"progress_callback": progress_callback} if progress_callback is not None else {}),
     )

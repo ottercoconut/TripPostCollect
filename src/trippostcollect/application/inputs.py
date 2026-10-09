@@ -25,12 +25,6 @@ def parse_args() -> argparse.Namespace:
         help="bilibili weibo douyin zhihu; XHS is a low-level target selected only by xhs_runner.py",
     )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Output root.")
-    parser.add_argument(
-        "--timeout-per-platform",
-        type=int,
-        default=180,
-        help="Maximum seconds without durable MediaCrawler progress.",
-    )
     parser.add_argument("--login-type", default="cookie", choices=("cookie", "qrcode", "phone"), help="MediaCrawler login type.")
     parser.add_argument("--get-media", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(

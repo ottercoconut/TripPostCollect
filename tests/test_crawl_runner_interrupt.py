@@ -753,6 +753,7 @@ def test_sigterm_during_worker_popen_is_replayed_after_proc_is_owned(
                 tmp_path,
                 3600,
                 log_dir,
+                progress_paths=[],
             )
 
     assert raised.value.signum == signal.SIGTERM

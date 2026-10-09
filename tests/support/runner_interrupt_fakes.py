@@ -176,6 +176,7 @@ def run_middle(work: Path, job_key: str, mode: str, production_args: list[str]) 
             ROOT,
             3600,
             job_dir / "worker-logs",
+            progress_paths=[],
         )
         if mode == "import-hang":
             # 与生产一致：导入失败（sqlite_import_failed）时不提交 checkpoint，直接以 2 结束。

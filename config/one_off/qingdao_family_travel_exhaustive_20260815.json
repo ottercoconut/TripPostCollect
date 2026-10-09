@@ -23,7 +23,6 @@
         "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
-        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },
@@ -47,7 +46,6 @@
         "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
-        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },
@@ -71,7 +69,6 @@
         "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
-        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },
@@ -95,7 +92,6 @@
         "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
-        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },
@@ -119,7 +115,6 @@
         "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
-        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },
@@ -143,7 +138,6 @@
         "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
-        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },
@@ -167,7 +161,6 @@
         "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
-        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },
@@ -191,7 +184,6 @@
         "target_new_posts": 50,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
-        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },

@@ -109,7 +109,6 @@ def test_supervised_child_passes_one_fixed_watchdog_without_mutating_environment
         ["python", "child.py"],
         cwd=tmp_path,
         env=env,
-        timeout_seconds=7200,
     )
 
     assert observed is result
@@ -119,7 +118,7 @@ def test_supervised_child_passes_one_fixed_watchdog_without_mutating_environment
     assert call["command"] == ["python", "child.py"]
     assert call["cwd"] == tmp_path
     assert call["env"] is env
-    assert call["timeout_seconds"] == 7200
+    assert "timeout_seconds" not in call
     assert call["runtime_watchdog"] == parent_runtime_watchdog_policy()
 
 
@@ -150,7 +149,6 @@ def test_supervised_child_rejects_identity_or_secret_injection_before_spawn(
             ["child"],
             cwd=tmp_path,
             env=env,
-            timeout_seconds=7200,
         )
 
     assert guard.calls == []
@@ -167,7 +165,6 @@ def test_supervised_child_propagates_failure_without_a_second_spawn(
             ["child"],
             cwd=tmp_path,
             env={"TRIPPOSTCOLLECT_XHS_RUN_ID": "run-1"},
-            timeout_seconds=7200,
         )
 
     assert len(guard.calls) == 1

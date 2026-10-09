@@ -72,6 +72,7 @@ from trippostcollect.runtime.cookies import required_cookie_names as required_co
 from trippostcollect.runtime.helpers import _runtime_progress as _runtime_progress
 from trippostcollect.runtime.helpers import _runtime_progress_if_due as _runtime_progress_if_due
 from trippostcollect.runtime.helpers import utc_stamp as utc_stamp
+from trippostcollect.runtime.process import NO_PROGRESS_WATCHDOG_SECONDS as NO_PROGRESS_WATCHDOG_SECONDS
 from trippostcollect.runtime.process import PAGINATION_EVENT_FIELDS as PAGINATION_EVENT_FIELDS
 from trippostcollect.runtime.process import RUNTIME_WATCHDOG_STOP_DETAILS as RUNTIME_WATCHDOG_STOP_DETAILS
 from trippostcollect.runtime.process import append_runtime_watchdog_stop_event as append_runtime_watchdog_stop_event
@@ -81,6 +82,7 @@ from trippostcollect.runtime.process import skipped_command as skipped_command
 from trippostcollect.scheduler.discovery import load_checkpoint
 from trippostcollect.scheduler.discovery import save_checkpoint
 from trippostcollect.scheduler.discovery import save_seen_candidates
+from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
 from typing import Callable
 from typing import TYPE_CHECKING
 import argparse
@@ -951,11 +953,6 @@ def _run_platform_without_policy(
                 }
             extra_env["TRIPPOSTCOLLECT_COOKIES"] = str(cookie_export["cookie_header"])
             login_state = {"ok": True, **public_cookie_export(cookie_export)}
-    timeout = args.timeout_per_platform
-    if platform_key == "xhs" and (args.login_type == "qrcode" or args.headed):
-        timeout = max(timeout, 420)
-    if platform_key == "zhihu":
-        timeout = max(timeout, 300)
     execution_state_path = os.environ.get(
         "TRIPPOSTCOLLECT_EXECUTION_STATE_PATH",
         "",
@@ -966,13 +963,18 @@ def _run_platform_without_policy(
     run = run_command(
         cmd,
         ROOT,
-        timeout,
+        NO_PROGRESS_WATCHDOG_SECONDS,
         log_dir,
         extra_env=extra_env,
         progress_paths=progress_paths,
         runtime_reporter=runtime_reporter,
         network_diagnostics_path=(
             navigation_diagnostics_path if platform_key == "xhs" else None
+        ),
+        operator_wait_diagnostics_path=(
+            operator_wait_diagnostics_path(behavior_evidence_path)
+            if platform_key == "xhs"
+            else None
         ),
         startup_grace_seconds=HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS,
     )
@@ -989,7 +991,7 @@ def _run_platform_without_policy(
                 int(args.start_offset) if args.start_offset is not None else None
             ),
             start_cursor=str(args.start_cursor or "") or None,
-            inactivity_timeout_seconds=float(timeout),
+            inactivity_timeout_seconds=NO_PROGRESS_WATCHDOG_SECONDS,
             last_progress_age_seconds=float(
                 run.get("last_progress_age_seconds") or 0.0
             ),

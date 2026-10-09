@@ -60,11 +60,20 @@ python scripts/xhs_accounts.py list
 继续前逐项确认：
 
 - 操作人已显式登记并指定逻辑账号槽位；状态为 `active`，没有活动租约。runner 不会自动创建槽位。
-- `target_key` 存在且关键词属于青岛；顶部刷新和超时符合本轮要求。
+- `target_key` 存在且关键词属于青岛；顶部刷新符合本轮要求。target 不含 `timeout_seconds`，出现即
+  配置错误；正式轮不设任务时长上限，只受统一的 1200 秒无持久进展看门狗约束（见下文）。
 - `behavior_profile=xhs_guarded` 且使用有头浏览器。
-- pool 的 `lease_seconds` 是租期上限，必须覆盖动态租期：目标声明的 runtime 预算、30 秒 child 进程组
-  关闭预算和 270 秒根层验证、摘要与数据库收尾预算之和；正式租约只写本目标实际所需时长。该计划
-  到期时间用于互斥审计，不是父层整轮墙钟 kill。
+- pool 的 `lease_seconds` 是租约 TTL，不含任何任务时长：取得租约时写入 `expires_at = 取得时刻 + TTL`，
+  此后父层每收到一次新的认证心跳 sequence、且距上次续期已达 TTL 一半时，按精确 `lease_id` 与
+  owner token 把 `heartbeat_at` 推进到当前时刻、`expires_at` 推进到当前时刻加 TTL。child 结束后（正常退出
+  先续出完整 TTL；心跳失效或中断收束同样适用），父侧校验、发现提交和收尾期间由父进程保活继续按 TTL
+  一半续期，直到精确释放前才停止；所有者仍在工作，租约就不会过期。释放被延期（进程仍存活、收尾超
+  时等）时保活随本次关闭结束，之后到期只表示 owner 已不再续期。TTL 的一半必须覆盖父层心跳最长静默
+  窗口（启动宽限 120 秒与“陈旧 60 秒 + 恢复宽限 30 秒”取大，再加 5 秒检查间隔）、30 秒 child 进程组
+  关闭和 270 秒根层收尾预算，即 `lease_seconds` 至少 850 秒，不足时 runner 拒绝启动；当前配置为 900 秒。
+  续期不记账号事件，SQLite 暂时忙时留到下一次心跳或保活重试；owner token 不符时 child 阶段按失败收束，
+  收尾阶段停止保活并由精确释放报告所有权错误。到期时间只用于互斥审计，不是父层整轮墙钟 kill，也不
+  授权任何隐式释放。
 - 互动未明确时为 `none`；点赞等真实副作用必须由操作人明确选择。
 - pool schema v2 与 target schema v3 配置没有旧开关或数量控制字段。
 - checkpoint 引用的累计摘要及全部 JSONL 仍存在。
@@ -128,7 +137,24 @@ child 退出后回收其管道输出最多等 5 秒，后代仍占管道时显�
 父层不按整轮墙钟强制结束 child，而是验证 child 的认证心跳：启动宽限 120 秒、陈旧阈值 60 秒、
 每 5 秒检查一次；长调度间隙只给同一 sequence 一次 30 秒恢复宽限。心跳须覆盖登录、网络暂停、抓取
 和最终摘要写入。认证失败、sequence 回退/复用或超时会形成明确监督证据；不能把单纯“运行较久”当作
-关闭 Chrome 的理由。
+关闭 Chrome 的理由。child 运行期间由新鲜心跳驱动上文的租约续期，心跳陈旧时不再续期；child 结束后改由
+父进程保活续期到精确释放。
+
+心跳只证明中间层与 exporter 身份仍在，不证明抓取在前进。“进程活着但不再前进”由中间层统一的
+1200 秒无持久进展看门狗识别：execution state 事件、内容 JSONL、图片 manifest 与行为证据连续 1200 秒
+都没有变化时，以 `adaptive_search_stopped(runtime_failed, no_progress_timeout)` 收束，尾批不完整、不导入；
+首次进展之前另加 240 秒行为预算。网络恢复暂停期间，父层对新鲜的 `network_paused` 诊断冻结该计时，
+同一次连续断网最多 675 秒。
+
+人工等待期间同样暂停该计时，机制与网络暂停一致。共享 600 秒人工预算的计费区间（扫码登录、轮中登录
+恢复、API 验证码、作者页验证）以及搜索就绪验证与连续性验证（各自 600 秒上限，不计入共享预算）都通过
+同一个“人工等待中”信号，写 behavior evidence 同目录的 `behavior_evidence.operator_wait.json`：进入时写
+`waiting`，等待期间每 30 秒刷新，结束时写 `ended`；自动化子操作暂停人工计费时同样写 `ended`。父层只对
+新鲜（90 秒内）、结构有效且来自已核验 exporter 的 `waiting` 冻结计时，只在读到明确的 `ended` 时结束该
+暂停段，冻结的是剩余量，不重置；陈旧或格式错误的诊断不获得暂停时间。该文件不计为持久进展，1200 秒
+阈值、启动宽限和进展判定都不变。600 秒人工预算照常生效，耗尽时按 `xhs_manual_checkpoint_budget_exhausted`
+失败；父层对同一段连续人工等待设 675 秒上限，只防 child 失联后持续声称等待，超过时以
+`parent_operator_wait_timeout` 收束。
 
 正常可捕获的搜索或作者补全 `300011` 运行级限制仍必须在进程退出前先写入
 `adaptive_search_stopped(runtime_failed, stop_detail=platform_security_limit_300011, batch_complete=false)`；
@@ -183,7 +209,9 @@ python scripts/xhs_runner.py \
 - 顶层为 `planned`，只有 `plan_frozen=completed`，其余阶段为 `frozen`；
 - pool、target、正式契约及其 SHA-256 已冻结；
 - 逻辑账号槽位、关键词、来源耗尽策略、互动和有头模式正确；
-- preflight 证明槽位已显式登记且 active、无租约，并且租约覆盖动态预算；
+- preflight 证明槽位已显式登记且 active、无租约，并且租约由父层心跳续期
+  （`lease_renewed_by_parent_heartbeat=true`）；`plan.lease_budget` 记录 TTL、续期间隔与收尾预算，计划中
+  不含任务时长字段；
 - discovery 与该账号 checkpoint 一致：首次 page 1、顶部刷新 0；续跑有保存的 page、非空 search ID、
   顶部刷新页数及可选累计摘要。
 

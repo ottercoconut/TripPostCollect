@@ -80,6 +80,10 @@ def load_target(target_key: str, path: str | Path = XHS_TARGET_CONFIG) -> dict[s
             f"removed quantity fields remain in XHS target {target_key}: "
             f"{', '.join(stale_fields)}"
         )
+    if "timeout_seconds" in target:
+        raise XhsConfigError(
+            f"removed XHS target timeout_seconds remains in {resolved}: {target_key}"
+        )
     if "top_refresh_max_pages" not in target:
         raise XhsConfigError(f"XHS target {target_key} must define top_refresh_max_pages")
     top_refresh = int(target.get("top_refresh_max_pages") or 0)

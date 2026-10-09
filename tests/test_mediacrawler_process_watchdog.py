@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from support.signal_driver import isolated_signal_test
+from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -349,6 +350,7 @@ def test_private_runtime_environment_is_not_forwarded_to_exporter(
         tmp_path,
         2,
         tmp_path / "logs",
+        progress_paths=[],
     )
 
     assert result["returncode"] == 0
@@ -429,6 +431,7 @@ def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
             1,
             tmp_path / "registration-failure-logs",
             cleanup_grace_seconds=1,
+            progress_paths=[],
         )
 
     child_env = captured["child_env"]
@@ -521,6 +524,7 @@ def test_signal_after_exporter_popen_cancels_gate_before_registration_or_exec(
                 1,
                 tmp_path / f"pre-register-signal-{first_signal}",
                 cleanup_grace_seconds=1,
+                progress_paths=[],
             )
         assert interrupted.value.signum == first_signal
         assert captured["registration_calls"] == 0
@@ -594,6 +598,7 @@ def test_exporter_registration_exception_cancels_gate_without_target_exec(
             1,
             tmp_path / f"registration-exception-{type(injected).__name__}-logs",
             cleanup_grace_seconds=1,
+            progress_paths=[],
         )
 
     assert not target_side_effect.exists()
@@ -674,6 +679,7 @@ def test_exporter_gate_release_failure_marks_registered_wrapper_exited(
             1,
             tmp_path / "release-failure-logs",
             cleanup_grace_seconds=1,
+            progress_paths=[],
         )
 
     assert not target_side_effect.exists()
@@ -772,6 +778,7 @@ def test_signal_after_exporter_registration_reaps_exact_released_process(
                 1,
                 tmp_path / "registered-signal-logs",
                 cleanup_grace_seconds=1,
+                progress_paths=[],
             )
         assert captured["mark_calls"] == 1
         assert captured["marked_identity"] == captured["identity"]
@@ -1454,31 +1461,28 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
     assert captured["marked_identity"] == exporter_identity
 
 
-def test_runtime_reporter_requires_progress_tracking_before_popen(
+def test_runtime_reporter_requires_lease_registration_before_popen(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     reporter, _, _ = runtime_reporter
-    monkeypatch.setattr(
-        process,
-        "browser_launch_environment",
-        reporter_environment,
-    )
+    monkeypatch.setattr(process, "browser_launch_environment", lambda: {})
 
     def forbidden(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("Popen must not run without progress paths")
+        raise AssertionError("Popen must not run without lease registration")
 
     monkeypatch.setattr(process.subprocess, "Popen", forbidden)
     with pytest.raises(
         process.XhsRuntimeSupervisionError,
-        match="requires progress tracking",
+        match="requires lease registration",
     ):
         process.run_command(
             ["fake"],
             tmp_path,
             1,
-            tmp_path / "missing-progress-logs",
+            tmp_path / "missing-lease-logs",
+            progress_paths=[],
             runtime_reporter=reporter,
         )
 
@@ -1848,7 +1852,6 @@ def test_timeout_with_staged_records_remains_runtime_failure(
         behavior_profile="social_high_risk",
         discovery_job_id=None,
         resume_identities_path=None,
-        timeout_per_platform=1200,
     )
 
     result = mediacrawler_crawl._run_platform_without_policy(
@@ -2009,3 +2012,204 @@ def test_watchdog_does_not_replace_existing_terminal_event(tmp_path: Path) -> No
     assert result == {"skipped": True, "reason": "terminal_event_already_present"}
     assert len(payload["events"]) == 1
     assert payload["events"][0]["details"]["stop_reason"] == "source_exhausted"
+
+
+def test_operator_wait_diagnostics_require_fresh_exact_state(tmp_path: Path) -> None:
+    diagnostic_path = operator_wait_diagnostics_path(tmp_path / "behavior_evidence.json")
+    assert diagnostic_path.name == "behavior_evidence.operator_wait.json"
+    now = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+
+    def write(*, state: str = "waiting", at: datetime = now, **extra: object) -> None:
+        diagnostic_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "platform": "xhs",
+                    "updated_at": at.isoformat(),
+                    "state": state,
+                    "stage": "midrun_login_recovery",
+                    "started_at": at.isoformat(),
+                    **extra,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    read = process.xhs_operator_wait_state_from_diagnostics
+    assert read(diagnostic_path, now=now) == "unknown"
+    write()
+    assert read(diagnostic_path, now=now) == "operator_waiting"
+    write(state="ended")
+    assert read(diagnostic_path, now=now) == "operator_wait_ended"
+    # 陈旧、未知状态或多余字段都不获得暂停时间，也不能冒充结束。
+    write(at=now - timedelta(seconds=91))
+    assert read(diagnostic_path, now=now) == "unknown"
+    write(state="paused")
+    assert read(diagnostic_path, now=now) == "unknown"
+    write(extra_field=True)
+    assert read(diagnostic_path, now=now) == "unknown"
+    assert read(None, now=now) == "unknown"
+
+
+def test_parent_operator_wait_clock_reuses_network_pause_accounting() -> None:
+    clock = process.XhsParentNetworkPauseClock(
+        ceiling_seconds=10,
+        paused_state="operator_waiting",
+        resumed_state="operator_wait_ended",
+    )
+
+    assert clock.observe("operator_waiting", now=100) == (0.0, False)
+    assert clock.observe("operator_waiting", now=104) == (4.0, False)
+    # 网络状态名不能冒充人工等待；不可信间隙不计入暂停。
+    assert clock.observe("network_paused", now=106) == (0.0, False)
+    assert clock.observe("operator_waiting", now=107) == (0.0, False)
+    assert clock.observe("operator_wait_ended", now=108) == (1.0, False)
+    assert clock.observe("operator_waiting", now=120) == (0.0, False)
+    assert clock.observe("operator_waiting", now=130) == (10.0, True)
+    assert clock.total_seconds == 15
+
+
+@pytest.mark.macos_process
+def test_real_child_survives_no_progress_budget_during_operator_wait_then_resumes(
+    runtime_reporter: tuple[object, dict[str, Path], object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reporter, _, _ = runtime_reporter
+    configure_real_supervised_exporter(monkeypatch)
+    ready = tmp_path / "exporter-ready"
+    finished = tmp_path / "operator-finished"
+    wait_started_at = None
+    is_ready = bounded_ready(ready)
+    inactivity_budget = 1.0
+
+    def operator_observation(_path: object) -> str:
+        nonlocal wait_started_at
+        if not is_ready():
+            return "operator_waiting"
+        if wait_started_at is None:
+            wait_started_at = time.monotonic()
+        # 人工等待远长于剩余看门狗时间，仍不得触发 no_progress_timeout。
+        if time.monotonic() - wait_started_at < 3 * inactivity_budget:
+            return "operator_waiting"
+        finished.touch()
+        return "operator_wait_ended"
+
+    monkeypatch.setattr(
+        process,
+        "xhs_operator_wait_state_from_diagnostics",
+        operator_observation,
+    )
+
+    result = process.run_command(
+        [
+            sys.executable,
+            "-c",
+            CHILD_READY_RELEASE + "print('operator-done')\n",
+            str(ready),
+            str(finished),
+        ],
+        tmp_path,
+        inactivity_budget,
+        tmp_path / "operator-wait-logs",
+        progress_paths=[ready],
+        runtime_reporter=reporter,
+        operator_wait_diagnostics_path=tmp_path / "behavior_evidence.operator_wait.json",
+        poll_seconds=0.01,
+        cleanup_grace_seconds=1,
+    )
+
+    assert result["returncode"] == 0
+    assert result["timed_out"] is False
+    assert result["timeout_reason"] is None
+    assert result["stdout_tail"].strip() == "operator-done"
+    assert result["operator_wait_observed"] is True
+    assert result["operator_wait_total_seconds"] > inactivity_budget
+    assert result["network_pause_observed"] is False
+
+
+@pytest.mark.macos_process
+def test_watchdog_resumes_after_operator_wait_ends_and_still_times_out(
+    runtime_reporter: tuple[object, dict[str, Path], object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reporter, _, _ = runtime_reporter
+    configure_real_supervised_exporter(monkeypatch)
+    ready = tmp_path / "exporter-ready"
+    never_released = tmp_path / "never-released"
+    wait_started_at = None
+    is_ready = bounded_ready(ready)
+    inactivity_budget = 1.0
+
+    def operator_observation(_path: object) -> str:
+        nonlocal wait_started_at
+        if not is_ready():
+            return "operator_waiting"
+        if wait_started_at is None:
+            wait_started_at = time.monotonic()
+        if time.monotonic() - wait_started_at < 2 * inactivity_budget:
+            return "operator_waiting"
+        return "operator_wait_ended"
+
+    monkeypatch.setattr(
+        process,
+        "xhs_operator_wait_state_from_diagnostics",
+        operator_observation,
+    )
+    started = time.monotonic()
+
+    result = process.run_command(
+        [sys.executable, "-c", CHILD_READY_RELEASE, str(ready), str(never_released)],
+        tmp_path,
+        inactivity_budget,
+        tmp_path / "operator-wait-resume-logs",
+        progress_paths=[ready],
+        runtime_reporter=reporter,
+        operator_wait_diagnostics_path=tmp_path / "behavior_evidence.operator_wait.json",
+        poll_seconds=0.01,
+        cleanup_grace_seconds=1,
+    )
+
+    assert result["timed_out"] is True
+    assert result["timeout_reason"] == "no_progress_timeout"
+    assert result["operator_wait_observed"] is True
+    assert result["operator_wait_total_seconds"] >= inactivity_budget
+    # 冻结只延后、不重置：结束等待后最多再等一个阈值就收束。
+    assert time.monotonic() - started < 15
+    assert not never_released.exists()
+
+
+@pytest.mark.macos_process
+def test_operator_wait_longer_than_parent_ceiling_is_a_supervision_failure(
+    runtime_reporter: tuple[object, dict[str, Path], object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reporter, _, _ = runtime_reporter
+    configure_real_supervised_exporter(monkeypatch)
+    ready = tmp_path / "exporter-ready"
+    never_released = tmp_path / "never-released"
+    monkeypatch.setattr(process, "XHS_PARENT_OPERATOR_WAIT_CEILING_SECONDS", 1.5)
+    monkeypatch.setattr(
+        process,
+        "xhs_operator_wait_state_from_diagnostics",
+        lambda _path: "operator_waiting",
+    )
+
+    result = process.run_command(
+        [sys.executable, "-c", CHILD_READY_RELEASE, str(ready), str(never_released)],
+        tmp_path,
+        1.0,
+        tmp_path / "operator-wait-ceiling-logs",
+        progress_paths=[ready],
+        runtime_reporter=reporter,
+        operator_wait_diagnostics_path=tmp_path / "behavior_evidence.operator_wait.json",
+        poll_seconds=0.01,
+        cleanup_grace_seconds=1,
+    )
+
+    assert result["timed_out"] is True
+    assert result["timeout_reason"] == "parent_operator_wait_timeout"
+    assert result["operator_wait_ceiling_seconds"] == 1.5
+    assert process.runtime_watchdog_stop_detail(result) == "parent_operator_wait_timeout"

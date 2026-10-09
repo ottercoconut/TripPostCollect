@@ -41,12 +41,12 @@ from trippostcollect.xhs.config import load_pool_config, load_target
 from trippostcollect.xhs.leases import (
     LeaseGuard,
     XhsLeaseSignal,
-    crawl_lease_budget,
 )
 from trippostcollect.xhs.runtime import (
     runtime_session_paths,
 )
 from trippostcollect.xhs.supervision import (
+    parent_heartbeat_lease_budget,
     run_supervised_xhs_subprocess,
     runtime_watchdog_evidence,
 )
@@ -267,8 +267,6 @@ def build_child_command(
         keyword,
         "--output-dir",
         str(output_root),
-        "--timeout-per-platform",
-        str(int(target["timeout_seconds"])),
         "--required-fields-profile",
         str(target["required_fields_profile"]),
         "--behavior-profile",
@@ -381,10 +379,7 @@ def _run_main() -> int:
     target = load_target(args.target_key, args.target_config)
     pool = load_pool_config(args.pool_config)
     try:
-        lease_budget = crawl_lease_budget(
-            timeout_seconds=int(target["timeout_seconds"]),
-            configured_lease_seconds=int(pool["lease_seconds"]),
-        )
+        lease_budget = parent_heartbeat_lease_budget(int(pool["lease_seconds"]))
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     keyword = str(args.keyword or target["keyword"])
@@ -423,9 +418,7 @@ def _run_main() -> int:
         "batch_count": (len(targets) + args.batch_size - 1) // args.batch_size,
         "target_ids": [item["platform_post_id"] for item in targets],
         "rejected_count": len(rejected),
-        "timeout_seconds": target["timeout_seconds"],
         "lease_seconds": lease_budget.lease_seconds,
-        "configured_lease_ceiling_seconds": pool["lease_seconds"],
         "lease_budget": lease_budget.public(),
         "behavior_profile": pool["behavior_profile"],
         "login_mode": "per_run_qrcode",
@@ -614,7 +607,6 @@ def _run_main() -> int:
                 command,
                 cwd=ROOT,
                 env=env,
-                timeout_seconds=int(target["timeout_seconds"]),
             )
             terminalizer.phase("after_child_exit")
             exit_code = int(completed.returncode)

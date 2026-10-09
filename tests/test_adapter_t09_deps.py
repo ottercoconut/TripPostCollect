@@ -121,7 +121,12 @@ def test_platform_xhs_dependency_direction():
 
 
 def test_runtime_does_not_import_xhs_platform_or_scripts(tmp_path):
-    allowed_root_xhs = {"trippostcollect.xhs.leases", "trippostcollect.xhs.runtime"}
+    # #75：人工等待诊断的格式常量只依赖标准库，父层读取与 child 写入共用这一处定义。
+    allowed_root_xhs = {
+        "trippostcollect.xhs.leases",
+        "trippostcollect.xhs.runtime",
+        "trippostcollect.xhs.operator_wait",
+    }
     for path in sorted((PACKAGE / "runtime").glob("*.py")):
         for _, module, guarded in resolved_imports(path, f"trippostcollect.runtime.{path.stem}"):
             if guarded:

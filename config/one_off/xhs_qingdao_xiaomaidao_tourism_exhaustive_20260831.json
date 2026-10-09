@@ -6,7 +6,6 @@
       "keyword": "青岛小麦岛旅游",
       "target_url": "https://www.xiaohongshu.com/search_result?keyword=%E9%9D%92%E5%B2%9B%E5%B0%8F%E9%BA%A6%E5%B2%9B%E6%97%85%E6%B8%B8",
       "top_refresh_max_pages": 5,
-      "timeout_seconds": 28800,
       "required_fields_profile": "image_post_with_followers_v1",
       "followers_policy": "required"
     }

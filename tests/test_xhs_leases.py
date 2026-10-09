@@ -30,22 +30,31 @@ from trippostcollect.xhs.leases import (
     LeaseBudget,
     LeaseGuard,
     ProcessIdentity,
+    RuntimeStatusWatchdogPolicy,
     ProcessSnapshot,
     SystemProcessInspector,
     XhsLeaseOwnershipError,
     XhsLeaseSignal,
     XhsOrphanLeaseRecoveryRefused,
     acquire_exact_account_lease,
-    crawl_lease_budget,
+    heartbeat_lease_budget,
+    minimum_heartbeat_lease_seconds,
     public_lease,
     recover_orphaned_account_lease,
     register_lease_process,
     release_exact_account_lease,
+    renew_exact_account_lease,
 )
 from trippostcollect.xhs.runtime import prepare_runtime_session, runtime_session_paths
 
 
 UTC = timezone.utc
+# 测试 child 不写运行状态；启动宽限足够长，只在 child 退出时结束等待。
+TEST_WATCHDOG = RuntimeStatusWatchdogPolicy(
+    startup_grace_seconds=60,
+    stale_after_seconds=60,
+    poll_seconds=0.05,
+)
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -588,7 +597,7 @@ def acquire_test_lease(
             runtime_profile_dir=(
                 runtime_profile_dir or runtime_session_paths(run_id)["profile"]
             ),
-            budget=LeaseBudget(runtime_seconds=60),
+            budget=LeaseBudget(lease_seconds=60),
             owner=owner,
             now=now or datetime(2026, 8, 30, 0, 0, tzinfo=UTC),
             lease_id=exact_lease_id,
@@ -721,7 +730,7 @@ else:
     return result.stdout.strip()
 
 
-def test_xhs_exact_lease_schema_and_dynamic_budgets(control_db: Path) -> None:
+def test_xhs_exact_lease_schema_and_heartbeat_ttl_budget(control_db: Path) -> None:
     with connect(control_db) as conn:
         lease_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(xhs_account_leases)")
@@ -747,15 +756,23 @@ def test_xhs_exact_lease_schema_and_dynamic_budgets(control_db: Path) -> None:
             "SELECT name FROM schema_migrations WHERE version=21"
         ).fetchone()[0] == "xhs_exact_lease_identity"
 
-    crawl = crawl_lease_budget(timeout_seconds=7_200, configured_lease_seconds=29_100)
-    assert crawl.public() == {
-        "runtime_seconds": 7_200,
+    watchdog = RuntimeStatusWatchdogPolicy(
+        startup_grace_seconds=120,
+        stale_after_seconds=60,
+        poll_seconds=5,
+        resume_grace_seconds=30,
+    )
+    assert minimum_heartbeat_lease_seconds(watchdog) == 850
+    budget = heartbeat_lease_budget(configured_lease_seconds=900, watchdog=watchdog)
+    assert budget.public() == {
+        "lease_seconds": 900,
+        "renew_after_seconds": 450.0,
+        "renewal": "parent_runtime_heartbeat",
         "child_shutdown_seconds": 30,
         "root_finalize_seconds": 270,
-        "lease_seconds": 7_500,
     }
-    with pytest.raises(ValueError, match="does not cover"):
-        crawl_lease_budget(timeout_seconds=7_200, configured_lease_seconds=7_499)
+    with pytest.raises(ValueError, match="below 850"):
+        heartbeat_lease_budget(configured_lease_seconds=849, watchdog=watchdog)
 
 
 @pytest.mark.macos_process
@@ -1731,7 +1748,7 @@ def test_current_schema_guard_uses_only_current_lock_without_legacy_path_side_ef
         lease_kind="crawl",
         execution_state_path=tmp_path / "current-lock-only.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
+        budget=LeaseBudget(lease_seconds=10),
         inspector=inspector,
     )
 
@@ -1764,7 +1781,7 @@ def test_current_schema_guard_fails_closed_on_current_lock_without_legacy_fallba
         lease_kind="crawl",
         execution_state_path=tmp_path / "current-lock-busy.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
+        budget=LeaseBudget(lease_seconds=10),
         inspector=FakeInspector(current=OWNER),
     )
     try:
@@ -1834,7 +1851,7 @@ def test_migrated_schema_ignores_obsolete_lock_and_profile_runtime(
         lease_kind="crawl",
         execution_state_path=tmp_path / "migrated-current-only.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
+        budget=LeaseBudget(lease_seconds=10),
         inspector=inspector,
     )
 
@@ -1931,7 +1948,7 @@ def test_normal_end_releases_exact_lease(control_db: Path, tmp_path: Path) -> No
         lease_kind="crawl",
         execution_state_path=tmp_path / "normal-state.json",
         runtime_profile_dir=runtime_session_paths("normal-end")["profile"],
-        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=1),
+        budget=LeaseBudget(lease_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=1),
     )
     with guard:
         paths = guard.prepare_runtime_session()
@@ -1944,7 +1961,7 @@ def test_normal_end_releases_exact_lease(control_db: Path, tmp_path: Path) -> No
             [sys.executable, "-c", "print('ok')"],
             cwd=tmp_path,
             env={},
-            timeout_seconds=5,
+            runtime_watchdog=TEST_WATCHDOG,
         )
         assert result.returncode == 0
         assert result.stdout.strip() == "ok"
@@ -1987,7 +2004,7 @@ def test_guard_removes_runtime_session_before_releasing_database_lease(
         lease_kind="crawl",
         execution_state_path=tmp_path / "cleanup-before-release.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
+        budget=LeaseBudget(lease_seconds=10),
     )
     guard.acquire()
     paths = guard.prepare_runtime_session()
@@ -2024,7 +2041,7 @@ def test_guard_cleanup_requires_observed_absence(
         db_path=control_db, account_id="xhs-a01", run_id="observed-cleanup",
         lease_kind="crawl", execution_state_path=tmp_path / "state.json",
         runtime_profile_dir=runtime_session_paths("observed-cleanup")["profile"],
-        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=4),
+        budget=LeaseBudget(lease_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=4),
         inspector=inspector,
     )
     guard.acquire()
@@ -2100,7 +2117,7 @@ def test_ordinary_exception_releases_without_changing_health(
         lease_kind="crawl",
         execution_state_path=tmp_path / "error-state.json",
         runtime_profile_dir=runtime_session_paths("ordinary-error")["profile"],
-        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=1),
+        budget=LeaseBudget(lease_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=1),
     )
     with pytest.raises(RuntimeError, match="ordinary failure"):
         with guard:
@@ -2148,7 +2165,7 @@ def test_guard_repeated_close_preserves_deferred_release_result(
         lease_kind="crawl",
         execution_state_path=tmp_path / "deferred-close.json",
         runtime_profile_dir=runtime_session_paths("deferred-close")["profile"],
-        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=1),
+        budget=LeaseBudget(lease_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=1),
     )
     guard.acquire()
     paths = guard.prepare_runtime_session()
@@ -2196,7 +2213,7 @@ def test_zero_finalize_budget_retains_lease_lock_and_session_without_assessment(
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
         budget=LeaseBudget(
-            runtime_seconds=10,
+            lease_seconds=10,
             child_shutdown_seconds=2,
             root_finalize_seconds=0,
         ),
@@ -2267,7 +2284,7 @@ def test_close_identity_probe_timeout_retains_profile_lease_and_file_lock(
         lease_kind="crawl",
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10, root_finalize_seconds=1),
+        budget=LeaseBudget(lease_seconds=10, root_finalize_seconds=1),
         inspector=FakeInspector(current=OWNER),
     )
     guard.acquire()
@@ -2326,7 +2343,7 @@ def test_finalize_timeout_event_write_failure_cannot_release_any_capability(
         lease_kind="crawl",
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10, root_finalize_seconds=0),
+        budget=LeaseBudget(lease_seconds=10, root_finalize_seconds=0),
         inspector=FakeInspector(current=OWNER),
     )
     guard.acquire()
@@ -2390,7 +2407,7 @@ def test_root_deadline_bounds_term_and_kill_without_removing_profile(
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
         budget=LeaseBudget(
-            runtime_seconds=10,
+            lease_seconds=10,
             child_shutdown_seconds=2,
             root_finalize_seconds=root_budget,
         ),
@@ -2458,7 +2475,7 @@ def test_second_signal_shortens_close_deadline_without_overwriting_or_throwing(
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
         budget=LeaseBudget(
-            runtime_seconds=10,
+            lease_seconds=10,
             child_shutdown_seconds=8,
             root_finalize_seconds=10,
         ),
@@ -2514,7 +2531,7 @@ def test_safe_assessment_finishing_exactly_at_deadline_still_releases(
         lease_kind="crawl",
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10, root_finalize_seconds=2),
+        budget=LeaseBudget(lease_seconds=10, root_finalize_seconds=2),
         inspector=FakeInspector(current=OWNER),
     )
     guard.acquire()
@@ -2570,7 +2587,7 @@ def test_pid_reuse_is_not_signalled_during_bounded_close(
         lease_kind="crawl",
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10, root_finalize_seconds=2),
+        budget=LeaseBudget(lease_seconds=10, root_finalize_seconds=2),
         inspector=inspector,
     )
     guard.acquire()
@@ -2619,7 +2636,7 @@ def test_runtime_session_cleanup_failure_retains_exact_lease(
         lease_kind="crawl",
         execution_state_path=tmp_path / "cleanup-failure.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
+        budget=LeaseBudget(lease_seconds=10),
     )
     guard.acquire()
     paths = guard.prepare_runtime_session()
@@ -2668,7 +2685,7 @@ def test_incomplete_runtime_session_removal_retains_exact_lease(
         lease_kind="repair",
         execution_state_path=tmp_path / "cleanup-incomplete.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
+        budget=LeaseBudget(lease_seconds=10),
     )
     guard.acquire()
     paths = guard.prepare_runtime_session()
@@ -2715,7 +2732,7 @@ def test_guard_does_not_delete_session_it_failed_to_create(
         lease_kind="crawl",
         execution_state_path=tmp_path / "preexisting-session.json",
         runtime_profile_dir=paths["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
+        budget=LeaseBudget(lease_seconds=10),
     )
     guard.acquire()
 
@@ -2763,7 +2780,7 @@ def test_guard_owns_and_removes_session_after_mid_creation_failure(
         lease_kind="crawl",
         execution_state_path=tmp_path / "partial-claimed-session.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
+        budget=LeaseBudget(lease_seconds=10),
     )
     guard.acquire()
     create_session = xhs_leases.create_runtime_session
@@ -2802,7 +2819,7 @@ def test_guard_retains_claimed_session_when_marker_no_longer_matches(
         lease_kind="crawl",
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
+        budget=LeaseBudget(lease_seconds=10),
     )
     guard.acquire()
     paths = guard.prepare_runtime_session()
@@ -2847,7 +2864,7 @@ def test_guard_does_not_follow_preexisting_session_root_symlink(
         lease_kind="crawl",
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=paths["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
+        budget=LeaseBudget(lease_seconds=10),
     )
     guard.acquire()
     paths["root"].parent.mkdir(parents=True, exist_ok=True)
@@ -2881,7 +2898,7 @@ def test_lease_rejects_noncanonical_runtime_profile(
             lease_kind="crawl",
             execution_state_path=tmp_path / "canonical-run.json",
             runtime_profile_dir=profile_value,
-            budget=LeaseBudget(runtime_seconds=10),
+            budget=LeaseBudget(lease_seconds=10),
         )
 
 
@@ -2903,7 +2920,7 @@ def test_lease_rejects_symlinked_runtime_session(
             lease_kind="crawl",
             execution_state_path=tmp_path / "symlink-run.json",
             runtime_profile_dir=runtime_session_paths("symlink-run")["profile"],
-            budget=LeaseBudget(runtime_seconds=10),
+            budget=LeaseBudget(lease_seconds=10),
         )
 
 
@@ -2922,7 +2939,7 @@ def test_child_registration_failure_stops_untracked_process_group(
         lease_kind="crawl",
         execution_state_path=tmp_path / "registration-failure.json",
         runtime_profile_dir=runtime_session_paths("registration-failure")["profile"],
-        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=1),
+        budget=LeaseBudget(lease_seconds=10, child_shutdown_seconds=2, root_finalize_seconds=1),
     )
     child_pid: list[int] = []
 
@@ -2945,7 +2962,7 @@ def test_child_registration_failure_stops_untracked_process_group(
                 ],
                 cwd=tmp_path,
                 env={},
-                timeout_seconds=5,
+                runtime_watchdog=TEST_WATCHDOG,
             )
     assert child_pid
     assert not target_side_effect.exists()
@@ -2981,7 +2998,7 @@ def test_signal_during_child_registration_cancels_gate_before_target_exec(
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
         budget=LeaseBudget(
-            runtime_seconds=10,
+            lease_seconds=10,
             child_shutdown_seconds=2,
             root_finalize_seconds=1,
         ),
@@ -3016,7 +3033,7 @@ def test_signal_during_child_registration_cancels_gate_before_target_exec(
                 ],
                 cwd=tmp_path,
                 env={},
-                timeout_seconds=5,
+                runtime_watchdog=TEST_WATCHDOG,
             )
 
         assert interrupted.value.signum == first_signal
@@ -3046,7 +3063,7 @@ def test_keyboard_interrupt_during_child_registration_never_execs_target(
         lease_kind="crawl",
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2),
+        budget=LeaseBudget(lease_seconds=10, child_shutdown_seconds=2),
     )
     child_pid: list[int] = []
 
@@ -3071,7 +3088,7 @@ def test_keyboard_interrupt_during_child_registration_never_execs_target(
                 ],
                 cwd=tmp_path,
                 env={},
-                timeout_seconds=5,
+                runtime_watchdog=TEST_WATCHDOG,
             )
 
     assert not target_side_effect.exists()
@@ -3096,7 +3113,7 @@ def test_child_gate_release_failure_never_execs_target_or_leaves_process(
         lease_kind="crawl",
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2),
+        budget=LeaseBudget(lease_seconds=10, child_shutdown_seconds=2),
     )
     original_register = guard.register_process
 
@@ -3122,7 +3139,7 @@ def test_child_gate_release_failure_never_execs_target_or_leaves_process(
                 ],
                 cwd=tmp_path,
                 env={},
-                timeout_seconds=5,
+                runtime_watchdog=TEST_WATCHDOG,
             )
 
     assert not target_side_effect.exists()
@@ -3145,7 +3162,7 @@ def test_gated_child_keeps_registered_pid_and_process_group_after_exec(
         lease_kind="crawl",
         execution_state_path=tmp_path / f"{run_id}.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10, child_shutdown_seconds=2),
+        budget=LeaseBudget(lease_seconds=10, child_shutdown_seconds=2),
     )
     registered: list[ProcessIdentity] = []
 
@@ -3170,7 +3187,7 @@ def test_gated_child_keeps_registered_pid_and_process_group_after_exec(
             ],
             cwd=tmp_path,
             env={},
-            timeout_seconds=5,
+            runtime_watchdog=TEST_WATCHDOG,
         )
 
     assert result.returncode == 0
@@ -3272,7 +3289,7 @@ def test_expired_ttl_does_not_authorize_implicit_release(
                 requested_account_id="xhs-a01",
                 execution_state_path=tmp_path / "new-state.json",
                 runtime_profile_dir=runtime_session_paths("new-owner")["profile"],
-                budget=LeaseBudget(runtime_seconds=60),
+                budget=LeaseBudget(lease_seconds=60),
                 owner=ProcessIdentity(
                     host_id="host-a",
                     boot_id="boot-a",
@@ -3284,6 +3301,173 @@ def test_expired_ttl_does_not_authorize_implicit_release(
                 now=acquired_at + timedelta(hours=1),
             )
         assert conn.execute("SELECT run_id FROM xhs_account_leases").fetchone()[0] == "expired-owner"
+
+
+def test_renewal_advances_heartbeat_and_ttl_only_for_exact_owner(
+    control_db: Path,
+    tmp_path: Path,
+) -> None:
+    acquired_at = datetime(2026, 8, 30, 0, 0, tzinfo=UTC)
+    lease = acquire_test_lease(
+        control_db,
+        run_id="renewed-owner",
+        state_path=tmp_path / "renewed-state.json",
+        now=acquired_at,
+    )
+    renewed_at = acquired_at + timedelta(hours=3)
+    with connect(control_db) as conn:
+        expires_at = renew_exact_account_lease(
+            conn,
+            lease_id=lease["lease_id"],
+            owner_token=lease["owner_token"],
+            lease_seconds=900,
+            now=renewed_at,
+        )
+        row = conn.execute(
+            "SELECT acquired_at, heartbeat_at, expires_at FROM xhs_account_leases"
+        ).fetchone()
+        assert expires_at == (renewed_at + timedelta(seconds=900)).isoformat()
+        assert row["expires_at"] == expires_at
+        assert row["heartbeat_at"] == renewed_at.isoformat()
+        assert row["acquired_at"] == acquired_at.isoformat()
+        with pytest.raises(XhsLeaseOwnershipError, match="renewal rejected"):
+            renew_exact_account_lease(
+                conn,
+                lease_id=lease["lease_id"],
+                owner_token="not-the-owner",
+                lease_seconds=900,
+                now=renewed_at + timedelta(minutes=5),
+            )
+        assert conn.execute(
+            "SELECT expires_at FROM xhs_account_leases"
+        ).fetchone()[0] == expires_at
+        event_types = [
+            item[0]
+            for item in conn.execute(
+                "SELECT event_type FROM xhs_account_events ORDER BY id"
+            )
+        ]
+        assert "lease_renewed" not in event_types
+
+
+def test_guard_renewal_keeps_exact_release_semantics(
+    control_db: Path,
+    tmp_path: Path,
+    business_inspector: FakeInspector,
+) -> None:
+    guard = LeaseGuard(
+        inspector=business_inspector,
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id="guard-renewal",
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "guard-renewal-state.json",
+        runtime_profile_dir=runtime_session_paths("guard-renewal")["profile"],
+        budget=LeaseBudget(lease_seconds=900, child_shutdown_seconds=2, root_finalize_seconds=1),
+    )
+    with guard:
+        acquired_expiry = guard.lease_expires_at
+        guard.renew_lease()
+        assert guard.lease_expires_at >= acquired_expiry
+        with connect(control_db) as conn:
+            row = conn.execute(
+                "SELECT expires_at, lease_duration_seconds FROM xhs_account_leases"
+            ).fetchone()
+        assert row["expires_at"] == guard.lease_expires_at
+        assert row["lease_duration_seconds"] == 900
+        guard.set_outcome("completed")
+    with connect(control_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+    with pytest.raises(XhsLeaseOwnershipError, match="renewal rejected"):
+        guard.renew_lease()
+
+
+def test_parent_keepalive_renews_after_child_exit_until_exact_release(
+    control_db: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    business_inspector: FakeInspector,
+) -> None:
+    guard = LeaseGuard(
+        inspector=business_inspector,
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id="post-child-keepalive",
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "post-child-keepalive.json",
+        runtime_profile_dir=runtime_session_paths("post-child-keepalive")["profile"],
+        budget=LeaseBudget(lease_seconds=1, child_shutdown_seconds=0, root_finalize_seconds=1),
+    )
+    original_renew = xhs_leases.renew_exact_account_lease
+    original_release = xhs_leases.release_exact_account_lease
+    renewals: list[str] = []
+    keepalive_alive_at_release: list[bool] = []
+
+    def counting_renew(conn, **kwargs) -> str:
+        expires_at = original_renew(conn, **kwargs)
+        renewals.append(expires_at)
+        return expires_at
+
+    def observing_release(conn, **kwargs) -> None:
+        keepalive_alive_at_release.append(guard._parent_keepalive_thread is not None)
+        original_release(conn, **kwargs)
+
+    monkeypatch.setattr(xhs_leases, "renew_exact_account_lease", counting_renew)
+    monkeypatch.setattr(xhs_leases, "release_exact_account_lease", observing_release)
+    guard.acquire()
+    # run_subprocess 的 finally 在 child 结束后调用它；这里直接模拟父侧校验与收尾阶段。
+    guard._start_parent_keepalive()
+    deadline = time.monotonic() + 10
+    while len(renewals) < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert len(renewals) >= 2
+    with connect(control_db) as conn:
+        row = conn.execute(
+            "SELECT heartbeat_at, expires_at FROM xhs_account_leases"
+        ).fetchone()
+    assert row["expires_at"] > row["heartbeat_at"]
+
+    guard.set_outcome("completed")
+    assert guard.close() is True
+    assert keepalive_alive_at_release == [False]
+    renewals_at_release = len(renewals)
+    time.sleep(0.8)
+    assert len(renewals) == renewals_at_release
+    with connect(control_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM xhs_account_leases").fetchone()[0] == 0
+
+
+def test_parent_keepalive_stops_when_lease_ownership_is_lost(
+    control_db: Path,
+    tmp_path: Path,
+    business_inspector: FakeInspector,
+) -> None:
+    guard = LeaseGuard(
+        inspector=business_inspector,
+        db_path=control_db,
+        account_id="xhs-a01",
+        run_id="keepalive-lost",
+        lease_kind="crawl",
+        execution_state_path=tmp_path / "keepalive-lost.json",
+        runtime_profile_dir=runtime_session_paths("keepalive-lost")["profile"],
+        budget=LeaseBudget(lease_seconds=1, child_shutdown_seconds=0, root_finalize_seconds=1),
+    )
+    guard.acquire()
+    with connect(control_db) as conn:
+        conn.execute("UPDATE xhs_account_leases SET owner_token='someone-else'")
+        conn.commit()
+    guard._start_parent_keepalive()
+    thread = guard._parent_keepalive_thread
+    assert thread is not None
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    with connect(control_db) as conn:
+        assert conn.execute(
+            "SELECT owner_token FROM xhs_account_leases"
+        ).fetchone()[0] == "someone-else"
+    guard._stop_parent_keepalive()
+    guard._restore_signal_handlers()
+    guard.file_lock.release()
 
 
 def test_repair_and_crawl_share_one_exact_account_mutex(
@@ -3305,7 +3489,7 @@ def test_repair_and_crawl_share_one_exact_account_mutex(
                 requested_account_id="xhs-a01",
                 execution_state_path=tmp_path / "crawl-contender.json",
                 runtime_profile_dir=runtime_session_paths("crawl-contender")["profile"],
-                budget=LeaseBudget(runtime_seconds=60),
+                budget=LeaseBudget(lease_seconds=60),
                 owner=ProcessIdentity(
                     "host-a", "boot-a", 222, "2026-08-30T00:02:00+00:00", "owner-222", 222
                 ),
@@ -3334,7 +3518,7 @@ def test_repair_and_crawl_share_one_exact_account_mutex(
                 requested_account_id="xhs-a01",
                 execution_state_path=tmp_path / "repair-contender.json",
                 runtime_profile_dir=runtime_session_paths("repair-contender")["profile"],
-                budget=LeaseBudget(runtime_seconds=60),
+                budget=LeaseBudget(lease_seconds=60),
                 owner=ProcessIdentity(
                     "host-a", "boot-a", 333, "2026-08-30T00:03:00+00:00", "owner-333", 333
                 ),
@@ -3367,7 +3551,7 @@ def test_exact_leases_only_block_the_same_account(
             requested_account_id="xhs-a02",
             execution_state_path=tmp_path / "account-two.json",
             runtime_profile_dir=runtime_session_paths("account-two")["profile"],
-            budget=LeaseBudget(runtime_seconds=60),
+            budget=LeaseBudget(lease_seconds=60),
             owner=ProcessIdentity(
                 "host-a", "boot-a", 222, "2026-08-30T00:02:00+00:00", "owner-222", 222
             ),
@@ -3993,7 +4177,7 @@ def test_signal_handler_latches_first_signal_and_restores_handlers(
         lease_kind="crawl",
         execution_state_path=tmp_path / "signal-latch.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
+        budget=LeaseBudget(lease_seconds=10),
         inspector=FakeInspector(),
     )
     previous = {
@@ -4041,7 +4225,7 @@ def test_signal_latch_survives_deferred_close_and_restores_handlers(
         lease_kind="crawl",
         execution_state_path=tmp_path / "signal-latch-deferred-close.json",
         runtime_profile_dir=runtime_session_paths(run_id)["profile"],
-        budget=LeaseBudget(runtime_seconds=10),
+        budget=LeaseBudget(lease_seconds=10),
         inspector=FakeInspector(current=OWNER),
     )
     guard.acquire()
@@ -4118,8 +4302,18 @@ GUARD_DRIVER = r"""
 import sys
 from pathlib import Path
 from trippostcollect.xhs import accounts, runtime
-from trippostcollect.xhs.leases import LeaseBudget, LeaseGuard, XhsLeaseSignal
+from trippostcollect.xhs.leases import (
+    LeaseBudget,
+    LeaseGuard,
+    RuntimeStatusWatchdogPolicy,
+    XhsLeaseSignal,
+)
 
+TEST_WATCHDOG = RuntimeStatusWatchdogPolicy(
+    startup_grace_seconds=120,
+    stale_after_seconds=60,
+    poll_seconds=0.05,
+)
 root = Path(sys.argv[1])
 run_id = sys.argv[2]
 accounts.XHS_LOCK_ROOT = root / "locks"
@@ -4131,7 +4325,7 @@ guard = LeaseGuard(
     lease_kind="crawl",
     execution_state_path=root / f"{run_id}.missing.json",
     runtime_profile_dir=runtime.runtime_session_paths(run_id)["profile"],
-    budget=LeaseBudget(runtime_seconds=60, child_shutdown_seconds=4, root_finalize_seconds=1),
+    budget=LeaseBudget(lease_seconds=60, child_shutdown_seconds=4, root_finalize_seconds=1),
 )
 try:
     with guard:
@@ -4139,7 +4333,7 @@ try:
             [sys.executable, "-c", "import time; time.sleep(60)"],
             cwd=root,
             env={},
-            timeout_seconds=60,
+            runtime_watchdog=TEST_WATCHDOG,
         )
 except XhsLeaseSignal as exc:
     raise SystemExit(128 + exc.signum)

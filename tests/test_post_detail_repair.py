@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import signal
-import subprocess
 import sys
 from importlib import import_module
 from pathlib import Path
@@ -493,7 +491,6 @@ def test_build_child_command_disables_discovery_writes(tmp_path: Path) -> None:
         db_path=tmp_path / "db.sqlite",
         output_root=tmp_path / "output",
         targets_path=tmp_path / "targets.json",
-        timeout_seconds=600,
         headless=False,
     )
 
@@ -501,6 +498,7 @@ def test_build_child_command_disables_discovery_writes(tmp_path: Path) -> None:
     assert "--candidate-hard-limit" not in command
     assert "--target-new-posts" not in command
     assert "--completion-mode" not in command
+    assert "--timeout-per-platform" not in command
     assert "--post-repair" in command
     assert "--repair-targets-file" in command
     assert "--download-images" in command
@@ -659,7 +657,7 @@ def test_repair_runtime_stop_reason_preserves_structured_blocker() -> None:
     assert mediacrawler.repair_runtime_stop_reason(records, ["douyin"]) == ""
 
 
-def test_run_repair_child_timeout_uses_formal_process_group_contract(
+def test_run_repair_child_waits_without_batch_wall_clock_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[tuple[str, int, int | None]] = []
@@ -669,43 +667,26 @@ def test_run_repair_child_timeout_uses_formal_process_group_contract(
         returncode = None
 
         def communicate(self, *, timeout: int | None = None) -> tuple[str, str]:
-            if timeout == 17:
-                raise subprocess.TimeoutExpired(
-                    ["child"], timeout, output="before", stderr="warning"
-                )
-            self.returncode = 124
-            return "after", "tail"
-
-    process = FakeProcess()
+            assert timeout is None
+            self.returncode = 0
+            return "out", "err"
 
     def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
         del command
         events.append(("popen", int(kwargs["start_new_session"]), int(kwargs["text"])))
-        return process
-
-    def fake_killpg(pid: int, sig: int) -> None:
-        events.append(("killpg", pid, sig))
+        return FakeProcess()
 
     monkeypatch.setattr(repair.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(repair.os, "killpg", fake_killpg)
 
-    result = repair.run_repair_child(
-        ["child"],
-        cwd=ROOT,
-        timeout_seconds=17,
-    )
+    result = repair.run_repair_child(["child"], cwd=ROOT)
 
-    assert result["timed_out"] is True
-    assert result["returncode"] == 124
-    assert result["stdout"] == "beforeafter"
-    assert result["stderr"] == "warningtail"
-    assert events == [("popen", 1, 1), ("killpg", 4242, signal.SIGTERM)]
+    assert result == {"returncode": 0, "stdout": "out", "stderr": "err"}
+    assert events == [("popen", 1, 1)]
 
 
 @pytest.mark.parametrize(
     ("error", "strict"),
     [
-        ("post_detail_repair_batch_timeout:2040", False),
         ("missing_child_summary_exit_2", False),
         ("runtime_failed", False),
         ("repair_no_valid_detail", False),

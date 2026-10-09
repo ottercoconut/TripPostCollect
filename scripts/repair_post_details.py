@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import json
 import os
-import signal
 import sqlite3
 import subprocess
 import sys
@@ -18,7 +17,6 @@ from urllib.parse import urlparse
 
 from trippostcollect.core.execution_state import FORMAL_STEPS, FrozenExecutionState
 from trippostcollect.application.failures import extract_stdout_json
-from trippostcollect.runtime.behavior import HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS
 from trippostcollect.artifacts.image_completion import (
     verify_image_artifacts,
     verify_image_persistence,
@@ -63,7 +61,6 @@ def parse_args() -> argparse.Namespace:
         help="Maximum pending rows in this pass; 0 scans every currently actionable row.",
     )
     parser.add_argument("--post-id", action="append", dest="post_ids", default=[])
-    parser.add_argument("--timeout-per-batch", type=int, default=900)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -370,7 +367,6 @@ def build_child_command(
     db_path: Path,
     output_root: Path,
     targets_path: Path,
-    timeout_seconds: int,
     headless: bool,
 ) -> list[str]:
     command = [
@@ -382,8 +378,6 @@ def build_child_command(
         keyword,
         "--output-dir",
         str(output_root),
-        "--timeout-per-platform",
-        str(timeout_seconds),
         "--required-fields-profile",
         "image_post_with_followers_v1",
         "--behavior-profile",
@@ -420,8 +414,8 @@ def run_repair_child(
     command: list[str],
     *,
     cwd: Path,
-    timeout_seconds: int,
 ) -> dict[str, Any]:
+    # 批次不设整轮墙钟上限；卡住由 child 中间层的无进展看门狗收束。
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -431,39 +425,12 @@ def run_repair_child(
         text=True,
         start_new_session=True,
     )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
-        return {
-            "returncode": int(process.returncode or 0),
-            "stdout": stdout or "",
-            "stderr": stderr or "",
-            "timed_out": False,
-            "timeout_seconds": timeout_seconds,
-        }
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            extra_stdout, extra_stderr = process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            extra_stdout, extra_stderr = process.communicate()
-        stdout += extra_stdout or ""
-        stderr += extra_stderr or ""
-        return {
-            "returncode": 124,
-            "stdout": stdout,
-            "stderr": stderr,
-            "timed_out": True,
-            "timeout_seconds": timeout_seconds,
-        }
+    stdout, stderr = process.communicate()
+    return {
+        "returncode": int(process.returncode or 0),
+        "stdout": stdout or "",
+        "stderr": stderr or "",
+    }
 
 
 def repaired_rows(
@@ -612,8 +579,6 @@ def repair_persistence_failure_reason(
 def _strict_batch_blocker(error: str) -> bool:
     if not error:
         return False
-    if error.startswith("post_detail_repair_batch_timeout:"):
-        return False
     if error.startswith("missing_child_summary_exit_"):
         return False
     return error in {
@@ -668,8 +633,8 @@ def _complete_no_op(
 
 def main() -> int:
     args = parse_args()
-    if args.batch_size <= 0 or args.max_items < 0 or args.timeout_per_batch <= 0:
-        raise SystemExit("--batch-size and --timeout-per-batch must be positive; --max-items cannot be negative")
+    if args.batch_size <= 0 or args.max_items < 0:
+        raise SystemExit("--batch-size must be positive; --max-items cannot be negative")
     if not str(args.keyword or "").strip():
         raise SystemExit("--keyword cannot be empty")
 
@@ -731,7 +696,6 @@ def main() -> int:
             db_path=db_path,
             output_root=run_dir / "children" / f"batch-{index:04d}",
             targets_path=targets_path,
-            timeout_seconds=args.timeout_per_batch,
             headless=args.headless,
         )
         batch_plans.append(
@@ -761,7 +725,6 @@ def main() -> int:
         "selected_waived_count": len(selected_waived),
         "batch_size": args.batch_size,
         "batch_count": len(batch_plans),
-        "timeout_per_batch": args.timeout_per_batch,
         "headed": not args.headless,
         "discovery_writes": False,
         "local_image_storage_required": True,
@@ -862,9 +825,6 @@ def main() -> int:
             child_run = run_repair_child(
                 batch_plan["command"],
                 cwd=PROJECT_ROOT,
-                timeout_seconds=(
-                    args.timeout_per_batch + HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS
-                ),
             )
             stdout = child_run["stdout"]
             stderr = child_run["stderr"]
@@ -872,12 +832,7 @@ def main() -> int:
             child_summary_path = str(stdout_json.get("summary") or "")
             child_summary = load_child_summary(child_summary_path)
             child_error = ""
-            if child_run["timed_out"]:
-                child_error = (
-                    "post_detail_repair_batch_timeout:"
-                    f"{child_run['timeout_seconds']}"
-                )
-            elif not child_summary:
+            if not child_summary:
                 child_error = f"missing_child_summary_exit_{child_run['returncode']}"
             else:
                 child_error = _fatal_child_failure(child_summary)
@@ -887,8 +842,6 @@ def main() -> int:
                 "batch": batch_plan["batch"],
                 "target_count": batch_plan["target_count"],
                 "exit_code": int(child_run["returncode"]),
-                "timed_out": bool(child_run["timed_out"]),
-                "timeout_seconds": int(child_run["timeout_seconds"]),
                 "summary": child_summary_path,
                 "import_completion_met": bool(child_summary.get("import_completion_met")),
                 "valid_total_count": int(
@@ -1008,9 +961,6 @@ def main() -> int:
                         else "completed_with_remaining"
                     )
                     state.finalize(outcome=outcome, evidence=persistence_evidence)
-    except subprocess.TimeoutExpired as exc:
-        fatal_error = f"post_detail_repair_batch_timeout:{exc.timeout}"
-        _state_fail_open(state, fatal_error)
     except (OSError, sqlite3.Error, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
         fatal_error = f"post_detail_repair_exception:{type(exc).__name__}:{exc}"
         _state_fail_open(state, fatal_error)

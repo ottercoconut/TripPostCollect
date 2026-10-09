@@ -1775,13 +1775,28 @@ def frozen_view(result, tmp_path) -> dict:
     return expectations.scrub(normalized(result), (tmp_path, "<TMP>"))
 
 
+# #75 授权差异：人工等待期间 child 额外写出供父层冻结看门狗的诊断文件。
+OPERATOR_WAIT_DIAGNOSTIC = "logs/xhs/behavior_evidence.operator_wait.json"
+
+
+def without_operator_wait_diagnostic(view: dict) -> dict:
+    """新增诊断只允许是结构有效、且等待已明确结束的那一个文件；其余产物仍逐项比较。"""
+    files = dict(view["files"])
+    raw = files.pop(OPERATOR_WAIT_DIAGNOSTIC, None)
+    if raw is not None:
+        payload = json.loads(raw)
+        assert set(payload) == {"schema_version", "platform", "updated_at", "state", "stage", "started_at"}
+        assert (payload["schema_version"], payload["platform"], payload["state"]) == (1, "xhs", "ended")
+    return {**view, "files": files}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario_name", sorted(SCENARIOS))
 async def test_root_xhs_matches_frozen_legacy_expectation(tmp_path, monkeypatch, scenario_name):
     """T14：根实现与固化的冻结旧实现归一结果比较（同一 normalized 与逐项比较），不加载 fork 或 E。"""
     new = await run_side(RootSide(), scenario_name, tmp_path, monkeypatch)
     expected = deviation.xhs_cdp_settings_without_user_data_dir(expectations.load(*T14_XHS, scenario_name))
-    assert_normalized_equivalent(expected, frozen_view(new, tmp_path))
+    assert_normalized_equivalent(expected, without_operator_wait_diagnostic(frozen_view(new, tmp_path)))
     check_scenario(new, scenario_name)
     assert set(new["ready_modules"]) <= {"trippostcollect.platforms.xhs.behavior"}
 

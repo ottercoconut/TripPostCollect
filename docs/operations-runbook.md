@@ -58,11 +58,14 @@ python scripts/crawl_runner.py \
 指定 job 时，正式命令使用与 dry-run 相同的 `--job-key`。正式结构化抓取固定抓到可验证来源耗尽，
 不接受数量目标、候选硬上限、停滞停止或完成模式选择参数。
 
-`timeout_per_platform` / `--timeout-per-platform` 是“无持久进展看门狗”，不是从进程启动累计的总运行
-时限。execution state 事件、内容 JSONL、图片 manifest 或行为证据任一发生变化都会重置计时；因此只要
-来源耗尽抓取仍在推进，就允许总运行时间超过该值。启动阶段另保留行为预算。所有受监控证据持续不变
-达到阈值时才记录 `adaptive_search_stopped(runtime_failed, no_progress_timeout)`，尾批标记为不完整，禁止
-导入并从最后完整批次恢复。看门狗收束先只向监督进程发送一次 SIGTERM，最多等待 20 秒让 child、
+正式抓取不设任务级时长上限，配置与 CLI 都没有时限参数：通用 job 出现 `timeout_per_platform`、小红书
+target 出现 `timeout_seconds` 即配置错误，中间层也不再接受 `--timeout-per-platform`。所有平台（含小红书）
+统一使用代码常量 1200 秒的“无持久进展看门狗”，它不是从进程启动累计的总运行时限。execution state
+事件、内容 JSONL、图片 manifest 或行为证据任一发生变化都会重置计时；因此只要来源耗尽抓取仍在推进，
+就允许总运行时间超过该值。首次进展之前另加 240 秒行为预算。小红书网络恢复暂停与人工等待期间暂停
+计时（见“登录”一节的网络恢复与人工等待说明）。所有受监控证据持续不变达到 1200 秒时才记录
+`adaptive_search_stopped(runtime_failed, no_progress_timeout)`，尾批标记为不完整，禁止导入并从最后完整
+批次恢复。看门狗收束先只向监督进程发送一次 SIGTERM，最多等待 20 秒让 child、
 exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中的 `timeout_reason`、
 `last_progress_age_seconds`、`forced_termination` 和 `timeout_state_event` 用于复核该路径。
 
@@ -143,7 +146,6 @@ source .venv/bin/activate
 python scripts/mediacrawler_crawl.py \
   --platforms weibo \
   --keyword 青岛旅游 \
-  --timeout-per-platform 120 \
   --download-images \
   --media-root temp/diagnostic_media \
   --no-import
@@ -216,11 +218,9 @@ python scripts/repair_post_details.py \
 `--max-items N` 用于小批试跑，`--post-id ID` 用于精确重试。详情或图片候选失败只留下该旧记录继续
 待修复，成功子集可以入库；运行级阻断（登录、验证码、频控、安全或策略、浏览器整体失败、运行权限
 或行为证据失败）以及 SQLite、媒体持久化一致性失败会停止后续批次。
-`--timeout-per-batch` 是传给平台 worker 的基础平台预算；修复总控会在此基础上额外保留正式抓取同款
-`HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS` 行为预算（当前 240 秒），并对整个进程组执行先 `SIGTERM`、
-后 `SIGKILL` 的收束。这样浏览器行为预算不会被父进程过早截断；微博等慢平台可显式提高该参数，
-例如 `--timeout-per-batch 1800`，但不得绕过批次、备份和状态门禁。
-无人值守模式下，单批超时、child 缺摘要、普通详情运行失败或 `repair_no_valid_detail` 只记录在
+修复批次不设整轮墙钟上限，也没有批次时限参数；平台 child 的中间层沿用统一的 1200 秒无持久进展
+看门狗，持续推进时批次运行时长不受限制，卡住时由该看门狗以 `no_progress_timeout` 收束。
+无人值守模式下，child 缺摘要、普通详情运行失败或 `repair_no_valid_detail` 只记录在
 批次结果中并跳过该批，随后继续清单中的后续批次；只有上述运行级阻断以及 SQLite、媒体持久化
 一致性失败才会停止该平台总控。
 通用修复 child 会按冻结目标集合和最终有效集合的差集写
@@ -345,7 +345,8 @@ checkpoint/cursor/seen/campaign、导入或删除旧 staging、写内容 SQLite�
 
 ## 一次性配置
 
-新关键词、平台组合、顶部刷新或无进展看门狗调整使用 `config/one_off/` 的派生配置，不直接修改长期主配置。
+新关键词、平台组合或顶部刷新调整使用 `config/one_off/` 的派生配置，不直接修改长期主配置。无进展
+看门狗阈值是代码常量，不能通过派生配置调整。
 派生文件必须保留主配置的 defaults 和全部长期 job；否则同步会禁用遗漏的任务。
 
 1. 确认关键词属于青岛范围，记录目标 job 原值。
@@ -464,6 +465,13 @@ python scripts/xhs_runner.py \
 `online` 才结束该暂停段；陈旧、格式错误或非 transport 诊断既不获得看门狗时间，也不能
 冒充恢复信号。child 首次写出 `network_recovery_timeout` 后，父层只给一次 20 秒终态写入和
 进程收束时间；后续同类事件不延长这个窗口。
+
+小红书人工等待（扫码登录、轮中登录恢复、API 验证码、作者页验证、搜索就绪验证与连续性验证）期间，
+无持久进展看门狗按同一方式暂停计时：child 在 behavior evidence 同目录写
+`behavior_evidence.operator_wait.json`（`waiting` 每 30 秒刷新，结束写 `ended`），父层只对新鲜、结构
+有效且来自已核验 exporter 的 `waiting` 冻结剩余量，明确 `ended` 才结束暂停段。阈值、启动宽限和进展
+判定不变；600 秒人工预算耗尽时仍按人工预算耗尽错误失败。同一段连续人工等待的父层上限为 675 秒，
+超过时以 `parent_operator_wait_timeout` 收束。
 
 正文图片字节下载不使用上述 600 秒 API/导航恢复循环，仍按正式契约做候选级有限重试
 （当前最多 3 次）。耗尽后记录 `image_download_retryable` 与 `candidate_skipped`，不得伪称曾等待 600 秒。
@@ -957,7 +965,9 @@ keychain。浏览器失败需区分：
 | `network_recovery_timeout` | 600 秒内未恢复；本轮失败并保留安全 checkpoint |
 | `parent_network_pause_timeout` | 同一次连续 `network_paused` 达到 675 秒，父层收束失联 child |
 | `parent_network_terminal_unwind_timeout` | child 首次报告网络恢复耗尽后，20 秒内未完成终态写入和收束 |
+| `parent_operator_wait_timeout` | 同一段连续人工等待达到 675 秒，父层收束失联 child |
 | `runtime_status_startup_timeout` / `runtime_status_stale` | 认证心跳未按监督窗口推进 |
+| `no_progress_timeout` | 受监控证据连续 1200 秒（首次进展前另加 240 秒，网络暂停与人工等待期间不计时）无变化；中间层收束 worker，尾批不导入 |
 | `login_required` | 平台明确要求登录 |
 | `captcha_detected` | 平台安全验证或验证码 |
 
@@ -972,7 +982,9 @@ keychain。浏览器失败需区分：
 
 小红书父层不设置整轮墙钟超时；它只监督 child 写出的认证心跳。启动宽限为 120 秒，心跳陈旧阈值
 为 60 秒，每 5 秒检查一次；长调度间隙只允许同一 sequence 一次 30 秒恢复宽限。网络暂停和最终摘要
-写入期间也必须继续心跳，避免把仍健康的 child 误杀。正常结束、可捕获异常和 SIGINT/SIGTERM 均须
+写入期间也必须继续心跳，避免把仍健康的 child 误杀。child 运行期间新鲜心跳按 pool `lease_seconds`（TTL）续期
+账号租约，child 结束后由父进程保活续期到精确释放，租约不依赖任务时长；心跳只证明进程身份仍在，抓取是否前进由中间层统一的 1200 秒无持久
+进展看门狗判断。正常结束、可捕获异常和 SIGINT/SIGTERM 均须
 在摘要中保留精确 child/exporter/Chrome 生命周期、临时 session 删除及租约释放证据；无法证明进程
 消失或目录已删除时保留租约并明确延期清理。
 

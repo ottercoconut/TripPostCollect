@@ -58,12 +58,12 @@ from trippostcollect.xhs.leases import (
     LeaseGuard,
     SystemProcessInspector,
     XhsLeaseSignal,
-    crawl_lease_budget,
 )
 from trippostcollect.xhs.runtime import (
     runtime_session_paths,
 )
 from trippostcollect.xhs.supervision import (
+    parent_heartbeat_lease_budget,
     run_supervised_xhs_subprocess,
     runtime_watchdog_evidence,
 )
@@ -474,8 +474,6 @@ def build_child_command(
         str(target["keyword"]),
         "--output-dir",
         str(output_root),
-        "--timeout-per-platform",
-        str(int(target["timeout_seconds"])),
         "--start-page",
         str(int(discovery["resume_page"])),
         "--top-refresh-max-pages",
@@ -863,10 +861,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
     target = load_target(args.target_key, args.target_config)
     pool = load_pool_config(args.pool_config)
     try:
-        lease_budget = crawl_lease_budget(
-            timeout_seconds=int(target["timeout_seconds"]),
-            configured_lease_seconds=int(pool["lease_seconds"]),
-        )
+        lease_budget = parent_heartbeat_lease_budget(int(pool["lease_seconds"]))
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     db_path = Path(args.db).expanduser().resolve()
@@ -956,9 +951,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
         "runtime_profile_dir": str(session_paths["profile"]),
         "keyword": target["keyword"],
         "completion_policy": "source_exhausted",
-        "timeout_seconds": target["timeout_seconds"],
         "lease_seconds": lease_budget.lease_seconds,
-        "configured_lease_ceiling_seconds": pool["lease_seconds"],
         "lease_budget": lease_budget.public(),
         "behavior_profile": pool["behavior_profile"],
         "local_image_storage_required": True,
@@ -971,7 +964,7 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
             "active_lease": False,
             "persistent_account_profile": False,
             "persistent_login_state": False,
-            "lease_covers_timeout_cleanup": True,
+            "lease_renewed_by_parent_heartbeat": True,
         },
         "discovery": discovery_plan,
     }
@@ -1127,7 +1120,6 @@ def _run_main(args: argparse.Namespace | None = None) -> int:
                 command,
                 cwd=ROOT,
                 env=env,
-                timeout_seconds=int(target["timeout_seconds"]),
                 progress_callback=batch_committer,
             )
             terminalizer.phase("after_child_exit")
