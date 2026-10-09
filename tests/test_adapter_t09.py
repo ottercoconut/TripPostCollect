@@ -15,7 +15,6 @@ import dataclasses
 from hashlib import sha256
 import importlib
 import importlib.util
-from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -29,7 +28,6 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 import humps
-from PIL import Image
 from playwright._impl._errors import TargetClosedError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 import pytest
@@ -37,9 +35,10 @@ import tenacity._asyncio
 
 from support.creator_runtime_profile import use_legacy_creator_page_read
 from support.main_page_lifecycle import use_legacy_main_page_closed_name
+from support import legacy_expectations as expectations
+from support.stable_png import solid_png
 from support.raw_author_identity import XHS_KEEP_AUTHOR_DETAIL_ENV, use_raw_author_identity
 from trippostcollect.application import events
-from trippostcollect.platforms import _fork_bridge
 from trippostcollect.runtime import behavior as runtime_behavior
 from trippostcollect.runtime import browser as runtime_browser
 from trippostcollect.runtime import http as runtime_http
@@ -120,7 +119,12 @@ class LegacySide:
         self.source = source
         self.label = label
 
+    # 旧侧在 fork 顶层包与 fork config 之上执行，随 fork 在 T14-C 删除。
+    uses_fork_config = True
+
     def install(self, patch, workdir: Path):
+        from trippostcollect.platforms import _fork_bridge
+
         _fork_bridge.install()
         for parent in ("model", "tools", "store", "media_platform"):
             importlib.import_module(parent)
@@ -180,6 +184,8 @@ class RootSide:
     """迁移后实现：worker 入口与 trippostcollect.platforms.xhs。"""
 
     label = "root"
+    # 根侧只经 entry.configure 写根配置对象，不加载 fork config。
+    uses_fork_config = False
 
     def install(self, patch, workdir: Path):
         import trippostcollect.platforms as package
@@ -244,8 +250,11 @@ class LegacyFactorySide(RootSide):
     """旧桥：fork main 的 CrawlerFactory 仍能装配小红书，且全部委托根实现（T14 前行为不变）。"""
 
     label = "legacy-factory"
+    uses_fork_config = True
 
     def install(self, patch, workdir: Path):
+        from trippostcollect.platforms import _fork_bridge
+
         mods = self.install_root(patch, workdir)
         _fork_bridge.install()
         for parent in ("model", "tools", "store", "media_platform"):
@@ -376,9 +385,8 @@ _PNG_CACHE: dict[str, bytes] = {}
 def png_bytes(url: str) -> bytes:
     if url not in _PNG_CACHE:
         digest = sha256(url.encode()).digest()
-        buffer = BytesIO()
-        Image.new("RGB", (4, 3), color=(digest[0], digest[1], digest[2])).save(buffer, format="PNG")
-        _PNG_CACHE[url] = buffer.getvalue()
+        # 与主机无关的纯色 PNG（见 support/stable_png.py；Pillow 压缩字节随 CPU 不同）。
+        _PNG_CACHE[url] = solid_png(4, 3, (digest[0], digest[1], digest[2]))
     return _PNG_CACHE[url]
 
 
@@ -1313,19 +1321,21 @@ async def run_scenario(side, scenario_name: str, workdir: Path, patch) -> dict:
     for name, value in scenario_env(scenario, out).items():
         patch.setenv(name, value)
     mods = side.install(patch, workdir)
-    config = importlib.import_module("config")
-    for name in dir(config):
-        if name.isupper():
-            patch.setattr(config, name, getattr(config, name))
     argv = scenario_argv(scenario, out)
+    if side.uses_fork_config:
+        config = importlib.import_module("config")
+        for name in dir(config):
+            if name.isupper():
+                patch.setattr(config, name, getattr(config, name))
     mods.entry.configure(argv)
-    # T12：新入口只写根配置对象；旧桥两侧仍读 fork config，按原 configure 语义同步写回。
-    from trippostcollect.application import worker_inputs
-    worker_inputs.apply_to_config(worker_inputs.parse_cmd(argv), config)
-    # fork config 在本进程可能早已导入；按新进程首次导入的语义从当前 env 重读这两个键。
-    patch.setattr(config, "COOKIES", os.environ.get("TRIPPOSTCOLLECT_COOKIES", ""))
-    patch.setattr(config, "CUSTOM_BROWSER_PATH", os.environ.get("TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH")
-                  or os.environ.get("CUSTOM_BROWSER_PATH", ""))
+    if side.uses_fork_config:
+        # T12：新入口只写根配置对象；旧桥两侧仍读 fork config，按原 configure 语义同步写回。
+        from trippostcollect.application import worker_inputs
+        worker_inputs.apply_to_config(worker_inputs.parse_cmd(argv), config)
+        # fork config 在本进程可能早已导入；按新进程首次导入的语义从当前 env 重读这两个键。
+        patch.setattr(config, "COOKIES", os.environ.get("TRIPPOSTCOLLECT_COOKIES", ""))
+        patch.setattr(config, "CUSTOM_BROWSER_PATH", os.environ.get("TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH")
+                      or os.environ.get("CUSTOM_BROWSER_PATH", ""))
     side.install_hooks(mods)
 
     def publish(details):
@@ -1418,7 +1428,12 @@ def normalized(result: dict) -> dict:
 
 
 def assert_equivalent(old: dict, new: dict) -> None:
-    left, right = normalized(old), normalized(new)
+    assert_normalized_equivalent(normalized(old), normalized(new))
+
+
+def assert_normalized_equivalent(left: dict, right: dict) -> None:
+    """比较两侧已归一的结果；T14 根侧用例以固化的旧侧归一结果作为 left。"""
+    left, right = dict(left), dict(right)
     old_trace, new_trace = left.pop("trace"), right.pop("trace")
     for index, (a, b) in enumerate(zip(old_trace, new_trace)):
         if a != b:
@@ -1946,6 +1961,7 @@ async def compare_sides(old_side, new_side, scenario_name, tmp_path, monkeypatch
 # 对照用例
 
 
+@expectations.legacy_only
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario_name", sorted(SCENARIOS))
 async def test_root_xhs_matches_frozen_legacy(tmp_path, monkeypatch, scenario_name):
@@ -1954,6 +1970,7 @@ async def test_root_xhs_matches_frozen_legacy(tmp_path, monkeypatch, scenario_na
     assert set(new["ready_modules"]) <= {"trippostcollect.platforms.xhs.behavior"}
 
 
+@expectations.legacy_only
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario_name", ["success", "qr_expired_refresh", "network_recover", "repair"])
 async def test_frozen_legacy_harness_is_deterministic(tmp_path, monkeypatch, scenario_name):
@@ -1962,15 +1979,63 @@ async def test_frozen_legacy_harness_is_deterministic(tmp_path, monkeypatch, sce
                         tmp_path, monkeypatch)
 
 
+T14_XHS = ("T09", "xhs_scenarios")
+
+
+async def run_side(side, scenario_name, tmp_path, monkeypatch):
+    with monkeypatch.context() as patch:
+        return await run_scenario(side, scenario_name, tmp_path, patch)
+
+
+def frozen_view(result, tmp_path) -> dict:
+    """固化/比较用的旧侧视图：原对照的归一结果，再去掉主机检出路径与临时目录。"""
+    return expectations.scrub(normalized(result), (tmp_path, "<TMP>"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario_name", sorted(SCENARIOS))
+async def test_root_xhs_matches_frozen_legacy_expectation(tmp_path, monkeypatch, scenario_name):
+    """T14：根实现与固化的冻结旧实现归一结果比较（同一 normalized 与逐项比较），不加载 fork 或 E。"""
+    new = await run_side(RootSide(), scenario_name, tmp_path, monkeypatch)
+    assert_normalized_equivalent(expectations.load(*T14_XHS, scenario_name), frozen_view(new, tmp_path))
+    check_scenario(new, scenario_name)
+    assert set(new["ready_modules"]) <= {"trippostcollect.platforms.xhs.behavior"}
+
+
+@expectations.legacy_guard
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario_name", sorted(SCENARIOS))
+async def test_t14_guard_frozen_legacy_xhs(tmp_path, monkeypatch, pytestconfig, scenario_name):
+    old = await run_side(LegacySide(), scenario_name, tmp_path, monkeypatch)
+    check_scenario(old, scenario_name)
+    expectations.check_legacy(pytestconfig, *T14_XHS, scenario_name, frozen_view(old, tmp_path),
+                              source_test="tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy")
+
+
+# 旧侧参数只验证冻结旧实现自身，T14-C 随 fork 删除；根侧参数不依赖 fork。
+SIDE_FACTORIES = [pytest.param(LegacySide, id="legacy", marks=expectations.legacy_only_marks()),
+                  pytest.param(RootSide, id="root")]
 LEGACY_FACTORY_SCENARIOS = ["success", "qr_expired_refresh", "captcha_pass", "network_recover",
                             "cdp_launch_failed", "repair"]
 
 
+@expectations.legacy_only
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario_name", LEGACY_FACTORY_SCENARIOS)
 async def test_legacy_factory_matches_root_entry(tmp_path, monkeypatch, scenario_name):
     """旧桥 fork main 工厂与新 worker 入口在同一 fake 下逐项相等。"""
     await compare_sides(LegacyFactorySide(), RootSide(), scenario_name, tmp_path, monkeypatch)
+
+
+@expectations.legacy_guard
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario_name", LEGACY_FACTORY_SCENARIOS)
+async def test_t14_guard_legacy_factory_xhs(tmp_path, monkeypatch, pytestconfig, scenario_name):
+    """旧桥 fork 工厂与冻结旧实现的归一结果逐字节相同，共用 T09/xhs_scenarios 预期；根侧见上方根用例。"""
+    old = await run_side(LegacyFactorySide(), scenario_name, tmp_path, monkeypatch)
+    check_scenario(old, scenario_name)
+    expectations.check_legacy(pytestconfig, *T14_XHS, scenario_name, frozen_view(old, tmp_path),
+                              source_test="tests/test_adapter_t09.py::test_legacy_factory_matches_root_entry")
 
 
 # ---------------------------------------------------------------------------
@@ -1987,15 +2052,12 @@ def construct_crawler(mods, patch, out: Path):
     """root 侧经 configure 与 load_crawler 装配构造；旧侧直接无参构造冻结类。"""
     if not isinstance(mods.side, RootSide):
         return mods.core.XiaoHongShuCrawler()
-    config = importlib.import_module("config")
-    for name in dir(config):
-        if name.isupper():
-            patch.setattr(config, name, getattr(config, name))
+    # 根侧 configure 只写根配置对象，不再快照或改写 fork config。
     mods.entry.configure(scenario_argv(SCENARIOS["success"], out))
     return mods.side.crawler_class(mods)()
 
 
-@pytest.mark.parametrize("side_factory", [LegacySide, RootSide], ids=["legacy", "root"])
+@pytest.mark.parametrize("side_factory", SIDE_FACTORIES)
 def test_manual_wait_budget_charges_overlap_once(tmp_path, monkeypatch, side_factory):
     with monkeypatch.context() as patch:
         _, mods = side_modules(side_factory(), patch, tmp_path)
@@ -2033,7 +2095,7 @@ def test_manual_wait_budget_charges_overlap_once(tmp_path, monkeypatch, side_fac
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("side_factory", [LegacySide, RootSide], ids=["legacy", "root"])
+@pytest.mark.parametrize("side_factory", SIDE_FACTORIES)
 async def test_popup_seams_are_instance_attributes(tmp_path, monkeypatch, side_factory):
     """fork 测试替换的 _popup_sleep/_popup_monotonic 仍是实例级接缝，预算与守卫都经它们计时。"""
     with monkeypatch.context() as patch:
@@ -2081,7 +2143,7 @@ def bound_paths(value, target, *, depth=3, prefix=""):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario_name", ["login_budget_exhausted", "qr_env_invalid"])
-@pytest.mark.parametrize("side_factory", [LegacySide, RootSide], ids=["legacy", "root"])
+@pytest.mark.parametrize("side_factory", SIDE_FACTORIES)
 async def test_login_terminal_writes_use_worker_event_exit(tmp_path, monkeypatch, side_factory, scenario_name):
     """接缝 5：登录两处终态写出经 worker 出口（旧实现模块全局按名绑定；新实现经 entry 注入端口）。"""
     side = side_factory()
@@ -2120,7 +2182,7 @@ async def test_login_terminal_writes_use_worker_event_exit(tmp_path, monkeypatch
         assert module.append_execution_event is events.append_worker_execution_event
 
 
-@pytest.mark.parametrize("side_factory", [LegacySide, RootSide], ids=["legacy", "root"])
+@pytest.mark.parametrize("side_factory", SIDE_FACTORIES)
 def test_repair_blocking_uses_exception_types_not_text(tmp_path, monkeypatch, side_factory):
     with monkeypatch.context() as patch:
         _, mods = side_modules(side_factory(), patch, tmp_path)
@@ -2161,10 +2223,6 @@ async def test_root_repair_is_explicit_branch_without_class_patch(tmp_path, monk
         world, mods = side_modules(RootSide(), patch, tmp_path)
         for name, value in scenario_env(SCENARIOS["repair"], tmp_path / "env").items():
             patch.setenv(name, value)
-        config = importlib.import_module("config")
-        for name in dir(config):
-            if name.isupper():
-                patch.setattr(config, name, getattr(config, name))
         for name in ("media_platform.xhs", "media_platform.xhs.core", "store.xhs"):
             patch.delitem(sys.modules, name, raising=False)
         mods.entry.configure(scenario_argv(SCENARIOS["repair"], tmp_path / "env"))
@@ -2175,7 +2233,7 @@ async def test_root_repair_is_explicit_branch_without_class_patch(tmp_path, monk
         assert "media_platform.xhs" not in sys.modules and "media_platform.xhs.core" not in sys.modules
 
 
-@pytest.mark.parametrize("side_factory", [LegacySide, RootSide], ids=["legacy", "root"])
+@pytest.mark.parametrize("side_factory", SIDE_FACTORIES)
 def test_pure_parsers_and_signer(tmp_path, monkeypatch, side_factory):
     with monkeypatch.context() as patch:
         world, mods = side_modules(side_factory(), patch, tmp_path)
@@ -2207,6 +2265,7 @@ def test_pure_parsers_and_signer(tmp_path, monkeypatch, side_factory):
         assert [item.value for item in enums.SearchNoteType] == [0, 1, 2]
 
 
+@expectations.legacy_only
 def test_legacy_fork_package_delegates_to_root(tmp_path, monkeypatch):
     """fork 旧位置只留薄转发：类、异常与枚举都是根对象，不存在第二份实现。"""
     import inspect

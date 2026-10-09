@@ -1,0 +1,926 @@
+{
+ "generated_on": "2026-10-09",
+ "generation_command": "TPC sandbox: pytest -p pytest_asyncio.plugin -m t14_legacy_guard --t14-write-legacy-expectations=<DIR> <对应测试文件>",
+ "fork_commit": "3488cf2df2ee6370e8553b157e4d833ff3c0cb8d",
+ "root_commit": "ee571915c80f84379fbecd9c71a3b76f09ed5080",
+ "root_commit_note": "生成时根检出 HEAD 为 ee571915c80f84379fbecd9c71a3b76f09ed5080；工作区有未提交改动；被测 src/、scripts/ 与 root_commit 相同。",
+ "bridge_sha256": "2a11439f4e5b9df83d67d0a527b37e7803c3ee1498e4901a1f6597015bfe037a",
+ "fork_python_sources_sha256": "ad6e4b262cb0119ddfa9115f1d8444aa54eaff8ff14523603ac444c8a06b169d",
+ "files": {
+  "T05/frozen_implementation/detail-repair0.json": {
+   "sha256": "1bf2d11a3353a497668d1d935311226c4186fdad688716d0f1df3ce52baf0d4a",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/detail-repair1.json": {
+   "sha256": "1bf2d11a3353a497668d1d935311226c4186fdad688716d0f1df3ce52baf0d4a",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/detail_403-repair0.json": {
+   "sha256": "1afcac32224d0409c7ba4713c21b6d8cdde972d81713532a0a5b5757b991501a",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/detail_403-repair1.json": {
+   "sha256": "f486af8df9a3b575f38a5997cb7729c84dddc0a41658c519deb03f0e79463e43",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/detail_429-repair0.json": {
+   "sha256": "dbd31ba6d65bdede0f506432dc3958fae6a79e58f07676600bfda35cb1b5df81",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/detail_429-repair1.json": {
+   "sha256": "f486af8df9a3b575f38a5997cb7729c84dddc0a41658c519deb03f0e79463e43",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/detail_error-repair0.json": {
+   "sha256": "8c9f47d72fe53b12359ef29926fe96b9cbfa2a0ca43f6ba71042811896cbdf8c",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/detail_error-repair1.json": {
+   "sha256": "f486af8df9a3b575f38a5997cb7729c84dddc0a41658c519deb03f0e79463e43",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/detail_retry-repair0.json": {
+   "sha256": "aa4a111bfd7ee9c563e83605eb6970a7090d2a247f75ee44140d136e9679217d",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/detail_retry-repair1.json": {
+   "sha256": "aa4a111bfd7ee9c563e83605eb6970a7090d2a247f75ee44140d136e9679217d",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/empty-repair0.json": {
+   "sha256": "17d484df7c538dfcf1b449fce7062cc824f5c11b0718d27e716e7bddf21453d9",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/empty-repair1.json": {
+   "sha256": "17d484df7c538dfcf1b449fce7062cc824f5c11b0718d27e716e7bddf21453d9",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/image_bad_bytes-repair0.json": {
+   "sha256": "8a4c1ad5a534e4a58606d1ea7d8ae0b997dbf3c3b0990a31c963989e37c84413",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/image_bad_bytes-repair1.json": {
+   "sha256": "8a4c1ad5a534e4a58606d1ea7d8ae0b997dbf3c3b0990a31c963989e37c84413",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/image_failure-repair0.json": {
+   "sha256": "86f82ea245a42e4c9f73301548e52c08a663e028da01317140fac22d8c5bd2e3",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/image_failure-repair1.json": {
+   "sha256": "86f82ea245a42e4c9f73301548e52c08a663e028da01317140fac22d8c5bd2e3",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/image_rate_limit-repair0.json": {
+   "sha256": "db50d82d2d61fd625a41b07d94f55a3bcea4430ada689eaa44a8af0dd42192c0",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/image_rate_limit-repair1.json": {
+   "sha256": "db50d82d2d61fd625a41b07d94f55a3bcea4430ada689eaa44a8af0dd42192c0",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/image_retry-repair0.json": {
+   "sha256": "436c8596d12df674cec5abfa9df4070e714ee105e987ef7a79bc8c50d1e50e8d",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/image_retry-repair1.json": {
+   "sha256": "436c8596d12df674cec5abfa9df4070e714ee105e987ef7a79bc8c50d1e50e8d",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/login_expired-repair0.json": {
+   "sha256": "39ddc0b8bcab89391984b5b05a2da611dd61127eef318e38442c3edf4b25fcb4",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/login_expired-repair1.json": {
+   "sha256": "39ddc0b8bcab89391984b5b05a2da611dd61127eef318e38442c3edf4b25fcb4",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/repair_api-repair0.json": {
+   "sha256": "5be5a7e6c933d2ba98bcf6ef55b7ca776abf17154f6ae08ec851a462de01762b",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/repair_api-repair1.json": {
+   "sha256": "b437e023022920da93ead260e74878b6d039ac533816eada5ede6d05363750d0",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/repair_empty-repair0.json": {
+   "sha256": "5be5a7e6c933d2ba98bcf6ef55b7ca776abf17154f6ae08ec851a462de01762b",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/repair_empty-repair1.json": {
+   "sha256": "6ab85b4967ce9d64753ff71e64e1b0a336169ca93e92dc9f0417f6392baa5a04",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/repair_navigation-repair0.json": {
+   "sha256": "5be5a7e6c933d2ba98bcf6ef55b7ca776abf17154f6ae08ec851a462de01762b",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/repair_navigation-repair1.json": {
+   "sha256": "40971909874f8ab484d3348bc0841bf885a387c94dc60cb984532c5acb896074",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/repair_page-repair0.json": {
+   "sha256": "5be5a7e6c933d2ba98bcf6ef55b7ca776abf17154f6ae08ec851a462de01762b",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/repair_page-repair1.json": {
+   "sha256": "0eb397d38ee46d33431339d13a8406536e0dfcd6fa190b48d716f8ac23cf90aa",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/repair_rate_limit-repair0.json": {
+   "sha256": "5be5a7e6c933d2ba98bcf6ef55b7ca776abf17154f6ae08ec851a462de01762b",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/repair_rate_limit-repair1.json": {
+   "sha256": "baac2493d9ffdce6a388da6f7f00e47f7cc107136ed1be209e3bdf56ee877a16",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/search-repair0.json": {
+   "sha256": "fea05df3ab660af3b0fa1fe515c9c53e66a1716db63782be6777521fc387e623",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/search-repair1.json": {
+   "sha256": "fea05df3ab660af3b0fa1fe515c9c53e66a1716db63782be6777521fc387e623",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/search_error-repair0.json": {
+   "sha256": "245798fc7053934d3e633faf1b8e8b920388f385d0efbd8e2c0702c6519d4fc7",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/search_error-repair1.json": {
+   "sha256": "245798fc7053934d3e633faf1b8e8b920388f385d0efbd8e2c0702c6519d4fc7",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/search_retry-repair0.json": {
+   "sha256": "1fd323a9718c6a1d8bc020124faf8dfbe2931ae623ff3ed2f1ad8cd55040d237",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/frozen_implementation/search_retry-repair1.json": {
+   "sha256": "1fd323a9718c6a1d8bc020124faf8dfbe2931ae623ff3ed2f1ad8cd55040d237",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
+   ]
+  },
+  "T05/repair_exception_chain/api_error.json": {
+   "sha256": "62693b178e15dfa5f467c93e106450b34d70c15a54b12e27b38c8f1eea8567e5",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_repair_attempts_and_exception_chain_match_frozen_hook"
+   ]
+  },
+  "T05/repair_exception_chain/empty.json": {
+   "sha256": "c95b9a47ee8664347dfac8f52583242a28b7da3324dbb5d6b9591c3550c697f6",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_repair_attempts_and_exception_chain_match_frozen_hook"
+   ]
+  },
+  "T05/repair_exception_chain/navigation.json": {
+   "sha256": "98d29bb37c4a579d04c5c90b15293ee298328b6fb292f1c2adbc1d1f493da07b",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_repair_attempts_and_exception_chain_match_frozen_hook"
+   ]
+  },
+  "T05/repair_exception_chain/no_page.json": {
+   "sha256": "40d11f0404722a83404bb31dc60a0153b7aa5ab1b2c8227bc7cfec0531c5cdfc",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_repair_attempts_and_exception_chain_match_frozen_hook"
+   ]
+  },
+  "T05/repair_exception_chain/rate_limit.json": {
+   "sha256": "7fe39e792a0cf6bb9e607c610c4c57d88f665b14baed82dc3a3ff68815c31156",
+   "source_tests": [
+    "tests/test_adapter_t05.py::test_repair_attempts_and_exception_chain_match_frozen_hook"
+   ]
+  },
+  "T06/first_page_rebuild/visible10-offset0-search_id_stable-verify0.json": {
+   "sha256": "08f742c471c8ec64ca9c13d7a4b3945267b60314fb63223cdb1ccee56f929246",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_first_page_rebuild_evidence_matches_baseline"
+   ]
+  },
+  "T06/first_page_rebuild/visible10-offset10-search_id_empty-verify0.json": {
+   "sha256": "08f742c471c8ec64ca9c13d7a4b3945267b60314fb63223cdb1ccee56f929246",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_first_page_rebuild_evidence_matches_baseline"
+   ]
+  },
+  "T06/first_page_rebuild/visible10-offset10-search_id_stable-verify0.json": {
+   "sha256": "8016df36fae01e22f79a5f8dd673723e59de095ce3d539b7f1b95e151a018d4d",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_first_page_rebuild_evidence_matches_baseline"
+   ]
+  },
+  "T06/first_page_rebuild/visible10-offset10-search_id_stable-verify1.json": {
+   "sha256": "08f742c471c8ec64ca9c13d7a4b3945267b60314fb63223cdb1ccee56f929246",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_first_page_rebuild_evidence_matches_baseline"
+   ]
+  },
+  "T06/first_page_rebuild/visible9-offset10-search_id_stable-verify0.json": {
+   "sha256": "08f742c471c8ec64ca9c13d7a4b3945267b60314fb63223cdb1ccee56f929246",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_first_page_rebuild_evidence_matches_baseline"
+   ]
+  },
+  "T06/post_form_signature_inputs/comment_reply.json": {
+   "sha256": "896931a60f273b295216dccd8c82c57b5de008265a4d1332ec3e30a9105094c8",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_post_form_and_signature_inputs_match_baseline"
+   ]
+  },
+  "T06/repair_exception_chain/original_error0-page1.json": {
+   "sha256": "3e89832625a144b4e37d5ec7cc53d080bc4ca4c1d54555a4642937b9bd8fc033",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_repair_exception_chain_matches_baseline"
+   ]
+  },
+  "T06/repair_exception_chain/original_error1-page0.json": {
+   "sha256": "6d0ba7130ff1b0e75b90bae512640165d6cdb3acfc0d8ccc08ab3c38de1c79e4",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_repair_exception_chain_matches_baseline"
+   ]
+  },
+  "T06/repair_exception_chain/original_error1-page1.json": {
+   "sha256": "38895b478e1bdad433382ee8466ce898cb35fed8d64cb1ed43712f0ebf3fc75a",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_repair_exception_chain_matches_baseline"
+   ]
+  },
+  "T06/requests_records_images_events/browser_pages-fallback0.json": {
+   "sha256": "a2256ebd06d82710696f8996c9c0a44fe9afe776d1d2a14df6feca78e6ef8030",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/browser_pages-fallback1.json": {
+   "sha256": "a2256ebd06d82710696f8996c9c0a44fe9afe776d1d2a14df6feca78e6ef8030",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/creator_blocked-fallback0.json": {
+   "sha256": "1a6269c7fcf7b9e402d65a81f0ab0dc8c8a99daede0e52ec3c4b9fafb428e609",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/creator_blocked-fallback1.json": {
+   "sha256": "1a6269c7fcf7b9e402d65a81f0ab0dc8c8a99daede0e52ec3c4b9fafb428e609",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/creator_empty-fallback0.json": {
+   "sha256": "bf1b3dc2025db28db431f382aaab06844d208406271ef269f1abf912b40e2f35",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/creator_empty-fallback1.json": {
+   "sha256": "bf1b3dc2025db28db431f382aaab06844d208406271ef269f1abf912b40e2f35",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/creator_retry-fallback0.json": {
+   "sha256": "4c9d088d490e1b6e9d5681cefdfd226f00bdc319d15316865b822c7535279b21",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/creator_retry-fallback1.json": {
+   "sha256": "4c9d088d490e1b6e9d5681cefdfd226f00bdc319d15316865b822c7535279b21",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/detail-fallback0.json": {
+   "sha256": "ee7d016d8ff1e5aeb2fe6b298426b64c696a9246e116cbf9929339d754f8fc5e",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/detail-fallback1.json": {
+   "sha256": "ee7d016d8ff1e5aeb2fe6b298426b64c696a9246e116cbf9929339d754f8fc5e",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/detail_shell-fallback0.json": {
+   "sha256": "93dd65349d3cb3436a412849e7c345d2a209035a0af45b1b7d48e83a12129151",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/detail_shell-fallback1.json": {
+   "sha256": "c88c742a3b0a4a64dd4d168b1ca81280e90460359910e355eaceaba254d92622",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/empty_ambiguous-fallback0.json": {
+   "sha256": "414c4736f0fc862add9629ac1d5b1699f9dd6884c4eda5158e3159008832a4f3",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/empty_ambiguous-fallback1.json": {
+   "sha256": "414c4736f0fc862add9629ac1d5b1699f9dd6884c4eda5158e3159008832a4f3",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/empty_verified-fallback0.json": {
+   "sha256": "043f41c06d9eedcdee7ba33d575044d87aa60a37624eded0c8d106b8ab364db9",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/empty_verified-fallback1.json": {
+   "sha256": "043f41c06d9eedcdee7ba33d575044d87aa60a37624eded0c8d106b8ab364db9",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/empty_visible-fallback0.json": {
+   "sha256": "20ceea4a8e127328e2ca124ac5c2259dd5c105f35aff735c4b6d8f373a7a354d",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/empty_visible-fallback1.json": {
+   "sha256": "20ceea4a8e127328e2ca124ac5c2259dd5c105f35aff735c4b6d8f373a7a354d",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/image_blocked-fallback0.json": {
+   "sha256": "085a6f05dc1b4584019814ebb72b33fa965c31ec690d070d2c940c43a86ef183",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/image_blocked-fallback1.json": {
+   "sha256": "085a6f05dc1b4584019814ebb72b33fa965c31ec690d070d2c940c43a86ef183",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/image_failed-fallback0.json": {
+   "sha256": "f5062cdad4c9681dbc0535e7db350925dbff412f9720ce0e3eb0d030867feecb",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/image_failed-fallback1.json": {
+   "sha256": "f5062cdad4c9681dbc0535e7db350925dbff412f9720ce0e3eb0d030867feecb",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/image_retry-fallback0.json": {
+   "sha256": "b8139b00cc489f8f7d8a153d3d77709301b084ab62fedc90bd7beafa4daedab3",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/image_retry-fallback1.json": {
+   "sha256": "b8139b00cc489f8f7d8a153d3d77709301b084ab62fedc90bd7beafa4daedab3",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/login_expired-fallback0.json": {
+   "sha256": "5811eeac700f79b324ad0adb386cb16fe729f0b1ac21bdc042b2b35aa55daed2",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/login_expired-fallback1.json": {
+   "sha256": "5811eeac700f79b324ad0adb386cb16fe729f0b1ac21bdc042b2b35aa55daed2",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/search_blocked-fallback0.json": {
+   "sha256": "4e8b1ce4a4bcbfdccfb14ac535759731d196835b6d28e21e767fcb5a4b81db11",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/search_blocked-fallback1.json": {
+   "sha256": "4e8b1ce4a4bcbfdccfb14ac535759731d196835b6d28e21e767fcb5a4b81db11",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/search_pages-fallback0.json": {
+   "sha256": "dd39880f98b1bc0281e38f345774158192d2401e68a78b06fe97e363330d7def",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/requests_records_images_events/search_pages-fallback1.json": {
+   "sha256": "dd39880f98b1bc0281e38f345774158192d2401e68a78b06fe97e363330d7def",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_old_new_requests_records_images_events"
+   ]
+  },
+  "T06/slider_tracks/get_tracks_137.json": {
+   "sha256": "5b0c1b1ecc81bce7a7279ce28cf11ad60cec0fde07eb04f184bbcac43cfdd171",
+   "source_tests": [
+    "tests/test_adapter_t06.py::test_memory_and_slider_lifecycle_match_baseline"
+   ]
+  },
+  "T07/request_event_artifacts/detail_401.json": {
+   "sha256": "47466c0f4baa7689938c2aad25a19d681a84b4c3b52478af58170ea8e31aa7eb",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/detail_404.json": {
+   "sha256": "dff94d6f7b39e44039f4c73db474f73da703985e90a1e2be73636bacdcde80e0",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/detail_429.json": {
+   "sha256": "47466c0f4baa7689938c2aad25a19d681a84b4c3b52478af58170ea8e31aa7eb",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/detail_failed.json": {
+   "sha256": "47466c0f4baa7689938c2aad25a19d681a84b4c3b52478af58170ea8e31aa7eb",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/detail_parse.json": {
+   "sha256": "dff94d6f7b39e44039f4c73db474f73da703985e90a1e2be73636bacdcde80e0",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/detail_retry.json": {
+   "sha256": "8ba3f505d3f71a3894caf82edc5cbb342ed2c8589411e4d2d552174432afb271",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/detail_success.json": {
+   "sha256": "82f3b17c0c62f057dd3c98d5410ba210ff22eba4b7ed1b3d509511d390317edd",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/empty.json": {
+   "sha256": "9431c83ddb4bf3a8259babf9a4a36f18d934f3377348b70fbeb02fc683af4c57",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/image_block.json": {
+   "sha256": "ae859cc2ecc56aeb3d75672b4020c0033d42eae7cbf7ec03d7ae88b3a124c4f0",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/image_failed.json": {
+   "sha256": "0c0921c55245d77123b0468c3ea22201c19968c3ae5bb4feb7a1d67bf578f9a1",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/image_retry.json": {
+   "sha256": "a64db557f5640ee5a0e6cbe09ca92bb752030972f137343e3e50872cbc71b494",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/login_expired.json": {
+   "sha256": "7f7c2e125ec0f8985d0c5262c89e77c7ee7412491a38b8ebef47b261bdcd8df3",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/navigation_timeout.json": {
+   "sha256": "efbd6e4b49da8f3ffe10cf532f6655603dc949837f2327ec4e81176e3aa9e9bb",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/search_block.json": {
+   "sha256": "8e24e22b20b514374af7d3d45568bbe75e885fa60b9e98ed31896d81b0a4c71e",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/search_content.json": {
+   "sha256": "769152d64c6b14e513e65cd88b226b0c8ac4e852f61be2a6e072eaa3121facf3",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/search_detail_401.json": {
+   "sha256": "fc64028f2aa9f628095fd85e291195dadfca5de27162dc22a4f23d93fc11d222",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/search_detail_429.json": {
+   "sha256": "2104cbd8bddfbecfa6e485f1c396edb57491107e5426ffd1df18e37d58ac68c5",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/search_retry.json": {
+   "sha256": "7d4b7c8ba3b824d0f0d21d1ee38ecb4019e1442a55fe9cfe1dcd284457b6c23c",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T07/request_event_artifacts/success.json": {
+   "sha256": "efbd6e4b49da8f3ffe10cf532f6655603dc949837f2327ec4e81176e3aa9e9bb",
+   "source_tests": [
+    "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+    "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence"
+   ]
+  },
+  "T09/xhs_scenarios/batch_publish_failure.json": {
+   "sha256": "d42ea376c6d68cebe5480089c7baa051bbafed5fdebf75573cbbc7fdb1fcf8c7",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/candidate_skips.json": {
+   "sha256": "46e806d8241a51abe4e90e5252ac1fbcd98d5b3214584d84963c59928671e175",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/captcha_pass.json": {
+   "sha256": "f0d1d2eb3f56df8ab196cfb5a069d02f53552fb1dbe7f86d276f0b00f038be11",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_legacy_factory_matches_root_entry",
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/captcha_rate_limited.json": {
+   "sha256": "9e5dd8f7559e3a78618db16087acc051db7fef441424c0d5a3214b51dfa4459a",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/captcha_timeout.json": {
+   "sha256": "63d292d1dd83fec22a4ae9a08b8a324e4efeea95612a81ec502659fc5c413181",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/cdp_concurrent_session.json": {
+   "sha256": "b03ca92761a677b50f6a3aa045d1abc9750cd97d9541d6c095d3ddb1086a0f75",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/cdp_disconnect.json": {
+   "sha256": "9fbf423e7f1475b6ce3042320fff3a46eafa6ad9968636dd90478468fe0bf3a0",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/cdp_launch_failed.json": {
+   "sha256": "5d0f790d6da9ee29d702cf94dc21e15a2de9c9712ee81c2c5a0f10eadd9c413d",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_legacy_factory_matches_root_entry",
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/continuity_blocked.json": {
+   "sha256": "6701a4a71eaa696c41d530d2007d47d529a7e0944a61328be01decba5659a3fb",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/continuity_verification.json": {
+   "sha256": "8a71a82d2cd15e203a3a2919f8e4df6d76bd4d3643e39805884c93b02a72924e",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/creator_300012.json": {
+   "sha256": "b3ed013a4e33edb6412a47c3c8686dd150f9ae5356bce5e29fd493e8e3b2db4d",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/creator_page_security.json": {
+   "sha256": "2ce26851d83aa75e8e5fcba3b078c3972cc63a749355e6023f34cf57f8c076c3",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/creator_page_verification.json": {
+   "sha256": "434107da4834228d056241ea0d4c8451f88d8756621db32a3eb788379f18826d",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/creator_primary_login.json": {
+   "sha256": "9e0852c7863c1abfbbed115161e374a338f38cbccc5b90c4d395998a340a55c4",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/explore_blank.json": {
+   "sha256": "7993f083599e81422d0315b321d4611358bba41482871bf4c63a561674f3c6cf",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/explore_blank_fail.json": {
+   "sha256": "79addcc790de0f533478c1dd7e000d588fcaa4161f3750a735102c2f4392bd03",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/image_blocking.json": {
+   "sha256": "88281f3ddfec92cfac6a610c46e6f6a6d4aebae9e441efc7ab0922c828cd24ed",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/interaction_comment.json": {
+   "sha256": "f95b6f3cd9ac85915f4d5c0148594d3f6472d5c39e0b8af415142e974457067f",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/interaction_like.json": {
+   "sha256": "6bf46034d393188faed722c3ce158a6ef0b6bfc3fe1ffe8eb3d5c5434a74f11a",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/login_budget_exhausted.json": {
+   "sha256": "e6cf663a0c1b96d06c29f2640ee2e2c248de074f26aa704dd4abc741893ac8ca",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/login_expired.json": {
+   "sha256": "345e9ebc8723e1e6bf73e2b2731d30e6ab0952aea8e4bacdf8d1f30a2da01a39",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/login_progress_tab.json": {
+   "sha256": "7d6c5b640b986da72b1c4c68a1c5c909855e74d3a6a10adcdea906dba7a0411b",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/main_page_closed.json": {
+   "sha256": "a021252fabb991bc635b7127312a739fcf2adb604b2379a506b05f1d5c14b850",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/network_recover.json": {
+   "sha256": "ee2a1dbf54e494a9fb9d708536228bcb9a6e23330e405c3969d3eb3d22f9c8c8",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_legacy_factory_matches_root_entry",
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/network_timeout.json": {
+   "sha256": "4bb5b4f86afed158c38e609c242531593decb308222f152d48c34fbcd1b05d33",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/qr_env_invalid.json": {
+   "sha256": "a2a3e0bb8e137ab143eb7efa73727a8d8fde79efa1d5372aa66d3d72ec7395c3",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/qr_expired_refresh.json": {
+   "sha256": "098d7ae9c2dcd417eceeb9b07d90d2da3cfdac5931e1f732ed06973e931f8c8e",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_legacy_factory_matches_root_entry",
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/repair.json": {
+   "sha256": "b57b6b31c2ce4eb4558276735d51f8675def4a6143708bbc6ef4c6dca71fd2ac",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_legacy_factory_matches_root_entry",
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/repair_300011.json": {
+   "sha256": "04068ad0b546b0cbca7e3ce5c75402b8ea5158f99087db9da2d59491a816f9e9",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/repair_ip_blocked.json": {
+   "sha256": "7d5544642196c42be69dc805c9eb107c620ad39da250c1700f7eea2444aa91c5",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/scan_latched.json": {
+   "sha256": "bb6fb6f7470650e9539127aac4836eecbff51a06d0a92f3340cbb019d418dbcc",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/search_429.json": {
+   "sha256": "78122773bfcd19dc0ef107e24061e1714ab35d80964a30fa55638340d5091c83",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/search_ready_verification.json": {
+   "sha256": "94e201d1932ecfda9226355b875a165a9bf49da869e0fa4b95904685150418a1",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/security_300011.json": {
+   "sha256": "e876cff5b3410b75638bb806c5094cce452d88760644b7a52dc1174c1fe1f2bb",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/selfinfo_verification.json": {
+   "sha256": "07e55e9fd35a9eca6e3ea680734fc7ceb5dbcdfe953f76bffdc1749ad90d82c9",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "T09/xhs_scenarios/success.json": {
+   "sha256": "f2801bf298e302b4b9562a98fed14e3b3b80a32b52611a6df2a72990472ffe24",
+   "source_tests": [
+    "tests/test_adapter_t09.py::test_legacy_factory_matches_root_entry",
+    "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy"
+   ]
+  },
+  "shared_staging/baseline_classes/douyin.json": {
+   "sha256": "bbf0cdbab13b73621a7951245f3f66bb443936b42c86df590817a773cae467ba",
+   "source_tests": [
+    "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup"
+   ]
+  },
+  "shared_staging/baseline_classes/weibo.json": {
+   "sha256": "c1efb5df249eb44f1a794bba2c3b52c61d2247294eb75ec9e031f97db7417a1c",
+   "source_tests": [
+    "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup"
+   ]
+  },
+  "shared_staging/baseline_classes/xhs.json": {
+   "sha256": "7c59c5d58fcff558201c0d54e30d00f6293cdbc1c36217a9e0345ca60927ba0e",
+   "source_tests": [
+    "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup"
+   ]
+  },
+  "shared_staging/baseline_classes/zhihu.json": {
+   "sha256": "10ec63b2410067b0eddf99b60b270980f49fb5147e7452467311c947bc3a8f4c",
+   "source_tests": [
+    "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup"
+   ]
+  }
+ }
+}

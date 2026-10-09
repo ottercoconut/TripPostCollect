@@ -1,0 +1,22 @@
+{
+ "artifacts":{},
+ "events":[],
+ "failure":[],
+ "trace":[
+  {"$t14":"tuple","v":["launch",{"headless":false,"proxy":null}]},
+  {"$t14":"tuple","v":["new_context",{"user_agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1","viewport":{"height":1080,"width":1920}}]},
+  {"$t14":"tuple","v":["stealth",{"$t14":"sha256","v":"02ae012addcdb30b0ed1a512406feb487699b1b217566e87a8086b54dfcc1d4d","size":180462}]},
+  {"$t14":"tuple","v":["new_page"]},
+  {"$t14":"tuple","v":["goto","https://www.weibo.com",{}]},
+  {"$t14":"tuple","v":["cookies",["https://m.weibo.cn"]]},
+  {"$t14":"tuple","v":["request","GET","https://m.weibo.cn/api/config",{"headers":{"Content-Type":"application/json;charset=UTF-8","Cookie":"SUB=t05","Origin":"https://m.weibo.cn","Referer":"https://m.weibo.cn","User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"},"timeout":60}]},
+  {"$t14":"tuple","v":["goto","https://m.weibo.cn/search?containerid=100103type%3D1%26q%3D%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",{"wait_until":"domcontentloaded"}]},
+  {"$t14":"tuple","v":["behavior","weibo"]},
+  {"$t14":"tuple","v":["cookies",["https://m.weibo.cn"]]},
+  {"$t14":"tuple","v":["request","GET","https://m.weibo.cn/detail/long",{"headers":{"Content-Type":"application/json;charset=UTF-8","Cookie":"SUB=t05","Origin":"https://m.weibo.cn","Referer":"https://m.weibo.cn","User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"},"timeout":60}]},
+  {"$t14":"tuple","v":["request","GET","https://m.weibo.cn/detail/long",{"headers":{"Content-Type":"application/json;charset=UTF-8","Cookie":"SUB=t05","Origin":"https://m.weibo.cn","Referer":"https://m.weibo.cn","User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"},"timeout":60}]},
+  {"$t14":"tuple","v":["request","GET","https://m.weibo.cn/detail/long",{"headers":{"Content-Type":"application/json;charset=UTF-8","Cookie":"SUB=t05","Origin":"https://m.weibo.cn","Referer":"https://m.weibo.cn","User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"},"timeout":60}]},
+  {"$t14":"tuple","v":["playwright_exit"]},
+  {"$t14":"tuple","v":["close"]}
+ ]
+}

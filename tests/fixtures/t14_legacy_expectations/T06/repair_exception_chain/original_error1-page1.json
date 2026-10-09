@@ -1,0 +1,10 @@
+{
+ "$t14":"tuple",
+ "v":[
+  "RuntimeError",
+  "browser detail response did not contain aweme_detail; attempts=['note:reason=navigation_or_response:Error:payload_keys=[]', 'video:reason=navigation_or_response:Error:payload_keys=[]']",
+  "ValueError",
+  "原详情请求失败",
+  [{"timeout":30000},{"timeout":30000}]
+ ]
+}

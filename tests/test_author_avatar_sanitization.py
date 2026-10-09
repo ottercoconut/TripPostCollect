@@ -14,6 +14,8 @@ import types
 
 import pytest
 
+from support import legacy_expectations as expectations
+
 from trippostcollect.records.sanitization import (
     AUTHOR_AVATAR_LOG_REDACTION,
     redact_author_avatar_text,
@@ -188,7 +190,8 @@ def test_mediacrawler_run_command_redacts_logs_and_summary_tail(
 def test_mediacrawler_exporter_sanitizes_before_jsonl_serialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from scripts.mediacrawler_export_entrypoint import sanitize_export_item
+    # T14：原经旧桥 E 的同名转发调用；E 只是转交根净化函数，此处直接用根实现。
+    from trippostcollect.records.sanitization import sanitize_export_item
 
     monkeypatch.setenv("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS", "1")
     serialized = json.dumps(
@@ -206,6 +209,7 @@ def test_mediacrawler_exporter_sanitizes_before_jsonl_serialization(
     assert persisted == {"note_id": "note-1", "title": "青岛"}
 
 
+@expectations.legacy_only
 def test_mediacrawler_export_hook_wraps_writer_before_persistence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -246,7 +250,7 @@ def test_mediacrawler_export_hook_wraps_writer_before_persistence(
     ("zhihu", "zhihu", "Zhihu"),
     ("xhs", "xhs", "Xhs"),
 ])
-@pytest.mark.parametrize("bridge", ["worker", "legacy"])
+@pytest.mark.parametrize("bridge", ["worker", pytest.param("legacy", marks=expectations.legacy_only_marks())])
 def test_worker_store_files_remove_avatar_before_serialization(
     tmp_path: Path, platform: str, storage: str, prefix: str, bridge: str,
 ) -> None:
@@ -270,22 +274,33 @@ entry.configure([
     "--headless", "true", "--save_data_option", "jsonl", "--save_data_path", destination,
     "--start", "1", "--max_concurrency_num", "1", "--enable_ip_proxy", "false",
 ])
-# T12：新入口不再装载 fork；fork store 与 writer 经过渡装载点显式加载。
-from trippostcollect.platforms import _fork_bridge
-_fork_bridge.install()
 if bridge == "worker":
+    # T14：worker 侧只经根入口装配的内容出口写出（正式 worker 只有 JSONL；CSV/JSON 为 fork 退出出口）。
     entry.install_hooks()
+    assert entry.load_crawler(platform)
+    config = entry.current_config()
+    if platform == "wb":
+        make_sink = lambda: entry.weibo_dependencies(config)[1].store_factory()
+    elif platform == "dy":
+        make_sink = lambda: entry.douyin_dependencies(config)["ports"].content_sink("search")
+    elif platform == "zhihu":
+        make_sink = lambda: entry._zhihu_dependencies(config)[1].content_sink_factory()
+    else:
+        make_sink = lambda: entry.xhs_dependencies(config, repair=False)["ports"].content_sink_factory("search")
 else:
+    # 旧桥：fork store 与 writer 经过渡装载点显式加载；T14-C 随旧桥删除。
+    from trippostcollect.platforms import _fork_bridge
+    _fork_bridge.install()
     from mediacrawler_export_entrypoint import install_export_hook
     install_export_hook()
-assert entry.load_crawler(platform)
-import config
-config.SAVE_DATA_PATH = destination
-config.ENABLE_GET_WORDCLOUD = False
-from var import crawler_type_var
-crawler_type_var.set("search")
-store = importlib.import_module(f"store.{storage}._store_impl")
-from tools.async_file_writer import AsyncFileWriter
+    assert entry.load_crawler(platform)
+    import config
+    config.SAVE_DATA_PATH = destination
+    config.ENABLE_GET_WORDCLOUD = False
+    from var import crawler_type_var
+    crawler_type_var.set("search")
+    store = importlib.import_module(f"store.{storage}._store_impl")
+    from tools.async_file_writer import AsyncFileWriter
 url = "https://fixture.test/private-photo.jpg"
 body_url = "https://fixture.test/body.jpg"
 raw = {
@@ -305,14 +320,17 @@ def checked_dumps(value, *args, **kwargs):
     return text
 json.dumps = checked_dumps
 async def write():
+    if bridge == "worker":
+        await make_sink().store_content(raw)
+        return
     await getattr(store, f"{prefix}JsonlStoreImplement")().store_content(raw)
     writer = AsyncFileWriter(storage, "search")
     await writer.write_single_item_to_json(raw, "contents")
     await writer.write_to_csv(raw, "contents")
 asyncio.run(write())
-assert len(serialized) >= 2
+assert len(serialized) >= (1 if bridge == "worker" else 2)
 files = list(Path(destination).rglob("search_contents_*"))
-assert len(files) == 3
+assert len(files) == (1 if bridge == "worker" else 3)
 for path in files:
     text = path.read_text(encoding="utf-8-sig")
     assert url not in text

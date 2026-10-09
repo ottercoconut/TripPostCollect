@@ -1,0 +1,10 @@
+[
+ {
+  "$t14":"tuple",
+  "v":["sign","/aweme/v1/web/comment/reply/","id=101&text=%E9%9D%92%E5%B2%9B&device_platform=webapp&aid=6383&channel=channel_pc_web&version_code=190600&version_name=19.6.0&pc_client_type=1&cookie_enabled=true&browser_language=zh-CN&browser_platform=MacIntel&browser_name=Chrome&browser_version=125.0.0.0&browser_online=true&engine_name=Blink&engine_version=125.0.0.0&os_name=Mac+OS&os_version=10.15.7&cpu_core_num=8&device_memory=8&platform=PC&screen_width=1920&screen_height=1080&effective_type=4g&downlink=10&round_trip_time=50&webid=123&msToken=fixture&update_version_code=170400&verifyFp=verify&fp=verify&uifid=current",{},"Chrome/125.0.0.0"]
+ },
+ {
+  "$t14":"tuple",
+  "v":["request","POST","https://www.douyin.com/aweme/v1/web/comment/reply/",{"$t14":"utf8","v":"id=101&text=%E9%9D%92%E5%B2%9B&device_platform=webapp&aid=6383&channel=channel_pc_web&version_code=190600&version_name=19.6.0&pc_client_type=1&cookie_enabled=true&browser_language=zh-CN&browser_platform=MacIntel&browser_name=Chrome&browser_version=125.0.0.0&browser_online=true&engine_name=Blink&engine_version=125.0.0.0&os_name=Mac+OS&os_version=10.15.7&cpu_core_num=8&device_memory=8&platform=PC&screen_width=1920&screen_height=1080&effective_type=4g&downlink=10&round_trip_time=50&webid=123&msToken=fixture&update_version_code=170400&verifyFp=verify&fp=verify&uifid=current&a_bogus=fixed%2Bbogus%2F%3D"},[{"$t14":"tuple","v":["content-length","604"]},{"$t14":"tuple","v":["content-type","application/x-www-form-urlencoded"]},{"$t14":"tuple","v":["cookie","sessionid=current"]},{"$t14":"tuple","v":["host","www.douyin.com"]},{"$t14":"tuple","v":["referer","https://www.douyin.com/"]},{"$t14":"tuple","v":["user-agent","Chrome/125.0.0.0"]}]]
+ }
+]

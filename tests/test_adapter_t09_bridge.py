@@ -8,6 +8,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from support import legacy_expectations as expectations
+
+# T14：本文件只做旧桥（fork 工厂/E）与根的双轨对照或旧桥自测，T14-C 随旧桥整体删除。
+pytestmark = list(expectations.legacy_only_marks())
+
+
 ROOT = Path(__file__).resolve().parents[1]
 
 # 子进程内按 E.main 的顺序安装导出与批次 hook，再分别经旧式 fork 累加器、

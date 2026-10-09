@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from support import legacy_expectations as expectations
 from trippostcollect.application import candidates, worker_inputs
 from trippostcollect.db import discovery_read
 from trippostcollect.db.bootstrap import bootstrap_database
@@ -56,11 +57,23 @@ def legacy(tmp_path):
     return _module(path, "t03_legacy")
 
 
+FORK_ADAPTIVE = ROOT / "tools/MediaCrawler/tools/trippostcollect_adaptive.py"
+
+
 @pytest.fixture
 def fork():
-    return _module(
-        ROOT / "tools/MediaCrawler/tools/trippostcollect_adaptive.py", "t03_fork_adaptive",
-    )
+    """fork 薄转发是三方对照的第三条腿；独立预期是登记提交原源码（legacy）与字面期望。
+
+    T14：fork 删除后本夹具返回 None，三方对照退化为 legacy 与根两方，用例不再依赖 fork；
+    T14-C 删除 fork 时同批删除本夹具与各处 fork 腿。
+    """
+    if not FORK_ADAPTIVE.is_file():
+        return None
+    return _module(FORK_ADAPTIVE, "t03_fork_adaptive")
+
+
+def _reads(legacy, fork):
+    return [module.existing_platform_identities for module in (legacy, fork) if module is not None]
 
 
 @pytest.fixture
@@ -115,7 +128,8 @@ def _database(path):
 def _equal_read(platform, scope, legacy, fork, expected):
     assert legacy.existing_platform_identities(platform) == expected
     assert discovery_read.existing_platform_identities(platform, **scope) == expected
-    assert fork.existing_platform_identities(platform) == expected
+    if fork is not None:
+        assert fork.existing_platform_identities(platform) == expected
 
 
 @pytest.mark.parametrize("platform", ["weibo", "xhs"])
@@ -188,7 +202,7 @@ def test_resume_subset(scope, legacy, fork, monkeypatch, tmp_path, state):
     expected = {"post", "url-id", "seen", "excluded"}
     if state in {"null", "number"}:
         # 迭代在 except 之外；不能擅自把非法形状吞成空集合。
-        for read in (legacy.existing_platform_identities, fork.existing_platform_identities):
+        for read in _reads(legacy, fork):
             with pytest.raises(TypeError):
                 read("weibo")
         with pytest.raises(TypeError):
@@ -245,7 +259,7 @@ def test_query_error_boundaries(scope, legacy, fork, monkeypatch, platform, tabl
     if expected is not None:
         _equal_read(platform, scope, legacy, fork, expected)
     else:
-        for read in (legacy.existing_platform_identities, fork.existing_platform_identities):
+        for read in _reads(legacy, fork):
             with pytest.raises(error):
                 read(platform)
         with pytest.raises(error):
@@ -274,7 +288,9 @@ def test_env_int_reader(legacy, fork, monkeypatch, value, default, expected):
     else:
         monkeypatch.setenv(name, value)
     read = worker_inputs.env_int_reader(name, default, environ=os.environ)
-    assert read() == legacy.env_int(name, default) == fork.env_int(name, default) == expected
+    assert read() == legacy.env_int(name, default) == expected
+    if fork is not None:
+        assert fork.env_int(name, default) == expected
     monkeypatch.setenv(name, "29")
     assert read() == 29
     bound = {name: "4"}
@@ -286,6 +302,7 @@ def test_env_int_reader(legacy, fork, monkeypatch, value, default, expected):
     assert read() == max(0, default)
 
 
+@expectations.legacy_only
 @pytest.mark.parametrize("platform", ["weibo", "douyin", "zhihu", "xhs"])
 def test_factory_loads_known_once(fork, monkeypatch, platform):
     known = {"known"}
@@ -333,6 +350,35 @@ def test_root_default_event_sink_does_not_write_files(monkeypatch, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def _root_event_sequence():
+    root_events = []
+    root = candidates.AdaptiveAccumulator(
+        "weibo", stagnation_basis="candidate_identity", existing_identities={"known"},
+        event_sink=lambda event_type, details: root_events.append((event_type, details)),
+    )
+    _event_sequence(root)
+    return root_events
+
+
+def _check_event_sequence(root_events):
+    assert [event_type for event_type, _ in root_events] == [
+        "adaptive_batch_completed", "adaptive_search_stopped",
+    ]
+    assert root_events[0][1]["candidate_count"] == 3
+    assert root_events[1][1]["stop_reason"] == "source_exhausted"
+
+
+def test_root_injected_event_sequence():
+    """T14：原对照的根侧字面断言。
+
+    不固化 fork 侧结果：fork 的 tools/trippostcollect_adaptive.AdaptiveAccumulator 是根类子类，只换了默认
+    事件出口，仓库中也没有独立的旧实现，固化它等于根实现与自身比较。事件字段的独立断言见
+    tests/application/test_discovery.py（原 fork 用例原名原断言移植）。
+    """
+    _check_event_sequence(_root_event_sequence())
+
+
+@expectations.legacy_only
 def test_injected_event_sequence_matches_fork_module_patch(fork, monkeypatch):
     root_events = []
     fork_events = []
@@ -358,6 +404,19 @@ def test_injected_event_sequence_matches_fork_module_patch(fork, monkeypatch):
     assert root_events[1][1]["stop_reason"] == "source_exhausted"
 
 
+def test_root_explicit_sink_is_excluded_from_comparison():
+    """T14：原用例的根侧部分；fork 部分随旧桥在 T14-C 删除。"""
+    events = []
+    explicit = candidates.AdaptiveAccumulator("weibo", event_sink=lambda *event: events.append(event))
+    default = candidates.AdaptiveAccumulator("weibo")
+    assert explicit == default
+    assert repr(explicit) == repr(default)
+    assert "event_sink" not in repr(explicit)
+    _event_sequence(explicit)
+    assert len(events) == 2
+
+
+@expectations.legacy_only
 def test_fork_preserves_explicit_sink_and_excludes_it_from_comparison(fork, monkeypatch):
     events = []
 
@@ -402,6 +461,7 @@ def test_http_factory(monkeypatch, disabled, override):
     assert result == {"verify": not disabled if override is None else override}
 
 
+@expectations.legacy_only
 def test_fork_http_reads_config_each_call(monkeypatch):
     config = SimpleNamespace()
     monkeypatch.setitem(sys.modules, "config", config)

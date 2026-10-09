@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from support import legacy_expectations as expectations
+
 from trippostcollect.application import collection as t11_collection
 from trippostcollect.application import reporting as t11_reporting
 
@@ -72,7 +74,6 @@ for _file, _names, _kind in (
     ("tests/test_adapter_t06_bridge.py", ("CrawlerFactory", "create_crawler"), "A"),
     ("tests/test_adapter_t07.py", ("CrawlerFactory", "create_crawler"), "A"),
     ("tests/test_adapter_t09.py", ("CrawlerFactory", "create_crawler"), "A"),
-    ("tests/test_residual_detail_fallbacks.py", ("create_crawler",), "A"),
     ("tests/test_shared_staging.py", ("store_comment", "store_creator"), "A"),
     ("tests/test_author_avatar_sanitization.py", ("write_to_csv", "write_single_item_to_json"), "A"),
     ("tests/platforms/douyin/test_douyin_store.py", ("DouyinStoreFactory", "create_store"), "A"),
@@ -89,7 +90,9 @@ for _file, _names, _kind in (
         "store_comment", "store_creator", "WeibostoreFactory", "create_store", "update_weibo_note_comment",
         "WeiboNote", "WeiboNoteComment",
     ), "D"),
-    ("tests/support/douyin.py", ("create_store", "DouyinStoreFactory", "update_dy_aweme_comment"), "D"),
+    ("tests/support/douyin.py", (
+        "create_store", "DouyinStoreFactory", "update_dy_aweme_comment", "_extract_comment_image_list",
+    ), "D"),
     ("tests/support/weibo_privacy.py", ("create_store", "update_weibo_note_comment", "WeibostoreFactory"), "D"),
 ):
     for _name in _names:
@@ -215,6 +218,7 @@ def test_old_bridge_allowlist_is_exactly_the_t14_bridge() -> None:
     assert {kind for kind in TEST_ALLOWLIST.values()} <= {"A", "B", "D"}
 
 
+@expectations.legacy_only
 def test_fork_bridge_is_kept_only_for_old_bridge_until_t14() -> None:
     # 决策 5：模块文件保留到 T14，仅供旧桥与对照测试；docstring 写明用途与删除卡。
     module = ast.parse((PACKAGE / "platforms" / "_fork_bridge.py").read_text(encoding="utf-8"))
@@ -222,6 +226,7 @@ def test_fork_bridge_is_kept_only_for_old_bridge_until_t14() -> None:
     assert "旧桥" in docstring and "T14" in docstring
 
 
+@expectations.legacy_only
 def test_old_bridge_export_hook_still_wraps_the_same_three_writer_methods(monkeypatch: pytest.MonkeyPatch) -> None:
     # 决策 6：方法名改由旧桥 E 传入，E 包裹的方法集合与净化行为不变。
     import asyncio
@@ -301,12 +306,16 @@ def fork_modules():
             found.setdefault(name.split(".")[0], []).append(name)
     return {key: sorted(value) for key, value in sorted(found.items())}
 
-from trippostcollect.platforms import _fork_bridge
+try:
+    from trippostcollect.platforms import _fork_bridge
+except ImportError:  # T14-C 删除过渡装载点后，新入口自然无从调用
+    _fork_bridge = None
 
 def _forbidden_install():
     raise RuntimeError("新入口路径调用了过渡装载 _fork_bridge.install")
 
-_fork_bridge.install = _forbidden_install
+if _fork_bridge is not None:
+    _fork_bridge.install = _forbidden_install
 from trippostcollect.platforms.entry import configure, install_hooks, load_crawler
 stages = {}
 configure(argv); stages["configure"] = fork_modules()

@@ -8,15 +8,21 @@ from types import ModuleType
 
 import pytest
 
+from support import legacy_expectations as expectations
 from support.weibo_adapter import ROOT, settings
-from test_adapter_t05 import drive
-from trippostcollect.platforms import entry
+from test_adapter_t05 import DRIVE_SCENARIOS, T14_BRIDGE, drive
+from trippostcollect.platforms import _fork_bridge, entry
 from trippostcollect.platforms.weibo import client, core, login, models, parser
+
+
+# T14：本文件只做旧桥（fork 工厂/E）与根的双轨对照或旧桥自测，T14-C 随旧桥整体删除。
+pytestmark = list(expectations.legacy_only_marks())
 
 
 def bridge_types(monkeypatch):
     """只加载工厂定义；不执行 fork main 的抓取入口。"""
     settings()
+    _fork_bridge.install()
     fork = import_module("media_platform.weibo")
     fork_core = import_module("media_platform.weibo.core")
     fork_client = import_module("media_platform.weibo.client")
@@ -53,44 +59,54 @@ def bridge_types(monkeypatch):
     return factory, new_type, fork_core
 
 
+async def execute(old_bridge, directory, scenario, post_repair):
+    with pytest.MonkeyPatch.context() as patch:
+        factory, new_type, fork_core = bridge_types(patch)
+        bridge = import_module("mediacrawler_export_entrypoint")
+
+        def construct(options, ports):
+            # drive 已提供全部 fake；这里只把相同端口传给两个真实无参构造入口。
+            patch.setattr(entry, "weibo_dependencies", lambda config, *, post_repair=False: (
+                options, replace(ports, post_repair=post_repair),
+            ))
+            if old_bridge:
+                bridge.install_weibo_browser_detail_fallback()
+                instance = factory.create_crawler("wb")
+                assert fork_core._post_repair is bool(post_repair)
+            else:
+                patch.setattr(bridge, "install_xhs_repair_resilience", lambda: None)
+                patch.setattr(bridge, "install_douyin_browser_detail_fallback", lambda: None)
+                entry.install_hooks()
+                instance = new_type()
+            assert instance.ports.post_repair is bool(post_repair)
+            assert instance.config is options
+            return instance
+
+        # 原 50 项测试与 fixtures 不变，只在本测试作用域接入同一 drive 的构造边界。
+        patch.setattr(core, "WeiboCrawler", construct)
+        return await drive(None, directory, patch, scenario, post_repair)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("post_repair", [0, 1])
-@pytest.mark.parametrize("scenario", [
-    "search", "detail", "empty", "search_retry", "search_error", "detail_retry", "detail_error",
-    "detail_403", "detail_429", "image_failure", "image_rate_limit", "image_retry", "image_bad_bytes",
-    "login_expired", "repair_api", "repair_page", "repair_empty", "repair_navigation", "repair_rate_limit",
-])
+@pytest.mark.parametrize("scenario", DRIVE_SCENARIOS)
 async def test_fork_factory_matches_new_entry_requests_and_artifacts(tmp_path, scenario, post_repair):
-    async def execute(old_bridge, directory):
-        with pytest.MonkeyPatch.context() as patch:
-            factory, new_type, fork_core = bridge_types(patch)
-            bridge = import_module("mediacrawler_export_entrypoint")
-
-            def construct(options, ports):
-                # drive 已提供全部 fake；这里只把相同端口传给两个真实无参构造入口。
-                patch.setattr(entry, "weibo_dependencies", lambda config, *, post_repair=False: (
-                    options, replace(ports, post_repair=post_repair),
-                ))
-                if old_bridge:
-                    bridge.install_weibo_browser_detail_fallback()
-                    instance = factory.create_crawler("wb")
-                    assert fork_core._post_repair is bool(post_repair)
-                else:
-                    patch.setattr(bridge, "install_xhs_repair_resilience", lambda: None)
-                    patch.setattr(bridge, "install_douyin_browser_detail_fallback", lambda: None)
-                    entry.install_hooks()
-                    instance = new_type()
-                assert instance.ports.post_repair is bool(post_repair)
-                assert instance.config is options
-                return instance
-
-            # 原 50 项测试与 fixtures 不变，只在本测试作用域接入同一 drive 的构造边界。
-            patch.setattr(core, "WeiboCrawler", construct)
-            return await drive(None, directory, patch, scenario, post_repair)
-
-    old = await execute(True, tmp_path / "bridge")
-    new = await execute(False, tmp_path / "entry")
+    old = await execute(True, tmp_path / "bridge", scenario, post_repair)
+    new = await execute(False, tmp_path / "entry", scenario, post_repair)
     assert old == new
+
+
+@expectations.legacy_guard
+@pytest.mark.asyncio
+@pytest.mark.parametrize("post_repair", [0, 1])
+@pytest.mark.parametrize("scenario", DRIVE_SCENARIOS)
+async def test_t14_guard_fork_factory_drive(tmp_path, pytestconfig, scenario, post_repair):
+    """旧桥 fork 工厂当场结果与固化预期逐字节一致；根侧比较见 test_adapter_t05.py。"""
+    old = await execute(True, tmp_path / "bridge", scenario, post_repair)
+    expectations.check_legacy(
+        pytestconfig, *T14_BRIDGE, f"{scenario}-repair{post_repair}", expectations.scrub(old, (tmp_path, "<TMP>")),
+        source_test="tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts",
+    )
 
 
 def test_legacy_hook_latches_only_at_install_time(monkeypatch):
@@ -114,6 +130,7 @@ def test_legacy_store_uses_root_projection_and_shared_stagers():
     from trippostcollect.artifacts.jsonl import JsonlContentStore
 
     settings()
+    _fork_bridge.install()
     store = import_module("store.weibo")
     assert isinstance(store.update_weibo_note, partial)
     assert store.update_weibo_note.func is core.WeiboCrawler.update_weibo_note

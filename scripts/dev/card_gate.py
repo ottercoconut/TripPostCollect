@@ -308,15 +308,22 @@ def removal_problems(root, progress):
     return problems
 
 
-def selected_lanes(head_fork):
-    """fork lane 只在本次仍有 fork gitlink 时运行；基线与本次使用同一组 lane 才可比较。"""
-    return (*ROOT_LANES, "fork") if head_fork else ROOT_LANES
+def matrix_offline_tests():
+    return tuple(load_module(ROOT / "scripts/ci/run_matrix.py", "card_gate_lane_matrix").FORK_OFFLINE_TESTS)
+
+
+def selected_lanes(head_fork, offline_tests=None):
+    """fork lane 只在本次仍有 fork gitlink 且 run_matrix 离线清单非空时运行（与 run_matrix.fork_lane_enabled
+    一致）；基线与本次使用同一组 lane 才可比较。offline_tests 缺省取本次 checkout 的 run_matrix。"""
+    if offline_tests is None:
+        offline_tests = matrix_offline_tests()
+    return (*ROOT_LANES, "fork") if head_fork and offline_tests else ROOT_LANES
 
 
 def fork_plan(root, base, checkout, common, fork_python=None):
     """T14 过渡：按基线与本次（索引）的 fork gitlink 决定 lane、基线对象库与 fork 解释器。
 
-    present：两侧都有 gitlink，行为与 T14 前一致；removing：基线有、本次无（T14-C 本身），跳过 fork lane，
+    present：两侧都有 gitlink，fork lane 另需 run_matrix 离线清单非空（T14-B2 起为空，不运行）；removing：基线有、本次无（T14-C 本身），跳过 fork lane，
     基线 fork 源码从仍含该提交的对象库导出；absent：两侧都无。T14-C 合并后只剩 absent，可删除本函数。
     """
     fork_base, head_fork = ledger.fork_gitlink(root, base), ledger.fork_gitlink(root)
@@ -329,10 +336,12 @@ def fork_plan(root, base, checkout, common, fork_python=None):
             [root / FORK] if head_fork else [root / FORK, git_dir / "modules" / FORK,
                                              checkout / FORK, common / "modules" / FORK],
             fork_base)
+    lanes = selected_lanes(head_fork)
+    # fork 解释器只供 fork lane；清单为空不运行 fork lane 时不要求 fork 环境。
     return {"base": fork_base, "head": head_fork,
             "transition": "present" if head_fork else "removing" if fork_base else "absent",
-            "repository": repository, "lanes": selected_lanes(head_fork),
-            "python": (fork_python or checkout / FORK / ".venv/bin/python").absolute() if head_fork else None}
+            "repository": repository, "lanes": lanes,
+            "python": (fork_python or checkout / FORK / ".venv/bin/python").absolute() if "fork" in lanes else None}
 
 
 def fork_repository(candidates, commit):
@@ -424,7 +433,7 @@ def render_summary(report):
     """三态结论始终在最后一行；跳过测试不能成为通过。"""
     lines = ["沙箱 canary：" + ("通过" if report.get("canary", {}).get("passed") else "未通过")]
     if "fork" in report:
-        lines.append("fork：" + {"present": "基线与本次均有 gitlink（含 fork lane）",
+        lines.append("fork：" + {"present": "基线与本次均有 gitlink（离线清单非空时含 fork lane）",
                                  "removing": "本次删除 gitlink（T14-C 过渡，跳过 fork lane，原位定义按预期退出核对）",
                                  "absent": "基线与本次均无 gitlink（无 fork lane）"}[report["fork"]["transition"]])
     if "ledger" in report:

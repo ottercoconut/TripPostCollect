@@ -1,24 +1,42 @@
-"""TripPostCollect tests for adaptive accumulator."""
+"""TripPostCollect tests for adaptive accumulator.
+
+T14：原用例经 fork 的 tools/trippostcollect_adaptive 薄转发（类与判据均重导出根实现，事件出口为
+模块全局）运行；现直接使用根 trippostcollect.application.candidates，以显式 event_sink 捕获事件，
+"从环境装配"改用正式 worker 装配函数（entry 的小红书/抖音累加器工厂）。断言不变。
+"""
 
 from __future__ import annotations
 
 import sqlite3
-import sys
-from importlib import import_module
-from pathlib import Path
+
+from trippostcollect.application import candidates
+from trippostcollect.application.worker_inputs import worker_config
+from trippostcollect.platforms import entry
 
 
-ROOT = Path(__file__).resolve().parents[1]
-MEDIACRAWLER_TOOLS = ROOT / "tools" / "MediaCrawler" / "tools"
-if str(MEDIACRAWLER_TOOLS) not in sys.path:
-    sys.path.insert(0, str(MEDIACRAWLER_TOOLS))
+def _discard(*args, **kwargs) -> None:
+    return None
 
-trippostcollect_adaptive = import_module("trippostcollect_adaptive")
+
+def _accumulator(events=None, **kwargs) -> candidates.AdaptiveAccumulator:
+    sink = _discard if events is None else (lambda event_type, details: events.append((event_type, details)))
+    return candidates.AdaptiveAccumulator(event_sink=sink, **kwargs)
+
+
+def _from_environment(platform: str) -> candidates.AdaptiveAccumulator:
+    """正式 worker 装配的累加器：已知集合范围在构造时从 env 读取一次，事件出口替换为丢弃。"""
+    config = worker_config()
+    config.PLATFORM = platform
+    if platform == "xhs":
+        accumulator = entry.xhs_dependencies(config, repair=False)["ports"].accumulator_factory()
+    else:
+        accumulator = entry.douyin_dependencies(config)["ports"].candidates()
+    accumulator.event_sink = _discard
+    return accumulator
 
 
 def test_stagnation_is_diagnostic_and_never_stops_discovery(monkeypatch) -> None:
-    monkeypatch.setattr(trippostcollect_adaptive, "append_execution_event", lambda *args, **kwargs: None)
-    accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
+    accumulator = _accumulator(
         platform="xhs",
     )
 
@@ -36,8 +54,7 @@ def test_stagnation_is_diagnostic_and_never_stops_discovery(monkeypatch) -> None
 
 
 def test_new_valid_record_resets_stagnation(monkeypatch) -> None:
-    monkeypatch.setattr(trippostcollect_adaptive, "append_execution_event", lambda *args, **kwargs: None)
-    accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
+    accumulator = _accumulator(
         platform="xhs",
     )
 
@@ -52,12 +69,7 @@ def test_new_valid_record_resets_stagnation(monkeypatch) -> None:
 
 
 def test_candidate_and_valid_counts_never_stop_before_source_exhaustion(monkeypatch) -> None:
-    monkeypatch.setattr(
-        trippostcollect_adaptive,
-        "append_execution_event",
-        lambda *args, **kwargs: None,
-    )
-    accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
+    accumulator = _accumulator(
         platform="xhs",
     )
 
@@ -70,16 +82,11 @@ def test_candidate_and_valid_counts_never_stop_before_source_exhaustion(monkeypa
 
 
 def test_legacy_quantity_environment_cannot_restore_quantity_stops(monkeypatch) -> None:
-    monkeypatch.setattr(
-        trippostcollect_adaptive,
-        "append_execution_event",
-        lambda *args, **kwargs: None,
-    )
     monkeypatch.setenv("TRIPPOSTCOLLECT_COMPLETION_MODE", "target-new-posts")
     monkeypatch.setenv("TRIPPOSTCOLLECT_TARGET_NEW_POSTS", "1")
     monkeypatch.setenv("TRIPPOSTCOLLECT_CANDIDATE_HARD_LIMIT", "1")
     monkeypatch.setenv("TRIPPOSTCOLLECT_MAX_STAGNANT_BATCHES", "1")
-    accumulator = trippostcollect_adaptive.AdaptiveAccumulator.from_environment("xhs")
+    accumulator = _from_environment("xhs")
 
     accumulator.begin_batch()
     assert accumulator.consider("candidate-1", valid=True) is False
@@ -100,14 +107,7 @@ def test_legacy_quantity_environment_cannot_restore_quantity_stops(monkeypatch) 
 
 def test_completed_batch_event_keeps_candidate_identities_for_failed_run_resume(monkeypatch) -> None:
     events = []
-    monkeypatch.setattr(
-        trippostcollect_adaptive,
-        "append_execution_event",
-        lambda event_type, details: events.append((event_type, details)),
-    )
-    accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
-        platform="xhs",
-    )
+    accumulator = _accumulator(events, platform="xhs")
 
     accumulator.begin_batch()
     accumulator.consider("valid-note", valid=True)
@@ -121,8 +121,7 @@ def test_completed_batch_event_keeps_candidate_identities_for_failed_run_resume(
 
 
 def test_weibo_stagnation_tracks_candidate_identity_progress(monkeypatch) -> None:
-    monkeypatch.setattr(trippostcollect_adaptive, "append_execution_event", lambda *args, **kwargs: None)
-    accumulator = trippostcollect_adaptive.AdaptiveAccumulator(
+    accumulator = _accumulator(
         platform="weibo",
         stagnation_basis="candidate_identity",
     )
@@ -141,7 +140,7 @@ def test_weibo_stagnation_tracks_candidate_identity_progress(monkeypatch) -> Non
 
 
 def test_douyin_exhausted_cursor_reseed_requires_new_candidate_continuation() -> None:
-    should_reseed = trippostcollect_adaptive.should_reseed_douyin_frontier
+    should_reseed = candidates.should_reseed_douyin_frontier
 
     assert should_reseed(
         saved_source_exhausted=True,
@@ -192,6 +191,6 @@ def test_common_persisted_seen_candidate_is_loaded_before_detail(monkeypatch, tm
     monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_JOB_ID", "24")
     monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT", "fingerprint")
 
-    accumulator = trippostcollect_adaptive.AdaptiveAccumulator.from_environment("douyin")
+    accumulator = _from_environment("douyin")
 
     assert accumulator.is_known("seen-video") is True

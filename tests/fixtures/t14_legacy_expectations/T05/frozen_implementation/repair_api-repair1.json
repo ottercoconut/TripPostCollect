@@ -1,0 +1,28 @@
+{
+ "artifacts":{
+  "weibo/image_manifest.jsonl":{"$t14":"utf8","v":"{\"attempts\":1,\"error_code\":null,\"fetch_status\":\"downloaded\",\"height\":3,\"http_status\":200,\"image_role\":\"content\",\"mime_type\":\"image/png\",\"platform_key\":\"weibo\",\"platform_post_id\":\"long\",\"schema_version\":1,\"sha256\":\"f24617654f3945f7225534ae4b68914c486fb1c69d05bf7b3c87afa53fb485ae\",\"size_bytes\":107,\"source_asset_key\":\"weibo:pid:p-long\",\"source_index\":0,\"source_key\":\"image_list\",\"source_url\":\"https://wx1.sinaimg.cn/orj360/long.jpg\",\"staging_path\":\"weibo/images/long/000.png\",\"width\":4}\n"},
+  "weibo/images/long/000.png":{"$t14":"b64","v":"iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAMklEQVR4AQEnANj/AAAA/wAA/wAA/wAA/wAAAP8AAP8AAP8AAP8AAAD/AAD/AAD/AAD/3UkL9fbxz2cAAAAASUVORK5CYII="},
+  "weibo/jsonl/detail_contents_2026-09-30.jsonl":{"$t14":"utf8","v":"{\"note_id\": \"long\", \"content\": \"青岛完整正文\", \"create_time\": 1749873600, \"create_date_time\": \"2025-06-14 12:00:00+08:00\", \"liked_count\": \"1\", \"comments_count\": \"2\", \"shared_count\": \"3\", \"last_modify_ts\": 1700000000000, \"note_url\": \"https://m.weibo.cn/detail/long\", \"image_list\": [\"https://wx1.sinaimg.cn/orj360/long.jpg\"], \"image_count\": 1, \"image_list_source\": \"mblog.pics\", \"image_assets\": [{\"pid\": \"p-long\", \"url\": \"https://wx1.sinaimg.cn/orj360/long.jpg\", \"source_index\": 0}], \"creator_hash\": \"author\", \"nickname\": \"青岛作者\", \"followers_count\": 0, \"fans_count\": 0, \"followers_observed\": true, \"author_followers_source\": \"search_author\", \"source_keyword\": \"青岛旅游\", \"content_detail_status\": \"detail_observed\", \"content_detail_source\": \"mobile_detail\"}\n"}
+ },
+ "events":[],
+ "failure":[],
+ "trace":[
+  {"$t14":"tuple","v":["launch",{"headless":false,"proxy":null}]},
+  {"$t14":"tuple","v":["new_context",{"user_agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1","viewport":{"height":1080,"width":1920}}]},
+  {"$t14":"tuple","v":["stealth",{"$t14":"sha256","v":"02ae012addcdb30b0ed1a512406feb487699b1b217566e87a8086b54dfcc1d4d","size":180462}]},
+  {"$t14":"tuple","v":["new_page"]},
+  {"$t14":"tuple","v":["goto","https://www.weibo.com",{}]},
+  {"$t14":"tuple","v":["cookies",["https://m.weibo.cn"]]},
+  {"$t14":"tuple","v":["request","GET","https://m.weibo.cn/api/config",{"headers":{"Content-Type":"application/json;charset=UTF-8","Cookie":"SUB=t05","Origin":"https://m.weibo.cn","Referer":"https://m.weibo.cn","User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"},"timeout":60}]},
+  {"$t14":"tuple","v":["goto","https://m.weibo.cn/search?containerid=100103type%3D1%26q%3D%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",{"wait_until":"domcontentloaded"}]},
+  {"$t14":"tuple","v":["behavior","weibo"]},
+  {"$t14":"tuple","v":["cookies",["https://m.weibo.cn"]]},
+  {"$t14":"tuple","v":["request","GET","https://m.weibo.cn/detail/long",{"headers":{"Content-Type":"application/json;charset=UTF-8","Cookie":"SUB=t05","Origin":"https://m.weibo.cn","Referer":"https://m.weibo.cn","User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"},"timeout":60}]},
+  {"$t14":"tuple","v":["request","GET","https://m.weibo.cn/detail/long",{"headers":{"Content-Type":"application/json;charset=UTF-8","Cookie":"SUB=t05","Origin":"https://m.weibo.cn","Referer":"https://m.weibo.cn","User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"},"timeout":60}]},
+  {"$t14":"tuple","v":["request","GET","https://m.weibo.cn/detail/long",{"headers":{"Content-Type":"application/json;charset=UTF-8","Cookie":"SUB=t05","Origin":"https://m.weibo.cn","Referer":"https://m.weibo.cn","User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"},"timeout":60}]},
+  {"$t14":"tuple","v":["browser_api","GET","https://m.weibo.cn/statuses/show?id=long",{"headers":{"Referer":"https://m.weibo.cn/detail/long"},"timeout":7000}]},
+  {"$t14":"tuple","v":["request","GET","https://i1.wp.com/wx1.sinaimg.cn/large/long.jpg",{"headers":{"Accept":"image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8","Content-Type":"application/json;charset=UTF-8","Cookie":"SUB=t05","Origin":"https://m.weibo.cn","Referer":"https://m.weibo.cn","User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"},"timeout":60}]},
+  {"$t14":"tuple","v":["playwright_exit"]},
+  {"$t14":"tuple","v":["close"]}
+ ]
+}

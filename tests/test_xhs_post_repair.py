@@ -32,7 +32,17 @@ if str(SCRIPTS) not in sys.path:
 
 repair = import_module("repair_xhs_posts")
 mediacrawler = import_module("mediacrawler_crawl")
-entrypoint = import_module("mediacrawler_export_entrypoint")
+
+
+def install_worker_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T14：原用旧桥 E 的 install_xhs_repair_resilience 锁存修复开关；改由正式 worker 的
+    entry.install_hooks 在同一时点读取。用例结束时还原它写入的全部模块级开关（含 _xhs_repair）。"""
+    from trippostcollect.application import events
+
+    for name in ("_xhs_repair", "_weibo_post_repair", "_douyin_browser_detail_fallback"):
+        monkeypatch.setattr(platform_entry, name, getattr(platform_entry, name))
+    monkeypatch.setattr(events, "_batch_publisher", events._batch_publisher)
+    platform_entry.install_hooks()
 
 
 @pytest.mark.parametrize("interrupt_kind", ["lease_signal", "keyboard_interrupt"])
@@ -813,7 +823,7 @@ async def test_xhs_repair_stops_on_browser_lifecycle_failure_with_structured_blo
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR", "1")
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_BATCH_SIZE", "2")
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH", str(report_path))
-    entrypoint.install_xhs_repair_resilience()
+    install_worker_hooks(monkeypatch)
     crawler = FakeCrawler(**platform_entry.xhs_dependencies(repair_crawler_config(["note-1", "note-2", "note-3"])))
 
     with pytest.raises(type(failure)) as exc_info:
@@ -896,7 +906,7 @@ async def test_xhs_repair_continues_same_and_later_batches_after_candidate_failu
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_BATCH_SIZE", "2")
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH", str(report_path))
 
-    entrypoint.install_xhs_repair_resilience()
+    install_worker_hooks(monkeypatch)
     await FakeCrawler(**platform_entry.xhs_dependencies(config)).get_specified_notes()
 
     report = json.loads(report_path.read_text(encoding="utf-8"))

@@ -11,7 +11,8 @@ import sys
 from types import SimpleNamespace
 
 from support.raw_author_identity import use_raw_author_identity
-from trippostcollect.platforms import _fork_bridge, entry
+from trippostcollect.application.worker_inputs import worker_config
+from trippostcollect.platforms import entry
 from trippostcollect.platforms.weibo import core, models
 
 
@@ -20,10 +21,14 @@ FIXTURE = ROOT / "tests/fixtures/adapter_t05"
 
 
 def settings(**overrides):
-    """只复制静态配置；所有输出由测试的临时目录覆盖。"""
-    _fork_bridge.install()
-    import config
+    """只复制静态配置；所有输出由测试的临时目录覆盖。
+
+    T14：默认值取根配置对象 worker_config()，不再读取 fork config；两者在这些键上逐键相同由
+    tests/test_adapter_t12.py::test_worker_config_matches_fork_defaults_key_by_key 守护。
+    """
     from trippostcollect.runtime.browser import CDPBrowserSettings
+
+    config = worker_config()
 
     keys = {field.name for cls in (models.WeiboConfig, CDPBrowserSettings) for field in fields(cls)}
     result = SimpleNamespace(**{key: getattr(config, key) for key in keys})
@@ -47,7 +52,12 @@ def client_ports(**overrides):
 
 
 def load_baseline(tmp_path, monkeypatch):
-    """校验所有 fixture 字节后按原包相对导入；共享能力仍用已迁的根实现。"""
+    """校验所有 fixture 字节后按原包相对导入；共享能力仍用已迁的根实现。
+
+    依赖 fork 顶层包，仅供双轨对照与 T14 守卫使用，随 fork 在 T14-C 删除。
+    """
+    from trippostcollect.platforms import _fork_bridge
+
     _fork_bridge.install()
     for name in list(sys.modules):
         if name.startswith("t05_legacy_"):

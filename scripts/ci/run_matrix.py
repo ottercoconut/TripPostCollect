@@ -21,13 +21,12 @@ _COVERAGE.loader.exec_module(coverage_report)
 
 
 FORK = "tools/MediaCrawler"
-# T14 过渡：fork gitlink 存在时才运行 fork 离线 lane；34 个用例到根断言的映射见
-# tests/fixtures/t14_fork_test_mapping.json。T14-C 删除 fork 后，本节常量与 fork lane 代码一并删除。
-FORK_OFFLINE_TESTS = tuple(f"tests/test_{name}.py" for name in (
-    "image_client_http_classification",
-    "image_download_retry", "image_staging_errors", "trippostcollect_adaptive",
-))
-FORK_EXPECTED_TESTS = 34
+# T14 过渡：fork gitlink 存在且离线清单非空时才运行 fork 离线 lane。T14-B2 起原 34 个离线用例已按台账
+# target_file 原名原断言移植到 tests/artifacts/test_staging.py 与 tests/application/test_discovery.py
+# （映射见 tests/fixtures/t14_fork_test_mapping.json），清单为空，fork lane 不再运行。
+# T14-C 删除 fork 后，本节常量与 fork lane 代码一并删除。
+FORK_OFFLINE_TESTS: tuple[str, ...] = ()
+FORK_EXPECTED_TESTS = 0
 # 根环境选站装配验收：B站正式 article 路线与四站 worker 选站，均不得装载 fork 顶层包。
 ROOT_ASSEMBLY_MODULES = tuple(f"trippostcollect.platforms.bilibili.{name}" for name in (
     "core", "client", "parser", "login", "signer",
@@ -67,6 +66,11 @@ def fork_pythonpath(source, support):
     return os.pathsep.join(str(path) for path in (
         source / "tools/MediaCrawler", source / "src", source / "scripts", support,
     ))
+
+
+def fork_lane_enabled(with_fork):
+    """fork lane 需要 fork 仍在且离线清单非空；清单为空时 pytest 会改收 fork 全部用例，不得运行。"""
+    return bool(with_fork and FORK_OFFLINE_TESTS)
 
 
 def fork_test_command(python, fork, output):
@@ -209,11 +213,12 @@ def main():
            check=False, timeout=120)
     results["assembly"] = {"returncode": result.returncode, "modules": list(ROOT_ASSEMBLY_MODULES),
                            "worker_platforms": list(WORKER_PLATFORM_CODES)}
-    if with_fork:
+    if fork_lane_enabled(with_fork):
         results["fork_offline"] = run_fork_offline(source, reports, args.fork_python)
-    # 五站覆盖：按 tests/fixtures/t13_coverage.json 核对各 lane（fork 仍在时含 fork）的 junit，任一声明 node 缺失或未通过即失败。
-    coverage = coverage_report.write_report(source / coverage_report.SPEC_PATH, reports,
-                                            (*coverage_report.ROOT_LANES, *(("fork",) if with_fork else ())))
+    # 五站覆盖：按 tests/fixtures/t13_coverage.json 核对各 lane（fork lane 运行时含 fork）的 junit，任一声明 node 缺失或未通过即失败。
+    coverage = coverage_report.write_report(
+        source / coverage_report.SPEC_PATH, reports,
+        (*coverage_report.ROOT_LANES, *(("fork",) if fork_lane_enabled(with_fork) else ())))
     results["coverage"] = {"returncode": int(not coverage["ok"]), "problems": len(coverage["problems"]),
                            "status_counts": coverage["status_counts"]}
     (reports / "matrix.json").write_text(json.dumps(results, indent=2))
