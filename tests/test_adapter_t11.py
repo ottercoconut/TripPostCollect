@@ -267,7 +267,9 @@ def baseline(monkeypatch):
     module.__file__ = str(FIXTURES / "mediacrawler_crawl.py.txt")
     monkeypatch.setitem(sys.modules, module.__name__, module)
     # T14-C 有意偏离：MEDIACRAWLER_DIR 与过渡模块 execution_state 已删除，执行前单向替换旧导入。
-    text, namespace = fork_removal_deviation.frozen_source(source.decode("utf-8"))
+    text, namespace = fork_removal_deviation.frozen_source(
+        source.decode("utf-8"), mediacrawler_dir_imports=1, execution_state_imports=1,
+    )
     vars(module).update(namespace)
     exec(compile(text, module.__file__, "exec"), vars(module))
     return module

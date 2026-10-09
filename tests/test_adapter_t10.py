@@ -6,6 +6,7 @@ import argparse
 import ast
 import asyncio
 from datetime import datetime
+from hashlib import sha256
 import importlib
 import json
 import re
@@ -31,15 +32,30 @@ FIXTURES = ROOT / "tests/fixtures/adapter_t10"
 ROWS = [row for row in json.loads((ROOT / "docs/adapter-ledger/symbols.json").read_text())["rows"] if row["card"] == "T10"]
 
 
+PROVENANCE = json.loads((FIXTURES / "provenance.json").read_text())
+# T14-C 删除的两类旧导入在各冻结文件中的预期次数（MEDIACRAWLER_DIR, execution_state）。
+FORK_REMOVAL_IMPORTS = {
+    "mediacrawler_login_warmup": (1, 0), "login_warmup": (1, 0), "mediacrawler_crawl": (0, 0),
+    "ctf_browser_resilience": (0, 0), "required_cookie_names": (0, 0),
+}
+
+
 def frozen_source(name):
-    return (FIXTURES / f"{name}.py.txt").read_text()
+    """读取冻结原文，先按 provenance.json 核对 sha256。"""
+    data = (FIXTURES / f"{name}.py.txt").read_bytes()
+    assert sha256(data).hexdigest() == PROVENANCE["fixtures_sha256"][f"{name}.py.txt"], name
+    return data.decode("utf-8")
 
 
 def old_module(name, namespace=None):
     module = ModuleType(f"frozen_{name}")
     module.__dict__.update(namespace or {})
     # T14-C 有意偏离：MEDIACRAWLER_DIR 与过渡模块 execution_state 已删除，执行前单向替换旧导入。
-    source, preset = fork_removal_deviation.frozen_source(frozen_source(name))
+    mediacrawler_dir_imports, execution_state_imports = FORK_REMOVAL_IMPORTS[name]
+    source, preset = fork_removal_deviation.frozen_source(
+        frozen_source(name), mediacrawler_dir_imports=mediacrawler_dir_imports,
+        execution_state_imports=execution_state_imports,
+    )
     module.__dict__.update(preset)
     if "from __future__ import annotations" not in source:
         source = "from __future__ import annotations\n" + source

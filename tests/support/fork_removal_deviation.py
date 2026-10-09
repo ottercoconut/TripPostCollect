@@ -8,7 +8,7 @@ T08/T10/T11 的冻结旧源码（tests/fixtures/adapter_t08、adapter_t10、adap
    ``trippostcollect.core.execution_state``）。
 
 固化文件不改、哈希断言照旧针对原字节。执行前对源码做“钉住旧值 → 单向替换”：先断言旧导入恰好出现
-预期次数，再把 ``MEDIACRAWLER_DIR`` 从 ``core.paths`` 导入中移除并以原值预置到模块命名空间（测试照旧可
+调用方声明的预期次数，再把 ``MEDIACRAWLER_DIR`` 从 ``core.paths`` 导入中移除并以原值预置到模块命名空间（测试照旧可
 monkeypatch 为临时目录），把 ``from execution_state import`` 换成转发目标的同名导入。其余源码逐字执行。
 """
 
@@ -30,30 +30,33 @@ def legacy_mediacrawler_dir():
     return paths.PROJECT_ROOT / "tools" / "MediaCrawler"
 
 
-def frozen_source(source: str) -> tuple[str, dict[str, Any]]:
-    """返回可执行的冻结源码与需预置的命名空间；源码不含这两类旧导入时原样返回。"""
+def frozen_source(source: str, *, mediacrawler_dir_imports: int, execution_state_imports: int) -> tuple[str, dict[str, Any]]:
+    """返回可执行的冻结源码与需预置的命名空间。
+
+    调用方按冻结文件给出两类旧导入的预期次数（0 或 1）；实际出现次数必须恰好相等，替换后旧导入必须
+    全部消失，防止 fixture 或替换规则变化时静默跳过偏离。
+    """
     namespace: dict[str, Any] = {}
     imports = [node for node in ast.parse(source).body
                if isinstance(node, ast.ImportFrom) and node.module == "trippostcollect.core.paths"
                and any(alias.name == MEDIACRAWLER_DIR_NAME for alias in node.names)]
-    assert len(imports) <= 1, "冻结源码中 MEDIACRAWLER_DIR 导入不止一处"
+    assert len(imports) == mediacrawler_dir_imports, (len(imports), mediacrawler_dir_imports)
     if imports:
         lines = source.splitlines(keepends=True)
         start, end = imports[0].lineno - 1, imports[0].end_lineno
         statement = "".join(lines[start:end])
-        if f"    {MEDIACRAWLER_DIR_NAME},\n" in statement:
-            assert statement.count(f"    {MEDIACRAWLER_DIR_NAME},\n") == 1
-            replaced = statement.replace(f"    {MEDIACRAWLER_DIR_NAME},\n", "")
-        else:
-            assert statement.count(f" {MEDIACRAWLER_DIR_NAME}, ") == 1, statement
-            replaced = statement.replace(f" {MEDIACRAWLER_DIR_NAME}, ", " ")
+        multiline, inline = f"    {MEDIACRAWLER_DIR_NAME},\n", f" {MEDIACRAWLER_DIR_NAME}, "
+        assert statement.count(multiline) + statement.count(inline) == 1, statement
+        replaced = statement.replace(multiline, "").replace(inline, " ")
         source = "".join(lines[:start]) + replaced + "".join(lines[end:])
-        assert MEDIACRAWLER_DIR_NAME not in "".join(
-            ast.unparse(node) for node in ast.parse(source).body if isinstance(node, ast.ImportFrom))
         namespace[MEDIACRAWLER_DIR_NAME] = legacy_mediacrawler_dir()
-    count = source.count(LEGACY_EXECUTION_STATE_IMPORT)
-    assert count <= 1, "冻结源码中 execution_state 导入不止一处"
-    if count:
-        assert f"\n{LEGACY_EXECUTION_STATE_IMPORT}" in source
-        source = source.replace(LEGACY_EXECUTION_STATE_IMPORT, ROOT_EXECUTION_STATE_IMPORT)
+    assert not any(
+        isinstance(node, ast.ImportFrom) and any(alias.name == MEDIACRAWLER_DIR_NAME for alias in node.names)
+        for node in ast.parse(source).body
+    ), "MEDIACRAWLER_DIR 旧导入未被替换"
+    marker = f"\n{LEGACY_EXECUTION_STATE_IMPORT}"
+    assert source.count(LEGACY_EXECUTION_STATE_IMPORT) == source.count(marker) == execution_state_imports, (
+        source.count(LEGACY_EXECUTION_STATE_IMPORT), execution_state_imports)
+    source = source.replace(marker, f"\n{ROOT_EXECUTION_STATE_IMPORT}")
+    assert LEGACY_EXECUTION_STATE_IMPORT not in source, "execution_state 旧导入未被替换"
     return source, namespace

@@ -61,6 +61,31 @@ cherry-pick、rebase 和后续修复已经吸收的改动，以最终实现及�
   集成分支处理并重新验证，不自动创建未经检查的合并。
 - 本地设置 `pull.ff=only`，使 `git pull` 遇到分叉时停止；`push.default=simple`
   使用同名分支推送规则。这些设置位于 `.git/config`，不会随 clone 复制，且不代替人工核对。
+- 拉取或快进会改动冻结资产（`config/frozen_files.json` 登记且本机带不可变标志的文件）时，`git pull`
+  无法替换这些文件，快进会中途停下、工作树只更新一部分。先用
+  `git diff --name-only HEAD..origin/main` 确认要变动的冻结文件，再按以下顺序执行（T14-C 的
+  具体文件与迁移前提见 [运行手册](operations-runbook.md)「拉取 T14 删除批（T14-C）」）：
+  1. 确认没有 runner、worker 或 warmup 在运行；拉取 T14-C 前还须已在 T14-A 版本上按运行手册完成并核对
+     非小红书登录资料迁移，并建议把 `tools/MediaCrawler/browser_data` 另行备份到仓库外。
+  2. 在当前 `main` 上运行 `python scripts/verify_frozen_files.py`，必须通过。
+  3. 只对将被改动的冻结文件解除标志（T14-C 为 `docs/crawl-architecture.md` 与
+     `docs/data-persistence.md`）。macOS 与 Linux 分别为：
+
+     ```bash
+     chflags nouchg \
+       docs/crawl-architecture.md \
+       docs/data-persistence.md
+     sudo chattr -i \
+       docs/crawl-architecture.md \
+       docs/data-persistence.md
+     ```
+
+  4. 确认 `git config --get submodule.recurse` 无输出，再执行 `git pull --ff-only`；不带
+     `--recurse-submodules`。拉取失败时先看 `git status --short`，不用 `reset --hard` 或 `clean` 处理。
+  5. 恢复标志（macOS `chflags uchg`，Linux `sudo chattr +i`，对象同第 3 步），再运行
+     `python scripts/verify_frozen_files.py`，必须通过。
+  6. 不要运行 `git submodule deinit tools/MediaCrawler`：它会删除旧子模块工作树及其中的
+     `browser_data` 备份；拉取后残留的 `tools/MediaCrawler/` 已被 `.gitignore` 忽略。
 - 需要保留发布或回滚版本时，创建带说明标签，记录完整 SHA 和验证结果。
   已使用的标签不移动；后续修复使用新标签。标签只覆盖已提交文件，不包含未提交改动和运行数据。
 

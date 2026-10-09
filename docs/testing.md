@@ -286,8 +286,11 @@ macOS 为 Seatbelt（[sandbox_macos.py](../scripts/dev/sandbox_macos.py)），Li
 | 禁浏览器与桌面打开器 | process-exec 路径正则 | 名称匹配同一正则的可执行文件/目录与 xdg-open 等被遮蔽，exec 得 EACCES |
 | 只写临时根与 /dev | file-write* require-not | 根只读绑定，写入得 EROFS |
 | 禁读写本机浏览器用户数据 | `~/Library/Application Support` 下 Chrome 目录 | `~/.config` 下 Chrome/Chromium/Chrome for Testing 目录被 000 空目录遮蔽 |
-| 禁读写项目平台登录资料 | checkout 内 `data/runtime/platform_sessions` 禁读写 | checkout 内现存的 `data/runtime/platform_sessions` 被 000 空目录遮蔽 |
+| 禁读写项目平台登录资料 | checkout 内 `data/runtime/platform_sessions` 与 `tools/MediaCrawler/browser_data` 禁读写 | checkout 内现存的这两个目录被 000 空目录遮蔽 |
 | 冻结副本不可变标志 | `chflags uchg`（所有者可设） | `chattr +i`（需 root，非 root 经 `sudo -n`） |
+
+`tools/MediaCrawler/browser_data` 是 T14 迁移前的旧登录资料位置；fork 删除后，操作人保留的回退备份仍可能
+留在磁盘上（已被 `.gitignore` 忽略），因此沙箱继续禁止测试读写。
 
 Linux 前置条件：安装 `bubblewrap`；Ubuntu 23.10 起默认限制非特权用户命名空间，需为
 `/usr/bin/bwrap` 放行（AppArmor profile 含 `userns,`）；建立测试副本时设置冻结副本 `chattr +i`

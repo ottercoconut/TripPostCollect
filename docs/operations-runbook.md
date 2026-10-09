@@ -840,6 +840,83 @@ T14-A 曾在运行期对“旧目录存在而新目录不存在”和新位置�
    快照与 profile 一起作为回退备份（回退到 T14 之前的代码时旧代码仍从这里读取）；迁移后各平台首个正式轮
    成功后，由操作人删除整个旧 `tools/MediaCrawler/` 目录；删除前再次执行第 1 步的进程检查。
 
+### 拉取 T14 删除批（T14-C）
+
+前提：先在 T14-A 版本（仍含 fork gitlink 的 `main`）上按第 1–5 步完成迁移并核对通过，再拉取 T14-C。
+T14-C 同批改动了冻结资产 `docs/crawl-architecture.md` 与 `docs/data-persistence.md`（并更新登记哈希）；本机
+这两份文件带不可变标志（macOS `uchg`，Linux `chattr +i`）时，`git pull` 无法替换它们，fast-forward 会中途
+停下、工作树只更新一部分。按下列顺序执行，不要跳步：
+
+1. 确认没有 runner、executor、worker 或 warmup 在运行（命令应无输出），并确认第 1–5 步已在 T14-A 版本上
+   完成并核对。建议另把旧 profile 备份到仓库外（含登录态，目标目录只允许本人读写，不得放进仓库或同步盘）：
+
+   ```bash
+   pgrep -fl "crawl_runner.py|xhs_runner.py|mediacrawler_crawl.py|trippostcollect.platforms.entry|login_warmup.py"
+   mkdir -m 700 /仓库外绝对路径/tpc-browser-data-backup
+   ditto \
+     tools/MediaCrawler/browser_data \
+     /仓库外绝对路径/tpc-browser-data-backup/browser_data
+   ```
+
+   Linux 没有 `ditto`，用 `cp -a` 代替。
+
+2. 在当前 `main`（拉取前）验证冻结资产，必须通过：
+
+   ```bash
+   source .venv/bin/activate
+   python scripts/verify_frozen_files.py
+   ```
+
+3. 只对这两份文件解除不可变标志。macOS：
+
+   ```bash
+   chflags nouchg \
+     docs/crawl-architecture.md \
+     docs/data-persistence.md
+   ```
+
+   Linux：
+
+   ```bash
+   sudo chattr -i \
+     docs/crawl-architecture.md \
+     docs/data-persistence.md
+   ```
+
+4. 确认未设置 `submodule.recurse`（应无输出；若输出 `true`，先移除该设置再拉取），然后只做快进拉取，
+   不带 `--recurse-submodules`：
+
+   ```bash
+   git config --get submodule.recurse
+   git pull --ff-only
+   ```
+
+   拉取若报错停下，先看 `git status --short`，不要用 `reset --hard`、`clean` 或 `checkout -- .` 处理，
+   把输出交人工确认。
+
+5. 恢复不可变标志并重新验证，必须通过。macOS：
+
+   ```bash
+   chflags uchg \
+     docs/crawl-architecture.md \
+     docs/data-persistence.md
+   source .venv/bin/activate
+   python scripts/verify_frozen_files.py
+   ```
+
+   Linux：
+
+   ```bash
+   sudo chattr +i \
+     docs/crawl-architecture.md \
+     docs/data-persistence.md
+   source .venv/bin/activate
+   python scripts/verify_frozen_files.py
+   ```
+
+6. 不要运行 `git submodule deinit tools/MediaCrawler`：它会删除旧子模块工作树及其中的 `browser_data`
+   备份。拉取后留在磁盘上的 `tools/MediaCrawler/` 已被 `.gitignore` 忽略，按上文第 6 步保留和删除。
+
 ## 浏览器与行为证据
 
 Chrome HOME、Crashpad 和缓存由 `src/trippostcollect/runtime/browser_runtime.py` 放在 `data/runtime/`，Chromium 使用 mock

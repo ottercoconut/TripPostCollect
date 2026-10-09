@@ -36,7 +36,9 @@ def baseline(tmp_path):
     source = (ROOT / "tests/fixtures/adapter_t08/mediacrawler_crawl.py.txt").read_bytes()
     assert sha256(source).hexdigest() == "df19e2b8e508332399b762b58cf205754e67ff4fa1b133ccb06cec29f6b1fd4f"
     # T14-C 有意偏离：MEDIACRAWLER_DIR 与过渡模块 execution_state 已删除，执行前单向替换旧导入。
-    text, namespace = fork_removal_deviation.frozen_source(source.decode("utf-8"))
+    text, namespace = fork_removal_deviation.frozen_source(
+        source.decode("utf-8"), mediacrawler_dir_imports=1, execution_state_imports=1,
+    )
     path = tmp_path / "baseline.py"
     path.write_text(text, encoding="utf-8")
     spec = importlib.util.spec_from_file_location("t08_baseline", path)
