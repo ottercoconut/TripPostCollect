@@ -1,4 +1,4 @@
-"""生成平台适配迁移台账；只做静态分析、只读基线查询和临时副本测试收集。"""
+"""平台适配迁移台账：冻结自检、工作树迁移进度与输入漂移核对；只做静态分析，不调用 Git。"""
 
 from __future__ import annotations
 
@@ -7,28 +7,16 @@ import ast
 import collections
 from dataclasses import dataclass
 import hashlib
-import importlib.util
 import json
-import os
 from pathlib import Path
 import re
-import subprocess
-import tempfile
 
 from adapter_ledger_rules import (
     CLI_DEFINITION_SOURCES,
     ENTRYPOINTS,
-    FORK_EXCLUDED_DIRS,
-    FORK_BRIDGE_FILES,
-    FORK_EXCLUDED_PLATFORMS,
-    FORK_PREFIX,
     FROZEN_LEDGER_SHA256,
     PROGRESS_RESOLUTIONS,
-    RESOURCE_FILES,
-    SPEC_MERGE_BASE,
-    SYMBOL_ROOT_FILES,
     SYMBOL_RULES,
-    TEST_FILE_RULES,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,68 +39,6 @@ def load_symbols(root):
 def load_inputs(root):
     """读取已提交输入产物，不依赖 Git 历史。"""
     return json.loads((Path(root) / LEDGER_DIR / "inputs.json").read_text(encoding="utf-8"))
-
-
-def check_file(path, expected):
-    """按 UTF-8 字节比较；缺失的产物同样视为过期。"""
-    path = Path(path)
-    return path.is_file() and path.read_bytes() == expected.encode("utf-8")
-
-
-def publish(path, content, check=False):
-    if check:
-        matches = check_file(path, content)
-        if not matches:
-            print(f"产物缺失或过期：{path}")
-        return matches
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content.encode("utf-8"))
-    print(f"已生成：{path.relative_to(ROOT)}")
-    return True
-
-
-def fork_python_files(root):
-    """先裁剪无关目录再枚举，避免遍历虚拟环境与运行产物。"""
-    fork = root / FORK_PREFIX
-    for directory, dirs, names in os.walk(fork, followlinks=False):
-        dirs[:] = sorted(
-            name
-            for name in dirs
-            if name not in FORK_EXCLUDED_DIRS
-            and not any(platform in name for platform in FORK_EXCLUDED_PLATFORMS)
-            and not (Path(directory) / name).is_symlink()
-        )
-        for name in sorted(names):
-            path = Path(directory) / name
-            relative = path.relative_to(fork).as_posix()
-            if (
-                path.suffix == ".py"
-                and not path.is_symlink()
-                and not any(platform in relative for platform in FORK_EXCLUDED_PLATFORMS)
-            ):
-                yield path.relative_to(root).as_posix()
-
-
-def fork_gitlink(root, revision=None):
-    """返回 fork gitlink 登记的提交；revision 为空时读索引（反映当前 checkout 与已暂存删除）。
-
-    T14 过渡判定的唯一依据：head 中没有 gitlink 即视为 fork 已删除。T14-C 合并后基线与 head 都不再含
-    gitlink，本函数及所有 fork 分支可一并删除。
-    """
-    path = FORK_PREFIX.rstrip("/")
-    output = git_read(root, *(("ls-tree", revision, "--", path) if revision else ("ls-files", "-s", "--", path)))
-    for line in output.splitlines():
-        fields, _, name = line.partition("\t")
-        fields = fields.split()
-        if name == path and fields and fields[0] == "160000":
-            return fields[-1] if revision else fields[1]
-    return None
-
-
-def require_fork(root):
-    """生成类命令必须重新枚举 fork 基线；fork 删除后台账冻结，只保留 --check 自检。"""
-    if not fork_gitlink(root):
-        raise RuntimeError("fork gitlink 已删除：迁移台账已冻结，只支持 symbols/inputs/baseline --check 自检")
 
 
 def frozen_problems(root, command):
@@ -162,52 +88,6 @@ def check_frozen(root, command):
     return not problems
 
 
-def baseline_sources(root):
-    """只从登记提交枚举源码；工作树迁移不能改变冻结台账。"""
-    require_fork(root)
-    baseline = json.loads((root / LEDGER_DIR / "baseline.json").read_text(encoding="utf-8"))
-    root_files = git_read(root, "ls-tree", "-r", "--name-only", baseline["root_head"]).splitlines()
-    fork = root / FORK_PREFIX
-    fork_files = git_read(fork, "ls-tree", "-r", "--name-only", baseline["fork_head"]).splitlines()
-    files = root_files + [
-        FORK_PREFIX + name
-        for name in fork_files
-        if name.endswith(".py")
-        and not set(Path(name).parts[:-1]).intersection(FORK_EXCLUDED_DIRS)
-        and not any(platform in name for platform in FORK_EXCLUDED_PLATFORMS)
-    ]
-
-    def read(relative):
-        if relative.startswith(FORK_PREFIX):
-            return git_read(fork, "show", f"{baseline['fork_head']}:{relative.removeprefix(FORK_PREFIX)}", strip=False)
-        return git_read(root, "show", f"{baseline['root_head']}:{relative}", strip=False)
-
-    return files, read
-
-
-def symbol_files(root, source_files=None):
-    files = list(SYMBOL_ROOT_FILES)
-    if source_files is None:
-        fork_files = fork_python_files(root)
-    else:
-        files = [relative for relative in files if relative in source_files]
-        fork_files = (relative for relative in source_files if relative.startswith(FORK_PREFIX))
-    for relative in sorted(fork_files):
-        local = relative.removeprefix(FORK_PREFIX)
-        if local.startswith(("config/", "constant/")) or local == "var.py":
-            continue
-        if local.endswith("__init__.py") and not local.startswith("store/"):
-            continue
-        files.append(relative)
-    return files
-
-
-def definitions(path, source=None):
-    """与原型一致：只枚举顶层定义及类的直接方法，不枚举局部函数。"""
-    tree = ast.parse(path.read_text(encoding="utf-8") if source is None else source, filename=str(path))
-    yield from tree_definitions(tree)
-
-
 def tree_definitions(tree):
     for node in tree.body:
         if isinstance(node, DEFINITION_TYPES):
@@ -218,59 +98,8 @@ def tree_definitions(tree):
                         yield f"{node.name}.{method.name}", method
 
 
-def build_symbols(root, files=None):
-    root = Path(root)
-    if files is None:
-        source_files, read = baseline_sources(root)
-        files = symbol_files(root, source_files)
-    else:
-        def read(relative):
-            return (root / relative).read_text(encoding="utf-8")
-    rows, unmapped, nodes = [], [], []
-    rules = [(files.split("|"), re.compile(pattern), rest) for files, pattern, *rest in SYMBOL_RULES]
-    for relative in files:
-        for qualname, node in definitions(root / relative, read(relative)):
-            row = {"file": relative, "line": node.lineno, "qualname": qualname}
-            for matches, pattern, values in rules:
-                if relative in matches and pattern.fullmatch(qualname):
-                    row.update(zip(("target", "disposition", "card", "tests", "note"), values))
-                    rows.append(row)
-                    nodes.append((row, node))
-                    break
-            else:
-                unmapped.append(row)
-    exited = {row["qualname"].split(".")[-1] for row in rows if row["disposition"] == "退"}
-    kept = {row["qualname"].split(".")[-1] for row in rows if row["disposition"] != "退"}
-    references = collections.defaultdict(set)
-    for row, node in nodes:
-        if row["disposition"] == "退":
-            continue
-        for child in ast.walk(node):
-            name = (
-                child.id if isinstance(child, ast.Name) else (child.attr if isinstance(child, ast.Attribute) else None)
-            )
-            if name in exited - kept:
-                references[name].add(f"{row['file'].replace(FORK_PREFIX, 'M/')}:{row['qualname']}")
-    stat = dict(collections.Counter(row["disposition"] for row in rows))
-    stat["total"] = len(rows)
-    return {
-        "rows": rows,
-        "unmapped": unmapped,
-        "stat": stat,
-        "exit_references": [
-            {"symbol": name, "referenced_by": sorted(refs)} for name, refs in sorted(references.items())
-        ],
-    }
-
-
-def build_inputs(root):
-    root = Path(root)
-    files, read = baseline_sources(root)
-    return extract_inputs(files, read)
-
-
 def extract_inputs(files, read, *, definition_sources=None):
-    """共用静态提取规则，调用方决定读取基线提交还是工作树。"""
+    """静态提取 CLI 参数定义与环境变量名；read 决定读取来源（漂移核对读工作树）。"""
     cli = {}
     for relative in ENTRYPOINTS:
         sources = (relative, *(definition_sources or {}).get(relative, ()))
@@ -308,7 +137,7 @@ def extract_inputs(files, read, *, definition_sources=None):
         path = Path(relative)
         if not (
             path.suffix == ".py"
-            and (path.parent == Path("scripts") or relative.startswith(("src/", FORK_PREFIX)))
+            and (path.parent == Path("scripts") or relative.startswith("src/"))
         ):
             continue
         tree = ast.parse(read(relative))
@@ -342,7 +171,6 @@ def build_input_drift(root):
     files = {
         path.relative_to(root).as_posix() for pattern in ("scripts/*.py", "src/**/*.py") for path in root.glob(pattern)
     }
-    files.update(fork_python_files(root))
 
     def read(relative):
         path = root / relative
@@ -570,12 +398,11 @@ def referenced_names(node, imports):
 def resolve_by_rule(row, target, target_definitions, inspect, *, source=None):
     """按 PROGRESS_RESOLUTIONS 收口常规定位得到 pending/missing 的行；未登记时返回 None。
 
-    source 为原定义仍在时的（节点, 导入, 目标模块）：只有保留文件中的“迁至”且原定义 AST 直接引用登记的
-    承接定义才计 moved；fork 与私有桥原位定义在删除批之前一律保持 pending，“退出”在原定义仍在时不生效。
-    原定义不存在时，“迁至”要求承接定义存在，“退出”直接记 exited。
+    source 为原定义仍在时的（节点, 导入, 目标模块）：只有“迁至”且原定义 AST 直接引用登记的承接定义才计
+    moved，“退出”在原定义仍在时不生效。原定义不存在时，“迁至”要求承接定义存在，“退出”直接记 exited。
     """
     resolution = PROGRESS_RESOLUTIONS.get((row["file"], row["qualname"]))
-    if resolution is None or source and (row["file"].startswith(FORK_PREFIX) or row["file"] in FORK_BRIDGE_FILES):
+    if resolution is None:
         return None
     kind, name, basis = resolution
     if kind == "退出":
@@ -593,7 +420,7 @@ def resolve_by_rule(row, target, target_definitions, inspect, *, source=None):
 def build_progress(root, reader=None):
     """逐行对照冻结账，复用原位、委托、一跳重导出、直接 mixin 基类定位与显式收口规则。
 
-    reader 仅供测试模拟删除批（例如隐藏 fork 与私有桥），默认读取工作树。
+    reader 可注入（card_gate 读取基线提交），默认读取工作树。
     """
     root = Path(root)
     baseline = load_symbols(root)
@@ -611,197 +438,16 @@ def build_progress(root, reader=None):
     return {"total": len(rows), "counts": counts, "missing": [row for row in rows if row["state"] == "missing"], "rows": rows}
 
 
-def git_read(root, *args, strip=True):
-    result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False)
-    if result.returncode:
-        raise RuntimeError(
-            f"只读 Git 查询失败：{root}，{' '.join(args)}。"
-            "请在含 .git 且根历史完整的 checkout 中运行，并确认子模块对象库包含 "
-            "baseline.json 登记的 fork_head；工具不会自动拉取缺失对象。"
-        )
-    return result.stdout.strip() if strip else result.stdout
-
-
-def build_baseline(root):
-    root = Path(root)
-    require_fork(root)
-    fork, upstream = root / FORK_PREFIX, root.parent / "MediaCrawler-upstream"
-    if not upstream.is_dir():
-        raise RuntimeError(f"上游只读副本不存在：{upstream}")
-    upstream_head = git_read(upstream, "rev-parse", "HEAD")
-    baseline = {
-        "root_head": git_read(root, "rev-parse", "HEAD"),
-        "fork_head": git_read(fork, "rev-parse", "HEAD"),
-        "upstream_head": upstream_head,
-        "resources": {name: hashlib.sha256((fork / name).read_bytes()).hexdigest() for name in RESOURCE_FILES},
-    }
-    object_check = subprocess.run(
-        ["git", "-C", str(fork), "cat-file", "-e", f"{upstream_head}^{{commit}}"],
-        capture_output=True,
-        check=False,
-    )
-    if object_check.returncode:
-        baseline["fork_upstream_merge_base"] = SPEC_MERGE_BASE
-        baseline["note"] = "fork 对象库没有上游 HEAD 对象；分叉点回退为规格 A 节固定值，未拉取或写入 Git。"
-    else:
-        baseline["fork_upstream_merge_base"] = git_read(fork, "merge-base", "HEAD", upstream_head)
-    return baseline
-
-
-def load_matrix():
-    """只加载 CI 的定义，复用副本白名单、fork 文件清单和导入路径规则。"""
-    spec = importlib.util.spec_from_file_location("adapter_ledger_matrix", ROOT / "scripts/ci/run_matrix.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def temporary_source(path):
-    source = Path(path).resolve()
-    if source == ROOT.resolve():
-        raise SystemExit("拒绝在生产 checkout 收集测试；请先使用 make-source 创建临时源码副本。")
-    parents = {Path("/private/tmp").resolve(), Path(tempfile.gettempdir()).resolve()}
-    if not any(source != parent and source.is_relative_to(parent) for parent in parents):
-        raise SystemExit("源码副本必须位于 /private/tmp 或 tempfile.gettempdir() 下。")
-    return source
-
-
-COLLECTION_PLUGIN = '''"""仅记录收集结果，不执行测试或夹具。"""
-import json
-import os
-from pathlib import Path
-
-
-def pytest_collection_finish(session):
-    nodes = [
-        {"node_id": item.nodeid, "markers": sorted({marker.name for marker in item.iter_markers()})}
-        for item in session.items
-    ]
-    Path(os.environ["ADAPTER_LEDGER_COLLECTION"]).write_text(
-        json.dumps(nodes, ensure_ascii=False, indent=2, sort_keys=True) + "\\n", encoding="utf-8",
-    )
-'''
-
-
-def collect_nodes(source, side, matrix, support):
-    fork = source / FORK_PREFIX
-    interpreter = ROOT / (".venv/bin/python" if side == "root" else f"{FORK_PREFIX}.venv/bin/python")
-    cwd = source if side == "root" else fork
-    output = support / f"{side}.json"
-    environment = os.environ.copy()
-    environment.pop("PYTEST_ADDOPTS", None)
-    environment.pop("PYTEST_PLUGINS", None)
-    environment.update(
-        {
-            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
-            "PYTHONNOUSERSITE": "1",
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "TRIPPOST_PROJECT_ROOT": str(source),
-            "ADAPTER_LEDGER_COLLECTION": str(output),
-            "PYTHONPATH": os.pathsep.join(
-                str(path)
-                for path in (
-                    source / "src",
-                    source / "scripts",
-                    source / "tests",
-                    support,
-                )
-            )
-            if side == "root"
-            else matrix.fork_pythonpath(source, support),
-        }
-    )
-    command = [str(interpreter), "-m", "pytest"]
-    if side == "root":
-        command += ["tests"]
-    else:
-        command += [
-            *matrix.FORK_OFFLINE_TESTS,
-            "-c",
-            str(fork / "pyproject.toml"),
-            "--rootdir",
-            str(fork),
-            "--confcutdir",
-            str(fork),
-        ]
-    command += [
-        "--collect-only",
-        "-q",
-        "-p",
-        "no:cacheprovider",
-        "-p",
-        "pytest_asyncio.plugin",
-        "-p",
-        "adapter_ledger_collection",
-    ]
-    result = subprocess.run(command, cwd=cwd, env=environment, capture_output=True, text=True, check=False, timeout=180)
-    if result.returncode:
-        # 收集失败只展示尾部，避免把全量节点或导入日志展开。
-        detail = "\n".join((result.stdout + result.stderr).splitlines()[-40:])
-        raise RuntimeError(f"{side} 测试收集失败（退出码 {result.returncode}）：\n{detail}")
-    nodes = json.loads(output.read_text(encoding="utf-8"))
-    if not nodes:
-        raise RuntimeError(f"{side} 测试收集为空")
-    return nodes
-
-
-def build_tests(source):
-    source = temporary_source(source)
-    require_fork(ROOT)
-    matrix = load_matrix()
-    files = {path.relative_to(source).as_posix() for path in (source / "tests").rglob("test_*.py")}
-    files.update(FORK_PREFIX + name for name in matrix.FORK_OFFLINE_TESTS)
-    missing = sorted(files - TEST_FILE_RULES.keys())
-    if missing:
-        raise RuntimeError("以下测试文件没有迁移规则：\n" + "\n".join(missing))
-    result = {"collected_at_root_head": git_read(ROOT, "rev-parse", "HEAD")}
-    with tempfile.TemporaryDirectory(prefix="adapter-ledger-plugin-") as directory:
-        support = Path(directory)
-        (support / "adapter_ledger_collection.py").write_text(COLLECTION_PLUGIN, encoding="utf-8")
-        for side in ("root", "fork"):
-            nodes = collect_nodes(source, side, matrix, support)
-            for node in nodes:
-                source_file = (FORK_PREFIX if side == "fork" else "") + node["node_id"].split("::", 1)[0]
-                if source_file not in TEST_FILE_RULES:
-                    raise RuntimeError(f"测试文件没有迁移规则：{source_file}")
-                lane = (
-                    "fork"
-                    if side == "fork"
-                    else next(
-                        (
-                            lane
-                            for marker, lane in (
-                                ("macos_process", "os"),
-                                ("local_socket", "socket"),
-                                ("installation", "installation"),
-                            )
-                            if marker in node["markers"]
-                        ),
-                        "component",
-                    )
-                )
-                rule = TEST_FILE_RULES[source_file]
-                target = rule.get("target_by_lane", {}).get(lane, rule["target_file"])
-                node.update(
-                    source_file=source_file, target_file=target, lane=lane, protects=rule["protects"], card=rule["card"]
-                )
-            result[side] = {"nodes": sorted(nodes, key=lambda node: node["node_id"])}
-    return result
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, title="子命令")
     for name in ("symbols", "inputs", "baseline", "all"):
-        subparser = commands.add_parser(name, help="生成或校验迁移台账")
-        subparser.add_argument("--check", action="store_true", help="只比较磁盘产物，不写文件")
+        subparser = commands.add_parser(name, help="冻结自检迁移台账（台账已冻结，只支持 --check）")
+        subparser.add_argument("--check", action="store_true",
+                               help="核对登记散列、C8 附录由 JSON 重现与规则一致；不访问 Git 对象库")
     progress = commands.add_parser("progress", help="按卡号报告工作树迁移进度")
     progress.add_argument("--json", action="store_true", help="向标准输出打印完整 JSON 报告")
     commands.add_parser("drift", help="核对工作树 CLI 与环境变量是否偏离基线")
-    collector = commands.add_parser("tests", help="在临时源码副本中收集测试节点")
-    collector.add_argument("--source", required=True, type=Path, help="临时源码副本目录")
-    copier = commands.add_parser("make-source", help="复制源码白名单，排除运行产物和虚拟环境")
-    copier.add_argument("destination", type=Path, help="尚不存在的临时目录")
     args = parser.parse_args(argv)
     try:
         if args.command == "progress":
@@ -822,38 +468,16 @@ def main(argv=None):
             result = build_input_drift(ROOT)
             print(json_text(result), end="")
             return 1 if any(result.values()) else 0
-        if args.command == "make-source":
-            source = temporary_source(args.destination)
-            load_matrix().fresh_source(ROOT, source)
-            print(f"已创建临时源码副本：{source}")
-            return 0
-        if args.command == "tests":
-            result = build_tests(args.source)
-            publish(ROOT / LEDGER_DIR / "tests.json", json_text(result))
-            for side in ("root", "fork"):
-                counts = dict(collections.Counter(node["lane"] for node in result[side]["nodes"]))
-                print(f"{side} 收集 {len(result[side]['nodes'])} 个节点，分组：{counts}")
-            return 0
+        # T14 删除 fork 后台账冻结：不再从基线重新生成，只做不访问 Git 对象库的冻结自检。
+        if not args.check:
+            print("迁移台账已冻结，只支持 --check 自检")
+            return 1
         success = True
-        # fork 删除后（无 gitlink）只做冻结自检；fork 仍在时另外按登记提交重新枚举并逐字节比较。
-        regenerate = not args.check or fork_gitlink(ROOT) is not None
         for command in ("baseline", "symbols", "inputs") if args.command == "all" else (args.command,):
-            if args.check:
-                success = check_frozen(ROOT, command) and success
-            if not regenerate:
-                continue
-            result = {"baseline": build_baseline, "symbols": build_symbols, "inputs": build_inputs}[command](ROOT)
-            if command == "symbols" and result["unmapped"]:
-                print("以下定义没有处置规则：")
-                for row in result["unmapped"]:
-                    print(f"{row['file']}:{row['line']} {row['qualname']}")
-                return 1
-            success = publish(ROOT / LEDGER_DIR / f"{command}.json", json_text(result), args.check) and success
-            if command == "symbols":
-                success = publish(ROOT / SYMBOL_MARKDOWN, render_symbols(result), args.check) and success
+            success = check_frozen(ROOT, command) and success
         return 0 if success else 1
-    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
-        print(f"台账生成失败：{error}")
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"台账检查失败：{error}")
         return 1
 
 

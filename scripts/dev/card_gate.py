@@ -20,11 +20,9 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 import adapter_ledger as ledger
-from adapter_ledger_rules import FORK_BRIDGE_FILES
 
 
 ROOT = Path(__file__).resolve().parents[2]
-FORK = "tools/MediaCrawler"
 ROOT_LANES = ("component", "installation", "os")
 
 
@@ -134,40 +132,23 @@ class Sandbox:
         return record["returncode"]
 
 
-def changed_files(root, root_names, fork_names):
+def changed_files(root, names):
     """解析 NUL 分隔文件名；删除文件计入清单，只检查现存 Python 文件。"""
-    def names(value):
-        return sorted({p for p in value.split("\0") if p and p != "temp" and not p.startswith("temp/")})
-    root_files = [p for p in names(root_names) if p != FORK and not p.startswith(FORK + "/")]
-    fork_files = names(fork_names)
-    return {
-        "root": root_files, "fork": fork_files,
-        "compile": [p for p in root_files + [f"{FORK}/{p}" for p in fork_files]
-                    if p.endswith(".py") and (root / p).is_file()],
-        "ruff": [p for p in root_files if p.endswith(".py") and (root / p).is_file()],
-    }
+    files = sorted({p for p in names.split("\0") if p and p != "temp" and not p.startswith("temp/")})
+    python = [p for p in files if p.endswith(".py") and (root / p).is_file()]
+    return {"root": files, "compile": python, "ruff": python}
 
 
 def ast_text(node):
     return ast.dump(node, include_attributes=False) if node is not None else None
 
 
-def retired_source(root, path):
-    """fork 删除批中随 fork/私有桥整体删除的原文件；T14-C 合并后基线不再含这些文件，可删除本函数。"""
-    return (path.startswith(FORK + "/") or path in FORK_BRIDGE_FILES) and not (Path(root) / path).exists()
-
-
-def ast_review(root, rows, reader, cards=(), pairs=(), retiring=False):
-    """两侧共用按文件缓存的定位器，覆盖本卡迁移和前序已迁实现的变化。
-
-    retiring 表示基线有 fork gitlink 而本次没有（T14-C）：基线仍在 fork/私有桥原位（pending）的定义
-    随文件整体删除，若本次已由承接定义或收口规则定位（moved/exited），记为预期退出而不逐字对照；
-    本次未定位的仍按“工作树未定位”报错。
-    """
+def ast_review(root, rows, reader, cards=(), pairs=()):
+    """两侧共用按文件缓存的定位器，覆盖本卡迁移和前序已迁实现的变化。"""
     inspect = ledger.definition_inspector(root)
     base_inspect = ledger.definition_inspector(root, reader)
 
-    result = {"equal": [], "different": [], "missing": [], "pending": [], "exited": [], "retired": [],
+    result = {"equal": [], "different": [], "missing": [], "pending": [], "exited": [],
               "cards": [], "previously_moved": 0}
     selected_cards = set(cards)
 
@@ -200,10 +181,6 @@ def ast_review(root, rows, reader, cards=(), pairs=(), retiring=False):
         result["previously_moved"] += previous.state == "moved"
         item = {"definition": f"{row['file']}:{row['qualname']}",
                 "base_location": position(previous), "location": position(located)}
-        if (retiring and previous.state == "pending" and located.state in ("moved", "exited")
-                and retired_source(root, previous.file)):
-            result["retired"].append(item)
-            continue
         if located.state in ("pending", "exited"):
             result[located.state].append(item.copy())
             # 原位 pending 仍单列；已迁实现退回原位且内容改变时不能掩盖差异。
@@ -249,7 +226,7 @@ def junit_result(xml_path, counts, returncode=0):
     return {"failures": sorted(failures), "counts": counts, "returncode": returncode}
 
 
-def compare_lane(current, baseline, expected=None):
+def compare_lane(current, baseline):
     """按失败集合判定；失败消失、通过数下降为显式变化提示。"""
     before, after = set(baseline["failures"]), set(current["failures"])
     added, removed = sorted(after - before), sorted(before - after)
@@ -261,8 +238,6 @@ def compare_lane(current, baseline, expected=None):
     errors = []
     if added:
         errors.append("新增失败 " + "、".join(added))
-    if expected is not None and current["counts"].get("selected") != expected:
-        errors.append(f"fork 选中数不符：应为 {expected}")
     for label, result in (("本次", current), ("基线", baseline)):
         counts = result["counts"]
         if (result["returncode"] not in (0, 1, 2)
@@ -270,15 +245,12 @@ def compare_lane(current, baseline, expected=None):
                 or counts.get("selected", 0) == 0
                 or (counts.get("collection_errors", 0) and not result["failures"])):
             errors.append(label + "测试未完整运行")
-        if result.get("expected") is not None and counts.get("selected") != result["expected"]:
-            errors.append(label + " fork 选中数不符")
     return {"passed": not errors, "added": added, "removed": removed,
             "notes": notes, "errors": errors}
 
 
-def cache_identity(root_commit, fork_commit, script_hash, fork_python):
-    return {"root_commit": root_commit, "fork_commit": fork_commit,
-            "script_hash": script_hash, "fork_python": str(fork_python) if fork_python else None}
+def cache_identity(root_commit, script_hash):
+    return {"root_commit": root_commit, "script_hash": script_hash}
 
 
 def cache_valid(cached, identity, lanes):
@@ -297,64 +269,6 @@ def canary_profile_probes(output, stores):
     return checkout, paths
 
 
-def removal_problems(root, progress):
-    """T14-C 删除批的额外门禁：fork 目录须已从磁盘删除（只 git rm --cached 不算），台账不得残留 pending。"""
-    problems = []
-    if (Path(root) / FORK).exists():
-        problems.append(f"fork 删除批要求 {FORK} 目录已从磁盘删除（仅 git rm --cached 不算删除）")
-    pending = progress["counts"].get("pending", 0)
-    if pending:
-        problems.append(f"fork 删除批要求台账 progress 的 pending 为 0，实际 {pending}")
-    return problems
-
-
-def matrix_offline_tests():
-    return tuple(load_module(ROOT / "scripts/ci/run_matrix.py", "card_gate_lane_matrix").FORK_OFFLINE_TESTS)
-
-
-def selected_lanes(head_fork, offline_tests=None):
-    """fork lane 只在本次仍有 fork gitlink 且 run_matrix 离线清单非空时运行（与 run_matrix.fork_lane_enabled
-    一致）；基线与本次使用同一组 lane 才可比较。offline_tests 缺省取本次 checkout 的 run_matrix。"""
-    if offline_tests is None:
-        offline_tests = matrix_offline_tests()
-    return (*ROOT_LANES, "fork") if head_fork and offline_tests else ROOT_LANES
-
-
-def fork_plan(root, base, checkout, common, fork_python=None):
-    """T14 过渡：按基线与本次（索引）的 fork gitlink 决定 lane、基线对象库与 fork 解释器。
-
-    present：两侧都有 gitlink，fork lane 另需 run_matrix 离线清单非空（T14-B2 起为空，不运行）；removing：基线有、本次无（T14-C 本身），跳过 fork lane，
-    基线 fork 源码从仍含该提交的对象库导出；absent：两侧都无。T14-C 合并后只剩 absent，可删除本函数。
-    """
-    fork_base, head_fork = ledger.fork_gitlink(root, base), ledger.fork_gitlink(root)
-    if head_fork and not fork_base:
-        raise RuntimeError("基线没有 fork gitlink，本次不得重新引入 fork")
-    repository = None
-    if fork_base:
-        git_dir = (root / ledger.git_read(root, "rev-parse", "--git-dir")).resolve()
-        repository = fork_repository(
-            [root / FORK] if head_fork else [root / FORK, git_dir / "modules" / FORK,
-                                             checkout / FORK, common / "modules" / FORK],
-            fork_base)
-    lanes = selected_lanes(head_fork)
-    # fork 解释器只供 fork lane；清单为空不运行 fork lane 时不要求 fork 环境。
-    return {"base": fork_base, "head": head_fork,
-            "transition": "present" if head_fork else "removing" if fork_base else "absent",
-            "repository": repository, "lanes": lanes,
-            "python": (fork_python or checkout / FORK / ".venv/bin/python").absolute() if "fork" in lanes else None}
-
-
-def fork_repository(candidates, commit):
-    """在候选对象库中找到含基线 fork 提交者；本次已删除 fork 时可退到主 checkout 或子模块 gitdir。"""
-    for candidate in candidates:
-        if candidate.exists() and subprocess.run(
-                ["git", "-C", str(candidate), "cat-file", "-e", f"{commit}^{{commit}}"],
-                capture_output=True, check=False).returncode == 0:
-            return candidate
-    raise RuntimeError(f"基线含 fork gitlink {commit}，但以下位置均无该提交，无法导出基线："
-                       + "、".join(map(str, candidates)))
-
-
 def remove_source(path):
     """只解除本次临时源码副本的不可变标志，再删除副本。"""
     if not path.exists():
@@ -367,12 +281,12 @@ def remove_source(path):
     shutil.rmtree(path)
 
 
-def run_tests(pristine, output, sandbox, python, fork_python, sources, selected):
+def run_tests(pristine, output, sandbox, python, sources):
     """每组生成独立白名单副本，避免前一组测试留下的修改影响下一组。"""
     matrix = load_module(pristine / "scripts/ci/run_matrix.py", "card_gate_matrix")
     lanes = load_module(pristine / "tests/run_lanes.py", "card_gate_lanes")
     results = {}
-    for lane in selected:
+    for lane in ROOT_LANES:
         destination = output / f"source-{lane}"
         sources.append(destination)
         source = matrix.fresh_source(pristine, destination)
@@ -381,31 +295,19 @@ def run_tests(pristine, output, sandbox, python, fork_python, sources, selected)
         environment = clean_environment(report, lanes.runtime_path())
         environment.update(TPC_LANE_COUNTS=str(report / "counts.json"),
                            TPC_EXEC_GUARD_REPORT=str(report / "execution-guard.json"))
-        if lane == "fork":
-            support = report / "support"
-            support.mkdir()
-            shutil.copyfile(source / "tests/run_lanes.py", support / "ci_lane_report.py")
-            shutil.copyfile(source / "tests/support/execution_guard.py", support / "ci_execution_guard.py")
-            environment["PYTHONPATH"] = matrix.fork_pythonpath(source, support)
-            cwd = source / FORK
-            command = matrix.fork_test_command(fork_python, cwd, report)
-        else:
-            environment["PYTHONPATH"] = os.pathsep.join(str(source / p) for p in ("src", "tests", "scripts"))
-            cwd = source
-            command = [python, "-m", "pytest", "tests", "-m", lanes.EXPRESSIONS[lane],
-                       "--strict-markers", "-p", "pytest_asyncio.plugin", "-p", "run_lanes",
-                       "-p", "support.execution_guard", "-o", "xfail_strict=true",
-                       "--basetemp", report / "t/pytest", "--junitxml", report / "pytest.xml",
-                       "-o", f"cache_dir={report / 'cache'}", "-q"]
+        environment["PYTHONPATH"] = os.pathsep.join(str(source / p) for p in ("src", "tests", "scripts"))
+        command = [python, "-m", "pytest", "tests", "-m", lanes.EXPRESSIONS[lane],
+                   "--strict-markers", "-p", "pytest_asyncio.plugin", "-p", "run_lanes",
+                   "-p", "support.execution_guard", "-o", "xfail_strict=true",
+                   "--basetemp", report / "t/pytest", "--junitxml", report / "pytest.xml",
+                   "-o", f"cache_dir={report / 'cache'}", "-q"]
         # 保留文件字段，准确恢复任意测试类名的 nodeid，不依赖 Test 前缀猜测。
         command.extend(["-o", "junit_family=xunit1"])
-        code = sandbox.run(command, cwd, report / "pytest.log", environment=environment)
+        code = sandbox.run(command, source, report / "pytest.log", environment=environment)
         counts_path, xml_path = report / "counts.json", report / "pytest.xml"
         if not counts_path.is_file() or not xml_path.is_file():
             raise RuntimeError(f"{lane} 未生成完整计数/JUnit，见 {report}")
         results[lane] = junit_result(xml_path, json.loads(counts_path.read_text()), code)
-        if lane == "fork":
-            results[lane]["expected"] = matrix.FORK_EXPECTED_TESTS
     return results
 
 
@@ -417,25 +319,20 @@ def git_bytes(root, *arguments):
     return result.stdout
 
 
-def archive_source(root, base, fork_base, destination, fork_repo=None):
-    """从对象库导出基线，不 checkout、不修改索引或引用；基线无 fork gitlink 时只导出根。"""
+def git_text(root, *arguments):
+    return git_bytes(root, *arguments).decode().strip()
+
+
+def archive_source(root, base, destination):
+    """从对象库导出基线，不 checkout、不修改索引或引用。"""
     destination.mkdir(parents=True)
-    archives = [(root, base, destination)]
-    if fork_base:
-        archives.append((fork_repo or root / FORK, fork_base, destination / FORK))
-    for repository, revision, target in archives:
-        target.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(fileobj=io.BytesIO(git_bytes(repository, "archive", revision))) as archive:
-            archive.extractall(target, filter="data")
+    with tarfile.open(fileobj=io.BytesIO(git_bytes(root, "archive", base))) as archive:
+        archive.extractall(destination, filter="data")
 
 
 def render_summary(report):
     """三态结论始终在最后一行；跳过测试不能成为通过。"""
     lines = ["沙箱 canary：" + ("通过" if report.get("canary", {}).get("passed") else "未通过")]
-    if "fork" in report:
-        lines.append("fork：" + {"present": "基线与本次均有 gitlink（离线清单非空时含 fork lane）",
-                                 "removing": "本次删除 gitlink（T14-C 过渡，跳过 fork lane，原位定义按预期退出核对）",
-                                 "absent": "基线与本次均无 gitlink（无 fork lane）"}[report["fork"]["transition"]])
     if "ledger" in report:
         item = report["ledger"]
         lines.append(f"台账：总计 {item['progress']['total']}，{item['progress']['counts']}")
@@ -449,7 +346,7 @@ def render_summary(report):
         lines.append("冻结文件：" + ("通过" if report["frozen"] else "未通过"))
     if "files" in report:
         item = report["files"]
-        lines.append(f"改动文件：根 {len(item['root'])}，fork {len(item['fork'])}；"
+        lines.append(f"改动文件：{len(item['root'])}；"
                      f"编译 {len(item['compile'])}，ruff {len(item['ruff'])}；失败 {item['failures']}")
     if "ast" in report:
         item = report["ast"]
@@ -457,8 +354,7 @@ def render_summary(report):
             return [r["definition"] for r in item[key]]
 
         lines.append(f"AST：逐字 {len(item['equal'])}，差异 {names('different')}，未定位 {names('missing')}；"
-                     f"原位 pending {len(item['pending'])}，退出 {len(item['exited'])}，"
-                     f"随 fork 删除预期退出 {len(item.get('retired', []))}；"
+                     f"原位 pending {len(item['pending'])}，退出 {len(item['exited'])}；"
                      f"其中前序已迁 {item['previously_moved']}")
     if report.get("skip_tests"):
         lines.append("测试：未运行（--skip-tests）")
@@ -488,7 +384,6 @@ def main(argv=None):
     parser.add_argument("--base")
     parser.add_argument("--card", action="append", default=[])
     parser.add_argument("--pair", action="append", default=[])
-    parser.add_argument("--fork-python", type=Path)
     parser.add_argument("--skip-tests", action="store_true")
     parser.add_argument("--refresh-baseline", action="store_true")
     parser.add_argument("--keep", action="store_true")
@@ -511,23 +406,16 @@ def main(argv=None):
     sources = []
     code = 2
     try:
-        common = Path(ledger.git_read(ROOT, "rev-parse", "--git-common-dir"))
+        common = Path(git_text(ROOT, "rev-parse", "--git-common-dir"))
         common = (ROOT / common).resolve()
         checkout = common.parent
-        base = ledger.git_read(ROOT, "rev-parse", "--verify", (args.base or ledger.git_read(
+        base = git_text(ROOT, "rev-parse", "--verify", (args.base or git_text(
             ROOT, "merge-base", "HEAD", "main")) + "^{commit}")
-        plan = fork_plan(ROOT, base, checkout, common, args.fork_python)
-        fork_base, head_fork, transition = plan["base"], plan["head"], plan["transition"]
-        fork_repo, fork_python, lanes_selected = plan["repository"], plan["python"], plan["lanes"]
-        report["fork"] = {"base": fork_base, "head": head_fork, "transition": transition,
-                          "repository": str(fork_repo) if fork_repo else None, "lanes": list(lanes_selected)}
         python = ROOT / ".venv/bin/python"
         backend = sandbox_backend()
         backend.preflight()
         if not python.is_file():
             raise RuntimeError("缺少工作树解释器")
-        if not args.skip_tests and fork_python and not fork_python.is_file():
-            raise RuntimeError(f"fork 解释器不存在：{fork_python}")
         rows = ledger.load_symbols(ROOT)["rows"]
         if set(args.card) - {r["card"] for r in rows}:
             raise ValueError("未知卡号")
@@ -545,7 +433,7 @@ def main(argv=None):
         probe_checkout, profile_probes = canary_profile_probes(output, backend.PROFILE_STORES)
         policy = backend.prepare(output, (ROOT, checkout, probe_checkout), home, lanes.runtime_path())
         sandbox = Sandbox(backend, policy, clean_environment(output / "control", lanes.runtime_path()))
-        report.update(base=base, fork_base=fork_base, sandbox=backend.NAME, commands=sandbox.commands)
+        report.update(base=base, sandbox=backend.NAME, commands=sandbox.commands)
         canary_log = output / "canary.json"
         probe_name = f".card-gate-probe-{output.name}"
         canary_spec = {**backend.canary_spec(home, policy), "project_profiles": profile_probes}
@@ -577,17 +465,12 @@ def main(argv=None):
                             and not any(drift.values()) and progress["counts"]["missing"] == 0}
         if not report["ledger"]["passed"]:
             report["errors"].append("台账检查失败")
-        if transition == "removing":
-            report["fork"]["problems"] = removal_problems(ROOT, progress)
-            report["errors"].extend(report["fork"]["problems"])
         report["frozen"] = check("frozen", [python, "scripts/verify_frozen_files.py"])[0] == 0
         if not report["frozen"]:
             report["errors"].append("冻结文件校验失败")
-        root_names = git_bytes(ROOT, "diff", "--name-only", "-z", base).decode() + git_bytes(
+        names = git_bytes(ROOT, "diff", "--name-only", "-z", base).decode() + git_bytes(
             ROOT, "ls-files", "--others", "--exclude-standard", "-z").decode()
-        fork_names = (git_bytes(ROOT / FORK, "diff", "--name-only", "-z", fork_base).decode() + git_bytes(
-            ROOT / FORK, "ls-files", "--others", "--exclude-standard", "-z").decode()) if head_fork else ""
-        files = changed_files(ROOT, root_names, fork_names)
+        files = changed_files(ROOT, names)
         files["failures"] = []
         for index, path in enumerate(files["compile"]):
             if check(f"compile-{index}", [python, "-c", "import py_compile,sys; "
@@ -601,15 +484,10 @@ def main(argv=None):
             report["errors"].append("改动文件检查失败")
 
         def reader(path):
-            repository, revision, relative = ROOT, base, path
-            if path.startswith(FORK + "/"):
-                if not fork_base:
-                    return ""
-                repository, revision, relative = fork_repo, fork_base, path[len(FORK) + 1:]
-            names = git_bytes(repository, "ls-tree", "--name-only", revision, "--", relative).decode().splitlines()
-            return git_bytes(repository, "show", f"{revision}:{relative}").decode() if relative in names else ""
+            listed = git_bytes(ROOT, "ls-tree", "--name-only", base, "--", path).decode().splitlines()
+            return git_bytes(ROOT, "show", f"{base}:{path}").decode() if path in listed else ""
 
-        report["ast"] = ast_review(ROOT, rows, reader, args.card, pairs, retiring=transition == "removing")
+        report["ast"] = ast_review(ROOT, rows, reader, args.card, pairs)
         counts = defaultdict(Counter)
         for row in progress["rows"]:
             if row["card"] in report["ast"]["cards"]:
@@ -618,15 +496,14 @@ def main(argv=None):
         if report["ast"]["different"] or report["ast"]["missing"]:
             report["errors"].append("AST 存在差异或未定位定义")
         if not args.skip_tests:
-            identity = cache_identity(base, fork_base, hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), fork_python)
-            cache = common / "card-gate" / f"baseline-{base}-{fork_base or 'nofork'}.json"
+            identity = cache_identity(base, hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+            cache = common / "card-gate" / f"baseline-{base}.json"
             cached = json.loads(cache.read_text()) if cache.is_file() else {}
-            if args.refresh_baseline or not cache_valid(cached, identity, lanes_selected):
+            if args.refresh_baseline or not cache_valid(cached, identity, ROOT_LANES):
                 pristine = output / "baseline-archive"
                 sources.append(pristine)
-                archive_source(ROOT, base, fork_base, pristine, fork_repo)
-                baseline = run_tests(pristine, output / "baseline", sandbox, python, fork_python, sources,
-                                     lanes_selected)
+                archive_source(ROOT, base, pristine)
+                baseline = run_tests(pristine, output / "baseline", sandbox, python, sources)
                 cached = {"identity": identity, "lanes": baseline}
                 # 缓存是编排进程唯一写入临时根以外的报告，不经子进程执行。
                 cache.parent.mkdir(parents=True, exist_ok=True)
@@ -634,11 +511,11 @@ def main(argv=None):
                 report["cache"] = "重建 " + str(cache)
             else:
                 report["cache"] = "命中 " + str(cache)
-            current = run_tests(ROOT, output / "current", sandbox, python, fork_python, sources, lanes_selected)
+            current = run_tests(ROOT, output / "current", sandbox, python, sources)
             report["tests"] = {}
             for lane, result in current.items():
                 baseline = cached["lanes"][lane]
-                comparison = compare_lane(result, baseline, result.get("expected"))
+                comparison = compare_lane(result, baseline)
                 report["tests"][lane] = {"current": result, "baseline": baseline, "comparison": comparison}
                 if not comparison["passed"]:
                     report["errors"].append(lane + "测试失败集合或计数不符合要求")

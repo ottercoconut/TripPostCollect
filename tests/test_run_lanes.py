@@ -16,34 +16,6 @@ from support.signal_driver import isolated_signal_test
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/ci"))
 
 
-def test_fork_worker_paths_and_pytest_boundary(tmp_path):
-    from importlib.machinery import PathFinder
-    import run_matrix
-
-    source = tmp_path / "source"
-    support = tmp_path / "reports/ci_support"
-    paths = run_matrix.fork_pythonpath(source, support).split(os.pathsep)
-    assert paths == [str(source / "tools/MediaCrawler"), str(source / "src"),
-                     str(source / "scripts"), str(support)]
-    fork = source / "tools/MediaCrawler"
-    command = run_matrix.fork_test_command(Path("worker-python"), fork, tmp_path)
-    assert command[:3] == ["worker-python", "-m", "pytest"]
-    assert command[command.index("-c") + 1] == str(fork / "pyproject.toml")
-    assert command[command.index("--confcutdir") + 1] == str(fork)
-    assert command[command.index("--rootdir") + 1] == str(fork)
-    # T14-B2：34 个原离线用例已原名移植到根，清单为空；fork 仍在也不运行 fork lane。
-    assert run_matrix.FORK_OFFLINE_TESTS == () and run_matrix.FORK_EXPECTED_TESTS == 0
-    assert run_matrix.fork_lane_enabled(True) is False and run_matrix.fork_lane_enabled(False) is False
-    assert "support.execution_guard" not in command
-    assert "ci_execution_guard" in command
-    root = Path(__file__).resolve().parents[1]
-    # 不依赖当前进程已安装的根包：新增路径必须能定位到真实 src 包。
-    spec = PathFinder.find_spec("trippostcollect", run_matrix.fork_pythonpath(root, support).split(os.pathsep))
-    assert Path(spec.origin) == root / "src/trippostcollect/__init__.py"
-    assert all((root / "tools/MediaCrawler" / name).is_file()
-               for name in run_matrix.FORK_OFFLINE_TESTS)
-
-
 @pytest.mark.parametrize("kind, expected", [(AssertionError, "AssertionError"),
                                           (type("SecretHeader", (Exception,), {}), "OtherError")])
 def test_failure_diagnostic_excludes_exception_text_and_parameter_values(tmp_path, kind, expected):
@@ -450,12 +422,11 @@ def test_fresh_sources_never_reuse_data_or_environment(monkeypatch, tmp_path, ro
         (pristine / file).write_text("source")
     if root_readme:
         (pristine / "README.md").write_text("root readme")
-    for directory in ("data", "outputs", ".venv", "tools/MediaCrawler/.venv",
-                      "tools/MediaCrawler/browser_data"):
+    for directory in ("data", "outputs", ".venv", "src/.venv", "tools/MediaCrawler/browser_data"):
         path = pristine / directory
         path.mkdir(parents=True)
         (path / "private").write_text("do not copy")
-    (pristine / "tools/.env").write_text("secret")
+    (pristine / "src/.env").write_text("secret")
     restored = []
     monkeypatch.setattr(run_matrix, "restore_frozen", restored.append)
     first = run_matrix.fresh_source(pristine, tmp_path / "one")
@@ -471,9 +442,10 @@ def test_fresh_sources_never_reuse_data_or_environment(monkeypatch, tmp_path, ro
             assert (copied / file).read_text() == "source"
     assert not (second / "data").exists()
     assert not (second / ".venv").exists()
-    assert not (second / "tools/MediaCrawler/.venv").exists()
-    assert not (second / "tools/MediaCrawler/browser_data").exists()
-    assert not (second / "tools/.env").exists()
+    assert not (second / "src/.venv").exists()
+    assert not (second / "src/.env").exists()
+    # tools/ 不在白名单：旧登录资料备份等残留目录不进入副本。
+    assert not (second / "tools").exists()
     assert restored == [first, second]
     assert (pristine / "data/private").read_text() == "do not copy"
     with pytest.raises(FileExistsError):
@@ -615,8 +587,8 @@ def test_pf_without_real_packet_counts_fails(monkeypatch):
         native_macos.checked_counters("test")
 
 
-def test_fresh_source_without_fork_tools_directory(monkeypatch, tmp_path):
-    """T14-C 删除 fork 后没有 tools/：白名单副本跳过该目录而不是失败。"""
+def test_fresh_source_without_tools_directory(monkeypatch, tmp_path):
+    """白名单不含 tools/：pristine 没有该目录时副本照常生成。"""
     import run_matrix
 
     pristine = tmp_path / "pristine"
@@ -631,38 +603,29 @@ def test_fresh_source_without_fork_tools_directory(monkeypatch, tmp_path):
     assert (copied / "src").is_dir()
 
 
-def test_fork_gitlink_present_follows_index(tmp_path):
+@pytest.mark.parametrize("extra_module, passed", [(None, True), ("crawl_policy", False)])
+def test_assembly_check_rejects_modules_outside_source_src(tmp_path, extra_module, passed):
+    """选站装配只允许从源码副本的 src 装载项目模块；scripts 等路径被插入 sys.path 时失败。"""
     import subprocess
     import run_matrix
 
-    def git(*args):
-        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
-
-    git("init", "-q")
-    assert run_matrix.fork_gitlink_present(tmp_path) is False
-    git("update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},tools/MediaCrawler")
-    assert run_matrix.fork_gitlink_present(tmp_path) is True
-    git("rm", "-q", "--cached", "tools/MediaCrawler")
-    assert run_matrix.fork_gitlink_present(tmp_path) is False
-
-
-@pytest.mark.parametrize("gitlink,source_fork,fork_python", [
-    (True, False, True), (True, True, False), (False, True, False), (False, False, True),
-])
-def test_matrix_requires_consistent_fork_inputs(monkeypatch, tmp_path, gitlink, source_fork, fork_python):
-    import run_matrix
-
-    source = tmp_path / "pristine"
-    (source / ("tools/MediaCrawler" if source_fork else "src")).mkdir(parents=True)
-    runner = Path(run_matrix.__file__).resolve().parents[2] / "tests/run_lanes.py"
-    argv = ["run_matrix.py", "--source", str(source), "--reports", str(tmp_path / "reports"),
-            "--runner", str(runner)]
-    if fork_python:
-        argv += ["--fork-python", str(tmp_path / "fork-python")]
-    monkeypatch.setattr(sys, "argv", argv)
-    monkeypatch.setattr(run_matrix, "fork_gitlink_present", lambda repository: gitlink)
-    with pytest.raises(RuntimeError, match="同时存在或同时缺省"):
-        run_matrix.main()
+    root = Path(__file__).resolve().parents[1]
+    support = tmp_path / "ci_support"
+    support.mkdir()
+    # 本单测只核对装配后的模块来源判定；守卫与网络探针由 CI 沙箱内的真实副本承担。
+    (support / "ci_execution_guard.py").write_text("def install():\n    pass\ndef canary():\n    pass\n")
+    (support / "ci_lane_report.py").write_text("def denied_network_probe(*args):\n    pass\n")
+    modules = list(run_matrix.ROOT_ASSEMBLY_MODULES) + ([extra_module] if extra_module else [])
+    environment = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "PYTHONNOUSERSITE": "1",
+                   "PYTHONDONTWRITEBYTECODE": "1",
+                   "PYTHONPATH": os.pathsep.join([str(root / "src"), str(root / "scripts"), str(support)])}
+    result = subprocess.run(
+        [sys.executable, "-P", "-c", run_matrix.ASSEMBLY_CHECK, str(tmp_path), str(root),
+         ",".join(modules), ",".join(run_matrix.WORKER_PLATFORM_CODES)],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=120, check=False)
+    assert (result.returncode == 0) is passed, result.stdout[-2000:] + result.stderr[-2000:]
+    if not passed:
+        assert "modules loaded outside src: crawl_policy" in result.stderr
 
 
 def test_policy_denies_project_login_profiles(tmp_path):
