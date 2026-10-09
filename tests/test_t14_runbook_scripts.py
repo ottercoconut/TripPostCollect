@@ -307,6 +307,7 @@ def test_leftover_snapshot_copy_in_new_profile_is_reported(project: Path) -> Non
     verify = run(project, "step3")
     assert verify_status(verify) == 2, detail(verify)
     assert "weibo profile: same_entry_set=no" in verify.stdout, detail(verify)
+    assert "mismatch_detail=none extra=1 " in verify.stdout, detail(verify)
 
 
 def test_content_mismatch_exits_2(project: Path) -> None:
@@ -363,7 +364,53 @@ def test_verification_command_failures_exit_nonzero(project: Path, flags: dict[s
     assert "problems=" not in verify.stdout, detail(verify)
 
 
-def test_verification_script_creates_no_temporary_files() -> None:
-    # 第 3 段只读不写：CI 沙箱内也不依赖 mktemp 或临时文件。
+def test_verification_script_creates_no_temporary_files(project: Path, tmp_path: Path) -> None:
+    # 第 3 段只读不写：不依赖 mktemp、here-string 或内层 heredoc（bash 5.1 前二者借临时文件实现）。
     script = runbook_script("step3")
     assert "mktemp" not in script and "$work" not in script and "trap" not in script
+    assert "<<<" not in script
+    assert script.count("<<") == 1 and script.startswith("bash <<'SH'\n")
+    migrated(project)
+    # 直接执行内层脚本（去掉外层 `bash <<'SH'` 包装），TMPDIR 指向只读空目录，执行后必须仍为空。
+    lines = script.splitlines()
+    assert lines[0] == "bash <<'SH'" and "SH" in lines
+    inner = "\n".join(lines[1:lines.index("SH")]) + "\n"
+    inner_path = tmp_path / "step3-inner.sh"
+    inner_path.write_text(inner, encoding="utf-8")
+    readonly = tmp_path / "readonly-tmp"
+    readonly.mkdir()
+    readonly.chmod(0o555)
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("STUB_")}
+    environment["PATH"] = f"{project.parent / 'stubs'}{os.pathsep}{environment.get('PATH', '')}"
+    environment["TMPDIR"] = str(readonly)
+    try:
+        result = subprocess.run(
+            [BASH, str(inner_path)], cwd=project, env=environment,
+            capture_output=True, text=True, timeout=300, check=False,
+        )
+        assert result.returncode == 0, detail(result)
+        assert "problems=0" in result.stdout, detail(result)
+        assert list(readonly.iterdir()) == []
+    finally:
+        readonly.chmod(0o755)
+
+
+@pytest.mark.parametrize(("relative", "replace_with", "expected"), [
+    ("link", "file", "link:type=1"),
+    ("Default/Cookies", "dir", "file:type=1"),
+], ids=["link_to_file", "file_to_dir"])
+def test_type_mismatch_is_reported_not_failed(project: Path, relative: str, replace_with: str, expected: str) -> None:
+    migrated(project)
+    target = project / SESSIONS / "weibo" / "profile" / relative
+    parent_times = target.parent.stat()
+    target.unlink()
+    if replace_with == "file":
+        target.write_bytes(b"not a link")
+    else:
+        target.mkdir()
+    os.utime(target.parent, ns=(parent_times.st_atime_ns, parent_times.st_mtime_ns))
+    verify = run(project, "step3")
+    assert verify_status(verify) == 2, detail(verify)
+    assert f"weibo profile: same_entry_set=yes entries=6 mismatched=1 mismatch_detail={expected} extra=0 " \
+        in verify.stdout, detail(verify)
+    assert verify.stderr == "", detail(verify)

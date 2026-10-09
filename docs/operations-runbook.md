@@ -84,21 +84,22 @@ exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中
   人工处理。B站在中间层进程内经 Playwright pipe 启动的浏览器，在中间层被强杀后随 pipe 断开退出。
   systemd 等对整个 cgroup 同时发 SIGTERM 的场景，worker 与 Chrome 会直接收到信号，不符合“逐层一次”，
   worker 可能因第二次信号跳过清理。
-- 强杀兜底后的残留核对与清理：先确认没有仍在运行的通用 runner 或 child，再只读列出使用项目登录资料
-  目录的 Chrome PID，不打印完整命令行。T14 迁移后 profile 位于
+- 强杀兜底后的残留核对与清理：先确认没有仍在运行的通用 runner、executor、worker 或 warmup（复用迁移
+  第 1 步的进程模式，但不加 `-l`，不打印完整命令行），再只读列出使用项目登录资料目录的 Chrome PID。
+  Chrome 收到的 `--user-data-dir` 是 `core.paths` 解析出的物理绝对路径，所以匹配时用 `$(pwd -P)`，
+  不用可能含符号链接的 `$PWD`。T14 迁移后 profile 位于
   `data/runtime/platform_sessions/<platform>/`（`cdp_profile`，共享 profile 时为 `profile`）；迁移前的旧位置
   `tools/MediaCrawler/browser_data/`（`cdp_<平台>_user_data_dir`，共享时无 `cdp_` 前缀）并列核对，该旧路径
   一项在 T14-C 删除 fork 后移除：
 
   ```bash
-  pgrep -f scripts/crawl_runner.py
-  pgrep -f scripts/mediacrawler_crawl.py
-  pgrep -f -- "--user-data-dir=$PWD/data/runtime/platform_sessions/"
-  pgrep -f -- "--user-data-dir=$PWD/tools/MediaCrawler/browser_data/"
+  pgrep -f "crawl_runner.py|mediacrawler_crawl.py|trippostcollect.platforms.entry|login_warmup.py"
+  pgrep -f -- "--user-data-dir=$(pwd -P)/data/runtime/platform_sessions/"
+  pgrep -f -- "--user-data-dir=$(pwd -P)/tools/MediaCrawler/browser_data/"
   ```
 
-  前两条无输出时才清理后两条列出的 PID：先 `kill -TERM <pid>...`，再用同样的 `pgrep` 复核，仍有残留
-  才 `kill -KILL <pid>...`。小红书临时 profile 不在这些目录，按其平台文档处理，不用此命令。
+  第一条无输出时才清理后两条列出的 PID：先 `kill -TERM <pid>...`，等待数秒（例如 `sleep 5`）后用同样的
+  `pgrep` 复核，确认仍有残留才 `kill -KILL <pid>...`。小红书临时 profile 不在这些目录，按其平台文档处理，不用此命令。
 - 派发：首信号后排队 job 不再派发，不租约、不写 attempt、不启动 child，`crawl_jobs.status` 保持原值
   （通常为 `pending`），仅 execution state 写成中断终态、run_summary 记录为 `retry_wait`。已派发 job 若
   在启动前看到信号也不启动 child。信号前已结束且已被 runner 观察到的平台结果照常验证并保留；child
@@ -587,7 +588,10 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
    mtime 与权限位，而 Chrome 只关心链接目标（如 `SingletonLock` 指向的主机与进程），这些属性对 profile
    没有意义。目录与普通文件仍比较全部字段。每组输出 `mismatch_detail=<类型>:<字段>=<次数>,…`
    （类型为 file/dir/link，字段为 type/mode/size/mtime/owner/content/target/missing，无不一致时为 `none`），
-   只给分类计数、不含路径。另对照（不计符号链接）
+   只给分类计数、不含路径；类型不同的条目只记 `<类型>:type`，不再比较其余字段，按不一致处理而非命令错误。
+   `extra=N` 是新侧多出的条目数（例如新 profile 里残留的快照副本），N 不为 0 同样计入不一致。
+   `cd`、`find`、`stat`、`cmp`、`readlink`、`shasum` 自身的报错不输出（避免把路径打到终端），出错时只看
+   `FAILED:` 行。全段不使用 here-string 或内层 heredoc（bash 5.1 前二者借临时文件实现）。另对照（不计符号链接）
    `find <dir> -perm +077 | wc -l` 的 group/other 权限条目数。profile 根本身单独核对类型、权限、属主与
    mtime：新旧根权限必须相同（`root_mode_same`）；`root_mode_700` 只作信息输出，不计入失败（旧根若是 755，
    `ditto` 会原样复制，不应要求操作人改权限）。快照比较大小、权限、mtime、属主属组与 SHA-256，并要求新快照为
@@ -614,9 +618,9 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
    }
    entries() {
      if [ "$2" = old ]; then
-       (set -o pipefail; cd "$1" && find . -mindepth 1 ! -path "./$snap" -print0 | LC_ALL=C sort -z)
+       (set -o pipefail; cd "$1" 2>/dev/null && find . -mindepth 1 ! -path "./$snap" -print0 2>/dev/null | LC_ALL=C sort -z)
      else
-       (set -o pipefail; cd "$1" && find . -mindepth 1 -print0 | LC_ALL=C sort -z)
+       (set -o pipefail; cd "$1" 2>/dev/null && find . -mindepth 1 -print0 2>/dev/null | LC_ALL=C sort -z)
      fi
    }
    listing() {
@@ -642,9 +646,17 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
      else echo other
      fi
    }
+   split_stat() {
+     # 用参数展开拆分 `|` 分隔的字段；不用 here-string（bash 5.1 前借临时文件实现）。
+     local rest=$1
+     f_type=${rest%%|*}; rest=${rest#*|}
+     f_mode=${rest%%|*}; rest=${rest#*|}
+     f_size=${rest%%|*}; rest=${rest#*|}
+     f_mtime=${rest%%|*}; f_owner=${rest#*|}
+   }
    compare_tree() {
-     local label=$1 a=$2 b=$3 same=yes total=0 bad=0 i rel kind sa sb la lb rc perm_a perm_b keys entry_bad detail
-     local ta pa za ma oa tb pb zb mb ob
+     local label=$1 a=$2 b=$3 same=yes total=0 bad=0 missing=0 extra i rel kind sa sb la lb rc perm_a perm_b
+     local keys entry_bad detail ta pa za ma oa
      local -a old_list new_list
      # 不用临时文件：条目列表经进程替换读入数组，列表不完整时 load_list 已 fail。
      load_list "$a" old
@@ -666,27 +678,34 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
        kind=$(kind_of "$a/$rel") || fail "classify entry"
        if [ ! -e "$b/$rel" ] && [ ! -L "$b/$rel" ]; then
          bad=$((bad + 1))
+         missing=$((missing + 1))
          keys="$keys$kind:missing "
          continue
        fi
-       sa=$(stat -f '%HT|%p|%z|%m|%Su:%Sg' "$a/$rel") || fail "stat old entry"
-       sb=$(stat -f '%HT|%p|%z|%m|%Su:%Sg' "$b/$rel") || fail "stat new entry"
-       IFS='|' read -r ta pa za ma oa <<< "$sa"
-       IFS='|' read -r tb pb zb mb ob <<< "$sb"
+       sa=$(stat -f '%HT|%p|%z|%m|%Su:%Sg' "$a/$rel" 2>/dev/null) || fail "stat old entry"
+       sb=$(stat -f '%HT|%p|%z|%m|%Su:%Sg' "$b/$rel" 2>/dev/null) || fail "stat new entry"
+       split_stat "$sa"
+       ta=$f_type; pa=$f_mode; za=$f_size; ma=$f_mtime; oa=$f_owner
+       split_stat "$sb"
+       if [ "$ta" != "$f_type" ]; then
+         # 类型不同是不一致而非命令错误：不再对其做 readlink/cmp。
+         bad=$((bad + 1))
+         keys="$keys$kind:type "
+         continue
+       fi
        entry_bad=""
-       [ "$ta" = "$tb" ] || entry_bad="$entry_bad$kind:type "
-       [ "$oa" = "$ob" ] || entry_bad="$entry_bad$kind:owner "
+       [ "$oa" = "$f_owner" ] || entry_bad="$entry_bad$kind:owner "
        if [ "$kind" = link ]; then
-         la=$(readlink "$a/$rel") || fail "readlink old"
-         lb=$(readlink "$b/$rel") || fail "readlink new"
+         la=$(readlink "$a/$rel" 2>/dev/null) || fail "readlink old"
+         lb=$(readlink "$b/$rel" 2>/dev/null) || fail "readlink new"
          [ "$la" = "$lb" ] || entry_bad="$entry_bad$kind:target "
        else
-         [ "$pa" = "$pb" ] || entry_bad="$entry_bad$kind:mode "
-         [ "$za" = "$zb" ] || entry_bad="$entry_bad$kind:size "
-         [ "$ma" = "$mb" ] || entry_bad="$entry_bad$kind:mtime "
+         [ "$pa" = "$f_mode" ] || entry_bad="$entry_bad$kind:mode "
+         [ "$za" = "$f_size" ] || entry_bad="$entry_bad$kind:size "
+         [ "$ma" = "$f_mtime" ] || entry_bad="$entry_bad$kind:mtime "
          if [ "$kind" = file ]; then
            rc=0
-           cmp -s "$a/$rel" "$b/$rel" || rc=$?
+           cmp -s "$a/$rel" "$b/$rel" 2>/dev/null || rc=$?
            [ "$rc" -le 1 ] || fail "cmp entry"
            [ "$rc" -eq 0 ] || entry_bad="$entry_bad$kind:content "
          fi
@@ -696,26 +715,29 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
          keys="$keys$entry_bad"
        fi
      done
+     # 新侧多出的条目数：新侧总数减去旧侧条目中在新侧存在的数目（新侧不排除快照）。
+     extra=$(( ${#new_list[@]} - (total - missing) ))
      detail=$(printf '%s\n' $keys | LC_ALL=C sort | uniq -c | awk 'NF == 2 {printf "%s%s=%s", sep, $2, $1; sep=","}') \
        || fail "summarize mismatches"
      [ -n "$detail" ] || detail=none
-     perm_a=$(find "$a" ! -type l ! -path "$a/$snap" -perm +077 | wc -l | tr -d ' ') || fail "find old perms"
-     perm_b=$(find "$b" ! -type l -perm +077 | wc -l | tr -d ' ') || fail "find new perms"
-     echo "$label: same_entry_set=$same entries=$total mismatched=$bad mismatch_detail=$detail group_other_perm=$perm_a/$perm_b"
-     if [ "$same" != yes ] || [ "$bad" -ne 0 ] || [ "$perm_a" != "$perm_b" ]; then
+     perm_a=$(find "$a" ! -type l ! -path "$a/$snap" -perm +077 2>/dev/null | wc -l | tr -d ' ') || fail "find old perms"
+     perm_b=$(find "$b" ! -type l -perm +077 2>/dev/null | wc -l | tr -d ' ') || fail "find new perms"
+     echo "$label: same_entry_set=$same entries=$total mismatched=$bad mismatch_detail=$detail extra=$extra" \
+       "group_other_perm=$perm_a/$perm_b"
+     if [ "$same" != yes ] || [ "$bad" -ne 0 ] || [ "$extra" -ne 0 ] || [ "$perm_a" != "$perm_b" ]; then
        problems=$((problems + 1))
      fi
    }
    compare_root() {
      local label=$1 a=$2 b=$3 ta tb ma mb oa ob ra rb
-     ta=$(stat -f %HT "$a") || fail "stat old root"
-     tb=$(stat -f %HT "$b") || fail "stat new root"
-     ma=$(stat -f %Lp "$a") || fail "stat old root"
-     mb=$(stat -f %Lp "$b") || fail "stat new root"
-     oa=$(stat -f %Su "$a") || fail "stat old root"
-     ob=$(stat -f %Su "$b") || fail "stat new root"
-     ra=$(stat -f %m "$a") || fail "stat old root"
-     rb=$(stat -f %m "$b") || fail "stat new root"
+     ta=$(stat -f %HT "$a" 2>/dev/null) || fail "stat old root"
+     tb=$(stat -f %HT "$b" 2>/dev/null) || fail "stat new root"
+     ma=$(stat -f %Lp "$a" 2>/dev/null) || fail "stat old root"
+     mb=$(stat -f %Lp "$b" 2>/dev/null) || fail "stat new root"
+     oa=$(stat -f %Su "$a" 2>/dev/null) || fail "stat old root"
+     ob=$(stat -f %Su "$b" 2>/dev/null) || fail "stat new root"
+     ra=$(stat -f %m "$a" 2>/dev/null) || fail "stat old root"
+     rb=$(stat -f %m "$b" 2>/dev/null) || fail "stat new root"
      echo "$label: root_type_same=$(yes_no "$ta" "$tb") root_dir=$([ -d "$b" ] && [ ! -L "$b" ] && echo yes || echo no)" \
        "root_mode_same=$(yes_no "$ma" "$mb") root_mode_700=$(yes_no "$mb" 700)" \
        "root_owner_same=$(yes_no "$oa" "$ob")" \
@@ -748,11 +770,11 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
        problems=$((problems + 1))
        continue
      fi
-     sa=$(stat -f '%z %Sp %m %Su:%Sg' "$old_snap") || fail "stat old snapshot"
-     sb=$(stat -f '%z %Sp %m %Su:%Sg' "$new_snap") || fail "stat new snapshot"
-     mode=$(stat -f %Sp "$new_snap") || fail "stat new snapshot"
-     ha=$(shasum -a 256 < "$old_snap") || fail "hash old snapshot"
-     hb=$(shasum -a 256 < "$new_snap") || fail "hash new snapshot"
+     sa=$(stat -f '%z %Sp %m %Su:%Sg' "$old_snap" 2>/dev/null) || fail "stat old snapshot"
+     sb=$(stat -f '%z %Sp %m %Su:%Sg' "$new_snap" 2>/dev/null) || fail "stat new snapshot"
+     mode=$(stat -f %Sp "$new_snap" 2>/dev/null) || fail "stat new snapshot"
+     ha=$(shasum -a 256 < "$old_snap" 2>/dev/null) || fail "hash old snapshot"
+     hb=$(shasum -a 256 < "$new_snap" 2>/dev/null) || fail "hash new snapshot"
      if [ "$sa" = "$sb" ] && [ "$mode" = "-rw-------" ] && [ "$ha" = "$hb" ]; then
        echo "$platform snapshot: 一致"
      else
@@ -768,7 +790,7 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
    <!-- /t14-migrate:step3 -->
 
    通过标准是最后两行为 `problems=0` 与 `exit=0`：此时每行 root 结果除信息项 `root_mode_700` 外均为 `yes`，
-   每行 profile 结果为 `same_entry_set=yes`、`mismatched=0`、`mismatch_detail=none` 且 `group_other_perm` 两侧计数相等，快照为“一致”。
+   每行 profile 结果为 `same_entry_set=yes`、`mismatched=0`、`mismatch_detail=none`、`extra=0` 且 `group_other_perm` 两侧计数相等，快照为“一致”。
    `exit=1` 表示某个命令出错（看 `FAILED:` 行），`exit=2` 表示存在不一致。非 root 账号复制时属主或属组可能与旧侧不同；即使只有属组不同，也按“不一致”交人工
    确认，不得擅自 `chmod`/`chown`。确认是复制错误时，只删除新侧对应的 `profile`/`cdp_profile` 目录或
    新快照文件后重做第 2 步；旧目录与旧快照始终不动，可重复复制。
