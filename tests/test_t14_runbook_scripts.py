@@ -81,6 +81,7 @@ fi
 exec /usr/bin/cmp "$@"
 """,
     "find": """#!/bin/bash
+[ -n "${STUB_FIND_FAIL:-}" ] && exit 1
 if /usr/bin/find --version >/dev/null 2>&1; then
   args=()
   for arg in "$@"; do
@@ -352,10 +353,17 @@ def test_symlink_target_change_is_reported(project: Path) -> None:
     ({"STUB_STAT_FAIL_MATCH": "Default/Cookies"}, "FAILED: stat old entry"),
     ({"STUB_CMP_FAIL_MATCH": "Default/Cookies"}, "FAILED: cmp entry"),
     ({"STUB_SHASUM_FAIL": "1"}, "FAILED: hash old snapshot"),
-], ids=["stat_root", "stat_entry", "cmp_error", "shasum"])
+    ({"STUB_FIND_FAIL": "1"}, "FAILED: list old entries"),
+], ids=["stat_root", "stat_entry", "cmp_error", "shasum", "find_entries"])
 def test_verification_command_failures_exit_nonzero(project: Path, flags: dict[str, str], message: str) -> None:
     migrated(project)
     verify = run(project, "step3", **flags)
     assert verify_status(verify) not in (0, 2), detail(verify)
     assert message in verify.stderr, detail(verify)
     assert "problems=" not in verify.stdout, detail(verify)
+
+
+def test_verification_script_creates_no_temporary_files() -> None:
+    # 第 3 段只读不写：CI 沙箱内也不依赖 mktemp 或临时文件。
+    script = runbook_script("step3")
+    assert "mktemp" not in script and "$work" not in script and "trap" not in script

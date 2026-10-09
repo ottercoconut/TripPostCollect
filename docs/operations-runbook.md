@@ -84,18 +84,21 @@ exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中
   人工处理。B站在中间层进程内经 Playwright pipe 启动的浏览器，在中间层被强杀后随 pipe 断开退出。
   systemd 等对整个 cgroup 同时发 SIGTERM 的场景，worker 与 Chrome 会直接收到信号，不符合“逐层一次”，
   worker 可能因第二次信号跳过清理。
-- 强杀兜底后的残留核对与清理：先确认没有仍在运行的通用 runner 或 child，再只读列出使用项目
-  `tools/MediaCrawler/browser_data/` 下 profile（`cdp_<平台>_user_data_dir`，共享 profile 时无 `cdp_` 前缀）的
-  Chrome PID，不打印完整命令行：
+- 强杀兜底后的残留核对与清理：先确认没有仍在运行的通用 runner 或 child，再只读列出使用项目登录资料
+  目录的 Chrome PID，不打印完整命令行。T14 迁移后 profile 位于
+  `data/runtime/platform_sessions/<platform>/`（`cdp_profile`，共享 profile 时为 `profile`）；迁移前的旧位置
+  `tools/MediaCrawler/browser_data/`（`cdp_<平台>_user_data_dir`，共享时无 `cdp_` 前缀）并列核对，该旧路径
+  一项在 T14-C 删除 fork 后移除：
 
   ```bash
   pgrep -f scripts/crawl_runner.py
   pgrep -f scripts/mediacrawler_crawl.py
+  pgrep -f -- "--user-data-dir=$PWD/data/runtime/platform_sessions/"
   pgrep -f -- "--user-data-dir=$PWD/tools/MediaCrawler/browser_data/"
   ```
 
-  前两条无输出时才清理第三条列出的 PID：先 `kill -TERM <pid>...`，再用同一条 `pgrep` 复核，仍有残留
-  才 `kill -KILL <pid>...`。小红书临时 profile 不在该目录，按其平台文档处理，不用此命令。
+  前两条无输出时才清理后两条列出的 PID：先 `kill -TERM <pid>...`，再用同样的 `pgrep` 复核，仍有残留
+  才 `kill -KILL <pid>...`。小红书临时 profile 不在这些目录，按其平台文档处理，不用此命令。
 - 派发：首信号后排队 job 不再派发，不租约、不写 attempt、不启动 child，`crawl_jobs.status` 保持原值
   （通常为 `pending`），仅 execution state 写成中断终态、run_summary 记录为 `retry_wait`。已派发 job 若
   在启动前看到信号也不启动 child。信号前已结束且已被 runner 观察到的平台结果照常验证并保留；child
@@ -589,7 +592,8 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
    mtime：新旧根权限必须相同（`root_mode_same`）；`root_mode_700` 只作信息输出，不计入失败（旧根若是 755，
    `ditto` 会原样复制，不应要求操作人改权限）。快照比较大小、权限、mtime、属主属组与 SHA-256，并要求新快照为
    `-rw-------`。输出只含平台名、目录种类、布尔值和计数，不打印路径、内容、哈希或 Cookie。
-   `stat`、`find`、`cmp`、`readlink`、`shasum` 等任一命令出错都以非零状态立即停止；此时前面已通过的平台
+   脚本不创建临时文件（条目列表经进程替换读入数组，列表不完整即判失败），只读不写。
+   `stat`、`find`、`cmp`、`readlink`、`shasum` 等任一命令出错都以非零状态立即停止并打印 `FAILED:` 行；此时前面已通过的平台
    可能已经打印了“一致”，所以 **最终结论只以退出码和最后的 `problems=N` 为准**。全部命令成功时脚本打印
    `problems=N`（不一致项数），N 不为 0 时以状态 2 退出。脚本结束后紧接着执行 `echo "exit=$?"` 确认退出码。
 
@@ -599,8 +603,7 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
    set -eu -o pipefail
    snap=trippostcollect_cookie_snapshot.json
    legacy_root=tools/MediaCrawler/browser_data
-   work=$(mktemp -d) || exit 1
-   trap 'rm -rf "$work"' EXIT
+   end_mark=__T14_ENTRIES_COMPLETE__
    problems=0
    fail() {
      echo "FAILED: $*" >&2
@@ -611,10 +614,26 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
    }
    entries() {
      if [ "$2" = old ]; then
-       (cd "$1" && find . -mindepth 1 ! -path "./$snap" -print0 | LC_ALL=C sort -z)
+       (set -o pipefail; cd "$1" && find . -mindepth 1 ! -path "./$snap" -print0 | LC_ALL=C sort -z)
      else
-       (cd "$1" && find . -mindepth 1 -print0 | LC_ALL=C sort -z)
+       (set -o pipefail; cd "$1" && find . -mindepth 1 -print0 | LC_ALL=C sort -z)
      fi
+   }
+   listing() {
+     # 进程替换的退出码不会传给读取方：只有 entries 成功才追加结束标记，读取方据此判定成败。
+     if entries "$1" "$2"; then printf '%s\0' "$end_mark"; fi
+   }
+   load_list() {
+     local rel complete=no
+     loaded=()
+     while IFS= read -r -d '' rel; do
+       if [ "$rel" = "$end_mark" ]; then
+         complete=yes
+       else
+         loaded+=("$rel")
+       fi
+     done < <(listing "$1" "$2")
+     [ "$complete" = yes ] || fail "list $2 entries"
    }
    kind_of() {
      if [ -L "$1" ]; then echo link
@@ -624,18 +643,27 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
      fi
    }
    compare_tree() {
-     local label=$1 a=$2 b=$3 same=no total=0 bad=0 rel kind sa sb la lb rc perm_a perm_b keys entry_bad detail
+     local label=$1 a=$2 b=$3 same=yes total=0 bad=0 i rel kind sa sb la lb rc perm_a perm_b keys entry_bad detail
      local ta pa za ma oa tb pb zb mb ob
-     entries "$a" old > "$work/a" || fail "list old entries"
-     entries "$b" new > "$work/b" || fail "list new entries"
-     rc=0
-     cmp -s "$work/a" "$work/b" || rc=$?
-     [ "$rc" -le 1 ] || fail "cmp entry lists"
-     if [ "$rc" -eq 0 ]; then same=yes; fi
+     local -a old_list new_list
+     # 不用临时文件：条目列表经进程替换读入数组，列表不完整时 load_list 已 fail。
+     load_list "$a" old
+     old_list=(${loaded[@]+"${loaded[@]}"})
+     load_list "$b" new
+     new_list=(${loaded[@]+"${loaded[@]}"})
+     if [ "${#old_list[@]}" -ne "${#new_list[@]}" ]; then
+       same=no
+     else
+       i=0
+       while [ "$i" -lt "${#old_list[@]}" ]; do
+         [ "${old_list[$i]}" = "${new_list[$i]}" ] || same=no
+         i=$((i + 1))
+       done
+     fi
      keys=""
-     while IFS= read -r -d '' rel; do
+     for rel in ${old_list[@]+"${old_list[@]}"}; do
        total=$((total + 1))
-       kind=$(kind_of "$a/$rel")
+       kind=$(kind_of "$a/$rel") || fail "classify entry"
        if [ ! -e "$b/$rel" ] && [ ! -L "$b/$rel" ]; then
          bad=$((bad + 1))
          keys="$keys$kind:missing "
@@ -667,7 +695,7 @@ T14 起，B站、微博、抖音和知乎的持久 profile 与 Cookie 快照不�
          bad=$((bad + 1))
          keys="$keys$entry_bad"
        fi
-     done < "$work/a"
+     done
      detail=$(printf '%s\n' $keys | LC_ALL=C sort | uniq -c | awk 'NF == 2 {printf "%s%s=%s", sep, $2, $1; sep=","}') \
        || fail "summarize mismatches"
      [ -n "$detail" ] || detail=none
