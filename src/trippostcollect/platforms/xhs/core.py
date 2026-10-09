@@ -44,10 +44,11 @@ from trippostcollect.platforms.xhs.errors import (
     XHSNetworkRecoveryTimeout,
     XHSNoteDetailUnavailable,
     XhsErrorsMixin,
+    is_xhs_target_closed_failure,
     xhs_cdp_lifecycle_stop_detail,
 )
 from trippostcollect.platforms.xhs.login import XhsLoginMixin
-from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget, XHSManualWaitBudgetExhausted
+from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget
 from trippostcollect.platforms.xhs.media import XhsMediaMixin
 from trippostcollect.platforms.xhs.models import SearchSortType
 from trippostcollect.platforms.xhs.navigation import XhsNavigationMixin
@@ -64,7 +65,7 @@ logger = logging.getLogger("MediaCrawler")
 def _mark_cdp_lifecycle_failed(
     accumulator, exc: CDPBrowserLifecycleError, *, requested_page, search_id, discovery_phase: str
 ) -> None:
-    """浏览器生命周期失败统一记为本页 runtime_failed；页内请求与登录恢复共用。"""
+    """浏览器生命周期失败统一记为本页 runtime_failed；登录恢复经 _login_recovery_stop_detail 取同一细节。"""
     detail = xhs_cdp_lifecycle_stop_detail(exc)
     logger.error(
         "[XiaoHongShuCrawler.search] CDP lifecycle ended on "
@@ -78,6 +79,28 @@ def _mark_cdp_lifecycle_failed(
         resume_cursor=search_id,
         discovery_phase=discovery_phase,
     )
+
+
+def _playwright_stop_detail(exc: PlaywrightError) -> str:
+    """Playwright 运行期失败的停止细节；页内请求与登录恢复共用。"""
+    if is_xhs_target_closed_failure(exc):
+        return "browser_context_closed"
+    return "browser_runtime_failed"
+
+
+def _login_recovery_stop_detail(exc: BaseException) -> Optional[str]:
+    """页内登录恢复中的运行级失败按同级页内分支同一口径给出停止细节；其他异常返回 None。"""
+    if isinstance(exc, CDPBrowserLifecycleError):
+        return xhs_cdp_lifecycle_stop_detail(exc)
+    if isinstance(exc, XHSNetworkRecoveryTimeout):
+        return "network_recovery_timeout"
+    if isinstance(exc, IPBlockError):
+        return "ip_blocked_300012"
+    if isinstance(exc, PlatformRuntimeError):
+        return exc.code
+    if isinstance(exc, PlaywrightError):
+        return _playwright_stop_detail(exc)
+    return None
 
 
 class XiaoHongShuCrawler(
@@ -632,23 +655,24 @@ class XiaoHongShuCrawler(
                                         keyword
                                     )
                                 )
-                            except XHSManualWaitBudgetExhausted as budget_exc:
+                            except Exception as recovery_exc:
+                                # 在处理体内抛出，不会落到下方同级分支；运行级失败按同级
+                                # 口径写停止事件后结束本页，未识别异常照常上抛。
+                                recovery_detail = _login_recovery_stop_detail(
+                                    self._request_failure_exception(recovery_exc)
+                                )
+                                if recovery_detail is None:
+                                    raise
+                                logger.error(
+                                    "[XiaoHongShuCrawler.search] Mid-run login recovery "
+                                    f"failed on page {requested_page}: {recovery_exc!r}"
+                                )
                                 accumulator.mark_runtime_failed(
-                                    budget_exc.code,
+                                    recovery_detail,
                                     source_page=requested_page,
                                     source_cursor=search_id,
                                     resume_page=requested_page,
                                     resume_cursor=search_id,
-                                    discovery_phase=discovery_phase,
-                                )
-                                break
-                            except CDPBrowserLifecycleError as lifecycle_exc:
-                                # 在处理体内抛出，不会落到下方同级的生命周期分支。
-                                _mark_cdp_lifecycle_failed(
-                                    accumulator,
-                                    lifecycle_exc,
-                                    requested_page=requested_page,
-                                    search_id=search_id,
                                     discovery_phase=discovery_phase,
                                 )
                                 break
@@ -690,14 +714,7 @@ class XiaoHongShuCrawler(
                         )
                         break
                     except PlaywrightError as exc:
-                        detail = (
-                            "browser_context_closed"
-                            if (
-                                exc.__class__.__name__ == "TargetClosedError"
-                                or "context or browser has been closed" in str(exc).lower()
-                            )
-                            else "browser_runtime_failed"
-                        )
+                        detail = _playwright_stop_detail(exc)
                         logger.error(
                             "[XiaoHongShuCrawler.search] Browser runtime error on "
                             f"page {requested_page}: {exc!r}"

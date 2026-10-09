@@ -28,7 +28,12 @@ from typing import Any
 
 from playwright.async_api import Error as PlaywrightError
 
-from trippostcollect.platforms.xhs.errors import IPBlockError, PlatformRuntimeError
+from trippostcollect.platforms.xhs.errors import (
+    IPBlockError,
+    PlatformRuntimeError,
+    XHSNetworkRecoveryTimeout,
+    is_xhs_target_closed_failure,
+)
 from trippostcollect.platforms.xhs.parser import parse_note_info_from_note_url
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 
@@ -43,7 +48,13 @@ def _repair_exception_is_blocking(crawler: Any, exc: BaseException) -> bool:
             request_failure = request_failure_factory(exc)
         except Exception:
             request_failure = exc
-    blocking_types = (IPBlockError, PlatformRuntimeError, CDPBrowserLifecycleError)
+    # 网络恢复预算耗尽终止本轮，与搜索阶段口径一致；不按候选失败逐个再等预算。
+    blocking_types = (
+        IPBlockError,
+        PlatformRuntimeError,
+        CDPBrowserLifecycleError,
+        XHSNetworkRecoveryTimeout,
+    )
     if blocking_types and isinstance(request_failure, blocking_types):
         return True
     if isinstance(request_failure, PlaywrightError) or isinstance(exc, PlaywrightError):
@@ -122,13 +133,24 @@ def _xhs_repair_blocker(crawler: Any, exc: BaseException) -> dict[str, str]:
             "error_code": "browser_target_closed",
             "reason": str(request_failure.event.get("code") or "xhs_cdp_lifecycle_failure"),
         }
+    if isinstance(request_failure, XHSNetworkRecoveryTimeout):
+        # 与搜索阶段 runtime_failed/network_recovery_timeout 同一口径：失败族 + 具体原因。
+        return {
+            "error_type": error_type,
+            "error_code": "runtime_failed",
+            "reason": "network_recovery_timeout",
+        }
     code = str(getattr(request_failure, "code", "") or "")
     text = str(request_failure).lower()
     if not code and error_type == "IPBlockError":
         code = "ip_blocked"
-    if not code and (
-        isinstance(request_failure, PlaywrightError) or isinstance(exc, PlaywrightError)
-    ):
+    playwright_failures = [
+        item for item in (request_failure, exc) if isinstance(item, PlaywrightError)
+    ]
+    if not code and any(is_xhs_target_closed_failure(item) for item in playwright_failures):
+        # 必须先于通用 Playwright 分类，否则 TargetClosedError 会被归为 browser_runtime_failed。
+        code = "browser_target_closed"
+    if not code and playwright_failures:
         code = "browser_runtime_failed"
     if not code:
         for marker, normalized in (

@@ -260,9 +260,12 @@ python scripts/repair_xhs_posts.py \
 
 详情 API、HTML 回退、作者资料与图片各自沿用有界请求重试；最终失败会记录真实 `attempts`、
 `failure_scope` 和 `error_code`。普通候选失败不序列化空壳记录，不阻塞同批成功记录，也不阻止下一批；
-登录、验证码、频控、封禁、安全限制和浏览器整体失败仍立即停止；Chrome 进程退出、CDP 断开、
-BrowserContext 或主页面意外关闭写入 `runtime_blocker`，`error_code=browser_target_closed`，具体生命周期码
-在 `reason`。child `summary.json` 的
+登录、验证码、频控、封禁、安全限制、网络恢复预算耗尽和浏览器整体失败仍立即停止，当前未完成批次
+不写入 `batches`；Chrome 进程退出、CDP 断开、BrowserContext 或主页面意外关闭写入 `runtime_blocker`，
+`error_code=browser_target_closed`，具体生命周期码在 `reason`；Playwright 直接报告 page/context/browser
+已关闭（`TargetClosedError`）同样记 `browser_target_closed`。网络恢复预算耗尽记
+`error_code=runtime_failed`、`reason=network_recovery_timeout`，不按候选失败继续等待下一候选。
+child `summary.json` 的
 `pagination_evidence.skipped_candidate_failures` 与平台记录的 `repair_report` 是失败清单，顶层
 `repair_xhs_posts.py` 摘要也会转存该报告。
 
@@ -304,7 +307,10 @@ BrowserContext 或主页面意外关闭写入 `runtime_blocker`，`error_code=br
   立即按运行级阻断停止，不点击刷新绕过。
 - 搜索 API 明确登录过期时暂停原请求，置前原有抓取页，使用该页已经出现的二维码等待人工登录；
   不新开登录标签页，也不把最新打开的作者页或辅助页接管为主页面。可见登录 UI 与 self-info API
-  都恢复后刷新当前内存 Cookie，并重试同一来源页。等待期间不导航或刷新原页。
+  都恢复后刷新当前内存 Cookie，并重试同一来源页。等待期间不导航或刷新原页。恢复等待中出现终态
+  弹窗、人工预算耗尽、网络恢复超时、`300012`、Playwright 浏览器错误或生命周期失败时，与页内请求
+  直接遇到同类失败写同一 `runtime_failed/<stop_detail>` 停止事件并保留当前页为续跑前沿，不写
+  `source_exhausted`。
 - “安全限制”、账号异常、`300011/300012`、`/website-login/error`、频控或封禁属于运行级阻断，
   立即停止，不能进入人工验证码等待或候选跳过。
 - 可识别的短时网络错误只进入 `network_paused`，保留同一 Chrome、BrowserContext、Page 和原操作，

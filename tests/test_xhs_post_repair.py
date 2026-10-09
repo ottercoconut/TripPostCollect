@@ -19,7 +19,8 @@ from trippostcollect.application.failures import latest_runtime_blocker
 from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.platforms import entry as platform_entry
 from trippostcollect.platforms.xhs import repair as xhs_repair
-from trippostcollect.platforms.xhs.errors import XHSMainPageClosedUnexpected
+from playwright.async_api import Error as PlaywrightError
+from trippostcollect.platforms.xhs.errors import XHSMainPageClosedUnexpected, XHSNetworkRecoveryTimeout
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.platforms.xhs.core import XiaoHongShuCrawler as RootXiaoHongShuCrawler
 from trippostcollect.xhs import accounts
@@ -835,6 +836,8 @@ async def test_xhs_repair_stops_on_browser_lifecycle_failure_with_structured_blo
     assert enriched == ["note-1"] and stored == []
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["candidate_failures"] == [] and report["successful_ids"] == []
+    # 阻断发生在第一批中途：未完成批次不提交。
+    assert report["batches"] == []
     code = failure.event["code"]
     assert report["runtime_blocker"] == {
         "error_type": type(failure).__name__,
@@ -845,6 +848,122 @@ async def test_xhs_repair_stops_on_browser_lifecycle_failure_with_structured_blo
     assert blocker["failure_type"] == "browser_target_closed"
     assert blocker["reason"] == code
     assert blocker["status"] == "blocked" and blocker["retryable"] is False
+
+
+class TargetClosedError(PlaywrightError):
+    """与 Playwright 同名的关闭异常；分类按类名识别。"""
+
+
+async def run_blocked_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    failure: BaseException,
+    stage: str,
+) -> tuple[pytest.ExceptionInfo, list[str], list[str], dict]:
+    """真实 repair 编排：note-1 在指定阶段抛出 failure，其余候选正常。"""
+    requested: list[str] = []
+    stored: list[str] = []
+
+    class FakeCrawler(RootXiaoHongShuCrawler):
+        async def get_note_detail_async_task(self, *, note_id, **_kwargs):
+            requested.append(note_id)
+            if stage == "detail" and note_id == "note-1":
+                raise failure
+            return {"note_id": note_id, "xsec_token": f"token-{note_id}", "type": "normal"}
+
+        async def enrich_note_creator(self, note_detail):
+            if stage == "creator" and note_detail["note_id"] == "note-1":
+                raise failure
+
+        async def get_notice_media(self, _note_detail):
+            return None
+
+        @staticmethod
+        def is_video_note(_note_detail):
+            return False
+
+        async def update_xhs_note(self, note_detail):
+            stored.append(note_detail["note_id"])
+
+    monkeypatch.setattr(
+        xhs_repair,
+        "parse_note_info_from_note_url",
+        lambda value: SimpleNamespace(note_id=value, xsec_source="pc_search", xsec_token=f"token-{value}"),
+    )
+    monkeypatch.setattr(platform_entry, "_xhs_repair", False)
+    report_path = tmp_path / "repair_report.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR", "1")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_BATCH_SIZE", "2")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH", str(report_path))
+    install_worker_hooks(monkeypatch)
+    crawler = FakeCrawler(**platform_entry.xhs_dependencies(repair_crawler_config(["note-1", "note-2", "note-3"])))
+
+    with pytest.raises(type(failure)) as exc_info:
+        await crawler.get_specified_notes()
+
+    return exc_info, requested, stored, json.loads(report_path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["detail", "creator"])
+async def test_xhs_repair_network_recovery_timeout_blocks_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    # #60：网络恢复预算耗尽终止本轮，不按候选失败继续让后续候选再等一次预算。
+    failure = XHSNetworkRecoveryTimeout(f"repair:{stage}", 600.0)
+
+    exc_info, requested, stored, report = await run_blocked_repair(
+        tmp_path, monkeypatch, failure=failure, stage=stage
+    )
+
+    assert exc_info.value is failure
+    assert requested == ["note-1", "note-2"]
+    assert stored == []
+    assert report["candidate_failures"] == [] and report["successful_ids"] == []
+    assert report["batches"] == []
+    assert report["runtime_blocker"] == {
+        "error_type": "XHSNetworkRecoveryTimeout",
+        "error_code": "runtime_failed",
+        "reason": "network_recovery_timeout",
+    }
+    blocker = latest_runtime_blocker([{"platform": "xhs", "repair_report": report}], ["xhs"])
+    assert blocker["failure_type"] == "runtime_failed"
+    assert blocker["stop_reason"] == "runtime_failed"
+    assert blocker["reason"] == "network_recovery_timeout"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "error_code"),
+    [
+        (TargetClosedError("Target page, context or browser has been closed"), "browser_target_closed"),
+        (PlaywrightError("Browser.close: Connection closed while reading"), "browser_runtime_failed"),
+    ],
+    ids=["target_closed", "playwright_runtime"],
+)
+async def test_xhs_repair_playwright_blocker_classifies_target_closed_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: PlaywrightError,
+    error_code: str,
+) -> None:
+    # #60：TargetClosedError 先于通用 Playwright 分支归入 browser_target_closed。
+    exc_info, requested, stored, report = await run_blocked_repair(
+        tmp_path, monkeypatch, failure=failure, stage="creator"
+    )
+
+    assert exc_info.value is failure
+    assert requested == ["note-1", "note-2"] and stored == []
+    assert report["batches"] == [] and report["candidate_failures"] == []
+    assert report["runtime_blocker"] == {
+        "error_type": type(failure).__name__,
+        "error_code": error_code,
+    }
+    blocker = latest_runtime_blocker([{"platform": "xhs", "repair_report": report}], ["xhs"])
+    assert blocker["failure_type"] == error_code
 
 
 @pytest.mark.asyncio
