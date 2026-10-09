@@ -350,9 +350,6 @@ def test_root_default_event_sink_does_not_write_files(monkeypatch, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-T14_EVENTS = ("T03", "injected_event_sequence")
-
-
 def _root_event_sequence():
     root_events = []
     root = candidates.AdaptiveAccumulator(
@@ -363,19 +360,6 @@ def _root_event_sequence():
     return root_events
 
 
-def _fork_event_sequence(fork, monkeypatch):
-    fork_events = []
-    adapted = fork.AdaptiveAccumulator(
-        "weibo", stagnation_basis="candidate_identity", existing_identities={"known"},
-    )
-    monkeypatch.setattr(
-        fork, "append_execution_event",
-        lambda event_type, details: fork_events.append((event_type, details)),
-    )
-    _event_sequence(adapted)
-    return fork_events
-
-
 def _check_event_sequence(root_events):
     assert [event_type for event_type, _ in root_events] == [
         "adaptive_batch_completed", "adaptive_search_stopped",
@@ -384,19 +368,14 @@ def _check_event_sequence(root_events):
     assert root_events[1][1]["stop_reason"] == "source_exhausted"
 
 
-def test_root_injected_event_sequence_matches_frozen_fork_module_patch():
-    """T14：根注入出口的事件序列与固化的 fork 模块全局出口结果比较。"""
-    root_events = _root_event_sequence()
-    assert root_events == expectations.load(*T14_EVENTS, "weibo")
-    _check_event_sequence(root_events)
+def test_root_injected_event_sequence():
+    """T14：原对照的根侧字面断言。
 
-
-@expectations.legacy_guard
-def test_t14_guard_fork_module_patch_event_sequence(fork, monkeypatch, pytestconfig):
-    expectations.check_legacy(
-        pytestconfig, *T14_EVENTS, "weibo", _fork_event_sequence(fork, monkeypatch),
-        source_test="tests/test_adapter_t03.py::test_injected_event_sequence_matches_fork_module_patch",
-    )
+    不固化 fork 侧结果：fork 的 tools/trippostcollect_adaptive.AdaptiveAccumulator 是根类子类，只换了默认
+    事件出口，仓库中也没有独立的旧实现，固化它等于根实现与自身比较。事件字段的独立断言见
+    tests/application/test_discovery.py（原 fork 用例原名原断言移植）。
+    """
+    _check_event_sequence(_root_event_sequence())
 
 
 @expectations.legacy_only

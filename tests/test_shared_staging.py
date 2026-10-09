@@ -20,6 +20,7 @@ from PIL import Image
 import pytest
 
 from support import legacy_expectations as expectations
+from support import platform_session_deviation as deviation
 from trippostcollect.application.contracts import ContentSink, ImageStager, JsonlWriter
 from trippostcollect.artifacts.jsonl import JsonlContentStore
 
@@ -383,8 +384,10 @@ def test_root_staging_matches_frozen_baseline(platform, tmp_path, monkeypatch):
     retained = {name: data for name, data in expected["tree_after_jsonl"].items()
                 if not any(kind in name for kind in EXITED_ITEM_TYPES)}
     assert _tree(root) == retained
-    default_root = _root_image_stager(platform, "").save_data_root
-    assert expectations.scrub(str(default_root)) == expected["default_save_data_root"]
+    # #59 有意偏离：根 worker 缺省暂存根不再回落 fork 数据目录。钉住被偏离的旧值，并断言根侧显式失败。
+    assert expected["default_save_data_root"] == deviation.LEGACY_DEFAULT_SAVE_DATA_ROOT
+    with pytest.raises(RuntimeError, match=deviation.SAVE_DATA_PATH_REQUIRED):
+        _root_image_stager(platform, "")
 
 
 @pytest.mark.asyncio

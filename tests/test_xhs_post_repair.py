@@ -36,10 +36,10 @@ mediacrawler = import_module("mediacrawler_crawl")
 
 def install_worker_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
     """T14：原用旧桥 E 的 install_xhs_repair_resilience 锁存修复开关；改由正式 worker 的
-    entry.install_hooks 在同一时点读取。用例结束时还原它顺带写入的其他模块级开关。"""
+    entry.install_hooks 在同一时点读取。用例结束时还原它写入的全部模块级开关（含 _xhs_repair）。"""
     from trippostcollect.application import events
 
-    for name in ("_weibo_post_repair", "_douyin_browser_detail_fallback"):
+    for name in ("_xhs_repair", "_weibo_post_repair", "_douyin_browser_detail_fallback"):
         monkeypatch.setattr(platform_entry, name, getattr(platform_entry, name))
     monkeypatch.setattr(events, "_batch_publisher", events._batch_publisher)
     platform_entry.install_hooks()

@@ -13,7 +13,8 @@ import pytest
 from trippostcollect.platforms import _fork_bridge, entry
 from trippostcollect.platforms.douyin import client, core, login, login_support, parser
 from support import legacy_expectations as expectations
-from test_adapter_t06 import SCENARIOS, T14_BRIDGE, drive
+from support import platform_session_deviation as deviation
+from test_adapter_t06 import SCENARIOS, T14_BRIDGE, current_douyin_profile, drive
 
 
 # T14：本文件只做旧桥（fork 工厂/E）与根的双轨对照或旧桥自测，T14-C 随旧桥整体删除。
@@ -96,14 +97,14 @@ async def test_fork_factory_matches_new_entry(tmp_path, monkeypatch, scenario, f
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback", [0, 1])
 @pytest.mark.parametrize("scenario", SCENARIOS)
-async def test_t14_guard_fork_factory_drive(tmp_path, monkeypatch, pytestconfig, scenario, fallback):
-    """旧桥 fork 工厂当场结果与固化预期逐字节一致；根侧比较见 test_adapter_t06.py。"""
+async def test_t14_guard_fork_factory_drive(tmp_path, monkeypatch, scenario, fallback):
+    """旧桥 fork 工厂当场结果与登记 #59 偏离后的固化预期相等；根侧比较见 test_adapter_t06.py。"""
     with monkeypatch.context() as patch:
         old = await drive_assembly(tmp_path / "old", patch, scenario, fallback, old_bridge=True)
-    expectations.check_legacy(
-        pytestconfig, *T14_BRIDGE, f"{scenario}-fallback{fallback}", expectations.scrub(old, (tmp_path, "<TMP>")),
-        source_test="tests/test_adapter_t06_bridge.py::test_fork_factory_matches_new_entry",
-    )
+    # fork 工厂构造的是根 crawler 子类：#59 后 profile 已在新位置，按与根侧同一偏离登记比较；
+    # 固化文件只由冻结 fixture 路径再生成，本守卫不写出。
+    assert expectations.scrub(old, (tmp_path, "<TMP>")) == deviation.douyin_profile(
+        expectations.load(*T14_BRIDGE, f"{scenario}-fallback{fallback}"), current_douyin_profile(tmp_path))
 
 
 def test_fork_exports_root_implementations_and_injection_only():

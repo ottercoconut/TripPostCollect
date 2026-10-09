@@ -74,7 +74,6 @@ for _file, _names, _kind in (
     ("tests/test_adapter_t06_bridge.py", ("CrawlerFactory", "create_crawler"), "A"),
     ("tests/test_adapter_t07.py", ("CrawlerFactory", "create_crawler"), "A"),
     ("tests/test_adapter_t09.py", ("CrawlerFactory", "create_crawler"), "A"),
-    ("tests/test_residual_detail_fallbacks.py", ("create_crawler",), "A"),
     ("tests/test_shared_staging.py", ("store_comment", "store_creator"), "A"),
     ("tests/test_author_avatar_sanitization.py", ("write_to_csv", "write_single_item_to_json"), "A"),
     ("tests/platforms/douyin/test_douyin_store.py", ("DouyinStoreFactory", "create_store"), "A"),

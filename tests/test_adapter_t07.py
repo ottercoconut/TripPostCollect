@@ -129,7 +129,8 @@ async def drive(baseline, output, patch, scenario, *, migrated, crawler_factory=
         SAVE_DATA_OPTION="jsonl", SAVE_DATA_PATH=str(output / "data"),
         ZHIHU_SPECIFIED_ID_LIST=["https://www.zhihu.com/question/10/answer/101", "https://zhuanlan.zhihu.com/p/102"],
     ).items():
-        patch.setattr(config, name, value, raising=baseline is not None)
+        # 只有词云这一个 fork 退出键在根配置对象上不存在，仅对它放宽；其余键缺失即报错。
+        patch.setattr(config, name, value, raising=baseline is not None or name != "ENABLE_GET_WORDCLOUD")
 
     async def sleep(seconds):
         trace.append(("sleep", float(seconds)))

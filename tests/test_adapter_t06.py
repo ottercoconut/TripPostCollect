@@ -24,6 +24,7 @@ from PIL import Image
 import pytest
 
 from support import legacy_expectations as expectations
+from support import platform_session_deviation as deviation
 from support.raw_author_identity import use_raw_author_identity
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
@@ -36,14 +37,6 @@ from trippostcollect.runtime import image_retry
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/adapter_t06"
-def t14_douyin_profiles():
-    """旧侧 fork 固定位置与新侧当前（测试中已重定向的）core.paths 位置；调用时求值。"""
-    return {
-        str(ROOT / "tools/MediaCrawler/browser_data/dy_user_data_dir"),
-        str(paths.platform_profile_dir("douyin")),
-    }
-
-
 def t14_slider_paths(node):
     """T14 授权差异：滑块临时图从 fork temp_image（及 cwd 相对路径）改到 DOUYIN_SLIDER_IMAGE_DIR。"""
     source = ast.unparse(node)
@@ -299,9 +292,7 @@ async def drive(modules, root, patch, scenario, fallback):
             trace.append(("playwright_exit",))
 
         async def launch_persistent_context(self, **kwargs):
-            # T14 授权差异：持久 profile 从 fork browser_data 迁到 core.paths 定义的新位置；两侧归一为同一记号。
-            if kwargs.get("user_data_dir") in t14_douyin_profiles():
-                kwargs = {**kwargs, "user_data_dir": "<douyin persistent profile>"}
+            # 记录原始 user_data_dir；#59 的 profile 迁移偏离只在比较时对旧侧预期单向变换。
             trace.append(("launch", kwargs))
             return Context()
 
@@ -423,6 +414,11 @@ SCENARIOS = (
 T14_DRIVE = ("T06", "requests_records_images_events")
 
 
+def current_douyin_profile(tmp_path):
+    """根当前的抖音持久 profile（调用时求值，测试中已由 conftest 重定向），按根侧同样规则 scrub。"""
+    return expectations.scrub(str(paths.platform_profile_dir("douyin")), (tmp_path, "<TMP>"))
+
+
 @expectations.legacy_only
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback", [0, 1])
@@ -433,7 +429,9 @@ async def test_old_new_requests_records_images_events(tmp_path, monkeypatch, sce
             before = await drive(old, tmp_path / "old", patch, scenario, fallback)
     with monkeypatch.context() as patch:
         after = await drive(None, tmp_path / "new", patch, scenario, fallback)
-    assert after == before
+    # #59 有意偏离：旧侧 fork profile 位置单向换成根当前位置后再整体比较。
+    assert expectations.scrub(after, (tmp_path, "<TMP>")) == deviation.douyin_profile(
+        expectations.scrub(before, (tmp_path, "<TMP>")), current_douyin_profile(tmp_path))
     check_drive_result(after, scenario, fallback)
 
 
@@ -444,7 +442,8 @@ async def test_root_matches_frozen_legacy_requests_records_images_events(tmp_pat
     """T14：根实现与固化的旧实现结果比较（同一 drive、同一 == 语义），不加载 fork 或 E。"""
     with monkeypatch.context() as patch:
         after = await drive(None, tmp_path / "new", patch, scenario, fallback)
-    assert expectations.scrub(after, (tmp_path, "<TMP>")) == expectations.load(*T14_DRIVE, f"{scenario}-fallback{fallback}")
+    assert expectations.scrub(after, (tmp_path, "<TMP>")) == deviation.douyin_profile(
+        expectations.load(*T14_DRIVE, f"{scenario}-fallback{fallback}"), current_douyin_profile(tmp_path))
     check_drive_result(after, scenario, fallback)
 
 
@@ -497,7 +496,8 @@ async def test_root_entry_assembly_matches_frozen_fork_factory(tmp_path, monkeyp
     """T14：替代旧桥工厂对照；根入口装配结果与固化的 fork 工厂结果比较。"""
     with monkeypatch.context() as patch:
         new = await drive_entry_assembly(tmp_path / "new", patch, scenario, fallback)
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == expectations.load(*T14_BRIDGE, f"{scenario}-fallback{fallback}")
+    assert expectations.scrub(new, (tmp_path, "<TMP>")) == deviation.douyin_profile(
+        expectations.load(*T14_BRIDGE, f"{scenario}-fallback{fallback}"), current_douyin_profile(tmp_path))
     check_drive_result(new, scenario, fallback)
 
 

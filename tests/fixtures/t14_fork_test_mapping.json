@@ -367,8 +367,8 @@
      "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
     },
     {
-     "test": "tests/test_adapter_t03.py::test_root_injected_event_sequence_matches_frozen_fork_module_patch",
-     "asserts": "根注入出口的事件序列与 T14 固化的 fork 模块出口结果逐项相等（tests/fixtures/t14_legacy_expectations/T03）"
+     "test": "tests/test_adapter_t03.py::test_root_injected_event_sequence",
+     "asserts": "根 AdaptiveAccumulator 经显式 event_sink 产生 adaptive_batch_completed/adaptive_search_stopped，事件类型、candidate_count 与 stop_reason 字面断言"
     },
     {
      "test": "tests/test_adaptive_accumulator.py::test_completed_batch_event_keeps_candidate_identities_for_failed_run_resume",

@@ -261,6 +261,32 @@ def fork_commit() -> str | None:
     return head if not head.startswith("ref:") else None
 
 
+def root_commit() -> str | None:
+    """读取根检出的 HEAD 提交（worktree 经 commondir 解析引用）；不可读时返回 None。
+
+    只记录 HEAD，不能反映生成时工作区中的未提交改动，manifest 以 root_commit_note 说明。
+    """
+    try:
+        pointer = ROOT / ".git"
+        gitdir = Path(pointer.read_text(encoding="utf-8").strip().removeprefix("gitdir: ")) \
+            if pointer.is_file() else pointer
+        head = (gitdir / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref: "):
+            return head
+        ref = head.removeprefix("ref: ")
+        common = gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip() \
+            if (gitdir / "commondir").is_file() else gitdir
+        for base in (gitdir, common):
+            if (base / ref).is_file():
+                return (base / ref).read_text(encoding="utf-8").strip()
+        for line in (common / "packed-refs").read_text(encoding="utf-8").splitlines():
+            if line.endswith(" " + ref):
+                return line.split()[0]
+    except OSError:
+        return None
+    return None
+
+
 def write_manifest(target: str) -> None:
     """再生成会话结束时写出 manifest：来源元数据与各文件哈希。"""
     root = Path(target)
@@ -278,6 +304,8 @@ def write_manifest(target: str) -> None:
         "generated_on": date.today().isoformat(),
         "generation_command": GENERATION_COMMAND,
         "fork_commit": fork_commit(),
+        "root_commit": root_commit(),
+        "root_commit_note": "生成时根检出的 HEAD；生成时工作区可能含未提交改动（如本批测试改动）。",
         **source_digest(),
         "files": files,
     }

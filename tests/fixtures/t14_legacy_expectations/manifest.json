@@ -2,15 +2,11 @@
  "generated_on": "2026-10-08",
  "generation_command": "TPC sandbox: pytest -p pytest_asyncio.plugin -m t14_legacy_guard --t14-write-legacy-expectations=<DIR> <对应测试文件>",
  "fork_commit": "3488cf2df2ee6370e8553b157e4d833ff3c0cb8d",
+ "root_commit": "69a824be4d050e71072d006512ed0dff7506f915",
+ "root_commit_note": "生成时根检出的 HEAD（main 69a824b）；生成时工作区另含当时未提交的 T14-B2 测试改动（后提交为 8f6fef6，rebase 后为 f7d4cdf）。被测根实现源码（src/）与 69a824b 相同。",
  "bridge_sha256": "2a11439f4e5b9df83d67d0a527b37e7803c3ee1498e4901a1f6597015bfe037a",
  "fork_python_sources_sha256": "ad6e4b262cb0119ddfa9115f1d8444aa54eaff8ff14523603ac444c8a06b169d",
  "files": {
-  "T03/injected_event_sequence/weibo.json": {
-   "sha256": "5201c04a3ffd18b22a270687f9bf755c21a53fdf51617d48a715b935fdcdce35",
-   "source_tests": [
-    "tests/test_adapter_t03.py::test_injected_event_sequence_matches_fork_module_patch"
-   ]
-  },
   "T05/frozen_implementation/detail-repair0.json": {
    "sha256": "ca3ca83b6de5a9aee8a547522c76293a0b1d93d249111cbbb5ba1ee91783ca84",
    "source_tests": [
