@@ -132,10 +132,8 @@ def build_report(spec: Mapping[str, Any], outcomes_by_lane: Mapping[str, Mapping
         lane = entry["lane"]
         outcomes = outcomes_by_lane.get(lane)
         if outcomes is None:
-            # fork 删除后不再运行 fork lane；残留的 fork 条目必须从声明中删除，不能静默跳过。
-            problems.append(f"{responsibility}/{owner}: " + (
-                "fork lane 未运行（fork 已删除），覆盖声明须移除 fork 条目"
-                if lane == "fork" and lane not in outcomes_by_lane else f"lane {lane} 无 junit 结果"))
+            # 声明的 lane 未运行或没有 junit（含不属于 ROOT_LANES 的声明）都不能静默跳过。
+            problems.append(f"{responsibility}/{owner}: lane {lane} 无 junit 结果")
             continue
         matched = match_entry(entry, outcomes)
         entry_issue = entry_problems(entry, matched)

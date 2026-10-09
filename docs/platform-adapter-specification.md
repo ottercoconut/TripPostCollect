@@ -792,7 +792,7 @@ BC snapshot复验不是完整图片解码/权威整帖/SQLite内容门禁；ACK�
 T00实施起步保存机器可读的**旧node→新node→保护语义→lane→前置卡**台账（目标 `tests/adapter_migration_inventory.json`）。
 旧节点来自固定F/M收集，不以报告缩写或省略号冒充node；拆/合节点登记全部来源与新断言位置。
 每站实现时同时迁测试，F09新增场景按站参数化，不能等旧树删除后再补测试归属。
-`scripts/ci/run_matrix.py:FORK_OFFLINE_TESTS:15/FORK_EXPECTED_TESTS:26` 的32文件417项是旧基线，不能永久跑已删除路径（T14 已执行：T14-B2 移植剩余离线用例后清单清空，T14-C 删除 fork 后 fork lane 不再运行）。
+`scripts/ci/run_matrix.py:FORK_OFFLINE_TESTS:15/FORK_EXPECTED_TESTS:26` 的32文件417项是旧基线，不能永久跑已删除路径（T14 已执行：T14-B2 移植剩余离线用例后清单清空，T14-C 删除 fork 后 fork lane 不再运行，#64 删除 FORK 常量与 fork lane 代码）。
 T12更新root/worker组、静态导入清单、支持插件/fixture隔离和两版本计数基准；删除旧Bili视频import，新增根article＋五站选站装配验收。
 迁移后的计数由职责台账与实际collect核对，不机械固定417；缺测、空收集、skip/xfail/xpass、导入失败不能冒充通过。
 沿用[testing.md](testing.md)现有pytest/marker/lane/托管OS机制；届时同批更新其原fork引用，不把本轮限制变成项目永久规则。
@@ -831,7 +831,7 @@ T00 已交付（2026-09-29，基线见 `docs/adapter-ledger/baseline.json`）：
 - 结论：X7 两处 PLATFORMS 对共有平台代号一致（dy/zhihu/wb/bili，W 不含 xhs），可按 T01 合并；X11 `repair_runtime_stop_reason`
   保留并随 T10 迁入 `application/repair.py`，其 2 个测试不改；三站 `IPBlockError`/`ForbiddenError` 与 `recv_sms.py` 在闭包内无引用，确认退出。
 - 后续卡开工前运行 `symbols --check` 与 `inputs --check`；源码改动后先更新规则或迁移结果再提交，不手改 JSON。
-- T14 已执行：fork gitlink 删除后台账冻结，`symbols`、`inputs`、`baseline` 不带 `--check` 的生成以及 `tests` 收集均拒绝运行；
+- T14 已执行：fork gitlink 删除后台账冻结，#64 删除生成代码与 `tests`、`make-source` 子命令，`symbols`、`inputs`、`baseline`、`all` 只接受 `--check`；
   `symbols/inputs/baseline --check` 只做不访问 Git 对象库的冻结自检（登记散列、C8 附录由 JSON 逐字节重现、规则与冻结行一致）。
 
 T01/T12确定的资源与安装策略（T）：JS和LICENSE迁入上述resources目录成为单一源码真源，旧地址过渡只委托resource reader，不留手工双份。

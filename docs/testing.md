@@ -8,7 +8,7 @@
 
 使用仅含源码的临时副本，包含 src、scripts、tests、config、db、docs、pyproject.toml、
 uv.lock、build_support.py、MANIFEST.in、`.github/workflows/macos-test-lanes.yml`（工作流配置本身受测）。
-T14 起仓库不再含 fork 子模块。不能复制原 data、outputs、temp、
+T14 起仓库不再含 fork 子模块，白名单也不再含 `tools/`。不能复制原 data、outputs、temp、
 浏览器状态、.env、凭证、.git、旧虚拟环境或历史审计附件。data/outputs 起初必须为空。
 当前未提交的新测试和支持文件也必须复制；不能只 git archive HEAD 而漏掉本轮修改。
 每个副本按自己的冻结登记核验哈希并恢复不可变标志（macOS `uchg`、Linux `chattr +i`，实现见
@@ -96,11 +96,12 @@ checkout 不保留认证信息。依赖准备阶段联网；根环境使用 `uv 
 没有私人源码、账号数据库或浏览器 profile。完整安装 lane 检查根 CLI `--help`，并构建 wheel/sdist 做仓库外安装验收。
 根环境选站装配检查（matrix 的 `assembly`）在独立副本中导入 B站正式 article 模块
 （`run_matrix.ROOT_ASSEMBLY_MODULES`）并对四站调用 `trippostcollect.platforms.entry.load_crawler`，
-不调用抓取入口，也不得装载原 fork 路径下的任何包；上游 B站视频主循环不再导入。
+不调用抓取入口；装配后源码副本中只允许 `src/` 下的模块被装载，scripts 等其他路径的模块一经装载即失败
+（防止旧桥式 `sys.path` 插入回归）；上游 B站视频主循环不再导入。
 原 fork 离线用例已全部移植到根 tests：T14-B2 把最后 4 文件、34 个用例按台账 target_file 原名原断言移植到
 `tests/artifacts/test_staging.py` 与 `tests/application/test_discovery.py`（component lane，映射见
-`tests/fixtures/t14_fork_test_mapping.json`）；T14-C 删除 fork 子模块后没有 gitlink，fork 离线 lane 不再运行，CI 也不再
-准备 fork 环境。
+`tests/fixtures/t14_fork_test_mapping.json`）；T14-C 删除 fork 子模块，#64 随后删除 fork 离线 lane 代码与
+`run_matrix.py --fork-python` 参数，CI 只运行根 lane。
 原浏览器与 CDP 生命周期的 41 个用例已迁入根 `tests/runtime/`，归入 component lane；
 知乎的 3 文件、27 个用例已迁入根 `tests/platforms/zhihu/`，同样归入 component lane。
 进程、信号和 socket 调用均使用替身，不启动真实浏览器或进程。
@@ -239,9 +240,10 @@ macos_process；其中真实自发信号也移到 driver。它们计入完整 OS
 pytest 只校验已提交的迁移台账产物、由符号 JSON 渲染的 C8 附录，以及当前工作树的输入漂移
 和迁移进度；纯源码副本不需要 `.git`，也不调用 Git 重建基线。
 
-T14 删除 fork 子模块后台账冻结：`symbols`、`inputs`、`baseline` 不带 `--check` 的生成
-以及 `tests` 收集均拒绝运行，不再从基线提交重建；`--check` 只做不访问 Git 对象库的冻结自检（登记散列、C8 附录由 JSON 逐字节重现、
-规则与冻结行一致），不需要子模块对象库。在仓库 checkout 中执行：
+T14 删除 fork 子模块后台账冻结：生成代码、`tests` 收集与 `make-source` 子命令已在 #64 删除；
+`symbols`、`inputs`、`baseline`、`all` 只接受 `--check`，不带时直接报“迁移台账已冻结”并返回 1。
+`--check` 只做不调用 Git 的冻结自检（登记散列、C8 附录由 JSON 逐字节重现、规则与冻结行一致）。
+在仓库 checkout 中执行：
 
 ```bash
 source .venv/bin/activate
@@ -265,6 +267,8 @@ fork、私有桥与过渡模块删除后，依赖它们的对照用例按以下�
   每条 `cdp_manager` 记录先钉住 `USER_DATA_DIR == "%s_user_data_dir"`，再删除该键后与根实现比较。
 - `tests/test_adapter_t12.py` 的 `T14C_DELETED_LEDGER_NODES` 登记 6 个随删除批消失的台账节点（只测旧导出
   hook 或 fork 评论脱敏的用例）；台账节点对账总数相应扣除。
+- `tests/test_adapter_t12.py` 的 `T64_DELETED_LEDGER_NODES` 登记 #64 清理批删除的 4 个台账节点（fork lane
+  的路径/命令拼装、台账生成的未映射报告、`check_file`、`tests` 收集子命令；对应代码已删除），对账总数同样扣除。
 - 台账收口规则新增 fork `tools/trippostcollect_adaptive.py:env_int` → `env_int_reader`：T03 迁入的单次读取包装
   `worker_inputs.env_int` 只供 fork 旧委托，随删除批删除，根实现统一经零参 `env_int_reader` 读取。
 - `TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL` 已登记到 `adapter_ledger.AUTHORIZED_ENV_REMOVALS`，`drift` 不把它计为

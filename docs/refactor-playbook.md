@@ -45,7 +45,7 @@
 
 每张卡的复核以闸门脚本（`scripts/dev/card_gate.py`）的输出为准。一条命令跑完，只输出摘要。
 在工作树激活独立环境后运行下例；省略 `--card` 时自动选择原定义发生变化的台账行。
-基线缓存位于 `<git common dir>/card-gate/baseline-<根提交>-<fork提交或nofork>.json`（T14 删除 fork 后为 `nofork`），
+基线缓存位于 `<git common dir>/card-gate/baseline-<根提交>.json`，
 闸门代码变化会重算，也可用 `--refresh-baseline` 强制刷新。
 退出码为 0（通过）、1（未通过或跳过测试的部分验收）、2（预检、canary 等自身错误）。
 详细 JSON 与摘要写入本次临时目录，`--keep` 可保留源码副本。
@@ -59,7 +59,7 @@ python scripts/dev/card_gate.py \
 
 过渡期逐项运行的做法已由闸门脚本替代，复核项目与结论口径如下。
 
-- **测试**：在临时源码副本（`adapter_ledger.py make-source`）中，于沙箱内运行 component、installation、os 三组；fork 离线测试只在基线与本次都有 fork gitlink 且离线清单非空时运行，T14 删除 fork 后不再运行。
+- **测试**：在临时源码副本（与 CI 相同的 `run_matrix.fresh_source` 白名单）中，于沙箱内运行 component、installation、os 三组；基线从 `--base` 提交导出，两侧使用同一组 lane。
   - 与基线比较的是**失败集合**，不是通过数量：macOS 本机沙箱会限制 `ps`，os 组固定有少量失败，只要失败集合不变即可；Linux 沙箱不限制 `ps`。
   - 最终的 OS 结论以 CI 托管 VM 为准。
 - **台账四项检查**。

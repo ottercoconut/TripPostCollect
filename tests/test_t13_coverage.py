@@ -43,7 +43,6 @@ def _load(name: str, path: Path):
 
 
 report = _load("t13_coverage_report", ROOT / "scripts" / "ci" / "coverage_report.py")
-run_matrix = _load("t13_run_matrix", ROOT / "scripts" / "ci" / "run_matrix.py")
 SPEC = report.load_spec(ROOT / report.SPEC_PATH)
 
 
@@ -72,11 +71,6 @@ def collected(tmp_path_factory) -> dict[str, dict[str, dict]]:
     return result
 
 
-def _root_entries():
-    return [(responsibility, owner, entry) for responsibility, owner, entry in report.iter_entries(SPEC)
-            if entry["lane"] != "fork"]
-
-
 def test_matrix_declares_every_responsibility_for_five_sites() -> None:
     assert report.spec_problems(SPEC) == []
     for responsibility in ("F11", "F12", "F13", "F14", "F15"):
@@ -98,7 +92,7 @@ def test_legacy_equivalence_flag_marks_exactly_frozen_comparison_tests() -> None
 
 def test_declared_nodes_run_in_declared_lane_without_skip(collected) -> None:
     problems = []
-    for responsibility, owner, entry in _root_entries():
+    for responsibility, owner, entry in report.iter_entries(SPEC):
         matched = report.match_entry(entry, collected[entry["lane"]])
         problems += [f"{responsibility}/{owner}: {item}" for item in report.entry_problems(entry, matched)]
         for nodeid in matched:
@@ -133,7 +127,7 @@ def _site_evidence(site: str, nodeid: str) -> bool:
 def test_site_cells_reference_their_site(collected) -> None:
     """covered 格的每个条目必须有本站证据，防止拿他站或无关用例充数；例外须写 site_basis。"""
     problems = []
-    for responsibility, owner, entry in _root_entries():
+    for responsibility, owner, entry in report.iter_entries(SPEC):
         cell = SPEC["responsibilities"].get(responsibility, {}).get("cells", {}).get(owner)
         if cell is None or cell["status"] != "covered" or entry.get("site_basis"):
             continue
@@ -161,7 +155,6 @@ def test_issue_2_lease_exit_nodes_are_complete(collected) -> None:
     assert all(not report.match_entry(entry, collected[lane]) for lane in ("socket", "installation", "os"))
 
 
-def test_fork_lane_is_gone_after_fork_removal() -> None:
-    # T14-C 删除 fork 后不再有 fork lane：声明中不得残留 fork 条目，离线清单为空。
-    assert run_matrix.FORK_OFFLINE_TESTS == ()
-    assert [entry for _, _, entry in report.iter_entries(SPEC) if entry["lane"] == "fork"] == []
+def test_declared_lanes_are_root_lanes() -> None:
+    # CI 只运行 ROOT_LANES；声明不得引用其他 lane（如已删除的 fork lane）。
+    assert {entry["lane"] for _, _, entry in report.iter_entries(SPEC)} <= set(report.ROOT_LANES)

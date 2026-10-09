@@ -502,16 +502,7 @@ def test_generated_resources_are_not_hand_copied_into_source_tree() -> None:
     assert (ROOT / "docs" / "formal-crawl-contract.md").is_file()
 
 
-# ---------- 6. CI 分组、FORK 清单与测试台账 ----------
-
-def _load_run_matrix():
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("t12_run_matrix", ROOT / "scripts" / "ci" / "run_matrix.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
+# ---------- 6. CI 分组与测试台账 ----------
 
 def test_ci_fork_check_drops_upstream_bilibili_video_and_checks_root_five_site_assembly() -> None:
     source = (ROOT / "scripts" / "ci" / "run_matrix.py").read_text(encoding="utf-8")
@@ -536,12 +527,6 @@ def _ledger_nodes():
     return json.loads((ROOT / "docs" / "adapter-ledger" / "tests.json").read_text(encoding="utf-8"))
 
 
-def test_fork_offline_list_is_empty_after_fork_removal() -> None:
-    # T14-B2 已把 fork 离线用例全部移植到根（tests/fixtures/t14_fork_test_mapping.json），T14-C 删除 fork。
-    matrix = _load_run_matrix()
-    assert matrix.FORK_OFFLINE_TESTS == () and matrix.FORK_EXPECTED_TESTS == 0
-
-
 ERRNO_PARAMS = {"51": "ENETUNREACH", "60": "ETIMEDOUT", "61": "ECONNREFUSED",
                 "101": "ENETUNREACH", "110": "ETIMEDOUT", "111": "ECONNREFUSED"}
 # 台账收集于 macOS：errno 参数值随平台变化，按符号名归一。
@@ -562,6 +547,14 @@ T14C_DELETED_LEDGER_NODES = {
     "tests/test_xhs_batch_checkpoint.py::test_exporter_hook_publishes_only_after_durable_event",
     "tests/test_douyin_no_user_info.py::test_douyin_comment_masks_user_info",
     "tests/test_weibo_no_user_info.py::test_weibo_comment_masks_user_info",
+}
+# #64 清理批随 fork 过渡代码与台账生成路径删除的 4 个台账节点：fork lane 的 PYTHONPATH/命令拼装、
+# 符号账生成的未映射报告、产物比对 check_file、tests 收集子命令（生成与收集已删除，台账只做冻结自检）。
+T64_DELETED_LEDGER_NODES = {
+    "tests/test_run_lanes.py::test_fork_worker_paths_and_pytest_boundary",
+    "tests/test_adapter_ledger.py::test_unmapped_definition_is_reported",
+    "tests/test_adapter_ledger.py::test_check_mode_detects_stale_artifact",
+    "tests/test_adapter_ledger.py::test_tests_collector_refuses_production_checkout",
 }
 # 决策 13：按台账 target_file 迁移，名称与断言不变；迁移后只能出现在目标文件。
 MOVED_TO_TARGET = {
@@ -587,8 +580,6 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
     )
     assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
     collected = {_normalize(line.strip()) for line in result.stdout.splitlines() if "::" in line}
-    matrix = _load_run_matrix()
-    offline = set(matrix.FORK_OFFLINE_TESTS)
     data = _ledger_nodes()
     missing = []
     for side in ("root", "fork"):
@@ -597,11 +588,10 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
             places = {_normalize(f"{node['target_file']}::{name}")}
             if side == "root":
                 places.add(_normalize(node["node_id"]))
-            in_root = bool(places & collected)
-            in_fork = side == "fork" and node["source_file"].removeprefix("tools/MediaCrawler/") in offline
-            if in_root == in_fork:
+            # fork 离线 lane 已随 fork 删除：两侧台账节点都只能在根收集中找到。
+            if not places & collected:
                 missing.append(node["node_id"])
-    assert set(missing) == DELETED_LEDGER_NODES | T14C_DELETED_LEDGER_NODES
+    assert set(missing) == DELETED_LEDGER_NODES | T14C_DELETED_LEDGER_NODES | T64_DELETED_LEDGER_NODES
     for source, target in MOVED_TO_TARGET.items():
         assert source not in collected and target in collected, (source, target)
-    assert len(data["root"]["nodes"]) + len(data["fork"]["nodes"]) - len(missing) == 1418 - len(T14C_DELETED_LEDGER_NODES)
+    assert len(data["root"]["nodes"]) + len(data["fork"]["nodes"]) - len(missing) == 1418 - len(T14C_DELETED_LEDGER_NODES) - len(T64_DELETED_LEDGER_NODES)
