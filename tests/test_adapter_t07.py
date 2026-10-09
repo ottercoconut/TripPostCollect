@@ -8,7 +8,6 @@ from dataclasses import fields, replace
 from hashlib import sha256
 import importlib
 import importlib.util
-from io import BytesIO
 import json
 from pathlib import Path
 import subprocess
@@ -18,10 +17,10 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import execjs
 import httpx
-from PIL import Image
 import pytest
 
 from support import legacy_expectations as expectations
+from support.stable_png import solid_png
 from support.raw_author_identity import use_raw_author_identity
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
@@ -215,9 +214,8 @@ async def drive(baseline, output, patch, scenario, *, migrated, crawler_factory=
 
     patch.setattr(execjs, "compile", compile_fixed)
     patch.setattr(signer if migrated else baseline.signer, "ZHIHU_SGIN_JS", None)
-    data = BytesIO()
-    Image.new("RGB", (5, 4), color=(10, 20, 30)).save(data, format="PNG")
-    image_bytes = data.getvalue()
+    # 与主机无关的纯色 PNG（见 support/stable_png.py；Pillow 压缩字节随 CPU 不同）。
+    image_bytes = solid_png(5, 4, (10, 20, 30))
 
     def entity(identity, kind="answer", *, full=False):
         return {

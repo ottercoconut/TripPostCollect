@@ -97,14 +97,15 @@ async def test_fork_factory_matches_new_entry(tmp_path, monkeypatch, scenario, f
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback", [0, 1])
 @pytest.mark.parametrize("scenario", SCENARIOS)
-async def test_t14_guard_fork_factory_drive(tmp_path, monkeypatch, scenario, fallback):
+async def test_t14_guard_fork_factory_drive(tmp_path, monkeypatch, pytestconfig, scenario, fallback):
     """旧桥 fork 工厂当场结果与登记 #59 偏离后的固化预期相等；根侧比较见 test_adapter_t06.py。"""
     with monkeypatch.context() as patch:
         old = await drive_assembly(tmp_path / "old", patch, scenario, fallback, old_bridge=True)
     # fork 工厂构造的是根 crawler 子类：#59 后 profile 已在新位置，按与根侧同一偏离登记比较；
-    # 固化文件只由冻结 fixture 路径再生成，本守卫不写出。
+    # 固化文件只由冻结 fixture 路径再生成，本守卫不写出；再生成时与本会话刚写出的文件比较。
     assert expectations.scrub(old, (tmp_path, "<TMP>")) == deviation.douyin_profile(
-        expectations.load(*T14_BRIDGE, f"{scenario}-fallback{fallback}"), current_douyin_profile(tmp_path))
+        expectations.load_current(pytestconfig, *T14_BRIDGE, f"{scenario}-fallback{fallback}"),
+        current_douyin_profile(tmp_path))
 
 
 def test_fork_exports_root_implementations_and_injection_only():

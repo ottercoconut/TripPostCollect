@@ -15,7 +15,6 @@ import dataclasses
 from hashlib import sha256
 import importlib
 import importlib.util
-from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -29,7 +28,6 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 import humps
-from PIL import Image
 from playwright._impl._errors import TargetClosedError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 import pytest
@@ -38,6 +36,7 @@ import tenacity._asyncio
 from support.creator_runtime_profile import use_legacy_creator_page_read
 from support.main_page_lifecycle import use_legacy_main_page_closed_name
 from support import legacy_expectations as expectations
+from support.stable_png import solid_png
 from support.raw_author_identity import XHS_KEEP_AUTHOR_DETAIL_ENV, use_raw_author_identity
 from trippostcollect.application import events
 from trippostcollect.runtime import behavior as runtime_behavior
@@ -386,9 +385,8 @@ _PNG_CACHE: dict[str, bytes] = {}
 def png_bytes(url: str) -> bytes:
     if url not in _PNG_CACHE:
         digest = sha256(url.encode()).digest()
-        buffer = BytesIO()
-        Image.new("RGB", (4, 3), color=(digest[0], digest[1], digest[2])).save(buffer, format="PNG")
-        _PNG_CACHE[url] = buffer.getvalue()
+        # 与主机无关的纯色 PNG（见 support/stable_png.py；Pillow 压缩字节随 CPU 不同）。
+        _PNG_CACHE[url] = solid_png(4, 3, (digest[0], digest[1], digest[2]))
     return _PNG_CACHE[url]
 
 

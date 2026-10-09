@@ -124,3 +124,18 @@ def test_files_are_canonical_and_free_of_host_paths_and_avatar_urls():
             assert marker not in text, (name, marker)
         assert not re.search(r"https?://[^\"\s]*avatar", text, re.IGNORECASE), name
         assert avatar_url_hits(expectations.decode(json.loads(text))) == [], name
+
+
+def test_test_input_png_is_host_independent():
+    """固化预期中的图片来自 support/stable_png（不经压缩器）；钉住字节摘要，任何主机都必须一致。"""
+    from io import BytesIO
+
+    from PIL import Image
+
+    from support.stable_png import solid_png
+
+    data = solid_png(4, 3, (0, 0, 255))
+    assert sha256(data).hexdigest() == "f24617654f3945f7225534ae4b68914c486fb1c69d05bf7b3c87afa53fb485ae"
+    image = Image.open(BytesIO(data))
+    image.load()
+    assert (image.size, image.mode, image.getpixel((3, 2))) == ((4, 3), "RGB", (0, 0, 255))

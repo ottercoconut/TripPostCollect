@@ -20,10 +20,10 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
-from PIL import Image
 import pytest
 
 from support import legacy_expectations as expectations
+from support.stable_png import solid_png
 from support import platform_session_deviation as deviation
 from support.raw_author_identity import use_raw_author_identity
 from trippostcollect.application import events
@@ -153,8 +153,8 @@ async def drive(modules, root, patch, scenario, fallback):
                 "TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET", "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR"):
         patch.delenv(key, raising=False)
     (root / "state.json").write_text('{"events":[]}')
-    image_output = io.BytesIO()
-    Image.new("RGB", (8, 6), "orange").save(image_output, format="PNG")
+    # 与主机无关的纯色 PNG（见 support/stable_png.py；Pillow 压缩字节随 CPU 不同）。
+    image_output = io.BytesIO(solid_png(8, 6, (255, 165, 0)))
 
     def search_payload(offset):
         if scenario == "search_blocked":

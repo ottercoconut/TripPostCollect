@@ -20,6 +20,7 @@ from PIL import Image
 import pytest
 
 from support import legacy_expectations as expectations
+from support.stable_png import solid_png
 from support import platform_session_deviation as deviation
 from trippostcollect.application.contracts import ContentSink, ImageStager, JsonlWriter
 from trippostcollect.artifacts.jsonl import JsonlContentStore
@@ -71,6 +72,9 @@ def _tree(directory):
 
 
 def _raster(kind, color="blue"):
+    if kind == "PNG":
+        # 与主机无关的纯色 PNG（见 support/stable_png.py；Pillow 压缩字节随 CPU 不同）。
+        return solid_png(8, 6, {"blue": (0, 0, 255), "red": (255, 0, 0)}[color])
     output = BytesIO()
     Image.new("RGB", (8, 6), color=color).save(output, format=kind)
     return output.getvalue()

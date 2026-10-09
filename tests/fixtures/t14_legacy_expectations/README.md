@@ -49,6 +49,9 @@ pytest -p pytest_asyncio.plugin \
 - 新增的只有四项，两侧同样处理：dict 按键排序书写（`==` 本与顺序无关，避免目录遍历顺序随 OS 不同）；
   检出根与临时目录换成占位符；超过 16 KiB 的 bytes（stealth 脚本原文）只存 sha256 与长度；
   键名含 `avatar` 的值只存摘要，文件不含头像 URL。
+- 测试输入中的 PNG 一律由 `tests/support/stable_png.py` 手工拼出（deflate 存储块，不经压缩器）。Pillow 内置
+  zlib-ng 按 CPU 特性选择实现，同一图像在 macOS arm64 与 Linux x86_64 上压缩字节可能不同，曾使 T05/T07/T09
+  在 macOS 上与 Linux 生成的预期不一致；改用稳定输入后从旧侧重新生成。JPEG 输入（shared_staging）仍由 Pillow 生成。
 - `shared_staging`：根内容出口已无评论/创作者写出（T12 退出切片），根侧比较排除基线中的
   `_comments_`/`_creators_` 文件；根配置在构造时冻结，换目录即构造新 sink。
 

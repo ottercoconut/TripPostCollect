@@ -8,7 +8,6 @@ from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
-import io
 import json
 from pathlib import Path
 import sqlite3
@@ -16,12 +15,12 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import httpx
-from PIL import Image
 import pytest
 from playwright.async_api import Error as PlaywrightError
 from tenacity import RetryError
 
 from support import legacy_expectations as expectations
+from support.stable_png import solid_png
 from support.weibo_adapter import ROOT, load_baseline, settings
 from trippostcollect.application import events
 from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
@@ -72,9 +71,8 @@ async def drive(legacy, directory, monkeypatch, scenario, post_repair):
     monkeypatch.setenv("TRIPPOSTCOLLECT_WEIBO_BROWSER_DETAIL_TIMEOUT_MS", "7000")
     monkeypatch.setattr(events, "_utc_iso", lambda: "2026-09-30T00:00:00+00:00")
     monkeypatch.setattr(image_retry, "IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS", (0, 0))
-    output = io.BytesIO()
-    Image.new("RGB", (4, 3), "blue").save(output, format="PNG")
-    image_bytes = output.getvalue()
+    # 与主机无关的纯色 PNG（见 support/stable_png.py；Pillow 压缩字节随 CPU 不同）。
+    image_bytes = solid_png(4, 3, (0, 0, 255))
 
     async def sleep(_):
         return None

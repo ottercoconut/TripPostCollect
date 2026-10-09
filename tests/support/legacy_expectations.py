@@ -218,6 +218,14 @@ def load(card: str, group: str, case: str) -> Any:
     return decode(json.loads(data))
 
 
+def load_current(config, card: str, group: str, case: str) -> Any:
+    """守卫读取比较基准：再生成模式下取本会话刚由冻结 fixture 路径写出的文件，否则取固化文件。"""
+    target = config.getoption(WRITE_OPTION)
+    if not target:
+        return load(card, group, case)
+    return decode(json.loads((Path(target) / relative(card, group, case)).read_text(encoding="utf-8")))
+
+
 def check_legacy(config, card: str, group: str, case: str, value: Any, *, source_test: str) -> None:
     """守卫：旧侧当场结果编码后必须与固化文件逐字节一致；再生成模式下改为写出。"""
     text = dumps(value)
