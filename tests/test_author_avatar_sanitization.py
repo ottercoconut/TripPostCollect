@@ -157,8 +157,9 @@ def test_mediacrawler_run_command_redacts_logs_and_summary_tail(
     class FakeProcess:
         returncode = 0
 
-        def communicate(self, timeout: int) -> tuple[bytes, bytes]:
-            assert timeout == 10
+        def communicate(self, timeout: float) -> tuple[bytes, bytes]:
+            # 看门狗按轮询间隔有界等待，不超过无进展阈值。
+            assert 0 < timeout <= 10
             return (
                 f'{{"avatar_url":"{AVATAR_URL}"}}\n'.encode(),
                 f"duplicate={AVATAR_URL}\n".encode(),
@@ -176,6 +177,7 @@ def test_mediacrawler_run_command_redacts_logs_and_summary_tail(
         tmp_path,
         10,
         tmp_path / "logs",
+        progress_paths=[],
     )
 
     assert (tmp_path / "logs/stdout.log").read_text(encoding="utf-8") == (

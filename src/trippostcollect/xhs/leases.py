@@ -271,26 +271,31 @@ def spawn_gated_subprocess(
 
 @dataclass(frozen=True)
 class LeaseBudget:
-    runtime_seconds: int
+    """租约 TTL 与收尾预算；租约不含任务时长，由父层心跳按 TTL 续期。"""
+
+    lease_seconds: int
     child_shutdown_seconds: int = DEFAULT_CHILD_SHUTDOWN_BUDGET_SECONDS
     root_finalize_seconds: int = DEFAULT_ROOT_FINALIZE_BUDGET_SECONDS
 
     def __post_init__(self) -> None:
-        if self.runtime_seconds <= 0:
-            raise ValueError("runtime_seconds must be positive")
+        if self.lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
         if self.child_shutdown_seconds < 0 or self.root_finalize_seconds < 0:
             raise ValueError("lease cleanup budgets cannot be negative")
 
     @property
-    def lease_seconds(self) -> int:
-        return self.runtime_seconds + self.child_shutdown_seconds + self.root_finalize_seconds
+    def renew_after_seconds(self) -> float:
+        """距上次续期达到 TTL 一半后，下一次新鲜心跳触发续期。"""
 
-    def public(self) -> dict[str, int]:
+        return self.lease_seconds / 2
+
+    def public(self) -> dict[str, Any]:
         return {
-            "runtime_seconds": self.runtime_seconds,
+            "lease_seconds": self.lease_seconds,
+            "renew_after_seconds": self.renew_after_seconds,
+            "renewal": "parent_runtime_heartbeat",
             "child_shutdown_seconds": self.child_shutdown_seconds,
             "root_finalize_seconds": self.root_finalize_seconds,
-            "lease_seconds": self.lease_seconds,
         }
 
 
@@ -337,11 +342,42 @@ def drain_exited_child_output(
         return _text_output(proc, exc.stdout), _text_output(proc, exc.stderr)
 
 
-def crawl_lease_budget(*, timeout_seconds: int, configured_lease_seconds: int) -> LeaseBudget:
-    budget = LeaseBudget(runtime_seconds=int(timeout_seconds))
-    if int(configured_lease_seconds) < budget.lease_seconds:
+def minimum_heartbeat_lease_seconds(
+    watchdog: RuntimeStatusWatchdogPolicy,
+    *,
+    child_shutdown_seconds: int = DEFAULT_CHILD_SHUTDOWN_BUDGET_SECONDS,
+    root_finalize_seconds: int = DEFAULT_ROOT_FINALIZE_BUDGET_SECONDS,
+) -> int:
+    """续期间隔为 TTL 一半；该一半必须覆盖心跳最长静默、child 关闭与根收尾。"""
+
+    silent_seconds = (
+        max(
+            watchdog.startup_grace_seconds,
+            watchdog.stale_after_seconds + watchdog.resume_grace_seconds,
+        )
+        + watchdog.poll_seconds
+    )
+    return math.ceil(
+        2 * (silent_seconds + child_shutdown_seconds + root_finalize_seconds)
+    )
+
+
+def heartbeat_lease_budget(
+    *,
+    configured_lease_seconds: int,
+    watchdog: RuntimeStatusWatchdogPolicy,
+) -> LeaseBudget:
+    budget = LeaseBudget(lease_seconds=int(configured_lease_seconds))
+    minimum = minimum_heartbeat_lease_seconds(
+        watchdog,
+        child_shutdown_seconds=budget.child_shutdown_seconds,
+        root_finalize_seconds=budget.root_finalize_seconds,
+    )
+    if budget.lease_seconds < minimum:
         raise ValueError(
-            "configured XHS lease ceiling does not cover runtime, child shutdown, and root finalization"
+            f"configured XHS lease_seconds {budget.lease_seconds} is below {minimum}: "
+            "half the TTL must cover the parent heartbeat silence window, child shutdown, "
+            "and root finalization"
         )
     return budget
 
@@ -1008,6 +1044,38 @@ def acquire_exact_account_lease(
     except Exception:
         conn.rollback()
         raise
+
+
+def renew_exact_account_lease(
+    conn: sqlite3.Connection,
+    *,
+    lease_id: str,
+    owner_token: str,
+    lease_seconds: int,
+    now: datetime | None = None,
+) -> str:
+    """只按精确 lease_id 与 owner token 续期；续期不记事件、不改变释放语义。"""
+
+    current = now or datetime.now(timezone.utc)
+    expires_at = iso(current + timedelta(seconds=int(lease_seconds)))
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        updated = conn.execute(
+            """
+            UPDATE xhs_account_leases SET heartbeat_at=?, expires_at=?
+            WHERE lease_id=? AND owner_token=?
+            """,
+            (iso(current), expires_at, lease_id, owner_token),
+        )
+        if updated.rowcount != 1:
+            raise XhsLeaseOwnershipError(
+                "exact XHS lease renewal rejected: owner token or lease identity mismatch"
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return expires_at
 
 
 def release_exact_account_lease(
@@ -1803,6 +1871,8 @@ class LeaseGuard:
         self.lease_id = ""
         self.owner_token = ""
         self.owner: ProcessIdentity | None = None
+        self.lease_expires_at = ""
+        self._lease_renewed_at: float | None = None
         self.outcome = "failed"
         self.signal_received: int | None = None
         self._previous_handlers: dict[int, Any] = {}
@@ -1867,6 +1937,8 @@ class LeaseGuard:
             self.account = result
             self.lease_id = str(result["lease_id"])
             self.owner_token = str(result["owner_token"])
+            self.lease_expires_at = str(result["lease_expires_at"])
+            self._lease_renewed_at = time.monotonic()
             self._install_signal_handlers()
             return result
         except BaseException:
@@ -2113,6 +2185,35 @@ class LeaseGuard:
                 identity=identity,
             )
 
+    def renew_lease(self) -> None:
+        """把精确租约的 heartbeat_at/expires_at 推进到现在起一个 TTL。"""
+
+        if self.account is None:
+            raise RuntimeError("XHS LeaseGuard is not acquired")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            self.lease_expires_at = renew_exact_account_lease(
+                conn,
+                lease_id=self.lease_id,
+                owner_token=self.owner_token,
+                lease_seconds=self.budget.lease_seconds,
+            )
+        self._lease_renewed_at = time.monotonic()
+
+    def _renew_lease_on_heartbeat(self, *, force: bool = False) -> None:
+        # 只有已获取的租约才续期；SQLite 忙时留到下一次心跳，属主不符仍按失败收束。
+        if self.account is None or self._lease_renewed_at is None:
+            return
+        if (
+            not force
+            and time.monotonic() - self._lease_renewed_at < self.budget.renew_after_seconds
+        ):
+            return
+        try:
+            self.renew_lease()
+        except sqlite3.OperationalError:
+            return
+
     def observe_profile_processes(self) -> list[ProcessIdentity]:
         if not self.account:
             raise RuntimeError("XHS LeaseGuard is not acquired")
@@ -2128,19 +2229,16 @@ class LeaseGuard:
         *,
         cwd: Path,
         env: Mapping[str, str],
-        timeout_seconds: int,
-        runtime_watchdog: RuntimeStatusWatchdogPolicy | None = None,
+        runtime_watchdog: RuntimeStatusWatchdogPolicy,
         progress_callback: Callable[[], None] | None = None,
     ) -> LeaseSubprocessResult:
         if self.signal_received is not None:
             raise XhsLeaseSignal(self.signal_received)
         child_env = self.child_environment(env)
-        runtime_auth_key: bytes | None = None
-        if runtime_watchdog is not None:
-            runtime_auth_key = secrets.token_bytes(32)
-            if type(runtime_auth_key) is not bytes or len(runtime_auth_key) != 32:
-                raise RuntimeError("runtime watchdog key generation failed")
-            child_env[RUNTIME_STATUS_AUTH_KEY_ENV] = runtime_auth_key.hex()
+        runtime_auth_key = secrets.token_bytes(32)
+        if type(runtime_auth_key) is not bytes or len(runtime_auth_key) != 32:
+            raise RuntimeError("runtime watchdog key generation failed")
+        child_env[RUNTIME_STATUS_AUTH_KEY_ENV] = runtime_auth_key.hex()
         gated: GatedSubprocess | None = None
         identity: ProcessIdentity | None = None
         deferred_signals = DeferredTerminationSignals()
@@ -2188,14 +2286,10 @@ class LeaseGuard:
         assert gated is not None
         assert identity is not None
         proc = gated.process
-        watchdog_state = (
-            _ParentRuntimeWatchdogState(
-                policy=runtime_watchdog,
-                started_at=watchdog_started_at,
-                last_poll_at=watchdog_started_at,
-            )
-            if runtime_watchdog is not None
-            else None
+        watchdog_state = _ParentRuntimeWatchdogState(
+            policy=runtime_watchdog,
+            started_at=watchdog_started_at,
+            last_poll_at=watchdog_started_at,
         )
         timed_out = False
         termination_reason: str | None = None
@@ -2206,150 +2300,131 @@ class LeaseGuard:
             deferred_signals.restore()
             if deferred_signals.signal_received is not None:
                 deferred_signals.replay()
-            if runtime_watchdog is None:
-                try:
-                    stdout, stderr = proc.communicate(timeout=int(timeout_seconds))
+            status_path = runtime_status_path(self.run_id)
+            while True:
+                if self.signal_received is not None:
+                    if self._interrupt_forwarded_at is not None:
+                        stdout, stderr = self._await_interrupted_subprocess(
+                            proc,
+                            identity,
+                        )
+                    else:
+                        stdout, stderr = self._terminate_registered_subprocess(
+                            proc,
+                            identity,
+                        )
+                    raise XhsLeaseSignal(self.signal_received)
+                if proc.poll() is not None:
+                    stdout, stderr = drain_exited_child_output(proc)
                     returncode = int(proc.returncode or 0)
-                    if self.signal_received is not None:
-                        raise XhsLeaseSignal(self.signal_received)
-                except subprocess.TimeoutExpired as exc:
-                    timed_out = True
-                    termination_reason = "absolute_timeout"
-                    stdout = str(exc.stdout or "")
-                    stderr = str(exc.stderr or "")
-                    self._signal_registered_group(identity, signal.SIGTERM)
-                    try:
-                        extra_stdout, extra_stderr = proc.communicate(
-                            timeout=max(1, self.budget.child_shutdown_seconds // 2)
-                        )
-                    except subprocess.TimeoutExpired:
-                        self._signal_registered_group(identity, signal.SIGKILL)
-                        extra_stdout, extra_stderr = proc.communicate(
-                            timeout=max(1, self.budget.child_shutdown_seconds // 2)
-                        )
-                    stdout += str(extra_stdout or "")
-                    stderr += str(extra_stderr or "")
-                    returncode = 124
-                    self.terminate_owned_processes()
-            else:
-                assert runtime_auth_key is not None
-                assert watchdog_state is not None
-                status_path = runtime_status_path(self.run_id)
-                while True:
-                    if self.signal_received is not None:
-                        if self._interrupt_forwarded_at is not None:
-                            stdout, stderr = self._await_interrupted_subprocess(
-                                proc,
-                                identity,
-                            )
-                        else:
-                            stdout, stderr = self._terminate_registered_subprocess(
-                                proc,
-                                identity,
-                            )
-                        raise XhsLeaseSignal(self.signal_received)
-                    if proc.poll() is not None:
-                        stdout, stderr = drain_exited_child_output(proc)
-                        returncode = int(proc.returncode or 0)
-                        break
-                    if progress_callback is not None:
-                        progress_callback()
-                    observed_identity = self.inspector.identity(proc.pid)
-                    if observed_identity is None:
-                        # A platform probe may briefly lose sight of a live
-                        # child, and a just-exited child may already be a
-                        # zombie before ``Popen.poll`` reaps it.  The Popen
-                        # handle still names our exact child, so first give it
-                        # one bounded interval to exit.  If it remains live,
-                        # its authenticated status must still pass below.
-                        try:
-                            stdout, stderr = proc.communicate(
-                                timeout=runtime_watchdog.poll_seconds
-                            )
-                        except subprocess.TimeoutExpired:
-                            pass
-                        else:
-                            returncode = int(proc.returncode or 0)
-                            break
-                    elif observed_identity != identity:
-                        # The exact process probe can observe the child as a
-                        # zombie just before ``Popen.poll`` reaps it.  Give
-                        # that exit race one bounded watchdog interval before
-                        # deciding that the PID belongs to a different live
-                        # process.  This does not grant liveness: a still-live
-                        # child must prove the original exact identity again.
-                        try:
-                            stdout, stderr = proc.communicate(
-                                timeout=runtime_watchdog.poll_seconds
-                            )
-                        except subprocess.TimeoutExpired:
-                            reproved_identity = self.inspector.identity(proc.pid)
-                            if (
-                                reproved_identity is not None
-                                and reproved_identity != identity
-                            ):
-                                termination_reason = "child_process_identity_changed"
-                                self.terminate_owned_processes()
-                                break
-                        else:
-                            returncode = int(proc.returncode or 0)
-                            break
-                    try:
-                        status = read_runtime_status_if_present(
-                            status_path,
-                            auth_key=runtime_auth_key,
-                            expected_run_id=self.run_id,
-                            expected_account_id=self.account_id,
-                            expected_lease_id=self.lease_id,
-                            expected_writer_identity=identity,
-                        )
-                    except RuntimeStatusValidationError:
-                        termination_reason = "runtime_status_invalid"
-                        returncode = 1
-                        stdout, stderr = self._terminate_registered_subprocess(
-                            proc,
-                            identity,
-                        )
-                        self.terminate_owned_processes()
-                        break
-                    termination_reason = watchdog_state.observe(
-                        status,
-                        received_at=time.monotonic(),
-                    )
-                    if termination_reason is not None:
-                        if termination_reason in {
-                            "runtime_status_startup_timeout",
-                            "runtime_status_stale",
-                        }:
-                            observed_returncode = proc.poll()
-                            if observed_returncode is not None:
-                                stdout, stderr = drain_exited_child_output(proc)
-                                returncode = int(observed_returncode)
-                                termination_reason = None
-                                break
-                        timed_out = termination_reason in {
-                            "runtime_status_startup_timeout",
-                            "runtime_status_stale",
-                        }
-                        returncode = 124 if timed_out else 1
-                        stdout, stderr = self._terminate_registered_subprocess(
-                            proc,
-                            identity,
-                        )
-                        self.terminate_owned_processes()
-                        break
+                    break
+                if progress_callback is not None:
+                    progress_callback()
+                observed_identity = self.inspector.identity(proc.pid)
+                if observed_identity is None:
+                    # A platform probe may briefly lose sight of a live
+                    # child, and a just-exited child may already be a
+                    # zombie before ``Popen.poll`` reaps it.  The Popen
+                    # handle still names our exact child, so first give it
+                    # one bounded interval to exit.  If it remains live,
+                    # its authenticated status must still pass below.
                     try:
                         stdout, stderr = proc.communicate(
                             timeout=runtime_watchdog.poll_seconds
                         )
                     except subprocess.TimeoutExpired:
-                        continue
-                    returncode = int(proc.returncode or 0)
+                        pass
+                    else:
+                        returncode = int(proc.returncode or 0)
+                        break
+                elif observed_identity != identity:
+                    # The exact process probe can observe the child as a
+                    # zombie just before ``Popen.poll`` reaps it.  Give
+                    # that exit race one bounded watchdog interval before
+                    # deciding that the PID belongs to a different live
+                    # process.  This does not grant liveness: a still-live
+                    # child must prove the original exact identity again.
+                    try:
+                        stdout, stderr = proc.communicate(
+                            timeout=runtime_watchdog.poll_seconds
+                        )
+                    except subprocess.TimeoutExpired:
+                        reproved_identity = self.inspector.identity(proc.pid)
+                        if (
+                            reproved_identity is not None
+                            and reproved_identity != identity
+                        ):
+                            termination_reason = "child_process_identity_changed"
+                            self.terminate_owned_processes()
+                            break
+                    else:
+                        returncode = int(proc.returncode or 0)
+                        break
+                try:
+                    status = read_runtime_status_if_present(
+                        status_path,
+                        auth_key=runtime_auth_key,
+                        expected_run_id=self.run_id,
+                        expected_account_id=self.account_id,
+                        expected_lease_id=self.lease_id,
+                        expected_writer_identity=identity,
+                    )
+                except RuntimeStatusValidationError:
+                    termination_reason = "runtime_status_invalid"
+                    returncode = 1
+                    stdout, stderr = self._terminate_registered_subprocess(
+                        proc,
+                        identity,
+                    )
+                    self.terminate_owned_processes()
                     break
-                if termination_reason is None and self.signal_received is not None:
-                    # 锁存之后才观察到 child 正常退出（中间层收束 worker 后自行退出）：按中断处理，
-                    # 与无 watchdog 分支一致，不把中断后的退出码当作 child 结果。
-                    raise XhsLeaseSignal(self.signal_received)
+                previous_sequence = watchdog_state.last_sequence
+                termination_reason = watchdog_state.observe(
+                    status,
+                    received_at=time.monotonic(),
+                )
+                if (
+                    termination_reason is None
+                    and watchdog_state.last_sequence != previous_sequence
+                ):
+                    self._renew_lease_on_heartbeat()
+                if termination_reason is not None:
+                    if termination_reason in {
+                        "runtime_status_startup_timeout",
+                        "runtime_status_stale",
+                    }:
+                        observed_returncode = proc.poll()
+                        if observed_returncode is not None:
+                            stdout, stderr = drain_exited_child_output(proc)
+                            returncode = int(observed_returncode)
+                            termination_reason = None
+                            break
+                    timed_out = termination_reason in {
+                        "runtime_status_startup_timeout",
+                        "runtime_status_stale",
+                    }
+                    returncode = 124 if timed_out else 1
+                    stdout, stderr = self._terminate_registered_subprocess(
+                        proc,
+                        identity,
+                    )
+                    self.terminate_owned_processes()
+                    break
+                try:
+                    stdout, stderr = proc.communicate(
+                        timeout=runtime_watchdog.poll_seconds
+                    )
+                except subprocess.TimeoutExpired:
+                    continue
+                returncode = int(proc.returncode or 0)
+                break
+            if termination_reason is None and self.signal_received is not None:
+                # 锁存之后才观察到 child 正常退出（中间层收束 worker 后自行退出）：按中断处理，
+                # 不把中断后的退出码当作 child 结果。
+                raise XhsLeaseSignal(self.signal_received)
+            if termination_reason is None:
+                # child 正常退出后父侧仍持有租约做校验与收尾，先给出一个完整 TTL。
+                self._renew_lease_on_heartbeat(force=True)
         except BaseException:
             self.terminate_owned_processes()
             raise
@@ -2368,15 +2443,8 @@ class LeaseGuard:
             stderr=stderr,
             timed_out=timed_out,
             termination_reason=termination_reason,
-            runtime_status=(
-                watchdog_state.public_status()
-                if watchdog_state is not None
-                else None
-            ),
-            watchdog_resume_grace_used=bool(
-                watchdog_state is not None
-                and watchdog_state.resume_granted_sequence is not None
-            ),
+            runtime_status=watchdog_state.public_status(),
+            watchdog_resume_grace_used=watchdog_state.resume_granted_sequence is not None,
         )
 
     def _terminate_registered_subprocess(

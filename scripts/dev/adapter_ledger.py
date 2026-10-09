@@ -162,6 +162,12 @@ AUTHORIZED_ENV_REMOVALS = frozenset({
     "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
     "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL",
 })
+# #75（用户授权删除任务级时限）删除的 CLI 参数：中间层无进展看门狗阈值改为代码常量，修复批次不再设墙钟上限。
+# 只登记这 2 个确切的（入口, 参数）对；清单外的删除或修改仍计入 cli_changed。
+AUTHORIZED_CLI_REMOVALS = frozenset({
+    ("scripts/mediacrawler_crawl.py", "--timeout-per-platform"),
+    ("scripts/repair_post_details.py", "--timeout-per-batch"),
+})
 
 
 def build_input_drift(root):
@@ -179,7 +185,11 @@ def build_input_drift(root):
     current = extract_inputs(files, read, definition_sources=CLI_DEFINITION_SOURCES)
     changed = {}
     for entry in sorted(baseline["cli"].keys() | current["cli"].keys()):
-        before, after = baseline["cli"].get(entry, []), current["cli"].get(entry, [])
+        before = [
+            argument for argument in baseline["cli"].get(entry, [])
+            if (entry, argument["flags"][0]) not in AUTHORIZED_CLI_REMOVALS
+        ]
+        after = current["cli"].get(entry, [])
         if before == after:
             continue
         details = []

@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 
 
 PROCESS_PROGRESS_POLL_SECONDS = 5.0
+# 所有平台统一的无持久进展看门狗阈值：受监控证据连续不变达到该值才收束；不限制整轮总时长。
+NO_PROGRESS_WATCHDOG_SECONDS = 1200.0
 PROCESS_CLEANUP_GRACE_SECONDS = 20.0
 PROCESS_FINAL_REAP_SECONDS = 5.0
 # 小红书租约中间层收到操作人中断后等待 exporter 自行退出的上限，超时即对 exporter 组 SIGKILL。
@@ -805,7 +807,7 @@ def run_command(
     log_dir: Path,
     *,
     extra_env: dict[str, str] | None = None,
-    progress_paths: Iterable[Path] | None = None,
+    progress_paths: Iterable[Path],
     runtime_reporter: XhsSupervisorRuntimeReporter | None = None,
     network_diagnostics_path: str | Path | None = None,
     startup_grace_seconds: float = 0.0,
@@ -838,9 +840,9 @@ def run_command(
         ceiling_seconds=XHS_PARENT_NETWORK_PAUSE_CEILING_SECONDS
     )
     network_terminal_grace_started_at: float | None = None
-    tracked_paths = tuple(progress_paths) if progress_paths is not None else None
+    tracked_paths = tuple(progress_paths)
     excluded_progress_paths: set[Path] = set()
-    if runtime_reporter is not None and tracked_paths is not None:
+    if runtime_reporter is not None:
         runtime_status_file = runtime_reporter.status_path.expanduser().absolute()
         excluded_progress_paths.add(runtime_status_file)
         if network_diagnostics_path is not None:
@@ -852,13 +854,9 @@ def run_command(
             for path in tracked_paths
             if Path(path).expanduser().absolute() != runtime_status_file
         )
-    progress_signature = (
-        progress_path_signature(
-            tracked_paths,
-            excluded_paths=excluded_progress_paths,
-        )
-        if tracked_paths is not None
-        else ()
+    progress_signature = progress_path_signature(
+        tracked_paths,
+        excluded_paths=excluded_progress_paths,
     )
     proc: subprocess.Popen[bytes] | None = None
     gated: GatedSubprocess | None = None
@@ -869,11 +867,9 @@ def run_command(
         str(registration_env.get(key) or "")
         for key in (LEASE_DB_ENV, LEASE_ID_ENV, LEASE_OWNER_TOKEN_ENV)
     )
-    if runtime_reporter is not None and (
-        tracked_paths is None or not lease_registration_enabled
-    ):
+    if runtime_reporter is not None and not lease_registration_enabled:
         raise XhsRuntimeSupervisionError(
-            "XHS runtime reporter requires progress tracking and lease registration"
+            "XHS runtime reporter requires lease registration"
         )
     process_inspector = (
         SystemProcessInspector()
@@ -962,24 +958,19 @@ def run_command(
         while True:
             now = time.monotonic()
             progress_advanced = False
-            if tracked_paths is not None:
-                current_signature = progress_path_signature(
-                    tracked_paths,
-                    excluded_paths=excluded_progress_paths,
-                )
-                if current_signature != progress_signature:
-                    progress_signature = current_signature
-                    progress_observed = True
-                    progress_advanced = True
-                    last_progress_at = now
-                current_budget = timeout + (
-                    0.0 if progress_observed else max(0.0, startup_grace_seconds)
-                )
-                remaining = current_budget - (now - last_progress_at)
-                communicate_timeout = min(max(0.01, poll_seconds), max(0.01, remaining))
-            else:
-                remaining = timeout
-                communicate_timeout = timeout
+            current_signature = progress_path_signature(
+                tracked_paths,
+                excluded_paths=excluded_progress_paths,
+            )
+            if current_signature != progress_signature:
+                progress_signature = current_signature
+                progress_observed = True
+                progress_advanced = True
+                last_progress_at = now
+            current_budget = timeout + (
+                0.0 if progress_observed else max(0.0, startup_grace_seconds)
+            )
+            remaining = current_budget - (now - last_progress_at)
             network_state = "unknown"
             network_reason = ""
             if runtime_reporter is not None:
@@ -1026,29 +1017,22 @@ def run_command(
                         "xhs_exporter_process_identity_changed"
                     )
 
-            pause_ceiling_expired = False
-            if tracked_paths is not None:
-                pause_delta, pause_ceiling_expired = network_pause_clock.observe(
-                    network_state,
-                    now=now,
-                )
-                if not progress_advanced:
-                    last_progress_at += pause_delta
-            if tracked_paths is not None and network_state == "network_paused":
-                current_budget = timeout + (
-                    0.0 if progress_observed else max(0.0, startup_grace_seconds)
-                )
-                remaining = current_budget - (now - last_progress_at)
+            pause_delta, pause_ceiling_expired = network_pause_clock.observe(
+                network_state,
+                now=now,
+            )
+            if not progress_advanced:
+                last_progress_at += pause_delta
+            current_budget = timeout + (
+                0.0 if progress_observed else max(0.0, startup_grace_seconds)
+            )
+            remaining = current_budget - (now - last_progress_at)
+            if network_state == "network_paused":
                 communicate_timeout = max(0.01, poll_seconds)
             else:
-                if tracked_paths is not None:
-                    current_budget = timeout + (
-                        0.0 if progress_observed else max(0.0, startup_grace_seconds)
-                    )
-                    remaining = current_budget - (now - last_progress_at)
-                    communicate_timeout = min(
-                        max(0.01, poll_seconds), max(0.01, remaining)
-                    )
+                communicate_timeout = min(
+                    max(0.01, poll_seconds), max(0.01, remaining)
+                )
 
             expiration_reason: str | None = None
             terminal_grace_elapsed = (
@@ -1069,11 +1053,7 @@ def run_command(
                 and network_state != "network_paused"
                 and network_terminal_grace_started_at is None
             ):
-                expiration_reason = (
-                    "no_progress_timeout"
-                    if tracked_paths is not None
-                    else "wall_clock_timeout"
-                )
+                expiration_reason = "no_progress_timeout"
             if expiration_reason is not None:
                 # Prefer a child terminal result that won the boundary race.
                 # In particular, do not rewrite its network_recovery_timeout as
@@ -1126,26 +1106,6 @@ def run_command(
                         timeout=PROCESS_FINAL_REAP_SECONDS,
                         grace_seconds=cleanup_grace_seconds,
                     )
-                elif tracked_paths is None:
-                    timed_out = True
-                    returncode = 124
-                    timeout_reason = "wall_clock_timeout"
-                    last_progress_age_seconds = max(
-                        0.0,
-                        time.monotonic() - last_progress_at,
-                    )
-                    termination_requested = True
-                    (
-                        stdout_data,
-                        stderr_data,
-                        forced_termination,
-                    ) = terminate_managed_process(
-                        proc,
-                        grace_seconds=cleanup_grace_seconds,
-                    )
-                    stdout = decode_text(stdout_data)
-                    stderr = decode_text(stderr_data)
-                    break
                 else:
                     continue
             stdout = decode_text(stdout_data)
@@ -1208,22 +1168,20 @@ def run_command(
         "returncode": returncode,
         "timed_out": timed_out,
         "timeout_reason": timeout_reason,
-        "inactivity_timeout_seconds": timeout if tracked_paths is not None else None,
-        "startup_grace_seconds": (
-            startup_grace_seconds if tracked_paths is not None else None
-        ),
+        "inactivity_timeout_seconds": timeout,
+        "startup_grace_seconds": startup_grace_seconds,
         "progress_observed": progress_observed,
         "last_progress_age_seconds": round(last_progress_age_seconds, 2),
         "network_pause_observed": network_pause_clock.observed,
         "network_pause_total_seconds": round(network_pause_clock.total_seconds, 2),
         "network_pause_ceiling_seconds": (
             XHS_PARENT_NETWORK_PAUSE_CEILING_SECONDS
-            if runtime_reporter is not None and tracked_paths is not None
+            if runtime_reporter is not None
             else None
         ),
         "network_terminal_grace_seconds": (
             XHS_CHILD_NETWORK_TERMINAL_GRACE_SECONDS
-            if runtime_reporter is not None and tracked_paths is not None
+            if runtime_reporter is not None
             else None
         ),
         "network_terminal_observed": network_terminal_grace_started_at is not None,

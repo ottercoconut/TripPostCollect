@@ -65,7 +65,6 @@ def test_xhs_repair_interrupt_writes_terminal_audit_before_exact_cleanup(
                         "target_key": "test",
                         "keyword": "青岛旅游",
                         "top_refresh_max_pages": 1,
-                        "timeout_seconds": 1800,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }

@@ -115,8 +115,8 @@ BrowserContext；只有触发轮的精确租约已经释放且 `runtime_session_
 
 正式结构化发现抓取只有 `source-exhausted` 一种完成语义，runner 不提供完成模式选择参数。通用配置
 schema v2 与小红书 target schema v3 都拒绝旧数量控制字段，执行器也拒绝旧数量 CLI 参数，不保留
-运行时兼容。分页循环持续处理未知候选，只有平台返回可验证的来源耗尽证据，或出现超时、登录/
-验证、频控及其他运行级阻断时才停止。候选数量、连续无新增批次和名义页数只能作为审计指标，不能
+运行时兼容。分页循环持续处理未知候选，只有平台返回可验证的来源耗尽证据，或出现无持久进展看门狗
+超时、登录/验证、频控及其他运行级阻断时才停止。候选数量、连续无新增批次和名义页数只能作为审计指标，不能
 触发正常停止，也不能证明来源耗尽。
 
 历史详情修复按用户授权后冻结的精确帖子清单验收 `repair_import_met`，不发现新候选，也不复用来源
@@ -138,9 +138,13 @@ schema v2 与小红书 target schema v3 都拒绝旧数量控制字段，执行�
 - `topic_relevant_inserted_rows` / `topic_relevant_updated_rows` 与对应的
   `topic_irrelevant_*` 字段：实际事务结果的主题分项。
 
-小红书必须同时核对 `top_refresh_max_pages`、`timeout_seconds` 与账号 `lease_seconds`；租期由目标超时、
-child 进程组关闭和根层收尾预算动态计算，pool 值是允许的上限。这些运行预算不属于查询来源参数，
-调整后继续使用原目标、账号和查询指纹对应的 checkpoint，但必须通过新的 dry-run 冻结并核对计划。
+正式抓取不设任务级时长上限：通用 job 不含 `timeout_per_platform`，小红书 target 不含
+`timeout_seconds`，配置中出现任一字段即报错。所有平台（含小红书）的中间层统一使用代码常量 1200 秒的
+无持久进展看门狗：execution state 事件、内容 JSONL、图片 manifest 与行为证据连续 1200 秒都没有变化
+才以 `no_progress_timeout` 运行级失败结束，持续推进时整轮总时长不受限制。小红书必须同时核对
+`top_refresh_max_pages` 与 pool 的 `lease_seconds`；`lease_seconds` 是租约 TTL，由父层认证心跳续期，
+不依赖任务时长。这些参数不属于查询来源参数，调整后继续使用原目标、账号和查询指纹对应的
+checkpoint，但必须通过新的 dry-run 冻结并核对计划。
 
 发现抓取只有 `formal_validation.source_exhausted_met=true` 才能进入正式持久化；此时新增数可以为 0，
 但仍必须真实执行持久化阶段并分别报告处理、新增和更新。不能用退出码、`processed_rows`、
@@ -206,7 +210,7 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 `crawl_discovery_candidate_exclusions`；该表不属于内容或已处理候选记忆。后续 child 仅在昂贵详情、
 作者或图片请求前把对应 ID 视为已知并跳过，不生成 `web_posts`、不增加成功数，也不单独构成
 `source_exhausted` 证据。普通重试耗尽使用自动 `candidate_skipped`，不自动创建排除表记录；排除表只用于
-操作人希望在请求前精确阻止某候选的场景。若 child 在预算超时或可捕获中断前已经写出
+操作人希望在请求前精确阻止某候选的场景。若 child 在无进展看门狗超时或可捕获中断前已经写出
 `candidate_skipped`，根执行器仍必须从事件流聚合 `skipped_candidate_failures`；正式摘要保留
 `runtime_failed`，checkpoint 只采用最后一个完整分页批次，不因已记录跳过候选回卷，也不得越过未完成
 尾批。refresh 阶段记录的跳过候选同样进入 seen，不把深层前沿改成第 1 页。
@@ -327,7 +331,7 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 维护 `xhs_discovery_checkpoints`，以 `target_key + account_id + query_fingerprint` 唯一定位，
 并在同一作用域的 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID；两者不与通用任务或
 其他账号共享未入库活动。指纹包含平台、关键词和影响来源结果的查询参数，
-不包含超时、登录和顶部刷新页数。关键词或来源查询参数改变时必须形成新
+不包含登录和顶部刷新页数。关键词或来源查询参数改变时必须形成新
 记忆，不得误用旧游标。
 
 通用平台在昂贵处理前跳过 `web_posts` 已有 ID、累计摘要中的有效 ID、

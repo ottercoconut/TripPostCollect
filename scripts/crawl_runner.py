@@ -68,6 +68,8 @@ RUNNER_SQLITE_BUSY_TIMEOUT_MS = 60_000
 REMOVED_FORMAL_QUANTITY_FIELDS = frozenset(
     {"candidate_hard_limit", "max_stagnant_batches", "target_new_posts"}
 )
+# 任务级时限已删除（#75）：无进展看门狗阈值是代码常量，配置中再出现即报错。
+REMOVED_TASK_TIMEOUT_FIELDS = frozenset({"timeout_per_platform"})
 RUNNER_CHILD_POLL_SECONDS = 0.5
 RUNNER_LANE_WAIT_SECONDS = 0.5
 # SIGHUP（终端挂断）与 SIGINT/SIGTERM 同样锁存，避免独立会话中的 child 成为孤儿；SIGQUIT 不处理。
@@ -169,9 +171,17 @@ def validate_crawl_config(config: Any, path: Path) -> dict[str, Any]:
             f"expected {CRAWL_CONFIG_SCHEMA_VERSION}"
         )
     for item in config.get("jobs") or []:
-        if not isinstance(item, dict) or item.get("job_kind") != "mediacrawler_search":
+        if not isinstance(item, dict):
             continue
         params = item.get("params") or {}
+        stale_timeouts = sorted(REMOVED_TASK_TIMEOUT_FIELDS & params.keys())
+        if stale_timeouts:
+            raise ValueError(
+                f"removed task timeout fields remain in job {item.get('job_key')}: "
+                f"{', '.join(stale_timeouts)}"
+            )
+        if item.get("job_kind") != "mediacrawler_search":
+            continue
         stale_fields = sorted(REMOVED_FORMAL_QUANTITY_FIELDS & params.keys())
         if stale_fields:
             raise ValueError(
@@ -376,6 +386,12 @@ def build_command(row: JobRow, args: argparse.Namespace) -> list[str]:
                 f"Removed quantity fields remain in job {row['job_key']}: "
                 f"{', '.join(stale_fields)}"
             )
+        stale_timeouts = sorted(REMOVED_TASK_TIMEOUT_FIELDS & params.keys())
+        if stale_timeouts:
+            raise ValueError(
+                f"Removed task timeout fields remain in job {row['job_key']}: "
+                f"{', '.join(stale_timeouts)}"
+            )
         required_fields_profile = str(params.get("required_fields_profile") or "")
         followers_policy = str(params.get("followers_policy") or "")
         if required_fields_profile != "image_post_with_followers_v1":
@@ -388,7 +404,6 @@ def build_command(row: JobRow, args: argparse.Namespace) -> list[str]:
             raise ValueError(f"removed download_images option remains in job {row['job_key']}")
         command = [sys.executable, str(ROOT / "scripts" / "mediacrawler_crawl.py"), "--platforms", platform]
         add_flag(command, "--keyword", args.recovery_keyword or params.get("keyword", "青岛旅游"))
-        add_flag(command, "--timeout-per-platform", params.get("timeout_per_platform", 180))
         add_flag(command, "--required-fields-profile", required_fields_profile)
         add_flag(command, "--behavior-profile", profile)
         add_flag(command, "--login-type", params.get("login_type", "cookie"))

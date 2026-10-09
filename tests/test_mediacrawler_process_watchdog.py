@@ -349,6 +349,7 @@ def test_private_runtime_environment_is_not_forwarded_to_exporter(
         tmp_path,
         2,
         tmp_path / "logs",
+        progress_paths=[],
     )
 
     assert result["returncode"] == 0
@@ -429,6 +430,7 @@ def test_registration_failure_terminates_stripped_child_without_false_exit_mark(
             1,
             tmp_path / "registration-failure-logs",
             cleanup_grace_seconds=1,
+            progress_paths=[],
         )
 
     child_env = captured["child_env"]
@@ -521,6 +523,7 @@ def test_signal_after_exporter_popen_cancels_gate_before_registration_or_exec(
                 1,
                 tmp_path / f"pre-register-signal-{first_signal}",
                 cleanup_grace_seconds=1,
+                progress_paths=[],
             )
         assert interrupted.value.signum == first_signal
         assert captured["registration_calls"] == 0
@@ -594,6 +597,7 @@ def test_exporter_registration_exception_cancels_gate_without_target_exec(
             1,
             tmp_path / f"registration-exception-{type(injected).__name__}-logs",
             cleanup_grace_seconds=1,
+            progress_paths=[],
         )
 
     assert not target_side_effect.exists()
@@ -674,6 +678,7 @@ def test_exporter_gate_release_failure_marks_registered_wrapper_exited(
             1,
             tmp_path / "release-failure-logs",
             cleanup_grace_seconds=1,
+            progress_paths=[],
         )
 
     assert not target_side_effect.exists()
@@ -772,6 +777,7 @@ def test_signal_after_exporter_registration_reaps_exact_released_process(
                 1,
                 tmp_path / "registered-signal-logs",
                 cleanup_grace_seconds=1,
+                progress_paths=[],
             )
         assert captured["mark_calls"] == 1
         assert captured["marked_identity"] == captured["identity"]
@@ -1454,31 +1460,28 @@ def test_no_progress_expiry_round_does_not_emit_another_heartbeat(
     assert captured["marked_identity"] == exporter_identity
 
 
-def test_runtime_reporter_requires_progress_tracking_before_popen(
+def test_runtime_reporter_requires_lease_registration_before_popen(
     runtime_reporter: tuple[object, dict[str, Path], object],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     reporter, _, _ = runtime_reporter
-    monkeypatch.setattr(
-        process,
-        "browser_launch_environment",
-        reporter_environment,
-    )
+    monkeypatch.setattr(process, "browser_launch_environment", lambda: {})
 
     def forbidden(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("Popen must not run without progress paths")
+        raise AssertionError("Popen must not run without lease registration")
 
     monkeypatch.setattr(process.subprocess, "Popen", forbidden)
     with pytest.raises(
         process.XhsRuntimeSupervisionError,
-        match="requires progress tracking",
+        match="requires lease registration",
     ):
         process.run_command(
             ["fake"],
             tmp_path,
             1,
-            tmp_path / "missing-progress-logs",
+            tmp_path / "missing-lease-logs",
+            progress_paths=[],
             runtime_reporter=reporter,
         )
 
@@ -1848,7 +1851,6 @@ def test_timeout_with_staged_records_remains_runtime_failure(
         behavior_profile="social_high_risk",
         discovery_job_id=None,
         resume_identities_path=None,
-        timeout_per_platform=1200,
     )
 
     result = mediacrawler_crawl._run_platform_without_policy(

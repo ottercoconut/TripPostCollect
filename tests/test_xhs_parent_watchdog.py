@@ -163,7 +163,7 @@ def configured_guard(tmp_path: Path, inspector: Any) -> LeaseGuard:
         execution_state_path=tmp_path / "state.json",
         runtime_profile_dir=runtime.runtime_session_paths("run-1")["profile"],
         budget=LeaseBudget(
-            runtime_seconds=30,
+            lease_seconds=30,
             child_shutdown_seconds=2,
             root_finalize_seconds=1,
         ),
@@ -236,13 +236,11 @@ def run_watchdog(
     guard: LeaseGuard,
     *,
     policy: RuntimeStatusWatchdogPolicy,
-    timeout_seconds: int = 1,
 ) -> LeaseSubprocessResult:
     return guard.run_subprocess(
         ["fake-supervisor"],
         cwd=guard.execution_state_path.parent,
         env={"VISIBLE": "1"},
-        timeout_seconds=timeout_seconds,
         runtime_watchdog=policy,
     )
 
@@ -323,7 +321,6 @@ def test_authenticated_sequences_use_receive_monotonic_and_outlive_old_timeout(
 
     result = run_watchdog(
         guard,
-        timeout_seconds=1,
         policy=RuntimeStatusWatchdogPolicy(0.3, 0.4, 0.2, 0.1),
     )
 
@@ -433,7 +430,6 @@ for sequence in range(1, 41):
         ],
         cwd=tmp_path,
         env=dict(os.environ),
-        timeout_seconds=1,
         runtime_watchdog=RuntimeStatusWatchdogPolicy(1, 0.5, 0.02, 0.1),
     )
 
@@ -793,34 +789,87 @@ def test_large_poll_gap_grants_one_bounded_resume_window_per_sequence(
     assert result.watchdog_resume_grace_used is True
 
 
-def test_legacy_mode_keeps_absolute_timeout_and_generates_no_runtime_key(
+def test_fresh_heartbeat_renews_lease_after_half_ttl_and_on_child_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = FakeClock()
     guard = configured_guard(tmp_path, FakeInspector())
-    process = FakeProcess(clock)
-    observed = install_process_harness(monkeypatch, guard, process)
+    guard.budget = LeaseBudget(lease_seconds=1, child_shutdown_seconds=2, root_finalize_seconds=1)
+    guard.account = {"account_id": "xhs-a01"}
+    guard._lease_renewed_at = clock.value
+    process = FakeProcess(clock, exit_at=1.2)
+    install_process_harness(monkeypatch, guard, process)
     monkeypatch.setattr(leases.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(leases.secrets, "token_bytes", lambda size: AUTH_KEY)
+    sequences = iter(range(1, 100))
+    monkeypatch.setattr(
+        leases,
+        "read_runtime_status_if_present",
+        lambda _path, **_kwargs: status_payload(next(sequences)),
+    )
+    renewed_at: list[float] = []
 
-    def forbidden_key(_size: int) -> bytes:
-        raise AssertionError("legacy timeout must not generate a runtime key")
+    def renew() -> None:
+        renewed_at.append(clock.value)
+        guard._lease_renewed_at = clock.value
 
-    monkeypatch.setattr(leases.secrets, "token_bytes", forbidden_key)
+    monkeypatch.setattr(guard, "renew_lease", renew)
 
-    result = guard.run_subprocess(
-        ["fake-supervisor"],
-        cwd=tmp_path,
-        env={},
-        timeout_seconds=1,
+    result = run_watchdog(
+        guard,
+        policy=RuntimeStatusWatchdogPolicy(0.3, 0.4, 0.1, 0.0),
     )
 
-    assert clock.value == 1
-    assert result.returncode == 124
-    assert result.timed_out is True
-    assert result.termination_reason == "absolute_timeout"
-    assert result.runtime_status is None
-    assert runtime.RUNTIME_STATUS_AUTH_KEY_ENV not in observed["popen_env"]
+    assert result.returncode == 0
+    assert result.termination_reason is None
+    # 心跳每 0.1 秒推进；TTL 一半（0.5 秒）后才续期，child 退出时再强制续期一次。
+    assert len(renewed_at) >= 3
+    assert all(
+        later - earlier >= 0.5 - 1e-9
+        for earlier, later in zip(renewed_at[:-2], renewed_at[1:-1])
+    )
+    assert renewed_at[-1] == clock.value
+
+
+def test_stale_heartbeat_never_renews_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    guard = configured_guard(tmp_path, FakeInspector())
+    guard.budget = LeaseBudget(lease_seconds=1, child_shutdown_seconds=2, root_finalize_seconds=1)
+    guard.account = {"account_id": "xhs-a01"}
+    guard._lease_renewed_at = clock.value
+    process = FakeProcess(clock)
+    install_process_harness(monkeypatch, guard, process)
+    monkeypatch.setattr(leases.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(leases.secrets, "token_bytes", lambda size: AUTH_KEY)
+    monkeypatch.setattr(
+        leases,
+        "read_runtime_status_if_present",
+        lambda _path, **_kwargs: status_payload(1),
+    )
+    renewed: list[float] = []
+    monkeypatch.setattr(guard, "renew_lease", lambda: renewed.append(clock.value))
+
+    result = run_watchdog(
+        guard,
+        policy=RuntimeStatusWatchdogPolicy(0.3, 0.4, 0.1, 0.0),
+    )
+
+    assert result.termination_reason == "runtime_status_stale"
+    assert renewed == []
+
+
+def test_run_subprocess_requires_parent_heartbeat_watchdog(tmp_path: Path) -> None:
+    guard = configured_guard(tmp_path, FakeInspector())
+    with pytest.raises(TypeError):
+        guard.run_subprocess(  # type: ignore[call-arg]
+            ["fake-supervisor"],
+            cwd=tmp_path,
+            env={},
+        )
 
 
 @pytest.mark.parametrize(

@@ -556,6 +556,17 @@ T64_DELETED_LEDGER_NODES = {
     "tests/test_adapter_ledger.py::test_check_mode_detects_stale_artifact",
     "tests/test_adapter_ledger.py::test_tests_collector_refuses_production_checkout",
 }
+# #75 删除任务级时限随之删除或改写的 6 个台账节点：中间层墙钟模式（progress_paths 改为必填）、
+# LeaseGuard 无心跳绝对超时、修复批次墙钟上限与其失败码、以任务时长计算租期的预算用例。
+T75_DELETED_LEDGER_NODES = {
+    "tests/test_mediacrawler_process_watchdog.py::test_runtime_reporter_requires_progress_tracking_before_popen",
+    "tests/test_post_detail_repair.py::test_run_repair_child_timeout_uses_formal_process_group_contract",
+    "tests/test_post_detail_repair.py::test_strict_batch_blocker_only_stops_unattended_repair"
+    "[post_detail_repair_batch_timeout:2040-False]",
+    "tests/test_xhs_leases.py::test_xhs_exact_lease_schema_and_dynamic_budgets",
+    "tests/test_xhs_parent_watchdog.py::test_legacy_mode_keeps_absolute_timeout_and_generates_no_runtime_key",
+    "tests/test_xhs_pool.py::test_long_xhs_target_uses_time_budget_only",
+}
 # 决策 13：按台账 target_file 迁移，名称与断言不变；迁移后只能出现在目标文件。
 MOVED_TO_TARGET = {
     "tests/test_run_ids.py::test_all_script_run_ids_include_microseconds":
@@ -591,7 +602,17 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
             # fork 离线 lane 已随 fork 删除：两侧台账节点都只能在根收集中找到。
             if not places & collected:
                 missing.append(node["node_id"])
-    assert set(missing) == DELETED_LEDGER_NODES | T14C_DELETED_LEDGER_NODES | T64_DELETED_LEDGER_NODES
+    assert set(missing) == (
+        DELETED_LEDGER_NODES
+        | T14C_DELETED_LEDGER_NODES
+        | T64_DELETED_LEDGER_NODES
+        | T75_DELETED_LEDGER_NODES
+    )
     for source, target in MOVED_TO_TARGET.items():
         assert source not in collected and target in collected, (source, target)
-    assert len(data["root"]["nodes"]) + len(data["fork"]["nodes"]) - len(missing) == 1418 - len(T14C_DELETED_LEDGER_NODES) - len(T64_DELETED_LEDGER_NODES)
+    assert len(data["root"]["nodes"]) + len(data["fork"]["nodes"]) - len(missing) == (
+        1418
+        - len(T14C_DELETED_LEDGER_NODES)
+        - len(T64_DELETED_LEDGER_NODES)
+        - len(T75_DELETED_LEDGER_NODES)
+    )

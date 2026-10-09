@@ -58,15 +58,15 @@ def run_runner(work: Path) -> int:
 
     xhs_runner.build_child_command = fake_command
     if plan.get("child_shutdown_seconds") is not None:
-        production_budget = xhs_runner.crawl_lease_budget
+        production_budget = xhs_runner.parent_heartbeat_lease_budget
 
-        def short_budget(**kwargs: object) -> object:
+        def short_budget(*args: object, **kwargs: object) -> object:
             return dataclasses.replace(
-                production_budget(**kwargs),
+                production_budget(*args, **kwargs),
                 child_shutdown_seconds=int(plan["child_shutdown_seconds"]),
             )
 
-        xhs_runner.crawl_lease_budget = short_budget
+        xhs_runner.parent_heartbeat_lease_budget = short_budget
     _write_json(work / "runner.json", {"pid": os.getpid(), "pgid": os.getpgid(0)})
     args = argparse.Namespace(
         target_key="test",
@@ -100,6 +100,7 @@ def run_middle(work: Path, worker_mode: str) -> int:
             ROOT,
             3600,
             work / "worker-logs",
+            progress_paths=[],
         )
         return 0
 

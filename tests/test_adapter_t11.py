@@ -119,6 +119,29 @@ def t12_authorized(node):
     return node
 
 
+# #75 授权差异：删除 timeout_per_platform 与按平台的下限，无进展看门狗阈值改为代码常量。
+T75_OLD_TIMEOUT_SOURCE = (
+    "    timeout = args.timeout_per_platform\n"
+    "    if platform_key == \"xhs\" and (args.login_type == \"qrcode\" or args.headed):\n"
+    "        timeout = max(timeout, 420)\n"
+    "    if platform_key == \"zhihu\":\n"
+    "        timeout = max(timeout, 300)\n"
+)
+T75_REPLACEMENTS = (
+    (T75_OLD_TIMEOUT_SOURCE, ""),
+    ("        ROOT,\n        timeout,\n        log_dir,", "        ROOT,\n        NO_PROGRESS_WATCHDOG_SECONDS,\n        log_dir,"),
+    ("inactivity_timeout_seconds=float(timeout),", "inactivity_timeout_seconds=NO_PROGRESS_WATCHDOG_SECONDS,"),
+)
+
+
+def t75_authorized_source(text):
+    """在冻结旧源码上做 #75 的同样替换；每处必须恰好出现一次。"""
+    for old, new in T75_REPLACEMENTS:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    return text
+
+
 def t14_authorized(node):
     """T14 授权差异：run_platform 在预算守卫前对非小红书平台做 profile 迁移失败关闭检查。"""
     node = deepcopy(node)
@@ -198,7 +221,7 @@ def test_a_migrated_ast(row):
     if row["disposition"] == "薄":
         target = ROOT / "src/trippostcollect/application/collection.py"
     assert target.exists(), f"新定义不存在：{target.relative_to(ROOT)}::{name}"
-    old = t12_authorized(definition((FIXTURES / "mediacrawler_crawl.py.txt").read_text(), name))
+    old = t12_authorized(definition(t75_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text()), name))
     new = t14_authorized(definition(target.read_text(), name))
     assert normalized_pair(old, new, AST_RULES[name])[0] == normalized_pair(old, new, AST_RULES[name])[1]
     if row["disposition"] == "薄":
@@ -270,6 +293,9 @@ def baseline(monkeypatch):
     text, namespace = fork_removal_deviation.frozen_source(
         source.decode("utf-8"), mediacrawler_dir_imports=1, execution_state_imports=1,
     )
+    # #75 有意偏离：任务级时限删除，旧执行器同样改用统一的无进展看门狗常量。
+    text = t75_authorized_source(text)
+    namespace["NO_PROGRESS_WATCHDOG_SECONDS"] = process.NO_PROGRESS_WATCHDOG_SECONDS
     vars(module).update(namespace)
     exec(compile(text, module.__file__, "exec"), vars(module))
     return module

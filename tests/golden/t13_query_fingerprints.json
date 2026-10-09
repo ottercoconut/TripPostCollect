@@ -8,7 +8,6 @@
         "top_refresh_max_pages": 3,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
-        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },
@@ -22,7 +21,6 @@
         "top_refresh_max_pages": 3,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
-        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false,
         "search_type": "default"
@@ -37,7 +35,6 @@
         "top_refresh_max_pages": 3,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
-        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false,
         "publish_time_type": 0
@@ -52,7 +49,6 @@
         "top_refresh_max_pages": 3,
         "required_fields_profile": "image_post_with_followers_v1",
         "followers_policy": "required",
-        "timeout_per_platform": 1200,
         "login_type": "cookie",
         "headless": false
       },

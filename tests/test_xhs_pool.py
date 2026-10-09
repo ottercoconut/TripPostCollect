@@ -20,6 +20,7 @@ from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.xhs import accounts
 from trippostcollect.xhs.config import load_pool_config, load_target
 from trippostcollect.xhs.config import XhsConfigError
+from trippostcollect.xhs.supervision import parent_heartbeat_lease_budget
 from trippostcollect.xhs.runtime import (
     prepare_runtime_session,
     remove_runtime_session,
@@ -52,21 +53,49 @@ def test_default_xhs_target_uses_exhaustion_schema() -> None:
     assert "candidate_hard_limit" not in target
     assert "max_stagnant_batches" not in target
     assert target["top_refresh_max_pages"] == 5
-    assert target["timeout_seconds"] == 7200
+    assert "timeout_seconds" not in target
     assert target["local_image_storage_required"] is True
     assert "download_images" not in target
-    assert pool["lease_seconds"] == 29100
-    assert pool["lease_seconds"] >= target["timeout_seconds"] + 300
+    assert pool["lease_seconds"] == 900
+    assert parent_heartbeat_lease_budget(pool["lease_seconds"]).lease_seconds == 900
 
 
-def test_long_xhs_target_uses_time_budget_only() -> None:
+def test_long_xhs_target_has_no_task_time_budget() -> None:
     target = load_target("qingdao_free_travel_exhaustive")
-    pool = load_pool_config()
 
     assert target["keyword"] == "青岛自由行"
     assert target["top_refresh_max_pages"] == 5
-    assert target["timeout_seconds"] == 28800
-    assert pool["lease_seconds"] >= target["timeout_seconds"] + 300
+    assert "timeout_seconds" not in target
+
+
+def test_xhs_target_rejects_removed_timeout_seconds(tmp_path: Path) -> None:
+    target_path = tmp_path / "targets.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "targets": [
+                    {
+                        "target_key": "test",
+                        "keyword": "青岛旅游",
+                        "top_refresh_max_pages": 0,
+                        "timeout_seconds": 7200,
+                        "required_fields_profile": "image_post_with_followers_v1",
+                        "followers_policy": "required",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(XhsConfigError, match="removed XHS target timeout_seconds"):
+        load_target("test", target_path)
+
+
+def test_xhs_pool_lease_ttl_must_cover_heartbeat_gap_and_cleanup() -> None:
+    with pytest.raises(ValueError, match="below 850"):
+        parent_heartbeat_lease_budget(849)
 
 
 def test_xhs_runtime_session_has_only_profile_and_is_removable(
@@ -130,7 +159,6 @@ def test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup(
                         "target_key": "test",
                         "keyword": "青岛旅游",
                         "top_refresh_max_pages": 1,
-                        "timeout_seconds": 1800,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }
@@ -342,7 +370,6 @@ def test_xhs_low_level_executor_uses_profile_contract_without_legacy_login_switc
         start_cursor="",
         start_offset=0,
         start_page=1,
-        timeout_per_platform=7200,
         top_refresh_max_pages=5,
         xhs_account_id="xhs-a01",
         xhs_detail_urls=[],
@@ -1434,7 +1461,6 @@ def test_config_and_child_command_use_run_scoped_login_paths(tmp_path: Path) -> 
                         "target_key": "test",
                         "keyword": "青岛旅游",
                         "top_refresh_max_pages": 3,
-                        "timeout_seconds": 1800,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }
@@ -1700,7 +1726,6 @@ def test_xhs_target_rejects_removed_download_images_option(tmp_path: Path) -> No
                         "target_key": "test",
                         "keyword": "青岛旅游",
                         "top_refresh_max_pages": 0,
-                        "timeout_seconds": 30,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                         "download_images": False,
@@ -1726,7 +1751,6 @@ def test_xhs_target_rejects_removed_quantity_fields(tmp_path: Path) -> None:
                         "target_key": "test",
                         "keyword": "青岛旅游",
                         "top_refresh_max_pages": 0,
-                        "timeout_seconds": 30,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                         "target_new_posts": 1,

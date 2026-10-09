@@ -10,8 +10,8 @@
     },
     {
       "path": "docs/formal-crawl-contract.md",
-      "sha256": "1d9ea349960c7e8dd12f985ec93744bcaef32c944fe2e0b86122c3dd2608006a",
-      "reason": "用户授权更新并重新冻结的五平台正式抓取与正文图片本地化机器契约",
+      "sha256": "0cb731af491cb9a11de58094bbbb6abc9c92399383612a6766975d57c16079b8",
+      "reason": "用户授权更新并重新冻结的五平台正式抓取与正文图片本地化机器契约；#75 删除任务级时限后经用户授权同步更新并重新冻结",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
     },

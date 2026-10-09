@@ -66,7 +66,6 @@ def _setup(tmp_path: Path, worker_mode: str) -> tuple[Path, dict]:
                         "target_key": "test",
                         "keyword": "青岛旅游",
                         "top_refresh_max_pages": 1,
-                        "timeout_seconds": 1800,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }
@@ -229,8 +228,9 @@ def test_lease_interrupt_budgets_are_nested() -> None:
 
     from trippostcollect.runtime import process
     from trippostcollect.xhs import leases
+    from trippostcollect.xhs.supervision import parent_heartbeat_lease_budget
 
-    budget = leases.crawl_lease_budget(timeout_seconds=1800, configured_lease_seconds=2400)
+    budget = parent_heartbeat_lease_budget(2400)
     assert budget.child_shutdown_seconds == leases.DEFAULT_CHILD_SHUTDOWN_BUDGET_SECONDS
     middle_ceiling = (
         process.XHS_LEASE_INTERRUPT_EXPORTER_GRACE_SECONDS

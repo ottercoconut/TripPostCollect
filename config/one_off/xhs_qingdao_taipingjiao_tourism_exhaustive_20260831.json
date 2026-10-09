@@ -6,7 +6,6 @@
       "keyword": "青岛太平角旅游",
       "target_url": "https://www.xiaohongshu.com/search_result?keyword=%E9%9D%92%E5%B2%9B%E5%A4%AA%E5%B9%B3%E8%A7%92%E6%97%85%E6%B8%B8",
       "top_refresh_max_pages": 5,
-      "timeout_seconds": 28800,
       "required_fields_profile": "image_post_with_followers_v1",
       "followers_policy": "required"
     }
