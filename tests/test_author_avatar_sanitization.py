@@ -10,11 +10,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import types
 
 import pytest
 
-from support import legacy_expectations as expectations
 
 from trippostcollect.records.sanitization import (
     AUTHOR_AVATAR_LOG_REDACTION,
@@ -209,56 +207,21 @@ def test_mediacrawler_exporter_sanitizes_before_jsonl_serialization(
     assert persisted == {"note_id": "note-1", "title": "青岛"}
 
 
-@expectations.legacy_only
-def test_mediacrawler_export_hook_wraps_writer_before_persistence(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from scripts import mediacrawler_export_entrypoint as entrypoint
-
-    class FakeWriter:
-        async def write_to_csv(self, item: dict, item_type: str) -> dict:
-            return item
-
-        async def write_to_jsonl(self, item: dict, item_type: str) -> dict:
-            return item
-
-        async def write_single_item_to_json(self, item: dict, item_type: str) -> dict:
-            return item
-
-    fake_tools = types.ModuleType("tools")
-    fake_tools.__path__ = []
-    fake_writer_module = types.ModuleType("tools.async_file_writer")
-    fake_writer_module.AsyncFileWriter = FakeWriter
-    monkeypatch.setitem(sys.modules, "tools", fake_tools)
-    monkeypatch.setitem(sys.modules, "tools.async_file_writer", fake_writer_module)
-    monkeypatch.setenv("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS", "1")
-
-    entrypoint.install_export_hook()
-    persisted = asyncio.run(
-        FakeWriter().write_to_jsonl(
-            {"avatar_url": AVATAR_URL, "copied": AVATAR_URL, "title": "青岛"},
-            "contents",
-        )
-    )
-
-    assert persisted == {"title": "青岛"}
-
-
 @pytest.mark.parametrize("platform,storage,prefix", [
     ("wb", "weibo", "Weibo"),
     ("dy", "douyin", "Douyin"),
     ("zhihu", "zhihu", "Zhihu"),
     ("xhs", "xhs", "Xhs"),
 ])
-@pytest.mark.parametrize("bridge", ["worker", pytest.param("legacy", marks=expectations.legacy_only_marks())])
+# 旧桥参数随 fork/E 在 T14-C 删除；保留 worker 参数 id 使用例名不变。
+@pytest.mark.parametrize("bridge", ["worker"])
 def test_worker_store_files_remove_avatar_before_serialization(
     tmp_path: Path, platform: str, storage: str, prefix: str, bridge: str,
 ) -> None:
-    """真实 store 和 writer 落盘；独立解释器隔离旧 hook 的类级修改。"""
+    """真实内容出口与 writer 落盘；独立解释器隔离入口装配的模块级状态。"""
     source = Path(__file__).resolve().parents[1]
     code = r'''
 import asyncio
-import importlib
 import json
 import os
 from pathlib import Path
@@ -274,33 +237,19 @@ entry.configure([
     "--headless", "true", "--save_data_option", "jsonl", "--save_data_path", destination,
     "--start", "1", "--max_concurrency_num", "1", "--enable_ip_proxy", "false",
 ])
-if bridge == "worker":
-    # T14：worker 侧只经根入口装配的内容出口写出（正式 worker 只有 JSONL；CSV/JSON 为 fork 退出出口）。
-    entry.install_hooks()
-    assert entry.load_crawler(platform)
-    config = entry.current_config()
-    if platform == "wb":
-        make_sink = lambda: entry.weibo_dependencies(config)[1].store_factory()
-    elif platform == "dy":
-        make_sink = lambda: entry.douyin_dependencies(config)["ports"].content_sink("search")
-    elif platform == "zhihu":
-        make_sink = lambda: entry._zhihu_dependencies(config)[1].content_sink_factory()
-    else:
-        make_sink = lambda: entry.xhs_dependencies(config, repair=False)["ports"].content_sink_factory("search")
+assert bridge == "worker"
+# T14：worker 侧只经根入口装配的内容出口写出（正式 worker 只有 JSONL；CSV/JSON 为 fork 退出出口）。
+entry.install_hooks()
+assert entry.load_crawler(platform)
+config = entry.current_config()
+if platform == "wb":
+    make_sink = lambda: entry.weibo_dependencies(config)[1].store_factory()
+elif platform == "dy":
+    make_sink = lambda: entry.douyin_dependencies(config)["ports"].content_sink("search")
+elif platform == "zhihu":
+    make_sink = lambda: entry._zhihu_dependencies(config)[1].content_sink_factory()
 else:
-    # 旧桥：fork store 与 writer 经过渡装载点显式加载；T14-C 随旧桥删除。
-    from trippostcollect.platforms import _fork_bridge
-    _fork_bridge.install()
-    from mediacrawler_export_entrypoint import install_export_hook
-    install_export_hook()
-    assert entry.load_crawler(platform)
-    import config
-    config.SAVE_DATA_PATH = destination
-    config.ENABLE_GET_WORDCLOUD = False
-    from var import crawler_type_var
-    crawler_type_var.set("search")
-    store = importlib.import_module(f"store.{storage}._store_impl")
-    from tools.async_file_writer import AsyncFileWriter
+    make_sink = lambda: entry.xhs_dependencies(config, repair=False)["ports"].content_sink_factory("search")
 url = "https://fixture.test/private-photo.jpg"
 body_url = "https://fixture.test/body.jpg"
 raw = {
@@ -320,17 +269,11 @@ def checked_dumps(value, *args, **kwargs):
     return text
 json.dumps = checked_dumps
 async def write():
-    if bridge == "worker":
-        await make_sink().store_content(raw)
-        return
-    await getattr(store, f"{prefix}JsonlStoreImplement")().store_content(raw)
-    writer = AsyncFileWriter(storage, "search")
-    await writer.write_single_item_to_json(raw, "contents")
-    await writer.write_to_csv(raw, "contents")
+    await make_sink().store_content(raw)
 asyncio.run(write())
-assert len(serialized) >= (1 if bridge == "worker" else 2)
+assert len(serialized) >= 1
 files = list(Path(destination).rglob("search_contents_*"))
-assert len(files) == (1 if bridge == "worker" else 3)
+assert len(files) == 1
 for path in files:
     text = path.read_text(encoding="utf-8-sig")
     assert url not in text

@@ -175,7 +175,7 @@ from trippostcollect.artifacts.image_proxy import (
     remote_image_failure_code,
     fetch_remote_image_bytes,
 )
-from execution_state import FrozenExecutionState as FrozenExecutionState
+from trippostcollect.core.execution_state import FrozenExecutionState as FrozenExecutionState
 from trippostcollect.runtime.human_flow import install_runtime_hints
 from trippostcollect.runtime.behavior import (
     behavior_evidence_valid,

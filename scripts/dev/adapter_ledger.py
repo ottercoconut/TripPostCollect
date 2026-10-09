@@ -321,7 +321,9 @@ def extract_inputs(files, read, *, definition_sources=None):
 
 # 规格 D2 授权删除的父发 env：docs/platform-adapter-specification.md 第 469 行（DISCOVERY_ 五项，
 # “父发但已审计闭包无消费者；T12移除发出”）与第 485 行（XHS_CREATOR_VERIFY_WAIT_SECONDS，“父发无消费，T12删除”）。
-# 只登记这 6 个确切名字，不通配、不从文件读取；清单外的删除仍计入 env_removed。
+# T14-C（#19 删除批，用户授权治理变更）另删 XHS_KEEP_AUTHOR_DETAIL：唯一消费者是 fork 旧 store 的作者原值开关，
+# #49/#51 起根实现恒保存平台原值、不读取该 env（tests/test_author_raw_identity.py），fork 删除后父发无消费者。
+# 只登记这 7 个确切名字，不通配、不从文件读取；清单外的删除仍计入 env_removed。
 AUTHORIZED_ENV_REMOVALS = frozenset({
     "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID",
     "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM",
@@ -329,6 +331,7 @@ AUTHORIZED_ENV_REMOVALS = frozenset({
     "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE",
     "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED",
     "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
+    "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL",
 })
 
 

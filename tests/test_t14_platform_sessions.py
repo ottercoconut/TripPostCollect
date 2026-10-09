@@ -1,4 +1,6 @@
-"""T14：非小红书持久 profile 与 Cookie 快照迁出 fork 目录，并对未迁移旧目录失败关闭。
+"""T14：非小红书持久 profile 与 Cookie 快照位于 platform_sessions，并对迁移中断的 `.partial` 残留失败关闭。
+
+T14-C 删除 fork 后不再识别旧 fork profile 位置，也不回退读取；只保留 `.partial` 残留检查。
 
 全部只用 tmp_path 下的临时目录；不访问网络、不启动浏览器、不读写真实 profile。
 """
@@ -28,13 +30,12 @@ SECRET = "t14-secret-cookie-value"
 
 
 @pytest.fixture
-def session_roots(isolated_platform_sessions) -> tuple[Path, Path]:
-    # conftest 的自动隔离已把两个根指向本用例的临时目录。
-    return isolated_platform_sessions.legacy, isolated_platform_sessions.sessions
+def sessions(isolated_platform_sessions) -> Path:
+    # conftest 的自动隔离已把 platform_sessions 根指向本用例的临时目录。
+    return isolated_platform_sessions.sessions
 
 
-def _legacy_profile(legacy: Path, name: str) -> Path:
-    profile = legacy / name
+def _profile_with_snapshot(profile: Path) -> Path:
     profile.mkdir(parents=True)
     (profile / "trippostcollect_cookie_snapshot.json").write_text(
         json.dumps({"cookies": [{"name": "z_c0", "value": SECRET}]}), encoding="utf-8",
@@ -42,12 +43,24 @@ def _legacy_profile(legacy: Path, name: str) -> Path:
     return profile
 
 
+def _partial(sessions: Path, platform: str, leaf: str = "profile") -> Path:
+    """迁移中途失败留下的新侧残留，内含带 Cookie 的快照副本（错误信息不得泄露）。"""
+    return _profile_with_snapshot(sessions / platform / f"{leaf}.partial")
+
+
+def _old_fork_profile(checkout: Path, name: str) -> Path:
+    """删除 fork 后磁盘上可能残留的旧 fork profile；运行期不得再识别或读取。"""
+    return _profile_with_snapshot(checkout / "tools/MediaCrawler/browser_data" / name)
+
+
 # ---------- paths 新布局 ----------
 
 def test_platform_sessions_layout_is_under_runtime_not_fork(isolated_platform_sessions) -> None:
     original = isolated_platform_sessions.original
     assert original.sessions == paths.RUNTIME_ROOT / "platform_sessions"
-    assert original.legacy == paths.MEDIACRAWLER_DIR / "browser_data"
+    # T14-C：旧 fork 位置常量与迁移对照随 fork 删除。
+    for removed in ("TOOLS_ROOT", "MEDIACRAWLER_DIR", "LEGACY_FORK_PROFILE_ROOT", "legacy_fork_profile_dirs"):
+        assert not hasattr(paths, removed), removed
     for platform in GENERIC:
         session = paths.PLATFORM_SESSIONS_ROOT / platform
         assert paths.platform_session_dir(platform) == session
@@ -60,7 +73,7 @@ def test_platform_sessions_layout_is_under_runtime_not_fork(isolated_platform_se
             paths.platform_cdp_profile_dir(platform),
             paths.platform_cookie_snapshot_path(platform),
         ):
-            assert not value.is_relative_to(paths.TOOLS_ROOT)
+            assert not value.is_relative_to(paths.PROJECT_ROOT / "tools")
 
 
 def test_xhs_and_unknown_platforms_have_no_persistent_session() -> None:
@@ -83,22 +96,12 @@ def test_profile_code_maps_back_to_platform_key() -> None:
         paths.platform_key_for_profile_code("ks")
 
 
-def test_legacy_pairs_are_one_to_one(session_roots: tuple[Path, Path]) -> None:
-    legacy, sessions = session_roots
-    for platform, code in GENERIC.items():
-        assert paths.legacy_fork_profile_dirs(platform) == (
-            (legacy / f"{code}_user_data_dir", sessions / platform / "profile"),
-            (legacy / f"cdp_{code}_user_data_dir", sessions / platform / "cdp_profile"),
-        )
-
-
 # ---------- Cookie 快照读写同一路径 ----------
 
-def test_cookie_snapshot_write_and_load_use_the_same_sibling_path(session_roots: tuple[Path, Path]) -> None:
+def test_cookie_snapshot_write_and_load_use_the_same_sibling_path(sessions: Path) -> None:
     from trippostcollect.application import warmup
     from trippostcollect.runtime import cookies
 
-    _, sessions = session_roots
     target = paths.platform_cookie_snapshot_path("zhihu")
     cookie_rows = [{"name": "d_c0", "value": "d"}, {"name": "z_c0", "value": "z"}]
     info = cookies.write_cookie_snapshot(
@@ -124,39 +127,17 @@ def test_cookie_snapshot_write_and_load_use_the_same_sibling_path(session_roots:
 # ---------- 失败关闭检查 ----------
 
 @pytest.mark.parametrize("platform", sorted(GENERIC))
-def test_legacy_profile_without_new_profile_is_refused(
-    session_roots: tuple[Path, Path], platform: str,
-) -> None:
-    legacy, sessions = session_roots
-    _legacy_profile(legacy, f"{GENERIC[platform]}_user_data_dir")
+def test_partial_profile_without_new_profile_is_refused(sessions: Path, platform: str) -> None:
+    _partial(sessions, platform)
     with pytest.raises(RuntimeError, match=rf"^platform_session_migration_required:{platform} ") as caught:
         paths.require_platform_session_migrated(platform)
     assert SECRET not in str(caught.value)
     assert "operations-runbook.md" in str(caught.value)
-    # 失败关闭：不创建新目录，也不回退使用旧目录。
-    assert not sessions.exists()
+    # 失败关闭：不在残留旁边新建 profile。
+    assert not paths.platform_profile_dir(platform).exists()
 
 
-def test_legacy_cdp_profile_is_checked_separately(session_roots: tuple[Path, Path]) -> None:
-    legacy, _ = session_roots
-    _legacy_profile(legacy, "wb_user_data_dir")
-    _legacy_profile(legacy, "cdp_wb_user_data_dir")
-    paths.platform_profile_dir("weibo").mkdir(parents=True)
-    with pytest.raises(RuntimeError, match=r"cdp_wb_user_data_dir -> .*cdp_profile"):
-        paths.require_platform_session_migrated("weibo")
-    paths.platform_cdp_profile_dir("weibo").mkdir()
-    paths.require_platform_session_migrated("weibo")
-
-
-def test_new_profile_passes_even_when_legacy_remains(session_roots: tuple[Path, Path]) -> None:
-    legacy, _ = session_roots
-    _legacy_profile(legacy, "dy_user_data_dir")
-    paths.platform_profile_dir("douyin").mkdir(parents=True)
-    paths.require_platform_session_migrated("douyin")
-
-
-def test_first_login_without_any_profile_passes(session_roots: tuple[Path, Path]) -> None:
-    _, sessions = session_roots
+def test_first_login_without_any_profile_passes(sessions: Path) -> None:
     for platform in GENERIC:
         paths.require_platform_session_migrated(platform)
     assert not sessions.exists()
@@ -169,7 +150,7 @@ def test_migration_failure_is_classified_final() -> None:
         exit_code=1,
         stderr=(
             "platform_session_failed:RuntimeError:platform_session_migration_required:zhihu "
-            "(按 docs/operations-runbook.md「T14 非小红书登录资料迁移」迁移：a -> b)"
+            "(按 docs/operations-runbook.md「T14 非小红书登录资料迁移」处理：未完成的迁移残留 p.partial，删除后重做)"
         ),
         meta={"platform": "zhihu"},
     )
@@ -183,12 +164,11 @@ def test_migration_failure_is_classified_final() -> None:
 
 
 def test_runner_refuses_before_policy_guard_and_worker(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, session_roots: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sessions: Path,
 ) -> None:
     from trippostcollect.application import collection
 
-    legacy, _ = session_roots
-    _legacy_profile(legacy, "wb_user_data_dir")
+    _partial(sessions, "weibo")
 
     def forbidden(*args, **kwargs):
         raise AssertionError("must not consume site budget or start a worker")
@@ -205,29 +185,27 @@ def test_runner_refuses_before_policy_guard_and_worker(
     assert SECRET not in json.dumps(record, ensure_ascii=False)
 
 
-def test_worker_entry_refuses_generic_platform_but_not_xhs(session_roots: tuple[Path, Path]) -> None:
+def test_worker_entry_refuses_generic_platform_but_not_xhs(sessions: Path) -> None:
     from trippostcollect.platforms import entry
 
-    legacy, _ = session_roots
-    for code in ("wb", "dy", "zhihu"):
-        _legacy_profile(legacy, f"{code}_user_data_dir")
+    for code, platform in (("wb", "weibo"), ("dy", "douyin"), ("zhihu", "zhihu")):
+        _partial(sessions, platform)
         with pytest.raises(RuntimeError, match="^platform_session_migration_required:"):
             entry.require_persistent_session_migrated(code)
-    _legacy_profile(legacy, "xhs_user_data_dir")
+    _partial(sessions, "xhs")
     entry.require_persistent_session_migrated("xhs")
 
 
 def test_warmup_refuses_before_creating_new_profile(
-    session_roots: tuple[Path, Path], tmp_path: Path,
+    sessions: Path, tmp_path: Path,
 ) -> None:
     from trippostcollect.application import warmup
 
-    legacy, sessions = session_roots
-    _legacy_profile(legacy, "bili_user_data_dir")
+    _partial(sessions, "bilibili", "cdp_profile")
     args = argparse.Namespace(browser_path=None, timeout_seconds=1)
     with pytest.raises(RuntimeError, match="^platform_session_migration_required:bilibili"):
         asyncio.run(warmup.warmup_one(None, "bilibili", tmp_path, args))
-    assert not sessions.exists()
+    assert not paths.platform_profile_dir("bilibili").exists()
 
 
 # ---------- warmup 不再依赖 fork 目录 ----------
@@ -271,7 +249,6 @@ def test_unified_warmup_runs_without_fork_directory(
     async def fake_target(playwright, target, batch_dir, args):
         return {"target": target, "ok": True, "profile_dir": str(paths.platform_profile_dir(target))}
 
-    monkeypatch.setattr(paths, "MEDIACRAWLER_DIR", tmp_path / "missing-fork")
     monkeypatch.setattr(warmup, "async_playwright", FakePlaywright)
     monkeypatch.setattr(warmup, "run_target", fake_target)
     args = argparse.Namespace(timeout_seconds=1, targets=["all"], output_dir=str(tmp_path / "out"))
@@ -344,7 +321,7 @@ def test_entry_image_root_requires_explicit_save_path(tmp_path: Path) -> None:
     ],
 )
 def test_crawler_persistent_context_uses_platform_session_profile(
-    session_roots: tuple[Path, Path], module: str, cls: str, attr: str, platform: str,
+    sessions: Path, module: str, cls: str, attr: str, platform: str,
 ) -> None:
     import importlib
 
@@ -370,7 +347,7 @@ def test_crawler_persistent_context_uses_platform_session_profile(
 
 @pytest.mark.parametrize(("share", "leaf"), [(True, "profile"), (False, "cdp_profile")])
 def test_cdp_manager_profile_follows_share_flag(
-    monkeypatch: pytest.MonkeyPatch, session_roots: tuple[Path, Path], share: bool, leaf: str,
+    monkeypatch: pytest.MonkeyPatch, sessions: Path, share: bool, leaf: str,
 ) -> None:
     from dataclasses import replace
     from unittest.mock import AsyncMock, MagicMock
@@ -378,7 +355,6 @@ def test_cdp_manager_profile_follows_share_flag(
     from support.browser_settings import BROWSER_SETTINGS
     from trippostcollect.runtime.browser import CDPBrowserManager
 
-    _, sessions = session_roots
     if share:
         monkeypatch.setenv("TRIPPOSTCOLLECT_SHARE_CDP_PROFILE", "1")
     else:
@@ -399,14 +375,7 @@ def test_cdp_manager_profile_follows_share_flag(
 # ---------- 未完成的迁移残留（.partial）失败关闭 ----------
 
 @pytest.mark.parametrize("leaf", ["profile", "cdp_profile"])
-@pytest.mark.parametrize("legacy_exists", [True, False])
-def test_partial_copy_is_refused_even_when_target_exists(
-    session_roots: tuple[Path, Path], leaf: str, legacy_exists: bool,
-) -> None:
-    legacy, sessions = session_roots
-    if legacy_exists:
-        _legacy_profile(legacy, "zhihu_user_data_dir")
-        _legacy_profile(legacy, "cdp_zhihu_user_data_dir")
+def test_partial_copy_is_refused_even_when_target_exists(sessions: Path, leaf: str) -> None:
     (sessions / "zhihu" / "profile").mkdir(parents=True)
     (sessions / "zhihu" / "cdp_profile").mkdir()
     (sessions / "zhihu" / f"{leaf}.partial").mkdir()
@@ -424,12 +393,11 @@ def _golden_argv(name: str, tmp: Path) -> list[str]:
 
 
 def test_entry_main_refuses_before_hooks_and_crawler(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, session_roots: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sessions: Path,
 ) -> None:
     from trippostcollect.platforms import entry
 
-    legacy, _ = session_roots
-    _legacy_profile(legacy, "wb_user_data_dir")
+    _partial(sessions, "weibo")
 
     def forbidden(*args, **kwargs):
         raise AssertionError("worker must refuse before hooks or crawler start")
@@ -441,7 +409,7 @@ def test_entry_main_refuses_before_hooks_and_crawler(
         entry.main(_golden_argv("weibo_search", tmp_path))
 
 
-# ---------- 未迁移 checkout 下测试隔离仍成立 ----------
+# ---------- 带残留的 checkout 下测试隔离仍成立 ----------
 
 ENTRY_PROBE = (
     "import json\n"
@@ -462,7 +430,8 @@ def _run_entry_probe(tmp_path: Path, checkout: Path, *, redirect: bool) -> subpr
     environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
     environment["PYTHONPATH"] = str(ROOT / "src")
     environment["PYTHONIOENCODING"] = "utf-8"
-    # 现有工作根机制：子进程的 core.paths 以 fake checkout 为根，其旧 fork 目录模拟 Mac 上尚未迁移的状态。
+    # 现有工作根机制：子进程的 core.paths 以 fake checkout 为根；其中的旧 fork profile 模拟删除 fork 后
+    # 磁盘残留，platform_sessions 下的 `.partial` 模拟中断的迁移。
     environment["TRIPPOST_PROJECT_ROOT"] = str(checkout)
     code = ENTRY_PROBE.format(
         redirect=child_redirect_source(tmp_path / "isolation") if redirect else "",
@@ -474,9 +443,13 @@ def _run_entry_probe(tmp_path: Path, checkout: Path, *, redirect: bool) -> subpr
     )
 
 
-def test_subprocess_entry_cases_pass_in_unmigrated_checkout(tmp_path: Path) -> None:
+def test_subprocess_entry_cases_pass_in_checkout_with_residue(tmp_path: Path) -> None:
     checkout = tmp_path / "checkout"
-    _legacy_profile(checkout / "tools/MediaCrawler/browser_data", "wb_user_data_dir")
+    _old_fork_profile(checkout, "wb_user_data_dir")
+    # 旧 fork profile 不再触发检查。
+    ignored = _run_entry_probe(tmp_path, checkout, redirect=False)
+    assert ignored.returncode == 0, ignored.stderr[-3000:]
+    _partial(checkout / "data/runtime/platform_sessions", "weibo")
     control = _run_entry_probe(tmp_path, checkout, redirect=False)
     assert control.returncode != 0
     assert "platform_session_migration_required:weibo" in control.stderr
@@ -486,7 +459,7 @@ def test_subprocess_entry_cases_pass_in_unmigrated_checkout(tmp_path: Path) -> N
     assert json.loads(isolated.stdout.strip().splitlines()[-1]) == {"code": 0}
 
 
-def test_in_process_cases_pass_in_unmigrated_checkout(
+def test_in_process_cases_pass_in_checkout_with_residue(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     from support.platform_sessions import redirect_platform_session_roots
@@ -498,9 +471,9 @@ def test_in_process_cases_pass_in_unmigrated_checkout(
     def reached(*args, **kwargs):
         raise Reached
 
-    unmigrated = tmp_path / "checkout" / "tools/MediaCrawler/browser_data"
-    for code in GENERIC.values():
-        _legacy_profile(unmigrated, f"{code}_user_data_dir")
+    residue = tmp_path / "checkout" / "data/runtime/platform_sessions"
+    for platform in GENERIC:
+        _partial(residue, platform)
     monkeypatch.setattr(collection, "_run_platform_without_policy", reached)
 
     @contextlib.contextmanager
@@ -508,8 +481,8 @@ def test_in_process_cases_pass_in_unmigrated_checkout(
         yield {}
 
     monkeypatch.setattr(collection, "site_request_guard", no_policy)
-    # 对照：不隔离时（旧根指向未迁移目录）进程内正式入口被拒绝。
-    monkeypatch.setattr(paths, "LEGACY_FORK_PROFILE_ROOT", unmigrated)
+    # 对照：不隔离时（根指向带残留的目录）进程内正式入口被拒绝。
+    monkeypatch.setattr(paths, "PLATFORM_SESSIONS_ROOT", residue)
     record = collection.run_platform("douyin", argparse.Namespace(keyword="青岛"), tmp_path / "a", ports=None)
     assert record["failure_classification"]["reason"] == "platform_session_migration_required:douyin"
     # conftest 使用的同一重定向恢复隔离后，进程内用例越过检查进入原有流程。
@@ -520,8 +493,7 @@ def test_in_process_cases_pass_in_unmigrated_checkout(
         collection.run_platform("douyin", argparse.Namespace(keyword="青岛"), tmp_path / "b", ports=None)
 
 
-def test_dangling_partial_symlink_is_refused(session_roots: tuple[Path, Path]) -> None:
-    _, sessions = session_roots
+def test_dangling_partial_symlink_is_refused(sessions: Path) -> None:
     (sessions / "weibo" / "profile").mkdir(parents=True)
     partial = sessions / "weibo" / "profile.partial"
     partial.symlink_to(sessions / "weibo" / "missing-target")

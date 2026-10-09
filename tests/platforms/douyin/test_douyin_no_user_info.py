@@ -1,8 +1,8 @@
 """抖音作者字段边界回归：SQLite 直接执行冻结旧列契约。
 
 用例名沿用测试台账登记的 node ID。#49 起作品（根实现）的 creator_hash 为平台原始 uid、nickname
-为原始昵称，sec_uid/short_id/unique_id/头像/签名/IP 归属地仍不得写出；评论属 T12 退出切片，
-只经 fork 旧 store 投影，仍断言其旧的哈希/脱敏行为，随旧桥在 T14 删除。
+为原始昵称，sec_uid/short_id/unique_id/头像/签名/IP 归属地仍不得写出。评论属 T12 退出切片，
+原先只验证冻结旧评论投影哈希/脱敏行为的 test_douyin_comment_masks_user_info 随旧身份函数在 T14-C 删除。
 """
 import asyncio
 
@@ -12,7 +12,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from support.douyin import config, douyin_store as ds
-from trippostcollect.records.identity import anonymize_user_id, mask_nickname
 
 LEGACY_COLUMNS = json.loads((Path(__file__).parents[2] / "fixtures/adapter_t06/legacy_columns.json").read_text())
 
@@ -81,33 +80,6 @@ def _build_aweme_item() -> dict:
     }
 
 
-def _build_comment_item() -> dict:
-    """贴近真实抖音结构的 mock comment_item。aweme_id 须与传入
-    update_dy_aweme_comment 的 aweme_id 一致。"""
-    return {
-        "aweme_id": "7234567890123456",
-        "cid": "1111111111",
-        "text": "这是一条评论内容",
-        "create_time": 1700000001,
-        "reply_id": "0",
-        "reply_comment_total": 2,
-        "digg_count": 5,
-        "ip_label": "北京",  # IP 归属地,禁用
-        "user": {
-            "uid": "555666777",
-            "sec_uid": "MS4wLjABBBBCommentSecUid",
-            "short_id": "22233344",
-            "unique_id": "commenter_unique_xyz",
-            "nickname": "评论员小王",
-            "avatar_medium": {"url_list": ["http://x/cavatar.jpg"]},
-            "signature": "评论员个人签名内容",
-        },
-        "image_list": [
-            {"origin_url": {"url_list": ["", "http://x/cimg.jpg"]}},
-        ],
-    }
-
-
 # ----------------------------- 辅助 -----------------------------
 
 class _FakeStore:
@@ -115,13 +87,9 @@ class _FakeStore:
 
     def __init__(self):
         self.contents = []
-        self.comments = []
 
     async def store_content(self, content_item):
         self.contents.append(dict(content_item))
-
-    async def store_comment(self, comment_item):
-        self.comments.append(dict(comment_item))
 
 
 def _patch_factory(fake):
@@ -138,7 +106,7 @@ def _assert_no_forbidden(captured: dict, label: str):
 
 def _assert_raw_values_absent(captured: dict, raw_values, label: str):
     """禁用的原始值(sec_uid/short_id/unique_id/头像/签名/IP 等)不得出现在任何存储值里。
-    creator_hash 单独断言(作品为原始 uid,旧评论投影为哈希),不参与子串扫描。"""
+    creator_hash 单独断言(作品为原始 uid),不参与子串扫描。"""
     leaked = []
     for rv in raw_values:
         if not rv:
@@ -204,52 +172,6 @@ def test_douyin_aweme_masks_user_info():
     assert captured.get("comment_count") == "20"
     assert captured.get("share_count") == "3"
     assert captured.get("aweme_url") == f"https://www.douyin.com/video/{aweme['aweme_id']}"
-
-
-def test_douyin_comment_masks_user_info():
-    """退出切片的 fork 旧评论投影：不含禁用键，仍按旧行为哈希 uid、脱敏昵称。"""
-    aweme_id = "7234567890123456"
-    comment = _build_comment_item()
-    raw_uid = comment["user"]["uid"]
-    raw_nick = comment["user"]["nickname"]
-    raw_sensitive = [
-        raw_uid,
-        comment["user"]["sec_uid"],
-        comment["user"]["short_id"],
-        comment["user"]["unique_id"],
-        comment["user"]["avatar_medium"]["url_list"][0],
-        comment["user"]["signature"],
-        comment["ip_label"],
-    ]
-
-    fake = _FakeStore()
-    orig = _patch_factory(fake)
-    try:
-        asyncio.run(ds.update_dy_aweme_comment(aweme_id, comment))
-    finally:
-        ds.DouyinStoreFactory.create_store = orig
-
-    assert len(fake.comments) == 1
-    captured = fake.comments[0]
-
-    _assert_no_forbidden(captured, "douyin_comment")
-    _assert_raw_values_absent(captured, raw_sensitive, "douyin_comment")
-
-    assert captured.get("creator_hash")
-    assert captured["creator_hash"] != raw_uid
-    assert captured["creator_hash"] == anonymize_user_id(raw_uid)
-    assert captured.get("nickname")
-    assert captured["nickname"] != raw_nick
-    assert captured["nickname"] == mask_nickname(raw_nick)
-
-    # 评论内容/ID 保留
-    assert captured.get("content") == comment["text"]
-    assert captured.get("comment_id") == comment["cid"]
-    assert captured.get("aweme_id") == aweme_id
-    assert captured.get("parent_comment_id") == "0"
-    assert captured.get("sub_comment_count") == "2"
-    # 评论图片提取
-    assert captured.get("pictures") == "http://x/cimg.jpg"
 
 
 def test_douyin_store_end_to_end_sqlite(monkeypatch):
@@ -332,23 +254,4 @@ def test_douyin_store_end_to_end_sqlite(monkeypatch):
     # captured 的所有 key 都是合法 ORM 列(无悬空 key)
     assert set(captured.keys()).issubset(orm_cols), (
         f"captured 含非 ORM 列: {set(captured.keys()) - orm_cols}"
-    )
-
-    # 评论(fork 旧投影，退出切片)同样做一次 ORM 构造校验(证明 comment dict key 对得上)
-    comment = _build_comment_item()
-    fake_c = _FakeStore()
-    orig_c = _patch_factory(fake_c)
-    try:
-        asyncio.run(ds.update_dy_aweme_comment(comment["aweme_id"], comment))
-    finally:
-        ds.DouyinStoreFactory.create_store = orig_c
-    captured_comment = fake_c.comments[0]
-    comment_obj = checked_record(LEGACY_COLUMNS["DouyinAwemeComment"], captured_comment)  # 不抛异常即对得上
-    assert comment_obj.comment_id == comment["cid"]
-    assert comment_obj.creator_hash == anonymize_user_id(comment["user"]["uid"])
-    assert comment_obj.nickname == mask_nickname(comment["user"]["nickname"])
-    _assert_no_forbidden(captured_comment, "douyin_comment_orm_construct")
-    comment_orm_cols = set(LEGACY_COLUMNS["DouyinAwemeComment"])
-    assert set(captured_comment.keys()).issubset(comment_orm_cols), (
-        f"captured_comment 含非 ORM 列: {set(captured_comment.keys()) - comment_orm_cols}"
     )

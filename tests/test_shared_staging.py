@@ -1,19 +1,15 @@
-"""四站暂存和内容出口与固定 Git 基线逐字节对照；不启动抓取。"""
+"""四站暂存和内容出口与固定 Git 基线逐字节对照；不启动抓取。
+
+Git 基线类（tests/golden/shared_staging.json 原文）在 fork 包上的运行结果已在 T14 删除 fork 前固化到
+tests/fixtures/t14_legacy_expectations/shared_staging；根侧只运行根入口装配的出口并与之比较。
+"""
 
 from __future__ import annotations
 
 import ast
 import asyncio
-from hashlib import sha256
-import importlib
-import importlib.util
-import inspect
 from io import BytesIO
-import json
-import os
 from pathlib import Path
-import subprocess
-import sys
 from unittest.mock import patch
 
 from PIL import Image, UnidentifiedImageError
@@ -33,34 +29,6 @@ PLATFORMS = {
     "zhihu": ("zhihu", "ZhihuStoreImage", "ZhihuJsonlStoreImplement", "content_id"),
     "xhs": ("xhs", "XiaoHongShuImage", "XhsJsonlStoreImplement", "note_id"),
 }
-
-
-def _baseline(name, directory):
-    """原类取自 Git show，保留原文；纯源码副本使用同一提交快照。"""
-    snapshot = json.loads((ROOT / "tests/golden/shared_staging.json").read_text())
-    entry = snapshot["classes"][name]
-    source = entry["preamble"] + '''
-from __future__ import annotations
-from pathlib import Path
-from typing import Dict, List
-import config
-from base.base_crawler import AbstractStore, AbstractStoreImage
-from tools import utils
-from tools.async_file_writer import AsyncFileWriter
-from tools.image_manifest import (
-    ImageAsset, failed_manifest_row, stage_post_images, upsert_manifest_rows_atomic,
-    weibo_source_asset_key, douyin_source_asset_key, zhihu_source_asset_key,
-    xhs_source_asset_key,
-)
-from trippostcollect.core.paths import MEDIACRAWLER_DIR
-from var import crawler_type_var
-''' + entry["source"]
-    path = directory / f"baseline_{name}.py"
-    path.write_text(source, encoding="utf-8")
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return getattr(module, name)
 
 
 def _tree(directory):
@@ -92,16 +60,6 @@ def _raster(kind, color="blue"):
     output = BytesIO()
     Image.new("RGB", (8, 6), color=color).save(output, format=kind)
     return output.getvalue()
-
-
-async def _images(cls, directory, id_keyword):
-    """fork/基线类：经 fork config 设暂存根，经 fork utils.logger 捕获日志。"""
-    import config
-    from tools import utils
-
-    config.SAVE_DATA_PATH = str(directory)
-    return await _stage_images(cls, directory, id_keyword,
-                               lambda sink: patch.object(utils.logger, "info", side_effect=sink))
 
 
 async def _stage_images(make_store, directory, id_keyword, capture_logs):
@@ -175,142 +133,6 @@ async def _stage_images(make_store, directory, id_keyword, capture_logs):
         errors.append((type(caught.value).__name__, str(caught.value), caught.value.code))
     assert not any(".part" in path for path in _tree(directory))
     return returned, errors, logs
-
-
-async def _jsonl(cls, directory):
-    import config
-    from tools.utils import utils
-    from var import crawler_type_var
-
-    config.SAVE_DATA_PATH = str(directory)
-    token = crawler_type_var.set("search")
-    try:
-        sink = cls()
-        assert isinstance(sink, ContentSink)
-        writer = sink.file_writer if hasattr(sink, "file_writer") else sink.writer
-        assert isinstance(writer, JsonlWriter)
-        assert writer.crawler_type == "search"
-        avatar = "https://image.example/avatar.jpg"
-        item = {
-            "id": "青岛-1", "text": "青岛图文\n正文", "author": {
-                "name": "作者", "avatar_url": avatar, "duplicate": avatar,
-                "followers_count": 12,
-            }, "images": [avatar, "https://image.example/body.jpg"],
-        }
-        with patch.object(utils, "get_current_date", return_value="2026-09-30"):
-            assert await sink.store_content(item) is None
-            assert await sink.store_content(item) is None
-            payload = next(directory.glob("*/jsonl/*.jsonl")).read_bytes()
-            assert len(payload.splitlines()) == 2
-            assert avatar.encode() not in payload
-            assert b"avatar_url" not in payload
-            assert "作者".encode() in payload
-            # 原构造时捕获 crawler_type；目录和日期在写出时读取。
-            crawler_type_var.set("detail")
-            config.SAVE_DATA_PATH = str(directory / "changed")
-            with patch.object(utils, "get_current_date", return_value="2026-10-01"):
-                await sink.store_content(item)
-            await sink.store_comment(item)
-            await sink.store_creator(item)
-        if hasattr(sink, "flush"):
-            assert sink.flush() is None
-        assert item["author"]["avatar_url"] == avatar
-    finally:
-        crawler_type_var.reset(token)
-
-
-def _exercise(platform, directory):
-    """真实装配四站入口，构造 store；不构造 crawler 实例或调用 start。"""
-    from trippostcollect.platforms.entry import configure, install_hooks, load_crawler
-
-    code, image_name, jsonl_name, id_keyword = PLATFORMS[platform]
-    commands = json.loads((ROOT / "tests/golden/t02_worker_commands.json").read_text())
-    scenario = {"weibo": "weibo_search", "douyin": "douyin_search_discovery",
-                "zhihu": "zhihu_search", "xhs": "xhs_search_qrcode"}[platform]
-    argv = [part.replace("<TMP>", str(directory)) for part in commands[scenario]["cmd"][4:]]
-    configure(argv)
-    # T12：新入口不再装载 fork；旧桥 store 对照经过渡装载点显式加载。
-    from trippostcollect.platforms import _fork_bridge
-    _fork_bridge.install()
-    install_hooks()
-    crawler = load_crawler(code)
-    assert inspect.isclass(crawler)
-    image_cls = getattr(importlib.import_module(f"store.{platform}.{platform}_store_media"), image_name)
-    jsonl_cls = getattr(importlib.import_module(f"store.{platform}._store_impl"), jsonl_name)
-    baseline_image = _baseline(image_name, directory)
-    baseline_jsonl = _baseline(jsonl_name, directory)
-    for new, old, methods in (
-        (image_cls, baseline_image, ("__init__", "store_post_images", "record_failure")),
-        (jsonl_cls, baseline_jsonl, ("__init__", "store_content", "store_comment", "store_creator")),
-    ):
-        for method in methods:
-            # 原模块的 future import 不统一；参数名称、种类与默认值才是调用契约。
-            def parameters(cls):
-                return [
-                    (p.name, p.kind, p.default)
-                    for p in inspect.signature(getattr(cls, method)).parameters.values()
-                ]
-            assert parameters(new) == parameters(old)
-    old_root, new_root = directory / "baseline", directory / "new"
-    old_images = asyncio.run(_images(baseline_image, old_root, id_keyword))
-    assert old_images == asyncio.run(_images(image_cls, new_root, id_keyword))
-    old_tree_after_images = _tree(old_root)
-    assert old_tree_after_images == _tree(new_root)
-    asyncio.run(_jsonl(baseline_jsonl, old_root))
-    asyncio.run(_jsonl(jsonl_cls, new_root))
-    assert _tree(old_root) == _tree(new_root)
-    # 默认目录只检查属性，绝不访问真实目录或写出默认产物。
-    import config
-    config.SAVE_DATA_PATH = ""
-    assert baseline_image().save_data_root == image_cls().save_data_root
-    # T14：基线类（Git 快照原文）的结果另行写出，供守卫与固化预期逐字节比较。
-    legacy_view = expectations.scrub({
-        "images": old_images, "tree_after_images": old_tree_after_images,
-        "tree_after_jsonl": _tree(old_root), "default_save_data_root": str(baseline_image().save_data_root),
-    }, (directory, "<TMP>"))
-    (directory / "legacy_view.json").write_text(expectations.dumps(legacy_view), encoding="utf-8")
-    result = {
-        "platform": platform, "crawler": crawler.__name__, "start_called": False,
-        "files": {path: sha256(data).hexdigest() for path, data in _tree(new_root).items() if data is not None},
-    }
-    (directory / "comparison.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
-    print(json.dumps({"platform": platform, "files": len(result["files"]), "equal": True}))
-
-
-@expectations.legacy_only
-@pytest.mark.parametrize("platform", PLATFORMS)
-def test_four_platforms_match_baseline_after_entry_setup(platform, tmp_path):
-    _run_exercise(platform, tmp_path)
-
-
-def _run_exercise(platform, tmp_path):
-    # 子进程避免 fork config/tools 包污染其他根测试；只绑定当前副本的根 src 与测试辅助。
-    env = dict(
-        os.environ, PYTHONPATH=os.pathsep.join((str(ROOT / "src"), str(ROOT / "tests"))),
-        PYTHONDONTWRITEBYTECODE="1", TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS="1",
-    )
-    program = (
-        "import runpy, sys; from pathlib import Path; "
-        "runpy.run_path(sys.argv[1])['_exercise'](sys.argv[2], Path(sys.argv[3]))"
-    )
-    result = subprocess.run(
-        [sys.executable, "-P", "-c", program, str(Path(__file__).resolve()), platform, str(tmp_path)],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120,
-    )
-    assert result.returncode == 0, result.stderr[-6000:]
-    assert json.loads(result.stdout.strip().splitlines()[-1])["equal"] is True
-
-
-@expectations.legacy_guard
-@pytest.mark.parametrize("platform", PLATFORMS)
-def test_t14_guard_baseline_staging(platform, tmp_path, pytestconfig):
-    """Git 基线类在 fork 包上的当场结果与固化预期逐字节一致；根侧比较见下方根用例。"""
-    _run_exercise(platform, tmp_path)
-    view = expectations.decode(json.loads((tmp_path / "legacy_view.json").read_text(encoding="utf-8")))
-    expectations.check_legacy(
-        pytestconfig, *T14_STAGING, platform, view,
-        source_test="tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup",
-    )
 
 
 T14_STAGING = ("shared_staging", "baseline_classes")

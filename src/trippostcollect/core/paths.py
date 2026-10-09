@@ -30,7 +30,6 @@ DOCS_ROOT = PROJECT_ROOT / "docs"
 DATA_ROOT = PROJECT_ROOT / "data"
 OUTPUTS_ROOT = PROJECT_ROOT / "outputs"
 TEMP_ROOT = PROJECT_ROOT / "temp"
-TOOLS_ROOT = PROJECT_ROOT / "tools"
 RUNTIME_ROOT = DATA_ROOT / "runtime"
 LOCAL_MEDIA_ROOT = DATA_ROOT / "media"
 
@@ -40,11 +39,8 @@ XHS_TARGET_CONFIG = CONFIG_ROOT / "xhs_targets.json"
 XHS_POOL_CONFIG = CONFIG_ROOT / "xhs_pool.json"
 FORMAL_CRAWL_CONTRACT = DOCS_ROOT / "formal-crawl-contract.md"
 
-MEDIACRAWLER_DIR = TOOLS_ROOT / "MediaCrawler"
 PLATFORM_PROFILE_CODES = {"bilibili": "bili", "weibo": "wb", "douyin": "dy", "zhihu": "zhihu", "xhs": "xhs"}
 COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
-# 仅用于 T14 迁移失败关闭检查：识别 fork 下尚未迁移的旧非小红书 profile；T14 删除批随 fork 一并移除。
-LEGACY_FORK_PROFILE_ROOT = MEDIACRAWLER_DIR / "browser_data"
 PLATFORM_SESSION_MIGRATION_REQUIRED = "platform_session_migration_required"
 MEDIACRAWLER_RUNS_OUTPUT = OUTPUTS_ROOT / "mediacrawler_runs"
 MEDIACRAWLER_LOGIN_OUTPUT = OUTPUTS_ROOT / "mediacrawler_login_warmup"
@@ -126,29 +122,19 @@ def platform_cookie_snapshot_path(platform_key: str) -> Path:
     return platform_session_dir(platform_key) / COOKIE_SNAPSHOT_FILENAME
 
 
-def legacy_fork_profile_dirs(platform_key: str) -> tuple[tuple[Path, Path], ...]:
-    """仅供迁移检查：旧 fork profile 与新位置的一一对应（普通、CDP 独立两种）。"""
-    code = PLATFORM_PROFILE_CODES[_persistent_session_platform(platform_key)]
-    return (
-        (LEGACY_FORK_PROFILE_ROOT / f"{code}_user_data_dir", platform_profile_dir(platform_key)),
-        (LEGACY_FORK_PROFILE_ROOT / f"cdp_{code}_user_data_dir", platform_cdp_profile_dir(platform_key)),
-    )
-
-
 def require_platform_session_migrated(platform_key: str) -> None:
-    """失败关闭：旧 fork profile 仍在而新 profile 不存在、或留有未完成的 `.partial` 复制时拒绝启动。
+    """失败关闭：新位置留有未完成复制的 `profile.partial`/`cdp_profile.partial` 时拒绝启动。
 
-    不回退旧位置。两者都不存在时按首登流程由调用方创建新目录；新 profile 已存在且无残留时直接通过。
-    错误只给出平台与目录，不读取或输出任何 Cookie。
+    `.partial` 只由 T14 登录资料迁移在复制中途失败时留下；残留说明迁移未完成，不得在其旁边
+    按首登流程新建 profile。新 profile 不存在且无残留时由调用方按首登流程创建。错误只给出平台与
+    目录，不读取或输出任何 Cookie。
     """
     problems = []
-    for legacy, target in legacy_fork_profile_dirs(platform_key):
+    for target in (platform_profile_dir(platform_key), platform_cdp_profile_dir(platform_key)):
         partial = target.with_name(f"{target.name}.partial")
         # 悬空符号链接 exists() 为 False，也必须视为残留。
         if partial.exists() or partial.is_symlink():
             problems.append(f"未完成的迁移残留 {partial}，删除后重做")
-        elif legacy.exists() and not target.exists():
-            problems.append(f"{legacy} -> {target}")
     if problems:
         raise RuntimeError(
             f"{PLATFORM_SESSION_MIGRATION_REQUIRED}:{platform_key} "

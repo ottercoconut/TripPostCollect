@@ -17,15 +17,15 @@
     },
     {
       "path": "docs/crawl-architecture.md",
-      "sha256": "0c85c185c63c212e7d87fa73515b78946ddfd4493af73af8e064fde0122d56b1",
-      "reason": "用户授权更新并重新冻结的五平台抓取与正文图片本地化架构基线",
+      "sha256": "bbd9c07fb4f7fcd79b8ba5097a17e779ec8ee9585ec047953a1738a35125b5f1",
+      "reason": "用户授权更新并重新冻结的五平台抓取与正文图片本地化架构基线；T14（#19）删除 fork 后经用户授权同步更新并重新冻结",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
     },
     {
       "path": "docs/data-persistence.md",
-      "sha256": "4b57835c24521e5a282ee5d20f901f12a322412dc2625f98d541838acdd23d39",
-      "reason": "用户授权更新并重新冻结的正文图片本地路径、事务和校验规范",
+      "sha256": "e20186f94209609fbdca8c907ea898cec6643008a8970466a8428a1fe9571fe0",
+      "reason": "用户授权更新并重新冻结的正文图片本地路径、事务和校验规范；T14（#19）删除 fork 后经用户授权同步更新并重新冻结",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
     }

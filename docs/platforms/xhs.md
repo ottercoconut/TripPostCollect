@@ -69,7 +69,7 @@ python scripts/xhs_accounts.py list
 - pool schema v2 与 target schema v3 配置没有旧开关或数量控制字段。
 - checkpoint 引用的累计摘要及全部 JSONL 仍存在。
 
-缺少任一前提即停止，不直接调用 MediaCrawler 探测或绕过门禁。
+缺少任一前提即停止，不直接调用平台 worker 探测或绕过门禁。
 
 `xhs_account_leases` 同时记录 `lease_id`、不可公开的 `owner_token`、账号、run、租约类型、host/boot
 ID、owner PID、owner 进程启动时间和启动 token、PGID、execution state 路径，以及取得、心跳、计划

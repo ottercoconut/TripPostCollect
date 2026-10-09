@@ -62,20 +62,8 @@ def append_and_publish(
 
 
 def append_worker_execution_event(event_type: str, details: dict[str, Any]) -> None:
-    """fork 保留同名可 patch 出口；持久化失败仍沿 legacy 吞错边界。"""
+    """worker 事件出口（原 fork 同名可 patch 出口）；持久化失败仍沿 legacy 吞错边界。"""
     append_and_publish(
         event_type, details, original=append_execution_event, publish_batch=_batch_publisher,
     )
 
-
-def install_batch_checkpoint_hook(adaptive: Any, *, publish_batch: Callable) -> None:
-    """仅供在途旧桥安装原包装；正式 worker 使用显式发布出口。"""
-    if getattr(adaptive, "_trippostcollect_batch_checkpoint", False):
-        return
-    original = adaptive.append_execution_event
-
-    def append_and_checkpoint(event_type: str, details: dict[str, Any]) -> None:
-        append_and_publish(event_type, details, original=original, publish_batch=publish_batch)
-
-    adaptive.append_execution_event = append_and_checkpoint
-    adaptive._trippostcollect_batch_checkpoint = True

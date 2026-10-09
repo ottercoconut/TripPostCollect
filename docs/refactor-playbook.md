@@ -32,21 +32,21 @@
    - 阅读 issue、规格 G 节中该卡的行，以及台账中卡号为该卡的全部行。
    - 运行台账四项检查：`symbols --check`、`inputs --check`、`drift`（必须为空）、`progress`（missing 必须为 0）。
    - 确认前置卡的 PR 状态：不仅看 PR 是否已合并，还要确认其内容已经进入 main（见第 7 节）。
-2. **准备工作区**：按第 7 节建 worktree、独立环境与冻结标志，并确定 fork 的基点提交。
+2. **准备工作区**：按第 7 节建 worktree、独立环境与冻结标志。
 3. **验收测试**
    - 实施方起草，协调者审查。审查重点：该卡的风险点是否都被覆盖；实现之前是否确实失败；能否拦住回归。
    - 凡是"与旧实现等价"的要求，都要在改动前用旧实现捕获基线（命令、配置写入、事件序列、返回值等），存到 `tests/golden/`，新实现逐项比对。
 4. **实现**：实施方按派发说明实现，运行闸门脚本，写审查包。
 5. **审查**：协调者读闸门摘要和审查包，按第 5 节的风险等级抽查代码。有问题就在同一个实施会话里续派修正，直到通过。
-6. **提交**：按第 8 节，先提交 fork，再按主题分批提交根仓库，然后开 PR（写明合并顺序），并在 issue 上评论进度。
+6. **提交**：按第 8 节按主题分批提交，然后开 PR（写明合并顺序），并在 issue 上评论进度。
 7. **收尾**：更新交接说明，按第 10 节的格式汇报。
 
 ## 4. 验证：卡片闸门
 
 每张卡的复核以闸门脚本（`scripts/dev/card_gate.py`）的输出为准。一条命令跑完，只输出摘要。
 在工作树激活独立环境后运行下例；省略 `--card` 时自动选择原定义发生变化的台账行。
-基线缓存位于 `<git common dir>/card-gate/baseline-<根提交>-<fork提交>.json`，
-闸门代码或 fork 解释器路径变化会重算，也可用 `--refresh-baseline` 强制刷新。
+基线缓存位于 `<git common dir>/card-gate/baseline-<根提交>-<fork提交或nofork>.json`（T14 删除 fork 后为 `nofork`），
+闸门代码变化会重算，也可用 `--refresh-baseline` 强制刷新。
 退出码为 0（通过）、1（未通过或跳过测试的部分验收）、2（预检、canary 等自身错误）。
 详细 JSON 与摘要写入本次临时目录，`--keep` 可保留源码副本。
 
@@ -59,7 +59,7 @@ python scripts/dev/card_gate.py \
 
 过渡期逐项运行的做法已由闸门脚本替代，复核项目与结论口径如下。
 
-- **测试**：在临时源码副本（`adapter_ledger.py make-source`）中，于沙箱内运行 component、installation、os 三组，以及 fork 离线测试。
+- **测试**：在临时源码副本（`adapter_ledger.py make-source`）中，于沙箱内运行 component、installation、os 三组；fork 离线测试只在基线与本次都有 fork gitlink 且离线清单非空时运行，T14 删除 fork 后不再运行。
   - 与基线比较的是**失败集合**，不是通过数量：macOS 本机沙箱会限制 `ps`，os 组固定有少量失败，只要失败集合不变即可；Linux 沙箱不限制 `ps`。
   - 最终的 OS 结论以 CI 托管 VM 为准。
 - **台账四项检查**。
@@ -71,7 +71,7 @@ Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linu
 
 - 禁止网络；
 - 禁止启动任何浏览器进程，以及桌面打开器（macOS `open`、`osascript`，Linux `xdg-open` 等）；
-- 禁止写入真实的 `data/`（含 T14 起的 `data/runtime/platform_sessions/`）、`outputs/`，以及迁移期旧 `tools/MediaCrawler/browser_data`；
+- 禁止写入真实的 `data/`、`outputs/`，并禁止读写真实平台登录资料 `data/runtime/platform_sessions/`；
 - 禁止读写本机 Chrome 与 Chrome for Testing 的用户数据目录；
 - 子孙进程继承以上限制。
 
@@ -83,7 +83,7 @@ Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linu
 
 实施方在 worktree 中写 `temp/<卡>-review.md`（不提交），固定包含：
 
-1. 改动文件清单，根仓库与 fork 分开列；
+1. 改动文件清单；
 2. 每一处与原实现的差异，写明理由和所属的允许类别；
 3. 依赖方向检查结果；
 4. 与规格的偏离、未完成项、疑点；
@@ -112,9 +112,9 @@ Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linu
   - runtime 不得导入 application（`application.contracts` 除外）、artifacts、platforms 或任何 scripts 模块；
   - application 不得导入 platforms 的实现；
   - 遇到反向依赖，用注入回调切断，或把纯函数下沉；不得隐式同步全局变量。
-- 过渡期只允许一个显式装载点把 fork 目录与 scripts 加入 `sys.path`（`platforms/_fork_bridge.py`）；T12 起正式入口与五站装配不再调用，模块仅供旧桥与对照测试使用，T14 随旧桥删除。
-  不使用 PYTHONPATH，不依赖 cwd。worker 以根解释器 `-P -m trippostcollect.platforms.entry` 启动，cwd 为项目根。
-- 旧桥（`scripts/mediacrawler_export_entrypoint.py`、fork 的 `main.py` 与 `cmd_arg/`）保留到 T14 才删除，期间行为不得改变。
+- 过渡期曾只允许一个显式装载点把 fork 目录与 scripts 加入 `sys.path`（`platforms/_fork_bridge.py`），T14 已随旧桥删除；
+  现不得向 `sys.path` 插入目录，不使用 PYTHONPATH，不依赖 cwd。worker 以根解释器 `-P -m trippostcollect.platforms.entry` 启动，cwd 为项目根。
+- 旧桥（`scripts/mediacrawler_export_entrypoint.py`、fork 的 `main.py` 与 `cmd_arg/`）保留到 T14，期间行为未改变；T14 已删除。
 - 旧位置保留外部同名入口时，采用薄转发或重导出，调用点尽量零改动；不得在旧位置保留第二份权威实现。
 - 冻结文件（`config/frozen_files.json` 登记的资产）不得修改；台账 JSON 不得手改；CLI 参数与 `TRIPPOSTCOLLECT_*` 环境变量名不得新增或删除。
 - T14 起非小红书 profile 与 Cookie 快照位于 `core.paths` 定义的 `data/runtime/platform_sessions/<platform>/`，快照文件名（`trippostcollect_cookie_snapshot.json`）不变；真实目录由操作人按运行手册迁移。代码与测试不读取、不移动真实 profile 与数据。
@@ -123,10 +123,8 @@ Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linu
 
 - 互不依赖的卡并行进行，每张卡一个 git worktree、一个实施会话。每个 worktree 都要做到：
   - 独立环境：`uv sync --locked --extra dev --python 3.12`（与 CI 一致；未指定时 uv 可能选到更高版本）；
-  - 子模块初始化后，远端名为 `origin`；
   - 核对冻结文件哈希一致后，补上不可变标志：macOS `chflags uchg`，Linux `sudo chattr +i`。新建的 worktree 不会带这个标志，缺了 pre-commit 会失败。
 - 判断能否并行，看台账中两张卡的来源文件是否重叠，以及是否存在跨卡依赖的定义。有重叠就按顺序叠加。
-- **fork 线性化**：后一张卡的 fork 分支基于前一张卡的 fork 提交；fork 分支合入 fork 主线之前不得删除，否则子模块指针会失效。
 - **根 PR 叠加**：后一张卡以前一张卡的分支作为 base，并在 PR 中写明"先合并 #X"。
   - 操作人只合并 base 为 main 的 PR。叠加 PR 的 base 仍是另一功能分支时，合并只会进入那个分支，内容不会进入 main。
   - 前一个 PR 被 squash 合并后，协调者把叠加分支 rebase 到 main（`git rebase --onto main <原 base>`），
@@ -139,9 +137,9 @@ Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linu
 
 ## 8. 版本控制规范
 
-- commit、PR、issue、汇报全部使用中文。commit 沿用现有格式 `type(范围): 描述`，例如 `refactor(运行时)`、`docs(架构)`、`chore(台账)`、`build(依赖)`。fork 提交也使用中文。
+- commit、PR、issue、汇报全部使用中文。commit 沿用现有格式 `type(范围): 描述`，例如 `refactor(运行时)`、`docs(架构)`、`chore(台账)`、`build(依赖)`。
 - commit、PR、issue 中不加任何署名行或生成标记，即使工具默认要求添加也不加。
-- 不直接推送 main，不启用自动合并；PR 由操作人合并。推送只涉及功能分支与 fork 的专用分支。
+- 不直接推送 main，不启用自动合并；PR 由操作人合并。推送只涉及功能分支。
 - 暂存时按文件逐个添加，不整目录添加；`temp/` 下的产物不提交。
 - PR 描述包含：关联 issue、合并顺序、改动摘要、等价性说明、验证命令与计数、偏离说明。PR 标题控制在 70 字符以内。
 
@@ -165,7 +163,6 @@ Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linu
 - **执行会话汇报格式**（同时写入交接说明）：
   - 卡号与状态（完成 / 停在刹车点）；
   - PR 编号与合并顺序；
-  - fork 分支与提交；
   - 闸门摘要；
   - 偏离与遗留；
   - 需要操作人做什么；
@@ -192,14 +189,14 @@ Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linu
 ```text
 你是平台适配重构 <卡号>（issue #<编号>）的执行会话。
 先读 docs/refactor-playbook.md 与 .git/platform-adapter-handoff.md，严格按第 3 节"单卡标准流程"完成本卡。
-基点：根分支 <分支或 main>，fork 基点 <提交>；需叠加的前置 PR：<#编号或无>；可与本卡并行的卡：<卡号或无>。
+基点：根分支 <分支或 main>；需叠加的前置 PR：<#编号或无>；可与本卡并行的卡：<卡号或无>。
 完成或命中刹车时，按第 10 节格式汇报，并更新交接说明。
 ```
 
 **实施方派发说明的固定前置约束**（每次派发都放在最前面）：
 
 ```text
-- 只改指定 worktree 的工作树；不执行任何 git 写操作（包括子模块）。
+- 只改指定 worktree 的工作树；不执行任何 git 写操作。
 - 使用该 worktree 的独立环境；所有 pytest 与可能启动子进程的命令必须经沙箱运行；完整测试只在临时源码副本中运行。
 - 不修改冻结文件与台账 JSON；不访问网络平台、不启动浏览器、不读写真实 profile 与数据。
 - 不新增 CLI 参数或 TRIPPOSTCOLLECT_* 环境变量名；不改行为、wire、指纹、schema、签名、HTTP 客户端、浏览器 driver。

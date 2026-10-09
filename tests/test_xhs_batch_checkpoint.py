@@ -16,7 +16,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from support import legacy_expectations as expectations
 
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.xhs import batch_checkpoint as batch
@@ -447,7 +446,8 @@ def test_batch_snapshot_files_do_not_duplicate_live_export_counts(scenario: Simp
     assert output["jsonl_files"] == [str(s.contents)]
 
 
-@pytest.mark.parametrize("bridge", ["worker", pytest.param("legacy", marks=expectations.legacy_only_marks())])
+# 旧桥参数随 fork/E 在 T14-C 删除；保留 worker 参数 id 使用例名不变。
+@pytest.mark.parametrize("bridge", ["worker"])
 @pytest.mark.parametrize("enabled", ["1", "0"])
 @pytest.mark.parametrize("failure", ["", "xhs_batch_checkpoint_ack_timeout", "other"])
 def test_worker_checkpoint_exit_order_and_failures(tmp_path, bridge, enabled, failure):
@@ -483,18 +483,11 @@ entry.configure([
     "--headless", "false", "--save_data_option", "jsonl", "--save_data_path", str(Path.cwd()),
     "--start", "1", "--max_concurrency_num", "1", "--enable_ip_proxy", "false",
 ])
-if bridge == "worker":
-    # T14：worker 侧直接用根事件出口（fork tools.trippostcollect_adaptive 原即重导出此函数）。
-    entry.install_hooks()
-    from trippostcollect.application.events import append_worker_execution_event
-    adaptive = SimpleNamespace(append_execution_event=append_worker_execution_event)
-else:
-    # 旧桥 E 的 hook 包裹 fork 模块全局出口，经过渡装载点显式加载；T14-C 随旧桥删除。
-    from trippostcollect.platforms import _fork_bridge
-    _fork_bridge.install()
-    from mediacrawler_export_entrypoint import install_batch_checkpoint_hook
-    install_batch_checkpoint_hook()
-    from tools import trippostcollect_adaptive as adaptive
+assert bridge == "worker"
+# T14：worker 侧直接用根事件出口（fork tools.trippostcollect_adaptive 原即重导出此函数）。
+entry.install_hooks()
+from trippostcollect.application.events import append_worker_execution_event
+adaptive = SimpleNamespace(append_execution_event=append_worker_execution_event)
 adaptive.append_execution_event("unrelated", {})
 details = {"platform": "xhs", "batch_complete": True, "source_has_more": True}
 expected_detail = (failure if failure.startswith("xhs_batch_checkpoint_")
@@ -591,70 +584,6 @@ def test_worker_explicit_checkpoint_uses_real_publisher_and_ack(scenario, monkey
     assert json.loads((run_dir / "batch_checkpoint_ack.json").read_text()) == json.loads(
         (run_dir / "batch_checkpoint.json").read_text(),
     )
-
-
-@expectations.legacy_only
-def test_exporter_hook_publishes_only_after_durable_event(
-    scenario: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from types import ModuleType
-    from scripts import mediacrawler_export_entrypoint as exporter
-
-    s = scenario
-    s.state["events"] = []
-    s.state_path.write_text(json.dumps(s.state))
-
-    def append(event_type: str, details: dict) -> None:
-        state = json.loads(s.state_path.read_text())
-        state["events"].append({"type": event_type, "details": details})
-        s.state_path.write_text(json.dumps(state))
-
-    tools_module = ModuleType("tools")
-    tools_module.trippostcollect_adaptive = SimpleNamespace(append_execution_event=append)
-    monkeypatch.setitem(sys.modules, "tools", tools_module)
-    for key, value in s.env.items():
-        monkeypatch.setenv(key, value)
-    exporter.install_batch_checkpoint_hook()
-    tools_module.trippostcollect_adaptive.append_execution_event("adaptive_batch_completed", s.event)
-    assert saved(s)["resume_page"] == 47
-
-
-@expectations.legacy_only
-@pytest.mark.parametrize("error, detail", [
-    (FileNotFoundError("missing export directory"), "xhs_batch_checkpoint_filenotfounderror"),
-    (RuntimeError("xhs_batch_checkpoint_ack_timeout"), "xhs_batch_checkpoint_ack_timeout"),
-])
-def test_exporter_checkpoint_failure_keeps_precise_terminal_evidence(
-    scenario: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, error: Exception, detail: str
-) -> None:
-    from types import ModuleType
-    from scripts import mediacrawler_export_entrypoint as exporter
-
-    s = scenario
-    events = []
-    tools_module = ModuleType("tools")
-    tools_module.trippostcollect_adaptive = SimpleNamespace(
-        append_execution_event=lambda kind, data: events.append({"type": kind, "details": data})
-    )
-    monkeypatch.setitem(sys.modules, "tools", tools_module)
-    monkeypatch.setenv(batch.ENABLED_ENV, "1")
-
-    def fail(*_args):
-        raise error
-
-    monkeypatch.setattr(batch, "publish_batch", fail)
-    exporter.install_batch_checkpoint_hook()
-    with pytest.raises(RuntimeError, match=detail):
-        tools_module.trippostcollect_adaptive.append_execution_event("adaptive_batch_completed", s.event)
-    assert [event["type"] for event in events] == ["adaptive_batch_completed", "xhs_runtime_terminal"]
-    terminal = events[-1]["details"]
-    assert terminal["phase"] == "batch_checkpoint"
-    assert terminal["stop_detail"] == detail
-    crawler = import_module("mediacrawler_crawl")
-    blocker = crawler.runtime_blocker_from_terminal_event(terminal)
-    assert blocker["failure_type"] == "runtime_failed"
-    assert blocker["reason"] == detail
-    assert not saved(s)["checkpoint_found"]
 
 
 def _audit_commits(s: SimpleNamespace) -> int:

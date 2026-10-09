@@ -13,8 +13,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 | 命令、登录、恢复和结果检查 | [正式抓取运行手册](operations-runbook.md) |
 | 抖音、微博、知乎历史详情修复 | [正式抓取运行手册](operations-runbook.md#通用平台历史详情修复) |
 | 调度器、执行器和数据流 | [抓取架构](crawl-architecture.md) |
-| MediaCrawler 上游同步和本地改造 | [MediaCrawler fork 维护](mediacrawler-fork-maintenance.md) |
-| 本地分支清理、提交、配套版本和 Git 备份恢复 | [本地分支与版本管理](version-control.md) |
+| 本地分支清理、提交、版本标签和 Git 备份恢复 | [本地分支与版本管理](version-control.md) |
 | SQLite、媒体文件、事务和入库校验 | [数据持久化](data-persistence.md) |
 | 面向研究使用的帖子、作者、互动与图片字段 | [抓取结果数据字典](crawl-result-data-dictionary.md) |
 | 五个平台的字段能力 | [平台字段覆盖](platform-field-coverage.md) |
@@ -31,7 +30,8 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 平台迁移 v0.7：[主设计与历史研究](platform-adapters.md)、[详细迁移规格](platform-adapter-specification.md)、
 [附录 C8 全量符号账](platform-adapter-symbol-ledger.md)、[P00 工作单与证据索引](platform-adapter-preflight.md)。
 详细规格定义迁移清单、接口/读取时点、任务和门禁；C8 逐项处置每个定义；任务卡的执行清单以 GitHub issues 跟踪。
-P00 已完成，四者均不构成实施授权、迁移完成报告或现行操作契约。
+平台适配迁移已于 T14（#19）收口，fork 子模块与私有桥已删除；四者保留为迁移设计、决策与证据记录，
+不构成现行操作契约。五个平台的现行实现位于 `src/trippostcollect/platforms/<platform>/`。
 分工、单卡流程、验证与接力规则见[重构执行手册](refactor-playbook.md)。
 
 为避免同一规则在多篇文档中漂移，文档只维护各自负责的内容：

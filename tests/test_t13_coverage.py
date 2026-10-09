@@ -22,13 +22,10 @@ from run_lanes import EXPRESSIONS
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FORK = ROOT / "tools" / "MediaCrawler"
-# 依赖冻结旧实现 fixture 的对照测试文件（T05–T10），T14 删除时守护强制重新覆盖。
-LEGACY_FILES = frozenset(f"tests/test_adapter_{name}.py" for name in (
-    "t05", "t05_bridge", "t06", "t06_bridge", "t07", "t08", "t09", "t09_bridge", "t10"))
+# 与冻结旧实现（固化预期或冻结 fixture）对照的测试文件（T05–T10）；T14-C 删除旧桥对照文件后只剩根侧比较。
+LEGACY_FILES = frozenset(f"tests/test_adapter_{name}.py" for name in ("t05", "t06", "t07", "t08", "t09", "t10"))
 # 单站卡的对照文件只驱动该站，文件本身即本站证据。
-CARD_SITES = {"t05": "weibo", "t05_bridge": "weibo", "t06": "douyin", "t06_bridge": "douyin",
-              "t07": "zhihu", "t08": "bilibili", "t09": "xhs", "t09_bridge": "xhs", "t09_deps": "xhs"}
+CARD_SITES = {"t05": "weibo", "t06": "douyin", "t07": "zhihu", "t08": "bilibili", "t09": "xhs", "t09_deps": "xhs"}
 SITE_TOKENS = {
     "bilibili": ("bilibili", "bili"),
     "weibo": ("weibo", "wb"),
@@ -164,20 +161,7 @@ def test_issue_2_lease_exit_nodes_are_complete(collected) -> None:
     assert all(not report.match_entry(entry, collected[lane]) for lane in ("socket", "installation", "os"))
 
 
-def test_fork_nodes_remain_in_offline_list() -> None:
-    if not FORK.is_dir():
-        # T14-C 删除 fork 后不再有 fork lane：声明中残留的 fork 条目必须一并删除。
-        assert [entry for _, _, entry in report.iter_entries(SPEC) if entry["lane"] == "fork"] == []
-        return
-    offline = set(run_matrix.FORK_OFFLINE_TESTS)
-    total = 0
-    for responsibility, owner, entry in report.iter_entries(SPEC):
-        if entry["lane"] != "fork":
-            continue
-        assert entry["file"] in offline, (responsibility, entry["file"])
-        tree = ast.parse((FORK / entry["file"]).read_text(encoding="utf-8"))
-        functions = [node.name for node in tree.body
-                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")]
-        assert len(functions) >= entry["min_functions"], entry["file"]
-        total += 1
-    assert total == len(offline)
+def test_fork_lane_is_gone_after_fork_removal() -> None:
+    # T14-C 删除 fork 后不再有 fork lane：声明中不得残留 fork 条目，离线清单为空。
+    assert run_matrix.FORK_OFFLINE_TESTS == ()
+    assert [entry for _, _, entry in report.iter_entries(SPEC) if entry["lane"] == "fork"] == []

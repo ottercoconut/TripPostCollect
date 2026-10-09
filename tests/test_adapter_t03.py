@@ -10,11 +10,9 @@ from pathlib import Path
 import random
 import sqlite3
 import sys
-from types import SimpleNamespace
 
 import pytest
 
-from support import legacy_expectations as expectations
 from trippostcollect.application import candidates, worker_inputs
 from trippostcollect.db import discovery_read
 from trippostcollect.db.bootstrap import bootstrap_database
@@ -57,23 +55,8 @@ def legacy(tmp_path):
     return _module(path, "t03_legacy")
 
 
-FORK_ADAPTIVE = ROOT / "tools/MediaCrawler/tools/trippostcollect_adaptive.py"
-
-
-@pytest.fixture
-def fork():
-    """fork 薄转发是三方对照的第三条腿；独立预期是登记提交原源码（legacy）与字面期望。
-
-    T14：fork 删除后本夹具返回 None，三方对照退化为 legacy 与根两方，用例不再依赖 fork；
-    T14-C 删除 fork 时同批删除本夹具与各处 fork 腿。
-    """
-    if not FORK_ADAPTIVE.is_file():
-        return None
-    return _module(FORK_ADAPTIVE, "t03_fork_adaptive")
-
-
-def _reads(legacy, fork):
-    return [module.existing_platform_identities for module in (legacy, fork) if module is not None]
+def _reads(legacy):
+    return [legacy.existing_platform_identities]
 
 
 @pytest.fixture
@@ -125,16 +108,14 @@ def _database(path):
         )
 
 
-def _equal_read(platform, scope, legacy, fork, expected):
+def _equal_read(platform, scope, legacy, expected):
     assert legacy.existing_platform_identities(platform) == expected
     assert discovery_read.existing_platform_identities(platform, **scope) == expected
-    if fork is not None:
-        assert fork.existing_platform_identities(platform) == expected
 
 
 @pytest.mark.parametrize("platform", ["weibo", "xhs"])
 @pytest.mark.parametrize("state", ["unset", "missing", "empty", "directory", "missing-parent", "invalid", "schema-empty"])
-def test_database_unavailable(scope, legacy, fork, monkeypatch, platform, state):
+def test_database_unavailable(scope, legacy, monkeypatch, platform, state):
     path = Path(scope["db_path"])
     if state == "unset":
         _set_scope(monkeypatch, scope, db_path="")
@@ -148,12 +129,12 @@ def test_database_unavailable(scope, legacy, fork, monkeypatch, platform, state)
         path.write_text("不是 SQLite")
     elif state == "schema-empty":
         bootstrap_database(path, sync_jobs=False)
-    _equal_read(platform, scope, legacy, fork, set())
+    _equal_read(platform, scope, legacy, set())
 
 
 @pytest.mark.parametrize("platform", ["weibo", "xhs"])
 @pytest.mark.parametrize("missing", [None, "web_posts", "seen", "exclusions"])
-def test_database_subset(scope, legacy, fork, platform, missing):
+def test_database_subset(scope, legacy, platform, missing):
     _database(scope["db_path"])
     expected = {"post", "url-id", "xhs-seen"} if platform == "xhs" else {"post", "url-id", "seen", "excluded"}
     table = {
@@ -170,25 +151,25 @@ def test_database_subset(scope, legacy, fork, platform, missing):
             expected.discard("xhs-seen" if platform == "xhs" else "seen")
         elif platform != "xhs":
             expected.discard("excluded")
-    _equal_read(platform, scope, legacy, fork, expected)
+    _equal_read(platform, scope, legacy, expected)
 
 
 @pytest.mark.parametrize("job_id", ["", "0", "not-int", "-1"])
-def test_job_scope_empty_or_invalid(scope, legacy, fork, monkeypatch, job_id):
+def test_job_scope_empty_or_invalid(scope, legacy, monkeypatch, job_id):
     _database(scope["db_path"])
     _set_scope(monkeypatch, scope, job_id=job_id)
-    _equal_read("weibo", scope, legacy, fork, {"post", "url-id"})
+    _equal_read("weibo", scope, legacy, {"post", "url-id"})
 
 
 @pytest.mark.parametrize("field", ["xhs_target_key", "xhs_account_id", "xhs_fingerprint", "fingerprint"])
-def test_incomplete_scope(scope, legacy, fork, monkeypatch, field):
+def test_incomplete_scope(scope, legacy, monkeypatch, field):
     _database(scope["db_path"])
     _set_scope(monkeypatch, scope, **{field: " "})
-    _equal_read("xhs" if field.startswith("xhs") else "weibo", scope, legacy, fork, {"post", "url-id"})
+    _equal_read("xhs" if field.startswith("xhs") else "weibo", scope, legacy, {"post", "url-id"})
 
 
 @pytest.mark.parametrize("state", ["missing", "broken", "directory", "valid", "object", "null", "number"])
-def test_resume_subset(scope, legacy, fork, monkeypatch, tmp_path, state):
+def test_resume_subset(scope, legacy, monkeypatch, tmp_path, state):
     _database(scope["db_path"])
     path = tmp_path / "resume.json"
     _set_scope(monkeypatch, scope, resume_identities_path=str(path))
@@ -202,7 +183,7 @@ def test_resume_subset(scope, legacy, fork, monkeypatch, tmp_path, state):
     expected = {"post", "url-id", "seen", "excluded"}
     if state in {"null", "number"}:
         # 迭代在 except 之外；不能擅自把非法形状吞成空集合。
-        for read in _reads(legacy, fork):
+        for read in _reads(legacy):
             with pytest.raises(TypeError):
                 read("weibo")
         with pytest.raises(TypeError):
@@ -212,11 +193,11 @@ def test_resume_subset(scope, legacy, fork, monkeypatch, tmp_path, state):
             expected.update({"resume", "0", "False"})
         elif state == "object":
             expected.add("resume")
-        _equal_read("weibo", scope, legacy, fork, expected)
+        _equal_read("weibo", scope, legacy, expected)
 
 
 @pytest.mark.parametrize("error", [OSError, sqlite3.Error])
-def test_outer_database_errors_preserve_resume(scope, legacy, fork, monkeypatch, tmp_path, error):
+def test_outer_database_errors_preserve_resume(scope, legacy, monkeypatch, tmp_path, error):
     resume = tmp_path / "resume.json"
     resume.write_text('["resume"]')
     _set_scope(monkeypatch, scope, resume_identities_path=str(resume))
@@ -225,7 +206,7 @@ def test_outer_database_errors_preserve_resume(scope, legacy, fork, monkeypatch,
         raise error("合成连接故障")
 
     monkeypatch.setattr(sqlite3, "connect", fail)
-    _equal_read("weibo", scope, legacy, fork, {"resume"})
+    _equal_read("weibo", scope, legacy, {"resume"})
 
 
 @pytest.mark.parametrize("platform,table,error,expected", [
@@ -238,7 +219,7 @@ def test_outer_database_errors_preserve_resume(scope, legacy, fork, monkeypatch,
     ("xhs", "seen_candidates", ValueError, None),
     ("weibo", "seen_candidates", TypeError, None),
 ])
-def test_query_error_boundaries(scope, legacy, fork, monkeypatch, platform, table, error, expected):
+def test_query_error_boundaries(scope, legacy, monkeypatch, platform, table, error, expected):
     _database(scope["db_path"])
     connect = sqlite3.connect
 
@@ -257,9 +238,9 @@ def test_query_error_boundaries(scope, legacy, fork, monkeypatch, platform, tabl
 
     monkeypatch.setattr(sqlite3, "connect", lambda *_: FaultConnection())
     if expected is not None:
-        _equal_read(platform, scope, legacy, fork, expected)
+        _equal_read(platform, scope, legacy, expected)
     else:
-        for read in _reads(legacy, fork):
+        for read in _reads(legacy):
             with pytest.raises(error):
                 read(platform)
         with pytest.raises(error):
@@ -267,7 +248,7 @@ def test_query_error_boundaries(scope, legacy, fork, monkeypatch, platform, tabl
 
 
 @pytest.mark.parametrize("error", [OSError, TypeError, json.JSONDecodeError])
-def test_resume_read_errors_keep_database(scope, legacy, fork, monkeypatch, error):
+def test_resume_read_errors_keep_database(scope, legacy, monkeypatch, error):
     _database(scope["db_path"])
     _set_scope(monkeypatch, scope, resume_identities_path="synthetic.json")
 
@@ -277,11 +258,11 @@ def test_resume_read_errors_keep_database(scope, legacy, fork, monkeypatch, erro
         raise error("合成文件故障")
 
     monkeypatch.setattr(Path, "read_text", fail)
-    _equal_read("weibo", scope, legacy, fork, {"post", "url-id", "seen", "excluded"})
+    _equal_read("weibo", scope, legacy, {"post", "url-id", "seen", "excluded"})
 
 
 @pytest.mark.parametrize("value,default,expected", [(None, 3, 3), ("bad", 3, 3), ("-2", 3, 0), ("0", 3, 0), ("17", 3, 17), (None, -3, 0)])
-def test_env_int_reader(legacy, fork, monkeypatch, value, default, expected):
+def test_env_int_reader(legacy, monkeypatch, value, default, expected):
     name = "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES"
     if value is None:
         monkeypatch.delenv(name, raising=False)
@@ -289,8 +270,6 @@ def test_env_int_reader(legacy, fork, monkeypatch, value, default, expected):
         monkeypatch.setenv(name, value)
     read = worker_inputs.env_int_reader(name, default, environ=os.environ)
     assert read() == legacy.env_int(name, default) == expected
-    if fork is not None:
-        assert fork.env_int(name, default) == expected
     monkeypatch.setenv(name, "29")
     assert read() == 29
     bound = {name: "4"}
@@ -302,20 +281,23 @@ def test_env_int_reader(legacy, fork, monkeypatch, value, default, expected):
     assert read() == max(0, default)
 
 
-@expectations.legacy_only
 @pytest.mark.parametrize("platform", ["weibo", "douyin", "zhihu", "xhs"])
-def test_factory_loads_known_once(fork, monkeypatch, platform):
+def test_root_factory_loads_known_once(platform):
+    """T14-C：原 fork 工厂用例（from_environment）的根侧断言；env 作用域读取归 entry 装配，构造归 for_platform。"""
     known = {"known"}
     calls = []
-    monkeypatch.setattr(fork, "existing_platform_identities", lambda value: calls.append(value) or known)
-    monkeypatch.setattr(fork, "append_execution_event", lambda *args: None)
-    accumulator = fork.AdaptiveAccumulator.from_environment(platform)
-    assert isinstance(accumulator, fork.AdaptiveAccumulator)
+
+    def read(value):
+        calls.append(value)
+        return known
+
+    accumulator = candidates.AdaptiveAccumulator.for_platform(platform, existing_identities=read(platform))
+    assert isinstance(accumulator, candidates.AdaptiveAccumulator)
     assert accumulator.existing_identities is known
     assert accumulator.stagnation_basis == ("candidate_identity" if platform == "weibo" else "valid_new")
     for index in range(5):
         accumulator.begin_batch()
-        accumulator.is_known("known")
+        assert accumulator.is_known("known")
         accumulator.consider(str(index), valid=False)
         accumulator.finish_batch()
     assert calls == [platform]
@@ -378,32 +360,6 @@ def test_root_injected_event_sequence():
     _check_event_sequence(_root_event_sequence())
 
 
-@expectations.legacy_only
-def test_injected_event_sequence_matches_fork_module_patch(fork, monkeypatch):
-    root_events = []
-    fork_events = []
-    root = candidates.AdaptiveAccumulator(
-        "weibo", stagnation_basis="candidate_identity", existing_identities={"known"},
-        event_sink=lambda event_type, details: root_events.append((event_type, details)),
-    )
-    adapted = fork.AdaptiveAccumulator(
-        "weibo", stagnation_basis="candidate_identity", existing_identities={"known"},
-    )
-    # 实例创建后才替换模块全局函数，验证出口在事件发生时解析。
-    monkeypatch.setattr(
-        fork, "append_execution_event",
-        lambda event_type, details: fork_events.append((event_type, details)),
-    )
-    _event_sequence(root)
-    _event_sequence(adapted)
-    assert root_events == fork_events
-    assert [event_type for event_type, _ in root_events] == [
-        "adaptive_batch_completed", "adaptive_search_stopped",
-    ]
-    assert root_events[0][1]["candidate_count"] == 3
-    assert root_events[1][1]["stop_reason"] == "source_exhausted"
-
-
 def test_root_explicit_sink_is_excluded_from_comparison():
     """T14：原用例的根侧部分；fork 部分随旧桥在 T14-C 删除。"""
     events = []
@@ -414,27 +370,6 @@ def test_root_explicit_sink_is_excluded_from_comparison():
     assert "event_sink" not in repr(explicit)
     _event_sequence(explicit)
     assert len(events) == 2
-
-
-@expectations.legacy_only
-def test_fork_preserves_explicit_sink_and_excludes_it_from_comparison(fork, monkeypatch):
-    events = []
-
-    def sink(event_type, details):
-        events.append((event_type, details))
-
-    def reject_module_sink(*args):
-        pytest.fail("显式注入的事件出口不能被 fork 默认出口覆盖")
-
-    monkeypatch.setattr(fork, "append_execution_event", reject_module_sink)
-    for accumulator_type in (candidates.AdaptiveAccumulator, fork.AdaptiveAccumulator):
-        explicit = accumulator_type("weibo", event_sink=sink)
-        default = accumulator_type("weibo")
-        assert explicit == default
-        assert repr(explicit) == repr(default)
-        assert "event_sink" not in repr(explicit)
-        _event_sequence(explicit)
-    assert len(events) == 4
 
 
 def test_candidates_imports_respect_application_boundary():
@@ -459,19 +394,6 @@ def test_http_factory(monkeypatch, disabled, override):
     kwargs = {} if override is None else {"verify": override}
     result = http.make_async_client(disable_ssl_verify=disabled, **kwargs)
     assert result == {"verify": not disabled if override is None else override}
-
-
-@expectations.legacy_only
-def test_fork_http_reads_config_each_call(monkeypatch):
-    config = SimpleNamespace()
-    monkeypatch.setitem(sys.modules, "config", config)
-    fork_http = _module(ROOT / "tools/MediaCrawler/tools/httpx_util.py", "t03_fork_http")
-    monkeypatch.setattr(http.httpx, "AsyncClient", lambda **kwargs: kwargs)
-    assert fork_http.make_async_client() == {"verify": True}
-    for disabled in (True, False, True):
-        monkeypatch.setattr(config, "DISABLE_SSL_VERIFY", disabled, raising=False)
-        assert fork_http.make_async_client() == {"verify": not disabled}
-        assert fork_http.make_async_client(verify="custom", timeout=5) == {"verify": "custom", "timeout": 5}
 
 
 @pytest.mark.parametrize("name", ["get_user_agent", "get_mobile_user_agent"])
@@ -561,10 +483,9 @@ def test_t03_ledger_rows(monkeypatch):
     rows = [row for row in result["rows"] if row["card"] == "T03"]
     assert len(rows) == 28
     assert result["counts"]["missing"] == 0
-    pending = {row["qualname"] for row in rows if row["state"] == "pending"}
-    # 台账只识别单条 return 到目标模块；继承适配不伪报为原类逐字迁出。
-    assert pending == {"AdaptiveAccumulator", "AdaptiveAccumulator.from_environment"}
-    assert sum(row["state"] == "moved" for row in rows) == 26
+    # T14-C 删除 fork 薄子类后，AdaptiveAccumulator 与 from_environment 按 PROGRESS_RESOLUTIONS 归到根定义。
+    assert [row["qualname"] for row in rows if row["state"] != "moved"] == []
+    assert sum(row["state"] == "moved" for row in rows) == 28
 
 
 def test_cookie_imports_share_one_implementation(monkeypatch):

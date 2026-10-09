@@ -254,16 +254,13 @@ def _legacy_identity_code_references(source: str) -> bool:
 
 
 def test_root_package_no_longer_calls_legacy_identity_transforms() -> None:
-    """哈希/脱敏函数只为 fork 旧导入出口与冻结旧投影测试保留到 T14；根包与 scripts 不得再引用。"""
+    """哈希/脱敏函数已随 fork 旧导入出口在 T14-C 删除；根包（含 records/identity.py）与 scripts 不得再定义或引用。"""
     root = Path(__file__).resolve().parents[1]
-    identity = root / "src" / "trippostcollect" / "records" / "identity.py"
     hits = []
     for base in (root / "src" / "trippostcollect", root / "scripts"):
         for path in base.rglob("*.py"):
             relative = path.relative_to(root).as_posix()
             source = path.read_text(encoding="utf-8")
-            if path == identity:
-                continue
             if relative == LEDGER_RULES:
                 if _legacy_identity_code_references(source):
                     hits.append(relative)

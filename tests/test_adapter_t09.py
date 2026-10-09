@@ -1,8 +1,10 @@
-"""小红书 T09：冻结旧实现与根平台实现在同一离线边界下逐项对照。
+"""小红书 T09：根平台实现在离线边界下运行，与固化的冻结旧实现预期逐项对照。
 
-两侧都只替换最外层边界：Playwright/CDP、HTTPX 工厂、xhshow、单调时钟、sleep 与随机源。
+只替换最外层边界：Playwright/CDP、HTTPX 工厂、xhshow、单调时钟、sleep 与随机源。
 边界在源模块上替换后再全新导入被测实现，因此不依赖新实现内部如何传递这些依赖；
 业务代码、tenacity 重试层、行为桥、候选累计器、JSONL 与图片 staging 全部真实运行。
+冻结旧实现（fork 5a68eb5 的 XHS 文件与 main b4e893b 的两个 scripts）的结果已在 T14 删除 fork 前固化到
+tests/fixtures/t14_legacy_expectations/T09；旧侧装载与守卫随 fork 在 T14-C 删除。
 """
 
 from __future__ import annotations
@@ -14,7 +16,6 @@ from collections import Counter
 import dataclasses
 from hashlib import sha256
 import importlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -37,7 +38,7 @@ from support.creator_runtime_profile import use_legacy_creator_page_read
 from support.main_page_lifecycle import use_legacy_main_page_closed_name
 from support import legacy_expectations as expectations
 from support.stable_png import solid_png
-from support.raw_author_identity import XHS_KEEP_AUTHOR_DETAIL_ENV, use_raw_author_identity
+from support import platform_session_deviation as deviation
 from trippostcollect.application import events
 from trippostcollect.runtime import behavior as runtime_behavior
 from trippostcollect.runtime import browser as runtime_browser
@@ -46,8 +47,6 @@ from trippostcollect.runtime import human_flow
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "tests/fixtures/adapter_t09"
-FORK = ROOT / "tools/MediaCrawler"
 REAL_SLEEP = asyncio.sleep
 REAL_MONOTONIC = time.monotonic
 CLOCK_START = 1000.0
@@ -60,49 +59,10 @@ UA = (
 TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?")
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 ADDRESS_RE = re.compile(r"0x[0-9a-f]{6,}")
-LEGACY_MODULES = (
-    ("model.m_xiaohongshu", "model/m_xiaohongshu.py"),
-    ("tools.image_manifest", "tools/image_manifest.py"),
-    ("tools.trippostcollect_behavior", "tools/trippostcollect_behavior.py"),
-    ("mediacrawler_behavior", "scripts/mediacrawler_behavior.py"),
-    ("store.xhs", "store/xhs/__init__.py"),
-    ("media_platform.xhs", "media_platform/xhs/__init__.py"),
-    ("mediacrawler_export_entrypoint", "scripts/mediacrawler_export_entrypoint.py"),
-)
-# 共享的 fork 薄转发在导入时按名绑定边界，旧侧每次随冻结实现重新执行。
-LEGACY_SHARED = (
-    ("tools.httpx_util", "tools/httpx_util.py"),
-    ("tools._browser_bridge", "tools/_browser_bridge.py"),
-    ("tools.cdp_browser", "tools/cdp_browser.py"),
-)
 
 
 # ---------------------------------------------------------------------------
-# 两侧实现装载
-
-
-def frozen_source(relative: str) -> bytes:
-    metadata = json.loads((FIXTURE / "baseline.json").read_text())
-    data = (FIXTURE / (relative + ".txt")).read_bytes()
-    assert sha256(data).hexdigest() == metadata["files"][relative], relative
-    return data
-
-
-def fork_source(relative: str) -> bytes:
-    """仅供迁移前自检：当前 fork/scripts 原文。"""
-    base = ROOT if relative.startswith("scripts/") else FORK
-    return (base / relative).read_bytes()
-
-
-def _load(patch, name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    patch.setitem(sys.modules, name, module)
-    spec.loader.exec_module(module)
-    parent, _, attr = name.rpartition(".")
-    if parent:
-        patch.setattr(importlib.import_module(parent), attr, module, raising=False)
-    return module
+# 根实现装载
 
 
 def _register_new_modules(patch, prefixes: tuple[str, ...]) -> None:
@@ -112,80 +72,10 @@ def _register_new_modules(patch, prefixes: tuple[str, ...]) -> None:
             patch.setitem(sys.modules, name, module)
 
 
-class LegacySide:
-    """冻结旧实现：fork 5a68eb5 的 XHS 文件与 main b4e893b 的两个 scripts。"""
-
-    def __init__(self, source=frozen_source, label: str = "legacy"):
-        self.source = source
-        self.label = label
-
-    # 旧侧在 fork 顶层包与 fork config 之上执行，随 fork 在 T14-C 删除。
-    uses_fork_config = True
-
-    def install(self, patch, workdir: Path):
-        from trippostcollect.platforms import _fork_bridge
-
-        _fork_bridge.install()
-        for parent in ("model", "tools", "store", "media_platform"):
-            importlib.import_module(parent)
-        exact = {name for name, _ in LEGACY_MODULES + LEGACY_SHARED}
-        for name in list(sys.modules):
-            if name in exact or name.startswith(("media_platform.xhs", "store.xhs")):
-                patch.delitem(sys.modules, name)
-        # 旧文件原文恢复到临时目录；包内相对导入从同一目录解析。
-        directory = workdir / f"{self.label}-source"
-        for relative in json.loads((FIXTURE / "baseline.json").read_text())["files"]:
-            target = directory / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(self.source(relative))
-        modules = {}
-        for name, relative in LEGACY_MODULES[:3]:
-            modules[name] = _load(patch, name, directory / relative)
-        for name, relative in LEGACY_SHARED:
-            modules[name] = _load(patch, name, FORK / relative)
-        for name, relative in LEGACY_MODULES[3:]:
-            modules[name] = _load(patch, name, directory / relative)
-        _register_new_modules(patch, ("media_platform.xhs.", "store.xhs."))
-        # #49：根实现保存作者原始 ID 与昵称；旧 store 按正式 worker 取值写出原值并替换身份转换。
-        use_raw_author_identity(patch, modules["store.xhs"])
-        patch.setenv(XHS_KEEP_AUTHOR_DETAIL_ENV, "1")
-        import trippostcollect.platforms.entry as entry
-
-        package = "media_platform.xhs."
-        return SimpleNamespace(
-            side=self,
-            entry=entry,
-            core=sys.modules[package + "core"],
-            client=sys.modules[package + "client"],
-            login=sys.modules[package + "login"],
-            manual_wait=sys.modules[package + "manual_wait"],
-            errors=sys.modules[package + "exception"],
-            repair=modules["mediacrawler_export_entrypoint"],
-            behavior=modules["mediacrawler_behavior"],
-            signer=sys.modules[package + "playwright_sign"],
-            parser=SimpleNamespace(
-                help=sys.modules[package + "help"],
-                extractor=sys.modules[package + "extractor"],
-                store=modules["store.xhs"],
-                manifest=modules["tools.image_manifest"],
-                models=sys.modules[package + "field"],
-            ),
-        )
-
-    def install_hooks(self, mods) -> None:
-        # 旧 worker 的 XHS 修复入口：冻结旧桥 E 原样替换冻结 crawler 的方法。
-        mods.repair.install_xhs_repair_resilience()
-
-    def crawler_class(self, mods):
-        return mods.core.XiaoHongShuCrawler
-
-
 class RootSide:
     """迁移后实现：worker 入口与 trippostcollect.platforms.xhs。"""
 
     label = "root"
-    # 根侧只经 entry.configure 写根配置对象，不加载 fork config。
-    uses_fork_config = False
 
     def install(self, patch, workdir: Path):
         import trippostcollect.platforms as package
@@ -236,63 +126,6 @@ class RootSide:
         assert (cls.__module__.startswith("trippostcollect.platforms.xhs")
                 or cls.__module__ == "trippostcollect.platforms.entry"), cls.__module__
         return cls
-
-
-# 旧桥链路上按名绑定边界或随机源的模块，每次随被测实现重新导入。
-LEGACY_BRIDGE_MODULES = (
-    "model.m_xiaohongshu", "tools.image_manifest", "tools.trippostcollect_behavior",
-    "tools.httpx_util", "tools._browser_bridge", "tools.cdp_browser",
-    "mediacrawler_behavior", "mediacrawler_export_entrypoint",
-)
-
-
-class LegacyFactorySide(RootSide):
-    """旧桥：fork main 的 CrawlerFactory 仍能装配小红书，且全部委托根实现（T14 前行为不变）。"""
-
-    label = "legacy-factory"
-    uses_fork_config = True
-
-    def install(self, patch, workdir: Path):
-        from trippostcollect.platforms import _fork_bridge
-
-        mods = self.install_root(patch, workdir)
-        _fork_bridge.install()
-        for parent in ("model", "tools", "store", "media_platform"):
-            importlib.import_module(parent)
-        for name in list(sys.modules):
-            if name in LEGACY_BRIDGE_MODULES or name.startswith(("media_platform.xhs", "store.xhs")):
-                patch.delitem(sys.modules, name)
-        for parent in ("media_platform", "store"):
-            patch.delattr(importlib.import_module(parent), "xhs", raising=False)
-
-        def unused_crawler():
-            raise AssertionError("小红书对照不得构造其他平台")
-
-        # main 顶层还装载其他站点、旧参数解析器和数据库入口；只真实加载小红书链路。
-        patch.setitem(sys.modules, "cmd_arg", SimpleNamespace())
-        patch.setitem(sys.modules, "database", SimpleNamespace(db=SimpleNamespace()))
-        for platform, name in (
-            ("bilibili", "BilibiliCrawler"), ("douyin", "DouYinCrawler"), ("kuaishou", "KuaishouCrawler"),
-            ("tieba", "TieBaCrawler"), ("weibo", "WeiboCrawler"), ("zhihu", "ZhihuCrawler"),
-        ):
-            patch.setitem(sys.modules, "media_platform." + platform, SimpleNamespace(**{name: unused_crawler}))
-        try:
-            mods.legacy_main = _load(patch, "t09_legacy_main", FORK / "main.py")
-        finally:
-            _register_new_modules(patch, ("media_platform.xhs", "store.xhs", *LEGACY_BRIDGE_MODULES))
-        return mods
-
-    def install_root(self, patch, workdir: Path):
-        return RootSide.install(self, patch, workdir)
-
-    def install_hooks(self, mods) -> None:
-        # 旧桥 E 的 XHS 修复安装点；其余 export/批次 hook 与本对照无关。
-        importlib.import_module("mediacrawler_export_entrypoint").install_xhs_repair_resilience()
-
-    def crawler_class(self, mods):
-        legacy = importlib.import_module("media_platform.xhs")
-        assert mods.legacy_main.CrawlerFactory.CRAWLERS["xhs"] is legacy.XiaoHongShuCrawler
-        return lambda: mods.legacy_main.CrawlerFactory.create_crawler("xhs")
 
 
 # ---------------------------------------------------------------------------
@@ -1322,20 +1155,7 @@ async def run_scenario(side, scenario_name: str, workdir: Path, patch) -> dict:
         patch.setenv(name, value)
     mods = side.install(patch, workdir)
     argv = scenario_argv(scenario, out)
-    if side.uses_fork_config:
-        config = importlib.import_module("config")
-        for name in dir(config):
-            if name.isupper():
-                patch.setattr(config, name, getattr(config, name))
     mods.entry.configure(argv)
-    if side.uses_fork_config:
-        # T12：新入口只写根配置对象；旧桥两侧仍读 fork config，按原 configure 语义同步写回。
-        from trippostcollect.application import worker_inputs
-        worker_inputs.apply_to_config(worker_inputs.parse_cmd(argv), config)
-        # fork config 在本进程可能早已导入；按新进程首次导入的语义从当前 env 重读这两个键。
-        patch.setattr(config, "COOKIES", os.environ.get("TRIPPOSTCOLLECT_COOKIES", ""))
-        patch.setattr(config, "CUSTOM_BROWSER_PATH", os.environ.get("TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH")
-                      or os.environ.get("CUSTOM_BROWSER_PATH", ""))
     side.install_hooks(mods)
 
     def publish(details):
@@ -1427,12 +1247,8 @@ def normalized(result: dict) -> dict:
     return payload
 
 
-def assert_equivalent(old: dict, new: dict) -> None:
-    assert_normalized_equivalent(normalized(old), normalized(new))
-
-
 def assert_normalized_equivalent(left: dict, right: dict) -> None:
-    """比较两侧已归一的结果；T14 根侧用例以固化的旧侧归一结果作为 left。"""
+    """比较已归一的结果；left 为固化的冻结旧实现归一结果（已按登记偏离变换），right 为根实现。"""
     left, right = dict(left), dict(right)
     old_trace, new_trace = left.pop("trace"), right.pop("trace")
     for index, (a, b) in enumerate(zip(old_trace, new_trace)):
@@ -1946,39 +1762,6 @@ def check_scenario(result, scenario_name: str) -> None:
         check(result)
 
 
-async def compare_sides(old_side, new_side, scenario_name, tmp_path, monkeypatch):
-    with monkeypatch.context() as patch:
-        old = await run_scenario(old_side, scenario_name, tmp_path, patch)
-    with monkeypatch.context() as patch:
-        new = await run_scenario(new_side, scenario_name, tmp_path, patch)
-    assert_equivalent(old, new)
-    check_scenario(old, scenario_name)
-    check_scenario(new, scenario_name)
-    return old, new
-
-
-# ---------------------------------------------------------------------------
-# 对照用例
-
-
-@expectations.legacy_only
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario_name", sorted(SCENARIOS))
-async def test_root_xhs_matches_frozen_legacy(tmp_path, monkeypatch, scenario_name):
-    _, new = await compare_sides(LegacySide(), RootSide(), scenario_name, tmp_path, monkeypatch)
-    # 搜索就绪等待由平台 behavior 提供，不再经 scripts 注入。
-    assert set(new["ready_modules"]) <= {"trippostcollect.platforms.xhs.behavior"}
-
-
-@expectations.legacy_only
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario_name", ["success", "qr_expired_refresh", "network_recover", "repair"])
-async def test_frozen_legacy_harness_is_deterministic(tmp_path, monkeypatch, scenario_name):
-    """比较器自检：同一冻结旧实现跑两次必须逐项一致。"""
-    await compare_sides(LegacySide(label="legacy-a"), LegacySide(label="legacy-b"), scenario_name,
-                        tmp_path, monkeypatch)
-
-
 T14_XHS = ("T09", "xhs_scenarios")
 
 
@@ -1997,45 +1780,14 @@ def frozen_view(result, tmp_path) -> dict:
 async def test_root_xhs_matches_frozen_legacy_expectation(tmp_path, monkeypatch, scenario_name):
     """T14：根实现与固化的冻结旧实现归一结果比较（同一 normalized 与逐项比较），不加载 fork 或 E。"""
     new = await run_side(RootSide(), scenario_name, tmp_path, monkeypatch)
-    assert_normalized_equivalent(expectations.load(*T14_XHS, scenario_name), frozen_view(new, tmp_path))
+    expected = deviation.xhs_cdp_settings_without_user_data_dir(expectations.load(*T14_XHS, scenario_name))
+    assert_normalized_equivalent(expected, frozen_view(new, tmp_path))
     check_scenario(new, scenario_name)
     assert set(new["ready_modules"]) <= {"trippostcollect.platforms.xhs.behavior"}
 
 
-@expectations.legacy_guard
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario_name", sorted(SCENARIOS))
-async def test_t14_guard_frozen_legacy_xhs(tmp_path, monkeypatch, pytestconfig, scenario_name):
-    old = await run_side(LegacySide(), scenario_name, tmp_path, monkeypatch)
-    check_scenario(old, scenario_name)
-    expectations.check_legacy(pytestconfig, *T14_XHS, scenario_name, frozen_view(old, tmp_path),
-                              source_test="tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy")
-
-
-# 旧侧参数只验证冻结旧实现自身，T14-C 随 fork 删除；根侧参数不依赖 fork。
-SIDE_FACTORIES = [pytest.param(LegacySide, id="legacy", marks=expectations.legacy_only_marks()),
-                  pytest.param(RootSide, id="root")]
-LEGACY_FACTORY_SCENARIOS = ["success", "qr_expired_refresh", "captcha_pass", "network_recover",
-                            "cdp_launch_failed", "repair"]
-
-
-@expectations.legacy_only
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario_name", LEGACY_FACTORY_SCENARIOS)
-async def test_legacy_factory_matches_root_entry(tmp_path, monkeypatch, scenario_name):
-    """旧桥 fork main 工厂与新 worker 入口在同一 fake 下逐项相等。"""
-    await compare_sides(LegacyFactorySide(), RootSide(), scenario_name, tmp_path, monkeypatch)
-
-
-@expectations.legacy_guard
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario_name", LEGACY_FACTORY_SCENARIOS)
-async def test_t14_guard_legacy_factory_xhs(tmp_path, monkeypatch, pytestconfig, scenario_name):
-    """旧桥 fork 工厂与冻结旧实现的归一结果逐字节相同，共用 T09/xhs_scenarios 预期；根侧见上方根用例。"""
-    old = await run_side(LegacyFactorySide(), scenario_name, tmp_path, monkeypatch)
-    check_scenario(old, scenario_name)
-    expectations.check_legacy(pytestconfig, *T14_XHS, scenario_name, frozen_view(old, tmp_path),
-                              source_test="tests/test_adapter_t09.py::test_legacy_factory_matches_root_entry")
+# 单元级接缝原为旧侧与根侧两参；旧侧随 fork 在 T14-C 删除，保留参数 id 使用例名不变。
+SIDE_FACTORIES = [pytest.param(RootSide, id="root")]
 
 
 # ---------------------------------------------------------------------------
@@ -2049,9 +1801,7 @@ def side_modules(side, patch, tmp_path):
 
 
 def construct_crawler(mods, patch, out: Path):
-    """root 侧经 configure 与 load_crawler 装配构造；旧侧直接无参构造冻结类。"""
-    if not isinstance(mods.side, RootSide):
-        return mods.core.XiaoHongShuCrawler()
+    """经 configure 与 load_crawler 装配构造。"""
     # 根侧 configure 只写根配置对象，不再快照或改写 fork config。
     mods.entry.configure(scenario_argv(SCENARIOS["success"], out))
     return mods.side.crawler_class(mods)()
@@ -2145,7 +1895,7 @@ def bound_paths(value, target, *, depth=3, prefix=""):
 @pytest.mark.parametrize("scenario_name", ["login_budget_exhausted", "qr_env_invalid"])
 @pytest.mark.parametrize("side_factory", SIDE_FACTORIES)
 async def test_login_terminal_writes_use_worker_event_exit(tmp_path, monkeypatch, side_factory, scenario_name):
-    """接缝 5：登录两处终态写出经 worker 出口（旧实现模块全局按名绑定；新实现经 entry 注入端口）。"""
+    """接缝 5：登录两处终态写出经 worker 出口（根实现经 entry 注入端口）。"""
     side = side_factory()
     with monkeypatch.context() as patch:
         routed = []
@@ -2169,17 +1919,13 @@ async def test_login_terminal_writes_use_worker_event_exit(tmp_path, monkeypatch
     calls = [node for node in ast.walk(method) if isinstance(node, ast.Call) and node.args
              and isinstance(node.args[0], ast.Constant) and node.args[0].value == "xhs_runtime_terminal"]
     assert len(calls) == 2 and len({ast.dump(call.func) for call in calls}) == 1
-    if isinstance(side, RootSide):
-        assert module.__name__ == "trippostcollect.platforms.xhs.login"
-        # 两处写出都调用注入端口，端口与旧实现导入时绑定的是同一函数对象。
-        assert isinstance(calls[0].func, ast.Attribute)
-        assert bound_paths(crawler, events.append_worker_execution_event)
-        for name, item in xhs_modules.items():
-            assert not hasattr(item, "append_execution_event"), name
-            assert not hasattr(item, "append_worker_execution_event"), name
-    else:
-        assert isinstance(calls[0].func, ast.Name)
-        assert module.append_execution_event is events.append_worker_execution_event
+    assert module.__name__ == "trippostcollect.platforms.xhs.login"
+    # 两处写出都调用注入端口，端口与旧实现导入时绑定的是同一函数对象。
+    assert isinstance(calls[0].func, ast.Attribute)
+    assert bound_paths(crawler, events.append_worker_execution_event)
+    for name, item in xhs_modules.items():
+        assert not hasattr(item, "append_execution_event"), name
+        assert not hasattr(item, "append_worker_execution_event"), name
 
 
 @pytest.mark.parametrize("side_factory", SIDE_FACTORIES)
@@ -2187,9 +1933,8 @@ def test_repair_blocking_uses_exception_types_not_text(tmp_path, monkeypatch, si
     with monkeypatch.context() as patch:
         _, mods = side_modules(side_factory(), patch, tmp_path)
         repair, errors = mods.repair, mods.errors
-        if isinstance(mods.side, RootSide):
-            # 根实现显式导入 errors；不得再按 fork 模块路径字符串查找异常类型。
-            patch.delitem(sys.modules, "media_platform.xhs.core", raising=False)
+        # 根实现显式导入 errors；不得再按 fork 模块路径字符串查找异常类型。
+        patch.delitem(sys.modules, "media_platform.xhs.core", raising=False)
         crawler = SimpleNamespace(_request_failure_exception=lambda exc: exc)
         plain_ip = errors.IPBlockError("Network connection error, please check network settings or restart")
         plain_runtime = errors.PlatformRuntimeError("XHS platform security limit, code 300011",
@@ -2263,33 +2008,3 @@ def test_pure_parsers_and_signer(tmp_path, monkeypatch, side_factory):
         enums = mods.parser.models
         assert enums.SearchSortType("popularity_descending").name == "MOST_POPULAR"
         assert [item.value for item in enums.SearchNoteType] == [0, 1, 2]
-
-
-@expectations.legacy_only
-def test_legacy_fork_package_delegates_to_root(tmp_path, monkeypatch):
-    """fork 旧位置只留薄转发：类、异常与枚举都是根对象，不存在第二份实现。"""
-    import inspect
-
-    with monkeypatch.context() as patch:
-        _, mods = side_modules(LegacyFactorySide(), patch, tmp_path)
-        legacy = importlib.import_module("media_platform.xhs")
-        root_class = mods.core.XiaoHongShuCrawler
-        assert issubclass(legacy.XiaoHongShuCrawler, root_class)
-        for name in dir(root_class):
-            if name.startswith("__"):
-                continue
-            value = inspect.getattr_static(root_class, name)
-            if callable(getattr(root_class, name)):
-                assert inspect.getattr_static(legacy.XiaoHongShuCrawler, name) is value, name
-        for old_module, new_module, names in (
-            ("client", mods.client, ["XiaoHongShuClient"]),
-            ("login", mods.login, ["XiaoHongShuLogin"]),
-            ("manual_wait", mods.manual_wait, ["XHSManualWaitBudget", "XHSManualWaitBudgetExhausted"]),
-            ("exception", mods.errors, ["DataFetchError", "IPBlockError", "PlatformRuntimeError", "NoteNotFoundError"]),
-            ("field", mods.parser.models, ["SearchSortType", "SearchNoteType"]),
-            ("extractor", mods.parser.extractor, ["XiaoHongShuExtractor"]),
-        ):
-            old = importlib.import_module("media_platform.xhs." + old_module)
-            for name in names:
-                assert getattr(old, name) is getattr(new_module, name), (old_module, name)
-        assert importlib.import_module("model.m_xiaohongshu").NoteUrlInfo is mods.parser.models.NoteUrlInfo

@@ -5,7 +5,8 @@
 
 ## 登录与入口
 
-- 正式入口：`crawl_runner.py` 调用 MediaCrawler 微博搜索。
+- 正式入口：`crawl_runner.py` 经 `mediacrawler_crawl.py` 启动根包 worker（`trippostcollect.platforms.entry`）
+  执行微博搜索，实现位于 `src/trippostcollect/platforms/weibo/`。
 - warmup 用后台移动页验证 `/api/config`；失效时把桌面
   `passport.weibo.com/sso/signin` 登录页置前。人工完成 SSO 后回到移动端刷新 Cookie。
 - 关闭重开 profile 后，只有移动接口同时返回 `login=true` 和有效 `uid` 才成功；`WBPSESS` 不能

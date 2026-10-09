@@ -9,9 +9,11 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - `config/`: 长期抓取任务配置；通用入口是 `crawl_targets.json`，小红书使用独立 `xhs_*.json`。
 - `db/`: SQLite 表结构，包括平台表、内容表、证据表和调度表。
 - `docs/`: 架构、入库、字段覆盖说明；字段能力变化必须同步文档。
-- `scripts/`: 调度、MediaCrawler 对接、页面证据抓取、导入和共享策略。
-- `tools/MediaCrawler/`: 第三方抓取工具，由项目封装脚本调用，不把其内部命令当作根项目命令。
-- `data/`: 默认 SQLite、运行状态、浏览器状态。
+- `scripts/`: 调度、结构化抓取薄入口（`mediacrawler_*.py` 为历史沿用名）、页面证据抓取、导入和共享策略。
+- `src/trippostcollect/`: 根包实现；五个正式平台的适配器在 `platforms/<platform>/`，worker 入口是
+  `trippostcollect.platforms.entry`。项目不再包含 MediaCrawler fork 子模块。
+- `data/`: 默认 SQLite、运行状态、浏览器状态；B站、微博、抖音、知乎登录资料在
+  `data/runtime/platform_sessions/<platform>/`。
 - `outputs/`: 抓取暂存产物、日志、摘要；结构化长期数据以 SQLite 为准。
 - `temp/`: 临时验证和一次性测试，可随时清理；正式流程和历史验收文档不得依赖其中已有文件。
 
@@ -56,6 +58,12 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 小红书 runner 收到可捕获的 SIGINT/SIGTERM 时，必须写 `runtime_failed/operator_interrupt` execution
   state 与 `run_summary.json`，再精确收束进程、删除临时 session、释放租约；不得只清资源却把状态
   留在 `running`，也不得推进 discovery checkpoint 或伪造来源耗尽。
+- 通用 runner 收到 SIGINT/SIGTERM/SIGHUP 时只锁存首个信号，不再派发排队 job。中间层与 worker 各在
+  独立会话，信号沿链路每层只转发一次 SIGTERM，SIGKILL 仅作超时兜底，并按登记身份同时收束 worker
+  进程组。被收束或未派发的 job 写 `runtime_failed:operator_interrupt:<SIG>` 并 finalize 为失败终态，
+  必须写 `run_summary.json`，退出码为 128+首个信号；runner 不更新 campaign、不写来源耗尽，中断不计入
+  失败次数。中间层在信号前已提交的 checkpoint/seen 属真实确认数据，予以保留。两层 child 的
+  stdout/stderr 在中断后先清洗再落盘。小红书租约链路不适用本条，见 `docs/platforms/xhs.md`。
 - 通用 `--dry-run` 不访问平台内容，但默认会同步调度表并写 run report、摘要和 execution state；小红书 dry-run 不构造 child 命令且没有 `import_result`，以后四阶段保持 `frozen` 证明未执行。
 - B站、微博、小红书、抖音、知乎粉丝量为必需字段；数值、来源和 `followers_observed=true` 必须同时存在，平台不提供时只能由配置声明 `ignored`。
 - 路径定义集中在 `trippostcollect.core.paths`；新增代码不要硬编码 `outputs/`、`data/runtime/`、浏览器配置目录等目录。
@@ -83,7 +91,6 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 
 - 不对 `outputs/**/logs/*.log`、JSONL、HTML、截图元数据做宽泛 `rg`。
 - 查日志只用 `tail -n 40`、`summary.json`、字段列表、计数和样本。
-- 对第三方目录 `tools/MediaCrawler` 只查精确文件，不做全树大范围搜索。
 - 长跑 server 会话不直接 poll 大缓冲；需要停服务时先判断是否有日志积压，必要时只用进程/端口状态确认。
 - 文档只读相关章节，不重复整篇读取。
 - 对大文件验证用小脚本输出计数、字段名和短样本，不把原文吐回上下文。
@@ -124,7 +131,8 @@ python scripts/crawl_runner.py \
   `config/xhs_*.json` 和对应的 `scripts/xhs_accounts.py`、`scripts/xhs_runner.py`；
   不得把小红书放入通用 runner、warmup、benchmark 或中途自动换号。
 - 登录、Chrome、阻断恢复：读 `docs/operations-runbook.md`；通用入口是 `scripts/login_warmup.py`，小红书不得使用该入口。
-- MediaCrawler 平台实现：读 `docs/platforms/<platform>.md`、`scripts/mediacrawler_crawl.py`，必要时只读对应第三方精确文件。
+- 结构化平台实现：读 `docs/platforms/<platform>.md`、`src/trippostcollect/platforms/<platform>/` 和
+  `scripts/mediacrawler_crawl.py` 薄入口；平台适配规则见 `docs/platform-adapters.md`。
 - 页面证据抓取和导入：读 `docs/platforms/page-evidence.md`、`docs/data-persistence.md`、
   `scripts/ctf_resource_crawl.py`、`scripts/import_ctf_captures.py`。当前正式配置没有页面证据任务；
   直接运行只用于开发或诊断，且其独立 profile 不由 `scripts/login_warmup.py` 验证。以后若新增

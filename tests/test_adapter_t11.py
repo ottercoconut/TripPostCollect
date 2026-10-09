@@ -24,6 +24,7 @@ from types import ModuleType, SimpleNamespace
 from PIL import Image
 import pytest
 
+from support import fork_removal_deviation
 from trippostcollect.artifacts.image_candidates import content_image_candidates
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
 from trippostcollect.artifacts.image_materialization import write_staging_image
@@ -101,6 +102,8 @@ T12_REMOVED_ENV = {
     "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE", "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED",
     "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
 }
+# T14-C 授权差异：唯一消费者 fork 旧 store 随 fork 删除，父侧不再发出（ledger.AUTHORIZED_ENV_REMOVALS 同步登记）。
+T14C_REMOVED_ENV = {"TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL"}
 
 
 def t12_authorized(node):
@@ -108,7 +111,7 @@ def t12_authorized(node):
     for child in ast.walk(node):
         if isinstance(child, ast.Dict):
             kept = [(key, value) for key, value in zip(child.keys, child.values)
-                    if not (isinstance(key, ast.Constant) and key.value in T12_REMOVED_ENV)]
+                    if not (isinstance(key, ast.Constant) and key.value in T12_REMOVED_ENV | T14C_REMOVED_ENV)]
             child.keys, child.values = [key for key, _ in kept], [value for _, value in kept]
     if isinstance(node, ast.FunctionDef) and node.name == "ensure_prerequisites":
         node.body = [statement for statement in node.body
@@ -263,7 +266,10 @@ def baseline(monkeypatch):
     module = ModuleType("t11_frozen_executor")
     module.__file__ = str(FIXTURES / "mediacrawler_crawl.py.txt")
     monkeypatch.setitem(sys.modules, module.__name__, module)
-    exec(compile(source, module.__file__, "exec"), vars(module))
+    # T14-C 有意偏离：MEDIACRAWLER_DIR 与过渡模块 execution_state 已删除，执行前单向替换旧导入。
+    text, namespace = fork_removal_deviation.frozen_source(source.decode("utf-8"))
+    vars(module).update(namespace)
+    exec(compile(text, module.__file__, "exec"), vars(module))
     return module
 
 

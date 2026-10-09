@@ -8,6 +8,7 @@
 [详细迁移规格](platform-adapter-specification.md) C0–C7记录五站十三类闭包与主链，
 [附录 C8](platform-adapter-symbol-ledger.md)逐项处置1234个定义，D记录接口和读取时点，G记录获准实施后的任务，
 各任务卡的执行清单以 GitHub issues 跟踪。实施回归、安装、正式试跑与治理切换是独立门禁，本轮均未执行。
+T14（#19）已删除 fork 子模块与私有桥 E；本单中的 `M/`、fork 解释器、子模块归档等步骤只作历史记录，不能在现行仓库复现。
 
 ## 范围、基线与授权
 
@@ -398,7 +399,6 @@ cp tests/test_full_content_contract.py \
 (deny file-read* file-write*
   (subpath "/Users/kawauso/Documents/Projects/TripPostCollect/data")
   (subpath "/Users/kawauso/Documents/Projects/TripPostCollect/outputs")
-  (subpath "/Users/kawauso/Documents/Projects/TripPostCollect/tools/MediaCrawler/browser_data")
   (subpath "/Users/kawauso/.ssh")
   (subpath "/Users/kawauso/.codex")
   (subpath "/Users/kawauso/Library/Keychains")
@@ -409,6 +409,9 @@ cp tests/test_full_content_contract.py \
   (literal "/usr/bin/osascript")
   (regex #".*(Google Chrome|Chromium|chrome-headless|/chrome|/firefox|/webkit|/MiniBrowser).*"))
 ~~~
+
+原策略另禁读写当时的 fork 登录资料目录；T14 后非小红书登录资料位于 `data/runtime/platform_sessions/`，
+已被上面的 `data` 规则覆盖，示例不再列出已删除的 fork 路径。
 
 同一 zsh 会话中分别运行两个副本和两解释器；每项记录独立 XML、退出码和短日志尾部。
 现有解释器的绝对路径仅用于读取环境，项目导入及测试 cwd 来自副本：

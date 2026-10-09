@@ -29,7 +29,7 @@ if str(SCRIPTS) not in sys.path:
 
 crawl_runner = import_module("crawl_runner")
 mediacrawler_crawl = import_module("mediacrawler_crawl")
-execution_state = import_module("execution_state")
+execution_state = import_module("trippostcollect.core.execution_state")
 
 
 def png_bytes(color: tuple[int, int, int] = (10, 20, 30)) -> bytes:

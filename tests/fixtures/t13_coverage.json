@@ -124,7 +124,7 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t03.py::test_factory_loads_known_once",
+       "function": "tests/test_adapter_t03.py::test_root_factory_loads_known_once",
        "lane": "component",
        "params": [
         "weibo"
@@ -194,7 +194,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t03.py::test_factory_loads_known_once",
+       "function": "tests/test_adapter_t03.py::test_root_factory_loads_known_once",
        "lane": "component",
        "params": [
         "douyin"
@@ -224,7 +224,7 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t03.py::test_factory_loads_known_once",
+       "function": "tests/test_adapter_t03.py::test_root_factory_loads_known_once",
        "lane": "component",
        "params": [
         "zhihu"
@@ -316,8 +316,11 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_xhs_batch_checkpoint.py::test_exporter_hook_publishes_only_after_durable_event",
-       "lane": "component"
+       "function": "tests/test_xhs_batch_checkpoint.py::test_worker_checkpoint_exit_order_and_failures",
+       "lane": "component",
+       "params": [
+        "worker"
+       ]
       },
       {
        "function": "tests/test_xhs_batch_checkpoint.py::test_complete_batch_survives_root_loss_and_mutable_export_tail",
@@ -329,10 +332,6 @@
       },
       {
        "function": "tests/test_xhs_batch_checkpoint.py::test_ack_failure_after_db_commit_is_idempotent",
-       "lane": "component"
-      },
-      {
-       "function": "tests/test_xhs_batch_checkpoint.py::test_exporter_checkpoint_failure_keeps_precise_terminal_evidence",
        "lane": "component"
       },
       {
@@ -348,9 +347,8 @@
        "lane": "os"
       },
       {
-       "function": "tests/test_adapter_t09_bridge.py::test_e_bridge_publishes_xhs_batch_like_legacy",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/test_adapter_t09_deps.py::test_formal_xhs_accumulator_publishes_through_worker_event_exit",
+       "lane": "component"
       }
      ]
     }
@@ -840,7 +838,7 @@
       {
        "file": "tests/platforms/weibo/test_weibo_no_user_info.py",
        "lane": "component",
-       "min_count": 3
+       "min_count": 2
       },
       {
        "function": "tests/platforms/weibo/test_weibo_store.py::test_note_store_keeps_pid_order_and_ignores_avatar",
@@ -861,7 +859,7 @@
       {
        "file": "tests/platforms/douyin/test_douyin_no_user_info.py",
        "lane": "component",
-       "min_count": 3
+       "min_count": 2
       },
       {
        "function": "tests/test_image_candidates.py::test_non_content_fields_never_become_content_candidates",
@@ -1006,7 +1004,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup",
+       "function": "tests/test_shared_staging.py::test_root_staging_matches_frozen_baseline",
        "lane": "component",
        "params": [
         "weibo"
@@ -1041,7 +1039,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup",
+       "function": "tests/test_shared_staging.py::test_root_staging_matches_frozen_baseline",
        "lane": "component",
        "params": [
         "douyin"
@@ -1073,7 +1071,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup",
+       "function": "tests/test_shared_staging.py::test_root_staging_matches_frozen_baseline",
        "lane": "component",
        "params": [
         "zhihu"
@@ -1105,7 +1103,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_shared_staging.py::test_four_platforms_match_baseline_after_entry_setup",
+       "function": "tests/test_shared_staging.py::test_root_staging_matches_frozen_baseline",
        "lane": "component",
        "params": [
         "xhs"
@@ -1420,7 +1418,7 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t06.py::test_old_new_requests_records_images_events",
+       "function": "tests/test_adapter_t06.py::test_root_matches_frozen_legacy_requests_records_images_events",
        "lane": "component",
        "params": [
         "login_expired"
@@ -1428,7 +1426,7 @@
        "legacy_equivalence": true
       },
       {
-       "function": "tests/test_adapter_t06.py::test_memory_and_slider_lifecycle_match_baseline",
+       "function": "tests/test_adapter_t06.py::test_root_slider_tracks_and_cache_match_frozen_legacy",
        "lane": "component",
        "legacy_equivalence": true
       },
@@ -1465,7 +1463,7 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence",
+       "function": "tests/test_adapter_t07.py::test_root_matches_frozen_legacy_request_event_and_artifacts",
        "lane": "component",
        "params": [
         "login_expired"
@@ -1603,7 +1601,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t05.py::test_repair_attempts_and_exception_chain_match_frozen_hook",
+       "function": "tests/test_adapter_t05.py::test_root_repair_attempts_and_exception_chain_match_frozen_legacy",
        "lane": "component",
        "legacy_equivalence": true
       }
@@ -1643,7 +1641,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t06.py::test_repair_exception_chain_matches_baseline",
+       "function": "tests/test_adapter_t06.py::test_root_repair_exception_chain_matches_frozen_legacy",
        "lane": "component",
        "legacy_equivalence": true
       }
@@ -1703,7 +1701,7 @@
        "min_count": 17
       },
       {
-       "function": "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy",
+       "function": "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy_expectation",
        "lane": "component",
        "params": [
         "repair"
@@ -1747,12 +1745,12 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
+       "function": "tests/test_adapter_t05.py::test_root_matches_frozen_legacy_requests_artifacts_and_events",
        "lane": "component",
        "legacy_equivalence": true
       },
       {
-       "function": "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts",
+       "function": "tests/test_adapter_t05.py::test_root_entry_assembly_matches_frozen_fork_factory",
        "lane": "component",
        "legacy_equivalence": true
       },
@@ -1774,12 +1772,12 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t06.py::test_old_new_requests_records_images_events",
+       "function": "tests/test_adapter_t06.py::test_root_matches_frozen_legacy_requests_records_images_events",
        "lane": "component",
        "legacy_equivalence": true
       },
       {
-       "function": "tests/test_adapter_t06.py::test_post_form_and_signature_inputs_match_baseline",
+       "function": "tests/test_adapter_t06.py::test_root_post_form_and_signature_inputs_match_frozen_legacy",
        "lane": "component",
        "legacy_equivalence": true
       },
@@ -1801,12 +1799,12 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t07.py::test_request_event_and_artifact_equivalence",
+       "function": "tests/test_adapter_t07.py::test_root_matches_frozen_legacy_request_event_and_artifacts",
        "lane": "component",
        "legacy_equivalence": true
       },
       {
-       "function": "tests/test_adapter_t07.py::test_legacy_factory_and_new_entry_equivalence",
+       "function": "tests/test_adapter_t07.py::test_root_entry_matches_frozen_legacy_factory",
        "lane": "component",
        "legacy_equivalence": true
       },
@@ -1832,19 +1830,19 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy",
+       "function": "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy_expectation",
        "lane": "component",
        "params": [
         "network_recover",
         "network_timeout",
         "cdp_disconnect",
-        "main_page_closed"
+        "main_page_closed",
+        "success",
+        "qr_expired_refresh",
+        "captcha_pass",
+        "cdp_launch_failed",
+        "repair"
        ],
-       "legacy_equivalence": true
-      },
-      {
-       "function": "tests/test_adapter_t09.py::test_legacy_factory_matches_root_entry",
-       "lane": "component",
        "legacy_equivalence": true
       },
       {
@@ -1958,9 +1956,9 @@
        "legacy_equivalence": true
       },
       {
-       "function": "tests/test_adapter_t02.py::test_fork_signature_js_loads_from_any_cwd",
+       "function": "tests/test_adapter_t02.py::test_all_worker_platforms_import_in_root_environment_without_exit_slices",
        "lane": "installation",
-       "site_basis": "抖音与知乎签名 JS 的 Node 桥从任意 cwd 装载"
+       "site_basis": "抖音签名 JS 在根环境导入时经 Node 桥从任意 cwd 编译（原 fork 签名用例随旧桥删除）"
       }
      ]
     },
@@ -2063,7 +2061,7 @@
       {
        "file": "tests/platforms/weibo/test_weibo_no_user_info.py",
        "lane": "component",
-       "min_count": 3
+       "min_count": 2
       },
       {
        "file": "tests/platforms/weibo/test_weibo_store.py",
@@ -2104,7 +2102,7 @@
       {
        "file": "tests/platforms/douyin/test_douyin_no_user_info.py",
        "lane": "component",
-       "min_count": 3
+       "min_count": 2
       },
       {
        "file": "tests/platforms/douyin/test_douyin_search_safety.py",
@@ -2309,7 +2307,7 @@
        "min_count": 1
       },
       {
-       "function": "tests/test_adapter_t03.py::test_factory_loads_known_once",
+       "function": "tests/test_adapter_t03.py::test_root_factory_loads_known_once",
        "lane": "component",
        "params": [
         "xhs"

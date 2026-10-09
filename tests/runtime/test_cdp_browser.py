@@ -234,12 +234,9 @@ async def test_non_xhs_cdp_profile_behavior_is_unchanged_and_ignores_xhs_env(
     # （未共享 CDP profile 的 cdp_<code>_user_data_dir -> data/runtime/platform_sessions/<platform>/cdp_profile）。
     xhs_only_path = tmp_path / "must-not-be-used"
     monkeypatch.setattr("trippostcollect.core.paths.PLATFORM_SESSIONS_ROOT", tmp_path / "platform_sessions")
-    monkeypatch.setattr("trippostcollect.core.paths.LEGACY_FORK_PROFILE_ROOT", tmp_path / "browser_data")
-    legacy_to_new = {
-        str(legacy.relative_to(tmp_path)): str(target)
-        for legacy, target in paths.legacy_fork_profile_dirs("zhihu")
-    }
-    settings = replace(BROWSER_SETTINGS, PLATFORM="zhihu", SAVE_LOGIN_STATE=save_login_state, USER_DATA_DIR="%s_user_data_dir")
+    legacy_to_new = {"browser_data/cdp_zhihu_user_data_dir": str(tmp_path / "platform_sessions/zhihu/cdp_profile")}
+    assert legacy_to_new["browser_data/cdp_zhihu_user_data_dir"] == str(paths.platform_cdp_profile_dir("zhihu"))
+    settings = replace(BROWSER_SETTINGS, PLATFORM="zhihu", SAVE_LOGIN_STATE=save_login_state)
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_PROFILE_DIR", str(xhs_only_path))
     monkeypatch.delenv("TRIPPOSTCOLLECT_SHARE_CDP_PROFILE", raising=False)
     manager = _ready_cdp_launch_manager(monkeypatch, settings)

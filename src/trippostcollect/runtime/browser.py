@@ -66,9 +66,6 @@ class CDPBrowserSettings:
     BROWSER_LAUNCH_TIMEOUT: int
     CUSTOM_BROWSER_PATH: str
     SAVE_LOGIN_STATE: bool
-    # 位置已由 core.paths 定义，本字段不再参与路径计算；仅因 fork `tools/_browser_bridge.py` 仍按名构造
-    # 而保留，T14 删除批随 fork 一并移除。
-    USER_DATA_DIR: str
     AUTO_CLOSE_BROWSER: bool
 
 

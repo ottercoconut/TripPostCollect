@@ -10,10 +10,10 @@
    - 不含任何禁用字段键(user_id/avatar/gender/profile_url/ip_location/desc ...)
    - creator_hash 为平台原始用户 ID(整数 ID 归一为字符串),nickname 为原始昵称
    - 头像、性别、主页、签名、IP 归属地的原始值不出现在任何存储值里
-2. test_weibo_comment_masks_user_info —— 评论属 T12 退出切片,根实现与正式路径不产出评论;
-   本用例只执行冻结 fixture 中的旧评论投影,仍断言其旧的哈希/脱敏行为,随旧桥在 T14 删除。
-3. test_weibo_store_end_to_end_sqlite —— 端到端:把 note(根实现)与 comment(冻结旧投影)
-   产生的真实 dict 按冻结旧 ORM 的列定义，用 SQLite 内存库走完整写入+查询。
+2. 评论属 T12 退出切片,根实现与正式路径不产出评论;原先只验证冻结旧评论投影哈希/脱敏行为的
+   test_weibo_comment_masks_user_info 随旧身份函数在 T14-C 删除。
+3. test_weibo_store_end_to_end_sqlite —— 端到端:把 note(根实现)产生的真实 dict
+   按冻结旧 ORM 的列定义，用 SQLite 内存库走完整写入+查询。
    sqlite_roundtrip(..., "WeiboNote", captured_dict) 会因 旧模型声明字段对未知关键字的校验,
    在 dict 含已删列时直接抛 TypeError —— 以此证明 dict 的 key 与删列后的 ORM 完全对得上,
    且表中无禁用列、有 creator_hash。
@@ -29,10 +29,7 @@ from support.weibo_privacy import config, sqlite_roundtrip
 # 原始(明文)测试数据
 RAW_USER_ID = 7654321
 RAW_NICKNAME = "微博达人"
-RAW_COMMENT_USER_ID = 111222
-RAW_COMMENT_NICKNAME = "评论员小张"
 NOTE_ID = "5123456789"
-COMMENT_ID = "998877"
 # 合法 RFC2822 时间串(weekday 与日期已对齐:2025-06-14 是周六)
 RFC2822_TIME = "Sat Jun 14 12:00:00 +0800 2025"
 
@@ -70,44 +67,16 @@ def make_mock_note() -> dict:
     }
 
 
-def make_mock_comment() -> dict:
-    """贴近真实微博评论结构的 mock comment_item(含嵌套 user 信息)。"""
-    return {
-        "id": COMMENT_ID,
-        "text": "说得好 <a href='#'>支持</a>",
-        "created_at": RFC2822_TIME,
-        "total_number": 3,
-        "like_count": 5,
-        "rootid": "parent_abc",
-        "user": {
-            "id": RAW_COMMENT_USER_ID,
-            "screen_name": RAW_COMMENT_NICKNAME,
-            "avatar_hd": "https://wx avatar.example.com/111222.jpg",
-            "gender": "m",
-            "profile_url": "https://m.weibo.cn/profile/111222",
-            "description": "评论员签名",
-            "ip_location": "广东",
-        },
-    }
-
-
 # ----------------------------- FakeStore 捕获 -----------------------------
 
 class _FakeStore:
-    """捕获 store_content / store_comment 收到的 dict,不触发任何真实存储。"""
+    """捕获 store_content 收到的 dict,不触发任何真实存储。"""
 
     def __init__(self):
         self.captured_content = {}
-        self.captured_comment = {}
 
     async def store_content(self, content_item):
         self.captured_content.update(content_item)
-
-    async def store_comment(self, comment_item):
-        self.captured_comment.update(comment_item)
-
-    async def store_creator(self, creator):
-        pass
 
 
 def _patch_factory(fake: "_FakeStore"):
@@ -170,49 +139,10 @@ def test_weibo_note_masks_user_info():
     assert captured["shared_count"] == "1"
 
 
-def test_weibo_comment_masks_user_info():
-    """退出切片的冻结旧评论投影:不含禁用键,仍按旧行为哈希 user id、脱敏昵称。"""
-    from support.weibo_privacy import wb
-
-    fake = _FakeStore()
-    wb_, orig = _patch_factory(fake)
-    try:
-        asyncio.run(wb.update_weibo_note_comment(NOTE_ID, make_mock_comment()))
-    finally:
-        _restore(wb_, orig)
-
-    captured = fake.captured_comment
-    assert captured, "FakeStore 未捕获到 comment dict"
-
-    # 1. 不含任何禁用字段键
-    hit = set(captured.keys()) & FORBIDDEN_KEYS
-    assert not hit, f"comment 存储字典仍含禁用字段键: {hit}"
-
-    # 2. creator_hash 存在、不等于原始 user id
-    creator_hash = captured.get("creator_hash")
-    assert creator_hash, "comment dict 缺少 creator_hash"
-    assert creator_hash != str(RAW_COMMENT_USER_ID)
-    assert creator_hash != RAW_COMMENT_USER_ID
-    assert len(creator_hash) == 16
-
-    # 3. 昵称已脱敏
-    nickname = captured.get("nickname")
-    assert nickname, "comment dict 缺少 nickname"
-    assert nickname != RAW_COMMENT_NICKNAME, "comment 昵称未脱敏,仍为原文"
-    assert "*" in nickname, f"comment 昵称未脱敏: {nickname}"
-
-    # 4. 内容字段正确
-    assert "说得好" in captured["content"]
-    assert captured["comment_id"] == COMMENT_ID
-    assert captured["comment_like_count"] == "5"
-    assert captured["sub_comment_count"] == "3"
-    assert captured["parent_comment_id"] == "parent_abc"
-
-
 def test_weibo_store_end_to_end_sqlite(monkeypatch):
-    """端到端:捕获 note/comment 的真实 dict,按冻结旧 ORM 的列定义，用 SQLite 内存库走完整 写入+查询。
+    """端到端:捕获 note 的真实 dict,按冻结旧 ORM 的列定义，用 SQLite 内存库走完整 写入+查询。
 
-    关键点:sqlite_roundtrip(..., "WeiboNote", captured_dict) / 评论旧模型字段校验 会触发
+    关键点:sqlite_roundtrip(..., "WeiboNote", captured_dict) 会触发
     冻结旧模型声明字段的关键字校验——若 dict 含已删列(如 avatar/gender)会直接
     抛 TypeError。此处不抛异常即证明 dict 的 key 与删列后的 ORM 列完全对得上。
     """
@@ -221,20 +151,18 @@ def test_weibo_store_end_to_end_sqlite(monkeypatch):
 
     from support.weibo_privacy import wb
 
-    # ---- 1. 用 FakeStore 捕获 update_weibo_note / update_weibo_note_comment 产生的真实 dict ----
+    # ---- 1. 用 FakeStore 捕获 update_weibo_note 产生的真实 dict ----
     fake = _FakeStore()
     wb_, orig = _patch_factory(fake)
     try:
         asyncio.run(wb.update_weibo_note(make_mock_note()))
-        asyncio.run(wb.update_weibo_note_comment(NOTE_ID, make_mock_comment()))
     finally:
         _restore(wb_, orig)
 
     captured_note = dict(fake.captured_content)
-    captured_comment = dict(fake.captured_comment)
-    assert captured_note and captured_comment
+    assert captured_note
 
-    # ---- 2. SQLite 内存库,建 weibo 两张表 ----
+    # ---- 2. SQLite 内存库,建 WeiboNote 表 ----
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
     try:
@@ -250,17 +178,6 @@ def test_weibo_store_end_to_end_sqlite(monkeypatch):
         # 确认没有 desc 列存任何用户描述
         assert "desc" not in note_cols
 
-        # ---- 4. comment(冻结旧投影,退出切片):ID 已统一为字符串类型,create_time 保持 int ----
-        cc = dict(captured_comment)
-        cc["create_time"] = int(cc.get("create_time", 0) or 0)
-        crow, comment_cols = sqlite_roundtrip(connection, "WeiboNoteComment", cc)
-        assert not (comment_cols & FORBIDDEN_KEYS), \
-            f"WeiboNoteComment 表仍含禁用列: {comment_cols & FORBIDDEN_KEYS}"
-        assert crow.creator_hash and crow.creator_hash != str(RAW_COMMENT_USER_ID)
-        assert crow.nickname != RAW_COMMENT_NICKNAME and "*" in crow.nickname
-        assert crow.comment_id == COMMENT_ID
-        assert crow.note_id == NOTE_ID
-        assert "说得好" in crow.content
     finally:
         connection.close()
 

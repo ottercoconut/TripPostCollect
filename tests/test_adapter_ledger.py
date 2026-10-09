@@ -410,11 +410,12 @@ def test_progress_mixin_shadowing(tmp_path: Path, case: str, expected: str) -> N
 
 
 def test_only_spec_authorized_env_removals_are_excluded_from_drift(tmp_path: Path) -> None:
-    """规格 D2（469/485 行）授权的 6 个名字不计漂移；清单外删除仍出现在 env_removed。"""
+    """规格 D2（469/485 行）授权的 6 个名字与 T14-C 删除的 XHS_KEEP_AUTHOR_DETAIL 不计漂移；清单外删除仍出现在 env_removed。"""
     assert ledger.AUTHORIZED_ENV_REMOVALS == {
         "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID", "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM",
         "TRIPPOSTCOLLECT_DISCOVERY_KEYWORD", "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE",
         "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED", "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
+        "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL",
     }
     module = "src/trippostcollect/emitter.py"
     emitted = (

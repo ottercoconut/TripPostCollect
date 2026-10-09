@@ -19,6 +19,7 @@ from urllib.parse import parse_qsl
 
 import pytest
 
+from support import fork_removal_deviation
 from trippostcollect.application import inputs, page_evidence, repair, warmup
 from trippostcollect.core import paths as core_paths
 from trippostcollect.runtime import cookies, page_readiness
@@ -37,7 +38,9 @@ def frozen_source(name):
 def old_module(name, namespace=None):
     module = ModuleType(f"frozen_{name}")
     module.__dict__.update(namespace or {})
-    source = frozen_source(name)
+    # T14-C 有意偏离：MEDIACRAWLER_DIR 与过渡模块 execution_state 已删除，执行前单向替换旧导入。
+    source, preset = fork_removal_deviation.frozen_source(frozen_source(name))
+    module.__dict__.update(preset)
     if "from __future__ import annotations" not in source:
         source = "from __future__ import annotations\n" + source
     exec(compile(source, name, "exec"), module.__dict__)
@@ -217,7 +220,6 @@ def configure(monkeypatch, module, fake, root):
     else:
         # T14：新实现不再检查 fork 目录，快照经 cookie_snapshot_path 写出；对照时落在与旧实现相同的文件。
         monkeypatch.setattr(module, "cookie_snapshot_path", lambda key: root / "profiles" / key / core_paths.COOKIE_SNAPSHOT_FILENAME)
-        monkeypatch.setattr(core_paths, "LEGACY_FORK_PROFILE_ROOT", root.parent / "no-legacy-fork-profiles")
     monkeypatch.setattr(module, "discover_cdp_browser_path", lambda: None)
     monkeypatch.setattr(module, "browser_runtime_args", lambda: [])
     monkeypatch.setattr(module, "browser_launch_environment", lambda: {})

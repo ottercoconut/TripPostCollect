@@ -1,18 +1,17 @@
-"""旧隐私用例的窄测试装配；评论退出切片只从冻结 fixture 执行。"""
+"""旧隐私用例的窄测试装配：作者字段边界只经根实现 update_weibo_note 验证。
+
+评论属 T12 退出切片；原先从冻结 fixture 执行的旧评论投影只验证旧哈希/脱敏行为，随旧身份函数在 T14-C 删除。
+"""
 
 import ast
 from dataclasses import replace
 import json
-import logging
-import re
 from types import SimpleNamespace
-from typing import Dict
 
-from support.weibo_adapter import FIXTURE, crawler, settings
-from trippostcollect.records.identity import anonymize_user_id, mask_nickname
-from trippostcollect.runtime import helpers
+from support.weibo_adapter import ROOT, crawler, settings
 
 
+FIXTURE = ROOT / "tests/fixtures/adapter_t05"
 config = settings()
 
 
@@ -28,23 +27,7 @@ async def update_weibo_note(note_item):
     await instance.update_weibo_note(note_item)
 
 
-source = ast.parse((FIXTURE / "store/weibo/__init__.py.txt").read_text())
-comment = next(node for node in source.body if getattr(node, "name", "") == "update_weibo_note_comment")
-namespace = {
-    "Dict": Dict, "re": re, "anonymize_user_id": anonymize_user_id,
-    "mask_nickname": mask_nickname, "WeibostoreFactory": Factory,
-    "utils": SimpleNamespace(
-        rfc2822_to_timestamp=helpers.rfc2822_to_timestamp,
-        rfc2822_to_china_datetime=helpers.rfc2822_to_china_datetime,
-        get_current_timestamp=helpers.get_current_timestamp,
-        logger=logging.getLogger("MediaCrawler"),
-    ),
-}
-exec(compile(ast.Module(body=[comment], type_ignores=[]), "旧微博评论投影", "exec"), namespace)
-wb = SimpleNamespace(
-    WeibostoreFactory=Factory, update_weibo_note=update_weibo_note,
-    update_weibo_note_comment=namespace["update_weibo_note_comment"],
-)
+wb = SimpleNamespace(WeibostoreFactory=Factory, update_weibo_note=update_weibo_note)
 
 
 def sqlite_roundtrip(connection, model_name, record):

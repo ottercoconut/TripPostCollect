@@ -1424,7 +1424,7 @@ def verify_apply_inputs(config: RepairConfig, meta: dict[str, str]) -> dict[str,
 
 def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
     if config.apply:
-        # T14：apply 会读取新位置的 B站快照；旧 profile 未迁移时先失败关闭，不写状态库，
+        # T14：apply 会读取新位置的 B站快照；迁移中断留下 `.partial` 残留时先失败关闭，不写状态库，
         # 也不把“快照不在新位置”误报为 login_required。
         require_platform_session_migrated("bilibili")
     ensure_parent(config.state_db_path)

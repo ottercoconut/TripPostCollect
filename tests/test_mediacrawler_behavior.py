@@ -15,7 +15,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from support import legacy_expectations as expectations
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,63 +36,6 @@ def _fork_behavior_adapter():
     module = module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-@expectations.legacy_only
-def test_fork_behavior_injects_original_xhs_dependencies_at_call_time(monkeypatch, tmp_path):
-    adapter = _fork_behavior_adapter()
-    page = object()
-    calls = []
-
-    async def run(borrowed, **kwargs):
-        assert borrowed is page
-        calls.append(kwargs)
-        return {"status": "completed"}
-
-    monkeypatch.setattr(runtime_behavior, "run_page_behavior", run)
-    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_ENABLED", "0")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", str(tmp_path / "missing"))
-    assert asyncio.run(adapter.run_required_human_behavior(page, "xhs")) == {
-        "status": "disabled", "platform": "xhs",
-    }
-    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_ENABLED", "1")
-    with pytest.raises(RuntimeError, match="human behavior configuration is incomplete"):
-        asyncio.run(adapter.run_required_human_behavior(page, "xhs"))
-    assert calls == []
-    monkeypatch.setenv("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", str(SCRIPTS))
-    evidence = str(tmp_path / "behavior.json")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", evidence)
-    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_PROFILE", "xhs_guarded")
-    assert asyncio.run(adapter.run_required_human_behavior(page, "xhs")) == {"status": "completed"}
-    assert calls == [{
-        "platform_key": "xhs", "evidence_path": evidence, "profile_name": "xhs_guarded",
-        "xhs_search_ready": mediacrawler_behavior.wait_for_xhs_search_ready,
-        "write_evidence": mediacrawler_behavior.write_evidence,
-    }]
-
-
-@expectations.legacy_only
-def test_fork_runtime_hints_keep_guard_without_injecting_scripts_path(monkeypatch, tmp_path):
-    adapter = _fork_behavior_adapter()
-    context = object()
-    calls = []
-
-    async def install(borrowed):
-        calls.append(borrowed)
-
-    monkeypatch.setattr(runtime_behavior, "install_runtime_hints", install)
-    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_ENABLED", "0")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", str(tmp_path / "missing"))
-    asyncio.run(adapter.install_project_runtime_hints(context))
-    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_ENABLED", "1")
-    with pytest.raises(RuntimeError, match="runtime hint configuration is incomplete"):
-        asyncio.run(adapter.install_project_runtime_hints(context))
-    assert calls == []
-    monkeypatch.setenv("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", str(tmp_path))
-    before = list(sys.path)
-    asyncio.run(adapter.install_project_runtime_hints(context))
-    assert sys.path == before
-    assert calls == [context]
 
 
 def valid_fingerprint(*, webdriver=None) -> dict:

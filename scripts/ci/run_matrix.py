@@ -24,7 +24,7 @@ FORK = "tools/MediaCrawler"
 # T14 过渡：fork gitlink 存在且离线清单非空时才运行 fork 离线 lane。T14-B2 起原 34 个离线用例已按台账
 # target_file 原名原断言移植到 tests/artifacts/test_staging.py 与 tests/application/test_discovery.py
 # （映射见 tests/fixtures/t14_fork_test_mapping.json），清单为空，fork lane 不再运行。
-# T14-C 删除 fork 后，本节常量与 fork lane 代码一并删除。
+# T14-C 已删除 fork；本节常量与 fork lane 代码在 T14-C 卡片闸门（基线仍含 fork）通过后的清理批删除。
 FORK_OFFLINE_TESTS: tuple[str, ...] = ()
 FORK_EXPECTED_TESTS = 0
 # 根环境选站装配验收：B站正式 article 路线与四站 worker 选站，均不得装载 fork 顶层包。

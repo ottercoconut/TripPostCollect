@@ -13,3 +13,6 @@ data/
 playwright-profile/
 outputs/
 temp/
+# T14-C 删除 fork 子模块后，旧工作副本中 tools/MediaCrawler 可能作为未跟踪备份（含旧 profile）留在磁盘；
+# 忽略它，防止误提交为嵌套仓库，也避免 rg 等工具扫到。
+/tools/MediaCrawler/

@@ -2459,6 +2459,9 @@ PROGRESS_RESOLUTIONS = {
                            ("xhs", "XiaoHongShuImage"), ("zhihu", "ZhihuStoreImage"))
         for member in ("", ".__init__", ".store_post_images", ".record_failure")
     },
+    ("tools/MediaCrawler/tools/trippostcollect_adaptive.py", "env_int"): (
+        "迁至", "env_int_reader",
+        "T03单次读取包装env_int只供fork旧委托，T14-C随fork删除；根实现统一经零参env_int_reader在操作起点读取"),
     ("tools/MediaCrawler/tools/trippostcollect_adaptive.py", "AdaptiveAccumulator.from_environment"): (
         "迁至", "AdaptiveAccumulator.for_platform",
         "env作用域读取归db.discovery_read并由entry装配，构造与微博stagnation_basis归for_platform"),
