@@ -867,15 +867,29 @@ T14-C 同批改动了冻结资产 `docs/crawl-architecture.md` 与 `docs/data-pe
    python scripts/verify_frozen_files.py
    ```
 
-3. 只对这两份文件解除不可变标志。macOS：
+3. 列出本次拉取会改动、且本机带不可变标志的文件，记下清单供第 5 步恢复。T14-C 改动两份冻结文档和
+   登记文件 `config/frozen_files.json`（同批更新登记哈希）；登记文件本身不在冻结登记中，但本机若也给它设了
+   标志，同样会挡住拉取。macOS 看 `ls -lO` 的标志列是否含 `uchg`，Linux 看 `lsattr` 的属性是否含 `i`：
+
+   ```bash
+   git fetch origin
+   git diff --name-only HEAD..origin/main
+   ls -lO \
+     docs/crawl-architecture.md \
+     docs/data-persistence.md \
+     config/frozen_files.json
+   ```
+
+   Linux 把 `ls -lO` 换成 `lsattr`。只对清单中的文件解除标志。macOS（三份都带 `uchg` 时）：
 
    ```bash
    chflags nouchg \
      docs/crawl-architecture.md \
-     docs/data-persistence.md
+     docs/data-persistence.md \
+     config/frozen_files.json
    ```
 
-   Linux：
+   Linux（只有两份冻结文档带 `i` 时）：
 
    ```bash
    sudo chattr -i \
@@ -894,12 +908,13 @@ T14-C 同批改动了冻结资产 `docs/crawl-architecture.md` 与 `docs/data-pe
    拉取若报错停下，先看 `git status --short`，不要用 `reset --hard`、`clean` 或 `checkout -- .` 处理，
    把输出交人工确认。
 
-5. 恢复不可变标志并重新验证，必须通过。macOS：
+5. 按第 3 步记下的清单恢复不可变标志（不给原本没有标志的文件新加），再重新验证，必须通过。macOS：
 
    ```bash
    chflags uchg \
      docs/crawl-architecture.md \
-     docs/data-persistence.md
+     docs/data-persistence.md \
+     config/frozen_files.json
    source .venv/bin/activate
    python scripts/verify_frozen_files.py
    ```
