@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from trippostcollect.application.inputs import PLATFORMS as PLATFORMS
+from trippostcollect.application.visit_gate import VISIT_GATED_PLATFORMS
 from trippostcollect.core.paths import ensure_parent
 from trippostcollect.records.formal import is_video_record as is_video_record
 from trippostcollect.records.formal import platform_from_path as platform_from_path
@@ -366,6 +367,9 @@ def collect_behavior_validation(
         )
         # 纳入访问门禁的平台：节奏与连续性改由不截断的访问账本按本轮实际访问推导。
         visit_validation = (content_visits or {}).get(platform_key)
+        if visit_validation is None and platform_key in VISIT_GATED_PLATFORMS:
+            # 门禁平台缺少访问门禁结果时失败关闭，不能因调用方漏传而静默放行。
+            visit_validation = {"content_visit_ok": False, "problem": "visit_validation_missing"}
         if visit_validation is not None:
             pacing_ok = bool(visit_validation.get("request_pacing_ok"))
             continuity_ok = bool(visit_validation.get("continuity_ok"))

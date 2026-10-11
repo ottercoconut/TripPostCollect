@@ -6,6 +6,7 @@ from urllib.parse import quote, unquote
 
 import pytest
 
+from trippostcollect.application import reporting
 from trippostcollect.application.collection import apply_formal_completion_gates
 from trippostcollect.application.reporting import (
     TARGET_URL_MAX_UNQUOTE,
@@ -115,6 +116,21 @@ def test_gated_platform_failures_fail_behavior(result):
     gated = collect_behavior_validation([platform_record("xhs")], ["xhs"], KEYWORD, content_visits={"xhs": result})
     assert gated["behavior_ok"] is False and gated["ok"] is False
     assert gated["content_visit_ok"] is result["content_visit_ok"]
+
+
+def test_gated_platform_without_visit_results_fails_closed(monkeypatch):
+    monkeypatch.setattr(reporting, "VISIT_GATED_PLATFORMS", frozenset({"xhs"}))
+    records = [platform_record("xhs"), platform_record("zhihu", url=encoded(1))]
+    result = collect_behavior_validation(records, ["xhs", "zhihu"], KEYWORD)
+    xhs = result["platforms"]["xhs"]
+    assert xhs["content_visit_ok"] is False
+    assert xhs["content_visit_validation"] == {"content_visit_ok": False, "problem": "visit_validation_missing"}
+    assert xhs["request_pacing_ok"] is False and xhs["behavior_ok"] is False
+    assert result["platforms"]["zhihu"]["content_visit_ok"] is None
+    assert result["platforms"]["zhihu"]["behavior_ok"] is True
+    assert result["content_visit_ok"] is False and result["behavior_ok"] is False and result["ok"] is False
+    passed = collect_behavior_validation(records, ["xhs", "zhihu"], KEYWORD, content_visits={"xhs": visits()})
+    assert passed["content_visit_ok"] is True and passed["ok"] is True
 
 
 def test_ungated_platforms_are_unchanged():
