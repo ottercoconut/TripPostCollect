@@ -36,6 +36,8 @@ from trippostcollect.application.reporting import summarize_output_with_progress
 from trippostcollect.application.reporting import terminal_summary_envelope
 from trippostcollect.application.reporting import write_json_with_progress
 from trippostcollect.application.reporting import write_markdown
+from trippostcollect.application.visit_gate import VISIT_GATED_PLATFORMS
+from trippostcollect.application.visit_gate import validate_summary_content_visits
 from trippostcollect.application.warmup import cookie_snapshot_path
 from trippostcollect.artifacts.formal_images import formal_media_persistence_lock
 from trippostcollect.artifacts.formal_images import materialize_formal_record_images
@@ -79,6 +81,7 @@ from trippostcollect.runtime.process import append_runtime_watchdog_stop_event a
 from trippostcollect.runtime.process import run_command as run_command
 from trippostcollect.runtime.process import runtime_watchdog_stop_detail as runtime_watchdog_stop_detail
 from trippostcollect.runtime.process import skipped_command as skipped_command
+from trippostcollect.runtime.visit_ledger import content_visits_path
 from trippostcollect.scheduler.discovery import load_checkpoint
 from trippostcollect.scheduler.discovery import save_checkpoint
 from trippostcollect.scheduler.discovery import save_seen_candidates
@@ -958,6 +961,8 @@ def _run_platform_without_policy(
         "",
     ).strip()
     progress_paths = [save_path, behavior_evidence_path]
+    if platform_key in VISIT_GATED_PLATFORMS:
+        progress_paths.append(content_visits_path(behavior_evidence_path))
     if execution_state_path:
         progress_paths.append(Path(execution_state_path).expanduser())
     run = run_command(
@@ -1020,6 +1025,9 @@ def _run_platform_without_policy(
         args.keyword,
         runtime_reporter.checkpoint if runtime_reporter is not None else None,
     )
+    if platform_key in VISIT_GATED_PLATFORMS:
+        ledger_path = content_visits_path(behavior_evidence_path)
+        output["content_visit_paths"] = [str(ledger_path)] if ledger_path.is_file() else []
     status = (
         "completed"
         if output["parse_errors"] == 0
@@ -1198,6 +1206,7 @@ def apply_formal_completion_gates(
     gated["image_materialization_complete"] = bool(image_materialization.get("complete"))
     gated["behavior_evidence_ok"] = bool(behavior_validation.get("behavior_ok"))
     gated["policy_evidence_ok"] = bool(behavior_validation.get("policy_ok"))
+    gated["content_visit_ok"] = behavior_validation.get("content_visit_ok")
     gated["child_execution_ok"] = child_execution_ok
     raw_runtime_stop_reason = str(gated.get("stop_reason") or "")
     if raw_runtime_stop_reason in {"login_required", "captcha_detected"}:
@@ -1583,6 +1592,27 @@ def _run_main(
             repair_mode=True,
             progress_callback=progress_callback,
         )
+    content_visits = {
+        platform_key: validate_summary_content_visits(
+            summary,
+            content_valid_records,
+            platform_key,
+            repair_mode=repair_mode,
+            stop_event=pagination_evidence.get("stop_event"),
+        )
+        for platform_key in platforms
+        if platform_key in VISIT_GATED_PLATFORMS
+    }
+    if content_visits:
+        behavior_validation = collect_behavior_validation(
+            records,
+            platforms,
+            args.keyword,
+            args.xhs_post_interaction,
+            repair_mode=repair_mode,
+            content_visits=content_visits,
+        )
+        summary["behavior_validation"] = behavior_validation
     materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}
     if args.download_images:
         (

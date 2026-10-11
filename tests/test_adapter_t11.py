@@ -25,6 +25,7 @@ from PIL import Image
 import pytest
 
 from support import fork_removal_deviation
+from trippostcollect.application import reporting, visit_gate
 from trippostcollect.artifacts.image_candidates import content_image_candidates
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
 from trippostcollect.artifacts.image_materialization import write_staging_image
@@ -32,6 +33,7 @@ from trippostcollect.core.execution_state import FrozenExecutionState
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.bilibili import core as bilibili_core
 from trippostcollect.runtime import process
+from trippostcollect.runtime.visit_ledger import content_visits_path
 from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -157,6 +159,97 @@ def t75_authorized_source(text):
     return text
 
 
+# #71 授权差异：访问门禁 content_visit_ok 接入行为门禁，target_url_ok 改为逐层解码；
+# 纳入访问门禁的平台把访问账本列入看门狗进展路径与平台记录输出。旧执行器同样替换后执行。
+T71_REPLACEMENTS = (
+    (
+        "    repair_mode: bool = False,\n) -> dict[str, Any]:\n    latest_by_platform",
+        "    repair_mode: bool = False,\n"
+        "    content_visits: dict[str, dict[str, Any]] | None = None,\n"
+        ") -> dict[str, Any]:\n    latest_by_platform",
+    ),
+    (
+        "            or \"search_results\" in continuity_stages\n        )\n",
+        "            or \"search_results\" in continuity_stages\n        )\n"
+        "        # 纳入访问门禁的平台：节奏与连续性改由不截断的访问账本按本轮实际访问推导。\n"
+        "        visit_validation = (content_visits or {}).get(platform_key)\n"
+        "        if visit_validation is not None:\n"
+        "            pacing_ok = bool(visit_validation.get(\"request_pacing_ok\"))\n"
+        "            continuity_ok = bool(visit_validation.get(\"continuity_ok\"))\n"
+        "        content_visit_ok = visit_validation is None or bool(visit_validation.get(\"content_visit_ok\"))\n",
+    ),
+    (
+        "        target_url_ok = bool(keyword) and keyword in unquote(behavior_url)\n",
+        "        target_url_ok = _url_contains_keyword(behavior_url, keyword)\n",
+    ),
+    (
+        "                and pacing_ok\n                and continuity_ok\n            ),",
+        "                and pacing_ok\n                and continuity_ok\n                and content_visit_ok\n            ),",
+    ),
+    (
+        "            \"continuity_ok\": continuity_ok,\n            \"post_interaction_requested\"",
+        "            \"continuity_ok\": continuity_ok,\n"
+        "            \"content_visit_ok\": None if visit_validation is None else content_visit_ok,\n"
+        "            \"content_visit_validation\": visit_validation,\n"
+        "            \"post_interaction_requested\"",
+    ),
+    (
+        "    return {\n        \"required\": True,\n        \"ok\": behavior_ok and policy_ok,\n"
+        "        \"behavior_ok\": behavior_ok,\n        \"policy_ok\": policy_ok,\n",
+        "    visit_results = [\n"
+        "        item[\"content_visit_ok\"] for item in platform_results.values() if item[\"content_visit_ok\"] is not None\n"
+        "    ]\n"
+        "    return {\n        \"required\": True,\n        \"ok\": behavior_ok and policy_ok,\n"
+        "        \"behavior_ok\": behavior_ok,\n        \"policy_ok\": policy_ok,\n"
+        "        \"content_visit_ok\": all(visit_results) if visit_results else None,\n",
+    ),
+    (
+        "    progress_paths = [save_path, behavior_evidence_path]\n",
+        "    progress_paths = [save_path, behavior_evidence_path]\n"
+        "    if platform_key in VISIT_GATED_PLATFORMS:\n"
+        "        progress_paths.append(content_visits_path(behavior_evidence_path))\n",
+    ),
+    (
+        "        runtime_reporter.checkpoint if runtime_reporter is not None else None,\n    )\n",
+        "        runtime_reporter.checkpoint if runtime_reporter is not None else None,\n    )\n"
+        "    if platform_key in VISIT_GATED_PLATFORMS:\n"
+        "        ledger_path = content_visits_path(behavior_evidence_path)\n"
+        "        output[\"content_visit_paths\"] = [str(ledger_path)] if ledger_path.is_file() else []\n",
+    ),
+    (
+        "    gated[\"policy_evidence_ok\"] = bool(behavior_validation.get(\"policy_ok\"))\n",
+        "    gated[\"policy_evidence_ok\"] = bool(behavior_validation.get(\"policy_ok\"))\n"
+        "    gated[\"content_visit_ok\"] = behavior_validation.get(\"content_visit_ok\")\n",
+    ),
+    (
+        "    materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}\n",
+        "    content_visits = {\n"
+        "        platform_key: validate_summary_content_visits(\n"
+        "            summary,\n            content_valid_records,\n            platform_key,\n"
+        "            repair_mode=repair_mode,\n"
+        "            stop_event=pagination_evidence.get(\"stop_event\"),\n"
+        "        )\n"
+        "        for platform_key in platforms\n"
+        "        if platform_key in VISIT_GATED_PLATFORMS\n"
+        "    }\n"
+        "    if content_visits:\n"
+        "        behavior_validation = collect_behavior_validation(\n"
+        "            records,\n            platforms,\n            args.keyword,\n            args.xhs_post_interaction,\n"
+        "            repair_mode=repair_mode,\n            content_visits=content_visits,\n        )\n"
+        "        summary[\"behavior_validation\"] = behavior_validation\n"
+        "    materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}\n",
+    ),
+)
+
+
+def t71_authorized_source(text):
+    """在冻结旧源码上做 #71 的同样替换；每处必须恰好出现一次。"""
+    for old, new in T71_REPLACEMENTS:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    return text
+
+
 def t14_authorized(node):
     """T14 授权差异：run_platform 在预算守卫前对非小红书平台做 profile 迁移失败关闭检查。"""
     node = deepcopy(node)
@@ -236,7 +329,8 @@ def test_a_migrated_ast(row):
     if row["disposition"] == "薄":
         target = ROOT / "src/trippostcollect/application/collection.py"
     assert target.exists(), f"新定义不存在：{target.relative_to(ROOT)}::{name}"
-    old = t12_authorized(definition(t75_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text()), name))
+    frozen = t71_authorized_source(t75_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text()))
+    old = t12_authorized(definition(frozen, name))
     new = t14_authorized(definition(target.read_text(), name))
     assert normalized_pair(old, new, AST_RULES[name])[0] == normalized_pair(old, new, AST_RULES[name])[1]
     if row["disposition"] == "薄":
@@ -311,6 +405,12 @@ def baseline(monkeypatch):
     # #75 有意偏离：任务级时限删除，旧执行器同样改用统一的无进展看门狗常量。
     text = t75_authorized_source(text)
     namespace["NO_PROGRESS_WATCHDOG_SECONDS"] = process.NO_PROGRESS_WATCHDOG_SECONDS
+    # #71 有意偏离：访问门禁与逐层解码接入旧执行器，名称取自新实现的同一定义。
+    text = t71_authorized_source(text)
+    namespace["VISIT_GATED_PLATFORMS"] = visit_gate.VISIT_GATED_PLATFORMS
+    namespace["validate_summary_content_visits"] = visit_gate.validate_summary_content_visits
+    namespace["content_visits_path"] = content_visits_path
+    namespace["_url_contains_keyword"] = reporting._url_contains_keyword
     namespace["operator_wait_diagnostics_path"] = operator_wait_diagnostics_path
     vars(module).update(namespace)
     exec(compile(text, module.__file__, "exec"), vars(module))
