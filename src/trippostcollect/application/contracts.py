@@ -410,13 +410,6 @@ class XhsClientPorts:
 
 
 @dataclass(frozen=True)
-class XhsLoginPorts:
-    """二维码提取仍由运行时拥有，HTTPX 工厂与 UA 在装配时绑定。"""
-
-    find_login_qrcode: Callable[..., Any]
-
-
-@dataclass(frozen=True)
 class XhsPorts:
     """小红书编排借用的 IO 能力；装配不执行 IO，事件出口经此注入。"""
 
@@ -427,7 +420,6 @@ class XhsPorts:
     accumulator_factory: Callable[..., Any]
     append_execution_event: Callable[[str, dict[str, Any]], None]
     client: XhsClientPorts
-    login: XhsLoginPorts
     behavior: XhsBehaviorPorts
     record_platform_security_limit: Callable[..., Any]
     current_timestamp: Callable[[], int]

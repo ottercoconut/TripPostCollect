@@ -41,6 +41,7 @@ from trippostcollect.platforms.xhs.errors import (
     XHSNetworkRecoveryTimeout,
     is_recoverable_xhs_navigation_failure,
 )
+from trippostcollect.platforms.xhs.page_scripts import dom_render_diagnostic
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -258,25 +259,7 @@ class XhsNavigationMixin:
             "request_failures": list(self._navigation_request_failures[-8:]),
         }
         try:
-            async with asyncio.timeout(5.0):
-                observed = await page.evaluate(
-                    """() => ({
-                        ready_state: document.readyState || '',
-                        title: (document.title || '').slice(0, 160),
-                        dom_length: document.documentElement
-                            ? document.documentElement.outerHTML.length
-                            : 0,
-                        body_text_length: document.body
-                            ? (document.body.innerText || '').trim().length
-                            : 0,
-                        body_child_element_count: document.body
-                            ? document.body.childElementCount
-                            : 0,
-                        visibility_state: document.visibilityState || '',
-                    })"""
-                )
-            if isinstance(observed, dict):
-                diagnostic.update(observed)
+            diagnostic.update(await dom_render_diagnostic(page))
         except Exception as exc:
             diagnostic["inspection_error"] = f"{type(exc).__name__}: {exc}"
         return diagnostic

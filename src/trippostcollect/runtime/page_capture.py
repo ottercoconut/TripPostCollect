@@ -364,6 +364,7 @@ class PageCaptureChannel:
         self._event = asyncio.Event()
         self._fault: BaseException | None = None
         self._installed = False
+        self.closed = False
         self.dropped_responses = 0
 
     # 页面登记 -----------------------------------------------------------------
@@ -643,7 +644,7 @@ class PageCaptureChannel:
     # 事件回调（同步；只在这里分配截获序号） ------------------------------------
 
     def _on_response(self, page: Any, response: Any) -> None:
-        if self._fault is not None:
+        if self._fault is not None or self.closed:
             return
         try:
             self._handle_response(page, response)
@@ -780,7 +781,7 @@ class PageCaptureChannel:
         self._store(rule.name, captured)
 
     def _on_request_failed(self, page: Any, request: Any) -> None:
-        if self._fault is not None:
+        if self._fault is not None or self.closed:
             return
         try:
             origin = self._origin(page, request)
@@ -850,11 +851,17 @@ class PageCaptureChannel:
                 f"page capture channel failed: {type(self._fault).__name__}"
             ) from self._fault
 
-    async def aclose(self) -> None:
+    def close(self) -> None:
+        """停止截获：关闭窗口、取消未完成的读体并关闭账本；之后到达的事件一律忽略。"""
+        self.closed = True
         for window in list(self._windows):
             window.close()
-        tasks = list(self._tasks)
-        for task in tasks:
+        for task in list(self._tasks):
             task.cancel()
+        self.ledger.close()
+
+    async def aclose(self) -> None:
+        tasks = list(self._tasks)
+        self.close()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)

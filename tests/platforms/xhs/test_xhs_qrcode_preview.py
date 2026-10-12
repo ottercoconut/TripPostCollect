@@ -11,12 +11,11 @@ from trippostcollect.platforms.xhs.login import XiaoHongShuLogin
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudgetExhausted
 from trippostcollect.runtime import login_helpers
 
-from .support import config, login_ports
+from .support import config
 
 
 class FakeContext:
-    async def cookies(self) -> list[dict[str, str]]:
-        return [{"name": "web_session", "value": "before"}]
+    pages: list = []
 
 
 class FakeClock:
@@ -36,7 +35,6 @@ def make_login() -> tuple[XiaoHongShuLogin, SimpleNamespace]:
         login_type="qrcode",
         browser_context=FakeContext(),
         context_page=page,
-        ports=login_ports,
     )
     return login, page
 
@@ -48,9 +46,10 @@ def configure_qrcode_flow(
     wait_seconds: int,
 ) -> tuple[AsyncMock, MagicMock]:
     clock = FakeClock()
-    find_qrcode = AsyncMock(return_value="qr-image")
+    # 二维码就绪只经 DOM 布尔判断；不下载图片，也就没有可供预览的字节。
+    find_qrcode = AsyncMock(return_value=True)
     show_qrcode = MagicMock()
-    monkeypatch.setattr(login_ports, "find_login_qrcode", find_qrcode)
+    monkeypatch.setattr(login_module, "dom_qr_ready", find_qrcode)
     monkeypatch.setattr(login_helpers, "show_qrcode", show_qrcode)
     monkeypatch.setattr(login_module.time, "monotonic", clock.monotonic)
     monkeypatch.setattr(login_module.asyncio, "sleep", clock.sleep)
@@ -73,7 +72,7 @@ def configure_qrcode_flow(
             "pages": [{"login_or_qr": ["扫码登录"]}],
         }
 
-    async def check_login_state(_session: str) -> bool:
+    async def check_login_state() -> bool:
         login._last_login_observation = observe_qr()
         return False
 
@@ -207,3 +206,12 @@ def test_xhs_login_class_has_no_os_qrcode_preview_path() -> None:
     assert "xdg-open" not in source
     assert "subprocess" not in source
     assert not hasattr(XiaoHongShuLogin, "_show_qrcode_for_headless_browser")
+
+
+def test_xhs_login_never_downloads_the_qrcode_image() -> None:
+    source = inspect.getsource(login_module)
+
+    assert "find_login_qrcode" not in source
+    assert "base64" not in source
+    assert "cookies()" not in source
+    assert "convert_cookies" not in source

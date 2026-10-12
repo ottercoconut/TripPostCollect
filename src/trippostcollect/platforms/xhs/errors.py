@@ -118,6 +118,22 @@ def is_recoverable_xhs_navigation_failure(exc: BaseException) -> bool:
     )
 
 
+def is_recoverable_xhs_request_failure(failure_text: str) -> bool:
+    """页面请求的 requestfailed 失败文本是否为可恢复的网络中断（与导航同一组 net::ERR_* 标记）。"""
+    detail = str(failure_text or "").casefold()
+    return any(marker in detail for marker in _XHS_RECOVERABLE_NAVIGATION_ERROR_MARKERS)
+
+
+class XHSLoginExpired(RuntimeError):
+    """规则端点返回未登录或登录过期，或登录后截获到 guest=true：进入轮中登录恢复。"""
+
+    code = "login_required"
+
+    def __init__(self, stage: str):
+        super().__init__(f"xhs_login_expired:{stage}")
+        self.stage = stage
+
+
 class XHSImageDownloadError(RuntimeError):
     """An XHS post image exhausted its applicable fetch attempts."""
 

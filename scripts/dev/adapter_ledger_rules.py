@@ -1929,6 +1929,13 @@ PROGRESS_RESOLUTIONS = {
         "退出", None, "#51取消用户ID哈希，平台原始值经records.identity.platform_user_id保存；T14随旧桥删除"),
     ("tools/MediaCrawler/tools/user_hash.py", "mask_nickname"): (
         "退出", None, "#51取消昵称脱敏，平台原始值经records.identity.platform_nickname保存；T14随旧桥删除"),
+    # #71 第一批：小红书取数改为浏览器 L1（被动截获页面响应或读取页面状态），被替代的符号直接删除。
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._pong_with_network_recovery"): (
+        "退出", None, "#71：登录态改由截获的user/me（guest=false）与可见UI共同确认，self-info探测删除"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler.launch_browser"): (
+        "退出", None, "#71：小红书正式轮次恒为CDP单次启动，非CDP启动分支删除，收到非CDP设置直接报错"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._profile_dir"): (
+        "退出", None, "#71：唯一调用方非CDP启动随之删除；CDP启动由runtime.browser读取运行级profile"),
 }
 
 # 冻结台账的 SHA-256：T14 删除 fork 后台账冻结，`--check` 只做冻结自检，不再重新枚举基线源码。

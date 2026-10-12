@@ -567,6 +567,24 @@ T75_DELETED_LEDGER_NODES = {
     "tests/test_xhs_parent_watchdog.py::test_legacy_mode_keeps_absolute_timeout_and_generates_no_runtime_key",
     "tests/test_xhs_pool.py::test_long_xhs_target_uses_time_budget_only",
 }
+# #71 第一批（小红书取数改为浏览器 L1）删除或改写的台账节点：被替代的旧取数路径用例。
+T71_DELETED_LEDGER_NODES = {
+    'tests/test_xhs_login_contract.py::test_failed_startup_pong_enters_real_qrcode_state_machine_once',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_always_uses_the_run_scoped_profile[False]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_always_uses_the_run_scoped_profile[True]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[ \\t -False]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[ \\t -True]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[-False]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[-True]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[None-False]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[None-True]',
+    'tests/test_xhs_midrun_login_recovery.py::test_checkpoint_race_after_pong_blocks_navigation',
+    'tests/test_xhs_midrun_login_recovery.py::test_midrun_network_confirmation_and_navigation_do_not_use_manual_budget',
+    'tests/test_xhs_midrun_login_recovery.py::test_profile_shell_without_self_info_never_navigates',
+    'tests/test_xhs_midrun_login_recovery.py::test_recovered_session_does_not_hide_navigation_failure',
+    'tests/test_xhs_midrun_login_recovery.py::test_sms_checkpoint_with_stale_profile_never_probes_or_navigates',
+    'tests/test_xhs_popup_guard.py::test_crawler_opened_xhs_tab_waits_30_seconds_after_failed_scroll',
+}
 # 决策 13：按台账 target_file 迁移，名称与断言不变；迁移后只能出现在目标文件。
 MOVED_TO_TARGET = {
     "tests/test_run_ids.py::test_all_script_run_ids_include_microseconds":
@@ -607,6 +625,7 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
         | T14C_DELETED_LEDGER_NODES
         | T64_DELETED_LEDGER_NODES
         | T75_DELETED_LEDGER_NODES
+        | T71_DELETED_LEDGER_NODES
     )
     for source, target in MOVED_TO_TARGET.items():
         assert source not in collected and target in collected, (source, target)
@@ -615,4 +634,5 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
         - len(T14C_DELETED_LEDGER_NODES)
         - len(T64_DELETED_LEDGER_NODES)
         - len(T75_DELETED_LEDGER_NODES)
+        - len(T71_DELETED_LEDGER_NODES)
     )

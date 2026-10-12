@@ -25,6 +25,15 @@ WORKER_CODES = ("wb", "dy", "zhihu", "xhs")
 MIXIN_MODULES = {"session", "navigation", "login", "author", "detail", "media", "errors", "parser", "behavior"}
 
 
+def exited_rows() -> set[tuple[str, str]]:
+    sys.path.insert(0, str(ROOT / "scripts/dev"))
+    try:
+        rules = importlib.import_module("adapter_ledger_rules")
+    finally:
+        sys.path.remove(str(ROOT / "scripts/dev"))
+    return {key for key, (action, _, _) in rules.PROGRESS_RESOLUTIONS.items() if action == "退出"}
+
+
 def resolved_imports(path: Path, package: str):
     """包含函数内与 TYPE_CHECKING 块；相对导入还原为绝对模块。"""
     tree = ast.parse(path.read_text())
@@ -175,6 +184,8 @@ def test_crawler_methods_live_in_ledger_target_mixins():
         and row["target"].startswith("platforms/xhs/")
     ]
     assert len(rows) == 69
+    # #71 起被替代的方法按规则文件登记“退出”，不再要求存在。
+    rows = [row for row in rows if (row["file"], row["qualname"]) not in exited_rows()]
     for row in rows:
         name = row["qualname"].split(".", 1)[1]
         owner = next(cls for cls in crawler.__mro__ if name in vars(cls))

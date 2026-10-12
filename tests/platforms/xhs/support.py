@@ -1,10 +1,16 @@
 """旧 fork 用例的局部配置与装配接缝；不导入 fork，不读取真实配置。"""
 
 from dataclasses import fields, is_dataclass
+from pathlib import Path
 from types import SimpleNamespace
+import uuid
 
 from trippostcollect.platforms.entry import xhs_dependencies
+from trippostcollect.platforms.xhs.capture import XHS_RULES, XHS_SENTINEL, XHS_VERIFY_HEADERS
 from trippostcollect.platforms.xhs.core import XiaoHongShuCrawler as RootXiaoHongShuCrawler
+from trippostcollect.platforms.xhs.page_scripts import STATE_SCRIPTS
+from trippostcollect.runtime.page_capture import PageCaptureChannel
+from trippostcollect.runtime.visit_ledger import VisitLedger
 
 
 # 与原 fork 用例运行时的 base_config/xhs_config 默认值一致，用例再按需 patch。
@@ -45,4 +51,21 @@ class XiaoHongShuCrawler(RootXiaoHongShuCrawler):
 
 
 client_ports = dependencies()["ports"].client
-login_ports = dependencies()["ports"].login
+
+
+def make_capture(directory: Path, *, context=None, mode: str = "discovery") -> PageCaptureChannel:
+    """与会话相同规则的页面取数通道；账本写在用例临时目录，名称唯一。"""
+    ledger = VisitLedger.create(
+        Path(directory) / f"behavior_evidence.{uuid.uuid4().hex[:8]}.content_visits.jsonl",
+        platform="xhs",
+        mode=mode,
+    )
+    return PageCaptureChannel(
+        context if context is not None else SimpleNamespace(pages=[], on=lambda *args: None),
+        platform="xhs",
+        rules=XHS_RULES,
+        ledger=ledger,
+        sentinel=XHS_SENTINEL,
+        verify_headers=XHS_VERIFY_HEADERS,
+        state_scripts=STATE_SCRIPTS,
+    )

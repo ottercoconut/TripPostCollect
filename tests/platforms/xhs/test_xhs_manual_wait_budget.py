@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from trippostcollect.platforms.xhs.errors import PlatformRuntimeError
 from trippostcollect.platforms.xhs.manual_wait import (
     XHS_MANUAL_WAIT_BUDGET_EXHAUSTED,
     XHS_MANUAL_WAIT_BUDGET_SECONDS,
@@ -166,3 +167,37 @@ def test_each_popup_uses_the_existing_remainder_and_exact_boundary() -> None:
     with pytest.raises(XHSManualWaitBudgetExhausted):
         budget.start("manual_verification_popup:fourth")
     assert budget.manual_elapsed_seconds == 10.0
+
+
+def test_manual_wait_budget_charges_overlap_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """自 T09 迁入：重叠的人工等待按时间并集计一次，暂停区间不计；环境值截到 0–600 秒。"""
+    now = [0.0]
+    budget = XHSManualWaitBudget(limit_seconds=600, monotonic=lambda: now[0])
+    first = budget.start("initial_qrcode_login")
+    now[0] = 10.0
+    second = budget.start("frontend_verification")
+    now[0] = 30.0
+    first.close()
+    now[0] = 50.0
+    with second.paused():
+        now[0] = 80.0
+    second.close()
+    assert budget.manual_elapsed_seconds == 50.0
+    overlap = XHSManualWaitBudget(limit_seconds=600, monotonic=lambda: now[0])
+    waiter = overlap.start("midrun_login_recovery")
+    other = overlap.start("creator_profile_verification")
+    with waiter.paused():
+        now[0] = 100.0
+    assert overlap.manual_elapsed_seconds == 20.0
+    waiter.close()
+    other.close()
+    for raw, expected in (("bad", 600.0), ("inf", 600.0), ("900", 600.0), ("120", 120.0), ("-5", 0.0)):
+        monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_LOGIN_WAIT_SECONDS", raw)
+        assert XHSManualWaitBudget.from_environment(monotonic=lambda: 0.0).limit_seconds == expected
+    exhausted = XHSManualWaitBudget(limit_seconds=5, monotonic=lambda: now[0])
+    ticket = exhausted.start("x")
+    now[0] += 5
+    with pytest.raises(XHSManualWaitBudgetExhausted) as error:
+        ticket.raise_if_exhausted()
+    assert error.value.code == XHS_MANUAL_WAIT_BUDGET_EXHAUSTED
+    assert isinstance(error.value, PlatformRuntimeError)

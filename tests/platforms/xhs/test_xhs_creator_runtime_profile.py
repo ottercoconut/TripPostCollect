@@ -40,7 +40,7 @@ from trippostcollect.platforms.xhs.parser import (
 )
 from trippostcollect.records.sanitization import AUTHOR_AVATAR_KEYS, XHS_SERIALIZED_PROFILE_AVATAR_PATHS
 
-from .support import XiaoHongShuCrawler, client_ports
+from .support import XiaoHongShuCrawler, client_ports, make_capture
 from .test_xhs_discovery_memory import lifecycle_error, prepare_crawler, valid_note
 
 
@@ -1380,6 +1380,7 @@ def main_page_search(monkeypatch, tmp_path):
 
     instance._assert_primary_page_alive = assert_primary_page_alive
     instance.published_batches = []
+    instance.capture = make_capture(tmp_path)
     monkeypatch.setattr(app_events, "_batch_publisher", instance.published_batches.append)
     return instance, state_path
 

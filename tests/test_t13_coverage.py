@@ -23,9 +23,10 @@ from run_lanes import EXPRESSIONS
 
 ROOT = Path(__file__).resolve().parents[1]
 # 与冻结旧实现（固化预期或冻结 fixture）对照的测试文件（T05–T10）；T14-C 删除旧桥对照文件后只剩根侧比较。
-LEGACY_FILES = frozenset(f"tests/test_adapter_{name}.py" for name in ("t05", "t06", "t07", "t08", "t09", "t10"))
+# T09 冻结对照随 #71（小红书取数改为浏览器 L1）退役删除。
+LEGACY_FILES = frozenset(f"tests/test_adapter_{name}.py" for name in ("t05", "t06", "t07", "t08", "t10"))
 # 单站卡的对照文件只驱动该站，文件本身即本站证据。
-CARD_SITES = {"t05": "weibo", "t06": "douyin", "t07": "zhihu", "t08": "bilibili", "t09": "xhs", "t09_deps": "xhs"}
+CARD_SITES = {"t05": "weibo", "t06": "douyin", "t07": "zhihu", "t08": "bilibili", "t09_deps": "xhs"}
 SITE_TOKENS = {
     "bilibili": ("bilibili", "bili"),
     "weibo": ("weibo", "wb"),

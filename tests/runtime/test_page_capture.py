@@ -359,3 +359,18 @@ async def test_ledger_never_contains_urls_tokens_or_query_values(tmp_path):
     # 查询键名可以出现（如 xsec_token），值不得出现。
     for secret in ("SECRET", "://", "avatar", "正文", "imageView"):
         assert secret not in text
+
+
+@pytest.mark.asyncio
+async def test_close_stops_capture_and_closes_the_ledger(tmp_path):
+    _, primary, ledger, channel = build(tmp_path)
+    slow = primary.respond(search_request(primary), body=body({}), delayed=True)
+    await asyncio.sleep(0)
+    await channel.aclose()
+    late = primary.respond(search_request(primary, 2), body=body({}))
+    await asyncio.sleep(0)
+    assert channel.closed and late.body_calls == 0 and slow.body_calls == 1
+    assert channel.drain("t.search", after_seq=0) == []
+    with pytest.raises(RuntimeError):
+        ledger.append("decision", seq=ledger.next_seq(), page_role=None, subject_id="n", decision="x",
+                      from_visit=None)

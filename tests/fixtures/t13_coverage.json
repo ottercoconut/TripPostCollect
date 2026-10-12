@@ -1512,12 +1512,11 @@
       {
        "file": "tests/platforms/xhs/test_xhs_login_contract.py",
        "lane": "component",
-       "min_count": 51
+       "min_count": 46
       },
       {
-       "function": "tests/test_adapter_t09.py::test_manual_wait_budget_charges_overlap_once",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/platforms/xhs/test_xhs_manual_wait_budget.py::test_manual_wait_budget_charges_overlap_once",
+       "lane": "component"
       },
       {
        "function": "tests/test_mediacrawler_behavior.py::test_xhs_search_verification_wait_keeps_page_open_until_cleared",
@@ -1701,12 +1700,9 @@
        "min_count": 17
       },
       {
-       "function": "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy_expectation",
+       "file": "tests/platforms/xhs/test_xhs_repair_state.py",
        "lane": "component",
-       "params": [
-        "repair"
-       ],
-       "legacy_equivalence": true
+       "min_count": 3
       }
      ]
     }
@@ -1830,25 +1826,9 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy_expectation",
+       "file": "tests/platforms/xhs/test_xhs_login_state.py",
        "lane": "component",
-       "params": [
-        "network_recover",
-        "network_timeout",
-        "cdp_disconnect",
-        "main_page_closed",
-        "success",
-        "qr_expired_refresh",
-        "captcha_pass",
-        "cdp_launch_failed",
-        "repair"
-       ],
-       "legacy_equivalence": true
-      },
-      {
-       "function": "tests/test_adapter_t09.py::test_pure_parsers_and_signer",
-       "lane": "component",
-       "legacy_equivalence": true
+       "min_count": 30
       }
      ]
     }
@@ -2254,7 +2234,7 @@
       {
        "file": "tests/platforms/xhs/test_xhs_login_contract.py",
        "lane": "component",
-       "min_count": 51
+       "min_count": 46
       },
       {
        "file": "tests/platforms/xhs/test_xhs_manual_wait_budget.py",

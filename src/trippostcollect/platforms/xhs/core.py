@@ -58,6 +58,7 @@ from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.runtime.cookies import convert_browser_context_cookies
 from trippostcollect.runtime.image_retry import is_runtime_blocking_image_error
+from trippostcollect.runtime.page_capture import PageCaptureChannel
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -144,6 +145,7 @@ class XiaoHongShuCrawler(
         self._navigation_page_errors: List[Dict] = []
         self._navigation_request_failures: List[Dict] = []
         self._manual_wait_budget: Optional[XHSManualWaitBudget] = None
+        self.capture: Optional[PageCaptureChannel] = None
 
     async def start(self) -> None:
         self.inputs.validate_login_contract()
@@ -172,6 +174,7 @@ class XiaoHongShuCrawler(
             else:
                 await self._prepare_browser_shutdown()
             finally:
+                self._close_capture_channel()
                 # Stopping Playwright tears down the CDP transport before
                 # app_runner invokes the later resource cleanup. Mark that
                 # disconnect as planned without closing the browser here.
@@ -651,9 +654,7 @@ class XiaoHongShuCrawler(
                         if self._is_login_expired_failure(exc):
                             try:
                                 recovered = (
-                                    await self._wait_for_midrun_login_recovery(
-                                        keyword
-                                    )
+                                    await self._wait_for_midrun_login_recovery()
                                 )
                             except Exception as recovery_exc:
                                 # 在处理体内抛出，不会落到下方同级分支；运行级失败按同级

@@ -435,7 +435,7 @@ def xhs_dependencies(config, *, repair=None):
     from playwright.async_api import async_playwright
     from trippostcollect.application.candidates import AdaptiveAccumulator
     from trippostcollect.application.contracts import (
-        XhsBehaviorPorts, XhsClientPorts, XhsLoginPorts, XhsPorts, XhsSettings,
+        XhsBehaviorPorts, XhsClientPorts, XhsPorts, XhsSettings,
     )
     from trippostcollect.application.events import append_worker_execution_event
     from trippostcollect.application.worker_inputs import _enabled, xhs_readers
@@ -446,7 +446,7 @@ def xhs_dependencies(config, *, repair=None):
     from trippostcollect.platforms.xhs import behavior as xhs_behavior
     from trippostcollect.platforms.xhs.behavior import wait_for_xhs_search_ready
     from trippostcollect.platforms.xhs.parser import xhs_source_asset_key
-    from trippostcollect.runtime import behavior, helpers, http, login_helpers
+    from trippostcollect.runtime import behavior, helpers, http
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
 
     values = {field.name: getattr(config, field.name) for field in fields(XhsSettings)}
@@ -517,10 +517,6 @@ def xhs_dependencies(config, *, repair=None):
                 make_async_client=make_async_client, behavior=behavior_ports,
                 xhs_international=settings.XHS_INTERNATIONAL,
             ),
-            login=XhsLoginPorts(find_login_qrcode=partial(
-                login_helpers.find_login_qrcode, make_async_client=make_async_client,
-                get_user_agent=helpers.get_user_agent,
-            )),
             behavior=behavior_ports,
             record_platform_security_limit=partial(
                 xhs_behavior.record_platform_security_limit, ports=behavior_ports,

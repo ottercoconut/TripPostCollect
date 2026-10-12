@@ -26,7 +26,7 @@ from trippostcollect.platforms.xhs.errors import (
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudgetExhausted
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 
-from .support import XiaoHongShuCrawler, config
+from .support import XiaoHongShuCrawler, config, make_capture
 
 
 class SearchClient:
@@ -121,6 +121,7 @@ def prepare_crawler(monkeypatch, tmp_path, *, items, start_page=3):
 
     crawler = XiaoHongShuCrawler()
     crawler.xhs_client = SearchClient(items)
+    crawler.capture = make_capture(tmp_path)
     detail_ids = []
 
     async def fetch_detail(*, note_id, **kwargs):
@@ -539,7 +540,7 @@ async def test_wrapped_login_expiry_waits_and_retries_same_search_page(
     await crawler.search()
 
     assert [call["page"] for call in crawler.xhs_client.calls] == [3, 3]
-    crawler._wait_for_midrun_login_recovery.assert_awaited_once_with("青岛旅游")
+    crawler._wait_for_midrun_login_recovery.assert_awaited_once_with()
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
     assert stopped["details"]["stop_reason"] == "source_exhausted"
@@ -700,7 +701,7 @@ async def test_search_login_recovery_run_failure_writes_structured_stop(
 
     await crawler.search()
 
-    crawler._wait_for_midrun_login_recovery.assert_awaited_once_with("青岛旅游")
+    crawler._wait_for_midrun_login_recovery.assert_awaited_once_with()
     assert [call["page"] for call in crawler.xhs_client.calls] == [3]
     assert detail_ids == []
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
