@@ -25,6 +25,7 @@ import pytest
 from playwright.async_api import async_playwright
 
 from support.xhs_offline_site import (
+    AVATAR_HOST,
     EXPLORE_URL,
     PNG_SIGNATURE,
     TARGET_FILTERS,
@@ -39,6 +40,7 @@ from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_m
 from trippostcollect.platforms.xhs import scan as xhs_scan
 from trippostcollect.platforms.xhs import session as xhs_session
 from trippostcollect.platforms.xhs.parser import update_xhs_note
+from trippostcollect.records.sanitization import sanitize_export_item
 from trippostcollect.runtime.visit_ledger import iter_ledger_lines
 from trippostcollect.xhs.search_target import is_target_search
 
@@ -278,7 +280,11 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
         "/user/profile/author-a", "/user/profile/author-b",
     ]
     assert len(actions(crawler, "close_tab")) == 2 and open_pages == 1
-    assert "sns-avatar" not in json.dumps(crawler.records, ensure_ascii=False)
+    # 作者页投影在真实页面中就不带头像；feed 卡片头像只在内存记录中，由写出端的导出清理器去除。
+    assert f"{AVATAR_HOST}/avatar/" not in json.dumps(crawler.records, ensure_ascii=False)
+    monkeypatch.setenv("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS", "1")
+    exported = [sanitize_export_item(record) for record in crawler.records]
+    assert "sns-avatar" not in json.dumps(exported, ensure_ascii=False)
 
     result = run_gate(crawler, state_path, tmp_path)
     assert result["problem_counts"] == {}
