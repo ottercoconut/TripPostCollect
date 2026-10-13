@@ -25,8 +25,19 @@ from trippostcollect.platforms.xhs.errors import (
     XHSRequestFailed,
     XhsNoteRedo,
 )
-from trippostcollect.platforms.xhs.page_scripts import dom_overlay_state, dom_scroll_metrics, dom_visible_cards
-from trippostcollect.platforms.xhs.parser import _normalized_creator_item, _xhs_image_assets
+from trippostcollect.platforms.xhs.page_scripts import (
+    XHS_OVERLAY_ROOTS,
+    dom_note_view_state,
+    dom_scroll_metrics,
+    dom_visible_cards,
+)
+from trippostcollect.platforms.xhs.parser import (
+    XHS_NOTE_REQUIRED_COUNTS,
+    XhsParserMixin,
+    _normalized_creator_item,
+    _xhs_image_assets,
+    note_card_problems,
+)
 from trippostcollect.platforms.xhs.scan import SearchItem, SearchPage, XhsScanInterrupted
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.image_retry import is_runtime_blocking_image_error
@@ -44,7 +55,6 @@ XHS_OVERLAY_POLL_SECONDS = 0.25
 # 浮层未出现时等 3–6 秒再点一次；浮层出现但没有 feed 时先关闭，等 4–8 秒再开。
 XHS_OVERLAY_REOPEN_SECONDS = (3.0, 6.0)
 XHS_OVERLAY_RECLOSE_SECONDS = (4.0, 8.0)
-XHS_NOTE_REQUIRED_COUNTS = ("liked_count", "collected_count", "comment_count", "share_count")
 OVERLAY_RANDOM = random.SystemRandom()
 
 
@@ -79,19 +89,37 @@ def _feed_note_id(item: CapturedResponse | CaptureFailure) -> str:
     return str(request.get("source_note_id") or "")
 
 
-def _feed_note_card(captured: CapturedResponse) -> tuple[Optional[dict[str, Any]], str]:
-    """feed 成功响应里的 note_card 与其笔记 ID；形状不对时 note_card 为 None。"""
+def _feed_note_card(captured: CapturedResponse) -> Optional[dict[str, Any]]:
+    """feed 成功响应里的 note_card（缺 note_id 时取条目 id）；形状不对时为 None。"""
     data = (captured.json or {}).get("data") if isinstance(captured.json, dict) else None
     items = data.get("items") if isinstance(data, dict) else None
     first = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else None
     note_card = first.get("note_card") if first is not None else None
     if not isinstance(note_card, dict):
-        return None, ""
-    return dict(note_card), str(note_card.get("note_id") or first.get("id") or "")
+        return None
+    note_card = dict(note_card)
+    if not note_card.get("note_id"):
+        note_card["note_id"] = first.get("id")
+    return note_card
+
+
+def note_card_failure(note_card: Optional[dict[str, Any]], note_id: str) -> str:
+    """两种来源的详情形状判定（§9.3）：返回候选失败码，通过或视频（由调用方跳过）时为空串。"""
+    if note_card is None:
+        return "detail_parse_failed"
+    problems = note_card_problems(note_card, note_id)
+    if "note_id_mismatch" in problems:
+        return "note_id_mismatch"
+    if problems and not XhsParserMixin.is_video_note(note_card):
+        return "detail_parse_failed"
+    return ""
 
 
 class XhsOverlayMixin:
     """浮层详情；作为 XiaoHongShuCrawler 的 mixin，由全量扫描对当前页的未知图文调用。"""
+
+    # 详情视图的根选择器：全量扫描为浮层；repair 改为整页（翻图与点作者共用同一组读数）。
+    _note_view_roots: tuple[str, ...] = XHS_OVERLAY_ROOTS
 
     async def _process_note_card(self, item: SearchItem, search_page: SearchPage, card: dict[str, Any]) -> None:
         """处理一篇并作出决定：成功写记录与 consider，候选失败记跳过，运行级事件上抛。
@@ -180,15 +208,16 @@ class XhsOverlayMixin:
                 attempts=1, retryable=not final, **position,
             )
             return
-        note_card, card_note_id = _feed_note_card(captured)
-        if note_card is None or card_note_id != note_id:
+        note_card = _feed_note_card(captured)
+        failure_code = note_card_failure(note_card, note_id)
+        if failure_code:
             await self._close_note_overlay(note_id)
             accumulator.skip_candidate_failure(
                 note_id, failure_scope="post", detail="note_detail_unavailable",
-                error_code="detail_parse_failed" if note_card is None else "note_id_mismatch",
-                attempts=1, retryable=False, **position,
+                error_code=failure_code, attempts=1, retryable=False, **position,
             )
             return
+        assert note_card is not None
         trigger = max((click for click in run.clicks if click[0] < captured.seq), default=run.clicks[-1])[1]
         if self.is_video_note(note_card):
             await self._close_note_overlay(note_id)
@@ -256,14 +285,14 @@ class XhsOverlayMixin:
         target_valid = valid and topic_relevant_for_web_post("xhs", note_detail, fallback_keyword=self._scan.keyword)
         accumulator.consider(note_id, valid=target_valid)
 
-    async def _check_primary_before_click(self) -> None:
+    async def _check_primary_before_click(self, reason: str = "note_overlay") -> None:
         """§3.4 第 1 条：主页面存活；终态上抛，登录界面转轮中恢复，验证界面先被动等待完成。"""
-        self._assert_primary_page_alive("note_overlay")
+        self._assert_primary_page_alive(reason)
         state = await self._popup_checkpoint_state(self.context_page)
-        self._raise_for_terminal_popup_state(state, reason="note_overlay")
+        self._raise_for_terminal_popup_state(state, reason=reason)
         markers = set(state.get("manual_markers") or [])
         if markers == {"login_required"}:
-            raise XHSLoginExpired("note_overlay")
+            raise XHSLoginExpired(reason)
         if markers:
             await self._wait_for_frontend_verification(required=False, data_arrived=lambda: False)
 
@@ -291,7 +320,7 @@ class XhsOverlayMixin:
                 if failure.recoverable:
                     raise failure
                 captured = None  # 非网络类失败（如请求被取消）按本次未取到 feed
-            state = await dom_overlay_state(self.context_page)
+            state = await self._note_view_state()
             overlay_seen = overlay_seen or bool(state.get("visible"))
             if captured is not None:
                 self._overlay_fail_streak = 0
@@ -312,12 +341,16 @@ class XhsOverlayMixin:
                 raise PlatformRuntimeError("XHS note overlay stopped opening", code="xhs_overlay_not_opening")
         return None
 
+    async def _note_view_state(self) -> dict[str, Any]:
+        """当前详情视图（浮层，或 repair 直开的整页）的页码、翻图箭头、作者名与关闭按钮。"""
+        return await dom_note_view_state(self.context_page, self._note_view_roots)
+
     async def _wait_overlay(self, check: Any, timeout: float) -> dict[str, Any]:
-        """轮询浮层状态直到 check 为真或超时，返回最后一次读数。"""
+        """轮询详情视图状态直到 check 为真或超时，返回最后一次读数。"""
         polls = max(1, int(timeout / XHS_OVERLAY_POLL_SECONDS))
         state: dict[str, Any] = {}
         for attempt in range(polls):
-            state = await dom_overlay_state(self.context_page)
+            state = await self._note_view_state()
             if check(state):
                 return state
             if attempt + 1 < polls:
@@ -328,7 +361,7 @@ class XhsOverlayMixin:
         """写 close_overlay 后点关闭按钮（不按 Esc），5 秒内确认浮层消失；重试一次仍失败为运行级。"""
         capture = self._require_capture()
         for _attempt in range(2):
-            state = await dom_overlay_state(self.context_page)
+            state = await self._note_view_state()
             if not state.get("visible"):
                 return
             point = state.get("close")

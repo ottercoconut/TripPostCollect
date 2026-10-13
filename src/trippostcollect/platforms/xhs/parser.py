@@ -427,6 +427,98 @@ def creator_runtime_followers_observed(user_id: str, creator: Dict) -> bool:
     )
 
 
+# repair 页面状态投影的字段白名单（§9.3，camelCase）：user.avatar、user.xsecToken、liked/collected/followed、
+# relation、niceCount、图片的 stream/infoList/traceId/fileId 都不投影；xsec_token 由保存的链接提供。
+XHS_NOTE_STATE_TOP_FIELDS = ("noteId", "type", "title", "desc", "time", "lastUpdateTime", "ipLocation")
+XHS_NOTE_STATE_OBJECT_FIELDS = (
+    ("user", ("userId", "nickname")),
+    ("interactInfo", ("likedCount", "collectedCount", "commentCount", "shareCount")),
+)
+XHS_NOTE_STATE_LIST_FIELDS = (
+    ("imageList", ("urlDefault", "url", "urlPre", "width", "height", "livePhoto")),
+    ("tagList", ("id", "name", "type")),
+)
+XHS_NOTE_STATE_MAX_ITEMS = 64
+# feed note_card 与页面状态投影共用的形状不变式（note_card_problems）。
+XHS_NOTE_TYPES = frozenset({"normal", "video"})
+XHS_NOTE_REQUIRED_COUNTS = ("liked_count", "collected_count", "comment_count", "share_count")
+
+
+def xhs_note_state_spec(note_id: str) -> Dict[str, Any]:
+    """传给 note_detail_state 脚本的参数：目标笔记 ID 与字段白名单。"""
+    return {
+        "note_id": str(note_id),
+        "top_fields": list(XHS_NOTE_STATE_TOP_FIELDS),
+        "object_fields": [[key, list(fields)] for key, fields in XHS_NOTE_STATE_OBJECT_FIELDS],
+        "list_fields": [[key, list(fields)] for key, fields in XHS_NOTE_STATE_LIST_FIELDS],
+        "max_items": XHS_NOTE_STATE_MAX_ITEMS,
+    }
+
+
+def _note_state_scalars(source: Any, fields: tuple[str, ...]) -> Dict:
+    projected: Dict[str, Any] = {}
+    if not isinstance(source, dict):
+        return projected
+    for field in fields:
+        value = source.get(field)
+        if isinstance(value, (str, bool)) or (isinstance(value, (int, float)) and math.isfinite(value)):
+            projected[humps.decamelize(field)] = value
+    return projected
+
+
+def project_note_state(state_note: Dict) -> Dict:
+    """页面状态的 note（camelCase）→ 与 feed note_card 同形的 snake_case；白名单之外的字段一律丢弃。"""
+    note_card = _note_state_scalars(state_note, XHS_NOTE_STATE_TOP_FIELDS)
+    for key, fields in XHS_NOTE_STATE_OBJECT_FIELDS:
+        note_card[humps.decamelize(key)] = _note_state_scalars(state_note.get(key), fields)
+    for key, fields in XHS_NOTE_STATE_LIST_FIELDS:
+        items = state_note.get(key)
+        note_card[humps.decamelize(key)] = [
+            _note_state_scalars(item, fields)
+            for item in (items if isinstance(items, list) else [])[:XHS_NOTE_STATE_MAX_ITEMS]
+            if isinstance(item, dict)
+        ]
+    return note_card
+
+
+def read_note_state(result: Any) -> Tuple[Optional[Dict], str]:
+    """校验 note_detail_state 的返回信封；成功时返回投影后的 note_card，否则返回原因类别。"""
+    if not isinstance(result, dict):
+        return None, "state_read_error"
+    if result.get("status") == "missing":
+        return None, "state_missing"
+    note = result.get("note")
+    if result.get("status") != "ok" or not isinstance(note, dict):
+        return None, "state_read_error"
+    return project_note_state(note), "ok"
+
+
+def note_card_problems(note_card: Dict, expected_id: str) -> List[str]:
+    """feed 与页面状态两种来源共用的形状不变式；返回问题类别，空列表表示通过。"""
+    problems: List[str] = []
+    if str(note_card.get("note_id") or "") != str(expected_id):
+        problems.append("note_id_mismatch")
+    if note_card.get("type") not in XHS_NOTE_TYPES:
+        problems.append("type_invalid")
+    publish_time = note_card.get("time")
+    if isinstance(publish_time, bool) or not isinstance(publish_time, (int, float)) or not publish_time > 0:
+        problems.append("time_invalid")
+    user = note_card.get("user") if isinstance(note_card.get("user"), dict) else {}
+    if not str(user.get("user_id") or "").strip():
+        problems.append("user_id_missing")
+    images = note_card.get("image_list")
+    if not (
+        isinstance(images, list)
+        and images
+        and all(isinstance(image, dict) and str(image.get("url_default") or "").strip() for image in images)
+    ):
+        problems.append("image_list_invalid")
+    interact = note_card.get("interact_info") if isinstance(note_card.get("interact_info"), dict) else {}
+    if any(interact.get(key) is None for key in XHS_NOTE_REQUIRED_COUNTS):
+        problems.append("interact_counts_missing")
+    return problems
+
+
 def update_xhs_note(
     note_item: Dict,
     *,

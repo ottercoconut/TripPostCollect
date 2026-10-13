@@ -192,7 +192,6 @@ async def test_xhs_behavior_primary_page_close_is_terminal_without_adoption(
         "run_required_human_behavior",
         run_behavior,
     )
-    crawler.xhs_client = SimpleNamespace(playwright_page=original)
     crawler.cdp_manager = SimpleNamespace(assert_alive=lifecycle_stages.append)
     crawler.launch_browser_with_cdp = AsyncMock(
         side_effect=AssertionError("must not relaunch Chrome")
@@ -205,7 +204,6 @@ async def test_xhs_behavior_primary_page_close_is_terminal_without_adoption(
     assert calls == [original]
     assert lifecycle_stages == ["behavior_primary_page_closed"]
     assert crawler.context_page is original
-    assert crawler.xhs_client.playwright_page is original
     assert replacement.closed is False
     crawler.launch_browser_with_cdp.assert_not_awaited()
 
@@ -219,7 +217,6 @@ async def test_xhs_search_navigation_primary_page_close_is_terminal_without_retr
     crawler = XiaoHongShuCrawler()
     crawler.browser_context = context
     crawler.context_page = original
-    crawler.xhs_client = SimpleNamespace(playwright_page=original)
     crawler._enter_search_from_home = AsyncMock(
         side_effect=RuntimeError(
             "TargetClosedError: Target page, context or browser has been closed"
@@ -237,7 +234,6 @@ async def test_xhs_search_navigation_primary_page_close_is_terminal_without_retr
     )
     crawler._enter_search_from_home.assert_awaited_once_with("青岛旅游", navigate=False)
     assert crawler.context_page is original
-    assert crawler.xhs_client.playwright_page is original
     assert replacement.closed is False
     crawler.launch_browser_with_cdp.assert_not_awaited()
 

@@ -5,9 +5,7 @@ import pytest
 
 import trippostcollect.platforms.xhs.author as xhs_author
 from trippostcollect.platforms.xhs.errors import (
-    IPBlockError,
     PlatformRuntimeError,
-    XHSCreatorProfileUnavailable,
     XhsNoteRedo,
 )
 from trippostcollect.platforms.xhs.parser import XiaoHongShuExtractor
@@ -27,19 +25,8 @@ def projection(user_id: str, fans: str) -> dict:
     ]}}
 
 
-class _CreatorClient:
-    def __init__(self, creator_info):
-        self.creator_info = creator_info
-        self.calls = []
-
-    async def get_creator_info(self, **kwargs):
-        self.calls.append(kwargs)
-        return self.creator_info
-
-
 @pytest.fixture
 def crawler(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS", "1")
     instance = XiaoHongShuCrawler()
     instance._guarded_pause = AsyncMock(return_value=0.0)
     instance.context_page = Mock()
@@ -90,11 +77,9 @@ async def test_profile_probe_does_not_adopt_newer_signed_in_auxiliary(crawler):
     auxiliary.url = "https://www.xiaohongshu.com/user/profile/author"
     auxiliary.locator.return_value.count = AsyncMock(return_value=1)
     crawler.browser_context = Mock(pages=[primary, auxiliary])
-    crawler.xhs_client = Mock(playwright_page=primary)
 
     assert await crawler._profile_ui_visible() is False
     assert crawler.context_page is primary
-    assert crawler.xhs_client.playwright_page is primary
     auxiliary.locator.assert_not_called()
 
 
@@ -114,40 +99,6 @@ async def test_profile_ui_visible_accepts_nonsemantic_current_sidebar(crawler):
 
     assert await crawler._profile_ui_visible() is True
     assert crawler.context_page.locator.call_count == 3
-
-
-# 以下 enrich_note_creator 用例覆盖 repair 过渡路径（无 token API → 直开作者页），提交 6 随之删除。
-
-
-@pytest.mark.asyncio
-async def test_creator_enrichment_uses_signed_in_profile_without_note_token(crawler):
-    creator = {"interactions": [{"type": "fans", "count": "123"}]}
-    crawler.xhs_client = _CreatorClient(creator)
-    crawler._repair_creator_info_by_url = AsyncMock()
-    note = {
-        "user": {"user_id": "author-1"},
-        "xsec_token": "note-token-must-not-be-used-for-author-profile",
-        "xsec_source": "pc_search",
-    }
-
-    await crawler.enrich_note_creator(note)
-
-    assert crawler.xhs_client.calls == [{"user_id": "author-1"}]
-    assert note["creator_profile"] == creator
-    crawler._repair_creator_info_by_url.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_creator_enrichment_falls_back_to_signed_in_browser(crawler):
-    creator = {"interactions": [{"type": "fans", "count": "456"}]}
-    crawler.xhs_client = _CreatorClient(None)
-    crawler._repair_creator_info_by_url = AsyncMock(return_value=creator)
-    note = {"user": {"user_id": "author-2"}, "xsec_token": "note-token"}
-
-    await crawler.enrich_note_creator(note)
-
-    crawler._repair_creator_info_by_url.assert_awaited_once_with("author-2")
-    assert note["creator_profile"] == creator
 
 
 @pytest.mark.asyncio
@@ -172,46 +123,6 @@ async def test_failed_login_recovery_on_the_original_page_is_login_required(craw
     with pytest.raises(PlatformRuntimeError) as exc_info:
         await crawler._get_creator_info_from_browser("author-login", note=NOTE)
     assert exc_info.value.code == "login_required"
-
-
-@pytest.mark.asyncio
-async def test_creator_enrichment_reports_empty_profile_after_all_fallbacks(crawler):
-    crawler.xhs_client = _CreatorClient(None)
-    crawler._repair_creator_info_by_url = AsyncMock(return_value=None)
-    note = {"user": {"user_id": "author-empty"}}
-
-    with pytest.raises(XHSCreatorProfileUnavailable) as exc_info:
-        await crawler.enrich_note_creator(note)
-
-    assert exc_info.value.attempts == 2
-    crawler._repair_creator_info_by_url.assert_awaited_once_with("author-empty")
-
-
-@pytest.mark.asyncio
-async def test_creator_enrichment_does_not_hide_ip_block(crawler):
-    crawler.xhs_client = AsyncMock()
-    crawler.xhs_client.get_creator_info.side_effect = IPBlockError(
-        "Network connection error, code 300012"
-    )
-    crawler._repair_creator_info_by_url = AsyncMock()
-    note = {"user": {"user_id": "author-blocked"}}
-
-    with pytest.raises(IPBlockError):
-        await crawler.enrich_note_creator(note)
-
-    crawler._repair_creator_info_by_url.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_creator_enrichment_does_not_hide_visible_browser_block(crawler):
-    crawler.xhs_client = _CreatorClient(None)
-    crawler._repair_creator_info_by_url = AsyncMock(
-        side_effect=RuntimeError("xhs_creator_profile_visible_block:captcha_or_verify")
-    )
-    note = {"user": {"user_id": "author-3"}}
-
-    with pytest.raises(RuntimeError, match="xhs_creator_profile_visible_block"):
-        await crawler.enrich_note_creator(note)
 
 
 @pytest.mark.asyncio
@@ -465,65 +376,20 @@ async def test_creator_verification_popups_share_one_remaining_budget(
 @pytest.mark.asyncio
 async def test_creator_enrichment_caches_successful_author_profile(crawler):
     creator = {"interactions": [{"type": "fans", "count": "789"}]}
-    crawler.xhs_client = _CreatorClient(creator)
-    first = {"user": {"user_id": "author-4"}}
-    second = {"user": {"user_id": "author-4"}}
 
-    await crawler.enrich_note_creator(first)
-    await crawler.enrich_note_creator(second)
+    async def read_author(user_id, *, note):
+        crawler._creator_visit_id = f"visit-{note.note_id}"
+        return creator
 
-    assert crawler.xhs_client.calls == [{"user_id": "author-4"}]
-    assert first["creator_profile"] == creator
-    assert second["creator_profile"] == creator
+    crawler._get_creator_info_from_browser = AsyncMock(side_effect=read_author)
+    first = SimpleNamespace(note_id="note-1", user_id="author-4")
+    second = SimpleNamespace(note_id="note-2", user_id="author-4")
 
-
-@pytest.mark.asyncio
-async def test_browser_identity_headers_follow_current_chromium_version(crawler):
-    class IdentityPage:
-        async def evaluate(self, script):
-            return {
-                "webdriver": None,
-                "user_agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/149.0.0.0 Safari/537.36"
-                ),
-                "language": "zh-CN",
-                "platform": "macOS",
-                "mobile": False,
-                "brands": [
-                    {"brand": "Chromium", "version": "149"},
-                    {"brand": "Not)A;Brand", "version": "24"},
-                ],
-            }
-
-    crawler.context_page = IdentityPage()
-
-    headers = await crawler._browser_identity_headers()
-
-    assert "Chrome/149.0.0.0" in headers["user-agent"]
-    assert '"Chromium";v="149"' in headers["sec-ch-ua"]
-    assert "126" not in str(headers)
-    assert headers["accept-language"] == "zh-CN"
-
-
-@pytest.mark.asyncio
-async def test_browser_identity_headers_reject_version_mismatch(crawler):
-    class IdentityPage:
-        async def evaluate(self, script):
-            return {
-                "webdriver": None,
-                "user_agent": "Mozilla/5.0 Chrome/149.0.0.0 Safari/537.36",
-                "language": "zh-CN",
-                "platform": "macOS",
-                "mobile": False,
-                "brands": [{"brand": "Chromium", "version": "126"}],
-            }
-
-    crawler.context_page = IdentityPage()
-
-    with pytest.raises(RuntimeError, match="version_mismatch"):
-        await crawler._browser_identity_headers()
+    assert await crawler._enrich_creator_via_author_tab(first) == (creator, "visit-note-1")
+    # 同一作者本轮只点一次：第二篇直接引用首次作者访问，不再停顿或点击。
+    assert await crawler._enrich_creator_via_author_tab(second) == (creator, "visit-note-1")
+    crawler._get_creator_info_from_browser.assert_awaited_once()
+    crawler._guarded_pause.assert_awaited_once_with("creator_profile", 8.0, 18.0)
 
 
 def test_creator_html_extractor_stops_at_end_of_initial_state_object():

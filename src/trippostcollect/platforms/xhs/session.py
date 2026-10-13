@@ -25,7 +25,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import time
 from typing import Dict, List, Optional
 
@@ -351,65 +350,6 @@ class XhsSessionMixin:
                 await page.close()
         except Exception as exc:
             logger.warning(f"[XiaoHongShuCrawler] Page close did not finish cleanly: {exc}")
-
-    async def _browser_identity_headers(self) -> Dict[str, str]:
-        try:
-            async with asyncio.timeout(10):
-                identity = await self.context_page.evaluate(
-                    """() => ({
-                        webdriver: navigator.webdriver,
-                        user_agent: navigator.userAgent || '',
-                        language: navigator.language || '',
-                        platform: navigator.userAgentData
-                            ? navigator.userAgentData.platform
-                            : (navigator.platform || ''),
-                        mobile: navigator.userAgentData
-                            ? navigator.userAgentData.mobile
-                            : false,
-                        brands: navigator.userAgentData
-                            ? Array.from(navigator.userAgentData.brands || [])
-                            : [],
-                    })"""
-                )
-        except Exception as exc:
-            raise RuntimeError(f"xhs_browser_identity_unavailable:{type(exc).__name__}") from exc
-
-        user_agent = str((identity or {}).get("user_agent") or "").strip()
-        language = str((identity or {}).get("language") or "").strip()
-        platform = str((identity or {}).get("platform") or "").strip()
-        brands = (identity or {}).get("brands") or []
-        if (identity or {}).get("webdriver") is not None:
-            raise RuntimeError("xhs_browser_identity_webdriver_exposed")
-        if not user_agent or not language or not platform or not isinstance(brands, list) or not brands:
-            raise RuntimeError("xhs_browser_identity_incomplete")
-
-        ua_match = re.search(r"(?:Chrome|Chromium)/(\d+)", user_agent)
-        ua_major = ua_match.group(1) if ua_match else ""
-        normalized_brands: List[str] = []
-        chromium_major = ""
-        for item in brands:
-            if not isinstance(item, dict):
-                continue
-            brand = str(item.get("brand") or "").replace("\\", "").replace('"', "").strip()
-            version = str(item.get("version") or "").split(".", 1)[0].strip()
-            if not brand or not version:
-                continue
-            normalized_brands.append(f'"{brand}";v="{version}"')
-            if brand in {"Chromium", "Google Chrome"}:
-                chromium_major = version
-        if not normalized_brands or not ua_major or chromium_major != ua_major:
-            raise RuntimeError(
-                f"xhs_browser_identity_version_mismatch:ua={ua_major},client_hints={chromium_major}"
-            )
-
-        self.user_agent = user_agent
-        return {
-            "accept-language": language,
-            "sec-ch-ua": ", ".join(normalized_brands),
-            "sec-ch-ua-mobile": "?1" if bool((identity or {}).get("mobile")) else "?0",
-            "sec-ch-ua-platform": f'"{platform}"',
-            "user-agent": user_agent,
-        }
 
     def _assert_primary_page_alive(self, stage: str) -> None:
         """Keep the original business page; auxiliary tabs never become primary."""
@@ -969,12 +909,6 @@ class XhsSessionMixin:
 
         if not recovered:
             raise RuntimeError("xhs_midrun_login_recovery_incomplete")
-        xhs_client = getattr(self, "xhs_client", None)
-        if xhs_client is not None:
-            await xhs_client.update_cookies(
-                browser_context=self.browser_context,
-                urls=self.cookie_urls,
-            )
         logger.info(
             "[XiaoHongShuCrawler] Mid-run login recovery confirmed by the "
             "visible UI and a guest=false user/me response."
@@ -1037,9 +971,6 @@ class XhsSessionMixin:
 
         # 临时 profile 每轮都未登录：直接进入二维码登录，再以 UI 与 user/me 共同确认。
         await self._run_qrcode_login()
-        if self.ports.repair:
-            # repair 过渡（提交 6 删）：repair 仍经旧 API 取详情与作者；正式发现只读页面截获。
-            self.xhs_client = await self.create_xhs_client(httpx_proxy_format)
         self.crawler_type = self.settings.CRAWLER_TYPE
         if self.settings.CRAWLER_TYPE == "search":
             # 回车、点选“图文”、收起面板、翻页停顿、初始行为阶段与回顶都在全量扫描内完成。

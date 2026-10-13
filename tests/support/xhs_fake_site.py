@@ -1,5 +1,6 @@
 """小红书搜索流程的离线站点：首页输入、回车、筛选面板点选“图文”、虚拟列表滚动与逐页搜索响应；
 点封面打开笔记浮层（feed 与图片响应、翻图、关闭按钮），点作者名打开作者标签页（页面状态投影）。
+repair 直开 `/explore/<id>` 时为整页详情：没有 feed，页面状态 note_detail_state 按脚本参数的白名单投影。
 
 只模拟用到的 DOM 读数（按 `page_scripts.DOM_SCRIPTS` / `STATE_SCRIPTS` 的脚本文本分派）与鼠标、键盘动作；
 响应经 `page_events` 的假请求/响应发给页面取数通道。不启动浏览器、不联网。
@@ -8,8 +9,9 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Iterable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from support.page_events import FakeContext, FakePage
 from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS, STATE_SCRIPTS
@@ -62,6 +64,51 @@ def detail_card(note_id: str, *, images: int = 2, user_id: str | None = None, no
         "image_list": [{"url_default": image_url(note_id, index)} for index in range(images)],
         "tag_list": [],
     }
+
+
+def state_note(card: dict[str, Any]) -> dict[str, Any]:
+    """feed note_card 对应的页面状态 note（camelCase）；带上投影白名单之外的字段（头像、token、互动状态）。"""
+    user = card.get("user") or {}
+    interact = card.get("interact_info") or {}
+    return {
+        "noteId": card.get("note_id"),
+        "type": card.get("type"),
+        "title": card.get("title"),
+        "desc": card.get("desc"),
+        "time": card.get("time"),
+        "lastUpdateTime": card.get("last_update_time", card.get("time")),
+        "ipLocation": "山东",
+        "xsecToken": "state-token",
+        "user": {
+            "userId": user.get("user_id"), "nickname": user.get("nickname"),
+            "avatar": user.get("avatar"), "xsecToken": "user-token",
+        },
+        "interactInfo": {
+            "likedCount": interact.get("liked_count"), "collectedCount": interact.get("collected_count"),
+            "commentCount": interact.get("comment_count"), "shareCount": interact.get("share_count"),
+            "liked": False, "collected": False, "followed": False, "relation": "none",
+        },
+        "imageList": [
+            {"urlDefault": image.get("url_default"), "width": 1, "height": 1, "livePhoto": False,
+             "traceId": "trace", "stream": {}}
+            for image in card.get("image_list") or []
+        ],
+        "tagList": list(card.get("tag_list") or []),
+    }
+
+
+def whitelisted_state(note: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    """按 note_detail_state 的脚本参数只复制白名单标量，等价于页面内脚本的投影。"""
+    def scalars(source: Any, fields: list[str]) -> dict[str, Any]:
+        source = source if isinstance(source, dict) else {}
+        return {key: source[key] for key in fields if isinstance(source.get(key), (str, int, float, bool))}
+
+    projected = scalars(note, spec["top_fields"])
+    for key, fields in spec["object_fields"]:
+        projected[key] = scalars(note.get(key), fields)
+    for key, fields in spec["list_fields"]:
+        projected[key] = [scalars(item, fields) for item in (note.get(key) or [])[: spec["max_items"]]]
+    return projected
 
 
 def creator_projection(*, fans: str = "128") -> dict[str, Any]:
@@ -239,6 +286,18 @@ class XhsFakeSite:
         self.feed_requests: list[str] = []
         self.author_tabs: list[AuthorTab] = []
         self.loaded_images: set[str] = set()
+        # repair 整页：失效链接跳 /404；note_states[id] 为列表时依次返回（用完后照常投影），否则每次都返回该值。
+        self.unavailable_notes: set[str] = set()
+        self.note_states: dict[str, Any] = {}
+        self.note_page_opens: list[str] = []
+        self.author_same_page = False
+        self.same_page_author: str | None = None
+        self.page_history: list[str] = []
+        self.page.go_back = self.go_back  # type: ignore[attr-defined]
+        # 作者页同页跳转时主页面也要做到达检查与小幅滚动。
+        self.page.viewport_size = {"width": VIEW_WIDTH, "height": VIEW_HEIGHT}  # type: ignore[attr-defined]
+        self.page.wait_for_timeout = self._noop  # type: ignore[attr-defined]
+        self.page.wait_for_load_state = self._noop  # type: ignore[attr-defined]
 
     @staticmethod
     async def _noop(*args: Any, **kwargs: Any) -> None:
@@ -268,9 +327,51 @@ class XhsFakeSite:
         self.panel_visible = False
         self.box_value = ""
         self.box_focused = False
+        self.overlay_note = None
+        self.same_page_author = None
+        match = re.match(r"^/explore/([^/]+)$", urlsplit(url).path)
+        if match:
+            self.open_note_page(match.group(1))
         return None
 
+    async def go_back(self, **kwargs: Any) -> None:
+        """回到笔记整页：同一文档的图片走缓存，不再加载。"""
+        self.same_page_author = None
+        self.page.url = self.page_history.pop()
+        match = re.match(r"^/explore/([^/]+)$", urlsplit(self.page.url).path)
+        self.overlay_note = match.group(1) if match else None
+
+    def open_note_page(self, note_id: str) -> None:
+        """repair 直开保存的链接：整页详情，首图与相邻图加载（同一文档内已加载的图走缓存）；没有 feed。"""
+        self.note_page_opens.append(note_id)
+        if note_id in self.unavailable_notes:
+            self.page.url = "https://www.xiaohongshu.com/404?source=note"
+            return
+        self.overlay_note = note_id
+        self.overlay_page = 1
+        self.load_image(note_id, 0)
+        self.load_image(note_id, 1)
+
+    def note_state(self, spec: dict[str, Any]) -> Any:
+        note_id = spec["note_id"]
+        queued = self.note_states.get(note_id)
+        if queued is not None and not isinstance(queued, list):
+            return queued
+        if queued:
+            value = queued.pop(0)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+        if self.overlay_note != note_id:
+            return {"status": "missing"}
+        return {"status": "ok", "note": whitelisted_state(state_note(self.detail(note_id)), spec)}
+
     async def evaluate(self, script: str, arg: Any = None) -> Any:
+        state_name = STATE_NAMES.get(script)
+        if state_name == "note_detail_state":
+            return self.note_state(arg)
+        if state_name == "creator_page_data" and self.same_page_author is not None:
+            return self.creator_projections.get(self.same_page_author, creator_projection())
         name = SCRIPT_NAMES.get(script)
         if name == "render_diagnostic":
             return {"ready_state": "complete", "body_text_length": 100, "body_child_element_count": 3}
@@ -297,7 +398,7 @@ class XhsFakeSite:
             return self.visible_cards()
         if name == "search_ready_counts":
             return {"card_count": len(self.rendered_items()), "profile_count": 1}
-        if name == "overlay_state":
+        if name == "note_view_state":
             return self.overlay_state()
         raise AssertionError(f"unexpected page script: {name or script[:40]}")
 
@@ -498,6 +599,12 @@ class XhsFakeSite:
             self.author_tab_failures -= 1
             return
         user_id = str(self.detail(self.overlay_note)["user"]["user_id"])
+        if self.author_same_page:
+            self.page_history.append(self.page.url)
+            self.overlay_note = None
+            self.same_page_author = user_id
+            self.page.url = f"https://www.xiaohongshu.com/user/profile/{self.author_url_ids.get(user_id, user_id)}"
+            return
         tab = AuthorTab(self, user_id, self.author_url_ids.get(user_id, user_id))
         self.author_tabs.append(tab)
         self.context.new_page(page=tab)
@@ -514,5 +621,5 @@ def make_site(*args: Any, **kwargs: Any) -> XhsFakeSite:
 
 __all__ = [
     "XhsFakeSite", "FakePage", "make_site", "note", "TARGET_FILTERS", "detail_card", "creator_projection",
-    "image_url", "image_bytes",
+    "image_url", "image_bytes", "state_note", "whitelisted_state",
 ]

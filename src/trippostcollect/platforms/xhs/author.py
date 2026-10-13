@@ -19,18 +19,17 @@
 
 # TripPostCollect：T09 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-"""作者补全（§3.4 第 7 条）：停顿后在浮层内点击作者名，经新标签页的页面状态投影读作者资料，作者页验证等待。
+"""作者补全（§3.4 第 7 条）：停顿后在详情视图内点击作者名，经新标签页的页面状态投影读作者资料，作者页验证等待。
 
-`enrich_note_creator` 的无 token API 与直开作者页只剩 repair 过渡使用（提交 6 删）。
+repair 直开的整页若点击后同页跳转到作者页（§9.2，待 V9），读完投影后返回笔记页。
 """
 
 import asyncio
 import logging
-import os
 import random
 import re
 from typing import Any, Dict, List, NoReturn, Optional, Tuple
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 
 from playwright.async_api import (
     Error as PlaywrightError,
@@ -40,20 +39,16 @@ from playwright.async_api import (
 
 from trippostcollect.platforms.xhs.behavior import inspect_visible_page_state
 from trippostcollect.platforms.xhs.errors import (
-    IPBlockError,
     PlatformRuntimeError,
     XHSCreatorProfileUnavailable,
-    XHSNetworkRecoveryTimeout,
     XhsNoteRedo,
 )
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitTicket
-from trippostcollect.platforms.xhs.page_scripts import dom_overlay_state
 from trippostcollect.platforms.xhs.parser import (
     creator_runtime_followers_observed,
     read_creator_runtime_projection,
     xhs_creator_projection_spec,
 )
-from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -104,73 +99,6 @@ class XhsAuthorMixin:
         )
         raise XHSCreatorProfileUnavailable(user_id, self._creator_attempts or 1, reason=reason)
 
-    async def enrich_note_creator(self, note_detail: Dict) -> None:
-        """repair 过渡（提交 6 删）：无 token API，失败后直开作者页读取投影。"""
-        if os.environ.get("TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS") != "1":
-            return
-        user_info = note_detail.get("user") or {}
-        user_id = user_info.get("user_id")
-        if not user_id:
-            return
-        cached_creator = self.creator_profile_cache.get(str(user_id))
-        if cached_creator:
-            note_detail["creator_profile"] = cached_creator[0]
-            return
-        creator_info = None
-        attempts = 0
-        api_reason = ""
-        try:
-            creator_info = await self._run_with_network_recovery(
-                lambda: self.xhs_client.get_creator_info(user_id=user_id),
-                stage=f"creator_profile_api:user={user_id}",
-            )
-            attempts += 1
-            api_reason = self._creator_client_parse_reason()
-        except (XHSNetworkRecoveryTimeout, CDPBrowserLifecycleError):
-            # 本轮生命周期与网络恢复失败立即上抛，不等浏览器回退前的停顿。
-            raise
-        except Exception as exc:
-            attempts += self._request_failure_attempts(exc)
-            request_failure = self._request_failure_exception(exc)
-            api_reason = f"api_request_failed:{type(request_failure).__name__}"
-            if isinstance(request_failure, IPBlockError):
-                raise request_failure
-            if isinstance(request_failure, PlatformRuntimeError):
-                raise request_failure
-            if self._is_login_expired_failure(exc):
-                raise PlatformRuntimeError(
-                    "XHS creator profile login expired",
-                    code="login_required",
-                ) from request_failure
-            logger.warning(
-                "[XiaoHongShuCrawler.enrich_note_creator] "
-                f"session profile request failed, using browser fallback: {user_id}, {exc}"
-            )
-
-        browser_reason = ""
-        if not creator_info:
-            await self._guarded_pause("creator_profile_browser_fallback", 12.0, 30.0)
-            attempts += 1
-            self._creator_browser_reason = ""
-            creator_info = await self._repair_creator_info_by_url(str(user_id))
-            browser_reason = (
-                self._creator_browser_reason or self._creator_client_parse_reason()
-            )
-        if creator_info:
-            self.creator_profile_cache[str(user_id)] = (creator_info, None)
-            note_detail["creator_profile"] = creator_info
-            await self._guarded_pause("creator_profile", 8.0, 18.0)
-        else:
-            reason = f"api={api_reason or 'unknown'};browser={browser_reason or 'unknown'}"
-            logger.warning(
-                f"[XiaoHongShuCrawler.enrich_note_creator] creator profile empty after browser fallback: {user_id}, reason={reason}"
-            )
-            raise XHSCreatorProfileUnavailable(str(user_id), attempts, reason=reason)
-
-    def _creator_client_parse_reason(self) -> str:
-        """repair 过渡：客户端最近一次作者页静态解析的原因类别；没有记录时返回空串。"""
-        return str(getattr(self.xhs_client, "last_creator_parse_reason", "") or "")
-
     async def _raise_for_creator_page_terminal(
         self,
         page: Page,
@@ -213,6 +141,11 @@ class XhsAuthorMixin:
         if page is None:
             self._creator_browser_reason = "author_tab_not_opened"
             return None
+        if page is self.context_page:
+            try:
+                return await self._read_author_tab(page, user_id)
+            finally:
+                await self._return_from_author_page(note)
         self._require_capture().attach(page, "author_tab")
         try:
             return await self._read_author_tab(page, user_id)
@@ -225,11 +158,14 @@ class XhsAuthorMixin:
             await self._close_author_tab(page, note)
 
     async def _open_author_tab(self, note: Any) -> Optional[Page]:
-        """写 click_author（from_visit＝本篇详情访问）后点击作者名，等待新标签页；两次都没打开时返回 None。"""
+        """写 click_author（from_visit＝本篇详情访问）后点击作者名，等待新标签页；两次都没打开时返回 None。
+
+        repair 整页中点击后主页面同页跳转到作者页时，返回主页面本身，不再点第二次。
+        """
         capture = self._require_capture()
         for attempt in range(1, XHS_AUTHOR_TAB_ATTEMPTS + 1):
             self._creator_attempts = attempt
-            state = await dom_overlay_state(self.context_page)
+            state = await self._note_view_state()
             point = state.get("author")
             if point is None:
                 await self._scan_sleep(AUTHOR_RANDOM.uniform(1.0, 2.0))
@@ -243,6 +179,8 @@ class XhsAuthorMixin:
                     await self._click_point(point)
                 page = await opened.value
             except (PlaywrightTimeoutError, TimeoutError):
+                if self.ports.repair and profile_url_user_id(getattr(self.context_page, "url", "")):
+                    return self.context_page
                 continue
             finally:
                 self._crawler_page_open_depth -= 1
@@ -262,27 +200,11 @@ class XhsAuthorMixin:
                 raise
             logger.warning(f"[XiaoHongShuCrawler.author] Could not bring the main page to front: {exc}")
 
-    async def _repair_creator_info_by_url(self, user_id: str) -> Optional[Dict]:
-        """repair 过渡（提交 6 删）：在新标签页直开作者页后读取投影。"""
-        self._assert_primary_page_alive("creator_profile_browser")
-        primary_state = await self._popup_checkpoint_state(self.context_page)
-        self._raise_for_terminal_popup_state(primary_state, reason="creator_profile_browser")
-        if primary_state.get("manual_markers"):
-            return await self._recover_creator_login_on_primary_page(user_id)
-        page = await self._new_guarded_page()
-        self._require_capture().attach(page, "author_tab")
-        try:
-            await self._goto_with_deadline(
-                page,
-                f"{self.index_url}/user/profile/{quote(user_id)}",
-                stage="creator_profile_browser",
-            )
-            return await self._read_author_tab(page, user_id)
-        finally:
-            await self._close_page_with_deadline(
-                page,
-                reason="creator_profile_cleanup",
-            )
+    async def _return_from_author_page(self, note: Any) -> None:
+        """同页跳转的作者页读完后写 go_back 并返回笔记页（repair，待 V9）。"""
+        self._require_capture().action("go_back", page_role="primary", target={"note_id": note.note_id})
+        async with asyncio.timeout(self.inputs.navigation_deadline_seconds() + 2.0):
+            await self.context_page.go_back(wait_until="commit")
 
     async def _read_author_tab(self, page: Page, user_id: str) -> Optional[Dict]:
         """作者页到达检查与小幅滚动后读取投影；登录界面转主页面恢复，验证界面进入作者页验证等待。"""

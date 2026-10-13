@@ -187,9 +187,11 @@ def test_fork_node_count_matches_ci_expectation() -> None:
     ))
     moved = [node for node in data["fork"]["nodes"] if node["target_file"] in moved_files]
     assert len(moved) == 383
+    # #71 第一批删除的小红书旧取数路径用例文件；其台账节点登记在 test_adapter_t12.T71_DELETED_LEDGER_NODES。
+    retired_files = {f"tests/platforms/xhs/test_xhs_{name}.py" for name in ("core_access_error", "image_download")}
     for node in moved:
         assert not (ROOT / node["source_file"]).exists()
-        assert (ROOT / node["target_file"]).is_file()
+        assert (ROOT / node["target_file"]).is_file() is (node["target_file"] not in retired_files)
     assert len(data["fork"]["nodes"]) - len(moved) == expected
 
 
@@ -388,7 +390,7 @@ def test_only_spec_authorized_env_removals_are_excluded_from_drift(tmp_path: Pat
         "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID", "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM",
         "TRIPPOSTCOLLECT_DISCOVERY_KEYWORD", "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE",
         "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED", "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
-        "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL",
+        "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL", "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS",
     }
     module = "src/trippostcollect/emitter.py"
     emitted = (

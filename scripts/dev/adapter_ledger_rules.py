@@ -1951,6 +1951,20 @@ PROGRESS_RESOLUTIONS = {
         "退出", None, "#71：唯一用途为本地生成search_id，search_id改由前端生成并从截获请求体读取"),
     ("tools/MediaCrawler/media_platform/xhs/help.py", "get_search_id"): (
         "退出", None, "#71：search_id由前端生成，全量扫描按截获请求体的search_id与筛选签名区分会话"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler.get_note_detail_async_task"): (
+        "退出", None, "#71：详情改由浮层feed截获（发现）或直开保存链接读页面状态（repair）取得，API与HTML详情删除"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler.enrich_note_creator"): (
+        "迁至", "XhsAuthorMixin._enrich_creator_via_author_tab",
+        "#71：作者资料改为点击作者名后读作者页页面状态投影；无token作者API与直开作者页删除"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler.get_note_images"): (
+        "迁至", "XhsMediaMixin._collect_note_images",
+        "#71：正文图片改为翻图触发前端加载、图片窗口截获字节后整帖暂存，直连下载删除"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler.get_notice_media"): (
+        "退出", None, "#71：只转调直连下载且不下载视频；截获路径由_collect_note_images与_stage_note_images承担"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler.create_xhs_client"): (
+        "退出", None, "#71：小红书不再由程序发请求，repair改为直开保存链接后，httpx客户端不再创建"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._browser_identity_headers"): (
+        "退出", None, "#71：唯一调用方httpx客户端构造删除，不再把浏览器身份拼进程序请求头"),
 }
 
 # 冻结台账的 SHA-256：T14 删除 fork 后台账冻结，`--check` 只做冻结自检，不再重新枚举基线源码。

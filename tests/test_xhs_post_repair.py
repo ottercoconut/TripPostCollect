@@ -736,6 +736,7 @@ def test_candidate_only_child_failure_does_not_hide_runtime_or_media_blockers() 
             "pagination_incomplete": False,
             "behavior_evidence_ok": True,
             "policy_evidence_ok": True,
+            "content_visit_ok": True,
         },
         "records": [
             {
@@ -758,6 +759,9 @@ def test_candidate_only_child_failure_does_not_hide_runtime_or_media_blockers() 
     summary["formal_validation"]["local_image_failure_count"] = 1
     assert repair.candidate_only_child_failure(summary) is False
     summary["formal_validation"]["local_image_failure_count"] = 0
+    summary["formal_validation"]["content_visit_ok"] = False
+    assert repair.candidate_only_child_failure(summary) is False
+    summary["formal_validation"]["content_visit_ok"] = True
     summary["records"][0]["repair_report"]["runtime_blocker"] = {
         "error_code": "login_required"
     }
@@ -783,38 +787,26 @@ REPAIR_LIFECYCLE_FAILURES = [
 ]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure", REPAIR_LIFECYCLE_FAILURES, ids=lambda failure: failure.event["code"]
-)
-async def test_xhs_repair_stops_on_browser_lifecycle_failure_with_structured_blocker(
+class TargetClosedError(PlaywrightError):
+    """与 Playwright 同名的关闭异常；分类按类名识别。"""
+
+
+async def run_repair_with(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    failure: CDPBrowserLifecycleError,
-) -> None:
+    outcomes: dict[str, BaseException],
+) -> tuple[list[str], dict]:
+    """真实 repair 编排（批次、报告、阻断判定）；单个目标的直开流程换成按 outcomes 抛出的桩。"""
     requested: list[str] = []
-    enriched: list[str] = []
-    stored: list[str] = []
 
-    class FakeCrawler(RootXiaoHongShuCrawler):
-        async def get_note_detail_async_task(self, *, note_id, **_kwargs):
-            requested.append(note_id)
-            return {"note_id": note_id, "xsec_token": f"token-{note_id}", "type": "normal"}
-
-        async def enrich_note_creator(self, note_detail):
-            enriched.append(note_detail["note_id"])
+    async def fake_repair_note(_crawler, url, target):
+        assert url == target.note_id
+        requested.append(target.note_id)
+        failure = outcomes.get(target.note_id)
+        if failure is not None:
             raise failure
 
-        async def get_notice_media(self, _note_detail):
-            return None
-
-        @staticmethod
-        def is_video_note(_note_detail):
-            return False
-
-        async def update_xhs_note(self, note_detail):
-            stored.append(note_detail["note_id"])
-
+    monkeypatch.setattr(xhs_repair, "_repair_note", fake_repair_note)
     monkeypatch.setattr(
         xhs_repair,
         "parse_note_info_from_note_url",
@@ -826,16 +818,31 @@ async def test_xhs_repair_stops_on_browser_lifecycle_failure_with_structured_blo
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_BATCH_SIZE", "2")
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH", str(report_path))
     install_worker_hooks(monkeypatch)
-    crawler = FakeCrawler(**platform_entry.xhs_dependencies(repair_crawler_config(["note-1", "note-2", "note-3"])))
-
-    with pytest.raises(type(failure)) as exc_info:
+    crawler = RootXiaoHongShuCrawler(
+        **platform_entry.xhs_dependencies(repair_crawler_config(["note-1", "note-2", "note-3"]))
+    )
+    try:
         await crawler.get_specified_notes()
+    finally:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    return requested, report
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", REPAIR_LIFECYCLE_FAILURES, ids=lambda failure: failure.event["code"]
+)
+async def test_xhs_repair_stops_on_browser_lifecycle_failure_with_structured_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: CDPBrowserLifecycleError,
+) -> None:
+    with pytest.raises(type(failure)) as exc_info:
+        await run_repair_with(tmp_path, monkeypatch, {"note-1": failure})
 
     assert exc_info.value is failure
-    # 同批后续候选与下一批都不再处理，也不当作候选失败。
-    assert requested == ["note-1", "note-2"]
-    assert enriched == ["note-1"] and stored == []
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report = json.loads((tmp_path / "repair_report.json").read_text(encoding="utf-8"))
+    # 逐个直开：阻断后同批后续候选与下一批都不再处理，也不当作候选失败。
     assert report["candidate_failures"] == [] and report["successful_ids"] == []
     # 阻断发生在第一批中途：未完成批次不提交。
     assert report["batches"] == []
@@ -851,78 +858,19 @@ async def test_xhs_repair_stops_on_browser_lifecycle_failure_with_structured_blo
     assert blocker["status"] == "blocked" and blocker["retryable"] is False
 
 
-class TargetClosedError(PlaywrightError):
-    """与 Playwright 同名的关闭异常；分类按类名识别。"""
-
-
-async def run_blocked_repair(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    failure: BaseException,
-    stage: str,
-) -> tuple[pytest.ExceptionInfo, list[str], list[str], dict]:
-    """真实 repair 编排：note-1 在指定阶段抛出 failure，其余候选正常。"""
-    requested: list[str] = []
-    stored: list[str] = []
-
-    class FakeCrawler(RootXiaoHongShuCrawler):
-        async def get_note_detail_async_task(self, *, note_id, **_kwargs):
-            requested.append(note_id)
-            if stage == "detail" and note_id == "note-1":
-                raise failure
-            return {"note_id": note_id, "xsec_token": f"token-{note_id}", "type": "normal"}
-
-        async def enrich_note_creator(self, note_detail):
-            if stage == "creator" and note_detail["note_id"] == "note-1":
-                raise failure
-
-        async def get_notice_media(self, _note_detail):
-            return None
-
-        @staticmethod
-        def is_video_note(_note_detail):
-            return False
-
-        async def update_xhs_note(self, note_detail):
-            stored.append(note_detail["note_id"])
-
-    monkeypatch.setattr(
-        xhs_repair,
-        "parse_note_info_from_note_url",
-        lambda value: SimpleNamespace(note_id=value, xsec_source="pc_search", xsec_token=f"token-{value}"),
-    )
-    monkeypatch.setattr(platform_entry, "_xhs_repair", False)
-    report_path = tmp_path / "repair_report.json"
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR", "1")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_BATCH_SIZE", "2")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH", str(report_path))
-    install_worker_hooks(monkeypatch)
-    crawler = FakeCrawler(**platform_entry.xhs_dependencies(repair_crawler_config(["note-1", "note-2", "note-3"])))
-
-    with pytest.raises(type(failure)) as exc_info:
-        await crawler.get_specified_notes()
-
-    return exc_info, requested, stored, json.loads(report_path.read_text(encoding="utf-8"))
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["detail", "creator"])
 async def test_xhs_repair_network_recovery_timeout_blocks_the_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stage: str,
 ) -> None:
     # #60：网络恢复预算耗尽终止本轮，不按候选失败继续让后续候选再等一次预算。
-    failure = XHSNetworkRecoveryTimeout(f"repair:{stage}", 600.0)
+    failure = XHSNetworkRecoveryTimeout("navigation:repair_note_detail", 600.0)
 
-    exc_info, requested, stored, report = await run_blocked_repair(
-        tmp_path, monkeypatch, failure=failure, stage=stage
-    )
+    with pytest.raises(XHSNetworkRecoveryTimeout) as exc_info:
+        await run_repair_with(tmp_path, monkeypatch, {"note-1": failure})
 
     assert exc_info.value is failure
-    assert requested == ["note-1", "note-2"]
-    assert stored == []
+    report = json.loads((tmp_path / "repair_report.json").read_text(encoding="utf-8"))
     assert report["candidate_failures"] == [] and report["successful_ids"] == []
     assert report["batches"] == []
     assert report["runtime_blocker"] == {
@@ -952,12 +900,12 @@ async def test_xhs_repair_playwright_blocker_classifies_target_closed_first(
     error_code: str,
 ) -> None:
     # #60：TargetClosedError 先于通用 Playwright 分支归入 browser_target_closed。
-    exc_info, requested, stored, report = await run_blocked_repair(
-        tmp_path, monkeypatch, failure=failure, stage="creator"
-    )
+    with pytest.raises(type(failure)) as exc_info:
+        await run_repair_with(tmp_path, monkeypatch, {"note-2": failure})
 
     assert exc_info.value is failure
-    assert requested == ["note-1", "note-2"] and stored == []
+    report = json.loads((tmp_path / "repair_report.json").read_text(encoding="utf-8"))
+    assert report["successful_ids"] == ["note-1"]
     assert report["batches"] == [] and report["candidate_failures"] == []
     assert report["runtime_blocker"] == {
         "error_type": type(failure).__name__,
@@ -972,67 +920,15 @@ async def test_xhs_repair_continues_same_and_later_batches_after_candidate_failu
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stored: list[str] = []
-    requested: list[str] = []
-
-    # T09：修复编排迁入根 crawler；旧 hook 只锁存开关，经 entry 装配进入 crawler 端口。
-    class FakeCrawler(RootXiaoHongShuCrawler):
-        async def get_note_detail_async_task(self, *, note_id, **_kwargs):
-            requested.append(note_id)
-            if note_id == "note-1":
-                error = RuntimeError("detail exhausted")
-                error.code = "api_and_html_empty"
-                error.attempts = 3
-                raise error
-            return {
-                "note_id": note_id,
-                "xsec_token": f"token-{note_id}",
-                "type": "normal",
-            }
-
-        async def enrich_note_creator(self, _note_detail):
-            return None
-
-        async def get_notice_media(self, _note_detail):
-            return None
-
-        @staticmethod
-        def is_video_note(_note_detail):
-            return False
-
-        async def update_xhs_note(self, note_detail):
-            stored.append(note_detail["note_id"])
-
-    config = SimpleNamespace(
-        **asdict(BROWSER_SETTINGS),
-        CDP_HEADLESS=False, CRAWLER_TYPE="detail", ENABLE_CDP_MODE=True, ENABLE_GET_MEIDAS=False,
-        HEADLESS=False, KEYWORDS="", LOGIN_TYPE="qrcode", COOKIES="", SAVE_DATA_OPTION="jsonl", SAVE_DATA_PATH="",
-        XHS_INTERNATIONAL=False,
-        MAX_CONCURRENCY_NUM=1,
-        XHS_SPECIFIED_NOTE_URL_LIST=["note-1", "note-2", "note-3"],
+    requested, report = await run_repair_with(
+        tmp_path,
+        monkeypatch,
+        {"note-1": xhs_repair.XhsRepairSkip("repair_link_unavailable", retryable=False)},
     )
-    monkeypatch.setattr(
-        xhs_repair,
-        "parse_note_info_from_note_url",
-        lambda value: SimpleNamespace(
-            note_id=value,
-            xsec_source="pc_search",
-            xsec_token=f"token-{value}",
-        ),
-    )
-    monkeypatch.setattr(platform_entry, "_xhs_repair", False)
-    report_path = tmp_path / "repair_report.json"
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR", "1")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_BATCH_SIZE", "2")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH", str(report_path))
 
-    install_worker_hooks(monkeypatch)
-    await FakeCrawler(**platform_entry.xhs_dependencies(config)).get_specified_notes()
-
-    report = json.loads(report_path.read_text(encoding="utf-8"))
     assert requested == ["note-1", "note-2", "note-3"]
-    assert stored == ["note-2", "note-3"]
     assert [batch["batch"] for batch in report["batches"]] == [1, 2]
+    assert report["batches"][0]["failed_ids"] == ["note-1"]
     assert report["successful_ids"] == ["note-2", "note-3"]
     assert report["candidate_failures"] == [
         {
@@ -1041,10 +937,10 @@ async def test_xhs_repair_continues_same_and_later_batches_after_candidate_failu
             "platform_post_id": "note-1",
             "batch": 1,
             "failure_scope": "detail",
-            "detail": "RuntimeError",
-            "error_type": "RuntimeError",
-            "error_code": "api_and_html_empty",
-            "attempts": 3,
-            "retryable": True,
+            "detail": "",
+            "error_type": "",
+            "error_code": "repair_link_unavailable",
+            "attempts": 1,
+            "retryable": False,
         }
     ]

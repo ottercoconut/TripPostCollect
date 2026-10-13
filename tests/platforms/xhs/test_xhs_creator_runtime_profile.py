@@ -23,9 +23,7 @@ import trippostcollect.platforms.xhs.author as xhs_author
 from trippostcollect.platforms.xhs.client import XiaoHongShuClient
 from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
-    XHSCreatorProfileUnavailable,
     XHSMainPageClosedUnexpected,
-    XHSNetworkRecoveryTimeout,
 )
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget, XHSManualWaitBudgetExhausted
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
@@ -680,32 +678,8 @@ class CreatorPage:
         return None
 
 
-class StaticClient:
-    """只暴露浏览器回退会用到的静态解析；与真实客户端一样记录原因类别。"""
-
-    def __init__(self, api_creator=None, api_html=""):
-        self._extractor = XiaoHongShuExtractor()
-        self.last_creator_parse_reason = ""
-        self.api_creator = api_creator
-        self.api_html = api_html
-        self.api_calls = []
-        self.static_calls = 0
-
-    async def get_creator_info(self, **kwargs):
-        self.api_calls.append(kwargs)
-        if self.api_html:
-            return self.extract_creator_info_from_html(self.api_html)
-        return self.api_creator
-
-    def extract_creator_info_from_html(self, html):
-        self.static_calls += 1
-        creator, self.last_creator_parse_reason = self._extractor.extract_creator_info_with_reason(html)
-        return creator
-
-
 @pytest.fixture
 def crawler(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS", "1")
     monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior_evidence.json"))
     return attach_creator_harness(XiaoHongShuCrawler(), monkeypatch, tmp_path)
 
@@ -720,7 +694,6 @@ def attach_creator_harness(instance, monkeypatch, tmp_path):
     instance._close_page_with_deadline = AsyncMock()
     instance._close_author_tab = AsyncMock()
     instance.capture = make_capture(tmp_path)
-    instance.xhs_client = StaticClient()
     clock = {"now": 100.0}
     instance.sleeps = []
 
@@ -999,39 +972,6 @@ async def test_closed_author_tab_is_unavailable_but_transient_evaluate_error_ret
 
 
 @pytest.mark.asyncio
-async def test_both_paths_failing_raise_with_combined_reason_categories(crawler):
-    crawler.xhs_client = StaticClient(api_html=NEW_SET_BEFORE_USER)
-    page = CreatorPage([None], html=NEW_SET_BEFORE_USER)
-    crawler._new_guarded_page = AsyncMock(return_value=page)
-
-    with pytest.raises(XHSCreatorProfileUnavailable) as exc_info:
-        await crawler.enrich_note_creator({"user": {"user_id": REQUESTED_USER}})
-
-    assert exc_info.value.attempts == 2
-    assert exc_info.value.reason == (
-        "api=state_decode_failed:js_new_expression;browser=runtime_projection_empty"
-    )
-    assert REQUESTED_USER not in exc_info.value.reason
-    assert [event["outcome"] for event in parse_diagnostics(crawler)] == ["runtime_projection_empty"]
-    assert_diagnostic_is_safe(crawler)
-
-
-@pytest.mark.asyncio
-async def test_api_request_failure_reason_uses_exception_type(crawler):
-    crawler.xhs_client = StaticClient()
-    crawler.xhs_client.get_creator_info = AsyncMock(side_effect=ValueError("合成异常 synthetic-author-a"))
-    page = CreatorPage([None], html="<html></html>")
-    crawler._new_guarded_page = AsyncMock(return_value=page)
-
-    with pytest.raises(XHSCreatorProfileUnavailable) as exc_info:
-        await crawler.enrich_note_creator({"user": {"user_id": REQUESTED_USER}})
-
-    assert exc_info.value.reason == (
-        "api=api_request_failed:ValueError;browser=runtime_projection_empty"
-    )
-
-
-@pytest.mark.asyncio
 async def test_boolean_fans_are_not_ready_and_end_as_followers_unobserved(crawler):
     page = CreatorPage([{"status": "ok", "creator": {"fans": True, "basicInfo": {"nickname": "合成作者"},
                                                       "interactions": [{"type": "fans", "count": True}]}}],
@@ -1291,26 +1231,6 @@ async def test_verification_read_accepts_after_clean_recheck(crawler):
     assert creator["interactions"][1]["count"] == "128"
     assert crawler.visible_markers == []
     assert [event["outcome"] for event in parse_diagnostics(crawler)] == ["ok"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [
-    CDPBrowserLifecycleError({"code": "xhs_browser_context_closed_unexpected"}, stage="creator_profile_api"),
-    XHSMainPageClosedUnexpected(stage="creator_profile_api"),
-    XHSNetworkRecoveryTimeout("creator_profile_api", 600.0),
-])
-async def test_api_stage_run_failure_propagates_before_browser_fallback_pause(crawler, failure):
-    crawler.xhs_client.get_creator_info = AsyncMock(side_effect=failure)
-    crawler._new_guarded_page = AsyncMock()
-    note = {"note_id": "note-a", "user": {"user_id": REQUESTED_USER}}
-
-    with pytest.raises(type(failure)) as exc_info:
-        await crawler.enrich_note_creator(note)
-
-    assert exc_info.value is failure
-    crawler._guarded_pause.assert_not_awaited()
-    crawler._new_guarded_page.assert_not_awaited()
-    assert "creator_profile" not in note
 
 
 @pytest.mark.asyncio

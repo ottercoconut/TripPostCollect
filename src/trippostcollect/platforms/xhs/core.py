@@ -31,7 +31,6 @@ from playwright.async_api import BrowserContext, Error as PlaywrightError, Page
 from trippostcollect.application.contracts import XhsPorts, XhsReaders, XhsSettings
 from trippostcollect.platforms.xhs.author import XhsAuthorMixin
 from trippostcollect.platforms.xhs.behavior import XhsBehaviorMixin
-from trippostcollect.platforms.xhs.client import XiaoHongShuClient
 from trippostcollect.platforms.xhs.detail import XhsDetailMixin
 from trippostcollect.platforms.xhs.errors import (
     IPBlockError,
@@ -51,7 +50,6 @@ from trippostcollect.platforms.xhs.parser import XhsParserMixin, update_xhs_note
 from trippostcollect.platforms.xhs.scan import ScanState, XhsScanMixin
 from trippostcollect.platforms.xhs.session import XhsSessionMixin
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
-from trippostcollect.runtime.cookies import convert_browser_context_cookies
 from trippostcollect.runtime.page_capture import PageCaptureChannel
 
 logger = logging.getLogger("MediaCrawler")
@@ -124,7 +122,6 @@ class XiaoHongShuCrawler(
     XhsErrorsMixin,
 ):
     context_page: Page
-    xhs_client: XiaoHongShuClient
     browser_context: BrowserContext
     cdp_manager: Optional[object]
 
@@ -136,7 +133,6 @@ class XiaoHongShuCrawler(
         self.crawler_type = ""
         self.index_url = "https://www.rednote.com" if self.settings.XHS_INTERNATIONAL else "https://www.xiaohongshu.com"
         self.explore_url = f"{self.index_url}/explore"
-        self.cookie_urls = [self.index_url]
         self.user_agent: Optional[str] = None
         self.cdp_manager = None
         self._browser_session_started = False
@@ -229,37 +225,6 @@ class XiaoHongShuCrawler(
                     resume_cursor=None,
                     discovery_phase="full_scan",
                 )
-
-    async def create_xhs_client(self, httpx_proxy: Optional[str]) -> XiaoHongShuClient:
-        """repair 过渡（提交 6 删）：旧 API 详情与作者接口的客户端。"""
-        logger.info("[XiaoHongShuCrawler.create_xhs_client] Begin create Xiaohongshu API client ...")
-        identity_headers = await self._browser_identity_headers()
-        cookie_str, cookie_dict = await convert_browser_context_cookies(
-            self.browser_context,
-            urls=self.cookie_urls,
-        )
-        xhs_client_obj = XiaoHongShuClient(
-            proxy=httpx_proxy,
-            headers={
-                "accept": "application/json, text/plain, */*",
-                "cache-control": "no-cache",
-                "content-type": "application/json;charset=UTF-8",
-                "origin": self.index_url,
-                "pragma": "no-cache",
-                "priority": "u=1, i",
-                "referer": f"{self.index_url}/",
-                "sec-fetch-dest": "empty",
-                "sec-fetch-mode": "cors",
-                "sec-fetch-site": "same-site",
-                **identity_headers,
-                "Cookie": cookie_str,
-            },
-            playwright_page=self.context_page,
-            cookie_dict=cookie_dict,
-            manual_wait_budget=self._get_manual_wait_budget(),
-            ports=self.ports.client,
-        )
-        return xhs_client_obj
 
     @classmethod
     def bind(cls, dependencies):

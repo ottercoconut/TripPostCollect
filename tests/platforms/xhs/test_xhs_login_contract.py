@@ -565,7 +565,7 @@ def _configure_browser_session_test(
     *,
     page: _LoginFlowPage,
     events: list[str],
-) -> tuple[XiaoHongShuCrawler, _LoginFlowContext, SimpleNamespace]:
+) -> tuple[XiaoHongShuCrawler, _LoginFlowContext]:
     monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior_evidence.json"))
     monkeypatch.setattr(xhs_session, "XHS_LOGIN_ME_CONFIRM_SECONDS", 0.05)
     context = _LoginFlowContext(page)
@@ -579,21 +579,12 @@ def _configure_browser_session_test(
         return_value={"status": "completed"}
     )
     crawler.search = AsyncMock()
-
-    async def update_cookies(**_kwargs: object) -> None:
-        events.append("update_cookies")
-
-    client = SimpleNamespace(
-        playwright_page=page,
-        update_cookies=AsyncMock(side_effect=update_cookies),
-    )
-    crawler.create_xhs_client = AsyncMock(return_value=client)
     monkeypatch.setattr(crawler.ports, "install_project_runtime_hints", AsyncMock())
     monkeypatch.setattr(config, "ENABLE_CDP_MODE", True)
     monkeypatch.setattr(config, "CDP_HEADLESS", False)
     monkeypatch.setattr(config, "KEYWORDS", "青岛登录测试")
     monkeypatch.setattr(config, "CRAWLER_TYPE", "search")
-    return crawler, context, client
+    return crawler, context
 
 
 def _install_observed_login_factory(
@@ -645,7 +636,7 @@ async def test_startup_enters_qrcode_login_once_and_confirms_with_user_me(
     page = _LoginFlowPage(visible_text="扫码登录 打开小红书扫一扫")
     page.visible_selectors.add(XiaoHongShuLogin._QRCODE_SELECTOR)
     events: list[str] = []
-    crawler, context, client = _configure_browser_session_test(
+    crawler, context = _configure_browser_session_test(
         monkeypatch,
         tmp_path,
         page=page,
@@ -697,7 +688,7 @@ async def test_signed_in_ui_without_guest_false_user_me_reloads_once_then_fails(
     page = _LoginFlowPage(visible_text="首页 我")
     page.visible_selectors.add(XiaoHongShuLogin._PROFILE_SELECTORS[0])
     events: list[str] = []
-    crawler, _context, _client = _configure_browser_session_test(
+    crawler, _context = _configure_browser_session_test(
         monkeypatch,
         tmp_path,
         page=page,
@@ -722,7 +713,6 @@ async def test_signed_in_ui_without_guest_false_user_me_reloads_once_then_fails(
     assert details["stop_detail"] == "xhs_login_state_unconfirmed"
     assert [line["action"] for line in _ledger(crawler) if line["kind"] == "action"] == ["reload"]
     assert not [line for line in _ledger(crawler) if line["kind"] == "visit"]
-    crawler.create_xhs_client.assert_not_awaited()
     crawler.search.assert_not_awaited()
 
 
@@ -761,7 +751,7 @@ async def test_startup_sms_terminal_fails_immediately_without_retry_or_business_
     clock = _LoginFlowClock()
     page = _LoginFlowPage(visible_text=visible_text)
     events: list[str] = []
-    crawler, context, client = _configure_browser_session_test(
+    crawler, context = _configure_browser_session_test(
         monkeypatch,
         tmp_path,
         page=page,
@@ -797,7 +787,6 @@ async def test_startup_sms_terminal_fails_immediately_without_retry_or_business_
             "retryable": False,
         },
     )
-    crawler.create_xhs_client.assert_not_awaited()
     crawler._open_behavior_search_page_on_primary_page.assert_not_awaited()
     crawler._run_human_behavior_on_primary_page.assert_not_awaited()
     crawler.search.assert_not_awaited()
@@ -832,39 +821,6 @@ async def test_legacy_storage_state_file_is_not_read_or_rewritten(
     assert snapshot_path.read_text(encoding="utf-8") == "legacy-sentinel\n"
     assert list(tmp_path.iterdir()) == [snapshot_path]
     async_playwright.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_context_cookies_still_seed_the_api_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    crawler = XiaoHongShuCrawler()
-    crawler.browser_context = SimpleNamespace()
-    crawler.context_page = SimpleNamespace()
-    crawler._browser_identity_headers = AsyncMock(
-        return_value={"user-agent": "Chromium/140"}
-    )
-    convert_cookies = AsyncMock(
-        return_value=(
-            "web_session=current; a1=signed",
-            {"web_session": "current", "a1": "signed"},
-        )
-    )
-    monkeypatch.setattr(
-        xhs_core,
-        "convert_browser_context_cookies",
-        convert_cookies,
-    )
-
-    client = await crawler.create_xhs_client(None)
-
-    convert_cookies.assert_awaited_once_with(
-        crawler.browser_context,
-        urls=crawler.cookie_urls,
-    )
-    assert client.headers["Cookie"] == "web_session=current; a1=signed"
-    assert client.cookie_dict == {"web_session": "current", "a1": "signed"}
-    assert client.playwright_page is crawler.context_page
 
 
 def test_login_terminal_writes_use_the_injected_worker_event_exit() -> None:

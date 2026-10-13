@@ -13,6 +13,10 @@ from typing import Any
 from playwright.async_api import Page
 
 
+# 浮层只认遮罩；repair 直开的整页先认遮罩，再认整页容器（整页结构待 V9 实测）。
+XHS_OVERLAY_ROOTS = ("div.note-detail-mask",)
+XHS_NOTE_PAGE_ROOTS = ("div.note-detail-mask", "#noteContainer")
+
 DOM_SCRIPTS: dict[str, str] = {
     # 二维码只作为“已就绪”的布尔信号：可见且 src 非空；不读取、不保存图片内容。
     "qr_ready": """() => {
@@ -116,7 +120,8 @@ DOM_SCRIPTS: dict[str, str] = {
         };
     }""",
     # 笔记浮层（R2）：遮罩与正文是否可见、页码 k/N、关闭按钮、右箭头与作者名链接的中心点。
-    "overlay_state": """() => {
+    # 笔记详情视图：浮层（div.note-detail-mask）或 repair 直开的整页；roots 依次尝试，取第一个可见的根。
+    "note_view_state": """(roots) => {
         const visible = (node) => {
             if (!node) return false;
             const style = window.getComputedStyle(node);
@@ -128,8 +133,8 @@ DOM_SCRIPTS: dict[str, str] = {
             const rect = node.getBoundingClientRect();
             return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
         };
-        const mask = document.querySelector('div.note-detail-mask');
-        if (!visible(mask)) return { visible: false };
+        const mask = roots.map((selector) => document.querySelector(selector)).find((node) => visible(node));
+        if (!mask) return { visible: false };
         const content = ['.note-content', '#detail-desc', '.author a.name']
             .some((selector) => visible(mask.querySelector(selector)));
         let pageIndex = null;
@@ -311,6 +316,74 @@ STATE_SCRIPTS: dict[str, str] = {
         return { status: 'rejected', reason: INCOMPLETE };
     }
 }""",
+    # repair 直开笔记页的白名单投影（§9.3）：只读 window.__INITIAL_STATE__.note.noteDetailMap[<id>].note，
+    # 按 spec 的字段表只复制标量（Vue ref 解包同作者投影）；头像、xsecToken、互动状态与图片流信息不在字段表内。
+    # 只读自有数据属性，不序列化整份状态。
+    "note_detail_state": """(spec) => {
+    const isObject = (value) => value !== null && typeof value === 'object';
+    const ownValue = (node, key) => {
+        if (!isObject(node)) return undefined;
+        const descriptor = Object.getOwnPropertyDescriptor(node, key);
+        if (descriptor === undefined || !('value' in descriptor)) return undefined;
+        return descriptor.value;
+    };
+    const isRef = (value) => {
+        const marker = Object.getOwnPropertyDescriptor(value, '__v_isRef');
+        return marker !== undefined && 'value' in marker && marker.value === true;
+    };
+    const unref = (value) => {
+        let current = value;
+        for (let depth = 0; depth < 4; depth += 1) {
+            if (!isObject(current) || !isRef(current)) return current;
+            const wrapped = Object.getOwnPropertyDescriptor(current, '_rawValue')
+                || Object.getOwnPropertyDescriptor(current, '_value');
+            if (wrapped === undefined || !('value' in wrapped)) return undefined;
+            current = wrapped.value;
+        }
+        return current;
+    };
+    const field = (node, key) => unref(ownValue(unref(node), key));
+    const isPlain = (value) => {
+        if (!isObject(value) || Array.isArray(value)) return false;
+        const prototype = Object.getPrototypeOf(value);
+        return prototype === Object.prototype || prototype === null;
+    };
+    const scalars = (source, fields) => {
+        const result = {};
+        if (!isPlain(source)) return result;
+        for (const key of fields) {
+            const value = field(source, key);
+            if (typeof value === 'string' || typeof value === 'boolean'
+                || (typeof value === 'number' && Number.isFinite(value))) {
+                result[key] = value;
+            }
+        }
+        return result;
+    };
+    try {
+        const detailMap = field(field(field(window, '__INITIAL_STATE__'), 'note'), 'noteDetailMap');
+        const note = field(field(detailMap, spec.note_id), 'note');
+        if (!isPlain(note)) return { status: 'missing' };
+        const projected = scalars(note, spec.top_fields);
+        for (const [key, fields] of spec.object_fields) {
+            projected[key] = scalars(field(note, key), fields);
+        }
+        for (const [key, fields] of spec.list_fields) {
+            const items = field(note, key);
+            const rebuilt = [];
+            if (Array.isArray(items)) {
+                const length = Math.min(ownValue(items, 'length'), spec.max_items);
+                for (let index = 0; index < length; index += 1) {
+                    rebuilt.push(scalars(unref(ownValue(items, String(index))), fields));
+                }
+            }
+            projected[key] = rebuilt;
+        }
+        return { status: 'ok', note: projected };
+    } catch (error) {
+        return { status: 'rejected' };
+    }
+}""",
 }
 
 
@@ -363,9 +436,13 @@ async def dom_filter_state(page: Page, label: str) -> dict[str, Any]:
     return state if isinstance(state, dict) else {}
 
 
-async def dom_overlay_state(page: Page) -> dict[str, Any]:
-    state = await _dom(page, "overlay_state")
+async def dom_note_view_state(page: Page, roots: tuple[str, ...]) -> dict[str, Any]:
+    state = await _dom(page, "note_view_state", list(roots))
     return state if isinstance(state, dict) else {"visible": False}
+
+
+async def dom_overlay_state(page: Page) -> dict[str, Any]:
+    return await dom_note_view_state(page, XHS_OVERLAY_ROOTS)
 
 
 async def dom_search_ready_counts(page: Page) -> dict[str, Any]:

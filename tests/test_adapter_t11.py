@@ -254,7 +254,12 @@ T71_REPLACEMENTS = (
     (
         '        if not args.xhs_repair and args.start_page > 1 and not args.start_cursor:\n            raise SystemExit("XHS continuation requires --start-cursor together with --start-page")',
         '        if (\n            args.start_page != 1\n            or args.start_cursor\n            or args.top_refresh_max_pages > 0\n            or args.discovery_source_exhausted\n        ):\n            raise SystemExit("xhs_full_scan_rejects_resume_args")',
-    )
+    ),
+    # 作者补全恒为点击作者名（正式发现与 repair 同一路径），不再注入开关。
+    (
+        '                "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": "1",\n                "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",\n',
+        '                "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",\n',
+    ),
 )
 
 def t71_authorized_source(text):

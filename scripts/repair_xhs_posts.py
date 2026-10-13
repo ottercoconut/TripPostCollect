@@ -367,6 +367,7 @@ def candidate_only_child_failure(child_summary: dict[str, Any]) -> bool:
         and validation.get("pagination_incomplete") is False
         and validation.get("behavior_evidence_ok") is True
         and validation.get("policy_evidence_ok") is True
+        and validation.get("content_visit_ok") is True
         and not report.get("runtime_blocker")
     )
 

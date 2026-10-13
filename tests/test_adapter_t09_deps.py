@@ -241,7 +241,7 @@ def test_crawler_methods_live_in_ledger_target_mixins():
     assert not defined & moved, sorted(defined & moved)
     # 原实例属性名保持，fork 测试与旧桥仍按这些名字替换。
     for name in ("_popup_sleep", "_popup_monotonic", "_get_manual_wait_budget", "_run_browser_session",
-                 "launch_browser_with_cdp", "create_xhs_client"):
+                 "launch_browser_with_cdp"):
         assert callable(getattr(crawler, name))
 
 

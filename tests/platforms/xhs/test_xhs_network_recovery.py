@@ -358,26 +358,6 @@ async def test_invalid_operation_page_is_terminal_before_retry(
     assert sleeps == []
 
 
-@pytest.mark.asyncio
-async def test_creator_network_timeout_never_opens_browser_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    crawler = XiaoHongShuCrawler()
-    crawler._run_with_network_recovery = AsyncMock(
-        side_effect=XHSNetworkRecoveryTimeout("creator_profile_api:user=author", 600)
-    )
-    crawler._get_creator_info_from_browser = AsyncMock()
-    crawler._guarded_pause = AsyncMock()
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS", "1")
-    note = {"user": {"user_id": "author"}}
-
-    with pytest.raises(XHSNetworkRecoveryTimeout):
-        await crawler.enrich_note_creator(note)
-
-    crawler._get_creator_info_from_browser.assert_not_awaited()
-    crawler._guarded_pause.assert_not_awaited()
-
-
 @pytest.mark.parametrize(
     "error",
     [

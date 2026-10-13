@@ -52,7 +52,10 @@
     },
     {
      "test": "tests/platforms/xhs/test_xhs_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
-     "asserts": "下游：已分类 404 错误只尝试 1 次，manifest 保留 error_code/http_status"
+     "asserts": "下游：已分类 404 错误只尝试 1 次，manifest 保留 error_code/http_status",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "小红书正文图片改为翻图触发前端加载、图片窗口截获字节，直连下载、重试循环与重试次数不再是小红书契约；截获图片的失败行与整帖拒绝由 tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_not_captured_is_retryable_and_later_candidate_continues、::test_terminal_image_status_is_final_and_later_candidate_continues 与 tests/platforms/xhs/test_xhs_repair_state.py::test_missing_image_is_retryable_and_forbidden_image_stops_the_run 断言"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_xhs_http_404_preserves_terminal_status"
@@ -184,7 +187,10 @@
     },
     {
      "test": "tests/platforms/xhs/test_xhs_image_download.py::test_transient_xhs_image_failure_recovers_and_records_attempts",
-     "asserts": "None 一次后成功，manifest attempts=2、fetch await 2 次（经根重试循环）"
+     "asserts": "None 一次后成功，manifest attempts=2、fetch await 2 次（经根重试循环）",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "小红书正文图片改为翻图触发前端加载、图片窗口截获字节，直连下载、重试循环与重试次数不再是小红书契约；截获图片的失败行与整帖拒绝由 tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_not_captured_is_retryable_and_later_candidate_continues、::test_terminal_image_status_is_final_and_later_candidate_continues 与 tests/platforms/xhs/test_xhs_repair_state.py::test_missing_image_is_retryable_and_forbidden_image_stops_the_run 断言"
     },
     {
      "test": "tests/platforms/zhihu/test_zhihu_image_download.py::test_transient_zhihu_image_failure_recovers_and_records_attempts",
@@ -204,7 +210,10 @@
     },
     {
      "test": "tests/platforms/xhs/test_xhs_image_download.py::test_xhs_failed_image_writes_no_success_file_or_manifest",
-     "asserts": "三次 None 后失败，fetch await 3 次，无成功文件"
+     "asserts": "三次 None 后失败，fetch await 3 次，无成功文件",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "小红书正文图片改为翻图触发前端加载、图片窗口截获字节，直连下载、重试循环与重试次数不再是小红书契约；截获图片的失败行与整帖拒绝由 tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_not_captured_is_retryable_and_later_candidate_continues、::test_terminal_image_status_is_final_and_later_candidate_continues 与 tests/platforms/xhs/test_xhs_repair_state.py::test_missing_image_is_retryable_and_forbidden_image_stops_the_run 断言"
     },
     {
      "test": "tests/platforms/douyin/test_douyin_image_only.py::test_failed_note_image_writes_failed_manifest_only",
@@ -236,7 +245,10 @@
     },
     {
      "test": "tests/platforms/xhs/test_xhs_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
-     "asserts": "不可重试 404 错误经根重试循环只尝试 1 次，manifest error_code=image_source_unavailable、http_status=404、attempts=1"
+     "asserts": "不可重试 404 错误经根重试循环只尝试 1 次，manifest error_code=image_source_unavailable、http_status=404、attempts=1",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "小红书正文图片改为翻图触发前端加载、图片窗口截获字节，直连下载、重试循环与重试次数不再是小红书契约；截获图片的失败行与整帖拒绝由 tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_not_captured_is_retryable_and_later_candidate_continues、::test_terminal_image_status_is_final_and_later_candidate_continues 与 tests/platforms/xhs/test_xhs_repair_state.py::test_missing_image_is_retryable_and_forbidden_image_stops_the_run 断言"
     },
     {
      "test": "tests/platforms/zhihu/test_zhihu_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",

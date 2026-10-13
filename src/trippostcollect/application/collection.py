@@ -851,7 +851,6 @@ def _run_platform_without_policy(
             extra_env[ENABLED_ENV] = "0"
         extra_env.update(
             {
-                "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": "1",
                 "TRIPPOSTCOLLECT_SHARE_CDP_PROFILE": "1",
                 "TRIPPOSTCOLLECT_XHS_PROFILE_DIR": str(Path(args.xhs_profile_dir).expanduser().resolve()),
                 "TRIPPOSTCOLLECT_XHS_ACCOUNT_ID": str(args.xhs_account_id),

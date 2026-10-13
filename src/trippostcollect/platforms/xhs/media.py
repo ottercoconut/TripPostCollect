@@ -19,25 +19,15 @@
 
 # TripPostCollect：T09 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-"""正文图片：浮层内翻图触发前端加载，按 url_default > url > url_pre 认领窗口截获的字节并整帖暂存；不下载视频。
+"""正文图片：详情视图内翻图触发前端加载，按 url_default > url > url_pre 认领窗口截获的字节并整帖暂存；不下载视频。"""
 
-`get_notice_media` / `get_note_images` 的直连下载只剩 repair 过渡使用（提交 6 删）。
-"""
-
-import asyncio
 import logging
 import random
 from typing import Any, Dict, List, Optional
 
 from trippostcollect.application.contracts import ImageStagingError
 from trippostcollect.platforms.xhs.errors import XHSImageDownloadError
-from trippostcollect.platforms.xhs.page_scripts import dom_overlay_state
-from trippostcollect.platforms.xhs.parser import _xhs_image_assets
-from trippostcollect.runtime.image_retry import (
-    ImageDownloadFetchError,
-    classified_http_image_error,
-    fetch_image_bytes_with_retry,
-)
+from trippostcollect.runtime.image_retry import classified_http_image_error
 from trippostcollect.runtime.page_capture import CapturedImage, ImageWindow
 
 logger = logging.getLogger("MediaCrawler")
@@ -57,7 +47,7 @@ class XhsMediaMixin:
     async def _collect_note_images(
         self, note_id: str, window: ImageWindow, assets: List[Dict],
     ) -> Dict[str, Optional[tuple[CapturedImage, str]]]:
-        """翻图触发剩余图片加载，最后一张之后再等剩余响应；窗口由 `_process_note_card` 在点击前打开。"""
+        """翻图触发剩余图片加载，最后一张之后再等剩余响应；窗口由调用方在点击（repair 为直开）之前打开。"""
         if len(assets) > 1:
             await self._flip_note_images(note_id, len(assets))
         return await window.collect(XHS_IMAGE_SETTLE_SECONDS)
@@ -65,7 +55,7 @@ class XhsMediaMixin:
     async def _flip_note_images(self, note_id: str, total: int) -> None:
         """每次翻图前停 1.5–3 秒（只写账本 note_image 停顿），按页码 k/N 核实前进；不前进时换一种方式再试一次。"""
         capture = self._require_capture()
-        state = await dom_overlay_state(self.context_page)
+        state = await self._note_view_state()
         current = int(state.get("page_index") or 1)
         while current < total:
             start_seq = capture.pause_started()
@@ -130,96 +120,3 @@ class XhsMediaMixin:
             )
             raise XHSImageDownloadError(note_id, source_index, exc.code, 1) from exc
         return visit_ids
-
-    async def get_notice_media(self, note_detail: Dict):
-        """repair 过渡：经旧客户端直连下载（提交 6 改为截获）。"""
-        if not self.settings.ENABLE_GET_MEIDAS:
-            logger.info("[XiaoHongShuCrawler.get_notice_media] Crawling image mode is not enabled")
-            return
-        await self.get_note_images(note_detail)
-        logger.info("[XiaoHongShuCrawler.get_notice_media] Video media crawling is disabled by TripPostCollect policy")
-
-    async def get_note_images(self, note_item: Dict):
-        """Get note images. Please use get_notice_media
-
-        Args:
-            note_item: Note item dictionary
-        """
-        if not self.settings.ENABLE_GET_MEIDAS:
-            return
-        note_id = str(note_item.get("note_id") or "")
-        image_assets = _xhs_image_assets(note_item)
-        if not image_assets:
-            return
-        fetched_assets: List[Dict] = []
-        for asset in image_assets:
-            source_index = int(asset["source_index"])
-            try:
-                content, attempts = await fetch_image_bytes_with_retry(
-                    lambda: self.xhs_client.get_note_media(asset["url"]),
-                    logger=logger,
-                    label=(
-                        f"platform=xhs note_id={note_id} "
-                        f"source_index={source_index}"
-                    ),
-                )
-            except ImageDownloadFetchError as exc:
-                await self.record_xhs_note_image_failure(
-                    note_id,
-                    {
-                        **asset,
-                        "attempts": exc.attempts,
-                        "http_status": exc.http_status,
-                        "error_code": exc.code,
-                    },
-                )
-                raise XHSImageDownloadError(
-                    note_id, source_index, exc.code, exc.attempts
-                ) from exc
-            await asyncio.sleep(random.random())
-            if content is None:
-                await self.record_xhs_note_image_failure(
-                    note_id,
-                    {
-                        **asset,
-                        "attempts": attempts,
-                        "http_status": None,
-                        "error_code": "image_download_retryable",
-                    },
-                )
-                raise XHSImageDownloadError(
-                    note_id,
-                    source_index,
-                    "image_download_retryable",
-                    attempts,
-                )
-            fetched_assets.append(
-                {**asset, "content": content, "attempts": attempts, "http_status": 200}
-            )
-        try:
-            await self.update_xhs_note_images(note_id, fetched_assets)
-        except ImageStagingError as exc:
-            source_index = int(exc.source_index or 0)
-            failed_asset = next(
-                (
-                    asset
-                    for asset in fetched_assets
-                    if int(asset["source_index"]) == source_index
-                ),
-                image_assets[0],
-            )
-            await self.record_xhs_note_image_failure(
-                note_id,
-                {
-                    **failed_asset,
-                    "attempts": int(failed_asset.get("attempts") or 1),
-                    "http_status": 200,
-                    "error_code": exc.code,
-                },
-            )
-            raise XHSImageDownloadError(
-                note_id,
-                source_index,
-                exc.code,
-                int(failed_asset.get("attempts") or 1),
-            ) from exc
