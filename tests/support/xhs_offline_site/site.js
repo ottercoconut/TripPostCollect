@@ -1,6 +1,10 @@
 /* 离线回放站点自身的前端（不是项目注入的脚本）。按 V1、V16 与 R2 定值建模：
    首页输入 → 回车经 history.pushState 进入 /search_result_ai（关键词两次编码）并发不带 filters 的第 1 页；
-   筛选入口在第 1 页结果渲染约 1.5 秒后才插入，其前有一个零尺寸的同类副本（Mac 首轮实测入口为空）；
+   结果页有两种布局（<html data-layout>）：默认 AI 对话布局（Mac 人工侦察 2026-10-13）根节点为
+   .ai-feeds-page.with-ai-chat，结果列表占左侧，右侧对话栏固定且可独立滚动，筛选入口在 .ai-chat-inner 内，
+   面板挂在入口内部、打开时入口加 .active、收起时从 DOM 移除，每个标签前有一份重叠的 aria-hidden 副本；
+   备选 V16 布局入口在 .search-layout 内，其前有一个零尺寸的同类副本，面板按 hidden 切换。两种布局的入口
+   文字都在直属 span 里，且都在第 1 页结果渲染约 1.5 秒后才插入（Mac 首轮实测入口为空）；
    筛选面板按文字点选“图文”发 5 项 filters 的第 1 页（新 search_id），入口改为“已筛选”，面板不自动收起；
    虚拟列表只保留视口附近的行（不超过 30 个节点），接近底部时请求下一页，视口未填满时自行补页；
    点封面打开浮层，首图先于 feed 加载，feed 到达后预载下一张，翻图再预载；作者名 target=_blank 打开作者页；
@@ -18,7 +22,9 @@
   const LIST_TOP = 120;
   const ROW_HEIGHT = 360;
   const COLUMNS = 4;
-  const COLUMN_WIDTH = 300;
+  const AI_CHAT = document.documentElement.dataset.layout !== 'v16';
+  // AI 对话布局下结果列表只占左侧约 2/3，列宽收窄以容纳 4 列（与 site.css 一致）。
+  const COLUMN_WIDTH = AI_CHAT ? 200 : 300;
   const PREFETCH_PX = 400;
   // 视口上方保留 2 行、当前行之后 4 行：至多 7 行 28 个节点。
   const ROWS_BEFORE = 2;
@@ -45,6 +51,8 @@
     sessions: [],
     captchaShown: 0,
     overlaysOpened: 0,
+    hiddenTagClicks: 0,
+    chatScrolls: 0,
   };
   window.__tpcOffline = audit;
 
@@ -184,8 +192,8 @@
     renderList();
     if (ui && !ui.entryShown) {
       ui.entryShown = true;
-      const { bar, entry } = ui;
-      setTimeout(() => bar.appendChild(entry), ENTRY_DELAY_MS);
+      const { entryHost, entry } = ui;
+      setTimeout(() => entryHost.appendChild(entry), ENTRY_DELAY_MS);
     }
     // 视口未填满时前端自行补页（没有滚动）。
     setTimeout(() => maybeLoadMore('self'), 0);
@@ -213,7 +221,7 @@
 
   const refreshFilterUi = () => {
     if (!ui) return;
-    ui.entry.textContent = state.filterApplied ? '已筛选' : '筛选';
+    ui.entryLabel.textContent = state.filterApplied ? '已筛选' : '筛选';
     ui.panel.querySelectorAll('.tags').forEach((tag) => {
       tag.classList.toggle('active', state.selection[tag.getAttribute('data-group')] === tag.textContent);
     });
@@ -227,32 +235,94 @@
     newSession(buildFilters()); // 面板保持打开，再点入口才收起
   };
 
-  const showResults = () => {
-    const page = el('div', 'ai-feeds-page');
-    const layout = el('div', 'search-layout');
-    const bar = el('div', 'filter-bar');
-    const entry = el('div', 'filter', '筛选');
-    entry.addEventListener('click', () => { ui.panel.hidden = !ui.panel.hidden; });
-    bar.appendChild(el('div', 'filter decoy', '筛选'));
+  const panelOpen = () => (AI_CHAT ? ui.panelHost.isConnected : !ui.panel.hidden);
+
+  // AI 对话布局：面板挂在入口内部，收起时从 DOM 移除；V16：面板在 .search-layout 内按 hidden 切换。
+  const togglePanel = () => {
+    if (!AI_CHAT) {
+      ui.panel.hidden = !ui.panel.hidden;
+      return;
+    }
+    if (panelOpen()) ui.panelHost.remove();
+    else ui.entry.appendChild(ui.panelHost);
+    ui.entry.classList.toggle('active', panelOpen());
+  };
+
+  const filterEntry = (className) => {
+    const entry = el('div', className);
+    entry.appendChild(el('span', '', '筛选'));
+    return entry;
+  };
+
+  const tagNode = (group, label, hidden) => {
+    const tag = el('div', 'tags', label);
+    tag.setAttribute('data-group', group.type);
+    if (hidden) {
+      tag.setAttribute('aria-hidden', 'true');
+      tag.addEventListener('click', () => { audit.hiddenTagClicks += 1; });
+    } else {
+      tag.addEventListener('click', () => chooseFilter(group.type, label));
+    }
+    return tag;
+  };
+
+  const buildPanel = () => {
     const panel = el('div', 'filters-wrapper');
-    panel.hidden = true;
     FILTER_GROUPS.forEach((group) => {
       const row = el('div', 'filters');
       const tags = el('div', 'tag-container');
       group.options.forEach(([label]) => {
-        const tag = el('div', 'tags', label);
-        tag.setAttribute('data-group', group.type);
-        tag.addEventListener('click', () => chooseFilter(group.type, label));
-        tags.appendChild(tag);
+        if (!AI_CHAT) {
+          tags.appendChild(tagNode(group, label, false));
+          return;
+        }
+        // 两份坐标重叠：aria-hidden 副本在前，真标签在后、叠在上面。
+        const slot = el('span', 'tag-slot');
+        slot.append(tagNode(group, label, true), tagNode(group, label, false));
+        tags.appendChild(slot);
       });
       row.append(el('span', 'title', group.title), tags);
       panel.appendChild(row);
     });
+    return panel;
+  };
+
+  const showResults = () => {
+    const page = el('div', AI_CHAT ? 'ai-feeds-page with-ai-chat' : 'ai-feeds-page');
+    const layout = el('div', 'search-layout');
     const container = el('div', 'feeds-container');
-    layout.append(bar, panel, container, el('div', 'feeds-end', '- THE END -'));
-    page.appendChild(layout);
+    const end = el('div', 'feeds-end', '- THE END -');
+    const panel = buildPanel();
+    let entry;
+    let entryHost;
+    let panelHost = panel;
+    if (AI_CHAT) {
+      const main = el('div', 'search-layout__main');
+      main.append(container, end);
+      layout.append(el('div', 'search-layout__top'), el('div', 'search-layout__middle'), main);
+      entry = filterEntry('filter ai-chat-filter');
+      panelHost = el('div', 'filter-panel');
+      panelHost.appendChild(panel);
+      entryHost = el('div', 'ai-chat-inner');
+      const messages = el('div', 'ai-chat-messages');
+      for (let index = 0; index < 12; index += 1) messages.appendChild(el('div', 'ai-chat-message', '点点 ai'));
+      messages.addEventListener('scroll', () => { audit.chatScrolls += 1; }, { passive: true });
+      const chat = el('div', 'ai-chat-section');
+      chat.append(entryHost, messages);
+      page.append(layout, chat);
+    } else {
+      entryHost = el('div', 'filter-bar');
+      entryHost.appendChild(filterEntry('filter decoy'));
+      entry = filterEntry('filter');
+      panel.hidden = true;
+      layout.append(entryHost, panel, container, end);
+      page.appendChild(layout);
+    }
+    entry.addEventListener('click', (event) => {
+      if (!event.target.closest('.filters-wrapper')) togglePanel();
+    });
     document.getElementById('app').replaceChildren(page);
-    ui = { bar, entry, panel, container, entryShown: false };
+    ui = { entryHost, entry, entryLabel: entry.firstChild, panel, panelHost, container, entryShown: false };
     refreshFilterUi();
   };
 

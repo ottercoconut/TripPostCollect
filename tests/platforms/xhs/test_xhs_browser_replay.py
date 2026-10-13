@@ -218,9 +218,10 @@ def assert_staged_png(site: XhsOfflineSite, crawler, note_id: str, count: int) -
 
 @pytest.mark.asyncio
 async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tmp_path):
-    """3 页（每页 12 项、共 36 项）末页 has_more=false：等延迟渲染的筛选入口并跳过其前的零尺寸副本，按文字
-    点选“图文”、收面板、虚拟列表回收下的全量扫描，浮层详情与翻图截获 PNG（首图先于 feed 到达）、
-    target=_blank 作者页（同一作者只点一次），经真实门禁通过。"""
+    """AI 对话布局下 3 页（每页 12 项、共 36 项）末页 has_more=false：等延迟渲染、位于对话栏内的筛选入口，按文字
+    点选“图文”的真标签（不是重叠的 aria-hidden 副本）、收面板（面板从 DOM 移除），滚轮只作用在结果列表上；
+    虚拟列表回收下的全量扫描，浮层详情与翻图截获 PNG（首图先于 feed 到达）、target=_blank 作者页（同一作者
+    只点一次），经真实门禁通过。"""
     pages = [[search_item(f"p{number}-{index:02d}") for index in range(12)] for number in (1, 2, 3)]
     pages[0][6] = search_item("p1-06", card_type="video")
     images = {"p1-02": 3, "p2-05": 2, "p3-09": 1}
@@ -235,7 +236,15 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
         await page.goto(EXPLORE_URL)
         await crawler.search()
         audit = await page.evaluate("() => window.__tpcOffline")
-        filter_nodes = await page.evaluate("() => document.querySelectorAll('.search-layout div.filter').length")
+        layout = await page.evaluate("""() => ({
+            ai_chat: document.querySelectorAll('.ai-feeds-page.with-ai-chat').length,
+            entries: document.querySelectorAll('div.filter').length,
+            layout_entries: document.querySelectorAll('.search-layout div.filter').length,
+            chat_entries: document.querySelectorAll('.ai-chat-inner > div.filter.ai-chat-filter').length,
+            panels: document.querySelectorAll('.filters-wrapper').length,
+            entry_active: document.querySelectorAll('div.filter.active').length,
+            chat_scroll_top: document.querySelector('.ai-chat-messages').scrollTop,
+        })""")
         first_row_rendered = await page.evaluate("() => document.querySelectorAll('section.note-item[data-index=\"0\"]').length")
         final_path = urlsplit(page.url).path
         open_pages = len(context.pages)
@@ -253,7 +262,12 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     assert target[0]["filters"] == TARGET_FILTERS and is_target_search(target[0])
     assert [body["page"] for body in target] == [1, 2, 3]
     assert audit["clickedOptions"] == [["filter_note_type", "图文"]]
-    assert filter_nodes == 2  # 零尺寸副本在真实入口之前，入口延迟插入
+    assert audit["hiddenTagClicks"] == 0  # 点中真标签，不是 aria-hidden 副本
+    assert layout == {
+        "ai_chat": 1, "entries": 1, "layout_entries": 0, "chat_entries": 1,
+        "panels": 0, "entry_active": 0, "chat_scroll_top": 0,
+    }
+    assert audit["chatScrolls"] == 0  # 滚轮全部作用在结果列表上
     filter_targets = [line["target"].get("filter") for line in actions(crawler, "apply_filter")]
     assert filter_targets == ["panel_open", "note_type", "panel_close"]
     first_scroll = actions(crawler, "scroll")[0]["seq"]
@@ -337,9 +351,10 @@ async def test_feed_verification_layer_then_redo_reuses_the_cached_first_image(m
 
 @pytest.mark.asyncio
 async def test_frontend_self_load_when_viewport_is_not_filled_passes_the_gate(monkeypatch, tmp_path):
-    """目标会话第 1 页只有一行、填不满视口：站点不经滚动自行请求第 2 页，门禁计入 frontend_self_loads 而不失败。"""
+    """V16 布局下目标会话第 1 页只有一行、填不满视口：站点不经滚动自行请求第 2 页，门禁计入 frontend_self_loads
+    而不失败；筛选入口在 .search-layout 内，其前的零尺寸副本被跳过。"""
     pages = [[search_item(f"s1-{index}") for index in range(4)], [search_item(f"s2-{index}") for index in range(8)]]
-    site = XhsOfflineSite(KEYWORD, pages)
+    site = XhsOfflineSite(KEYWORD, pages, layout="v16")
     unknown = {"s1-1", "s2-4"}
     known = [item["id"] for items in pages for item in items if item["id"] not in unknown]
 
@@ -348,8 +363,12 @@ async def test_frontend_self_load_when_viewport_is_not_filled_passes_the_gate(mo
         await page.goto(EXPLORE_URL)
         await crawler.search()
         audit = await page.evaluate("() => window.__tpcOffline")
+        filter_nodes = await page.evaluate("() => document.querySelectorAll('.search-layout div.filter').length")
+        ai_chat = await page.evaluate("() => document.querySelectorAll('.with-ai-chat').length")
 
     assert audit["selfLoads"] >= 1
+    assert filter_nodes == 2 and ai_chat == 0  # 零尺寸副本在真实入口之前，入口延迟插入
+    assert audit["clickedOptions"] == [["filter_note_type", "图文"]]
     assert [record["note_id"] for record in crawler.records] == ["s1-1", "s2-4"]
     stopped = last_stop(state_path)
     assert stopped["stop_reason"] == "source_exhausted" and stopped["source_page"] == 2

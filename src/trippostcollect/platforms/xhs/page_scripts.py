@@ -64,13 +64,29 @@ DOM_SCRIPTS: dict[str, str] = {
             };
         }).filter((card) => card.note_id && card.visible_ratio > 0);
     }""",
+    # list_rect 是结果列表（.search-layout）与视口相交的矩形，滚轮落点限定在其中；AI 对话布局右侧的对话栏
+    # 可独立滚动，不能让滚轮落在上面。取不到时为 null。
     "scroll_metrics": """() => {
         const root = document.scrollingElement || document.documentElement;
+        const width = window.innerWidth || 0;
+        const height = window.innerHeight || 0;
+        const layout = document.querySelector('.ai-feeds-page .search-layout')
+            || document.querySelector('.search-layout');
+        let listRect = null;
+        if (layout) {
+            const rect = layout.getBoundingClientRect();
+            const left = Math.max(rect.left, 0);
+            const top = Math.max(rect.top, 0);
+            const right = Math.min(rect.right, width);
+            const bottom = Math.min(rect.bottom, height);
+            if (right > left && bottom > top) listRect = { left, top, right, bottom };
+        }
         return {
             scroll_y: Math.round(window.scrollY || root.scrollTop || 0),
-            inner_height: window.innerHeight || 0,
-            inner_width: window.innerWidth || 0,
+            inner_height: height,
+            inner_width: width,
             scroll_height: Math.round(root.scrollHeight || 0),
+            list_rect: listRect,
         };
     }""",
     "search_box": """() => {
@@ -93,9 +109,11 @@ DOM_SCRIPTS: dict[str, str] = {
         const rect = layout.getBoundingClientRect();
         return { visible: rect.width > 0 && rect.height > 0 };
     }""",
-    # 筛选入口取第一个可见且文字精确为“筛选”/“已筛选”的 .search-layout div.filter（可能有隐藏副本在前）；
-    # 面板可见性与按精确文字定位的选项，各组都有 .tags，不按位置或 class 取。其余字段只有计数、布尔与
-    # 至多 2 条入口文字节点的祖先链（6 层 tag.class，16 位以上的 class 片段遮为 <id>），供入口缺失时诊断。
+    # 筛选入口（Mac 人工侦察 2026-10-13）：两种已知布局——V16 在 .search-layout 内，AI 对话布局
+    # （.ai-feeds-page.with-ai-chat）在右侧 .ai-chat-inner 内、面板挂在入口内部。全文档取第一个可见且直属
+    # span 文字精确为“筛选”/“已筛选”的 div.filter（前面可能有隐藏副本）；入口文字与点击落点都只取这个 span。
+    # 选项各组都有 .tags，不按位置或 class 取；每个标签有一份重叠的 aria-hidden 副本，排除后按精确文字取可见的。
+    # 轮询用，保持精简；整页计数在 filter_diagnostic。
     "filter_state": """(label) => {
         const labels = ['筛选', '已筛选'];
         const textOf = (node) => (node.innerText || node.textContent || '').trim();
@@ -110,6 +128,32 @@ DOM_SCRIPTS: dict[str, str] = {
             const rect = node.getBoundingClientRect();
             return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
         };
+        const labelOf = (node) => Array.from(node.querySelectorAll(':scope > span')).find(
+            (span) => visible(span) && labels.includes(textOf(span))
+        ) || null;
+        const entry = Array.from(document.querySelectorAll('div.filter')).find(
+            (node) => visible(node) && labelOf(node)
+        );
+        const span = entry ? labelOf(entry) : null;
+        const option = Array.from(
+            document.querySelectorAll('.filters-wrapper .filters .tag-container .tags')
+        ).find((node) => !node.closest('[aria-hidden="true"]') && visible(node) && textOf(node) === label);
+        return {
+            entry_text: span ? textOf(span) : '',
+            entry: center(span),
+            panel_visible: visible(document.querySelector('.filters-wrapper')),
+            option: center(option),
+        };
+    }""",
+    # 筛选失败时才调用：整页计数、布尔与至多 2 条入口文字节点的祖先链（6 层 tag.class，class 内 16 位以上的
+    # 字母数字片段遮为 <id>），不含正文或地址。entry_candidates 为全文档 div.filter 个数。
+    "filter_diagnostic": """() => {
+        const labels = ['筛选', '已筛选'];
+        const visible = (node) => {
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
         const chain = (node) => {
             const parts = [];
             for (let current = node; current && parts.length < 6; current = current.parentElement) {
@@ -120,24 +164,15 @@ DOM_SCRIPTS: dict[str, str] = {
             }
             return parts;
         };
-        const candidates = Array.from(document.querySelectorAll('.search-layout div.filter'));
-        const entry = candidates.find((node) => visible(node) && labels.includes(textOf(node))) || null;
-        const panel = document.querySelector('.filters-wrapper');
-        const option = Array.from(
-            document.querySelectorAll('.filters-wrapper .filters .tag-container .tags')
-        ).find((node) => textOf(node) === label);
+        const candidates = Array.from(document.querySelectorAll('div.filter'));
         const labelNodes = Array.from(document.querySelectorAll('body *')).filter(
             (node) => node.childElementCount === 0 && labels.includes((node.textContent || '').trim())
         );
         return {
-            entry_text: entry ? textOf(entry) : '',
-            entry: center(entry),
-            panel_visible: visible(panel),
-            option: center(option),
             layout_count: document.querySelectorAll('.search-layout').length,
             entry_candidates: candidates.length,
             entry_visible: candidates.some(visible),
-            panel_present: Boolean(panel),
+            panel_present: Boolean(document.querySelector('.filters-wrapper')),
             label_nodes: labelNodes.length,
             label_chains: labelNodes.slice(0, 2).map(chain),
             inner_width: window.innerWidth,
@@ -478,6 +513,11 @@ async def dom_search_layout_visible(page: Page) -> bool:
 
 async def dom_filter_state(page: Page, label: str) -> dict[str, Any]:
     state = await _dom(page, "filter_state", label)
+    return state if isinstance(state, dict) else {}
+
+
+async def dom_filter_diagnostic(page: Page) -> dict[str, Any]:
+    state = await _dom(page, "filter_diagnostic")
     return state if isinstance(state, dict) else {}
 
 

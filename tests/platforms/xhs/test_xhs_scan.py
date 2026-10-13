@@ -283,7 +283,7 @@ def test_filter_entry_that_renders_late_is_awaited_then_clicked_after_a_reaction
     assert kind == "sleep" and low <= reaction <= high
     filters = [line["target"].get("filter") for line in harness.ledger() if line.get("action") == "apply_filter"]
     assert filters == ["panel_open", "note_type", "panel_close"]
-    assert not _filter_diagnostics(harness)
+    assert not _filter_diagnostics(harness) and site.diagnostic_reads == 0
 
 
 def test_filter_entry_that_never_renders_waits_out_both_attempts_then_stops_with_diagnostic(
@@ -306,7 +306,7 @@ def test_filter_entry_that_never_renders_waits_out_both_attempts_then_stops_with
     assert not any(line.get("action") == "apply_filter" for line in harness.ledger())
     written = json.loads(evidence.with_name("behavior_evidence.navigation.json").read_text(encoding="utf-8"))
     (diagnostic,) = [event for event in written["events"] if event["stage"] == "search_filter"]
-    assert diagnostic["outcome"] == "filter_entry_missing"
+    assert diagnostic["outcome"] == "filter_entry_missing" and site.diagnostic_reads == 1
     assert diagnostic["layout_count"] == 1 and diagnostic["entry_candidates"] == 0
     assert diagnostic["entry_visible"] is False and diagnostic["label_chains"] == []
     warning = next(record.getMessage() for record in caplog.records if "Search filter failed" in record.getMessage())
@@ -325,6 +325,26 @@ def test_filter_option_missing_on_first_attempt_reopens_the_panel_and_succeeds(t
     filters = [line["target"].get("filter") for line in harness.ledger() if line.get("action") == "apply_filter"]
     assert filters == ["panel_open", "panel_close", "panel_open", "note_type", "panel_close"]
     assert not _filter_diagnostics(harness)
+
+
+def test_scroll_wheel_lands_inside_the_result_list_rectangle(tmp_path):
+    site = XhsFakeSite(KEYWORD, _pages(3, 8))
+    site.list_rect = {"left": 0.0, "top": 64.0, "right": 896.0, "bottom": 900.0}
+    harness = Harness(tmp_path, site)
+
+    harness.run()
+
+    assert harness.accumulator.summary()["stop_reason"] == "source_exhausted"
+    inset = xhs_scan.XHS_SCROLL_POINTER_INSET
+    assert site.wheel_points
+    for x, y in site.wheel_points:
+        assert 896 * inset <= x <= 896 * (1 - inset)
+        assert 64 + 836 * inset <= y <= 900 - 836 * inset
+    # 取不到矩形（或矩形为空）时按视口比例落点。
+    x, y = XiaoHongShuCrawler._scroll_pointer(
+        {"inner_width": 1000, "inner_height": 800, "list_rect": {"left": 0, "top": 0, "right": 0, "bottom": 0}},
+    )
+    assert 300 <= x <= 700 and 280 <= y <= 600
 
 
 def test_keyword_mismatch_reenters_once_from_home_then_stops(tmp_path):

@@ -36,7 +36,12 @@ from trippostcollect.platforms.xhs.navigation import (
     is_search_result_url,
     search_request_page,
 )
-from trippostcollect.platforms.xhs.page_scripts import dom_filter_state, dom_scroll_metrics, dom_visible_cards
+from trippostcollect.platforms.xhs.page_scripts import (
+    dom_filter_diagnostic,
+    dom_filter_state,
+    dom_scroll_metrics,
+    dom_visible_cards,
+)
 from trippostcollect.platforms.xhs.parser import search_items_from_response
 from trippostcollect.runtime.human_flow import load_behavior_profile
 from trippostcollect.runtime.page_capture import CaptureFailure, CapturedResponse
@@ -52,6 +57,8 @@ logger = logging.getLogger("MediaCrawler")
 SEARCH_RULE = XHS_SEARCH_RULE.name
 XHS_SEARCH_LOAD_WAIT_SECONDS = 20.0
 XHS_SCROLL_SETTLE_SECONDS = (0.4, 1.2)
+# 滚轮落点在结果列表与视口的相交矩形内，横纵各向内缩这一比例；取不到矩形时按视口比例落点。
+XHS_SCROLL_POINTER_INSET = 0.2
 # 单步滚动不超过视口 0.8 倍；可点击带为视口高度 10% 到底边，二者配合保证向下扫描不跳过任何一行卡片。
 XHS_SCROLL_VIEWPORT_RATIO = 0.8
 XHS_CLICK_BAND_TOP = 0.1
@@ -66,7 +73,7 @@ XHS_FILTER_POLL_SECONDS = 0.25
 XHS_FILTER_ENTRY_WAIT_SECONDS = 15.0
 XHS_BEFORE_FILTER_SECONDS = (0.6, 1.8)
 XHS_FILTER_APPLIED_TEXT = "已筛选"
-# 筛选失败时并入导航诊断的页面字段：只有计数、布尔与遮蔽后的祖先链，不含正文或地址；祖先链不进日志。
+# 筛选失败时并入导航诊断的 filter_diagnostic 字段：只有计数与布尔，不含正文或地址；祖先链另并入、不进日志。
 XHS_FILTER_DIAGNOSTIC_KEYS = (
     "layout_count", "entry_candidates", "entry_visible", "panel_present", "label_nodes",
     "inner_width", "inner_height", "scroll_y",
@@ -413,9 +420,9 @@ class XhsScanMixin:
         page = self.context_page
         error = ""
         try:
-            state = await dom_filter_state(page, XHS_TARGET_FILTER_LABEL)
+            state = await dom_filter_diagnostic(page)
         except Exception as exc:
-            state, error = {}, f"filter_state: {type(exc).__name__}"
+            state, error = {}, f"filter_diagnostic: {type(exc).__name__}"
         counts = {key: state[key] for key in XHS_FILTER_DIAGNOSTIC_KEYS if key in state}
         await self._record_navigation_diagnostic(
             page, stage="search_filter", outcome=reason, error=error,
@@ -860,7 +867,6 @@ class XhsScanMixin:
         page = self.context_page
         before = await dom_scroll_metrics(page)
         height = int(before.get("inner_height") or 0)
-        width = int(before.get("inner_width") or 0)
         scroll_y = int(before.get("scroll_y") or 0)
         low, high = load_behavior_profile("xhs_guarded", strict=True).scroll_delta_px
         step = SCAN_RANDOM.randint(int(low), int(high))
@@ -869,16 +875,33 @@ class XhsScanMixin:
         if direction < 0 and scroll_y > 0:
             step = min(step, scroll_y)
         delta = step if direction > 0 else -step
-        if width > 0 and height > 0:
-            await page.mouse.move(
-                SCAN_RANDOM.uniform(0.3, 0.7) * width,
-                SCAN_RANDOM.uniform(0.35, 0.75) * height,
-                steps=SCAN_RANDOM.randint(4, 10),
-            )
+        pointer = self._scroll_pointer(before)
+        if pointer is not None:
+            await page.mouse.move(*pointer, steps=SCAN_RANDOM.randint(4, 10))
         self._record_trigger_action("scroll", {"phase": phase, "delta_y": delta, "scroll_y_before": scroll_y})
         await page.mouse.wheel(0, delta)
         await self._scan_sleep(SCAN_RANDOM.uniform(*XHS_SCROLL_SETTLE_SECONDS))
         return await dom_scroll_metrics(page)
+
+    @staticmethod
+    def _scroll_pointer(metrics: dict[str, Any]) -> Optional[tuple[float, float]]:
+        """滚轮落点：结果列表与视口相交矩形内、四周留边，避开 AI 对话布局右侧可独立滚动的对话栏。"""
+        rect = metrics.get("list_rect")
+        if isinstance(rect, dict):
+            left, top = float(rect.get("left") or 0), float(rect.get("top") or 0)
+            right, bottom = float(rect.get("right") or 0), float(rect.get("bottom") or 0)
+            if right > left and bottom > top:
+                inset_x = (right - left) * XHS_SCROLL_POINTER_INSET
+                inset_y = (bottom - top) * XHS_SCROLL_POINTER_INSET
+                return (
+                    SCAN_RANDOM.uniform(left + inset_x, right - inset_x),
+                    SCAN_RANDOM.uniform(top + inset_y, bottom - inset_y),
+                )
+        width = int(metrics.get("inner_width") or 0)
+        height = int(metrics.get("inner_height") or 0)
+        if width > 0 and height > 0:
+            return SCAN_RANDOM.uniform(0.3, 0.7) * width, SCAN_RANDOM.uniform(0.35, 0.75) * height
+        return None
 
     async def _scroll_to_top(self) -> None:
         for _ in range(XHS_SCROLL_TOP_MAX_STEPS):

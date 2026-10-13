@@ -37,6 +37,8 @@ API_HEADERS = {
     "access-control-expose-headers": "verifytype, verifyuuid",
 }
 STATIC_TYPES = {".js": "application/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
+# 结果页布局：ai_chat 为 Mac 人工侦察 2026-10-13 的 AI 对话布局，v16 为 V16（10-11）的布局。
+LAYOUTS = frozenset({"ai_chat", "v16"})
 
 __all__ = [
     "EXPLORE_URL", "PNG_SIGNATURE", "TARGET_FILTERS", "XhsOfflineSite", "cover_url", "image_url", "search_item",
@@ -73,7 +75,7 @@ class XhsOfflineSite:
     回车后的综合会话（不带 filters）只返回 `general_items`，has_more=false。`details[id]` 为 feed 的 note_card
     （默认 `detail_card(id)`）；`feed_overrides[id]` 依次替换每次 feed：整数为 HTTP 状态码（461/471 带验证头）。
     feed 响应延迟 `feed_delay_seconds` 才回应，使首图先于 feed 到达。`creators[user_id]` 为作者页投影的来源
-    （默认 `creator_projection()`）。
+    （默认 `creator_projection()`）。`layout` 选结果页布局：`ai_chat`（默认，当前线上的 AI 对话布局）或 `v16`。
     """
 
     def __init__(
@@ -83,8 +85,12 @@ class XhsOfflineSite:
         *,
         general_items: list[dict[str, Any]] | None = None,
         feed_delay_seconds: float = 0.6,
+        layout: str = "ai_chat",
     ) -> None:
+        if layout not in LAYOUTS:
+            raise ValueError(f"unknown offline layout: {layout}")
         self.keyword = keyword
+        self.layout = layout
         self.pages = [list(items) for items in pages]
         self.general_items = list(general_items if general_items is not None else
                                   [search_item(f"general-{index}") for index in range(8)])
@@ -152,7 +158,8 @@ class XhsOfflineSite:
     async def _document(self, route: Any, path: str) -> None:
         self.document_requests.append(path)
         if path == "/explore":
-            await self._file(route, "explore.html", "text/html; charset=utf-8")
+            body = (SITE_DIR / "explore.html").read_text(encoding="utf-8").replace("__TPC_LAYOUT__", self.layout)
+            await route.fulfill(status=200, headers={"content-type": "text/html; charset=utf-8"}, body=body.encode())
         elif path.startswith("/__offline__/") and Path(path).suffix in STATIC_TYPES:
             await self._file(route, Path(path).name, STATIC_TYPES[Path(path).suffix])
         elif path.startswith("/user/profile/"):
@@ -168,7 +175,7 @@ class XhsOfflineSite:
 
     @staticmethod
     async def _file(route: Any, name: str, content_type: str) -> None:
-        if name not in {"explore.html", "site.js", "site.css", "captcha.html"}:
+        if name not in {"site.js", "site.css", "captcha.html"}:
             await route.abort("blockedbyclient")
             return
         await route.fulfill(status=200, headers={"content-type": content_type}, body=(SITE_DIR / name).read_bytes())

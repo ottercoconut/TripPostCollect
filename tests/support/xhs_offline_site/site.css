@@ -23,6 +23,27 @@ html, body { margin: 0; padding: 0; background: #fff; font-family: sans-serif; }
 .tag-container { display: flex; }
 .tag-container .tags { padding: 4px 12px; margin-right: 8px; border-radius: 12px; background: #f5f5f5; cursor: pointer; }
 .tag-container .tags.active { background: #ffe4e8; }
+/* AI 对话布局（默认）：对话栏固定在右侧 34vw（约 30%，略宽使按视口 30%–70% 的旧落点可能落在上面），结果列表占
+   其余部分（4 列收窄到 200px），消息区独立滚动且不向文档传递滚动；筛选入口在对话栏顶部，面板绝对定位挂在入口内部，入口矩形不随面板变大；每个标签的 aria-hidden 副本
+   绝对定位在真标签下面，二者坐标重叠。 */
+.ai-feeds-page.with-ai-chat .search-layout { margin-right: 34vw; }
+.search-layout__top { height: 56px; }
+.ai-chat-section { position: fixed; top: 64px; right: 0; bottom: 0; width: 34vw; z-index: 20; background: #fafafa;
+  border-left: 1px solid #eee; display: flex; flex-direction: column; }
+.ai-chat-inner { flex: none; height: 56px; display: flex; align-items: center; justify-content: flex-end;
+  padding-right: 24px; }
+.ai-chat-messages { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 12px; }
+.ai-chat-message { height: 240px; margin-bottom: 12px; background: #fff; }
+div.filter.ai-chat-filter { position: relative; width: 100px; height: 40px; line-height: 40px; text-align: center;
+  border-radius: 20px; background: #f5f5f5; cursor: pointer; }
+div.filter.ai-chat-filter.active { background: #ffe4e8; }
+.ai-chat-filter .filters-wrapper { position: absolute; top: 48px; right: 0; line-height: normal; text-align: left; }
+.tag-slot { position: relative; display: inline-block; margin-right: 8px; }
+.tag-slot .tags { margin-right: 0; position: relative; }
+.tag-slot .tags[aria-hidden="true"] { position: absolute; left: 0; top: 0; }
+.with-ai-chat section.note-item { width: 190px; }
+.with-ai-chat section.note-item a.cover, .with-ai-chat section.note-item .footer { width: 170px; }
+.with-ai-chat section.note-item a.cover img { width: 170px; }
 .feeds-container { position: relative; }
 section.note-item { position: absolute; width: 260px; height: 340px; }
 section.note-item a.cover { position: absolute; top: 20px; left: 10px; width: 240px; height: 240px;

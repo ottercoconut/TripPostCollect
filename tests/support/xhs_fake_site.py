@@ -196,6 +196,7 @@ class _Mouse:
         self.site.click(x, y)
 
     async def wheel(self, delta_x: float, delta_y: float) -> None:
+        self.site.wheel_points.append(self.site.mouse_position)
         self.site.wheel(delta_y)
 
 
@@ -219,7 +220,8 @@ class XhsFakeSite:
 
     选项：`apply_filter_works=False` 点选“图文”不产生目标会话；`panel_closes=False` 面板收不起；
     `entry_delay_reads` 为结果页上前几次读筛选状态时入口尚未渲染（None 为始终不出现）；
-    `option_missing_opens` 为前几次打开面板时没有“图文”选项；
+    `option_missing_opens` 为前几次打开面板时没有“图文”选项；`list_rect` 为滚动度量里结果列表与视口的
+    相交矩形（None 时不给，扫描按视口比例落点），`wheel_points` 记下每次滚轮时的鼠标位置；
     `typed_keyword` 让回车请求体里的关键词与目标不同；`stall_after` 页之后前端不再加载；
     `hot_query` 每页附一条热搜项（无 DOM 卡片）。`search_overrides[k]` 依次替换目标会话第 k 页的响应：
     字符串为请求失败文本（requestfailed），字典为响应 JSON；被替换的页不算已加载，前端下次滚动会重发。
@@ -269,6 +271,9 @@ class XhsFakeSite:
         self.filter_reads = 0
         self.option_missing_opens = 0
         self.panel_opens = 0
+        self.diagnostic_reads = 0
+        self.list_rect: dict[str, float] | None = None
+        self.wheel_points: list[tuple[float, float]] = []
         self.session_counter = 0
         self.search_id = ""
         self.session_filters: list[dict[str, Any]] | None = None
@@ -392,9 +397,12 @@ class XhsFakeSite:
                 "inner_height": VIEW_HEIGHT,
                 "inner_width": VIEW_WIDTH,
                 "scroll_height": self.scroll_height(),
+                "list_rect": dict(self.list_rect) if self.list_rect else None,
             }
         if name == "filter_state":
             return self.filter_state(arg)
+        if name == "filter_diagnostic":
+            return self.filter_diagnostic()
         if name == "visible_cards":
             return self.visible_cards()
         if name == "search_ready_counts":
@@ -417,6 +425,12 @@ class XhsFakeSite:
             "entry": dict(FILTER_ENTRY) if rendered else None,
             "panel_visible": self.panel_visible,
             "option": dict(FILTER_OPTION) if has_option else None,
+        }
+
+    def filter_diagnostic(self) -> dict[str, Any]:
+        self.diagnostic_reads += 1
+        rendered = self.entry_rendered
+        return {
             "layout_count": int(self.on_results),
             "entry_candidates": int(rendered),
             "entry_visible": rendered,
