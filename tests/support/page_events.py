@@ -144,13 +144,48 @@ class FakePage(Emitter):
         self.emit("requestfailed", request)
 
 
+class _ExpectPage:
+    """`async with context.expect_page(timeout=…) as info: …; page = await info.value` 的最小替身；
+    与 Playwright 一样在离开 `async with` 时等待新页面，超时抛 TimeoutError。"""
+
+    def __init__(self, context: "FakeContext", timeout_seconds: float) -> None:
+        self._context = context
+        self._timeout = timeout_seconds
+        self._future: asyncio.Future[Any] | None = None
+
+    async def __aenter__(self) -> "_ExpectPage":
+        future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+
+        def handler(page: Any) -> None:
+            if not future.done():
+                future.set_result(page)
+
+        self._context.on("page", handler)
+        self._future = future
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        if exc_type is None:
+            assert self._future is not None
+            await asyncio.wait_for(asyncio.shield(self._future), self._timeout)
+        return False
+
+    @property
+    def value(self) -> "asyncio.Future[Any]":
+        assert self._future is not None
+        return self._future
+
+
 class FakeContext(Emitter):
     def __init__(self) -> None:
         super().__init__()
         self.pages: list[FakePage] = []
 
-    def new_page(self, url: str = "about:blank") -> FakePage:
-        page = FakePage(url)
+    def new_page(self, url: str = "about:blank", *, page: FakePage | None = None) -> FakePage:
+        page = page if page is not None else FakePage(url)
         self.pages.append(page)
         self.emit("page", page)
         return page
+
+    def expect_page(self, *, timeout: float = 30_000) -> _ExpectPage:
+        return _ExpectPage(self, timeout / 1000)

@@ -1,37 +1,39 @@
 """全量滚动扫描的抓取记忆与停止口径：已知候选滑过、候选失败、运行级失败集中写停止事件（full_scan，无恢复位置）。
 
-搜索流程经离线站点驱动；单篇处理暂走过渡的旧 API 详情路径（提交 5 改为浮层），本文件只验证其候选与运行级口径。
+搜索与单篇处理都经离线站点驱动：点封面打开浮层、截获 feed 与图片、点击作者名读作者页投影、关闭浮层。
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from types import SimpleNamespace
+from hashlib import sha256
 from unittest.mock import ANY, AsyncMock, Mock
 
-import httpx
 import pytest
 
 from playwright.async_api import Error as PlaywrightError
-from tenacity import Future, RetryError
-from support.xhs_fake_site import XhsFakeSite, note
+from support.xhs_fake_site import XhsFakeSite, detail_card, image_url, note
 from trippostcollect.application import events as app_events
-from trippostcollect.platforms.xhs import core as xhs_core
+from trippostcollect.application.visit_gate import validate_content_visits
+from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
+from trippostcollect.platforms.xhs import author as xhs_author
+from trippostcollect.platforms.xhs import behavior as xhs_behavior
+from trippostcollect.platforms.xhs import media as xhs_media
+from trippostcollect.platforms.xhs import overlay as xhs_overlay
 from trippostcollect.platforms.xhs import scan as xhs_scan
 from trippostcollect.platforms.xhs.errors import (
-    DataFetchError,
     IPBlockError,
     PlatformRuntimeError,
-    XHSCreatorProfileUnavailable,
-    XHSImageDownloadError,
     XHSMainPageClosedUnexpected,
     XHSNetworkRecoveryTimeout,
-    XHSNoteDetailUnavailable,
     xhs_cdp_lifecycle_stop_detail,
 )
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudgetExhausted
+from trippostcollect.platforms.xhs.parser import update_xhs_note
+from trippostcollect.platforms.xhs.session import XHS_NEW_PAGE_MIN_HOLD_SECONDS
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
+from trippostcollect.runtime.visit_ledger import iter_ledger_lines
 
 from .support import XiaoHongShuCrawler, config, make_capture
 
@@ -51,39 +53,29 @@ def lifecycle_error(code: str, *, stage: str = "search") -> CDPBrowserLifecycleE
     )
 
 
-def valid_note(note_id: str) -> dict:
-    return {
-        "note_id": note_id,
-        "title": f"note {note_id}",
-        "desc": "青岛 body",
-        "content_detail_status": "detail_observed",
-        "content_detail_source": "note_detail",
-        "time": 1_700_000_000_000,
-        "user": {"user_id": f"author-{note_id}", "nickname": "author"},
-        "image_list": [{"url_default": "https://example.test/image.jpg"}],
-        "creator_profile": {"fans_count": 100},
-        "interact_info": {
-            "liked_count": 1,
-            "collected_count": 2,
-            "comment_count": 3,
-            "share_count": 4,
-        },
-        "xsec_token": "token",
-    }
-
-
 async def _no_sleep(*_args, **_kwargs) -> None:
     return None
 
 
 def prepare_crawler(monkeypatch, tmp_path, *, items, pages=None):
-    """目标会话第 1 页为 `items`（或多页 `pages`），其后是 has_more=false 的空页。"""
+    """目标会话第 1 页为 `items`（或多页 `pages`），其后是 has_more=false 的空页。
+
+    返回 (crawler, 发出 feed 请求的笔记 ID 列表, 状态文件, 站点)。暂存与写出替换为内存记录：
+    `crawler.staged[note_id]` 为交给暂存的图片，`crawler.records` 为写出的 JSONL 记录。
+    """
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps({"events": []}), encoding="utf-8")
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior_evidence.json"))
     monkeypatch.setattr(config, "KEYWORDS", KEYWORD)
+    monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", True)
     monkeypatch.setattr(xhs_scan, "merge_pending_behavior_evidence", lambda pending, ports: None)
     monkeypatch.setattr(xhs_scan, "XHS_SEARCH_LOAD_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(xhs_overlay, "XHS_DETAIL_CAPTURE_SECONDS", 0.05)
+    monkeypatch.setattr(xhs_media, "XHS_IMAGE_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr(xhs_author, "XHS_AUTHOR_TAB_OPEN_SECONDS", 0.05)
+    monkeypatch.setattr(xhs_author, "XHS_CREATOR_RUNTIME_READY_SECONDS", 0.05)
+    monkeypatch.setattr(xhs_author, "inspect_visible_page_state", AsyncMock(return_value=("", {})))
 
     site = XhsFakeSite(KEYWORD, pages if pages is not None else [[note(item) for item in items]])
     crawler = XiaoHongShuCrawler()
@@ -92,6 +84,7 @@ def prepare_crawler(monkeypatch, tmp_path, *, items, pages=None):
     crawler.capture = make_capture(tmp_path, context=site.context)
     crawler.capture.install(site.page)
     crawler._scan_sleep = _no_sleep
+    crawler._popup_sleep = _no_sleep
 
     async def guarded_pause(stage, minimum, maximum):
         start = crawler.capture.pause_started()
@@ -109,24 +102,21 @@ def prepare_crawler(monkeypatch, tmp_path, *, items, pages=None):
     crawler._popup_checkpoint_state = AsyncMock(
         return_value={"closed": False, "visible_text": "ok", "manual_markers": [], "terminal": ""}
     )
-    detail_ids = []
+    crawler.staged = {}
+    crawler.records = []
 
-    async def fetch_detail(*, note_id, **kwargs):
-        detail_ids.append(note_id)
-        return valid_note(note_id)
+    async def stage_images(note_id, items):
+        crawler.staged[note_id] = items
 
-    crawler.get_note_detail_async_task = fetch_detail
-    crawler._maybe_run_post_interaction = AsyncMock(return_value=None)
-    crawler.enrich_note_creator = AsyncMock(return_value=None)
-    crawler.get_notice_media = AsyncMock(return_value=None)
-    crawler.is_video_note = lambda note: False
-    monkeypatch.setattr(crawler, "update_xhs_note", AsyncMock(return_value=None))
-    monkeypatch.setattr(
-        xhs_core,
-        "_normalized_creator_item",
-        lambda user_id, profile, **_injected: {"fans_count": profile["fans_count"]},
-    )
-    return crawler, detail_ids, state_path, site
+    async def store(note_item):
+        crawler.records.append(
+            update_xhs_note(note_item, source_keyword=KEYWORD, current_timestamp=lambda: 0, save_data_option="jsonl")
+        )
+
+    crawler.update_xhs_note_images = stage_images
+    crawler.record_xhs_note_image_failure = AsyncMock()
+    monkeypatch.setattr(crawler, "update_xhs_note", AsyncMock(side_effect=store))
+    return crawler, site.feed_requests, state_path, site
 
 
 def events_of(state_path, kind: str) -> list[dict]:
@@ -146,6 +136,32 @@ def assert_runtime_stop(stopped: dict, detail: str, *, source_page=1) -> None:
     assert stopped["resume_page"] is None and stopped["resume_cursor"] is None
     assert stopped["batch_complete"] is False
     assert "source_visit_id" not in stopped
+
+
+def ledger_lines(crawler) -> list[dict]:
+    return list(iter_ledger_lines(crawler.capture.ledger.path))
+
+
+def network_sleeps(sleeps: list[float]) -> list[float]:
+    """网络退避的等待；作者标签页的最短保留也经同一时钟，单独剔除。"""
+    return [seconds for seconds in sleeps if seconds != XHS_NEW_PAGE_MIN_HOLD_SECONDS]
+
+
+def write_manifest(crawler, path) -> str:
+    """按交给暂存的字节写出与正式暂存同构的 manifest，供门禁核对 sha256。"""
+    entries = [
+        ImageManifestEntry(
+            schema_version=1, platform_key="xhs", platform_post_id=note_id, image_role="content",
+            source_index=item["source_index"], source_key="image_list", source_asset_key=item["source_asset_key"],
+            source_url=item["url"], fetch_status="downloaded", attempts=1, http_status=200,
+            staging_path=f"images/{note_id}/{item['source_index']}.webp", size_bytes=len(item["content"]),
+            mime_type="image/webp", width=1, height=1, sha256=sha256(item["content"]).hexdigest(), error_code=None,
+        )
+        for note_id, items in crawler.staged.items()
+        for item in items
+    ]
+    write_manifest_atomic(path, entries)
+    return str(path)
 
 
 @pytest.mark.asyncio
@@ -180,6 +196,7 @@ async def test_all_unknown_candidates_are_processed_before_exhaustion(monkeypatc
     await crawler.search()
 
     assert detail_ids == ["first", "second"]
+    assert [record["note_id"] for record in crawler.records] == ["first", "second"]
     stopped = last_stop(state_path)
     assert stopped["stop_reason"] == "source_exhausted"
     assert stopped["stop_detail"] == "has_more_false"
@@ -193,10 +210,50 @@ async def test_all_unknown_candidates_are_processed_before_exhaustion(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_overlay_records_pass_the_real_visit_gate(monkeypatch, tmp_path):
+    """两页关键词：浮层详情、翻图截获、作者标签页与关闭浮层写出的账本与记录，经真实门禁回读全部通过。"""
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, detail_ids, state_path, site = prepare_crawler(
+        monkeypatch, tmp_path, items=None, pages=[[note("p1-a"), note("p1-b")], [note("p2-a")]],
+    )
+    site.details["p1-a"] = detail_card("p1-a", images=3, user_id="shared-author")
+    site.details["p2-a"] = detail_card("p2-a", images=1, user_id="shared-author")
+
+    await crawler.search()
+
+    assert detail_ids == ["p1-a", "p1-b", "p2-a"]
+    assert len(site.author_tabs) == 2  # 同一作者只点一次
+    assert all(tab.closed for tab in site.author_tabs)
+    records = crawler.records
+    assert [record["note_id"] for record in records] == ["p1-a", "p1-b", "p2-a"]
+    refs = {record["note_id"]: record["content_visit_refs"] for record in records}
+    assert refs["p2-a"]["creator_profile"] == refs["p1-a"]["creator_profile"]
+    assert len(refs["p1-a"]["images"]) == 3
+    assert all(ref["ledger_id"] == crawler.capture.ledger.ledger_id for ref in refs.values())
+    actions = [line["action"] for line in ledger_lines(crawler) if line["kind"] == "action"]
+    assert actions.count("flip_image") == 3 and actions.count("click_author") == 2
+    assert actions.count("close_tab") == 2 and actions.count("close_overlay") == 3
+
+    result = validate_content_visits(
+        records,
+        [crawler.capture.ledger.path],
+        platform="xhs",
+        mode="discovery",
+        manifests=[write_manifest(crawler, tmp_path / "image_manifest.jsonl")],
+        stop_event=last_stop(state_path),
+    )
+
+    assert result["problem_counts"] == {}
+    assert result["content_visit_ok"] is True and result["checked_records"] == 3
+    assert result["required_stages"] == ["creator_profile", "note_detail", "search_page", "search_results"]
+    assert result["continuity_ok"] is True and result["request_pacing_ok"] is True
+
+
+@pytest.mark.asyncio
 async def test_browser_context_close_is_recorded_as_runtime_failure(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["new-note"])
-    crawler.enrich_note_creator = AsyncMock(
+    crawler._enrich_creator_via_author_tab = AsyncMock(
         side_effect=PlaywrightError(
             "BrowserContext.new_page: Target page, context or browser has been closed"
         )
@@ -213,7 +270,7 @@ async def test_browser_context_close_is_recorded_as_runtime_failure(monkeypatch,
 async def test_creator_security_limit_is_recorded_as_terminal_runtime_failure(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["security-limited-note"])
-    crawler.enrich_note_creator = AsyncMock(
+    crawler._enrich_creator_via_author_tab = AsyncMock(
         side_effect=PlatformRuntimeError(
             "XHS creator profile is blocked by a platform security limit",
             code="platform_security_limit_300011",
@@ -230,23 +287,28 @@ async def test_creator_security_limit_is_recorded_as_terminal_runtime_failure(mo
 
 
 @pytest.mark.asyncio
-async def test_retryable_detail_failure_is_run_only_and_search_continues(monkeypatch, tmp_path):
+async def test_feed_missing_twice_is_retryable_run_only_and_search_continues(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path, site = prepare_crawler(
+    crawler, detail_ids, state_path, site = prepare_crawler(
         monkeypatch, tmp_path, items=None, pages=[[note("retry-detail")], [note("later")]],
     )
-    crawler.get_note_detail_async_task = AsyncMock(
-        side_effect=[XHSNoteDetailUnavailable("retry-detail", "api_and_html_empty", attempts=3), valid_note("later")]
-    )
+    site.feed_overrides["retry-detail"] = ["no_feed", "no_feed"]
 
     await crawler.search()
 
-    crawler.update_xhs_note.assert_awaited_once()
+    assert [record["note_id"] for record in crawler.records] == ["later"]
     (skipped,) = events_of(state_path, "candidate_skipped")
     assert skipped["identity"] == "retry-detail"
     assert skipped["failure_scope"] == "post"
-    assert skipped["attempts"] == 3
+    assert skipped["error_code"] == "note_detail_not_observed"
+    assert skipped["attempts"] == 2
     assert skipped["retryable"] is True
+    # 浮层出现但没有 feed：先点关闭按钮，再开一次；两次都没有 feed 后关闭浮层。
+    actions = [(line["action"], line["target"].get("note_id")) for line in ledger_lines(crawler) if line["kind"] == "action"]
+    assert actions[actions.index(("click_card", "retry-detail")):][:4] == [
+        ("click_card", "retry-detail"), ("close_overlay", "retry-detail"),
+        ("click_card", "retry-detail"), ("close_overlay", "retry-detail"),
+    ]
     stopped = last_stop(state_path)
     assert stopped["stop_reason"] == "source_exhausted"
     # 可重试的候选失败只算本轮已决定，不进入跨轮记忆。
@@ -254,14 +316,51 @@ async def test_retryable_detail_failure_is_run_only_and_search_continues(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_overlay_shown_without_feed_is_reopened_once_and_then_processed(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, detail_ids, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["slow"])
+    site.feed_overrides["slow"] = ["no_feed"]
+
+    await crawler.search()
+
+    (record,) = crawler.records
+    detail = next(line for line in ledger_lines(crawler) if line.get("id") == record["content_visit_refs"]["note_detail"])
+    clicks = [line for line in ledger_lines(crawler) if line.get("action") == "click_card"]
+    assert len(clicks) == 2 and detail["trigger"] == clicks[1]["id"]
+    assert not events_of(state_path, "candidate_skipped")
+
+
+@pytest.mark.asyncio
+async def test_three_notes_whose_overlay_never_opens_stop_the_run(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, detail_ids, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["a", "b", "c", "d"])
+    for note_id in ("a", "b", "c"):
+        site.feed_overrides[note_id] = ["no_overlay", "no_overlay"]
+
+    await crawler.search()
+
+    assert detail_ids == []
+    assert [event["identity"] for event in events_of(state_path, "candidate_skipped")] == ["a", "b"]
+    assert_runtime_stop(last_stop(state_path), "xhs_overlay_not_opening")
+
+
+@pytest.mark.asyncio
+async def test_overlay_that_cannot_be_closed_stops_the_run(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["stuck"])
+    site.overlay_closes = False
+
+    await crawler.search()
+
+    assert crawler.records == []
+    assert_runtime_stop(last_stop(state_path), "xhs_overlay_close_failed")
+
+
+@pytest.mark.asyncio
 async def test_ip_block_stops_run_without_skipping_or_marking_seen(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["blocked-detail"])
-    crawler.get_note_detail_async_task = AsyncMock(
-        side_effect=RetryError(
-            Future.construct(3, IPBlockError("Network connection error, code 300012"), has_exception=True)
-        )
-    )
+    site.feed_overrides["blocked-detail"] = [{"code": 300012, "success": False, "msg": "网络连接异常"}]
 
     await crawler.search()
 
@@ -273,100 +372,190 @@ async def test_ip_block_stops_run_without_skipping_or_marking_seen(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_detail_fallback_attempt_count_matches_actual_requests(monkeypatch) -> None:
-    crawler = XiaoHongShuCrawler()
-    crawler._guarded_pause = AsyncMock(return_value=0.0)
-    crawler.xhs_client = AsyncMock()
-    crawler.xhs_client.get_note_by_id.return_value = None
-    crawler.xhs_client.get_note_by_id_from_html.side_effect = RetryError(
-        Future.construct(
-            3,
-            DataFetchError("temporary HTML detail failure"),
-            has_exception=True,
-        )
-    )
+@pytest.mark.parametrize(
+    ("override", "error_code"),
+    [
+        ({"code": -510000, "success": False, "msg": "笔记不存在"}, "note_not_found"),
+        ({"code": 0, "success": True, "data": {"items": [{"id": "other", "note_card": detail_card("other")}]}},
+         "note_id_mismatch"),
+        ({"code": 0, "success": True, "data": {"items": []}}, "detail_parse_failed"),
+    ],
+    ids=["note_missing", "id_mismatch", "parse_failed"],
+)
+async def test_deterministic_feed_failures_are_final_candidate_skips(monkeypatch, tmp_path, override, error_code):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["broken", "fine"])
+    site.feed_overrides["broken"] = [override]
 
-    with pytest.raises(XHSNoteDetailUnavailable) as exc_info:
-        await crawler.get_note_detail_async_task(
-            note_id="attempt-count",
-            xsec_source="pc_search",
-            xsec_token="token",
-            semaphore=xhs_core.asyncio.Semaphore(1),
-        )
+    await crawler.search()
 
-    assert exc_info.value.attempts == 4
-    assert crawler.xhs_client.get_note_by_id.await_count == 1
-    assert crawler.xhs_client.get_note_by_id_from_html.await_count == 1
+    (skipped,) = events_of(state_path, "candidate_skipped")
+    assert skipped["identity"] == "broken" and skipped["error_code"] == error_code
+    assert skipped["retryable"] is False and skipped["attempts"] == 1
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted"
+    assert stopped["candidate_identities"] == ["broken", "fine"]
 
 
 @pytest.mark.asyncio
-async def test_image_failure_is_recorded_and_later_xhs_candidate_continues(monkeypatch, tmp_path):
+async def test_video_feed_is_closed_and_decided_without_a_record(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["clip"])
+    site.details["clip"] = detail_card("clip", note_type="video")
+
+    await crawler.search()
+
+    assert crawler.records == [] and site.overlay_note is None
+    lines = ledger_lines(crawler)
+    assert not [line for line in lines if line.get("stage") == "note_detail" and line["kind"] == "visit"]
+    assert [line["decision"] for line in lines if line["kind"] == "decision"] == ["video_skipped_from_detail"]
+    assert last_stop(state_path)["candidate_identities"] == ["clip"]
+
+
+@pytest.mark.asyncio
+async def test_image_not_captured_is_retryable_and_later_candidate_continues(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     crawler, _, state_path, site = prepare_crawler(
         monkeypatch, tmp_path, items=["retry-image", "success-image"],
     )
-    crawler.get_notice_media = AsyncMock(
-        side_effect=[XHSImageDownloadError("retry-image", 0, "image_download_retryable", attempts=3), None]
-    )
+    site.image_overrides[image_url("retry-image", 1)] = "missing"
 
     await crawler.search()
 
-    crawler.update_xhs_note.assert_awaited_once()
+    assert [record["note_id"] for record in crawler.records] == ["success-image"]
     (skipped,) = events_of(state_path, "candidate_skipped")
     assert skipped["identity"] == "retry-image"
     assert skipped["failure_scope"] == "image"
-    assert skipped["attempts"] == 3
+    assert skipped["error_code"] == "image_response_not_observed"
+    assert skipped["source_index"] == 1
     assert skipped["retryable"] is True
+    failure = crawler.record_xhs_note_image_failure.await_args.args[1]
+    assert failure["error_code"] == "image_response_not_observed" and failure["http_status"] is None
     stopped = last_stop(state_path)
     assert stopped["stop_reason"] == "source_exhausted"
     assert stopped["candidate_identities"] == ["success-image"]
 
 
 @pytest.mark.asyncio
-async def test_creator_failure_is_recorded_and_later_xhs_candidate_continues(monkeypatch, tmp_path):
+async def test_terminal_image_status_is_final_and_later_candidate_continues(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, _, state_path, site = prepare_crawler(
+        monkeypatch, tmp_path, items=["terminal-image", "must-store"],
+    )
+    site.image_overrides[image_url("terminal-image", 0)] = 404
+
+    await crawler.search()
+
+    assert [record["note_id"] for record in crawler.records] == ["must-store"]
+    (skipped,) = events_of(state_path, "candidate_skipped")
+    assert skipped["identity"] == "terminal-image"
+    assert skipped["failure_scope"] == "image"
+    assert skipped["error_code"] == "image_source_unavailable"
+    assert skipped["retryable"] is False
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted"
+    assert stopped["candidate_identities"] == ["must-store", "terminal-image"]
+
+
+@pytest.mark.asyncio
+async def test_blocking_image_status_stops_the_run(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["limited"])
+    site.image_overrides[image_url("limited", 0)] = 429
+
+    await crawler.search()
+
+    assert not events_of(state_path, "candidate_skipped")
+    assert_runtime_stop(last_stop(state_path), "image_rate_limited")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setup", "reason", "retryable", "attempts"),
+    [
+        (lambda site: setattr(site, "author_tab_failures", 2), "author_tab_not_opened", True, 2),
+        (lambda site: site.author_url_ids.update({"author-retry-creator": "someone-else"}), "creator_mismatch", False, 1),
+        (lambda site: site.creator_projections.update({"author-retry-creator": {"status": "missing"}}),
+         "runtime_projection_empty", True, 1),
+        (lambda site: site.creator_projections.update(
+            {"author-retry-creator": {"status": "rejected", "reason": "projection_avatar_check_incomplete"}}),
+         "projection_avatar_check_incomplete", False, 1),
+    ],
+    ids=["tab_not_opened", "creator_mismatch", "projection_empty", "avatar_check_incomplete"],
+)
+async def test_creator_failure_is_a_candidate_skip_and_later_candidate_continues(
+    monkeypatch, tmp_path, setup, reason, retryable, attempts,
+):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     crawler, _, state_path, site = prepare_crawler(
         monkeypatch, tmp_path, items=["retry-creator", "success-creator"],
     )
-    crawler.enrich_note_creator = AsyncMock(
-        side_effect=[XHSCreatorProfileUnavailable("author-retry", attempts=3), None]
-    )
+    setup(site)
 
     await crawler.search()
 
-    crawler.update_xhs_note.assert_awaited_once()
-    assert crawler.get_notice_media.await_count == 1
+    assert [record["note_id"] for record in crawler.records] == ["success-creator"]
+    assert "retry-creator" not in crawler.staged
     (skipped,) = events_of(state_path, "candidate_skipped")
     assert skipped["identity"] == "retry-creator"
     assert skipped["failure_scope"] == "post"
     assert skipped["error_code"] == "creator_profile_unavailable"
-    assert skipped["attempts"] == 3
+    assert skipped["detail"] == f"creator_profile_failed:{reason}"
+    assert skipped["attempts"] == attempts and skipped["retryable"] is retryable
+    assert site.overlay_note is None and all(tab.closed for tab in site.author_tabs)
     stopped = last_stop(state_path)
     assert stopped["stop_reason"] == "source_exhausted"
-    assert stopped["candidate_identities"] == ["success-creator"]
+    expected = ["success-creator"] if retryable else ["retry-creator", "success-creator"]
+    assert stopped["candidate_identities"] == expected
 
 
 @pytest.mark.asyncio
-async def test_terminal_image_failure_is_recorded_and_later_candidate_continues(monkeypatch, tmp_path):
+async def test_login_expired_feed_recovers_and_redoes_the_whole_note(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path, site = prepare_crawler(
-        monkeypatch, tmp_path, items=["terminal-image", "must-not-store"],
-    )
-    crawler.get_notice_media = AsyncMock(
-        side_effect=[XHSImageDownloadError("terminal-image", 0, "image_decode_failed", attempts=1), None]
-    )
+    crawler, detail_ids, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["expired"])
+    site.feed_overrides["expired"] = [dict(LOGIN_EXPIRED)]
+    crawler._wait_for_midrun_login_recovery = AsyncMock(return_value=True)
 
     await crawler.search()
 
-    crawler.update_xhs_note.assert_awaited_once()
-    assert crawler.get_notice_media.await_count == 2
-    (skipped,) = events_of(state_path, "candidate_skipped")
-    assert skipped["identity"] == "terminal-image"
-    assert skipped["failure_scope"] == "image"
-    assert skipped["retryable"] is False
-    stopped = last_stop(state_path)
-    assert stopped["stop_reason"] == "source_exhausted"
-    assert stopped["candidate_identities"] == ["must-not-store", "terminal-image"]
+    crawler._wait_for_midrun_login_recovery.assert_awaited_once_with()
+    assert detail_ids == ["expired", "expired"]
+    (record,) = crawler.records
+    detail = next(line for line in ledger_lines(crawler) if line.get("id") == record["content_visit_refs"]["note_detail"])
+    clicks = [line for line in ledger_lines(crawler) if line.get("action") == "click_card"]
+    assert len(clicks) == 2 and detail["trigger"] == clicks[1]["id"]
+    assert last_stop(state_path)["stop_reason"] == "source_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_detail_network_outage_pauses_and_redoes_the_note(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, detail_ids, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["network-detail"])
+    site.feed_overrides["network-detail"] = ["net::ERR_INTERNET_DISCONNECTED"]
+    sleeps = attach_network_clock(monkeypatch, crawler, wait_seconds=10.0)
+
+    await crawler.search()
+
+    assert detail_ids == ["network-detail", "network-detail"]
+    assert network_sleeps(sleeps) == [2.0]
+    outcomes = [call.kwargs["outcome"] for call in crawler._record_network_recovery_event.await_args_list]
+    assert outcomes == ["network_paused", "network_recovered"]
+    assert [record["note_id"] for record in crawler.records] == ["network-detail"]
+    assert last_stop(state_path)["stop_reason"] == "source_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_frontend_verification_on_feed_waits_and_redoes_the_note(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, detail_ids, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["verify"])
+    site.feed_overrides["verify"] = [461]
+    crawler._wait_for_frontend_verification = AsyncMock(return_value=True)
+
+    await crawler.search()
+
+    assert crawler._wait_for_frontend_verification.await_args.kwargs["required"] is True
+    assert detail_ids == ["verify", "verify"]
+    assert [record["note_id"] for record in crawler.records] == ["verify"]
 
 
 def expire_login_on_page_two(site: XhsFakeSite, *, times: int = 1) -> None:
@@ -520,6 +709,8 @@ async def test_search_login_recovery_unclassified_error_still_escapes(monkeypatc
     assert not events_of(state_path, "adaptive_search_stopped")
 
 
+
+
 POST_INTERACTION_RUN_FAILURES = [
     (lifecycle_error("xhs_browser_context_closed_unexpected", stage="post_interaction"), "browser_context_closed"),
     (lifecycle_error("xhs_browser_process_exited", stage="post_interaction"), "browser_process_exited"),
@@ -529,16 +720,14 @@ POST_INTERACTION_RUN_FAILURES = [
 
 
 def prepare_post_interaction(monkeypatch, tmp_path, failure):
-    """真实帖子互动入口；互动辅助页导航按用例抛错，后续互动步骤不会到达。"""
+    """真实帖子互动入口：在当前浮层内执行，不新开标签页；互动本身按用例抛错。"""
     crawler, detail_ids, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["note-interacted"])
-    del crawler._maybe_run_post_interaction
-    crawler.post_interaction_mode = "like"
+    crawler.post_interaction_mode = "like-one"
     crawler.post_interaction_attempted = False
-    interaction_page = object()
-    crawler._new_guarded_page = AsyncMock(return_value=interaction_page)
-    crawler._goto_with_deadline = AsyncMock(side_effect=failure)
-    crawler._close_page_with_deadline = AsyncMock()
-    return crawler, state_path, interaction_page
+    interaction = AsyncMock(side_effect=failure)
+    monkeypatch.setattr(xhs_behavior, "run_requested_post_interaction", interaction)
+    crawler._new_guarded_page = AsyncMock()
+    return crawler, state_path, site, interaction
 
 
 @pytest.mark.asyncio
@@ -547,14 +736,12 @@ async def test_post_interaction_lifecycle_or_network_timeout_fails_the_run(
     monkeypatch, tmp_path, failure, stop_detail
 ):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, state_path, interaction_page = prepare_post_interaction(monkeypatch, tmp_path, failure)
+    crawler, state_path, site, interaction = prepare_post_interaction(monkeypatch, tmp_path, failure)
 
     await crawler.search()
 
-    crawler._close_page_with_deadline.assert_awaited_once_with(
-        interaction_page, reason="post_interaction_cleanup"
-    )
-    crawler.enrich_note_creator.assert_not_awaited()
+    assert interaction.await_args.args[0] is site.page
+    crawler._new_guarded_page.assert_not_awaited()
     crawler.update_xhs_note.assert_not_awaited()
     assert not events_of(state_path, "candidate_skipped")
     assert not events_of(state_path, "adaptive_batch_completed")
@@ -562,38 +749,39 @@ async def test_post_interaction_lifecycle_or_network_timeout_fails_the_run(
 
 
 @pytest.mark.asyncio
-async def test_post_interaction_helper_page_closure_does_not_stop_crawl(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "failure",
+    [PlaywrightError("Target page, context or browser has been closed"), RuntimeError("xhs_post_interaction_button_missing")],
+    ids=["page_closed", "plain_runtime_error"],
+)
+async def test_post_interaction_own_failure_does_not_stop_crawl(monkeypatch, tmp_path, failure):
+    # 互动自身失败只记告警，照常关闭浮层、入库并继续到来源耗尽。
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    failure = PlaywrightError("Target page, context or browser has been closed")
-    crawler, state_path, interaction_page = prepare_post_interaction(monkeypatch, tmp_path, failure)
+    crawler, state_path, site, interaction = prepare_post_interaction(monkeypatch, tmp_path, failure)
 
     await crawler.search()
 
-    crawler._close_page_with_deadline.assert_awaited_once_with(
-        interaction_page, reason="post_interaction_cleanup"
-    )
-    crawler.enrich_note_creator.assert_awaited_once()
-    crawler.update_xhs_note.assert_awaited_once()
+    interaction.assert_awaited_once()
+    assert crawler.post_interaction_attempted is True
+    crawler._new_guarded_page.assert_not_awaited()
+    assert [record["note_id"] for record in crawler.records] == ["note-interacted"]
+    assert not events_of(state_path, "candidate_skipped")
     assert last_stop(state_path)["stop_reason"] == "source_exhausted"
 
 
 @pytest.mark.asyncio
-async def test_post_interaction_plain_runtime_error_does_not_stop_crawl(monkeypatch, tmp_path):
-    # 普通 RuntimeError 只是互动自身失败，记录告警后照常补全、入库并继续到来源耗尽。
+async def test_post_interaction_runs_inside_the_overlay_before_it_closes(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    failure = RuntimeError("xhs_post_interaction_button_missing")
-    crawler, state_path, interaction_page = prepare_post_interaction(monkeypatch, tmp_path, failure)
+    crawler, state_path, site, interaction = prepare_post_interaction(monkeypatch, tmp_path, None)
+    seen = []
+    interaction.side_effect = lambda page, **kwargs: seen.append((site.overlay_note, kwargs["note_id"])) or {
+        "status": "completed"
+    }
 
     await crawler.search()
 
-    crawler._close_page_with_deadline.assert_awaited_once_with(
-        interaction_page, reason="post_interaction_cleanup"
-    )
-    assert crawler.post_interaction_attempted is True
-    crawler.enrich_note_creator.assert_awaited_once()
-    crawler.update_xhs_note.assert_awaited_once()
-    assert not events_of(state_path, "candidate_skipped")
-    assert last_stop(state_path)["stop_reason"] == "source_exhausted"
+    assert seen == [("note-interacted", "note-interacted")]
+    assert interaction.await_args.kwargs["requested_mode"] == "like-one"
 
 
 def attach_network_clock(monkeypatch, crawler, *, wait_seconds: float) -> list[float]:
@@ -627,7 +815,7 @@ async def test_search_disconnect_pauses_and_rescrolls_in_the_same_browser_sessio
     await crawler.search()
 
     assert [request["page"] for request in site.requests if "filters" in request] == [1, 2, 2]
-    assert sleeps == [2.0]
+    assert network_sleeps(sleeps) == [2.0]
     assert crawler.browser_context is context and crawler.context_page is page
     outcomes = [call.kwargs["outcome"] for call in crawler._record_network_recovery_event.await_args_list]
     assert outcomes == ["network_paused", "network_recovered"]
@@ -645,7 +833,7 @@ async def test_search_disconnect_timeout_is_a_runtime_stop(monkeypatch, tmp_path
 
     await crawler.search()
 
-    assert sleeps == [2.0, 3.0]
+    assert network_sleeps(sleeps) == [2.0, 3.0]
     assert_runtime_stop(last_stop(state_path), "network_recovery_timeout", source_page=ANY)
 
 
@@ -712,17 +900,19 @@ async def test_cdp_disconnect_during_network_pause_is_a_lifecycle_stop(monkeypat
     assert_runtime_stop(last_stop(state_path), "cdp_disconnected", source_page=ANY)
 
 
+
+
 @pytest.mark.asyncio
-async def test_cdp_process_exit_from_detail_is_not_candidate_failure(monkeypatch, tmp_path):
+async def test_cdp_process_exit_while_opening_the_overlay_is_not_candidate_failure(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["new-note"])
-    crawler.get_note_detail_async_task = AsyncMock(
+    crawler._open_note_overlay = AsyncMock(
         side_effect=lifecycle_error("xhs_browser_process_exited", stage="detail:new-note")
     )
 
     await crawler.search()
 
-    assert crawler.get_note_detail_async_task.await_count == 1
+    assert crawler._open_note_overlay.await_count == 1
     assert not events_of(state_path, "candidate_skipped")
     assert not events_of(state_path, "adaptive_batch_completed")
     assert_runtime_stop(last_stop(state_path), "browser_process_exited")
@@ -732,42 +922,13 @@ async def test_cdp_process_exit_from_detail_is_not_candidate_failure(monkeypatch
 async def test_cdp_context_close_from_creator_is_not_candidate_failure(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["new-note"])
-    crawler.enrich_note_creator = AsyncMock(
+    crawler._enrich_creator_via_author_tab = AsyncMock(
         side_effect=lifecycle_error("xhs_browser_context_closed_unexpected", stage="creator:new-note")
     )
 
     await crawler.search()
 
-    assert crawler.enrich_note_creator.await_count == 1
+    assert crawler._enrich_creator_via_author_tab.await_count == 1
     assert not events_of(state_path, "candidate_skipped")
     assert not events_of(state_path, "adaptive_batch_completed")
     assert_runtime_stop(last_stop(state_path), "browser_context_closed")
-
-
-@pytest.mark.asyncio
-async def test_detail_transport_outage_retries_same_detail_without_html_fallback(monkeypatch) -> None:
-    crawler = XiaoHongShuCrawler()
-    page = SimpleNamespace(is_closed=lambda: False, url="https://www.xiaohongshu.com")
-    crawler.context_page = page
-    crawler.browser_context = SimpleNamespace(pages=[page], new_page=AsyncMock())
-    attach_network_clock(monkeypatch, crawler, wait_seconds=10.0)
-    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/sns/web/v1/feed")
-    crawler.xhs_client = AsyncMock()
-    crawler.xhs_client.get_note_by_id.side_effect = [
-        RetryError(
-            Future.construct(3, httpx.ConnectError("temporary disconnect", request=request), has_exception=True)
-        ),
-        valid_note("network-detail"),
-    ]
-    crawler._guarded_pause = AsyncMock(return_value=0.0)
-
-    result = await crawler.get_note_detail_async_task(
-        note_id="network-detail",
-        xsec_source="pc_search",
-        xsec_token="token",
-        semaphore=xhs_core.asyncio.Semaphore(1),
-    )
-
-    assert result and result["note_id"] == "network-detail"
-    assert crawler.xhs_client.get_note_by_id.await_count == 2
-    crawler.xhs_client.get_note_by_id_from_html.assert_not_awaited()

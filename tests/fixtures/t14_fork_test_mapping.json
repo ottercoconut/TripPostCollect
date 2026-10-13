@@ -415,7 +415,10 @@
     },
     {
      "test": "tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_failure_is_recorded_and_later_xhs_candidate_continues",
-     "asserts": "小红书图片失败候选记录后继续"
+     "asserts": "小红书图片失败候选记录后继续",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "小红书图片改为浮层翻图截获，直连下载与重试次数不再是契约；图片失败候选记录后继续由 tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_not_captured_is_retryable_and_later_candidate_continues 与 ::test_terminal_image_status_is_final_and_later_candidate_continues 断言"
     }
    ],
    "ported_to": "tests/application/test_discovery.py::test_image_failed_candidate_is_recorded_seen_and_does_not_block_batch"

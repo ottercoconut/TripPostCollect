@@ -69,7 +69,7 @@ class Harness:
         self.site.wheel(-300)
         return {"status": "completed"}
 
-    async def process_note(self, item, search_page) -> None:
+    async def process_note(self, item, search_page, card) -> None:
         assert search_page is self.crawler._scan.tracker.current
         self.processed.append(item.note_id)
         self.crawler._scan.accumulator.consider(item.note_id, valid=True)
@@ -257,8 +257,8 @@ def test_frontend_restart_without_filter_reapplies_it_and_finishes_on_the_new_se
     restarted = []
     original = harness.process_note
 
-    async def process_and_restart(item, search_page):
-        await original(item, search_page)
+    async def process_and_restart(item, search_page, card):
+        await original(item, search_page, card)
         if not restarted:
             restarted.append(item.note_id)
             site.restart_without_filter()

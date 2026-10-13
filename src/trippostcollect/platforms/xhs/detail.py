@@ -19,7 +19,7 @@
 
 # TripPostCollect：T09 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-"""笔记详情：API → HTML 回退、并发信号量与指定笔记（含历史修复显式分支）。"""
+"""指定笔记只经 repair；`get_note_detail_async_task` 的 API → HTML 详情只剩 repair 过渡使用（提交 6 删）。"""
 
 import asyncio
 import logging
@@ -33,8 +33,6 @@ from trippostcollect.platforms.xhs.errors import (
     NoteNotFoundError,
     XHSNoteDetailUnavailable,
 )
-from trippostcollect.platforms.xhs.models import NoteUrlInfo
-from trippostcollect.platforms.xhs.parser import parse_note_info_from_note_url
 from trippostcollect.platforms.xhs.repair import run_xhs_repair
 
 logger = logging.getLogger("MediaCrawler")
@@ -44,41 +42,12 @@ class XhsDetailMixin:
     """笔记详情；作为 XiaoHongShuCrawler 的 mixin，方法体逐字迁入。"""
 
     async def get_specified_notes(self):
-        """Get the information and comments of the specified post
-
-        Note: Must specify note_id, xsec_source, xsec_token
-        """
-        if self.ports.repair:
-            # 修复开关在 install_hooks 时点读取并经装配传入；显式分支取代旧桥对类方法的替换。
-            return await run_xhs_repair(self)
-        get_note_detail_task_list = []
-        detail_semaphore = asyncio.Semaphore(self.settings.MAX_CONCURRENCY_NUM)
-        for full_note_url in self.settings.XHS_SPECIFIED_NOTE_URL_LIST:
-            note_url_info: NoteUrlInfo = parse_note_info_from_note_url(full_note_url)
-            logger.info(f"[XiaoHongShuCrawler.get_specified_notes] Parse note url info: {note_url_info}")
-            crawler_task = self.get_note_detail_async_task(
-                note_id=note_url_info.note_id,
-                xsec_source=note_url_info.xsec_source,
-                xsec_token=note_url_info.xsec_token,
-                semaphore=detail_semaphore,
-            )
-            get_note_detail_task_list.append(crawler_task)
-
-        need_get_comment_note_ids = []
-        xsec_tokens = []
-        note_details = await asyncio.gather(*get_note_detail_task_list)
-        for note_detail in note_details:
-            if note_detail:
-                if self.is_video_note(note_detail):
-                    logger.info(
-                        f"[XiaoHongShuCrawler.get_specified_notes] Skip video note, note_id: {note_detail.get('note_id')}"
-                    )
-                    continue
-                need_get_comment_note_ids.append(note_detail.get("note_id", ""))
-                xsec_tokens.append(note_detail.get("xsec_token", ""))
-                await self.enrich_note_creator(note_detail)
-                await self.update_xhs_note(note_detail)
-                await self.get_notice_media(note_detail)
+        """指定笔记模式：只保留 repair 分支，非 repair 的 detail 模式直接报错。"""
+        if not self.ports.repair:
+            # 经 API 取指定笔记详情的分支已删除；指定笔记只经 repair 处理。
+            raise RuntimeError("xhs_detail_mode_requires_repair")
+        # 修复开关在 install_hooks 时点读取并经装配传入；显式分支取代旧桥对类方法的替换。
+        return await run_xhs_repair(self)
 
     async def get_note_detail_async_task(
         self,
@@ -87,7 +56,7 @@ class XhsDetailMixin:
         xsec_token: str,
         semaphore: asyncio.Semaphore,
     ) -> Optional[Dict]:
-        """Get note detail
+        """repair 过渡（提交 6 删）：经旧 API 与 HTML 取笔记详情。
 
         Args:
             note_id:

@@ -209,7 +209,7 @@ class ScanState:
 
 
 class XhsScanMixin:
-    """全量滚动扫描；作为 XiaoHongShuCrawler 的 mixin。单篇处理由 `_process_note_card` 提供。"""
+    """全量滚动扫描；作为 XiaoHongShuCrawler 的 mixin。单篇处理由 `overlay.XhsOverlayMixin._process_note_card` 提供。"""
 
     @staticmethod
     async def _scan_sleep(seconds: float) -> None:
@@ -613,7 +613,7 @@ class XhsScanMixin:
             if not current.results_paused:
                 await self._guarded_pause("search_results", 6.0, 14.0)
                 current.results_paused = True
-            await self._process_note_card(item, current)
+            await self._process_note_card(item, current, card)
             return True
         return decided
 

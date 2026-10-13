@@ -147,6 +147,14 @@ class XHSLoginExpired(RuntimeError):
         self.stage = stage
 
 
+class XhsNoteRedo(RuntimeError):
+    """单篇处理中的登录、验证或网络恢复已完成：关闭残留浮层后整篇重做一次（§3.8.4）。"""
+
+    def __init__(self, reason: str):
+        super().__init__(f"xhs_note_redo:{reason}")
+        self.reason = reason
+
+
 class XHSImageDownloadError(RuntimeError):
     """An XHS post image exhausted its applicable fetch attempts."""
 
@@ -176,7 +184,7 @@ class XHSNoteDetailUnavailable(RuntimeError):
 class XHSCreatorProfileUnavailable(RuntimeError):
     """An XHS creator profile remained unavailable after observed attempts.
 
-    reason 只含两条取数路径的原因类别（如 ``api=...;browser=...``），不含 HTML、ID 或参数。
+    reason 只含单一路径的原因类别（如 ``author_tab_not_opened``），不含 HTML、ID 或参数。
     """
 
     def __init__(self, user_id: str, attempts: int, reason: str = ""):

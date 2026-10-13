@@ -33,7 +33,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import urlencode, urlparse
 
 from playwright.async_api import Page
 
@@ -69,19 +69,26 @@ XHS_OPERATOR_CHALLENGES = frozenset({"captcha_or_verify", "login_required"})
 XHS_VERIFICATION_SURFACE_SECONDS = 30.0
 XHS_VERIFICATION_POLL_SECONDS = 1.0
 XHS_CAPTCHA_ROUTE = "/website-login/captcha"
-XHS_COMMENT_SELECTORS = (
-    "[class*='comments-container']",
-    "[class*='comment-list']",
-    "[id*='comment']",
-    "[class*='comment']",
-    "[aria-label*='评论']",
+# 互动只在当前笔记浮层内进行（§3.4 第 8 条），选择器一律限定在 .note-detail-mask 内。
+XHS_OVERLAY_SCOPE = ".note-detail-mask"
+XHS_COMMENT_SELECTORS = tuple(
+    f"{XHS_OVERLAY_SCOPE} {selector}"
+    for selector in (
+        "[class*='comments-container']",
+        "[class*='comment-list']",
+        "[id*='comment']",
+        "[class*='comment']",
+        "[aria-label*='评论']",
+    )
 )
-XHS_LIKE_SELECTORS = (
-    ".note-detail-mask .interact-container .like-wrapper",
-    ".interact-container .like-wrapper",
-    "[class*='engage-bar'] [class*='like-wrapper']",
-    "[role='button'][aria-label*='点赞']",
-    "button[aria-label*='点赞']",
+XHS_LIKE_SELECTORS = tuple(
+    f"{XHS_OVERLAY_SCOPE} {selector}"
+    for selector in (
+        ".interact-container .like-wrapper",
+        "[class*='engage-bar'] [class*='like-wrapper']",
+        "[role='button'][aria-label*='点赞']",
+        "button[aria-label*='点赞']",
+    )
 )
 
 
@@ -1315,6 +1322,7 @@ class XhsBehaviorMixin:
         return True
 
     async def _maybe_run_post_interaction(self, note_detail: Dict) -> None:
+        """仅在请求了互动、本轮尚未执行且本篇有效时，在当前浮层内执行；不新开标签页、不直接打开地址。"""
         if self.post_interaction_mode == "none" or self.post_interaction_attempted:
             return
         self.post_interaction_attempted = True
@@ -1322,18 +1330,8 @@ class XhsBehaviorMixin:
         if not note_id:
             logger.warning("[XiaoHongShuCrawler] Skip requested post interaction: missing note_id")
             return
-        query = (
-            f"xsec_token={quote(str(note_detail.get('xsec_token') or ''))}"
-            f"&xsec_source={quote(str(note_detail.get('xsec_source') or 'pc_search'))}"
-        )
-        interaction_url = f"{self.index_url}/explore/{quote(note_id)}?{query}"
-        page = await self._new_guarded_page()
+        page = self.context_page
         try:
-            await self._goto_with_deadline(
-                page,
-                interaction_url,
-                stage="post_interaction",
-            )
             interaction = await run_requested_post_interaction(
                 page,
                 platform_key="xhs",
@@ -1365,9 +1363,4 @@ class XhsBehaviorMixin:
         except Exception as exc:
             logger.warning(
                 f"[XiaoHongShuCrawler] Requested post interaction failed without stopping crawl: {type(exc).__name__}: {exc}"
-            )
-        finally:
-            await self._close_page_with_deadline(
-                page,
-                reason="post_interaction_cleanup",
             )

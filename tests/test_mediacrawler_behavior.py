@@ -1275,6 +1275,12 @@ def test_behavior_validation_rejects_wrong_keyword_url() -> None:
     assert validation["platforms"]["zhihu"]["target_url_ok"] is False
 
 
+def xhs_visit_gate(*, pacing: bool = True, continuity: bool = True) -> dict:
+    """#71：xhs 纳入访问门禁后，节奏与连续性以账本判定结果为准。"""
+    return {"xhs": {"content_visit_ok": True, "request_pacing_ok": pacing, "continuity_ok": continuity,
+                    "problem_counts": {}}}
+
+
 def test_xhs_behavior_validation_requires_guarded_request_pacing() -> None:
     evidence = valid_xhs_evidence()
     evidence.update(
@@ -1296,9 +1302,12 @@ def test_xhs_behavior_validation_requires_guarded_request_pacing() -> None:
         "policy_events": [{"allowed": True, "disabled": False}],
     }
 
-    complete = mediacrawler_crawl.collect_behavior_validation([record], ["xhs"], "青岛旅游")
-    record["behavior_evidence"]["request_pacing_events"].pop()
-    missing = mediacrawler_crawl.collect_behavior_validation([record], ["xhs"], "青岛旅游")
+    complete = mediacrawler_crawl.collect_behavior_validation(
+        [record], ["xhs"], "青岛旅游", content_visits=xhs_visit_gate(),
+    )
+    missing = mediacrawler_crawl.collect_behavior_validation(
+        [record], ["xhs"], "青岛旅游", content_visits=xhs_visit_gate(pacing=False),
+    )
 
     assert complete["ok"] is True
     assert complete["platforms"]["xhs"]["request_pacing_ok"] is True
@@ -1325,7 +1334,9 @@ def test_xhs_behavior_validation_requires_continuity_behavior() -> None:
         "policy_events": [{"allowed": True, "disabled": False}],
     }
 
-    validation = mediacrawler_crawl.collect_behavior_validation([record], ["xhs"], "青岛旅游")
+    validation = mediacrawler_crawl.collect_behavior_validation(
+        [record], ["xhs"], "青岛旅游", content_visits=xhs_visit_gate(continuity=False),
+    )
 
     assert validation["ok"] is False
     assert validation["platforms"]["xhs"]["continuity_ok"] is False
@@ -1360,6 +1371,7 @@ def test_xhs_interaction_is_reported_but_does_not_invalidate_crawl() -> None:
         ["xhs"],
         "青岛旅游",
         "like-one",
+        content_visits=xhs_visit_gate(),
     )
 
     assert validation["ok"] is True

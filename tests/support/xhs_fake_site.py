@@ -1,7 +1,8 @@
-"""小红书搜索流程的离线站点：首页输入、回车、筛选面板点选“图文”、虚拟列表滚动与逐页搜索响应。
+"""小红书搜索流程的离线站点：首页输入、回车、筛选面板点选“图文”、虚拟列表滚动与逐页搜索响应；
+点封面打开笔记浮层（feed 与图片响应、翻图、关闭按钮），点作者名打开作者标签页（页面状态投影）。
 
-只模拟扫描用到的 DOM 读数（按 `page_scripts.DOM_SCRIPTS` 的脚本文本分派）与鼠标、键盘动作；搜索响应经
-`page_events` 的假请求/响应发给页面取数通道。不启动浏览器、不联网。
+只模拟用到的 DOM 读数（按 `page_scripts.DOM_SCRIPTS` / `STATE_SCRIPTS` 的脚本文本分派）与鼠标、键盘动作；
+响应经 `page_events` 的假请求/响应发给页面取数通道。不启动浏览器、不联网。
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from typing import Any, Iterable
 from urllib.parse import quote
 
 from support.page_events import FakeContext, FakePage
-from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
+from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS, STATE_SCRIPTS
 
 SEARCH_URL = "https://so.xiaohongshu.com/api/sns/web/v2/search/notes"
 TARGET_FILTERS = [
@@ -21,7 +22,9 @@ TARGET_FILTERS = [
     {"type": "filter_note_range", "tags": ["不限"]},
     {"type": "filter_pos_distance", "tags": ["不限"]},
 ]
+FEED_URL = "https://edith.xiaohongshu.com/api/sns/web/v1/feed"
 SCRIPT_NAMES = {script: name for name, script in DOM_SCRIPTS.items()}
+STATE_NAMES = {script: name for name, script in STATE_SCRIPTS.items()}
 
 VIEW_WIDTH = 1280
 VIEW_HEIGHT = 900
@@ -33,6 +36,97 @@ PREFETCH_PX = 400
 SEARCH_BOX = {"x": 640.0, "y": 40.0}
 FILTER_ENTRY = {"x": 1200.0, "y": 100.0}
 FILTER_OPTION = {"x": 700.0, "y": 200.0}
+CLOSE_POINT = {"x": 1250.0, "y": 50.0}
+ARROW_POINT = {"x": 760.0, "y": 450.0}
+AUTHOR_POINT = {"x": 980.0, "y": 130.0}
+
+
+def image_url(note_id: str, index: int) -> str:
+    return f"https://sns-webpic-qc.xhscdn.com/202601/{note_id}/notes_pre_post/{note_id}-{index}!nd_dft_wlteh_webp_3"
+
+
+def image_bytes(note_id: str, index: int) -> bytes:
+    return f"image-{note_id}-{index}".encode()
+
+
+def detail_card(note_id: str, *, images: int = 2, user_id: str | None = None, note_type: str = "normal") -> dict[str, Any]:
+    """feed 的 note_card：字段齐全的有效图文（头像只在内存中，写出时由清理器去除）。"""
+    return {
+        "note_id": note_id,
+        "type": note_type,
+        "title": f"note {note_id}",
+        "desc": "青岛 正文",
+        "time": 1_700_000_000_000,
+        "user": {"user_id": user_id or f"author-{note_id}", "nickname": "作者", "avatar": "https://sns-avatar-qc.xhscdn.com/a.jpg"},
+        "interact_info": {"liked_count": "1", "collected_count": "2", "comment_count": "3", "share_count": "4"},
+        "image_list": [{"url_default": image_url(note_id, index)} for index in range(images)],
+        "tag_list": [],
+    }
+
+
+def creator_projection(*, fans: str = "128") -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "creator": {
+            "basicInfo": {"nickname": "作者", "desc": "简介", "ipLocation": "山东"},
+            "interactions": [
+                {"type": "follows", "name": "关注", "count": "5"},
+                {"type": "fans", "name": "粉丝", "count": fans},
+                {"type": "interaction", "name": "获赞与收藏", "count": "99"},
+            ],
+        },
+    }
+
+
+class AuthorTab(FakePage):
+    """作者标签页：地址路径为 /user/profile/<id>，页面状态投影由站点给出。"""
+
+    viewport_size = {"width": 1280, "height": 800}
+
+    def __init__(self, site: "XhsFakeSite", user_id: str, url_user_id: str) -> None:
+        super().__init__(f"https://www.xiaohongshu.com/user/profile/{url_user_id}?xsec_source=pc_note")
+        self.site = site
+        self.user_id = user_id
+        self.closed = False
+        self.mouse = _TabMouse()
+        self.projection_calls = 0
+
+    async def evaluate(self, script: str, arg: Any = None) -> Any:
+        if STATE_NAMES.get(script) == "creator_page_data":
+            self.projection_calls += 1
+            hook = self.site.projection_hooks.get(self.user_id)
+            if hook is not None:
+                hook()
+            value = self.site.creator_projections.get(self.user_id, creator_projection())
+            if isinstance(value, BaseException):
+                raise value
+            return value
+        if SCRIPT_NAMES.get(script) == "render_diagnostic":
+            return {"ready_state": "complete", "body_text_length": 100, "body_child_element_count": 3}
+        raise AssertionError(f"unexpected author tab script: {script[:40]}")
+
+    async def wait_for_timeout(self, milliseconds: float) -> None:
+        return None
+
+    async def wait_for_load_state(self, state: str, timeout: float | None = None) -> None:
+        return None
+
+    async def bring_to_front(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+
+class _TabMouse:
+    async def move(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def wheel(self, *args: Any, **kwargs: Any) -> None:
+        return None
 
 
 def note(note_id: str, *, card_type: str = "normal") -> dict[str, Any]:
@@ -69,6 +163,8 @@ class _Keyboard:
     async def press(self, key: str) -> None:
         if key == "Enter" and self.site.box_focused:
             self.site.press_enter()
+        elif key == "ArrowRight" and self.site.overlay_note is not None:
+            self.site.flip()
 
 
 class XhsFakeSite:
@@ -78,6 +174,12 @@ class XhsFakeSite:
     `typed_keyword` 让回车请求体里的关键词与目标不同；`stall_after` 页之后前端不再加载；
     `hot_query` 每页附一条热搜项（无 DOM 卡片）。`search_overrides[k]` 依次替换目标会话第 k 页的响应：
     字符串为请求失败文本（requestfailed），字典为响应 JSON；被替换的页不算已加载，前端下次滚动会重发。
+
+    浮层：`details[id]` 为 feed 的 note_card（默认 `detail_card(id)`）。`feed_overrides[id]` 依次替换每次点击：
+    "no_overlay" 浮层不出现；"no_feed" 浮层出现但无 feed；"net::…" 为 feed 请求失败；整数为 HTTP 状态码；
+    字典为 feed 响应 JSON。`image_overrides[url]` 为 "missing"（从不加载）或 HTTP 状态码。打开浮层加载前两张图，
+    翻到第 k 页再加载第 k+1 张。`author_tab_failures` 次点击作者名不开标签页；`author_url_ids[user]` 改写标签页
+    地址里的作者 ID；`creator_projections[user]` 替换投影返回值，`projection_hooks[user]` 在每次读取投影时调用。
     """
 
     def __init__(
@@ -123,6 +225,20 @@ class XhsFakeSite:
         self.search_overrides: dict[int, list[Any]] = {}
         self.before_respond: Any = None
         self.enter_items = [note(f"general-{index}") for index in range(4)]
+        self.details: dict[str, dict[str, Any]] = {}
+        self.feed_overrides: dict[str, list[Any]] = {}
+        self.image_overrides: dict[str, Any] = {}
+        self.author_tab_failures = 0
+        self.author_url_ids: dict[str, str] = {}
+        self.creator_projections: dict[str, Any] = {}
+        self.projection_hooks: dict[str, Any] = {}
+        self.overlay_closes = True
+        self.overlay_note: str | None = None
+        self.overlay_page = 0
+        self.results_url = ""
+        self.feed_requests: list[str] = []
+        self.author_tabs: list[AuthorTab] = []
+        self.loaded_images: set[str] = set()
 
     @staticmethod
     async def _noop(*args: Any, **kwargs: Any) -> None:
@@ -181,6 +297,8 @@ class XhsFakeSite:
             return self.visible_cards()
         if name == "search_ready_counts":
             return {"card_count": len(self.rendered_items()), "profile_count": 1}
+        if name == "overlay_state":
+            return self.overlay_state()
         raise AssertionError(f"unexpected page script: {name or script[:40]}")
 
     def visible_cards(self) -> list[dict[str, Any]]:
@@ -211,7 +329,18 @@ class XhsFakeSite:
         def near(point: dict[str, float]) -> bool:
             return abs(point["x"] - x) < 20 and abs(point["y"] - y) < 20
 
-        if not self.on_results and near(SEARCH_BOX):
+        if self.overlay_note is not None:
+            if near(CLOSE_POINT) and self.overlay_closes:
+                self.close_overlay()
+            elif near(ARROW_POINT):
+                self.flip()
+            elif near(AUTHOR_POINT):
+                self.open_author_tab()
+            return
+        card = next((card for card in self.visible_cards() if card["cover"] and near(card["cover"])), None)
+        if self.on_results and card is not None:
+            self.open_overlay(card["note_id"])
+        elif not self.on_results and near(SEARCH_BOX):
             self.box_focused = True
         elif self.on_results and near(FILTER_ENTRY):
             if self.panel_visible and not self.panel_closes:
@@ -294,6 +423,85 @@ class XhsFakeSite:
         payload = {"code": 0, "success": True, "data": {"has_more": has_more, "items": body_items}}
         self.page.respond(request, status=status, body=json.dumps(payload, ensure_ascii=False).encode())
 
+    # 浮层 --------------------------------------------------------------------
+
+    def detail(self, note_id: str) -> dict[str, Any]:
+        return self.details.setdefault(note_id, detail_card(note_id))
+
+    def overlay_state(self) -> dict[str, Any]:
+        if self.overlay_note is None:
+            return {"visible": False}
+        total = len(self.detail(self.overlay_note).get("image_list") or [])
+        return {
+            "visible": True,
+            "content_visible": True,
+            "page_index": self.overlay_page if total else None,
+            "page_total": total or None,
+            "close": dict(CLOSE_POINT),
+            "right_arrow": dict(ARROW_POINT) if total > 1 else None,
+            "author": dict(AUTHOR_POINT),
+        }
+
+    def open_overlay(self, note_id: str) -> None:
+        override = self.feed_overrides[note_id].pop(0) if self.feed_overrides.get(note_id) else None
+        if override == "no_overlay":
+            return
+        self.results_url = self.page.url
+        self.overlay_note = note_id
+        self.overlay_page = 1
+        self.page.url = f"https://www.xiaohongshu.com/explore/{note_id}?xsec_token=token-{note_id}&xsec_source=pc_search"
+        if override != "no_feed":
+            self.respond_feed(note_id, override)
+        self.load_image(note_id, 0)
+        self.load_image(note_id, 1)
+
+    def respond_feed(self, note_id: str, override: Any = None) -> None:
+        self.feed_requests.append(note_id)
+        request_json = {"source_note_id": note_id, "image_formats": ["jpg", "webp", "avif"], "xsec_source": "pc_search"}
+        request = self.page.request("POST", FEED_URL, resource_type="fetch", post_data_json=request_json)
+        if isinstance(override, str):
+            self.page.fail(request, override)
+            return
+        if isinstance(override, int):
+            self.page.respond(request, status=override, body=b"{}")
+            return
+        payload = override if isinstance(override, dict) else {
+            "code": 0, "success": True, "data": {"items": [{"id": note_id, "model_type": "note", "note_card": self.detail(note_id)}]},
+        }
+        self.page.respond(request, status=200, body=json.dumps(payload, ensure_ascii=False).encode())
+
+    def load_image(self, note_id: str, index: int) -> None:
+        images = self.detail(note_id).get("image_list") or []
+        if index >= len(images):
+            return
+        url = images[index]["url_default"]
+        override = self.image_overrides.get(url)
+        if override == "missing" or url in self.loaded_images:
+            return
+        self.loaded_images.add(url)
+        request = self.page.request("GET", url, resource_type="image")
+        status = override if isinstance(override, int) else 200
+        self.page.respond(request, status=status, body=image_bytes(note_id, index) if status == 200 else b"")
+
+    def flip(self) -> None:
+        total = len(self.detail(self.overlay_note).get("image_list") or [])
+        if self.overlay_page < total:
+            self.overlay_page += 1
+            self.load_image(self.overlay_note, self.overlay_page)
+
+    def close_overlay(self) -> None:
+        self.overlay_note = None
+        self.page.url = self.results_url
+
+    def open_author_tab(self) -> None:
+        if self.author_tab_failures > 0:
+            self.author_tab_failures -= 1
+            return
+        user_id = str(self.detail(self.overlay_note)["user"]["user_id"])
+        tab = AuthorTab(self, user_id, self.author_url_ids.get(user_id, user_id))
+        self.author_tabs.append(tab)
+        self.context.new_page(page=tab)
+
     def restart_without_filter(self) -> None:
         """前端在验证或登录恢复后自行重搜且丢了筛选：新会话、无 filters、列表回顶。"""
         self.filter_applied = False
@@ -304,4 +512,7 @@ def make_site(*args: Any, **kwargs: Any) -> XhsFakeSite:
     return XhsFakeSite(*args, **kwargs)
 
 
-__all__ = ["XhsFakeSite", "FakePage", "make_site", "note", "TARGET_FILTERS"]
+__all__ = [
+    "XhsFakeSite", "FakePage", "make_site", "note", "TARGET_FILTERS", "detail_card", "creator_projection",
+    "image_url", "image_bytes",
+]

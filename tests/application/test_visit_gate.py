@@ -525,7 +525,7 @@ def test_summary_helper_unions_ledgers_and_manifests(tmp_path):
 
 
 def test_policies_never_declare_playwright_requests():
-    assert VISIT_GATED_PLATFORMS == frozenset()
+    assert VISIT_GATED_PLATFORMS == frozenset({"xhs"}) <= set(VISIT_POLICIES)
     assert set(VISIT_POLICIES) == {"xhs"}
     with pytest.raises(ValueError):
         VisitPolicy(

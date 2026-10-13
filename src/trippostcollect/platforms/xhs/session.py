@@ -1037,7 +1037,9 @@ class XhsSessionMixin:
 
         # 临时 profile 每轮都未登录：直接进入二维码登录，再以 UI 与 user/me 共同确认。
         await self._run_qrcode_login()
-        self.xhs_client = await self.create_xhs_client(httpx_proxy_format)
+        if self.ports.repair:
+            # repair 过渡（提交 6 删）：repair 仍经旧 API 取详情与作者；正式发现只读页面截获。
+            self.xhs_client = await self.create_xhs_client(httpx_proxy_format)
         self.crawler_type = self.settings.CRAWLER_TYPE
         if self.settings.CRAWLER_TYPE == "search":
             # 回车、点选“图文”、收起面板、翻页停顿、初始行为阶段与回顶都在全量扫描内完成。

@@ -24,7 +24,7 @@ SCRIPT_MODULES = {path.stem for path in (ROOT / "scripts").glob("*.py")} | {"scr
 WORKER_CODES = ("wb", "dy", "zhihu", "xhs")
 MIXIN_MODULES = {"session", "navigation", "login", "author", "detail", "media", "errors", "parser", "behavior"}
 # #71 新增、台账之外的 mixin 模块。
-T71_MIXIN_MODULES = {"scan"}
+T71_MIXIN_MODULES = {"scan", "overlay"}
 # 平台层只可依赖根侧父子共用的格式定义，不得依赖租约、发现等控制面。
 XHS_ROOT_MODULES_ALLOWED = {"trippostcollect.xhs.operator_wait", "trippostcollect.xhs.search_target"}
 

@@ -33,7 +33,7 @@ from trippostcollect.core.execution_state import FrozenExecutionState
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.bilibili import core as bilibili_core
 from trippostcollect.runtime import process
-from trippostcollect.runtime.visit_ledger import content_visits_path
+from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_path
 from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -544,6 +544,70 @@ def behavior_for(platform):
     }
 
 
+XHS_LEDGER_ID = "71" * 16
+XHS_LEDGER_TIME = "2026-10-01T01:02:03+00:00"
+
+
+def write_xhs_visit_ledger(behavior_path, records, entries):
+    """#71 合成账本：与离线记录、manifest 一致的回车 → 点选“图文” → 逐篇浮层与作者页访问。
+
+    只替代 worker 的取数过程，账本与 `content_visit_refs` 按真实 worker 的写法给出，访问门禁在全链路上照常执行。
+    返回目标会话（has_more=false）搜索访问 id，供来源耗尽停止事件引用。
+    """
+    ledger = VisitLedger.create(
+        content_visits_path(behavior_path), platform="xhs", mode="discovery",
+        ledger_id=XHS_LEDGER_ID, clock=lambda: XHS_LEDGER_TIME,
+    )
+
+    def action(kind, target, from_visit=None):
+        return ledger.append("action", seq=ledger.next_seq(), page_role="primary", action=kind, target=target,
+                             from_visit=from_visit)
+
+    def visit(stage, rule, source, *, trigger, subject_id=None, **audit):
+        return ledger.append("visit", seq=ledger.next_seq(), page_role="primary", recorded_at=XHS_LEDGER_TIME,
+                             stage=stage, source=source, rule=rule, endpoint=None,
+                             status=200 if source == "page_response" else None, outcome="ok", route="/search_result_ai",
+                             query_keys=[], subject_id=subject_id, trigger=trigger, **audit)
+
+    def pause(stage, continuity="n/a"):
+        start = ledger.next_seq()
+        ledger.append("pause", seq=ledger.next_seq(), page_role="primary", stage=stage, start_seq=start,
+                      seconds=1.0, continuity=continuity)
+
+    def search(trigger, *, target, items):
+        return visit("search_results", "xhs.search_notes", "page_response", trigger=trigger,
+                     search_session="offline-2" if target else "offline-1",
+                     filter_signature="target" if target else "none", is_target=target, keyword_matches_target=True,
+                     search_page=1, has_more=not target, items=items)
+
+    search(action("press_enter", {}), target=False, items=[])
+    target = search(action("apply_filter", {"filter": "note_type"}), target=True,
+                    items=[{"id": record["note_id"], "type": "normal"} for record in records])
+    pause("search_results", "completed")
+    creator = None
+    for record in records:
+        note_id = record["note_id"]
+        click = action("click_card", {"note_id": note_id})
+        detail = visit("note_detail", "xhs.feed", "page_response", trigger=click, subject_id=note_id)
+        images = [
+            visit("note_image", "xhs.note_image", "page_response", trigger=click, subject_id=note_id,
+                  asset_key=entry.source_asset_key, sha256=entry.sha256, bytes=entry.size_bytes)
+            for entry in entries if entry.platform_post_id == note_id
+        ]
+        pause("note_detail")
+        if creator is None:
+            pause("creator_profile")
+            author = action("click_author", {"note_id": note_id}, from_visit=detail)
+            creator = visit("creator_profile", "creator_page_data", "page_state", trigger=author,
+                            subject_id=record["user_id"], url_user_id=record["user_id"])
+            action("close_tab", {"note_id": note_id})
+        action("close_overlay", {"note_id": note_id})
+        record["content_visit_refs"] = {"ledger_id": XHS_LEDGER_ID, "search_results": target, "note_detail": detail,
+                                        "creator_profile": creator, "images": images}
+    ledger.close()
+    return target
+
+
 def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
     """落盘真实 JSONL、manifest 和 PNG；仅替代 worker，不替代正式门禁。"""
     folder = save_path / platform
@@ -572,6 +636,13 @@ def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
             ))
             if scenario == "missing_image":
                 staged.path.unlink()
+            if platform == "xhs":
+                # 真实小红书记录带 image_assets（门禁 R5 按它逐张核对）。
+                record.setdefault("image_assets", []).append({
+                    "url": candidate.source_url, "source_index": candidate.source_index,
+                    "source_asset_key": candidate.source_asset_key,
+                })
+    source_visit_id = write_xhs_visit_ledger(behavior_path, records, entries) if platform == "xhs" else None
     (folder / "search_contents_fixed.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
     write_manifest_atomic(folder / "image_manifest.jsonl", entries)
     behavior = behavior_for(platform)
@@ -586,6 +657,8 @@ def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
         "raw_batch_count": 2, "pages_fetched": 2, "stop_reason": "source_exhausted",
         "stop_detail": "has_more_false",
     }
+    if source_visit_id is not None:
+        details["source_visit_id"] = source_visit_id
     if scenario.startswith("count_"):
         details["candidate_count"] = int(scenario.split("_")[1])
     if scenario == "many_pages":

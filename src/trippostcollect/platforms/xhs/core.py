@@ -21,7 +21,6 @@
 
 """小红书 crawler 组合类：搜索编排与会话调用；各职责方法由同一类的 mixin 提供。"""
 
-import asyncio
 import logging
 import os
 from asyncio import Task
@@ -37,11 +36,8 @@ from trippostcollect.platforms.xhs.detail import XhsDetailMixin
 from trippostcollect.platforms.xhs.errors import (
     IPBlockError,
     PlatformRuntimeError,
-    XHSCreatorProfileUnavailable,
-    XHSImageDownloadError,
     XHSLoginExpired,
     XHSNetworkRecoveryTimeout,
-    XHSNoteDetailUnavailable,
     XhsErrorsMixin,
     is_xhs_target_closed_failure,
     xhs_cdp_lifecycle_stop_detail,
@@ -50,13 +46,12 @@ from trippostcollect.platforms.xhs.login import XhsLoginMixin
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget
 from trippostcollect.platforms.xhs.media import XhsMediaMixin
 from trippostcollect.platforms.xhs.navigation import XhsNavigationMixin, XhsSearchEntryFailed
-from trippostcollect.platforms.xhs.parser import XhsParserMixin, _normalized_creator_item, update_xhs_note
-from trippostcollect.platforms.xhs.scan import ScanState, SearchItem, SearchPage, XhsScanMixin
+from trippostcollect.platforms.xhs.overlay import XhsOverlayMixin
+from trippostcollect.platforms.xhs.parser import XhsParserMixin, update_xhs_note
+from trippostcollect.platforms.xhs.scan import ScanState, XhsScanMixin
 from trippostcollect.platforms.xhs.session import XhsSessionMixin
-from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.runtime.cookies import convert_browser_context_cookies
-from trippostcollect.runtime.image_retry import is_runtime_blocking_image_error
 from trippostcollect.runtime.page_capture import PageCaptureChannel
 
 logger = logging.getLogger("MediaCrawler")
@@ -104,7 +99,7 @@ def _login_recovery_stop_detail(exc: BaseException) -> Optional[str]:
 
 
 def _full_scan_stop_detail(exc: BaseException) -> Optional[str]:
-    """全量扫描的运行级失败细节：与登录恢复同一口径，另加搜索入口与过渡详情路径；其他异常返回 None。"""
+    """全量扫描的运行级失败细节：与登录恢复同一口径，另加搜索入口与轮中登录失效；其他异常返回 None。"""
     detail = _login_recovery_stop_detail(exc)
     if detail is not None:
         return detail
@@ -112,13 +107,12 @@ def _full_scan_stop_detail(exc: BaseException) -> Optional[str]:
         return str(exc)
     if isinstance(exc, XHSLoginExpired):
         return exc.code
-    if isinstance(exc, XHSNoteDetailUnavailable):
-        return "note_detail_unavailable"
     return None
 
 
 class XiaoHongShuCrawler(
     XhsScanMixin,
+    XhsOverlayMixin,
     XhsSessionMixin,
     XhsNavigationMixin,
     XhsLoginMixin,
@@ -149,7 +143,9 @@ class XiaoHongShuCrawler(
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
         self.post_interaction_mode = os.environ.get("TRIPPOSTCOLLECT_XHS_POST_INTERACTION", "none").strip()
         self.post_interaction_attempted = False
-        self.creator_profile_cache: Dict[str, Dict] = {}
+        # 作者 ID → (作者资料, 首次作者访问 id)；同一作者本轮只点一次，之后的记录引用首次访问。
+        self.creator_profile_cache: Dict[str, tuple[Dict, Optional[str]]] = {}
+        self._overlay_fail_streak = 0
         self._crawler_page_open_depth = 0
         self._initial_pages: Dict[int, Page] = {}
         self._new_pages: Dict[int, tuple[Page, float, str]] = {}
@@ -234,143 +230,8 @@ class XiaoHongShuCrawler(
                     discovery_phase="full_scan",
                 )
 
-    async def _process_note_card(self, item: SearchItem, search_page: SearchPage) -> None:
-        """过渡实现（提交 5 由浮层处理取代）：经旧 API 取详情、作者与图片，并对本篇作出决定。"""
-        accumulator = self._scan.accumulator
-        identity = item.note_id
-        position = {
-            "source_page": search_page.page,
-            "source_cursor": search_page.session.search_id,
-            "discovery_phase": "full_scan",
-        }
-        try:
-            note_detail = await self.get_note_detail_async_task(
-                note_id=identity,
-                xsec_source=item.xsec_source,
-                xsec_token=item.xsec_token,
-                semaphore=asyncio.Semaphore(1),
-            )
-        except Exception as exc:
-            request_failure = self._request_failure_exception(exc)
-            if self._is_login_expired_failure(exc):
-                raise XHSLoginExpired("note_detail") from exc
-            detail_text = str(request_failure).lower()
-            if isinstance(
-                request_failure,
-                (IPBlockError, PlatformRuntimeError, XHSNetworkRecoveryTimeout, CDPBrowserLifecycleError),
-            ) or isinstance(exc, PlaywrightError):
-                raise request_failure
-            if any(
-                marker in detail_text
-                for marker in ("platform_security_limit", "captcha", "rate_limit", "login_required")
-            ):
-                raise PlatformRuntimeError(str(request_failure), code="search_or_detail_request_failed") from exc
-            accumulator.skip_candidate_failure(
-                identity,
-                failure_scope="post",
-                detail="note_detail_unavailable",
-                error_code=exc.code if isinstance(exc, XHSNoteDetailUnavailable) else "detail_request_failed",
-                attempts=(
-                    exc.attempts
-                    if isinstance(exc, XHSNoteDetailUnavailable)
-                    else self._request_failure_attempts(exc)
-                ),
-                retryable=True,
-                **position,
-            )
-            return
-        if not note_detail:
-            accumulator.consider(identity, valid=False)
-            return
-        if self.is_video_note(note_detail):
-            logger.info(f"[XiaoHongShuCrawler.search] Skip video note, note_id: {identity}")
-            accumulator.consider(identity, valid=False)
-            return
-        await self._maybe_run_post_interaction(note_detail)
-        try:
-            await self.enrich_note_creator(note_detail)
-        except XHSCreatorProfileUnavailable as exc:
-            accumulator.skip_candidate_failure(
-                identity,
-                failure_scope="post",
-                detail=f"creator_profile_failed:{exc.reason}" if exc.reason else "creator_profile_failed",
-                error_code="creator_profile_unavailable",
-                attempts=exc.attempts,
-                retryable=True,
-                **position,
-            )
-            return
-        except RuntimeError as exc:
-            if isinstance(exc, (XHSNetworkRecoveryTimeout, CDPBrowserLifecycleError)):
-                raise
-            detail_text = str(exc).lower()
-            if any(
-                marker in detail_text
-                for marker in ("platform_security_limit", "captcha", "rate_limit", "login_required")
-            ):
-                raise
-            retry_exhausted = "creator_profile_unavailable_after_retry" in detail_text
-            accumulator.skip_candidate_failure(
-                identity,
-                failure_scope="post",
-                detail="creator_profile_failed",
-                error_code="creator_profile_unavailable" if retry_exhausted else type(exc).__name__,
-                attempts=1,
-                retryable=retry_exhausted,
-                **position,
-            )
-            return
-        creator_profile = note_detail.get("creator_profile") or {}
-        creator_item = (
-            _normalized_creator_item(
-                (note_detail.get("user") or {}).get("user_id", ""),
-                creator_profile,
-                current_timestamp=self.ports.current_timestamp,
-            )
-            if creator_profile
-            else {}
-        )
-        followers_observed = any(creator_item.get(key) not in (None, "") for key in ("fans_count", "fans"))
-        interact_info = note_detail.get("interact_info") or {}
-        valid = bool(
-            identity
-            and note_detail.get("desc")
-            and note_detail.get("content_detail_status") == "detail_observed"
-            and note_detail.get("content_detail_source") == "note_detail"
-            and note_detail.get("time")
-            and (note_detail.get("user") or {}).get("user_id")
-            and (note_detail.get("user") or {}).get("nickname")
-            and note_detail.get("image_list")
-            and followers_observed
-            and all(
-                interact_info.get(key) not in (None, "")
-                for key in ("liked_count", "collected_count", "comment_count", "share_count")
-            )
-        )
-        if valid:
-            try:
-                await self.get_notice_media(note_detail)
-            except XHSImageDownloadError as exc:
-                if is_runtime_blocking_image_error(exc.code):
-                    raise PlatformRuntimeError(f"XHS image download {exc.code}", code=exc.code) from exc
-                accumulator.skip_candidate_failure(
-                    identity,
-                    failure_scope="image",
-                    detail="image_download_failed",
-                    error_code=exc.code,
-                    attempts=exc.attempts,
-                    source_index=exc.source_index,
-                    **position,
-                )
-                return
-        await self.update_xhs_note(note_detail)
-        target_valid = valid and topic_relevant_for_web_post(
-            "xhs", note_detail, fallback_keyword=self._scan.keyword,
-        )
-        accumulator.consider(identity, valid=target_valid)
-
     async def create_xhs_client(self, httpx_proxy: Optional[str]) -> XiaoHongShuClient:
-        """Create Xiaohongshu client"""
+        """repair 过渡（提交 6 删）：旧 API 详情与作者接口的客户端。"""
         logger.info("[XiaoHongShuCrawler.create_xhs_client] Begin create Xiaohongshu API client ...")
         identity_headers = await self._browser_identity_headers()
         cookie_str, cookie_dict = await convert_browser_context_cookies(

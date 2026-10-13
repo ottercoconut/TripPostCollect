@@ -90,10 +90,15 @@ def visits(*, ok=True, pacing=True, continuity=True) -> dict:
 
 
 def test_double_encoded_xhs_result_page_passes_target_url():
-    result = collect_behavior_validation([platform_record("xhs")], ["xhs"], KEYWORD)
+    result = collect_behavior_validation([platform_record("xhs")], ["xhs"], KEYWORD, content_visits={"xhs": visits()})
     assert result["platforms"]["xhs"]["target_url_ok"] is True
     assert result["behavior_ok"] is True
-    assert result["content_visit_ok"] is None and result["platforms"]["xhs"]["content_visit_ok"] is None
+    assert result["content_visit_ok"] is True and result["platforms"]["xhs"]["content_visit_ok"] is True
+
+
+def test_xhs_is_gated_and_fails_closed_without_visit_results():
+    result = collect_behavior_validation([platform_record("xhs")], ["xhs"], KEYWORD)
+    assert result["platforms"]["xhs"]["content_visit_ok"] is False and result["behavior_ok"] is False
 
 
 def test_gated_platform_takes_pacing_and_continuity_from_the_ledger():

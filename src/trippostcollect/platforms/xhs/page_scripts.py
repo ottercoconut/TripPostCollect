@@ -115,6 +115,46 @@ DOM_SCRIPTS: dict[str, str] = {
             option: visible(option) ? center(option) : null,
         };
     }""",
+    # 笔记浮层（R2）：遮罩与正文是否可见、页码 k/N、关闭按钮、右箭头与作者名链接的中心点。
+    "overlay_state": """() => {
+        const visible = (node) => {
+            if (!node) return false;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const center = (node) => {
+            if (!visible(node)) return null;
+            const rect = node.getBoundingClientRect();
+            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        };
+        const mask = document.querySelector('div.note-detail-mask');
+        if (!visible(mask)) return { visible: false };
+        const content = ['.note-content', '#detail-desc', '.author a.name']
+            .some((selector) => visible(mask.querySelector(selector)));
+        let pageIndex = null;
+        let pageTotal = null;
+        const nodes = mask.querySelectorAll('.fraction, span, div');
+        for (let index = 0; index < nodes.length && index < 400; index += 1) {
+            const node = nodes[index];
+            if (node.childElementCount) continue;
+            const match = /^\\s*(\\d+)\\s*\\/\\s*(\\d+)\\s*$/.exec(node.textContent || '');
+            if (match && visible(node)) {
+                pageIndex = Number(match[1]);
+                pageTotal = Number(match[2]);
+                break;
+            }
+        }
+        return {
+            visible: true,
+            content_visible: content,
+            page_index: pageIndex,
+            page_total: pageTotal,
+            close: center(document.querySelector('div.close-circle')),
+            right_arrow: center(mask.querySelector('div.arrow-controller.right')),
+            author: center(mask.querySelector('.author a.name')),
+        };
+    }""",
     "search_ready_counts": """() => ({
         card_count: document.querySelectorAll(
             "section.note-item, a[href*='/explore/'], a[href*='/discovery/item/']"
@@ -123,7 +163,155 @@ DOM_SCRIPTS: dict[str, str] = {
     })""",
 }
 
-STATE_SCRIPTS: dict[str, str] = {}
+STATE_SCRIPTS: dict[str, str] = {
+    # 作者页白名单投影（经通道 read_state 原样使用这一份）：只读取页面已执行的
+    # window.__INITIAL_STATE__.user.userPageData。先在该作者记录内有界收集头像证据 URL（键与路径来自
+    # records.sanitization），再按白名单只复制标量字段，删除与证据 URL 完全相同的字符串；证据集合不返回。
+    # 只有自有数据属性 __v_isRef === true 的节点才按 Vue ref 解包，其余对象的全部字段都参与证据扫描。
+    # 计数类字段不投影布尔值。只读自有数据属性（不触发 getter 或 toJSON），检查做不完时拒绝整个投影。
+    # 不序列化整份状态，不返回 HTML。
+    "creator_page_data": """(spec) => {
+    const INCOMPLETE = 'projection_avatar_check_incomplete';
+    const avatarKeys = new Set(spec.avatar_keys);
+    const avatarPaths = new Set(spec.avatar_paths.map((path) => JSON.stringify(path)));
+    const isObject = (value) => value !== null && typeof value === 'object';
+    const ownValue = (node, key) => {
+        const descriptor = Object.getOwnPropertyDescriptor(node, key);
+        if (descriptor === undefined) return undefined;
+        if (!('value' in descriptor)) throw new Error(INCOMPLETE);
+        return descriptor.value;
+    };
+    const numericFields = new Set(spec.numeric_fields);
+    const stripChars = new Set(Array.from(spec.strip_chars));
+    const pyStrip = (text) => {
+        let start = 0;
+        let end = text.length;
+        while (start < end && stripChars.has(text[start])) start += 1;
+        while (end > start && stripChars.has(text[end - 1])) end -= 1;
+        return text.slice(start, end);
+    };
+    const isRef = (value) => {
+        const marker = Object.getOwnPropertyDescriptor(value, '__v_isRef');
+        return marker !== undefined && 'value' in marker && marker.value === true;
+    };
+    const unref = (value) => {
+        let current = value;
+        for (let depth = 0; depth < 4; depth += 1) {
+            if (!isObject(current) || !isRef(current)) return current;
+            const wrapped = Object.getOwnPropertyDescriptor(current, '_rawValue')
+                || Object.getOwnPropertyDescriptor(current, '_value');
+            if (wrapped === undefined || !('value' in wrapped)) throw new Error(INCOMPLETE);
+            current = wrapped.value;
+        }
+        return current;
+    };
+    const isPlain = (value) => {
+        if (!isObject(value) || Array.isArray(value)) return false;
+        const prototype = Object.getPrototypeOf(value);
+        return prototype === Object.prototype || prototype === null;
+    };
+    const isAvatarKey = (key) => avatarKeys.has(key.toLowerCase())
+        || avatarKeys.has(key.toUpperCase().toLowerCase());
+    const evidencedUrl = (value) => {
+        if (typeof value !== 'string') return null;
+        const candidate = pyStrip(value);
+        if (!candidate || (candidate.length > 8192 && Array.from(candidate).length > 8192)) return null;
+        const lowered = candidate.toLowerCase();
+        let rest = null;
+        if (lowered.startsWith('http://')) rest = candidate.slice(7);
+        else if (lowered.startsWith('https://')) rest = candidate.slice(8);
+        else if (lowered.startsWith('//')) rest = candidate.slice(2);
+        if (rest === null || !rest.split(/[\\/?#]/, 1)[0]) return null;
+        return candidate;
+    };
+    const evidence = new Set();
+    const ancestors = [];
+    let remaining = spec.max_nodes;
+    const visit = (value, path, inAvatar, depth) => {
+        remaining -= 1;
+        if (remaining < 0 || depth > spec.max_depth) throw new Error(INCOMPLETE);
+        const node = unref(value);
+        if (inAvatar) {
+            const url = evidencedUrl(node);
+            if (url !== null) {
+                evidence.add(url);
+                return;
+            }
+        }
+        if (node === null || node === undefined) return;
+        const kind = typeof node;
+        if (kind === 'string' || kind === 'number' || kind === 'boolean') return;
+        if (kind !== 'object') throw new Error(INCOMPLETE);
+        if (ancestors.includes(node)) throw new Error(INCOMPLETE);
+        ancestors.push(node);
+        try {
+            if (Array.isArray(node)) {
+                const length = ownValue(node, 'length');
+                for (let index = 0; index < length; index += 1) {
+                    visit(ownValue(node, String(index)), path, inAvatar, depth + 1);
+                }
+            } else if (node instanceof Set) {
+                for (const item of node) visit(item, path, inAvatar, depth + 1);
+            } else if (node instanceof Map) {
+                for (const [key, item] of node) {
+                    visit(key, path, inAvatar, depth + 1);
+                    visit(item, path, inAvatar, depth + 1);
+                }
+            } else if (!(node instanceof Date)) {
+                if (!isPlain(node)) throw new Error(INCOMPLETE);
+                for (const key of Object.keys(node)) {
+                    const nestedPath = path.concat([key]);
+                    const nestedAvatar = inAvatar || isAvatarKey(key)
+                        || avatarPaths.has(JSON.stringify(nestedPath));
+                    visit(ownValue(node, key), nestedPath, nestedAvatar, depth + 1);
+                }
+            }
+        } finally {
+            ancestors.pop();
+        }
+    };
+    const scalarFields = (source, fields) => {
+        const result = {};
+        for (const field of fields) {
+            const value = ownValue(source, field);
+            if (typeof value === 'string') {
+                if (!evidence.has(pyStrip(value))) result[field] = value;
+            } else if (typeof value === 'number' && Number.isFinite(value)) {
+                result[field] = value;
+            } else if (typeof value === 'boolean' && !numericFields.has(field)) {
+                result[field] = value;
+            }
+        }
+        return result;
+    };
+    try {
+        const state = unref(ownValue(window, '__INITIAL_STATE__'));
+        const user = isPlain(state) ? unref(ownValue(state, 'user')) : undefined;
+        const data = isPlain(user) ? unref(ownValue(user, 'userPageData')) : undefined;
+        if (!isPlain(data)) return { status: 'missing' };
+        visit(data, [], false, 0);
+        const creator = scalarFields(data, spec.top_fields);
+        for (const [key, fields] of spec.object_fields) {
+            const container = unref(ownValue(data, key));
+            if (isPlain(container)) creator[key] = scalarFields(container, fields);
+        }
+        for (const [key, fields] of spec.list_fields) {
+            const items = unref(ownValue(data, key));
+            if (!Array.isArray(items)) continue;
+            const rebuilt = [];
+            const length = Math.min(ownValue(items, 'length'), spec.max_items);
+            for (let index = 0; index < length; index += 1) {
+                const item = unref(ownValue(items, String(index)));
+                if (isPlain(item)) rebuilt.push(scalarFields(item, fields));
+            }
+            creator[key] = rebuilt;
+        }
+        return { status: 'ok', creator };
+    } catch (error) {
+        return { status: 'rejected', reason: INCOMPLETE };
+    }
+}""",
+}
 
 
 async def _dom(page: Page, name: str, arg: Any = None, *, timeout: float = 5.0) -> Any:
@@ -173,6 +361,11 @@ async def dom_search_layout_visible(page: Page) -> bool:
 async def dom_filter_state(page: Page, label: str) -> dict[str, Any]:
     state = await _dom(page, "filter_state", label)
     return state if isinstance(state, dict) else {}
+
+
+async def dom_overlay_state(page: Page) -> dict[str, Any]:
+    state = await _dom(page, "overlay_state")
+    return state if isinstance(state, dict) else {"visible": False}
 
 
 async def dom_search_ready_counts(page: Page) -> dict[str, Any]:

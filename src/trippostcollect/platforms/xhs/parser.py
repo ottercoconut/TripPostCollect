@@ -417,20 +417,6 @@ def read_creator_runtime_projection(result: Any) -> Tuple[Dict, str]:
     return projected, "ok"
 
 
-def creator_profile_user_ids(creator: Dict) -> List[str]:
-    """作者资料自带的用户 ID（只看 basicInfo 系键），用于和请求的作者核对。"""
-    user_ids = []
-    for key in XHS_CREATOR_BASIC_INFO_KEYS:
-        basic = creator.get(key)
-        if not isinstance(basic, dict):
-            continue
-        for field in ("userId", "user_id"):
-            value = basic.get(field)
-            if value not in (None, ""):
-                user_ids.append(str(value))
-    return user_ids
-
-
 def creator_runtime_followers_observed(user_id: str, creator: Dict) -> bool:
     """运行时投影的就绪判定：沿用 update_xhs_note 的 fans_count/fans 取值，只认非布尔且可按
     records.formal.parse_int 解析的计数（含“万/亿”单位）；0 是真实观察值。"""
@@ -520,6 +506,9 @@ def update_xhs_note(
         "xsec_token": note_item.get("xsec_token"),  # xsec_token
         "creator_profile_json": creator_item.get("creator_profile_json", ""),
     }
+    if note_item.get("content_visit_refs"):
+        # 来源引用（§5.3）：本记录引用的搜索、详情、作者与图片访问；随整条记录进 raw_sample_json。
+        local_db_item["content_visit_refs"] = note_item["content_visit_refs"]
     if save_data_option == "jsonl":
         local_db_item.update(
             {

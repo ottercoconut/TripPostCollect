@@ -653,6 +653,9 @@ def test_repair_behavior_gate_does_not_require_search_pacing(monkeypatch) -> Non
         ["xhs"],
         "青岛旅游",
         repair_mode=True,
+        # #71：xhs 纳入访问门禁后节奏与连续性以账本判定结果为准（repair 不要求搜索阶段）。
+        content_visits={"xhs": {"content_visit_ok": True, "request_pacing_ok": True, "continuity_ok": True,
+                                "required_stages": ["creator_profile", "note_detail"]}},
     )
 
     assert result["ok"] is True

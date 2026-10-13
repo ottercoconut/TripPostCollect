@@ -1350,6 +1350,8 @@ PAGINATION_EVENT_FIELDS = (
     "stagnation_basis",
     "stop_reason",
     "stop_detail",
+    # 门禁平台的来源耗尽停止事件引用目标会话末页的搜索访问（访问门禁 G2 据此回读账本）。
+    "source_visit_id",
     "candidate_identities",
     "skipped_candidate_count",
     "skipped_candidate_failures",

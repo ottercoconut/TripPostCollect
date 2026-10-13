@@ -117,7 +117,7 @@ VISIT_POLICIES: dict[str, VisitPolicy] = {
     ),
 }
 # 已纳入访问门禁的平台；平台在其取数改造完成的批次加入。
-VISIT_GATED_PLATFORMS: frozenset[str] = frozenset()
+VISIT_GATED_PLATFORMS: frozenset[str] = frozenset({"xhs"})
 
 
 def _seq(line: Mapping[str, Any]) -> int:
