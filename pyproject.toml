@@ -57,6 +57,7 @@ markers = [
     "macos_process: 需要独立 macOS 环境的真实进程、信号或文件锁",
     "local_socket: 仅专用临时目录 AF_UNIX bind",
     "installation: 根项目完整依赖及 CLI 入口验收",
+    "browser_replay: 本地 Chromium headless shell 离线回放（只在 macOS OS lane 执行）",
 ]
 
 [tool.ruff]

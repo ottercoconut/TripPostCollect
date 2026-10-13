@@ -159,3 +159,11 @@ def test_issue_2_lease_exit_nodes_are_complete(collected) -> None:
 def test_declared_lanes_are_root_lanes() -> None:
     # CI 只运行 ROOT_LANES；声明不得引用其他 lane（如已删除的 fork lane）。
     assert {entry["lane"] for _, _, entry in report.iter_entries(SPEC)} <= set(report.ROOT_LANES)
+
+
+def test_browser_replay_nodes_are_collected_only_in_the_os_lane(collected) -> None:
+    """本地 Chromium 回放只进 OS lane；component lane 按标记排除，不靠运行期跳过（必跑 lane 不接受 skip）。"""
+    marked = {lane: {nodeid for nodeid, item in nodes.items() if "browser_replay" in item["markers"]}
+              for lane, nodes in collected.items()}
+    assert len(marked["os"]) >= 3
+    assert all(not nodes for lane, nodes in marked.items() if lane != "os")

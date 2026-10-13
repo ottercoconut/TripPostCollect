@@ -21,10 +21,10 @@ import pytest
 
 
 EXPRESSIONS = {
-    "component": "not macos_process and not local_socket and not installation",
+    "component": "not macos_process and not local_socket and not installation and not browser_replay",
     "socket": "local_socket",
     "installation": "installation",
-    "os": "macos_process",
+    "os": "macos_process or browser_replay",
 }
 
 
