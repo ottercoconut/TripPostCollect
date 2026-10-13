@@ -104,7 +104,11 @@ class XhsOfflineSite:
 
     def watch(self, context: Any) -> None:
         """记下 Context 内的全部请求，供结束时核对没有请求逃逸路由。"""
-        context.on("request", self.seen_requests.append)
+        # Playwright 会在回调对象上缓存包装器；内置方法（如 list.append）不能设属性，必须用普通方法。
+        context.on("request", self._record_request)
+
+    def _record_request(self, request: Any) -> None:
+        self.seen_requests.append(request)
 
     def escaped(self) -> list[str]:
         handled = {id(request) for request in self.handled_requests}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections import defaultdict
 from typing import Any, Callable
 
@@ -12,6 +13,9 @@ class Emitter:
         self._handlers: dict[str, list[Callable[..., Any]]] = defaultdict(list)
 
     def on(self, event: str, handler: Callable[..., Any]) -> None:
+        # 与 Playwright 相同：非绑定方法的回调要能设属性（其包装器缓存在回调对象上），内置方法会在此失败。
+        if not inspect.ismethod(handler):
+            setattr(handler, "__impl__", getattr(handler, "__impl__", None))
         self._handlers[event].append(handler)
 
     def emit(self, event: str, *args: Any) -> None:
