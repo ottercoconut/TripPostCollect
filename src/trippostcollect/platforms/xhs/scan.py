@@ -1,0 +1,836 @@
+"""小红书 B2 全量滚动扫描：首页输入搜索、点选“图文”、目标会话逐页登记、按序完成批次与来源耗尽。
+
+前端每次从第 1 页开始的搜索是一个会话，键为 `(search_id, 筛选签名)`；只有 `is_target_search` 为真的
+目标会话参与登记与批次。循环每步只读可见卡片的 ID 与几何：已处理的滑过、视频记决定、未知图文就地
+处理；页按序完成。目标会话从第 1 页连续截获到 has_more=false 且全部完成才是来源耗尽。
+
+翻页停顿不变式（与门禁 G3 同义）：目标会话每截获一页 has_more=true，此后任何一次列表滚动之前都
+必须先完成一次 `search_page` 停顿，且停顿开始序号大于该页的到达序号；仍在读体的搜索响应按欠账处理。
+运行级异常一律上抛，由 `core.search` 集中写停止事件。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import random
+from collections import Counter
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+
+from trippostcollect.platforms.xhs.behavior import merge_pending_behavior_evidence
+from trippostcollect.platforms.xhs.capture import (
+    XHS_SEARCH_RULE,
+    classify_xhs_api_response,
+    raise_for_runtime_verdict,
+)
+from trippostcollect.platforms.xhs.errors import (
+    PlatformRuntimeError,
+    XHSLoginExpired,
+    XHSNetworkRecoveryTimeout,
+    XHSRequestFailed,
+)
+from trippostcollect.platforms.xhs.navigation import (
+    XHS_SEARCH_CAPTURE_SECONDS,
+    XhsSearchEntryFailed,
+    is_search_result_url,
+    search_request_page,
+)
+from trippostcollect.platforms.xhs.page_scripts import dom_filter_state, dom_scroll_metrics, dom_visible_cards
+from trippostcollect.platforms.xhs.parser import search_items_from_response
+from trippostcollect.runtime.human_flow import load_behavior_profile
+from trippostcollect.runtime.page_capture import CaptureFailure, CapturedResponse
+from trippostcollect.runtime.visit_ledger import line_seq
+from trippostcollect.xhs.search_target import (
+    XHS_TARGET_FILTER_LABEL,
+    is_target_search,
+    search_filter_signature,
+)
+
+logger = logging.getLogger("MediaCrawler")
+
+SEARCH_RULE = XHS_SEARCH_RULE.name
+XHS_SEARCH_LOAD_WAIT_SECONDS = 20.0
+XHS_SCROLL_SETTLE_SECONDS = (0.4, 1.2)
+# 单步滚动不超过视口 0.8 倍；可点击带为视口高度 10% 到底边，二者配合保证向下扫描不跳过任何一行卡片。
+XHS_SCROLL_VIEWPORT_RATIO = 0.8
+XHS_CLICK_BAND_TOP = 0.1
+XHS_CLICK_BAND_BOTTOM_MARGIN_PX = 8.0
+XHS_STALL_JIGGLES = 3
+XHS_UNREGISTERED_CARD_STEPS = 2
+XHS_BACKFILL_ATTEMPTS = 3
+XHS_FILTER_POLLS = 20
+XHS_FILTER_POLL_SECONDS = 0.25
+XHS_FILTER_APPLIED_TEXT = "已筛选"
+XHS_SCROLL_TOP_MAX_STEPS = 400
+# 读 DOM 之前先等在途的搜索响应读完体（列表可能已按它重新渲染）；单次最长约 10 秒。
+XHS_SEARCH_SETTLE_ROUNDS = 20
+XHS_SEARCH_SETTLE_POLL_SECONDS = 0.5
+# 首页输入搜索的一次受控恢复覆盖这些码；筛选与收起面板各有自己的一次重试。
+ENTRY_RECOVERABLE_CODES = frozenset({"explore_not_rendered", "search_not_rendered", "search_keyword_mismatch"})
+SCAN_RANDOM = random.SystemRandom()
+
+
+class XhsScanInterrupted(RuntimeError):
+    """验证完成后需要重触发当前动作：仍在结果页则重滚一步，已离开则回首页重新输入。"""
+
+
+@dataclass(frozen=True)
+class SearchItem:
+    note_id: str
+    xsec_token: str
+    xsec_source: str
+    card_type: str
+    position: int
+
+
+@dataclass(eq=False)
+class SearchSession:
+    search_id: str
+    filter_signature: str
+    started_seq: int
+    is_target: bool
+    keyword_matches: bool
+    pages: dict[int, "SearchPage"] = field(default_factory=dict)
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.search_id, self.filter_signature
+
+    @property
+    def last_page(self) -> Optional["SearchPage"]:
+        return self.pages[max(self.pages)] if self.pages else None
+
+
+@dataclass(eq=False)
+class SearchPage:
+    session: SearchSession
+    page: int
+    seq: int
+    visit_id: str
+    has_more: Optional[bool]
+    raw_count: int
+    items: tuple[SearchItem, ...]
+    observed: set[str] = field(default_factory=set)
+    passed: bool = False
+    began: bool = False
+    results_paused: bool = False
+    finished: bool = False
+
+    @property
+    def note_ids(self) -> list[str]:
+        return [item.note_id for item in self.items]
+
+
+class CardRegistry:
+    """note_id → (页, 项)。会话重置时整体换成新会话；同一会话内以首次出现的页为准，保证页按序完成。"""
+
+    def __init__(self) -> None:
+        self._cards: dict[str, tuple[SearchPage, SearchItem]] = {}
+
+    def register(self, page: SearchPage) -> None:
+        for item in page.items:
+            self._cards.setdefault(item.note_id, (page, item))
+
+    def get(self, note_id: str) -> Optional[tuple[SearchPage, SearchItem]]:
+        return self._cards.get(note_id)
+
+
+class PageTracker:
+    """目标会话的页按序完成：第 k 页完成后才轮到第 k+1 页；负责 begin_batch / finish_batch 时机。"""
+
+    def __init__(self, session: SearchSession, accumulator: Any) -> None:
+        self.session = session
+        self.accumulator = accumulator
+        self.next_page = 1
+
+    @property
+    def current(self) -> Optional[SearchPage]:
+        return self.session.pages.get(self.next_page)
+
+    def begin(self, page: SearchPage) -> None:
+        if not page.began:
+            self.accumulator.begin_batch()
+            page.began = True
+
+    def ready(self, page: SearchPage) -> bool:
+        return (page.passed or not page.items) and all(
+            self.accumulator.is_known(note_id) for note_id in page.note_ids
+        )
+
+    def _finish(self, page: SearchPage, *, complete: bool) -> None:
+        self.accumulator.finish_batch(
+            source_page=page.page,
+            source_cursor=self.session.search_id,
+            source_has_more=page.has_more,
+            raw_batch_count=page.raw_count,
+            resume_page=None,
+            resume_cursor=None,
+            batch_complete=complete,
+            discovery_phase="full_scan",
+            count_stagnation=True,
+        )
+
+    def finish(self, page: SearchPage) -> None:
+        self.begin(page)
+        self._finish(page, complete=True)
+        page.finished = True
+        self.next_page += 1
+
+    def abandon(self) -> None:
+        """会话重置时未完成的当前页记一次未完成批次（不发布），已决定的候选照常保留。"""
+        page = self.current
+        if page is not None and page.began and not page.finished:
+            self._finish(page, complete=False)
+
+
+@dataclass
+class ScanState:
+    keyword: str
+    accumulator: Any
+    sessions: dict[tuple[str, str], SearchSession] = field(default_factory=dict)
+    target: Optional[SearchSession] = None
+    tracker: Optional[PageTracker] = None
+    registry: CardRegistry = field(default_factory=CardRegistry)
+    search_cursor: int = 0
+    owed_page_seq: int = 0
+    page_pause_cleared_seq: int = 0
+    entering: bool = False
+    needs_entry: bool = True
+    entry_navigate: bool = False
+    needs_top: bool = False
+    pending_session: Optional[SearchSession] = None
+    retrigger: bool = False
+    exhausted: bool = False
+    network_state: dict[str, object] = field(default_factory=dict)
+    unregistered: Counter = field(default_factory=Counter)
+    backfill_attempts: Counter = field(default_factory=Counter)
+    observed_index: dict[str, int] = field(default_factory=dict)
+
+
+class XhsScanMixin:
+    """全量滚动扫描；作为 XiaoHongShuCrawler 的 mixin。单篇处理由 `_process_note_card` 提供。"""
+
+    @staticmethod
+    async def _scan_sleep(seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+    def _scan_position(self) -> dict[str, Any]:
+        """运行级失败的停止事件位置：目标会话中正在处理（或等待截获）的页与 search_id；全量扫描没有恢复位置。"""
+        scan = getattr(self, "_scan", None)
+        tracker = scan.tracker if scan is not None else None
+        return {
+            "source_page": tracker.next_page if tracker is not None else None,
+            "source_cursor": tracker.session.search_id if tracker is not None else None,
+        }
+
+    async def _run_full_scan(self, keyword: str, accumulator: Any) -> None:
+        """一个关键词的全量扫描：直到来源耗尽或运行级异常上抛。"""
+        scan = self._scan = ScanState(keyword=keyword, accumulator=accumulator)
+        if not self._behavior_stage_done:
+            self._pending_behavior_evidence = {}
+        while accumulator.can_continue and not scan.exhausted:
+            try:
+                if scan.needs_entry:
+                    await self._start_target_session()
+                elif not self._behavior_stage_done:
+                    await self._run_initial_behavior_stage()
+                    scan.needs_top = True
+                elif scan.needs_top:
+                    await self._scroll_to_top()
+                    scan.needs_top = False
+                elif scan.retrigger:
+                    scan.retrigger = False
+                    await self._retrigger_scroll()
+                else:
+                    await self._scan_step()
+            except XHSLoginExpired as exc:
+                logger.warning(f"[XiaoHongShuCrawler.scan] Login expired during full scan: {exc}")
+                if not await self._wait_for_midrun_login_recovery():
+                    raise PlatformRuntimeError("XHS login remained expired", code="login_required") from exc
+                self._after_scan_interruption()
+            except XHSRequestFailed as exc:
+                await self._pause_scan_for_network(exc)
+            except XhsScanInterrupted as exc:
+                logger.info(f"[XiaoHongShuCrawler.scan] Re-triggering after {exc}")
+                self._after_scan_interruption()
+
+    def _after_scan_interruption(self) -> None:
+        scan = self._scan
+        if scan.needs_entry or not is_search_result_url(self.context_page.url):
+            scan.needs_entry = True
+            scan.entry_navigate = True
+        else:
+            scan.retrigger = True
+
+    async def _pause_scan_for_network(self, exc: XHSRequestFailed) -> None:
+        """§3.8.3：搜索请求 net::ERR_* 失败进入网络暂停，退避后重滚一步；不可恢复的失败为运行级。"""
+        scan = self._scan
+        if not exc.recoverable:
+            raise PlatformRuntimeError(str(exc), code="search_request_failed") from exc
+        if not await self._pause_for_network_recovery(exc, stage="full_scan", state=scan.network_state):
+            started_at = float(scan.network_state.get("started_at") or self._popup_monotonic())
+            raise XHSNetworkRecoveryTimeout("full_scan", self._popup_monotonic() - started_at) from exc
+        self._after_scan_interruption()
+
+    # 进入搜索与目标会话 ---------------------------------------------------------
+
+    async def _start_target_session(self) -> None:
+        """回车 → 非目标第 1 页 → 点选“图文” → 目标会话第 1 页 → 收起面板（§3.2 第 1–5 条）。"""
+        scan = self._scan
+        for attempt in (0, 1):
+            scan.entering = True
+            try:
+                await self._enter_search(navigate=scan.entry_navigate or attempt > 0)
+                session = await self._apply_target_filter()
+                if not session.keyword_matches:
+                    raise XhsSearchEntryFailed("search_keyword_mismatch")
+                await self._close_filter_panel()
+            except XhsSearchEntryFailed as exc:
+                if attempt or exc.code not in ENTRY_RECOVERABLE_CODES:
+                    raise
+                logger.warning(
+                    "[XiaoHongShuCrawler.scan] Search entry failed; re-entering from the home page once: "
+                    f"{exc.code}"
+                )
+                continue
+            finally:
+                scan.entering = False
+            self._adopt_target_session(session)
+            scan.needs_entry = False
+            scan.entry_navigate = False
+            return
+
+    async def _enter_search(self, *, navigate: bool) -> None:
+        try:
+            await self._open_behavior_search_page_on_primary_page(self._scan.keyword, navigate=navigate)
+        except XhsSearchEntryFailed:
+            # 网络失败、验证或登录失效优先于“未出结果”。
+            await self._consume_search_captures()
+            raise
+        await self._consume_search_captures()
+
+    async def _apply_target_filter(self) -> SearchSession:
+        """打开面板、按精确文字点选“图文”；以“已筛选”加目标会话第 1 页判定成功，失败重试一次。"""
+        page = self.context_page
+        after_seq = self._require_capture().ledger.last_seq
+        for attempt in (0, 1):
+            session = self._newest_target_session(after_seq)
+            if attempt and session is not None and await self._filter_applied():
+                return session
+            state = await self._open_filter_panel()
+            click = self._record_trigger_action(
+                "apply_filter", {"filter": "note_type", "label": XHS_TARGET_FILTER_LABEL},
+            )
+            await self._click_point(state["option"])
+            session = await self._await_target_page_one(after_seq=line_seq(click))
+            if session is not None and await self._filter_applied():
+                return session
+            logger.warning(
+                "[XiaoHongShuCrawler.scan] Target filter not confirmed "
+                f"(attempt {attempt + 1}): target_session={session is not None}, url_path_ok="
+                f"{is_search_result_url(page.url)}"
+            )
+        raise XhsSearchEntryFailed("target_filter_not_applied")
+
+    async def _filter_applied(self) -> bool:
+        state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
+        return state.get("entry_text") == XHS_FILTER_APPLIED_TEXT
+
+    async def _open_filter_panel(self) -> dict[str, Any]:
+        state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
+        if state.get("panel_visible") and state.get("option"):
+            return state
+        entry = state.get("entry")
+        if not entry:
+            raise XhsSearchEntryFailed("target_filter_not_applied")
+        self._record_trigger_action("apply_filter", {"filter": "panel_open"})
+        await self._click_point(entry)
+        opened = await self._poll_filter_state(lambda value: bool(value.get("panel_visible") and value.get("option")))
+        if opened is None:
+            raise XhsSearchEntryFailed("target_filter_not_applied")
+        return opened
+
+    async def _close_filter_panel(self) -> None:
+        """面板不会自动收起：任何滚动之前再点一次入口，确认 .filters-wrapper 不可见；失败重试一次。"""
+        for _ in (0, 1):
+            state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
+            if not state.get("panel_visible"):
+                return
+            entry = state.get("entry")
+            if not entry:
+                break
+            self._record_trigger_action("apply_filter", {"filter": "panel_close"})
+            await self._click_point(entry)
+            if await self._poll_filter_state(lambda value: not value.get("panel_visible")) is not None:
+                return
+        raise XhsSearchEntryFailed("filter_panel_not_closed")
+
+    async def _poll_filter_state(self, accept: Callable[[dict[str, Any]], bool]) -> Optional[dict[str, Any]]:
+        for _ in range(XHS_FILTER_POLLS):
+            await self._scan_sleep(XHS_FILTER_POLL_SECONDS)
+            state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
+            if accept(state):
+                return state
+        return None
+
+    async def _click_point(self, point: dict[str, Any]) -> None:
+        page = self.context_page
+        x, y = float(point["x"]), float(point["y"])
+        await page.mouse.move(x, y, steps=SCAN_RANDOM.randint(6, 14))
+        await page.mouse.click(x, y, delay=SCAN_RANDOM.randint(80, 220))
+
+    async def _await_target_page_one(self, *, after_seq: int) -> Optional[SearchSession]:
+        await self._require_capture().wait_for(
+            SEARCH_RULE,
+            after_seq=after_seq,
+            predicate=lambda item: (
+                isinstance(item, CapturedResponse)
+                and search_request_page(item) == 1
+                and is_target_search(item.request_json)
+            ),
+            timeout=XHS_SEARCH_CAPTURE_SECONDS,
+        )
+        await self._consume_search_captures()
+        return self._newest_target_session(after_seq)
+
+    def _newest_target_session(self, after_seq: int) -> Optional[SearchSession]:
+        sessions = [
+            session
+            for session in self._scan.sessions.values()
+            if session.is_target and session.started_seq > after_seq and 1 in session.pages
+        ]
+        return max(sessions, key=lambda session: session.started_seq, default=None)
+
+    def _adopt_target_session(self, session: SearchSession) -> None:
+        scan = self._scan
+        if scan.tracker is not None and scan.tracker.session is not session:
+            scan.tracker.abandon()
+        scan.target = session
+        scan.tracker = PageTracker(session, scan.accumulator)
+        scan.registry = CardRegistry()
+        for number in sorted(session.pages):
+            scan.registry.register(session.pages[number])
+        scan.pending_session = None
+        scan.unregistered.clear()
+        scan.backfill_attempts.clear()
+        scan.observed_index.clear()
+
+    async def _run_initial_behavior_stage(self) -> None:
+        """§3.2 第 6 条：行为阶段的滚轮是目标会话第 1 页之后的第一次滚动，之前按不变式做翻页停顿。
+
+        此时行为证据尚未创建：停顿照常执行并实时写账本（含连续性结果），行为证据的事件先暂存，
+        行为阶段写出证据后并入。
+        """
+        await self._ensure_page_pause()
+        self._record_trigger_action("scroll", {"phase": "behavior_stage"})
+        self._assert_primary_page_alive("initial_behavior")
+        evidence = await self._run_human_behavior_on_primary_page(self._scan.keyword)
+        if evidence.get("status") != "completed":
+            raise RuntimeError("XHS required human behavior stage did not complete")
+        merge_pending_behavior_evidence(self._pending_behavior_evidence or {}, ports=self.ports.behavior)
+        self._pending_behavior_evidence = None
+        self._behavior_stage_done = True
+
+    # 搜索截获 -------------------------------------------------------------------
+
+    async def _consume_search_captures(self) -> None:
+        """按到达序号处理已结算的搜索截获与请求失败，再处理非规则端点的验证哨兵。"""
+        scan = self._scan
+        capture = self._require_capture()
+        for item in capture.drain(SEARCH_RULE, after_seq=scan.search_cursor):
+            scan.search_cursor = max(scan.search_cursor, item.seq)
+            if isinstance(item, CaptureFailure):
+                raise XHSRequestFailed("search", item.failure_text)
+            verdict = classify_xhs_api_response(item)
+            if verdict.kind == "verification":
+                await self._wait_for_frontend_verification(
+                    required=True,
+                    data_arrived=lambda seq=item.seq: capture.latest(
+                        SEARCH_RULE, after_seq=seq, predicate=lambda later: later.status == 200,
+                    ) is not None,
+                )
+                raise XhsScanInterrupted("frontend_verification:search")
+            raise_for_runtime_verdict(verdict, stage="search")
+            if not verdict.ok:
+                raise PlatformRuntimeError(
+                    f"XHS search response failed: {verdict.detail}", code="search_request_failed",
+                )
+            self._on_search_captured(item)
+            if scan.network_state:
+                await self._finish_network_recovery(stage="full_scan", state=scan.network_state)
+        hits = capture.take_sentinel_hits()
+        if hits:
+            # 同一批非规则端点的 461/471 共用一次 30 秒的验证界面检查。
+            surfaced = await self._wait_for_frontend_verification(required=False, data_arrived=lambda: False)
+            for hit in hits:
+                capture.signal(hit, outcome="verification_surfaced" if surfaced else "ignored")
+            if surfaced:
+                raise XhsScanInterrupted("frontend_verification:sentinel")
+
+    def _on_search_captured(self, captured: CapturedResponse) -> None:
+        """写搜索访问；目标会话的页按序登记，has_more=true 的页置“欠一次翻页停顿”。"""
+        scan = self._scan
+        request = captured.request_json if isinstance(captured.request_json, dict) else {}
+        data = captured.json.get("data") if isinstance(captured.json, dict) else None
+        data = data if isinstance(data, dict) else {}
+        raw_items = data.get("items") if isinstance(data.get("items"), list) else []
+        page_no = search_request_page(captured)
+        search_id = str(request.get("search_id") or "")
+        has_more = data.get("has_more") if isinstance(data.get("has_more"), bool) else None
+        items = tuple(
+            SearchItem(
+                note_id=item["id"],
+                xsec_token=item["xsec_token"],
+                xsec_source=item["xsec_source"],
+                card_type=item["type"],
+                position=item["position"],
+            )
+            for item in search_items_from_response(captured.json)
+        )
+        signature = search_filter_signature(request)
+        is_target = is_target_search(request)
+        keyword_matches = request.get("keyword") == scan.keyword
+        visit_id = self._require_capture().record_visit(
+            captured,
+            stage="search_results",
+            subject_id=None,
+            trigger=self._trigger_before(captured.seq),
+            search_session=search_id,
+            filter_signature=signature,
+            is_target=is_target,
+            keyword_matches_target=keyword_matches,
+            search_page=page_no,
+            has_more=has_more,
+            items=[{"id": item.note_id, "type": item.card_type} for item in items],
+        )
+        if page_no is None or not search_id:
+            raise PlatformRuntimeError("XHS search request lacks page or search_id", code="search_request_failed")
+        key = (search_id, signature)
+        session = scan.sessions.get(key)
+        if session is None:
+            if page_no != 1:
+                logger.info(f"[XiaoHongShuCrawler.scan] Ignore page {page_no} of an unseen search session")
+                return
+            session = SearchSession(search_id, signature, captured.seq, is_target, keyword_matches)
+            scan.sessions[key] = session
+            if not scan.entering and scan.target is not None:
+                scan.pending_session = session
+        if not session.is_target or page_no in session.pages:
+            return
+        if page_no != (max(session.pages) if session.pages else 0) + 1:
+            raise PlatformRuntimeError(
+                f"XHS target search page {page_no} arrived without its previous page", code="xhs_search_page_gap",
+            )
+        page = SearchPage(
+            session=session,
+            page=page_no,
+            seq=captured.seq,
+            visit_id=visit_id,
+            has_more=has_more,
+            raw_count=len(raw_items),
+            items=items,
+        )
+        session.pages[page_no] = page
+        if session is scan.target:
+            scan.registry.register(page)
+        if has_more is True:
+            scan.owed_page_seq = max(scan.owed_page_seq, captured.seq)
+
+    # 扫描一步 -------------------------------------------------------------------
+
+    async def _settle_search_captures(self) -> None:
+        scan = self._scan
+        capture = self._require_capture()
+        await self._consume_search_captures()
+        for _ in range(XHS_SEARCH_SETTLE_ROUNDS):
+            if capture.latest_pending_seq(SEARCH_RULE) <= scan.search_cursor:
+                return
+            await capture.wait_for(SEARCH_RULE, after_seq=scan.search_cursor, timeout=XHS_SEARCH_SETTLE_POLL_SECONDS)
+            await self._consume_search_captures()
+
+    async def _scan_step(self) -> None:
+        scan = self._scan
+        await self._settle_search_captures()
+        if scan.pending_session is not None:
+            await self._reset_search_session(scan.pending_session)
+            return
+        self._assert_primary_page_alive("full_scan")
+        page = self.context_page
+        if not is_search_result_url(page.url):
+            logger.warning("[XiaoHongShuCrawler.scan] Main page left the search results; re-entering the search")
+            scan.needs_entry = True
+            scan.entry_navigate = True
+            return
+        metrics = await dom_scroll_metrics(page)
+        cards = await dom_visible_cards(page)
+        if await self._decide_visible_cards(cards, metrics):
+            return
+        next_page = scan.tracker.next_page
+        if self._finish_ready_batches() or scan.tracker.next_page != next_page:
+            return  # 耗尽，或已轮到下一页：重新读取可见卡片
+        if await self._backfill_missed(cards, metrics):
+            return
+        if self._at_list_bottom(metrics):
+            await self._handle_list_bottom()
+            return
+        await self._scroll_feed_step(1, phase="scan")
+
+    async def _decide_visible_cards(self, cards: list[dict[str, Any]], metrics: dict[str, Any]) -> bool:
+        """按 data-index 升序：已知滑过、视频记决定、当前页的未知图文就地处理（每页先做一次搜索结果停顿）。"""
+        scan = self._scan
+        tracker = scan.tracker
+        accumulator = scan.accumulator
+        height = float(metrics.get("inner_height") or 0)
+        registered: list[tuple[dict[str, Any], SearchPage, SearchItem]] = []
+        unregistered: set[str] = set()
+        for card in cards:
+            note_id = str(card.get("note_id") or "")
+            if not note_id:
+                continue
+            entry = scan.registry.get(note_id)
+            if entry is None:
+                unregistered.add(note_id)
+                continue
+            registered.append((card, *entry))
+            scan.observed_index[note_id] = int(card.get("data_index", -1))
+            self._mark_observed(entry[0], note_id)
+        self._count_unregistered(unregistered)
+        decided = False
+        for card, search_page, item in registered:
+            note_id = item.note_id
+            current = tracker.current
+            if search_page is not current or accumulator.is_known(note_id) or not self._card_clickable(card, height):
+                continue
+            tracker.begin(current)
+            if item.card_type == "video":
+                self._require_capture().decision(
+                    note_id, "video_skipped_from_search", from_visit=current.visit_id, page_role="primary",
+                )
+                accumulator.consider(note_id, valid=False)
+                decided = True
+                continue
+            if not current.results_paused:
+                await self._guarded_pause("search_results", 6.0, 14.0)
+                current.results_paused = True
+            await self._process_note_card(item, current)
+            return True
+        return decided
+
+    def _count_unregistered(self, unregistered: set[str]) -> None:
+        """有 data-note-id 却未登记的卡片连续 2 次读数仍未登记即停止；搜索响应仍在读体时不计。"""
+        scan = self._scan
+        for note_id in list(scan.unregistered):
+            if note_id not in unregistered:
+                del scan.unregistered[note_id]
+        if not unregistered or self._require_capture().latest_pending_seq(SEARCH_RULE):
+            return
+        for note_id in unregistered:
+            scan.unregistered[note_id] += 1
+            if scan.unregistered[note_id] >= XHS_UNREGISTERED_CARD_STEPS:
+                raise PlatformRuntimeError(
+                    "XHS search card stayed unregistered", code="xhs_search_card_unregistered",
+                )
+
+    @staticmethod
+    def _card_clickable(card: dict[str, Any], height: float) -> bool:
+        cover = card.get("cover")
+        if not isinstance(cover, dict) or height <= 0:
+            return False
+        y = float(cover.get("y") or 0)
+        return XHS_CLICK_BAND_TOP * height <= y <= height - XHS_CLICK_BAND_BOTTOM_MARGIN_PX
+
+    def _mark_observed(self, search_page: SearchPage, note_id: str) -> None:
+        """视口出现过某页的卡片，即越过了此前各页；一页的卡片全部出现过也算越过。"""
+        search_page.observed.add(note_id)
+        if search_page.observed.issuperset(search_page.note_ids):
+            search_page.passed = True
+        for number, page in search_page.session.pages.items():
+            if number < search_page.page:
+                page.passed = True
+
+    def _finish_ready_batches(self) -> bool:
+        """按序完成已越过且全部决定的页；目标会话末页 has_more=false 完成即来源耗尽。"""
+        scan = self._scan
+        tracker = scan.tracker
+        while (page := tracker.current) is not None and tracker.ready(page):
+            tracker.finish(page)
+            if page.has_more is False:
+                scan.accumulator.mark_source_exhausted(
+                    "has_more_false",
+                    source_page=page.page,
+                    source_cursor=tracker.session.search_id,
+                    source_has_more=False,
+                    raw_batch_count=page.raw_count,
+                    batch_complete=True,
+                    discovery_phase="full_scan",
+                    source_visit_id=page.visit_id,
+                )
+                scan.exhausted = True
+                return True
+        return False
+
+    async def _backfill_missed(self, cards: list[dict[str, Any]], metrics: dict[str, Any]) -> bool:
+        """当前页中已越到视口上方、却仍未决定的卡片：向上滚回让虚拟列表重新渲染它们。
+
+        “上方”指仍可见但封面中心高于可点击带，或已不可见且序号小于最小可见序号；可点击带以下的卡片
+        由向下滚动处理。
+        """
+        scan = self._scan
+        current = scan.tracker.current
+        if current is None:
+            return False
+        accumulator = scan.accumulator
+        band_top = XHS_CLICK_BAND_TOP * float(metrics.get("inner_height") or 0)
+        visible = {str(card.get("note_id") or ""): card for card in cards}
+        min_index = min((int(card.get("data_index", -1)) for card in cards), default=-1)
+        undecided = [note_id for note_id in current.note_ids if not accumulator.is_known(note_id)]
+
+        def above(note_id: str) -> bool:
+            card = visible.get(note_id)
+            if card is not None:
+                cover = card.get("cover")
+                return isinstance(cover, dict) and float(cover.get("y") or 0) < band_top
+            return note_id in scan.observed_index and scan.observed_index[note_id] < min_index
+
+        missed = [note_id for note_id in undecided if above(note_id)]
+        if missed:
+            for note_id in missed:
+                scan.backfill_attempts[note_id] += 1
+                if scan.backfill_attempts[note_id] > XHS_BACKFILL_ATTEMPTS:
+                    raise PlatformRuntimeError(
+                        "XHS search card could not be reached again", code="xhs_search_items_unresolved",
+                    )
+            await self._scroll_feed_step(-1, phase="backfill")
+            return True
+        if current.passed and any(note_id not in scan.observed_index for note_id in undecided):
+            # 已越过该页，但页内未知项从未出现在列表中：该页不可能完成，不能推断耗尽。
+            raise PlatformRuntimeError(
+                "XHS search items were never rendered", code="xhs_search_items_unresolved",
+            )
+        return False
+
+    @staticmethod
+    def _at_list_bottom(metrics: dict[str, Any]) -> bool:
+        scroll_y = float(metrics.get("scroll_y") or 0)
+        inner_height = float(metrics.get("inner_height") or 0)
+        scroll_height = float(metrics.get("scroll_height") or 0)
+        return scroll_y + inner_height >= scroll_height - 2
+
+    async def _handle_list_bottom(self) -> None:
+        """已到列表底部：末页 has_more=false 时完成剩余页；否则等待新页，停滞则检查可见状态并抖动。"""
+        scan = self._scan
+        last = scan.target.last_page
+        if last is not None and last.has_more is False:
+            for page in scan.target.pages.values():
+                page.passed = True
+            if self._finish_ready_batches():
+                return
+            if await self._await_new_search_page():
+                return  # 前端可能正在重新搜索，列表已先行替换
+            raise PlatformRuntimeError(
+                "XHS search reached the end with undecided items", code="xhs_search_items_unresolved",
+            )
+        if await self._await_new_search_page():
+            return
+        await self._check_stalled_page_state()
+        for _ in range(XHS_STALL_JIGGLES):
+            await self._scroll_feed_step(-1, phase="stall")
+            await self._scroll_feed_step(1, phase="stall")
+            if await self._await_new_search_page():
+                return
+        raise PlatformRuntimeError("XHS search stopped loading new pages", code="xhs_search_load_stalled")
+
+    async def _await_new_search_page(self) -> bool:
+        scan = self._scan
+        before = len(scan.target.pages)
+        await self._require_capture().wait_for(
+            SEARCH_RULE, after_seq=scan.search_cursor, timeout=XHS_SEARCH_LOAD_WAIT_SECONDS,
+        )
+        await self._consume_search_captures()
+        return len(scan.target.pages) > before or scan.pending_session is not None
+
+    async def _check_stalled_page_state(self) -> None:
+        state = await self._popup_checkpoint_state(self.context_page)
+        self._raise_for_terminal_popup_state(state, reason="search_load_stalled")
+        markers = list(state.get("manual_markers") or [])
+        if "login_required" in markers:
+            raise XHSLoginExpired("search_load_stalled")
+        if markers:
+            await self._wait_for_frontend_verification(required=False, data_arrived=lambda: False)
+            raise XhsScanInterrupted("visible_verification:search_load_stalled")
+
+    async def _reset_search_session(self, session: SearchSession) -> None:
+        """前端从第 1 页重新搜索：目标会话直接采用；丢了“图文”筛选则重新点选。都从新会话顶部继续。"""
+        scan = self._scan
+        scan.pending_session = None
+        if not session.is_target:
+            scan.entering = True
+            try:
+                session = await self._apply_target_filter()
+                await self._close_filter_panel()
+            finally:
+                scan.entering = False
+        if not session.keyword_matches:
+            scan.needs_entry = True
+            scan.entry_navigate = True
+            return
+        logger.info("[XiaoHongShuCrawler.scan] Frontend restarted the search; continuing from the new session top")
+        self._adopt_target_session(session)
+        scan.needs_top = True
+
+    # 滚动 -----------------------------------------------------------------------
+
+    async def _ensure_page_pause(self) -> None:
+        """翻页停顿不变式：欠账（含仍在读体的搜索响应）未被停顿覆盖时，先停顿再滚动。"""
+        scan = self._scan
+        capture = self._require_capture()
+        while True:
+            await self._consume_search_captures()
+            owed = max(scan.owed_page_seq, capture.latest_pending_seq(SEARCH_RULE))
+            if owed <= scan.page_pause_cleared_seq:
+                return
+            covered = capture.ledger.last_seq
+            await self._guarded_pause("search_page", 12.0, 30.0)
+            scan.page_pause_cleared_seq = covered
+
+    async def _scroll_feed_step(self, direction: int, *, phase: str) -> dict[str, Any]:
+        """鼠标在列表区域滚轮一步：先满足翻页停顿不变式，写 scroll 动作后再滚动，停 0.4–1.2 秒后核实位移。"""
+        await self._ensure_page_pause()
+        page = self.context_page
+        before = await dom_scroll_metrics(page)
+        height = int(before.get("inner_height") or 0)
+        width = int(before.get("inner_width") or 0)
+        scroll_y = int(before.get("scroll_y") or 0)
+        low, high = load_behavior_profile("xhs_guarded", strict=True).scroll_delta_px
+        step = SCAN_RANDOM.randint(int(low), int(high))
+        if height > 0:
+            step = min(step, max(1, int(height * XHS_SCROLL_VIEWPORT_RATIO)))
+        if direction < 0 and scroll_y > 0:
+            step = min(step, scroll_y)
+        delta = step if direction > 0 else -step
+        if width > 0 and height > 0:
+            await page.mouse.move(
+                SCAN_RANDOM.uniform(0.3, 0.7) * width,
+                SCAN_RANDOM.uniform(0.35, 0.75) * height,
+                steps=SCAN_RANDOM.randint(4, 10),
+            )
+        self._record_trigger_action("scroll", {"phase": phase, "delta_y": delta, "scroll_y_before": scroll_y})
+        await page.mouse.wheel(0, delta)
+        await self._scan_sleep(SCAN_RANDOM.uniform(*XHS_SCROLL_SETTLE_SECONDS))
+        return await dom_scroll_metrics(page)
+
+    async def _scroll_to_top(self) -> None:
+        for _ in range(XHS_SCROLL_TOP_MAX_STEPS):
+            metrics = await dom_scroll_metrics(self.context_page)
+            if int(metrics.get("scroll_y") or 0) <= 0:
+                return
+            await self._scroll_feed_step(-1, phase="to_top")
+        logger.warning("[XiaoHongShuCrawler.scan] Could not reach the list top within the step bound")
+
+    async def _retrigger_scroll(self) -> None:
+        """验证或网络恢复后重触发：上滚一步（不在顶部时）再下滚一步。"""
+        metrics = await dom_scroll_metrics(self.context_page)
+        if int(metrics.get("scroll_y") or 0) > 0:
+            await self._scroll_feed_step(-1, phase="retrigger")
+        await self._scroll_feed_step(1, phase="retrigger")

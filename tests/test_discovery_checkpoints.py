@@ -928,9 +928,13 @@ def test_xhs_query_fingerprint_canonical_bytes_are_stable() -> None:
     from trippostcollect.xhs.discovery import xhs_query_fingerprint
 
     golden = FINGERPRINT_GOLDEN["xhs"]
+    legacy = golden["legacy_before_71"]
 
     assert hashlib.sha256(golden["canonical"].encode("utf-8")).hexdigest() == golden["sha256"]
     assert xhs_query_fingerprint(golden["target"]) == golden["sha256"]
+    # #71 有意变更：目标排序与类型并入指纹，旧记忆不再被复用。
+    assert hashlib.sha256(legacy["canonical"].encode("utf-8")).hexdigest() == legacy["sha256"]
+    assert golden["sha256"] != legacy["sha256"]
 
 
 def _bilibili_item(post_id: str) -> dict:

@@ -501,45 +501,32 @@ async def test_navigation_network_error_then_target_close_is_aborted(
 
 
 @pytest.mark.asyncio
-async def test_uncommitted_navigation_timeout_retries_but_committed_search_does_not(
+async def test_navigation_timeout_retries_even_when_the_url_already_committed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # 新流程不再导航到搜索结果页，“已提交则交给可见就绪”的分支随之删除：超时一律按网络暂停重试。
     crawler, context, _primary, sleeps = _crawler_with_clock(monkeypatch)
     response = SimpleNamespace(status=204)
-    uncommitted = _navigation_page(
+    page = _navigation_page(
         url="https://www.xiaohongshu.com/explore",
-        side_effect=[TimeoutError("deadline"), response],
+        side_effect=[TimeoutError("deadline after commit"), response],
     )
-    committed = _navigation_page(
-        url="https://www.xiaohongshu.com/search_result?keyword=test",
-        side_effect=TimeoutError("deadline after commit"),
-    )
-    context.pages.extend([uncommitted, committed])
+    context.pages.append(page)
     crawler._record_navigation_diagnostic = AsyncMock(return_value={})
 
     await crawler._goto_with_deadline(
-        uncommitted,
+        page,
         "https://www.xiaohongshu.com/explore",
-        stage="initial_explore",
-    )
-    await crawler._goto_with_deadline(
-        committed,
-        "https://www.xiaohongshu.com/search_result?keyword=test",
-        stage="behavior_search",
+        stage="search_entry_explore",
     )
 
-    assert uncommitted.goto.await_count == 2
-    assert committed.goto.await_count == 1
+    assert page.goto.await_count == 2
     assert sleeps == [2.0]
     outcomes = [
         call.kwargs["outcome"]
         for call in crawler._record_navigation_diagnostic.await_args_list
     ]
-    assert outcomes == [
-        "navigation_network_error",
-        "navigation_committed",
-        "commit_timeout_deferred",
-    ]
+    assert outcomes == ["navigation_network_error", "navigation_committed"]
 
 
 @pytest.mark.asyncio
@@ -567,43 +554,6 @@ async def test_old_search_url_does_not_fake_commit_of_new_search_target(
         for call in crawler._record_navigation_diagnostic.await_args_list
     ]
     assert outcomes == ["navigation_network_error", "navigation_committed"]
-
-
-@pytest.mark.asyncio
-async def test_committed_timeout_after_network_pause_is_deferred_not_recovered(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    crawler, context, _primary, sleeps = _crawler_with_clock(monkeypatch)
-    target = "https://www.xiaohongshu.com/search_result?keyword=new"
-    page = _navigation_page(
-        url="https://www.xiaohongshu.com/explore",
-        side_effect=None,
-    )
-    calls = 0
-
-    async def goto(*_args, **_kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise PlaywrightError("page.goto: net::ERR_NETWORK_CHANGED")
-        page.url = target
-        raise TimeoutError("timed out after URL commit")
-
-    page.goto = AsyncMock(side_effect=goto)
-    context.pages.append(page)
-    crawler._record_navigation_diagnostic = AsyncMock(return_value={})
-
-    await crawler._goto_with_deadline(page, target, stage="behavior_search")
-
-    assert page.goto.await_count == 2
-    assert sleeps == [2.0]
-    assert [
-        call.kwargs["outcome"]
-        for call in crawler._record_network_recovery_event.await_args_list
-    ] == [
-        "network_paused",
-        "network_recovery_deferred_to_visible_readiness",
-    ]
 
 
 @pytest.mark.asyncio

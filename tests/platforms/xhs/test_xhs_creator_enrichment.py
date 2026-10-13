@@ -509,57 +509,6 @@ async def test_browser_identity_headers_reject_version_mismatch(crawler):
         await crawler._browser_identity_headers()
 
 
-@pytest.mark.asyncio
-async def test_search_navigation_timeout_can_defer_to_visible_readiness(crawler):
-    class CommittedPage:
-        url = "https://www.xiaohongshu.com/search_result?keyword=test"
-
-        async def goto(self, *args, **kwargs):
-            raise TimeoutError
-
-    await crawler._goto_with_deadline(
-        CommittedPage(),
-        "https://www.xiaohongshu.com/search_result?keyword=test",
-        stage="behavior_search",
-    )
-
-
-@pytest.mark.asyncio
-async def test_behavior_search_uses_explore_fallback_after_blank_shell(crawler):
-    crawler.context_page = Mock()
-    crawler._goto_with_deadline = AsyncMock()
-    crawler._wait_for_visible_page_shell = AsyncMock(
-        side_effect=[False, True, True]
-    )
-    crawler._record_navigation_diagnostic = AsyncMock(return_value={})
-
-    await crawler._open_behavior_search_page("青岛冷门景点")
-
-    navigated_urls = [call.args[1] for call in crawler._goto_with_deadline.await_args_list]
-    assert navigated_urls == [
-        "https://www.xiaohongshu.com/search_result?keyword=%E9%9D%92%E5%B2%9B%E5%86%B7%E9%97%A8%E6%99%AF%E7%82%B9",
-        "https://www.xiaohongshu.com/explore",
-        "https://www.xiaohongshu.com/search_result?keyword=%E9%9D%92%E5%B2%9B%E5%86%B7%E9%97%A8%E6%99%AF%E7%82%B9",
-    ]
-    assert crawler._record_navigation_diagnostic.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_behavior_search_does_not_retry_when_shell_is_visible(crawler):
-    crawler.context_page = Mock()
-    crawler._goto_with_deadline = AsyncMock()
-    crawler._wait_for_visible_page_shell = AsyncMock(return_value=True)
-    crawler._record_navigation_diagnostic = AsyncMock(return_value={})
-
-    await crawler._open_behavior_search_page("青岛冷门景点")
-
-    crawler._goto_with_deadline.assert_awaited_once()
-    assert crawler._goto_with_deadline.await_args.args[1].startswith(
-        "https://www.xiaohongshu.com/search_result?keyword="
-    )
-    crawler._record_navigation_diagnostic.assert_not_awaited()
-
-
 def test_creator_html_extractor_stops_at_end_of_initial_state_object():
     html = (
         '<script>window.__INITIAL_STATE__={"user":{"userPageData":'

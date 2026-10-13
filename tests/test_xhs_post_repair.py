@@ -64,7 +64,6 @@ def test_xhs_repair_interrupt_writes_terminal_audit_before_exact_cleanup(
                     {
                         "target_key": "test",
                         "keyword": "青岛旅游",
-                        "top_refresh_max_pages": 1,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }
@@ -767,7 +766,7 @@ def repair_crawler_config(note_ids: list[str]) -> SimpleNamespace:
         **asdict(BROWSER_SETTINGS),
         CDP_HEADLESS=False, CRAWLER_TYPE="detail", ENABLE_CDP_MODE=True, ENABLE_GET_MEIDAS=False,
         HEADLESS=False, KEYWORDS="", LOGIN_TYPE="qrcode", COOKIES="", SAVE_DATA_OPTION="jsonl", SAVE_DATA_PATH="",
-        SORT_TYPE="", START_PAGE=1, XHS_INTERNATIONAL=False,
+        XHS_INTERNATIONAL=False,
         MAX_CONCURRENCY_NUM=1,
         XHS_SPECIFIED_NOTE_URL_LIST=note_ids,
     )
@@ -1005,7 +1004,7 @@ async def test_xhs_repair_continues_same_and_later_batches_after_candidate_failu
         **asdict(BROWSER_SETTINGS),
         CDP_HEADLESS=False, CRAWLER_TYPE="detail", ENABLE_CDP_MODE=True, ENABLE_GET_MEIDAS=False,
         HEADLESS=False, KEYWORDS="", LOGIN_TYPE="qrcode", COOKIES="", SAVE_DATA_OPTION="jsonl", SAVE_DATA_PATH="",
-        SORT_TYPE="", START_PAGE=1, XHS_INTERNATIONAL=False,
+        XHS_INTERNATIONAL=False,
         MAX_CONCURRENCY_NUM=1,
         XHS_SPECIFIED_NOTE_URL_LIST=["note-1", "note-2", "note-3"],
     )

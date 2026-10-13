@@ -566,7 +566,6 @@ def test_formal_os_signal_immediately_after_acquire_has_one_failed_terminal_comm
                     {
                         "target_key": "test",
                         "keyword": "青岛旅游",
-                        "top_refresh_max_pages": 1,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }
@@ -672,7 +671,6 @@ def test_sms_terminal_before_pagination_keeps_precise_reason_and_checkpoint(
                     {
                         "target_key": "test",
                         "keyword": "青岛旅游",
-                        "top_refresh_max_pages": 1,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }
@@ -710,9 +708,8 @@ def test_sms_terminal_before_pagination_keeps_precise_reason_and_checkpoint(
             account_id="xhs-a01",
             keyword="青岛旅游",
             query_fingerprint_value=fingerprint,
-            resume_page=44,
-            resume_search_id="safe-search-id",
             source_has_more=True,
+            source_exhausted=False,
             last_batch_complete=True,
             last_stop_reason="continue",
             last_run_id="safe-run",
@@ -835,7 +832,7 @@ def test_sms_terminal_before_pagination_keeps_precise_reason_and_checkpoint(
     with sqlite3.connect(db_path) as conn:
         checkpoint = conn.execute(
             """
-            SELECT resume_page, resume_search_id, last_run_id,
+            SELECT source_has_more, last_stop_reason, last_run_id,
                    campaign_candidate_count
             FROM xhs_discovery_checkpoints
             WHERE target_key='test' AND account_id='xhs-a01'
@@ -849,7 +846,7 @@ def test_sms_terminal_before_pagination_keeps_precise_reason_and_checkpoint(
             """,
             (run_id,),
         ).fetchone()
-    assert checkpoint == (44, "safe-search-id", "safe-run", 579)
+    assert checkpoint == (1, "continue", "safe-run", 579)
     event = json.loads(event_row[0])
     assert event["failure_type"] == "sms_verification_terminal"
     assert event["stop_reason"] == "runtime_failed"

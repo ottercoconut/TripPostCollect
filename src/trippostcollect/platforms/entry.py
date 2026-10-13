@@ -463,8 +463,10 @@ def xhs_dependencies(config, *, repair=None):
         return http.make_async_client(disable_ssl_verify=getattr(config, "DISABLE_SSL_VERIFY", False), **kwargs)
 
     def accumulator_factory():
+        # 小红书可重试的候选失败不写入跨轮 seen：下一轮全量扫描到时就地重试。
         accumulator = AdaptiveAccumulator.for_platform(
             "xhs",
+            persist_retryable_skips=False,
             existing_identities=existing_platform_identities(
                 "xhs",
                 db_path=os.environ.get("TRIPPOSTCOLLECT_DB_PATH", ""),

@@ -79,7 +79,10 @@ XHS_SCHEMA_MIGRATIONS = (
     (12, "xhs_discovery_checkpoints"),
     (21, "xhs_exact_lease_identity"),
     (22, "xhs_run_scoped_login_state"),
+    (23, "xhs_discovery_full_scan"),
 )
+# 迁移 23：小红书每轮全量扫描，checkpoint 不再保存深层前沿。
+XHS_RETIRED_CHECKPOINT_COLUMNS = ("resume_page", "resume_search_id")
 
 
 class XhsLeaseCutoverBlocked(RuntimeError):
@@ -207,6 +210,82 @@ def _assert_xhs_foreign_keys(conn: sqlite3.Connection) -> None:
         raise RuntimeError(
             f"XHS schema cutover foreign-key check failed: {violations[:3]!r}"
         )
+
+
+def _xhs_checkpoint_has_retired_columns(conn: sqlite3.Connection) -> bool:
+    return table_exists(conn, "xhs_discovery_checkpoints") and bool(
+        set(XHS_RETIRED_CHECKPOINT_COLUMNS) & table_columns(conn, "xhs_discovery_checkpoints")
+    )
+
+
+def _rebuild_xhs_discovery_checkpoints(
+    conn: sqlite3.Connection,
+    schema_statements: tuple[str, ...],
+) -> None:
+    """迁移 23 的重建体：按现行定义建新表，逐列复制其余全部列，替换旧表并重建索引。
+
+    调用方持有写事务并已关闭外键检查；行、其余列与 seen/租约表都不改动。
+    """
+    table_statement = next(
+        statement
+        for statement in schema_statements
+        if statement.lstrip().startswith("CREATE TABLE IF NOT EXISTS xhs_discovery_checkpoints (")
+    )
+    index_statements = [
+        statement
+        for statement in schema_statements
+        if statement.lstrip().startswith("CREATE INDEX IF NOT EXISTS idx_xhs_discovery_checkpoints_")
+    ]
+    conn.execute(
+        table_statement.replace(
+            "CREATE TABLE IF NOT EXISTS xhs_discovery_checkpoints (",
+            "CREATE TABLE xhs_discovery_checkpoints_new (",
+            1,
+        )
+    )
+    old_columns = table_columns(conn, "xhs_discovery_checkpoints")
+    columns = [
+        column
+        for column in _ordered_columns(conn, "xhs_discovery_checkpoints_new")
+        if column in old_columns
+    ]
+    column_list = ", ".join(columns)
+    conn.execute(
+        f"INSERT INTO xhs_discovery_checkpoints_new ({column_list}) "
+        f"SELECT {column_list} FROM xhs_discovery_checkpoints"
+    )
+    conn.execute("DROP TABLE xhs_discovery_checkpoints")
+    conn.execute("ALTER TABLE xhs_discovery_checkpoints_new RENAME TO xhs_discovery_checkpoints")
+    for statement in index_statements:
+        conn.execute(statement)
+
+
+def _ordered_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
+    return [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()]
+
+
+def _migrate_xhs_discovery_full_scan(
+    conn: sqlite3.Connection,
+    schema_statements: tuple[str, ...],
+) -> None:
+    """迁移 23 在单一 BEGIN IMMEDIATE 事务中完成并登记；新库或已迁移的库不改动。幂等。"""
+    if not _xhs_checkpoint_has_retired_columns(conn):
+        return  # 新库按现行定义建表，由调用方登记 23；已迁移的库不再改动
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if _xhs_checkpoint_has_retired_columns(conn):
+                _rebuild_xhs_discovery_checkpoints(conn, schema_statements)
+            _record_xhs_schema_migrations(conn)
+            _assert_xhs_foreign_keys(conn)
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
 
 
 def _record_xhs_schema_migrations(conn: sqlite3.Connection) -> None:
@@ -678,6 +757,7 @@ def ensure_xhs_control_schema(
     if not (rebuild_accounts or rebuild_leases):
         conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
         _execute_sqlite_statements(conn, schema_statements)
+        _migrate_xhs_discovery_full_scan(conn, schema_statements)
         _record_xhs_schema_migrations(conn)
         return
     # End any caller transaction before taking filesystem locks.  Every cutover
@@ -689,6 +769,7 @@ def ensure_xhs_control_schema(
         if not (rebuild_accounts or rebuild_leases):
             conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
             _execute_sqlite_statements(conn, schema_statements)
+            _migrate_xhs_discovery_full_scan(conn, schema_statements)
             _record_xhs_schema_migrations(conn)
             return
         with _guard_xhs_legacy_cutover(
@@ -768,6 +849,8 @@ def ensure_xhs_control_schema(
                     )
                     conn.execute("DROP TABLE xhs_accounts_runtime_backup")
                 conn.execute("DROP TABLE IF EXISTS xhs_platform_state")
+                if _xhs_checkpoint_has_retired_columns(conn):
+                    _rebuild_xhs_discovery_checkpoints(conn, schema_statements)
                 record_xhs_lease_schema_cutover(conn, obsolete_leases)
                 _record_xhs_schema_migrations(conn)
                 _assert_xhs_foreign_keys(conn)

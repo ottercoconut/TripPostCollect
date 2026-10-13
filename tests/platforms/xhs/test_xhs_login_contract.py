@@ -681,9 +681,8 @@ async def test_startup_enters_qrcode_login_once_and_confirms_with_user_me(
         ("login_state", "xhs.user_me", False)
     ]
     assert crawler.capture.role_of(page) == "primary"
-    crawler._run_human_behavior_on_primary_page.assert_awaited_once_with(
-        "青岛登录测试"
-    )
+    # search 模式下首页输入、点选“图文”、翻页停顿与初始行为阶段都在全量扫描内完成。
+    crawler._run_human_behavior_on_primary_page.assert_not_awaited()
     crawler.search.assert_awaited_once_with()
 
 

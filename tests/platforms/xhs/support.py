@@ -17,7 +17,7 @@ from trippostcollect.runtime.visit_ledger import VisitLedger
 config = SimpleNamespace(
     PLATFORM="xhs", LOGIN_TYPE="qrcode", COOKIES="", CRAWLER_TYPE="search",
     ENABLE_CDP_MODE=False, CDP_HEADLESS=False, HEADLESS=False, KEYWORDS="编程副业,编程兼职",
-    START_PAGE=1, SORT_TYPE="popularity_descending", MAX_CONCURRENCY_NUM=1, ENABLE_GET_MEIDAS=False,
+    MAX_CONCURRENCY_NUM=1, ENABLE_GET_MEIDAS=False,
     SAVE_DATA_OPTION="jsonl", SAVE_DATA_PATH="", XHS_INTERNATIONAL=False,
     XHS_SPECIFIED_NOTE_URL_LIST=[
         "https://www.xiaohongshu.com/explore/64b95d01000000000c034587"

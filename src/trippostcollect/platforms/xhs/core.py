@@ -28,7 +28,6 @@ from asyncio import Task
 from typing import Dict, List, Optional
 
 from playwright.async_api import BrowserContext, Error as PlaywrightError, Page
-from tenacity import RetryError
 
 from trippostcollect.application.contracts import XhsPorts, XhsReaders, XhsSettings
 from trippostcollect.platforms.xhs.author import XhsAuthorMixin
@@ -36,11 +35,11 @@ from trippostcollect.platforms.xhs.behavior import XhsBehaviorMixin
 from trippostcollect.platforms.xhs.client import XiaoHongShuClient
 from trippostcollect.platforms.xhs.detail import XhsDetailMixin
 from trippostcollect.platforms.xhs.errors import (
-    DataFetchError,
     IPBlockError,
     PlatformRuntimeError,
     XHSCreatorProfileUnavailable,
     XHSImageDownloadError,
+    XHSLoginExpired,
     XHSNetworkRecoveryTimeout,
     XHSNoteDetailUnavailable,
     XhsErrorsMixin,
@@ -50,9 +49,9 @@ from trippostcollect.platforms.xhs.errors import (
 from trippostcollect.platforms.xhs.login import XhsLoginMixin
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget
 from trippostcollect.platforms.xhs.media import XhsMediaMixin
-from trippostcollect.platforms.xhs.models import SearchSortType
-from trippostcollect.platforms.xhs.navigation import XhsNavigationMixin
-from trippostcollect.platforms.xhs.parser import XhsParserMixin, _normalized_creator_item, get_search_id, update_xhs_note
+from trippostcollect.platforms.xhs.navigation import XhsNavigationMixin, XhsSearchEntryFailed
+from trippostcollect.platforms.xhs.parser import XhsParserMixin, _normalized_creator_item, update_xhs_note
+from trippostcollect.platforms.xhs.scan import ScanState, SearchItem, SearchPage, XhsScanMixin
 from trippostcollect.platforms.xhs.session import XhsSessionMixin
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
@@ -64,21 +63,21 @@ logger = logging.getLogger("MediaCrawler")
 
 
 def _mark_cdp_lifecycle_failed(
-    accumulator, exc: CDPBrowserLifecycleError, *, requested_page, search_id, discovery_phase: str
+    accumulator, exc: CDPBrowserLifecycleError, *, source_page, source_cursor
 ) -> None:
-    """浏览器生命周期失败统一记为本页 runtime_failed；登录恢复经 _login_recovery_stop_detail 取同一细节。"""
+    """浏览器生命周期失败统一记为 runtime_failed；登录恢复经 _login_recovery_stop_detail 取同一细节。"""
     detail = xhs_cdp_lifecycle_stop_detail(exc)
     logger.error(
         "[XiaoHongShuCrawler.search] CDP lifecycle ended on "
-        f"page {requested_page}: {exc!r}"
+        f"page {source_page}: {exc!r}"
     )
     accumulator.mark_runtime_failed(
         detail,
-        source_page=requested_page,
-        source_cursor=search_id,
-        resume_page=requested_page,
-        resume_cursor=search_id,
-        discovery_phase=discovery_phase,
+        source_page=source_page,
+        source_cursor=source_cursor,
+        resume_page=None,
+        resume_cursor=None,
+        discovery_phase="full_scan",
     )
 
 
@@ -104,7 +103,22 @@ def _login_recovery_stop_detail(exc: BaseException) -> Optional[str]:
     return None
 
 
+def _full_scan_stop_detail(exc: BaseException) -> Optional[str]:
+    """全量扫描的运行级失败细节：与登录恢复同一口径，另加搜索入口与过渡详情路径；其他异常返回 None。"""
+    detail = _login_recovery_stop_detail(exc)
+    if detail is not None:
+        return detail
+    if isinstance(exc, XhsSearchEntryFailed):
+        return str(exc)
+    if isinstance(exc, XHSLoginExpired):
+        return exc.code
+    if isinstance(exc, XHSNoteDetailUnavailable):
+        return "note_detail_unavailable"
+    return None
+
+
 class XiaoHongShuCrawler(
+    XhsScanMixin,
     XhsSessionMixin,
     XhsNavigationMixin,
     XhsLoginMixin,
@@ -146,6 +160,11 @@ class XiaoHongShuCrawler(
         self._navigation_request_failures: List[Dict] = []
         self._manual_wait_budget: Optional[XHSManualWaitBudget] = None
         self.capture: Optional[PageCaptureChannel] = None
+        self._trigger_actions: List[tuple[int, str]] = []
+        self._scan: Optional[ScanState] = None
+        self._behavior_stage_done = False
+        # 行为证据创建前的停顿与验证事件暂存（见 _guarded_pause）；行为阶段后并入并置空。
+        self._pending_behavior_evidence: Optional[Dict] = None
 
     async def start(self) -> None:
         self.inputs.validate_login_contract()
@@ -185,562 +204,170 @@ class XiaoHongShuCrawler(
                     )
 
     async def search(self) -> None:
-        """Search for notes and retrieve their comment information."""
+        """按关键词逐个全量滚动扫描；运行级失败在此集中写停止事件，来源耗尽由扫描判定。"""
         logger.info("[XiaoHongShuCrawler.search] Begin search Xiaohongshu keywords")
         accumulator = self.ports.accumulator_factory()
-        start_page = self.settings.START_PAGE
-        for keyword in self.settings.KEYWORDS.split(","):
+        for keyword in (item.strip() for item in self.settings.KEYWORDS.split(",")):
+            if not keyword:
+                continue
+            if not accumulator.can_continue:
+                break
             self.source_keyword = keyword
             logger.info(f"[XiaoHongShuCrawler.search] Current search keyword: {keyword}")
-            refresh_max_pages = self.inputs.refresh_max_pages()
-            source_exhausted = (
-                os.environ.get("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED") == "1"
-            )
-            frontier_search_id = os.environ.get(
-                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR",
-                "",
-            ) or get_search_id()
-            phases: list[tuple[str, int, int | None, str]] = []
-            if refresh_max_pages > 0:
-                phases.append(("refresh", 1, refresh_max_pages, get_search_id()))
-            if not source_exhausted:
-                phases.append(("frontier", start_page, None, frontier_search_id))
-
-            for discovery_phase, phase_start, phase_limit, search_id in phases:
-                page = phase_start
-                phase_batches = 0
-                while (
-                    accumulator.can_continue
-                    and (phase_limit is None or phase_batches < phase_limit)
-                ):
-                    requested_page = page
-                    try:
-                        logger.info(
-                            "[XiaoHongShuCrawler.search] search Xiaohongshu "
-                            f"keyword: {keyword}, page: {requested_page}, phase: {discovery_phase}"
-                        )
-                        notes_res = await self._run_with_network_recovery(
-                            lambda: self.xhs_client.get_note_by_keyword(
-                                keyword=keyword,
-                                search_id=search_id,
-                                page=requested_page,
-                                sort=(
-                                    SearchSortType(self.settings.SORT_TYPE)
-                                    if self.settings.SORT_TYPE != ""
-                                    else SearchSortType.GENERAL
-                                ),
-                            ),
-                            stage=(
-                                f"search:{discovery_phase}:"
-                                f"page={requested_page}:cursor={search_id}"
-                            ),
-                        )
-                        if not notes_res:
-                            logger.info("[XiaoHongShuCrawler.search] No more content!")
-                            if discovery_phase == "frontier":
-                                accumulator.mark_source_exhausted(
-                                    "empty_response",
-                                    source_page=requested_page,
-                                    source_cursor=search_id,
-                                    source_has_more=False,
-                                    raw_batch_count=0,
-                                    resume_page=requested_page,
-                                    resume_cursor=search_id,
-                                    discovery_phase=discovery_phase,
-                                )
-                            break
-
-                        raw_items = list(notes_res.get("items") or [])
-                        source_has_more = (
-                            notes_res.get("has_more")
-                            if "has_more" in notes_res
-                            else None
-                        )
-                        pending_ids: set[str] = set()
-                        unknown_items: List[Dict] = []
-                        for post_item in raw_items:
-                            if post_item.get("model_type") in ("rec_query", "hot_query"):
-                                continue
-                            identity = str(post_item.get("id") or "")
-                            if accumulator.is_known(identity) or (
-                                identity and identity in pending_ids
-                            ):
-                                continue
-                            if identity:
-                                pending_ids.add(identity)
-                            unknown_items.append(post_item)
-
-                        accumulator.begin_batch()
-                        selected_items = unknown_items
-                        if not selected_items:
-                            resume_page = requested_page + 1
-                            if accumulator.finish_batch(
-                                source_page=requested_page,
-                                source_cursor=search_id,
-                                source_has_more=source_has_more,
-                                raw_batch_count=len(raw_items),
-                                resume_page=resume_page,
-                                resume_cursor=search_id,
-                                batch_complete=True,
-                                discovery_phase=discovery_phase,
-                                count_stagnation=discovery_phase == "frontier",
-                            ):
-                                break
-                            if source_has_more in (False, 0):
-                                if discovery_phase == "frontier":
-                                    accumulator.mark_source_exhausted(
-                                        "has_more_false",
-                                        source_page=requested_page,
-                                        source_cursor=search_id,
-                                        source_has_more=False,
-                                        raw_batch_count=len(raw_items),
-                                        resume_page=resume_page,
-                                        resume_cursor=search_id,
-                                        batch_complete=True,
-                                        discovery_phase=discovery_phase,
-                                    )
-                                break
-                            page = resume_page
-                            phase_batches += 1
-                            await self._guarded_pause("search_page", 12.0, 30.0)
-                            continue
-
-                        await self._guarded_pause("search_results", 6.0, 14.0)
-                        semaphore = asyncio.Semaphore(self.settings.MAX_CONCURRENCY_NUM)
-                        task_list = [
-                            self.get_note_detail_async_task(
-                                note_id=post_item.get("id"),
-                                xsec_source=post_item.get("xsec_source"),
-                                xsec_token=post_item.get("xsec_token"),
-                                semaphore=semaphore,
-                            )
-                            for post_item in selected_items
-                        ]
-                        note_details = await asyncio.gather(
-                            *task_list,
-                            return_exceptions=True,
-                        )
-                        note_ids: List[str] = []
-                        xsec_tokens: List[str] = []
-                        processed_count = 0
-                        for post_item, note_detail in zip(selected_items, note_details):
-                            identity = str(
-                                (
-                                    (note_detail or {}).get("note_id")
-                                    if isinstance(note_detail, dict)
-                                    else ""
-                                )
-                                or post_item.get("id")
-                                or ""
-                            )
-                            processed_count += 1
-                            if isinstance(note_detail, BaseException):
-                                request_failure = self._request_failure_exception(
-                                    note_detail
-                                )
-                                detail_text = str(request_failure).lower()
-                                if (
-                                    isinstance(
-                                        request_failure,
-                                        (
-                                            IPBlockError,
-                                            PlatformRuntimeError,
-                                            XHSNetworkRecoveryTimeout,
-                                            CDPBrowserLifecycleError,
-                                        ),
-                                    )
-                                    or isinstance(note_detail, PlaywrightError)
-                                    or self._is_login_expired_failure(note_detail)
-                                    or any(
-                                        marker in detail_text
-                                        for marker in (
-                                            "platform_security_limit",
-                                            "captcha",
-                                            "rate_limit",
-                                            "login_required",
-                                        )
-                                    )
-                                ):
-                                    raise request_failure
-                                error_code = (
-                                    note_detail.code
-                                    if isinstance(note_detail, XHSNoteDetailUnavailable)
-                                    else "detail_request_failed"
-                                )
-                                should_stop = accumulator.skip_candidate_failure(
-                                    identity,
-                                    failure_scope="post",
-                                    detail="note_detail_unavailable",
-                                    error_code=error_code,
-                                    attempts=(
-                                        note_detail.attempts
-                                        if isinstance(
-                                            note_detail, XHSNoteDetailUnavailable
-                                        )
-                                        else self._request_failure_attempts(note_detail)
-                                    ),
-                                    retryable=True,
-                                    source_page=requested_page,
-                                    source_cursor=search_id,
-                                    discovery_phase=discovery_phase,
-                                )
-                                if should_stop:
-                                    break
-                                continue
-                            if note_detail:
-                                if self.is_video_note(note_detail):
-                                    logger.info(
-                                        "[XiaoHongShuCrawler.search] Skip video note, "
-                                        f"note_id: {note_detail.get('note_id')}"
-                                    )
-                                    if accumulator.consider(identity, valid=False):
-                                        break
-                                    continue
-                                await self._maybe_run_post_interaction(note_detail)
-                                try:
-                                    await self.enrich_note_creator(note_detail)
-                                except XHSCreatorProfileUnavailable as exc:
-                                    should_stop = accumulator.skip_candidate_failure(
-                                        identity,
-                                        failure_scope="post",
-                                        detail=(
-                                            f"creator_profile_failed:{exc.reason}"
-                                            if exc.reason
-                                            else "creator_profile_failed"
-                                        ),
-                                        error_code="creator_profile_unavailable",
-                                        attempts=exc.attempts,
-                                        retryable=True,
-                                        source_page=requested_page,
-                                        source_cursor=search_id,
-                                        discovery_phase=discovery_phase,
-                                    )
-                                    if should_stop:
-                                        break
-                                    continue
-                                except RuntimeError as exc:
-                                    if isinstance(
-                                        exc,
-                                        (
-                                            XHSNetworkRecoveryTimeout,
-                                            CDPBrowserLifecycleError,
-                                        ),
-                                    ):
-                                        raise
-                                    detail_text = str(exc).lower()
-                                    if any(
-                                        marker in detail_text
-                                        for marker in (
-                                            "platform_security_limit",
-                                            "captcha",
-                                            "rate_limit",
-                                            "login_required",
-                                        )
-                                    ):
-                                        raise
-                                    should_stop = accumulator.skip_candidate_failure(
-                                        identity,
-                                        failure_scope="post",
-                                        detail="creator_profile_failed",
-                                        error_code=(
-                                            "creator_profile_unavailable"
-                                            if "creator_profile_unavailable_after_retry"
-                                            in detail_text
-                                            else type(exc).__name__
-                                        ),
-                                        attempts=1,
-                                        retryable=(
-                                            "creator_profile_unavailable_after_retry"
-                                            in detail_text
-                                        ),
-                                        source_page=requested_page,
-                                        source_cursor=search_id,
-                                        discovery_phase=discovery_phase,
-                                    )
-                                    if should_stop:
-                                        break
-                                    continue
-                                creator_profile = note_detail.get("creator_profile") or {}
-                                creator_item = (
-                                    _normalized_creator_item(
-                                        (note_detail.get("user") or {}).get("user_id", ""),
-                                        creator_profile,
-                                        current_timestamp=self.ports.current_timestamp,
-                                    )
-                                    if creator_profile
-                                    else {}
-                                )
-                                followers_observed = any(
-                                    creator_item.get(key) not in (None, "")
-                                    for key in ("fans_count", "fans")
-                                )
-                                interact_info = note_detail.get("interact_info") or {}
-                                valid = bool(
-                                    identity
-                                    and note_detail.get("desc")
-                                    and note_detail.get("content_detail_status") == "detail_observed"
-                                    and note_detail.get("content_detail_source") == "note_detail"
-                                    and note_detail.get("time")
-                                    and (note_detail.get("user") or {}).get("user_id")
-                                    and (note_detail.get("user") or {}).get("nickname")
-                                    and note_detail.get("image_list")
-                                    and followers_observed
-                                    and all(
-                                        interact_info.get(key) not in (None, "")
-                                        for key in (
-                                            "liked_count",
-                                            "collected_count",
-                                            "comment_count",
-                                            "share_count",
-                                        )
-                                    )
-                                )
-                                if valid:
-                                    try:
-                                        await self.get_notice_media(note_detail)
-                                    except XHSImageDownloadError as exc:
-                                        if is_runtime_blocking_image_error(exc.code):
-                                            accumulator.mark_runtime_failed(
-                                                exc.code,
-                                                source_page=requested_page,
-                                                source_cursor=search_id,
-                                                resume_page=requested_page,
-                                                resume_cursor=search_id,
-                                                discovery_phase=discovery_phase,
-                                            )
-                                            break
-                                        should_stop = accumulator.skip_candidate_failure(
-                                            identity,
-                                            failure_scope="image",
-                                            detail="image_download_failed",
-                                            error_code=exc.code,
-                                            attempts=exc.attempts,
-                                            source_index=exc.source_index,
-                                            source_page=requested_page,
-                                            source_cursor=search_id,
-                                            discovery_phase=discovery_phase,
-                                        )
-                                        if should_stop:
-                                            break
-                                        continue
-                                await self.update_xhs_note(note_detail)
-                                note_ids.append(note_detail.get("note_id"))
-                                xsec_tokens.append(note_detail.get("xsec_token"))
-                                target_valid = valid and topic_relevant_for_web_post(
-                                    "xhs",
-                                    note_detail,
-                                    fallback_keyword=keyword,
-                                )
-                                should_stop = accumulator.consider(
-                                    identity,
-                                    valid=target_valid,
-                                )
-                                if should_stop:
-                                    break
-                            elif accumulator.consider(identity, valid=False):
-                                break
-
-                        logger.info(
-                            "[XiaoHongShuCrawler.search] Note detail summaries: "
-                            f"{self.note_detail_summaries([item for item in note_details if isinstance(item, dict)])}"
-                        )
-                        batch_complete = processed_count >= len(unknown_items)
-                        resume_page = (
-                            requested_page + 1 if batch_complete else requested_page
-                        )
-                        if accumulator.finish_batch(
-                            source_page=requested_page,
-                            source_cursor=search_id,
-                            source_has_more=source_has_more,
-                            raw_batch_count=len(raw_items),
-                            resume_page=resume_page,
-                            resume_cursor=search_id,
-                            batch_complete=batch_complete,
-                            discovery_phase=discovery_phase,
-                            count_stagnation=discovery_phase == "frontier",
-                        ):
-                            break
-                        if source_has_more in (False, 0):
-                            if discovery_phase == "frontier":
-                                accumulator.mark_source_exhausted(
-                                    "has_more_false",
-                                    source_page=requested_page,
-                                    source_cursor=search_id,
-                                    source_has_more=False,
-                                    raw_batch_count=len(raw_items),
-                                    resume_page=resume_page,
-                                    resume_cursor=search_id,
-                                    batch_complete=batch_complete,
-                                    discovery_phase=discovery_phase,
-                                )
-                            break
-                        page = requested_page + 1
-                        phase_batches += 1
-                        await self._guarded_pause("search_page", 12.0, 30.0)
-                    except XHSNetworkRecoveryTimeout as exc:
-                        logger.error(
-                            "[XiaoHongShuCrawler.search] Network recovery budget "
-                            f"expired on page {requested_page}: {exc}"
-                        )
-                        accumulator.mark_runtime_failed(
-                            "network_recovery_timeout",
-                            source_page=requested_page,
-                            source_cursor=search_id,
-                            resume_page=requested_page,
-                            resume_cursor=search_id,
-                            discovery_phase=discovery_phase,
-                        )
-                        break
-                    except XHSNoteDetailUnavailable as exc:
-                        logger.error(
-                            "[XiaoHongShuCrawler.search] Note detail remained unavailable "
-                            f"on page {requested_page}: {exc!r}"
-                        )
-                        accumulator.mark_runtime_failed(
-                            "note_detail_unavailable",
-                            source_page=requested_page,
-                            source_cursor=search_id,
-                            resume_page=requested_page,
-                            resume_cursor=search_id,
-                            discovery_phase=discovery_phase,
-                        )
-                        break
-                    except IPBlockError as exc:
-                        logger.error(
-                            "[XiaoHongShuCrawler.search] Platform IP block: "
-                            f"{exc!r}"
-                        )
-                        accumulator.mark_runtime_failed(
-                            "ip_blocked_300012",
-                            source_page=requested_page,
-                            source_cursor=search_id,
-                            resume_page=requested_page,
-                            resume_cursor=search_id,
-                            discovery_phase=discovery_phase,
-                        )
-                        break
-                    except PlatformRuntimeError as exc:
-                        accumulator.mark_runtime_failed(
-                            exc.code,
-                            source_page=requested_page,
-                            source_cursor=search_id,
-                            resume_page=requested_page,
-                            resume_cursor=search_id,
-                            discovery_phase=discovery_phase,
-                        )
-                        break
-                    except (DataFetchError, RetryError) as exc:
-                        request_failure = self._request_failure_exception(exc)
-                        if isinstance(request_failure, IPBlockError):
-                            accumulator.mark_runtime_failed(
-                                "ip_blocked_300012",
-                                source_page=requested_page,
-                                source_cursor=search_id,
-                                resume_page=requested_page,
-                                resume_cursor=search_id,
-                                discovery_phase=discovery_phase,
-                            )
-                            break
-                        if isinstance(request_failure, PlatformRuntimeError):
-                            accumulator.mark_runtime_failed(
-                                request_failure.code,
-                                source_page=requested_page,
-                                source_cursor=search_id,
-                                resume_page=requested_page,
-                                resume_cursor=search_id,
-                                discovery_phase=discovery_phase,
-                            )
-                            break
-                        if self._is_login_expired_failure(exc):
-                            try:
-                                recovered = (
-                                    await self._wait_for_midrun_login_recovery()
-                                )
-                            except Exception as recovery_exc:
-                                # 在处理体内抛出，不会落到下方同级分支；运行级失败按同级
-                                # 口径写停止事件后结束本页，未识别异常照常上抛。
-                                recovery_detail = _login_recovery_stop_detail(
-                                    self._request_failure_exception(recovery_exc)
-                                )
-                                if recovery_detail is None:
-                                    raise
-                                logger.error(
-                                    "[XiaoHongShuCrawler.search] Mid-run login recovery "
-                                    f"failed on page {requested_page}: {recovery_exc!r}"
-                                )
-                                accumulator.mark_runtime_failed(
-                                    recovery_detail,
-                                    source_page=requested_page,
-                                    source_cursor=search_id,
-                                    resume_page=requested_page,
-                                    resume_cursor=search_id,
-                                    discovery_phase=discovery_phase,
-                                )
-                                break
-                            if recovered:
-                                continue
-                            logger.error(
-                                "[XiaoHongShuCrawler.search] Login remained expired "
-                                f"on page {requested_page}."
-                            )
-                            accumulator.mark_runtime_failed(
-                                "login_required",
-                                source_page=requested_page,
-                                source_cursor=search_id,
-                                resume_page=requested_page,
-                                resume_cursor=search_id,
-                                discovery_phase=discovery_phase,
-                            )
-                            break
-                        logger.error(
-                            "[XiaoHongShuCrawler.search] Search or note detail "
-                            f"request failed: {self._request_failure_exception(exc)!r}"
-                        )
-                        accumulator.mark_runtime_failed(
-                            "search_or_detail_request_failed",
-                            source_page=requested_page,
-                            source_cursor=search_id,
-                            resume_page=requested_page,
-                            resume_cursor=search_id,
-                            discovery_phase=discovery_phase,
-                        )
-                        break
-                    except CDPBrowserLifecycleError as exc:
-                        _mark_cdp_lifecycle_failed(
-                            accumulator,
-                            exc,
-                            requested_page=requested_page,
-                            search_id=search_id,
-                            discovery_phase=discovery_phase,
-                        )
-                        break
-                    except PlaywrightError as exc:
-                        detail = _playwright_stop_detail(exc)
-                        logger.error(
-                            "[XiaoHongShuCrawler.search] Browser runtime error on "
-                            f"page {requested_page}: {exc!r}"
-                        )
-                        accumulator.mark_runtime_failed(
-                            detail,
-                            source_page=requested_page,
-                            source_cursor=search_id,
-                            resume_page=requested_page,
-                            resume_cursor=search_id,
-                            discovery_phase=discovery_phase,
-                        )
-                        break
-
-            if source_exhausted and not accumulator.stop_reason:
-                accumulator.mark_source_exhausted(
-                    "saved_source_exhausted",
-                    source_page=start_page,
-                    source_cursor=frontier_search_id,
-                    source_has_more=False,
-                    raw_batch_count=0,
-                    resume_page=start_page,
-                    resume_cursor=frontier_search_id,
-                    discovery_phase="frontier",
+            try:
+                await self._run_full_scan(keyword, accumulator)
+            except CDPBrowserLifecycleError as exc:
+                _mark_cdp_lifecycle_failed(accumulator, exc, **self._scan_position())
+            except Exception as exc:
+                detail = _full_scan_stop_detail(exc)
+                if detail is None:
+                    raise
+                logger.error(
+                    "[XiaoHongShuCrawler.search] Full scan stopped: "
+                    f"detail={detail}, error={exc!r}"
                 )
+                accumulator.mark_runtime_failed(
+                    detail,
+                    **self._scan_position(),
+                    resume_page=None,
+                    resume_cursor=None,
+                    discovery_phase="full_scan",
+                )
+
+    async def _process_note_card(self, item: SearchItem, search_page: SearchPage) -> None:
+        """过渡实现（提交 5 由浮层处理取代）：经旧 API 取详情、作者与图片，并对本篇作出决定。"""
+        accumulator = self._scan.accumulator
+        identity = item.note_id
+        position = {
+            "source_page": search_page.page,
+            "source_cursor": search_page.session.search_id,
+            "discovery_phase": "full_scan",
+        }
+        try:
+            note_detail = await self.get_note_detail_async_task(
+                note_id=identity,
+                xsec_source=item.xsec_source,
+                xsec_token=item.xsec_token,
+                semaphore=asyncio.Semaphore(1),
+            )
+        except Exception as exc:
+            request_failure = self._request_failure_exception(exc)
+            if self._is_login_expired_failure(exc):
+                raise XHSLoginExpired("note_detail") from exc
+            detail_text = str(request_failure).lower()
+            if isinstance(
+                request_failure,
+                (IPBlockError, PlatformRuntimeError, XHSNetworkRecoveryTimeout, CDPBrowserLifecycleError),
+            ) or isinstance(exc, PlaywrightError):
+                raise request_failure
+            if any(
+                marker in detail_text
+                for marker in ("platform_security_limit", "captcha", "rate_limit", "login_required")
+            ):
+                raise PlatformRuntimeError(str(request_failure), code="search_or_detail_request_failed") from exc
+            accumulator.skip_candidate_failure(
+                identity,
+                failure_scope="post",
+                detail="note_detail_unavailable",
+                error_code=exc.code if isinstance(exc, XHSNoteDetailUnavailable) else "detail_request_failed",
+                attempts=(
+                    exc.attempts
+                    if isinstance(exc, XHSNoteDetailUnavailable)
+                    else self._request_failure_attempts(exc)
+                ),
+                retryable=True,
+                **position,
+            )
+            return
+        if not note_detail:
+            accumulator.consider(identity, valid=False)
+            return
+        if self.is_video_note(note_detail):
+            logger.info(f"[XiaoHongShuCrawler.search] Skip video note, note_id: {identity}")
+            accumulator.consider(identity, valid=False)
+            return
+        await self._maybe_run_post_interaction(note_detail)
+        try:
+            await self.enrich_note_creator(note_detail)
+        except XHSCreatorProfileUnavailable as exc:
+            accumulator.skip_candidate_failure(
+                identity,
+                failure_scope="post",
+                detail=f"creator_profile_failed:{exc.reason}" if exc.reason else "creator_profile_failed",
+                error_code="creator_profile_unavailable",
+                attempts=exc.attempts,
+                retryable=True,
+                **position,
+            )
+            return
+        except RuntimeError as exc:
+            if isinstance(exc, (XHSNetworkRecoveryTimeout, CDPBrowserLifecycleError)):
+                raise
+            detail_text = str(exc).lower()
+            if any(
+                marker in detail_text
+                for marker in ("platform_security_limit", "captcha", "rate_limit", "login_required")
+            ):
+                raise
+            retry_exhausted = "creator_profile_unavailable_after_retry" in detail_text
+            accumulator.skip_candidate_failure(
+                identity,
+                failure_scope="post",
+                detail="creator_profile_failed",
+                error_code="creator_profile_unavailable" if retry_exhausted else type(exc).__name__,
+                attempts=1,
+                retryable=retry_exhausted,
+                **position,
+            )
+            return
+        creator_profile = note_detail.get("creator_profile") or {}
+        creator_item = (
+            _normalized_creator_item(
+                (note_detail.get("user") or {}).get("user_id", ""),
+                creator_profile,
+                current_timestamp=self.ports.current_timestamp,
+            )
+            if creator_profile
+            else {}
+        )
+        followers_observed = any(creator_item.get(key) not in (None, "") for key in ("fans_count", "fans"))
+        interact_info = note_detail.get("interact_info") or {}
+        valid = bool(
+            identity
+            and note_detail.get("desc")
+            and note_detail.get("content_detail_status") == "detail_observed"
+            and note_detail.get("content_detail_source") == "note_detail"
+            and note_detail.get("time")
+            and (note_detail.get("user") or {}).get("user_id")
+            and (note_detail.get("user") or {}).get("nickname")
+            and note_detail.get("image_list")
+            and followers_observed
+            and all(
+                interact_info.get(key) not in (None, "")
+                for key in ("liked_count", "collected_count", "comment_count", "share_count")
+            )
+        )
+        if valid:
+            try:
+                await self.get_notice_media(note_detail)
+            except XHSImageDownloadError as exc:
+                if is_runtime_blocking_image_error(exc.code):
+                    raise PlatformRuntimeError(f"XHS image download {exc.code}", code=exc.code) from exc
+                accumulator.skip_candidate_failure(
+                    identity,
+                    failure_scope="image",
+                    detail="image_download_failed",
+                    error_code=exc.code,
+                    attempts=exc.attempts,
+                    source_index=exc.source_index,
+                    **position,
+                )
+                return
+        await self.update_xhs_note(note_detail)
+        target_valid = valid and topic_relevant_for_web_post(
+            "xhs", note_detail, fallback_keyword=self._scan.keyword,
+        )
+        accumulator.consider(identity, valid=target_valid)
 
     async def create_xhs_client(self, httpx_proxy: Optional[str]) -> XiaoHongShuClient:
         """Create Xiaohongshu client"""

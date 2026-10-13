@@ -23,15 +23,32 @@ FORK_TOPS = {
 SCRIPT_MODULES = {path.stem for path in (ROOT / "scripts").glob("*.py")} | {"scripts"}
 WORKER_CODES = ("wb", "dy", "zhihu", "xhs")
 MIXIN_MODULES = {"session", "navigation", "login", "author", "detail", "media", "errors", "parser", "behavior"}
+# #71 新增、台账之外的 mixin 模块。
+T71_MIXIN_MODULES = {"scan"}
+# 平台层只可依赖根侧父子共用的格式定义，不得依赖租约、发现等控制面。
+XHS_ROOT_MODULES_ALLOWED = {"trippostcollect.xhs.operator_wait", "trippostcollect.xhs.search_target"}
 
 
-def exited_rows() -> set[tuple[str, str]]:
+def _resolutions() -> dict:
     sys.path.insert(0, str(ROOT / "scripts/dev"))
     try:
         rules = importlib.import_module("adapter_ledger_rules")
     finally:
         sys.path.remove(str(ROOT / "scripts/dev"))
-    return {key for key, (action, _, _) in rules.PROGRESS_RESOLUTIONS.items() if action == "退出"}
+    return rules.PROGRESS_RESOLUTIONS
+
+
+def exited_rows() -> set[tuple[str, str]]:
+    return {key for key, (action, _, _) in _resolutions().items() if action == "退出"}
+
+
+def migrated_names() -> dict[tuple[str, str], str]:
+    """“迁至”行的承接方法名（限定名最后一段）。"""
+    return {
+        key: target.rsplit(".", 1)[-1]
+        for key, (action, target, _) in _resolutions().items()
+        if action == "迁至" and target
+    }
 
 
 def resolved_imports(path: Path, package: str):
@@ -127,6 +144,15 @@ def test_platform_xhs_dependency_direction():
                 assert module == "trippostcollect.application.contracts", (path.name, module)
             if module.startswith("trippostcollect.platforms"):
                 assert module.startswith("trippostcollect.platforms.xhs"), (path.name, module)
+            if module == "trippostcollect.xhs" or module.startswith("trippostcollect.xhs."):
+                assert module in XHS_ROOT_MODULES_ALLOWED, (path.name, module)
+
+
+def test_search_target_imports_only_standard_library():
+    path = PACKAGE / "xhs/search_target.py"
+    for _, module, _ in resolved_imports(path, "trippostcollect.xhs.search_target"):
+        top = module.split(".")[0]
+        assert top == "__future__" or top in sys.stdlib_module_names, module
 
 
 def test_runtime_does_not_import_xhs_platform_or_scripts(tmp_path):
@@ -186,8 +212,9 @@ def test_crawler_methods_live_in_ledger_target_mixins():
     assert len(rows) == 69
     # #71 起被替代的方法按规则文件登记“退出”，不再要求存在。
     rows = [row for row in rows if (row["file"], row["qualname"]) not in exited_rows()]
+    migrated = migrated_names()
     for row in rows:
-        name = row["qualname"].split(".", 1)[1]
+        name = migrated.get((row["file"], row["qualname"]), row["qualname"].split(".", 1)[1])
         owner = next(cls for cls in crawler.__mro__ if name in vars(cls))
         expected = "trippostcollect." + row["target"][:-3].replace("/", ".")
         assert owner.__module__ == expected, (name, owner, expected)
@@ -195,9 +222,9 @@ def test_crawler_methods_live_in_ledger_target_mixins():
     mixins = [base for base in crawler.__bases__ if base.__module__ != core.__name__]
     assert {base.__module__.rsplit(".", 1)[-1] for base in mixins} == {
         row["target"][len("platforms/xhs/"):-3] for row in rows if row["target"] != "platforms/xhs/core.py"
-    }
+    } | T71_MIXIN_MODULES
     for base in mixins:
-        assert base.__module__.rsplit(".", 1)[-1] in MIXIN_MODULES
+        assert base.__module__.rsplit(".", 1)[-1] in MIXIN_MODULES | T71_MIXIN_MODULES
         assert base.__bases__ == (object,), base
     tree = ast.parse((PLATFORM / "core.py").read_text())
     imported = {}

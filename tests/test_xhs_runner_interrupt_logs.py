@@ -65,7 +65,6 @@ def _setup(tmp_path: Path, worker_mode: str) -> tuple[Path, dict]:
                     {
                         "target_key": "test",
                         "keyword": "青岛旅游",
-                        "top_refresh_max_pages": 1,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }

@@ -164,7 +164,6 @@ def worker_config(*, environ: Mapping[str, str] = os.environ) -> SimpleNamespace
         CRAWLER_MAX_SLEEP_SEC=2,
         DISABLE_SSL_VERIFY=False,
         # 四站配置：原 xhs/dy/weibo/zhihu_config 的同名键。
-        SORT_TYPE="popularity_descending",
         PUBLISH_TIME_TYPE=0,
         WEIBO_SEARCH_TYPE="default",
         ENABLE_WEIBO_FULL_TEXT=True,
@@ -330,5 +329,4 @@ def xhs_readers(config):
         network_retry_min_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MIN_SECONDS", 2.0),
         network_retry_max_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MAX_SECONDS", 30.0),
         creator_verify_poll_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_POLL_SECONDS", 2.0),
-        refresh_max_pages=env_int_reader("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", 0),
     )

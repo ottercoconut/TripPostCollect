@@ -613,6 +613,11 @@ class PageCaptureChannel:
                 return item
         return None
 
+    def latest_pending_seq(self, rule_name: str) -> int:
+        """仍在读体的截获中最大的到达序号；没有在途截获时为 0。"""
+        self._rule(rule_name)
+        return max(self._pending[rule_name], default=0)
+
     def drain(self, rule_name: str, *, after_seq: int) -> list[CapturedResponse | CaptureFailure]:
         """after_seq 之后已结算的全部截获与失败，按到达序号排列（供逐页扫描）。"""
         self._raise_if_faulted()

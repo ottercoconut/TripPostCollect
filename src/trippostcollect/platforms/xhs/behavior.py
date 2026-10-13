@@ -38,7 +38,8 @@ from urllib.parse import quote, urlencode, urlparse
 from playwright.async_api import Page
 
 from trippostcollect.application.contracts import XhsBehaviorPorts
-from trippostcollect.platforms.xhs.errors import XHSNetworkRecoveryTimeout
+from trippostcollect.platforms.xhs.errors import PlatformRuntimeError, XHSLoginExpired, XHSNetworkRecoveryTimeout
+from trippostcollect.platforms.xhs.page_scripts import dom_search_ready_counts
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.runtime import behavior as _behavior
 from trippostcollect.runtime.behavior import (
@@ -64,6 +65,10 @@ XHS_CONTINUITY_VERIFY_WAIT_SECONDS = 600.0
 XHS_CONTINUITY_VERIFY_POLL_SECONDS = 2.0
 XHS_POST_INTERACTION_MODES = frozenset({"comment-scroll", "like-one", "random"})
 XHS_OPERATOR_CHALLENGES = frozenset({"captcha_or_verify", "login_required"})
+# §3.8.2：461/471 之后等待验证界面出现的上限（不是人工等待），出现后转入共享人工预算。
+XHS_VERIFICATION_SURFACE_SECONDS = 30.0
+XHS_VERIFICATION_POLL_SECONDS = 1.0
+XHS_CAPTCHA_ROUTE = "/website-login/captcha"
 XHS_COMMENT_SELECTORS = (
     "[class*='comments-container']",
     "[class*='comment-list']",
@@ -209,14 +214,7 @@ async def _wait_for_xhs_search_ready(
         try:
             async with asyncio.timeout(min(6.0, remaining)):
                 last_text, last_markers = await visible_page_state(page)
-                counts = await page.evaluate(
-                    """() => ({
-                        card_count: document.querySelectorAll(
-                            "a[href*='/explore/'], a[href*='/discovery/item/']"
-                        ).length,
-                        profile_count: document.querySelectorAll("a[href*='/user/profile/']").length,
-                    })"""
-                )
+                counts = await dom_search_ready_counts(page)
                 card_count = int((counts or {}).get("card_count") or 0)
                 profile_count = int((counts or {}).get("profile_count") or 0)
         except TimeoutError:
@@ -735,14 +733,19 @@ async def run_xhs_continuity_behavior(
     evidence_path: str | Path,
     stage: str,
     write_evidence: Callable[..., Any],
+    pending: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """`pending` 为行为证据创建前的暂存：事件记入暂存，失败与验证等待照常写出，行为阶段后并入。"""
     path = Path(evidence_path).expanduser()
-    try:
-        evidence = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"cannot update XHS continuity evidence: {exc}") from exc
-    if evidence.get("profile") != "xhs_guarded" or not behavior_evidence_valid(evidence):
-        raise RuntimeError("XHS continuity behavior requires completed xhs_guarded evidence")
+    if pending is not None:
+        evidence = pending
+    else:
+        try:
+            evidence = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cannot update XHS continuity evidence: {exc}") from exc
+        if evidence.get("profile") != "xhs_guarded" or not behavior_evidence_valid(evidence):
+            raise RuntimeError("XHS continuity behavior requires completed xhs_guarded evidence")
 
     started_at = utc_now()
     initial_text, initial_markers = await visible_page_state(page)
@@ -826,7 +829,8 @@ async def run_xhs_continuity_behavior(
     continuity_events = evidence.setdefault("continuity_events", [])
     continuity_events.append(continuity)
     evidence["continuity_events"] = continuity_events[-50:]
-    write_evidence(path, evidence)
+    if pending is None:
+        write_evidence(path, evidence)
     return continuity
 
 
@@ -1046,6 +1050,7 @@ async def run_required_request_pause(
     maximum: float,
     *,
     ports: XhsBehaviorPorts,
+    pending: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not ports.enabled():
         raise RuntimeError("required TripPostCollect request pacing is disabled")
@@ -1055,6 +1060,12 @@ async def run_required_request_pause(
     if not scripts_dir.is_dir() or not evidence_path:
         raise RuntimeError("required TripPostCollect request pacing configuration is incomplete")
 
+    if pending is not None:
+        event = await _behavior.guarded_request_sleep(
+            profile_name=profile_name, stage=stage, minimum=minimum, maximum=maximum,
+        )
+        pending.setdefault("request_pacing_events", []).append(event)
+        return event
     return await _behavior.run_guarded_request_pause(
         evidence_path=evidence_path,
         profile_name=profile_name,
@@ -1070,6 +1081,7 @@ async def run_required_continuity_behavior(
     stage: str,
     *,
     ports: XhsBehaviorPorts,
+    pending: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not ports.enabled():
         raise RuntimeError("required TripPostCollect continuity behavior is disabled")
@@ -1084,7 +1096,50 @@ async def run_required_continuity_behavior(
         evidence_path=evidence_path,
         stage=stage,
         write_evidence=ports.write_evidence,
+        pending=pending,
     )
+
+
+PENDING_EVIDENCE_LISTS = ("request_pacing_events", "continuity_events", "operator_verification_events")
+
+
+def merge_pending_behavior_evidence(pending: dict[str, Any], *, ports: XhsBehaviorPorts) -> None:
+    """行为阶段写出证据后，把之前暂存的节奏、连续性与验证事件按时间先后并入（放在已有事件之前）。"""
+    if not any(pending.get(key) for key in PENDING_EVIDENCE_LISTS):
+        return
+    path = Path(os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()).expanduser()
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot merge pending XHS behavior evidence: {exc}") from exc
+    if evidence.get("profile") != "xhs_guarded" or not behavior_evidence_valid(evidence):
+        raise RuntimeError("pending XHS behavior events require completed xhs_guarded evidence")
+    for key, limit in zip(PENDING_EVIDENCE_LISTS, (200, 50, 50)):
+        merged = [*(pending.get(key) or []), *(evidence.get(key) or [])]
+        if merged:
+            evidence[key] = merged[-limit:]
+    ports.write_evidence(path, evidence)
+
+
+def append_operator_verification_event(
+    event: dict[str, Any],
+    *,
+    ports: XhsBehaviorPorts,
+    pending: dict[str, Any] | None = None,
+) -> None:
+    """前端验证的人工等待记录；行为证据创建前记入暂存。"""
+    if pending is not None:
+        pending.setdefault("operator_verification_events", []).append(event)
+        return
+    path = Path(os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()).expanduser()
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot record XHS operator verification: {exc}") from exc
+    events = evidence.setdefault("operator_verification_events", [])
+    events.append(event)
+    evidence["operator_verification_events"] = events[-50:]
+    ports.write_evidence(path, evidence)
 
 
 async def run_required_api_captcha_verification(
@@ -1177,7 +1232,87 @@ async def run_requested_post_interaction(
 
 
 class XhsBehaviorMixin:
-    """显式互动入口；作为 XiaoHongShuCrawler 的 mixin，方法体逐字保留。"""
+    """显式互动入口与前端验证的被动等待；作为 XiaoHongShuCrawler 的 mixin。"""
+
+    async def _verification_surface(self) -> Any:
+        """所有页面（含子 frame 路由）中出现验证界面的那一页；终态标记立即上抛，登录界面转轮中恢复。"""
+        for page in list(self.browser_context.pages):
+            if self._page_is_closed(page):
+                continue
+            state = await self._popup_checkpoint_state(page)
+            self._raise_for_terminal_popup_state(state, reason="frontend_verification")
+            markers = set(state.get("manual_markers") or [])
+            if markers == {"login_required"}:
+                raise XHSLoginExpired("frontend_verification")
+            routes = [str(getattr(page, "url", "") or "")]
+            routes.extend(str(getattr(frame, "url", "") or "") for frame in getattr(page, "frames", []) or [])
+            if markers or any(urlparse(route).path.startswith(XHS_CAPTCHA_ROUTE) for route in routes):
+                return page
+        return None
+
+    async def _wait_for_frontend_verification(
+        self,
+        *,
+        required: bool,
+        data_arrived: Callable[[], bool],
+    ) -> bool:
+        """§3.8.2 被动等待：30 秒内观察验证界面；出现则置前并在共享人工预算内等它消失。
+
+        完成条件：验证界面消失，且主页面连续两次有可见文本。规则端点（required）30 秒内既无验证界面
+        也无原数据时为运行级失败；返回是否出现过验证界面。
+        """
+        surfaced = None
+        polls = max(1, int(XHS_VERIFICATION_SURFACE_SECONDS / XHS_VERIFICATION_POLL_SECONDS))
+        for attempt in range(polls):
+            surfaced = await self._verification_surface()
+            if surfaced is not None or data_arrived():
+                break
+            if attempt + 1 < polls:
+                await self._popup_sleep(XHS_VERIFICATION_POLL_SECONDS)
+        if surfaced is None:
+            if required and not data_arrived():
+                raise PlatformRuntimeError(
+                    "XHS frontend verification did not surface", code="xhs_verification_not_surfaced",
+                )
+            return False
+        event = {"stage": "frontend_verification", "started_at": utc_now(), "status": "waiting_for_operator"}
+        ticket = self._get_manual_wait_budget().start("frontend_verification")
+        clear_observations = 0
+        try:
+            logger.warning(
+                "[XiaoHongShuCrawler] Frontend verification surfaced; waiting for the operator within the "
+                f"shared manual budget ({ticket.remaining_seconds:.1f}s left)."
+            )
+            while True:
+                ticket.raise_if_exhausted()
+                try:
+                    await surfaced.bring_to_front()
+                except Exception:
+                    pass
+                still_surfaced = await self._verification_surface()
+                primary = await self._popup_checkpoint_state(self.context_page)
+                self._raise_for_terminal_popup_state(primary, reason="frontend_verification")
+                if (
+                    still_surfaced is None
+                    and not primary.get("manual_markers")
+                    and str(primary.get("visible_text") or "").strip()
+                ):
+                    clear_observations += 1
+                    if clear_observations >= 2:
+                        break
+                else:
+                    clear_observations = 0
+                remaining = ticket.remaining_seconds
+                if remaining <= 0:
+                    ticket.raise_if_exhausted()
+                await self._popup_sleep(min(2.0, remaining))
+        finally:
+            ticket.close()
+        event.update({"status": "completed", "finished_at": utc_now()})
+        append_operator_verification_event(
+            event, ports=self.ports.behavior, pending=getattr(self, "_pending_behavior_evidence", None),
+        )
+        return True
 
     async def _maybe_run_post_interaction(self, note_detail: Dict) -> None:
         if self.post_interaction_mode == "none" or self.post_interaction_attempted:

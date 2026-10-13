@@ -374,3 +374,25 @@ async def test_close_stops_capture_and_closes_the_ledger(tmp_path):
     with pytest.raises(RuntimeError):
         ledger.append("decision", seq=ledger.next_seq(), page_role=None, subject_id="n", decision="x",
                       from_visit=None)
+
+
+@pytest.mark.asyncio
+async def test_latest_pending_seq_reports_responses_still_reading_their_body(tmp_path):
+    _, primary, _, channel = build(tmp_path)
+    assert channel.latest_pending_seq("t.search") == 0
+    first = primary.respond(search_request(primary), body=body({}), delayed=True)
+    second = primary.respond(search_request(primary, 2), body=body({}), delayed=True)
+    await asyncio.sleep(0)
+    pending = channel.latest_pending_seq("t.search")
+    assert pending > 0 and channel.drain("t.search", after_seq=0) == []
+    first.release()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert channel.latest_pending_seq("t.search") == pending
+    second.release()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert channel.latest_pending_seq("t.search") == 0
+    assert [item.seq for item in channel.drain("t.search", after_seq=0)] == [pending - 1, pending]
+    with pytest.raises(ValueError):
+        channel.latest_pending_seq("unknown.rule")

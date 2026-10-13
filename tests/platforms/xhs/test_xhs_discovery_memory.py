@@ -1,17 +1,24 @@
+"""全量滚动扫描的抓取记忆与停止口径：已知候选滑过、候选失败、运行级失败集中写停止事件（full_scan，无恢复位置）。
+
+搜索流程经离线站点驱动；单篇处理暂走过渡的旧 API 详情路径（提交 5 改为浮层），本文件只验证其候选与运行级口径。
+"""
+
 from __future__ import annotations
 
 import json
 import sqlite3
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import ANY, AsyncMock, Mock
 
 import httpx
 import pytest
 
 from playwright.async_api import Error as PlaywrightError
 from tenacity import Future, RetryError
+from support.xhs_fake_site import XhsFakeSite, note
 from trippostcollect.application import events as app_events
 from trippostcollect.platforms.xhs import core as xhs_core
+from trippostcollect.platforms.xhs import scan as xhs_scan
 from trippostcollect.platforms.xhs.errors import (
     DataFetchError,
     IPBlockError,
@@ -28,50 +35,8 @@ from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 
 from .support import XiaoHongShuCrawler, config, make_capture
 
-
-class SearchClient:
-    def __init__(self, items):
-        self.items = items
-        self.calls = []
-
-    async def get_note_by_keyword(self, **kwargs):
-        self.calls.append(kwargs)
-        return {"items": self.items, "has_more": False}
-
-
-class LoginExpiredSearchClient:
-    def __init__(self, *, recover: bool):
-        self.recover = recover
-        self.calls = []
-
-    async def get_note_by_keyword(self, **kwargs):
-        self.calls.append(kwargs)
-        if not self.recover or len(self.calls) == 1:
-            failure = DataFetchError("登录已过期")
-            raise RetryError(Future.construct(3, failure, has_exception=True))
-        return {"items": [], "has_more": False}
-
-
-class NetworkOutageSearchClient:
-    def __init__(self, *, recover: bool):
-        self.recover = recover
-        self.calls = []
-
-    async def get_note_by_keyword(self, **kwargs):
-        self.calls.append(kwargs)
-        if not self.recover or len(self.calls) == 1:
-            request = httpx.Request(
-                "GET",
-                "https://edith.xiaohongshu.com/api/sns/web/v1/search/notes",
-            )
-            raise RetryError(
-                Future.construct(
-                    3,
-                    httpx.ReadTimeout("temporary disconnect", request=request),
-                    has_exception=True,
-                )
-            )
-        return {"items": [], "has_more": False}
+KEYWORD = "青岛旅游"
+LOGIN_EXPIRED = {"code": -101, "success": False, "msg": "登录已过期"}
 
 
 def lifecycle_error(code: str, *, stage: str = "search") -> CDPBrowserLifecycleError:
@@ -107,21 +72,43 @@ def valid_note(note_id: str) -> dict:
     }
 
 
-def prepare_crawler(monkeypatch, tmp_path, *, items, start_page=3):
+async def _no_sleep(*_args, **_kwargs) -> None:
+    return None
+
+
+def prepare_crawler(monkeypatch, tmp_path, *, items, pages=None):
+    """目标会话第 1 页为 `items`（或多页 `pages`），其后是 has_more=false 的空页。"""
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps({"events": []}), encoding="utf-8")
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR", "saved-search-id")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", "0")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED", "0")
-    monkeypatch.setattr(config, "START_PAGE", start_page)
-    monkeypatch.setattr(config, "KEYWORDS", "青岛旅游")
-    monkeypatch.setattr(config, "SORT_TYPE", "")
-    monkeypatch.setattr(config, "MAX_CONCURRENCY_NUM", 1)
+    monkeypatch.setattr(config, "KEYWORDS", KEYWORD)
+    monkeypatch.setattr(xhs_scan, "merge_pending_behavior_evidence", lambda pending, ports: None)
+    monkeypatch.setattr(xhs_scan, "XHS_SEARCH_LOAD_WAIT_SECONDS", 0.05)
 
+    site = XhsFakeSite(KEYWORD, pages if pages is not None else [[note(item) for item in items]])
     crawler = XiaoHongShuCrawler()
-    crawler.xhs_client = SearchClient(items)
-    crawler.capture = make_capture(tmp_path)
+    crawler.context_page = site.page
+    crawler.browser_context = site.context
+    crawler.capture = make_capture(tmp_path, context=site.context)
+    crawler.capture.install(site.page)
+    crawler._scan_sleep = _no_sleep
+
+    async def guarded_pause(stage, minimum, maximum):
+        start = crawler.capture.pause_started()
+        continuity = "completed" if stage in {"search_results", "search_page"} else "n/a"
+        crawler.capture.pause_finished(stage, start, 0.0, continuity)
+        return 0.0
+
+    async def behavior(keyword):
+        site.wheel(600)
+        site.wheel(-600)
+        return {"status": "completed"}
+
+    crawler._guarded_pause = guarded_pause
+    crawler._run_human_behavior_on_primary_page = behavior
+    crawler._popup_checkpoint_state = AsyncMock(
+        return_value={"closed": False, "visible_text": "ok", "manual_markers": [], "terminal": ""}
+    )
     detail_ids = []
 
     async def fetch_detail(*, note_id, **kwargs):
@@ -129,54 +116,36 @@ def prepare_crawler(monkeypatch, tmp_path, *, items, start_page=3):
         return valid_note(note_id)
 
     crawler.get_note_detail_async_task = fetch_detail
-    crawler._guarded_pause = AsyncMock(return_value=0.0)
     crawler._maybe_run_post_interaction = AsyncMock(return_value=None)
     crawler.enrich_note_creator = AsyncMock(return_value=None)
     crawler.get_notice_media = AsyncMock(return_value=None)
     crawler.is_video_note = lambda note: False
-    crawler.note_detail_summaries = lambda notes: [{"note_id": note["note_id"]} for note in notes]
     monkeypatch.setattr(crawler, "update_xhs_note", AsyncMock(return_value=None))
     monkeypatch.setattr(
         xhs_core,
         "_normalized_creator_item",
         lambda user_id, profile, **_injected: {"fans_count": profile["fans_count"]},
     )
-    return crawler, detail_ids, state_path
+    return crawler, detail_ids, state_path, site
 
 
-def attach_network_clock(
-    monkeypatch: pytest.MonkeyPatch,
-    crawler: XiaoHongShuCrawler,
-    *,
-    wait_seconds: float,
-) -> tuple[object, object, list[float]]:
-    page = SimpleNamespace(is_closed=lambda: False, url="https://www.xiaohongshu.com")
-    context = SimpleNamespace(pages=[page], new_page=AsyncMock())
-    crawler.context_page = page
-    crawler.browser_context = context
-    crawler._record_network_recovery_event = AsyncMock()
-    crawler.launch_browser = AsyncMock()
-    crawler.launch_browser_with_cdp = AsyncMock()
+def events_of(state_path, kind: str) -> list[dict]:
+    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
+    return [event["details"] for event in events if event["type"] == kind]
 
-    clock = {"now": 50.0}
-    sleeps: list[float] = []
 
-    def monotonic() -> float:
-        return clock["now"]
+def last_stop(state_path) -> dict:
+    return events_of(state_path, "adaptive_search_stopped")[-1]
 
-    async def sleep(seconds: float) -> None:
-        sleeps.append(seconds)
-        clock["now"] += seconds
 
-    crawler._popup_monotonic = monotonic
-    crawler._popup_sleep = sleep
-    monkeypatch.setenv(
-        "TRIPPOSTCOLLECT_XHS_NETWORK_WAIT_SECONDS",
-        str(wait_seconds),
-    )
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MIN_SECONDS", "2")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MAX_SECONDS", "4")
-    return context, page, sleeps
+def assert_runtime_stop(stopped: dict, detail: str, *, source_page=1) -> None:
+    assert stopped["stop_reason"] == "runtime_failed"
+    assert stopped["stop_detail"] == detail
+    assert stopped["discovery_phase"] == "full_scan"
+    assert stopped["source_page"] == source_page
+    assert stopped["resume_page"] is None and stopped["resume_cursor"] is None
+    assert stopped["batch_complete"] is False
+    assert "source_visit_id" not in stopped
 
 
 @pytest.mark.asyncio
@@ -188,82 +157,45 @@ async def test_known_note_is_skipped_before_detail_request(monkeypatch, tmp_path
         )
         conn.execute("INSERT INTO web_posts VALUES ('xhs', 'known-note', NULL)")
     monkeypatch.setenv("TRIPPOSTCOLLECT_DB_PATH", str(db_path))
-    crawler, detail_ids, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "known-note"}, {"id": "new-note"}],
+    crawler, detail_ids, state_path, site = prepare_crawler(
+        monkeypatch, tmp_path, items=["known-note", "new-note"],
     )
 
     await crawler.search()
 
     assert detail_ids == ["new-note"]
-    assert crawler.xhs_client.calls[0]["page"] == 3
-    assert crawler.xhs_client.calls[0]["search_id"] == "saved-search-id"
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["resume_page"] == 4
-    assert stopped["details"]["batch_complete"] is True
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted"
+    assert stopped["resume_page"] is None
+    assert stopped["batch_complete"] is True
 
 
 @pytest.mark.asyncio
-async def test_all_unknown_candidates_are_processed_before_exhaustion(
-    monkeypatch,
-    tmp_path,
-):
+async def test_all_unknown_candidates_are_processed_before_exhaustion(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, detail_ids, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "first"}, {"id": "second"}],
+    crawler, detail_ids, state_path, site = prepare_crawler(
+        monkeypatch, tmp_path, items=["first", "second"],
     )
 
     await crawler.search()
 
     assert detail_ids == ["first", "second"]
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["resume_page"] == 4
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
-    assert stopped["details"]["batch_complete"] is True
-    assert stopped["details"]["candidate_identities"] == ["first", "second"]
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted"
+    assert stopped["stop_detail"] == "has_more_false"
+    assert stopped["discovery_phase"] == "full_scan"
+    assert stopped["source_page"] == 2 and stopped["source_has_more"] is False
+    assert stopped["source_cursor"] == site.search_id
+    assert stopped["resume_page"] is None and stopped["resume_cursor"] is None
+    assert stopped["batch_complete"] is True
+    assert stopped["candidate_identities"] == ["first", "second"]
+    assert stopped["source_visit_id"].startswith(crawler.capture.ledger.ledger_id)
 
 
 @pytest.mark.asyncio
-async def test_top_refresh_uses_fresh_search_id_before_saved_frontier(monkeypatch, tmp_path):
+async def test_browser_context_close_is_recorded_as_runtime_failure(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, detail_ids, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "top-new"}],
-        start_page=1,
-    )
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", "2")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED", "1")
-    monkeypatch.setattr(xhs_core, "get_search_id", lambda: "fresh-search-id")
-
-    await crawler.search()
-
-    assert detail_ids == ["top-new"]
-    assert [(call["page"], call["search_id"]) for call in crawler.xhs_client.calls] == [
-        (1, "fresh-search-id")
-    ]
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_detail"] == "saved_source_exhausted"
-
-
-@pytest.mark.asyncio
-async def test_browser_context_close_is_recorded_as_resumable_runtime_failure(
-    monkeypatch,
-    tmp_path,
-):
-    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "new-note"}],
-    )
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["new-note"])
     crawler.enrich_note_creator = AsyncMock(
         side_effect=PlaywrightError(
             "BrowserContext.new_page: Target page, context or browser has been closed"
@@ -272,26 +204,15 @@ async def test_browser_context_close_is_recorded_as_resumable_runtime_failure(
 
     await crawler.search()
 
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "runtime_failed"
-    assert stopped["details"]["stop_detail"] == "browser_context_closed"
-    assert stopped["details"]["resume_page"] == 3
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
-    assert stopped["details"]["batch_complete"] is False
+    stopped = last_stop(state_path)
+    assert_runtime_stop(stopped, "browser_context_closed")
+    assert stopped["source_cursor"] == site.search_id
 
 
 @pytest.mark.asyncio
-async def test_creator_security_limit_is_recorded_as_terminal_runtime_failure(
-    monkeypatch,
-    tmp_path,
-):
+async def test_creator_security_limit_is_recorded_as_terminal_runtime_failure(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "security-limited-note"}],
-    )
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["security-limited-note"])
     crawler.enrich_note_creator = AsyncMock(
         side_effect=PlatformRuntimeError(
             "XHS creator profile is blocked by a platform security limit",
@@ -301,86 +222,54 @@ async def test_creator_security_limit_is_recorded_as_terminal_runtime_failure(
 
     await crawler.search()
 
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    assert not [event for event in events if event["type"] == "candidate_skipped"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "runtime_failed"
-    assert stopped["details"]["stop_detail"] == "platform_security_limit_300011"
-    assert stopped["details"]["source_page"] == 3
-    assert stopped["details"]["source_cursor"] == "saved-search-id"
-    assert stopped["details"]["resume_page"] == 3
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
-    assert stopped["details"]["batch_complete"] is False
-    assert stopped["details"]["candidate_identities"] == []
+    assert not events_of(state_path, "candidate_skipped")
+    stopped = last_stop(state_path)
+    assert_runtime_stop(stopped, "platform_security_limit_300011")
+    assert stopped["source_cursor"] == site.search_id
+    assert stopped["candidate_identities"] == []
 
 
 @pytest.mark.asyncio
-async def test_detail_failure_is_recorded_seen_and_search_continues(
-    monkeypatch,
-    tmp_path,
-):
+async def test_retryable_detail_failure_is_run_only_and_search_continues(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "retry-detail"}],
+    crawler, _, state_path, site = prepare_crawler(
+        monkeypatch, tmp_path, items=None, pages=[[note("retry-detail")], [note("later")]],
     )
     crawler.get_note_detail_async_task = AsyncMock(
-        side_effect=XHSNoteDetailUnavailable(
-            "retry-detail", "api_and_html_empty", attempts=3
-        )
+        side_effect=[XHSNoteDetailUnavailable("retry-detail", "api_and_html_empty", attempts=3), valid_note("later")]
     )
-    crawler.xhs_client = AsyncMock()
-    crawler.xhs_client.get_note_by_keyword.side_effect = [
-        {"items": [{"id": "retry-detail"}], "has_more": True},
-        {"items": [], "has_more": False},
-    ]
 
     await crawler.search()
 
-    crawler.update_xhs_note.assert_not_awaited()
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    skipped = [event for event in events if event["type"] == "candidate_skipped"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert skipped[0]["details"]["identity"] == "retry-detail"
-    assert skipped[0]["details"]["failure_scope"] == "post"
-    assert skipped[0]["details"]["attempts"] == 3
-    assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["resume_page"] == 5
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
-    assert stopped["details"]["candidate_identities"] == ["retry-detail"]
+    crawler.update_xhs_note.assert_awaited_once()
+    (skipped,) = events_of(state_path, "candidate_skipped")
+    assert skipped["identity"] == "retry-detail"
+    assert skipped["failure_scope"] == "post"
+    assert skipped["attempts"] == 3
+    assert skipped["retryable"] is True
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted"
+    # 可重试的候选失败只算本轮已决定，不进入跨轮记忆。
+    assert stopped["candidate_identities"] == ["later"]
 
 
 @pytest.mark.asyncio
-async def test_ip_block_stops_run_without_skipping_or_marking_seen(
-    monkeypatch,
-    tmp_path,
-):
+async def test_ip_block_stops_run_without_skipping_or_marking_seen(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "blocked-detail"}],
-    )
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["blocked-detail"])
     crawler.get_note_detail_async_task = AsyncMock(
         side_effect=RetryError(
-            Future.construct(
-                3,
-                IPBlockError("Network connection error, code 300012"),
-                has_exception=True,
-            )
+            Future.construct(3, IPBlockError("Network connection error, code 300012"), has_exception=True)
         )
     )
 
     await crawler.search()
 
     crawler.update_xhs_note.assert_not_awaited()
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    assert not [event for event in events if event["type"] == "candidate_skipped"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "runtime_failed"
-    assert stopped["details"]["stop_detail"] == "ip_blocked_300012"
-    assert stopped["details"]["candidate_identities"] == []
+    assert not events_of(state_path, "candidate_skipped")
+    stopped = last_stop(state_path)
+    assert_runtime_stop(stopped, "ip_blocked_300012")
+    assert stopped["candidate_identities"] == []
 
 
 @pytest.mark.asyncio
@@ -411,249 +300,143 @@ async def test_detail_fallback_attempt_count_matches_actual_requests(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_image_failure_is_recorded_and_later_xhs_candidate_continues(
-    monkeypatch,
-    tmp_path,
-):
+async def test_image_failure_is_recorded_and_later_xhs_candidate_continues(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "retry-image"}, {"id": "success-image"}],
+    crawler, _, state_path, site = prepare_crawler(
+        monkeypatch, tmp_path, items=["retry-image", "success-image"],
     )
     crawler.get_notice_media = AsyncMock(
-        side_effect=[
-            XHSImageDownloadError(
-                "retry-image", 0, "image_download_retryable", attempts=3
-            ),
-            None,
-        ]
+        side_effect=[XHSImageDownloadError("retry-image", 0, "image_download_retryable", attempts=3), None]
     )
 
     await crawler.search()
 
     crawler.update_xhs_note.assert_awaited_once()
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    skipped = [event for event in events if event["type"] == "candidate_skipped"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert skipped[0]["details"]["identity"] == "retry-image"
-    assert skipped[0]["details"]["failure_scope"] == "image"
-    assert skipped[0]["details"]["attempts"] == 3
-    assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["resume_page"] == 4
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
-    assert stopped["details"]["candidate_identities"] == [
-        "retry-image",
-        "success-image",
-    ]
+    (skipped,) = events_of(state_path, "candidate_skipped")
+    assert skipped["identity"] == "retry-image"
+    assert skipped["failure_scope"] == "image"
+    assert skipped["attempts"] == 3
+    assert skipped["retryable"] is True
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted"
+    assert stopped["candidate_identities"] == ["success-image"]
 
 
 @pytest.mark.asyncio
-async def test_creator_failure_is_recorded_and_later_xhs_candidate_continues(
-    monkeypatch,
-    tmp_path,
-):
+async def test_creator_failure_is_recorded_and_later_xhs_candidate_continues(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "retry-creator"}, {"id": "success-creator"}],
+    crawler, _, state_path, site = prepare_crawler(
+        monkeypatch, tmp_path, items=["retry-creator", "success-creator"],
     )
     crawler.enrich_note_creator = AsyncMock(
-        side_effect=[
-            XHSCreatorProfileUnavailable("author-retry", attempts=3),
-            None,
-        ]
+        side_effect=[XHSCreatorProfileUnavailable("author-retry", attempts=3), None]
     )
 
     await crawler.search()
 
     crawler.update_xhs_note.assert_awaited_once()
     assert crawler.get_notice_media.await_count == 1
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    skipped = [event for event in events if event["type"] == "candidate_skipped"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert skipped[0]["details"]["identity"] == "retry-creator"
-    assert skipped[0]["details"]["failure_scope"] == "post"
-    assert skipped[0]["details"]["error_code"] == "creator_profile_unavailable"
-    assert skipped[0]["details"]["attempts"] == 3
-    assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["candidate_identities"] == [
-        "retry-creator",
-        "success-creator",
-    ]
+    (skipped,) = events_of(state_path, "candidate_skipped")
+    assert skipped["identity"] == "retry-creator"
+    assert skipped["failure_scope"] == "post"
+    assert skipped["error_code"] == "creator_profile_unavailable"
+    assert skipped["attempts"] == 3
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted"
+    assert stopped["candidate_identities"] == ["success-creator"]
 
 
 @pytest.mark.asyncio
-async def test_terminal_image_failure_is_recorded_and_later_candidate_continues(
-    monkeypatch,
-    tmp_path,
-):
+async def test_terminal_image_failure_is_recorded_and_later_candidate_continues(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "terminal-image"}, {"id": "must-not-store"}],
+    crawler, _, state_path, site = prepare_crawler(
+        monkeypatch, tmp_path, items=["terminal-image", "must-not-store"],
     )
     crawler.get_notice_media = AsyncMock(
-        side_effect=[
-            XHSImageDownloadError(
-                "terminal-image", 0, "image_decode_failed", attempts=1
-            ),
-            None,
-        ]
+        side_effect=[XHSImageDownloadError("terminal-image", 0, "image_decode_failed", attempts=1), None]
     )
 
     await crawler.search()
 
     crawler.update_xhs_note.assert_awaited_once()
     assert crawler.get_notice_media.await_count == 2
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    skipped = [event for event in events if event["type"] == "candidate_skipped"]
-    assert skipped[0]["details"]["identity"] == "terminal-image"
-    assert skipped[0]["details"]["failure_scope"] == "image"
-    assert skipped[0]["details"]["retryable"] is False
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["resume_page"] == 4
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
-    assert stopped["details"]["candidate_identities"] == [
-        "must-not-store",
-        "terminal-image",
-    ]
+    (skipped,) = events_of(state_path, "candidate_skipped")
+    assert skipped["identity"] == "terminal-image"
+    assert skipped["failure_scope"] == "image"
+    assert skipped["retryable"] is False
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted"
+    assert stopped["candidate_identities"] == ["must-not-store", "terminal-image"]
+
+
+def expire_login_on_page_two(site: XhsFakeSite, *, times: int = 1) -> None:
+    site.search_overrides[2] = [dict(LOGIN_EXPIRED) for _ in range(times)]
 
 
 @pytest.mark.asyncio
-async def test_wrapped_login_expiry_waits_and_retries_same_search_page(
-    monkeypatch,
-    tmp_path,
-):
+async def test_search_login_expiry_waits_and_retriggers_the_same_session(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[],
-    )
-    crawler.xhs_client = LoginExpiredSearchClient(recover=True)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["first"])
+    expire_login_on_page_two(site)
     crawler._wait_for_midrun_login_recovery = AsyncMock(return_value=True)
 
     await crawler.search()
 
-    assert [call["page"] for call in crawler.xhs_client.calls] == [3, 3]
     crawler._wait_for_midrun_login_recovery.assert_awaited_once_with()
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["stop_detail"] == "has_more_false"
+    assert [request["page"] for request in site.requests if "filters" in request] == [1, 2, 2]
+    assert len({request["search_id"] for request in site.requests if "filters" in request}) == 1
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted"
+    assert stopped["stop_detail"] == "has_more_false"
 
 
 @pytest.mark.asyncio
-async def test_wrapped_login_expiry_timeout_keeps_current_page_as_frontier(
-    monkeypatch,
-    tmp_path,
-):
+async def test_search_login_expiry_without_recovery_stops_as_login_required(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[],
-    )
-    crawler.xhs_client = LoginExpiredSearchClient(recover=False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["first"])
+    expire_login_on_page_two(site)
     crawler._wait_for_midrun_login_recovery = AsyncMock(return_value=False)
 
     await crawler.search()
 
-    assert [call["page"] for call in crawler.xhs_client.calls] == [3]
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "runtime_failed"
-    assert stopped["details"]["stop_detail"] == "login_required"
-    assert stopped["details"]["resume_page"] == 3
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
-    assert stopped["details"]["batch_complete"] is False
+    assert_runtime_stop(last_stop(state_path), "login_required", source_page=ANY)
 
 
 @pytest.mark.asyncio
-async def test_shared_manual_budget_exhaustion_is_a_fixed_runtime_stop(
-    monkeypatch,
-    tmp_path,
-):
+async def test_main_page_closed_in_search_login_recovery_stops_at_current_page(monkeypatch, tmp_path):
+    """第 1 页完成并发布；第 2 页登录过期，同时主页面关闭（浏览器仍存活）。"""
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[],
+    crawler, detail_ids, state_path, site = prepare_crawler(
+        monkeypatch, tmp_path, items=None, pages=[[note("note-confirmed")], [note("never")]],
     )
-    crawler.xhs_client = LoginExpiredSearchClient(recover=False)
-    crawler._wait_for_midrun_login_recovery = AsyncMock(
-        side_effect=XHSManualWaitBudgetExhausted()
-    )
+    closed = {"value": False}
+    site.page.is_closed = lambda: closed["value"]
 
-    await crawler.search()
+    async def still_behavior(keyword):
+        return {"status": "completed"}
 
-    assert [call["page"] for call in crawler.xhs_client.calls] == [3]
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    stopped = [
-        event for event in events if event["type"] == "adaptive_search_stopped"
-    ][-1]
-    assert stopped["details"]["stop_reason"] == "runtime_failed"
-    assert (
-        stopped["details"]["stop_detail"]
-        == "xhs_manual_checkpoint_budget_exhausted"
-    )
-    assert stopped["details"]["resume_page"] == 3
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
-    assert stopped["details"]["batch_complete"] is False
+    # 行为阶段不滚动：第 2 页只在第 1 页处理完、扫描向下滚动时才请求。
+    crawler._run_human_behavior_on_primary_page = still_behavior
 
+    def close_on_page_two(number, request_json):
+        if number == 2 and "filters" in request_json:
+            closed["value"] = True
 
-class ConfirmedThenLoginExpiredClient:
-    """第 3 页正常完成并确认；第 4 页登录过期，同时主页面关闭（浏览器仍存活）。"""
-
-    def __init__(self, crawler):
-        self.crawler = crawler
-        self.calls = []
-
-    async def get_note_by_keyword(self, **kwargs):
-        self.calls.append(kwargs)
-        if kwargs["page"] == 3:
-            return {"items": [{"id": "note-confirmed"}], "has_more": True}
-        self.crawler.context_page.closed = True
-        failure = DataFetchError("登录已过期")
-        raise RetryError(Future.construct(3, failure, has_exception=True))
-
-
-@pytest.mark.asyncio
-async def test_main_page_closed_in_search_login_recovery_stops_at_current_page(
-    monkeypatch,
-    tmp_path,
-):
-    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, detail_ids, state_path = prepare_crawler(monkeypatch, tmp_path, items=[])
-    crawler.xhs_client = ConfirmedThenLoginExpiredClient(crawler)
-    page = SimpleNamespace(closed=False)
-    page.is_closed = lambda: page.closed
-    crawler.context_page = page
+    site.before_respond = close_on_page_two
+    expire_login_on_page_two(site)
     crawler.cdp_manager = Mock(assert_alive=Mock())
     published = []
     monkeypatch.setattr(app_events, "_batch_publisher", published.append)
 
-    # 不应逃出 search()：真实登录恢复入口检查主页面并以生命周期失败结束本页。
     await crawler.search()
 
     crawler.cdp_manager.assert_alive.assert_any_call("midrun_login_recovery")
-    assert [call["page"] for call in crawler.xhs_client.calls] == [3, 4]
     assert detail_ids == ["note-confirmed"]
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    assert not any(event["type"] == "candidate_skipped" for event in events)
-    completed = [event["details"] for event in events if event["type"] == "adaptive_batch_completed"]
-    assert [(batch["source_page"], batch["resume_page"]) for batch in completed] == [(3, 4)]
+    assert not events_of(state_path, "candidate_skipped")
+    completed = events_of(state_path, "adaptive_batch_completed")
+    assert [(batch["source_page"], batch["resume_page"]) for batch in completed] == [(1, None)]
     assert published == completed
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
-    assert stopped["stop_reason"] == "runtime_failed"
-    assert stopped["stop_detail"] == "main_page_closed"
-    assert stopped["resume_page"] == 4
-    assert stopped["resume_cursor"] == "saved-search-id"
-    assert stopped["batch_complete"] is False
+    assert_runtime_stop(last_stop(state_path), "main_page_closed", source_page=2)
 
 
 class TargetClosedError(PlaywrightError):
@@ -668,10 +451,6 @@ LOGIN_RECOVERY_RUN_FAILURES = [
     (XHSManualWaitBudgetExhausted(), "xhs_manual_checkpoint_budget_exhausted"),
     (XHSNetworkRecoveryTimeout("midrun_login_confirmation", 600.0), "network_recovery_timeout"),
     (IPBlockError("Network connection error"), "ip_blocked_300012"),
-    (
-        RetryError(Future.construct(3, IPBlockError("Network connection error"), has_exception=True)),
-        "ip_blocked_300012",
-    ),
     (PlaywrightError("Protocol error (Runtime.evaluate): boom"), "browser_runtime_failed"),
     (TargetClosedError("Target page, context or browser has been closed"), "browser_context_closed"),
     (XHSMainPageClosedUnexpected(stage="midrun_login_recovery"), "main_page_closed"),
@@ -683,49 +462,35 @@ LOGIN_RECOVERY_RUN_FAILURES = [
     ("failure", "stop_detail"),
     LOGIN_RECOVERY_RUN_FAILURES,
     ids=[
-        "terminal_popup", "manual_budget", "network_timeout", "ip_block", "ip_block_retry",
+        "terminal_popup", "manual_budget", "network_timeout", "ip_block",
         "playwright", "target_closed", "main_page_closed",
     ],
 )
 async def test_search_login_recovery_run_failure_writes_structured_stop(
-    monkeypatch,
-    tmp_path,
-    failure,
-    stop_detail,
+    monkeypatch, tmp_path, failure, stop_detail,
 ):
-    # #60：恢复等待在 except 处理体内抛出，同级分支接不住；须按同级口径写停止事件后结束本页。
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, detail_ids, state_path = prepare_crawler(monkeypatch, tmp_path, items=[])
-    crawler.xhs_client = LoginExpiredSearchClient(recover=False)
+    crawler, detail_ids, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=[])
+    site.search_overrides[1] = [dict(LOGIN_EXPIRED)]
     crawler._wait_for_midrun_login_recovery = AsyncMock(side_effect=failure)
 
     await crawler.search()
 
     crawler._wait_for_midrun_login_recovery.assert_awaited_once_with()
-    assert [call["page"] for call in crawler.xhs_client.calls] == [3]
     assert detail_ids == []
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    assert not any(event["type"] == "candidate_skipped" for event in events)
-    assert not any(event["type"] == "adaptive_batch_completed" for event in events)
-    stops = [event["details"] for event in events if event["type"] == "adaptive_search_stopped"]
-    assert len(stops) == 1
-    assert stops[0]["stop_reason"] == "runtime_failed"
-    assert stops[0]["stop_detail"] == stop_detail
-    assert stops[0]["resume_page"] == 3
-    assert stops[0]["resume_cursor"] == "saved-search-id"
-    assert stops[0]["batch_complete"] is False
+    assert not events_of(state_path, "candidate_skipped")
+    assert not events_of(state_path, "adaptive_batch_completed")
+    (stopped,) = events_of(state_path, "adaptive_search_stopped")
+    assert stopped["stop_reason"] == "runtime_failed"
+    assert stopped["stop_detail"] == stop_detail
+    assert stopped["resume_page"] is None and stopped["batch_complete"] is False
 
 
 @pytest.mark.asyncio
-async def test_search_login_recovery_terminal_popup_stops_through_real_recovery(
-    monkeypatch,
-    tmp_path,
-):
-    # 真实恢复入口：原页出现频控终态弹窗，session 抛 PlatformRuntimeError，search() 不得放它逃出。
+async def test_search_login_recovery_terminal_popup_stops_through_real_recovery(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(monkeypatch, tmp_path, items=[])
-    crawler.xhs_client = LoginExpiredSearchClient(recover=False)
-    crawler.context_page = SimpleNamespace(bring_to_front=AsyncMock(), is_closed=lambda: False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["first"])
+    expire_login_on_page_two(site)
     crawler.cdp_manager = Mock(assert_alive=Mock())
     crawler._popup_checkpoint_state = AsyncMock(
         return_value={"closed": False, "visible_text": "访问频繁", "manual_markers": [], "terminal": "rate_limited"}
@@ -736,20 +501,15 @@ async def test_search_login_recovery_terminal_popup_stops_through_real_recovery(
 
     crawler._popup_checkpoint_state.assert_awaited_once()
     crawler._profile_ui_visible.assert_not_awaited()
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
-    assert stopped["stop_reason"] == "runtime_failed"
-    assert stopped["stop_detail"] == "xhs_rate_limited_terminal"
-    assert stopped["resume_page"] == 3
-    assert stopped["batch_complete"] is False
+    assert_runtime_stop(last_stop(state_path), "xhs_rate_limited_terminal", source_page=ANY)
 
 
 @pytest.mark.asyncio
 async def test_search_login_recovery_unclassified_error_still_escapes(monkeypatch, tmp_path):
-    # 未识别异常与页内同级分支一样照常上抛，不伪造停止事件或来源耗尽。
+    # 未识别异常照常上抛，不伪造停止事件或来源耗尽。
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(monkeypatch, tmp_path, items=[])
-    crawler.xhs_client = LoginExpiredSearchClient(recover=False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["first"])
+    expire_login_on_page_two(site)
     failure = ValueError("unexpected recovery bug")
     crawler._wait_for_midrun_login_recovery = AsyncMock(side_effect=failure)
 
@@ -757,8 +517,7 @@ async def test_search_login_recovery_unclassified_error_still_escapes(monkeypatc
         await crawler.search()
 
     assert exc_info.value is failure
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    assert not any(event["type"] == "adaptive_search_stopped" for event in events)
+    assert not events_of(state_path, "adaptive_search_stopped")
 
 
 POST_INTERACTION_RUN_FAILURES = [
@@ -771,11 +530,7 @@ POST_INTERACTION_RUN_FAILURES = [
 
 def prepare_post_interaction(monkeypatch, tmp_path, failure):
     """真实帖子互动入口；互动辅助页导航按用例抛错，后续互动步骤不会到达。"""
-    crawler, detail_ids, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "note-interacted", "xsec_token": "token"}],
-    )
+    crawler, detail_ids, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["note-interacted"])
     del crawler._maybe_run_post_interaction
     crawler.post_interaction_mode = "like"
     crawler.post_interaction_attempted = False
@@ -801,13 +556,9 @@ async def test_post_interaction_lifecycle_or_network_timeout_fails_the_run(
     )
     crawler.enrich_note_creator.assert_not_awaited()
     crawler.update_xhs_note.assert_not_awaited()
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    assert not any(event["type"] == "candidate_skipped" for event in events)
-    assert not any(event["type"] == "adaptive_batch_completed" for event in events)
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
-    assert stopped["stop_reason"] == "runtime_failed"
-    assert stopped["stop_detail"] == stop_detail
-    assert stopped["resume_page"] == 3
+    assert not events_of(state_path, "candidate_skipped")
+    assert not events_of(state_path, "adaptive_batch_completed")
+    assert_runtime_stop(last_stop(state_path), stop_detail)
 
 
 @pytest.mark.asyncio
@@ -823,14 +574,12 @@ async def test_post_interaction_helper_page_closure_does_not_stop_crawl(monkeypa
     )
     crawler.enrich_note_creator.assert_awaited_once()
     crawler.update_xhs_note.assert_awaited_once()
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
-    assert stopped["stop_reason"] == "source_exhausted"
+    assert last_stop(state_path)["stop_reason"] == "source_exhausted"
 
 
 @pytest.mark.asyncio
 async def test_post_interaction_plain_runtime_error_does_not_stop_crawl(monkeypatch, tmp_path):
-    # behavior.py：普通 RuntimeError 只是互动自身失败，记录告警后照常补全、入库并继续到来源耗尽。
+    # 普通 RuntimeError 只是互动自身失败，记录告警后照常补全、入库并继续到来源耗尽。
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     failure = RuntimeError("xhs_post_interaction_button_missing")
     crawler, state_path, interaction_page = prepare_post_interaction(monkeypatch, tmp_path, failure)
@@ -843,88 +592,72 @@ async def test_post_interaction_plain_runtime_error_does_not_stop_crawl(monkeypa
     assert crawler.post_interaction_attempted is True
     crawler.enrich_note_creator.assert_awaited_once()
     crawler.update_xhs_note.assert_awaited_once()
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    assert not any(event["type"] == "candidate_skipped" for event in events)
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
-    assert stopped["stop_reason"] == "source_exhausted"
+    assert not events_of(state_path, "candidate_skipped")
+    assert last_stop(state_path)["stop_reason"] == "source_exhausted"
+
+
+def attach_network_clock(monkeypatch, crawler, *, wait_seconds: float) -> list[float]:
+    crawler._record_network_recovery_event = AsyncMock()
+    clock = {"now": 50.0}
+    sleeps: list[float] = []
+
+    def monotonic() -> float:
+        return clock["now"]
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    crawler._popup_monotonic = monotonic
+    crawler._popup_sleep = sleep
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_WAIT_SECONDS", str(wait_seconds))
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MIN_SECONDS", "2")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MAX_SECONDS", "4")
+    return sleeps
 
 
 @pytest.mark.asyncio
-async def test_search_disconnect_retries_same_page_cursor_and_browser_session(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
+async def test_search_disconnect_pauses_and_rescrolls_in_the_same_browser_session(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[],
-    )
-    crawler.xhs_client = NetworkOutageSearchClient(recover=True)
-    context, page, sleeps = attach_network_clock(
-        monkeypatch,
-        crawler,
-        wait_seconds=10.0,
-    )
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["first"])
+    site.search_overrides[2] = ["net::ERR_INTERNET_DISCONNECTED"]
+    sleeps = attach_network_clock(monkeypatch, crawler, wait_seconds=10.0)
+    context, page = crawler.browser_context, crawler.context_page
 
     await crawler.search()
 
-    assert [call["page"] for call in crawler.xhs_client.calls] == [3, 3]
-    assert [call["search_id"] for call in crawler.xhs_client.calls] == [
-        "saved-search-id",
-        "saved-search-id",
-    ]
-    assert crawler.browser_context is context
-    assert crawler.context_page is page
+    assert [request["page"] for request in site.requests if "filters" in request] == [1, 2, 2]
     assert sleeps == [2.0]
-    context.new_page.assert_not_awaited()
-    crawler.launch_browser.assert_not_awaited()
-    crawler.launch_browser_with_cdp.assert_not_awaited()
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["stop_detail"] == "has_more_false"
+    assert crawler.browser_context is context and crawler.context_page is page
+    outcomes = [call.kwargs["outcome"] for call in crawler._record_network_recovery_event.await_args_list]
+    assert outcomes == ["network_paused", "network_recovered"]
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted"
+    assert stopped["stop_detail"] == "has_more_false"
 
 
 @pytest.mark.asyncio
-async def test_search_disconnect_timeout_preserves_current_recovery_frontier(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
+async def test_search_disconnect_timeout_is_a_runtime_stop(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[],
-    )
-    crawler.xhs_client = NetworkOutageSearchClient(recover=False)
-    context, page, sleeps = attach_network_clock(
-        monkeypatch,
-        crawler,
-        wait_seconds=5.0,
-    )
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["first"])
+    site.search_overrides[2] = ["net::ERR_INTERNET_DISCONNECTED"] * 5
+    sleeps = attach_network_clock(monkeypatch, crawler, wait_seconds=5.0)
 
     await crawler.search()
 
-    assert [call["page"] for call in crawler.xhs_client.calls] == [3, 3, 3]
-    assert [call["search_id"] for call in crawler.xhs_client.calls] == [
-        "saved-search-id",
-        "saved-search-id",
-        "saved-search-id",
-    ]
     assert sleeps == [2.0, 3.0]
-    assert crawler.browser_context is context
-    assert crawler.context_page is page
-    context.new_page.assert_not_awaited()
-    crawler.launch_browser.assert_not_awaited()
-    crawler.launch_browser_with_cdp.assert_not_awaited()
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
-    assert stopped["details"]["stop_reason"] == "runtime_failed"
-    assert stopped["details"]["stop_detail"] == "network_recovery_timeout"
-    assert stopped["details"]["resume_page"] == 3
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
-    assert stopped["details"]["batch_complete"] is False
+    assert_runtime_stop(last_stop(state_path), "network_recovery_timeout", source_page=ANY)
+
+
+@pytest.mark.asyncio
+async def test_unrecoverable_search_request_failure_is_a_runtime_stop(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["first"])
+    site.search_overrides[2] = ["net::ERR_ABORTED"]
+
+    await crawler.search()
+
+    assert_runtime_stop(last_stop(state_path), "search_request_failed", source_page=ANY)
 
 
 @pytest.mark.parametrize(
@@ -937,41 +670,22 @@ async def test_search_disconnect_timeout_preserves_current_recovery_frontier(
     ],
 )
 @pytest.mark.asyncio
-async def test_cdp_lifecycle_failure_preserves_frontier_without_retry_or_relaunch(
-    code: str,
-    stop_detail: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
+async def test_cdp_lifecycle_failure_stops_without_retry_or_relaunch(code, stop_detail, monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, detail_ids, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[],
-    )
-    crawler.xhs_client.get_note_by_keyword = AsyncMock(
-        side_effect=lifecycle_error(code)
-    )
-    crawler.launch_browser = AsyncMock()
+    crawler, detail_ids, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["first"])
+    crawler._assert_primary_page_alive = Mock(side_effect=lifecycle_error(code, stage="full_scan"))
     crawler.launch_browser_with_cdp = AsyncMock()
 
     await crawler.search()
 
-    assert crawler.xhs_client.get_note_by_keyword.await_count == 1
     assert detail_ids == []
-    crawler.launch_browser.assert_not_awaited()
     crawler.launch_browser_with_cdp.assert_not_awaited()
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    assert not any(event["type"] == "adaptive_batch_completed" for event in events)
-    stopped = [
-        event for event in events if event["type"] == "adaptive_search_stopped"
-    ][-1]
-    assert stopped["details"]["stop_reason"] == "runtime_failed"
-    assert stopped["details"]["stop_detail"] == stop_detail
-    assert stopped["details"]["resume_page"] == 3
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
-    assert stopped["details"]["batch_complete"] is False
-    assert stopped["details"].get("candidate_identities") in (None, [])
+    assert not events_of(state_path, "adaptive_batch_completed")
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "runtime_failed"
+    assert stopped["stop_detail"] == stop_detail
+    assert stopped["resume_page"] is None and stopped["batch_complete"] is False
+    assert stopped.get("candidate_identities") in (None, [])
 
 
 def test_main_page_closed_is_lifecycle_failure_with_unchanged_message() -> None:
@@ -984,126 +698,64 @@ def test_main_page_closed_is_lifecycle_failure_with_unchanged_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cdp_disconnect_after_transport_pause_preserves_same_frontier(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
+async def test_cdp_disconnect_during_network_pause_is_a_lifecycle_stop(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[],
-    )
-    crawler.xhs_client = NetworkOutageSearchClient(recover=False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["first"])
+    site.search_overrides[2] = ["net::ERR_INTERNET_DISCONNECTED"]
     crawler._pause_for_network_recovery = AsyncMock(
-        side_effect=lifecycle_error(
-            "xhs_cdp_disconnected_unexpected",
-            stage="search:frontier:page=3",
-        )
+        side_effect=lifecycle_error("xhs_cdp_disconnected_unexpected", stage="full_scan")
     )
-    crawler.launch_browser = AsyncMock()
-    crawler.launch_browser_with_cdp = AsyncMock()
 
     await crawler.search()
 
-    assert [call["page"] for call in crawler.xhs_client.calls] == [3]
     assert crawler._pause_for_network_recovery.await_count == 1
-    crawler.launch_browser.assert_not_awaited()
-    crawler.launch_browser_with_cdp.assert_not_awaited()
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    assert not any(event["type"] == "adaptive_batch_completed" for event in events)
-    stopped = [
-        event for event in events if event["type"] == "adaptive_search_stopped"
-    ][-1]
-    assert stopped["details"]["stop_reason"] == "runtime_failed"
-    assert stopped["details"]["stop_detail"] == "cdp_disconnected"
-    assert stopped["details"]["resume_page"] == 3
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
-    assert stopped["details"]["batch_complete"] is False
+    assert_runtime_stop(last_stop(state_path), "cdp_disconnected", source_page=ANY)
 
 
 @pytest.mark.asyncio
-async def test_cdp_process_exit_from_detail_gather_is_not_candidate_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
+async def test_cdp_process_exit_from_detail_is_not_candidate_failure(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "new-note", "xsec_token": "token"}],
-    )
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["new-note"])
     crawler.get_note_detail_async_task = AsyncMock(
-        side_effect=lifecycle_error(
-            "xhs_browser_process_exited",
-            stage="detail:new-note",
-        )
+        side_effect=lifecycle_error("xhs_browser_process_exited", stage="detail:new-note")
     )
 
     await crawler.search()
 
     assert crawler.get_note_detail_async_task.await_count == 1
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    assert not any(event["type"] == "candidate_skipped" for event in events)
-    assert not any(event["type"] == "adaptive_batch_completed" for event in events)
-    stopped = [
-        event for event in events if event["type"] == "adaptive_search_stopped"
-    ][-1]
-    assert stopped["details"]["stop_detail"] == "browser_process_exited"
-    assert stopped["details"]["resume_page"] == 3
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
+    assert not events_of(state_path, "candidate_skipped")
+    assert not events_of(state_path, "adaptive_batch_completed")
+    assert_runtime_stop(last_stop(state_path), "browser_process_exited")
 
 
 @pytest.mark.asyncio
-async def test_cdp_context_close_from_creator_is_not_candidate_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
+async def test_cdp_context_close_from_creator_is_not_candidate_failure(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
-        monkeypatch,
-        tmp_path,
-        items=[{"id": "new-note", "xsec_token": "token"}],
-    )
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["new-note"])
     crawler.enrich_note_creator = AsyncMock(
-        side_effect=lifecycle_error(
-            "xhs_browser_context_closed_unexpected",
-            stage="creator:new-note",
-        )
+        side_effect=lifecycle_error("xhs_browser_context_closed_unexpected", stage="creator:new-note")
     )
 
     await crawler.search()
 
     assert crawler.enrich_note_creator.await_count == 1
-    events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
-    assert not any(event["type"] == "candidate_skipped" for event in events)
-    assert not any(event["type"] == "adaptive_batch_completed" for event in events)
-    stopped = [
-        event for event in events if event["type"] == "adaptive_search_stopped"
-    ][-1]
-    assert stopped["details"]["stop_detail"] == "browser_context_closed"
-    assert stopped["details"]["resume_page"] == 3
-    assert stopped["details"]["resume_cursor"] == "saved-search-id"
+    assert not events_of(state_path, "candidate_skipped")
+    assert not events_of(state_path, "adaptive_batch_completed")
+    assert_runtime_stop(last_stop(state_path), "browser_context_closed")
 
 
 @pytest.mark.asyncio
-async def test_detail_transport_outage_retries_same_detail_without_html_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_detail_transport_outage_retries_same_detail_without_html_fallback(monkeypatch) -> None:
     crawler = XiaoHongShuCrawler()
+    page = SimpleNamespace(is_closed=lambda: False, url="https://www.xiaohongshu.com")
+    crawler.context_page = page
+    crawler.browser_context = SimpleNamespace(pages=[page], new_page=AsyncMock())
     attach_network_clock(monkeypatch, crawler, wait_seconds=10.0)
-    request = httpx.Request(
-        "GET",
-        "https://edith.xiaohongshu.com/api/sns/web/v1/feed",
-    )
+    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/sns/web/v1/feed")
     crawler.xhs_client = AsyncMock()
     crawler.xhs_client.get_note_by_id.side_effect = [
         RetryError(
-            Future.construct(
-                3,
-                httpx.ConnectError("temporary disconnect", request=request),
-                has_exception=True,
-            )
+            Future.construct(3, httpx.ConnectError("temporary disconnect", request=request), has_exception=True)
         ),
         valid_note("network-detail"),
     ]

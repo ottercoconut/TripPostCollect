@@ -220,7 +220,7 @@ async def test_xhs_search_navigation_primary_page_close_is_terminal_without_retr
     crawler.browser_context = context
     crawler.context_page = original
     crawler.xhs_client = SimpleNamespace(playwright_page=original)
-    crawler._open_behavior_search_page = AsyncMock(
+    crawler._enter_search_from_home = AsyncMock(
         side_effect=RuntimeError(
             "TargetClosedError: Target page, context or browser has been closed"
         )
@@ -235,7 +235,7 @@ async def test_xhs_search_navigation_primary_page_close_is_terminal_without_retr
     assert str(exc_info.value) == (
         "xhs_main_page_closed_unexpected:stage=search_navigation"
     )
-    crawler._open_behavior_search_page.assert_awaited_once_with("青岛旅游")
+    crawler._enter_search_from_home.assert_awaited_once_with("青岛旅游", navigate=False)
     assert crawler.context_page is original
     assert crawler.xhs_client.playwright_page is original
     assert replacement.closed is False
@@ -250,7 +250,7 @@ async def test_xhs_search_navigation_network_error_is_not_mislabeled_page_close(
     crawler.browser_context = FakeContext([primary], events)
     crawler.context_page = primary
     network_error = RuntimeError("net::ERR_INTERNET_DISCONNECTED")
-    crawler._open_behavior_search_page = AsyncMock(side_effect=network_error)
+    crawler._enter_search_from_home = AsyncMock(side_effect=network_error)
     crawler._assert_cdp_lifecycle_alive = AsyncMock(
         side_effect=AssertionError("network errors are not page-close lifecycle events")
     )
@@ -259,7 +259,7 @@ async def test_xhs_search_navigation_network_error_is_not_mislabeled_page_close(
         await crawler._open_behavior_search_page_on_primary_page("青岛旅游")
 
     assert exc_info.value is network_error
-    crawler._open_behavior_search_page.assert_awaited_once_with("青岛旅游")
+    crawler._enter_search_from_home.assert_awaited_once_with("青岛旅游", navigate=False)
     crawler._assert_cdp_lifecycle_alive.assert_not_awaited()
 
 

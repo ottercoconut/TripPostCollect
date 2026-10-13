@@ -392,7 +392,10 @@
     },
     {
      "test": "tests/platforms/xhs/test_xhs_discovery_memory.py::test_browser_context_close_is_recorded_as_resumable_runtime_failure",
-     "asserts": "小红书运行级失败记为 runtime_failed 并保留前沿"
+     "asserts": "小红书运行级失败记为 runtime_failed 并保留前沿",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "小红书改为每轮从顶部全量滚动扫描，深层前沿删除，“保留前沿”不再是契约；运行级失败记为 runtime_failed 由 tests/platforms/xhs/test_xhs_discovery_memory.py::test_browser_context_close_is_recorded_as_runtime_failure 断言"
     }
    ],
    "ported_to": "tests/application/test_discovery.py::test_runtime_failure_has_distinct_stop_reason"

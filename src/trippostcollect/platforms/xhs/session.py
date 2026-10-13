@@ -55,6 +55,7 @@ from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
     XHSMainPageClosedUnexpected,
     XHSNetworkRecoveryTimeout,
+    XHSRequestFailed,
     is_recoverable_xhs_navigation_failure,
 )
 from trippostcollect.platforms.xhs.login import XiaoHongShuLogin
@@ -310,16 +311,23 @@ class XhsSessionMixin:
                 return
 
     async def _guarded_pause(self, stage: str, minimum: float, maximum: float) -> float:
-        """节奏停顿：行为证据记 request_pacing_events，账本记首尾序号与连续性结果（门禁以账本为准）。"""
+        """节奏停顿：行为证据记 request_pacing_events，账本记首尾序号与连续性结果（门禁以账本为准）。
+
+        行为证据创建之前（首个关键词的初始行为阶段之前）停顿照常执行并实时写账本，行为证据的节奏与
+        连续性事件记入 `_pending_behavior_evidence`，行为阶段写出证据后并入。
+        """
         capture = self._require_capture()
+        pending = getattr(self, "_pending_behavior_evidence", None)
         start_seq = capture.pause_started()
-        event = await run_required_request_pause(stage, minimum, maximum, ports=self.ports.behavior)
+        event = await run_required_request_pause(
+            stage, minimum, maximum, ports=self.ports.behavior, pending=pending,
+        )
         seconds = float(event["seconds"])
         logger.info(f"[XiaoHongShuCrawler] Guarded pause stage={stage} seconds={seconds:.3f}")
         continuity_status = "n/a"
         if stage in {"search_results", "search_page"}:
             continuity = await run_required_continuity_behavior(
-                self.context_page, stage, ports=self.ports.behavior,
+                self.context_page, stage, ports=self.ports.behavior, pending=pending,
             )
             continuity_status = "completed" if continuity.get("status") == "completed" else "failed"
             logger.info(
@@ -428,10 +436,10 @@ class XhsSessionMixin:
             self._assert_cdp_lifecycle_alive("behavior_primary_page_closed")
             raise XHSMainPageClosedUnexpected(stage="behavior") from exc
 
-    async def _open_behavior_search_page_on_primary_page(self, keyword: str) -> None:
-        """Navigate once; never adopt another tab after the primary page closes."""
+    async def _open_behavior_search_page_on_primary_page(self, keyword: str, *, navigate: bool = False) -> int:
+        """首页输入搜索；主页面关闭即本轮失败，不接管其他标签页。返回回车动作的序号。"""
         try:
-            await self._open_behavior_search_page(keyword)
+            return await self._enter_search_from_home(keyword, navigate=navigate)
         except Exception as exc:
             if not self._is_target_closed_error(exc):
                 raise
@@ -653,6 +661,7 @@ class XhsSessionMixin:
         if not (
             is_recoverable_xhs_transport_failure(exc)
             or is_recoverable_xhs_navigation_failure(exc)
+            or (isinstance(exc, XHSRequestFailed) and exc.recoverable)
         ):
             return False
 
@@ -1029,22 +1038,23 @@ class XhsSessionMixin:
         # 临时 profile 每轮都未登录：直接进入二维码登录，再以 UI 与 user/me 共同确认。
         await self._run_qrcode_login()
         self.xhs_client = await self.create_xhs_client(httpx_proxy_format)
-        behavior_keyword = next(
-            (item.strip() for item in self.settings.KEYWORDS.split(",") if item.strip()),
-            "",
-        )
-        if behavior_keyword:
-            await self._open_behavior_search_page_on_primary_page(behavior_keyword)
-        self._assert_primary_page_alive("initial_behavior")
-        behavior_evidence = await self._run_human_behavior_on_primary_page(
-            behavior_keyword
-        )
-        if behavior_evidence.get("status") != "completed":
-            raise RuntimeError("XHS required human behavior stage did not complete")
         self.crawler_type = self.settings.CRAWLER_TYPE
         if self.settings.CRAWLER_TYPE == "search":
+            # 回车、点选“图文”、收起面板、翻页停顿、初始行为阶段与回顶都在全量扫描内完成。
             await self.search()
         elif self.settings.CRAWLER_TYPE == "detail":
+            behavior_keyword = next(
+                (item.strip() for item in self.settings.KEYWORDS.split(",") if item.strip()),
+                "",
+            )
+            if behavior_keyword:
+                await self._open_behavior_search_page_on_primary_page(behavior_keyword)
+            self._assert_primary_page_alive("initial_behavior")
+            behavior_evidence = await self._run_human_behavior_on_primary_page(
+                behavior_keyword
+            )
+            if behavior_evidence.get("status") != "completed":
+                raise RuntimeError("XHS required human behavior stage did not complete")
             await self.get_specified_notes()
 
         logger.info("[XiaoHongShuCrawler.start] Xhs Crawler finished ...")

@@ -242,8 +242,20 @@ T71_REPLACEMENTS = (
         "        summary[\"behavior_validation\"] = behavior_validation\n"
         "    materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}\n",
     ),
+    # 小红书每轮全量扫描：child 不再注入深层前沿与顶部刷新变量，拒绝恢复参数。
+    (
+        '    if platform_key == "xhs":\n        extra_env.update(\n            {\n                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE": str(args.start_page),\n                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR": str(args.start_cursor or ""),\n                "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES": str(\n                    args.top_refresh_max_pages\n                ),\n                "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED": (\n                    "1" if args.discovery_source_exhausted else "0"\n                ),\n            }\n        )\n    if args.resume_identities_path:',
+        '    if args.resume_identities_path:',
+    ),
+    (
+        '    xhs_managed_resume = bool(args.xhs_account_id and args.start_cursor)\n    if (\n        args.start_page > 1\n        and not args.resume_summary\n        and args.discovery_job_id is None\n        and not xhs_managed_resume\n    ):',
+        '    if (\n        args.start_page > 1\n        and not args.resume_summary\n        and args.discovery_job_id is None\n    ):',
+    ),
+    (
+        '        if not args.xhs_repair and args.start_page > 1 and not args.start_cursor:\n            raise SystemExit("XHS continuation requires --start-cursor together with --start-page")',
+        '        if (\n            args.start_page != 1\n            or args.start_cursor\n            or args.top_refresh_max_pages > 0\n            or args.discovery_source_exhausted\n        ):\n            raise SystemExit("xhs_full_scan_rejects_resume_args")',
+    )
 )
-
 
 def t71_authorized_source(text):
     """在冻结旧源码上做 #71 的同样替换；每处必须恰好出现一次。"""

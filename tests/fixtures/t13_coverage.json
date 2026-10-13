@@ -256,7 +256,7 @@
        "min_count": 8
       },
       {
-       "function": "tests/test_xhs_batch_checkpoint.py::test_top_refresh_retains_deep_frontier",
+       "function": "tests/test_xhs_batch_checkpoint.py::test_committer_rejects_a_batch_outside_the_full_scan",
        "lane": "component"
       },
       {
@@ -327,7 +327,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_xhs_batch_checkpoint.py::test_empty_refresh_commits_history_without_creating_export_files",
+       "function": "tests/test_xhs_batch_checkpoint.py::test_empty_first_batch_then_first_content_uses_next_ack_sequence",
        "lane": "component"
       },
       {
@@ -2219,7 +2219,7 @@
       {
        "file": "tests/platforms/xhs/test_xhs_creator_enrichment.py",
        "lane": "component",
-       "min_count": 22
+       "min_count": 19
       },
       {
        "file": "tests/platforms/xhs/test_xhs_discovery_memory.py",
@@ -2254,7 +2254,7 @@
       {
        "file": "tests/platforms/xhs/test_xhs_network_recovery.py",
        "lane": "component",
-       "min_count": 40
+       "min_count": 39
       },
       {
        "file": "tests/platforms/xhs/test_xhs_popup_guard.py",

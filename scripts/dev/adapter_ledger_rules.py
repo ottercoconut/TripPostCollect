@@ -1936,6 +1936,21 @@ PROGRESS_RESOLUTIONS = {
         "退出", None, "#71：小红书正式轮次恒为CDP单次启动，非CDP启动分支删除，收到非CDP设置直接报错"),
     ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._profile_dir"): (
         "退出", None, "#71：唯一调用方非CDP启动随之删除；CDP启动由runtime.browser读取运行级profile"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._open_behavior_search_page"): (
+        "迁至", "XhsNavigationMixin._enter_search_from_home",
+        "#71：不再导航搜索结果页，改为首页搜索框逐字输入并回车；恢复为回首页重新输入一次"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._navigation_target_matches"): (
+        "退出", None, "#71：唯一调用方（导航到搜索结果页的提交判定）随首页输入搜索删除，无其他调用"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.get_note_by_keyword"): (
+        "退出", None, "#71：搜索结果改由前端自发请求、页面取数通道截获，不再由程序发搜索请求"),
+    ("tools/MediaCrawler/media_platform/xhs/field.py", "SearchSortType"): (
+        "退出", None, "#71：排序不再是请求参数，目标排序由xhs.search_target的语义标签与谓词表达"),
+    ("tools/MediaCrawler/media_platform/xhs/field.py", "SearchNoteType"): (
+        "退出", None, "#71：类型改为界面点选“图文”，目标会话由xhs.search_target.is_target_search识别"),
+    ("tools/MediaCrawler/media_platform/xhs/help.py", "base36encode"): (
+        "退出", None, "#71：唯一用途为本地生成search_id，search_id改由前端生成并从截获请求体读取"),
+    ("tools/MediaCrawler/media_platform/xhs/help.py", "get_search_id"): (
+        "退出", None, "#71：search_id由前端生成，全量扫描按截获请求体的search_id与筛选签名区分会话"),
 }
 
 # 冻结台账的 SHA-256：T14 删除 fork 后台账冻结，`--check` 只做冻结自检，不再重新枚举基线源码。

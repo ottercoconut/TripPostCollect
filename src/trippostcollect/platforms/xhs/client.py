@@ -44,8 +44,7 @@ from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
 )
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget
-from trippostcollect.platforms.xhs.models import SearchNoteType, SearchSortType
-from trippostcollect.platforms.xhs.parser import XiaoHongShuExtractor, get_search_id
+from trippostcollect.platforms.xhs.parser import XiaoHongShuExtractor
 from trippostcollect.platforms.xhs.signer import sign_with_xhshow
 from trippostcollect.runtime.cookies import convert_browser_context_cookies
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError, classified_http_image_error
@@ -415,38 +414,6 @@ class XiaoHongShuClient:
         )
         self.headers["Cookie"] = cookie_str
         self.cookie_dict = cookie_dict
-
-    async def get_note_by_keyword(
-        self,
-        keyword: str,
-        search_id: str = get_search_id(),
-        page: int = 1,
-        page_size: int = 20,
-        sort: SearchSortType = SearchSortType.GENERAL,
-        note_type: SearchNoteType = SearchNoteType.ALL,
-    ) -> Dict:
-        """
-        Search notes by keyword
-        Args:
-            keyword: Keyword parameter
-            page: Page number
-            page_size: Page data length
-            sort: Search result sorting specification
-            note_type: Type of note to search
-
-        Returns:
-
-        """
-        uri = "/api/sns/web/v1/search/notes"
-        data = {
-            "keyword": keyword,
-            "page": page,
-            "page_size": page_size,
-            "search_id": search_id,
-            "sort": sort.value,
-            "note_type": note_type.value,
-        }
-        return await self.post(uri, data)
 
     async def get_note_by_id(
         self,

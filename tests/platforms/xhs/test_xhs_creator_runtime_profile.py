@@ -40,7 +40,8 @@ from trippostcollect.platforms.xhs.parser import (
 )
 from trippostcollect.records.sanitization import AUTHOR_AVATAR_KEYS, XHS_SERIALIZED_PROFILE_AVATAR_PATHS
 
-from .support import XiaoHongShuCrawler, client_ports, make_capture
+from .support import XiaoHongShuCrawler, client_ports
+from support.xhs_fake_site import note
 from .test_xhs_discovery_memory import lifecycle_error, prepare_crawler, valid_note
 
 
@@ -1290,10 +1291,10 @@ async def test_api_stage_run_failure_propagates_before_browser_fallback_pause(cr
 @pytest.mark.asyncio
 async def test_candidate_skip_detail_carries_reason_without_html_or_avatar(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
+    crawler, _, state_path, _site = prepare_crawler(
         monkeypatch,
         tmp_path,
-        items=[{"id": "retry-creator"}, {"id": "success-creator"}],
+        items=["retry-creator", "success-creator"],
     )
     reason = "api=state_decode_failed:js_new_expression;browser=followers_unobserved,static_state_script_missing"
     crawler.enrich_note_creator = AsyncMock(
@@ -1315,7 +1316,7 @@ async def test_candidate_skip_detail_carries_reason_without_html_or_avatar(monke
 # ---------------------------------------------------------------------------
 # #55 主页面关闭：浏览器、context 与作者辅助页仍存活时，作者补全期间主页面关闭让本轮失败。
 
-# 第 3 页的作者经 API 取到资料并完成批次；第 4 页第一位作者进入浏览器回退，第二位不得被处理。
+# 第 1 页的作者经 API 取到资料并完成批次；第 2 页第一位作者进入浏览器回退，第二位不得被处理。
 MAIN_PAGE_NOTE_AUTHORS = {
     "note-confirmed": "author-confirmed",
     "note-closing": REQUESTED_USER,
@@ -1324,20 +1325,11 @@ MAIN_PAGE_NOTE_AUTHORS = {
 
 
 class SearchCreatorClient(StaticClient):
-    """两页搜索；作者 API 只认识首页作者，其余作者为空结果并进入浏览器回退。"""
+    """作者 API 只认识首页作者，其余作者为空结果并进入浏览器回退。"""
 
     def __init__(self):
         super().__init__()
-        self.pages = {
-            3: {"items": [{"id": "note-confirmed"}], "has_more": True},
-            4: {"items": [{"id": "note-closing"}, {"id": "note-untouched"}], "has_more": False},
-        }
-        self.search_pages = []
         self.on_api_miss = None
-
-    async def get_note_by_keyword(self, **kwargs):
-        self.search_pages.append(kwargs["page"])
-        return copy.deepcopy(self.pages[kwargs["page"]])
 
     async def get_creator_info(self, **kwargs):
         self.api_calls.append(kwargs["user_id"])
@@ -1353,8 +1345,18 @@ def main_page_search(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS", "1")
     monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior_evidence.json"))
-    instance, _, state_path = prepare_crawler(monkeypatch, tmp_path, items=[])
+    instance, _, state_path, site = prepare_crawler(
+        monkeypatch,
+        tmp_path,
+        items=None,
+        pages=[[note("note-confirmed")], [note("note-closing"), note("note-untouched")]],
+    )
     attach_creator_harness(instance, monkeypatch, tmp_path)
+    # 主页面仍是离线搜索页；关闭由各用例经标志设置。
+    instance.site = site
+    instance.main_closed = False
+    instance.context_page = site.page
+    site.page.is_closed = lambda: instance.main_closed
     del instance.enrich_note_creator
     instance.xhs_client = SearchCreatorClient()
 
@@ -1380,13 +1382,12 @@ def main_page_search(monkeypatch, tmp_path):
 
     instance._assert_primary_page_alive = assert_primary_page_alive
     instance.published_batches = []
-    instance.capture = make_capture(tmp_path)
     monkeypatch.setattr(app_events, "_batch_publisher", instance.published_batches.append)
     return instance, state_path
 
 
 def close_main_page(instance):
-    instance.context_page.is_closed.return_value = True
+    instance.main_closed = True
 
 
 def close_during_midrun_login_recovery(instance):
@@ -1448,13 +1449,14 @@ async def test_main_page_closed_during_creator_enrichment_fails_run_not_candidat
     # 后续候选不处理：第二位作者未请求，只有已确认批次的候选入库。
     assert crawler.xhs_client.api_calls == ["author-confirmed", REQUESTED_USER]
     assert [call.args[0]["note_id"] for call in crawler.update_xhs_note.await_args_list] == ["note-confirmed"]
-    assert crawler.xhs_client.search_pages == [3, 4]
-    # 已确认批次保留且只发布一次；未完成的第 4 页不产生批次完成，也不发布 checkpoint。
+    assert [request["page"] for request in crawler.site.requests if "filters" in request][:2] == [1, 2]
+    # 已确认批次保留且只发布一次；未完成的第 2 页不产生批次完成，也不发布 checkpoint。
     completed = [event["details"] for event in events if event["type"] == "adaptive_batch_completed"]
-    assert [(batch["source_page"], batch["resume_page"]) for batch in completed] == [(3, 4)]
+    assert [(batch["source_page"], batch["resume_page"]) for batch in completed] == [(1, None)]
     assert completed[0]["batch_complete"] is True
     assert crawler.published_batches == completed
-    assert stopped["resume_page"] == 4 and stopped["batch_complete"] is False
+    assert stopped["source_page"] == 2 and stopped["resume_page"] is None
+    assert stopped["batch_complete"] is False
     # 前提：同一阶段先确认浏览器与 context 存活，才判定主页面关闭；作者辅助页打开过就照常收束。
     crawler.cdp_manager.assert_alive.assert_any_call(stage)
     if close_point == "before_browser_fallback":
@@ -1473,7 +1475,7 @@ async def test_context_lifecycle_failure_keeps_priority_over_closed_main_page(mo
     context_closed = lifecycle_error("xhs_browser_context_closed_unexpected", stage="creator")
 
     def assert_alive(stage):
-        if crawler.context_page.is_closed.return_value:
+        if crawler.main_closed:
             raise context_closed
 
     crawler.cdp_manager = Mock(assert_alive=assert_alive)
@@ -1486,7 +1488,7 @@ async def test_context_lifecycle_failure_keeps_priority_over_closed_main_page(mo
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
     assert stopped["stop_reason"] == "runtime_failed"
     assert stopped["stop_detail"] == "browser_context_closed"
-    assert stopped["resume_page"] == 4
+    assert stopped["source_page"] == 2 and stopped["resume_page"] is None
 
 
 @pytest.mark.asyncio

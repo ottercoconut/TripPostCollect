@@ -23,9 +23,7 @@
 
 import json
 import math
-import random
 import re
-import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -42,32 +40,29 @@ from trippostcollect.runtime.helpers import extract_url_params_to_dict, normaliz
 XHS_STABLE_PATH_MARKERS = ("/notes_pre_post/", "/notes_post/", "/notes/")
 
 
-def base36encode(number, alphabet='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'):
-    """Converts an integer to a base36 string."""
-    if not isinstance(number, int):
-        raise TypeError('number must be an integer')
-
-    base36 = ''
-    sign = ''
-
-    if number < 0:
-        sign = '-'
-        number = -number
-
-    if 0 <= number < len(alphabet):
-        return sign + alphabet[number]
-
-    while number != 0:
-        number, i = divmod(number, len(alphabet))
-        base36 = alphabet[i] + base36
-
-    return sign + base36
-
-
-def get_search_id():
-    e = int(time.time() * 1000) << 64
-    t = int(random.uniform(0, 2147483646))
-    return base36encode((e + t))
+def search_items_from_response(payload: Any) -> List[Dict[str, Any]]:
+    """搜索响应中的笔记项（R1：只取 model_type=note，热搜词条等忽略）：id、xsec_token、xsec_source、
+    卡片类型（note_card.type：normal / video / 缺失为空）与页内序号。"""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    raw_items = data.get("items") if isinstance(data, dict) else None
+    items: List[Dict[str, Any]] = []
+    for position, item in enumerate(raw_items if isinstance(raw_items, list) else []):
+        if not isinstance(item, dict) or item.get("model_type") != "note":
+            continue
+        note_id = str(item.get("id") or "").strip()
+        if not note_id:
+            continue
+        note_card = item.get("note_card") if isinstance(item.get("note_card"), dict) else {}
+        items.append(
+            {
+                "id": note_id,
+                "xsec_token": str(item.get("xsec_token") or ""),
+                "xsec_source": str(item.get("xsec_source") or "pc_search"),
+                "type": str(note_card.get("type") or ""),
+                "position": position,
+            }
+        )
+    return items
 
 
 def parse_note_info_from_note_url(url: str) -> NoteUrlInfo:

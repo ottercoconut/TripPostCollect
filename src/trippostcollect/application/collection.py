@@ -838,18 +838,6 @@ def _run_platform_without_policy(
                 ),
             }
         )
-    if platform_key == "xhs":
-        extra_env.update(
-            {
-                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR": str(args.start_cursor or ""),
-                "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES": str(
-                    args.top_refresh_max_pages
-                ),
-                "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED": (
-                    "1" if args.discovery_source_exhausted else "0"
-                ),
-            }
-        )
     if args.resume_identities_path:
         extra_env["TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH"] = args.resume_identities_path
     login_state: dict[str, Any] | None = None
@@ -1284,12 +1272,10 @@ def _run_main(
         args.no_checkpoint_write = True
     if repair_mode:
         args.no_checkpoint_write = True
-    xhs_managed_resume = bool(args.xhs_account_id and args.start_cursor)
     if (
         args.start_page > 1
         and not args.resume_summary
         and args.discovery_job_id is None
-        and not xhs_managed_resume
     ):
         raise SystemExit("--start-page greater than 1 requires --resume-summary")
     if args.get_media:
@@ -1390,8 +1376,13 @@ def _run_main(
             raise SystemExit("XHS requires runner-managed discovery target and query fingerprint")
         if args.behavior_profile != "xhs_guarded":
             raise SystemExit("XHS requires --behavior-profile xhs_guarded")
-        if not args.xhs_repair and args.start_page > 1 and not args.start_cursor:
-            raise SystemExit("XHS continuation requires --start-cursor together with --start-page")
+        if (
+            args.start_page != 1
+            or args.start_cursor
+            or args.top_refresh_max_pages > 0
+            or args.discovery_source_exhausted
+        ):
+            raise SystemExit("xhs_full_scan_rejects_resume_args")
         if not Path(args.xhs_profile_dir).expanduser().is_dir():
             raise SystemExit("XHS isolated profile directory does not exist")
     elif args.xhs_post_interaction != "none":

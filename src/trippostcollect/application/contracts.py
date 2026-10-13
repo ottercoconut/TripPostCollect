@@ -369,8 +369,6 @@ class XhsSettings:
     LOGIN_TYPE: str
     MAX_CONCURRENCY_NUM: int
     SAVE_DATA_OPTION: str
-    SORT_TYPE: str
-    START_PAGE: int
     XHS_INTERNATIONAL: bool
     XHS_SPECIFIED_NOTE_URL_LIST: tuple[str, ...]
 
@@ -389,7 +387,6 @@ class XhsReaders:
     network_retry_min_seconds: Callable[[], float]
     network_retry_max_seconds: Callable[[], float]
     creator_verify_poll_seconds: Callable[[], float]
-    refresh_max_pages: Callable[[], int]
 
 
 @dataclass(frozen=True)

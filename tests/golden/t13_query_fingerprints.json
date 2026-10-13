@@ -57,11 +57,16 @@
     }
   },
   "xhs": {
+    "_note": "#71 第一批有意变更：目标排序（综合）与类型（图文）的语义标签并入指纹，升级后首轮形成新记忆；legacy_before_71 为变更前取值。",
     "target": {
       "target_key": "xhs_qingdao_laoshan_guide",
       "keyword": "青岛崂山旅游攻略"
     },
-    "canonical": "{\"keyword\":\"青岛崂山旅游攻略\",\"platform_key\":\"xhs\",\"source_options\":{\"target_key\":\"xhs_qingdao_laoshan_guide\"}}",
-    "sha256": "db7d9031b30f60c558397a28015454d027d877353777db0f757e2bb8091e4537"
+    "canonical": "{\"keyword\":\"青岛崂山旅游攻略\",\"platform_key\":\"xhs\",\"source_options\":{\"search_note_type\":\"image\",\"search_sort\":\"general\",\"target_key\":\"xhs_qingdao_laoshan_guide\"}}",
+    "sha256": "b9fb32fe59ab2e64326f2dfd929249c079a796414efb43d2ff5c00e6f0519fdf",
+    "legacy_before_71": {
+      "canonical": "{\"keyword\":\"青岛崂山旅游攻略\",\"platform_key\":\"xhs\",\"source_options\":{\"target_key\":\"xhs_qingdao_laoshan_guide\"}}",
+      "sha256": "db7d9031b30f60c558397a28015454d027d877353777db0f757e2bb8091e4537"
+    }
   }
 }

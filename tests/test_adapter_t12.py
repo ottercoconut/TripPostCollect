@@ -65,6 +65,12 @@ REMOVED_ENV = frozenset({
 })
 # T14-C 删除：唯一消费者是 fork 旧 store 的作者原值开关，根实现不读取（见 ledger.AUTHORIZED_ENV_REMOVALS）。
 T14C_REMOVED_ENV = frozenset({"TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL"})
+# #71：小红书每轮全量扫描，父层不再向小红书 child 注入发现恢复参数；其他平台仍在用这些名字。
+T71_REMOVED_XHS_ENV = frozenset({
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR",
+    "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED",
+    "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES",
+})
 
 # 根测试中允许保留的退出名引用：(文件, 名字) → 类别。T14-C 删旧桥时已清理旧桥对照（原 A 类）。
 # B＝负向守卫（断言不存在或不被调用）；D＝沿用旧存储出口名的测试装配与隐私用例（名字指向根实现或
@@ -444,8 +450,9 @@ def test_unconsumed_parent_env_is_no_longer_emitted_and_rest_is_unchanged(
     current = _capture_extra_env(monkeypatch, tmp_path)
     assert sorted(current) == sorted(baseline)
     for name, env in baseline.items():
-        assert removed.isdisjoint(current[name]), name
-        expected = {key: value for key, value in env.items() if key not in removed}
+        removed_here = removed | (T71_REMOVED_XHS_ENV if name.startswith("xhs_") else frozenset())
+        assert removed_here.isdisjoint(current[name]), name
+        expected = {key: value for key, value in env.items() if key not in removed_here}
         assert current[name] == expected, name
 
 
@@ -569,6 +576,29 @@ T75_DELETED_LEDGER_NODES = {
 }
 # #71 第一批（小红书取数改为浏览器 L1）删除或改写的台账节点：被替代的旧取数路径用例。
 T71_DELETED_LEDGER_NODES = {
+    'tests/test_xhs_batch_checkpoint.py::test_empty_refresh_commits_history_without_creating_export_files[False]',
+    'tests/test_xhs_batch_checkpoint.py::test_empty_refresh_commits_history_without_creating_export_files[True]',
+    'tests/test_xhs_batch_checkpoint.py::test_top_refresh_retains_deep_frontier',
+    'tests/test_xhs_creator_enrichment.py::test_behavior_search_does_not_retry_when_shell_is_visible',
+    'tests/test_xhs_creator_enrichment.py::test_behavior_search_uses_explore_fallback_after_blank_shell',
+    'tests/test_xhs_creator_enrichment.py::test_search_navigation_timeout_can_defer_to_visible_readiness',
+    'tests/test_xhs_discovery.py::test_frontier_commit_advances_and_clears_completed_campaign',
+    'tests/test_xhs_discovery.py::test_incomplete_last_page_does_not_mark_frontier_exhausted',
+    'tests/test_xhs_discovery.py::test_query_fingerprint_tracks_source_but_not_refresh_budget',
+    'tests/test_xhs_discovery.py::test_refresh_commit_preserves_exhausted_frontier',
+    'tests/test_xhs_discovery_memory.py::test_browser_context_close_is_recorded_as_resumable_runtime_failure',
+    'tests/test_xhs_discovery_memory.py::test_cdp_disconnect_after_transport_pause_preserves_same_frontier',
+    'tests/test_xhs_discovery_memory.py::test_cdp_lifecycle_failure_preserves_frontier_without_retry_or_relaunch[xhs_browser_context_closed_unexpected-browser_context_closed]',
+    'tests/test_xhs_discovery_memory.py::test_cdp_lifecycle_failure_preserves_frontier_without_retry_or_relaunch[xhs_browser_process_exited-browser_process_exited]',
+    'tests/test_xhs_discovery_memory.py::test_cdp_lifecycle_failure_preserves_frontier_without_retry_or_relaunch[xhs_cdp_disconnected_unexpected-cdp_disconnected]',
+    'tests/test_xhs_discovery_memory.py::test_cdp_process_exit_from_detail_gather_is_not_candidate_failure',
+    'tests/test_xhs_discovery_memory.py::test_detail_failure_is_recorded_seen_and_search_continues',
+    'tests/test_xhs_discovery_memory.py::test_search_disconnect_retries_same_page_cursor_and_browser_session',
+    'tests/test_xhs_discovery_memory.py::test_search_disconnect_timeout_preserves_current_recovery_frontier',
+    'tests/test_xhs_discovery_memory.py::test_shared_manual_budget_exhaustion_is_a_fixed_runtime_stop',
+    'tests/test_xhs_discovery_memory.py::test_top_refresh_uses_fresh_search_id_before_saved_frontier',
+    'tests/test_xhs_discovery_memory.py::test_wrapped_login_expiry_timeout_keeps_current_page_as_frontier',
+    'tests/test_xhs_discovery_memory.py::test_wrapped_login_expiry_waits_and_retries_same_search_page',
     'tests/test_xhs_login_contract.py::test_failed_startup_pong_enters_real_qrcode_state_machine_once',
     'tests/test_xhs_login_contract.py::test_standard_xhs_launch_always_uses_the_run_scoped_profile[False]',
     'tests/test_xhs_login_contract.py::test_standard_xhs_launch_always_uses_the_run_scoped_profile[True]',
@@ -583,6 +613,8 @@ T71_DELETED_LEDGER_NODES = {
     'tests/test_xhs_midrun_login_recovery.py::test_profile_shell_without_self_info_never_navigates',
     'tests/test_xhs_midrun_login_recovery.py::test_recovered_session_does_not_hide_navigation_failure',
     'tests/test_xhs_midrun_login_recovery.py::test_sms_checkpoint_with_stale_profile_never_probes_or_navigates',
+    'tests/test_xhs_network_recovery.py::test_committed_timeout_after_network_pause_is_deferred_not_recovered',
+    'tests/test_xhs_network_recovery.py::test_uncommitted_navigation_timeout_retries_but_committed_search_does_not',
     'tests/test_xhs_popup_guard.py::test_crawler_opened_xhs_tab_waits_30_seconds_after_failed_scroll',
 }
 # 决策 13：按台账 target_file 迁移，名称与断言不变；迁移后只能出现在目标文件。

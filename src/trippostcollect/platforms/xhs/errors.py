@@ -124,6 +124,19 @@ def is_recoverable_xhs_request_failure(failure_text: str) -> bool:
     return any(marker in detail for marker in _XHS_RECOVERABLE_NAVIGATION_ERROR_MARKERS)
 
 
+class XHSRequestFailed(RuntimeError):
+    """规则请求的 requestfailed：失败文本含可恢复的 net::ERR_* 标记时进入网络暂停，否则为运行级失败。"""
+
+    def __init__(self, stage: str, failure_text: str):
+        super().__init__(f"xhs_request_failed:{stage}:{failure_text}"[:500])
+        self.stage = stage
+        self.failure_text = failure_text
+
+    @property
+    def recoverable(self) -> bool:
+        return is_recoverable_xhs_request_failure(self.failure_text)
+
+
 class XHSLoginExpired(RuntimeError):
     """规则端点返回未登录或登录过期，或登录后截获到 guest=true：进入轮中登录恢复。"""
 

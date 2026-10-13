@@ -19,17 +19,18 @@
 
 # TripPostCollect：T09 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-"""主页面导航：带期限的 goto、可见壳等待、/explore 回退与导航诊断写出。"""
+"""主页面导航：带期限的 goto、可见壳等待、首页输入搜索与导航诊断写出。"""
 
 import asyncio
 import json
 import logging
 import os
+import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
-from urllib.parse import parse_qsl, quote, urlparse
+from urllib.parse import urlparse
 
 from playwright.async_api import (
     Error as PlaywrightError,
@@ -41,26 +42,50 @@ from trippostcollect.platforms.xhs.errors import (
     XHSNetworkRecoveryTimeout,
     is_recoverable_xhs_navigation_failure,
 )
-from trippostcollect.platforms.xhs.page_scripts import dom_render_diagnostic
+from trippostcollect.platforms.xhs.page_scripts import (
+    dom_render_diagnostic,
+    dom_search_box,
+    dom_search_layout_visible,
+)
+from trippostcollect.runtime.page_capture import CapturedResponse
+from trippostcollect.runtime.visit_ledger import line_seq
 
 logger = logging.getLogger("MediaCrawler")
+
+# 搜索结果页路径（V16：回车后为 /search_result_ai），只按路径精确比较，不用子串。
+XHS_SEARCH_RESULT_PATHS = frozenset({"/search_result_ai", "/search_result"})
+XHS_SEARCH_CAPTURE_SECONDS = 30.0
+XHS_TYPE_KEY_SECONDS = (0.12, 0.26)
+XHS_BEFORE_ENTER_SECONDS = (0.5, 1.5)
+INPUT_RANDOM = random.SystemRandom()
+
+
+def is_search_result_url(url: str) -> bool:
+    """封面链接 /search_result/<note_id> 与浮层打开时的 /explore/<id> 都不是结果页。"""
+    path = urlparse(str(url or "")).path
+    if len(path) > 1:
+        path = path.rstrip("/")
+    return path in XHS_SEARCH_RESULT_PATHS
+
+
+def search_request_page(item: object) -> int | None:
+    request = getattr(item, "request_json", None)
+    try:
+        return int(request.get("page")) if isinstance(request, dict) else None
+    except (TypeError, ValueError):
+        return None
+
+
+class XhsSearchEntryFailed(RuntimeError):
+    """首页输入搜索或目标筛选失败；只允许一次受控恢复，仍失败即按 code 停止。"""
+
+    def __init__(self, code: str):
+        super().__init__(f"xhs_navigation_recovery_failed:{code}")
+        self.code = code
 
 
 class XhsNavigationMixin:
     """主页面导航；作为 XiaoHongShuCrawler 的 mixin，方法体逐字迁入。"""
-
-    @staticmethod
-    def _navigation_target_matches(target_url: str, current_url: str) -> bool:
-        def normalized(url: str) -> tuple[str, str, str, tuple[tuple[str, str], ...]]:
-            parsed = urlparse(str(url or ""))
-            return (
-                parsed.scheme.casefold(),
-                parsed.netloc.casefold(),
-                parsed.path.rstrip("/") or "/",
-                tuple(sorted(parse_qsl(parsed.query, keep_blank_values=True))),
-            )
-
-        return bool(current_url) and normalized(target_url) == normalized(current_url)
 
     async def _goto_with_deadline(
         self,
@@ -88,33 +113,6 @@ class XhsNavigationMixin:
                         response.status if response is not None else None
                     )
             except (PlaywrightTimeoutError, TimeoutError) as exc:
-                try:
-                    current_url = page.url or ""
-                except Exception:
-                    current_url = ""
-                if (
-                    "/search_result" in url
-                    and self._navigation_target_matches(url, current_url)
-                ):
-                    await self._abort_network_recovery(
-                        stage=recovery_stage,
-                        state=recovery_state,
-                        error=exc,
-                        page=page,
-                        outcome="network_recovery_deferred_to_visible_readiness",
-                    )
-                    await self._record_navigation_diagnostic(
-                        page,
-                        stage=stage,
-                        outcome="commit_timeout_deferred",
-                        error=f"{type(exc).__name__}: {exc}",
-                    )
-                    logger.warning(
-                        "[XiaoHongShuCrawler] Navigation event timed out after URL "
-                        "commit; continuing with visible readiness gate: "
-                        f"stage={stage}, url={current_url}"
-                    )
-                    return
                 await self._record_navigation_diagnostic(
                     page,
                     stage=stage,
@@ -331,51 +329,68 @@ class XhsNavigationMixin:
                 return False
             await asyncio.sleep(min(2.0, remaining))
 
-    async def _open_behavior_search_page(self, keyword: str) -> None:
-        search_url = f"{self.index_url}/search_result?keyword={quote(keyword)}"
-        await self._goto_with_deadline(
-            self.context_page,
-            search_url,
-            stage="behavior_search",
-        )
-        search_shell_timeout = self.inputs.search_shell_timeout_seconds()
-        if await self._wait_for_visible_page_shell(
-            self.context_page,
-            stage="behavior_search",
-            timeout_seconds=search_shell_timeout,
-        ):
-            return
+    async def _enter_search_from_home(self, keyword: str, *, navigate: bool = False) -> int:
+        """首页搜索框逐字输入关键词并回车，等到第 1 页搜索被截获且结果页可见；返回回车动作的序号。
 
-        await self._record_navigation_diagnostic(
-            self.context_page,
-            stage="behavior_search_recovery",
-            outcome="explore_fallback_started",
-        )
-        await self._goto_with_deadline(
-            self.context_page,
-            self.explore_url,
-            stage="behavior_search_recovery_explore",
-        )
-        recovery_timeout = self.inputs.recovery_shell_timeout_seconds()
+        不直接导航到搜索结果页。前端的联想、onebox、筛选配套请求不截获。`navigate` 为真（受控恢复、
+        会话重置）时总是重新打开首页，保证搜索框为空。
+        """
+        page = self.context_page
+        capture = self._require_capture()
+        if navigate or (urlparse(str(page.url or "")).path.rstrip("/") or "/") != "/explore":
+            self._record_trigger_action("navigate", {"route": "/explore"})
+            await self._goto_with_deadline(page, self.explore_url, stage="search_entry_explore")
         if not await self._wait_for_visible_page_shell(
-            self.context_page,
-            stage="behavior_search_recovery_explore",
-            timeout_seconds=recovery_timeout,
+            page,
+            stage="search_entry_explore",
+            timeout_seconds=self.inputs.recovery_shell_timeout_seconds(),
         ):
-            raise RuntimeError("xhs_navigation_recovery_failed:explore_not_rendered")
-        await self._goto_with_deadline(
-            self.context_page,
-            search_url,
-            stage="behavior_search_recovery_search",
+            raise XhsSearchEntryFailed("explore_not_rendered")
+        box = await dom_search_box(page)
+        if not box.get("visible"):
+            raise XhsSearchEntryFailed("explore_not_rendered")
+        x, y = float(box["x"]), float(box["y"])
+        await page.mouse.move(x, y, steps=INPUT_RANDOM.randint(6, 14))
+        await page.mouse.click(x, y, delay=INPUT_RANDOM.randint(80, 220))
+        self._record_trigger_action("type_search", {"chars": len(keyword)})
+        for character in keyword:
+            await page.keyboard.type(character)
+            await self._scan_sleep(INPUT_RANDOM.uniform(*XHS_TYPE_KEY_SECONDS))
+        await self._scan_sleep(INPUT_RANDOM.uniform(*XHS_BEFORE_ENTER_SECONDS))
+        enter = self._record_trigger_action("press_enter", {})
+        await page.keyboard.press("Enter")
+        captured = await capture.wait_for(
+            "xhs.search_notes",
+            after_seq=line_seq(enter),
+            predicate=lambda item: isinstance(item, CapturedResponse) and search_request_page(item) == 1,
+            timeout=XHS_SEARCH_CAPTURE_SECONDS,
         )
-        if not await self._wait_for_visible_page_shell(
-            self.context_page,
-            stage="behavior_search_recovery_search",
-            timeout_seconds=recovery_timeout,
-        ):
-            raise RuntimeError("xhs_navigation_recovery_failed:search_not_rendered")
-        await self._record_navigation_diagnostic(
-            self.context_page,
-            stage="behavior_search_recovery",
-            outcome="explore_fallback_completed",
-        )
+        if captured is None or not await self._search_layout_ready(page):
+            await self._record_navigation_diagnostic(
+                page, stage="search_entry", outcome="search_not_rendered",
+            )
+            raise XhsSearchEntryFailed("search_not_rendered")
+        return line_seq(enter)
+
+    def _record_trigger_action(self, kind: str, target: Dict) -> str:
+        """主页面上可能引发搜索请求的动作：写账本并记下序号，供搜索访问认定 trigger。"""
+        action_id = self._require_capture().action(kind, page_role="primary", target=target)
+        self._trigger_actions.append((line_seq(action_id), action_id))
+        del self._trigger_actions[:-64]
+        return action_id
+
+    def _trigger_before(self, seq: int) -> Optional[str]:
+        for action_seq, action_id in reversed(self._trigger_actions):
+            if action_seq < seq:
+                return action_id
+        return None
+
+    async def _search_layout_ready(self, page: Page) -> bool:
+        """回车后主页面须是搜索结果页（只比路径）且 .search-layout 可见；在搜索页壳超时内轮询。"""
+        polls = max(1, int(self.inputs.search_shell_timeout_seconds() / 0.5))
+        for attempt in range(polls):
+            if is_search_result_url(page.url) and await dom_search_layout_visible(page):
+                return True
+            if attempt + 1 < polls:
+                await self._scan_sleep(0.5)
+        return False

@@ -244,6 +244,22 @@ def behavior_evidence_valid(evidence: dict[str, Any] | None) -> bool:
     )
 
 
+async def guarded_request_sleep(
+    *,
+    profile_name: str,
+    stage: str,
+    minimum: float,
+    maximum: float,
+) -> dict[str, Any]:
+    """节奏停顿本身：按档位随机等待并返回事件；写入行为证据由调用方负责。"""
+    if profile_name != "xhs_guarded":
+        raise RuntimeError("XHS request pacing requires the xhs_guarded behavior profile")
+    low, high = sorted((max(0.0, float(minimum)), max(0.0, float(maximum))))
+    seconds = REQUEST_RANDOM.uniform(low, high)
+    await asyncio.sleep(seconds)
+    return {"stage": stage, "seconds": round(seconds, 3), "finished_at": utc_now()}
+
+
 async def run_guarded_request_pause(
     *,
     evidence_path: str | Path,
@@ -253,11 +269,9 @@ async def run_guarded_request_pause(
     maximum: float,
     write_evidence: Callable[[str | Path, dict[str, Any]], None],
 ) -> dict[str, Any]:
-    if profile_name != "xhs_guarded":
-        raise RuntimeError("XHS request pacing requires the xhs_guarded behavior profile")
-    low, high = sorted((max(0.0, float(minimum)), max(0.0, float(maximum))))
-    seconds = REQUEST_RANDOM.uniform(low, high)
-    await asyncio.sleep(seconds)
+    event = await guarded_request_sleep(
+        profile_name=profile_name, stage=stage, minimum=minimum, maximum=maximum,
+    )
 
     path = Path(evidence_path).expanduser()
     try:
@@ -266,7 +280,6 @@ async def run_guarded_request_pause(
         raise RuntimeError(f"cannot update XHS request pacing evidence: {exc}") from exc
     if not behavior_evidence_valid(evidence):
         raise RuntimeError("cannot append XHS request pacing to incomplete behavior evidence")
-    event = {"stage": stage, "seconds": round(seconds, 3), "finished_at": utc_now()}
     events = evidence.setdefault("request_pacing_events", [])
     events.append(event)
     evidence["request_pacing_events"] = events[-200:]
