@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +14,7 @@ import trippostcollect.platforms.xhs.behavior as xhs_behavior
 import trippostcollect.platforms.xhs.core as xhs_core
 import trippostcollect.platforms.xhs.scan as xhs_scan
 import trippostcollect.runtime.behavior as runtime_behavior
-from support.xhs_fake_site import XhsFakeSite, note
+from support.xhs_fake_site import FILTER_ENTRY, XhsFakeSite, note
 from trippostcollect.application.candidates import AdaptiveAccumulator
 from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.evidence import write_evidence
@@ -104,6 +105,29 @@ def _offline(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _pages(count: int, per_page: int, *, prefix: str = "n") -> list[list[dict]]:
     return [[note(f"{prefix}{page}-{index}") for index in range(per_page)] for page in range(1, count + 1)]
+
+
+def _record_sleeps_and_clicks(harness: Harness) -> list[tuple]:
+    """把扫描侧的等待与主页面点击按发生顺序记成 ("sleep", 秒) / ("click", x, y)。"""
+    events: list[tuple] = []
+    mouse = harness.site.page.mouse
+    click = mouse.click
+
+    async def sleep(seconds: float) -> None:
+        events.append(("sleep", seconds))
+        await asyncio.sleep(0)
+
+    async def recording_click(x: float, y: float, delay: int = 0) -> None:
+        events.append(("click", x, y))
+        await click(x, y, delay=delay)
+
+    harness.crawler._scan_sleep = sleep
+    mouse.click = recording_click
+    return events
+
+
+def _filter_diagnostics(harness: Harness) -> list[dict]:
+    return [event for event in harness.crawler._navigation_diagnostics if event["stage"] == "search_filter"]
 
 
 def test_two_page_keyword_is_exhausted_and_passes_entry_page_and_exhaustion_gates(tmp_path):
@@ -226,6 +250,7 @@ def test_target_filter_that_never_applies_stops_after_one_retry(tmp_path):
         if line["kind"] == "action" and line["target"].get("filter") == "note_type"
     ]
     assert len(clicks) == 2
+    assert [event["outcome"] for event in _filter_diagnostics(harness)] == ["filter_not_confirmed"]
 
 
 def test_filter_panel_that_stays_open_has_its_own_code(tmp_path):
@@ -237,6 +262,69 @@ def test_filter_panel_that_stays_open_has_its_own_code(tmp_path):
 
     assert caught.value.code == "filter_panel_not_closed"
     assert not any(line.get("action") == "scroll" for line in harness.ledger())
+    assert [event["outcome"] for event in _filter_diagnostics(harness)] == ["filter_panel_not_closed"]
+
+
+def test_filter_entry_that_renders_late_is_awaited_then_clicked_after_a_reaction_pause(tmp_path):
+    site = XhsFakeSite(KEYWORD, _pages(1, 4))
+    site.entry_delay_reads = 5
+    harness = Harness(tmp_path, site)
+    events = _record_sleeps_and_clicks(harness)
+
+    harness.run()
+
+    assert harness.processed == [f"n1-{index}" for index in range(4)]
+    entry_click = events.index(("click", FILTER_ENTRY["x"], FILTER_ENTRY["y"]))
+    before = events[:entry_click]
+    # 第 1 次读状态在开面板前，入口等待从第 2 次读起，第 6 次读到入口：其间轮询等待 4 次。
+    assert before.count(("sleep", xhs_scan.XHS_FILTER_POLL_SECONDS)) == 4
+    kind, reaction = before[-1]
+    low, high = xhs_scan.XHS_BEFORE_FILTER_SECONDS
+    assert kind == "sleep" and low <= reaction <= high
+    filters = [line["target"].get("filter") for line in harness.ledger() if line.get("action") == "apply_filter"]
+    assert filters == ["panel_open", "note_type", "panel_close"]
+    assert not _filter_diagnostics(harness)
+
+
+def test_filter_entry_that_never_renders_waits_out_both_attempts_then_stops_with_diagnostic(
+    tmp_path, monkeypatch, caplog,
+):
+    evidence = tmp_path / "behavior_evidence.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(evidence))
+    site = XhsFakeSite(KEYWORD, _pages(1, 4))
+    site.entry_delay_reads = None
+    harness = Harness(tmp_path, site)
+    events = _record_sleeps_and_clicks(harness)
+
+    with caplog.at_level(logging.WARNING, logger="MediaCrawler"), pytest.raises(XhsSearchEntryFailed) as caught:
+        harness.run()
+
+    assert caught.value.code == "target_filter_not_applied"
+    polls = round(xhs_scan.XHS_FILTER_ENTRY_WAIT_SECONDS / xhs_scan.XHS_FILTER_POLL_SECONDS)
+    assert events.count(("sleep", xhs_scan.XHS_FILTER_POLL_SECONDS)) == 2 * polls
+    assert ("click", FILTER_ENTRY["x"], FILTER_ENTRY["y"]) not in events
+    assert not any(line.get("action") == "apply_filter" for line in harness.ledger())
+    written = json.loads(evidence.with_name("behavior_evidence.navigation.json").read_text(encoding="utf-8"))
+    (diagnostic,) = [event for event in written["events"] if event["stage"] == "search_filter"]
+    assert diagnostic["outcome"] == "filter_entry_missing"
+    assert diagnostic["layout_count"] == 1 and diagnostic["entry_candidates"] == 0
+    assert diagnostic["entry_visible"] is False and diagnostic["label_chains"] == []
+    warning = next(record.getMessage() for record in caplog.records if "Search filter failed" in record.getMessage())
+    assert "reason=filter_entry_missing" in warning and "entry_candidates=0" in warning
+    assert "xiaohongshu.com" not in warning
+
+
+def test_filter_option_missing_on_first_attempt_reopens_the_panel_and_succeeds(tmp_path):
+    site = XhsFakeSite(KEYWORD, _pages(1, 4))
+    site.option_missing_opens = 1
+    harness = Harness(tmp_path, site)
+
+    harness.run()
+
+    assert harness.processed == [f"n1-{index}" for index in range(4)]
+    filters = [line["target"].get("filter") for line in harness.ledger() if line.get("action") == "apply_filter"]
+    assert filters == ["panel_open", "panel_close", "panel_open", "note_type", "panel_close"]
+    assert not _filter_diagnostics(harness)
 
 
 def test_keyword_mismatch_reenters_once_from_home_then_stops(tmp_path):

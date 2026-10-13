@@ -218,6 +218,8 @@ class XhsFakeSite:
     """目标会话的页由 `pages` 给出：每页一个笔记项列表；最后一页之后自动追加 has_more=false 的空页（R4）。
 
     选项：`apply_filter_works=False` 点选“图文”不产生目标会话；`panel_closes=False` 面板收不起；
+    `entry_delay_reads` 为结果页上前几次读筛选状态时入口尚未渲染（None 为始终不出现）；
+    `option_missing_opens` 为前几次打开面板时没有“图文”选项；
     `typed_keyword` 让回车请求体里的关键词与目标不同；`stall_after` 页之后前端不再加载；
     `hot_query` 每页附一条热搜项（无 DOM 卡片）。`search_overrides[k]` 依次替换目标会话第 k 页的响应：
     字符串为请求失败文本（requestfailed），字典为响应 JSON；被替换的页不算已加载，前端下次滚动会重发。
@@ -263,6 +265,10 @@ class XhsFakeSite:
         self.scroll_y = 0
         self.panel_visible = False
         self.filter_applied = False
+        self.entry_delay_reads: int | None = 0
+        self.filter_reads = 0
+        self.option_missing_opens = 0
+        self.panel_opens = 0
         self.session_counter = 0
         self.search_id = ""
         self.session_filters: list[dict[str, Any]] | None = None
@@ -388,12 +394,7 @@ class XhsFakeSite:
                 "scroll_height": self.scroll_height(),
             }
         if name == "filter_state":
-            return {
-                "entry_text": "已筛选" if self.filter_applied else "筛选",
-                "entry": dict(FILTER_ENTRY) if self.on_results else None,
-                "panel_visible": self.panel_visible,
-                "option": dict(FILTER_OPTION) if self.panel_visible and arg == "图文" else None,
-            }
+            return self.filter_state(arg)
         if name == "visible_cards":
             return self.visible_cards()
         if name == "search_ready_counts":
@@ -401,6 +402,31 @@ class XhsFakeSite:
         if name == "note_view_state":
             return self.overlay_state()
         raise AssertionError(f"unexpected page script: {name or script[:40]}")
+
+    @property
+    def entry_rendered(self) -> bool:
+        return self.on_results and self.entry_delay_reads is not None and self.filter_reads > self.entry_delay_reads
+
+    def filter_state(self, label: str) -> dict[str, Any]:
+        if self.on_results:
+            self.filter_reads += 1
+        rendered = self.entry_rendered
+        has_option = self.panel_visible and label == "图文" and self.panel_opens > self.option_missing_opens
+        return {
+            "entry_text": ("已筛选" if self.filter_applied else "筛选") if rendered else "",
+            "entry": dict(FILTER_ENTRY) if rendered else None,
+            "panel_visible": self.panel_visible,
+            "option": dict(FILTER_OPTION) if has_option else None,
+            "layout_count": int(self.on_results),
+            "entry_candidates": int(rendered),
+            "entry_visible": rendered,
+            "panel_present": self.on_results,
+            "label_nodes": int(rendered),
+            "label_chains": [["span", "div.filter", "div.<id>", "div.search-layout"]] if rendered else [],
+            "inner_width": VIEW_WIDTH,
+            "inner_height": VIEW_HEIGHT,
+            "scroll_y": self.scroll_y,
+        }
 
     def visible_cards(self) -> list[dict[str, Any]]:
         cards = []
@@ -443,10 +469,11 @@ class XhsFakeSite:
             self.open_overlay(card["note_id"])
         elif not self.on_results and near(SEARCH_BOX):
             self.box_focused = True
-        elif self.on_results and near(FILTER_ENTRY):
+        elif self.entry_rendered and near(FILTER_ENTRY):
             if self.panel_visible and not self.panel_closes:
                 return
             self.panel_visible = not self.panel_visible
+            self.panel_opens += int(self.panel_visible)
         elif self.on_results and self.panel_visible and near(FILTER_OPTION):
             if self.apply_filter_works:
                 self.filter_applied = True

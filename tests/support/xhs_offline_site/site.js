@@ -1,5 +1,6 @@
 /* 离线回放站点自身的前端（不是项目注入的脚本）。按 V1、V16 与 R2 定值建模：
    首页输入 → 回车经 history.pushState 进入 /search_result_ai（关键词两次编码）并发不带 filters 的第 1 页；
+   筛选入口在第 1 页结果渲染约 1.5 秒后才插入，其前有一个零尺寸的同类副本（Mac 首轮实测入口为空）；
    筛选面板按文字点选“图文”发 5 项 filters 的第 1 页（新 search_id），入口改为“已筛选”，面板不自动收起；
    虚拟列表只保留视口附近的行（不超过 30 个节点），接近底部时请求下一页，视口未填满时自行补页；
    点封面打开浮层，首图先于 feed 加载，feed 到达后预载下一张，翻图再预载；作者名 target=_blank 打开作者页；
@@ -22,6 +23,7 @@
   // 视口上方保留 2 行、当前行之后 4 行：至多 7 行 28 个节点。
   const ROWS_BEFORE = 2;
   const ROWS_AFTER = 4;
+  const ENTRY_DELAY_MS = 1500;
   // 各组 .tags 结构相同；“图文”既不是首组也不是组内首项，程序须按文字定位。
   const FILTER_GROUPS = [
     { type: 'sort_type', title: '排序依据', options: [['综合', 'general'], ['最新', 'time_descending'],
@@ -180,6 +182,11 @@
     state.page = number;
     state.hasMore = data.has_more === true;
     renderList();
+    if (ui && !ui.entryShown) {
+      ui.entryShown = true;
+      const { bar, entry } = ui;
+      setTimeout(() => bar.appendChild(entry), ENTRY_DELAY_MS);
+    }
     // 视口未填满时前端自行补页（没有滚动）。
     setTimeout(() => maybeLoadMore('self'), 0);
   };
@@ -226,7 +233,7 @@
     const bar = el('div', 'filter-bar');
     const entry = el('div', 'filter', '筛选');
     entry.addEventListener('click', () => { ui.panel.hidden = !ui.panel.hidden; });
-    bar.appendChild(entry);
+    bar.appendChild(el('div', 'filter decoy', '筛选'));
     const panel = el('div', 'filters-wrapper');
     panel.hidden = true;
     FILTER_GROUPS.forEach((group) => {
@@ -245,7 +252,7 @@
     layout.append(bar, panel, container, el('div', 'feeds-end', '- THE END -'));
     page.appendChild(layout);
     document.getElementById('app').replaceChildren(page);
-    ui = { entry, panel, container };
+    ui = { bar, entry, panel, container, entryShown: false };
     refreshFilterUi();
   };
 

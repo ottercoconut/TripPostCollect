@@ -218,8 +218,9 @@ def assert_staged_png(site: XhsOfflineSite, crawler, note_id: str, count: int) -
 
 @pytest.mark.asyncio
 async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tmp_path):
-    """3 页（每页 12 项、共 36 项）末页 has_more=false：按文字点选“图文”、收面板、虚拟列表回收下的全量扫描，
-    浮层详情与翻图截获 PNG（首图先于 feed 到达）、target=_blank 作者页（同一作者只点一次），经真实门禁通过。"""
+    """3 页（每页 12 项、共 36 项）末页 has_more=false：等延迟渲染的筛选入口并跳过其前的零尺寸副本，按文字
+    点选“图文”、收面板、虚拟列表回收下的全量扫描，浮层详情与翻图截获 PNG（首图先于 feed 到达）、
+    target=_blank 作者页（同一作者只点一次），经真实门禁通过。"""
     pages = [[search_item(f"p{number}-{index:02d}") for index in range(12)] for number in (1, 2, 3)]
     pages[0][6] = search_item("p1-06", card_type="video")
     images = {"p1-02": 3, "p2-05": 2, "p3-09": 1}
@@ -234,6 +235,7 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
         await page.goto(EXPLORE_URL)
         await crawler.search()
         audit = await page.evaluate("() => window.__tpcOffline")
+        filter_nodes = await page.evaluate("() => document.querySelectorAll('.search-layout div.filter').length")
         first_row_rendered = await page.evaluate("() => document.querySelectorAll('section.note-item[data-index=\"0\"]').length")
         final_path = urlsplit(page.url).path
         open_pages = len(context.pages)
@@ -251,6 +253,7 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     assert target[0]["filters"] == TARGET_FILTERS and is_target_search(target[0])
     assert [body["page"] for body in target] == [1, 2, 3]
     assert audit["clickedOptions"] == [["filter_note_type", "图文"]]
+    assert filter_nodes == 2  # 零尺寸副本在真实入口之前，入口延迟插入
     filter_targets = [line["target"].get("filter") for line in actions(crawler, "apply_filter")]
     assert filter_targets == ["panel_open", "note_type", "panel_close"]
     first_scroll = actions(crawler, "scroll")[0]["seq"]

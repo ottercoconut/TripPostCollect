@@ -381,12 +381,19 @@ child `summary.json` 的
 ### 搜索与全量扫描
 
 - 搜索固定为“综合 + 图文”。回车后进入 `/search_result_ai`，前端先发不带 `filters` 的“综合 + 不限”
-  第 1 页，这一会话只截获、不处理、不滚动。随后打开 `.search-layout div.filter` 筛选面板，按精确文字
-  点选“图文”（各组 `.tags` 结构相同，不按位置），以入口文字变为“已筛选”且截获到目标会话第 1 页
-  （5 项 `filters`：`sort_type=general`、`filter_note_type=普通笔记`，其余三项“不限”）判定成功，失败重试
-  一次后报 `target_filter_not_applied`。面板不会自动收起，任何滚动之前再点一次入口并确认收起，失败重试
-  一次后报 `filter_panel_not_closed`；目标会话第 1 页的关键词与目标不符时重新输入一次，仍不符报
-  `search_keyword_mismatch`。三者都以 `xhs_navigation_recovery_failed:<code>` 停止。
+  第 1 页，这一会话只截获、不处理、不滚动。筛选入口取 `.search-layout div.filter` 中第一个可见且文字
+  精确为“筛选”或“已筛选”的节点（前面可能有隐藏或零尺寸的同类节点）；入口未渲染时每次尝试按 0.25 秒
+  轮询最多等 15 秒，出现后停顿 0.6–1.8 秒再点开面板，按精确文字点选“图文”（各组 `.tags` 结构相同，
+  不按位置），以入口文字变为“已筛选”且截获到目标会话第 1 页（5 项 `filters`：`sort_type=general`、
+  `filter_note_type=普通笔记`，其余三项“不限”）判定成功。入口始终未出现、面板未打开、选项缺失或点选后
+  未确认都只算本次尝试失败，重试一次后报 `target_filter_not_applied`。面板不会自动收起，任何滚动之前
+  再点一次入口并确认收起，失败重试一次后报 `filter_panel_not_closed`；目标会话第 1 页的关键词与目标
+  不符时重新输入一次，仍不符报 `search_keyword_mismatch`。三者都以 `xhs_navigation_recovery_failed:<code>`
+  停止。两个筛选停止码在停止前向 `behavior_evidence.navigation.json` 追加一条 `stage=search_filter`
+  诊断，`outcome` 为最后一次尝试的子原因：`filter_entry_missing`、`filter_panel_not_opened`、
+  `filter_option_missing`、`filter_not_confirmed` 或 `filter_panel_not_closed`；并入 `.search-layout`、
+  入口候选、可见性、面板、精确文字节点等计数，视口尺寸与滚动位置，以及至多 2 条文字节点的 6 层祖先链
+  （长 class 片段遮为 `<id>`），不含正文。日志同时有一行不含地址的 `Search filter failed`。
 - 地址栏里的关键词经两次编码；行为门禁的 `target_url_ok` 对地址逐层解码（最多 3 层），任一层含关键词
   即为真，通用平台单次编码的结果不变。“真实关键词页”另由账本证明：目标会话第 1 页的
   `keyword_matches_target=true`。
@@ -613,7 +620,7 @@ child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_t
 
 | 场景 | `stop_detail` / `error_code` | 级别 | 进入 seen |
 |---|---|---|---|
-| 首页未渲染、搜索未出结果、点选“图文”未生效、面板收不起、关键词不符（各含一次受控恢复） | `xhs_navigation_recovery_failed:explore_not_rendered` / `:search_not_rendered` / `:target_filter_not_applied` / `:filter_panel_not_closed` / `:search_keyword_mismatch` | 运行级 | 否 |
+| 首页未渲染、搜索未出结果、点选“图文”未生效（含筛选入口缺失）、面板收不起、关键词不符（各含一次受控恢复） | `xhs_navigation_recovery_failed:explore_not_rendered` / `:search_not_rendered` / `:target_filter_not_applied` / `:filter_panel_not_closed` / `:search_keyword_mismatch` | 运行级 | 否 |
 | 搜索响应未知业务码或不可恢复的请求失败 | `search_request_failed` | 运行级 | 否 |
 | 到底部等不到新页（抖动 3 次后） | `xhs_search_load_stalled` | 运行级 | 否 |
 | 有 `data-note-id` 的卡片连续 2 次读数未登记 | `xhs_search_card_unregistered` | 运行级 | 否 |

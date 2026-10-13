@@ -93,30 +93,56 @@ DOM_SCRIPTS: dict[str, str] = {
         const rect = layout.getBoundingClientRect();
         return { visible: rect.width > 0 && rect.height > 0 };
     }""",
-    # 筛选入口文字、面板可见性与按精确文字定位的选项；各组都有 .tags，不按位置或 class 取。
+    # 筛选入口取第一个可见且文字精确为“筛选”/“已筛选”的 .search-layout div.filter（可能有隐藏副本在前）；
+    # 面板可见性与按精确文字定位的选项，各组都有 .tags，不按位置或 class 取。其余字段只有计数、布尔与
+    # 至多 2 条入口文字节点的祖先链（6 层 tag.class，16 位以上的 class 片段遮为 <id>），供入口缺失时诊断。
     "filter_state": """(label) => {
-        const center = (node) => {
-            if (!node) return null;
-            const rect = node.getBoundingClientRect();
-            if (rect.width <= 0 || rect.height <= 0) return null;
-            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-        };
+        const labels = ['筛选', '已筛选'];
+        const textOf = (node) => (node.innerText || node.textContent || '').trim();
         const visible = (node) => {
             if (!node) return false;
             const style = window.getComputedStyle(node);
             const rect = node.getBoundingClientRect();
             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
         };
-        const entry = document.querySelector('.search-layout div.filter');
+        const center = (node) => {
+            if (!visible(node)) return null;
+            const rect = node.getBoundingClientRect();
+            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        };
+        const chain = (node) => {
+            const parts = [];
+            for (let current = node; current && parts.length < 6; current = current.parentElement) {
+                const classes = Array.from(current.classList || []).map(
+                    (name) => name.replace(/[A-Za-z0-9]{16,}/g, '<id>')
+                );
+                parts.push([current.tagName.toLowerCase(), ...classes].join('.'));
+            }
+            return parts;
+        };
+        const candidates = Array.from(document.querySelectorAll('.search-layout div.filter'));
+        const entry = candidates.find((node) => visible(node) && labels.includes(textOf(node))) || null;
         const panel = document.querySelector('.filters-wrapper');
         const option = Array.from(
             document.querySelectorAll('.filters-wrapper .filters .tag-container .tags')
-        ).find((node) => (node.innerText || node.textContent || '').trim() === label);
+        ).find((node) => textOf(node) === label);
+        const labelNodes = Array.from(document.querySelectorAll('body *')).filter(
+            (node) => node.childElementCount === 0 && labels.includes((node.textContent || '').trim())
+        );
         return {
-            entry_text: entry ? (entry.innerText || entry.textContent || '').trim() : '',
+            entry_text: entry ? textOf(entry) : '',
             entry: center(entry),
             panel_visible: visible(panel),
-            option: visible(option) ? center(option) : null,
+            option: center(option),
+            layout_count: document.querySelectorAll('.search-layout').length,
+            entry_candidates: candidates.length,
+            entry_visible: candidates.some(visible),
+            panel_present: Boolean(panel),
+            label_nodes: labelNodes.length,
+            label_chains: labelNodes.slice(0, 2).map(chain),
+            inner_width: window.innerWidth,
+            inner_height: window.innerHeight,
+            scroll_y: window.scrollY,
         };
     }""",
     # 笔记浮层（R2）：遮罩与正文是否可见、页码 k/N、关闭按钮、右箭头与作者名链接的中心点。

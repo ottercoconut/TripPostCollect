@@ -270,8 +270,10 @@ class XhsNavigationMixin:
         outcome: str,
         response_status: Optional[int] = None,
         error: str = "",
+        extra: Optional[Dict] = None,
     ) -> Dict:
         diagnostic = await self._page_render_diagnostic(page)
+        diagnostic.update(extra or {})
         diagnostic.update(
             {
                 "at": self._utc_now(),

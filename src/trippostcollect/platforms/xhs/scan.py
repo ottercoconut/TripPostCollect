@@ -61,7 +61,16 @@ XHS_UNREGISTERED_CARD_STEPS = 2
 XHS_BACKFILL_ATTEMPTS = 3
 XHS_FILTER_POLLS = 20
 XHS_FILTER_POLL_SECONDS = 0.25
+# 入口相对第 1 页结果的渲染时机未经实测（Mac 首轮在结果到达约 1 秒后读到空入口）；每次尝试按轮询间隔
+# 最多等这么久。入口出现后、点击之前的人手反应停顿是输入微停顿，不写 pause 行。
+XHS_FILTER_ENTRY_WAIT_SECONDS = 15.0
+XHS_BEFORE_FILTER_SECONDS = (0.6, 1.8)
 XHS_FILTER_APPLIED_TEXT = "已筛选"
+# 筛选失败时并入导航诊断的页面字段：只有计数、布尔与遮蔽后的祖先链，不含正文或地址；祖先链不进日志。
+XHS_FILTER_DIAGNOSTIC_KEYS = (
+    "layout_count", "entry_candidates", "entry_visible", "panel_present", "label_nodes",
+    "inner_width", "inner_height", "scroll_y",
+)
 XHS_SCROLL_TOP_MAX_STEPS = 400
 # 读 DOM 之前先等在途的搜索响应读完体（列表可能已按它重新渲染）；单次最长约 10 秒。
 XHS_SEARCH_SETTLE_ROUNDS = 20
@@ -73,6 +82,14 @@ SCAN_RANDOM = random.SystemRandom()
 
 class XhsScanInterrupted(RuntimeError):
     """验证完成后需要重触发当前动作：仍在结果页则重滚一步，已离开则回首页重新输入。"""
+
+
+class XhsFilterAttemptFailed(RuntimeError):
+    """一次筛选尝试失败（入口未出现、面板未打开、选项缺失）；只在 `_apply_target_filter` 内部重试。"""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -311,14 +328,23 @@ class XhsScanMixin:
         await self._consume_search_captures()
 
     async def _apply_target_filter(self) -> SearchSession:
-        """打开面板、按精确文字点选“图文”；以“已筛选”加目标会话第 1 页判定成功，失败重试一次。"""
+        """等入口、打开面板、按精确文字点选“图文”；以“已筛选”加目标会话第 1 页判定成功。
+
+        入口始终未出现、面板未打开、选项缺失或点选后未确认都只让本次尝试失败；重试一次，两次都失败才停止。
+        """
         page = self.context_page
         after_seq = self._require_capture().ledger.last_seq
+        reason = ""
         for attempt in (0, 1):
             session = self._newest_target_session(after_seq)
             if attempt and session is not None and await self._filter_applied():
                 return session
-            state = await self._open_filter_panel()
+            try:
+                state = await self._open_filter_panel()
+            except XhsFilterAttemptFailed as exc:
+                reason = exc.reason
+                logger.warning(f"[XiaoHongShuCrawler.scan] Target filter attempt {attempt + 1} failed: {reason}")
+                continue
             click = self._record_trigger_action(
                 "apply_filter", {"filter": "note_type", "label": XHS_TARGET_FILTER_LABEL},
             )
@@ -326,11 +352,13 @@ class XhsScanMixin:
             session = await self._await_target_page_one(after_seq=line_seq(click))
             if session is not None and await self._filter_applied():
                 return session
+            reason = "filter_not_confirmed"
             logger.warning(
                 "[XiaoHongShuCrawler.scan] Target filter not confirmed "
                 f"(attempt {attempt + 1}): target_session={session is not None}, url_path_ok="
                 f"{is_search_result_url(page.url)}"
             )
+        await self._record_filter_failure(reason)
         raise XhsSearchEntryFailed("target_filter_not_applied")
 
     async def _filter_applied(self) -> bool:
@@ -338,18 +366,31 @@ class XhsScanMixin:
         return state.get("entry_text") == XHS_FILTER_APPLIED_TEXT
 
     async def _open_filter_panel(self) -> dict[str, Any]:
+        """本次尝试的面板：已开且有“图文”直接用；开着却没有选项先收起再重开，以免点入口反把它关上。"""
         state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
         if state.get("panel_visible") and state.get("option"):
             return state
-        entry = state.get("entry")
-        if not entry:
-            raise XhsSearchEntryFailed("target_filter_not_applied")
+        if state.get("panel_visible"):
+            await self._close_filter_panel()
+        entry = await self._wait_for_filter_entry()
+        await self._scan_sleep(SCAN_RANDOM.uniform(*XHS_BEFORE_FILTER_SECONDS))
         self._record_trigger_action("apply_filter", {"filter": "panel_open"})
         await self._click_point(entry)
         opened = await self._poll_filter_state(lambda value: bool(value.get("panel_visible") and value.get("option")))
-        if opened is None:
-            raise XhsSearchEntryFailed("target_filter_not_applied")
-        return opened
+        if opened is not None:
+            return opened
+        state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
+        raise XhsFilterAttemptFailed("filter_option_missing" if state.get("panel_visible") else "filter_panel_not_opened")
+
+    async def _wait_for_filter_entry(self) -> dict[str, Any]:
+        polls = max(1, round(XHS_FILTER_ENTRY_WAIT_SECONDS / XHS_FILTER_POLL_SECONDS))
+        for poll in range(polls + 1):
+            state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
+            if state.get("entry"):
+                return state["entry"]
+            if poll < polls:
+                await self._scan_sleep(XHS_FILTER_POLL_SECONDS)
+        raise XhsFilterAttemptFailed("filter_entry_missing")
 
     async def _close_filter_panel(self) -> None:
         """面板不会自动收起：任何滚动之前再点一次入口，确认 .filters-wrapper 不可见；失败重试一次。"""
@@ -364,7 +405,26 @@ class XhsScanMixin:
             await self._click_point(entry)
             if await self._poll_filter_state(lambda value: not value.get("panel_visible")) is not None:
                 return
+        await self._record_filter_failure("filter_panel_not_closed")
         raise XhsSearchEntryFailed("filter_panel_not_closed")
+
+    async def _record_filter_failure(self, reason: str) -> None:
+        """筛选停止前把子原因与页面计数写入导航诊断，并在日志留一行（不含地址与文字）。"""
+        page = self.context_page
+        error = ""
+        try:
+            state = await dom_filter_state(page, XHS_TARGET_FILTER_LABEL)
+        except Exception as exc:
+            state, error = {}, f"filter_state: {type(exc).__name__}"
+        counts = {key: state[key] for key in XHS_FILTER_DIAGNOSTIC_KEYS if key in state}
+        await self._record_navigation_diagnostic(
+            page, stage="search_filter", outcome=reason, error=error,
+            extra={**counts, "label_chains": state.get("label_chains") or []},
+        )
+        logger.warning(
+            f"[XiaoHongShuCrawler.scan] Search filter failed: reason={reason}, "
+            + ", ".join(f"{key}={value}" for key, value in counts.items())
+        )
 
     async def _poll_filter_state(self, accept: Callable[[dict[str, Any]], bool]) -> Optional[dict[str, Any]]:
         for _ in range(XHS_FILTER_POLLS):
