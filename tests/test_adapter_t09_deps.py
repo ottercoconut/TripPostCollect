@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 
 import pytest
 
@@ -131,9 +132,11 @@ def test_worker_platforms_never_import_fork_media_platform(tmp_path):
 def test_platform_xhs_dependency_direction():
     files = sorted(PLATFORM.glob("*.py"))
     assert {path.stem for path in files} >= {
-        "core", "client", "parser", "login", "models", "signer", "session", "navigation", "behavior",
+        "core", "parser", "login", "models", "session", "navigation", "behavior",
         "author", "detail", "media", "repair", "manual_wait", "errors",
     }
+    # #71：httpx 客户端与 xhshow 本地签名整体删除。
+    assert not {"client", "signer"} & {path.stem for path in files}
     for path in files:
         for _, module, _ in resolved_imports(path, f"trippostcollect.platforms.xhs.{path.stem}"):
             top = module.split(".")[0]
@@ -146,6 +149,15 @@ def test_platform_xhs_dependency_direction():
                 assert module.startswith("trippostcollect.platforms.xhs"), (path.name, module)
             if module == "trippostcollect.xhs" or module.startswith("trippostcollect.xhs."):
                 assert module in XHS_ROOT_MODULES_ALLOWED, (path.name, module)
+
+
+def test_xhshow_is_no_longer_a_dependency():
+    """#71：小红书不再本地签名，xhshow 与其唯一依赖 pycryptodome 不在依赖声明与锁文件中。"""
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    declared = project["dependencies"] + [item for group in project.get("optional-dependencies", {}).values() for item in group]
+    assert not [item for item in declared if item.lower().startswith(("xhshow", "pycryptodome"))]
+    locked = {package["name"] for package in tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))["package"]}
+    assert not {"xhshow", "pycryptodome"} & locked
 
 
 def test_search_target_imports_only_standard_library():

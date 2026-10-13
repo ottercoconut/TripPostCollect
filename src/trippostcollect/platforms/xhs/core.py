@@ -37,7 +37,6 @@ from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
     XHSLoginExpired,
     XHSNetworkRecoveryTimeout,
-    XhsErrorsMixin,
     is_xhs_target_closed_failure,
     xhs_cdp_lifecycle_stop_detail,
 )
@@ -119,7 +118,6 @@ class XiaoHongShuCrawler(
     XhsMediaMixin,
     XhsBehaviorMixin,
     XhsParserMixin,
-    XhsErrorsMixin,
 ):
     context_page: Page
     browser_context: BrowserContext
@@ -131,12 +129,10 @@ class XiaoHongShuCrawler(
         self.ports = ports
         self.source_keyword = ""
         self.crawler_type = ""
-        self.index_url = "https://www.rednote.com" if self.settings.XHS_INTERNATIONAL else "https://www.xiaohongshu.com"
+        self.index_url = "https://www.xiaohongshu.com"
         self.explore_url = f"{self.index_url}/explore"
-        self.user_agent: Optional[str] = None
         self.cdp_manager = None
         self._browser_session_started = False
-        self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
         self.post_interaction_mode = os.environ.get("TRIPPOSTCOLLECT_XHS_POST_INTERACTION", "none").strip()
         self.post_interaction_attempted = False
         # 作者 ID → (作者资料, 首次作者访问 id)；同一作者本轮只点一次，之后的记录引用首次访问。
@@ -160,15 +156,9 @@ class XiaoHongShuCrawler(
 
     async def start(self) -> None:
         self.inputs.validate_login_contract()
-        playwright_proxy_format, httpx_proxy_format = None, None
-
         async with self.ports.async_playwright() as playwright:
             try:
-                await self._run_browser_session(
-                    playwright,
-                    playwright_proxy_format,
-                    httpx_proxy_format,
-                )
+                await self._run_browser_session(playwright, None)
             except BaseException as primary_error:
                 try:
                     await self._prepare_browser_shutdown()

@@ -55,7 +55,7 @@ def test_fork_dynamic_imports_and_behavior_injection(tmp_path):
         from human_flow import install_runtime_hints
         from mediacrawler_behavior import (
             run_page_behavior, run_guarded_request_pause,
-            run_xhs_continuity_behavior, run_xhs_api_captcha_verification,
+            run_xhs_continuity_behavior,
             visible_page_state, record_xhs_platform_security_limit,
             run_xhs_post_interaction,
         )
@@ -68,7 +68,7 @@ def test_fork_dynamic_imports_and_behavior_injection(tmp_path):
         assert legacy.write_evidence is write_evidence
         for function in (
             run_page_behavior, run_guarded_request_pause,
-            run_xhs_continuity_behavior, run_xhs_api_captcha_verification,
+            run_xhs_continuity_behavior,
             record_xhs_platform_security_limit, run_xhs_post_interaction,
         ):
             # T09：小红书函数在旧入口为绑定证据出口的 partial，按原函数名取同一对象。

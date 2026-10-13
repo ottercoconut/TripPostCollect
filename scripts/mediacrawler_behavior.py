@@ -56,7 +56,6 @@ from trippostcollect.platforms.xhs.behavior import (  # noqa: E402
 
 record_xhs_platform_security_limit = partial(_xhs_behavior.record_xhs_platform_security_limit, write_evidence=write_evidence)
 wait_for_xhs_continuity_verification = partial(_xhs_behavior.wait_for_xhs_continuity_verification, write_evidence=write_evidence)
-run_xhs_api_captcha_verification = partial(_xhs_behavior.run_xhs_api_captcha_verification, write_evidence=write_evidence)
 persist_xhs_continuity_failure = partial(_xhs_behavior.persist_xhs_continuity_failure, write_evidence=write_evidence)
 run_xhs_continuity_behavior = partial(_xhs_behavior.run_xhs_continuity_behavior, write_evidence=write_evidence)
 run_xhs_post_interaction = partial(_xhs_behavior.run_xhs_post_interaction, write_evidence=write_evidence)

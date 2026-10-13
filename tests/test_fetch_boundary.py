@@ -12,7 +12,8 @@
    作为 `state_scripts=` 交给通道，不得被下标取用。
 
 盲区：`runtime/browser.py` 以 `add_init_script(path=...)` 注入的 stealth.min.js 是文件而非字符串常量，
-不在本检查范围内，归 #72；`runtime/page_readiness.py` 只供页面证据使用，不在扫描清单内。
+不在本检查范围内，归 #72；小红书会话 CDP 分支调用的 `cdp_manager.add_stealth_script()` 即这一注入，同属 #72。
+`runtime/page_readiness.py` 只供页面证据使用，不在扫描清单内。
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src/trippostcollect"
 # 平台 → 包内目录。抖音、知乎、B站在各自改造批次加入；微博见 #73。
-GUARDED_PLATFORMS: dict[str, str] = {}
+GUARDED_PLATFORMS: dict[str, str] = {"xhs": "platforms/xhs"}
 # 平台会调用、且向页面传入脚本字符串的 runtime 模块；平台新增依赖时同步加入。
 RUNTIME_SCRIPT_MODULES: dict[str, tuple[str, ...]] = {
     "xhs": ("runtime/behavior.py", "runtime/human_flow.py", "runtime/page_capture.py"),
@@ -529,7 +530,8 @@ def test_whitelist_must_match_exact_hits(monkeypatch, tmp_path):
     (package / "runtime").mkdir()
     (package / "runtime/clean.py").write_text("async def run(page):\n    return await page.evaluate('() => 1')\n")
     monkeypatch.setattr(sys.modules[__name__], "PACKAGE", package)
-    monkeypatch.setitem(GUARDED_PLATFORMS, "demo", "platforms/demo")
+    # 自测只检查合成平台：真实受检平台的目录不在临时包内。
+    monkeypatch.setattr(sys.modules[__name__], "GUARDED_PLATFORMS", {"demo": "platforms/demo"})
     monkeypatch.setitem(RUNTIME_SCRIPT_MODULES, "demo", ("runtime/clean.py",))
     monkeypatch.setitem(WHITELISTS, "demo", frozenset())
     with pytest.raises(AssertionError):

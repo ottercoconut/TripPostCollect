@@ -40,10 +40,6 @@ from trippostcollect.platforms.xhs.behavior import (
     run_required_continuity_behavior,
     run_required_request_pause,
 )
-from trippostcollect.platforms.xhs.client import (
-    is_recoverable_xhs_transport_failure,
-    unwrap_xhs_request_failure,
-)
 from trippostcollect.platforms.xhs.capture import (
     XHS_RULES,
     XHS_SENTINEL,
@@ -53,7 +49,6 @@ from trippostcollect.platforms.xhs.capture import (
 from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
     XHSMainPageClosedUnexpected,
-    XHSNetworkRecoveryTimeout,
     XHSRequestFailed,
     is_recoverable_xhs_navigation_failure,
 )
@@ -599,8 +594,7 @@ class XhsSessionMixin:
         page: Optional[Page] = None,
     ) -> bool:
         if not (
-            is_recoverable_xhs_transport_failure(exc)
-            or is_recoverable_xhs_navigation_failure(exc)
+            is_recoverable_xhs_navigation_failure(exc)
             or (isinstance(exc, XHSRequestFailed) and exc.recoverable)
         ):
             return False
@@ -640,7 +634,7 @@ class XhsSessionMixin:
             await self._record_network_recovery_event(
                 stage=stage,
                 outcome="network_recovery_timeout",
-                error=f"{type(unwrap_xhs_request_failure(exc)).__name__}: {exc}",
+                error=f"{type(exc).__name__}: {exc}",
                 page=page,
             )
             return False
@@ -652,17 +646,16 @@ class XhsSessionMixin:
             minimum_delay * (2 ** min(failures - 1, 6)),
             wait_seconds - elapsed,
         )
-        nested = unwrap_xhs_request_failure(exc)
         logger.warning(
             "[XiaoHongShuCrawler] Temporary network outage; preserving the "
             "current browser session and retrying the same operation: "
-            f"stage={stage}, failure={type(nested).__name__}, "
+            f"stage={stage}, failure={type(exc).__name__}, "
             f"elapsed={elapsed:.1f}s, retry_in={delay:.1f}s"
         )
         await self._record_network_recovery_event(
             stage=stage,
             outcome="network_paused",
-            error=f"{type(nested).__name__}: {nested}"[:500],
+            error=f"{type(exc).__name__}: {exc}"[:500],
             page=page,
         )
         await self._popup_sleep(delay)
@@ -719,40 +712,6 @@ class XhsSessionMixin:
             error=f"{type(error).__name__}: {error}"[:500],
             page=operation_page,
         )
-
-    async def _run_with_network_recovery(self, operation, *, stage: str):
-        state: Dict[str, object] = {}
-        while True:
-            try:
-                result = await operation()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if not is_recoverable_xhs_transport_failure(exc):
-                    await self._abort_network_recovery(
-                        stage=stage,
-                        state=state,
-                        error=exc,
-                    )
-                    raise
-                if await self._pause_for_network_recovery(
-                    exc,
-                    stage=stage,
-                    state=state,
-                ):
-                    continue
-                started_at = float(
-                    state.get("started_at") or self._popup_monotonic()
-                )
-                raise XHSNetworkRecoveryTimeout(
-                    stage,
-                    self._popup_monotonic() - started_at,
-                ) from unwrap_xhs_request_failure(exc)
-            await self._finish_network_recovery(
-                stage=stage,
-                state=state,
-            )
-            return result
 
     async def _await_logged_in_user_me(self, *, after_seq: int) -> Optional[CapturedResponse]:
         captured = await self._require_capture().wait_for(
@@ -919,7 +878,6 @@ class XhsSessionMixin:
         self,
         playwright: Playwright,
         playwright_proxy_format: Optional[Dict],
-        httpx_proxy_format: Optional[str],
     ) -> None:
         if self._browser_session_started:
             raise RuntimeError("xhs_browser_session_already_started")
@@ -934,7 +892,7 @@ class XhsSessionMixin:
         self.browser_context = await self.launch_browser_with_cdp(
             playwright,
             playwright_proxy_format,
-            self.user_agent,
+            None,
             headless=self.settings.CDP_HEADLESS,
         )
         if self.cdp_manager:

@@ -2221,7 +2221,7 @@
       {
        "file": "tests/platforms/xhs/test_xhs_creator_enrichment.py",
        "lane": "component",
-       "min_count": 13
+       "min_count": 11
       },
       {
        "file": "tests/platforms/xhs/test_xhs_discovery_memory.py",
@@ -2232,6 +2232,11 @@
        "file": "tests/platforms/xhs/test_xhs_login_contract.py",
        "lane": "component",
        "min_count": 45
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_login_state.py",
+       "lane": "component",
+       "min_count": 30
       },
       {
        "file": "tests/platforms/xhs/test_xhs_manual_wait_budget.py",
@@ -2251,7 +2256,7 @@
       {
        "file": "tests/platforms/xhs/test_xhs_network_recovery.py",
        "lane": "component",
-       "min_count": 38
+       "min_count": 37
       },
       {
        "file": "tests/platforms/xhs/test_xhs_note_projection.py",
@@ -2272,11 +2277,6 @@
        "file": "tests/platforms/xhs/test_xhs_qrcode_preview.py",
        "lane": "component",
        "min_count": 6
-      },
-      {
-       "file": "tests/platforms/xhs/test_xhs_raw_response_errors.py",
-       "lane": "component",
-       "min_count": 24
       },
       {
        "file": "tests/platforms/xhs/test_xhs_repair_state.py",

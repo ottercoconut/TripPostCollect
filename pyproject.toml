@@ -24,7 +24,6 @@ dependencies = [
     "pyhumps==3.8.0",
     "scrapling[fetchers]>=0.4.9,<1",
     "tenacity==8.2.2",
-    "xhshow==0.2.0",
 ]
 
 [project.optional-dependencies]

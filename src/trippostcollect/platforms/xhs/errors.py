@@ -19,34 +19,24 @@
 
 # TripPostCollect：T09 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-"""小红书平台异常、可恢复判定与请求失败解释；分类优先级保持原实现。"""
+"""小红书平台异常与可恢复判定；分类优先级保持原实现。"""
 
 
-from httpx import RequestError
 from playwright.async_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
-from tenacity import RetryError
 
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 
 
-class DataFetchError(RequestError):
-    """something error when fetch"""
-
-
-class IPBlockError(RequestError):
+class IPBlockError(RuntimeError):
     """fetch so fast that the server block us ip"""
 
 
-class PlatformRuntimeError(RequestError):
+class PlatformRuntimeError(RuntimeError):
     """A login or rate-limit response that must stop the current run."""
 
     def __init__(self, message: str, *, code: str):
         super().__init__(message)
         self.code = code
-
-
-class NoteNotFoundError(RequestError):
-    """Note does not exist or is abnormal"""
 
 
 _XHS_RECOVERABLE_NAVIGATION_ERROR_MARKERS = (
@@ -169,18 +159,6 @@ class XHSImageDownloadError(RuntimeError):
         self.attempts = max(1, int(attempts))
 
 
-class XHSNoteDetailUnavailable(RuntimeError):
-    """An XHS note detail remained unavailable after bounded attempts."""
-
-    def __init__(self, note_id: str, code: str, attempts: int = 1):
-        super().__init__(
-            f"XHS note detail unavailable: note_id={note_id or '<missing>'}, code={code}"
-        )
-        self.note_id = note_id
-        self.code = code
-        self.attempts = max(1, int(attempts))
-
-
 class XHSCreatorProfileUnavailable(RuntimeError):
     """An XHS creator profile remained unavailable after observed attempts.
 
@@ -207,42 +185,3 @@ class XHSNetworkRecoveryTimeout(RuntimeError):
         )
         self.stage = stage
         self.elapsed_seconds = max(0.0, elapsed_seconds)
-
-
-class XhsErrorsMixin:
-    """请求失败解释；作为 XiaoHongShuCrawler 的 mixin，方法体逐字保留。"""
-
-    @staticmethod
-    def _request_failure_exception(exc: BaseException) -> BaseException:
-        """Return the request exception hidden by tenacity, when available."""
-        if not isinstance(exc, RetryError):
-            return exc
-        try:
-            nested = exc.last_attempt.exception()
-        except Exception:
-            nested = None
-        return nested if isinstance(nested, BaseException) else exc
-
-    @staticmethod
-    def _request_failure_attempts(exc: BaseException) -> int:
-        """Return the observed tenacity attempt count without inventing retries."""
-
-        if not isinstance(exc, RetryError):
-            return 1
-        return max(1, int(getattr(exc.last_attempt, "attempt_number", 1) or 1))
-
-    @classmethod
-    def _is_login_expired_failure(cls, exc: BaseException) -> bool:
-        nested = cls._request_failure_exception(exc)
-        text = str(nested).lower()
-        return isinstance(nested, DataFetchError) and any(
-            marker in text
-            for marker in (
-                "登录已过期",
-                "登录状态已失效",
-                "登录失效",
-                "login expired",
-                "login has expired",
-                "session expired",
-            )
-        )

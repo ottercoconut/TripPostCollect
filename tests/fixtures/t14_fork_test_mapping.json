@@ -48,7 +48,7 @@
    "root": [
     {
      "test": "tests/artifacts/test_staging.py::test_xhs_http_404_preserves_terminal_status",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "#71 起同名同参数改为截获路径：截获图片 HTTP 404 经 _stage_note_images 分类为 image_source_unavailable，失败行保留 http_status=404"
     },
     {
      "test": "tests/platforms/xhs/test_xhs_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
@@ -67,11 +67,14 @@
    "root": [
     {
      "test": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_run_level_http_status",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "#71 起同名同参数改为截获路径：规则端点 401/403/429 经 classify_xhs_api_response 与 raise_for_runtime_verdict 为运行级 login_required/rate_limited"
     },
     {
      "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status",
-     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次"
+     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "#71 删除 httpx 客户端，小红书规则端点改由页面取数通道截获；状态码与业务码分类由 tests/platforms/xhs/test_xhs_login_state.py::test_rule_endpoint_classification_keeps_the_client_code_table 与 ::test_verdict_details_and_runtime_raises 断言"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_run_level_http_status[401-login_required]"
@@ -83,11 +86,14 @@
    "root": [
     {
      "test": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_run_level_http_status",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "#71 起同名同参数改为截获路径：规则端点 401/403/429 经 classify_xhs_api_response 与 raise_for_runtime_verdict 为运行级 login_required/rate_limited"
     },
     {
      "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status",
-     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次"
+     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "#71 删除 httpx 客户端，小红书规则端点改由页面取数通道截获；状态码与业务码分类由 tests/platforms/xhs/test_xhs_login_state.py::test_rule_endpoint_classification_keeps_the_client_code_table 与 ::test_verdict_details_and_runtime_raises 断言"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_run_level_http_status[403-login_required]"
@@ -99,11 +105,14 @@
    "root": [
     {
      "test": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_run_level_http_status",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "#71 起同名同参数改为截获路径：规则端点 401/403/429 经 classify_xhs_api_response 与 raise_for_runtime_verdict 为运行级 login_required/rate_limited"
     },
     {
      "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status",
-     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次"
+     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "#71 删除 httpx 客户端，小红书规则端点改由页面取数通道截获；状态码与业务码分类由 tests/platforms/xhs/test_xhs_login_state.py::test_rule_endpoint_classification_keeps_the_client_code_table 与 ::test_verdict_details_and_runtime_raises 断言"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_run_level_http_status[429-rate_limited]"
@@ -115,11 +124,14 @@
    "root": [
     {
      "test": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_ip_block_business_code",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "#71 起同名改为截获路径：规则端点业务码 300012 经 raise_for_runtime_verdict 抛 IPBlockError"
     },
     {
      "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block",
-     "asserts": "参数 300012/\"300012\" 在 return_response=True/False 下均抛 IPBlockError，只请求一次"
+     "asserts": "参数 300012/\"300012\" 在 return_response=True/False 下均抛 IPBlockError，只请求一次",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "#71 删除 httpx 客户端，小红书规则端点改由页面取数通道截获；状态码与业务码分类由 tests/platforms/xhs/test_xhs_login_state.py::test_rule_endpoint_classification_keeps_the_client_code_table 与 ::test_verdict_details_and_runtime_raises 断言"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_ip_block_business_code"
@@ -131,11 +143,14 @@
    "root": [
     {
      "test": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_security_limit_business_code",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "#71 起同名改为截获路径：规则端点业务码 300011 为运行级 platform_security_limit_300011"
     },
     {
      "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block",
-     "asserts": "参数 300011/\"300011\" 抛 PlatformRuntimeError(code=platform_security_limit_300011)"
+     "asserts": "参数 300011/\"300011\" 抛 PlatformRuntimeError(code=platform_security_limit_300011)",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "#71 删除 httpx 客户端，小红书规则端点改由页面取数通道截获；状态码与业务码分类由 tests/platforms/xhs/test_xhs_login_state.py::test_rule_endpoint_classification_keeps_the_client_code_table 与 ::test_verdict_details_and_runtime_raises 断言"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_security_limit_business_code"

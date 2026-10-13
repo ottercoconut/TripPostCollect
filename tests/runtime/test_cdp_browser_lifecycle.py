@@ -9,10 +9,10 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
-import httpx
 import pytest
 
 from support.browser_settings import BROWSER_SETTINGS
+from support.xhs_network import offline, retry_after_network_pause
 from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.platforms.entry import xhs_dependencies
 from trippostcollect.platforms.xhs.core import XiaoHongShuCrawler as RootXiaoHongShuCrawler
@@ -814,12 +814,10 @@ async def test_public_network_outage_keeps_healthy_browser_without_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     crawler, manager, process, sleeps = _crawler_with_healthy_cdp(monkeypatch)
-    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/search")
-    operation = AsyncMock(
-        side_effect=[httpx.ReadTimeout("offline", request=request), "restored"]
-    )
+    operation = AsyncMock(side_effect=[offline(), "restored"])
 
-    result = await crawler._run_with_network_recovery(
+    result = await retry_after_network_pause(
+        crawler,
         operation,
         stage="search:frontier:page=3",
     )
@@ -838,10 +836,7 @@ async def test_process_exit_during_network_wait_is_terminal_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     crawler, manager, process, sleeps = _crawler_with_healthy_cdp(monkeypatch)
-    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/search")
-    operation = AsyncMock(
-        side_effect=httpx.ReadTimeout("offline", request=request)
-    )
+    operation = AsyncMock(side_effect=offline())
     original_sleep = crawler._popup_sleep
 
     async def exit_during_sleep(seconds: float) -> None:
@@ -854,7 +849,8 @@ async def test_process_exit_during_network_wait_is_terminal_without_retry(
         CDPBrowserLifecycleError,
         match=r"xhs_browser_process_exited:stage=search:frontier:page=3:pid=1414:returncode=23",
     ):
-        await crawler._run_with_network_recovery(
+        await retry_after_network_pause(
+            crawler,
             operation,
             stage="search:frontier:page=3",
         )

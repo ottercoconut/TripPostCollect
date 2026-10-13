@@ -19,7 +19,7 @@
 
 # TripPostCollect：T09 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-"""小红书特有行为：搜索就绪、连续性与 API 验证等待、平台限制证据、显式互动。
+"""小红书特有行为：搜索就绪、连续性与前端验证等待、平台限制证据、显式互动。
 
 原 scripts/mediacrawler_behavior.py 的小红书函数与 fork 行为桥中的小红书入口合并于此；
 证据写出与启用判定经注入端口提供，平台层不导入应用或产物实现。
@@ -33,13 +33,13 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 from playwright.async_api import Page
 
 from trippostcollect.application.contracts import XhsBehaviorPorts
 from trippostcollect.platforms.xhs.errors import PlatformRuntimeError, XHSLoginExpired, XHSNetworkRecoveryTimeout
-from trippostcollect.platforms.xhs.page_scripts import dom_search_ready_counts
+from trippostcollect.platforms.xhs.page_scripts import dom_like_control_state, dom_search_ready_counts
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.runtime import behavior as _behavior
 from trippostcollect.runtime.behavior import (
@@ -519,181 +519,6 @@ async def _wait_for_xhs_continuity_verification(
             )
 
 
-async def run_xhs_api_captcha_verification(
-    page: Page,
-    *,
-    evidence_path: str | Path,
-    verify_type: str,
-    verify_uuid: str,
-    verify_biz: int,
-    timeout_seconds: float | None = None,
-    poll_seconds: float | None = None,
-    write_evidence: Callable[..., Any],
-) -> dict[str, Any]:
-    path = Path(evidence_path).expanduser()
-    try:
-        evidence = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"cannot update XHS API captcha evidence: {exc}") from exc
-    if evidence.get("profile") != "xhs_guarded" or not behavior_evidence_valid(evidence):
-        raise RuntimeError("XHS API captcha verification requires completed xhs_guarded evidence")
-    if not verify_type or not verify_uuid:
-        raise RuntimeError("XHS API captcha response is missing verification identifiers")
-
-    timeout = max(
-        0.1,
-        float(
-            XHS_CONTINUITY_VERIFY_WAIT_SECONDS
-            if timeout_seconds is None
-            else timeout_seconds
-        ),
-    )
-    poll = max(
-        0.01,
-        float(
-            XHS_CONTINUITY_VERIFY_POLL_SECONDS
-            if poll_seconds is None
-            else poll_seconds
-        ),
-    )
-    redirect_url = page.url
-    captcha_url = "https://www.xiaohongshu.com/website-login/captcha?" + urlencode(
-        {
-            "redirectPath": redirect_url,
-            "verifyUuid": verify_uuid,
-            "verifyType": verify_type,
-            "verifyBiz": str(verify_biz),
-        }
-    )
-    started = time.monotonic()
-    event: dict[str, Any] = {
-        "stage": "api_captcha",
-        "started_at": utc_now(),
-        "finished_at": None,
-        "status": "waiting_for_operator",
-        "initial_challenge": "api_captcha",
-        "challenge": "api_captcha",
-        "verify_type": verify_type,
-        "verify_uuid": verify_uuid,
-        "verify_biz": verify_biz,
-        "redirect_url": redirect_url,
-        "captcha_url": captcha_url,
-        "timeout_seconds": round(timeout, 3),
-    }
-    verification_events = evidence.setdefault("operator_verification_events", [])
-    verification_events.append(event)
-    evidence["operator_verification_events"] = verification_events[-50:]
-    write_evidence(path, evidence)
-
-    try:
-        await page.goto(captcha_url, wait_until="domcontentloaded", timeout=30_000)
-        await page.bring_to_front()
-    except Exception as exc:
-        event.update(
-            {
-                "finished_at": utc_now(),
-                "status": "failed",
-                "error": f"captcha_navigation_failed:{type(exc).__name__}:{exc}",
-            }
-        )
-        evidence.update(
-            {
-                "status": "failed",
-                "challenge": "captcha_or_verify",
-                "visible_markers": {"captcha_or_verify": True},
-            }
-        )
-        write_evidence(path, evidence)
-        raise RuntimeError("xhs_api_captcha_page_unavailable") from exc
-
-    latest_text = ""
-    latest_markers: dict[str, bool] = {"captcha_or_verify": True}
-    ready_observations = 0
-    while True:
-        remaining = timeout - (time.monotonic() - started)
-        if remaining <= 0:
-            event.update(
-                {
-                    "finished_at": utc_now(),
-                    "status": "failed",
-                    "challenge": "api_captcha",
-                    "visible_markers": latest_markers,
-                    "visible_text_sample": latest_text,
-                    "elapsed_seconds": round(time.monotonic() - started, 3),
-                    "error": "operator_verification_timeout",
-                    "url": page.url,
-                }
-            )
-            evidence.update(
-                {
-                    "status": "failed",
-                    "challenge": "captcha_or_verify",
-                    "visible_markers": latest_markers,
-                    "visible_text_sample": latest_text,
-                }
-            )
-            write_evidence(path, evidence)
-            raise RuntimeError("xhs_api_captcha_verification_timeout")
-
-        await asyncio.sleep(min(poll, remaining))
-        latest_text, latest_markers = await visible_page_state(page)
-        current_url = page.url
-        visible = visible_challenge(latest_markers)
-        event.update(
-            {
-                "challenge": visible or "api_captcha",
-                "visible_markers": latest_markers,
-                "visible_text_sample": latest_text,
-                "elapsed_seconds": round(time.monotonic() - started, 3),
-                "url": current_url,
-            }
-        )
-        redirect = urlparse(redirect_url)
-        current = urlparse(current_url)
-        returned_to_redirect_route = bool(
-            current.hostname == redirect.hostname
-            and current.path.rstrip("/") == redirect.path.rstrip("/")
-        )
-        page_ready = bool(
-            "/website-login/captcha" not in current_url
-            and returned_to_redirect_route
-            and latest_text.strip()
-            and not visible
-            and not latest_markers.get("captcha_or_verify")
-            and not latest_markers.get("login_required")
-        )
-        ready_observations = ready_observations + 1 if page_ready else 0
-        event["ready_observations"] = ready_observations
-        if ready_observations >= 2:
-            event.update(
-                {
-                    "finished_at": utc_now(),
-                    "status": "completed",
-                    "challenge": "",
-                }
-            )
-            write_evidence(path, evidence)
-            return event
-        if visible and visible not in XHS_OPERATOR_CHALLENGES:
-            event.update(
-                {
-                    "finished_at": utc_now(),
-                    "status": "failed",
-                    "error": f"{visible}_during_operator_verification",
-                }
-            )
-            evidence.update(
-                {
-                    "status": "failed",
-                    "challenge": visible,
-                    "visible_markers": latest_markers,
-                    "visible_text_sample": latest_text,
-                }
-            )
-            write_evidence(path, evidence)
-            raise RuntimeError(f"{visible}_detected_during_xhs_api_captcha")
-
-
 def persist_xhs_continuity_failure(
     evidence: dict[str, Any],
     *,
@@ -855,26 +680,7 @@ async def _first_visible_locator(page: Page, selectors: tuple[str, ...]):
 
 
 async def _like_control_state(locator: Any) -> dict[str, Any]:
-    return await locator.evaluate(
-        """element => {
-            const control = element.closest('button,[role="button"]') || element;
-            const className = String(control.className || element.className || '');
-            const activeDescendant = Boolean(
-                control.querySelector('[class*="liked"], [class*="active"], [data-state="active"], [aria-pressed="true"]')
-            );
-            const useElement = control.querySelector('use');
-            return {
-                aria_pressed: control.getAttribute('aria-pressed') || '',
-                aria_label: control.getAttribute('aria-label') || '',
-                title: control.getAttribute('title') || '',
-                data_state: control.getAttribute('data-state') || '',
-                class_name: className.slice(0, 240),
-                text: String(control.innerText || element.innerText || '').trim().slice(0, 120),
-                icon_ref: useElement ? (useElement.getAttribute('href') || useElement.getAttribute('xlink:href') || '') : '',
-                active_descendant: activeDescendant,
-            };
-        }"""
-    )
+    return await dom_like_control_state(locator)
 
 
 def _looks_liked(state: dict[str, Any]) -> bool:
@@ -1147,34 +953,6 @@ def append_operator_verification_event(
     events.append(event)
     evidence["operator_verification_events"] = events[-50:]
     ports.write_evidence(path, evidence)
-
-
-async def run_required_api_captcha_verification(
-    page: Page,
-    *,
-    verify_type: str,
-    verify_uuid: str,
-    verify_biz: int,
-    timeout_seconds: float | None = None,
-    ports: XhsBehaviorPorts,
-) -> dict[str, Any]:
-    if not ports.enabled():
-        raise RuntimeError("required TripPostCollect API captcha verification is disabled")
-    scripts_dir = Path(os.environ.get("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", "")).expanduser()
-    evidence_path = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()
-    profile_name = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_PROFILE", "").strip()
-    if not scripts_dir.is_dir() or not evidence_path or profile_name != "xhs_guarded":
-        raise RuntimeError("required TripPostCollect API captcha configuration is incomplete")
-
-    kwargs: dict[str, Any] = {
-        "evidence_path": evidence_path,
-        "verify_type": verify_type,
-        "verify_uuid": verify_uuid,
-        "verify_biz": verify_biz,
-    }
-    if timeout_seconds is not None:
-        kwargs["timeout_seconds"] = timeout_seconds
-    return await run_xhs_api_captcha_verification(page, **kwargs, write_evidence=ports.write_evidence)
 
 
 async def inspect_visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:

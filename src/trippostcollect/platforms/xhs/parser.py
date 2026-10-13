@@ -19,11 +19,10 @@
 
 # TripPostCollect：T09 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-"""小红书纯解析：URL、INITIAL_STATE、正文图片与作者投影；不含网络或文件 IO。"""
+"""小红书纯解析：URL、搜索响应、页面状态投影、正文图片与作者投影；不含网络或文件 IO。"""
 
 import json
 import math
-import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -78,83 +77,6 @@ def parse_note_info_from_note_url(url: str) -> NoteUrlInfo:
     xsec_token = params.get("xsec_token", "")
     xsec_source = params.get("xsec_source", "")
     return NoteUrlInfo(note_id=note_id, xsec_token=xsec_token, xsec_source=xsec_source)
-
-
-class XiaoHongShuExtractor:
-    def __init__(self):
-        pass
-
-    def extract_note_detail_from_html(self, note_id: str, html: str) -> Optional[Dict]:
-        """Extract note details from HTML
-
-        Args:
-            html (str): HTML string
-
-        Returns:
-            Dict: Note details dictionary
-        """
-        if "noteDetailMap" not in html:
-            # Either a CAPTCHA appeared or the note doesn't exist
-            return None
-
-        state = re.findall(r"window.__INITIAL_STATE__=({.*})</script>", html)[
-            0
-        ].replace("undefined", '""')
-        if state != "{}":
-            note_dict = humps.decamelize(json.loads(state))
-            return note_dict["note"]["note_detail_map"][note_id]["note"]
-        return None
-
-    def extract_creator_info_from_html(self, html: str) -> Optional[Dict]:
-        """Extract user information from HTML
-
-        Args:
-            html (str): HTML string
-
-        Returns:
-            Dict: User information dictionary
-        """
-        creator_info, _reason = self.extract_creator_info_with_reason(html)
-        return creator_info
-
-    def extract_creator_info_with_reason(self, html: str) -> Tuple[Optional[Dict], str]:
-        """与 extract_creator_info_from_html 同一严格解码，另返回只含类别的原因供诊断。
-
-        原因取值：``ok``、``state_script_missing``、``state_decode_failed:<类别>``、
-        ``state_null``、``user_missing``、``user_page_data_missing``、``user_page_data_empty``；
-        不含 HTML、作者 ID 或请求参数。
-        """
-        match = re.search(
-            r"<script[^>]*>\s*window\.__INITIAL_STATE__\s*=\s*", html, re.M
-        )
-        if match is None:
-            return None, "state_script_missing"
-        state_source = html[match.end() :].replace(":undefined", ":null").lstrip()
-        try:
-            info, _ = json.JSONDecoder(strict=False).raw_decode(state_source)
-        except json.JSONDecodeError as exc:
-            return None, f"state_decode_failed:{_state_decode_failure_kind(state_source, exc.pos)}"
-        if info is None:
-            return None, "state_null"
-        user_info = info.get("user")
-        if not isinstance(user_info, dict):
-            return None, "user_missing"
-        creator_info = user_info.get("userPageData")
-        if not isinstance(creator_info, dict):
-            return None, "user_page_data_missing"
-        return creator_info, "ok" if creator_info else "user_page_data_empty"
-
-
-def _state_decode_failure_kind(source: str, position: int) -> str:
-    """只按失败位置的首个记号归类，便于区分平台状态里的 JS 构造与普通损坏。"""
-    token = source[position : position + 32]
-    if not token:
-        return "truncated"
-    if re.match(r"new\s+[A-Za-z_$]", token):
-        return "js_new_expression"
-    if re.match(r"[A-Za-z_$]", token):
-        return "js_identifier"
-    return "invalid_json"
 
 
 def xhs_source_asset_key(source_url: str) -> str:

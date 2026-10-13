@@ -139,7 +139,6 @@ def worker_config(*, environ: Mapping[str, str] = os.environ) -> SimpleNamespace
     """
     return SimpleNamespace(
         PLATFORM="xhs",
-        XHS_INTERNATIONAL=False,
         KEYWORDS="编程副业,编程兼职",
         LOGIN_TYPE="qrcode",
         COOKIES=environ.get("TRIPPOSTCOLLECT_COOKIES", ""),

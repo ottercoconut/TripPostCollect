@@ -773,8 +773,6 @@ def repair_crawler_config(note_ids: list[str]) -> SimpleNamespace:
         **asdict(BROWSER_SETTINGS),
         CDP_HEADLESS=False, CRAWLER_TYPE="detail", ENABLE_CDP_MODE=True, ENABLE_GET_MEIDAS=False,
         HEADLESS=False, KEYWORDS="", LOGIN_TYPE="qrcode", COOKIES="", SAVE_DATA_OPTION="jsonl", SAVE_DATA_PATH="",
-        XHS_INTERNATIONAL=False,
-        MAX_CONCURRENCY_NUM=1,
         XHS_SPECIFIED_NOTE_URL_LIST=note_ids,
     )
 

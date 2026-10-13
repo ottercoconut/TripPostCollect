@@ -412,10 +412,10 @@ async def test_browser_session_latch_prevents_concurrent_second_launch(
     monkeypatch.setattr(config, "ENABLE_CDP_MODE", True)
     playwright = SimpleNamespace(chromium=SimpleNamespace())
 
-    first = asyncio.create_task(crawler._run_browser_session(playwright, None, None))
+    first = asyncio.create_task(crawler._run_browser_session(playwright, None))
     await asyncio.wait_for(launch_entered.wait(), timeout=0.2)
     with pytest.raises(RuntimeError, match=r"^xhs_browser_session_already_started$"):
-        await crawler._run_browser_session(playwright, None, None)
+        await crawler._run_browser_session(playwright, None)
 
     release_launch.set()
     with pytest.raises(RuntimeError, match="first launch failed"):
@@ -437,9 +437,9 @@ async def test_failed_browser_session_cannot_be_restarted_sequentially(
     playwright = SimpleNamespace(chromium=SimpleNamespace())
 
     with pytest.raises(RuntimeError, match="first launch failed"):
-        await crawler._run_browser_session(playwright, None, None)
+        await crawler._run_browser_session(playwright, None)
     with pytest.raises(RuntimeError, match=r"^xhs_browser_session_already_started$"):
-        await crawler._run_browser_session(playwright, None, None)
+        await crawler._run_browser_session(playwright, None)
 
     crawler.launch_browser_with_cdp.assert_awaited_once()
 
@@ -452,7 +452,7 @@ async def test_non_cdp_settings_fail_before_any_browser_launch(monkeypatch) -> N
     playwright = SimpleNamespace(chromium=SimpleNamespace())
 
     with pytest.raises(RuntimeError, match=r"^xhs_requires_cdp_mode$"):
-        await crawler._run_browser_session(playwright, None, None)
+        await crawler._run_browser_session(playwright, None)
 
     crawler.launch_browser_with_cdp.assert_not_awaited()
     assert crawler._browser_session_started is True

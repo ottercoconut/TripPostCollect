@@ -1965,6 +1965,74 @@ PROGRESS_RESOLUTIONS = {
         "退出", None, "#71：小红书不再由程序发请求，repair改为直开保存链接后，httpx客户端不再创建"),
     ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._browser_identity_headers"): (
         "退出", None, "#71：唯一调用方httpx客户端构造删除，不再把浏览器身份拼进程序请求头"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "unwrap_xhs_request_failure"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "is_recoverable_xhs_transport_failure"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.__init__"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient._get_manual_wait_budget"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient._pre_headers"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.request"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient._build_query_string"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.get"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.post"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.get_note_media"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.query_self"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.pong"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.update_cookies"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.get_note_by_id"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.get_creator_info"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.extract_creator_info_from_html"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/client.py", "XiaoHongShuClient.get_note_by_id_from_html"): (
+        "退出", None, "#71 第一批：小红书取数改为浏览器 L1，httpx 客户端整体删除"),
+    ("tools/MediaCrawler/media_platform/xhs/playwright_sign.py", "sign_with_xhshow"): (
+        "退出", None, "#71：xhshow 本地签名删除，请求由前端自行签名发出"),
+    ("tools/MediaCrawler/media_platform/xhs/xhs_sign.py", "get_trace_id"): (
+        "退出", None, "#71：xhshow 本地签名删除，trace 由前端生成"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XHSNoteDetailUnavailable"): (
+        "退出", None, "#71：API与HTML详情删除后无抛出点；详情未取到改为候选码note_detail_not_observed"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XHSNoteDetailUnavailable.__init__"): (
+        "退出", None, "#71：随XHSNoteDetailUnavailable删除"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._request_failure_exception"): (
+        "退出", None, "#71：tenacity拆包随httpx客户端删除；repair阻断按异常类型直接判定"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._request_failure_attempts"): (
+        "退出", None, "#71：tenacity重试次数随httpx客户端删除；候选失败次数由页面尝试次数给出"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._is_login_expired_failure"): (
+        "退出", None, "#71：登录失效改由capture.classify_xhs_api_response按业务码与LOGIN_EXPIRED_MARKERS判定"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._run_with_network_recovery"): (
+        "退出", None, "#71：无调用方；网络暂停由_pause_for_network_recovery按导航失败与requestfailed失败文本判定"),
+    ("tools/MediaCrawler/media_platform/xhs/exception.py", "DataFetchError"): (
+        "退出", None, "#71：httpx请求异常删除，规则端点结果改为capture分类与候选码"),
+    ("tools/MediaCrawler/media_platform/xhs/exception.py", "NoteNotFoundError"): (
+        "退出", None, "#71：笔记不存在改为feed业务码分类后的候选码note_not_found"),
+    ("tools/MediaCrawler/media_platform/xhs/extractor.py", "XiaoHongShuExtractor"): (
+        "退出", None, "#71：HTML静态解析删除，详情与作者只经页面状态白名单投影读取"),
+    ("tools/MediaCrawler/media_platform/xhs/extractor.py", "XiaoHongShuExtractor.__init__"): (
+        "退出", None, "#71：随XiaoHongShuExtractor删除"),
+    ("tools/MediaCrawler/media_platform/xhs/extractor.py", "XiaoHongShuExtractor.extract_note_detail_from_html"): (
+        "退出", None, "#71：repair改为读note_detail_state页面状态投影"),
+    ("tools/MediaCrawler/media_platform/xhs/extractor.py", "XiaoHongShuExtractor.extract_creator_info_from_html"): (
+        "退出", None, "#71：作者资料只经creator_page_data页面状态投影读取"),
+    ("scripts/mediacrawler_behavior.py", "run_xhs_api_captcha_verification"): (
+        "退出", None, "#71：不再拼验证页URL；461/471改为前端验证被动等待（wait_for_frontend_verification）"),
+    ("tools/MediaCrawler/tools/trippostcollect_behavior.py", "run_required_api_captcha_verification"): (
+        "退出", None, "#71：唯一调用方httpx客户端删除；验证改为前端验证被动等待"),
 }
 
 # 冻结台账的 SHA-256：T14 删除 fork 后台账冻结，`--check` 只做冻结自检，不再重新枚举基线源码。

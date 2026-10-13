@@ -5,22 +5,18 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import httpx
 import pytest
 from playwright.async_api import Error as PlaywrightError
-from tenacity import Future, RetryError
 
 from trippostcollect.platforms.xhs.errors import (
-    DataFetchError,
     XHSNetworkRecoveryTimeout,
+    XHSRequestFailed,
     is_recoverable_xhs_navigation_failure,
 )
 
+from support.xhs_network import offline, retry_after_network_pause
+
 from .support import XiaoHongShuCrawler
-
-
-def _retry_error(error: BaseException) -> RetryError:
-    return RetryError(Future.construct(3, error, has_exception=True))
 
 
 def _crawler_with_clock(
@@ -72,16 +68,16 @@ async def test_transport_outage_retries_operation_without_replacing_browser_sess
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     crawler, context, page, sleeps = _crawler_with_clock(monkeypatch)
-    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/search")
     calls: list[tuple[object, object]] = []
 
     async def operation() -> str:
         calls.append((crawler.browser_context, crawler.context_page))
         if len(calls) == 1:
-            raise httpx.ReadTimeout("offline", request=request)
+            raise offline()
         return "restored"
 
-    result = await crawler._run_with_network_recovery(
+    result = await retry_after_network_pause(
+        crawler,
         operation,
         stage="search:frontier:page=3",
     )
@@ -97,29 +93,6 @@ async def test_transport_outage_retries_operation_without_replacing_browser_sess
 
 
 @pytest.mark.asyncio
-async def test_retry_error_is_unwrapped_before_same_operation_retry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    crawler, _context, _page, sleeps = _crawler_with_clock(monkeypatch)
-    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/search")
-    operation = AsyncMock(
-        side_effect=[
-            _retry_error(httpx.ConnectError("offline", request=request)),
-            {"items": []},
-        ]
-    )
-
-    result = await crawler._run_with_network_recovery(
-        operation,
-        stage="search:refresh:page=1",
-    )
-
-    assert result == {"items": []}
-    assert operation.await_count == 2
-    assert sleeps == [2.0]
-
-
-@pytest.mark.asyncio
 async def test_network_budget_exhaustion_has_exact_backoff_and_keeps_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -127,13 +100,13 @@ async def test_network_budget_exhaustion_has_exact_backoff_and_keeps_session(
         monkeypatch,
         wait_seconds=5.0,
     )
-    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/search")
     operation = AsyncMock(
-        side_effect=httpx.ConnectError("still offline", request=request)
+        side_effect=offline()
     )
 
     with pytest.raises(XHSNetworkRecoveryTimeout) as exc_info:
-        await crawler._run_with_network_recovery(
+        await retry_after_network_pause(
+            crawler,
             operation,
             stage="search:frontier:page=9",
         )
@@ -164,13 +137,13 @@ async def test_context_replacement_during_pause_is_terminal_not_a_second_retry(
         crawler.browser_context = replacement_context
 
     crawler._popup_sleep = replace_context
-    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/search")
     operation = AsyncMock(
-        side_effect=httpx.ReadTimeout("offline", request=request)
+        side_effect=offline()
     )
 
     with pytest.raises(PlaywrightError, match="context_replaced"):
-        await crawler._run_with_network_recovery(
+        await retry_after_network_pause(
+            crawler,
             operation,
             stage="search:frontier:page=3",
         )
@@ -184,10 +157,11 @@ async def test_non_transport_request_error_is_never_retried_as_network(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     crawler, _context, _page, sleeps = _crawler_with_clock(monkeypatch)
-    operation = AsyncMock(side_effect=DataFetchError("invalid response schema"))
+    operation = AsyncMock(side_effect=XHSRequestFailed("note_detail", "net::ERR_ABORTED"))
 
-    with pytest.raises(DataFetchError, match="invalid response schema"):
-        await crawler._run_with_network_recovery(
+    with pytest.raises(XHSRequestFailed, match="ERR_ABORTED"):
+        await retry_after_network_pause(
+            crawler,
             operation,
             stage="search:frontier:page=3",
         )
@@ -205,7 +179,8 @@ async def test_network_wait_does_not_swallow_task_cancellation(
     operation = AsyncMock(side_effect=asyncio.CancelledError())
 
     with pytest.raises(asyncio.CancelledError):
-        await crawler._run_with_network_recovery(
+        await retry_after_network_pause(
+            crawler,
             operation,
             stage="search:frontier:page=3",
         )
@@ -223,13 +198,13 @@ async def test_disabled_network_wait_fails_without_hidden_sleep(
         monkeypatch,
         wait_seconds=0.0,
     )
-    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/search")
     operation = AsyncMock(
-        side_effect=httpx.ReadTimeout("offline", request=request)
+        side_effect=offline()
     )
 
     with pytest.raises(XHSNetworkRecoveryTimeout) as exc_info:
-        await crawler._run_with_network_recovery(
+        await retry_after_network_pause(
+            crawler,
             operation,
             stage="search:frontier:page=3",
         )
@@ -253,20 +228,21 @@ async def test_concurrent_recovery_stages_keep_independent_deadlines(
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_WAIT_SECONDS", "0.03")
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MIN_SECONDS", "0.01")
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MAX_SECONDS", "0.01")
-    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/test")
     calls = {"a": 0, "b": 0}
 
     async def fail(name: str) -> None:
         calls[name] += 1
-        raise httpx.ConnectError(f"offline-{name}", request=request)
+        raise offline(f"note_detail:{name}")
 
     results = await asyncio.wait_for(
         asyncio.gather(
-            crawler._run_with_network_recovery(
+            retry_after_network_pause(
+                crawler,
                 lambda: fail("a"),
                 stage="note_detail_api:note=a",
             ),
-            crawler._run_with_network_recovery(
+            retry_after_network_pause(
+                crawler,
                 lambda: fail("b"),
                 stage="note_detail_api:note=b",
             ),
@@ -285,16 +261,16 @@ async def test_transport_then_nontransport_error_is_aborted_not_recovered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     crawler, _context, _page, sleeps = _crawler_with_clock(monkeypatch)
-    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/search")
     operation = AsyncMock(
         side_effect=[
-            httpx.ReadTimeout("offline", request=request),
-            DataFetchError("bad response after reconnect"),
+            offline(),
+            RuntimeError("bad response after reconnect"),
         ]
     )
 
-    with pytest.raises(DataFetchError, match="bad response after reconnect"):
-        await crawler._run_with_network_recovery(
+    with pytest.raises(RuntimeError, match="bad response after reconnect"):
+        await retry_after_network_pause(
+            crawler,
             operation,
             stage="search:frontier:page=3",
         )
@@ -315,13 +291,13 @@ async def test_missing_browser_context_is_terminal_before_network_sleep(
     crawler._record_network_recovery_event = AsyncMock()
     crawler._popup_sleep = AsyncMock()
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_WAIT_SECONDS", "10")
-    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/search")
     operation = AsyncMock(
-        side_effect=httpx.ConnectError("offline", request=request)
+        side_effect=offline()
     )
 
     with pytest.raises(PlaywrightError, match="context_missing"):
-        await crawler._run_with_network_recovery(
+        await retry_after_network_pause(
+            crawler,
             operation,
             stage="search:frontier:page=3",
         )
@@ -343,13 +319,13 @@ async def test_invalid_operation_page_is_terminal_before_retry(
         context.pages.clear()
     else:
         page.context = SimpleNamespace(pages=[page])
-    request = httpx.Request("GET", "https://edith.xiaohongshu.com/api/search")
     operation = AsyncMock(
-        side_effect=httpx.ReadTimeout("offline", request=request)
+        side_effect=offline()
     )
 
     with pytest.raises(PlaywrightError, match="xhs_network_recovery"):
-        await crawler._run_with_network_recovery(
+        await retry_after_network_pause(
+            crawler,
             operation,
             stage="search:frontier:page=3",
         )
@@ -391,7 +367,7 @@ def test_navigation_classifier_accepts_only_explicit_recoverable_failures(
             "Target page, context or browser has been closed after "
             "net::ERR_CONNECTION_RESET"
         ),
-        DataFetchError("invalid response schema"),
+        RuntimeError("invalid response schema"),
     ],
 )
 def test_navigation_classifier_rejects_ambiguous_or_terminal_failures(

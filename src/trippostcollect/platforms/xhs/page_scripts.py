@@ -160,6 +160,25 @@ DOM_SCRIPTS: dict[str, str] = {
             author: center(mask.querySelector('.author a.name')),
         };
     }""",
+    # 点赞控件（浮层内）的按下状态：只读属性、类名与可见文本，不读页面状态。
+    "like_control_state": """element => {
+            const control = element.closest('button,[role="button"]') || element;
+            const className = String(control.className || element.className || '');
+            const activeDescendant = Boolean(
+                control.querySelector('[class*="liked"], [class*="active"], [data-state="active"], [aria-pressed="true"]')
+            );
+            const useElement = control.querySelector('use');
+            return {
+                aria_pressed: control.getAttribute('aria-pressed') || '',
+                aria_label: control.getAttribute('aria-label') || '',
+                title: control.getAttribute('title') || '',
+                data_state: control.getAttribute('data-state') || '',
+                class_name: className.slice(0, 240),
+                text: String(control.innerText || element.innerText || '').trim().slice(0, 120),
+                icon_ref: useElement ? (useElement.getAttribute('href') || useElement.getAttribute('xlink:href') || '') : '',
+                active_descendant: activeDescendant,
+            };
+        }""",
     "search_ready_counts": """() => ({
         card_count: document.querySelectorAll(
             "section.note-item, a[href*='/explore/'], a[href*='/discovery/item/']"
@@ -443,6 +462,12 @@ async def dom_note_view_state(page: Page, roots: tuple[str, ...]) -> dict[str, A
 
 async def dom_overlay_state(page: Page) -> dict[str, Any]:
     return await dom_note_view_state(page, XHS_OVERLAY_ROOTS)
+
+
+async def dom_like_control_state(locator: Any) -> dict[str, Any]:
+    """在点赞控件元素上执行：返回按下状态相关的属性与文本摘要。"""
+    state = await _dom(locator, "like_control_state")
+    return state if isinstance(state, dict) else {}
 
 
 async def dom_search_ready_counts(page: Page) -> dict[str, Any]:

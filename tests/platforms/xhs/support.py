@@ -17,8 +17,8 @@ from trippostcollect.runtime.visit_ledger import VisitLedger
 config = SimpleNamespace(
     PLATFORM="xhs", LOGIN_TYPE="qrcode", COOKIES="", CRAWLER_TYPE="search",
     ENABLE_CDP_MODE=False, CDP_HEADLESS=False, HEADLESS=False, KEYWORDS="编程副业,编程兼职",
-    MAX_CONCURRENCY_NUM=1, ENABLE_GET_MEIDAS=False,
-    SAVE_DATA_OPTION="jsonl", SAVE_DATA_PATH="", XHS_INTERNATIONAL=False,
+    ENABLE_GET_MEIDAS=False,
+    SAVE_DATA_OPTION="jsonl", SAVE_DATA_PATH="",
     XHS_SPECIFIED_NOTE_URL_LIST=[
         "https://www.xiaohongshu.com/explore/64b95d01000000000c034587"
         "?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed",
@@ -48,9 +48,6 @@ class XiaoHongShuCrawler(RootXiaoHongShuCrawler):
     def __init__(self):
         super().__init__(**dependencies())
         self.settings = config
-
-
-client_ports = dependencies()["ports"].client
 
 
 def make_capture(directory: Path, *, context=None, mode: str = "discovery") -> PageCaptureChannel:

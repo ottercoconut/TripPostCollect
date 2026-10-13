@@ -658,7 +658,7 @@ async def test_startup_enters_qrcode_login_once_and_confirms_with_user_me(
 
     clock.on_sleep = complete_scan
 
-    await crawler._run_browser_session(object(), None, None)
+    await crawler._run_browser_session(object(), None)
 
     assert len(instances) == 1
     assert instances[0]._manual_wait_budget is budget
@@ -703,7 +703,7 @@ async def test_signed_in_ui_without_guest_false_user_me_reloads_once_then_fails(
     monkeypatch.setattr(crawler.ports, "append_execution_event", append_event)
 
     with pytest.raises(RuntimeError, match=r"^xhs_login_state_unconfirmed$"):
-        await crawler._run_browser_session(object(), None, None)
+        await crawler._run_browser_session(object(), None)
 
     assert page.reloads == 1
     append_event.assert_called_once()
@@ -766,7 +766,7 @@ async def test_startup_sms_terminal_fails_immediately_without_retry_or_business_
     monkeypatch.setattr(xhs_login.asyncio, "sleep", clock.sleep)
 
     with pytest.raises(xhs_core.PlatformRuntimeError, match=f"^{terminal_code}$"):
-        await crawler._run_browser_session(object(), None, None)
+        await crawler._run_browser_session(object(), None)
 
     assert len(instances) == 1
     assert instances[0]._manual_wait_budget is budget

@@ -7,7 +7,6 @@ import asyncio
 import copy
 from types import SimpleNamespace
 import json
-import re
 import subprocess
 import sys
 from unittest.mock import AsyncMock, Mock
@@ -20,7 +19,6 @@ import pytest
 
 from trippostcollect.application import events as app_events
 import trippostcollect.platforms.xhs.author as xhs_author
-from trippostcollect.platforms.xhs.client import XiaoHongShuClient
 from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
     XHSMainPageClosedUnexpected,
@@ -32,7 +30,6 @@ from trippostcollect.platforms.xhs.parser import (
     XHS_CREATOR_INTERACTION_ITEM_FIELDS,
     XHS_CREATOR_INTERACTION_LIST_KEYS,
     XHS_CREATOR_TOP_FIELDS,
-    XiaoHongShuExtractor,
     read_creator_runtime_projection,
     update_xhs_note,
     xhs_creator_projection_spec,
@@ -42,7 +39,7 @@ from trippostcollect.records.sanitization import AUTHOR_AVATAR_KEYS, XHS_SERIALI
 from trippostcollect.platforms.xhs.page_scripts import STATE_SCRIPTS
 from trippostcollect.runtime.visit_ledger import iter_ledger_lines
 
-from .support import XiaoHongShuCrawler, client_ports, make_capture
+from .support import XiaoHongShuCrawler, make_capture
 from support.xhs_fake_site import detail_card, note
 from .test_xhs_discovery_memory import lifecycle_error, prepare_crawler
 
@@ -83,27 +80,6 @@ def json_state_html(creator) -> str:
     return state_html(json.dumps({"user": {"userPageData": creator}}, ensure_ascii=False))
 
 
-def legacy_extract_creator_info_from_html(html: str):
-    """#52 之前的严格静态解析原文，用于逐项对照返回值。"""
-    match = re.search(
-        r"<script[^>]*>\s*window\.__INITIAL_STATE__\s*=\s*", html, re.M
-    )
-    if match is None:
-        return None
-    state_source = html[match.end() :].replace(":undefined", ":null")
-    try:
-        info, _ = json.JSONDecoder(strict=False).raw_decode(state_source.lstrip())
-    except json.JSONDecodeError:
-        return None
-    if info is None:
-        return None
-    user_info = info.get("user")
-    if not isinstance(user_info, dict):
-        return None
-    creator_info = user_info.get("userPageData")
-    return creator_info if isinstance(creator_info, dict) else None
-
-
 CREATOR_JSON = json.dumps(creator_state(), ensure_ascii=False)
 NEW_SET_BEFORE_USER = state_html(
     '{"global":{"seen":new Set(["x"])},"user":{"userPageData":' + CREATOR_JSON + "}}"
@@ -111,50 +87,6 @@ NEW_SET_BEFORE_USER = state_html(
 NEW_SET_AFTER_USER = state_html(
     '{"user":{"userPageData":' + CREATOR_JSON + '},"feed":{"ids":new Set([])}}'
 )
-STATIC_CASES = [
-    (json_state_html(creator_state()), "ok"),
-    (state_html('{"user":{"userPageData":{"ipLocation":undefined,"interactions":[]}}}'), "ok"),
-    (NEW_SET_BEFORE_USER, "state_decode_failed:js_new_expression"),
-    (NEW_SET_AFTER_USER, "state_decode_failed:js_new_expression"),
-    (state_html('{"user":{"userPageData":{"list":[1,undefined]}}}'), "state_decode_failed:js_identifier"),
-    (state_html('{"user":{"userPageData":{"a":-}}}'), "state_decode_failed:invalid_json"),
-    ('<script>window.__INITIAL_STATE__={"user":{"userPageData":{"a":1', "state_decode_failed:truncated"),
-    ("<html><body>没有状态</body></html>", "state_script_missing"),
-    (state_html("null"), "state_null"),
-    (state_html('{"note":{}}'), "user_missing"),
-    (state_html('{"user":{"userInfo":{}}}'), "user_page_data_missing"),
-    (state_html('{"user":{"userPageData":[]}}'), "user_page_data_missing"),
-    (state_html('{"user":{"userPageData":{}}}'), "user_page_data_empty"),
-]
-
-
-@pytest.mark.parametrize(("html", "reason"), STATIC_CASES)
-def test_strict_static_parse_is_unchanged_and_reports_reason_category(html, reason):
-    extractor = XiaoHongShuExtractor()
-
-    creator, observed_reason = extractor.extract_creator_info_with_reason(html)
-
-    assert creator == legacy_extract_creator_info_from_html(html)
-    assert extractor.extract_creator_info_from_html(html) == creator
-    assert observed_reason == reason
-    assert REQUESTED_USER not in observed_reason and "<" not in observed_reason
-
-
-def test_client_records_static_parse_reason():
-    client = XiaoHongShuClient(
-        headers={"Cookie": "web_session=test"},
-        playwright_page=Mock(),
-        cookie_dict={},
-        ports=client_ports,
-    )
-    assert client.last_creator_parse_reason == ""
-
-    assert client.extract_creator_info_from_html(NEW_SET_BEFORE_USER) is None
-    assert client.last_creator_parse_reason == "state_decode_failed:js_new_expression"
-    assert client.extract_creator_info_from_html(json_state_html(creator_state()))
-    assert client.last_creator_parse_reason == "ok"
-
-
 def test_projection_whitelist_matches_downstream_reads_and_excludes_avatar_and_credentials():
     every_key = (
         set(XHS_CREATOR_TOP_FIELDS)
@@ -233,23 +165,13 @@ def test_zero_fans_projection_is_kept_and_observed_downstream():
             {}, "runtime_projection_empty"), empty
 
 
-def test_python_refilter_drops_boolean_counts_but_static_path_keeps_legacy_behavior():
+def test_python_refilter_drops_boolean_counts():
     projected, reason = read_creator_runtime_projection({"status": "ok", "creator": {
         "fans": True, "basicInfo": {"nickname": "合成作者", "fans": True},
         "interactions": [{"type": "fans", "count": True}],
     }})
     assert reason == "ok"
     assert projected == {"basicInfo": {"nickname": "合成作者"}, "interactions": [{"type": "fans"}]}
-
-    html = json_state_html({"basicInfo": {"nickname": "合成作者", "fans": True}})
-    static = XiaoHongShuExtractor().extract_creator_info_from_html(html)
-    assert static == legacy_extract_creator_info_from_html(html)
-    record = update_xhs_note(
-        {"note_id": "synthetic-note", "user": {"user_id": REQUESTED_USER}, "interact_info": {},
-         "creator_profile": static},
-        source_keyword="青岛", current_timestamp=lambda: 0, save_data_option="jsonl",
-    )
-    assert record["fans_count"] is True and record["followers_observed"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -746,7 +668,6 @@ async def open_with(crawler, page):
 
 @pytest.mark.asyncio
 async def test_new_set_ssr_fails_static_parse_but_runtime_projection_reads_creator(crawler):
-    assert XiaoHongShuExtractor().extract_creator_info_from_html(NEW_SET_BEFORE_USER) is None
     page = CreatorPage([creator_state()], html=NEW_SET_BEFORE_USER)
 
     creator = await open_with(crawler, page)

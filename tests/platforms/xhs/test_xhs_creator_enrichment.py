@@ -8,7 +8,6 @@ from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
     XhsNoteRedo,
 )
-from trippostcollect.platforms.xhs.parser import XiaoHongShuExtractor
 from trippostcollect.platforms.xhs.manual_wait import (
     XHSManualWaitBudget,
     XHSManualWaitBudgetExhausted,
@@ -390,30 +389,3 @@ async def test_creator_enrichment_caches_successful_author_profile(crawler):
     assert await crawler._enrich_creator_via_author_tab(second) == (creator, "visit-note-1")
     crawler._get_creator_info_from_browser.assert_awaited_once()
     crawler._guarded_pause.assert_awaited_once_with("creator_profile", 8.0, 18.0)
-
-
-def test_creator_html_extractor_stops_at_end_of_initial_state_object():
-    html = (
-        '<script>window.__INITIAL_STATE__={"user":{"userPageData":'
-        '{"userId":"author-8","interactions":[{"type":"fans","count":"88"}]}}}'
-        '</script><script>window.__NEXT_STATE__={"extra":true}</script>'
-    )
-
-    creator = XiaoHongShuExtractor().extract_creator_info_from_html(html)
-
-    assert creator == {
-        "userId": "author-8",
-        "interactions": [{"type": "fans", "count": "88"}],
-    }
-
-
-def test_creator_html_extractor_preserves_undefined_fallback():
-    html = (
-        '<script nonce="test"> window.__INITIAL_STATE__ = '
-        '{"user":{"userPageData":{"userId":"author-9","ipLocation":undefined}}}'
-        ";</script>"
-    )
-
-    creator = XiaoHongShuExtractor().extract_creator_info_from_html(html)
-
-    assert creator == {"userId": "author-9", "ipLocation": None}

@@ -367,9 +367,7 @@ class XhsSettings:
     HEADLESS: bool
     KEYWORDS: str
     LOGIN_TYPE: str
-    MAX_CONCURRENCY_NUM: int
     SAVE_DATA_OPTION: str
-    XHS_INTERNATIONAL: bool
     XHS_SPECIFIED_NOTE_URL_LIST: tuple[str, ...]
 
 
@@ -398,15 +396,6 @@ class XhsBehaviorPorts:
 
 
 @dataclass(frozen=True)
-class XhsClientPorts:
-    """原 HTTPX 短会话工厂（每次调用时读取 TLS 开关）与 API 验证桥。"""
-
-    make_async_client: Callable[..., Any]
-    behavior: XhsBehaviorPorts
-    xhs_international: bool
-
-
-@dataclass(frozen=True)
 class XhsPorts:
     """小红书编排借用的 IO 能力；装配不执行 IO，事件出口经此注入。"""
 
@@ -416,7 +405,6 @@ class XhsPorts:
     run_required_human_behavior: Callable[..., Any]
     accumulator_factory: Callable[..., Any]
     append_execution_event: Callable[[str, dict[str, Any]], None]
-    client: XhsClientPorts
     behavior: XhsBehaviorPorts
     record_platform_security_limit: Callable[..., Any]
     current_timestamp: Callable[[], int]
