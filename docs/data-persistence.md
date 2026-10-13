@@ -96,11 +96,19 @@ schema migration `19/post_detail_repair_waivers` 记录该表已进入现行内�
 审计时间；`xhs_account_leases` 防止同一逻辑槽位并发使用，并记录本轮临时 profile 路径及精确 owner/
 进程身份；`xhs_account_events`、`xhs_runs` 保存人工状态变化、挑战信号和运行摘要。项目不持久化小红书
 Cookie、localStorage、sessionStorage、独立浏览器快照、平台身份哈希或加密密钥；本轮临时 profile
-只在租约生命周期内存在，精确收束运行树后删除。`xhs_discovery_checkpoints` 按目标、账号和查询指纹保存下一安全页、
-该深层搜索的 `search_id`、耗尽状态、停止原因和未完成累计摘要路径；它不保存 Cookie，也不跨
-账号共享未入库活动。`xhs_discovery_seen_candidates` 在相同作用域保存已经完成处理的笔记 ID，
+只在租约生命周期内存在，精确收束运行树后删除。`xhs_discovery_checkpoints` 按目标、账号和查询指纹保存最近
+停止原因、上次是否完整到达来源末尾（审计）和未完成累计摘要路径；不保存页码或 search ID，不保存
+Cookie，也不跨账号共享未入库活动。`xhs_discovery_seen_candidates` 在相同作用域保存已经完成处理的笔记 ID，
 包括因视频或正式字段不足而不进入累计摘要的候选，以及结构有效但主题不相关的候选，避免它们跨轮
-反复触发详情和作者请求。小红书全部结构有效图文仍写入 `web_posts` / `web_post_images`。
+反复触发详情和作者请求；`retryable=true` 的候选失败不写入该表，下一轮重试。小红书全部结构有效图文仍写入 `web_posts` / `web_post_images`。
+小红书记录的 `content_visit_refs`（本轮访问账本 ID 与搜索、详情、作者、逐张图片的访问 ID）随
+`raw_sample_json` 入库，不新增列。
+
+schema migration `23/xhs_discovery_full_scan` 在单一 `BEGIN IMMEDIATE` 事务中重建
+`xhs_discovery_checkpoints`，删除 `resume_page`、`resume_search_id` 两列，其余列与全部行原样保留（旧
+查询指纹的行留作审计），重建索引；不触碰 seen 表和租约表，重复执行无变化。升级前须确认没有运行中的
+runner、`xhs_accounts.py list` 无活动租约，并用 SQLite `.backup` 备份数据库、`PRAGMA integrity_check`
+核对备份（步骤见运行手册）；回退只能用备份覆盖并同时回到旧代码。
 
 可捕获的 SIGINT/SIGTERM 不提交 `xhs_discovery_checkpoints` 或 `xhs_discovery_seen_candidates`；runner
 必须先把 execution state 与 `xhs_runs` 终结为 `runtime_failed/operator_interrupt`，写顶层
@@ -109,9 +117,9 @@ Cookie、localStorage、sessionStorage、独立浏览器快照、平台身份哈
 `lease_cleanup.ok=true` 同时成立，才证明该中断轮的控制面与运行树已完整收束。
 
 小红书 checkpoint 与通用表遵守同一提交边界：只有 child `summary.json` 已形成且含分页证据时，
-`xhs_runner.py` 才在同一事务提交前沿与已处理候选 ID；来源尚未耗尽时 `last_summary_path` 指向
-合并活动的最新摘要，取得完整耗尽证据并成功入库后清空摘要路径但保留深层前沿。
-`status=exhausted` 后只刷新顶部；`--no-import` 不更新
+`xhs_runner.py` 才在同一事务提交 checkpoint 与已处理候选 ID；来源尚未耗尽时 `last_summary_path` 指向
+合并活动的最新摘要，取得完整耗尽证据并成功入库后清空摘要路径；下一轮仍全量扫描。
+`--no-import` 不更新
 checkpoint。`import_result.reason=sqlite_import_failed` 时 runner 和 discovery 提交函数都必须跳过
 checkpoint、seen 与 campaign 更新。摘要或其 JSONL 缺失时冻结失败，不能静默丢弃活动。
 

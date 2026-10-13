@@ -44,6 +44,7 @@ runner 负责选择任务、冻结计划、调用 child、验证产物、持久�
 后才创建新的 `run_id`、profile、二维码和 Context。纯二维码过期只刷新组件；整页 reload 受每张新
 二维码 180 秒下限约束，人工验证出现后两种刷新均锁死。SIGINT/SIGTERM 在同一 runner 收尾路径写
 `runtime_failed/operator_interrupt` state 与摘要、收束运行树并释放租约，不产生 discovery 提交。
+搜索、详情、作者、图片只经页面取数通道（被动截获或页面状态）取得，见下文“页面取数通道与访问证据”。
 
 通用 runner 在冻结全部选中计划后，按实际平台键建立执行通道。不同平台通道默认并行，同一平台的
 多个 job 在通道内按调度顺序串行；`--max-parallel-platforms` 默认 4，设为 1 时只改变执行并发度，
@@ -68,7 +69,7 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
 ```text
 冻结配置与计划
   -> 登录、请求策略与行为证据
-  -> 搜索/顶部刷新/深层发现
+  -> 搜索/顶部刷新/深层发现（小红书：首页输入后全量滚动）
   -> 已知 ID 前置过滤
   -> 详情、作者和权威正文图补全
   -> 头像清除器（失败关闭）
@@ -90,7 +91,8 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
 ```text
 平台详情/正文结构
   -> 显式 ImageCandidate(role=content)
-  -> 当前登录/签名会话下载到本轮 staging
+  -> 通用平台：当前登录/签名会话下载到本轮 staging
+     小红书：浏览器翻看时截获的图片响应体写入本轮 staging
   -> 原子追加 image_manifest.jsonl
   -> 根项目按同一投影核对身份和数量
   -> 验证路径、SHA-256、MIME、后缀、尺寸与解码
@@ -112,6 +114,30 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
 固定 URL 页面证据不使用正文图片投影。执行器只记录图片请求的非识别聚合计数，不保存任意图片
 响应 URL 或响应体；截图作为整页证据附件保留，但不形成 `ctf_capture_images`、正文图片或 `page`
 关系。历史 `images.json` 在恢复导入时也不得重新生成未分类图片行。
+
+## 页面取数通道与访问证据
+
+已纳入访问门禁的平台（当前为小红书）只经页面取数通道取得平台数据：
+
+- `runtime/page_capture.py`（Channel）：按平台登记的规则（方法、主机、路径、资源类型）被动截获本轮
+  页面自身请求的响应，读取登记过的页面状态投影；图片只在单篇的图片窗口内、按期望 URL 读体。
+- `runtime/visit_ledger.py`（Ledger）：行为证据同目录的只追加 `content_visits` JSONL，用单一单调序号
+  记录动作、访问、停顿、决定与诊断；不截断，计入无持久进展看门狗的进展路径和批次快照。
+- `application/visit_gate.py`（visit_gate）：入库前按账本逐条核验记录的 `content_visit_refs`，结果为
+  `content_visit_ok`，并按实际访问推导节奏与连续性的必需阶段。
+
+```text
+页面响应 / 页面状态
+  -> Channel 截获并写账本访问行
+  -> 平台层组装记录，写 content_visit_refs（搜索、详情、作者、逐张图片）
+  -> 根项目 visit_gate 回读账本与 manifest，判定 content_visit_ok
+  -> 行为与持久化门禁
+```
+
+取数分级以[正式契约](formal-crawl-contract.md#取数来源与真实访问门禁)为准，本文不另行定义：L3 只指
+Playwright `page.request` / `context.request`，所有平台禁止；浏览器外 HTTP 客户端单列，已纳入门禁的
+平台只允许平台文档登记的例外，尚未纳入的平台维持现状。静态检查 `tests/test_fetch_boundary.py`
+守护旁路导入、Playwright 请求接口和页面脚本内的主动请求。
 
 ## 状态与发现记忆
 
@@ -138,7 +164,8 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 账号隔离。两套控制面都在 child 摘要与批次证据形成后才提交；媒体或 SQLite 失败不得提前推进。
 
 存在 checkpoint 时先有限刷新顶部，再从深层前沿继续。顶部刷新不推进深层位置；边界页允许重取，
-已知 ID 在详情、作者和媒体请求前过滤。平台 cursor 组成和重新建链规则只写在对应平台文档。
+已知 ID 在详情、作者和媒体请求前过滤。小红书没有前沿与顶部刷新，每轮从首页搜索后全量滚到
+`has_more=false`，已知 ID 在点开前滑过。平台 cursor 组成和重新建链规则只写在对应平台文档。
 
 ## 平台拓扑
 

@@ -16,6 +16,10 @@
   Cookie、storage state 或其他登录快照。
 - 每个正式轮创建一个空临时 profile，只允许一次 Chrome 启动和一个 BrowserContext；登录、验证与
   业务阶段不得轮内重启。page/context/browser 真关闭时本轮失败，不得 fallback 到第二个浏览器。
+- 搜索、详情、作者、图片与登录态只来自本轮页面自身请求的被动截获响应或页面状态（L1）：不在页面内
+  主动请求（L2），不用 Playwright 请求接口（L3），也没有浏览器外 HTTP 客户端的例外。每条记录以
+  `content_visit_refs` 引用访问账本，入库前须 `content_visit_ok=true`；分级见
+  [正式契约](../formal-crawl-contract.md#取数来源与真实访问门禁)，逐条规则见下文“访问证据”。
 
 ## 执行流
 
@@ -24,10 +28,12 @@
   -> dry-run 冻结账号、目标、互动和发现计划
   -> 人工确认
   -> 正式运行并申请账号租约
-  -> 创建本轮空临时 profile，启动唯一 Chrome/BrowserContext，人工扫码
-  -> xhs_guarded、顶部刷新和深层 page + search_id
-  -> 详情、作者粉丝和正文图片
-  -> 每个完整批次生成不可变 child 恢复摘要，根 runner 校验并提交 checkpoint/seen/campaign
+  -> 创建本轮空临时 profile，启动唯一 Chrome/BrowserContext，人工扫码，截获 user/me 确认登录态
+  -> 首页输入关键词回车，筛选面板点选“图文”后收起，xhs_guarded 行为阶段
+  -> 从目标会话顶部全量滚到 has_more=false：已知 ID 滑过，未知图文就地点开
+  -> 浮层详情（截获 feed）、翻图（截获正文图）、点击作者名打开作者页（读页面状态投影）
+  -> 每个有新增决定的完整批次生成不可变 child 恢复摘要（含访问账本快照），根 runner 校验并提交
+     checkpoint/seen/campaign
   -> child 收到根 runner 的提交确认后开始下一批
   -> 根项目复验、媒体晋升和 SQLite 批次事务
   -> 终态对账账号级 checkpoint/seen/campaign；只有正式成功才清空累计摘要
@@ -44,9 +50,10 @@
 - 正文图只来自详情 `image_list`；每个对象按 `url_default`、`url`、`url_pre` 选择一个 URL，并用稳定
   notes 路径生成资产键。头像、作者主页图片、封面、搜索预览和视频不进入图片候选或下载链；作者
   主页仍只用于观察粉丝量等研究所需作者指标。
-- 图片请求复用本轮 BrowserContext/API Cookie，不创建或恢复第二份会话，不调用视频 store。
-- 作者粉丝必须来自当前登录会话的作者主页，保存数值、`followers_observed=true` 和
-  `author_followers_source=creator_profile`。笔记 `xsec_token` 不能作为作者主页凭据。
+- 正文图字节取自浏览器翻看浮层时截获的图片响应体，不另发请求，不创建或恢复第二份会话，不调用
+  视频 store；头像主机的响应从不读取。
+- 作者粉丝必须来自浮层内点击作者名打开的作者页页面状态，保存数值、`followers_observed=true` 和
+  `author_followers_source=creator_profile`。
 - 平台层写 `<child_artifact>/xhs/data/xhs/` 下的 staging/manifest；根项目负责通用字节复验、晋升和
   SQLite。共享重试和失败分类不在本文重复。
 
@@ -60,8 +67,8 @@ python scripts/xhs_accounts.py list
 继续前逐项确认：
 
 - 操作人已显式登记并指定逻辑账号槽位；状态为 `active`，没有活动租约。runner 不会自动创建槽位。
-- `target_key` 存在且关键词属于青岛；顶部刷新符合本轮要求。target 不含 `timeout_seconds`，出现即
-  配置错误；正式轮不设任务时长上限，只受统一的 1200 秒无持久进展看门狗约束（见下文）。
+- `target_key` 存在且关键词属于青岛。target 不含 `timeout_seconds` 或已删除的 `top_refresh_max_pages`，
+  出现即配置错误；正式轮不设任务时长上限，只受统一的 1200 秒无持久进展看门狗约束（见下文）。
 - `behavior_profile=xhs_guarded` 且使用有头浏览器。
 - pool 的 `lease_seconds` 是租约 TTL，不含任何任务时长：取得租约时写入 `expires_at = 取得时刻 + TTL`，
   此后父层每收到一次新的认证心跳 sequence、且距上次续期已达 TTL 一半时，按精确 `lease_id` 与
@@ -147,7 +154,7 @@ child 退出后回收其管道输出最多等 5 秒，后代仍占管道时显�
 同一次连续断网最多 675 秒。
 
 人工等待期间同样暂停该计时，机制与网络暂停一致。共享 600 秒人工预算的计费区间（扫码登录、轮中登录
-恢复、API 验证码、作者页验证）以及搜索就绪验证与连续性验证（各自 600 秒上限，不计入共享预算）都通过
+恢复、前端验证（规则端点 461/471）、作者页验证）以及搜索就绪验证与连续性验证（各自 600 秒上限，不计入共享预算）都通过
 同一个“人工等待中”信号，写 behavior evidence 同目录的 `behavior_evidence.operator_wait.json`：进入时写
 `waiting`，等待期间每 30 秒刷新，结束时写 `ended`；自动化子操作暂停人工计费时同样写 `ended`。父层只对
 新鲜（90 秒内）、结构有效且来自已核验 exporter 的 `waiting` 冻结计时，只在读到明确的 `ended` 时结束该
@@ -177,9 +184,9 @@ sessionStorage 或设备指纹。
 
 登录只发生在正式 `xhs_runner.py` 轮次中。runner 取得租约后创建
 `data/runtime/xhs/sessions/<run_id>/profile/` 空临时目录，启动唯一 Chrome/BrowserContext，并固定传
-`--login-type qrcode`。登录成功由可见身份与 self-info API 共同确认；二维码消失或 Cookie 变化不能
-单独放行。本轮 API 签名和图片下载可在内存中复用当前 BrowserContext Cookie，但结束时不把任何登录
-状态晋升为跨轮资产。
+`--login-type qrcode`。登录成功由可见身份与截获到 `guest=false` 的 `user/me` 响应共同确认；UI 已确认
+但 30 秒内没有截获时只允许整页 reload 一次，仍没有即 `xhs_login_state_unconfirmed`。二维码只判 DOM
+就绪，二维码消失或 Cookie 变化不能单独放行。结束时不把任何登录状态晋升为跨轮资产。
 
 轮初纯未扫码页面明确显示二维码过期时，只有连续两次确认仍无扫码、手机确认、短信或安全验证进展，
 才可点击二维码组件内刷新控件。新二维码出现后重新计算 180 秒整页 reload 下限；未过期二维码页面
@@ -212,8 +219,9 @@ python scripts/xhs_runner.py \
 - preflight 证明槽位已显式登记且 active、无租约，并且租约由父层心跳续期
   （`lease_renewed_by_parent_heartbeat=true`）；`plan.lease_budget` 记录 TTL、续期间隔与收尾预算，计划中
   不含任务时长字段；
-- discovery 与该账号 checkpoint 一致：首次 page 1、顶部刷新 0；续跑有保存的 page、非空 search ID、
-  顶部刷新页数及可选累计摘要。
+- discovery 与该账号 checkpoint 一致：`checkpoint_found`、`last_status`、`last_stop_reason`、
+  `seen_candidate_count`、`campaign_summary_path` 与累计摘要携带的访问账本快照数
+  `campaign_visit_ledger_count`；计划中没有页码、search ID 或顶部刷新页数，每轮都从首页搜索后全量扫描。
 
 dry-run 不申请正式租约、不创建临时 profile、不构造 child 命令，也没有 `import_result`；这些缺席不是
 失败或入库证据。
@@ -295,8 +303,14 @@ python scripts/repair_xhs_posts.py \
   --batch-size 5
 ```
 
-详情 API、HTML 回退、作者资料与图片各自沿用有界请求重试；最终失败会记录真实 `attempts`、
-`failure_scope` 和 `error_code`。普通候选失败不序列化空壳记录，不阻塞同批成功记录，也不阻止下一批；
+修复先在首页输入 `--keyword` 搜索并完成行为阶段（不进入全量扫描），再逐个目标串行处理：打开本篇
+图片窗口，写 `navigate` 动作后在主页面直开保存的笔记链接，读取页面状态 `note_detail_state` 的白名单
+投影（与 feed `note_card` 同形，须通过同一形状校验），详情停顿后翻图截获正文图，作者停顿后点击页面内
+作者名读取作者页投影（同页跳转到作者页时读完写 `go_back` 返回）。链接跳转 `/404` 记
+`repair_link_unavailable`（不可重试）；页面壳未出现记 `note_page_not_rendered`，10 秒内读不到状态记
+`note_detail_not_observed`，登录恢复或验证后第二次重开仍中断记 `note_redo_interrupted`（均可重试）；
+视频记 `video_skipped`。repair 账本 `mode=repair`，访问门禁没有搜索访问要求，触发动作为 `navigate`。
+最终失败会记录真实 `attempts`、`failure_scope` 和 `error_code`。普通候选失败不序列化空壳记录，不阻塞同批成功记录，也不阻止下一批；
 登录、验证码、频控、封禁、安全限制、网络恢复预算耗尽和浏览器整体失败仍立即停止，当前未完成批次
 不写入 `batches`；Chrome 进程退出、CDP 断开、BrowserContext 或主页面意外关闭写入 `runtime_blocker`，
 `error_code=browser_target_closed`，具体生命周期码在 `reason`；Playwright 直接报告 page/context/browser
@@ -317,69 +331,130 @@ child `summary.json` 的
 
 ### 标签页、网络与人工验证
 
-- 正式浏览器启动后先打开 `/explore` 并确认页面壳已可见，再进入真实关键词搜索页。搜索页在导航
-  `commit` 后持续无可见文本时，程序只允许执行一次受控恢复：回到 `/explore` 确认渲染，再重新进入
-  同一关键词搜索页；恢复仍为空白则按 `runtime_failed` 停止，不重启浏览器、不换号，也不推进
-  checkpoint。启动导航会把 `readyState`、DOM/正文长度、主文档状态、页面脚本错误和失败资源的紧凑
+- 正式浏览器启动后先打开 `/explore` 并确认页面壳已可见，再在首页搜索框逐字输入关键词并回车，不直接
+  导航到搜索结果页。回车后须截获第 1 页搜索且主页面进入 `/search_result_ai`、`.search-layout` 可见；
+  首页未渲染、搜索未出结果或关键词不符时只允许一次受控恢复：重新打开 `/explore` 再输入；仍失败按
+  `runtime_failed/xhs_navigation_recovery_failed:<code>` 停止，不重启浏览器、不换号，也不推进 checkpoint。启动导航会把 `readyState`、DOM/正文长度、主文档状态、页面脚本错误和失败资源的紧凑
   摘要写入 behavior evidence 同目录的 `behavior_evidence.navigation.json`，白屏超时不得只凭外部关闭
   后的 `TargetClosedError` 分类。
 - 搜索卡片和作者链接在匿名页面也可能存在；可见的精确“登录”按钮优先判定为 `login_required`，
   不得仅凭卡片数或作者链接数把匿名页面判为 ready。主页面在搜索导航、行为、登录恢复或作者补全
   等阶段意外关闭时立即以 `xhs_main_page_closed_unexpected` 终止本轮（浏览器生命周期失败；搜索阶段，
-  包括页内登录过期后的恢复等待，记为 `runtime_failed/main_page_closed` 并保留当前页为续跑前沿，不写
+  包括页内登录过期后的恢复等待，记为 `runtime_failed/main_page_closed`，不写
   `candidate_skipped`，不提交未完成批次）；同时观察到
   Chrome 进程、CDP 或 BrowserContext 的生命周期失败时，仍以后者的代码为准。即使 BrowserContext
   中另有同域页面，也不得接管、重试当前阶段或重新启动 Chrome。原主页面仍存活时，平台主动打开的
   普通新页继续只由新页守卫管理。
-- 正式 BrowserContext 守卫安装后出现的任何新标签页都立即置前，并从出现起至少保留 30 秒；平台
+- 正式 BrowserContext 守卫安装后出现的任何新标签页都立即置前，并从出现起至少保留 20 秒；平台
   弹页、作者主页回退、互动和验证辅助页一视同仁。正常返回、异常、Playwright 退出和最终清理都
   不得绕过。首个主页面可豁免，启动时已有的额外页仍受保护。
-- 明确登录、扫码或验证码页置前并进入本轮共享的 600 秒人工处理预算，30 秒保护期不能缩短它，切换
+- 明确登录、扫码或验证码页置前并进入本轮共享的 600 秒人工处理预算，20 秒保护期不能缩短它，切换
   页面也不能重新计时。
 - 搜索连续性出现登录要求或图片验证时，保持当前页并写
-  `operator_verification_events`；完成后刷新当前内存 Cookie 并继续，人工预算耗尽时失败。
-- 搜索 API 461/471 使用响应 `Verifyuuid`、`Verifytype` 在同一 BrowserContext 打开平台人工验证页；
-  可见状态必须同时检查顶层页与子 frame；通过后还需连续两次确认已回到原路由且有可见文本，
-  再刷新 Cookie 并重试原请求。`Requests too frequent` 等可见频控优先于验证页标题分类，
-  立即按运行级阻断停止，不点击刷新绕过。
-- 搜索 API 明确登录过期时暂停原请求，置前原有抓取页，使用该页已经出现的二维码等待人工登录；
-  不新开登录标签页，也不把最新打开的作者页或辅助页接管为主页面。可见登录 UI 与 self-info API
-  都恢复后刷新当前内存 Cookie，并重试同一来源页。等待期间不导航或刷新原页。恢复等待中出现终态
-  弹窗、人工预算耗尽、网络恢复超时、`300012`、Playwright 浏览器错误或生命周期失败时，与页内请求
-  直接遇到同类失败写同一 `runtime_failed/<stop_detail>` 停止事件并保留当前页为续跑前沿，不写
-  `source_exhausted`。
+  `operator_verification_events`；完成后继续，人工预算耗尽时失败。
+- 规则端点（搜索 `search/notes`、详情 `feed`、`user/me`）返回 461/471 时被动等待：30 秒内在所有页面的
+  顶层与子 frame 观察验证界面（可见标记、`/website-login/captcha` 路由、人工检查选择器），出现即置前并
+  在共享人工预算内等它消失，再连续两次确认主页面有可见文本才算完成，写 `operator_verification_events`；
+  随后搜索阶段重新滚动（前端已重搜则按会话重置），详情阶段整篇重做一次。程序不自行拼接或打开验证页
+  地址。30 秒内既无验证界面、原数据也没有到达时为 `runtime_failed/xhs_verification_not_surfaced`。
+  `Requests too frequent` 等可见频控优先于验证页标题分类，立即按运行级阻断停止，不点击刷新绕过。
+- 状态哨兵只对规则端点做运行级判定。非规则端点（埋点、安全脚本、评论、分享码等）的
+  401/403/429/461/471 只写账本 `signal` 诊断，不读响应体；其中 461/471 同一批共用一次 30 秒的验证
+  界面检查，出现界面按上一条处理，否则继续运行。
+- 规则端点出现业务码 -101 或登录过期文案、截获 `user/me` 为 `guest=true`，或主页面出现可见登录 UI 时，
+  置前原有抓取页，使用该页已经出现的二维码等待人工登录；不新开登录标签页，也不把最新打开的作者页
+  或辅助页接管为主页面。可见登录 UI 恢复、且恢复开始后截获到 `guest=false` 的 `user/me` 才算恢复；
+  前端没有自行请求 `user/me` 时只允许在 UI 确认后 reload 一次。恢复后主页面仍在原搜索列表则继续扫描，
+  否则重新从首页进入搜索；单篇处理中的恢复整篇重做一次。等待期间不导航原页。恢复等待中出现终态
+  弹窗、人工预算耗尽、网络恢复超时、`300012`、Playwright 浏览器错误或生命周期失败时，与直接遇到
+  同类失败写同一 `runtime_failed/<stop_detail>` 停止事件，不写 `source_exhausted`。
 - “安全限制”、账号异常、`300011/300012`、`/website-login/error`、频控或封禁属于运行级阻断，
   立即停止，不能进入人工验证码等待或候选跳过。
-- 可识别的短时网络错误只进入 `network_paused`，保留同一 Chrome、BrowserContext、Page 和原操作，
-  在原处以最短 2 秒、最长 30 秒退避重试；父层继续验证认证心跳，不因网络中断或整轮运行较久主动
-  关闭浏览器。runner 固定下发 600 秒网络恢复预算，不受调用者环境覆盖；恢复后继续原请求，预算耗尽
-  时写 `network_recovery_timeout` 并保留最后安全 checkpoint，不重启 Chrome、不创建新 Context 或新
+- 规则请求 `requestfailed` 的可识别 `net::ERR_*` 或导航失败只进入 `network_paused`，保留同一 Chrome、
+  BrowserContext 和 Page，以最短 2 秒、最长 30 秒退避后重触发原动作（搜索重滚一步、详情整篇重做、
+  作者重点作者名）；父层继续验证认证心跳，不因网络中断或整轮运行较久主动
+  关闭浏览器。runner 固定下发 600 秒网络恢复预算，不受调用者环境覆盖；预算耗尽时写 `network_recovery_timeout` 并保留最后安全 checkpoint，不重启 Chrome、不创建新 Context 或新
   页面重放。
 - page、context 或 browser 实际关闭以及 CDP 断开均为终端浏览器错误；生命周期证据必须区分计划关闭
   与非计划关闭，本轮不得启动第二个 Chrome 或 BrowserContext。
 
-### 行为、作者与发现
+### 搜索与全量扫描
 
-- `xhs_guarded` 只在真实关键词页执行；使用少量桌面滚轮并验证实际位移，不扫描隐藏 HTML 文本。
-- 运行指纹必须完整，`navigator.webdriver` 不得暴露，Chromium UA 与 API Client Hints 主版本一致。
-- 搜索并发为 1；搜索、详情、作者主页、翻页分别随机等待并写 `request_pacing_events`，批次间继续写
-  `continuity_events`。
-- 作者补全先用登录会话的无 token 请求；空结果后随机等待，再用同一 BrowserContext 打开无 token
-  作者页。打开前先检查原抓取页，原页已出现登录或验证时直接在原页等待，不再创建作者辅助页；
-  作者辅助页遇到登录失效也回到原抓取页恢复会话，成功后重试作者请求。作者专属安全验证仍保留
-  对应页面等待操作人，不能因为 HTML 已有作者数据而提前关闭。
-- 作者页静态解析只做严格 JSON 解码（`:undefined` 预替换为 `null`）。平台状态里出现
-  `new Set(...)` 等 JS 构造时解码失败，无 token 请求路径因此仍会失败，只能靠浏览器回退取数，
-  这会多一次作者页访问和暂停。
-- 浏览器回退在到达与滚动检查后进入有界就绪等待，预算 10 秒。`domcontentloaded` 只是前置条件，
-  超时记 `page_not_ready` 后继续。随后执行固定脚本，读取页面已执行的
-  `window.__INITIAL_STATE__.user.userPageData`。只有自有数据属性 `__v_isRef === true` 的节点才按
-  Vue ref 解包；脚本按白名单只复制标量字段，不序列化整份状态，也不返回 HTML。白名单分三部分：
+- 搜索固定为“综合 + 图文”。回车后进入 `/search_result_ai`，前端先发不带 `filters` 的“综合 + 不限”
+  第 1 页，这一会话只截获、不处理、不滚动。随后打开 `.search-layout div.filter` 筛选面板，按精确文字
+  点选“图文”（各组 `.tags` 结构相同，不按位置），以入口文字变为“已筛选”且截获到目标会话第 1 页
+  （5 项 `filters`：`sort_type=general`、`filter_note_type=普通笔记`，其余三项“不限”）判定成功，失败重试
+  一次后报 `target_filter_not_applied`。面板不会自动收起，任何滚动之前再点一次入口并确认收起，失败重试
+  一次后报 `filter_panel_not_closed`；目标会话第 1 页的关键词与目标不符时重新输入一次，仍不符报
+  `search_keyword_mismatch`。三者都以 `xhs_navigation_recovery_failed:<code>` 停止。
+- 地址栏里的关键词经两次编码；行为门禁的 `target_url_ok` 对地址逐层解码（最多 3 层），任一层含关键词
+  即为真，通用平台单次编码的结果不变。“真实关键词页”另由账本证明：目标会话第 1 页的
+  `keyword_matches_target=true`。
+- 查询指纹并入目标排序与类型的语义标签（`search_sort=general`、`search_note_type=image`）。升级后首轮
+  使用新指纹：dry-run 显示 `checkpoint_found=false`；已入库笔记照常滑过；旧指纹 seen 中未入库的 ID 重新
+  判定一次；旧的未完成累计不再续上；旧 checkpoint 与 seen 行保留作审计；升级前不需要先跑完旧轮次。
+- 每轮从目标会话顶部全量滚到末页 `has_more=false`，不保存深层位置，也没有顶部刷新。按 `data-index`
+  顺序处理视口内卡片：数据库、账号 seen、累计摘要和本轮已决定的 ID 直接滑过；搜索项为视频的在点击前
+  记决定；其余未知图文在封面中心进入可点击带（视口高 10% 到底边 8px）时就地点开。单步滚动不超过视口
+  0.8 倍。已滑到可点击带上方仍未决定的卡片向上补漏，同一卡片补漏 3 次仍够不着即
+  `xhs_search_items_unresolved`。
+- 前端自行重搜（出现新的第 1 页会话）时：目标会话直接采用；丢了“图文”则重新点选并收起面板；关键词
+  不符则回首页重新输入；都从新会话顶部继续。会话重置时未完成的页记一次 `batch_complete=false` 的批次
+  事件，不发布。
+- 运行级停止（都不推断来源耗尽）：有 `data-note-id` 却连续 2 次读数未登记的卡片为
+  `xhs_search_card_unregistered`；目标会话第 k 页到达时缺第 k−1 页为 `xhs_search_page_gap`；已越过的页内
+  未知项从未渲染、或到底部仍有未决定项为 `xhs_search_items_unresolved`；到底部等不到新页，检查可见状态
+  并上下抖动 3 次后仍没有新页为 `xhs_search_load_stalled`；搜索响应未知业务码为 `search_request_failed`。
+- 每页已越过且全部决定后写 `adaptive_batch_completed`；只有本页有新增决定时才发布批次。末页
+  `has_more=false` 完成即 `source_exhausted(has_more_false)`，停止事件的 `source_visit_id` 指向该搜索访问。
+
+### 单篇处理
+
+- 点击封面前打开本篇唯一的图片窗口：窗口先持有图片响应句柄、不读体，feed 给出期望 URL 后只对精确匹配
+  的句柄读体，因此首图早于 feed 到达也能认领。浮层出现并截获本篇 feed 后写详情访问；feed 中为视频则
+  关闭浮层、记决定。浮层未出现 3–6 秒后重点，出现但没有 feed 时先关闭、4–8 秒后重开，两次都没有 feed
+  记可重试候选 `note_detail_not_observed`；连续 3 篇浮层都不出现为 `xhs_overlay_not_opening`。
+- 正文可见后做详情停顿，再翻图：每次翻到下一张前停 1.5–3 秒（只写账本 `note_image` 停顿），约四分之一
+  按 → 键、其余点右箭头，按页码 k/N 核实前进，不前进时换一种方式再试一次。作者见下一小节。有效记录
+  如请求了互动，在当前浮层内执行，不新开标签页。最后点关闭按钮关闭浮层（不按 Esc，5 秒内确认，重试
+  一次仍关不掉为 `xhs_overlay_close_failed`），再暂存截获的图片并写记录。
+- 单篇内的登录恢复、验证完成或网络恢复后整篇重做一次：关闭残留浮层、在可点击带内重新找到卡片再点开，
+  沿用同一图片窗口；同一文档重开时图片可能走内存缓存而没有响应，记录可以引用早先尝试截获的图片访问。
+  第二次登录或网络中断照常上抛给扫描；第二次因验证或作者页登录重做、或重做时卡片已不在可点击带内，
+  交回扫描重新处理。重做后仍缺图记可重试候选 `image_response_not_observed`。
+
+### 节奏与行为
+
+- 搜索并发为 1。`xhs_guarded` 只在搜索结果页执行；使用少量桌面滚轮并验证实际位移，不扫描隐藏 HTML
+  文本。运行指纹必须完整，`navigator.webdriver` 不得暴露。
+- 各档停顿写行为证据 `request_pacing_events` 与账本 `pause`；搜索两档另执行连续性行为并写
+  `continuity_events`。`xhs_guarded` 的长停留与冷却不启用。
+
+| 档位 | 取值 | 落点 |
+|---|---|---|
+| `search_results` | 6–14 秒 | 每页第一张未处理卡片点击前，每页至多一次 |
+| `search_page` | 12–30 秒 | 每截获一页 `has_more=true` 的目标会话页后、下一次程序滚动之前；初始行为阶段之前那一次即第 1 页的应用，停顿中到达的页需再停 |
+| `note_detail` | 4–10 秒 | 浮层正文可见后、翻图前 |
+| `creator_profile` | 8–18 秒 | 点击作者名之前；读到投影后不额外停留，按 20 秒最短保留关闭 |
+| 翻图 `note_image` | 1.5–3 秒 | 每次翻到下一张之前；只写账本，不入 `request_pacing_events`，不列入必需阶段 |
+
+### 作者补全
+
+- 作者补全只走浏览器：作者停顿后在浮层（repair 为整页）内点击作者名，等待前台新标签页（每次 10 秒，最多
+  两次，都没打开记 `author_tab_not_opened`）。点击前先检查原抓取页，原页已出现登录或验证时直接在原页
+  等待，不再点击；作者页遇到登录失效也回到原抓取页恢复会话，成功后整篇重做。作者专属安全验证仍在
+  对应页面等待操作人。标签页最短保留 20 秒后写 `close_tab` 关闭，主页面置前。repair 中点击后主页面同页
+  跳转到作者页时，读完投影写 `go_back` 返回笔记页。
+- 作者页先做到达与小幅滚动检查，再进入有界就绪等待，预算 10 秒。`domcontentloaded` 只是前置条件，
+  超时记 `page_not_ready` 后继续。随后经页面取数通道读取状态投影 `creator_page_data`（接受时写作者
+  访问），只读页面已执行的 `window.__INITIAL_STATE__.user.userPageData`。只有自有数据属性
+  `__v_isRef === true` 的节点才按 Vue ref 解包；脚本按白名单只复制标量字段，不序列化整份状态，也不
+  返回 HTML。白名单分三部分：
   - 仓库内下游读取的字段：`basicInfo` 的用户 ID、昵称、简介、性别、IP 属地，粉丝、关注、笔记与获赞
     指标键，以及 `interactions` 条目的 `type/name/key/count/num/value`；
   - 研究项目经 `creator_profile_json` 读取的字段：`interactions[].i18nCount`、`tags[].tagType/name`、
     `verifyInfo.redOfficialVerifyType`；
-  - 平台号 `basicInfo.redId`：保留它是为了与静态路径的完整结构对齐。它是字符串，同样参与头像同值删除。
+  - 平台号 `basicInfo.redId`：字符串，同样参与头像同值删除。
 
   头像（`imageb`、`images`、`avatar*`、`icon`）与任何凭据或 token 字段都不投影；计数类字段不投影布尔值。
 - 投影前，脚本先在该作者记录内收集头像证据 URL。证据键与路径直接取自 `records.sanitization`：
@@ -389,67 +464,75 @@ child `summary.json` 的
   生效；笔记级头像仍由 Python 清理器按键删除。
 - 脚本只经属性描述符读取自有数据属性，不读取访问器属性，不调用 `toJSON`；遇到 Proxy 时，其 trap
   仍可能执行页面代码。遇到超限、循环引用、访问器属性、函数或未知对象类型（Set、Map、Date 除外）时，
-  整个投影被拒绝（`projection_avatar_check_incomplete`），立即回退静态解析。未求值的 computed ref
-  按缺失处理。
+  整个投影被拒绝（`projection_avatar_check_incomplete`）。未求值的 computed ref 按缺失处理。
 - 就绪与成功条件：粉丝计数必须非布尔，且能按 `records.formal.parse_int` 解析（含“万/亿”）。计数按原值
   保存（如 `1.2万`）；0 是真实观察值，不补值。仅有 `interactions` 数组不算就绪。每次读取投影后，
   先做生命周期、登录、验证、阻断与封禁检查，然后才接受结果或重试，每 0.5 秒重试一次。出现验证标记时，
-  先进入既有验证等待。人工验证完成后，每轮做一次检查，再读取一次：先投影，取不到再走严格静态解析；
-  这一步不会重入就绪等待。读到结果后、接受之前，依次复查以下各项：
-  - 生命周期：主页面与作者页都必须存活；
-  - 可见状态：再次检查阻断与封禁；
-  - 人工流程：验证重现时丢弃本次结果，在同一 ticket 的预算内继续等待；出现登录要求时转入登录恢复；
-  - ticket 预算：已耗尽时按共享人工预算耗尽（`xhs_manual_checkpoint_budget_exhausted`）失败，不接受
-    超时之后才拿到的数据。
+  先进入既有验证等待；人工验证完成后，每轮做一次检查，再读取一次投影，这一步不会重入就绪等待。读到
+  结果后、接受之前，依次复查生命周期（主页面与作者页都必须存活）、可见阻断与封禁、人工流程（验证重现
+  时丢弃本次结果，在同一 ticket 的预算内继续等待；出现登录要求时转入登录恢复）和 ticket 预算（已耗尽时
+  按 `xhs_manual_checkpoint_budget_exhausted` 失败，不接受超时之后才拿到的数据）。取消以及页面、浏览器
+  关闭照常向上传播。
+- 作者页地址路径 `/user/profile/<id>` 中的作者 ID 必须与 feed 的 `user_id` 一致，否则判 `creator_mismatch`。
+  `creator_profile_json` 只含上面列出的白名单字段；下游如果读取白名单外的字段（例如 `extraInfo`、
+  `tags[].icon`），在记录里会缺失。
+- `creator_profile_parse` 导航诊断在就绪等待结束时写一次（`outcome` 取 `ok` 或原因类别），就绪等待中
+  转入登录恢复时写 `ok_login_recovery` 或 `login_recovery_empty`，验证等待中读到作者资料且复查通过时写
+  `ok`，判定作者不一致时写 `creator_mismatch`。到达或滚动检查直接转入登录恢复、验证等待因人工预算耗尽
+  而抛错、验证等待中转入登录恢复和复查时验证重现，都不写。
+- 失败时 `candidate_skipped.error_code=creator_profile_unavailable`，`detail` 为
+  `creator_profile_failed:<原因>`（多个原因以逗号连接），原因只含类别：
 
-  取消以及页面、浏览器关闭照常向上传播。
-- 页面数据带有作者 ID 且与请求的 `user_id` 不一致时，判为 `creator_mismatch`，不可用。ID 缺失时
-  沿用按 `user_id` 打开的作者页和笔记作者 ID，不凭昵称比对。投影在预算内拿不到粉丝时，回退到
-  `page.content()` 加严格静态解析。
-- `creator_profile_json` 的形状因取数路径而异：
-  - 运行时投影路径写入白名单结构，只含上面列出的字段；
-  - 无 token 请求、静态回退与验证后静态读取路径仍写完整的 `userPageData`，头像由 Python 清理器删除。
+| 原因 | 可重试 |
+|---|---|
+| `author_tab_not_opened`、`author_tab_closed` | 是 |
+| `page_not_ready`、`runtime_projection_empty`、`runtime_projection_timeout`、`runtime_projection_error`、`followers_unobserved` | 是 |
+| `login_recovery_empty`、`verification_wait:<原因>` | 是 |
+| `creator_mismatch`、`projection_avatar_check_incomplete` | 否（决定性结果，重试不会改变） |
 
-  下游如果读取白名单外的字段（例如 `extraInfo`、`tags[].icon`），在投影路径的记录里会缺失。按列做
-  统计时，需要区分记录来自哪条路径，或只使用白名单字段。
-- `creator_profile_parse` 导航诊断的写入时机：
-  - 就绪等待结束时写一次，`outcome` 取 `ok`、`ok_static_state` 或原因类别；
-  - 就绪等待中转入登录恢复时写 `ok_login_recovery` 或 `login_recovery_empty`；
-  - 验证等待中读到作者资料、且接受前复查通过时写 `ok` 或 `ok_static_state`；判定作者不一致时写
-    `creator_mismatch`。
+- 成功作者结果只在本轮按作者 ID 缓存，不替代来源证据；缓存命中的记录引用首次打开该作者时的访问。
 
-  以下情况不写：到达或滚动检查直接转入登录恢复；验证等待因人工预算耗尽而抛错，包括复查时才耗尽；
-  验证等待中转入登录恢复；复查时验证重现。
-- 两条路径都失败时，`candidate_skipped.detail` 写为 `creator_profile_failed:api=<原因>;browser=<原因>`，
-  `error_code` 仍为 `creator_profile_unavailable`。repair 路径的失败记录不带原因码。原因只含类别：
-  - 无 token 请求：`api_request_failed:<异常类型>`；
-  - 静态解析：`state_script_missing`、
-    `state_decode_failed:<js_new_expression|js_identifier|invalid_json|truncated>`、`state_null`、
-    `user_missing`、`user_page_data_missing`、`user_page_data_empty`，在浏览器侧加 `static_` 前缀；
-  - 运行时投影：`page_not_ready`、`runtime_projection_empty`、`runtime_projection_timeout`、
-    `runtime_projection_error`、`projection_avatar_check_incomplete`、`followers_unobserved`、
-    `creator_mismatch`；
-  - 其他分支：`login_recovery_empty`、`verification_wait:<原因>`。
-- 成功作者结果只在本轮按作者 ID 缓存，不替代来源证据。
-- 有 checkpoint 时用新 search ID 刷新顶部，再用保存的 `page + search_id` 恢复深层；顶部刷新不
-  覆盖深层位置。深层耗尽后只刷新顶部。
-- 只有未知笔记 ID 才进入候选处理；数据库、账号 seen、累计摘要和本轮已见 ID 在详情前过滤。完整页保存
-  下一页，页中途停止保存当前页。
-- `stagnant_batches` 按“本批没有有效新增”累计，仅作诊断；它不触发停止。正常停止只接受可验证的
-  `source_exhausted`，运行级阻断按失败处理。
+### 访问证据
+
+- 每轮在行为证据同目录写只追加的 `behavior_evidence.content_visits.jsonl`，以单一单调序号记录动作
+  （导航、输入、回车、筛选、滚动、点卡片、翻图、点作者、关闭）、页面响应与页面状态访问、停顿、决定和
+  诊断信号；不截断，不写 token、查询值、正文、头像或完整图片 URL，并列入 1200 秒看门狗的进展路径。
+  批次快照固化账本并计入哈希；累计摘要的记录携带各轮账本快照，跨轮累计记录逐条核验。
+- 每条记录的 `content_visit_refs` 引用 `ledger_id` 与搜索、详情、作者、逐张图片的访问 ID，随
+  `raw_sample_json` 入库。`content_visit_ok` 按访问序号逐条核验（问题码 R1–R7）：
+  1. 引用齐全且都能在账本中解析，作者与图片访问和详情访问同属一个账本；
+  2. 搜索访问属于目标会话、状态 200，含该 ID 且该项不是视频；
+  3. 详情访问是本篇 feed 的页面响应（状态 200），由同一 ID 的 `click_card` 触发，且晚于搜索访问；
+  4. 作者访问是作者页页面状态，作者 ID 与页面地址一致，由某次详情访问之后的 `click_author` 触发，并晚于
+     该动作；
+  5. 图片访问的资产键与 manifest 的 `source_asset_key`、哈希与 manifest 的 sha256 一致，且晚于该笔记在
+     本账本中的首个 `click_card`（允许首图早于 feed、允许引用早先尝试）；
+  6. 搜索结果、详情、作者三档停顿分别位于该页首次点卡片、本篇首个后续动作、点作者名之前；
+  7. 一个详情或图片访问只被一条记录引用。
+- 全轮规则：G1 目标会话第 1 页由点选“图文”触发且关键词相符，之前有回车与非目标第 1 页；G2 来源耗尽
+  的停止事件指向目标会话 `has_more=false` 的搜索访问，且同会话各页连续；G3 相邻两页之间若有程序滚动，
+  第一次滚动之前须有始于前一页之后的 `search_page` 停顿，没有滚动则记为前端自行加载
+  （`frontend_self_loads`），缺前一页判失败。G1、G3 与必需阶段按账本逐个判定。
+- 小红书的 `request_pacing_ok` 与 `continuity_ok` 改由账本按本轮实际访问推导：有详情访问才要求
+  `search_results`、`note_detail`，有点作者才要求 `creator_profile`，至少一次下一页由程序滚动触发才要求
+  `search_page`；必需的搜索两档各至少有一次连续性完成。整轮没有新笔记时不要求详情与作者阶段。
+- 任一规则不满足即 `behavior_evidence_ok=false`；门禁平台缺少门禁结果同样失败
+  （`visit_validation_missing`）。
 
 ## 6. 完成检查
 
 ### 批次恢复点
 
-正式搜索的完整非耗尽批次在写出 `adaptive_batch_completed` 后，立即固化当前 JSONL 与 manifest
-快照。快照以 `.batch-<sequence>.snapshot` 为后缀保存在源文件旁；后续追加写入原 JSONL 或替换原
+正式搜索的完整非耗尽批次在写出 `adaptive_batch_completed` 后，只有本页有新增决定
+（`batch_candidate_identity_count > 0`）才发布：立即核验访问账本并固化当前 JSONL、manifest 与访问账本
+快照，账本快照计入哈希。没有新增决定的页仍写 `adaptive_batch_completed` 供审计与看门狗，但不触发根
+事务。快照以 `.batch-<sequence>.snapshot` 为后缀保存在源文件旁；后续追加写入原 JSONL 或替换原
 manifest 不会改变已提交快照，manifest 的相对 staging 图片路径保持有效。快照不复制登录 profile、
 Cookie 或浏览器存储。
 
-导出数据目录按首条实际写入记录延迟创建。完整批次没有新增产物时（例如顶部刷新全部命中已知
-候选），允许目录尚不存在，仍提交包含空的本轮文件清单、历史累计产物和分页证据的摘要并等待确认；
-不得虚构内容文件或因此重置深层页码。批次已声明有效记录却找不到内容文件时，按
+导出数据目录按首条实际写入记录延迟创建。发布的批次没有新增内容产物时（例如本页新增决定都是视频
+或候选失败），允许目录尚不存在，仍提交包含空的本轮文件清单、历史累计产物和分页证据的摘要并等待确认；
+不得虚构内容文件。批次已声明有效记录却找不到内容文件时，按
 `xhs_batch_checkpoint_content_missing` 失败，不把产物丢失当作空批次。
 
 child 批次摘要及提交确认保存在 `data/runtime/xhs/batch_checkpoints/<run_id>/`。根 runner 通过监督
@@ -458,8 +541,8 @@ child 批次摘要及提交确认保存在 `data/runtime/xhs/batch_checkpoints/<
 `batch_checkpoint_committed` 审计事件，再写确认文件。底层搜索循环不写 SQLite。
 
 child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_timeout` 运行级失败结束，不能
-继续后续批次。根 runner 在提交确认前消失时最多重取一个边界批次；已提交批次不依赖最终
-`run_summary.json` 才能恢复。顶部刷新保存累计成果但保留原深层位置。未完成批次不走批次提交，
+继续后续批次。根 runner 在提交确认前消失时，未确认的批次由下一轮全量扫描自然覆盖；已提交批次不依赖
+最终 `run_summary.json` 才能恢复。未完成批次不走批次提交，
 来源耗尽批次仍由完整终态门禁处理，不能提前标成耗尽。
 
 批次发布失败会记录 `xhs_runtime_terminal(phase=batch_checkpoint)`，保留具体
@@ -478,7 +561,8 @@ child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_t
 
 - 顶层 `run_summary.json` 为 `completed`，账号租约已经释放；
 - `discovery.skipped=false`，checkpoint/seen/campaign 没有提交错误；
-- `continuity_ok=true` 且至少覆盖 `search_results`；
+- `behavior_validation.platforms.xhs.content_visit_ok=true`；`request_pacing_ok`、`continuity_ok` 由访问账本
+  按本轮实际访问推导且均为 true（见“访问证据”）；
 - 每条记录具有 note detail 正文、原始发布时间、作者原始 `user_id`/昵称（不哈希、不脱敏）、
   creator profile 粉丝证据和完整本地正文图片；
 - 视频和互动只在各自报告中，不计抓取成功；
@@ -516,29 +600,61 @@ child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_t
 | 普通平台请求频控 | `rate_limited` | `xhs_rate_limited_terminal` |
 | 登录时 Page 全部关闭或 BrowserContext 不可用 | `browser_target_closed` | `xhs_login_browser_pages_closed` / `xhs_login_browser_context_unavailable` |
 | 登录状态机的其他未识别异常 | `login_runtime_error` | 原始稳定异常文本，空文本时使用异常类型生成稳定码 |
+| 登录 UI 已确认但 30 秒与一次 reload 后仍无 `guest=false` 的 `user/me` | `login_runtime_error` | `xhs_login_state_unconfirmed` |
 
 不得把无编号安全限制、账号异常、登录错误页或频控推断成 `300011`；`--retry-on-300011` 仍只接受
 精确 `platform_security_limit_300011` 及完整停止、清理和 checkpoint 对账证据。登录阶段在第一个分页
 事件前被阻断时，顶层 `discovery.reason=runtime_blocked_before_pagination` 且保留原 checkpoint；这不是
 `terminal_commit_failed`。后者只用于真实 SQLite 终态事务或线性化提交失败。
 
+全量扫描与单篇处理的停止码和候选码如下。“进入 seen”指该 ID 随完整批次写入跨轮
+`xhs_discovery_seen_candidates`：运行级失败一律不写；候选失败只有 `retryable=false` 的写入，
+`retryable=true` 的只算本轮已决定，下一轮全量扫描到时就地重试。
+
+| 场景 | `stop_detail` / `error_code` | 级别 | 进入 seen |
+|---|---|---|---|
+| 首页未渲染、搜索未出结果、点选“图文”未生效、面板收不起、关键词不符（各含一次受控恢复） | `xhs_navigation_recovery_failed:explore_not_rendered` / `:search_not_rendered` / `:target_filter_not_applied` / `:filter_panel_not_closed` / `:search_keyword_mismatch` | 运行级 | 否 |
+| 搜索响应未知业务码或不可恢复的请求失败 | `search_request_failed` | 运行级 | 否 |
+| 到底部等不到新页（抖动 3 次后） | `xhs_search_load_stalled` | 运行级 | 否 |
+| 有 `data-note-id` 的卡片连续 2 次读数未登记 | `xhs_search_card_unregistered` | 运行级 | 否 |
+| 目标会话第 k 页到达时缺第 k−1 页 | `xhs_search_page_gap` | 运行级 | 否 |
+| 已越过的页内未知项从未渲染、补漏 3 次仍够不着或到底部仍未决定 | `xhs_search_items_unresolved` | 运行级 | 否 |
+| 连续 3 篇浮层不出现 | `xhs_overlay_not_opening` | 运行级 | 否 |
+| 浮层重试一次仍关不掉 | `xhs_overlay_close_failed` | 运行级 | 否 |
+| 规则端点 461/471 后 30 秒内既无验证界面也无数据 | `xhs_verification_not_surfaced` | 运行级 | 否 |
+| 规则端点 HTTP 401/403 | `login_required` | 运行级 | 否 |
+| 规则端点 HTTP 429 | `rate_limited` | 运行级 | 否 |
+| 认领到的期望图片响应为 401/403/429 | `image_auth_required` / `image_rate_limited` | 运行级 | 否 |
+| 搜索项或 feed 为视频 | 决定（`consider(valid=False)`，账本 `decision` 行） | 决定 | 是 |
+| feed 两次都未截获（含非网络类请求失败） | `note_detail_not_observed`，`attempts=2` | 候选，可重试 | 否 |
+| feed 未知业务码 | `detail_request_failed` | 候选，可重试 | 否 |
+| feed -510000/-510001 | `note_not_found` | 候选，不可重试 | 是 |
+| feed 内 ID 不符或形状不合格（`note_card_problems`） | `note_id_mismatch` / `detail_parse_failed` | 候选，不可重试 | 是 |
+| 作者补全失败 | `creator_profile_unavailable`，`detail=creator_profile_failed:<原因>`（见“作者补全”） | 候选，按原因 | 按原因 |
+| 图片响应未截获（含重做后仍缺）或临时错误 | `image_response_not_observed` 等可重试图片码 | 候选，可重试 | 否 |
+| 图片 404/400、格式或解码失败 | 现有 `classified_http_image_error` 与暂存码 | 候选，不可重试 | 是 |
+| repair：链接跳转 `/404` | `repair_link_unavailable` | 候选，不可重试 | —（repair 不写 seen） |
+| repair：页面壳未出现、10 秒内读不到状态、第二次重开仍中断 | `note_page_not_rendered` / `note_detail_not_observed` / `note_redo_interrupted` | 候选，可重试 | — |
+| repair：视频 | `video_skipped`（`content_policy`） | 候选 | — |
+
 | 信号 | 处理 |
 |---|---|
 | 轮初二维码 | 保持本轮唯一 Chrome；只在纯未扫码且明确过期、连续两次无进展时刷新组件 |
-| 连续性登录/图片验证、461/471 | 保持页面、人工处理、刷新当前内存 Cookie 并重试原请求；共用单调 600 秒人工预算 |
+| 连续性登录/图片验证 | 保持页面、人工处理后继续；共用单调 600 秒人工预算 |
+| 规则端点 461/471 | 被动等待验证界面消失，完成后搜索重滚或整篇重做；共用单调 600 秒人工预算 |
+| 非规则端点 401/403/429/461/471 | 只写账本 `signal`；461/471 出现验证界面才进入等待，否则继续 |
 | 作者页二维码 | 保持作者页置前，人工扫码后继续；计入同一人工预算 |
-| 任意新标签页 | 立即置前且至少保留 30 秒；明确验证页按本轮剩余人工预算等待 |
+| 任意新标签页 | 立即置前且至少保留 20 秒；明确验证页按本轮剩余人工预算等待 |
 | 短时网络中断 | 同一 Chrome/Context/Page 内暂停并退避；恢复后继续原操作，默认 600 秒 |
 | `network_recovery_timeout` | 运行级失败并保留最后安全 checkpoint；不得启动第二个浏览器 |
 | page/context/browser 关闭或 CDP 断开 | 终端浏览器失败；记录非计划关闭证据，不得轮内重启 |
-| 详情、作者或正文图候选级失败 | 核对 `candidate_skipped` 和 manifest；整帖不入库，ID 写账号 seen，继续候选 |
-| 登录、频控、安全限制、封禁 | 运行级失败；保留 page/search ID，不写候选 seen |
+| 详情、作者或正文图候选级失败 | 核对 `candidate_skipped` 和 manifest；整帖不入库，只有 `retryable=false` 的 ID 写账号 seen（`retryable=true` 的下一轮重试），继续候选 |
+| 登录、频控、安全限制、封禁 | 运行级失败；不写候选 seen，下一轮全量重滚 |
 | 完整 `300011` 且已精确释放租约 | 可显式用 `--retry-on-300011` 每 30 分钟同账号续跑；其他阻断不自动重试 |
 | manifest 身份、哈希或路径错误 | 停止晋升和 checkpoint，修复代码/产物后重跑 |
 | 连续批次没有新有效记录 | 只核对诊断计数并继续；不能据此停止或推断耗尽 |
 | `source_exhausted` | 只有停止事件、`source_exhausted_met` 与正式持久化门禁全部通过才完成 |
 | 超时或缺少停止事件 | `runtime_failed`，不能推断来源耗尽 |
-| 保存的 search ID 恢复失败 | 保留 checkpoint，不生成新 ID 猜测深页 |
 | 累计摘要或 JSONL 缺失 | 冻结前失败；恢复原文件或停止，不清空路径继续 |
 | `sqlite_import_failed` | 不提交 checkpoint、seen 或 campaign；核对数据库和媒体回滚 |
 | 正常结束或可捕获普通异常 | `LeaseGuard` 收束登记进程，精确 token 删除且 rowcount 必须为 1；异常不伪装成功 |
@@ -552,13 +668,12 @@ child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_t
 | 两个恢复命令并发 | 同账号 `flock` 与 `BEGIN IMMEDIATE` 串行化；只有精确 DELETE rowcount=1 的一个成功 |
 | 错误 lease/run/owner | 删除谓词不匹配并失败关闭；不得写成功恢复事件或改变账号健康 |
 
-小红书不向操作人开放手工 `--resume-summary`、`--start-page` 或 `--start-cursor`。checkpoint/seen 以
-`target_key + account_id + query_fingerprint` 隔离；换号不是原账号续跑。SQLite
-`resume_search_id`、dry-run `plan.discovery.resume_search_id`、child `--start-cursor` 和分页事件
-cursor 表示同一个 client search ID。
+小红书不向操作人开放手工 `--resume-summary`、`--start-page` 或 `--start-cursor`；runner 只在有未完成
+累计时把上一份摘要交给 child。checkpoint/seen 以 `target_key + account_id + query_fingerprint` 隔离；
+换号不是原账号续跑。分页事件中的页码与 search ID 取自前端搜索请求，只作审计，不是恢复位置。
 
-来源耗尽且入库成功时，checkpoint 保存耗尽坐标、完整停止证据和本轮摘要身份；后续轮次只做顶部
-刷新，只有平台提供新的可验证来源链时才重建深层前沿。seen 保留，累计摘要在成功提交后清空。
+来源耗尽且入库成功时，checkpoint 保存 `status=exhausted`、完整停止证据和本轮摘要身份，只作审计；
+下一轮仍从首页搜索后全量扫描。seen 保留，累计摘要在成功提交后清空。
 
 ## 8. 逻辑槽位与临时会话
 
@@ -566,8 +681,8 @@ cursor 表示同一个 client search ID。
   `xhs_accounts.py ensure-slot` 创建，runner 对未知槽位失败关闭。
 - 每个正式 run 只在 `data/runtime/xhs/sessions/<run_id>/profile/` 创建权限受限的空临时 profile。
   不读取或保存跨轮 Cookie、localStorage、sessionStorage、storage state、设备标识或平台身份。
-- 本轮 Chrome、BrowserContext 与 API 客户端可以在内存中共享当前 Cookie 供登录验证、签名和图片
-  下载；这些值不得写成下一轮登录输入。下一正式轮仍以空 profile 和新二维码开始。
+- 本轮 Chrome 与 BrowserContext 在内存中持有当前登录状态；项目不读取或复制 Cookie 用于任何浏览器外
+  请求，这些值也不得写成下一轮登录输入。下一正式轮仍以空 profile 和新二维码开始。
 - 正常完成、可捕获异常和 SIGINT/SIGTERM 都须留下精确浏览器生命周期与清理证据。只有登记进程及
   进程组已消失、临时 session 已删除且 owner token 精确删除成功，才能报告
   `runtime_session_removed=true`、`lease_released=true` 和 `lease_cleanup.ok=true`。

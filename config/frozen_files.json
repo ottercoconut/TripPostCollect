@@ -10,22 +10,22 @@
     },
     {
       "path": "docs/formal-crawl-contract.md",
-      "sha256": "e42cbc81dff6c82e013443ea8cee99b040cdc1475b828453ee4daa149d169c10",
-      "reason": "用户授权更新并重新冻结的五平台正式抓取与正文图片本地化机器契约；#75 删除任务级时限后经用户授权同步更新并重新冻结",
+      "sha256": "9e720bcaacc99e8383196ef65cc667711a3375da87dbd9f7d138fe08cca4c258",
+      "reason": "用户授权更新并重新冻结的五平台正式抓取与正文图片本地化机器契约；#75 删除任务级时限后经用户授权同步更新并重新冻结；#71 小红书改为浏览器 L1 取数并新增取数来源与真实访问门禁后经用户授权同步更新并重新冻结",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
     },
     {
       "path": "docs/crawl-architecture.md",
-      "sha256": "bbd9c07fb4f7fcd79b8ba5097a17e779ec8ee9585ec047953a1738a35125b5f1",
-      "reason": "用户授权更新并重新冻结的五平台抓取与正文图片本地化架构基线；T14（#19）删除 fork 后经用户授权同步更新并重新冻结",
+      "sha256": "5d0723a6159c4fef7bf02949ee7263f8c32b58cbdf83ee9dc6ddbf8535d4761f",
+      "reason": "用户授权更新并重新冻结的五平台抓取与正文图片本地化架构基线；T14（#19）删除 fork 后经用户授权同步更新并重新冻结；#71 新增页面取数通道与访问证据后经用户授权同步更新并重新冻结",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
     },
     {
       "path": "docs/data-persistence.md",
-      "sha256": "e20186f94209609fbdca8c907ea898cec6643008a8970466a8428a1fe9571fe0",
-      "reason": "用户授权更新并重新冻结的正文图片本地路径、事务和校验规范；T14（#19）删除 fork 后经用户授权同步更新并重新冻结",
+      "sha256": "e2c05164fe3712b26bcb0e506a0479591abe042420dcbfa406f4ba398e17f934",
+      "reason": "用户授权更新并重新冻结的正文图片本地路径、事务和校验规范；T14（#19）删除 fork 后经用户授权同步更新并重新冻结；#71 小红书全量扫描与迁移 23 后经用户授权同步更新并重新冻结",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
     }

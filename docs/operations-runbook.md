@@ -252,7 +252,8 @@ python scripts/repair_post_details.py \
 三个独立平台进程可以并行访问平台。长期媒体晋升和 SQLite 导入仍使用项目全局跨进程锁，因此写入
 阶段会自动串行；不得绕过该锁或手工改 execution state。小红书继续使用独立的
 `scripts/repair_xhs_posts.py`，不能放入此入口。小红书修复入口使用 `--batch-size` 在同一个浏览器会话
-内分批；候选的详情、作者或图片重试耗尽后写入 `repair_report` 并继续同批成功项及后续批次。
+内分批，批内逐个目标串行：在主页面直开保存的笔记链接，读取页面状态投影，翻图截获正文图并点击作者名
+读取作者页（见 [`platforms/xhs.md`](platforms/xhs.md)）；候选的详情、作者或图片重试耗尽后写入 `repair_report` 并继续同批成功项及后续批次。
 登录/验证码/频控/安全限制/浏览器整体失败仍停止整轮；SQLite 或媒体一致性门禁也不会因部分成功而
 放宽。某个 child 全部候选失败且不存在上述运行级或持久化阻断时，父入口把失败清单作为已完成尝试
 持久化到 `xhs_runs.report_json`，不会用非零父进程状态阻断后续修复任务；后续自动选取会跳过已有失败
@@ -265,7 +266,8 @@ python scripts/repair_post_details.py \
 ## 自动恢复与检查
 
 正常 workflow 不手工传页码、cursor 或摘要。runner 按 job/目标、查询指纹及小红书账号自动读取
-checkpoint，先有限刷新顶部，再恢复深层前沿。检查控制面时只看计数和坐标，不展开候选 ID 或长 JSON。
+checkpoint；通用平台先有限刷新顶部，再恢复深层前沿，小红书每轮从首页搜索后全量扫描，不保存页码或
+search ID。检查控制面时只看计数和坐标，不展开候选 ID 或长 JSON。
 
 通用 checkpoint：
 
@@ -287,7 +289,7 @@ sqlite3 data/trippostcollect.sqlite \
 
 ```bash
 sqlite3 data/trippostcollect.sqlite \
-  "SELECT target_key, account_id, keyword, resume_page, resume_search_id, status, last_batch_complete, last_stop_reason, last_run_id, campaign_candidate_count, updated_at FROM xhs_discovery_checkpoints ORDER BY target_key, account_id;"
+  "SELECT target_key, account_id, keyword, status, last_batch_complete, last_stop_reason, last_run_id, campaign_candidate_count, updated_at FROM xhs_discovery_checkpoints ORDER BY target_key, account_id;"
 sqlite3 data/trippostcollect.sqlite \
   "SELECT target_key, account_id, query_fingerprint, COUNT(*) AS seen_candidates FROM xhs_discovery_seen_candidates GROUP BY target_key, account_id, query_fingerprint ORDER BY target_key, account_id;"
 ```
@@ -304,7 +306,7 @@ python scripts/crawl_runner.py \
 
 核对规则：
 
-- 抖音深层恢复必须同时有 page、offset 和非空 search ID；小红书必须同时有 page 和 search ID。
+- 抖音深层恢复必须同时有 page、offset 和非空 search ID。
 - 首次执行从第 1 页开始且顶部刷新为 0；有 checkpoint 后才执行顶部刷新。
 - `last_summary_path` 非空时，对应摘要及 JSONL 必须存在，否则冻结应失败。
 - child 结束后，摘要中的前沿、SQLite checkpoint 和 `last_run_id` 必须一致。
@@ -338,10 +340,34 @@ execution state 是否存在、是否含 `adaptive_search_stopped`、尾批和�
 能否释放账号互斥。即使 state 缺失或没有停止事件，只要旧 runner/child/exporter/本轮 Chrome 已被
 精确证明全部死亡，也允许写 `orphan_lease_reconciled` 并只回收该租约。该动作不得补写 state、推进
 checkpoint/cursor/seen/campaign、导入或删除旧 staging、写内容 SQLite，或改变账号状态。随后必须先用
-同账号、同配置 dry-run，再由新正式轮从最后安全 checkpoint 恢复。
+同账号、同配置 dry-run，再由新正式轮重新全量扫描（未完成累计摘要照常续上）。
 
 `--start-page`、`--resume-summary` 和 `--recovery-keyword` 只用于用户明确批准的人工恢复。优先修复
 自动 checkpoint；不得删除数据库记录后猜页码续跑。平台 cursor 细节见对应平台文档。
+
+### 小红书全量扫描升级（迁移 23）
+
+升级到全量扫描版本前先备份数据库：确认没有运行中的 runner，`xhs_accounts.py list` 无活动租约，再执行：
+
+```bash
+mkdir -p data/backups/xhs_full_scan_migration
+sqlite3 data/trippostcollect.sqlite \
+  ".backup 'data/backups/xhs_full_scan_migration/trippostcollect-<日期>.sqlite'"
+sqlite3 data/backups/xhs_full_scan_migration/trippostcollect-<日期>.sqlite \
+  "PRAGMA integrity_check;"
+```
+
+首次打开数据库时迁移 23 删除 `xhs_discovery_checkpoints` 的 `resume_page`、`resume_search_id` 两列，行与
+其余列原样保留。回退只能用备份覆盖并同时回到旧代码。
+
+升级后首轮：
+
+- 升级前不需要先跑完旧轮次；旧轮次的未完成累计不会续上。
+- 查询指纹已并入目标排序与类型，首轮使用新指纹，dry-run 显示 `checkpoint_found=false`。
+- 已入库笔记照常滑过；旧指纹 seen 中未入库的 ID（主题不相关、候选失败、视频）会重新判定一次。
+- 旧的未完成累计随旧指纹放弃，相关笔记在新流程中经真实访问重新采集；未入库的旧 staging 产物留在
+  原 run 目录，不导入、不晋升。
+- 旧 checkpoint 与 seen 行保留作审计，新指纹不再读取。
 
 ## 一次性配置
 
@@ -466,7 +492,7 @@ python scripts/xhs_runner.py \
 冒充恢复信号。child 首次写出 `network_recovery_timeout` 后，父层只给一次 20 秒终态写入和
 进程收束时间；后续同类事件不延长这个窗口。
 
-小红书人工等待（扫码登录、轮中登录恢复、API 验证码、作者页验证、搜索就绪验证与连续性验证）期间，
+小红书人工等待（扫码登录、轮中登录恢复、前端验证、作者页验证、搜索就绪验证与连续性验证）期间，
 无持久进展看门狗按同一方式暂停计时：child 在 behavior evidence 同目录写
 `behavior_evidence.operator_wait.json`（`waiting` 每 30 秒刷新，结束写 `ended`），父层只对新鲜、结构
 有效且来自已核验 exporter 的 `waiting` 冻结剩余量，明确 `ended` 才结束暂停段。阈值、启动宽限和进展
