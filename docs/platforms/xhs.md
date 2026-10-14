@@ -553,8 +553,14 @@ child `summary.json` 的
 - 全轮规则：G1 目标会话第 1 页由点选“图文”触发且关键词相符，之前有回车与非目标第 1 页；G2 来源耗尽
   的停止事件指向目标会话 `has_more=false` 的搜索访问，且同会话各页连续；G3 相邻两页之间若有程序滚动，
   第一次滚动之前须有始于前一页之后的 `search_page` 停顿，没有滚动则记为前端自行加载
-  （`frontend_self_loads`），缺前一页判失败。G1、G3 与必需阶段按账本逐个判定。
-- 小红书的 `request_pacing_ok` 与 `continuity_ok` 改由账本按本轮实际访问推导：有详情访问才要求
+  （`frontend_self_loads`），缺前一页判失败。
+- 账本级检查（G1、G3、必需节奏与连续性）只对被引用的账本逐个判定：有效记录的 `content_visit_refs`
+  （搜索、详情、作者、逐张图片）或 discovery 停止事件的 `source_visit_id` 能解析到的账本。累计摘要携带、
+  但没有任何引用的账本（例如停在筛选的失败轮）照常加载，只用于解析引用；依据为 Mac 实测 2026-10-14：
+  第 1 轮失败账本随累计摘要进入第 2、3 轮，报 G1。一个账本都加载不到仍报 `LEDGER`；加载到账本但没有
+  被引用的账本时不做账本级检查，`request_pacing_ok`、`continuity_ok` 为 false。门禁结果的 `ledger_count`
+  为加载的账本数，`checked_ledger_count` 为被引用的账本数。
+- 小红书的 `request_pacing_ok` 与 `continuity_ok` 改由被引用的账本按本轮实际访问推导：有详情访问才要求
   `search_results`、`note_detail`，有点作者才要求 `creator_profile`，至少一次下一页由程序滚动触发才要求
   `search_page`；必需的搜索两档各至少有一次连续性完成。整轮没有新笔记时不要求详情与作者阶段。
 - 任一规则不满足即 `behavior_evidence_ok=false`；门禁平台缺少门禁结果同样失败

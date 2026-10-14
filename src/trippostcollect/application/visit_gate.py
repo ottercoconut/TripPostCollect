@@ -1,8 +1,9 @@
 """真实访问门禁 `content_visit_ok`：每条正式记录都必须经访问账本追溯到真实的页面访问。
 
-逐条规则（R1–R7）对本次入库的全部记录（含跨轮累计）生效；全轮规则（G1–G3）与必需节奏阶段
-按每个账本各自判定。所有先后比较都用账本的单调序号 `seq`（截获为到达序号；停顿用 `start_seq`
-判断“在某事件之后开始”、用 `seq` 判断“在某事件之前结束”），不看文件行序或写入时刻。
+逐条规则（R1–R7）对本次入库的全部记录（含跨轮累计）生效；账本级规则（G1、G3）与必需节奏阶段
+只对被引用的账本（记录引用或 discovery 停止事件引用）逐个判定，累计摘要携带却无人引用的账本
+（例如停在筛选的失败轮）只用于解析引用。所有先后比较都用账本的单调序号 `seq`（截获为到达序号；
+停顿用 `start_seq` 判断“在某事件之后开始”、用 `seq` 判断“在某事件之前结束”），不看文件行序或写入时刻。
 
 平台差异由 `VisitPolicy` 声明；本模块不导入平台实现，规则名与平台侧的捕获规则由测试核对一致。
 """
@@ -263,6 +264,20 @@ def _search_item_types(visit: Mapping[str, Any]) -> dict[str, str]:
         for item in visit.get("items") or []
         if isinstance(item, Mapping) and item.get("id")
     }
+
+
+def _referenced_ledgers(
+    record: Mapping[str, Any], chain: Iterable[str], indexes: Mapping[str, _LedgerIndex]
+) -> set[str]:
+    """记录引用（搜索、详情、作者、逐张图片）中能解析到的访问所在的账本；不论该记录是否通过逐条规则。"""
+    refs = record.get("content_visit_refs")
+    if not isinstance(refs, Mapping):
+        return set()
+    visit_ids = [refs.get(stage) for stage in chain if stage != "images"]
+    images = refs.get("images")
+    if isinstance(images, list):
+        visit_ids.extend(images)
+    return {found[0].ledger_id for found in (_resolve(indexes, item) for item in visit_ids) if found is not None}
 
 
 def _check_record(
@@ -540,7 +555,10 @@ def validate_content_visits(
     manifests: Iterable[str | Path],
     stop_event: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """`records` 为正式有效集合（含跨轮累计）；`ledger_paths` 为本轮账本与累计摘要携带的快照。"""
+    """`records` 为正式有效集合（含跨轮累计）；`ledger_paths` 为本轮账本与累计摘要携带的快照。
+
+    全部加载的账本都用于解析引用；G1、G3 与必需阶段只检查记录或 discovery 停止事件引用到的账本。
+    """
     policy = VISIT_POLICIES[platform]
     if mode not in policy.chains:
         raise ValueError(f"unsupported content visit mode: {mode}")
@@ -552,8 +570,10 @@ def validate_content_visits(
     used_details: Counter[str] = Counter()
     used_images: Counter[str] = Counter()
     checked = 0
+    referenced: set[str] = set()
     for record in records:
         checked += 1
+        referenced |= _referenced_ledgers(record, policy.chains[mode], indexes)
         _check_record(
             record,
             policy=policy,
@@ -567,14 +587,19 @@ def validate_content_visits(
     for visit_id, count in [*used_details.items(), *used_images.items()]:
         if count > 1:
             report.fail("R7", visit_id)
+    if mode == "discovery" and stop_event:
+        found = _resolve(indexes, stop_event.get("source_visit_id"))
+        if found is not None:
+            referenced.add(found[0].ledger_id)
+    checked_indexes = [index for index in indexes.values() if index.ledger_id in referenced]
 
     required_pacing: set[str] = set()
     required_continuity: set[str] = set()
     observed: set[str] = set()
     completed: set[str] = set()
-    pacing_ok = continuity_ok = bool(indexes)
+    pacing_ok = continuity_ok = bool(checked_indexes)
     detail_spec_by_mode = policy.spec(mode, "note_detail")
-    for index in indexes.values():
+    for index in checked_indexes:
         scroll_triggered = 0
         if mode == "discovery":
             _check_entry(index, policy, report)
@@ -606,6 +631,7 @@ def validate_content_visits(
         "content_visit_ok": not report.problems,
         "checked_records": checked,
         "ledger_count": len(indexes),
+        "checked_ledger_count": len(checked_indexes),
         "problem_counts": dict(sorted(report.problems.items())),
         "sample_ids": list(report.samples),
         "required_stages": sorted(required_pacing),

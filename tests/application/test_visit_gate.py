@@ -1,4 +1,4 @@
-"""访问门禁 content_visit_ok：逐条规则 R1–R7、全轮规则 G1–G3、必需阶段推导与跨轮账本并集。"""
+"""访问门禁 content_visit_ok：逐条规则 R1–R7、全轮规则 G1–G3、必需阶段推导、跨轮账本并集与被引用账本。"""
 
 from __future__ import annotations
 
@@ -205,7 +205,7 @@ def test_discovery_chain_passes_with_all_stages_and_out_of_order_lines(tmp_path)
     result = check(run, records, manifest_path)
     assert result["content_visit_ok"] is True, result
     assert result["problem_counts"] == {} and result["sample_ids"] == []
-    assert result["checked_records"] == 2 and result["ledger_count"] == 1
+    assert result["checked_records"] == 2 and result["ledger_count"] == 1 and result["checked_ledger_count"] == 1
     assert result["required_stages"] == ["creator_profile", "note_detail", "search_page", "search_results"]
     assert result["continuity_required_stages"] == ["search_page", "search_results"]
     assert result["request_pacing_ok"] is True and result["continuity_ok"] is True
@@ -402,18 +402,23 @@ def test_missing_previous_page_fails_page_rule(tmp_path):
     run = Run(tmp_path / "ledger.jsonl")
     run.enter([("n1", "normal")])
     run.behavior_stage()
-    run.search(3, [], has_more=False)
-    assert check(run, [], tmp_path / "absent.jsonl", stop={})["problem_counts"] == {"G3": 1}
+    last = run.search(3, [], has_more=False)
+    result = check(run, [], tmp_path / "absent.jsonl",
+                   stop={"stop_reason": "source_exhausted", "source_visit_id": last})
+    assert result["problem_counts"] == {"G2": 1, "G3": 1}
 
 
 @pytest.mark.parametrize(
     "kwargs", [{"keyword_ok": False}, {"filter_label": "panel_close"}], ids=["keyword_mismatch", "wrong_trigger"]
 )
 def test_entry_rule_requires_target_filter_and_matching_keyword(tmp_path, kwargs):
+    """没有记录时，来源耗尽停止事件引用的账本同样做 G1。"""
     run = Run(tmp_path / "ledger.jsonl")
-    run.enter([("n1", "normal")], has_more=False, **kwargs)
-    result = check(run, [], tmp_path / "absent.jsonl", stop={})
+    first = run.enter([("n1", "normal")], has_more=False, **kwargs)
+    result = check(run, [], tmp_path / "absent.jsonl",
+                   stop={"stop_reason": "source_exhausted", "source_visit_id": first})
     assert result["problem_counts"] == {"G1": 1}
+    assert result["checked_ledger_count"] == 1
 
 
 def test_exhaustion_rule_requires_target_has_more_false_and_contiguous_pages(tmp_path):
@@ -448,9 +453,43 @@ def test_cross_round_ledgers_are_validated_as_a_union(tmp_path):
     manifest_path = manifest(tmp_path / "m.jsonl", {"n1": 2, "n2": 2})
     result = check(current, records, manifest_path, paths=[snapshot, current.path])
     assert result["content_visit_ok"] is True, result
-    assert result["ledger_count"] == 2
+    assert result["ledger_count"] == 2 and result["checked_ledger_count"] == 2
     missing = check(current, records, manifest_path, paths=[current.path])
     assert missing["problem_counts"] == {"R1": 1}
+
+
+def stalled_at_filter(path: Path) -> tuple[Run, str]:
+    """停在筛选的失败轮：只有输入、回车与非目标第 1 页，没有目标会话，也没有记录。"""
+    run = Run(path)
+    run.action("type_search")
+    enter = run.action("press_enter")
+    return run, run.search(1, [("x1", "normal")], trigger=enter, target=False)
+
+
+def test_carried_ledger_without_references_is_only_used_for_resolving(tmp_path):
+    stalled, _ = stalled_at_filter(tmp_path / "round1" / "ledger.jsonl")
+    current, records, manifest_path = standard_run(tmp_path / "round2")
+    result = check(current, records, manifest_path, paths=[stalled.path, current.path])
+    assert result["content_visit_ok"] is True, result
+    assert result["ledger_count"] == 2 and result["checked_ledger_count"] == 1
+
+
+def test_carried_ledger_referenced_by_a_record_is_checked(tmp_path):
+    stalled, enter_visit = stalled_at_filter(tmp_path / "round1" / "ledger.jsonl")
+    current, records, manifest_path = standard_run(tmp_path / "round2")
+    records[0]["content_visit_refs"]["search_results"] = enter_visit
+    result = check(current, records, manifest_path, paths=[stalled.path, current.path])
+    assert result["problem_counts"]["G1"] == 1
+    assert f"G1:{stalled.ledger.ledger_id}" in result["sample_ids"]
+    assert result["checked_ledger_count"] == 2
+
+
+def test_round_without_records_or_stop_reference_skips_ledger_rules(tmp_path):
+    stalled, _ = stalled_at_filter(tmp_path / "ledger.jsonl")
+    result = check(stalled, [], tmp_path / "absent.jsonl", stop={})
+    assert result["problem_counts"] == {}
+    assert result["ledger_count"] == 1 and result["checked_ledger_count"] == 0
+    assert result["request_pacing_ok"] is False and result["continuity_ok"] is False
 
 
 def test_snapshot_and_live_ledger_with_same_id_use_the_longer(tmp_path):
@@ -522,6 +561,20 @@ def test_summary_helper_unions_ledgers_and_manifests(tmp_path):
     items = [{"platform": "xhs", "record": record, "manifest_paths": [str(manifest_path)]} for record in records]
     result = validate_summary_content_visits(summary, items, "xhs", repair_mode=False, stop_event=run.stop)
     assert result["content_visit_ok"] is True and result["checked_records"] == 2
+
+
+def test_summary_carrying_failed_round_ledger_does_not_fail_entry_rule(tmp_path):
+    """Mac 实测 2026-10-14：第 1 轮停在筛选的账本随累计摘要进入后续轮次，不再报 G1。"""
+    stalled, _ = stalled_at_filter(tmp_path / "round1" / "ledger.jsonl")
+    run, records, manifest_path = standard_run(tmp_path / "round2")
+    summary = {"records": [
+        {"platform": "xhs", "output": {"content_visit_paths": [str(stalled.path)]}},
+        {"platform": "xhs", "output": {"content_visit_paths": [str(run.path)]}},
+    ]}
+    items = [{"platform": "xhs", "record": record, "manifest_paths": [str(manifest_path)]} for record in records]
+    result = validate_summary_content_visits(summary, items, "xhs", repair_mode=False, stop_event=run.stop)
+    assert result["content_visit_ok"] is True, result
+    assert result["ledger_count"] == 2 and result["checked_ledger_count"] == 1
 
 
 def test_policies_never_declare_playwright_requests():
