@@ -15,7 +15,8 @@ import pytest
 
 
 from trippostcollect.records.sanitization import (
-    AUTHOR_AVATAR_LOG_REDACTION,
+    AUTHOR_AVATAR_LOG_REDACTION_HEAD,
+    author_avatar_log_marker,
     redact_author_avatar_text,
     sanitize_author_avatar_data,
 )
@@ -137,7 +138,8 @@ def test_unstructured_child_output_with_avatar_key_is_discarded_whole() -> None:
     sanitized, changed = redact_author_avatar_text(output)
 
     assert changed is True
-    assert sanitized == AUTHOR_AVATAR_LOG_REDACTION
+    # 第二行的 URL 主机名本身含头像词，同样计为命中行。
+    assert sanitized == f"{AUTHOR_AVATAR_LOG_REDACTION_HEAD} text_lines=2 tags=<untagged>\n"
     assert AVATAR_URL not in sanitized
 
 
@@ -145,6 +147,77 @@ def test_unstructured_child_output_without_avatar_key_is_unchanged() -> None:
     output = "processed content image https://images.test/body.jpg\n"
 
     assert redact_author_avatar_text(output) == (output, False)
+
+
+def log_line(tag: str, message: str, *, filename: str = "core.py:263") -> str:
+    """worker logging 格式的一行（见 runtime.worker.init_loging_config）。"""
+    return f"2026-10-14 10:00:00 MediaCrawler INFO ({filename}) - {tag}{message}"
+
+
+def test_log_marker_counts_hit_lines_per_stream_and_keeps_only_module_tags() -> None:
+    stdout = "\n".join(
+        [
+            log_line("[store.xhs.update_xhs_note] ", f"xhs note: {{'avatar_url': '{AVATAR_URL}', 'desc': '崂山'}}"),
+            log_line("[XiaoHongShuCrawler] ", "Guarded pause stage=note_detail seconds=2.5"),
+            log_line("[store.xhs.update_xhs_note] ", f"xhs note: {{'avatar': '{AVATAR_URL}'}}"),
+        ]
+    )
+    stderr = f"[Main] user_avatar={AVATAR_URL} xsec_token=secret\n"
+
+    marker = author_avatar_log_marker({"stdout": stdout, "stderr": stderr})
+
+    assert marker == (
+        f"{AUTHOR_AVATAR_LOG_REDACTION_HEAD} stdout_lines=2 stderr_lines=1 "
+        "tags=[store.xhs.update_xhs_note],[Main]\n"
+    )
+    # 命中行的其他文字（URL、头像值、正文、token、文件名与行号）都不进标记。
+    for fragment in ("avatar.test", "崂山", "secret", "core.py", "MediaCrawler", "xhs note"):
+        assert fragment not in marker
+    assert author_avatar_log_marker({"stdout": "plain\n", "stderr": ""}) is None
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        (f"author_avatar={AVATAR_URL}", "<untagged>"),
+        (log_line("", f"avatar={AVATAR_URL}"), "<untagged>"),
+        (f"note [XiaoHongShuCrawler.author] avatar link {AVATAR_URL}", "<untagged>"),
+        (f"[Xiao Hong Shu] avatar {AVATAR_URL}", "<untagged>"),
+        (f"[https://sns-avatar-qc.xhscdn.com/a.jpg] {AVATAR_URL}", "<untagged>"),
+        (f"[XiaoHongShuCrawler.avatar] {AVATAR_URL}", "<untagged>"),
+        (f"[{'A' * 70}] avatar", "<untagged>"),
+        (f"[XiaoHongShuCrawler.author][store.xhs] avatar={AVATAR_URL}", "[XiaoHongShuCrawler.author]"),
+        (log_line("[XiaoHongShuCrawler.author] ", "avatar link"), "[XiaoHongShuCrawler.author]"),
+    ],
+)
+def test_log_marker_tag_is_the_leading_bracket_identifier_only(line: str, expected: str) -> None:
+    marker = author_avatar_log_marker({"stdout": line})
+
+    assert marker == f"{AUTHOR_AVATAR_LOG_REDACTION_HEAD} stdout_lines=1 tags={expected}\n"
+
+
+def test_log_marker_tags_are_deduplicated_in_first_seen_order_and_capped_at_five() -> None:
+    tags = ["[A]", "[B]", "[A]", "[C]", "", "[D]", "[E]", "[F]", "[B]"]
+    stdout = "\n".join(f"{tag} avatar={AVATAR_URL}" for tag in tags[:5])
+    stderr = "\n".join(f"{tag} avatar={AVATAR_URL}" for tag in tags[5:])
+
+    marker = author_avatar_log_marker({"stdout": stdout, "stderr": stderr})
+
+    assert marker == (
+        f"{AUTHOR_AVATAR_LOG_REDACTION_HEAD} stdout_lines=5 stderr_lines=4 tags=[A],[B],[C],<untagged>,[D]\n"
+    )
+
+
+def test_write_command_logs_replaces_both_streams_with_the_same_marker(tmp_path: Path) -> None:
+    stdout = log_line("[XiaoHongShuCrawler] ", "picked https://images.test/body.jpg") + "\n"
+    stderr = log_line("[XiaoHongShuCrawler.author] ", f"avatar={AVATAR_URL}") + "\n"
+
+    logs = t11_process.write_command_logs(["child"], tmp_path, stdout, stderr)
+
+    expected = f"{AUTHOR_AVATAR_LOG_REDACTION_HEAD} stdout_lines=0 stderr_lines=1 tags=[XiaoHongShuCrawler.author]\n"
+    assert logs["stdout"] == logs["stderr"] == expected
+    assert (tmp_path / "stdout.log").read_text(encoding="utf-8") == expected
+    assert (tmp_path / "stderr.log").read_text(encoding="utf-8") == expected
 
 
 def test_mediacrawler_run_command_redacts_logs_and_summary_tail(
@@ -181,7 +254,7 @@ def test_mediacrawler_run_command_redacts_logs_and_summary_tail(
     )
 
     assert (tmp_path / "logs/stdout.log").read_text(encoding="utf-8") == (
-        AUTHOR_AVATAR_LOG_REDACTION
+        f"{AUTHOR_AVATAR_LOG_REDACTION_HEAD} stdout_lines=1 stderr_lines=1 tags=<untagged>\n"
     )
     assert AVATAR_URL not in result["stdout_tail"]
     assert AVATAR_URL not in result["stderr_tail"]

@@ -29,6 +29,7 @@ from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
 from trippostcollect.platforms.xhs import author as xhs_author
 from trippostcollect.platforms.xhs import behavior as xhs_behavior
+from trippostcollect.platforms.xhs import core as xhs_core
 from trippostcollect.platforms.xhs import media as xhs_media
 from trippostcollect.platforms.xhs import overlay as xhs_overlay
 from trippostcollect.platforms.xhs import scan as xhs_scan
@@ -40,12 +41,11 @@ from trippostcollect.platforms.xhs.errors import (
     xhs_cdp_lifecycle_stop_detail,
 )
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudgetExhausted
-from trippostcollect.platforms.xhs.parser import update_xhs_note
 from trippostcollect.platforms.xhs.session import XHS_NEW_PAGE_MIN_HOLD_SECONDS
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.runtime.visit_ledger import iter_ledger_lines
 
-from .support import XiaoHongShuCrawler, config, make_capture
+from .support import XiaoHongShuCrawler, assert_no_avatar_log_lines, config, crawler_log_lines, make_capture
 
 KEYWORD = "青岛旅游"
 LOGIN_EXPIRED = {"code": -101, "success": False, "msg": "登录已过期"}
@@ -71,7 +71,7 @@ def prepare_crawler(monkeypatch, tmp_path, *, items, pages=None):
     """目标会话第 1 页为 `items`（或多页 `pages`），其后是 has_more=false 的空页。
 
     返回 (crawler, 发出 feed 请求的笔记 ID 列表, 状态文件, 站点)。暂存与写出替换为内存记录：
-    `crawler.staged[note_id]` 为交给暂存的图片，`crawler.records` 为写出的 JSONL 记录；
+    `crawler.staged[note_id]` 为交给暂存的图片，`crawler.records` 为经真实 `store_xhs_note` 写出的 JSONL 记录；
     `crawler.pause_ranges` 为各节奏停顿收到的 (档位, 下限, 上限)。
     """
     state_path = tmp_path / "state.json"
@@ -122,9 +122,14 @@ def prepare_crawler(monkeypatch, tmp_path, *, items, pages=None):
     async def stage_images(note_id, items):
         crawler.staged[note_id] = items
 
+    class MemorySink:
+        async def store_content(self, item):
+            crawler.records.append(item)
+
     async def store(note_item):
-        crawler.records.append(
-            update_xhs_note(note_item, source_keyword=KEYWORD, current_timestamp=lambda: 0, save_data_option="jsonl")
+        await xhs_core.store_xhs_note(
+            note_item, source_keyword=KEYWORD, crawler_type="search", save_data_option="jsonl",
+            current_timestamp=lambda: 0, content_sink_factory=lambda _crawler_type: MemorySink(),
         )
 
     crawler.update_xhs_note_images = stage_images
@@ -233,7 +238,12 @@ async def test_overlay_records_pass_the_real_visit_gate(monkeypatch, tmp_path):
     site.details["p1-a"] = detail_card("p1-a", images=3, user_id="shared-author")
     site.details["p2-a"] = detail_card("p2-a", images=1, user_id="shared-author")
 
-    await crawler.search()
+    with crawler_log_lines() as log_lines:
+        await crawler.search()
+
+    # 整轮日志（含写出记录的日志）不命中头像正则，子进程日志不会被整段替换为审计标记（#80）。
+    assert log_lines and any(line.startswith("[store.xhs.update_xhs_note]") for line in log_lines)
+    assert_no_avatar_log_lines(log_lines)
 
     assert detail_ids == ["p1-a", "p1-b", "p2-a"]
     assert len(site.author_tabs) == 2  # 同一作者只点一次

@@ -20,10 +20,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping
 from trippostcollect.application.contracts import XhsRuntimeSupervisionError
 from trippostcollect.core.execution_state import FrozenExecutionState
 from trippostcollect.core.paths import ensure_dir
-from trippostcollect.records.sanitization import (
-    AUTHOR_AVATAR_LOG_REDACTION,
-    redact_author_avatar_text,
-)
+from trippostcollect.records.sanitization import author_avatar_log_marker
 from trippostcollect.runtime.browser_runtime import browser_launch_environment
 from trippostcollect.xhs.leases import (
     DeferredTerminationSignals,
@@ -718,13 +715,12 @@ def write_command_logs(
     stdout: str,
     stderr: str,
 ) -> dict[str, str]:
-    """两路输出共享头像证据：任一路命中即两路整体替换，清洗后才写盘。"""
+    """两路输出共享头像证据：任一路命中即两路整体替换为同一审计标记（带各路命中行数与模块标签），清洗后才写盘。"""
 
     log_dir = ensure_dir(log_dir)
-    _, avatar_output_detected = redact_author_avatar_text(f"{stdout}\n{stderr}")
-    if avatar_output_detected:
-        stdout = AUTHOR_AVATAR_LOG_REDACTION
-        stderr = AUTHOR_AVATAR_LOG_REDACTION
+    marker = author_avatar_log_marker({"stdout": stdout, "stderr": stderr})
+    if marker is not None:
+        stdout = stderr = marker
     stdout_log = log_dir / "stdout.log"
     stderr_log = log_dir / "stderr.log"
     command_log = log_dir / "command.txt"

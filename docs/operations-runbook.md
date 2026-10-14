@@ -126,7 +126,10 @@ exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中
   提交前时，按冻结契约整批回滚并在 child 摘要写 `sqlite_import_failed`，checkpoint/seen 不推进；
   中间层入口已锁存该信号，因此仍以 `128+信号` 退出并输出 `runtime_failed:operator_interrupt:<SIG>`。
 - 日志：两层 child 的 stdout/stderr 在中断后同样落盘，runner 层位于 `<run_dir>/jobs/<job_key>/`，worker
-  层位于 child 批次的 `logs/<platform>/`；写盘前两路共享头像审计，任一路命中即两路整体替换。
+  层位于 child 批次的 `logs/<platform>/`；写盘前两路共享头像审计，任一路命中即两路整体替换为同一审计标记。
+  标记形如 `[TripPostCollect redacted child output containing author-avatar fields] stdout_lines=1
+  stderr_lines=0 tags=[store.xhs.update_xhs_note]`：各路命中行数，加命中行开头（worker 日志前缀之后）的
+  方括号模块标签，去重、最多 5 个，无标签或标签含头像词时记 `<untagged>`；命中行的其他文字不进标记（#80）。
 
 只同步主配置：
 
@@ -1038,7 +1041,8 @@ runner run_summary.json
 - manifest 身份、SHA 与计数已由 `artifacts_verified` 复验；
 - SQLite 正文图片具有连续 index、项目相对路径、尺寸、MIME、SHA，文件位于 `data/media`；
 - 本轮新 JSONL、摘要、child stdout/stderr 和活库不含已知头像键、经这些键证明的头像 URL 或头像
-  关系；子进程输出若触发整段头像审计标记属于正确清除结果。只核对本轮产物与活库，不为日常验收
+  关系；子进程输出若触发整段头像审计标记属于正确清除结果，但本轮日志诊断随之丢失：按标记中的 `tags`
+  找到打印头像键或头像值的日志并修正，不改头像正则。只核对本轮产物与活库，不为日常验收
   宽泛扫描历史 `outputs/`、备份或冻结证据；
 - 分页证据包含停止事件；只有批次事件而无停止事件时按运行失败处理。
 

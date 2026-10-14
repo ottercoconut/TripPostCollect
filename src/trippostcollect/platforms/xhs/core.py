@@ -260,7 +260,11 @@ async def store_xhs_note(
         current_timestamp=current_timestamp,
         save_data_option=save_data_option,
     )
-    logger.info(f"[store.xhs.update_xhs_note] xhs note: {local_db_item}")
+    # 只记标识与计数：整条记录含作者头像键与值、xsec_token 和正文，会让子进程日志整段替换为头像审计标记（#80）。
+    logger.info(
+        f"[store.xhs.update_xhs_note] xhs note: note_id={local_db_item.get('note_id')}, "
+        f"images={len(local_db_item.get('image_assets') or [])}"
+    )
     await content_sink_factory(crawler_type).store_content(local_db_item)
 
 

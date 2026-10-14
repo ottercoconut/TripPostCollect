@@ -681,7 +681,7 @@ def test_run_command_interrupt_writes_cumulative_cleaned_logs(
 ) -> None:
     """中断前已被 communicate 读走的输出与收束尾部输出合并写盘，各一次。"""
 
-    from trippostcollect.records.sanitization import AUTHOR_AVATAR_LOG_REDACTION
+    from trippostcollect.records.sanitization import AUTHOR_AVATAR_LOG_REDACTION_HEAD
     from trippostcollect.runtime import process
 
     ready = tmp_path / "ready"
@@ -717,8 +717,7 @@ def test_run_command_interrupt_writes_cumulative_cleaned_logs(
     assert (log_dir / "command.txt").is_file()
     if variant == "avatar":
         # 头像证据只在 stderr 尾部出现，stdout 里的同值 URL 也必须随两路整体清除。
-        assert stdout == AUTHOR_AVATAR_LOG_REDACTION
-        assert stderr == AUTHOR_AVATAR_LOG_REDACTION
+        assert stdout == stderr == f"{AUTHOR_AVATAR_LOG_REDACTION_HEAD} stdout_lines=0 stderr_lines=1 tags=<untagged>\n"
         assert "img.example.invalid" not in stdout + stderr
     else:
         assert stdout == "child-partial-out\nchild-cleanup-out\n"

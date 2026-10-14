@@ -39,15 +39,15 @@ from trippostcollect.application.reporting import _url_contains_keyword
 from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
 from trippostcollect.platforms.xhs import author as xhs_author
+from trippostcollect.platforms.xhs import core as xhs_core
 from trippostcollect.platforms.xhs import scan as xhs_scan
 from trippostcollect.platforms.xhs import session as xhs_session
 from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
-from trippostcollect.platforms.xhs.parser import update_xhs_note
 from trippostcollect.records.sanitization import sanitize_export_item
 from trippostcollect.runtime.visit_ledger import iter_ledger_lines
 from trippostcollect.xhs.search_target import is_target_search
 
-from .support import XiaoHongShuCrawler, config, make_capture
+from .support import XiaoHongShuCrawler, assert_no_avatar_log_lines, config, crawler_log_lines, make_capture
 
 ROOT = Path(__file__).resolve().parents[3]
 KEYWORD = "青岛旅游"
@@ -158,9 +158,14 @@ def prepare_crawler(monkeypatch, tmp_path, context, page, *, known: list[str]):
     async def record_image_failure(note_id, asset):
         raise AssertionError(f"unexpected image failure for {note_id}: {asset.get('error_code')}")
 
+    class MemorySink:
+        async def store_content(self, item):
+            crawler.records.append(item)
+
     async def store(note_item):
-        crawler.records.append(
-            update_xhs_note(note_item, source_keyword=KEYWORD, current_timestamp=lambda: 0, save_data_option="jsonl")
+        await xhs_core.store_xhs_note(
+            note_item, source_keyword=KEYWORD, crawler_type="search", save_data_option="jsonl",
+            current_timestamp=lambda: 0, content_sink_factory=lambda _crawler_type: MemorySink(),
         )
 
     crawler._guarded_pause = guarded_pause
@@ -240,7 +245,8 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     async with replay_browser(site) as (context, page):
         crawler, state_path = prepare_crawler(monkeypatch, tmp_path, context, page, known=known)
         await page.goto(EXPLORE_URL)
-        await crawler.search()
+        with crawler_log_lines() as log_lines:
+            await crawler.search()
         audit = await page.evaluate("() => window.__tpcOffline")
         layout = await page.evaluate("""() => ({
             ai_chat: document.querySelectorAll('.ai-feeds-page.with-ai-chat').length,
@@ -283,6 +289,9 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     assert site.feed_requests == ["p1-02", "p2-05", "p3-09"]  # 视频在点击前跳过，已知项滑过
     assert [record["note_id"] for record in crawler.records] == ["p1-02", "p2-05", "p3-09"]
     assert final_path == "/search_result_ai"
+    # 整轮日志（含写出记录与作者页的日志）不命中头像正则；失败时只报模块标签（#80）。
+    assert any(line.startswith("[store.xhs.update_xhs_note]") for line in log_lines)
+    assert_no_avatar_log_lines(log_lines)
 
     # 回车会话不带 filters；按文字点选“图文”后目标会话第 1 页带 5 项 filters；面板收起后才滚动。
     assert "filters" not in site.search_requests[0] and site.search_requests[0]["keyword"] == KEYWORD

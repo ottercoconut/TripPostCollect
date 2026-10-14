@@ -133,7 +133,8 @@ checkpoint、cursor、seen、campaign，不得晋升/删除/导入旧 staging，
 `finally`，由上面的孤儿对账恢复。
 信号路径：Guard 只向 child（中间层）进程组发 SIGTERM，exporter 在独立会话中不会直接收到。中间层把
 首个 SIGTERM 转为可捕获中断，只向 exporter 转发一次温和信号，等待其清理后把 exporter 日志经头像清洗
-落盘，并在退出前把 exporter 标记为已退出；Guard 随后的收束因此不会再对 exporter 发第二次温和信号，
+落盘（命中时两路替换为带各路命中行数与模块标签的审计标记，格式见运行手册），并在退出前把 exporter
+标记为已退出；Guard 随后的收束因此不会再对 exporter 发第二次温和信号，
 只处理仍存活的登记进程。锁存之后才观察到 child 正常退出时同样按中断处理。预算嵌套：Guard 自转发起
 给 child `child_shutdown_seconds` 减 5 秒（默认 25 秒）自行退出，期间不再发 SIGTERM，超时才 SIGKILL
 并最多回收 5 秒；中间层等待 exporter 至多 12 秒（超时对 exporter 组 SIGKILL），再加 5 秒输出回收与

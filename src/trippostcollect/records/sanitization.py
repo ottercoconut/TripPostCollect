@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import json
 import os
 import re
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
 
@@ -31,7 +31,16 @@ AUTHOR_AVATAR_TEXT_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:avatar_url|author_avatar|author_avatar_url|avatar|user_avatar)(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
-AUTHOR_AVATAR_LOG_REDACTION = "[TripPostCollect redacted child output containing author-avatar fields]\n"
+AUTHOR_AVATAR_LOG_REDACTION_HEAD = "[TripPostCollect redacted child output containing author-avatar fields]"
+# 审计标记的定位信息（#80）：各路命中行数，以及命中行开头（worker 日志前缀之后）的模块标签。标签只取形如
+# `[XiaoHongShuCrawler.author]` 的方括号标识符本身，去重、最多 5 个；不符合这个格式或自身含头像词的记为
+# `<untagged>`。命中行的其他文字一概不进标记。
+AUTHOR_AVATAR_LOG_TAG_LIMIT = 5
+AUTHOR_AVATAR_LOG_UNTAGGED = "<untagged>"
+# worker 的 logging 格式：`%(asctime)s %(name)s %(levelname)s (%(filename)s:%(lineno)d) - %(message)s`。
+_LOG_RECORD_PREFIX_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)? \S+ [A-Z]+ \(\S+:\d+\) - ")
+_LOG_MODULE_TAG_RE = re.compile(r"\[[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*\]")
+_LOG_MODULE_TAG_MAX_LENGTH = 64
 
 
 @dataclass(frozen=True)
@@ -46,10 +55,41 @@ class AvatarSanitizationResult:
         return bool(self.removed_keys or self.removed_values)
 
 
+def _log_module_tag(line: str) -> str:
+    prefix = _LOG_RECORD_PREFIX_RE.match(line)
+    tag = _LOG_MODULE_TAG_RE.match(line, prefix.end() if prefix else 0)
+    if (
+        tag is None
+        or len(tag.group()) > _LOG_MODULE_TAG_MAX_LENGTH
+        or AUTHOR_AVATAR_TEXT_TOKEN_RE.search(tag.group())
+    ):
+        return AUTHOR_AVATAR_LOG_UNTAGGED
+    return tag.group()
+
+
+def author_avatar_log_marker(streams: Mapping[str, str]) -> str | None:
+    """任一路命中头像词时返回各路共用的整段替换标记，否则为 None。
+
+    标记为固定头部、各路命中行数（`<路名>_lines=N`）与命中行的模块标签，不含命中行的其他任何文字。
+    """
+    counts: dict[str, int] = {}
+    tags: list[str] = []
+    for name, text in streams.items():
+        hits = [line for line in text.splitlines() if AUTHOR_AVATAR_TEXT_TOKEN_RE.search(line)]
+        counts[name] = len(hits)
+        for line in hits:
+            tag = _log_module_tag(line)
+            if tag not in tags and len(tags) < AUTHOR_AVATAR_LOG_TAG_LIMIT:
+                tags.append(tag)
+    if not any(counts.values()):
+        return None
+    lines = " ".join(f"{name}_lines={count}" for name, count in counts.items())
+    return f"{AUTHOR_AVATAR_LOG_REDACTION_HEAD} {lines} tags={','.join(tags)}\n"
+
+
 def redact_author_avatar_text(value: str) -> tuple[str, bool]:
-    if AUTHOR_AVATAR_TEXT_TOKEN_RE.search(value):
-        return AUTHOR_AVATAR_LOG_REDACTION, True
-    return value, False
+    marker = author_avatar_log_marker({"text": value})
+    return (value, False) if marker is None else (marker, True)
 
 
 def _is_avatar_key(value: Any) -> bool:

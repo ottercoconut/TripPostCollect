@@ -1,14 +1,18 @@
 """旧 fork 用例的局部配置与装配接缝；不导入 fork，不读取真实配置。"""
 
+from contextlib import contextmanager
 from dataclasses import fields, is_dataclass
+import logging
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Iterator
 import uuid
 
 from trippostcollect.platforms.entry import xhs_dependencies
 from trippostcollect.platforms.xhs.capture import XHS_RULES, XHS_SENTINEL, XHS_VERIFY_HEADERS
 from trippostcollect.platforms.xhs.core import XiaoHongShuCrawler as RootXiaoHongShuCrawler
 from trippostcollect.platforms.xhs.page_scripts import STATE_SCRIPTS
+from trippostcollect.records.sanitization import author_avatar_log_marker
 from trippostcollect.runtime.page_capture import PageCaptureChannel
 from trippostcollect.runtime.visit_ledger import VisitLedger
 
@@ -66,3 +70,34 @@ def make_capture(directory: Path, *, context=None, mode: str = "discovery") -> P
         verify_headers=XHS_VERIFY_HEADERS,
         state_scripts=STATE_SCRIPTS,
     )
+
+
+@contextmanager
+def crawler_log_lines() -> Iterator[list[str]]:
+    """收集期间 MediaCrawler logger 的消息与异常文本（按行），且不传到根 logger：失败报告不会带出原文。"""
+    lines: list[str] = []
+
+    class Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            lines.extend(record.getMessage().splitlines())
+            if record.exc_info:
+                lines.extend(logging.Formatter().formatException(record.exc_info).splitlines())
+
+    logger = logging.getLogger("MediaCrawler")
+    handler = Collect(logging.DEBUG)
+    saved_level, saved_propagate = logger.level, logger.propagate
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    try:
+        yield lines
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(saved_level)
+        logger.propagate = saved_propagate
+
+
+def assert_no_avatar_log_lines(lines: list[str]) -> None:
+    """日志不命中头像正则；失败时只报审计标记（命中行数与模块标签），不报原文。"""
+    marker = author_avatar_log_marker({"log": "\n".join(lines)})
+    assert marker is None, marker
