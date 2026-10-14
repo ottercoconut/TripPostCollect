@@ -8,8 +8,11 @@
    文字都在直属 span 里，且都在第 1 页结果渲染约 1.5 秒后才插入（Mac 首轮实测入口为空）；
    筛选面板按文字点选“图文”发 5 项 filters 的第 1 页（新 search_id），入口改为“已筛选”，面板不自动收起；
    虚拟列表只保留可见区附近的行（不超过 30 个节点），接近列表底部时请求下一页，可见区未填满时自行补页；
-   每次点击记下命中的元素类别（封面、对话栏笔记链接或其他）；
-   点封面打开浮层，首图先于 feed 加载，feed 到达后预载下一张，翻图再预载；作者名 target=_blank 打开作者页；
+   响应里的非笔记条目（hot_query 等）同样占一个列表位置，渲染为没有封面的 section.note-item（Mac 人工取证 2026-10-14）；
+   每次点击记下命中的元素类别（封面、对话栏笔记链接、相关搜索卡或其他）；
+   点封面打开浮层，首图先于 feed 加载，feed 到达后预载下一张，翻图再预载；浮层作者区按 Mac 人工取证 2026-10-14：
+   旧位置 div.author 下的作者名隐藏在前，可见的作者名与头像链接在 .interaction-container 的 .author-container 里，
+   评论区里评论者（含作者本人）的 a.name 也在 div.author 下；作者名 target=_blank 打开作者页，评论者链接只计数；
    feed 或搜索返回 461/471 时显示验证层。同一文档内图片元素按 URL 复用，重开不再请求（模拟内存缓存）。
    全部请求由测试的 context.route 回应。 */
 (() => {
@@ -62,6 +65,10 @@
     coverClicks: 0,
     chatNoteClicks: 0,
     strayClicks: [],
+    queryCardsRendered: 0,
+    queryCardClicks: 0,
+    authorNameClicks: 0,
+    commentLinkClicks: 0,
   };
   window.__tpcOffline = audit;
 
@@ -70,6 +77,12 @@
     if (className) node.className = className;
     if (text !== undefined) node.textContent = text;
     return node;
+  };
+  // 逐层嵌套的 div：返回自外向内的各层节点。
+  const wrapped = (...classNames) => {
+    const nodes = classNames.map((className) => el('div', className));
+    nodes.slice(1).forEach((node, index) => nodes[index].appendChild(node));
+    return nodes;
   };
   const defaultSelection = () => {
     const selection = {};
@@ -114,6 +127,11 @@
     section.setAttribute('data-index', String(index));
     section.style.top = `${Math.floor(index / COLUMNS) * ROW_HEIGHT}px`;
     section.style.left = `${LIST_LEFT + (index % COLUMNS) * COLUMN_WIDTH}px`;
+    if (item.model_type !== 'note') {
+      audit.queryCardsRendered += 1;
+      section.appendChild(el('div', 'query-note-wrapper', '相关搜索'));
+      return section;
+    }
     const cover = el('a', 'cover');
     cover.href = `/search_result/${item.id}?xsec_token=${encodeURIComponent(item.xsec_token || '')}&xsec_source=`;
     const coverUrl = (card.cover || {}).url_pre;
@@ -169,7 +187,8 @@
   // 对话栏引用的笔记（ID 与本会话结果重叠）：带 data-note-id 的 /explore/ 链接、/search_result/ 链接与引用块。
   const renderChatNotes = () => {
     if (!ui || !ui.chatNotes) return;
-    const refs = state.items.slice(0, CHAT_NOTE_REFS).map((item, index) => {
+    const notes = state.items.filter((item) => item.model_type === 'note');
+    const refs = notes.slice(0, CHAT_NOTE_REFS).map((item, index) => {
       const ref = el(index % 3 === 2 ? 'div' : 'a', 'ai-note-ref', '参考笔记');
       if (index % 3 === 0) ref.href = `/explore/${item.id}`;
       if (index % 3 === 1) ref.href = `/search_result/${item.id}?xsec_token=offline&xsec_source=`;
@@ -219,7 +238,7 @@
     const data = payload && payload.data;
     if (status !== 200 || !data) return;
     (data.items || []).forEach((item) => {
-      if (item && item.model_type === 'note' && item.id) state.items.push(item);
+      if (item && item.id) state.items.push(item);
     });
     state.page = number;
     state.hasMore = data.has_more === true;
@@ -401,23 +420,61 @@
     const right = el('div', 'arrow-controller right');
     right.addEventListener('click', () => flip(1));
     media.append(slide, fraction, left, right);
-    const author = el('div', 'author');
-    const name = el('a', 'name');
-    name.target = '_blank';
-    author.appendChild(name);
+    const profileLink = (className) => {
+      const link = el('a', className);
+      link.target = '_blank';
+      return link;
+    };
+    // 旧位置：.note-container 的直接子节点，隐藏，排在可见作者名之前。
+    const [oldAuthor, , oldInfo] = wrapped('author', 'author-wrapper', 'info');
+    const oldName = profileLink('name');
+    oldInfo.appendChild(oldName);
+    const [author, , info] = wrapped('author-container', 'author-wrapper', 'info');
+    const [avatarClick, avatarBox] = wrapped('avatar-click', 'avatar-container');
+    const avatarLink = profileLink('');
+    avatarBox.appendChild(avatarLink);
+    const name = profileLink('name');
+    info.append(avatarClick, name);
     const content = el('div', 'note-content');
     const title = el('div', 'title');
     title.id = 'detail-title';
     const desc = el('div', 'desc');
     desc.id = 'detail-desc';
     content.append(title, desc);
+    const [comments, , commentList] = wrapped('comments-el', 'comments-container', 'list-container');
     const side = el('div', 'interaction-container');
-    side.append(author, content);
+    side.append(author, content, comments);
     const container = el('div', 'note-container');
-    container.append(media, side);
+    container.append(media, oldAuthor, side);
     mask.append(close, container);
+    // 浮层内的点击：评论者链接只计数、不打开；笔记作者名计数后照常由 target=_blank 打开作者页。
+    mask.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      if (target.closest('.comment-item a')) {
+        event.preventDefault();
+        audit.commentLinkClicks += 1;
+      } else if (target.closest('.author-container a.name')) {
+        audit.authorNameClicks += 1;
+      }
+    }, true);
     document.body.appendChild(mask);
-    return { mask, slide, fraction, left, right, author, name, content, title, desc };
+    return {
+      mask, slide, fraction, left, right, author, oldName, avatarLink, name, content, title, desc, comments, commentList,
+    };
+  };
+  const profileHref = (userId) => `${PROFILE_URL}${encodeURIComponent(userId || '')}?xsec_token=offline&xsec_source=pc_note`;
+  // 评论者：两位其他用户与笔记作者本人（链接同样指向作者主页）。
+  const commentNode = (userId, nickname) => {
+    const parent = el('div', 'parent-comment');
+    const [item, , right, , authorBox] = wrapped('comment-item', 'comment-inner-container', 'right', 'author-wrapper', 'author');
+    const link = el('a', 'name', nickname);
+    link.target = '_blank';
+    link.href = profileHref(userId);
+    authorBox.appendChild(link);
+    right.appendChild(el('div', 'content', '去过，很好看'));
+    parent.appendChild(item);
+    return parent;
   };
   const overlayUi = buildOverlay();
 
@@ -464,18 +521,26 @@
     if (status !== 200 || !note) return;
     overlay.images = (note.image_list || []).map((image) => image && image.url_default).filter(Boolean);
     const user = note.user || {};
-    overlayUi.author.querySelectorAll('img').forEach((node) => node.remove());
+    overlayUi.avatarLink.replaceChildren();
     if (user.avatar) {
       const avatar = cachedImage(user.avatar);
       avatar.className = 'avatar-item';
-      overlayUi.author.prepend(avatar);
+      overlayUi.avatarLink.appendChild(avatar);
     }
-    overlayUi.name.textContent = user.nickname || '作者';
-    overlayUi.name.href = `${PROFILE_URL}${encodeURIComponent(user.user_id || '')}?xsec_token=offline&xsec_source=pc_note`;
+    [overlayUi.oldName, overlayUi.name].forEach((link) => {
+      link.textContent = user.nickname || '作者';
+      link.href = profileHref(user.user_id);
+    });
+    overlayUi.avatarLink.href = profileHref(user.user_id);
     overlayUi.title.textContent = note.title || '';
     overlayUi.desc.textContent = note.desc || '';
+    overlayUi.commentList.replaceChildren(
+      commentNode('commenter-1', '路人甲'), commentNode(user.user_id, user.nickname || '作者'),
+      commentNode('commenter-2', '路人乙'),
+    );
     overlayUi.author.hidden = false;
     overlayUi.content.hidden = false;
+    overlayUi.comments.hidden = false;
     showImage(0);
   };
 
@@ -490,6 +555,7 @@
     );
     overlayUi.author.hidden = true;
     overlayUi.content.hidden = true;
+    overlayUi.comments.hidden = true;
     overlayUi.fraction.textContent = '';
     overlayUi.left.hidden = true;
     overlayUi.right.hidden = true;
@@ -548,11 +614,14 @@
     if (!ui) return;
     const target = event.target instanceof Element ? event.target : null;
     if (!target || target.closest('.note-detail-mask, .captcha-layer, div.filter, .filters-wrapper')) return;
+    const card = target.closest('section.note-item');
     if (target.closest('section.note-item a.cover')) {
       audit.coverClicks += 1;
     } else if (target.closest('.ai-chat-section [data-note-id], .ai-chat-section a[href]')) {
       event.preventDefault();
       audit.chatNoteClicks += 1;
+    } else if (card && card.querySelector('.query-note-wrapper')) {
+      audit.queryCardClicks += 1;
     } else {
       audit.strayClicks.push(`${target.tagName.toLowerCase()}.${target.className || ''}`);
     }

@@ -20,6 +20,7 @@ from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.evidence import write_evidence
 from trippostcollect.platforms.xhs.errors import PlatformRuntimeError
 from trippostcollect.platforms.xhs.navigation import XhsSearchEntryFailed
+from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
 from trippostcollect.runtime.visit_ledger import iter_ledger_lines, line_seq
 
 from .support import XiaoHongShuCrawler, make_capture
@@ -216,7 +217,8 @@ def test_card_without_registration_for_two_steps_stops_with_card_and_response_di
 ):
     evidence = tmp_path / "behavior_evidence.json"
     monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(evidence))
-    # stray 不在任何响应里；hot-1 是每个第 1 页响应末尾的热搜条目；general-1 只在回车会话（非目标）第 1 页。
+    # stray 不在任何响应里；general-1 只在回车会话（非目标）第 1 页；hot-1 是目标会话第 1 页的热搜条目（已知非笔记
+    # 条目，跳过，不进诊断）。
     site = XhsFakeSite(KEYWORD, _pages(2, 4), unregistered_ids=("stray", "hot-1", "general-1"))
     harness = Harness(tmp_path, site)
 
@@ -225,14 +227,14 @@ def test_card_without_registration_for_two_steps_stops_with_card_and_response_di
 
     assert caught.value.code == "xhs_search_card_unregistered"
     assert harness.processed == ["n1-0"]
-    assert site.card_diagnostic_reads == [["general-1", "hot-1", "stray"]]
+    assert site.card_diagnostic_reads == [["general-1", "stray"]]
     written = json.loads(evidence.with_name("behavior_evidence.navigation.json").read_text(encoding="utf-8"))
     (diagnostic,) = [event for event in written["events"] if event["stage"] == "search_scan"]
     assert diagnostic["outcome"] == "card_unregistered" and diagnostic["error"] == ""
     assert diagnostic["url"] == "https://www.xiaohongshu.com/search_result_ai" and "title" not in diagnostic
     assert diagnostic["scroll_container"] == "document" and diagnostic["view_rect"]["top"] == 0
     cards = {card["note_id"]: card for card in diagnostic["cards"]}
-    assert list(cards) == ["general-1", "hot-1", "stray"]
+    assert list(cards) == ["general-1", "stray"]
     assert cards["stray"]["responses"] is None
     assert cards["stray"]["dom"] == {
         "note_id": "stray", "nodes": 1, "data_index": "0", "has_cover": True, "cover_path": "/search_result",
@@ -241,28 +243,20 @@ def test_card_without_registration_for_two_steps_stops_with_card_and_response_di
     }
     target = harness.crawler._scan.target
     enter = next(session for session in harness.crawler._scan.sessions.values() if not session.is_target)
-    hot_enter, hot_target = cards["hot-1"]["responses"]
-    assert hot_enter == {
-        "seq": enter.started_seq, "session_seq": enter.started_seq, "is_target": False, "current_target": False,
-        "page": 1, "position": 4, "model_type": "hot_query",
-    }
-    assert hot_target == {
-        "seq": target.started_seq, "session_seq": target.started_seq, "is_target": True, "current_target": True,
-        "page": 1, "position": 4, "model_type": "hot_query",
-    }
+    assert target.pages[1].non_notes_seen == {"hot-1"}
     (general,) = cards["general-1"]["responses"]
-    assert general["session_seq"] == enter.started_seq < target.started_seq
-    assert (general["is_target"], general["current_target"], general["position"], general["model_type"]) == (
-        False, False, 1, "note",
-    )
+    assert general == {
+        "seq": enter.started_seq, "session_seq": enter.started_seq, "is_target": False, "current_target": False,
+        "page": 1, "position": 1, "model_type": "note",
+    }
+    assert enter.started_seq < target.started_seq
     text = json.dumps(diagnostic, ensure_ascii=False)
     assert "token" not in text and "keyword" not in text and KEYWORD not in text
     warning = next(
         record.getMessage() for record in caplog.records if "Search card stayed unregistered" in record.getMessage()
     )
-    assert "hot-1(index=1, cover=/search_result, card=section.note-item, " in warning
-    assert "seen=non_target:p1:hot_query+current:p1:hot_query" in warning
-    assert "general-1(index=2" in warning and "seen=non_target:p1:note" in warning
+    assert "hot-1" not in warning
+    assert "general-1(index=2, cover=/search_result, card=section.note-item, seen=non_target:p1:note)" in warning
     assert "stray(index=0" in warning and "seen=none" in warning
     assert "xiaohongshu.com" not in warning and "token" not in warning
 
@@ -304,6 +298,53 @@ def test_target_session_from_the_note_type_click_logs_no_trigger_warning(tmp_pat
 
     assert harness.processed == [f"n1-{index}" for index in range(4)]
     assert not any("not triggered by this note-type click" in record.getMessage() for record in caplog.records)
+
+
+def test_non_note_cards_of_the_session_are_skipped_and_do_not_hold_the_page_open(tmp_path, caplog):
+    # Mac 人工取证 2026-10-14：hot_query 条目在列表里占一个位置，渲染为没有封面的卡片，id 为 50 位非十六进制。
+    hot = "related_query_qingdao_xiaoyushan_offline_card_0001"
+    pages = _pages(2, 4)
+    pages[0].insert(2, {"id": hot, "model_type": "hot_query"})
+    site = XhsFakeSite(KEYWORD, pages)
+    harness = Harness(tmp_path, site)
+
+    with caplog.at_level(logging.INFO, logger="MediaCrawler"):
+        harness.run()
+
+    assert len(hot) == 50
+    assert harness.processed == [f"n{page}-{index}" for page in (1, 2) for index in range(4)]
+    assert harness.accumulator.summary()["stop_reason"] == "source_exhausted"
+    first = harness.crawler._scan.target.pages[1]
+    assert first.passed and first.finished
+    assert first.non_note_ids == {hot, "hot-1"} and first.non_notes_seen == {hot}
+    assert not harness.accumulator.is_known(hot)
+    assert not any(line.get("subject_id") == hot or (line.get("target") or {}).get("note_id") == hot
+                   for line in harness.ledger())
+    assert not any(record.getMessage().startswith("[XiaoHongShuCrawler.scan] Search card stayed")
+                   for record in caplog.records)
+    finished = [record.getMessage() for record in caplog.records if "finished: non_note_items" in record.getMessage()]
+    assert finished[0].endswith("Search page 1 finished: non_note_items=2, non_note_cards_skipped=1")
+    assert harness.gate()["content_visit_ok"]
+
+
+def test_navigation_diagnostics_keep_only_paths_and_never_the_page_title(tmp_path):
+    site = XhsFakeSite(KEYWORD, _pages(1, 1))
+    crawler = Harness(tmp_path, site).crawler
+    site.page.url = "https://www.xiaohongshu.com/explore/n1-0?xsec_token=secret-token&xsec_source=pc_search"
+    crawler._install_navigation_observers(site.page)
+    failed = site.page.request(
+        "GET", "https://fe-static.xhscdn.com/formula-static/app.js?v=secret-token#x", resource_type="script",
+    )
+    site.page.fail(failed, "net::ERR_FAILED")
+
+    diagnostic = asyncio.run(crawler._record_navigation_diagnostic(site.page, stage="search_entry", outcome="probe"))
+
+    assert diagnostic["url"] == "https://www.xiaohongshu.com/explore/n1-0" and "title" not in diagnostic
+    assert [failure["url"] for failure in diagnostic["request_failures"]] == [
+        "https://fe-static.xhscdn.com/formula-static/app.js",
+    ]
+    assert "secret-token" not in json.dumps(diagnostic)
+    assert "document.title" not in DOM_SCRIPTS["render_diagnostic"]
 
 
 def test_search_that_stops_loading_is_stalled_not_exhausted(tmp_path):

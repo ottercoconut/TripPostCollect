@@ -27,6 +27,7 @@ from playwright.async_api import async_playwright
 from support.xhs_offline_site import (
     AVATAR_HOST,
     EXPLORE_URL,
+    HOT_QUERY_ID,
     PNG_SIGNATURE,
     TARGET_FILTERS,
     XhsOfflineSite,
@@ -222,12 +223,13 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     """AI 对话布局下 3 页（每页 12 项、共 36 项）末页 has_more=false：等延迟渲染、位于对话栏内的筛选入口，按文字
     点选“图文”的真标签（不是重叠的 aria-hidden 副本）、收面板（面板从 DOM 移除）；列表在页头下方的容器内滚动、
     window 不动，滚轮只作用在结果列表上，对话栏里与结果 ID 重叠的笔记链接不计入、不点击，点卡片都命中封面；
-    虚拟列表回收下的全量扫描，浮层详情与翻图截获 PNG（首图先于 feed 到达）、target=_blank 作者页（同一作者
-    只点一次），经真实门禁通过。"""
+    虚拟列表回收下的全量扫描，第 1 页中间的相关搜索卡（hot_query，没有封面）跳过、不停止；浮层详情与翻图截获 PNG
+    （首图先于 feed 到达）；作者链接按作者 ID 定位：旧位置的隐藏作者名与评论区（含作者本人的评论）都不点，点中
+    interaction-container 里的作者名打开 target=_blank 作者页（同一作者只点一次），经真实门禁通过。"""
     pages = [[search_item(f"p{number}-{index:02d}") for index in range(12)] for number in (1, 2, 3)]
     pages[0][6] = search_item("p1-06", card_type="video")
     images = {"p1-02": 3, "p2-05": 2, "p3-09": 1}
-    site = XhsOfflineSite(KEYWORD, pages)
+    site = XhsOfflineSite(KEYWORD, pages, hot_query_at=6)
     site.details["p1-02"] = detail_card("p1-02", images=3, user_id="author-a")
     site.details["p2-05"] = detail_card("p2-05", images=2, user_id="author-a")
     site.details["p3-09"] = detail_card("p3-09", images=1, user_id="author-b")
@@ -254,6 +256,19 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
             list_cards: document.querySelectorAll('.search-layout section.note-item').length,
             window_scroll_y: window.scrollY,
         })""")
+        overlay_links = await page.evaluate("""() => {
+            const mask = document.querySelector('div.note-detail-mask');
+            const comments = Array.from(mask.querySelectorAll('.comment-item a.name'));
+            return {
+                old_names: mask.querySelectorAll('.note-container > .author a.name').length,
+                author_names: mask.querySelectorAll('.interaction-container .author-container a.name').length,
+                avatar_links: mask.querySelectorAll('.author-container .avatar-container a').length,
+                comment_links: comments.length,
+                own_comment_links: comments.filter(
+                    (node) => new URL(node.href).pathname === '/user/profile/author-b'
+                ).length,
+            };
+        }""")
         metrics = await page.evaluate(DOM_SCRIPTS["scroll_metrics"])
         counts = await page.evaluate(DOM_SCRIPTS["search_ready_counts"])
         first_row_rendered = await page.evaluate("() => document.querySelectorAll('section.note-item[data-index=\"0\"]').length")
@@ -292,6 +307,15 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     assert counts["card_count"] == lists["list_cards"] > 0
     assert audit["chatNoteClicks"] == 0 and audit["strayClicks"] == []
     assert audit["coverClicks"] == len(actions(crawler, "click_card")) == audit["overlaysOpened"] == 3
+    # 第 1 页中间的相关搜索卡渲染过、从未被点，作为本会话已知的非笔记条目跳过。
+    assert audit["queryCardsRendered"] >= 1 and audit["queryCardClicks"] == 0
+    assert crawler._scan.target.pages[1].non_notes_seen == {HOT_QUERY_ID}
+    # 浮层作者区与实测一致；只点了笔记作者名，评论者链接（含作者本人的评论）一次都没点。
+    assert overlay_links == {
+        "old_names": 1, "author_names": 1, "avatar_links": 1, "comment_links": 3, "own_comment_links": 1,
+    }
+    assert audit["authorNameClicks"] == len(actions(crawler, "click_author")) == 2
+    assert audit["commentLinkClicks"] == 0
     filter_targets = [line["target"].get("filter") for line in actions(crawler, "apply_filter")]
     assert filter_targets == ["panel_open", "note_type", "panel_close"]
     first_scroll = actions(crawler, "scroll")[0]["seq"]

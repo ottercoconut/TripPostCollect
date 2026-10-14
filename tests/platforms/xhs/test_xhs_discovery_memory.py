@@ -14,7 +14,15 @@ from unittest.mock import ANY, AsyncMock, Mock
 import pytest
 
 from playwright.async_api import Error as PlaywrightError
-from support.xhs_fake_site import XhsFakeSite, detail_card, image_url, note
+from support.xhs_fake_site import (
+    AUTHOR_POINT,
+    AVATAR_POINT,
+    COMMENT_POINT,
+    XhsFakeSite,
+    detail_card,
+    image_url,
+    note,
+)
 from trippostcollect.application import events as app_events
 from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
@@ -549,6 +557,7 @@ async def test_author_tab_not_opened_records_a_link_diagnostic_without_query_val
     assert diagnostic["view_visible"] is True
     assert (diagnostic["author_names"], diagnostic["author_names_visible"]) == (1, visible)
     assert (diagnostic["profile_links"], diagnostic["profile_links_visible"]) == (1, visible)
+    assert (diagnostic["author_id_links"], diagnostic["author_id_links_visible"]) == (1, visible)
     (link,) = diagnostic["profile_link_nodes"]
     assert link["visible"] is bool(visible) and link["target"] == "_blank"
     assert link["chain"][:2] == ["a.name", "div.author"]
@@ -558,6 +567,63 @@ async def test_author_tab_not_opened_records_a_link_diagnostic_without_query_val
     assert f"outcome={outcome}, attempts={attempts}, view_visible=True, author_names=1, " in warning
     assert f"author_names_visible={visible}" in warning and f"clicked_path={clicked_path}" in warning
     assert "xiaohongshu.com" not in warning and "token" not in warning
+
+
+def _link(user_id: str, point: dict | None, *, comment: bool = False, named: bool = True) -> dict:
+    return {"user_id": user_id, "point": dict(point) if point else None, "comment": comment, "named": named}
+
+
+AUTHOR = f"author-{HEX_NOTE}"
+# Mac 人工取证 2026-10-14 的浮层：旧位置 div.author 下的作者名隐藏在前，评论者的 a.name 也在 div.author 下，
+# 作者本人的评论同样指向作者主页；可见的作者名在 interaction-container 的 author-container 里，旁边是头像链接。
+AUTHOR_LINK_CASES = {
+    "hidden_old_location": ([_link(AUTHOR, None), _link(AUTHOR, AUTHOR_POINT)], AUTHOR_POINT),
+    "commenter": ([_link("commenter-1", COMMENT_POINT, comment=True), _link(AUTHOR, AUTHOR_POINT)], AUTHOR_POINT),
+    "own_comment": (
+        [_link(AUTHOR, None), _link(AUTHOR, COMMENT_POINT, comment=True), _link(AUTHOR, AUTHOR_POINT)], AUTHOR_POINT,
+    ),
+    "avatar_only": ([_link(AUTHOR, None), _link(AUTHOR, AVATAR_POINT, named=False)], AVATAR_POINT),
+}
+
+
+def test_author_click_point_prefers_a_visible_named_link_outside_the_comments():
+    def links(case: str) -> list[dict]:
+        return [
+            {key: link[key] for key in ("point", "comment", "named")}
+            for link in AUTHOR_LINK_CASES[case][0]
+            if link["user_id"] == AUTHOR
+        ]
+
+    for case, (_, expected) in AUTHOR_LINK_CASES.items():
+        assert xhs_author.author_click_point(links(case)) == expected, case
+    named_comment_first = [
+        {"point": dict(COMMENT_POINT), "comment": True, "named": True},
+        {"point": dict(AVATAR_POINT), "comment": False, "named": False},
+        {"point": dict(AUTHOR_POINT), "comment": False, "named": True},
+    ]
+    assert xhs_author.author_click_point(named_comment_first) == AUTHOR_POINT
+    assert xhs_author.author_click_point([{"point": None, "comment": False, "named": True}]) is None
+    assert xhs_author.author_click_point([{"point": dict(COMMENT_POINT), "comment": True, "named": True}]) is None
+    assert xhs_author.author_click_point(None) is None and xhs_author.author_click_point([]) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", list(AUTHOR_LINK_CASES))
+async def test_author_link_is_located_by_the_author_id_outside_the_comments(monkeypatch, tmp_path, case):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=[HEX_NOTE])
+    links, expected = AUTHOR_LINK_CASES[case]
+    site.profile_links[HEX_NOTE] = links
+
+    await crawler.search()
+
+    assert [record["note_id"] for record in crawler.records] == [HEX_NOTE]
+    assert not events_of(state_path, "candidate_skipped")
+    assert len(site.author_tabs) == 1 and site.author_tabs[0].user_id == AUTHOR
+    assert (expected["x"], expected["y"]) in site.click_points
+    assert (COMMENT_POINT["x"], COMMENT_POINT["y"]) not in site.click_points and site.comment_clicks == 0
+    assert len([line for line in ledger_lines(crawler) if line.get("action") == "click_author"]) == 1
+    assert last_stop(state_path)["stop_reason"] == "source_exhausted"
 
 
 @pytest.mark.asyncio

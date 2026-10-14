@@ -39,9 +39,12 @@ API_HEADERS = {
 STATIC_TYPES = {".js": "application/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
 # 结果页布局：ai_chat 为 Mac 人工侦察 2026-10-13 的 AI 对话布局，v16 为 V16（10-11）的布局。
 LAYOUTS = frozenset({"ai_chat", "v16"})
+# 相关搜索卡（Mac 人工取证 2026-10-14）：model_type=hot_query，id 为 50 位、不是十六进制。
+HOT_QUERY_ID = "related_query_qingdao_xiaoyushan_offline_card_0001"
 
 __all__ = [
-    "EXPLORE_URL", "PNG_SIGNATURE", "TARGET_FILTERS", "XhsOfflineSite", "cover_url", "image_url", "search_item",
+    "EXPLORE_URL", "HOT_QUERY_ID", "PNG_SIGNATURE", "TARGET_FILTERS", "XhsOfflineSite", "cover_url", "image_url",
+    "search_item",
 ]
 
 
@@ -76,6 +79,8 @@ class XhsOfflineSite:
     （默认 `detail_card(id)`）；`feed_overrides[id]` 依次替换每次 feed：整数为 HTTP 状态码（461/471 带验证头）。
     feed 响应延迟 `feed_delay_seconds` 才回应，使首图先于 feed 到达。`creators[user_id]` 为作者页投影的来源
     （默认 `creator_projection()`）。`layout` 选结果页布局：`ai_chat`（默认，当前线上的 AI 对话布局）或 `v16`。
+    `hot_query_at` 给出时，目标会话第 1 页响应在该位置插入一条 `HOT_QUERY_ID` 的 hot_query 条目（列表中渲染为没有
+    封面的卡片）。
     """
 
     def __init__(
@@ -86,11 +91,13 @@ class XhsOfflineSite:
         general_items: list[dict[str, Any]] | None = None,
         feed_delay_seconds: float = 0.6,
         layout: str = "ai_chat",
+        hot_query_at: int | None = None,
     ) -> None:
         if layout not in LAYOUTS:
             raise ValueError(f"unknown offline layout: {layout}")
         self.keyword = keyword
         self.layout = layout
+        self.hot_query_at = hot_query_at
         self.pages = [list(items) for items in pages]
         self.general_items = list(general_items if general_items is not None else
                                   [search_item(f"general-{index}") for index in range(8)])
@@ -202,11 +209,12 @@ class XhsOfflineSite:
         self.search_requests.append(body)
         number = int(body.get("page") or 0)
         if "filters" in body and is_target_search(body) and 1 <= number <= len(self.pages):
-            items, has_more = self.pages[number - 1], number < len(self.pages)
+            items, has_more = list(self.pages[number - 1]), number < len(self.pages)
+            if number == 1 and self.hot_query_at is not None:
+                items.insert(self.hot_query_at, {"id": HOT_QUERY_ID, "model_type": "hot_query"})
         else:
             items, has_more = (self.general_items if number == 1 else []), False
-        hot = [{"id": f"hot-{number}", "model_type": "hot_query"}]
-        payload = {"code": 0, "success": True, "msg": "成功", "data": {"has_more": has_more, "items": [*items, *hot]}}
+        payload = {"code": 0, "success": True, "msg": "成功", "data": {"has_more": has_more, "items": items}}
         await route.fulfill(status=200, headers=API_HEADERS, body=json.dumps(payload, ensure_ascii=False).encode())
 
     async def _feed(self, route: Any, request: Any) -> None:

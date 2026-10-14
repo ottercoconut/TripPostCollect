@@ -57,6 +57,10 @@ section.note-item a.cover { position: absolute; top: 20px; left: 10px; width: 24
   display: block; background: #eee; overflow: hidden; }
 section.note-item a.cover img { width: 240px; height: 240px; display: block; }
 section.note-item .footer { position: absolute; top: 270px; left: 10px; width: 240px; font-size: 14px; }
+/* 相关搜索卡（hot_query）：同样是 section.note-item，没有封面。 */
+section.note-item .query-note-wrapper { position: absolute; top: 20px; left: 10px; width: 240px; height: 300px;
+  background: #f5efe0; }
+.with-ai-chat section.note-item .query-note-wrapper { width: 170px; }
 .feeds-end { height: 200px; line-height: 120px; text-align: center; color: #999; }
 .note-detail-mask { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 50; background: rgba(0, 0, 0, 0.6); }
 .note-detail-mask[hidden] { display: none; }
@@ -70,11 +74,16 @@ div.arrow-controller.left { left: 12px; }
 div.arrow-controller.right { right: 12px; }
 div.arrow-controller[hidden] { display: none; }
 .interaction-container { width: 400px; padding: 24px; box-sizing: border-box; }
-.author { display: flex; align-items: center; height: 48px; }
-.author[hidden], .note-content[hidden] { display: none; }
-.author img.avatar-item { width: 40px; height: 40px; border-radius: 20px; margin-right: 12px; }
-.author a.name { color: #333; text-decoration: none; font-size: 16px; padding: 8px 0; }
+/* 作者区（Mac 人工取证 2026-10-14）：旧位置 div.author 是 .note-container 的直接子节点、隐藏；可见的作者名与头像在
+   .interaction-container 的 .author-container 里；评论者的 a.name 也在 div.author 下。 */
+.note-container > .author { display: none; }
+.author-container .info, .author { display: flex; align-items: center; height: 48px; }
+.author-container[hidden], .note-content[hidden], .comments-el[hidden] { display: none; }
+.author-container img.avatar-item { width: 40px; height: 40px; border-radius: 20px; margin-right: 12px; display: block; }
+.author-container a.name, .comment-item a.name { color: #333; text-decoration: none; font-size: 16px; padding: 8px 0; }
 .note-content { margin-top: 24px; }
+.comments-container { margin-top: 24px; }
+.comment-item .comment-inner-container { padding: 4px 0; }
 div.close-circle { position: fixed; top: 24px; left: 24px; width: 40px; height: 40px; border-radius: 20px;
   background: #fff; z-index: 60; cursor: pointer; }
 div.close-circle[hidden] { display: none; }

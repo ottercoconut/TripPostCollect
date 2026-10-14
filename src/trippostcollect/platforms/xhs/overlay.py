@@ -340,9 +340,9 @@ class XhsOverlayMixin:
                 raise PlatformRuntimeError("XHS note overlay stopped opening", code="xhs_overlay_not_opening")
         return None
 
-    async def _note_view_state(self) -> dict[str, Any]:
-        """当前详情视图（浮层，或 repair 直开的整页）的页码、翻图箭头、作者名与关闭按钮。"""
-        return await dom_note_view_state(self.context_page, self._note_view_roots)
+    async def _note_view_state(self, author_id: str = "") -> dict[str, Any]:
+        """当前详情视图（浮层，或 repair 直开的整页）的页码、翻图箭头与关闭按钮；给出作者 ID 时另含作者链接。"""
+        return await dom_note_view_state(self.context_page, self._note_view_roots, author_id)
 
     async def _wait_overlay(self, check: Any, timeout: float) -> dict[str, Any]:
         """轮询详情视图状态直到 check 为真或超时，返回最后一次读数。"""

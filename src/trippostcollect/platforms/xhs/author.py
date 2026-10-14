@@ -75,6 +75,19 @@ def profile_url_user_id(url: str) -> str:
     return match.group(1) if match else ""
 
 
+def author_click_point(links: Any) -> Optional[Dict]:
+    """作者链接的点击点：作者 ID 一致的链接中，取可见且不在评论区的第一个有文字的作者名，没有时取头像链接。
+
+    旧位置隐藏的作者名、评论者链接与作者本人的评论都不点（Mac 人工取证 2026-10-14）；都没有时为 None。
+    """
+    usable = [
+        link for link in (links if isinstance(links, list) else [])
+        if isinstance(link, dict) and isinstance(link.get("point"), dict) and link.get("comment") is False
+    ]
+    chosen = next((link for link in usable if link.get("named") is True), usable[0] if usable else None)
+    return chosen["point"] if chosen is not None else None
+
+
 def path_template(url: str) -> str:
     """地址路径的模板（如 `/user/profile/<id>`），不含查询串。"""
     return XHS_PATH_ID_RE.sub("<id>", urlsplit(str(url or "")).path)
@@ -175,8 +188,8 @@ class XhsAuthorMixin:
         clicked_path = ""
         for attempt in range(1, XHS_AUTHOR_TAB_ATTEMPTS + 1):
             self._creator_attempts = attempt
-            state = await self._note_view_state()
-            point = state.get("author")
+            state = await self._note_view_state(author_id=note.user_id)
+            point = author_click_point(state.get("author_links"))
             if point is None:
                 attempts.append("link_missing")
                 await self._scan_sleep(AUTHOR_RANDOM.uniform(1.0, 2.0))
@@ -199,34 +212,35 @@ class XhsAuthorMixin:
                 self._crawler_page_open_depth -= 1
             self._register_new_page(page, source="crawler_opened")
             return page
-        await self._record_author_tab_failure(attempts, clicked_path)
+        await self._record_author_tab_failure(note, attempts, clicked_path)
         return None
 
-    async def _record_author_tab_failure(self, attempts: List[str], clicked_path: str) -> None:
+    async def _record_author_tab_failure(self, note: Any, attempts: List[str], clicked_path: str) -> None:
         """作者标签页没打开：按最后一次尝试写 author_link_missing / author_tab_timeout 导航诊断，并在日志留一行。
 
-        诊断含详情视图内作者名链接与作者主页链接的个数、可见个数、前 4 个主页链接的 target 与祖先链；点击过时
-        另记点击后主页面路径的模板。不含 token、地址查询串或正文。
+        诊断含详情视图内作者名链接、作者主页链接与指向本篇作者的链接的个数、可见个数，前 4 个主页链接的 target 与
+        祖先链；点击过时另记点击后主页面路径的模板。不含 token、地址查询串或正文。
         """
         page = self.context_page
         outcome = "author_tab_timeout" if attempts and attempts[-1] == "tab_timeout" else "author_link_missing"
         error = ""
         try:
-            links = await dom_author_link_diagnostic(page, self._note_view_roots)
+            links = await dom_author_link_diagnostic(page, self._note_view_roots, note.user_id)
         except Exception as exc:
             links, error = {}, f"author_link_diagnostic: {type(exc).__name__}"
         extra: Dict[str, Any] = {"attempts": attempts, **links}
         if clicked_path:
             extra["clicked_path"] = clicked_path
-        await self._record_navigation_diagnostic(
-            page, stage="creator_profile", outcome=outcome, error=error, extra=extra, redact_page=True,
-        )
+        await self._record_navigation_diagnostic(page, stage="creator_profile", outcome=outcome, error=error, extra=extra)
         fields = [
             f"outcome={outcome}",
             f"attempts={attempts}",
             *(
                 f"{key}={links[key]}"
-                for key in ("view_visible", "author_names", "author_names_visible", "profile_links", "profile_links_visible")
+                for key in (
+                    "view_visible", "author_names", "author_names_visible", "profile_links", "profile_links_visible",
+                    "author_id_links", "author_id_links_visible",
+                )
                 if key in links
             ),
             f"clicked_path={clicked_path or None}",

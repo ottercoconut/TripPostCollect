@@ -336,7 +336,8 @@ child `summary.json` 的
   首页未渲染、搜索未出结果或关键词不符时只允许一次受控恢复：重新打开 `/explore` 再输入；仍失败按
   `runtime_failed/xhs_navigation_recovery_failed:<code>` 停止，不重启浏览器、不换号，也不推进 checkpoint。启动导航会把 `readyState`、DOM/正文长度、主文档状态、页面脚本错误和失败资源的紧凑
   摘要写入 behavior evidence 同目录的 `behavior_evidence.navigation.json`，白屏超时不得只凭外部关闭
-  后的 `TargetClosedError` 分类。
+  后的 `TargetClosedError` 分类。该文件中所有诊断的页面地址与失败资源地址都只留到路径（不含查询串），也不读取
+  页面标题。
 - 搜索卡片和作者链接在匿名页面也可能存在；可见的精确“登录”按钮优先判定为 `login_required`，
   不得仅凭卡片数或作者链接数把匿名页面判为 ready。主页面在搜索导航、行为、登录恢复或作者补全
   等阶段意外关闭时立即以 `xhs_main_page_closed_unexpected` 终止本轮（浏览器生命周期失败；搜索阶段，
@@ -426,10 +427,17 @@ child `summary.json` 的
   的不点。单步滚动不超过列表可见区高度的 0.8 倍；可见区高于 80px 时单步小于可点击带高度，封面中心一步
   越不过整条带，不会跳过一行。已滑到可点击带上方仍未决定的卡片向上补漏，同一卡片补漏 3 次仍够不着即
   `xhs_search_items_unresolved`。
+- 非笔记条目（依据：Mac 人工取证 2026-10-14）：搜索响应里 `model_type` 不是 `note` 的条目（如 `hot_query`
+  相关搜索卡，id 不是 24 位十六进制）在列表中同样占一个 `data-index` 位置，渲染为没有封面的
+  `section.note-item`。截获响应时把带 id 的非笔记条目登记为该会话、该页的已知非笔记条目；扫描读到本会话
+  已知非笔记条目的卡片直接跳过：不计未登记、不作候选、不点击、不写账本，也不参与“本页卡片全部出现过”与
+  “越过本页”的判断（两者只看笔记条目）。该页完成时若有非笔记条目，日志记一行
+  `Search page <k> finished: non_note_items=<响应条目数>, non_note_cards_skipped=<列表中见到的不同 id 数>`。
 - 前端自行重搜（出现新的第 1 页会话）时：目标会话直接采用；丢了“图文”则重新点选并收起面板；关键词
   不符则回首页重新输入；都从新会话顶部继续。会话重置时未完成的页记一次 `batch_complete=false` 的批次
   事件，不发布。
-- 运行级停止（都不推断来源耗尽）：有 `data-note-id` 却连续 2 次读数未登记的卡片为
+- 运行级停止（都不推断来源耗尽）：有 `data-note-id`、却既不是本会话笔记也不是已知非笔记条目（响应里从未
+  出现过），且连续 2 次读数仍未登记的卡片为
   `xhs_search_card_unregistered`；目标会话第 k 页到达时缺第 k−1 页为 `xhs_search_page_gap`；已越过的页内
   未知项从未渲染、或到底部仍有未决定项为 `xhs_search_items_unresolved`；到底部等不到新页，检查可见状态
   并上下抖动 3 次后仍没有新页为 `xhs_search_load_stalled`；搜索响应未知业务码为 `search_request_failed`。
@@ -469,7 +477,12 @@ child `summary.json` 的
 ### 作者补全
 
 - 作者补全只走浏览器：作者停顿后在浮层（repair 为整页）内点击作者名，等待前台新标签页（每次 10 秒，最多
-  两次，都没打开记 `author_tab_not_opened`）。点击前先检查原抓取页，原页已出现登录或验证时直接在原页
+  两次，都没打开记 `author_tab_not_opened`）。作者链接按作者 ID 定位（依据：Mac 人工取证 2026-10-14）：在详情
+  视图根节点内取路径为 `/user/profile/<本篇作者 ID>`（作者 ID 取自 feed 的 note_card，repair 取自页面状态投影）、
+  可见且不在评论区（祖先不含 `.comment-item`、`.comment-inner-container`、`.comments-container`、
+  `.comment-list`）的链接，优先有文字的 `a.name`，没有时用头像链接。旧位置 `div.author` 下隐藏的作者名、
+  评论者链接与作者本人的评论都不点；不能简单取第一个可见的 `.author a.name`（评论者的作者名也在
+  `div.author` 下）。点击前先检查原抓取页，原页已出现登录或验证时直接在原页
   等待，不再点击；作者页遇到登录失效也回到原抓取页恢复会话，成功后整篇重做。作者专属安全验证仍在
   对应页面等待操作人。标签页最短保留 20 秒后写 `close_tab` 关闭，主页面置前。repair 中点击后主页面同页
   跳转到作者页时，读完投影写 `go_back` 返回笔记页。
@@ -546,13 +559,13 @@ child `summary.json` 的
   `search_page`；必需的搜索两档各至少有一次连续性完成。整轮没有新笔记时不要求详情与作者阶段。
 - 任一规则不满足即 `behavior_evidence_ok=false`；门禁平台缺少门禁结果同样失败
   （`visit_validation_missing`）。
-- 失败诊断写入 `behavior_evidence.navigation.json`（页面地址只留到路径、不含标题，不进账本）：
+- 失败诊断写入 `behavior_evidence.navigation.json`（不进账本）：
   `xhs_search_card_unregistered` 停止前追加 `stage=search_scan`、`outcome=card_unregistered`，列出每个未登记
   ID 的卡片结构（`data-index`、有无封面、封面路径首段、`tag.class`、在列表可见区的位置）与它在本轮全部搜索
   响应（含非目标会话与非笔记条目，只在内存中保留）中的出处（会话起始序号、是否目标会话、页码、`model_type`，
   从未出现为 `null`）；作者标签页两次都没打开时追加 `stage=creator_profile`，最后一次没有可见作者名链接为
   `author_link_missing`、点击后新标签页超时为 `author_tab_timeout`（另记点击后主页面路径模板），含浮层内作者名
-  链接与作者主页链接的个数、可见个数、`target` 与祖先链。目标会话第 1 页的触发动作不是本次点选“图文”
+  链接、作者主页链接与指向本篇作者的主页链接的个数、可见个数，以及前 4 个主页链接的 `target` 与祖先链。目标会话第 1 页的触发动作不是本次点选“图文”
   （G1 将失败）时只写一行 warning 日志，带触发动作、`target` 与回车会话的序号，判定不变。
 
 ## 6. 完成检查
@@ -652,7 +665,7 @@ child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_t
 | 首页未渲染、搜索未出结果、点选“图文”未生效（含筛选入口缺失）、面板收不起、关键词不符（各含一次受控恢复） | `xhs_navigation_recovery_failed:explore_not_rendered` / `:search_not_rendered` / `:target_filter_not_applied` / `:filter_panel_not_closed` / `:search_keyword_mismatch` | 运行级 | 否 |
 | 搜索响应未知业务码或不可恢复的请求失败 | `search_request_failed` | 运行级 | 否 |
 | 到底部等不到新页（抖动 3 次后） | `xhs_search_load_stalled` | 运行级 | 否 |
-| 有 `data-note-id` 的卡片连续 2 次读数未登记 | `xhs_search_card_unregistered` | 运行级 | 否 |
+| 有 `data-note-id`、不是本会话笔记或已知非笔记条目的卡片连续 2 次读数未登记 | `xhs_search_card_unregistered` | 运行级 | 否 |
 | 目标会话第 k 页到达时缺第 k−1 页 | `xhs_search_page_gap` | 运行级 | 否 |
 | 已越过的页内未知项从未渲染、补漏 3 次仍够不着或到底部仍未决定 | `xhs_search_items_unresolved` | 运行级 | 否 |
 | 连续 3 篇浮层不出现 | `xhs_overlay_not_opening` | 运行级 | 否 |

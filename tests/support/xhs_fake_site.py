@@ -41,6 +41,8 @@ FILTER_OPTION = {"x": 700.0, "y": 200.0}
 CLOSE_POINT = {"x": 1250.0, "y": 50.0}
 ARROW_POINT = {"x": 760.0, "y": 450.0}
 AUTHOR_POINT = {"x": 980.0, "y": 130.0}
+AVATAR_POINT = {"x": 930.0, "y": 130.0}
+COMMENT_POINT = {"x": 980.0, "y": 600.0}
 
 
 def image_url(note_id: str, index: int) -> str:
@@ -232,8 +234,10 @@ class XhsFakeSite:
     浮层：`details[id]` 为 feed 的 note_card（默认 `detail_card(id)`）。`feed_overrides[id]` 依次替换每次点击：
     "no_overlay" 浮层不出现；"no_feed" 浮层出现但无 feed；"net::…" 为 feed 请求失败；整数为 HTTP 状态码；
     字典为 feed 响应 JSON。`image_overrides[url]` 为 "missing"（从不加载）或 HTTP 状态码。打开浮层加载前两张图，
-    翻到第 k 页再加载第 k+1 张。`author_tab_failures` 次点击作者名不开标签页；`hidden_author_notes` 中笔记的浮层
-    只有隐藏的作者名链接（note_view_state 无作者点）；`author_url_ids[user]` 改写标签页
+    翻到第 k 页再加载第 k+1 张。`author_tab_failures` 次点击作者名不开标签页；浮层内的作者主页链接由
+    `profile_links[id]` 给出（每项 user_id、point（不可见为 None）、comment、named），默认只有一个指向作者的可见作者名
+    （AUTHOR_POINT）；`hidden_author_notes` 中笔记默认的作者名不可见。note_view_state 按脚本参数里的作者 ID 过滤，
+    同页面脚本；点中 AUTHOR_POINT 或 AVATAR_POINT 打开作者页，点中 COMMENT_POINT 只记 `comment_clicks`；`author_url_ids[user]` 改写标签页
     地址里的作者 ID；`creator_projections[user]` 替换投影返回值，`projection_hooks[user]` 在每次读取投影时调用。
     """
 
@@ -280,6 +284,9 @@ class XhsFakeSite:
         self.card_diagnostic_reads: list[list[str]] = []
         self.author_diagnostic_reads = 0
         self.hidden_author_notes: set[str] = set()
+        self.profile_links: dict[str, list[dict[str, Any]]] = {}
+        self.comment_clicks = 0
+        self.click_points: list[tuple[float, float]] = []
         self.list_rect: dict[str, float] | None = None
         self.view_rect: dict[str, float] | None = None
         self.cover_blocked: dict[str, int] = {}
@@ -434,11 +441,11 @@ class XhsFakeSite:
         if name == "card_diagnostic":
             return self.card_diagnostic(arg)
         if name == "author_link_diagnostic":
-            return self.author_link_diagnostic()
+            return self.author_link_diagnostic(arg["author"])
         if name == "search_ready_counts":
             return {"card_count": len(self.rendered_items()), "profile_count": 1}
         if name == "note_view_state":
-            return self.overlay_state()
+            return self.overlay_state(arg["author"])
         raise AssertionError(f"unexpected page script: {name or script[:40]}")
 
     @property
@@ -473,18 +480,20 @@ class XhsFakeSite:
         }
 
     def visible_cards(self) -> list[dict[str, Any]]:
-        """列表可见区内的卡片几何；封面中心落在可见区外或被 cover_blocked 遮住时 cover_hit 为假。不改变状态。"""
+        """列表可见区内的卡片几何；封面中心落在可见区外或被 cover_blocked 遮住时 cover_hit 为假。不改变状态。
+
+        页里的非笔记条目（如 hot_query，Mac 人工取证 2026-10-14）同样占一个列表位置，渲染为没有封面的卡片。
+        """
         view = self.view()
         cards = []
         for index, item in enumerate(self.rendered_items()):
-            if item.get("model_type") not in (None, "note"):
-                continue
             top = self.list_origin() + (index // COLUMNS) * ROW_HEIGHT - self.scroll_y
             bottom = top + ROW_HEIGHT - 20
             visible = max(0, min(bottom, view["bottom"]) - max(top, view["top"]))
             if visible <= 0:
                 continue
             cover = {"x": 160.0 + 300 * (index % COLUMNS), "y": top + 130.0, "width": 240, "height": 240}
+            has_cover = item.get("model_type") in (None, "note")
             cards.append(
                 {
                     "note_id": item["id"],
@@ -492,8 +501,8 @@ class XhsFakeSite:
                     "visible_ratio": visible / (bottom - top),
                     "top": top,
                     "bottom": bottom,
-                    "cover": cover,
-                    "cover_hit": view["top"] <= cover["y"] < view["bottom"]
+                    "cover": cover if has_cover else None,
+                    "cover_hit": has_cover and view["top"] <= cover["y"] < view["bottom"]
                     and self.cover_blocked.get(item["id"], 0) <= 0,
                 }
             )
@@ -514,29 +523,41 @@ class XhsFakeSite:
                     "note_id": note_id,
                     "nodes": 1,
                     "data_index": str(card["data_index"]),
-                    "has_cover": True,
-                    "cover_path": "/search_result",
+                    "has_cover": card["cover"] is not None,
+                    "cover_path": "/search_result" if card["cover"] is not None else None,
                     "card": "section.note-item",
-                    "first_child": "a.cover.mask",
+                    "first_child": "a.cover.mask" if card["cover"] is not None else "div.query-note-wrapper",
                     "position": {"left": 0, "top": round(card["top"] - view["top"]), "width": 240, "height": 340},
                 }
             )
         return result
 
-    def author_link_diagnostic(self) -> dict[str, Any]:
+    def overlay_links(self) -> list[dict[str, Any]]:
+        note_id = self.overlay_note
+        if note_id in self.profile_links:
+            return self.profile_links[note_id]
+        point = None if note_id in self.hidden_author_notes else dict(AUTHOR_POINT)
+        return [{"user_id": str(self.detail(note_id)["user"]["user_id"]), "point": point, "comment": False, "named": True}]
+
+    def author_link_diagnostic(self, author: str) -> dict[str, Any]:
         self.author_diagnostic_reads += 1
         if self.overlay_note is None:
             return {"view_visible": False}
-        hidden = self.overlay_note in self.hidden_author_notes
+        links = self.overlay_links()
+        names = [link for link in links if link["named"]]
+        own = [link for link in links if link["user_id"] == author]
         chain = ["a.name", "div.author", "div.author-container", "div.note-detail-mask", "body", "html"]
-        nodes = [{"visible": not hidden, "target": "_blank", "chain": chain}]
         return {
             "view_visible": True,
-            "author_names": 1,
-            "author_names_visible": int(not hidden),
-            "profile_links": 1,
-            "profile_links_visible": int(not hidden),
-            "profile_link_nodes": nodes,
+            "author_names": len(names),
+            "author_names_visible": sum(link["point"] is not None for link in names),
+            "profile_links": len(links),
+            "profile_links_visible": sum(link["point"] is not None for link in links),
+            "author_id_links": len(own),
+            "author_id_links_visible": sum(link["point"] is not None for link in own),
+            "profile_link_nodes": [
+                {"visible": link["point"] is not None, "target": "_blank", "chain": chain} for link in links[:4]
+            ],
         }
 
     def read_visible_cards(self) -> list[dict[str, Any]]:
@@ -550,6 +571,8 @@ class XhsFakeSite:
     # 动作 ----------------------------------------------------------------------
 
     def click(self, x: float, y: float) -> None:
+        self.click_points.append((x, y))
+
         def near(point: dict[str, float]) -> bool:
             return abs(point["x"] - x) < 20 and abs(point["y"] - y) < 20
 
@@ -558,8 +581,10 @@ class XhsFakeSite:
                 self.close_overlay()
             elif near(ARROW_POINT):
                 self.flip()
-            elif near(AUTHOR_POINT):
+            elif near(AUTHOR_POINT) or near(AVATAR_POINT):
                 self.open_author_tab()
+            elif near(COMMENT_POINT):
+                self.comment_clicks += 1
             return
         card = next(
             (card for card in self.visible_cards() if card["cover"] and card["cover_hit"] and near(card["cover"])), None,
@@ -658,7 +683,7 @@ class XhsFakeSite:
     def detail(self, note_id: str) -> dict[str, Any]:
         return self.details.setdefault(note_id, detail_card(note_id))
 
-    def overlay_state(self) -> dict[str, Any]:
+    def overlay_state(self, author: str = "") -> dict[str, Any]:
         if self.overlay_note is None:
             return {"visible": False}
         total = len(self.detail(self.overlay_note).get("image_list") or [])
@@ -669,7 +694,11 @@ class XhsFakeSite:
             "page_total": total or None,
             "close": dict(CLOSE_POINT),
             "right_arrow": dict(ARROW_POINT) if total > 1 else None,
-            "author": None if self.overlay_note in self.hidden_author_notes else dict(AUTHOR_POINT),
+            "author_links": [
+                {"point": link["point"], "comment": link["comment"], "named": link["named"]}
+                for link in self.overlay_links()
+                if author and link["user_id"] == author
+            ],
         }
 
     def open_overlay(self, note_id: str) -> None:

@@ -155,6 +155,10 @@ class SearchPage:
     has_more: Optional[bool]
     raw_count: int
     items: tuple[SearchItem, ...]
+    # 本页的非笔记条目（model_type 不是 note、带 id，如 hot_query）：列表里同样渲染成卡片，扫描时跳过。
+    non_note_ids: frozenset[str] = frozenset()
+    non_note_count: int = 0
+    non_notes_seen: set[str] = field(default_factory=set)
     observed: set[str] = field(default_factory=set)
     passed: bool = False
     began: bool = False
@@ -167,17 +171,24 @@ class SearchPage:
 
 
 class CardRegistry:
-    """note_id → (页, 项)。会话重置时整体换成新会话；同一会话内以首次出现的页为准，保证页按序完成。"""
+    """note_id → (页, 项)，非笔记条目 id → 页。会话重置时整体换成新会话；同一会话内以首次出现的页为准，
+    保证页按序完成。"""
 
     def __init__(self) -> None:
         self._cards: dict[str, tuple[SearchPage, SearchItem]] = {}
+        self._non_notes: dict[str, SearchPage] = {}
 
     def register(self, page: SearchPage) -> None:
         for item in page.items:
             self._cards.setdefault(item.note_id, (page, item))
+        for item_id in page.non_note_ids:
+            self._non_notes.setdefault(item_id, page)
 
     def get(self, note_id: str) -> Optional[tuple[SearchPage, SearchItem]]:
         return self._cards.get(note_id)
+
+    def non_note(self, item_id: str) -> Optional[SearchPage]:
+        return self._non_notes.get(item_id)
 
 
 class PageTracker:
@@ -638,11 +649,14 @@ class XhsScanMixin:
         if page_no is None or not search_id:
             raise PlatformRuntimeError("XHS search request lacks page or search_id", code="search_request_failed")
         key = (search_id, signature)
+        non_notes: list[str] = []
         for position, raw in enumerate(raw_items):
             if isinstance(raw, dict) and str(raw.get("id") or ""):
                 scan.response_entries.setdefault(str(raw["id"]), []).append(
                     ResponseEntry(captured.seq, key, is_target, page_no, position, str(raw.get("model_type") or "")[:40])
                 )
+                if raw.get("model_type") != "note":
+                    non_notes.append(str(raw["id"]))
         session = scan.sessions.get(key)
         if session is None:
             if page_no != 1:
@@ -666,6 +680,8 @@ class XhsScanMixin:
             has_more=has_more,
             raw_count=len(raw_items),
             items=items,
+            non_note_ids=frozenset(non_notes),
+            non_note_count=len(non_notes),
         )
         session.pages[page_no] = page
         if session is scan.target:
@@ -714,7 +730,10 @@ class XhsScanMixin:
         await self._scroll_feed_step(1, phase="scan")
 
     async def _decide_visible_cards(self, cards: list[dict[str, Any]], metrics: dict[str, Any]) -> bool:
-        """按 data-index 升序：已知滑过、视频记决定、当前页的未知图文就地处理（每页先做一次搜索结果停顿）。"""
+        """按 data-index 升序：已知滑过、视频记决定、当前页的未知图文就地处理（每页先做一次搜索结果停顿）。
+
+        本会话已知的非笔记条目卡片直接跳过：不计未登记、不作候选、不点击，也不参与“越过本页”的判断。
+        """
         scan = self._scan
         tracker = scan.tracker
         accumulator = scan.accumulator
@@ -727,7 +746,11 @@ class XhsScanMixin:
                 continue
             entry = scan.registry.get(note_id)
             if entry is None:
-                unregistered.add(note_id)
+                non_note_page = scan.registry.non_note(note_id)
+                if non_note_page is None:
+                    unregistered.add(note_id)
+                else:
+                    non_note_page.non_notes_seen.add(note_id)
                 continue
             registered.append((card, *entry))
             scan.observed_index[note_id] = int(card.get("data_index", -1))
@@ -755,7 +778,8 @@ class XhsScanMixin:
         return decided
 
     async def _count_unregistered(self, unregistered: set[str], metrics: dict[str, Any]) -> None:
-        """有 data-note-id 却未登记的卡片连续 2 次读数仍未登记即停止；搜索响应仍在读体时不计。"""
+        """有 data-note-id 却既不是本会话笔记、也不是已知非笔记条目的卡片，连续 2 次读数仍未登记即停止；
+        搜索响应仍在读体时不计。"""
         scan = self._scan
         for note_id in list(scan.unregistered):
             if note_id not in unregistered:
@@ -805,7 +829,7 @@ class XhsScanMixin:
 
         cards = [{"note_id": note_id, "dom": dom.get(note_id), "responses": responses(note_id)} for note_id in note_ids]
         await self._record_navigation_diagnostic(
-            page, stage="search_scan", outcome="card_unregistered", error=error, redact_page=True,
+            page, stage="search_scan", outcome="card_unregistered", error=error,
             extra={
                 "scroll_container": metrics.get("scroll_container"),
                 "scroll_y": metrics.get("scroll_y"),
@@ -878,6 +902,11 @@ class XhsScanMixin:
         tracker = scan.tracker
         while (page := tracker.current) is not None and tracker.ready(page):
             tracker.finish(page)
+            if page.non_note_count:
+                logger.info(
+                    f"[XiaoHongShuCrawler.scan] Search page {page.page} finished: non_note_items={page.non_note_count}, "
+                    f"non_note_cards_skipped={len(page.non_notes_seen)}"
+                )
             if page.has_more is False:
                 scan.accumulator.mark_source_exhausted(
                     "has_more_false",

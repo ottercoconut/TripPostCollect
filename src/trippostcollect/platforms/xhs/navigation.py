@@ -69,7 +69,7 @@ def is_search_result_url(url: str) -> bool:
 
 
 def url_without_query(url: object) -> str:
-    """地址只留到路径（去掉查询串与片段）；浮层打开时主页面地址带 xsec_token。"""
+    """地址只留到路径（去掉查询串与片段）：浮层与作者页地址带 xsec_token，结果页地址带关键词。"""
     parts = urlsplit(str(url or ""))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
@@ -213,7 +213,7 @@ class XhsNavigationMixin:
                 {
                     "at": self._utc_now(),
                     "resource_type": str(getattr(request, "resource_type", "") or "")[:80],
-                    "url": request_url[:500],
+                    "url": url_without_query(request_url)[:500],
                     "failure": str(failure or "")[:300],
                 }
             )
@@ -257,8 +257,9 @@ class XhsNavigationMixin:
             )
 
     async def _page_render_diagnostic(self, page: Page) -> Dict:
+        """页面渲染摘要：地址（含失败请求地址）只留到路径，不读页面标题。"""
         diagnostic: Dict = {
-            "url": str(getattr(page, "url", "") or ""),
+            "url": url_without_query(getattr(page, "url", "")),
             "page_errors": list(self._navigation_page_errors[-5:]),
             "request_failures": list(self._navigation_request_failures[-8:]),
         }
@@ -277,17 +278,8 @@ class XhsNavigationMixin:
         response_status: Optional[int] = None,
         error: str = "",
         extra: Optional[Dict] = None,
-        redact_page: bool = False,
     ) -> Dict:
-        """`redact_page` 为真时，页面地址与失败请求地址只留到路径并去掉页面标题（浮层的地址带 token、标题是笔记标题）。"""
         diagnostic = await self._page_render_diagnostic(page)
-        if redact_page:
-            diagnostic["url"] = url_without_query(diagnostic.get("url"))
-            diagnostic.pop("title", None)
-            diagnostic["request_failures"] = [
-                {**failure, "url": url_without_query(failure.get("url"))}
-                for failure in diagnostic.get("request_failures") or []
-            ]
         diagnostic.update(extra or {})
         diagnostic.update(
             {

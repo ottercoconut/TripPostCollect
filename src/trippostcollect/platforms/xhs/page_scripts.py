@@ -61,6 +61,21 @@ _LIST_VIEW = """const listLayout = () => document.querySelector('.ai-feeds-page 
             }
             return { layout, container, root, view, clip: (rect) => intersect(rect, view) };
         };"""
+# 详情视图里的作者链接（Mac 人工取证 2026-10-14）：路径为 /user/profile/<作者 ID> 的链接。旧位置 div.author 下的
+# a.name 隐藏在前，评论者的 a.name 也在 div.author 下，作者本人的评论同样指向作者主页，所以按作者 ID 过滤并排除
+# 评论区（.comment-item 与 .comment-inner-container 来自取证的祖先链，另两个来自互动阶段的评论区选择器）。
+# 以 _AUTHOR_LINKS_SLOT 占位、模块加载时替换，同 _LIST_VIEW。
+_AUTHOR_LINKS_SLOT = "/*author_links*/"
+_AUTHOR_LINKS = """const profileId = (node) => {
+            const match = /^\\/user\\/profile\\/([^/]+)\\/?$/.exec(node.pathname || '');
+            return match ? match[1] : '';
+        };
+        const authorLinks = (root, author) => (author ? Array.from(
+            root.querySelectorAll('a[href*="/user/profile/"]')
+        ).filter((node) => profileId(node) === author) : []);
+        const inComments = (node) => Boolean(
+            node.closest('.comment-item, .comment-inner-container, .comments-container, .comment-list')
+        );"""
 # 失败诊断共用的节点描述：tagOf 为 tag.class（class 内连续 16 个及以上字母数字的片段遮为 <id>），chain 为自身起
 # 至多 6 层祖先的 tagOf。以 _CLASS_CHAIN_SLOT 占位、模块加载时替换，同 _LIST_VIEW。
 _CLASS_CHAIN_SLOT = "/*class_chain*/"
@@ -88,7 +103,6 @@ DOM_SCRIPTS: dict[str, str] = {
     }""",
     "render_diagnostic": """() => ({
         ready_state: document.readyState || '',
-        title: (document.title || '').slice(0, 160),
         dom_length: document.documentElement
             ? document.documentElement.outerHTML.length
             : 0,
@@ -258,9 +272,11 @@ DOM_SCRIPTS: dict[str, str] = {
             scroll_y: window.scrollY,
         };
     }""",
-    # 笔记浮层（R2）：遮罩与正文是否可见、页码 k/N、关闭按钮、右箭头与作者名链接的中心点。
+    # 笔记浮层（R2）：遮罩与正文是否可见、页码 k/N、关闭按钮、右箭头的中心点。
     # 笔记详情视图：浮层（div.note-detail-mask）或 repair 直开的整页；roots 依次尝试，取第一个可见的根。
-    "note_view_state": """(roots) => {
+    # author 为本篇作者 ID 时另给 author_links：根内该作者主页链接（见 _AUTHOR_LINKS）按文档顺序的中心点（不可见为
+    # null）、是否在评论区、是否为有文字的 a.name；不返回文字或地址，选点在 Python 侧。
+    "note_view_state": """({ roots, author }) => {
         const visible = (node) => {
             if (!node) return false;
             const style = window.getComputedStyle(node);
@@ -272,6 +288,7 @@ DOM_SCRIPTS: dict[str, str] = {
             const rect = node.getBoundingClientRect();
             return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
         };
+        /*author_links*/
         const mask = roots.map((selector) => document.querySelector(selector)).find((node) => visible(node));
         if (!mask) return { visible: false };
         const content = ['.note-content', '#detail-desc', '.author a.name']
@@ -296,12 +313,17 @@ DOM_SCRIPTS: dict[str, str] = {
             page_total: pageTotal,
             close: center(document.querySelector('div.close-circle')),
             right_arrow: center(mask.querySelector('div.arrow-controller.right')),
-            author: center(mask.querySelector('.author a.name')),
+            author_links: authorLinks(mask, author).map((node) => ({
+                point: center(node),
+                comment: inComments(node),
+                named: node.classList.contains('name') && (node.textContent || '').trim().length > 0,
+            })),
         };
     }""",
-    # 作者标签页没打开时才调用：详情视图（取法同 note_view_state）内作者名链接与作者主页链接的个数、可见个数，
-    # 前 4 个主页链接的可见性、target 属性与祖先链（见 _CLASS_CHAIN）；不含文字或地址。
-    "author_link_diagnostic": """(roots) => {
+    # 作者标签页没打开时才调用：详情视图（取法同 note_view_state）内作者名链接、作者主页链接、指向本篇作者的
+    # 主页链接（见 _AUTHOR_LINKS）的个数与可见个数，前 4 个主页链接的可见性、target 属性与祖先链（见 _CLASS_CHAIN）；
+    # 不含文字或地址。
+    "author_link_diagnostic": """({ roots, author }) => {
         const visible = (node) => {
             if (!node) return false;
             const style = window.getComputedStyle(node);
@@ -309,16 +331,20 @@ DOM_SCRIPTS: dict[str, str] = {
             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
         };
         /*class_chain*/
+        /*author_links*/
         const mask = roots.map((selector) => document.querySelector(selector)).find((node) => visible(node));
         if (!mask) return { view_visible: false };
         const names = Array.from(mask.querySelectorAll('.author a.name'));
         const links = Array.from(mask.querySelectorAll('a[href*="/user/profile/"]'));
+        const own = authorLinks(mask, author);
         return {
             view_visible: true,
             author_names: names.length,
             author_names_visible: names.filter(visible).length,
             profile_links: links.length,
             profile_links_visible: links.filter(visible).length,
+            author_id_links: own.length,
+            author_id_links_visible: own.filter(visible).length,
             profile_link_nodes: links.slice(0, 4).map((node) => ({
                 visible: visible(node),
                 target: node.hasAttribute('target') ? node.getAttribute('target').slice(0, 16) : null,
@@ -358,7 +384,9 @@ DOM_SCRIPTS: dict[str, str] = {
     }""",
 }
 DOM_SCRIPTS = {
-    name: script.replace(_LIST_VIEW_SLOT, _LIST_VIEW).replace(_CLASS_CHAIN_SLOT, _CLASS_CHAIN)
+    name: script.replace(_LIST_VIEW_SLOT, _LIST_VIEW)
+    .replace(_CLASS_CHAIN_SLOT, _CLASS_CHAIN)
+    .replace(_AUTHOR_LINKS_SLOT, _AUTHOR_LINKS)
     for name, script in DOM_SCRIPTS.items()
 }
 
@@ -640,13 +668,13 @@ async def dom_filter_diagnostic(page: Page) -> dict[str, Any]:
     return state if isinstance(state, dict) else {}
 
 
-async def dom_note_view_state(page: Page, roots: tuple[str, ...]) -> dict[str, Any]:
-    state = await _dom(page, "note_view_state", list(roots))
+async def dom_note_view_state(page: Page, roots: tuple[str, ...], author: str = "") -> dict[str, Any]:
+    state = await _dom(page, "note_view_state", {"roots": list(roots), "author": author})
     return state if isinstance(state, dict) else {"visible": False}
 
 
-async def dom_author_link_diagnostic(page: Page, roots: tuple[str, ...]) -> dict[str, Any]:
-    state = await _dom(page, "author_link_diagnostic", list(roots))
+async def dom_author_link_diagnostic(page: Page, roots: tuple[str, ...], author: str) -> dict[str, Any]:
+    state = await _dom(page, "author_link_diagnostic", {"roots": list(roots), "author": author})
     return state if isinstance(state, dict) else {}
 
 
