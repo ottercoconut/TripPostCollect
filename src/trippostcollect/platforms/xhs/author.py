@@ -63,6 +63,10 @@ XHS_CREATOR_RUNTIME_FINAL_REASONS = frozenset(
 )
 XHS_AUTHOR_TAB_OPEN_SECONDS = 10.0
 XHS_AUTHOR_TAB_ATTEMPTS = 2
+# 操作人 2026-10-14 要求全面提速（#79）：点击作者名之前的节奏停顿；作者标签页每次打开时抽一次保留时长，
+# 从出现起计，读到投影之前不关，抽到的值记在 close_tab 动作的 target.hold_seconds。
+XHS_CREATOR_PROFILE_PAUSE_SECONDS = (2.0, 5.0)
+XHS_AUTHOR_TAB_HOLD_SECONDS = (5.0, 9.0)
 XHS_PROFILE_PATH_RE = re.compile(r"^/user/profile/([^/]+)/?$")
 # 诊断里的路径模板：连续 16 个及以上字母数字的片段遮为 <id>（同页面诊断的 class 遮蔽规则）。
 XHS_PATH_ID_RE = re.compile(r"[A-Za-z0-9]{16,}")
@@ -105,7 +109,7 @@ class XhsAuthorMixin:
         cached = self.creator_profile_cache.get(user_id)
         if cached is not None:
             return cached
-        await self._guarded_pause("creator_profile", 8.0, 18.0)
+        await self._guarded_pause("creator_profile", *XHS_CREATOR_PROFILE_PAUSE_SECONDS)
         self._creator_browser_reason = ""
         self._creator_visit_id = None
         self._creator_attempts = 0
@@ -152,7 +156,7 @@ class XhsAuthorMixin:
         )
 
     async def _get_creator_info_from_browser(self, user_id: str, *, note: Any) -> Optional[Dict]:
-        """在浮层内点击作者名打开前台新标签页，读取投影后按最短保留关闭并置前主页面。"""
+        """在浮层内点击作者名打开前台新标签页，读取投影后按打开时抽到的保留时长关闭并置前主页面。"""
         self._assert_primary_page_alive("creator_profile_browser")
         primary_state = await self._popup_checkpoint_state(self.context_page)
         self._raise_for_terminal_popup_state(primary_state, reason="creator_profile_browser")
@@ -211,6 +215,7 @@ class XhsAuthorMixin:
             finally:
                 self._crawler_page_open_depth -= 1
             self._register_new_page(page, source="crawler_opened")
+            self._extend_new_page_hold(page, AUTHOR_RANDOM.uniform(*XHS_AUTHOR_TAB_HOLD_SECONDS))
             return page
         await self._record_author_tab_failure(note, attempts, clicked_path)
         return None
@@ -248,9 +253,12 @@ class XhsAuthorMixin:
         logger.warning("[XiaoHongShuCrawler.author] Author tab not opened: " + ", ".join(fields))
 
     async def _close_author_tab(self, page: Page, note: Any) -> None:
-        """新标签页最短保留期满后写 close_tab 并关闭，主页面置前；不额外停留。"""
+        """打开时抽到的保留期满后写 close_tab（带抽到的保留秒数）并关闭，主页面置前；不额外停留。"""
         await self._wait_before_page_close(page, reason="creator_profile_cleanup")
-        self._require_capture().action("close_tab", page_role="author_tab", target={"note_id": note.note_id})
+        self._require_capture().action(
+            "close_tab", page_role="author_tab",
+            target={"note_id": note.note_id, "hold_seconds": round(self._new_page_hold_seconds(page), 3)},
+        )
         await self._close_page_with_deadline(page, reason="creator_profile_cleanup")
         try:
             await self.context_page.bring_to_front()

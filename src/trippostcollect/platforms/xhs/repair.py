@@ -41,7 +41,7 @@ from trippostcollect.platforms.xhs.errors import (
     is_xhs_target_closed_failure,
 )
 from trippostcollect.platforms.xhs.models import NoteUrlInfo
-from trippostcollect.platforms.xhs.overlay import NoteVisit, note_card_failure
+from trippostcollect.platforms.xhs.overlay import XHS_NOTE_DETAIL_PAUSE_SECONDS, NoteVisit, note_card_failure
 from trippostcollect.platforms.xhs.page_scripts import XHS_NOTE_PAGE_ROOTS
 from trippostcollect.platforms.xhs.parser import (
     _xhs_image_assets,
@@ -304,7 +304,7 @@ async def _repair_note_once(
             {asset["url"]: asset["source_asset_key"] for asset in assets},
             subject_id=note_id, trigger=trigger, attempt=attempt,
         )
-    await crawler._guarded_pause("note_detail", 4.0, 10.0)
+    await crawler._guarded_pause("note_detail", *XHS_NOTE_DETAIL_PAUSE_SECONDS)
     images = await crawler._collect_note_images(note_id, window, assets) if assets else {}
     creator, note.creator_visit = await crawler._enrich_creator_via_author_tab(note)
     note_detail = {

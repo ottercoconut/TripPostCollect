@@ -92,7 +92,7 @@ async def test_unexpected_xhs_tab_is_held_and_preserved_for_login() -> None:
     assert popup.closed is False
     assert events[0] == ("front", "security-popup")
     assert events[1][0] == "sleep"
-    assert events[1][1] == pytest.approx(20.0)
+    assert events[1][1] == pytest.approx(5.0)
     assert len(events) == 2
 
 
@@ -114,13 +114,13 @@ async def test_extra_tab_present_at_guard_install_is_also_protected() -> None:
     assert crawler._new_pages[id(popup)][2] == "preexisting_extra"
     assert events == [
         ("front", "startup-security-popup"),
-        ("sleep", pytest.approx(20.0)),
+        ("sleep", pytest.approx(5.0)),
     ]
     assert popup.closed is False
 
 
 @pytest.mark.asyncio
-async def test_crawler_opened_xhs_tab_waits_20_seconds_after_failed_scroll() -> None:
+async def test_crawler_opened_xhs_tab_waits_minimum_hold_after_failed_scroll() -> None:
     events: list[tuple[str, object]] = []
     primary = FakePage("search", events)
     context = FakeContext([primary], events)
@@ -138,7 +138,7 @@ async def test_crawler_opened_xhs_tab_waits_20_seconds_after_failed_scroll() -> 
     scroll_index = events.index(("scroll_effect", False))
     sleep_index = next(index for index, event in enumerate(events) if event[0] == "sleep")
     close_index = events.index(("close", "crawler-owned"))
-    assert events[sleep_index][1] == pytest.approx(20.0)
+    assert events[sleep_index][1] == pytest.approx(5.0)
     assert scroll_index < sleep_index < close_index
     assert page.closed is True
 
@@ -160,7 +160,7 @@ async def test_xhs_context_cleanup_waits_for_unexpected_tab() -> None:
 
     sleep_index = next(index for index, event in enumerate(events) if event[0] == "sleep")
     close_index = events.index(("context_close", "context"))
-    assert events[sleep_index][1] == pytest.approx(20.0)
+    assert events[sleep_index][1] == pytest.approx(5.0)
     assert sleep_index < close_index
     assert events.index(("close", "captcha-popup")) < close_index
 
@@ -476,9 +476,9 @@ async def test_popup_seams_are_instance_attributes() -> None:
     assert crawler._get_manual_wait_budget() is crawler._get_manual_wait_budget()
     page = FakePage("explore/popup-ad", events)
     crawler._register_new_page(page, source="platform_opened")
-    clock[0] += 12.0
+    clock[0] += 3.0
     await crawler._close_page_with_deadline(page, reason="unit")
-    # 守卫从登记时刻计 20 秒；剩余 8 秒经实例级 _popup_sleep 等待，关闭不早于 20 秒。
-    assert slept == [8.0]
-    assert page.closed and clock[0] == 5020.0
+    # 守卫从登记时刻计 5 秒；剩余 2 秒经实例级 _popup_sleep 等待，关闭不早于 5 秒。
+    assert slept == [2.0]
+    assert page.closed and clock[0] == 5005.0
     assert ("front", "explore/popup-ad") in events

@@ -388,4 +388,4 @@ async def test_creator_enrichment_caches_successful_author_profile(crawler):
     # 同一作者本轮只点一次：第二篇直接引用首次作者访问，不再停顿或点击。
     assert await crawler._enrich_creator_via_author_tab(second) == (creator, "visit-note-1")
     crawler._get_creator_info_from_browser.assert_awaited_once()
-    crawler._guarded_pause.assert_awaited_once_with("creator_profile", 8.0, 18.0)
+    crawler._guarded_pause.assert_awaited_once_with("creator_profile", 2.0, 5.0)

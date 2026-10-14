@@ -38,6 +38,7 @@ from support.xhs_fake_site import detail_card
 from trippostcollect.application.reporting import _url_contains_keyword
 from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
+from trippostcollect.platforms.xhs import author as xhs_author
 from trippostcollect.platforms.xhs import scan as xhs_scan
 from trippostcollect.platforms.xhs import session as xhs_session
 from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
@@ -120,6 +121,7 @@ def prepare_crawler(monkeypatch, tmp_path, context, page, *, known: list[str]):
     monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", True)
     monkeypatch.setattr(xhs_scan, "merge_pending_behavior_evidence", lambda pending, ports: None)
     monkeypatch.setattr(xhs_session, "XHS_NEW_PAGE_MIN_HOLD_SECONDS", 1.0)
+    monkeypatch.setattr(xhs_author, "XHS_AUTHOR_TAB_HOLD_SECONDS", (1.0, 1.0))
 
     crawler = XiaoHongShuCrawler()
     crawler.context_page = page

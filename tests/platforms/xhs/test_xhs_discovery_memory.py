@@ -18,6 +18,7 @@ from support.xhs_fake_site import (
     AUTHOR_POINT,
     AVATAR_POINT,
     COMMENT_POINT,
+    AuthorTab,
     XhsFakeSite,
     detail_card,
     image_url,
@@ -70,7 +71,8 @@ def prepare_crawler(monkeypatch, tmp_path, *, items, pages=None):
     """目标会话第 1 页为 `items`（或多页 `pages`），其后是 has_more=false 的空页。
 
     返回 (crawler, 发出 feed 请求的笔记 ID 列表, 状态文件, 站点)。暂存与写出替换为内存记录：
-    `crawler.staged[note_id]` 为交给暂存的图片，`crawler.records` 为写出的 JSONL 记录。
+    `crawler.staged[note_id]` 为交给暂存的图片，`crawler.records` 为写出的 JSONL 记录；
+    `crawler.pause_ranges` 为各节奏停顿收到的 (档位, 下限, 上限)。
     """
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps({"events": []}), encoding="utf-8")
@@ -95,7 +97,10 @@ def prepare_crawler(monkeypatch, tmp_path, *, items, pages=None):
     crawler._scan_sleep = _no_sleep
     crawler._popup_sleep = _no_sleep
 
+    crawler.pause_ranges = []
+
     async def guarded_pause(stage, minimum, maximum):
+        crawler.pause_ranges.append((stage, minimum, maximum))
         start = crawler.capture.pause_started()
         continuity = "completed" if stage in {"search_results", "search_page"} else "n/a"
         crawler.capture.pause_finished(stage, start, 0.0, continuity)
@@ -152,7 +157,7 @@ def ledger_lines(crawler) -> list[dict]:
 
 
 def network_sleeps(sleeps: list[float]) -> list[float]:
-    """网络退避的等待；作者标签页的最短保留也经同一时钟，单独剔除。"""
+    """网络退避的等待；作者标签页的保留也经同一时钟（`attach_network_clock` 把它固定为通用最短保留），单独剔除。"""
     return [seconds for seconds in sleeps if seconds != XHS_NEW_PAGE_MIN_HOLD_SECONDS]
 
 
@@ -242,6 +247,12 @@ async def test_overlay_records_pass_the_real_visit_gate(monkeypatch, tmp_path):
     actions = [line["action"] for line in ledger_lines(crawler) if line["kind"] == "action"]
     assert actions.count("flip_image") == 3 and actions.count("click_author") == 2
     assert actions.count("close_tab") == 2 and actions.count("close_overlay") == 3
+    # 操作人 2026-10-14 要求全面提速（#79）后的各档取值。
+    assert set(crawler.pause_ranges) == {
+        ("search_page", 4.0, 10.0), ("search_results", 2.0, 5.0), ("note_detail", 2.0, 4.0), ("creator_profile", 2.0, 5.0),
+    }
+    flips = [line["seconds"] for line in ledger_lines(crawler) if line["kind"] == "pause" and line["stage"] == "note_image"]
+    assert len(flips) == 3 and all(0.8 <= seconds <= 1.8 for seconds in flips)
 
     result = validate_content_visits(
         records,
@@ -256,6 +267,70 @@ async def test_overlay_records_pass_the_real_visit_gate(monkeypatch, tmp_path):
     assert result["content_visit_ok"] is True and result["checked_records"] == 3
     assert result["required_stages"] == ["creator_profile", "note_detail", "search_page", "search_results"]
     assert result["continuity_ok"] is True and result["request_pacing_ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_author_tab_hold_is_drawn_per_open_and_tab_stays_until_projection(monkeypatch, tmp_path):
+    """作者标签页每次打开抽一次 5–9 秒保留，从出现起计，记在 close_tab 的 target.hold_seconds；读到投影之前不关。
+
+    第一位作者 1 秒读完投影，按抽到的保留关闭；第二位作者读投影耗时 12 秒，长于任何抽样，读完即关、不额外停留。
+    """
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["quick", "slow"])
+    clock = {"now": 100.0}
+
+    async def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+
+    crawler._popup_monotonic = lambda: clock["now"]
+    crawler._popup_sleep = sleep
+    draws: list[tuple[float, float, float]] = []
+
+    class RecordingRandom:
+        def uniform(self, low: float, high: float) -> float:
+            value = xhs_author.random.uniform(low, high)
+            draws.append((low, high, value))
+            return value
+
+    monkeypatch.setattr(xhs_author, "AUTHOR_RANDOM", RecordingRandom())
+    read_done: dict[str, float] = {}
+
+    def slow_read(user_id: str, seconds: float):
+        def hook() -> None:
+            clock["now"] += seconds
+            read_done[user_id] = clock["now"]
+        return hook
+
+    site.projection_hooks["author-quick"] = slow_read("author-quick", 1.0)
+    site.projection_hooks["author-slow"] = slow_read("author-slow", 12.0)
+    closed_at: dict[str, float] = {}
+
+    async def close(tab) -> None:
+        closed_at[tab.user_id] = clock["now"]
+        tab.closed = True
+
+    monkeypatch.setattr(AuthorTab, "close", close)
+
+    await crawler.search()
+
+    assert last_stop(state_path)["stop_reason"] == "source_exhausted"
+    assert [tab.user_id for tab in site.author_tabs] == ["author-quick", "author-slow"]
+    assert [(low, high) for low, high, _ in draws] == [(5.0, 9.0), (5.0, 9.0)]
+    holds = [value for _, _, value in draws]
+    assert all(5.0 <= value <= 9.0 for value in holds)
+    lines = ledger_lines(crawler)
+    closes = [line for line in lines if line.get("action") == "close_tab"]
+    assert [line["target"]["hold_seconds"] for line in closes] == [round(value, 3) for value in holds]
+    creator_visits = [line for line in lines if line["kind"] == "visit" and line["stage"] == "creator_profile"]
+    assert [line["seq"] < close["seq"] for line, close in zip(creator_visits, closes, strict=True)] == [True, True]
+    for tab, hold in zip(site.author_tabs, holds, strict=True):
+        opened_at = crawler._new_pages[id(tab)][1]
+        assert crawler._new_pages[id(tab)][3] == hold
+        assert closed_at[tab.user_id] >= read_done[tab.user_id]
+        assert closed_at[tab.user_id] == pytest.approx(max(opened_at + hold, read_done[tab.user_id]))
+    quick, slow = site.author_tabs
+    assert closed_at["author-quick"] == pytest.approx(crawler._new_pages[id(quick)][1] + holds[0])
+    assert closed_at["author-slow"] == pytest.approx(read_done["author-slow"])
 
 
 @pytest.mark.asyncio
@@ -915,6 +990,7 @@ def attach_network_clock(monkeypatch, crawler, *, wait_seconds: float) -> list[f
 
     crawler._popup_monotonic = monotonic
     crawler._popup_sleep = sleep
+    monkeypatch.setattr(xhs_author, "XHS_AUTHOR_TAB_HOLD_SECONDS", (XHS_NEW_PAGE_MIN_HOLD_SECONDS,) * 2)
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_WAIT_SECONDS", str(wait_seconds))
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MIN_SECONDS", "2")
     monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MAX_SECONDS", "4")

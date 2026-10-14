@@ -63,6 +63,8 @@ logger = logging.getLogger("MediaCrawler")
 XHS_SEARCH_READY_TIMEOUT_SECONDS = 90.0
 XHS_CONTINUITY_VERIFY_WAIT_SECONDS = 600.0
 XHS_CONTINUITY_VERIFY_POLL_SECONDS = 2.0
+# 搜索两档节奏停顿之后连续性行为的停顿（操作人 2026-10-14 要求全面提速，#79）。
+XHS_CONTINUITY_PAUSE_SECONDS = (0.8, 2.0)
 XHS_POST_INTERACTION_MODES = frozenset({"comment-scroll", "like-one", "random"})
 XHS_OPERATOR_CHALLENGES = frozenset({"captcha_or_verify", "login_required"})
 # §3.8.2：461/471 之后等待验证界面出现的上限（不是人工等待），出现后转入共享人工预算。
@@ -614,7 +616,7 @@ async def run_xhs_continuity_behavior(
 
     events: list[dict[str, Any]] = []
     profile = load_behavior_profile("xhs_guarded", strict=True)
-    await human_pause(page, (1.5, 4.5), reason=f"continuity_{stage}", log=events)
+    await human_pause(page, XHS_CONTINUITY_PAUSE_SECONDS, reason=f"continuity_{stage}", log=events)
     await random_mouse_moves(page, profile, events)
     final_text, final_markers = await visible_page_state(page)
     final_challenge = visible_challenge(final_markers)

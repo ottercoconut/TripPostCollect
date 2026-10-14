@@ -54,7 +54,7 @@ DEFAULT_PROFILES: dict[str, BehaviorProfile] = {
     ),
     "xhs_guarded": BehaviorProfile(
         name="xhs_guarded",
-        list_dwell_seconds=(45, 120),
+        list_dwell_seconds=(8, 20),
         detail_dwell_seconds=(90, 240),
         inter_detail_cooldown_seconds=(600, 1800),
         comment_visit_probability=0.0,

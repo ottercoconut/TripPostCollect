@@ -32,7 +32,8 @@ from trippostcollect.runtime.page_capture import CapturedImage, ImageWindow
 
 logger = logging.getLogger("MediaCrawler")
 
-XHS_IMAGE_FLIP_SECONDS = (1.5, 3.0)
+# 每次翻到下一张之前的停顿（操作人 2026-10-14 要求全面提速，#79）。
+XHS_IMAGE_FLIP_SECONDS = (0.8, 1.8)
 XHS_IMAGE_SETTLE_SECONDS = 15.0
 # 约四分之一的翻图改按 → 键（R2 已证实可用），其余点右箭头；不点图片本身。
 XHS_IMAGE_KEY_FLIP_SHARE = 0.25
@@ -53,7 +54,7 @@ class XhsMediaMixin:
         return await window.collect(XHS_IMAGE_SETTLE_SECONDS)
 
     async def _flip_note_images(self, note_id: str, total: int) -> None:
-        """每次翻图前停 1.5–3 秒（只写账本 note_image 停顿），按页码 k/N 核实前进；不前进时换一种方式再试一次。"""
+        """每次翻图前按 XHS_IMAGE_FLIP_SECONDS 停顿（只写账本 note_image 停顿），按页码 k/N 核实前进；不前进时换一种方式再试一次。"""
         capture = self._require_capture()
         state = await self._note_view_state()
         current = int(state.get("page_index") or 1)

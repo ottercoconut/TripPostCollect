@@ -48,6 +48,8 @@ logger = logging.getLogger("MediaCrawler")
 
 FEED_RULE = XHS_FEED_RULE.name
 XHS_DETAIL_CAPTURE_SECONDS = 20.0
+# 浮层正文可见后、翻图前的详情停顿（操作人 2026-10-14 要求全面提速，#79）；repair 整页沿用。
+XHS_NOTE_DETAIL_PAUSE_SECONDS = (2.0, 4.0)
 XHS_DETAIL_ATTEMPTS = 2
 XHS_OVERLAY_FAIL_STREAK = 3
 XHS_OVERLAY_CLOSE_SECONDS = 5.0
@@ -237,7 +239,7 @@ class XhsOverlayMixin:
                 subject_id=note_id, trigger=trigger, attempt=len(run.clicks),
             )
         await self._wait_overlay(lambda state: bool(state.get("content_visible")), XHS_OVERLAY_CLOSE_SECONDS)
-        await self._guarded_pause("note_detail", 4.0, 10.0)
+        await self._guarded_pause("note_detail", *XHS_NOTE_DETAIL_PAUSE_SECONDS)
         images = await self._collect_note_images(note_id, run.window, assets) if assets else {}
 
         creator: dict[str, Any] = {}

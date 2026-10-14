@@ -140,7 +140,7 @@ class XiaoHongShuCrawler(
         self._overlay_fail_streak = 0
         self._crawler_page_open_depth = 0
         self._initial_pages: Dict[int, Page] = {}
-        self._new_pages: Dict[int, tuple[Page, float, str]] = {}
+        self._new_pages: Dict[int, tuple[Page, float, str, float]] = {}
         self._new_page_guard_tasks: Dict[int, Task[None]] = {}
         self._navigation_diagnostics: List[Dict] = []
         self._navigation_observed_pages: set[int] = set()

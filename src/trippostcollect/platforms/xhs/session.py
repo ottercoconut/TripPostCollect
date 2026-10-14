@@ -61,7 +61,8 @@ from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_pat
 logger = logging.getLogger("MediaCrawler")
 
 
-XHS_NEW_PAGE_MIN_HOLD_SECONDS = 20.0
+# 普通新标签页从出现起的最短保留（操作人 2026-10-14 要求全面提速，#79）；作者标签页另按打开时抽到的时长延长。
+XHS_NEW_PAGE_MIN_HOLD_SECONDS = 5.0
 # 登录 UI 确认后等待前端自发的 user/me（guest=false）；超时只允许一次整页 reload。
 XHS_LOGIN_ME_CONFIRM_SECONDS = 30.0
 _XHS_MANUAL_CHECKPOINT_TEXTS = (
@@ -182,11 +183,27 @@ class XhsSessionMixin:
         if page_id in self._new_pages:
             return
         opened_at = self._popup_monotonic()
-        self._new_pages[page_id] = (page, opened_at, source)
-        task = asyncio.create_task(self._hold_new_page(page, opened_at, source))
+        self._new_pages[page_id] = (page, opened_at, source, XHS_NEW_PAGE_MIN_HOLD_SECONDS)
+        task = asyncio.create_task(self._hold_new_page(page, source))
         self._new_page_guard_tasks[page_id] = task
 
-    async def _hold_new_page(self, page: Page, opened_at: float, source: str) -> None:
+    def _extend_new_page_hold(self, page: Page, seconds: float) -> None:
+        """把已登记新标签页的保留时长（从出现起计）改为 `seconds`，不短于通用最短保留。"""
+        page_id = id(page)
+        entry = self._new_pages.get(page_id)
+        if entry is None or entry[0] is not page:
+            return
+        self._new_pages[page_id] = (*entry[:3], max(XHS_NEW_PAGE_MIN_HOLD_SECONDS, float(seconds)))
+
+    def _new_page_hold_seconds(self, page: Page) -> float:
+        entry = self._new_pages.get(id(page))
+        return entry[3] if entry is not None and entry[0] is page else XHS_NEW_PAGE_MIN_HOLD_SECONDS
+
+    def _new_page_hold_remaining(self, page: Page) -> float:
+        _, opened_at, _, hold_seconds = self._new_pages[id(page)]
+        return max(0.0, hold_seconds - (self._popup_monotonic() - opened_at))
+
+    async def _hold_new_page(self, page: Page, source: str) -> None:
         """Surface any new tab and keep it alive without trying to classify it."""
         try:
             await page.bring_to_front()
@@ -195,11 +212,7 @@ class XhsSessionMixin:
                 "[XiaoHongShuCrawler] Could not bring new tab to front: "
                 f"{type(exc).__name__}: {exc}"
             )
-        remaining = max(
-            0.0,
-            XHS_NEW_PAGE_MIN_HOLD_SECONDS
-            - (self._popup_monotonic() - opened_at),
-        )
+        remaining = self._new_page_hold_remaining(page)
         logger.warning(
             "[XiaoHongShuCrawler] New browser tab opened; keeping it visible "
             f"for at least {XHS_NEW_PAGE_MIN_HOLD_SECONDS:.0f}s before any "
@@ -235,12 +248,8 @@ class XhsSessionMixin:
                     "[XiaoHongShuCrawler] New-tab guard task failed; "
                     f"enforcing remaining hold directly: {type(exc).__name__}: {exc}"
                 )
-        _, opened_at, source = self._new_pages[page_id]
-        remaining = max(
-            0.0,
-            XHS_NEW_PAGE_MIN_HOLD_SECONDS
-            - (self._popup_monotonic() - opened_at),
-        )
+        source = self._new_pages[page_id][2]
+        remaining = self._new_page_hold_remaining(page)
         if remaining > 0:
             await self._popup_sleep(remaining)
         logger.info(
@@ -252,16 +261,10 @@ class XhsSessionMixin:
     async def _wait_for_all_new_page_guards(self) -> None:
         """Drain all new-tab hold periods before Playwright or the context can close them."""
         while True:
-            guarded_pages = [
-                page
-                for page, _, _ in self._new_pages.values()
-                if not self._page_is_closed(page)
-            ]
             pending = [
                 page
-                for page in guarded_pages
-                if self._popup_monotonic() - self._new_pages[id(page)][1]
-                < XHS_NEW_PAGE_MIN_HOLD_SECONDS
+                for page, *_ in self._new_pages.values()
+                if not self._page_is_closed(page) and self._new_page_hold_remaining(page) > 0
             ]
             if not pending:
                 return

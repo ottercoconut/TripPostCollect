@@ -690,7 +690,7 @@ def test_page_pause_before_behavior_evidence_is_a_full_guarded_pause(tmp_path, m
     crawler.capture = make_capture(tmp_path)
     crawler._pending_behavior_evidence = {}
 
-    seconds = asyncio.run(crawler._guarded_pause("search_page", 12.0, 30.0))
+    seconds = asyncio.run(crawler._guarded_pause("search_page", *xhs_scan.XHS_SEARCH_PAGE_PAUSE_SECONDS))
 
     assert seconds == 0.0 and moves == ["xhs_guarded"]
     assert not evidence_path.exists()
@@ -708,7 +708,7 @@ def test_page_pause_before_behavior_evidence_is_a_full_guarded_pause(tmp_path, m
 
     # 行为证据存在后不再暂存：照常追加到证据文件。
     crawler._pending_behavior_evidence = None
-    asyncio.run(crawler._guarded_pause("search_results", 6.0, 14.0))
+    asyncio.run(crawler._guarded_pause("search_results", *xhs_scan.XHS_SEARCH_RESULTS_PAUSE_SECONDS))
     merged = json.loads(evidence_path.read_text())
     assert [event["stage"] for event in merged["request_pacing_events"]][-1] == "search_results"
 
@@ -723,7 +723,7 @@ def test_page_pause_without_evidence_or_pending_is_still_rejected(tmp_path, monk
     crawler.capture = make_capture(tmp_path)
 
     with pytest.raises(RuntimeError, match="cannot update XHS request pacing evidence"):
-        asyncio.run(crawler._guarded_pause("search_page", 12.0, 30.0))
+        asyncio.run(crawler._guarded_pause("search_page", *xhs_scan.XHS_SEARCH_PAGE_PAUSE_SECONDS))
 
 
 def test_full_scan_failure_mapping_keeps_unknown_errors_raised():

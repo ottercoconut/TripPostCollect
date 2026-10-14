@@ -58,6 +58,10 @@ logger = logging.getLogger("MediaCrawler")
 
 SEARCH_RULE = XHS_SEARCH_RULE.name
 XHS_SEARCH_LOAD_WAIT_SECONDS = 20.0
+# 搜索两档节奏停顿（操作人 2026-10-14 要求全面提速，#79）：每页第一张未处理卡片点击前；目标会话页到达后、
+# 下一次程序滚动之前。
+XHS_SEARCH_RESULTS_PAUSE_SECONDS = (2.0, 5.0)
+XHS_SEARCH_PAGE_PAUSE_SECONDS = (4.0, 10.0)
 XHS_SCROLL_SETTLE_SECONDS = (0.4, 1.2)
 # 滚轮落点在结果列表与列表可见区的相交矩形内，横纵各向内缩这一比例；取不到矩形时按列表可见区比例落点。
 XHS_SCROLL_POINTER_INSET = 0.2
@@ -771,7 +775,7 @@ class XhsScanMixin:
                 decided = True
                 continue
             if not current.results_paused:
-                await self._guarded_pause("search_results", 6.0, 14.0)
+                await self._guarded_pause("search_results", *XHS_SEARCH_RESULTS_PAUSE_SECONDS)
                 current.results_paused = True
             await self._process_note_card(item, current, card)
             return True
@@ -1044,7 +1048,7 @@ class XhsScanMixin:
             if owed <= scan.page_pause_cleared_seq:
                 return
             covered = capture.ledger.last_seq
-            await self._guarded_pause("search_page", 12.0, 30.0)
+            await self._guarded_pause("search_page", *XHS_SEARCH_PAGE_PAUSE_SECONDS)
             scan.page_pause_cleared_seq = covered
 
     async def _scroll_feed_step(self, direction: int, *, phase: str) -> dict[str, Any]:
