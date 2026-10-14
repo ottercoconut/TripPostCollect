@@ -220,8 +220,10 @@ class XhsFakeSite:
 
     选项：`apply_filter_works=False` 点选“图文”不产生目标会话；`panel_closes=False` 面板收不起；
     `entry_delay_reads` 为结果页上前几次读筛选状态时入口尚未渲染（None 为始终不出现）；
-    `option_missing_opens` 为前几次打开面板时没有“图文”选项；`list_rect` 为滚动度量里结果列表与视口的
-    相交矩形（None 时不给，扫描按视口比例落点），`wheel_points` 记下每次滚轮时的鼠标位置；
+    `option_missing_opens` 为前几次打开面板时没有“图文”选项；`list_rect` 为滚动度量里结果列表与列表可见区的
+    相交矩形（None 时不给，扫描按可见区比例落点），`wheel_points` 记下每次滚轮时的鼠标位置；`view_rect` 为列表
+    滚动容器的可见区（None 为整页滚动，可见区即视口；给出时列表在容器内自顶部排起、滚动位置是容器的）；
+    `cover_blocked[id]` 为这张卡片可见时前几次读数的封面中心被遮住（cover_hit 为假，点击落空）；
     `typed_keyword` 让回车请求体里的关键词与目标不同；`stall_after` 页之后前端不再加载；
     `hot_query` 每页附一条热搜项（无 DOM 卡片）。`search_overrides[k]` 依次替换目标会话第 k 页的响应：
     字符串为请求失败文本（requestfailed），字典为响应 JSON；被替换的页不算已加载，前端下次滚动会重发。
@@ -273,6 +275,8 @@ class XhsFakeSite:
         self.panel_opens = 0
         self.diagnostic_reads = 0
         self.list_rect: dict[str, float] | None = None
+        self.view_rect: dict[str, float] | None = None
+        self.cover_blocked: dict[str, int] = {}
         self.wheel_points: list[tuple[float, float]] = []
         self.session_counter = 0
         self.search_id = ""
@@ -328,9 +332,22 @@ class XhsFakeSite:
         rendered = [item for items in self.loaded for item in items]
         return [{"id": note_id} for note_id in self.unregistered_ids] + rendered
 
+    def view(self) -> dict[str, float]:
+        return dict(self.view_rect) if self.view_rect else {
+            "left": 0.0, "top": 0.0, "right": float(VIEW_WIDTH), "bottom": float(VIEW_HEIGHT),
+        }
+
+    def view_height(self) -> int:
+        view = self.view()
+        return int(view["bottom"] - view["top"])
+
+    def list_origin(self) -> float:
+        """第 0 行卡片在滚动位置为 0 时的视口纵坐标：整页滚动自 LIST_TOP 起，容器滚动自容器顶部起。"""
+        return self.view()["top"] if self.view_rect else float(LIST_TOP)
+
     def scroll_height(self) -> int:
         rows = -(-len(self.rendered_items()) // COLUMNS)
-        return LIST_TOP + rows * ROW_HEIGHT + FOOTER
+        return int(self.list_origin() - self.view()["top"]) + rows * ROW_HEIGHT + FOOTER
 
     async def goto(self, url: str, **kwargs: Any) -> None:
         self.page.url = url
@@ -392,11 +409,14 @@ class XhsFakeSite:
         if name == "search_layout":
             return {"visible": self.on_results}
         if name == "scroll_metrics":
+            view = self.view()
             return {
+                "scroll_container": "element" if self.view_rect else "document",
                 "scroll_y": self.scroll_y,
-                "inner_height": VIEW_HEIGHT,
-                "inner_width": VIEW_WIDTH,
+                "inner_height": self.view_height(),
+                "inner_width": int(view["right"] - view["left"]),
                 "scroll_height": self.scroll_height(),
+                "view_rect": view,
                 "list_rect": dict(self.list_rect) if self.list_rect else None,
             }
         if name == "filter_state":
@@ -404,7 +424,7 @@ class XhsFakeSite:
         if name == "filter_diagnostic":
             return self.filter_diagnostic()
         if name == "visible_cards":
-            return self.visible_cards()
+            return self.read_visible_cards()
         if name == "search_ready_counts":
             return {"card_count": len(self.rendered_items()), "profile_count": 1}
         if name == "note_view_state":
@@ -443,15 +463,18 @@ class XhsFakeSite:
         }
 
     def visible_cards(self) -> list[dict[str, Any]]:
+        """列表可见区内的卡片几何；封面中心落在可见区外或被 cover_blocked 遮住时 cover_hit 为假。不改变状态。"""
+        view = self.view()
         cards = []
         for index, item in enumerate(self.rendered_items()):
             if item.get("model_type") not in (None, "note"):
                 continue
-            top = LIST_TOP + (index // COLUMNS) * ROW_HEIGHT - self.scroll_y
+            top = self.list_origin() + (index // COLUMNS) * ROW_HEIGHT - self.scroll_y
             bottom = top + ROW_HEIGHT - 20
-            visible = max(0, min(bottom, VIEW_HEIGHT) - max(top, 0))
+            visible = max(0, min(bottom, view["bottom"]) - max(top, view["top"]))
             if visible <= 0:
                 continue
+            cover = {"x": 160.0 + 300 * (index % COLUMNS), "y": top + 130.0, "width": 240, "height": 240}
             cards.append(
                 {
                     "note_id": item["id"],
@@ -459,9 +482,19 @@ class XhsFakeSite:
                     "visible_ratio": visible / (bottom - top),
                     "top": top,
                     "bottom": bottom,
-                    "cover": {"x": 160.0 + 300 * (index % COLUMNS), "y": top + 130.0, "width": 240, "height": 240},
+                    "cover": cover,
+                    "cover_hit": view["top"] <= cover["y"] < view["bottom"]
+                    and self.cover_blocked.get(item["id"], 0) <= 0,
                 }
             )
+        return cards
+
+    def read_visible_cards(self) -> list[dict[str, Any]]:
+        """页面脚本读数：可见卡片的遮挡计数各减一。"""
+        cards = self.visible_cards()
+        for card in cards:
+            if self.cover_blocked.get(card["note_id"], 0) > 0:
+                self.cover_blocked[card["note_id"]] -= 1
         return cards
 
     # 动作 ----------------------------------------------------------------------
@@ -478,7 +511,9 @@ class XhsFakeSite:
             elif near(AUTHOR_POINT):
                 self.open_author_tab()
             return
-        card = next((card for card in self.visible_cards() if card["cover"] and near(card["cover"])), None)
+        card = next(
+            (card for card in self.visible_cards() if card["cover"] and card["cover_hit"] and near(card["cover"])), None,
+        )
         if self.on_results and card is not None:
             self.open_overlay(card["note_id"])
         elif not self.on_results and near(SEARCH_BOX):
@@ -510,7 +545,7 @@ class XhsFakeSite:
         self.respond_page(1)
 
     def wheel(self, delta_y: float) -> None:
-        maximum = max(0, self.scroll_height() - VIEW_HEIGHT)
+        maximum = max(0, self.scroll_height() - self.view_height())
         self.scroll_y = int(min(max(0, self.scroll_y + delta_y), maximum))
         self.maybe_load_next()
 
@@ -522,7 +557,7 @@ class XhsFakeSite:
             return
         if self.stall_after is not None and next_page > self.stall_after:
             return
-        if self.scroll_y + VIEW_HEIGHT >= self.scroll_height() - PREFETCH_PX:
+        if self.scroll_y + self.view_height() >= self.scroll_height() - PREFETCH_PX:
             self.respond_page(next_page)
 
     def respond_page(self, number: int, *, status: int = 200, failure: str | None = None) -> None:

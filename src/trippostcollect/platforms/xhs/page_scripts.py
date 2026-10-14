@@ -17,6 +17,51 @@ from playwright.async_api import Page
 XHS_OVERLAY_ROOTS = ("div.note-detail-mask",)
 XHS_NOTE_PAGE_ROOTS = ("div.note-detail-mask", "#noteContainer")
 
+# 结果列表视图（Mac 人工测量 2026-10-13）：AI 对话布局的列表在 .search-layout 的某个祖先容器内滚动、window 不动，
+# 对话栏关闭后整页滚动。listLayout 取 .ai-feeds-page 下的 .search-layout（退而任一个）；listView 从它（含自身）向上
+# 找第一个 overflow-y 可滚动且确有可滚内容的元素作滚动容器，到文档根为止（body 只在根不是 visible 时才算自己
+# 滚动），找不到为文档；view 是容器可见区（padding 盒）与视口的交集，文档时为整个视口；clip 求矩形与 view 的交集。
+# 登记表里的脚本以 _LIST_VIEW_SLOT 占位、模块加载时替换（登记表须保持字面量字符串，见 tests/test_fetch_boundary.py）。
+_LIST_VIEW_SLOT = "/*list_view*/"
+_LIST_VIEW = """const listLayout = () => document.querySelector('.ai-feeds-page .search-layout')
+            || document.querySelector('.search-layout');
+        const listView = () => {
+            const layout = listLayout();
+            const html = document.documentElement;
+            const root = document.scrollingElement || html;
+            const scrolls = (node) => {
+                if (node === document.body && window.getComputedStyle(html).overflowY === 'visible') return false;
+                return ['auto', 'scroll', 'overlay'].includes(window.getComputedStyle(node).overflowY)
+                    && node.scrollHeight > node.clientHeight + 1;
+            };
+            let container = null;
+            for (let node = layout; node && node !== root && node !== html; node = node.parentElement) {
+                if (scrolls(node)) {
+                    container = node;
+                    break;
+                }
+            }
+            const intersect = (a, b) => {
+                if (!a || !b) return null;
+                const left = Math.max(a.left, b.left);
+                const top = Math.max(a.top, b.top);
+                const right = Math.min(a.right, b.right);
+                const bottom = Math.min(a.bottom, b.bottom);
+                return right > left && bottom > top ? { left, top, right, bottom } : null;
+            };
+            const viewport = { left: 0, top: 0, right: window.innerWidth || 0, bottom: window.innerHeight || 0 };
+            let view = intersect(viewport, viewport);
+            if (container) {
+                const rect = container.getBoundingClientRect();
+                const left = rect.left + container.clientLeft;
+                const top = rect.top + container.clientTop;
+                view = intersect(
+                    { left, top, right: left + container.clientWidth, bottom: top + container.clientHeight }, viewport,
+                );
+            }
+            return { layout, container, root, view, clip: (rect) => intersect(rect, view) };
+        };"""
+
 DOM_SCRIPTS: dict[str, str] = {
     # 二维码只作为“已就绪”的布尔信号：可见且 src 非空；不读取、不保存图片内容。
     "qr_ready": """() => {
@@ -42,51 +87,46 @@ DOM_SCRIPTS: dict[str, str] = {
         visibility_state: document.visibilityState || '',
     })""",
     # 以下选择器定值依据 V1、V16、R2（issuecomment-6107337442、6106301408）。
-    # 视口内带 data-note-id 的卡片：只读 ID、序号与几何，不读内容。
+    # 结果列表内（取不到 .search-layout 时为全文档）与列表可见区相交、带 data-note-id 的卡片：只读 ID、序号与几何，
+    # 不读内容。visible_ratio 按卡片与 view 的交集计算；cover_hit 为封面中心点 elementFromPoint 落在这张卡片内
+    # （被固定头部、对话栏或弹层遮住为假）。
     "visible_cards": """() => {
-        const height = window.innerHeight || document.documentElement.clientHeight || 0;
-        return Array.from(document.querySelectorAll('section.note-item')).map((node) => {
+        /*list_view*/
+        const { layout, clip } = listView();
+        return Array.from((layout || document).querySelectorAll('section.note-item')).map((node) => {
             const rect = node.getBoundingClientRect();
             const index = Number(node.getAttribute('data-index'));
-            const visible = Math.max(0, Math.min(rect.bottom, height) - Math.max(rect.top, 0));
+            const shown = clip(rect);
             const cover = node.querySelector('a.cover');
             const coverRect = cover ? cover.getBoundingClientRect() : null;
+            const x = coverRect ? coverRect.left + coverRect.width / 2 : 0;
+            const y = coverRect ? coverRect.top + coverRect.height / 2 : 0;
+            const hit = shown && coverRect ? document.elementFromPoint(x, y) : null;
             return {
                 note_id: node.getAttribute('data-note-id') || '',
                 data_index: Number.isFinite(index) ? index : -1,
-                visible_ratio: rect.height > 0 ? visible / rect.height : 0,
+                visible_ratio: shown && rect.height > 0 ? (shown.bottom - shown.top) / rect.height : 0,
                 top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right,
-                cover: coverRect ? {
-                    x: coverRect.left + coverRect.width / 2,
-                    y: coverRect.top + coverRect.height / 2,
-                    width: coverRect.width, height: coverRect.height,
-                } : null,
+                cover: coverRect ? { x, y, width: coverRect.width, height: coverRect.height } : null,
+                cover_hit: Boolean(hit && node.contains(hit)),
             };
         }).filter((card) => card.note_id && card.visible_ratio > 0);
     }""",
-    # list_rect 是结果列表（.search-layout）与视口相交的矩形，滚轮落点限定在其中；AI 对话布局右侧的对话栏
-    # 可独立滚动，不能让滚轮落在上面。取不到时为 null。
+    # 列表的滚动位置：容器为元素时取它的 scrollTop / clientHeight / scrollHeight，为文档时取 window 与文档根。
+    # view_rect 是列表可见区（容器可见区与视口的交集）；list_rect 是结果列表（.search-layout）与 view_rect 的交集，
+    # 滚轮落点限定在其中（AI 对话布局右侧的对话栏可独立滚动，不能让滚轮落在上面），取不到时为 null；
+    # scroll_container 只用于诊断。
     "scroll_metrics": """() => {
-        const root = document.scrollingElement || document.documentElement;
-        const width = window.innerWidth || 0;
-        const height = window.innerHeight || 0;
-        const layout = document.querySelector('.ai-feeds-page .search-layout')
-            || document.querySelector('.search-layout');
-        let listRect = null;
-        if (layout) {
-            const rect = layout.getBoundingClientRect();
-            const left = Math.max(rect.left, 0);
-            const top = Math.max(rect.top, 0);
-            const right = Math.min(rect.right, width);
-            const bottom = Math.min(rect.bottom, height);
-            if (right > left && bottom > top) listRect = { left, top, right, bottom };
-        }
+        /*list_view*/
+        const { layout, container, root, view, clip } = listView();
         return {
-            scroll_y: Math.round(window.scrollY || root.scrollTop || 0),
-            inner_height: height,
-            inner_width: width,
-            scroll_height: Math.round(root.scrollHeight || 0),
-            list_rect: listRect,
+            scroll_container: container ? 'element' : 'document',
+            scroll_y: Math.round(container ? container.scrollTop : (window.scrollY || root.scrollTop || 0)),
+            inner_height: container ? container.clientHeight : (window.innerHeight || 0),
+            inner_width: container ? container.clientWidth : (window.innerWidth || 0),
+            scroll_height: Math.round((container || root).scrollHeight || 0),
+            view_rect: view,
+            list_rect: layout ? clip(layout.getBoundingClientRect()) : null,
         };
     }""",
     "search_box": """() => {
@@ -103,8 +143,8 @@ DOM_SCRIPTS: dict[str, str] = {
         };
     }""",
     "search_layout": """() => {
-        const layout = document.querySelector('.ai-feeds-page .search-layout')
-            || document.querySelector('.search-layout');
+        /*list_view*/
+        const layout = listLayout();
         if (!layout) return { visible: false };
         const rect = layout.getBoundingClientRect();
         return { visible: rect.width > 0 && rect.height > 0 };
@@ -240,13 +280,19 @@ DOM_SCRIPTS: dict[str, str] = {
                 active_descendant: activeDescendant,
             };
         }""",
-    "search_ready_counts": """() => ({
-        card_count: document.querySelectorAll(
-            "section.note-item, a[href*='/explore/'], a[href*='/discovery/item/']"
-        ).length,
-        profile_count: document.querySelectorAll("a[href*='/user/profile/']").length,
-    })""",
+    # 只数结果列表内的卡片、笔记链接与作者链接（AI 对话布局的对话栏里也有笔记链接）；取不到列表时为全文档。
+    "search_ready_counts": """() => {
+        /*list_view*/
+        const root = listLayout() || document;
+        return {
+            card_count: root.querySelectorAll(
+                "section.note-item, a[href*='/explore/'], a[href*='/discovery/item/']"
+            ).length,
+            profile_count: root.querySelectorAll("a[href*='/user/profile/']").length,
+        };
+    }""",
 }
+DOM_SCRIPTS = {name: script.replace(_LIST_VIEW_SLOT, _LIST_VIEW) for name, script in DOM_SCRIPTS.items()}
 
 STATE_SCRIPTS: dict[str, str] = {
     # 作者页白名单投影（经通道 read_state 原样使用这一份）：只读取页面已执行的

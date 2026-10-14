@@ -57,9 +57,11 @@ logger = logging.getLogger("MediaCrawler")
 SEARCH_RULE = XHS_SEARCH_RULE.name
 XHS_SEARCH_LOAD_WAIT_SECONDS = 20.0
 XHS_SCROLL_SETTLE_SECONDS = (0.4, 1.2)
-# 滚轮落点在结果列表与视口的相交矩形内，横纵各向内缩这一比例；取不到矩形时按视口比例落点。
+# 滚轮落点在结果列表与列表可见区的相交矩形内，横纵各向内缩这一比例；取不到矩形时按列表可见区比例落点。
 XHS_SCROLL_POINTER_INSET = 0.2
-# 单步滚动不超过视口 0.8 倍；可点击带为视口高度 10% 到底边，二者配合保证向下扫描不跳过任何一行卡片。
+# 滚动位置、可见区均指列表的实际滚动容器（见 page_scripts.scroll_metrics）。单步滚动不超过列表可见区高度 h 的
+# 0.8 倍；可点击带为可见区顶部加 0.1h 到底边上方 8px，且封面中心须命中本卡片。h ≥ 80px 时 0.8h ≤ 0.9h − 8，
+# 封面中心一步越不过整条带，向下扫描不跳过任何一行卡片。
 XHS_SCROLL_VIEWPORT_RATIO = 0.8
 XHS_CLICK_BAND_TOP = 0.1
 XHS_CLICK_BAND_BOTTOM_MARGIN_PX = 8.0
@@ -230,6 +232,15 @@ class ScanState:
     unregistered: Counter = field(default_factory=Counter)
     backfill_attempts: Counter = field(default_factory=Counter)
     observed_index: dict[str, int] = field(default_factory=dict)
+    scroll_container: str = ""
+
+
+def _rect(value: Any) -> Optional[tuple[float, float, float, float]]:
+    """页面脚本给出的 {left, top, right, bottom}；缺失或为空时为 None。"""
+    if not isinstance(value, dict):
+        return None
+    left, top, right, bottom = (float(value.get(key) or 0) for key in ("left", "top", "right", "bottom"))
+    return (left, top, right, bottom) if right > left and bottom > top else None
 
 
 class XhsScanMixin:
@@ -630,6 +641,7 @@ class XhsScanMixin:
             scan.entry_navigate = True
             return
         metrics = await dom_scroll_metrics(page)
+        self._note_scroll_container(metrics)
         cards = await dom_visible_cards(page)
         if await self._decide_visible_cards(cards, metrics):
             return
@@ -648,7 +660,7 @@ class XhsScanMixin:
         scan = self._scan
         tracker = scan.tracker
         accumulator = scan.accumulator
-        height = float(metrics.get("inner_height") or 0)
+        band = self._click_band(metrics)
         registered: list[tuple[dict[str, Any], SearchPage, SearchItem]] = []
         unregistered: set[str] = set()
         for card in cards:
@@ -667,7 +679,7 @@ class XhsScanMixin:
         for card, search_page, item in registered:
             note_id = item.note_id
             current = tracker.current
-            if search_page is not current or accumulator.is_known(note_id) or not self._card_clickable(card, height):
+            if search_page is not current or accumulator.is_known(note_id) or not self._card_clickable(card, band):
                 continue
             tracker.begin(current)
             if item.card_type == "video":
@@ -700,15 +712,37 @@ class XhsScanMixin:
                 )
 
     @staticmethod
-    def _card_clickable(card: dict[str, Any], height: float) -> bool:
+    def _click_band(metrics: dict[str, Any]) -> Optional[tuple[float, float]]:
+        """可点击带的上下沿（视口纵坐标）：列表可见区顶部加其高度的 10% 到底边上方 8px；没有可见区时为 None。"""
+        view = _rect(metrics.get("view_rect"))
+        if view is None:
+            return None
+        top, bottom = view[1], view[3]
+        return top + XHS_CLICK_BAND_TOP * (bottom - top), bottom - XHS_CLICK_BAND_BOTTOM_MARGIN_PX
+
+    @staticmethod
+    def _card_clickable(card: dict[str, Any], band: Optional[tuple[float, float]]) -> bool:
+        """封面中心在可点击带内，且该点命中这张卡片（没有被固定头部、对话栏或弹层遮住）。"""
         cover = card.get("cover")
-        if not isinstance(cover, dict) or height <= 0:
+        if band is None or not isinstance(cover, dict) or card.get("cover_hit") is not True:
             return False
-        y = float(cover.get("y") or 0)
-        return XHS_CLICK_BAND_TOP * height <= y <= height - XHS_CLICK_BAND_BOTTOM_MARGIN_PX
+        return band[0] <= float(cover.get("y") or 0) <= band[1]
+
+    def _note_scroll_container(self, metrics: dict[str, Any]) -> None:
+        """列表滚动容器类型（document / element）变化时记一行诊断日志，只含几何数值。"""
+        kind = str(metrics.get("scroll_container") or "")
+        if kind == self._scan.scroll_container:
+            return
+        self._scan.scroll_container = kind
+        view = _rect(metrics.get("view_rect"))
+        logger.info(
+            f"[XiaoHongShuCrawler.scan] List scroll container: {kind or 'unknown'}, "
+            f"view_rect={tuple(round(value) for value in view) if view else None}, "
+            f"inner_height={metrics.get('inner_height')}, scroll_height={metrics.get('scroll_height')}"
+        )
 
     def _mark_observed(self, search_page: SearchPage, note_id: str) -> None:
-        """视口出现过某页的卡片，即越过了此前各页；一页的卡片全部出现过也算越过。"""
+        """列表可见区出现过某页的卡片，即越过了此前各页；一页的卡片全部出现过也算越过。"""
         search_page.observed.add(note_id)
         if search_page.observed.issuperset(search_page.note_ids):
             search_page.passed = True
@@ -738,7 +772,7 @@ class XhsScanMixin:
         return False
 
     async def _backfill_missed(self, cards: list[dict[str, Any]], metrics: dict[str, Any]) -> bool:
-        """当前页中已越到视口上方、却仍未决定的卡片：向上滚回让虚拟列表重新渲染它们。
+        """当前页中已越到列表可见区上方、却仍未决定的卡片：向上滚回让虚拟列表重新渲染它们。
 
         “上方”指仍可见但封面中心高于可点击带，或已不可见且序号小于最小可见序号；可点击带以下的卡片
         由向下滚动处理。
@@ -748,7 +782,8 @@ class XhsScanMixin:
         if current is None:
             return False
         accumulator = scan.accumulator
-        band_top = XHS_CLICK_BAND_TOP * float(metrics.get("inner_height") or 0)
+        band = self._click_band(metrics)
+        band_top = band[0] if band is not None else 0.0
         visible = {str(card.get("note_id") or ""): card for card in cards}
         min_index = min((int(card.get("data_index", -1)) for card in cards), default=-1)
         undecided = [note_id for note_id in current.note_ids if not accumulator.is_known(note_id)]
@@ -866,12 +901,12 @@ class XhsScanMixin:
         await self._ensure_page_pause()
         page = self.context_page
         before = await dom_scroll_metrics(page)
-        height = int(before.get("inner_height") or 0)
+        view = _rect(before.get("view_rect"))
         scroll_y = int(before.get("scroll_y") or 0)
         low, high = load_behavior_profile("xhs_guarded", strict=True).scroll_delta_px
         step = SCAN_RANDOM.randint(int(low), int(high))
-        if height > 0:
-            step = min(step, max(1, int(height * XHS_SCROLL_VIEWPORT_RATIO)))
+        if view is not None:
+            step = min(step, max(1, int((view[3] - view[1]) * XHS_SCROLL_VIEWPORT_RATIO)))
         if direction < 0 and scroll_y > 0:
             step = min(step, scroll_y)
         delta = step if direction > 0 else -step
@@ -885,22 +920,24 @@ class XhsScanMixin:
 
     @staticmethod
     def _scroll_pointer(metrics: dict[str, Any]) -> Optional[tuple[float, float]]:
-        """滚轮落点：结果列表与视口相交矩形内、四周留边，避开 AI 对话布局右侧可独立滚动的对话栏。"""
-        rect = metrics.get("list_rect")
-        if isinstance(rect, dict):
-            left, top = float(rect.get("left") or 0), float(rect.get("top") or 0)
-            right, bottom = float(rect.get("right") or 0), float(rect.get("bottom") or 0)
-            if right > left and bottom > top:
-                inset_x = (right - left) * XHS_SCROLL_POINTER_INSET
-                inset_y = (bottom - top) * XHS_SCROLL_POINTER_INSET
-                return (
-                    SCAN_RANDOM.uniform(left + inset_x, right - inset_x),
-                    SCAN_RANDOM.uniform(top + inset_y, bottom - inset_y),
-                )
-        width = int(metrics.get("inner_width") or 0)
-        height = int(metrics.get("inner_height") or 0)
-        if width > 0 and height > 0:
-            return SCAN_RANDOM.uniform(0.3, 0.7) * width, SCAN_RANDOM.uniform(0.35, 0.75) * height
+        """滚轮落点：结果列表与列表可见区相交矩形内、四周留边，避开 AI 对话布局右侧可独立滚动的对话栏；
+        取不到该矩形时在列表可见区内按横 30%–70%、纵 35%–75% 落点。"""
+        rect = _rect(metrics.get("list_rect"))
+        if rect is not None:
+            left, top, right, bottom = rect
+            inset_x = (right - left) * XHS_SCROLL_POINTER_INSET
+            inset_y = (bottom - top) * XHS_SCROLL_POINTER_INSET
+            return (
+                SCAN_RANDOM.uniform(left + inset_x, right - inset_x),
+                SCAN_RANDOM.uniform(top + inset_y, bottom - inset_y),
+            )
+        view = _rect(metrics.get("view_rect"))
+        if view is not None:
+            left, top, right, bottom = view
+            return (
+                left + SCAN_RANDOM.uniform(0.3, 0.7) * (right - left),
+                top + SCAN_RANDOM.uniform(0.35, 0.75) * (bottom - top),
+            )
         return None
 
     async def _scroll_to_top(self) -> None:

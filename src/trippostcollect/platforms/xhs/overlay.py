@@ -162,10 +162,9 @@ class XhsOverlayMixin:
     async def _card_for_redo(self, note_id: str) -> dict[str, Any]:
         """恢复后重新找到这张卡片；不在可点击带内时交回扫描（本篇仍未决定，扫描会再次处理）。"""
         page = self.context_page
-        metrics = await dom_scroll_metrics(page)
-        height = float(metrics.get("inner_height") or 0)
+        band = self._click_band(await dom_scroll_metrics(page))
         for card in await dom_visible_cards(page):
-            if str(card.get("note_id") or "") == note_id and self._card_clickable(card, height):
+            if str(card.get("note_id") or "") == note_id and self._card_clickable(card, band):
                 return card
         raise XhsScanInterrupted("note_redo_card_not_visible")
 

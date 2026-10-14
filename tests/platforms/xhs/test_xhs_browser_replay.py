@@ -39,6 +39,7 @@ from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
 from trippostcollect.platforms.xhs import scan as xhs_scan
 from trippostcollect.platforms.xhs import session as xhs_session
+from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
 from trippostcollect.platforms.xhs.parser import update_xhs_note
 from trippostcollect.records.sanitization import sanitize_export_item
 from trippostcollect.runtime.visit_ledger import iter_ledger_lines
@@ -219,7 +220,8 @@ def assert_staged_png(site: XhsOfflineSite, crawler, note_id: str, count: int) -
 @pytest.mark.asyncio
 async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tmp_path):
     """AI 对话布局下 3 页（每页 12 项、共 36 项）末页 has_more=false：等延迟渲染、位于对话栏内的筛选入口，按文字
-    点选“图文”的真标签（不是重叠的 aria-hidden 副本）、收面板（面板从 DOM 移除），滚轮只作用在结果列表上；
+    点选“图文”的真标签（不是重叠的 aria-hidden 副本）、收面板（面板从 DOM 移除）；列表在页头下方的容器内滚动、
+    window 不动，滚轮只作用在结果列表上，对话栏里与结果 ID 重叠的笔记链接不计入、不点击，点卡片都命中封面；
     虚拟列表回收下的全量扫描，浮层详情与翻图截获 PNG（首图先于 feed 到达）、target=_blank 作者页（同一作者
     只点一次），经真实门禁通过。"""
     pages = [[search_item(f"p{number}-{index:02d}") for index in range(12)] for number in (1, 2, 3)]
@@ -245,6 +247,15 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
             entry_active: document.querySelectorAll('div.filter.active').length,
             chat_scroll_top: document.querySelector('.ai-chat-messages').scrollTop,
         })""")
+        lists = await page.evaluate("""() => ({
+            chat_note_ids: Array.from(document.querySelectorAll('.ai-chat-section [data-note-id]'))
+                .map((node) => node.getAttribute('data-note-id')),
+            chat_explore_links: document.querySelectorAll('.ai-chat-section a[href^="/explore/"]').length,
+            list_cards: document.querySelectorAll('.search-layout section.note-item').length,
+            window_scroll_y: window.scrollY,
+        })""")
+        metrics = await page.evaluate(DOM_SCRIPTS["scroll_metrics"])
+        counts = await page.evaluate(DOM_SCRIPTS["search_ready_counts"])
         first_row_rendered = await page.evaluate("() => document.querySelectorAll('section.note-item[data-index=\"0\"]').length")
         final_path = urlsplit(page.url).path
         open_pages = len(context.pages)
@@ -268,6 +279,17 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
         "panels": 0, "entry_active": 0, "chat_scroll_top": 0,
     }
     assert audit["chatScrolls"] == 0  # 滚轮全部作用在结果列表上
+    # 列表在容器内滚动：window 始终不动，账本中的滚动位置取自容器；第 2、3 页由滚到容器底部附近触发。
+    assert audit["maxWindowScrollY"] == 0 and lists["window_scroll_y"] == 0
+    assert audit["maxListScrollTop"] > 0 and max(line["target"]["scroll_y_before"] for line in actions(crawler, "scroll")) > 0
+    assert audit["scrollLoads"] == 2 and audit["selfLoads"] == 0
+    assert metrics["scroll_container"] == "element" and metrics["view_rect"]["top"] == 116
+    assert metrics["list_rect"]["right"] <= VIEWPORT["width"] * 0.65 + 1
+    # 对话栏里的笔记链接与结果 ID 重叠，但不计入列表、从未被点；点卡片的落点都在封面内。
+    assert lists["chat_note_ids"] == ["p1-00", "p1-02", "p1-03"] and lists["chat_explore_links"] == 2
+    assert counts["card_count"] == lists["list_cards"] > 0
+    assert audit["chatNoteClicks"] == 0 and audit["strayClicks"] == []
+    assert audit["coverClicks"] == len(actions(crawler, "click_card")) == audit["overlaysOpened"] == 3
     filter_targets = [line["target"].get("filter") for line in actions(crawler, "apply_filter")]
     assert filter_targets == ["panel_open", "note_type", "panel_close"]
     first_scroll = actions(crawler, "scroll")[0]["seq"]
@@ -351,8 +373,8 @@ async def test_feed_verification_layer_then_redo_reuses_the_cached_first_image(m
 
 @pytest.mark.asyncio
 async def test_frontend_self_load_when_viewport_is_not_filled_passes_the_gate(monkeypatch, tmp_path):
-    """V16 布局下目标会话第 1 页只有一行、填不满视口：站点不经滚动自行请求第 2 页，门禁计入 frontend_self_loads
-    而不失败；筛选入口在 .search-layout 内，其前的零尺寸副本被跳过。"""
+    """V16 布局（整页滚动）下目标会话第 1 页只有一行、填不满视口：站点不经滚动自行请求第 2 页，门禁计入
+    frontend_self_loads 而不失败；筛选入口在 .search-layout 内，其前的零尺寸副本被跳过。"""
     pages = [[search_item(f"s1-{index}") for index in range(4)], [search_item(f"s2-{index}") for index in range(8)]]
     site = XhsOfflineSite(KEYWORD, pages, layout="v16")
     unknown = {"s1-1", "s2-4"}
@@ -365,9 +387,11 @@ async def test_frontend_self_load_when_viewport_is_not_filled_passes_the_gate(mo
         audit = await page.evaluate("() => window.__tpcOffline")
         filter_nodes = await page.evaluate("() => document.querySelectorAll('.search-layout div.filter').length")
         ai_chat = await page.evaluate("() => document.querySelectorAll('.with-ai-chat').length")
+        metrics = await page.evaluate(DOM_SCRIPTS["scroll_metrics"])
 
     assert audit["selfLoads"] >= 1
     assert filter_nodes == 2 and ai_chat == 0  # 零尺寸副本在真实入口之前，入口延迟插入
+    assert metrics["scroll_container"] == "document" and metrics["view_rect"]["top"] == 0  # 整页滚动
     assert audit["clickedOptions"] == [["filter_note_type", "图文"]]
     assert [record["note_id"] for record in crawler.records] == ["s1-1", "s2-4"]
     stopped = last_stop(state_path)

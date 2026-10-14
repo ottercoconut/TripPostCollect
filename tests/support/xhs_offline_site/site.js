@@ -1,12 +1,14 @@
 /* 离线回放站点自身的前端（不是项目注入的脚本）。按 V1、V16 与 R2 定值建模：
    首页输入 → 回车经 history.pushState 进入 /search_result_ai（关键词两次编码）并发不带 filters 的第 1 页；
-   结果页有两种布局（<html data-layout>）：默认 AI 对话布局（Mac 人工侦察 2026-10-13）根节点为
-   .ai-feeds-page.with-ai-chat，结果列表占左侧，右侧对话栏固定且可独立滚动，筛选入口在 .ai-chat-inner 内，
+   结果页有两种布局（<html data-layout>）：默认 AI 对话布局（Mac 人工侦察与测量 2026-10-13）根节点为
+   .ai-feeds-page.with-ai-chat，顶部搜索框区域 116px 固定、window 不滚动，结果列表在左侧 .feeds-scroller 容器内
+   滚动，右侧对话栏并排且可独立滚动，内有与结果卡片 ID 重叠的笔记链接，筛选入口在 .ai-chat-inner 内，
    面板挂在入口内部、打开时入口加 .active、收起时从 DOM 移除，每个标签前有一份重叠的 aria-hidden 副本；
-   备选 V16 布局入口在 .search-layout 内，其前有一个零尺寸的同类副本，面板按 hidden 切换。两种布局的入口
+   备选 V16 布局整页滚动，入口在 .search-layout 内，其前有一个零尺寸的同类副本，面板按 hidden 切换。两种布局的入口
    文字都在直属 span 里，且都在第 1 页结果渲染约 1.5 秒后才插入（Mac 首轮实测入口为空）；
    筛选面板按文字点选“图文”发 5 项 filters 的第 1 页（新 search_id），入口改为“已筛选”，面板不自动收起；
-   虚拟列表只保留视口附近的行（不超过 30 个节点），接近底部时请求下一页，视口未填满时自行补页；
+   虚拟列表只保留可见区附近的行（不超过 30 个节点），接近列表底部时请求下一页，可见区未填满时自行补页；
+   每次点击记下命中的元素类别（封面、对话栏笔记链接或其他）；
    点封面打开浮层，首图先于 feed 加载，feed 到达后预载下一张，翻图再预载；作者名 target=_blank 打开作者页；
    feed 或搜索返回 461/471 时显示验证层。同一文档内图片元素按 URL 复用，重开不再请求（模拟内存缓存）。
    全部请求由测试的 context.route 回应。 */
@@ -18,13 +20,15 @@
   const CAPTCHA_URL = 'https://www.xiaohongshu.com/website-login/captcha';
   const PROFILE_URL = 'https://www.xiaohongshu.com/user/profile/';
   const VERIFIED_MESSAGE = 'tpc-offline-verified';
-  // 与 site.css 一致：列表自文档 120px 起，每行 360px、4 列；尾部 200px。
-  const LIST_TOP = 120;
+  const AI_CHAT = document.documentElement.dataset.layout !== 'v16';
+  // 与 site.css 一致：V16 列表自文档 120px 起，AI 对话布局自滚动容器内 56px 起；每行 360px、4 列；尾部 200px。
+  const LIST_TOP = AI_CHAT ? 56 : 120;
   const ROW_HEIGHT = 360;
   const COLUMNS = 4;
-  const AI_CHAT = document.documentElement.dataset.layout !== 'v16';
-  // AI 对话布局下结果列表只占左侧约 2/3，列宽收窄以容纳 4 列（与 site.css 一致）。
+  // AI 对话布局下结果列表只占左侧 65%，列宽收窄、左边距缩小以容纳 4 列（与 site.css 一致）。
   const COLUMN_WIDTH = AI_CHAT ? 200 : 300;
+  const LIST_LEFT = AI_CHAT ? 16 : 40;
+  const CHAT_NOTE_REFS = 4;
   const PREFETCH_PX = 400;
   // 视口上方保留 2 行、当前行之后 4 行：至多 7 行 28 个节点。
   const ROWS_BEFORE = 2;
@@ -53,6 +57,11 @@
     overlaysOpened: 0,
     hiddenTagClicks: 0,
     chatScrolls: 0,
+    maxWindowScrollY: 0,
+    maxListScrollTop: 0,
+    coverClicks: 0,
+    chatNoteClicks: 0,
+    strayClicks: [],
   };
   window.__tpcOffline = audit;
 
@@ -104,7 +113,7 @@
     section.setAttribute('data-note-id', item.id);
     section.setAttribute('data-index', String(index));
     section.style.top = `${Math.floor(index / COLUMNS) * ROW_HEIGHT}px`;
-    section.style.left = `${40 + (index % COLUMNS) * COLUMN_WIDTH}px`;
+    section.style.left = `${LIST_LEFT + (index % COLUMNS) * COLUMN_WIDTH}px`;
     const cover = el('a', 'cover');
     cover.href = `/search_result/${item.id}?xsec_token=${encodeURIComponent(item.xsec_token || '')}&xsec_source=`;
     const coverUrl = (card.cover || {}).url_pre;
@@ -117,11 +126,14 @@
     return section;
   };
 
+  // 列表的滚动位置：AI 对话布局是 .feeds-scroller 的，V16 是整页的。
+  const listScrollTop = () => (AI_CHAT ? ui.scroller.scrollTop : window.scrollY);
+
   const renderList = () => {
     if (!ui) return;
     const container = ui.container;
     container.style.height = `${Math.ceil(state.items.length / COLUMNS) * ROW_HEIGHT}px`;
-    const currentRow = Math.max(0, Math.floor((window.scrollY - LIST_TOP) / ROW_HEIGHT));
+    const currentRow = Math.max(0, Math.floor((listScrollTop() - LIST_TOP) / ROW_HEIGHT));
     const firstIndex = Math.max(0, currentRow - ROWS_BEFORE) * COLUMNS;
     const endIndex = Math.min(state.items.length, (currentRow + ROWS_AFTER + 1) * COLUMNS);
     const wanted = new Map();
@@ -141,8 +153,30 @@
   };
 
   const nearBottom = () => {
+    if (AI_CHAT) {
+      const { scroller } = ui;
+      return scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - PREFETCH_PX;
+    }
     const root = document.scrollingElement || document.documentElement;
     return window.scrollY + window.innerHeight >= root.scrollHeight - PREFETCH_PX;
+  };
+
+  const onListScroll = () => {
+    renderList();
+    maybeLoadMore('scroll');
+  };
+
+  // 对话栏引用的笔记（ID 与本会话结果重叠）：带 data-note-id 的 /explore/ 链接、/search_result/ 链接与引用块。
+  const renderChatNotes = () => {
+    if (!ui || !ui.chatNotes) return;
+    const refs = state.items.slice(0, CHAT_NOTE_REFS).map((item, index) => {
+      const ref = el(index % 3 === 2 ? 'div' : 'a', 'ai-note-ref', '参考笔记');
+      if (index % 3 === 0) ref.href = `/explore/${item.id}`;
+      if (index % 3 === 1) ref.href = `/search_result/${item.id}?xsec_token=offline&xsec_source=`;
+      if (index % 3 !== 1) ref.setAttribute('data-note-id', item.id);
+      return ref;
+    });
+    ui.chatNotes.replaceChildren(...refs);
   };
 
   const maybeLoadMore = (reason) => {
@@ -190,6 +224,7 @@
     state.page = number;
     state.hasMore = data.has_more === true;
     renderList();
+    if (number === 1) renderChatNotes();
     if (ui && !ui.entryShown) {
       ui.entryShown = true;
       const { entryHost, entry } = ui;
@@ -209,6 +244,7 @@
     state.loading = false;
     audit.sessions.push({ search_id: state.searchId, filtered: Boolean(filters) });
     window.scrollTo(0, 0);
+    if (ui && ui.scroller) ui.scroller.scrollTop = 0;
     if (ui) ui.container.replaceChildren();
     renderList();
     loadPage(1);
@@ -296,20 +332,30 @@
     let entry;
     let entryHost;
     let panelHost = panel;
+    let scroller = null;
+    let chatNotes = null;
     if (AI_CHAT) {
       const main = el('div', 'search-layout__main');
       main.append(container, end);
       layout.append(el('div', 'search-layout__top'), el('div', 'search-layout__middle'), main);
+      scroller = el('div', 'feeds-scroller');
+      scroller.appendChild(layout);
+      scroller.addEventListener('scroll', () => {
+        audit.maxListScrollTop = Math.max(audit.maxListScrollTop, scroller.scrollTop);
+        onListScroll();
+      }, { passive: true });
       entry = filterEntry('filter ai-chat-filter');
       panelHost = el('div', 'filter-panel');
       panelHost.appendChild(panel);
       entryHost = el('div', 'ai-chat-inner');
       const messages = el('div', 'ai-chat-messages');
+      chatNotes = el('div', 'ai-chat-notes');
+      messages.appendChild(chatNotes);
       for (let index = 0; index < 12; index += 1) messages.appendChild(el('div', 'ai-chat-message', '点点 ai'));
       messages.addEventListener('scroll', () => { audit.chatScrolls += 1; }, { passive: true });
       const chat = el('div', 'ai-chat-section');
       chat.append(entryHost, messages);
-      page.append(layout, chat);
+      page.append(scroller, chat);
     } else {
       entryHost = el('div', 'filter-bar');
       entryHost.appendChild(filterEntry('filter decoy'));
@@ -322,7 +368,9 @@
       if (!event.target.closest('.filters-wrapper')) togglePanel();
     });
     document.getElementById('app').replaceChildren(page);
-    ui = { entryHost, entry, entryLabel: entry.firstChild, panel, panelHost, container, entryShown: false };
+    ui = {
+      entryHost, entry, entryLabel: entry.firstChild, panel, panelHost, container, scroller, chatNotes, entryShown: false,
+    };
     refreshFilterUi();
   };
 
@@ -491,7 +539,22 @@
     else if (event.key === 'ArrowLeft') flip(-1);
   });
   window.addEventListener('scroll', () => {
-    renderList();
-    maybeLoadMore('scroll');
+    audit.maxWindowScrollY = Math.max(audit.maxWindowScrollY, window.scrollY);
+    if (!AI_CHAT) onListScroll();
   }, { passive: true });
+  // 结果页上的点击按命中元素归类（捕获阶段，先于各自的处理）：封面、对话栏笔记引用（不跳转）、筛选与浮层之外的
+  // 其余点击都记为 stray（class 链首段）。
+  document.addEventListener('click', (event) => {
+    if (!ui) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || target.closest('.note-detail-mask, .captcha-layer, div.filter, .filters-wrapper')) return;
+    if (target.closest('section.note-item a.cover')) {
+      audit.coverClicks += 1;
+    } else if (target.closest('.ai-chat-section [data-note-id], .ai-chat-section a[href]')) {
+      event.preventDefault();
+      audit.chatNoteClicks += 1;
+    } else {
+      audit.strayClicks.push(`${target.tagName.toLowerCase()}.${target.className || ''}`);
+    }
+  }, true);
 })();

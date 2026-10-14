@@ -340,11 +340,82 @@ def test_scroll_wheel_lands_inside_the_result_list_rectangle(tmp_path):
     for x, y in site.wheel_points:
         assert 896 * inset <= x <= 896 * (1 - inset)
         assert 64 + 836 * inset <= y <= 900 - 836 * inset
-    # 取不到矩形（或矩形为空）时按视口比例落点。
-    x, y = XiaoHongShuCrawler._scroll_pointer(
-        {"inner_width": 1000, "inner_height": 800, "list_rect": {"left": 0, "top": 0, "right": 0, "bottom": 0}},
-    )
-    assert 300 <= x <= 700 and 280 <= y <= 600
+    # 取不到矩形（或矩形为空）时在列表可见区内按比例落点；可见区也没有时不移动鼠标。
+    x, y = XiaoHongShuCrawler._scroll_pointer({
+        "view_rect": {"left": 0, "top": 100, "right": 1000, "bottom": 900},
+        "list_rect": {"left": 0, "top": 0, "right": 0, "bottom": 0},
+    })
+    assert 300 <= x <= 700 and 380 <= y <= 700
+    assert XiaoHongShuCrawler._scroll_pointer({"view_rect": None, "list_rect": None}) is None
+
+
+def test_list_scrolled_inside_a_container_uses_the_container_position_band_and_step(tmp_path, caplog):
+    """AI 对话布局：列表在容器内滚动（可见区 116–417，高 301），window 不动。到底判断、回到顶部、单步上限与可点击带
+    都按容器的数值与可见区计算。"""
+    site = XhsFakeSite(KEYWORD, _pages(3, 8))
+    site.view_rect = {"left": 0.0, "top": 116.0, "right": 1280.0, "bottom": 417.0}
+    harness = Harness(tmp_path, site)
+    clicked: list[dict] = []
+    original = harness.process_note
+
+    async def process(item, search_page, card):
+        clicked.append(card)
+        await original(item, search_page, card)
+
+    harness.crawler._process_note_card = process
+    caplog.set_level(logging.INFO, logger="MediaCrawler")
+
+    harness.run()
+
+    summary = harness.accumulator.summary()
+    assert summary["stop_reason"] == "source_exhausted" and summary["source_page"] == 4
+    assert len(set(harness.processed)) == len(harness.processed) == 24
+    # 可点击带自可见区顶部加 0.1 × 301 起，到底边上方 8px；封面中心都命中本卡片。
+    assert all(card["cover_hit"] and 116 + 30.1 <= card["cover"]["y"] <= 409 for card in clicked)
+    scrolls = [line["target"] for line in harness.ledger() if line["kind"] == "action" and line["action"] == "scroll"]
+    ours = [target for target in scrolls if target["phase"] != "behavior_stage"]
+    cap = int(301 * xhs_scan.XHS_SCROLL_VIEWPORT_RATIO)
+    assert max(abs(target["delta_y"]) for target in ours) == cap
+    # 行为阶段停在容器中部，回到顶部按容器的 scrollTop 逐步上滚到 0。
+    to_top = [target for target in ours if target["phase"] == "to_top"]
+    assert to_top and to_top[0]["scroll_y_before"] > 0
+    assert to_top[-1]["scroll_y_before"] + to_top[-1]["delta_y"] == 0
+    assert all(-cap <= target["delta_y"] < 0 for target in to_top)
+    # 扫描滚到容器底部才处理末页（has_more=false），位置不超过容器的可滚范围。
+    assert all(0 <= target["scroll_y_before"] <= site.scroll_height() - 301 for target in ours)
+    assert "List scroll container: element, view_rect=(0, 116, 1280, 417)" in caplog.text
+    assert harness.gate()["content_visit_ok"]
+
+    # 可点击带只按 view_rect 计算：同一封面高度，可见区上移后落在带外。
+    band = XiaoHongShuCrawler._click_band({"view_rect": site.view_rect, "inner_height": 900})
+    assert band == (116 + 0.1 * 301, 417 - xhs_scan.XHS_CLICK_BAND_BOTTOM_MARGIN_PX)
+    card = {"cover": {"x": 160.0, "y": 140.0}, "cover_hit": True}
+    assert not XiaoHongShuCrawler._card_clickable(card, band)
+    assert XiaoHongShuCrawler._card_clickable(card, XiaoHongShuCrawler._click_band({"view_rect": {
+        "left": 0, "top": 0, "right": 1280, "bottom": 900,
+    }}))
+    assert XiaoHongShuCrawler._click_band({"view_rect": None}) is None
+
+
+def test_card_whose_cover_center_is_covered_is_not_clicked_until_it_is_hit(tmp_path):
+    """封面中心被遮住（elementFromPoint 不在本卡片内）的卡片即使在可点击带内也不点；遮挡消失后再处理。"""
+    site = XhsFakeSite(KEYWORD, _pages(2, 8))
+    site.cover_blocked = {"n1-1": 2}
+    harness = Harness(tmp_path, site)
+    clicked: list[dict] = []
+    original = harness.process_note
+
+    async def process(item, search_page, card):
+        clicked.append(card)
+        await original(item, search_page, card)
+
+    harness.crawler._process_note_card = process
+
+    harness.run()
+
+    assert harness.processed[:4] == ["n1-0", "n1-2", "n1-1", "n1-3"]
+    assert len(set(harness.processed)) == 16 and all(card["cover_hit"] for card in clicked)
+    assert harness.accumulator.summary()["stop_reason"] == "source_exhausted"
 
 
 def test_keyword_mismatch_reenters_once_from_home_then_stops(tmp_path):

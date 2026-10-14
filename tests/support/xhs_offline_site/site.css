@@ -1,4 +1,5 @@
-/* 几何与 site.js 的常量一致：页头 64px 固定，筛选栏 56px 随文档滚动，列表自 120px 起每行 360px、4 列。 */
+/* 几何与 site.js 的常量一致：V16 布局页头 64px 固定，筛选栏 56px 随文档滚动，列表自文档 120px 起每行 360px、4 列；
+   AI 对话布局页头（搜索框区域）116px 固定，列表在容器内自 56px（__top）起。 */
 html, body { margin: 0; padding: 0; background: #fff; font-family: sans-serif; }
 .header { position: fixed; top: 0; left: 0; right: 0; height: 64px; background: #fff; z-index: 30;
   display: flex; align-items: center; border-bottom: 1px solid #eee; }
@@ -23,17 +24,23 @@ html, body { margin: 0; padding: 0; background: #fff; font-family: sans-serif; }
 .tag-container { display: flex; }
 .tag-container .tags { padding: 4px 12px; margin-right: 8px; border-radius: 12px; background: #f5f5f5; cursor: pointer; }
 .tag-container .tags.active { background: #ffe4e8; }
-/* AI 对话布局（默认）：对话栏固定在右侧 34vw（约 30%，略宽使按视口 30%–70% 的旧落点可能落在上面），结果列表占
-   其余部分（4 列收窄到 200px），消息区独立滚动且不向文档传递滚动；筛选入口在对话栏顶部，面板绝对定位挂在入口内部，入口矩形不随面板变大；每个标签的 aria-hidden 副本
-   绝对定位在真标签下面，二者坐标重叠。 */
-.ai-feeds-page.with-ai-chat .search-layout { margin-right: 34vw; }
+/* AI 对话布局（默认，Mac 人工测量 2026-10-13）：顶部固定的搜索框区域 116px；其下 .ai-feeds-page 占满视口其余部分，
+   window 不滚动。左侧结果列表在 .feeds-scroller（overflow-y: auto）内滚动（4 列收窄到 200px）；右侧并排 35% 宽的
+   对话栏（左缘在视口 65%，按视口 30%–70% 的旧落点可能落在上面），消息区独立滚动且不向外传递滚动，内有几个
+   与结果卡片 ID 重叠的笔记链接；筛选入口在对话栏顶部，面板绝对定位挂在入口内部，入口矩形不随面板变大；每个标签的
+   aria-hidden 副本绝对定位在真标签下面，二者坐标重叠。 */
+html[data-layout="ai_chat"] .header { height: 116px; }
+html[data-layout="ai_chat"] #app { padding-top: 116px; }
+.ai-feeds-page.with-ai-chat { position: fixed; top: 116px; left: 0; right: 0; bottom: 0; display: flex; }
+.feeds-scroller { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: auto; }
 .search-layout__top { height: 56px; }
-.ai-chat-section { position: fixed; top: 64px; right: 0; bottom: 0; width: 34vw; z-index: 20; background: #fafafa;
-  border-left: 1px solid #eee; display: flex; flex-direction: column; }
+.ai-chat-section { flex: none; width: 35%; background: #fafafa; border-left: 1px solid #eee; box-sizing: border-box;
+  display: flex; flex-direction: column; }
 .ai-chat-inner { flex: none; height: 56px; display: flex; align-items: center; justify-content: flex-end;
   padding-right: 24px; }
 .ai-chat-messages { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 12px; }
 .ai-chat-message { height: 240px; margin-bottom: 12px; background: #fff; }
+.ai-note-ref { display: block; margin: 12px; padding: 8px; background: #f0f0f0; color: #333; }
 div.filter.ai-chat-filter { position: relative; width: 100px; height: 40px; line-height: 40px; text-align: center;
   border-radius: 20px; background: #f5f5f5; cursor: pointer; }
 div.filter.ai-chat-filter.active { background: #ffe4e8; }
