@@ -546,6 +546,14 @@ child `summary.json` 的
   `search_page`；必需的搜索两档各至少有一次连续性完成。整轮没有新笔记时不要求详情与作者阶段。
 - 任一规则不满足即 `behavior_evidence_ok=false`；门禁平台缺少门禁结果同样失败
   （`visit_validation_missing`）。
+- 失败诊断写入 `behavior_evidence.navigation.json`（页面地址只留到路径、不含标题，不进账本）：
+  `xhs_search_card_unregistered` 停止前追加 `stage=search_scan`、`outcome=card_unregistered`，列出每个未登记
+  ID 的卡片结构（`data-index`、有无封面、封面路径首段、`tag.class`、在列表可见区的位置）与它在本轮全部搜索
+  响应（含非目标会话与非笔记条目，只在内存中保留）中的出处（会话起始序号、是否目标会话、页码、`model_type`，
+  从未出现为 `null`）；作者标签页两次都没打开时追加 `stage=creator_profile`，最后一次没有可见作者名链接为
+  `author_link_missing`、点击后新标签页超时为 `author_tab_timeout`（另记点击后主页面路径模板），含浮层内作者名
+  链接与作者主页链接的个数、可见个数、`target` 与祖先链。目标会话第 1 页的触发动作不是本次点选“图文”
+  （G1 将失败）时只写一行 warning 日志，带触发动作、`target` 与回车会话的序号，判定不变。
 
 ## 6. 完成检查
 

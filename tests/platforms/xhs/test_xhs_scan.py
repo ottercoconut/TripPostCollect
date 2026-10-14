@@ -14,13 +14,13 @@ import trippostcollect.platforms.xhs.behavior as xhs_behavior
 import trippostcollect.platforms.xhs.core as xhs_core
 import trippostcollect.platforms.xhs.scan as xhs_scan
 import trippostcollect.runtime.behavior as runtime_behavior
-from support.xhs_fake_site import FILTER_ENTRY, XhsFakeSite, note
+from support.xhs_fake_site import FILTER_ENTRY, LIST_TOP, XhsFakeSite, note
 from trippostcollect.application.candidates import AdaptiveAccumulator
 from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.evidence import write_evidence
 from trippostcollect.platforms.xhs.errors import PlatformRuntimeError
 from trippostcollect.platforms.xhs.navigation import XhsSearchEntryFailed
-from trippostcollect.runtime.visit_ledger import iter_ledger_lines
+from trippostcollect.runtime.visit_ledger import iter_ledger_lines, line_seq
 
 from .support import XiaoHongShuCrawler, make_capture
 
@@ -211,14 +211,99 @@ def test_known_pages_are_scrolled_past_without_search_results_pause(tmp_path):
     assert harness.gate()["content_visit_ok"]
 
 
-def test_card_without_registration_for_two_steps_stops_the_run(tmp_path):
-    site = XhsFakeSite(KEYWORD, _pages(2, 4), unregistered_ids=("stray",))
+def test_card_without_registration_for_two_steps_stops_with_card_and_response_diagnostic(
+    tmp_path, monkeypatch, caplog,
+):
+    evidence = tmp_path / "behavior_evidence.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(evidence))
+    # stray 不在任何响应里；hot-1 是每个第 1 页响应末尾的热搜条目；general-1 只在回车会话（非目标）第 1 页。
+    site = XhsFakeSite(KEYWORD, _pages(2, 4), unregistered_ids=("stray", "hot-1", "general-1"))
     harness = Harness(tmp_path, site)
 
-    with pytest.raises(PlatformRuntimeError) as caught:
+    with caplog.at_level(logging.WARNING, logger="MediaCrawler"), pytest.raises(PlatformRuntimeError) as caught:
         harness.run()
 
     assert caught.value.code == "xhs_search_card_unregistered"
+    assert harness.processed == ["n1-0"]
+    assert site.card_diagnostic_reads == [["general-1", "hot-1", "stray"]]
+    written = json.loads(evidence.with_name("behavior_evidence.navigation.json").read_text(encoding="utf-8"))
+    (diagnostic,) = [event for event in written["events"] if event["stage"] == "search_scan"]
+    assert diagnostic["outcome"] == "card_unregistered" and diagnostic["error"] == ""
+    assert diagnostic["url"] == "https://www.xiaohongshu.com/search_result_ai" and "title" not in diagnostic
+    assert diagnostic["scroll_container"] == "document" and diagnostic["view_rect"]["top"] == 0
+    cards = {card["note_id"]: card for card in diagnostic["cards"]}
+    assert list(cards) == ["general-1", "hot-1", "stray"]
+    assert cards["stray"]["responses"] is None
+    assert cards["stray"]["dom"] == {
+        "note_id": "stray", "nodes": 1, "data_index": "0", "has_cover": True, "cover_path": "/search_result",
+        "card": "section.note-item", "first_child": "a.cover.mask",
+        "position": {"left": 0, "top": LIST_TOP, "width": 240, "height": 340},
+    }
+    target = harness.crawler._scan.target
+    enter = next(session for session in harness.crawler._scan.sessions.values() if not session.is_target)
+    hot_enter, hot_target = cards["hot-1"]["responses"]
+    assert hot_enter == {
+        "seq": enter.started_seq, "session_seq": enter.started_seq, "is_target": False, "current_target": False,
+        "page": 1, "position": 4, "model_type": "hot_query",
+    }
+    assert hot_target == {
+        "seq": target.started_seq, "session_seq": target.started_seq, "is_target": True, "current_target": True,
+        "page": 1, "position": 4, "model_type": "hot_query",
+    }
+    (general,) = cards["general-1"]["responses"]
+    assert general["session_seq"] == enter.started_seq < target.started_seq
+    assert (general["is_target"], general["current_target"], general["position"], general["model_type"]) == (
+        False, False, 1, "note",
+    )
+    text = json.dumps(diagnostic, ensure_ascii=False)
+    assert "token" not in text and "keyword" not in text and KEYWORD not in text
+    warning = next(
+        record.getMessage() for record in caplog.records if "Search card stayed unregistered" in record.getMessage()
+    )
+    assert "hot-1(index=1, cover=/search_result, card=section.note-item, " in warning
+    assert "seen=non_target:p1:hot_query+current:p1:hot_query" in warning
+    assert "general-1(index=2" in warning and "seen=non_target:p1:note" in warning
+    assert "stray(index=0" in warning and "seen=none" in warning
+    assert "xiaohongshu.com" not in warning and "token" not in warning
+
+
+def test_target_session_started_before_the_note_type_click_is_logged_with_its_trigger(tmp_path, caplog):
+    site = XhsFakeSite(KEYWORD, _pages(1, 4))
+    site.entry_click_applies_filter = True
+    harness = Harness(tmp_path, site)
+
+    with caplog.at_level(logging.WARNING, logger="MediaCrawler"):
+        harness.run()
+
+    assert harness.processed == [f"n1-{index}" for index in range(4)]
+    actions = {line["id"]: line for line in harness.ledger() if line["kind"] == "action"}
+    filters = [line["target"].get("filter") for line in actions.values() if line["action"] == "apply_filter"]
+    assert filters == ["panel_open", "note_type", "panel_close"]
+    scan = harness.crawler._scan
+    target = scan.target
+    trigger = actions[target.trigger]
+    assert trigger["target"] == {"filter": "panel_open"}
+    enter = next(session for session in scan.sessions.values() if not session.is_target)
+    warning = next(
+        record.getMessage() for record in caplog.records if "not triggered by this note-type click" in record.getMessage()
+    )
+    assert (
+        f'trigger=apply_filter, trigger_target={{"filter": "panel_open"}}, trigger_seq={line_seq(trigger["id"])}, '
+        f"target_session_seq={target.started_seq}, enter_session_seq={enter.started_seq}, "
+        "enter_session_target=False, note_type_clicks=1"
+    ) in warning
+    assert not harness.gate()["content_visit_ok"]
+
+
+def test_target_session_from_the_note_type_click_logs_no_trigger_warning(tmp_path, caplog):
+    site = XhsFakeSite(KEYWORD, _pages(1, 4))
+    harness = Harness(tmp_path, site)
+
+    with caplog.at_level(logging.WARNING, logger="MediaCrawler"):
+        harness.run()
+
+    assert harness.processed == [f"n1-{index}" for index in range(4)]
+    assert not any("not triggered by this note-type click" in record.getMessage() for record in caplog.records)
 
 
 def test_search_that_stops_loading_is_stalled_not_exhausted(tmp_path):

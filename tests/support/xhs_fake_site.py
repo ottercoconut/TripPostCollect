@@ -220,7 +220,8 @@ class XhsFakeSite:
 
     选项：`apply_filter_works=False` 点选“图文”不产生目标会话；`panel_closes=False` 面板收不起；
     `entry_delay_reads` 为结果页上前几次读筛选状态时入口尚未渲染（None 为始终不出现）；
-    `option_missing_opens` 为前几次打开面板时没有“图文”选项；`list_rect` 为滚动度量里结果列表与列表可见区的
+    `option_missing_opens` 为前几次打开面板时没有“图文”选项；`entry_click_applies_filter` 为点入口打开面板时前端同时
+    发出目标会话第 1 页（触发者是 panel_open），之后点“图文”不再发请求；`list_rect` 为滚动度量里结果列表与列表可见区的
     相交矩形（None 时不给，扫描按可见区比例落点），`wheel_points` 记下每次滚轮时的鼠标位置；`view_rect` 为列表
     滚动容器的可见区（None 为整页滚动，可见区即视口；给出时列表在容器内自顶部排起、滚动位置是容器的）；
     `cover_blocked[id]` 为这张卡片可见时前几次读数的封面中心被遮住（cover_hit 为假，点击落空）；
@@ -231,7 +232,8 @@ class XhsFakeSite:
     浮层：`details[id]` 为 feed 的 note_card（默认 `detail_card(id)`）。`feed_overrides[id]` 依次替换每次点击：
     "no_overlay" 浮层不出现；"no_feed" 浮层出现但无 feed；"net::…" 为 feed 请求失败；整数为 HTTP 状态码；
     字典为 feed 响应 JSON。`image_overrides[url]` 为 "missing"（从不加载）或 HTTP 状态码。打开浮层加载前两张图，
-    翻到第 k 页再加载第 k+1 张。`author_tab_failures` 次点击作者名不开标签页；`author_url_ids[user]` 改写标签页
+    翻到第 k 页再加载第 k+1 张。`author_tab_failures` 次点击作者名不开标签页；`hidden_author_notes` 中笔记的浮层
+    只有隐藏的作者名链接（note_view_state 无作者点）；`author_url_ids[user]` 改写标签页
     地址里的作者 ID；`creator_projections[user]` 替换投影返回值，`projection_hooks[user]` 在每次读取投影时调用。
     """
 
@@ -272,8 +274,12 @@ class XhsFakeSite:
         self.entry_delay_reads: int | None = 0
         self.filter_reads = 0
         self.option_missing_opens = 0
+        self.entry_click_applies_filter = False
         self.panel_opens = 0
         self.diagnostic_reads = 0
+        self.card_diagnostic_reads: list[list[str]] = []
+        self.author_diagnostic_reads = 0
+        self.hidden_author_notes: set[str] = set()
         self.list_rect: dict[str, float] | None = None
         self.view_rect: dict[str, float] | None = None
         self.cover_blocked: dict[str, int] = {}
@@ -425,6 +431,10 @@ class XhsFakeSite:
             return self.filter_diagnostic()
         if name == "visible_cards":
             return self.read_visible_cards()
+        if name == "card_diagnostic":
+            return self.card_diagnostic(arg)
+        if name == "author_link_diagnostic":
+            return self.author_link_diagnostic()
         if name == "search_ready_counts":
             return {"card_count": len(self.rendered_items()), "profile_count": 1}
         if name == "note_view_state":
@@ -489,6 +499,46 @@ class XhsFakeSite:
             )
         return cards
 
+    def card_diagnostic(self, note_ids: list[str]) -> list[dict[str, Any]]:
+        self.card_diagnostic_reads.append(list(note_ids))
+        cards = {card["note_id"]: card for card in self.visible_cards()}
+        result = []
+        for note_id in note_ids:
+            card = cards.get(note_id)
+            if card is None:
+                result.append({"note_id": note_id, "nodes": 0})
+                continue
+            view = self.view()
+            result.append(
+                {
+                    "note_id": note_id,
+                    "nodes": 1,
+                    "data_index": str(card["data_index"]),
+                    "has_cover": True,
+                    "cover_path": "/search_result",
+                    "card": "section.note-item",
+                    "first_child": "a.cover.mask",
+                    "position": {"left": 0, "top": round(card["top"] - view["top"]), "width": 240, "height": 340},
+                }
+            )
+        return result
+
+    def author_link_diagnostic(self) -> dict[str, Any]:
+        self.author_diagnostic_reads += 1
+        if self.overlay_note is None:
+            return {"view_visible": False}
+        hidden = self.overlay_note in self.hidden_author_notes
+        chain = ["a.name", "div.author", "div.author-container", "div.note-detail-mask", "body", "html"]
+        nodes = [{"visible": not hidden, "target": "_blank", "chain": chain}]
+        return {
+            "view_visible": True,
+            "author_names": 1,
+            "author_names_visible": int(not hidden),
+            "profile_links": 1,
+            "profile_links_visible": int(not hidden),
+            "profile_link_nodes": nodes,
+        }
+
     def read_visible_cards(self) -> list[dict[str, Any]]:
         """页面脚本读数：可见卡片的遮挡计数各减一。"""
         cards = self.visible_cards()
@@ -523,8 +573,11 @@ class XhsFakeSite:
                 return
             self.panel_visible = not self.panel_visible
             self.panel_opens += int(self.panel_visible)
+            if self.panel_visible and self.entry_click_applies_filter and not self.filter_applied:
+                self.filter_applied = True
+                self.start_session(filters=TARGET_FILTERS)
         elif self.on_results and self.panel_visible and near(FILTER_OPTION):
-            if self.apply_filter_works:
+            if self.apply_filter_works and not (self.entry_click_applies_filter and self.filter_applied):
                 self.filter_applied = True
                 self.start_session(filters=TARGET_FILTERS)
 
@@ -616,7 +669,7 @@ class XhsFakeSite:
             "page_total": total or None,
             "close": dict(CLOSE_POINT),
             "right_arrow": dict(ARROW_POINT) if total > 1 else None,
-            "author": dict(AUTHOR_POINT),
+            "author": None if self.overlay_note in self.hidden_author_notes else dict(AUTHOR_POINT),
         }
 
     def open_overlay(self, note_id: str) -> None:

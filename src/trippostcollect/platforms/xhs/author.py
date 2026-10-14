@@ -44,6 +44,7 @@ from trippostcollect.platforms.xhs.errors import (
     XhsNoteRedo,
 )
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitTicket
+from trippostcollect.platforms.xhs.page_scripts import dom_author_link_diagnostic
 from trippostcollect.platforms.xhs.parser import (
     creator_runtime_followers_observed,
     read_creator_runtime_projection,
@@ -63,6 +64,8 @@ XHS_CREATOR_RUNTIME_FINAL_REASONS = frozenset(
 XHS_AUTHOR_TAB_OPEN_SECONDS = 10.0
 XHS_AUTHOR_TAB_ATTEMPTS = 2
 XHS_PROFILE_PATH_RE = re.compile(r"^/user/profile/([^/]+)/?$")
+# 诊断里的路径模板：连续 16 个及以上字母数字的片段遮为 <id>（同页面诊断的 class 遮蔽规则）。
+XHS_PATH_ID_RE = re.compile(r"[A-Za-z0-9]{16,}")
 AUTHOR_RANDOM = random.SystemRandom()
 
 
@@ -70,6 +73,11 @@ def profile_url_user_id(url: str) -> str:
     """作者标签页地址路径 `/user/profile/<id>` 中的作者 ID；不是作者页时为空串。"""
     match = XHS_PROFILE_PATH_RE.match(urlsplit(str(url or "")).path)
     return match.group(1) if match else ""
+
+
+def path_template(url: str) -> str:
+    """地址路径的模板（如 `/user/profile/<id>`），不含查询串。"""
+    return XHS_PATH_ID_RE.sub("<id>", urlsplit(str(url or "")).path)
 
 
 class XhsAuthorMixin:
@@ -158,16 +166,19 @@ class XhsAuthorMixin:
             await self._close_author_tab(page, note)
 
     async def _open_author_tab(self, note: Any) -> Optional[Page]:
-        """写 click_author（from_visit＝本篇详情访问）后点击作者名，等待新标签页；两次都没打开时返回 None。
+        """写 click_author（from_visit＝本篇详情访问）后点击作者名，等待新标签页；两次都没打开时写诊断并返回 None。
 
         repair 整页中点击后主页面同页跳转到作者页时，返回主页面本身，不再点第二次。
         """
         capture = self._require_capture()
+        attempts: List[str] = []
+        clicked_path = ""
         for attempt in range(1, XHS_AUTHOR_TAB_ATTEMPTS + 1):
             self._creator_attempts = attempt
             state = await self._note_view_state()
             point = state.get("author")
             if point is None:
+                attempts.append("link_missing")
                 await self._scan_sleep(AUTHOR_RANDOM.uniform(1.0, 2.0))
                 continue
             self._author_click_id = capture.action(
@@ -181,12 +192,46 @@ class XhsAuthorMixin:
             except (PlaywrightTimeoutError, TimeoutError):
                 if self.ports.repair and profile_url_user_id(getattr(self.context_page, "url", "")):
                     return self.context_page
+                attempts.append("tab_timeout")
+                clicked_path = path_template(getattr(self.context_page, "url", ""))
                 continue
             finally:
                 self._crawler_page_open_depth -= 1
             self._register_new_page(page, source="crawler_opened")
             return page
+        await self._record_author_tab_failure(attempts, clicked_path)
         return None
+
+    async def _record_author_tab_failure(self, attempts: List[str], clicked_path: str) -> None:
+        """作者标签页没打开：按最后一次尝试写 author_link_missing / author_tab_timeout 导航诊断，并在日志留一行。
+
+        诊断含详情视图内作者名链接与作者主页链接的个数、可见个数、前 4 个主页链接的 target 与祖先链；点击过时
+        另记点击后主页面路径的模板。不含 token、地址查询串或正文。
+        """
+        page = self.context_page
+        outcome = "author_tab_timeout" if attempts and attempts[-1] == "tab_timeout" else "author_link_missing"
+        error = ""
+        try:
+            links = await dom_author_link_diagnostic(page, self._note_view_roots)
+        except Exception as exc:
+            links, error = {}, f"author_link_diagnostic: {type(exc).__name__}"
+        extra: Dict[str, Any] = {"attempts": attempts, **links}
+        if clicked_path:
+            extra["clicked_path"] = clicked_path
+        await self._record_navigation_diagnostic(
+            page, stage="creator_profile", outcome=outcome, error=error, extra=extra, redact_page=True,
+        )
+        fields = [
+            f"outcome={outcome}",
+            f"attempts={attempts}",
+            *(
+                f"{key}={links[key]}"
+                for key in ("view_visible", "author_names", "author_names_visible", "profile_links", "profile_links_visible")
+                if key in links
+            ),
+            f"clicked_path={clicked_path or None}",
+        ]
+        logger.warning("[XiaoHongShuCrawler.author] Author tab not opened: " + ", ".join(fields))
 
     async def _close_author_tab(self, page: Page, note: Any) -> None:
         """新标签页最短保留期满后写 close_tab 并关闭，主页面置前；不额外停留。"""

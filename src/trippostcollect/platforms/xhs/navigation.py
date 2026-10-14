@@ -30,7 +30,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from playwright.async_api import (
     Error as PlaywrightError,
@@ -66,6 +66,12 @@ def is_search_result_url(url: str) -> bool:
     if len(path) > 1:
         path = path.rstrip("/")
     return path in XHS_SEARCH_RESULT_PATHS
+
+
+def url_without_query(url: object) -> str:
+    """地址只留到路径（去掉查询串与片段）；浮层打开时主页面地址带 xsec_token。"""
+    parts = urlsplit(str(url or ""))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 def search_request_page(item: object) -> int | None:
@@ -271,8 +277,17 @@ class XhsNavigationMixin:
         response_status: Optional[int] = None,
         error: str = "",
         extra: Optional[Dict] = None,
+        redact_page: bool = False,
     ) -> Dict:
+        """`redact_page` 为真时，页面地址与失败请求地址只留到路径并去掉页面标题（浮层的地址带 token、标题是笔记标题）。"""
         diagnostic = await self._page_render_diagnostic(page)
+        if redact_page:
+            diagnostic["url"] = url_without_query(diagnostic.get("url"))
+            diagnostic.pop("title", None)
+            diagnostic["request_failures"] = [
+                {**failure, "url": url_without_query(failure.get("url"))}
+                for failure in diagnostic.get("request_failures") or []
+            ]
         diagnostic.update(extra or {})
         diagnostic.update(
             {
@@ -377,14 +392,21 @@ class XhsNavigationMixin:
     def _record_trigger_action(self, kind: str, target: Dict) -> str:
         """主页面上可能引发搜索请求的动作：写账本并记下序号，供搜索访问认定 trigger。"""
         action_id = self._require_capture().action(kind, page_role="primary", target=target)
-        self._trigger_actions.append((line_seq(action_id), action_id))
+        self._trigger_actions.append((line_seq(action_id), action_id, kind, dict(target)))
         del self._trigger_actions[:-64]
         return action_id
 
     def _trigger_before(self, seq: int) -> Optional[str]:
-        for action_seq, action_id in reversed(self._trigger_actions):
+        for action_seq, action_id, _kind, _target in reversed(self._trigger_actions):
             if action_seq < seq:
                 return action_id
+        return None
+
+    def _trigger_action(self, action_id: Optional[str]) -> Optional[tuple[int, str, Dict]]:
+        """最近 64 个触发动作中该 id 的（序号, 种类, target）；不在其中为 None。"""
+        for action_seq, known_id, kind, target in self._trigger_actions:
+            if known_id == action_id:
+                return action_seq, kind, target
         return None
 
     async def _search_layout_ready(self, page: Page) -> bool:

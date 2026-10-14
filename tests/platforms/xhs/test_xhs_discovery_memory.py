@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from hashlib import sha256
 from unittest.mock import ANY, AsyncMock, Mock
@@ -507,6 +508,56 @@ async def test_creator_failure_is_a_candidate_skip_and_later_candidate_continues
     assert stopped["stop_reason"] == "source_exhausted"
     expected = ["success-creator"] if retryable else ["retry-creator", "success-creator"]
     assert stopped["candidate_identities"] == expected
+
+
+HEX_NOTE = "681097f0000000000d009ccf"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setup", "outcome", "attempts", "visible", "clicked_path", "clicks"),
+    [
+        (lambda site: site.hidden_author_notes.add(HEX_NOTE), "author_link_missing",
+         ["link_missing", "link_missing"], 0, None, 0),
+        (lambda site: setattr(site, "author_tab_failures", 2), "author_tab_timeout",
+         ["tab_timeout", "tab_timeout"], 1, "/explore/<id>", 2),
+    ],
+    ids=["link_missing", "tab_timeout"],
+)
+async def test_author_tab_not_opened_records_a_link_diagnostic_without_query_values(
+    monkeypatch, tmp_path, caplog, setup, outcome, attempts, visible, clicked_path, clicks,
+):
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=[HEX_NOTE, "success-creator"])
+    setup(site)
+
+    with caplog.at_level(logging.WARNING, logger="MediaCrawler"):
+        await crawler.search()
+
+    (skipped,) = events_of(state_path, "candidate_skipped")
+    assert skipped["identity"] == HEX_NOTE and skipped["detail"] == "creator_profile_failed:author_tab_not_opened"
+    assert [record["note_id"] for record in crawler.records] == ["success-creator"]
+    author_clicks = [
+        line for line in ledger_lines(crawler)
+        if line.get("action") == "click_author" and line["target"]["note_id"] == HEX_NOTE
+    ]
+    assert len(author_clicks) == clicks and site.author_diagnostic_reads == 1
+    written = json.loads((tmp_path / "behavior_evidence.navigation.json").read_text(encoding="utf-8"))
+    (diagnostic,) = [event for event in written["events"] if event["stage"] == "creator_profile"]
+    assert diagnostic["outcome"] == outcome and diagnostic["attempts"] == attempts and diagnostic["error"] == ""
+    assert diagnostic["url"] == f"https://www.xiaohongshu.com/explore/{HEX_NOTE}" and "title" not in diagnostic
+    assert diagnostic["view_visible"] is True
+    assert (diagnostic["author_names"], diagnostic["author_names_visible"]) == (1, visible)
+    assert (diagnostic["profile_links"], diagnostic["profile_links_visible"]) == (1, visible)
+    (link,) = diagnostic["profile_link_nodes"]
+    assert link["visible"] is bool(visible) and link["target"] == "_blank"
+    assert link["chain"][:2] == ["a.name", "div.author"]
+    assert diagnostic.get("clicked_path") == clicked_path
+    assert "token" not in json.dumps(diagnostic)
+    warning = next(record.getMessage() for record in caplog.records if "Author tab not opened" in record.getMessage())
+    assert f"outcome={outcome}, attempts={attempts}, view_visible=True, author_names=1, " in warning
+    assert f"author_names_visible={visible}" in warning and f"clicked_path={clicked_path}" in warning
+    assert "xiaohongshu.com" not in warning and "token" not in warning
 
 
 @pytest.mark.asyncio

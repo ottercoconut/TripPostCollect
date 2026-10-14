@@ -148,7 +148,7 @@ class XiaoHongShuCrawler(
         self._navigation_request_failures: List[Dict] = []
         self._manual_wait_budget: Optional[XHSManualWaitBudget] = None
         self.capture: Optional[PageCaptureChannel] = None
-        self._trigger_actions: List[tuple[int, str]] = []
+        self._trigger_actions: List[tuple[int, str, str, Dict]] = []
         self._scan: Optional[ScanState] = None
         self._behavior_stage_done = False
         # 行为证据创建前的停顿与验证事件暂存（见 _guarded_pause）；行为阶段后并入并置空。

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 from collections import Counter
@@ -37,6 +38,7 @@ from trippostcollect.platforms.xhs.navigation import (
     search_request_page,
 )
 from trippostcollect.platforms.xhs.page_scripts import (
+    dom_card_diagnostic,
     dom_filter_diagnostic,
     dom_filter_state,
     dom_scroll_metrics,
@@ -67,6 +69,9 @@ XHS_CLICK_BAND_TOP = 0.1
 XHS_CLICK_BAND_BOTTOM_MARGIN_PX = 8.0
 XHS_STALL_JIGGLES = 3
 XHS_UNREGISTERED_CARD_STEPS = 2
+# 未登记卡片诊断最多描述的 ID 个数，以及每个 ID 最多列出的响应出处条数。
+XHS_UNREGISTERED_DIAGNOSTIC_IDS = 8
+XHS_UNREGISTERED_DIAGNOSTIC_ENTRIES = 6
 XHS_BACKFILL_ATTEMPTS = 3
 XHS_FILTER_POLLS = 20
 XHS_FILTER_POLL_SECONDS = 0.25
@@ -110,6 +115,18 @@ class SearchItem:
     position: int
 
 
+@dataclass(frozen=True)
+class ResponseEntry:
+    """一次搜索截获里的一个条目（含非目标会话与非笔记条目）；只留在内存中，供未登记卡片诊断。"""
+
+    seq: int
+    session: tuple[str, str]
+    is_target: bool
+    page: int
+    position: int
+    model_type: str
+
+
 @dataclass(eq=False)
 class SearchSession:
     search_id: str
@@ -117,6 +134,7 @@ class SearchSession:
     started_seq: int
     is_target: bool
     keyword_matches: bool
+    trigger: Optional[str] = None
     pages: dict[int, "SearchPage"] = field(default_factory=dict)
 
     @property
@@ -230,6 +248,8 @@ class ScanState:
     exhausted: bool = False
     network_state: dict[str, object] = field(default_factory=dict)
     unregistered: Counter = field(default_factory=Counter)
+    # 条目 id → 本轮全部搜索截获中的出处（见 ResponseEntry）。
+    response_entries: dict[str, list[ResponseEntry]] = field(default_factory=dict)
     backfill_attempts: Counter = field(default_factory=Counter)
     observed_index: dict[str, int] = field(default_factory=dict)
     scroll_container: str = ""
@@ -353,9 +373,11 @@ class XhsScanMixin:
         page = self.context_page
         after_seq = self._require_capture().ledger.last_seq
         reason = ""
+        clicks: list[str] = []
         for attempt in (0, 1):
             session = self._newest_target_session(after_seq)
             if attempt and session is not None and await self._filter_applied():
+                self._note_target_trigger(session, clicks)
                 return session
             try:
                 state = await self._open_filter_panel()
@@ -366,9 +388,11 @@ class XhsScanMixin:
             click = self._record_trigger_action(
                 "apply_filter", {"filter": "note_type", "label": XHS_TARGET_FILTER_LABEL},
             )
+            clicks.append(click)
             await self._click_point(state["option"])
             session = await self._await_target_page_one(after_seq=line_seq(click))
             if session is not None and await self._filter_applied():
+                self._note_target_trigger(session, clicks)
                 return session
             reason = "filter_not_confirmed"
             logger.warning(
@@ -382,6 +406,31 @@ class XhsScanMixin:
     async def _filter_applied(self) -> bool:
         state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
         return state.get("entry_text") == XHS_FILTER_APPLIED_TEXT
+
+    def _note_target_trigger(self, session: SearchSession, clicks: list[str]) -> None:
+        """目标会话第 1 页的 trigger 不是本次点选“图文”时记一行日志（门禁 G1 会因此失败），判定不变。
+
+        日志带 trigger 的动作种类、target 与序号，以及该会话与最近回车会话的起始序号（回车会话是否已是目标会话）。
+        """
+        if session.trigger in clicks:
+            return
+        seq, kind, target = self._trigger_action(session.trigger) or (None, "unknown", {})
+        enter = max(
+            (
+                other
+                for other in self._scan.sessions.values()
+                if (self._trigger_action(other.trigger) or (None, "", {}))[1] == "press_enter"
+            ),
+            key=lambda other: other.started_seq,
+            default=None,
+        )
+        logger.warning(
+            "[XiaoHongShuCrawler.scan] Target session page 1 was not triggered by this note-type click: "
+            f"trigger={kind}, trigger_target={json.dumps(target, ensure_ascii=False, sort_keys=True)}, "
+            f"trigger_seq={seq}, target_session_seq={session.started_seq}, "
+            f"enter_session_seq={enter.started_seq if enter else None}, "
+            f"enter_session_target={enter.is_target if enter else None}, note_type_clicks={len(clicks)}"
+        )
 
     async def _open_filter_panel(self) -> dict[str, Any]:
         """本次尝试的面板：已开且有“图文”直接用；开着却没有选项先收起再重开，以免点入口反把它关上。"""
@@ -547,7 +596,10 @@ class XhsScanMixin:
                 raise XhsScanInterrupted("frontend_verification:sentinel")
 
     def _on_search_captured(self, captured: CapturedResponse) -> None:
-        """写搜索访问；目标会话的页按序登记，has_more=true 的页置“欠一次翻页停顿”。"""
+        """写搜索访问；目标会话的页按序登记，has_more=true 的页置“欠一次翻页停顿”。
+
+        每个响应的全部条目（含非目标会话、非笔记条目）按 id 记下出处，只留在内存中供未登记卡片诊断。
+        """
         scan = self._scan
         request = captured.request_json if isinstance(captured.request_json, dict) else {}
         data = captured.json.get("data") if isinstance(captured.json, dict) else None
@@ -569,11 +621,12 @@ class XhsScanMixin:
         signature = search_filter_signature(request)
         is_target = is_target_search(request)
         keyword_matches = request.get("keyword") == scan.keyword
+        trigger = self._trigger_before(captured.seq)
         visit_id = self._require_capture().record_visit(
             captured,
             stage="search_results",
             subject_id=None,
-            trigger=self._trigger_before(captured.seq),
+            trigger=trigger,
             search_session=search_id,
             filter_signature=signature,
             is_target=is_target,
@@ -585,12 +638,17 @@ class XhsScanMixin:
         if page_no is None or not search_id:
             raise PlatformRuntimeError("XHS search request lacks page or search_id", code="search_request_failed")
         key = (search_id, signature)
+        for position, raw in enumerate(raw_items):
+            if isinstance(raw, dict) and str(raw.get("id") or ""):
+                scan.response_entries.setdefault(str(raw["id"]), []).append(
+                    ResponseEntry(captured.seq, key, is_target, page_no, position, str(raw.get("model_type") or "")[:40])
+                )
         session = scan.sessions.get(key)
         if session is None:
             if page_no != 1:
                 logger.info(f"[XiaoHongShuCrawler.scan] Ignore page {page_no} of an unseen search session")
                 return
-            session = SearchSession(search_id, signature, captured.seq, is_target, keyword_matches)
+            session = SearchSession(search_id, signature, captured.seq, is_target, keyword_matches, trigger)
             scan.sessions[key] = session
             if not scan.entering and scan.target is not None:
                 scan.pending_session = session
@@ -674,7 +732,7 @@ class XhsScanMixin:
             registered.append((card, *entry))
             scan.observed_index[note_id] = int(card.get("data_index", -1))
             self._mark_observed(entry[0], note_id)
-        self._count_unregistered(unregistered)
+        await self._count_unregistered(unregistered, metrics)
         decided = False
         for card, search_page, item in registered:
             note_id = item.note_id
@@ -696,7 +754,7 @@ class XhsScanMixin:
             return True
         return decided
 
-    def _count_unregistered(self, unregistered: set[str]) -> None:
+    async def _count_unregistered(self, unregistered: set[str], metrics: dict[str, Any]) -> None:
         """有 data-note-id 却未登记的卡片连续 2 次读数仍未登记即停止；搜索响应仍在读体时不计。"""
         scan = self._scan
         for note_id in list(scan.unregistered):
@@ -706,10 +764,74 @@ class XhsScanMixin:
             return
         for note_id in unregistered:
             scan.unregistered[note_id] += 1
-            if scan.unregistered[note_id] >= XHS_UNREGISTERED_CARD_STEPS:
-                raise PlatformRuntimeError(
-                    "XHS search card stayed unregistered", code="xhs_search_card_unregistered",
-                )
+        if max(scan.unregistered[note_id] for note_id in unregistered) >= XHS_UNREGISTERED_CARD_STEPS:
+            await self._record_unregistered_cards(sorted(unregistered), metrics)
+            raise PlatformRuntimeError(
+                "XHS search card stayed unregistered", code="xhs_search_card_unregistered",
+            )
+
+    async def _record_unregistered_cards(self, note_ids: list[str], metrics: dict[str, Any]) -> None:
+        """停止前把每个未登记 ID 的卡片结构与它在本轮搜索响应中的出处写入导航诊断，并在日志留一行。
+
+        出处列出每次出现的截获序号、所在会话的起始序号、是否目标会话 / 当前目标会话、页码、页内位置与
+        model_type；从未出现为 None。不含 token、地址查询串或正文。
+        """
+        scan = self._scan
+        page = self.context_page
+        note_ids = note_ids[:XHS_UNREGISTERED_DIAGNOSTIC_IDS]
+        error = ""
+        try:
+            dom = {str(card.get("note_id")): card for card in await dom_card_diagnostic(page, note_ids)}
+        except Exception as exc:
+            dom, error = {}, f"card_diagnostic: {type(exc).__name__}"
+        target_key = scan.target.key if scan.target is not None else None
+
+        def responses(note_id: str) -> Optional[list[dict[str, Any]]]:
+            entries = scan.response_entries.get(note_id)
+            if not entries:
+                return None
+            return [
+                {
+                    "seq": entry.seq,
+                    "session_seq": session.started_seq if (session := scan.sessions.get(entry.session)) else None,
+                    "is_target": entry.is_target,
+                    "current_target": entry.session == target_key,
+                    "page": entry.page,
+                    "position": entry.position,
+                    "model_type": entry.model_type,
+                }
+                for entry in entries[:XHS_UNREGISTERED_DIAGNOSTIC_ENTRIES]
+            ]
+
+        cards = [{"note_id": note_id, "dom": dom.get(note_id), "responses": responses(note_id)} for note_id in note_ids]
+        await self._record_navigation_diagnostic(
+            page, stage="search_scan", outcome="card_unregistered", error=error, redact_page=True,
+            extra={
+                "scroll_container": metrics.get("scroll_container"),
+                "scroll_y": metrics.get("scroll_y"),
+                "view_rect": metrics.get("view_rect"),
+                "cards": cards,
+            },
+        )
+
+        def session_kind(item: dict[str, Any]) -> str:
+            if item["current_target"]:
+                return "current"
+            return "target" if item["is_target"] else "non_target"
+
+        def summary(card: dict[str, Any]) -> str:
+            shape = card["dom"] or {}
+            seen = "none" if card["responses"] is None else "+".join(
+                f"{session_kind(item)}:p{item['page']}:{item['model_type'] or '?'}" for item in card["responses"]
+            )
+            return (
+                f"{card['note_id']}(index={shape.get('data_index')}, cover={shape.get('cover_path')}, "
+                f"card={shape.get('card')}, seen={seen})"
+            )
+
+        logger.warning(
+            "[XiaoHongShuCrawler.scan] Search card stayed unregistered: " + ", ".join(summary(card) for card in cards)
+        )
 
     @staticmethod
     def _click_band(metrics: dict[str, Any]) -> Optional[tuple[float, float]]:

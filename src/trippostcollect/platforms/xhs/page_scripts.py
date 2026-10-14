@@ -61,6 +61,20 @@ _LIST_VIEW = """const listLayout = () => document.querySelector('.ai-feeds-page 
             }
             return { layout, container, root, view, clip: (rect) => intersect(rect, view) };
         };"""
+# 失败诊断共用的节点描述：tagOf 为 tag.class（class 内连续 16 个及以上字母数字的片段遮为 <id>），chain 为自身起
+# 至多 6 层祖先的 tagOf。以 _CLASS_CHAIN_SLOT 占位、模块加载时替换，同 _LIST_VIEW。
+_CLASS_CHAIN_SLOT = "/*class_chain*/"
+_CLASS_CHAIN = """const tagOf = (node) => [
+            node.tagName.toLowerCase(),
+            ...Array.from(node.classList || []).map((name) => name.replace(/[A-Za-z0-9]{16,}/g, '<id>')),
+        ].join('.');
+        const chain = (node) => {
+            const parts = [];
+            for (let current = node; current && parts.length < 6; current = current.parentElement) {
+                parts.push(tagOf(current));
+            }
+            return parts;
+        };"""
 
 DOM_SCRIPTS: dict[str, str] = {
     # 二维码只作为“已就绪”的布尔信号：可见且 src 非空；不读取、不保存图片内容。
@@ -111,6 +125,39 @@ DOM_SCRIPTS: dict[str, str] = {
                 cover_hit: Boolean(hit && node.contains(hit)),
             };
         }).filter((card) => card.note_id && card.visible_ratio > 0);
+    }""",
+    # 未登记卡片停止前才调用：结果列表内（范围同 visible_cards）每个 ID 的卡片个数、data-index 原值、有无 a.cover、
+    # 封面链接路径的第一段（只读 pathname，不含查询串）、卡片与首个子元素的 tag.class（见 _CLASS_CHAIN），以及
+    # 卡片相对列表可见区左上角的位置；不含文字或地址。
+    "card_diagnostic": """(ids) => {
+        /*list_view*/
+        /*class_chain*/
+        const { layout, view } = listView();
+        const cards = Array.from((layout || document).querySelectorAll('section.note-item'));
+        const origin = view || { left: 0, top: 0 };
+        return ids.map((id) => {
+            const matches = cards.filter((node) => node.getAttribute('data-note-id') === id);
+            const node = matches[0];
+            if (!node) return { note_id: id, nodes: 0 };
+            const cover = node.querySelector('a.cover');
+            const first = node.firstElementChild;
+            const rect = node.getBoundingClientRect();
+            return {
+                note_id: id,
+                nodes: matches.length,
+                data_index: node.getAttribute('data-index'),
+                has_cover: Boolean(cover),
+                cover_path: cover ? '/' + ((cover.pathname || '').split('/')[1] || '') : null,
+                card: tagOf(node),
+                first_child: first ? tagOf(first) : null,
+                position: {
+                    left: Math.round(rect.left - origin.left),
+                    top: Math.round(rect.top - origin.top),
+                    width: Math.round(rect.width),
+                    height: Math.round(rect.height),
+                },
+            };
+        });
     }""",
     # 列表的滚动位置：容器为元素时取它的 scrollTop / clientHeight / scrollHeight，为文档时取 window 与文档根。
     # view_rect 是列表可见区（容器可见区与视口的交集）；list_rect 是结果列表（.search-layout）与 view_rect 的交集，
@@ -185,8 +232,8 @@ DOM_SCRIPTS: dict[str, str] = {
             option: center(option),
         };
     }""",
-    # 筛选失败时才调用：整页计数、布尔与至多 2 条入口文字节点的祖先链（6 层 tag.class，class 内 16 位以上的
-    # 字母数字片段遮为 <id>），不含正文或地址。entry_candidates 为全文档 div.filter 个数。
+    # 筛选失败时才调用：整页计数、布尔与至多 2 条入口文字节点的祖先链（见 _CLASS_CHAIN），不含正文或地址。
+    # entry_candidates 为全文档 div.filter 个数。
     "filter_diagnostic": """() => {
         const labels = ['筛选', '已筛选'];
         const visible = (node) => {
@@ -194,16 +241,7 @@ DOM_SCRIPTS: dict[str, str] = {
             const rect = node.getBoundingClientRect();
             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
         };
-        const chain = (node) => {
-            const parts = [];
-            for (let current = node; current && parts.length < 6; current = current.parentElement) {
-                const classes = Array.from(current.classList || []).map(
-                    (name) => name.replace(/[A-Za-z0-9]{16,}/g, '<id>')
-                );
-                parts.push([current.tagName.toLowerCase(), ...classes].join('.'));
-            }
-            return parts;
-        };
+        /*class_chain*/
         const candidates = Array.from(document.querySelectorAll('div.filter'));
         const labelNodes = Array.from(document.querySelectorAll('body *')).filter(
             (node) => node.childElementCount === 0 && labels.includes((node.textContent || '').trim())
@@ -261,6 +299,33 @@ DOM_SCRIPTS: dict[str, str] = {
             author: center(mask.querySelector('.author a.name')),
         };
     }""",
+    # 作者标签页没打开时才调用：详情视图（取法同 note_view_state）内作者名链接与作者主页链接的个数、可见个数，
+    # 前 4 个主页链接的可见性、target 属性与祖先链（见 _CLASS_CHAIN）；不含文字或地址。
+    "author_link_diagnostic": """(roots) => {
+        const visible = (node) => {
+            if (!node) return false;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        /*class_chain*/
+        const mask = roots.map((selector) => document.querySelector(selector)).find((node) => visible(node));
+        if (!mask) return { view_visible: false };
+        const names = Array.from(mask.querySelectorAll('.author a.name'));
+        const links = Array.from(mask.querySelectorAll('a[href*="/user/profile/"]'));
+        return {
+            view_visible: true,
+            author_names: names.length,
+            author_names_visible: names.filter(visible).length,
+            profile_links: links.length,
+            profile_links_visible: links.filter(visible).length,
+            profile_link_nodes: links.slice(0, 4).map((node) => ({
+                visible: visible(node),
+                target: node.hasAttribute('target') ? node.getAttribute('target').slice(0, 16) : null,
+                chain: chain(node),
+            })),
+        };
+    }""",
     # 点赞控件（浮层内）的按下状态：只读属性、类名与可见文本，不读页面状态。
     "like_control_state": """element => {
             const control = element.closest('button,[role="button"]') || element;
@@ -292,7 +357,10 @@ DOM_SCRIPTS: dict[str, str] = {
         };
     }""",
 }
-DOM_SCRIPTS = {name: script.replace(_LIST_VIEW_SLOT, _LIST_VIEW) for name, script in DOM_SCRIPTS.items()}
+DOM_SCRIPTS = {
+    name: script.replace(_LIST_VIEW_SLOT, _LIST_VIEW).replace(_CLASS_CHAIN_SLOT, _CLASS_CHAIN)
+    for name, script in DOM_SCRIPTS.items()
+}
 
 STATE_SCRIPTS: dict[str, str] = {
     # 作者页白名单投影（经通道 read_state 原样使用这一份）：只读取页面已执行的
@@ -539,6 +607,11 @@ async def dom_visible_cards(page: Page) -> list[dict[str, Any]]:
     return sorted((card for card in cards if isinstance(card, dict)), key=lambda card: card.get("data_index", -1))
 
 
+async def dom_card_diagnostic(page: Page, note_ids: list[str]) -> list[dict[str, Any]]:
+    cards = await _dom(page, "card_diagnostic", list(note_ids))
+    return [card for card in cards if isinstance(card, dict)] if isinstance(cards, list) else []
+
+
 async def dom_scroll_metrics(page: Page) -> dict[str, Any]:
     metrics = await _dom(page, "scroll_metrics")
     return metrics if isinstance(metrics, dict) else {}
@@ -570,6 +643,11 @@ async def dom_filter_diagnostic(page: Page) -> dict[str, Any]:
 async def dom_note_view_state(page: Page, roots: tuple[str, ...]) -> dict[str, Any]:
     state = await _dom(page, "note_view_state", list(roots))
     return state if isinstance(state, dict) else {"visible": False}
+
+
+async def dom_author_link_diagnostic(page: Page, roots: tuple[str, ...]) -> dict[str, Any]:
+    state = await _dom(page, "author_link_diagnostic", list(roots))
+    return state if isinstance(state, dict) else {}
 
 
 async def dom_overlay_state(page: Page) -> dict[str, Any]:
