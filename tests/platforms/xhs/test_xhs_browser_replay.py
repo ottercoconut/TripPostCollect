@@ -281,7 +281,9 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     assert audit["chatScrolls"] == 0  # 滚轮全部作用在结果列表上
     # 列表在容器内滚动：window 始终不动，账本中的滚动位置取自容器；第 2、3 页由滚到容器底部附近触发。
     assert audit["maxWindowScrollY"] == 0 and lists["window_scroll_y"] == 0
-    assert audit["maxListScrollTop"] > 0 and max(line["target"]["scroll_y_before"] for line in actions(crawler, "scroll")) > 0
+    # 行为阶段的 scroll 动作只记 phase，没有滚动位置；这里只看扫描滚动。
+    scan_scrolls = [line["target"] for line in actions(crawler, "scroll") if line["target"].get("phase") != "behavior_stage"]
+    assert audit["maxListScrollTop"] > 0 and max(target["scroll_y_before"] for target in scan_scrolls) > 0
     assert audit["scrollLoads"] == 2 and audit["selfLoads"] == 0
     assert metrics["scroll_container"] == "element" and metrics["view_rect"]["top"] == 116
     assert metrics["list_rect"]["right"] <= VIEWPORT["width"] * 0.65 + 1
