@@ -38,7 +38,7 @@ def _fork_behavior_adapter():
     return module
 
 
-def valid_fingerprint(*, webdriver=None) -> dict:
+def valid_fingerprint(*, webdriver=False) -> dict:
     return {
         "webdriver": webdriver,
         "languages": ["zh-CN", "zh"],
@@ -283,7 +283,7 @@ async def test_behavior_stage_writes_complete_evidence(tmp_path: Path, monkeypat
     )
 
     assert mediacrawler_behavior.behavior_evidence_valid(evidence) is True
-    assert evidence["runtime_fingerprint"]["webdriver"] is None
+    assert evidence["runtime_fingerprint"] == valid_fingerprint()
     assert json.loads(evidence_path.read_text())["status"] == "completed"
     assert evidence_path.with_suffix(".png").is_file()
 
@@ -711,8 +711,22 @@ def test_xhs_behavior_rejects_exposed_webdriver_and_ineffective_scroll() -> None
     ineffective = valid_xhs_evidence()
     ineffective["events"][-1]["effective_passes"] = 0
 
+    assert mediacrawler_behavior.behavior_evidence_valid(valid_xhs_evidence()) is True
     assert mediacrawler_behavior.behavior_evidence_valid(exposed) is False
     assert mediacrawler_behavior.behavior_evidence_valid(ineffective) is False
+
+
+@pytest.mark.parametrize("webdriver", [None, "missing", True, 0, "false"])
+def test_xhs_behavior_accepts_only_the_native_false_webdriver(webdriver) -> None:
+    """#83：正式轮不再注入脚本，原生 navigator.webdriver 为 false；undefined（被改写）或缺失都不通过。"""
+    evidence = valid_xhs_evidence()
+    if webdriver == "missing":
+        evidence["runtime_fingerprint"].pop("webdriver")
+    else:
+        evidence["runtime_fingerprint"]["webdriver"] = webdriver
+
+    assert mediacrawler_behavior.runtime_fingerprint_valid(evidence["runtime_fingerprint"]) is False
+    assert mediacrawler_behavior.behavior_evidence_valid(evidence) is False
 
 
 @pytest.mark.asyncio

@@ -27,7 +27,7 @@ config = SimpleNamespace(
         "https://www.xiaohongshu.com/explore/64b95d01000000000c034587"
         "?xsec_token=AB0EFqJvINCkj6xOCKCQgfNNh8GdnBC_6XecG4QOddo3Q=&xsec_source=pc_cfeed",
     ],
-    CDP_CONNECT_EXISTING=False, CDP_DEBUG_PORT=9222, BROWSER_LAUNCH_TIMEOUT=60, CUSTOM_BROWSER_PATH="",
+    BROWSER_LAUNCH_TIMEOUT=60, CUSTOM_BROWSER_PATH="",
     SAVE_LOGIN_STATE=True, AUTO_CLOSE_BROWSER=True, DISABLE_SSL_VERIFY=False,
     CRAWLER_MAX_NOTES_COUNT=15,
 )

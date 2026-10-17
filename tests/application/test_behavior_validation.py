@@ -65,7 +65,7 @@ def evidence(platform: str, *, pacing=True, url=None) -> dict:
         "events": [{"event": "pause"}, {"event": "mouse_moves"},
                    {"event": "human_scroll_complete", "effective_passes": 1}],
         "page_readiness": {"ready": True},
-        "runtime_fingerprint": {"webdriver": None, "languages": ["zh-CN"], "platform": "MacIntel",
+        "runtime_fingerprint": {"webdriver": False, "languages": ["zh-CN"], "platform": "MacIntel",
                                 "user_agent": "test", "visibility_state": "visible",
                                 "viewport": {"width": 1280, "height": 900}},
         # 长轮次中被截断的行为证据：早期的必需节奏阶段已不在最后 200 条里。

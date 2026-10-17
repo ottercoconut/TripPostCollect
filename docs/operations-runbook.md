@@ -88,9 +88,11 @@ exporter 和浏览器退出；仍有进程组成员才发送 SIGKILL。摘要中
   收束证据写入任务记录与 `run_summary.json` 的 `residual_process_groups`，runner stderr 输出
   `[residual_process_groups]` 行。
 - 遗留风险：CDP Chrome 由 `runtime/browser_launcher.py` 以 `setsid` 自成会话、带 `--remote-debugging-port`
-  启动，stdio 接 `/dev/null`，既不在中间层进程组，也不在登记的 worker 组内。正常收束时由 worker 清理
+  启动，stdio 接 `/dev/null`，既不在中间层进程组，也不在登记的 worker 组内。调试端口由系统在
+  `127.0.0.1` 上分配，不传 `--remote-debugging-address`，只监听本机回环地址。正常收束时由 worker 清理
   流程关闭；一旦走到强杀兜底，它不会因控制端断开而自行退出，launcher 也不再清理，会一直残留，须
-  人工处理。B站在中间层进程内经 Playwright pipe 启动的浏览器，在中间层被强杀后随 pipe 断开退出。
+  人工处理；残留期间调试端口仍对本机进程开放且没有认证，持有本轮登录态。B站在中间层进程内经
+  Playwright pipe 启动的浏览器，在中间层被强杀后随 pipe 断开退出。
   systemd 等对整个 cgroup 同时发 SIGTERM 的场景，worker 与 Chrome 会直接收到信号，不符合“逐层一次”，
   worker 可能因第二次信号跳过清理。
 - 强杀兜底后的残留核对与清理：先确认没有仍在运行的通用 runner、executor、worker 或 warmup（复用迁移

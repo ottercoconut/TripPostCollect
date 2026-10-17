@@ -2033,6 +2033,11 @@ PROGRESS_RESOLUTIONS = {
         "退出", None, "#71：不再拼验证页URL；461/471改为前端验证被动等待（wait_for_frontend_verification）"),
     ("tools/MediaCrawler/tools/trippostcollect_behavior.py", "run_required_api_captcha_verification"): (
         "退出", None, "#71：唯一调用方httpx客户端删除；验证改为前端验证被动等待"),
+    # #83：小红书正式轮不再注入页面脚本，共享 CDP 启动器只自启本机浏览器。
+    ("tools/MediaCrawler/tools/trippostcollect_behavior.py", "install_project_runtime_hints"): (
+        "退出", None, "#83：唯一调用方小红书会话不再注入runtime hints；其他平台直接调用human_flow.install_runtime_hints"),
+    ("tools/MediaCrawler/tools/cdp_browser.py", "CDPBrowserManager._connect_existing_browser"): (
+        "退出", None, "#83：连接已有浏览器在生产中不可达（worker配置恒为False、无入口可改），随CDP_DEBUG_PORT删除"),
 }
 
 # 冻结台账的 SHA-256：T14 删除 fork 后台账冻结，`--check` 只做冻结自检，不再重新枚举基线源码。

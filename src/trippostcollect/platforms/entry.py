@@ -477,14 +477,6 @@ def xhs_dependencies(config, *, repair=None):
         accumulator.event_sink = append_worker_execution_event
         return accumulator
 
-    async def install_project_runtime_hints(context):
-        if not _enabled():
-            return
-        scripts_dir = Path(os.environ.get("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", "")).expanduser()
-        if not scripts_dir.is_dir():
-            raise RuntimeError("required TripPostCollect runtime hint configuration is incomplete")
-        await behavior.install_project_runtime_hints(context)
-
     async def run_behavior(page, platform_key):
         if not _enabled():
             return {"status": "disabled", "platform": platform_key}
@@ -507,7 +499,6 @@ def xhs_dependencies(config, *, repair=None):
             browser_manager_factory=partial(
                 CDPBrowserManager, browser_settings, project_browser_args=behavior.project_browser_args,
             ),
-            install_project_runtime_hints=install_project_runtime_hints,
             run_required_human_behavior=run_behavior,
             accumulator_factory=accumulator_factory,
             append_execution_event=append_worker_execution_event,

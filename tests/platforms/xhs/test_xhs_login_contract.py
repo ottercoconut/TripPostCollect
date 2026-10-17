@@ -510,10 +510,14 @@ class _LoginFlowPage(Emitter):
         self.visible_selectors: set[str] = set()
         self.closed = False
         self.front_count = 0
+        self.init_scripts: list[object] = []
 
     @property
     def frames(self) -> list["_LoginFlowPage"]:
         return [self]
+
+    async def add_init_script(self, *args: object, **kwargs: object) -> None:
+        self.init_scripts.append((args, kwargs))
 
     def locator(self, selector: str) -> _LoginFlowLocator:
         return _LoginFlowLocator(self, selector)
@@ -549,10 +553,14 @@ class _LoginFlowContext:
         self.pages = [page]
         self.page_handler: object | None = None
         self.new_page_calls = 0
+        self.init_scripts: list[object] = []
 
     def on(self, event: str, handler: object) -> None:
         assert event == "page"
         self.page_handler = handler
+
+    async def add_init_script(self, *args: object, **kwargs: object) -> None:
+        self.init_scripts.append((args, kwargs))
 
     async def new_page(self) -> _LoginFlowPage:
         self.new_page_calls += 1
@@ -579,7 +587,6 @@ def _configure_browser_session_test(
         return_value={"status": "completed"}
     )
     crawler.search = AsyncMock()
-    monkeypatch.setattr(crawler.ports, "install_project_runtime_hints", AsyncMock())
     monkeypatch.setattr(config, "ENABLE_CDP_MODE", True)
     monkeypatch.setattr(config, "CDP_HEADLESS", False)
     monkeypatch.setattr(config, "KEYWORDS", "青岛登录测试")
@@ -674,6 +681,70 @@ async def test_startup_enters_qrcode_login_once_and_confirms_with_user_me(
     assert crawler.capture.role_of(page) == "primary"
     # search 模式下首页输入、点选“图文”、翻页停顿与初始行为阶段都在全量扫描内完成。
     crawler._run_human_behavior_on_primary_page.assert_not_awaited()
+    crawler.search.assert_awaited_once_with()
+
+
+class _StartupBrowserManager:
+    """真实 launch_browser_with_cdp 调用的 CDP manager 替身；记录伪装脚本调用，不启动浏览器。"""
+
+    def __init__(self, context: _LoginFlowContext) -> None:
+        self.context = context
+        self.launches: list[dict[str, object]] = []
+        self.stealth_calls = 0
+
+    async def launch_and_connect(self, **kwargs: object) -> _LoginFlowContext:
+        self.launches.append(kwargs)
+        return self.context
+
+    async def get_browser_info(self) -> dict[str, object]:
+        return {}
+
+    async def add_stealth_script(self, *_args: object, **_kwargs: object) -> None:
+        self.stealth_calls += 1
+
+    def assert_alive(self, _stage: str) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_startup_injects_no_page_scripts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#83：正式轮只启动一次 CDP，Context 与主页面都不调用 add_init_script，也不调用 add_stealth_script。"""
+    clock = _LoginFlowClock()
+    page = _LoginFlowPage(visible_text="扫码登录 打开小红书扫一扫")
+    page.visible_selectors.add(XiaoHongShuLogin._QRCODE_SELECTOR)
+    events: list[str] = []
+    crawler, context = _configure_browser_session_test(
+        monkeypatch,
+        tmp_path,
+        page=page,
+        events=events,
+    )
+    del crawler.launch_browser_with_cdp
+    manager = _StartupBrowserManager(context)
+    monkeypatch.setattr(crawler.ports, "browser_manager_factory", lambda: manager)
+    crawler._manual_wait_budget = XHSManualWaitBudget(limit_seconds=600, monotonic=clock.monotonic)
+    _install_observed_login_factory(monkeypatch, events)
+    _login_flow(monkeypatch, clock, page)
+
+    def complete_scan(now: float) -> None:
+        if now < 1 or XiaoHongShuLogin._PROFILE_SELECTORS[0] in page.visible_selectors:
+            return
+        page.visible_text = "首页 我"
+        page.visible_selectors.discard(XiaoHongShuLogin._QRCODE_SELECTOR)
+        page.visible_selectors.add(XiaoHongShuLogin._PROFILE_SELECTORS[0])
+        page.emit_user_me(guest=False)
+
+    clock.on_sleep = complete_scan
+
+    await crawler._run_browser_session(object(), None)
+
+    assert len(manager.launches) == 1
+    assert crawler.cdp_manager is manager
+    assert manager.stealth_calls == 0
+    assert context.init_scripts == [] and page.init_scripts == []
     crawler.search.assert_awaited_once_with()
 
 

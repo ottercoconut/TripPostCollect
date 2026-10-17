@@ -140,6 +140,8 @@ async def launch_login_context(
         "viewport": {"width": 1280, "height": 900},
         "accept_downloads": True,
         "ignore_https_errors": True,
+        # 显式开启沙箱：Playwright 在 chromium_sandbox 不为 True 时会自动追加 --no-sandbox。
+        "chromium_sandbox": True,
         "args": [
             "--disable-dev-shm-usage",
             "--disable-blink-features=AutomationControlled",
@@ -149,7 +151,6 @@ async def launch_login_context(
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
-            "--no-sandbox",
             *browser_runtime_args(),
         ],
         "env": browser_launch_environment(),

@@ -401,7 +401,6 @@ class XhsPorts:
 
     async_playwright: Callable[..., Any]
     browser_manager_factory: Callable[..., Any]
-    install_project_runtime_hints: Callable[..., Any]
     run_required_human_behavior: Callable[..., Any]
     accumulator_factory: Callable[..., Any]
     append_execution_event: Callable[[str, dict[str, Any]], None]

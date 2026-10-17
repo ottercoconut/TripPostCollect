@@ -542,7 +542,7 @@ def behavior_for(platform):
         "events": [{"event": "pause"}, {"event": "mouse_moves"},
                    {"event": "human_scroll_complete", "effective_passes": 1}],
         "page_readiness": {"ready": True},
-        "runtime_fingerprint": {"webdriver": None, "languages": ["zh-CN"], "platform": "MacIntel", "visibility_state": "visible",
+        "runtime_fingerprint": {"webdriver": False, "languages": ["zh-CN"], "platform": "MacIntel", "visibility_state": "visible",
                                 "user_agent": "离线驱动", "viewport": {"width": 1280, "height": 900}},
         "request_pacing_events": [{"stage": s} for s in ("search_results", "note_detail", "creator_profile")],
         "continuity_events": [{"stage": "search_results", "status": "completed"}],

@@ -76,6 +76,9 @@ def discover_cdp_browser_path() -> str | None:
 
 logger = logging.getLogger("MediaCrawler")
 
+# 自启 Chrome 的调试端口只在本机回环地址上监听；连接、就绪检查与取端口都用同一地址。
+CDP_LOOPBACK_HOST = "127.0.0.1"
+
 
 class BrowserLauncher:
     """
@@ -255,47 +258,32 @@ class BrowserLauncher:
 
         return paths
 
-    def find_available_port(self, start_port: int = 9222) -> int:
-        """
-        Find available port
-        """
-        port = start_port
-        while port < start_port + 100:  # Try up to 100 ports
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(('localhost', port))
-                    return port
-            except OSError:
-                port += 1
-
-        raise RuntimeError(f"Cannot find available port, tried {start_port} to {port-1}")
+    @staticmethod
+    def find_available_port() -> int:
+        """在本机回环地址上绑定端口 0，取系统分配的空闲高位端口后关闭 socket，由 Chrome 随后监听。"""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((CDP_LOOPBACK_HOST, 0))
+            return int(s.getsockname()[1])
 
     def launch_browser(self, browser_path: str, debug_port: int, headless: bool = False,
                       user_data_dir: Optional[str] = None) -> subprocess.Popen:
         """
         Launch browser process
         """
-        # Basic launch arguments
+        # 不传 --remote-debugging-address：Chrome 默认只在本机回环地址上监听调试端口。
         args = [
             browser_path,
             f"--remote-debugging-port={debug_port}",
-            "--remote-debugging-address=0.0.0.0",  # Allow remote access
             "--no-first-run",
             "--no-default-browser-check",
-            "--disable-background-timer-throttling",
+            # 保留：被遮挡的窗口仍按可见处理。页面变为 hidden 会让行为门禁失败、IntersectionObserver
+            # 翻页与懒加载停止、等待动画帧卡住；页面本身测不出这个参数。最小化是否同样覆盖未实测。
             "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
             "--disable-features=TranslateUI",
-            "--disable-ipc-flooding-protection",
             "--disable-hang-monitor",
             "--disable-prompt-on-repost",
             "--disable-sync",
             "--disable-dev-shm-usage",  # Avoid shared memory issues
-            "--no-sandbox",  # Disable sandbox in CDP mode
-            # Key anti-detection arguments
-            "--disable-blink-features=AutomationControlled",  # Disable automation control flag
-            "--exclude-switches=enable-automation",  # Exclude automation switch
-            "--disable-infobars",  # Disable info bars
             *self._project_browser_args(),
         ]
 
@@ -430,7 +418,7 @@ class BrowserLauncher:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(1)
-                    result = s.connect_ex(('localhost', debug_port))
+                    result = s.connect_ex((CDP_LOOPBACK_HOST, debug_port))
                     if result == 0:
                         status = self.process_status(reason="browser_ready_confirm")
                         if not status["running"]:

@@ -4,8 +4,6 @@ from trippostcollect.runtime.browser import CDPBrowserSettings
 
 BROWSER_SETTINGS = CDPBrowserSettings(
     PLATFORM="xhs",
-    CDP_CONNECT_EXISTING=False,
-    CDP_DEBUG_PORT=9222,
     BROWSER_LAUNCH_TIMEOUT=60,
     CUSTOM_BROWSER_PATH="",
     SAVE_LOGIN_STATE=True,

@@ -12,7 +12,8 @@
    作为 `state_scripts=` 交给通道，不得被下标取用。
 
 盲区：`runtime/browser.py` 以 `add_init_script(path=...)` 注入的 stealth.min.js 是文件而非字符串常量，
-不在本检查范围内，归 #72；小红书会话 CDP 分支调用的 `cdp_manager.add_stealth_script()` 即这一注入，同属 #72。
+不在本检查范围内，归 #72。小红书正式轮自 #83 起不注入任何页面脚本，由
+`tests/platforms/xhs/test_xhs_login_contract.py::test_startup_injects_no_page_scripts` 覆盖。
 `runtime/page_readiness.py` 只供页面证据使用，不在扫描清单内。
 """
 

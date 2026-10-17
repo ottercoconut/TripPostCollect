@@ -243,6 +243,20 @@ python scripts/xhs_runner.py \
 可捕获异常或操作人中断都要先写终态，再精确收束 child/exporter/Chrome、删除临时 session 并释放
 租约；任一清理事实无法证明时保留租约并在摘要中明确延期。
 
+Chrome 由共享 CDP 启动器（`runtime/browser_launcher.py`）自启：
+- 调试端口：在 `127.0.0.1` 上绑定端口 0 取得系统分配的空闲端口，关闭后交给 Chrome；不传
+  `--remote-debugging-address`，只监听本机回环地址。端口号只在 worker 进程内使用（连接、就绪检查、
+  生命周期错误文本与日志），不写入租约、进程登记、访问账本或执行状态；租约按 `--user-data-dir` 识别
+  本轮 Chrome。
+- 不传 `--no-sandbox`、`--disable-blink-features=AutomationControlled`、`--exclude-switches=enable-automation`、
+  `--disable-infobars`，也不传后台定时器节流、渲染进程降级与 IPC 防洪三个后台参数。
+- 保留 `--disable-backgrounding-occluded-windows`：窗口被遮挡或最小化时页面会变为 hidden，导致行为门禁
+  （要求 `visibility_state=visible`）失败、IntersectionObserver 翻页与懒加载停止、等待动画帧卡住；页面本身
+  测不出这个参数。该参数让被遮挡的窗口仍按可见处理，最小化是否同样覆盖未实测，正式轮期间不要最小化
+  Chrome 窗口。
+- 正式轮不向页面注入任何脚本：不注入 `stealth.min.js`，也不改写 `navigator`。自启 Chrome 不带
+  `--enable-automation`，`navigator.webdriver` 保持原生 `false`，主线程与 Worker 读到的都是原生值。
+
 显式互动在一轮最多一次：
 
 ```bash
@@ -465,7 +479,7 @@ child `summary.json` 的
 ### 节奏与行为
 
 - 搜索并发为 1。`xhs_guarded` 只在搜索结果页执行；使用少量桌面滚轮并验证实际位移，不扫描隐藏 HTML
-  文本。运行指纹必须完整，`navigator.webdriver` 不得暴露。
+  文本。运行指纹必须完整，`navigator.webdriver` 必须是原生 `false`（`undefined` 或 `true` 都不通过）。
 - 各档停顿写行为证据 `request_pacing_events` 与账本 `pause`；搜索两档另执行连续性行为（先停 0.8–2 秒，
   再移动鼠标）并写 `continuity_events`。`xhs_guarded` 的详情长停留与详情间冷却不启用。
 - 取值依据：操作人 2026-10-14 要求全面提速（#79）。各档取值是代码中的具名常量（行为阶段列表停留在共享

@@ -645,7 +645,7 @@ def _valid_evidence() -> dict:
             {"event": "human_scroll_complete", "intent": "list", "passes": 1, "effective_passes": 1},
         ],
         "runtime_fingerprint": {
-            "webdriver": None,
+            "webdriver": False,
             "languages": ["zh-CN", "zh"],
             "platform": "MacIntel",
             "user_agent": "test-agent",

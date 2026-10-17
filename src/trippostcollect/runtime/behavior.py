@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from playwright.async_api import BrowserContext, Page
+from playwright.async_api import Page
 
 from trippostcollect.records.text_signals import is_xhs_sms_terminal_text
-from trippostcollect.runtime.human_flow import dwell_on_list, load_behavior_profile, install_runtime_hints
+from trippostcollect.runtime.human_flow import dwell_on_list, load_behavior_profile
 from trippostcollect.runtime.helpers import utc_now
 
 
@@ -158,9 +158,9 @@ def runtime_fingerprint_valid(fingerprint: dict[str, Any] | None) -> bool:
     if not isinstance(fingerprint, dict):
         return False
     viewport = fingerprint.get("viewport") or {}
+    # 小红书正式轮不注入脚本，自启 Chrome 不带 --enable-automation：原生 navigator.webdriver 为 false。
     return bool(
-        "webdriver" in fingerprint
-        and fingerprint.get("webdriver") is None
+        fingerprint.get("webdriver") is False
         and fingerprint.get("languages")
         and fingerprint.get("platform")
         and fingerprint.get("user_agent")
@@ -415,11 +415,6 @@ def project_browser_args() -> list[str]:
     if not any(item.startswith("--lang=") for item in args):
         args.append("--lang=zh-CN")
     return args
-
-
-async def install_project_runtime_hints(context: BrowserContext) -> None:
-    """旧适配在调用前核验启用状态与配置，runtime 直接安装共享提示。"""
-    await install_runtime_hints(context)
 
 
 async def run_required_human_behavior(

@@ -91,7 +91,7 @@ def test_fork_dynamic_imports_and_behavior_injection(tmp_path):
             async def evaluate(self, expression):
                 if "navigator.webdriver" in expression:
                     return {
-                        "webdriver": None, "languages": ["zh-CN"],
+                        "webdriver": False, "languages": ["zh-CN"],
                         "platform": "test", "user_agent": "test",
                         "visibility_state": "visible",
                         "viewport": {"width": 100, "height": 100},

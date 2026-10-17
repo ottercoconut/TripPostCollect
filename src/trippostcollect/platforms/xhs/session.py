@@ -898,12 +898,9 @@ class XhsSessionMixin:
             None,
             headless=self.settings.CDP_HEADLESS,
         )
-        if self.cdp_manager:
-            await self.cdp_manager.add_stealth_script()
-
+        # 不注入任何页面脚本：自启 Chrome 不带 --enable-automation，navigator 保持原生值。
         self.capture = self._open_capture_channel()
         self._install_new_page_guard()
-        await self.ports.install_project_runtime_hints(self.browser_context)
         self._set_primary_page(await self._single_page_for_login())
         self.capture.install(self.context_page)
         await self._goto_with_deadline(

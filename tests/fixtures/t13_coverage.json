@@ -1297,7 +1297,7 @@
        "min_count": 1
       },
       {
-       "function": "tests/runtime/test_cdp_browser.py::test_xhs_cdp_rejects_existing_browser_without_a_retry_path",
+       "function": "tests/runtime/test_cdp_browser.py::test_xhs_cdp_launch_always_uses_the_run_scoped_profile",
        "lane": "component"
       }
      ]

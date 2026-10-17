@@ -575,6 +575,12 @@ T75_DELETED_LEDGER_NODES = {
     "tests/test_xhs_parent_watchdog.py::test_legacy_mode_keeps_absolute_timeout_and_generates_no_runtime_key",
     "tests/test_xhs_pool.py::test_long_xhs_target_uses_time_budget_only",
 }
+# #83 随“连接已有浏览器”路径删除的台账节点。
+T83_DELETED_LEDGER_NODES = {
+    "tests/test_cdp_browser.py::test_existing_browser_connects_directly_to_devtools_browser",
+    "tests/test_cdp_browser.py::test_existing_browser_falls_back_to_discovered_websocket_url",
+    "tests/test_cdp_browser.py::test_xhs_cdp_rejects_existing_browser_without_a_retry_path",
+}
 # #71 第一批（小红书取数改为浏览器 L1）删除或改写的台账节点：被替代的旧取数路径用例。
 T71_DELETED_LEDGER_NODES = {
     'tests/test_mediacrawler_behavior.py::test_xhs_api_captcha_does_not_complete_on_blank_redirect',
@@ -715,6 +721,7 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
         | T64_DELETED_LEDGER_NODES
         | T75_DELETED_LEDGER_NODES
         | T71_DELETED_LEDGER_NODES
+        | T83_DELETED_LEDGER_NODES
     )
     for source, target in MOVED_TO_TARGET.items():
         assert source not in collected and target in collected, (source, target)
@@ -724,4 +731,5 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
         - len(T64_DELETED_LEDGER_NODES)
         - len(T75_DELETED_LEDGER_NODES)
         - len(T71_DELETED_LEDGER_NODES)
+        - len(T83_DELETED_LEDGER_NODES)
     )
