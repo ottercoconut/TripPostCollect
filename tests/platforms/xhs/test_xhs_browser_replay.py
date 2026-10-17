@@ -114,7 +114,12 @@ async def replay_browser(site: XhsOfflineSite):
             site.watch(context)
             await context.route("**/*", site.handle)
             pointer_events: list[dict] = []
-            await context.expose_function("__tpcPointerEvent", pointer_events.append)
+
+            # Playwright 要给回调设属性，内置方法 list.append 不能设属性，必须包一层普通函数（同 8376f79）。
+            def record_pointer_event(event: dict) -> None:
+                pointer_events.append(event)
+
+            await context.expose_function("__tpcPointerEvent", record_pointer_event)
             await context.add_init_script(POINTER_RECORDER)
             page = await context.new_page()
             yield context, page, pointer_events
