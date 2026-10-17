@@ -45,6 +45,7 @@ LOGIN_VISIBLE_RE = re.compile(r"请先登录|登录后查看|需要登录|login_
 
 
 async def runtime_fingerprint(page: Page) -> dict[str, Any]:
+    """行为证据里的运行环境；window_size 与 screen 只记录、不参与门禁（核对固定窗口能否放进屏幕可用区域）。"""
     async with asyncio.timeout(10):
         return await page.evaluate(
             """() => ({
@@ -59,6 +60,13 @@ async def runtime_fingerprint(page: Page) -> dict[str, Any]:
                     width: window.innerWidth || 0,
                     height: window.innerHeight || 0,
                     device_pixel_ratio: window.devicePixelRatio || 1,
+                },
+                window_size: { outer_width: window.outerWidth || 0, outer_height: window.outerHeight || 0 },
+                screen: {
+                    width: screen.width || 0,
+                    height: screen.height || 0,
+                    avail_width: screen.availWidth || 0,
+                    avail_height: screen.availHeight || 0,
                 },
                 visibility_state: document.visibilityState || '',
             })"""

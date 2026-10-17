@@ -47,6 +47,7 @@ from trippostcollect.platforms.xhs.page_scripts import (
     dom_search_box,
     dom_search_layout_visible,
 )
+from trippostcollect.runtime.human_pointer import Box, pointer_for
 from trippostcollect.runtime.page_capture import CapturedResponse
 from trippostcollect.runtime.visit_ledger import line_seq
 
@@ -358,10 +359,9 @@ class XhsNavigationMixin:
         box = await dom_search_box(page)
         if not box.get("visible"):
             raise XhsSearchEntryFailed("explore_not_rendered")
-        x, y = float(box["x"]), float(box["y"])
-        await page.mouse.move(x, y, steps=INPUT_RANDOM.randint(6, 14))
-        await page.mouse.click(x, y, delay=INPUT_RANDOM.randint(80, 220))
-        self._record_trigger_action("type_search", {"chars": len(keyword)})
+        # 聚焦搜索框的点击没有单独的账本动作，它的指针记录随紧接着的 type_search 写出。
+        focus = await pointer_for(page).click(Box.from_point(box))
+        self._record_trigger_action("type_search", {"chars": len(keyword)}, pointer=focus)
         for character in keyword:
             await page.keyboard.type(character)
             await self._scan_sleep(INPUT_RANDOM.uniform(*XHS_TYPE_KEY_SECONDS))
@@ -381,9 +381,9 @@ class XhsNavigationMixin:
             raise XhsSearchEntryFailed("search_not_rendered")
         return line_seq(enter)
 
-    def _record_trigger_action(self, kind: str, target: Dict) -> str:
+    def _record_trigger_action(self, kind: str, target: Dict, *, pointer: Optional[Dict] = None) -> str:
         """主页面上可能引发搜索请求的动作：写账本并记下序号，供搜索访问认定 trigger。"""
-        action_id = self._require_capture().action(kind, page_role="primary", target=target)
+        action_id = self._require_capture().action(kind, page_role="primary", target=target, pointer=pointer)
         self._trigger_actions.append((line_seq(action_id), action_id, kind, dict(target)))
         del self._trigger_actions[:-64]
         return action_id

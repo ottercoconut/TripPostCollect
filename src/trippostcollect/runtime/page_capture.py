@@ -408,11 +408,14 @@ class PageCaptureChannel:
         page_role: str,
         target: Mapping[str, Any],
         from_visit: str | None = None,
+        pointer: Mapping[str, Any] | None = None,
     ) -> str:
-        """分配序号并写账本后返回动作 id；调用方随后才执行界面动作。"""
+        """分配序号并写账本后返回动作 id；调用方随后才执行界面动作。`pointer` 为执行前计划好的指针记录
+        （点击落点比例与接近时长，或各滚轮手势的事件数与位移），给出时写进同一行。"""
         seq = self.next_seq()
+        fields: dict[str, Any] = {"pointer": dict(pointer)} if pointer is not None else {}
         return self.ledger.append(
-            "action", seq=seq, page_role=page_role, action=kind, target=dict(target), from_visit=from_visit
+            "action", seq=seq, page_role=page_role, action=kind, target=dict(target), from_visit=from_visit, **fields
         )
 
     def pause_started(self) -> int:

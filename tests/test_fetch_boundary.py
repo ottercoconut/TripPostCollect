@@ -34,7 +34,7 @@ PACKAGE = ROOT / "src/trippostcollect"
 GUARDED_PLATFORMS: dict[str, str] = {"xhs": "platforms/xhs"}
 # 平台会调用、且向页面传入脚本字符串的 runtime 模块；平台新增依赖时同步加入。
 RUNTIME_SCRIPT_MODULES: dict[str, tuple[str, ...]] = {
-    "xhs": ("runtime/behavior.py", "runtime/human_flow.py", "runtime/page_capture.py"),
+    "xhs": ("runtime/behavior.py", "runtime/human_flow.py", "runtime/human_pointer.py", "runtime/page_capture.py"),
 }
 # 每平台一个显式白名单：(包内相对路径, 规则编号, 命中详情)。条目必须仍然命中，过期即失败。
 WHITELISTS: dict[str, frozenset[tuple[str, str, str]]] = {

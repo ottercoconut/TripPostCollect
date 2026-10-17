@@ -18,6 +18,7 @@ from support.xhs_fake_site import (
     AUTHOR_POINT,
     AVATAR_POINT,
     COMMENT_POINT,
+    inside,
     AuthorTab,
     XhsFakeSite,
     detail_card,
@@ -257,6 +258,19 @@ async def test_overlay_records_pass_the_real_visit_gate(monkeypatch, tmp_path):
     actions = [line["action"] for line in ledger_lines(crawler) if line["kind"] == "action"]
     assert actions.count("flip_image") == 3 and actions.count("click_author") == 2
     assert actions.count("close_tab") == 2 and actions.count("close_overlay") == 3
+    # #84：每次点击带落点在元素框中的比例与接近时长，每次列表滚动带各手势的事件数与位移；真实门禁照常通过。
+    clicks = {"click_card", "close_overlay", "click_author", "apply_filter", "type_search"}
+    for line in (line for line in ledger_lines(crawler) if line["kind"] == "action"):
+        if line["action"] in clicks or (line["action"] == "flip_image" and line["target"]["method"] == "arrow"):
+            pointer = line["pointer"]
+            assert 0 < pointer["x_ratio"] < 1 and 0 < pointer["y_ratio"] < 1
+            assert pointer["approach_ms"] > 0 and pointer["moves"] > 0 and 80 <= pointer["hold_ms"] <= 135
+        elif line["action"] == "scroll" and "delta_y" in line["target"]:
+            gestures = line["pointer"]["gestures"]
+            assert sum(gesture["delta_y"] for gesture in gestures) == line["target"]["delta_y"]
+            assert all(gesture["events"] >= 8 for gesture in gestures)
+        else:
+            assert "pointer" not in line, line["action"]
     # 操作人 2026-10-14 要求全面提速（#79）后的各档取值。
     assert set(crawler.pause_ranges) == {
         ("search_page", 4.0, 10.0), ("search_results", 2.0, 5.0), ("note_detail", 2.0, 4.0), ("creator_profile", 2.0, 5.0),
@@ -705,8 +719,8 @@ async def test_author_link_is_located_by_the_author_id_outside_the_comments(monk
     assert [record["note_id"] for record in crawler.records] == [HEX_NOTE]
     assert not events_of(state_path, "candidate_skipped")
     assert len(site.author_tabs) == 1 and site.author_tabs[0].user_id == AUTHOR
-    assert (expected["x"], expected["y"]) in site.click_points
-    assert (COMMENT_POINT["x"], COMMENT_POINT["y"]) not in site.click_points and site.comment_clicks == 0
+    assert any(inside(expected, x, y) for x, y in site.click_points)
+    assert not any(inside(COMMENT_POINT, x, y) for x, y in site.click_points) and site.comment_clicks == 0
     assert len([line for line in ledger_lines(crawler) if line.get("action") == "click_author"]) == 1
     assert last_stop(state_path)["stop_reason"] == "source_exhausted"
 

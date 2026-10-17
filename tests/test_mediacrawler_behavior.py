@@ -27,6 +27,7 @@ mediacrawler_crawl = import_module("mediacrawler_crawl")
 xhs_behavior = import_module("trippostcollect.platforms.xhs.behavior")
 runtime_behavior = import_module("trippostcollect.runtime.behavior")
 human_flow = import_module("trippostcollect.runtime.human_flow")
+human_pointer = import_module("trippostcollect.runtime.human_pointer")
 
 
 def _fork_behavior_adapter():
@@ -48,6 +49,8 @@ def valid_fingerprint(*, webdriver=False) -> dict:
         "device_memory": 8,
         "max_touch_points": 0,
         "viewport": {"width": 1440, "height": 900, "device_pixel_ratio": 2},
+        "window_size": {"outer_width": 1450, "outer_height": 863},
+        "screen": {"width": 1470, "height": 956, "avail_width": 1470, "avail_height": 863},
         "visibility_state": "visible",
     }
 
@@ -730,6 +733,26 @@ def test_xhs_behavior_accepts_only_the_native_false_webdriver(webdriver) -> None
 
 
 @pytest.mark.asyncio
+async def test_window_and_screen_sizes_are_recorded_but_not_gated() -> None:
+    """固定窗口 1450×900 高于 Mac 屏幕可用区域 863：采集外窗、屏幕与可用区域尺寸供实测核对，不参与门禁。"""
+
+    class Page:
+        async def evaluate(self, script: str) -> dict:
+            for name in ("outerWidth", "outerHeight", "screen.width", "screen.height", "availWidth", "availHeight",
+                         "devicePixelRatio"):
+                assert name in script, name
+            return valid_fingerprint()
+
+    fingerprint = await runtime_behavior.runtime_fingerprint(Page())
+    assert fingerprint["window_size"] == {"outer_width": 1450, "outer_height": 863}
+    for drop in ("window_size", "screen"):
+        reduced = {key: value for key, value in fingerprint.items() if key != drop}
+        assert mediacrawler_behavior.runtime_fingerprint_valid(reduced) is True
+    taller = {**fingerprint, "window_size": {"outer_width": 1450, "outer_height": 900}}
+    assert mediacrawler_behavior.runtime_fingerprint_valid(taller) is True
+
+
+@pytest.mark.asyncio
 async def test_xhs_guarded_request_pause_is_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class FixedRandom:
         @staticmethod
@@ -1026,8 +1049,11 @@ async def test_xhs_like_does_not_click_an_already_liked_control(monkeypatch: pyt
 
 @pytest.mark.asyncio
 async def test_xhs_like_clicks_once_and_verifies_state_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    """点赞控件在视口下方：用滚轮手势滚进视口（没有程序滚动），按轨迹移上去后原地按下，只点一次。"""
+
     class LikeLocator:
         click_count = 0
+        top = 1200.0  # 视口高 800：初始在下方
 
         async def count(self) -> int:
             return 1
@@ -1039,7 +1065,16 @@ async def test_xhs_like_clicks_once_and_verifies_state_change(monkeypatch: pytes
         async def is_visible(self, timeout: int) -> bool:
             return True
 
+        def box(self) -> dict:
+            return {"x": 900.0, "y": self.top, "width": 40.0, "height": 24.0}
+
+        async def bounding_box(self, timeout: int) -> dict:
+            return self.box()
+
         async def evaluate(self, script: str) -> dict:
+            if script == human_pointer.ELEMENT_VIEW_SCRIPT:
+                return {"left": 900.0, "top": self.top, "width": 40.0, "height": 24.0,
+                        "clip": {"left": 0.0, "top": 0.0, "right": 1280.0, "bottom": 800.0}}
             liked = self.click_count == 1
             return {
                 "aria_pressed": "true" if liked else "false",
@@ -1052,21 +1087,40 @@ async def test_xhs_like_clicks_once_and_verifies_state_change(monkeypatch: pytes
                 "active_descendant": liked,
             }
 
-        async def scroll_into_view_if_needed(self, timeout: int) -> None:
+    class Mouse:
+        def __init__(self, like: LikeLocator) -> None:
+            self.like = like
+            self.position = (0.0, 0.0)
+            self.wheel_events: list[tuple[int, int]] = []
+
+        async def move(self, x: float, y: float) -> None:
+            self.position = (x, y)
+
+        async def wheel(self, delta_x: int, delta_y: int) -> None:
+            self.wheel_events.append((delta_x, delta_y))
+            self.like.top -= delta_y
+
+        async def down(self) -> None:
             return None
 
-        async def hover(self, timeout: int) -> None:
-            return None
-
-        async def click(self, **kwargs) -> None:
-            self.click_count += 1
+        async def up(self) -> None:
+            box = self.like.box()
+            x, y = self.position
+            assert box["x"] <= x <= box["x"] + box["width"] and box["y"] <= y <= box["y"] + box["height"]
+            self.like.click_count += 1
 
     class LikePage:
+        viewport_size = {"width": 1280, "height": 800}
+
         def __init__(self) -> None:
             self.like = LikeLocator()
+            self.mouse = Mouse(self.like)
 
         def locator(self, selector: str) -> LikeLocator:
             return self.like
+
+        async def wait_for_timeout(self, milliseconds: float) -> None:
+            return None
 
     async def no_mouse_moves(page, profile, log) -> None:
         return None
@@ -1078,10 +1132,17 @@ async def test_xhs_like_clicks_once_and_verifies_state_change(monkeypatch: pytes
     monkeypatch.setattr(xhs_behavior, "random_mouse_moves", no_mouse_moves)
     monkeypatch.setattr(xhs_behavior, "human_pause", no_pause)
 
-    result = await mediacrawler_behavior._run_xhs_like_once(page, object(), [])
+    events: list[dict] = []
+    result = await mediacrawler_behavior._run_xhs_like_once(page, object(), events)
 
     assert result["status"] == "completed"
     assert page.like.click_count == 1
+    assert 0 <= page.like.top and page.like.top + 24 <= 800
+    (into_view,) = [event for event in events if event["event"] == "wheel_into_view"]
+    assert into_view["gestures"] and all(gesture["events"] >= 8 for gesture in into_view["gestures"])
+    assert sum(gesture["delta_y"] for gesture in into_view["gestures"]) == sum(dy for _, dy in page.mouse.wheel_events)
+    (click,) = [event for event in events if event["event"] == "pointer_click"]
+    assert click["target"] == "like" and 0 < click["x_ratio"] < 1 and 0 < click["y_ratio"] < 1
 
 
 @pytest.mark.asyncio
@@ -1099,14 +1160,18 @@ async def test_human_scroll_records_observed_page_movement(monkeypatch: pytest.M
         def __init__(self, page) -> None:
             self.page = page
 
-        async def move(self, x: int, y: int, steps: int) -> None:
-            return None
+        async def move(self, x: float, y: float) -> None:
+            self.page.moves += 1
 
         async def wheel(self, delta_x: int, delta_y: int) -> None:
+            self.page.wheels += 1
             self.page.scroll_top = max(0, self.page.scroll_top + delta_y)
 
     class ScrollPage:
+        viewport_size = None  # 经 CDP 连接的页面没有视口模拟：光标从页面脚本读视口
+
         def __init__(self) -> None:
+            self.moves = self.wheels = 0
             self.scroll_top = 0
             self.mouse = Mouse(self)
 
@@ -1138,6 +1203,10 @@ async def test_human_scroll_records_observed_page_movement(monkeypatch: pytest.M
     completion = next(item for item in events if item["event"] == "human_scroll_complete")
     assert completion["effective_passes"] == 1
     assert any(item.get("effect_observed") is True for item in events)
+    # xhs_guarded：移动按轨迹逐个发出，滚动是手势序列，事件里记各手势的事件数与位移。
+    (wheel,) = [item for item in events if item["event"] == "wheel_scroll"]
+    assert sum(gesture["delta_y"] for gesture in wheel["gestures"]) == wheel["delta_y"] == page.scroll_top
+    assert page.wheels == sum(gesture["events"] for gesture in wheel["gestures"]) and page.moves > 3
 
 
 def test_all_selected_platforms_require_behavior_and_policy_evidence() -> None:

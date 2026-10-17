@@ -36,6 +36,7 @@ RESOURCE_SOURCES = {
     "js/zhihu.js": "src/trippostcollect/resources/js/zhihu.js",
     "js/stealth.min.js": "src/trippostcollect/resources/js/stealth.min.js",
     "licenses/MediaCrawler-LICENSE": "src/trippostcollect/resources/licenses/MediaCrawler-LICENSE",
+    "licenses/CloakBrowser-LICENSE": "src/trippostcollect/resources/licenses/CloakBrowser-LICENSE",
     **{f"sql/{name}": f"db/{name}" for name in SQL_FILES},
     "contracts/formal-crawl-contract.md": "docs/formal-crawl-contract.md",
 }

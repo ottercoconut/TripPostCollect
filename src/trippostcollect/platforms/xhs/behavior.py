@@ -49,6 +49,7 @@ from trippostcollect.runtime.behavior import (
     visible_page_state,
 )
 from trippostcollect.runtime.helpers import utc_now
+from trippostcollect.runtime.human_pointer import Box, pointer_for
 from trippostcollect.xhs.operator_wait import OperatorWaitEpisode, current_operator_wait_signal
 from trippostcollect.runtime.human_flow import (
     human_pause,
@@ -727,7 +728,9 @@ async def _run_xhs_comment_scroll(page: Page, profile: Any, events: list[dict[st
         await human_scroll(page, profile, intent="find_comments", max_passes=1, log=events)
     if locator is None:
         return {"status": "failed", "action": "comment-scroll", "reason": "comment_container_not_found"}
-    await locator.scroll_into_view_if_needed(timeout=5_000)
+    # 用滚轮手势滚到评论区；超出上限抛 ElementNotInView，按本次互动失败处理，不退回程序滚动。
+    gestures = await pointer_for(page).scroll_into_view(locator)
+    events.append({"event": "wheel_into_view", "target": "comments", "gestures": gestures})
     await human_pause(page, (2.0, 8.0), reason="comments_arrival", log=events)
     await human_scroll(page, profile, intent="comments", max_passes=2, log=events)
     return {"status": "completed", "action": "comment-scroll", "selector": selector}
@@ -753,10 +756,15 @@ async def _run_xhs_like_once(page: Page, profile: Any, events: list[dict[str, An
             "selector": selector,
             "before": before,
         }
-    await locator.scroll_into_view_if_needed(timeout=5_000)
-    await locator.hover(timeout=3_000)
+    pointer = pointer_for(page)
+    gestures = await pointer.scroll_into_view(locator)
+    events.append({"event": "wheel_into_view", "target": "like", "gestures": gestures})
+    # 先取元素框再按轨迹移上去（悬停），停顿后原地按下。
+    plan = await pointer.plan_click(Box.from_bounding_box(await locator.bounding_box(timeout=3_000)))
+    await pointer.approach(plan)
     await human_pause(page, (1.2, 4.5), reason="before_like", log=events)
-    await locator.click(timeout=5_000, delay=REQUEST_RANDOM.randint(80, 220))
+    await pointer.press(plan)
+    events.append({"event": "pointer_click", "target": "like", **plan.evidence})
     await human_pause(page, (1.5, 4.0), reason="after_like", log=events)
     after = await _like_control_state(locator)
     verified = _looks_liked(after) or any(

@@ -256,6 +256,36 @@ Chrome 由共享 CDP 启动器（`runtime/browser_launcher.py`）自启：
   Chrome 窗口。
 - 正式轮不向页面注入任何脚本：不注入 `stealth.min.js`，也不改写 `navigator`。自启 Chrome 不带
   `--enable-automation`，`navigator.webdriver` 保持原生 `false`，主线程与 Worker 读到的都是原生值。
+- 行为证据的 `runtime_fingerprint` 另记 `window_size`（`outer_width`、`outer_height`）与 `screen`（`width`、
+  `height`、`avail_width`、`avail_height`），`viewport.device_pixel_ratio` 照旧；这些只记录、不参与门禁。用途是
+  核对固定窗口 1450×900 能否放进屏幕可用区域：操作人 Mac 的可用区域是 1470×863，高度差 37px，Chrome
+  是否把窗口收进可用区域待实测。
+
+正式轮（含 repair）的鼠标动作都经 `runtime/human_pointer.py`（#84）。算法移植自 CloakBrowser 包装层
+`cloakbrowser/human/`（MIT，提交 `fbf005bc`，许可见 `resources/licenses/CloakBrowser-LICENSE`），参数按操作人
+2026-10-17 在 Mac 上用触控板手工录制的样本校准。键盘不模拟真人，关键词仍逐字 `keyboard.type`。
+- 每次 `mouse.move` / `mouse.wheel` 只发一个事件，事件之间按 60Hz（约 16.7ms，±3%）真实等待。每个页面
+  记住自己的光标位置；本页第一个指针动作前，光标先出现在视口中下部（横 30%–70%、纵 60%–90%），停
+  0.15–0.4 秒再走轨迹，不从 (0,0) 画长线。
+- 接近目标分两段：快速主移动（三次 Bezier、速度前段达峰，时长约 110+6·log2(1+距离/8) 毫秒，700px 级约
+  150ms）落在目标附近（多数越过、少数没够到，偏离全程的 6%–22%、至多 115px），静止 90–260ms 后再做
+  1 次、约三分之一的情况 2 次修正（每次约 200ms），最后精确落到目标点；60px 以内一笔到位。修正结束后
+  静止 20–550ms 才按下，按住 80–135ms。
+- 落点是元素框内的整数坐标，按截断正态取：横向 25%–75%（中心 50%），纵向 25%–55%（中心 40%）；小目标
+  （筛选标签文字、作者名）离元素边至少 2px。卡片封面的落点纵向再限在可点击带内（可点击判定仍只看封面中心）。
+  定位器上的控件（登录按钮、二维码刷新、点赞）先取元素框，再按同样方式点击，不用 `locator.click`。
+- 滚动是触控板手势序列：每个手势 3–6 个事件内升到峰值，再衰减到 1，可能以一个 0 结束、偶尔跟 1–2 个
+  反向的 1；`deltaY` 为整数，总和恰为该次滚动距离。峰值随距离增长（150px 约 10、400px 约 40，上限 50），
+  每个手势至少 8 个事件、至多约 400px，更长的滚动拆成多个手势，手势间停 0.4–0.95 秒。`deltaX` 是
+  `deltaY` 的 0–0.4 倍同向漂移，方向整轮固定。
+- 需要把元素滚进可视区（评论区、点赞控件）时，光标先移进该元素所在滚动区域，用手势按需要的位移滚动后
+  重新测量，至多 8 轮，连续两轮位置不变即停；仍不可见按本次互动失败处理，不退回 `scroll_into_view_if_needed`。
+- 证据：账本中点击类动作（`apply_filter`、`click_card`、`close_overlay`、`click_author`、按箭头的
+  `flip_image`，以及聚焦搜索框那次点击随 `type_search`）带 `pointer`：`x_ratio`、`y_ratio`（落点在元素框
+  中的比例）、`approach_ms`、`moves`、`settle_ms`、`hold_ms`，本页第一次时另有 `entered=true`；扫描 `scroll`
+  动作带 `pointer.gestures`（每个手势的 `events`、`delta_y`、`delta_x`）。这些都在执行前计划好、随动作行写出。
+  行为证据的 `wheel_scroll` 事件带同样的 `gestures`，互动另记 `wheel_into_view` 与 `pointer_click`。作者页的
+  一次小幅滚动不写记录。
 
 显式互动在一轮最多一次：
 
@@ -404,7 +434,7 @@ child `summary.json` 的
   （`.ai-feeds-page.with-ai-chat`，右侧有可独立滚动的对话栏）的入口在 `.ai-chat-inner` 内，面板挂在入口
   内部，收起时从 DOM 移除，`.search-layout` 内没有入口。因此入口在全文档 `div.filter` 中取第一个可见、
   且直属 `span` 文字精确为“筛选”或“已筛选”的节点（前面可能有隐藏或零尺寸的同类节点）；入口文字只读
-  这个 `span`（面板开着时入口的整体文字含面板内容），开、收面板都点它的中心。选项每个标签有一份坐标
+  这个 `span`（面板开着时入口的整体文字含面板内容），开、收面板都点它（落点在 `span` 框内）。选项每个标签有一份坐标
   重叠的 `aria-hidden="true"` 副本，排除自身或祖先带该属性的节点后按精确文字取可见的那个。入口未渲染时
   每次尝试按 0.25 秒轮询最多等 15 秒，出现后停顿 0.6–1.8 秒再点开面板，按精确文字点选“图文”（各组
   `.tags` 结构相同，不按位置），以入口文字变为“已筛选”且截获到目标会话第 1 页（5 项 `filters`：`sort_type=general`、
@@ -428,9 +458,10 @@ child `summary.json` 的
   回到顶部和账本 `scroll_y_before` 都用它；“列表可见区”是容器可见区与视口的交集，文档时为整个视口。
   容器类型变化时日志记一行 `List scroll container`，只含几何数值。卡片和就绪计数里的笔记链接、作者链接只在
   `.search-layout` 内找（取不到时为全文档），对话栏里的不算。
-- 扫描滚轮的鼠标落点限定在结果列表 `.search-layout` 与列表可见区相交的矩形内，横纵各内缩 20%，以免 AI
-  对话布局下滚轮落在对话栏上；取不到该矩形时在列表可见区内按宽 30%–70%、高 35%–75% 落点。行为阶段的
-  共享滚轮不在此列。
+- 扫描滚动时光标位于结果列表 `.search-layout` 与列表可见区相交的矩形内，横纵各内缩 20%，以免 AI 对话
+  布局下滚轮落在对话栏上；取不到该矩形时为列表可见区内宽 30%–70%、高 35%–75% 的区域。光标已在区域内就
+  不动，否则按轨迹移进区域。每一步的位移由若干触控板手势凑成，总和恰为该步距离。行为阶段的共享滚动
+  不在此列。
 - 地址栏里的关键词经两次编码；行为门禁的 `target_url_ok` 对地址逐层解码（最多 3 层），任一层含关键词
   即为真，通用平台单次编码的结果不变。“真实关键词页”另由账本证明：目标会话第 1 页的
   `keyword_matches_target=true`。
@@ -478,7 +509,7 @@ child `summary.json` 的
 
 ### 节奏与行为
 
-- 搜索并发为 1。`xhs_guarded` 只在搜索结果页执行；使用少量桌面滚轮并验证实际位移，不扫描隐藏 HTML
+- 搜索并发为 1。`xhs_guarded` 只在搜索结果页执行；使用少量触控板手势滚动并验证实际位移，不扫描隐藏 HTML
   文本。运行指纹必须完整，`navigator.webdriver` 必须是原生 `false`（`undefined` 或 `true` 都不通过）。
 - 各档停顿写行为证据 `request_pacing_events` 与账本 `pause`；搜索两档另执行连续性行为（先停 0.8–2 秒，
   再移动鼠标）并写 `continuity_events`。`xhs_guarded` 的详情长停留与详情间冷却不启用。

@@ -35,14 +35,25 @@ ROW_HEIGHT = 360
 COLUMNS = 4
 FOOTER = 200
 PREFETCH_PX = 400
-SEARCH_BOX = {"x": 640.0, "y": 40.0}
-FILTER_ENTRY = {"x": 1200.0, "y": 100.0}
-FILTER_OPTION = {"x": 700.0, "y": 200.0}
-CLOSE_POINT = {"x": 1250.0, "y": 50.0}
-ARROW_POINT = {"x": 760.0, "y": 450.0}
-AUTHOR_POINT = {"x": 980.0, "y": 130.0}
-AVATAR_POINT = {"x": 930.0, "y": 130.0}
-COMMENT_POINT = {"x": 980.0, "y": 600.0}
+
+
+def box(x: float, y: float, width: float, height: float) -> dict[str, float]:
+    """页面脚本给出的元素框：中心点 x、y 与 left、top、width、height。"""
+    return {"x": x, "y": y, "left": x - width / 2, "top": y - height / 2, "width": width, "height": height}
+
+
+def inside(point: dict[str, float], x: float, y: float) -> bool:
+    return point["left"] <= x <= point["left"] + point["width"] and point["top"] <= y <= point["top"] + point["height"]
+
+
+SEARCH_BOX = box(640.0, 40.0, 400, 36)
+FILTER_ENTRY = box(1200.0, 100.0, 28, 20)
+FILTER_OPTION = box(700.0, 200.0, 48, 24)
+CLOSE_POINT = box(1250.0, 50.0, 36, 36)
+ARROW_POINT = box(760.0, 450.0, 32, 32)
+AUTHOR_POINT = box(980.0, 130.0, 64, 20)
+AVATAR_POINT = box(930.0, 130.0, 36, 36)
+COMMENT_POINT = box(980.0, 600.0, 64, 20)
 
 
 def image_url(note_id: str, index: int) -> str:
@@ -193,9 +204,15 @@ class _Mouse:
 
     async def move(self, x: float, y: float, steps: int = 1) -> None:
         self.site.mouse_position = (x, y)
+        self.site.move_count += 1
 
-    async def click(self, x: float, y: float, delay: int = 0) -> None:
-        self.site.click(x, y)
+    async def down(self) -> None:
+        self.site.mouse_down = True
+
+    async def up(self) -> None:
+        assert self.site.mouse_down, "mouse up without down"
+        self.site.mouse_down = False
+        self.site.click(*self.site.mouse_position)
 
     async def wheel(self, delta_x: float, delta_y: float) -> None:
         self.site.wheel_points.append(self.site.mouse_position)
@@ -270,6 +287,9 @@ class XhsFakeSite:
         self.page.is_closed = lambda: False  # type: ignore[attr-defined]
         self.page.bring_to_front = self._noop  # type: ignore[attr-defined]
         self.mouse_position = (0.0, 0.0)
+        self.mouse_down = False
+        self.move_count = 0
+        self.wheel_loaded = False
         self.box_focused = False
         self.box_value = ""
         self.scroll_y = 0
@@ -408,6 +428,7 @@ class XhsFakeSite:
         return {"status": "ok", "note": whitelisted_state(state_note(self.detail(note_id)), spec)}
 
     async def evaluate(self, script: str, arg: Any = None) -> Any:
+        self.wheel_loaded = False
         state_name = STATE_NAMES.get(script)
         if state_name == "note_detail_state":
             return self.note_state(arg)
@@ -492,7 +513,7 @@ class XhsFakeSite:
             visible = max(0, min(bottom, view["bottom"]) - max(top, view["top"]))
             if visible <= 0:
                 continue
-            cover = {"x": 160.0 + 300 * (index % COLUMNS), "y": top + 130.0, "width": 240, "height": 240}
+            cover = box(160.0 + 300 * (index % COLUMNS), top + 130.0, 240, 240)
             has_cover = item.get("model_type") in (None, "note")
             cards.append(
                 {
@@ -574,7 +595,7 @@ class XhsFakeSite:
         self.click_points.append((x, y))
 
         def near(point: dict[str, float]) -> bool:
-            return abs(point["x"] - x) < 20 and abs(point["y"] - y) < 20
+            return inside(point, x, y)
 
         if self.overlay_note is not None:
             if near(CLOSE_POINT) and self.overlay_closes:
@@ -586,13 +607,14 @@ class XhsFakeSite:
             elif near(COMMENT_POINT):
                 self.comment_clicks += 1
             return
+        # 筛选面板与入口在卡片之上：落点同时落在标签与卡片封面内时点中的是标签。
         card = next(
             (card for card in self.visible_cards() if card["cover"] and card["cover_hit"] and near(card["cover"])), None,
         )
-        if self.on_results and card is not None:
-            self.open_overlay(card["note_id"])
-        elif not self.on_results and near(SEARCH_BOX):
-            self.box_focused = True
+        if self.on_results and self.panel_visible and near(FILTER_OPTION):
+            if self.apply_filter_works and not (self.entry_click_applies_filter and self.filter_applied):
+                self.filter_applied = True
+                self.start_session(filters=TARGET_FILTERS)
         elif self.entry_rendered and near(FILTER_ENTRY):
             if self.panel_visible and not self.panel_closes:
                 return
@@ -601,10 +623,10 @@ class XhsFakeSite:
             if self.panel_visible and self.entry_click_applies_filter and not self.filter_applied:
                 self.filter_applied = True
                 self.start_session(filters=TARGET_FILTERS)
-        elif self.on_results and self.panel_visible and near(FILTER_OPTION):
-            if self.apply_filter_works and not (self.entry_click_applies_filter and self.filter_applied):
-                self.filter_applied = True
-                self.start_session(filters=TARGET_FILTERS)
+        elif self.on_results and card is not None:
+            self.open_overlay(card["note_id"])
+        elif not self.on_results and near(SEARCH_BOX):
+            self.box_focused = True
 
     def press_enter(self) -> None:
         keyword = self.typed_keyword if self.typed_keyword is not None else self.box_value
@@ -623,9 +645,14 @@ class XhsFakeSite:
         self.respond_page(1)
 
     def wheel(self, delta_y: float) -> None:
+        """一个滚轮事件。一次滚动由若干手势、几十个事件组成；页面在下一页渲染前不会再发请求，所以两次页面读数之间
+        的连续滚轮事件最多触发一页。"""
         maximum = max(0, self.scroll_height() - self.view_height())
         self.scroll_y = int(min(max(0, self.scroll_y + delta_y), maximum))
-        self.maybe_load_next()
+        if not self.wheel_loaded:
+            loaded = len(self.loaded)
+            self.maybe_load_next()
+            self.wheel_loaded = len(self.loaded) > loaded
 
     def maybe_load_next(self) -> None:
         if self.session_filters is None or not self.loaded:

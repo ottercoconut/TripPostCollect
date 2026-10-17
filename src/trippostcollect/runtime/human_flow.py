@@ -11,6 +11,8 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
 
+from trippostcollect.runtime.human_pointer import pointer_for
+
 
 RANDOM = random.SystemRandom()
 
@@ -202,11 +204,13 @@ async def random_mouse_moves(page: Page, profile: BehaviorProfile, log: list[dic
     width, height = await page_size(page)
     count = RANDOM.randint(*profile.mouse_move_count)
     for _ in range(count):
-        await page.mouse.move(
-            RANDOM.randint(20, max(30, width - 20)),
-            RANDOM.randint(20, max(30, height - 20)),
-            steps=RANDOM.randint(2, 8),
-        )
+        x = RANDOM.randint(20, max(30, width - 20))
+        y = RANDOM.randint(20, max(30, height - 20))
+        if profile.name == "xhs_guarded":
+            # 小红书：分段轨迹，事件按 60Hz 逐个发出（#84）。
+            await pointer_for(page).move_to(x, y)
+        else:
+            await page.mouse.move(x, y, steps=RANDOM.randint(2, 8))
         await page.wait_for_timeout(RANDOM.randint(80, 450))
     _log(log, {"event": "mouse_moves", "count": count})
 
@@ -256,9 +260,16 @@ async def cdp_touch_scroll(page: Page, delta_y: int, log: list[dict[str, Any]] |
         return False
 
 
-async def wheel_scroll(page: Page, delta_y: int, log: list[dict[str, Any]] | None = None) -> bool:
+async def wheel_scroll(
+    page: Page, delta_y: int, log: list[dict[str, Any]] | None = None, *, gestures: bool = False,
+) -> bool:
+    """`gestures` 为真（小红书 xhs_guarded 档位）时按触控板手势序列滚动，并在事件里记各手势的事件数与位移。"""
     before = await scroll_position(page)
-    await page.mouse.wheel(RANDOM.randint(-40, 40), delta_y)
+    scroll: dict[str, Any] = {}
+    if gestures:
+        scroll = await pointer_for(page).scroll(delta_y)
+    else:
+        await page.mouse.wheel(RANDOM.randint(-40, 40), delta_y)
     await page.wait_for_timeout(120)
     after = await scroll_position(page)
     effect_observed = scroll_effect_observed(before, after)
@@ -270,6 +281,7 @@ async def wheel_scroll(page: Page, delta_y: int, log: list[dict[str, Any]] | Non
             "effect_observed": effect_observed,
             "before": before,
             "after": after,
+            **scroll,
         },
     )
     return effect_observed
@@ -292,16 +304,20 @@ async def human_scroll(
         width, height = await page_size(page)
         target_x = RANDOM.randint(max(30, width // 3), max(31, width * 4 // 5))
         target_y = RANDOM.randint(max(40, height // 3), max(41, height * 4 // 5))
-        await page.mouse.move(target_x, target_y, steps=RANDOM.randint(3, 8))
+        gestures = profile.name == "xhs_guarded"
+        if gestures:
+            await pointer_for(page).move_to(target_x, target_y)
+        else:
+            await page.mouse.move(target_x, target_y, steps=RANDOM.randint(3, 8))
         _log(log, {"event": "scroll_target", "x": target_x, "y": target_y})
         direction = -1 if index > 0 and RANDOM.random() < 0.16 else 1
         delta = direction * RANDOM.randint(*profile.scroll_delta_px)
         use_touch = RANDOM.random() < profile.cdp_touch_probability
         effect_observed = use_touch and await cdp_touch_scroll(page, delta, log)
         if not effect_observed:
-            effect_observed = await wheel_scroll(page, delta, log)
+            effect_observed = await wheel_scroll(page, delta, log, gestures=gestures)
         if not effect_observed:
-            effect_observed = await wheel_scroll(page, -delta, log)
+            effect_observed = await wheel_scroll(page, -delta, log, gestures=gestures)
         if effect_observed:
             effective_passes += 1
         await page.wait_for_timeout(RANDOM.randint(450, 2600))

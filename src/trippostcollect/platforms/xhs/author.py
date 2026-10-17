@@ -50,6 +50,7 @@ from trippostcollect.platforms.xhs.parser import (
     read_creator_runtime_projection,
     xhs_creator_projection_spec,
 )
+from trippostcollect.runtime.human_pointer import pointer_for
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -80,7 +81,7 @@ def profile_url_user_id(url: str) -> str:
 
 
 def author_click_point(links: Any) -> Optional[Dict]:
-    """作者链接的点击点：作者 ID 一致的链接中，取可见且不在评论区的第一个有文字的作者名，没有时取头像链接。
+    """要点击的作者链接的元素框：作者 ID 一致的链接中，取可见且不在评论区的第一个有文字的作者名，没有时取头像链接。
 
     旧位置隐藏的作者名、评论者链接与作者本人的评论都不点（Mac 人工取证 2026-10-14）；都没有时为 None。
     """
@@ -198,13 +199,15 @@ class XhsAuthorMixin:
                 attempts.append("link_missing")
                 await self._scan_sleep(AUTHOR_RANDOM.uniform(1.0, 2.0))
                 continue
+            plan = await self._plan_click(point)
             self._author_click_id = capture.action(
                 "click_author", page_role="primary", target={"note_id": note.note_id}, from_visit=note.detail_visit,
+                pointer=plan.evidence,
             )
             self._crawler_page_open_depth += 1
             try:
                 async with self.browser_context.expect_page(timeout=int(XHS_AUTHOR_TAB_OPEN_SECONDS * 1000)) as opened:
-                    await self._click_point(point)
+                    await self._perform_click(plan)
                 page = await opened.value
             except (PlaywrightTimeoutError, TimeoutError):
                 if self.ports.repair and profile_url_user_id(getattr(self.context_page, "url", "")):
@@ -289,13 +292,13 @@ class XhsAuthorMixin:
             return await self._recover_creator_login_on_primary_page(user_id)
         if markers.get("captcha_or_verify"):
             return await self._wait_for_creator_profile_verification(page, user_id)
-        viewport = page.viewport_size or {"width": 1280, "height": 800}
-        await page.mouse.move(
-            random.randint(80, max(81, viewport["width"] - 80)),
-            random.randint(80, max(81, viewport["height"] - 80)),
-            steps=random.randint(6, 14),
+        pointer = pointer_for(page)
+        viewport = await pointer.viewport()
+        await pointer.move_to(
+            random.randint(80, max(81, int(viewport.width) - 80)),
+            random.randint(80, max(81, int(viewport.height) - 80)),
         )
-        await page.mouse.wheel(0, random.randint(180, 460))
+        await pointer.scroll(random.randint(180, 460))
         await page.wait_for_timeout(random.randint(500, 1_500))
 
         text_sample, markers = await inspect_visible_page_state(page)

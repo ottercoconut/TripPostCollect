@@ -33,6 +33,7 @@ from playwright.async_api import BrowserContext, Page
 from trippostcollect.platforms.xhs.errors import PlatformRuntimeError
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget
 from trippostcollect.platforms.xhs.page_scripts import dom_qr_ready
+from trippostcollect.runtime.human_pointer import Box, pointer_for
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -640,7 +641,9 @@ class XiaoHongShuLogin:
                         locator = getattr(candidate, "first", candidate)
                         if not await locator.is_visible(timeout=500):
                             continue
-                        await locator.click(timeout=5_000)
+                        # 框相对主页面视口（含 iframe 内的控件），由该页面的光标按轨迹点击。
+                        box = Box.from_bounding_box(await locator.bounding_box(timeout=5_000))
+                        await pointer_for(page).click(box)
                         self.context_page = page
                         logger.info(
                             "[XiaoHongShuLogin.login_by_qrcode] Expired pure QR "
@@ -811,7 +814,8 @@ class XiaoHongShuLogin:
                                 "xpath=//*[@id='app']/div[1]/div[2]/div[1]/ul/"
                                 "div[1]/button"
                             )
-                            await login_button_ele.click(timeout=5_000)
+                            box = Box.from_bounding_box(await login_button_ele.bounding_box(timeout=5_000))
+                            await pointer_for(self.context_page).click(box)
                             remaining = ticket.remaining_seconds
                             if remaining > 0:
                                 await asyncio.sleep(min(0.5, remaining))

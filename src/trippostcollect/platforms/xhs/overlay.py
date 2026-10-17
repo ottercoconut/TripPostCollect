@@ -167,7 +167,7 @@ class XhsOverlayMixin:
         band = self._click_band(await dom_scroll_metrics(page))
         for card in await dom_visible_cards(page):
             if str(card.get("note_id") or "") == note_id and self._card_clickable(card, band):
-                return card
+                return {**card, "click_band": band}
         raise XhsScanInterrupted("note_redo_card_not_visible")
 
     async def _process_note_once(
@@ -304,12 +304,15 @@ class XhsOverlayMixin:
         capture = self._require_capture()
         overlay_seen = False
         for attempt in range(1, XHS_DETAIL_ATTEMPTS + 1):
+            # 落点在封面内，纵向限在可点击带内（可点击判定只看封面中心）。
+            plan = await self._plan_click(card["cover"], within=card["click_band"])
             action = capture.action(
                 "click_card", page_role="primary",
                 target={"note_id": item.note_id, "data_index": int(card.get("data_index", -1))},
+                pointer=plan.evidence,
             )
             run.clicks.append((line_seq(action), action))
-            await self._click_point(card["cover"])
+            await self._perform_click(plan)
             captured = await capture.wait_for(
                 FEED_RULE,
                 after_seq=line_seq(action),
@@ -368,8 +371,9 @@ class XhsOverlayMixin:
             point = state.get("close")
             if point is None:
                 continue
-            capture.action("close_overlay", page_role="primary", target={"note_id": note_id})
-            await self._click_point(point)
+            plan = await self._plan_click(point)
+            capture.action("close_overlay", page_role="primary", target={"note_id": note_id}, pointer=plan.evidence)
+            await self._perform_click(plan)
             closed = await self._wait_overlay(lambda current: not current.get("visible"), XHS_OVERLAY_CLOSE_SECONDS)
             if not closed.get("visible"):
                 return

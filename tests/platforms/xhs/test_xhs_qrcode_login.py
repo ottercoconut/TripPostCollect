@@ -52,15 +52,41 @@ class FakeLocator:
         assert timeout > 0
         return self.selector in self.page.visible_selectors
 
-    async def click(self, timeout: int) -> None:
+    async def bounding_box(self, timeout: int) -> dict[str, float]:
         assert timeout > 0
-        self.page.events.append(("click", self.selector))
+        box = {"x": 100.0 + 200 * len(self.page.boxes), "y": 300.0, "width": 120.0, "height": 40.0}
+        self.page.boxes[self.selector] = box
+        return box
+
+
+class FakeMouse:
+    """登录页的点击经光标轨迹完成：抬起时落点所在元素框对应的选择器记为一次点击。"""
+
+    def __init__(self, page: FakePage) -> None:
+        self.page = page
+        self.position = (0.0, 0.0)
+
+    async def move(self, x: float, y: float) -> None:
+        self.position = (x, y)
+
+    async def down(self) -> None:
+        return None
+
+    async def up(self) -> None:
+        x, y = self.position
+        selector = next(
+            selector for selector, box in self.page.boxes.items()
+            if box["x"] <= x <= box["x"] + box["width"] and box["y"] <= y <= box["y"] + box["height"]
+        )
+        self.page.events.append(("click", selector))
         self.page.click_times.append(self.page.clock.now)
         if self.page.click_hook is not None:
-            self.page.click_hook(self.page, self.selector)
+            self.page.click_hook(self.page, selector)
 
 
 class FakePage:
+    viewport_size = {"width": 1280, "height": 800}
+
     def __init__(self, clock: FakeClock, *, name: str = "login") -> None:
         self.clock = clock
         self.name = name
@@ -72,6 +98,8 @@ class FakePage:
         self.close_calls = 0
         self.reload_times: list[float] = []
         self.click_times: list[float] = []
+        self.boxes: dict[str, dict[str, float]] = {}
+        self.mouse = FakeMouse(self)
         self.events: list[tuple[str, str]] = []
         self.inner_text_hook: Callable[[FakePage], None] | None = None
         self.click_hook: Callable[[FakePage, str], None] | None = None
@@ -95,6 +123,9 @@ class FakePage:
 
     async def bring_to_front(self) -> None:
         self.events.append(("front", self.name))
+
+    async def wait_for_timeout(self, milliseconds: float) -> None:
+        return None
 
     async def close(self) -> None:
         self.close_calls += 1

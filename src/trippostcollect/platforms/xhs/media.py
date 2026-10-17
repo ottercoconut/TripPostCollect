@@ -68,11 +68,13 @@ class XhsMediaMixin:
             for method in methods:
                 if method == "arrow" and state.get("right_arrow") is None:
                     continue
+                plan = await self._plan_click(state["right_arrow"]) if method == "arrow" else None
                 capture.action(
                     "flip_image", page_role="primary", target={"note_id": note_id, "to_index": current + 1, "method": method},
+                    pointer=plan.evidence if plan is not None else None,
                 )
-                if method == "arrow":
-                    await self._click_point(state["right_arrow"])
+                if plan is not None:
+                    await self._perform_click(plan)
                 else:
                     await self.context_page.keyboard.press("ArrowRight")
                 state = await self._wait_overlay(

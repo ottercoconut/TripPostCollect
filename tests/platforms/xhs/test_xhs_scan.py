@@ -14,7 +14,7 @@ import trippostcollect.platforms.xhs.behavior as xhs_behavior
 import trippostcollect.platforms.xhs.core as xhs_core
 import trippostcollect.platforms.xhs.scan as xhs_scan
 import trippostcollect.runtime.behavior as runtime_behavior
-from support.xhs_fake_site import FILTER_ENTRY, LIST_TOP, XhsFakeSite, note
+from support.xhs_fake_site import FILTER_ENTRY, LIST_TOP, XhsFakeSite, inside, note
 from trippostcollect.application.candidates import AdaptiveAccumulator
 from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.evidence import write_evidence
@@ -109,22 +109,26 @@ def _pages(count: int, per_page: int, *, prefix: str = "n") -> list[list[dict]]:
 
 
 def _record_sleeps_and_clicks(harness: Harness) -> list[tuple]:
-    """把扫描侧的等待与主页面点击按发生顺序记成 ("sleep", 秒) / ("click", x, y)。"""
+    """把扫描侧的等待与主页面点击按发生顺序记成 ("sleep", 秒) / ("click", x, y)；点击在抬起时按光标位置记。"""
     events: list[tuple] = []
     mouse = harness.site.page.mouse
-    click = mouse.click
+    up = mouse.up
 
     async def sleep(seconds: float) -> None:
         events.append(("sleep", seconds))
         await asyncio.sleep(0)
 
-    async def recording_click(x: float, y: float, delay: int = 0) -> None:
-        events.append(("click", x, y))
-        await click(x, y, delay=delay)
+    async def recording_up() -> None:
+        events.append(("click", *harness.site.mouse_position))
+        await up()
 
     harness.crawler._scan_sleep = sleep
-    mouse.click = recording_click
+    mouse.up = recording_up
     return events
+
+
+def _clicks_inside(events: list[tuple], target: dict) -> list[int]:
+    return [index for index, event in enumerate(events) if event[0] == "click" and inside(target, *event[1:])]
 
 
 def _filter_diagnostics(harness: Harness) -> list[dict]:
@@ -400,7 +404,7 @@ def test_filter_entry_that_renders_late_is_awaited_then_clicked_after_a_reaction
     harness.run()
 
     assert harness.processed == [f"n1-{index}" for index in range(4)]
-    entry_click = events.index(("click", FILTER_ENTRY["x"], FILTER_ENTRY["y"]))
+    entry_click = _clicks_inside(events, FILTER_ENTRY)[0]
     before = events[:entry_click]
     # 第 1 次读状态在开面板前，入口等待从第 2 次读起，第 6 次读到入口：其间轮询等待 4 次。
     assert before.count(("sleep", xhs_scan.XHS_FILTER_POLL_SECONDS)) == 4
@@ -428,7 +432,7 @@ def test_filter_entry_that_never_renders_waits_out_both_attempts_then_stops_with
     assert caught.value.code == "target_filter_not_applied"
     polls = round(xhs_scan.XHS_FILTER_ENTRY_WAIT_SECONDS / xhs_scan.XHS_FILTER_POLL_SECONDS)
     assert events.count(("sleep", xhs_scan.XHS_FILTER_POLL_SECONDS)) == 2 * polls
-    assert ("click", FILTER_ENTRY["x"], FILTER_ENTRY["y"]) not in events
+    assert not _clicks_inside(events, FILTER_ENTRY)
     assert not any(line.get("action") == "apply_filter" for line in harness.ledger())
     written = json.loads(evidence.with_name("behavior_evidence.navigation.json").read_text(encoding="utf-8"))
     (diagnostic,) = [event for event in written["events"] if event["stage"] == "search_filter"]
@@ -466,13 +470,15 @@ def test_scroll_wheel_lands_inside_the_result_list_rectangle(tmp_path):
     for x, y in site.wheel_points:
         assert 896 * inset <= x <= 896 * (1 - inset)
         assert 64 + 836 * inset <= y <= 900 - 836 * inset
-    # 取不到矩形（或矩形为空）时在列表可见区内按比例落点；可见区也没有时不移动鼠标。
-    x, y = XiaoHongShuCrawler._scroll_pointer({
+    # 光标已在区域内就不动：整轮的滚动只在第一次移进区域，之后各步的滚轮位置相同。
+    assert len(set(site.wheel_points)) == 1
+    # 取不到矩形（或矩形为空）时为列表可见区内按比例取的区域；可见区也没有时不移动鼠标。
+    area = XiaoHongShuCrawler._scroll_area({
         "view_rect": {"left": 0, "top": 100, "right": 1000, "bottom": 900},
         "list_rect": {"left": 0, "top": 0, "right": 0, "bottom": 0},
     })
-    assert 300 <= x <= 700 and 380 <= y <= 700
-    assert XiaoHongShuCrawler._scroll_pointer({"view_rect": None, "list_rect": None}) is None
+    assert area == (300, 380, 400, 320)
+    assert XiaoHongShuCrawler._scroll_area({"view_rect": None, "list_rect": None}) is None
 
 
 def test_list_scrolled_inside_a_container_uses_the_container_position_band_and_step(tmp_path, caplog):

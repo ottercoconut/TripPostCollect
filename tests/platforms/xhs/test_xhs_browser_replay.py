@@ -44,6 +44,7 @@ from trippostcollect.platforms.xhs import scan as xhs_scan
 from trippostcollect.platforms.xhs import session as xhs_session
 from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
 from trippostcollect.records.sanitization import sanitize_export_item
+from trippostcollect.runtime.human_pointer import pointer_for
 from trippostcollect.runtime.visit_ledger import iter_ledger_lines
 from trippostcollect.xhs.search_target import is_target_search
 
@@ -55,6 +56,29 @@ VIEWPORT = {"width": 1280, "height": 900}
 # 程序内的随机等待按真实值执行但截到此上限：滚动后留出渲染时间，又不让回放过长。
 ACTION_SLEEP_CAP_SECONDS = 0.3
 REQUIRED_STAGES = ["creator_profile", "note_detail", "search_page", "search_results"]
+# #84：在每个文档里记下指针、点击与滚轮事件（经 expose_function 交回 Python，跨导航与作者标签页都在），回放后对照
+# 操作人的 Mac 触控板样本核对合成事件的结构。
+POINTER_RECORDER = """(() => {
+    if (window.__tpcPointerRecorder) return;
+    window.__tpcPointerRecorder = true;
+    const send = (record) => { try { window.__tpcPointerEvent({ ...record, doc: location.pathname }); } catch (error) {} };
+    const at = (event) => performance.timeOrigin + event.timeStamp;
+    const options = { capture: true, passive: true };
+    addEventListener('pointermove', (event) => send({ type: 'move', t: at(event), x: event.clientX, y: event.clientY }), options);
+    addEventListener('pointerdown', (event) => {
+        const rect = event.target instanceof Element ? event.target.getBoundingClientRect() : null;
+        send({
+            type: 'down', t: at(event), x: event.clientX, y: event.clientY,
+            pressure: event.pressure, width: event.width, height: event.height,
+            rect: rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null,
+        });
+    }, options);
+    addEventListener('pointerup', (event) => send({ type: 'up', t: at(event) }), options);
+    addEventListener('click', (event) => send({ type: 'click', t: at(event), x: event.clientX, y: event.clientY }), options);
+    addEventListener('wheel', (event) => send({
+        type: 'wheel', t: at(event), dx: event.deltaX, dy: event.deltaY, mode: event.deltaMode,
+    }), options);
+})()"""
 
 
 def _headless_shell_installed() -> bool:
@@ -82,15 +106,18 @@ pytestmark = [
 
 @asynccontextmanager
 async def replay_browser(site: XhsOfflineSite):
-    """一个浏览器、一个 Context、一个主页面；Context 内的全部请求都交给离线站点的路由。"""
+    """一个浏览器、一个 Context、一个主页面；Context 内的全部请求都交给离线站点的路由。第三项是页面记下的指针事件。"""
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True, args=["--disable-smooth-scrolling"])
         try:
             context = await browser.new_context(viewport=VIEWPORT, locale="zh-CN", service_workers="block")
             site.watch(context)
             await context.route("**/*", site.handle)
+            pointer_events: list[dict] = []
+            await context.expose_function("__tpcPointerEvent", pointer_events.append)
+            await context.add_init_script(POINTER_RECORDER)
             page = await context.new_page()
-            yield context, page
+            yield context, page, pointer_events
             await context.close()
         finally:
             await browser.close()
@@ -141,10 +168,11 @@ def prepare_crawler(monkeypatch, tmp_path, context, page, *, known: list[str]):
 
     async def behavior(keyword):
         crawler.behavior_urls.append(page.url)
-        await page.mouse.move(640, 520)
-        await page.mouse.wheel(0, 600)
+        pointer = pointer_for(page)  # 与正式行为阶段（xhs_guarded）相同：轨迹移动、触控板手势滚动
+        await pointer.move_to(640, 520)
+        await pointer.scroll(600)
         await asyncio.sleep(0.5)
-        await page.mouse.wheel(0, -600)
+        await pointer.scroll(-600)
         await asyncio.sleep(0.5)
         evidence_path.write_text(
             json.dumps({"status": "completed", "url": page.url, "events": [], "operator_verification_events": []}),
@@ -217,6 +245,39 @@ def run_gate(crawler, state_path, tmp_path) -> dict:
     )
 
 
+def assert_pointer_events_match_the_sample(events: list[dict], crawler) -> None:
+    """合成事件的结构与 Mac 触控板样本一致：移动约每帧一个、落点不在几何中心、按住 81–132ms、pressure 0.5 与
+    1×1 接触面、整数点击坐标；滚轮每个手势至少 8 个事件、deltaMode 0、|deltaY| 不超过 60。"""
+    events = sorted(events, key=lambda event: event["t"])
+    moves = [event for event in events if event["type"] == "move"]
+    gaps = [later["t"] - earlier["t"] for earlier, later in zip(moves, moves[1:]) if later["doc"] == earlier["doc"]]
+    assert len(gaps) > 50 and 12 <= sorted(gaps)[len(gaps) // 2] <= 25
+    downs = [event for event in events if event["type"] == "down"]
+    ups = [event for event in events if event["type"] == "up"]
+    assert len(downs) == len(ups) >= len(actions(crawler, "click_card")) + len(actions(crawler, "apply_filter"))
+    for down, up in zip(downs, ups):
+        assert down["pressure"] == 0.5 and down["width"] == 1 and down["height"] == 1
+        assert float(down["x"]).is_integer() and float(down["y"]).is_integer()
+        assert 70 <= up["t"] - down["t"] <= 200, up["t"] - down["t"]
+    centered = [
+        down for down in downs if down["rect"] is not None
+        and abs(down["x"] - (down["rect"]["left"] + down["rect"]["width"] / 2)) < 1
+        and abs(down["y"] - (down["rect"]["top"] + down["rect"]["height"] / 2)) < 1
+    ]
+    assert len(centered) < len(downs)
+    clicks = [event for event in events if event["type"] == "click"]
+    assert clicks and all(float(event["x"]).is_integer() and float(event["y"]).is_integer() for event in clicks)
+    wheels = [event for event in events if event["type"] == "wheel"]
+    gestures: list[list[dict]] = []
+    for event in wheels:
+        if not gestures or event["t"] - gestures[-1][-1]["t"] > 200 or event["doc"] != gestures[-1][-1]["doc"]:
+            gestures.append([])
+        gestures[-1].append(event)
+    assert gestures and all(len(gesture) >= 8 for gesture in gestures), [len(gesture) for gesture in gestures]
+    assert {event["mode"] for event in wheels} == {0}
+    assert all(abs(event["dy"]) <= 60 and float(event["dy"]).is_integer() for event in wheels)
+
+
 def assert_staged_png(site: XhsOfflineSite, crawler, note_id: str, count: int) -> None:
     staged = crawler.staged[note_id]
     assert [item["url"] for item in staged] == [image_url(note_id, index) for index in range(count)]
@@ -242,7 +303,7 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     site.details["p3-09"] = detail_card("p3-09", images=1, user_id="author-b")
     known = [item["id"] for items in pages for item in items if item["id"] not in {*images, "p1-06"}]
 
-    async with replay_browser(site) as (context, page):
+    async with replay_browser(site) as (context, page, pointer_events):
         crawler, state_path = prepare_crawler(monkeypatch, tmp_path, context, page, known=known)
         await page.goto(EXPLORE_URL)
         with crawler_log_lines() as log_lines:
@@ -368,6 +429,7 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     assert result["required_stages"] == REQUIRED_STAGES
     assert result["continuity_ok"] is True and result["request_pacing_ok"] is True
     assert site.unexpected == [] and site.escaped() == []
+    assert_pointer_events_match_the_sample(pointer_events, crawler)
 
 
 @pytest.mark.asyncio
@@ -380,7 +442,7 @@ async def test_feed_verification_layer_then_redo_reuses_the_cached_first_image(m
     site.feed_overrides["v-3"] = [461]
     known = [item["id"] for item in items if item["id"] != "v-3"]
 
-    async with replay_browser(site) as (context, page):
+    async with replay_browser(site) as (context, page, pointer_events):
         crawler, state_path = prepare_crawler(monkeypatch, tmp_path, context, page, known=known)
         await page.goto(EXPLORE_URL)
         await crawler.search()
@@ -417,7 +479,7 @@ async def test_frontend_self_load_when_viewport_is_not_filled_passes_the_gate(mo
     unknown = {"s1-1", "s2-4"}
     known = [item["id"] for items in pages for item in items if item["id"] not in unknown]
 
-    async with replay_browser(site) as (context, page):
+    async with replay_browser(site) as (context, page, pointer_events):
         crawler, state_path = prepare_crawler(monkeypatch, tmp_path, context, page, known=known)
         await page.goto(EXPLORE_URL)
         await crawler.search()

@@ -46,6 +46,7 @@ from trippostcollect.platforms.xhs.page_scripts import (
 )
 from trippostcollect.platforms.xhs.parser import search_items_from_response
 from trippostcollect.runtime.human_flow import load_behavior_profile
+from trippostcollect.runtime.human_pointer import Box, ClickPlan, pointer_for
 from trippostcollect.runtime.page_capture import CaptureFailure, CapturedResponse
 from trippostcollect.runtime.visit_ledger import line_seq
 from trippostcollect.xhs.search_target import (
@@ -63,7 +64,8 @@ XHS_SEARCH_LOAD_WAIT_SECONDS = 20.0
 XHS_SEARCH_RESULTS_PAUSE_SECONDS = (2.0, 5.0)
 XHS_SEARCH_PAGE_PAUSE_SECONDS = (4.0, 10.0)
 XHS_SCROLL_SETTLE_SECONDS = (0.4, 1.2)
-# 滚轮落点在结果列表与列表可见区的相交矩形内，横纵各向内缩这一比例；取不到矩形时按列表可见区比例落点。
+# 滚动时光标位于结果列表与列表可见区的相交矩形内，横纵各向内缩这一比例；取不到矩形时按列表可见区比例取区域。
+# 光标已在区域内就不动，每一步的位移由若干个触控板手势凑成，总和恰为该步距离。
 XHS_SCROLL_POINTER_INSET = 0.2
 # 滚动位置、可见区均指列表的实际滚动容器（见 page_scripts.scroll_metrics）。单步滚动不超过列表可见区高度 h 的
 # 0.8 倍；可点击带为可见区顶部加 0.1h 到底边上方 8px，且封面中心须命中本卡片。h ≥ 80px 时 0.8h ≤ 0.9h − 8，
@@ -400,11 +402,12 @@ class XhsScanMixin:
                 reason = exc.reason
                 logger.warning(f"[XiaoHongShuCrawler.scan] Target filter attempt {attempt + 1} failed: {reason}")
                 continue
+            plan = await self._plan_click(state["option"])
             click = self._record_trigger_action(
-                "apply_filter", {"filter": "note_type", "label": XHS_TARGET_FILTER_LABEL},
+                "apply_filter", {"filter": "note_type", "label": XHS_TARGET_FILTER_LABEL}, pointer=plan.evidence,
             )
             clicks.append(click)
-            await self._click_point(state["option"])
+            await self._perform_click(plan)
             session = await self._await_target_page_one(after_seq=line_seq(click))
             if session is not None and await self._filter_applied():
                 self._note_target_trigger(session, clicks)
@@ -456,8 +459,9 @@ class XhsScanMixin:
             await self._close_filter_panel()
         entry = await self._wait_for_filter_entry()
         await self._scan_sleep(SCAN_RANDOM.uniform(*XHS_BEFORE_FILTER_SECONDS))
-        self._record_trigger_action("apply_filter", {"filter": "panel_open"})
-        await self._click_point(entry)
+        plan = await self._plan_click(entry)
+        self._record_trigger_action("apply_filter", {"filter": "panel_open"}, pointer=plan.evidence)
+        await self._perform_click(plan)
         opened = await self._poll_filter_state(lambda value: bool(value.get("panel_visible") and value.get("option")))
         if opened is not None:
             return opened
@@ -483,8 +487,9 @@ class XhsScanMixin:
             entry = state.get("entry")
             if not entry:
                 break
-            self._record_trigger_action("apply_filter", {"filter": "panel_close"})
-            await self._click_point(entry)
+            plan = await self._plan_click(entry)
+            self._record_trigger_action("apply_filter", {"filter": "panel_close"}, pointer=plan.evidence)
+            await self._perform_click(plan)
             if await self._poll_filter_state(lambda value: not value.get("panel_visible")) is not None:
                 return
         await self._record_filter_failure("filter_panel_not_closed")
@@ -516,11 +521,13 @@ class XhsScanMixin:
                 return state
         return None
 
-    async def _click_point(self, point: dict[str, Any]) -> None:
-        page = self.context_page
-        x, y = float(point["x"]), float(point["y"])
-        await page.mouse.move(x, y, steps=SCAN_RANDOM.randint(6, 14))
-        await page.mouse.click(x, y, delay=SCAN_RANDOM.randint(80, 220))
+    async def _plan_click(self, target: dict[str, Any], *, within: Optional[tuple[float, float]] = None) -> ClickPlan:
+        """在主页面上计划一次点击：落点在页面脚本给出的元素框内，从当前光标位置分段接近。调用方把
+        `plan.evidence` 写进账本动作后再执行（账本动作先于界面动作）。"""
+        return await pointer_for(self.context_page).plan_click(Box.from_point(target), within=within)
+
+    async def _perform_click(self, plan: ClickPlan) -> None:
+        await pointer_for(self.context_page).perform_click(plan)
 
     async def _await_target_page_one(self, *, after_seq: int) -> Optional[SearchSession]:
         await self._require_capture().wait_for(
@@ -777,7 +784,7 @@ class XhsScanMixin:
             if not current.results_paused:
                 await self._guarded_pause("search_results", *XHS_SEARCH_RESULTS_PAUSE_SECONDS)
                 current.results_paused = True
-            await self._process_note_card(item, current, card)
+            await self._process_note_card(item, current, {**card, "click_band": band})
             return True
         return decided
 
@@ -1052,7 +1059,8 @@ class XhsScanMixin:
             scan.page_pause_cleared_seq = covered
 
     async def _scroll_feed_step(self, direction: int, *, phase: str) -> dict[str, Any]:
-        """鼠标在列表区域滚轮一步：先满足翻页停顿不变式，写 scroll 动作后再滚动，停 0.4–1.2 秒后核实位移。"""
+        """在列表区域用触控板手势滚动一步：先满足翻页停顿不变式，光标不在列表区域内时先移进去，写 scroll 动作（带各手势
+        的事件数与位移）后再滚动，停 0.4–1.2 秒后核实位移。"""
         await self._ensure_page_pause()
         page = self.context_page
         before = await dom_scroll_metrics(page)
@@ -1065,34 +1073,32 @@ class XhsScanMixin:
         if direction < 0 and scroll_y > 0:
             step = min(step, scroll_y)
         delta = step if direction > 0 else -step
-        pointer = self._scroll_pointer(before)
-        if pointer is not None:
-            await page.mouse.move(*pointer, steps=SCAN_RANDOM.randint(4, 10))
-        self._record_trigger_action("scroll", {"phase": phase, "delta_y": delta, "scroll_y_before": scroll_y})
-        await page.mouse.wheel(0, delta)
+        pointer = pointer_for(page)
+        area = self._scroll_area(before)
+        if area is not None:
+            await pointer.move_into(area)
+        plan = pointer.plan_scroll(delta)
+        self._record_trigger_action(
+            "scroll", {"phase": phase, "delta_y": delta, "scroll_y_before": scroll_y}, pointer=plan.evidence,
+        )
+        await pointer.perform_scroll(plan)
         await self._scan_sleep(SCAN_RANDOM.uniform(*XHS_SCROLL_SETTLE_SECONDS))
         return await dom_scroll_metrics(page)
 
     @staticmethod
-    def _scroll_pointer(metrics: dict[str, Any]) -> Optional[tuple[float, float]]:
-        """滚轮落点：结果列表与列表可见区相交矩形内、四周留边，避开 AI 对话布局右侧可独立滚动的对话栏；
-        取不到该矩形时在列表可见区内按横 30%–70%、纵 35%–75% 落点。"""
+    def _scroll_area(metrics: dict[str, Any]) -> Optional[Box]:
+        """滚动时光标所在的区域：结果列表与列表可见区相交矩形、四周留边，避开 AI 对话布局右侧可独立滚动的对话栏；
+        取不到该矩形时为列表可见区内横 30%–70%、纵 35%–75% 的部分。"""
         rect = _rect(metrics.get("list_rect"))
         if rect is not None:
             left, top, right, bottom = rect
             inset_x = (right - left) * XHS_SCROLL_POINTER_INSET
             inset_y = (bottom - top) * XHS_SCROLL_POINTER_INSET
-            return (
-                SCAN_RANDOM.uniform(left + inset_x, right - inset_x),
-                SCAN_RANDOM.uniform(top + inset_y, bottom - inset_y),
-            )
+            return Box(left + inset_x, top + inset_y, right - left - 2 * inset_x, bottom - top - 2 * inset_y)
         view = _rect(metrics.get("view_rect"))
         if view is not None:
             left, top, right, bottom = view
-            return (
-                left + SCAN_RANDOM.uniform(0.3, 0.7) * (right - left),
-                top + SCAN_RANDOM.uniform(0.35, 0.75) * (bottom - top),
-            )
+            return Box(left + 0.3 * (right - left), top + 0.35 * (bottom - top), 0.4 * (right - left), 0.4 * (bottom - top))
         return None
 
     async def _scroll_to_top(self) -> None:

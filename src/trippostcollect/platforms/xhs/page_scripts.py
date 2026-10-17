@@ -135,7 +135,9 @@ DOM_SCRIPTS: dict[str, str] = {
                 data_index: Number.isFinite(index) ? index : -1,
                 visible_ratio: shown && rect.height > 0 ? (shown.bottom - shown.top) / rect.height : 0,
                 top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right,
-                cover: coverRect ? { x, y, width: coverRect.width, height: coverRect.height } : null,
+                cover: coverRect ? {
+                    x, y, left: coverRect.left, top: coverRect.top, width: coverRect.width, height: coverRect.height,
+                } : null,
                 cover_hit: Boolean(hit && node.contains(hit)),
             };
         }).filter((card) => card.note_id && card.visible_ratio > 0);
@@ -201,6 +203,7 @@ DOM_SCRIPTS: dict[str, str] = {
             focused: document.activeElement === box,
             value_length: (box.value || '').length,
             x: rect.left + rect.width / 2, y: rect.top + rect.height / 2,
+            left: rect.left, top: rect.top, width: rect.width, height: rect.height,
         };
     }""",
     "search_layout": """() => {
@@ -227,7 +230,10 @@ DOM_SCRIPTS: dict[str, str] = {
         const center = (node) => {
             if (!visible(node)) return null;
             const rect = node.getBoundingClientRect();
-            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+            return {
+                x: rect.left + rect.width / 2, y: rect.top + rect.height / 2,
+                left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+            };
         };
         const labelOf = (node) => Array.from(node.querySelectorAll(':scope > span')).find(
             (span) => visible(span) && labels.includes(textOf(span))
@@ -272,9 +278,9 @@ DOM_SCRIPTS: dict[str, str] = {
             scroll_y: window.scrollY,
         };
     }""",
-    # 笔记浮层（R2）：遮罩与正文是否可见、页码 k/N、关闭按钮、右箭头的中心点。
+    # 笔记浮层（R2）：遮罩与正文是否可见、页码 k/N、关闭按钮、右箭头的元素框（带中心点 x、y）。
     # 笔记详情视图：浮层（div.note-detail-mask）或 repair 直开的整页；roots 依次尝试，取第一个可见的根。
-    # author 为本篇作者 ID 时另给 author_links：根内该作者主页链接（见 _AUTHOR_LINKS）按文档顺序的中心点（不可见为
+    # author 为本篇作者 ID 时另给 author_links：根内该作者主页链接（见 _AUTHOR_LINKS）按文档顺序的元素框（不可见为
     # null）、是否在评论区、是否为有文字的 a.name；不返回文字或地址，选点在 Python 侧。
     "note_view_state": """({ roots, author }) => {
         const visible = (node) => {
@@ -286,7 +292,10 @@ DOM_SCRIPTS: dict[str, str] = {
         const center = (node) => {
             if (!visible(node)) return null;
             const rect = node.getBoundingClientRect();
-            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+            return {
+                x: rect.left + rect.width / 2, y: rect.top + rect.height / 2,
+                left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+            };
         };
         /*author_links*/
         const mask = roots.map((selector) => document.querySelector(selector)).find((node) => visible(node));
