@@ -472,8 +472,8 @@ child `summary.json` 的
   `.search-layout` 内找（取不到时为全文档），对话栏里的不算。
 - 扫描滚动时光标位于结果列表 `.search-layout` 与列表可见区相交的矩形内，横纵各内缩 20%，以免 AI 对话
   布局下滚轮落在对话栏上；取不到该矩形时为列表可见区内宽 30%–70%、高 35%–75% 的区域。光标已在区域内就
-  不动，否则按轨迹移进区域。每一步的位移由若干触控板手势凑成，总和恰为该步距离。行为阶段的共享滚动
-  不在此列。
+  不动，否则按轨迹移进区域。每一步的位移由若干触控板手势凑成，总和恰为该步距离。行为阶段与连续性行为
+  使用同一个内缩矩形，但取不到时不退回可见区（见“节奏与行为”）。
 - 地址栏里的关键词经两次编码；行为门禁的 `target_url_ok` 对地址逐层解码（最多 3 层），任一层含关键词
   即为真，通用平台单次编码的结果不变。“真实关键词页”另由账本证明：目标会话第 1 页的
   `keyword_matches_target=true`。
@@ -523,8 +523,22 @@ child `summary.json` 的
 
 - 搜索并发为 1。`xhs_guarded` 只在搜索结果页执行；使用少量触控板手势滚动并验证实际位移，不扫描隐藏 HTML
   文本。运行指纹必须完整，`navigator.webdriver` 必须是原生 `false`（`undefined` 或 `true` 都不通过）。
+- 行为阶段（`dwell_on_list` 的随机移动与滚动）和连续性行为的随机移动都限定在结果列表区域内（#88）：区域与
+  扫描滚动相同，即 `.search-layout` 与列表可见区相交的矩形横纵各内缩 20%。AI 对话布局下列表可见区是滚动容器
+  的可见区，整页滚动的布局为视口；内缩让目标点与滚轮落点离开右侧对话栏（含筛选入口）和顶部固定的搜索框区域，
+  轨迹越过目标至多 115px，也不会进入对话栏。随机移动开始时取一次区域，滚动每一轮重取。行为阶段判断滚动
+  是否有效只看列表自身的滚动位置（AI 对话布局为容器的 `scrollTop`，整页滚动为 `window.scrollY`，滚动容器类型
+  须前后一致），对话栏或其他节点的滚动不算，也不使用触摸滚动。证据中 `mouse_moves` 与 `scroll_target` 事件
+  另记 `area`（所用区域的 `left`、`top`、`width`、`height`）与 `scroll_container`（`element` 或 `document`），
+  `wheel_scroll` 的 `before`、`after` 为列表的 `scroll_y` 与 `scroll_container`。其他平台与档位仍按整个视口与
+  全页可滚动节点。
+- 取不到区域（页面没有 `.search-layout` 为 `search_layout_missing`，列表与可见区不相交为 `list_not_in_view`）
+  时不退回整个视口。行为阶段的 `mouse_moves` 是必需事件，按 `human_behavior_failed:xhs:…xhs_list_area_unavailable:<原因>`
+  失败（证据 `status=failed`、`error` 带原因），扫描随即报行为阶段未完成。连续性行为的随机移动只是装饰性动作，
+  跳过这次移动、在事件里记 `{"event": "mouse_moves_skipped", "reason": <原因>}`，之后照常做最终状态检查，
+  记录照常为 `completed`（例如人工验证刚结束、列表尚未渲染）；页面不对由扫描自身的检查处理。
 - 各档停顿写行为证据 `request_pacing_events` 与账本 `pause`；搜索两档另执行连续性行为（先停 0.8–2 秒，
-  再移动鼠标）并写 `continuity_events`。`xhs_guarded` 的详情长停留与详情间冷却不启用。
+  再在列表区域内移动鼠标）并写 `continuity_events`。`xhs_guarded` 的详情长停留与详情间冷却不启用。
 - 取值依据：操作人 2026-10-14 要求全面提速（#79）。各档取值是代码中的具名常量（行为阶段列表停留在共享
   运行时 `xhs_guarded` 档位），不设配置项；门禁只核对停顿是否存在及其位置，不核对秒数。
 

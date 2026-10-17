@@ -457,6 +457,7 @@ class XhsFakeSite:
                 "scroll_height": self.scroll_height(),
                 "view_rect": view,
                 "list_rect": dict(self.list_rect) if self.list_rect else None,
+                "layout_present": self.on_results,
             }
         if name == "filter_state":
             return self.filter_state(arg)

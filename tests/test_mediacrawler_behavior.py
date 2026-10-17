@@ -258,7 +258,7 @@ async def test_xhs_bare_visible_login_control_blocks_search_readiness(
     assert readiness["reason"] == "login_required"
 
 
-async def fake_dwell_on_list(page, profile, log) -> None:
+async def fake_dwell_on_list(page, profile, log, *, list_area=None) -> None:
     log.extend(
         [
             {"event": "pause", "reason": "list_dwell_initial", "seconds": 1.0},
@@ -631,7 +631,7 @@ async def test_xhs_dwell_stops_when_rate_limit_appears(
             "login_required": False,
         }
 
-    async def blocking_dwell(page, profile, log) -> None:
+    async def blocking_dwell(page, profile, log, *, list_area) -> None:
         log.append({"event": "pause", "reason": "list_dwell_initial", "seconds": 60.0})
         await asyncio.Event().wait()
 
@@ -792,7 +792,8 @@ async def test_xhs_continuity_behavior_is_persisted(
     async def fake_pause(page, seconds_range, *, reason, log):
         log.append({"event": "pause", "reason": reason, "seconds": 2.0})
 
-    async def fake_mouse_moves(page, profile, log):
+    async def fake_mouse_moves(page, profile, log, *, list_area):
+        assert list_area is xhs_behavior.xhs_list_area
         log.append({"event": "mouse_moves", "count": 1})
 
     evidence_path = tmp_path / "behavior.json"
@@ -841,7 +842,8 @@ async def test_xhs_continuity_waits_for_operator_login_and_continues(
     async def fake_pause(page, seconds_range, *, reason, log):
         log.append({"event": "pause", "reason": reason, "seconds": 2.0})
 
-    async def fake_mouse_moves(page, profile, log):
+    async def fake_mouse_moves(page, profile, log, *, list_area):
+        assert list_area is xhs_behavior.xhs_list_area
         log.append({"event": "mouse_moves", "count": 1})
 
     page = FakePage()

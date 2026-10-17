@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from playwright.async_api import Page
 
 from trippostcollect.records.text_signals import is_xhs_sms_terminal_text
-from trippostcollect.runtime.human_flow import dwell_on_list, load_behavior_profile
+from trippostcollect.runtime.human_flow import ListAreaProbe, dwell_on_list, load_behavior_profile
 from trippostcollect.runtime.helpers import utc_now
 
 
@@ -191,8 +191,10 @@ async def dwell_on_list_with_checks(
     page: Page,
     profile: Any,
     events: list[dict[str, Any]],
+    *,
+    list_area: ListAreaProbe,
 ) -> tuple[str, dict[str, bool]]:
-    dwell_task = asyncio.create_task(dwell_on_list(page, profile, log=events))
+    dwell_task = asyncio.create_task(dwell_on_list(page, profile, log=events, list_area=list_area))
     try:
         while True:
             done, _ = await asyncio.wait(
@@ -303,9 +305,11 @@ async def run_page_behavior(
     profile_name: str = "social_high_risk",
     write_evidence: Callable[[str | Path, dict[str, Any]], None],
     xhs_search_ready: Callable[[Page, list], Awaitable[dict[str, Any]]] | None = None,
+    xhs_list_area: ListAreaProbe | None = None,
 ) -> dict[str, Any]:
-    if profile_name == "xhs_guarded" and xhs_search_ready is None:
-        raise RuntimeError("xhs_guarded requires an injected xhs_search_ready")
+    """`xhs_guarded` 须注入搜索结果就绪等待与结果列表区域（行为阶段的光标与滚轮限定在列表内，#88）。"""
+    if profile_name == "xhs_guarded" and (xhs_search_ready is None or xhs_list_area is None):
+        raise RuntimeError("xhs_guarded requires an injected xhs_search_ready and xhs_list_area")
     started_at = utc_now()
     events: list[dict[str, Any]] = []
     error = ""
@@ -348,7 +352,9 @@ async def run_page_behavior(
                 visible_markers = initial_visible_markers
             else:
                 if profile_name == "xhs_guarded":
-                    visible_text_sample, visible_markers = await dwell_on_list_with_checks(page, profile, events)
+                    visible_text_sample, visible_markers = await dwell_on_list_with_checks(
+                        page, profile, events, list_area=xhs_list_area,
+                    )
                 else:
                     await dwell_on_list(page, profile, log=events)
                 if not visible_challenge(visible_markers):
@@ -431,6 +437,7 @@ async def run_required_human_behavior(
     profile_name: str,
     xhs_search_ready: Callable[[Page, list], Awaitable[dict[str, Any]]],
     write_evidence: Callable[[str | Path, dict[str, Any]], None],
+    xhs_list_area: ListAreaProbe | None = None,
 ) -> dict[str, Any]:
     """依赖由旧适配注入；XHS 等待实现待 T09 迁出 scripts。"""
     return await run_page_behavior(
@@ -439,5 +446,6 @@ async def run_required_human_behavior(
         evidence_path=evidence_path,
         profile_name=profile_name,
         xhs_search_ready=xhs_search_ready,
+        xhs_list_area=xhs_list_area,
         write_evidence=write_evidence,
     )

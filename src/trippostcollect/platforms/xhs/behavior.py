@@ -39,7 +39,11 @@ from playwright.async_api import Page
 
 from trippostcollect.application.contracts import XhsBehaviorPorts
 from trippostcollect.platforms.xhs.errors import PlatformRuntimeError, XHSLoginExpired, XHSNetworkRecoveryTimeout
-from trippostcollect.platforms.xhs.page_scripts import dom_like_control_state, dom_search_ready_counts
+from trippostcollect.platforms.xhs.page_scripts import (
+    dom_like_control_state,
+    dom_scroll_metrics,
+    dom_search_ready_counts,
+)
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.runtime import behavior as _behavior
 from trippostcollect.runtime.behavior import (
@@ -52,6 +56,7 @@ from trippostcollect.runtime.helpers import utc_now
 from trippostcollect.runtime.human_pointer import Box, pointer_for
 from trippostcollect.xhs.operator_wait import OperatorWaitEpisode, current_operator_wait_signal
 from trippostcollect.runtime.human_flow import (
+    ListArea,
     human_pause,
     human_scroll,
     load_behavior_profile,
@@ -93,6 +98,45 @@ XHS_LIKE_SELECTORS = tuple(
         "button[aria-label*='点赞']",
     )
 )
+# 搜索结果页上光标与滚轮的区域：结果列表 .search-layout 与列表可见区（滚动容器可见区与视口的交集，整页滚动时为
+# 视口）的相交矩形，横纵各向内缩这一比例。目标点与滚轮落点因此离开右侧对话栏和顶部固定的搜索框区域（约 116px，
+# 可见区高于 580px 时小于高度的 20%）；轨迹越过目标至多 115px，小于列表宽度的 20%，不会进入对话栏。
+# 扫描滚动与行为动作共用（#88）。
+XHS_LIST_AREA_INSET = 0.2
+
+
+class XhsListAreaUnavailable(RuntimeError):
+    """搜索结果页上取不到结果列表区域；行为动作不退回整个视口：行为阶段按失败处理，连续性行为跳过随机移动。"""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"xhs_list_area_unavailable:{reason}")
+        self.reason = reason
+
+
+def list_area_box(metrics: dict[str, Any]) -> Box | None:
+    """scroll_metrics 的 list_rect 按 `XHS_LIST_AREA_INSET` 内缩后的区域；没有 list_rect 时为 None。"""
+    rect = metrics.get("list_rect")
+    if not isinstance(rect, dict):
+        return None
+    left, top, right, bottom = (float(rect.get(key) or 0) for key in ("left", "top", "right", "bottom"))
+    if right <= left or bottom <= top:
+        return None
+    inset_x = (right - left) * XHS_LIST_AREA_INSET
+    inset_y = (bottom - top) * XHS_LIST_AREA_INSET
+    return Box(left + inset_x, top + inset_y, right - left - 2 * inset_x, bottom - top - 2 * inset_y)
+
+
+async def xhs_list_area(page: Page) -> ListArea:
+    """行为阶段与连续性行为在搜索结果页上的区域和列表滚动位置（布局 A 为滚动容器，布局 B 为 window）。"""
+    metrics = await dom_scroll_metrics(page)
+    box = list_area_box(metrics)
+    if box is None:
+        raise XhsListAreaUnavailable("list_not_in_view" if metrics.get("layout_present") else "search_layout_missing")
+    return ListArea(
+        box=box,
+        scroll_y=int(metrics.get("scroll_y") or 0),
+        scroll_container=str(metrics.get("scroll_container") or ""),
+    )
 
 
 async def record_xhs_platform_security_limit(
@@ -618,7 +662,12 @@ async def run_xhs_continuity_behavior(
     events: list[dict[str, Any]] = []
     profile = load_behavior_profile("xhs_guarded", strict=True)
     await human_pause(page, XHS_CONTINUITY_PAUSE_SECONDS, reason=f"continuity_{stage}", log=events)
-    await random_mouse_moves(page, profile, events)
+    try:
+        await random_mouse_moves(page, profile, events, list_area=xhs_list_area)
+    except XhsListAreaUnavailable as exc:
+        # 随机移动只是装饰性动作：取不到列表区域（例如人工验证刚结束、列表尚未渲染）时跳过，不退回整个视口，
+        # 也不让本轮失败；页面不对由扫描自身的检查处理。
+        events.append({"event": "mouse_moves_skipped", "reason": exc.reason})
     final_text, final_markers = await visible_page_state(page)
     final_challenge = visible_challenge(final_markers)
     if final_challenge in XHS_OPERATOR_CHALLENGES:

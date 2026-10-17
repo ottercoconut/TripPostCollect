@@ -178,7 +178,7 @@ DOM_SCRIPTS: dict[str, str] = {
     # 列表的滚动位置：容器为元素时取它的 scrollTop / clientHeight / scrollHeight，为文档时取 window 与文档根。
     # view_rect 是列表可见区（容器可见区与视口的交集）；list_rect 是结果列表（.search-layout）与 view_rect 的交集，
     # 滚轮落点限定在其中（AI 对话布局右侧的对话栏可独立滚动，不能让滚轮落在上面），取不到时为 null；
-    # scroll_container 只用于诊断。
+    # layout_present 区分“没有 .search-layout”与“列表不在可见区内”；scroll_container 用于诊断与行为证据。
     "scroll_metrics": """() => {
         /*list_view*/
         const { layout, container, root, view, clip } = listView();
@@ -190,6 +190,7 @@ DOM_SCRIPTS: dict[str, str] = {
             scroll_height: Math.round((container || root).scrollHeight || 0),
             view_rect: view,
             list_rect: layout ? clip(layout.getBoundingClientRect()) : null,
+            layout_present: Boolean(layout),
         };
     }""",
     "search_box": """() => {

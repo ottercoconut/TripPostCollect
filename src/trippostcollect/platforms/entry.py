@@ -444,7 +444,7 @@ def xhs_dependencies(config, *, repair=None):
     from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
     from trippostcollect.db.discovery_read import existing_platform_identities
     from trippostcollect.platforms.xhs import behavior as xhs_behavior
-    from trippostcollect.platforms.xhs.behavior import wait_for_xhs_search_ready
+    from trippostcollect.platforms.xhs.behavior import wait_for_xhs_search_ready, xhs_list_area
     from trippostcollect.platforms.xhs.parser import xhs_source_asset_key
     from trippostcollect.runtime import behavior, helpers
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
@@ -487,6 +487,7 @@ def xhs_dependencies(config, *, repair=None):
             raise RuntimeError("required TripPostCollect human behavior configuration is incomplete")
         return await behavior.run_required_human_behavior(
             page, platform_key=platform_key, xhs_search_ready=wait_for_xhs_search_ready,
+            xhs_list_area=xhs_list_area,
             write_evidence=write_evidence, evidence_path=evidence_path, profile_name=profile_name,
         )
 

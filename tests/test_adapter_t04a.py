@@ -107,7 +107,8 @@ def test_fork_dynamic_imports_and_behavior_injection(tmp_path):
             calls.append("xhs_search_ready")
             return {"ready": True}
 
-        async def dwell(page, profile, log):
+        async def dwell(page, profile, log, *, list_area):
+            assert list_area is legacy.xhs_list_area
             calls.append("dwell")
             log.extend([
                 {"event": "pause"}, {"event": "mouse_moves"},
@@ -149,7 +150,7 @@ def test_fork_dynamic_imports_and_behavior_injection(tmp_path):
 async def test_guarded_behavior_requires_injected_wait(tmp_path):
     evidence_path = tmp_path / "behavior.json"
     with pytest.raises(
-        RuntimeError, match="^xhs_guarded requires an injected xhs_search_ready$",
+        RuntimeError, match="^xhs_guarded requires an injected xhs_search_ready and xhs_list_area$",
     ):
         await behavior.run_page_behavior(
             object(), platform_key="xhs", profile_name="xhs_guarded",

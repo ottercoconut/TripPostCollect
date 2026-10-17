@@ -19,7 +19,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from trippostcollect.platforms.xhs.behavior import merge_pending_behavior_evidence
+from trippostcollect.platforms.xhs.behavior import list_area_box, merge_pending_behavior_evidence
 from trippostcollect.platforms.xhs.capture import (
     XHS_SEARCH_RULE,
     classify_xhs_api_response,
@@ -64,9 +64,8 @@ XHS_SEARCH_LOAD_WAIT_SECONDS = 20.0
 XHS_SEARCH_RESULTS_PAUSE_SECONDS = (2.0, 5.0)
 XHS_SEARCH_PAGE_PAUSE_SECONDS = (4.0, 10.0)
 XHS_SCROLL_SETTLE_SECONDS = (0.4, 1.2)
-# 滚动时光标位于结果列表与列表可见区的相交矩形内，横纵各向内缩这一比例；取不到矩形时按列表可见区比例取区域。
-# 光标已在区域内就不动，每一步的位移由若干个触控板手势凑成，总和恰为该步距离。
-XHS_SCROLL_POINTER_INSET = 0.2
+# 滚动时光标位于结果列表与列表可见区的相交矩形内（与行为动作同一区域，见 behavior.list_area_box）；取不到矩形时
+# 按列表可见区比例取区域。光标已在区域内就不动，每一步的位移由若干个触控板手势凑成，总和恰为该步距离。
 # 滚动位置、可见区均指列表的实际滚动容器（见 page_scripts.scroll_metrics）。单步滚动不超过列表可见区高度 h 的
 # 0.8 倍；可点击带为可见区顶部加 0.1h 到底边上方 8px，且封面中心须命中本卡片。h ≥ 80px 时 0.8h ≤ 0.9h − 8，
 # 封面中心一步越不过整条带，向下扫描不跳过任何一行卡片。
@@ -1141,12 +1140,9 @@ class XhsScanMixin:
     def _scroll_area(metrics: dict[str, Any]) -> Optional[Box]:
         """滚动时光标所在的区域：结果列表与列表可见区相交矩形、四周留边，避开 AI 对话布局右侧可独立滚动的对话栏；
         取不到该矩形时为列表可见区内横 30%–70%、纵 35%–75% 的部分。"""
-        rect = _rect(metrics.get("list_rect"))
-        if rect is not None:
-            left, top, right, bottom = rect
-            inset_x = (right - left) * XHS_SCROLL_POINTER_INSET
-            inset_y = (bottom - top) * XHS_SCROLL_POINTER_INSET
-            return Box(left + inset_x, top + inset_y, right - left - 2 * inset_x, bottom - top - 2 * inset_y)
+        area = list_area_box(metrics)
+        if area is not None:
+            return area
         view = _rect(metrics.get("view_rect"))
         if view is not None:
             left, top, right, bottom = view

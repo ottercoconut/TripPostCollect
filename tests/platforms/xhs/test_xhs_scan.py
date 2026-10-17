@@ -532,7 +532,7 @@ def test_scroll_wheel_lands_inside_the_result_list_rectangle(tmp_path):
     harness.run()
 
     assert harness.accumulator.summary()["stop_reason"] == "source_exhausted"
-    inset = xhs_scan.XHS_SCROLL_POINTER_INSET
+    inset = xhs_behavior.XHS_LIST_AREA_INSET
     assert site.wheel_points
     for x, y in site.wheel_points:
         assert 896 * inset <= x <= 896 * (1 - inset)
@@ -751,8 +751,8 @@ def test_page_pause_before_behavior_evidence_is_a_full_guarded_pause(tmp_path, m
     async def pause(page, bounds, *, reason, log):
         log.append({"event": "pause", "reason": reason})
 
-    async def mouse_moves(page, profile, log):
-        moves.append(profile.name)
+    async def mouse_moves(page, profile, log, *, list_area):
+        moves.append((profile.name, list_area))
         log.append({"event": "mouse_moves"})
 
     monkeypatch.setattr(xhs_behavior, "visible_page_state", visible_state)
@@ -765,7 +765,7 @@ def test_page_pause_before_behavior_evidence_is_a_full_guarded_pause(tmp_path, m
 
     seconds = asyncio.run(crawler._guarded_pause("search_page", *xhs_scan.XHS_SEARCH_PAGE_PAUSE_SECONDS))
 
-    assert seconds == 0.0 and moves == ["xhs_guarded"]
+    assert seconds == 0.0 and moves == [("xhs_guarded", xhs_behavior.xhs_list_area)]
     assert not evidence_path.exists()
     (pause_line,) = [line for line in iter_ledger_lines(crawler.capture.ledger.path) if line["kind"] == "pause"]
     assert pause_line["stage"] == "search_page" and pause_line["continuity"] == "completed"
