@@ -12,9 +12,10 @@ import pytest
 
 import trippostcollect.platforms.xhs.behavior as xhs_behavior
 import trippostcollect.platforms.xhs.core as xhs_core
+import trippostcollect.platforms.xhs.navigation as xhs_navigation
 import trippostcollect.platforms.xhs.scan as xhs_scan
 import trippostcollect.runtime.behavior as runtime_behavior
-from support.xhs_fake_site import FILTER_ENTRY, LIST_TOP, XhsFakeSite, inside, note
+from support.xhs_fake_site import FILTER_ENTRY, FILTER_OPTION, LIST_TOP, XhsFakeSite, inside, note
 from trippostcollect.application.candidates import AdaptiveAccumulator
 from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.evidence import write_evidence
@@ -351,6 +352,32 @@ def test_navigation_diagnostics_keep_only_paths_and_never_the_page_title(tmp_pat
     assert "document.title" not in DOM_SCRIPTS["render_diagnostic"]
 
 
+def test_navigation_diagnostics_keep_recent_entries_per_stage_in_time_order(tmp_path, monkeypatch):
+    evidence = tmp_path / "behavior_evidence.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(evidence))
+    crawler = Harness(tmp_path, XhsFakeSite(KEYWORD, _pages(1, 1))).crawler
+    limit = xhs_navigation.XHS_NAVIGATION_DIAGNOSTICS_PER_STAGE
+
+    async def record() -> None:
+        await crawler._record_navigation_diagnostic(crawler.context_page, stage="search_filter", outcome="attempt_1:x")
+        for index in range(limit + 15):
+            await crawler._record_navigation_diagnostic(
+                crawler.context_page, stage="creator_profile_parse", outcome=f"ok-{index}",
+            )
+        await crawler._record_navigation_diagnostic(crawler.context_page, stage="search_filter", outcome="attempt_2:y")
+
+    asyncio.run(record())
+
+    written = json.loads(evidence.with_name("behavior_evidence.navigation.json").read_text(encoding="utf-8"))
+    assert written["schema_version"] == 1 and written["events"] == crawler._navigation_diagnostics
+    outcomes = [(event["stage"], event["outcome"]) for event in written["events"]]
+    assert outcomes == [
+        ("search_filter", "attempt_1:x"),
+        *(("creator_profile_parse", f"ok-{index}") for index in range(15, limit + 15)),
+        ("search_filter", "attempt_2:y"),
+    ]
+
+
 def test_search_that_stops_loading_is_stalled_not_exhausted(tmp_path):
     site = XhsFakeSite(KEYWORD, _pages(3, 8), stall_after=2)
     harness = Harness(tmp_path, site)
@@ -380,7 +407,9 @@ def test_target_filter_that_never_applies_stops_after_one_retry(tmp_path):
         if line["kind"] == "action" and line["target"].get("filter") == "note_type"
     ]
     assert len(clicks) == 2
-    assert [event["outcome"] for event in _filter_diagnostics(harness)] == ["filter_not_confirmed"]
+    assert [event["outcome"] for event in _filter_diagnostics(harness)] == [
+        "attempt_1:filter_not_confirmed", "attempt_2:filter_not_confirmed", "filter_not_confirmed",
+    ]
 
 
 def test_filter_panel_that_stays_open_has_its_own_code(tmp_path):
@@ -435,8 +464,10 @@ def test_filter_entry_that_never_renders_waits_out_both_attempts_then_stops_with
     assert not _clicks_inside(events, FILTER_ENTRY)
     assert not any(line.get("action") == "apply_filter" for line in harness.ledger())
     written = json.loads(evidence.with_name("behavior_evidence.navigation.json").read_text(encoding="utf-8"))
-    (diagnostic,) = [event for event in written["events"] if event["stage"] == "search_filter"]
-    assert diagnostic["outcome"] == "filter_entry_missing" and site.diagnostic_reads == 1
+    *attempts, diagnostic = [event for event in written["events"] if event["stage"] == "search_filter"]
+    assert [event["outcome"] for event in attempts] == ["attempt_1:filter_entry_missing", "attempt_2:filter_entry_missing"]
+    assert all(event["moments"] == {} for event in attempts) and site.diagnostic_reads == 3
+    assert diagnostic["outcome"] == "filter_entry_missing" and "moments" not in diagnostic
     assert diagnostic["layout_count"] == 1 and diagnostic["entry_candidates"] == 0
     assert diagnostic["entry_visible"] is False and diagnostic["label_chains"] == []
     warning = next(record.getMessage() for record in caplog.records if "Search filter failed" in record.getMessage())
@@ -444,17 +475,53 @@ def test_filter_entry_that_never_renders_waits_out_both_attempts_then_stops_with
     assert "xiaohongshu.com" not in warning
 
 
-def test_filter_option_missing_on_first_attempt_reopens_the_panel_and_succeeds(tmp_path):
+def test_filter_option_missing_on_first_attempt_reopens_the_panel_and_records_the_attempt(
+    tmp_path, monkeypatch, caplog,
+):
+    evidence = tmp_path / "behavior_evidence.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(evidence))
     site = XhsFakeSite(KEYWORD, _pages(1, 4))
     site.option_missing_opens = 1
     harness = Harness(tmp_path, site)
 
-    harness.run()
+    with caplog.at_level(logging.WARNING, logger="MediaCrawler"):
+        harness.run()
 
     assert harness.processed == [f"n1-{index}" for index in range(4)]
     filters = [line["target"].get("filter") for line in harness.ledger() if line.get("action") == "apply_filter"]
     assert filters == ["panel_open", "panel_close", "panel_open", "note_type", "panel_close"]
-    assert not _filter_diagnostics(harness)
+    written = json.loads(evidence.with_name("behavior_evidence.navigation.json").read_text(encoding="utf-8"))
+    (diagnostic,) = [event for event in written["events"] if event["stage"] == "search_filter"]
+    assert diagnostic["outcome"] == "attempt_1:filter_option_missing"
+    assert diagnostic["panel_count"] == 1 and diagnostic["panel_visible_count"] == 1
+    assert diagnostic["entry_candidates"] == 1 and diagnostic["label_chains"]
+    closed = {"panel_visible": False, "option": False, "entry_text": "筛选"}
+    no_option = {"panel_visible": True, "option": False, "entry_text": "筛选"}
+    assert diagnostic["moments"] == {
+        "before_approach": closed, "before_press": closed, "first_poll": no_option, "poll_end": no_option,
+    }
+    (warning,) = [record.getMessage() for record in caplog.records if "Target filter attempt" in record.getMessage()]
+    assert "attempt 1 failed: filter_option_missing" in warning and "panel_visible_count=1" in warning
+    assert '"before_press":{"panel_visible":false,"option":false,"entry_text":"筛选"}' in warning
+    assert "xiaohongshu.com" not in warning and not any("Search filter failed" in r.getMessage() for r in caplog.records)
+
+
+def test_filter_panel_opened_by_hovering_the_entry_is_used_without_pressing_it(tmp_path, caplog):
+    site = XhsFakeSite(KEYWORD, _pages(1, 4))
+    site.hover_opens_panel = True
+    harness = Harness(tmp_path, site)
+
+    with caplog.at_level(logging.INFO, logger="MediaCrawler"):
+        harness.run()
+
+    assert harness.processed == [f"n1-{index}" for index in range(4)]
+    filters = [line["target"].get("filter") for line in harness.ledger() if line.get("action") == "apply_filter"]
+    assert filters == ["panel_open", "note_type", "panel_close"]
+    entry_clicks = [index for index, point in enumerate(site.click_points) if inside(FILTER_ENTRY, *point)]
+    option_click = next(index for index, point in enumerate(site.click_points) if inside(FILTER_OPTION, *point))
+    assert entry_clicks and min(entry_clicks) > option_click  # 只有收面板时按过入口
+    assert site.panel_opens == 1 and not _filter_diagnostics(harness)
+    assert any("opened on hover" in record.getMessage() for record in caplog.records)
 
 
 def test_scroll_wheel_lands_inside_the_result_list_rectangle(tmp_path):

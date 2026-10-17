@@ -88,7 +88,7 @@ XHS_BEFORE_FILTER_SECONDS = (0.6, 1.8)
 XHS_FILTER_APPLIED_TEXT = "已筛选"
 # 筛选失败时并入导航诊断的 filter_diagnostic 字段：只有计数与布尔，不含正文或地址；祖先链另并入、不进日志。
 XHS_FILTER_DIAGNOSTIC_KEYS = (
-    "layout_count", "entry_candidates", "entry_visible", "panel_present", "label_nodes",
+    "layout_count", "entry_candidates", "entry_visible", "panel_count", "panel_visible_count", "label_nodes",
     "inner_width", "inner_height", "scroll_y",
 )
 XHS_SCROLL_TOP_MAX_STEPS = 400
@@ -280,6 +280,19 @@ def _rect(value: Any) -> Optional[tuple[float, float, float, float]]:
     return (left, top, right, bottom) if right > left and bottom > top else None
 
 
+def _panel_ready(state: dict[str, Any]) -> bool:
+    return bool(state.get("panel_visible") and state.get("option"))
+
+
+def _filter_moment(state: dict[str, Any]) -> dict[str, Any]:
+    """筛选尝试诊断里一个时刻的状态：只记布尔与入口文字（filter_state 只给“筛选”“已筛选”或空串）。"""
+    return {
+        "panel_visible": bool(state.get("panel_visible")),
+        "option": bool(state.get("option")),
+        "entry_text": str(state.get("entry_text") or ""),
+    }
+
+
 class XhsScanMixin:
     """全量滚动扫描；作为 XiaoHongShuCrawler 的 mixin。单篇处理由 `overlay.XhsOverlayMixin._process_note_card` 提供。"""
 
@@ -386,21 +399,23 @@ class XhsScanMixin:
         """等入口、打开面板、按精确文字点选“图文”；以“已筛选”加目标会话第 1 页判定成功。
 
         入口始终未出现、面板未打开、选项缺失或点选后未确认都只让本次尝试失败；重试一次，两次都失败才停止。
+        每次失败的尝试各写一条诊断（含重试成功的情况），两次都失败时另写最终的一条。
         """
         page = self.context_page
         after_seq = self._require_capture().ledger.last_seq
         reason = ""
         clicks: list[str] = []
-        for attempt in (0, 1):
+        for attempt in (1, 2):
             session = self._newest_target_session(after_seq)
-            if attempt and session is not None and await self._filter_applied():
+            if attempt > 1 and session is not None and await self._filter_applied():
                 self._note_target_trigger(session, clicks)
                 return session
+            moments: dict[str, dict[str, Any]] = {}
             try:
-                state = await self._open_filter_panel()
+                state = await self._open_filter_panel(moments)
             except XhsFilterAttemptFailed as exc:
                 reason = exc.reason
-                logger.warning(f"[XiaoHongShuCrawler.scan] Target filter attempt {attempt + 1} failed: {reason}")
+                await self._record_filter_failure(reason, attempt=attempt, moments=moments)
                 continue
             plan = await self._plan_click(state["option"])
             click = self._record_trigger_action(
@@ -415,9 +430,10 @@ class XhsScanMixin:
             reason = "filter_not_confirmed"
             logger.warning(
                 "[XiaoHongShuCrawler.scan] Target filter not confirmed "
-                f"(attempt {attempt + 1}): target_session={session is not None}, url_path_ok="
+                f"(attempt {attempt}): target_session={session is not None}, url_path_ok="
                 f"{is_search_result_url(page.url)}"
             )
+            await self._record_filter_failure(reason, attempt=attempt, moments=moments)
         await self._record_filter_failure(reason)
         raise XhsSearchEntryFailed("target_filter_not_applied")
 
@@ -450,23 +466,37 @@ class XhsScanMixin:
             f"enter_session_target={enter.is_target if enter else None}, note_type_clicks={len(clicks)}"
         )
 
-    async def _open_filter_panel(self) -> dict[str, Any]:
-        """本次尝试的面板：已开且有“图文”直接用；开着却没有选项先收起再重开，以免点入口反把它关上。"""
-        state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
-        if state.get("panel_visible") and state.get("option"):
+    async def _open_filter_panel(self, moments: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """本次尝试的面板：已开且有“图文”直接用；开着却没有选项先收起再重开，以免点入口反把它关上。
+
+        光标先接近入口并按样本静止，再读一次状态：面板已因悬停打开且有“图文”就不再按下（按下会把它关上，#81），
+        否则照常按下。`moments` 记下接近前、按下前、按下后第 1 次轮询与轮询结束时的筛选状态，供失败诊断。
+        """
+        page = self.context_page
+        state = await dom_filter_state(page, XHS_TARGET_FILTER_LABEL)
+        if _panel_ready(state):
             return state
         if state.get("panel_visible"):
             await self._close_filter_panel()
         entry = await self._wait_for_filter_entry()
         await self._scan_sleep(SCAN_RANDOM.uniform(*XHS_BEFORE_FILTER_SECONDS))
+        moments["before_approach"] = _filter_moment(await dom_filter_state(page, XHS_TARGET_FILTER_LABEL))
+        pointer = pointer_for(page)
         plan = await self._plan_click(entry)
         self._record_trigger_action("apply_filter", {"filter": "panel_open"}, pointer=plan.evidence)
-        await self._perform_click(plan)
-        opened = await self._poll_filter_state(lambda value: bool(value.get("panel_visible") and value.get("option")))
+        await pointer.approach(plan)
+        await pointer.settle(plan)
+        state = await dom_filter_state(page, XHS_TARGET_FILTER_LABEL)
+        moments["before_press"] = _filter_moment(state)
+        if _panel_ready(state):
+            logger.info("[XiaoHongShuCrawler.scan] Filter panel opened on hover; entry not pressed")
+            return state
+        await pointer.press(plan)
+        opened = await self._poll_filter_state(_panel_ready, moments=moments)
         if opened is not None:
             return opened
-        state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
-        raise XhsFilterAttemptFailed("filter_option_missing" if state.get("panel_visible") else "filter_panel_not_opened")
+        panel_visible = moments.get("poll_end", {}).get("panel_visible")
+        raise XhsFilterAttemptFailed("filter_option_missing" if panel_visible else "filter_panel_not_opened")
 
     async def _wait_for_filter_entry(self) -> dict[str, Any]:
         polls = max(1, round(XHS_FILTER_ENTRY_WAIT_SECONDS / XHS_FILTER_POLL_SECONDS))
@@ -495,8 +525,14 @@ class XhsScanMixin:
         await self._record_filter_failure("filter_panel_not_closed")
         raise XhsSearchEntryFailed("filter_panel_not_closed")
 
-    async def _record_filter_failure(self, reason: str) -> None:
-        """筛选停止前把子原因与页面计数写入导航诊断，并在日志留一行（不含地址与文字）。"""
+    async def _record_filter_failure(
+        self, reason: str, *, attempt: int = 0, moments: Optional[dict[str, dict[str, Any]]] = None,
+    ) -> None:
+        """把筛选子原因与页面计数写入导航诊断，并在日志留一行（不含地址与入口文字以外的页面文字）。
+
+        给出 `attempt` 时是一次失败的尝试：`outcome` 为 `attempt_<n>:<子原因>`，另带本次尝试各时刻的筛选状态
+        `moments`；不给时是停止前的最终诊断，`outcome` 只是子原因。
+        """
         page = self.context_page
         error = ""
         try:
@@ -504,19 +540,35 @@ class XhsScanMixin:
         except Exception as exc:
             state, error = {}, f"filter_diagnostic: {type(exc).__name__}"
         counts = {key: state[key] for key in XHS_FILTER_DIAGNOSTIC_KEYS if key in state}
-        await self._record_navigation_diagnostic(
-            page, stage="search_filter", outcome=reason, error=error,
-            extra={**counts, "label_chains": state.get("label_chains") or []},
-        )
-        logger.warning(
-            f"[XiaoHongShuCrawler.scan] Search filter failed: reason={reason}, "
-            + ", ".join(f"{key}={value}" for key, value in counts.items())
-        )
+        extra: dict[str, Any] = {**counts, "label_chains": state.get("label_chains") or []}
+        outcome = reason
+        if attempt:
+            outcome = f"attempt_{attempt}:{reason}"
+            extra["moments"] = moments or {}
+        await self._record_navigation_diagnostic(page, stage="search_filter", outcome=outcome, error=error, extra=extra)
+        summary = ", ".join(f"{key}={value}" for key, value in counts.items())
+        if attempt:
+            logger.warning(
+                f"[XiaoHongShuCrawler.scan] Target filter attempt {attempt} failed: {reason}, {summary}, moments="
+                + json.dumps(moments or {}, ensure_ascii=False, separators=(",", ":"))
+            )
+        else:
+            logger.warning(f"[XiaoHongShuCrawler.scan] Search filter failed: reason={reason}, {summary}")
 
-    async def _poll_filter_state(self, accept: Callable[[dict[str, Any]], bool]) -> Optional[dict[str, Any]]:
-        for _ in range(XHS_FILTER_POLLS):
+    async def _poll_filter_state(
+        self,
+        accept: Callable[[dict[str, Any]], bool],
+        *,
+        moments: Optional[dict[str, dict[str, Any]]] = None,
+    ) -> Optional[dict[str, Any]]:
+        """按间隔读筛选状态直到满足 `accept`；给出 `moments` 时记下第 1 次与最后一次读到的状态。"""
+        for poll in range(XHS_FILTER_POLLS):
             await self._scan_sleep(XHS_FILTER_POLL_SECONDS)
             state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
+            if moments is not None:
+                moment = _filter_moment(state)
+                moments.setdefault("first_poll", moment)
+                moments["poll_end"] = moment
             if accept(state):
                 return state
         return None

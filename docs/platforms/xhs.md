@@ -283,7 +283,8 @@ Chrome 由共享 CDP 启动器（`runtime/browser_launcher.py`）自启：
 - 证据：账本中点击类动作（`apply_filter`、`click_card`、`close_overlay`、`click_author`、按箭头的
   `flip_image`，以及聚焦搜索框那次点击随 `type_search`）带 `pointer`：`x_ratio`、`y_ratio`（落点在元素框
   中的比例）、`approach_ms`、`moves`、`settle_ms`、`hold_ms`，本页第一次时另有 `entered=true`；扫描 `scroll`
-  动作带 `pointer.gestures`（每个手势的 `events`、`delta_y`、`delta_x`）。这些都在执行前计划好、随动作行写出。
+  动作带 `pointer.gestures`（每个手势的 `events`、`delta_y`、`delta_x`）。这些都在执行前计划好、随动作行写出；
+  筛选面板因悬停已打开而没有按下时，`panel_open` 行的 `pointer` 仍是计划值（见“搜索与全量扫描”）。
   行为证据的 `wheel_scroll` 事件带同样的 `gestures`，互动另记 `wheel_into_view` 与 `pointer_click`。作者页的
   一次小幅滚动不写记录。
 
@@ -382,7 +383,8 @@ child `summary.json` 的
   `runtime_failed/xhs_navigation_recovery_failed:<code>` 停止，不重启浏览器、不换号，也不推进 checkpoint。启动导航会把 `readyState`、DOM/正文长度、主文档状态、页面脚本错误和失败资源的紧凑
   摘要写入 behavior evidence 同目录的 `behavior_evidence.navigation.json`，白屏超时不得只凭外部关闭
   后的 `TargetClosedError` 分类。该文件中所有诊断的页面地址与失败资源地址都只留到路径（不含查询串），也不读取
-  页面标题。
+  页面标题。文件按 `stage` 各保留最近 30 条、整体按写入顺序排列，低频阶段（如 `search_filter`）不会被每访问
+  一次作者页就写一条的 `creator_profile_parse` 挤掉。
 - 搜索卡片和作者链接在匿名页面也可能存在；可见的精确“登录”按钮优先判定为 `login_required`，
   不得仅凭卡片数或作者链接数把匿名页面判为 ready。主页面在搜索导航、行为、登录恢复或作者补全
   等阶段意外关闭时立即以 `xhs_main_page_closed_unexpected` 终止本轮（浏览器生命周期失败；搜索阶段，
@@ -436,18 +438,28 @@ child `summary.json` 的
   且直属 `span` 文字精确为“筛选”或“已筛选”的节点（前面可能有隐藏或零尺寸的同类节点）；入口文字只读
   这个 `span`（面板开着时入口的整体文字含面板内容），开、收面板都点它（落点在 `span` 框内）。选项每个标签有一份坐标
   重叠的 `aria-hidden="true"` 副本，排除自身或祖先带该属性的节点后按精确文字取可见的那个。入口未渲染时
-  每次尝试按 0.25 秒轮询最多等 15 秒，出现后停顿 0.6–1.8 秒再点开面板，按精确文字点选“图文”（各组
-  `.tags` 结构相同，不按位置），以入口文字变为“已筛选”且截获到目标会话第 1 页（5 项 `filters`：`sort_type=general`、
-  `filter_note_type=普通笔记`，其余三项“不限”）判定成功。入口始终未出现、面板未打开、选项缺失或点选后
-  未确认都只算本次尝试失败，重试一次后报 `target_filter_not_applied`。面板不会自动收起，任何滚动之前
-  再点一次入口并确认收起，失败重试一次后报 `filter_panel_not_closed`；目标会话第 1 页的关键词与目标
-  不符时重新输入一次，仍不符报 `search_keyword_mismatch`。三者都以 `xhs_navigation_recovery_failed:<code>`
-  停止。两个筛选停止码在停止前向 `behavior_evidence.navigation.json` 追加一条 `stage=search_filter`
-  诊断，`outcome` 为最后一次尝试的子原因：`filter_entry_missing`、`filter_panel_not_opened`、
-  `filter_option_missing`、`filter_not_confirmed` 或 `filter_panel_not_closed`；只在失败时统计并入
-  `.search-layout` 个数、全文档 `div.filter` 个数、可见性、面板、精确文字节点等计数，视口尺寸与滚动位置，
-  以及至多 2 条文字节点的 6 层祖先链（class 内长字母数字片段遮为 `<id>`），不含正文。日志同时有一行
-  不含地址的 `Search filter failed`。
+  每次尝试按 0.25 秒轮询最多等 15 秒，出现后停顿 0.6–1.8 秒，光标接近入口并按样本静止后先读一次状态：
+  面板已因悬停打开且有“图文”就不再按下入口（按下会把它关上，#81），只记一行 info 日志
+  `Filter panel opened on hover`，不另写账本动作；否则按下入口，再按 0.25 秒轮询最多 20 次等面板与选项出现，
+  最后一次读到面板可见却没有选项为 `filter_option_missing`，否则为 `filter_panel_not_opened`。随后按精确文字
+  点选“图文”（各组 `.tags` 结构相同，不按位置），以入口文字变为“已筛选”且截获到目标会话第 1 页（5 项
+  `filters`：`sort_type=general`、`filter_note_type=普通笔记`，其余三项“不限”）判定成功。入口始终未出现、
+  面板未打开、选项缺失或点选后未确认都只算本次尝试失败，重试一次后报 `target_filter_not_applied`。面板不会
+  自动收起，任何滚动之前再点一次入口并确认收起，失败重试一次后报 `filter_panel_not_closed`；目标会话第 1 页
+  的关键词与目标不符时重新输入一次，仍不符报 `search_keyword_mismatch`。三者都以
+  `xhs_navigation_recovery_failed:<code>` 停止。
+- 筛选诊断写入 `behavior_evidence.navigation.json`，`stage=search_filter`，只在失败时统计：`.search-layout`
+  个数、全文档 `div.filter` 个数、入口可见性、`.filters-wrapper` 个数（`panel_count`）与其中可见的个数
+  （`panel_visible_count`；轮询的 `panel_visible` 只看第一个）、精确文字节点个数，视口尺寸与滚动位置，以及至多
+  2 条文字节点的 6 层祖先链（class 内长字母数字片段遮为 `<id>`），不含正文或地址。
+  - 每次失败的打开或点选尝试（包括第 1 次失败、重试成功）写一条，`outcome` 为 `attempt_<n>:<子原因>`
+    （`filter_entry_missing`、`filter_panel_not_opened`、`filter_option_missing` 或 `filter_not_confirmed`），另带
+    `moments`：接近入口前（`before_approach`）、光标到达入口静止后按下前（`before_press`）、按下后第 1 次轮询
+    （`first_poll`）与轮询结束时（`poll_end`）的 `panel_visible`、`option`（布尔）与 `entry_text`（只取“筛选”
+    “已筛选”或空串）；入口始终未出现时 `moments` 为空，悬停已打开时只到 `before_press`。日志对应一行不含地址的
+    `Target filter attempt <n> failed`，带同样的计数与 `moments`。
+  - 两个筛选停止码在停止前再追加一条最终诊断，`outcome` 为最后一次尝试的子原因或 `filter_panel_not_closed`，
+    不带 `moments`；日志同时有一行不含地址的 `Search filter failed`。
 - 列表的滚动方式（依据：Mac 人工测量 2026-10-13）：AI 对话布局下结果列表在 `.search-layout` 的某个祖先
   容器内滚动，`window.scrollY` 始终为 0，顶部约 116px 的搜索框区域固定不动；右侧对话栏与列表并排、不重叠，
   可独立滚动，里面有笔记链接与 `data-note-id` 元素，但没有 `section.note-item`。关闭对话栏后的布局（V16）

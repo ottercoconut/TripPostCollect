@@ -253,7 +253,8 @@ DOM_SCRIPTS: dict[str, str] = {
         };
     }""",
     # 筛选失败时才调用：整页计数、布尔与至多 2 条入口文字节点的祖先链（见 _CLASS_CHAIN），不含正文或地址。
-    # entry_candidates 为全文档 div.filter 个数。
+    # entry_candidates 为全文档 div.filter 个数；panel_count、panel_visible_count 为 .filters-wrapper 的个数与其中
+    # 可见的个数（filter_state 的 panel_visible 只看第一个）。
     "filter_diagnostic": """() => {
         const labels = ['筛选', '已筛选'];
         const visible = (node) => {
@@ -263,6 +264,7 @@ DOM_SCRIPTS: dict[str, str] = {
         };
         /*class_chain*/
         const candidates = Array.from(document.querySelectorAll('div.filter'));
+        const panels = Array.from(document.querySelectorAll('.filters-wrapper'));
         const labelNodes = Array.from(document.querySelectorAll('body *')).filter(
             (node) => node.childElementCount === 0 && labels.includes((node.textContent || '').trim())
         );
@@ -270,7 +272,8 @@ DOM_SCRIPTS: dict[str, str] = {
             layout_count: document.querySelectorAll('.search-layout').length,
             entry_candidates: candidates.length,
             entry_visible: candidates.some(visible),
-            panel_present: Boolean(document.querySelector('.filters-wrapper')),
+            panel_count: panels.length,
+            panel_visible_count: panels.filter(visible).length,
             label_nodes: labelNodes.length,
             label_chains: labelNodes.slice(0, 2).map(chain),
             inner_width: window.innerWidth,

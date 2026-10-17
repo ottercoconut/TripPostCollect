@@ -203,8 +203,11 @@ class _Mouse:
         self.site = site
 
     async def move(self, x: float, y: float, steps: int = 1) -> None:
+        entered = not inside(FILTER_ENTRY, *self.site.mouse_position) and inside(FILTER_ENTRY, x, y)
         self.site.mouse_position = (x, y)
         self.site.move_count += 1
+        if entered:
+            self.site.hover_entry()
 
     async def down(self) -> None:
         self.site.mouse_down = True
@@ -240,7 +243,8 @@ class XhsFakeSite:
     选项：`apply_filter_works=False` 点选“图文”不产生目标会话；`panel_closes=False` 面板收不起；
     `entry_delay_reads` 为结果页上前几次读筛选状态时入口尚未渲染（None 为始终不出现）；
     `option_missing_opens` 为前几次打开面板时没有“图文”选项；`entry_click_applies_filter` 为点入口打开面板时前端同时
-    发出目标会话第 1 页（触发者是 panel_open），之后点“图文”不再发请求；`list_rect` 为滚动度量里结果列表与列表可见区的
+    发出目标会话第 1 页（触发者是 panel_open），之后点“图文”不再发请求；`hover_opens_panel` 为光标移入入口框时面板
+    就打开（已开着不变；按下入口仍切换开关，面板不随光标离开收起）；`list_rect` 为滚动度量里结果列表与列表可见区的
     相交矩形（None 时不给，扫描按可见区比例落点），`wheel_points` 记下每次滚轮时的鼠标位置；`view_rect` 为列表
     滚动容器的可见区（None 为整页滚动，可见区即视口；给出时列表在容器内自顶部排起、滚动位置是容器的）；
     `cover_blocked[id]` 为这张卡片可见时前几次读数的封面中心被遮住（cover_hit 为假，点击落空）；
@@ -299,6 +303,7 @@ class XhsFakeSite:
         self.filter_reads = 0
         self.option_missing_opens = 0
         self.entry_click_applies_filter = False
+        self.hover_opens_panel = False
         self.panel_opens = 0
         self.diagnostic_reads = 0
         self.card_diagnostic_reads: list[list[str]] = []
@@ -492,7 +497,8 @@ class XhsFakeSite:
             "layout_count": int(self.on_results),
             "entry_candidates": int(rendered),
             "entry_visible": rendered,
-            "panel_present": self.on_results,
+            "panel_count": int(self.on_results),
+            "panel_visible_count": int(self.panel_visible),
             "label_nodes": int(rendered),
             "label_chains": [["span", "div.filter", "div.<id>", "div.search-layout"]] if rendered else [],
             "inner_width": VIEW_WIDTH,
@@ -627,6 +633,11 @@ class XhsFakeSite:
             self.open_overlay(card["note_id"])
         elif not self.on_results and near(SEARCH_BOX):
             self.box_focused = True
+
+    def hover_entry(self) -> None:
+        if self.hover_opens_panel and self.overlay_note is None and self.entry_rendered and not self.panel_visible:
+            self.panel_visible = True
+            self.panel_opens += 1
 
     def press_enter(self) -> None:
         keyword = self.typed_keyword if self.typed_keyword is not None else self.box_value

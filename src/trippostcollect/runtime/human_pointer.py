@@ -527,14 +527,19 @@ class HumanPointer:
     async def approach(self, plan: ClickPlan) -> None:
         await self._travel(plan.entry, plan.entry_pause_ms, plan.moves)
 
-    async def press(self, plan: ClickPlan) -> None:
+    async def settle(self, plan: ClickPlan) -> None:
+        """按下前的静止；调用方可在静止后读页面再决定是否 `press`。"""
         await self._wait(plan.settle_ms)
+
+    async def press(self, plan: ClickPlan) -> None:
+        """原地按下、按住、松开（不含按下前的静止）。"""
         await self.page.mouse.down()
         await self._wait(plan.hold_ms)
         await self.page.mouse.up()
 
     async def perform_click(self, plan: ClickPlan) -> None:
         await self.approach(plan)
+        await self.settle(plan)
         await self.press(plan)
 
     async def click(self, box: Box, *, within: Optional[tuple[float, float]] = None) -> dict[str, Any]:

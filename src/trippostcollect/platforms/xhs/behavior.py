@@ -763,6 +763,7 @@ async def _run_xhs_like_once(page: Page, profile: Any, events: list[dict[str, An
     plan = await pointer.plan_click(Box.from_bounding_box(await locator.bounding_box(timeout=3_000)))
     await pointer.approach(plan)
     await human_pause(page, (1.2, 4.5), reason="before_like", log=events)
+    await pointer.settle(plan)
     await pointer.press(plan)
     events.append({"event": "pointer_click", "target": "like", **plan.evidence})
     await human_pause(page, (1.5, 4.0), reason="after_like", log=events)

@@ -27,6 +27,7 @@ import logging
 import os
 import random
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
@@ -58,6 +59,9 @@ XHS_SEARCH_RESULT_PATHS = frozenset({"/search_result_ai", "/search_result"})
 XHS_SEARCH_CAPTURE_SECONDS = 30.0
 XHS_TYPE_KEY_SECONDS = (0.12, 0.26)
 XHS_BEFORE_ENTER_SECONDS = (0.5, 1.5)
+# 导航诊断按 stage 各保留最近这么多条，整体仍按写入顺序（#81）：取原来的全局上限，任何阶段都不比原来留得少，
+# 也不会被每访问一次作者页就写一条的 creator_profile_parse 挤掉。
+XHS_NAVIGATION_DIAGNOSTICS_PER_STAGE = 30
 INPUT_RANDOM = random.SystemRandom()
 
 
@@ -73,6 +77,17 @@ def url_without_query(url: object) -> str:
     """地址只留到路径（去掉查询串与片段）：浮层与作者页地址带 xsec_token，结果页地址带关键词。"""
     parts = urlsplit(str(url or ""))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
+def recent_per_stage(events: list[Dict]) -> list[Dict]:
+    """每个 stage 只留最近 `XHS_NAVIGATION_DIAGNOSTICS_PER_STAGE` 条，保持原有先后顺序。"""
+    kept: list[Dict] = []
+    counts: Counter = Counter()
+    for event in reversed(events):
+        counts[event.get("stage")] += 1
+        if counts[event.get("stage")] <= XHS_NAVIGATION_DIAGNOSTICS_PER_STAGE:
+            kept.append(event)
+    return kept[::-1]
 
 
 def search_request_page(item: object) -> int | None:
@@ -241,7 +256,7 @@ class XhsNavigationMixin:
             "schema_version": 1,
             "platform": "xhs",
             "updated_at": self._utc_now(),
-            "events": self._navigation_diagnostics[-30:],
+            "events": self._navigation_diagnostics,
         }
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -291,8 +306,7 @@ class XhsNavigationMixin:
                 "error": error[:500],
             }
         )
-        self._navigation_diagnostics.append(diagnostic)
-        self._navigation_diagnostics = self._navigation_diagnostics[-30:]
+        self._navigation_diagnostics = recent_per_stage([*self._navigation_diagnostics, diagnostic])
         self._write_navigation_diagnostics()
         return diagnostic
 

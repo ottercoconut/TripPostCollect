@@ -199,6 +199,25 @@ def test_first_action_enters_from_the_lower_middle_then_dispatches_one_event_per
     assert "entered" not in asyncio.run(pointer.click(hp.Box(600.0, 400.0, 150.0, 110.0)))
 
 
+def test_click_can_stop_after_settling_and_press_does_not_settle_again():
+    page = RecordingPage()
+    pointer = hp.HumanPointer(page, rng=random.Random(5), drift_sign=1)
+    pointer.position = (300.0, 500.0)
+    plan = asyncio.run(pointer.plan_click(hp.Box(1200.0, 80.0, 28.0, 20.0)))
+
+    async def hover_then_press() -> int:
+        await pointer.approach(plan)
+        await pointer.settle(plan)
+        settled = len(page.mouse.events)
+        await pointer.press(plan)
+        return settled
+
+    settled = asyncio.run(hover_then_press())
+    hovered, pressed = page.mouse.events[:settled], page.mouse.events[settled:]
+    assert hovered[-1] == ("wait", plan.settle_ms) and not any(event[0] in {"down", "up"} for event in hovered)
+    assert pressed == [("down",), ("wait", plan.hold_ms), ("up",)]
+
+
 # 触控板手势 -----------------------------------------------------------------
 
 def _body(events: list[tuple[int, int]]) -> list[int]:
