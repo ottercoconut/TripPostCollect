@@ -52,7 +52,7 @@ def test_default_xhs_target_uses_exhaustion_schema() -> None:
     assert "target_new_posts" not in target
     assert "candidate_hard_limit" not in target
     assert "max_stagnant_batches" not in target
-    assert target["top_refresh_max_pages"] == 5
+    assert "top_refresh_max_pages" not in target
     assert "timeout_seconds" not in target
     assert target["local_image_storage_required"] is True
     assert "download_images" not in target
@@ -64,8 +64,32 @@ def test_long_xhs_target_has_no_task_time_budget() -> None:
     target = load_target("qingdao_free_travel_exhaustive")
 
     assert target["keyword"] == "青岛自由行"
-    assert target["top_refresh_max_pages"] == 5
+    assert "top_refresh_max_pages" not in target
     assert "timeout_seconds" not in target
+
+
+def test_xhs_target_rejects_removed_top_refresh_max_pages(tmp_path: Path) -> None:
+    target_path = tmp_path / "targets.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "targets": [
+                    {
+                        "target_key": "test",
+                        "keyword": "青岛旅游",
+                        "top_refresh_max_pages": 0,
+                        "required_fields_profile": "image_post_with_followers_v1",
+                        "followers_policy": "required",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(XhsConfigError, match="removed XHS target top_refresh_max_pages"):
+        load_target("test", target_path)
 
 
 def test_xhs_target_rejects_removed_timeout_seconds(tmp_path: Path) -> None:
@@ -78,7 +102,6 @@ def test_xhs_target_rejects_removed_timeout_seconds(tmp_path: Path) -> None:
                     {
                         "target_key": "test",
                         "keyword": "青岛旅游",
-                        "top_refresh_max_pages": 0,
                         "timeout_seconds": 7200,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
@@ -158,7 +181,6 @@ def test_xhs_operator_interrupt_finalizes_state_summary_and_exact_cleanup(
                     {
                         "target_key": "test",
                         "keyword": "青岛旅游",
-                        "top_refresh_max_pages": 1,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }
@@ -370,7 +392,7 @@ def test_xhs_low_level_executor_uses_profile_contract_without_legacy_login_switc
         start_cursor="",
         start_offset=0,
         start_page=1,
-        top_refresh_max_pages=5,
+        top_refresh_max_pages=0,
         xhs_account_id="xhs-a01",
         xhs_detail_urls=[],
         xhs_discovery_query_fingerprint="fingerprint",
@@ -747,7 +769,8 @@ def _prepare_300011_retry_database(
                     "stop_detail": "platform_security_limit_300011",
                     "stop_event": {
                         "source_page": 42,
-                        "resume_page": 42,
+                        "resume_page": None,
+                        "discovery_phase": "full_scan",
                         "batch_complete": False,
                     },
                 }
@@ -771,7 +794,6 @@ def _prepare_300011_retry_database(
         "finished_at": finished_at.isoformat(timespec="seconds"),
         "discovery": {
             "last_stop_reason": "runtime_failed",
-            "resume_page": 42,
         },
     }
     with sqlite3.connect(db_path) as conn:
@@ -806,12 +828,12 @@ def _prepare_300011_retry_database(
             """
             INSERT INTO xhs_discovery_checkpoints(
                 target_key, account_id, keyword, query_fingerprint,
-                resume_page, resume_search_id, last_batch_complete,
+                source_has_more, last_batch_complete,
                 last_stop_reason, last_run_id, last_summary_path,
                 campaign_candidate_count
             ) VALUES (
                 'target', 'xhs-a01', '青岛旅游', 'fingerprint',
-                42, 'cursor-42', 0, 'runtime_failed', ?, ?, 577
+                1, 0, 'runtime_failed', ?, ?, 577
             )
             """,
             (run_id, str(child_summary_path)),
@@ -1460,7 +1482,6 @@ def test_config_and_child_command_use_run_scoped_login_paths(tmp_path: Path) -> 
                     {
                         "target_key": "test",
                         "keyword": "青岛旅游",
-                        "top_refresh_max_pages": 3,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }
@@ -1493,10 +1514,7 @@ def test_config_and_child_command_use_run_scoped_login_paths(tmp_path: Path) -> 
         no_import=False,
         post_interaction="comment-scroll",
         discovery={
-            "resume_page": 7,
-            "resume_search_id": "saved-search-id",
-            "source_exhausted": False,
-            "top_refresh_max_pages": 3,
+            "checkpoint_found": True,
             "campaign_summary_path": "",
             "target_key": "test",
             "query_fingerprint": "test-fingerprint",
@@ -1520,9 +1538,9 @@ def test_config_and_child_command_use_run_scoped_login_paths(tmp_path: Path) -> 
     assert "--target-new-posts" not in command
     assert "--candidate-hard-limit" not in command
     assert "--max-stagnant-batches" not in command
-    assert command[command.index("--start-page") + 1] == "7"
-    assert command[command.index("--start-cursor") + 1] == "saved-search-id"
-    assert command[command.index("--top-refresh-max-pages") + 1] == "3"
+    # 每轮全量扫描：child 命令不带任何恢复位置参数。
+    for removed in ("--start-page", "--start-cursor", "--top-refresh-max-pages", "--discovery-source-exhausted"):
+        assert removed not in command
     assert "--download-images" in command
     assert command[command.index("--media-root") + 1] == str(
         xhs_runner.LOCAL_MEDIA_ROOT.resolve()
@@ -1725,7 +1743,6 @@ def test_xhs_target_rejects_removed_download_images_option(tmp_path: Path) -> No
                     {
                         "target_key": "test",
                         "keyword": "青岛旅游",
-                        "top_refresh_max_pages": 0,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                         "download_images": False,
@@ -1750,7 +1767,6 @@ def test_xhs_target_rejects_removed_quantity_fields(tmp_path: Path) -> None:
                     {
                         "target_key": "test",
                         "keyword": "青岛旅游",
-                        "top_refresh_max_pages": 0,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                         "target_new_posts": 1,

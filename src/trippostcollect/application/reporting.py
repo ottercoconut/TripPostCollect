@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from trippostcollect.application.inputs import PLATFORMS as PLATFORMS
+from trippostcollect.application.visit_gate import VISIT_GATED_PLATFORMS
 from trippostcollect.core.paths import ensure_parent
 from trippostcollect.records.formal import is_video_record as is_video_record
 from trippostcollect.records.formal import platform_from_path as platform_from_path
@@ -21,6 +22,10 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".svg", ".i
 
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm"}
+
+
+# 地址栏关键词可能被前端多次百分号编码（小红书结果页为两次）；逐层解码的最多次数。
+TARGET_URL_MAX_UNQUOTE = 3
 
 
 AUTHOR_FIELD_MARKERS = ("author", "user", "nickname", "avatar", "fans", "follower", "follow", "up")
@@ -293,12 +298,30 @@ def terminal_summary_envelope(
     }
 
 
+def _url_contains_keyword(url: str, keyword: str) -> bool:
+    """原串或逐层解码后的任一层包含关键词即为真；第一层与单次解码的旧判定完全相同。"""
+    if not keyword:
+        return False
+    layer = url
+    if keyword in layer:
+        return True
+    for _ in range(TARGET_URL_MAX_UNQUOTE):
+        decoded = unquote(layer)
+        if decoded == layer:
+            return False
+        layer = decoded
+        if keyword in layer:
+            return True
+    return False
+
+
 def collect_behavior_validation(
     records: list[dict[str, Any]],
     platforms: list[str],
     keyword: str,
     xhs_post_interaction: str = "none",
     repair_mode: bool = False,
+    content_visits: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     latest_by_platform: dict[str, dict[str, Any]] = {}
     for record in reversed(records):
@@ -342,6 +365,15 @@ def collect_behavior_validation(
             or repair_mode
             or "search_results" in continuity_stages
         )
+        # 纳入访问门禁的平台：节奏与连续性改由不截断的访问账本按本轮实际访问推导。
+        visit_validation = (content_visits or {}).get(platform_key)
+        if visit_validation is None and platform_key in VISIT_GATED_PLATFORMS:
+            # 门禁平台缺少访问门禁结果时失败关闭，不能因调用方漏传而静默放行。
+            visit_validation = {"content_visit_ok": False, "problem": "visit_validation_missing"}
+        if visit_validation is not None:
+            pacing_ok = bool(visit_validation.get("request_pacing_ok"))
+            continuity_ok = bool(visit_validation.get("continuity_ok"))
+        content_visit_ok = visit_validation is None or bool(visit_validation.get("content_visit_ok"))
         post_interactions = [
             item
             for item in evidence.get("post_interactions") or []
@@ -360,7 +392,7 @@ def collect_behavior_validation(
             for event in policy_events
         )
         behavior_url = str(evidence.get("url") or "")
-        target_url_ok = bool(keyword) and keyword in unquote(behavior_url)
+        target_url_ok = _url_contains_keyword(behavior_url, keyword)
         platform_results[platform_key] = {
             "behavior_ok": (
                 behavior_evidence_valid(evidence)
@@ -368,6 +400,7 @@ def collect_behavior_validation(
                 and profile_ok
                 and pacing_ok
                 and continuity_ok
+                and content_visit_ok
             ),
             "behavior_status": str(evidence.get("status") or "missing"),
             "behavior_profile": behavior_profile,
@@ -379,6 +412,8 @@ def collect_behavior_validation(
             "continuity_event_count": len(continuity_events),
             "continuity_stages": sorted(continuity_stages),
             "continuity_ok": continuity_ok,
+            "content_visit_ok": None if visit_validation is None else content_visit_ok,
+            "content_visit_validation": visit_validation,
             "post_interaction_requested": interaction_requested,
             "post_interaction_mode": xhs_post_interaction if platform_key == "xhs" else "none",
             "post_interaction_ok": interaction_ok,
@@ -392,11 +427,15 @@ def collect_behavior_validation(
 
     behavior_ok = bool(platform_results) and all(item["behavior_ok"] for item in platform_results.values())
     policy_ok = bool(platform_results) and all(item["policy_allowed"] for item in platform_results.values())
+    visit_results = [
+        item["content_visit_ok"] for item in platform_results.values() if item["content_visit_ok"] is not None
+    ]
     return {
         "required": True,
         "ok": behavior_ok and policy_ok,
         "behavior_ok": behavior_ok,
         "policy_ok": policy_ok,
+        "content_visit_ok": all(visit_results) if visit_results else None,
         "required_platforms": platforms,
         "platforms": platform_results,
     }

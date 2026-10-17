@@ -25,6 +25,7 @@ from PIL import Image
 import pytest
 
 from support import fork_removal_deviation
+from trippostcollect.application import reporting, visit_gate
 from trippostcollect.artifacts.image_candidates import content_image_candidates
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
 from trippostcollect.artifacts.image_materialization import write_staging_image
@@ -32,6 +33,7 @@ from trippostcollect.core.execution_state import FrozenExecutionState
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.bilibili import core as bilibili_core
 from trippostcollect.runtime import process
+from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_path
 from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -157,6 +159,117 @@ def t75_authorized_source(text):
     return text
 
 
+# #71 授权差异：访问门禁 content_visit_ok 接入行为门禁，target_url_ok 改为逐层解码；
+# 纳入访问门禁的平台把访问账本列入看门狗进展路径与平台记录输出。旧执行器同样替换后执行。
+T71_REPLACEMENTS = (
+    (
+        "    repair_mode: bool = False,\n) -> dict[str, Any]:\n    latest_by_platform",
+        "    repair_mode: bool = False,\n"
+        "    content_visits: dict[str, dict[str, Any]] | None = None,\n"
+        ") -> dict[str, Any]:\n    latest_by_platform",
+    ),
+    (
+        "            or \"search_results\" in continuity_stages\n        )\n",
+        "            or \"search_results\" in continuity_stages\n        )\n"
+        "        # 纳入访问门禁的平台：节奏与连续性改由不截断的访问账本按本轮实际访问推导。\n"
+        "        visit_validation = (content_visits or {}).get(platform_key)\n"
+        "        if visit_validation is None and platform_key in VISIT_GATED_PLATFORMS:\n"
+        "            # 门禁平台缺少访问门禁结果时失败关闭，不能因调用方漏传而静默放行。\n"
+        "            visit_validation = {\"content_visit_ok\": False, \"problem\": \"visit_validation_missing\"}\n"
+        "        if visit_validation is not None:\n"
+        "            pacing_ok = bool(visit_validation.get(\"request_pacing_ok\"))\n"
+        "            continuity_ok = bool(visit_validation.get(\"continuity_ok\"))\n"
+        "        content_visit_ok = visit_validation is None or bool(visit_validation.get(\"content_visit_ok\"))\n",
+    ),
+    (
+        "        target_url_ok = bool(keyword) and keyword in unquote(behavior_url)\n",
+        "        target_url_ok = _url_contains_keyword(behavior_url, keyword)\n",
+    ),
+    (
+        "                and pacing_ok\n                and continuity_ok\n            ),",
+        "                and pacing_ok\n                and continuity_ok\n                and content_visit_ok\n            ),",
+    ),
+    (
+        "            \"continuity_ok\": continuity_ok,\n            \"post_interaction_requested\"",
+        "            \"continuity_ok\": continuity_ok,\n"
+        "            \"content_visit_ok\": None if visit_validation is None else content_visit_ok,\n"
+        "            \"content_visit_validation\": visit_validation,\n"
+        "            \"post_interaction_requested\"",
+    ),
+    (
+        "    return {\n        \"required\": True,\n        \"ok\": behavior_ok and policy_ok,\n"
+        "        \"behavior_ok\": behavior_ok,\n        \"policy_ok\": policy_ok,\n",
+        "    visit_results = [\n"
+        "        item[\"content_visit_ok\"] for item in platform_results.values() if item[\"content_visit_ok\"] is not None\n"
+        "    ]\n"
+        "    return {\n        \"required\": True,\n        \"ok\": behavior_ok and policy_ok,\n"
+        "        \"behavior_ok\": behavior_ok,\n        \"policy_ok\": policy_ok,\n"
+        "        \"content_visit_ok\": all(visit_results) if visit_results else None,\n",
+    ),
+    (
+        "    progress_paths = [save_path, behavior_evidence_path]\n",
+        "    progress_paths = [save_path, behavior_evidence_path]\n"
+        "    if platform_key in VISIT_GATED_PLATFORMS:\n"
+        "        progress_paths.append(content_visits_path(behavior_evidence_path))\n",
+    ),
+    (
+        "        runtime_reporter.checkpoint if runtime_reporter is not None else None,\n    )\n",
+        "        runtime_reporter.checkpoint if runtime_reporter is not None else None,\n    )\n"
+        "    if platform_key in VISIT_GATED_PLATFORMS:\n"
+        "        ledger_path = content_visits_path(behavior_evidence_path)\n"
+        "        output[\"content_visit_paths\"] = [str(ledger_path)] if ledger_path.is_file() else []\n",
+    ),
+    (
+        "    gated[\"policy_evidence_ok\"] = bool(behavior_validation.get(\"policy_ok\"))\n",
+        "    gated[\"policy_evidence_ok\"] = bool(behavior_validation.get(\"policy_ok\"))\n"
+        "    gated[\"content_visit_ok\"] = behavior_validation.get(\"content_visit_ok\")\n",
+    ),
+    (
+        "    materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}\n",
+        "    content_visits = {\n"
+        "        platform_key: validate_summary_content_visits(\n"
+        "            summary,\n            content_valid_records,\n            platform_key,\n"
+        "            repair_mode=repair_mode,\n"
+        "            stop_event=pagination_evidence.get(\"stop_event\"),\n"
+        "        )\n"
+        "        for platform_key in platforms\n"
+        "        if platform_key in VISIT_GATED_PLATFORMS\n"
+        "    }\n"
+        "    if content_visits:\n"
+        "        behavior_validation = collect_behavior_validation(\n"
+        "            records,\n            platforms,\n            args.keyword,\n            args.xhs_post_interaction,\n"
+        "            repair_mode=repair_mode,\n            content_visits=content_visits,\n        )\n"
+        "        summary[\"behavior_validation\"] = behavior_validation\n"
+        "    materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}\n",
+    ),
+    # 小红书每轮全量扫描：child 不再注入深层前沿与顶部刷新变量，拒绝恢复参数。
+    (
+        '    if platform_key == "xhs":\n        extra_env.update(\n            {\n                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE": str(args.start_page),\n                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR": str(args.start_cursor or ""),\n                "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES": str(\n                    args.top_refresh_max_pages\n                ),\n                "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED": (\n                    "1" if args.discovery_source_exhausted else "0"\n                ),\n            }\n        )\n    if args.resume_identities_path:',
+        '    if args.resume_identities_path:',
+    ),
+    (
+        '    xhs_managed_resume = bool(args.xhs_account_id and args.start_cursor)\n    if (\n        args.start_page > 1\n        and not args.resume_summary\n        and args.discovery_job_id is None\n        and not xhs_managed_resume\n    ):',
+        '    if (\n        args.start_page > 1\n        and not args.resume_summary\n        and args.discovery_job_id is None\n    ):',
+    ),
+    (
+        '        if not args.xhs_repair and args.start_page > 1 and not args.start_cursor:\n            raise SystemExit("XHS continuation requires --start-cursor together with --start-page")',
+        '        if (\n            args.start_page != 1\n            or args.start_cursor\n            or args.top_refresh_max_pages > 0\n            or args.discovery_source_exhausted\n        ):\n            raise SystemExit("xhs_full_scan_rejects_resume_args")',
+    ),
+    # 作者补全恒为点击作者名（正式发现与 repair 同一路径），不再注入开关。
+    (
+        '                "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": "1",\n                "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",\n',
+        '                "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",\n',
+    ),
+)
+
+def t71_authorized_source(text):
+    """在冻结旧源码上做 #71 的同样替换；每处必须恰好出现一次。"""
+    for old, new in T71_REPLACEMENTS:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    return text
+
+
 def t14_authorized(node):
     """T14 授权差异：run_platform 在预算守卫前对非小红书平台做 profile 迁移失败关闭检查。"""
     node = deepcopy(node)
@@ -236,7 +349,8 @@ def test_a_migrated_ast(row):
     if row["disposition"] == "薄":
         target = ROOT / "src/trippostcollect/application/collection.py"
     assert target.exists(), f"新定义不存在：{target.relative_to(ROOT)}::{name}"
-    old = t12_authorized(definition(t75_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text()), name))
+    frozen = t71_authorized_source(t75_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text()))
+    old = t12_authorized(definition(frozen, name))
     new = t14_authorized(definition(target.read_text(), name))
     assert normalized_pair(old, new, AST_RULES[name])[0] == normalized_pair(old, new, AST_RULES[name])[1]
     if row["disposition"] == "薄":
@@ -311,6 +425,12 @@ def baseline(monkeypatch):
     # #75 有意偏离：任务级时限删除，旧执行器同样改用统一的无进展看门狗常量。
     text = t75_authorized_source(text)
     namespace["NO_PROGRESS_WATCHDOG_SECONDS"] = process.NO_PROGRESS_WATCHDOG_SECONDS
+    # #71 有意偏离：访问门禁与逐层解码接入旧执行器，名称取自新实现的同一定义。
+    text = t71_authorized_source(text)
+    namespace["VISIT_GATED_PLATFORMS"] = visit_gate.VISIT_GATED_PLATFORMS
+    namespace["validate_summary_content_visits"] = visit_gate.validate_summary_content_visits
+    namespace["content_visits_path"] = content_visits_path
+    namespace["_url_contains_keyword"] = reporting._url_contains_keyword
     namespace["operator_wait_diagnostics_path"] = operator_wait_diagnostics_path
     vars(module).update(namespace)
     exec(compile(text, module.__file__, "exec"), vars(module))
@@ -422,11 +542,75 @@ def behavior_for(platform):
         "events": [{"event": "pause"}, {"event": "mouse_moves"},
                    {"event": "human_scroll_complete", "effective_passes": 1}],
         "page_readiness": {"ready": True},
-        "runtime_fingerprint": {"webdriver": None, "languages": ["zh-CN"], "platform": "MacIntel", "visibility_state": "visible",
+        "runtime_fingerprint": {"webdriver": False, "languages": ["zh-CN"], "platform": "MacIntel", "visibility_state": "visible",
                                 "user_agent": "离线驱动", "viewport": {"width": 1280, "height": 900}},
         "request_pacing_events": [{"stage": s} for s in ("search_results", "note_detail", "creator_profile")],
         "continuity_events": [{"stage": "search_results", "status": "completed"}],
     }
+
+
+XHS_LEDGER_ID = "71" * 16
+XHS_LEDGER_TIME = "2026-10-01T01:02:03+00:00"
+
+
+def write_xhs_visit_ledger(behavior_path, records, entries):
+    """#71 合成账本：与离线记录、manifest 一致的回车 → 点选“图文” → 逐篇浮层与作者页访问。
+
+    只替代 worker 的取数过程，账本与 `content_visit_refs` 按真实 worker 的写法给出，访问门禁在全链路上照常执行。
+    返回目标会话（has_more=false）搜索访问 id，供来源耗尽停止事件引用。
+    """
+    ledger = VisitLedger.create(
+        content_visits_path(behavior_path), platform="xhs", mode="discovery",
+        ledger_id=XHS_LEDGER_ID, clock=lambda: XHS_LEDGER_TIME,
+    )
+
+    def action(kind, target, from_visit=None):
+        return ledger.append("action", seq=ledger.next_seq(), page_role="primary", action=kind, target=target,
+                             from_visit=from_visit)
+
+    def visit(stage, rule, source, *, trigger, subject_id=None, **audit):
+        return ledger.append("visit", seq=ledger.next_seq(), page_role="primary", recorded_at=XHS_LEDGER_TIME,
+                             stage=stage, source=source, rule=rule, endpoint=None,
+                             status=200 if source == "page_response" else None, outcome="ok", route="/search_result_ai",
+                             query_keys=[], subject_id=subject_id, trigger=trigger, **audit)
+
+    def pause(stage, continuity="n/a"):
+        start = ledger.next_seq()
+        ledger.append("pause", seq=ledger.next_seq(), page_role="primary", stage=stage, start_seq=start,
+                      seconds=1.0, continuity=continuity)
+
+    def search(trigger, *, target, items):
+        return visit("search_results", "xhs.search_notes", "page_response", trigger=trigger,
+                     search_session="offline-2" if target else "offline-1",
+                     filter_signature="target" if target else "none", is_target=target, keyword_matches_target=True,
+                     search_page=1, has_more=not target, items=items)
+
+    search(action("press_enter", {}), target=False, items=[])
+    target = search(action("apply_filter", {"filter": "note_type"}), target=True,
+                    items=[{"id": record["note_id"], "type": "normal"} for record in records])
+    pause("search_results", "completed")
+    creator = None
+    for record in records:
+        note_id = record["note_id"]
+        click = action("click_card", {"note_id": note_id})
+        detail = visit("note_detail", "xhs.feed", "page_response", trigger=click, subject_id=note_id)
+        images = [
+            visit("note_image", "xhs.note_image", "page_response", trigger=click, subject_id=note_id,
+                  asset_key=entry.source_asset_key, sha256=entry.sha256, bytes=entry.size_bytes)
+            for entry in entries if entry.platform_post_id == note_id
+        ]
+        pause("note_detail")
+        if creator is None:
+            pause("creator_profile")
+            author = action("click_author", {"note_id": note_id}, from_visit=detail)
+            creator = visit("creator_profile", "creator_page_data", "page_state", trigger=author,
+                            subject_id=record["user_id"], url_user_id=record["user_id"])
+            action("close_tab", {"note_id": note_id})
+        action("close_overlay", {"note_id": note_id})
+        record["content_visit_refs"] = {"ledger_id": XHS_LEDGER_ID, "search_results": target, "note_detail": detail,
+                                        "creator_profile": creator, "images": images}
+    ledger.close()
+    return target
 
 
 def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
@@ -457,6 +641,13 @@ def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
             ))
             if scenario == "missing_image":
                 staged.path.unlink()
+            if platform == "xhs":
+                # 真实小红书记录带 image_assets（门禁 R5 按它逐张核对）。
+                record.setdefault("image_assets", []).append({
+                    "url": candidate.source_url, "source_index": candidate.source_index,
+                    "source_asset_key": candidate.source_asset_key,
+                })
+    source_visit_id = write_xhs_visit_ledger(behavior_path, records, entries) if platform == "xhs" else None
     (folder / "search_contents_fixed.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
     write_manifest_atomic(folder / "image_manifest.jsonl", entries)
     behavior = behavior_for(platform)
@@ -471,6 +662,8 @@ def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
         "raw_batch_count": 2, "pages_fetched": 2, "stop_reason": "source_exhausted",
         "stop_detail": "has_more_false",
     }
+    if source_visit_id is not None:
+        details["source_visit_id"] = source_visit_id
     if scenario.startswith("count_"):
         details["candidate_count"] = int(scenario.split("_")[1])
     if scenario == "many_pages":

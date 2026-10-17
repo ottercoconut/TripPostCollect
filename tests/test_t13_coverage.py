@@ -23,9 +23,10 @@ from run_lanes import EXPRESSIONS
 
 ROOT = Path(__file__).resolve().parents[1]
 # 与冻结旧实现（固化预期或冻结 fixture）对照的测试文件（T05–T10）；T14-C 删除旧桥对照文件后只剩根侧比较。
-LEGACY_FILES = frozenset(f"tests/test_adapter_{name}.py" for name in ("t05", "t06", "t07", "t08", "t09", "t10"))
+# T09 冻结对照随 #71（小红书取数改为浏览器 L1）退役删除。
+LEGACY_FILES = frozenset(f"tests/test_adapter_{name}.py" for name in ("t05", "t06", "t07", "t08", "t10"))
 # 单站卡的对照文件只驱动该站，文件本身即本站证据。
-CARD_SITES = {"t05": "weibo", "t06": "douyin", "t07": "zhihu", "t08": "bilibili", "t09": "xhs", "t09_deps": "xhs"}
+CARD_SITES = {"t05": "weibo", "t06": "douyin", "t07": "zhihu", "t08": "bilibili", "t09_deps": "xhs"}
 SITE_TOKENS = {
     "bilibili": ("bilibili", "bili"),
     "weibo": ("weibo", "wb"),
@@ -158,3 +159,11 @@ def test_issue_2_lease_exit_nodes_are_complete(collected) -> None:
 def test_declared_lanes_are_root_lanes() -> None:
     # CI 只运行 ROOT_LANES；声明不得引用其他 lane（如已删除的 fork lane）。
     assert {entry["lane"] for _, _, entry in report.iter_entries(SPEC)} <= set(report.ROOT_LANES)
+
+
+def test_browser_replay_nodes_are_collected_only_in_the_os_lane(collected) -> None:
+    """本地 Chromium 回放只进 OS lane；component lane 按标记排除，不靠运行期跳过（必跑 lane 不接受 skip）。"""
+    marked = {lane: {nodeid for nodeid, item in nodes.items() if "browser_replay" in item["markers"]}
+              for lane, nodes in collected.items()}
+    assert len(marked["os"]) >= 3
+    assert all(not nodes for lane, nodes in marked.items() if lane != "os")

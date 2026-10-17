@@ -30,10 +30,10 @@ from typing import Awaitable, Callable, Optional
 
 from playwright.async_api import BrowserContext, Page
 
-from trippostcollect.application.contracts import XhsLoginPorts
 from trippostcollect.platforms.xhs.errors import PlatformRuntimeError
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget
-from trippostcollect.runtime.cookies import convert_cookies
+from trippostcollect.platforms.xhs.page_scripts import dom_qr_ready
+from trippostcollect.runtime.human_pointer import Box, pointer_for
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -137,7 +137,6 @@ class XiaoHongShuLogin:
                  close_page: Optional[Callable[..., Awaitable[None]]] = None,
                  new_page: Optional[Callable[[], Awaitable[Page]]] = None,
                  manual_wait_budget: Optional[XHSManualWaitBudget] = None,
-                 ports: Optional[XhsLoginPorts] = None,
                  ):
         if login_type != "qrcode":
             raise ValueError("xhs_login_type_must_be_qrcode")
@@ -146,7 +145,6 @@ class XiaoHongShuLogin:
         self.close_page = close_page
         self.new_page = new_page
         self._manual_wait_budget = manual_wait_budget
-        self.ports = ports
         self._last_login_observation: dict[str, object] = {}
         self._manual_progress_observed = False
         self._last_checkpoint_kind = "initial_qrcode_login"
@@ -173,9 +171,9 @@ class XiaoHongShuLogin:
             pass
         logger.warning(
             "[XiaoHongShuLogin] Unexpected login tab detected; keeping it visible "
-            "for at least 30s before close."
+            "for at least 20s before close."
         )
-        await asyncio.sleep(30)
+        await asyncio.sleep(20)
         if not page.is_closed():
             await page.close()
 
@@ -259,15 +257,7 @@ class XiaoHongShuLogin:
                     parts.append(await body.inner_text(timeout=750))
             except Exception:
                 continue
-        if locator_supported:
-            return "\n".join(parts)
-
-        # Test doubles and older Page shims may lack Locator. Real Playwright
-        # pages always use rendered text above.
-        try:
-            return await page.content()
-        except Exception:
-            return ""
+        return "\n".join(parts) if locator_supported else ""
 
     @staticmethod
     def _matching_markers(text: str, markers: frozenset[str]) -> set[str]:
@@ -651,7 +641,9 @@ class XiaoHongShuLogin:
                         locator = getattr(candidate, "first", candidate)
                         if not await locator.is_visible(timeout=500):
                             continue
-                        await locator.click(timeout=5_000)
+                        # 框相对主页面视口（含 iframe 内的控件），由该页面的光标按轨迹点击。
+                        box = Box.from_bounding_box(await locator.bounding_box(timeout=5_000))
+                        await pointer_for(page).click(box)
                         self.context_page = page
                         logger.info(
                             "[XiaoHongShuLogin.login_by_qrcode] Expired pure QR "
@@ -662,7 +654,7 @@ class XiaoHongShuLogin:
                         continue
         return False
 
-    async def _check_login_state_once(self, no_logged_in_session: str) -> bool:
+    async def _check_login_state_once(self) -> bool:
         """Confirm login only from visible UI across the one BrowserContext."""
         observation = await self._login_observation()
         self._last_login_observation = observation
@@ -694,21 +686,6 @@ class XiaoHongShuLogin:
                 "visible profile UI without a login/security checkpoint."
             )
             return True
-
-        # Cookie mutation is evidence only; it cannot end the login wait or
-        # trigger browser shutdown before stable signed-in UI appears.
-        current_cookie = await self.browser_context.cookies()
-        _, cookie_dict = convert_cookies(current_cookie)
-        current_web_session = cookie_dict.get("web_session")
-        if (
-            no_logged_in_session
-            and current_web_session
-            and current_web_session != no_logged_in_session
-        ):
-            logger.info(
-                "[XiaoHongShuLogin.check_login_state] web_session changed, "
-                "waiting for logged-in UI before confirming login."
-            )
         return False
 
     async def begin(self):
@@ -757,10 +734,6 @@ class XiaoHongShuLogin:
         budget = self._get_manual_wait_budget()
         ticket = budget.start("initial_qrcode_login")
         try:
-            current_cookie = await self.browser_context.cookies()
-            _, cookie_dict = convert_cookies(current_cookie)
-            no_logged_in_session = cookie_dict.get("web_session")
-
             next_refresh_at: Optional[float] = None
             progress_latched = False
             qrcode_displayed = False
@@ -776,9 +749,7 @@ class XiaoHongShuLogin:
             )
             while True:
                 ticket.raise_if_exhausted()
-                logged_in = await self._check_login_state_once(
-                    no_logged_in_session
-                )
+                logged_in = await self._check_login_state_once()
                 observation = self._last_login_observation
                 ticket.raise_if_exhausted()
                 if observation.get("manual_in_progress") and not progress_latched:
@@ -826,13 +797,11 @@ class XiaoHongShuLogin:
                     next_refresh_at = None
 
                 if not qrcode_displayed and not progress_latched and not logged_in:
-                    base64_qrcode_img = await self.ports.find_login_qrcode(
-                        self.context_page,
-                        selector=self._QRCODE_SELECTOR,
-                    )
+                    # 二维码只作“已就绪”的布尔信号：纯 DOM 判断，不下载、不保存图片。
+                    qr_ready = await dom_qr_ready(self.context_page)
                     ticket.raise_if_exhausted()
                     if (
-                        not base64_qrcode_img
+                        not qr_ready
                         and not observation.get("qr_expired")
                     ):
                         logger.info(
@@ -845,7 +814,8 @@ class XiaoHongShuLogin:
                                 "xpath=//*[@id='app']/div[1]/div[2]/div[1]/ul/"
                                 "div[1]/button"
                             )
-                            await login_button_ele.click(timeout=5_000)
+                            box = Box.from_bounding_box(await login_button_ele.bounding_box(timeout=5_000))
+                            await pointer_for(self.context_page).click(box)
                             remaining = ticket.remaining_seconds
                             if remaining > 0:
                                 await asyncio.sleep(min(0.5, remaining))
@@ -855,12 +825,9 @@ class XiaoHongShuLogin:
                                 f"dialog failed: {exc}"
                             )
                         ticket.raise_if_exhausted()
-                        base64_qrcode_img = await self.ports.find_login_qrcode(
-                            self.context_page,
-                            selector=self._QRCODE_SELECTOR,
-                        )
+                        qr_ready = await dom_qr_ready(self.context_page)
                         ticket.raise_if_exhausted()
-                    if base64_qrcode_img and not observation.get("qr_expired"):
+                    if qr_ready and not observation.get("qr_expired"):
                         qrcode_displayed = True
                         next_refresh_at = budget.now() + refresh_seconds
                         logger.info(
@@ -876,8 +843,8 @@ class XiaoHongShuLogin:
                     and observation.get("qr_visible")
                     and not observation.get("qr_expired")
                 ):
-                    # Visible QR is enough to start its lifetime even when byte
-                    # extraction for a headless preview fails.
+                    # A visible QR observed by the login observation also starts
+                    # its lifetime.
                     next_refresh_at = now + refresh_seconds
 
                 if (
@@ -893,9 +860,7 @@ class XiaoHongShuLogin:
                     # An expired pure QR may use only its own explicit refresh
                     # control, and only after a second observation closes the
                     # scan/confirm transition race.
-                    confirmed_logged_in = await self._check_login_state_once(
-                        no_logged_in_session
-                    )
+                    confirmed_logged_in = await self._check_login_state_once()
                     confirmed_observation = self._last_login_observation
                     observation = confirmed_observation
                     if confirmed_observation.get("manual_in_progress"):
@@ -939,9 +904,7 @@ class XiaoHongShuLogin:
                     # scan/SMS/security transition permanently disables reload.
                     refresh_allowed = self._is_pure_qr_observation(observation)
                     if refresh_allowed:
-                        confirmed_logged_in = await self._check_login_state_once(
-                            no_logged_in_session
-                        )
+                        confirmed_logged_in = await self._check_login_state_once()
                         confirmed_observation = self._last_login_observation
                         if confirmed_observation.get("manual_in_progress"):
                             progress_latched = True
@@ -997,7 +960,8 @@ class XhsLoginMixin:
     """轮内登录入口；作为 XiaoHongShuCrawler 的 mixin，两处终态写出经注入事件出口。"""
 
     async def _run_qrcode_login(self) -> None:
-        """Run the one XHS login state machine in the current browser session."""
+        """Run the one XHS login state machine, then confirm it with a guest=false user/me."""
+        login_started_seq = self._require_capture().ledger.last_seq
         login_obj = XiaoHongShuLogin(
             login_type=self.settings.LOGIN_TYPE,
             browser_context=self.browser_context,
@@ -1005,10 +969,11 @@ class XhsLoginMixin:
             close_page=self._close_page_with_deadline,
             new_page=self._new_guarded_page,
             manual_wait_budget=self._get_manual_wait_budget(),
-            ports=self.ports.login,
         )
         try:
             await login_obj.begin()
+            self._set_primary_page(login_obj.context_page)
+            await self._confirm_login_state(after_seq=login_started_seq)
         except PlatformRuntimeError as exc:
             stop_detail = str(exc.code or "xhs_login_runtime_failed")
             observed_failure_type = getattr(
@@ -1061,8 +1026,6 @@ class XhsLoginMixin:
                 },
             )
             raise
-        self.context_page = login_obj.context_page
-        self.xhs_client.playwright_page = self.context_page
 
     async def _single_page_for_login(self) -> Page:
         """Select a login tab without closing any verification companion tab."""

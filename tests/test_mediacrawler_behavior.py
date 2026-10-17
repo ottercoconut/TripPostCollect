@@ -27,6 +27,7 @@ mediacrawler_crawl = import_module("mediacrawler_crawl")
 xhs_behavior = import_module("trippostcollect.platforms.xhs.behavior")
 runtime_behavior = import_module("trippostcollect.runtime.behavior")
 human_flow = import_module("trippostcollect.runtime.human_flow")
+human_pointer = import_module("trippostcollect.runtime.human_pointer")
 
 
 def _fork_behavior_adapter():
@@ -38,7 +39,7 @@ def _fork_behavior_adapter():
     return module
 
 
-def valid_fingerprint(*, webdriver=None) -> dict:
+def valid_fingerprint(*, webdriver=False) -> dict:
     return {
         "webdriver": webdriver,
         "languages": ["zh-CN", "zh"],
@@ -48,6 +49,8 @@ def valid_fingerprint(*, webdriver=None) -> dict:
         "device_memory": 8,
         "max_touch_points": 0,
         "viewport": {"width": 1440, "height": 900, "device_pixel_ratio": 2},
+        "window_size": {"outer_width": 1450, "outer_height": 863},
+        "screen": {"width": 1470, "height": 956, "avail_width": 1470, "avail_height": 863},
         "visibility_state": "visible",
     }
 
@@ -255,7 +258,7 @@ async def test_xhs_bare_visible_login_control_blocks_search_readiness(
     assert readiness["reason"] == "login_required"
 
 
-async def fake_dwell_on_list(page, profile, log) -> None:
+async def fake_dwell_on_list(page, profile, log, *, list_area=None) -> None:
     log.extend(
         [
             {"event": "pause", "reason": "list_dwell_initial", "seconds": 1.0},
@@ -283,7 +286,7 @@ async def test_behavior_stage_writes_complete_evidence(tmp_path: Path, monkeypat
     )
 
     assert mediacrawler_behavior.behavior_evidence_valid(evidence) is True
-    assert evidence["runtime_fingerprint"]["webdriver"] is None
+    assert evidence["runtime_fingerprint"] == valid_fingerprint()
     assert json.loads(evidence_path.read_text())["status"] == "completed"
     assert evidence_path.with_suffix(".png").is_file()
 
@@ -628,7 +631,7 @@ async def test_xhs_dwell_stops_when_rate_limit_appears(
             "login_required": False,
         }
 
-    async def blocking_dwell(page, profile, log) -> None:
+    async def blocking_dwell(page, profile, log, *, list_area) -> None:
         log.append({"event": "pause", "reason": "list_dwell_initial", "seconds": 60.0})
         await asyncio.Event().wait()
 
@@ -711,8 +714,42 @@ def test_xhs_behavior_rejects_exposed_webdriver_and_ineffective_scroll() -> None
     ineffective = valid_xhs_evidence()
     ineffective["events"][-1]["effective_passes"] = 0
 
+    assert mediacrawler_behavior.behavior_evidence_valid(valid_xhs_evidence()) is True
     assert mediacrawler_behavior.behavior_evidence_valid(exposed) is False
     assert mediacrawler_behavior.behavior_evidence_valid(ineffective) is False
+
+
+@pytest.mark.parametrize("webdriver", [None, "missing", True, 0, "false"])
+def test_xhs_behavior_accepts_only_the_native_false_webdriver(webdriver) -> None:
+    """#83：正式轮不再注入脚本，原生 navigator.webdriver 为 false；undefined（被改写）或缺失都不通过。"""
+    evidence = valid_xhs_evidence()
+    if webdriver == "missing":
+        evidence["runtime_fingerprint"].pop("webdriver")
+    else:
+        evidence["runtime_fingerprint"]["webdriver"] = webdriver
+
+    assert mediacrawler_behavior.runtime_fingerprint_valid(evidence["runtime_fingerprint"]) is False
+    assert mediacrawler_behavior.behavior_evidence_valid(evidence) is False
+
+
+@pytest.mark.asyncio
+async def test_window_and_screen_sizes_are_recorded_but_not_gated() -> None:
+    """固定窗口 1450×900 高于 Mac 屏幕可用区域 863：采集外窗、屏幕与可用区域尺寸供实测核对，不参与门禁。"""
+
+    class Page:
+        async def evaluate(self, script: str) -> dict:
+            for name in ("outerWidth", "outerHeight", "screen.width", "screen.height", "availWidth", "availHeight",
+                         "devicePixelRatio"):
+                assert name in script, name
+            return valid_fingerprint()
+
+    fingerprint = await runtime_behavior.runtime_fingerprint(Page())
+    assert fingerprint["window_size"] == {"outer_width": 1450, "outer_height": 863}
+    for drop in ("window_size", "screen"):
+        reduced = {key: value for key, value in fingerprint.items() if key != drop}
+        assert mediacrawler_behavior.runtime_fingerprint_valid(reduced) is True
+    taller = {**fingerprint, "window_size": {"outer_width": 1450, "outer_height": 900}}
+    assert mediacrawler_behavior.runtime_fingerprint_valid(taller) is True
 
 
 @pytest.mark.asyncio
@@ -755,7 +792,8 @@ async def test_xhs_continuity_behavior_is_persisted(
     async def fake_pause(page, seconds_range, *, reason, log):
         log.append({"event": "pause", "reason": reason, "seconds": 2.0})
 
-    async def fake_mouse_moves(page, profile, log):
+    async def fake_mouse_moves(page, profile, log, *, list_area):
+        assert list_area is xhs_behavior.xhs_list_area
         log.append({"event": "mouse_moves", "count": 1})
 
     evidence_path = tmp_path / "behavior.json"
@@ -804,7 +842,8 @@ async def test_xhs_continuity_waits_for_operator_login_and_continues(
     async def fake_pause(page, seconds_range, *, reason, log):
         log.append({"event": "pause", "reason": reason, "seconds": 2.0})
 
-    async def fake_mouse_moves(page, profile, log):
+    async def fake_mouse_moves(page, profile, log, *, list_area):
+        assert list_area is xhs_behavior.xhs_list_area
         log.append({"event": "mouse_moves", "count": 1})
 
     page = FakePage()
@@ -932,89 +971,6 @@ async def test_xhs_continuity_rate_limit_fails_and_is_persisted(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_xhs_api_captcha_opens_operator_page_and_resumes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    page = FakePage()
-    redirect_url = page.url
-    normal_markers = {
-        "captcha_or_verify": False,
-        "rate_limited": False,
-        "blocked": False,
-        "login_required": False,
-    }
-
-    async def completed_verification(current_page):
-        current_page.url = redirect_url
-        return "正常搜索内容", normal_markers
-
-    async def no_sleep(seconds):
-        return None
-
-    evidence_path = tmp_path / "behavior.json"
-    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
-    monkeypatch.setattr(xhs_behavior, "visible_page_state", completed_verification)
-    monkeypatch.setattr(xhs_behavior.asyncio, "sleep", no_sleep)
-
-    event = await mediacrawler_behavior.run_xhs_api_captcha_verification(
-        page,
-        evidence_path=evidence_path,
-        verify_type="216",
-        verify_uuid="test-uuid",
-        verify_biz=461,
-    )
-
-    persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
-    assert page.brought_to_front == 1
-    assert event["status"] == "completed"
-    assert event["redirect_url"] == redirect_url
-    assert event["verify_type"] == "216"
-    assert "verifyUuid=test-uuid" in event["captcha_url"]
-    assert persisted["operator_verification_events"][0]["status"] == "completed"
-    assert persisted["status"] == "completed"
-
-
-@pytest.mark.asyncio
-async def test_xhs_api_captcha_does_not_complete_on_blank_redirect(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    page = FakePage()
-    redirect_url = page.url
-    observations = iter(("", "正常搜索内容", "正常搜索内容"))
-    normal_markers = {
-        "captcha_or_verify": False,
-        "rate_limited": False,
-        "blocked": False,
-        "login_required": False,
-    }
-
-    async def redirecting_page_state(current_page):
-        current_page.url = redirect_url
-        return next(observations), normal_markers
-
-    async def no_sleep(seconds):
-        return None
-
-    evidence_path = tmp_path / "behavior.json"
-    evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
-    monkeypatch.setattr(xhs_behavior, "visible_page_state", redirecting_page_state)
-    monkeypatch.setattr(xhs_behavior.asyncio, "sleep", no_sleep)
-
-    event = await mediacrawler_behavior.run_xhs_api_captcha_verification(
-        page,
-        evidence_path=evidence_path,
-        verify_type="216",
-        verify_uuid="test-uuid",
-        verify_biz=461,
-    )
-
-    assert event["status"] == "completed"
-    assert event["ready_observations"] == 2
-
-
-@pytest.mark.asyncio
 async def test_xhs_requested_comment_scroll_is_recorded_without_changing_base_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1095,8 +1051,11 @@ async def test_xhs_like_does_not_click_an_already_liked_control(monkeypatch: pyt
 
 @pytest.mark.asyncio
 async def test_xhs_like_clicks_once_and_verifies_state_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    """点赞控件在视口下方：用滚轮手势滚进视口（没有程序滚动），按轨迹移上去后原地按下，只点一次。"""
+
     class LikeLocator:
         click_count = 0
+        top = 1200.0  # 视口高 800：初始在下方
 
         async def count(self) -> int:
             return 1
@@ -1108,7 +1067,16 @@ async def test_xhs_like_clicks_once_and_verifies_state_change(monkeypatch: pytes
         async def is_visible(self, timeout: int) -> bool:
             return True
 
+        def box(self) -> dict:
+            return {"x": 900.0, "y": self.top, "width": 40.0, "height": 24.0}
+
+        async def bounding_box(self, timeout: int) -> dict:
+            return self.box()
+
         async def evaluate(self, script: str) -> dict:
+            if script == human_pointer.ELEMENT_VIEW_SCRIPT:
+                return {"left": 900.0, "top": self.top, "width": 40.0, "height": 24.0,
+                        "clip": {"left": 0.0, "top": 0.0, "right": 1280.0, "bottom": 800.0}}
             liked = self.click_count == 1
             return {
                 "aria_pressed": "true" if liked else "false",
@@ -1121,21 +1089,40 @@ async def test_xhs_like_clicks_once_and_verifies_state_change(monkeypatch: pytes
                 "active_descendant": liked,
             }
 
-        async def scroll_into_view_if_needed(self, timeout: int) -> None:
+    class Mouse:
+        def __init__(self, like: LikeLocator) -> None:
+            self.like = like
+            self.position = (0.0, 0.0)
+            self.wheel_events: list[tuple[int, int]] = []
+
+        async def move(self, x: float, y: float) -> None:
+            self.position = (x, y)
+
+        async def wheel(self, delta_x: int, delta_y: int) -> None:
+            self.wheel_events.append((delta_x, delta_y))
+            self.like.top -= delta_y
+
+        async def down(self) -> None:
             return None
 
-        async def hover(self, timeout: int) -> None:
-            return None
-
-        async def click(self, **kwargs) -> None:
-            self.click_count += 1
+        async def up(self) -> None:
+            box = self.like.box()
+            x, y = self.position
+            assert box["x"] <= x <= box["x"] + box["width"] and box["y"] <= y <= box["y"] + box["height"]
+            self.like.click_count += 1
 
     class LikePage:
+        viewport_size = {"width": 1280, "height": 800}
+
         def __init__(self) -> None:
             self.like = LikeLocator()
+            self.mouse = Mouse(self.like)
 
         def locator(self, selector: str) -> LikeLocator:
             return self.like
+
+        async def wait_for_timeout(self, milliseconds: float) -> None:
+            return None
 
     async def no_mouse_moves(page, profile, log) -> None:
         return None
@@ -1147,10 +1134,17 @@ async def test_xhs_like_clicks_once_and_verifies_state_change(monkeypatch: pytes
     monkeypatch.setattr(xhs_behavior, "random_mouse_moves", no_mouse_moves)
     monkeypatch.setattr(xhs_behavior, "human_pause", no_pause)
 
-    result = await mediacrawler_behavior._run_xhs_like_once(page, object(), [])
+    events: list[dict] = []
+    result = await mediacrawler_behavior._run_xhs_like_once(page, object(), events)
 
     assert result["status"] == "completed"
     assert page.like.click_count == 1
+    assert 0 <= page.like.top and page.like.top + 24 <= 800
+    (into_view,) = [event for event in events if event["event"] == "wheel_into_view"]
+    assert into_view["gestures"] and all(gesture["events"] >= 8 for gesture in into_view["gestures"])
+    assert sum(gesture["delta_y"] for gesture in into_view["gestures"]) == sum(dy for _, dy in page.mouse.wheel_events)
+    (click,) = [event for event in events if event["event"] == "pointer_click"]
+    assert click["target"] == "like" and 0 < click["x_ratio"] < 1 and 0 < click["y_ratio"] < 1
 
 
 @pytest.mark.asyncio
@@ -1168,14 +1162,18 @@ async def test_human_scroll_records_observed_page_movement(monkeypatch: pytest.M
         def __init__(self, page) -> None:
             self.page = page
 
-        async def move(self, x: int, y: int, steps: int) -> None:
-            return None
+        async def move(self, x: float, y: float) -> None:
+            self.page.moves += 1
 
         async def wheel(self, delta_x: int, delta_y: int) -> None:
+            self.page.wheels += 1
             self.page.scroll_top = max(0, self.page.scroll_top + delta_y)
 
     class ScrollPage:
+        viewport_size = None  # 经 CDP 连接的页面没有视口模拟：光标从页面脚本读视口
+
         def __init__(self) -> None:
+            self.moves = self.wheels = 0
             self.scroll_top = 0
             self.mouse = Mouse(self)
 
@@ -1207,6 +1205,10 @@ async def test_human_scroll_records_observed_page_movement(monkeypatch: pytest.M
     completion = next(item for item in events if item["event"] == "human_scroll_complete")
     assert completion["effective_passes"] == 1
     assert any(item.get("effect_observed") is True for item in events)
+    # xhs_guarded：移动按轨迹逐个发出，滚动是手势序列，事件里记各手势的事件数与位移。
+    (wheel,) = [item for item in events if item["event"] == "wheel_scroll"]
+    assert sum(gesture["delta_y"] for gesture in wheel["gestures"]) == wheel["delta_y"] == page.scroll_top
+    assert page.wheels == sum(gesture["events"] for gesture in wheel["gestures"]) and page.moves > 3
 
 
 def test_all_selected_platforms_require_behavior_and_policy_evidence() -> None:
@@ -1275,6 +1277,12 @@ def test_behavior_validation_rejects_wrong_keyword_url() -> None:
     assert validation["platforms"]["zhihu"]["target_url_ok"] is False
 
 
+def xhs_visit_gate(*, pacing: bool = True, continuity: bool = True) -> dict:
+    """#71：xhs 纳入访问门禁后，节奏与连续性以账本判定结果为准。"""
+    return {"xhs": {"content_visit_ok": True, "request_pacing_ok": pacing, "continuity_ok": continuity,
+                    "problem_counts": {}}}
+
+
 def test_xhs_behavior_validation_requires_guarded_request_pacing() -> None:
     evidence = valid_xhs_evidence()
     evidence.update(
@@ -1296,9 +1304,12 @@ def test_xhs_behavior_validation_requires_guarded_request_pacing() -> None:
         "policy_events": [{"allowed": True, "disabled": False}],
     }
 
-    complete = mediacrawler_crawl.collect_behavior_validation([record], ["xhs"], "青岛旅游")
-    record["behavior_evidence"]["request_pacing_events"].pop()
-    missing = mediacrawler_crawl.collect_behavior_validation([record], ["xhs"], "青岛旅游")
+    complete = mediacrawler_crawl.collect_behavior_validation(
+        [record], ["xhs"], "青岛旅游", content_visits=xhs_visit_gate(),
+    )
+    missing = mediacrawler_crawl.collect_behavior_validation(
+        [record], ["xhs"], "青岛旅游", content_visits=xhs_visit_gate(pacing=False),
+    )
 
     assert complete["ok"] is True
     assert complete["platforms"]["xhs"]["request_pacing_ok"] is True
@@ -1325,7 +1336,9 @@ def test_xhs_behavior_validation_requires_continuity_behavior() -> None:
         "policy_events": [{"allowed": True, "disabled": False}],
     }
 
-    validation = mediacrawler_crawl.collect_behavior_validation([record], ["xhs"], "青岛旅游")
+    validation = mediacrawler_crawl.collect_behavior_validation(
+        [record], ["xhs"], "青岛旅游", content_visits=xhs_visit_gate(continuity=False),
+    )
 
     assert validation["ok"] is False
     assert validation["platforms"]["xhs"]["continuity_ok"] is False
@@ -1360,6 +1373,7 @@ def test_xhs_interaction_is_reported_but_does_not_invalidate_crawl() -> None:
         ["xhs"],
         "青岛旅游",
         "like-one",
+        content_visits=xhs_visit_gate(),
     )
 
     assert validation["ok"] is True

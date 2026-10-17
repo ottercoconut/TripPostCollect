@@ -146,6 +146,8 @@ def test_native_controller_restores_anchor_and_token(monkeypatch, tmp_path,
     monkeypatch.setattr(native_macos, "hosted_only", lambda: None)
     monkeypatch.setattr(native_macos.signal, "signal", lambda *args: None)
     monkeypatch.setenv("GITHUB_RUN_ID", "test")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "pw-browsers"))
+    monkeypatch.setenv("TPC_BROWSER_REPLAY", "1")
 
     def fake_pf(*args):
         events.append(args)
@@ -179,7 +181,8 @@ def test_native_controller_restores_anchor_and_token(monkeypatch, tmp_path,
     monkeypatch.setattr(native_macos, "prepare_anchor", prepare)
     monkeypatch.setattr(native_macos, "verify_connected", connected)
     monkeypatch.setattr(native_macos.subprocess, "run", fake_run)
-    def fake_test(command, *args, cleanup):
+    def fake_test(command, source, environment, log, *, cleanup):
+        events.append(("environment", {key: environment.get(key) for key in native_macos.BROWSER_REPLAY_KEYS}))
         if fail_execution == "cleanup":
             cleanup.update(confirmed=False, status="cleanup_failed")
             events.append(("cleanup_failed",))
@@ -213,6 +216,9 @@ def test_native_controller_restores_anchor_and_token(monkeypatch, tmp_path,
         ("-a", "com.apple/trippostcollect-tests", "-F", "rules"))
     assert ("-X", "123") in events
     assert (("-f", "original-empty.pf") in events) == temporary_dispatcher
+    # 本地 Chromium 回放只把 headless shell 位置与开关交给测试进程。
+    assert ("environment", {"PLAYWRIGHT_BROWSERS_PATH": str(tmp_path / "pw-browsers"),
+                            "TPC_BROWSER_REPLAY": "1"}) in events
     assert json.loads((tmp_path / "os-policy.json").read_text())["restored"] is True
 
 
@@ -356,6 +362,31 @@ def test_signal_driver_loads_asyncio_with_autoload_disabled(tmp_path, request):
     assert len(guard["observations"]) == 6
     assert {item["boundary"] for item in guard["observations"]} == {"subprocess", "exec"}
     assert tmp_path.is_dir()
+
+
+def test_browser_replay_is_selected_only_by_the_os_lane():
+    from _pytest.mark.expression import Expression
+
+    def selected(lane, markers):
+        return Expression.compile(run_lanes.EXPRESSIONS[lane]).evaluate(lambda name, **_: name in markers)
+
+    assert [lane for lane in run_lanes.EXPRESSIONS if selected(lane, {"browser_replay"})] == ["os"]
+    assert [lane for lane in run_lanes.EXPRESSIONS if selected(lane, {"macos_process"})] == ["os"]
+    assert [lane for lane in run_lanes.EXPRESSIONS if selected(lane, set())] == ["component"]
+
+
+def test_matrix_passes_browser_replay_only_to_the_os_lane(tmp_path):
+    from run_matrix import lane_environment
+
+    browsers = str(tmp_path / "pw-browsers")
+    environ = {"PATH": "/usr/bin", "PLAYWRIGHT_BROWSERS_PATH": browsers, "TPC_BROWSER_REPLAY": "0"}
+    native = lane_environment("os", environ)
+    assert native["PLAYWRIGHT_BROWSERS_PATH"] == browsers and native["TPC_BROWSER_REPLAY"] == "1"
+    for lane in ("component", "socket", "installation"):
+        environment = lane_environment(lane, environ)
+        assert environment == {"PATH": "/usr/bin"}
+    # 没有安装位置时不打开回放开关：OS lane 的回放用例会跳过，再由 skip=0 校验判失败。
+    assert lane_environment("os", {"PATH": "/usr/bin"}) == {"PATH": "/usr/bin"}
 
 
 def test_matrix_uses_outer_runner_and_rejects_inner_runner(tmp_path):

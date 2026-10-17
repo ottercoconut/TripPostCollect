@@ -50,7 +50,7 @@ from trippostcollect.core.paths import (
     platform_key_for_profile_code,
     platform_profile_dir,
 )
-from trippostcollect.runtime.browser_launcher import BrowserLauncher
+from trippostcollect.runtime.browser_launcher import CDP_LOOPBACK_HOST, BrowserLauncher
 
 
 logger = logging.getLogger("MediaCrawler")
@@ -61,8 +61,6 @@ class CDPBrowserSettings:
     """调用方完成 CLI 配置后，在构造 manager 时冻结的浏览器配置。"""
 
     PLATFORM: str
-    CDP_CONNECT_EXISTING: bool
-    CDP_DEBUG_PORT: int
     BROWSER_LAUNCH_TIMEOUT: int
     CUSTOM_BROWSER_PATH: str
     SAVE_LOGIN_STATE: bool
@@ -344,19 +342,13 @@ class CDPBrowserManager:
             if self._launch_started:
                 raise RuntimeError("cdp_browser_manager_already_started")
             self._launch_started = True
-            self._owns_browser_process = not self.settings.CDP_CONNECT_EXISTING
+            self._owns_browser_process = True
         try:
-            if self.settings.PLATFORM == "xhs" and self.settings.CDP_CONNECT_EXISTING:
-                raise RuntimeError("xhs_cdp_connect_existing_forbidden")
-            if self.settings.CDP_CONNECT_EXISTING:
-                # Connect to an existing browser that already has remote debugging enabled
-                return await self._connect_existing_browser(playwright, playwright_proxy, user_agent)
-
             # 1. Detect browser path
             browser_path = await self._get_browser_path()
 
-            # 2. Get available port
-            self.debug_port = self.launcher.find_available_port(self.settings.CDP_DEBUG_PORT)
+            # 2. 系统在本机回环地址上分配的空闲端口
+            self.debug_port = self.launcher.find_available_port()
 
             # 3. Launch browser
             await self._launch_browser(browser_path, headless)
@@ -383,64 +375,6 @@ class CDPBrowserManager:
             self.mark_planned_cleanup("launch_failure")
             await self.cleanup(force=True)
             raise
-
-    async def _connect_existing_browser(
-        self,
-        playwright: Playwright,
-        playwright_proxy: Optional[Dict] = None,
-        user_agent: Optional[str] = None,
-    ) -> BrowserContext:
-        """
-        Connect to an existing browser that already has remote debugging enabled.
-        User needs to enable remote debugging via chrome://inspect/#remote-debugging
-        or launch Chrome with --remote-debugging-port flag.
-        """
-        self.debug_port = self.settings.CDP_DEBUG_PORT
-        logger.info(
-            f"[CDPBrowserManager] Connecting to existing browser on port {self.debug_port}..."
-        )
-        logger.info(
-            "[CDPBrowserManager] Make sure remote debugging is enabled in your browser: "
-            "chrome://inspect/#remote-debugging"
-        )
-
-        # Wait for the browser's CDP port to become available
-        # The user may need time to enable remote debugging or confirm the connection dialog
-        timeout = self.settings.BROWSER_LAUNCH_TIMEOUT
-        logger.info(
-            f"[CDPBrowserManager] Waiting up to {timeout}s for browser CDP connection..."
-        )
-        connected = False
-        for i in range(timeout):
-            if await self._test_cdp_connection(self.debug_port):
-                connected = True
-                break
-            if i % 5 == 0 and i > 0:
-                logger.info(
-                    f"[CDPBrowserManager] Still waiting for browser... ({i}s elapsed) "
-                    "Please enable remote debugging: chrome://inspect/#remote-debugging"
-                )
-            await asyncio.sleep(1)
-
-        if not connected:
-            raise RuntimeError(
-                f"Cannot connect to existing browser on port {self.debug_port} "
-                f"after waiting {timeout}s. Please ensure:\n"
-                "  1. Your browser is running\n"
-                "  2. Remote debugging is enabled (chrome://inspect/#remote-debugging)\n"
-                f"  3. The debug port is {self.debug_port} (configure via CDP_DEBUG_PORT)"
-            )
-
-        # Connect via CDP (reuse existing method)
-        await self._connect_via_cdp(playwright)
-
-        # Create browser context (reuse existing method, will prefer existing context)
-        browser_context = await self._create_browser_context(playwright_proxy, user_agent)
-        self.browser_context = browser_context
-        self._observe_browser_context(browser_context)
-
-        logger.info("[CDPBrowserManager] Successfully connected to existing browser")
-        return browser_context
 
     async def _get_browser_path(self) -> str:
         """
@@ -480,7 +414,7 @@ class CDPBrowserManager:
             # Simple socket connection test
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(5)
-                result = s.connect_ex(("localhost", debug_port))
+                result = s.connect_ex((CDP_LOOPBACK_HOST, debug_port))
                 if result == 0:
                     logger.info(
                         f"[CDPBrowserManager] CDP port {debug_port} is accessible"
@@ -588,7 +522,7 @@ class CDPBrowserManager:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"http://localhost:{debug_port}/json/version", timeout=10
+                    f"http://{CDP_LOOPBACK_HOST}:{debug_port}/json/version", timeout=10
                 )
                 if response.status_code == 200:
                     data = response.json()
@@ -611,35 +545,9 @@ class CDPBrowserManager:
         Connect to browser via CDP
         """
         try:
-            if self.settings.CDP_CONNECT_EXISTING:
-                # Existing browser remote debugging in Chrome 136+ does not expose
-                # /json/version. Connect directly and wait for user confirmation.
-                ws_url = f"ws://localhost:{self.debug_port}/devtools/browser"
-                logger.info(f"[CDPBrowserManager] Connecting to existing browser via CDP: {ws_url}")
-                logger.info(
-                    "[CDPBrowserManager] Please check your browser for a confirmation dialog and accept it"
-                )
-                try:
-                    self.browser = await playwright.chromium.connect_over_cdp(
-                        ws_url, timeout=self.settings.BROWSER_LAUNCH_TIMEOUT * 1000
-                    )
-                except Exception as direct_error:
-                    logger.warning(
-                        "[CDPBrowserManager] Direct existing-browser CDP connection failed: "
-                        f"{direct_error}. Trying /json/version discovery..."
-                    )
-                    ws_url = await self._get_browser_websocket_url(self.debug_port)
-                    logger.info(
-                        f"[CDPBrowserManager] Connecting to existing browser via discovered CDP: {ws_url}"
-                    )
-                    self.browser = await playwright.chromium.connect_over_cdp(
-                        ws_url, timeout=self.settings.BROWSER_LAUNCH_TIMEOUT * 1000
-                    )
-            else:
-                # For launched browser, get WebSocket URL first
-                ws_url = await self._get_browser_websocket_url(self.debug_port)
-                logger.info(f"[CDPBrowserManager] Connecting to browser via CDP: {ws_url}")
-                self.browser = await playwright.chromium.connect_over_cdp(ws_url)
+            ws_url = await self._get_browser_websocket_url(self.debug_port)
+            logger.info(f"[CDPBrowserManager] Connecting to browser via CDP: {ws_url}")
+            self.browser = await playwright.chromium.connect_over_cdp(ws_url)
 
             self._observe_browser(self.browser)
             if self.browser.is_connected():
@@ -898,10 +806,6 @@ class CDPBrowserManager:
                     "[CDPBrowserManager] Browser process kept running "
                     "(AUTO_CLOSE_BROWSER=False)"
                 )
-        elif self.settings.CDP_CONNECT_EXISTING:
-            logger.info(
-                "[CDPBrowserManager] Connected to existing browser, skipping process cleanup"
-            )
 
         result = {
             "status": "failed" if errors else "completed",

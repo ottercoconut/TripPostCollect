@@ -152,7 +152,9 @@ def extract_inputs(files, read, *, definition_sources=None):
 # “父发但已审计闭包无消费者；T12移除发出”）与第 485 行（XHS_CREATOR_VERIFY_WAIT_SECONDS，“父发无消费，T12删除”）。
 # T14-C（#19 删除批，用户授权治理变更）另删 XHS_KEEP_AUTHOR_DETAIL：唯一消费者是 fork 旧 store 的作者原值开关，
 # #49/#51 起根实现恒保存平台原值、不读取该 env（tests/test_author_raw_identity.py），fork 删除后父发无消费者。
-# 只登记这 7 个确切名字，不通配、不从文件读取；清单外的删除仍计入 env_removed。
+# #71 第一批（用户授权：小红书取数改为浏览器 L1）另删 XHS_ENRICH_CREATORS：作者补全恒为点击作者名，
+# 正式发现与 repair 都不再读取开关，父发无消费者。
+# 只登记这 8 个确切名字，不通配、不从文件读取；清单外的删除仍计入 env_removed。
 AUTHORIZED_ENV_REMOVALS = frozenset({
     "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID",
     "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM",
@@ -161,6 +163,7 @@ AUTHORIZED_ENV_REMOVALS = frozenset({
     "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED",
     "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
     "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL",
+    "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS",
 })
 # #75（用户授权删除任务级时限）删除的 CLI 参数：中间层无进展看门狗阈值改为代码常量，修复批次不再设墙钟上限。
 # 只登记这 2 个确切的（入口, 参数）对；清单外的删除或修改仍计入 cli_changed。

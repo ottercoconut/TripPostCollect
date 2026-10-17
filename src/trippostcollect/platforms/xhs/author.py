@@ -19,14 +19,17 @@
 
 # TripPostCollect：T09 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-"""作者补全：无 token API → 暂停 → 原页检查 → 作者页回退与作者页验证等待。"""
+"""作者补全（§3.4 第 7 条）：停顿后在详情视图内点击作者名，经新标签页的页面状态投影读作者资料，作者页验证等待。
+
+repair 直开的整页若点击后同页跳转到作者页（§9.2，待 V9），读完投影后返回笔记页。
+"""
 
 import asyncio
 import logging
-import os
 import random
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import quote
+import re
+from typing import Any, Dict, List, NoReturn, Optional, Tuple
+from urllib.parse import urlsplit
 
 from playwright.async_api import (
     Error as PlaywrightError,
@@ -36,19 +39,18 @@ from playwright.async_api import (
 
 from trippostcollect.platforms.xhs.behavior import inspect_visible_page_state
 from trippostcollect.platforms.xhs.errors import (
-    IPBlockError,
     PlatformRuntimeError,
     XHSCreatorProfileUnavailable,
-    XHSNetworkRecoveryTimeout,
+    XhsNoteRedo,
 )
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitTicket
+from trippostcollect.platforms.xhs.page_scripts import dom_author_link_diagnostic
 from trippostcollect.platforms.xhs.parser import (
     creator_runtime_followers_observed,
-    creator_profile_user_ids,
     read_creator_runtime_projection,
     xhs_creator_projection_spec,
 )
-from trippostcollect.runtime.browser import CDPBrowserLifecycleError
+from trippostcollect.runtime.human_pointer import pointer_for
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -56,229 +58,72 @@ logger = logging.getLogger("MediaCrawler")
 XHS_CREATOR_RUNTIME_READY_SECONDS = 10.0
 XHS_CREATOR_RUNTIME_POLL_SECONDS = 0.5
 XHS_CREATOR_RUNTIME_EVALUATE_SECONDS = 5.0
-# 重试也不会改变结论的投影原因：立即结束等待（作者不一致不再做静态回退）。
+# 重试也不会改变结论的投影原因：立即结束等待，候选失败不可重试。
 XHS_CREATOR_RUNTIME_FINAL_REASONS = frozenset(
     {"creator_mismatch", "projection_avatar_check_incomplete"}
 )
+XHS_AUTHOR_TAB_OPEN_SECONDS = 10.0
+XHS_AUTHOR_TAB_ATTEMPTS = 2
+# 操作人 2026-10-14 要求全面提速（#79）：点击作者名之前的节奏停顿；作者标签页每次打开时抽一次保留时长，
+# 从出现起计，读到投影之前不关，抽到的值记在 close_tab 动作的 target.hold_seconds。
+XHS_CREATOR_PROFILE_PAUSE_SECONDS = (2.0, 5.0)
+XHS_AUTHOR_TAB_HOLD_SECONDS = (5.0, 9.0)
+XHS_PROFILE_PATH_RE = re.compile(r"^/user/profile/([^/]+)/?$")
+# 诊断里的路径模板：连续 16 个及以上字母数字的片段遮为 <id>（同页面诊断的 class 遮蔽规则）。
+XHS_PATH_ID_RE = re.compile(r"[A-Za-z0-9]{16,}")
+AUTHOR_RANDOM = random.SystemRandom()
 
-# 固定的页面投影脚本（page.evaluate 原样使用这一份）：只读取页面已执行的
-# window.__INITIAL_STATE__.user.userPageData。先在该作者记录内有界收集头像证据 URL（键与路径来自
-# records.sanitization），再按白名单只复制标量字段，删除与证据 URL 完全相同的字符串；证据集合不返回。
-# 只有自有数据属性 __v_isRef === true 的节点才按 Vue ref 解包，其余对象的全部字段都参与证据扫描。
-# 计数类字段不投影布尔值。只读自有数据属性（不触发 getter 或 toJSON），检查做不完时拒绝整个投影。
-# 不序列化整份状态，不返回 HTML。
-XHS_CREATOR_RUNTIME_PROJECTION_SCRIPT = """(spec) => {
-    const INCOMPLETE = 'projection_avatar_check_incomplete';
-    const avatarKeys = new Set(spec.avatar_keys);
-    const avatarPaths = new Set(spec.avatar_paths.map((path) => JSON.stringify(path)));
-    const isObject = (value) => value !== null && typeof value === 'object';
-    const ownValue = (node, key) => {
-        const descriptor = Object.getOwnPropertyDescriptor(node, key);
-        if (descriptor === undefined) return undefined;
-        if (!('value' in descriptor)) throw new Error(INCOMPLETE);
-        return descriptor.value;
-    };
-    const numericFields = new Set(spec.numeric_fields);
-    const stripChars = new Set(Array.from(spec.strip_chars));
-    const pyStrip = (text) => {
-        let start = 0;
-        let end = text.length;
-        while (start < end && stripChars.has(text[start])) start += 1;
-        while (end > start && stripChars.has(text[end - 1])) end -= 1;
-        return text.slice(start, end);
-    };
-    const isRef = (value) => {
-        const marker = Object.getOwnPropertyDescriptor(value, '__v_isRef');
-        return marker !== undefined && 'value' in marker && marker.value === true;
-    };
-    const unref = (value) => {
-        let current = value;
-        for (let depth = 0; depth < 4; depth += 1) {
-            if (!isObject(current) || !isRef(current)) return current;
-            const wrapped = Object.getOwnPropertyDescriptor(current, '_rawValue')
-                || Object.getOwnPropertyDescriptor(current, '_value');
-            if (wrapped === undefined || !('value' in wrapped)) throw new Error(INCOMPLETE);
-            current = wrapped.value;
-        }
-        return current;
-    };
-    const isPlain = (value) => {
-        if (!isObject(value) || Array.isArray(value)) return false;
-        const prototype = Object.getPrototypeOf(value);
-        return prototype === Object.prototype || prototype === null;
-    };
-    const isAvatarKey = (key) => avatarKeys.has(key.toLowerCase())
-        || avatarKeys.has(key.toUpperCase().toLowerCase());
-    const evidencedUrl = (value) => {
-        if (typeof value !== 'string') return null;
-        const candidate = pyStrip(value);
-        if (!candidate || (candidate.length > 8192 && Array.from(candidate).length > 8192)) return null;
-        const lowered = candidate.toLowerCase();
-        let rest = null;
-        if (lowered.startsWith('http://')) rest = candidate.slice(7);
-        else if (lowered.startsWith('https://')) rest = candidate.slice(8);
-        else if (lowered.startsWith('//')) rest = candidate.slice(2);
-        if (rest === null || !rest.split(/[\\/?#]/, 1)[0]) return null;
-        return candidate;
-    };
-    const evidence = new Set();
-    const ancestors = [];
-    let remaining = spec.max_nodes;
-    const visit = (value, path, inAvatar, depth) => {
-        remaining -= 1;
-        if (remaining < 0 || depth > spec.max_depth) throw new Error(INCOMPLETE);
-        const node = unref(value);
-        if (inAvatar) {
-            const url = evidencedUrl(node);
-            if (url !== null) {
-                evidence.add(url);
-                return;
-            }
-        }
-        if (node === null || node === undefined) return;
-        const kind = typeof node;
-        if (kind === 'string' || kind === 'number' || kind === 'boolean') return;
-        if (kind !== 'object') throw new Error(INCOMPLETE);
-        if (ancestors.includes(node)) throw new Error(INCOMPLETE);
-        ancestors.push(node);
-        try {
-            if (Array.isArray(node)) {
-                const length = ownValue(node, 'length');
-                for (let index = 0; index < length; index += 1) {
-                    visit(ownValue(node, String(index)), path, inAvatar, depth + 1);
-                }
-            } else if (node instanceof Set) {
-                for (const item of node) visit(item, path, inAvatar, depth + 1);
-            } else if (node instanceof Map) {
-                for (const [key, item] of node) {
-                    visit(key, path, inAvatar, depth + 1);
-                    visit(item, path, inAvatar, depth + 1);
-                }
-            } else if (!(node instanceof Date)) {
-                if (!isPlain(node)) throw new Error(INCOMPLETE);
-                for (const key of Object.keys(node)) {
-                    const nestedPath = path.concat([key]);
-                    const nestedAvatar = inAvatar || isAvatarKey(key)
-                        || avatarPaths.has(JSON.stringify(nestedPath));
-                    visit(ownValue(node, key), nestedPath, nestedAvatar, depth + 1);
-                }
-            }
-        } finally {
-            ancestors.pop();
-        }
-    };
-    const scalarFields = (source, fields) => {
-        const result = {};
-        for (const field of fields) {
-            const value = ownValue(source, field);
-            if (typeof value === 'string') {
-                if (!evidence.has(pyStrip(value))) result[field] = value;
-            } else if (typeof value === 'number' && Number.isFinite(value)) {
-                result[field] = value;
-            } else if (typeof value === 'boolean' && !numericFields.has(field)) {
-                result[field] = value;
-            }
-        }
-        return result;
-    };
-    try {
-        const state = unref(ownValue(window, '__INITIAL_STATE__'));
-        const user = isPlain(state) ? unref(ownValue(state, 'user')) : undefined;
-        const data = isPlain(user) ? unref(ownValue(user, 'userPageData')) : undefined;
-        if (!isPlain(data)) return { status: 'missing' };
-        visit(data, [], false, 0);
-        const creator = scalarFields(data, spec.top_fields);
-        for (const [key, fields] of spec.object_fields) {
-            const container = unref(ownValue(data, key));
-            if (isPlain(container)) creator[key] = scalarFields(container, fields);
-        }
-        for (const [key, fields] of spec.list_fields) {
-            const items = unref(ownValue(data, key));
-            if (!Array.isArray(items)) continue;
-            const rebuilt = [];
-            const length = Math.min(ownValue(items, 'length'), spec.max_items);
-            for (let index = 0; index < length; index += 1) {
-                const item = unref(ownValue(items, String(index)));
-                if (isPlain(item)) rebuilt.push(scalarFields(item, fields));
-            }
-            creator[key] = rebuilt;
-        }
-        return { status: 'ok', creator };
-    } catch (error) {
-        return { status: 'rejected', reason: INCOMPLETE };
-    }
-}"""
+
+def profile_url_user_id(url: str) -> str:
+    """作者标签页地址路径 `/user/profile/<id>` 中的作者 ID；不是作者页时为空串。"""
+    match = XHS_PROFILE_PATH_RE.match(urlsplit(str(url or "")).path)
+    return match.group(1) if match else ""
+
+
+def author_click_point(links: Any) -> Optional[Dict]:
+    """要点击的作者链接的元素框：作者 ID 一致的链接中，取可见且不在评论区的第一个有文字的作者名，没有时取头像链接。
+
+    旧位置隐藏的作者名、评论者链接与作者本人的评论都不点（Mac 人工取证 2026-10-14）；都没有时为 None。
+    """
+    usable = [
+        link for link in (links if isinstance(links, list) else [])
+        if isinstance(link, dict) and isinstance(link.get("point"), dict) and link.get("comment") is False
+    ]
+    chosen = next((link for link in usable if link.get("named") is True), usable[0] if usable else None)
+    return chosen["point"] if chosen is not None else None
+
+
+def path_template(url: str) -> str:
+    """地址路径的模板（如 `/user/profile/<id>`），不含查询串。"""
+    return XHS_PATH_ID_RE.sub("<id>", urlsplit(str(url or "")).path)
 
 
 class XhsAuthorMixin:
-    """作者补全；作为 XiaoHongShuCrawler 的 mixin，方法体逐字迁入。"""
+    """作者补全；作为 XiaoHongShuCrawler 的 mixin。"""
 
-    async def enrich_note_creator(self, note_detail: Dict) -> None:
-        """Attach creator homepage metrics when TripPostCollect requests author enrichment."""
-        if os.environ.get("TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS") != "1":
-            return
-        user_info = note_detail.get("user") or {}
-        user_id = user_info.get("user_id")
-        if not user_id:
-            return
-        cached_creator = self.creator_profile_cache.get(str(user_id))
-        if cached_creator:
-            note_detail["creator_profile"] = cached_creator
-            return
-        creator_info = None
-        attempts = 0
-        api_reason = ""
-        try:
-            creator_info = await self._run_with_network_recovery(
-                lambda: self.xhs_client.get_creator_info(user_id=user_id),
-                stage=f"creator_profile_api:user={user_id}",
-            )
-            attempts += 1
-            api_reason = self._creator_client_parse_reason()
-        except (XHSNetworkRecoveryTimeout, CDPBrowserLifecycleError):
-            # 本轮生命周期与网络恢复失败立即上抛，不等浏览器回退前的停顿。
-            raise
-        except Exception as exc:
-            attempts += self._request_failure_attempts(exc)
-            request_failure = self._request_failure_exception(exc)
-            api_reason = f"api_request_failed:{type(request_failure).__name__}"
-            if isinstance(request_failure, IPBlockError):
-                raise request_failure
-            if isinstance(request_failure, PlatformRuntimeError):
-                raise request_failure
-            if self._is_login_expired_failure(exc):
-                raise PlatformRuntimeError(
-                    "XHS creator profile login expired",
-                    code="login_required",
-                ) from request_failure
-            logger.warning(
-                "[XiaoHongShuCrawler.enrich_note_creator] "
-                f"session profile request failed, using browser fallback: {user_id}, {exc}"
-            )
+    async def _enrich_creator_via_author_tab(self, note: Any) -> Tuple[Dict, str]:
+        """返回（作者资料, 作者访问 id）；同一作者本轮只点一次，之后直接引用首次访问。
 
-        browser_reason = ""
-        if not creator_info:
-            await self._guarded_pause("creator_profile_browser_fallback", 12.0, 30.0)
-            attempts += 1
-            self._creator_browser_reason = ""
-            creator_info = await self._get_creator_info_from_browser(str(user_id))
-            browser_reason = (
-                self._creator_browser_reason or self._creator_client_parse_reason()
-            )
-        if creator_info:
-            self.creator_profile_cache[str(user_id)] = creator_info
-            note_detail["creator_profile"] = creator_info
-            await self._guarded_pause("creator_profile", 8.0, 18.0)
-        else:
-            reason = f"api={api_reason or 'unknown'};browser={browser_reason or 'unknown'}"
-            logger.warning(
-                f"[XiaoHongShuCrawler.enrich_note_creator] creator profile empty after browser fallback: {user_id}, reason={reason}"
-            )
-            raise XHSCreatorProfileUnavailable(str(user_id), attempts, reason=reason)
-
-    def _creator_client_parse_reason(self) -> str:
-        """客户端最近一次作者页静态解析的原因类别；没有记录时返回空串。"""
-        return str(getattr(self.xhs_client, "last_creator_parse_reason", "") or "")
+        取不到时抛 `XHSCreatorProfileUnavailable`，reason 为单一路径的原因类别。
+        """
+        user_id = note.user_id
+        cached = self.creator_profile_cache.get(user_id)
+        if cached is not None:
+            return cached
+        await self._guarded_pause("creator_profile", *XHS_CREATOR_PROFILE_PAUSE_SECONDS)
+        self._creator_browser_reason = ""
+        self._creator_visit_id = None
+        self._creator_attempts = 0
+        creator_info = await self._get_creator_info_from_browser(user_id, note=note)
+        if creator_info and self._creator_visit_id:
+            entry = (creator_info, self._creator_visit_id)
+            self.creator_profile_cache[user_id] = entry
+            return entry
+        reason = self._creator_browser_reason or "unknown"
+        logger.warning(
+            f"[XiaoHongShuCrawler.author] creator profile unavailable: {user_id}, reason={reason}"
+        )
+        raise XHSCreatorProfileUnavailable(user_id, self._creator_attempts or 1, reason=reason)
 
     async def _raise_for_creator_page_terminal(
         self,
@@ -311,71 +156,174 @@ class XhsAuthorMixin:
             reason=f"creator_profile:{user_id}:{stage}",
         )
 
-    async def _get_creator_info_from_browser(self, user_id: str) -> Optional[Dict]:
-        """Load an author homepage in the signed-in context when the direct request is empty."""
+    async def _get_creator_info_from_browser(self, user_id: str, *, note: Any) -> Optional[Dict]:
+        """在浮层内点击作者名打开前台新标签页，读取投影后按打开时抽到的保留时长关闭并置前主页面。"""
         self._assert_primary_page_alive("creator_profile_browser")
         primary_state = await self._popup_checkpoint_state(self.context_page)
         self._raise_for_terminal_popup_state(primary_state, reason="creator_profile_browser")
         if primary_state.get("manual_markers"):
             return await self._recover_creator_login_on_primary_page(user_id)
-        page = await self._new_guarded_page()
+        page = await self._open_author_tab(note)
+        if page is None:
+            self._creator_browser_reason = "author_tab_not_opened"
+            return None
+        if page is self.context_page:
+            try:
+                return await self._read_author_tab(page, user_id)
+            finally:
+                await self._return_from_author_page(note)
+        self._require_capture().attach(page, "author_tab")
         try:
-            await self._goto_with_deadline(
-                page,
-                f"{self.index_url}/user/profile/{quote(user_id)}",
-                stage="creator_profile_browser",
-            )
-            await page.wait_for_timeout(random.randint(1_200, 3_000))
-
-            text_sample, markers = await inspect_visible_page_state(page)
-            await self._raise_for_creator_page_terminal(
-                page,
-                user_id=str(user_id),
-                stage="arrival",
-                visible_text=text_sample,
-                visible_markers=markers,
-            )
-            if markers.get("login_required"):
-                return await self._recover_creator_login_on_primary_page(user_id)
-            if markers.get("captcha_or_verify"):
-                return await self._wait_for_creator_profile_verification(page, user_id)
-            viewport = page.viewport_size or {"width": 1280, "height": 800}
-            await page.mouse.move(
-                random.randint(80, max(81, viewport["width"] - 80)),
-                random.randint(80, max(81, viewport["height"] - 80)),
-                steps=random.randint(6, 14),
-            )
-            await page.mouse.wheel(0, random.randint(180, 460))
-            await page.wait_for_timeout(random.randint(500, 1_500))
-
-            text_sample, markers = await inspect_visible_page_state(page)
-            await self._raise_for_creator_page_terminal(
-                page,
-                user_id=str(user_id),
-                stage="post_scroll",
-                visible_text=text_sample,
-                visible_markers=markers,
-            )
-            if markers.get("login_required"):
-                return await self._recover_creator_login_on_primary_page(user_id)
-            if markers.get("captcha_or_verify"):
-                return await self._wait_for_creator_profile_verification(page, user_id)
-            creator_info, self._creator_browser_reason = (
-                await self._read_creator_profile_from_page(page, str(user_id))
-            )
-            return creator_info
+            return await self._read_author_tab(page, user_id)
+        except PlaywrightError:
+            if self._page_is_closed(page) and not self._page_is_closed(self.context_page):
+                self._creator_browser_reason = "author_tab_closed"
+                return None
+            raise
         finally:
-            await self._close_page_with_deadline(
-                page,
-                reason="creator_profile_cleanup",
+            await self._close_author_tab(page, note)
+
+    async def _open_author_tab(self, note: Any) -> Optional[Page]:
+        """写 click_author（from_visit＝本篇详情访问）后点击作者名，等待新标签页；两次都没打开时写诊断并返回 None。
+
+        repair 整页中点击后主页面同页跳转到作者页时，返回主页面本身，不再点第二次。
+        """
+        capture = self._require_capture()
+        attempts: List[str] = []
+        clicked_path = ""
+        for attempt in range(1, XHS_AUTHOR_TAB_ATTEMPTS + 1):
+            self._creator_attempts = attempt
+            state = await self._note_view_state(author_id=note.user_id)
+            point = author_click_point(state.get("author_links"))
+            if point is None:
+                attempts.append("link_missing")
+                await self._scan_sleep(AUTHOR_RANDOM.uniform(1.0, 2.0))
+                continue
+            plan = await self._plan_click(point)
+            self._author_click_id = capture.action(
+                "click_author", page_role="primary", target={"note_id": note.note_id}, from_visit=note.detail_visit,
+                pointer=plan.evidence,
             )
+            self._crawler_page_open_depth += 1
+            try:
+                async with self.browser_context.expect_page(timeout=int(XHS_AUTHOR_TAB_OPEN_SECONDS * 1000)) as opened:
+                    await self._perform_click(plan)
+                page = await opened.value
+            except (PlaywrightTimeoutError, TimeoutError):
+                if self.ports.repair and profile_url_user_id(getattr(self.context_page, "url", "")):
+                    return self.context_page
+                attempts.append("tab_timeout")
+                clicked_path = path_template(getattr(self.context_page, "url", ""))
+                continue
+            finally:
+                self._crawler_page_open_depth -= 1
+            self._register_new_page(page, source="crawler_opened")
+            self._extend_new_page_hold(page, AUTHOR_RANDOM.uniform(*XHS_AUTHOR_TAB_HOLD_SECONDS))
+            return page
+        await self._record_author_tab_failure(note, attempts, clicked_path)
+        return None
+
+    async def _record_author_tab_failure(self, note: Any, attempts: List[str], clicked_path: str) -> None:
+        """作者标签页没打开：按最后一次尝试写 author_link_missing / author_tab_timeout 导航诊断，并在日志留一行。
+
+        诊断含详情视图内作者名链接、作者主页链接与指向本篇作者的链接的个数、可见个数，前 4 个主页链接的 target 与
+        祖先链；点击过时另记点击后主页面路径的模板。不含 token、地址查询串或正文。
+        """
+        page = self.context_page
+        outcome = "author_tab_timeout" if attempts and attempts[-1] == "tab_timeout" else "author_link_missing"
+        error = ""
+        try:
+            links = await dom_author_link_diagnostic(page, self._note_view_roots, note.user_id)
+        except Exception as exc:
+            links, error = {}, f"author_link_diagnostic: {type(exc).__name__}"
+        extra: Dict[str, Any] = {"attempts": attempts, **links}
+        if clicked_path:
+            extra["clicked_path"] = clicked_path
+        await self._record_navigation_diagnostic(page, stage="creator_profile", outcome=outcome, error=error, extra=extra)
+        fields = [
+            f"outcome={outcome}",
+            f"attempts={attempts}",
+            *(
+                f"{key}={links[key]}"
+                for key in (
+                    "view_visible", "author_names", "author_names_visible", "profile_links", "profile_links_visible",
+                    "author_id_links", "author_id_links_visible",
+                )
+                if key in links
+            ),
+            f"clicked_path={clicked_path or None}",
+        ]
+        logger.warning("[XiaoHongShuCrawler.author] Author tab not opened: " + ", ".join(fields))
+
+    async def _close_author_tab(self, page: Page, note: Any) -> None:
+        """打开时抽到的保留期满后写 close_tab（带抽到的保留秒数）并关闭，主页面置前；不额外停留。"""
+        await self._wait_before_page_close(page, reason="creator_profile_cleanup")
+        self._require_capture().action(
+            "close_tab", page_role="author_tab",
+            target={"note_id": note.note_id, "hold_seconds": round(self._new_page_hold_seconds(page), 3)},
+        )
+        await self._close_page_with_deadline(page, reason="creator_profile_cleanup")
+        try:
+            await self.context_page.bring_to_front()
+        except PlaywrightError as exc:
+            if self._is_target_closed_error(exc):
+                raise
+            logger.warning(f"[XiaoHongShuCrawler.author] Could not bring the main page to front: {exc}")
+
+    async def _return_from_author_page(self, note: Any) -> None:
+        """同页跳转的作者页读完后写 go_back 并返回笔记页（repair，待 V9）。"""
+        self._require_capture().action("go_back", page_role="primary", target={"note_id": note.note_id})
+        async with asyncio.timeout(self.inputs.navigation_deadline_seconds() + 2.0):
+            await self.context_page.go_back(wait_until="commit")
+
+    async def _read_author_tab(self, page: Page, user_id: str) -> Optional[Dict]:
+        """作者页到达检查与小幅滚动后读取投影；登录界面转主页面恢复，验证界面进入作者页验证等待。"""
+        await page.wait_for_timeout(random.randint(1_200, 3_000))
+
+        text_sample, markers = await inspect_visible_page_state(page)
+        await self._raise_for_creator_page_terminal(
+            page,
+            user_id=str(user_id),
+            stage="arrival",
+            visible_text=text_sample,
+            visible_markers=markers,
+        )
+        if markers.get("login_required"):
+            return await self._recover_creator_login_on_primary_page(user_id)
+        if markers.get("captcha_or_verify"):
+            return await self._wait_for_creator_profile_verification(page, user_id)
+        pointer = pointer_for(page)
+        viewport = await pointer.viewport()
+        await pointer.move_to(
+            random.randint(80, max(81, int(viewport.width) - 80)),
+            random.randint(80, max(81, int(viewport.height) - 80)),
+        )
+        await pointer.scroll(random.randint(180, 460))
+        await page.wait_for_timeout(random.randint(500, 1_500))
+
+        text_sample, markers = await inspect_visible_page_state(page)
+        await self._raise_for_creator_page_terminal(
+            page,
+            user_id=str(user_id),
+            stage="post_scroll",
+            visible_text=text_sample,
+            visible_markers=markers,
+        )
+        if markers.get("login_required"):
+            return await self._recover_creator_login_on_primary_page(user_id)
+        if markers.get("captcha_or_verify"):
+            return await self._wait_for_creator_profile_verification(page, user_id)
+        creator_info, self._creator_browser_reason = (
+            await self._read_creator_profile_from_page(page, str(user_id))
+        )
+        return creator_info
 
     async def _read_creator_profile_from_page(
         self,
         page: Page,
         user_id: str,
     ) -> Tuple[Optional[Dict], str]:
-        """作者页取数：有界等待运行时投影出现粉丝观察，取不到再回退 page.content() 严格静态解析。
+        """作者页取数：有界等待页面状态投影出现粉丝观察（经通道 read_state，接受时写作者访问）。
 
         每次读取投影后、接受或重试之前，都先做生命周期、登录、验证、阻断与封禁检查；出现验证
         标记时进入既有验证等待（其内部只做“检查 + 读取一次”，不会回到这里）。取消、页面与浏览器
@@ -437,14 +385,6 @@ class XhsAuthorMixin:
                 break
             await self._popup_sleep(min(XHS_CREATOR_RUNTIME_POLL_SECONDS, remaining))
 
-        if creator_info is None and "creator_mismatch" not in reasons:
-            html_content = await page.content()
-            creator_info = self.xhs_client.extract_creator_info_from_html(html_content)
-            static_reason = self._creator_client_parse_reason() or "unknown"
-            if creator_info:
-                outcome = "ok_static_state"
-            else:
-                reasons.append(f"static_{static_reason}")
         reason = ",".join(reasons)
         await self._record_navigation_diagnostic(
             page,
@@ -458,21 +398,12 @@ class XhsAuthorMixin:
         page: Page,
         user_id: str,
     ) -> Tuple[Optional[Dict], str]:
-        """读取一次：先运行时投影，取不到再严格静态解析；不做可见状态检查，不进入验证等待，也不写诊断。
+        """读取一次投影；不做可见状态检查，不进入验证等待，也不写诊断。
 
-        成功时原因为 ok 或 ok_static_state；作者不一致时为 creator_mismatch。
+        成功时原因为 ok；作者不一致时为 creator_mismatch。
         """
         projected, projection_reason = await self._creator_runtime_projection(page, user_id)
-        if projected is not None:
-            return projected, "ok"
-        if projection_reason == "creator_mismatch":
-            return None, projection_reason
-        html_content = await page.content()
-        creator_info = self.xhs_client.extract_creator_info_from_html(html_content)
-        if creator_info:
-            return creator_info, "ok_static_state"
-        static_reason = self._creator_client_parse_reason() or "unknown"
-        return None, f"{projection_reason},static_{static_reason}"
+        return projected, ("ok" if projected is not None else projection_reason)
 
     async def _read_creator_profile_after_verification(
         self,
@@ -524,35 +455,49 @@ class XhsAuthorMixin:
         page: Page,
         user_id: str,
     ) -> Tuple[Optional[Dict], str]:
-        """执行固定投影脚本一次；只在粉丝观察成立时返回作者资料，否则返回原因类别。"""
+        """经通道读取一次白名单投影；只在粉丝观察成立时接受并写作者访问，否则返回原因类别。
+
+        作者 ID 一致性比对标签页地址路径 `/user/profile/<id>` 与 feed 的作者 ID。
+        """
+        url_user_id = profile_url_user_id(getattr(page, "url", ""))
+        if url_user_id != user_id:
+            return None, "creator_mismatch"
+        outcome: Dict[str, Any] = {}
+
+        def accept(raw: Any) -> bool:
+            projected, reason = read_creator_runtime_projection(raw)
+            if reason == "ok" and not creator_runtime_followers_observed(user_id, projected):
+                reason = "followers_unobserved"
+            outcome["value"] = (projected if reason == "ok" else None, reason)
+            return reason == "ok"
+
         try:
-            async with asyncio.timeout(XHS_CREATOR_RUNTIME_EVALUATE_SECONDS):
-                raw = await page.evaluate(
-                    XHS_CREATOR_RUNTIME_PROJECTION_SCRIPT,
-                    xhs_creator_projection_spec(),
-                )
+            _raw, visit_id = await self._require_capture().read_state(
+                page,
+                "creator_page_data",
+                xhs_creator_projection_spec(),
+                stage="creator_profile",
+                subject_id=user_id,
+                trigger=getattr(self, "_author_click_id", None),
+                accept=accept,
+                timeout=XHS_CREATOR_RUNTIME_EVALUATE_SECONDS,
+                url_user_id=url_user_id,
+            )
         except TimeoutError:
             return None, "runtime_projection_timeout"
         except PlaywrightError as exc:
             if self._is_target_closed_error(exc) or self._page_is_closed(page):
                 raise
             return None, "runtime_projection_error"
-        projected, reason = read_creator_runtime_projection(raw)
-        if reason != "ok":
-            return None, reason
-        if any(page_user_id != user_id for page_user_id in creator_profile_user_ids(projected)):
-            return None, "creator_mismatch"
-        if not creator_runtime_followers_observed(user_id, projected):
-            return None, "followers_unobserved"
-        return projected, "ok"
+        if visit_id is not None:
+            self._creator_visit_id = visit_id
+        return outcome["value"]
 
-    async def _recover_creator_login_on_primary_page(self, user_id: str) -> Optional[Dict]:
-        """Restore the shared session on the existing main page, then retry the author."""
-        await self._wait_for_midrun_login_recovery()
-        return await self._run_with_network_recovery(
-            lambda: self.xhs_client.get_creator_info(user_id=user_id),
-            stage=f"creator_profile_api:user={user_id}",
-        )
+    async def _recover_creator_login_on_primary_page(self, user_id: str) -> NoReturn:
+        """在原主页面完成轮中登录恢复后整篇重做（§3.8.4）；不再请求接口。"""
+        if not await self._wait_for_midrun_login_recovery():
+            raise PlatformRuntimeError("XHS creator profile login expired", code="login_required")
+        raise XhsNoteRedo("creator_login_recovered")
 
     async def _wait_for_creator_profile_verification(
         self,

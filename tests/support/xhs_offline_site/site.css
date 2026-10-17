@@ -1,0 +1,91 @@
+/* 几何与 site.js 的常量一致：V16 布局页头 64px 固定，筛选栏 56px 随文档滚动，列表自文档 120px 起每行 360px、4 列；
+   AI 对话布局页头（搜索框区域）116px 固定，列表在容器内自 56px（__top）起。 */
+html, body { margin: 0; padding: 0; background: #fff; font-family: sans-serif; }
+.header { position: fixed; top: 0; left: 0; right: 0; height: 64px; background: #fff; z-index: 30;
+  display: flex; align-items: center; border-bottom: 1px solid #eee; }
+.logo { width: 160px; padding-left: 24px; color: #ff2442; font-weight: bold; }
+.search-area { width: 520px; }
+.input-box { height: 40px; border-radius: 20px; background: #f5f5f5; padding: 0 16px; }
+.input-box .textarea { width: 100%; height: 40px; border: 0; background: transparent; resize: none;
+  font-size: 16px; line-height: 40px; outline: none; }
+#app { padding-top: 64px; }
+.explore-page { padding: 24px; min-height: 600px; }
+.channel-list span { margin-right: 24px; }
+.ai-feeds-page .search-layout { position: relative; }
+.filter-bar { height: 56px; display: flex; align-items: center; justify-content: flex-end; padding-right: 40px; }
+.search-layout div.filter { width: 88px; height: 32px; line-height: 32px; text-align: center; border-radius: 16px;
+  background: #f5f5f5; cursor: pointer; }
+.search-layout div.filter.decoy { width: 0; height: 0; overflow: hidden; }
+.filters-wrapper { position: fixed; top: 112px; right: 40px; width: 600px; background: #fff; z-index: 25;
+  border: 1px solid #ddd; padding: 12px 16px; }
+.filters-wrapper[hidden] { display: none; }
+.filters { display: flex; align-items: center; margin: 8px 0; }
+.filters .title { width: 80px; color: #666; }
+.tag-container { display: flex; }
+.tag-container .tags { padding: 4px 12px; margin-right: 8px; border-radius: 12px; background: #f5f5f5; cursor: pointer; }
+.tag-container .tags.active { background: #ffe4e8; }
+/* AI 对话布局（默认，Mac 人工测量 2026-10-13）：顶部固定的搜索框区域 116px；其下 .ai-feeds-page 占满视口其余部分，
+   window 不滚动。左侧结果列表在 .feeds-scroller（overflow-y: auto）内滚动（4 列收窄到 200px）；右侧并排 35% 宽的
+   对话栏（左缘在视口 65%，按视口 30%–70% 的旧落点可能落在上面），消息区独立滚动且不向外传递滚动，内有几个
+   与结果卡片 ID 重叠的笔记链接；筛选入口在对话栏顶部，面板绝对定位挂在入口内部，入口矩形不随面板变大；每个标签的
+   aria-hidden 副本绝对定位在真标签下面，二者坐标重叠。 */
+html[data-layout="ai_chat"] .header { height: 116px; }
+html[data-layout="ai_chat"] #app { padding-top: 116px; }
+.ai-feeds-page.with-ai-chat { position: fixed; top: 116px; left: 0; right: 0; bottom: 0; display: flex; }
+.feeds-scroller { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: auto; }
+.search-layout__top { height: 56px; }
+.ai-chat-section { flex: none; width: 35%; background: #fafafa; border-left: 1px solid #eee; box-sizing: border-box;
+  display: flex; flex-direction: column; }
+.ai-chat-inner { flex: none; height: 56px; display: flex; align-items: center; justify-content: flex-end;
+  padding-right: 24px; }
+.ai-chat-messages { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 12px; }
+.ai-chat-message { height: 240px; margin-bottom: 12px; background: #fff; }
+.ai-note-ref { display: block; margin: 12px; padding: 8px; background: #f0f0f0; color: #333; }
+div.filter.ai-chat-filter { position: relative; width: 100px; height: 40px; line-height: 40px; text-align: center;
+  border-radius: 20px; background: #f5f5f5; cursor: pointer; }
+div.filter.ai-chat-filter.active { background: #ffe4e8; }
+.ai-chat-filter .filters-wrapper { position: absolute; top: 48px; right: 0; line-height: normal; text-align: left; }
+.tag-slot { position: relative; display: inline-block; margin-right: 8px; }
+.tag-slot .tags { margin-right: 0; position: relative; }
+.tag-slot .tags[aria-hidden="true"] { position: absolute; left: 0; top: 0; }
+.with-ai-chat section.note-item { width: 190px; }
+.with-ai-chat section.note-item a.cover, .with-ai-chat section.note-item .footer { width: 170px; }
+.with-ai-chat section.note-item a.cover img { width: 170px; }
+.feeds-container { position: relative; }
+section.note-item { position: absolute; width: 260px; height: 340px; }
+section.note-item a.cover { position: absolute; top: 20px; left: 10px; width: 240px; height: 240px;
+  display: block; background: #eee; overflow: hidden; }
+section.note-item a.cover img { width: 240px; height: 240px; display: block; }
+section.note-item .footer { position: absolute; top: 270px; left: 10px; width: 240px; font-size: 14px; }
+/* 相关搜索卡（hot_query）：同样是 section.note-item，没有封面。 */
+section.note-item .query-note-wrapper { position: absolute; top: 20px; left: 10px; width: 240px; height: 300px;
+  background: #f5efe0; }
+.with-ai-chat section.note-item .query-note-wrapper { width: 170px; }
+.feeds-end { height: 200px; line-height: 120px; text-align: center; color: #999; }
+.note-detail-mask { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 50; background: rgba(0, 0, 0, 0.6); }
+.note-detail-mask[hidden] { display: none; }
+.note-container { position: absolute; top: 60px; left: 140px; width: 1000px; height: 780px; background: #fff; display: flex; }
+.media-container { position: relative; width: 600px; height: 780px; background: #222; }
+.media-container .slide img { width: 600px; height: 600px; margin-top: 90px; display: block; }
+.media-container .fraction { position: absolute; bottom: 16px; left: 280px; color: #fff; }
+div.arrow-controller { position: absolute; top: 370px; width: 40px; height: 40px; border-radius: 20px;
+  background: rgba(255, 255, 255, 0.8); cursor: pointer; }
+div.arrow-controller.left { left: 12px; }
+div.arrow-controller.right { right: 12px; }
+div.arrow-controller[hidden] { display: none; }
+.interaction-container { width: 400px; padding: 24px; box-sizing: border-box; }
+/* 作者区（Mac 人工取证 2026-10-14）：旧位置 div.author 是 .note-container 的直接子节点、隐藏；可见的作者名与头像在
+   .interaction-container 的 .author-container 里；评论者的 a.name 也在 div.author 下。 */
+.note-container > .author { display: none; }
+.author-container .info, .author { display: flex; align-items: center; height: 48px; }
+.author-container[hidden], .note-content[hidden], .comments-el[hidden] { display: none; }
+.author-container img.avatar-item { width: 40px; height: 40px; border-radius: 20px; margin-right: 12px; display: block; }
+.author-container a.name, .comment-item a.name { color: #333; text-decoration: none; font-size: 16px; padding: 8px 0; }
+.note-content { margin-top: 24px; }
+.comments-container { margin-top: 24px; }
+.comment-item .comment-inner-container { padding: 4px 0; }
+div.close-circle { position: fixed; top: 24px; left: 24px; width: 40px; height: 40px; border-radius: 20px;
+  background: #fff; z-index: 60; cursor: pointer; }
+div.close-circle[hidden] { display: none; }
+.captcha-layer { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 100; background: rgba(0, 0, 0, 0.4); }
+.captcha-layer iframe { position: absolute; top: 200px; left: 440px; width: 400px; height: 300px; border: 0; background: #fff; }

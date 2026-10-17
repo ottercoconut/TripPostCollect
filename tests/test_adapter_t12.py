@@ -65,6 +65,13 @@ REMOVED_ENV = frozenset({
 })
 # T14-C 删除：唯一消费者是 fork 旧 store 的作者原值开关，根实现不读取（见 ledger.AUTHORIZED_ENV_REMOVALS）。
 T14C_REMOVED_ENV = frozenset({"TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL"})
+# #71：小红书每轮全量扫描，父层不再向小红书 child 注入发现恢复参数；其他平台仍在用这些名字。
+T71_REMOVED_XHS_ENV = frozenset({
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR",
+    "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED",
+    "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES",
+    "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS",
+})
 
 # 根测试中允许保留的退出名引用：(文件, 名字) → 类别。T14-C 删旧桥时已清理旧桥对照（原 A 类）。
 # B＝负向守卫（断言不存在或不被调用）；D＝沿用旧存储出口名的测试装配与隐私用例（名字指向根实现或
@@ -444,8 +451,9 @@ def test_unconsumed_parent_env_is_no_longer_emitted_and_rest_is_unchanged(
     current = _capture_extra_env(monkeypatch, tmp_path)
     assert sorted(current) == sorted(baseline)
     for name, env in baseline.items():
-        assert removed.isdisjoint(current[name]), name
-        expected = {key: value for key, value in env.items() if key not in removed}
+        removed_here = removed | (T71_REMOVED_XHS_ENV if name.startswith("xhs_") else frozenset())
+        assert removed_here.isdisjoint(current[name]), name
+        expected = {key: value for key, value in env.items() if key not in removed_here}
         assert current[name] == expected, name
 
 
@@ -567,6 +575,111 @@ T75_DELETED_LEDGER_NODES = {
     "tests/test_xhs_parent_watchdog.py::test_legacy_mode_keeps_absolute_timeout_and_generates_no_runtime_key",
     "tests/test_xhs_pool.py::test_long_xhs_target_uses_time_budget_only",
 }
+# #83 随“连接已有浏览器”路径删除的台账节点。
+T83_DELETED_LEDGER_NODES = {
+    "tests/test_cdp_browser.py::test_existing_browser_connects_directly_to_devtools_browser",
+    "tests/test_cdp_browser.py::test_existing_browser_falls_back_to_discovered_websocket_url",
+    "tests/test_cdp_browser.py::test_xhs_cdp_rejects_existing_browser_without_a_retry_path",
+}
+# #71 第一批（小红书取数改为浏览器 L1）删除或改写的台账节点：被替代的旧取数路径用例。
+T71_DELETED_LEDGER_NODES = {
+    'tests/test_mediacrawler_behavior.py::test_xhs_api_captcha_does_not_complete_on_blank_redirect',
+    'tests/test_mediacrawler_behavior.py::test_xhs_api_captcha_opens_operator_page_and_resumes',
+    'tests/test_xhs_batch_checkpoint.py::test_empty_refresh_commits_history_without_creating_export_files[False]',
+    'tests/test_xhs_batch_checkpoint.py::test_empty_refresh_commits_history_without_creating_export_files[True]',
+    'tests/test_xhs_batch_checkpoint.py::test_top_refresh_retains_deep_frontier',
+    'tests/test_xhs_core_access_error.py::test_gather_stops_on_single_blocked_note',
+    'tests/test_xhs_core_access_error.py::test_note_detail_task_preserves_access_error[error0]',
+    'tests/test_xhs_core_access_error.py::test_note_detail_task_preserves_access_error[error1]',
+    'tests/test_xhs_creator_enrichment.py::test_behavior_search_does_not_retry_when_shell_is_visible',
+    'tests/test_xhs_creator_enrichment.py::test_behavior_search_uses_explore_fallback_after_blank_shell',
+    'tests/test_xhs_creator_enrichment.py::test_browser_identity_headers_follow_current_chromium_version',
+    'tests/test_xhs_creator_enrichment.py::test_browser_identity_headers_reject_version_mismatch',
+    'tests/test_xhs_creator_enrichment.py::test_creator_browser_fallback_keeps_qr_page_open_until_verified',
+    'tests/test_xhs_creator_enrichment.py::test_creator_browser_login_returns_to_original_page',
+    'tests/test_xhs_creator_enrichment.py::test_creator_enrichment_does_not_hide_ip_block',
+    'tests/test_xhs_creator_enrichment.py::test_creator_enrichment_does_not_hide_visible_browser_block',
+    'tests/test_xhs_creator_enrichment.py::test_creator_enrichment_falls_back_to_signed_in_browser',
+    'tests/test_xhs_creator_enrichment.py::test_creator_enrichment_reports_empty_profile_after_all_fallbacks',
+    'tests/test_xhs_creator_enrichment.py::test_creator_enrichment_uses_signed_in_profile_without_note_token',
+    'tests/test_xhs_creator_enrichment.py::test_creator_html_extractor_preserves_undefined_fallback',
+    'tests/test_xhs_creator_enrichment.py::test_creator_html_extractor_stops_at_end_of_initial_state_object',
+    'tests/test_xhs_creator_enrichment.py::test_original_page_login_prevents_opening_creator_tab',
+    'tests/test_xhs_creator_enrichment.py::test_search_navigation_timeout_can_defer_to_visible_readiness',
+    'tests/test_xhs_discovery.py::test_frontier_commit_advances_and_clears_completed_campaign',
+    'tests/test_xhs_discovery.py::test_incomplete_last_page_does_not_mark_frontier_exhausted',
+    'tests/test_xhs_discovery.py::test_query_fingerprint_tracks_source_but_not_refresh_budget',
+    'tests/test_xhs_discovery.py::test_refresh_commit_preserves_exhausted_frontier',
+    'tests/test_xhs_discovery_memory.py::test_browser_context_close_is_recorded_as_resumable_runtime_failure',
+    'tests/test_xhs_discovery_memory.py::test_cdp_disconnect_after_transport_pause_preserves_same_frontier',
+    'tests/test_xhs_discovery_memory.py::test_cdp_lifecycle_failure_preserves_frontier_without_retry_or_relaunch[xhs_browser_context_closed_unexpected-browser_context_closed]',
+    'tests/test_xhs_discovery_memory.py::test_cdp_lifecycle_failure_preserves_frontier_without_retry_or_relaunch[xhs_browser_process_exited-browser_process_exited]',
+    'tests/test_xhs_discovery_memory.py::test_cdp_lifecycle_failure_preserves_frontier_without_retry_or_relaunch[xhs_cdp_disconnected_unexpected-cdp_disconnected]',
+    'tests/test_xhs_discovery_memory.py::test_cdp_process_exit_from_detail_gather_is_not_candidate_failure',
+    'tests/test_xhs_discovery_memory.py::test_creator_failure_is_recorded_and_later_xhs_candidate_continues',
+    'tests/test_xhs_discovery_memory.py::test_detail_failure_is_recorded_seen_and_search_continues',
+    'tests/test_xhs_discovery_memory.py::test_detail_fallback_attempt_count_matches_actual_requests',
+    'tests/test_xhs_discovery_memory.py::test_detail_transport_outage_retries_same_detail_without_html_fallback',
+    'tests/test_xhs_discovery_memory.py::test_image_failure_is_recorded_and_later_xhs_candidate_continues',
+    'tests/test_xhs_discovery_memory.py::test_search_disconnect_retries_same_page_cursor_and_browser_session',
+    'tests/test_xhs_discovery_memory.py::test_search_disconnect_timeout_preserves_current_recovery_frontier',
+    'tests/test_xhs_discovery_memory.py::test_shared_manual_budget_exhaustion_is_a_fixed_runtime_stop',
+    'tests/test_xhs_discovery_memory.py::test_terminal_image_failure_is_recorded_and_later_candidate_continues',
+    'tests/test_xhs_discovery_memory.py::test_top_refresh_uses_fresh_search_id_before_saved_frontier',
+    'tests/test_xhs_discovery_memory.py::test_wrapped_login_expiry_timeout_keeps_current_page_as_frontier',
+    'tests/test_xhs_discovery_memory.py::test_wrapped_login_expiry_waits_and_retries_same_search_page',
+    'tests/test_xhs_image_download.py::test_equivalent_xhs_asset_variants_are_deduplicated',
+    'tests/test_xhs_image_download.py::test_one_image_object_downloads_one_authoritative_url_with_true_format',
+    'tests/test_xhs_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence',
+    'tests/test_xhs_image_download.py::test_transient_xhs_image_failure_recovers_and_records_attempts',
+    'tests/test_xhs_image_download.py::test_xhs_failed_image_writes_no_success_file_or_manifest',
+    'tests/test_xhs_login_contract.py::test_context_cookies_still_seed_the_api_client',
+    'tests/test_xhs_login_contract.py::test_failed_startup_pong_enters_real_qrcode_state_machine_once',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_always_uses_the_run_scoped_profile[False]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_always_uses_the_run_scoped_profile[True]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[ \\t -False]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[ \\t -True]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[-False]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[-True]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[None-False]',
+    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[None-True]',
+    'tests/test_xhs_media_policy.py::test_disabled_media_mode_reaches_no_media_method',
+    'tests/test_xhs_media_policy.py::test_image_mode_never_reaches_video_method_or_store',
+    'tests/test_xhs_midrun_login_recovery.py::test_checkpoint_race_after_pong_blocks_navigation',
+    'tests/test_xhs_midrun_login_recovery.py::test_midrun_network_confirmation_and_navigation_do_not_use_manual_budget',
+    'tests/test_xhs_midrun_login_recovery.py::test_profile_shell_without_self_info_never_navigates',
+    'tests/test_xhs_midrun_login_recovery.py::test_recovered_session_does_not_hide_navigation_failure',
+    'tests/test_xhs_midrun_login_recovery.py::test_sms_checkpoint_with_stale_profile_never_probes_or_navigates',
+    'tests/test_xhs_network_recovery.py::test_committed_timeout_after_network_pause_is_deferred_not_recovered',
+    'tests/test_xhs_network_recovery.py::test_creator_network_timeout_never_opens_browser_fallback',
+    'tests/test_xhs_network_recovery.py::test_retry_error_is_unwrapped_before_same_operation_retry',
+    'tests/test_xhs_network_recovery.py::test_uncommitted_navigation_timeout_retries_but_committed_search_does_not',
+    'tests/test_xhs_popup_guard.py::test_crawler_opened_xhs_tab_waits_30_seconds_after_failed_scroll',
+    'tests/test_xhs_raw_response_errors.py::test_api_captcha_error_after_budget_boundary_uses_fixed_terminal_reason',
+    'tests/test_xhs_raw_response_errors.py::test_api_captcha_popups_share_the_crawler_manual_budget',
+    'tests/test_xhs_raw_response_errors.py::test_html_detail_does_not_multiply_transport_retries',
+    'tests/test_xhs_raw_response_errors.py::test_html_detail_still_retries_parse_failures',
+    'tests/test_xhs_raw_response_errors.py::test_pong_does_not_swallow_cancellation',
+    'tests/test_xhs_raw_response_errors.py::test_pong_does_not_turn_platform_checkpoint_into_logged_out[429-rate_limited]',
+    'tests/test_xhs_raw_response_errors.py::test_pong_does_not_turn_platform_checkpoint_into_logged_out[461-verification_required]',
+    'tests/test_xhs_raw_response_errors.py::test_pong_does_not_turn_platform_checkpoint_into_logged_out[471-verification_required]',
+    'tests/test_xhs_raw_response_errors.py::test_pong_preserves_business_block_from_successful_http_response[300011-PlatformRuntimeError]',
+    'tests/test_xhs_raw_response_errors.py::test_pong_preserves_business_block_from_successful_http_response[300012-IPBlockError]',
+    'tests/test_xhs_raw_response_errors.py::test_pong_propagates_temporary_transport_outage[ConnectError]',
+    'tests/test_xhs_raw_response_errors.py::test_pong_propagates_temporary_transport_outage[ReadTimeout]',
+    'tests/test_xhs_raw_response_errors.py::test_pong_returns_false_only_for_explicit_unauthenticated_status[401]',
+    'tests/test_xhs_raw_response_errors.py::test_pong_returns_false_only_for_explicit_unauthenticated_status[403]',
+    'tests/test_xhs_raw_response_errors.py::test_raw_response_keeps_successful_html',
+    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status[401-login_required]',
+    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status[403-login_required]',
+    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status[429-rate_limited]',
+    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block[300011-PlatformRuntimeError-platform_security_limit_300011-False]',
+    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block[300011-PlatformRuntimeError-platform_security_limit_300011-True]',
+    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block[300012-IPBlockError-None-False]',
+    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block[300012-IPBlockError-None-True]',
+    'tests/test_xhs_raw_response_errors.py::test_successful_json_keeps_raw_and_parsed_return_modes',
+    'tests/test_xhs_raw_response_errors.py::test_transport_classifier_unwraps_retry_error_without_broad_request_errors',
+}
 # 决策 13：按台账 target_file 迁移，名称与断言不变；迁移后只能出现在目标文件。
 MOVED_TO_TARGET = {
     "tests/test_run_ids.py::test_all_script_run_ids_include_microseconds":
@@ -607,6 +720,8 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
         | T14C_DELETED_LEDGER_NODES
         | T64_DELETED_LEDGER_NODES
         | T75_DELETED_LEDGER_NODES
+        | T71_DELETED_LEDGER_NODES
+        | T83_DELETED_LEDGER_NODES
     )
     for source, target in MOVED_TO_TARGET.items():
         assert source not in collected and target in collected, (source, target)
@@ -615,4 +730,6 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
         - len(T14C_DELETED_LEDGER_NODES)
         - len(T64_DELETED_LEDGER_NODES)
         - len(T75_DELETED_LEDGER_NODES)
+        - len(T71_DELETED_LEDGER_NODES)
+        - len(T83_DELETED_LEDGER_NODES)
     )

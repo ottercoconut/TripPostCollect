@@ -474,10 +474,6 @@ def build_child_command(
         str(target["keyword"]),
         "--output-dir",
         str(output_root),
-        "--start-page",
-        str(int(discovery["resume_page"])),
-        "--top-refresh-max-pages",
-        str(int(discovery["top_refresh_max_pages"])),
         "--required-fields-profile",
         str(target["required_fields_profile"]),
         "--behavior-profile",
@@ -497,12 +493,9 @@ def build_child_command(
         "--xhs-post-interaction",
         post_interaction,
     ]
-    if discovery.get("resume_search_id"):
-        command.extend(["--start-cursor", str(discovery["resume_search_id"])])
+    # 每轮从首页搜索后全量扫描：不传页码、游标或耗尽标记，只带未完成的累计摘要。
     if discovery.get("campaign_summary_path"):
         command.extend(["--resume-summary", str(discovery["campaign_summary_path"])])
-    if discovery.get("source_exhausted"):
-        command.append("--discovery-source-exhausted")
     command.append("--download-images")
     command.extend(["--media-root", str(LOCAL_MEDIA_ROOT.resolve())])
     if pool.get("headed", True):
@@ -793,6 +786,9 @@ def frozen_discovery_inputs(discovery: dict[str, Any]) -> list[Path]:
     for record in summary.get("records") or []:
         output = record.get("output") if isinstance(record, dict) else {}
         for path_value in (output or {}).get("jsonl_files") or []:
+            inputs.append(Path(path_value).expanduser().resolve())
+        # 累计记录的访问证据：账本快照缺失时冻结前失败，与 JSONL 缺失同等处理。
+        for path_value in (output or {}).get("content_visit_paths") or []:
             inputs.append(Path(path_value).expanduser().resolve())
         if summary.get("batch_checkpoint"):
             for path_value in (output or {}).get("image_manifest_paths") or []:

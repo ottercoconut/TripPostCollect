@@ -57,6 +57,8 @@ def old_module(name, namespace=None):
         execution_state_imports=execution_state_imports,
     )
     module.__dict__.update(preset)
+    if name == "mediacrawler_login_warmup":
+        source = t83_sandbox_enabled(source)
     if "from __future__ import annotations" not in source:
         source = "from __future__ import annotations\n" + source
     exec(compile(source, name, "exec"), module.__dict__)
@@ -84,6 +86,15 @@ def t14_warmup_one(source):
         "    profile_dir = profile_dir_for(platform_key)\n",
     )
     return re.sub(r"(write_cookie_snapshot\(\n\s+platform_key,\n)\s+profile_dir,\n", r"\1", source)
+
+
+def t83_sandbox_enabled(source):
+    """#83 授权差异：登录预热不再传 --no-sandbox，并显式 chromium_sandbox=True，其他参数不变。"""
+    line = '            "--no-sandbox",\n'
+    anchor = '        "ignore_https_errors": True,\n'
+    assert source.count(line) == 1 and source.count(anchor) == 1
+    source = source.replace(line, "")
+    return source.replace(anchor, anchor + '        "chromium_sandbox": True,\n')
 
 
 def t14_without_fork_check(node):
@@ -121,6 +132,8 @@ def test_migrated_ast(row):
             source = t14_snapshot_writer(source)
         elif name == "warmup_one":
             source = t14_warmup_one(source)
+        elif name == "launch_login_context":
+            source = t83_sandbox_enabled(source)
     if row["disposition"] == "薄":
         target = ROOT / "src/trippostcollect/application/warmup.py"
         if row["file"] == "scripts/login_warmup.py":

@@ -55,6 +55,11 @@ jobs:
             --locked \
             --extra dev \
             --python "$PYTHON_VERSION"
+          # OS lane 的 browser_replay 用 Playwright 管理的 Chromium headless shell，只在此联网阶段安装。
+          PLAYWRIGHT_BROWSERS_PATH="$TPC_WORK/pw-browsers" \
+            "$TPC_WORK/root-venv/bin/python" -m playwright install \
+              --only-shell \
+              chromium
           command -v node
           node --version
       - name: 核对迁移台账
@@ -80,6 +85,8 @@ jobs:
             python scripts/dev/adapter_ledger.py progress
       - name: 执行独立副本分组及选站装配
         shell: bash
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ env.TPC_WORK }}/pw-browsers
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"

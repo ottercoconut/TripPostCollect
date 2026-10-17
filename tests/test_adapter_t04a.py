@@ -55,7 +55,7 @@ def test_fork_dynamic_imports_and_behavior_injection(tmp_path):
         from human_flow import install_runtime_hints
         from mediacrawler_behavior import (
             run_page_behavior, run_guarded_request_pause,
-            run_xhs_continuity_behavior, run_xhs_api_captcha_verification,
+            run_xhs_continuity_behavior,
             visible_page_state, record_xhs_platform_security_limit,
             run_xhs_post_interaction,
         )
@@ -68,7 +68,7 @@ def test_fork_dynamic_imports_and_behavior_injection(tmp_path):
         assert legacy.write_evidence is write_evidence
         for function in (
             run_page_behavior, run_guarded_request_pause,
-            run_xhs_continuity_behavior, run_xhs_api_captcha_verification,
+            run_xhs_continuity_behavior,
             record_xhs_platform_security_limit, run_xhs_post_interaction,
         ):
             # T09：小红书函数在旧入口为绑定证据出口的 partial，按原函数名取同一对象。
@@ -91,7 +91,7 @@ def test_fork_dynamic_imports_and_behavior_injection(tmp_path):
             async def evaluate(self, expression):
                 if "navigator.webdriver" in expression:
                     return {
-                        "webdriver": None, "languages": ["zh-CN"],
+                        "webdriver": False, "languages": ["zh-CN"],
                         "platform": "test", "user_agent": "test",
                         "visibility_state": "visible",
                         "viewport": {"width": 100, "height": 100},
@@ -107,7 +107,8 @@ def test_fork_dynamic_imports_and_behavior_injection(tmp_path):
             calls.append("xhs_search_ready")
             return {"ready": True}
 
-        async def dwell(page, profile, log):
+        async def dwell(page, profile, log, *, list_area):
+            assert list_area is legacy.xhs_list_area
             calls.append("dwell")
             log.extend([
                 {"event": "pause"}, {"event": "mouse_moves"},
@@ -149,7 +150,7 @@ def test_fork_dynamic_imports_and_behavior_injection(tmp_path):
 async def test_guarded_behavior_requires_injected_wait(tmp_path):
     evidence_path = tmp_path / "behavior.json"
     with pytest.raises(
-        RuntimeError, match="^xhs_guarded requires an injected xhs_search_ready$",
+        RuntimeError, match="^xhs_guarded requires an injected xhs_search_ready and xhs_list_area$",
     ):
         await behavior.run_page_behavior(
             object(), platform_key="xhs", profile_name="xhs_guarded",

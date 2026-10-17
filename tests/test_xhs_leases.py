@@ -511,10 +511,14 @@ def assert_v22_xhs_history_preserved(conn: sqlite3.Connection) -> None:
         None,
         "{}",
     )
+    # 迁移 23 随同一次切换删除深层前沿两列，其余列原样保留。
+    assert not {"resume_page", "resume_search_id"} & {
+        row[1] for row in conn.execute("PRAGMA table_info(xhs_discovery_checkpoints)")
+    }
     assert conn.execute(
         """
         SELECT id, target_key, account_id, keyword, query_fingerprint,
-               resume_page, resume_search_id, source_has_more, status,
+               source_has_more, status,
                last_batch_complete, last_stop_reason, last_run_id,
                last_summary_path, campaign_candidate_count, created_at, updated_at
         FROM xhs_discovery_checkpoints
@@ -525,8 +529,6 @@ def assert_v22_xhs_history_preserved(conn: sqlite3.Connection) -> None:
         "xhs-a01",
         "青岛旅游",
         "fingerprint",
-        9,
-        "cursor-9",
         1,
         "active",
         1,
@@ -877,6 +879,7 @@ def test_xhs_v22_cutover_retries_when_legacy_account_set_expands_before_begin(
         ("INSERT INTO xhs_accounts(", False),
         ("DROP TABLE xhs_accounts_runtime_backup", False),
         ("DROP TABLE IF EXISTS xhs_platform_state", False),
+        ("ALTER TABLE xhs_discovery_checkpoints_new RENAME", False),
         ("INSERT INTO xhs_account_events(", False),
         ("INSERT OR IGNORE INTO schema_migrations", False),
         ("PRAGMA foreign_key_check", False),
@@ -892,6 +895,7 @@ def test_xhs_v22_cutover_retries_when_legacy_account_set_expands_before_begin(
         "accounts-restored",
         "backup-dropped",
         "obsolete-state-dropped",
+        "checkpoint-frontier-dropped",
         "cutover-event-recorded",
         "version-recorded",
         "foreign-key-check",
@@ -1462,8 +1466,8 @@ def test_obsolete_lease_cutover_preserves_discovery_memory(
             """
             INSERT INTO xhs_discovery_checkpoints(
                 target_key, account_id, keyword, query_fingerprint,
-                resume_page, resume_search_id, last_run_id
-            ) VALUES ('target', 'xhs-a01', '青岛旅游', 'fingerprint', 9, 'cursor-9', 'safe-run')
+                source_has_more, last_stop_reason, last_run_id
+            ) VALUES ('target', 'xhs-a01', '青岛旅游', 'fingerprint', 1, 'runtime_failed', 'safe-run')
             """
         )
         conn.execute(
@@ -1490,11 +1494,11 @@ def test_obsolete_lease_cutover_preserves_discovery_memory(
         assert tuple(
             conn.execute(
                 """
-                SELECT resume_page, resume_search_id, last_run_id
+                SELECT source_has_more, last_stop_reason, last_run_id
                 FROM xhs_discovery_checkpoints
                 """
             ).fetchone()
-        ) == (9, "cursor-9", "safe-run")
+        ) == (1, "runtime_failed", "safe-run")
         assert conn.execute(
             "SELECT platform_post_id FROM xhs_discovery_seen_candidates"
         ).fetchone()[0] == "post-9"
@@ -3910,8 +3914,8 @@ def test_missing_adaptive_event_does_not_mutate_state_or_discovery(
             """
             INSERT INTO xhs_discovery_checkpoints(
                 target_key, account_id, keyword, query_fingerprint,
-                resume_page, resume_search_id, last_run_id
-            ) VALUES ('target', 'xhs-a01', '青岛旅游', 'fingerprint', 7, 'search-id', 'safe-run')
+                source_has_more, last_stop_reason, last_run_id
+            ) VALUES ('target', 'xhs-a01', '青岛旅游', 'fingerprint', 1, 'runtime_failed', 'safe-run')
             """
         )
         conn.execute(
@@ -3925,7 +3929,7 @@ def test_missing_adaptive_event_does_not_mutate_state_or_discovery(
         conn.commit()
         before_checkpoint = tuple(
             conn.execute(
-                "SELECT resume_page, resume_search_id, last_run_id FROM xhs_discovery_checkpoints"
+                "SELECT source_has_more, last_stop_reason, last_run_id FROM xhs_discovery_checkpoints"
             ).fetchone()
         )
         before_seen = conn.execute(
@@ -3942,7 +3946,7 @@ def test_missing_adaptive_event_does_not_mutate_state_or_discovery(
         assert result["terminal_assessment"]["terminal_complete"] is False
         assert tuple(
             conn.execute(
-                "SELECT resume_page, resume_search_id, last_run_id FROM xhs_discovery_checkpoints"
+                "SELECT source_has_more, last_stop_reason, last_run_id FROM xhs_discovery_checkpoints"
             ).fetchone()
         ) == before_checkpoint
         assert conn.execute(

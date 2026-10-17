@@ -13,6 +13,15 @@ import sys
 import time
 
 
+# OS lane 的本地 Chromium 离线回放：headless shell 在联网准备阶段装入 PLAYWRIGHT_BROWSERS_PATH，
+# 这里只把它的位置与回放开关交给测试进程，不转交其他宿主环境。
+BROWSER_REPLAY_KEYS = ("PLAYWRIGHT_BROWSERS_PATH", "TPC_BROWSER_REPLAY")
+
+
+def browser_replay_environment():
+    return {key: os.environ[key] for key in BROWSER_REPLAY_KEYS if os.environ.get(key)}
+
+
 def hosted_only():
     if not (sys.platform == "darwin" and os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
@@ -191,6 +200,7 @@ def run_test_command(command, source, environment, log, *, cleanup=None,
 
 def run_isolated(command, source, output, environment, log):
     hosted_only()
+    environment = {**environment, **browser_replay_environment()}
     anchor = "com.apple/trippostcollect-tests"
     evidence = {"mechanism": "pf+python-execution-guard",
                 "run_id": os.environ["GITHUB_RUN_ID"], "restored": False}

@@ -256,7 +256,7 @@
        "min_count": 8
       },
       {
-       "function": "tests/test_xhs_batch_checkpoint.py::test_top_refresh_retains_deep_frontier",
+       "function": "tests/test_xhs_batch_checkpoint.py::test_committer_rejects_a_batch_outside_the_full_scan",
        "lane": "component"
       },
       {
@@ -327,7 +327,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_xhs_batch_checkpoint.py::test_empty_refresh_commits_history_without_creating_export_files",
+       "function": "tests/test_xhs_batch_checkpoint.py::test_empty_first_batch_then_first_content_uses_next_ack_sequence",
        "lane": "component"
       },
       {
@@ -1090,9 +1090,16 @@
      "status": "covered",
      "entries": [
       {
-       "file": "tests/platforms/xhs/test_xhs_image_download.py",
-       "lane": "component",
-       "min_count": 5
+       "function": "tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_not_captured_is_retryable_and_later_candidate_continues",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/xhs/test_xhs_discovery_memory.py::test_terminal_image_status_is_final_and_later_candidate_continues",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/xhs/test_xhs_repair_state.py::test_missing_image_is_retryable_and_forbidden_image_stops_the_run",
+       "lane": "component"
       },
       {
        "function": "tests/test_mediacrawler_import.py::test_manifest_or_staging_failure_blocks_whole_post",
@@ -1290,7 +1297,7 @@
        "min_count": 1
       },
       {
-       "function": "tests/runtime/test_cdp_browser.py::test_xhs_cdp_rejects_existing_browser_without_a_retry_path",
+       "function": "tests/runtime/test_cdp_browser.py::test_xhs_cdp_launch_always_uses_the_run_scoped_profile",
        "lane": "component"
       }
      ]
@@ -1512,12 +1519,11 @@
       {
        "file": "tests/platforms/xhs/test_xhs_login_contract.py",
        "lane": "component",
-       "min_count": 51
+       "min_count": 45
       },
       {
-       "function": "tests/test_adapter_t09.py::test_manual_wait_budget_charges_overlap_once",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/platforms/xhs/test_xhs_manual_wait_budget.py::test_manual_wait_budget_charges_overlap_once",
+       "lane": "component"
       },
       {
        "function": "tests/test_mediacrawler_behavior.py::test_xhs_search_verification_wait_keeps_page_open_until_cleared",
@@ -1701,12 +1707,9 @@
        "min_count": 17
       },
       {
-       "function": "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy_expectation",
+       "file": "tests/platforms/xhs/test_xhs_repair_state.py",
        "lane": "component",
-       "params": [
-        "repair"
-       ],
-       "legacy_equivalence": true
+       "min_count": 3
       }
      ]
     }
@@ -1830,25 +1833,9 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t09.py::test_root_xhs_matches_frozen_legacy_expectation",
+       "file": "tests/platforms/xhs/test_xhs_login_state.py",
        "lane": "component",
-       "params": [
-        "network_recover",
-        "network_timeout",
-        "cdp_disconnect",
-        "main_page_closed",
-        "success",
-        "qr_expired_refresh",
-        "captcha_pass",
-        "cdp_launch_failed",
-        "repair"
-       ],
-       "legacy_equivalence": true
-      },
-      {
-       "function": "tests/test_adapter_t09.py::test_pure_parsers_and_signer",
-       "lane": "component",
-       "legacy_equivalence": true
+       "min_count": 30
       }
      ]
     }
@@ -2232,14 +2219,9 @@
      "status": "covered",
      "entries": [
       {
-       "file": "tests/platforms/xhs/test_xhs_core_access_error.py",
-       "lane": "component",
-       "min_count": 3
-      },
-      {
        "file": "tests/platforms/xhs/test_xhs_creator_enrichment.py",
        "lane": "component",
-       "min_count": 22
+       "min_count": 11
       },
       {
        "file": "tests/platforms/xhs/test_xhs_discovery_memory.py",
@@ -2247,14 +2229,14 @@
        "min_count": 23
       },
       {
-       "file": "tests/platforms/xhs/test_xhs_image_download.py",
-       "lane": "component",
-       "min_count": 5
-      },
-      {
        "file": "tests/platforms/xhs/test_xhs_login_contract.py",
        "lane": "component",
-       "min_count": 51
+       "min_count": 45
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_login_state.py",
+       "lane": "component",
+       "min_count": 30
       },
       {
        "file": "tests/platforms/xhs/test_xhs_manual_wait_budget.py",
@@ -2274,7 +2256,12 @@
       {
        "file": "tests/platforms/xhs/test_xhs_network_recovery.py",
        "lane": "component",
-       "min_count": 40
+       "min_count": 37
+      },
+      {
+       "file": "tests/platforms/xhs/test_xhs_note_projection.py",
+       "lane": "component",
+       "min_count": 18
       },
       {
        "file": "tests/platforms/xhs/test_xhs_popup_guard.py",
@@ -2292,9 +2279,9 @@
        "min_count": 6
       },
       {
-       "file": "tests/platforms/xhs/test_xhs_raw_response_errors.py",
+       "file": "tests/platforms/xhs/test_xhs_repair_state.py",
        "lane": "component",
-       "min_count": 24
+       "min_count": 12
       },
       {
        "file": "tests/platforms/xhs/test_xhs_shutdown_error_priority.py",

@@ -11,6 +11,7 @@ RESOURCE_SHA256 = {
     "js/zhihu.js": "9753572dc21148975600ca8083e92245e69130cd11414a3e3089013b3aaee3f1",
     "js/stealth.min.js": "02ae012addcdb30b0ed1a512406feb487699b1b217566e87a8086b54dfcc1d4d",
     "licenses/MediaCrawler-LICENSE": "aeff21de8609bec9d6e939bbbba7c2914ae0a6e7c9470ea7945c03f7d17a2a33",
+    "licenses/CloakBrowser-LICENSE": "93a9c5b5542faf5ff6c7956406b56930fde10bd4d3e8dc7b89f01a88a8d2b29b",
 }
 # 构建生成的包内资源 → 仓库内唯一编辑真源。构建模块 build_support.py 读取此表复制进 wheel，
 # 源码树不保存副本；源码 checkout 中包内没有生成副本时直接读真源。

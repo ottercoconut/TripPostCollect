@@ -10,7 +10,6 @@ HTTP 只用 httpx.MockTransport，不访问网络。
 from __future__ import annotations
 
 from io import BytesIO
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -21,11 +20,13 @@ from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.artifacts import image_staging as image_manifest
 from trippostcollect.platforms.douyin import client as douyin_client
 from trippostcollect.platforms.weibo import client as weibo_client
-from trippostcollect.platforms.xhs import client as xhs_client
-from trippostcollect.platforms.xhs.errors import IPBlockError, PlatformRuntimeError
+from trippostcollect.platforms.xhs.capture import XHS_FEED_RULE, classify_xhs_api_response, raise_for_runtime_verdict
+from trippostcollect.platforms.xhs.errors import IPBlockError, PlatformRuntimeError, XHSImageDownloadError
+from trippostcollect.platforms.xhs.media import XhsMediaMixin
 from trippostcollect.platforms.zhihu import client as zhihu_client
 from trippostcollect.runtime import image_retry as image_download_retry
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError
+from trippostcollect.runtime.page_capture import CapturedImage, CapturedResponse
 
 
 def async_client_factory(status_code: int, content: bytes = b""):
@@ -71,19 +72,33 @@ async def test_weibo_http_404_preserves_terminal_status(monkeypatch) -> None:
     assert exc_info.value.http_status == 404
 
 
+def xhs_rule_response(status: int, payload: object = None) -> CapturedResponse:
+    """小红书规则端点（feed）的一次截获；#71 起分类来自页面截获，不再经 httpx 客户端。"""
+    return CapturedResponse(
+        rule=XHS_FEED_RULE, seq=1, page_role="primary", route="/explore/<id>", query_keys=(),
+        endpoint="/api/sns/web/v1/feed", status=status, verify_headers_present=False,
+        request_json={"source_note_id": "test"}, json=payload, observed_at="2026-01-01T00:00:00+08:00",
+    )
+
+
 @pytest.mark.asyncio
 async def test_xhs_http_404_preserves_terminal_status(monkeypatch) -> None:
-    client = object.__new__(xhs_client.XiaoHongShuClient)
-    # T09：HTTP 依赖已迁入显式端口，继续只验证本站原分类。
-    client._ports = SimpleNamespace(make_async_client=async_client_factory(404))
-    client.proxy = None
-    client.timeout = 1
+    # #71：正文图片由图片窗口截获；截获到的 404 仍分类为不可重试的 image_source_unavailable 并保留状态码。
+    failures: list[dict] = []
 
-    with pytest.raises(ImageDownloadFetchError) as exc_info:
-        await client.get_note_media("https://example.test/missing.jpg")
+    class Media(XhsMediaMixin):
+        async def record_xhs_note_image_failure(self, note_id, failure):
+            failures.append(failure)
+
+    url = "https://example.test/missing.jpg"
+    asset = {"url": url, "source_index": 0, "source_asset_key": "xhs:path:/missing.jpg"}
+    image = CapturedImage(url=url, seq=3, page_role="primary", status=404, content=b"", sha256="", observed_at="t")
+
+    with pytest.raises(XHSImageDownloadError) as exc_info:
+        await Media()._stage_note_images("note-1", [asset], {url: (image, "v-3")})
 
     assert exc_info.value.code == "image_source_unavailable"
-    assert exc_info.value.http_status == 404
+    assert failures[0]["http_status"] == 404 and failures[0]["error_code"] == "image_source_unavailable"
 
 
 @pytest.mark.parametrize(
@@ -96,60 +111,29 @@ async def test_xhs_html_response_preserves_run_level_http_status(
     status,
     code,
 ) -> None:
-    client = object.__new__(xhs_client.XiaoHongShuClient)
-    # T09：HTTP 依赖已迁入显式端口，继续只验证本站原分类。
-    client._ports = SimpleNamespace(make_async_client=async_client_factory(status))
-    client.proxy = None
-    client.timeout = 1
-
+    # #71：规则端点的 401/403/429 由页面截获分类，照旧为运行级失败。
     with pytest.raises(PlatformRuntimeError) as exc_info:
-        await client.request(
-            "GET",
-            "https://www.xiaohongshu.com/user/profile/test",
-            return_response=True,
-        )
+        raise_for_runtime_verdict(classify_xhs_api_response(xhs_rule_response(status)), stage="note_detail")
 
     assert exc_info.value.code == code
 
 
 @pytest.mark.asyncio
 async def test_xhs_html_response_preserves_ip_block_business_code(monkeypatch) -> None:
-    payload = b'{"success":false,"code":300012,"msg":"blocked"}'
-    client = object.__new__(xhs_client.XiaoHongShuClient)
-    # T09：HTTP 依赖已迁入显式端口，继续只验证本站原分类。
-    client._ports = SimpleNamespace(make_async_client=async_client_factory(200, payload))
-    client.proxy = None
-    client.timeout = 1
-    client.IP_ERROR_CODE = 300012
-    client.IP_ERROR_STR = "Network connection error, code 300012"
+    payload = {"success": False, "code": 300012, "msg": "blocked"}
 
     with pytest.raises(IPBlockError):
-        await client.request(
-            "GET",
-            "https://www.xiaohongshu.com/explore/test",
-            return_response=True,
-        )
+        raise_for_runtime_verdict(classify_xhs_api_response(xhs_rule_response(200, payload)), stage="note_detail")
 
 
 @pytest.mark.asyncio
 async def test_xhs_html_response_preserves_security_limit_business_code(
     monkeypatch,
 ) -> None:
-    payload = b'{"success":false,"code":300011,"msg":"Account exception"}'
-    client = object.__new__(xhs_client.XiaoHongShuClient)
-    # T09：HTTP 依赖已迁入显式端口，继续只验证本站原分类。
-    client._ports = SimpleNamespace(make_async_client=async_client_factory(200, payload))
-    client.proxy = None
-    client.timeout = 1
-    client.IP_ERROR_CODE = 300012
-    client.IP_ERROR_STR = "Network connection error, code 300012"
+    payload = {"success": False, "code": 300011, "msg": "Account exception"}
 
     with pytest.raises(PlatformRuntimeError) as exc_info:
-        await client.request(
-            "GET",
-            "https://www.xiaohongshu.com/user/profile/test",
-            return_response=True,
-        )
+        raise_for_runtime_verdict(classify_xhs_api_response(xhs_rule_response(200, payload)), stage="note_detail")
 
     assert exc_info.value.code == "platform_security_limit_300011"
 

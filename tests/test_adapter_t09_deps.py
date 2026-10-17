@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 
 import pytest
 
@@ -23,6 +24,32 @@ FORK_TOPS = {
 SCRIPT_MODULES = {path.stem for path in (ROOT / "scripts").glob("*.py")} | {"scripts"}
 WORKER_CODES = ("wb", "dy", "zhihu", "xhs")
 MIXIN_MODULES = {"session", "navigation", "login", "author", "detail", "media", "errors", "parser", "behavior"}
+# #71 新增、台账之外的 mixin 模块。
+T71_MIXIN_MODULES = {"scan", "overlay"}
+# 平台层只可依赖根侧父子共用的格式定义，不得依赖租约、发现等控制面。
+XHS_ROOT_MODULES_ALLOWED = {"trippostcollect.xhs.operator_wait", "trippostcollect.xhs.search_target"}
+
+
+def _resolutions() -> dict:
+    sys.path.insert(0, str(ROOT / "scripts/dev"))
+    try:
+        rules = importlib.import_module("adapter_ledger_rules")
+    finally:
+        sys.path.remove(str(ROOT / "scripts/dev"))
+    return rules.PROGRESS_RESOLUTIONS
+
+
+def exited_rows() -> set[tuple[str, str]]:
+    return {key for key, (action, _, _) in _resolutions().items() if action == "退出"}
+
+
+def migrated_names() -> dict[tuple[str, str], str]:
+    """“迁至”行的承接方法名（限定名最后一段）。"""
+    return {
+        key: target.rsplit(".", 1)[-1]
+        for key, (action, target, _) in _resolutions().items()
+        if action == "迁至" and target
+    }
 
 
 def resolved_imports(path: Path, package: str):
@@ -105,9 +132,11 @@ def test_worker_platforms_never_import_fork_media_platform(tmp_path):
 def test_platform_xhs_dependency_direction():
     files = sorted(PLATFORM.glob("*.py"))
     assert {path.stem for path in files} >= {
-        "core", "client", "parser", "login", "models", "signer", "session", "navigation", "behavior",
+        "core", "parser", "login", "models", "session", "navigation", "behavior",
         "author", "detail", "media", "repair", "manual_wait", "errors",
     }
+    # #71：httpx 客户端与 xhshow 本地签名整体删除。
+    assert not {"client", "signer"} & {path.stem for path in files}
     for path in files:
         for _, module, _ in resolved_imports(path, f"trippostcollect.platforms.xhs.{path.stem}"):
             top = module.split(".")[0]
@@ -118,6 +147,24 @@ def test_platform_xhs_dependency_direction():
                 assert module == "trippostcollect.application.contracts", (path.name, module)
             if module.startswith("trippostcollect.platforms"):
                 assert module.startswith("trippostcollect.platforms.xhs"), (path.name, module)
+            if module == "trippostcollect.xhs" or module.startswith("trippostcollect.xhs."):
+                assert module in XHS_ROOT_MODULES_ALLOWED, (path.name, module)
+
+
+def test_xhshow_is_no_longer_a_dependency():
+    """#71：小红书不再本地签名，xhshow 与其唯一依赖 pycryptodome 不在依赖声明与锁文件中。"""
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    declared = project["dependencies"] + [item for group in project.get("optional-dependencies", {}).values() for item in group]
+    assert not [item for item in declared if item.lower().startswith(("xhshow", "pycryptodome"))]
+    locked = {package["name"] for package in tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))["package"]}
+    assert not {"xhshow", "pycryptodome"} & locked
+
+
+def test_search_target_imports_only_standard_library():
+    path = PACKAGE / "xhs/search_target.py"
+    for _, module, _ in resolved_imports(path, "trippostcollect.xhs.search_target"):
+        top = module.split(".")[0]
+        assert top == "__future__" or top in sys.stdlib_module_names, module
 
 
 def test_runtime_does_not_import_xhs_platform_or_scripts(tmp_path):
@@ -175,8 +222,11 @@ def test_crawler_methods_live_in_ledger_target_mixins():
         and row["target"].startswith("platforms/xhs/")
     ]
     assert len(rows) == 69
+    # #71 起被替代的方法按规则文件登记“退出”，不再要求存在。
+    rows = [row for row in rows if (row["file"], row["qualname"]) not in exited_rows()]
+    migrated = migrated_names()
     for row in rows:
-        name = row["qualname"].split(".", 1)[1]
+        name = migrated.get((row["file"], row["qualname"]), row["qualname"].split(".", 1)[1])
         owner = next(cls for cls in crawler.__mro__ if name in vars(cls))
         expected = "trippostcollect." + row["target"][:-3].replace("/", ".")
         assert owner.__module__ == expected, (name, owner, expected)
@@ -184,9 +234,9 @@ def test_crawler_methods_live_in_ledger_target_mixins():
     mixins = [base for base in crawler.__bases__ if base.__module__ != core.__name__]
     assert {base.__module__.rsplit(".", 1)[-1] for base in mixins} == {
         row["target"][len("platforms/xhs/"):-3] for row in rows if row["target"] != "platforms/xhs/core.py"
-    }
+    } | T71_MIXIN_MODULES
     for base in mixins:
-        assert base.__module__.rsplit(".", 1)[-1] in MIXIN_MODULES
+        assert base.__module__.rsplit(".", 1)[-1] in MIXIN_MODULES | T71_MIXIN_MODULES
         assert base.__bases__ == (object,), base
     tree = ast.parse((PLATFORM / "core.py").read_text())
     imported = {}
@@ -203,7 +253,7 @@ def test_crawler_methods_live_in_ledger_target_mixins():
     assert not defined & moved, sorted(defined & moved)
     # 原实例属性名保持，fork 测试与旧桥仍按这些名字替换。
     for name in ("_popup_sleep", "_popup_monotonic", "_get_manual_wait_budget", "_run_browser_session",
-                 "launch_browser_with_cdp", "create_xhs_client"):
+                 "launch_browser_with_cdp"):
         assert callable(getattr(crawler, name))
 
 

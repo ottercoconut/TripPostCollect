@@ -435,7 +435,7 @@ def xhs_dependencies(config, *, repair=None):
     from playwright.async_api import async_playwright
     from trippostcollect.application.candidates import AdaptiveAccumulator
     from trippostcollect.application.contracts import (
-        XhsBehaviorPorts, XhsClientPorts, XhsLoginPorts, XhsPorts, XhsSettings,
+        XhsBehaviorPorts, XhsPorts, XhsSettings,
     )
     from trippostcollect.application.events import append_worker_execution_event
     from trippostcollect.application.worker_inputs import _enabled, xhs_readers
@@ -444,9 +444,9 @@ def xhs_dependencies(config, *, repair=None):
     from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
     from trippostcollect.db.discovery_read import existing_platform_identities
     from trippostcollect.platforms.xhs import behavior as xhs_behavior
-    from trippostcollect.platforms.xhs.behavior import wait_for_xhs_search_ready
+    from trippostcollect.platforms.xhs.behavior import wait_for_xhs_search_ready, xhs_list_area
     from trippostcollect.platforms.xhs.parser import xhs_source_asset_key
-    from trippostcollect.runtime import behavior, helpers, http, login_helpers
+    from trippostcollect.runtime import behavior, helpers
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
 
     values = {field.name: getattr(config, field.name) for field in fields(XhsSettings)}
@@ -458,13 +458,11 @@ def xhs_dependencies(config, *, repair=None):
     save_data_path = config.SAVE_DATA_PATH
     logger = logging.getLogger("MediaCrawler")
 
-    def make_async_client(**kwargs):
-        # TLS 开关原本在每次 HTTPX 工厂调用时读取；共享输入暂不提前冻结。
-        return http.make_async_client(disable_ssl_verify=getattr(config, "DISABLE_SSL_VERIFY", False), **kwargs)
-
     def accumulator_factory():
+        # 小红书可重试的候选失败不写入跨轮 seen：下一轮全量扫描到时就地重试。
         accumulator = AdaptiveAccumulator.for_platform(
             "xhs",
+            persist_retryable_skips=False,
             existing_identities=existing_platform_identities(
                 "xhs",
                 db_path=os.environ.get("TRIPPOSTCOLLECT_DB_PATH", ""),
@@ -479,14 +477,6 @@ def xhs_dependencies(config, *, repair=None):
         accumulator.event_sink = append_worker_execution_event
         return accumulator
 
-    async def install_project_runtime_hints(context):
-        if not _enabled():
-            return
-        scripts_dir = Path(os.environ.get("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", "")).expanduser()
-        if not scripts_dir.is_dir():
-            raise RuntimeError("required TripPostCollect runtime hint configuration is incomplete")
-        await behavior.install_project_runtime_hints(context)
-
     async def run_behavior(page, platform_key):
         if not _enabled():
             return {"status": "disabled", "platform": platform_key}
@@ -497,6 +487,7 @@ def xhs_dependencies(config, *, repair=None):
             raise RuntimeError("required TripPostCollect human behavior configuration is incomplete")
         return await behavior.run_required_human_behavior(
             page, platform_key=platform_key, xhs_search_ready=wait_for_xhs_search_ready,
+            xhs_list_area=xhs_list_area,
             write_evidence=write_evidence, evidence_path=evidence_path, profile_name=profile_name,
         )
 
@@ -509,18 +500,9 @@ def xhs_dependencies(config, *, repair=None):
             browser_manager_factory=partial(
                 CDPBrowserManager, browser_settings, project_browser_args=behavior.project_browser_args,
             ),
-            install_project_runtime_hints=install_project_runtime_hints,
             run_required_human_behavior=run_behavior,
             accumulator_factory=accumulator_factory,
             append_execution_event=append_worker_execution_event,
-            client=XhsClientPorts(
-                make_async_client=make_async_client, behavior=behavior_ports,
-                xhs_international=settings.XHS_INTERNATIONAL,
-            ),
-            login=XhsLoginPorts(find_login_qrcode=partial(
-                login_helpers.find_login_qrcode, make_async_client=make_async_client,
-                get_user_agent=helpers.get_user_agent,
-            )),
             behavior=behavior_ports,
             record_platform_security_limit=partial(
                 xhs_behavior.record_platform_security_limit, ports=behavior_ports,

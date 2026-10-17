@@ -27,6 +27,8 @@ ALLOWED = {
         "xhs.supervision",
         # #75：小红书人工等待诊断路径与 child 写入共用同一定义（只依赖标准库）。
         "xhs.operator_wait",
+        # #71：访问账本路径与 worker 写入共用同一推导（行为证据同目录）。
+        "runtime.visit_ledger",
     },
     "application/reporting.py": {"records.formal", "runtime.behavior", "runtime.helpers"},
     "application/failures.py": {"records.text_signals"},

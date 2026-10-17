@@ -100,6 +100,16 @@ def lane_command(runner, source, lane, output):
             "--lane", lane, "-o", str(output)]
 
 
+def lane_environment(lane, environ=None):
+    """只有 OS lane 拿到本地 Chromium 回放开关与 headless shell 位置；其余 lane 一律去掉这两项。"""
+    source = os.environ if environ is None else environ
+    environment = {key: value for key, value in source.items()
+                   if key not in ("PLAYWRIGHT_BROWSERS_PATH", "TPC_BROWSER_REPLAY")}
+    if lane == "os" and source.get("PLAYWRIGHT_BROWSERS_PATH"):
+        environment.update(PLAYWRIGHT_BROWSERS_PATH=source["PLAYWRIGHT_BROWSERS_PATH"], TPC_BROWSER_REPLAY="1")
+    return environment
+
+
 def redact_junit(path):
     """Keep case outcomes/counts, never upload tracebacks or captured content."""
     tree = ET.parse(path)
@@ -134,7 +144,7 @@ def main():
     for lane in ("component", "socket", "installation", "os"):
         lane_source = fresh_source(source, source.parent / f"lane-{lane}")
         result = subprocess.run(lane_command(runner, lane_source, lane, reports / lane),
-                                check=False, cwd=runner.parent.parent)
+                                check=False, cwd=runner.parent.parent, env=lane_environment(lane))
         results[lane] = {"returncode": result.returncode}
         summary = reports / lane / "result.json"
         if summary.exists():

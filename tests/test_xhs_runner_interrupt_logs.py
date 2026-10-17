@@ -18,7 +18,7 @@ import time
 import pytest
 
 from trippostcollect.db.bootstrap import bootstrap_database
-from trippostcollect.records.sanitization import AUTHOR_AVATAR_LOG_REDACTION
+from trippostcollect.records.sanitization import AUTHOR_AVATAR_LOG_REDACTION_HEAD
 from trippostcollect.runtime.process import process_group_exists
 from trippostcollect.xhs import accounts
 
@@ -65,7 +65,6 @@ def _setup(tmp_path: Path, worker_mode: str) -> tuple[Path, dict]:
                     {
                         "target_key": "test",
                         "keyword": "青岛旅游",
-                        "top_refresh_max_pages": 1,
                         "required_fields_profile": "image_post_with_followers_v1",
                         "followers_policy": "required",
                     }
@@ -269,8 +268,7 @@ def test_xhs_lease_interrupt_persists_cleaned_child_logs_and_signals_worker_once
     stderr = (work / "worker-logs" / "stderr.log").read_text(encoding="utf-8")
     assert (work / "worker-logs" / "command.txt").is_file()
     if worker_mode == "avatar":
-        assert stdout == AUTHOR_AVATAR_LOG_REDACTION
-        assert stderr == AUTHOR_AVATAR_LOG_REDACTION
+        assert stdout == stderr == f"{AUTHOR_AVATAR_LOG_REDACTION_HEAD} stdout_lines=0 stderr_lines=1 tags=<untagged>\n"
     else:
         assert_once(stdout, "xhs:worker-partial-out")
         assert_once(stdout, "xhs:worker-cleanup-out")
