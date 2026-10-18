@@ -288,6 +288,11 @@ def _panel_ready(state: dict[str, Any]) -> bool:
     return bool(state.get("panel_visible") and state.get("option"))
 
 
+def _hover_region(state: dict[str, Any]) -> tuple[Box, ...]:
+    """悬停打开的面板在光标离开入口与面板时收起（#81）：接近“图文”的轨迹限定在入口框与面板框的并集内。"""
+    return tuple(Box.from_point(state[key]) for key in ("entry", "panel") if state.get(key))
+
+
 def _filter_moment(state: dict[str, Any]) -> dict[str, Any]:
     """筛选尝试诊断里一个时刻的状态：只记布尔与入口文字（filter_state 只给“筛选”“已筛选”或空串）。"""
     return {
@@ -434,17 +439,13 @@ class XhsScanMixin:
                 return session
             moments: dict[str, dict[str, Any]] = {}
             try:
-                state = await self._open_filter_panel(moments)
+                state, hovered = await self._open_filter_panel(moments)
+                click = await self._press_filter_option(state, hovered=hovered, moments=moments)
             except XhsFilterAttemptFailed as exc:
                 reason = exc.reason
                 await self._record_filter_failure(reason, attempt=attempt, moments=moments)
                 continue
-            plan = await self._plan_click(state["option"])
-            click = self._record_trigger_action(
-                "apply_filter", {"filter": "note_type", "label": XHS_TARGET_FILTER_LABEL}, pointer=plan.evidence,
-            )
             clicks.append(click)
-            await self._perform_click(plan)
             session = await self._await_target_page_one(after_seq=line_seq(click))
             if session is not None and await self._filter_applied():
                 self._note_target_trigger(session, clicks)
@@ -488,8 +489,8 @@ class XhsScanMixin:
             f"enter_session_target={enter.is_target if enter else None}, note_type_clicks={len(clicks)}"
         )
 
-    async def _open_filter_panel(self, moments: dict[str, dict[str, Any]]) -> dict[str, Any]:
-        """本次尝试的面板：已开且有“图文”直接用；开着却没有选项先收起再重开，以免点入口反把它关上。
+    async def _open_filter_panel(self, moments: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], bool]:
+        """本次尝试的面板与它是否由悬停打开：已开且有“图文”直接用；开着却没有选项先收起再重开，以免点入口反把它关上。
 
         光标先接近入口并按样本静止，再读一次状态：面板已因悬停打开且有“图文”就不再按下（按下会把它关上，#81），
         否则照常按下。`moments` 记下接近前、按下前、按下后第 1 次轮询与轮询结束时的筛选状态，供失败诊断。
@@ -497,7 +498,7 @@ class XhsScanMixin:
         page = self.context_page
         state = await dom_filter_state(page, XHS_TARGET_FILTER_LABEL)
         if _panel_ready(state):
-            return state
+            return state, False
         if state.get("panel_visible"):
             await self._close_filter_panel()
         entry = await self._wait_for_filter_entry()
@@ -512,13 +513,35 @@ class XhsScanMixin:
         moments["before_press"] = _filter_moment(state)
         if _panel_ready(state):
             logger.info("[XiaoHongShuCrawler.scan] Filter panel opened on hover; entry not pressed")
-            return state
+            return state, True
         await pointer.press(plan)
         opened = await self._poll_filter_state(_panel_ready, moments=moments)
         if opened is not None:
-            return opened
+            return opened, False
         panel_visible = moments.get("poll_end", {}).get("panel_visible")
         raise XhsFilterAttemptFailed("filter_option_missing" if panel_visible else "filter_panel_not_opened")
+
+    async def _press_filter_option(
+        self, state: dict[str, Any], *, hovered: bool, moments: dict[str, dict[str, Any]],
+    ) -> str:
+        """点选“图文”，返回账本动作 id。面板由悬停打开时，接近轨迹的每个点都在入口框与面板框的并集内（见
+        `_hover_region`）；按下入口打开的照常接近。到达并静止后再读一次状态（`moments.before_option_press`）：面板仍可见
+        且选项仍在才按下，否则本次尝试以 `filter_panel_closed_before_option` 失败，不再空等目标会话第 1 页。
+        """
+        page = self.context_page
+        pointer = pointer_for(page)
+        plan = await self._plan_click(state["option"], region=_hover_region(state) if hovered else ())
+        click = self._record_trigger_action(
+            "apply_filter", {"filter": "note_type", "label": XHS_TARGET_FILTER_LABEL}, pointer=plan.evidence,
+        )
+        await pointer.approach(plan)
+        await pointer.settle(plan)
+        current = await dom_filter_state(page, XHS_TARGET_FILTER_LABEL)
+        moments["before_option_press"] = _filter_moment(current)
+        if not _panel_ready(current):
+            raise XhsFilterAttemptFailed("filter_panel_closed_before_option")
+        await pointer.press(plan)
+        return click
 
     async def _wait_for_filter_entry(self) -> dict[str, Any]:
         polls = max(1, round(XHS_FILTER_ENTRY_WAIT_SECONDS / XHS_FILTER_POLL_SECONDS))
@@ -595,10 +618,16 @@ class XhsScanMixin:
                 return state
         return None
 
-    async def _plan_click(self, target: dict[str, Any], *, within: Optional[tuple[float, float]] = None) -> ClickPlan:
-        """在主页面上计划一次点击：落点在页面脚本给出的元素框内，从当前光标位置分段接近。调用方把
-        `plan.evidence` 写进账本动作后再执行（账本动作先于界面动作）。"""
-        return await pointer_for(self.context_page).plan_click(Box.from_point(target), within=within)
+    async def _plan_click(
+        self,
+        target: dict[str, Any],
+        *,
+        within: Optional[tuple[float, float]] = None,
+        region: tuple[Box, ...] = (),
+    ) -> ClickPlan:
+        """在主页面上计划一次点击：落点在页面脚本给出的元素框内，从当前光标位置分段接近（给出 `region` 时轨迹限定
+        在其中）。调用方把 `plan.evidence` 写进账本动作后再执行（账本动作先于界面动作）。"""
+        return await pointer_for(self.context_page).plan_click(Box.from_point(target), within=within, region=region)
 
     async def _perform_click(self, plan: ClickPlan) -> None:
         await pointer_for(self.context_page).perform_click(plan)

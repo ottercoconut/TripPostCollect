@@ -218,7 +218,8 @@ DOM_SCRIPTS: dict[str, str] = {
     # （.ai-feeds-page.with-ai-chat）在右侧 .ai-chat-inner 内、面板挂在入口内部。全文档取第一个可见且直属
     # span 文字精确为“筛选”/“已筛选”的 div.filter（前面可能有隐藏副本）；入口文字与点击落点都只取这个 span。
     # 选项各组都有 .tags，不按位置或 class 取；每个标签有一份重叠的 aria-hidden 副本，排除后按精确文字取可见的。
-    # 轮询用，保持精简；整页计数在 filter_diagnostic。
+    # panel 为第一个可见的 .filters-wrapper 的元素框（悬停打开时，光标离开入口与面板即收起，接近“图文”的轨迹限定在
+    # 两者的并集内，#81）。轮询用，保持精简；整页计数在 filter_diagnostic。
     "filter_state": """(label) => {
         const labels = ['筛选', '已筛选'];
         const textOf = (node) => (node.innerText || node.textContent || '').trim();
@@ -250,6 +251,7 @@ DOM_SCRIPTS: dict[str, str] = {
             entry_text: span ? textOf(span) : '',
             entry: center(span),
             panel_visible: visible(document.querySelector('.filters-wrapper')),
+            panel: center(Array.from(document.querySelectorAll('.filters-wrapper')).find(visible) || null),
             option: center(option),
         };
     }""",

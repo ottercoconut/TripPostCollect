@@ -218,6 +218,40 @@ def test_click_can_stop_after_settling_and_press_does_not_settle_again():
     assert pressed == [("down",), ("wait", plan.hold_ms), ("up",)]
 
 
+def _inside(box: hp.Box, x: float, y: float) -> bool:
+    return box.left <= x <= box.left + box.width and box.top <= y <= box.top + box.height
+
+
+def test_click_with_a_region_keeps_every_trajectory_point_inside_the_union():
+    """#81：悬停打开的筛选面板，从入口到面板里的“图文”，主移动、越过或没够到的落点与修正段的每个点都在入口框与
+    面板框的并集内；落点与不限定时相同，事件间隔、静止与按住时长仍按样本取值。不限定时多数轨迹会离开并集。"""
+    entry = hp.Box(1186.0, 90.0, 28.0, 20.0)
+    panel = hp.Box(664.0, 110.0, 558.0, 170.0)
+    option = hp.Box(676.0, 188.0, 48.0, 24.0)
+    page = RecordingPage()
+    left = 0
+    for seed in SEEDS:
+        free, bound = (hp.HumanPointer(page, rng=random.Random(seed), drift_sign=1) for _ in range(2))
+        free.position = bound.position = (1200.0, 98.0)
+        unconstrained = asyncio.run(free.plan_click(option))
+        plan = asyncio.run(bound.plan_click(option, region=(entry, panel)))
+        assert plan.point == unconstrained.point and plan.moves[-1][:2] == plan.point
+        assert all(_inside(entry, x, y) or _inside(panel, x, y) for x, y, _ in plan.moves)
+        assert min(_gaps(list(plan.moves))) >= hp.FRAME_MS * (1 - hp.FRAME_JITTER) - 1e-6
+        assert hp.SETTLE_MS[0] <= plan.settle_ms <= hp.SETTLE_MS[1] and hp.HOLD_MS[0] <= plan.hold_ms <= hp.HOLD_MS[1]
+        left += any(not (_inside(entry, x, y) or _inside(panel, x, y)) for x, y, _ in unconstrained.moves)
+    assert left > len(SEEDS) / 2
+
+
+def test_union_clamp_keeps_points_inside_and_moves_others_to_the_nearest_box():
+    entry, panel = hp.Box(100.0, 0.0, 20.0, 20.0), hp.Box(0.0, 20.0, 200.0, 100.0)
+    assert hp._clamp_point((110.0, 10.0), (entry, panel)) == (110.0, 10.0)
+    assert hp._clamp_point((50.0, 18.0), (entry, panel)) == (50.0, 21.0)  # 面板上方：夹到面板上沿内 1px
+    assert hp._clamp_point((98.0, 5.0), (entry, panel)) == (101.0, 5.0)  # 入口左侧：夹到入口左沿内 1px
+    assert hp.Box(0.0, 0.0, 50.0, 50.0).intersect(hp.Box(40.0, 40.0, 50.0, 50.0)) == hp.Box(40.0, 40.0, 10.0, 10.0)
+    assert hp.Box(0.0, 0.0, 10.0, 10.0).intersect(hp.Box(20.0, 0.0, 5.0, 5.0)) is None
+
+
 # 触控板手势 -----------------------------------------------------------------
 
 def _body(events: list[tuple[int, int]]) -> list[int]:

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import math
 import random
 import time
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional, Union
 import weakref
 
 RANDOM = random.SystemRandom()
@@ -117,6 +117,16 @@ class Box(NamedTuple):
             raise ElementNotInView("element has no visible box")
         return cls(float(value["x"]), float(value["y"]), float(value["width"]), float(value["height"]))
 
+    def intersect(self, other: "Box") -> Optional["Box"]:
+        left, top = max(self.left, other.left), max(self.top, other.top)
+        right = min(self.left + self.width, other.left + other.width)
+        bottom = min(self.top + self.height, other.top + other.height)
+        return Box(left, top, right - left, bottom - top) if right > left and bottom > top else None
+
+
+# 轨迹的限定范围：一个矩形，或若干矩形的并集（例如悬停打开的筛选面板与它的入口，#81）。
+Bounds = Union[Box, tuple[Box, ...]]
+
 
 class ElementNotInView(RuntimeError):
     """元素没有可见框，或滚轮手势在上限内没能把它滚进可视区；调用方按原有失败路径处理。"""
@@ -188,9 +198,12 @@ def _progress_curve(peak: float) -> Callable[[float], float]:
     return curve
 
 
-def _clamp_point(point: tuple[float, float], bounds: Optional[Box]) -> tuple[float, float]:
+def _clamp_point(point: tuple[float, float], bounds: Optional[Bounds]) -> tuple[float, float]:
+    """把点夹进范围内（离边 1px）。范围为若干矩形时取并集：已在某个矩形内的点不动，否则夹到最近的矩形上。"""
     if bounds is None:
         return point
+    if not isinstance(bounds, Box):
+        return min((_clamp_point(point, box) for box in bounds), key=lambda clamped: math.dist(clamped, point))
     return (
         min(max(point[0], bounds.left + 1), bounds.left + bounds.width - 1),
         min(max(point[1], bounds.top + 1), bounds.top + bounds.height - 1),
@@ -210,7 +223,7 @@ def stroke_ms(dist: float, rng: random.Random, *, correction: bool = False) -> f
 
 def plan_stroke(
     start: tuple[float, float], end: tuple[float, float], duration_ms: float, rng: random.Random,
-    *, bounds: Optional[Box] = None,
+    *, bounds: Optional[Bounds] = None,
 ) -> list[Move]:
     """一笔移动的事件；末事件恰在 end，事件间隔为一帧（带 ±3% 抖动），太小的位移并入下一事件。"""
     sx, sy = start
@@ -252,10 +265,11 @@ def plan_stroke(
 
 
 def plan_approach(
-    start: tuple[float, float], end: tuple[float, float], rng: random.Random, *, bounds: Optional[Box] = None,
+    start: tuple[float, float], end: tuple[float, float], rng: random.Random, *, bounds: Optional[Bounds] = None,
 ) -> list[Move]:
     """接近目标：一段快速主移动落在目标附近（多数越过、少数没够到），停一下，再 1–2 次小幅修正到目标；
-    段间停顿并入下一段首个事件的等待，停顿期间没有事件。60px 以内一笔到位。"""
+    段间停顿并入下一段首个事件的等待，停顿期间没有事件。60px 以内一笔到位。给出 `bounds` 时，主移动与修正段的
+    每个点、越过或没够到的落点和第二次修正的中间点都夹回范围内（时长按夹回后的距离算）。"""
     dist = math.hypot(end[0] - start[0], end[1] - start[1])
     if dist < MIN_STEP_PX:
         return []
@@ -511,13 +525,18 @@ class HumanPointer:
         )
         return entry, self.rng.uniform(*ENTRY_PAUSE_MS), entry, view
 
-    async def plan_click(self, box: Box, *, within: Optional[tuple[float, float]] = None) -> ClickPlan:
+    async def plan_click(
+        self, box: Box, *, within: Optional[tuple[float, float]] = None, region: tuple[Box, ...] = (),
+    ) -> ClickPlan:
+        """计划一次点击。接近轨迹默认限定在视口内；给出 `region`（若干矩形，取并集后与视口相交）时限定在其中，
+        调用方须保证当前光标与 `box` 都在区域内。时长、事件间隔与落点分布不受影响。"""
         entry, entry_pause, start, view = await self._start()
         point = click_point(box, self.rng, within=within)
+        bounds: Bounds = tuple(clip for area in region if (clip := area.intersect(view)) is not None) or view
         return ClickPlan(
             entry=entry,
             entry_pause_ms=entry_pause,
-            moves=tuple(plan_approach(start, point, self.rng, bounds=view)),
+            moves=tuple(plan_approach(start, point, self.rng, bounds=bounds)),
             point=point,
             box=box,
             settle_ms=_bounded_lognormal(self.rng, *SETTLE_MS),

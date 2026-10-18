@@ -442,9 +442,15 @@ child `summary.json` 的
   面板已因悬停打开且有“图文”就不再按下入口（按下会把它关上，#81），只记一行 info 日志
   `Filter panel opened on hover`，不另写账本动作；否则按下入口，再按 0.25 秒轮询最多 20 次等面板与选项出现，
   最后一次读到面板可见却没有选项为 `filter_option_missing`，否则为 `filter_panel_not_opened`。随后按精确文字
-  点选“图文”（各组 `.tags` 结构相同，不按位置），以入口文字变为“已筛选”且截获到目标会话第 1 页（5 项
-  `filters`：`sort_type=general`、`filter_note_type=普通笔记`，其余三项“不限”）判定成功。入口始终未出现、
-  面板未打开、选项缺失或点选后未确认都只算本次尝试失败，重试一次后报 `target_filter_not_applied`。面板不会
+  点选“图文”（各组 `.tags` 结构相同，不按位置）。面板由悬停打开时，光标离开入口与面板就会收起（第 6 轮
+  实测 2026-10-18：悬停打开后第 1 次点选落空、等满约 30 秒报 `filter_not_confirmed`，失败时 `panel_count=0`）：
+  从入口到“图文”这一段的接近轨迹（主移动、越过或没够到的落点与修正段）每个点都夹在入口框（`span`）与面板框
+  （第一个可见的 `.filters-wrapper`）的并集内，时长、事件间隔与落点分布照常；按下入口打开的照常接近。两种情况
+  都在到达“图文”并静止后、按下前再读一次状态，面板仍可见且选项仍在才按下，否则不按，本次尝试立即以
+  `filter_panel_closed_before_option` 失败并重试（账本里这次的 `note_type` 动作没有对应的按下）。以入口文字变为
+  “已筛选”且截获到目标会话第 1 页（5 项 `filters`：`sort_type=general`、`filter_note_type=普通笔记`，其余三项
+  “不限”）判定成功。入口始终未出现、面板未打开、选项缺失、点选前面板已收起或点选后未确认都只算本次尝试失败，
+  重试一次后报 `target_filter_not_applied`。面板不会
   自动收起，任何滚动之前再点一次入口并确认收起，失败重试一次后报 `filter_panel_not_closed`；目标会话第 1 页
   的关键词与目标不符时重新输入一次，仍不符报 `search_keyword_mismatch`。三者都以
   `xhs_navigation_recovery_failed:<code>` 停止。
@@ -453,10 +459,11 @@ child `summary.json` 的
   （`panel_visible_count`；轮询的 `panel_visible` 只看第一个）、精确文字节点个数，视口尺寸与滚动位置，以及至多
   2 条文字节点的 6 层祖先链（class 内长字母数字片段遮为 `<id>`），不含正文或地址。
   - 每次失败的打开或点选尝试（包括第 1 次失败、重试成功）写一条，`outcome` 为 `attempt_<n>:<子原因>`
-    （`filter_entry_missing`、`filter_panel_not_opened`、`filter_option_missing` 或 `filter_not_confirmed`），另带
-    `moments`：接近入口前（`before_approach`）、光标到达入口静止后按下前（`before_press`）、按下后第 1 次轮询
-    （`first_poll`）与轮询结束时（`poll_end`）的 `panel_visible`、`option`（布尔）与 `entry_text`（只取“筛选”
-    “已筛选”或空串）；入口始终未出现时 `moments` 为空，悬停已打开时只到 `before_press`。日志对应一行不含地址的
+    （`filter_entry_missing`、`filter_panel_not_opened`、`filter_option_missing`、`filter_panel_closed_before_option`
+    或 `filter_not_confirmed`），另带 `moments`：接近入口前（`before_approach`）、光标到达入口静止后按下前
+    （`before_press`）、按下后第 1 次轮询（`first_poll`）与轮询结束时（`poll_end`）、到达“图文”静止后按下前
+    （`before_option_press`）的 `panel_visible`、`option`（布尔）与 `entry_text`（只取“筛选”“已筛选”或空串）；
+    入口始终未出现时 `moments` 为空，悬停已打开时没有两次轮询。日志对应一行不含地址的
     `Target filter attempt <n> failed`，带同样的计数与 `moments`。
   - 两个筛选停止码在停止前再追加一条最终诊断，`outcome` 为最后一次尝试的子原因或 `filter_panel_not_closed`，
     不带 `moments`；日志同时有一行不含地址的 `Search filter failed`。

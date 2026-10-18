@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+import random
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +16,7 @@ import trippostcollect.platforms.xhs.core as xhs_core
 import trippostcollect.platforms.xhs.navigation as xhs_navigation
 import trippostcollect.platforms.xhs.scan as xhs_scan
 import trippostcollect.runtime.behavior as runtime_behavior
-from support.xhs_fake_site import FILTER_ENTRY, FILTER_OPTION, LIST_TOP, XhsFakeSite, inside, note
+from support.xhs_fake_site import FILTER_ENTRY, FILTER_OPTION, FILTER_PANEL, LIST_TOP, XhsFakeSite, inside, note
 from trippostcollect.application.candidates import AdaptiveAccumulator
 from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.evidence import write_evidence
@@ -561,10 +562,62 @@ def test_filter_option_missing_on_first_attempt_reopens_the_panel_and_records_th
     assert "xiaohongshu.com" not in warning and not any("Search filter failed" in r.getMessage() for r in caplog.records)
 
 
-def test_filter_panel_opened_by_hovering_the_entry_is_used_without_pressing_it(tmp_path, caplog):
+def _record_pointer(harness: Harness) -> list[tuple]:
+    """主页面的移动与抬起按发生顺序记成 ("move", x, y, 移动后面板是否开着) / ("up", x, y)，筛选账本动作记成
+    ("action", filter)。"""
+    events: list[tuple] = []
+    site = harness.site
+    mouse = site.page.mouse
+    move, up = mouse.move, mouse.up
+    record = harness.crawler._record_trigger_action
+
+    def recording_action(action, target, **kwargs):
+        if action == "apply_filter":
+            events.append(("action", target.get("filter")))
+        return record(action, target, **kwargs)
+
+    async def recording_move(x: float, y: float, steps: int = 1) -> None:
+        await move(x, y, steps)
+        events.append(("move", x, y, site.panel_visible))
+
+    async def recording_up() -> None:
+        events.append(("up", *site.mouse_position))
+        await up()
+
+    mouse.move, mouse.up = recording_move, recording_up
+    harness.crawler._record_trigger_action = recording_action
+    return events
+
+
+def _option_approach(events: list[tuple]) -> list[tuple]:
+    """最后一次 note_type 动作之后、按下“图文”之前的移动（即入口到选项这一段）。"""
+    start = max(index for index, event in enumerate(events) if event == ("action", "note_type"))
+    pressed = next(
+        index for index, event in enumerate(events)
+        if index > start and event[0] == "up" and inside(FILTER_OPTION, *event[1:])
+    )
+    return events[start + 1:pressed]
+
+
+def _hover_site(seed: int) -> XhsFakeSite:
+    """悬停打开面板、光标离开入口与面板即收起的站点；主页面光标用固定种子。"""
     site = XhsFakeSite(KEYWORD, _pages(1, 4))
     site.hover_opens_panel = True
+    xhs_scan.pointer_for(site.page).rng = random.Random(seed)
+    return site
+
+
+def _in_hover_region(x: float, y: float) -> bool:
+    return inside(FILTER_ENTRY, x, y) or inside(FILTER_PANEL, x, y)
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_filter_panel_opened_on_hover_is_used_without_pressing_and_the_path_to_the_option_stays_inside_it(
+    tmp_path, caplog, seed,
+):
+    site = _hover_site(seed)
     harness = Harness(tmp_path, site)
+    events = _record_pointer(harness)
 
     with caplog.at_level(logging.INFO, logger="MediaCrawler"):
         harness.run()
@@ -572,11 +625,63 @@ def test_filter_panel_opened_by_hovering_the_entry_is_used_without_pressing_it(t
     assert harness.processed == [f"n1-{index}" for index in range(4)]
     filters = [line["target"].get("filter") for line in harness.ledger() if line.get("action") == "apply_filter"]
     assert filters == ["panel_open", "note_type", "panel_close"]
-    entry_clicks = [index for index, point in enumerate(site.click_points) if inside(FILTER_ENTRY, *point)]
-    option_click = next(index for index, point in enumerate(site.click_points) if inside(FILTER_OPTION, *point))
-    assert entry_clicks and min(entry_clicks) > option_click  # 只有收面板时按过入口
-    assert site.panel_opens == 1 and not _filter_diagnostics(harness)
+    # 入口与第一次按下之间没有按下：面板由悬停打开。入口到“图文”这一段的每个轨迹点都在入口与面板的并集内，面板一直开着。
+    actions = [event for event in events[events.index(("action", "panel_open")):] if event[0] != "move"]
+    assert actions[:2] == [("action", "panel_open"), ("action", "note_type")]
+    assert actions[2][0] == "up" and inside(FILTER_OPTION, *actions[2][1:])
+    segment = _option_approach(events)
+    assert len(segment) > 5
+    assert all(event[0] == "move" and _in_hover_region(*event[1:3]) and event[3] for event in segment)
+    assert not _filter_diagnostics(harness)
     assert any("opened on hover" in record.getMessage() for record in caplog.records)
+
+
+def test_hover_panel_closed_before_the_option_press_fails_the_attempt_at_once_and_the_retry_succeeds(
+    tmp_path, monkeypatch, caplog,
+):
+    # 第 1 次尝试不限定轨迹：越过入口左沿离开并集，面板收起；复核后不按下，立即重试（不等目标会话第 1 页）。
+    site = _hover_site(0)
+    harness = Harness(tmp_path, site)
+    events = _record_pointer(harness)
+    region = xhs_scan._hover_region
+    calls = []
+
+    def first_unconstrained(state):
+        calls.append(state)
+        return () if len(calls) == 1 else region(state)
+
+    monkeypatch.setattr(xhs_scan, "_hover_region", first_unconstrained)
+    waits = []
+    await_page_one = harness.crawler._await_target_page_one
+
+    async def counting_wait(*, after_seq):
+        waits.append(after_seq)
+        return await await_page_one(after_seq=after_seq)
+
+    harness.crawler._await_target_page_one = counting_wait
+
+    with caplog.at_level(logging.INFO, logger="MediaCrawler"):
+        harness.run()
+
+    assert harness.processed == [f"n1-{index}" for index in range(4)]
+    filters = [line["target"].get("filter") for line in harness.ledger() if line.get("action") == "apply_filter"]
+    assert filters == ["panel_open", "note_type", "panel_open", "note_type", "panel_close"]
+    presses = [index for index, event in enumerate(events) if event[0] == "up" and inside(FILTER_OPTION, *event[1:])]
+    assert len(presses) == 1 and len(calls) == 2 and len(waits) == 1
+    # 第 1 次的入口到选项：离开并集即收起，到选项上不按下；第 2 次悬停重新打开，这一段留在并集内。
+    first = events.index(("action", "note_type"))
+    second = events.index(("action", "panel_open"), first)
+    assert not any(event[0] == "up" for event in events[first:second])
+    assert any(event[0] == "move" and not _in_hover_region(*event[1:3]) for event in events[first:second])
+    assert not events[second - 1][3]
+    assert all(_in_hover_region(*event[1:3]) and event[3] for event in _option_approach(events))
+    (diagnostic,) = _filter_diagnostics(harness)
+    assert diagnostic["outcome"] == "attempt_1:filter_panel_closed_before_option"
+    assert diagnostic["moments"]["before_press"] == {"panel_visible": True, "option": True, "entry_text": "筛选"}
+    assert diagnostic["moments"]["before_option_press"] == {"panel_visible": False, "option": False, "entry_text": "筛选"}
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("attempt 1 failed: filter_panel_closed_before_option" in message for message in messages)
+    assert not any("Target filter not confirmed" in message for message in messages)
 
 
 def test_scroll_wheel_lands_inside_the_result_list_rectangle(tmp_path):
