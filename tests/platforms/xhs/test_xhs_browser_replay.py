@@ -44,7 +44,15 @@ from trippostcollect.platforms.xhs import scan as xhs_scan
 from trippostcollect.platforms.xhs import session as xhs_session
 from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
 from trippostcollect.records.sanitization import sanitize_export_item
-from trippostcollect.runtime.human_pointer import pointer_for
+from trippostcollect.runtime.human_pointer import (
+    FRAME_JITTER,
+    FRAME_MS,
+    GESTURE_MAX_PX,
+    GESTURE_MIN_EVENTS,
+    GESTURE_PEAK_MAX,
+    HOLD_MS,
+    pointer_for,
+)
 from trippostcollect.runtime.visit_ledger import iter_ledger_lines
 from trippostcollect.xhs.engagement import engagement_observation
 from trippostcollect.xhs.search_target import is_target_search
@@ -257,20 +265,54 @@ def run_gate(crawler, state_path, tmp_path) -> dict:
     )
 
 
+def median(values: list[float]) -> float:
+    return sorted(values)[len(values) // 2]
+
+
 def assert_pointer_events_match_the_sample(events: list[dict], crawler) -> None:
-    """合成事件的结构与 Mac 触控板样本一致：移动约每帧一个、落点不在几何中心、按住 81–132ms、pressure 0.5 与
-    1×1 接触面、整数点击坐标；滚轮每个手势至少 8 个事件、deltaMode 0、|deltaY| 不超过 60。"""
+    """合成指针与滚轮对照 Mac 触控板样本（#84）。时长与手势的计划值取自账本的指针记录，严格落在 human_pointer 的
+    样本区间内；页面实测值另含 CDP 派发与渲染进程排队，CI 负载高时单次会远超计划（#96），只核对先后与中位数的宽窗口。
+    与负载无关的结构逐个核对：pressure 0.5 与 1×1 接触面、整数点击坐标、落点不在几何中心、deltaMode 0、整数 deltaY。"""
+    pointers = [
+        (line["action"], line["pointer"]) for line in ledger_lines(crawler)
+        if line.get("kind") == "action" and line.get("pointer")
+    ]
+    # 计划：每个移动事件前至少等一帧（带抖动；并入的小位移与段间停顿只会更长），按住时长在样本区间内。
+    for _action, pointer in pointers:
+        if "moves" in pointer:
+            assert pointer["approach_ms"] >= pointer["moves"] * FRAME_MS * (1 - FRAME_JITTER) - 0.5, pointer
+    presses = [(action, pointer["hold_ms"]) for action, pointer in pointers if "hold_ms" in pointer]
+    assert presses and all(HOLD_MS[0] <= hold <= HOLD_MS[1] for _action, hold in presses), presses
+    # 计划：列表滚动的手势各不超过 400px、位移之和等于动作的 delta_y，不小于 8px 的手势至少 8 个事件。
+    scan_scrolls = [line for line in actions(crawler, "scroll") if "delta_y" in line["target"]]
+    assert scan_scrolls
+    for line in scan_scrolls:
+        planned = line["pointer"]["gestures"]
+        assert sum(gesture["delta_y"] for gesture in planned) == line["target"]["delta_y"]
+        for gesture in planned:
+            assert abs(gesture["delta_y"]) <= GESTURE_MAX_PX, gesture
+            assert abs(gesture["delta_y"]) < GESTURE_MIN_EVENTS or gesture["events"] >= GESTURE_MIN_EVENTS, gesture
+
     events = sorted(events, key=lambda event: event["t"])
     moves = [event for event in events if event["type"] == "move"]
     gaps = [later["t"] - earlier["t"] for earlier, later in zip(moves, moves[1:]) if later["doc"] == earlier["doc"]]
-    assert len(gaps) > 50 and 12 <= sorted(gaps)[len(gaps) // 2] <= 25
+    # 实测：负载高时 Chromium 把 pointermove 并到帧上、CDP 往返变长，间隔变成整帧或更长。中位数窗口取半帧到 4 帧：
+    # 不等待的连发仍低于下限，要过半的移动各晚 3 帧以上才会越过上限。
+    assert len(gaps) > 50 and FRAME_MS / 2 <= median(gaps) <= FRAME_MS * 4, median(gaps)
     downs = [event for event in events if event["type"] == "down"]
     ups = [event for event in events if event["type"] == "up"]
-    assert len(downs) == len(ups) >= len(actions(crawler, "click_card")) + len(actions(crawler, "apply_filter"))
-    for down, up in zip(downs, ups):
+    assert [event["type"] for event in events if event["type"] in {"down", "up"}] == ["down", "up"] * len(downs)
+    # 每次按下都来自账本里的一个计划；筛选以外的计划都会按下（悬停已打开面板时不按入口，按“图文”前面板已收起时不按）。
+    assert sum(action != "apply_filter" for action, _hold in presses) <= len(downs) <= len(presses)
+    for down in downs:
         assert down["pressure"] == 0.5 and down["width"] == 1 and down["height"] == 1
         assert float(down["x"]).is_integer() and float(down["y"]).is_integer()
-        assert 70 <= up["t"] - down["t"] <= 200, up["t"] - down["t"]
+    # 实测：pointerdown 到 pointerup 是按住时长加派发与排队，负载只会拉长、不会缩短。逐个只要求 up 晚于 down；中位数
+    # 下限比计划下限低 10ms（计时器提前触发与时间戳粗化的余量），上限取计划上限的两倍，要过半的按压各多出 135ms 以上
+    # 才会越界，没有按住（约 0ms）仍低于下限。
+    holds = [up["t"] - down["t"] for down, up in zip(downs, ups)]
+    assert all(hold > 0 for hold in holds), holds
+    assert HOLD_MS[0] - 10 <= median(holds) <= HOLD_MS[1] * 2, holds
     centered = [
         down for down in downs if down["rect"] is not None
         and abs(down["x"] - (down["rect"]["left"] + down["rect"]["width"] / 2)) < 1
@@ -285,9 +327,14 @@ def assert_pointer_events_match_the_sample(events: list[dict], crawler) -> None:
         if not gestures or event["t"] - gestures[-1][-1]["t"] > 200 or event["doc"] != gestures[-1][-1]["doc"]:
             gestures.append([])
         gestures[-1].append(event)
-    assert gestures and all(len(gesture) >= 8 for gesture in gestures), [len(gesture) for gesture in gestures]
-    assert {event["mode"] for event in wheels} == {0}
-    assert all(abs(event["dy"]) <= 60 and float(event["dy"]).is_integer() for event in wheels)
+    assert gestures and {event["mode"] for event in wheels} == {0}
+    assert all(float(event["dy"]).is_integer() for event in wheels)
+    # 实测：渲染进程忙时连续的滚轮事件会合并（位移相加、事件变少），中途停顿超过 200ms 会把一个手势切成两段，只看
+    # 中位数。120px 以上的计划手势约有 26 个以上事件、逐手势 |deltaY| 中位数约在 10 以内；要过半的手势被合并到 8 个
+    # 事件以下，或过半的事件超过计划峰值上限 50 才会越界，一次滚完或少数几大步仍会被发现。
+    sizes = [len(gesture) for gesture in gestures]
+    assert median(sizes) >= GESTURE_MIN_EVENTS, sizes
+    assert median([abs(event["dy"]) for event in wheels]) <= GESTURE_PEAK_MAX
 
 
 def assert_staged_png(site: XhsOfflineSite, crawler, note_id: str, count: int) -> None:
