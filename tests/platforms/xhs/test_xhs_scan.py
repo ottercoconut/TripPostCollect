@@ -820,7 +820,9 @@ def test_frontend_restart_without_filter_reapplies_it_and_finishes_on_the_new_se
 
 def _fail_page_two_once(harness: Harness) -> list[tuple[str, str]]:
     """目标会话第 2 页的第一次请求以 net::ERR_INTERNET_DISCONNECTED 失败；网络暂停立即恢复，前端只剩第 1 页。
-    返回记录 (阶段, 失败文本) 的列表。"""
+    返回记录 (阶段, 失败文本) 的列表。
+
+    假前端在同一手势的后续滚轮事件里会重新请求并拿到第 2 页；暂停丢掉它后，重触发再请求一次，所以第 2 页送达两次。"""
     site = harness.site
     original_respond = site.respond_page
     failed = []
@@ -859,6 +861,13 @@ def test_search_request_network_failure_pauses_and_retriggers(tmp_path, monkeypa
         if line["kind"] == "action" and line["action"] == "scroll" and line["target"].get("phase") == "retrigger"
     ]
     assert retrigger
+    # #95：失败请求不写访问；重触发后重复送达的第 2 页同样欠一次翻页停顿，下一次滚动触发第 3 页之前先停。
+    target_pages = [
+        line["search_page"] for line in harness.ledger() if line["kind"] == "visit" and line.get("is_target") is True
+    ]
+    assert target_pages == [1, 2, 2, 3]
+    gate = harness.gate()
+    assert gate["content_visit_ok"] is True and gate["problem_counts"] == {}, gate
 
 
 LIST_RECT = {"left": 40.0, "top": 0.0, "right": 1240.0, "bottom": 900.0}
@@ -908,6 +917,7 @@ def test_first_row_passed_by_the_network_retrigger_is_backfilled_upward_and_the_
         for message in messages
     )
     _assert_wheels_inside_the_list(site)
+    assert harness.gate()["problem_counts"] == {}
 
 
 def test_item_the_frontend_never_renders_is_backfilled_up_to_the_limit_then_stops(tmp_path, monkeypatch, caplog):

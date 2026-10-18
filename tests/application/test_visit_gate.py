@@ -398,6 +398,33 @@ def test_scroll_triggered_page_needs_page_pause_after_previous_page(tmp_path, pa
     assert result["required_stages"] == ["search_page"]
 
 
+@pytest.mark.parametrize("pause_after_redelivery", [False, True])
+def test_redelivered_previous_page_needs_its_own_page_pause(tmp_path, pause_after_redelivery):
+    """#95：第 2 页请求网络失败（失败请求不写访问）后，第 2 页送达两次：一次在网络暂停之前，一次由恢复后的重触发滚动
+    带出。G3 从第 2 页最近一次送达算起：之后触发第 3 页的第一次滚动之前须另有翻页停顿。"""
+    run = Run(tmp_path / "ledger.jsonl")
+    run.enter([("n1", "normal")])
+    run.pause("search_page", "completed")
+    behavior = run.action("scroll", {"phase": "behavior_stage"})
+    run.search(2, [("n2", "normal")], trigger=behavior)
+    run.pause("search_page", "completed")
+    retrigger = run.action("scroll", {"phase": "retrigger", "delta_y": 720})
+    run.search(2, [("n2", "normal")], trigger=retrigger)
+    if pause_after_redelivery:
+        run.pause("search_page", "completed")
+    backfill = run.action("scroll", {"phase": "backfill", "delta_y": -720})
+    last = run.search(3, [], trigger=backfill, has_more=False)
+    result = check(run, [], tmp_path / "absent.jsonl",
+                   stop={"stop_reason": "source_exhausted", "source_visit_id": last})
+    if pause_after_redelivery:
+        assert result["content_visit_ok"] is True, result
+        assert result["problem_counts"] == {}
+    else:
+        assert result["problem_counts"] == {"G3": 1}
+        assert result["sample_ids"] == [f"G3:{last}"]
+    assert result["frontend_self_loads"] == 0
+
+
 def test_missing_previous_page_fails_page_rule(tmp_path):
     run = Run(tmp_path / "ledger.jsonl")
     run.enter([("n1", "normal")])

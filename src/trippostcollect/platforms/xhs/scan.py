@@ -728,6 +728,9 @@ class XhsScanMixin:
     def _on_search_captured(self, captured: CapturedResponse) -> None:
         """写搜索访问；目标会话的页按序登记，has_more=true 的页置“欠一次翻页停顿”。
 
+        已登记页的重复送达（例如前端在网络恢复后重新请求同一页）不再登记，但同样置欠账：门禁 G3 从第 k−1 页
+        最近一次送达算起，要求下一次程序滚动之前有翻页停顿（#95）。
+
         每个响应的全部条目（含非目标会话、非笔记条目）按 id 记下出处，只留在内存中供未登记卡片诊断。
         """
         scan = self._scan
@@ -789,7 +792,11 @@ class XhsScanMixin:
             scan.sessions[key] = session
             if not scan.entering and scan.target is not None:
                 scan.pending_session = session
-        if not session.is_target or page_no in session.pages:
+        if not session.is_target:
+            return
+        if has_more is True:
+            scan.owed_page_seq = max(scan.owed_page_seq, captured.seq)
+        if page_no in session.pages:
             return
         if page_no != (max(session.pages) if session.pages else 0) + 1:
             raise PlatformRuntimeError(
@@ -809,8 +816,6 @@ class XhsScanMixin:
         session.pages[page_no] = page
         if session is scan.target:
             scan.registry.register(page)
-        if has_more is True:
-            scan.owed_page_seq = max(scan.owed_page_seq, captured.seq)
 
     # 扫描一步 -------------------------------------------------------------------
 
