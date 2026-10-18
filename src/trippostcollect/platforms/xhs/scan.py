@@ -79,6 +79,8 @@ XHS_UNREGISTERED_DIAGNOSTIC_IDS = 8
 XHS_UNREGISTERED_DIAGNOSTIC_ENTRIES = 6
 # “搜索项从未渲染”诊断最多描述的 ID 个数（出处条数同上）。
 XHS_UNRENDERED_DIAGNOSTIC_IDS = 10
+# 向上补漏的上限：已读到、滑到上方仍未决定的卡片每张至多补漏这么多次；已越过的页里从未读到的项，该页至多向上
+# 补漏滚动这么多步（见 `_backfill_unread`）。
 XHS_BACKFILL_ATTEMPTS = 3
 XHS_FILTER_POLLS = 20
 XHS_FILTER_POLL_SECONDS = 0.25
@@ -171,6 +173,9 @@ class SearchPage:
     passed: bool = False
     # 首次判为越过时的来源（见 `_mark_observed`、`_handle_list_bottom`），只供诊断。
     passed_by: Optional[dict[str, Any]] = None
+    # 已越过却从未读到的未决定项向上补漏（见 `_backfill_unread`）：仍在找的 ID 与每次补漏滚动后的读数。
+    backfill_pending: set[str] = field(default_factory=set)
+    backfill_steps: list[dict[str, Any]] = field(default_factory=list)
     began: bool = False
     results_paused: bool = False
     finished: bool = False
@@ -858,6 +863,8 @@ class XhsScanMixin:
         band = self._click_band(metrics)
         registered: list[tuple[dict[str, Any], SearchPage, SearchItem]] = []
         unregistered: set[str] = set()
+        pending = tracker.current.backfill_pending if tracker.current is not None else set()
+        backfilled: list[int] = []
         for card in cards:
             note_id = str(card.get("note_id") or "")
             if not note_id:
@@ -873,6 +880,15 @@ class XhsScanMixin:
             registered.append((card, *entry))
             scan.observed_index[note_id] = int(card.get("data_index", -1))
             self._mark_observed(*entry, card, metrics)
+            if note_id in pending:
+                pending.discard(note_id)
+                backfilled.append(scan.observed_index[note_id])
+        if backfilled:
+            logger.info(
+                f"[XiaoHongShuCrawler.scan] Backfill reached unread search items: page={tracker.current.page}, "
+                f"found={len(backfilled)}, index={_index_range(backfilled)}, still_unread={len(pending)}, "
+                f"steps={len(tracker.current.backfill_steps)}"
+            )
         await self._count_unregistered(unregistered, metrics)
         decided = False
         for card, search_page, item in registered:
@@ -1060,7 +1076,7 @@ class XhsScanMixin:
         """当前页中已越到列表可见区上方、却仍未决定的卡片：向上滚回让虚拟列表重新渲染它们。
 
         “上方”指仍可见但封面中心高于可点击带，或已不可见且序号小于最小可见序号；可点击带以下的卡片
-        由向下滚动处理。
+        由向下滚动处理。已越过的页里从未读到的未决定项见 `_backfill_unread`。
         """
         scan = self._scan
         current = scan.tracker.current
@@ -1090,16 +1106,78 @@ class XhsScanMixin:
                     )
             await self._scroll_feed_step(-1, phase="backfill")
             return True
-        unrendered = [note_id for note_id in undecided if note_id not in scan.observed_index]
-        if current.passed and unrendered:
-            # 已越过该页，但页内未知项从未出现在列表中：该页不可能完成，不能推断耗尽。
+        unread = [note_id for note_id in undecided if note_id not in scan.observed_index]
+        if current.passed and unread:
+            return await self._backfill_unread(current, unread, undecided=len(undecided), cards=cards, metrics=metrics)
+        return False
+
+    async def _backfill_unread(
+        self,
+        current: SearchPage,
+        unread: list[str],
+        *,
+        undecided: int,
+        cards: list[dict[str, Any]],
+        metrics: dict[str, Any],
+    ) -> bool:
+        """已越过的页里从未读到的未决定项：先向上补漏，补不到才停止（#92）。
+
+        扫描以外的滚动（重触发、行为阶段、关闭浮层后前端恢复位置）可能在读卡片之前就越过一行。补漏用同一种滚轮手势
+        在列表区域内向上滚一步（`phase=backfill_unread`，写账本），立即读一次可见卡片记下读数，交回扫描：读到的项照常登记、
+        决定。列表已到顶或本页已补漏 XHS_BACKFILL_ATTEMPTS 步仍没读到，写诊断后按 `xhs_search_items_unresolved` 停止；
+        这些项不记候选失败，也不跳过。诊断的补漏记录带目标：这些项中页内位置最靠前者的 data-index 下限（见
+        `_unread_index_floor`），与各步可见范围对照即知是否已滚到它应在的位置。
+        """
+        current.backfill_pending.update(unread)
+        at_top = int(metrics.get("scroll_y") or 0) <= 0
+        if at_top or len(current.backfill_steps) >= XHS_BACKFILL_ATTEMPTS:
+            backfill = {
+                "attempts": len(current.backfill_steps),
+                "limit": XHS_BACKFILL_ATTEMPTS,
+                "target_index": self._unread_index_floor(current, unread),
+                "at_top": at_top,
+                "steps": list(current.backfill_steps),
+            }
             await self._record_items_never_rendered(
-                current, unrendered, undecided=len(undecided), cards=cards, metrics=metrics,
+                current, unread, undecided=undecided, cards=cards, metrics=metrics, backfill=backfill,
             )
             raise PlatformRuntimeError(
                 "XHS search items were never rendered", code="xhs_search_items_unresolved",
             )
-        return False
+        after = await self._scroll_feed_step(-1, phase="backfill_unread")
+        seen = await dom_visible_cards(self.context_page)
+        current.backfill_steps.append(
+            {
+                "scroll_y": after.get("scroll_y"),
+                "visible_index_range": _index_range(int(card.get("data_index", -1)) for card in seen),
+                "at_top": int(after.get("scroll_y") or 0) <= 0,
+            }
+        )
+        return True
+
+    def _unread_index_floor(self, current: SearchPage, unread: list[str]) -> int:
+        """从未读到项中页内位置最靠前者的 data-index 下限：本页已读到的项在它之前为其序号 +1、在它之后为其序号减去
+        页内位置差，更早页已读到的项为其序号 +1，取最大者（至少 0）。页内位置含非笔记条目；没渲染或没有卡片的条目只会
+        让实际序号更靠后，所以是下限。跨页重复的项读到的序号可能属于另一页，不参与。"""
+        scan = self._scan
+        first = min(item.position for item in current.items if item.note_id in unread)
+        pages = current.session.pages.values()
+        repeated = {note_id for note_id, count in Counter(n for page in pages for n in page.note_ids).items() if count > 1}
+        floor = 0
+        for page in pages:
+            if page.page > current.page:
+                continue
+            positions = {item.note_id: item.position for item in page.items}
+            for note_id in page.observed - repeated:
+                index = scan.observed_index.get(note_id)
+                if index is None:
+                    continue
+                position = positions.get(note_id, -1)
+                if page is current and position > first:
+                    floor = max(floor, index - (position - first))
+                else:
+                    floor = max(floor, index + 1)
+        return floor
 
     async def _record_items_never_rendered(
         self,
@@ -1109,13 +1187,15 @@ class XhsScanMixin:
         undecided: int,
         cards: list[dict[str, Any]],
         metrics: dict[str, Any],
+        backfill: dict[str, Any],
     ) -> None:
-        """停止前把当前页从未出现在列表中的未决定项写入导航诊断，并在日志留一行（只诊断，不改判定）。
+        """补漏仍没读到、停止前把当前页从未出现在列表中的未决定项写入导航诊断，并在日志留一行。
 
         每项（至多 XHS_UNRENDERED_DIAGNOSTIC_IDS 个）给出页内位置与卡片类型、目标会话中也含它的其他页、结果列表内
         的卡片读数（card_diagnostic，没有为 nodes=0）与本轮搜索响应中的出处（见 `_response_origins`）。整页给出条目数、
         未决定数、从未出现数、已观察数及其 data-index 范围、已跳过的非笔记卡片数、把本页判为越过的来源（passed_by），
-        以及可见卡片的 data-index 范围、列表滚动位置与可见区。只含 ID、计数、页码、位置与类型。
+        以及可见卡片的 data-index 范围、列表滚动位置与可见区。`backfill` 为补漏记录：已补漏步数与上限、目标 data-index
+        下限、停止时是否到顶，以及每步滚动后的滚动位置、可见卡片 data-index 范围与是否到顶。只含 ID、计数、页码、位置与类型。
         """
         scan = self._scan
         items = {item.note_id: item for item in current.items}
@@ -1156,6 +1236,7 @@ class XhsScanMixin:
                 "scroll_height": metrics.get("scroll_height"),
                 "inner_height": metrics.get("inner_height"),
                 "view_rect": metrics.get("view_rect"),
+                "backfill": backfill,
                 "items": entries,
             },
         )
@@ -1176,7 +1257,9 @@ class XhsScanMixin:
             "[XiaoHongShuCrawler.scan] Search items were never rendered: "
             f"page={current.page}, items={len(current.items)}, undecided={undecided}, never_rendered={len(unrendered)}, "
             f"observed={len(current.observed)}, observed_index={observed_range}, visible_index={visible_range}, "
-            f"passed_by={passed_text}, scroll_y={metrics.get('scroll_y')}/{metrics.get('scroll_height')}; "
+            f"passed_by={passed_text}, scroll_y={metrics.get('scroll_y')}/{metrics.get('scroll_height')}, "
+            f"backfill={backfill['attempts']}/{backfill['limit']}:target={backfill['target_index']}:"
+            f"top={backfill['at_top']}; "
             + ", ".join(summary(entry) for entry in entries)
         )
 

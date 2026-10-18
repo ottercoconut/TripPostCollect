@@ -295,6 +295,8 @@ def test_page_item_that_never_renders_stops_with_an_items_never_rendered_diagnos
         "visible_index_range": [0, 6], "scroll_container": "document", "scroll_y": 0,
         "scroll_height": LIST_TOP + 2 * 360 + 200, "inner_height": 900,
         "view_rect": {"left": 0.0, "top": 0.0, "right": 1280.0, "bottom": 900.0},
+        # 列表已在顶部：不再向上补漏，直接停止。
+        "backfill": {"attempts": 0, "limit": 3, "target_index": 1, "at_top": True, "steps": []},
     }
     assert {key: diagnostic[key] for key in page_fields} == page_fields
     assert diagnostic["outcome"] == "items_never_rendered" and diagnostic["error"] == ""
@@ -316,7 +318,7 @@ def test_page_item_that_never_renders_stops_with_an_items_never_rendered_diagnos
     )
     assert warning.endswith(
         "page=1, items=4, undecided=1, never_rendered=1, observed=3, observed_index=[0, 2], visible_index=[0, 6], "
-        f"passed_by=later_page:p2:index=3, scroll_y=0/{LIST_TOP + 2 * 360 + 200}; "
+        f"passed_by=later_page:p2:index=3, scroll_y=0/{LIST_TOP + 2 * 360 + 200}, backfill=0/3:target=1:top=True; "
         "n1-1(pos=1, type=normal, nodes=0, index=None, other_pages=[2], seen=current:p1:note+current:p2:note)"
     )
     assert "xiaohongshu.com" not in warning and "token" not in warning
@@ -816,9 +818,10 @@ def test_frontend_restart_without_filter_reapplies_it_and_finishes_on_the_new_se
     assert harness.gate()["content_visit_ok"]
 
 
-def test_search_request_network_failure_pauses_and_retriggers(tmp_path, monkeypatch):
-    site = XhsFakeSite(KEYWORD, _pages(2, 8))
-    harness = Harness(tmp_path, site)
+def _fail_page_two_once(harness: Harness) -> list[tuple[str, str]]:
+    """目标会话第 2 页的第一次请求以 net::ERR_INTERNET_DISCONNECTED 失败；网络暂停立即恢复，前端只剩第 1 页。
+    返回记录 (阶段, 失败文本) 的列表。"""
+    site = harness.site
     original_respond = site.respond_page
     failed = []
 
@@ -839,6 +842,13 @@ def test_search_request_network_failure_pauses_and_retriggers(tmp_path, monkeypa
         return True
 
     harness.crawler._pause_for_network_recovery = pause_for_network
+    return pauses
+
+
+def test_search_request_network_failure_pauses_and_retriggers(tmp_path, monkeypatch):
+    site = XhsFakeSite(KEYWORD, _pages(2, 8))
+    harness = Harness(tmp_path, site)
+    pauses = _fail_page_two_once(harness)
 
     harness.run()
 
@@ -849,6 +859,100 @@ def test_search_request_network_failure_pauses_and_retriggers(tmp_path, monkeypa
         if line["kind"] == "action" and line["action"] == "scroll" and line["target"].get("phase") == "retrigger"
     ]
     assert retrigger
+
+
+LIST_RECT = {"left": 40.0, "top": 0.0, "right": 1240.0, "bottom": 900.0}
+
+
+def _scroll_actions(harness: Harness, phase: str) -> list[dict]:
+    return [
+        line["target"] for line in harness.ledger()
+        if line["kind"] == "action" and line["action"] == "scroll" and line["target"].get("phase") == phase
+    ]
+
+
+def _assert_wheels_inside_the_list(site: XhsFakeSite) -> None:
+    area = xhs_behavior.list_area_box({"list_rect": LIST_RECT})
+    assert site.wheel_points
+    for x, y in site.wheel_points:
+        assert area.left <= x <= area.left + area.width and area.top <= y <= area.top + area.height
+
+
+def test_first_row_passed_by_the_network_retrigger_is_backfilled_upward_and_the_scan_continues(
+    tmp_path, monkeypatch, caplog,
+):
+    # #89 / #92：种子 4 下，网络恢复后的重触发在扫描第一次读卡片之前一步滚过第 1 页首行（index 0–3），第 2 页首行
+    # 一出现即把第 1 页判为越过。首行从未读到：先在列表区域内向上补漏，读到后照常决定，扫描继续到来源耗尽。
+    monkeypatch.setattr(xhs_scan, "SCAN_RANDOM", random.Random(4))
+    site = XhsFakeSite(KEYWORD, _pages(2, 8))
+    site.list_rect = dict(LIST_RECT)
+    harness = Harness(tmp_path, site)
+    pauses = _fail_page_two_once(harness)
+    caplog.set_level(logging.INFO, logger="MediaCrawler")
+
+    harness.run()
+
+    assert pauses == [("full_scan", "net::ERR_INTERNET_DISCONNECTED")]
+    assert harness.accumulator.summary()["stop_reason"] == "source_exhausted"
+    assert sorted(harness.processed) == sorted(f"n{page}-{index}" for page in (1, 2) for index in range(8))
+    assert harness.processed[:8] == [f"n1-{index}" for index in (4, 5, 6, 7, 0, 1, 2, 3)]
+    (backfill,) = _scroll_actions(harness, "backfill_unread")
+    assert backfill["delta_y"] < 0 and backfill["scroll_y_before"] > 0
+    assert _scroll_actions(harness, "retrigger")
+    assert not [event for event in harness.crawler._navigation_diagnostics if event["stage"] == "search_scan"]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        message.endswith(
+            "Backfill reached unread search items: page=1, found=4, index=[0, 3], still_unread=0, steps=1"
+        )
+        for message in messages
+    )
+    _assert_wheels_inside_the_list(site)
+
+
+def test_item_the_frontend_never_renders_is_backfilled_up_to_the_limit_then_stops(tmp_path, monkeypatch, caplog):
+    evidence = tmp_path / "behavior_evidence.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(evidence))
+    # 第 5 页的 n5-1 照常出现在响应里，但列表从不渲染；第 6 页首张卡片出现即把第 5 页判为越过。此时列表远离顶部：
+    # 向上补漏满 3 步仍没读到，以原停止码停止，诊断里有补漏记录。
+    site = XhsFakeSite(KEYWORD, _pages(6, 8))
+    site.unrendered_ids = {"n5-1"}
+    site.list_rect = dict(LIST_RECT)
+    harness = Harness(tmp_path, site)
+
+    with caplog.at_level(logging.WARNING, logger="MediaCrawler"), pytest.raises(PlatformRuntimeError) as caught:
+        harness.run()
+
+    assert caught.value.code == "xhs_search_items_unresolved"
+    assert str(caught.value) == "XHS search items were never rendered"
+    assert "n5-1" not in harness.processed and {f"n5-{index}" for index in (0, 2, 3, 4, 5, 6, 7)} <= set(
+        harness.processed
+    )
+    assert not [event for event in harness.events if event[0] == "candidate_skipped"]
+    backfills = _scroll_actions(harness, "backfill_unread")
+    assert len(backfills) == 3 and all(action["delta_y"] < 0 for action in backfills)
+    (diagnostic,) = [event for event in harness.crawler._navigation_diagnostics if event["stage"] == "search_scan"]
+    assert (diagnostic["page"], diagnostic["never_rendered"], diagnostic["undecided"]) == (5, 1, 1)
+    backfill = diagnostic["backfill"]
+    # n5-0（index 32）在它之前，下限为 33；n5-1 不占位置，n5-2 的 index 也是 33。
+    assert {key: backfill[key] for key in ("attempts", "limit", "target_index", "at_top")} == {
+        "attempts": 3, "limit": 3, "target_index": 33, "at_top": False,
+    }
+    steps = backfill["steps"]
+    assert [step["scroll_y"] for step in steps] == [
+        action["scroll_y_before"] + action["delta_y"] for action in backfills
+    ]
+    assert all(step["scroll_y"] > 0 and step["at_top"] is False for step in steps)
+    assert [step["scroll_y"] for step in steps] == sorted((step["scroll_y"] for step in steps), reverse=True)
+    for step in steps:
+        low, high = step["visible_index_range"]
+        assert 0 <= low <= high
+    assert diagnostic["scroll_y"] == steps[-1]["scroll_y"]
+    warning = next(
+        record.getMessage() for record in caplog.records if "Search items were never rendered" in record.getMessage()
+    )
+    assert "page=5, items=8, undecided=1, never_rendered=1" in warning and "backfill=3/3:target=33:top=False;" in warning
+    _assert_wheels_inside_the_list(site)
 
 
 def test_core_search_maps_entry_failure_to_full_scan_runtime_stop(tmp_path, monkeypatch):

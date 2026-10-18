@@ -494,6 +494,12 @@ child `summary.json` 的
   的不点。单步滚动不超过列表可见区高度的 0.8 倍；可见区高于 80px 时单步小于可点击带高度，封面中心一步
   越不过整条带，不会跳过一行。已滑到可点击带上方仍未决定的卡片向上补漏，同一卡片补漏 3 次仍够不着即
   `xhs_search_items_unresolved`。
+- 扫描以外的滚动（网络恢复或验证后的重触发、行为阶段、关闭浮层后前端恢复滚动位置）可能在扫描读卡片之前
+  就越过一行（#89：重触发一步滚过第 1 页首行，第 2 页首行出现即把第 1 页判为越过）。因此已越过的页里从未
+  读到的未决定项先向上补漏（#92）：用同一种滚轮手势在列表区域内向上滚一步（`scroll` 动作 `phase=backfill_unread`，
+  光标照常限定在列表区域），立即读一次可见卡片，交回扫描；读到的项照常登记、决定，日志记一行
+  `Backfill reached unread search items: page=…, found=…, index=[a, b], still_unread=…, steps=…`。列表已到顶，或
+  本页已向上补漏 3 步仍没读到，才按 `xhs_search_items_unresolved` 停止；这些项不记候选失败，也不跳过。
 - 非笔记条目（依据：Mac 人工取证 2026-10-14）：搜索响应里 `model_type` 不是 `note` 的条目（如 `hot_query`
   相关搜索卡，id 不是 24 位十六进制）在列表中同样占一个 `data-index` 位置，渲染为没有封面的
   `section.note-item`。截获响应时把带 id 的非笔记条目登记为该会话、该页的已知非笔记条目；扫描读到本会话
@@ -506,7 +512,7 @@ child `summary.json` 的
 - 运行级停止（都不推断来源耗尽）：有 `data-note-id`、却既不是本会话笔记也不是已知非笔记条目（响应里从未
   出现过），且连续 2 次读数仍未登记的卡片为
   `xhs_search_card_unregistered`；目标会话第 k 页到达时缺第 k−1 页为 `xhs_search_page_gap`；已越过的页内
-  未知项从未渲染、或到底部仍有未决定项为 `xhs_search_items_unresolved`；到底部等不到新页，检查可见状态
+  未知项向上补漏到顶或满 3 步仍没读到、或到底部仍有未决定项为 `xhs_search_items_unresolved`；到底部等不到新页，检查可见状态
   并上下抖动 3 次后仍没有新页为 `xhs_search_load_stalled`；搜索响应未知业务码为 `search_request_failed`。
 - 每页已越过且全部决定后写 `adaptive_batch_completed`；只有本页有新增决定时才发布批次。末页
   `has_more=false` 完成即 `source_exhausted(has_more_false)`，停止事件的 `source_visit_id` 指向该搜索访问。
@@ -658,14 +664,17 @@ child `summary.json` 的
   `xhs_search_card_unregistered` 停止前追加 `stage=search_scan`、`outcome=card_unregistered`，列出每个未登记
   ID 的卡片结构（`data-index`、有无封面、封面路径首段、`tag.class`、在列表可见区的位置）与它在本轮全部搜索
   响应（含非目标会话与非笔记条目，只在内存中保留）中的出处（会话起始序号、是否目标会话、页码、页内位置、
-  `model_type`、卡片类型 `note_card.type`，从未出现为 `null`）；已越过的页内未知项从未渲染而以
-  `xhs_search_items_unresolved` 停止前追加 `stage=search_scan`、`outcome=items_never_rendered`（只诊断，判定不变）：
+  `model_type`、卡片类型 `note_card.type`，从未出现为 `null`）；已越过的页内未知项向上补漏仍没读到而以
+  `xhs_search_items_unresolved` 停止前追加 `stage=search_scan`、`outcome=items_never_rendered`：
   本页页码、条目数、未决定数、从未出现数、已观察数及其 `data-index` 范围、已跳过的非笔记卡片数、可见卡片的
   `data-index` 范围、列表滚动位置与可见区，`passed_by` 为首次把本页判为越过的来源（`later_page` 为后面某页的
   卡片出现：该卡片的页码、ID、页内位置、`data-index`、相对列表可见区顶部的纵坐标与当时的滚动位置；
   `list_bottom` 为末页已到底），`items` 列出至多 10 个从未出现的 ID 的页内位置、卡片类型、目标会话中也含它的
-  其他页（跨页重复）、结果列表内的卡片读数（没有为 `nodes=0`）与同上的响应出处，日志另记一行
-  `Search items were never rendered`；某篇有未截获的正文图时，在记失败行并抛出之前追加 `stage=note_images`、
+  其他页（跨页重复）、结果列表内的卡片读数（没有为 `nodes=0`）与同上的响应出处；`backfill` 为补漏记录：已补漏
+  步数 `attempts` 与上限 `limit`（3）、`target_index`（这些项中页内位置最靠前者的 `data-index` 下限：按本页已读到
+  项的页内位置推算，跨页重复项不参与）、停止时是否到顶 `at_top`，`steps` 为每步滚动后的滚动位置、可见卡片
+  `data-index` 范围与是否到顶。日志另记一行 `Search items were never rendered`（含
+  `backfill=<步数>/<上限>:target=<下限>:top=<是否到顶>`）；某篇有未截获的正文图时，在记失败行并抛出之前追加 `stage=note_images`、
   `outcome=image_response_not_observed`（只诊断，仍是第一张缺失即本篇可重试失败）：笔记 ID、期望与截获张数、
   全部缺失的 `source_index`；本篇窗口内见到、没有匹配上任何期望的图片响应总数及按（协议、主机、样式）分组的
   计数（至多 16 组）；逐个缺失项的期望协议、主机、样式，是否见过比对键相同的响应（读体失败或句柄被挤出时为
@@ -778,7 +787,7 @@ child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_t
 | 到底部等不到新页（抖动 3 次后） | `xhs_search_load_stalled` | 运行级 | 否 |
 | 有 `data-note-id`、不是本会话笔记或已知非笔记条目的卡片连续 2 次读数未登记 | `xhs_search_card_unregistered` | 运行级 | 否 |
 | 目标会话第 k 页到达时缺第 k−1 页 | `xhs_search_page_gap` | 运行级 | 否 |
-| 已越过的页内未知项从未渲染、补漏 3 次仍够不着或到底部仍未决定 | `xhs_search_items_unresolved` | 运行级 | 否 |
+| 已越过的页内未知项向上补漏到顶或满 3 步仍没读到、补漏 3 次仍够不着或到底部仍未决定 | `xhs_search_items_unresolved` | 运行级 | 否 |
 | 连续 3 篇浮层不出现 | `xhs_overlay_not_opening` | 运行级 | 否 |
 | 浮层重试一次仍关不掉 | `xhs_overlay_close_failed` | 运行级 | 否 |
 | 规则端点 461/471 后 30 秒内既无验证界面也无数据 | `xhs_verification_not_surfaced` | 运行级 | 否 |
