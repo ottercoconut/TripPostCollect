@@ -14,8 +14,10 @@ from trippostcollect.runtime.page_capture import (
     CaptureFailure,
     CaptureRule,
     CapturedResponse,
+    ImageWindow,
     PageCaptureChannel,
     SentinelRule,
+    image_match_key,
     route_of,
 )
 from trippostcollect.runtime.visit_ledger import VisitLedger, line_seq, load_ledger
@@ -260,6 +262,130 @@ async def test_image_body_read_failure_waits_for_another_arrival(tmp_path):
                     body_error=RuntimeError("evicted"))
     assert (await window.collect(timeout=0.02))["https://img.cdn.example.com/a"] is None
     assert window.read_errors == 1
+
+
+WEBPIC = "webpic.cdn.example.com/202610181600/SIGSEG0123456789/FILEID01!nd_dft_wlteh_webp_3"
+
+
+@pytest.mark.parametrize("expected_scheme, response_scheme", [("http", "https"), ("https", "http")])
+@pytest.mark.parametrize("response_first", [False, True])
+@pytest.mark.asyncio
+async def test_image_window_treats_http_and_https_as_the_same_address(
+    tmp_path, expected_scheme, response_scheme, response_first,
+):
+    # #93：https 页面上的 http 图片被浏览器升级为 https 请求；先到的响应进 `_held`，登记期望后同样认领。
+    _, primary, ledger, channel = build(tmp_path)
+    window = channel.open_image_window("primary")
+    expected = f"{expected_scheme}://{WEBPIC}"
+
+    def respond():
+        return primary.respond(
+            primary.request("GET", f"{response_scheme}://{WEBPIC}", resource_type="image"), body=b"img",
+        )
+
+    response = respond() if response_first else None
+    window.expect({expected: "k:1"}, subject_id="n1", trigger=None)
+    response = response or respond()
+    result = await window.collect(timeout=1)
+    assert list(result) == [expected] and response.body_calls == 1
+    image, visit_id = result[expected]
+    assert image.content == b"img" and image.url == f"{response_scheme}://{WEBPIC}"
+    visit = next(line for line in ledger_lines(ledger) if line["id"] == visit_id)
+    assert visit["endpoint"] == "GET webpic.cdn.example.com *" and visit["asset_key"] == "k:1"
+    assert window.miss_report([])["unmatched_responses"] == 0
+
+
+@pytest.mark.parametrize(
+    "response_url",
+    [
+        "https://webpic2.cdn.example.com/202610181600/SIGSEG0123456789/FILEID01!nd_dft_wlteh_webp_3",
+        "https://webpic.cdn.example.com/202610181601/SIGSEG0123456789/FILEID01!nd_dft_wlteh_webp_3",
+        "https://webpic.cdn.example.com/202610181600/SIGSEG0123456789/FILEID01!nd_dft_wgth_webp_3",
+        "https://webpic.cdn.example.com/202610181600/SIGSEG0123456789/FILEID01!nd_dft_wlteh_webp_3?v=2",
+    ],
+    ids=["host", "path", "style", "query"],
+)
+@pytest.mark.parametrize("response_first", [False, True])
+@pytest.mark.asyncio
+async def test_image_window_still_requires_the_same_host_path_and_query(tmp_path, response_url, response_first):
+    _, primary, _, channel = build(tmp_path)
+    window = channel.open_image_window("primary")
+
+    def respond():
+        return primary.respond(primary.request("GET", response_url, resource_type="image"), body=b"img")
+
+    response = respond() if response_first else None
+    window.expect({f"http://{WEBPIC}": "k:1"}, subject_id="n1", trigger=None)
+    response = response or respond()
+    assert (await window.collect(timeout=0.02)) == {f"http://{WEBPIC}": None}
+    assert response.body_calls == 0
+    assert image_match_key(response_url) != image_match_key(f"http://{WEBPIC}")
+
+
+@pytest.mark.asyncio
+async def test_image_miss_report_counts_unmatched_forms_and_compares_file_ids_without_addresses(tmp_path):
+    _, primary, _, channel = build(tmp_path)
+    foreign = FakePage("https://www.example.com/explore")
+    channel.dropped_responses = 5  # 窗口打开前的丢弃不计入
+    window = channel.open_image_window("primary")
+    base = "webpic.cdn.example.com/202610181600/SIGSEG0123456789"
+    expected = {
+        f"http://{base}/FILEID00!nd_dft_wlteh_webp_3": "k:0",
+        f"http://{base}/FILEID01!nd_dft_wlteh_webp_3": "k:1",
+        f"http://{base}/FILEID02!nd_dft_wlteh_webp_3": "k:2",
+        f"http://{base}/FILEID03!nd_dft_wlteh_webp_3?imageView=SECRET": "k:3",
+    }
+    window.expect(expected, subject_id="n1", trigger=None)
+    responses = [
+        f"https://{base}/FILEID00!nd_dft_wlteh_webp_3",  # 升级后的同一地址：截获
+        f"https://{base}/FILEID01!nd_dft_wgth_webp_3",  # 同文件 ID、样式不同
+        f"https://{base}/FILEID01!nd_dft_wgth_webp_3",
+        "https://other.cdn.example.com/202610181559/SIGSEG9999999999/FILEID02!nd_dft_wlteh_webp_3",
+        "https://webpic.cdn.example.com/202610171200/SIGSEGcover/COVER01!nc_n_webp_mw_1",  # 无关图片
+    ]
+    for url in responses:
+        primary.respond(primary.request("GET", url, resource_type="image"), body=b"img")
+    primary.respond(
+        primary.request("GET", f"https://{base}/FILEID03!nd_dft_wlteh_webp_3?imageView=SECRET", resource_type="image"),
+        body_error=RuntimeError("evicted"),
+    )
+    primary.respond(primary.request("GET", "https://img.cdn.example.com/x", resource_type="image",
+                                    frame_page=foreign), body=b"x")
+    result = await window.collect(timeout=0.05)
+    missing = [url for url, captured in result.items() if captured is None]
+    assert missing == list(expected)[1:]
+
+    report = window.miss_report(missing)
+
+    assert report["unmatched_responses"] == 4 and report["untracked_responses"] == 0
+    assert report["unmatched_forms"] == [
+        {"scheme": "https", "host": "webpic.cdn.example.com", "style": "nd_dft_wgth_webp_3", "count": 2},
+        {"scheme": "https", "host": "other.cdn.example.com", "style": "nd_dft_wlteh_webp_3", "count": 1},
+        {"scheme": "https", "host": "webpic.cdn.example.com", "style": "nc_n_webp_mw_1", "count": 1},
+    ]
+    form = {"scheme": "http", "host": "webpic.cdn.example.com", "style": "nd_dft_wlteh_webp_3"}
+    assert report["missing"] == [
+        {**form, "same_key_seen": False, "same_file_id_seen": True, "differs": [["scheme", "style"]]},
+        {**form, "same_key_seen": False, "same_file_id_seen": True, "differs": [["scheme", "host", "path"]]},
+        {**form, "same_key_seen": True, "same_file_id_seen": False, "differs": []},
+    ]
+    assert report["read_errors"] == 1 and report["dropped_responses"] == 1
+    text = json.dumps(report)
+    for fragment in ("://", "/", "SIGSEG", "2026101", "FILEID", "COVER", "SECRET", "imageView"):
+        assert fragment not in text
+
+
+@pytest.mark.asyncio
+async def test_image_miss_report_bounds_tracked_addresses(tmp_path):
+    _, primary, _, channel = build(tmp_path)
+    window = ImageWindow(channel, "primary", 64, max_seen=2)
+    channel._windows.add(window)
+    for name in ("a", "b", "c", "c"):
+        primary.respond(primary.request("GET", f"https://img.cdn.example.com/{name}!s", resource_type="image"),
+                        body=b"x")
+    report = window.miss_report([])
+    assert report["untracked_responses"] == 1 and report["unmatched_responses"] == 3
+    assert report["unmatched_forms"] == [{"scheme": "https", "host": "img.cdn.example.com", "style": "s", "count": 3}]
 
 
 @pytest.mark.asyncio

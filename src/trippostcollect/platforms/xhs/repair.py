@@ -317,7 +317,7 @@ async def _repair_note_once(
     }
     if assets:
         # 截获的图片数必须等于投影的资产数；缺图在暂存前记 image_response_not_observed。
-        note.image_visits = await crawler._stage_note_images(note_id, assets, images)
+        note.image_visits = await crawler._stage_note_images(note_id, window, assets, images)
     note_detail["content_visit_refs"] = crawler._build_content_visit_refs(note)
     await crawler.update_xhs_note(note_detail)
 

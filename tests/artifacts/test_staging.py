@@ -26,7 +26,7 @@ from trippostcollect.platforms.xhs.media import XhsMediaMixin
 from trippostcollect.platforms.zhihu import client as zhihu_client
 from trippostcollect.runtime import image_retry as image_download_retry
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError
-from trippostcollect.runtime.page_capture import CapturedImage, CapturedResponse
+from trippostcollect.runtime.page_capture import CapturedImage, CapturedResponse, ImageWindow
 
 
 def async_client_factory(status_code: int, content: bytes = b""):
@@ -95,7 +95,7 @@ async def test_xhs_http_404_preserves_terminal_status(monkeypatch) -> None:
     image = CapturedImage(url=url, seq=3, page_role="primary", status=404, content=b"", sha256="", observed_at="t")
 
     with pytest.raises(XHSImageDownloadError) as exc_info:
-        await Media()._stage_note_images("note-1", [asset], {url: (image, "v-3")})
+        await Media()._stage_note_images("note-1", MagicMock(spec=ImageWindow), [asset], {url: (image, "v-3")})
 
     assert exc_info.value.code == "image_source_unavailable"
     assert failures[0]["http_status"] == 404 and failures[0]["error_code"] == "image_source_unavailable"

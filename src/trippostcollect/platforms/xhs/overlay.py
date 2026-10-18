@@ -270,7 +270,7 @@ class XhsOverlayMixin:
         await self._close_note_overlay(note_id)
         if valid and assets:
             try:
-                note.image_visits = await self._stage_note_images(note_id, assets, images)
+                note.image_visits = await self._stage_note_images(note_id, run.window, assets, images)
             except XHSImageDownloadError as exc:
                 if is_runtime_blocking_image_error(exc.code):
                     raise PlatformRuntimeError(f"XHS image {exc.code}", code=exc.code) from exc

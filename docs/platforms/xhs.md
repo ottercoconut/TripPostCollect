@@ -513,8 +513,11 @@ child `summary.json` 的
 
 ### 单篇处理
 
-- 点击封面前打开本篇唯一的图片窗口：窗口先持有图片响应句柄、不读体，feed 给出期望 URL 后只对精确匹配
-  的句柄读体，因此首图早于 feed 到达也能认领。浮层出现并截获本篇 feed 后写详情访问；feed 中为视频则
+- 点击封面前打开本篇唯一的图片窗口：窗口先持有图片响应句柄、不读体，feed 给出期望 URL 后只对比对键相同
+  的句柄读体，因此首图早于 feed 到达也能认领。比对键把 http 与 https 视为同一地址，主机、路径（含时间段、
+  签名段、文件 ID 与 `!` 之后的样式）与查询串仍须完全一致：feed 给的是 http 地址，https 页面上的浏览器会把
+  这类混合内容图片自动升级为 https 再请求（第 6 轮 96 篇全部 `image_response_not_observed`，#93）。清单
+  `source_url` 与暂存资产保持 feed 原值。浮层出现并截获本篇 feed 后写详情访问；feed 中为视频则
   关闭浮层、记决定。浮层未出现 3–6 秒后重点，出现但没有 feed 时先关闭、4–8 秒后重开，两次都没有 feed
   记可重试候选 `note_detail_not_observed`；连续 3 篇浮层都不出现为 `xhs_overlay_not_opening`。
 - 正文可见后做详情停顿，再翻图：每次翻到下一张前停 0.8–1.8 秒（只写账本 `note_image` 停顿），约四分之一
@@ -662,7 +665,14 @@ child `summary.json` 的
   卡片出现：该卡片的页码、ID、页内位置、`data-index`、相对列表可见区顶部的纵坐标与当时的滚动位置；
   `list_bottom` 为末页已到底），`items` 列出至多 10 个从未出现的 ID 的页内位置、卡片类型、目标会话中也含它的
   其他页（跨页重复）、结果列表内的卡片读数（没有为 `nodes=0`）与同上的响应出处，日志另记一行
-  `Search items were never rendered`；作者标签页两次都没打开时追加 `stage=creator_profile`，最后一次没有可见作者名链接为
+  `Search items were never rendered`；某篇有未截获的正文图时，在记失败行并抛出之前追加 `stage=note_images`、
+  `outcome=image_response_not_observed`（只诊断，仍是第一张缺失即本篇可重试失败）：笔记 ID、期望与截获张数、
+  全部缺失的 `source_index`；本篇窗口内见到、没有匹配上任何期望的图片响应总数及按（协议、主机、样式）分组的
+  计数（至多 16 组）；逐个缺失项的期望协议、主机、样式，是否见过比对键相同的响应（读体失败或句柄被挤出时为
+  true），是否见过同一文件 ID（路径最后一段 `!` 之前）的其他响应及差异部分（`scheme`、`host`、`path` 即文件 ID
+  之前的路径段、`style`、`query`）；窗口的读体失败数与通道 `dropped_responses` 在本窗口期间的增量；失败请求
+  只留协议、主机与样式。窗口为此另记至多 256 个不同响应地址的摘要与形态（超出部分计入 `untracked_responses`），
+  诊断与日志 `Note images not captured` 都不含图片地址、时间段、签名段、文件 ID 或查询串；作者标签页两次都没打开时追加 `stage=creator_profile`，最后一次没有可见作者名链接为
   `author_link_missing`、点击后新标签页超时为 `author_tab_timeout`（另记点击后主页面路径模板），含浮层内作者名
   链接、作者主页链接与指向本篇作者的主页链接的个数、可见个数，以及前 4 个主页链接的 `target` 与祖先链。目标会话第 1 页的触发动作不是本次点选“图文”
   （G1 将失败）时只写一行 warning 日志，带触发动作、`target` 与回车会话的序号，判定不变。

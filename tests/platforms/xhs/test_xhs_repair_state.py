@@ -254,6 +254,12 @@ async def test_missing_image_is_retryable_and_forbidden_image_stops_the_run(monk
     )
     assert report["runtime_blocker"]["error_code"] == "image_auth_required"
     assert site.note_page_opens == ["note-a", "note-b"]
+    # repair 直开同样写未截获诊断；403 已截获，不写。
+    (diagnostic,) = [event for event in crawler._navigation_diagnostics if event["stage"] == "note_images"]
+    assert (diagnostic["note_id"], diagnostic["captured_count"], diagnostic["missing_source_indexes"]) == (
+        "note-a", 1, [1],
+    )
+    assert diagnostic["missing"][0]["same_file_id_seen"] is False and diagnostic["unmatched_responses"] == 0
 
 
 @pytest.mark.asyncio

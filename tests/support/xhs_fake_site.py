@@ -259,7 +259,8 @@ class XhsFakeSite:
 
     浮层：`details[id]` 为 feed 的 note_card（默认 `detail_card(id)`）。`feed_overrides[id]` 依次替换每次点击：
     "no_overlay" 浮层不出现；"no_feed" 浮层出现但无 feed；"net::…" 为 feed 请求失败；整数为 HTTP 状态码；
-    字典为 feed 响应 JSON。`image_overrides[url]` 为 "missing"（从不加载）或 HTTP 状态码。打开浮层加载前两张图，
+    字典为 feed 响应 JSON。`image_overrides[url]` 为 "missing"（从不加载）、HTTP 状态码，或前端实际请求的另一地址
+    （如浏览器把 http 升级为 https、前端换了样式）。打开浮层加载前两张图，
     翻到第 k 页再加载第 k+1 张。`author_tab_failures` 次点击作者名不开标签页；浮层内的作者主页链接由
     `profile_links[id]` 给出（每项 user_id、point（不可见为 None）、comment、named），默认只有一个指向作者的可见作者名
     （AUTHOR_POINT）；`hidden_author_notes` 中笔记默认的作者名不可见。note_view_state 按脚本参数里的作者 ID 过滤，
@@ -790,7 +791,7 @@ class XhsFakeSite:
         if override == "missing" or url in self.loaded_images:
             return
         self.loaded_images.add(url)
-        request = self.page.request("GET", url, resource_type="image")
+        request = self.page.request("GET", override if isinstance(override, str) else url, resource_type="image")
         status = override if isinstance(override, int) else 200
         self.page.respond(request, status=status, body=image_bytes(note_id, index) if status == 200 else b"")
 

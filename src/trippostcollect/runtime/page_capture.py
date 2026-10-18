@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from hashlib import sha256
@@ -26,6 +26,9 @@ from trippostcollect.runtime.visit_ledger import VisitLedger
 
 
 IMAGE_WINDOW_MAX_HANDLES = 64
+# 未截获诊断：每个窗口最多跟踪的不同响应地址数，以及诊断里最多列出的（协议, 主机, 样式）分组数。
+IMAGE_WINDOW_MAX_SEEN = 256
+IMAGE_DIAGNOSTIC_MAX_FORMS = 16
 MAX_RETAINED_PER_RULE = 256
 BODY_KINDS = frozenset({"json", "bytes", "none"})
 _ID_SEGMENT_RE = re.compile(r"[0-9a-fA-F]{16,}|\d{5,}|[A-Za-z0-9_-]{20,}")
@@ -169,6 +172,8 @@ class SentinelHit:
 
 @dataclass(frozen=True)
 class CapturedImage:
+    """`url` 为实际响应地址（可能已被浏览器从 http 升级为 https）；`ImageWindow.collect()` 的键为期望地址。"""
+
     url: str
     seq: int
     page_role: str
@@ -178,8 +183,72 @@ class CapturedImage:
     observed_at: str
 
 
+def image_match_key(url: str) -> str:
+    """图片比对键：http 与 https 视为同一地址，主机、路径与查询串仍须完全一致。
+
+    https 页面上的 http 图片会被浏览器自动升级为 https 再请求（混合内容），响应地址与 feed 给出的地址只差协议。
+    """
+    scheme, sep, rest = url.partition(":")
+    return rest if sep and scheme.lower() in ("http", "https") else url
+
+
+def image_url_form(url: str) -> dict[str, str]:
+    """诊断可写的地址形态：协议、主机与样式（路径最后一段 `!` 之后的部分），不含路径其余部分与查询串。"""
+    return _ImageShape.of(url).form()
+
+
+def _digest(text: str) -> str:
+    return sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+_SHAPE_PARTS = (("scheme", "scheme"), ("host", "host"), ("path", "prefix"), ("style", "style"), ("query", "query"))
+
+
+@dataclass(frozen=True)
+class _ImageShape:
+    """图片地址的形态：协议、主机、样式原样保留；文件 ID（最后一段 `!` 之前）、之前的路径段与查询串只留摘要。"""
+
+    scheme: str
+    host: str
+    style: str
+    prefix: str
+    file_id: str
+    query: str
+
+    @classmethod
+    def of(cls, url: str) -> _ImageShape:
+        parts = urlsplit(str(url or ""))
+        prefix, _, last = parts.path.rpartition("/")
+        file_id, _, style = last.partition("!")
+        return cls(
+            scheme=parts.scheme.lower(),
+            host=(parts.hostname or "").lower(),
+            style=style,
+            prefix=_digest(prefix),
+            file_id=_digest(file_id),
+            query=_digest(parts.query),
+        )
+
+    def form(self) -> dict[str, str]:
+        return {"scheme": self.scheme, "host": self.host, "style": self.style}
+
+    def differences(self, other: _ImageShape) -> tuple[str, ...]:
+        """与另一形态不同的部分：scheme、host、path（文件 ID 之前的路径段）、style、query。"""
+        return tuple(name for name, attr in _SHAPE_PARTS if getattr(self, attr) != getattr(other, attr))
+
+
+@dataclass
+class _SeenImage:
+    """窗口内见到的一个响应地址：只留比对键摘要、形态与次数，不留地址。"""
+
+    key: str
+    shape: _ImageShape
+    count: int = 0
+
+
 @dataclass(frozen=True)
 class _ImageExpectation:
+    url: str
     asset_key: str
     subject_id: str
     trigger: str | None
@@ -194,6 +263,7 @@ class _HeldImage:
     route: str
     query_keys: tuple[str, ...]
     observed_at: str
+    url: str
     response: Any
 
 
@@ -205,16 +275,25 @@ def _request_json(request: Any) -> Any:
 
 
 class ImageWindow:
-    """一篇笔记的图片窗口：先持有响应句柄、不读体，期望 URL 登记后只对精确匹配的句柄读体。"""
+    """一篇笔记的图片窗口：先持有响应句柄、不读体，期望 URL 登记后只对比对键相同的句柄读体。
 
-    def __init__(self, channel: PageCaptureChannel, page_role: str, max_handles: int) -> None:
+    比对键见 `image_match_key`。窗口另记一份有界的响应形态计数（不含地址），供未截获诊断使用。
+    """
+
+    def __init__(
+        self, channel: PageCaptureChannel, page_role: str, max_handles: int, max_seen: int = IMAGE_WINDOW_MAX_SEEN,
+    ) -> None:
         self._channel = channel
         self.page_role = page_role
         self._max_handles = max_handles
+        self._max_seen = max_seen
         self._held: OrderedDict[str, _HeldImage] = OrderedDict()
         self._expected: dict[str, _ImageExpectation] = {}
         self._results: dict[str, tuple[CapturedImage, str]] = {}
         self._reading: set[str] = set()
+        self._seen: OrderedDict[str, _SeenImage] = OrderedDict()
+        self._untracked = 0
+        self._dropped_at_open = channel.dropped_responses
         self.read_errors = 0
         self.closed = False
 
@@ -222,16 +301,28 @@ class ImageWindow:
     def held_count(self) -> int:
         return len(self._held)
 
-    def _offer(self, held: _HeldImage, url: str) -> None:
-        if self.closed or held.page_role != self.page_role or url in self._results:
+    def _offer(self, held: _HeldImage) -> None:
+        if self.closed or held.page_role != self.page_role:
             return
-        if url in self._expected:
-            self._start_read(url, held)
+        key = image_match_key(held.url)
+        self._observe(key, held.url)
+        if key in self._results:
             return
-        self._held.pop(url, None)
-        self._held[url] = held
+        if key in self._expected:
+            self._start_read(key, held)
+            return
+        self._held.pop(key, None)
+        self._held[key] = held
         while len(self._held) > self._max_handles:
             self._held.popitem(last=False)
+
+    def _observe(self, key: str, url: str) -> None:
+        seen = self._seen.get(_digest(url))
+        if seen is None:
+            seen = self._seen[_digest(url)] = _SeenImage(key=_digest(key), shape=_ImageShape.of(url))
+            while len(self._seen) > self._max_seen:
+                self._untracked += self._seen.popitem(last=False)[1].count
+        seen.count += 1
 
     def expect(
         self,
@@ -246,37 +337,38 @@ class ImageWindow:
         if self.closed:
             raise RuntimeError("image window is closed")
         for url, asset_key in assets.items():
-            if url in self._results:
+            key = image_match_key(url)
+            if key in self._results:
                 continue
-            self._expected[url] = _ImageExpectation(
-                asset_key=str(asset_key), subject_id=str(subject_id), trigger=trigger, attempt=int(attempt)
+            self._expected[key] = _ImageExpectation(
+                url=url, asset_key=str(asset_key), subject_id=str(subject_id), trigger=trigger, attempt=int(attempt)
             )
-            held = self._held.pop(url, None)
+            held = self._held.pop(key, None)
             if held is not None:
-                self._start_read(url, held)
+                self._start_read(key, held)
 
-    def _start_read(self, url: str, held: _HeldImage) -> None:
-        if url in self._reading:
+    def _start_read(self, key: str, held: _HeldImage) -> None:
+        if key in self._reading:
             return
-        self._reading.add(url)
-        self._channel._spawn(self._read(url, held))
+        self._reading.add(key)
+        self._channel._spawn(self._read(key, held))
 
-    async def _read(self, url: str, held: _HeldImage) -> None:
+    async def _read(self, key: str, held: _HeldImage) -> None:
         try:
             content = await held.response.body()
         except Exception:
             self.read_errors += 1
             return
         finally:
-            self._reading.discard(url)
+            self._reading.discard(key)
             self._channel._notify()
-        expectation = self._expected.get(url)
-        if self.closed or expectation is None or url in self._results:
+        expectation = self._expected.get(key)
+        if self.closed or expectation is None or key in self._results:
             return
         status = int(held.response.status)
         digest = sha256(content).hexdigest()
         image = CapturedImage(
-            url=url,
+            url=held.url,
             seq=held.seq,
             page_role=held.page_role,
             status=status,
@@ -291,7 +383,7 @@ class ImageWindow:
             stage=held.rule.stage,
             source="page_response",
             rule=held.rule.name,
-            endpoint=held.rule.endpoint(url),
+            endpoint=held.rule.endpoint(held.url),
             status=status,
             outcome="ok" if status == 200 else "http_error",
             route=held.route,
@@ -303,21 +395,61 @@ class ImageWindow:
             bytes=len(content),
             attempt=expectation.attempt,
         )
-        self._results[url] = (image, visit_id)
+        self._results[key] = (image, visit_id)
         self._channel._notify()
 
     def _complete(self) -> bool:
-        return all(url in self._results for url in self._expected)
+        return all(key in self._results for key in self._expected)
 
     async def collect(self, timeout: float) -> dict[str, tuple[CapturedImage, str] | None]:
-        """等到全部期望 URL 截获或超时；未截获的 URL 映射为 None。"""
+        """等到全部期望 URL 截获或超时；键为登记时的期望 URL，未截获的映射为 None。"""
         await self._channel._wait_until(lambda: self._complete() or None, timeout)
-        return {url: self._results.get(url) for url in self._expected}
+        return {expectation.url: self._results.get(key) for key, expectation in self._expected.items()}
+
+    def miss_report(self, missing: Iterable[str]) -> dict[str, Any]:
+        """未截获诊断：本窗口见到、但没有匹配上任何期望的图片响应按（协议, 主机, 样式）计数；逐个缺失的期望 URL
+        比对同一文件 ID 的响应差在哪些部分。只含计数、协议、主机、样式与布尔值，不含地址、路径段或查询串。"""
+        expected = {_digest(key) for key in self._expected}
+        groups: Counter[tuple[str, str, str]] = Counter()
+        for seen in self._seen.values():
+            if seen.key not in expected:
+                groups[seen.shape.scheme, seen.shape.host, seen.shape.style] += seen.count
+        entries = []
+        for url in missing:
+            key = _digest(image_match_key(url))
+            shape = _ImageShape.of(url)
+            differs = sorted(
+                {
+                    seen.shape.differences(shape)
+                    for seen in self._seen.values()
+                    if seen.key != key and seen.shape.file_id == shape.file_id
+                }
+            )
+            entries.append(
+                {
+                    **shape.form(),
+                    "same_key_seen": any(seen.key == key for seen in self._seen.values()),
+                    "same_file_id_seen": bool(differs),
+                    "differs": [list(parts) for parts in differs],
+                }
+            )
+        return {
+            "unmatched_responses": sum(groups.values()),
+            "unmatched_forms": [
+                {"scheme": scheme, "host": host, "style": style, "count": count}
+                for (scheme, host, style), count in groups.most_common(IMAGE_DIAGNOSTIC_MAX_FORMS)
+            ],
+            "untracked_responses": self._untracked,
+            "missing": entries,
+            "read_errors": self.read_errors,
+            "dropped_responses": self._channel.dropped_responses - self._dropped_at_open,
+        }
 
     def close(self) -> None:
         """丢弃未认领的句柄；已截获的字节由调用方持有，不受影响。"""
         self.closed = True
         self._held.clear()
+        self._seen.clear()
         self._channel._windows.discard(self)
 
 
@@ -703,10 +835,11 @@ class PageCaptureChannel:
                 route=route,
                 query_keys=query_keys,
                 observed_at=observed_at,
+                url=url,
                 response=response,
             )
             for window in list(self._windows):
-                window._offer(held, url)
+                window._offer(held)
             return
         self._pending[rule.name].add(seq)
         self._spawn(

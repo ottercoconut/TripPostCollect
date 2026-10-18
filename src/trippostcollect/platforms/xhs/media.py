@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 from trippostcollect.application.contracts import ImageStagingError
 from trippostcollect.platforms.xhs.errors import XHSImageDownloadError
 from trippostcollect.runtime.image_retry import classified_http_image_error
-from trippostcollect.runtime.page_capture import CapturedImage, ImageWindow
+from trippostcollect.runtime.page_capture import CapturedImage, ImageWindow, image_url_form
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -89,9 +89,12 @@ class XhsMediaMixin:
             current = int(state["page_index"])
 
     async def _stage_note_images(
-        self, note_id: str, assets: List[Dict], images: Dict[str, Optional[tuple[CapturedImage, str]]],
+        self, note_id: str, window: ImageWindow, assets: List[Dict], images: Dict[str, Optional[tuple[CapturedImage, str]]],
     ) -> List[str]:
-        """把窗口截获的字节按资产顺序交给暂存；返回图片访问 id。未截获或状态码异常记失败行后抛出。"""
+        """把窗口截获的字节按资产顺序交给暂存；返回图片访问 id。未截获或状态码异常记失败行后抛出。
+
+        有未截获的图片时，抛出前先写一条 `note_images` 导航诊断（全部缺失序号与窗口内见到的响应形态）。
+        """
         fetched: List[Dict[str, Any]] = []
         visit_ids: List[str] = []
         for asset in assets:
@@ -104,6 +107,9 @@ class XhsMediaMixin:
                     if result is None
                     else classified_http_image_error(int(status), f"XHS image HTTP {status}").code
                 )
+                missing = [item for item in assets if images.get(item["url"]) is None]
+                if missing:
+                    await self._record_images_not_observed(note_id, window, assets, missing)
                 await self.record_xhs_note_image_failure(
                     note_id, {**asset, "attempts": 1, "http_status": status, "error_code": code},
                 )
@@ -123,3 +129,46 @@ class XhsMediaMixin:
             )
             raise XHSImageDownloadError(note_id, source_index, exc.code, 1) from exc
         return visit_ids
+
+    async def _record_images_not_observed(
+        self, note_id: str, window: ImageWindow, assets: List[Dict], missing: List[Dict],
+    ) -> None:
+        """未截获诊断与一行日志：只有计数、序号、协议、主机、样式与布尔值；失败请求的地址同样只留形态。"""
+        report = window.miss_report([asset["url"] for asset in missing])
+        entries = [
+            {"source_index": int(asset["source_index"]), **entry} for asset, entry in zip(missing, report.pop("missing"))
+        ]
+        indexes = [entry["source_index"] for entry in entries]
+        request_failures = [
+            {
+                "at": failure.get("at"),
+                "resource_type": failure.get("resource_type"),
+                **image_url_form(str(failure.get("url") or "")),
+                "failure": failure.get("failure"),
+            }
+            for failure in self._navigation_request_failures[-8:]
+        ]
+        await self._record_navigation_diagnostic(
+            self.context_page,
+            stage="note_images",
+            outcome="image_response_not_observed",
+            extra={
+                "note_id": note_id,
+                "expected_count": len(assets),
+                "captured_count": len(assets) - len(missing),
+                "missing_source_indexes": indexes,
+                **report,
+                "missing": entries,
+                "request_failures": request_failures,
+            },
+        )
+        forms = ", ".join(
+            f"{form['scheme']} {form['host']} !{form['style']}×{form['count']}" for form in report["unmatched_forms"][:3]
+        )
+        logger.warning(
+            f"[XiaoHongShuCrawler.media] Note images not captured: {note_id} expected={len(assets)}, "
+            f"captured={len(assets) - len(missing)}, missing={indexes}, "
+            f"unmatched={report['unmatched_responses']} ({forms or 'none'}), "
+            f"same_file_id={sum(entry['same_file_id_seen'] for entry in entries)}/{len(entries)}, "
+            f"read_errors={report['read_errors']}, dropped={report['dropped_responses']}"
+        )

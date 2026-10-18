@@ -22,6 +22,7 @@ from support.xhs_fake_site import (
     AuthorTab,
     XhsFakeSite,
     detail_card,
+    image_bytes,
     image_url,
     note,
 )
@@ -542,6 +543,60 @@ async def test_image_not_captured_is_retryable_and_later_candidate_continues(mon
     stopped = last_stop(state_path)
     assert stopped["stop_reason"] == "source_exhausted"
     assert stopped["candidate_identities"] == ["success-image"]
+
+
+@pytest.mark.asyncio
+async def test_upgraded_http_images_are_captured_and_a_restyled_image_writes_a_miss_diagnostic(monkeypatch, tmp_path):
+    # #93：feed 给 http 地址，前端实际请求 https（混合内容自动升级）仍能认领；换了样式的图片未截获时，
+    # 抛出前写 note_images 诊断，只有计数、序号、协议、主机、样式与布尔值。
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["upgraded", "restyled"])
+    for note_id in ("upgraded", "restyled"):
+        card = detail_card(note_id, images=3)
+        for index, image in enumerate(card["image_list"]):
+            image["url_default"] = image_url(note_id, index).replace("https://", "http://")
+            site.image_overrides[image["url_default"]] = image_url(note_id, index)
+        site.details[note_id] = card
+    restyled = image_url("restyled", 0).replace("https://", "http://")
+    site.image_overrides[restyled] = image_url("restyled", 0).replace("nd_dft_wlteh_webp_3", "nd_dft_wgth_webp_3")
+
+    with crawler_log_lines() as log_lines:
+        await crawler.search()
+
+    assert [record["note_id"] for record in crawler.records] == ["upgraded"]
+    assert [item["content"] for item in crawler.staged["upgraded"]] == [image_bytes("upgraded", i) for i in range(3)]
+    assert [item["url"] for item in crawler.staged["upgraded"]] == [
+        image_url("upgraded", i).replace("https://", "http://") for i in range(3)
+    ]
+    (skipped,) = events_of(state_path, "candidate_skipped")
+    assert (skipped["identity"], skipped["error_code"], skipped["source_index"], skipped["retryable"]) == (
+        "restyled", "image_response_not_observed", 0, True,
+    )
+    assert crawler.record_xhs_note_image_failure.await_count == 1
+    (diagnostic,) = [event for event in crawler._navigation_diagnostics if event["stage"] == "note_images"]
+    assert diagnostic["outcome"] == "image_response_not_observed" and diagnostic["note_id"] == "restyled"
+    assert (diagnostic["expected_count"], diagnostic["captured_count"], diagnostic["missing_source_indexes"]) == (
+        3, 2, [0],
+    )
+    assert diagnostic["unmatched_responses"] == 1 and diagnostic["untracked_responses"] == 0
+    assert diagnostic["unmatched_forms"] == [
+        {"scheme": "https", "host": "sns-webpic-qc.xhscdn.com", "style": "nd_dft_wgth_webp_3", "count": 1},
+    ]
+    assert diagnostic["missing"] == [
+        {
+            "source_index": 0, "scheme": "http", "host": "sns-webpic-qc.xhscdn.com", "style": "nd_dft_wlteh_webp_3",
+            "same_key_seen": False, "same_file_id_seen": True, "differs": [["scheme", "style"]],
+        },
+    ]
+    assert diagnostic["read_errors"] == 0 and diagnostic["dropped_responses"] == 0
+    # 页面地址是渲染诊断的公共字段（只到路径）；其余字段不含任何地址。
+    assert diagnostic["url"] == "https://www.xiaohongshu.com/search_result_ai"
+    text = json.dumps({key: value for key, value in diagnostic.items() if key != "url"}, ensure_ascii=False)
+    assert "://" not in text and "notes_pre_post" not in text and "202601" not in text
+    (line,) = [line for line in log_lines if "Note images not captured" in line]
+    assert "restyled expected=3, captured=2, missing=[0]" in line
+    assert "https sns-webpic-qc.xhscdn.com !nd_dft_wgth_webp_3×1" in line and "same_file_id=1/1" in line
+    assert "://" not in line and "notes_pre_post" not in line
 
 
 @pytest.mark.asyncio
