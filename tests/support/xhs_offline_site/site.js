@@ -6,7 +6,8 @@
    面板挂在入口内部、打开时入口加 .active、收起时从 DOM 移除，每个标签前有一份重叠的 aria-hidden 副本；
    备选 V16 布局整页滚动，入口在 .search-layout 内，其前有一个零尺寸的同类副本，面板按 hidden 切换。两种布局的入口
    文字都在直属 span 里，且都在第 1 页结果渲染约 1.5 秒后才插入（Mac 首轮实测入口为空）；
-   筛选面板按文字点选“图文”发 5 项 filters 的第 1 页（新 search_id），入口改为“已筛选”，面板不自动收起；
+   筛选面板按文字点选“图文”发 5 项 filters 的第 1 页（新 search_id），入口改为“已筛选”，面板不自动收起；面板默认
+   只随点击入口切换，悬停模式（<html data-filter-panel="hover">）另随光标开合，见 setPanel 之后的 pointermove 处理；
    虚拟列表只保留可见区附近的行（不超过 30 个节点），接近列表底部时请求下一页，可见区未填满时自行补页；
    响应里的非笔记条目（hot_query 等）同样占一个列表位置，渲染为没有封面的 section.note-item（Mac 人工取证 2026-10-14）；
    每次点击记下命中的元素类别（封面、对话栏笔记链接、相关搜索卡或其他）；
@@ -24,6 +25,7 @@
   const PROFILE_URL = 'https://www.xiaohongshu.com/user/profile/';
   const VERIFIED_MESSAGE = 'tpc-offline-verified';
   const AI_CHAT = document.documentElement.dataset.layout !== 'v16';
+  const HOVER_PANEL = document.documentElement.dataset.filterPanel === 'hover';
   // 与 site.css 一致：V16 列表自文档 120px 起，AI 对话布局自滚动容器内 56px 起；每行 360px、4 列；尾部 200px。
   const LIST_TOP = AI_CHAT ? 56 : 120;
   const ROW_HEIGHT = 360;
@@ -55,6 +57,9 @@
     selfLoads: 0,
     scrollLoads: 0,
     clickedOptions: [],
+    // 面板开合与选项点击的先后：press_open/press_close 为点入口，hover_open 为光标移入入口，leave_close 为光标移出
+    // 入口与面板的并集，option 为点选标签。
+    panelEvents: [],
     sessions: [],
     captchaShown: 0,
     overlaysOpened: 0,
@@ -284,6 +289,7 @@
 
   const chooseFilter = (type, label) => {
     audit.clickedOptions.push([type, label]);
+    audit.panelEvents.push('option');
     state.selection[type] = label;
     state.filterApplied = FILTER_GROUPS.some((group) => state.selection[group.type] !== group.options[0][0]);
     refreshFilterUi();
@@ -292,16 +298,33 @@
 
   const panelOpen = () => (AI_CHAT ? ui.panelHost.isConnected : !ui.panel.hidden);
 
-  // AI 对话布局：面板挂在入口内部，收起时从 DOM 移除；V16：面板在 .search-layout 内按 hidden 切换。
-  const togglePanel = () => {
+  // AI 对话布局：面板挂在入口内部，收起时从 DOM 移除；V16：面板在 .search-layout 内按 hidden 切换。`cause` 为
+  // press、hover 或 leave，与开合方向一起记入 audit.panelEvents。
+  const setPanel = (open, cause) => {
+    if (open === panelOpen()) return;
     if (!AI_CHAT) {
-      ui.panel.hidden = !ui.panel.hidden;
-      return;
+      ui.panel.hidden = !open;
+    } else {
+      if (open) ui.entry.appendChild(ui.panelHost);
+      else ui.panelHost.remove();
+      ui.entry.classList.toggle('active', open);
     }
-    if (panelOpen()) ui.panelHost.remove();
-    else ui.entry.appendChild(ui.panelHost);
-    ui.entry.classList.toggle('active', panelOpen());
+    audit.panelEvents.push(`${cause}_${open ? 'open' : 'close'}`);
   };
+
+  // 悬停模式，与 Python 假站点的 hover_opens_panel 一致：光标从入口外移入入口时打开面板（已开着不变），面板开着时
+  // 光标移到入口与面板的并集之外即收起，点入口仍切换。按真实 pointermove 的命中元素判断：面板被浮层或验证层盖住时
+  // 命中的是遮罩；AI 对话布局的面板挂在入口内部，命中面板不算移入入口。
+  document.addEventListener('pointermove', (event) => {
+    if (!HOVER_PANEL || !ui) return;
+    const target = event.target instanceof Node ? event.target : null;
+    const inPanel = Boolean(target) && ui.panel.contains(target);
+    const onEntry = Boolean(target) && ui.entry.contains(target) && !inPanel;
+    const entered = onEntry && !ui.pointerOnEntry;
+    ui.pointerOnEntry = onEntry;
+    if (entered) setPanel(true, 'hover');
+    else if (!onEntry && !inPanel) setPanel(false, 'leave');
+  }, { capture: true, passive: true });
 
   const filterEntry = (className) => {
     const entry = el('div', className);
@@ -384,11 +407,12 @@
       page.appendChild(layout);
     }
     entry.addEventListener('click', (event) => {
-      if (!event.target.closest('.filters-wrapper')) togglePanel();
+      if (!event.target.closest('.filters-wrapper')) setPanel(!panelOpen(), 'press');
     });
     document.getElementById('app').replaceChildren(page);
     ui = {
       entryHost, entry, entryLabel: entry.firstChild, panel, panelHost, container, scroller, chatNotes, entryShown: false,
+      pointerOnEntry: false,
     };
     refreshFilterUi();
   };

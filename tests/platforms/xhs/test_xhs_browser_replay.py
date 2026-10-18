@@ -226,6 +226,11 @@ def actions(crawler, kind: str) -> list[dict]:
     return [line for line in ledger_lines(crawler) if line.get("kind") == "action" and line["action"] == kind]
 
 
+def filter_targets(crawler) -> list[tuple]:
+    """筛选动作的 (filter, method) 序列（#81）。"""
+    return [(line["target"].get("filter"), line["target"].get("method")) for line in actions(crawler, "apply_filter")]
+
+
 def visit(crawler, visit_id: str) -> dict:
     return next(line for line in ledger_lines(crawler) if line.get("id") == visit_id)
 
@@ -347,8 +352,9 @@ def assert_staged_png(site: XhsOfflineSite, crawler, note_id: str, count: int) -
 
 @pytest.mark.asyncio
 async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tmp_path):
-    """AI 对话布局下 3 页（每页 12 项、共 36 项）末页 has_more=false：等延迟渲染、位于对话栏内的筛选入口，按文字
-    点选“图文”的真标签（不是重叠的 aria-hidden 副本）、收面板（面板从 DOM 移除）；列表在页头下方的容器内滚动、
+    """AI 对话布局下 3 页（每页 12 项、共 36 项）末页 has_more=false：等延迟渲染、位于对话栏内的筛选入口，面板悬停
+    开合：光标移入入口即打开、不按入口，按文字点选“图文”的真标签（不是重叠的 aria-hidden 副本），把光标移出入口与
+    面板即收起（面板从 DOM 移除）；列表在页头下方的容器内滚动、
     window 不动，滚轮只作用在结果列表上，对话栏里与结果 ID 重叠的笔记链接不计入、不点击，点卡片都命中封面；
     虚拟列表回收下的全量扫描，第 1 页中间的相关搜索卡（hot_query，没有封面）跳过、不停止；浮层详情与翻图截获 PNG
     （首图先于 feed 到达）；作者链接按作者 ID 定位：旧位置的隐藏作者名与评论区（含作者本人的评论）都不点，点中
@@ -356,7 +362,7 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     pages = [[search_item(f"p{number}-{index:02d}") for index in range(12)] for number in (1, 2, 3)]
     pages[0][6] = search_item("p1-06", card_type="video")
     images = {"p1-02": 3, "p2-05": 2, "p3-09": 1}
-    site = XhsOfflineSite(KEYWORD, pages, hot_query_at=6)
+    site = XhsOfflineSite(KEYWORD, pages, hot_query_at=6, hover_opens_panel=True)
     site.details["p1-02"] = detail_card("p1-02", images=3, user_id="author-a")
     site.details["p2-05"] = detail_card("p2-05", images=2, user_id="author-a")
     site.details["p3-09"] = detail_card("p3-09", images=1, user_id="author-b")
@@ -447,13 +453,16 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     }
     assert audit["authorNameClicks"] == len(actions(crawler, "click_author")) == 2
     assert audit["commentLinkClicks"] == 0
-    # 离线站点的面板只随点击入口切换：移开光标收不起，回退为点入口（#81）。
-    filter_targets = [
-        (line["target"].get("filter"), line["target"].get("method")) for line in actions(crawler, "apply_filter")
-    ]
-    assert filter_targets == [
-        ("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave"), ("panel_close", "entry_press"),
-    ]
+    # 面板悬停开合（#81）：筛选一次成功，收起由移开光标完成，没有回退到按入口；点选“图文”之后面板只收起一次、不再
+    # 打开。接近入口时越过入口可能开 → 关 → 再开（人越过目标时也会这样），不在此断言。
+    assert [session["filtered"] for session in audit["sessions"]] == [False, True]
+    assert filter_targets(crawler) == [("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave")]
+    panel_events = audit["panelEvents"]
+    option = panel_events.index("option")
+    assert panel_events[option - 1] == "hover_open" and panel_events[option:] == ["option", "leave_close"]
+    assert not {"press_open", "press_close"} & set(panel_events), panel_events
+    assert "[XiaoHongShuCrawler.scan] Filter panel opened on hover; entry not pressed" in log_lines
+    assert not any("stayed open after the pointer left" in line for line in log_lines)
     first_scroll = actions(crawler, "scroll")[0]["seq"]
     assert actions(crawler, "apply_filter")[-1]["seq"] < first_scroll
 
@@ -597,7 +606,8 @@ async def test_note_engagement_script_reads_the_field_structure(tmp_path):
 @pytest.mark.asyncio
 async def test_feed_verification_layer_then_redo_reuses_the_cached_first_image(monkeypatch, tmp_path):
     """feed 返回 461：站点显示验证层（captcha iframe），完成后整篇重做；同一文档重开时首图走内存、没有新的
-    响应事件，记录引用第一次尝试截获的图片访问，门禁照常通过。"""
+    响应事件，记录引用第一次尝试截获的图片访问，门禁照常通过。面板只随点击入口切换（默认）：按入口打开，移开光标
+    收不起，回退为按入口收起。"""
     items = [search_item(f"v-{index}") for index in range(8)]
     site = XhsOfflineSite(KEYWORD, [items])
     site.details["v-3"] = detail_card("v-3", images=2, user_id="author-v")
@@ -613,6 +623,10 @@ async def test_feed_verification_layer_then_redo_reuses_the_cached_first_image(m
 
     assert site.feed_requests == ["v-3", "v-3"]
     assert audit["captchaShown"] == 1 and layers == 0
+    assert filter_targets(crawler) == [
+        ("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave"), ("panel_close", "entry_press"),
+    ]
+    assert audit["panelEvents"] == ["press_open", "option", "press_close"]
     assert site.document_requests.count("/website-login/captcha") == 1
     assert [record["note_id"] for record in crawler.records] == ["v-3"]
     assert_staged_png(site, crawler, "v-3", 2)
