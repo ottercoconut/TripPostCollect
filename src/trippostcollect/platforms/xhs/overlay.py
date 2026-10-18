@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -27,6 +28,7 @@ from trippostcollect.platforms.xhs.errors import (
 )
 from trippostcollect.platforms.xhs.page_scripts import (
     XHS_OVERLAY_ROOTS,
+    dom_note_engagement,
     dom_note_view_state,
     dom_scroll_metrics,
     dom_visible_cards,
@@ -43,6 +45,12 @@ from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.image_retry import is_runtime_blocking_image_error
 from trippostcollect.runtime.page_capture import CaptureFailure, CapturedResponse, ImageWindow
 from trippostcollect.runtime.visit_ledger import line_seq
+from trippostcollect.xhs.engagement import (
+    append_engagement_observation,
+    comments_pending,
+    engagement_evidence_path,
+    engagement_observation,
+)
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -57,6 +65,8 @@ XHS_OVERLAY_POLL_SECONDS = 0.25
 # 浮层未出现时等 3–6 秒再点一次；浮层出现但没有 feed 时先关闭，等 4–8 秒再开。
 XHS_OVERLAY_REOPEN_SECONDS = (3.0, 6.0)
 XHS_OVERLAY_RECLOSE_SECONDS = (4.0, 8.0)
+# #94 取证：评论区可能晚于互动栏渲染，读到总数行或空状态前至多再等这么久。
+XHS_ENGAGEMENT_COMMENTS_SECONDS = 2.0
 OVERLAY_RANDOM = random.SystemRandom()
 
 
@@ -241,6 +251,7 @@ class XhsOverlayMixin:
         await self._wait_overlay(lambda state: bool(state.get("content_visible")), XHS_OVERLAY_CLOSE_SECONDS)
         await self._guarded_pause("note_detail", *XHS_NOTE_DETAIL_PAUSE_SECONDS)
         images = await self._collect_note_images(note_id, run.window, assets) if assets else {}
+        await self._record_engagement_observation(note_id, note_card, mode="discovery")
 
         creator: dict[str, Any] = {}
         if note.user_id:
@@ -378,6 +389,37 @@ class XhsOverlayMixin:
             if not closed.get("visible"):
                 return
         raise PlatformRuntimeError("XHS note overlay did not close", code="xhs_overlay_close_failed")
+
+    async def _record_engagement_observation(self, note_id: str, note_card: dict[str, Any], *, mode: str) -> None:
+        """#94 取证：读互动栏与评论区，逐篇追加到行为证据同目录的 engagement 证据；只取证，不影响本篇的处理与判定，
+        读数失败只记失败类别。"""
+        evidence_path = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()
+        if not evidence_path:
+            return
+        page, failure = await self._read_note_engagement()
+        line = engagement_observation(
+            note_id, mode=mode, interact=note_card.get("interact_info"), page=page, failure=failure,
+        )
+        try:
+            append_engagement_observation(engagement_evidence_path(evidence_path), line)
+        except OSError as exc:
+            logger.warning(f"[XiaoHongShuCrawler.overlay] Could not persist engagement observation: {type(exc).__name__}")
+
+    async def _read_note_engagement(self) -> tuple[Any, str]:
+        """读到评论区总数行或空状态即止，否则每 0.25 秒再读、至多 XHS_ENGAGEMENT_COMMENTS_SECONDS；返回最后一次读数。"""
+        polls = 1 + int(XHS_ENGAGEMENT_COMMENTS_SECONDS / XHS_OVERLAY_POLL_SECONDS)
+        page: Any = None
+        for attempt in range(polls):
+            try:
+                page = await dom_note_engagement(self.context_page, self._note_view_roots)
+            except TimeoutError:
+                return None, "timeout"
+            except Exception:
+                return None, "script_error"
+            if not comments_pending(page) or attempt + 1 == polls:
+                break
+            await self._scan_sleep(XHS_OVERLAY_POLL_SECONDS)
+        return page, ""
 
     def _note_fields_valid(self, note_id: str, note_detail: dict[str, Any]) -> bool:
         """有效条件与原详情路径一致：正文、时间、作者、图片、粉丝观察与四个互动数。"""

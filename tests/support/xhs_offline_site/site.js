@@ -441,9 +441,31 @@
     const desc = el('div', 'desc');
     desc.id = 'detail-desc';
     content.append(title, desc);
-    const [comments, , commentList] = wrapped('comments-el', 'comments-container', 'list-container');
+    const [comments, commentsBox, commentList] = wrapped('comments-el', 'comments-container', 'list-container');
+    // 评论区总数行与空状态（操作人 2026-10-18 实地结构）：按 feed 的评论数插入其一，不按 hidden 切换。
+    const commentTotal = el('div', 'total');
+    const noComments = el('div', 'no-comments-text', '这是一片荒地 ');
+    noComments.appendChild(el('span', 'focus-comments', '点击评论'));
+    // 底部互动栏（同上）：.buttons.engage-bar-style 的 .left 内依次为点赞、收藏、评论的 span.count，分享只有图标。
+    const counter = (className) => {
+      const wrapper = el('span', className);
+      const count = el('span', 'count');
+      wrapper.append(el('span', 'icon'), count);
+      return [wrapper, count];
+    };
+    const [likeWrapper, likeCount] = counter('like-wrapper');
+    const [collectWrapper, collectCount] = counter('collect-wrapper');
+    const [chatWrapper, chatCount] = counter('chat-wrapper');
+    const engageLeft = el('div', 'left');
+    engageLeft.append(likeWrapper, collectWrapper, chatWrapper);
+    const shareWrapper = el('div', 'share-wrapper');
+    const shareIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    shareIcon.setAttribute('class', 'share-icon');
+    shareWrapper.appendChild(shareIcon);
+    const engageBar = el('div', 'buttons engage-bar-style');
+    engageBar.append(engageLeft, shareWrapper);
     const side = el('div', 'interaction-container');
-    side.append(author, content, comments);
+    side.append(author, content, comments, engageBar);
     const container = el('div', 'note-container');
     container.append(media, oldAuthor, side);
     mask.append(close, container);
@@ -461,6 +483,7 @@
     document.body.appendChild(mask);
     return {
       mask, slide, fraction, left, right, author, oldName, avatarLink, name, content, title, desc, comments, commentList,
+      commentsBox, commentTotal, noComments, likeCount, collectCount, chatCount,
     };
   };
   const profileHref = (userId) => `${PROFILE_URL}${encodeURIComponent(userId || '')}?xsec_token=offline&xsec_source=pc_note`;
@@ -473,6 +496,10 @@
     link.href = profileHref(userId);
     authorBox.appendChild(link);
     right.appendChild(el('div', 'content', '去过，很好看'));
+    // 评论的点赞同样是 .like-wrapper span.count，且在文档顺序上先于底部互动栏。
+    const like = el('span', 'like-wrapper');
+    like.appendChild(el('span', 'count', '5'));
+    right.appendChild(like);
     parent.appendChild(item);
     return parent;
   };
@@ -534,10 +561,27 @@
     overlayUi.avatarLink.href = profileHref(user.user_id);
     overlayUi.title.textContent = note.title || '';
     overlayUi.desc.textContent = note.desc || '';
-    overlayUi.commentList.replaceChildren(
-      commentNode('commenter-1', '路人甲'), commentNode(user.user_id, user.nickname || '作者'),
-      commentNode('commenter-2', '路人乙'),
-    );
+    // 计数为空串时按实地观察显示：点赞文字为空、收藏显示“收藏”、评论显示“评论”，评论区为空状态。
+    const interact = note.interact_info || {};
+    const shown = (key, label) => (interact[key] === undefined || interact[key] === null || interact[key] === ''
+      ? label : String(interact[key]));
+    overlayUi.likeCount.textContent = shown('liked_count', '');
+    overlayUi.collectCount.textContent = shown('collected_count', '收藏');
+    overlayUi.chatCount.textContent = shown('comment_count', '评论');
+    const hasComments = shown('comment_count', '') !== '';
+    overlayUi.commentTotal.remove();
+    overlayUi.noComments.remove();
+    if (hasComments) {
+      overlayUi.commentTotal.textContent = `共 ${interact.comment_count} 条评论`;
+      overlayUi.commentsBox.insertBefore(overlayUi.commentTotal, overlayUi.commentList);
+      overlayUi.commentList.replaceChildren(
+        commentNode('commenter-1', '路人甲'), commentNode(user.user_id, user.nickname || '作者'),
+        commentNode('commenter-2', '路人乙'),
+      );
+    } else {
+      overlayUi.commentsBox.insertBefore(overlayUi.noComments, overlayUi.commentList);
+      overlayUi.commentList.replaceChildren();
+    }
     overlayUi.author.hidden = false;
     overlayUi.content.hidden = false;
     overlayUi.comments.hidden = false;

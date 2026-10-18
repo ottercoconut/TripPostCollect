@@ -27,7 +27,10 @@ MIXIN_MODULES = {"session", "navigation", "login", "author", "detail", "media", 
 # #71 新增、台账之外的 mixin 模块。
 T71_MIXIN_MODULES = {"scan", "overlay"}
 # 平台层只可依赖根侧父子共用的格式定义，不得依赖租约、发现等控制面。
-XHS_ROOT_MODULES_ALLOWED = {"trippostcollect.xhs.operator_wait", "trippostcollect.xhs.search_target"}
+# #94：互动计数取证的逐篇证据与子摘要汇总共用 xhs.engagement（只依赖标准库与 records.formal）。
+XHS_ROOT_MODULES_ALLOWED = {
+    "trippostcollect.xhs.engagement", "trippostcollect.xhs.operator_wait", "trippostcollect.xhs.search_target",
+}
 
 
 def _resolutions() -> dict:

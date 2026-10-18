@@ -34,6 +34,7 @@ from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.bilibili import core as bilibili_core
 from trippostcollect.runtime import process
 from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_path
+from trippostcollect.xhs.engagement import engagement_evidence_path, summarize_engagement_evidence
 from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -316,6 +317,15 @@ T71_REPLACEMENTS = (
         T71_ENVELOPE_PRINT + "    _runtime_progress(progress_callback)\n    write_markdown(summary, report_path)\n"
         "    _runtime_progress(progress_callback)\n",
     ),
+    # #94：小红书平台记录的 output 带互动计数取证汇总（只取证，判定未变）。
+    (
+        "        output[\"content_visit_paths\"] = [str(ledger_path)] if ledger_path.is_file() else []\n",
+        "        output[\"content_visit_paths\"] = [str(ledger_path)] if ledger_path.is_file() else []\n"
+        "    if platform_key == \"xhs\":\n"
+        "        output[\"engagement_observation\"] = summarize_engagement_evidence(\n"
+        "            engagement_evidence_path(behavior_evidence_path)\n"
+        "        )\n",
+    ),
 )
 
 def t71_authorized_source(text):
@@ -488,6 +498,8 @@ def baseline(monkeypatch):
     namespace["content_visits_path"] = content_visits_path
     namespace["_url_contains_keyword"] = reporting._url_contains_keyword
     namespace["operator_wait_diagnostics_path"] = operator_wait_diagnostics_path
+    namespace["engagement_evidence_path"] = engagement_evidence_path
+    namespace["summarize_engagement_evidence"] = summarize_engagement_evidence
     vars(module).update(namespace)
     exec(compile(text, module.__file__, "exec"), vars(module))
     return module

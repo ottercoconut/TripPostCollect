@@ -46,6 +46,7 @@ from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
 from trippostcollect.records.sanitization import sanitize_export_item
 from trippostcollect.runtime.human_pointer import pointer_for
 from trippostcollect.runtime.visit_ledger import iter_ledger_lines
+from trippostcollect.xhs.engagement import engagement_observation
 from trippostcollect.xhs.search_target import is_target_search
 
 from .support import XiaoHongShuCrawler, assert_no_avatar_log_lines, config, crawler_log_lines, make_capture
@@ -219,6 +220,12 @@ def actions(crawler, kind: str) -> list[dict]:
 
 def visit(crawler, visit_id: str) -> dict:
     return next(line for line in ledger_lines(crawler) if line.get("id") == visit_id)
+
+
+def engagement_lines(tmp_path) -> dict[str, dict]:
+    path = tmp_path / "behavior_evidence.engagement.jsonl"
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    return {line["note_id"]: line for line in lines}
 
 
 def last_stop(state_path) -> dict:
@@ -435,6 +442,104 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     assert result["continuity_ok"] is True and result["request_pacing_ok"] is True
     assert site.unexpected == [] and site.escaped() == []
     assert_pointer_events_match_the_sample(pointer_events, crawler)
+
+    # #94：浮层底部互动栏与评论区按实地结构读数；评论区里评论的点赞（同为 .like-wrapper span.count、在互动栏之前）
+    # 不被读到。
+    lines = engagement_lines(tmp_path)
+    assert sorted(lines) == sorted(images)
+    for line in lines.values():
+        assert (line["mode"], line["read"], line["bar"], line["left"]) == ("discovery", "ok", True, True)
+        assert line["counts"] == {
+            "liked_count": {"feed": "number", "feed_value": 1, "page": "number", "page_value": 1},
+            "collected_count": {"feed": "number", "feed_value": 2, "page": "number", "page_value": 2},
+            "comment_count": {"feed": "number", "feed_value": 3, "page": "number", "page_value": 3},
+            "share_count": {"feed": "number", "feed_value": 4, "page": "icon_only"},
+        }
+        assert line["comments"] == {"section": "total", "total": 3, "container": True, "empty_state": False}
+
+
+# #94：操作人 2026-10-18 实地查看的互动栏与评论区结构。评论区在前、互动栏在底部；评论的点赞同样是
+# .like-wrapper span.count。numbers 为有数字的笔记（点赞另带 like-active，含“万”），zero 为计数为 0 时的显示，
+# missing 缺评论与分享（互动栏外另有一个 .chat-wrapper），hidden 为不可见的根。
+ENGAGEMENT_FIELD_HTML = """
+<div id="numbers"><div class="interaction-container">
+  <div class="comments-el"><div class="comments-container">
+    <div class="total">共 12 条评论</div>
+    <div class="list-container"><div class="parent-comment"><div class="comment-item"><div class="right">
+      <span class="like-wrapper"><span class="count">5</span></span>
+    </div></div></div></div>
+  </div></div>
+  <div class="buttons engage-bar-style">
+    <div class="left">
+      <span class="like-wrapper like-active"><span class="like-lottie"></span><span class="count">1.2万</span></span>
+      <span class="collect-wrapper"><span class="count">36</span></span>
+      <span class="chat-wrapper"><span class="count">12</span></span>
+    </div>
+    <div class="share-wrapper"><svg class="share-icon" width="16" height="16"></svg></div>
+  </div>
+</div></div>
+<div id="zero"><div class="interaction-container">
+  <div class="comments-el"><div class="comments-container">
+    <div class="no-comments-text">这是一片荒地 <span class="focus-comments">点击评论</span></div>
+  </div></div>
+  <div class="buttons engage-bar-style">
+    <div class="left">
+      <span class="like-wrapper"><span class="count"></span></span>
+      <span class="collect-wrapper"><span class="count">收藏</span></span>
+      <span class="chat-wrapper"><span class="count">评论</span></span>
+    </div>
+    <div class="share-wrapper"><svg class="share-icon" width="16" height="16"></svg></div>
+  </div>
+</div></div>
+<div id="missing">
+  <div class="header"><span class="chat-wrapper"><span class="count">9</span></span></div>
+  <div class="buttons engage-bar-style"><div class="left">
+    <span class="like-wrapper"><span class="count">7</span></span>
+    <span class="collect-wrapper"></span>
+  </div></div>
+</div>
+<div id="hidden" style="display: none"><div class="buttons engage-bar-style"></div></div>
+"""
+
+
+@pytest.mark.asyncio
+async def test_note_engagement_script_reads_the_field_structure(tmp_path):
+    """真实 Chromium 中执行 note_engagement 脚本：只读互动栏 .left 内的计数，空文字、文字标签、缺失元素与不可见的根
+    分别归类；输出只有文字截断、个数与布尔值。"""
+    site = XhsOfflineSite(KEYWORD, [[]])
+    async with replay_browser(site) as (_context, page, _pointer_events):
+        await page.set_content(ENGAGEMENT_FIELD_HTML)
+        reads = {
+            view: await page.evaluate(DOM_SCRIPTS["note_engagement"], {"roots": [f"#{view}"]})
+            for view in ("numbers", "zero", "missing", "hidden")
+        }
+
+    assert reads["numbers"] == {
+        "view_visible": True, "bar": True, "left": True,
+        "like": {"text": "1.2万", "matches": 1, "wrappers": 2},
+        "collect": {"text": "36", "matches": 1, "wrappers": 1},
+        "chat": {"text": "12", "matches": 1, "wrappers": 1},
+        "share": {"button": True, "text": None, "matches": 0, "wrappers": 1},
+        "comments": {"container": True, "total_text": "共 12 条评论", "empty_state": False},
+    }
+    assert reads["hidden"] == {"view_visible": False}
+    feed = {"liked_count": "", "collected_count": "", "comment_count": "", "share_count": ""}
+    zero = engagement_observation("zero", mode="discovery", interact=feed, page=reads["zero"])
+    assert zero["counts"] == {
+        "liked_count": {"feed": "empty_string", "page": "empty"},
+        "collected_count": {"feed": "empty_string", "page": "label"},
+        "comment_count": {"feed": "empty_string", "page": "label"},
+        "share_count": {"feed": "empty_string", "page": "icon_only"},
+    }
+    assert zero["comments"] == {"section": "empty_state", "container": True, "empty_state": True}
+    missing = engagement_observation("missing", mode="discovery", interact=feed, page=reads["missing"])
+    assert missing["counts"]["liked_count"] == {"feed": "empty_string", "page": "number", "page_value": 7}
+    assert missing["counts"]["collected_count"] == {"feed": "empty_string", "page": "absent", "matches": 0, "wrappers": 1}
+    assert missing["counts"]["comment_count"] == {"feed": "empty_string", "page": "absent", "matches": 0, "wrappers": 1}
+    assert missing["counts"]["share_count"] == {"feed": "empty_string", "page": "absent", "matches": 0, "wrappers": 0}
+    assert missing["comments"] == {"section": "not_rendered", "container": False, "empty_state": False}
+    hidden = engagement_observation("hidden", mode="discovery", interact=feed, page=reads["hidden"])
+    assert hidden["read"] == "view_missing" and hidden["comments"] == {"section": "unread"}
 
 
 @pytest.mark.asyncio

@@ -367,6 +367,54 @@ DOM_SCRIPTS: dict[str, str] = {
             })),
         };
     }""",
+    # #94 取证：详情视图（取法同 note_view_state）的互动栏与评论区，结构按操作人 2026-10-18 实地查看：互动栏根
+    # .buttons.engage-bar-style，其 .left 内依次为点赞 .like-wrapper（可另带 like-active 等状态类）、收藏
+    # .collect-wrapper、评论 .chat-wrapper 的 span.count；分享 .share-wrapper 只有图标；评论区总数行 div.total，
+    # 空状态 .no-comments-text。返回计数位置与总数行的文字（各截 32 字，在 Python 侧归类、不落盘）、互动栏内匹配
+    # 个数与整个视图内同类包装元素个数；不读正文或评论内容。
+    "note_engagement": """({ roots }) => {
+        const visible = (node) => {
+            if (!node) return false;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const view = roots.map((selector) => document.querySelector(selector)).find((node) => visible(node));
+        if (!view) return { view_visible: false };
+        const text = (node) => (node.textContent || '').trim().slice(0, 32);
+        const bar = view.querySelector('.buttons.engage-bar-style');
+        const left = bar ? bar.querySelector('.left') : null;
+        const slot = (wrapper) => {
+            const counts = left ? left.querySelectorAll(wrapper + ' span.count') : [];
+            return {
+                text: counts.length ? text(counts[0]) : null,
+                matches: counts.length,
+                wrappers: view.querySelectorAll(wrapper).length,
+            };
+        };
+        const share = bar ? bar.querySelector('.share-wrapper') : null;
+        const shareCount = share ? share.querySelector('.count') : null;
+        const total = view.querySelector('div.total');
+        return {
+            view_visible: true,
+            bar: Boolean(bar),
+            left: Boolean(left),
+            like: slot('.like-wrapper'),
+            collect: slot('.collect-wrapper'),
+            chat: slot('.chat-wrapper'),
+            share: {
+                button: Boolean(share),
+                text: shareCount ? text(shareCount) : null,
+                matches: shareCount ? 1 : 0,
+                wrappers: view.querySelectorAll('.share-wrapper').length,
+            },
+            comments: {
+                container: Boolean(view.querySelector('.comments-container')),
+                total_text: total ? text(total) : null,
+                empty_state: Boolean(view.querySelector('.no-comments-text')),
+            },
+        };
+    }""",
     # 点赞控件（浮层内）的按下状态：只读属性、类名与可见文本，不读页面状态。
     "like_control_state": """element => {
             const control = element.closest('button,[role="button"]') || element;
@@ -691,6 +739,11 @@ async def dom_note_view_state(page: Page, roots: tuple[str, ...], author: str = 
 async def dom_author_link_diagnostic(page: Page, roots: tuple[str, ...], author: str) -> dict[str, Any]:
     state = await _dom(page, "author_link_diagnostic", {"roots": list(roots), "author": author})
     return state if isinstance(state, dict) else {}
+
+
+async def dom_note_engagement(page: Page, roots: tuple[str, ...]) -> Any:
+    """原样返回脚本结果，形状由 `trippostcollect.xhs.engagement` 判定。"""
+    return await _dom(page, "note_engagement", {"roots": list(roots)})
 
 
 async def dom_overlay_state(page: Page) -> dict[str, Any]:

@@ -271,7 +271,7 @@ async def _read_repair_note_state(
 async def _repair_note_once(
     crawler: Any, url: str, target: NoteUrlInfo, window: ImageWindow, *, attempt: int,
 ) -> None:
-    """§9.2 第 3 步的一次尝试：直开链接 → 页面状态 → 期望图片 → 详情停顿 → 翻图 → 作者 → 暂存与写出。"""
+    """§9.2 第 3 步的一次尝试：直开链接 → 页面状态 → 期望图片 → 详情停顿 → 翻图 → 互动计数取证 → 作者 → 暂存与写出。"""
     capture = crawler._require_capture()
     note_id = str(target.note_id)
     page = crawler.context_page
@@ -306,6 +306,7 @@ async def _repair_note_once(
         )
     await crawler._guarded_pause("note_detail", *XHS_NOTE_DETAIL_PAUSE_SECONDS)
     images = await crawler._collect_note_images(note_id, window, assets) if assets else {}
+    await crawler._record_engagement_observation(note_id, note_card, mode="repair")
     creator, note.creator_visit = await crawler._enrich_creator_via_author_tab(note)
     note_detail = {
         **note_card,

@@ -29,6 +29,8 @@ ALLOWED = {
         "xhs.operator_wait",
         # #71：访问账本路径与 worker 写入共用同一推导（行为证据同目录）。
         "runtime.visit_ledger",
+        # #94：互动计数取证的证据路径与汇总，与 worker 写入共用同一定义。
+        "xhs.engagement",
     },
     "application/reporting.py": {"records.formal", "runtime.behavior", "runtime.helpers"},
     "application/failures.py": {"records.text_signals"},

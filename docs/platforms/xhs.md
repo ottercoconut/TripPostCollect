@@ -530,6 +530,15 @@ child `summary.json` 的
   按 → 键、其余点右箭头，按页码 k/N 核实前进，不前进时换一种方式再试一次。作者见下一小节。有效记录
   如请求了互动，在当前浮层内执行，不新开标签页。最后点关闭按钮关闭浮层（不按 Esc，5 秒内确认，重试
   一次仍关不掉为 `xhs_overlay_close_failed`），再暂存截获的图片并写记录。
+- 互动计数取证（#94，只取证、判定未变）：翻图之后、点作者之前（repair 整页在同一位置）读一次详情视图根
+  （浮层为 `div.note-detail-mask`，repair 另认整页根）内的互动栏与评论区。结构按操作人 2026-10-18 实地查看：
+  互动栏根 `.buttons.engage-bar-style`，其 `.left` 内为点赞 `.like-wrapper span.count`（可另带 `like-active`
+  等状态类）、收藏 `.collect-wrapper span.count`、评论 `.chat-wrapper span.count`；分享 `.share-wrapper` 只有
+  图标，网页上不显示分享数；评论区总数行 `div.total`（“共 N 条评论”）、空状态 `.no-comments-text`，另记评论区
+  容器 `.comments-container` 是否存在。评论区的评论也有 `.like-wrapper span.count`，所以三处计数只在互动栏
+  `.left` 内找。评论区还没给出总数行或空状态时每 0.25 秒再读，至多 2 秒。读数失败只记类别（`timeout`、
+  `script_error`，视图不在为 `view_missing`），不影响本篇的处理。有效性判定不变：四个计数仍须非空，空串仍算
+  缺失，相应笔记仍判无效（用户 2026-10-18 决定：空串须有明确依据才能按 0 处理）。
 - 单篇内的登录恢复、验证完成或网络恢复后整篇重做一次：关闭残留浮层、在可点击带内重新找到卡片再点开，
   沿用同一图片窗口；同一文档重开时图片可能走内存缓存而没有响应，记录可以引用早先尝试截获的图片访问。
   第二次登录或网络中断照常上抛给扫描；第二次因验证或作者页登录重做、或重做时卡片已不在可点击带内，
@@ -685,6 +694,18 @@ child `summary.json` 的
   `author_link_missing`、点击后新标签页超时为 `author_tab_timeout`（另记点击后主页面路径模板），含浮层内作者名
   链接、作者主页链接与指向本篇作者的主页链接的个数、可见个数，以及前 4 个主页链接的 `target` 与祖先链。目标会话第 1 页的触发动作不是本次点选“图文”
   （G1 将失败）时只写一行 warning 日志，带触发动作、`target` 与回车会话的序号，判定不变。
+- 互动计数取证（#94）逐篇追加到 `behavior_evidence.engagement.jsonl`（不进账本、不截断；整篇重做时同一笔记
+  有多行）：笔记 ID、`mode`、`read`，读数成功时另记互动栏根 `bar` 与 `.left` 是否存在。四个计数各记 feed 原值
+  类别 `feed`（`number` 带 `feed_value`，按 `parse_int` 解析、含“万”；`empty_string`；`missing` 即键不存在；
+  `null`；`other`）与页面显示类别 `page`（`number` 带 `page_value`；`label` 为非空的非数字文字，只记类别；
+  `empty` 为元素在但文字为空；`absent` 为找不到元素，带互动栏 `.left` 内匹配个数 `matches` 与整个视图内同类
+  包装元素个数 `wrappers`；分享有按钮无 `.count` 为 `icon_only`；读数失败为 `unread`）。评论区记 `section`
+  （`total` 带总数 `total`、`unparsed_total`、`empty_state`、`container_only`、`not_rendered`、`unread`）与
+  `container`、`empty_state` 两个布尔值。不写页面原文、正文、评论、作者或地址；笔记 ID 不进日志。子摘要平台
+  记录的 `output.engagement_observation` 按笔记汇总（重做取最后一行）：`lines`、`notes`、`reads`、
+  `bar_missing`；`counts.<计数>` 与 `comment_section`（feed 评论数对评论区）各有 `feed_by_page`（feed 类别 ×
+  页面类别的篇数）、`both_numbers`（两边都是数字时 `equal`、`different` 的篇数）与 `feed_empty_page`（feed 为
+  空串时页面一侧的分布：数字按 `0`、`1-9`、`10+` 分档，其余按类别）。
 
 ## 6. 完成检查
 

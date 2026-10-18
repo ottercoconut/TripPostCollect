@@ -85,6 +85,8 @@ from trippostcollect.runtime.visit_ledger import content_visits_path
 from trippostcollect.scheduler.discovery import load_checkpoint
 from trippostcollect.scheduler.discovery import save_checkpoint
 from trippostcollect.scheduler.discovery import save_seen_candidates
+from trippostcollect.xhs.engagement import engagement_evidence_path
+from trippostcollect.xhs.engagement import summarize_engagement_evidence
 from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
 from typing import Callable
 from typing import TYPE_CHECKING
@@ -1015,6 +1017,11 @@ def _run_platform_without_policy(
     if platform_key in VISIT_GATED_PLATFORMS:
         ledger_path = content_visits_path(behavior_evidence_path)
         output["content_visit_paths"] = [str(ledger_path)] if ledger_path.is_file() else []
+    if platform_key == "xhs":
+        # #94 取证：互动计数与页面显示的对照表（判定未变）。
+        output["engagement_observation"] = summarize_engagement_evidence(
+            engagement_evidence_path(behavior_evidence_path)
+        )
     status = (
         "completed"
         if output["parse_errors"] == 0

@@ -81,6 +81,67 @@ def detail_card(note_id: str, *, images: int = 2, user_id: str | None = None, no
     }
 
 
+def engagement_view(card: dict[str, Any]) -> dict[str, Any]:
+    """详情视图内的互动栏与评论区（操作人 2026-10-18 实地结构）：嵌套字典的键为“标签.类名”（同级重名在后面加 #n），
+    叶子为元素文字，缺键即元素不存在。feed 计数按原值显示；空串按实地观察：点赞文字为空、收藏显示“收藏”、评论显示
+    “评论”，评论区为空状态。分享只有图标。有评论时列一条评论，其点赞同样是 .like-wrapper span.count，在文档顺序上
+    先于底部的互动栏（不限定在互动栏内读就会读到它）。
+    """
+    interact = card.get("interact_info") or {}
+
+    def shown(key: str, label: str) -> str:
+        value = interact.get(key)
+        return label if value in (None, "") else str(value)
+
+    comments = interact.get("comment_count")
+    if comments in (None, ""):
+        section: dict[str, Any] = {"div.no-comments-text": {"span": "这是一片荒地 ", "span.focus-comments": "点击评论"}}
+    else:
+        section = {
+            "div.total": f"共 {comments} 条评论",
+            "div.list-container": {"div.parent-comment": {"div.like-wrapper": {"svg.like-icon": "", "span.count": "5"}}},
+        }
+    return {
+        "div.comments-el": {"div.comments-container": section},
+        "div.buttons.engage-bar-style": {
+            "div.left": {
+                "span.like-wrapper": {"svg.like-icon": "", "span.count": shown("liked_count", "")},
+                "span.collect-wrapper": {"svg.collect-icon": "", "span.count": shown("collected_count", "收藏")},
+                "span.chat-wrapper": {"svg.chat-icon": "", "span.count": shown("comment_count", "评论")},
+            },
+            "div.share-wrapper": {"svg.share-icon": ""},
+        },
+    }
+
+
+def _key_matches(key: str, compound: str) -> bool:
+    tag, *classes = key.split("#", 1)[0].split(".")
+    wanted_tag, *wanted = compound.split(".")
+    return (not wanted_tag or wanted_tag == tag) and set(wanted) <= set(classes)
+
+
+def _descendants(node: dict[str, Any]) -> Iterable[tuple[str, Any]]:
+    for key, child in node.items():
+        yield key, child
+        if isinstance(child, dict):
+            yield from _descendants(child)
+
+
+def select(node: Any, selector: str) -> list[Any]:
+    """后代选择器（空格分隔、只含标签与类名的复合选择器）在 engagement_view 上按文档顺序匹配，同 querySelectorAll。"""
+    current = [node]
+    for compound in selector.split():
+        current = [
+            child for parent in current if isinstance(parent, dict)
+            for key, child in _descendants(parent) if _key_matches(key, compound)
+        ]
+    return current
+
+
+def text_of(node: Any) -> str:
+    return "".join(text_of(child) for child in node.values()) if isinstance(node, dict) else str(node)
+
+
 def state_note(card: dict[str, Any]) -> dict[str, Any]:
     """feed note_card 对应的页面状态 note（camelCase）；带上投影白名单之外的字段（头像、token、互动状态）。"""
     user = card.get("user") or {}
@@ -341,6 +402,10 @@ class XhsFakeSite:
         self.creator_projections: dict[str, Any] = {}
         self.projection_hooks: dict[str, Any] = {}
         self.overlay_closes = True
+        # #94：engagement_views[id] 替换默认的互动栏与评论区；comments_late_reads[id] 次读数内评论区只有空容器。
+        self.engagement_views: dict[str, dict[str, Any]] = {}
+        self.comments_late_reads: dict[str, int] = {}
+        self.engagement_reads: list[str] = []
         self.overlay_note: str | None = None
         self.overlay_page = 0
         self.results_url = ""
@@ -481,6 +546,8 @@ class XhsFakeSite:
             return {"card_count": len(self.rendered_items()), "profile_count": 1}
         if name == "note_view_state":
             return self.overlay_state(arg["author"])
+        if name == "note_engagement":
+            return self.note_engagement()
         raise AssertionError(f"unexpected page script: {name or script[:40]}")
 
     @property
@@ -754,6 +821,57 @@ class XhsFakeSite:
             ],
         }
 
+    def note_engagement(self) -> dict[str, Any]:
+        """note_engagement 脚本在 engagement_view 上的等价读数，选择器与页面脚本相同。"""
+        if self.overlay_note is None:
+            return {"view_visible": False}
+        note_id = self.overlay_note
+        self.engagement_reads.append(note_id)
+        view = self.engagement_views.get(note_id) or engagement_view(self.detail(note_id))
+        if self.comments_late_reads.get(note_id, 0) > 0:
+            self.comments_late_reads[note_id] -= 1
+            view = {**view, "div.comments-el": {"div.comments-container": {}}}
+
+        def first(found: list[Any]) -> Any:
+            return found[0] if found else None
+
+        def text(node: Any) -> str:
+            return text_of(node).strip()[:32]
+
+        bar = first(select(view, ".buttons.engage-bar-style"))
+        left = first(select(bar, ".left")) if bar is not None else None
+
+        def slot(wrapper: str) -> dict[str, Any]:
+            counts = select(left, f"{wrapper} span.count") if left is not None else []
+            return {
+                "text": text(counts[0]) if counts else None,
+                "matches": len(counts),
+                "wrappers": len(select(view, wrapper)),
+            }
+
+        share = first(select(bar, ".share-wrapper")) if bar is not None else None
+        share_count = first(select(share, ".count")) if share is not None else None
+        total = first(select(view, "div.total"))
+        return {
+            "view_visible": True,
+            "bar": bar is not None,
+            "left": left is not None,
+            "like": slot(".like-wrapper"),
+            "collect": slot(".collect-wrapper"),
+            "chat": slot(".chat-wrapper"),
+            "share": {
+                "button": share is not None,
+                "text": text(share_count) if share_count is not None else None,
+                "matches": int(share_count is not None),
+                "wrappers": len(select(view, ".share-wrapper")),
+            },
+            "comments": {
+                "container": bool(select(view, ".comments-container")),
+                "total_text": text(total) if total is not None else None,
+                "empty_state": bool(select(view, ".no-comments-text")),
+            },
+        }
+
     def open_overlay(self, note_id: str) -> None:
         override = self.feed_overrides[note_id].pop(0) if self.feed_overrides.get(note_id) else None
         if override == "no_overlay":
@@ -832,5 +950,5 @@ def make_site(*args: Any, **kwargs: Any) -> XhsFakeSite:
 
 __all__ = [
     "XhsFakeSite", "FakePage", "make_site", "note", "TARGET_FILTERS", "detail_card", "creator_projection",
-    "image_url", "image_bytes", "state_note", "whitelisted_state",
+    "engagement_view", "image_url", "image_bytes", "state_note", "whitelisted_state",
 ]
