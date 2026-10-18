@@ -471,20 +471,31 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
         "| 平台 | 状态 | 图文内容记录 | 发帖时间记录 | 跳过视频记录 | 图片文件 | 视频文件(应为0) | 作者字段 |",
         "|---|---|---:|---:|---:|---:|---:|---|",
     ]
+    incomplete = False
     for record in summary["records"]:
         output = record["output"]
+        # 中断轮次由批次检查点写入的累计记录只有产物路径、没有计数：计数列显示“—”，不按 0 计。
+        if record["status"] == "incomplete":
+            incomplete = True
+            counts = dict.fromkeys(("contents", "published_at", "skipped_videos", "images", "videos", "fields"), "—")
+        else:
+            counts = {
+                "contents": output["non_video_content_records"],
+                "published_at": output["published_at_records"],
+                "skipped_videos": output["video_like_records"],
+                "images": output["image_file_count"],
+                "videos": output["video_file_count"],
+                "fields": ", ".join(output["author_like_fields"]) or "无",
+            }
         lines.append(
             "| {label} | {status} | {contents} | {published_at} | {skipped_videos} | {images} | {videos} | {fields} |".format(
                 label=record.get("label") or PLATFORMS[record["platform"]]["label"],
                 status=record["status"],
-                contents=output["non_video_content_records"],
-                published_at=output["published_at_records"],
-                skipped_videos=output["video_like_records"],
-                images=output["image_file_count"],
-                videos=output["video_file_count"],
-                fields=", ".join(output["author_like_fields"]) or "无",
+                **counts,
             )
         )
+    if incomplete:
+        lines.extend(["", "- `incomplete`：中断轮次由批次检查点写入的累计记录，只有产物路径，没有计数。"])
     lines.extend(["", "## 样本", ""])
     for record in summary["records"]:
         label = record.get("label") or PLATFORMS[record["platform"]]["label"]

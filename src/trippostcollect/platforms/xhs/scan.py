@@ -77,6 +77,8 @@ XHS_UNREGISTERED_CARD_STEPS = 2
 # 未登记卡片诊断最多描述的 ID 个数，以及每个 ID 最多列出的响应出处条数。
 XHS_UNREGISTERED_DIAGNOSTIC_IDS = 8
 XHS_UNREGISTERED_DIAGNOSTIC_ENTRIES = 6
+# “搜索项从未渲染”诊断最多描述的 ID 个数（出处条数同上）。
+XHS_UNRENDERED_DIAGNOSTIC_IDS = 10
 XHS_BACKFILL_ATTEMPTS = 3
 XHS_FILTER_POLLS = 20
 XHS_FILTER_POLL_SECONDS = 0.25
@@ -130,6 +132,7 @@ class ResponseEntry:
     page: int
     position: int
     model_type: str
+    card_type: str
 
 
 @dataclass(eq=False)
@@ -166,6 +169,8 @@ class SearchPage:
     non_notes_seen: set[str] = field(default_factory=set)
     observed: set[str] = field(default_factory=set)
     passed: bool = False
+    # 首次判为越过时的来源（见 `_mark_observed`、`_handle_list_bottom`），只供诊断。
+    passed_by: Optional[dict[str, Any]] = None
     began: bool = False
     results_paused: bool = False
     finished: bool = False
@@ -290,6 +295,24 @@ def _filter_moment(state: dict[str, Any]) -> dict[str, Any]:
         "option": bool(state.get("option")),
         "entry_text": str(state.get("entry_text") or ""),
     }
+
+
+def _origins_text(responses: Optional[list[dict[str, Any]]]) -> str:
+    """日志里的出处摘要：会话（current 为当前目标会话，target 为其他目标会话，non_target）、页码与 model_type。"""
+    if responses is None:
+        return "none"
+
+    def kind(item: dict[str, Any]) -> str:
+        if item["current_target"]:
+            return "current"
+        return "target" if item["is_target"] else "non_target"
+
+    return "+".join(f"{kind(item)}:p{item['page']}:{item['model_type'] or '?'}" for item in responses)
+
+
+def _index_range(values: Any) -> Optional[list[int]]:
+    indices = [value for value in values if value >= 0]
+    return [min(indices), max(indices)] if indices else None
 
 
 class XhsScanMixin:
@@ -714,8 +737,12 @@ class XhsScanMixin:
         non_notes: list[str] = []
         for position, raw in enumerate(raw_items):
             if isinstance(raw, dict) and str(raw.get("id") or ""):
+                card = raw.get("note_card") if isinstance(raw.get("note_card"), dict) else {}
                 scan.response_entries.setdefault(str(raw["id"]), []).append(
-                    ResponseEntry(captured.seq, key, is_target, page_no, position, str(raw.get("model_type") or "")[:40])
+                    ResponseEntry(
+                        captured.seq, key, is_target, page_no, position,
+                        str(raw.get("model_type") or "")[:40], str(card.get("type") or "")[:40],
+                    )
                 )
                 if raw.get("model_type") != "note":
                     non_notes.append(str(raw["id"]))
@@ -816,7 +843,7 @@ class XhsScanMixin:
                 continue
             registered.append((card, *entry))
             scan.observed_index[note_id] = int(card.get("data_index", -1))
-            self._mark_observed(entry[0], note_id)
+            self._mark_observed(*entry, card, metrics)
         await self._count_unregistered(unregistered, metrics)
         decided = False
         for card, search_page, item in registered:
@@ -856,40 +883,47 @@ class XhsScanMixin:
                 "XHS search card stayed unregistered", code="xhs_search_card_unregistered",
             )
 
-    async def _record_unregistered_cards(self, note_ids: list[str], metrics: dict[str, Any]) -> None:
-        """停止前把每个未登记 ID 的卡片结构与它在本轮搜索响应中的出处写入导航诊断，并在日志留一行。
-
-        出处列出每次出现的截获序号、所在会话的起始序号、是否目标会话 / 当前目标会话、页码、页内位置与
-        model_type；从未出现为 None。不含 token、地址查询串或正文。
-        """
+    def _response_origins(self, note_id: str) -> Optional[list[dict[str, Any]]]:
+        """条目在本轮搜索响应中的出处：每次出现的截获序号、所在会话的起始序号、是否目标会话 / 当前目标会话、页码、
+        页内位置、model_type 与卡片类型（note_card.type），至多 XHS_UNREGISTERED_DIAGNOSTIC_ENTRIES 条；从未出现为 None。"""
         scan = self._scan
+        entries = scan.response_entries.get(note_id)
+        if not entries:
+            return None
+        target_key = scan.target.key if scan.target is not None else None
+        return [
+            {
+                "seq": entry.seq,
+                "session_seq": session.started_seq if (session := scan.sessions.get(entry.session)) else None,
+                "is_target": entry.is_target,
+                "current_target": entry.session == target_key,
+                "page": entry.page,
+                "position": entry.position,
+                "model_type": entry.model_type,
+                "card_type": entry.card_type,
+            }
+            for entry in entries[:XHS_UNREGISTERED_DIAGNOSTIC_ENTRIES]
+        ]
+
+    async def _card_diagnostics(self, note_ids: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
+        """note_id → card_diagnostic 读数（结果列表内的卡片个数、data-index、位置等）；读取失败时为空并给出错误类型。"""
+        try:
+            cards = await dom_card_diagnostic(self.context_page, note_ids)
+        except Exception as exc:
+            return {}, f"card_diagnostic: {type(exc).__name__}"
+        return {str(card.get("note_id")): card for card in cards}, ""
+
+    async def _record_unregistered_cards(self, note_ids: list[str], metrics: dict[str, Any]) -> None:
+        """停止前把每个未登记 ID 的卡片结构与它在本轮搜索响应中的出处（见 `_response_origins`）写入导航诊断，并在
+        日志留一行。不含 token、地址查询串或正文。
+        """
         page = self.context_page
         note_ids = note_ids[:XHS_UNREGISTERED_DIAGNOSTIC_IDS]
-        error = ""
-        try:
-            dom = {str(card.get("note_id")): card for card in await dom_card_diagnostic(page, note_ids)}
-        except Exception as exc:
-            dom, error = {}, f"card_diagnostic: {type(exc).__name__}"
-        target_key = scan.target.key if scan.target is not None else None
-
-        def responses(note_id: str) -> Optional[list[dict[str, Any]]]:
-            entries = scan.response_entries.get(note_id)
-            if not entries:
-                return None
-            return [
-                {
-                    "seq": entry.seq,
-                    "session_seq": session.started_seq if (session := scan.sessions.get(entry.session)) else None,
-                    "is_target": entry.is_target,
-                    "current_target": entry.session == target_key,
-                    "page": entry.page,
-                    "position": entry.position,
-                    "model_type": entry.model_type,
-                }
-                for entry in entries[:XHS_UNREGISTERED_DIAGNOSTIC_ENTRIES]
-            ]
-
-        cards = [{"note_id": note_id, "dom": dom.get(note_id), "responses": responses(note_id)} for note_id in note_ids]
+        dom, error = await self._card_diagnostics(note_ids)
+        cards = [
+            {"note_id": note_id, "dom": dom.get(note_id), "responses": self._response_origins(note_id)}
+            for note_id in note_ids
+        ]
         await self._record_navigation_diagnostic(
             page, stage="search_scan", outcome="card_unregistered", error=error,
             extra={
@@ -900,19 +934,11 @@ class XhsScanMixin:
             },
         )
 
-        def session_kind(item: dict[str, Any]) -> str:
-            if item["current_target"]:
-                return "current"
-            return "target" if item["is_target"] else "non_target"
-
         def summary(card: dict[str, Any]) -> str:
             shape = card["dom"] or {}
-            seen = "none" if card["responses"] is None else "+".join(
-                f"{session_kind(item)}:p{item['page']}:{item['model_type'] or '?'}" for item in card["responses"]
-            )
             return (
                 f"{card['note_id']}(index={shape.get('data_index')}, cover={shape.get('cover_path')}, "
-                f"card={shape.get('card')}, seen={seen})"
+                f"card={shape.get('card')}, seen={_origins_text(card['responses'])})"
             )
 
         logger.warning(
@@ -949,14 +975,31 @@ class XhsScanMixin:
             f"inner_height={metrics.get('inner_height')}, scroll_height={metrics.get('scroll_height')}"
         )
 
-    def _mark_observed(self, search_page: SearchPage, note_id: str) -> None:
-        """列表可见区出现过某页的卡片，即越过了此前各页；一页的卡片全部出现过也算越过。"""
-        search_page.observed.add(note_id)
+    def _mark_observed(
+        self, search_page: SearchPage, item: SearchItem, card: dict[str, Any], metrics: dict[str, Any],
+    ) -> None:
+        """列表可见区出现过某页的卡片，即越过了此前各页；一页的卡片全部出现过也算越过。
+
+        每页首次判为越过时记下来源卡片：所在页码、ID、页内位置、data-index、相对列表可见区顶部的纵坐标与当时的滚动位置。
+        """
+        search_page.observed.add(item.note_id)
+        pages = [page for number, page in search_page.session.pages.items() if number < search_page.page]
         if search_page.observed.issuperset(search_page.note_ids):
-            search_page.passed = True
-        for number, page in search_page.session.pages.items():
-            if number < search_page.page:
-                page.passed = True
+            pages.append(search_page)
+        view = _rect(metrics.get("view_rect"))
+        for page in pages:
+            if page.passed:
+                continue
+            page.passed = True
+            page.passed_by = {
+                "reason": "all_observed" if page is search_page else "later_page",
+                "page": search_page.page,
+                "note_id": item.note_id,
+                "position": item.position,
+                "data_index": int(card.get("data_index", -1)),
+                "top": round(float(card.get("top") or 0) - (view[1] if view else 0.0)),
+                "scroll_y": metrics.get("scroll_y"),
+            }
 
     def _finish_ready_batches(self) -> bool:
         """按序完成已越过且全部决定的页；目标会话末页 has_more=false 完成即来源耗尽。"""
@@ -1018,12 +1061,95 @@ class XhsScanMixin:
                     )
             await self._scroll_feed_step(-1, phase="backfill")
             return True
-        if current.passed and any(note_id not in scan.observed_index for note_id in undecided):
+        unrendered = [note_id for note_id in undecided if note_id not in scan.observed_index]
+        if current.passed and unrendered:
             # 已越过该页，但页内未知项从未出现在列表中：该页不可能完成，不能推断耗尽。
+            await self._record_items_never_rendered(
+                current, unrendered, undecided=len(undecided), cards=cards, metrics=metrics,
+            )
             raise PlatformRuntimeError(
                 "XHS search items were never rendered", code="xhs_search_items_unresolved",
             )
         return False
+
+    async def _record_items_never_rendered(
+        self,
+        current: SearchPage,
+        unrendered: list[str],
+        *,
+        undecided: int,
+        cards: list[dict[str, Any]],
+        metrics: dict[str, Any],
+    ) -> None:
+        """停止前把当前页从未出现在列表中的未决定项写入导航诊断，并在日志留一行（只诊断，不改判定）。
+
+        每项（至多 XHS_UNRENDERED_DIAGNOSTIC_IDS 个）给出页内位置与卡片类型、目标会话中也含它的其他页、结果列表内
+        的卡片读数（card_diagnostic，没有为 nodes=0）与本轮搜索响应中的出处（见 `_response_origins`）。整页给出条目数、
+        未决定数、从未出现数、已观察数及其 data-index 范围、已跳过的非笔记卡片数、把本页判为越过的来源（passed_by），
+        以及可见卡片的 data-index 范围、列表滚动位置与可见区。只含 ID、计数、页码、位置与类型。
+        """
+        scan = self._scan
+        items = {item.note_id: item for item in current.items}
+        note_ids = unrendered[:XHS_UNRENDERED_DIAGNOSTIC_IDS]
+        dom, error = await self._card_diagnostics(note_ids)
+        entries = [
+            {
+                "note_id": note_id,
+                "position": items[note_id].position,
+                "card_type": items[note_id].card_type,
+                "other_pages": sorted(
+                    number for number, page in current.session.pages.items()
+                    if page is not current and note_id in page.note_ids
+                ),
+                "dom": dom.get(note_id),
+                "responses": self._response_origins(note_id),
+            }
+            for note_id in note_ids
+        ]
+        observed_range = _index_range(
+            scan.observed_index[note_id] for note_id in current.observed if note_id in scan.observed_index
+        )
+        visible_range = _index_range(int(card.get("data_index", -1)) for card in cards)
+        await self._record_navigation_diagnostic(
+            self.context_page, stage="search_scan", outcome="items_never_rendered", error=error,
+            extra={
+                "page": current.page,
+                "page_items": len(current.items),
+                "undecided": undecided,
+                "never_rendered": len(unrendered),
+                "observed": len(current.observed),
+                "observed_index_range": observed_range,
+                "non_note_cards_seen": len(current.non_notes_seen),
+                "passed_by": current.passed_by,
+                "visible_index_range": visible_range,
+                "scroll_container": metrics.get("scroll_container"),
+                "scroll_y": metrics.get("scroll_y"),
+                "scroll_height": metrics.get("scroll_height"),
+                "inner_height": metrics.get("inner_height"),
+                "view_rect": metrics.get("view_rect"),
+                "items": entries,
+            },
+        )
+        passed = current.passed_by or {"reason": "none"}
+        passed_text = (
+            f"{passed['reason']}:p{passed['page']}:index={passed['data_index']}" if "page" in passed else passed["reason"]
+        )
+
+        def summary(entry: dict[str, Any]) -> str:
+            shape = entry["dom"] or {}
+            return (
+                f"{entry['note_id']}(pos={entry['position']}, type={entry['card_type']}, nodes={shape.get('nodes')}, "
+                f"index={shape.get('data_index')}, other_pages={entry['other_pages']}, "
+                f"seen={_origins_text(entry['responses'])})"
+            )
+
+        logger.warning(
+            "[XiaoHongShuCrawler.scan] Search items were never rendered: "
+            f"page={current.page}, items={len(current.items)}, undecided={undecided}, never_rendered={len(unrendered)}, "
+            f"observed={len(current.observed)}, observed_index={observed_range}, visible_index={visible_range}, "
+            f"passed_by={passed_text}, scroll_y={metrics.get('scroll_y')}/{metrics.get('scroll_height')}; "
+            + ", ".join(summary(entry) for entry in entries)
+        )
 
     @staticmethod
     def _at_list_bottom(metrics: dict[str, Any]) -> bool:
@@ -1038,7 +1164,8 @@ class XhsScanMixin:
         last = scan.target.last_page
         if last is not None and last.has_more is False:
             for page in scan.target.pages.values():
-                page.passed = True
+                if not page.passed:
+                    page.passed, page.passed_by = True, {"reason": "list_bottom"}
             if self._finish_ready_batches():
                 return
             if await self._await_new_search_page():

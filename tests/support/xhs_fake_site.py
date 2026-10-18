@@ -249,7 +249,8 @@ class XhsFakeSite:
     滚动容器的可见区（None 为整页滚动，可见区即视口；给出时列表在容器内自顶部排起、滚动位置是容器的）；
     `cover_blocked[id]` 为这张卡片可见时前几次读数的封面中心被遮住（cover_hit 为假，点击落空）；
     `typed_keyword` 让回车请求体里的关键词与目标不同；`stall_after` 页之后前端不再加载；
-    `hot_query` 每页附一条热搜项（无 DOM 卡片）。`search_overrides[k]` 依次替换目标会话第 k 页的响应：
+    `hot_query` 每页附一条热搜项（无 DOM 卡片）；`unrendered_ids` 中的条目照常出现在响应里，但列表从不渲染（不占位置，
+    后面卡片的 data-index 依次前移）。`search_overrides[k]` 依次替换目标会话第 k 页的响应：
     字符串为请求失败文本（requestfailed），字典为响应 JSON；被替换的页不算已加载，前端下次滚动会重发。
 
     浮层：`details[id]` 为 feed 的 note_card（默认 `detail_card(id)`）。`feed_overrides[id]` 依次替换每次点击：
@@ -315,6 +316,7 @@ class XhsFakeSite:
         self.list_rect: dict[str, float] | None = None
         self.view_rect: dict[str, float] | None = None
         self.cover_blocked: dict[str, int] = {}
+        self.unrendered_ids: set[str] = set()
         self.wheel_points: list[tuple[float, float]] = []
         self.session_counter = 0
         self.search_id = ""
@@ -367,7 +369,7 @@ class XhsFakeSite:
             return []
         if self.session_filters is None:
             return list(self.enter_items)
-        rendered = [item for items in self.loaded for item in items]
+        rendered = [item for items in self.loaded for item in items if item["id"] not in self.unrendered_ids]
         return [{"id": note_id} for note_id in self.unregistered_ids] + rendered
 
     def view(self) -> dict[str, float]:

@@ -647,8 +647,15 @@ child `summary.json` 的
 - 失败诊断写入 `behavior_evidence.navigation.json`（不进账本）：
   `xhs_search_card_unregistered` 停止前追加 `stage=search_scan`、`outcome=card_unregistered`，列出每个未登记
   ID 的卡片结构（`data-index`、有无封面、封面路径首段、`tag.class`、在列表可见区的位置）与它在本轮全部搜索
-  响应（含非目标会话与非笔记条目，只在内存中保留）中的出处（会话起始序号、是否目标会话、页码、`model_type`，
-  从未出现为 `null`）；作者标签页两次都没打开时追加 `stage=creator_profile`，最后一次没有可见作者名链接为
+  响应（含非目标会话与非笔记条目，只在内存中保留）中的出处（会话起始序号、是否目标会话、页码、页内位置、
+  `model_type`、卡片类型 `note_card.type`，从未出现为 `null`）；已越过的页内未知项从未渲染而以
+  `xhs_search_items_unresolved` 停止前追加 `stage=search_scan`、`outcome=items_never_rendered`（只诊断，判定不变）：
+  本页页码、条目数、未决定数、从未出现数、已观察数及其 `data-index` 范围、已跳过的非笔记卡片数、可见卡片的
+  `data-index` 范围、列表滚动位置与可见区，`passed_by` 为首次把本页判为越过的来源（`later_page` 为后面某页的
+  卡片出现：该卡片的页码、ID、页内位置、`data-index`、相对列表可见区顶部的纵坐标与当时的滚动位置；
+  `list_bottom` 为末页已到底），`items` 列出至多 10 个从未出现的 ID 的页内位置、卡片类型、目标会话中也含它的
+  其他页（跨页重复）、结果列表内的卡片读数（没有为 `nodes=0`）与同上的响应出处，日志另记一行
+  `Search items were never rendered`；作者标签页两次都没打开时追加 `stage=creator_profile`，最后一次没有可见作者名链接为
   `author_link_missing`、点击后新标签页超时为 `author_tab_timeout`（另记点击后主页面路径模板），含浮层内作者名
   链接、作者主页链接与指向本篇作者的主页链接的个数、可见个数，以及前 4 个主页链接的 `target` 与祖先链。目标会话第 1 页的触发动作不是本次点选“图文”
   （G1 将失败）时只写一行 warning 日志，带触发动作、`target` 与回车会话的序号，判定不变。
@@ -683,7 +690,9 @@ child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_t
 `xhs_batch_checkpoint_*` 子原因，并归类为不可自动重试的 `runtime_failed`。本地文件异常和等待
 提交确认超时不能归为网络超时；已提交的安全恢复点保持有效，不补写来源耗尽。
 
-批次摘要固定为未完成、未入库，只作为后续正式 runner 的恢复输入；下一轮仍重新扫码，重新验证
+批次摘要固定为未完成、未入库，只作为后续正式 runner 的恢复输入。本轮在累计记录后追加的平台记录为
+`status=incomplete`，`output` 只有 `jsonl_files`、`image_manifest_paths`、`content_visit_paths`，没有计数；
+后续轮次的 `summary.md` 把这类记录的计数列显示为“—”，不按 0 计（#91）。下一轮仍重新扫码，重新验证
 累计字段、行为、图片与来源耗尽证据后才可入库。收到中断后不再提交新批次，已确认的恢复点保留。
 `--no-import`、dry-run 和历史详情修复均不启用该握手。旧版本缺少批次快照的孤儿轮次仍遵循前述
 孤儿对账规则，本机制不会自动补签旧终态或把旧产物导入。

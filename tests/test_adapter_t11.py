@@ -260,6 +260,48 @@ T71_REPLACEMENTS = (
         '                "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": "1",\n                "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",\n',
         '                "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",\n',
     ),
+    # #91：累计摘要里中断轮次的批次检查点记录（status=incomplete）只有产物路径，摘要表的计数列显示“—”。
+    (
+        '        output = record["output"]\n        lines.append(\n'
+        '            "| {label} | {status} | {contents} | {published_at} | {skipped_videos} | {images} | {videos} | {fields} |".format(\n'
+        '                label=record.get("label") or PLATFORMS[record["platform"]]["label"],\n'
+        '                status=record["status"],\n'
+        '                contents=output["non_video_content_records"],\n'
+        '                published_at=output["published_at_records"],\n'
+        '                skipped_videos=output["video_like_records"],\n'
+        '                images=output["image_file_count"],\n'
+        '                videos=output["video_file_count"],\n'
+        '                fields=", ".join(output["author_like_fields"]) or "无",\n'
+        '            )\n        )\n'
+        '    lines.extend(["", "## 样本", ""])\n',
+        '        output = record["output"]\n'
+        '        if record["status"] == "incomplete":\n'
+        '            incomplete = True\n'
+        '            counts = dict.fromkeys(("contents", "published_at", "skipped_videos", "images", "videos", "fields"), "—")\n'
+        '        else:\n'
+        '            counts = {\n'
+        '                "contents": output["non_video_content_records"],\n'
+        '                "published_at": output["published_at_records"],\n'
+        '                "skipped_videos": output["video_like_records"],\n'
+        '                "images": output["image_file_count"],\n'
+        '                "videos": output["video_file_count"],\n'
+        '                "fields": ", ".join(output["author_like_fields"]) or "无",\n'
+        '            }\n'
+        '        lines.append(\n'
+        '            "| {label} | {status} | {contents} | {published_at} | {skipped_videos} | {images} | {videos} | {fields} |".format(\n'
+        '                label=record.get("label") or PLATFORMS[record["platform"]]["label"],\n'
+        '                status=record["status"],\n'
+        '                **counts,\n'
+        '            )\n        )\n'
+        '    if incomplete:\n'
+        '        lines.extend(["", "- `incomplete`：中断轮次由批次检查点写入的累计记录，只有产物路径，没有计数。"])\n'
+        '    lines.extend(["", "## 样本", ""])\n',
+    ),
+    (
+        '        "|---|---|---:|---:|---:|---:|---:|---|",\n    ]\n    for record in summary["records"]:\n        output',
+        '        "|---|---|---:|---:|---:|---:|---:|---|",\n    ]\n    incomplete = False\n'
+        '    for record in summary["records"]:\n        output',
+    ),
 )
 
 def t71_authorized_source(text):
@@ -677,6 +719,9 @@ def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
     no_stop = scenario in {"missing_stop", "many_pages", "stagnant", "empty_page"} or scenario.startswith("count_")
     if scenario == "pagination_block":
         details.update(stop_reason="runtime_failed", stop_detail="blocked_or_forbidden")
+    if scenario == "items_unresolved":
+        # 小红书全量扫描停止（#92）：运行级失败，来源未耗尽。
+        details.update(source_has_more=True, stop_reason="runtime_failed", stop_detail="xhs_search_items_unresolved")
     state.append_event("adaptive_batch_completed", details)
     if not no_stop:
         state.append_event("adaptive_search_stopped", details)
@@ -718,8 +763,8 @@ def database_snapshot(path):
     return snapshot
 
 
-def drive(module, root, patch, capsys, platform="weibo", scenario="success"):
-    """旧新两侧共用边界、故障和 SQL 观测；不替换收集、晋升、事务或门禁。"""
+def drive(module, root, patch, capsys, platform="weibo", scenario="success", resume_summary=None):
+    """旧新两侧共用边界、故障和 SQL 观测；不替换收集、晋升、事务或门禁。`resume_summary` 为累计摘要路径。"""
     root.mkdir()
     media = root / "temp/media"
     db = root / "posts.sqlite"
@@ -738,10 +783,12 @@ def drive(module, root, patch, capsys, platform="weibo", scenario="success"):
                  "--login-type", "qrcode"]
     else:
         argv += ["--discovery-job-id", "1", "--discovery-query-fingerprint", "query", "--discovery-run-id", "t11"]
+    if resume_summary is not None:
+        argv += ["--resume-summary", str(resume_summary)]
     strict_patch(patch, sys, "argv", argv)
     args = module.parse_args()
-    for name in ("resume_summary", "zhihu_detail_urls_file", "xhs_detail_urls_file",
-                 "xhs_repair_target_ids_file", "repair_targets_file"):
+    assert args.resume_summary == (None if resume_summary is None else str(resume_summary))
+    for name in ("zhihu_detail_urls_file", "xhs_detail_urls_file", "xhs_repair_target_ids_file", "repair_targets_file"):
         assert getattr(args, name) is None
     with sqlite3.connect(db) as conn:
         bootstrap_connection(conn, sync_jobs=False)
@@ -1052,6 +1099,44 @@ def test_d_completion_requires_stop_evidence(baseline, tmp_path, monkeypatch, ca
         assert summary["import_completion_met"] is completed
         assert value["result"] == (0 if completed else 2)
         assert value["envelope"][-1]["status"] == ("completed" if completed else "failed")
+
+
+@pytest.mark.parametrize("scenario", ["success", "items_unresolved"])
+def test_e_incomplete_campaign_records_still_write_markdown_and_keep_the_stop_reason(
+    tmp_path, monkeypatch, capsys, scenario,
+):
+    """#91：累计摘要带中断轮次的批次检查点记录（只有产物路径、没有计数）时，完成轮次与扫描停止的失败轮次都写出
+    summary.md 并按门禁退出；根读子摘要的同一组函数拿到子摘要里的停止原因。"""
+    xhs_runner = importlib.import_module("xhs_runner")
+    campaign = tmp_path / "campaign_summary.json"
+    incomplete = {"platform": "xhs", "status": "incomplete", "ok": False,
+                  "output": {"jsonl_files": [], "image_manifest_paths": [], "content_visit_paths": []}}
+    campaign.write_text(json.dumps({"keyword": "青岛旅游", "records": [incomplete, incomplete]}))
+    root = tmp_path / "run"
+
+    value = drive(executor, root, monkeypatch, capsys, "xhs", scenario, resume_summary=campaign)
+
+    completed = scenario == "success"
+    assert value["result"] == (0 if completed else 2)
+    summary = value["summary"]
+    assert [record["status"] for record in summary["records"]] == ["incomplete", "incomplete", "completed"]
+    rows = [line for line in value["markdown"].decode().splitlines() if line.startswith("| 小红书 |")]
+    assert rows[:2] == ["| 小红书 | incomplete | — | — | — | — | — | — |"] * 2
+    assert rows[2].startswith("| 小红书 | completed | 2 | 2 | 0 | 2 | 0 |")
+    assert "- `incomplete`：中断轮次由批次检查点写入的累计记录" in value["markdown"].decode()
+    (envelope,) = value["envelope"]
+    assert envelope["status"] == ("completed" if completed else "failed")
+    assert envelope["summary"] == "<run>/batches/fixed/summary.json"
+    # 根：从 stdout 的终态信封取子摘要路径，再按子摘要归类失败（scripts/xhs_runner.py 同一组函数）。
+    stdout = json.dumps({**envelope, "summary": str(root / "batches/fixed/summary.json")})
+    child = xhs_runner.load_child_summary(xhs_runner.extract_stdout_json(stdout)["summary"])
+    fields = xhs_runner._terminal_failure_fields(stdout, child, exit_code=value["result"])
+    if completed:
+        assert fields == {"failure_type": "", "stop_reason": "source_exhausted", "stop_detail": "has_more_false",
+                          "reason": "has_more_false"}
+    else:
+        assert fields == {"failure_type": "runtime_failed", "stop_reason": "runtime_failed",
+                          "stop_detail": "xhs_search_items_unresolved", "reason": "xhs_search_items_unresolved"}
 
 
 def test_guard_and_strict_patch(monkeypatch):

@@ -252,7 +252,7 @@ def test_card_without_registration_for_two_steps_stops_with_card_and_response_di
     (general,) = cards["general-1"]["responses"]
     assert general == {
         "seq": enter.started_seq, "session_seq": enter.started_seq, "is_target": False, "current_target": False,
-        "page": 1, "position": 1, "model_type": "note",
+        "page": 1, "position": 1, "model_type": "note", "card_type": "normal",
     }
     assert enter.started_seq < target.started_seq
     text = json.dumps(diagnostic, ensure_ascii=False)
@@ -263,6 +263,61 @@ def test_card_without_registration_for_two_steps_stops_with_card_and_response_di
     assert "hot-1" not in warning
     assert "general-1(index=2, cover=/search_result, card=section.note-item, seen=non_target:p1:note)" in warning
     assert "stray(index=0" in warning and "seen=none" in warning
+    assert "xiaohongshu.com" not in warning and "token" not in warning
+
+
+def test_page_item_that_never_renders_stops_with_an_items_never_rendered_diagnostic(tmp_path, monkeypatch, caplog):
+    evidence = tmp_path / "behavior_evidence.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(evidence))
+    # 第 1 页的 n1-1 从不渲染，第 2 页的响应里又出现一次（跨页重复）；第 2 页首张卡片 n2-0 与第 1 页同在首行，
+    # 一出现就把第 1 页判为越过。
+    pages = _pages(2, 4)
+    pages[1].append(note("n1-1"))
+    site = XhsFakeSite(KEYWORD, pages)
+    site.unrendered_ids = {"n1-1"}
+    harness = Harness(tmp_path, site)
+
+    with caplog.at_level(logging.WARNING, logger="MediaCrawler"), pytest.raises(PlatformRuntimeError) as caught:
+        harness.run()
+
+    assert caught.value.code == "xhs_search_items_unresolved"
+    assert str(caught.value) == "XHS search items were never rendered"
+    assert harness.processed == ["n1-0", "n1-2", "n1-3"]
+    assert site.card_diagnostic_reads == [["n1-1"]]
+    written = json.loads(evidence.with_name("behavior_evidence.navigation.json").read_text(encoding="utf-8"))
+    (diagnostic,) = [event for event in written["events"] if event["stage"] == "search_scan"]
+    page_fields = {
+        "page": 1, "page_items": 4, "undecided": 1, "never_rendered": 1, "observed": 3,
+        "observed_index_range": [0, 2], "non_note_cards_seen": 0,
+        "passed_by": {"reason": "later_page", "page": 2, "note_id": "n2-0", "position": 0, "data_index": 3,
+                      "top": LIST_TOP, "scroll_y": 0},
+        "visible_index_range": [0, 6], "scroll_container": "document", "scroll_y": 0,
+        "scroll_height": LIST_TOP + 2 * 360 + 200, "inner_height": 900,
+        "view_rect": {"left": 0.0, "top": 0.0, "right": 1280.0, "bottom": 900.0},
+    }
+    assert {key: diagnostic[key] for key in page_fields} == page_fields
+    assert diagnostic["outcome"] == "items_never_rendered" and diagnostic["error"] == ""
+    target = harness.crawler._scan.target
+    (item,) = diagnostic["items"]
+    assert item == {
+        "note_id": "n1-1", "position": 1, "card_type": "normal", "other_pages": [2],
+        "dom": {"note_id": "n1-1", "nodes": 0},
+        "responses": [
+            {"seq": target.pages[page].seq, "session_seq": target.started_seq, "is_target": True,
+             "current_target": True, "page": page, "position": position, "model_type": "note", "card_type": "normal"}
+            for page, position in ((1, 1), (2, 4))
+        ],
+    }
+    text = json.dumps(diagnostic, ensure_ascii=False)
+    assert "token" not in text and "keyword" not in text and KEYWORD not in text
+    warning = next(
+        record.getMessage() for record in caplog.records if "Search items were never rendered" in record.getMessage()
+    )
+    assert warning.endswith(
+        "page=1, items=4, undecided=1, never_rendered=1, observed=3, observed_index=[0, 2], visible_index=[0, 6], "
+        f"passed_by=later_page:p2:index=3, scroll_y=0/{LIST_TOP + 2 * 360 + 200}; "
+        "n1-1(pos=1, type=normal, nodes=0, index=None, other_pages=[2], seen=current:p1:note+current:p2:note)"
+    )
     assert "xiaohongshu.com" not in warning and "token" not in warning
 
 
