@@ -1860,9 +1860,7 @@ def _run_main(
         summary,
         progress_callback=progress_callback,
     )
-    _runtime_progress(progress_callback)
-    write_markdown(summary, report_path)
-    _runtime_progress(progress_callback)
+    # summary.json 已是终版：先打印终态信封，之后 Markdown 等步骤失败照常让子进程失败，根仍能取到子摘要（#91）。
     print(
         json.dumps(
             terminal_summary_envelope(
@@ -1875,6 +1873,9 @@ def _run_main(
         ),
         flush=True,
     )
+    _runtime_progress(progress_callback)
+    write_markdown(summary, report_path)
+    _runtime_progress(progress_callback)
     partial_repair_import_ok = bool(
         repair_mode
         and summary["import_completion_met"]

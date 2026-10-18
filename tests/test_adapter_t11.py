@@ -25,7 +25,7 @@ from PIL import Image
 import pytest
 
 from support import fork_removal_deviation
-from trippostcollect.application import reporting, visit_gate
+from trippostcollect.application import collection, reporting, visit_gate
 from trippostcollect.artifacts.image_candidates import content_image_candidates
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
 from trippostcollect.artifacts.image_materialization import write_staging_image
@@ -158,6 +158,13 @@ def t75_authorized_source(text):
         text = text.replace(old, new)
     return text
 
+
+T71_ENVELOPE_PRINT = (
+    "    print(\n        json.dumps(\n            terminal_summary_envelope(\n"
+    "                summary_path=summary_path,\n                report_path=report_path,\n"
+    "                batch_dir=batch_dir,\n                summary=summary,\n            ),\n"
+    "            ensure_ascii=False,\n        ),\n        flush=True,\n    )\n"
+)
 
 # #71 授权差异：访问门禁 content_visit_ok 接入行为门禁，target_url_ok 改为逐层解码；
 # 纳入访问门禁的平台把访问账本列入看门狗进展路径与平台记录输出。旧执行器同样替换后执行。
@@ -301,6 +308,13 @@ T71_REPLACEMENTS = (
         '        "|---|---|---:|---:|---:|---:|---:|---|",\n    ]\n    for record in summary["records"]:\n        output',
         '        "|---|---|---:|---:|---:|---:|---:|---|",\n    ]\n    incomplete = False\n'
         '    for record in summary["records"]:\n        output',
+    ),
+    # #91：终版 summary.json 写出后立即打印终态信封，再写 Markdown。
+    (
+        "    _runtime_progress(progress_callback)\n    write_markdown(summary, report_path)\n"
+        "    _runtime_progress(progress_callback)\n" + T71_ENVELOPE_PRINT,
+        T71_ENVELOPE_PRINT + "    _runtime_progress(progress_callback)\n    write_markdown(summary, report_path)\n"
+        "    _runtime_progress(progress_callback)\n",
     ),
 )
 
@@ -1137,6 +1151,59 @@ def test_e_incomplete_campaign_records_still_write_markdown_and_keep_the_stop_re
     else:
         assert fields == {"failure_type": "runtime_failed", "stop_reason": "runtime_failed",
                           "stop_detail": "xhs_search_items_unresolved", "reason": "xhs_search_items_unresolved"}
+
+
+@pytest.mark.parametrize(
+    ("platform", "scenario"),
+    [("xhs", "success"), ("xhs", "items_unresolved"), ("weibo", "success"), ("weibo", "pagination_block")],
+)
+def test_e_markdown_failure_after_the_envelope_fails_the_child_and_keeps_the_child_summary(
+    tmp_path, monkeypatch, capsys, platform, scenario,
+):
+    """#91 后续：终版 summary.json 写出后立即打印终态信封。之后 Markdown 抛异常照常从中间层入口传出（进程以 1 退出），
+    根仍从 stdout 唯一的信封取到子摘要与其中的停止原因（小红书经 xhs_runner、通用平台经 crawl_runner 的同一组函数）。"""
+
+    def broken_markdown(summary, path):
+        raise KeyError("non_video_content_records")
+
+    strict_patch(monkeypatch, collection, "write_markdown", broken_markdown)
+    root = tmp_path / "run"
+
+    with pytest.raises(KeyError):
+        process.run_main_with_operator_interrupt(lambda: drive(executor, root, monkeypatch, capsys, platform, scenario))
+
+    stdout = capsys.readouterr().out
+    batch_dir = root / "batches/fixed"
+    summary_path = batch_dir / "summary.json"
+    child = json.loads(summary_path.read_text())
+    (envelope,) = [json.loads(line) for line in stdout.splitlines() if line.startswith("{")]
+    assert envelope == reporting.terminal_summary_envelope(
+        summary_path=summary_path, report_path=batch_dir / "summary.md", batch_dir=batch_dir, summary=child,
+    )
+    assert envelope["status"] == ("completed" if scenario == "success" else "failed")
+    assert not (batch_dir / "summary.md").exists()
+    exit_code = 1  # 未捕获异常：解释器以 1 退出
+    if platform == "xhs":
+        xhs_runner = importlib.import_module("xhs_runner")
+        loaded = xhs_runner.load_child_summary(xhs_runner.extract_stdout_json(stdout)["summary"])
+        assert loaded == child
+        fields = xhs_runner._terminal_failure_fields(stdout, loaded, exit_code=exit_code)
+        if scenario == "success":
+            assert loaded["formal_validation"]["stop_reason"] == "source_exhausted"
+            assert fields == {"failure_type": "runtime_failed", "stop_reason": "runtime_failed",
+                              "stop_detail": "xhs_child_exit_1", "reason": "xhs_child_exit_1"}
+        else:
+            assert fields == {"failure_type": "runtime_failed", "stop_reason": "runtime_failed",
+                              "stop_detail": "xhs_search_items_unresolved", "reason": "xhs_search_items_unresolved"}
+    else:
+        crawl_runner = importlib.import_module("crawl_runner")
+        assert crawl_runner.find_artifact_paths(stdout, None)[2] == str(summary_path)
+        assert crawl_runner.classify_attempt(exit_code=exit_code, stdout=stdout)["status"] != "completed"
+        validation = child["formal_validation"]
+        if scenario == "success":
+            assert validation["stop_reason"] == "source_exhausted"
+        else:
+            assert (validation["stop_reason"], validation["stop_detail"]) == ("runtime_failed", "blocked_or_forbidden")
 
 
 def test_guard_and_strict_patch(monkeypatch):
