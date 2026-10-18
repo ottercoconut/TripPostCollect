@@ -16,13 +16,16 @@ import trippostcollect.platforms.xhs.core as xhs_core
 import trippostcollect.platforms.xhs.navigation as xhs_navigation
 import trippostcollect.platforms.xhs.scan as xhs_scan
 import trippostcollect.runtime.behavior as runtime_behavior
-from support.xhs_fake_site import FILTER_ENTRY, FILTER_OPTION, FILTER_PANEL, LIST_TOP, XhsFakeSite, inside, note
+from support.xhs_fake_site import (
+    FILTER_ENTRY, FILTER_OPTION, FILTER_PANEL, LIST_TOP, SEARCH_BOX, XhsFakeSite, inside, note,
+)
 from trippostcollect.application.candidates import AdaptiveAccumulator
 from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.evidence import write_evidence
 from trippostcollect.platforms.xhs.errors import PlatformRuntimeError
 from trippostcollect.platforms.xhs.navigation import XhsSearchEntryFailed
 from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
+from trippostcollect.runtime.human_pointer import Box, HumanPointer
 from trippostcollect.runtime.visit_ledger import iter_ledger_lines, line_seq
 
 from .support import XiaoHongShuCrawler, make_capture
@@ -157,11 +160,14 @@ def test_two_page_keyword_is_exhausted_and_passes_entry_page_and_exhaustion_gate
     decisions = [line for line in lines if line["kind"] == "decision"]
     assert [(line["subject_id"], line["decision"]) for line in decisions] == [("v1", "video_skipped_from_search")]
     actions = [line for line in lines if line["kind"] == "action"]
-    assert [line["action"] for line in actions[:6]] == [
-        "type_search", "press_enter", "apply_filter", "apply_filter", "apply_filter", "scroll",
+    assert [line["action"] for line in actions[:7]] == [
+        "type_search", "press_enter", "apply_filter", "apply_filter", "apply_filter", "apply_filter", "scroll",
     ]
-    assert [line["target"].get("filter") for line in actions[2:5]] == ["panel_open", "note_type", "panel_close"]
-    behavior_scroll = actions[5]
+    # 默认假站点的面板只随点击入口切换：移开光标收不起，回退为点入口（#81）。
+    assert [(line["target"].get("filter"), line["target"].get("method")) for line in actions[2:6]] == [
+        ("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave"), ("panel_close", "entry_press"),
+    ]
+    behavior_scroll = actions[6]
     assert behavior_scroll["target"] == {"phase": "behavior_stage"}
     # 行为阶段的滚轮之前恰有一次翻页停顿，且在目标会话第 1 页之后开始。
     searches = [line for line in lines if line["kind"] == "visit" and line["stage"] == "search_results"]
@@ -335,7 +341,7 @@ def test_target_session_started_before_the_note_type_click_is_logged_with_its_tr
     assert harness.processed == [f"n1-{index}" for index in range(4)]
     actions = {line["id"]: line for line in harness.ledger() if line["kind"] == "action"}
     filters = [line["target"].get("filter") for line in actions.values() if line["action"] == "apply_filter"]
-    assert filters == ["panel_open", "note_type", "panel_close"]
+    assert filters == ["panel_open", "note_type", "panel_close", "panel_close"]
     scan = harness.crawler._scan
     target = scan.target
     trigger = actions[target.trigger]
@@ -499,7 +505,7 @@ def test_filter_entry_that_renders_late_is_awaited_then_clicked_after_a_reaction
     low, high = xhs_scan.XHS_BEFORE_FILTER_SECONDS
     assert kind == "sleep" and low <= reaction <= high
     filters = [line["target"].get("filter") for line in harness.ledger() if line.get("action") == "apply_filter"]
-    assert filters == ["panel_open", "note_type", "panel_close"]
+    assert filters == ["panel_open", "note_type", "panel_close", "panel_close"]
     assert not _filter_diagnostics(harness) and site.diagnostic_reads == 0
 
 
@@ -547,7 +553,9 @@ def test_filter_option_missing_on_first_attempt_reopens_the_panel_and_records_th
 
     assert harness.processed == [f"n1-{index}" for index in range(4)]
     filters = [line["target"].get("filter") for line in harness.ledger() if line.get("action") == "apply_filter"]
-    assert filters == ["panel_open", "panel_close", "panel_open", "note_type", "panel_close"]
+    assert filters == [
+        "panel_open", "panel_close", "panel_close", "panel_open", "note_type", "panel_close", "panel_close",
+    ]
     written = json.loads(evidence.with_name("behavior_evidence.navigation.json").read_text(encoding="utf-8"))
     (diagnostic,) = [event for event in written["events"] if event["stage"] == "search_filter"]
     assert diagnostic["outcome"] == "attempt_1:filter_option_missing"
@@ -669,7 +677,8 @@ def test_hover_panel_closed_before_the_option_press_fails_the_attempt_at_once_an
     filters = [line["target"].get("filter") for line in harness.ledger() if line.get("action") == "apply_filter"]
     assert filters == ["panel_open", "note_type", "panel_open", "note_type", "panel_close"]
     presses = [index for index, event in enumerate(events) if event[0] == "up" and inside(FILTER_OPTION, *event[1:])]
-    assert len(presses) == 1 and len(calls) == 2 and len(waits) == 1
+    # 第 3 次取并集是收起面板时移开光标的落点区域（#81）。
+    assert len(presses) == 1 and len(calls) == 3 and len(waits) == 1
     # 第 1 次的入口到选项：离开并集即收起，到选项上不按下；第 2 次悬停重新打开，这一段留在并集内。
     first = events.index(("action", "note_type"))
     second = events.index(("action", "panel_open"), first)
@@ -684,6 +693,133 @@ def test_hover_panel_closed_before_the_option_press_fails_the_attempt_at_once_an
     messages = [record.getMessage() for record in caplog.records]
     assert any("attempt 1 failed: filter_panel_closed_before_option" in message for message in messages)
     assert not any("Target filter not confirmed" in message for message in messages)
+
+
+# 假站点没有 list_rect：列表区域取可见区（整个视口）中部横 30%–70%、纵 35%–75%，整块都在面板下沿（280）之下。
+LEAVE_AREA = Box(384.0, 315.0, 512.0, 360.0)
+
+
+def _in_box(box: Box, x: float, y: float) -> bool:
+    return box.left <= x <= box.left + box.width and box.top <= y <= box.top + box.height
+
+
+def _record_close(harness: Harness, events: list[tuple]) -> list[dict]:
+    """收起面板前后各记一次：面板被打开的次数、离开即收起的次数、事件位置。"""
+    site = harness.site
+    close = harness.crawler._close_filter_panel
+    marks: list[dict] = []
+
+    def mark() -> None:
+        marks.append({"opens": site.panel_opens, "leave_closes": site.panel_leave_closes, "event": len(events)})
+
+    async def recording_close() -> None:
+        mark()
+        await close()
+        mark()
+
+    harness.crawler._close_filter_panel = recording_close
+    return marks
+
+
+def _record_plans(monkeypatch) -> list[tuple[Box, tuple[Box, ...]]]:
+    """主页面每次计划的点击：(目标框, region)。"""
+    plans: list[tuple[Box, tuple[Box, ...]]] = []
+    plan_click = HumanPointer.plan_click
+
+    async def recording(self, box, *, within=None, region=()):
+        plans.append((box, tuple(region)))
+        return await plan_click(self, box, within=within, region=region)
+
+    monkeypatch.setattr(HumanPointer, "plan_click", recording)
+    return plans
+
+
+def _filter_methods(harness: Harness) -> list[tuple]:
+    return [
+        (line["target"].get("filter"), line["target"].get("method"))
+        for line in harness.ledger() if line.get("action") == "apply_filter"
+    ]
+
+
+def test_leave_area_is_the_list_area_below_the_entry_and_panel():
+    region = (Box.from_point(FILTER_ENTRY), Box.from_point(FILTER_PANEL))
+    assert xhs_scan._leave_area(Box(0.0, 100.0, 800.0, 700.0), region) == Box(0.0, 304.0, 800.0, 496.0)
+    assert xhs_scan._leave_area(LEAVE_AREA, region) == LEAVE_AREA
+    assert xhs_scan._leave_area(Box(0.0, 100.0, 800.0, 220.0), region) is None  # 下沿以下只剩 16px
+    assert xhs_scan._leave_area(None, region) is None
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_hover_panel_is_closed_by_moving_the_pointer_out_and_never_reopens(tmp_path, monkeypatch, seed):
+    # #81：悬停打开的面板在光标离开入口与面板的并集时收起。收起时把光标移到列表区域里面板下方的随机点，不按下入口，
+    # 途中面板只关不开（原先从“图文”移回入口再按下：先自行收起、进入口又被悬停打开、按下再关上）。
+    plans = _record_plans(monkeypatch)
+    site = _hover_site(seed)
+    harness = Harness(tmp_path, site)
+    events = _record_pointer(harness)
+    marks = _record_close(harness, events)
+
+    harness.run()
+
+    assert harness.processed == [f"n1-{index}" for index in range(4)]
+    assert _filter_methods(harness) == [("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave")]
+    before, after = marks
+    assert after["opens"] == before["opens"] and after["leave_closes"] == before["leave_closes"] + 1
+    closing = events[before["event"]:after["event"]]
+    assert closing[0] == ("action", "panel_close") and not any(event[0] == "up" for event in closing)
+    shown = [event[3] for event in closing if event[0] == "move"]
+    assert shown[-1] is False and True not in shown[shown.index(False):]
+    x, y = site.mouse_position
+    assert _in_box(LEAVE_AREA, x, y) and not _in_hover_region(x, y) and not site.panel_visible
+    # 只有收起这一次计划不同：落点区域为列表区域，不限定轨迹；搜索框、入口与“图文”的计划照旧。
+    search, entry, option = (Box.from_point(point) for point in (SEARCH_BOX, FILTER_ENTRY, FILTER_OPTION))
+    assert plans == [(search, ()), (entry, ()), (option, (entry, Box.from_point(FILTER_PANEL))), (LEAVE_AREA, ())]
+    (leave,) = [
+        line for line in harness.ledger()
+        if line.get("action") == "apply_filter" and line["target"].get("method") == "pointer_leave"
+    ]
+    assert set(leave["pointer"]) == {"x_ratio", "y_ratio", "approach_ms", "moves"}
+    assert not _filter_diagnostics(harness)
+
+
+def test_panel_that_stays_open_after_the_pointer_leaves_is_closed_by_pressing_the_entry(tmp_path, monkeypatch, caplog):
+    # 面板不随光标离开收起（默认假站点只随点击入口切换）：移开后按 XHS_FILTER_LEAVE_POLLS 次轮询确认不了，回退为点入口。
+    plans = _record_plans(monkeypatch)
+    site = XhsFakeSite(KEYWORD, _pages(1, 4))
+    harness = Harness(tmp_path, site)
+    events = _record_pointer(harness)
+    marks = _record_close(harness, events)
+
+    async def sleep(seconds: float) -> None:
+        events.append(("sleep", seconds))
+        await asyncio.sleep(0)
+
+    harness.crawler._scan_sleep = sleep
+
+    with caplog.at_level(logging.INFO, logger="MediaCrawler"):
+        harness.run()
+
+    assert harness.processed == [f"n1-{index}" for index in range(4)]
+    assert _filter_methods(harness) == [
+        ("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave"), ("panel_close", "entry_press"),
+    ]
+    before, after = marks
+    closing = events[before["event"]:after["event"]]
+    leave, press = [index for index, event in enumerate(closing) if event == ("action", "panel_close")]
+    leave_moves = [event for event in closing[leave:press] if event[0] == "move"]
+    assert leave_moves and all(event[3] for event in leave_moves) and _in_box(LEAVE_AREA, *leave_moves[-1][1:3])
+    assert closing[leave:press].count(("sleep", xhs_scan.XHS_FILTER_POLL_SECONDS)) == xhs_scan.XHS_FILTER_LEAVE_POLLS
+    ups = [event for event in closing if event[0] == "up"]
+    assert len(ups) == 1 and inside(FILTER_ENTRY, *ups[0][1:]) and closing.index(ups[0]) > press
+    assert after["opens"] == before["opens"] and not site.panel_visible
+    # 其他点击不变：搜索框、入口、“图文”、收起时的入口都照常计划并按下，按下恰为这四次。
+    search, entry, option = (Box.from_point(point) for point in (SEARCH_BOX, FILTER_ENTRY, FILTER_OPTION))
+    assert plans == [(search, ()), (entry, ()), (option, ()), (LEAVE_AREA, ()), (entry, ())]
+    presses = [event[1:] for event in events if event[0] == "up"]
+    targets = (SEARCH_BOX, FILTER_ENTRY, FILTER_OPTION, FILTER_ENTRY)
+    assert len(presses) == 4 and all(inside(target, *press) for target, press in zip(targets, presses))
+    assert any("stayed open after the pointer left" in record.getMessage() for record in caplog.records)
+    assert not _filter_diagnostics(harness)
 
 
 def test_scroll_wheel_lands_inside_the_result_list_rectangle(tmp_path):

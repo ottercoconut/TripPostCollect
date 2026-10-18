@@ -84,6 +84,12 @@ XHS_UNRENDERED_DIAGNOSTIC_IDS = 10
 XHS_BACKFILL_ATTEMPTS = 3
 XHS_FILTER_POLLS = 20
 XHS_FILTER_POLL_SECONDS = 0.25
+# 收起面板先移开光标（#81，第 6 轮实证：光标离开入口与面板的并集时悬停打开的面板会收起）：落点取结果列表区域
+# （同滚动，#88）中入口与面板下沿以下、留出间距的部分，不够高时直接点入口；移开后至多轮询这么多次确认收起，
+# 确认不了再点入口。
+XHS_FILTER_LEAVE_MARGIN_PX = 24.0
+XHS_FILTER_LEAVE_MIN_HEIGHT_PX = 40.0
+XHS_FILTER_LEAVE_POLLS = 8
 # 入口相对第 1 页结果的渲染时机未经实测（Mac 首轮在结果到达约 1 秒后读到空入口）；每次尝试按轮询间隔
 # 最多等这么久。入口出现后、点击之前的人手反应停顿是输入微停顿，不写 pause 行。
 XHS_FILTER_ENTRY_WAIT_SECONDS = 15.0
@@ -294,8 +300,19 @@ def _panel_ready(state: dict[str, Any]) -> bool:
 
 
 def _hover_region(state: dict[str, Any]) -> tuple[Box, ...]:
-    """悬停打开的面板在光标离开入口与面板时收起（#81）：接近“图文”的轨迹限定在入口框与面板框的并集内。"""
+    """悬停打开的面板在光标离开入口与面板时收起（#81）：接近“图文”的轨迹限定在入口框与面板框的并集内；收起面板时
+    移开光标的落点取在这个并集下方（见 `_leave_area`）。"""
     return tuple(Box.from_point(state[key]) for key in ("entry", "panel") if state.get(key))
+
+
+def _leave_area(area: Optional[Box], region: tuple[Box, ...]) -> Optional[Box]:
+    """移开光标收起面板时的落点区域：列表区域中位于入口与面板下沿以下、留出间距的部分；不够高时为 None。"""
+    if area is None:
+        return None
+    bottom = max((box.top + box.height for box in region), default=area.top)
+    top = max(area.top, bottom + XHS_FILTER_LEAVE_MARGIN_PX)
+    height = area.top + area.height - top
+    return Box(area.left, top, area.width, height) if height >= XHS_FILTER_LEAVE_MIN_HEIGHT_PX else None
 
 
 def _filter_moment(state: dict[str, Any]) -> dict[str, Any]:
@@ -559,7 +576,16 @@ class XhsScanMixin:
         raise XhsFilterAttemptFailed("filter_entry_missing")
 
     async def _close_filter_panel(self) -> None:
-        """面板不会自动收起：任何滚动之前再点一次入口，确认 .filters-wrapper 不可见；失败重试一次。"""
+        """任何滚动之前收起面板，确认 .filters-wrapper 不可见（#81）。先把光标移出入口与面板的并集（见 `_leave_filter_panel`），
+        确认不了才点入口收起，失败重试一次。两种方式都写 `apply_filter panel_close`，`method` 分别为 `pointer_leave`
+        与 `entry_press`；从“图文”移回入口再按下会让悬停打开的面板先自行收起、进入口又被悬停打开（开 → 关 → 再开）。
+        """
+        state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
+        if not state.get("panel_visible"):
+            return
+        if await self._leave_filter_panel(state):
+            return
+        logger.info("[XiaoHongShuCrawler.scan] Filter panel stayed open after the pointer left; pressing the entry")
         for _ in (0, 1):
             state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
             if not state.get("panel_visible"):
@@ -568,12 +594,34 @@ class XhsScanMixin:
             if not entry:
                 break
             plan = await self._plan_click(entry)
-            self._record_trigger_action("apply_filter", {"filter": "panel_close"}, pointer=plan.evidence)
+            self._record_trigger_action(
+                "apply_filter", {"filter": "panel_close", "method": "entry_press"}, pointer=plan.evidence,
+            )
             await self._perform_click(plan)
             if await self._poll_filter_state(lambda value: not value.get("panel_visible")) is not None:
                 return
         await self._record_filter_failure("filter_panel_not_closed")
         raise XhsSearchEntryFailed("filter_panel_not_closed")
+
+    async def _leave_filter_panel(self, state: dict[str, Any]) -> bool:
+        """把光标移到 `_leave_area` 内的随机点，不按下：落点分布与轨迹按 HumanPointer 的人类样本（与点击相同，只是
+        不静止、不按下，账本的指针记录相应不含 `settle_ms`、`hold_ms`）。之后至多轮询 `XHS_FILTER_LEAVE_POLLS` 次，
+        面板收起返回 True；落点区域取不到时不移动、返回 False。"""
+        page = self.context_page
+        target = _leave_area(self._scroll_area(await dom_scroll_metrics(page)), _hover_region(state))
+        if target is None:
+            return False
+        pointer = pointer_for(page)
+        plan = await pointer.plan_click(target)
+        evidence = {key: value for key, value in plan.evidence.items() if key not in ("settle_ms", "hold_ms")}
+        self._record_trigger_action(
+            "apply_filter", {"filter": "panel_close", "method": "pointer_leave"}, pointer=evidence,
+        )
+        await pointer.approach(plan)
+        closed = await self._poll_filter_state(
+            lambda value: not value.get("panel_visible"), polls=XHS_FILTER_LEAVE_POLLS,
+        )
+        return closed is not None
 
     async def _record_filter_failure(
         self, reason: str, *, attempt: int = 0, moments: Optional[dict[str, dict[str, Any]]] = None,
@@ -610,9 +658,10 @@ class XhsScanMixin:
         accept: Callable[[dict[str, Any]], bool],
         *,
         moments: Optional[dict[str, dict[str, Any]]] = None,
+        polls: int = XHS_FILTER_POLLS,
     ) -> Optional[dict[str, Any]]:
-        """按间隔读筛选状态直到满足 `accept`；给出 `moments` 时记下第 1 次与最后一次读到的状态。"""
-        for poll in range(XHS_FILTER_POLLS):
+        """按间隔读筛选状态直到满足 `accept`，至多 `polls` 次；给出 `moments` 时记下第 1 次与最后一次读到的状态。"""
+        for poll in range(polls):
             await self._scan_sleep(XHS_FILTER_POLL_SECONDS)
             state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
             if moments is not None:

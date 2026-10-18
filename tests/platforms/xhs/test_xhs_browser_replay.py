@@ -400,8 +400,13 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     }
     assert audit["authorNameClicks"] == len(actions(crawler, "click_author")) == 2
     assert audit["commentLinkClicks"] == 0
-    filter_targets = [line["target"].get("filter") for line in actions(crawler, "apply_filter")]
-    assert filter_targets == ["panel_open", "note_type", "panel_close"]
+    # 离线站点的面板只随点击入口切换：移开光标收不起，回退为点入口（#81）。
+    filter_targets = [
+        (line["target"].get("filter"), line["target"].get("method")) for line in actions(crawler, "apply_filter")
+    ]
+    assert filter_targets == [
+        ("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave"), ("panel_close", "entry_press"),
+    ]
     first_scroll = actions(crawler, "scroll")[0]["seq"]
     assert actions(crawler, "apply_filter")[-1]["seq"] < first_scroll
 

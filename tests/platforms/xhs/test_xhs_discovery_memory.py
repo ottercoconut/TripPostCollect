@@ -262,7 +262,13 @@ async def test_overlay_records_pass_the_real_visit_gate(monkeypatch, tmp_path):
     # #84：每次点击带落点在元素框中的比例与接近时长，每次列表滚动带各手势的事件数与位移；真实门禁照常通过。
     clicks = {"click_card", "close_overlay", "click_author", "apply_filter", "type_search"}
     for line in (line for line in ledger_lines(crawler) if line["kind"] == "action"):
-        if line["action"] in clicks or (line["action"] == "flip_image" and line["target"]["method"] == "arrow"):
+        if line["target"].get("method") == "pointer_leave":
+            # #81：移开光标收起面板只接近、不静止也不按下，指针记录没有 settle_ms 与 hold_ms。
+            pointer = line["pointer"]
+            assert 0 < pointer["x_ratio"] < 1 and 0 < pointer["y_ratio"] < 1
+            assert pointer["approach_ms"] > 0 and pointer["moves"] > 0
+            assert "settle_ms" not in pointer and "hold_ms" not in pointer
+        elif line["action"] in clicks or (line["action"] == "flip_image" and line["target"]["method"] == "arrow"):
             pointer = line["pointer"]
             assert 0 < pointer["x_ratio"] < 1 and 0 < pointer["y_ratio"] < 1
             assert pointer["approach_ms"] > 0 and pointer["moves"] > 0 and 80 <= pointer["hold_ms"] <= 135

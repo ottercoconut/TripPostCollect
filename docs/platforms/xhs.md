@@ -436,7 +436,7 @@ child `summary.json` 的
   （`.ai-feeds-page.with-ai-chat`，右侧有可独立滚动的对话栏）的入口在 `.ai-chat-inner` 内，面板挂在入口
   内部，收起时从 DOM 移除，`.search-layout` 内没有入口。因此入口在全文档 `div.filter` 中取第一个可见、
   且直属 `span` 文字精确为“筛选”或“已筛选”的节点（前面可能有隐藏或零尺寸的同类节点）；入口文字只读
-  这个 `span`（面板开着时入口的整体文字含面板内容），开、收面板都点它（落点在 `span` 框内）。选项每个标签有一份坐标
+  这个 `span`（面板开着时入口的整体文字含面板内容），开面板与回退收起时点它（落点在 `span` 框内）。选项每个标签有一份坐标
   重叠的 `aria-hidden="true"` 副本，排除自身或祖先带该属性的节点后按精确文字取可见的那个。入口未渲染时
   每次尝试按 0.25 秒轮询最多等 15 秒，出现后停顿 0.6–1.8 秒，光标接近入口并按样本静止后先读一次状态：
   面板已因悬停打开且有“图文”就不再按下入口（按下会把它关上，#81），只记一行 info 日志
@@ -450,8 +450,14 @@ child `summary.json` 的
   `filter_panel_closed_before_option` 失败并重试（账本里这次的 `note_type` 动作没有对应的按下）。以入口文字变为
   “已筛选”且截获到目标会话第 1 页（5 项 `filters`：`sort_type=general`、`filter_note_type=普通笔记`，其余三项
   “不限”）判定成功。入口始终未出现、面板未打开、选项缺失、点选前面板已收起或点选后未确认都只算本次尝试失败，
-  重试一次后报 `target_filter_not_applied`。面板不会
-  自动收起，任何滚动之前再点一次入口并确认收起，失败重试一次后报 `filter_panel_not_closed`；目标会话第 1 页
+  重试一次后报 `target_filter_not_applied`。任何滚动之前收起面板（#81）：先把光标移出入口与面板的并集，
+  落点取结果列表区域（同滚动的列表区域，#88）中入口与面板下沿以下、留出 24px 的部分，落点分布与轨迹按人类
+  样本、不静止也不按下，再按 0.25 秒轮询至多 8 次确认面板不可见；确认不了（或该部分不足 40px 高）才按原来的
+  方式点入口并确认收起，失败重试一次后报 `filter_panel_not_closed`，回退时记一行 info 日志
+  `Filter panel stayed open after the pointer left`。原先从“图文”移回入口再按下，途中面板先自行收起、进入口
+  又被悬停打开、按下再关上（开 → 关 → 再开）。两种方式都写 `apply_filter` 的 `panel_close` 动作，`target.method`
+  为 `pointer_leave`（指针记录只有落点比例、接近时长与移动事件数）或 `entry_press`；成功时的筛选动作序列为
+  `panel_open`、`note_type`、`panel_close(pointer_leave)`，回退时末尾再加 `panel_close(entry_press)`。目标会话第 1 页
   的关键词与目标不符时重新输入一次，仍不符报 `search_keyword_mismatch`。三者都以
   `xhs_navigation_recovery_failed:<code>` 停止。
 - 筛选诊断写入 `behavior_evidence.navigation.json`，`stage=search_filter`，只在失败时统计：`.search-layout`
