@@ -308,7 +308,7 @@ class XhsFakeSite:
     `entry_delay_reads` 为结果页上前几次读筛选状态时入口尚未渲染（None 为始终不出现）；
     `option_missing_opens` 为前几次打开面板时没有“图文”选项；`entry_click_applies_filter` 为点入口打开面板时前端同时
     发出目标会话第 1 页（触发者是 panel_open），之后点“图文”不再发请求；`hover_opens_panel` 为光标移入入口框时面板
-    就打开（已开着不变；按下入口仍切换开关），面板开着时光标移到入口框与面板框 FILTER_PANEL 的并集之外即收起
+    就打开（已开着不变；按下入口仍切换开关），面板开着时光标移到入口框与面板框 `panel_box`（默认 FILTER_PANEL）的并集之外即收起
     （`panel_leave_closes` 计次）；`list_rect` 为滚动度量里结果列表与列表可见区的
     相交矩形（None 时不给，扫描按可见区比例落点），`wheel_points` 记下每次滚轮时的鼠标位置；`view_rect` 为列表
     滚动容器的可见区（None 为整页滚动，可见区即视口；给出时列表在容器内自顶部排起、滚动位置是容器的）；
@@ -373,6 +373,7 @@ class XhsFakeSite:
         self.option_missing_opens = 0
         self.entry_click_applies_filter = False
         self.hover_opens_panel = False
+        self.panel_box = dict(FILTER_PANEL)
         self.panel_opens = 0
         self.panel_leave_closes = 0
         self.diagnostic_reads = 0
@@ -567,7 +568,7 @@ class XhsFakeSite:
             "entry_text": ("已筛选" if self.filter_applied else "筛选") if rendered else "",
             "entry": dict(FILTER_ENTRY) if rendered else None,
             "panel_visible": self.panel_visible,
-            "panel": dict(FILTER_PANEL) if self.panel_visible else None,
+            "panel": dict(self.panel_box) if self.panel_visible else None,
             "option": dict(FILTER_OPTION) if has_option else None,
         }
 
@@ -729,7 +730,7 @@ class XhsFakeSite:
             self.panel_opens += 1
 
     def hover_leave(self, x: float, y: float) -> None:
-        if self.hover_opens_panel and self.panel_visible and not (inside(FILTER_ENTRY, x, y) or inside(FILTER_PANEL, x, y)):
+        if self.hover_opens_panel and self.panel_visible and not (inside(FILTER_ENTRY, x, y) or inside(self.panel_box, x, y)):
             self.panel_visible = False
             self.panel_leave_closes += 1
 

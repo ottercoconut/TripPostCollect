@@ -17,7 +17,7 @@ import trippostcollect.platforms.xhs.navigation as xhs_navigation
 import trippostcollect.platforms.xhs.scan as xhs_scan
 import trippostcollect.runtime.behavior as runtime_behavior
 from support.xhs_fake_site import (
-    FILTER_ENTRY, FILTER_OPTION, FILTER_PANEL, LIST_TOP, SEARCH_BOX, XhsFakeSite, inside, note,
+    FILTER_ENTRY, FILTER_OPTION, FILTER_PANEL, LIST_TOP, SEARCH_BOX, XhsFakeSite, box, inside, note,
 )
 from trippostcollect.application.candidates import AdaptiveAccumulator
 from trippostcollect.application.visit_gate import validate_content_visits
@@ -745,12 +745,27 @@ def _filter_methods(harness: Harness) -> list[tuple]:
     ]
 
 
-def test_leave_area_is_the_list_area_below_the_entry_and_panel():
-    region = (Box.from_point(FILTER_ENTRY), Box.from_point(FILTER_PANEL))
-    assert xhs_scan._leave_area(Box(0.0, 100.0, 800.0, 700.0), region) == Box(0.0, 304.0, 800.0, 496.0)
-    assert xhs_scan._leave_area(LEAVE_AREA, region) == LEAVE_AREA
-    assert xhs_scan._leave_area(Box(0.0, 100.0, 800.0, 220.0), region) is None  # 下沿以下只剩 16px
-    assert xhs_scan._leave_area(None, region) is None
+# 加高的面板（664–1222 × 110–660）：LEAVE_AREA 下沿 675，面板下方留 24px 后不够；左侧 384–640 够。
+TALL_PANEL = box(943.0, 385.0, 558, 550)
+# 再向左加宽（400–1222）：左侧留 24px 后也不够，右侧在列表区域外。
+WIDE_PANEL = box(811.0, 385.0, 822, 550)
+
+
+def test_leave_area_is_the_largest_part_of_the_list_area_outside_the_entry_and_panel():
+    leave = xhs_scan._leave_area
+    region = (Box.from_point(FILTER_ENTRY), Box.from_point(FILTER_PANEL))  # 外接框 664–1222 × 90–280
+    # 下方 800×496 与左侧 640×700 都够：取面积大的左侧，靠外接框一侧留 24px。
+    assert leave(Box(0.0, 100.0, 800.0, 700.0), region) == Box(0.0, 100.0, 640.0, 700.0)
+    assert leave(LEAVE_AREA, region) == LEAVE_AREA  # 整块都在下方
+    assert leave(Box(0.0, 100.0, 800.0, 220.0), region) == Box(0.0, 100.0, 640.0, 220.0)  # 下方只剩 16px
+    # 外接框在列表区域左上：下方只剩 36px、左侧没有，取右侧。
+    assert leave(Box(600.0, 100.0, 1000.0, 300.0), (Box(560.0, 90.0, 300.0, 250.0),)) == Box(884.0, 100.0, 716.0, 300.0)
+    assert leave(LEAVE_AREA, (Box.from_point(FILTER_ENTRY), Box.from_point(TALL_PANEL))) == Box(384.0, 315.0, 256.0, 360.0)
+    assert leave(LEAVE_AREA, (Box.from_point(FILTER_ENTRY), Box.from_point(WIDE_PANEL))) is None
+    # 左侧只剩 32px 宽：不够。
+    assert leave(LEAVE_AREA, (Box(440.0, 90.0, 800.0, 600.0),)) is None
+    assert leave(None, region) is None
+    assert leave(LEAVE_AREA, ()) == LEAVE_AREA
 
 
 @pytest.mark.parametrize("seed", range(8))
@@ -786,6 +801,91 @@ def test_hover_panel_is_closed_by_moving_the_pointer_out_and_never_reopens(tmp_p
     assert not _filter_diagnostics(harness)
 
 
+@pytest.mark.parametrize("seed", range(8))
+def test_tall_hover_panel_is_left_sideways_when_there_is_no_room_below(tmp_path, monkeypatch, seed):
+    # #81 第 7 轮：面板很高时列表区域在面板下方不够，改取左侧；照样移开即收起，不按入口、不再开。
+    plans = _record_plans(monkeypatch)
+    site = _hover_site(seed)
+    site.panel_box = dict(TALL_PANEL)
+    harness = Harness(tmp_path, site)
+    events = _record_pointer(harness)
+    marks = _record_close(harness, events)
+
+    harness.run()
+
+    assert harness.processed == [f"n1-{index}" for index in range(4)]
+    assert _filter_methods(harness) == [("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave")]
+    before, after = marks
+    assert after["opens"] == before["opens"] and after["leave_closes"] == before["leave_closes"] + 1
+    closing = events[before["event"]:after["event"]]
+    assert not any(event[0] == "up" for event in closing)
+    left = Box(384.0, 315.0, 256.0, 360.0)
+    assert plans[-1] == (left, ())
+    x, y = site.mouse_position
+    assert _in_box(left, x, y) and not inside(TALL_PANEL, x, y) and not site.panel_visible
+    assert not _filter_diagnostics(harness)
+
+
+def _in_wide_region(x: float, y: float) -> bool:
+    return inside(FILTER_ENTRY, x, y) or inside(WIDE_PANEL, x, y)
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_hover_panel_with_no_room_on_any_side_is_closed_by_the_entry_along_a_path_inside_it(
+    tmp_path, monkeypatch, caplog, seed,
+):
+    # 各侧都不够：不移开，记一行几何日志后回退按入口；从“图文”回到入口的每个轨迹点都在入口与面板的并集内，
+    # 途中面板不自行收起、进入口也不再开，只由这一次按下收起。
+    plans = _record_plans(monkeypatch)
+    site = _hover_site(seed)
+    site.panel_box = dict(WIDE_PANEL)
+    harness = Harness(tmp_path, site)
+    events = _record_pointer(harness)
+    marks = _record_close(harness, events)
+
+    with caplog.at_level(logging.INFO, logger="MediaCrawler"):
+        harness.run()
+
+    assert harness.processed == [f"n1-{index}" for index in range(4)]
+    assert _filter_methods(harness) == [("panel_open", None), ("note_type", None), ("panel_close", "entry_press")]
+    before, after = marks
+    assert after["opens"] == before["opens"] and after["leave_closes"] == before["leave_closes"]
+    closing = events[before["event"]:after["event"]]
+    moves = [event for event in closing if event[0] == "move"]
+    assert moves and all(_in_wide_region(*event[1:3]) and event[3] for event in moves)
+    ups = [event for event in closing if event[0] == "up"]
+    assert len(ups) == 1 and inside(FILTER_ENTRY, *ups[0][1:]) and not site.panel_visible
+    entry = Box.from_point(FILTER_ENTRY)
+    assert plans[-1] == (entry, (entry, Box.from_point(WIDE_PANEL)))
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "[XiaoHongShuCrawler.scan] Filter panel leave area unavailable: reason=no_room, "
+        "list_area=(384, 315, 896, 675), union=(400, 90, 1222, 660)"
+    ) in messages
+    assert not _filter_diagnostics(harness)
+
+
+def test_missing_list_area_is_logged_and_the_entry_is_pressed_inside_the_hover_region(tmp_path, monkeypatch, caplog):
+    plans = _record_plans(monkeypatch)
+    site = _hover_site(0)
+    harness = Harness(tmp_path, site)
+    harness.crawler._scroll_area = lambda metrics: None
+    marks = _record_close(harness, _record_pointer(harness))
+
+    with caplog.at_level(logging.INFO, logger="MediaCrawler"):
+        harness.run()
+
+    assert _filter_methods(harness)[-1] == ("panel_close", "entry_press")
+    before, after = marks
+    assert after["opens"] == before["opens"] and after["leave_closes"] == before["leave_closes"]
+    entry = Box.from_point(FILTER_ENTRY)
+    assert plans[-1] == (entry, (entry, Box.from_point(FILTER_PANEL)))
+    assert (
+        "[XiaoHongShuCrawler.scan] Filter panel leave area unavailable: reason=no_list_area, list_area=None, "
+        "union=(664, 90, 1222, 280)"
+    ) in [record.getMessage() for record in caplog.records]
+
+
 def test_panel_that_stays_open_after_the_pointer_leaves_is_closed_by_pressing_the_entry(tmp_path, monkeypatch, caplog):
     # 面板不随光标离开收起（默认假站点只随点击入口切换）：移开后按 XHS_FILTER_LEAVE_POLLS 次轮询确认不了，回退为点入口。
     plans = _record_plans(monkeypatch)
@@ -816,7 +916,8 @@ def test_panel_that_stays_open_after_the_pointer_leaves_is_closed_by_pressing_th
     ups = [event for event in closing if event[0] == "up"]
     assert len(ups) == 1 and inside(FILTER_ENTRY, *ups[0][1:]) and closing.index(ups[0]) > press
     assert after["opens"] == before["opens"] and not site.panel_visible
-    # 其他点击不变：搜索框、入口、“图文”、收起时的入口都照常计划并按下，按下恰为这四次。
+    # 其他点击不变：搜索框、入口、“图文”、收起时的入口都照常计划并按下，按下恰为这四次。光标已移开，按入口时
+    # 照常接近（不限定在并集内）。
     search, entry, option = (Box.from_point(point) for point in (SEARCH_BOX, FILTER_ENTRY, FILTER_OPTION))
     assert plans == [(search, ()), (entry, ()), (option, ()), (LEAVE_AREA, ()), (entry, ())]
     presses = [event[1:] for event in events if event[0] == "up"]

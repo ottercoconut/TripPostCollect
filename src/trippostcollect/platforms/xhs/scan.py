@@ -92,10 +92,10 @@ XHS_DEFERRED_PLACEMENTS = {
 XHS_FILTER_POLLS = 20
 XHS_FILTER_POLL_SECONDS = 0.25
 # 收起面板先移开光标（#81，第 6 轮实证：光标离开入口与面板的并集时悬停打开的面板会收起）：落点取结果列表区域
-# （同滚动，#88）中入口与面板下沿以下、留出间距的部分，不够高时直接点入口；移开后至多轮询这么多次确认收起，
-# 确认不了再点入口。
+# （同滚动，#88）中入口与面板外接框之外最大的一块（下方、左侧或右侧，靠外接框一侧留出间距），宽、高都至少
+# XHS_FILTER_LEAVE_MIN_SIZE_PX，都不够时直接点入口；移开后至多轮询这么多次确认收起，确认不了再点入口。
 XHS_FILTER_LEAVE_MARGIN_PX = 24.0
-XHS_FILTER_LEAVE_MIN_HEIGHT_PX = 40.0
+XHS_FILTER_LEAVE_MIN_SIZE_PX = 40.0
 XHS_FILTER_LEAVE_POLLS = 8
 # 入口相对第 1 页结果的渲染时机未经实测（Mac 首轮在结果到达约 1 秒后读到空入口）；每次尝试按轮询间隔
 # 最多等这么久。入口出现后、点击之前的人手反应停顿是输入微停顿，不写 pause 行。
@@ -310,19 +310,50 @@ def _panel_ready(state: dict[str, Any]) -> bool:
 
 
 def _hover_region(state: dict[str, Any]) -> tuple[Box, ...]:
-    """悬停打开的面板在光标离开入口与面板时收起（#81）：接近“图文”的轨迹限定在入口框与面板框的并集内；收起面板时
-    移开光标的落点取在这个并集下方（见 `_leave_area`）。"""
+    """悬停打开的面板在光标离开入口与面板时收起（#81）：接近“图文”与回退按入口收起时，轨迹限定在入口框与面板框的
+    并集内；收起面板时移开光标的落点取在这个并集之外（见 `_leave_area`）。"""
     return tuple(Box.from_point(state[key]) for key in ("entry", "panel") if state.get(key))
 
 
+def _bounding_box(boxes: tuple[Box, ...]) -> Optional[Box]:
+    if not boxes:
+        return None
+    left, top = min(box.left for box in boxes), min(box.top for box in boxes)
+    right = max(box.left + box.width for box in boxes)
+    bottom = max(box.top + box.height for box in boxes)
+    return Box(left, top, right - left, bottom - top)
+
+
+def _box_text(box: Optional[Box]) -> str:
+    """日志里的矩形：(left, top, right, bottom) 取整；没有为 None。"""
+    if box is None:
+        return "None"
+    return str(tuple(round(value) for value in (box.left, box.top, box.left + box.width, box.top + box.height)))
+
+
 def _leave_area(area: Optional[Box], region: tuple[Box, ...]) -> Optional[Box]:
-    """移开光标收起面板时的落点区域：列表区域中位于入口与面板下沿以下、留出间距的部分；不够高时为 None。"""
+    """移开光标收起面板时的落点区域：列表区域中位于入口与面板外接框之外的最大一块。候选为外接框的下方、左侧与右侧
+    （各取列表区域的整宽或整高，靠外接框一侧留出 XHS_FILTER_LEAVE_MARGIN_PX），宽、高都不小于
+    XHS_FILTER_LEAVE_MIN_SIZE_PX 的取面积最大者；都不够或没有列表区域时为 None。没有入口与面板框时为整个列表区域。"""
     if area is None:
         return None
-    bottom = max((box.top + box.height for box in region), default=area.top)
-    top = max(area.top, bottom + XHS_FILTER_LEAVE_MARGIN_PX)
-    height = area.top + area.height - top
-    return Box(area.left, top, area.width, height) if height >= XHS_FILTER_LEAVE_MIN_HEIGHT_PX else None
+    union = _bounding_box(region)
+    candidates = (area,)
+    if union is not None:
+        right, bottom = area.left + area.width, area.top + area.height
+        below = max(area.top, union.top + union.height + XHS_FILTER_LEAVE_MARGIN_PX)
+        left_end = min(right, union.left - XHS_FILTER_LEAVE_MARGIN_PX)
+        right_start = max(area.left, union.left + union.width + XHS_FILTER_LEAVE_MARGIN_PX)
+        candidates = (
+            Box(area.left, below, area.width, bottom - below),
+            Box(area.left, area.top, left_end - area.left, area.height),
+            Box(right_start, area.top, right - right_start, area.height),
+        )
+    fits = [
+        box for box in candidates
+        if box.width >= XHS_FILTER_LEAVE_MIN_SIZE_PX and box.height >= XHS_FILTER_LEAVE_MIN_SIZE_PX
+    ]
+    return max(fits, key=lambda box: box.width * box.height, default=None)
 
 
 def _filter_moment(state: dict[str, Any]) -> dict[str, Any]:
@@ -611,7 +642,9 @@ class XhsScanMixin:
     async def _close_filter_panel(self) -> None:
         """任何滚动之前收起面板，确认 .filters-wrapper 不可见（#81）。先把光标移出入口与面板的并集（见 `_leave_filter_panel`），
         确认不了才点入口收起，失败重试一次。两种方式都写 `apply_filter panel_close`，`method` 分别为 `pointer_leave`
-        与 `entry_press`；从“图文”移回入口再按下会让悬停打开的面板先自行收起、进入口又被悬停打开（开 → 关 → 再开）。
+        与 `entry_press`。按入口时，面板框可取且光标仍在并集内（落点区域取不到、没有移开），接近轨迹限定在并集内
+        （同点选“图文”）：不限定时从“图文”回到入口的途中会离开并集，悬停打开的面板先自行收起、进入口又被悬停打开
+        （开 → 关 → 再开）。光标已移开（面板没随离开收起）或取不到面板框时照常接近。
         """
         state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
         if not state.get("panel_visible"):
@@ -626,7 +659,10 @@ class XhsScanMixin:
             entry = state.get("entry")
             if not entry:
                 break
-            plan = await self._plan_click(entry)
+            region = _hover_region(state) if state.get("panel") else ()
+            if not any(pointer_for(self.context_page).inside(box) for box in region):
+                region = ()
+            plan = await self._plan_click(entry, region=region)
             self._record_trigger_action(
                 "apply_filter", {"filter": "panel_close", "method": "entry_press"}, pointer=plan.evidence,
             )
@@ -639,10 +675,18 @@ class XhsScanMixin:
     async def _leave_filter_panel(self, state: dict[str, Any]) -> bool:
         """把光标移到 `_leave_area` 内的随机点，不按下：落点分布与轨迹按 HumanPointer 的人类样本（与点击相同，只是
         不静止、不按下，账本的指针记录相应不含 `settle_ms`、`hold_ms`）。之后至多轮询 `XHS_FILTER_LEAVE_POLLS` 次，
-        面板收起返回 True；落点区域取不到时不移动、返回 False。"""
+        面板收起返回 True；落点区域取不到时不移动、返回 False，并记一行 info 日志：原因（`no_list_area` 列表区域取不到，
+        `no_room` 各侧空间都不够）、列表区域框与入口和面板的外接框，只含坐标。"""
         page = self.context_page
-        target = _leave_area(self._scroll_area(await dom_scroll_metrics(page)), _hover_region(state))
+        area = self._scroll_area(await dom_scroll_metrics(page))
+        region = _hover_region(state)
+        target = _leave_area(area, region)
         if target is None:
+            logger.info(
+                "[XiaoHongShuCrawler.scan] Filter panel leave area unavailable: "
+                f"reason={'no_list_area' if area is None else 'no_room'}, list_area={_box_text(area)}, "
+                f"union={_box_text(_bounding_box(region))}"
+            )
             return False
         pointer = pointer_for(page)
         plan = await pointer.plan_click(target)

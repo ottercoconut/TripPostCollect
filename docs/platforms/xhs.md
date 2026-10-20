@@ -451,11 +451,19 @@ child `summary.json` 的
   “已筛选”且截获到目标会话第 1 页（5 项 `filters`：`sort_type=general`、`filter_note_type=普通笔记`，其余三项
   “不限”）判定成功。入口始终未出现、面板未打开、选项缺失、点选前面板已收起或点选后未确认都只算本次尝试失败，
   重试一次后报 `target_filter_not_applied`。任何滚动之前收起面板（#81）：先把光标移出入口与面板的并集，
-  落点取结果列表区域（同滚动的列表区域，#88）中入口与面板下沿以下、留出 24px 的部分，落点分布与轨迹按人类
-  样本、不静止也不按下，再按 0.25 秒轮询至多 8 次确认面板不可见；确认不了（或该部分不足 40px 高）才按原来的
-  方式点入口并确认收起，失败重试一次后报 `filter_panel_not_closed`，回退时记一行 info 日志
-  `Filter panel stayed open after the pointer left`。原先从“图文”移回入口再按下，途中面板先自行收起、进入口
-  又被悬停打开、按下再关上（开 → 关 → 再开）。两种方式都写 `apply_filter` 的 `panel_close` 动作，`target.method`
+  落点区域取结果列表区域（同滚动的列表区域，#88）中入口与面板外接框之外最大的一块：候选为外接框的下方、
+  左侧与右侧（各取列表区域的整宽或整高，靠外接框一侧留出 24px），宽、高都不小于 40px 的取面积最大者。面板在
+  列表右上方展开，面板很高时下方可能放不下，左侧通常有大块空间（第 7 轮只取下方：两行日志只隔 2 秒、账本没有
+  `pointer_leave`，即没有移动就回退，是列表区域取不到还是下方不够，日志分不出）。落点分布与轨迹按人类样本、
+  不静止也不按下，再按 0.25 秒轮询至多 8 次确认面板不可见。
+  落点区域取不到时不移动，记一行 info 日志 `Filter panel leave area unavailable: reason=…, list_area=(…),
+  union=(…)`（`reason` 为 `no_list_area` 列表区域取不到或 `no_room` 各侧都不够，两个框为 left、top、right、
+  bottom，只含坐标）。取不到落点区域或移开后确认不了，才按原来的方式点入口并确认收起，失败重试一次后报
+  `filter_panel_not_closed`，回退时记一行 info 日志 `Filter panel stayed open after the pointer left`（没有移动时
+  其前有上面那行）。按入口时，若取得到面板框且光标仍在并集内（没有移开），接近轨迹限定在入口与面板的并集内
+  （同点选“图文”）；光标已移开（面板没随离开收起）或取不到面板框时照常接近。不限定时从“图文”回到入口的途中
+  会离开并集：面板先自行收起、进入口又被悬停打开、按下再关上（开 → 关 → 再开）。两种方式都写 `apply_filter`
+  的 `panel_close` 动作，`target.method`
   为 `pointer_leave`（指针记录只有落点比例、接近时长与移动事件数）或 `entry_press`；成功时的筛选动作序列为
   `panel_open`、`note_type`、`panel_close(pointer_leave)`，回退时末尾再加 `panel_close(entry_press)`。目标会话第 1 页
   的关键词与目标不符时重新输入一次，仍不符报 `search_keyword_mismatch`。三者都以

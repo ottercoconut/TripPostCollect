@@ -647,6 +647,33 @@ async def test_feed_verification_layer_then_redo_reuses_the_cached_first_image(m
 
 
 @pytest.mark.asyncio
+async def test_tall_hover_panel_is_left_sideways_when_there_is_no_room_below(monkeypatch, tmp_path):
+    """#81 第 7 轮：面板很高（内容区至少 560px，下沿约在 758px），列表区域（纵向约 273–743px）在面板下方放不下落点，
+    改取面板左侧；移开光标即收起，不按入口，点选“图文”之后面板只收起一次、不再打开。"""
+    items = [search_item(f"t-{index}") for index in range(8)]
+    site = XhsOfflineSite(KEYWORD, [items], hover_opens_panel=True, panel_min_height=560)
+    known = [item["id"] for item in items]
+
+    async with replay_browser(site) as (context, page, pointer_events):
+        crawler, state_path = prepare_crawler(monkeypatch, tmp_path, context, page, known=known)
+        await page.goto(EXPLORE_URL)
+        with crawler_log_lines() as log_lines:
+            await crawler.search()
+        audit = await page.evaluate("() => window.__tpcOffline")
+
+    assert [session["filtered"] for session in audit["sessions"]] == [False, True]
+    assert filter_targets(crawler) == [("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave")]
+    panel_events = audit["panelEvents"]
+    option = panel_events.index("option")
+    assert panel_events[option - 1] == "hover_open" and panel_events[option:] == ["option", "leave_close"]
+    assert not {"press_open", "press_close"} & set(panel_events), panel_events
+    assert not any("leave area unavailable" in line for line in log_lines)
+    assert not any("stayed open after the pointer left" in line for line in log_lines)
+    assert last_stop(state_path)["stop_reason"] == "source_exhausted"
+    assert site.unexpected == [] and site.escaped() == []
+
+
+@pytest.mark.asyncio
 async def test_frontend_self_load_when_viewport_is_not_filled_passes_the_gate(monkeypatch, tmp_path):
     """V16 布局（整页滚动）下目标会话第 1 页只有一行、填不满视口：站点不经滚动自行请求第 2 页，门禁计入
     frontend_self_loads 而不失败；筛选入口在 .search-layout 内，其前的零尺寸副本被跳过。"""

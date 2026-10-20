@@ -81,7 +81,8 @@ class XhsOfflineSite:
     （默认 `creator_projection()`）。`layout` 选结果页布局：`ai_chat`（默认，当前线上的 AI 对话布局）或 `v16`。
     `hot_query_at` 给出时，目标会话第 1 页响应在该位置插入一条 `HOT_QUERY_ID` 的 hot_query 条目（列表中渲染为没有
     封面的卡片）。`hover_opens_panel` 与 `xhs_fake_site` 的同名选项语义一致：光标移入筛选入口时面板打开，移到入口与
-    面板的并集之外即收起，点入口仍切换；默认面板只随点击入口切换。
+    面板的并集之外即收起，点入口仍切换；默认面板只随点击入口切换。`panel_min_height` 给出时面板内容区至少这么高
+    （像素），用于面板下方放不下移开光标落点的情形（#81）。
     """
 
     def __init__(
@@ -94,6 +95,7 @@ class XhsOfflineSite:
         layout: str = "ai_chat",
         hot_query_at: int | None = None,
         hover_opens_panel: bool = False,
+        panel_min_height: int = 0,
     ) -> None:
         if layout not in LAYOUTS:
             raise ValueError(f"unknown offline layout: {layout}")
@@ -101,6 +103,7 @@ class XhsOfflineSite:
         self.layout = layout
         self.hot_query_at = hot_query_at
         self.hover_opens_panel = hover_opens_panel
+        self.panel_min_height = panel_min_height
         self.pages = [list(items) for items in pages]
         self.general_items = list(general_items if general_items is not None else
                                   [search_item(f"general-{index}") for index in range(8)])
@@ -172,6 +175,7 @@ class XhsOfflineSite:
                 (SITE_DIR / "explore.html").read_text(encoding="utf-8")
                 .replace("__TPC_LAYOUT__", self.layout)
                 .replace("__TPC_FILTER_PANEL__", "hover" if self.hover_opens_panel else "click")
+                .replace("__TPC_PANEL_HEIGHT__", str(int(self.panel_min_height)))
             )
             await route.fulfill(status=200, headers={"content-type": "text/html; charset=utf-8"}, body=body.encode())
         elif path.startswith("/__offline__/") and Path(path).suffix in STATIC_TYPES:

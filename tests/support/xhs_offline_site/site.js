@@ -26,6 +26,8 @@
   const VERIFIED_MESSAGE = 'tpc-offline-verified';
   const AI_CHAT = document.documentElement.dataset.layout !== 'v16';
   const HOVER_PANEL = document.documentElement.dataset.filterPanel === 'hover';
+  // 面板内容区的最小高度（像素，0 为按内容）：用于面板下方放不下移开光标落点的情形（#81）。
+  const PANEL_MIN_HEIGHT = Number(document.documentElement.dataset.filterPanelHeight) || 0;
   // 与 site.css 一致：V16 列表自文档 120px 起，AI 对话布局自滚动容器内 56px 起；每行 360px、4 列；尾部 200px。
   const LIST_TOP = AI_CHAT ? 56 : 120;
   const ROW_HEIGHT = 360;
@@ -346,6 +348,7 @@
 
   const buildPanel = () => {
     const panel = el('div', 'filters-wrapper');
+    if (PANEL_MIN_HEIGHT) panel.style.minHeight = `${PANEL_MIN_HEIGHT}px`;
     FILTER_GROUPS.forEach((group) => {
       const row = el('div', 'filters');
       const tags = el('div', 'tag-container');
