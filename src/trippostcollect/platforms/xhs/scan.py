@@ -82,6 +82,13 @@ XHS_UNRENDERED_DIAGNOSTIC_IDS = 10
 # 向上补漏的上限：已读到、滑到上方仍未决定的卡片每张至多补漏这么多次；已越过的页里从未读到的项，该页至多向上
 # 补漏滚动这么多步（见 `_backfill_unread`）。
 XHS_BACKFILL_ATTEMPTS = 3
+# 补漏前的位置判定（#92）：已越过页里从未读到的项，卡片节点在列表可见区上方或不存在时才向上补漏；在下方或与可见区
+# 相交时不补漏，交回扫描照常向下滚，每页每类第一次记一行日志（只含页码、项数、data-index 与相对位置）。
+XHS_BACKFILL_PLACEMENTS = frozenset({"above", "absent"})
+XHS_DEFERRED_PLACEMENTS = {
+    "below": "are below the list view",
+    "intersecting": "intersect the list view but were not read",
+}
 XHS_FILTER_POLLS = 20
 XHS_FILTER_POLL_SECONDS = 0.25
 # 收起面板先移开光标（#81，第 6 轮实证：光标离开入口与面板的并集时悬停打开的面板会收起）：落点取结果列表区域
@@ -182,6 +189,9 @@ class SearchPage:
     # 已越过却从未读到的未决定项向上补漏（见 `_backfill_unread`）：仍在找的 ID 与每次补漏滚动后的读数。
     backfill_pending: set[str] = field(default_factory=set)
     backfill_steps: list[dict[str, Any]] = field(default_factory=list)
+    # 补漏前的位置判定（见 `_place_unread`）：各项首次成为补漏目标时的位置，以及本页已记过日志的不补漏类别。
+    backfill_placements: dict[str, dict[str, Any]] = field(default_factory=dict)
+    deferred_noted: set[str] = field(default_factory=set)
     began: bool = False
     results_paused: bool = False
     finished: bool = False
@@ -340,6 +350,29 @@ def _origins_text(responses: Optional[list[dict[str, Any]]]) -> str:
 def _index_range(values: Any) -> Optional[list[int]]:
     indices = [value for value in values if value >= 0]
     return [min(indices), max(indices)] if indices else None
+
+
+def _data_index(value: Any) -> Optional[int]:
+    """card_diagnostic 读到的 data-index 原值（属性字符串）；缺失或不是整数时为 None。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _unread_placement(shape: Optional[dict[str, Any]], view_height: float) -> dict[str, Any]:
+    """从未读到项的卡片节点相对列表可见区的位置（card_diagnostic 读数，纵坐标以可见区顶部为 0）：顶边不低于可见区高度
+    为 below，底边不高于 0 为 above，其余与可见区相交为 intersecting；没有节点（含读数失败）为 absent。"""
+    position = shape.get("position") if shape and shape.get("nodes") else None
+    if not isinstance(position, dict):
+        return {"placement": "absent", "data_index": None, "top": None, "bottom": None}
+    top = float(position.get("top") or 0)
+    bottom = top + float(position.get("height") or 0)
+    placement = "below" if top >= view_height else "above" if bottom <= 0 else "intersecting"
+    return {
+        "placement": placement, "data_index": _data_index(shape.get("data_index")),
+        "top": round(top), "bottom": round(bottom),
+    }
 
 
 class XhsScanMixin:
@@ -1079,6 +1112,10 @@ class XhsScanMixin:
     ) -> None:
         """列表可见区出现过某页的卡片，即越过了此前各页；一页的卡片全部出现过也算越过。
 
+        结果列表是多列瀑布流，data-index 的先后不等于纵向位置（#92 第 7 轮：第 2 页首张卡片露出约 9px 时，第 1 页
+        还有一张在可见区下方约 76px）。所以“越过”只说明后面某页的卡片已出现，不说明本页没读到的项都在上方；
+        `_backfill_missed` 补漏前先按 DOM 位置判定这些项在哪里，这里不改判定。
+
         每页首次判为越过时记下来源卡片：所在页码、ID、页内位置、data-index、相对列表可见区顶部的纵坐标与当时的滚动位置。
         """
         search_page.observed.add(item.note_id)
@@ -1130,7 +1167,11 @@ class XhsScanMixin:
         """当前页中已越到列表可见区上方、却仍未决定的卡片：向上滚回让虚拟列表重新渲染它们。
 
         “上方”指仍可见但封面中心高于可点击带，或已不可见且序号小于最小可见序号；可点击带以下的卡片
-        由向下滚动处理。已越过的页里从未读到的未决定项见 `_backfill_unread`。
+        由向下滚动处理。
+
+        已越过的页里从未读到的未决定项：越过判定在瀑布流下可能过早（见 `_mark_observed`），先读这些项的卡片节点位置
+        （见 `_place_unread`）。在可见区上方或没有节点（含读数失败）的交给 `_backfill_unread` 向上补漏；全部在下方或与
+        可见区相交时返回 False，扫描照常向下滚，读到后照常决定。
         """
         scan = self._scan
         current = scan.tracker.current
@@ -1161,9 +1202,38 @@ class XhsScanMixin:
             await self._scroll_feed_step(-1, phase="backfill")
             return True
         unread = [note_id for note_id in undecided if note_id not in scan.observed_index]
-        if current.passed and unread:
-            return await self._backfill_unread(current, unread, undecided=len(undecided), cards=cards, metrics=metrics)
-        return False
+        if not (current.passed and unread):
+            return False
+        placements, dom, error = await self._place_unread(current, unread, metrics)
+        targets = [note_id for note_id in unread if placements[note_id]["placement"] in XHS_BACKFILL_PLACEMENTS]
+        if not targets:
+            return False
+        return await self._backfill_unread(
+            current, targets, undecided=len(undecided), cards=cards, metrics=metrics,
+            placements=placements, dom=dom, error=error,
+        )
+
+    async def _place_unread(
+        self, current: SearchPage, unread: list[str], metrics: dict[str, Any],
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str]:
+        """补漏前读一次这些项的卡片节点（card_diagnostic，只读几何），按相对列表可见区的位置分类（见 `_unread_placement`），
+        返回 note_id → 位置、读数与读数错误类型。本页第一次有项在下方（或与可见区相交却没读到）时记一行 info 日志，
+        只含页码、项数、data-index 与相对可见区顶部的纵坐标，不含笔记 ID。"""
+        view = _rect(metrics.get("view_rect"))
+        view_height = view[3] - view[1] if view is not None else float(metrics.get("inner_height") or 0)
+        dom, error = await self._card_diagnostics(unread)
+        placements = {note_id: _unread_placement(dom.get(note_id), view_height) for note_id in unread}
+        for kind, text in XHS_DEFERRED_PLACEMENTS.items():
+            deferred = [placements[note_id] for note_id in unread if placements[note_id]["placement"] == kind]
+            if not deferred or kind in current.deferred_noted:
+                continue
+            current.deferred_noted.add(kind)
+            logger.info(
+                f"[XiaoHongShuCrawler.scan] Unread search items {text}; scanning on without backfill: "
+                f"page={current.page}, items={len(deferred)}, index={[entry['data_index'] for entry in deferred]}, "
+                f"top={[entry['top'] for entry in deferred]}, view_height={round(view_height)}"
+            )
+        return placements, dom, error
 
     async def _backfill_unread(
         self,
@@ -1173,16 +1243,26 @@ class XhsScanMixin:
         undecided: int,
         cards: list[dict[str, Any]],
         metrics: dict[str, Any],
+        placements: dict[str, dict[str, Any]],
+        dom: dict[str, dict[str, Any]],
+        error: str,
     ) -> bool:
-        """已越过的页里从未读到的未决定项：先向上补漏，补不到才停止（#92）。
+        """已越过的页里从未读到、节点在可见区上方或不存在的未决定项：先向上补漏，补不到才停止（#92）。
 
         扫描以外的滚动（重触发、行为阶段、关闭浮层后前端恢复位置）可能在读卡片之前就越过一行。补漏用同一种滚轮手势
         在列表区域内向上滚一步（`phase=backfill_unread`，写账本），立即读一次可见卡片记下读数，交回扫描：读到的项照常登记、
-        决定。列表已到顶或本页已补漏 XHS_BACKFILL_ATTEMPTS 步仍没读到，写诊断后按 `xhs_search_items_unresolved` 停止；
+        决定。在可见区下方的项不在这里（见 `_backfill_missed`）：瀑布流里它们可能比后一页已露出的卡片更靠下。
+        列表已到顶或本页已补漏 XHS_BACKFILL_ATTEMPTS 步仍没读到，写诊断后按 `xhs_search_items_unresolved` 停止；
         这些项不记候选失败，也不跳过。诊断的补漏记录带目标：这些项中页内位置最靠前者的 data-index 下限（见
-        `_unread_index_floor`），与各步可见范围对照即知是否已滚到它应在的位置。
+        `_unread_index_floor`），与各步可见范围对照即知是否已滚到它应在的位置；以及各项首次成为补漏目标时的位置
+        （`placements`，读数失败时带错误类型）。`dom`、`error` 是本步补漏前的读数，停止诊断直接沿用。
         """
         current.backfill_pending.update(unread)
+        positions = {item.note_id: item.position for item in current.items}
+        for note_id in unread:
+            current.backfill_placements.setdefault(
+                note_id, {"note_id": note_id, "position": positions[note_id], **placements[note_id], "error": error},
+            )
         at_top = int(metrics.get("scroll_y") or 0) <= 0
         if at_top or len(current.backfill_steps) >= XHS_BACKFILL_ATTEMPTS:
             backfill = {
@@ -1191,9 +1271,11 @@ class XhsScanMixin:
                 "target_index": self._unread_index_floor(current, unread),
                 "at_top": at_top,
                 "steps": list(current.backfill_steps),
+                "placements": sorted(current.backfill_placements.values(), key=lambda entry: entry["position"]),
             }
             await self._record_items_never_rendered(
                 current, unread, undecided=undecided, cards=cards, metrics=metrics, backfill=backfill,
+                dom=dom, error=error,
             )
             raise PlatformRuntimeError(
                 "XHS search items were never rendered", code="xhs_search_items_unresolved",
@@ -1242,6 +1324,8 @@ class XhsScanMixin:
         cards: list[dict[str, Any]],
         metrics: dict[str, Any],
         backfill: dict[str, Any],
+        dom: dict[str, dict[str, Any]],
+        error: str,
     ) -> None:
         """补漏仍没读到、停止前把当前页从未出现在列表中的未决定项写入导航诊断，并在日志留一行。
 
@@ -1249,12 +1333,12 @@ class XhsScanMixin:
         的卡片读数（card_diagnostic，没有为 nodes=0）与本轮搜索响应中的出处（见 `_response_origins`）。整页给出条目数、
         未决定数、从未出现数、已观察数及其 data-index 范围、已跳过的非笔记卡片数、把本页判为越过的来源（passed_by），
         以及可见卡片的 data-index 范围、列表滚动位置与可见区。`backfill` 为补漏记录：已补漏步数与上限、目标 data-index
-        下限、停止时是否到顶，以及每步滚动后的滚动位置、可见卡片 data-index 范围与是否到顶。只含 ID、计数、页码、位置与类型。
+        下限、停止时是否到顶、每步滚动后的滚动位置、可见卡片 data-index 范围与是否到顶，以及各项首次成为补漏目标时
+        的位置。卡片读数 `dom` 与读数错误 `error` 沿用停止前补漏判定的那次读取。只含 ID、计数、页码、位置与类型。
         """
         scan = self._scan
         items = {item.note_id: item for item in current.items}
         note_ids = unrendered[:XHS_UNRENDERED_DIAGNOSTIC_IDS]
-        dom, error = await self._card_diagnostics(note_ids)
         entries = [
             {
                 "note_id": note_id,

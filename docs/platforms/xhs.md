@@ -506,6 +506,16 @@ child `summary.json` 的
   光标照常限定在列表区域），立即读一次可见卡片，交回扫描；读到的项照常登记、决定，日志记一行
   `Backfill reached unread search items: page=…, found=…, index=[a, b], still_unread=…, steps=…`。列表已到顶，或
   本页已向上补漏 3 步仍没读到，才按 `xhs_search_items_unresolved` 停止；这些项不记候选失败，也不跳过。
+- 越过判定的局限与补漏前的位置判定（#92 第 7 轮）：结果列表是多列瀑布流，`data-index` 的先后不等于纵向位置。
+  第 7 轮第 2 页首张卡片只露出约 9px 就把第 1 页判为越过，而第 1 页从未读到的那张卡片还在可见区下方约 76px，
+  向上补漏方向相反。越过判定本身不变；向上补漏之前，先用 `card_diagnostic` 读一次这些项的卡片节点（只读几何），
+  按相对列表可见区的位置分四类：顶边不低于可见区高度为“下方”，底边不高于可见区顶部为“上方”，其余与可见区
+  相交为“相交”（节点在可见区内却不在本次可见卡片读数里），没有节点为“不存在”，读数失败也按“不存在”。只有
+  “上方”与“不存在”的项向上补漏；全部是“下方”或“相交”时不补漏，扫描照常向下滚，读到后照常决定。每页第一次
+  因“下方”不补漏时日志记一行 `Unread search items are below the list view; scanning on without backfill: page=…,
+  items=…, index=[…], top=[…], view_height=…`（`index` 为各项 `data-index`，`top` 为相对列表可见区顶部的纵坐标，
+  不含笔记 ID）；“相交”同样每页记一行，开头为 `Unread search items intersect the list view but were not read`。
+  已读到又滑出可见区的卡片仍按“序号小于最小可见序号”判上方，未改。
 - 非笔记条目（依据：Mac 人工取证 2026-10-14）：搜索响应里 `model_type` 不是 `note` 的条目（如 `hot_query`
   相关搜索卡，id 不是 24 位十六进制）在列表中同样占一个 `data-index` 位置，渲染为没有封面的
   `section.note-item`。截获响应时把带 id 的非笔记条目登记为该会话、该页的已知非笔记条目；扫描读到本会话
@@ -688,7 +698,9 @@ child `summary.json` 的
   其他页（跨页重复）、结果列表内的卡片读数（没有为 `nodes=0`）与同上的响应出处；`backfill` 为补漏记录：已补漏
   步数 `attempts` 与上限 `limit`（3）、`target_index`（这些项中页内位置最靠前者的 `data-index` 下限：按本页已读到
   项的页内位置推算，跨页重复项不参与）、停止时是否到顶 `at_top`，`steps` 为每步滚动后的滚动位置、可见卡片
-  `data-index` 范围与是否到顶。日志另记一行 `Search items were never rendered`（含
+  `data-index` 范围与是否到顶，`placements` 为各项首次成为补漏目标时的位置判定（笔记 ID、页内位置、类别
+  `above`/`absent`、`data-index`、相对列表可见区顶部的上下沿，读数失败时 `error` 为错误类型）；`items` 的卡片读数
+  沿用停止前那次判定的读取。日志另记一行 `Search items were never rendered`（含
   `backfill=<步数>/<上限>:target=<下限>:top=<是否到顶>`）；某篇有未截获的正文图时，在记失败行并抛出之前追加 `stage=note_images`、
   `outcome=image_response_not_observed`（只诊断，仍是第一张缺失即本篇可重试失败）：笔记 ID、期望与截获张数、
   全部缺失的 `source_index`；本篇窗口内见到、没有匹配上任何期望的图片响应总数及按（协议、主机、样式）分组的

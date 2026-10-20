@@ -301,8 +301,12 @@ def test_page_item_that_never_renders_stops_with_an_items_never_rendered_diagnos
         "visible_index_range": [0, 6], "scroll_container": "document", "scroll_y": 0,
         "scroll_height": LIST_TOP + 2 * 360 + 200, "inner_height": 900,
         "view_rect": {"left": 0.0, "top": 0.0, "right": 1280.0, "bottom": 900.0},
-        # 列表已在顶部：不再向上补漏，直接停止。
-        "backfill": {"attempts": 0, "limit": 3, "target_index": 1, "at_top": True, "steps": []},
+        # 列表已在顶部：不再向上补漏，直接停止。补漏判定时它没有节点。
+        "backfill": {
+            "attempts": 0, "limit": 3, "target_index": 1, "at_top": True, "steps": [],
+            "placements": [{"note_id": "n1-1", "position": 1, "placement": "absent", "data_index": None, "top": None,
+                            "bottom": None, "error": ""}],
+        },
     }
     assert {key: diagnostic[key] for key in page_fields} == page_fields
     assert diagnostic["outcome"] == "items_never_rendered" and diagnostic["error"] == ""
@@ -1099,6 +1103,156 @@ def test_item_the_frontend_never_renders_is_backfilled_up_to_the_limit_then_stop
     )
     assert "page=5, items=8, undecided=1, never_rendered=1" in warning and "backfill=3/3:target=33:top=False;" in warning
     _assert_wheels_inside_the_list(site)
+    # 补漏判定时它没有节点（不存在），读数没有失败。
+    assert backfill["placements"] == [
+        {"note_id": "n5-1", "position": 1, "placement": "absent", "data_index": None, "top": None, "bottom": None,
+         "error": ""},
+    ]
+    assert not [record for record in caplog.records if "scanning on without backfill" in record.getMessage()]
+
+
+def test_unread_placement_is_relative_to_the_list_view():
+    def shape(top: float, height: float = 340.0, nodes: int = 1) -> dict:
+        return {"nodes": nodes, "data_index": "21", "position": {"left": 0, "top": top, "width": 240, "height": height}}
+
+    placement = xhs_scan._unread_placement
+    assert placement(shape(664.0), 664.0) == {"placement": "below", "data_index": 21, "top": 664, "bottom": 1004}
+    assert placement(shape(663.0), 664.0)["placement"] == "intersecting"
+    assert placement(shape(-339.0), 664.0)["placement"] == "intersecting"
+    assert placement(shape(-340.0), 664.0) == {"placement": "above", "data_index": 21, "top": -340, "bottom": 0}
+    absent = {"placement": "absent", "data_index": None, "top": None, "bottom": None}
+    assert placement(shape(100.0, nodes=0), 664.0) == absent
+    assert placement({"note_id": "x", "nodes": 0}, 664.0) == absent
+    assert placement(None, 664.0) == absent
+    assert placement({**shape(900.0), "data_index": None}, 664.0)["data_index"] is None
+
+
+def _record_placements(harness: Harness) -> list[tuple[int, dict]]:
+    """每次补漏前的位置判定：(判定时账本末行序号, note_id → 位置)。"""
+    calls: list[tuple[int, dict]] = []
+    place = harness.crawler._place_unread
+
+    async def recording(current, unread, metrics):
+        result = await place(current, unread, metrics)
+        calls.append((harness.crawler.capture.ledger.last_seq, result[0]))
+        return result
+
+    harness.crawler._place_unread = recording
+    return calls
+
+
+# 第 2 页首行已在库：n1-19 读到时它们可能整行已在可见区上方，前半段按 data-index 判“上方”会被 n1-19（index 19）
+# 挡住而来回滚动（见 handoff §37）；本组用例只看后半段。
+WATERFALL_KNOWN = tuple(f"n2-{index}" for index in range(4))
+
+
+def _waterfall_harness(tmp_path: Path) -> Harness:
+    # 多列瀑布流（#92 第 7 轮）：第 1 页末张 n1-19 下移 3 行，比第 2 页首行（index 20–23）还低 360px。单步滚动不超过
+    # 0.8 × 900 = 720px，所以第 2 页首行露出的那一步 n1-19 一定还在可见区下方；它的节点在 DOM 中。
+    site = XhsFakeSite(KEYWORD, _pages(2, 20))
+    site.card_shift = {"n1-19": 3 * 360.0}
+    site.dom_margin = 3000.0
+    site.list_rect = dict(LIST_RECT)
+    return Harness(tmp_path, site, known=WATERFALL_KNOWN)
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_unread_item_below_the_view_is_read_by_scanning_on_without_backfill(tmp_path, monkeypatch, caplog, seed):
+    monkeypatch.setattr(xhs_scan, "SCAN_RANDOM", random.Random(seed))
+    harness = _waterfall_harness(tmp_path)
+    site = harness.site
+    placements = _record_placements(harness)
+    caplog.set_level(logging.INFO, logger="MediaCrawler")
+
+    harness.run()
+
+    assert harness.accumulator.summary()["stop_reason"] == "source_exhausted"
+    assert harness.processed[:20] == [f"n1-{index}" for index in range(20)]
+    assert sorted(harness.processed[20:]) == sorted(f"n2-{index}" for index in range(4, 20))
+    assert not _scroll_actions(harness, "backfill_unread")
+    # 第 1 页被第 2 页首行判为越过时 n1-19 在可见区下方：不补漏，下一次滚动是向下的扫描滚动。
+    seq, first = placements[0]
+    assert first == {"n1-19": {"placement": "below", "data_index": 19, "top": first["n1-19"]["top"],
+                               "bottom": first["n1-19"]["top"] + 340}}
+    assert 900 <= first["n1-19"]["top"] < 900 + 720
+    assert all(placement["placement"] == "below" for _, call in placements for placement in call.values())
+    following = [
+        line for line in harness.ledger()
+        if line["kind"] == "action" and line["action"] == "scroll" and line_seq(line["id"]) > seq
+    ]
+    assert following[0]["target"]["phase"] == "scan" and following[0]["target"]["delta_y"] > 0
+    assert site.card_diagnostic_reads and all(read == ["n1-19"] for read in site.card_diagnostic_reads)
+    passed_by = harness.crawler._scan.target.pages[1].passed_by
+    assert (passed_by["reason"], passed_by["page"], passed_by["position"]) == ("later_page", 2, 0)
+    deferred = [record.getMessage() for record in caplog.records if "scanning on without backfill" in record.getMessage()]
+    assert deferred == [
+        "[XiaoHongShuCrawler.scan] Unread search items are below the list view; scanning on without backfill: "
+        f"page=1, items=1, index=[19], top=[{first['n1-19']['top']}], view_height=900"
+    ]
+    assert "n1-19" not in deferred[0]
+    assert not [record for record in caplog.records if "Backfill reached" in record.getMessage()]
+    assert not [event for event in harness.crawler._navigation_diagnostics if event["stage"] == "search_scan"]
+    _assert_wheels_inside_the_list(site)
+    assert harness.gate()["problem_counts"] == {}
+
+
+def test_unread_items_above_the_view_are_backfilled_with_their_placement(tmp_path, monkeypatch, caplog):
+    # 同 #89 用例（种子 4）：重触发一步滚过第 1 页首行，这次它们的节点仍在 DOM 中、在可见区上方：照常向上补漏。
+    monkeypatch.setattr(xhs_scan, "SCAN_RANDOM", random.Random(4))
+    site = XhsFakeSite(KEYWORD, _pages(2, 8))
+    site.list_rect = dict(LIST_RECT)
+    site.dom_margin = 3000.0
+    harness = Harness(tmp_path, site)
+    _fail_page_two_once(harness)
+    caplog.set_level(logging.INFO, logger="MediaCrawler")
+
+    harness.run()
+
+    assert harness.accumulator.summary()["stop_reason"] == "source_exhausted"
+    assert harness.processed[:8] == [f"n1-{index}" for index in (4, 5, 6, 7, 0, 1, 2, 3)]
+    (backfill,) = _scroll_actions(harness, "backfill_unread")
+    assert backfill["delta_y"] < 0
+    placements = harness.crawler._scan.target.pages[1].backfill_placements
+    assert sorted(placements) == [f"n1-{index}" for index in range(4)]
+    for index in range(4):
+        entry = placements[f"n1-{index}"]
+        assert (entry["position"], entry["placement"], entry["data_index"], entry["error"]) == (index, "above", index, "")
+        assert entry["bottom"] <= 0 and entry["bottom"] - entry["top"] == 340
+    assert not [record for record in caplog.records if "scanning on without backfill" in record.getMessage()]
+    assert any("Backfill reached unread search items: page=1, found=4" in record.getMessage() for record in caplog.records)
+
+
+def test_unread_item_whose_dom_read_fails_is_backfilled_as_absent_then_stops(tmp_path, monkeypatch, caplog):
+    evidence = tmp_path / "behavior_evidence.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(evidence))
+    monkeypatch.setattr(xhs_scan, "SCAN_RANDOM", random.Random(0))
+    reads = []
+
+    async def failing(page, note_ids):
+        reads.append(list(note_ids))
+        raise TimeoutError("card_diagnostic timed out")
+
+    monkeypatch.setattr(xhs_scan, "dom_card_diagnostic", failing)
+    harness = _waterfall_harness(tmp_path)
+    caplog.set_level(logging.INFO, logger="MediaCrawler")
+
+    with pytest.raises(PlatformRuntimeError) as caught:
+        harness.run()
+
+    # 读数失败按不存在处理：n1-19 实际在下方，向上补漏满 3 步仍读不到，以原停止码停止。
+    assert caught.value.code == "xhs_search_items_unresolved"
+    assert harness.processed == [f"n1-{index}" for index in range(19)]
+    assert len(_scroll_actions(harness, "backfill_unread")) == 3
+    assert reads == [["n1-19"]] * 4
+    (diagnostic,) = [event for event in harness.crawler._navigation_diagnostics if event["stage"] == "search_scan"]
+    assert diagnostic["error"] == "card_diagnostic: TimeoutError"
+    assert diagnostic["backfill"]["placements"] == [
+        {"note_id": "n1-19", "position": 19, "placement": "absent", "data_index": None, "top": None, "bottom": None,
+         "error": "card_diagnostic: TimeoutError"},
+    ]
+    (item,) = diagnostic["items"]
+    assert item["note_id"] == "n1-19" and item["dom"] is None
+    assert not [record for record in caplog.records if "scanning on without backfill" in record.getMessage()]
 
 
 def test_core_search_maps_entry_failure_to_full_scan_runtime_stop(tmp_path, monkeypatch):

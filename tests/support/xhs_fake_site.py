@@ -315,7 +315,9 @@ class XhsFakeSite:
     `cover_blocked[id]` 为这张卡片可见时前几次读数的封面中心被遮住（cover_hit 为假，点击落空）；
     `typed_keyword` 让回车请求体里的关键词与目标不同；`stall_after` 页之后前端不再加载；
     `hot_query` 每页附一条热搜项（无 DOM 卡片）；`unrendered_ids` 中的条目照常出现在响应里，但列表从不渲染（不占位置，
-    后面卡片的 data-index 依次前移）。`search_overrides[k]` 依次替换目标会话第 k 页的响应：
+    后面卡片的 data-index 依次前移）；`card_shift[id]` 把这张卡片下移若干像素（多列瀑布流：它可能比 data-index
+    更大的卡片更靠下；列表高度与加载时机仍按行数，下移后须落在后面页的行内）；可见区上下 `dom_margin` 像素内的卡片节点也在 DOM 中（card_diagnostic 读得到、visible_cards
+    不列出）。`search_overrides[k]` 依次替换目标会话第 k 页的响应：
     字符串为请求失败文本（requestfailed），字典为响应 JSON；被替换的页不算已加载，前端下次滚动会重发。
 
     浮层：`details[id]` 为 feed 的 note_card（默认 `detail_card(id)`）。`feed_overrides[id]` 依次替换每次点击：
@@ -384,6 +386,8 @@ class XhsFakeSite:
         self.view_rect: dict[str, float] | None = None
         self.cover_blocked: dict[str, int] = {}
         self.unrendered_ids: set[str] = set()
+        self.card_shift: dict[str, float] = {}
+        self.dom_margin = 0.0
         self.wheel_points: list[tuple[float, float]] = []
         self.session_counter = 0
         self.search_id = ""
@@ -583,6 +587,9 @@ class XhsFakeSite:
             "scroll_y": self.scroll_y,
         }
 
+    def card_top(self, index: int, note_id: str) -> float:
+        return self.list_origin() + (index // COLUMNS) * ROW_HEIGHT + self.card_shift.get(note_id, 0.0) - self.scroll_y
+
     def visible_cards(self) -> list[dict[str, Any]]:
         """列表可见区内的卡片几何；封面中心落在可见区外或被 cover_blocked 遮住时 cover_hit 为假。不改变状态。
 
@@ -591,7 +598,7 @@ class XhsFakeSite:
         view = self.view()
         cards = []
         for index, item in enumerate(self.rendered_items()):
-            top = self.list_origin() + (index // COLUMNS) * ROW_HEIGHT - self.scroll_y
+            top = self.card_top(index, item["id"])
             bottom = top + ROW_HEIGHT - 20
             visible = max(0, min(bottom, view["bottom"]) - max(top, view["top"]))
             if visible <= 0:
@@ -613,25 +620,30 @@ class XhsFakeSite:
         return cards
 
     def card_diagnostic(self, note_ids: list[str]) -> list[dict[str, Any]]:
+        """卡片节点读数：可见区上下 dom_margin 像素内的卡片在 DOM 中，位置相对列表可见区左上角。"""
         self.card_diagnostic_reads.append(list(note_ids))
-        cards = {card["note_id"]: card for card in self.visible_cards()}
+        view = self.view()
+        nodes = {}
+        for index, item in enumerate(self.rendered_items()):
+            top = self.card_top(index, item["id"])
+            if top + ROW_HEIGHT - 20 > view["top"] - self.dom_margin and top < view["bottom"] + self.dom_margin:
+                nodes[item["id"]] = (index, top, item.get("model_type") in (None, "note"))
         result = []
         for note_id in note_ids:
-            card = cards.get(note_id)
-            if card is None:
+            if note_id not in nodes:
                 result.append({"note_id": note_id, "nodes": 0})
                 continue
-            view = self.view()
+            index, top, has_cover = nodes[note_id]
             result.append(
                 {
                     "note_id": note_id,
                     "nodes": 1,
-                    "data_index": str(card["data_index"]),
-                    "has_cover": card["cover"] is not None,
-                    "cover_path": "/search_result" if card["cover"] is not None else None,
+                    "data_index": str(index),
+                    "has_cover": has_cover,
+                    "cover_path": "/search_result" if has_cover else None,
                     "card": "section.note-item",
-                    "first_child": "a.cover.mask" if card["cover"] is not None else "div.query-note-wrapper",
-                    "position": {"left": 0, "top": round(card["top"] - view["top"]), "width": 240, "height": 340},
+                    "first_child": "a.cover.mask" if has_cover else "div.query-note-wrapper",
+                    "position": {"left": 0, "top": round(top - view["top"]), "width": 240, "height": 340},
                 }
             )
         return result
