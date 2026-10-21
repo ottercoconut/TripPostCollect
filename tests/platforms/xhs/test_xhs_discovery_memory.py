@@ -301,6 +301,55 @@ async def test_overlay_records_pass_the_real_visit_gate(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_next_page_arriving_before_a_cross_page_duplicate_is_clicked_passes_the_real_gate(monkeypatch, tmp_path):
+    """#97 瀑布流：第 1 页的搜索结果停顿之后、点开跨页重复笔记 dup 之前，第 2 页已经送达。dup 登记在第 1 页，作为
+    第 1 页的结果点开；第 2 页在它自己第一张登记卡片之前停顿，真实门禁通过。"""
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, detail_ids, state_path, site = prepare_crawler(
+        monkeypatch, tmp_path, items=None, pages=[[note("p1-a"), note("dup")], [note("dup"), note("p2-a")]],
+    )
+    # 行为阶段不滚动，第 2 页只在第 1 页的搜索结果停顿之后送达。
+    crawler._run_human_behavior_on_primary_page = AsyncMock(return_value={"status": "completed"})
+    pause = crawler._guarded_pause
+
+    async def deliver_next_page_after_results_pause(stage, minimum, maximum):
+        seconds = await pause(stage, minimum, maximum)
+        if stage == "search_results" and len(site.loaded) == 1:
+            site.respond_page(2)
+        return seconds
+
+    crawler._guarded_pause = deliver_next_page_after_results_pause
+
+    await crawler.search()
+
+    assert detail_ids == ["p1-a", "dup", "p2-a"]
+    lines = ledger_lines(crawler)
+    pages = {
+        line["search_page"]: line for line in lines
+        if line["kind"] == "visit" and line["stage"] == "search_results" and line["is_target"]
+    }
+    clicks = {line["target"]["note_id"]: line["seq"] for line in lines if line.get("action") == "click_card"}
+    results_pauses = [line for line in lines if line["kind"] == "pause" and line["stage"] == "search_results"]
+    assert len(results_pauses) == 2
+    assert results_pauses[0]["seq"] < pages[2]["seq"] < clicks["dup"] < results_pauses[1]["start_seq"]
+    assert results_pauses[1]["seq"] < clicks["p2-a"]
+    refs = {record["note_id"]: record["content_visit_refs"] for record in crawler.records}
+    assert refs["dup"]["search_results"] == pages[1]["id"] and refs["p2-a"]["search_results"] == pages[2]["id"]
+
+    result = validate_content_visits(
+        crawler.records,
+        [crawler.capture.ledger.path],
+        platform="xhs",
+        mode="discovery",
+        manifests=[write_manifest(crawler, tmp_path / "image_manifest.jsonl")],
+        stop_event=last_stop(state_path),
+    )
+
+    assert result["problem_counts"] == {}
+    assert result["content_visit_ok"] is True and result["checked_records"] == 3
+
+
+@pytest.mark.asyncio
 async def test_author_tab_hold_is_drawn_per_open_and_tab_stays_until_projection(monkeypatch, tmp_path):
     """作者标签页每次打开抽一次 5–9 秒保留，从出现起计，记在 close_tab 的 target.hold_seconds；读到投影之前不关。
 

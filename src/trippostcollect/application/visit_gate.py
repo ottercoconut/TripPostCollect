@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -126,15 +127,49 @@ def _seq(line: Mapping[str, Any]) -> int:
 
 
 class _LedgerIndex:
-    def __init__(self, loaded: LoadedLedger) -> None:
+    def __init__(self, loaded: LoadedLedger, search_spec: StageSpec | None) -> None:
         self.loaded = loaded
         self.ledger_id = loaded.ledger_id
+        self.search_spec = search_spec
         self.ordered = sorted(loaded.lines, key=_seq)
         self.by_id = {line["id"]: line for line in loaded.lines}
         self.actions = [line for line in self.ordered if line["kind"] == "action"]
         self.visits = [line for line in self.ordered if line["kind"] == "visit"]
         self.pauses = [line for line in self.ordered if line["kind"] == "pause"]
         self.signals = [line for line in self.ordered if line["kind"] == "signal"]
+
+    @cached_property
+    def registrations(self) -> dict[tuple[tuple[str, str], str], str]:
+        """(搜索会话, 条目 id) → 登记访问 id，与扫描的登记一致：同一会话内每页只认首次送达，条目以首次出现的页为准。"""
+        found: dict[tuple[tuple[str, str], str], str] = {}
+        if self.search_spec is None:
+            return found
+        delivered: set[tuple[tuple[str, str], Any]] = set()
+        for visit in _target_search_visits(self, self.search_spec):
+            session = _session_key(visit)
+            if (session, visit.get("search_page")) in delivered:
+                continue
+            delivered.add((session, visit.get("search_page")))
+            for item_id in _search_item_types(visit):
+                found.setdefault((session, item_id), str(visit["id"]))
+        return found
+
+    def registered_at(self, visit: Mapping[str, Any], item_id: str) -> bool:
+        return self.registrations.get((_session_key(visit), item_id)) == visit["id"]
+
+    def first_registered_click(self, visit: Mapping[str, Any], kind: str) -> dict[str, Any] | None:
+        """本搜索访问之后第一次点击登记在本访问的条目。瀑布流下第 k 页未处理完时第 k+1 页已到，此后点开的跨页重复
+        条目登记在第 k 页、是第 k 页的结果，不算第 k+1 页的点击（#97）。"""
+        return next(
+            (
+                line
+                for line in self.actions
+                if _seq(line) > _seq(visit)
+                and line["action"] == kind
+                and self.registered_at(visit, str((line.get("target") or {}).get("note_id") or ""))
+            ),
+            None,
+        )
 
     def first_action(
         self,
@@ -199,6 +234,7 @@ def _load_indexes(
     report: _Report,
 ) -> dict[str, _LedgerIndex]:
     indexes: dict[str, _LedgerIndex] = {}
+    search_spec = VISIT_POLICIES[platform].stages[mode].get("search_results")
     for raw in sorted({str(Path(path)) for path in ledger_paths}):
         try:
             loaded = load_ledger(raw)
@@ -208,7 +244,7 @@ def _load_indexes(
         if loaded.platform != platform or loaded.mode != mode:
             report.fail("LEDGER", loaded.ledger_id)
             continue
-        index = _LedgerIndex(loaded)
+        index = _LedgerIndex(loaded, search_spec)
         known = indexes.get(index.ledger_id)
         if known is None:
             indexes[index.ledger_id] = index
@@ -320,7 +356,7 @@ def _check_record(
     detail_spec = policy.spec(mode, "note_detail")
     trigger_kind = str(detail_spec.trigger)
 
-    # R2 搜索访问（仅 discovery）。
+    # R2 搜索访问（仅 discovery）：是本篇在该搜索会话中的登记访问（必含该 ID）。
     search: dict[str, Any] | None = None
     if "search_results" in chain:
         search_index, search = resolved["search_results"]
@@ -329,7 +365,7 @@ def _check_record(
             _visit_matches(search, policy.spec(mode, "search_results"), "search_results")
             and search.get("status") == 200
             and search.get("is_target") is True
-            and note_id in types
+            and search_index.registered_at(search, note_id)
             and types[note_id] != "video"
         ):
             report.fail("R2", subject)
@@ -410,21 +446,11 @@ def _check_record(
     if not images_ok:
         report.fail("R5", subject)
 
-    # R6 节奏落点：搜索结果停顿、详情停顿与作者停顿各在对应动作之前。
+    # R6 节奏落点：搜索结果停顿在本访问之后、第一次点击登记在本访问的条目之前；详情停顿与作者停顿各在对应动作之前。
     pacing_ok = True
     if search is not None:
-        page_ids = set(_search_item_types(search))
-        first_click = next(
-            (
-                line
-                for line in detail_index.actions
-                if _seq(line) > _seq(search)
-                and line["action"] == trigger_kind
-                and str((line.get("target") or {}).get("note_id") or "") in page_ids
-            ),
-            None,
-        )
-        pacing_ok = first_click is not None and detail_index.has_pause(
+        first_click = search_index.first_registered_click(search, trigger_kind)
+        pacing_ok = first_click is not None and search_index.has_pause(
             "search_results", after=_seq(search), before=_seq(first_click)
         )
     detail_end = detail_index.first_action(DETAIL_PAUSE_END_ACTIONS, after=_seq(detail))

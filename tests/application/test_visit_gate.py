@@ -68,11 +68,11 @@ class Run:
 
     def search(self, page: int, items: list[tuple[str, str]], *, trigger: str | None = None,
                target: bool = True, has_more: bool = True, keyword_ok: bool = True,
-               session: str | None = None) -> str:
+               session: str | None = None, signature: str = SIGNATURE) -> str:
         visit = self.visit(
             stage="search_results", rule="xhs.search_notes", trigger=trigger, route="/search_result_ai",
             query_keys=["keyword", "source"], search_session=session or (self.session if target else "s-enter"),
-            filter_signature=SIGNATURE if target else "none", is_target=target, keyword_matches_target=keyword_ok,
+            filter_signature=signature if target else "none", is_target=target, keyword_matches_target=keyword_ok,
             search_page=page, has_more=has_more, items=[{"id": item, "type": kind} for item, kind in items],
         )
         if target and (session or self.session) == self.session:
@@ -349,6 +349,89 @@ def test_detail_pause_started_before_feed_does_not_count(tmp_path):
     run.action("close_overlay")
     result = check(run, [run.record("n1", "u1")], manifest(tmp_path / "m.jsonl", {"n1": 2}), stop={})
     assert result["problem_counts"] == {"R6": 1}
+
+
+def waterfall_run(tmp_path: Path, *, page_two_paused: bool) -> tuple[Run, list[dict], Path]:
+    """#97 瀑布流：第 1 页还没处理完，第 2 页已经送达。d1 同在两页、登记在第 1 页，第 2 页送达后才作为第 1 页的结果
+    点开；第 2 页的搜索结果停顿在它自己第一张登记卡片 n2 之前（`page_two_paused=False` 为漏掉）。"""
+    run = Run(tmp_path / "ledger.jsonl")
+    run.enter([("n1", "normal"), ("d1", "normal")])
+    run.behavior_stage()
+    run.note("n1", "u1")
+    run.search(2, [("d1", "normal"), ("n2", "normal")])
+    run.note("d1", "u2", first_page_note=False)
+    run.note("n2", "u3", first_page_note=page_two_paused)
+    records = [run.record("n1", "u1"), run.record("d1", "u2"), run.record("n2", "u3", search_page=2)]
+    return run, records, manifest(tmp_path / "m.jsonl", {"n1": 2, "d1": 2, "n2": 2})
+
+
+@pytest.mark.parametrize("page_two_paused", [True, False], ids=["paused", "missed"])
+def test_results_pause_is_due_before_the_first_click_registered_at_the_page(tmp_path, page_two_paused):
+    run, records, manifest_path = waterfall_run(tmp_path, page_two_paused=page_two_paused)
+    result = check(run, records, manifest_path, stop={})
+    if page_two_paused:
+        assert result["problem_counts"] == {} and result["content_visit_ok"] is True
+    else:
+        assert result["problem_counts"] == {"R6": 1}
+        assert result["sample_ids"] == ["R6:n2"]
+
+
+def test_record_must_reference_the_page_its_note_is_registered_at(tmp_path):
+    run, records, manifest_path = waterfall_run(tmp_path, page_two_paused=True)
+    records[1]["content_visit_refs"]["search_results"] = run.page_visits[2]
+    result = check(run, records, manifest_path, stop={})
+    assert result["problem_counts"] == {"R2": 1}
+    assert result["sample_ids"] == ["R2:d1"]
+
+
+def test_redelivered_page_keeps_the_registration_of_its_first_delivery(tmp_path):
+    """同一页重复送达不改登记：条目仍登记在首次送达，重复送达里新出现的条目也不登记（与扫描一致）。重复送达没有登记
+    任何条目，引用它的记录 R2 不通过，R6 的搜索结果停顿也找不到对应动作。"""
+    run = Run(tmp_path / "ledger.jsonl")
+    run.enter([("n1", "normal")])
+    run.behavior_stage()
+    first = run.search(2, [("n2", "normal")])
+    run.note("n1", "u1")
+    again = run.search(2, [("n2", "normal"), ("n3", "normal")])
+    run.note("n2", "u2")
+    run.note("n3", "u3", first_page_note=False)
+    manifest_path = manifest(tmp_path / "m.jsonl", {"n1": 2, "n2": 2, "n3": 2})
+
+    def record(note_id: str, user_id: str, search: str) -> dict:
+        found = run.record(note_id, user_id)
+        found["content_visit_refs"]["search_results"] = search
+        return found
+
+    registered = check(run, [run.record("n1", "u1"), record("n2", "u2", first)], manifest_path, stop={})
+    assert registered["content_visit_ok"] is True, registered
+    redelivered = check(
+        run, [run.record("n1", "u1"), record("n2", "u2", again), record("n3", "u3", again)], manifest_path, stop={},
+    )
+    assert redelivered["problem_counts"] == {"R2": 2, "R6": 2}
+
+
+@pytest.mark.parametrize("renewed", ["search_session", "filter_signature"])
+def test_registration_starts_over_in_each_search_session(tmp_path, renewed):
+    """重新搜索（新 search_id）或筛选签名不同即为新会话，各自从头登记：d1 在新会话第 1 页重新登记，引用它的记录通过；
+    新会话第 1 页的停顿在 d1 之前。"""
+    run = Run(tmp_path / "ledger.jsonl")
+    run.enter([("n1", "normal"), ("d1", "normal")])
+    run.behavior_stage()
+    run.note("n1", "u1")
+    original = run.page_visits[1]
+    enter = run.action("press_enter")
+    if renewed == "search_session":
+        visit = run.search(1, [("d1", "normal"), ("n2", "normal")], trigger=enter, session="s-renewed")
+    else:
+        visit = run.search(1, [("d1", "normal"), ("n2", "normal")], trigger=enter, signature=SIGNATURE + "-sorted")
+    run.note("d1", "u2")
+    run.note("n2", "u3", first_page_note=False)
+    records = [run.record("n1", "u1"), run.record("d1", "u2"), run.record("n2", "u3")]
+    records[0]["content_visit_refs"]["search_results"] = original
+    for record in records[1:]:
+        record["content_visit_refs"]["search_results"] = visit
+    result = check(run, records, manifest(tmp_path / "m.jsonl", {"n1": 2, "d1": 2, "n2": 2}), stop={})
+    assert result["content_visit_ok"] is True, result
 
 
 def test_detail_and_image_visits_are_referenced_once(tmp_path):
