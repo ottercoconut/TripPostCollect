@@ -376,6 +376,40 @@ def test_results_pause_is_due_before_the_first_click_registered_at_the_page(tmp_
         assert result["sample_ids"] == ["R6:n2"]
 
 
+@pytest.mark.parametrize("page_two_paused", [True, False], ids=["paused", "missed"])
+def test_results_pause_must_follow_the_last_click_before_the_first_registered_click(tmp_path, page_two_paused):
+    """第 2 页早于第 1 页的搜索结果停顿到达：第 1 页的停顿也在第 2 页访问与 n2 点击之间，但它早于 n1 的点击，
+    不算第 2 页的停顿；第 2 页须在 n1 之后、n2 之前另停一次。"""
+    run = Run(tmp_path / "ledger.jsonl")
+    run.enter([("n1", "normal")])
+    run.behavior_stage()
+    run.search(2, [("n2", "normal")])
+    run.note("n1", "u1")
+    run.note("n2", "u2", first_page_note=page_two_paused)
+    records = [run.record("n1", "u1"), run.record("n2", "u2", search_page=2)]
+    result = check(run, records, manifest(tmp_path / "m.jsonl", {"n1": 2, "n2": 2}), stop={})
+    if page_two_paused:
+        assert result["problem_counts"] == {} and result["content_visit_ok"] is True
+    else:
+        assert result["problem_counts"] == {"R6": 1}
+        assert result["sample_ids"] == ["R6:n2"]
+
+
+def test_results_pause_before_the_search_visit_does_not_count_after_an_earlier_click(tmp_path):
+    """对应动作之前的最后一次点卡片早于本访问时，下限仍是本访问：n1 之后、第 2 页送达之前的停顿不算。"""
+    run = Run(tmp_path / "ledger.jsonl")
+    run.enter([("n1", "normal")])
+    run.behavior_stage()
+    run.note("n1", "u1")
+    run.pause("search_results", "completed")
+    run.search(2, [("n2", "normal")])
+    run.note("n2", "u2", first_page_note=False)
+    records = [run.record("n1", "u1"), run.record("n2", "u2", search_page=2)]
+    result = check(run, records, manifest(tmp_path / "m.jsonl", {"n1": 2, "n2": 2}), stop={})
+    assert result["problem_counts"] == {"R6": 1}
+    assert result["sample_ids"] == ["R6:n2"]
+
+
 def test_record_must_reference_the_page_its_note_is_registered_at(tmp_path):
     run, records, manifest_path = waterfall_run(tmp_path, page_two_paused=True)
     records[1]["content_visit_refs"]["search_results"] = run.page_visits[2]

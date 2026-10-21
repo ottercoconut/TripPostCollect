@@ -446,13 +446,18 @@ def _check_record(
     if not images_ok:
         report.fail("R5", subject)
 
-    # R6 节奏落点：搜索结果停顿在本访问之后、第一次点击登记在本访问的条目之前；详情停顿与作者停顿各在对应动作之前。
+    # R6 节奏落点：搜索结果停顿在本访问及对应动作之前的最后一次点卡片之后、第一次点击登记在本访问的条目之前；
+    # 详情停顿与作者停顿各在对应动作之前。
     pacing_ok = True
     if search is not None:
         first_click = search_index.first_registered_click(search, trigger_kind)
-        pacing_ok = first_click is not None and search_index.has_pause(
-            "search_results", after=_seq(search), before=_seq(first_click)
-        )
+        if first_click is None:
+            pacing_ok = False
+        else:
+            # 第 k+1 页早于第 k 页的停顿到达时，第 k 页的停顿也在本访问之后；它早于第 k 页的点击，不是本页的停顿。
+            previous = search_index.last_action_before([trigger_kind], _seq(first_click))
+            after = max(_seq(search), _seq(previous) if previous is not None else 0)
+            pacing_ok = search_index.has_pause("search_results", after=after, before=_seq(first_click))
     detail_end = detail_index.first_action(DETAIL_PAUSE_END_ACTIONS, after=_seq(detail))
     pacing_ok = pacing_ok and detail_index.has_pause(
         "note_detail", after=_seq(detail), before=_seq(detail_end) if detail_end is not None else None
