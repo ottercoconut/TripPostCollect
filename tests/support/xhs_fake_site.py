@@ -204,8 +204,6 @@ def creator_projection(*, fans: str = "128") -> dict[str, Any]:
 class AuthorTab(FakePage):
     """作者标签页：地址路径为 /user/profile/<id>，页面状态投影由站点给出。"""
 
-    viewport_size = {"width": 1280, "height": 800}
-
     def __init__(self, site: "XhsFakeSite", user_id: str, url_user_id: str) -> None:
         super().__init__(f"https://www.xiaohongshu.com/user/profile/{url_user_id}?xsec_source=pc_note")
         self.site = site
@@ -245,11 +243,16 @@ class AuthorTab(FakePage):
 
 
 class _TabMouse:
+    """作者页不移动光标、不滚动（#98）；记录调用供断言。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
     async def move(self, *args: Any, **kwargs: Any) -> None:
-        return None
+        self.calls.append("move")
 
     async def wheel(self, *args: Any, **kwargs: Any) -> None:
-        return None
+        self.calls.append("wheel")
 
 
 # 搜索条目的 note_card.interact_info（操作人 2026-10-21 DevTools 实地结构）：四项计数为字符串，分享键为 shared_count
@@ -434,7 +437,7 @@ class XhsFakeSite:
         self.same_page_author: str | None = None
         self.page_history: list[str] = []
         self.page.go_back = self.go_back  # type: ignore[attr-defined]
-        # 作者页同页跳转时主页面也要做到达检查与小幅滚动。
+        # 主页面的光标动作需要视口尺寸；作者页同页跳转时主页面也要做到达检查与就绪等待。
         self.page.viewport_size = {"width": VIEW_WIDTH, "height": VIEW_HEIGHT}  # type: ignore[attr-defined]
         self.page.wait_for_timeout = self._noop  # type: ignore[attr-defined]
         self.page.wait_for_load_state = self._noop  # type: ignore[attr-defined]

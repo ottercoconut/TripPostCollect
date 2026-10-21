@@ -813,7 +813,7 @@ async def test_unit_fans_count_follows_downstream_rules_without_zero_fill(crawle
 @pytest.mark.asyncio
 async def test_login_during_readiness_uses_existing_primary_page_recovery(crawler):
     page = CreatorPage([None])
-    crawler.visible_markers = [{}, {}, {"login_required": True}]
+    crawler.visible_markers = [{}, {"login_required": True}]
     crawler._recover_creator_login_on_primary_page = AsyncMock(return_value={"fans": "1"})
 
     assert await open_with(crawler, page) == {"fans": "1"}
@@ -825,7 +825,7 @@ async def test_login_during_readiness_uses_existing_primary_page_recovery(crawle
 @pytest.mark.asyncio
 async def test_verification_during_readiness_keeps_existing_wait(crawler):
     page = CreatorPage([None])
-    crawler.visible_markers = [{}, {}, {"captcha_or_verify": True}]
+    crawler.visible_markers = [{}, {"captcha_or_verify": True}]
     crawler._wait_for_creator_profile_verification = AsyncMock(return_value={"fans": "2"})
 
     assert await open_with(crawler, page) == {"fans": "2"}
@@ -848,7 +848,7 @@ async def test_security_limit_during_readiness_stops_the_run(crawler, monkeypatc
 
     async def staged_inspect(current_page):
         calls["count"] += 1
-        if calls["count"] <= 2:
+        if calls["count"] <= 1:
             return "", {}
         return await inspect_state(current_page)
 
@@ -939,8 +939,8 @@ async def test_verification_wait_ends_on_author_mismatch_without_static_fallback
 @pytest.mark.asyncio
 async def test_captcha_on_first_check_enters_verification_before_accepting_runtime_data(crawler):
     page = CreatorPage([creator_state()], html=NEW_SET_BEFORE_USER)
-    # 到达、滚动检查干净；首轮投影已有粉丝，但接受前的检查出现验证码；验证轮询一次后完成。
-    crawler.visible_markers = [{}, {}, {"captcha_or_verify": True}, {"captcha_or_verify": True}, {}]
+    # 到达检查干净；首轮投影已有粉丝，但接受前的检查出现验证码；验证轮询一次后完成。
+    crawler.visible_markers = [{}, {"captcha_or_verify": True}, {"captcha_or_verify": True}, {}]
     entered = []
     original_wait = crawler._wait_for_creator_profile_verification
 
@@ -963,7 +963,7 @@ async def test_captcha_on_first_check_enters_verification_before_accepting_runti
 @pytest.mark.asyncio
 async def test_login_on_first_check_uses_recovery_even_with_ready_projection(crawler):
     page = CreatorPage([creator_state()])
-    crawler.visible_markers = [{}, {}, {"login_required": True}]
+    crawler.visible_markers = [{}, {"login_required": True}]
     crawler._recover_creator_login_on_primary_page = AsyncMock(return_value={"fans": "1"})
 
     assert await open_with(crawler, page) == {"fans": "1"}
@@ -984,7 +984,7 @@ async def test_lifecycle_failure_on_first_check_propagates(crawler, monkeypatch,
 
     async def inspect_state(current_page):
         calls["inspect"] += 1
-        if calls["inspect"] == 3 and isinstance(failure, TargetClosedError):
+        if calls["inspect"] == 2 and isinstance(failure, TargetClosedError):
             raise failure
         return "", {}
 
@@ -1005,7 +1005,7 @@ async def test_lifecycle_failure_on_first_check_propagates(crawler, monkeypatch,
 @pytest.mark.asyncio
 async def test_readiness_and_verification_never_recurse(crawler):
     page = CreatorPage([None, None, creator_state()], html=NEW_SET_BEFORE_USER)
-    crawler.visible_markers = [{}, {}, {}, {"captcha_or_verify": True}, {"captcha_or_verify": True}, {}]
+    crawler.visible_markers = [{}, {}, {"captcha_or_verify": True}, {"captcha_or_verify": True}, {}]
     depth = {"read": 0, "wait": 0, "max_read": 0, "max_wait": 0, "read_calls": 0, "wait_calls": 0}
     original_read = crawler._read_creator_profile_from_page
     original_wait = crawler._wait_for_creator_profile_verification

@@ -50,7 +50,6 @@ from trippostcollect.platforms.xhs.parser import (
     read_creator_runtime_projection,
     xhs_creator_projection_spec,
 )
-from trippostcollect.runtime.human_pointer import pointer_for
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -277,7 +276,7 @@ class XhsAuthorMixin:
             await self.context_page.go_back(wait_until="commit")
 
     async def _read_author_tab(self, page: Page, user_id: str) -> Optional[Dict]:
-        """作者页到达检查与小幅滚动后读取投影；登录界面转主页面恢复，验证界面进入作者页验证等待。"""
+        """作者页到达检查后读取投影；登录界面转主页面恢复，验证界面进入作者页验证等待。"""
         await page.wait_for_timeout(random.randint(1_200, 3_000))
 
         text_sample, markers = await inspect_visible_page_state(page)
@@ -285,27 +284,6 @@ class XhsAuthorMixin:
             page,
             user_id=str(user_id),
             stage="arrival",
-            visible_text=text_sample,
-            visible_markers=markers,
-        )
-        if markers.get("login_required"):
-            return await self._recover_creator_login_on_primary_page(user_id)
-        if markers.get("captcha_or_verify"):
-            return await self._wait_for_creator_profile_verification(page, user_id)
-        pointer = pointer_for(page)
-        viewport = await pointer.viewport()
-        await pointer.move_to(
-            random.randint(80, max(81, int(viewport.width) - 80)),
-            random.randint(80, max(81, int(viewport.height) - 80)),
-        )
-        await pointer.scroll(random.randint(180, 460))
-        await page.wait_for_timeout(random.randint(500, 1_500))
-
-        text_sample, markers = await inspect_visible_page_state(page)
-        await self._raise_for_creator_page_terminal(
-            page,
-            user_id=str(user_id),
-            stage="post_scroll",
             visible_text=text_sample,
             visible_markers=markers,
         )
