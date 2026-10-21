@@ -285,8 +285,7 @@ Chrome 由共享 CDP 启动器（`runtime/browser_launcher.py`）自启：
   中的比例）、`approach_ms`、`moves`、`settle_ms`、`hold_ms`，本页第一次时另有 `entered=true`；扫描 `scroll`
   动作带 `pointer.gestures`（每个手势的 `events`、`delta_y`、`delta_x`）。这些都在执行前计划好、随动作行写出；
   筛选面板因悬停已打开而没有按下时，`panel_open` 行的 `pointer` 仍是计划值（见“搜索与全量扫描”）。
-  行为证据的 `wheel_scroll` 事件带同样的 `gestures`，互动另记 `wheel_into_view` 与 `pointer_click`。作者页的
-  一次小幅滚动不写记录。
+  行为证据的 `wheel_scroll` 事件带同样的 `gestures`，互动另记 `wheel_into_view` 与 `pointer_click`。
 
 显式互动在一轮最多一次：
 
@@ -619,7 +618,7 @@ child `summary.json` 的
   全面提速，#79），读到投影之前不关；读完时已过保留期则立即关闭，否则等到期满。关闭前写 `close_tab`，
   `target.hold_seconds` 为本次抽到的保留秒数，供实测统计；随后主页面置前。repair 中点击后主页面同页
   跳转到作者页时，读完投影写 `go_back` 返回笔记页。
-- 作者页先做到达与小幅滚动检查，再进入有界就绪等待，预算 10 秒。`domcontentloaded` 只是前置条件，
+- 作者页先做到达检查，不移动光标、不滚动，再进入有界就绪等待，预算 10 秒。`domcontentloaded` 只是前置条件，
   超时记 `page_not_ready` 后继续。随后经页面取数通道读取状态投影 `creator_page_data`（接受时写作者
   访问），只读页面已执行的 `window.__INITIAL_STATE__.user.userPageData`。只有自有数据属性
   `__v_isRef === true` 的节点才按 Vue ref 解包；脚本按白名单只复制标量字段，不序列化整份状态，也不
@@ -652,7 +651,7 @@ child `summary.json` 的
   `tags[].icon`），在记录里会缺失。
 - `creator_profile_parse` 导航诊断在就绪等待结束时写一次（`outcome` 取 `ok` 或原因类别），就绪等待中
   转入登录恢复时写 `ok_login_recovery` 或 `login_recovery_empty`，验证等待中读到作者资料且复查通过时写
-  `ok`，判定作者不一致时写 `creator_mismatch`。到达或滚动检查直接转入登录恢复、验证等待因人工预算耗尽
+  `ok`，判定作者不一致时写 `creator_mismatch`。到达检查直接转入登录恢复、验证等待因人工预算耗尽
   而抛错、验证等待中转入登录恢复和复查时验证重现，都不写。
 - 失败时 `candidate_skipped.error_code=creator_profile_unavailable`，`detail` 为
   `creator_profile_failed:<原因>`（多个原因以逗号连接），原因只含类别：

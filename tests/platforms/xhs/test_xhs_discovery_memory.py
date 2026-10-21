@@ -250,6 +250,7 @@ async def test_overlay_records_pass_the_real_visit_gate(monkeypatch, tmp_path):
     assert detail_ids == ["p1-a", "p1-b", "p2-a"]
     assert len(site.author_tabs) == 2  # 同一作者只点一次
     assert all(tab.closed for tab in site.author_tabs)
+    assert all(not tab.mouse.calls for tab in site.author_tabs)  # 作者页不移动光标、不滚动（#98）
     records = crawler.records
     assert [record["note_id"] for record in records] == ["p1-a", "p1-b", "p2-a"]
     refs = {record["note_id"]: record["content_visit_refs"] for record in records}
