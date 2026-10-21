@@ -12,17 +12,20 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from trippostcollect.scheduler.discovery import query_fingerprint
+from trippostcollect.xhs.engagement import COUNT_RULE
 from trippostcollect.xhs.search_target import target_search_fingerprint_params
 
 
 def xhs_query_fingerprint(target: Mapping[str, Any]) -> str:
-    # 目标排序与类型并入指纹：来源查询参数改变须形成新记忆。
+    """来源查询参数或候选判定规则改变，须形成新记忆：目标排序与类型（#71）和计数判定规则（#94，feed 空串经登记所用
+    搜索条目确认为 0）都并入指纹。新指纹首轮不续旧的未完成累计；旧指纹 seen 中未入库的笔记按新规则重新判定一次。"""
     return query_fingerprint(
         "xhs",
         str(target["keyword"]),
         {
             "target_key": str(target["target_key"]),
             **target_search_fingerprint_params(),
+            "count_rule": COUNT_RULE,
         },
     )
 

@@ -498,9 +498,12 @@ child `summary.json` 的
 - 地址栏里的关键词经两次编码；行为门禁的 `target_url_ok` 对地址逐层解码（最多 3 层），任一层含关键词
   即为真，通用平台单次编码的结果不变。“真实关键词页”另由账本证明：目标会话第 1 页的
   `keyword_matches_target=true`。
-- 查询指纹并入目标排序与类型的语义标签（`search_sort=general`、`search_note_type=image`）。升级后首轮
+- 来源查询参数或候选判定规则改变，都须形成新的发现记忆。查询指纹并入目标排序与类型的语义标签
+  （`search_sort=general`、`search_note_type=image`，#71）和计数判定规则的语义标签
+  `count_rule=feed_empty_search_zero`（#94：feed 空串经登记所用搜索条目确认为 0，见“单篇处理”）。后者的原因：
+  规则改变前判无效的笔记已随批次写进账号 seen，不换指纹，全量扫描会直接滑过它们，新规则永远用不上。升级后首轮
   使用新指纹：dry-run 显示 `checkpoint_found=false`；已入库笔记照常滑过；旧指纹 seen 中未入库的 ID 重新
-  判定一次；旧的未完成累计不再续上；旧 checkpoint 与 seen 行保留作审计；升级前不需要先跑完旧轮次。
+  判定一次；旧的未完成累计不再续上（不交给 child）；旧 checkpoint 与 seen 行保留作审计；升级前不需要先跑完旧轮次。
 - 每轮从目标会话顶部全量滚到末页 `has_more=false`，不保存深层位置，也没有顶部刷新。按 `data-index`
   顺序处理列表可见区内的卡片：数据库、账号 seen、累计摘要和本轮已决定的 ID 直接滑过；搜索项为视频的在
   点击前记决定；其余未知图文在可点击时就地点开。可点击指封面中心在可点击带内（列表可见区顶部加其高度

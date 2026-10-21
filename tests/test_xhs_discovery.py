@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
+from importlib import import_module
 from pathlib import Path
 
 import pytest
@@ -11,14 +13,21 @@ import pytest
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.scheduler.discovery import query_fingerprint
 from trippostcollect.xhs import discovery as xhs_discovery
+from trippostcollect.xhs.config import load_pool_config, load_target
 from trippostcollect.xhs.discovery import (
     commit_child_discovery,
     load_checkpoint,
     resolve_discovery_plan,
     save_checkpoint,
+    save_seen_candidates,
     update_campaign,
     xhs_query_fingerprint,
 )
+from trippostcollect.xhs.search_target import target_search_fingerprint_params
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 
 
 def target(**overrides: object) -> dict[str, object]:
@@ -45,21 +54,101 @@ def prepare_connection(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def test_query_fingerprint_tracks_source_and_target_search_definition(monkeypatch) -> None:
+def before_count_rule_fingerprint() -> str:
+    """#94 计数判定规则并入指纹之前（#71 起）的取值。"""
+    return query_fingerprint(
+        "xhs", "青岛旅游", {"target_key": "qingdao_travel", **target_search_fingerprint_params()},
+    )
+
+
+def test_query_fingerprint_tracks_source_target_search_definition_and_count_rule(monkeypatch) -> None:
     base = target()
     changed_source = target(target_key="qingdao_food")
     legacy = query_fingerprint("xhs", "青岛旅游", {"target_key": "qingdao_travel"})
 
     assert xhs_query_fingerprint(base) != xhs_query_fingerprint(changed_source)
-    # 目标排序与类型并入指纹：与旧指纹不同，改变目标定义即形成新记忆。
+    # 目标排序与类型、计数判定规则并入指纹：与两代旧指纹都不同，改变任一项即形成新记忆。
     assert xhs_query_fingerprint(base) != legacy
+    assert xhs_query_fingerprint(base) != before_count_rule_fingerprint()
     original = xhs_query_fingerprint(base)
+    monkeypatch.setattr(xhs_discovery, "COUNT_RULE", "another_rule")
+    assert xhs_query_fingerprint(base) != original
+    monkeypatch.undo()
     monkeypatch.setattr(
         xhs_discovery,
         "target_search_fingerprint_params",
         lambda: {"search_sort": "general", "search_note_type": "video"},
     )
     assert xhs_query_fingerprint(base) != original
+
+
+def test_count_rule_upgrade_dry_run_starts_new_memory_and_leaves_the_old_campaign(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#94 规则改变后首轮：旧指纹下有未完成累计（批次摘要 status=incomplete）与 seen，新指纹 dry-run 显示
+    checkpoint_found=false；不报错、不要求先跑完旧轮次，不把旧累计交给 child；旧 checkpoint 与 seen 行原样保留。"""
+    xhs_runner = import_module("xhs_runner")
+    db_path = tmp_path / "xhs.sqlite"
+    conn = prepare_connection(db_path)
+    old = before_count_rule_fingerprint()
+    old_summary = tmp_path / "batch-000002.summary.json"
+    old_summary.write_text(
+        json.dumps({
+            "import_completion_met": False,
+            "records": [{"platform": "xhs", "status": "incomplete", "ok": False, "output": {}}],
+        }),
+        encoding="utf-8",
+    )
+    save_checkpoint(
+        conn, target_key="qingdao_travel", account_id="xhs-a01", keyword="青岛旅游", query_fingerprint_value=old,
+        source_has_more=True, source_exhausted=False, last_batch_complete=True, last_stop_reason="continue",
+        last_run_id="round-8",
+    )
+    update_campaign(
+        conn, target_key="qingdao_travel", account_id="xhs-a01", query_fingerprint_value=old,
+        summary_path=str(old_summary), candidate_count=389,
+    )
+    save_seen_candidates(
+        conn, target_key="qingdao_travel", account_id="xhs-a01", query_fingerprint_value=old,
+        platform_post_ids=["blank-count-note", "valid-note"], run_id="round-8",
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(xhs_runner, "XHS_RUNTIME_ROOT", tmp_path / "runtime")
+    monkeypatch.setattr(xhs_runner, "XHS_EXECUTION_STATE_ROOT", tmp_path / "states")
+    monkeypatch.setattr(
+        sys, "argv",
+        ["xhs_runner.py", "--target-key", "qingdao_travel", "--account-id", "xhs-a01", "--db", str(db_path),
+         "--dry-run"],
+    )
+
+    assert xhs_runner._run_main(xhs_runner.parse_args()) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    discovery = output["plan"]["discovery"]
+    assert discovery["query_fingerprint"] == xhs_query_fingerprint(target()) != old
+    assert discovery["checkpoint_found"] is False and discovery["checkpoint_before"] is None
+    assert (discovery["last_status"], discovery["campaign_summary_path"]) == ("", "")
+    assert discovery["campaign_visit_ledgers"] == [] and discovery["seen_candidate_count"] == 0
+    # 旧累计不进冻结输入，也不交给 child。
+    assert str(old_summary) not in Path(output["state"]).read_text(encoding="utf-8")
+    command = xhs_runner.build_child_command(
+        target=load_target("qingdao_travel", xhs_runner.XHS_TARGET_CONFIG),
+        pool=load_pool_config(xhs_runner.XHS_POOL_CONFIG), account={"account_id": "xhs-a01"},
+        profile_dir=tmp_path / "profile", db_path=db_path, output_root=tmp_path / "output", no_import=False,
+        post_interaction="none", discovery=discovery,
+    )
+    assert "--resume-summary" not in command
+    assert command[command.index("--xhs-discovery-query-fingerprint") + 1] == discovery["query_fingerprint"]
+    # 旧指纹的 checkpoint、累计指针与 seen 行原样保留作审计。
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        kept = load_checkpoint(conn, target_key="qingdao_travel", account_id="xhs-a01", query_fingerprint_value=old)
+        assert kept is not None and kept["last_summary_path"] == str(old_summary)
+        assert {row[0] for row in conn.execute("SELECT query_fingerprint FROM xhs_discovery_checkpoints")} == {old}
+        assert conn.execute(
+            "SELECT COUNT(*) FROM xhs_discovery_seen_candidates WHERE query_fingerprint=?", (old,),
+        ).fetchone()[0] == 2
 
 
 def test_checkpoint_isolated_per_account_and_resolves_campaign(tmp_path: Path) -> None:

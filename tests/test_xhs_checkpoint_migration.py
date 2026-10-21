@@ -107,7 +107,7 @@ def test_migration_is_idempotent(tmp_path):
 
 
 def test_old_fingerprint_memory_is_kept_but_not_reused_by_the_full_scan_target(tmp_path):
-    """目标排序与类型并入指纹：升级后首轮落在新记忆上，旧指纹的行原样保留供审计。"""
+    """目标排序与类型（#71）、计数判定规则（#94）并入指纹：升级后首轮落在新记忆上，旧指纹的行原样保留供审计。"""
     path = tmp_path / "control.sqlite"
     _pre_migration_database(path)
     conn = _open_control_db(path)

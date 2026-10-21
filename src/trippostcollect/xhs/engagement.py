@@ -91,6 +91,11 @@ def search_source(
     }
 
 
+# 计数判定规则的语义标签，并入查询指纹（`xhs.discovery.xhs_query_fingerprint`）：规则改变时改标签以形成新的发现记忆，
+# 旧规则下判无效、未入库的笔记才会重新判定（账号 seen 按指纹隔离）。
+COUNT_RULE = "feed_empty_search_zero"
+
+
 def search_zero_keys(interact: Any, search: Mapping[str, Any] | None) -> tuple[str, ...]:
     """按规则记为 0 的计数键：feed 原值为空串、登记所用搜索条目同一项明确为 0（类别 zero）。四项同一规则、逐项
     判断；feed 为数字（含 "0"）、null 或缺键，搜索为非零数字、空串、null 或缺键，或没有搜索来源时都不算。"""
