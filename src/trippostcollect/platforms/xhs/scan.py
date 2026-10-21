@@ -135,6 +135,8 @@ class SearchItem:
     xsec_source: str
     card_type: str
     position: int
+    # #94 取证：本条目 interact_info 的四项计数原值（搜索键 → 原值，只含出现的键），只留在内存中。
+    counts: dict[str, Any] = field(compare=False)
 
 
 @dataclass(frozen=True)
@@ -174,6 +176,7 @@ class SearchPage:
     session: SearchSession
     page: int
     seq: int
+    observed_at: str
     visit_id: str
     has_more: Optional[bool]
     raw_count: int
@@ -874,6 +877,7 @@ class XhsScanMixin:
                 xsec_source=item["xsec_source"],
                 card_type=item["type"],
                 position=item["position"],
+                counts=item["counts"],
             )
             for item in search_items_from_response(captured.json)
         )
@@ -932,6 +936,7 @@ class XhsScanMixin:
             session=session,
             page=page_no,
             seq=captured.seq,
+            observed_at=captured.observed_at,
             visit_id=visit_id,
             has_more=has_more,
             raw_count=len(raw_items),

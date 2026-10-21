@@ -252,12 +252,21 @@ class _TabMouse:
         return None
 
 
-def note(note_id: str, *, card_type: str = "normal") -> dict[str, Any]:
+# 搜索条目的 note_card.interact_info（操作人 2026-10-21 DevTools 实地结构）：四项计数为字符串，分享键为 shared_count
+# （feed 为 share_count），另有布尔 liked、collected。默认与 detail_card 的 feed 计数相同。
+SEARCH_INTERACT = {
+    "liked": False, "liked_count": "1", "collected": False, "collected_count": "2", "comment_count": "3",
+    "shared_count": "4",
+}
+
+
+def note(note_id: str, *, card_type: str = "normal", interact: dict[str, Any] | None = None) -> dict[str, Any]:
+    """搜索响应中的笔记条目；`interact` 整体替换默认的 interact_info（缺键即不存在）。"""
     return {
         "id": note_id,
         "model_type": "note",
         "xsec_token": f"token-{note_id}",
-        "note_card": {"type": card_type},
+        "note_card": {"type": card_type, "interact_info": dict(SEARCH_INTERACT if interact is None else interact)},
     }
 
 

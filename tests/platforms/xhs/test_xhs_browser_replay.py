@@ -505,16 +505,29 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     assert_pointer_events_match_the_sample(pointer_events, crawler)
 
     # #94：浮层底部互动栏与评论区按实地结构读数；评论区里评论的点赞（同为 .like-wrapper span.count、在互动栏之前）
-    # 不被读到。
+    # 不被读到。搜索一侧为登记卡片所用的目标会话条目（分享键 shared_count），页码为笔记所在页。
     lines = engagement_lines(tmp_path)
     assert sorted(lines) == sorted(images)
-    for line in lines.values():
+    for note_id, line in lines.items():
         assert (line["mode"], line["read"], line["bar"], line["left"]) == ("discovery", "ok", True, True)
+        assert (line["search"]["source"], line["search"]["page"]) == ("search_results", int(note_id[1]))
+        assert line["search"]["search_seq"] < line["search"]["feed_seq"] and line["search"]["lag_seconds"] >= 0
         assert line["counts"] == {
-            "liked_count": {"feed": "number", "feed_value": 1, "page": "number", "page_value": 1},
-            "collected_count": {"feed": "number", "feed_value": 2, "page": "number", "page_value": 2},
-            "comment_count": {"feed": "number", "feed_value": 3, "page": "number", "page_value": 3},
-            "share_count": {"feed": "number", "feed_value": 4, "page": "icon_only"},
+            "liked_count": {
+                "feed": "number", "feed_value": 1, "search": "number", "search_value": 1, "page": "number",
+                "page_value": 1,
+            },
+            "collected_count": {
+                "feed": "number", "feed_value": 2, "search": "number", "search_value": 2, "page": "number",
+                "page_value": 2,
+            },
+            "comment_count": {
+                "feed": "number", "feed_value": 3, "search": "number", "search_value": 3, "page": "number",
+                "page_value": 3,
+            },
+            "share_count": {
+                "feed": "number", "feed_value": 4, "search": "number", "search_value": 4, "page": "icon_only",
+            },
         }
         assert line["comments"] == {"section": "total", "total": 3, "container": True, "empty_state": False}
 
@@ -585,19 +598,28 @@ async def test_note_engagement_script_reads_the_field_structure(tmp_path):
     }
     assert reads["hidden"] == {"view_visible": False}
     feed = {"liked_count": "", "collected_count": "", "comment_count": "", "share_count": ""}
+    # 这里只验页面读数，没有搜索来源（搜索一侧记 no_source）。
     zero = engagement_observation("zero", mode="discovery", interact=feed, page=reads["zero"])
     assert zero["counts"] == {
-        "liked_count": {"feed": "empty_string", "page": "empty"},
-        "collected_count": {"feed": "empty_string", "page": "label"},
-        "comment_count": {"feed": "empty_string", "page": "label"},
-        "share_count": {"feed": "empty_string", "page": "icon_only"},
+        "liked_count": {"feed": "empty_string", "search": "no_source", "page": "empty"},
+        "collected_count": {"feed": "empty_string", "search": "no_source", "page": "label"},
+        "comment_count": {"feed": "empty_string", "search": "no_source", "page": "label"},
+        "share_count": {"feed": "empty_string", "search": "no_source", "page": "icon_only"},
     }
     assert zero["comments"] == {"section": "empty_state", "container": True, "empty_state": True}
     missing = engagement_observation("missing", mode="discovery", interact=feed, page=reads["missing"])
-    assert missing["counts"]["liked_count"] == {"feed": "empty_string", "page": "number", "page_value": 7}
-    assert missing["counts"]["collected_count"] == {"feed": "empty_string", "page": "absent", "matches": 0, "wrappers": 1}
-    assert missing["counts"]["comment_count"] == {"feed": "empty_string", "page": "absent", "matches": 0, "wrappers": 1}
-    assert missing["counts"]["share_count"] == {"feed": "empty_string", "page": "absent", "matches": 0, "wrappers": 0}
+    assert missing["counts"]["liked_count"] == {
+        "feed": "empty_string", "search": "no_source", "page": "number", "page_value": 7,
+    }
+    assert missing["counts"]["collected_count"] == {
+        "feed": "empty_string", "search": "no_source", "page": "absent", "matches": 0, "wrappers": 1,
+    }
+    assert missing["counts"]["comment_count"] == {
+        "feed": "empty_string", "search": "no_source", "page": "absent", "matches": 0, "wrappers": 1,
+    }
+    assert missing["counts"]["share_count"] == {
+        "feed": "empty_string", "search": "no_source", "page": "absent", "matches": 0, "wrappers": 0,
+    }
     assert missing["comments"] == {"section": "not_rendered", "container": False, "empty_state": False}
     hidden = engagement_observation("hidden", mode="discovery", interact=feed, page=reads["hidden"])
     assert hidden["read"] == "view_missing" and hidden["comments"] == {"section": "unread"}

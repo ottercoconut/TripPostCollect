@@ -34,6 +34,7 @@ from trippostcollect.records.formal import parse_int
 from trippostcollect.records.identity import platform_nickname, platform_user_id
 from trippostcollect.records.sanitization import AUTHOR_AVATAR_KEYS, XHS_SERIALIZED_PROFILE_AVATAR_PATHS
 from trippostcollect.runtime.helpers import extract_url_params_to_dict, normalize_image_url
+from trippostcollect.xhs.engagement import search_counts
 
 
 XHS_STABLE_PATH_MARKERS = ("/notes_pre_post/", "/notes_post/", "/notes/")
@@ -41,7 +42,7 @@ XHS_STABLE_PATH_MARKERS = ("/notes_pre_post/", "/notes_post/", "/notes/")
 
 def search_items_from_response(payload: Any) -> List[Dict[str, Any]]:
     """搜索响应中的笔记项（R1：只取 model_type=note，热搜词条等忽略）：id、xsec_token、xsec_source、
-    卡片类型（note_card.type：normal / video / 缺失为空）与页内序号。"""
+    卡片类型（note_card.type：normal / video / 缺失为空）、页内序号与 #94 取证用的四项计数原值。"""
     data = payload.get("data") if isinstance(payload, dict) else None
     raw_items = data.get("items") if isinstance(data, dict) else None
     items: List[Dict[str, Any]] = []
@@ -59,6 +60,7 @@ def search_items_from_response(payload: Any) -> List[Dict[str, Any]]:
                 "xsec_source": str(item.get("xsec_source") or "pc_search"),
                 "type": str(note_card.get("type") or ""),
                 "position": position,
+                "counts": search_counts(note_card.get("interact_info")),
             }
         )
     return items

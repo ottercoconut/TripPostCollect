@@ -50,6 +50,7 @@ from trippostcollect.xhs.engagement import (
     comments_pending,
     engagement_evidence_path,
     engagement_observation,
+    search_source,
 )
 
 logger = logging.getLogger("MediaCrawler")
@@ -251,7 +252,12 @@ class XhsOverlayMixin:
         await self._wait_overlay(lambda state: bool(state.get("content_visible")), XHS_OVERLAY_CLOSE_SECONDS)
         await self._guarded_pause("note_detail", *XHS_NOTE_DETAIL_PAUSE_SECONDS)
         images = await self._collect_note_images(note_id, run.window, assets) if assets else {}
-        await self._record_engagement_observation(note_id, note_card, mode="discovery")
+        # 登记本篇卡片所用的搜索条目（同一会话内以首次出现的页为准，重复送达不改登记）。
+        search = search_source(
+            item.counts, page=search_page.page, search_seq=search_page.seq, search_at=search_page.observed_at,
+            feed_seq=captured.seq, feed_at=captured.observed_at,
+        )
+        await self._record_engagement_observation(note_id, note_card, mode="discovery", search=search)
 
         creator: dict[str, Any] = {}
         if note.user_id:
@@ -390,15 +396,17 @@ class XhsOverlayMixin:
                 return
         raise PlatformRuntimeError("XHS note overlay did not close", code="xhs_overlay_close_failed")
 
-    async def _record_engagement_observation(self, note_id: str, note_card: dict[str, Any], *, mode: str) -> None:
-        """#94 取证：读互动栏与评论区，逐篇追加到行为证据同目录的 engagement 证据；只取证，不影响本篇的处理与判定，
-        读数失败只记失败类别。"""
+    async def _record_engagement_observation(
+        self, note_id: str, note_card: dict[str, Any], *, mode: str, search: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """#94 取证：读互动栏与评论区，连同登记所用搜索条目的计数（`search`，repair 没有）逐篇追加到行为证据同目录的
+        engagement 证据；只取证，不影响本篇的处理与判定，读数失败只记失败类别。"""
         evidence_path = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()
         if not evidence_path:
             return
         page, failure = await self._read_note_engagement()
         line = engagement_observation(
-            note_id, mode=mode, interact=note_card.get("interact_info"), page=page, failure=failure,
+            note_id, mode=mode, interact=note_card.get("interact_info"), page=page, search=search, failure=failure,
         )
         try:
             append_engagement_observation(engagement_evidence_path(evidence_path), line)

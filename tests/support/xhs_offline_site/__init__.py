@@ -19,7 +19,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from support.stable_png import solid_png
-from support.xhs_fake_site import TARGET_FILTERS, creator_projection, detail_card, image_url
+from support.xhs_fake_site import SEARCH_INTERACT, TARGET_FILTERS, creator_projection, detail_card, image_url
 from trippostcollect.xhs.search_target import is_target_search
 
 SITE_DIR = Path(__file__).resolve().parent
@@ -54,7 +54,8 @@ def cover_url(note_id: str) -> str:
 
 
 def search_item(note_id: str, *, card_type: str = "normal") -> dict[str, Any]:
-    """搜索响应中的笔记项：cover.url_pre 为卡片缩略图，cover.url_default 即正文首图（浮层先载）。"""
+    """搜索响应中的笔记项：cover.url_pre 为卡片缩略图，cover.url_default 即正文首图（浮层先载）；interact_info 同假站点
+    默认值（#94）。"""
     return {
         "id": note_id,
         "model_type": "note",
@@ -63,6 +64,7 @@ def search_item(note_id: str, *, card_type: str = "normal") -> dict[str, Any]:
             "type": card_type,
             "display_title": f"笔记 {note_id}",
             "cover": {"url_pre": cover_url(note_id), "url_default": image_url(note_id, 0)},
+            "interact_info": dict(SEARCH_INTERACT),
         },
     }
 
