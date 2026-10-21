@@ -41,6 +41,7 @@ from trippostcollect.platforms.xhs.parser import (
     note_card_problems,
 )
 from trippostcollect.platforms.xhs.scan import SearchItem, SearchPage, XhsScanInterrupted
+from trippostcollect.records.formal import INTERACT_COUNT_EVIDENCE_FIELD
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.image_retry import is_runtime_blocking_image_error
 from trippostcollect.runtime.page_capture import CaptureFailure, CapturedResponse, ImageWindow
@@ -51,6 +52,7 @@ from trippostcollect.xhs.engagement import (
     engagement_evidence_path,
     engagement_observation,
     search_source,
+    search_zero_evidence,
 )
 
 logger = logging.getLogger("MediaCrawler")
@@ -279,6 +281,12 @@ class XhsOverlayMixin:
             "content_detail_status": "detail_observed",
             "content_detail_source": "note_detail",
         }
+        # #94（用户 2026-10-21 决定）：feed 空串、登记所用搜索条目同一项明确为 0 的计数记为 "0" 并写来源说明；
+        # 换一份 interact_info，不改截获到的 feed。
+        zero_evidence = search_zero_evidence(note_card.get("interact_info"), search, search_visit=search_page.visit_id)
+        if zero_evidence:
+            note_detail["interact_info"] = {**note_card["interact_info"], **dict.fromkeys(zero_evidence, "0")}
+            note_detail[INTERACT_COUNT_EVIDENCE_FIELD] = zero_evidence
         if creator:
             note_detail["creator_profile"] = creator
         valid = self._note_fields_valid(note_id, note_detail)
@@ -430,7 +438,8 @@ class XhsOverlayMixin:
         return page, ""
 
     def _note_fields_valid(self, note_id: str, note_detail: dict[str, Any]) -> bool:
-        """有效条件与原详情路径一致：正文、时间、作者、图片、粉丝观察与四个互动数。"""
+        """有效条件与原详情路径一致：正文、时间、作者、图片、粉丝观察与四个互动数。互动数读 `note_detail`：全量扫描中
+        feed 空串经搜索结果确认为 0 的项已记为 "0"（#94），其余空串仍算缺失。"""
         user = note_detail.get("user") or {}
         interact = note_detail.get("interact_info") or {}
         creator = note_detail.get("creator_profile") or {}

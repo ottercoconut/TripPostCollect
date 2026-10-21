@@ -7,7 +7,7 @@
 |---|---|---|---|---|---|---|---|---|
 | B站 article | `article_view_api` 详情正文 | 详情观察后的 `image_urls` | 当前会话 staging → manifest → `data/media`；搜索预览/封面/头像排除 | 结构化 | ID/昵称 | 作者关系统计 | 赞/评/浏览 | 正常正式入口使用详情实现；历史完整性事件已完成修复与清理 |
 | 微博 | `search_mblog_complete` / `mobile_detail` | `mblog.pics` → `image_list` | 当前会话 staging → manifest → `data/media`；头像/封面排除 | 结构化 | ID/昵称 | `mblog.user` | 赞/评/转 | 长文详情重试耗尽后记录并跳过，禁止保存截断正文 |
-| 小红书 | `note_detail` 非空 `desc` | 笔记详情 `image_list` | 每个图片对象选择一个正文 URL，staging → manifest → `data/media`；头像/视频排除 | 结构化 | ID/昵称/主页 | 浮层点击打开的作者页页面状态 | 赞/藏/评/分享 | 详情或作者补全重试耗尽后记录并跳过 |
+| 小红书 | `note_detail` 非空 `desc` | 笔记详情 `image_list` | 每个图片对象选择一个正文 URL，staging → manifest → `data/media`；头像/视频排除 | 结构化 | ID/昵称/主页 | 浮层点击打开的作者页页面状态 | 赞/藏/评/分享；feed 空串只在登记所用搜索条目同一项明确为 0 时记为 0 | 详情或作者补全重试耗尽后记录并跳过 |
 | 抖音 | `aweme_detail` 非空 `desc` | `note_download_url` | 保留 `images[].uri` 稳定键，staging → manifest → `data/media`；封面/视频/音乐/头像排除 | 结构化 | ID/昵称/主页 | 作者主页 | 赞/藏/评/分享 | 标题和预览文本不能代替正文 |
 | 知乎 | `search_content` / `answer_detail` / `article_detail` | 正文/详情 `image_list` | 当前会话 staging → manifest → `data/media`；公式/头像/作者主页/zvideo 排除 | 结构化 | ID/昵称/主页 | search author/member | 赞/评 | 详情重试耗尽后记录并跳过，标题/摘要不能通过 |
 
@@ -16,7 +16,9 @@
 
 五个结构化平台都配置 `followers_policy=required`：数值、来源和
 `followers_observed=true` 缺一不可。真实 0 粉丝有效，缺失后由模型默认生成的 0 无效。
-抖音和小红书必须使用作者主页来源，不能用搜索结果中的占位 0 通过校验。
+抖音和小红书的粉丝量必须使用作者主页来源，不能用搜索结果中的占位 0 通过校验。小红书互动计数的“搜索结果确认为 0”
+（feed 为空串、登记所用搜索条目同一项明确为 0，记录带来源说明，见 `platforms/xhs.md`）只适用于点赞、收藏、
+评论、分享四项，不适用于粉丝量。
 B站搜索结果的 `desc` 和 `image_urls` 只是摘要与预览，必须取得
 `content_detail_status=detail_observed` 后才能通过正文完整性门禁；候选自身详情失败在有限重试后
 记录 `candidate_skipped` 并进入已处理记忆，登录、风控或频控信号仍停止运行且不写 seen。

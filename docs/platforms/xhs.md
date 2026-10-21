@@ -554,7 +554,7 @@ child `summary.json` 的
   按 → 键、其余点右箭头，按页码 k/N 核实前进，不前进时换一种方式再试一次。作者见下一小节。有效记录
   如请求了互动，在当前浮层内执行，不新开标签页。最后点关闭按钮关闭浮层（不按 Esc，5 秒内确认，重试
   一次仍关不掉为 `xhs_overlay_close_failed`），再暂存截获的图片并写记录。
-- 互动计数取证（#94，只取证、判定未变）：翻图之后、点作者之前（repair 整页在同一位置）读一次详情视图根
+- 互动计数取证（#94）：翻图之后、点作者之前（repair 整页在同一位置）读一次详情视图根
   （浮层为 `div.note-detail-mask`，repair 另认整页根）内的互动栏与评论区。结构按操作人 2026-10-18 实地查看：
   互动栏根 `.buttons.engage-bar-style`，其 `.left` 内为点赞 `.like-wrapper span.count`（可另带 `like-active`
   等状态类）、收藏 `.collect-wrapper span.count`、评论 `.chat-wrapper span.count`；分享 `.share-wrapper` 只有
@@ -566,8 +566,20 @@ child `summary.json` 的
   `shared_count`（分享键名与 feed 的 `share_count` 不同；操作人 2026-10-21 DevTools 核对：feed 为空串的地方搜索写
   `"0"`，但搜索的数字可能比 feed 旧）。登记卡片时只把这四项原值留在内存中（`SearchItem.counts`，不留 `liked`、
   `collected` 等其他字段）；同一会话内以首次出现的页为准，同一页重复送达不改登记。repair 整页没有搜索响应，记
-  无搜索来源。有效性判定不变：只看 feed，四个计数仍须非空，空串仍算缺失，相应笔记仍判无效（用户 2026-10-18
-  决定：空串须有明确依据才能按 0 处理；2026-10-21 再次确认，先用大样本看 feed 空串对应的搜索值）。
+  无搜索来源。取证本身不影响判定；空串怎样判见下一条。
+- 互动计数的空串（#94，用户 2026-10-21 决定）：四个计数取 feed 原值，四项同一规则，逐篇逐项判断。feed 为空串、
+  登记本篇卡片所用的搜索条目同一项（分享为 `shared_count`）明确为 0 时，这一项记为 `"0"`；两边都有数字时以 feed
+  为准，搜索的数字从不替代 feed 的数字。其余情况仍算缺失，相应笔记判无效：feed 为 `null` 或缺键（详情形状判定处
+  即为候选失败 `detail_parse_failed`）；搜索一侧为非零数字、空串、`null` 或缺键；repair 整页没有搜索来源。依据为
+  操作人 2026-10-21 DevTools 核对与第 8 轮统计（481 个 feed 空串全部对应搜索 `"0"`；两边都有数字时搜索有时比
+  feed 小）。记为 0 时不改截获到的 feed，记录换一份 `interact_info`，并逐项写来源说明
+  `interact_count_evidence.<计数键>`：`source=search_results_zero`、feed 原值 `feed_value`（空串）、搜索键
+  `search_key` 与原值 `search_value`（原样，`"0"` 或 `0`）、登记所用的搜索页码 `search_page`、搜索访问 ID
+  `search_visit`（等于 `content_visit_refs.search_results`，可在账本中核到）。没有记为 0 的项不写，不写空对象。
+  来源说明与 `content_visit_refs` 一样随记录进 JSONL 与 `raw_sample_json`，不新增列。入库校验对带来源说明的记录
+  逐项核对：键须为四项计数之一、`source` 为 `search_results_zero`、记录里对应计数解析为 0、`search_visit` 等于
+  记录的 `content_visit_refs.search_results`；任一不符或为空对象记 `interact_count_evidence_invalid`，跨轮累计记录
+  重新校验与导入时同样核对。粉丝量不适用此规则。
 - 单篇内的登录恢复、验证完成或网络恢复后整篇重做一次：关闭残留浮层、在可点击带内重新找到卡片再点开，
   沿用同一图片窗口；同一文档重开时图片可能走内存缓存而没有响应，记录可以引用早先尝试截获的图片访问。
   第二次登录或网络中断照常上抛给扫描；第二次因验证或作者页登录重做、或重做时卡片已不在可点击带内，
@@ -725,14 +737,15 @@ child `summary.json` 的
   `author_link_missing`、点击后新标签页超时为 `author_tab_timeout`（另记点击后主页面路径模板），含浮层内作者名
   链接、作者主页链接与指向本篇作者的主页链接的个数、可见个数，以及前 4 个主页链接的 `target` 与祖先链。目标会话第 1 页的触发动作不是本次点选“图文”
   （G1 将失败）时只写一行 warning 日志，带触发动作、`target` 与回车会话的序号，判定不变。
-- 互动计数取证（#94）逐篇追加到 `behavior_evidence.engagement.jsonl`（`schema_version=2`；不进账本、不截断；
+- 互动计数取证（#94）逐篇追加到 `behavior_evidence.engagement.jsonl`（`schema_version=3`；不进账本、不截断；
   整篇重做时同一笔记有多行）：笔记 ID、`mode`、`read`，读数成功时另记互动栏根 `bar` 与 `.left` 是否存在。
   `search` 记搜索来源：全量扫描为 `source=search_results`，带登记所用条目的页码 `page`、该页搜索响应与本篇 feed
   响应的截获序号 `search_seq`、`feed_seq`，以及 feed 晚于搜索的秒数 `lag_seconds`（两次截获时刻相减，精确到秒，
   解析不了为 null）；repair 为 `source=none`。四个计数各记 feed 原值类别 `feed` 与搜索原值类别 `search`（同一套：
   `number` 带 `feed_value`/`search_value`，按 `parse_int` 解析、含“万”且不为 0；`zero` 为解析为 0、实地为
   `"0"`，同样带数值 0，与空串区分；`empty_string`；`missing` 即键不存在；`null`；`other`；搜索一侧没有来源为
-  `no_source`。搜索的 `shared_count` 对 feed 的 `share_count`）与页面显示类别 `page`（`number` 带 `page_value`；
+  `no_source`。搜索的 `shared_count` 对 feed 的 `share_count`）、`zero_by_search`（布尔，本篇这一项是否按上文
+  空串规则记为 0，与写记录用同一判定；3 起新增）与页面显示类别 `page`（`number` 带 `page_value`；
   `label` 为非空的非数字文字，只记类别；`empty` 为元素在但文字为空；`absent` 为找不到元素，带互动栏 `.left` 内匹配个数 `matches` 与整个视图内同类
   包装元素个数 `wrappers`；分享有按钮无 `.count` 为 `icon_only`；读数失败为 `unread`）。评论区记 `section`
   （`total` 带总数 `total`、`unparsed_total`、`empty_state`、`container_only`、`not_rendered`、`unread`）与
@@ -744,7 +757,8 @@ child `summary.json` 的
   `search.counts.<计数>` 每项计数一张：`search_key`（搜索响应里的键名）、`feed_by_search`（feed 类别 × 搜索类别的
   篇数）、`feed_empty_search`（feed 为空串时搜索一侧的分布：`0`（即 `zero`）、`1-9`、`10+`、`empty_string`、
   `missing`、`null`、`other`、`no_source`）与 `both_numbers`（两边都有数时搜索等于、小于、大于 feed 的篇数：
-  `equal`、`search_lower`、`search_higher`）。汇总只供只读统计，判定与入库字段不读它。
+  `equal`、`search_lower`、`search_higher`）与 `zero_by_search`（按规则记为 0 的篇数）。汇总只供只读统计，判定与
+  入库字段不读它。
 
 ## 6. 完成检查
 

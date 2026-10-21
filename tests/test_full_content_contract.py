@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from copy import deepcopy
 from importlib import import_module
@@ -281,6 +282,94 @@ def test_observed_zero_metric_is_valid(platform_key: str, group: tuple[str, ...]
 
     assert validation["valid"] is True
     assert validation["reasons"] == []
+
+
+XHS_COUNTS = ("liked_count", "collected_count", "comment_count", "share_count")
+
+
+def xhs_row(record: dict) -> dict:
+    return mediacrawler_crawl.row_for_record(
+        "xhs", record, artifact_dir="synthetic-contract-fixture", captured_at="2026-10-21T12:00:00+08:00",
+        keyword="青岛",
+    )
+
+
+def test_xhs_string_zero_metrics_pass_the_required_metric_check() -> None:
+    """小红书计数按字符串保存；"0" 是非空值，入库解析为 0。"""
+    record = formal_records()["xhs"]
+    record.update(dict.fromkeys(XHS_COUNTS, "0"))
+
+    validation = mediacrawler_crawl.validate_formal_record("xhs", record, set())
+    row = xhs_row(record)
+
+    assert validation["valid"] is True and validation["reasons"] == []
+    assert [row[f"post_{name}_count"] for name in ("likes", "favorites", "comments", "shares")] == [0, 0, 0, 0]
+
+
+def xhs_search_zero_record() -> dict:
+    """#94：分享在 feed 为空串、登记所用搜索条目为 "0"，记为 "0" 并带来源说明。"""
+    record = formal_records()["xhs"]
+    record["share_count"] = "0"
+    record["content_visit_refs"] = {"ledger_id": "ledger-1", "search_results": "ledger-1:3"}
+    record["interact_count_evidence"] = {
+        "share_count": {
+            "source": "search_results_zero", "feed_value": "", "search_key": "shared_count", "search_value": "0",
+            "search_page": 1, "search_visit": "ledger-1:3",
+        },
+    }
+    return record
+
+
+def test_xhs_search_confirmed_zero_with_consistent_evidence_is_valid_and_kept_in_raw_sample() -> None:
+    record = xhs_search_zero_record()
+
+    validation = mediacrawler_crawl.validate_formal_record("xhs", record, set())
+    row = xhs_row(record)
+
+    assert validation["valid"] is True and validation["reasons"] == []
+    assert row["post_shares_count"] == 0
+    assert json.loads(row["raw_sample_json"])["interact_count_evidence"] == record["interact_count_evidence"]
+
+
+def _value_not_zero(record: dict) -> None:
+    record["share_count"] = "4"
+
+
+def _key_not_a_count(record: dict) -> None:
+    evidence = record["interact_count_evidence"]
+    evidence["shared_count"] = evidence.pop("share_count")
+
+
+def _visit_mismatch(record: dict) -> None:
+    record["interact_count_evidence"]["share_count"]["search_visit"] = "ledger-1:4"
+
+
+def _refs_missing(record: dict) -> None:
+    del record["content_visit_refs"]
+
+
+def _other_source(record: dict) -> None:
+    record["interact_count_evidence"]["share_count"]["source"] = "existing_web_posts_metric"
+
+
+def _empty_evidence(record: dict) -> None:
+    record["interact_count_evidence"] = {}
+
+
+@pytest.mark.parametrize(
+    "break_evidence",
+    (_value_not_zero, _key_not_a_count, _visit_mismatch, _refs_missing, _other_source, _empty_evidence),
+    ids=lambda func: func.__name__.strip("_"),
+)
+def test_xhs_inconsistent_count_evidence_is_invalid(break_evidence) -> None:
+    """带来源说明时逐项核对：键是四项计数之一、对应计数解析为 0、搜索访问 ID 等于记录的搜索访问引用。"""
+    record = xhs_search_zero_record()
+    break_evidence(record)
+
+    validation = mediacrawler_crawl.validate_formal_record("xhs", record, set())
+
+    assert validation["valid"] is False
+    assert validation["reasons"] == ["interact_count_evidence_invalid"]
 
 
 @pytest.mark.parametrize("platform_key", EXPECTED_PLATFORMS)

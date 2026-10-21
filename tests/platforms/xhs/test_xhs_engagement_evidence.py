@@ -1,9 +1,10 @@
-"""互动计数与页面显示、搜索响应的对照取证（#94）：只取证，判定不变，空串仍算缺失。
+"""互动计数与页面显示、搜索响应的对照取证，以及 feed 空串经搜索结果确认为 0 的规则（#94）。
 
 浮层（repair 为整页）在翻图之后、点作者之前读一次互动栏与评论区，逐篇追加到 `behavior_evidence.engagement.jsonl`；
 子摘要的平台记录 `output.engagement_observation` 按计数汇总。假站点的互动栏按操作人 2026-10-18 实地结构建模，
 读数用与页面脚本相同的选择器。全量扫描另记登记本篇卡片所用的搜索条目里的四项计数（搜索键 shared_count 对 feed
-share_count，操作人 2026-10-21 DevTools 核对）；repair 整页没有搜索来源。
+share_count，操作人 2026-10-21 DevTools 核对）；repair 整页没有搜索来源。用户 2026-10-21 决定：逐项判断，feed 为
+空串、登记所用搜索条目同一项明确为 0 时记为 "0" 并写来源说明，其余空串仍算缺失。
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 from support.xhs_fake_site import detail_card, engagement_view, image_url, note
 from trippostcollect.platforms.xhs import overlay as xhs_overlay
+from trippostcollect.records.formal import interact_count_evidence_ok
 from trippostcollect.xhs.engagement import (
     comment_section,
     display_kind,
@@ -23,6 +25,8 @@ from trippostcollect.xhs.engagement import (
     raw_kind,
     search_counts,
     search_source,
+    search_zero_evidence,
+    search_zero_keys,
     summarize_engagement_evidence,
 )
 
@@ -36,6 +40,13 @@ def card_with(note_id: str, **interact: str) -> dict:
     card = detail_card(note_id)
     card["interact_info"].update(interact)
     return card
+
+
+def search_interact(liked, collected, comment, shared=None) -> dict:
+    """搜索条目的 interact_info（实地形状）；`shared` 为 None 时缺 shared_count 键。"""
+    values = {"liked": False, "liked_count": liked, "collected": False, "collected_count": collected,
+              "comment_count": comment}
+    return values if shared is None else {**values, "shared_count": shared}
 
 
 def evidence_lines(tmp_path) -> list[dict]:
@@ -154,6 +165,7 @@ def test_summary_tables_cross_feed_and_page_categories(tmp_path):
         "empty_string": {"no_source": 4}, "number": {"no_source": 3},
     }
     assert summary["search"]["counts"]["liked_count"]["feed_empty_search"]["no_source"] == 4
+    assert {key: summary["search"]["counts"][key]["zero_by_search"] for key in COUNTS} == dict.fromkeys(COUNTS, 0)
     missing = summarize_engagement_evidence(tmp_path / "missing.jsonl")
     assert missing["notes"] == 0 and missing["search"]["sources"] == {}
 
@@ -174,10 +186,19 @@ def test_search_counts_keep_only_the_four_raw_values_and_record_their_origin():
         "source": "search_results", "page": 2, "search_seq": 14, "feed_seq": 40, "lag_seconds": 37,
     }
     assert line["counts"] == {
-        "liked_count": {"feed": "number", "feed_value": 2, "search": "number", "search_value": 1, "page": "unread"},
-        "collected_count": {"feed": "empty_string", "search": "zero", "search_value": 0, "page": "unread"},
-        "comment_count": {"feed": "number", "feed_value": 3, "search": "empty_string", "page": "unread"},
-        "share_count": {"feed": "number", "feed_value": 4, "search": "missing", "page": "unread"},
+        "liked_count": {
+            "feed": "number", "feed_value": 2, "search": "number", "search_value": 1, "zero_by_search": False,
+            "page": "unread",
+        },
+        "collected_count": {
+            "feed": "empty_string", "search": "zero", "search_value": 0, "zero_by_search": True, "page": "unread",
+        },
+        "comment_count": {
+            "feed": "number", "feed_value": 3, "search": "empty_string", "zero_by_search": False, "page": "unread",
+        },
+        "share_count": {
+            "feed": "number", "feed_value": 4, "search": "missing", "zero_by_search": False, "page": "unread",
+        },
     }
     unparsed = search_source({}, page=1, search_seq=1, search_at="", feed_seq=2, feed_at="2026-10-21T05:00:00+00:00")
     assert unparsed["origin"]["lag_seconds"] is None
@@ -185,6 +206,45 @@ def test_search_counts_keep_only_the_four_raw_values_and_record_their_origin():
     assert repair["search"] == {"source": "none"}
     assert {entry["search"] for entry in repair["counts"].values()} == {"no_source"}
     assert all("search_value" not in entry for entry in repair["counts"].values())
+    assert {entry["zero_by_search"] for entry in repair["counts"].values()} == {False}
+
+
+def test_search_zero_rule_needs_a_blank_feed_and_an_explicit_search_zero_per_count():
+    """逐项判断、四项同一规则：feed 为空串且登记所用搜索条目同一项明确为 0 才记为 0；来源说明带 feed 原值、搜索键与
+    原值、搜索页码与搜索访问 ID。"""
+
+    def search(**counts):
+        return search_source(
+            counts, page=3, search_seq=5, search_at="2026-10-21T05:00:00+00:00",
+            feed_seq=8, feed_at="2026-10-21T05:00:09+00:00",
+        )
+
+    blank = {"liked_count": "", "collected_count": "", "comment_count": "", "share_count": ""}
+    zeros = search(liked_count="0", collected_count="0", comment_count="0", shared_count="0")
+    assert search_zero_keys(blank, zeros) == COUNTS
+    assert search_zero_evidence(blank, zeros, search_visit="ledger-1:7")["share_count"] == {
+        "source": "search_results_zero", "feed_value": "", "search_key": "shared_count", "search_value": "0",
+        "search_page": 3, "search_visit": "ledger-1:7",
+    }
+    # 搜索原值原样记录（数值 0 同样是明确写出的 0）。
+    numeric = search_zero_evidence(blank, search(liked_count=0), search_visit="v")
+    assert list(numeric) == ["liked_count"] and numeric["liked_count"]["search_value"] == 0
+    # 搜索为非零数字、空串、null、缺键：不记为 0。
+    assert search_zero_keys(blank, search(liked_count="2", collected_count="", comment_count=None)) == ()
+    # feed 为 null、缺键或已有数字（含 "0"）：不动，搜索的数字不替代 feed。
+    feed = {"liked_count": None, "comment_count": "0", "share_count": "5"}
+    assert search_zero_keys(feed, zeros) == ()
+    # 没有搜索来源（repair 整页）。
+    assert search_zero_keys(blank, None) == () and search_zero_evidence(blank, None, search_visit="v") == {}
+    # 逐项：只有分享满足规则。
+    mixed = {"liked_count": "", "collected_count": "4", "comment_count": "", "share_count": ""}
+    only_share = search(liked_count="1", collected_count="0", comment_count="", shared_count="0")
+    assert search_zero_keys(mixed, only_share) == ("share_count",)
+    line = engagement_observation("n", mode="discovery", interact=mixed, page=None, search=only_share,
+                                  failure="timeout")
+    assert {key: entry["zero_by_search"] for key, entry in line["counts"].items()} == {
+        "liked_count": False, "collected_count": False, "comment_count": False, "share_count": True,
+    }
 
 
 def test_search_tables_cross_feed_and_search_categories(tmp_path):
@@ -255,6 +315,8 @@ def test_search_tables_cross_feed_and_search_categories(tmp_path):
         "0": 1, "1-9": 0, "10+": 0, "empty_string": 0, "missing": 1, "null": 0, "other": 0, "no_source": 1,
     }
     assert share["both_numbers"] == {"equal": 2, "search_lower": 2, "search_higher": 0}
+    # 按规则记为 0 的篇数：A 四项、B 的收藏；feed 写 0 的 f 与搜索非零的 d 不算。
+    assert [tables[key]["zero_by_search"] for key in COUNTS] == [1, 2, 1, 1]
     # 页面一侧的表照常：feed 写 0 单列为 zero。
     assert summary["counts"]["liked_count"]["feed_by_page"] == {
         "empty_string": {"unread": 3}, "number": {"unread": 3}, "zero": {"unread": 1},
@@ -262,7 +324,9 @@ def test_search_tables_cross_feed_and_search_categories(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_overlay_records_engagement_for_every_detail_note_and_validity_is_unchanged(monkeypatch, tmp_path):
+async def test_overlay_records_engagement_for_every_detail_note_and_unconfirmed_blanks_stay_missing(
+    monkeypatch, tmp_path,
+):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     ids = ["plain", "wan", "zero", "drift", "absent", "late", "imgfail"]
     crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=ids)
@@ -288,7 +352,7 @@ async def test_overlay_records_engagement_for_every_detail_note_and_validity_is_
 
     await crawler.search()
 
-    # 判定与改动前一致：四个计数都非空才有效，空串仍算缺失。
+    # 搜索条目为假站点默认的非零计数，空串没有被确认为 0：四个计数都非空才有效，空串仍算缺失。
     expected = {
         note_id: all(site.detail(note_id)["interact_info"][key] not in (None, "") for key in COUNTS) for note_id in ids
     }
@@ -305,38 +369,48 @@ async def test_overlay_records_engagement_for_every_detail_note_and_validity_is_
     # 搜索条目为假站点默认值（与 feed 默认计数相同）。
     assert lines["plain"]["counts"] == {
         "liked_count": {
-            "feed": "number", "feed_value": 1, "search": "number", "search_value": 1, "page": "number", "page_value": 1,
+            "feed": "number", "feed_value": 1, "search": "number", "search_value": 1, "zero_by_search": False,
+            "page": "number", "page_value": 1,
         },
         "collected_count": {
-            "feed": "number", "feed_value": 2, "search": "number", "search_value": 2, "page": "number", "page_value": 2,
+            "feed": "number", "feed_value": 2, "search": "number", "search_value": 2, "zero_by_search": False,
+            "page": "number", "page_value": 2,
         },
         "comment_count": {
-            "feed": "number", "feed_value": 3, "search": "number", "search_value": 3, "page": "number", "page_value": 3,
+            "feed": "number", "feed_value": 3, "search": "number", "search_value": 3, "zero_by_search": False,
+            "page": "number", "page_value": 3,
         },
-        "share_count": {"feed": "number", "feed_value": 4, "search": "number", "search_value": 4, "page": "icon_only"},
+        "share_count": {
+            "feed": "number", "feed_value": 4, "search": "number", "search_value": 4, "zero_by_search": False,
+            "page": "icon_only",
+        },
     }
     assert {line["search"]["source"] for line in lines.values()} == {"search_results"}
     # 评论区的评论点赞同样是 .like-wrapper span.count，但不在互动栏内，不被读到。
     assert lines["plain"]["comments"] == {"section": "total", "total": 3, "container": True, "empty_state": False}
     assert lines["wan"]["counts"]["liked_count"] == {
-        "feed": "number", "feed_value": 12000, "search": "number", "search_value": 1, "page": "number",
-        "page_value": 12000,
+        "feed": "number", "feed_value": 12000, "search": "number", "search_value": 1, "zero_by_search": False,
+        "page": "number", "page_value": 12000,
     }
     assert {key: entry["page"] for key, entry in lines["zero"]["counts"].items()} == {
         "liked_count": "empty", "collected_count": "label", "comment_count": "label", "share_count": "icon_only",
     }
     assert {entry["feed"] for entry in lines["zero"]["counts"].values()} == {"empty_string"}
+    assert {entry["zero_by_search"] for entry in lines["zero"]["counts"].values()} == {False}
+    (zero_record,) = [record for record in crawler.records if record["note_id"] == "zero"]
+    assert zero_record["liked_count"] == "" and "interact_count_evidence" not in zero_record
     assert lines["zero"]["comments"] == {"section": "empty_state", "container": True, "empty_state": True}
     assert lines["drift"]["counts"]["liked_count"] == {
-        "feed": "number", "feed_value": 7, "search": "number", "search_value": 1, "page": "number", "page_value": 8,
+        "feed": "number", "feed_value": 7, "search": "number", "search_value": 1, "zero_by_search": False,
+        "page": "number", "page_value": 8,
     }
     assert lines["absent"]["counts"]["comment_count"] == {
-        "feed": "number", "feed_value": 3, "search": "number", "search_value": 3, "page": "absent", "matches": 0,
-        "wrappers": 0,
+        "feed": "number", "feed_value": 3, "search": "number", "search_value": 3, "zero_by_search": False,
+        "page": "absent", "matches": 0, "wrappers": 0,
     }
     assert lines["absent"]["counts"]["share_count"] == {
-        "feed": "number", "feed_value": 4, "search": "number", "search_value": 4, "page": "absent", "matches": 0,
-        "wrappers": 0,
+        "feed": "number", "feed_value": 4, "search": "number", "search_value": 4, "zero_by_search": False,
+        "page": "absent", "matches": 0, "wrappers": 0,
     }
     assert lines["absent"]["comments"] == {"section": "not_rendered", "container": False, "empty_state": False}
     assert lines["late"]["comments"]["section"] == "total"
@@ -374,23 +448,17 @@ def ticking_clock(start: str = "2026-10-21T05:00:00+00:00"):
 
 
 @pytest.mark.asyncio
-async def test_overlay_records_the_registered_search_counts_and_validity_is_unchanged(monkeypatch, tmp_path):
+async def test_overlay_records_the_registered_search_counts(monkeypatch, tmp_path):
     """逐篇证据带登记本篇卡片所用的搜索条目计数：feed 空串对搜索 "0"、搜索比 feed 小、搜索空串与缺键；同一篇出现在两页
-    时用首次出现的页，同一页重复送达时用第一次送达；判定仍只看 feed，空串照常判无效。"""
+    时用首次出现的页，同一页重复送达时用第一次送达。feed 空串对搜索 "0" 的两篇按规则记为 0，都有效。"""
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-
-    def interact(liked, collected, comment, shared=None):
-        values = {"liked": False, "liked_count": liked, "collected": False, "collected_count": collected,
-                  "comment_count": comment}
-        return values if shared is None else {**values, "shared_count": shared}
-
     page_one = [
-        note("zeros", interact=interact("0", "0", "0", "0")),
-        note("older", interact=interact("1", "0", "1", "3")),
-        note("blank", interact=interact("", "2", "3")),
-        note("dup", interact=interact("9", "2", "3", "4")),
+        note("zeros", interact=search_interact("0", "0", "0", "0")),
+        note("older", interact=search_interact("1", "0", "1", "3")),
+        note("blank", interact=search_interact("", "2", "3")),
+        note("dup", interact=search_interact("9", "2", "3", "4")),
     ]
-    page_two = [note("later"), note("dup", interact=interact("99", "2", "3", "4"))]
+    page_two = [note("later"), note("dup", interact=search_interact("99", "2", "3", "4"))]
     crawler, _, _, site = prepare_crawler(monkeypatch, tmp_path, items=[], pages=[page_one, page_two])
     crawler.capture._clock = ticking_clock()
     site.details["zeros"] = card_with("zeros", liked_count="", collected_count="", comment_count="", share_count="")
@@ -398,7 +466,7 @@ async def test_overlay_records_the_registered_search_counts_and_validity_is_unch
     # 第 2 页第一次送达的“later”点赞为 8；前端随后重发第 2 页（默认值 1），登记仍是第一次送达的那一条。
     first_delivery = {
         "code": 0, "success": True,
-        "data": {"has_more": True, "items": [note("later", interact=interact("8", "2", "3", "4")), page_two[1]]},
+        "data": {"has_more": True, "items": [note("later", interact=search_interact("8", "2", "3", "4")), page_two[1]]},
     }
     site.search_overrides[2] = [first_delivery]
     verdicts = spy_validity(crawler)
@@ -406,7 +474,7 @@ async def test_overlay_records_the_registered_search_counts_and_validity_is_unch
     await crawler.search()
 
     ids = ["zeros", "older", "blank", "dup", "later"]
-    assert verdicts == {"zeros": False, "older": False, "blank": True, "dup": True, "later": True}
+    assert verdicts == {"zeros": True, "older": True, "blank": True, "dup": True, "later": True}
     lines = {line["note_id"]: line for line in evidence_lines(tmp_path)}
     assert sorted(lines) == sorted(ids)
 
@@ -472,6 +540,91 @@ async def test_overlay_records_the_registered_search_counts_and_validity_is_unch
 
 
 @pytest.mark.asyncio
+async def test_overlay_records_a_blank_feed_count_as_zero_only_when_the_registered_search_item_says_zero(
+    monkeypatch, tmp_path,
+):
+    """用户 2026-10-21 决定（#94）：逐项判断，feed 为空串、登记所用搜索条目同一项明确为 "0" 时记为 "0" 并在记录里写
+    来源说明；搜索为非零数字、空串或缺键时仍缺失；feed 为 null 或缺键在详情形状判定处就是候选失败；两边都有数字时
+    用 feed 的数字。截获到的 feed 不被改动。"""
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    zeros = search_interact("0", "0", "0", "0")
+    items = [
+        note("allzero", interact=zeros),
+        note("share", interact=search_interact("1", "2", "3", "0")),
+        note("nonzero", interact=search_interact("2", "2", "3", "4")),
+        note("sblank", interact=search_interact("1", "", "3", "4")),
+        note("smissing", interact=search_interact("1", "2", "3")),
+        note("fnull", interact=zeros),
+        note("fmissing", interact=zeros),
+        note("differ", interact=search_interact("3", "2", "3", "4")),
+    ]
+    crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=[], pages=[items])
+    site.details["allzero"] = card_with("allzero", liked_count="", collected_count="", comment_count="", share_count="")
+    site.details["share"] = card_with("share", share_count="")
+    site.details["nonzero"] = card_with("nonzero", liked_count="")
+    site.details["sblank"] = card_with("sblank", collected_count="")
+    site.details["smissing"] = card_with("smissing", share_count="")
+    site.details["fnull"] = card_with("fnull", liked_count=None)
+    site.details["fmissing"] = detail_card("fmissing")
+    del site.details["fmissing"]["interact_info"]["comment_count"]
+    site.details["differ"] = card_with("differ", liked_count="7")
+    verdicts = spy_validity(crawler)
+
+    await crawler.search()
+
+    assert verdicts == {
+        "allzero": True, "share": True, "nonzero": False, "sblank": False, "smissing": False, "differ": True,
+    }
+    skipped = {event["identity"]: event["error_code"] for event in events_of(state_path, "candidate_skipped")}
+    assert skipped == {"fnull": "detail_parse_failed", "fmissing": "detail_parse_failed"}
+    records = {record["note_id"]: record for record in crawler.records}
+    assert sorted(records) == sorted(verdicts)
+
+    allzero = records["allzero"]
+    assert [allzero[key] for key in COUNTS] == ["0", "0", "0", "0"]
+    evidence = allzero["interact_count_evidence"]
+    search_visit = allzero["content_visit_refs"]["search_results"]
+    assert search_visit and list(evidence) == list(COUNTS)
+    for key, search_key in zip(COUNTS, ("liked_count", "collected_count", "comment_count", "shared_count")):
+        assert evidence[key] == {
+            "source": "search_results_zero", "feed_value": "", "search_key": search_key, "search_value": "0",
+            "search_page": 1, "search_visit": search_visit,
+        }
+    assert interact_count_evidence_ok(allzero)
+    share = records["share"]
+    assert [share[key] for key in COUNTS] == ["1", "2", "3", "0"]
+    assert list(share["interact_count_evidence"]) == ["share_count"] and interact_count_evidence_ok(share)
+    # 未确认的空串原样保留、不写来源说明；两边都有数字时记录用 feed 的数字。
+    assert (records["nonzero"]["liked_count"], records["sblank"]["collected_count"]) == ("", "")
+    assert records["smissing"]["share_count"] == ""
+    assert records["differ"]["liked_count"] == "7"
+    for note_id in ("nonzero", "sblank", "smissing", "differ"):
+        assert "interact_count_evidence" not in records[note_id]
+
+    # 截获到的 feed 原对象仍是空串（记录里换了一份 interact_info）。
+    captured = crawler.capture.latest(
+        xhs_overlay.FEED_RULE, predicate=lambda item: xhs_overlay._feed_note_id(item) == "allzero",
+    )
+    assert captured.json["data"]["items"][0]["note_card"]["interact_info"] == {
+        "liked_count": "", "collected_count": "", "comment_count": "", "share_count": "",
+    }
+
+    lines = {line["note_id"]: line for line in evidence_lines(tmp_path)}
+    flags = {
+        note_id: {key for key, entry in line["counts"].items() if entry["zero_by_search"]}
+        for note_id, line in lines.items()
+    }
+    assert flags == {
+        "allzero": set(COUNTS), "share": {"share_count"}, "nonzero": set(), "sblank": set(), "smissing": set(),
+        "differ": set(),
+    }
+    # 逐篇证据仍记 feed 原值类别。
+    assert {entry["feed"] for entry in lines["allzero"]["counts"].values()} == {"empty_string"}
+    summary = summarize_engagement_evidence(tmp_path / "behavior_evidence.engagement.jsonl")
+    assert [summary["search"]["counts"][key]["zero_by_search"] for key in COUNTS] == [1, 1, 1, 2]
+
+
+@pytest.mark.asyncio
 async def test_failed_engagement_read_records_a_category_and_leaves_the_note_unchanged(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     crawler, _, _, site = prepare_crawler(monkeypatch, tmp_path, items=["slow", "broken", "fine"])
@@ -495,7 +648,8 @@ async def test_failed_engagement_read_records_a_category_and_leaves_the_note_unc
     assert [lines[note_id]["read"] for note_id in ("slow", "broken", "fine")] == ["timeout", "script_error", "ok"]
     # 读数失败不影响搜索一侧。
     assert lines["slow"]["counts"]["liked_count"] == {
-        "feed": "number", "feed_value": 1, "search": "number", "search_value": 1, "page": "unread",
+        "feed": "number", "feed_value": 1, "search": "number", "search_value": 1, "zero_by_search": False,
+        "page": "unread",
     }
     assert lines["slow"]["comments"] == {"section": "unread"} and "bar" not in lines["slow"]
 
@@ -513,10 +667,16 @@ async def test_repair_page_view_records_engagement_too(monkeypatch, tmp_path):
     assert (line["mode"], line["note_id"], line["read"]) == ("repair", "repaired", "ok")
     # 整页直开没有搜索响应：记无搜索来源。
     assert line["search"] == {"source": "none"}
-    assert line["counts"]["comment_count"] == {"feed": "empty_string", "search": "no_source", "page": "label"}
+    assert line["counts"]["comment_count"] == {
+        "feed": "empty_string", "search": "no_source", "zero_by_search": False, "page": "label",
+    }
     assert {entry["search"] for entry in line["counts"].values()} == {"no_source"}
     assert line["comments"]["section"] == "empty_state"
-    assert crawler.records[0]["note_id"] == "repaired"
+    # 没有搜索来源：空串仍算缺失，不写来源说明。
+    (record,) = crawler.records
+    assert record["note_id"] == "repaired" and record["comment_count"] == ""
+    assert "interact_count_evidence" not in record
     summary = summarize_engagement_evidence(tmp_path / "behavior_evidence.engagement.jsonl")
     assert summary["search"]["sources"] == {"none": 1}
     assert summary["search"]["counts"]["comment_count"]["feed_empty_search"]["no_source"] == 1
+    assert summary["search"]["counts"]["comment_count"]["zero_by_search"] == 0

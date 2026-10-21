@@ -1,12 +1,14 @@
-"""小红书互动计数与页面显示、搜索响应的对照取证（#94）：只取证，不改有效性判定。
+"""小红书互动计数与页面显示、搜索响应的对照取证，以及 feed 空串经搜索结果确认为 0 的规则（#94）。
 
-feed `note_card.interact_info` 的四个计数约四分之一的笔记有空串；空串仍算缺失（用户 2026-10-18 决定：不能直接
-按 0 处理，须有明确依据）。全量扫描的浮层与 repair 的整页在翻图之后、点作者之前读一次互动栏与评论区，逐篇追加
-到行为证据同目录的 `behavior_evidence.engagement.jsonl`（不截断；只有笔记 ID、类别与数字，不写正文、评论、
-作者或地址），子摘要的平台记录 `output.engagement_observation` 按计数汇总成对照表。
+feed `note_card.interact_info` 的四个计数约四分之一的笔记有空串。全量扫描的浮层与 repair 的整页在翻图之后、
+点作者之前读一次互动栏与评论区，逐篇追加到行为证据同目录的 `behavior_evidence.engagement.jsonl`（不截断；只有
+笔记 ID、类别与数字，不写正文、评论、作者或地址），子摘要的平台记录 `output.engagement_observation` 按计数汇总
+成对照表。
 
 全量扫描另记登记本篇卡片所用的目标会话搜索条目里的四项计数（操作人 2026-10-21 DevTools 核对：feed 为空串的地方
-搜索响应写 "0"，但搜索的数字可能比 feed 旧），与 feed 原值用同一套类别；repair 整页没有搜索来源。
+搜索响应写 "0"，但搜索的数字可能比 feed 旧），与 feed 原值用同一套类别；repair 整页没有搜索来源。第 8 轮 481 个
+feed 空串全部对应搜索 "0"，用户 2026-10-21 决定：逐项判断，feed 为空串、搜索同一项明确为 0 时这一项记为 "0" 并
+写来源说明；其余情况仍算缺失，搜索的数字从不替代 feed 的数字。
 """
 
 from __future__ import annotations
@@ -18,10 +20,10 @@ from pathlib import Path
 import re
 from typing import Any, Mapping
 
-from trippostcollect.records.formal import parse_int
+from trippostcollect.records.formal import SEARCH_ZERO_EVIDENCE_SOURCE, parse_int
 
 
-ENGAGEMENT_SCHEMA_VERSION = 2
+ENGAGEMENT_SCHEMA_VERSION = 3
 ENGAGEMENT_COUNTS = ("liked_count", "collected_count", "comment_count", "share_count")
 # 计数键 → 搜索响应 `note_card.interact_info` 里的键：分享为 shared_count（feed 为 share_count）。
 SEARCH_COUNT_KEYS = {
@@ -86,6 +88,34 @@ def search_source(
             "feed_seq": feed_seq,
             "lag_seconds": _lag_seconds(search_at, feed_at),
         },
+    }
+
+
+def search_zero_keys(interact: Any, search: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """按规则记为 0 的计数键：feed 原值为空串、登记所用搜索条目同一项明确为 0（类别 zero）。四项同一规则、逐项
+    判断；feed 为数字（含 "0"）、null 或缺键，搜索为非零数字、空串、null 或缺键，或没有搜索来源时都不算。"""
+    if not search:
+        return ()
+    return tuple(
+        key for key in ENGAGEMENT_COUNTS
+        if raw_kind(interact, key)[0] == "empty_string"
+        and raw_kind(search["counts"], SEARCH_COUNT_KEYS[key])[0] == "zero"
+    )
+
+
+def search_zero_evidence(interact: Any, search: Mapping[str, Any] | None, *, search_visit: str) -> dict[str, Any]:
+    """按规则记为 0 的每一项的来源说明（计数键 → 说明）：feed 原值、搜索键与原值、登记所用的搜索页码与搜索访问 ID
+    （同 `content_visit_refs.search_results`）。没有记为 0 的项时为空字典，调用方不写出。"""
+    return {
+        key: {
+            "source": SEARCH_ZERO_EVIDENCE_SOURCE,
+            "feed_value": interact[key],
+            "search_key": SEARCH_COUNT_KEYS[key],
+            "search_value": search["counts"][SEARCH_COUNT_KEYS[key]],
+            "search_page": search["origin"]["page"],
+            "search_visit": search_visit,
+        }
+        for key in search_zero_keys(interact, search)
     }
 
 
@@ -155,7 +185,8 @@ def engagement_observation(
     at: str | None = None,
 ) -> dict[str, Any]:
     """一篇的逐篇证据。`failure` 为读数异常类别（timeout、script_error）；读数失败时页面一侧记 unread。
-    `search` 为 `search_source` 的结果；没有搜索来源（repair 整页）时为 None，各计数的搜索一侧记 no_source。"""
+    `search` 为 `search_source` 的结果；没有搜索来源（repair 整页）时为 None，各计数的搜索一侧记 no_source。
+    各计数的 `zero_by_search` 标明本篇这一项是否按规则记为 0（与写记录用同一判定 `search_zero_keys`）。"""
     if failure:
         read = failure
     elif not isinstance(page, Mapping):
@@ -164,6 +195,7 @@ def engagement_observation(
         read = "view_missing"
     else:
         read = "ok"
+    zeros = search_zero_keys(interact, search)
     counts: dict[str, Any] = {}
     for key in ENGAGEMENT_COUNTS:
         kind, value = raw_kind(interact, key)
@@ -174,6 +206,7 @@ def engagement_observation(
         entry["search"] = kind
         if value is not None:
             entry["search_value"] = value
+        entry["zero_by_search"] = key in zeros
         entry.update(_page_entry(page, key) if read == "ok" else {"page": "unread"})
         counts[key] = entry
     line: dict[str, Any] = {
@@ -299,7 +332,11 @@ def summarize_engagement_evidence(path: str | Path) -> dict[str, Any]:
             (str(entry.get("feed")), entry.get("feed_value"), str(entry.get("search")), entry.get("search_value"))
             for entry in entries
         ]
-        summary["search"]["counts"][key] = {"search_key": SEARCH_COUNT_KEYS[key], **_search_table(search_pairs)}
+        summary["search"]["counts"][key] = {
+            "search_key": SEARCH_COUNT_KEYS[key],
+            **_search_table(search_pairs),
+            "zero_by_search": sum(1 for entry in entries if entry.get("zero_by_search") is True),
+        }
     section_pairs = []
     for line in notes:
         entry = line["counts"].get("comment_count") or {}

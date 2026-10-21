@@ -30,7 +30,7 @@ import humps
 
 from trippostcollect.application.contracts import ImageStagingError
 from trippostcollect.platforms.xhs.models import NoteUrlInfo
-from trippostcollect.records.formal import parse_int
+from trippostcollect.records.formal import INTERACT_COUNT_EVIDENCE_FIELD, parse_int
 from trippostcollect.records.identity import platform_nickname, platform_user_id
 from trippostcollect.records.sanitization import AUTHOR_AVATAR_KEYS, XHS_SERIALIZED_PROFILE_AVATAR_PATHS
 from trippostcollect.runtime.helpers import extract_url_params_to_dict, normalize_image_url
@@ -525,6 +525,9 @@ def update_xhs_note(
     if note_item.get("content_visit_refs"):
         # 来源引用（§5.3）：本记录引用的搜索、详情、作者与图片访问；随整条记录进 raw_sample_json。
         local_db_item["content_visit_refs"] = note_item["content_visit_refs"]
+    if note_item.get(INTERACT_COUNT_EVIDENCE_FIELD):
+        # #94：feed 空串经搜索结果确认为 0 的计数的来源说明；同样随整条记录进 raw_sample_json，入库时逐项核对。
+        local_db_item[INTERACT_COUNT_EVIDENCE_FIELD] = note_item[INTERACT_COUNT_EVIDENCE_FIELD]
     if save_data_option == "jsonl":
         local_db_item.update(
             {
