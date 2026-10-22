@@ -463,6 +463,49 @@ def test_search_that_stops_loading_is_stalled_not_exhausted(tmp_path):
     assert len(stall_scrolls) == 2 * xhs_scan.XHS_STALL_JIGGLES
 
 
+def _deliver_between_jiggle_scrolls(harness: Harness) -> None:
+    """前端不靠下滚加载（`stall_after`），下一页只在列表到底后的抖动中、上滚之后下滚之前到达：下滚开头的翻页停顿
+    检查先消费它，随后的等待看不到新的搜索响应。"""
+    site, crawler = harness.site, harness.crawler
+    step = crawler._scroll_feed_step
+
+    async def jiggling(direction: int, *, phase: str) -> dict:
+        metrics = await step(direction, phase=phase)
+        if phase == "stall" and direction < 0 and len(site.loaded) < len(site.target_pages):
+            site.respond_page(len(site.loaded) + 1)
+        return metrics
+
+    crawler._scroll_feed_step = jiggling
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_pages_arriving_during_stall_jiggles_count_against_the_page_count_before_them(tmp_path, count):
+    """第 1 页之后的每一页（最后是 has_more=false 的空页）都在抖动中到达、被翻页停顿检查先消费；与抖动前的页数相比
+    仍算新页：每次到底只抖一次，末页到达后照常来源耗尽，不误报 xhs_search_load_stalled（#103）。"""
+    site = XhsFakeSite(KEYWORD, _pages(count, 8), stall_after=1)
+    harness = Harness(tmp_path, site)
+    _deliver_between_jiggle_scrolls(harness)
+
+    harness.run()
+
+    assert harness.accumulator.summary()["stop_reason"] == "source_exhausted"
+    assert len(harness.processed) == len(set(harness.processed)) == 8 * count
+    lines = harness.ledger()
+    visits = [line for line in lines if line["kind"] == "visit" and line["stage"] == "search_results" and line["is_target"]]
+    assert [(line["search_page"], line["has_more"]) for line in visits] == [
+        (number, number <= count) for number in range(1, count + 2)
+    ]
+    scrolls = [line for line in lines if line["kind"] == "action" and line["action"] == "scroll"]
+    for visit in visits[1:]:
+        before = [line for line in scrolls if line["seq"] < visit["seq"]][-1]
+        after = next(line for line in scrolls if line["seq"] > visit["seq"])
+        assert before["target"]["phase"] == after["target"]["phase"] == "stall"
+        assert before["target"]["delta_y"] < 0 < after["target"]["delta_y"]
+    assert len([line for line in scrolls if line["target"].get("phase") == "stall"]) == 2 * count
+    gate = harness.gate()
+    assert gate["content_visit_ok"], gate
+
+
 def test_target_filter_that_never_applies_stops_after_one_retry(tmp_path):
     site = XhsFakeSite(KEYWORD, _pages(1, 4), apply_filter_works=False)
     harness = Harness(tmp_path, site)

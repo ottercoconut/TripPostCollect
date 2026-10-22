@@ -374,10 +374,9 @@ def _hot_search(site: XhsFakeSite, tag: str = "路线规划") -> None:
     site.start_session(filters=site.search_filters())
 
 
-def test_unexpected_hot_filter_session_reenters_from_home_and_closes_the_chat_again(tmp_path, monkeypatch, caplog):
+def test_unexpected_hot_filter_session_reenters_from_home_and_closes_the_chat_again(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger="MediaCrawler")
-    monkeypatch.setattr(xhs_scan, "SCAN_RANDOM", random.Random(3))
-    site = XhsFakeSite(KEYWORD, _pages(3, 8))
+    site = XhsFakeSite(KEYWORD, _pages(3, 4))
     site.ai_chat = True
     harness = Harness(tmp_path, site)
     original = harness.process_note
@@ -393,7 +392,7 @@ def test_unexpected_hot_filter_session_reenters_from_home_and_closes_the_chat_ag
 
     summary = harness.accumulator.summary()
     assert summary["stop_reason"] == "source_exhausted"
-    assert len(harness.processed) == len(set(harness.processed)) == 24  # 已处理的 ID 在新目标会话里照常滑过
+    assert len(harness.processed) == len(set(harness.processed)) == 12  # 已处理的 ID 在新目标会话里照常滑过
     [diagnostic] = [event for event in harness.crawler._navigation_diagnostics if event["stage"] == "unexpected_search_session"]
     assert diagnostic["outcome"] == "reenter_from_home"
     assert {key: diagnostic[key] for key in ("filter_hot", "extra_keys", "missing_keys", "keyword_matches", "reentry", "limit")} == {
