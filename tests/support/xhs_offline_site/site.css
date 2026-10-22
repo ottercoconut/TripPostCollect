@@ -1,6 +1,6 @@
 /* 几何与 site.js 的常量一致：静态 V16 布局页头 64px 固定，筛选栏 56px 随文档滚动，列表自文档 120px 起每行 360px、4 列；
-   AI 对话布局页头（搜索框区域）116px 固定，列表在容器内自 56px（__top）起；关闭对话栏后整页滚动，标签行 40px，列表自
-   文档 156px 起。 */
+   AI 对话布局页头（搜索框区域）116px 固定，列表在容器内自 56px（__top）起；关闭对话栏后整页滚动，标签行 40px、热门
+   筛选标签排 48px，列表自文档 204px 起。 */
 html, body { margin: 0; padding: 0; background: #fff; font-family: sans-serif; }
 .header { position: fixed; top: 0; left: 0; right: 0; height: 64px; background: #fff; z-index: 30;
   display: flex; align-items: center; border-bottom: 1px solid #eee; }
@@ -90,6 +90,18 @@ section.note-item .query-note-wrapper { position: absolute; top: 20px; left: 10p
 .search-layout__top .filters .title { width: 64px; }
 .search-layout__top .tag-container { margin-left: auto; }
 .search-layout__top .tag-container .tags { padding: 4px 8px; font-size: 13px; }
+/* 热门筛选标签排（#102，Mac 人工侦察 2026-10-22）：标签行下一行，高 48px，按钮高 36px；滚过原位后 .reds-sticky 加
+   is-fixed，固定在页头下沿（top 116px，z-index 5），占位 .reds-sticky-box 保持 48px 高。对话栏打开时隐藏：AI 对话布局下
+   它是否在容器内吸顶未经实测，那里的几何保持第 6–8 轮验证过的样子。 */
+.search-layout__middle .reds-sticky-box { height: 48px; }
+.with-ai-chat .search-layout__middle .reds-sticky-box { display: none; }
+.reds-sticky { height: 48px; box-sizing: border-box; padding-left: 40px; background: #fff; }
+.reds-sticky.is-fixed { position: fixed; top: 116px; z-index: 5; }
+.tab-scroll-container { height: 48px; display: flex; align-items: center; overflow-x: auto; overflow-y: hidden; }
+.tab-scroll-container .content-container { display: flex; height: 36px; }
+.tab-scroll-container button.tab { height: 36px; margin-right: 8px; padding: 0 14px; border: 0; border-radius: 18px;
+  background: #f5f5f5; white-space: nowrap; cursor: pointer; }
+.tab-scroll-container button.tab.active { background: #ffe4e8; }
 .feeds-end { height: 200px; line-height: 120px; text-align: center; color: #999; }
 .note-detail-mask { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 50; background: rgba(0, 0, 0, 0.6); }
 .note-detail-mask[hidden] { display: none; }

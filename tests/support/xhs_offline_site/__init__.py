@@ -89,6 +89,10 @@ class XhsOfflineSite:
     封面的卡片）。`hover_opens_panel` 与 `xhs_fake_site` 的同名选项语义一致：光标移入筛选入口时面板打开，移到入口与
     面板的并集之外即收起，点入口仍切换；默认面板只随点击入口切换。`panel_min_height` 给出时面板内容区至少这么高
     （像素），用于面板下方放不下移开光标落点的情形（#81）。
+    关闭对话栏后的 V16 下，标签行下一行是热门筛选标签排，滚过原位后吸顶在 116–164（#102）；点任一标签，前端以新
+    search_id 带 filter_hot 重新搜索第 1 页（非目标会话，回应 `general_items`）并替换列表。`hot_search_on_cover` 给出时，
+    第 N 次点封面不开浮层、改为这样一次搜索（模拟第 9 轮误点的后果），只注入第一个首页文档，回首页重新进入后不再注入。
+    `hot_search_requests()` 为带 filter_hot 的搜索请求。
     """
 
     def __init__(
@@ -103,6 +107,7 @@ class XhsOfflineSite:
         hot_query_at: int | None = None,
         hover_opens_panel: bool = False,
         panel_min_height: int = 0,
+        hot_search_on_cover: int = 0,
     ) -> None:
         if layout not in LAYOUTS:
             raise ValueError(f"unknown offline layout: {layout}")
@@ -114,6 +119,7 @@ class XhsOfflineSite:
         self.hot_query_at = hot_query_at
         self.hover_opens_panel = hover_opens_panel
         self.panel_min_height = panel_min_height
+        self.hot_search_on_cover = hot_search_on_cover
         self.pages = [list(items) for items in pages]
         self.general_items = list(general_items if general_items is not None else
                                   [search_item(f"general-{index}") for index in range(8)])
@@ -149,6 +155,12 @@ class XhsOfflineSite:
     def detail(self, note_id: str) -> dict[str, Any]:
         return self.details.setdefault(note_id, detail_card(note_id))
 
+    def hot_search_requests(self) -> list[dict[str, Any]]:
+        return [
+            body for body in self.search_requests
+            if any(item.get("type") == "filter_hot" for item in body.get("filters") or [])
+        ]
+
     def image_body(self, url: str) -> bytes:
         return _png_for(url)
 
@@ -181,12 +193,15 @@ class XhsOfflineSite:
     async def _document(self, route: Any, path: str) -> None:
         self.document_requests.append(path)
         if path == "/explore":
+            # 误点注入只给第一个首页文档：程序回首页重新进入后的文档不再注入。
+            hot_search_on_cover, self.hot_search_on_cover = self.hot_search_on_cover, 0
             body = (
                 (SITE_DIR / "explore.html").read_text(encoding="utf-8")
                 .replace("__TPC_LAYOUT__", self.layout)
                 .replace("__TPC_AI_CHAT_CLOSE__", self.ai_chat_close)
                 .replace("__TPC_FILTER_PANEL__", "hover" if self.hover_opens_panel else "click")
                 .replace("__TPC_PANEL_HEIGHT__", str(int(self.panel_min_height)))
+                .replace("__TPC_HOT_SEARCH_ON_COVER__", str(int(hot_search_on_cover)))
             )
             await route.fulfill(status=200, headers={"content-type": "text/html; charset=utf-8"}, body=body.encode())
         elif path.startswith("/__offline__/") and Path(path).suffix in STATIC_TYPES:

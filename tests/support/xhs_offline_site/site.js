@@ -19,6 +19,10 @@
    旧位置 div.author 下的作者名隐藏在前，可见的作者名与头像链接在 .interaction-container 的 .author-container 里，
    评论区里评论者（含作者本人）的 a.name 也在 div.author 下；作者名 target=_blank 打开作者页，评论者链接只计数；
    feed 或搜索返回 461/471 时显示验证层。同一文档内图片元素按 URL 复用，重开不再请求（模拟内存缓存）。
+   V16 的顶部遮挡（Mac 人工侦察 2026-10-22，#102）：页头（.ai-header-container）固定在 0–116；关闭对话栏后，标签行
+   下一行是热门筛选标签排（.search-layout__middle > .reds-sticky-box > .reds-sticky > … > button.tab，“综合”选中），
+   滚过原位后 .reds-sticky 改为 position: fixed; top: 116px，覆盖 116–164；点任一标签以新 search_id 带 filter_hot
+   重新搜索并替换列表（<html data-hot-search-on-cover="N"> 另让第 N 次点封面改为这样一次搜索，模拟误点的后果）。
    全部请求由测试的 context.route 回应。 */
 (() => {
   'use strict';
@@ -36,9 +40,15 @@
   const HOVER_PANEL = document.documentElement.dataset.filterPanel === 'hover';
   // 面板内容区的最小高度（像素，0 为按内容）：用于面板下方放不下移开光标落点的情形（#81）。
   const PANEL_MIN_HEIGHT = Number(document.documentElement.dataset.filterPanelHeight) || 0;
-  // 与 site.css 一致：静态 V16 列表自文档 120px 起，AI 对话布局自滚动容器内 56px 起，关闭对话栏后自文档 156px
-  // （页头 116px 加标签行 40px）起；每行 360px、4 列；尾部 200px。
-  const listTop = () => (chatOpen ? 56 : STATIC_V16 ? 120 : 156);
+  // 第几次点封面改为带 filter_hot 的新搜索（0 为不注入，#102）。
+  const HOT_SEARCH_ON_COVER = Number(document.documentElement.dataset.hotSearchOnCover) || 0;
+  // 热门筛选标签排（Mac 人工侦察 2026-10-22）：首项“综合”默认选中；滚过原位后吸顶在页头下沿。
+  const HOT_TAGS = ['综合', '10月', '实况', '路线规划', '行程安排', '门票价格', '三天两夜', '天主教堂', '一日游', '打卡',
+    '拍照', '攻略'];
+  const HOT_ROW_STICK_TOP = 116;
+  // 与 site.css 一致：静态 V16 列表自文档 120px 起，AI 对话布局自滚动容器内 56px 起，关闭对话栏后自文档 204px
+  // （页头 116px、标签行 40px 加热门标签排 48px）起；每行 360px、4 列；尾部 200px。
+  const listTop = () => (chatOpen ? 56 : STATIC_V16 ? 120 : 204);
   const ROW_HEIGHT = 360;
   const COLUMNS = 4;
   // 对话栏打开时结果列表只占左侧（对话栏内联宽 515px），列宽收窄、左边距缩小以容纳 4 列（与 site.css 一致）。
@@ -90,6 +100,11 @@
     aiChatClosed: 0,
     aiChatReopened: 0,
     askAiClicks: 0,
+    // #102：热门标签被点的次数与文字、标签排吸顶的次数、注入的误点搜索次数。
+    hotTabClicks: 0,
+    hotTabLabels: [],
+    hotRowStuck: 0,
+    injectedHotSearches: 0,
   };
   window.__tpcOffline = audit;
 
@@ -138,6 +153,7 @@
     resultsUrl: '',
   };
   let ui = null;
+  let coverPresses = 0;
 
   // 搜索结果页 ---------------------------------------------------------------
 
@@ -159,6 +175,12 @@
     if (coverUrl) cover.appendChild(cachedImage(coverUrl));
     cover.addEventListener('click', (event) => {
       event.preventDefault();
+      coverPresses += 1;
+      if (coverPresses === HOT_SEARCH_ON_COVER) {
+        audit.injectedHotSearches += 1;
+        hotSearch(HOT_TAGS[3]);
+        return;
+      }
       openOverlay(item);
     });
     section.append(cover, el('div', 'footer', card.display_title || ''));
@@ -168,8 +190,27 @@
   // 列表的滚动位置：对话栏打开时是 .feeds-scroller 的，V16（含关闭对话栏后）是整页的。
   const listScrollTop = () => (chatOpen ? ui.scroller.scrollTop : window.scrollY);
 
+  // 热门筛选标签排吸顶：关闭对话栏后，占位的 .reds-sticky-box 上沿滚到页头下沿之上时，.reds-sticky 改为固定定位
+  // （top 116px，横向与占位对齐），滚回原位后恢复。对话栏打开时标签排隐藏，不吸顶。
+  const updateSticky = () => {
+    if (!ui || !ui.sticky) return;
+    const box = ui.stickyBox.getBoundingClientRect();
+    const stuck = !chatOpen && box.height > 0 && box.top < HOT_ROW_STICK_TOP;
+    if (stuck && !ui.sticky.classList.contains('is-fixed')) audit.hotRowStuck += 1;
+    ui.sticky.classList.toggle('is-fixed', stuck);
+    ui.sticky.style.left = stuck ? `${box.left}px` : '';
+    ui.sticky.style.width = stuck ? `${box.width}px` : '';
+  };
+
+  // 点热门标签（或注入的误点）：前端以新 search_id、当前筛选加 filter_hot 重新搜索，列表回顶并替换。
+  const hotSearch = (label) => {
+    if (ui && ui.hotTabs) ui.hotTabs.forEach((tab) => tab.classList.toggle('active', tab.textContent === label));
+    newSession([...buildFilters(), { type: 'filter_hot', tags: [label] }]);
+  };
+
   const renderList = () => {
     if (!ui) return;
+    updateSticky();
     const container = ui.container;
     container.style.height = `${Math.ceil(state.items.length / COLUMNS) * ROW_HEIGHT}px`;
     const currentRow = Math.max(0, Math.floor((listScrollTop() - listTop()) / ROW_HEIGHT));
@@ -458,6 +499,10 @@
     let divider = null;
     let chat = null;
     let chatNotes = null;
+    let stickyBox = null;
+    let sticky = null;
+    let hotContent = null;
+    let hotTabs = null;
     let insertEntries;
     if (!STATIC_V16) {
       // 标签行：“笔记”“用户”“问点点 ai”与筛选入口同一行；对话栏打开时这个入口隐藏（CSS），全页 div.filter 不唯一。
@@ -471,9 +516,28 @@
       });
       tabs.appendChild(askAi);
       top.appendChild(tabs);
+      // 热门筛选标签排（#102）：在标签行下一行、第一行卡片上方；对话栏打开时隐藏（CSS）。
+      const middle = el('div', 'search-layout__middle');
+      [stickyBox, sticky, , hotContent] = wrapped(
+        'reds-sticky-box sticky tag-search-sticky-ai', 'reds-sticky', 'scroll-container tab-scroll-container ai-mode',
+        'content-container',
+      );
+      hotTabs = HOT_TAGS.map((label, index) => {
+        const tab = el('button', index === 0 ? 'tab active' : 'tab', label);
+        tab.type = 'button';
+        tab.setAttribute('aria-details', label);
+        tab.addEventListener('click', () => {
+          audit.hotTabClicks += 1;
+          audit.hotTabLabels.push(label);
+          hotSearch(label);
+        });
+        return tab;
+      });
+      hotContent.append(...hotTabs);
+      middle.appendChild(stickyBox);
       const main = el('div', 'search-layout__main');
       main.append(container, end);
-      layout.append(top, el('div', 'search-layout__middle'), main);
+      layout.append(top, middle, main);
       scroller = el('div', 'feeds-scroller');
       scroller.appendChild(layout);
       scroller.addEventListener('scroll', () => {
@@ -528,7 +592,7 @@
     document.getElementById('app').replaceChildren(page);
     ui = {
       page, layout, scroller, divider, chat, layoutEntry, chatEntry, entries, insertEntries, panel, panelHost, container,
-      chatNotes, entryShown: false, pointerOnEntry: false,
+      chatNotes, stickyBox, sticky, hotTabs, entryShown: false, pointerOnEntry: false,
     };
     refreshFilterUi();
   };
@@ -794,12 +858,12 @@
     if (!chatOpen) onListScroll();
   }, { passive: true });
   // 结果页上的点击按命中元素归类（捕获阶段，先于各自的处理）：封面、对话栏笔记引用（不跳转）、筛选、浮层、对话栏
-  // 关闭按钮与“问点点 ai”（各自计数）之外的其余点击都记为 stray（class 链首段）。
+  // 关闭按钮、“问点点 ai”与热门标签排（各自计数）之外的其余点击都记为 stray（class 链首段）。
   document.addEventListener('click', (event) => {
     if (!ui) return;
     const target = event.target instanceof Element ? event.target : null;
     if (!target || target.closest(
-      '.note-detail-mask, .captcha-layer, div.filter, .filters-wrapper, .xhs-ai-chat-header__close, .ai-tab',
+      '.note-detail-mask, .captcha-layer, div.filter, .filters-wrapper, .xhs-ai-chat-header__close, .ai-tab, .reds-sticky',
     )) return;
     const card = target.closest('section.note-item');
     if (target.closest('section.note-item a.cover')) {
