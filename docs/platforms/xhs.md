@@ -627,7 +627,8 @@ child `summary.json` 的
   出现过），且连续 2 次读数仍未登记的卡片为
   `xhs_search_card_unregistered`；目标会话第 k 页到达时缺第 k−1 页为 `xhs_search_page_gap`；已越过的页内
   未知项向上补漏到顶或满 3 步仍没读到、或到底部仍有未决定项为 `xhs_search_items_unresolved`；到底部等不到新页，检查可见状态
-  并上下抖动 3 次后仍没有新页为 `xhs_search_load_stalled`；搜索响应未知业务码为 `search_request_failed`；一轮内第 4 次
+  并上下抖动 3 次后仍没有新页为 `xhs_search_load_stalled`（有无新页一律与到底时目标会话的页数比较：抖动中到达、
+  先被下一次滚动的翻页停顿检查消费的页同样算新页，#103）；搜索响应未知业务码为 `search_request_failed`；一轮内第 4 次
   出现非目标的新会话为 `xhs_unexpected_search_session_limit`。
 - 每页已越过且全部决定后写 `adaptive_batch_completed`；只有本页有新增决定时才发布批次。末页
   `has_more=false` 完成即 `source_exhausted(has_more_false)`，停止事件的 `source_visit_id` 指向该搜索访问。

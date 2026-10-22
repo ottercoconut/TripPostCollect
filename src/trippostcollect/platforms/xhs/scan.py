@@ -1761,8 +1761,13 @@ class XhsScanMixin:
         return scroll_y + inner_height >= scroll_height - 2
 
     async def _handle_list_bottom(self) -> None:
-        """已到列表底部：末页 has_more=false 时完成剩余页；否则等待新页，停滞则检查可见状态并抖动。"""
+        """已到列表底部：末页 has_more=false 时完成剩余页；否则等待新页，停滞则检查可见状态并抖动。
+
+        新页一律与进入时目标会话的页数比较（#103）：抖动中到达的页会先被下一次滚动的翻页停顿检查消费、登记，
+        之后的等待看不到新响应，但页数已超过进入时的基准。
+        """
         scan = self._scan
+        before = len(scan.target.pages)
         last = scan.target.last_page
         if last is not None and last.has_more is False:
             for page in scan.target.pages.values():
@@ -1770,28 +1775,30 @@ class XhsScanMixin:
                     page.passed, page.passed_by = True, {"reason": "list_bottom"}
             if self._finish_ready_batches():
                 return
-            if await self._await_new_search_page():
+            if await self._await_new_search_page(before):
                 return  # 前端可能正在重新搜索，列表已先行替换
             raise PlatformRuntimeError(
                 "XHS search reached the end with undecided items", code="xhs_search_items_unresolved",
             )
-        if await self._await_new_search_page():
+        if await self._await_new_search_page(before):
             return
         await self._check_stalled_page_state()
         for _ in range(XHS_STALL_JIGGLES):
             await self._scroll_feed_step(-1, phase="stall")
             await self._scroll_feed_step(1, phase="stall")
-            if await self._await_new_search_page():
+            if await self._await_new_search_page(before):
                 return
         raise PlatformRuntimeError("XHS search stopped loading new pages", code="xhs_search_load_stalled")
 
-    async def _await_new_search_page(self) -> bool:
+    async def _await_new_search_page(self, before: int) -> bool:
+        """目标会话的页数超过调用方记下的 `before`，或出现了新会话时为 True。已经如此时不再等待；否则等一个新的
+        搜索响应（至多 `XHS_SEARCH_LOAD_WAIT_SECONDS`），消费后再判定。"""
         scan = self._scan
-        before = len(scan.target.pages)
-        await self._require_capture().wait_for(
-            SEARCH_RULE, after_seq=scan.search_cursor, timeout=XHS_SEARCH_LOAD_WAIT_SECONDS,
-        )
-        await self._consume_search_captures()
+        if len(scan.target.pages) <= before and scan.pending_session is None:
+            await self._require_capture().wait_for(
+                SEARCH_RULE, after_seq=scan.search_cursor, timeout=XHS_SEARCH_LOAD_WAIT_SECONDS,
+            )
+            await self._consume_search_captures()
         return len(scan.target.pages) > before or scan.pending_session is not None
 
     async def _check_stalled_page_state(self) -> None:
