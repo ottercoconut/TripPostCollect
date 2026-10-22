@@ -17,6 +17,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import sys
 from urllib.parse import quote, urlsplit
@@ -352,7 +353,9 @@ def assert_staged_png(site: XhsOfflineSite, crawler, note_id: str, count: int) -
 
 @pytest.mark.asyncio
 async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tmp_path):
-    """AI 对话布局下 3 页（每页 12 项、共 36 项）末页 has_more=false：等延迟渲染、位于对话栏内的筛选入口，面板悬停
+    """AI 对话布局下 3 页（每页 12 项、共 36 项）末页 has_more=false。对话栏头部没有关闭按钮（#99）：写一条
+    `ai_chat_close` 诊断，不点击，按 AI 对话布局完成全程。等延迟渲染、位于对话栏内的筛选入口（标签行里另有一个隐藏的
+    div.filter），面板悬停
     开合：光标移入入口即打开、不按入口，按文字点选“图文”的真标签（不是重叠的 aria-hidden 副本），把光标移出入口与
     面板即收起（面板从 DOM 移除）；列表在页头下方的容器内滚动、
     window 不动，滚轮只作用在结果列表上，对话栏里与结果 ID 重叠的笔记链接不计入、不点击，点卡片都命中封面；
@@ -362,7 +365,7 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     pages = [[search_item(f"p{number}-{index:02d}") for index in range(12)] for number in (1, 2, 3)]
     pages[0][6] = search_item("p1-06", card_type="video")
     images = {"p1-02": 3, "p2-05": 2, "p3-09": 1}
-    site = XhsOfflineSite(KEYWORD, pages, hot_query_at=6, hover_opens_panel=True)
+    site = XhsOfflineSite(KEYWORD, pages, hot_query_at=6, hover_opens_panel=True, ai_chat_close="missing")
     site.details["p1-02"] = detail_card("p1-02", images=3, user_id="author-a")
     site.details["p2-05"] = detail_card("p2-05", images=2, user_id="author-a")
     site.details["p3-09"] = detail_card("p3-09", images=1, user_id="author-b")
@@ -377,6 +380,8 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
         layout = await page.evaluate("""() => ({
             ai_chat: document.querySelectorAll('.ai-feeds-page.with-ai-chat').length,
             entries: document.querySelectorAll('div.filter').length,
+            visible_entries: Array.from(document.querySelectorAll('div.filter'))
+                .filter((node) => node.getBoundingClientRect().width > 0).length,
             layout_entries: document.querySelectorAll('.search-layout div.filter').length,
             chat_entries: document.querySelectorAll('.ai-chat-inner > div.filter.ai-chat-filter').length,
             panels: document.querySelectorAll('.filters-wrapper').length,
@@ -427,9 +432,17 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     assert audit["clickedOptions"] == [["filter_note_type", "图文"]]
     assert audit["hiddenTagClicks"] == 0  # 点中真标签，不是 aria-hidden 副本
     assert layout == {
-        "ai_chat": 1, "entries": 1, "layout_entries": 0, "chat_entries": 1,
+        "ai_chat": 1, "entries": 2, "visible_entries": 1, "layout_entries": 1, "chat_entries": 1,
         "panels": 0, "entry_active": 0, "chat_scroll_top": 0,
     }
+    # 没有关闭按钮：不写 dismiss_ai_chat、不点，诊断与日志各一条，按 AI 对话布局继续；“问点点 ai”从未被点。
+    assert actions(crawler, "dismiss_ai_chat") == []
+    assert audit["aiChatCloseClicks"] == audit["aiChatClosed"] == audit["askAiClicks"] == 0
+    [chat_failure] = [item for item in crawler._navigation_diagnostics if item["stage"] == "ai_chat_close"]
+    assert chat_failure["outcome"] == "button_not_clickable" and chat_failure["clicks"] == 0
+    assert chat_failure["with_ai_chat"] is True and chat_failure["button_count"] == 0
+    assert chat_failure["ai_chat_inner"] is not None and chat_failure["button"] is None
+    assert sum("AI chat panel not closed; continuing in the AI chat layout" in line for line in log_lines) == 1
     assert audit["chatScrolls"] == 0  # 滚轮全部作用在结果列表上
     # 列表在容器内滚动：window 始终不动，账本中的滚动位置取自容器；第 2、3 页由滚到容器底部附近触发。
     assert audit["maxWindowScrollY"] == 0 and lists["window_scroll_y"] == 0
@@ -632,8 +645,8 @@ async def test_note_engagement_script_reads_the_field_structure(tmp_path):
 @pytest.mark.asyncio
 async def test_feed_verification_layer_then_redo_reuses_the_cached_first_image(monkeypatch, tmp_path):
     """feed 返回 461：站点显示验证层（captcha iframe），完成后整篇重做；同一文档重开时首图走内存、没有新的
-    响应事件，记录引用第一次尝试截获的图片访问，门禁照常通过。面板只随点击入口切换（默认）：按入口打开，移开光标
-    收不起，回退为按入口收起。"""
+    响应事件，记录引用第一次尝试截获的图片访问，门禁照常通过。进入结果页后先关闭对话栏（#99），之后为 V16 整页滚动。
+    面板只随点击入口切换（默认）：按入口打开，移开光标收不起，回退为按入口收起。"""
     items = [search_item(f"v-{index}") for index in range(8)]
     site = XhsOfflineSite(KEYWORD, [items])
     site.details["v-3"] = detail_card("v-3", images=2, user_id="author-v")
@@ -648,6 +661,7 @@ async def test_feed_verification_layer_then_redo_reuses_the_cached_first_image(m
         layers = await page.evaluate("() => document.querySelectorAll('.captcha-layer').length")
 
     assert site.feed_requests == ["v-3", "v-3"]
+    assert len(actions(crawler, "dismiss_ai_chat")) == 1 and audit["aiChatClosed"] == 1 and audit["askAiClicks"] == 0
     assert audit["captchaShown"] == 1 and layers == 0
     assert filter_targets(crawler) == [
         ("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave"), ("panel_close", "entry_press"),
@@ -672,10 +686,43 @@ async def test_feed_verification_layer_then_redo_reuses_the_cached_first_image(m
     assert site.unexpected == [] and site.escaped() == []
 
 
+APPROACH_LINE = re.compile(
+    r"Filter option approach: hovered=(True|False), entry=\((-?\d+), (-?\d+), (-?\d+), (-?\d+)\), "
+    r"entry_container=\((-?\d+), (-?\d+), (-?\d+), (-?\d+)\), panel=\((-?\d+), (-?\d+), (-?\d+), (-?\d+)\), "
+    r"corridor=(None|\((-?\d+), (-?\d+), (-?\d+), (-?\d+)\)), container_gap=(-?[\d.]+)"
+)
+
+
+def approach_geometry(log_lines: list[str]) -> dict:
+    """点选“图文”时那行日志里的框（left、top、right、bottom）与 div 到面板的间隙。"""
+    [line] = [line for line in log_lines if "Filter option approach:" in line]
+    match = APPROACH_LINE.search(line)
+    assert match, line
+    values = match.groups()
+    boxes = [tuple(int(value) for value in values[start:start + 4]) for start in (1, 5, 9)]
+    corridor = None if values[13] == "None" else tuple(int(value) for value in values[14:18])
+    return {
+        "hovered": values[0] == "True", "entry": boxes[0], "entry_container": boxes[1], "panel": boxes[2],
+        "corridor": corridor, "gap": float(values[18]),
+    }
+
+
+def assert_v16_gap_corridor(geometry: dict) -> None:
+    """关闭对话栏后的 V16 几何（同侦察）：div.filter 84×40、“筛选” span 高 20 在其中，面板在 div 下方 10px，走廊为
+    span 下沿到面板上沿、span 与面板横向重叠的那段。"""
+    span, container, panel = geometry["entry"], geometry["entry_container"], geometry["panel"]
+    assert (container[2] - container[0], container[3] - container[1]) == (84, 40), geometry
+    assert span[3] - span[1] == 20 and container[1] <= span[1] < span[3] <= container[3], geometry
+    assert geometry["gap"] == 10.0 and panel[1] == container[3] + 10, geometry
+    assert geometry["corridor"] == (max(span[0], panel[0]), span[3], min(span[2], panel[2]), panel[1]), geometry
+
+
 @pytest.mark.asyncio
 async def test_tall_hover_panel_is_left_sideways_when_there_is_no_room_below(monkeypatch, tmp_path):
-    """#81 第 7 轮：面板很高（内容区至少 560px，下沿约在 758px），列表区域（纵向约 273–743px）在面板下方放不下落点，
-    改取面板左侧；移开光标即收起，不按入口，点选“图文”之后面板只收起一次、不再打开。"""
+    """#81 第 7 轮：进入结果页后关闭对话栏（#99），按 V16 布局筛选。面板很高（至少 560px，下沿约在 726px），列表区域
+    （纵向约 273–743px）在面板下方放不下落点，改取面板左侧；移开光标即收起，不按入口，点选“图文”之后面板只收起
+    一次、不再打开。V16 的入口 div.filter 与面板之间有 10px 间隙，“筛选” span 到面板 20px：按 div 判定加间隙走廊，
+    从入口到“图文”（大致在入口正下方）的接近途中面板一直开着。"""
     items = [search_item(f"t-{index}") for index in range(8)]
     site = XhsOfflineSite(KEYWORD, [items], hover_opens_panel=True, panel_min_height=560)
     known = [item["id"] for item in items]
@@ -686,23 +733,98 @@ async def test_tall_hover_panel_is_left_sideways_when_there_is_no_room_below(mon
         with crawler_log_lines() as log_lines:
             await crawler.search()
         audit = await page.evaluate("() => window.__tpcOffline")
+        ai_chat = await page.evaluate("() => document.querySelectorAll('.with-ai-chat, .ai-chat-section').length")
 
+    assert len(actions(crawler, "dismiss_ai_chat")) == 1 and audit["aiChatClosed"] == 1 and ai_chat == 0
     assert [session["filtered"] for session in audit["sessions"]] == [False, True]
     assert filter_targets(crawler) == [("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave")]
     panel_events = audit["panelEvents"]
     option = panel_events.index("option")
     assert panel_events[option - 1] == "hover_open" and panel_events[option:] == ["option", "leave_close"]
     assert not {"press_open", "press_close"} & set(panel_events), panel_events
+    geometry = approach_geometry(log_lines)
+    assert geometry["hovered"] is True
+    assert_v16_gap_corridor(geometry)
     assert not any("leave area unavailable" in line for line in log_lines)
     assert not any("stayed open after the pointer left" in line for line in log_lines)
+    assert audit["askAiClicks"] == 0 and audit["strayClicks"] == []
     assert last_stop(state_path)["stop_reason"] == "source_exhausted"
+    assert site.unexpected == [] and site.escaped() == []
+
+
+@pytest.mark.asyncio
+async def test_ai_chat_is_closed_then_the_scan_scrolls_the_whole_page_and_passes_the_gate(monkeypatch, tmp_path):
+    """#99：AI 对话布局进入结果页，点关闭按钮（写 dismiss_ai_chat、带 pointer），对话栏与分隔条移除，列表改为整页滚动；
+    前端以回车会话的同一 search_id 续页第 2、3 页，记为非目标访问、trigger 为关闭动作；之后按 V16 布局点选“图文”，
+    两页目标会话照常扫完，“问点点 ai”从未被点，门禁通过。"""
+    pages = [[search_item(f"c{number}-{index:02d}") for index in range(12)] for number in (1, 2)]
+    unknown = ["c1-05", "c2-07"]
+    site = XhsOfflineSite(KEYWORD, pages)
+    known = [item["id"] for items in pages for item in items if item["id"] not in unknown]
+
+    async with replay_browser(site) as (context, page, pointer_events):
+        crawler, state_path = prepare_crawler(monkeypatch, tmp_path, context, page, known=known)
+        await page.goto(EXPLORE_URL)
+        with crawler_log_lines() as log_lines:
+            await crawler.search()
+        audit = await page.evaluate("() => window.__tpcOffline")
+        layout = await page.evaluate("""() => ({
+            ai_chat: document.querySelectorAll('.ai-feeds-page.with-ai-chat').length,
+            chat_sections: document.querySelectorAll('.ai-chat-section, .ai-chat-section-divider').length,
+            close_buttons: document.querySelectorAll('button.xhs-ai-chat-header__close').length,
+            top_entries: document.querySelectorAll('.search-layout > .search-layout__top > div.filter').length,
+            ask_ai_tabs: document.querySelectorAll('.search-layout__top .ai-tab').length,
+        })""")
+        metrics = await page.evaluate(DOM_SCRIPTS["scroll_metrics"])
+
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted" and stopped["source_page"] == 2
+    assert [record["note_id"] for record in crawler.records] == unknown
+    [dismiss] = actions(crawler, "dismiss_ai_chat")
+    assert dismiss["target"] == {"control": "ai_chat_close"}
+    assert {"x_ratio", "y_ratio", "approach_ms", "moves", "settle_ms", "hold_ms"} <= set(dismiss["pointer"])
+    assert audit["aiChatCloseClicks"] == audit["aiChatClosed"] == 1 and audit["aiChatReopened"] == 0
+    assert audit["askAiClicks"] == 0 and audit["strayClicks"] == []
+    assert layout == {"ai_chat": 0, "chat_sections": 0, "close_buttons": 0, "top_entries": 1, "ask_ai_tabs": 1}
+    # 关闭后整页滚动：window 动过，容器没有；扫描结束时的读数为文档滚动。
+    assert audit["maxWindowScrollY"] > 0 and audit["maxListScrollTop"] == 0
+    assert metrics["scroll_container"] == "document" and metrics["view_rect"]["top"] == 0
+    assert metrics["with_ai_chat"] is False and metrics["top_row_rect"] is None  # 扫完时标签行已滚出可见区
+    # 续页：回车会话（不带 filters）的同一 search_id 第 2、3 页，非目标访问，trigger 为关闭动作；目标会话由点选“图文”触发。
+    general = [body for body in site.search_requests if "filters" not in body]
+    assert [body["page"] for body in general] == [1, 2, 3] and len({body["search_id"] for body in general}) == 1
+    searches = [line for line in ledger_lines(crawler) if line.get("kind") == "visit" and line["stage"] == "search_results"]
+    assert [(line["is_target"], line["search_page"]) for line in searches] == [
+        (False, 1), (False, 2), (False, 3), (True, 1), (True, 2),
+    ]
+    assert [line["trigger"] for line in searches[1:3]] == [dismiss["id"], dismiss["id"]]
+    assert visit(crawler, searches[3]["trigger"])["target"]["filter"] == "note_type"
+    assert any(
+        line.startswith("[XiaoHongShuCrawler.scan] AI chat panel close: clicks=1, confirmed=True, scroll_container=document")
+        for line in log_lines
+    )
+    assert not any("AI chat panel not closed" in line or "reappeared" in line for line in log_lines)
+    # V16 下按入口打开面板（默认只随点击切换），移开光标收不起再按入口；入口与面板之间的走廊照常算出。
+    assert filter_targets(crawler) == [
+        ("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave"), ("panel_close", "entry_press"),
+    ]
+    assert audit["panelEvents"] == ["press_open", "option", "press_close"]
+    geometry = approach_geometry(log_lines)
+    assert geometry["hovered"] is False
+    assert_v16_gap_corridor(geometry)
+    assert audit["coverClicks"] == len(actions(crawler, "click_card")) == audit["overlaysOpened"] == 2
+
+    result = run_gate(crawler, state_path, tmp_path)
+    assert result["problem_counts"] == {}
+    assert result["content_visit_ok"] is True and result["checked_records"] == 2
     assert site.unexpected == [] and site.escaped() == []
 
 
 @pytest.mark.asyncio
 async def test_frontend_self_load_when_viewport_is_not_filled_passes_the_gate(monkeypatch, tmp_path):
     """V16 布局（整页滚动）下目标会话第 1 页只有一行、填不满视口：站点不经滚动自行请求第 2 页，门禁计入
-    frontend_self_loads 而不失败；筛选入口在 .search-layout 内，其前的零尺寸副本被跳过。"""
+    frontend_self_loads 而不失败；筛选入口在 .search-layout 内，其前的零尺寸副本被跳过。进入时就没有对话栏（#99）：
+    不点、不写动作，只记一行日志。"""
     pages = [[search_item(f"s1-{index}") for index in range(4)], [search_item(f"s2-{index}") for index in range(8)]]
     site = XhsOfflineSite(KEYWORD, pages, layout="v16")
     unknown = {"s1-1", "s2-4"}
@@ -711,7 +833,8 @@ async def test_frontend_self_load_when_viewport_is_not_filled_passes_the_gate(mo
     async with replay_browser(site) as (context, page, pointer_events):
         crawler, state_path = prepare_crawler(monkeypatch, tmp_path, context, page, known=known)
         await page.goto(EXPLORE_URL)
-        await crawler.search()
+        with crawler_log_lines() as log_lines:
+            await crawler.search()
         audit = await page.evaluate("() => window.__tpcOffline")
         filter_nodes = await page.evaluate("() => document.querySelectorAll('.search-layout div.filter').length")
         ai_chat = await page.evaluate("() => document.querySelectorAll('.with-ai-chat').length")
@@ -719,6 +842,10 @@ async def test_frontend_self_load_when_viewport_is_not_filled_passes_the_gate(mo
 
     assert audit["selfLoads"] >= 1
     assert filter_nodes == 2 and ai_chat == 0  # 零尺寸副本在真实入口之前，入口延迟插入
+    assert actions(crawler, "dismiss_ai_chat") == [] and audit["aiChatCloseClicks"] == 0
+    assert [line for line in log_lines if "AI chat panel" in line] == [
+        "[XiaoHongShuCrawler.scan] AI chat panel absent; already V16 layout"
+    ]
     assert metrics["scroll_container"] == "document" and metrics["view_rect"]["top"] == 0  # 整页滚动
     assert audit["clickedOptions"] == [["filter_note_type", "图文"]]
     assert [record["note_id"] for record in crawler.records] == ["s1-1", "s2-4"]
