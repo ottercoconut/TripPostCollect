@@ -19,7 +19,11 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from trippostcollect.platforms.xhs.behavior import list_area_box, merge_pending_behavior_evidence
+from trippostcollect.platforms.xhs.behavior import (
+    list_area_box,
+    list_top_row_floor,
+    merge_pending_behavior_evidence,
+)
 from trippostcollect.platforms.xhs.capture import (
     XHS_SEARCH_RULE,
     classify_xhs_api_response,
@@ -38,6 +42,7 @@ from trippostcollect.platforms.xhs.navigation import (
     search_request_page,
 )
 from trippostcollect.platforms.xhs.page_scripts import (
+    dom_ai_chat_state,
     dom_card_diagnostic,
     dom_filter_diagnostic,
     dom_filter_state,
@@ -68,7 +73,7 @@ XHS_SCROLL_SETTLE_SECONDS = (0.4, 1.2)
 # 按列表可见区比例取区域。光标已在区域内就不动，每一步的位移由若干个触控板手势凑成，总和恰为该步距离。
 # 滚动位置、可见区均指列表的实际滚动容器（见 page_scripts.scroll_metrics）。单步滚动不超过列表可见区高度 h 的
 # 0.8 倍；可点击带为可见区顶部加 0.1h 到底边上方 8px，且封面中心须命中本卡片。h ≥ 80px 时 0.8h ≤ 0.9h − 8，
-# 封面中心一步越不过整条带，向下扫描不跳过任何一行卡片。
+# 封面中心一步越不过整条带，向下扫描不跳过任何一行卡片。标签行在可见区内时带的上沿另须在它之下（见 `_click_band`）。
 XHS_SCROLL_VIEWPORT_RATIO = 0.8
 XHS_CLICK_BAND_TOP = 0.1
 XHS_CLICK_BAND_BOTTOM_MARGIN_PX = 8.0
@@ -98,9 +103,25 @@ XHS_FILTER_LEAVE_MARGIN_PX = 24.0
 XHS_FILTER_LEAVE_MIN_SIZE_PX = 40.0
 XHS_FILTER_LEAVE_POLLS = 8
 # 入口相对第 1 页结果的渲染时机未经实测（Mac 首轮在结果到达约 1 秒后读到空入口）；每次尝试按轮询间隔
-# 最多等这么久。入口出现后、点击之前的人手反应停顿是输入微停顿，不写 pause 行。
+# 最多等这么久。入口出现后、点击之前的人手反应停顿是输入微停顿，不写 pause 行；关闭对话栏的每次点击之前同样
+# 停顿一次。
 XHS_FILTER_ENTRY_WAIT_SECONDS = 15.0
-XHS_BEFORE_FILTER_SECONDS = (0.6, 1.8)
+XHS_REACTION_SECONDS = (0.6, 1.8)
+# V16 的悬停面板在入口正下方，入口 div.filter 与面板之间约有 10px 间隙，光标垂直穿过不收起（Mac 人工侦察
+# 2026-10-22）：div.filter 下沿到面板上沿不超过这么多像素（碰到或盖住面板也算）时，文字 span 下沿到面板上沿、两者
+# 横向重叠的那段并入悬停区域（见 `_gap_corridor`）。
+XHS_FILTER_GAP_CORRIDOR_MAX_PX = 16.0
+# 进入结果页后关闭“点点AI”对话栏（#99，Mac 人工侦察 2026-10-22）：关闭只对本次结果页加载有效，每次回车进入都
+# 要关。按钮可点（可见、不在 aria-hidden 祖先内、中心点命中）才点，至多点这么多次；每次点击后按间隔至多读这么多次，
+# 直到对话栏与 .ai-chat-inner 都不在。账本动作的 target 只是这个常量。
+XHS_AI_CHAT_CLOSE_ATTEMPTS = 2
+XHS_AI_CHAT_CONFIRM_POLLS = 20
+XHS_AI_CHAT_POLL_SECONDS = 0.25
+XHS_AI_CHAT_CLOSE_TARGET = {"control": "ai_chat_close"}
+# 关闭失败时并入导航诊断的 ai_chat_state 字段（计数与布尔）；元素框与点击次数另并入。
+XHS_AI_CHAT_DIAGNOSTIC_KEYS = (
+    "with_ai_chat", "button_count", "button_visible", "aria_label_ok", "aria_hidden_ancestor", "center_hit",
+)
 XHS_FILTER_APPLIED_TEXT = "已筛选"
 # 筛选失败时并入导航诊断的 filter_diagnostic 字段：只有计数与布尔，不含正文或地址；祖先链另并入、不进日志。
 XHS_FILTER_DIAGNOSTIC_KEYS = (
@@ -298,6 +319,12 @@ class ScanState:
     backfill_attempts: Counter = field(default_factory=Counter)
     observed_index: dict[str, int] = field(default_factory=dict)
     scroll_container: str = ""
+    # 本次结果页加载按 V16 布局运行（对话栏已关闭，或进入时就没有，#99）；关闭失败按 AI 布局继续时为假。
+    v16_layout: bool = False
+    # 当前目标会话已记过“对话栏重新出现”的诊断（每个目标会话一次）。
+    ai_chat_reappeared: bool = False
+    # 非目标会话第 2 页起的截获数（关闭对话栏引发同一非目标会话续页，只用于日志计数）。
+    non_target_followups: int = 0
 
 
 def _rect(value: Any) -> Optional[tuple[float, float, float, float]]:
@@ -312,10 +339,54 @@ def _panel_ready(state: dict[str, Any]) -> bool:
     return bool(state.get("panel_visible") and state.get("option"))
 
 
+def _state_box(state: dict[str, Any], key: str) -> Optional[Box]:
+    return Box.from_point(state[key]) if state.get(key) else None
+
+
+def _gap_corridor(state: dict[str, Any]) -> tuple[Optional[Box], Optional[float]]:
+    """入口与面板之间的间隙走廊（V16，#99）与入口容器下沿到面板上沿的像素数（没有入口或面板时为 None）。
+
+    悬停目标是入口 div.filter（`entry_container`），光标在文字 span 外、div 内时面板不收起，div 与面板之间约 10px 的
+    间隙也不收起。div 下沿到面板上沿不超过 `XHS_FILTER_GAP_CORRIDOR_MAX_PX`（不大于 0 也算）、span 下沿在面板上沿之上、
+    span 与面板横向重叠时，走廊为横向重叠段 × span 下沿到面板上沿。取不到 div 时按 span 判定，即 span 与面板之间
+    0 到上限像素的间隙。AI 对话布局的面板挂在入口内部，div 本来就盖住这段，加走廊无害。
+    """
+    entry, panel = _state_box(state, "entry"), _state_box(state, "panel")
+    if entry is None or panel is None:
+        return None, None
+    container = _state_box(state, "entry_container") or entry
+    gap = panel.top - (container.top + container.height)
+    entry_bottom = entry.top + entry.height
+    left = max(entry.left, panel.left)
+    right = min(entry.left + entry.width, panel.left + panel.width)
+    if gap <= XHS_FILTER_GAP_CORRIDOR_MAX_PX and entry_bottom < panel.top and right > left:
+        return Box(left, entry_bottom, right - left, panel.top - entry_bottom), gap
+    return None, gap
+
+
 def _hover_region(state: dict[str, Any]) -> tuple[Box, ...]:
     """悬停打开的面板在光标离开入口与面板时收起（#81）：接近“图文”与回退按入口收起时，轨迹限定在入口框与面板框的
-    并集内；收起面板时移开光标的落点取在这个并集之外（见 `_leave_area`）。"""
-    return tuple(Box.from_point(state[key]) for key in ("entry", "panel") if state.get(key))
+    并集内；收起面板时移开光标的落点取在这个并集之外（见 `_leave_area`）。有间隙走廊时并入（见 `_gap_corridor`）：
+    不并入时间隙里的轨迹点会被夹到入口或面板边上，光标一步跳过间隙。"""
+    boxes = tuple(box for box in (_state_box(state, "entry"), _state_box(state, "panel")) if box is not None)
+    corridor, _ = _gap_corridor(state)
+    return (boxes[0], corridor, boxes[1]) if corridor is not None else boxes
+
+
+def _ai_chat_closed(state: dict[str, Any]) -> bool:
+    return not state.get("with_ai_chat") and state.get("ai_chat_inner") is None
+
+
+def _ai_chat_button_clickable(state: dict[str, Any]) -> bool:
+    """关闭按钮可点：可见（有元素框）、不在 aria-hidden 祖先内、中心点命中按钮；aria-label 不符只进诊断。"""
+    return bool(state.get("button")) and not state.get("aria_hidden_ancestor") and state.get("center_hit") is True
+
+
+def _box_fields(value: Any) -> Optional[dict[str, float]]:
+    """诊断里的元素框：left、top、width、height 保留一位小数；没有为 None。"""
+    if not isinstance(value, dict):
+        return None
+    return {key: round(float(value.get(key) or 0), 1) for key in ("left", "top", "width", "height")}
 
 
 def _bounding_box(boxes: tuple[Box, ...]) -> Optional[Box]:
@@ -477,12 +548,13 @@ class XhsScanMixin:
     # 进入搜索与目标会话 ---------------------------------------------------------
 
     async def _start_target_session(self) -> None:
-        """回车 → 非目标第 1 页 → 点选“图文” → 目标会话第 1 页 → 收起面板（§3.2 第 1–5 条）。"""
+        """回车 → 非目标第 1 页 → 关闭对话栏（#99） → 点选“图文” → 目标会话第 1 页 → 收起面板（§3.2 第 1–5 条）。"""
         scan = self._scan
         for attempt in (0, 1):
             scan.entering = True
             try:
                 await self._enter_search(navigate=scan.entry_navigate or attempt > 0)
+                await self._dismiss_ai_chat()
                 session = await self._apply_target_filter()
                 if not session.keyword_matches:
                     raise XhsSearchEntryFailed("search_keyword_mismatch")
@@ -510,6 +582,104 @@ class XhsScanMixin:
             await self._consume_search_captures()
             raise
         await self._consume_search_captures()
+
+    async def _dismiss_ai_chat(self) -> None:
+        """关闭“点点AI”对话栏，之后按 V16 布局运行（#99）。进入结果页时没有对话栏就不做界面动作，只记一行日志。
+
+        每次点击之前先做反应停顿，再读一次按钮（新鲜的命中检测）：对话栏已关闭或按钮不可点就不再点——对话栏消失后
+        按钮原位置在 V16 下是结果列表，盲点会点开笔记。可点才计划点击、写 `dismiss_ai_chat`，到达并静止后再读一次，
+        按钮仍可点且落点仍在按钮内才按下；按下后限时轮询到对话栏与 .ai-chat-inner 都不在。未确认时至多再试一次。
+        之后先把这期间到达的搜索响应消费完（关闭会引发同一非目标会话的续页，trigger 落在本动作上），再进入筛选。
+        没有可点的按钮或两次都未确认时写一条导航诊断，按 AI 布局继续，本轮不失败。
+        """
+        scan = self._scan
+        page = self.context_page
+        scan.v16_layout = False
+        state = await dom_ai_chat_state(page)
+        if not state.get("with_ai_chat"):
+            scan.v16_layout = True
+            logger.info("[XiaoHongShuCrawler.scan] AI chat panel absent; already V16 layout")
+            return
+        followups = scan.non_target_followups
+        pointer = pointer_for(page)
+        clicks = 0
+        for _ in range(XHS_AI_CHAT_CLOSE_ATTEMPTS):
+            await self._scan_sleep(SCAN_RANDOM.uniform(*XHS_REACTION_SECONDS))
+            state = await dom_ai_chat_state(page)
+            if _ai_chat_closed(state) or not _ai_chat_button_clickable(state):
+                break
+            plan = await self._plan_click(state["button"])
+            self._record_trigger_action("dismiss_ai_chat", dict(XHS_AI_CHAT_CLOSE_TARGET), pointer=plan.evidence)
+            await pointer.approach(plan)
+            await pointer.settle(plan)
+            state = await dom_ai_chat_state(page)
+            if _ai_chat_closed(state):
+                break
+            if not (_ai_chat_button_clickable(state) and pointer.inside(Box.from_point(state["button"]))):
+                continue
+            await pointer.press(plan)
+            clicks += 1
+            for _ in range(XHS_AI_CHAT_CONFIRM_POLLS):
+                await self._scan_sleep(XHS_AI_CHAT_POLL_SECONDS)
+                state = await dom_ai_chat_state(page)
+                if _ai_chat_closed(state):
+                    break
+            if _ai_chat_closed(state):
+                break
+        confirmed = _ai_chat_closed(state)
+        await self._settle_search_captures()
+        scan.v16_layout = confirmed
+        metrics = await dom_scroll_metrics(page)
+        logger.info(
+            f"[XiaoHongShuCrawler.scan] AI chat panel close: clicks={clicks}, confirmed={confirmed}, "
+            f"scroll_container={metrics.get('scroll_container') or 'unknown'}, "
+            f"continuation_pages={scan.non_target_followups - followups}"
+        )
+        if not confirmed:
+            await self._record_ai_chat_failure(
+                "not_confirmed" if clicks else "button_not_clickable", state, clicks=clicks,
+            )
+
+    async def _record_ai_chat_failure(self, outcome: str, state: dict[str, Any], *, clicks: int) -> None:
+        """对话栏没关掉：写一条导航诊断（只含计数、布尔与元素框）并记一行日志，按 AI 布局继续。"""
+        counts = {key: state.get(key) for key in XHS_AI_CHAT_DIAGNOSTIC_KEYS}
+        extra: dict[str, Any] = {
+            **counts,
+            "ai_chat_inner": _box_fields(state.get("ai_chat_inner")),
+            "button": _box_fields(state.get("button")),
+            "clicks": clicks,
+            "confirmed": False,
+        }
+        await self._record_navigation_diagnostic(self.context_page, stage="ai_chat_close", outcome=outcome, extra=extra)
+        summary = ", ".join(f"{key}={value}" for key, value in counts.items())
+        logger.warning(
+            "[XiaoHongShuCrawler.scan] AI chat panel not closed; continuing in the AI chat layout: "
+            f"outcome={outcome}, clicks={clicks}, {summary}"
+        )
+
+    async def _note_ai_chat_reappeared(self, metrics: dict[str, Any]) -> None:
+        """扫描中途借每步的 scroll_metrics 读数发现对话栏重新出现：每个目标会话只写一条诊断，不关闭，按 AI 布局继续。
+
+        扫描阶段不关：关闭会让列表重新排版，还可能在目标会话里加载新页，而那次加载之前没有翻页停顿。
+        """
+        scan = self._scan
+        if not scan.v16_layout or scan.ai_chat_reappeared or not metrics.get("with_ai_chat"):
+            return
+        scan.ai_chat_reappeared = True
+        tracker = scan.tracker
+        extra = {
+            "with_ai_chat": True,
+            "scroll_container": str(metrics.get("scroll_container") or ""),
+            "search_page": tracker.next_page if tracker is not None else None,
+        }
+        await self._record_navigation_diagnostic(
+            self.context_page, stage="ai_chat_reappeared", outcome="present_during_scan", extra=extra,
+        )
+        logger.warning(
+            "[XiaoHongShuCrawler.scan] AI chat panel reappeared during the scan; not closing it, continuing in the "
+            f"AI chat layout: scroll_container={extra['scroll_container'] or 'unknown'}, "
+            f"search_page={extra['search_page']}"
+        )
 
     async def _apply_target_filter(self) -> SearchSession:
         """等入口、打开面板、按精确文字点选“图文”；以“已筛选”加目标会话第 1 页判定成功。
@@ -591,7 +761,7 @@ class XhsScanMixin:
         if state.get("panel_visible"):
             await self._close_filter_panel()
         entry = await self._wait_for_filter_entry()
-        await self._scan_sleep(SCAN_RANDOM.uniform(*XHS_BEFORE_FILTER_SECONDS))
+        await self._scan_sleep(SCAN_RANDOM.uniform(*XHS_REACTION_SECONDS))
         moments["before_approach"] = _filter_moment(await dom_filter_state(page, XHS_TARGET_FILTER_LABEL))
         pointer = pointer_for(page)
         plan = await self._plan_click(entry)
@@ -616,9 +786,19 @@ class XhsScanMixin:
         """点选“图文”，返回账本动作 id。面板由悬停打开时，接近轨迹的每个点都在入口框与面板框的并集内（见
         `_hover_region`）；按下入口打开的照常接近。到达并静止后再读一次状态（`moments.before_option_press`）：面板仍可见
         且选项仍在才按下，否则本次尝试以 `filter_panel_closed_before_option` 失败，不再空等目标会话第 1 页。
+        计划之前记一行 info 日志：入口 span、入口 div.filter、面板与间隙走廊的框和 div 到面板的像素数（只有框与数值），
+        正式轮不碰窗口，事后从日志核对 V16 几何。
         """
         page = self.context_page
         pointer = pointer_for(page)
+        corridor, gap = _gap_corridor(state)
+        logger.info(
+            "[XiaoHongShuCrawler.scan] Filter option approach: "
+            f"hovered={hovered}, entry={_box_text(_state_box(state, 'entry'))}, "
+            f"entry_container={_box_text(_state_box(state, 'entry_container'))}, "
+            f"panel={_box_text(_state_box(state, 'panel'))}, corridor={_box_text(corridor)}, "
+            f"container_gap={None if gap is None else round(gap, 1)}"
+        )
         plan = await self._plan_click(state["option"], region=_hover_region(state) if hovered else ())
         click = self._record_trigger_action(
             "apply_filter", {"filter": "note_type", "label": XHS_TARGET_FILTER_LABEL}, pointer=plan.evidence,
@@ -801,6 +981,7 @@ class XhsScanMixin:
         scan.unregistered.clear()
         scan.backfill_attempts.clear()
         scan.observed_index.clear()
+        scan.ai_chat_reappeared = False
 
     async def _run_initial_behavior_stage(self) -> None:
         """§3.2 第 6 条：行为阶段的滚轮是目标会话第 1 页之后的第一次滚动，之前按不变式做翻页停顿。
@@ -923,6 +1104,7 @@ class XhsScanMixin:
             if not scan.entering and scan.target is not None:
                 scan.pending_session = session
         if not session.is_target:
+            scan.non_target_followups += int(page_no > 1)
             return
         if has_more is True:
             scan.owed_page_seq = max(scan.owed_page_seq, captured.seq)
@@ -975,6 +1157,7 @@ class XhsScanMixin:
             return
         metrics = await dom_scroll_metrics(page)
         self._note_scroll_container(metrics)
+        await self._note_ai_chat_reappeared(metrics)
         cards = await dom_visible_cards(page)
         if await self._decide_visible_cards(cards, metrics):
             return
@@ -1128,12 +1311,16 @@ class XhsScanMixin:
 
     @staticmethod
     def _click_band(metrics: dict[str, Any]) -> Optional[tuple[float, float]]:
-        """可点击带的上下沿（视口纵坐标）：列表可见区顶部加其高度的 10% 到底边上方 8px；没有可见区时为 None。"""
+        """可点击带的上下沿（视口纵坐标）：列表可见区顶部加其高度的 10% 到底边上方 8px；没有可见区时为 None。
+        列表顶部的标签行在可见区内时，上沿至少在它下沿之下 8px（行里有“问点点 ai”标签，#99）：卡片在标签行下方
+        排起，不吸顶时它只在没有卡片的位置抬高上沿；吸顶时被它盖住中心的封面本来就 cover_hit 为假。"""
         view = _rect(metrics.get("view_rect"))
         if view is None:
             return None
         top, bottom = view[1], view[3]
-        return top + XHS_CLICK_BAND_TOP * (bottom - top), bottom - XHS_CLICK_BAND_BOTTOM_MARGIN_PX
+        upper = top + XHS_CLICK_BAND_TOP * (bottom - top)
+        floor = list_top_row_floor(metrics)
+        return max(upper, floor) if floor is not None else upper, bottom - XHS_CLICK_BAND_BOTTOM_MARGIN_PX
 
     @staticmethod
     def _card_clickable(card: dict[str, Any], band: Optional[tuple[float, float]]) -> bool:

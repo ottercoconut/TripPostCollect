@@ -27,6 +27,7 @@ ACTION_KINDS = frozenset(
     {
         "type_search",
         "press_enter",
+        "dismiss_ai_chat",
         "apply_filter",
         "scroll",
         "click_card",
