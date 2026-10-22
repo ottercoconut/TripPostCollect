@@ -3,7 +3,7 @@
    筛选标签排 48px，列表自文档 204px 起。 */
 html, body { margin: 0; padding: 0; background: #fff; font-family: sans-serif; }
 .header { position: fixed; top: 0; left: 0; right: 0; height: 64px; background: #fff; z-index: 30;
-  display: flex; align-items: center; border-bottom: 1px solid #eee; }
+  display: flex; align-items: center; border-bottom: 1px solid #eee; box-sizing: border-box; }
 .logo { width: 160px; padding-left: 24px; color: #ff2442; font-weight: bold; }
 .search-area { width: 520px; }
 .input-box { height: 40px; border-radius: 20px; background: #f5f5f5; padding: 0 16px; }
