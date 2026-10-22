@@ -79,17 +79,18 @@ def profile_url_user_id(url: str) -> str:
     return match.group(1) if match else ""
 
 
-def author_click_point(links: Any) -> Optional[Dict]:
-    """要点击的作者链接的元素框：作者 ID 一致的链接中，取可见且不在评论区的第一个有文字的作者名，没有时取头像链接。
+def author_click_link(links: Any) -> Optional[Tuple[int, Dict]]:
+    """要点击的作者链接：作者 ID 一致的链接中，取可见且不在评论区的第一个有文字的作者名，没有时取头像链接；返回它在
+    `links`（页面脚本按文档顺序给出）中的序号与元素框，序号供按下前的命中检测定位同一个链接（#102）。
 
     旧位置隐藏的作者名、评论者链接与作者本人的评论都不点（Mac 人工取证 2026-10-14）；都没有时为 None。
     """
     usable = [
-        link for link in (links if isinstance(links, list) else [])
+        (index, link) for index, link in enumerate(links if isinstance(links, list) else [])
         if isinstance(link, dict) and isinstance(link.get("point"), dict) and link.get("comment") is False
     ]
-    chosen = next((link for link in usable if link.get("named") is True), usable[0] if usable else None)
-    return chosen["point"] if chosen is not None else None
+    chosen = next((pair for pair in usable if pair[1].get("named") is True), usable[0] if usable else None)
+    return (chosen[0], chosen[1]["point"]) if chosen is not None else None
 
 
 def path_template(url: str) -> str:
@@ -183,7 +184,8 @@ class XhsAuthorMixin:
             await self._close_author_tab(page, note)
 
     async def _open_author_tab(self, note: Any) -> Optional[Page]:
-        """写 click_author（from_visit＝本篇详情访问）后点击作者名，等待新标签页；两次都没打开时写诊断并返回 None。
+        """接近作者名并在光标处复核命中后写 click_author（from_visit＝本篇详情访问）并按下，等待新标签页；两次都没打开时
+        写诊断并返回 None（尝试记录为 link_missing、link_not_hit 或 tab_timeout）。
 
         repair 整页中点击后主页面同页跳转到作者页时，返回主页面本身，不再点第二次。
         """
@@ -193,12 +195,18 @@ class XhsAuthorMixin:
         for attempt in range(1, XHS_AUTHOR_TAB_ATTEMPTS + 1):
             self._creator_attempts = attempt
             state = await self._note_view_state(author_id=note.user_id)
-            point = author_click_point(state.get("author_links"))
-            if point is None:
+            link = author_click_link(state.get("author_links"))
+            if link is None:
                 attempts.append("link_missing")
                 await self._scan_sleep(AUTHOR_RANDOM.uniform(1.0, 2.0))
                 continue
+            index, point = link
             plan = await self._plan_click(point)
+            # 光标到达并静止后在光标处做命中检测（#102），不中不按下、不写动作，本次尝试记 link_not_hit。
+            target = {"kind": "author", "roots": list(self._note_view_roots), "author": note.user_id, "index": index}
+            if not await self._approach_checked(plan, target):
+                attempts.append("link_not_hit")
+                continue
             self._author_click_id = capture.action(
                 "click_author", page_role="primary", target={"note_id": note.note_id}, from_visit=note.detail_visit,
                 pointer=plan.evidence,
@@ -206,7 +214,7 @@ class XhsAuthorMixin:
             self._crawler_page_open_depth += 1
             try:
                 async with self.browser_context.expect_page(timeout=int(XHS_AUTHOR_TAB_OPEN_SECONDS * 1000)) as opened:
-                    await self._perform_click(plan)
+                    await self._press(plan)
                 page = await opened.value
             except (PlaywrightTimeoutError, TimeoutError):
                 if self.ports.repair and profile_url_user_id(getattr(self.context_page, "url", "")):

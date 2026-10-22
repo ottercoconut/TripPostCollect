@@ -345,7 +345,8 @@ def test_target_session_started_before_the_note_type_click_is_logged_with_its_tr
     assert harness.processed == [f"n1-{index}" for index in range(4)]
     actions = {line["id"]: line for line in harness.ledger() if line["kind"] == "action"}
     filters = [line["target"].get("filter") for line in actions.values() if line["action"] == "apply_filter"]
-    assert filters == ["panel_open", "note_type", "panel_close", "panel_close"]
+    # 面板里“图文”已选中、页面当前的会话已是目标会话：不再点选（再点会取消，#102），按成功处理。
+    assert filters == ["panel_open", "panel_close", "panel_close"]
     scan = harness.crawler._scan
     target = scan.target
     trigger = actions[target.trigger]
@@ -357,7 +358,7 @@ def test_target_session_started_before_the_note_type_click_is_logged_with_its_tr
     assert (
         f'trigger=apply_filter, trigger_target={{"filter": "panel_open"}}, trigger_seq={line_seq(trigger["id"])}, '
         f"target_session_seq={target.started_seq}, enter_session_seq={enter.started_seq}, "
-        "enter_session_target=False, note_type_clicks=1"
+        "enter_session_target=False, note_type_clicks=0"
     ) in warning
     assert not harness.gate()["content_visit_ok"]
 
@@ -1032,7 +1033,8 @@ def test_keyword_mismatch_reenters_once_from_home_then_stops(tmp_path):
     assert actions.count("press_enter") == 2 and actions.count("navigate") == 1
 
 
-def test_frontend_restart_without_filter_reapplies_it_and_finishes_on_the_new_session(tmp_path):
+def test_frontend_restart_without_filter_reenters_from_home_and_finishes_on_the_new_session(tmp_path):
+    """前端自行重搜且丢了“图文”：不在原页面重新点选，写诊断后回首页重新输入、点选（#102）。"""
     site = XhsFakeSite(KEYWORD, _pages(2, 4))
     harness = Harness(tmp_path, site)
     restarted = []
@@ -1051,11 +1053,17 @@ def test_frontend_restart_without_filter_reapplies_it_and_finishes_on_the_new_se
     summary = harness.accumulator.summary()
     assert summary["stop_reason"] == "source_exhausted"
     assert len(set(harness.processed)) == len(harness.processed) == 8
-    note_type_clicks = [
-        line for line in harness.ledger()
-        if line["kind"] == "action" and line["target"].get("filter") == "note_type"
+    actions = [line for line in harness.ledger() if line["kind"] == "action"]
+    assert [line["target"].get("filter") for line in actions].count("note_type") == 2
+    assert [line["action"] for line in actions].count("navigate") == 1
+    assert [line["action"] for line in actions].count("press_enter") == 2
+    [diagnostic] = [
+        event for event in harness.crawler._navigation_diagnostics if event["stage"] == "unexpected_search_session"
     ]
-    assert len(note_type_clicks) == 2
+    assert diagnostic["outcome"] == "reenter_from_home" and diagnostic["filter_hot"] is False
+    assert diagnostic["extra_keys"] == [] and diagnostic["missing_keys"] == [
+        "filter_note_range", "filter_note_time", "filter_note_type", "filter_pos_distance", "sort_type",
+    ]
     assert harness.gate()["content_visit_ok"]
 
 

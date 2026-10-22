@@ -11,7 +11,7 @@ import pytest
 
 import trippostcollect.platforms.xhs.scan as xhs_scan
 from support.xhs_fake_site import AI_CHAT_CLOSE, TOP_ROW, XhsFakeSite, box, inside
-from trippostcollect.platforms.xhs.behavior import XHS_LIST_TOP_ROW_MARGIN_PX, list_area_box, xhs_list_area
+from trippostcollect.platforms.xhs.behavior import XHS_LIST_TOP_MARGIN_PX, list_area_box, xhs_list_area
 from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
 from trippostcollect.runtime.human_pointer import Box, HumanPointer
 
@@ -516,7 +516,7 @@ class _MetricsPage:
 
 
 def test_list_area_leave_area_and_click_band_start_below_the_tag_row():
-    floor = 156 + XHS_LIST_TOP_ROW_MARGIN_PX
+    floor = 156 + XHS_LIST_TOP_MARGIN_PX
     region = xhs_scan._hover_region(_entry_state(RECON_SPAN, RECON_PANEL, RECON_DIV, with_ai_chat=False))
     # 滚动位置为 0：内缩已让区域离开标签行，结果不变；落点区域在入口与面板左侧。
     area = list_area_box(V16_METRICS)

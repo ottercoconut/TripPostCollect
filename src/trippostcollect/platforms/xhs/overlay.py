@@ -40,7 +40,7 @@ from trippostcollect.platforms.xhs.parser import (
     _xhs_image_assets,
     note_card_problems,
 )
-from trippostcollect.platforms.xhs.scan import SearchItem, SearchPage, XhsScanInterrupted
+from trippostcollect.platforms.xhs.scan import SearchItem, SearchPage, XhsCardWithheld, XhsScanInterrupted
 from trippostcollect.records.formal import INTERACT_COUNT_EVIDENCE_FIELD
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.image_retry import is_runtime_blocking_image_error
@@ -325,19 +325,24 @@ class XhsOverlayMixin:
     async def _open_note_overlay(
         self, item: SearchItem, card: dict[str, Any], run: _NoteRun,
     ) -> Optional[CapturedResponse]:
-        """点封面打开浮层并等本篇的 feed；最多两次尝试，都没有 feed 时返回 None（§3.4 第 3、4 条）。"""
+        """点封面打开浮层并等本篇的 feed；最多两次尝试，都没有 feed 时返回 None（§3.4 第 3、4 条）。
+
+        每次点击计划落点后在落点上、光标到达并静止后在光标处各做一次命中检测（#102），都命中这张卡片的封面才写
+        `click_card` 并按下；任一次不中就不按下、不写动作，抛 `XhsCardWithheld` 交回扫描。`click_card` 同时登记为可能
+        引发搜索请求的动作：误点到别的控件带出新搜索时，搜索访问的 trigger 指向它。
+        """
         capture = self._require_capture()
         overlay_seen = False
         for attempt in range(1, XHS_DETAIL_ATTEMPTS + 1):
-            # 落点在封面内，纵向限在可点击带内（可点击判定只看封面中心）。
-            plan = await self._plan_click(card["cover"], within=card["click_band"])
-            action = capture.action(
-                "click_card", page_role="primary",
-                target={"note_id": item.note_id, "data_index": int(card.get("data_index", -1))},
+            plan = await self._plan_card_click(item.note_id, card)
+            if not await self._approach_checked(plan, {"kind": "card", "note_id": item.note_id}):
+                raise XhsCardWithheld("before_press")
+            action = self._record_trigger_action(
+                "click_card", {"note_id": item.note_id, "data_index": int(card.get("data_index", -1))},
                 pointer=plan.evidence,
             )
             run.clicks.append((line_seq(action), action))
-            await self._perform_click(plan)
+            await self._press(plan)
             captured = await capture.wait_for(
                 FEED_RULE,
                 after_seq=line_seq(action),
@@ -387,7 +392,8 @@ class XhsOverlayMixin:
         return state
 
     async def _close_note_overlay(self, note_id: str) -> None:
-        """写 close_overlay 后点关闭按钮（不按 Esc），5 秒内确认浮层消失；重试一次仍失败为运行级。"""
+        """点关闭按钮（不按 Esc），5 秒内确认浮层消失；重试一次仍失败为运行级。光标到达并静止后在光标处做命中检测
+        （#102），命中关闭按钮才写 close_overlay 并按下，不中本次不按下、不写动作。"""
         capture = self._require_capture()
         for _attempt in range(2):
             state = await self._note_view_state()
@@ -397,8 +403,10 @@ class XhsOverlayMixin:
             if point is None:
                 continue
             plan = await self._plan_click(point)
+            if not await self._approach_checked(plan, {"kind": "close"}):
+                continue
             capture.action("close_overlay", page_role="primary", target={"note_id": note_id}, pointer=plan.evidence)
-            await self._perform_click(plan)
+            await self._press(plan)
             closed = await self._wait_overlay(lambda current: not current.get("visible"), XHS_OVERLAY_CLOSE_SECONDS)
             if not closed.get("visible"):
                 return
