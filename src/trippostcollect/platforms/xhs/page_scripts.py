@@ -182,10 +182,37 @@ DOM_SCRIPTS: dict[str, str] = {
     # top_row_rect 是列表顶部的标签行（.search-layout__top，含筛选入口与点了会重新打开对话栏的“问点点 ai”标签，
     # Mac 人工侦察 2026-10-22）与 view_rect 的交集，光标落点与点击都避开它；with_ai_chat 为对话栏是否打开，
     # 扫描每步借这次读数发现对话栏重新出现（#99）。
+    # top_occlusion_bottom 是列表可见区顶部的固定或吸顶遮挡的下沿（#102，Mac 人工侦察 2026-10-22：V16 搜索栏固定在
+    # 0–116，热门筛选标签排滚动后吸顶在 116–164，点中即带 filter_hot 重新搜索）：position 为 fixed 或 sticky、可见、
+    # 与 list_rect 横向重叠、上沿在可见区上半部、高度不超过可见区一半、下沿在可见区顶部之下的元素中最大的下沿，
+    # 没有为 null；top_occluders 为这类元素个数。列表的祖先（AI 对话布局里固定定位的列表外壳）不算；高的固定层
+    # （浮层遮罩、侧栏、滑出的面板）也不算，它们由点击前的落点命中检测挡住。卡片子树不遍历。只返回数值与计数。
     "scroll_metrics": """() => {
         /*list_view*/
         const { layout, container, root, view, clip } = listView();
         const topRow = layout ? layout.querySelector('.search-layout__top') : null;
+        const listRect = layout ? clip(layout.getBoundingClientRect()) : null;
+        let occlusionBottom = null;
+        let occluders = 0;
+        if (listRect && view && document.body) {
+            const half = (view.bottom - view.top) / 2;
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
+                acceptNode: (node) => (
+                    node.matches('section.note-item') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+                ),
+            });
+            for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                const style = window.getComputedStyle(node);
+                if (style.position !== 'fixed' && style.position !== 'sticky') continue;
+                if (style.visibility === 'hidden' || node.contains(layout)) continue;
+                const rect = node.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0 || rect.height > half) continue;
+                if (rect.top >= view.top + half || rect.bottom <= view.top) continue;
+                if (Math.min(rect.right, listRect.right) <= Math.max(rect.left, listRect.left)) continue;
+                occluders += 1;
+                occlusionBottom = occlusionBottom === null ? rect.bottom : Math.max(occlusionBottom, rect.bottom);
+            }
+        }
         return {
             scroll_container: container ? 'element' : 'document',
             scroll_y: Math.round(container ? container.scrollTop : (window.scrollY || root.scrollTop || 0)),
@@ -193,10 +220,47 @@ DOM_SCRIPTS: dict[str, str] = {
             inner_width: container ? container.clientWidth : (window.innerWidth || 0),
             scroll_height: Math.round((container || root).scrollHeight || 0),
             view_rect: view,
-            list_rect: layout ? clip(layout.getBoundingClientRect()) : null,
+            list_rect: listRect,
             top_row_rect: topRow ? clip(topRow.getBoundingClientRect()) : null,
+            top_occlusion_bottom: occlusionBottom,
+            top_occluders: occluders,
             layout_present: Boolean(layout),
             with_ai_chat: Boolean(document.querySelector('.ai-feeds-page.with-ai-chat')),
+        };
+    }""",
+    # 落点命中检测（#102）：点卡片在计划的落点、点卡片与浮层控件在按下前的光标位置读 elementFromPoint，命中须在目标
+    # 元素（含后代）内。目标按 kind 取：card 为结果列表内（范围同 visible_cards）data-note-id 为 note_id 的卡片的
+    # a.cover；close 为关闭按钮 div.close-circle；right_arrow 与 author 在详情视图（roots 取法同 note_view_state）内，
+    # 分别为右箭头与该作者主页链接（见 _AUTHOR_LINKS）中按文档顺序的第 index 个。返回目标是否存在、是否命中与命中
+    # 元素的 tag.class（见 _CLASS_CHAIN），不含文字或地址。
+    "point_hit": """({ x, y, target }) => {
+        /*list_view*/
+        /*class_chain*/
+        /*author_links*/
+        const visible = (node) => {
+            if (!node) return false;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        let element = null;
+        if (target.kind === 'card') {
+            const card = Array.from((listLayout() || document).querySelectorAll('section.note-item')).find(
+                (node) => node.getAttribute('data-note-id') === target.note_id
+            );
+            element = card ? card.querySelector('a.cover') : null;
+        } else if (target.kind === 'close') {
+            element = document.querySelector('div.close-circle');
+        } else {
+            const view = target.roots.map((selector) => document.querySelector(selector)).find(visible);
+            if (view && target.kind === 'right_arrow') element = view.querySelector('div.arrow-controller.right');
+            if (view && target.kind === 'author') element = authorLinks(view, target.author)[target.index] || null;
+        }
+        const hit = document.elementFromPoint(x, y);
+        return {
+            target: Boolean(element),
+            hit: Boolean(element && hit && element.contains(hit)),
+            hit_tag: hit ? tagOf(hit) : null,
         };
     }""",
     "search_box": """() => {
@@ -267,7 +331,9 @@ DOM_SCRIPTS: dict[str, str] = {
     # 选项各组都有 .tags，不按位置或 class 取；每个标签有一份重叠的 aria-hidden 副本，排除后按精确文字取可见的。
     # panel 为第一个可见的 .filters-wrapper 的元素框（悬停打开时，光标离开入口与面板即收起，接近“图文”的轨迹限定在
     # 两者的并集内，#81）；entry_container 为命中的那个 div.filter 的元素框（悬停目标是它而不只是文字 span，V16 下它
-    # 与面板之间的间隙决定是否加间隙走廊，#99）；with_ai_chat 为对话栏是否打开（打开时不加走廊）。轮询用，保持精简；
+    # 与面板之间的间隙决定是否加间隙走廊，#99）；with_ai_chat 为对话栏是否打开（打开时不加走廊）；option_selected 为
+    # “图文”是否已选中（再点会取消，#102）：类名含 active（同页热门标签排选中项为 button.tab.active，离线站点同此），
+    # 或 aria-selected / aria-checked / aria-pressed 为 "true"；面板选项的选中类名未经实测。轮询用，保持精简；
     # 整页计数在 filter_diagnostic。
     "filter_state": """(label) => {
         const labels = ['筛选', '已筛选'];
@@ -296,6 +362,10 @@ DOM_SCRIPTS: dict[str, str] = {
         const option = Array.from(
             document.querySelectorAll('.filters-wrapper .filters .tag-container .tags')
         ).find((node) => !node.closest('[aria-hidden="true"]') && visible(node) && textOf(node) === label);
+        const selected = Boolean(option) && (
+            option.classList.contains('active')
+            || ['aria-selected', 'aria-checked', 'aria-pressed'].some((name) => option.getAttribute(name) === 'true')
+        );
         return {
             entry_text: span ? textOf(span) : '',
             entry: center(span),
@@ -304,6 +374,7 @@ DOM_SCRIPTS: dict[str, str] = {
             panel_visible: visible(document.querySelector('.filters-wrapper')),
             panel: center(Array.from(document.querySelectorAll('.filters-wrapper')).find(visible) || null),
             option: center(option),
+            option_selected: selected,
         };
     }""",
     # 筛选失败时才调用：整页计数、布尔与至多 2 条入口文字节点的祖先链（见 _CLASS_CHAIN），不含正文或地址。
@@ -757,6 +828,11 @@ async def dom_card_diagnostic(page: Page, note_ids: list[str]) -> list[dict[str,
 async def dom_scroll_metrics(page: Page) -> dict[str, Any]:
     metrics = await _dom(page, "scroll_metrics")
     return metrics if isinstance(metrics, dict) else {}
+
+
+async def dom_point_hit(page: Page, x: float, y: float, target: dict[str, Any]) -> dict[str, Any]:
+    state = await _dom(page, "point_hit", {"x": x, "y": y, "target": target})
+    return state if isinstance(state, dict) else {}
 
 
 async def dom_search_box(page: Page) -> dict[str, Any]:

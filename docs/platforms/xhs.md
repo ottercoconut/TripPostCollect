@@ -274,6 +274,10 @@ Chrome 由共享 CDP 启动器（`runtime/browser_launcher.py`）自启：
 - 落点是元素框内的整数坐标，按截断正态取：横向 25%–75%（中心 50%），纵向 25%–55%（中心 40%）；小目标
   （筛选标签文字、作者名）离元素边至少 2px。卡片封面的落点纵向再限在可点击带内（可点击判定仍只看封面中心）。
   定位器上的控件（登录按钮、二维码刷新、点赞）先取元素框，再按同样方式点击，不用 `locator.click`。
+- 落点命中检测（#102）：页面脚本 `point_hit` 在给定坐标读 `elementFromPoint`，命中须在目标元素（含后代）内，只返回
+  目标是否存在、是否命中与命中元素的 `tag.class`。点卡片在计划落点后先查一次（不中换一个落点重抽，连同第一次
+  至多 3 次）；点卡片、关闭浮层、按右箭头翻图与点作者名都在光标到达并静止后、按下前在光标处再查一次，不中就
+  不按下（见“搜索与全量扫描”“单篇处理”）。只做命中检测，不改落点分布。
 - 滚动是触控板手势序列：每个手势 3–6 个事件内升到峰值，再衰减到 1，可能以一个 0 结束、偶尔跟 1–2 个
   反向的 1；`deltaY` 为整数，总和恰为该次滚动距离。峰值随距离增长（150px 约 10、400px 约 40，上限 50），
   每个手势至少 8 个事件、至多约 400px，更长的滚动拆成多个手势，手势间停 0.4–0.95 秒。`deltaX` 是
@@ -284,7 +288,10 @@ Chrome 由共享 CDP 启动器（`runtime/browser_launcher.py`）自启：
   `flip_image`，以及聚焦搜索框那次点击随 `type_search`）带 `pointer`：`x_ratio`、`y_ratio`（落点在元素框
   中的比例）、`approach_ms`、`moves`、`settle_ms`、`hold_ms`，本页第一次时另有 `entered=true`；扫描 `scroll`
   动作带 `pointer.gestures`（每个手势的 `events`、`delta_y`、`delta_x`）。这些都在执行前计划好、随动作行写出；
-  筛选面板因悬停已打开而没有按下时，`panel_open` 行的 `pointer` 仍是计划值（见“搜索与全量扫描”）。
+  筛选面板因悬停已打开而没有按下时，`panel_open` 行的 `pointer` 仍是计划值（见“搜索与全量扫描”）。`click_card`、
+  `close_overlay`、`click_author` 与按箭头的 `flip_image` 在按下前复核命中之后、按下之前才写（#102）：账本里这四种
+  点击都对应一次真正的按下，复核不中的那次没有动作行，只有一行日志。`click_card` 另登记为可能引发搜索请求的
+  动作：误点到别的控件带出新搜索时，那次搜索访问的 `trigger` 指向它。
   行为证据的 `wheel_scroll` 事件带同样的 `gestures`，互动另记 `wheel_into_view` 与 `pointer_click`。
 
 显式互动在一轮最多一次：
@@ -460,7 +467,14 @@ child `summary.json` 的
   `filter_panel_closed_before_option` 失败并重试（账本里这次的 `note_type` 动作没有对应的按下）。以入口文字变为
   “已筛选”且截获到目标会话第 1 页（5 项 `filters`：`sort_type=general`、`filter_note_type=普通笔记`，其余三项
   “不限”）判定成功。入口始终未出现、面板未打开、选项缺失、点选前面板已收起或点选后未确认都只算本次尝试失败，
-  重试一次后报 `target_filter_not_applied`。任何滚动之前收起面板（#81）：先把光标移出入口与面板的并集，
+  重试一次后报 `target_filter_not_applied`。面板打开后“图文”已处于选中状态时不点（再点会取消“图文”，#102 第 9 轮：
+  入口已是“已筛选”时点“图文”反而取消了筛选）：先等在途的搜索响应读完，页面当前的会话（最近开始的那个）已是目标
+  会话就按成功处理，记一行 info 日志 `Target filter option already selected and the current search session is the
+  target`；否则还有别的筛选（如热门标签的 `filter_hot`），原地无法修复，本次尝试写一条 `filter_option_preselected`
+  诊断后以 `target_filter_preselected` 回首页重新输入一次（同首页受控恢复），仍是这样即以
+  `xhs_navigation_recovery_failed:target_filter_preselected` 停止。选中状态由 `filter_state.option_selected` 给出：“图文”
+  节点的类名含 `active`（同页热门标签排的选中项为 `button.tab.active`），或 `aria-selected`、`aria-checked`、
+  `aria-pressed` 为 `"true"`；面板选项的选中类名尚未实测。任何滚动之前收起面板（#81）：先把光标移出入口与面板的并集，
   落点区域取结果列表区域（同滚动的列表区域，#88）中入口与面板外接框之外最大的一块：候选为外接框的下方、
   左侧与右侧（各取列表区域的整宽或整高，靠外接框一侧留出 24px），宽、高都不小于 40px 的取面积最大者。面板在
   列表右上方展开，面板很高时下方可能放不下，左侧通常有大块空间（第 7 轮只取下方：两行日志只隔 2 秒、账本没有
@@ -513,8 +527,8 @@ child `summary.json` 的
   （`panel_visible_count`；轮询的 `panel_visible` 只看第一个）、精确文字节点个数，视口尺寸与滚动位置，以及至多
   2 条文字节点的 6 层祖先链（class 内长字母数字片段遮为 `<id>`），不含正文或地址。
   - 每次失败的打开或点选尝试（包括第 1 次失败、重试成功）写一条，`outcome` 为 `attempt_<n>:<子原因>`
-    （`filter_entry_missing`、`filter_panel_not_opened`、`filter_option_missing`、`filter_panel_closed_before_option`
-    或 `filter_not_confirmed`），另带 `moments`：接近入口前（`before_approach`）、光标到达入口静止后按下前
+    （`filter_entry_missing`、`filter_panel_not_opened`、`filter_option_missing`、`filter_panel_closed_before_option`、
+    `filter_not_confirmed`，或“图文”已选中而当前会话不是目标会话的 `filter_option_preselected`，#102），另带 `moments`：接近入口前（`before_approach`）、光标到达入口静止后按下前
     （`before_press`）、按下后第 1 次轮询（`first_poll`）与轮询结束时（`poll_end`）、到达“图文”静止后按下前
     （`before_option_press`）的 `panel_visible`、`option`（布尔）与 `entry_text`（只取“筛选”“已筛选”或空串）；
     入口始终未出现时 `moments` 为空，悬停已打开时没有两次轮询。日志对应一行不含地址的
@@ -524,16 +538,30 @@ child `summary.json` 的
 - 列表的滚动方式（依据：Mac 人工测量 2026-10-13）：AI 对话布局下结果列表在 `.search-layout` 的某个祖先
   容器内滚动，`window.scrollY` 始终为 0，顶部约 116px 的搜索框区域固定不动；右侧对话栏与列表并排、不重叠，
   可独立滚动，里面有笔记链接与 `data-note-id` 元素，但没有 `section.note-item`。关闭对话栏后的布局（V16）
-  整页滚动。正式轮正常为 V16（见“关闭对话栏”），关闭失败时按 AI 布局继续，两种布局按同一口径运行：滚动容器取 `.search-layout`
+  整页滚动，顶部同样被盖住（Mac 人工侦察 2026-10-22，#102；此前所记“顶部栏不吸顶”不成立）：搜索栏
+  `div.ai-header-container` 始终 `position: fixed`，覆盖视口 0–116；标签行下一行的热门筛选标签排
+  `.search-layout__middle > .reds-sticky-box.sticky.tag-search-sticky-ai > .reds-sticky > … > button.tab`（“综合”选中，
+  其余为热门标签，点任一个都以新 `search_id` 带 `filter_hot` 重新搜索）未滚动时在原位、第一行卡片上方，滚过原位后
+  `.reds-sticky` 变为 `position: fixed; top: 116px`，覆盖 116–164。列表上的这类遮挡见下文“视口顶部遮挡下沿”。
+  正式轮正常为 V16（见“关闭对话栏”），关闭失败时按 AI 布局继续，两种布局按同一口径运行：滚动容器取 `.search-layout`
   （优先 `.ai-feeds-page` 下的）自身或向上第一个 `overflow-y` 为 `auto`、`scroll` 或 `overlay` 且
   `scrollHeight` 比 `clientHeight` 大 1px 以上的元素（到文档根为止），找不到为文档。“滚动位置”指该容器的
   `scrollTop`（文档时为 `window.scrollY`），到底判断（滚动位置加容器可见高度达到 `scrollHeight` 减 2px）、
   回到顶部和账本 `scroll_y_before` 都用它；“列表可见区”是容器可见区与视口的交集，文档时为整个视口。
   容器类型变化时日志记一行 `List scroll container`，只含几何数值。卡片和就绪计数里的笔记链接、作者链接只在
   `.search-layout` 内找（取不到时为全文档），对话栏里的不算。
+- 视口顶部遮挡下沿（#102）：`scroll_metrics` 每次读数一并给出 `top_occlusion_bottom` 与 `top_occluders`（只有数值与
+  计数）：`position` 为 `fixed` 或 `sticky`、可见、与结果列表矩形横向重叠、上沿在列表可见区上半部、高度不超过
+  可见区一半、下沿在可见区顶部之下的元素中，最大的下沿与个数，没有为 `null` 与 0。不按类名判断：列表的祖先
+  （AI 对话布局里固定定位的列表外壳）不算；侧栏与列表横向不重叠；浮层遮罩、滑出的面板这类高的固定层不算，由
+  落点命中检测挡住；卡片子树不遍历。V16 未滚动时为搜索栏的 116，标签排吸顶后为 164。AI 对话布局的列表可见区
+  从搜索栏下沿开始，搜索栏下沿不在可见区顶部之下，不报遮挡，可点击带、单步上限与区域都与此前相同。这条下沿
+  与标签行一起抬高可点击带上沿、滚轮与行为区域上沿以及移开光标落点的上沿（都在两者中较低的下沿之下 8px）；
+  单步滚动上限改按遮挡下沿以下的可见区高度计（见扫描一条）。
 - 扫描滚动时光标位于结果列表 `.search-layout` 与列表可见区相交的矩形内，横纵各内缩 20%，以免 AI 对话
-  布局下滚轮落在对话栏上；标签行 `.search-layout__top` 在列表可见区内时，矩形的上沿至少在它下沿之下 8px（不吸顶时
-  内缩本已让矩形离开它，吸顶与否未经实测；收起筛选面板时移开光标的落点区域同取这个矩形）；取不到该矩形时为列表可见区内宽 30%–70%、高 35%–75% 的区域。光标已在区域内就
+  布局下滚轮落在对话栏上；标签行 `.search-layout__top` 或视口顶部遮挡在列表可见区内时，矩形的上沿至少在两者中
+  较低的下沿之下 8px（收起筛选面板时移开光标的落点区域同取这个矩形）；取不到该矩形时为列表可见区内宽 30%–70%、
+  高 35%–75% 的区域，上沿同样在它们之下，去掉后不剩时不移动光标。光标已在区域内就
   不动，否则按轨迹移进区域。每一步的位移由若干触控板手势凑成，总和恰为该步距离。行为阶段与连续性行为
   使用同一个内缩矩形，但取不到时不退回可见区（见“节奏与行为”）。
 - 地址栏里的关键词经两次编码；行为门禁的 `target_url_ok` 对地址逐层解码（最多 3 层），任一层含关键词
@@ -548,10 +576,21 @@ child `summary.json` 的
 - 每轮从目标会话顶部全量滚到末页 `has_more=false`，不保存深层位置，也没有顶部刷新。按 `data-index`
   顺序处理列表可见区内的卡片：数据库、账号 seen、累计摘要和本轮已决定的 ID 直接滑过；搜索项为视频的在
   点击前记决定；其余未知图文在可点击时就地点开。可点击指封面中心在可点击带内（列表可见区顶部加其高度
-  10% 起，标签行在可见区内时另须在它下沿之下 8px，到其底边上方 8px 止；卡片点击的落点纵向同样限在带内），且该点 `elementFromPoint` 落在这张卡片内；被固定头部、对话栏或弹层遮住
-  的不点。单步滚动不超过列表可见区高度的 0.8 倍；可见区高于 80px 时单步小于可点击带高度，封面中心一步
-  越不过整条带，不会跳过一行。已滑到可点击带上方仍未决定的卡片向上补漏，同一卡片补漏 3 次仍够不着即
-  `xhs_search_items_unresolved`。
+  10% 起，标签行或视口顶部遮挡在可见区内时另须在两者中较低的下沿之下 8px，到其底边上方 8px 止；卡片点击的
+  落点纵向同样限在带内），且该点 `elementFromPoint` 落在这张卡片内；被固定头部、对话栏或弹层遮住的不点。
+  单步滚动不超过遮挡下沿以下的列表可见区高度 h'（没有遮挡时为整个可见区高度）的 0.8 倍：遮挡不随列表滚动，
+  h' 高于 80px 时单步小于可点击带高度，封面中心一步越不过整条带，不会跳过一行；标签行随列表滚动，不影响步长。
+  第 9 轮的侦察几何（内高 444、吸顶后遮挡到 164）下带为 172–436，单步上限由 355 降为 224。已滑到可点击带上方
+  仍未决定的卡片向上补漏，同一卡片补漏 3 次仍够不着即 `xhs_search_items_unresolved`。
+- 点卡片的落点命中检测（#102，防误点的主保障；遮挡可能不在顶部，也可能是以后新出现的）：计划落点后先在落点上
+  用 `point_hit` 检查命中这张卡片的 `a.cover`（含后代），不中就换一个落点重抽，连同第一次至多 3 次；重抽过时记一行
+  info 日志 `Card click point redrawn: note_id=…, data_index=…, missed=[…]`（各次命中元素的 `tag.class`），都不中时记
+  warning `Card click withheld: … check=planned_point` 并不点。都命中才接近，光标到达并静止后、按下前在光标处
+  再查一次，不中就不按下，记 warning `Click not pressed: the pointer is not on the target before the press:
+  target=card, note_id=…, target_present=…, hit=…`。这两种情况都不写 `click_card`，这张卡片本步不可点、仍未决定，
+  交回扫描：下一次列表滚动之前不再点它，扫描照常往下走，滚动之后再判定（滑到带上方时照常向上补漏）。两次都命中
+  才写 `click_card` 并按下，所以账本里的每条 `click_card` 都是一次真正的按下，门禁 R3、R5、R6 不会把没按下的
+  点击当作详情的触发证据。
 - 扫描以外的滚动（网络恢复或验证后的重触发、行为阶段、关闭浮层后前端恢复滚动位置）可能在扫描读卡片之前
   就越过一行（#89：重触发一步滚过第 1 页首行，第 2 页首行出现即把第 1 页判为越过）。因此已越过的页里从未
   读到的未决定项先向上补漏（#92）：用同一种滚轮手势在列表区域内向上滚一步（`scroll` 动作 `phase=backfill_unread`，
@@ -574,14 +613,22 @@ child `summary.json` 的
   已知非笔记条目的卡片直接跳过：不计未登记、不作候选、不点击、不写账本，也不参与“本页卡片全部出现过”与
   “越过本页”的判断（两者只看笔记条目）。该页完成时若有非笔记条目，日志记一行
   `Search page <k> finished: non_note_items=<响应条目数>, non_note_cards_skipped=<列表中见到的不同 id 数>`。
-- 前端自行重搜（出现新的第 1 页会话）时：目标会话直接采用；丢了“图文”则重新点选并收起面板；关键词
-  不符则回首页重新输入；都从新会话顶部继续。会话重置时未完成的页记一次 `batch_complete=false` 的批次
-  事件，不发布。
+- 扫描中途出现新的第 1 页会话时：目标会话（前端自行重搜且筛选仍是“图文”）直接采用，从新会话顶部继续；关键词
+  不符回首页重新输入。不是目标会话（丢了“图文”，或带出别的筛选，如第 9 轮误点吸顶的热门标签带出
+  `filter_hot=["路线规划"]`）时不在原页面重新点选“图文”：那时入口已是“已筛选”，再点会取消“图文”（#102）。改为写一条
+  导航诊断 `stage=unexpected_search_session` 与一行 warning 日志 `Unexpected non-target search session during the
+  scan`，再回首页重新进入：照常输入回车、关闭对话栏、点选“图文”、收起面板（首页新搜索不沿用上次的筛选，
+  2026-10-14 侦察）。一轮内因此重新进入至多 3 次，第 4 次出现时诊断的 `outcome` 为 `limit_exceeded`，以运行级停止
+  码 `xhs_unexpected_search_session_limit` 停止。会话重置或重新进入时未完成的页记一次 `batch_complete=false` 的
+  批次事件，不发布；本轮已决定的 ID 在新目标会话里照常滑过。一个账本里因此可有多个目标会话：G1 只要有一个目标
+  会话第 1 页由点选“图文”触发且之前有回车与它的非目标第 1 页即通过（每次重新进入都满足）；G3 按会话分别检查
+  翻页停顿；逐条规则只看各记录引用的搜索访问与点击，与以前的导航恢复相同。
 - 运行级停止（都不推断来源耗尽）：有 `data-note-id`、却既不是本会话笔记也不是已知非笔记条目（响应里从未
   出现过），且连续 2 次读数仍未登记的卡片为
   `xhs_search_card_unregistered`；目标会话第 k 页到达时缺第 k−1 页为 `xhs_search_page_gap`；已越过的页内
   未知项向上补漏到顶或满 3 步仍没读到、或到底部仍有未决定项为 `xhs_search_items_unresolved`；到底部等不到新页，检查可见状态
-  并上下抖动 3 次后仍没有新页为 `xhs_search_load_stalled`；搜索响应未知业务码为 `search_request_failed`。
+  并上下抖动 3 次后仍没有新页为 `xhs_search_load_stalled`；搜索响应未知业务码为 `search_request_failed`；一轮内第 4 次
+  出现非目标的新会话为 `xhs_unexpected_search_session_limit`。
 - 每页已越过且全部决定后写 `adaptive_batch_completed`；只有本页有新增决定时才发布批次。末页
   `has_more=false` 完成即 `source_exhausted(has_more_false)`，停止事件的 `source_visit_id` 指向该搜索访问。
 
@@ -597,7 +644,9 @@ child `summary.json` 的
 - 正文可见后做详情停顿，再翻图：每次翻到下一张前停 0.8–1.8 秒（只写账本 `note_image` 停顿），约四分之一
   按 → 键、其余点右箭头，按页码 k/N 核实前进，不前进时换一种方式再试一次。作者见下一小节。有效记录
   如请求了互动，在当前浮层内执行，不新开标签页。最后点关闭按钮关闭浮层（不按 Esc，5 秒内确认，重试
-  一次仍关不掉为 `xhs_overlay_close_failed`），再暂存截获的图片并写记录。
+  一次仍关不掉为 `xhs_overlay_close_failed`），再暂存截获的图片并写记录。点右箭头与关闭按钮都在光标到达并静止后、
+  按下前在光标处做命中检测（#102，同点卡片），不中就不按下、不写动作，记 warning `Click not pressed`（`target` 为
+  `right_arrow` 或 `close`）：翻图改用另一种方式，关闭按钮算一次没关掉的尝试。
 - 互动计数取证（#94）：翻图之后、点作者之前（repair 整页在同一位置）读一次详情视图根
   （浮层为 `div.note-detail-mask`，repair 另认整页根）内的互动栏与评论区。结构按操作人 2026-10-18 实地查看：
   互动栏根 `.buttons.engage-bar-style`，其 `.left` 内为点赞 `.like-wrapper span.count`（可另带 `like-active`
@@ -635,8 +684,9 @@ child `summary.json` 的
   文本。运行指纹必须完整，`navigator.webdriver` 必须是原生 `false`（`undefined` 或 `true` 都不通过）。
 - 行为阶段（`dwell_on_list` 的随机移动与滚动）和连续性行为的随机移动都限定在结果列表区域内（#88）：区域与
   扫描滚动相同，即 `.search-layout` 与列表可见区相交的矩形横纵各内缩 20%。AI 对话布局下列表可见区是滚动容器
-  的可见区，整页滚动的布局为视口；内缩让目标点与滚轮落点离开右侧对话栏（含筛选入口）和顶部固定的搜索框区域，
-  轨迹越过目标至多 115px，也不会进入对话栏；区域上沿同样在标签行下沿之下 8px（见“关闭对话栏”）。随机移动开始时取一次区域，滚动每一轮重取。行为阶段判断滚动
+  的可见区，整页滚动的布局为视口；内缩让目标点与滚轮落点离开右侧对话栏（含筛选入口），轨迹越过目标至多 115px，
+  也不会进入对话栏；区域上沿同样在标签行与视口顶部遮挡（V16 的搜索栏与吸顶的热门标签排）中较低的下沿之下 8px
+  （见“关闭对话栏”与“视口顶部遮挡下沿”）。随机移动开始时取一次区域，滚动每一轮重取。行为阶段判断滚动
   是否有效只看列表自身的滚动位置（AI 对话布局为容器的 `scrollTop`，整页滚动为 `window.scrollY`，滚动容器类型
   须前后一致），对话栏或其他节点的滚动不算，也不使用触摸滚动。证据中 `mouse_moves` 与 `scroll_target` 事件
   另记 `area`（所用区域的 `left`、`top`、`width`、`height`）与 `scroll_container`（`element` 或 `document`），
@@ -669,7 +719,8 @@ child `summary.json` 的
   可见且不在评论区（祖先不含 `.comment-item`、`.comment-inner-container`、`.comments-container`、
   `.comment-list`）的链接，优先有文字的 `a.name`，没有时用头像链接。旧位置 `div.author` 下隐藏的作者名、
   评论者链接与作者本人的评论都不点；不能简单取第一个可见的 `.author a.name`（评论者的作者名也在
-  `div.author` 下）。点击前先检查原抓取页，原页已出现登录或验证时直接在原页
+  `div.author` 下）。光标到达作者链接并静止后、按下前在光标处做命中检测（#102，按同一作者 ID 链接序号定位），
+  不中就不按下、不写 `click_author`，本次尝试记 `link_not_hit`。点击前先检查原抓取页，原页已出现登录或验证时直接在原页
   等待，不再点击；作者页遇到登录失效也回到原抓取页恢复会话，成功后整篇重做。作者专属安全验证仍在
   对应页面等待操作人。作者标签页每次打开时抽一次 5–9 秒保留时长（从出现起计，操作人 2026-10-14 要求
   全面提速，#79），读到投影之前不关；读完时已过保留期则立即关闭，否则等到期满。关闭前写 `close_tab`，
@@ -764,7 +815,11 @@ child `summary.json` 的
 - 任一规则不满足即 `behavior_evidence_ok=false`；门禁平台缺少门禁结果同样失败
   （`visit_validation_missing`）。
 - 失败诊断写入 `behavior_evidence.navigation.json`（不进账本）：关闭对话栏失败与扫描中途重新出现见“关闭对话栏”
-  （`stage=ai_chat_close`、`stage=ai_chat_reappeared`，都不停止本轮）；
+  （`stage=ai_chat_close`、`stage=ai_chat_reappeared`，都不停止本轮）；扫描中途出现非目标的新会话时追加
+  `stage=unexpected_search_session`（#102，`outcome` 为 `reenter_from_home`，第 4 次为 `limit_exceeded` 并停止），只含
+  触发它的动作种类 `trigger`（搜索访问认定的 trigger，如 `click_card`、`scroll`）、筛选签名里有无热门标签
+  `filter_hot`（布尔）、与当前目标会话签名相比多出与缺少的筛选键名 `extra_keys`、`missing_keys`（不含取值）、
+  `keyword_matches`，以及本轮第几次 `reentry` 与上限 `limit`；
   `xhs_search_card_unregistered` 停止前追加 `stage=search_scan`、`outcome=card_unregistered`，列出每个未登记
   ID 的卡片结构（`data-index`、有无封面、封面路径首段、`tag.class`、在列表可见区的位置）与它在本轮全部搜索
   响应（含非目标会话与非笔记条目，只在内存中保留）中的出处（会话起始序号、是否目标会话、页码、页内位置、
@@ -788,7 +843,8 @@ child `summary.json` 的
   之前的路径段、`style`、`query`）；窗口的读体失败数与通道 `dropped_responses` 在本窗口期间的增量；失败请求
   只留协议、主机与样式。窗口为此另记至多 256 个不同响应地址的摘要与形态（超出部分计入 `untracked_responses`），
   诊断与日志 `Note images not captured` 都不含图片地址、时间段、签名段、文件 ID 或查询串；作者标签页两次都没打开时追加 `stage=creator_profile`，最后一次没有可见作者名链接为
-  `author_link_missing`、点击后新标签页超时为 `author_tab_timeout`（另记点击后主页面路径模板），含浮层内作者名
+  `author_link_missing`（按下前复核不中的尝试记为 `link_not_hit`，在 `attempts` 中可见）、点击后新标签页超时为
+  `author_tab_timeout`（另记点击后主页面路径模板），含浮层内作者名
   链接、作者主页链接与指向本篇作者的主页链接的个数、可见个数，以及前 4 个主页链接的 `target` 与祖先链。目标会话第 1 页的触发动作不是本次点选“图文”
   （G1 将失败）时只写一行 warning 日志，带触发动作、`target` 与回车会话的序号，判定不变。
 - 互动计数取证（#94）逐篇追加到 `behavior_evidence.engagement.jsonl`（`schema_version=3`；不进账本、不截断；
@@ -910,7 +966,8 @@ child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_t
 
 | 场景 | `stop_detail` / `error_code` | 级别 | 进入 seen |
 |---|---|---|---|
-| 首页未渲染、搜索未出结果、点选“图文”未生效（含筛选入口缺失）、面板收不起、关键词不符（各含一次受控恢复） | `xhs_navigation_recovery_failed:explore_not_rendered` / `:search_not_rendered` / `:target_filter_not_applied` / `:filter_panel_not_closed` / `:search_keyword_mismatch` | 运行级 | 否 |
+| 首页未渲染、搜索未出结果、点选“图文”未生效（含筛选入口缺失）、面板收不起、关键词不符、“图文”已选中但还有别的筛选（各含一次受控恢复） | `xhs_navigation_recovery_failed:explore_not_rendered` / `:search_not_rendered` / `:target_filter_not_applied` / `:filter_panel_not_closed` / `:search_keyword_mismatch` / `:target_filter_preselected` | 运行级 | 否 |
+| 扫描中途出现非目标的新会话（如误点热门标签带出 `filter_hot`），回首页重新进入 3 次后第 4 次出现 | `xhs_unexpected_search_session_limit` | 运行级 | 否 |
 | 搜索响应未知业务码或不可恢复的请求失败 | `search_request_failed` | 运行级 | 否 |
 | 到底部等不到新页（抖动 3 次后） | `xhs_search_load_stalled` | 运行级 | 否 |
 | 有 `data-note-id`、不是本会话笔记或已知非笔记条目的卡片连续 2 次读数未登记 | `xhs_search_card_unregistered` | 运行级 | 否 |

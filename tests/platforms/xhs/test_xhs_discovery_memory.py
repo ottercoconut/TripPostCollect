@@ -796,7 +796,7 @@ AUTHOR_LINK_CASES = {
 }
 
 
-def test_author_click_point_prefers_a_visible_named_link_outside_the_comments():
+def test_author_click_link_prefers_a_visible_named_link_outside_the_comments():
     def links(case: str) -> list[dict]:
         return [
             {key: link[key] for key in ("point", "comment", "named")}
@@ -805,16 +805,17 @@ def test_author_click_point_prefers_a_visible_named_link_outside_the_comments():
         ]
 
     for case, (_, expected) in AUTHOR_LINK_CASES.items():
-        assert xhs_author.author_click_point(links(case)) == expected, case
+        index, point = xhs_author.author_click_link(links(case))
+        assert point == expected and links(case)[index]["point"] == expected, case
     named_comment_first = [
         {"point": dict(COMMENT_POINT), "comment": True, "named": True},
         {"point": dict(AVATAR_POINT), "comment": False, "named": False},
         {"point": dict(AUTHOR_POINT), "comment": False, "named": True},
     ]
-    assert xhs_author.author_click_point(named_comment_first) == AUTHOR_POINT
-    assert xhs_author.author_click_point([{"point": None, "comment": False, "named": True}]) is None
-    assert xhs_author.author_click_point([{"point": dict(COMMENT_POINT), "comment": True, "named": True}]) is None
-    assert xhs_author.author_click_point(None) is None and xhs_author.author_click_point([]) is None
+    assert xhs_author.author_click_link(named_comment_first) == (2, AUTHOR_POINT)
+    assert xhs_author.author_click_link([{"point": None, "comment": False, "named": True}]) is None
+    assert xhs_author.author_click_link([{"point": dict(COMMENT_POINT), "comment": True, "named": True}]) is None
+    assert xhs_author.author_click_link(None) is None and xhs_author.author_click_link([]) is None
 
 
 @pytest.mark.asyncio

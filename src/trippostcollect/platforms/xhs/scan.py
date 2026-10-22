@@ -21,7 +21,8 @@ from typing import Any, Callable, Optional
 
 from trippostcollect.platforms.xhs.behavior import (
     list_area_box,
-    list_top_row_floor,
+    list_occlusion_bottom,
+    list_top_floor,
     merge_pending_behavior_evidence,
 )
 from trippostcollect.platforms.xhs.capture import (
@@ -46,6 +47,7 @@ from trippostcollect.platforms.xhs.page_scripts import (
     dom_card_diagnostic,
     dom_filter_diagnostic,
     dom_filter_state,
+    dom_point_hit,
     dom_scroll_metrics,
     dom_visible_cards,
 )
@@ -73,10 +75,21 @@ XHS_SCROLL_SETTLE_SECONDS = (0.4, 1.2)
 # 按列表可见区比例取区域。光标已在区域内就不动，每一步的位移由若干个触控板手势凑成，总和恰为该步距离。
 # 滚动位置、可见区均指列表的实际滚动容器（见 page_scripts.scroll_metrics）。单步滚动不超过列表可见区高度 h 的
 # 0.8 倍；可点击带为可见区顶部加 0.1h 到底边上方 8px，且封面中心须命中本卡片。h ≥ 80px 时 0.8h ≤ 0.9h − 8，
-# 封面中心一步越不过整条带，向下扫描不跳过任何一行卡片。标签行在可见区内时带的上沿另须在它之下（见 `_click_band`）。
+# 封面中心一步越不过整条带，向下扫描不跳过任何一行卡片。标签行与视口顶部的固定或吸顶遮挡在可见区内时，带的上沿
+# 另须在它们之下 8px（见 `_click_band`）。遮挡不随列表滚动，单步上限因此改按遮挡下沿到可见区底边的高度 h' 计：
+# 0.8h' 不超过带高，h' ≥ 80px 时同样不跳行（#102）；标签行随列表滚动，不影响步长。
 XHS_SCROLL_VIEWPORT_RATIO = 0.8
 XHS_CLICK_BAND_TOP = 0.1
 XHS_CLICK_BAND_BOTTOM_MARGIN_PX = 8.0
+# 点卡片的落点命中检测（#102）：计划落点后在落点上读 elementFromPoint，命中须在这张卡片的 a.cover 内；不命中换一个
+# 落点重抽，连同第一次至多这么多次。都不命中，或光标到达并静止后、按下前在光标处复核不中，本次不按下、不写
+# click_card，这张卡片本步不可点，交回扫描在下一次滚动之后再处理。
+XHS_CARD_POINT_DRAWS = 3
+# 扫描中途出现非目标的新搜索会话（如误点吸顶的热门筛选标签带出 filter_hot，#102）时回首页重新进入，不在原页面重新
+# 点选“图文”；一轮内至多这么多次，再出现即以 xhs_unexpected_search_session_limit 停止。诊断只记筛选键名，热门筛选
+# 标签的键名单独给一个布尔（第 9 轮账本：filter_hot=["路线规划"] 等）。
+XHS_UNEXPECTED_SESSION_REENTRIES = 3
+XHS_FILTER_HOT_KEY = "filter_hot"
 XHS_STALL_JIGGLES = 3
 XHS_UNREGISTERED_CARD_STEPS = 2
 # 未登记卡片诊断最多描述的 ID 个数，以及每个 ID 最多列出的响应出处条数。
@@ -132,13 +145,20 @@ XHS_SCROLL_TOP_MAX_STEPS = 400
 # 读 DOM 之前先等在途的搜索响应读完体（列表可能已按它重新渲染）；单次最长约 10 秒。
 XHS_SEARCH_SETTLE_ROUNDS = 20
 XHS_SEARCH_SETTLE_POLL_SECONDS = 0.5
-# 首页输入搜索的一次受控恢复覆盖这些码；筛选与收起面板各有自己的一次重试。
-ENTRY_RECOVERABLE_CODES = frozenset({"explore_not_rendered", "search_not_rendered", "search_keyword_mismatch"})
+# 首页输入搜索的一次受控恢复覆盖这些码；筛选与收起面板各有自己的一次重试。面板里“图文”已选中而当前会话不是目标
+# 会话（还有别的筛选，再点只会取消“图文”）无法原地修复，同样回首页重新输入（#102）。
+ENTRY_RECOVERABLE_CODES = frozenset(
+    {"explore_not_rendered", "search_not_rendered", "search_keyword_mismatch", "target_filter_preselected"}
+)
 SCAN_RANDOM = random.SystemRandom()
 
 
 class XhsScanInterrupted(RuntimeError):
     """验证完成后需要重触发当前动作：仍在结果页则重滚一步，已离开则回首页重新输入。"""
+
+
+class XhsCardWithheld(RuntimeError):
+    """点卡片的落点命中检测不通过（#102）：本次不按下、不写 click_card，这张卡片本步不可点，交回扫描。"""
 
 
 class XhsFilterAttemptFailed(RuntimeError):
@@ -325,6 +345,10 @@ class ScanState:
     ai_chat_reappeared: bool = False
     # 非目标会话第 2 页起的截获数（关闭对话栏引发同一非目标会话续页，只用于日志计数）。
     non_target_followups: int = 0
+    # 落点命中检测不通过、本步不可点的卡片（#102）：下一次列表滚动或换目标会话时清空。
+    withheld: set[str] = field(default_factory=set)
+    # 本轮因非目标的新会话回首页重新进入的次数（#102）。
+    unexpected_reentries: int = 0
 
 
 def _rect(value: Any) -> Optional[tuple[float, float, float, float]]:
@@ -333,6 +357,15 @@ def _rect(value: Any) -> Optional[tuple[float, float, float, float]]:
         return None
     left, top, right, bottom = (float(value.get(key) or 0) for key in ("left", "top", "right", "bottom"))
     return (left, top, right, bottom) if right > left and bottom > top else None
+
+
+def _signature_keys(signature: str) -> set[str]:
+    """筛选签名（见 `search_filter_signature`）里的筛选键名；没有 filters（"none"）或无法解析时为空集。"""
+    try:
+        pairs = json.loads(signature)
+    except ValueError:
+        return set()
+    return {str(pair[0]) for pair in pairs if isinstance(pair, list) and pair} if isinstance(pairs, list) else set()
 
 
 def _panel_ready(state: dict[str, Any]) -> bool:
@@ -689,6 +722,9 @@ class XhsScanMixin:
 
         入口始终未出现、面板未打开、选项缺失或点选后未确认都只让本次尝试失败；重试一次，两次都失败才停止。
         每次失败的尝试各写一条诊断（含重试成功的情况），两次都失败时另写最终的一条。
+
+        面板里“图文”已选中时不点（再点会取消，#102）：页面当前的会话已是目标会话就按成功处理；否则还有别的筛选
+        （如 filter_hot），原地无法修复，写一条尝试诊断后以 `target_filter_preselected` 交给回首页重新输入。
         """
         page = self.context_page
         after_seq = self._require_capture().ledger.last_seq
@@ -702,6 +738,17 @@ class XhsScanMixin:
             moments: dict[str, dict[str, Any]] = {}
             try:
                 state, hovered = await self._open_filter_panel(moments)
+                if state.get("option_selected"):
+                    current = await self._current_target_session()
+                    if current is not None:
+                        logger.info(
+                            "[XiaoHongShuCrawler.scan] Target filter option already selected and the current search "
+                            "session is the target; not pressing it"
+                        )
+                        self._note_target_trigger(current, clicks)
+                        return current
+                    await self._record_filter_failure("filter_option_preselected", attempt=attempt, moments=moments)
+                    raise XhsSearchEntryFailed("target_filter_preselected")
                 click = await self._press_filter_option(state, hovered=hovered, moments=moments)
             except XhsFilterAttemptFailed as exc:
                 reason = exc.reason
@@ -725,6 +772,13 @@ class XhsScanMixin:
     async def _filter_applied(self) -> bool:
         state = await dom_filter_state(self.context_page, XHS_TARGET_FILTER_LABEL)
         return state.get("entry_text") == XHS_FILTER_APPLIED_TEXT
+
+    async def _current_target_session(self) -> Optional[SearchSession]:
+        """先等在途的搜索响应读完并消费（晚到的目标会话第 1 页可能还在读体），页面当前的会话（最近开始的那个）是目标
+        会话时返回它，否则为 None。"""
+        await self._settle_search_captures()
+        latest = max(self._scan.sessions.values(), key=lambda session: session.started_seq, default=None)
+        return latest if latest is not None and latest.is_target else None
 
     def _note_target_trigger(self, session: SearchSession, clicks: list[str]) -> None:
         """目标会话第 1 页的 trigger 不是本次点选“图文”时记一行日志（门禁 G1 会因此失败），判定不变。
@@ -951,6 +1005,50 @@ class XhsScanMixin:
     async def _perform_click(self, plan: ClickPlan) -> None:
         await pointer_for(self.context_page).perform_click(plan)
 
+    async def _plan_card_click(self, note_id: str, card: dict[str, Any]) -> ClickPlan:
+        """计划点这张卡片：落点在封面内、纵向限在可点击带内（可点击判定只看封面中心）。计划后在落点上做命中检测（#102），
+        命中须在这张卡片的 a.cover 内；不命中换一个落点重抽，连同第一次至多 `XHS_CARD_POINT_DRAWS` 次。重抽过时记一行
+        info 日志，都不命中时记一行 warning 日志（卡片 ID、序号与各次命中元素的 tag.class）并抛 `XhsCardWithheld`。"""
+        target = {"kind": "card", "note_id": note_id}
+        missed: list[Optional[str]] = []
+        for _ in range(XHS_CARD_POINT_DRAWS):
+            plan = await self._plan_click(card["cover"], within=card["click_band"])
+            hit = await dom_point_hit(self.context_page, *plan.point, target)
+            if hit.get("hit"):
+                if missed:
+                    logger.info(
+                        f"[XiaoHongShuCrawler.scan] Card click point redrawn: note_id={note_id}, "
+                        f"data_index={card.get('data_index')}, missed={missed}"
+                    )
+                return plan
+            missed.append(hit.get("hit_tag"))
+        logger.warning(
+            f"[XiaoHongShuCrawler.scan] Card click withheld: note_id={note_id}, data_index={card.get('data_index')}, "
+            f"check=planned_point, missed={missed}"
+        )
+        raise XhsCardWithheld("planned_point")
+
+    async def _approach_checked(self, plan: ClickPlan, target: dict[str, Any]) -> bool:
+        """按计划接近并静止，再在光标当前位置做命中检测（按下前复核，#102），不按下。命中返回 True，调用方随后写账本
+        动作并 `_press`；不命中记一行 warning 日志（目标种类与命中元素的 tag.class）并返回 False，调用方不按下、
+        不写动作：没有真正按下的点击不在账本里留下点击记录。"""
+        pointer = pointer_for(self.context_page)
+        await pointer.approach(plan)
+        await pointer.settle(plan)
+        x, y = pointer.position or plan.point
+        hit = await dom_point_hit(self.context_page, x, y, target)
+        if hit.get("hit"):
+            return True
+        logger.warning(
+            f"[XiaoHongShuCrawler.scan] Click not pressed: the pointer is not on the target before the press: "
+            f"target={target['kind']}, note_id={target.get('note_id')}, target_present={hit.get('target')}, "
+            f"hit={hit.get('hit_tag')}"
+        )
+        return False
+
+    async def _press(self, plan: ClickPlan) -> None:
+        await pointer_for(self.context_page).press(plan)
+
     async def _await_target_page_one(self, *, after_seq: int) -> Optional[SearchSession]:
         await self._require_capture().wait_for(
             SEARCH_RULE,
@@ -986,6 +1084,7 @@ class XhsScanMixin:
         scan.unregistered.clear()
         scan.backfill_attempts.clear()
         scan.observed_index.clear()
+        scan.withheld.clear()
         scan.ai_chat_reappeared = False
 
     async def _run_initial_behavior_stage(self) -> None:
@@ -1180,6 +1279,8 @@ class XhsScanMixin:
         """按 data-index 升序：已知滑过、视频记决定、当前页的未知图文就地处理（每页先做一次搜索结果停顿）。
 
         本会话已知的非笔记条目卡片直接跳过：不计未登记、不作候选、不点击，也不参与“越过本页”的判断。
+        落点命中检测不通过的卡片（`XhsCardWithheld`，#102）本步不可点：记入 `withheld`，下一次列表滚动之前不再点它，
+        仍未决定，扫描照常往下走。
         """
         scan = self._scan
         tracker = scan.tracker
@@ -1218,7 +1319,12 @@ class XhsScanMixin:
         for card, search_page, item in registered:
             note_id = item.note_id
             current = tracker.current
-            if search_page is not current or accumulator.is_known(note_id) or not self._card_clickable(card, band):
+            if (
+                search_page is not current
+                or accumulator.is_known(note_id)
+                or note_id in scan.withheld
+                or not self._card_clickable(card, band)
+            ):
                 continue
             tracker.begin(current)
             if item.card_type == "video":
@@ -1231,7 +1337,10 @@ class XhsScanMixin:
             if not current.results_paused:
                 await self._guarded_pause("search_results", *XHS_SEARCH_RESULTS_PAUSE_SECONDS)
                 current.results_paused = True
-            await self._process_note_card(item, current, {**card, "click_band": band})
+            try:
+                await self._process_note_card(item, current, {**card, "click_band": band})
+            except XhsCardWithheld:
+                scan.withheld.add(note_id)
             return True
         return decided
 
@@ -1317,14 +1426,16 @@ class XhsScanMixin:
     @staticmethod
     def _click_band(metrics: dict[str, Any]) -> Optional[tuple[float, float]]:
         """可点击带的上下沿（视口纵坐标）：列表可见区顶部加其高度的 10% 到底边上方 8px；没有可见区时为 None。
-        列表顶部的标签行在可见区内时，上沿至少在它下沿之下 8px（行里有“问点点 ai”标签，#99）：卡片在标签行下方
-        排起，不吸顶时它只在没有卡片的位置抬高上沿；吸顶时被它盖住中心的封面本来就 cover_hit 为假。"""
+        列表顶部的标签行（行里有“问点点 ai”标签，#99）或视口顶部的固定、吸顶遮挡（V16 搜索栏与吸顶的热门筛选标签排，
+        #102）在可见区内时，上沿至少在它们中较低的下沿之下 8px（见 `list_top_floor`）：标签行随列表滚动，只在没有卡片
+        的位置抬高上沿；遮挡固定不动，上沿以上的封面部分不落点。AI 对话布局的可见区从搜索栏下沿开始，遮挡不在可见区内，
+        带不变。"""
         view = _rect(metrics.get("view_rect"))
         if view is None:
             return None
         top, bottom = view[1], view[3]
         upper = top + XHS_CLICK_BAND_TOP * (bottom - top)
-        floor = list_top_row_floor(metrics)
+        floor = list_top_floor(metrics)
         return max(upper, floor) if floor is not None else upper, bottom - XHS_CLICK_BAND_BOTTOM_MARGIN_PX
 
     @staticmethod
@@ -1694,16 +1805,26 @@ class XhsScanMixin:
             raise XhsScanInterrupted("visible_verification:search_load_stalled")
 
     async def _reset_search_session(self, session: SearchSession) -> None:
-        """前端从第 1 页重新搜索：目标会话直接采用；丢了“图文”筛选则重新点选。都从新会话顶部继续。"""
+        """前端从第 1 页重新搜索：目标会话直接采用，从新会话顶部继续；关键词不符回首页重新输入。
+
+        不是目标会话（丢了“图文”，或带出别的筛选，如误点吸顶的热门筛选标签带出 filter_hot，#102）时不在原页面重新
+        点选“图文”：入口已是“已筛选”时再点只会取消“图文”。写一条导航诊断 `stage=unexpected_search_session` 后回首页
+        重新进入（新搜索不沿用上次的筛选，照常关闭对话栏、点选“图文”）；本轮第 `XHS_UNEXPECTED_SESSION_REENTRIES + 1`
+        次出现时以 `xhs_unexpected_search_session_limit` 停止。
+        """
         scan = self._scan
         scan.pending_session = None
         if not session.is_target:
-            scan.entering = True
-            try:
-                session = await self._apply_target_filter()
-                await self._close_filter_panel()
-            finally:
-                scan.entering = False
+            scan.unexpected_reentries += 1
+            exceeded = scan.unexpected_reentries > XHS_UNEXPECTED_SESSION_REENTRIES
+            await self._record_unexpected_session(session, exceeded=exceeded)
+            if exceeded:
+                raise PlatformRuntimeError(
+                    "XHS search kept restarting into non-target sessions", code="xhs_unexpected_search_session_limit",
+                )
+            scan.needs_entry = True
+            scan.entry_navigate = True
+            return
         if not session.keyword_matches:
             scan.needs_entry = True
             scan.entry_navigate = True
@@ -1711,6 +1832,31 @@ class XhsScanMixin:
         logger.info("[XiaoHongShuCrawler.scan] Frontend restarted the search; continuing from the new session top")
         self._adopt_target_session(session)
         scan.needs_top = True
+
+    async def _record_unexpected_session(self, session: SearchSession, *, exceeded: bool) -> None:
+        """非目标的新会话：导航诊断与一行 warning 日志只含触发动作的种类、筛选签名里有无 filter_hot、与当前目标会话的
+        签名相比多出与缺少的筛选键名（不含取值）、关键词是否一致，以及本轮第几次与上限。"""
+        scan = self._scan
+        keys = _signature_keys(session.filter_signature)
+        target_keys = _signature_keys(scan.target.filter_signature) if scan.target is not None else set()
+        _, kind, _ = self._trigger_action(session.trigger) or (None, "unknown", {})
+        extra: dict[str, Any] = {
+            "trigger": kind,
+            "filter_hot": XHS_FILTER_HOT_KEY in keys,
+            "extra_keys": sorted(keys - target_keys),
+            "missing_keys": sorted(target_keys - keys),
+            "keyword_matches": session.keyword_matches,
+            "reentry": scan.unexpected_reentries,
+            "limit": XHS_UNEXPECTED_SESSION_REENTRIES,
+        }
+        outcome = "limit_exceeded" if exceeded else "reenter_from_home"
+        await self._record_navigation_diagnostic(
+            self.context_page, stage="unexpected_search_session", outcome=outcome, extra=extra,
+        )
+        logger.warning(
+            "[XiaoHongShuCrawler.scan] Unexpected non-target search session during the scan: "
+            f"outcome={outcome}, " + ", ".join(f"{key}={value}" for key, value in extra.items())
+        )
 
     # 滚动 -----------------------------------------------------------------------
 
@@ -1729,16 +1875,16 @@ class XhsScanMixin:
 
     async def _scroll_feed_step(self, direction: int, *, phase: str) -> dict[str, Any]:
         """在列表区域用触控板手势滚动一步：先满足翻页停顿不变式，光标不在列表区域内时先移进去，写 scroll 动作（带各手势
-        的事件数与位移）后再滚动，停 0.4–1.2 秒后核实位移。"""
+        的事件数与位移）后再滚动，停 0.4–1.2 秒后核实位移。单步上限见 `_step_limit`；滚动之后清空本步不可点的卡片。"""
         await self._ensure_page_pause()
         page = self.context_page
         before = await dom_scroll_metrics(page)
-        view = _rect(before.get("view_rect"))
         scroll_y = int(before.get("scroll_y") or 0)
         low, high = load_behavior_profile("xhs_guarded", strict=True).scroll_delta_px
         step = SCAN_RANDOM.randint(int(low), int(high))
-        if view is not None:
-            step = min(step, max(1, int((view[3] - view[1]) * XHS_SCROLL_VIEWPORT_RATIO)))
+        limit = self._step_limit(before)
+        if limit is not None:
+            step = min(step, limit)
         if direction < 0 and scroll_y > 0:
             step = min(step, scroll_y)
         delta = step if direction > 0 else -step
@@ -1751,21 +1897,38 @@ class XhsScanMixin:
             "scroll", {"phase": phase, "delta_y": delta, "scroll_y_before": scroll_y}, pointer=plan.evidence,
         )
         await pointer.perform_scroll(plan)
+        self._scan.withheld.clear()
         await self._scan_sleep(SCAN_RANDOM.uniform(*XHS_SCROLL_SETTLE_SECONDS))
         return await dom_scroll_metrics(page)
 
     @staticmethod
+    def _step_limit(metrics: dict[str, Any]) -> Optional[int]:
+        """单步滚动上限：列表可见区中视口顶部固定或吸顶遮挡（#102）下沿以下部分的高度的 0.8 倍，至少 1px；没有可见区时
+        为 None。遮挡不在可见区内（AI 对话布局，或 V16 未滚动时）就是可见区高度的 0.8 倍。"""
+        view = _rect(metrics.get("view_rect"))
+        if view is None:
+            return None
+        occlusion = list_occlusion_bottom(metrics)
+        top = max(view[1], occlusion) if occlusion is not None else view[1]
+        return max(1, int((view[3] - top) * XHS_SCROLL_VIEWPORT_RATIO))
+
+    @staticmethod
     def _scroll_area(metrics: dict[str, Any]) -> Optional[Box]:
         """滚动时光标所在的区域：结果列表与列表可见区相交矩形、四周留边，避开 AI 对话布局右侧可独立滚动的对话栏；
-        取不到该矩形时为列表可见区内横 30%–70%、纵 35%–75% 的部分。"""
+        取不到该矩形时为列表可见区内横 30%–70%、纵 35%–75% 的部分。两者的上沿都在标签行与顶部遮挡之下（见
+        `list_top_floor`），去掉后不剩时为 None。"""
         area = list_area_box(metrics)
         if area is not None:
             return area
         view = _rect(metrics.get("view_rect"))
-        if view is not None:
-            left, top, right, bottom = view
-            return Box(left + 0.3 * (right - left), top + 0.35 * (bottom - top), 0.4 * (right - left), 0.4 * (bottom - top))
-        return None
+        if view is None:
+            return None
+        left, top, right, bottom = view
+        upper, lower = top + 0.35 * (bottom - top), top + 0.75 * (bottom - top)
+        floor = list_top_floor(metrics)
+        if floor is not None:
+            upper = max(upper, floor)
+        return Box(left + 0.3 * (right - left), upper, 0.4 * (right - left), lower - upper) if lower > upper else None
 
     async def _scroll_to_top(self) -> None:
         for _ in range(XHS_SCROLL_TOP_MAX_STEPS):

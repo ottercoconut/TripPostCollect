@@ -99,13 +99,15 @@ XHS_LIKE_SELECTORS = tuple(
     )
 )
 # 搜索结果页上光标与滚轮的区域：结果列表 .search-layout 与列表可见区（滚动容器可见区与视口的交集，整页滚动时为
-# 视口）的相交矩形，横纵各向内缩这一比例。目标点与滚轮落点因此离开右侧对话栏和顶部固定的搜索框区域（约 116px，
-# 可见区高于 580px 时小于高度的 20%）；轨迹越过目标至多 115px，小于列表宽度的 20%，不会进入对话栏。
+# 视口）的相交矩形，横纵各向内缩这一比例。目标点与滚轮落点因此离开右侧对话栏；顶部固定的搜索框区域与吸顶的标签排
+# 另由 `list_top_floor` 排除（#102）。轨迹越过目标至多 115px，小于列表宽度的 20%，不会进入对话栏。
 # 扫描滚动与行为动作共用（#88）。
 XHS_LIST_AREA_INSET = 0.2
-# 列表顶部的标签行（scroll_metrics.top_row_rect）里有点了会重新打开“点点AI”对话栏的“问点点 ai”标签（#99）：区域与
-# 卡片可点击带的上沿都至少在它下沿之下这么多像素。轨迹从行上经过可以（悬停无反应），落点不行。
-XHS_LIST_TOP_ROW_MARGIN_PX = 8.0
+# 列表可见区上部不能落点的两类东西：列表顶部的标签行（scroll_metrics.top_row_rect，里有点了会重新打开“点点AI”对话栏的
+# “问点点 ai”标签，#99），以及视口顶部的固定或吸顶遮挡（top_occlusion_bottom：V16 搜索栏与吸顶后的热门筛选标签排，
+# 点中标签即带 filter_hot 重新搜索，#102）。区域、卡片可点击带与移开光标的落点的上沿都至少在两者下沿之下这么多像素。
+# 轨迹从上面经过可以（悬停无反应），落点不行。
+XHS_LIST_TOP_MARGIN_PX = 8.0
 
 
 class XhsListAreaUnavailable(RuntimeError):
@@ -116,17 +118,29 @@ class XhsListAreaUnavailable(RuntimeError):
         self.reason = reason
 
 
-def list_top_row_floor(metrics: dict[str, Any]) -> float | None:
-    """标签行下沿加 `XHS_LIST_TOP_ROW_MARGIN_PX`（视口纵坐标）；标签行不在列表可见区内时为 None。"""
-    rect = metrics.get("top_row_rect")
-    if not isinstance(rect, dict) or float(rect.get("bottom") or 0) <= float(rect.get("top") or 0):
+def list_occlusion_bottom(metrics: dict[str, Any]) -> float | None:
+    """视口顶部固定或吸顶遮挡的下沿（视口纵坐标，见 page_scripts.scroll_metrics）；没有时为 None。"""
+    value = metrics.get("top_occlusion_bottom")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(rect["bottom"]) + XHS_LIST_TOP_ROW_MARGIN_PX
+    return float(value)
+
+
+def list_top_floor(metrics: dict[str, Any]) -> float | None:
+    """标签行与顶部遮挡中较低的下沿加 `XHS_LIST_TOP_MARGIN_PX`（视口纵坐标）；两者都不在列表可见区内时为 None。"""
+    bottoms = []
+    rect = metrics.get("top_row_rect")
+    if isinstance(rect, dict) and float(rect.get("bottom") or 0) > float(rect.get("top") or 0):
+        bottoms.append(float(rect["bottom"]))
+    occlusion = list_occlusion_bottom(metrics)
+    if occlusion is not None:
+        bottoms.append(occlusion)
+    return max(bottoms) + XHS_LIST_TOP_MARGIN_PX if bottoms else None
 
 
 def list_area_box(metrics: dict[str, Any]) -> Box | None:
-    """scroll_metrics 的 list_rect 按 `XHS_LIST_AREA_INSET` 内缩后的区域，再去掉标签行及其下方留边以上的部分（见
-    `list_top_row_floor`）；没有 list_rect 或去掉后不剩时为 None。"""
+    """scroll_metrics 的 list_rect 按 `XHS_LIST_AREA_INSET` 内缩后的区域，再去掉标签行、顶部遮挡及其下方留边以上的
+    部分（见 `list_top_floor`）；没有 list_rect 或去掉后不剩时为 None。"""
     rect = metrics.get("list_rect")
     if not isinstance(rect, dict):
         return None
@@ -136,7 +150,7 @@ def list_area_box(metrics: dict[str, Any]) -> Box | None:
     inset_x = (right - left) * XHS_LIST_AREA_INSET
     inset_y = (bottom - top) * XHS_LIST_AREA_INSET
     area_top, area_bottom = top + inset_y, bottom - inset_y
-    floor = list_top_row_floor(metrics)
+    floor = list_top_floor(metrics)
     if floor is not None:
         area_top = max(area_top, floor)
     if area_bottom <= area_top:

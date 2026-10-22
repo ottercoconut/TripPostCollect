@@ -63,6 +63,11 @@ AI_CHAT_INNER = box(1100.0, 500.0, 300, 760)
 # 取自 Mac 人工侦察 2026-10-22，纵向在行的正中）。
 TOP_ROW = {"left": 40.0, "top": 76.0, "right": 1240.0, "bottom": 116.0}
 ASK_AI_TAG_X, ASK_AI_TAG_SIZE = 298.5, (65.0, 18.0)
+# V16 的固定搜索栏与热门筛选标签排（#102，Mac 人工侦察 2026-10-22）：搜索栏固定在 0–116；标签排在列表上方随文档
+# 滚动，滚过原位后吸顶在 116–164。标签依次为“综合”（选中）与若干热门标签，点任一个都带 filter_hot 重新搜索。
+V16_HEADER_BOTTOM = 116.0
+HOT_ROW_STICK_TOP = 116.0
+HOT_TAGS = ("综合", "10月", "路线规划", "门票价格")
 
 
 def image_url(note_id: str, index: int) -> str:
@@ -343,8 +348,8 @@ class XhsFakeSite:
     字符串为请求失败文本（requestfailed），字典为响应 JSON；被替换的页不算已加载，前端下次滚动会重发。
 
     浮层：`details[id]` 为 feed 的 note_card（默认 `detail_card(id)`）。`feed_overrides[id]` 依次替换每次点击：
-    "no_overlay" 浮层不出现；"no_feed" 浮层出现但无 feed；"net::…" 为 feed 请求失败；整数为 HTTP 状态码；
-    字典为 feed 响应 JSON。
+    "no_overlay" 浮层不出现；"no_feed" 浮层出现但无 feed；"hot_search" 浮层不出现，前端改为带 filter_hot 重新搜索
+    （第 9 轮误点热门标签的后果，#102）；"net::…" 为 feed 请求失败；整数为 HTTP 状态码；字典为 feed 响应 JSON。
 
     “点点AI”对话栏（#99）：`ai_chat` 为每次回车进入结果页时对话栏打开（默认不打开，即 V16）。关闭按钮 AI_CHAT_CLOSE
     的 `ai_chat_button_mode` 为 "ok"、"missing"（没有按钮）、"covered"（中心点被盖住，点到的是盖住它的元素）或
@@ -355,6 +360,17 @@ class XhsFakeSite:
     依次记 ("read", 对话栏是否打开, 按钮是否可点)、("click",)、("closed",)。`top_row` 为列表顶部标签行（默认不给；
     `top_row_sticky` 为吸顶，否则随列表滚动），点中其中的“问点点 ai”标签（`ask_ai_box`）重新打开对话栏
     （`ask_ai_clicks` 计次）。
+
+    V16 的顶部遮挡（#102）：`header_bottom` 为固定搜索栏下沿（默认不给）；`hot_row` 为热门筛选标签排滚动位置为 0 时的
+    元素框（默认不给），滚过原位后吸顶在 `HOT_ROW_STICK_TOP` 起；`list_top` 为第 0 行卡片在整页滚动位置 0 时的纵坐标
+    （默认 LIST_TOP，给出标签排时应放在它下方）。scroll_metrics 的 `top_occlusion_bottom`、`top_occluders` 按页面脚本的
+    规则给出两者（标签排只在吸顶时算；`hot_row_reported=False` 时不报，模拟检测不到的遮挡）；被遮住的封面中心
+    cover_hit 为假。点在标签排上（原位或吸顶）按横向位置选中 `HOT_TAGS` 之一，`hot_clicks` 记下，前端以新 search_id
+    带 filter_hot（“图文”已选时连同“图文”）重新搜索，列表回顶；点在搜索栏上无反应。`point_hit` 按同样的遮挡给出
+    落点命中（card 为这张卡片的封面框，close / right_arrow / author 为浮层控件框），`hit_overrides[卡片 ID 或控件种类]`
+    依次替换各次读数的结果（None 照常计算），`point_hits` 依次记 (种类, 键, x, y, 是否命中)。
+    `option_selected` 为“图文”已选；`option_deselects=True` 时点已选的“图文”取消它（以余下筛选重新搜索）。
+    `enter_filters` 依次给出各次回车会话的 filters（含“普通笔记”即视为“图文”已选），用完后为不带 filters。
 
     `image_overrides[url]` 为 "missing"（从不加载）、HTTP 状态码，或前端实际请求的另一地址
     （如浏览器把 http 升级为 https、前端换了样式）。打开浮层加载前两张图，
@@ -428,6 +444,17 @@ class XhsFakeSite:
         self.ask_ai_clicks = 0
         self.top_row: dict[str, float] | None = None
         self.top_row_sticky = False
+        # V16 的顶部遮挡与热门筛选标签排（#102）。
+        self.list_top = float(LIST_TOP)
+        self.header_bottom: float | None = None
+        self.hot_row: dict[str, float] | None = None
+        self.hot_row_reported = True
+        self.hot_clicks: list[str] = []
+        self.session_hot: str | None = None
+        self.option_deselects = False
+        self.enter_filters: list[list[dict[str, Any]] | None] = []
+        self.hit_overrides: dict[str, list[bool | None]] = {}
+        self.point_hits: list[tuple[str, str, float, float, bool]] = []
         self.panel_opens = 0
         self.panel_leave_closes = 0
         self.diagnostic_reads = 0
@@ -512,8 +539,8 @@ class XhsFakeSite:
         return int(view["bottom"] - view["top"])
 
     def list_origin(self) -> float:
-        """第 0 行卡片在滚动位置为 0 时的视口纵坐标：整页滚动自 LIST_TOP 起，容器滚动自容器顶部起。"""
-        return self.view()["top"] if self.view_rect else float(LIST_TOP)
+        """第 0 行卡片在滚动位置为 0 时的视口纵坐标：整页滚动自 `list_top`（默认 LIST_TOP）起，容器滚动自容器顶部起。"""
+        return self.view()["top"] if self.view_rect else self.list_top
 
     def scroll_height(self) -> int:
         rows = -(-len(self.rendered_items()) // COLUMNS)
@@ -581,6 +608,7 @@ class XhsFakeSite:
             return {"visible": self.on_results}
         if name == "scroll_metrics":
             view = self.view()
+            occlusion, occluders = self.top_occlusion()
             return {
                 "scroll_container": "element" if self.view_rect else "document",
                 "scroll_y": self.scroll_y,
@@ -590,9 +618,13 @@ class XhsFakeSite:
                 "view_rect": view,
                 "list_rect": dict(self.list_rect) if self.list_rect else None,
                 "top_row_rect": self.top_row_rect(),
+                "top_occlusion_bottom": occlusion,
+                "top_occluders": occluders,
                 "layout_present": self.on_results,
                 "with_ai_chat": self.on_results and self.ai_chat_open,
             }
+        if name == "point_hit":
+            return self.point_hit(arg["x"], arg["y"], arg["target"])
         if name == "ai_chat_state":
             return self.ai_chat_state()
         if name == "filter_state":
@@ -631,6 +663,93 @@ class XhsFakeSite:
         assert self.top_row is not None
         middle = (self.top_row["top"] + self.top_row["bottom"]) / 2 - self.top_row_shift()
         return box(ASK_AI_TAG_X, middle, *ASK_AI_TAG_SIZE)
+
+    def hot_row_state(self) -> tuple[dict[str, float], bool] | None:
+        """热门筛选标签排当前的视口框与是否吸顶；没有标签排或不在结果页时为 None。"""
+        if self.hot_row is None or not self.on_results:
+            return None
+        height = self.hot_row["bottom"] - self.hot_row["top"]
+        top = self.hot_row["top"] - self.scroll_y
+        stuck = top < HOT_ROW_STICK_TOP
+        top = HOT_ROW_STICK_TOP if stuck else top
+        return {"left": self.hot_row["left"], "top": top, "right": self.hot_row["right"], "bottom": top + height}, stuck
+
+    def top_occlusion(self) -> tuple[float | None, int]:
+        """同 scroll_metrics.top_occlusion_bottom / top_occluders：固定搜索栏与吸顶的标签排中，上沿在可见区上半部、
+        高度不超过可见区一半、下沿在可见区顶部之下的，取最大下沿与个数（两者都与列表横向重叠）。"""
+        if not self.on_results:
+            return None, 0
+        view = self.view()
+        half = (view["bottom"] - view["top"]) / 2
+        rects = [(0.0, self.header_bottom)] if self.header_bottom is not None else []
+        row = self.hot_row_state()
+        if row is not None and row[1] and self.hot_row_reported:
+            rects.append((row[0]["top"], row[0]["bottom"]))
+        kept = [
+            bottom for top, bottom in rects
+            if bottom - top <= half and top < view["top"] + half and bottom > view["top"]
+        ]
+        return (max(kept) if kept else None), len(kept)
+
+    def cover_at(self, x: float, y: float) -> str | None:
+        """视口坐标处盖在列表上的元素（tag.class）：固定搜索栏或吸顶的标签排；没有为 None。"""
+        if not self.on_results:
+            return None
+        if self.header_bottom is not None and y < self.header_bottom:
+            return "div.ai-header-container"
+        row = self.hot_row_state()
+        if row is not None and row[1] and row[0]["left"] <= x <= row[0]["right"] and row[0]["top"] <= y < row[0]["bottom"]:
+            return "button.tab"
+        return None
+
+    def hot_tab_at(self, x: float, y: float) -> str | None:
+        """点在标签排上（原位或吸顶）时按横向位置等分取 HOT_TAGS 之一；不在排上为 None。"""
+        row = self.hot_row_state()
+        if row is None:
+            return None
+        rect = row[0]
+        if not (rect["left"] <= x <= rect["right"] and rect["top"] <= y < rect["bottom"]):
+            return None
+        index = int((x - rect["left"]) / (rect["right"] - rect["left"]) * len(HOT_TAGS))
+        return HOT_TAGS[min(index, len(HOT_TAGS) - 1)]
+
+    def search_filters(self) -> list[dict[str, Any]] | None:
+        """前端按当前选择发出的 filters：“图文”已选为目标五项，另加选中的热门标签；都没有为 None（不带 filters）。"""
+        filters = [dict(item) for item in TARGET_FILTERS] if self.filter_applied else []
+        if self.session_hot is not None:
+            filters.append({"type": "filter_hot", "tags": [self.session_hot]})
+        return filters or None
+
+    def point_hit(self, x: float, y: float, target: dict[str, Any]) -> dict[str, Any]:
+        """同页面脚本 point_hit：卡片为这张卡片的封面框（不在可见区内、被搜索栏或吸顶标签排盖住都不中），浮层控件为
+        关闭按钮、右箭头或作者主页链接（按序号）的框；`hit_overrides` 依次替换结果。"""
+        kind = target["kind"]
+        key = str(target.get("note_id") or kind)
+        element: dict[str, float] | None = None
+        occluder = None
+        if kind == "card":
+            card = next((card for card in self.visible_cards() if card["note_id"] == target["note_id"]), None)
+            element = card["cover"] if card is not None else None
+            view = self.view()
+            occluder = self.cover_at(x, y) or (None if view["top"] <= y < view["bottom"] else "div.outside-list")
+        elif self.overlay_note is not None:
+            state = self.overlay_state(str(target.get("author") or ""))
+            if kind == "author":
+                links = state["author_links"]
+                index = int(target["index"])
+                element = links[index]["point"] if index < len(links) else None
+            else:
+                element = state.get("close" if kind == "close" else "right_arrow")
+        hit = element is not None and occluder is None and inside(element, x, y)
+        forced = self.hit_overrides.get(key)
+        if forced:
+            override = forced.pop(0)
+            if override is not None:
+                hit = element is not None and override
+                occluder = occluder or (None if hit else "div.fake-cover")
+        self.point_hits.append((kind, key, x, y, hit))
+        tag = "img" if hit else occluder or "div.feeds-container"
+        return {"target": element is not None, "hit": hit, "hit_tag": tag}
 
     def ai_chat_state(self) -> dict[str, Any]:
         """同页面脚本 ai_chat_state；关闭生效后的延迟按读数递减，减完的那次读数已是关闭后。"""
@@ -695,6 +814,7 @@ class XhsFakeSite:
             "panel_visible": self.panel_visible,
             "panel": dict(self.panel_box) if self.panel_visible else None,
             "option": dict(self.option_box) if has_option else None,
+            "option_selected": has_option and self.filter_applied,
         }
 
     def filter_diagnostic(self) -> dict[str, Any]:
@@ -742,7 +862,8 @@ class XhsFakeSite:
                     "cover": cover if has_cover else None,
                     "cover_hit": has_cover and view["top"] <= cover["y"] < view["bottom"]
                     and self.cover_blocked.get(item["id"], 0) <= 0
-                    and not (self.top_row_sticky and row is not None and row["top"] <= cover["y"] <= row["bottom"]),
+                    and not (self.top_row_sticky and row is not None and row["top"] <= cover["y"] <= row["bottom"])
+                    and self.cover_at(cover["x"], cover["y"]) is None,
                 }
             )
         return cards
@@ -846,9 +967,12 @@ class XhsFakeSite:
             (card for card in self.visible_cards() if card["cover"] and card["cover_hit"] and near(card["cover"])), None,
         )
         if self.on_results and self.panel_visible and near(self.option_box):
-            if self.apply_filter_works and not (self.entry_click_applies_filter and self.filter_applied):
+            if self.option_deselects and self.filter_applied:
+                self.filter_applied = False
+                self.start_session(filters=self.search_filters())
+            elif self.apply_filter_works and not (self.entry_click_applies_filter and self.filter_applied):
                 self.filter_applied = True
-                self.start_session(filters=TARGET_FILTERS)
+                self.start_session(filters=self.search_filters())
             for number, search_id in self.ai_chat_pending:
                 self.respond_followup(number, search_id)
             self.ai_chat_pending = []
@@ -863,6 +987,12 @@ class XhsFakeSite:
         elif self.on_results and self.top_row is not None and near(self.ask_ai_box()):
             self.ask_ai_clicks += 1
             self.ai_chat_open = True
+        elif self.on_results and (tab := self.hot_tab_at(x, y)) is not None:
+            self.hot_clicks.append(tab)
+            self.session_hot = tab
+            self.start_session(filters=self.search_filters())
+        elif self.on_results and self.cover_at(x, y) is not None:
+            return
         elif self.on_results and card is not None:
             self.open_overlay(card["note_id"])
         elif not self.on_results and near(SEARCH_BOX):
@@ -886,10 +1016,12 @@ class XhsFakeSite:
         keyword = self.typed_keyword if self.typed_keyword is not None else self.box_value
         self.page.url = f"https://www.xiaohongshu.com/search_result_ai?keyword={quote(quote(keyword))}&source=web"
         self.box_focused = False
-        self.filter_applied = False
+        filters = self.enter_filters.pop(0) if self.enter_filters else None
+        self.filter_applied = any(item["type"] == "filter_note_type" for item in filters or [])
+        self.session_hot = next((item["tags"][0] for item in filters or [] if item["type"] == "filter_hot"), None)
         self.ai_chat_open = self.ai_chat
         self.ai_chat_closing = None
-        self.start_session(filters=None, keyword=keyword)
+        self.start_session(filters=filters, keyword=keyword)
 
     def start_session(self, *, filters: list[dict[str, Any]] | None, keyword: str | None = None) -> None:
         self.session_counter += 1
@@ -1039,6 +1171,10 @@ class XhsFakeSite:
         override = self.feed_overrides[note_id].pop(0) if self.feed_overrides.get(note_id) else None
         if override == "no_overlay":
             return
+        if override == "hot_search":
+            self.session_hot = HOT_TAGS[2]
+            self.start_session(filters=self.search_filters())
+            return
         self.results_url = self.page.url
         self.overlay_note = note_id
         self.overlay_page = 1
@@ -1104,6 +1240,7 @@ class XhsFakeSite:
     def restart_without_filter(self) -> None:
         """前端在验证或登录恢复后自行重搜且丢了筛选：新会话、无 filters、列表回顶。"""
         self.filter_applied = False
+        self.session_hot = None
         self.start_session(filters=None)
 
 
@@ -1113,6 +1250,6 @@ def make_site(*args: Any, **kwargs: Any) -> XhsFakeSite:
 
 __all__ = [
     "XhsFakeSite", "FakePage", "make_site", "note", "TARGET_FILTERS", "detail_card", "creator_projection",
-    "AI_CHAT_CLOSE", "TOP_ROW",
+    "AI_CHAT_CLOSE", "TOP_ROW", "V16_HEADER_BOTTOM", "HOT_ROW_STICK_TOP", "HOT_TAGS",
     "engagement_view", "image_url", "image_bytes", "state_note", "whitelisted_state",
 ]
