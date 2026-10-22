@@ -4,8 +4,12 @@
    .ai-feeds-page.with-ai-chat，顶部搜索框区域 116px 固定、window 不滚动，结果列表在左侧 .feeds-scroller 容器内
    滚动，右侧对话栏并排且可独立滚动，内有与结果卡片 ID 重叠的笔记链接，筛选入口在 .ai-chat-inner 内，
    面板挂在入口内部、打开时入口加 .active、收起时从 DOM 移除，每个标签前有一份重叠的 aria-hidden 副本；
-   备选 V16 布局整页滚动，入口在 .search-layout 内，其前有一个零尺寸的同类副本，面板按 hidden 切换。两种布局的入口
-   文字都在直属 span 里，且都在第 1 页结果渲染约 1.5 秒后才插入（Mac 首轮实测入口为空）；
+   对话栏头部有关闭按钮 button.xhs-ai-chat-header__close（Mac 人工侦察 2026-10-22，#99）：点它去掉 with-ai-chat 与
+   对话栏，.search-layout 加宽、改为整页滚动，入口改为 .search-layout__top 里的 div.filter（对话栏打开时它隐藏），
+   面板悬停挂载在入口正下方、两者间约 10px 间隙不收起，并以同一 search_id、相同筛选发第 2、3 页续页；标签行的
+   “问点点 ai”标签点了重新打开对话栏。备选的静态 V16 布局（10-11）整页滚动，入口在 .search-layout 内，其前有一个
+   零尺寸的同类副本，面板按 hidden 切换。各布局的入口文字都在直属 span 里，且都在第 1 页结果渲染约 1.5 秒后才插入
+   （Mac 首轮实测入口为空）；
    筛选面板按文字点选“图文”发 5 项 filters 的第 1 页（新 search_id），入口改为“已筛选”，面板不自动收起；面板默认
    只随点击入口切换，悬停模式（<html data-filter-panel="hover">）另随光标开合，见 setPanel 之后的 pointermove 处理；
    虚拟列表只保留可见区附近的行（不超过 30 个节点），接近列表底部时请求下一页，可见区未填满时自行补页；
@@ -24,17 +28,22 @@
   const CAPTCHA_URL = 'https://www.xiaohongshu.com/website-login/captcha';
   const PROFILE_URL = 'https://www.xiaohongshu.com/user/profile/';
   const VERIFIED_MESSAGE = 'tpc-offline-verified';
-  const AI_CHAT = document.documentElement.dataset.layout !== 'v16';
+  const STATIC_V16 = document.documentElement.dataset.layout === 'v16';
+  // 对话栏头部有没有关闭按钮（"missing" 为没有，按钮缺失时程序按 AI 对话布局继续）。
+  const CLOSE_BUTTON = document.documentElement.dataset.aiChatClose !== 'missing';
+  // 对话栏是否打开：AI 对话布局初始为真，点关闭按钮后为假（V16，整页滚动），点“问点点 ai”再为真。
+  let chatOpen = !STATIC_V16;
   const HOVER_PANEL = document.documentElement.dataset.filterPanel === 'hover';
   // 面板内容区的最小高度（像素，0 为按内容）：用于面板下方放不下移开光标落点的情形（#81）。
   const PANEL_MIN_HEIGHT = Number(document.documentElement.dataset.filterPanelHeight) || 0;
-  // 与 site.css 一致：V16 列表自文档 120px 起，AI 对话布局自滚动容器内 56px 起；每行 360px、4 列；尾部 200px。
-  const LIST_TOP = AI_CHAT ? 56 : 120;
+  // 与 site.css 一致：静态 V16 列表自文档 120px 起，AI 对话布局自滚动容器内 56px 起，关闭对话栏后自文档 156px
+  // （页头 116px 加标签行 40px）起；每行 360px、4 列；尾部 200px。
+  const listTop = () => (chatOpen ? 56 : STATIC_V16 ? 120 : 156);
   const ROW_HEIGHT = 360;
   const COLUMNS = 4;
-  // AI 对话布局下结果列表只占左侧 65%，列宽收窄、左边距缩小以容纳 4 列（与 site.css 一致）。
-  const COLUMN_WIDTH = AI_CHAT ? 200 : 300;
-  const LIST_LEFT = AI_CHAT ? 16 : 40;
+  // 对话栏打开时结果列表只占左侧（对话栏内联宽 515px），列宽收窄、左边距缩小以容纳 4 列（与 site.css 一致）。
+  const columnWidth = () => (chatOpen ? 180 : 300);
+  const listLeft = () => (chatOpen ? 16 : 40);
   const CHAT_NOTE_REFS = 4;
   const PREFETCH_PX = 400;
   // 视口上方保留 2 行、当前行之后 4 行：至多 7 行 28 个节点。
@@ -76,6 +85,11 @@
     queryCardClicks: 0,
     authorNameClicks: 0,
     commentLinkClicks: 0,
+    // #99：点中对话栏关闭按钮、对话栏关闭与重新打开的次数，以及“问点点 ai”标签被点的次数。
+    aiChatCloseClicks: 0,
+    aiChatClosed: 0,
+    aiChatReopened: 0,
+    askAiClicks: 0,
   };
   window.__tpcOffline = audit;
 
@@ -133,7 +147,7 @@
     section.setAttribute('data-note-id', item.id);
     section.setAttribute('data-index', String(index));
     section.style.top = `${Math.floor(index / COLUMNS) * ROW_HEIGHT}px`;
-    section.style.left = `${LIST_LEFT + (index % COLUMNS) * COLUMN_WIDTH}px`;
+    section.style.left = `${listLeft() + (index % COLUMNS) * columnWidth()}px`;
     if (item.model_type !== 'note') {
       audit.queryCardsRendered += 1;
       section.appendChild(el('div', 'query-note-wrapper', '相关搜索'));
@@ -151,14 +165,14 @@
     return section;
   };
 
-  // 列表的滚动位置：AI 对话布局是 .feeds-scroller 的，V16 是整页的。
-  const listScrollTop = () => (AI_CHAT ? ui.scroller.scrollTop : window.scrollY);
+  // 列表的滚动位置：对话栏打开时是 .feeds-scroller 的，V16（含关闭对话栏后）是整页的。
+  const listScrollTop = () => (chatOpen ? ui.scroller.scrollTop : window.scrollY);
 
   const renderList = () => {
     if (!ui) return;
     const container = ui.container;
     container.style.height = `${Math.ceil(state.items.length / COLUMNS) * ROW_HEIGHT}px`;
-    const currentRow = Math.max(0, Math.floor((listScrollTop() - LIST_TOP) / ROW_HEIGHT));
+    const currentRow = Math.max(0, Math.floor((listScrollTop() - listTop()) / ROW_HEIGHT));
     const firstIndex = Math.max(0, currentRow - ROWS_BEFORE) * COLUMNS;
     const endIndex = Math.min(state.items.length, (currentRow + ROWS_AFTER + 1) * COLUMNS);
     const wanted = new Map();
@@ -178,7 +192,7 @@
   };
 
   const nearBottom = () => {
-    if (AI_CHAT) {
+    if (chatOpen) {
       const { scroller } = ui;
       return scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - PREFETCH_PX;
     }
@@ -212,9 +226,8 @@
     loadPage(state.page + 1);
   };
 
-  const loadPage = async (number) => {
-    const token = state.token;
-    state.loading = true;
+  // 当前会话第 number 页的请求（同一 search_id 与 filters）：返回状态码与 JSON（失败为 null）。
+  const requestPage = async (number) => {
     const body = {
       keyword: state.keyword,
       page: number,
@@ -227,15 +240,24 @@
       image_formats: ['jpg', 'webp', 'avif'],
     };
     if (state.filters) body.filters = state.filters;
-    let status = 0;
-    let payload = null;
     try {
       const response = await fetch(SEARCH_URL, { method: 'POST', credentials: 'include', body: JSON.stringify(body) });
-      status = response.status;
-      payload = await response.json().catch(() => null);
+      return { status: response.status, payload: await response.json().catch(() => null) };
     } catch (error) {
-      payload = null;
+      return { status: 0, payload: null };
     }
+  };
+
+  const appendItems = (data) => {
+    (data.items || []).forEach((item) => {
+      if (item && item.id) state.items.push(item);
+    });
+  };
+
+  const loadPage = async (number) => {
+    const token = state.token;
+    state.loading = true;
+    const { status, payload } = await requestPage(number);
     if (token !== state.token) return; // 期间前端已开始新的搜索会话
     state.loading = false;
     if (status === 461 || status === 471) {
@@ -244,17 +266,14 @@
     }
     const data = payload && payload.data;
     if (status !== 200 || !data) return;
-    (data.items || []).forEach((item) => {
-      if (item && item.id) state.items.push(item);
-    });
+    appendItems(data);
     state.page = number;
     state.hasMore = data.has_more === true;
     renderList();
     if (number === 1) renderChatNotes();
     if (ui && !ui.entryShown) {
       ui.entryShown = true;
-      const { entryHost, entry } = ui;
-      setTimeout(() => entryHost.appendChild(entry), ENTRY_DELAY_MS);
+      setTimeout(() => ui.insertEntries(), ENTRY_DELAY_MS);
     }
     // 视口未填满时前端自行补页（没有滚动）。
     setTimeout(() => maybeLoadMore('self'), 0);
@@ -283,7 +302,7 @@
 
   const refreshFilterUi = () => {
     if (!ui) return;
-    ui.entryLabel.textContent = state.filterApplied ? '已筛选' : '筛选';
+    ui.entries.forEach((entry) => { entry.firstChild.textContent = state.filterApplied ? '已筛选' : '筛选'; });
     ui.panel.querySelectorAll('.tags').forEach((tag) => {
       tag.classList.toggle('active', state.selection[tag.getAttribute('data-group')] === tag.textContent);
     });
@@ -298,30 +317,34 @@
     newSession(buildFilters()); // 面板保持打开，再点入口才收起
   };
 
-  const panelOpen = () => (AI_CHAT ? ui.panelHost.isConnected : !ui.panel.hidden);
+  // 当前生效的入口：静态 V16 只有一个；对话栏打开时是对话栏里的，关闭后是标签行里的。
+  const activeEntry = () => (STATIC_V16 || !chatOpen ? ui.layoutEntry : ui.chatEntry);
 
-  // AI 对话布局：面板挂在入口内部，收起时从 DOM 移除；V16：面板在 .search-layout 内按 hidden 切换。`cause` 为
-  // press、hover 或 leave，与开合方向一起记入 audit.panelEvents。
+  const panelOpen = () => (STATIC_V16 ? !ui.panel.hidden : ui.panelHost.isConnected);
+
+  // 静态 V16：面板在 .search-layout 内按 hidden 切换；其余：面板宿主 .filter-panel 挂在生效的入口内部，收起时从 DOM
+  // 移除。宿主比面板高出入口与面板之间的间隙（透明上内边距）：光标穿过间隙仍在宿主内，面板不收起（Mac 人工侦察
+  // 2026-10-22）。`cause` 为 press、hover、leave 或 layout（对话栏开合时收起），与开合方向一起记入 audit.panelEvents。
   const setPanel = (open, cause) => {
     if (open === panelOpen()) return;
-    if (!AI_CHAT) {
+    if (STATIC_V16) {
       ui.panel.hidden = !open;
     } else {
-      if (open) ui.entry.appendChild(ui.panelHost);
+      if (open) activeEntry().appendChild(ui.panelHost);
       else ui.panelHost.remove();
-      ui.entry.classList.toggle('active', open);
+      ui.entries.forEach((entry) => entry.classList.toggle('active', open && entry === activeEntry()));
     }
     audit.panelEvents.push(`${cause}_${open ? 'open' : 'close'}`);
   };
 
   // 悬停模式，与 Python 假站点的 hover_opens_panel 一致：光标从入口外移入入口时打开面板（已开着不变），面板开着时
-  // 光标移到入口与面板的并集之外即收起，点入口仍切换。按真实 pointermove 的命中元素判断：面板被浮层或验证层盖住时
-  // 命中的是遮罩；AI 对话布局的面板挂在入口内部，命中面板不算移入入口。
+  // 光标移到入口与面板宿主的并集之外即收起，点入口仍切换。按真实 pointermove 的命中元素判断：面板被浮层或验证层盖住时
+  // 命中的是遮罩；面板宿主挂在入口内部，命中宿主（含间隙）不算移入入口。
   document.addEventListener('pointermove', (event) => {
     if (!HOVER_PANEL || !ui) return;
     const target = event.target instanceof Node ? event.target : null;
-    const inPanel = Boolean(target) && ui.panel.contains(target);
-    const onEntry = Boolean(target) && ui.entry.contains(target) && !inPanel;
+    const inPanel = Boolean(target) && ui.panelHost.contains(target);
+    const onEntry = Boolean(target) && activeEntry().contains(target) && !inPanel;
     const entered = onEntry && !ui.pointerOnEntry;
     ui.pointerOnEntry = onEntry;
     if (entered) setPanel(true, 'hover');
@@ -353,7 +376,7 @@
       const row = el('div', 'filters');
       const tags = el('div', 'tag-container');
       group.options.forEach(([label]) => {
-        if (!AI_CHAT) {
+        if (STATIC_V16) {
           tags.appendChild(tagNode(group, label, false));
           return;
         }
@@ -368,54 +391,143 @@
     return panel;
   };
 
+  // 关闭按钮里的“×”图标（16×16 的 svg，与侦察一致；不引用外部资源）。
+  const closeIcon = () => {
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute('class', 'reds-icon');
+    icon.setAttribute('width', '16');
+    icon.setAttribute('height', '16');
+    icon.setAttribute('viewBox', '0 0 16 16');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', 'M3 3 L13 13 M13 3 L3 13');
+    path.setAttribute('stroke', '#999');
+    icon.appendChild(path);
+    return icon;
+  };
+
+  // 关闭对话栏后前端在同一会话里续页（Mac 人工侦察 2026-10-22：同一 search_id、相同筛选，至少到第 3 页）：两页一起
+  // 请求，都到后按页序追加到列表。
+  const continueAfterClose = async () => {
+    const token = state.token;
+    const numbers = [state.page + 1, state.page + 2];
+    const responses = await Promise.all(numbers.map((number) => requestPage(number)));
+    if (token !== state.token) return;
+    responses.forEach(({ status, payload }, index) => {
+      if (status !== 200 || !payload || !payload.data) return;
+      appendItems(payload.data);
+      state.page = numbers[index];
+    });
+    renderList();
+  };
+
+  // 对话栏开合（#99）：关闭时去掉 with-ai-chat、对话栏与分隔条，.search-layout 移出滚动容器、占满宽度并改为整页滚动，
+  // 生效的入口换成标签行里的 div.filter，随后续页；“问点点 ai”重新打开时恢复原结构。开着的面板先收起。
+  const setChat = (open) => {
+    if (!ui || STATIC_V16 || open === chatOpen) return;
+    if (panelOpen()) setPanel(false, 'layout');
+    chatOpen = open;
+    const { page, scroller, layout, divider, chat } = ui;
+    if (open) {
+      scroller.appendChild(layout);
+      page.replaceChildren(scroller, divider, chat);
+      page.classList.add('with-ai-chat');
+      audit.aiChatReopened += 1;
+    } else {
+      page.replaceChildren(layout);
+      page.classList.remove('with-ai-chat');
+      audit.aiChatClosed += 1;
+    }
+    window.scrollTo(0, 0);
+    scroller.scrollTop = 0;
+    ui.container.replaceChildren();
+    renderList();
+    if (!open) continueAfterClose();
+  };
+
   const showResults = () => {
-    const page = el('div', AI_CHAT ? 'ai-feeds-page with-ai-chat' : 'ai-feeds-page');
+    const page = el('div', STATIC_V16 ? 'ai-feeds-page' : 'ai-feeds-page with-ai-chat');
     const layout = el('div', 'search-layout');
     const container = el('div', 'feeds-container');
     const end = el('div', 'feeds-end', '- THE END -');
     const panel = buildPanel();
-    let entry;
-    let entryHost;
+    const layoutEntry = filterEntry('filter');
+    let chatEntry = null;
     let panelHost = panel;
     let scroller = null;
+    let divider = null;
+    let chat = null;
     let chatNotes = null;
-    if (AI_CHAT) {
+    let insertEntries;
+    if (!STATIC_V16) {
+      // 标签行：“笔记”“用户”“问点点 ai”与筛选入口同一行；对话栏打开时这个入口隐藏（CSS），全页 div.filter 不唯一。
+      const top = el('div', 'search-layout__top');
+      const tabs = el('div', 'search-tabs');
+      tabs.append(el('span', 'tab-item', '笔记'), el('span', 'tab-item', '用户'));
+      const askAi = el('span', 'tab-item ai-tab', '问点点 ai');
+      askAi.addEventListener('click', () => {
+        audit.askAiClicks += 1;
+        setChat(true);
+      });
+      tabs.appendChild(askAi);
+      top.appendChild(tabs);
       const main = el('div', 'search-layout__main');
       main.append(container, end);
-      layout.append(el('div', 'search-layout__top'), el('div', 'search-layout__middle'), main);
+      layout.append(top, el('div', 'search-layout__middle'), main);
       scroller = el('div', 'feeds-scroller');
       scroller.appendChild(layout);
       scroller.addEventListener('scroll', () => {
         audit.maxListScrollTop = Math.max(audit.maxListScrollTop, scroller.scrollTop);
         onListScroll();
       }, { passive: true });
-      entry = filterEntry('filter ai-chat-filter');
+      chatEntry = filterEntry('filter ai-chat-filter');
       panelHost = el('div', 'filter-panel');
       panelHost.appendChild(panel);
-      entryHost = el('div', 'ai-chat-inner');
+      const inner = el('div', 'ai-chat-inner');
+      const header = el('div', 'xhs-ai-chat-header');
+      header.appendChild(el('span', 'xhs-ai-chat-header__title', '点点 ai'));
+      if (CLOSE_BUTTON) {
+        const close = el('button', 'xhs-ai-chat-header__close');
+        close.type = 'button';
+        close.setAttribute('aria-label', '关闭 AI 对话');
+        close.appendChild(closeIcon());
+        close.addEventListener('click', () => {
+          audit.aiChatCloseClicks += 1;
+          setChat(false);
+        });
+        header.appendChild(close);
+      }
+      inner.appendChild(header);
       const messages = el('div', 'ai-chat-messages');
       chatNotes = el('div', 'ai-chat-notes');
       messages.appendChild(chatNotes);
       for (let index = 0; index < 12; index += 1) messages.appendChild(el('div', 'ai-chat-message', '点点 ai'));
       messages.addEventListener('scroll', () => { audit.chatScrolls += 1; }, { passive: true });
-      const chat = el('div', 'ai-chat-section');
-      chat.append(entryHost, messages);
-      page.append(scroller, chat);
+      chat = el('div', 'ai-chat-section');
+      chat.style.width = '515px';
+      chat.append(inner, messages);
+      divider = el('div', 'resizable-divider ai-chat-section-divider');
+      page.append(scroller, divider, chat);
+      insertEntries = () => {
+        top.appendChild(layoutEntry);
+        inner.appendChild(chatEntry);
+      };
     } else {
-      entryHost = el('div', 'filter-bar');
+      const entryHost = el('div', 'filter-bar');
       entryHost.appendChild(filterEntry('filter decoy'));
-      entry = filterEntry('filter');
       panel.hidden = true;
       layout.append(entryHost, panel, container, end);
       page.appendChild(layout);
+      insertEntries = () => entryHost.appendChild(layoutEntry);
     }
-    entry.addEventListener('click', (event) => {
-      if (!event.target.closest('.filters-wrapper')) setPanel(!panelOpen(), 'press');
-    });
+    const entries = [layoutEntry, chatEntry].filter(Boolean);
+    entries.forEach((entry) => entry.addEventListener('click', (event) => {
+      if (entry !== activeEntry() || event.target.closest('.filter-panel, .filters-wrapper')) return;
+      setPanel(!panelOpen(), 'press');
+    }));
     document.getElementById('app').replaceChildren(page);
     ui = {
-      entryHost, entry, entryLabel: entry.firstChild, panel, panelHost, container, scroller, chatNotes, entryShown: false,
-      pointerOnEntry: false,
+      page, layout, scroller, divider, chat, layoutEntry, chatEntry, entries, insertEntries, panel, panelHost, container,
+      chatNotes, entryShown: false, pointerOnEntry: false,
     };
     refreshFilterUi();
   };
@@ -428,6 +540,7 @@
     state.filterApplied = false;
     state.resultsUrl = `/search_result_ai?keyword=${encodeURIComponent(encodeURIComponent(keyword))}&source=web_explore_feed`;
     history.pushState({ view: 'search' }, '', state.resultsUrl);
+    chatOpen = !STATIC_V16; // 重新搜索时对话栏回来（关闭只对本次结果页加载有效）
     showResults();
     newSession(null);
   };
@@ -677,14 +790,16 @@
   });
   window.addEventListener('scroll', () => {
     audit.maxWindowScrollY = Math.max(audit.maxWindowScrollY, window.scrollY);
-    if (!AI_CHAT) onListScroll();
+    if (!chatOpen) onListScroll();
   }, { passive: true });
-  // 结果页上的点击按命中元素归类（捕获阶段，先于各自的处理）：封面、对话栏笔记引用（不跳转）、筛选与浮层之外的
-  // 其余点击都记为 stray（class 链首段）。
+  // 结果页上的点击按命中元素归类（捕获阶段，先于各自的处理）：封面、对话栏笔记引用（不跳转）、筛选、浮层、对话栏
+  // 关闭按钮与“问点点 ai”（各自计数）之外的其余点击都记为 stray（class 链首段）。
   document.addEventListener('click', (event) => {
     if (!ui) return;
     const target = event.target instanceof Element ? event.target : null;
-    if (!target || target.closest('.note-detail-mask, .captcha-layer, div.filter, .filters-wrapper')) return;
+    if (!target || target.closest(
+      '.note-detail-mask, .captcha-layer, div.filter, .filters-wrapper, .xhs-ai-chat-header__close, .ai-tab',
+    )) return;
     const card = target.closest('section.note-item');
     if (target.closest('section.note-item a.cover')) {
       audit.coverClicks += 1;

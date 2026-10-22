@@ -1,5 +1,6 @@
-/* 几何与 site.js 的常量一致：V16 布局页头 64px 固定，筛选栏 56px 随文档滚动，列表自文档 120px 起每行 360px、4 列；
-   AI 对话布局页头（搜索框区域）116px 固定，列表在容器内自 56px（__top）起。 */
+/* 几何与 site.js 的常量一致：静态 V16 布局页头 64px 固定，筛选栏 56px 随文档滚动，列表自文档 120px 起每行 360px、4 列；
+   AI 对话布局页头（搜索框区域）116px 固定，列表在容器内自 56px（__top）起；关闭对话栏后整页滚动，标签行 40px，列表自
+   文档 156px 起。 */
 html, body { margin: 0; padding: 0; background: #fff; font-family: sans-serif; }
 .header { position: fixed; top: 0; left: 0; right: 0; height: 64px; background: #fff; z-index: 30;
   display: flex; align-items: center; border-bottom: 1px solid #eee; }
@@ -13,9 +14,9 @@ html, body { margin: 0; padding: 0; background: #fff; font-family: sans-serif; }
 .channel-list span { margin-right: 24px; }
 .ai-feeds-page .search-layout { position: relative; }
 .filter-bar { height: 56px; display: flex; align-items: center; justify-content: flex-end; padding-right: 40px; }
-.search-layout div.filter { width: 88px; height: 32px; line-height: 32px; text-align: center; border-radius: 16px;
+.filter-bar div.filter { width: 88px; height: 32px; line-height: 32px; text-align: center; border-radius: 16px;
   background: #f5f5f5; cursor: pointer; }
-.search-layout div.filter.decoy { width: 0; height: 0; overflow: hidden; }
+.filter-bar div.filter.decoy { width: 0; height: 0; overflow: hidden; }
 .filters-wrapper { position: fixed; top: 112px; right: 40px; width: 600px; background: #fff; z-index: 25;
   border: 1px solid #ddd; padding: 12px 16px; }
 .filters-wrapper[hidden] { display: none; }
@@ -24,33 +25,45 @@ html, body { margin: 0; padding: 0; background: #fff; font-family: sans-serif; }
 .tag-container { display: flex; }
 .tag-container .tags { padding: 4px 12px; margin-right: 8px; border-radius: 12px; background: #f5f5f5; cursor: pointer; }
 .tag-container .tags.active { background: #ffe4e8; }
-/* AI 对话布局（默认，Mac 人工测量 2026-10-13）：顶部固定的搜索框区域 116px；其下 .ai-feeds-page 占满视口其余部分，
-   window 不滚动。左侧结果列表在 .feeds-scroller（overflow-y: auto）内滚动（4 列收窄到 200px）；右侧并排 35% 宽的
-   对话栏（左缘在视口 65%，按视口 30%–70% 的旧落点可能落在上面），消息区独立滚动且不向外传递滚动，内有几个
-   与结果卡片 ID 重叠的笔记链接；筛选入口在对话栏顶部，面板绝对定位挂在入口内部，入口矩形不随面板变大；每个标签的
-   aria-hidden 副本绝对定位在真标签下面，二者坐标重叠。 */
+/* AI 对话布局（默认，Mac 人工测量 2026-10-13、侦察 2026-10-22）：顶部固定的搜索框区域 116px；其下 .ai-feeds-page 占满
+   视口其余部分，window 不滚动。左侧结果列表在 .feeds-scroller（overflow-y: auto）内滚动（4 列收窄到 180px）；中间是
+   可拖动宽度的分隔条，右侧并排内联宽 515px 的对话栏（左缘约在视口 59%，按视口 30%–70% 的旧落点可能落在上面），
+   .ai-chat-inner 内先是头部（标题与关闭按钮 28×28），再是筛选入口；消息区独立滚动且不向外传递滚动，内有几个与结果
+   卡片 ID 重叠的笔记链接；面板宿主绝对定位挂在入口内部，入口矩形不随面板变大，宿主的上内边距盖住入口与面板之间
+   的间隙；每个标签的 aria-hidden 副本绝对定位在真标签下面，二者坐标重叠。 */
 html[data-layout="ai_chat"] .header { height: 116px; }
 html[data-layout="ai_chat"] #app { padding-top: 116px; }
 .ai-feeds-page.with-ai-chat { position: fixed; top: 116px; left: 0; right: 0; bottom: 0; display: flex; }
 .feeds-scroller { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: auto; }
-.search-layout__top { height: 56px; }
-.ai-chat-section { flex: none; width: 35%; background: #fafafa; border-left: 1px solid #eee; box-sizing: border-box;
+.search-layout__top { height: 56px; position: relative; display: flex; align-items: center; padding-left: 16px; }
+.search-tabs .tab-item { display: inline-block; margin-right: 16px; color: #333; cursor: pointer; }
+.search-tabs .tab-item.ai-tab { color: #ff2442; }
+.with-ai-chat .search-layout__top div.filter { display: none; }
+.resizable-divider.ai-chat-section-divider { flex: none; width: 8px; background: #f0f0f0; cursor: col-resize; }
+.ai-chat-section { flex: none; background: #fafafa; border-left: 1px solid #eee; box-sizing: border-box;
   display: flex; flex-direction: column; }
-.ai-chat-inner { flex: none; height: 56px; display: flex; align-items: center; justify-content: flex-end;
-  padding-right: 24px; }
+.ai-chat-inner { flex: none; display: flex; flex-direction: column; }
+.xhs-ai-chat-header { height: 44px; display: flex; align-items: center; justify-content: space-between;
+  padding: 0 16px; }
+.xhs-ai-chat-header__title { font-weight: bold; }
+button.xhs-ai-chat-header__close { width: 28px; height: 28px; padding: 0; border: 0; background: transparent;
+  display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.ai-chat-inner > div.filter.ai-chat-filter { align-self: flex-end; margin: 8px 24px; }
 .ai-chat-messages { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 12px; }
 .ai-chat-message { height: 240px; margin-bottom: 12px; background: #fff; }
 .ai-note-ref { display: block; margin: 12px; padding: 8px; background: #f0f0f0; color: #333; }
 div.filter.ai-chat-filter { position: relative; width: 100px; height: 40px; line-height: 40px; text-align: center;
   border-radius: 20px; background: #f5f5f5; cursor: pointer; }
 div.filter.ai-chat-filter.active { background: #ffe4e8; }
-.ai-chat-filter .filters-wrapper { position: absolute; top: 48px; right: 0; line-height: normal; text-align: left; }
+.filter-panel { position: absolute; z-index: 25; line-height: normal; text-align: left; }
+.filter-panel > .filters-wrapper { position: static; }
+.ai-chat-filter .filter-panel { top: 40px; right: 0; padding-top: 8px; }
 .tag-slot { position: relative; display: inline-block; margin-right: 8px; }
 .tag-slot .tags { margin-right: 0; position: relative; }
 .tag-slot .tags[aria-hidden="true"] { position: absolute; left: 0; top: 0; }
-.with-ai-chat section.note-item { width: 190px; }
-.with-ai-chat section.note-item a.cover, .with-ai-chat section.note-item .footer { width: 170px; }
-.with-ai-chat section.note-item a.cover img { width: 170px; }
+.with-ai-chat section.note-item { width: 170px; }
+.with-ai-chat section.note-item a.cover, .with-ai-chat section.note-item .footer { width: 150px; }
+.with-ai-chat section.note-item a.cover img { width: 150px; }
 .feeds-container { position: relative; }
 section.note-item { position: absolute; width: 260px; height: 340px; }
 section.note-item a.cover { position: absolute; top: 20px; left: 10px; width: 240px; height: 240px;
@@ -60,7 +73,22 @@ section.note-item .footer { position: absolute; top: 270px; left: 10px; width: 2
 /* 相关搜索卡（hot_query）：同样是 section.note-item，没有封面。 */
 section.note-item .query-note-wrapper { position: absolute; top: 20px; left: 10px; width: 240px; height: 300px;
   background: #f5efe0; }
-.with-ai-chat section.note-item .query-note-wrapper { width: 170px; }
+.with-ai-chat section.note-item .query-note-wrapper { width: 150px; }
+/* 关闭对话栏后（V16，Mac 人工侦察 2026-10-22）：.search-layout 占满宽度、整页滚动；标签行 40px，入口 div.filter
+   84×40 在行内右侧，“筛选” span 40×20 居中；面板宿主挂在入口下方、上内边距 10px 盖住间隙，面板 457px 宽、比入口
+   右缘多出 11px，各组标签靠右（“图文”大致在入口正下方）。 */
+.ai-feeds-page:not(.with-ai-chat) .search-layout__top { height: 40px; padding-left: 40px; }
+.search-layout__top div.filter { position: absolute; top: 0; right: 32px; width: 84px; height: 40px;
+  display: flex; align-items: center; justify-content: center; border-radius: 20px; background: #f5f5f5;
+  cursor: pointer; }
+.search-layout__top div.filter > span { display: inline-block; width: 40px; height: 20px; line-height: 20px;
+  text-align: center; }
+.search-layout__top div.filter.active { background: #ffe4e8; }
+.search-layout__top div.filter .filter-panel { top: 40px; right: -11px; padding-top: 10px; }
+.search-layout__top .filters-wrapper { width: 457px; box-sizing: border-box; }
+.search-layout__top .filters .title { width: 64px; }
+.search-layout__top .tag-container { margin-left: auto; }
+.search-layout__top .tag-container .tags { padding: 4px 8px; font-size: 13px; }
 .feeds-end { height: 200px; line-height: 120px; text-align: center; color: #999; }
 .note-detail-mask { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 50; background: rgba(0, 0, 0, 0.6); }
 .note-detail-mask[hidden] { display: none; }
