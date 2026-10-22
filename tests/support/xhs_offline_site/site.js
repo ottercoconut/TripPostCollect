@@ -323,8 +323,9 @@
   const panelOpen = () => (STATIC_V16 ? !ui.panel.hidden : ui.panelHost.isConnected);
 
   // 静态 V16：面板在 .search-layout 内按 hidden 切换；其余：面板宿主 .filter-panel 挂在生效的入口内部，收起时从 DOM
-  // 移除。宿主比面板高出入口与面板之间的间隙（透明上内边距）：光标穿过间隙仍在宿主内，面板不收起（Mac 人工侦察
-  // 2026-10-22）。`cause` 为 press、hover、leave 或 layout（对话栏开合时收起），与开合方向一起记入 audit.panelEvents。
+  // 移除。关闭对话栏后的 V16 下宿主比面板高出入口与面板之间的间隙（透明上内边距）：光标穿过间隙仍在宿主内，面板不收起
+  // （Mac 人工侦察 2026-10-22）；AI 对话布局的间隙不盖住（未实测）。`cause` 为 press、hover、leave 或 layout（对话栏
+  // 开合时收起），与开合方向一起记入 audit.panelEvents。
   const setPanel = (open, cause) => {
     if (open === panelOpen()) return;
     if (STATIC_V16) {

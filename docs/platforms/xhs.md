@@ -450,9 +450,12 @@ child `summary.json` 的
   （约 84×40，“筛选” `span` 约 20px 高、居中），光标在 `span` 外、`div` 内时面板不收起，`div` 与面板之间约 10px 的
   间隙也不收起：`div` 下沿到面板上沿不超过 16px（碰到或盖住面板也算）、`span` 下沿在面板上沿之上且两者横向重叠时，
   `span` 下沿到面板上沿、横向重叠的那段作为间隙走廊并入并集（取不到 `div` 框时按 `span` 与面板之间 0–16px 判定），
-  否则间隙里的轨迹点会被夹到 `span` 或面板边上、光标一步跳过间隙。点选“图文”时记一行 info 日志
-  `Filter option approach: hovered=…, entry=(…), entry_container=(…), panel=(…), corridor=(…), container_gap=…`
-  （框为 left、top、right、bottom，间隙为 `div` 下沿到面板上沿的像素数，只有框与数值），供事后核对几何；按下入口打开的照常接近。两种情况
+  否则间隙里的轨迹点会被夹到 `span` 或面板边上、光标一步跳过间隙。走廊只在 V16 布局下启用：`filter_state` 读到
+  `.ai-feeds-page.with-ai-chat`（对话栏没关掉、按 AI 布局继续的备用路径）时不加，保持第 6–8 轮实测过的严格并集，
+  那里约 8px 的间隙是否收起面板没有实测。点选“图文”时记一行 info 日志
+  `Filter option approach: hovered=…, with_ai_chat=…, entry=(…), entry_container=(…), panel=(…), corridor=(…),
+  container_gap=…`（框为 left、top、right、bottom，间隙为 `div` 下沿到面板上沿的像素数，只有布尔、框与数值），供事后
+  核对几何；按下入口打开的照常接近。两种情况
   都在到达“图文”并静止后、按下前再读一次状态，面板仍可见且选项仍在才按下，否则不按，本次尝试立即以
   `filter_panel_closed_before_option` 失败并重试（账本里这次的 `note_type` 动作没有对应的按下）。以入口文字变为
   “已筛选”且截获到目标会话第 1 页（5 项 `filters`：`sort_type=general`、`filter_note_type=普通笔记`，其余三项

@@ -267,7 +267,8 @@ DOM_SCRIPTS: dict[str, str] = {
     # 选项各组都有 .tags，不按位置或 class 取；每个标签有一份重叠的 aria-hidden 副本，排除后按精确文字取可见的。
     # panel 为第一个可见的 .filters-wrapper 的元素框（悬停打开时，光标离开入口与面板即收起，接近“图文”的轨迹限定在
     # 两者的并集内，#81）；entry_container 为命中的那个 div.filter 的元素框（悬停目标是它而不只是文字 span，V16 下它
-    # 与面板之间的间隙决定是否加间隙走廊，#99）。轮询用，保持精简；整页计数在 filter_diagnostic。
+    # 与面板之间的间隙决定是否加间隙走廊，#99）；with_ai_chat 为对话栏是否打开（打开时不加走廊）。轮询用，保持精简；
+    # 整页计数在 filter_diagnostic。
     "filter_state": """(label) => {
         const labels = ['筛选', '已筛选'];
         const textOf = (node) => (node.innerText || node.textContent || '').trim();
@@ -299,6 +300,7 @@ DOM_SCRIPTS: dict[str, str] = {
             entry_text: span ? textOf(span) : '',
             entry: center(span),
             entry_container: entry ? center(entry) : null,
+            with_ai_chat: Boolean(document.querySelector('.ai-feeds-page.with-ai-chat')),
             panel_visible: visible(document.querySelector('.filters-wrapper')),
             panel: center(Array.from(document.querySelectorAll('.filters-wrapper')).find(visible) || null),
             option: center(option),

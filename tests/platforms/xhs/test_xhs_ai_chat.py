@@ -347,8 +347,8 @@ V16_DIV_GAP = {"left": 1054.0, "top": 156.0, "width": 84.0, "height": 10.0}
 V16_ROW = {"left": 40.0, "top": 116.0, "right": 1180.0, "bottom": 156.0}
 
 
-def _entry_state(entry: dict, panel: dict | None, container: dict | None = None) -> dict:
-    return {"entry": entry, "panel": panel, "entry_container": container}
+def _entry_state(entry: dict, panel: dict | None, container: dict | None = None, *, with_ai_chat: bool) -> dict:
+    return {"entry": entry, "panel": panel, "entry_container": container, "with_ai_chat": with_ai_chat}
 
 
 def _moved(point: dict, dy: float) -> dict:
@@ -356,31 +356,51 @@ def _moved(point: dict, dy: float) -> dict:
 
 
 def test_gap_corridor_is_decided_by_the_entry_container_and_spans_from_the_label_to_the_panel():
-    state = _entry_state(RECON_SPAN, RECON_PANEL, RECON_DIV)
+    state = _entry_state(RECON_SPAN, RECON_PANEL, RECON_DIV, with_ai_chat=False)
     assert xhs_scan._gap_corridor(state) == (RECON_CORRIDOR, 10.0)
     assert xhs_scan._hover_region(state) == (Box.from_point(RECON_SPAN), RECON_CORRIDOR, Box.from_point(RECON_PANEL))
     # div 到面板超过 16px：不加走廊。
-    assert xhs_scan._gap_corridor(_entry_state(RECON_SPAN, _moved(RECON_PANEL, 7), RECON_DIV)) == (None, 17.0)
+    far = _entry_state(RECON_SPAN, _moved(RECON_PANEL, 7), RECON_DIV, with_ai_chat=False)
+    assert xhs_scan._gap_corridor(far) == (None, 17.0)
     # div 碰到或盖住面板（不大于 0 也算），span 下沿仍在面板上沿之上：走廊为 span 下沿到面板上沿。
     overlapping = _moved(RECON_PANEL, -16)
-    assert xhs_scan._gap_corridor(_entry_state(RECON_SPAN, overlapping, RECON_DIV)) == (
+    assert xhs_scan._gap_corridor(_entry_state(RECON_SPAN, overlapping, RECON_DIV, with_ai_chat=False)) == (
         Box(1376.0, 146.0, 40.0, 4.0), -6.0,
     )
     # span 下沿不在面板上沿之上、横向不重叠：都不加。
-    assert xhs_scan._gap_corridor(_entry_state(RECON_SPAN, _moved(RECON_PANEL, -26), RECON_DIV))[0] is None
+    above = _entry_state(RECON_SPAN, _moved(RECON_PANEL, -26), RECON_DIV, with_ai_chat=False)
+    assert xhs_scan._gap_corridor(above)[0] is None
     aside = box(700.0, RECON_PANEL["y"], 400, RECON_PANEL["height"])
-    assert xhs_scan._gap_corridor(_entry_state(RECON_SPAN, aside, RECON_DIV))[0] is None
+    assert xhs_scan._gap_corridor(_entry_state(RECON_SPAN, aside, RECON_DIV, with_ai_chat=False))[0] is None
     # 取不到 div 时按 span 判定：span 到面板 20px 不加，10px 加。
-    assert xhs_scan._gap_corridor(_entry_state(RECON_SPAN, RECON_PANEL)) == (None, 20.0)
-    assert xhs_scan._gap_corridor(_entry_state(RECON_SPAN, _moved(RECON_PANEL, -10)))[0] == Box(1376.0, 146.0, 40.0, 10.0)
-    assert xhs_scan._hover_region(_entry_state(RECON_SPAN, None, RECON_DIV)) == (Box.from_point(RECON_SPAN),)
-    assert xhs_scan._gap_corridor(_entry_state(RECON_SPAN, None, RECON_DIV)) == (None, None)
+    assert xhs_scan._gap_corridor(_entry_state(RECON_SPAN, RECON_PANEL, with_ai_chat=False)) == (None, 20.0)
+    near = _entry_state(RECON_SPAN, _moved(RECON_PANEL, -10), with_ai_chat=False)
+    assert xhs_scan._gap_corridor(near)[0] == Box(1376.0, 146.0, 40.0, 10.0)
+    no_panel = _entry_state(RECON_SPAN, None, RECON_DIV, with_ai_chat=False)
+    assert xhs_scan._hover_region(no_panel) == (Box.from_point(RECON_SPAN),)
+    assert xhs_scan._gap_corridor(no_panel) == (None, None)
+    # 读数里没有 with_ai_chat 时同 V16。
+    assert xhs_scan._gap_corridor({"entry": RECON_SPAN, "panel": RECON_PANEL, "entry_container": RECON_DIV}) == (
+        RECON_CORRIDOR, 10.0,
+    )
+
+
+def test_gap_corridor_is_never_added_while_the_ai_chat_is_open():
+    """AI 对话布局（关闭失败的备用路径）保持实测过的严格并集：同样的几何、div 盖住面板或按 span 判定都不加走廊，
+    间隙照常算出供日志核对。"""
+    state = _entry_state(RECON_SPAN, RECON_PANEL, RECON_DIV, with_ai_chat=True)
+    assert xhs_scan._gap_corridor(state) == (None, 10.0)
+    assert xhs_scan._hover_region(state) == (Box.from_point(RECON_SPAN), Box.from_point(RECON_PANEL))
+    overlapping = _entry_state(RECON_SPAN, _moved(RECON_PANEL, -16), RECON_DIV, with_ai_chat=True)
+    assert xhs_scan._gap_corridor(overlapping) == (None, -6.0)
+    near = _entry_state(RECON_SPAN, _moved(RECON_PANEL, -10), with_ai_chat=True)
+    assert xhs_scan._gap_corridor(near)[0] is None and len(xhs_scan._hover_region(near)) == 2
 
 
 def test_vertical_path_from_the_label_down_to_the_option_passes_through_the_gap_instead_of_jumping_it():
     """60 个种子：轨迹点都在 span、走廊与面板的并集内，且绝大多数轨迹确有点落在 span 与面板之间的 20px 里（少数是
     主移动一帧本来就超过 20px）；只按 span 与面板严格取并集时，间隙里的点全被夹到边上、一个也不剩。"""
-    region = xhs_scan._hover_region(_entry_state(RECON_SPAN, RECON_PANEL, RECON_DIV))
+    region = xhs_scan._hover_region(_entry_state(RECON_SPAN, RECON_PANEL, RECON_DIV, with_ai_chat=False))
     strict = (Box.from_point(RECON_SPAN), Box.from_point(RECON_PANEL))
     seeds = range(60)
 
@@ -448,10 +468,11 @@ def test_v16_hover_filter_after_closing_keeps_the_panel_open_and_never_touches_t
     assert filters == [("panel_open", None), ("note_type", None), ("panel_close", "pointer_leave")]
     approach = moves[marks["apply_filter:note_type"]:marks["apply_filter:panel_close"]]
     assert approach and all(visible for _, _, visible in approach)
-    union = xhs_scan._hover_region(_entry_state(V16_SPAN, V16_PANEL, V16_DIV))
+    union = xhs_scan._hover_region(_entry_state(V16_SPAN, V16_PANEL, V16_DIV, with_ai_chat=False))
     assert len(union) == 3 and all(any(_within(area, x, y) for area in union) for x, y, _ in approach)
     assert _log_lines(caplog, "Filter option approach:") == [
-        "[XiaoHongShuCrawler.scan] Filter option approach: hovered=True, entry=(1076, 126, 1116, 146), "
+        "[XiaoHongShuCrawler.scan] Filter option approach: hovered=True, with_ai_chat=False, "
+        "entry=(1076, 126, 1116, 146), "
         "entry_container=(1054, 116, 1138, 156), panel=(692, 166, 1149, 466), corridor=(1076, 146, 1116, 166), "
         "container_gap=10.0"
     ]
@@ -496,7 +517,7 @@ class _MetricsPage:
 
 def test_list_area_leave_area_and_click_band_start_below_the_tag_row():
     floor = 156 + XHS_LIST_TOP_ROW_MARGIN_PX
-    region = xhs_scan._hover_region(_entry_state(RECON_SPAN, RECON_PANEL, RECON_DIV))
+    region = xhs_scan._hover_region(_entry_state(RECON_SPAN, RECON_PANEL, RECON_DIV, with_ai_chat=False))
     # 滚动位置为 0：内缩已让区域离开标签行，结果不变；落点区域在入口与面板左侧。
     area = list_area_box(V16_METRICS)
     assert area == pytest.approx(Box(385.2, 188.0, 789.6, 216.0))

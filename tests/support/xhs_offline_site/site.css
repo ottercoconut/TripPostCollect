@@ -29,8 +29,9 @@ html, body { margin: 0; padding: 0; background: #fff; font-family: sans-serif; }
    视口其余部分，window 不滚动。左侧结果列表在 .feeds-scroller（overflow-y: auto）内滚动（4 列收窄到 180px）；中间是
    可拖动宽度的分隔条，右侧并排内联宽 515px 的对话栏（左缘约在视口 59%，按视口 30%–70% 的旧落点可能落在上面），
    .ai-chat-inner 内先是头部（标题与关闭按钮 28×28），再是筛选入口；消息区独立滚动且不向外传递滚动，内有几个与结果
-   卡片 ID 重叠的笔记链接；面板宿主绝对定位挂在入口内部，入口矩形不随面板变大，宿主的上内边距盖住入口与面板之间
-   的间隙；每个标签的 aria-hidden 副本绝对定位在真标签下面，二者坐标重叠。 */
+   卡片 ID 重叠的笔记链接；面板宿主绝对定位挂在入口内部，入口矩形不随面板变大，入口与面板之间 8px 的间隙不盖住
+   （这里的间隙是否收起面板没有实测，程序在 AI 布局下也不让轨迹穿过它）；每个标签的 aria-hidden 副本绝对定位在真标签
+   下面，二者坐标重叠。 */
 html[data-layout="ai_chat"] .header { height: 116px; }
 html[data-layout="ai_chat"] #app { padding-top: 116px; }
 .ai-feeds-page.with-ai-chat { position: fixed; top: 116px; left: 0; right: 0; bottom: 0; display: flex; }
@@ -57,7 +58,7 @@ div.filter.ai-chat-filter { position: relative; width: 100px; height: 40px; line
 div.filter.ai-chat-filter.active { background: #ffe4e8; }
 .filter-panel { position: absolute; z-index: 25; line-height: normal; text-align: left; }
 .filter-panel > .filters-wrapper { position: static; }
-.ai-chat-filter .filter-panel { top: 40px; right: 0; padding-top: 8px; }
+.ai-chat-filter .filter-panel { top: 48px; right: 0; }
 .tag-slot { position: relative; display: inline-block; margin-right: 8px; }
 .tag-slot .tags { margin-right: 0; position: relative; }
 .tag-slot .tags[aria-hidden="true"] { position: absolute; left: 0; top: 0; }

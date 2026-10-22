@@ -109,7 +109,7 @@ XHS_FILTER_ENTRY_WAIT_SECONDS = 15.0
 XHS_REACTION_SECONDS = (0.6, 1.8)
 # V16 的悬停面板在入口正下方，入口 div.filter 与面板之间约有 10px 间隙，光标垂直穿过不收起（Mac 人工侦察
 # 2026-10-22）：div.filter 下沿到面板上沿不超过这么多像素（碰到或盖住面板也算）时，文字 span 下沿到面板上沿、两者
-# 横向重叠的那段并入悬停区域（见 `_gap_corridor`）。
+# 横向重叠的那段并入悬停区域（见 `_gap_corridor`）。只在 V16 下启用：AI 对话布局的间隙没有实测。
 XHS_FILTER_GAP_CORRIDOR_MAX_PX = 16.0
 # 进入结果页后关闭“点点AI”对话栏（#99，Mac 人工侦察 2026-10-22）：关闭只对本次结果页加载有效，每次回车进入都
 # 要关。按钮可点（可见、不在 aria-hidden 祖先内、中心点命中）才点，至多点这么多次；每次点击后按间隔至多读这么多次，
@@ -349,13 +349,16 @@ def _gap_corridor(state: dict[str, Any]) -> tuple[Optional[Box], Optional[float]
     悬停目标是入口 div.filter（`entry_container`），光标在文字 span 外、div 内时面板不收起，div 与面板之间约 10px 的
     间隙也不收起。div 下沿到面板上沿不超过 `XHS_FILTER_GAP_CORRIDOR_MAX_PX`（不大于 0 也算）、span 下沿在面板上沿之上、
     span 与面板横向重叠时，走廊为横向重叠段 × span 下沿到面板上沿。取不到 div 时按 span 判定，即 span 与面板之间
-    0 到上限像素的间隙。AI 对话布局的面板挂在入口内部，div 本来就盖住这段，加走廊无害。
+    0 到上限像素的间隙。只在 V16 布局下启用：`with_ai_chat` 为真（对话栏没关掉，按 AI 布局继续的备用路径）时不加，
+    保持第 6–8 轮实测过的严格并集；那里的间隙是否收起面板没有实测。
     """
     entry, panel = _state_box(state, "entry"), _state_box(state, "panel")
     if entry is None or panel is None:
         return None, None
     container = _state_box(state, "entry_container") or entry
     gap = panel.top - (container.top + container.height)
+    if state.get("with_ai_chat"):
+        return None, gap
     entry_bottom = entry.top + entry.height
     left = max(entry.left, panel.left)
     right = min(entry.left + entry.width, panel.left + panel.width)
@@ -786,7 +789,8 @@ class XhsScanMixin:
         """点选“图文”，返回账本动作 id。面板由悬停打开时，接近轨迹的每个点都在入口框与面板框的并集内（见
         `_hover_region`）；按下入口打开的照常接近。到达并静止后再读一次状态（`moments.before_option_press`）：面板仍可见
         且选项仍在才按下，否则本次尝试以 `filter_panel_closed_before_option` 失败，不再空等目标会话第 1 页。
-        计划之前记一行 info 日志：入口 span、入口 div.filter、面板与间隙走廊的框和 div 到面板的像素数（只有框与数值），
+        计划之前记一行 info 日志：对话栏是否打开，入口 span、入口 div.filter、面板与间隙走廊的框和 div 到面板的像素数
+        （只有布尔、框与数值），
         正式轮不碰窗口，事后从日志核对 V16 几何。
         """
         page = self.context_page
@@ -794,7 +798,8 @@ class XhsScanMixin:
         corridor, gap = _gap_corridor(state)
         logger.info(
             "[XiaoHongShuCrawler.scan] Filter option approach: "
-            f"hovered={hovered}, entry={_box_text(_state_box(state, 'entry'))}, "
+            f"hovered={hovered}, with_ai_chat={bool(state.get('with_ai_chat'))}, "
+            f"entry={_box_text(_state_box(state, 'entry'))}, "
             f"entry_container={_box_text(_state_box(state, 'entry_container'))}, "
             f"panel={_box_text(_state_box(state, 'panel'))}, corridor={_box_text(corridor)}, "
             f"container_gap={None if gap is None else round(gap, 1)}"

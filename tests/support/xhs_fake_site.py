@@ -691,6 +691,7 @@ class XhsFakeSite:
             "entry_text": ("已筛选" if self.filter_applied else "筛选") if rendered else "",
             "entry": dict(self.entry_box) if rendered else None,
             "entry_container": dict(self.hover_target()) if rendered else None,
+            "with_ai_chat": self.on_results and self.ai_chat_open,
             "panel_visible": self.panel_visible,
             "panel": dict(self.panel_box) if self.panel_visible else None,
             "option": dict(self.option_box) if has_option else None,
