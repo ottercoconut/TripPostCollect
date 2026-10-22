@@ -475,6 +475,9 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     assert panel_events[option - 1] == "hover_open" and panel_events[option:] == ["option", "leave_close"]
     assert not {"press_open", "press_close"} & set(panel_events), panel_events
     assert "[XiaoHongShuCrawler.scan] Filter panel opened on hover; entry not pressed" in log_lines
+    # 按 AI 布局继续的备用路径不加间隙走廊，接近“图文”仍是实测过的严格并集。
+    geometry = approach_geometry(log_lines)
+    assert geometry["hovered"] is True and geometry["with_ai_chat"] is True and geometry["corridor"] is None
     assert not any("stayed open after the pointer left" in line for line in log_lines)
     first_scroll = actions(crawler, "scroll")[0]["seq"]
     assert actions(crawler, "apply_filter")[-1]["seq"] < first_scroll
@@ -687,29 +690,31 @@ async def test_feed_verification_layer_then_redo_reuses_the_cached_first_image(m
 
 
 APPROACH_LINE = re.compile(
-    r"Filter option approach: hovered=(True|False), entry=\((-?\d+), (-?\d+), (-?\d+), (-?\d+)\), "
+    r"Filter option approach: hovered=(True|False), with_ai_chat=(True|False), "
+    r"entry=\((-?\d+), (-?\d+), (-?\d+), (-?\d+)\), "
     r"entry_container=\((-?\d+), (-?\d+), (-?\d+), (-?\d+)\), panel=\((-?\d+), (-?\d+), (-?\d+), (-?\d+)\), "
     r"corridor=(None|\((-?\d+), (-?\d+), (-?\d+), (-?\d+)\)), container_gap=(-?[\d.]+)"
 )
 
 
 def approach_geometry(log_lines: list[str]) -> dict:
-    """点选“图文”时那行日志里的框（left、top、right、bottom）与 div 到面板的间隙。"""
+    """点选“图文”时那行日志里的布尔、框（left、top、right、bottom）与 div 到面板的间隙。"""
     [line] = [line for line in log_lines if "Filter option approach:" in line]
     match = APPROACH_LINE.search(line)
     assert match, line
     values = match.groups()
-    boxes = [tuple(int(value) for value in values[start:start + 4]) for start in (1, 5, 9)]
-    corridor = None if values[13] == "None" else tuple(int(value) for value in values[14:18])
+    boxes = [tuple(int(value) for value in values[start:start + 4]) for start in (2, 6, 10)]
+    corridor = None if values[14] == "None" else tuple(int(value) for value in values[15:19])
     return {
-        "hovered": values[0] == "True", "entry": boxes[0], "entry_container": boxes[1], "panel": boxes[2],
-        "corridor": corridor, "gap": float(values[18]),
+        "hovered": values[0] == "True", "with_ai_chat": values[1] == "True", "entry": boxes[0],
+        "entry_container": boxes[1], "panel": boxes[2], "corridor": corridor, "gap": float(values[19]),
     }
 
 
 def assert_v16_gap_corridor(geometry: dict) -> None:
     """关闭对话栏后的 V16 几何（同侦察）：div.filter 84×40、“筛选” span 高 20 在其中，面板在 div 下方 10px，走廊为
     span 下沿到面板上沿、span 与面板横向重叠的那段。"""
+    assert geometry["with_ai_chat"] is False, geometry
     span, container, panel = geometry["entry"], geometry["entry_container"], geometry["panel"]
     assert (container[2] - container[0], container[3] - container[1]) == (84, 40), geometry
     assert span[3] - span[1] == 20 and container[1] <= span[1] < span[3] <= container[3], geometry
