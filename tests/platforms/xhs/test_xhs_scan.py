@@ -506,7 +506,7 @@ def test_filter_entry_that_renders_late_is_awaited_then_clicked_after_a_reaction
     # 第 1 次读状态在开面板前，入口等待从第 2 次读起，第 6 次读到入口：其间轮询等待 4 次。
     assert before.count(("sleep", xhs_scan.XHS_FILTER_POLL_SECONDS)) == 4
     kind, reaction = before[-1]
-    low, high = xhs_scan.XHS_BEFORE_FILTER_SECONDS
+    low, high = xhs_scan.XHS_REACTION_SECONDS
     assert kind == "sleep" and low <= reaction <= high
     filters = [line["target"].get("filter") for line in harness.ledger() if line.get("action") == "apply_filter"]
     assert filters == ["panel_open", "note_type", "panel_close", "panel_close"]

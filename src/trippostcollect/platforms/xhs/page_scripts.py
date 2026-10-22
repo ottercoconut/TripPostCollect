@@ -179,9 +179,13 @@ DOM_SCRIPTS: dict[str, str] = {
     # view_rect 是列表可见区（容器可见区与视口的交集）；list_rect 是结果列表（.search-layout）与 view_rect 的交集，
     # 滚轮落点限定在其中（AI 对话布局右侧的对话栏可独立滚动，不能让滚轮落在上面），取不到时为 null；
     # layout_present 区分“没有 .search-layout”与“列表不在可见区内”；scroll_container 用于诊断与行为证据。
+    # top_row_rect 是列表顶部的标签行（.search-layout__top，含筛选入口与点了会重新打开对话栏的“问点点 ai”标签，
+    # Mac 人工侦察 2026-10-22）与 view_rect 的交集，光标落点与点击都避开它；with_ai_chat 为对话栏是否打开，
+    # 扫描每步借这次读数发现对话栏重新出现（#99）。
     "scroll_metrics": """() => {
         /*list_view*/
         const { layout, container, root, view, clip } = listView();
+        const topRow = layout ? layout.querySelector('.search-layout__top') : null;
         return {
             scroll_container: container ? 'element' : 'document',
             scroll_y: Math.round(container ? container.scrollTop : (window.scrollY || root.scrollTop || 0)),
@@ -190,7 +194,9 @@ DOM_SCRIPTS: dict[str, str] = {
             scroll_height: Math.round((container || root).scrollHeight || 0),
             view_rect: view,
             list_rect: layout ? clip(layout.getBoundingClientRect()) : null,
+            top_row_rect: topRow ? clip(topRow.getBoundingClientRect()) : null,
             layout_present: Boolean(layout),
+            with_ai_chat: Boolean(document.querySelector('.ai-feeds-page.with-ai-chat')),
         };
     }""",
     "search_box": """() => {
@@ -214,12 +220,54 @@ DOM_SCRIPTS: dict[str, str] = {
         const rect = layout.getBoundingClientRect();
         return { visible: rect.width > 0 && rect.height > 0 };
     }""",
+    # “点点AI”对话栏与它的关闭按钮（Mac 人工侦察 2026-10-22，#99）：with_ai_chat 为 .ai-feeds-page.with-ai-chat
+    # 是否存在，ai_chat_inner 为 .ai-chat-inner 的元素框（不存在为 null）。按钮只在 .ai-chat-section 内按
+    # button.xhs-ai-chat-header__close 取：返回个数与其中可见的个数，button 为第一个可见、不在 aria-hidden 祖先内的
+    # （没有时为第一个可见的）元素框，另给它的 aria-label 是否为“关闭 AI 对话”、是否在 aria-hidden 祖先内、中心点
+    # elementFromPoint 是否落在按钮或其后代上。只返回计数、布尔与几何，不返回文字。
+    "ai_chat_state": """() => {
+        const visible = (node) => {
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const boxOf = (node) => {
+            const rect = node.getBoundingClientRect();
+            return {
+                x: rect.left + rect.width / 2, y: rect.top + rect.height / 2,
+                left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+            };
+        };
+        const hidden = (node) => Boolean(node.closest('[aria-hidden="true"]'));
+        const inner = document.querySelector('.ai-chat-inner');
+        const section = document.querySelector('.ai-chat-section');
+        const buttons = section ? Array.from(section.querySelectorAll('button.xhs-ai-chat-header__close')) : [];
+        const shown = buttons.filter(visible);
+        const button = shown.find((node) => !hidden(node)) || shown[0] || null;
+        let centerHit = false;
+        if (button) {
+            const box = boxOf(button);
+            const hit = document.elementFromPoint(box.x, box.y);
+            centerHit = Boolean(hit && button.contains(hit));
+        }
+        return {
+            with_ai_chat: Boolean(document.querySelector('.ai-feeds-page.with-ai-chat')),
+            ai_chat_inner: inner ? boxOf(inner) : null,
+            button_count: buttons.length,
+            button_visible: shown.length,
+            button: button ? boxOf(button) : null,
+            aria_label_ok: Boolean(button && button.getAttribute('aria-label') === '关闭 AI 对话'),
+            aria_hidden_ancestor: Boolean(button && hidden(button)),
+            center_hit: centerHit,
+        };
+    }""",
     # 筛选入口（Mac 人工侦察 2026-10-13）：两种已知布局——V16 在 .search-layout 内，AI 对话布局
     # （.ai-feeds-page.with-ai-chat）在右侧 .ai-chat-inner 内、面板挂在入口内部。全文档取第一个可见且直属
     # span 文字精确为“筛选”/“已筛选”的 div.filter（前面可能有隐藏副本）；入口文字与点击落点都只取这个 span。
     # 选项各组都有 .tags，不按位置或 class 取；每个标签有一份重叠的 aria-hidden 副本，排除后按精确文字取可见的。
     # panel 为第一个可见的 .filters-wrapper 的元素框（悬停打开时，光标离开入口与面板即收起，接近“图文”的轨迹限定在
-    # 两者的并集内，#81）。轮询用，保持精简；整页计数在 filter_diagnostic。
+    # 两者的并集内，#81）；entry_container 为命中的那个 div.filter 的元素框（悬停目标是它而不只是文字 span，V16 下它
+    # 与面板之间的间隙决定是否加间隙走廊，#99）。轮询用，保持精简；整页计数在 filter_diagnostic。
     "filter_state": """(label) => {
         const labels = ['筛选', '已筛选'];
         const textOf = (node) => (node.innerText || node.textContent || '').trim();
@@ -250,6 +298,7 @@ DOM_SCRIPTS: dict[str, str] = {
         return {
             entry_text: span ? textOf(span) : '',
             entry: center(span),
+            entry_container: entry ? center(entry) : null,
             panel_visible: visible(document.querySelector('.filters-wrapper')),
             panel: center(Array.from(document.querySelectorAll('.filters-wrapper')).find(visible) || null),
             option: center(option),
@@ -719,6 +768,11 @@ async def dom_search_layout_visible(page: Page) -> bool:
     except Exception:
         return False
     return bool(isinstance(state, dict) and state.get("visible"))
+
+
+async def dom_ai_chat_state(page: Page) -> dict[str, Any]:
+    state = await _dom(page, "ai_chat_state")
+    return state if isinstance(state, dict) else {}
 
 
 async def dom_filter_state(page: Page, label: str) -> dict[str, Any]:

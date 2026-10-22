@@ -56,6 +56,13 @@ ARROW_POINT = box(760.0, 450.0, 32, 32)
 AUTHOR_POINT = box(980.0, 130.0, 64, 20)
 AVATAR_POINT = box(930.0, 130.0, 36, 36)
 COMMENT_POINT = box(980.0, 600.0, 64, 20)
+# “点点AI”对话栏的关闭按钮（#99）：对话栏关闭后这个位置是第 4 列第 1 行卡片的封面，盲点会打开笔记。
+AI_CHAT_CLOSE = box(1225.0, 150.0, 28, 28)
+AI_CHAT_INNER = box(1100.0, 500.0, 300, 760)
+# 列表顶部的标签行（.search-layout__top，滚动位置为 0 时的视口坐标）：含筛选入口与“问点点 ai”标签（横向位置与尺寸
+# 取自 Mac 人工侦察 2026-10-22，纵向在行的正中）。
+TOP_ROW = {"left": 40.0, "top": 76.0, "right": 1240.0, "bottom": 116.0}
+ASK_AI_TAG_X, ASK_AI_TAG_SIZE = 298.5, (65.0, 18.0)
 
 
 def image_url(note_id: str, index: int) -> str:
@@ -278,7 +285,8 @@ class _Mouse:
         self.site = site
 
     async def move(self, x: float, y: float, steps: int = 1) -> None:
-        entered = not inside(FILTER_ENTRY, *self.site.mouse_position) and inside(FILTER_ENTRY, x, y)
+        entry = self.site.hover_target()
+        entered = not inside(entry, *self.site.mouse_position) and inside(entry, x, y)
         self.site.mouse_position = (x, y)
         self.site.move_count += 1
         if entered:
@@ -321,7 +329,9 @@ class XhsFakeSite:
     `option_missing_opens` 为前几次打开面板时没有“图文”选项；`entry_click_applies_filter` 为点入口打开面板时前端同时
     发出目标会话第 1 页（触发者是 panel_open），之后点“图文”不再发请求；`hover_opens_panel` 为光标移入入口框时面板
     就打开（已开着不变；按下入口仍切换开关），面板开着时光标移到入口框与面板框 `panel_box`（默认 FILTER_PANEL）的并集之外即收起
-    （`panel_leave_closes` 计次）；`list_rect` 为滚动度量里结果列表与列表可见区的
+    （`panel_leave_closes` 计次；`hover_gaps` 里的框也算在内，如 V16 入口与面板之间的间隙）；`entry_box`、`option_box`
+    为入口文字 span 与“图文”的元素框（默认 FILTER_ENTRY、FILTER_OPTION），`entry_container_box` 为入口 div.filter 的框
+    （默认同 span），悬停的进出按它算；`list_rect` 为滚动度量里结果列表与列表可见区的
     相交矩形（None 时不给，扫描按可见区比例落点），`wheel_points` 记下每次滚轮时的鼠标位置；`view_rect` 为列表
     滚动容器的可见区（None 为整页滚动，可见区即视口；给出时列表在容器内自顶部排起、滚动位置是容器的）；
     `cover_blocked[id]` 为这张卡片可见时前几次读数的封面中心被遮住（cover_hit 为假，点击落空）；
@@ -334,7 +344,19 @@ class XhsFakeSite:
 
     浮层：`details[id]` 为 feed 的 note_card（默认 `detail_card(id)`）。`feed_overrides[id]` 依次替换每次点击：
     "no_overlay" 浮层不出现；"no_feed" 浮层出现但无 feed；"net::…" 为 feed 请求失败；整数为 HTTP 状态码；
-    字典为 feed 响应 JSON。`image_overrides[url]` 为 "missing"（从不加载）、HTTP 状态码，或前端实际请求的另一地址
+    字典为 feed 响应 JSON。
+
+    “点点AI”对话栏（#99）：`ai_chat` 为每次回车进入结果页时对话栏打开（默认不打开，即 V16）。关闭按钮 AI_CHAT_CLOSE
+    的 `ai_chat_button_mode` 为 "ok"、"missing"（没有按钮）、"covered"（中心点被盖住，点到的是盖住它的元素）或
+    "aria_hidden"（在 aria-hidden 祖先内），`ai_chat_covered_from_read` 为从第几次 ai_chat_state 读数起按钮被盖住；
+    前 `ai_chat_close_ignored` 次点中按钮不生效；生效后对话栏再保持
+    `ai_chat_close_delay_reads` 次 ai_chat_state 读数才关。关闭时前端在同一非目标会话里续页 `ai_chat_followups`
+    （默认第 2、3 页）；`ai_chat_followups_late` 为续页在点选“图文”、目标会话第 1 页到达之后才到。`ai_chat_log`
+    依次记 ("read", 对话栏是否打开, 按钮是否可点)、("click",)、("closed",)。`top_row` 为列表顶部标签行（默认不给；
+    `top_row_sticky` 为吸顶，否则随列表滚动），点中其中的“问点点 ai”标签（`ask_ai_box`）重新打开对话栏
+    （`ask_ai_clicks` 计次）。
+
+    `image_overrides[url]` 为 "missing"（从不加载）、HTTP 状态码，或前端实际请求的另一地址
     （如浏览器把 http 升级为 https、前端换了样式）。打开浮层加载前两张图，
     翻到第 k 页再加载第 k+1 张。`author_tab_failures` 次点击作者名不开标签页；浮层内的作者主页链接由
     `profile_links[id]` 给出（每项 user_id、point（不可见为 None）、comment、named），默认只有一个指向作者的可见作者名
@@ -386,6 +408,26 @@ class XhsFakeSite:
         self.entry_click_applies_filter = False
         self.hover_opens_panel = False
         self.panel_box = dict(FILTER_PANEL)
+        self.entry_box = dict(FILTER_ENTRY)
+        self.entry_container_box: dict[str, float] | None = None
+        self.option_box = dict(FILTER_OPTION)
+        self.hover_gaps: list[dict[str, float]] = []
+        # “点点AI”对话栏（#99）：`ai_chat` 为每次回车进入结果页时对话栏打开。
+        self.ai_chat = False
+        self.ai_chat_open = False
+        self.ai_chat_button_mode = "ok"
+        self.ai_chat_covered_from_read: int | None = None
+        self.ai_chat_reads = 0
+        self.ai_chat_close_ignored = 0
+        self.ai_chat_close_delay_reads = 0
+        self.ai_chat_closing: int | None = None
+        self.ai_chat_followups = [2, 3]
+        self.ai_chat_followups_late = False
+        self.ai_chat_pending: list[tuple[int, str]] = []
+        self.ai_chat_log: list[tuple] = []
+        self.ask_ai_clicks = 0
+        self.top_row: dict[str, float] | None = None
+        self.top_row_sticky = False
         self.panel_opens = 0
         self.panel_leave_closes = 0
         self.diagnostic_reads = 0
@@ -547,8 +589,12 @@ class XhsFakeSite:
                 "scroll_height": self.scroll_height(),
                 "view_rect": view,
                 "list_rect": dict(self.list_rect) if self.list_rect else None,
+                "top_row_rect": self.top_row_rect(),
                 "layout_present": self.on_results,
+                "with_ai_chat": self.on_results and self.ai_chat_open,
             }
+        if name == "ai_chat_state":
+            return self.ai_chat_state()
         if name == "filter_state":
             return self.filter_state(arg)
         if name == "filter_diagnostic":
@@ -567,6 +613,71 @@ class XhsFakeSite:
             return self.note_engagement()
         raise AssertionError(f"unexpected page script: {name or script[:40]}")
 
+    def top_row_shift(self) -> float:
+        return 0.0 if self.top_row_sticky else float(self.scroll_y)
+
+    def top_row_rect(self) -> dict[str, float] | None:
+        """标签行与列表可见区的交集（同 scroll_metrics.top_row_rect）；没有或不在可见区内为 None。"""
+        if self.top_row is None or not self.on_results:
+            return None
+        view, shift = self.view(), self.top_row_shift()
+        top = max(self.top_row["top"] - shift, view["top"])
+        bottom = min(self.top_row["bottom"] - shift, view["bottom"])
+        if bottom <= top:
+            return None
+        return {"left": self.top_row["left"], "top": top, "right": self.top_row["right"], "bottom": bottom}
+
+    def ask_ai_box(self) -> dict[str, float]:
+        assert self.top_row is not None
+        middle = (self.top_row["top"] + self.top_row["bottom"]) / 2 - self.top_row_shift()
+        return box(ASK_AI_TAG_X, middle, *ASK_AI_TAG_SIZE)
+
+    def ai_chat_state(self) -> dict[str, Any]:
+        """同页面脚本 ai_chat_state；关闭生效后的延迟按读数递减，减完的那次读数已是关闭后。"""
+        if self.ai_chat_closing is not None:
+            if self.ai_chat_closing <= 0:
+                self.ai_chat_closing = None
+                self.close_ai_chat()
+            else:
+                self.ai_chat_closing -= 1
+        self.ai_chat_reads += 1
+        if self.ai_chat_covered_from_read is not None and self.ai_chat_reads >= self.ai_chat_covered_from_read:
+            self.ai_chat_button_mode = "covered"
+        opened = self.on_results and self.ai_chat_open
+        mode = self.ai_chat_button_mode
+        present = opened and mode != "missing"
+        self.ai_chat_log.append(("read", opened, present and mode == "ok"))
+        return {
+            "with_ai_chat": opened,
+            "ai_chat_inner": dict(AI_CHAT_INNER) if opened else None,
+            "button_count": int(present),
+            "button_visible": int(present),
+            "button": dict(AI_CHAT_CLOSE) if present else None,
+            "aria_label_ok": present,
+            "aria_hidden_ancestor": present and mode == "aria_hidden",
+            "center_hit": present and mode != "covered",
+        }
+
+    def close_ai_chat(self) -> None:
+        """对话栏关闭：前端以同一 search_id、相同筛选签名续页（默认立即到达）。"""
+        self.ai_chat_open = False
+        self.ai_chat_log.append(("closed",))
+        pages = [(number, self.search_id) for number in self.ai_chat_followups]
+        if self.ai_chat_followups_late:
+            self.ai_chat_pending.extend(pages)
+            return
+        for number, search_id in pages:
+            self.respond_followup(number, search_id)
+
+    def respond_followup(self, number: int, search_id: str) -> None:
+        """非目标会话（回车会话）的第 number 页：不改当前会话。"""
+        current = (self.search_id, self.session_filters)
+        self.search_id, self.session_filters = search_id, None
+        try:
+            self.respond_page(number)
+        finally:
+            self.search_id, self.session_filters = current
+
     @property
     def entry_rendered(self) -> bool:
         return self.on_results and self.entry_delay_reads is not None and self.filter_reads > self.entry_delay_reads
@@ -578,10 +689,11 @@ class XhsFakeSite:
         has_option = self.panel_visible and label == "图文" and self.panel_opens > self.option_missing_opens
         return {
             "entry_text": ("已筛选" if self.filter_applied else "筛选") if rendered else "",
-            "entry": dict(FILTER_ENTRY) if rendered else None,
+            "entry": dict(self.entry_box) if rendered else None,
+            "entry_container": dict(self.hover_target()) if rendered else None,
             "panel_visible": self.panel_visible,
             "panel": dict(self.panel_box) if self.panel_visible else None,
-            "option": dict(FILTER_OPTION) if has_option else None,
+            "option": dict(self.option_box) if has_option else None,
         }
 
     def filter_diagnostic(self) -> dict[str, Any]:
@@ -609,6 +721,7 @@ class XhsFakeSite:
         页里的非笔记条目（如 hot_query，Mac 人工取证 2026-10-14）同样占一个列表位置，渲染为没有封面的卡片。
         """
         view = self.view()
+        row = self.top_row_rect()
         cards = []
         for index, item in enumerate(self.rendered_items()):
             top = self.card_top(index, item["id"])
@@ -627,7 +740,8 @@ class XhsFakeSite:
                     "bottom": bottom,
                     "cover": cover if has_cover else None,
                     "cover_hit": has_cover and view["top"] <= cover["y"] < view["bottom"]
-                    and self.cover_blocked.get(item["id"], 0) <= 0,
+                    and self.cover_blocked.get(item["id"], 0) <= 0
+                    and not (self.top_row_sticky and row is not None and row["top"] <= cover["y"] <= row["bottom"]),
                 }
             )
         return cards
@@ -715,15 +829,29 @@ class XhsFakeSite:
             elif near(COMMENT_POINT):
                 self.comment_clicks += 1
             return
+        if self.on_results and self.ai_chat_open and self.ai_chat_button_mode != "missing" and near(AI_CHAT_CLOSE):
+            self.ai_chat_log.append(("click",))
+            if self.ai_chat_button_mode == "covered":
+                return
+            if self.ai_chat_close_ignored > 0:
+                self.ai_chat_close_ignored -= 1
+            elif self.ai_chat_close_delay_reads > 0:
+                self.ai_chat_closing = self.ai_chat_close_delay_reads
+            else:
+                self.close_ai_chat()
+            return
         # 筛选面板与入口在卡片之上：落点同时落在标签与卡片封面内时点中的是标签。
         card = next(
             (card for card in self.visible_cards() if card["cover"] and card["cover_hit"] and near(card["cover"])), None,
         )
-        if self.on_results and self.panel_visible and near(FILTER_OPTION):
+        if self.on_results and self.panel_visible and near(self.option_box):
             if self.apply_filter_works and not (self.entry_click_applies_filter and self.filter_applied):
                 self.filter_applied = True
                 self.start_session(filters=TARGET_FILTERS)
-        elif self.entry_rendered and near(FILTER_ENTRY):
+            for number, search_id in self.ai_chat_pending:
+                self.respond_followup(number, search_id)
+            self.ai_chat_pending = []
+        elif self.entry_rendered and near(self.entry_box):
             if self.panel_visible and not self.panel_closes:
                 return
             self.panel_visible = not self.panel_visible
@@ -731,10 +859,16 @@ class XhsFakeSite:
             if self.panel_visible and self.entry_click_applies_filter and not self.filter_applied:
                 self.filter_applied = True
                 self.start_session(filters=TARGET_FILTERS)
+        elif self.on_results and self.top_row is not None and near(self.ask_ai_box()):
+            self.ask_ai_clicks += 1
+            self.ai_chat_open = True
         elif self.on_results and card is not None:
             self.open_overlay(card["note_id"])
         elif not self.on_results and near(SEARCH_BOX):
             self.box_focused = True
+
+    def hover_target(self) -> dict[str, float]:
+        return self.entry_container_box or self.entry_box
 
     def hover_entry(self) -> None:
         if self.hover_opens_panel and self.overlay_note is None and self.entry_rendered and not self.panel_visible:
@@ -742,7 +876,8 @@ class XhsFakeSite:
             self.panel_opens += 1
 
     def hover_leave(self, x: float, y: float) -> None:
-        if self.hover_opens_panel and self.panel_visible and not (inside(FILTER_ENTRY, x, y) or inside(self.panel_box, x, y)):
+        held = (self.hover_target(), self.panel_box, *self.hover_gaps)
+        if self.hover_opens_panel and self.panel_visible and not any(inside(area, x, y) for area in held):
             self.panel_visible = False
             self.panel_leave_closes += 1
 
@@ -751,6 +886,8 @@ class XhsFakeSite:
         self.page.url = f"https://www.xiaohongshu.com/search_result_ai?keyword={quote(quote(keyword))}&source=web"
         self.box_focused = False
         self.filter_applied = False
+        self.ai_chat_open = self.ai_chat
+        self.ai_chat_closing = None
         self.start_session(filters=None, keyword=keyword)
 
     def start_session(self, *, filters: list[dict[str, Any]] | None, keyword: str | None = None) -> None:
@@ -975,5 +1112,6 @@ def make_site(*args: Any, **kwargs: Any) -> XhsFakeSite:
 
 __all__ = [
     "XhsFakeSite", "FakePage", "make_site", "note", "TARGET_FILTERS", "detail_card", "creator_projection",
+    "AI_CHAT_CLOSE", "TOP_ROW",
     "engagement_view", "image_url", "image_bytes", "state_note", "whitelisted_state",
 ]

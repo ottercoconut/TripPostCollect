@@ -280,7 +280,7 @@ Chrome 由共享 CDP 启动器（`runtime/browser_launcher.py`）自启：
   `deltaY` 的 0–0.4 倍同向漂移，方向整轮固定。
 - 需要把元素滚进可视区（评论区、点赞控件）时，光标先移进该元素所在滚动区域，用手势按需要的位移滚动后
   重新测量，至多 8 轮，连续两轮位置不变即停；仍不可见按本次互动失败处理，不退回 `scroll_into_view_if_needed`。
-- 证据：账本中点击类动作（`apply_filter`、`click_card`、`close_overlay`、`click_author`、按箭头的
+- 证据：账本中点击类动作（`dismiss_ai_chat`、`apply_filter`、`click_card`、`close_overlay`、`click_author`、按箭头的
   `flip_image`，以及聚焦搜索框那次点击随 `type_search`）带 `pointer`：`x_ratio`、`y_ratio`（落点在元素框
   中的比例）、`approach_ms`、`moves`、`settle_ms`、`hold_ms`，本页第一次时另有 `entered=true`；扫描 `scroll`
   动作带 `pointer.gestures`（每个手势的 `events`、`delta_y`、`delta_x`）。这些都在执行前计划好、随动作行写出；
@@ -430,10 +430,12 @@ child `summary.json` 的
 ### 搜索与全量扫描
 
 - 搜索固定为“综合 + 图文”。回车后进入 `/search_result_ai`，前端先发不带 `filters` 的“综合 + 不限”
-  第 1 页，这一会话只截获、不处理、不滚动。结果页有两种已知布局（依据：V16 与 Mac 人工侦察 2026-10-13）：
-  V16 的入口在 `.search-layout` 内，面板 `.filters-wrapper` 在其旁按显隐切换；AI 对话布局
-  （`.ai-feeds-page.with-ai-chat`，右侧有可独立滚动的对话栏）的入口在 `.ai-chat-inner` 内，面板挂在入口
-  内部，收起时从 DOM 移除，`.search-layout` 内没有入口。因此入口在全文档 `div.filter` 中取第一个可见、
+  第 1 页，这一会话只截获、不处理、不滚动。结果页有两种已知布局（依据：V16 与 Mac 人工侦察 2026-10-13、
+  2026-10-22）：每次回车进入结果页时默认为 AI 对话布局（`.ai-feeds-page.with-ai-chat`，右侧有可独立滚动的
+  “点点AI”对话栏；全新 profile 也是），入口在 `.ai-chat-inner` 内，面板挂在入口内部，收起时从 DOM 移除，
+  `.search-layout` 内没有入口；关闭对话栏后为 V16，入口在 `.search-layout > .search-layout__top` 内，面板
+  `.filters-wrapper` 悬停即打开，在入口正下方靠右，两者之间约有 10px 间隙。正式轮正常按 V16 运行：截获非目标
+  第 1 页之后、点选“图文”之前先关闭对话栏（见“关闭对话栏”一条）；关闭失败时按 AI 布局继续。入口在全文档 `div.filter` 中取第一个可见、
   且直属 `span` 文字精确为“筛选”或“已筛选”的节点（前面可能有隐藏或零尺寸的同类节点）；入口文字只读
   这个 `span`（面板开着时入口的整体文字含面板内容），开面板与回退收起时点它（落点在 `span` 框内）。选项每个标签有一份坐标
   重叠的 `aria-hidden="true"` 副本，排除自身或祖先带该属性的节点后按精确文字取可见的那个。入口未渲染时
@@ -444,7 +446,13 @@ child `summary.json` 的
   点选“图文”（各组 `.tags` 结构相同，不按位置）。面板由悬停打开时，光标离开入口与面板就会收起（第 6 轮
   实测 2026-10-18：悬停打开后第 1 次点选落空、等满约 30 秒报 `filter_not_confirmed`，失败时 `panel_count=0`）：
   从入口到“图文”这一段的接近轨迹（主移动、越过或没够到的落点与修正段）每个点都夹在入口框（`span`）与面板框
-  （第一个可见的 `.filters-wrapper`）的并集内，时长、事件间隔与落点分布照常；按下入口打开的照常接近。两种情况
+  （第一个可见的 `.filters-wrapper`）的并集内，时长、事件间隔与落点分布照常。V16 的悬停目标是入口 `div.filter`
+  （约 84×40，“筛选” `span` 约 20px 高、居中），光标在 `span` 外、`div` 内时面板不收起，`div` 与面板之间约 10px 的
+  间隙也不收起：`div` 下沿到面板上沿不超过 16px（碰到或盖住面板也算）、`span` 下沿在面板上沿之上且两者横向重叠时，
+  `span` 下沿到面板上沿、横向重叠的那段作为间隙走廊并入并集（取不到 `div` 框时按 `span` 与面板之间 0–16px 判定），
+  否则间隙里的轨迹点会被夹到 `span` 或面板边上、光标一步跳过间隙。点选“图文”时记一行 info 日志
+  `Filter option approach: hovered=…, entry=(…), entry_container=(…), panel=(…), corridor=(…), container_gap=…`
+  （框为 left、top、right、bottom，间隙为 `div` 下沿到面板上沿的像素数，只有框与数值），供事后核对几何；按下入口打开的照常接近。两种情况
   都在到达“图文”并静止后、按下前再读一次状态，面板仍可见且选项仍在才按下，否则不按，本次尝试立即以
   `filter_panel_closed_before_option` 失败并重试（账本里这次的 `note_type` 动作没有对应的按下）。以入口文字变为
   “已筛选”且截获到目标会话第 1 页（5 项 `filters`：`sort_type=general`、`filter_note_type=普通笔记`，其余三项
@@ -467,6 +475,36 @@ child `summary.json` 的
   `panel_open`、`note_type`、`panel_close(pointer_leave)`，回退时末尾再加 `panel_close(entry_press)`。目标会话第 1 页
   的关键词与目标不符时重新输入一次，仍不符报 `search_keyword_mismatch`。三者都以
   `xhs_navigation_recovery_failed:<code>` 停止。
+- 关闭对话栏（#99，依据：Mac 人工侦察 2026-10-22）：在回车并截获非目标第 1 页之后、点选“图文”之前。关闭只对本次
+  结果页加载有效（开关浮层、开作者页再回来都保持关闭；F5、重新搜索、新标签页都会让它回来），所以首次进入和
+  重新进入（受控恢复、离开结果页后回首页重新输入）都经过这一步。先读一次页面脚本 `ai_chat_state`（只返回计数、
+  布尔与元素框，不返回文字）：没有 `.ai-feeds-page.with-ai-chat` 时不做界面动作、不写账本，只记一行 info 日志
+  `AI chat panel absent; already V16 layout`。
+  - 关闭按钮只在 `.ai-chat-section` 内按 `button.xhs-ai-chat-header__close` 取；可见、不在 `aria-hidden` 祖先内且
+    中心点 `elementFromPoint` 落在按钮或其后代上才算可点。`aria-label` 是否为“关闭 AI 对话”只进诊断，不阻止点击。
+  - 每次点击之前停顿 0.6–1.8 秒（与接近筛选入口之前的反应停顿同一分布，不写 pause 行），再读一次按钮：对话栏
+    已关闭或按钮不可点就不再点。可点才按真人指针计划点击（落点、轨迹与按住时长同其他点击），写账本动作
+    `dismiss_ai_chat`（`target={"control": "ai_chat_close"}`，带 `pointer`），到达并静止后再读一次，按钮仍可点且
+    落点仍在按钮内才按下。按下后按 0.25 秒轮询至多 20 次（约 5 秒），直到 `with-ai-chat` 消失且 `.ai-chat-inner`
+    不存在；未确认时至多再试一次，共 2 次。防误点：对话栏一旦消失，按钮原位置在 V16 下落在结果列表上，盲点会
+    点开一篇笔记，所以每次按下之前都须是新鲜读数，不按原坐标补点。
+  - 关闭不换搜索会话：路径仍为 `/search_result_ai`，`search_id` 与筛选签名不变，前端随后在同一非目标会话里续页
+    （第 2、3 页……，筛选全为“不限”）。确认后先等在途的搜索响应读完并消费，这些续页记为非目标访问，trigger 为
+    `dismiss_ai_chat`；在点选“图文”之后才到的续页同样是非目标访问（trigger 落在 `apply_filter` 上），不影响目标
+    会话第 1 页的判定与门禁 G1。之后记一行 info 日志 `AI chat panel close: clicks=…, confirmed=…,
+    scroll_container=…, continuation_pages=…`（关闭后的滚动容器应为 `document`，续页数只数这一步消费到的）。
+  - 有对话栏但没有可点的按钮（`outcome=button_not_clickable`）、或按下 2 次仍未确认（`not_confirmed`）时，写一条
+    导航诊断 `stage=ai_chat_close`（`with_ai_chat`、`button_count`、`button_visible`、`aria_label_ok`、
+    `aria_hidden_ancestor`、`center_hit`、`ai_chat_inner` 与 `button` 的元素框、`clicks`、`confirmed`）和一行 warning
+    日志 `AI chat panel not closed; continuing in the AI chat layout`，按 AI 布局继续，本轮不失败；AI 布局的入口、
+    滚动容器与遮挡判定（见各条）全部保留。
+  - 扫描中途不关闭：关闭会让列表重新排版，还可能在目标会话里加载新页，而那次加载之前没有翻页停顿。扫描每步
+    本来就读的 `scroll_metrics` 带 `with_ai_chat`，按 V16 运行时它变为真即对话栏重新出现：每个目标会话只写一条
+    `stage=ai_chat_reappeared` 诊断（`outcome=present_during_scan`，带滚动容器类型与当前页码）和一行 warning 日志
+    `AI chat panel reappeared during the scan`，不点击，按 AI 布局继续。
+  - 结果列表顶部的标签行 `.search-layout__top`（含筛选入口与点了会重新打开对话栏的“问点点 ai”标签）：除筛选入口
+    外，任何点击与光标落点都不在这一行（见滚轮落点、可点击带与“节奏与行为”）；轨迹从行上经过可以，侦察中悬停
+    无反应。
 - 筛选诊断写入 `behavior_evidence.navigation.json`，`stage=search_filter`，只在失败时统计：`.search-layout`
   个数、全文档 `div.filter` 个数、入口可见性、`.filters-wrapper` 个数（`panel_count`）与其中可见的个数
   （`panel_visible_count`；轮询的 `panel_visible` 只看第一个）、精确文字节点个数，视口尺寸与滚动位置，以及至多
@@ -483,7 +521,7 @@ child `summary.json` 的
 - 列表的滚动方式（依据：Mac 人工测量 2026-10-13）：AI 对话布局下结果列表在 `.search-layout` 的某个祖先
   容器内滚动，`window.scrollY` 始终为 0，顶部约 116px 的搜索框区域固定不动；右侧对话栏与列表并排、不重叠，
   可独立滚动，里面有笔记链接与 `data-note-id` 元素，但没有 `section.note-item`。关闭对话栏后的布局（V16）
-  整页滚动。程序不关闭对话栏，也不为布局增加界面动作，两种布局按同一口径运行：滚动容器取 `.search-layout`
+  整页滚动。正式轮正常为 V16（见“关闭对话栏”），关闭失败时按 AI 布局继续，两种布局按同一口径运行：滚动容器取 `.search-layout`
   （优先 `.ai-feeds-page` 下的）自身或向上第一个 `overflow-y` 为 `auto`、`scroll` 或 `overlay` 且
   `scrollHeight` 比 `clientHeight` 大 1px 以上的元素（到文档根为止），找不到为文档。“滚动位置”指该容器的
   `scrollTop`（文档时为 `window.scrollY`），到底判断（滚动位置加容器可见高度达到 `scrollHeight` 减 2px）、
@@ -491,7 +529,8 @@ child `summary.json` 的
   容器类型变化时日志记一行 `List scroll container`，只含几何数值。卡片和就绪计数里的笔记链接、作者链接只在
   `.search-layout` 内找（取不到时为全文档），对话栏里的不算。
 - 扫描滚动时光标位于结果列表 `.search-layout` 与列表可见区相交的矩形内，横纵各内缩 20%，以免 AI 对话
-  布局下滚轮落在对话栏上；取不到该矩形时为列表可见区内宽 30%–70%、高 35%–75% 的区域。光标已在区域内就
+  布局下滚轮落在对话栏上；标签行 `.search-layout__top` 在列表可见区内时，矩形的上沿至少在它下沿之下 8px（不吸顶时
+  内缩本已让矩形离开它，吸顶与否未经实测；收起筛选面板时移开光标的落点区域同取这个矩形）；取不到该矩形时为列表可见区内宽 30%–70%、高 35%–75% 的区域。光标已在区域内就
   不动，否则按轨迹移进区域。每一步的位移由若干触控板手势凑成，总和恰为该步距离。行为阶段与连续性行为
   使用同一个内缩矩形，但取不到时不退回可见区（见“节奏与行为”）。
 - 地址栏里的关键词经两次编码；行为门禁的 `target_url_ok` 对地址逐层解码（最多 3 层），任一层含关键词
@@ -506,7 +545,7 @@ child `summary.json` 的
 - 每轮从目标会话顶部全量滚到末页 `has_more=false`，不保存深层位置，也没有顶部刷新。按 `data-index`
   顺序处理列表可见区内的卡片：数据库、账号 seen、累计摘要和本轮已决定的 ID 直接滑过；搜索项为视频的在
   点击前记决定；其余未知图文在可点击时就地点开。可点击指封面中心在可点击带内（列表可见区顶部加其高度
-  10% 起，到其底边上方 8px 止），且该点 `elementFromPoint` 落在这张卡片内；被固定头部、对话栏或弹层遮住
+  10% 起，标签行在可见区内时另须在它下沿之下 8px，到其底边上方 8px 止；卡片点击的落点纵向同样限在带内），且该点 `elementFromPoint` 落在这张卡片内；被固定头部、对话栏或弹层遮住
   的不点。单步滚动不超过列表可见区高度的 0.8 倍；可见区高于 80px 时单步小于可点击带高度，封面中心一步
   越不过整条带，不会跳过一行。已滑到可点击带上方仍未决定的卡片向上补漏，同一卡片补漏 3 次仍够不着即
   `xhs_search_items_unresolved`。
@@ -594,7 +633,7 @@ child `summary.json` 的
 - 行为阶段（`dwell_on_list` 的随机移动与滚动）和连续性行为的随机移动都限定在结果列表区域内（#88）：区域与
   扫描滚动相同，即 `.search-layout` 与列表可见区相交的矩形横纵各内缩 20%。AI 对话布局下列表可见区是滚动容器
   的可见区，整页滚动的布局为视口；内缩让目标点与滚轮落点离开右侧对话栏（含筛选入口）和顶部固定的搜索框区域，
-  轨迹越过目标至多 115px，也不会进入对话栏。随机移动开始时取一次区域，滚动每一轮重取。行为阶段判断滚动
+  轨迹越过目标至多 115px，也不会进入对话栏；区域上沿同样在标签行下沿之下 8px（见“关闭对话栏”）。随机移动开始时取一次区域，滚动每一轮重取。行为阶段判断滚动
   是否有效只看列表自身的滚动位置（AI 对话布局为容器的 `scrollTop`，整页滚动为 `window.scrollY`，滚动容器类型
   须前后一致），对话栏或其他节点的滚动不算，也不使用触摸滚动。证据中 `mouse_moves` 与 `scroll_target` 事件
   另记 `area`（所用区域的 `left`、`top`、`width`、`height`）与 `scroll_container`（`element` 或 `document`），
@@ -721,7 +760,8 @@ child `summary.json` 的
   `search_page`；必需的搜索两档各至少有一次连续性完成。整轮没有新笔记时不要求详情与作者阶段。
 - 任一规则不满足即 `behavior_evidence_ok=false`；门禁平台缺少门禁结果同样失败
   （`visit_validation_missing`）。
-- 失败诊断写入 `behavior_evidence.navigation.json`（不进账本）：
+- 失败诊断写入 `behavior_evidence.navigation.json`（不进账本）：关闭对话栏失败与扫描中途重新出现见“关闭对话栏”
+  （`stage=ai_chat_close`、`stage=ai_chat_reappeared`，都不停止本轮）；
   `xhs_search_card_unregistered` 停止前追加 `stage=search_scan`、`outcome=card_unregistered`，列出每个未登记
   ID 的卡片结构（`data-index`、有无封面、封面路径首段、`tag.class`、在列表可见区的位置）与它在本轮全部搜索
   响应（含非目标会话与非笔记条目，只在内存中保留）中的出处（会话起始序号、是否目标会话、页码、页内位置、
