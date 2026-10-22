@@ -17,6 +17,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import random
 import re
 import sqlite3
 import sys
@@ -41,6 +42,7 @@ from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
 from trippostcollect.platforms.xhs import author as xhs_author
 from trippostcollect.platforms.xhs import core as xhs_core
+from trippostcollect.platforms.xhs import overlay as xhs_overlay
 from trippostcollect.platforms.xhs import scan as xhs_scan
 from trippostcollect.platforms.xhs import session as xhs_session
 from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
@@ -115,12 +117,12 @@ pytestmark = [
 
 
 @asynccontextmanager
-async def replay_browser(site: XhsOfflineSite):
+async def replay_browser(site: XhsOfflineSite, *, viewport: dict = VIEWPORT):
     """一个浏览器、一个 Context、一个主页面；Context 内的全部请求都交给离线站点的路由。第三项是页面记下的指针事件。"""
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True, args=["--disable-smooth-scrolling"])
         try:
-            context = await browser.new_context(viewport=VIEWPORT, locale="zh-CN", service_workers="block")
+            context = await browser.new_context(viewport=viewport, locale="zh-CN", service_workers="block")
             site.watch(context)
             await context.route("**/*", site.handle)
             pointer_events: list[dict] = []
@@ -452,6 +454,8 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
     assert audit["scrollLoads"] == 2 and audit["selfLoads"] == 0
     assert metrics["scroll_container"] == "element" and metrics["view_rect"]["top"] == 116
     assert metrics["list_rect"]["right"] <= VIEWPORT["width"] * 0.65 + 1
+    # #102：AI 对话布局里固定定位的 .ai-feeds-page 是列表的祖先、页头下沿不在可见区顶部之下，都不算遮挡，带与步长不变。
+    assert metrics["top_occlusion_bottom"] is None and metrics["top_occluders"] == 0
     # 对话栏里的笔记链接与结果 ID 重叠，但不计入列表、从未被点；点卡片的落点都在封面内。
     assert lists["chat_note_ids"] == ["p1-00", "p1-02", "p1-03"] and lists["chat_explore_links"] == 2
     assert counts["card_count"] == lists["list_cards"] > 0
@@ -795,6 +799,9 @@ async def test_ai_chat_is_closed_then_the_scan_scrolls_the_whole_page_and_passes
     assert audit["maxWindowScrollY"] > 0 and audit["maxListScrollTop"] == 0
     assert metrics["scroll_container"] == "document" and metrics["view_rect"]["top"] == 0
     assert metrics["with_ai_chat"] is False and metrics["top_row_rect"] is None  # 扫完时标签行已滚出可见区
+    # #102：扫完时热门筛选标签排已吸顶，页头（0–116）与它（116–164）都盖在列表上；标签从未被点，没有带 filter_hot 的搜索。
+    assert metrics["top_occlusion_bottom"] == 164 and metrics["top_occluders"] == 2
+    assert audit["hotRowStuck"] >= 1 and audit["hotTabClicks"] == 0 and site.hot_search_requests() == []
     # 续页：回车会话（不带 filters）的同一 search_id 第 2、3 页，非目标访问，trigger 为关闭动作；目标会话由点选“图文”触发。
     general = [body for body in site.search_requests if "filters" not in body]
     assert [body["page"] for body in general] == [1, 2, 3] and len({body["search_id"] for body in general}) == 1
@@ -852,6 +859,7 @@ async def test_frontend_self_load_when_viewport_is_not_filled_passes_the_gate(mo
         "[XiaoHongShuCrawler.scan] AI chat panel absent; already V16 layout"
     ]
     assert metrics["scroll_container"] == "document" and metrics["view_rect"]["top"] == 0  # 整页滚动
+    assert metrics["top_occlusion_bottom"] == 64 and metrics["top_occluders"] == 1  # 静态 V16 的 64px 固定页头
     assert audit["clickedOptions"] == [["filter_note_type", "图文"]]
     assert [record["note_id"] for record in crawler.records] == ["s1-1", "s2-4"]
     stopped = last_stop(state_path)
@@ -861,4 +869,131 @@ async def test_frontend_self_load_when_viewport_is_not_filled_passes_the_gate(mo
     assert result["problem_counts"] == {}
     assert result["content_visit_ok"] is True and result["checked_records"] == 2
     assert result["frontend_self_loads"] >= 1
+    assert site.unexpected == [] and site.escaped() == []
+
+
+# #102：侦察窗口（Mac 普通 Chrome，内宽 1470、内高 444）。关闭对话栏后的 V16 下列表自文档 204px 起，每行 360px，封面在
+# 卡片内 20px 起、高 240px；页头固定在 0–116，热门筛选标签排滚过 40px 后吸顶在 116–164。
+RECON_VIEWPORT = {"width": 1470, "height": 444}
+
+
+class _LongSteps(random.Random):
+    """扫描每步都取画像上限，由单步上限截住：未吸顶时 0.8 × (444 − 116) = 262，吸顶后 0.8 × (444 − 164) = 224。滚动位置依次为
+    262、486、710……：第 2 行在 262 时封面中心 442 还在可点击带（172–436）下方，到 486 时封面上沿 98、中心 218，第一次可点时
+    上沿就压在吸顶的标签排下面（第 9 轮误点的几何）。"""
+
+    def randint(self, a: int, b: int) -> int:
+        return b
+
+
+@pytest.mark.asyncio
+async def test_v16_cards_scrolling_under_the_sticky_hot_tag_row_never_click_a_tag(monkeypatch, tmp_path):
+    """#102：按侦察窗口关闭对话栏后整页滚动三页。热门筛选标签排吸顶后，有卡片在封面上沿还压在标签排下面、中心已露出时
+    被点开；可点击带从标签排下沿之下 8px 起，标签被点 0 次，没有 filter_hot 会话，门禁通过。扫完时在真实 Chromium 里直接
+    执行页面脚本：页头与吸顶的标签排报为遮挡（164，2 个），标签中心的点对卡片不命中、命中元素是标签。"""
+    pages = [[search_item(f"v{number}-{index:02d}") for index in range(8)] for number in (1, 2, 3)]
+    unknown = ["v1-01", "v1-05", "v2-06", "v3-02"]
+    site = XhsOfflineSite(KEYWORD, pages)
+    known = [item["id"] for items in pages for item in items if item["id"] not in unknown]
+    monkeypatch.setattr(xhs_scan, "SCAN_RANDOM", _LongSteps(7))
+
+    async with replay_browser(site, viewport=RECON_VIEWPORT) as (context, page, pointer_events):
+        crawler, state_path = prepare_crawler(monkeypatch, tmp_path, context, page, known=known)
+        opened: list[tuple[str, dict, tuple, object]] = []
+        process = crawler._process_note_card
+
+        async def recording(item, search_page, card):
+            metrics = await page.evaluate(DOM_SCRIPTS["scroll_metrics"])
+            opened.append((item.note_id, card["cover"], card["click_band"], metrics.get("top_occlusion_bottom")))
+            await process(item, search_page, card)
+
+        crawler._process_note_card = recording
+        await page.goto(EXPLORE_URL)
+        with crawler_log_lines() as log_lines:
+            await crawler.search()
+        audit = await page.evaluate("() => window.__tpcOffline")
+        metrics = await page.evaluate(DOM_SCRIPTS["scroll_metrics"])
+        probe = await page.evaluate("""() => {
+            const tab = document.querySelector('.reds-sticky.is-fixed button.tab');
+            const cover = document.querySelector('section.note-item[data-note-id] a.cover');
+            if (!tab || !cover) return null;
+            const rect = tab.getBoundingClientRect();
+            return {
+                x: rect.left + rect.width / 2, y: rect.top + rect.height / 2,
+                note_id: cover.closest('section.note-item').getAttribute('data-note-id'),
+            };
+        }""")
+        hit = await page.evaluate(DOM_SCRIPTS["point_hit"], {
+            "x": probe["x"], "y": probe["y"], "target": {"kind": "card", "note_id": probe["note_id"]},
+        }) if probe else None
+
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted" and stopped["source_page"] == 3
+    assert sorted(record["note_id"] for record in crawler.records) == sorted(unknown)
+    assert len(actions(crawler, "dismiss_ai_chat")) == 1 and audit["aiChatClosed"] == 1
+    # 吸顶后点开的卡片：带的上沿在标签排下沿之下 8px；其中有封面上沿压在标签排下面、中心已露出的。
+    stuck = [(cover, band) for _, cover, band, occlusion in opened if occlusion == 164]
+    assert stuck and all(band[0] == 172 for _, band in stuck), opened
+    assert any(cover["top"] < 164 < cover["y"] for cover, _ in stuck), opened
+    # 标签从未被点、没有 filter_hot 会话；每次点封面都打开浮层并恰有一条 click_card。
+    assert audit["hotRowStuck"] >= 1 and audit["hotTabClicks"] == 0 and audit["hotTabLabels"] == []
+    assert site.hot_search_requests() == [] and audit["strayClicks"] == []
+    assert audit["coverClicks"] == len(actions(crawler, "click_card")) == audit["overlaysOpened"] == len(unknown)
+    assert not any("Card click withheld" in line or "target=card" in line for line in log_lines)
+    assert metrics["top_occlusion_bottom"] == 164 and metrics["top_occluders"] == 2
+    assert probe is not None and hit["target"] is True and hit["hit"] is False, hit
+    assert hit["hit_tag"].startswith("button.tab"), hit
+
+    result = run_gate(crawler, state_path, tmp_path)
+    assert result["problem_counts"] == {}
+    assert result["content_visit_ok"] is True and result["checked_records"] == len(unknown)
+    assert site.unexpected == [] and site.escaped() == []
+
+
+@pytest.mark.asyncio
+async def test_unexpected_hot_filter_search_reenters_from_home_and_passes_the_gate(monkeypatch, tmp_path):
+    """#102 注入：第 1 次点封面时站点不开浮层，改为带 filter_hot 的新搜索第 1 页（第 9 轮误点的后果）。程序等不到 feed；
+    第 2 次尝试时列表已替换，落点命中检测找不到这张卡片，不按下、交回扫描。扫描写 unexpected_search_session 诊断（trigger
+    为那次 click_card），回首页重新输入、关闭对话栏、点选“图文”，在新目标会话里处理完两篇，同一账本两个目标会话，门禁通过。"""
+    pages = [[search_item(f"h{number}-{index:02d}") for index in range(8)] for number in (1, 2)]
+    unknown = ["h1-02", "h2-05"]
+    site = XhsOfflineSite(KEYWORD, pages, hot_search_on_cover=1)
+    known = [item["id"] for items in pages for item in items if item["id"] not in unknown]
+    monkeypatch.setattr(xhs_overlay, "XHS_DETAIL_CAPTURE_SECONDS", 3.0)
+
+    async with replay_browser(site) as (context, page, pointer_events):
+        crawler, state_path = prepare_crawler(monkeypatch, tmp_path, context, page, known=known)
+        await page.goto(EXPLORE_URL)
+        with crawler_log_lines() as log_lines:
+            await crawler.search()
+        audit = await page.evaluate("() => window.__tpcOffline")  # 回首页重新进入后的文档
+
+    stopped = last_stop(state_path)
+    assert stopped["stop_reason"] == "source_exhausted" and stopped["source_page"] == 2
+    assert [record["note_id"] for record in crawler.records] == unknown
+    [hot] = site.hot_search_requests()
+    assert hot["page"] == 1 and hot["filters"][-1] == {"type": "filter_hot", "tags": ["路线规划"]}
+    assert site.document_requests.count("/explore") == 2
+    [diagnostic] = [event for event in crawler._navigation_diagnostics if event["stage"] == "unexpected_search_session"]
+    assert diagnostic["outcome"] == "reenter_from_home" and diagnostic["trigger"] == "click_card"
+    assert diagnostic["filter_hot"] is True and diagnostic["extra_keys"] == ["filter_hot"]
+    assert diagnostic["missing_keys"] == [] and diagnostic["keyword_matches"] is True
+    lines = ledger_lines(crawler)
+    clicks = [line for line in actions(crawler, "click_card") if line["target"]["note_id"] == "h1-02"]
+    assert len(clicks) == 2  # 带出新搜索的那次与新目标会话里的那次；交回扫描的那次没有按下
+    searches = [line for line in lines if line.get("kind") == "visit" and line["stage"] == "search_results"]
+    hot_visit = next(line for line in searches if "filter_hot" in line["filter_signature"])
+    assert hot_visit["is_target"] is False and hot_visit["search_page"] == 1 and hot_visit["trigger"] == clicks[0]["id"]
+    after = [line["action"] for line in lines if line.get("kind") == "action" and line["seq"] > hot_visit["seq"]]
+    assert after[:4] == ["navigate", "type_search", "press_enter", "dismiss_ai_chat"]
+    assert len({(line["search_session"], line["filter_signature"]) for line in searches if line["is_target"]}) == 2
+    assert any("Card click withheld: note_id=h1-02" in line and "check=planned_point" in line for line in log_lines)
+    assert any("Unexpected non-target search session" in line for line in log_lines)
+    # 重新进入后的文档：对话栏照常关闭，标签从未被点，也不再注入。
+    assert audit["aiChatClosed"] == 1 and audit["hotTabClicks"] == 0 and audit["injectedHotSearches"] == 0
+    assert audit["coverClicks"] == audit["overlaysOpened"] == 2 and audit["strayClicks"] == []
+
+    result = run_gate(crawler, state_path, tmp_path)
+    assert result["problem_counts"] == {}
+    assert result["content_visit_ok"] is True and result["checked_records"] == 2
     assert site.unexpected == [] and site.escaped() == []
