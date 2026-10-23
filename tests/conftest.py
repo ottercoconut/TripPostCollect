@@ -1,5 +1,7 @@
 """局部启用业务观测；除 T14 登录资料根隔离外，路径夹具和真实 OS 测试不自动注入。"""
 
+import signal
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +9,30 @@ import pytest
 from support.platform_sessions import redirect_platform_session_roots
 from support.xhs_process_fakes import OWNER, FakeInspector
 from trippostcollect.xhs.leases import LeaseGuard
+
+
+# 每个用例的执行上限（#105）：超时即在当前执行位置抛 TimeoutError，让卡住的用例以失败结束，
+# CI 的 failure_diagnostics 才能给出用例与行号，而不是整个 lane 卡到工作流上限被取消。
+PER_TEST_TIMEOUT_SECONDS = 300
+
+
+@pytest.fixture(autouse=True)
+def per_test_watchdog():
+    """SIGALRM 只能在主线程安装；没有 SIGALRM 的平台或非主线程不设上限。"""
+    if not hasattr(signal, "SIGALRM") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def expire(signum, frame):
+        raise TimeoutError(f"test exceeded {PER_TEST_TIMEOUT_SECONDS}s (per-test watchdog, #105)")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, PER_TEST_TIMEOUT_SECONDS)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 @pytest.fixture(autouse=True)
