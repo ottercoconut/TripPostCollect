@@ -717,14 +717,12 @@ async def test_all_login_pages_closed_is_terminal_without_new_page() -> None:
         login_type="qrcode",
         browser_context=context,
         context_page=page,
-        new_page=AsyncMock(side_effect=AssertionError("must not relaunch page")),
     )
 
     with pytest.raises(RuntimeError, match="xhs_login_browser_pages_closed"):
         await login._single_login_page()
 
     assert context.new_page_calls == 0
-    login.new_page.assert_not_awaited()
 
 
 @pytest.mark.asyncio

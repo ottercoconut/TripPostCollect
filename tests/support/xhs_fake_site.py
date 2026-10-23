@@ -236,6 +236,8 @@ class AuthorTab(FakePage):
             return value
         if SCRIPT_NAMES.get(script) == "render_diagnostic":
             return {"ready_state": "complete", "body_text_length": 100, "body_child_element_count": 3}
+        if SCRIPT_NAMES.get(script) == "focus_state":
+            return {"visibility_state": self.site.tab_visibility, "has_focus": True}
         raise AssertionError(f"unexpected author tab script: {script[:40]}")
 
     async def wait_for_timeout(self, milliseconds: float) -> None:
@@ -245,7 +247,7 @@ class AuthorTab(FakePage):
         return None
 
     async def bring_to_front(self) -> None:
-        return None
+        self.site.fronted.append("author_tab")
 
     async def close(self) -> None:
         self.closed = True
@@ -379,6 +381,8 @@ class XhsFakeSite:
     （AUTHOR_POINT）；`hidden_author_notes` 中笔记默认的作者名不可见。note_view_state 按脚本参数里的作者 ID 过滤，
     同页面脚本；点中 AUTHOR_POINT 或 AVATAR_POINT 打开作者页，点中 COMMENT_POINT 只记 `comment_clicks`；`author_url_ids[user]` 改写标签页
     地址里的作者 ID；`creator_projections[user]` 替换投影返回值，`projection_hooks[user]` 在每次读取投影时调用。
+    焦点与可见性（#107）：`page_visibility`、`tab_visibility` 为主页面与作者页 focus_state 读到的 visibilityState
+    （默认 "visible"），`fronted` 依次记下置前的页面。
     """
 
     def __init__(
@@ -408,7 +412,7 @@ class XhsFakeSite:
         self.page.evaluate = self.evaluate  # type: ignore[method-assign]
         self.page.goto = self.goto  # type: ignore[attr-defined]
         self.page.is_closed = lambda: False  # type: ignore[attr-defined]
-        self.page.bring_to_front = self._noop  # type: ignore[attr-defined]
+        self.page.bring_to_front = self._front_primary  # type: ignore[attr-defined]
         self.mouse_position = (0.0, 0.0)
         self.mouse_down = False
         self.move_count = 0
@@ -497,6 +501,11 @@ class XhsFakeSite:
         self.results_url = ""
         self.feed_requests: list[str] = []
         self.author_tabs: list[AuthorTab] = []
+        # #107：focus_state 读数按 page_visibility（主页面）与 tab_visibility（作者页）给出，hasFocus 恒为真；
+        # 置前依次记入 fronted（"primary" / "author_tab"）。
+        self.page_visibility = "visible"
+        self.tab_visibility = "visible"
+        self.fronted: list[str] = []
         self.loaded_images: set[str] = set()
         # repair 整页：失效链接跳 /404；note_states[id] 为列表时依次返回（用完后照常投影），否则每次都返回该值。
         self.unavailable_notes: set[str] = set()
@@ -514,6 +523,9 @@ class XhsFakeSite:
     @staticmethod
     async def _noop(*args: Any, **kwargs: Any) -> None:
         return None
+
+    async def _front_primary(self) -> None:
+        self.fronted.append("primary")
 
     # 页面状态 ------------------------------------------------------------------
 
@@ -643,6 +655,8 @@ class XhsFakeSite:
             return self.overlay_state(arg["author"])
         if name == "note_engagement":
             return self.note_engagement()
+        if name == "focus_state":
+            return {"visibility_state": self.page_visibility, "has_focus": True}
         raise AssertionError(f"unexpected page script: {name or script[:40]}")
 
     def top_row_shift(self) -> float:

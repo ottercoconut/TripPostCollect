@@ -170,6 +170,8 @@ async def test_sms_checkpoint_with_stale_profile_never_probes_or_reloads(
     assert crawler._profile_ui_visible.await_count == 0
     assert page.reloads == 0 and goto.await_count == 0
     assert page.bring_to_front.await_count >= 2
+    # #107：轮中登录恢复照常无条件置前，不读页面可见性。
+    assert crawler._page_focus["samples"] == {} and crawler._page_focus["read_failures"] == {}
     assert sum(sleeps) == pytest.approx(6.0)
     assert login_visits(crawler) == []
 

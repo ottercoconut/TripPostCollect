@@ -114,6 +114,11 @@ DOM_SCRIPTS: dict[str, str] = {
             : 0,
         visibility_state: document.visibilityState || '',
     })""",
+    # 业务阶段按需置前的判据与行为证据 page_focus 抽样（#107）：只读可见性与焦点两个值。
+    "focus_state": """() => ({
+        visibility_state: document.visibilityState || '',
+        has_focus: document.hasFocus(),
+    })""",
     # 以下选择器定值依据 V1、V16、R2（issuecomment-6107337442、6106301408）。
     # 结果列表内（取不到 .search-layout 时为全文档）与列表可见区相交、带 data-note-id 的卡片：只读 ID、序号与几何，
     # 不读内容。visible_ratio 按卡片与 view 的交集计算；cover_hit 为封面中心点 elementFromPoint 落在这张卡片内
@@ -811,6 +816,11 @@ async def dom_qr_ready(page: Page) -> bool:
 async def dom_render_diagnostic(page: Page) -> dict[str, Any]:
     observed = await _dom(page, "render_diagnostic")
     return observed if isinstance(observed, dict) else {}
+
+
+async def dom_focus_state(page: Page) -> dict[str, Any]:
+    state = await _dom(page, "focus_state")
+    return state if isinstance(state, dict) else {}
 
 
 async def dom_visible_cards(page: Page) -> list[dict[str, Any]]:

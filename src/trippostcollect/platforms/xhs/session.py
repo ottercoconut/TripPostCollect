@@ -37,6 +37,7 @@ from playwright.async_api import (
 
 from trippostcollect.platforms.xhs.behavior import (
     inspect_visible_page_state,
+    record_xhs_page_focus,
     run_required_continuity_behavior,
     run_required_request_pause,
 )
@@ -54,7 +55,7 @@ from trippostcollect.platforms.xhs.errors import (
 )
 from trippostcollect.platforms.xhs.login import XiaoHongShuLogin
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget
-from trippostcollect.platforms.xhs.page_scripts import STATE_SCRIPTS
+from trippostcollect.platforms.xhs.page_scripts import STATE_SCRIPTS, dom_focus_state
 from trippostcollect.runtime.page_capture import CapturedResponse, PageCaptureChannel, route_of
 from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_path
 
@@ -204,12 +205,12 @@ class XhsSessionMixin:
         return max(0.0, hold_seconds - (self._popup_monotonic() - opened_at))
 
     async def _hold_new_page(self, page: Page, source: str) -> None:
-        """Surface any new tab and keep it alive without trying to classify it."""
+        """新标签页从出现起保留，不做分类；只有确为 hidden 时才置前（#107）。"""
         try:
-            await page.bring_to_front()
+            await self._bring_to_front_if_hidden(page, "new_tab")
         except Exception as exc:
             logger.warning(
-                "[XiaoHongShuCrawler] Could not bring new tab to front: "
+                "[XiaoHongShuCrawler] Could not check or bring new tab to front: "
                 f"{type(exc).__name__}: {exc}"
             )
         remaining = self._new_page_hold_remaining(page)
@@ -221,17 +222,35 @@ class XhsSessionMixin:
         if remaining > 0:
             await self._popup_sleep(remaining)
 
-    async def _new_guarded_page(self) -> Page:
-        """Open a crawler-requested page while retaining the universal new-tab guard."""
-        self._crawler_page_open_depth += 1
+    async def _bring_to_front_if_hidden(self, page: Page, point: str) -> None:
+        """业务阶段按需置前（#107）：读目标页 visibilityState 与 hasFocus 计入 page_focus.samples（只存计数），确为 hidden
+        才置前并记带原因的日志，其余跳过，两者都计数。
+
+        `bring_to_front` 在 macOS 上会把整个 Chrome 拉到系统前台、抢走操作人在其他应用里的键盘焦点。读取与置前的
+        异常原样上抛，由调用方按原有路径处理（读取失败只计数，随下一次记录写入）；登录、扫码、验证与轮中登录恢复
+        的显式置前不经这里。
+        """
+        focus = self._page_focus
         try:
-            page = await self.browser_context.new_page()
-        finally:
-            self._crawler_page_open_depth -= 1
-        # Playwright normally emits ``page`` before ``new_page`` returns. Registering
-        # explicitly as well keeps the guard correct if that event is delayed.
-        self._register_new_page(page, source="crawler_opened")
-        return page
+            state = await dom_focus_state(page)
+        except Exception:
+            focus["read_failures"][point] = focus["read_failures"].get(point, 0) + 1
+            raise
+        visibility = str(state.get("visibility_state") or "unknown")
+        samples = focus["samples"].setdefault(point, {})
+        key = f"{visibility}/{'focused' if state.get('has_focus') is True else 'unfocused'}"
+        samples[key] = samples.get(key, 0) + 1
+        hidden = visibility == "hidden"
+        counts = focus["bring_to_front" if hidden else "bring_to_front_skipped"]
+        counts[point] += 1
+        record_xhs_page_focus(focus, ports=self.ports.behavior)
+        if not hidden:
+            return
+        logger.info(
+            "[XiaoHongShuCrawler] Bringing page to front: "
+            f"reason={point}_hidden, has_focus={state.get('has_focus')}, count={counts[point]}"
+        )
+        await page.bring_to_front()
 
     async def _wait_before_page_close(self, page: Page, *, reason: str) -> None:
         page_id = id(page)

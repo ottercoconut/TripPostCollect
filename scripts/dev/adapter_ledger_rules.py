@@ -2038,6 +2038,11 @@ PROGRESS_RESOLUTIONS = {
         "退出", None, "#83：唯一调用方小红书会话不再注入runtime hints；其他平台直接调用human_flow.install_runtime_hints"),
     ("tools/MediaCrawler/tools/cdp_browser.py", "CDPBrowserManager._connect_existing_browser"): (
         "退出", None, "#83：连接已有浏览器在生产中不可达（worker配置恒为False、无入口可改），随CDP_DEBUG_PORT删除"),
+    # #107：登录与业务阶段都不新开页面，新开页路径无调用方，随之删除。
+    ("tools/MediaCrawler/media_platform/xhs/login.py", "XiaoHongShuLogin._new_login_page"): (
+        "退出", None, "#107：全仓库无调用方；登录只在已有标签页中选页，不新开登录页"),
+    ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._new_guarded_page"): (
+        "退出", None, "#107：唯一用途是注入给无调用方的_new_login_page；作者页由可信点击打开，经_register_new_page受守卫"),
 }
 
 # 冻结台账的 SHA-256：T14 删除 fork 后台账冻结，`--check` 只做冻结自检，不再重新枚举基线源码。

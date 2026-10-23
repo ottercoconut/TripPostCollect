@@ -30,7 +30,7 @@ from playwright.async_api import BrowserContext, Error as PlaywrightError, Page
 
 from trippostcollect.application.contracts import XhsPorts, XhsReaders, XhsSettings
 from trippostcollect.platforms.xhs.author import XhsAuthorMixin
-from trippostcollect.platforms.xhs.behavior import XhsBehaviorMixin
+from trippostcollect.platforms.xhs.behavior import XhsBehaviorMixin, empty_page_focus
 from trippostcollect.platforms.xhs.detail import XhsDetailMixin
 from trippostcollect.platforms.xhs.errors import (
     IPBlockError,
@@ -142,6 +142,8 @@ class XiaoHongShuCrawler(
         self._initial_pages: Dict[int, Page] = {}
         self._new_pages: Dict[int, tuple[Page, float, str, float]] = {}
         self._new_page_guard_tasks: Dict[int, Task[None]] = {}
+        # 业务阶段按需置前与焦点抽样的累计计数（#107），整体写入行为证据 page_focus。
+        self._page_focus: Dict = empty_page_focus()
         self._navigation_diagnostics: List[Dict] = []
         self._navigation_observed_pages: set[int] = set()
         self._navigation_page_errors: List[Dict] = []

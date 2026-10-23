@@ -1500,6 +1500,8 @@ def test_page_pause_before_behavior_evidence_is_a_full_guarded_pause(tmp_path, m
     asyncio.run(crawler._guarded_pause("search_results", *xhs_scan.XHS_SEARCH_RESULTS_PAUSE_SECONDS))
     merged = json.loads(evidence_path.read_text())
     assert [event["stage"] for event in merged["request_pacing_events"]][-1] == "search_results"
+    # #107：停顿不读页面焦点与可见性（主页面桩没有 evaluate），也不写 page_focus。
+    assert "page_focus" not in merged
 
 
 def test_page_pause_without_evidence_or_pending_is_still_rejected(tmp_path, monkeypatch):

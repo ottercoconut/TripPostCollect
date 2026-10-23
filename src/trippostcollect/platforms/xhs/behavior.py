@@ -1047,6 +1047,34 @@ def append_operator_verification_event(
     ports.write_evidence(path, evidence)
 
 
+# 业务阶段按需置前的两个判定点（#107）：任何新标签页出现时，以及关闭作者标签页之后的主页面。
+XHS_FOCUS_POINTS = ("new_tab", "primary_after_author_tab")
+
+
+def empty_page_focus() -> dict[str, Any]:
+    """行为证据 `page_focus` 的初值：抽样与读取失败按判定点稀疏计数，置前与跳过两个判定点都从 0 计。"""
+    return {
+        "samples": {},
+        "read_failures": {},
+        "bring_to_front": dict.fromkeys(XHS_FOCUS_POINTS, 0),
+        "bring_to_front_skipped": dict.fromkeys(XHS_FOCUS_POINTS, 0),
+    }
+
+
+def record_xhs_page_focus(page_focus: dict[str, Any], *, ports: XhsBehaviorPorts) -> None:
+    """把本轮累计的焦点与可见性计数整体写入行为证据 `page_focus`；行为证据创建之前只在内存累计，之后的下一次写入全量。"""
+    raw_path = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()
+    path = Path(raw_path).expanduser()
+    if not raw_path or not path.is_file():
+        return
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot record XHS page focus: {exc}") from exc
+    evidence["page_focus"] = page_focus
+    ports.write_evidence(path, evidence)
+
+
 async def inspect_visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
     """Reuse the project's visible challenge checks without replacing run evidence."""
     scripts_dir = Path(os.environ.get("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", "")).expanduser()

@@ -260,6 +260,10 @@ async def test_overlay_records_pass_the_real_visit_gate(monkeypatch, tmp_path):
     actions = [line["action"] for line in ledger_lines(crawler) if line["kind"] == "action"]
     assert actions.count("flip_image") == 3 and actions.count("click_author") == 2
     assert actions.count("close_tab") == 2 and actions.count("close_overlay") == 3
+    # #107：作者页打开时与关闭后的主页面都可见，业务阶段一次也不置前；跳过按判定点计数。
+    assert site.fronted == []
+    assert crawler._page_focus["bring_to_front"] == {"new_tab": 0, "primary_after_author_tab": 0}
+    assert crawler._page_focus["bring_to_front_skipped"] == {"new_tab": 2, "primary_after_author_tab": 2}
     # #84：每次点击带落点在元素框中的比例与接近时长，每次列表滚动带各手势的事件数与位移；真实门禁照常通过。
     clicks = {"click_card", "close_overlay", "click_author", "apply_filter", "type_search"}
     for line in (line for line in ledger_lines(crawler) if line["kind"] == "action"):
@@ -299,6 +303,29 @@ async def test_overlay_records_pass_the_real_visit_gate(monkeypatch, tmp_path):
     assert result["content_visit_ok"] is True and result["checked_records"] == 3
     assert result["required_stages"] == ["creator_profile", "note_detail", "search_page", "search_results"]
     assert result["continuity_ok"] is True and result["request_pacing_ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_hidden_author_tab_and_main_page_are_each_brought_to_front_once(monkeypatch, tmp_path):
+    """#107：作者页出现时与关闭后的主页面读到 hidden 时各置前一次，带原因记日志与计数；作者补全与来源耗尽不受影响。"""
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    crawler, detail_ids, state_path, site = prepare_crawler(
+        monkeypatch, tmp_path, items=None, pages=[[note("p1-a")]],
+    )
+    site.details["p1-a"] = detail_card("p1-a", images=1, user_id="background-author")
+    site.page_visibility = site.tab_visibility = "hidden"
+
+    with crawler_log_lines() as log_lines:
+        await crawler.search()
+
+    assert detail_ids == ["p1-a"] and [record["note_id"] for record in crawler.records] == ["p1-a"]
+    assert last_stop(state_path)["stop_reason"] == "source_exhausted"
+    assert site.fronted == ["author_tab", "primary"]
+    assert [line.split("reason=")[1].split(",")[0] for line in log_lines if "Bringing page to front" in line] == [
+        "new_tab_hidden", "primary_after_author_tab_hidden",
+    ]
+    assert crawler._page_focus["bring_to_front"] == {"new_tab": 1, "primary_after_author_tab": 1}
+    assert crawler._page_focus["bring_to_front_skipped"] == {"new_tab": 0, "primary_after_author_tab": 0}
 
 
 @pytest.mark.asyncio
@@ -1054,7 +1081,6 @@ def prepare_post_interaction(monkeypatch, tmp_path, failure):
     crawler.post_interaction_attempted = False
     interaction = AsyncMock(side_effect=failure)
     monkeypatch.setattr(xhs_behavior, "run_requested_post_interaction", interaction)
-    crawler._new_guarded_page = AsyncMock()
     return crawler, state_path, site, interaction
 
 
@@ -1069,7 +1095,7 @@ async def test_post_interaction_lifecycle_or_network_timeout_fails_the_run(
     await crawler.search()
 
     assert interaction.await_args.args[0] is site.page
-    crawler._new_guarded_page.assert_not_awaited()
+    assert site.context.pages == [site.page, *site.author_tabs]  # 除作者页外不新开标签页
     crawler.update_xhs_note.assert_not_awaited()
     assert not events_of(state_path, "candidate_skipped")
     assert not events_of(state_path, "adaptive_batch_completed")
@@ -1091,7 +1117,7 @@ async def test_post_interaction_own_failure_does_not_stop_crawl(monkeypatch, tmp
 
     interaction.assert_awaited_once()
     assert crawler.post_interaction_attempted is True
-    crawler._new_guarded_page.assert_not_awaited()
+    assert site.context.pages == [site.page, *site.author_tabs]  # 除作者页外不新开标签页
     assert [record["note_id"] for record in crawler.records] == ["note-interacted"]
     assert not events_of(state_path, "candidate_skipped")
     assert last_stop(state_path)["stop_reason"] == "source_exhausted"

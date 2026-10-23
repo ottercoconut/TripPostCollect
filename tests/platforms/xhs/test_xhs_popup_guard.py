@@ -1,26 +1,34 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from playwright.async_api import Error as PlaywrightError
 import pytest
 
 from trippostcollect.platforms.xhs.errors import PlatformRuntimeError
 from trippostcollect.platforms.xhs.login import XiaoHongShuLogin
+from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
 
-from .support import XiaoHongShuCrawler, config
+from .support import XiaoHongShuCrawler, config, crawler_log_lines
 
 
 class FakePage:
-    def __init__(self, name: str, events: list[tuple[str, object]]):
+    def __init__(self, name: str, events: list[tuple[str, object]], *, visibility: str = "visible"):
         self.name = name
         self.url = f"https://www.xiaohongshu.com/{name}"
         self.closed = False
         self.events = events
+        self.visibility = visibility
 
     def is_closed(self) -> bool:
         return self.closed
+
+    async def evaluate(self, script: str, arg=None) -> dict:
+        assert script == DOM_SCRIPTS["focus_state"]
+        return {"visibility_state": self.visibility, "has_focus": True}
 
     async def bring_to_front(self) -> None:
         self.events.append(("front", self.name))
@@ -46,11 +54,6 @@ class FakeContext:
         assert self.page_handler is not None
         self.page_handler(page)
 
-    async def new_page(self) -> FakePage:
-        page = FakePage("crawler-owned", self.events)
-        self.emit_page(page)
-        return page
-
     async def close(self) -> None:
         self.events.append(("context_close", "context"))
         self.closed = True
@@ -74,7 +77,7 @@ def install_fake_clock(crawler: XiaoHongShuCrawler, events: list[tuple[str, obje
 async def test_unexpected_xhs_tab_is_held_and_preserved_for_login() -> None:
     events: list[tuple[str, object]] = []
     primary = FakePage("search", events)
-    popup = FakePage("security-popup", events)
+    popup = FakePage("security-popup", events, visibility="hidden")
     context = FakeContext([primary], events)
     crawler = XiaoHongShuCrawler()
     install_fake_clock(crawler, events)
@@ -112,11 +115,69 @@ async def test_extra_tab_present_at_guard_install_is_also_protected() -> None:
     await asyncio.sleep(0)
 
     assert crawler._new_pages[id(popup)][2] == "preexisting_extra"
-    assert events == [
-        ("front", "startup-security-popup"),
-        ("sleep", pytest.approx(5.0)),
-    ]
+    # 已经可见的新标签页不置前（#107），保留期照旧。
+    assert events == [("sleep", pytest.approx(5.0))]
+    assert crawler._page_focus["bring_to_front_skipped"]["new_tab"] == 1
     assert popup.closed is False
+
+
+def _guarded_crawler(events: list[tuple[str, object]]) -> tuple[XiaoHongShuCrawler, FakeContext]:
+    context = FakeContext([FakePage("search", events)], events)
+    crawler = XiaoHongShuCrawler()
+    install_fake_clock(crawler, events)
+    crawler.browser_context = context
+    crawler.context_page = context.pages[0]
+    crawler._install_new_page_guard()
+    return crawler, context
+
+
+@pytest.mark.asyncio
+async def test_only_a_hidden_new_tab_is_brought_to_front_with_reason_and_counts(monkeypatch, tmp_path) -> None:
+    """#107：新标签页确为 hidden 才置前一次并记带原因的日志；visible 的跳过。计数整体写入行为证据 page_focus。"""
+    evidence_path = tmp_path / "behavior_evidence.json"
+    evidence_path.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(evidence_path))
+    events: list[tuple[str, object]] = []
+    crawler, context = _guarded_crawler(events)
+
+    with crawler_log_lines() as log_lines:
+        context.emit_page(FakePage("background-tab", events, visibility="hidden"))
+        context.emit_page(FakePage("foreground-tab", events))
+        await asyncio.gather(*crawler._new_page_guard_tasks.values())
+
+    assert [event for event in events if event[0] == "front"] == [("front", "background-tab")]
+    assert [line for line in log_lines if "Bringing page to front" in line] == [
+        "[XiaoHongShuCrawler] Bringing page to front: reason=new_tab_hidden, has_focus=True, count=1"
+    ]
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["status"] == "completed"
+    assert evidence["page_focus"] == {
+        "samples": {"new_tab": {"hidden/focused": 1, "visible/focused": 1}},
+        "read_failures": {},
+        "bring_to_front": {"new_tab": 1, "primary_after_author_tab": 0},
+        "bring_to_front_skipped": {"new_tab": 1, "primary_after_author_tab": 0},
+    }
+
+
+@pytest.mark.asyncio
+async def test_new_tab_focus_read_failure_is_warned_and_the_hold_is_kept() -> None:
+    """读不到新标签页的可见性时按原路径只记警告：不置前、计读取失败，保留期照旧。"""
+
+    class UnreadablePage(FakePage):
+        async def evaluate(self, script: str, arg=None) -> dict:
+            raise PlaywrightError("Execution context was destroyed, most likely because of a navigation")
+
+    events: list[tuple[str, object]] = []
+    crawler, context = _guarded_crawler(events)
+
+    with crawler_log_lines() as log_lines:
+        context.emit_page(UnreadablePage("navigating-tab", events, visibility="hidden"))
+        await asyncio.gather(*crawler._new_page_guard_tasks.values())
+
+    assert events == [("sleep", pytest.approx(5.0))]
+    assert crawler._page_focus["read_failures"] == {"new_tab": 1}
+    assert crawler._page_focus["bring_to_front"]["new_tab"] == 0
+    assert any(line.startswith("[XiaoHongShuCrawler] Could not check or bring new tab to front: Error:") for line in log_lines)
 
 
 @pytest.mark.asyncio
@@ -130,7 +191,11 @@ async def test_crawler_opened_xhs_tab_waits_minimum_hold_after_failed_scroll() -
     crawler.context_page = primary
     crawler._install_new_page_guard()
 
-    page = await crawler._new_guarded_page()
+    # 同作者名点击（_open_author_tab）：点击期间出现的标签页归为 crawler_opened。
+    page = FakePage("crawler-owned", events)
+    crawler._crawler_page_open_depth += 1
+    context.emit_page(page)
+    crawler._crawler_page_open_depth -= 1
     events.append(("scroll_effect", False))
     await crawler._close_page_with_deadline(page, reason="creator_profile_cleanup")
 
@@ -293,14 +358,14 @@ async def test_crawler_login_selection_does_not_replace_closed_pages() -> None:
     crawler = XiaoHongShuCrawler()
     crawler.browser_context = FakeContext([closed], events)
     crawler.context_page = closed
-    crawler._new_guarded_page = AsyncMock(
+    crawler.browser_context.new_page = AsyncMock(
         side_effect=AssertionError("must not create a replacement login page")
     )
 
     with pytest.raises(RuntimeError, match="xhs_login_browser_pages_closed"):
         await crawler._single_page_for_login()
 
-    crawler._new_guarded_page.assert_not_awaited()
+    crawler.browser_context.new_page.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -474,7 +539,7 @@ async def test_popup_seams_are_instance_attributes() -> None:
     crawler._popup_monotonic = lambda: clock[0]
     assert crawler._get_manual_wait_budget().now() == 5000.0
     assert crawler._get_manual_wait_budget() is crawler._get_manual_wait_budget()
-    page = FakePage("explore/popup-ad", events)
+    page = FakePage("explore/popup-ad", events, visibility="hidden")
     crawler._register_new_page(page, source="platform_opened")
     clock[0] += 3.0
     await crawler._close_page_with_deadline(page, reason="unit")
