@@ -473,8 +473,8 @@ child `summary.json` 的
   target`；否则还有别的筛选（如热门标签的 `filter_hot`），原地无法修复，本次尝试写一条 `filter_option_preselected`
   诊断后以 `target_filter_preselected` 回首页重新输入一次（同首页受控恢复），仍是这样即以
   `xhs_navigation_recovery_failed:target_filter_preselected` 停止。选中状态由 `filter_state.option_selected` 给出：“图文”
-  节点的类名含 `active`（同页热门标签排的选中项为 `button.tab.active`），或 `aria-selected`、`aria-checked`、
-  `aria-pressed` 为 `"true"`；面板选项的选中类名尚未实测。任何滚动之前收起面板（#81）：先把光标移出入口与面板的并集，
+  节点的类名含 `active`（Mac 人工实测：面板各选项未选中为 `div.tags`、选中为 `div.tags.active`，没有 aria 属性），
+  或 `aria-selected`、`aria-checked`、`aria-pressed` 为 `"true"`。任何滚动之前收起面板（#81）：先把光标移出入口与面板的并集，
   落点区域取结果列表区域（同滚动的列表区域，#88）中入口与面板外接框之外最大的一块：候选为外接框的下方、
   左侧与右侧（各取列表区域的整宽或整高，靠外接框一侧留出 24px），宽、高都不小于 40px 的取面积最大者。面板在
   列表右上方展开，面板很高时下方可能放不下，左侧通常有大块空间（第 7 轮只取下方：两行日志只隔 2 秒、账本没有

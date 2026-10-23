@@ -332,8 +332,8 @@ DOM_SCRIPTS: dict[str, str] = {
     # panel 为第一个可见的 .filters-wrapper 的元素框（悬停打开时，光标离开入口与面板即收起，接近“图文”的轨迹限定在
     # 两者的并集内，#81）；entry_container 为命中的那个 div.filter 的元素框（悬停目标是它而不只是文字 span，V16 下它
     # 与面板之间的间隙决定是否加间隙走廊，#99）；with_ai_chat 为对话栏是否打开（打开时不加走廊）；option_selected 为
-    # “图文”是否已选中（再点会取消，#102）：类名含 active（同页热门标签排选中项为 button.tab.active，离线站点同此），
-    # 或 aria-selected / aria-checked / aria-pressed 为 "true"；面板选项的选中类名未经实测。轮询用，保持精简；
+    # “图文”是否已选中（再点会取消，#102）：类名含 active（Mac 人工实测 2026-10-23：面板选项未选中为 div.tags、选中为
+    # div.tags.active，没有 aria 属性；离线站点同此），或 aria-selected / aria-checked / aria-pressed 为 "true"。轮询用，保持精简；
     # 整页计数在 filter_diagnostic。
     "filter_state": """(label) => {
         const labels = ['筛选', '已筛选'];
