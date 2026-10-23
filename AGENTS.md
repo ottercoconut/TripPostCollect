@@ -130,8 +130,8 @@ python scripts/crawl_runner.py \
 
 ## 任务路由
 
-- 正式抓取必须同时使用共享核心 `trippostcollect-crawl` 和唯一正式模式 Skill
-  `trippostcollect-crawl-to-source-exhaustion`；普通执行、恢复和“抓完结果”都走同一来源耗尽流程。
+- 正式抓取只有来源耗尽一种完成方式：普通执行、恢复和“抓完结果”都走同一流程，按下列路由读取正式契约、
+  平台文档与对应脚本执行。项目规则只以本仓库文档为准，不依赖仓库外的 Skill。
 - 通用正式抓取、停止和成功：读 `docs/formal-crawl-contract.md`、`config/crawl_targets.json`、`scripts/crawl_runner.py`。
 - 小红书逻辑槽位、轮内登录、抓取和失败恢复：先完整执行 `docs/platforms/xhs.md` 的阶段清单，再读
   `config/xhs_*.json` 和对应的 `scripts/xhs_accounts.py`、`scripts/xhs_runner.py`；

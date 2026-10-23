@@ -10,8 +10,8 @@
     },
     {
       "path": "docs/formal-crawl-contract.md",
-      "sha256": "9e720bcaacc99e8383196ef65cc667711a3375da87dbd9f7d138fe08cca4c258",
-      "reason": "用户授权更新并重新冻结的五平台正式抓取与正文图片本地化机器契约；#75 删除任务级时限后经用户授权同步更新并重新冻结；#71 小红书改为浏览器 L1 取数并新增取数来源与真实访问门禁后经用户授权同步更新并重新冻结",
+      "sha256": "e2dba3d338b5e76c6172cf0a688bca64a416fc506ccd49a297cbad8105a60e45",
+      "reason": "用户授权更新并重新冻结的五平台正式抓取与正文图片本地化机器契约；#75 删除任务级时限后经用户授权同步更新并重新冻结；#71 小红书改为浏览器 L1 取数并新增取数来源与真实访问门禁后经用户授权同步更新并重新冻结；2026-10-23 退役仓库外 Skill 后经用户授权删去 Skill 引用并重新冻结",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
     },
