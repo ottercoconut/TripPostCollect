@@ -1475,13 +1475,7 @@ def test_page_pause_before_behavior_evidence_is_a_full_guarded_pause(tmp_path, m
     monkeypatch.setattr(xhs_behavior, "human_pause", pause)
     monkeypatch.setattr(xhs_behavior, "random_mouse_moves", mouse_moves)
     crawler = XiaoHongShuCrawler()
-    focus_reads = []
-
-    async def evaluate(script, arg=None):
-        focus_reads.append(script)
-        return {"visibility_state": "visible", "has_focus": True}
-
-    crawler.context_page = SimpleNamespace(url="https://www.xiaohongshu.com/search_result_ai", evaluate=evaluate)
+    crawler.context_page = SimpleNamespace(url="https://www.xiaohongshu.com/search_result_ai")
     crawler.capture = make_capture(tmp_path)
     crawler._pending_behavior_evidence = {}
 
@@ -1506,12 +1500,8 @@ def test_page_pause_before_behavior_evidence_is_a_full_guarded_pause(tmp_path, m
     asyncio.run(crawler._guarded_pause("search_results", *xhs_scan.XHS_SEARCH_RESULTS_PAUSE_SECONDS))
     merged = json.loads(evidence_path.read_text())
     assert [event["stage"] for event in merged["request_pacing_events"]][-1] == "search_results"
-    # #107：每次停顿后对主页面抽样一次；行为证据创建前的抽样留在内存，创建后的下一次写入全量计数。
-    assert focus_reads == [DOM_SCRIPTS["focus_state"]] * 2
-    assert merged["page_focus"]["samples"] == {
-        "search_page": {"visible/focused": 1}, "search_results": {"visible/focused": 1},
-    }
-    assert merged["page_focus"]["bring_to_front"] == {"new_tab": 0, "primary_after_author_tab": 0}
+    # #107：停顿不读页面焦点与可见性（主页面桩没有 evaluate），也不写 page_focus。
+    assert "page_focus" not in merged
 
 
 def test_page_pause_without_evidence_or_pending_is_still_rejected(tmp_path, monkeypatch):

@@ -1081,7 +1081,6 @@ def prepare_post_interaction(monkeypatch, tmp_path, failure):
     crawler.post_interaction_attempted = False
     interaction = AsyncMock(side_effect=failure)
     monkeypatch.setattr(xhs_behavior, "run_requested_post_interaction", interaction)
-    crawler._new_guarded_page = AsyncMock()
     return crawler, state_path, site, interaction
 
 
@@ -1096,7 +1095,7 @@ async def test_post_interaction_lifecycle_or_network_timeout_fails_the_run(
     await crawler.search()
 
     assert interaction.await_args.args[0] is site.page
-    crawler._new_guarded_page.assert_not_awaited()
+    assert site.context.pages == [site.page, *site.author_tabs]  # 除作者页外不新开标签页
     crawler.update_xhs_note.assert_not_awaited()
     assert not events_of(state_path, "candidate_skipped")
     assert not events_of(state_path, "adaptive_batch_completed")
@@ -1118,7 +1117,7 @@ async def test_post_interaction_own_failure_does_not_stop_crawl(monkeypatch, tmp
 
     interaction.assert_awaited_once()
     assert crawler.post_interaction_attempted is True
-    crawler._new_guarded_page.assert_not_awaited()
+    assert site.context.pages == [site.page, *site.author_tabs]  # 除作者页外不新开标签页
     assert [record["note_id"] for record in crawler.records] == ["note-interacted"]
     assert not events_of(state_path, "candidate_skipped")
     assert last_stop(state_path)["stop_reason"] == "source_exhausted"

@@ -135,7 +135,6 @@ class XiaoHongShuLogin:
                  browser_context: BrowserContext,
                  context_page: Page,
                  close_page: Optional[Callable[..., Awaitable[None]]] = None,
-                 new_page: Optional[Callable[[], Awaitable[Page]]] = None,
                  manual_wait_budget: Optional[XHSManualWaitBudget] = None,
                  ):
         if login_type != "qrcode":
@@ -143,7 +142,6 @@ class XiaoHongShuLogin:
         self.browser_context = browser_context
         self.context_page = context_page
         self.close_page = close_page
-        self.new_page = new_page
         self._manual_wait_budget = manual_wait_budget
         self._last_login_observation: dict[str, object] = {}
         self._manual_progress_observed = False
@@ -155,11 +153,6 @@ class XiaoHongShuLogin:
                 monotonic=lambda: time.monotonic(),
             )
         return self._manual_wait_budget
-
-    async def _new_login_page(self) -> Page:
-        if self.new_page:
-            return await self.new_page()
-        return await self.browser_context.new_page()
 
     async def _close_extra_login_page(self, page: Page) -> None:
         if self.close_page:
@@ -967,7 +960,6 @@ class XhsLoginMixin:
             browser_context=self.browser_context,
             context_page=self.context_page,
             close_page=self._close_page_with_deadline,
-            new_page=self._new_guarded_page,
             manual_wait_budget=self._get_manual_wait_budget(),
         )
         try:

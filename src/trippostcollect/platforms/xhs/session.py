@@ -222,8 +222,14 @@ class XhsSessionMixin:
         if remaining > 0:
             await self._popup_sleep(remaining)
 
-    async def _sample_page_focus(self, page: Page, point: str) -> Dict:
-        """读页面的 visibilityState 与 hasFocus，按判定点或停顿档位计入 page_focus（只存计数）；读取异常计数后原样上抛。"""
+    async def _bring_to_front_if_hidden(self, page: Page, point: str) -> None:
+        """业务阶段按需置前（#107）：读目标页 visibilityState 与 hasFocus 计入 page_focus.samples（只存计数），确为 hidden
+        才置前并记带原因的日志，其余跳过，两者都计数。
+
+        `bring_to_front` 在 macOS 上会把整个 Chrome 拉到系统前台、抢走操作人在其他应用里的键盘焦点。读取与置前的
+        异常原样上抛，由调用方按原有路径处理（读取失败只计数，随下一次记录写入）；登录、扫码、验证与轮中登录恢复
+        的显式置前不经这里。
+        """
         focus = self._page_focus
         try:
             state = await dom_focus_state(page)
@@ -231,26 +237,13 @@ class XhsSessionMixin:
             focus["read_failures"][point] = focus["read_failures"].get(point, 0) + 1
             raise
         visibility = str(state.get("visibility_state") or "unknown")
-        key = f"{visibility}/{'focused' if state.get('has_focus') is True else 'unfocused'}"
         samples = focus["samples"].setdefault(point, {})
+        key = f"{visibility}/{'focused' if state.get('has_focus') is True else 'unfocused'}"
         samples[key] = samples.get(key, 0) + 1
-        return state
-
-    def _record_page_focus(self) -> None:
-        record_xhs_page_focus(self._page_focus, ports=self.ports.behavior)
-
-    async def _bring_to_front_if_hidden(self, page: Page, point: str) -> None:
-        """业务阶段按需置前（#107）：目标页确为 hidden 才置前并记带原因的日志，visible 时跳过，两者都计数。
-
-        `bring_to_front` 在 macOS 上会把整个 Chrome 拉到系统前台、抢走操作人在其他应用里的键盘焦点。读取与置前的
-        异常原样上抛，由调用方按原有路径处理（读取失败只计数，随下一次记录写入）；登录、扫码、验证与轮中登录恢复
-        的显式置前不经这里。
-        """
-        state = await self._sample_page_focus(page, point)
-        hidden = state.get("visibility_state") == "hidden"
-        counts = self._page_focus["bring_to_front" if hidden else "bring_to_front_skipped"]
+        hidden = visibility == "hidden"
+        counts = focus["bring_to_front" if hidden else "bring_to_front_skipped"]
         counts[point] += 1
-        self._record_page_focus()
+        record_xhs_page_focus(focus, ports=self.ports.behavior)
         if not hidden:
             return
         logger.info(
@@ -258,31 +251,6 @@ class XhsSessionMixin:
             f"reason={point}_hidden, has_focus={state.get('has_focus')}, count={counts[point]}"
         )
         await page.bring_to_front()
-
-    async def _sample_pause_focus(self, stage: str) -> None:
-        """每次节奏停顿后对主页面抽样一次（#107）；主页面关闭照常上抛，其他读取失败只记警告与计数。"""
-        try:
-            await self._sample_page_focus(self.context_page, stage)
-        except (PlaywrightError, TimeoutError) as exc:
-            if isinstance(exc, PlaywrightError) and self._is_target_closed_error(exc):
-                raise
-            logger.warning(
-                "[XiaoHongShuCrawler] Could not sample page focus: "
-                f"stage={stage}, {type(exc).__name__}: {exc}"
-            )
-        self._record_page_focus()
-
-    async def _new_guarded_page(self) -> Page:
-        """Open a crawler-requested page while retaining the universal new-tab guard."""
-        self._crawler_page_open_depth += 1
-        try:
-            page = await self.browser_context.new_page()
-        finally:
-            self._crawler_page_open_depth -= 1
-        # Playwright normally emits ``page`` before ``new_page`` returns. Registering
-        # explicitly as well keeps the guard correct if that event is delayed.
-        self._register_new_page(page, source="crawler_opened")
-        return page
 
     async def _wait_before_page_close(self, page: Page, *, reason: str) -> None:
         page_id = id(page)
@@ -362,8 +330,7 @@ class XhsSessionMixin:
         """节奏停顿：行为证据记 request_pacing_events，账本记首尾序号与连续性结果（门禁以账本为准）。
 
         行为证据创建之前（首个关键词的初始行为阶段之前）停顿照常执行并实时写账本，行为证据的节奏与
-        连续性事件记入 `_pending_behavior_evidence`，行为阶段写出证据后并入。停顿结束后对主页面做一次焦点与
-        可见性抽样（行为证据 page_focus.samples，档位名为键）。
+        连续性事件记入 `_pending_behavior_evidence`，行为阶段写出证据后并入。
         """
         capture = self._require_capture()
         pending = getattr(self, "_pending_behavior_evidence", None)
@@ -384,7 +351,6 @@ class XhsSessionMixin:
                 f"stage={stage} status={continuity.get('status')}"
             )
         capture.pause_finished(stage, start_seq, seconds, continuity_status)
-        await self._sample_pause_focus(stage)
         return seconds
 
     async def _close_page_with_deadline(

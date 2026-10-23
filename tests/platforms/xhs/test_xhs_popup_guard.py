@@ -54,11 +54,6 @@ class FakeContext:
         assert self.page_handler is not None
         self.page_handler(page)
 
-    async def new_page(self) -> FakePage:
-        page = FakePage("crawler-owned", self.events)
-        self.emit_page(page)
-        return page
-
     async def close(self) -> None:
         self.events.append(("context_close", "context"))
         self.closed = True
@@ -196,7 +191,11 @@ async def test_crawler_opened_xhs_tab_waits_minimum_hold_after_failed_scroll() -
     crawler.context_page = primary
     crawler._install_new_page_guard()
 
-    page = await crawler._new_guarded_page()
+    # 同作者名点击（_open_author_tab）：点击期间出现的标签页归为 crawler_opened。
+    page = FakePage("crawler-owned", events)
+    crawler._crawler_page_open_depth += 1
+    context.emit_page(page)
+    crawler._crawler_page_open_depth -= 1
     events.append(("scroll_effect", False))
     await crawler._close_page_with_deadline(page, reason="creator_profile_cleanup")
 
@@ -359,14 +358,14 @@ async def test_crawler_login_selection_does_not_replace_closed_pages() -> None:
     crawler = XiaoHongShuCrawler()
     crawler.browser_context = FakeContext([closed], events)
     crawler.context_page = closed
-    crawler._new_guarded_page = AsyncMock(
+    crawler.browser_context.new_page = AsyncMock(
         side_effect=AssertionError("must not create a replacement login page")
     )
 
     with pytest.raises(RuntimeError, match="xhs_login_browser_pages_closed"):
         await crawler._single_page_for_login()
 
-    crawler._new_guarded_page.assert_not_awaited()
+    crawler.browser_context.new_page.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -1052,7 +1052,7 @@ XHS_FOCUS_POINTS = ("new_tab", "primary_after_author_tab")
 
 
 def empty_page_focus() -> dict[str, Any]:
-    """行为证据 `page_focus` 的初值：抽样与读取失败按判定点或停顿档位稀疏计数，两个判定点的置前与跳过从 0 计。"""
+    """行为证据 `page_focus` 的初值：抽样与读取失败按判定点稀疏计数，置前与跳过两个判定点都从 0 计。"""
     return {
         "samples": {},
         "read_failures": {},

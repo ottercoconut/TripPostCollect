@@ -412,11 +412,12 @@ child `summary.json` 的
   警告；主页面已关闭照常按生命周期失败上抛，其他读取失败只记警告。登录、扫码、验证和轮中登录恢复不经这一
   判定，仍立即置前（见下一条）。
 - 行为证据 `page_focus` 只存计数，不存地址或正文：`bring_to_front` 与 `bring_to_front_skipped` 按判定点
-  （`new_tab`、`primary_after_author_tab`）记实际置前与因不是 hidden 而跳过的次数；`samples` 按判定点与节奏
-  停顿档位（每次停顿结束后对主页面抽样一次，不增加页面动作）记 `<visibilityState>/<focused|unfocused>`
-  （后者为 `document.hasFocus()`）的分布；`read_failures` 记读取失败次数。行为证据创建之前的计数先留在内存，
-  创建后的下一次记录写入全量。用途是 Mac 实测核对：没有验证事件时实际置前为 0；Chrome 退到后台后页面仍为
-  `visible`，且因 `connect_over_cdp` 默认开启焦点模拟，`hasFocus` 仍为真（待实测）。
+  （`new_tab`、`primary_after_author_tab`）记实际置前与因不是 hidden 而跳过的次数；`samples` 按同样两个判定点
+  记每次判定读到的 `<visibilityState>/<focused|unfocused>`（后者为 `document.hasFocus()`）的分布；
+  `read_failures` 记读取失败次数。只在这两个判定点读取（每篇各一次），节奏停顿不读，避免增加主环境
+  `page.evaluate` 与行为证据写入（#85）。行为证据创建之前的计数先留在内存，创建后的下一次记录写入全量。
+  用途是 Mac 实测核对：没有验证事件时实际置前为 0；Chrome 退到后台后页面仍为 `visible`，且因
+  `connect_over_cdp` 默认开启焦点模拟，`hasFocus` 仍为真（待实测）。
 - 明确登录、扫码或验证码页立即置前并进入本轮共享的 600 秒人工处理预算，新标签页保护期不能缩短它，切换
   页面也不能重新计时。
 - 搜索连续性出现登录要求或图片验证时，保持当前页并写
