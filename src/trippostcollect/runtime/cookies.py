@@ -181,7 +181,9 @@ async def main() -> int:
             executable_path=executable_path,
             locale="zh-CN",
             timezone_id="Asia/Shanghai",
-            args=["--disable-dev-shm-usage", "--no-sandbox", *runtime_args],
+            # 显式开启沙箱：Playwright 在 chromium_sandbox 不为 True 时会自动追加 --no-sandbox。
+            chromium_sandbox=True,
+            args=["--disable-dev-shm-usage", *runtime_args],
         )
         page = context.pages[0] if context.pages else await context.new_page()
         try:

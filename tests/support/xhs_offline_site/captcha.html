@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>安全验证</title>
+</head>
+<body>
+<div class="verify-box">请通过验证</div>
+<!-- 假验证层：显示数秒后视为操作人已完成，通知父页面移除验证层。 -->
+<script>setTimeout(() => { parent.postMessage('tpc-offline-verified', '*'); }, 4000);</script>
+</body>
+</html>

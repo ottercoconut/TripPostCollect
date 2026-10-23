@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from playwright.async_api import BrowserContext, Page
+from playwright.async_api import Page
 
 from trippostcollect.records.text_signals import is_xhs_sms_terminal_text
-from trippostcollect.runtime.human_flow import dwell_on_list, load_behavior_profile, install_runtime_hints
+from trippostcollect.runtime.human_flow import ListAreaProbe, dwell_on_list, load_behavior_profile
 from trippostcollect.runtime.helpers import utc_now
 
 
@@ -45,6 +45,7 @@ LOGIN_VISIBLE_RE = re.compile(r"请先登录|登录后查看|需要登录|login_
 
 
 async def runtime_fingerprint(page: Page) -> dict[str, Any]:
+    """行为证据里的运行环境；window_size 与 screen 只记录、不参与门禁（核对固定窗口能否放进屏幕可用区域）。"""
     async with asyncio.timeout(10):
         return await page.evaluate(
             """() => ({
@@ -59,6 +60,13 @@ async def runtime_fingerprint(page: Page) -> dict[str, Any]:
                     width: window.innerWidth || 0,
                     height: window.innerHeight || 0,
                     device_pixel_ratio: window.devicePixelRatio || 1,
+                },
+                window_size: { outer_width: window.outerWidth || 0, outer_height: window.outerHeight || 0 },
+                screen: {
+                    width: screen.width || 0,
+                    height: screen.height || 0,
+                    avail_width: screen.availWidth || 0,
+                    avail_height: screen.availHeight || 0,
                 },
                 visibility_state: document.visibilityState || '',
             })"""
@@ -158,9 +166,9 @@ def runtime_fingerprint_valid(fingerprint: dict[str, Any] | None) -> bool:
     if not isinstance(fingerprint, dict):
         return False
     viewport = fingerprint.get("viewport") or {}
+    # 小红书正式轮不注入脚本，自启 Chrome 不带 --enable-automation：原生 navigator.webdriver 为 false。
     return bool(
-        "webdriver" in fingerprint
-        and fingerprint.get("webdriver") is None
+        fingerprint.get("webdriver") is False
         and fingerprint.get("languages")
         and fingerprint.get("platform")
         and fingerprint.get("user_agent")
@@ -183,8 +191,10 @@ async def dwell_on_list_with_checks(
     page: Page,
     profile: Any,
     events: list[dict[str, Any]],
+    *,
+    list_area: ListAreaProbe,
 ) -> tuple[str, dict[str, bool]]:
-    dwell_task = asyncio.create_task(dwell_on_list(page, profile, log=events))
+    dwell_task = asyncio.create_task(dwell_on_list(page, profile, log=events, list_area=list_area))
     try:
         while True:
             done, _ = await asyncio.wait(
@@ -244,6 +254,22 @@ def behavior_evidence_valid(evidence: dict[str, Any] | None) -> bool:
     )
 
 
+async def guarded_request_sleep(
+    *,
+    profile_name: str,
+    stage: str,
+    minimum: float,
+    maximum: float,
+) -> dict[str, Any]:
+    """节奏停顿本身：按档位随机等待并返回事件；写入行为证据由调用方负责。"""
+    if profile_name != "xhs_guarded":
+        raise RuntimeError("XHS request pacing requires the xhs_guarded behavior profile")
+    low, high = sorted((max(0.0, float(minimum)), max(0.0, float(maximum))))
+    seconds = REQUEST_RANDOM.uniform(low, high)
+    await asyncio.sleep(seconds)
+    return {"stage": stage, "seconds": round(seconds, 3), "finished_at": utc_now()}
+
+
 async def run_guarded_request_pause(
     *,
     evidence_path: str | Path,
@@ -253,11 +279,9 @@ async def run_guarded_request_pause(
     maximum: float,
     write_evidence: Callable[[str | Path, dict[str, Any]], None],
 ) -> dict[str, Any]:
-    if profile_name != "xhs_guarded":
-        raise RuntimeError("XHS request pacing requires the xhs_guarded behavior profile")
-    low, high = sorted((max(0.0, float(minimum)), max(0.0, float(maximum))))
-    seconds = REQUEST_RANDOM.uniform(low, high)
-    await asyncio.sleep(seconds)
+    event = await guarded_request_sleep(
+        profile_name=profile_name, stage=stage, minimum=minimum, maximum=maximum,
+    )
 
     path = Path(evidence_path).expanduser()
     try:
@@ -266,7 +290,6 @@ async def run_guarded_request_pause(
         raise RuntimeError(f"cannot update XHS request pacing evidence: {exc}") from exc
     if not behavior_evidence_valid(evidence):
         raise RuntimeError("cannot append XHS request pacing to incomplete behavior evidence")
-    event = {"stage": stage, "seconds": round(seconds, 3), "finished_at": utc_now()}
     events = evidence.setdefault("request_pacing_events", [])
     events.append(event)
     evidence["request_pacing_events"] = events[-200:]
@@ -282,9 +305,11 @@ async def run_page_behavior(
     profile_name: str = "social_high_risk",
     write_evidence: Callable[[str | Path, dict[str, Any]], None],
     xhs_search_ready: Callable[[Page, list], Awaitable[dict[str, Any]]] | None = None,
+    xhs_list_area: ListAreaProbe | None = None,
 ) -> dict[str, Any]:
-    if profile_name == "xhs_guarded" and xhs_search_ready is None:
-        raise RuntimeError("xhs_guarded requires an injected xhs_search_ready")
+    """`xhs_guarded` 须注入搜索结果就绪等待与结果列表区域（行为阶段的光标与滚轮限定在列表内，#88）。"""
+    if profile_name == "xhs_guarded" and (xhs_search_ready is None or xhs_list_area is None):
+        raise RuntimeError("xhs_guarded requires an injected xhs_search_ready and xhs_list_area")
     started_at = utc_now()
     events: list[dict[str, Any]] = []
     error = ""
@@ -327,7 +352,9 @@ async def run_page_behavior(
                 visible_markers = initial_visible_markers
             else:
                 if profile_name == "xhs_guarded":
-                    visible_text_sample, visible_markers = await dwell_on_list_with_checks(page, profile, events)
+                    visible_text_sample, visible_markers = await dwell_on_list_with_checks(
+                        page, profile, events, list_area=xhs_list_area,
+                    )
                 else:
                     await dwell_on_list(page, profile, log=events)
                 if not visible_challenge(visible_markers):
@@ -404,17 +431,13 @@ def project_browser_args() -> list[str]:
     return args
 
 
-async def install_project_runtime_hints(context: BrowserContext) -> None:
-    """旧适配在调用前核验启用状态与配置，runtime 直接安装共享提示。"""
-    await install_runtime_hints(context)
-
-
 async def run_required_human_behavior(
     page: Page, platform_key: str, *,
     evidence_path: str,
     profile_name: str,
     xhs_search_ready: Callable[[Page, list], Awaitable[dict[str, Any]]],
     write_evidence: Callable[[str | Path, dict[str, Any]], None],
+    xhs_list_area: ListAreaProbe | None = None,
 ) -> dict[str, Any]:
     """依赖由旧适配注入；XHS 等待实现待 T09 迁出 scripts。"""
     return await run_page_behavior(
@@ -423,5 +446,6 @@ async def run_required_human_behavior(
         evidence_path=evidence_path,
         profile_name=profile_name,
         xhs_search_ready=xhs_search_ready,
+        xhs_list_area=xhs_list_area,
         write_evidence=write_evidence,
     )

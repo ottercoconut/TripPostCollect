@@ -5,8 +5,8 @@
 
 import asyncio
 import copy
+from types import SimpleNamespace
 import json
-import re
 import subprocess
 import sys
 from unittest.mock import AsyncMock, Mock
@@ -19,12 +19,9 @@ import pytest
 
 from trippostcollect.application import events as app_events
 import trippostcollect.platforms.xhs.author as xhs_author
-from trippostcollect.platforms.xhs.client import XiaoHongShuClient
 from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
-    XHSCreatorProfileUnavailable,
     XHSMainPageClosedUnexpected,
-    XHSNetworkRecoveryTimeout,
 )
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget, XHSManualWaitBudgetExhausted
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
@@ -33,15 +30,18 @@ from trippostcollect.platforms.xhs.parser import (
     XHS_CREATOR_INTERACTION_ITEM_FIELDS,
     XHS_CREATOR_INTERACTION_LIST_KEYS,
     XHS_CREATOR_TOP_FIELDS,
-    XiaoHongShuExtractor,
     read_creator_runtime_projection,
     update_xhs_note,
     xhs_creator_projection_spec,
 )
 from trippostcollect.records.sanitization import AUTHOR_AVATAR_KEYS, XHS_SERIALIZED_PROFILE_AVATAR_PATHS
 
-from .support import XiaoHongShuCrawler, client_ports
-from .test_xhs_discovery_memory import lifecycle_error, prepare_crawler, valid_note
+from trippostcollect.platforms.xhs.page_scripts import STATE_SCRIPTS
+from trippostcollect.runtime.visit_ledger import iter_ledger_lines
+
+from .support import XiaoHongShuCrawler, make_capture
+from support.xhs_fake_site import detail_card, note
+from .test_xhs_discovery_memory import lifecycle_error, prepare_crawler
 
 
 REQUESTED_USER = "synthetic-author-a"
@@ -80,27 +80,6 @@ def json_state_html(creator) -> str:
     return state_html(json.dumps({"user": {"userPageData": creator}}, ensure_ascii=False))
 
 
-def legacy_extract_creator_info_from_html(html: str):
-    """#52 之前的严格静态解析原文，用于逐项对照返回值。"""
-    match = re.search(
-        r"<script[^>]*>\s*window\.__INITIAL_STATE__\s*=\s*", html, re.M
-    )
-    if match is None:
-        return None
-    state_source = html[match.end() :].replace(":undefined", ":null")
-    try:
-        info, _ = json.JSONDecoder(strict=False).raw_decode(state_source.lstrip())
-    except json.JSONDecodeError:
-        return None
-    if info is None:
-        return None
-    user_info = info.get("user")
-    if not isinstance(user_info, dict):
-        return None
-    creator_info = user_info.get("userPageData")
-    return creator_info if isinstance(creator_info, dict) else None
-
-
 CREATOR_JSON = json.dumps(creator_state(), ensure_ascii=False)
 NEW_SET_BEFORE_USER = state_html(
     '{"global":{"seen":new Set(["x"])},"user":{"userPageData":' + CREATOR_JSON + "}}"
@@ -108,50 +87,6 @@ NEW_SET_BEFORE_USER = state_html(
 NEW_SET_AFTER_USER = state_html(
     '{"user":{"userPageData":' + CREATOR_JSON + '},"feed":{"ids":new Set([])}}'
 )
-STATIC_CASES = [
-    (json_state_html(creator_state()), "ok"),
-    (state_html('{"user":{"userPageData":{"ipLocation":undefined,"interactions":[]}}}'), "ok"),
-    (NEW_SET_BEFORE_USER, "state_decode_failed:js_new_expression"),
-    (NEW_SET_AFTER_USER, "state_decode_failed:js_new_expression"),
-    (state_html('{"user":{"userPageData":{"list":[1,undefined]}}}'), "state_decode_failed:js_identifier"),
-    (state_html('{"user":{"userPageData":{"a":-}}}'), "state_decode_failed:invalid_json"),
-    ('<script>window.__INITIAL_STATE__={"user":{"userPageData":{"a":1', "state_decode_failed:truncated"),
-    ("<html><body>没有状态</body></html>", "state_script_missing"),
-    (state_html("null"), "state_null"),
-    (state_html('{"note":{}}'), "user_missing"),
-    (state_html('{"user":{"userInfo":{}}}'), "user_page_data_missing"),
-    (state_html('{"user":{"userPageData":[]}}'), "user_page_data_missing"),
-    (state_html('{"user":{"userPageData":{}}}'), "user_page_data_empty"),
-]
-
-
-@pytest.mark.parametrize(("html", "reason"), STATIC_CASES)
-def test_strict_static_parse_is_unchanged_and_reports_reason_category(html, reason):
-    extractor = XiaoHongShuExtractor()
-
-    creator, observed_reason = extractor.extract_creator_info_with_reason(html)
-
-    assert creator == legacy_extract_creator_info_from_html(html)
-    assert extractor.extract_creator_info_from_html(html) == creator
-    assert observed_reason == reason
-    assert REQUESTED_USER not in observed_reason and "<" not in observed_reason
-
-
-def test_client_records_static_parse_reason():
-    client = XiaoHongShuClient(
-        headers={"Cookie": "web_session=test"},
-        playwright_page=Mock(),
-        cookie_dict={},
-        ports=client_ports,
-    )
-    assert client.last_creator_parse_reason == ""
-
-    assert client.extract_creator_info_from_html(NEW_SET_BEFORE_USER) is None
-    assert client.last_creator_parse_reason == "state_decode_failed:js_new_expression"
-    assert client.extract_creator_info_from_html(json_state_html(creator_state()))
-    assert client.last_creator_parse_reason == "ok"
-
-
 def test_projection_whitelist_matches_downstream_reads_and_excludes_avatar_and_credentials():
     every_key = (
         set(XHS_CREATOR_TOP_FIELDS)
@@ -230,23 +165,13 @@ def test_zero_fans_projection_is_kept_and_observed_downstream():
             {}, "runtime_projection_empty"), empty
 
 
-def test_python_refilter_drops_boolean_counts_but_static_path_keeps_legacy_behavior():
+def test_python_refilter_drops_boolean_counts():
     projected, reason = read_creator_runtime_projection({"status": "ok", "creator": {
         "fans": True, "basicInfo": {"nickname": "合成作者", "fans": True},
         "interactions": [{"type": "fans", "count": True}],
     }})
     assert reason == "ok"
     assert projected == {"basicInfo": {"nickname": "合成作者"}, "interactions": [{"type": "fans"}]}
-
-    html = json_state_html({"basicInfo": {"nickname": "合成作者", "fans": True}})
-    static = XiaoHongShuExtractor().extract_creator_info_from_html(html)
-    assert static == legacy_extract_creator_info_from_html(html)
-    record = update_xhs_note(
-        {"note_id": "synthetic-note", "user": {"user_id": REQUESTED_USER}, "interact_info": {},
-         "creator_profile": static},
-        source_keyword="青岛", current_timestamp=lambda: 0, save_data_option="jsonl",
-    )
-    assert record["fans_count"] is True and record["followers_observed"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +202,7 @@ def run_projection_script(setup: str, *, spec=None) -> dict:
         [str(node), "-e", NODE_RUNNER],
         input=json.dumps({
             "setup": setup,
-            "script": xhs_author.XHS_CREATOR_RUNTIME_PROJECTION_SCRIPT,
+            "script": STATE_SCRIPTS["creator_page_data"],
             "spec": spec or xhs_creator_projection_spec(),
         }),
         capture_output=True,
@@ -649,7 +574,7 @@ class CreatorPage:
         if "ready_state" in script:
             return {"ready_state": "complete", "title": "合成作者 - 小红书", "dom_length": 290_000,
                     "body_text_length": 800, "body_child_element_count": 3, "visibility_state": "visible"}
-        assert script == xhs_author.XHS_CREATOR_RUNTIME_PROJECTION_SCRIPT
+        assert script == STATE_SCRIPTS["creator_page_data"]
         assert arg == xhs_creator_projection_spec()
         self.projection_calls += 1
         if self.on_projection is not None:
@@ -671,33 +596,12 @@ class CreatorPage:
     def is_closed(self):
         return self.closed
 
-
-class StaticClient:
-    """只暴露浏览器回退会用到的静态解析；与真实客户端一样记录原因类别。"""
-
-    def __init__(self, api_creator=None, api_html=""):
-        self._extractor = XiaoHongShuExtractor()
-        self.last_creator_parse_reason = ""
-        self.api_creator = api_creator
-        self.api_html = api_html
-        self.api_calls = []
-        self.static_calls = 0
-
-    async def get_creator_info(self, **kwargs):
-        self.api_calls.append(kwargs)
-        if self.api_html:
-            return self.extract_creator_info_from_html(self.api_html)
-        return self.api_creator
-
-    def extract_creator_info_from_html(self, html):
-        self.static_calls += 1
-        creator, self.last_creator_parse_reason = self._extractor.extract_creator_info_with_reason(html)
-        return creator
+    def on(self, *args, **kwargs):
+        return None
 
 
 @pytest.fixture
 def crawler(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS", "1")
     monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior_evidence.json"))
     return attach_creator_harness(XiaoHongShuCrawler(), monkeypatch, tmp_path)
 
@@ -710,7 +614,8 @@ def attach_creator_harness(instance, monkeypatch, tmp_path):
     instance._popup_checkpoint_state = AsyncMock(return_value={})
     instance._goto_with_deadline = AsyncMock()
     instance._close_page_with_deadline = AsyncMock()
-    instance.xhs_client = StaticClient()
+    instance._close_author_tab = AsyncMock()
+    instance.capture = make_capture(tmp_path)
     clock = {"now": 100.0}
     instance.sleeps = []
 
@@ -746,38 +651,48 @@ def assert_diagnostic_is_safe(instance):
         assert forbidden not in text
 
 
+NOTE = SimpleNamespace(note_id="synthetic-note", user_id=REQUESTED_USER, detail_visit=None)
+
+
+async def verify(crawler, page):
+    """直接进入作者页验证等待；页面先以作者页角色登记到通道。"""
+    crawler.capture.attach(page, "author_tab")
+    return await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+
+
 async def open_with(crawler, page):
-    crawler._new_guarded_page = AsyncMock(return_value=page)
-    return await crawler._get_creator_info_from_browser(REQUESTED_USER)
+    """点击作者名得到的标签页由用例给出；关闭（最短保留、close_tab、置前）另有用例覆盖。"""
+    crawler._open_author_tab = AsyncMock(return_value=page)
+    return await crawler._get_creator_info_from_browser(REQUESTED_USER, note=NOTE)
 
 
 @pytest.mark.asyncio
 async def test_new_set_ssr_fails_static_parse_but_runtime_projection_reads_creator(crawler):
-    assert XiaoHongShuExtractor().extract_creator_info_from_html(NEW_SET_BEFORE_USER) is None
     page = CreatorPage([creator_state()], html=NEW_SET_BEFORE_USER)
 
     creator = await open_with(crawler, page)
 
     assert creator["interactions"][1] == {"type": "fans", "name": "粉丝", "count": "128"}
     assert "imageb" not in creator["basicInfo"] and "images" not in creator["basicInfo"]
-    assert page.content_calls == 0 and crawler.xhs_client.static_calls == 0
+    assert page.content_calls == 0
     assert page.load_states == [("domcontentloaded", 10_000)]
     assert [event["outcome"] for event in parse_diagnostics(crawler)] == ["ok"]
     assert crawler._creator_browser_reason == ""
     assert_diagnostic_is_safe(crawler)
-    crawler._close_page_with_deadline.assert_awaited_once_with(page, reason="creator_profile_cleanup")
+    crawler._close_author_tab.assert_awaited_once_with(page, NOTE)
 
 
 @pytest.mark.asyncio
-async def test_empty_projection_falls_back_to_strict_static_parse(crawler):
+async def test_empty_projection_is_unavailable_without_static_fallback(crawler):
     page = CreatorPage([None], html=json_state_html(creator_state()))
 
     creator = await open_with(crawler, page)
 
-    assert creator == creator_state()
-    assert page.content_calls == 1 and crawler.xhs_client.static_calls == 1
+    assert creator is None
+    assert page.content_calls == 0
     assert sum(crawler.sleeps) == pytest.approx(10.0)
-    assert [event["outcome"] for event in parse_diagnostics(crawler)] == ["ok_static_state"]
+    assert crawler._creator_browser_reason == "runtime_projection_empty"
+    assert [event["outcome"] for event in parse_diagnostics(crawler)] == ["runtime_projection_empty"]
 
 
 @pytest.mark.asyncio
@@ -805,9 +720,7 @@ async def test_budget_exhaustion_without_fans_reports_followers_unobserved(crawl
 
     assert creator is None
     assert sum(crawler.sleeps) == pytest.approx(10.0)
-    assert crawler._creator_browser_reason == (
-        "followers_unobserved,static_state_decode_failed:js_new_expression"
-    )
+    assert crawler._creator_browser_reason == "followers_unobserved"
     assert [event["outcome"] for event in parse_diagnostics(crawler)] == [crawler._creator_browser_reason]
     assert_diagnostic_is_safe(crawler)
 
@@ -821,46 +734,49 @@ async def test_page_not_ready_is_recorded_and_projection_still_runs(crawler):
 
     assert creator is None
     assert page.projection_calls > 1
-    assert crawler._creator_browser_reason == (
-        "page_not_ready,runtime_projection_empty,static_state_script_missing"
-    )
+    assert crawler._creator_browser_reason == "page_not_ready,runtime_projection_empty"
 
 
 @pytest.mark.asyncio
-async def test_mismatched_page_author_is_unavailable_without_static_fallback(crawler):
-    page = CreatorPage([creator_state(user_id="synthetic-author-other")],
-                       html=json_state_html(creator_state(user_id="synthetic-author-other")))
+async def test_author_tab_url_for_another_author_is_a_mismatch_without_reading(crawler):
+    page = CreatorPage([creator_state(user_id=REQUESTED_USER)])
+    page.url = "https://www.xiaohongshu.com/user/profile/synthetic-author-other?xsec_source=pc_note"
 
     creator = await open_with(crawler, page)
 
     assert creator is None
-    assert page.projection_calls == 1 and page.content_calls == 0
+    assert page.projection_calls == 0 and page.content_calls == 0
     assert crawler._creator_browser_reason == "creator_mismatch"
     assert [event["outcome"] for event in parse_diagnostics(crawler)] == ["creator_mismatch"]
 
 
 @pytest.mark.asyncio
-async def test_rejected_projection_falls_back_to_static_parse_without_waiting(crawler):
+async def test_rejected_projection_ends_without_waiting_or_static_fallback(crawler):
     page = CreatorPage([{"status": "rejected", "reason": "projection_avatar_check_incomplete"}],
                        html=NEW_SET_BEFORE_USER)
 
     creator = await open_with(crawler, page)
 
     assert creator is None
-    assert page.projection_calls == 1 and crawler.sleeps == [] and page.content_calls == 1
-    assert crawler._creator_browser_reason == (
-        "projection_avatar_check_incomplete,static_state_decode_failed:js_new_expression"
-    )
+    assert page.projection_calls == 1 and crawler.sleeps == [] and page.content_calls == 0
+    assert crawler._creator_browser_reason == "projection_avatar_check_incomplete"
+
+
+@pytest.mark.asyncio
+async def enrich_via_author_tab(crawler, page, note):
+    crawler._open_author_tab = AsyncMock(return_value=page)
+    creator, visit_id = await crawler._enrich_creator_via_author_tab(NOTE)
+    note["creator_profile"] = creator
+    return visit_id
 
 
 @pytest.mark.asyncio
 async def test_missing_page_user_id_uses_note_author_id(crawler):
     page = CreatorPage([creator_state()])
-    crawler._new_guarded_page = AsyncMock(return_value=page)
     note = {"note_id": "synthetic-note", "user": {"user_id": REQUESTED_USER, "nickname": "合成作者"},
             "xsec_token": "synthetic-note-token", "interact_info": {}}
 
-    await crawler.enrich_note_creator(note)
+    visit_id = await enrich_via_author_tab(crawler, page, note)
 
     assert "userId" not in note["creator_profile"]["basicInfo"]
     record = update_xhs_note(note, source_keyword="青岛", current_timestamp=lambda: 0,
@@ -870,15 +786,23 @@ async def test_missing_page_user_id_uses_note_author_id(crawler):
     assert record["followers_observed"] is True
     assert record["author_followers_source"] == "creator_profile"
     assert AVATAR_URL not in record["creator_profile_json"]
+    visit = [line for line in iter_ledger_lines(crawler.capture.ledger.path) if line.get("id") == visit_id]
+    assert visit[0]["stage"] == "creator_profile" and visit[0]["source"] == "page_state"
+    assert visit[0]["subject_id"] == visit[0]["url_user_id"] == REQUESTED_USER
+    assert AVATAR_URL not in crawler.capture.ledger.path.read_text(encoding="utf-8")
+    # 同一作者第二次直接引用首次访问，不再停顿或点击。
+    crawler._guarded_pause.reset_mock()
+    assert await crawler._enrich_creator_via_author_tab(NOTE) == (note["creator_profile"], visit_id)
+    crawler._guarded_pause.assert_not_awaited()
+    assert crawler._open_author_tab.await_count == 1
 
 
 @pytest.mark.asyncio
 async def test_unit_fans_count_follows_downstream_rules_without_zero_fill(crawler):
     page = CreatorPage([creator_state(fans="1.2万")])
-    crawler._new_guarded_page = AsyncMock(return_value=page)
     note = {"note_id": "synthetic-note", "user": {"user_id": REQUESTED_USER}, "interact_info": {}}
 
-    await crawler.enrich_note_creator(note)
+    await enrich_via_author_tab(crawler, page, note)
     record = update_xhs_note(note, source_keyword="青岛", current_timestamp=lambda: 0,
                              save_data_option="jsonl")
 
@@ -889,19 +813,19 @@ async def test_unit_fans_count_follows_downstream_rules_without_zero_fill(crawle
 @pytest.mark.asyncio
 async def test_login_during_readiness_uses_existing_primary_page_recovery(crawler):
     page = CreatorPage([None])
-    crawler.visible_markers = [{}, {}, {"login_required": True}]
+    crawler.visible_markers = [{}, {"login_required": True}]
     crawler._recover_creator_login_on_primary_page = AsyncMock(return_value={"fans": "1"})
 
     assert await open_with(crawler, page) == {"fans": "1"}
     crawler._recover_creator_login_on_primary_page.assert_awaited_once_with(REQUESTED_USER)
     assert page.content_calls == 0
-    crawler._close_page_with_deadline.assert_awaited_once_with(page, reason="creator_profile_cleanup")
+    crawler._close_author_tab.assert_awaited_once_with(page, NOTE)
 
 
 @pytest.mark.asyncio
 async def test_verification_during_readiness_keeps_existing_wait(crawler):
     page = CreatorPage([None])
-    crawler.visible_markers = [{}, {}, {"captcha_or_verify": True}]
+    crawler.visible_markers = [{}, {"captcha_or_verify": True}]
     crawler._wait_for_creator_profile_verification = AsyncMock(return_value={"fans": "2"})
 
     assert await open_with(crawler, page) == {"fans": "2"}
@@ -924,7 +848,7 @@ async def test_security_limit_during_readiness_stops_the_run(crawler, monkeypatc
 
     async def staged_inspect(current_page):
         calls["count"] += 1
-        if calls["count"] <= 2:
+        if calls["count"] <= 1:
             return "", {}
         return await inspect_state(current_page)
 
@@ -935,7 +859,7 @@ async def test_security_limit_during_readiness_stops_the_run(crawler, monkeypatc
 
     assert exc_info.value.code == "platform_security_limit_300011"
     assert record_limit.await_args.kwargs["stage"] == f"creator_profile:{REQUESTED_USER}:runtime_wait"
-    crawler._close_page_with_deadline.assert_awaited_once_with(page, reason="creator_profile_cleanup")
+    crawler._close_author_tab.assert_awaited_once_with(page, NOTE)
 
 
 @pytest.mark.asyncio
@@ -950,55 +874,22 @@ async def test_cancellation_and_closed_target_propagate(crawler, failure):
         await open_with(crawler, page)
 
     assert page.content_calls == 0
-    crawler._close_page_with_deadline.assert_awaited_once_with(page, reason="creator_profile_cleanup")
+    crawler._close_author_tab.assert_awaited_once_with(page, NOTE)
 
 
 @pytest.mark.asyncio
-async def test_closed_page_error_propagates_but_transient_evaluate_error_retries(crawler):
+async def test_closed_author_tab_is_unavailable_but_transient_evaluate_error_retries(crawler):
+    # 作者标签页被意外关闭（主页面仍在）是可重试的候选失败，不是运行级失败。
     closed_page = CreatorPage([PlaywrightError("Execution context was destroyed")])
     closed_page.closed = True
-    with pytest.raises(PlaywrightError):
-        await open_with(crawler, closed_page)
+    assert await open_with(crawler, closed_page) is None
+    assert crawler._creator_browser_reason == "author_tab_closed"
+    crawler._close_author_tab.assert_awaited_once_with(closed_page, NOTE)
 
     transient = CreatorPage([PlaywrightError("Execution context was destroyed"), creator_state()])
+    crawler._creator_browser_reason = ""
     assert (await open_with(crawler, transient))["interactions"][1]["count"] == "128"
     assert transient.projection_calls == 2
-
-
-@pytest.mark.asyncio
-async def test_both_paths_failing_raise_with_combined_reason_categories(crawler):
-    crawler.xhs_client = StaticClient(api_html=NEW_SET_BEFORE_USER)
-    page = CreatorPage([None], html=NEW_SET_BEFORE_USER)
-    crawler._new_guarded_page = AsyncMock(return_value=page)
-
-    with pytest.raises(XHSCreatorProfileUnavailable) as exc_info:
-        await crawler.enrich_note_creator({"user": {"user_id": REQUESTED_USER}})
-
-    assert exc_info.value.attempts == 2
-    assert exc_info.value.reason == (
-        "api=state_decode_failed:js_new_expression;"
-        "browser=runtime_projection_empty,static_state_decode_failed:js_new_expression"
-    )
-    assert REQUESTED_USER not in exc_info.value.reason
-    assert [event["outcome"] for event in parse_diagnostics(crawler)] == [
-        "runtime_projection_empty,static_state_decode_failed:js_new_expression"
-    ]
-    assert_diagnostic_is_safe(crawler)
-
-
-@pytest.mark.asyncio
-async def test_api_request_failure_reason_uses_exception_type(crawler):
-    crawler.xhs_client = StaticClient()
-    crawler.xhs_client.get_creator_info = AsyncMock(side_effect=ValueError("合成异常 synthetic-author-a"))
-    page = CreatorPage([None], html="<html></html>")
-    crawler._new_guarded_page = AsyncMock(return_value=page)
-
-    with pytest.raises(XHSCreatorProfileUnavailable) as exc_info:
-        await crawler.enrich_note_creator({"user": {"user_id": REQUESTED_USER}})
-
-    assert exc_info.value.reason == (
-        "api=api_request_failed:ValueError;browser=runtime_projection_empty,static_state_script_missing"
-    )
 
 
 @pytest.mark.asyncio
@@ -1009,7 +900,7 @@ async def test_boolean_fans_are_not_ready_and_end_as_followers_unobserved(crawle
 
     assert await open_with(crawler, page) is None
     assert sum(crawler.sleeps) == pytest.approx(10.0)
-    assert crawler._creator_browser_reason == "followers_unobserved,static_state_script_missing"
+    assert crawler._creator_browser_reason == "followers_unobserved"
 
 
 @pytest.mark.asyncio
@@ -1026,7 +917,7 @@ async def test_verification_wait_reads_runtime_projection_when_ssr_has_new_set(c
     page = CreatorPage([creator_state()], html=NEW_SET_BEFORE_USER)
     crawler.visible_markers = [{"captcha_or_verify": True}, {}]
 
-    creator = await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+    creator = await verify(crawler, page)
 
     assert creator["interactions"][1]["count"] == "128"
     assert page.projection_calls >= 1 and page.content_calls == 0
@@ -1036,24 +927,20 @@ async def test_verification_wait_reads_runtime_projection_when_ssr_has_new_set(c
 
 
 @pytest.mark.asyncio
-async def test_verification_wait_keeps_static_fallback_and_mismatch_ends_wait(crawler):
-    static_page = CreatorPage([None], html=json_state_html(creator_state()))
+async def test_verification_wait_ends_on_author_mismatch_without_static_fallback(crawler):
+    mismatch = CreatorPage([creator_state()], html=json_state_html(creator_state()))
+    mismatch.url = "https://www.xiaohongshu.com/user/profile/synthetic-author-other"
     crawler.visible_markers = [{}]
-    assert await crawler._wait_for_creator_profile_verification(static_page, REQUESTED_USER) == creator_state()
-    assert static_page.content_calls == 1
-
-    mismatch = CreatorPage([creator_state(user_id="synthetic-author-other")], html=NEW_SET_BEFORE_USER)
-    crawler.visible_markers = [{}]
-    assert await crawler._wait_for_creator_profile_verification(mismatch, REQUESTED_USER) is None
-    assert mismatch.content_calls == 0
+    assert await verify(crawler, mismatch) is None
+    assert mismatch.content_calls == 0 and mismatch.projection_calls == 0
     assert crawler._creator_browser_reason == "verification_wait:creator_mismatch"
 
 
 @pytest.mark.asyncio
 async def test_captcha_on_first_check_enters_verification_before_accepting_runtime_data(crawler):
     page = CreatorPage([creator_state()], html=NEW_SET_BEFORE_USER)
-    # 到达、滚动检查干净；首轮投影已有粉丝，但接受前的检查出现验证码；验证轮询一次后完成。
-    crawler.visible_markers = [{}, {}, {"captcha_or_verify": True}, {"captcha_or_verify": True}, {}]
+    # 到达检查干净；首轮投影已有粉丝，但接受前的检查出现验证码；验证轮询一次后完成。
+    crawler.visible_markers = [{}, {"captcha_or_verify": True}, {"captcha_or_verify": True}, {}]
     entered = []
     original_wait = crawler._wait_for_creator_profile_verification
 
@@ -1076,7 +963,7 @@ async def test_captcha_on_first_check_enters_verification_before_accepting_runti
 @pytest.mark.asyncio
 async def test_login_on_first_check_uses_recovery_even_with_ready_projection(crawler):
     page = CreatorPage([creator_state()])
-    crawler.visible_markers = [{}, {}, {"login_required": True}]
+    crawler.visible_markers = [{}, {"login_required": True}]
     crawler._recover_creator_login_on_primary_page = AsyncMock(return_value={"fans": "1"})
 
     assert await open_with(crawler, page) == {"fans": "1"}
@@ -1097,7 +984,7 @@ async def test_lifecycle_failure_on_first_check_propagates(crawler, monkeypatch,
 
     async def inspect_state(current_page):
         calls["inspect"] += 1
-        if calls["inspect"] == 3 and isinstance(failure, TargetClosedError):
+        if calls["inspect"] == 2 and isinstance(failure, TargetClosedError):
             raise failure
         return "", {}
 
@@ -1112,13 +999,13 @@ async def test_lifecycle_failure_on_first_check_propagates(crawler, monkeypatch,
         await open_with(crawler, page)
 
     assert page.projection_calls == 1 and page.content_calls == 0
-    crawler._close_page_with_deadline.assert_awaited_once_with(page, reason="creator_profile_cleanup")
+    crawler._close_author_tab.assert_awaited_once_with(page, NOTE)
 
 
 @pytest.mark.asyncio
 async def test_readiness_and_verification_never_recurse(crawler):
     page = CreatorPage([None, None, creator_state()], html=NEW_SET_BEFORE_USER)
-    crawler.visible_markers = [{}, {}, {}, {"captcha_or_verify": True}, {"captcha_or_verify": True}, {}]
+    crawler.visible_markers = [{}, {}, {"captcha_or_verify": True}, {"captcha_or_verify": True}, {}]
     depth = {"read": 0, "wait": 0, "max_read": 0, "max_wait": 0, "read_calls": 0, "wait_calls": 0}
     original_read = crawler._read_creator_profile_from_page
     original_wait = crawler._wait_for_creator_profile_verification
@@ -1177,7 +1064,7 @@ async def test_verification_read_rechecks_primary_page_before_accepting(crawler)
     crawler.visible_markers = [{}, {"captcha_or_verify": True}]
 
     with pytest.raises(RuntimeError, match="xhs_main_page_closed_unexpected"):
-        await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+        await verify(crawler, page)
 
     assert parse_diagnostics(crawler) == []
 
@@ -1189,7 +1076,7 @@ async def test_verification_read_rechecks_creator_page_before_accepting(crawler)
     crawler.visible_markers = [{}]
 
     with pytest.raises(PlaywrightError, match="has been closed"):
-        await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+        await verify(crawler, page)
 
     assert parse_diagnostics(crawler) == []
 
@@ -1203,7 +1090,7 @@ async def test_verification_reappearing_during_read_keeps_waiting_on_same_ticket
     # 轮询检查干净 → 读取 → 复查时验证重现；睡一轮后再次检查、读取、复查通过。
     crawler.visible_markers = [{}, {"captcha_or_verify": True}, {}, {}]
 
-    creator = await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+    creator = await verify(crawler, page)
 
     assert creator["interactions"][1]["count"] == "128"
     assert len(tickets) == 1
@@ -1236,7 +1123,7 @@ async def test_budget_exhausted_during_read_rejects_late_profile(crawler):
     crawler.visible_markers = [{}, {}]
 
     with pytest.raises(XHSManualWaitBudgetExhausted):
-        await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+        await verify(crawler, page)
 
     assert page.projection_calls == 1
     # 599 + 2 秒：读取结束时已超出 600 秒预算，结果不得接受。
@@ -1250,7 +1137,7 @@ async def test_login_during_verification_read_uses_login_recovery(crawler):
     crawler.visible_markers = [{}, {"login_required": True}]
     crawler._recover_creator_login_on_primary_page = AsyncMock(return_value={"fans": "5"})
 
-    assert await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER) == {"fans": "5"}
+    assert await verify(crawler, page) == {"fans": "5"}
     crawler._recover_creator_login_on_primary_page.assert_awaited_once_with(REQUESTED_USER)
     assert parse_diagnostics(crawler) == []
 
@@ -1260,7 +1147,7 @@ async def test_verification_read_accepts_after_clean_recheck(crawler):
     page = CreatorPage([creator_state()])
     crawler.visible_markers = [{}, {}]
 
-    creator = await crawler._wait_for_creator_profile_verification(page, REQUESTED_USER)
+    creator = await verify(crawler, page)
 
     assert creator["interactions"][1]["count"] == "128"
     assert crawler.visible_markers == []
@@ -1268,54 +1155,31 @@ async def test_verification_read_accepts_after_clean_recheck(crawler):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [
-    CDPBrowserLifecycleError({"code": "xhs_browser_context_closed_unexpected"}, stage="creator_profile_api"),
-    XHSMainPageClosedUnexpected(stage="creator_profile_api"),
-    XHSNetworkRecoveryTimeout("creator_profile_api", 600.0),
-])
-async def test_api_stage_run_failure_propagates_before_browser_fallback_pause(crawler, failure):
-    crawler.xhs_client.get_creator_info = AsyncMock(side_effect=failure)
-    crawler._new_guarded_page = AsyncMock()
-    note = {"note_id": "note-a", "user": {"user_id": REQUESTED_USER}}
-
-    with pytest.raises(type(failure)) as exc_info:
-        await crawler.enrich_note_creator(note)
-
-    assert exc_info.value is failure
-    crawler._guarded_pause.assert_not_awaited()
-    crawler._new_guarded_page.assert_not_awaited()
-    assert "creator_profile" not in note
-
-
-@pytest.mark.asyncio
 async def test_candidate_skip_detail_carries_reason_without_html_or_avatar(monkeypatch, tmp_path):
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    crawler, _, state_path = prepare_crawler(
+    crawler, _, state_path, site = prepare_crawler(
         monkeypatch,
         tmp_path,
-        items=[{"id": "retry-creator"}, {"id": "success-creator"}],
+        items=["retry-creator", "success-creator"],
     )
-    reason = "api=state_decode_failed:js_new_expression;browser=followers_unobserved,static_state_script_missing"
-    crawler.enrich_note_creator = AsyncMock(
-        side_effect=[XHSCreatorProfileUnavailable("author-retry", attempts=2, reason=reason), None]
-    )
+    site.creator_projections["author-retry-creator"] = {"status": "missing"}
 
     await crawler.search()
 
     events = json.loads(state_path.read_text(encoding="utf-8"))["events"]
     skipped = [event["details"] for event in events if event["type"] == "candidate_skipped"]
     assert len(skipped) == 1
-    assert skipped[0]["detail"] == f"creator_profile_failed:{reason}"
+    assert skipped[0]["detail"] == "creator_profile_failed:runtime_projection_empty"
     assert skipped[0]["error_code"] == "creator_profile_unavailable"
-    assert skipped[0]["attempts"] == 2 and skipped[0]["retryable"] is True
+    assert skipped[0]["attempts"] == 1 and skipped[0]["retryable"] is True
     serialized = json.dumps(skipped[0], ensure_ascii=False)
     assert "avatar" not in serialized and "<html" not in serialized and "author-retry" not in serialized
 
 
 # ---------------------------------------------------------------------------
-# #55 主页面关闭：浏览器、context 与作者辅助页仍存活时，作者补全期间主页面关闭让本轮失败。
+# #55 主页面关闭：浏览器、context 与作者标签页仍存活时，作者补全期间主页面关闭让本轮失败。
 
-# 第 3 页的作者经 API 取到资料并完成批次；第 4 页第一位作者进入浏览器回退，第二位不得被处理。
+# 第 1 页的作者取到资料并完成批次；第 2 页第一位作者补全期间主页面关闭，第二位不得被处理。
 MAIN_PAGE_NOTE_AUTHORS = {
     "note-confirmed": "author-confirmed",
     "note-closing": REQUESTED_USER,
@@ -1323,49 +1187,29 @@ MAIN_PAGE_NOTE_AUTHORS = {
 }
 
 
-class SearchCreatorClient(StaticClient):
-    """两页搜索；作者 API 只认识首页作者，其余作者为空结果并进入浏览器回退。"""
-
-    def __init__(self):
-        super().__init__()
-        self.pages = {
-            3: {"items": [{"id": "note-confirmed"}], "has_more": True},
-            4: {"items": [{"id": "note-closing"}, {"id": "note-untouched"}], "has_more": False},
-        }
-        self.search_pages = []
-        self.on_api_miss = None
-
-    async def get_note_by_keyword(self, **kwargs):
-        self.search_pages.append(kwargs["page"])
-        return copy.deepcopy(self.pages[kwargs["page"]])
-
-    async def get_creator_info(self, **kwargs):
-        self.api_calls.append(kwargs["user_id"])
-        if kwargs["user_id"] == "author-confirmed":
-            return {"fans_count": 100}
-        if self.on_api_miss is not None:
-            self.on_api_miss()
-        return None
-
-
 def main_page_search(monkeypatch, tmp_path):
-    """真实 search → 作者补全路径；主页面关闭点由各用例设置，记录主页面检查抛出的阶段。"""
+    """真实 search → 浮层 → 点击作者名路径；主页面关闭点由各用例设置，记录主页面检查抛出的阶段。"""
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS", "1")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior_evidence.json"))
-    instance, _, state_path = prepare_crawler(monkeypatch, tmp_path, items=[])
-    attach_creator_harness(instance, monkeypatch, tmp_path)
-    del instance.enrich_note_creator
-    instance.xhs_client = SearchCreatorClient()
+    instance, _, state_path, site = prepare_crawler(
+        monkeypatch,
+        tmp_path,
+        items=None,
+        pages=[[note("note-confirmed")], [note("note-closing"), note("note-untouched")]],
+    )
+    for note_id, user_id in MAIN_PAGE_NOTE_AUTHORS.items():
+        site.details[note_id] = detail_card(note_id, user_id=user_id)
+    instance.site = site
+    instance.main_closed = False
+    site.page.is_closed = lambda: instance.main_closed
+    # 作者页可见状态按作者给出；共享人工预算与轮询间隔沿用作者页验证等待。
+    instance.markers_by_user = {}
 
-    async def fetch_detail(*, note_id, **kwargs):
-        note = valid_note(note_id)
-        note["user"]["user_id"] = MAIN_PAGE_NOTE_AUTHORS[note_id]
-        return note
+    async def inspect_state(page):
+        queue = instance.markers_by_user.get(getattr(page, "user_id", ""), [])
+        return "", (queue.pop(0) if queue else {})
 
-    instance.get_note_detail_async_task = fetch_detail
-    instance.creator_page = CreatorPage([creator_state()])
-    instance._new_guarded_page = AsyncMock(return_value=instance.creator_page)
+    monkeypatch.setattr(xhs_author, "inspect_visible_page_state", inspect_state)
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_POLL_SECONDS", "1")
     # 浏览器与 context 存活：生命周期检查照常执行且不抛错。
     instance.cdp_manager = Mock(assert_alive=Mock())
     instance.closed_stages = []
@@ -1385,37 +1229,48 @@ def main_page_search(monkeypatch, tmp_path):
 
 
 def close_main_page(instance):
-    instance.context_page.is_closed.return_value = True
+    instance.main_closed = True
+
+
+def close_at_second_creator_pause(instance):
+    """第二位作者的作者停顿结束、点击作者名之前主页面关闭。"""
+    pause = instance._guarded_pause
+    count = {"creator": 0}
+
+    async def guarded_pause(stage, minimum, maximum):
+        result = await pause(stage, minimum, maximum)
+        if stage == "creator_profile":
+            count["creator"] += 1
+            if count["creator"] == 2:
+                close_main_page(instance)
+        return result
+
+    instance._guarded_pause = guarded_pause
 
 
 def close_during_midrun_login_recovery(instance):
-    """作者页落地即要求登录；中途登录恢复轮询中主页面关闭（第二次弹窗检查时）。"""
-    instance.visible_markers = [{"login_required": True}]
-    calls = {"count": 0}
+    """作者页落地即要求登录；转主页面轮中登录恢复时主页面已关闭。"""
+    instance.markers_by_user[REQUESTED_USER] = [{"login_required": True}]
+    recover = instance._wait_for_midrun_login_recovery
 
-    async def popup_state(page):
-        calls["count"] += 1
-        if calls["count"] == 2:
-            close_main_page(instance)
-            return {"manual_markers": ["qrcode"], "visible_text": "扫码登录"}
-        return {}
+    async def closing_recovery():
+        close_main_page(instance)
+        return await recover()
 
-    instance._popup_checkpoint_state = popup_state
+    instance._wait_for_midrun_login_recovery = closing_recovery
+
+
+def close_on_projection(instance):
+    instance.site.projection_hooks[REQUESTED_USER] = lambda: close_main_page(instance)
 
 
 MAIN_PAGE_CLOSE_POINTS = {
-    "before_browser_fallback": (
-        lambda instance: setattr(instance.xhs_client, "on_api_miss", lambda: close_main_page(instance)),
-        "creator_profile_browser",
-    ),
-    "after_runtime_projection": (
-        lambda instance: setattr(instance.creator_page, "on_projection", lambda: close_main_page(instance)),
-        "creator_profile_runtime_wait",
-    ),
+    "before_author_click": (close_at_second_creator_pause, "creator_profile_browser"),
+    "after_runtime_projection": (close_on_projection, "creator_profile_runtime_wait"),
     "verification_accept": (
         lambda instance: (
-            setattr(instance, "visible_markers", [{"captcha_or_verify": True}, {}]),
-            setattr(instance.creator_page, "on_projection", lambda: close_main_page(instance)),
+            instance.markers_by_user.update({REQUESTED_USER: [{"captcha_or_verify": True}, {}]}),
+            close_on_projection(instance),
         ),
         "creator_profile_verification_accept",
     ),
@@ -1444,25 +1299,22 @@ async def test_main_page_closed_during_creator_enrichment_fails_run_not_candidat
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
     assert stopped["stop_reason"] == "runtime_failed"
     assert stopped["stop_detail"] == "main_page_closed"
-    # 后续候选不处理：第二位作者未请求，只有已确认批次的候选入库。
-    assert crawler.xhs_client.api_calls == ["author-confirmed", REQUESTED_USER]
-    assert [call.args[0]["note_id"] for call in crawler.update_xhs_note.await_args_list] == ["note-confirmed"]
-    assert crawler.xhs_client.search_pages == [3, 4]
-    # 已确认批次保留且只发布一次；未完成的第 4 页不产生批次完成，也不发布 checkpoint。
+    # 后续候选不处理：第二位作者未点击，只有已确认批次的候选入库。
+    opened = [tab.user_id for tab in crawler.site.author_tabs]
+    expected_tabs = ["author-confirmed"] if close_point == "before_author_click" else ["author-confirmed", REQUESTED_USER]
+    assert opened == expected_tabs
+    assert all(tab.closed for tab in crawler.site.author_tabs)
+    assert [record["note_id"] for record in crawler.records] == ["note-confirmed"]
+    assert [request["page"] for request in crawler.site.requests if "filters" in request][:2] == [1, 2]
+    # 已确认批次保留且只发布一次；未完成的第 2 页不产生批次完成，也不发布 checkpoint。
     completed = [event["details"] for event in events if event["type"] == "adaptive_batch_completed"]
-    assert [(batch["source_page"], batch["resume_page"]) for batch in completed] == [(3, 4)]
+    assert [(batch["source_page"], batch["resume_page"]) for batch in completed] == [(1, None)]
     assert completed[0]["batch_complete"] is True
     assert crawler.published_batches == completed
-    assert stopped["resume_page"] == 4 and stopped["batch_complete"] is False
-    # 前提：同一阶段先确认浏览器与 context 存活，才判定主页面关闭；作者辅助页打开过就照常收束。
+    assert stopped["source_page"] == 2 and stopped["resume_page"] is None
+    assert stopped["batch_complete"] is False
+    # 前提：同一阶段先确认浏览器与 context 存活，才判定主页面关闭。
     crawler.cdp_manager.assert_alive.assert_any_call(stage)
-    if close_point == "before_browser_fallback":
-        crawler._new_guarded_page.assert_not_awaited()
-        crawler._close_page_with_deadline.assert_not_awaited()
-    else:
-        crawler._close_page_with_deadline.assert_awaited_once_with(
-            crawler.creator_page, reason="creator_profile_cleanup"
-        )
 
 
 @pytest.mark.asyncio
@@ -1472,7 +1324,7 @@ async def test_context_lifecycle_failure_keeps_priority_over_closed_main_page(mo
     context_closed = lifecycle_error("xhs_browser_context_closed_unexpected", stage="creator")
 
     def assert_alive(stage):
-        if crawler.context_page.is_closed.return_value:
+        if crawler.main_closed:
             raise context_closed
 
     crawler.cdp_manager = Mock(assert_alive=assert_alive)
@@ -1485,22 +1337,22 @@ async def test_context_lifecycle_failure_keeps_priority_over_closed_main_page(mo
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
     assert stopped["stop_reason"] == "runtime_failed"
     assert stopped["stop_detail"] == "browser_context_closed"
-    assert stopped["resume_page"] == 4
+    assert stopped["source_page"] == 2 and stopped["resume_page"] is None
 
 
 @pytest.mark.asyncio
 async def test_missing_creator_profile_with_live_main_page_still_skips_candidate(monkeypatch, tmp_path):
     crawler, state_path = main_page_search(monkeypatch, tmp_path)
-    crawler.creator_page.projections = [None]
-    crawler.creator_page.html = NEW_SET_BEFORE_USER
+    for user_id in (REQUESTED_USER, "author-untouched"):
+        crawler.site.creator_projections[user_id] = {"status": "missing"}
 
     await crawler.search()
 
     assert crawler.closed_stages == []
     events = search_events(state_path)
     skipped = [event["details"] for event in events if event["type"] == "candidate_skipped"]
-    assert [entry["detail"].split(":", 1)[0] for entry in skipped] == ["creator_profile_failed"] * 2
+    assert [entry["detail"] for entry in skipped] == ["creator_profile_failed:runtime_projection_empty"] * 2
     assert {entry["error_code"] for entry in skipped} == {"creator_profile_unavailable"}
-    assert crawler.xhs_client.api_calls == ["author-confirmed", REQUESTED_USER, "author-untouched"]
+    assert [tab.user_id for tab in crawler.site.author_tabs] == ["author-confirmed", REQUESTED_USER, "author-untouched"]
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]["details"]
     assert stopped["stop_reason"] == "source_exhausted"

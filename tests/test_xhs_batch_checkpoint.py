@@ -1,4 +1,4 @@
-"""A completed page must survive loss of the root before finalization."""
+"""全量扫描中新增了候选决定的完整页，须在根失联前固化（含访问账本快照）并由根确认。"""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import pytest
 
 
 from trippostcollect.db.bootstrap import bootstrap_connection
+from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_path, iter_ledger_lines
 from trippostcollect.xhs import batch_checkpoint as batch
 from trippostcollect.xhs.discovery import resolve_discovery_plan
 
@@ -29,7 +30,7 @@ if str(SCRIPTS) not in sys.path:
 @pytest.fixture
 def scenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     db = tmp_path / "test.sqlite"
-    target = {"target_key": "qingdao_trip", "keyword": "青岛旅行", "top_refresh_max_pages": 5}
+    target = {"target_key": "qingdao_trip", "keyword": "青岛旅行"}
     with sqlite3.connect(db) as conn:
         conn.row_factory = sqlite3.Row
         bootstrap_connection(conn, sync_content=True, sync_jobs=False)
@@ -65,18 +66,22 @@ def scenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace
     contents = data / "xhs" / "jsonl" / "search_contents_test.jsonl"
     contents.parent.mkdir(parents=True)
     contents.write_text('{"note_id":"note1","desc":"青岛旅行"}\n')
+    evidence = tmp_path / "outputs" / "run" / "child" / "logs" / "xhs" / "behavior_evidence.json"
+    ledger = VisitLedger.create(content_visits_path(evidence), platform="xhs", mode="discovery")
+    ledger.append("action", seq=ledger.next_seq(), page_role="primary", action="scroll", target={"phase": "scan"})
     event = {
         "platform": "xhs",
         "batch_no": 1,
         "source_page": 46,
-        "resume_page": 47,
+        "resume_page": None,
         "source_cursor": "search",
-        "resume_cursor": "search",
+        "resume_cursor": None,
         "source_has_more": True,
         "batch_complete": True,
-        "discovery_phase": "frontier",
+        "discovery_phase": "full_scan",
         "stop_reason": "continue",
         "candidate_count": 1,
+        "batch_candidate_identity_count": 1,
         "candidate_identities": ["note1"],
     }
     state_path = tmp_path / "state.json"
@@ -94,6 +99,7 @@ def scenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace
         batch.DATA_ROOT_ENV: str(data),
         "TRIPPOSTCOLLECT_EXECUTION_STATE_PATH": str(state_path),
         "TRIPPOSTCOLLECT_XHS_RUN_ID": "run",
+        "TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE": str(evidence),
     }
     guard = SimpleNamespace(db_path=db, run_id="run", lease_id="lease", owner_token="secret", signal_received=None)
     committer = batch.BatchCheckpointCommitter(
@@ -116,11 +122,19 @@ def test_complete_batch_survives_root_loss_and_mutable_export_tail(scenario: Sim
     batch.publish_batch(s.event, s.env)
     # No run_summary, terminal commit, or final state is ever produced.
     s.contents.write_text('{"note_id":"half-written-next-page"')
+    s.ledger.append("action", seq=s.ledger.next_seq(), page_role="primary", action="scroll", target={"phase": "scan"})
     plan = saved(s)
-    assert plan["resume_page"] == 47
+    assert plan["checkpoint_found"] is True
+    assert plan["last_stop_reason"] == "continue" and plan["last_status"] == "active"
     summary = json.loads(Path(plan["campaign_summary_path"]).read_text())
     snapshot = Path(summary["records"][-1]["output"]["jsonl_files"][0])
     assert json.loads(snapshot.read_text())["note_id"] == "note1"
+    # 访问账本与内容同批固化：快照计入哈希，之后续写的行不进入快照。
+    (ledger_snapshot,) = summary["records"][-1]["output"]["content_visit_paths"]
+    assert ledger_snapshot.endswith(".batch-000001.snapshot")
+    assert len(list(iter_ledger_lines(ledger_snapshot))) == 2
+    assert plan["campaign_visit_ledgers"] == [ledger_snapshot]
+    assert ledger_snapshot in {item["path"] for item in summary["batch_checkpoint"]["files"]}
     assert summary["import_completion_met"] is False
     assert summary["formal_validation"]["source_exhausted_met"] is False
     assert json.loads(s.state_path.read_text())["status"] == "running"
@@ -131,7 +145,10 @@ def test_complete_batch_survives_root_loss_and_mutable_export_tail(scenario: Sim
         assert not resolve_discovery_plan(conn, target=s.target, account_id="xhs-a01")["checkpoint_found"]
 
 
-@pytest.mark.parametrize("change", [{"batch_complete": False}, {"source_has_more": False}, {"platform": "weibo"}])
+@pytest.mark.parametrize(
+    "change",
+    [{"batch_complete": False}, {"source_has_more": False}, {"platform": "weibo"}, {"batch_candidate_identity_count": 0}],
+)
 def test_no_commit_for_partial_or_exhaustion_or_other_platform(scenario: SimpleNamespace, change: dict) -> None:
     s = scenario
     batch.publish_batch({**s.event, **change}, s.env)
@@ -193,68 +210,49 @@ def test_commit_rejects_unsafe_or_changed_inputs(
     assert not (pointer_path.parent / "batch_checkpoint_ack.json").exists()
 
 
-def test_top_refresh_retains_deep_frontier(scenario: SimpleNamespace) -> None:
+def test_ledger_is_required_and_must_stay_in_the_run(scenario: SimpleNamespace) -> None:
     s = scenario
-    s.discovery.update(resume_page=47, resume_search_id="deep")
-    s.event.update(source_page=1, resume_page=2, discovery_phase="refresh")
-    s.state_path.write_text(json.dumps(s.state))
-    batch.publish_batch(s.event, s.env)
-    assert saved(s)["resume_page"] == 47
-    assert saved(s)["resume_search_id"] == "deep"
+    env = {key: value for key, value in s.env.items() if key != "TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE"}
+    with pytest.raises(RuntimeError, match="xhs_batch_checkpoint_visit_ledger_missing"):
+        batch.publish_batch(s.event, env)
+    outside = s.tmp_path / "elsewhere" / "behavior_evidence.json"
+    VisitLedger.create(content_visits_path(outside), platform="xhs", mode="discovery")
+    with pytest.raises(RuntimeError, match="xhs_batch_checkpoint_visit_ledger_scope_mismatch"):
+        batch.publish_batch(s.event, {**s.env, "TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE": str(outside)})
+    assert not saved(s)["checkpoint_found"]
 
 
-@pytest.mark.parametrize("directory_exists", [False, True])
-def test_empty_refresh_commits_history_without_creating_export_files(
-    scenario: SimpleNamespace, directory_exists: bool
+def test_committer_rejects_a_batch_outside_the_full_scan(
+    scenario: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     s = scenario
-    shutil.rmtree(s.data.parent)
-    if directory_exists:
-        s.data.mkdir(parents=True)
-    old = s.tmp_path / "old.jsonl"
-    old.write_text('{"note_id":"old-note"}\n')
-    old_record = {"platform": "xhs", "output": {"jsonl_files": [str(old)]}}
-    prior = s.tmp_path / "prior.json"
-    prior.write_text(json.dumps({"records": [old_record]}))
-    s.discovery.update(resume_page=31, resume_search_id="deep", campaign_summary_path=str(prior))
-    s.env[batch.RESUME_ENV] = str(prior)
-    s.event.update(source_page=1, resume_page=2, discovery_phase="refresh",
-                   candidate_count=0, candidate_identities=[], valid_new_count=0, valid_existing_count=0)
+    s.event["discovery_phase"] = "frontier"
     s.state_path.write_text(json.dumps(s.state))
-
-    batch.publish_batch(s.event, s.env)
-
-    plan = saved(s)
-    assert plan["resume_page"] == 31
-    assert plan["resume_search_id"] == "deep"
-    summary = json.loads(Path(plan["campaign_summary_path"]).read_text())
-    assert summary["records"][0] == old_record
-    assert summary["records"][-1]["output"] == {"jsonl_files": [], "image_manifest_paths": []}
-    assert summary["formal_validation"]["candidate_count"] == 1
-    batch.verify_snapshot_artifacts(summary)
-    assert s.data.exists() is directory_exists
-    assert not list(s.data.rglob("*.jsonl"))
-    assert (s.tmp_path / "checkpoints/run/batch_checkpoint_ack.json").exists()
-    with sqlite3.connect(s.db) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM web_posts").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM xhs_discovery_seen_candidates").fetchone()[0] == 0
+    monkeypatch.setattr(batch, "ACK_TIMEOUT_SECONDS", 0)
+    with pytest.raises(RuntimeError, match="ack_timeout"):
+        batch.publish_batch(s.event, s.env)
+    with pytest.raises(RuntimeError, match="xhs_batch_checkpoint_unsafe_boundary"):
+        s.committer()
+    assert not saved(s)["checkpoint_found"]
 
 
 def test_empty_first_batch_then_first_content_uses_next_ack_sequence(scenario: SimpleNamespace) -> None:
     s = scenario
     shutil.rmtree(s.data.parent)
-    s.event.update(source_page=1, resume_page=2, candidate_count=0, candidate_identities=[])
+    s.event.update(source_page=1, candidate_count=0, candidate_identities=[], batch_candidate_identity_count=0)
     s.state_path.write_text(json.dumps(s.state))
+    # 没有新增候选决定的页（纯滑过）不发布、不往返确认。
     batch.publish_batch(s.event, s.env)
-    assert saved(s)["resume_page"] == 2
+    assert not saved(s)["checkpoint_found"]
+    assert not (s.tmp_path / "checkpoints").exists()
     assert not s.data.exists()
     s.contents.parent.mkdir(parents=True)
     s.contents.write_text('{"note_id":"first-note"}\n')
-    s.event.update(batch_no=2, source_page=2, resume_page=3,
-                   candidate_count=1, candidate_identities=["first-note"], valid_new_count=1)
+    s.event.update(batch_no=2, source_page=2, candidate_count=1, candidate_identities=["first-note"],
+                   batch_candidate_identity_count=1, valid_new_count=1)
     s.state_path.write_text(json.dumps(s.state))
     batch.publish_batch(s.event, s.env)
-    assert saved(s)["resume_page"] == 3
+    assert saved(s)["checkpoint_found"] is True
     assert s.committer.last_sequence == 2
     batch.verify_snapshot_artifacts(json.loads(Path(saved(s)["campaign_summary_path"]).read_text()))
 
@@ -266,7 +264,7 @@ def test_missing_export_with_valid_records_does_not_advance(scenario: SimpleName
     previous = saved(s)
     # Remove only the mutable original; the acknowledged snapshot remains intact.
     s.contents.unlink()
-    s.event.update(batch_no=2, source_page=47, resume_page=48, **{valid_field: 1})
+    s.event.update(batch_no=2, source_page=47, **{valid_field: 1})
     s.state_path.write_text(json.dumps(s.state))
     with pytest.raises(RuntimeError, match="xhs_batch_checkpoint_content_missing"):
         batch.publish_batch(s.event, s.env)
@@ -285,7 +283,7 @@ def test_corrupt_page_does_not_replace_previous_checkpoint(scenario: SimpleNames
     s = scenario
     batch.publish_batch(s.event, s.env)
     previous = saved(s)
-    s.event.update(batch_no=2, source_page=47, resume_page=48)
+    s.event.update(batch_no=2, source_page=47)
     s.state_path.write_text(json.dumps(s.state))
     s.contents.write_text('{"note_id":')
     with pytest.raises(ValueError):
@@ -306,7 +304,7 @@ def test_ack_failure_after_db_commit_is_idempotent(scenario: SimpleNamespace, mo
     monkeypatch.setattr(batch, "atomic_write_json", fail_ack)
     with pytest.raises(OSError):
         s.committer()
-    assert saved(s)["resume_page"] == 47
+    assert saved(s)["checkpoint_found"] is True
     monkeypatch.setattr(batch, "atomic_write_json", original)
     s.committer()
     s.committer()
@@ -357,7 +355,7 @@ b.publish_batch(s['event'], s['env'])
     plan = saved(s)
     assert plan["checkpoint_found"] == commit_before_kill
     if commit_before_kill:
-        assert plan["resume_page"] == 47
+        assert plan["last_stop_reason"] == "continue"
         assert Path(plan["campaign_summary_path"]).is_file()
 
 
@@ -557,7 +555,7 @@ def test_explicit_publisher_runs_after_legacy_swallowed_failure(monkeypatch):
 
 
 def test_worker_explicit_checkpoint_uses_real_publisher_and_ack(scenario, monkeypatch):
-    """新装配经真实 publish、临时 SQLite 提交和 ACK 推进安全前沿。"""
+    """新装配经真实 publish、临时 SQLite 提交和 ACK 固化本批决定。"""
     from trippostcollect.application import events
     from trippostcollect.platforms import entry
 
@@ -575,7 +573,7 @@ def test_worker_explicit_checkpoint_uses_real_publisher_and_ack(scenario, monkey
     events.append_worker_execution_event("adaptive_batch_completed", s.event)
     plan = saved(s)
     assert plan["checkpoint_found"] is True
-    assert plan["resume_page"] == 47
+    assert plan["campaign_visit_ledger_count"] == 1
     assert json.loads(s.state_path.read_text())["events"][-1]["details"] == s.event
     with sqlite3.connect(s.db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM xhs_discovery_checkpoints").fetchone()[0] == 1
@@ -615,7 +613,7 @@ def test_ack_directory_fsync_failure_keeps_committed_discovery(
 
     pointer = json.loads((run_dir / "batch_checkpoint.json").read_text())
     assert json.loads((run_dir / "batch_checkpoint_ack.json").read_text()) == pointer
-    assert saved(s)["resume_page"] == 47
+    assert saved(s)["checkpoint_found"] is True
     assert s.committer.last_sequence == 0
     with sqlite3.connect(s.db) as conn:
         assert conn.execute("SELECT platform_post_id FROM xhs_discovery_seen_candidates").fetchall() == [("note1",)]
@@ -624,7 +622,7 @@ def test_ack_directory_fsync_failure_keeps_committed_discovery(
 def test_repeated_commit_after_ack_failure_keeps_seen_unique_without_exactly_once_audit(
     scenario: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T13：ACK 失败后重放提交是 upsert；seen 唯一、前沿不重复推进，审计事件不承诺恰好一次。"""
+    """T13：ACK 失败后重放提交是 upsert；seen 唯一，审计事件不承诺恰好一次。"""
     s = scenario
     monkeypatch.setattr(batch, "ACK_TIMEOUT_SECONDS", 0)
     with pytest.raises(RuntimeError, match="ack_timeout"):
@@ -643,7 +641,7 @@ def test_repeated_commit_after_ack_failure_keeps_seen_unique_without_exactly_onc
     s.committer()
 
     assert s.committer.last_sequence == 1
-    assert saved(s)["resume_page"] == 47
+    assert saved(s)["checkpoint_found"] is True
     assert _audit_commits(s) == 2
     with sqlite3.connect(s.db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM xhs_discovery_seen_candidates").fetchone()[0] == 1

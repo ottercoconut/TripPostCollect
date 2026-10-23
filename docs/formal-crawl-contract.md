@@ -95,7 +95,8 @@ B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
 小红书额外使用逻辑账号隔离、精确单账号租约、本轮临时 profile 和 `xhs_guarded` 行为门禁；不自动
 换号、绕过验证或把登录/频控/封禁降级为候选失败。每个正式 `run_id` 只允许一次浏览器启动和一个
 BrowserContext，登录、行为、搜索、详情、作者和图片阶段只能在该 Context 内更换 Page；CDP 启动失败
-或 Context 关闭时本轮直接 `runtime_failed`，不得切换浏览器模式或重建 Context。纯二维码组件明确
+或 Context 关闭时本轮直接 `runtime_failed`，不得切换浏览器模式或重建 Context。作者页与互动均在
+该 Context 内进行，作者页只由页面内点击作者名产生。纯二维码组件明确
 过期时，只允许在连续两次确认无登录进展后点击组件内刷新控件；新二维码可用后重新计算 180 秒整页
 reload 下限。当前页未满该下限不得 reload。扫码、确认、验证码或安全验证一旦出现，本轮登录窗口内
 组件刷新与整页 reload 都必须禁用。可捕获的 SIGINT/SIGTERM 必须形成
@@ -109,7 +110,28 @@ BrowserContext；只有触发轮的精确租约已经释放且 `runtime_session_
 
 通用平台的验证码、频控或拒绝访问会写入站点冷却，后续任务由同一策略门禁停止；小红书只
 记录本轮证据，等待操作人指挥。断点续跑只校验本次新执行记录的行为与策略证据，不要求历史
-摘要补造新字段。
+摘要补造新字段；小红书累计记录的访问证据全部校验。
+
+## 取数来源与真实访问门禁
+
+取数来源分三级：L1 为被动截获页面自身发出的请求的响应，或读取页面状态；L2 为在页面上下文中
+主动发起请求；L3 为 Playwright `page.request` / `context.request`。L3 对所有平台禁止。浏览器外
+HTTP 客户端（httpx 等）不属于以上任何一级：已纳入访问门禁的平台不得用它取得平台数据，只有平台
+文档登记的例外（如图片直连 CDN，UA 与 Referer 取自浏览器、不带 cookie）可以使用；尚未纳入门禁
+的平台维持现状，直到各自的改造批次。已纳入访问门禁的平台只能经页面取数通道取得平台数据，静态
+检查 `tests/test_fetch_boundary.py` 禁止旁路导入、Playwright 请求接口和页面脚本内的主动请求。
+小红书的搜索、详情、作者、图片与登录态只用 L1，没有例外；其余平台的分级在各自改造时写入本节。
+
+每轮写只追加的访问账本（行为证据同目录的 `content_visits` JSONL），以单一单调序号记录动作、
+页面响应与页面状态读取、停顿和诊断。账本不截断，不写 token、查询值、正文、头像或完整图片 URL，
+并列入无持久进展看门狗的进展路径。每条记录以 `content_visit_refs` 引用其搜索、详情、作者与逐张
+图片访问，随 `raw_sample_json` 入库；批次快照固化账本并计入哈希。
+
+`content_visit_ok` 对本次入库的全部记录（含跨轮累计）逐条核验：引用均可解析；详情访问由列表
+点击触发，且晚于含该 ID 的搜索访问；作者访问由详情内点击触发，作者 ID 与页面 URL 一致；图片的
+资产键与哈希与 manifest 一致；规定的停顿位于对应动作之前。程序滚动触发下一页之前须有翻页停顿，
+前端自行加载的页只记诊断。必需节奏阶段按本轮实际发生的访问推导。任一项不满足即
+`behavior_evidence_ok=false`，不能用内容 JSONL 或退出码补签。逐条规则见对应平台文档。
 
 ## 来源耗尽与计数字段
 
@@ -140,13 +162,14 @@ schema v2 与小红书 target schema v3 都拒绝旧数量控制字段，执行�
 
 正式抓取不设任务级时长上限：通用 job 不含 `timeout_per_platform`，小红书 target 不含
 `timeout_seconds`，配置中出现任一字段即报错。所有平台（含小红书）的中间层统一使用代码常量 1200 秒的
-无持久进展看门狗：execution state 事件、内容 JSONL、图片 manifest 与行为证据连续 1200 秒都没有变化
+无持久进展看门狗：execution state 事件、内容 JSONL、图片 manifest、行为证据与访问账本（已纳入访问门禁
+的平台）连续 1200 秒都没有变化
 才以 `no_progress_timeout` 运行级失败结束，持续推进时整轮总时长不受限制。小红书的网络恢复暂停与
-人工等待（扫码登录、轮中登录恢复、API 验证码、作者页验证、搜索就绪验证与连续性验证）期间，父层只对
+人工等待（扫码登录、轮中登录恢复、前端验证、作者页验证、搜索就绪验证与连续性验证）期间，父层只对
 新鲜、结构有效的暂停诊断冻结该计时、结束后恢复，阈值与进展判定不变，600 秒人工预算耗尽仍按人工预算
-耗尽错误失败。小红书必须同时核对 `top_refresh_max_pages` 与 pool 的 `lease_seconds`；
+耗尽错误失败。小红书必须同时核对 pool 的 `lease_seconds`；
 `lease_seconds` 是租约 TTL，child 运行期间由父层认证心跳续期，child 结束后由父进程保活续期到精确
-释放，不依赖任务时长。这些参数不属于查询来源参数，调整后继续使用原目标、账号和查询指纹对应的
+释放，不依赖任务时长。该参数不属于查询来源参数，调整后继续使用原目标、账号和查询指纹对应的
 checkpoint，但必须通过新的 dry-run 冻结并核对计划。
 
 发现抓取只有 `formal_validation.source_exhausted_met=true` 才能进入正式持久化；此时新增数可以为 0，
@@ -316,6 +339,7 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 
 每个分页批次必须记录平台页码、请求游标或 search ID（平台提供时）、下一游标、可恢复的
 下一页/offset/cursor、批次是否完整、发现阶段、原始返回条数和 `has_more`（平台提供时）。
+小红书例外：页码与 search ID 取自前端发出的搜索请求，只作审计；全量扫描不存在可恢复的下一页。
 抖音搜索响应还必须验证 HTTP 可解析后的业务 envelope：非成功 `status_code`、缺失或非列表
 `data`、缺失或非法 `has_more`，以及 `has_more=true` 但没有下一 `logid`，都属于
 `runtime_failed`，不得降级成空页。状态文件保存脱敏的 `douyin_search_response_observed`；
@@ -331,7 +355,8 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 `crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates` 与操作人授权的
 `crawl_discovery_candidate_exclusions` 均以 `job_id + query_fingerprint` 隔离；前者保存安全前沿，
 第二张表保存已完成处理的候选 ID，第三张表保存精确、可审计且不计成功的排除 ID。小红书由独立 runner
-维护 `xhs_discovery_checkpoints`，以 `target_key + account_id + query_fingerprint` 唯一定位，
+维护 `xhs_discovery_checkpoints`，以 `target_key + account_id + query_fingerprint` 唯一定位（不保存前沿，
+每轮全量扫描），
 并在同一作用域的 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID；两者不与通用任务或
 其他账号共享未入库活动。指纹包含平台、关键词和影响来源结果的查询参数，
 不包含登录和顶部刷新页数。关键词或来源查询参数改变时必须形成新
@@ -343,7 +368,8 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 `xhs_discovery_seen_candidates`。五个平台的视频、已由决定性权威响应证明的字段无效项、结构有效候选
 （包括主题不相关记录），
 以及详情、作者或正文图在适用重试结束后仍失败的 `candidate_skipped`，都在 child 摘要形成后获得跨轮
-记忆。跳过候选不回填内容、不伪装字段无效、不增加完成计数；它只表示该来源候选已按本轮策略处理。
+记忆。小红书 `retryable=true` 的 `candidate_skipped` 只计入本轮已处理集合，不写入
+`xhs_discovery_seen_candidates`，下一轮全量扫描到时重试；`retryable=false` 的照常写入。跳过候选不回填内容、不伪装字段无效、不增加完成计数；它只表示该来源候选已按本轮策略处理。
 操作人若需在请求前阻止精确候选，可另写排除表；排除同样不增加完成计数。进程在写出候选级决定性
 事件前崩溃的候选不会被提前标记；已写出的 `candidate_skipped` 只有在所属批次完整时才随分页证据
 提交，未完成尾批仍允许保守重取。两套表的作用域不同：通用平台按 job 与查询
@@ -351,40 +377,41 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 
 “字段无效”必须已有决定性来源证据。B站 article、微博长文、小红书笔记和知乎 answer/article
 的详情请求、空响应或解析失败先完成平台规定的有限重试；仍失败即记录 `candidate_skipped` 并写入候选
-记忆，失败页可在批次完整后推进，但该 ID 永远不进入有效内容集合。登录、验证码、安全限制、频控、
+记忆（小红书 `retryable=true` 的只计入本轮已处理集合，下一轮重试），失败页可在批次完整后推进，但该 ID 永远不进入有效内容集合。登录、验证码、安全限制、频控、
 搜索请求失败或浏览器整体故障仍是运行级失败，不得按候选跳过。数据库已有 ID 的历史内容修复仍必须
 走平台文档定义的独立流程。
 
 首次执行从来源第一页开始，不做顶部刷新。每个完整前沿批次把下一页写入状态事件；抖音还必须
-同时写入下一 offset 和响应 search ID，小红书保存本次搜索使用的 client search ID。对应根执行器
+同时写入下一 offset 和响应 search ID。小红书每轮在首页搜索后从顶部全量滚到 `has_more=false`，不保存
+前沿与 search ID。对应根执行器
 在 child 摘要形成后才把状态事件提交到 SQLite，不得由底层循环提前推进数据库游标。中途停止的
 批次保存当前请求位置，下一次允许重取该批次，依靠已知 ID 提前去重；这样可以重复少量边界
-数据，但不能跳过未持久化候选。小红书只有在 child 摘要形成后才把本轮候选 ID 与前沿一起提交；
+数据，但不能跳过未持久化候选。小红书只有在 child 摘要形成后才提交本轮候选 ID 与累计摘要；
 视频、已有决定性证据的字段无效项、结构有效候选（含主题不相关）和 `candidate_skipped` 都会获得发现记忆。进程在候选级
 决定性事件或摘要形成前崩溃的候选不会被提前标记为已处理。
 
 存在 checkpoint 时，runner 自动把保存位置传给 child；有未完成累计摘要时再传入上一份
-`summary.json`。child 先刷新
+`summary.json`。顶部刷新仅限通用平台（小红书没有保存位置，每轮全量重滚）：child 先刷新
 配置的 `top_refresh_max_pages` 个顶部页面，再从保存前沿继续。顶部刷新用于发现新近发布内容，
 不推进深层 checkpoint；已知 ID 在详情、粉丝和媒体处理前跳过。深层批次
 完整结束才推进到下一页；抖音恢复命令必须同时包含 `--start-page`、`--start-offset` 和非空
-`--start-cursor`，小红书深页恢复必须同时包含 `--start-page` 和非空 `--start-cursor`。只有
-页码没有 search ID 的请求是无效恢复。
+`--start-cursor`。只有页码没有 search ID 的请求是无效恢复。
 
 运行级阻断或未取得停止证据的产物不单独入库。runner 保存安全摘要引用，下一次将历史与本次
 JSONL 合并校验并从最后完整前沿继续；只有取得可验证耗尽证据后，才把累计中全部结构有效记录
-（含主题不相关记录）一次性原子入库并清空累计摘要。checkpoint 本身保留，供下一次定时任务先刷新
-顶部，再判断是否出现新的来源链。运行错误仍按重试策略处理。
+（含主题不相关记录）一次性原子入库并清空累计摘要。checkpoint 本身保留；通用平台供下一次定时任务
+先刷新顶部，再判断是否出现新的来源链，小红书下一轮仍全量重滚。运行错误仍按重试策略处理。
 
-`source_exhausted` checkpoint 默认不再盲目请求原深页，只执行顶部刷新。抖音的耗尽只证明旧
+通用平台的 `source_exhausted` checkpoint 默认不再盲目请求原深页，只执行顶部刷新；小红书耗尽后与
+其他轮相同，全量重滚。抖音的耗尽只证明旧
 search ID 游标链结束：若顶部刷新同时观察到至少一个不在数据库、累计摘要或持久候选集合中的
 新候选 ID、最新响应 `has_more=true`
 且带非空下一 search ID，child 必须记录 `discovery_frontier_reseeded`，从该刷新链的下一组三元组
 建立新前沿并替换旧耗尽 checkpoint；任一条件缺失时保持耗尽，只做顶部刷新，避免每轮盲扫旧结果。
 来源重新出现未知内容时仍可累计。`--no-import` 诊断自动禁用 checkpoint 写入。通用 runner 的显式 `--resume-summary`、
 `--start-page` 和 `--recovery-keyword` 仅用于人工恢复，不是正常 workflow；使用显式参数时调度器
-不自动混入旧 checkpoint。小红书不开放这些人工恢复参数，全部由独立 runner 从账号级 checkpoint
-生成；换号产生独立记忆，不得解释为同一正式轮次续跑。旧 `search_id` 恢复失败时必须保留原
+不自动混入旧 checkpoint。小红书不开放这些人工恢复参数，也没有可恢复的位置，账号级 checkpoint
+只保存停止审计与累计摘要；换号产生独立记忆，不得解释为同一正式轮次续跑。旧 `search_id` 恢复失败时必须保留原
 checkpoint 并按 `runtime_failed` 停止，不得静默生成新 ID 请求猜测的深页。
 
 ## 正文图片摘要与错误契约

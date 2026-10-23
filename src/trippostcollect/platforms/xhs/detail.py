@@ -19,157 +19,18 @@
 
 # TripPostCollect：T09 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-"""笔记详情：API → HTML 回退、并发信号量与指定笔记（含历史修复显式分支）。"""
+"""指定笔记只经 repair：直开保存的链接并读取页面状态（repair.py）。"""
 
-import asyncio
-import logging
-from typing import Dict, Optional
-
-from tenacity import RetryError
-
-from trippostcollect.platforms.xhs.errors import (
-    DataFetchError,
-    IPBlockError,
-    NoteNotFoundError,
-    XHSNoteDetailUnavailable,
-)
-from trippostcollect.platforms.xhs.models import NoteUrlInfo
-from trippostcollect.platforms.xhs.parser import parse_note_info_from_note_url
 from trippostcollect.platforms.xhs.repair import run_xhs_repair
-
-logger = logging.getLogger("MediaCrawler")
 
 
 class XhsDetailMixin:
-    """笔记详情；作为 XiaoHongShuCrawler 的 mixin，方法体逐字迁入。"""
+    """指定笔记；作为 XiaoHongShuCrawler 的 mixin。"""
 
     async def get_specified_notes(self):
-        """Get the information and comments of the specified post
-
-        Note: Must specify note_id, xsec_source, xsec_token
-        """
-        if self.ports.repair:
-            # 修复开关在 install_hooks 时点读取并经装配传入；显式分支取代旧桥对类方法的替换。
-            return await run_xhs_repair(self)
-        get_note_detail_task_list = []
-        detail_semaphore = asyncio.Semaphore(self.settings.MAX_CONCURRENCY_NUM)
-        for full_note_url in self.settings.XHS_SPECIFIED_NOTE_URL_LIST:
-            note_url_info: NoteUrlInfo = parse_note_info_from_note_url(full_note_url)
-            logger.info(f"[XiaoHongShuCrawler.get_specified_notes] Parse note url info: {note_url_info}")
-            crawler_task = self.get_note_detail_async_task(
-                note_id=note_url_info.note_id,
-                xsec_source=note_url_info.xsec_source,
-                xsec_token=note_url_info.xsec_token,
-                semaphore=detail_semaphore,
-            )
-            get_note_detail_task_list.append(crawler_task)
-
-        need_get_comment_note_ids = []
-        xsec_tokens = []
-        note_details = await asyncio.gather(*get_note_detail_task_list)
-        for note_detail in note_details:
-            if note_detail:
-                if self.is_video_note(note_detail):
-                    logger.info(
-                        f"[XiaoHongShuCrawler.get_specified_notes] Skip video note, note_id: {note_detail.get('note_id')}"
-                    )
-                    continue
-                need_get_comment_note_ids.append(note_detail.get("note_id", ""))
-                xsec_tokens.append(note_detail.get("xsec_token", ""))
-                await self.enrich_note_creator(note_detail)
-                await self.update_xhs_note(note_detail)
-                await self.get_notice_media(note_detail)
-
-    async def get_note_detail_async_task(
-        self,
-        note_id: str,
-        xsec_source: str,
-        xsec_token: str,
-        semaphore: asyncio.Semaphore,
-    ) -> Optional[Dict]:
-        """Get note detail
-
-        Args:
-            note_id:
-            xsec_source:
-            xsec_token:
-            semaphore:
-
-        Returns:
-            Dict: note detail
-        """
-        note_detail = None
-        attempts = 0
-        logger.info(f"[get_note_detail_async_task] Begin get note detail, note_id: {note_id}")
-        async with semaphore:
-            try:
-                try:
-                    note_detail = await self._run_with_network_recovery(
-                        lambda: self.xhs_client.get_note_by_id(
-                            note_id,
-                            xsec_source,
-                            xsec_token,
-                        ),
-                        stage=f"note_detail_api:note={note_id}",
-                    )
-                    attempts += 1
-                except RetryError as exc:
-                    attempts += self._request_failure_attempts(exc)
-                    request_failure = self._request_failure_exception(exc)
-                    if isinstance(request_failure, IPBlockError):
-                        raise request_failure
-
-                if not note_detail:
-                    try:
-                        note_detail = await self._run_with_network_recovery(
-                            lambda: self.xhs_client.get_note_by_id_from_html(
-                                note_id,
-                                xsec_source,
-                                xsec_token,
-                                enable_cookie=True,
-                            ),
-                            stage=f"note_detail_html:note={note_id}",
-                        )
-                        attempts += 1
-                    except RetryError as exc:
-                        attempts += self._request_failure_attempts(exc)
-                        request_failure = self._request_failure_exception(exc)
-                        if isinstance(request_failure, IPBlockError):
-                            raise request_failure
-                        note_detail = None
-                    if not note_detail:
-                        logger.warning(
-                            "[XiaoHongShuCrawler.get_note_detail_async_task] "
-                            f"Detail remained unavailable after API and HTML fallback: {note_id}"
-                        )
-                        raise XHSNoteDetailUnavailable(
-                            note_id,
-                            "api_and_html_empty",
-                            attempts=max(1, attempts),
-                        )
-
-                note_detail.update({"xsec_token": xsec_token, "xsec_source": xsec_source})
-                note_detail.update(
-                    {
-                        "content_detail_status": "detail_observed",
-                        "content_detail_source": "note_detail",
-                    }
-                )
-
-                await self._guarded_pause("note_detail", 4.0, 10.0)
-
-                return note_detail
-
-            except NoteNotFoundError as ex:
-                logger.warning(f"[XiaoHongShuCrawler.get_note_detail_async_task] Note not found: {note_id}, {ex}")
-                return None
-            except DataFetchError as ex:
-                logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] Get note detail error: {ex}")
-                raise
-            except KeyError as ex:
-                logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] have not fund note detail note_id:{note_id}, err: {ex}")
-                raise XHSNoteDetailUnavailable(
-                    note_id,
-                    "detail_parse_failed",
-                    attempts=max(1, attempts),
-                ) from ex
+        """指定笔记模式：只保留 repair 分支，非 repair 的 detail 模式直接报错。"""
+        if not self.ports.repair:
+            # 经 API 取指定笔记详情的分支已删除；指定笔记只经 repair 处理。
+            raise RuntimeError("xhs_detail_mode_requires_repair")
+        # 修复开关在 install_hooks 时点读取并经装配传入；显式分支取代旧桥对类方法的替换。
+        return await run_xhs_repair(self)

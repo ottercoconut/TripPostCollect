@@ -79,11 +79,16 @@ def test_mapping_lists_every_fork_node_once_with_valid_status() -> None:
 
 
 def test_mapped_root_tests_exist() -> None:
+    """引用的根测试须存在；被后续 issue 删除的引用标 retired，写明 retired_by 与理由，不再要求函数存在。"""
     cache: dict[str, dict] = {}
     for item in MAPPING["nodes"]:
         for reference in item["root"]:
             path, _, function = reference["test"].partition("::")
             assert reference["asserts"], reference["test"]
+            if reference.get("status") == "retired":
+                assert reference["retired_by"] and reference["reason"].strip(), reference["test"]
+                continue
+            assert "status" not in reference, reference["test"]
             if path not in cache:
                 assert (ROOT / path).is_file(), reference["test"]
                 cache[path] = _test_functions(ROOT / path)

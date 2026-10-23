@@ -25,43 +25,46 @@ import asyncio
 import json
 import logging
 import os
-import re
 import time
 from typing import Dict, List, Optional
-from urllib.parse import quote
 
 from playwright.async_api import (
     BrowserContext,
-    BrowserType,
     Error as PlaywrightError,
     Page,
     Playwright,
 )
 
-from trippostcollect.core import resources
 from trippostcollect.platforms.xhs.behavior import (
     inspect_visible_page_state,
     run_required_continuity_behavior,
     run_required_request_pause,
 )
-from trippostcollect.platforms.xhs.client import (
-    is_recoverable_xhs_transport_failure,
-    unwrap_xhs_request_failure,
+from trippostcollect.platforms.xhs.capture import (
+    XHS_RULES,
+    XHS_SENTINEL,
+    XHS_VERIFY_HEADERS,
+    user_me_logged_in,
 )
 from trippostcollect.platforms.xhs.errors import (
     PlatformRuntimeError,
     XHSMainPageClosedUnexpected,
-    XHSNetworkRecoveryTimeout,
+    XHSRequestFailed,
     is_recoverable_xhs_navigation_failure,
 )
 from trippostcollect.platforms.xhs.login import XiaoHongShuLogin
 from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget
-from trippostcollect.runtime.behavior import project_browser_args
+from trippostcollect.platforms.xhs.page_scripts import STATE_SCRIPTS
+from trippostcollect.runtime.page_capture import CapturedResponse, PageCaptureChannel, route_of
+from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_path
 
 logger = logging.getLogger("MediaCrawler")
 
 
-XHS_NEW_PAGE_MIN_HOLD_SECONDS = 30.0
+# 普通新标签页从出现起的最短保留（操作人 2026-10-14 要求全面提速，#79）；作者标签页另按打开时抽到的时长延长。
+XHS_NEW_PAGE_MIN_HOLD_SECONDS = 5.0
+# 登录 UI 确认后等待前端自发的 user/me（guest=false）；超时只允许一次整页 reload。
+XHS_LOGIN_ME_CONFIRM_SECONDS = 30.0
 _XHS_MANUAL_CHECKPOINT_TEXTS = (
     "扫码登录",
     "二维码",
@@ -116,8 +119,48 @@ class XhsSessionMixin:
             )
         return self._manual_wait_budget
 
+    def _open_capture_channel(self) -> PageCaptureChannel:
+        """本轮唯一的页面取数通道与访问账本；账本与行为证据同目录，推导方式不经环境变量。"""
+        evidence_path = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()
+        if not evidence_path:
+            raise RuntimeError("xhs_visit_ledger_path_missing")
+        ledger = VisitLedger.create(
+            content_visits_path(evidence_path),
+            platform="xhs",
+            mode="repair" if self.ports.repair else "discovery",
+        )
+        return PageCaptureChannel(
+            self.browser_context,
+            platform="xhs",
+            rules=XHS_RULES,
+            ledger=ledger,
+            sentinel=XHS_SENTINEL,
+            verify_headers=XHS_VERIFY_HEADERS,
+            state_scripts=STATE_SCRIPTS,
+        )
+
+    def _require_capture(self) -> PageCaptureChannel:
+        capture = getattr(self, "capture", None)
+        if capture is None:
+            raise RuntimeError("xhs_capture_channel_missing")
+        return capture
+
+    def _close_capture_channel(self) -> None:
+        capture = getattr(self, "capture", None)
+        if capture is not None and not capture.closed:
+            capture.close()
+
+    def _set_primary_page(self, page: Page) -> None:
+        """登录状态机可能切换到有人工进展的标签页；通道角色随主页面同步。"""
+        capture = self._require_capture()
+        previous = getattr(self, "context_page", None)
+        if previous is not None and previous is not page:
+            capture.attach(previous, "new_tab")
+        self.context_page = page
+        capture.attach(page, "primary")
+
     def _install_new_page_guard(self) -> None:
-        """Protect every page appearing after browser launch for at least 30 seconds."""
+        """Protect every page appearing after browser launch for the minimum hold."""
         try:
             pages = list(self.browser_context.pages)
         except Exception:
@@ -140,11 +183,27 @@ class XhsSessionMixin:
         if page_id in self._new_pages:
             return
         opened_at = self._popup_monotonic()
-        self._new_pages[page_id] = (page, opened_at, source)
-        task = asyncio.create_task(self._hold_new_page(page, opened_at, source))
+        self._new_pages[page_id] = (page, opened_at, source, XHS_NEW_PAGE_MIN_HOLD_SECONDS)
+        task = asyncio.create_task(self._hold_new_page(page, source))
         self._new_page_guard_tasks[page_id] = task
 
-    async def _hold_new_page(self, page: Page, opened_at: float, source: str) -> None:
+    def _extend_new_page_hold(self, page: Page, seconds: float) -> None:
+        """把已登记新标签页的保留时长（从出现起计）改为 `seconds`，不短于通用最短保留。"""
+        page_id = id(page)
+        entry = self._new_pages.get(page_id)
+        if entry is None or entry[0] is not page:
+            return
+        self._new_pages[page_id] = (*entry[:3], max(XHS_NEW_PAGE_MIN_HOLD_SECONDS, float(seconds)))
+
+    def _new_page_hold_seconds(self, page: Page) -> float:
+        entry = self._new_pages.get(id(page))
+        return entry[3] if entry is not None and entry[0] is page else XHS_NEW_PAGE_MIN_HOLD_SECONDS
+
+    def _new_page_hold_remaining(self, page: Page) -> float:
+        _, opened_at, _, hold_seconds = self._new_pages[id(page)]
+        return max(0.0, hold_seconds - (self._popup_monotonic() - opened_at))
+
+    async def _hold_new_page(self, page: Page, source: str) -> None:
         """Surface any new tab and keep it alive without trying to classify it."""
         try:
             await page.bring_to_front()
@@ -153,11 +212,7 @@ class XhsSessionMixin:
                 "[XiaoHongShuCrawler] Could not bring new tab to front: "
                 f"{type(exc).__name__}: {exc}"
             )
-        remaining = max(
-            0.0,
-            XHS_NEW_PAGE_MIN_HOLD_SECONDS
-            - (self._popup_monotonic() - opened_at),
-        )
+        remaining = self._new_page_hold_remaining(page)
         logger.warning(
             "[XiaoHongShuCrawler] New browser tab opened; keeping it visible "
             f"for at least {XHS_NEW_PAGE_MIN_HOLD_SECONDS:.0f}s before any "
@@ -193,12 +248,8 @@ class XhsSessionMixin:
                     "[XiaoHongShuCrawler] New-tab guard task failed; "
                     f"enforcing remaining hold directly: {type(exc).__name__}: {exc}"
                 )
-        _, opened_at, source = self._new_pages[page_id]
-        remaining = max(
-            0.0,
-            XHS_NEW_PAGE_MIN_HOLD_SECONDS
-            - (self._popup_monotonic() - opened_at),
-        )
+        source = self._new_pages[page_id][2]
+        remaining = self._new_page_hold_remaining(page)
         if remaining > 0:
             await self._popup_sleep(remaining)
         logger.info(
@@ -210,16 +261,10 @@ class XhsSessionMixin:
     async def _wait_for_all_new_page_guards(self) -> None:
         """Drain all new-tab hold periods before Playwright or the context can close them."""
         while True:
-            guarded_pages = [
-                page
-                for page, _, _ in self._new_pages.values()
-                if not self._page_is_closed(page)
-            ]
             pending = [
                 page
-                for page in guarded_pages
-                if self._popup_monotonic() - self._new_pages[id(page)][1]
-                < XHS_NEW_PAGE_MIN_HOLD_SECONDS
+                for page, *_ in self._new_pages.values()
+                if not self._page_is_closed(page) and self._new_page_hold_remaining(page) > 0
             ]
             if not pending:
                 return
@@ -263,17 +308,30 @@ class XhsSessionMixin:
                 return
 
     async def _guarded_pause(self, stage: str, minimum: float, maximum: float) -> float:
-        event = await run_required_request_pause(stage, minimum, maximum, ports=self.ports.behavior)
+        """节奏停顿：行为证据记 request_pacing_events，账本记首尾序号与连续性结果（门禁以账本为准）。
+
+        行为证据创建之前（首个关键词的初始行为阶段之前）停顿照常执行并实时写账本，行为证据的节奏与
+        连续性事件记入 `_pending_behavior_evidence`，行为阶段写出证据后并入。
+        """
+        capture = self._require_capture()
+        pending = getattr(self, "_pending_behavior_evidence", None)
+        start_seq = capture.pause_started()
+        event = await run_required_request_pause(
+            stage, minimum, maximum, ports=self.ports.behavior, pending=pending,
+        )
         seconds = float(event["seconds"])
         logger.info(f"[XiaoHongShuCrawler] Guarded pause stage={stage} seconds={seconds:.3f}")
+        continuity_status = "n/a"
         if stage in {"search_results", "search_page"}:
             continuity = await run_required_continuity_behavior(
-                self.context_page, stage, ports=self.ports.behavior,
+                self.context_page, stage, ports=self.ports.behavior, pending=pending,
             )
+            continuity_status = "completed" if continuity.get("status") == "completed" else "failed"
             logger.info(
                 "[XiaoHongShuCrawler] Continuity behavior "
                 f"stage={stage} status={continuity.get('status')}"
             )
+        capture.pause_finished(stage, start_seq, seconds, continuity_status)
         return seconds
 
     async def _close_page_with_deadline(
@@ -290,72 +348,6 @@ class XhsSessionMixin:
                 await page.close()
         except Exception as exc:
             logger.warning(f"[XiaoHongShuCrawler] Page close did not finish cleanly: {exc}")
-
-    async def _browser_identity_headers(self) -> Dict[str, str]:
-        try:
-            async with asyncio.timeout(10):
-                identity = await self.context_page.evaluate(
-                    """() => ({
-                        webdriver: navigator.webdriver,
-                        user_agent: navigator.userAgent || '',
-                        language: navigator.language || '',
-                        platform: navigator.userAgentData
-                            ? navigator.userAgentData.platform
-                            : (navigator.platform || ''),
-                        mobile: navigator.userAgentData
-                            ? navigator.userAgentData.mobile
-                            : false,
-                        brands: navigator.userAgentData
-                            ? Array.from(navigator.userAgentData.brands || [])
-                            : [],
-                    })"""
-                )
-        except Exception as exc:
-            raise RuntimeError(f"xhs_browser_identity_unavailable:{type(exc).__name__}") from exc
-
-        user_agent = str((identity or {}).get("user_agent") or "").strip()
-        language = str((identity or {}).get("language") or "").strip()
-        platform = str((identity or {}).get("platform") or "").strip()
-        brands = (identity or {}).get("brands") or []
-        if (identity or {}).get("webdriver") is not None:
-            raise RuntimeError("xhs_browser_identity_webdriver_exposed")
-        if not user_agent or not language or not platform or not isinstance(brands, list) or not brands:
-            raise RuntimeError("xhs_browser_identity_incomplete")
-
-        ua_match = re.search(r"(?:Chrome|Chromium)/(\d+)", user_agent)
-        ua_major = ua_match.group(1) if ua_match else ""
-        normalized_brands: List[str] = []
-        chromium_major = ""
-        for item in brands:
-            if not isinstance(item, dict):
-                continue
-            brand = str(item.get("brand") or "").replace("\\", "").replace('"', "").strip()
-            version = str(item.get("version") or "").split(".", 1)[0].strip()
-            if not brand or not version:
-                continue
-            normalized_brands.append(f'"{brand}";v="{version}"')
-            if brand in {"Chromium", "Google Chrome"}:
-                chromium_major = version
-        if not normalized_brands or not ua_major or chromium_major != ua_major:
-            raise RuntimeError(
-                f"xhs_browser_identity_version_mismatch:ua={ua_major},client_hints={chromium_major}"
-            )
-
-        self.user_agent = user_agent
-        return {
-            "accept-language": language,
-            "sec-ch-ua": ", ".join(normalized_brands),
-            "sec-ch-ua-mobile": "?1" if bool((identity or {}).get("mobile")) else "?0",
-            "sec-ch-ua-platform": f'"{platform}"',
-            "user-agent": user_agent,
-        }
-
-    @staticmethod
-    def _profile_dir() -> str:
-        explicit_path = os.environ.get("TRIPPOSTCOLLECT_XHS_PROFILE_DIR", "").strip()
-        if not explicit_path:
-            raise RuntimeError("XHS requires TRIPPOSTCOLLECT_XHS_PROFILE_DIR from xhs_runner.py")
-        return os.path.abspath(os.path.expanduser(explicit_path))
 
     def _assert_primary_page_alive(self, stage: str) -> None:
         """Keep the original business page; auxiliary tabs never become primary."""
@@ -382,10 +374,10 @@ class XhsSessionMixin:
             self._assert_cdp_lifecycle_alive("behavior_primary_page_closed")
             raise XHSMainPageClosedUnexpected(stage="behavior") from exc
 
-    async def _open_behavior_search_page_on_primary_page(self, keyword: str) -> None:
-        """Navigate once; never adopt another tab after the primary page closes."""
+    async def _open_behavior_search_page_on_primary_page(self, keyword: str, *, navigate: bool = False) -> int:
+        """首页输入搜索；主页面关闭即本轮失败，不接管其他标签页。返回回车动作的序号。"""
         try:
-            await self._open_behavior_search_page(keyword)
+            return await self._enter_search_from_home(keyword, navigate=navigate)
         except Exception as exc:
             if not self._is_target_closed_error(exc):
                 raise
@@ -459,11 +451,7 @@ class XhsSessionMixin:
             visible_text, visible_markers = await inspect_visible_page_state(page)
         except Exception:
             try:
-                locator = getattr(page, "locator", None)
-                if callable(locator):
-                    visible_text = await locator("body").inner_text(timeout=2_000)
-                else:
-                    visible_text = await page.content()
+                visible_text = await page.locator("body").inner_text(timeout=2_000)
             except Exception:
                 visible_text = ""
             visible_text = " ".join(str(visible_text).split())[:2_000]
@@ -609,8 +597,8 @@ class XhsSessionMixin:
         page: Optional[Page] = None,
     ) -> bool:
         if not (
-            is_recoverable_xhs_transport_failure(exc)
-            or is_recoverable_xhs_navigation_failure(exc)
+            is_recoverable_xhs_navigation_failure(exc)
+            or (isinstance(exc, XHSRequestFailed) and exc.recoverable)
         ):
             return False
 
@@ -649,7 +637,7 @@ class XhsSessionMixin:
             await self._record_network_recovery_event(
                 stage=stage,
                 outcome="network_recovery_timeout",
-                error=f"{type(unwrap_xhs_request_failure(exc)).__name__}: {exc}",
+                error=f"{type(exc).__name__}: {exc}",
                 page=page,
             )
             return False
@@ -661,17 +649,16 @@ class XhsSessionMixin:
             minimum_delay * (2 ** min(failures - 1, 6)),
             wait_seconds - elapsed,
         )
-        nested = unwrap_xhs_request_failure(exc)
         logger.warning(
             "[XiaoHongShuCrawler] Temporary network outage; preserving the "
             "current browser session and retrying the same operation: "
-            f"stage={stage}, failure={type(nested).__name__}, "
+            f"stage={stage}, failure={type(exc).__name__}, "
             f"elapsed={elapsed:.1f}s, retry_in={delay:.1f}s"
         )
         await self._record_network_recovery_event(
             stage=stage,
             outcome="network_paused",
-            error=f"{type(nested).__name__}: {nested}"[:500],
+            error=f"{type(exc).__name__}: {exc}"[:500],
             page=page,
         )
         await self._popup_sleep(delay)
@@ -729,57 +716,64 @@ class XhsSessionMixin:
             page=operation_page,
         )
 
-    async def _run_with_network_recovery(self, operation, *, stage: str):
-        state: Dict[str, object] = {}
-        while True:
-            try:
-                result = await operation()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if not is_recoverable_xhs_transport_failure(exc):
-                    await self._abort_network_recovery(
-                        stage=stage,
-                        state=state,
-                        error=exc,
-                    )
-                    raise
-                if await self._pause_for_network_recovery(
-                    exc,
-                    stage=stage,
-                    state=state,
-                ):
-                    continue
-                started_at = float(
-                    state.get("started_at") or self._popup_monotonic()
-                )
-                raise XHSNetworkRecoveryTimeout(
-                    stage,
-                    self._popup_monotonic() - started_at,
-                ) from unwrap_xhs_request_failure(exc)
-            await self._finish_network_recovery(
-                stage=stage,
-                state=state,
-            )
-            return result
+    async def _await_logged_in_user_me(self, *, after_seq: int) -> Optional[CapturedResponse]:
+        captured = await self._require_capture().wait_for(
+            "xhs.user_me",
+            after_seq=after_seq,
+            predicate=user_me_logged_in,
+            timeout=XHS_LOGIN_ME_CONFIRM_SECONDS,
+        )
+        return captured if isinstance(captured, CapturedResponse) else None
 
-    async def _pong_with_network_recovery(self, *, stage: str) -> bool:
-        return bool(
-            await self._run_with_network_recovery(
-                self.xhs_client.pong,
-                stage=stage,
-            )
+    def _record_login_state_visit(self, captured: CapturedResponse) -> str:
+        # 只记 guest=false，不写 user_id 值。
+        return self._require_capture().record_visit(
+            captured,
+            stage="login_state",
+            subject_id=None,
+            trigger=None,
+            guest=False,
         )
 
-    async def _wait_for_midrun_login_recovery(self, keyword: Optional[str] = None) -> bool:
-        """Wait on the original page's QR; never open or adopt a login tab."""
+    async def _reload_primary_for_login_state(self) -> None:
+        """UI 已确认但前端没有自动请求 user/me 时的一次整页 reload（登录已确认后的普通刷新）。"""
+        self._require_capture().action(
+            "reload",
+            page_role="primary",
+            target={"route": route_of(str(getattr(self.context_page, "url", "") or ""))[0]},
+        )
+        await self.context_page.reload(wait_until="domcontentloaded", timeout=30_000)
+
+    async def _confirm_login_state(self, *, after_seq: int) -> str:
+        """登录 UI 稳定后，要求登录开始之后截获到 success、guest=false、user_id 非空的 user/me。"""
+        for attempt in range(2):
+            captured = await self._await_logged_in_user_me(after_seq=after_seq)
+            if captured is not None:
+                return self._record_login_state_visit(captured)
+            if attempt == 0:
+                logger.warning(
+                    "[XiaoHongShuCrawler] Signed-in UI confirmed without a guest=false "
+                    "user/me response; reloading the main page once."
+                )
+                await self._reload_primary_for_login_state()
+        raise RuntimeError("xhs_login_state_unconfirmed")
+
+    async def _wait_for_midrun_login_recovery(self) -> bool:
+        """Wait on the original page's QR; never open or adopt a login tab.
+
+        确认条件：可见 UI 恢复，且恢复开始之后截获到 guest=false 的 user/me。前端没有自动请求
+        user/me 时只允许一次主页面 reload；恢复后不导航，由调用方按当前页面继续或重置搜索会话。
+        """
         self._assert_primary_page_alive("midrun_login_recovery")
+        capture = self._require_capture()
+        recovery_seq = capture.ledger.last_seq
         budget = self._get_manual_wait_budget()
         ticket = budget.start("midrun_login_recovery")
         recovered = False
+        reloaded = False
         try:
             logger.warning(
-                "[XiaoHongShuCrawler] Xiaohongshu login expired during search; "
+                "[XiaoHongShuCrawler] Xiaohongshu login expired during the run; "
                 "waiting on the original page within the shared manual budget "
                 f"({ticket.remaining_seconds:.1f}s left) so the operator can "
                 "complete login/security verification."
@@ -791,7 +785,6 @@ class XhsSessionMixin:
 
             stage_started_elapsed = ticket.manual_elapsed_seconds
             last_print = 0.0
-            last_pong = stage_started_elapsed - 10.0
             manual_latched = False
             clear_observations = 0
             while True:
@@ -815,7 +808,7 @@ class XhsSessionMixin:
                 elif manual_latched:
                     # A blank/loading DOM is not evidence that an SMS or CAPTCHA
                     # flow completed. Require two consecutive rendered, clear
-                    # observations before probing the apparently signed-in shell.
+                    # observations before trusting the apparently signed-in shell.
                     clear_observations = (
                         clear_observations + 1 if visible_text else 0
                     )
@@ -825,24 +818,17 @@ class XhsSessionMixin:
                 )
                 profile_ui = (
                     await self._profile_ui_visible()
-                    if session_probe_allowed
+                    if session_probe_allowed and not manual_markers
                     else False
                 )
                 manual_elapsed = ticket.manual_elapsed_seconds
                 stage_elapsed = manual_elapsed - stage_started_elapsed
-                if profile_ui and manual_elapsed - last_pong >= 5.0:
+                if profile_ui:
                     ticket.raise_if_exhausted()
-                    last_pong = manual_elapsed
                     with ticket.paused():
-                        await self.xhs_client.update_cookies(
-                            browser_context=self.browser_context,
-                            urls=self.cookie_urls,
-                        )
-                        session_ready = await self._pong_with_network_recovery(
-                            stage="midrun_login_confirmation",
-                        )
+                        captured = await self._await_logged_in_user_me(after_seq=recovery_seq)
                     ticket.raise_if_exhausted()
-                    if session_ready:
+                    if captured is not None:
                         confirmed_state = await self._popup_checkpoint_state(
                             self.context_page
                         )
@@ -850,19 +836,22 @@ class XhsSessionMixin:
                             confirmed_state,
                             reason="midrun_login_recovery_confirmation",
                         )
-                        if confirmed_state.get("manual_markers") or not str(
+                        if not confirmed_state.get("manual_markers") and str(
                             confirmed_state.get("visible_text") or ""
                         ).strip():
-                            if confirmed_state.get("manual_markers"):
-                                manual_latched = True
-                            clear_observations = 0
-                            remaining = ticket.remaining_seconds
-                            if remaining <= 0:
-                                ticket.raise_if_exhausted()
-                            await self._popup_sleep(min(2.0, remaining))
-                            continue
-                        recovered = True
-                        break
+                            self._record_login_state_visit(captured)
+                            recovered = True
+                            break
+                        if confirmed_state.get("manual_markers"):
+                            manual_latched = True
+                        clear_observations = 0
+                    elif reloaded:
+                        raise RuntimeError("xhs_login_state_unconfirmed")
+                    else:
+                        reloaded = True
+                        with ticket.paused():
+                            await self._reload_primary_for_login_state()
+                        continue
 
                 if stage_elapsed - last_print >= 10.0:
                     logger.info(
@@ -882,20 +871,9 @@ class XhsSessionMixin:
 
         if not recovered:
             raise RuntimeError("xhs_midrun_login_recovery_incomplete")
-        if keyword is not None:
-            search_url = f"{self.index_url}/search_result?keyword={quote(keyword)}"
-            await self._goto_with_deadline(
-                self.context_page,
-                search_url,
-                stage="midrun_login_recovered",
-            )
-        await self.xhs_client.update_cookies(
-            browser_context=self.browser_context,
-            urls=self.cookie_urls,
-        )
         logger.info(
-            "[XiaoHongShuCrawler] Mid-run login recovery confirmed; "
-            "retrying the same search page."
+            "[XiaoHongShuCrawler] Mid-run login recovery confirmed by the "
+            "visible UI and a guest=false user/me response."
         )
         return True
 
@@ -903,39 +881,28 @@ class XhsSessionMixin:
         self,
         playwright: Playwright,
         playwright_proxy_format: Optional[Dict],
-        httpx_proxy_format: Optional[str],
     ) -> None:
         if self._browser_session_started:
             raise RuntimeError("xhs_browser_session_already_started")
         # Latch before the first await. A failed first launch must not make the
         # crawler instance reusable for a second Chrome/BrowserContext attempt.
         self._browser_session_started = True
+        # 正式小红书轮次只有一次 CDP 启动；不存在第二条启动路径。
+        if not self.settings.ENABLE_CDP_MODE:
+            raise RuntimeError("xhs_requires_cdp_mode")
 
-        if self.settings.ENABLE_CDP_MODE:
-            logger.info("[XiaoHongShuCrawler] Launching browser using CDP mode")
-            self.browser_context = await self.launch_browser_with_cdp(
-                playwright,
-                playwright_proxy_format,
-                self.user_agent,
-                headless=self.settings.CDP_HEADLESS,
-            )
-            if self.cdp_manager:
-                await self.cdp_manager.add_stealth_script()
-        else:
-            logger.info("[XiaoHongShuCrawler] Launching browser using standard mode")
-            chromium = playwright.chromium
-            self.browser_context = await self.launch_browser(
-                chromium,
-                playwright_proxy_format,
-                self.user_agent,
-                headless=self.settings.HEADLESS,
-            )
-            with resources.path("js/stealth.min.js") as stealth_path:
-                await self.browser_context.add_init_script(path=str(stealth_path))
-
+        logger.info("[XiaoHongShuCrawler] Launching browser using CDP mode")
+        self.browser_context = await self.launch_browser_with_cdp(
+            playwright,
+            playwright_proxy_format,
+            None,
+            headless=self.settings.CDP_HEADLESS,
+        )
+        # 不注入任何页面脚本：自启 Chrome 不带 --enable-automation，navigator 保持原生值。
+        self.capture = self._open_capture_channel()
         self._install_new_page_guard()
-        await self.ports.install_project_runtime_hints(self.browser_context)
-        self.context_page = await self._single_page_for_login()
+        self._set_primary_page(await self._single_page_for_login())
+        self.capture.install(self.context_page)
         await self._goto_with_deadline(
             self.context_page,
             self.explore_url,
@@ -960,74 +927,28 @@ class XhsSessionMixin:
             ):
                 raise RuntimeError("xhs_initial_explore_not_rendered")
 
-        self.xhs_client = await self.create_xhs_client(httpx_proxy_format)
-        if not await self._pong_with_network_recovery(stage="startup_login_probe"):
-            await self._run_qrcode_login()
-            await self.xhs_client.update_cookies(
-                browser_context=self.browser_context,
-                urls=self.cookie_urls,
-            )
-            if not await self._pong_with_network_recovery(
-                stage="startup_post_login_probe",
-            ):
-                raise RuntimeError(
-                    "[XiaoHongShuCrawler] Xiaohongshu login state not confirmed "
-                    "after login flow"
-                )
-        behavior_keyword = next(
-            (item.strip() for item in self.settings.KEYWORDS.split(",") if item.strip()),
-            "",
-        )
-        if behavior_keyword:
-            await self._open_behavior_search_page_on_primary_page(behavior_keyword)
-        self._assert_primary_page_alive("initial_behavior")
-        behavior_evidence = await self._run_human_behavior_on_primary_page(
-            behavior_keyword
-        )
-        if behavior_evidence.get("status") != "completed":
-            raise RuntimeError("XHS required human behavior stage did not complete")
-        await self.xhs_client.update_cookies(
-            browser_context=self.browser_context,
-            urls=self.cookie_urls,
-        )
-        if not await self._pong_with_network_recovery(
-            stage="post_behavior_login_probe",
-        ):
-            raise RuntimeError("xhs_session_not_confirmed_after_human_behavior")
+        # 临时 profile 每轮都未登录：直接进入二维码登录，再以 UI 与 user/me 共同确认。
+        await self._run_qrcode_login()
         self.crawler_type = self.settings.CRAWLER_TYPE
         if self.settings.CRAWLER_TYPE == "search":
+            # 回车、点选“图文”、收起面板、翻页停顿、初始行为阶段与回顶都在全量扫描内完成。
             await self.search()
         elif self.settings.CRAWLER_TYPE == "detail":
+            behavior_keyword = next(
+                (item.strip() for item in self.settings.KEYWORDS.split(",") if item.strip()),
+                "",
+            )
+            if behavior_keyword:
+                await self._open_behavior_search_page_on_primary_page(behavior_keyword)
+            self._assert_primary_page_alive("initial_behavior")
+            behavior_evidence = await self._run_human_behavior_on_primary_page(
+                behavior_keyword
+            )
+            if behavior_evidence.get("status") != "completed":
+                raise RuntimeError("XHS required human behavior stage did not complete")
             await self.get_specified_notes()
 
         logger.info("[XiaoHongShuCrawler.start] Xhs Crawler finished ...")
-
-    async def launch_browser(
-        self,
-        chromium: BrowserType,
-        playwright_proxy: Optional[Dict],
-        user_agent: Optional[str],
-        headless: bool = True,
-    ) -> BrowserContext:
-        """Launch browser and create browser context"""
-        logger.info("[XiaoHongShuCrawler.launch_browser] Begin create browser context ...")
-        # This class is XHS-only: its profile is a per-run isolation boundary,
-        # not optional cross-run login persistence controlled by
-        # SAVE_LOGIN_STATE.
-        user_data_dir = self._profile_dir()
-        browser_context = await chromium.launch_persistent_context(
-            user_data_dir=user_data_dir,
-            accept_downloads=True,
-            headless=headless,
-            proxy=playwright_proxy,  # type: ignore
-            viewport={
-                "width": 1920,
-                "height": 1080
-            },
-            user_agent=user_agent,
-            args=project_browser_args(),
-        )
-        return browser_context
 
     async def launch_browser_with_cdp(
         self,

@@ -19,7 +19,7 @@
 
 # TripPostCollect：T09 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-"""小红书特有行为：搜索就绪、连续性与 API 验证等待、平台限制证据、显式互动。
+"""小红书特有行为：搜索就绪、连续性与前端验证等待、平台限制证据、显式互动。
 
 原 scripts/mediacrawler_behavior.py 的小红书函数与 fork 行为桥中的小红书入口合并于此；
 证据写出与启用判定经注入端口提供，平台层不导入应用或产物实现。
@@ -33,12 +33,17 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import urlparse
 
 from playwright.async_api import Page
 
 from trippostcollect.application.contracts import XhsBehaviorPorts
-from trippostcollect.platforms.xhs.errors import XHSNetworkRecoveryTimeout
+from trippostcollect.platforms.xhs.errors import PlatformRuntimeError, XHSLoginExpired, XHSNetworkRecoveryTimeout
+from trippostcollect.platforms.xhs.page_scripts import (
+    dom_like_control_state,
+    dom_scroll_metrics,
+    dom_search_ready_counts,
+)
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.runtime import behavior as _behavior
 from trippostcollect.runtime.behavior import (
@@ -48,8 +53,10 @@ from trippostcollect.runtime.behavior import (
     visible_page_state,
 )
 from trippostcollect.runtime.helpers import utc_now
+from trippostcollect.runtime.human_pointer import Box, pointer_for
 from trippostcollect.xhs.operator_wait import OperatorWaitEpisode, current_operator_wait_signal
 from trippostcollect.runtime.human_flow import (
+    ListArea,
     human_pause,
     human_scroll,
     load_behavior_profile,
@@ -62,22 +69,106 @@ logger = logging.getLogger("MediaCrawler")
 XHS_SEARCH_READY_TIMEOUT_SECONDS = 90.0
 XHS_CONTINUITY_VERIFY_WAIT_SECONDS = 600.0
 XHS_CONTINUITY_VERIFY_POLL_SECONDS = 2.0
+# 搜索两档节奏停顿之后连续性行为的停顿（操作人 2026-10-14 要求全面提速，#79）。
+XHS_CONTINUITY_PAUSE_SECONDS = (0.8, 2.0)
 XHS_POST_INTERACTION_MODES = frozenset({"comment-scroll", "like-one", "random"})
 XHS_OPERATOR_CHALLENGES = frozenset({"captcha_or_verify", "login_required"})
-XHS_COMMENT_SELECTORS = (
-    "[class*='comments-container']",
-    "[class*='comment-list']",
-    "[id*='comment']",
-    "[class*='comment']",
-    "[aria-label*='评论']",
+# §3.8.2：461/471 之后等待验证界面出现的上限（不是人工等待），出现后转入共享人工预算。
+XHS_VERIFICATION_SURFACE_SECONDS = 30.0
+XHS_VERIFICATION_POLL_SECONDS = 1.0
+XHS_CAPTCHA_ROUTE = "/website-login/captcha"
+# 互动只在当前笔记浮层内进行（§3.4 第 8 条），选择器一律限定在 .note-detail-mask 内。
+XHS_OVERLAY_SCOPE = ".note-detail-mask"
+XHS_COMMENT_SELECTORS = tuple(
+    f"{XHS_OVERLAY_SCOPE} {selector}"
+    for selector in (
+        "[class*='comments-container']",
+        "[class*='comment-list']",
+        "[id*='comment']",
+        "[class*='comment']",
+        "[aria-label*='评论']",
+    )
 )
-XHS_LIKE_SELECTORS = (
-    ".note-detail-mask .interact-container .like-wrapper",
-    ".interact-container .like-wrapper",
-    "[class*='engage-bar'] [class*='like-wrapper']",
-    "[role='button'][aria-label*='点赞']",
-    "button[aria-label*='点赞']",
+XHS_LIKE_SELECTORS = tuple(
+    f"{XHS_OVERLAY_SCOPE} {selector}"
+    for selector in (
+        ".interact-container .like-wrapper",
+        "[class*='engage-bar'] [class*='like-wrapper']",
+        "[role='button'][aria-label*='点赞']",
+        "button[aria-label*='点赞']",
+    )
 )
+# 搜索结果页上光标与滚轮的区域：结果列表 .search-layout 与列表可见区（滚动容器可见区与视口的交集，整页滚动时为
+# 视口）的相交矩形，横纵各向内缩这一比例。目标点与滚轮落点因此离开右侧对话栏；顶部固定的搜索框区域与吸顶的标签排
+# 另由 `list_top_floor` 排除（#102）。轨迹越过目标至多 115px，小于列表宽度的 20%，不会进入对话栏。
+# 扫描滚动与行为动作共用（#88）。
+XHS_LIST_AREA_INSET = 0.2
+# 列表可见区上部不能落点的两类东西：列表顶部的标签行（scroll_metrics.top_row_rect，里有点了会重新打开“点点AI”对话栏的
+# “问点点 ai”标签，#99），以及视口顶部的固定或吸顶遮挡（top_occlusion_bottom：V16 搜索栏与吸顶后的热门筛选标签排，
+# 点中标签即带 filter_hot 重新搜索，#102）。区域、卡片可点击带与移开光标的落点的上沿都至少在两者下沿之下这么多像素。
+# 轨迹从上面经过可以（悬停无反应），落点不行。
+XHS_LIST_TOP_MARGIN_PX = 8.0
+
+
+class XhsListAreaUnavailable(RuntimeError):
+    """搜索结果页上取不到结果列表区域；行为动作不退回整个视口：行为阶段按失败处理，连续性行为跳过随机移动。"""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"xhs_list_area_unavailable:{reason}")
+        self.reason = reason
+
+
+def list_occlusion_bottom(metrics: dict[str, Any]) -> float | None:
+    """视口顶部固定或吸顶遮挡的下沿（视口纵坐标，见 page_scripts.scroll_metrics）；没有时为 None。"""
+    value = metrics.get("top_occlusion_bottom")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def list_top_floor(metrics: dict[str, Any]) -> float | None:
+    """标签行与顶部遮挡中较低的下沿加 `XHS_LIST_TOP_MARGIN_PX`（视口纵坐标）；两者都不在列表可见区内时为 None。"""
+    bottoms = []
+    rect = metrics.get("top_row_rect")
+    if isinstance(rect, dict) and float(rect.get("bottom") or 0) > float(rect.get("top") or 0):
+        bottoms.append(float(rect["bottom"]))
+    occlusion = list_occlusion_bottom(metrics)
+    if occlusion is not None:
+        bottoms.append(occlusion)
+    return max(bottoms) + XHS_LIST_TOP_MARGIN_PX if bottoms else None
+
+
+def list_area_box(metrics: dict[str, Any]) -> Box | None:
+    """scroll_metrics 的 list_rect 按 `XHS_LIST_AREA_INSET` 内缩后的区域，再去掉标签行、顶部遮挡及其下方留边以上的
+    部分（见 `list_top_floor`）；没有 list_rect 或去掉后不剩时为 None。"""
+    rect = metrics.get("list_rect")
+    if not isinstance(rect, dict):
+        return None
+    left, top, right, bottom = (float(rect.get(key) or 0) for key in ("left", "top", "right", "bottom"))
+    if right <= left or bottom <= top:
+        return None
+    inset_x = (right - left) * XHS_LIST_AREA_INSET
+    inset_y = (bottom - top) * XHS_LIST_AREA_INSET
+    area_top, area_bottom = top + inset_y, bottom - inset_y
+    floor = list_top_floor(metrics)
+    if floor is not None:
+        area_top = max(area_top, floor)
+    if area_bottom <= area_top:
+        return None
+    return Box(left + inset_x, area_top, right - left - 2 * inset_x, area_bottom - area_top)
+
+
+async def xhs_list_area(page: Page) -> ListArea:
+    """行为阶段与连续性行为在搜索结果页上的区域和列表滚动位置（布局 A 为滚动容器，布局 B 为 window）。"""
+    metrics = await dom_scroll_metrics(page)
+    box = list_area_box(metrics)
+    if box is None:
+        raise XhsListAreaUnavailable("list_not_in_view" if metrics.get("layout_present") else "search_layout_missing")
+    return ListArea(
+        box=box,
+        scroll_y=int(metrics.get("scroll_y") or 0),
+        scroll_container=str(metrics.get("scroll_container") or ""),
+    )
 
 
 async def record_xhs_platform_security_limit(
@@ -209,14 +300,7 @@ async def _wait_for_xhs_search_ready(
         try:
             async with asyncio.timeout(min(6.0, remaining)):
                 last_text, last_markers = await visible_page_state(page)
-                counts = await page.evaluate(
-                    """() => ({
-                        card_count: document.querySelectorAll(
-                            "a[href*='/explore/'], a[href*='/discovery/item/']"
-                        ).length,
-                        profile_count: document.querySelectorAll("a[href*='/user/profile/']").length,
-                    })"""
-                )
+                counts = await dom_search_ready_counts(page)
                 card_count = int((counts or {}).get("card_count") or 0)
                 profile_count = int((counts or {}).get("profile_count") or 0)
         except TimeoutError:
@@ -514,181 +598,6 @@ async def _wait_for_xhs_continuity_verification(
             )
 
 
-async def run_xhs_api_captcha_verification(
-    page: Page,
-    *,
-    evidence_path: str | Path,
-    verify_type: str,
-    verify_uuid: str,
-    verify_biz: int,
-    timeout_seconds: float | None = None,
-    poll_seconds: float | None = None,
-    write_evidence: Callable[..., Any],
-) -> dict[str, Any]:
-    path = Path(evidence_path).expanduser()
-    try:
-        evidence = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"cannot update XHS API captcha evidence: {exc}") from exc
-    if evidence.get("profile") != "xhs_guarded" or not behavior_evidence_valid(evidence):
-        raise RuntimeError("XHS API captcha verification requires completed xhs_guarded evidence")
-    if not verify_type or not verify_uuid:
-        raise RuntimeError("XHS API captcha response is missing verification identifiers")
-
-    timeout = max(
-        0.1,
-        float(
-            XHS_CONTINUITY_VERIFY_WAIT_SECONDS
-            if timeout_seconds is None
-            else timeout_seconds
-        ),
-    )
-    poll = max(
-        0.01,
-        float(
-            XHS_CONTINUITY_VERIFY_POLL_SECONDS
-            if poll_seconds is None
-            else poll_seconds
-        ),
-    )
-    redirect_url = page.url
-    captcha_url = "https://www.xiaohongshu.com/website-login/captcha?" + urlencode(
-        {
-            "redirectPath": redirect_url,
-            "verifyUuid": verify_uuid,
-            "verifyType": verify_type,
-            "verifyBiz": str(verify_biz),
-        }
-    )
-    started = time.monotonic()
-    event: dict[str, Any] = {
-        "stage": "api_captcha",
-        "started_at": utc_now(),
-        "finished_at": None,
-        "status": "waiting_for_operator",
-        "initial_challenge": "api_captcha",
-        "challenge": "api_captcha",
-        "verify_type": verify_type,
-        "verify_uuid": verify_uuid,
-        "verify_biz": verify_biz,
-        "redirect_url": redirect_url,
-        "captcha_url": captcha_url,
-        "timeout_seconds": round(timeout, 3),
-    }
-    verification_events = evidence.setdefault("operator_verification_events", [])
-    verification_events.append(event)
-    evidence["operator_verification_events"] = verification_events[-50:]
-    write_evidence(path, evidence)
-
-    try:
-        await page.goto(captcha_url, wait_until="domcontentloaded", timeout=30_000)
-        await page.bring_to_front()
-    except Exception as exc:
-        event.update(
-            {
-                "finished_at": utc_now(),
-                "status": "failed",
-                "error": f"captcha_navigation_failed:{type(exc).__name__}:{exc}",
-            }
-        )
-        evidence.update(
-            {
-                "status": "failed",
-                "challenge": "captcha_or_verify",
-                "visible_markers": {"captcha_or_verify": True},
-            }
-        )
-        write_evidence(path, evidence)
-        raise RuntimeError("xhs_api_captcha_page_unavailable") from exc
-
-    latest_text = ""
-    latest_markers: dict[str, bool] = {"captcha_or_verify": True}
-    ready_observations = 0
-    while True:
-        remaining = timeout - (time.monotonic() - started)
-        if remaining <= 0:
-            event.update(
-                {
-                    "finished_at": utc_now(),
-                    "status": "failed",
-                    "challenge": "api_captcha",
-                    "visible_markers": latest_markers,
-                    "visible_text_sample": latest_text,
-                    "elapsed_seconds": round(time.monotonic() - started, 3),
-                    "error": "operator_verification_timeout",
-                    "url": page.url,
-                }
-            )
-            evidence.update(
-                {
-                    "status": "failed",
-                    "challenge": "captcha_or_verify",
-                    "visible_markers": latest_markers,
-                    "visible_text_sample": latest_text,
-                }
-            )
-            write_evidence(path, evidence)
-            raise RuntimeError("xhs_api_captcha_verification_timeout")
-
-        await asyncio.sleep(min(poll, remaining))
-        latest_text, latest_markers = await visible_page_state(page)
-        current_url = page.url
-        visible = visible_challenge(latest_markers)
-        event.update(
-            {
-                "challenge": visible or "api_captcha",
-                "visible_markers": latest_markers,
-                "visible_text_sample": latest_text,
-                "elapsed_seconds": round(time.monotonic() - started, 3),
-                "url": current_url,
-            }
-        )
-        redirect = urlparse(redirect_url)
-        current = urlparse(current_url)
-        returned_to_redirect_route = bool(
-            current.hostname == redirect.hostname
-            and current.path.rstrip("/") == redirect.path.rstrip("/")
-        )
-        page_ready = bool(
-            "/website-login/captcha" not in current_url
-            and returned_to_redirect_route
-            and latest_text.strip()
-            and not visible
-            and not latest_markers.get("captcha_or_verify")
-            and not latest_markers.get("login_required")
-        )
-        ready_observations = ready_observations + 1 if page_ready else 0
-        event["ready_observations"] = ready_observations
-        if ready_observations >= 2:
-            event.update(
-                {
-                    "finished_at": utc_now(),
-                    "status": "completed",
-                    "challenge": "",
-                }
-            )
-            write_evidence(path, evidence)
-            return event
-        if visible and visible not in XHS_OPERATOR_CHALLENGES:
-            event.update(
-                {
-                    "finished_at": utc_now(),
-                    "status": "failed",
-                    "error": f"{visible}_during_operator_verification",
-                }
-            )
-            evidence.update(
-                {
-                    "status": "failed",
-                    "challenge": visible,
-                    "visible_markers": latest_markers,
-                    "visible_text_sample": latest_text,
-                }
-            )
-            write_evidence(path, evidence)
-            raise RuntimeError(f"{visible}_detected_during_xhs_api_captcha")
-
-
 def persist_xhs_continuity_failure(
     evidence: dict[str, Any],
     *,
@@ -735,14 +644,19 @@ async def run_xhs_continuity_behavior(
     evidence_path: str | Path,
     stage: str,
     write_evidence: Callable[..., Any],
+    pending: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """`pending` 为行为证据创建前的暂存：事件记入暂存，失败与验证等待照常写出，行为阶段后并入。"""
     path = Path(evidence_path).expanduser()
-    try:
-        evidence = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"cannot update XHS continuity evidence: {exc}") from exc
-    if evidence.get("profile") != "xhs_guarded" or not behavior_evidence_valid(evidence):
-        raise RuntimeError("XHS continuity behavior requires completed xhs_guarded evidence")
+    if pending is not None:
+        evidence = pending
+    else:
+        try:
+            evidence = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cannot update XHS continuity evidence: {exc}") from exc
+        if evidence.get("profile") != "xhs_guarded" or not behavior_evidence_valid(evidence):
+            raise RuntimeError("XHS continuity behavior requires completed xhs_guarded evidence")
 
     started_at = utc_now()
     initial_text, initial_markers = await visible_page_state(page)
@@ -779,8 +693,13 @@ async def run_xhs_continuity_behavior(
 
     events: list[dict[str, Any]] = []
     profile = load_behavior_profile("xhs_guarded", strict=True)
-    await human_pause(page, (1.5, 4.5), reason=f"continuity_{stage}", log=events)
-    await random_mouse_moves(page, profile, events)
+    await human_pause(page, XHS_CONTINUITY_PAUSE_SECONDS, reason=f"continuity_{stage}", log=events)
+    try:
+        await random_mouse_moves(page, profile, events, list_area=xhs_list_area)
+    except XhsListAreaUnavailable as exc:
+        # 随机移动只是装饰性动作：取不到列表区域（例如人工验证刚结束、列表尚未渲染）时跳过，不退回整个视口，
+        # 也不让本轮失败；页面不对由扫描自身的检查处理。
+        events.append({"event": "mouse_moves_skipped", "reason": exc.reason})
     final_text, final_markers = await visible_page_state(page)
     final_challenge = visible_challenge(final_markers)
     if final_challenge in XHS_OPERATOR_CHALLENGES:
@@ -826,7 +745,8 @@ async def run_xhs_continuity_behavior(
     continuity_events = evidence.setdefault("continuity_events", [])
     continuity_events.append(continuity)
     evidence["continuity_events"] = continuity_events[-50:]
-    write_evidence(path, evidence)
+    if pending is None:
+        write_evidence(path, evidence)
     return continuity
 
 
@@ -844,26 +764,7 @@ async def _first_visible_locator(page: Page, selectors: tuple[str, ...]):
 
 
 async def _like_control_state(locator: Any) -> dict[str, Any]:
-    return await locator.evaluate(
-        """element => {
-            const control = element.closest('button,[role="button"]') || element;
-            const className = String(control.className || element.className || '');
-            const activeDescendant = Boolean(
-                control.querySelector('[class*="liked"], [class*="active"], [data-state="active"], [aria-pressed="true"]')
-            );
-            const useElement = control.querySelector('use');
-            return {
-                aria_pressed: control.getAttribute('aria-pressed') || '',
-                aria_label: control.getAttribute('aria-label') || '',
-                title: control.getAttribute('title') || '',
-                data_state: control.getAttribute('data-state') || '',
-                class_name: className.slice(0, 240),
-                text: String(control.innerText || element.innerText || '').trim().slice(0, 120),
-                icon_ref: useElement ? (useElement.getAttribute('href') || useElement.getAttribute('xlink:href') || '') : '',
-                active_descendant: activeDescendant,
-            };
-        }"""
-    )
+    return await dom_like_control_state(locator)
 
 
 def _looks_liked(state: dict[str, Any]) -> bool:
@@ -908,7 +809,9 @@ async def _run_xhs_comment_scroll(page: Page, profile: Any, events: list[dict[st
         await human_scroll(page, profile, intent="find_comments", max_passes=1, log=events)
     if locator is None:
         return {"status": "failed", "action": "comment-scroll", "reason": "comment_container_not_found"}
-    await locator.scroll_into_view_if_needed(timeout=5_000)
+    # 用滚轮手势滚到评论区；超出上限抛 ElementNotInView，按本次互动失败处理，不退回程序滚动。
+    gestures = await pointer_for(page).scroll_into_view(locator)
+    events.append({"event": "wheel_into_view", "target": "comments", "gestures": gestures})
     await human_pause(page, (2.0, 8.0), reason="comments_arrival", log=events)
     await human_scroll(page, profile, intent="comments", max_passes=2, log=events)
     return {"status": "completed", "action": "comment-scroll", "selector": selector}
@@ -934,10 +837,16 @@ async def _run_xhs_like_once(page: Page, profile: Any, events: list[dict[str, An
             "selector": selector,
             "before": before,
         }
-    await locator.scroll_into_view_if_needed(timeout=5_000)
-    await locator.hover(timeout=3_000)
+    pointer = pointer_for(page)
+    gestures = await pointer.scroll_into_view(locator)
+    events.append({"event": "wheel_into_view", "target": "like", "gestures": gestures})
+    # 先取元素框再按轨迹移上去（悬停），停顿后原地按下。
+    plan = await pointer.plan_click(Box.from_bounding_box(await locator.bounding_box(timeout=3_000)))
+    await pointer.approach(plan)
     await human_pause(page, (1.2, 4.5), reason="before_like", log=events)
-    await locator.click(timeout=5_000, delay=REQUEST_RANDOM.randint(80, 220))
+    await pointer.settle(plan)
+    await pointer.press(plan)
+    events.append({"event": "pointer_click", "target": "like", **plan.evidence})
     await human_pause(page, (1.5, 4.0), reason="after_like", log=events)
     after = await _like_control_state(locator)
     verified = _looks_liked(after) or any(
@@ -1046,6 +955,7 @@ async def run_required_request_pause(
     maximum: float,
     *,
     ports: XhsBehaviorPorts,
+    pending: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not ports.enabled():
         raise RuntimeError("required TripPostCollect request pacing is disabled")
@@ -1055,6 +965,12 @@ async def run_required_request_pause(
     if not scripts_dir.is_dir() or not evidence_path:
         raise RuntimeError("required TripPostCollect request pacing configuration is incomplete")
 
+    if pending is not None:
+        event = await _behavior.guarded_request_sleep(
+            profile_name=profile_name, stage=stage, minimum=minimum, maximum=maximum,
+        )
+        pending.setdefault("request_pacing_events", []).append(event)
+        return event
     return await _behavior.run_guarded_request_pause(
         evidence_path=evidence_path,
         profile_name=profile_name,
@@ -1070,6 +986,7 @@ async def run_required_continuity_behavior(
     stage: str,
     *,
     ports: XhsBehaviorPorts,
+    pending: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not ports.enabled():
         raise RuntimeError("required TripPostCollect continuity behavior is disabled")
@@ -1084,35 +1001,50 @@ async def run_required_continuity_behavior(
         evidence_path=evidence_path,
         stage=stage,
         write_evidence=ports.write_evidence,
+        pending=pending,
     )
 
 
-async def run_required_api_captcha_verification(
-    page: Page,
-    *,
-    verify_type: str,
-    verify_uuid: str,
-    verify_biz: int,
-    timeout_seconds: float | None = None,
-    ports: XhsBehaviorPorts,
-) -> dict[str, Any]:
-    if not ports.enabled():
-        raise RuntimeError("required TripPostCollect API captcha verification is disabled")
-    scripts_dir = Path(os.environ.get("TRIPPOSTCOLLECT_PROJECT_SCRIPTS", "")).expanduser()
-    evidence_path = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()
-    profile_name = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_PROFILE", "").strip()
-    if not scripts_dir.is_dir() or not evidence_path or profile_name != "xhs_guarded":
-        raise RuntimeError("required TripPostCollect API captcha configuration is incomplete")
+PENDING_EVIDENCE_LISTS = ("request_pacing_events", "continuity_events", "operator_verification_events")
 
-    kwargs: dict[str, Any] = {
-        "evidence_path": evidence_path,
-        "verify_type": verify_type,
-        "verify_uuid": verify_uuid,
-        "verify_biz": verify_biz,
-    }
-    if timeout_seconds is not None:
-        kwargs["timeout_seconds"] = timeout_seconds
-    return await run_xhs_api_captcha_verification(page, **kwargs, write_evidence=ports.write_evidence)
+
+def merge_pending_behavior_evidence(pending: dict[str, Any], *, ports: XhsBehaviorPorts) -> None:
+    """行为阶段写出证据后，把之前暂存的节奏、连续性与验证事件按时间先后并入（放在已有事件之前）。"""
+    if not any(pending.get(key) for key in PENDING_EVIDENCE_LISTS):
+        return
+    path = Path(os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()).expanduser()
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot merge pending XHS behavior evidence: {exc}") from exc
+    if evidence.get("profile") != "xhs_guarded" or not behavior_evidence_valid(evidence):
+        raise RuntimeError("pending XHS behavior events require completed xhs_guarded evidence")
+    for key, limit in zip(PENDING_EVIDENCE_LISTS, (200, 50, 50)):
+        merged = [*(pending.get(key) or []), *(evidence.get(key) or [])]
+        if merged:
+            evidence[key] = merged[-limit:]
+    ports.write_evidence(path, evidence)
+
+
+def append_operator_verification_event(
+    event: dict[str, Any],
+    *,
+    ports: XhsBehaviorPorts,
+    pending: dict[str, Any] | None = None,
+) -> None:
+    """前端验证的人工等待记录；行为证据创建前记入暂存。"""
+    if pending is not None:
+        pending.setdefault("operator_verification_events", []).append(event)
+        return
+    path = Path(os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()).expanduser()
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot record XHS operator verification: {exc}") from exc
+    events = evidence.setdefault("operator_verification_events", [])
+    events.append(event)
+    evidence["operator_verification_events"] = events[-50:]
+    ports.write_evidence(path, evidence)
 
 
 async def inspect_visible_page_state(page: Page) -> tuple[str, dict[str, bool]]:
@@ -1177,9 +1109,90 @@ async def run_requested_post_interaction(
 
 
 class XhsBehaviorMixin:
-    """显式互动入口；作为 XiaoHongShuCrawler 的 mixin，方法体逐字保留。"""
+    """显式互动入口与前端验证的被动等待；作为 XiaoHongShuCrawler 的 mixin。"""
+
+    async def _verification_surface(self) -> Any:
+        """所有页面（含子 frame 路由）中出现验证界面的那一页；终态标记立即上抛，登录界面转轮中恢复。"""
+        for page in list(self.browser_context.pages):
+            if self._page_is_closed(page):
+                continue
+            state = await self._popup_checkpoint_state(page)
+            self._raise_for_terminal_popup_state(state, reason="frontend_verification")
+            markers = set(state.get("manual_markers") or [])
+            if markers == {"login_required"}:
+                raise XHSLoginExpired("frontend_verification")
+            routes = [str(getattr(page, "url", "") or "")]
+            routes.extend(str(getattr(frame, "url", "") or "") for frame in getattr(page, "frames", []) or [])
+            if markers or any(urlparse(route).path.startswith(XHS_CAPTCHA_ROUTE) for route in routes):
+                return page
+        return None
+
+    async def _wait_for_frontend_verification(
+        self,
+        *,
+        required: bool,
+        data_arrived: Callable[[], bool],
+    ) -> bool:
+        """§3.8.2 被动等待：30 秒内观察验证界面；出现则置前并在共享人工预算内等它消失。
+
+        完成条件：验证界面消失，且主页面连续两次有可见文本。规则端点（required）30 秒内既无验证界面
+        也无原数据时为运行级失败；返回是否出现过验证界面。
+        """
+        surfaced = None
+        polls = max(1, int(XHS_VERIFICATION_SURFACE_SECONDS / XHS_VERIFICATION_POLL_SECONDS))
+        for attempt in range(polls):
+            surfaced = await self._verification_surface()
+            if surfaced is not None or data_arrived():
+                break
+            if attempt + 1 < polls:
+                await self._popup_sleep(XHS_VERIFICATION_POLL_SECONDS)
+        if surfaced is None:
+            if required and not data_arrived():
+                raise PlatformRuntimeError(
+                    "XHS frontend verification did not surface", code="xhs_verification_not_surfaced",
+                )
+            return False
+        event = {"stage": "frontend_verification", "started_at": utc_now(), "status": "waiting_for_operator"}
+        ticket = self._get_manual_wait_budget().start("frontend_verification")
+        clear_observations = 0
+        try:
+            logger.warning(
+                "[XiaoHongShuCrawler] Frontend verification surfaced; waiting for the operator within the "
+                f"shared manual budget ({ticket.remaining_seconds:.1f}s left)."
+            )
+            while True:
+                ticket.raise_if_exhausted()
+                try:
+                    await surfaced.bring_to_front()
+                except Exception:
+                    pass
+                still_surfaced = await self._verification_surface()
+                primary = await self._popup_checkpoint_state(self.context_page)
+                self._raise_for_terminal_popup_state(primary, reason="frontend_verification")
+                if (
+                    still_surfaced is None
+                    and not primary.get("manual_markers")
+                    and str(primary.get("visible_text") or "").strip()
+                ):
+                    clear_observations += 1
+                    if clear_observations >= 2:
+                        break
+                else:
+                    clear_observations = 0
+                remaining = ticket.remaining_seconds
+                if remaining <= 0:
+                    ticket.raise_if_exhausted()
+                await self._popup_sleep(min(2.0, remaining))
+        finally:
+            ticket.close()
+        event.update({"status": "completed", "finished_at": utc_now()})
+        append_operator_verification_event(
+            event, ports=self.ports.behavior, pending=getattr(self, "_pending_behavior_evidence", None),
+        )
+        return True
 
     async def _maybe_run_post_interaction(self, note_detail: Dict) -> None:
+        """仅在请求了互动、本轮尚未执行且本篇有效时，在当前浮层内执行；不新开标签页、不直接打开地址。"""
         if self.post_interaction_mode == "none" or self.post_interaction_attempted:
             return
         self.post_interaction_attempted = True
@@ -1187,18 +1200,8 @@ class XhsBehaviorMixin:
         if not note_id:
             logger.warning("[XiaoHongShuCrawler] Skip requested post interaction: missing note_id")
             return
-        query = (
-            f"xsec_token={quote(str(note_detail.get('xsec_token') or ''))}"
-            f"&xsec_source={quote(str(note_detail.get('xsec_source') or 'pc_search'))}"
-        )
-        interaction_url = f"{self.index_url}/explore/{quote(note_id)}?{query}"
-        page = await self._new_guarded_page()
+        page = self.context_page
         try:
-            await self._goto_with_deadline(
-                page,
-                interaction_url,
-                stage="post_interaction",
-            )
             interaction = await run_requested_post_interaction(
                 page,
                 platform_key="xhs",
@@ -1230,9 +1233,4 @@ class XhsBehaviorMixin:
         except Exception as exc:
             logger.warning(
                 f"[XiaoHongShuCrawler] Requested post interaction failed without stopping crawl: {type(exc).__name__}: {exc}"
-            )
-        finally:
-            await self._close_page_with_deadline(
-                page,
-                reason="post_interaction_cleanup",
             )

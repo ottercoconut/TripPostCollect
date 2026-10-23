@@ -57,6 +57,12 @@ PLATFORM_REQUIRED_METRICS: dict[str, tuple[tuple[str, ...], ...]] = {
 }
 
 
+# #94（用户 2026-10-21 决定）：小红书 feed 计数为空串、登记所用搜索条目同一项明确为 0 时这一项记为 "0"，记录在此字段
+# 逐项写来源说明（计数键 → source、feed_value、search_key、search_value、search_page、search_visit）。
+INTERACT_COUNT_EVIDENCE_FIELD = "interact_count_evidence"
+SEARCH_ZERO_EVIDENCE_SOURCE = "search_results_zero"
+
+
 VIDEO_URL_RE = re.compile(r"(?i)(?:/(?:video|share/video)/\d+|\.(?:mp4|m4v|mov|webm|flv|m3u8|mpd)(?:[?#]|$))")
 
 
@@ -213,6 +219,25 @@ def published_at_for_record(record: dict[str, Any]) -> str | None:
         if parsed:
             return parsed
     return None
+
+
+def interact_count_evidence_ok(record: dict[str, Any]) -> bool:
+    """计数来源说明逐项核对：键是小红书四项计数之一、来源为搜索结果确认、记录里对应计数解析为 0、搜索访问 ID 等于
+    记录的 `content_visit_refs.search_results`；空对象或形状不对同样不通过。"""
+    evidence = record.get(INTERACT_COUNT_EVIDENCE_FIELD)
+    refs = record.get("content_visit_refs")
+    search_visit = refs.get("search_results") if isinstance(refs, dict) else None
+    if not isinstance(evidence, dict) or not evidence or not search_visit:
+        return False
+    counts = {keys[0] for keys in PLATFORM_REQUIRED_METRICS["xhs"]}
+    return all(
+        key in counts
+        and isinstance(entry, dict)
+        and entry.get("source") == SEARCH_ZERO_EVIDENCE_SOURCE
+        and parse_int(record.get(key)) == 0
+        and entry.get("search_visit") == search_visit
+        for key, entry in evidence.items()
+    )
 
 
 def merge_repair_fallback_metadata(
@@ -708,6 +733,9 @@ def validate_formal_record(
     ]
     if missing_metric_groups:
         reasons.append("missing_metrics:" + ",".join(missing_metric_groups))
+    # 带计数来源说明的记录（小红书 #94）跨轮重新校验与导入时都核到每个 0 的来源。
+    if INTERACT_COUNT_EVIDENCE_FIELD in record and not interact_count_evidence_ok(record):
+        reasons.append("interact_count_evidence_invalid")
     return {
         "valid": not reasons,
         "identity": identity,

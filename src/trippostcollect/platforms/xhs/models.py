@@ -21,29 +21,8 @@
 
 """小红书存活枚举与笔记 URL 模型；枚举值与字段保持原定义。"""
 
-from enum import Enum
 
 from pydantic import BaseModel, Field
-
-
-class SearchSortType(Enum):
-    """Search sort type"""
-    # Default
-    GENERAL = "general"
-    # Most popular
-    MOST_POPULAR = "popularity_descending"
-    # Latest
-    LATEST = "time_descending"
-
-
-class SearchNoteType(Enum):
-    """Search note type"""
-    # Default
-    ALL = 0
-    # Only video
-    VIDEO = 1
-    # Only image
-    IMAGE = 2
 
 
 class NoteUrlInfo(BaseModel):

@@ -9,7 +9,7 @@ import pytest
 from trippostcollect.platforms.xhs.errors import PlatformRuntimeError
 from trippostcollect.platforms.xhs.login import XiaoHongShuLogin
 
-from .support import XiaoHongShuCrawler, config, login_ports
+from .support import XiaoHongShuCrawler, config
 
 
 class FakePage:
@@ -92,7 +92,7 @@ async def test_unexpected_xhs_tab_is_held_and_preserved_for_login() -> None:
     assert popup.closed is False
     assert events[0] == ("front", "security-popup")
     assert events[1][0] == "sleep"
-    assert events[1][1] == pytest.approx(30.0)
+    assert events[1][1] == pytest.approx(5.0)
     assert len(events) == 2
 
 
@@ -114,13 +114,13 @@ async def test_extra_tab_present_at_guard_install_is_also_protected() -> None:
     assert crawler._new_pages[id(popup)][2] == "preexisting_extra"
     assert events == [
         ("front", "startup-security-popup"),
-        ("sleep", pytest.approx(30.0)),
+        ("sleep", pytest.approx(5.0)),
     ]
     assert popup.closed is False
 
 
 @pytest.mark.asyncio
-async def test_crawler_opened_xhs_tab_waits_30_seconds_after_failed_scroll() -> None:
+async def test_crawler_opened_xhs_tab_waits_minimum_hold_after_failed_scroll() -> None:
     events: list[tuple[str, object]] = []
     primary = FakePage("search", events)
     context = FakeContext([primary], events)
@@ -138,7 +138,7 @@ async def test_crawler_opened_xhs_tab_waits_30_seconds_after_failed_scroll() -> 
     scroll_index = events.index(("scroll_effect", False))
     sleep_index = next(index for index, event in enumerate(events) if event[0] == "sleep")
     close_index = events.index(("close", "crawler-owned"))
-    assert events[sleep_index][1] == pytest.approx(30.0)
+    assert events[sleep_index][1] == pytest.approx(5.0)
     assert scroll_index < sleep_index < close_index
     assert page.closed is True
 
@@ -160,7 +160,7 @@ async def test_xhs_context_cleanup_waits_for_unexpected_tab() -> None:
 
     sleep_index = next(index for index, event in enumerate(events) if event[0] == "sleep")
     close_index = events.index(("context_close", "context"))
-    assert events[sleep_index][1] == pytest.approx(30.0)
+    assert events[sleep_index][1] == pytest.approx(5.0)
     assert sleep_index < close_index
     assert events.index(("close", "captcha-popup")) < close_index
 
@@ -192,7 +192,6 @@ async def test_xhs_behavior_primary_page_close_is_terminal_without_adoption(
         "run_required_human_behavior",
         run_behavior,
     )
-    crawler.xhs_client = SimpleNamespace(playwright_page=original)
     crawler.cdp_manager = SimpleNamespace(assert_alive=lifecycle_stages.append)
     crawler.launch_browser_with_cdp = AsyncMock(
         side_effect=AssertionError("must not relaunch Chrome")
@@ -205,7 +204,6 @@ async def test_xhs_behavior_primary_page_close_is_terminal_without_adoption(
     assert calls == [original]
     assert lifecycle_stages == ["behavior_primary_page_closed"]
     assert crawler.context_page is original
-    assert crawler.xhs_client.playwright_page is original
     assert replacement.closed is False
     crawler.launch_browser_with_cdp.assert_not_awaited()
 
@@ -219,8 +217,7 @@ async def test_xhs_search_navigation_primary_page_close_is_terminal_without_retr
     crawler = XiaoHongShuCrawler()
     crawler.browser_context = context
     crawler.context_page = original
-    crawler.xhs_client = SimpleNamespace(playwright_page=original)
-    crawler._open_behavior_search_page = AsyncMock(
+    crawler._enter_search_from_home = AsyncMock(
         side_effect=RuntimeError(
             "TargetClosedError: Target page, context or browser has been closed"
         )
@@ -235,9 +232,8 @@ async def test_xhs_search_navigation_primary_page_close_is_terminal_without_retr
     assert str(exc_info.value) == (
         "xhs_main_page_closed_unexpected:stage=search_navigation"
     )
-    crawler._open_behavior_search_page.assert_awaited_once_with("青岛旅游")
+    crawler._enter_search_from_home.assert_awaited_once_with("青岛旅游", navigate=False)
     assert crawler.context_page is original
-    assert crawler.xhs_client.playwright_page is original
     assert replacement.closed is False
     crawler.launch_browser_with_cdp.assert_not_awaited()
 
@@ -250,7 +246,7 @@ async def test_xhs_search_navigation_network_error_is_not_mislabeled_page_close(
     crawler.browser_context = FakeContext([primary], events)
     crawler.context_page = primary
     network_error = RuntimeError("net::ERR_INTERNET_DISCONNECTED")
-    crawler._open_behavior_search_page = AsyncMock(side_effect=network_error)
+    crawler._enter_search_from_home = AsyncMock(side_effect=network_error)
     crawler._assert_cdp_lifecycle_alive = AsyncMock(
         side_effect=AssertionError("network errors are not page-close lifecycle events")
     )
@@ -259,7 +255,7 @@ async def test_xhs_search_navigation_network_error_is_not_mislabeled_page_close(
         await crawler._open_behavior_search_page_on_primary_page("青岛旅游")
 
     assert exc_info.value is network_error
-    crawler._open_behavior_search_page.assert_awaited_once_with("青岛旅游")
+    crawler._enter_search_from_home.assert_awaited_once_with("青岛旅游", navigate=False)
     crawler._assert_cdp_lifecycle_alive.assert_not_awaited()
 
 
@@ -280,7 +276,6 @@ async def test_standalone_xhs_login_preserves_extra_verification_tab(
         login_type="qrcode",
         browser_context=context,
         context_page=primary,
-        ports=login_ports,
     )
 
     selected = await login._single_login_page()
@@ -319,19 +314,15 @@ async def test_standalone_xhs_login_stops_on_platform_security_limit() -> None:
         async def is_visible(self, selector: str, timeout: int) -> bool:
             return True
 
-        async def content(self) -> str:
-            return ""
-
     page = SecurityLimitPage()
     login = XiaoHongShuLogin(
         login_type="qrcode",
         browser_context=SimpleNamespace(pages=[page]),
         context_page=page,
-        ports=login_ports,
     )
 
     with pytest.raises(PlatformRuntimeError) as exc_info:
-        await login._check_login_state_once("")
+        await login._check_login_state_once()
 
     assert exc_info.value.code == "xhs_login_error_page"
 
@@ -379,9 +370,7 @@ async def test_cdp_launch_failure_never_starts_standard_fallback(monkeypatch) ->
     )
     playwright = SimpleNamespace(chromium=chromium)
     crawler = XiaoHongShuCrawler()
-    crawler.launch_browser = AsyncMock(
-        side_effect=AssertionError("standard fallback launched")
-    )
+    assert not hasattr(crawler, "launch_browser")
     monkeypatch.setattr(
         crawler.ports,
         "browser_manager_factory",
@@ -402,7 +391,6 @@ async def test_cdp_launch_failure_never_starts_standard_fallback(monkeypatch) ->
     assert len(instances) == 1
     assert cleanup_calls == [True]
     assert crawler.cdp_manager is None
-    crawler.launch_browser.assert_not_awaited()
     chromium.launch.assert_not_awaited()
     chromium.launch_persistent_context.assert_not_awaited()
 
@@ -424,10 +412,10 @@ async def test_browser_session_latch_prevents_concurrent_second_launch(
     monkeypatch.setattr(config, "ENABLE_CDP_MODE", True)
     playwright = SimpleNamespace(chromium=SimpleNamespace())
 
-    first = asyncio.create_task(crawler._run_browser_session(playwright, None, None))
+    first = asyncio.create_task(crawler._run_browser_session(playwright, None))
     await asyncio.wait_for(launch_entered.wait(), timeout=0.2)
     with pytest.raises(RuntimeError, match=r"^xhs_browser_session_already_started$"):
-        await crawler._run_browser_session(playwright, None, None)
+        await crawler._run_browser_session(playwright, None)
 
     release_launch.set()
     with pytest.raises(RuntimeError, match="first launch failed"):
@@ -449,8 +437,48 @@ async def test_failed_browser_session_cannot_be_restarted_sequentially(
     playwright = SimpleNamespace(chromium=SimpleNamespace())
 
     with pytest.raises(RuntimeError, match="first launch failed"):
-        await crawler._run_browser_session(playwright, None, None)
+        await crawler._run_browser_session(playwright, None)
     with pytest.raises(RuntimeError, match=r"^xhs_browser_session_already_started$"):
-        await crawler._run_browser_session(playwright, None, None)
+        await crawler._run_browser_session(playwright, None)
 
     crawler.launch_browser_with_cdp.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_non_cdp_settings_fail_before_any_browser_launch(monkeypatch) -> None:
+    crawler = XiaoHongShuCrawler()
+    crawler.launch_browser_with_cdp = AsyncMock(side_effect=AssertionError("must not launch"))
+    monkeypatch.setattr(config, "ENABLE_CDP_MODE", False)
+    playwright = SimpleNamespace(chromium=SimpleNamespace())
+
+    with pytest.raises(RuntimeError, match=r"^xhs_requires_cdp_mode$"):
+        await crawler._run_browser_session(playwright, None)
+
+    crawler.launch_browser_with_cdp.assert_not_awaited()
+    assert crawler._browser_session_started is True
+
+
+@pytest.mark.asyncio
+async def test_popup_seams_are_instance_attributes() -> None:
+    """自 T09 迁入：预算与新页守卫都经实例级 _popup_monotonic/_popup_sleep 计时。"""
+    events: list[tuple[str, object]] = []
+    crawler = XiaoHongShuCrawler()
+    slept: list[float] = []
+    clock = [5000.0]
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock[0] += seconds
+
+    crawler._popup_sleep = fake_sleep
+    crawler._popup_monotonic = lambda: clock[0]
+    assert crawler._get_manual_wait_budget().now() == 5000.0
+    assert crawler._get_manual_wait_budget() is crawler._get_manual_wait_budget()
+    page = FakePage("explore/popup-ad", events)
+    crawler._register_new_page(page, source="platform_opened")
+    clock[0] += 3.0
+    await crawler._close_page_with_deadline(page, reason="unit")
+    # 守卫从登记时刻计 5 秒；剩余 2 秒经实例级 _popup_sleep 等待，关闭不早于 5 秒。
+    assert slept == [2.0]
+    assert page.closed and clock[0] == 5005.0
+    assert ("front", "explore/popup-ad") in events

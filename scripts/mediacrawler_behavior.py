@@ -46,6 +46,7 @@ from trippostcollect.platforms.xhs.behavior import (  # noqa: E402
     XHS_COMMENT_SELECTORS as XHS_COMMENT_SELECTORS,
     XHS_LIKE_SELECTORS as XHS_LIKE_SELECTORS,
     wait_for_xhs_search_ready as wait_for_xhs_search_ready,
+    xhs_list_area as xhs_list_area,
     _first_visible_locator as _first_visible_locator,
     _like_control_state as _like_control_state,
     _looks_liked as _looks_liked,
@@ -56,15 +57,15 @@ from trippostcollect.platforms.xhs.behavior import (  # noqa: E402
 
 record_xhs_platform_security_limit = partial(_xhs_behavior.record_xhs_platform_security_limit, write_evidence=write_evidence)
 wait_for_xhs_continuity_verification = partial(_xhs_behavior.wait_for_xhs_continuity_verification, write_evidence=write_evidence)
-run_xhs_api_captcha_verification = partial(_xhs_behavior.run_xhs_api_captcha_verification, write_evidence=write_evidence)
 persist_xhs_continuity_failure = partial(_xhs_behavior.persist_xhs_continuity_failure, write_evidence=write_evidence)
 run_xhs_continuity_behavior = partial(_xhs_behavior.run_xhs_continuity_behavior, write_evidence=write_evidence)
 run_xhs_post_interaction = partial(_xhs_behavior.run_xhs_post_interaction, write_evidence=write_evidence)
 
 
 async def run_page_behavior(*args, **kwargs):
-    """为旧入口注入小红书等待与证据出口。"""
+    """为旧入口注入小红书等待、结果列表区域与证据出口。"""
     kwargs.setdefault("xhs_search_ready", wait_for_xhs_search_ready)
+    kwargs.setdefault("xhs_list_area", xhs_list_area)
     kwargs.setdefault("write_evidence", write_evidence)
     return await _behavior.run_page_behavior(*args, **kwargs)
 

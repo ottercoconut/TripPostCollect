@@ -36,6 +36,11 @@ class AdaptiveAccumulator:
     stop_detail: str = ""
     skipped_candidate_failures: list[dict[str, Any]] = field(default_factory=list)
     skipped_candidate_identities: set[str] = field(default_factory=set)
+    # 为 False 时，可重试的候选失败只算本轮已决定，不进入跨轮记忆，下一轮全量扫描时就地重试。
+    persist_retryable_skips: bool = True
+    run_only_skipped_identities: set[str] = field(default_factory=set)
+    # 来源耗尽停止事件指向的访问账本行（仅受访问门禁约束的平台提供）。
+    last_source_visit_id: str | None = None
     _batch_new_before: int = 0
     _batch_candidate_before: int = 0
     event_sink: Callable[[str, dict[str, Any]], None] = field(
@@ -43,13 +48,20 @@ class AdaptiveAccumulator:
     )
 
     @classmethod
-    def for_platform(cls, platform: str, *, existing_identities: set[str]) -> "AdaptiveAccumulator":
+    def for_platform(
+        cls,
+        platform: str,
+        *,
+        existing_identities: set[str],
+        persist_retryable_skips: bool = True,
+    ) -> "AdaptiveAccumulator":
         return cls(
             platform=platform,
             stagnation_basis=(
                 "candidate_identity" if platform == "weibo" else "valid_new"
             ),
             existing_identities=existing_identities,
+            persist_retryable_skips=persist_retryable_skips,
         )
 
     @property
@@ -72,6 +84,7 @@ class AdaptiveAccumulator:
                 identity in self.existing_identities
                 or identity in self.seen_candidate_identities
                 or identity in self.skipped_candidate_identities
+                or identity in self.run_only_skipped_identities
             )
         )
 
@@ -123,7 +136,9 @@ class AdaptiveAccumulator:
             else bool(retryable)
         )
         self.skipped_candidate_failures.append(failure)
-        if identity:
+        if identity and failure["retryable"] and not self.persist_retryable_skips:
+            self.run_only_skipped_identities.add(identity)
+        elif identity:
             self.skipped_candidate_identities.add(identity)
             self.seen_candidate_identities.add(identity)
         self.event_sink("candidate_skipped", failure)
@@ -241,7 +256,9 @@ class AdaptiveAccumulator:
         resume_cursor: int | str | None = None,
         batch_complete: bool = True,
         discovery_phase: str = "frontier",
+        source_visit_id: str | None = None,
     ) -> None:
+        self.last_source_visit_id = source_visit_id
         self._record_source(
             source_page=source_page,
             source_offset=source_offset,
@@ -317,6 +334,8 @@ class AdaptiveAccumulator:
             self.skipped_candidate_failures
         )
         result["candidate_identities"] = sorted(self.seen_candidate_identities)
+        if self.last_source_visit_id:
+            result["source_visit_id"] = self.last_source_visit_id
         return result
 
 

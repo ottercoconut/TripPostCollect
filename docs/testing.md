@@ -68,20 +68,41 @@ python tests/run_lanes.py \
 缺能力或依赖返回非零。counts 区分 collected、selected、deselected、passed、failed、errors、
 skipped、xfailed、xpassed。空收集、skip、xfail、xpass 不可作为通过；
 result.json 将其他 lane 标记为“未运行”，未产生计数时为 null，不能算作零失败通过。
+
+每个用例有 300 秒执行上限（`tests/conftest.py` 的 `per_test_watchdog`，#105）：超时即在当前执行位置抛
+`TimeoutError`，卡住的用例以失败结束，counts.json 的 failure_diagnostics 给出用例与行号，避免整个 lane
+卡到工作流的 45 分钟上限被取消而没有任何定位信息。上限只在主线程、支持 SIGALRM 的平台上生效。
 父级预检失败可能尚无 XML，命令非零本身就是不可验收，不能仅靠 XML 是否存在判断成功。
 
 | lane | 选择表达式 | 执行边界 |
 |---|---|---|
-| component | not macos_process and not local_socket and not installation | macOS Seatbelt allow-default，保留动态库/Python 运行时能力；显式禁止凭证/生产数据访问、临时目录外写入、IP 网络、AF_UNIX bind、浏览器执行 |
+| component | not macos_process and not local_socket and not installation and not browser_replay | macOS Seatbelt allow-default，保留动态库/Python 运行时能力；显式禁止凭证/生产数据访问、临时目录外写入、IP 网络、AF_UNIX bind、浏览器执行 |
 | socket | local_socket | 同上；仅增加本轮输出 t/ 下 AF_UNIX bind；先检查目录外 bind、TCP 被拒绝 |
 | installation | installation | 同组件隔离；真实导入根依赖与 CLI，保留 run-ID 格式断言 |
-| os | macos_process | 独立 GitHub 托管 macOS VM，外部网络/浏览器策略；真实枚举、身份、组与 profile 预检 |
+| os | macos_process or browser_replay | 独立 GitHub 托管 macOS VM，外部网络/浏览器策略；真实枚举、身份、组与 profile 预检；`browser_replay` 用本地 Chromium headless shell 离线回放 |
 
 asyncio 插件在禁用自动加载后显式加载。进程信号用例通过 support/signal_driver.py 在独立
 pytest driver 执行原函数全部断言，父进程检查退出码和临时 XML；不再向主 pytest 发真实信号。
 主 pytest 与 signal driver 都显式加载独立 execution_guard 插件；driver 使用独立计数与守卫报告，
 不会覆盖父进程 counts。subprocess/exec 的 canary 使用不存在的浏览器/open/osascript 路径，
 只有守卫实际拒绝才通过，不启动真实浏览器。
+
+`browser_replay` 用例（`tests/platforms/xhs/test_xhs_browser_replay.py`）只在 OS lane 执行：
+
+- 浏览器是 Playwright 管理的 Chromium headless shell，只用于测试；正式运行仍用 Chrome for Testing。工作流在
+  联网的准备阶段用 `python -m playwright install --only-shell chromium` 装到
+  `PLAYWRIGHT_BROWSERS_PATH=$TPC_WORK/pw-browsers`；`run_matrix.py` 只给 OS lane 传该路径与
+  `TPC_BROWSER_REPLAY=1`，`native_macos.py:run_isolated` 再把这两项交给测试进程。
+- 非 darwin、没有 `TPC_BROWSER_REPLAY=1` 或找不到 headless shell 时用例跳过（标记级 `skipif`，不在收集期
+  跳过）；component lane 按标记直接排除，OS lane 不接受 skip，因此缺浏览器会使 OS lane 失败。
+- 执行路径：Python 只启动 Playwright driver（node），浏览器由 driver 拉起，两者经管道通信。执行守卫的
+  canary 不变，Python 侧直接拉起浏览器仍被拒绝；driver 拉起浏览器不经 Python 审计钩子，只在没有
+  Seatbelt 浏览器执行限制的 OS lane 发生。OS lane 的 PF 阻断全部 IP 网络（含回环），不影响管道。
+- 页面的全部请求由 `context.route("**/*")` 交给离线站点 `tests/support/xhs_offline_site/` 用 fixture
+  回应或拒绝，用例结束时断言没有任何请求逃逸路由。离线站点按 V1、V16、R2 定值建模搜索界面、虚拟列表、
+  笔记浮层、作者页与验证层，按 Mac 人工侦察建模 AI 对话布局及关闭对话栏后的 V16 布局（关闭按钮、续页、标签行与
+  “问点点 ai”标签，#99；固定页头与滚动后吸顶的热门筛选标签排，点标签带 filter_hot 重新搜索，另可注入一次误点后的
+  这种搜索，#102），站点自带的 JS 是假站点自身的前端，不是项目注入的脚本。
 
 ## 一次性托管 macOS CI
 
@@ -107,7 +128,8 @@ checkout 不保留认证信息。依赖准备阶段联网；根环境使用 `uv 
 进程、信号和 socket 调用均使用替身，不启动真实浏览器或进程。
 微博的 4 个测试文件、24 个用例已迁入根 `tests/platforms/weibo/`，归入 component lane。
 抖音的 4 个测试文件、41 个用例已迁入根 `tests/platforms/douyin/`，归入 component lane。
-小红书的 15 个测试文件已迁入根 `tests/platforms/xhs/`，共 249 个用例，归入 component lane。
+小红书测试在根 `tests/platforms/xhs/`（fork 移植时为 15 个文件、249 个用例），#71 后为 18 个文件、389 个用例：
+386 个归入 component lane，`test_xhs_browser_replay.py` 的 3 个归入 OS lane。
 CI 显式 setup-node；执行 PATH 保留检测到的 Node 目录、/usr/local/bin 与 /opt/homebrew/bin。
 B站正式 article 的行为仍由根项目测试覆盖，上游 video 主循环不作为替代。
 

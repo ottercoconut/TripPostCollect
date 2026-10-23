@@ -34,6 +34,11 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 只读管理端属于同级独立项目 `../TripPostAdmin`；本仓库不再包含管理端 API、Web、Docker 或管理端
   读模型，也不得让管理端导入采集包。两者只通过 SQLite schema、只读配置及媒体/证据文件契约协作。
 - `published_at` 必须来自平台原始发帖时间，入库保存为 Asia/Shanghai ISO；不要用抓取时间冒充发帖时间。
+- Playwright `page.request` / `context.request`（L3）对所有平台禁止。已纳入访问门禁的平台只能经页面取数
+  通道取得平台数据，浏览器外 HTTP 客户端只可用于平台文档登记的例外；尚未纳入门禁的平台维持现状，直到
+  各自的改造批次。小红书取数只能来自本轮页面自身请求的被动截获响应或页面状态（L1），不得在页面内主动
+  请求（L2），也没有浏览器外 HTTP 客户端的例外。每条入库记录须经 `content_visit_ok` 追溯到真实访问；
+  分级与规则见 `docs/formal-crawl-contract.md` 的“取数来源与真实访问门禁”。
 - 通用正式任务从 `scripts/crawl_runner.py` 进入；小红书的正式抓取与轮内扫码登录只从
   `scripts/xhs_runner.py` 进入，禁止放回通用 job、warmup 或独立登录流程。`xhs_accounts.py` 只管理
   非秘密逻辑槽位与精确租约，不保存平台登录态。
@@ -45,12 +50,13 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
   遇到运行级阻断。数量目标、候选硬上限和停滞停止条件均已删除；旧配置字段和旧 CLI 参数直接
   视为错误，不保留兼容层。`required_fields_profile`、行为/策略、正文图片和 SQLite 持久化门禁仍然
   全部生效。
-- 五个正式结构化搜索平台都由 runner 自动维护 SQLite 抓取记忆：首次从第一页开始，续跑先有限刷新顶部再恢复深层前沿；正常 workflow 不手工传页码、摘要或游标。通用平台按 job 与查询指纹保存安全前沿、有效累计摘要和所有已处理候选 ID；小红书使用独立表并额外按人工指定账号隔离所有已处理候选 ID。
+- 五个正式结构化搜索平台都由 runner 自动维护 SQLite 抓取记忆；正常 workflow 不手工传页码、摘要或游标。通用平台首次从第一页开始，续跑先有限刷新顶部再恢复深层前沿，按 job 与查询指纹保存安全前沿、有效累计摘要和所有已处理候选 ID。小红书每轮在首页搜索后从顶部滚到 `has_more=false`，已处理 ID 只滑过，不保存深层位置，也不做顶部刷新；独立表按目标、账号和查询指纹保存已处理 ID 与累计摘要。
 - 每个小红书正式轮次创建空的临时 profile 并要求人工扫码，不读取或保存跨轮登录态。轮初纯未扫码
   页面明确显示二维码过期时，只允许在连续两次确认仍无登录进展后点击二维码组件内的刷新控件；新
   二维码出现后重新计算 180 秒整页 reload 下限。未过期二维码所在页面至少等待 180 秒才允许 reload。
   一旦观察到已扫码、手机确认、验证码或安全验证状态，本轮登录等待即锁存，两种刷新都禁用，人工
-  处理总预算为 600 秒。普通新标签页至少保留 30 秒，登录或验证标签页必须置前并最长保留 600 秒。
+  处理总预算为 600 秒。作者标签页从出现起随机保留 5–9 秒，其他普通新标签页至少保留 5 秒，登录或验证
+  标签页必须置前并最长保留 600 秒。
 - 一个小红书正式轮次只允许一个临时 profile、一次 Chrome 启动和一个 BrowserContext；登录、验证
   或业务阶段不得轮内重启浏览器。初始 CDP 启动失败，或运行中 page/context/browser 被关闭时直接让
   本轮失败，不得 fallback 到第二个浏览器。`--retry-on-300011` 只能在上轮精确清理后启动新的正式
@@ -132,7 +138,8 @@ python scripts/crawl_runner.py \
   不得把小红书放入通用 runner、warmup、benchmark 或中途自动换号。
 - 登录、Chrome、阻断恢复：读 `docs/operations-runbook.md`；通用入口是 `scripts/login_warmup.py`，小红书不得使用该入口。
 - 结构化平台实现：读 `docs/platforms/<platform>.md`、`src/trippostcollect/platforms/<platform>/` 和
-  `scripts/mediacrawler_crawl.py` 薄入口；平台适配规则见 `docs/platform-adapters.md`。
+  `scripts/mediacrawler_crawl.py` 薄入口；取数来源与访问门禁见 `docs/formal-crawl-contract.md#取数来源与真实访问门禁`，
+  平台差异见 `docs/platforms/<platform>.md`。
 - 页面证据抓取和导入：读 `docs/platforms/page-evidence.md`、`docs/data-persistence.md`、
   `scripts/ctf_resource_crawl.py`、`scripts/import_ctf_captures.py`。当前正式配置没有页面证据任务；
   直接运行只用于开发或诊断，且其独立 profile 不由 `scripts/login_warmup.py` 验证。以后若新增
@@ -144,6 +151,7 @@ python scripts/crawl_runner.py \
 
 - Python 脚本改动后先 `source .venv/bin/activate`，再运行 `python -m py_compile <touched files>`。
 - Python 行为改动运行 `python -m pytest`；静态检查按需运行 `python -m ruff check <touched files>`。
+- 已纳入访问门禁的平台改动后须通过 `tests/test_fetch_boundary.py`。
 - JSON 配置改动后先 `source .venv/bin/activate`，再运行 `python -m json.tool <file> >/dev/null`。
 - 冻结资产：运行 `python scripts/verify_frozen_files.py`，确保正文与 `config/frozen_files.json` 的
   SHA-256 基线一致。

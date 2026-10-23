@@ -139,7 +139,6 @@ def worker_config(*, environ: Mapping[str, str] = os.environ) -> SimpleNamespace
     """
     return SimpleNamespace(
         PLATFORM="xhs",
-        XHS_INTERNATIONAL=False,
         KEYWORDS="编程副业,编程兼职",
         LOGIN_TYPE="qrcode",
         COOKIES=environ.get("TRIPPOSTCOLLECT_COOKIES", ""),
@@ -148,11 +147,9 @@ def worker_config(*, environ: Mapping[str, str] = os.environ) -> SimpleNamespace
         HEADLESS=False,
         SAVE_LOGIN_STATE=True,
         ENABLE_CDP_MODE=False,
-        CDP_DEBUG_PORT=9222,
         CUSTOM_BROWSER_PATH=environ.get("TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH") or environ.get("CUSTOM_BROWSER_PATH", ""),
         CDP_HEADLESS=False,
         BROWSER_LAUNCH_TIMEOUT=60,
-        CDP_CONNECT_EXISTING=False,
         AUTO_CLOSE_BROWSER=True,
         SAVE_DATA_OPTION="jsonl",
         SAVE_DATA_PATH="",
@@ -164,7 +161,6 @@ def worker_config(*, environ: Mapping[str, str] = os.environ) -> SimpleNamespace
         CRAWLER_MAX_SLEEP_SEC=2,
         DISABLE_SSL_VERIFY=False,
         # 四站配置：原 xhs/dy/weibo/zhihu_config 的同名键。
-        SORT_TYPE="popularity_descending",
         PUBLISH_TIME_TYPE=0,
         WEIBO_SEARCH_TYPE="default",
         ENABLE_WEIBO_FULL_TEXT=True,
@@ -330,5 +326,4 @@ def xhs_readers(config):
         network_retry_min_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MIN_SECONDS", 2.0),
         network_retry_max_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_NETWORK_RETRY_MAX_SECONDS", 30.0),
         creator_verify_poll_seconds=partial(_env_nonnegative_float, "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_POLL_SECONDS", 2.0),
-        refresh_max_pages=env_int_reader("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", 0),
     )

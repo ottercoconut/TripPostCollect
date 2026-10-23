@@ -66,12 +66,9 @@ pytest -p pytest_asyncio.plugin \
 
 已处理：
 
-- `T09/xhs_scenarios` 每个场景的 `cdp_manager` 记录含根配置的 `"USER_DATA_DIR":"%s_user_data_dir"`
-  （共 36 个文件）。T14-C 删除该配置字段后已按偏离登记处理：根侧比较经
-  `tests/support/platform_session_deviation.py:xhs_cdp_settings_without_user_data_dir` 变换加载的预期——先断言
-  每条记录恰含该旧值、且该键在预期中只出现于这些记录，再删除该键后与根实现比较。固化文件与 `manifest.json`
-  未改动。
 - 上文“来源”中的生成命令、`--t14-write-legacy-expectations` 选项、守卫用例与 `write_manifest` 已随 fork/E
   在 T14-C 删除；本目录此后不能再生成，生成代码见 Git 历史（`070d5ad`，T14-B2）。
-- `tests/fixtures/adapter_t09/`（T09 冻结的旧实现源码与场景，约 400 KiB）在 T14-C 后已无测试引用。它属于冻结
-  的 T 卡 fixture，不删除，保留为生成本目录 `T09/xhs_scenarios` 时旧侧的来源存档；T14 之后不再执行。
+- #71 第一批（小红书取数改为浏览器 L1）后，小红书的搜索、详情、作者、图片与登录态不再经 HTTP 客户端，
+  T09 冻结对照失去对照对象：`tests/test_adapter_t09.py`、本目录 `T09/`（36 个文件，连同 `manifest.json` 中的条目）
+  与 `tests/fixtures/adapter_t09/` 整体退役删除，不做偏离登记；非旧实现对照的断言已迁到
+  `tests/platforms/xhs/` 下对应用例。历史内容见 Git。

@@ -19,6 +19,37 @@ if str(SCRIPTS) not in sys.path:
 login_warmup = import_module("login_warmup")
 
 
+def test_login_context_launch_arguments_keep_the_renderer_sandbox(monkeypatch, tmp_path) -> None:
+    """#83：登录预热不传 --no-sandbox，并显式开启沙箱（否则 Playwright 自动追加），其他参数不变。"""
+    from trippostcollect.application import warmup
+
+    launches = []
+
+    class FakeChromium:
+        async def launch_persistent_context(self, **kwargs):
+            launches.append(kwargs)
+            return "context"
+
+    monkeypatch.setattr(warmup, "browser_runtime_args", lambda: ["--lang=zh-CN"])
+    monkeypatch.setattr(warmup, "browser_launch_environment", lambda: {})
+
+    playwright = argparse.Namespace(chromium=FakeChromium())
+    assert asyncio.run(warmup.launch_login_context(playwright, tmp_path, None)) == "context"
+
+    assert launches[0]["chromium_sandbox"] is True
+    assert launches[0]["args"] == [
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--lang=zh-CN",
+    ]
+
+
 def test_selected_targets_supports_all_aliases_and_deduplication() -> None:
     assert login_warmup.selected_targets(["all"]) == [
         "douyin",

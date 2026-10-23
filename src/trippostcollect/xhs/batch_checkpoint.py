@@ -17,6 +17,7 @@ from typing import Any, Mapping
 
 from trippostcollect.core.paths import XHS_BATCH_CHECKPOINT_ROOT, XHS_RUNS_OUTPUT
 from trippostcollect.artifacts.image_manifest import parse_manifest
+from trippostcollect.runtime.visit_ledger import content_visits_path, snapshot_ledger
 from trippostcollect.xhs.accounts import record_event
 from trippostcollect.xhs.discovery import commit_child_discovery
 from trippostcollect.xhs.terminal import atomic_write_json
@@ -26,6 +27,8 @@ ENABLED_ENV = "TRIPPOSTCOLLECT_XHS_BATCH_CHECKPOINT_ENABLED"
 DATA_ROOT_ENV = "TRIPPOSTCOLLECT_XHS_BATCH_DATA_ROOT"
 RESUME_ENV = "TRIPPOSTCOLLECT_XHS_BATCH_RESUME_SUMMARY"
 ACK_TIMEOUT_SECONDS = 60.0
+# 记录在批次快照中、须计入哈希的产物键：内容 JSONL、图片 manifest 与访问账本快照。
+SNAPSHOT_OUTPUT_KEYS = ("jsonl_files", "image_manifest_paths", "content_visit_paths")
 
 
 def _digest(path: Path) -> str:
@@ -54,7 +57,7 @@ def verify_snapshot_artifacts(summary: Mapping[str, Any]) -> None:
     referenced = {
         str(value)
         for record in summary["records"]
-        for key in ("jsonl_files", "image_manifest_paths")
+        for key in SNAPSHOT_OUTPUT_KEYS
         for value in record.get("output", {}).get(key, [])
     }
     if referenced != set(files):
@@ -90,6 +93,9 @@ def publish_batch(event: Mapping[str, Any], env: Mapping[str, str] | None = None
         return
     if event.get("batch_complete") is not True or event.get("source_has_more") is False:
         return
+    # 全量扫描每页都写批次事件；只有新增了持久候选决定的页才固化快照、等待根确认。
+    if int(event.get("batch_candidate_identity_count") or 0) <= 0:
+        return
     state_path = Path(source["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"])
     state = json.loads(state_path.read_text())
     plan = state["plan"]
@@ -100,7 +106,6 @@ def publish_batch(event: Mapping[str, Any], env: Mapping[str, str] | None = None
         raise RuntimeError("xhs_batch_checkpoint_run_mismatch")
     sequence = int(event["batch_no"])
     # The exporter creates this directory lazily, on its first stored record.
-    # A complete refresh page containing only known candidates has no files yet.
     data_root = Path(source[DATA_ROOT_ENV]).resolve()
     if not data_root.is_relative_to((XHS_RUNS_OUTPUT / run_id).resolve()):
         raise RuntimeError("xhs_batch_checkpoint_data_scope_mismatch")
@@ -108,6 +113,15 @@ def publish_batch(event: Mapping[str, Any], env: Mapping[str, str] | None = None
         raise RuntimeError("xhs_batch_checkpoint_data_root_not_directory")
     if str(source.get(RESUME_ENV) or "") != str(plan["discovery"].get("campaign_summary_path") or ""):
         raise RuntimeError("xhs_batch_checkpoint_campaign_mismatch")
+    # 账本在写任何快照之前核验，失败不留下半批快照。
+    evidence_path = str(source.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE") or "").strip()
+    if not evidence_path:
+        raise RuntimeError("xhs_batch_checkpoint_visit_ledger_missing")
+    ledger = content_visits_path(evidence_path)
+    if not ledger.resolve().is_relative_to((XHS_RUNS_OUTPUT / run_id).resolve()):
+        raise RuntimeError("xhs_batch_checkpoint_visit_ledger_scope_mismatch")
+    if not ledger.is_file():
+        raise RuntimeError("xhs_batch_checkpoint_visit_ledger_missing")
     paths = sorted((data_root / "xhs" / "jsonl").glob("*_contents_*.jsonl"))
     if not paths and any(int(event.get(key) or 0) > 0 for key in ("valid_new_count", "valid_existing_count")):
         raise RuntimeError("xhs_batch_checkpoint_content_missing")
@@ -126,6 +140,9 @@ def publish_batch(event: Mapping[str, Any], env: Mapping[str, str] | None = None
         _sync_directory(snapshot.parent)
         snapshot_files.append({"path": str(snapshot), "sha256": _digest(snapshot)})
         (manifests if path == manifest else contents).append(str(snapshot))
+    # 账本逐行校验后固化，与内容快照同批计入哈希；累计记录的访问证据由它们追溯。
+    ledger_snapshot = snapshot_ledger(ledger, sequence)
+    snapshot_files.append({"path": str(ledger_snapshot), "sha256": _digest(ledger_snapshot)})
 
     prior_records: list[dict[str, Any]] = []
     identities = set(event.get("candidate_identities") or [])
@@ -137,7 +154,7 @@ def publish_batch(event: Mapping[str, Any], env: Mapping[str, str] | None = None
         identities.update(previous_event.get("candidate_identities") or [])
     # Carry prior artifact hashes too: advancing a page must not drop the old campaign.
     for record in prior_records:
-        for key in ("jsonl_files", "image_manifest_paths"):
+        for key in SNAPSHOT_OUTPUT_KEYS:
             for value in (record.get("output") or {}).get(key) or []:
                 path = Path(value).resolve(strict=True)
                 snapshot_files.append({"path": str(path), "sha256": _digest(path)})
@@ -164,7 +181,11 @@ def publish_batch(event: Mapping[str, Any], env: Mapping[str, str] | None = None
                 "platform": "xhs",
                 "status": "incomplete",
                 "ok": False,
-                "output": {"jsonl_files": contents, "image_manifest_paths": manifests},
+                "output": {
+                    "jsonl_files": contents,
+                    "image_manifest_paths": manifests,
+                    "content_visit_paths": [str(ledger_snapshot)],
+                },
             },
         ],
         "pagination_evidence": {"stopped": False, "batches": [dict(event)]},
@@ -262,11 +283,10 @@ class BatchCheckpointCommitter:
         ):
             raise RuntimeError("xhs_batch_checkpoint_event_mismatch")
         if (
-            event.get("batch_complete") is not True
+            event.get("discovery_phase") != "full_scan"
+            or event.get("batch_complete") is not True
             or event.get("source_has_more") is False
             or int(event["batch_no"]) != sequence
-            or not event.get("resume_cursor")
-            or int(event["resume_page"]) != int(event["source_page"]) + 1
         ):
             raise RuntimeError("xhs_batch_checkpoint_unsafe_boundary")
         verify_snapshot_artifacts(summary)
@@ -301,7 +321,7 @@ class BatchCheckpointCommitter:
                 details={
                     "sequence": sequence,
                     "summary_sha256": pointer["sha256"],
-                    "resume_page": result["resume_page"],
+                    "source_exhausted": result["source_exhausted"],
                 },
             )
         atomic_write_json(run_dir / "batch_checkpoint_ack.json", pointer)

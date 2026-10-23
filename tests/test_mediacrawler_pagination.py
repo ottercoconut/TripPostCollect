@@ -865,3 +865,30 @@ def test_local_image_completeness_is_part_of_formal_record_selection(
     assert validation["local_images_complete"] is False
     assert validation["completion_met"] is False
     assert validation["invalid_reason_counts"] == {"local_images_incomplete": 1}
+
+
+def test_xhs_exhaustion_stop_event_keeps_its_source_visit_for_the_visit_gate(tmp_path: Path) -> None:
+    # #71：门禁 G2 经停止事件的 source_visit_id 回读目标会话末页；摘要白名单不得把它丢掉。
+    state_path = tmp_path / "state.json"
+    visit_id = "ab" * 16 + ":v000042"
+    write_state(
+        state_path,
+        [
+            {
+                "type": "adaptive_search_stopped",
+                "details": {
+                    "platform": "xhs",
+                    "source_page": 3,
+                    "source_has_more": False,
+                    "stop_reason": "source_exhausted",
+                    "stop_detail": "has_more_false",
+                    "discovery_phase": "full_scan",
+                    "source_visit_id": visit_id,
+                },
+            }
+        ],
+    )
+
+    evidence = mediacrawler_crawl.load_pagination_evidence(state_path)
+
+    assert evidence["stop_event"]["source_visit_id"] == visit_id

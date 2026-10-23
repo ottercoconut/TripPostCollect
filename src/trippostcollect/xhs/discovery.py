@@ -1,20 +1,31 @@
-"""Persistent per-account discovery frontiers for Xiaohongshu targets."""
+"""小红书按目标、账号与查询指纹保存的发现记忆：已处理候选与未完成累计摘要。
+
+每轮都从首页搜索后全量滚到 has_more=false，不保存页码或 search ID；checkpoint 只记最近停止原因、
+上次是否完整到达来源末尾（审计）与累计摘要。
+"""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any, Mapping
 
 from trippostcollect.scheduler.discovery import query_fingerprint
+from trippostcollect.xhs.engagement import COUNT_RULE
+from trippostcollect.xhs.search_target import target_search_fingerprint_params
 
 
 def xhs_query_fingerprint(target: Mapping[str, Any]) -> str:
+    """来源查询参数或候选判定规则改变，须形成新记忆：目标排序与类型（#71）和计数判定规则（#94，feed 空串经登记所用
+    搜索条目确认为 0）都并入指纹。新指纹首轮不续旧的未完成累计；旧指纹 seen 中未入库的笔记按新规则重新判定一次。"""
     return query_fingerprint(
         "xhs",
         str(target["keyword"]),
         {
             "target_key": str(target["target_key"]),
+            **target_search_fingerprint_params(),
+            "count_rule": COUNT_RULE,
         },
     )
 
@@ -51,6 +62,7 @@ def resolve_discovery_plan(
         query_fingerprint_value=fingerprint,
     )
     summary_path = ""
+    visit_ledgers: list[str] = []
     if checkpoint and checkpoint.get("last_summary_path"):
         candidate = Path(str(checkpoint["last_summary_path"])).expanduser()
         if not candidate.is_file():
@@ -59,23 +71,39 @@ def resolve_discovery_plan(
                 f"target={target['target_key']} account={account_id} path={candidate}"
             )
         summary_path = str(candidate.resolve())
+        visit_ledgers = campaign_visit_ledgers(candidate)
+    seen_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM xhs_discovery_seen_candidates
+        WHERE target_key=? AND account_id=? AND query_fingerprint=?
+        """,
+        (str(target["target_key"]), account_id, fingerprint),
+    ).fetchone()[0]
     return {
         "target_key": str(target["target_key"]),
         "account_id": account_id,
         "keyword": str(target["keyword"]),
         "query_fingerprint": fingerprint,
         "checkpoint_found": checkpoint is not None,
-        "resume_page": max(1, int((checkpoint or {}).get("resume_page") or 1)),
-        "resume_search_id": str((checkpoint or {}).get("resume_search_id") or ""),
-        "source_exhausted": (checkpoint or {}).get("status") == "exhausted",
-        "top_refresh_max_pages": (
-            max(0, int(target.get("top_refresh_max_pages") or 0))
-            if checkpoint
-            else 0
-        ),
+        "last_status": str((checkpoint or {}).get("status") or ""),
+        "last_stop_reason": str((checkpoint or {}).get("last_stop_reason") or ""),
+        "seen_candidate_count": int(seen_count or 0),
         "campaign_summary_path": summary_path,
+        "campaign_visit_ledgers": visit_ledgers,
+        "campaign_visit_ledger_count": len(visit_ledgers),
         "checkpoint_before": checkpoint,
     }
+
+
+def campaign_visit_ledgers(summary_path: str | Path) -> list[str]:
+    """累计摘要各记录携带的访问账本快照（门禁与冻结输入共用）。"""
+    summary = json.loads(Path(summary_path).expanduser().read_text(encoding="utf-8"))
+    return [
+        str(value)
+        for record in summary.get("records") or []
+        if isinstance(record, Mapping)
+        for value in ((record.get("output") or {}).get("content_visit_paths") or [])
+    ]
 
 
 def save_checkpoint(
@@ -85,26 +113,22 @@ def save_checkpoint(
     account_id: str,
     keyword: str,
     query_fingerprint_value: str,
-    resume_page: int,
-    resume_search_id: str | None,
     source_has_more: bool | None,
+    source_exhausted: bool,
     last_batch_complete: bool,
     last_stop_reason: str,
     last_run_id: str,
 ) -> None:
-    if resume_page < 1:
-        raise ValueError("resume_page must be positive")
+    """status 只在停止事件是完整的来源耗尽时写 exhausted，作审计；下一轮照样全量扫描。"""
     conn.execute(
         """
         INSERT INTO xhs_discovery_checkpoints (
-            target_key, account_id, keyword, query_fingerprint, resume_page,
-            resume_search_id, source_has_more, status, last_batch_complete,
+            target_key, account_id, keyword, query_fingerprint,
+            source_has_more, status, last_batch_complete,
             last_stop_reason, last_run_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(target_key, account_id, query_fingerprint) DO UPDATE SET
             keyword=excluded.keyword,
-            resume_page=excluded.resume_page,
-            resume_search_id=excluded.resume_search_id,
             source_has_more=excluded.source_has_more,
             status=excluded.status,
             last_batch_complete=excluded.last_batch_complete,
@@ -117,10 +141,8 @@ def save_checkpoint(
             account_id,
             keyword,
             query_fingerprint_value,
-            resume_page,
-            resume_search_id or None,
             None if source_has_more is None else int(source_has_more),
-            "exhausted" if source_has_more is False else "active",
+            "exhausted" if source_exhausted else "active",
             int(last_batch_complete),
             last_stop_reason,
             last_run_id,
@@ -209,36 +231,17 @@ def commit_child_discovery(
     if not isinstance(event, Mapping):
         raise RuntimeError("XHS child summary has no durable pagination evidence")
 
-    refresh_only = event.get("discovery_phase") == "refresh"
-    if refresh_only:
-        resume_page = max(1, int(discovery_plan.get("resume_page") or 1))
-        resume_search_id = str(discovery_plan.get("resume_search_id") or "") or None
-        source_has_more: bool | None = (
-            False if discovery_plan.get("source_exhausted") else None
-        )
+    source_has_more_value = event.get("source_has_more")
+    batch_complete = bool(event.get("batch_complete"))
+    if source_has_more_value in (False, 0) and not batch_complete:
+        source_has_more: bool | None = None
     else:
-        resume_page = max(
-            1,
-            int(
-                event.get("resume_page")
-                or event.get("source_page")
-                or discovery_plan.get("resume_page")
-                or 1
-            ),
-        )
-        resume_search_id = str(
-            event.get("resume_cursor")
-            or event.get("source_cursor")
-            or discovery_plan.get("resume_search_id")
-            or ""
-        ) or None
-        source_has_more_value = event.get("source_has_more")
-        if source_has_more_value in (False, 0) and not bool(event.get("batch_complete")):
-            source_has_more = None
-        else:
-            source_has_more = (
-                None if source_has_more_value is None else bool(source_has_more_value)
-            )
+        source_has_more = None if source_has_more_value is None else bool(source_has_more_value)
+    source_exhausted = bool(
+        event.get("stop_reason") == "source_exhausted"
+        and batch_complete
+        and source_has_more is False
+    )
 
     candidate_identities = event.get("candidate_identities") or []
     if not isinstance(candidate_identities, list):
@@ -266,10 +269,9 @@ def commit_child_discovery(
         account_id=account_id,
         keyword=str(target["keyword"]),
         query_fingerprint_value=fingerprint,
-        resume_page=resume_page,
-        resume_search_id=resume_search_id,
         source_has_more=source_has_more,
-        last_batch_complete=bool(event.get("batch_complete")),
+        source_exhausted=source_exhausted,
+        last_batch_complete=batch_complete,
         last_stop_reason=str(event.get("stop_reason") or "continue"),
         last_run_id=run_id,
     )
@@ -293,10 +295,8 @@ def commit_child_discovery(
         conn.commit()
     return {
         "skipped": False,
-        "refresh_only": refresh_only,
-        "resume_page": resume_page,
-        "resume_search_id": resume_search_id,
         "source_has_more": source_has_more,
+        "source_exhausted": source_exhausted,
         "last_stop_reason": str(event.get("stop_reason") or "continue"),
         "campaign_summary_path": campaign_summary_path,
         "campaign_candidate_count": campaign_candidate_count,

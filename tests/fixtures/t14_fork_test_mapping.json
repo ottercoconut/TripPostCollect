@@ -48,11 +48,14 @@
    "root": [
     {
      "test": "tests/artifacts/test_staging.py::test_xhs_http_404_preserves_terminal_status",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "#71 起同名同参数改为截获路径：截获图片 HTTP 404 经 _stage_note_images 分类为 image_source_unavailable，失败行保留 http_status=404"
     },
     {
      "test": "tests/platforms/xhs/test_xhs_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
-     "asserts": "下游：已分类 404 错误只尝试 1 次，manifest 保留 error_code/http_status"
+     "asserts": "下游：已分类 404 错误只尝试 1 次，manifest 保留 error_code/http_status",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "小红书正文图片改为翻图触发前端加载、图片窗口截获字节，直连下载、重试循环与重试次数不再是小红书契约；截获图片的失败行与整帖拒绝由 tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_not_captured_is_retryable_and_later_candidate_continues、::test_terminal_image_status_is_final_and_later_candidate_continues 与 tests/platforms/xhs/test_xhs_repair_state.py::test_missing_image_is_retryable_and_forbidden_image_stops_the_run 断言"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_xhs_http_404_preserves_terminal_status"
@@ -64,11 +67,14 @@
    "root": [
     {
      "test": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_run_level_http_status",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "#71 起同名同参数改为截获路径：规则端点 401/403/429 经 classify_xhs_api_response 与 raise_for_runtime_verdict 为运行级 login_required/rate_limited"
     },
     {
      "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status",
-     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次"
+     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "#71 删除 httpx 客户端，小红书规则端点改由页面取数通道截获；状态码与业务码分类由 tests/platforms/xhs/test_xhs_login_state.py::test_rule_endpoint_classification_keeps_the_client_code_table 与 ::test_verdict_details_and_runtime_raises 断言"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_run_level_http_status[401-login_required]"
@@ -80,11 +86,14 @@
    "root": [
     {
      "test": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_run_level_http_status",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "#71 起同名同参数改为截获路径：规则端点 401/403/429 经 classify_xhs_api_response 与 raise_for_runtime_verdict 为运行级 login_required/rate_limited"
     },
     {
      "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status",
-     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次"
+     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "#71 删除 httpx 客户端，小红书规则端点改由页面取数通道截获；状态码与业务码分类由 tests/platforms/xhs/test_xhs_login_state.py::test_rule_endpoint_classification_keeps_the_client_code_table 与 ::test_verdict_details_and_runtime_raises 断言"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_run_level_http_status[403-login_required]"
@@ -96,11 +105,14 @@
    "root": [
     {
      "test": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_run_level_http_status",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "#71 起同名同参数改为截获路径：规则端点 401/403/429 经 classify_xhs_api_response 与 raise_for_runtime_verdict 为运行级 login_required/rate_limited"
     },
     {
      "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status",
-     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次"
+     "asserts": "根 XiaoHongShuClient.request(return_response=True) 对同组参数 401/403→login_required、429→rate_limited 抛 PlatformRuntimeError，且只请求一次",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "#71 删除 httpx 客户端，小红书规则端点改由页面取数通道截获；状态码与业务码分类由 tests/platforms/xhs/test_xhs_login_state.py::test_rule_endpoint_classification_keeps_the_client_code_table 与 ::test_verdict_details_and_runtime_raises 断言"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_run_level_http_status[429-rate_limited]"
@@ -112,11 +124,14 @@
    "root": [
     {
      "test": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_ip_block_business_code",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "#71 起同名改为截获路径：规则端点业务码 300012 经 raise_for_runtime_verdict 抛 IPBlockError"
     },
     {
      "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block",
-     "asserts": "参数 300012/\"300012\" 在 return_response=True/False 下均抛 IPBlockError，只请求一次"
+     "asserts": "参数 300012/\"300012\" 在 return_response=True/False 下均抛 IPBlockError，只请求一次",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "#71 删除 httpx 客户端，小红书规则端点改由页面取数通道截获；状态码与业务码分类由 tests/platforms/xhs/test_xhs_login_state.py::test_rule_endpoint_classification_keeps_the_client_code_table 与 ::test_verdict_details_and_runtime_raises 断言"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_ip_block_business_code"
@@ -128,11 +143,14 @@
    "root": [
     {
      "test": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_security_limit_business_code",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "#71 起同名改为截获路径：规则端点业务码 300011 为运行级 platform_security_limit_300011"
     },
     {
      "test": "tests/platforms/xhs/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block",
-     "asserts": "参数 300011/\"300011\" 抛 PlatformRuntimeError(code=platform_security_limit_300011)"
+     "asserts": "参数 300011/\"300011\" 抛 PlatformRuntimeError(code=platform_security_limit_300011)",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "#71 删除 httpx 客户端，小红书规则端点改由页面取数通道截获；状态码与业务码分类由 tests/platforms/xhs/test_xhs_login_state.py::test_rule_endpoint_classification_keeps_the_client_code_table 与 ::test_verdict_details_and_runtime_raises 断言"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_xhs_html_response_preserves_security_limit_business_code"
@@ -184,7 +202,10 @@
     },
     {
      "test": "tests/platforms/xhs/test_xhs_image_download.py::test_transient_xhs_image_failure_recovers_and_records_attempts",
-     "asserts": "None 一次后成功，manifest attempts=2、fetch await 2 次（经根重试循环）"
+     "asserts": "None 一次后成功，manifest attempts=2、fetch await 2 次（经根重试循环）",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "小红书正文图片改为翻图触发前端加载、图片窗口截获字节，直连下载、重试循环与重试次数不再是小红书契约；截获图片的失败行与整帖拒绝由 tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_not_captured_is_retryable_and_later_candidate_continues、::test_terminal_image_status_is_final_and_later_candidate_continues 与 tests/platforms/xhs/test_xhs_repair_state.py::test_missing_image_is_retryable_and_forbidden_image_stops_the_run 断言"
     },
     {
      "test": "tests/platforms/zhihu/test_zhihu_image_download.py::test_transient_zhihu_image_failure_recovers_and_records_attempts",
@@ -204,7 +225,10 @@
     },
     {
      "test": "tests/platforms/xhs/test_xhs_image_download.py::test_xhs_failed_image_writes_no_success_file_or_manifest",
-     "asserts": "三次 None 后失败，fetch await 3 次，无成功文件"
+     "asserts": "三次 None 后失败，fetch await 3 次，无成功文件",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "小红书正文图片改为翻图触发前端加载、图片窗口截获字节，直连下载、重试循环与重试次数不再是小红书契约；截获图片的失败行与整帖拒绝由 tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_not_captured_is_retryable_and_later_candidate_continues、::test_terminal_image_status_is_final_and_later_candidate_continues 与 tests/platforms/xhs/test_xhs_repair_state.py::test_missing_image_is_retryable_and_forbidden_image_stops_the_run 断言"
     },
     {
      "test": "tests/platforms/douyin/test_douyin_image_only.py::test_failed_note_image_writes_failed_manifest_only",
@@ -236,7 +260,10 @@
     },
     {
      "test": "tests/platforms/xhs/test_xhs_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
-     "asserts": "不可重试 404 错误经根重试循环只尝试 1 次，manifest error_code=image_source_unavailable、http_status=404、attempts=1"
+     "asserts": "不可重试 404 错误经根重试循环只尝试 1 次，manifest error_code=image_source_unavailable、http_status=404、attempts=1",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "小红书正文图片改为翻图触发前端加载、图片窗口截获字节，直连下载、重试循环与重试次数不再是小红书契约；截获图片的失败行与整帖拒绝由 tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_not_captured_is_retryable_and_later_candidate_continues、::test_terminal_image_status_is_final_and_later_candidate_continues 与 tests/platforms/xhs/test_xhs_repair_state.py::test_missing_image_is_retryable_and_forbidden_image_stops_the_run 断言"
     },
     {
      "test": "tests/platforms/zhihu/test_zhihu_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence",
@@ -392,7 +419,10 @@
     },
     {
      "test": "tests/platforms/xhs/test_xhs_discovery_memory.py::test_browser_context_close_is_recorded_as_resumable_runtime_failure",
-     "asserts": "小红书运行级失败记为 runtime_failed 并保留前沿"
+     "asserts": "小红书运行级失败记为 runtime_failed 并保留前沿",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "小红书改为每轮从顶部全量滚动扫描，深层前沿删除，“保留前沿”不再是契约；运行级失败记为 runtime_failed 由 tests/platforms/xhs/test_xhs_discovery_memory.py::test_browser_context_close_is_recorded_as_runtime_failure 断言"
     }
    ],
    "ported_to": "tests/application/test_discovery.py::test_runtime_failure_has_distinct_stop_reason"
@@ -412,7 +442,10 @@
     },
     {
      "test": "tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_failure_is_recorded_and_later_xhs_candidate_continues",
-     "asserts": "小红书图片失败候选记录后继续"
+     "asserts": "小红书图片失败候选记录后继续",
+     "status": "retired",
+     "retired_by": "#71",
+     "reason": "小红书图片改为浮层翻图截获，直连下载与重试次数不再是契约；图片失败候选记录后继续由 tests/platforms/xhs/test_xhs_discovery_memory.py::test_image_not_captured_is_retryable_and_later_candidate_continues 与 ::test_terminal_image_status_is_final_and_later_candidate_continues 断言"
     }
    ],
    "ported_to": "tests/application/test_discovery.py::test_image_failed_candidate_is_recorded_seen_and_does_not_block_batch"

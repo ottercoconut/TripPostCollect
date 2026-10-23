@@ -1,0 +1,478 @@
+"""单篇处理（设计 §3.4）：点卡片打开浮层，截获 feed 与图片，点击作者名读作者页投影，浮层内互动，关闭浮层。
+
+本篇的图片窗口在第一次点击前打开，覆盖两次详情尝试与一次整篇重做（§3.8.4），离开时关闭。
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import random
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+from trippostcollect.platforms.xhs.author import XHS_CREATOR_RUNTIME_FINAL_REASONS
+from trippostcollect.platforms.xhs.capture import (
+    XHS_FEED_RULE,
+    classify_xhs_api_response,
+    raise_for_runtime_verdict,
+)
+from trippostcollect.platforms.xhs.errors import (
+    PlatformRuntimeError,
+    XHSCreatorProfileUnavailable,
+    XHSImageDownloadError,
+    XHSLoginExpired,
+    XHSNetworkRecoveryTimeout,
+    XHSRequestFailed,
+    XhsNoteRedo,
+)
+from trippostcollect.platforms.xhs.page_scripts import (
+    XHS_OVERLAY_ROOTS,
+    dom_note_engagement,
+    dom_note_view_state,
+    dom_scroll_metrics,
+    dom_visible_cards,
+)
+from trippostcollect.platforms.xhs.parser import (
+    XHS_NOTE_REQUIRED_COUNTS,
+    XhsParserMixin,
+    _normalized_creator_item,
+    _xhs_image_assets,
+    note_card_problems,
+)
+from trippostcollect.platforms.xhs.scan import SearchItem, SearchPage, XhsCardWithheld, XhsScanInterrupted
+from trippostcollect.records.formal import INTERACT_COUNT_EVIDENCE_FIELD
+from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
+from trippostcollect.runtime.image_retry import is_runtime_blocking_image_error
+from trippostcollect.runtime.page_capture import CaptureFailure, CapturedResponse, ImageWindow
+from trippostcollect.runtime.visit_ledger import line_seq
+from trippostcollect.xhs.engagement import (
+    append_engagement_observation,
+    comments_pending,
+    engagement_evidence_path,
+    engagement_observation,
+    search_source,
+    search_zero_evidence,
+)
+
+logger = logging.getLogger("MediaCrawler")
+
+FEED_RULE = XHS_FEED_RULE.name
+XHS_DETAIL_CAPTURE_SECONDS = 20.0
+# 浮层正文可见后、翻图前的详情停顿（操作人 2026-10-14 要求全面提速，#79）；repair 整页沿用。
+XHS_NOTE_DETAIL_PAUSE_SECONDS = (2.0, 4.0)
+XHS_DETAIL_ATTEMPTS = 2
+XHS_OVERLAY_FAIL_STREAK = 3
+XHS_OVERLAY_CLOSE_SECONDS = 5.0
+XHS_OVERLAY_POLL_SECONDS = 0.25
+# 浮层未出现时等 3–6 秒再点一次；浮层出现但没有 feed 时先关闭，等 4–8 秒再开。
+XHS_OVERLAY_REOPEN_SECONDS = (3.0, 6.0)
+XHS_OVERLAY_RECLOSE_SECONDS = (4.0, 8.0)
+# #94 取证：评论区可能晚于互动栏渲染，读到总数行或空状态前至多再等这么久。
+XHS_ENGAGEMENT_COMMENTS_SECONDS = 2.0
+OVERLAY_RANDOM = random.SystemRandom()
+
+
+@dataclass
+class NoteVisit:
+    """一篇笔记本次处理的 feed 详情与访问引用。"""
+
+    note_id: str
+    note_card: dict[str, Any]
+    trigger: str
+    detail_visit: str
+    search_visit: Optional[str]
+    creator_visit: Optional[str] = None
+    image_visits: list[str] = field(default_factory=list)
+
+    @property
+    def user_id(self) -> str:
+        return str((self.note_card.get("user") or {}).get("user_id") or "")
+
+
+@dataclass
+class _NoteRun:
+    """一篇笔记跨尝试共享的状态：唯一图片窗口与本篇全部 click_card 动作（序号, id）。"""
+
+    window: ImageWindow
+    clicks: list[tuple[int, str]] = field(default_factory=list)
+    overlay_seen: bool = False
+
+
+def _feed_note_id(item: CapturedResponse | CaptureFailure) -> str:
+    request = item.request_json if isinstance(item.request_json, dict) else {}
+    return str(request.get("source_note_id") or "")
+
+
+def _feed_note_card(captured: CapturedResponse) -> Optional[dict[str, Any]]:
+    """feed 成功响应里的 note_card（缺 note_id 时取条目 id）；形状不对时为 None。"""
+    data = (captured.json or {}).get("data") if isinstance(captured.json, dict) else None
+    items = data.get("items") if isinstance(data, dict) else None
+    first = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else None
+    note_card = first.get("note_card") if first is not None else None
+    if not isinstance(note_card, dict):
+        return None
+    note_card = dict(note_card)
+    if not note_card.get("note_id"):
+        note_card["note_id"] = first.get("id")
+    return note_card
+
+
+def note_card_failure(note_card: Optional[dict[str, Any]], note_id: str) -> str:
+    """两种来源的详情形状判定（§9.3）：返回候选失败码，通过或视频（由调用方跳过）时为空串。"""
+    if note_card is None:
+        return "detail_parse_failed"
+    problems = note_card_problems(note_card, note_id)
+    if "note_id_mismatch" in problems:
+        return "note_id_mismatch"
+    if problems and not XhsParserMixin.is_video_note(note_card):
+        return "detail_parse_failed"
+    return ""
+
+
+class XhsOverlayMixin:
+    """浮层详情；作为 XiaoHongShuCrawler 的 mixin，由全量扫描对当前页的未知图文调用。"""
+
+    # 详情视图的根选择器：全量扫描为浮层；repair 改为整页（翻图与点作者共用同一组读数）。
+    _note_view_roots: tuple[str, ...] = XHS_OVERLAY_ROOTS
+
+    async def _process_note_card(self, item: SearchItem, search_page: SearchPage, card: dict[str, Any]) -> None:
+        """处理一篇并作出决定：成功写记录与 consider，候选失败记跳过，运行级事件上抛。
+
+        单篇内的登录失效、验证完成或网络恢复后整篇重做一次；第二次再中断时关闭残留浮层并照常上抛。
+        """
+        run = _NoteRun(window=self._require_capture().open_image_window("primary"))
+        network_state: dict[str, Any] = {}
+        try:
+            for redo in (False, True):
+                try:
+                    await self._process_note_once(item, search_page, card, run)
+                    if network_state:
+                        await self._finish_network_recovery(stage="note_detail", state=network_state)
+                    return
+                except XHSLoginExpired:
+                    if redo:
+                        raise
+                    if not await self._wait_for_midrun_login_recovery():
+                        raise PlatformRuntimeError("XHS login remained expired", code="login_required")
+                except XHSRequestFailed as exc:
+                    if redo:
+                        raise
+                    if not await self._pause_for_network_recovery(exc, stage="note_detail", state=network_state):
+                        started_at = float(network_state.get("started_at") or self._popup_monotonic())
+                        raise XHSNetworkRecoveryTimeout(
+                            "note_detail", self._popup_monotonic() - started_at,
+                        ) from exc
+                except XhsNoteRedo as exc:
+                    if redo:
+                        await self._close_note_overlay(item.note_id)
+                        raise XhsScanInterrupted(f"note_redo_interrupted_twice:{exc.reason}") from exc
+                # 恢复已完成：关闭残留浮层，重新找到卡片后整篇重做。
+                logger.info(f"[XiaoHongShuCrawler.overlay] Redoing note after recovery: {item.note_id}")
+                await self._close_note_overlay(item.note_id)
+                card = await self._card_for_redo(item.note_id)
+        finally:
+            run.window.close()
+
+    async def _card_for_redo(self, note_id: str) -> dict[str, Any]:
+        """恢复后重新找到这张卡片；不在可点击带内时交回扫描（本篇仍未决定，扫描会再次处理）。"""
+        page = self.context_page
+        band = self._click_band(await dom_scroll_metrics(page))
+        for card in await dom_visible_cards(page):
+            if str(card.get("note_id") or "") == note_id and self._card_clickable(card, band):
+                return {**card, "click_band": band}
+        raise XhsScanInterrupted("note_redo_card_not_visible")
+
+    async def _process_note_once(
+        self, item: SearchItem, search_page: SearchPage, card: dict[str, Any], run: _NoteRun,
+    ) -> None:
+        note_id = item.note_id
+        accumulator = self._scan.accumulator
+        position = {
+            "source_page": search_page.page,
+            "source_cursor": search_page.session.search_id,
+            "discovery_phase": "full_scan",
+        }
+        await self._check_primary_before_click()
+        captured = await self._open_note_overlay(item, card, run)
+        if captured is None:
+            accumulator.skip_candidate_failure(
+                note_id, failure_scope="post", detail="note_detail_not_observed",
+                error_code="note_detail_not_observed", attempts=XHS_DETAIL_ATTEMPTS, retryable=True, **position,
+            )
+            return
+        capture = self._require_capture()
+        verdict = classify_xhs_api_response(captured)
+        if verdict.kind == "verification":
+            await self._wait_for_frontend_verification(
+                required=True,
+                data_arrived=lambda: capture.latest(
+                    FEED_RULE, after_seq=captured.seq, predicate=lambda later: _feed_note_id(later) == note_id,
+                ) is not None,
+            )
+            raise XhsNoteRedo("frontend_verification")
+        raise_for_runtime_verdict(verdict, stage="note_detail")
+        if verdict.kind == "note_not_found" or not verdict.ok:
+            # 笔记不存在或异常为决定性候选失败；未知业务码按本次未取到详情、可重试处理。
+            await self._close_note_overlay(note_id)
+            final = verdict.kind == "note_not_found"
+            accumulator.skip_candidate_failure(
+                note_id, failure_scope="post", detail="note_detail_unavailable",
+                error_code="note_not_found" if final else "detail_request_failed",
+                attempts=1, retryable=not final, **position,
+            )
+            return
+        note_card = _feed_note_card(captured)
+        failure_code = note_card_failure(note_card, note_id)
+        if failure_code:
+            await self._close_note_overlay(note_id)
+            accumulator.skip_candidate_failure(
+                note_id, failure_scope="post", detail="note_detail_unavailable",
+                error_code=failure_code, attempts=1, retryable=False, **position,
+            )
+            return
+        assert note_card is not None
+        trigger = max((click for click in run.clicks if click[0] < captured.seq), default=run.clicks[-1])[1]
+        if self.is_video_note(note_card):
+            await self._close_note_overlay(note_id)
+            capture.decision(note_id, "video_skipped_from_detail", page_role="primary")
+            accumulator.consider(note_id, valid=False)
+            return
+        note = NoteVisit(
+            note_id=note_id,
+            note_card=note_card,
+            trigger=trigger,
+            detail_visit=capture.record_visit(captured, stage="note_detail", subject_id=note_id, trigger=trigger),
+            search_visit=search_page.visit_id,
+        )
+        assets = _xhs_image_assets(note_card) if self.settings.ENABLE_GET_MEIDAS else []
+        if assets:
+            run.window.expect(
+                {asset["url"]: asset["source_asset_key"] for asset in assets},
+                subject_id=note_id, trigger=trigger, attempt=len(run.clicks),
+            )
+        await self._wait_overlay(lambda state: bool(state.get("content_visible")), XHS_OVERLAY_CLOSE_SECONDS)
+        await self._guarded_pause("note_detail", *XHS_NOTE_DETAIL_PAUSE_SECONDS)
+        images = await self._collect_note_images(note_id, run.window, assets) if assets else {}
+        # 登记本篇卡片所用的搜索条目（同一会话内以首次出现的页为准，重复送达不改登记）。
+        search = search_source(
+            item.counts, page=search_page.page, search_seq=search_page.seq, search_at=search_page.observed_at,
+            feed_seq=captured.seq, feed_at=captured.observed_at,
+        )
+        await self._record_engagement_observation(note_id, note_card, mode="discovery", search=search)
+
+        creator: dict[str, Any] = {}
+        if note.user_id:
+            try:
+                creator, note.creator_visit = await self._enrich_creator_via_author_tab(note)
+            except XHSCreatorProfileUnavailable as exc:
+                await self._close_note_overlay(note_id)
+                accumulator.skip_candidate_failure(
+                    note_id, failure_scope="post",
+                    detail=f"creator_profile_failed:{exc.reason}" if exc.reason else "creator_profile_failed",
+                    error_code="creator_profile_unavailable", attempts=exc.attempts,
+                    retryable=not set(exc.reason.split(",")) & XHS_CREATOR_RUNTIME_FINAL_REASONS, **position,
+                )
+                return
+        note_detail = {
+            **note_card,
+            "xsec_token": item.xsec_token,
+            "xsec_source": item.xsec_source,
+            "content_detail_status": "detail_observed",
+            "content_detail_source": "note_detail",
+        }
+        # #94（用户 2026-10-21 决定）：feed 空串、登记所用搜索条目同一项明确为 0 的计数记为 "0" 并写来源说明；
+        # 换一份 interact_info，不改截获到的 feed。
+        zero_evidence = search_zero_evidence(note_card.get("interact_info"), search, search_visit=search_page.visit_id)
+        if zero_evidence:
+            note_detail["interact_info"] = {**note_card["interact_info"], **dict.fromkeys(zero_evidence, "0")}
+            note_detail[INTERACT_COUNT_EVIDENCE_FIELD] = zero_evidence
+        if creator:
+            note_detail["creator_profile"] = creator
+        valid = self._note_fields_valid(note_id, note_detail)
+        if valid:
+            await self._maybe_run_post_interaction(note_detail)
+        await self._close_note_overlay(note_id)
+        if valid and assets:
+            try:
+                note.image_visits = await self._stage_note_images(note_id, run.window, assets, images)
+            except XHSImageDownloadError as exc:
+                if is_runtime_blocking_image_error(exc.code):
+                    raise PlatformRuntimeError(f"XHS image {exc.code}", code=exc.code) from exc
+                accumulator.skip_candidate_failure(
+                    note_id, failure_scope="image", detail="image_download_failed", error_code=exc.code,
+                    attempts=exc.attempts, source_index=exc.source_index,
+                    **({"retryable": True} if exc.code == "image_response_not_observed" else {}),
+                    **position,
+                )
+                return
+        note_detail["content_visit_refs"] = self._build_content_visit_refs(note)
+        await self.update_xhs_note(note_detail)
+        target_valid = valid and topic_relevant_for_web_post("xhs", note_detail, fallback_keyword=self._scan.keyword)
+        accumulator.consider(note_id, valid=target_valid)
+
+    async def _check_primary_before_click(self, reason: str = "note_overlay") -> None:
+        """§3.4 第 1 条：主页面存活；终态上抛，登录界面转轮中恢复，验证界面先被动等待完成。"""
+        self._assert_primary_page_alive(reason)
+        state = await self._popup_checkpoint_state(self.context_page)
+        self._raise_for_terminal_popup_state(state, reason=reason)
+        markers = set(state.get("manual_markers") or [])
+        if markers == {"login_required"}:
+            raise XHSLoginExpired(reason)
+        if markers:
+            await self._wait_for_frontend_verification(required=False, data_arrived=lambda: False)
+
+    async def _open_note_overlay(
+        self, item: SearchItem, card: dict[str, Any], run: _NoteRun,
+    ) -> Optional[CapturedResponse]:
+        """点封面打开浮层并等本篇的 feed；最多两次尝试，都没有 feed 时返回 None（§3.4 第 3、4 条）。
+
+        每次点击计划落点后在落点上、光标到达并静止后在光标处各做一次命中检测（#102），都命中这张卡片的封面才写
+        `click_card` 并按下；任一次不中就不按下、不写动作，抛 `XhsCardWithheld` 交回扫描。`click_card` 同时登记为可能
+        引发搜索请求的动作：误点到别的控件带出新搜索时，搜索访问的 trigger 指向它。
+        """
+        capture = self._require_capture()
+        overlay_seen = False
+        for attempt in range(1, XHS_DETAIL_ATTEMPTS + 1):
+            plan = await self._plan_card_click(item.note_id, card)
+            if not await self._approach_checked(plan, {"kind": "card", "note_id": item.note_id}):
+                raise XhsCardWithheld("before_press")
+            action = self._record_trigger_action(
+                "click_card", {"note_id": item.note_id, "data_index": int(card.get("data_index", -1))},
+                pointer=plan.evidence,
+            )
+            run.clicks.append((line_seq(action), action))
+            await self._press(plan)
+            captured = await capture.wait_for(
+                FEED_RULE,
+                after_seq=line_seq(action),
+                predicate=lambda found: _feed_note_id(found) == item.note_id,
+                timeout=XHS_DETAIL_CAPTURE_SECONDS,
+            )
+            if isinstance(captured, CaptureFailure):
+                failure = XHSRequestFailed("note_detail", captured.failure_text)
+                if failure.recoverable:
+                    raise failure
+                captured = None  # 非网络类失败（如请求被取消）按本次未取到 feed
+            state = await self._note_view_state()
+            overlay_seen = overlay_seen or bool(state.get("visible"))
+            if captured is not None:
+                self._overlay_fail_streak = 0
+                return captured
+            if attempt == XHS_DETAIL_ATTEMPTS:
+                break
+            if state.get("visible"):
+                await self._close_note_overlay(item.note_id)
+                await self._scan_sleep(OVERLAY_RANDOM.uniform(*XHS_OVERLAY_RECLOSE_SECONDS))
+            else:
+                await self._scan_sleep(OVERLAY_RANDOM.uniform(*XHS_OVERLAY_REOPEN_SECONDS))
+        await self._close_note_overlay(item.note_id)
+        if overlay_seen:
+            self._overlay_fail_streak = 0
+        else:
+            self._overlay_fail_streak = getattr(self, "_overlay_fail_streak", 0) + 1
+            if self._overlay_fail_streak >= XHS_OVERLAY_FAIL_STREAK:
+                raise PlatformRuntimeError("XHS note overlay stopped opening", code="xhs_overlay_not_opening")
+        return None
+
+    async def _note_view_state(self, author_id: str = "") -> dict[str, Any]:
+        """当前详情视图（浮层，或 repair 直开的整页）的页码、翻图箭头与关闭按钮；给出作者 ID 时另含作者链接。"""
+        return await dom_note_view_state(self.context_page, self._note_view_roots, author_id)
+
+    async def _wait_overlay(self, check: Any, timeout: float) -> dict[str, Any]:
+        """轮询详情视图状态直到 check 为真或超时，返回最后一次读数。"""
+        polls = max(1, int(timeout / XHS_OVERLAY_POLL_SECONDS))
+        state: dict[str, Any] = {}
+        for attempt in range(polls):
+            state = await self._note_view_state()
+            if check(state):
+                return state
+            if attempt + 1 < polls:
+                await self._scan_sleep(XHS_OVERLAY_POLL_SECONDS)
+        return state
+
+    async def _close_note_overlay(self, note_id: str) -> None:
+        """点关闭按钮（不按 Esc），5 秒内确认浮层消失；重试一次仍失败为运行级。光标到达并静止后在光标处做命中检测
+        （#102），命中关闭按钮才写 close_overlay 并按下，不中本次不按下、不写动作。"""
+        capture = self._require_capture()
+        for _attempt in range(2):
+            state = await self._note_view_state()
+            if not state.get("visible"):
+                return
+            point = state.get("close")
+            if point is None:
+                continue
+            plan = await self._plan_click(point)
+            if not await self._approach_checked(plan, {"kind": "close"}):
+                continue
+            capture.action("close_overlay", page_role="primary", target={"note_id": note_id}, pointer=plan.evidence)
+            await self._press(plan)
+            closed = await self._wait_overlay(lambda current: not current.get("visible"), XHS_OVERLAY_CLOSE_SECONDS)
+            if not closed.get("visible"):
+                return
+        raise PlatformRuntimeError("XHS note overlay did not close", code="xhs_overlay_close_failed")
+
+    async def _record_engagement_observation(
+        self, note_id: str, note_card: dict[str, Any], *, mode: str, search: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """#94 取证：读互动栏与评论区，连同登记所用搜索条目的计数（`search`，repair 没有）逐篇追加到行为证据同目录的
+        engagement 证据；只取证，不影响本篇的处理与判定，读数失败只记失败类别。"""
+        evidence_path = os.environ.get("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", "").strip()
+        if not evidence_path:
+            return
+        page, failure = await self._read_note_engagement()
+        line = engagement_observation(
+            note_id, mode=mode, interact=note_card.get("interact_info"), page=page, search=search, failure=failure,
+        )
+        try:
+            append_engagement_observation(engagement_evidence_path(evidence_path), line)
+        except OSError as exc:
+            logger.warning(f"[XiaoHongShuCrawler.overlay] Could not persist engagement observation: {type(exc).__name__}")
+
+    async def _read_note_engagement(self) -> tuple[Any, str]:
+        """读到评论区总数行或空状态即止，否则每 0.25 秒再读、至多 XHS_ENGAGEMENT_COMMENTS_SECONDS；返回最后一次读数。"""
+        polls = 1 + int(XHS_ENGAGEMENT_COMMENTS_SECONDS / XHS_OVERLAY_POLL_SECONDS)
+        page: Any = None
+        for attempt in range(polls):
+            try:
+                page = await dom_note_engagement(self.context_page, self._note_view_roots)
+            except TimeoutError:
+                return None, "timeout"
+            except Exception:
+                return None, "script_error"
+            if not comments_pending(page) or attempt + 1 == polls:
+                break
+            await self._scan_sleep(XHS_OVERLAY_POLL_SECONDS)
+        return page, ""
+
+    def _note_fields_valid(self, note_id: str, note_detail: dict[str, Any]) -> bool:
+        """有效条件与原详情路径一致：正文、时间、作者、图片、粉丝观察与四个互动数。互动数读 `note_detail`：全量扫描中
+        feed 空串经搜索结果确认为 0 的项已记为 "0"（#94），其余空串仍算缺失。"""
+        user = note_detail.get("user") or {}
+        interact = note_detail.get("interact_info") or {}
+        creator = note_detail.get("creator_profile") or {}
+        creator_item = (
+            _normalized_creator_item(str(user.get("user_id") or ""), creator, current_timestamp=self.ports.current_timestamp)
+            if creator
+            else {}
+        )
+        return bool(
+            note_id
+            and note_detail.get("desc")
+            and note_detail.get("time")
+            and user.get("user_id")
+            and user.get("nickname")
+            and note_detail.get("image_list")
+            and any(creator_item.get(key) not in (None, "") for key in ("fans_count", "fans"))
+            and all(interact.get(key) not in (None, "") for key in XHS_NOTE_REQUIRED_COUNTS)
+        )
+
+    def _build_content_visit_refs(self, note: NoteVisit) -> dict[str, Any]:
+        """记录的来源引用（§5.3）；图片可以引用本篇早先尝试截获的访问。"""
+        return {
+            "ledger_id": self._require_capture().ledger.ledger_id,
+            "search_results": note.search_visit,
+            "note_detail": note.detail_visit,
+            "creator_profile": note.creator_visit,
+            "images": list(note.image_visits),
+        }

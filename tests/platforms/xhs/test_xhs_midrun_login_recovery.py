@@ -1,5 +1,8 @@
+"""轮中登录恢复：可见 UI 恢复且恢复开始之后截获到 guest=false 的 user/me 才算完成；不导航。"""
+
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -7,12 +10,40 @@ import pytest
 
 import trippostcollect.platforms.xhs.core as xhs_core
 import trippostcollect.platforms.xhs.session as xhs_session
+from support.page_events import FakeContext, FakePage
 from trippostcollect.platforms.xhs.manual_wait import (
     XHSManualWaitBudget,
     XHSManualWaitBudgetExhausted,
 )
+from trippostcollect.runtime.visit_ledger import load_ledger
 
-from .support import XiaoHongShuCrawler
+from .support import XiaoHongShuCrawler, make_capture
+
+
+USER_ME = "https://edith.xiaohongshu.com/api/sns/web/v2/user/me"
+
+
+class Page(FakePage):
+    def __init__(self) -> None:
+        super().__init__("https://www.xiaohongshu.com/search_result_ai?keyword=x&source=web")
+        self.closed = False
+        self.reloads = 0
+        self.on_reload = None
+        self.bring_to_front = AsyncMock()
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    async def reload(self, *, wait_until: str, timeout: int) -> None:
+        assert (wait_until, timeout) == ("domcontentloaded", 30_000)
+        self.reloads += 1
+        if self.on_reload is not None:
+            self.on_reload()
+
+
+def emit_user_me(page: Page, *, guest: bool = False) -> None:
+    payload = {"success": True, "data": {"guest": guest, "user_id": "" if guest else "self"}}
+    page.respond(page.request("GET", USER_ME), body=json.dumps(payload).encode())
 
 
 def _state(
@@ -31,24 +62,33 @@ def _state(
 
 def _crawler(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
     states: list[dict[str, object]],
     *,
     wait_seconds: int = 12,
     profile_results: list[bool] | None = None,
-    pong_results: list[bool] | None = None,
-) -> tuple[XiaoHongShuCrawler, AsyncMock, AsyncMock, list[float]]:
+    user_me_on_probe: list[bool] | None = None,
+) -> tuple[XiaoHongShuCrawler, Page, AsyncMock, list[float]]:
+    """`user_me_on_probe[i]` 为真时，第 i 次看到登录 UI 时前端自发一次 guest=false 的 user/me。"""
+    monkeypatch.setattr(xhs_session, "XHS_LOGIN_ME_CONFIRM_SECONDS", 0.05)
     crawler = XiaoHongShuCrawler()
-    page = SimpleNamespace(bring_to_front=AsyncMock(), is_closed=lambda: False)
+    page = Page()
+    context = FakeContext()
+    context.pages.append(page)
     crawler.context_page = page
-    crawler.browser_context = object()
-    crawler.cookie_urls = [crawler.index_url]
-    crawler._profile_ui_visible = AsyncMock(
-        side_effect=profile_results if profile_results is not None else False
-    )
-    crawler.xhs_client = SimpleNamespace(
-        update_cookies=AsyncMock(),
-        pong=AsyncMock(side_effect=pong_results if pong_results is not None else False),
-    )
+    crawler.browser_context = context
+    crawler.capture = make_capture(tmp_path, context=context)
+    crawler.capture.install(page)
+    probes = list(profile_results) if profile_results is not None else []
+    emits = list(user_me_on_probe or [])
+
+    async def profile_ui() -> bool:
+        visible = probes.pop(0) if probes else False
+        if visible and emits and emits.pop(0):
+            emit_user_me(page)
+        return visible
+
+    crawler._profile_ui_visible = AsyncMock(side_effect=profile_ui)
     goto = AsyncMock()
     crawler._goto_with_deadline = goto
 
@@ -70,13 +110,22 @@ def _crawler(
         sleeps.append(seconds)
         clock["now"] += seconds
 
+    crawler._clock = clock
     crawler._popup_monotonic = monotonic
     crawler._popup_sleep = sleep
     crawler._manual_wait_budget = XHSManualWaitBudget(
         limit_seconds=wait_seconds,
         monotonic=monotonic,
     )
-    return crawler, page.bring_to_front, goto, sleeps
+    return crawler, page, goto, sleeps
+
+
+def ledger_lines(crawler) -> list[dict]:
+    return list(load_ledger(crawler.capture.ledger.path).lines)
+
+
+def login_visits(crawler) -> list[dict]:
+    return [line for line in ledger_lines(crawler) if line["kind"] == "visit" and line["stage"] == "login_state"]
 
 
 @pytest.mark.asyncio
@@ -99,11 +148,12 @@ async def test_actual_checkpoint_classifier_keeps_observed_sms_modal_manual(
 
 
 @pytest.mark.asyncio
-async def test_sms_checkpoint_with_stale_profile_never_probes_or_navigates(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_sms_checkpoint_with_stale_profile_never_probes_or_reloads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
 ) -> None:
-    crawler, foreground, goto, sleeps = _crawler(
+    crawler, page, goto, sleeps = _crawler(
         monkeypatch,
+        tmp_path,
         [
             _state(manual=("SMS Verification",)),
             _state(text=""),
@@ -111,25 +161,26 @@ async def test_sms_checkpoint_with_stale_profile_never_probes_or_navigates(
         ],
         wait_seconds=6,
         profile_results=[True],
-        pong_results=[True],
+        user_me_on_probe=[True],
     )
 
     with pytest.raises(XHSManualWaitBudgetExhausted):
-        await crawler._wait_for_midrun_login_recovery("青岛太平角旅游")
+        await crawler._wait_for_midrun_login_recovery()
 
     assert crawler._profile_ui_visible.await_count == 0
-    assert crawler.xhs_client.pong.await_count == 0
-    assert goto.await_count == 0
-    assert foreground.await_count >= 2
+    assert page.reloads == 0 and goto.await_count == 0
+    assert page.bring_to_front.await_count >= 2
     assert sum(sleeps) == pytest.approx(6.0)
+    assert login_visits(crawler) == []
 
 
 @pytest.mark.asyncio
 async def test_manual_latch_requires_two_nonblank_clear_observations(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
 ) -> None:
-    crawler, _foreground, goto, _sleeps = _crawler(
+    crawler, page, goto, _sleeps = _crawler(
         monkeypatch,
+        tmp_path,
         [
             _state(manual=("验证码",)),
             _state(text=""),
@@ -138,25 +189,27 @@ async def test_manual_latch_requires_two_nonblank_clear_observations(
             _state(text="signed-in shell"),
         ],
         profile_results=[True],
-        pong_results=[True],
+        user_me_on_probe=[True],
     )
 
-    recovered = await crawler._wait_for_midrun_login_recovery("青岛太平角旅游")
+    assert await crawler._wait_for_midrun_login_recovery() is True
 
-    assert recovered is True
     assert crawler._profile_ui_visible.await_count == 1
-    assert crawler.xhs_client.pong.await_count == 1
-    goto.assert_awaited_once()
-    assert goto.await_args.kwargs["stage"] == "midrun_login_recovered"
-    assert "keyword=%E9%9D%92%E5%B2%9B%E5%A4%AA%E5%B9%B3%E8%A7%92%E6%97%85%E6%B8%B8" in goto.await_args.args[1]
+    # 恢复后不导航：调用方按当前页面继续，或按会话重置重新搜索。
+    goto.assert_not_awaited()
+    assert page.reloads == 0
+    (visit,) = login_visits(crawler)
+    assert visit["rule"] == "xhs.user_me" and visit["guest"] is False and visit["subject_id"] is None
+    assert "self" not in json.dumps(visit)
 
 
 @pytest.mark.asyncio
 async def test_reappearing_checkpoint_resets_clear_confirmation(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
 ) -> None:
-    crawler, _foreground, goto, _sleeps = _crawler(
+    crawler, _page, goto, _sleeps = _crawler(
         monkeypatch,
+        tmp_path,
         [
             _state(manual=("验证码",)),
             _state(text="signed-in shell"),
@@ -166,142 +219,162 @@ async def test_reappearing_checkpoint_resets_clear_confirmation(
             _state(text="signed-in shell"),
         ],
         profile_results=[True],
-        pong_results=[True],
+        user_me_on_probe=[True],
     )
 
-    assert await crawler._wait_for_midrun_login_recovery("青岛太平角旅游")
+    assert await crawler._wait_for_midrun_login_recovery()
     assert crawler._profile_ui_visible.await_count == 1
-    goto.assert_awaited_once()
+    goto.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_race_after_pong_blocks_navigation(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_checkpoint_race_after_user_me_blocks_recovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
 ) -> None:
-    crawler, _foreground, goto, _sleeps = _crawler(
+    crawler, _page, goto, _sleeps = _crawler(
         monkeypatch,
+        tmp_path,
         [
             _state(text="signed-in shell"),
             _state(manual=("SMS Verification",)),
         ],
         wait_seconds=6,
         profile_results=[True],
-        pong_results=[True],
+        user_me_on_probe=[True],
     )
 
     with pytest.raises(XHSManualWaitBudgetExhausted):
-        await crawler._wait_for_midrun_login_recovery("青岛太平角旅游")
+        await crawler._wait_for_midrun_login_recovery()
 
-    assert crawler.xhs_client.pong.await_count == 1
     assert goto.await_count == 0
+    assert login_visits(crawler) == []
 
 
 @pytest.mark.asyncio
-async def test_profile_shell_without_self_info_never_navigates(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_user_me_before_recovery_or_guest_true_does_not_confirm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
 ) -> None:
-    crawler, _foreground, goto, _sleeps = _crawler(
+    crawler, page, _goto, _sleeps = _crawler(
         monkeypatch,
+        tmp_path,
+        [_state(text="signed-in shell")],
+        profile_results=[True, True],
+    )
+    emit_user_me(page)
+    await crawler.capture.wait_for("xhs.user_me", after_seq=0, timeout=1)
+    page.on_reload = lambda: emit_user_me(page, guest=True)
+
+    with pytest.raises(RuntimeError, match=r"^xhs_login_state_unconfirmed$"):
+        await crawler._wait_for_midrun_login_recovery()
+
+    assert page.reloads == 1
+    assert login_visits(crawler) == []
+
+
+@pytest.mark.asyncio
+async def test_signed_in_shell_without_user_me_reloads_once_then_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    crawler, page, goto, _sleeps = _crawler(
+        monkeypatch,
+        tmp_path,
         [_state(text="signed-in shell")],
         wait_seconds=12,
         profile_results=[True] * 6,
-        pong_results=[False, False],
     )
 
-    with pytest.raises(XHSManualWaitBudgetExhausted):
-        await crawler._wait_for_midrun_login_recovery("青岛太平角旅游")
+    with pytest.raises(RuntimeError, match=r"^xhs_login_state_unconfirmed$"):
+        await crawler._wait_for_midrun_login_recovery()
 
-    assert crawler.xhs_client.pong.await_count == 2
+    assert page.reloads == 1
     assert goto.await_count == 0
+    reloads = [line for line in ledger_lines(crawler) if line["kind"] == "action"]
+    assert [(line["action"], line["target"]) for line in reloads] == [("reload", {"route": "/search_result_ai"})]
+
+
+@pytest.mark.asyncio
+async def test_reload_after_confirmed_ui_triggers_user_me_and_recovers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    crawler, page, _goto, _sleeps = _crawler(
+        monkeypatch,
+        tmp_path,
+        [_state(text="signed-in shell")],
+        profile_results=[True, True],
+    )
+    page.on_reload = lambda: emit_user_me(page)
+
+    assert await crawler._wait_for_midrun_login_recovery()
+
+    assert page.reloads == 1
+    (visit,) = login_visits(crawler)
+    reload_action = next(line for line in ledger_lines(crawler) if line["kind"] == "action")
+    assert reload_action["seq"] < visit["seq"]
 
 
 @pytest.mark.asyncio
 async def test_terminal_restriction_preempts_wait_and_session_probe(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
 ) -> None:
-    crawler, _foreground, goto, sleeps = _crawler(
+    crawler, page, goto, sleeps = _crawler(
         monkeypatch,
+        tmp_path,
         [_state(terminal="rate_limited")],
         profile_results=[True],
-        pong_results=[True],
+        user_me_on_probe=[True],
     )
 
     with pytest.raises(xhs_core.PlatformRuntimeError) as captured:
-        await crawler._wait_for_midrun_login_recovery("青岛太平角旅游")
+        await crawler._wait_for_midrun_login_recovery()
 
     assert captured.value.code == "xhs_rate_limited_terminal"
     assert crawler._profile_ui_visible.await_count == 0
-    assert crawler.xhs_client.pong.await_count == 0
-    assert goto.await_count == 0
+    assert goto.await_count == 0 and page.reloads == 0
     assert sleeps == []
 
 
 @pytest.mark.asyncio
-async def test_recovered_session_does_not_hide_navigation_failure(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_user_me_wait_and_reload_do_not_use_manual_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
 ) -> None:
-    crawler, _foreground, goto, _sleeps = _crawler(
+    crawler, page, _goto, sleeps = _crawler(
         monkeypatch,
-        [_state(text="signed-in shell")],
-        profile_results=[True],
-        pong_results=[True],
-    )
-    goto.side_effect = RuntimeError("navigation still offline")
-
-    with pytest.raises(RuntimeError, match="navigation still offline"):
-        await crawler._wait_for_midrun_login_recovery("青岛太平角旅游")
-
-    goto.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_midrun_network_confirmation_and_navigation_do_not_use_manual_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    crawler, _foreground, goto, sleeps = _crawler(
-        monkeypatch,
+        tmp_path,
         [_state(text="signed-in shell")],
         wait_seconds=6,
-        profile_results=[True],
+        profile_results=[True, True],
     )
 
-    async def delayed_network_confirmation(*, stage: str) -> bool:
-        assert stage == "midrun_login_confirmation"
-        await crawler._popup_sleep(100.0)
-        return True
+    def slow_reload() -> None:
+        crawler._clock["now"] += 1000.0
+        emit_user_me(page)
 
-    async def delayed_navigation(*_args, **_kwargs) -> None:
-        await crawler._popup_sleep(1000.0)
+    page.on_reload = slow_reload
 
-    crawler._pong_with_network_recovery = delayed_network_confirmation
-    goto.side_effect = delayed_navigation
+    assert await crawler._wait_for_midrun_login_recovery()
 
-    assert await crawler._wait_for_midrun_login_recovery("青岛太平角旅游")
-
-    assert sleeps == [100.0, 1000.0]
+    assert sleeps == []
     assert crawler._manual_wait_budget.manual_elapsed_seconds == 0.0
     assert crawler._manual_wait_budget.remaining_seconds == 6.0
 
 
 @pytest.mark.asyncio
-async def test_recovery_keeps_original_qr_page_when_auxiliary_tab_closes(monkeypatch):
-    crawler, foreground, goto, _sleeps = _crawler(
+async def test_recovery_keeps_original_qr_page_when_auxiliary_tab_closes(monkeypatch, tmp_path):
+    crawler, primary, goto, _sleeps = _crawler(
         monkeypatch,
+        tmp_path,
         [_state(manual=("扫码登录",)), _state(), _state(), _state()],
         profile_results=[True],
-        pong_results=[True],
+        user_me_on_probe=[True],
     )
-    primary = crawler.context_page
+    closed = {"auxiliary": False}
     auxiliary = SimpleNamespace(
         url="https://www.xiaohongshu.com/website-login/login",
         is_closed=lambda: closed["auxiliary"],
         bring_to_front=AsyncMock(),
     )
-    closed = {"auxiliary": False}
-    crawler.browser_context = SimpleNamespace(
-        pages=[primary, auxiliary], new_page=AsyncMock(),
-    )
-    crawler.xhs_client.playwright_page = primary
+    crawler.browser_context.pages.append(auxiliary)
+    crawler.browser_context.new_page = AsyncMock()
     observe = crawler._popup_checkpoint_state
 
     async def observe_and_close_auxiliary(page):
@@ -312,21 +385,18 @@ async def test_recovery_keeps_original_qr_page_when_auxiliary_tab_closes(monkeyp
     crawler._popup_checkpoint_state = observe_and_close_auxiliary
     assert await crawler._wait_for_midrun_login_recovery()
     assert crawler.context_page is primary
-    assert crawler.xhs_client.playwright_page is primary
-    assert foreground.await_count >= 2
+    assert primary.bring_to_front.await_count >= 2
     auxiliary.bring_to_front.assert_not_awaited()
     crawler.browser_context.new_page.assert_not_awaited()
     goto.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_closed_original_page_fails_without_adopting_auxiliary(monkeypatch):
-    crawler, _foreground, goto, _sleeps = _crawler(monkeypatch, [_state()])
-    primary = crawler.context_page
-    primary.is_closed = lambda: True
-    crawler.browser_context = SimpleNamespace(
-        pages=[SimpleNamespace(is_closed=lambda: False)], new_page=AsyncMock(),
-    )
+async def test_closed_original_page_fails_without_adopting_auxiliary(monkeypatch, tmp_path):
+    crawler, primary, goto, _sleeps = _crawler(monkeypatch, tmp_path, [_state()])
+    primary.closed = True
+    crawler.browser_context.pages.append(SimpleNamespace(is_closed=lambda: False))
+    crawler.browser_context.new_page = AsyncMock()
     with pytest.raises(RuntimeError, match="xhs_main_page_closed_unexpected"):
         await crawler._wait_for_midrun_login_recovery()
     assert crawler.context_page is primary
