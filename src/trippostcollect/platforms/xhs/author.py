@@ -157,7 +157,7 @@ class XhsAuthorMixin:
         )
 
     async def _get_creator_info_from_browser(self, user_id: str, *, note: Any) -> Optional[Dict]:
-        """在浮层内点击作者名打开前台新标签页，读取投影后按打开时抽到的保留时长关闭并置前主页面。"""
+        """在浮层内点击作者名打开前台新标签页，读取投影后按打开时抽到的保留时长关闭；主页面不可见时才置前。"""
         self._assert_primary_page_alive("creator_profile_browser")
         primary_state = await self._popup_checkpoint_state(self.context_page)
         self._raise_for_terminal_popup_state(primary_state, reason="creator_profile_browser")
@@ -263,7 +263,7 @@ class XhsAuthorMixin:
         logger.warning("[XiaoHongShuCrawler.author] Author tab not opened: " + ", ".join(fields))
 
     async def _close_author_tab(self, page: Page, note: Any) -> None:
-        """打开时抽到的保留期满后写 close_tab（带抽到的保留秒数）并关闭，主页面置前；不额外停留。"""
+        """打开时抽到的保留期满后写 close_tab（带抽到的保留秒数）并关闭；主页面确为 hidden 时才置前（#107），不额外停留。"""
         await self._wait_before_page_close(page, reason="creator_profile_cleanup")
         self._require_capture().action(
             "close_tab", page_role="author_tab",
@@ -271,11 +271,13 @@ class XhsAuthorMixin:
         )
         await self._close_page_with_deadline(page, reason="creator_profile_cleanup")
         try:
-            await self.context_page.bring_to_front()
-        except PlaywrightError as exc:
-            if self._is_target_closed_error(exc):
+            await self._bring_to_front_if_hidden(self.context_page, "primary_after_author_tab")
+        except (PlaywrightError, TimeoutError) as exc:
+            if isinstance(exc, PlaywrightError) and self._is_target_closed_error(exc):
                 raise
-            logger.warning(f"[XiaoHongShuCrawler.author] Could not bring the main page to front: {exc}")
+            logger.warning(
+                f"[XiaoHongShuCrawler.author] Could not check or bring the main page to front: {type(exc).__name__}: {exc}"
+            )
 
     async def _return_from_author_page(self, note: Any) -> None:
         """同页跳转的作者页读完后写 go_back 并返回笔记页（repair，待 V9）。"""

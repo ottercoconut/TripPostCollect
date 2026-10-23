@@ -510,6 +510,17 @@ async def test_full_scan_in_local_chromium_passes_the_visit_gate(monkeypatch, tm
         "/user/profile/author-a", "/user/profile/author-b",
     ]
     assert len(actions(crawler, "close_tab")) == 2 and open_pages == 1
+    # #107：作者页打开时与关闭后的主页面在真实页面里读到的都是 visible，业务阶段一次也不置前。hasFocus 只记录、
+    # 不断言（headless shell 下取决于 Playwright 的焦点模拟，与有界面 Chrome 不同）。
+    focus = crawler._page_focus
+    assert focus["bring_to_front"] == {"new_tab": 0, "primary_after_author_tab": 0} and focus["read_failures"] == {}
+    assert focus["bring_to_front_skipped"] == {"new_tab": 2, "primary_after_author_tab": 2}
+    visible = {
+        point: sum(count for key, count in counts.items() if key.startswith("visible/"))
+        for point, counts in focus["samples"].items()
+    }
+    assert visible == {"new_tab": 2, "primary_after_author_tab": 2}
+    assert not any("Bringing page to front" in line for line in log_lines)
     # 作者页投影在真实页面中就不带头像；feed 卡片头像只在内存记录中，由写出端的导出清理器去除。
     assert f"{AVATAR_HOST}/avatar/" not in json.dumps(crawler.records, ensure_ascii=False)
     monkeypatch.setenv("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS", "1")

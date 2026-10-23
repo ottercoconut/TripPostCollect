@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+from playwright.async_api import Error as PlaywrightError
 import pytest
 
 import trippostcollect.platforms.xhs.author as xhs_author
@@ -12,8 +13,9 @@ from trippostcollect.platforms.xhs.manual_wait import (
     XHSManualWaitBudget,
     XHSManualWaitBudgetExhausted,
 )
+from trippostcollect.platforms.xhs.page_scripts import DOM_SCRIPTS
 
-from .support import XiaoHongShuCrawler, make_capture
+from .support import XiaoHongShuCrawler, crawler_log_lines, make_capture
 
 NOTE = SimpleNamespace(note_id="note-1", detail_visit=None)
 
@@ -31,6 +33,7 @@ def crawler(monkeypatch, tmp_path):
     instance.context_page = Mock()
     instance.context_page.is_closed.return_value = False
     instance.context_page.bring_to_front = AsyncMock()
+    instance.context_page.evaluate = AsyncMock(return_value={"visibility_state": "visible", "has_focus": True})
     instance._popup_checkpoint_state = AsyncMock(return_value={})
     instance.capture = make_capture(tmp_path)
     return instance
@@ -326,6 +329,8 @@ async def test_creator_verification_popups_share_one_remaining_budget(
             return False
 
         async def evaluate(self, script, arg=None):
+            if script == DOM_SCRIPTS["focus_state"]:
+                return {"visibility_state": "visible", "has_focus": True}
             if arg is None:
                 return {}
             return projection(self.name, "1") if self.name == "first" else {"status": "missing"}
@@ -370,6 +375,54 @@ async def test_creator_verification_popups_share_one_remaining_budget(
     assert crawler._manual_wait_budget.manual_elapsed_seconds == 5.0
     assert first.bring_to_front.await_count == 1
     assert second.bring_to_front.await_count == 1
+    # #107：作者页验证即使页面已经可见也照常置前，不经业务阶段的可见性判定。
+    assert crawler._page_focus["samples"] == {}
+
+
+def author_tab_stub() -> Mock:
+    tab = Mock()
+    tab.is_closed.return_value = False
+    tab.close = AsyncMock()
+    return tab
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("visibility", "brought"), [("visible", 0), ("hidden", 1)])
+async def test_main_page_is_brought_to_front_after_the_author_tab_only_when_hidden(crawler, visibility, brought):
+    """#107：关闭作者标签页后先读主页面可见性，确为 hidden 才置前一次并记原因；visible 时跳过。两者都计数。"""
+    crawler.context_page.evaluate.return_value = {"visibility_state": visibility, "has_focus": False}
+    tab = author_tab_stub()
+
+    with crawler_log_lines() as log_lines:
+        await crawler._close_author_tab(tab, NOTE)
+
+    tab.close.assert_awaited_once()
+    crawler.context_page.evaluate.assert_awaited_once_with(DOM_SCRIPTS["focus_state"])
+    assert crawler.context_page.bring_to_front.await_count == brought
+    assert [line for line in log_lines if "Bringing page to front" in line] == [
+        "[XiaoHongShuCrawler] Bringing page to front: "
+        "reason=primary_after_author_tab_hidden, has_focus=False, count=1"
+    ] * brought
+    focus = crawler._page_focus
+    assert focus["samples"] == {"primary_after_author_tab": {f"{visibility}/unfocused": 1}}
+    assert focus["bring_to_front"]["primary_after_author_tab"] == brought
+    assert focus["bring_to_front_skipped"]["primary_after_author_tab"] == 1 - brought
+
+
+@pytest.mark.asyncio
+async def test_main_page_focus_read_keeps_the_lifecycle_error_path(crawler):
+    """读主页面可见性时主页面已关闭照常上抛；其他读取失败只记警告，不置前。"""
+    crawler.context_page.evaluate.side_effect = PlaywrightError("Target page, context or browser has been closed")
+    with pytest.raises(PlaywrightError, match="has been closed"):
+        await crawler._close_author_tab(author_tab_stub(), NOTE)
+
+    crawler.context_page.evaluate.side_effect = PlaywrightError("Execution context was destroyed")
+    with crawler_log_lines() as log_lines:
+        await crawler._close_author_tab(author_tab_stub(), NOTE)
+
+    crawler.context_page.bring_to_front.assert_not_awaited()
+    assert crawler._page_focus["read_failures"] == {"primary_after_author_tab": 2}
+    assert any("Could not check or bring the main page to front: Error: Execution context" in line for line in log_lines)
 
 
 @pytest.mark.asyncio
