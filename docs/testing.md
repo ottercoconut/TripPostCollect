@@ -68,6 +68,10 @@ python tests/run_lanes.py \
 缺能力或依赖返回非零。counts 区分 collected、selected、deselected、passed、failed、errors、
 skipped、xfailed、xpassed。空收集、skip、xfail、xpass 不可作为通过；
 result.json 将其他 lane 标记为“未运行”，未产生计数时为 null，不能算作零失败通过。
+
+每个用例有 300 秒执行上限（`tests/conftest.py` 的 `per_test_watchdog`，#105）：超时即在当前执行位置抛
+`TimeoutError`，卡住的用例以失败结束，counts.json 的 failure_diagnostics 给出用例与行号，避免整个 lane
+卡到工作流的 45 分钟上限被取消而没有任何定位信息。上限只在主线程、支持 SIGALRM 的平台上生效。
 父级预检失败可能尚无 XML，命令非零本身就是不可验收，不能仅靠 XML 是否存在判断成功。
 
 | lane | 选择表达式 | 执行边界 |
