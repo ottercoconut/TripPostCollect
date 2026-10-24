@@ -454,6 +454,11 @@ python scripts/xhs_runner.py \
 Chrome/BrowserContext 内显示二维码供操作人登录；不得读取或保存跨轮 Cookie/storage state，不得在
 轮次中途重启浏览器、自动换号、关闭验证页或手工修改账号级 checkpoint。
 
+正式轮次安排在不用这台 Mac 的时段运行：只有开头扫码（以及偶发的人工验证）需要人在场。运行期间每打开一次
+作者页，Chrome 都会抢走系统焦点，此时敲下的键会进入小红书页面或 runner 所在终端，所以运行期间不要在这台
+Mac 上打字；不要最小化或全屏 Chrome 窗口。原因与实测见[小红书 Workflow](platforms/xhs.md)“标签页、网络与
+人工验证”（#107）。
+
 若正式轮以完整的 `platform_security_limit_300011` 终态停止，且精确租约释放审计和 SQLite
 checkpoint 对账均通过，可启动 30 分钟定时续跑：
 
