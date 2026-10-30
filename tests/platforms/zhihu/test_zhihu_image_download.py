@@ -35,6 +35,7 @@ def observed_content(content_id: str = "answer-1") -> ZhihuContent:
 
 @pytest.mark.asyncio
 async def test_client_image_request_reuses_session_headers_proxy_and_referer(monkeypatch):
+    # 名称沿用迁移台账登记的 fork 节点；#113 起只复用代理与 UA，Cookie 与签名头不再发往 zhimg CDN。
     observed = {}
 
     class Response:
@@ -70,7 +71,10 @@ async def test_client_image_request_reuses_session_headers_proxy_and_referer(mon
     client = ZhiHuClient(
         ports=ports,
         proxy="http://proxy.test:8080",
-        headers={"cookie": "session=active", "user-agent": "test-agent"},
+        headers={
+            "cookie": "session=active", "user-agent": "test-agent",
+            "x-zse-93": "101_3_3.0", "x-requested-with": "fetch", "x-api-version": "3.0.91",
+        },
         playwright_page=MagicMock(),
         cookie_dict={"d_c0": "token"},
     )
@@ -82,9 +86,12 @@ async def test_client_image_request_reuses_session_headers_proxy_and_referer(mon
 
     assert payload == b"image-bytes"
     assert observed["proxy"] == "http://proxy.test:8080"
-    assert observed["headers"]["cookie"] == "session=active"
-    assert observed["headers"]["user-agent"] == "test-agent"
-    assert observed["headers"]["referer"].endswith("/question/1/answer/2")
+    # #113：zhimg CDN 不需要 zhihu.com 会话；Cookie 与签名/API 头只发往 www.zhihu.com。
+    assert observed["headers"] == {
+        "user-agent": "test-agent",
+        "accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8",
+        "referer": "https://www.zhihu.com/",
+    }
 
 
 @pytest.mark.asyncio

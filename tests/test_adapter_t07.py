@@ -18,6 +18,7 @@ import httpx
 import pytest
 
 from support import legacy_expectations as expectations
+from support import zhihu_login_paging_deviation as deviation
 from support.stable_png import solid_png
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
@@ -190,6 +191,8 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
                     {"type": "search_result", "object": entity("101" if offset == 0 else "102", "answer" if offset == 0 else "article",
                                                               full=scenario == "search_content")},
                 ]}
+                # #113：真实 search_v3 恒带 paging；末页（与 empty）以 is_end=true 证明来源耗尽，HTTP 次序不变。
+                payload["paging"] = {"is_end": scenario == "empty" or offset >= 40}
             else:
                 identity = key.rsplit("/", 1)[-1]
                 if scenario in {"detail_404", "detail_429", "detail_401", "search_detail_429", "search_detail_401"}:
@@ -268,13 +271,21 @@ SCENARIOS = ["success", "navigation_timeout", "search_content", "empty", "search
 T14_DRIVE = ("T07", "request_event_artifacts")
 
 
+def legacy_expectation(scenario):
+    """固化预期经 #113 偏离变换（见 support.zhihu_login_paging_deviation）后用于根侧比较。"""
+    expected = expectations.load(*T14_DRIVE, scenario)
+    if scenario == "login_expired":
+        return deviation.login_expired_expectation(expected)
+    return deviation.zhihu_login_paging(expected, scenario)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", SCENARIOS)
 async def test_root_matches_frozen_legacy_request_event_and_artifacts(tmp_path, monkeypatch, scenario):
     """T14：根实现与固化的旧实现结果比较（同一 drive、同一 == 语义），不加载 fork。"""
     with monkeypatch.context() as patch:
         new = await drive(tmp_path / "new", patch, scenario)
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == expectations.load(*T14_DRIVE, scenario)
+    assert expectations.scrub(new, (tmp_path, "<TMP>")) == legacy_expectation(scenario)
     check_drive_result(new, scenario)
 
 
@@ -285,16 +296,15 @@ async def test_root_entry_matches_frozen_legacy_factory(tmp_path, monkeypatch, s
     with monkeypatch.context() as patch:
         new = await drive(tmp_path / "entry", patch, scenario,
                           crawler_factory=lambda: entry.load_crawler("zhihu")())
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == expectations.load(*T14_FACTORY, scenario)
+    assert expectations.scrub(new, (tmp_path, "<TMP>")) == legacy_expectation(scenario)
 
 
 def check_drive_result(new, scenario):
     trace = new["trace"]
     names = [event[0] for event in trace]
     assert names.count("compile") == 1
-    behavior_index = names.index("behavior")
-    assert trace[behavior_index][1] == "https://www.zhihu.com/search?q=" + quote("青岛旅游") + "&type=content"
-    assert names[behavior_index - 1] == "cookies"
+    # #113：worker 从不向浏览器注入 Cookie；httpx Cookie 只来自按 URL 过滤的 browser_context.cookies()。
+    assert "add_cookies" not in names and "reload" not in names
     assert "launch" in names
     requests = [event for event in trace if event[0] == "request"]
     assert all(event[1] == "GET" for event in requests)
@@ -302,28 +312,48 @@ def check_drive_result(new, scenario):
     assert all(event[3]["headers"]["x-zse-96"].startswith("2.0_") and event[3]["headers"]["x-zst-81"].startswith("3_2.0") for event in requests)
     assert all(event[3]["headers"]["cookie"] == "d_c0=t07;z_c0=active" for event in requests)
     assert b"avatar.test" not in b"".join(new["files"].values())
-    if scenario in {"success", "navigation_timeout", "search_content", "search_retry", "image_retry", "login_expired"}:
+    images = [event for event in trace if event[0] == "image"]
+    assert all(set(event[3]["headers"]) == {"user-agent", "accept", "referer"} for event in images)
+    if scenario == "login_expired":
+        # #113：/me 401 不重试、不重新注入，直接以 login_required 结束且不进入搜索与行为阶段。
+        assert new["counts"]["/api/v4/me"] == 1
+        assert "behavior" not in names and new["records"] == []
+        assert new["events"][-1]["details"]["stop_detail"] == "login_required"
+        return
+    behavior_index = names.index("behavior")
+    assert trace[behavior_index][1] == "https://www.zhihu.com/search?q=" + quote("青岛旅游") + "&type=content"
+    assert names[behavior_index - 1] == "cookies"
+    if scenario in {"success", "navigation_timeout", "search_content", "search_retry", "image_retry"}:
         assert len(new["records"]) == 2
         assert all(record["image_count"] == 1 and len(record["image_assets"]) == 1 for record in new["records"])
         assert all(record["content_text"] == "青岛正文第一段\n青岛正文第二段" for record in new["records"])
         assert new["events"][-1]["details"]["stop_reason"] == "source_exhausted"
+        assert new["events"][-1]["details"]["stop_detail"] == "paging_is_end"
         assert new["counts"]["/api/v4/search_v3"] == (5 if scenario == "search_retry" else 3)
+    # Referer 用本轮实际检索词，不再写死 q=python。
+    assert all("q=python" not in event[3]["headers"]["referer"] for event in requests)
     if scenario == "detail_404":
         assert new["counts"]["/question/10/answer/101"] == 1
         assert new["records"] == []
-    if scenario in {"detail_retry", "detail_failed", "detail_401", "detail_429"}:
+    if scenario == "detail_retry":
         assert new["counts"]["/question/10/answer/101"] == 3
+    if scenario == "detail_failed":
+        assert new["counts"]["/question/10/answer/101"] == 3
+    if scenario in {"detail_401", "detail_429"}:
+        # #113：阻断码不再重试。
+        assert new["counts"]["/question/10/answer/101"] == 1
     if scenario in {"search_block", "image_block", "search_detail_429", "search_detail_401"}:
         assert new["events"][-1]["details"]["stop_reason"] == "runtime_failed"
+    if scenario == "search_block":
+        assert new["counts"]["/api/v4/search_v3"] == 1
+        assert new["events"][-1]["details"]["stop_detail"] == "rate_limited"
     if scenario == "image_failed":
         assert [record["content_id"] for record in new["records"]] == ["102"]
         assert any(event["type"] == "candidate_skipped" for event in new["events"])
-    if scenario == "login_expired":
-        assert new["counts"]["/api/v4/me"] == 3
-        assert names.count("add_cookies") == 4
     if scenario == "empty":
         assert new["records"] == []
         assert new["events"][-1]["details"]["stop_reason"] == "source_exhausted"
+        assert new["events"][-1]["details"]["stop_detail"] == "paging_is_end"
     if scenario == "detail_success":
         assert [record["content_id"] for record in new["records"]] == ["101", "102"]
         assert [record["content_detail_source"] for record in new["records"]] == ["answer_detail", "article_detail"]
@@ -398,6 +428,13 @@ ISSUE_49_IDENTITY_REPLACEMENTS = (
     ('"Creator anonymized hash"', '"Creator raw platform user ID"'),
     ('"User nickname (masked)"', '"User raw nickname"'),
 )
+# #113 有意偏离：头像字段只留在内存中排除正文图，不进入 model_dump；两个模型各恰好一处。
+ISSUE_113_AVATAR_FIELD = (
+    'avatar_url: str = Field(default="", description="Creator avatar URL")',
+    'avatar_url: str = Field(default="", description="Creator avatar URL", exclude=True)',
+)
+# #113：搜索列表投影改由 extract_search_page 承接（丢弃 zvideo、保留原始 paging），原方法只剩委托。
+ISSUE_113_REPLACED_DEFINITIONS = {"ZhihuExtractor.extract_contents_from_search"}
 
 
 def test_pure_definitions_keep_original_bodies():
@@ -421,13 +458,16 @@ def test_pure_definitions_keep_original_bodies():
         }:
             continue
         name = row["qualname"]
-        if name in {"ZhihuExtractor", "update_zhihu_content"}:
+        if name in {"ZhihuExtractor", "update_zhihu_content"} | ISSUE_113_REPLACED_DEFINITIONS:
             continue
         original = (FIXTURE / (row["file"].removeprefix("tools/MediaCrawler/") + ".txt")).read_text()
         original = original.replace("utils.logger", "logger")
         # #49 有意偏离：作者 ID/昵称改存平台原始值，只允许身份转换调用与对应字段描述替换。
         for old, new in ISSUE_49_IDENTITY_REPLACEMENTS:
             original = original.replace(old, new)
+        if name in {"ZhihuContent", "ZhihuCreator"}:
+            assert original.count(ISSUE_113_AVATAR_FIELD[0]) == 2, name
+            original = original.replace(*ISSUE_113_AVATAR_FIELD)
         current = (ROOT / "src/trippostcollect" / row["target"]).read_text()
         assert ast.dump(definitions(original)[name]) == ast.dump(definitions(current)[name]), name
 

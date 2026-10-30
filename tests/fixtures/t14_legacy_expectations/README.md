@@ -62,7 +62,7 @@ pytest -p pytest_asyncio.plugin \
 ## T14-C
 
 删除 fork/E 时同批删除守卫用例与只测旧桥的用例（标记 `t14_legacy_guard` / `t14_legacy_only`），
-本目录与根侧比较用例保留。之后若根实现有意改变行为，在根侧比较中登记偏离并变换预期，不修改固化文件，也不得用根实现重新生成。已登记：#59（`tests/support/platform_session_deviation.py`：T06 抖音持久 profile 位置、shared_staging 缺省暂存根）；#114（`tests/support/weibo_fetch_deviation.py`：T05 微博图片直连新浪且不带 Cookie、修复回退删除 Playwright 请求接口）。
+本目录与根侧比较用例保留。之后若根实现有意改变行为，在根侧比较中登记偏离并变换预期，不修改固化文件，也不得用根实现重新生成。已登记：#59（`tests/support/platform_session_deviation.py`：T06 抖音持久 profile 位置、shared_staging 缺省暂存根）；#113（`tests/support/zhihu_login_paging_deviation.py`：T07 知乎不注入快照 Cookie、/me 失败即 login_required、来源耗尽只认 `paging.is_end`、401/403/429 不重试、图片请求不带会话头、API Referer 用本轮检索词）；#114（`tests/support/weibo_fetch_deviation.py`：T05 微博图片直连新浪且不带 Cookie、修复回退删除 Playwright 请求接口）。
 
 已处理：
 

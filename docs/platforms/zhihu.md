@@ -8,7 +8,12 @@
 - 正式入口：`crawl_runner.py` 经 `mediacrawler_crawl.py` 启动根包 worker（`trippostcollect.platforms.entry`）
   执行知乎搜索，实现位于 `src/trippostcollect/platforms/zhihu/`。
 - 登录态必须具有经关闭重开复验的 `d_c0/z_c0` Cookie snapshot。
-- 只接受 answer 和 article；zvideo 跳过。
+- 持久 profile 是知乎登录态的唯一权威来源。worker 不向浏览器注入快照 Cookie（注入会用无
+  expires/httpOnly/secure 的副本覆盖 profile 中的实时 `z_c0`）；httpx 请求的 Cookie 在首页加载后从
+  `browser_context.cookies()` 按 `https://www.zhihu.com` 过滤读取。`/api/v4/me` 复验失败即以
+  `runtime_failed/login_required` 运行级阻断结束，不在本轮重新登录；操作人先运行
+  `scripts/login_warmup.py --platforms zhihu` 再重跑。
+- 只接受 answer 和 article；zvideo 在搜索解析阶段丢弃，只计为已处理候选并进入候选记忆，不写项目 JSONL。
 - 去重键为内容 ID，answer URL 同时保留 question ID。
 - 行为阶段必须在本轮真实关键词搜索页完成；页面导航超时可以作为软失败继续检查已验证 Cookie 和
   API，最终仍以 API、字段和阻断证据决定结果。
@@ -28,6 +33,10 @@
   `url_token` 另存为 `creator_url_token`，只用于拼接主页 `https://www.zhihu.com/people/<url_token>`，
   不作为平台 ID。
 - 详情候选级失败有限重试后写 `candidate_skipped`；登录、授权、频控和验证仍是运行级阻断。
+- 401/403（`login_required`）、429（`rate_limited`）和 404 是平台确定答复，不重试；其余请求错误按
+  3 次、间隔 1 秒有限重试。搜索阶段的运行级失败保留各自错误码。详情 404 按候选级详情缺失处理。
+- 日志只记录内容 ID、类型、计数和状态码；不打印整条记录、search_v3 原始响应或 `/me` 响应。作者头像
+  只在内存中用于排除正文图候选，不进入 `model_dump` 和项目 JSONL。
 
 ## 正文图片与资产键
 
@@ -35,16 +44,24 @@
 作者主页、封面和搜索预览在候选阶段排除。
 
 同帖 `zhimg.com` URL 按稳定资源路径移除 `_r`、`_<width>w` 等已知变换后缀，保留首次 URL 后再下载；
-原始 `image_list` 保留所有 URL 证据。该规则不作用于外部域名，不使用感知哈希或视觉相似度。平台层
-复用当前登录会话写 staging/manifest，根项目再执行通用字节复验、同帖 SHA-256 去重、晋升和事务。
+原始 `image_list` 保留所有 URL 证据。该规则不作用于外部域名，不使用感知哈希或视觉相似度。zhimg CDN
+图片请求只发 UA、图片类 Accept 和 `Referer: https://www.zhihu.com/`，不带 zhihu.com Cookie 和 API
+签名头；平台层写 staging/manifest，根项目再执行通用字节复验、同帖 SHA-256 去重、晋升和事务。
 
 历史 manifest 中旧 zhimg URL 变体的严格兼容条件见[数据持久化](../data-persistence.md)；它只用于
 恢复复验，不改变当前候选投影。
 
 ## 发现与诊断
 
+来源耗尽只认 search_v3 原始响应的 `paging.is_end is True`，停止细节为 `paging_is_end`，批次
+`source_has_more` 取自响应。过滤后为空（例如整页都是 zvideo 或非内容卡片）但 `is_end=false` 的页
+照常完成批次并翻到下一页，`raw_batch_count` 记原始条数。响应缺 `paging` 或 `data`、`data` 为空却未
+声明 `is_end=true`、HTTP 404 都以 `runtime_failed/search_response_invalid` 结束，不推断为耗尽。
+2026-10-30 之前按“过滤后空页”记下的 `empty_page` 耗尽结论不可信，需重新扫描。
+
 有 checkpoint 时先刷新顶部，再从保存页码继续；完整页保存下一页，页中途停止保留当前页。正常
-workflow 不手工传 `--start-page` 或 `--resume-summary`。
+workflow 不手工传 `--start-page` 或 `--resume-summary`。搜索 API 的 Referer 使用本轮实际检索词的
+搜索页。
 
 批次使用 `stagnation_basis=valid_new` 记录诊断计数：只有批次没有新增满足正式字段 profile、且
 数据库中不存在的有效记录时才累计；新无效候选、重复候选和数据库已有记录都不能重置该计数。

@@ -2148,7 +2148,7 @@
        "min_count": 10
       },
       {
-       "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_filtered_empty_search_page_claims_exhaustion_baseline",
+       "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_filtered_only_page_with_is_end_false_continues_to_next_page",
        "lane": "component"
       }
      ]

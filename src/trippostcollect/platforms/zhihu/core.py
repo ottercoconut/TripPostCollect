@@ -29,10 +29,12 @@ from trippostcollect.application.contracts import ImageStagingError, ZhihuSettin
 from trippostcollect.core import resources
 from trippostcollect.core.paths import platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
-from trippostcollect.runtime.cookies import convert_str_cookie_to_dict
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError, is_runtime_blocking_image_error
 from . import models as constant
-from .models import ZhihuContent, DataFetchError, PlatformRuntimeError, ZhihuImageDownloadError, ZhihuDetailFetchError
+from .models import (
+    ZhihuContent, ZhihuSearchPage, DataFetchError, PlatformRuntimeError,
+    ZhihuImageDownloadError, ZhihuDetailFetchError,
+)
 from .client import ZhiHuClient
 from .parser import ZhihuExtractor, judge_zhihu_url, merge_search_content_detail
 from . import parser as zhihu_store
@@ -216,47 +218,27 @@ class ZhihuCrawler:
                 logger.warning(
                     f"[ZhihuCrawler.start] Initial homepage navigation did not settle: {exc}"
                 )
-            if self.settings.LOGIN_TYPE == "cookie" and self.ports.initial_cookies():
-                for key, value in convert_str_cookie_to_dict(self.ports.initial_cookies()).items():
-                    await self.browser_context.add_cookies(
-                        [{"name": key, "value": value, "domain": ".zhihu.com", "path": "/"}]
-                    )
-                try:
-                    await self.context_page.reload(
-                        wait_until="domcontentloaded",
-                        timeout=30_000,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        f"[ZhihuCrawler.start] Cookie reload did not settle: {exc}"
-                    )
+            # #113：持久 profile 是知乎登录态的唯一来源；不向浏览器注入快照 Cookie，
+            # 否则会用无 expires/httpOnly/secure 的副本覆盖 profile 中的实时 z_c0。
             await self._wait_for_initial_login_settle()
             await self._close_stale_pages(self.context_page)
 
-            # Create a client to interact with the zhihu website.
-            self.zhihu_client = await self.create_zhihu_client(httpx_proxy_format)
-            if not await self.zhihu_client.pong():
-                login_obj = self.ports.login_factory(
-                    login_type=self.settings.LOGIN_TYPE,
-                    login_phone="",  # input your phone number
-                    browser_context=self.browser_context,
-                    context_page=self.context_page,
-                    cookie_str=self.ports.initial_cookies(),
-                )
-                await login_obj.begin()
-                await self.zhihu_client.update_cookies(
-                    browser_context=self.browser_context,
-                    urls=self.cookie_urls,
-                )
-
             search_cookie_keyword = self.settings.KEYWORDS.split(",", maxsplit=1)[0].strip()
+            # Create a client to interact with the zhihu website.
+            self.zhihu_client = await self.create_zhihu_client(
+                httpx_proxy_format, referer_keyword=search_cookie_keyword,
+            )
+            if not await self.zhihu_client.pong():
+                self._stop_for_login_required()
+                return
+
             # Zhihu's search API requires opening the search page first to access cookies, homepage alone won't work
             logger.info(
                 "[ZhihuCrawler.start] Zhihu navigating to search page to get search page cookies, this process takes about 5 seconds"
             )
             try:
                 await self.context_page.goto(
-                    f"{self.index_url}/search?q={quote(search_cookie_keyword)}&type=content",
+                    self._search_page_url(search_cookie_keyword),
                     wait_until="domcontentloaded",
                     timeout=30_000,
                 )
@@ -283,6 +265,22 @@ class ZhihuCrawler:
 
             logger.info("[ZhihuCrawler.start] Zhihu Crawler finished ...")
 
+    def _stop_for_login_required(self) -> None:
+        """登录态未通过 /me 复验：运行级阻断结束，提示操作人先跑 warmup，不在本轮重新登录。"""
+        logger.error(
+            "[ZhihuCrawler.start] Zhihu login state is invalid in the persistent profile; "
+            "run scripts/login_warmup.py --platforms zhihu before the next formal run"
+        )
+        if self.settings.CRAWLER_TYPE != "search":
+            raise PlatformRuntimeError("zhihu login state invalid", code="login_required")
+        accumulator = self.ports.accumulator_factory("zhihu")
+        accumulator.mark_runtime_failed(
+            "login_required",
+            source_page=self.settings.START_PAGE,
+            resume_page=self.settings.START_PAGE,
+            discovery_phase="frontier",
+        )
+
     async def search(self) -> None:
         """Search for notes and retrieve their comment information."""
         logger.info("[ZhihuCrawler.search] Begin search zhihu keywords")
@@ -290,6 +288,7 @@ class ZhihuCrawler:
         accumulator = self.ports.accumulator_factory("zhihu")
         for keyword in self.settings.KEYWORDS.split(","):
             self.source_keyword = keyword
+            self.zhihu_client.set_search_referer(self._search_page_url(keyword))
             logger.info(
                 f"[ZhihuCrawler.search] Current search keyword: {keyword}"
             )
@@ -312,17 +311,21 @@ class ZhihuCrawler:
                             f"[ZhihuCrawler.search] search zhihu keyword: {keyword}, "
                             f"page: {requested_page}"
                         )
-                        content_list: List[ZhihuContent] = (
+                        search_page: ZhihuSearchPage = (
                             await self.zhihu_client.get_note_by_keyword(
                                 keyword=keyword,
                                 page=requested_page,
                             )
                         )
-                        if not content_list:
-                            logger.info("No more content!")
+                        # #113：只有原始 paging.is_end=true 才是来源耗尽证据；过滤后为空的页
+                        # （例如整页都是 zvideo 或非内容卡片）照常完成批次并翻到下一页。
+                        raw_batch_count = search_page.raw_count
+                        source_has_more = not search_page.is_end
+                        if raw_batch_count == 0:
+                            logger.info("[ZhihuCrawler.search] paging.is_end=true on an empty page")
                             if discovery_phase == "frontier":
                                 accumulator.mark_source_exhausted(
-                                    "empty_page",
+                                    "paging_is_end",
                                     source_page=requested_page,
                                     raw_batch_count=0,
                                     resume_page=requested_page,
@@ -331,7 +334,7 @@ class ZhihuCrawler:
                                 )
                             break
 
-                        raw_batch_count = len(content_list)
+                        content_list: List[ZhihuContent] = search_page.contents
                         pending_content_ids: set[str] = set()
                         unknown_contents: List[ZhihuContent] = []
                         for content in content_list:
@@ -352,6 +355,10 @@ class ZhihuCrawler:
 
                         page += 1
                         accumulator.begin_batch()
+                        # zvideo 在解析阶段已丢弃；这里只计为已处理候选并进入候选记忆，不写内容记录。
+                        for video_id in search_page.video_ids:
+                            if not accumulator.is_known(video_id):
+                                accumulator.consider(video_id, valid=False)
                         processed_count = 0
                         stored_contents: List[ZhihuContent] = []
                         for content in content_list:
@@ -452,19 +459,35 @@ class ZhihuCrawler:
                                 break
 
                         batch_complete = processed_count >= len(content_list)
+                        resume_page = page if batch_complete else requested_page
                         if accumulator.finish_batch(
                             source_page=requested_page,
+                            source_has_more=source_has_more,
                             raw_batch_count=raw_batch_count,
-                            resume_page=page if batch_complete else requested_page,
+                            resume_page=resume_page,
                             batch_complete=batch_complete,
                             discovery_phase=discovery_phase,
                             count_stagnation=discovery_phase == "frontier",
                         ):
                             break
-                    except DataFetchError:
-                        logger.error("[ZhihuCrawler.search] Search content error")
+                        if search_page.is_end:
+                            if discovery_phase == "frontier":
+                                accumulator.mark_source_exhausted(
+                                    "paging_is_end",
+                                    source_page=requested_page,
+                                    raw_batch_count=raw_batch_count,
+                                    resume_page=resume_page,
+                                    source_has_more=False,
+                                    batch_complete=batch_complete,
+                                    discovery_phase=discovery_phase,
+                                )
+                            break
+                    except DataFetchError as exc:
+                        # 登录失效、频控与响应无效保留各自错误码；其余请求失败统一为 search_request_failed。
+                        code = getattr(exc, "code", "") or "search_request_failed"
+                        logger.error(f"[ZhihuCrawler.search] Search request failed: {code}")
                         accumulator.mark_runtime_failed(
-                            "search_request_failed",
+                            code,
                             source_page=page,
                             resume_page=page,
                             discovery_phase=discovery_phase,
@@ -746,11 +769,17 @@ class ZhihuCrawler:
                 int(failed_asset.get("attempts") or 1),
             ) from exc
 
-    async def create_zhihu_client(self, httpx_proxy: Optional[str]) -> ZhiHuClient:
+    def _search_page_url(self, keyword: str) -> str:
+        return f"{self.index_url}/search?q={quote(keyword.strip())}&type=content"
+
+    async def create_zhihu_client(
+        self, httpx_proxy: Optional[str], *, referer_keyword: str,
+    ) -> ZhiHuClient:
         """Create zhihu client"""
         logger.info(
             "[ZhihuCrawler.create_zhihu_client] Begin create zhihu API client ..."
         )
+        # httpx 只取浏览器加载首页后、会随 www.zhihu.com 请求发出的 Cookie（按 URL 过滤）。
         cookie_str, cookie_dict = await self.ports.convert_browser_context_cookies(
             self.browser_context,
             urls=self.cookie_urls,
@@ -762,7 +791,7 @@ class ZhihuCrawler:
                 "accept-language": "zh-CN,zh;q=0.9",
                 "cookie": cookie_str,
                 "priority": "u=1, i",
-                "referer": "https://www.zhihu.com/search?q=python&time_interval=a_year&type=content",
+                "referer": self._search_page_url(referer_keyword),
                 "user-agent": self.user_agent,
                 "x-api-version": "3.0.91",
                 "x-app-za": "OS=Web",
@@ -887,5 +916,10 @@ async def store_zhihu_content(content_item: ZhihuContent, *, source_keyword, cur
         content_item, source_keyword=source_keyword(),
     )
     local_db_item.update({"last_modify_ts": current_timestamp()})
-    logger.info(f"[store.zhihu.update_zhihu_content] zhihu content: {local_db_item}")
+    # #82：整条记录含作者资料与正文，日志只记标识和计数。
+    logger.info(
+        "[store.zhihu.update_zhihu_content] zhihu content "
+        f"id:{local_db_item.get('content_id')}, type:{local_db_item.get('content_type')}, "
+        f"images:{local_db_item.get('image_count')}"
+    )
     await content_sink_factory().store_content(local_db_item)

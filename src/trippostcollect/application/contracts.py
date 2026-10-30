@@ -327,14 +327,6 @@ class ZhihuClientPorts:
 
 
 @dataclass(frozen=True)
-class ZhihuLoginPorts:
-    """二维码提取与显示仍由运行时拥有。"""
-
-    find_qrcode_img_from_canvas: Callable[..., Any]
-    show_qrcode: Callable[..., Any]
-
-
-@dataclass(frozen=True)
 class ZhihuPorts:
     """知乎编排借用的 IO 能力与操作起点 reader；装配不执行 IO。"""
 
@@ -343,14 +335,12 @@ class ZhihuPorts:
     project_browser_args: Callable[[], list[str]]
     run_required_human_behavior: Callable[..., Any]
     client_factory: Callable[..., Any]
-    login_factory: Callable[..., Any]
     convert_browser_context_cookies: Callable[..., Any]
     fetch_image_bytes_with_retry: Callable[..., Any]
     accumulator_factory: Callable[..., Any]
     refresh_max_pages: Callable[[], int]
     source_exhausted: Callable[[], bool]
     initial_settle_seconds: Callable[[], float]
-    initial_cookies: Callable[[], str]
     current_timestamp: Callable[[], int]
     content_sink_factory: Callable[[], ContentSink]
     image_stager_factory: Callable[[], ImageStager]
