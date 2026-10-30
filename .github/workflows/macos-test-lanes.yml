@@ -21,7 +21,7 @@ permissions:
 jobs:
   lanes:
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -84,6 +84,8 @@ jobs:
             --no-sync \
             python scripts/dev/adapter_ledger.py progress
       - name: 执行独立副本分组及选站装配
+        # 正常 7–13 分钟；#105 间歇卡死时由步骤超时自动失败，不再等到 job 上限。
+        timeout-minutes: 20
         shell: bash
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ env.TPC_WORK }}/pw-browsers
