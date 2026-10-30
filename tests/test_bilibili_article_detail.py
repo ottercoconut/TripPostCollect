@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from trippostcollect.platforms.bilibili import client as bilibili_client
 from trippostcollect.platforms.bilibili import core as bilibili_core
+from support.bilibili_search import paged_search
 
 import io
 import json
@@ -50,7 +51,7 @@ def hydrated_record(post_id: str = "123") -> dict:
         {
             "title": "详情标题",
             "content": "第一段完整正文。\n第二段完整正文。",
-            "image_urls": ["https://example.test/body.jpg"],
+            "content_pic_list": ["https://example.test/body.jpg"],
             "opus": {"content": {"paragraphs": []}},
         },
         attempts=1,
@@ -168,7 +169,7 @@ def test_short_detail_body_is_accepted_when_it_is_observed() -> None:
 
     record = mediacrawler_crawl.hydrate_bilibili_article_record(
         search_record,
-        {"content": "短文", "image_urls": ["https://example.test/short.jpg"]},
+        {"content": "短文", "content_pic_list": ["https://example.test/short.jpg"]},
         attempts=1,
     )
     record.update(
@@ -292,7 +293,7 @@ def test_rate_limit_detail_stops_run_without_marking_candidate_seen(
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_article_page",
-        lambda keyword, page, **kwargs: [search_item("blocked")],
+        paged_search({1: [search_item("blocked")]}),
     )
 
     def blocked_detail(post_id, cookie_header):
@@ -359,11 +360,7 @@ def test_detail_failure_is_recorded_seen_and_next_post_continues(monkeypatch, tm
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_article_page",
-        lambda keyword, page, **kwargs: (
-            [search_item("failed")]
-            if page == 1
-            else ([search_item("success")] if page == 2 else [])
-        ),
+        paged_search({1: [search_item("failed")], 2: [search_item("success")]}),
     )
 
     def fail_detail(post_id, cookie_header):
@@ -378,7 +375,7 @@ def test_detail_failure_is_recorded_seen_and_next_post_continues(monkeypatch, tm
             {
                 "title": "详情标题",
                     "content": "青岛可用的完整正文",
-                "image_urls": ["https://example.test/body.jpg"],
+                "content_pic_list": ["https://example.test/body.jpg"],
                 "opus": {"content": {"paragraphs": []}},
             },
             1,
@@ -455,7 +452,7 @@ def test_follower_failure_retries_then_records_skip_and_continues(
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_article_page",
-        lambda keyword, page, **kwargs: [failed, success] if page == 1 else [],
+        paged_search({1: [failed, success]}),
     )
     monkeypatch.setattr(
         bilibili_core,
@@ -464,7 +461,7 @@ def test_follower_failure_retries_then_records_skip_and_continues(
             {
                 "title": "详情标题",
                     "content": "青岛可用的完整正文",
-                "image_urls": ["https://example.test/body.jpg"],
+                "content_pic_list": ["https://example.test/body.jpg"],
                 "opus": {"content": {"paragraphs": []}},
             },
             1,

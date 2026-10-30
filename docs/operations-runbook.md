@@ -434,6 +434,10 @@ python scripts/login_warmup.py \
 微博必须在桌面 SSO 页完成人工登录，再回到移动端刷新 Cookie；最终只有移动接口同时返回
 `login=true` 和有效 `uid` 才成功。`WBPSESS` 不能单独作为成功证据。
 
+B站只有页面内请求 `api.bilibili.com/x/web-interface/nav` 返回 `isLogin=true` 才成功；`SESSDATA`、
+`DedeUserID` 只作标记，过期会话的 Cookie 仍会留在 profile 里，不能单独作为成功证据。正式抓取开始时
+同样校验 nav，未登录即以 `login_required` 停止。
+
 ### 小红书
 
 小红书不使用通用 warmup，也没有独立登录命令。逻辑账号槽位不保存平台身份；首次使用前必须显式

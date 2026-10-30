@@ -315,6 +315,7 @@ from trippostcollect.platforms.bilibili.models import (
     BilibiliArticleDetailError as BilibiliArticleDetailError,
     BilibiliFollowerFetchError as BilibiliFollowerFetchError,
     BilibiliRuntimeBlocked as BilibiliRuntimeBlocked,
+    BilibiliSearchPage as BilibiliSearchPage,
 )
 from trippostcollect.platforms.bilibili.parser import (
     clean_html_text as clean_html_text,
@@ -323,11 +324,15 @@ from trippostcollect.platforms.bilibili.parser import (
     normalize_bilibili_detail_image_url as normalize_bilibili_detail_image_url,
     extract_bilibili_detail_images as extract_bilibili_detail_images,
     hydrate_bilibili_article_record as hydrate_bilibili_article_record,
+    bilibili_delta_to_text as bilibili_delta_to_text,
+    bilibili_delta_image_urls as bilibili_delta_image_urls,
+    bilibili_bfs_asset_key as bilibili_bfs_asset_key,
     BILIBILI_HTML_IMAGE_RE as BILIBILI_HTML_IMAGE_RE,
 )
 from trippostcollect.platforms.bilibili.client import (
     bilibili_detail_headers as bilibili_detail_headers,
     bilibili_image_headers as bilibili_image_headers,
+    bilibili_request_stop_detail as bilibili_request_stop_detail,
     fetch_bilibili_article_detail as fetch_bilibili_article_detail,
     fetch_bilibili_article_detail_with_retry as fetch_bilibili_article_detail_with_retry,
     fetch_bilibili_wbi_keys as fetch_bilibili_wbi_keys,
@@ -535,10 +540,9 @@ def validate_formal_record(
 def fetch_bilibili_image_bytes(
     source_url: str,
     post_id: str,
-    cookie_header: str = "",
 ) -> RemoteImagePreview:
     return _bilibili_client.fetch_bilibili_image_bytes(
-        source_url, post_id, cookie_header,
+        source_url, post_id,
         ports=BilibiliImageFetchPorts(
             fetch_remote_image_bytes=fetch_remote_image_bytes,
             DEFAULT_ARCHIVE_IMAGE_MAX_BYTES=DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
@@ -550,7 +554,6 @@ def fetch_bilibili_image_bytes(
 def download_bilibili_record_images(
     record: dict[str, Any],
     *,
-    cookie_header: str,
     platform_data_root: Path,
     fetcher: Any | None = None,
     sleep_fn: Any | None = None,
@@ -558,7 +561,7 @@ def download_bilibili_record_images(
     max_attempts: int = BILIBILI_IMAGE_MAX_ATTEMPTS,
 ) -> list[ImageManifestEntry]:
     return _bilibili_core.download_bilibili_record_images(
-        record, cookie_header=cookie_header, platform_data_root=platform_data_root,
+        record, platform_data_root=platform_data_root,
         fetcher=fetcher, sleep_fn=sleep_fn, log_fn=log_fn, max_attempts=max_attempts,
         ports=BilibiliImagePorts(
             ImageManifestEntry=ImageManifestEntry,

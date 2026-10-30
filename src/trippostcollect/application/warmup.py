@@ -56,7 +56,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "code": "bili",
         "label": "B站",
         "urls": ["https://www.bilibili.com"],
-        "required": "cookie SESSDATA or DedeUserID",
+        "required": "api.bilibili.com /x/web-interface/nav isLogin=true",
     },
 }
 
@@ -278,6 +278,35 @@ async def weibo_api_check(page: Page) -> dict[str, Any]:
     return project_login_api_result(result, success_keys=("login", "uid"))
 
 
+async def bilibili_api_check(page: Page) -> dict[str, Any]:
+    # 过期会话的 SESSDATA 仍留在浏览器里；登录态以 nav 的 isLogin 为准（上游 c03ab60 同一缺陷）。
+    try:
+        result = await page.evaluate(
+            """
+            async () => {
+              try {
+                const res = await fetch('https://api.bilibili.com/x/web-interface/nav', {
+                  credentials: 'include'
+                });
+                const payload = await res.json();
+                const data = payload && payload.data || {};
+                return {
+                  ok: res.ok && payload && payload.code === 0,
+                  status: res.status,
+                  code: payload && payload.code,
+                  login: data.isLogin === true
+                };
+              } catch (error) {
+                return {ok: false, login: false, error: String(error)};
+              }
+            }
+            """
+        )
+        return result if isinstance(result, dict) else {"ok": False, "login": False, "error": "unexpected result"}
+    except Exception as exc:
+        return {"ok": False, "login": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 async def current_state(context: BrowserContext, page: Page, platform_key: str) -> dict[str, Any]:
     urls = PLATFORMS[platform_key]["urls"]
     cookie_urls = [PLATFORMS[platform_key]["verify_url"]] if platform_key == "weibo" else urls
@@ -315,10 +344,13 @@ async def current_state(context: BrowserContext, page: Page, platform_key: str) 
             "api_uid": api.get("uid"),
         }
     elif platform_key == "bilibili":
-        ok = bool(cookies.get("SESSDATA") or cookies.get("DedeUserID"))
+        api = await bilibili_api_check(page)
+        ok = api.get("login") is True
         markers = {
             "SESSDATA": bool(cookies.get("SESSDATA")),
             "DedeUserID": bool(cookies.get("DedeUserID")),
+            "api_ok": api.get("ok"),
+            "api_login": api.get("login"),
         }
     else:
         ok = False

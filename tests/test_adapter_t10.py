@@ -62,6 +62,7 @@ def old_module(name, namespace=None):
         for check in T112_LOGIN_API_CHECKS:
             source = t112_login_api_check(source, check)
         module.__dict__["project_login_api_result"] = warmup.project_login_api_result
+        source = t115_bilibili_nav_login(source)
     if "from __future__ import annotations" not in source:
         source = "from __future__ import annotations\n" + source
     exec(compile(source, name, "exec"), module.__dict__)
@@ -109,6 +110,46 @@ def t83_sandbox_enabled(source):
     return source.replace(anchor, anchor + '        "chromium_sandbox": True,\n')
 
 
+T115_OLD_BILIBILI_REQUIRED = '        "required": "cookie SESSDATA or DedeUserID",\n'
+T115_NEW_BILIBILI_REQUIRED = '        "required": "api.bilibili.com /x/web-interface/nav isLogin=true",\n'
+T115_OLD_BILIBILI_BRANCH = (
+    '    elif platform_key == "bilibili":\n'
+    '        ok = bool(cookies.get("SESSDATA") or cookies.get("DedeUserID"))\n'
+    "        markers = {\n"
+    '            "SESSDATA": bool(cookies.get("SESSDATA")),\n'
+    '            "DedeUserID": bool(cookies.get("DedeUserID")),\n'
+    "        }\n"
+)
+T115_NEW_BILIBILI_BRANCH = (
+    '    elif platform_key == "bilibili":\n'
+    "        api = await bilibili_api_check(page)\n"
+    '        ok = api.get("login") is True\n'
+    "        markers = {\n"
+    '            "SESSDATA": bool(cookies.get("SESSDATA")),\n'
+    '            "DedeUserID": bool(cookies.get("DedeUserID")),\n'
+    '            "api_ok": api.get("ok"),\n'
+    '            "api_login": api.get("login"),\n'
+    "        }\n"
+)
+
+
+def t115_bilibili_nav_login(source):
+    """#115 授权差异：B站登录判定改为页面内 nav 请求的 isLogin，cookie 存在只作标记。
+
+    旧分支与说明文字必须各恰好出现一次；新增的 bilibili_api_check 原样取自现行 warmup.py，
+    插在 current_state 之前，其余源码逐字不变。
+    """
+    assert source.count(T115_OLD_BILIBILI_REQUIRED) == 1
+    assert source.count(T115_OLD_BILIBILI_BRANCH) == 1
+    source = source.replace(T115_OLD_BILIBILI_REQUIRED, T115_NEW_BILIBILI_REQUIRED)
+    source = source.replace(T115_OLD_BILIBILI_BRANCH, T115_NEW_BILIBILI_BRANCH)
+    current = (ROOT / "src/trippostcollect/application/warmup.py").read_text()
+    check = ast.get_source_segment(current, function(current, "bilibili_api_check"))
+    anchor = "async def current_state(context: BrowserContext, page: Page, platform_key: str)"
+    assert source.count(anchor) == 1 and check
+    return source.replace(anchor, check + "\n\n\n" + anchor)
+
+
 def t14_without_fork_check(node):
     """T14 授权差异：入口不再要求 fork 目录存在。"""
     for child in ast.walk(node):
@@ -148,6 +189,8 @@ def test_migrated_ast(row):
             source = t112_login_api_check(source, name)
         elif name == "launch_login_context":
             source = t83_sandbox_enabled(source)
+        elif name == "current_state":
+            source = t115_bilibili_nav_login(source)
     if row["disposition"] == "薄":
         target = ROOT / "src/trippostcollect/application/warmup.py"
         if row["file"] == "scripts/login_warmup.py":

@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 from PIL import Image
 
 from trippostcollect.artifacts.image_manifest import parse_manifest
+from support.bilibili_search import paged_search
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,7 +110,7 @@ def install_successful_run_mocks(monkeypatch) -> None:
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_article_page",
-        lambda keyword, page, **kwargs: [search_item("123")] if page == 1 else [],
+        paged_search({1: [search_item("123")]}),
     )
     monkeypatch.setattr(
         bilibili_core,
@@ -121,11 +122,12 @@ def install_successful_run_mocks(monkeypatch) -> None:
 
 
 def test_detail_images_download_in_order_with_current_session_headers(tmp_path: Path) -> None:
+    # 节点名受冻结台账登记，保持不变；#115 起图片请求只带 article Referer，不带平台 Cookie。
     record = hydrated_record()
-    fetched: list[tuple[str, str, str]] = []
+    fetched: list[tuple[str, str]] = []
 
-    def fetcher(source_url: str, post_id: str, cookie_header: str):
-        fetched.append((source_url, post_id, cookie_header))
+    def fetcher(source_url: str, post_id: str):
+        fetched.append((source_url, post_id))
         return mediacrawler_crawl.RemoteImagePreview(
             content=png_bytes(),
             media_type="image/png",
@@ -135,14 +137,13 @@ def test_detail_images_download_in_order_with_current_session_headers(tmp_path: 
 
     entries = mediacrawler_crawl.download_bilibili_record_images(
         record,
-        cookie_header="SESSDATA=test",
         platform_data_root=tmp_path,
         fetcher=fetcher,
         sleep_fn=lambda value: None,
     )
 
     assert [item[0] for item in fetched] == record["image_urls"]
-    assert all(item[1:] == ("123", "SESSDATA=test") for item in fetched)
+    assert all(item[1] == "123" for item in fetched)
     assert "https://preview.test/search-preview.jpg" not in [item[0] for item in fetched]
     assert [entry.source_index for entry in entries] == [0, 1]
     assert all(entry.fetch_status == "downloaded" for entry in entries)
@@ -150,8 +151,8 @@ def test_detail_images_download_in_order_with_current_session_headers(tmp_path: 
     assert all((tmp_path / str(entry.staging_path)).is_file() for entry in entries)
     assert list(tmp_path.rglob("*.mp4")) == []
 
-    headers = mediacrawler_crawl.bilibili_image_headers("123", "SESSDATA=test")
-    assert headers["Cookie"] == "SESSDATA=test"
+    headers = mediacrawler_crawl.bilibili_image_headers("123")
+    assert "Cookie" not in headers
     assert headers["Referer"] == "https://www.bilibili.com/read/cv123/"
     assert headers["User-Agent"] == mediacrawler_crawl.BILIBILI_BROWSER_USER_AGENT
 
@@ -168,7 +169,6 @@ def test_search_only_record_never_creates_image_request(tmp_path: Path) -> None:
 
     entries = mediacrawler_crawl.download_bilibili_record_images(
         record,
-        cookie_header="",
         platform_data_root=tmp_path,
         fetcher=fetcher,
     )
@@ -194,7 +194,6 @@ def test_retryable_image_failure_writes_only_failed_manifest_status(tmp_path: Pa
 
     entries = mediacrawler_crawl.download_bilibili_record_images(
         record,
-        cookie_header="",
         platform_data_root=tmp_path,
         fetcher=fetcher,
         sleep_fn=sleeps.append,
@@ -229,7 +228,6 @@ def test_terminal_http_failure_is_not_mislabeled_retryable(tmp_path: Path) -> No
 
     entries = mediacrawler_crawl.download_bilibili_record_images(
         record,
-        cookie_header="",
         platform_data_root=tmp_path,
         fetcher=fetcher,
         sleep_fn=lambda _value: None,
@@ -245,7 +243,7 @@ def test_empty_image_response_retries_and_recovers(tmp_path: Path) -> None:
     record = hydrated_record()
     responses = [b"", b"", png_bytes(), png_bytes()]
 
-    def fetcher(source_url: str, post_id: str, cookie_header: str):
+    def fetcher(source_url: str, post_id: str):
         return mediacrawler_crawl.RemoteImagePreview(
             content=responses.pop(0),
             media_type="image/png",
@@ -255,7 +253,6 @@ def test_empty_image_response_retries_and_recovers(tmp_path: Path) -> None:
 
     entries = mediacrawler_crawl.download_bilibili_record_images(
         record,
-        cookie_header="",
         platform_data_root=tmp_path,
         fetcher=fetcher,
         sleep_fn=lambda _value: None,
@@ -283,7 +280,7 @@ def test_bilibili_run_writes_manifest_and_never_downloads_preview(monkeypatch, t
     install_successful_run_mocks(monkeypatch)
     fetched: list[str] = []
 
-    def fetch_image(source_url: str, post_id: str, cookie_header: str):
+    def fetch_image(source_url: str, post_id: str):
         fetched.append(source_url)
         return mediacrawler_crawl.RemoteImagePreview(
             content=png_bytes(),
@@ -337,7 +334,7 @@ def test_image_failure_is_recorded_seen_without_blocking_pages(monkeypatch, tmp_
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
     install_successful_run_mocks(monkeypatch)
 
-    def fail_image(source_url: str, post_id: str, cookie_header: str):
+    def fail_image(source_url: str, post_id: str):
         raise mediacrawler_crawl.RemoteImageFetchError(
             "HTTP 503",
             http_status=503,
@@ -391,7 +388,7 @@ def test_skipped_candidate_allows_empty_page_exhaustion(
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_article_page",
-        lambda keyword, page, **kwargs: [search_item("123")] if page == 1 else [],
+        paged_search({1: [search_item("123")]}),
     )
     monkeypatch.setattr(
         mediacrawler_crawl,
@@ -456,9 +453,7 @@ def test_terminal_image_failure_is_skipped_and_later_candidate_continues(
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_article_page",
-        lambda keyword, page, **kwargs: (
-            [search_item("123"), search_item("456")] if page == 1 else []
-        ),
+        paged_search({1: [search_item("123"), search_item("456")]}),
     )
 
     result = mediacrawler_crawl.run_bilibili_article_search(
@@ -537,12 +532,10 @@ def test_image_failure_does_not_block_later_bilibili_candidate(
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_article_page",
-        lambda keyword, page, **kwargs: (
-            [search_item("123"), search_item("124")] if page == 1 else []
-        ),
+        paged_search({1: [search_item("123"), search_item("124")]}),
     )
 
-    def selective_image(source_url: str, post_id: str, cookie_header: str):
+    def selective_image(source_url: str, post_id: str):
         if post_id == "123":
             raise mediacrawler_crawl.RemoteImageFetchError(
                 "HTTP 503",
@@ -595,10 +588,7 @@ def test_known_post_id_is_skipped_before_detail_or_image_requests(monkeypatch, t
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
     monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
     requested_pages: list[int] = []
-
-    def fetch_page(keyword, page, **kwargs):
-        requested_pages.append(page)
-        return [search_item("123")] if page == 1 else []
+    fetch_page = paged_search({1: [search_item("123")]}, requested=requested_pages)
 
     monkeypatch.setattr(bilibili_core, "fetch_bilibili_article_page", fetch_page)
     monkeypatch.setattr(
