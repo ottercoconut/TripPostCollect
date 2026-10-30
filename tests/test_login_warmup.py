@@ -188,3 +188,173 @@ def test_weibo_desktop_login_requires_sso_or_changed_session() -> None:
         {"WBPSESS": "anonymous"},
         {"WBPSESS": "anonymous", "SSOLoginState": "present"},
     ) is True
+
+
+# ---------- #112：warmup 报告不含平台原始响应与头像 ----------
+# 用 Playwright 自带的 node driver 执行 page.evaluate 使用的同一段脚本，只把 fetch 换成合成响应；
+# 不联网、不启动浏览器。
+
+import json  # noqa: E402
+import subprocess  # noqa: E402
+
+from playwright._impl._driver import compute_driver_executable  # noqa: E402
+
+from trippostcollect.records.sanitization import AUTHOR_AVATAR_KEYS  # noqa: E402
+
+LOGIN_SCRIPT_RUNNER = r"""
+const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+globalThis.fetch = async () => {
+  if (input.throws) { throw new TypeError('Failed to fetch https://www.zhihu.com/secret?token=abc'); }
+  return {
+    ok: input.status >= 200 && input.status < 300,
+    status: input.status,
+    json: async () => JSON.parse(input.body),
+    text: async () => input.body,
+  };
+};
+(async () => {
+  const result = await eval('(' + input.script + ')')();
+  process.stdout.write(JSON.stringify(result));
+})();
+"""
+AVATAR = "https://picx.zhimg.com/v2-synthetic_l.jpg"
+ME_BODY = json.dumps({
+    "id": "abc", "uid": "1234567890", "name": "青岛旅人", "url_token": "qd",
+    "avatar_url": AVATAR, "avatar_url_template": AVATAR.replace("_l", "_{size}"),
+    "email": "secret@example.test", "headline": "签名",
+})
+ERROR_BODY = json.dumps({"error": {
+    "code": 100, "name": "AuthenticationInvalidRequest",
+    "message": "请求头或参数封装错误 " + AVATAR, "need_login": True,
+}})
+WEIBO_BODY = json.dumps({"ok": 1, "data": {
+    "login": True, "uid": "7654321", "avatar_hd": AVATAR, "profile_image_url": AVATAR, "screen_name": "n",
+}})
+
+
+def evaluate_login_script(name: str, *, status: int, body: str = "", throws: bool = False) -> dict:
+    from trippostcollect.application import warmup
+
+    scripts = []
+
+    class RecordingPage:
+        async def evaluate(self, script):
+            scripts.append(script)
+            node, _cli = compute_driver_executable()
+            completed = subprocess.run(
+                [str(node), "-e", LOGIN_SCRIPT_RUNNER],
+                input=json.dumps({"script": script, "status": status, "body": body, "throws": throws}),
+                capture_output=True, text=True, timeout=60, env={}, check=True,
+            )
+            return json.loads(completed.stdout)
+
+    result = asyncio.run(getattr(warmup, name)(RecordingPage()))
+    assert len(scripts) == 1
+    return result
+
+
+def assert_no_avatar_or_raw_text(value) -> None:
+    text = json.dumps(value, ensure_ascii=False)
+    assert AVATAR not in text and "zhimg" not in text
+    assert not any(f'"{key}"' in text for key in AUTHOR_AVATAR_KEYS)
+    for raw in ("secret@example.test", "签名", "请求头", "token=abc", '"text"', "need_login"):
+        assert raw not in text
+
+
+def test_zhihu_me_success_keeps_only_uid_and_name() -> None:
+    result = evaluate_login_script("zhihu_api_check", status=200, body=ME_BODY)
+
+    assert result == {"ok": True, "status": 200, "uid": "1234567890", "name": "青岛旅人"}
+    assert_no_avatar_or_raw_text(result)
+
+
+def test_zhihu_me_failure_keeps_only_status_and_clean_error_identity() -> None:
+    result = evaluate_login_script("zhihu_api_check", status=401, body=ERROR_BODY)
+
+    assert result == {"ok": False, "status": 401, "error_code": 100, "error_name": "AuthenticationInvalidRequest"}
+    assert_no_avatar_or_raw_text(result)
+
+
+def test_zhihu_me_non_json_body_keeps_no_raw_text() -> None:
+    result = evaluate_login_script("zhihu_api_check", status=502, body=f"<html>{AVATAR}</html>")
+
+    assert result == {"ok": False, "status": 502}
+
+
+def test_login_check_network_error_keeps_only_error_name() -> None:
+    for name in ("zhihu_api_check", "weibo_api_check"):
+        result = evaluate_login_script(name, status=0, throws=True)
+
+        assert result["ok"] is False and result["error_name"] == "TypeError"
+        assert_no_avatar_or_raw_text(result)
+
+
+def test_weibo_config_keeps_only_login_and_uid() -> None:
+    result = evaluate_login_script("weibo_api_check", status=200, body=WEIBO_BODY)
+
+    assert result == {"ok": True, "status": 200, "login": True, "uid": "7654321"}
+    assert_no_avatar_or_raw_text(result)
+
+
+def test_login_check_projection_drops_unknown_and_unsafe_fields() -> None:
+    from trippostcollect.application import warmup
+
+    result = warmup.project_login_api_result(
+        {"ok": False, "status": 403, "text": ME_BODY, "avatar_url": AVATAR,
+         "error_code": f"code {AVATAR}", "error_name": "Error: " + "x" * 200},
+        success_keys=("uid", "name"),
+    )
+    assert result == {"ok": False, "status": 403}
+    assert warmup.project_login_api_result(None, success_keys=("uid",)) == {
+        "ok": False, "status": None, "error_name": "unexpected_result",
+    }
+
+
+def test_warmup_report_files_carry_no_avatar(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """知乎 warmup 全流程写出的 zhihu.json（含 initial_state、state、reopen_verify）不含头像键与原文。"""
+
+    from trippostcollect.application import warmup
+
+    monkeypatch.setattr(
+        warmup, "zhihu_api_check",
+        lambda _page: asyncio.sleep(0, warmup.project_login_api_result(
+            {"ok": True, "status": 200, "uid": "1", "name": "n", "text": ME_BODY, "avatar_url": AVATAR},
+            success_keys=("uid", "name"),
+        )),
+    )
+
+    class FakePage:
+        url = "https://www.zhihu.com"
+
+        async def goto(self, *_a, **_k):
+            return None
+
+        async def evaluate(self, _script):
+            return {}
+
+        async def wait_for_timeout(self, _ms):
+            return None
+
+    class FakeContext:
+        pages = [FakePage()]
+
+        async def cookies(self, _urls=None):
+            return [{"name": "z_c0", "value": "z"}, {"name": "d_c0", "value": "d"}]
+
+        async def close(self):
+            return None
+
+    async def fake_launch(*_args, **_kwargs):
+        return FakeContext()
+
+    monkeypatch.setattr(warmup, "launch_login_context", fake_launch)
+    monkeypatch.setattr(warmup, "discover_cdp_browser_path", lambda: None)
+    args = argparse.Namespace(
+        browser_path=None, timeout_seconds=5, no_close_on_success=False, skip_reopen_verify=False,
+    )
+    result = asyncio.run(warmup.warmup_one(None, "zhihu", tmp_path, args))
+
+    assert result["ok"] is True
+    written = json.loads((tmp_path / "zhihu.json").read_text(encoding="utf-8"))
+    assert written["state"]["api"] == {"ok": True, "status": 200, "uid": "1", "name": "n"}
+    assert_no_avatar_or_raw_text(written)

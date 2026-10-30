@@ -47,7 +47,6 @@ from trippostcollect.artifacts.paths import resolve_media_root
 from trippostcollect.core.paths import LOCAL_MEDIA_ROOT
 from trippostcollect.core.paths import PROJECT_ROOT
 from trippostcollect.core.paths import ensure_dir
-from trippostcollect.core.paths import require_platform_session_migrated
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.db.connection import connect_db
 from trippostcollect.db.content import FORMAL_SQLITE_BUSY_TIMEOUT_MS
@@ -1086,9 +1085,6 @@ def run_platform(
     shared_policy_disabled = platform_key == "xhs"
     policy_cleanup = clear_site_policy_state(site.key) if shared_policy_disabled else None
     try:
-        if platform_key != "xhs":
-            # T14 失败关闭：迁移中断留下 `.partial` 残留时不消耗站点预算、不启动浏览器或 worker。
-            require_platform_session_migrated(platform_key)
         with site_request_guard(
             site,
             label="mediacrawler:formal_platform_session",

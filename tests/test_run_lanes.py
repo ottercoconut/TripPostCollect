@@ -663,5 +663,6 @@ def test_policy_denies_project_login_profiles(tmp_path):
     source = (tmp_path / "source").resolve()
     source.mkdir()
     policy = run_lanes.sandbox_policy(source, tmp_path / "output", "component")
-    for relative in ("data/runtime/platform_sessions", "tools/MediaCrawler/browser_data"):
-        assert f'(deny file-read* file-write* (subpath {json.dumps(str(source / relative))}))' in policy
+    relative = "data/runtime/platform_sessions"
+    assert f'(deny file-read* file-write* (subpath {json.dumps(str(source / relative))}))' in policy
+    assert "tools/MediaCrawler" not in policy

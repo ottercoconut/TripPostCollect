@@ -428,6 +428,10 @@ def test_cookie_pure_functions_match_baseline(legacy, platform, monkeypatch):
     assert cookies.cookies_to_header(values) == legacy.cookies_to_header(values)
     for header in ("", "a=1;a=2; =x;bare;b=a=b", " z_c0=x ;d_c0=y"):
         assert cookies.cookie_names_from_header(header) == legacy.cookie_names_from_header(header)
+    # #112 有意偏离：旧实现按 split("=") 切分，值含 "=" 的 cookie（如 b=a=b）被静默丢弃；现按首个 "=" 切分。
+    assert cookies.convert_str_cookie_to_dict("a=1;a=2; =x;bare;b=a=b") == {"a": "2", "": "x", "b": "a=b"}
+    assert legacy.convert_str_cookie_to_dict("a=1;a=2; =x;bare;b=a=b") == {"a": "2", "": "x"}
+    for header in ("", " z_c0=x ;d_c0=y"):
         assert cookies.convert_str_cookie_to_dict(header) == legacy.convert_str_cookie_to_dict(header)
     for values in (None, [], [{"name": "a", "value": "b"}, {"name": "a", "value": "c"}, {}]):
         assert cookies.convert_cookies(values) == legacy.convert_cookies(values)

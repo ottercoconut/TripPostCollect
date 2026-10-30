@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -173,6 +174,53 @@ async def safe_local_storage(page: Page) -> dict[str, Any]:
         return {}
 
 
+# 登录检查接口结果只按白名单投影后进入 warmup 报告（#112）：成功只留 uid、name，失败只留状态码与
+# 清洗过的错误 code/name。平台原始响应（含 avatar_url 等头像字段）与异常原文都不进入任何项目文件。
+_LOGIN_API_ERROR_TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+_LOGIN_API_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _login_api_token(value: Any, pattern: re.Pattern[str] = _LOGIN_API_ERROR_TOKEN) -> str | int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and pattern.fullmatch(value):
+        return value
+    return None
+
+
+def project_login_api_result(result: Any, *, success_keys: tuple[str, ...]) -> dict[str, Any]:
+    """把页面内登录检查的返回值投影成可落盘的最小字段。"""
+
+    if not isinstance(result, dict):
+        return {"ok": False, "status": None, "error_name": "unexpected_result"}
+    status = result.get("status")
+    projected: dict[str, Any] = {
+        "ok": result.get("ok") is True,
+        "status": status if isinstance(status, int) and not isinstance(status, bool) else None,
+    }
+    if projected["ok"]:
+        for key in success_keys:
+            value = result.get(key)
+            if key == "uid":
+                value = _login_api_token(value, _LOGIN_API_ID)
+            elif key == "name":
+                value = value if isinstance(value, str) else None
+            else:
+                value = value is True
+            projected[key] = value
+        return projected
+    for key in success_keys:
+        if key == "login":
+            projected["login"] = False
+    for key in ("error_code", "error_name"):
+        value = _login_api_token(result.get(key))
+        if value is not None:
+            projected[key] = value
+    return projected
+
+
 async def zhihu_api_check(page: Page) -> dict[str, Any]:
     try:
         result = await page.evaluate(
@@ -182,25 +230,26 @@ async def zhihu_api_check(page: Page) -> dict[str, Any]:
                 const res = await fetch('/api/v4/me?include=email,is_active,is_bind_phone', {
                   credentials: 'include'
                 });
-                const text = await res.text();
                 let parsed = null;
-                try { parsed = JSON.parse(text); } catch (_) {}
+                try { parsed = await res.json(); } catch (_) {}
+                const error = parsed && parsed.error || {};
                 return {
                   ok: res.ok,
                   status: res.status,
                   uid: parsed && parsed.uid,
                   name: parsed && parsed.name,
-                  text: text.slice(0, 300)
+                  error_code: error.code,
+                  error_name: error.name
                 };
               } catch (error) {
-                return { ok: false, error: String(error) };
+                return { ok: false, error_name: error && error.name };
               }
             }
             """
         )
-        return result if isinstance(result, dict) else {"ok": False, "error": "unexpected result"}
     except Exception as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        result = {"ok": False, "error_name": type(exc).__name__}
+    return project_login_api_result(result, success_keys=("uid", "name"))
 
 
 async def weibo_api_check(page: Page) -> dict[str, Any]:
@@ -219,14 +268,14 @@ async def weibo_api_check(page: Page) -> dict[str, Any]:
                   uid: data.uid || null
                 };
               } catch (error) {
-                return {ok: false, login: false, error: String(error)};
+                return {ok: false, login: false, error_name: error && error.name};
               }
             }
             """
         )
-        return result if isinstance(result, dict) else {"ok": False, "login": False, "error": "unexpected result"}
     except Exception as exc:
-        return {"ok": False, "login": False, "error": f"{type(exc).__name__}: {exc}"}
+        result = {"ok": False, "login": False, "error_name": type(exc).__name__}
+    return project_login_api_result(result, success_keys=("login", "uid"))
 
 
 async def current_state(context: BrowserContext, page: Page, platform_key: str) -> dict[str, Any]:
@@ -310,8 +359,6 @@ def weibo_desktop_login_completed(initial: dict[str, Any], current: dict[str, An
 
 async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
     platform = PLATFORMS[platform_key]
-    # T14：迁移中断留下 `.partial` 残留时拒绝启动，避免在其旁边建出空 profile。
-    paths.require_platform_session_migrated(platform_key)
     profile_dir = profile_dir_for(platform_key)
     ensure_dir(profile_dir)
     out_path = batch_dir / f"{platform_key}.json"
