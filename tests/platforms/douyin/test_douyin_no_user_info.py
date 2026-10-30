@@ -52,11 +52,12 @@ def _build_aweme_item() -> dict:
             "avatar_thumb": {"url_list": ["http://x/avatar_thumb.jpg"]},
             "avatar_medium": {"url_list": ["http://x/avatar_medium.jpg"]},
             "signature": "这是创作者个人签名内容",
-            "follower_count": 12345,
+            "follower_count": 0,  # 搜索作者对象的占位粉丝数，#116 起不再采信
             "following_count": 321,
             "aweme_count": 88,
             "total_favorited": 7654321,
         },
+        "creator_profile": {"status_code": 0, "user": {"follower_count": 12345}},
         "statistics": {
             "digg_count": 100,
             "collect_count": 5,
@@ -161,11 +162,10 @@ def test_douyin_aweme_masks_user_info():
     # 5. 内容字段保留(desc/title 是作品描述,不禁用)
     assert captured.get("desc") == aweme["desc"]
     assert captured.get("title") == aweme["desc"]
-    # 6. _extract_* 内容字段正常提取(非空)
-    assert captured.get("cover_url") == "http://x/cover.jpg"
-    assert captured.get("video_download_url") == "http://x/video_h264.mp4"
-    assert captured.get("music_download_url") == "http://x/music.mp3"
+    # 6. #116：封面、视频、音乐地址不再写入内容记录；正文图仍来自 images。
+    assert not {"cover_url", "video_download_url", "music_download_url"} & set(captured)
     assert "http://x/note_img1.jpg" in captured.get("note_download_url", "")
+    assert captured.get("author_followers_source") == "creator_profile"
     # 7. 互动数据拍平
     assert captured.get("liked_count") == "100"
     assert captured.get("collected_count") == "5"
@@ -245,9 +245,6 @@ def test_douyin_store_end_to_end_sqlite(monkeypatch):
     assert row.author_liked_count == "7654321"
     assert row.desc == aweme["desc"]
     assert row.title == aweme["desc"]
-    assert row.cover_url == "http://x/cover.jpg"
-    assert row.video_download_url == "http://x/video_h264.mp4"
-    assert row.music_download_url == "http://x/music.mp3"
     # 禁用列在 ORM 上不存在(自省)
     orm_cols = set(LEGACY_COLUMNS["DouyinAweme"])
     assert not (orm_cols & FORBIDDEN_KEYS), f"ORM 仍含禁用列: {orm_cols & FORBIDDEN_KEYS}"

@@ -31,7 +31,7 @@ TRUSTED_CONTENT_DETAIL_SOURCES = {
     "bilibili": BILIBILI_TRUSTED_DETAIL_SOURCES,
     "weibo": frozenset({"search_mblog_complete", "mobile_detail"}),
     "xhs": frozenset({"note_detail"}),
-    "douyin": frozenset({"aweme_detail"}),
+    "douyin": frozenset({"aweme_detail", "search_aweme_info"}),
     "zhihu": frozenset({"search_content", "answer_detail", "article_detail"}),
 }
 

@@ -1929,6 +1929,14 @@ PROGRESS_RESOLUTIONS = {
         "退出", None, "#51取消用户ID哈希，平台原始值经records.identity.platform_user_id保存；T14随旧桥删除"),
     ("tools/MediaCrawler/tools/user_hash.py", "mask_nickname"): (
         "退出", None, "#51取消昵称脱敏，平台原始值经records.identity.platform_nickname保存；T14随旧桥删除"),
+    # #116：抖音内容记录不再写封面、视频、音乐地址；三个提取函数无其他调用方，随字段删除。
+    **{
+        ("tools/MediaCrawler/store/douyin/__init__.py", name): (
+            "退出", None, "#116：视频只计入已处理候选，内容记录删去cover_url/video_download_url/music_download_url")
+        for name in (
+            "_extract_content_cover_url", "_extract_video_download_url", "_extract_music_download_url",
+        )
+    },
     # #71 第一批：小红书取数改为浏览器 L1（被动截获页面响应或读取页面状态），被替代的符号直接删除。
     ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._pong_with_network_recovery"): (
         "退出", None, "#71：登录态改由截获的user/me（guest=false）与可见UI共同确认，self-info探测删除"),

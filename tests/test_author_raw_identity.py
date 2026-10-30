@@ -66,6 +66,7 @@ def douyin_record() -> dict:
     return douyin_parser.update_douyin_aweme(
         aweme, source_keyword="青岛旅游", current_timestamp=_clock,
         save_data_option="jsonl", enable_get_medias=True,
+        content_detail_source="search_aweme_info", expected_aweme_id=aweme["aweme_id"],
     )
 
 

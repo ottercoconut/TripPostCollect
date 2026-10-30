@@ -33,14 +33,25 @@ import httpx
 from playwright.async_api import BrowserContext, Page, Error as PlaywrightError
 from trippostcollect.application.contracts import DouyinClientPorts
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError, classified_http_image_error
-from trippostcollect.platforms.douyin.models import DataFetchError, SearchResponseError, SearchChannelType, SearchSortType, PublishTimeType
+from trippostcollect.platforms.douyin.models import (
+    DataFetchError, PlatformRuntimeError, SearchResponseError, SearchChannelType, SearchSortType, PublishTimeType,
+)
 from trippostcollect.platforms.douyin.parser import (
     _find_douyin_detail, decode_douyin_json_body, validate_douyin_search_response,
     classify_empty_first_page, DOUYIN_RESULT_LINK_SELECTOR, DOUYIN_NO_RESULT_MARKERS,
+    DOUYIN_DETAIL_CONTENT_SOURCE, DOUYIN_REBUILT_ITEM_SOURCE_KEY,
 )
 from trippostcollect.platforms.douyin.signer import get_a_bogus
 
 logger = logging.getLogger("MediaCrawler")
+
+# 上游 380b426：边缘网关 ArgusSecurityPlugin 只要求 detail 请求带 x-tt-argus，当前不校验取值。
+# 搜索与作者资料请求不加：真实浏览器在这些请求上的取值不是 1。
+DOUYIN_DETAIL_ARGUS_HEADER_VALUE = "1"
+DOUYIN_GATEWAY_BLOCK_MARKERS = ("ArgusSecurityPlugin", "Blocked by")
+# 媒体请求头参照上游 0ca7b29：带浏览器 UA 与 Referer 防盗链，不带 Cookie。
+DOUYIN_MEDIA_REFERER = "https://www.douyin.com/"
+DOUYIN_MEDIA_ACCEPT = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
 
 FIRST_PAGE_VISIBLE_FALLBACK_REASONS = {
     "search_verify_check",
@@ -331,15 +342,27 @@ class DouYinClient:
         for aweme_id in first_page_ids:
             try:
                 aweme_detail = await self.get_video_by_id(aweme_id)
+            except PlatformRuntimeError:
+                raise
             except Exception as exc:
                 logger.warning(
                     "[DouYinClient._build_visible_first_page_fallback] detail fetch failed, "
                     f"aweme_id: {aweme_id}, reason: {type(exc).__name__}"
                 )
                 continue
-            if isinstance(aweme_detail, dict) and aweme_detail.get("aweme_id"):
-                data.append({"aweme_info": aweme_detail})
-        if not data:
+            if isinstance(aweme_detail, dict) and str(aweme_detail.get("aweme_id") or "") == aweme_id:
+                data.append(
+                    {
+                        "aweme_info": aweme_detail,
+                        DOUYIN_REBUILT_ITEM_SOURCE_KEY: DOUYIN_DETAIL_CONTENT_SOURCE,
+                    }
+                )
+        if len(data) < expected_first_page_count:
+            # #116：部分详情失败时不能按完整页返回 has_more=1，否则失败的可见 ID 永久丢失。
+            logger.warning(
+                "[DouYinClient._build_visible_first_page_fallback] insufficient detail evidence, "
+                f"expected: {expected_first_page_count}, detail_count: {len(data)}"
+            )
             return None
         logger.info(
             "[DouYinClient._build_visible_first_page_fallback] rebuilt visible first page, "
@@ -422,7 +445,8 @@ class DouYinClient:
             "update_version_code": "0" if "/general/search/stream/" in uri else "170400",
         }
         verify_fp = str(self.cookie_dict.get("s_v_web_id") or "")
-        uifid = str(self.cookie_dict.get("UIFID_TEMP") or self.cookie_dict.get("UIFID") or "")
+        # 上游 cf513e7：uifid 优先取 UIFID，缺失时才退到 UIFID_TEMP。
+        uifid = str(self.cookie_dict.get("UIFID") or self.cookie_dict.get("UIFID_TEMP") or "")
         if verify_fp:
             common_params.update({"verifyFp": verify_fp, "fp": verify_fp})
         if uifid:
@@ -439,9 +463,31 @@ class DouYinClient:
             a_bogus = await get_a_bogus(uri, query_string, post_data, headers["User-Agent"], self.playwright_page)
             params["a_bogus"] = a_bogus
 
+    @staticmethod
+    def _raise_for_http_status(response) -> None:
+        """#116：解码前按 HTTP 状态分类；阻断类直接停止本轮，不进候选重试或首页重建。
+
+        异常文本带错误码：detail 模式下异常会冒出 worker，runner 只能从 stderr 文本分类。
+        """
+        status = response.status_code
+        if 200 <= status < 300:
+            return
+        if status == 401:
+            raise PlatformRuntimeError("douyin HTTP 401 login_required", code="login_required")
+        if status == 403 and any(marker in response.text for marker in DOUYIN_GATEWAY_BLOCK_MARKERS):
+            logger.error(
+                "[DouYinClient.request] platform gateway blocked request, "
+                f"status: {status}, body_prefix: {response.text[:80]!r}"
+            )
+            raise PlatformRuntimeError("douyin HTTP 403 blocked_or_forbidden", code="blocked_or_forbidden")
+        if status == 429:
+            raise PlatformRuntimeError("douyin HTTP 429 rate_limited", code="rate_limited")
+        raise DataFetchError(f"douyin HTTP {status}")
+
     async def request(self, method, url, **kwargs):
         async with self.ports.make_async_client(proxy=self.proxy) as client:
             response = await client.request(method, url, timeout=self.timeout, **kwargs)
+        self._raise_for_http_status(response)
         try:
             if response.content == b"" or response.text == "blocked":
                 logger.error(f"request params incrr, response.text: {response.text}")
@@ -591,6 +637,7 @@ class DouYinClient:
         params = {"aweme_id": aweme_id}
         headers = copy.copy(self.headers)
         del headers["Origin"]
+        headers["x-tt-argus"] = DOUYIN_DETAIL_ARGUS_HEADER_VALUE
         res = await self.get("/aweme/v1/web/aweme/detail/", params, headers)
         return res.get("aweme_detail", {})
 
@@ -602,13 +649,36 @@ class DouYinClient:
             "publish_video_strategy_type": 2,
             "personal_center_strategy": 1,
         }
-        return await self.get(uri, params)
+        payload = await self.get(uri, params)
+        # #116：只有业务状态为 0 且带 user 节点才算取得作者资料；否则按空资料走作者补全失败。
+        if payload.get("status_code") not in (0, "0") or not isinstance(payload.get("user"), dict):
+            logger.warning(
+                "[DouYinClient.get_user_info] creator profile envelope rejected, "
+                f"status_code: {payload.get('status_code')!r}, "
+                f"user_present: {isinstance(payload.get('user'), dict)}"
+            )
+            return {}
+        return payload
 
+
+    def _media_headers(self) -> Dict[str, str]:
+        """图片 CDN 请求头：与 API 同源的浏览器 UA、站点 Referer 与图片 Accept；Cookie 不透传。"""
+        headers = {"Referer": DOUYIN_MEDIA_REFERER, "Accept": DOUYIN_MEDIA_ACCEPT}
+        user_agent = str(self.headers.get("User-Agent") or "")
+        if user_agent:
+            headers["User-Agent"] = user_agent
+        return headers
 
     async def get_aweme_media(self, url: str) -> Union[bytes, None]:
         async with self.ports.make_async_client(proxy=self.proxy) as client:
             try:
-                response = await client.request("GET", url, timeout=self.timeout, follow_redirects=True)
+                response = await client.request(
+                    "GET",
+                    url,
+                    headers=self._media_headers(),
+                    timeout=self.timeout,
+                    follow_redirects=True,
+                )
                 response.raise_for_status()
                 return response.content
             except httpx.HTTPStatusError as exc:
@@ -754,6 +824,9 @@ class DouYinClient:
             detail = await self._get_video_by_id(aweme_id)
             if isinstance(detail, dict) and detail.get("aweme_id"):
                 return detail
+        except PlatformRuntimeError:
+            # 登录失效、网关拦截与限流停止本轮，不改走浏览器详情重试。
+            raise
         except Exception as exc:
             original_error = exc
         try:

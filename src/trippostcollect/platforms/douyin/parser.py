@@ -19,6 +19,21 @@ DOUYIN_RESULT_LINK_SELECTOR = ', '.join(
         '[id^="waterfall_item_"]:visible',
     )
 )
+# #116：作者粉丝量只认作者资料响应 user 节点（不读搜索作者对象、不递归嵌套对象）；键名沿用原
+# follower_keys 的全部候选与顺序，避免实际响应的键名与预期不同时把真实粉丝量误判为缺失。
+DOUYIN_PROFILE_FOLLOWER_KEYS = (
+    "follower_count",
+    "followers_count",
+    "mplatform_followers_count",
+    "fans_count",
+    "fans",
+)
+# #116：内容记录如实标注正文来源；两种来源都必须通过 douyin_content_detail_observed。
+DOUYIN_SEARCH_CONTENT_SOURCE = "search_aweme_info"
+DOUYIN_DETAIL_CONTENT_SOURCE = "aweme_detail"
+DOUYIN_IMAGE_NOTE_AWEME_TYPES = frozenset({"68"})
+# 首页重建用详情接口结果组成搜索项时打的标记，平台响应本身不会带这个键。
+DOUYIN_REBUILT_ITEM_SOURCE_KEY = "trippostcollect_content_source"
 DOUYIN_NO_RESULT_MARKERS = (
     "暂无搜索结果",
     "没有找到相关结果",
@@ -453,34 +468,21 @@ def _author_metric(author: Dict, creator_profile: Dict, *keys: str):
 # @Desc    :
 # TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
 def _normalized_author_stats(author: Dict, creator_profile: Dict) -> Dict:
-    follower_keys = (
-        "follower_count",
-        "followers_count",
-        "mplatform_followers_count",
-        "fans_count",
-        "fans",
+    # #116：粉丝量只读作者资料响应的 user 节点；搜索作者对象的占位 0 不再记为已观测。
+    profile_user = creator_profile.get("user") if isinstance(creator_profile, dict) else None
+    profile_user = profile_user if isinstance(profile_user, dict) else {}
+    follower_values = [
+        profile_user[key]
+        for key in DOUYIN_PROFILE_FOLLOWER_KEYS
+        if profile_user.get(key) not in (None, "")
+        and not isinstance(profile_user.get(key), (dict, list))
+    ]
+    # 与原实现相同：两个键都在时优先取非 0 值，真实 0 仍算已观测。
+    followers_count = next(
+        (value for value in follower_values if str(value) != "0"),
+        follower_values[0] if follower_values else None,
     )
-    followers_count = _author_metric(
-        author,
-        creator_profile,
-        *follower_keys,
-    )
-    expected = {key.lower() for key in follower_keys}
-
-    def observed(data: Any) -> bool:
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if str(key).lower() in expected and value not in (None, "") and not isinstance(value, (dict, list)):
-                    return True
-                if isinstance(value, (dict, list)) and observed(value):
-                    return True
-        elif isinstance(data, list):
-            return any(observed(item) for item in data)
-        return False
-
-    profile_observed = observed(creator_profile)
-    search_observed = observed(author)
-    followers_observed = profile_observed or search_observed
+    followers_observed = followers_count is not None
     return {
         "followers_count": followers_count,
         "fans_count": followers_count,
@@ -488,8 +490,7 @@ def _normalized_author_stats(author: Dict, creator_profile: Dict) -> Dict:
         "aweme_count": _author_metric(author, creator_profile, "aweme_count", "post_count", "posts_count", "video_count"),
         "author_liked_count": _author_metric(author, creator_profile, "total_favorited", "favorited_count", "liked_count"),
         "followers_observed": followers_observed,
-        "author_followers_source": "creator_profile" if profile_observed else ("search_author" if search_observed else "missing"),
-        "author_followers_zero_suspicious": str(followers_count) == "0" and not profile_observed,
+        "author_followers_source": "creator_profile" if followers_observed else "missing",
     }
 
 
@@ -593,92 +594,30 @@ def _extract_note_image_assets(aweme_detail: Dict) -> List[Dict]:
     return assets
 
 
-# -*- coding: utf-8 -*-
-# Copyright (c) 2025 relakkes@gmail.com
-#
-# This file is part of MediaCrawler project.
-# Repository: https://github.com/NanmiCoder/MediaCrawler/blob/main/store/douyin/__init__.py
-# GitHub: https://github.com/NanmiCoder
-# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-#
+# TripPostCollect #116：图文判定与正文来源证据，搜索卡片和详情两条路径共用。
+def is_douyin_image_note(aweme_item: Dict) -> bool:
+    """aweme_type 或正文图证明是图文；其余候选按视频计入已处理，不写内容记录。"""
+    return (
+        str(aweme_item.get("aweme_type")) in DOUYIN_IMAGE_NOTE_AWEME_TYPES
+        or bool(_extract_note_image_list(aweme_item))
+    )
 
-# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
-# -*- coding: utf-8 -*-
-# @Author  : relakkes@gmail.com
-# @Time    : 2024/1/14 18:46
-# @Desc    :
-# TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
-def _extract_content_cover_url(aweme_detail: Dict) -> str:
+def douyin_content_detail_observed(aweme_item: Dict, expected_aweme_id: str) -> bool:
+    """#116：搜索卡片与详情都必须是同一 aweme_id 的图文，并带非空 desc、发帖时间和作者 uid。
+
+    desc 为空时不能用标题或封面文字顶替。
     """
-    Extract video cover URL
-
-    Args:
-        aweme_detail (Dict): Douyin content details
-
-    Returns:
-        str: Video cover URL
-    """
-    res_cover_url = ""
-
-    video_item = aweme_detail.get("video", {})
-    raw_cover_url_list = (video_item.get("raw_cover", {}) or video_item.get("origin_cover", {})).get("url_list", [])
-    if raw_cover_url_list and len(raw_cover_url_list) > 1:
-        res_cover_url = raw_cover_url_list[1]
-
-    return res_cover_url
-
-
-# -*- coding: utf-8 -*-
-# Copyright (c) 2025 relakkes@gmail.com
-#
-# This file is part of MediaCrawler project.
-# Repository: https://github.com/NanmiCoder/MediaCrawler/blob/main/store/douyin/__init__.py
-# GitHub: https://github.com/NanmiCoder
-# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-#
-
-# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
-
-# -*- coding: utf-8 -*-
-# @Author  : relakkes@gmail.com
-# @Time    : 2024/1/14 18:46
-# @Desc    :
-# TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
-def _extract_video_download_url(aweme_detail: Dict) -> str:
-    """
-    Extract video download URL
-
-    Args:
-        aweme_detail (Dict): Douyin video
-
-    Returns:
-        str: Video download URL
-    """
-    video_item = aweme_detail.get("video", {})
-    url_h264_list = video_item.get("play_addr_h264", {}).get("url_list", [])
-    url_256_list = video_item.get("play_addr_256", {}).get("url_list", [])
-    url_list = video_item.get("play_addr", {}).get("url_list", [])
-    actual_url_list = url_h264_list or url_256_list or url_list
-    if not actual_url_list or len(actual_url_list) < 2:
-        return ""
-    return actual_url_list[-1]
+    author = aweme_item.get("author")
+    author = author if isinstance(author, dict) else {}
+    return bool(
+        str(expected_aweme_id or "")
+        and str(aweme_item.get("aweme_id") or "") == str(expected_aweme_id)
+        and is_douyin_image_note(aweme_item)
+        and str(aweme_item.get("desc") or "").strip()
+        and aweme_item.get("create_time")
+        and author.get("uid")
+    )
 
 
 # -*- coding: utf-8 -*-
@@ -705,47 +644,16 @@ def _extract_video_download_url(aweme_detail: Dict) -> str:
 # @Time    : 2024/1/14 18:46
 # @Desc    :
 # TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
-def _extract_music_download_url(aweme_detail: Dict) -> str:
-    """
-    Extract music download URL
-
-    Args:
-        aweme_detail (Dict): Douyin video
-
-    Returns:
-        str: Music download URL
-    """
-    music_item = aweme_detail.get("music", {})
-    play_url = music_item.get("play_url", {})
-    music_url = play_url.get("uri", "")
-    return music_url
-
-
-# -*- coding: utf-8 -*-
-# Copyright (c) 2025 relakkes@gmail.com
-#
-# This file is part of MediaCrawler project.
-# Repository: https://github.com/NanmiCoder/MediaCrawler/blob/main/store/douyin/__init__.py
-# GitHub: https://github.com/NanmiCoder
-# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-#
-
-# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
-
-# -*- coding: utf-8 -*-
-# @Author  : relakkes@gmail.com
-# @Time    : 2024/1/14 18:46
-# @Desc    :
-# TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
-def update_douyin_aweme(aweme_item: Dict, *, source_keyword: str, current_timestamp: Callable[[], int], save_data_option: str, enable_get_medias: bool) -> Dict:
+def update_douyin_aweme(
+    aweme_item: Dict,
+    *,
+    source_keyword: str,
+    current_timestamp: Callable[[], int],
+    save_data_option: str,
+    enable_get_medias: bool,
+    content_detail_source: str,
+    expected_aweme_id: str,
+) -> Dict:
     aweme_id = aweme_item.get("aweme_id")
     user_info = aweme_item.get("author", {})
     creator_profile = aweme_item.get("creator_profile") or {}
@@ -767,16 +675,12 @@ def update_douyin_aweme(aweme_item: Dict, *, source_keyword: str, current_timest
         "aweme_count": author_stats.get("aweme_count"),
         "author_liked_count": author_stats.get("author_liked_count"),
         "author_followers_source": author_stats.get("author_followers_source"),
-        "author_followers_zero_suspicious": author_stats.get("author_followers_zero_suspicious"),
         "liked_count": str(interact_info.get("digg_count")),
         "collected_count": str(interact_info.get("collect_count")),
         "comment_count": str(interact_info.get("comment_count")),
         "share_count": str(interact_info.get("share_count")),
         "last_modify_ts": current_timestamp(),
         "aweme_url": f"https://www.douyin.com/video/{aweme_id}",
-        "cover_url": _extract_content_cover_url(aweme_item),
-        "video_download_url": _extract_video_download_url(aweme_item),
-        "music_download_url": _extract_music_download_url(aweme_item),
         "note_download_url": ",".join(asset["url"] for asset in image_assets),
         "source_keyword": source_keyword,
     }
@@ -784,8 +688,12 @@ def update_douyin_aweme(aweme_item: Dict, *, source_keyword: str, current_timest
         save_content_item["image_assets"] = image_assets
         save_content_item["image_list_source"] = "aweme.images"
     if save_data_option == "jsonl":
-        save_content_item["content_detail_status"] = "detail_observed"
-        save_content_item["content_detail_source"] = "aweme_detail"
+        save_content_item["content_detail_status"] = (
+            "detail_observed"
+            if douyin_content_detail_observed(aweme_item, expected_aweme_id)
+            else "detail_unobserved"
+        )
+        save_content_item["content_detail_source"] = content_detail_source
     return save_content_item
 
 

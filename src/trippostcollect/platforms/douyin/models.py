@@ -62,6 +62,15 @@ class DataFetchError(RequestError):
     """something error when fetch"""
 
 
+# TripPostCollect #116：HTTP 状态在解码前分类；登录失效、网关拦截与限流必须停止本轮，不进候选重试。
+class PlatformRuntimeError(DataFetchError):
+    """A login, gateway-block or rate-limit response that must stop the current run."""
+
+    def __init__(self, message: str, *, code: str):
+        super().__init__(message)
+        self.code = code
+
+
 # -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com
 #

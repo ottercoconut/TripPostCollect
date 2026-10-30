@@ -8,11 +8,20 @@ offset/search ID、详情和严格图文资产差异。
 - 正式入口：`crawl_runner.py` 经 `mediacrawler_crawl.py` 启动根包 worker（`trippostcollect.platforms.entry`）
   执行抖音搜索，实现位于 `src/trippostcollect/platforms/douyin/`。
 - 登录后先进入本轮关键词页，再执行共享行为阶段并刷新 API Cookie。
-- 只接受图文作品；视频计入已处理候选但不进入内容或媒体下载。
-- 正文只接受 aweme 详情非空 `desc`，保存
-  `content_detail_status=detail_observed`、`content_detail_source=aweme_detail`。
+- 只接受图文作品（`aweme_type=68` 或带正文 `images`）；视频计入已处理候选，不请求作者资料，
+  不写内容记录，也不下载媒体。内容记录不写 `cover_url`、`video_download_url`、`music_download_url`。
+- 正文来源如实标注，不为每篇额外请求详情：搜索路径直接使用搜索卡片 `aweme_info`，保存
+  `content_detail_source=search_aweme_info`；只有经过 `/aweme/v1/web/aweme/detail/`、浏览器详情响应
+  或页面结构化状态的 detail/repair 路径（含首页重建）才保存 `content_detail_source=aweme_detail`。
+- 两种来源都只有在 `aweme_id` 与候选完全一致、是图文、`desc` 非空、带 `create_time` 和 `author.uid`
+  时才写 `content_detail_status=detail_observed`，否则写 `detail_unobserved`；`desc` 为空时不用标题或
+  封面文字顶替。
 - 正文图片来自 `note_download_url`；`images[].uri` 形成 `douyin:uri:<uri>` 稳定资产键。
-- 作者粉丝来自图文作者主页，要求 `followers_observed=true`；搜索作者对象的占位 0 不能通过。
+- 作者粉丝只读作者资料响应（`/aweme/v1/web/user/profile/other/`）`user` 节点的 `follower_count`，
+  缺失时读 `mplatform_followers_count`。只有资料响应 `status_code=0` 且带 `user` 节点、来源为
+  `creator_profile` 时才 `followers_observed=true`；搜索作者对象里的粉丝数（含占位 0）一律不算已观测。
+- worker 判定有效与导入门禁一致：没有 `creator_profile` 粉丝、正文证据或正文图的候选不算有效，
+  也不下载正文图。
 - 作者补全覆盖本轮全部未知图文候选，不使用固定作者数量上限。
 - 作者平台 ID 保存 `author.uid` 原始值（写在 `creator_hash` 键），昵称保存 `author.nickname` 原文；
   `sec_uid`、`short_id`、`unique_id`、签名、头像和 IP 归属地不写出。
@@ -27,7 +36,8 @@ API 客户端在进入关键词页前开始监听浏览器搜索响应。搜索�
 目标 offset 未进入监听缓存时，先在有头搜索页最多执行 8 次低频可见滚轮。仍未取得目标响应才回退
 到 API 请求，不能把“浏览器尚未加载”解释为耗尽。首页流无法读取或额外首页请求返回验证时，只有
 页面至少有 10 个可见 `waterfall_item_*` 卡片，并且浏览器已取得 offset 10 的健康响应和非空 search
-ID，才允许用前 10 个可见作品 ID 的详情重建首页；证据不足必须停止。
+ID，才允许用前 10 个可见作品 ID 的详情重建首页。10 个详情必须全部取得且 `aweme_id` 一致，任一失败都
+不返回部分页，否则失败的可见 ID 会随 `has_more=1` 永久跳过；证据不足必须停止。
 
 搜索接口契约：
 
@@ -41,6 +51,25 @@ ID，才允许用前 10 个可见作品 ID 的详情重建首页；证据不足�
 非成功 `status_code`、`data` 非列表、`has_more` 缺失/非法，或 `has_more=true` 但没有下一 `logid`，
 均为 `runtime_failed`。`SearchResponseError` 的具体 reason 必须进入停止证据；状态只保存脱敏元数据，
 不保存完整响应。`search_nil_info.search_nil_type=verify_check` 固定为 `search_verify_check`。
+响应带 `extra: null` 时按空 `logid` 处理。
+
+## HTTP 状态与请求头
+
+所有 API 响应在解码前先按 HTTP 状态分类，阻断类不进重试、不触发首页重建，也不改走浏览器详情：
+
+- 401：`login_required`；
+- 403 且响应体含 `ArgusSecurityPlugin` 或 `Blocked by`：边缘网关拦截，`blocked_or_forbidden`；
+- 429：`rate_limited`；
+- 其他非 2xx：可重试的传输失败，作者资料按“作者补全失败”有限重试后记为候选跳过。
+
+搜索或作者资料遇到前三类时，停止证据为 `runtime_failed`，`stop_detail` 为对应错误码，checkpoint
+保持当前 page、offset 和 search ID。作者资料响应 `status_code` 非 0 或缺 `user` 节点时视为空资料，
+走 `creator_profile_empty` 候选跳过。
+
+只有 `/aweme/v1/web/aweme/detail/` 请求带 `x-tt-argus: 1`（ArgusSecurityPlugin 当前不校验取值）；
+搜索与作者资料请求不加，因为真实浏览器在这些请求上的取值不是 1。签名参数 `uifid` 优先取 `UIFID`
+Cookie，缺失时才退到 `UIFID_TEMP`。正文图请求带与 API 同源的浏览器 `User-Agent`、
+`Referer: https://www.douyin.com/` 和图片 `Accept`，不带 Cookie。
 
 ## 空首页门禁
 
@@ -77,10 +106,13 @@ search ID 时，从刷新链下一页写 `discovery_frontier_reseeded` 并替换
 
 ## 严格 images-only
 
-只有确认的图文作品进入图片入口。`cover_url`、封面、`video_download_url`、音乐、头像和搜索预览
-均不进入 `ImageCandidate`、staging 或 manifest；代码不得调用 `get_aweme_video()`、视频 store 或音乐下载。平台层使用当前 `dy_client`
+只有确认的图文作品进入图片入口。封面、视频、音乐、头像和搜索预览地址既不写入内容记录，也不进入
+`ImageCandidate`、staging 或 manifest；代码不得调用 `get_aweme_video()`、视频 store 或音乐下载。平台层使用当前 `dy_client`
 会话和新鲜签名 URL 写 staging/manifest，根项目按 `note_download_url` 重建候选并执行通用字节复验、
 同帖去重、晋升和 SQLite 事务。
+
+2026-10 之前入库的搜索路径记录仍标为 `content_detail_source=aweme_detail`，实际正文来自搜索卡片；
+是否改写这批历史标签登记在 #117，不在本平台代码中处理。
 
 历史库中缺少 `content_detail_status=detail_observed` 的既有图文记录，从根项目
 `scripts/repair_post_details.py --platform douyin` 分批修复。清单只接受与既有 `aweme_id` 完全匹配的

@@ -33,7 +33,9 @@ from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError, is_runtime_blocking_image_error
 from trippostcollect.platforms.douyin import parser
 from trippostcollect.platforms.douyin.client import DouYinClient, inspect_empty_first_page
-from trippostcollect.platforms.douyin.models import DataFetchError, SearchResponseError, PublishTimeType, DouyinImageDownloadError
+from trippostcollect.platforms.douyin.models import (
+    DataFetchError, PlatformRuntimeError, SearchResponseError, PublishTimeType, DouyinImageDownloadError,
+)
 from trippostcollect.platforms.douyin.parser import parse_video_info_from_url
 from trippostcollect.platforms.douyin.login import DouYinLogin
 
@@ -230,6 +232,22 @@ class DouYinCrawler:
                             discovery_phase=discovery_phase,
                         )
                         break
+                    except PlatformRuntimeError as exc:
+                        logger.error(
+                            f"[DouYinCrawler.search] platform runtime failure for "
+                            f"keyword: {keyword}, code: {exc.code}"
+                        )
+                        accumulator.mark_runtime_failed(
+                            exc.code,
+                            source_page=requested_page,
+                            source_offset=requested_offset,
+                            source_cursor=requested_search_id,
+                            resume_page=requested_page,
+                            resume_offset=requested_offset,
+                            resume_cursor=requested_search_id,
+                            discovery_phase=discovery_phase,
+                        )
+                        break
                     except DataFetchError:
                         logger.error(
                             f"[DouYinCrawler.search] search douyin keyword: {keyword} failed"
@@ -262,7 +280,8 @@ class DouYinCrawler:
                     source_has_more = (
                         posts_res.get("has_more") if "has_more" in posts_res else None
                     )
-                    response_logid = posts_res.get("extra", {}).get("logid", "")
+                    # 响应可带 extra: null（has_more=0 时校验允许）；不能对 None 取 logid。
+                    response_logid = (posts_res.get("extra") or {}).get("logid", "")
                     next_search_id = requested_search_id or response_logid
                     resume_page = requested_page + 1
                     resume_offset = requested_offset + dy_limit_count
@@ -389,6 +408,18 @@ class DouYinCrawler:
                         if accumulator.is_known(aweme_id):
                             processed_count += 1
                             continue
+                        if not parser.is_douyin_image_note(aweme_info):
+                            # #116：视频只计入已处理候选，不请求作者资料，也不写内容记录。
+                            processed_count += 1
+                            if accumulator.consider(aweme_id, valid=False):
+                                break
+                            continue
+                        content_detail_source = (
+                            parser.DOUYIN_DETAIL_CONTENT_SOURCE
+                            if post_item.get(parser.DOUYIN_REBUILT_ITEM_SOURCE_KEY)
+                            == parser.DOUYIN_DETAIL_CONTENT_SOURCE
+                            else parser.DOUYIN_SEARCH_CONTENT_SOURCE
+                        )
                         aweme_info = await self.enrich_aweme_creator(aweme_info)
                         if aweme_info.get("creator_profile_runtime_error"):
                             accumulator.mark_runtime_failed(
@@ -429,14 +460,13 @@ class DouYinCrawler:
                             creator_profile,
                         )
                         statistics = aweme_info.get("statistics") or {}
+                        # 与导入门禁对齐：正文证据、正文图和作者资料粉丝缺一项都不下载图片。
                         valid = bool(
-                            aweme_id
-                            and aweme_info.get("desc")
-                            and aweme_info.get("create_time")
-                            and author.get("uid")
+                            parser.douyin_content_detail_observed(aweme_info, aweme_id)
                             and author.get("nickname")
                             and parser._extract_note_image_list(aweme_info)
                             and author_stats.get("followers_observed")
+                            and author_stats.get("author_followers_source") == "creator_profile"
                             and all(
                                 statistics.get(key) not in (None, "")
                                 for key in (
@@ -484,7 +514,11 @@ class DouYinCrawler:
                                 if should_stop:
                                     break
                                 continue
-                        await self.update_douyin_aweme(aweme_item=aweme_info)
+                        await self.update_douyin_aweme(
+                            aweme_item=aweme_info,
+                            content_detail_source=content_detail_source,
+                            expected_aweme_id=aweme_id,
+                        )
                         processed_count += 1
                         aweme_list.append(aweme_id)
                         page_aweme_list.append(aweme_id)
@@ -643,6 +677,19 @@ class DouYinCrawler:
                 last_error = None
                 if creator_profile:
                     break
+            except PlatformRuntimeError as exc:
+                # 登录失效、网关拦截与限流是运行级阻断：不重试，不当作单条候选失败。
+                logger.error(
+                    "[DouYinCrawler.enrich_aweme_creator] creator profile blocked, "
+                    f"code: {exc.code}, reason: {exc}"
+                )
+                aweme_info["creator_profile_attempts"] = attempts
+                aweme_info["creator_profile_runtime_error"] = exc.code
+                self.creator_profile_failure_cache[sec_uid] = {
+                    "runtime_error": exc.code,
+                    "attempts": attempts,
+                }
+                return aweme_info
             except DataFetchError as exc:
                 last_error = exc
                 if "account blocked" in str(exc).lower():
@@ -712,11 +759,40 @@ class DouYinCrawler:
         semaphore = asyncio.Semaphore(self.settings.MAX_CONCURRENCY_NUM)
         task_list = [self.get_aweme_detail(aweme_id=aweme_id, semaphore=semaphore) for aweme_id in aweme_id_list]
         aweme_details = await asyncio.gather(*task_list)
-        for aweme_detail in aweme_details:
-            if aweme_detail is not None:
-                aweme_detail = await self.enrich_aweme_creator(aweme_detail)
-                await self.update_douyin_aweme(aweme_item=aweme_detail)
-                await self.get_aweme_media(aweme_item=aweme_detail)
+        for aweme_id, aweme_detail in zip(aweme_id_list, aweme_details):
+            if not isinstance(aweme_detail, dict):
+                continue
+            if (
+                str(aweme_detail.get("aweme_id") or "") != str(aweme_id)
+                or not parser.is_douyin_image_note(aweme_detail)
+            ):
+                # #116：ID 不一致的空壳和视频都不写内容记录。
+                logger.warning(
+                    "[DouYinCrawler.get_specified_awemes] skip non-image or mismatched detail, "
+                    f"aweme_id: {aweme_id}"
+                )
+                continue
+            aweme_detail = await self.enrich_aweme_creator(aweme_detail)
+            if aweme_detail.get("creator_profile_runtime_error"):
+                code = str(aweme_detail["creator_profile_runtime_error"])
+                raise PlatformRuntimeError(f"douyin creator profile {code}", code=code)
+            await self.update_douyin_aweme(
+                aweme_item=aweme_detail,
+                content_detail_source=parser.DOUYIN_DETAIL_CONTENT_SOURCE,
+                expected_aweme_id=aweme_id,
+            )
+            author_stats = parser._normalized_author_stats(
+                aweme_detail.get("author") or {},
+                aweme_detail.get("creator_profile") or {},
+            )
+            if author_stats.get("author_followers_source") != "creator_profile":
+                # 与搜索路径一致：没有作者资料粉丝的记录导入必然被拒，不下载正文图。
+                logger.warning(
+                    "[DouYinCrawler.get_specified_awemes] skip images without creator profile "
+                    f"followers, aweme_id: {aweme_id}"
+                )
+                continue
+            await self.get_aweme_media(aweme_item=aweme_detail)
         logger.info("[DouYinCrawler.batch_get_note_comments] Crawling comment mode is not enabled")
 
     async def get_aweme_detail(self, aweme_id: str, semaphore: asyncio.Semaphore) -> Any:
@@ -728,6 +804,8 @@ class DouYinCrawler:
                 await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
                 logger.info(f"[DouYinCrawler.get_aweme_detail] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} seconds after fetching aweme {aweme_id}")
                 return result
+            except PlatformRuntimeError:
+                raise
             except DataFetchError as ex:
                 logger.error(f"[DouYinCrawler.get_aweme_detail] Get aweme detail error: {ex}")
                 return None
@@ -947,12 +1025,20 @@ class DouYinCrawler:
 
         return DouYinCrawler
 
-    async def update_douyin_aweme(self, aweme_item: Dict):
+    async def update_douyin_aweme(
+        self,
+        aweme_item: Dict,
+        *,
+        content_detail_source: str,
+        expected_aweme_id: str,
+    ):
         content_item = parser.update_douyin_aweme(
             aweme_item, source_keyword=self.source_keyword,
             current_timestamp=self.ports.current_timestamp,
             save_data_option=self.settings.SAVE_DATA_OPTION,
             enable_get_medias=self.settings.ENABLE_GET_MEIDAS,
+            content_detail_source=content_detail_source,
+            expected_aweme_id=expected_aweme_id,
         )
         logger.info(f"[store.douyin.update_douyin_aweme] douyin aweme id:{aweme_item.get('aweme_id')}, title:{content_item.get('title')}")
         await self.ports.content_sink(self.crawler_type).store_content(content_item=content_item)

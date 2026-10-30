@@ -36,10 +36,14 @@ class ProjectionStore:
     create_store = staticmethod(lambda: entry.douyin_dependencies(config)["ports"].content_sink(""))
 
 
-async def update_douyin_aweme(aweme_item):
+async def update_douyin_aweme(aweme_item, *, content_detail_source=parser.DOUYIN_SEARCH_CONTENT_SOURCE):
     crawler = make_crawler()
     crawler.ports = replace(crawler.ports, content_sink=lambda _: ProjectionStore.create_store())
-    await crawler.update_douyin_aweme(aweme_item)
+    await crawler.update_douyin_aweme(
+        aweme_item,
+        content_detail_source=content_detail_source,
+        expected_aweme_id=str(aweme_item.get("aweme_id") or ""),
+    )
 
 
 douyin_store = SimpleNamespace(
