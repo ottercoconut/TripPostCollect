@@ -1,7 +1,7 @@
 # 抖音
 
-抖音正式抓取服从[正式抓取执行契约](../formal-crawl-contract.md)。本文只维护浏览器响应监听、
-offset/search ID、详情和严格图文资产差异。
+抖音正式抓取服从[正式抓取执行契约](../formal-crawl-contract.md)。本文只维护浏览器响应截获、
+每轮全量翻页、详情和严格图文资产差异。
 
 ## 入口与字段
 
@@ -12,7 +12,7 @@ offset/search ID、详情和严格图文资产差异。
   不写内容记录，也不下载媒体。内容记录不写 `cover_url`、`video_download_url`、`music_download_url`。
 - 正文来源如实标注，不为每篇额外请求详情：搜索路径直接使用搜索卡片 `aweme_info`，保存
   `content_detail_source=search_aweme_info`；只有经过 `/aweme/v1/web/aweme/detail/`、浏览器详情响应
-  或页面结构化状态的 detail/repair 路径（含首页重建）才保存 `content_detail_source=aweme_detail`。
+  或页面结构化状态的 detail/repair 路径才保存 `content_detail_source=aweme_detail`。
 - 两种来源都只有在 `aweme_id` 与候选完全一致、是图文、`desc` 非空、带 `create_time` 和 `author.uid`
   时才写 `content_detail_status=detail_observed`，否则写 `detail_unobserved`；`desc` 为空时不用标题或
   封面文字顶替。
@@ -29,24 +29,21 @@ offset/search ID、详情和严格图文资产差异。
 
 ## 搜索响应与游标
 
-API 客户端在进入关键词页前开始监听浏览器搜索响应。搜索优先消费浏览器已取得的首页和滚动分页，
-只有超过可见前沿时才发后续请求。同一关键词、offset 和 search ID 有多条响应时，合并去重并优先
-最新的非 `verify_check` 响应；全部为验证信号时按风控失败。
+搜索只消费浏览器在本轮搜索页上自身发出的请求的响应（#124）。API 客户端在进入关键词页前开始监听
+`/aweme/v1/web/general/search/`：首页 offset 0 是进入搜索页时页面发出的 `/stream/` 响应，后续页由
+有头搜索页的低频可见滚轮触发页面自身的 `/single/` 请求。同一关键词、offset 和 search ID 有多条响应时，
+合并去重并优先最新的非 `verify_check` 响应；全部为验证信号时按风控失败。
 
-目标 offset 未进入监听缓存时，先在有头搜索页最多执行 8 次低频可见滚轮。仍未取得目标响应才回退
-到 API 请求，不能把“浏览器尚未加载”解释为耗尽。首页流无法读取或额外首页请求返回验证时，只有
-页面至少有 10 个可见 `waterfall_item_*` 卡片，并且浏览器已取得 offset 10 的健康响应和非空 search
-ID，才允许用前 10 个可见作品 ID 的详情重建首页。10 个详情必须全部取得且 `aweme_id` 一致，任一失败都
-不返回部分页，否则失败的可见 ID 会随 `has_more=1` 永久跳过；证据不足必须停止。
+连续翻页时目标只比已截获的页深一屏。目标 offset 未进入截获缓存时，最多执行 8 次可见滚轮；仍未截获
+即以 `runtime_failed`、`stop_detail=browser_search_response_missing` 停止。首页截获不到同样是
+`browser_search_response_missing`。不回退到浏览器外的 `/single/`、`/stream/` 直接请求，不猜深页，
+不用可见卡片 ID 加详情请求重建首页，缺失页的候选不写入已处理集合；不能把“浏览器尚未加载”解释为耗尽。
 
-搜索接口契约：
+搜索接口契约（页面自身请求的形状，客户端只校验响应）：
 
-- 新鲜首页使用 `/general/search/stream/`，后续使用 `/general/search/single/`；
-- `count=10`、`list_type=single`、`search_source=normal_search`，offset 按 10 递增；
+- 首页为 `/general/search/stream/`，后续为 `/general/search/single/`，offset 按 10 递增；
 - 首页流可能保留 HTTP chunk 边界，解析前必须重组全部 chunk；
-- 首页可由浏览器 offset 10 请求携带的 search ID 建链，也可在健康首页流中使用 `extra.logid`；
-- 后续页始终复用已经建立的 search ID，不把每页轮换 `logid` 当作新 cursor；
-- 禁止旧 `from_group_id` 或 `count=15/list_type=multi` 组合。
+- 首页响应的 `extra.logid` 作为本轮 search ID，后续页始终复用它，不把每页轮换的 `logid` 当作新 cursor。
 
 非成功 `status_code`、`data` 非列表、`has_more` 缺失/非法，或 `has_more=true` 但没有下一 `logid`，
 均为 `runtime_failed`。`SearchResponseError` 的具体 reason 必须进入停止证据；状态只保存脱敏元数据，
@@ -55,19 +52,19 @@ ID，才允许用前 10 个可见作品 ID 的详情重建首页。10 个详情�
 
 ## HTTP 状态与请求头
 
-所有 API 响应在解码前先按 HTTP 状态分类，阻断类不进重试、不触发首页重建，也不改走浏览器详情：
+作者资料与详情 API 响应在解码前先按 HTTP 状态分类，阻断类不进重试，也不改走浏览器详情：
 
 - 401：`login_required`；
 - 403 且响应体含 `ArgusSecurityPlugin` 或 `Blocked by`：边缘网关拦截，`blocked_or_forbidden`；
 - 429：`rate_limited`；
 - 其他非 2xx：可重试的传输失败，作者资料按“作者补全失败”有限重试后记为候选跳过。
 
-搜索或作者资料遇到前三类时，停止证据为 `runtime_failed`，`stop_detail` 为对应错误码，checkpoint
-保持当前 page、offset 和 search ID。作者资料响应 `status_code` 非 0 或缺 `user` 节点时视为空资料，
+作者资料遇到前三类时，停止证据为 `runtime_failed`，`stop_detail` 为对应错误码，checkpoint 记录
+当前 page、offset 和 search ID 供审计。作者资料响应 `status_code` 非 0 或缺 `user` 节点时视为空资料，
 走 `creator_profile_empty` 候选跳过。
 
 只有 `/aweme/v1/web/aweme/detail/` 请求带 `x-tt-argus: 1`（ArgusSecurityPlugin 当前不校验取值）；
-搜索与作者资料请求不加，因为真实浏览器在这些请求上的取值不是 1。签名参数 `uifid` 优先取 `UIFID`
+作者资料请求不加，因为真实浏览器在该请求上的取值不是 1。签名参数 `uifid` 优先取 `UIFID`
 Cookie，缺失时才退到 `UIFID_TEMP`。正文图请求带与 API 同源的浏览器 `User-Agent`、
 `Referer: https://www.douyin.com/` 和图片 `Accept`，不带 Cookie。
 
@@ -80,25 +77,24 @@ Cookie，缺失时才退到 `UIFID_TEMP`。正文图请求带与 API 同源的�
 - 没有卡片，也没有明确可见“无结果”：`ambiguous_empty_first_page`；
 - 只有页面明确显示无结果：`verified_empty_first_page`，可以证明当前链耗尽。
 
-前两项属于运行失败，checkpoint 保持 page 1、offset 0、空 search ID。
+前两项属于运行失败；下一轮照常从首页重新扫描。
 
-## checkpoint 与重新建链
+## 每轮全量扫描与 checkpoint
 
-checkpoint 必须成组保存下一 page、offset 和稳定 search ID。深层恢复缺任一项都直接拒绝。旧摘要
-误存轮换 log ID 时，runner 只允许从冻结摘要首个 frontier batch 的建链证据纠正，并在 dry-run 写
-`resume_cursor_corrected_from_summary=true`。
+抖音与小红书一样，每轮从第 1 页、offset 0、空 search ID 连续翻到平台 `has_more=false`（#124）。
+search ID 标识一次具体排序，新进程打开搜索页得到新 search ID，旧 offset 在新链上没有意义，页面也滚不到
+那么深；因此不跨进程跳到深层 page/offset/search ID，也没有顶部刷新、前沿重绑定或耗尽后 reseed。
+数据库已有 ID、累计摘要中的有效 ID 与持久已处理候选在作者、详情与媒体请求前滑过，不会重复入库。
 
-有 checkpoint 时先用空 cursor 刷新顶部。search ID 不能跨进程照搬：只有本轮刷新取得健康后页、
-`has_more=true` 和非空稳定 ID，才用新 ID 重新绑定深层前沿，并写
-`douyin_frontier_cursor_rebound`。刷新未覆盖旧 offset 时保留原 page/offset；已经覆盖时从刷新后的
-下一 offset 继续。没有健康刷新链时保留旧 checkpoint 并失败。
+runner 不把 checkpoint 转成 `--start-page`、`--top-refresh-max-pages` 或
+`--discovery-source-exhausted`；child 收到这些参数直接以 `douyin_full_scan_rejects_resume_args` 报错，
+`--start-offset`、`--start-cursor` 已删除。运行级失败时的未完成累计摘要仍经 `--resume-summary` 合并，
+下一轮取得 `has_more=false` 后一次性入库。
 
-耗尽状态只证明旧 search ID 链结束。顶部刷新同时发现未知 `aweme_id`、`has_more=true` 和非空稳定
-search ID 时，从刷新链下一页写 `discovery_frontier_reseeded` 并替换旧前沿；否则保持耗尽。
-
-完整响应保存下一 page、`offset + 10` 和稳定 ID；页中途停止保存当前三元组。`data=[]` 且
-`has_more=true` 是可继续空批次；深层 `has_more=false` 可以结束当前链，但新鲜首页仍必须满足上面的
-可见无结果门禁。
+checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供审计，不作续跑起点。完整批次记录
+下一 page、`offset + 10` 和本轮 search ID；页中途停止记录当前三元组。`data=[]` 且 `has_more=true` 是可
+继续空批次；`has_more=false` 结束本轮（`stop_detail=has_more_false`），新鲜首页仍必须满足上面的可见
+无结果门禁。checkpoint 为 `exhausted` 只是上一轮的真实证据，下一轮仍从第 1 页全量扫描，不退化为只刷顶部。
 
 批次继续使用 `stagnation_basis=valid_new` 记录诊断计数：只有批次没有新增满足正式字段 profile、且
 数据库中不存在的有效记录时才累计；新无效候选、重复候选和数据库已有记录都不能重置该计数。

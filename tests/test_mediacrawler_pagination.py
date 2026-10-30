@@ -667,45 +667,6 @@ def test_source_exhausted_completion_keeps_all_discovered_records(tmp_path: Path
     assert "quantity_limits_enforced" not in validation
 
 
-def test_pagination_evidence_keeps_douyin_frontier_reseed_event(tmp_path: Path) -> None:
-    state_path = tmp_path / "state.json"
-    write_state(
-        state_path,
-        [
-            {
-                "type": "discovery_frontier_reseeded",
-                "details": {
-                    "platform": "douyin",
-                    "reason": "new_candidates_after_saved_exhaustion",
-                    "saved_resume_page": 22,
-                    "saved_resume_offset": 315,
-                    "saved_resume_cursor": "old-search-id",
-                    "resume_page": 4,
-                    "resume_offset": 45,
-                    "resume_cursor": "new-search-id",
-                    "refresh_new_candidate_count": 34,
-                },
-            }
-        ],
-    )
-
-    evidence = mediacrawler_crawl.load_pagination_evidence(state_path)
-
-    assert evidence["frontier_reseeds"] == [
-        {
-            "platform": "douyin",
-            "reason": "new_candidates_after_saved_exhaustion",
-            "saved_resume_page": 22,
-            "saved_resume_offset": 315,
-            "saved_resume_cursor": "old-search-id",
-            "resume_page": 4,
-            "resume_offset": 45,
-            "resume_cursor": "new-search-id",
-            "refresh_new_candidate_count": 34,
-        }
-    ]
-
-
 def test_existing_valid_record_is_reported_as_update(tmp_path: Path) -> None:
     db_path = tmp_path / "posts.sqlite"
     existing = bilibili_record("existing")

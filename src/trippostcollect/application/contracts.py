@@ -64,7 +64,7 @@ class WeiboLoginPorts:
 
 
 class CandidateDecisions(Protocol):
-    """抖音消费的已有候选累积器；前沿纪元判定仍由应用层负责。"""
+    """抖音消费的已有候选累积器。"""
 
     seen_candidate_identities: set[str]
     stop_reason: str
@@ -86,12 +86,6 @@ class CandidateDecisions(Protocol):
 
     def mark_runtime_failed(self, detail: str, **position: Any) -> None: ...
 
-    def should_reseed_frontier(
-        self, *, saved_source_exhausted: bool,
-        refresh_has_more: bool | int | None, refresh_next_cursor: str | None,
-        refresh_new_candidate_count: int,
-    ) -> bool: ...
-
 
 @dataclass(frozen=True)
 class DouyinSettings:
@@ -103,7 +97,6 @@ class DouyinSettings:
     CRAWLER_TYPE: str
     KEYWORDS: str
     START_PAGE: int
-    PUBLISH_TIME_TYPE: int
     DY_SPECIFIED_ID_LIST: tuple[str, ...]
     MAX_CONCURRENCY_NUM: int
     CRAWLER_MAX_SLEEP_SEC: float
@@ -119,12 +112,8 @@ class DouyinSettings:
 
 @dataclass(frozen=True)
 class DouyinReaders:
-    """只绑定读取点；值仍在关键词、作者或详情操作开始时读取。"""
+    """只绑定读取点；值仍在作者或详情操作开始时读取。#124 起搜索每轮从首页开始，不读续跑输入。"""
 
-    refresh_max_pages: Callable[[], int]
-    source_exhausted: Callable[[], str | None]
-    resume_offset: Callable[[], int]
-    resume_cursor: Callable[[], str]
     enrich_creators: Callable[[], str | None]
     enrich_only_images: Callable[[], str]
     max_creator_enrich: Callable[[], str]

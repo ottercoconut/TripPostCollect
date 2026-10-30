@@ -72,6 +72,11 @@ T71_REMOVED_XHS_ENV = frozenset({
     "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES",
     "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS",
 })
+# #124：抖音每轮从首页全量扫描，三元组续跑的两项 env 唯一消费者删除，所有平台都不再发出（ledger.AUTHORIZED_ENV_REMOVALS 同步登记）。
+T124_REMOVED_ENV = frozenset({
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET",
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR",
+})
 
 # 根测试中允许保留的退出名引用：(文件, 名字) → 类别。T14-C 删旧桥时已清理旧桥对照（原 A 类）。
 # B＝负向守卫（断言不存在或不被调用）；D＝沿用旧存储出口名的测试装配与隐私用例（名字指向根实现或
@@ -445,7 +450,7 @@ def test_unconsumed_parent_env_is_no_longer_emitted_and_rest_is_unchanged(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     baseline = {name: value["extra_env"] for name, value in ENV_GOLDEN.items() if name != "_meta"}
-    removed = REMOVED_ENV | T14C_REMOVED_ENV
+    removed = REMOVED_ENV | T14C_REMOVED_ENV | T124_REMOVED_ENV
     # 基线确实覆盖了每个待删项，否则“不再发出”无从证明。
     assert removed <= set().union(*(set(env) for env in baseline.values()))
     current = _capture_extra_env(monkeypatch, tmp_path)
@@ -458,7 +463,7 @@ def test_unconsumed_parent_env_is_no_longer_emitted_and_rest_is_unchanged(
 
 
 def test_removed_env_names_have_no_producer_or_consumer() -> None:
-    pattern = re.compile("|".join(sorted(REMOVED_ENV | T14C_REMOVED_ENV)))
+    pattern = re.compile("|".join(sorted(REMOVED_ENV | T14C_REMOVED_ENV | T124_REMOVED_ENV)))
     files = retained_production_files()
     hits = [
         f"{path.relative_to(ROOT).as_posix()}:{number}"
@@ -586,6 +591,24 @@ T114_DELETED_LEDGER_NODES = {
     "tests/test_residual_detail_fallbacks.py::test_weibo_browser_api_is_bound_to_requested_id",
     "tests/test_weibo_image_download.py::test_weibo_image_urls_do_not_double_wrap_existing_proxy",
     "tests/test_weibo_image_download.py::test_weibo_image_urls_keep_bounded_proxy_and_direct_fallbacks",
+}
+# #124（抖音每轮从首页全量扫描、搜索只经浏览器截获）删除的台账节点：三元组续跑、耗尽后 reseed、
+# 首页直接请求参数契约与首页可见卡片重建用例。新语义由 tests/platforms/douyin/test_douyin_issue124.py 断言。
+T124_DELETED_LEDGER_NODES = {
+    "tests/test_adaptive_accumulator.py::test_douyin_exhausted_cursor_reseed_requires_new_candidate_continuation",
+    "tests/test_discovery_checkpoints.py::test_executor_keeps_first_douyin_search_id_when_response_logids_rotate",
+    "tests/test_discovery_checkpoints.py::test_reseeded_douyin_frontier_replaces_exhausted_cursor",
+    "tests/test_discovery_checkpoints.py::test_runner_repairs_rotated_douyin_cursor_from_frozen_summary",
+    "tests/test_discovery_checkpoints.py::test_runner_retries_unverified_douyin_first_page_checkpoint",
+    "tests/test_discovery_checkpoints.py::test_saved_empty_first_page_keeps_verified_exhaustion_detail",
+    "tests/test_discovery_checkpoints.py::test_top_refresh_keeps_saved_douyin_frontier",
+    "tests/test_douyin_search_safety.py::test_deep_frontier_rebinds_to_current_refresh_session_cursor",
+    "tests/test_douyin_search_safety.py::test_search_request_uses_current_single_column_contract",
+    "tests/test_douyin_search_safety.py::test_visible_first_page_rebuild_does_not_mask_business_error",
+    "tests/test_douyin_search_safety.py::test_visible_first_page_rebuild_requires_healthy_next_page[invalid_stream_json]",
+    "tests/test_douyin_search_safety.py::test_visible_first_page_rebuild_requires_healthy_next_page[search_verify_check]",
+    "tests/test_mediacrawler_pagination.py::test_pagination_evidence_keeps_douyin_frontier_reseed_event",
+    "tests/test_trippostcollect_adaptive.py::test_douyin_reseed_requires_new_candidate_and_cursor",
 }
 # #71 第一批（小红书取数改为浏览器 L1）删除或改写的台账节点：被替代的旧取数路径用例。
 T71_DELETED_LEDGER_NODES = {
@@ -729,6 +752,7 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
         | T71_DELETED_LEDGER_NODES
         | T83_DELETED_LEDGER_NODES
         | T114_DELETED_LEDGER_NODES
+        | T124_DELETED_LEDGER_NODES
     )
     for source, target in MOVED_TO_TARGET.items():
         assert source not in collected and target in collected, (source, target)
@@ -740,4 +764,5 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
         - len(T71_DELETED_LEDGER_NODES)
         - len(T83_DELETED_LEDGER_NODES)
         - len(T114_DELETED_LEDGER_NODES)
+        - len(T124_DELETED_LEDGER_NODES)
     )

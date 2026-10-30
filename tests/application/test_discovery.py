@@ -17,7 +17,7 @@ import json
 import sqlite3
 import sys
 
-from trippostcollect.application.candidates import AdaptiveAccumulator, should_reseed_douyin_frontier
+from trippostcollect.application.candidates import AdaptiveAccumulator
 from trippostcollect.application.events import append_worker_execution_event
 from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.platforms import entry
@@ -359,16 +359,3 @@ def test_candidate_identity_stagnation_allows_new_invalid_results(monkeypatch) -
     assert accumulator.stagnant_batches == 0
 
 
-def test_douyin_reseed_requires_new_candidate_and_cursor() -> None:
-    assert should_reseed_douyin_frontier(
-        saved_source_exhausted=True,
-        refresh_has_more=True,
-        refresh_next_cursor="new-search-id",
-        refresh_new_candidate_count=1,
-    ) is True
-    assert should_reseed_douyin_frontier(
-        saved_source_exhausted=True,
-        refresh_has_more=True,
-        refresh_next_cursor="new-search-id",
-        refresh_new_candidate_count=0,
-    ) is False

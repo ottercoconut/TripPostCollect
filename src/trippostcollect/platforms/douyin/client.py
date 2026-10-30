@@ -34,12 +34,11 @@ from playwright.async_api import BrowserContext, Page, Error as PlaywrightError
 from trippostcollect.application.contracts import DouyinClientPorts
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError, classified_http_image_error
 from trippostcollect.platforms.douyin.models import (
-    DataFetchError, PlatformRuntimeError, SearchResponseError, SearchChannelType, SearchSortType, PublishTimeType,
+    DataFetchError, PlatformRuntimeError, SearchResponseError,
 )
 from trippostcollect.platforms.douyin.parser import (
     _find_douyin_detail, decode_douyin_json_body, validate_douyin_search_response,
     classify_empty_first_page, DOUYIN_RESULT_LINK_SELECTOR, DOUYIN_NO_RESULT_MARKERS,
-    DOUYIN_DETAIL_CONTENT_SOURCE, DOUYIN_REBUILT_ITEM_SOURCE_KEY,
 )
 from trippostcollect.platforms.douyin.signer import get_a_bogus
 
@@ -53,13 +52,8 @@ DOUYIN_GATEWAY_BLOCK_MARKERS = ("ArgusSecurityPlugin", "Blocked by")
 DOUYIN_MEDIA_REFERER = "https://www.douyin.com/"
 DOUYIN_MEDIA_ACCEPT = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
 
-FIRST_PAGE_VISIBLE_FALLBACK_REASONS = {
-    "search_verify_check",
-    "invalid_stream_chunk_header",
-    "invalid_stream_chunk_size",
-    "truncated_stream_chunk",
-    "invalid_stream_json",
-}
+# #124：搜索只消费浏览器自身请求的截获响应；截获不到目标页即运行级失败，不改走浏览器外直接请求。
+BROWSER_SEARCH_RESPONSE_MISSING = "browser_search_response_missing"
 
 
 def get_web_id(random_source):
@@ -282,100 +276,6 @@ class DouYinClient:
         )
         return False
 
-    async def _build_visible_first_page_fallback(
-        self,
-        *,
-        keyword: str,
-        offset: int,
-        search_id: str,
-    ) -> Optional[Dict[str, Any]]:
-        """Rebuild page zero only when visible cards and a healthy next page prove the chain."""
-        if offset != 0 or search_id or self.playwright_page is None:
-            return None
-        if self._observed_search_response_tasks:
-            await asyncio.gather(
-                *tuple(self._observed_search_response_tasks),
-                return_exceptions=True,
-            )
-        next_page_records = []
-        for record in self._observed_search_responses:
-            payload = record["payload"]
-            nil_info = payload.get("search_nil_info")
-            if (
-                record["keyword"] == keyword
-                and record["offset"] > 0
-                and record["search_id"]
-                and payload.get("data")
-                and not (
-                    isinstance(nil_info, dict)
-                    and nil_info.get("search_nil_type") == "verify_check"
-                )
-            ):
-                next_page_records.append(record)
-        if not next_page_records:
-            return None
-        next_page = min(next_page_records, key=lambda record: record["offset"])
-        expected_first_page_count = next_page["offset"]
-        try:
-            visible_ids = await self.playwright_page.locator(
-                '[id^="waterfall_item_"]:visible'
-            ).evaluate_all(
-                r"""elements => elements
-                    .map(element => String(element.id || '').replace('waterfall_item_', ''))
-                    .filter(value => /^\d+$/.test(value))"""
-            )
-        except Exception as exc:
-            logger.warning(
-                "[DouYinClient._build_visible_first_page_fallback] visible card read failed, "
-                f"reason: {type(exc).__name__}"
-            )
-            return None
-        first_page_ids = list(dict.fromkeys(visible_ids))[:expected_first_page_count]
-        if len(first_page_ids) < expected_first_page_count:
-            logger.warning(
-                "[DouYinClient._build_visible_first_page_fallback] insufficient visible cards, "
-                f"expected: {expected_first_page_count}, observed: {len(first_page_ids)}"
-            )
-            return None
-
-        data = []
-        for aweme_id in first_page_ids:
-            try:
-                aweme_detail = await self.get_video_by_id(aweme_id)
-            except PlatformRuntimeError:
-                raise
-            except Exception as exc:
-                logger.warning(
-                    "[DouYinClient._build_visible_first_page_fallback] detail fetch failed, "
-                    f"aweme_id: {aweme_id}, reason: {type(exc).__name__}"
-                )
-                continue
-            if isinstance(aweme_detail, dict) and str(aweme_detail.get("aweme_id") or "") == aweme_id:
-                data.append(
-                    {
-                        "aweme_info": aweme_detail,
-                        DOUYIN_REBUILT_ITEM_SOURCE_KEY: DOUYIN_DETAIL_CONTENT_SOURCE,
-                    }
-                )
-        if len(data) < expected_first_page_count:
-            # #116：部分详情失败时不能按完整页返回 has_more=1，否则失败的可见 ID 永久丢失。
-            logger.warning(
-                "[DouYinClient._build_visible_first_page_fallback] insufficient detail evidence, "
-                f"expected: {expected_first_page_count}, detail_count: {len(data)}"
-            )
-            return None
-        logger.info(
-            "[DouYinClient._build_visible_first_page_fallback] rebuilt visible first page, "
-            f"visible_ids: {len(first_page_ids)}, detail_count: {len(data)}, "
-            f"next_offset: {next_page['offset']}, next_search_id_present: True"
-        )
-        return {
-            "status_code": 0,
-            "data": data,
-            "has_more": 1,
-            "extra": {"logid": next_page["search_id"]},
-        }
-
     async def __process_req_params(
         self,
         uri: str,
@@ -465,7 +365,7 @@ class DouYinClient:
 
     @staticmethod
     def _raise_for_http_status(response) -> None:
-        """#116：解码前按 HTTP 状态分类；阻断类直接停止本轮，不进候选重试或首页重建。
+        """#116：解码前按 HTTP 状态分类；阻断类直接停止本轮，不进候选重试。
 
         异常文本带错误码：detail 模式下异常会冒出 worker，runner 只能从 stderr 文本分类。
         """
@@ -539,18 +439,16 @@ class DouYinClient:
         self,
         keyword: str,
         offset: int = 0,
-        search_channel: SearchChannelType = SearchChannelType.GENERAL,
-        sort_type: SearchSortType = SearchSortType.GENERAL,
-        publish_time: PublishTimeType = PublishTimeType.UNLIMITED,
         search_id: str = "",
     ):
         """
-        DouYin Web Search API
+        DouYin Web Search API：只消费浏览器在本轮搜索页上自身发出的请求的截获响应。
+
+        #124：首页 offset 0 来自进入搜索页时截获的 /stream/ 响应；后续页由可见滚轮触发页面
+        自身请求，连续翻页时目标只比已截获的页深一屏。截获不到就以
+        ``browser_search_response_missing`` 运行级失败，不改走浏览器外直接请求，也不猜深页。
         :param keyword:
         :param offset:
-        :param search_channel:
-        :param sort_type:
-        :param publish_time: ·
         :param search_id: ·
         :return:
         """
@@ -570,63 +468,13 @@ class DouYinClient:
                 offset=offset,
                 search_id=search_id,
             )
-        if observed_response is not None:
-            return validate_douyin_search_response(observed_response)
-
-        query_params = {
-            'search_channel': search_channel.value,
-            'enable_history': '1',
-            'keyword': keyword,
-            'search_source': 'normal_search',
-            'query_correct_type': '1',
-            'is_filter_search': '0',
-            'from_group_id': '',
-            'disable_rs': '0',
-            'offset': offset,
-            'count': '10',
-            'need_filter_settings': '0',
-            'list_type': 'single',
-            'pc_search_top_1_params': json.dumps(
-                {"enable_ai_search_top_1": 1},
-                separators=(",", ":"),
-            ),
-            'search_id': search_id,
-            'pc_libra_divert': 'Mac',
-            'support_h265': '1',
-            'support_dash': '1',
-        }
-        if sort_type.value != SearchSortType.GENERAL.value or publish_time.value != PublishTimeType.UNLIMITED.value:
-            query_params["filter_selected"] = json.dumps({"sort_type": str(sort_type.value), "publish_time": str(publish_time.value)})
-            query_params["is_filter_search"] = 1
-            query_params["search_source"] = "tab_search"
-        referer_url = f"https://www.douyin.com/search/{keyword}?aid=f594bbd9-a0e2-4651-9319-ebe3cb6298c1&type=general"
-        headers = copy.copy(self.headers)
-        headers["Referer"] = urllib.parse.quote(referer_url, safe=':/')
-        endpoint = (
-            "/aweme/v1/web/general/search/stream/"
-            if offset == 0 and not search_id
-            else "/aweme/v1/web/general/search/single/"
-        )
-        if endpoint.endswith("/stream/"):
-            query_params["need_filter_settings"] = "1"
-        try:
-            response = await self.get(
-                endpoint,
-                query_params,
-                headers=headers,
+        if observed_response is None:
+            logger.error(
+                "[DouYinClient.search_info_by_keyword] browser search response missing, "
+                f"offset: {offset}, search_id_present: {bool(search_id)}"
             )
-            return validate_douyin_search_response(response)
-        except SearchResponseError as exc:
-            if exc.reason not in FIRST_PAGE_VISIBLE_FALLBACK_REASONS:
-                raise
-            fallback = await self._build_visible_first_page_fallback(
-                keyword=keyword,
-                offset=offset,
-                search_id=search_id,
-            )
-            if fallback is None:
-                raise
-            return validate_douyin_search_response(fallback)
+            raise SearchResponseError(BROWSER_SEARCH_RESPONSE_MISSING)
+        return validate_douyin_search_response(observed_response)
 
     async def _get_video_by_id(self, aweme_id: str) -> Any:
         """

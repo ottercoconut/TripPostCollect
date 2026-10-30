@@ -154,7 +154,9 @@ def extract_inputs(files, read, *, definition_sources=None):
 # #49/#51 起根实现恒保存平台原值、不读取该 env（tests/test_author_raw_identity.py），fork 删除后父发无消费者。
 # #71 第一批（用户授权：小红书取数改为浏览器 L1）另删 XHS_ENRICH_CREATORS：作者补全恒为点击作者名，
 # 正式发现与 repair 都不再读取开关，父发无消费者。
-# 只登记这 8 个确切名字，不通配、不从文件读取；清单外的删除仍计入 env_removed。
+# #124（用户授权：抖音每轮从首页全量扫描）另删 DISCOVERY_RESUME_OFFSET/RESUME_CURSOR：唯一消费者是抖音
+# 三元组续跑，B站/微博/知乎按页恢复、小红书全量扫描都不读这两个名字。
+# 只登记这 10 个确切名字，不通配、不从文件读取；清单外的删除仍计入 env_removed。
 AUTHORIZED_ENV_REMOVALS = frozenset({
     "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID",
     "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM",
@@ -164,12 +166,17 @@ AUTHORIZED_ENV_REMOVALS = frozenset({
     "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
     "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL",
     "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS",
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET",
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR",
 })
 # #75（用户授权删除任务级时限）删除的 CLI 参数：中间层无进展看门狗阈值改为代码常量，修复批次不再设墙钟上限。
 # #112 删除 runner 的 --no-throttle：结构化 child 从未定义该参数（转发即以退出码 2 失败），页面证据 child 的
-# 同名诊断开关保留在 ctf_resource_crawl.py。只登记这些确切的（入口, 参数）对；清单外的删除或修改仍计入 cli_changed。
+# 同名诊断开关保留在 ctf_resource_crawl.py。#124 删除 child 的 --start-offset/--start-cursor：只服务抖音三元组续跑，
+# 旧参数由 argparse 直接报错。只登记这些确切的（入口, 参数）对；清单外的删除或修改仍计入 cli_changed。
 AUTHORIZED_CLI_REMOVALS = frozenset({
     ("scripts/mediacrawler_crawl.py", "--timeout-per-platform"),
+    ("scripts/mediacrawler_crawl.py", "--start-offset"),
+    ("scripts/mediacrawler_crawl.py", "--start-cursor"),
     ("scripts/repair_post_details.py", "--timeout-per-batch"),
     ("scripts/crawl_runner.py", "--no-throttle"),
 })

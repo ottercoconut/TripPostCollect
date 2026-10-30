@@ -240,38 +240,6 @@ def platform_lane_key(row: JobRow) -> str:
     return str(row["site_key"])
 
 
-def is_unverified_douyin_first_page_checkpoint(
-    checkpoint: dict[str, Any] | None,
-) -> bool:
-    if not checkpoint:
-        return False
-    return bool(
-        checkpoint.get("platform_key") == "douyin"
-        and checkpoint.get("status") == "exhausted"
-        and checkpoint.get("last_stop_reason") == "source_exhausted"
-        and checkpoint.get("last_stop_detail") != "verified_empty_first_page"
-        and checkpoint.get("resume_page") in (1, "1")
-        and checkpoint.get("resume_offset") in (None, "", 0, "0")
-        and not str(checkpoint.get("resume_cursor") or "").strip()
-    )
-
-
-def stable_douyin_search_id_from_summary(summary: dict[str, Any]) -> str:
-    pagination = summary.get("pagination_evidence") or {}
-    for batch in pagination.get("batches") or []:
-        if not isinstance(batch, dict) or batch.get("platform") != "douyin":
-            continue
-        if batch.get("discovery_phase") not in (None, "frontier"):
-            continue
-        source_cursor = str(batch.get("source_cursor") or "")
-        next_cursor = str(batch.get("next_cursor") or "")
-        if source_cursor:
-            return source_cursor
-        if batch.get("source_offset") in (None, 0, "0") and next_cursor:
-            return next_cursor
-    return ""
-
-
 def resolve_discovery_args(
     conn: sqlite3.Connection,
     row: JobRow,
@@ -292,44 +260,37 @@ def resolve_discovery_args(
         job_id=int(row["id"]),
         query_fingerprint_value=fingerprint,
     )
+    # #124：抖音每轮从第 1 页全量翻到 has_more=false，与小红书一样不保存可恢复前沿；
+    # checkpoint 只作审计，不转成起始页、顶部刷新或耗尽标记。
+    full_scan = platform_key == "douyin"
+    if full_scan and args.start_page is not None:
+        raise ValueError(f"douyin_full_scan_rejects_start_page: job={row['job_key']}")
     explicit_recovery = bool(args.start_page is not None or args.resume_summary or args.recovery_keyword)
 
     job_args.discovery_job_id = int(row["id"])
     job_args.discovery_query_fingerprint = fingerprint
     job_args.discovery_run_id = run_id
     job_args.discovery_source_exhausted = False
-    job_args.start_offset = None
-    job_args.start_cursor = None
     job_args.top_refresh_max_pages = 0
     job_args.auto_resume = False
-    resume_cursor_corrected_from_summary = False
     if checkpoint and not explicit_recovery:
-        unverified_first_page = is_unverified_douyin_first_page_checkpoint(checkpoint)
         summary_value = str(checkpoint.get("last_summary_path") or "")
         summary_path = Path(summary_value).expanduser() if summary_value else None
-        job_args.start_page = max(1, int(checkpoint.get("resume_page") or 1))
-        job_args.start_offset = checkpoint.get("resume_offset")
-        job_args.start_cursor = checkpoint.get("resume_cursor")
-        job_args.discovery_source_exhausted = bool(
-            checkpoint.get("status") == "exhausted" and not unverified_first_page
-        )
-        job_args.top_refresh_max_pages = max(
-            0,
-            int(params.get("top_refresh_max_pages") or 3),
-        )
+        if not full_scan:
+            job_args.start_page = max(1, int(checkpoint.get("resume_page") or 1))
+            job_args.discovery_source_exhausted = checkpoint.get("status") == "exhausted"
+            job_args.top_refresh_max_pages = max(
+                0,
+                int(params.get("top_refresh_max_pages") or 3),
+            )
         if summary_path:
+            # 运行级失败时的累计记录靠累计摘要在下一轮取得耗尽证据后入库；抖音照样合并。
             if not summary_path.is_file():
                 raise RuntimeError(
                     "checkpoint campaign summary is missing: "
                     f"job={row['job_key']} path={summary_path}"
                 )
             job_args.resume_summary = str(summary_path.resolve())
-            if platform_key == "douyin":
-                prior_summary = load_json(summary_path)
-                stable_search_id = stable_douyin_search_id_from_summary(prior_summary)
-                if stable_search_id and stable_search_id != str(job_args.start_cursor or ""):
-                    job_args.start_cursor = stable_search_id
-                    resume_cursor_corrected_from_summary = True
         job_args.auto_resume = True
 
     plan = {
@@ -339,16 +300,9 @@ def resolve_discovery_args(
         "query_fingerprint": fingerprint,
         "checkpoint_found": checkpoint is not None,
         "auto_resume": bool(job_args.auto_resume),
+        "full_scan": full_scan,
         "resume_page": int(job_args.start_page or 1),
-        "resume_offset": job_args.start_offset,
-        "resume_cursor": job_args.start_cursor,
-        "resume_cursor_corrected_from_summary": resume_cursor_corrected_from_summary,
         "source_exhausted": bool(job_args.discovery_source_exhausted),
-        "unverified_first_page_checkpoint_rejected": bool(
-            checkpoint
-            and not explicit_recovery
-            and is_unverified_douyin_first_page_checkpoint(checkpoint)
-        ),
         "top_refresh_max_pages": int(job_args.top_refresh_max_pages),
         "campaign_summary_path": str(job_args.resume_summary or ""),
         "checkpoint_before": checkpoint,
@@ -413,10 +367,6 @@ def build_command(row: JobRow, args: argparse.Namespace) -> list[str]:
             add_flag(command, "--start-page", args.start_page)
         if args.resume_summary:
             add_flag(command, "--resume-summary", args.resume_summary)
-        if getattr(args, "start_offset", None) is not None:
-            add_flag(command, "--start-offset", args.start_offset)
-        if getattr(args, "start_cursor", None):
-            add_flag(command, "--start-cursor", args.start_cursor)
         add_flag(command, "--discovery-job-id", getattr(args, "discovery_job_id", row["id"]))
         add_flag(
             command,
@@ -424,13 +374,15 @@ def build_command(row: JobRow, args: argparse.Namespace) -> list[str]:
             getattr(args, "discovery_query_fingerprint", ""),
         )
         add_flag(command, "--discovery-run-id", getattr(args, "discovery_run_id", ""))
-        add_flag(
-            command,
-            "--top-refresh-max-pages",
-            getattr(args, "top_refresh_max_pages", 0),
-        )
-        if getattr(args, "discovery_source_exhausted", False):
-            command.append("--discovery-source-exhausted")
+        if platform != "douyin":
+            # #124：抖音 child 拒绝顶部刷新与耗尽参数，每轮自行从首页全量扫描。
+            add_flag(
+                command,
+                "--top-refresh-max-pages",
+                getattr(args, "top_refresh_max_pages", 0),
+            )
+            if getattr(args, "discovery_source_exhausted", False):
+                command.append("--discovery-source-exhausted")
         if args.headful or (params.get("headless") is False and not args.headless):
             command.append("--headed")
         if args.no_import:

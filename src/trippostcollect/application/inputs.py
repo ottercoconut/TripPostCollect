@@ -52,8 +52,6 @@ def parse_args() -> argparse.Namespace:
         help="Optional one-post visible XHS interaction selected by xhs_runner.py.",
     )
     parser.add_argument("--start-page", type=int, default=1, help="Recovery-only first platform page.")
-    parser.add_argument("--start-offset", type=int, default=0, help="Saved platform offset for the discovery frontier.")
-    parser.add_argument("--start-cursor", default="", help="Saved opaque platform cursor for the discovery frontier.")
     parser.add_argument("--resume-summary", help="Recovery-only prior summary whose JSONL records join this run.")
     parser.add_argument("--discovery-job-id", type=int)
     parser.add_argument("--discovery-query-fingerprint")

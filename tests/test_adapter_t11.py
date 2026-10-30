@@ -24,7 +24,7 @@ from types import ModuleType, SimpleNamespace
 from PIL import Image
 import pytest
 
-from support import fork_removal_deviation
+from support import douyin_full_scan_deviation, fork_removal_deviation
 from trippostcollect.application import collection, reporting, visit_gate
 from trippostcollect.artifacts.image_candidates import content_image_candidates
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
@@ -430,6 +430,13 @@ def normalized_pair(old, new, rules):
     return ast.dump(old), ast.dump(new)
 
 
+def t124_authorized_source(text):
+    """#124 有意偏离：抖音每轮从首页全量扫描，三元组续跑与 reseed 证据退出（见 support.douyin_full_scan_deviation）。"""
+    return douyin_full_scan_deviation.t11_after_t71_source(
+        t71_authorized_source(douyin_full_scan_deviation.t11_source(t75_authorized_source(text)))
+    )
+
+
 @pytest.mark.parametrize("row", ROWS, ids=lambda row: row["qualname"])
 def test_a_migrated_ast(row):
     name = row["qualname"]
@@ -437,7 +444,13 @@ def test_a_migrated_ast(row):
     if row["disposition"] == "薄":
         target = ROOT / "src/trippostcollect/application/collection.py"
     assert target.exists(), f"新定义不存在：{target.relative_to(ROOT)}::{name}"
-    frozen = t71_authorized_source(t75_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text()))
+    frozen = t124_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text())
+    if name in douyin_full_scan_deviation.T11_EXITED_DEFINITIONS:
+        # #124：旧定义确在冻结源码，新侧已删除且无人引用。
+        assert definition(frozen, name)
+        assert name not in {n.name for n in ast.parse(target.read_text()).body if hasattr(n, "name")}
+        assert name not in target.read_text()
+        return
     old = t12_authorized(definition(frozen, name))
     new = t14_authorized(definition(target.read_text(), name))
     assert normalized_pair(old, new, AST_RULES[name])[0] == normalized_pair(old, new, AST_RULES[name])[1]
@@ -513,8 +526,11 @@ def baseline(monkeypatch):
     # #75 有意偏离：任务级时限删除，旧执行器同样改用统一的无进展看门狗常量。
     text = t75_authorized_source(text)
     namespace["NO_PROGRESS_WATCHDOG_SECONDS"] = process.NO_PROGRESS_WATCHDOG_SECONDS
+    # #124 有意偏离：抖音续跑参数、env、reseed 证据退出，抖音收到恢复参数即拒绝。
+    text = douyin_full_scan_deviation.t11_source(text)
     # #71 有意偏离：访问门禁与逐层解码接入旧执行器，名称取自新实现的同一定义。
     text = t71_authorized_source(text)
+    text = douyin_full_scan_deviation.t11_after_t71_source(text)
     # #115 有意偏离：B站图片薄包装不再转发平台 Cookie。
     text = t115_authorized_source(text)
     namespace["VISIT_GATED_PLATFORMS"] = visit_gate.VISIT_GATED_PLATFORMS

@@ -53,15 +53,10 @@ def prepare(monkeypatch, tmp_path):
     state_path = tmp_path / "state.json"
     state_path.write_text('{"events": []}', encoding="utf-8")
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", "0")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED", "0")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET", "0")
-    monkeypatch.delenv("TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR", raising=False)
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     monkeypatch.setattr(config, "CRAWLER_MAX_NOTES_COUNT", 10)
     monkeypatch.setattr(config, "START_PAGE", 1)
     monkeypatch.setattr(config, "KEYWORDS", "青岛旅游")
-    monkeypatch.setattr(config, "PUBLISH_TIME_TYPE", 0)
     return state_path
 
 

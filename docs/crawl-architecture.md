@@ -173,7 +173,7 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 |---|---|---|---|
 | B站 article | 项目自有 article 搜索/详情分支 | article API、详情正文门禁 | [B站](platforms/bilibili.md) |
 | 微博 | 根包平台适配器搜索 | 移动端登录与长文详情 | [微博](platforms/weibo.md) |
-| 抖音 | 根包平台适配器搜索 | 浏览器响应监听、offset/search ID | [抖音](platforms/douyin.md) |
+| 抖音 | 根包平台适配器搜索 | 浏览器响应监听、每轮全量扫描 | [抖音](platforms/douyin.md) |
 | 知乎 | 根包平台适配器搜索 | answer/article 详情、zhimg 资产键 | [知乎](platforms/zhihu.md) |
 | 小红书 | 独立 runner + 根包平台适配器 | 逻辑账号租约、轮内扫码、标签页保护 | [小红书](platforms/xhs.md) |
 

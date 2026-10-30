@@ -192,7 +192,7 @@ Cookie、签名计算上下文、Page、BrowserContext、browser 实例不进入
 | 平台差异 | 保持要求 | 权威说明 |
 |---|---|---|
 | B站 article | 原搜索页、详情补全与已知 ID 提前跳过 | [B站](platforms/bilibili.md) |
-| 抖音 | page/offset/search ID 成组；空首页、建链和重建链条件保留 | [抖音游标](platforms/douyin.md#搜索响应与游标) |
+| 抖音 | 每轮从首页全量翻到 `has_more=false`，搜索只经浏览器截获（#124）；空首页门禁保留 | [抖音游标](platforms/douyin.md#搜索响应与游标) |
 | XHS | 保存 client search ID；账号隔离；批次 ACK 独立处理 | [XHS](platforms/xhs.md#批次恢复点) |
 | 微博、知乎 | 各自分页和权威详情来源保持 | [微博](platforms/weibo.md)、[知乎](platforms/zhihu.md) |
 
