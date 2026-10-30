@@ -116,10 +116,13 @@ BrowserContext；只有触发轮的精确租约已经释放且 `runtime_session_
 取数来源分三级：L1 为被动截获页面自身发出的请求的响应，或读取页面状态；L2 为在页面上下文中
 主动发起请求；L3 为 Playwright `page.request` / `context.request`。L3 对所有平台禁止。浏览器外
 HTTP 客户端（httpx 等）不属于以上任何一级：已纳入访问门禁的平台不得用它取得平台数据，只有平台
-文档登记的例外（如图片直连 CDN，UA 与 Referer 取自浏览器、不带 cookie）可以使用；尚未纳入门禁
-的平台维持现状，直到各自的改造批次。已纳入访问门禁的平台只能经页面取数通道取得平台数据，静态
-检查 `tests/test_fetch_boundary.py` 禁止旁路导入、Playwright 请求接口和页面脚本内的主动请求。
-小红书的搜索、详情、作者、图片与登录态只用 L1，没有例外；其余平台的分级在各自改造时写入本节。
+文档登记的例外（如图片直连 CDN，UA 与 Referer 取自浏览器、不带 cookie）可以使用。已纳入访问门禁的
+平台只能经页面取数通道取得平台数据，静态检查 `tests/test_fetch_boundary.py` 禁止旁路导入、Playwright
+请求接口和页面脚本内的主动请求；L3 的静态检查覆盖全部平台目录。
+小红书是唯一纳入访问门禁的平台，搜索、详情、作者、图片与登录态只用 L1，没有例外。B站、微博、抖音和
+知乎长期不纳入访问门禁（#111）：浏览器负责登录、Cookie 与行为证据，搜索、详情、作者与图片由浏览器外
+HTTP 客户端取得，不写访问账本，也不参与 `content_visit_ok`。其中正文图片请求不带平台 Cookie，也不经
+第三方代理。
 
 每轮写只追加的访问账本（行为证据同目录的 `content_visits` JSONL），以单一单调序号记录动作、
 页面响应与页面状态读取、停顿和诊断。账本不截断，不写 token、查询值、正文、头像或完整图片 URL，
@@ -270,7 +273,7 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 | B站 article | `article_view_api` | `content_text/content` | 搜索 `desc`、预览图 |
 | 微博 | `search_mblog_complete`、`mobile_detail` | `content_text/content` | 长文搜索截断 `mblog.text`、标题 |
 | 小红书 | `note_detail` | `desc` | 搜索卡片摘要、标题 |
-| 抖音 | `aweme_detail` | `desc` | 标题、封面或预览文本 |
+| 抖音 | `search_aweme_info`、`aweme_detail` | `desc` | 标题、封面或预览文本 |
 | 知乎 | `search_content`、`answer_detail`、`article_detail` | `content_text/content` | `title`、`desc/excerpt` |
 
 平台详情、作者与粉丝的具体来源由 `required_fields_profile`、
@@ -320,9 +323,13 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 ## 停止状态
 
 - `source_exhausted`：平台明确返回空页、空游标或 `has_more=false`，且状态文件存在对应
-  `adaptive_search_stopped` 证据。抖音新鲜游标链的第 1 页是例外：`data=[]` 与
-  `has_more=false` 不能单独证明耗尽；还必须由当前可见搜索页明确显示无结果，停止细节写为
-  `verified_empty_first_page`。可见页仍有作品或页面状态不明确时必须写
+  `adaptive_search_stopped` 证据。空页必须由平台自身的结束标记证明，过滤后为空、缺少结束标记或结束
+  标记与页码矛盾都不算：知乎只认响应 `paging.is_end=true`（`paging_is_end`）；B站只认首页
+  `numResults=0`（`no_results`）或页码大于 `numPages`（`empty_page`），停止事件记录
+  `source_num_pages`/`source_num_results`；微博只认原始 `cards` 为空或页面明确无内容（`empty_page`）。
+  这些平台的页内空页、缺少结束标记或缺少总数一律写 `runtime_failed`。抖音新鲜游标链的第 1 页是例外：
+  `data=[]` 与 `has_more=false` 不能单独证明耗尽；还必须由当前可见搜索页明确显示无结果，停止细节
+  写为 `verified_empty_first_page`。可见页仍有作品或页面状态不明确时必须写
   `runtime_failed`，分别使用 `empty_api_response_with_visible_results` 或
   `ambiguous_empty_first_page`，并保留第 1 页、offset 0、空 search ID 供下轮重取。
 - 批次中的 `stagnant_batches` 与 `stagnation_basis` 仅供审计。无论连续多少批没有新候选或有效记录，

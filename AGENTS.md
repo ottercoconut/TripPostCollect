@@ -34,11 +34,12 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 只读管理端属于同级独立项目 `../TripPostAdmin`；本仓库不再包含管理端 API、Web、Docker 或管理端
   读模型，也不得让管理端导入采集包。两者只通过 SQLite schema、只读配置及媒体/证据文件契约协作。
 - `published_at` 必须来自平台原始发帖时间，入库保存为 Asia/Shanghai ISO；不要用抓取时间冒充发帖时间。
-- Playwright `page.request` / `context.request`（L3）对所有平台禁止。已纳入访问门禁的平台只能经页面取数
-  通道取得平台数据，浏览器外 HTTP 客户端只可用于平台文档登记的例外；尚未纳入门禁的平台维持现状，直到
-  各自的改造批次。小红书取数只能来自本轮页面自身请求的被动截获响应或页面状态（L1），不得在页面内主动
-  请求（L2），也没有浏览器外 HTTP 客户端的例外。每条入库记录须经 `content_visit_ok` 追溯到真实访问；
-  分级与规则见 `docs/formal-crawl-contract.md` 的“取数来源与真实访问门禁”。
+- Playwright `page.request` / `context.request`（L3）对所有平台禁止。小红书已纳入访问门禁：取数只能
+  来自本轮页面自身请求的被动截获响应或页面状态（L1），不得在页面内主动请求（L2），也没有浏览器外
+  HTTP 客户端的例外；每条入库记录须经 `content_visit_ok` 追溯到真实访问。B站、微博、抖音和知乎长期沿用
+  浏览器负责登录、Cookie 与行为证据、取数走浏览器外 HTTP 客户端的方案（#111），不纳入访问门禁；其
+  正文图片请求不带平台 Cookie、不经第三方代理。分级与规则见
+  `docs/formal-crawl-contract.md` 的“取数来源与真实访问门禁”。
 - 通用正式任务从 `scripts/crawl_runner.py` 进入；小红书的正式抓取与轮内扫码登录只从
   `scripts/xhs_runner.py` 进入，禁止放回通用 job、warmup 或独立登录流程。`xhs_accounts.py` 只管理
   非秘密逻辑槽位与精确租约，不保存平台登录态。

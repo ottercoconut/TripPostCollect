@@ -136,7 +136,7 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
 
 取数分级以[正式契约](formal-crawl-contract.md#取数来源与真实访问门禁)为准，本文不另行定义：L3 只指
 Playwright `page.request` / `context.request`，所有平台禁止；浏览器外 HTTP 客户端单列，已纳入门禁的
-平台只允许平台文档登记的例外，尚未纳入的平台维持现状。静态检查 `tests/test_fetch_boundary.py`
+平台只允许平台文档登记的例外，B站、微博、抖音和知乎长期不纳入门禁（#111）。静态检查 `tests/test_fetch_boundary.py`
 守护旁路导入、Playwright 请求接口和页面脚本内的主动请求。
 
 ## 状态与发现记忆

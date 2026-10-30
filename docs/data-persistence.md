@@ -168,7 +168,7 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 | `content_text` | 仅接受 `content_detail_status=detail_observed` 且 `content_detail_source` 受信任的权威正文：B站 `content_text/content`，微博 `content_text/content`，小红书 `desc`，抖音 `desc`，知乎 `content_text/content`。小红书和知乎可在入库文本中拼接标题与已验证正文，但标题、搜索 `desc/excerpt` 或预览文本不能单独通过 |
 | `author_display_name` | `nickname` 或 `user_nickname` |
 | `author_platform_id` | 小红书 `user_id`、`creator_hash` 或其他平台用户 ID |
-| `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎搜索结果 `author.follower_count` 归一后的 `followers_count` |
+| `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎搜索结果 `author.follower_count` 归一后的 `followers_count`，抖音只取作者主页响应 `user` 节点的粉丝字段（`creator_profile`，不读搜索作者对象） |
 | `published_at` | 发帖时间，统一保存为 Asia/Shanghai ISO 字符串，如 `2024-04-06T15:35:00+08:00`。优先取平台原始发布时间字段，如 `create_time`、`publish_time`、`time`、`datePublished`；`captured_at` 只表示本项目抓取时间 |
 | `keyword` | 优先保存每条记录的 `source_keyword`；缺失时回退到最终执行摘要的 `keyword`，即本次 child 命令实际使用的检索词。当前通用结构化 store 会逐条写入 `source_keyword`；自动 checkpoint 延续同一查询词，显式 `--recovery-keyword` 才会产生恢复词。旧记录缺少该字段时，回退值不能作为其原始检索词证据 |
 | `topic_relevant` | 使用与 `keyword` 相同的实际检索词，分别检查最终写入 `web_posts.title` 与 `web_posts.content_text` 的字符串。任一字段经 Unicode NFKC、大小写和空白归一后包含“青岛”或完整检索词为 1，否则为 0；字段之间不拼接，平台清洗前文本、raw JSON、作者、URL 或其他元数据均不参与 |
@@ -452,7 +452,8 @@ B站 2026-08-02 正文完整性事件已经完成回填和清理，当前入库�
 - 正式新记录只下载并以 `content` 角色导入显式投影的正文图。头像、作者主页、封面、搜索预览、
   视频、音乐和知乎公式图会在下载前自动忽略，不进入 manifest、`data/media`、项目 JSONL、摘要
   子进程日志或 SQLite；历史未清除产物在恢复读取时也必须先在内存中清除头像数据。非结构化
-  stdout/stderr 出现任一已知头像键时整段丢弃为审计标记，不按 URL 域名或路径猜测。
+  stdout/stderr 出现任一已知头像键时整段丢弃为审计标记，不按 URL 域名或路径猜测。键名按完整键匹配；
+  `face`、`upic` 这类短键只按键的写法（如 `"face":`、`face=`）匹配，不命中 `interface`、`surface` 等普通词。
 - 知乎当前是结构化平台适配器入库路径；页面级产物只作为临时排障证据，不作为默认调度链路。
 - 正式有效性过滤在入库前完成；业务清洗、低质量分级和 flag-like 误报处理仍放在 SQL 视图或下游清洗层。
 - `outputs/` 不是长期图片主存储。结构化内容、作者、互动数、URL、本地路径、状态和摘要应进入
