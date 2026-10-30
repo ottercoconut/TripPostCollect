@@ -17,8 +17,20 @@ AUTHOR_AVATAR_KEYS = frozenset(
         "author_avatar_url",
         "avatar",
         "user_avatar",
+        # 微博用户对象（#112）。
+        "avatar_hd",
+        "avatar_large",
+        "profile_image_url",
+        # 知乎作者对象的尺寸模板（#112）。
+        "avatar_url_template",
+        # B站作者头像与搜索结果中的 UP 主头像（#112）。
+        "face",
+        "upic",
     }
 )
+# 日志中按词匹配的头像键。`face`、`upic` 是常见英文词或其片段，只在键的写法（紧跟引号后再接冒号，或紧跟
+# `=`/`:`）出现时才算命中，避免普通英文日志被整段替换。
+_DISTINCT_AVATAR_LOG_KEYS = tuple(sorted(AUTHOR_AVATAR_KEYS - {"face", "upic"}, key=len, reverse=True))
 XHS_SERIALIZED_PROFILE_AVATAR_PATHS = {
     "creator_profile_json": frozenset(
         {
@@ -28,7 +40,10 @@ XHS_SERIALIZED_PROFILE_AVATAR_PATHS = {
     )
 }
 AUTHOR_AVATAR_TEXT_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:avatar_url|author_avatar|author_avatar_url|avatar|user_avatar)(?![A-Za-z0-9_])",
+    r"(?<![A-Za-z0-9_])(?:"
+    + "|".join(re.escape(key) for key in _DISTINCT_AVATAR_LOG_KEYS)
+    + r")(?![A-Za-z0-9_])"
+    + r"|(?<![A-Za-z0-9_])(?:face|upic)(?:[\"']\s*:|\s*[=:])",
     re.IGNORECASE,
 )
 AUTHOR_AVATAR_LOG_REDACTION_HEAD = "[TripPostCollect redacted child output containing author-avatar fields]"

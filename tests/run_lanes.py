@@ -138,9 +138,8 @@ def sandbox_policy(source: Path, output: Path, lane: str) -> str:
             "Documents", "Desktop", "Downloads",
         )
     }
-    # 平台登录资料：T14-A 起位于 data/runtime/platform_sessions；fork 删除后旧 browser_data 未跟踪备份
-    # 可能仍留在 Mac 工作副本磁盘上，继续禁读写。
-    profiles = ("data/runtime/platform_sessions", "tools/MediaCrawler/browser_data")
+    # 平台登录资料：T14-A 起位于 data/runtime/platform_sessions；旧 fork browser_data 已从磁盘删除（#112）。
+    profiles = ("data/runtime/platform_sessions",)
     if checkout != source:
         forbidden.update(checkout / name for name in ("data", "outputs", *profiles, ".git", ".env"))
     forbidden.update(source / name for name in (*profiles, ".git", ".env"))

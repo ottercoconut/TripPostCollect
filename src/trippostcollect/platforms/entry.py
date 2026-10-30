@@ -60,14 +60,6 @@ def _save_data_root(save_data_path: str):
     return Path(save_data_path)
 
 
-def require_persistent_session_migrated(platform_code: str) -> None:
-    """非小红书 worker 建立持久浏览器会话前的失败关闭检查：拒绝 T14 迁移中断留下的 `.partial` 残留。"""
-    from trippostcollect.core import paths
-
-    if platform_code != "xhs":
-        paths.require_platform_session_migrated(paths.platform_key_for_profile_code(platform_code))
-
-
 def current_config():
     """configure 写回后的配置对象；未经 configure 时按默认值构造一次。"""
     global _config
@@ -522,7 +514,6 @@ def xhs_dependencies(config, *, repair=None):
 
 def main(argv=None) -> int:
     inputs = configure(argv)
-    require_persistent_session_migrated(inputs.platform)
     install_hooks()
     state = {"crawler": None}
 

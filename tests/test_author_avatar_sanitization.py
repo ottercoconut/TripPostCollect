@@ -68,6 +68,88 @@ def test_all_known_avatar_aliases_are_removed(alias: str) -> None:
     assert result.avatar_urls == frozenset({AVATAR_URL})
 
 
+# #112：微博 avatar_hd/avatar_large/profile_image_url、知乎 avatar_url_template、B站 face/upic。
+PLATFORM_AVATAR_KEYS = {
+    "avatar_hd": "weibo", "avatar_large": "weibo", "profile_image_url": "weibo",
+    "avatar_url_template": "zhihu", "face": "bilibili", "upic": "bilibili",
+}
+
+
+@pytest.mark.parametrize("alias", sorted(PLATFORM_AVATAR_KEYS))
+def test_platform_avatar_keys_are_removed_with_nested_and_duplicate_urls(alias: str) -> None:
+    body_url = "https://images.test/body.jpg"
+    payload = {
+        "user": {"id": 1, "screen_name": "作者", alias: AVATAR_URL, "followers_count": 9},
+        "pages": [{"author": {"mid": 2, alias.upper(): AVATAR_URL}}],
+        "pics": [body_url, AVATAR_URL],
+        "copied_cover": AVATAR_URL,
+        "title": "青岛",
+    }
+
+    result = sanitize_author_avatar_data(payload)
+
+    assert result.value == {
+        "user": {"id": 1, "screen_name": "作者", "followers_count": 9},
+        "pages": [{"author": {"mid": 2}}],
+        "pics": [body_url],
+        "title": "青岛",
+    }
+    assert result.avatar_urls == frozenset({AVATAR_URL})
+    assert (result.removed_keys, result.removed_values) == (2, 2)
+    assert AVATAR_URL not in json.dumps(result.value)
+
+
+def test_weibo_bilibili_zhihu_real_author_shapes_keep_research_fields() -> None:
+    weibo = {"user": {
+        "id": 7654321, "screen_name": "青岛", "followers_count": 12, "description": "简介",
+        "profile_url": "https://m.weibo.cn/u/7654321",
+        "profile_image_url": "https://tvax1.sinaimg.cn/crop.0.0.180.180.180/a.jpg",
+        "avatar_large": "https://tvax1.sinaimg.cn/crop.0.0.180.180.180/a.jpg?large",
+        "avatar_hd": "https://tvax1.sinaimg.cn/crop.0.0.180.180.180/a.jpg?hd",
+    }}
+    bilibili = {"owner": {"mid": 2, "name": "UP", "face": "https://i0.hdslb.com/bfs/face/a.jpg"},
+                "upic": "https://i0.hdslb.com/bfs/face/a.jpg", "pic": "https://i0.hdslb.com/bfs/archive/c.jpg"}
+    zhihu = {"author": {"id": "z", "name": "n", "url_token": "t",
+                        "avatar_url": "https://picx.zhimg.com/v2-a_l.jpg",
+                        "avatar_url_template": "https://picx.zhimg.com/v2-a_{size}.jpg"}}
+
+    assert sanitize_author_avatar_data(weibo).value == {"user": {
+        "id": 7654321, "screen_name": "青岛", "followers_count": 12, "description": "简介",
+        "profile_url": "https://m.weibo.cn/u/7654321",
+    }}
+    assert sanitize_author_avatar_data(bilibili).value == {
+        "owner": {"mid": 2, "name": "UP"}, "pic": "https://i0.hdslb.com/bfs/archive/c.jpg",
+    }
+    assert sanitize_author_avatar_data(zhihu).value == {"author": {"id": "z", "name": "n", "url_token": "t"}}
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "'avatar_hd': 'https://tvax1.sinaimg.cn/a.jpg'",
+        '{"avatar_large": "https://tvax1.sinaimg.cn/a.jpg"}',
+        "profile_image_url=https://tvax1.sinaimg.cn/a.jpg",
+        '"avatar_url_template": "https://picx.zhimg.com/v2-a_{size}.jpg"',
+        "{'mid': 2, 'face': 'https://i0.hdslb.com/bfs/face/a.jpg'}",
+        '{"upic": "https://i0.hdslb.com/bfs/face/a.jpg"}',
+        "owner face=https://i0.hdslb.com/bfs/face/a.jpg",
+    ],
+)
+def test_platform_avatar_keys_in_child_output_trigger_redaction(line: str) -> None:
+    marker = author_avatar_log_marker({"stdout": f"[WeiboClient.search] {line}\n"})
+
+    assert marker == f"{AUTHOR_AVATAR_LOG_REDACTION_HEAD} stdout_lines=1 tags=[WeiboClient.search]\n"
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["Playwright interface ready", "surface: 2", "typeface=serif", "face recognition disabled",
+     "upicture saved", "avatar_frame=1", "processed 3 images"],
+)
+def test_plain_words_containing_face_or_upic_do_not_trigger_redaction(line: str) -> None:
+    assert author_avatar_log_marker({"stdout": line}) is None
+
+
 def test_only_explicitly_evidenced_url_values_are_removed() -> None:
     body_url = "https://images.test/body.jpg"
     result = sanitize_author_avatar_data(

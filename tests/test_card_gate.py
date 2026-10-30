@@ -27,9 +27,9 @@ def test_policy_covers_all_boundaries():
     for root in ("/work/main", "/work/卡 G"):
         for name in ("data", "outputs"):
             assert f'(deny file-write* (subpath "{root}/{name}"))' in policy
-        # 真实平台登录资料禁读写：T14-A 的 platform_sessions 与删除前的 fork browser_data。
-        for name in ("data/runtime/platform_sessions", "tools/MediaCrawler/browser_data"):
-            assert f'(deny file-read* file-write* (subpath "{root}/{name}"))' in policy
+        # 真实平台登录资料禁读写：T14-A 起的 platform_sessions；旧 fork browser_data 已从磁盘删除（#112）。
+        assert f'(deny file-read* file-write* (subpath "{root}/data/runtime/platform_sessions"))' in policy
+        assert "tools/MediaCrawler" not in policy
     assert "(require-all" in policy
     assert '(require-not (subpath "/dev"))' in policy
     assert '(require-not (subpath "/tmp/带 空格/\\\"本轮\\\""))' in policy

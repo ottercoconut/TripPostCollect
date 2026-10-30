@@ -59,6 +59,9 @@ def old_module(name, namespace=None):
     module.__dict__.update(preset)
     if name == "mediacrawler_login_warmup":
         source = t83_sandbox_enabled(source)
+        for check in T112_LOGIN_API_CHECKS:
+            source = t112_login_api_check(source, check)
+        module.__dict__["project_login_api_result"] = warmup.project_login_api_result
     if "from __future__ import annotations" not in source:
         source = "from __future__ import annotations\n" + source
     exec(compile(source, name, "exec"), module.__dict__)
@@ -79,13 +82,22 @@ def t14_snapshot_writer(source):
 
 
 def t14_warmup_one(source):
-    """T14 授权差异：建 profile 前做迁移失败关闭检查；快照写出不再传 profile 目录。"""
-    source = source.replace(
-        "    platform = PLATFORMS[platform_key]\n    profile_dir = profile_dir_for(platform_key)\n",
-        "    platform = PLATFORMS[platform_key]\n    paths.require_platform_session_migrated(platform_key)\n"
-        "    profile_dir = profile_dir_for(platform_key)\n",
-    )
+    """T14 授权差异：快照写出不再传 profile 目录（#112 删除了 T14 迁移 `.partial` 检查，不再插入）。"""
     return re.sub(r"(write_cookie_snapshot\(\n\s+platform_key,\n)\s+profile_dir,\n", r"\1", source)
+
+
+# #112 授权差异：登录检查接口不再把 /api/v4/me 原文前 300 字（含 avatar_url）写进 warmup 报告，结果按白名单
+# 投影（成功只留 uid/name，失败只留状态码与清洗过的错误 code/name）。冻结原文必须仍是被替换的旧实现。
+T112_LOGIN_API_CHECKS = {"zhihu_api_check": "text: text.slice(0, 300)", "weibo_api_check": "uid: data.uid || null"}
+
+
+def t112_login_api_check(source, name):
+    old = ast.get_source_segment(source, function(source, name))
+    assert T112_LOGIN_API_CHECKS[name] in old
+    new_source = (ROOT / "src/trippostcollect/application/warmup.py").read_text()
+    new = ast.get_source_segment(new_source, function(new_source, name))
+    assert "project_login_api_result(result" in new and "text.slice" not in new
+    return source.replace(old, new)
 
 
 def t83_sandbox_enabled(source):
@@ -132,6 +144,8 @@ def test_migrated_ast(row):
             source = t14_snapshot_writer(source)
         elif name == "warmup_one":
             source = t14_warmup_one(source)
+        elif name in T112_LOGIN_API_CHECKS:
+            source = t112_login_api_check(source, name)
         elif name == "launch_login_context":
             source = t83_sandbox_enabled(source)
     if row["disposition"] == "薄":

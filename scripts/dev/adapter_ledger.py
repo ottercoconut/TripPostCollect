@@ -166,10 +166,12 @@ AUTHORIZED_ENV_REMOVALS = frozenset({
     "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS",
 })
 # #75（用户授权删除任务级时限）删除的 CLI 参数：中间层无进展看门狗阈值改为代码常量，修复批次不再设墙钟上限。
-# 只登记这 2 个确切的（入口, 参数）对；清单外的删除或修改仍计入 cli_changed。
+# #112 删除 runner 的 --no-throttle：结构化 child 从未定义该参数（转发即以退出码 2 失败），页面证据 child 的
+# 同名诊断开关保留在 ctf_resource_crawl.py。只登记这些确切的（入口, 参数）对；清单外的删除或修改仍计入 cli_changed。
 AUTHORIZED_CLI_REMOVALS = frozenset({
     ("scripts/mediacrawler_crawl.py", "--timeout-per-platform"),
     ("scripts/repair_post_details.py", "--timeout-per-batch"),
+    ("scripts/crawl_runner.py", "--no-throttle"),
 })
 
 

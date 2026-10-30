@@ -41,7 +41,6 @@ FORMAL_CRAWL_CONTRACT = DOCS_ROOT / "formal-crawl-contract.md"
 
 PLATFORM_PROFILE_CODES = {"bilibili": "bili", "weibo": "wb", "douyin": "dy", "zhihu": "zhihu", "xhs": "xhs"}
 COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
-PLATFORM_SESSION_MIGRATION_REQUIRED = "platform_session_migration_required"
 MEDIACRAWLER_RUNS_OUTPUT = OUTPUTS_ROOT / "mediacrawler_runs"
 MEDIACRAWLER_LOGIN_OUTPUT = OUTPUTS_ROOT / "mediacrawler_login_warmup"
 LOGIN_WARMUP_OUTPUT = OUTPUTS_ROOT / "login_warmup"
@@ -120,26 +119,6 @@ def platform_cdp_profile_dir(platform_key: str) -> Path:
 
 def platform_cookie_snapshot_path(platform_key: str) -> Path:
     return platform_session_dir(platform_key) / COOKIE_SNAPSHOT_FILENAME
-
-
-def require_platform_session_migrated(platform_key: str) -> None:
-    """失败关闭：新位置留有未完成复制的 `profile.partial`/`cdp_profile.partial` 时拒绝启动。
-
-    `.partial` 只由 T14 登录资料迁移在复制中途失败时留下；残留说明迁移未完成，不得在其旁边
-    按首登流程新建 profile。新 profile 不存在且无残留时由调用方按首登流程创建。错误只给出平台与
-    目录，不读取或输出任何 Cookie。
-    """
-    problems = []
-    for target in (platform_profile_dir(platform_key), platform_cdp_profile_dir(platform_key)):
-        partial = target.with_name(f"{target.name}.partial")
-        # 悬空符号链接 exists() 为 False，也必须视为残留。
-        if partial.exists() or partial.is_symlink():
-            problems.append(f"未完成的迁移残留 {partial}，删除后重做")
-    if problems:
-        raise RuntimeError(
-            f"{PLATFORM_SESSION_MIGRATION_REQUIRED}:{platform_key} "
-            f"(按 docs/operations-runbook.md「T14 非小红书登录资料迁移」处理：{'; '.join(problems)})"
-        )
 
 
 def ensure_dir(path: str | Path) -> Path:

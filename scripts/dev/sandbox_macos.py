@@ -15,9 +15,8 @@ from pathlib import Path
 NAME = "Seatbelt"
 SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 # 项目内真实登录资料目录（相对 checkout），禁读写。T14-A 起非小红书 profile 位于 platform_sessions；
-# T14-C 删除 fork 后，Mac 工作副本中旧 tools/MediaCrawler/browser_data 作为未跟踪备份仍留在磁盘，继续禁读写。
-# sandbox_linux 保持同一清单（测试守护）。
-PROFILE_STORES = ("data/runtime/platform_sessions", "tools/MediaCrawler/browser_data")
+# #112：旧 fork 目录 tools/MediaCrawler/ 已从磁盘删除，不再列入。sandbox_linux 保持同一清单（测试守护）。
+PROFILE_STORES = ("data/runtime/platform_sessions",)
 
 
 def preflight():

@@ -16,5 +16,10 @@ from trippostcollect.application.failures import (
     _stdout_without_json_payload as _stdout_without_json_payload,
     _terminal_stdout_payload as _terminal_stdout_payload,
     _strong_child_classification as _strong_child_classification,
+    _latest_child_classification as _latest_child_classification,
+    _latest_child_record as _latest_child_record,
+    _latest_worker_output as _latest_worker_output,
+    _summary_runtime_blocker_classification as _summary_runtime_blocker_classification,
+    _operator_interrupt_classification as _operator_interrupt_classification,
     _structured_runtime_blocker as _structured_runtime_blocker,
 )

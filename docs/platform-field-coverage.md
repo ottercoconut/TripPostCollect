@@ -43,4 +43,8 @@ B站搜索结果的 `desc` 和 `image_urls` 只是摘要与预览，必须取得
 识别；被合并变体保留在内容原始证据中而不重复下载。
 筛除头像等无用资源依赖上表的显式字段投影，不使用递归 URL 扫描或图片尺寸启发式，因此被排除
 资源不会触发下载。作者头像字段还会在首方 JSONL、摘要和 SQLite 序列化前递归清除；五个平台均
-不由 TripPostCollect 对外提供或持久化头像字段、头像 URL、头像关系或头像文件。
+不由 TripPostCollect 对外提供或持久化头像字段、头像 URL、头像关系或头像文件。递归清除的键名清单在
+`trippostcollect.records.sanitization.AUTHOR_AVATAR_KEYS`：通用 `avatar`、`avatar_url`、`author_avatar`、
+`author_avatar_url`、`user_avatar`，微博 `avatar_hd`、`avatar_large`、`profile_image_url`，知乎
+`avatar_url_template`，B站 `face`、`upic`；同一记录内由这些键证明的重复 URL 一并清除。子进程日志按同一
+清单整段替换，其中 `face`、`upic` 只按键的写法（`"face":`、`face=`）命中。

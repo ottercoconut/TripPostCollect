@@ -31,18 +31,16 @@ def test_checkpoint_failure_beats_incidental_traceback_timeout(detail: str) -> N
 
 
 def test_source_exhaustion_failure_beats_incidental_rate_text() -> None:
-    stdout = json.dumps(
-        {
-            "import_completion_met": False,
-            "failure_reason": "source_exhaustion_not_persisted",
-            "formal_validation": {
-                "stop_reason": "source_not_exhausted",
-                "invalid_reason_counts": {"raw_text_containing_429": 1},
-            },
-        }
-    )
+    summary = {
+        "import_completion_met": False,
+        "failure_reason": "source_exhaustion_not_persisted",
+        "formal_validation": {
+            "stop_reason": "source_not_exhausted",
+            "invalid_reason_counts": {"raw_text_containing_429": 1},
+        },
+    }
 
-    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout)
+    result = failure_classifier.classify_attempt(exit_code=2, summary=summary)
 
     assert result["status"] == "retry_wait"
     assert result["failure_type"] == "source_exhaustion_not_persisted"
@@ -109,7 +107,7 @@ def test_xhs_stable_parameter_error_beats_incidental_login_trace() -> None:
 
 
 def test_xhs_runtime_terminal_event_beats_incidental_stderr_markers() -> None:
-    stdout = json.dumps(
+    summary = (
         {
             "runtime_blocker": {
                 "source": "xhs_runtime_terminal",
@@ -133,7 +131,7 @@ def test_xhs_runtime_terminal_event_beats_incidental_stderr_markers() -> None:
 
     result = failure_classifier.classify_attempt(
         exit_code=1,
-        stdout=stdout,
+        summary=summary,
         stderr="SMS Verification Parameter error 安全限制 300011 扫码登录",
         meta={"platform": "xhs"},
     )
@@ -468,7 +466,7 @@ def test_true_captcha_marker_in_stdout_json_is_detected() -> None:
 
 
 def test_strong_platform_classification_beats_formal_count_failure() -> None:
-    stdout = json.dumps(
+    summary = (
         {
             "records": [
                 {
@@ -486,14 +484,14 @@ def test_strong_platform_classification_beats_formal_count_failure() -> None:
         }
     )
 
-    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout)
+    result = failure_classifier.classify_attempt(exit_code=2, summary=summary)
 
     assert result["status"] == "login_required"
     assert result["failure_type"] == "login_required"
 
 
 def test_latest_policy_block_preserves_child_cooldown() -> None:
-    stdout = json.dumps(
+    summary = (
         {
             "records": [
                 {
@@ -522,7 +520,7 @@ def test_latest_policy_block_preserves_child_cooldown() -> None:
         }
     )
 
-    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout)
+    result = failure_classifier.classify_attempt(exit_code=2, summary=summary)
 
     assert result["status"] == "retry_wait"
     assert result["failure_type"] == "policy_blocked"
@@ -592,6 +590,307 @@ def test_rate_limit_beats_target_closed_after_operator_closes_page() -> None:
         exit_code=1,
         stderr="请求过于频繁\nTargetClosedError: Target page, context or browser has been closed",
     )
+
+    assert result["failure_type"] == "rate_limited"
+    assert result["wait_seconds"] == 3600
+
+
+# ---------- runner 分类读取子摘要（#112 S1） ----------
+# 结构化 child 的 stdout 只打印终态信封（reporting.terminal_summary_envelope）；记录级分类、运行级阻断与
+# 正式门禁只在 summary.json。下列摘要用 collection 写摘要时的同一组函数构造。
+
+WORKER_SIGINT_LINE = "\n[Main] Received interrupt signal 2, exiting (cleanup max 15.0s)...\n"
+SUCCESS = {
+    "status": "completed", "failure_type": "success", "retryable": False,
+    "wait_seconds": 0, "reason": "completed",
+}
+
+
+def child_outputs(
+    batch_dir: Path,
+    *,
+    platform: str,
+    record_classification: dict,
+    stop_reason: str,
+    stop_event: dict | None = None,
+    worker_stdout: str = "",
+) -> tuple[str, dict]:
+    """返回 (child stdout 终态信封, summary.json 内容)，形状与 collection._run_main 写出的一致。"""
+
+    from trippostcollect.application.reporting import terminal_summary_envelope
+
+    record = {
+        "platform": platform,
+        "status": "completed" if record_classification["status"] == "completed" else "failed",
+        "run": {"returncode": 0, "stdout_tail": worker_stdout, "stderr_tail": ""},
+        "failure_classification": record_classification,
+    }
+    pagination_evidence = {
+        "available": True, "stopped": stop_event is not None, "stop_event": stop_event or {},
+    }
+    blocker = (
+        failure_classifier.runtime_blocker_from_pagination_evidence(pagination_evidence, [platform])
+        or failure_classifier.latest_runtime_blocker([record], [platform])
+    )
+    validation = failure_classifier.apply_runtime_blocker(
+        {"stop_reason": stop_reason, "stop_detail": "", "source_exhausted_met": False}, blocker,
+    )
+    summary = {
+        "records": [record],
+        "pagination_evidence": pagination_evidence,
+        "formal_validation": validation,
+        "import_completion_met": False,
+        "failure_reason": (
+            "import_completion_not_met: completion_mode=source-exhausted valid_new=3 "
+            f"stop_reason={validation['stop_reason']} behavior_ok=True policy_ok=True"
+        ),
+    }
+    if blocker:
+        summary["runtime_blocker"] = blocker
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = batch_dir / "summary.json"
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False), encoding="utf-8")
+    envelope = terminal_summary_envelope(
+        summary_path=summary_path,
+        report_path=batch_dir / "summary.md",
+        batch_dir=batch_dir,
+        summary=summary,
+    )
+    return json.dumps(envelope, ensure_ascii=False) + "\n", summary
+
+
+def test_envelope_alone_never_claims_source_exhaustion_not_persisted(tmp_path: Path) -> None:
+    """信封里只有 import_completion_met=false，没有 formal_validation：不得据此进入未耗尽分支。"""
+
+    stdout, _summary = child_outputs(
+        tmp_path, platform="douyin", record_classification=SUCCESS, stop_reason="runtime_failed",
+    )
+
+    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout)
+
+    assert result["failure_type"] != "source_exhaustion_not_persisted"
+
+
+@pytest.mark.parametrize(
+    ("platform", "record_kwargs", "expected"),
+    [
+        (
+            "weibo",
+            {"exit_code": 1, "stderr": "Login state result: False"},
+            {"status": "login_required", "failure_type": "login_required", "retryable": False},
+        ),
+        (
+            "zhihu",
+            {"exit_code": 1, "meta": {"structured_markers": {"captcha_or_verify": True}}},
+            {"status": "captcha_detected", "failure_type": "captcha_detected", "retryable": False},
+        ),
+    ],
+    ids=["login_required", "captcha_detected"],
+)
+def test_record_level_runtime_blocker_reaches_runner_from_summary(
+    tmp_path: Path, platform: str, record_kwargs: dict, expected: dict,
+) -> None:
+    kwargs = dict(record_kwargs)
+    kwargs["meta"] = {"platform": platform, **kwargs.get("meta", {})}
+    record_classification = failure_classifier.classify_attempt(**kwargs)
+    stdout, summary = child_outputs(
+        tmp_path, platform=platform, record_classification=record_classification,
+        stop_reason="behavior_evidence_failed",
+    )
+
+    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout, summary=summary)
+
+    assert {key: result[key] for key in expected} == expected
+    assert summary["formal_validation"]["stop_reason"] == expected["failure_type"]
+
+
+def test_policy_block_from_summary_keeps_child_cooldown(tmp_path: Path) -> None:
+    record_classification = {
+        "status": "retry_wait", "failure_type": "policy_blocked", "retryable": True,
+        "wait_seconds": 7200, "reason": "max_requests_per_session",
+    }
+    stdout, summary = child_outputs(
+        tmp_path, platform="bilibili", record_classification=record_classification,
+        stop_reason="crawl_policy_evidence_failed",
+    )
+
+    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout, summary=summary)
+
+    assert result == record_classification
+
+
+def test_pagination_runtime_stop_is_runtime_failed_with_its_detail(tmp_path: Path) -> None:
+    stop_event = {"platform": "weibo", "stop_reason": "runtime_failed", "stop_detail": "search_request_failed"}
+    stdout, summary = child_outputs(
+        tmp_path, platform="weibo", record_classification=SUCCESS, stop_reason="runtime_failed",
+        stop_event=stop_event,
+    )
+
+    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout, summary=summary)
+
+    assert result == {
+        "status": "retry_wait", "failure_type": "runtime_failed", "retryable": True,
+        "wait_seconds": 600, "reason": "search_request_failed",
+    }
+
+
+def test_pagination_login_stop_is_login_required(tmp_path: Path) -> None:
+    stop_event = {"platform": "zhihu", "stop_reason": "login_required", "stop_detail": "login_required"}
+    stdout, summary = child_outputs(
+        tmp_path, platform="zhihu", record_classification=SUCCESS, stop_reason="login_required",
+        stop_event=stop_event,
+    )
+
+    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout, summary=summary)
+
+    assert (result["status"], result["failure_type"], result["retryable"]) == (
+        "login_required", "login_required", False,
+    )
+
+
+def test_worker_sigint_seen_in_summary_is_operator_interrupt(tmp_path: Path) -> None:
+    """2026-10-08 抖音形状：worker 收到 Ctrl+C 后以 0 退出，中间层写出未耗尽摘要并以 2 退出。"""
+
+    stdout, summary = child_outputs(
+        tmp_path, platform="douyin", record_classification=SUCCESS, stop_reason="runtime_failed",
+        worker_stdout=WORKER_SIGINT_LINE,
+    )
+
+    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout, summary=summary)
+
+    assert result["failure_type"] == "runtime_failed"
+    assert result["reason"] == "operator_interrupt"
+    assert result["interrupt"]["signal"] == "SIGINT"
+    assert result["interrupt"]["error"] == "runtime_failed:operator_interrupt:SIGINT"
+
+
+def test_worker_sigterm_from_watchdog_is_not_operator_interrupt(tmp_path: Path) -> None:
+    """父链路与无进展看门狗只发 SIGTERM；worker 打印的 SIGTERM 行不能当作操作人中断。"""
+
+    stdout, summary = child_outputs(
+        tmp_path, platform="douyin", record_classification=SUCCESS,
+        stop_reason="image_materialization_incomplete",
+        worker_stdout="[Main] Received interrupt signal 15, exiting (cleanup max 15.0s)...\n",
+    )
+
+    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout, summary=summary)
+
+    assert "interrupt" not in result
+    assert result["failure_type"] == "source_exhaustion_not_persisted"
+
+
+def test_middle_layer_operator_sigterm_line_is_interrupt() -> None:
+    result = failure_classifier.classify_attempt(
+        exit_code=143,
+        stderr="Traceback ...\nruntime_failed:operator_interrupt:SIGTERM\n",
+    )
+
+    assert result["reason"] == "operator_interrupt"
+    assert result["interrupt"]["signal"] == "SIGTERM"
+    assert result["retryable"] is True
+
+
+def test_genuinely_unfinished_source_keeps_formal_stop_reason(tmp_path: Path) -> None:
+    stdout, summary = child_outputs(
+        tmp_path, platform="weibo", record_classification=SUCCESS,
+        stop_reason="image_materialization_incomplete",
+    )
+
+    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout, summary=summary)
+
+    assert result == {
+        "status": "retry_wait", "failure_type": "source_exhaustion_not_persisted", "retryable": True,
+        "wait_seconds": 600,
+        "reason": "formal_source_exhaustion_not_persisted:image_materialization_incomplete",
+    }
+
+
+def test_summary_body_text_is_not_pattern_matched(tmp_path: Path) -> None:
+    """摘要只按结构化字段读取：样本正文里的“请登录”不能把未耗尽改判为登录失效。"""
+
+    stdout, summary = child_outputs(
+        tmp_path, platform="weibo", record_classification=SUCCESS,
+        stop_reason="image_materialization_incomplete",
+    )
+    summary["formal_validation"]["valid_new_samples"] = [{"title": "青岛 请登录后查看 验证码 429"}]
+
+    result = failure_classifier.classify_attempt(exit_code=2, stdout=stdout, summary=summary)
+
+    assert result["failure_type"] == "source_exhaustion_not_persisted"
+
+
+def test_runner_classifies_from_child_summary_not_envelope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    import sqlite3
+    import subprocess
+    from types import SimpleNamespace
+
+    from trippostcollect.db.bootstrap import bootstrap_connection
+    from trippostcollect.db.connection import connect_db
+
+    crawl_runner = import_module("crawl_runner")
+    source = json.loads((ROOT / "config" / "crawl_targets.json").read_text(encoding="utf-8"))
+    job_config = next(job for job in source["jobs"] if job["site_key"] == "weibo")
+    db_path = tmp_path / "runner.sqlite"
+    with connect_db(db_path) as conn:
+        bootstrap_connection(conn, config={**source, "jobs": [job_config]}, sync_jobs=True)
+        row = dict(conn.execute("SELECT * FROM crawl_jobs WHERE job_key=?", (job_config["job_key"],)).fetchone())
+    contract = tmp_path / "contract.md"
+    contract.write_text("contract", encoding="utf-8")
+    state_path = tmp_path / "states" / f"{row['job_key']}.json"
+    crawl_runner.FrozenExecutionState.create(
+        state_path, run_id="run-classify", job_key=row["job_key"], site_key="weibo",
+        job_kind="mediacrawler_search", plan={"scheduling": {"lane_key": "weibo"}}, frozen_inputs=[contract],
+    )
+    job = crawl_runner.PreparedJob(
+        selection_index=0, row=row, command=["child"], discovery_plan=None,
+        state_path=state_path, lane_key="weibo",
+    )
+    record_classification = failure_classifier.classify_attempt(
+        exit_code=1, stderr="Login state result: False", meta={"platform": "weibo"},
+    )
+    stdout, _summary = child_outputs(
+        tmp_path / "child", platform="weibo", record_classification=record_classification,
+        stop_reason="behavior_evidence_failed",
+    )
+
+    def finished_child(*_args: object, **_kwargs: object) -> object:
+        return crawl_runner.ChildRun(
+            completed=subprocess.CompletedProcess(["child"], 2, stdout, ""),
+            raw_stdout=stdout, raw_stderr="", logs={}, interrupt_signum=None, launched=True,
+            forced_termination=False, killed_child_process_groups=[], residual_process_groups=[],
+        )
+
+    monkeypatch.setattr(crawl_runner, "run_child_command", finished_child)
+    record = crawl_runner.execute_prepared_job(
+        job, args=SimpleNamespace(no_import=False), db_path=db_path,
+        config={"defaults": {"schedule_jitter_ratio": 0}}, run_id="run-classify",
+        run_dir=tmp_path / "run", interrupt_signal=lambda: None,
+    )
+
+    assert (record["status"], record["failure_type"]) == ("login_required", "login_required")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["steps"]["command_executed"]["error"] == "login_or_profile_refresh_required"
+    with sqlite3.connect(db_path) as conn:
+        status, consecutive_failures = conn.execute(
+            "SELECT status, consecutive_failures FROM crawl_jobs WHERE job_key=?", (row["job_key"],),
+        ).fetchone()
+    assert (status, consecutive_failures) == ("login_required", 1)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "runtime_failed:rate_limited",
+        "[WeiboClient.request] GET /api/container/getIndex HTTP 429",
+        "bilibili search rate limit",
+    ],
+)
+def test_platform_rate_limited_code_is_rate_limited_not_tool_error(reason: str) -> None:
+    """#112：平台层结构化码 rate_limited（下划线）须与自然语言 rate limit 同为频控冷却。"""
+
+    result = failure_classifier.classify_attempt(exit_code=1, stderr=reason, meta={"platform": "weibo"})
 
     assert result["failure_type"] == "rate_limited"
     assert result["wait_seconds"] == 3600

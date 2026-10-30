@@ -66,7 +66,6 @@ def test_enabled_bilibili_job_routes_to_formal_detail_executor(tmp_path: Path) -
                 headful=False,
                 headless=False,
                 no_import=False,
-                no_throttle=False,
             ),
         )
 
@@ -85,3 +84,39 @@ def test_enabled_bilibili_job_routes_to_formal_detail_executor(tmp_path: Path) -
     )
     assert "--get-media" not in command
     assert "--no-import" not in command
+
+
+def test_runner_has_no_no_throttle_option(monkeypatch) -> None:
+    """#112：结构化 child 不认识 --no-throttle，runner 不再提供也不再转发这个参数。"""
+
+    import pytest
+
+    monkeypatch.setattr(sys, "argv", ["crawl_runner.py", "--no-throttle"])
+    with pytest.raises(SystemExit) as caught:
+        crawl_runner.parse_args()
+    assert caught.value.code == 2
+
+
+def test_every_runner_built_flag_is_accepted_by_the_structured_child(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """runner 为每个通用平台 job 生成的参数都能被 child 的 argparse 原样解析（含 headful/no-import 分支）。"""
+
+    from trippostcollect.application import inputs
+
+    monkeypatch.setattr(sys, "argv", ["crawl_runner.py", "--headful", "--no-import"])
+    runner_args = crawl_runner.parse_args()
+    runner_args.db = str(tmp_path / "posts.sqlite")
+    config = json.loads((ROOT / "config" / "crawl_targets.json").read_text(encoding="utf-8"))
+    with sqlite3.connect(tmp_path / "scheduler.sqlite") as connection:
+        connection.row_factory = sqlite3.Row
+        bootstrap_connection(connection, config=config)
+        rows = connection.execute(
+            "SELECT * FROM crawl_jobs WHERE job_kind='mediacrawler_search' ORDER BY job_key"
+        ).fetchall()
+    assert {row["site_key"] for row in rows} >= {"bilibili", "weibo", "douyin", "zhihu"}
+    for row in rows:
+        command = crawl_runner.build_command(row, runner_args)
+        monkeypatch.setattr(sys, "argv", ["mediacrawler_crawl.py", *command[2:]])
+        parsed = inputs.parse_args()
+        assert parsed.platforms == [row["site_key"]], row["job_key"]

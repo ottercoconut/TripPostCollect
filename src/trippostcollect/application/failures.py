@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 from typing import Any
 
 from trippostcollect.records.text_signals import (
@@ -56,11 +57,18 @@ XHS_CDP_LIFECYCLE_CODE_PATTERNS = re.compile(
     r")(?![A-Za-z0-9_])",
     re.I,
 )
-PLATFORM_SESSION_MIGRATION_PATTERNS = re.compile(
-    r"(?<![A-Za-z0-9_])platform_session_migration_required:(bilibili|weibo|douyin|zhihu)(?![A-Za-z0-9_])",
+# 中间层收到操作人信号后在 stderr 写出的稳定行（runtime.process.operator_interrupt_error）。
+MIDDLE_OPERATOR_INTERRUPT_PATTERNS = re.compile(
+    r"(?<![A-Za-z0-9_])runtime_failed:operator_interrupt:(SIG[A-Z0-9]+)(?![A-Za-z0-9_])",
+)
+# worker 生命周期（runtime.worker.run）收到首个 SIGINT 时打印的固定行；worker 随后仍可能以 0 退出。
+# 只认 SIGINT：runner、中间层与无进展看门狗沿链路只发 SIGTERM，worker 收到的 SIGINT 只能来自链路外的操作人。
+WORKER_OPERATOR_INTERRUPT_PATTERNS = re.compile(
+    rf"\[Main\] Received interrupt signal {int(signal.SIGINT)}, exiting",
 )
 IMPORT_TARGET_PATTERNS = re.compile(r"import_new_target_not_met", re.I)
-RATE_PATTERNS = re.compile(r"429|too many requests|rate limit|访问过于频繁|请求过于频繁|操作频繁", re.I)
+# 平台层结构化错误码 rate_limited（下划线）与自然语言 "rate limit" 同为频控（#112）。
+RATE_PATTERNS = re.compile(r"429|too many requests|rate[ _]limit(?:ed)?|访问过于频繁|请求过于频繁|操作频繁", re.I)
 XHS_FREQUENT_CHALLENGE_PATTERNS = re.compile(
     r"访问(?:过于)?频繁|请求(?:过于)?频繁|操作(?:过于)?频繁|"
     r"requests?\s+(?:are\s+)?too\s+frequent|too many requests|rate limit",
@@ -207,24 +215,114 @@ def _terminal_stdout_payload(stdout_json: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _strong_child_classification(stdout_json: dict[str, Any]) -> dict[str, Any] | None:
-    strong_statuses = {"captcha_detected", "login_required", "blocked", "failed_final"}
-    records = stdout_json.get("records")
+def _latest_child_classification(summary: dict[str, Any]) -> dict[str, Any]:
+    classification = _latest_child_record(summary).get("failure_classification") or {}
+    return dict(classification) if isinstance(classification, dict) else {}
+
+
+def _latest_child_record(summary: dict[str, Any]) -> dict[str, Any]:
+    records = summary.get("records")
     if not isinstance(records, list):
-        return None
-    latest_record = next(
+        return {}
+    return next(
         (record for record in reversed(records) if isinstance(record, dict)),
         {},
     )
-    classification = latest_record.get("failure_classification") or {}
-    if not isinstance(classification, dict):
-        return None
+
+
+def _latest_worker_output(summary: dict[str, Any]) -> str:
+    """最近一条平台记录里中间层保存的 worker 输出尾部（已清洗）；只用于匹配固定的中断行。"""
+
+    run = _latest_child_record(summary).get("run") or {}
+    if not isinstance(run, dict):
+        return ""
+    return _text_blob(run.get("stdout_tail"), run.get("stderr_tail"))
+
+
+def _strong_child_classification(summary: dict[str, Any]) -> dict[str, Any] | None:
+    strong_statuses = {"captcha_detected", "login_required", "blocked", "failed_final"}
+    classification = _latest_child_classification(summary)
     if (
         classification.get("failure_type") == "policy_blocked"
         or classification.get("status") in strong_statuses
     ):
-        return dict(classification)
+        return classification
     return None
+
+
+def _summary_runtime_blocker_classification(
+    summary: dict[str, Any],
+    *,
+    platform: str,
+) -> dict[str, Any] | None:
+    """把子摘要里本轮的运行级阻断还原成调度分类。
+
+    阻断来自最近一条平台记录时直接沿用该记录的分类（保留 wait_seconds）；来自分页停止事件时，
+    按停止细节重新分类取得状态与等待时间，原因保留停止细节。
+    """
+
+    blocker = summary.get("runtime_blocker") or {}
+    if not isinstance(blocker, dict):
+        return None
+    failure_type = str(blocker.get("failure_type") or "")
+    reason = str(blocker.get("reason") or "")
+    if failure_type not in RUNTIME_BLOCKING_FAILURE_TYPES or not reason:
+        return None
+    record_classification = _latest_child_classification(summary)
+    if record_classification.get("failure_type") == failure_type:
+        return record_classification
+    if failure_type == "runtime_failed":
+        return {
+            "status": "retry_wait",
+            "failure_type": "runtime_failed",
+            "retryable": True,
+            "wait_seconds": 600,
+            "reason": reason,
+        }
+    detail_classification = classify_attempt(
+        exit_code=1,
+        stderr=reason,
+        meta={"platform": str(blocker.get("platform") or platform)},
+    )
+    if detail_classification.get("failure_type") == failure_type:
+        return {**detail_classification, "reason": reason}
+    return {
+        "status": (
+            failure_type
+            if failure_type in {"login_required", "captcha_detected"}
+            else str(blocker.get("status") or "blocked")
+        ),
+        "failure_type": failure_type,
+        "retryable": bool(blocker.get("retryable", False)),
+        "wait_seconds": int(blocker.get("wait_seconds") or 0),
+        "reason": reason,
+    }
+
+
+def _operator_interrupt_classification(signum: int) -> dict[str, Any]:
+    """child 输出里可见、runner 自身未锁存的操作人中断。
+
+    与 runner 的中断分类同形：按 ``runtime_failed`` 重试，不写来源耗尽；带 ``interrupt`` 使调度表
+    不累计失败次数，也不因 ``max_attempts`` 升级为 ``failed_final``。
+    """
+
+    name = signal.Signals(signum).name
+    return {
+        "status": "retry_wait",
+        "failure_type": "runtime_failed",
+        "retryable": True,
+        "wait_seconds": 0,
+        "reason": "operator_interrupt",
+        "stop_reason": "runtime_failed",
+        "stop_detail": "operator_interrupt",
+        "interrupt": {
+            "reason": "operator_interrupt",
+            "signum": signum,
+            "signal": name,
+            "error": f"runtime_failed:operator_interrupt:{name}",
+            "source": "child_output",
+        },
+    }
 
 
 def _structured_runtime_blocker(
@@ -254,8 +352,17 @@ def classify_attempt(
     stdout: str = "",
     stderr: str = "",
     meta: dict[str, Any] | None = None,
+    summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """按退出码、输出文本与子摘要给出一次尝试的调度分类。
+
+    ``summary`` 是子进程的 summary.json。子进程 stdout 只打印终态信封（路径、状态与
+    ``failure_reason``），记录级分类、运行级阻断与正式门禁只能从摘要读取，不从 stdout 推断。
+    摘要只按结构化字段读取，不并入文本匹配，避免帖子正文里的“请登录”等字样被误判。
+    """
+
     meta = meta or {}
+    child_summary = summary if isinstance(summary, dict) else {}
     platform = str(meta.get("platform") or "").strip().lower()
     stdout_json = extract_stdout_json(stdout)
     markers = _meta_markers(meta)
@@ -292,19 +399,13 @@ def classify_attempt(
             "reason": meta.get("skip_reason") or "video_target_ignored",
         }
 
-    structured_runtime_blocker = _structured_runtime_blocker(stdout_json)
+    structured_runtime_blocker = _structured_runtime_blocker(child_summary)
     if structured_runtime_blocker:
         return structured_runtime_blocker
 
-    session_migration = PLATFORM_SESSION_MIGRATION_PATTERNS.search(terminal_text)
-    if session_migration:
-        return {
-            "status": "failed_final",
-            "failure_type": "platform_session_migration_required",
-            "retryable": False,
-            "wait_seconds": 0,
-            "reason": f"platform_session_migration_required:{session_migration.group(1)}",
-        }
+    middle_interrupt = MIDDLE_OPERATOR_INTERRUPT_PATTERNS.search(stderr)
+    if middle_interrupt and middle_interrupt.group(1) in signal.Signals.__members__:
+        return _operator_interrupt_classification(int(signal.Signals[middle_interrupt.group(1)]))
 
     checkpoint_failure = re.search(
         r"^RuntimeError: (xhs_batch_checkpoint_[a-z0-9_]+)\s*$", stderr, re.M
@@ -417,9 +518,13 @@ def classify_attempt(
             "reason": xhs_cdp_lifecycle.group(0).lower(),
         }
 
-    child_classification = _strong_child_classification(stdout_json)
+    child_classification = _strong_child_classification(child_summary)
     if child_classification:
         return child_classification
+
+    summary_blocker = _summary_runtime_blocker_classification(child_summary, platform=platform)
+    if summary_blocker:
+        return summary_blocker
 
     sms_terminal_reason = (
         _xhs_sms_terminal_reason(terminal_text)
@@ -480,8 +585,15 @@ def classify_attempt(
             "reason": "completed",
         }
 
-    formal_validation = stdout_json.get("formal_validation") or {}
-    if stdout_json.get("import_completion_met") is False and isinstance(formal_validation, dict):
+    # worker 被操作人 SIGINT 收束后可能以 0 退出，中间层随后写出“未耗尽”摘要；该行只在中间层保存的
+    # worker 输出尾部可见。它先于来源耗尽未持久化，避免把中断记成需要 600 秒重试的普通未耗尽。
+    if WORKER_OPERATOR_INTERRUPT_PATTERNS.search(
+        _text_blob(terminal_text, _latest_worker_output(child_summary))
+    ):
+        return _operator_interrupt_classification(int(signal.SIGINT))
+
+    formal_validation = child_summary.get("formal_validation")
+    if child_summary.get("import_completion_met") is False and isinstance(formal_validation, dict):
         stop_reason = str(formal_validation.get("stop_reason") or "source_not_exhausted")
         return {
             "status": "retry_wait",

@@ -24,8 +24,6 @@ from __future__ import annotations
 
 import json
 import time
-import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -33,9 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from trippostcollect.core.paths import (
     ensure_parent,
     platform_cookie_snapshot_path as cookie_snapshot_path,
-    platform_profile_dir as profile_dir_for, PROJECT_ROOT as ROOT,
 )
-from trippostcollect.runtime.browser_runtime import browser_runtime_args, browser_launch_environment
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Cookie
@@ -68,15 +64,11 @@ def convert_str_cookie_to_dict(cookie_str: str) -> Dict:
         return cookie_dict
     for cookie in cookie_str.split(";"):
         cookie = cookie.strip()
-        if not cookie:
+        if not cookie or "=" not in cookie:
             continue
-        cookie_list = cookie.split("=")
-        if len(cookie_list) != 2:
-            continue
-        cookie_value = cookie_list[1]
-        if isinstance(cookie_value, list):
-            cookie_value = "".join(cookie_value)
-        cookie_dict[cookie_list[0]] = cookie_value
+        # 只按首个 "=" 切分：Cookie 值本身可含 "="（如 base64 尾部填充），不得被丢弃。
+        name, value = cookie.split("=", 1)
+        cookie_dict[name] = value
     return cookie_dict
 
 
@@ -154,83 +146,15 @@ def public_cookie_export(cookie_export: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in cookie_export.items() if key != "cookie_header"}
 
 
-# T07：原执行器 Cookie 导出，子进程与 snapshot 优先级保持不变。
 def export_profile_cookies(platform_key: str, browser_path: str | None) -> dict[str, Any] | None:
-    snapshot = load_cookie_snapshot(platform_key)
-    if snapshot:
-        return snapshot
+    """读取 warmup 写出的 Cookie 快照；缺快照或缺必需 Cookie 时返回 None，由调用方失败并提示先运行 warmup。
 
-    profile_dir = profile_dir_for(platform_key)
-    if not profile_dir.exists():
-        return None
-    script = r"""
-import asyncio
-import json
-import sys
-from playwright.async_api import async_playwright
+    #112：不再在缺快照时另起 headless 浏览器打开登录 profile 读取 Cookie；登录态只由
+    ``scripts/login_warmup.py`` 验证并落快照。``browser_path`` 保留在签名中供调用方按原样传入。
+    """
 
-async def main() -> int:
-    profile_dir = sys.argv[1]
-    executable_path = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
-    target_url = sys.argv[3]
-    runtime_args = json.loads(sys.argv[4])
-    async with async_playwright() as playwright:
-        context = await playwright.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
-            headless=True,
-            executable_path=executable_path,
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
-            # 显式开启沙箱：Playwright 在 chromium_sandbox 不为 True 时会自动追加 --no-sandbox。
-            chromium_sandbox=True,
-            args=["--disable-dev-shm-usage", *runtime_args],
-        )
-        page = context.pages[0] if context.pages else await context.new_page()
-        try:
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(1000)
-        cookies = await context.cookies([target_url])
-        await context.close()
-        sys.stdout.write(";".join(f"{item['name']}={item.get('value', '')}" for item in cookies))
-    return 0
-
-raise SystemExit(asyncio.run(main()))
-"""
-    cmd = [sys.executable, "-c", script, str(profile_dir)]
-    if browser_path:
-        cmd.append(browser_path)
-    else:
-        cmd.append("")
-    cmd.append(platform_cookie_url(platform_key))
-    cmd.append(json.dumps(browser_runtime_args()))
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(ROOT),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=45,
-            check=False,
-            env=browser_launch_environment(),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    cookie_str = result.stdout.strip()
-    names = cookie_names_from_header(cookie_str)
-    missing = [name for name in required_cookie_names(platform_key) if name not in names]
-    if result.returncode != 0 or missing:
-        return None
-    return {
-        "cookie_header": cookie_str,
-        "source": "live_profile",
-        "snapshot_path": str(cookie_snapshot_path(platform_key)),
-        "saved_at": None,
-        "cookie_names": names,
-        "required_cookie_names": list(required_cookie_names(platform_key)),
-    }
+    del browser_path
+    return load_cookie_snapshot(platform_key)
 
 
 def cookie_dict(cookies: list[dict[str, Any]]) -> dict[str, str]:

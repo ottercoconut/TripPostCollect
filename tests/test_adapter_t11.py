@@ -337,14 +337,8 @@ def t71_authorized_source(text):
 
 
 def t14_authorized(node):
-    """T14 授权差异：run_platform 在预算守卫前对非小红书平台做 profile 迁移失败关闭检查。"""
-    node = deepcopy(node)
-    for child in ast.walk(node):
-        body = getattr(child, "body", None)
-        if isinstance(body, list):
-            child.body = [statement for statement in body
-                          if not (isinstance(statement, ast.If)
-                                  and "require_platform_session_migrated" in ast.unparse(statement))] or body
+    """T14 曾在 run_platform 预算守卫前插入 profile 迁移检查；#112 迁移完成后删除，新定义须与冻结原文相同。"""
+    assert "require_platform_session_migrated" not in ast.unparse(node)
     return node
 
 

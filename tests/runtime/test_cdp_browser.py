@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
+import json
 from pathlib import Path
 import socket
-import sys
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -159,67 +158,34 @@ async def test_cdp_probes_and_websocket_discovery_use_the_loopback_address(monke
     assert connects == [("127.0.0.1", 53117), ("127.0.0.1", 53117)]
 
 
-def test_cookie_export_launch_arguments_keep_the_renderer_sandbox(monkeypatch, tmp_path):
-    """#83：Cookie 导出子进程的 Chromium 不传 --no-sandbox，并显式开启沙箱，其他参数不变。
+def test_cookie_export_reads_only_the_warmup_snapshot(monkeypatch, tmp_path):
+    """#112：缺快照时不再另起 headless 浏览器读取登录 profile，直接返回 None 交调用方失败。"""
 
-    子进程脚本在本进程内对假 Playwright 执行一次，断言实际传给 launch_persistent_context 的参数。
-    """
-    profile_dir = tmp_path / "profile"
-    profile_dir.mkdir()
-    commands = []
-    monkeypatch.setattr(cookies, "load_cookie_snapshot", lambda _key: None)
-    monkeypatch.setattr(cookies, "profile_dir_for", lambda _key: profile_dir)
-    monkeypatch.setattr(cookies, "browser_runtime_args", lambda: ["--lang=zh-CN"])
-    monkeypatch.setattr(cookies, "browser_launch_environment", lambda: {})
-    monkeypatch.setattr(
-        cookies.subprocess,
-        "run",
-        lambda command, **_kwargs: commands.append(command) or MagicMock(returncode=1, stdout=""),
+    profile_dir = paths.platform_profile_dir("zhihu")
+    profile_dir.mkdir(parents=True)
+    import subprocess
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("cookie export must not start a browser process")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+
+    assert cookies.export_profile_cookies("zhihu", "/fake/chrome") is None
+
+    snapshot = paths.platform_cookie_snapshot_path("zhihu")
+    snapshot.write_text(
+        json.dumps({"saved_at": "2026-10-30T00:00:00+00:00", "cookies": [
+            {"name": "d_c0", "value": "d=="}, {"name": "z_c0", "value": "2|1:0|10:z="},
+        ]}),
+        encoding="utf-8",
     )
-
-    assert cookies.export_profile_cookies("zhihu", None) is None
-
-    launches = []
-
-    class FakePage:
-        async def goto(self, *_args, **_kwargs):
-            return None
-
-        async def wait_for_timeout(self, _milliseconds):
-            return None
-
-    class FakeContext:
-        pages = [FakePage()]
-
-        async def cookies(self, _urls):
-            return []
-
-        async def close(self):
-            return None
-
-    class FakeChromium:
-        async def launch_persistent_context(self, **kwargs):
-            launches.append(kwargs)
-            return FakeContext()
-
-    class FakePlaywright:
-        chromium = FakeChromium()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_exc):
-            return False
-
-    monkeypatch.setitem(sys.modules, "playwright.async_api", SimpleNamespace(async_playwright=FakePlaywright))
-    monkeypatch.setattr(sys, "argv", ["-c", *commands[0][3:]])
-    with pytest.raises(SystemExit) as exited:
-        exec(compile(commands[0][2], "<cookie-export>", "exec"), {"__name__": "__main__"})
-
-    assert exited.value.code == 0
-    assert launches[0]["chromium_sandbox"] is True
-    assert launches[0]["args"] == ["--disable-dev-shm-usage", "--lang=zh-CN"]
-    assert launches[0]["user_data_dir"] == str(profile_dir)
+    exported = cookies.export_profile_cookies("zhihu", None)
+    assert exported["source"] == "snapshot"
+    assert exported["cookie_header"] == "d_c0=d==;z_c0=2|1:0|10:z="
+    assert cookies.convert_str_cookie_to_dict(exported["cookie_header"]) == {
+        "d_c0": "d==", "z_c0": "2|1:0|10:z=",
+    }
 
 
 def test_xhs_browser_rejects_invalid_window_size(monkeypatch):

@@ -143,7 +143,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Plan jobs and commands without executing them.")
     parser.add_argument("--headless", action="store_true", help="Pass headless mode to browser jobs.")
     parser.add_argument("--headful", action="store_true", help="Pass headed mode to browser jobs when supported.")
-    parser.add_argument("--no-throttle", action="store_true", help="Forward --no-throttle to child scripts.")
     parser.add_argument("--no-import", action="store_true", help="Do not import capture results after successful jobs.")
     return parser.parse_args()
 
@@ -459,8 +458,6 @@ def build_command(row: JobRow, args: argparse.Namespace) -> list[str]:
     else:
         raise ValueError(f"Unsupported or retired job_kind: {kind}")
 
-    if args.no_throttle:
-        command.append("--no-throttle")
     return command
 
 
@@ -507,8 +504,18 @@ def insert_attempt(conn: sqlite3.Connection, row: JobRow, run_id: str, command: 
     return int(attempt_id)
 
 
-def find_artifact_paths(stdout: str, row: JobRow) -> tuple[str, list[str], str | None]:
+def find_artifact_paths(
+    stdout: str,
+    row: JobRow,
+) -> tuple[str, list[str], str | None, dict[str, Any]]:
+    """从 child 终态输出定位产物，并返回已读取的子摘要（缺失或损坏时为空字典）。
+
+    结构化 child 的 stdout 只有终态信封；记录级分类、运行级阻断与正式门禁都在 summary.json，
+    这里只读取一次，供失败分类、campaign 与产物/持久化校验共用。
+    """
+
     stdout_json = extract_stdout_json(stdout)
+    summary: dict[str, Any] = {}
     artifact_dirs: list[str] = []
     summary_path: str | None = None
     for key in ("artifact_dir", "batch_dir"):
@@ -530,14 +537,15 @@ def find_artifact_paths(stdout: str, row: JobRow) -> tuple[str, list[str], str |
         summary_path = match.group(1).strip()
     if summary_path:
         try:
-            summary = load_json(Path(summary_path))
+            loaded = load_json(Path(summary_path))
+            summary = loaded if isinstance(loaded, dict) else {}
             if summary.get("batch_dir"):
                 artifact_dirs.append(str(summary["batch_dir"]))
             for record in summary.get("records") or []:
                 if isinstance(record, dict) and record.get("artifact_dir"):
                     artifact_dirs.append(str(record["artifact_dir"]))
         except Exception:
-            pass
+            summary = {}
 
     for match in re.finditer(r"Saved artifacts to:\s*(.+)", stdout):
         artifact_dirs.append(match.group(1).strip())
@@ -556,7 +564,7 @@ def find_artifact_paths(stdout: str, row: JobRow) -> tuple[str, list[str], str |
                 capture_meta_paths.append(resolved)
 
     artifact_dir = artifact_dirs[0] if artifact_dirs else ""
-    return artifact_dir, capture_meta_paths, summary_path
+    return artifact_dir, capture_meta_paths, summary_path, summary
 
 
 def load_first_meta(paths: list[str]) -> dict[str, Any]:
@@ -1227,22 +1235,22 @@ def execute_prepared_job(
                     child_logs=child_logs,
                     residual_process_groups=child.residual_process_groups,
                 )
-            artifact_dir, capture_meta_paths, summary_path = find_artifact_paths(child.raw_stdout, row)
+            artifact_dir, capture_meta_paths, summary_path, child_summary = find_artifact_paths(
+                child.raw_stdout, row,
+            )
             meta = load_first_meta(capture_meta_paths)
+            # 结构化 child 的记录级分类、运行级阻断与正式门禁只在 summary.json；页面证据 child 的
+            # stdout 本身就是完整摘要，仍按原样分类。
             classification = classify_attempt(
                 exit_code=completed.returncode,
                 stdout=child.raw_stdout,
                 stderr=child.raw_stderr,
                 meta=meta,
+                summary=child_summary if row["job_kind"] == "mediacrawler_search" else None,
             )
-            child_summary: dict[str, Any] = {}
             checkpoint_progress = False
             discovery_plan = job.discovery_plan
             if discovery_plan and summary_path and Path(summary_path).is_file() and not args.no_import:
-                try:
-                    child_summary = load_json(Path(summary_path))
-                except (OSError, json.JSONDecodeError, TypeError):
-                    child_summary = {}
                 checkpoint_after = load_checkpoint(
                     conn,
                     job_id=int(row["id"]),
@@ -1320,11 +1328,6 @@ def execute_prepared_job(
                 state.begin("artifacts_verified")
                 if row["job_kind"] == "mediacrawler_search":
                     summary_exists = bool(summary_path and Path(summary_path).is_file())
-                    if summary_exists and not child_summary:
-                        try:
-                            child_summary = load_json(Path(str(summary_path)))
-                        except (OSError, json.JSONDecodeError, TypeError):
-                            child_summary = {}
                     image_artifacts = verify_image_artifacts(
                         child_summary,
                         project_root=ROOT,
