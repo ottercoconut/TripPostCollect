@@ -1736,7 +1736,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_bilibili_offline_faults.py::test_follower_transport_error_is_swallowed_retried_then_skips_candidate",
+       "function": "tests/test_bilibili_offline_faults.py::test_follower_transport_error_is_classified_retried_then_skips_candidate",
        "lane": "component"
       },
       {

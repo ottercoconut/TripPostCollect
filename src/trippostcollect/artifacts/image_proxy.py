@@ -54,17 +54,6 @@ class RemoteImagePreview:
     http_status: int = 200
 
 
-REMOTE_IMAGE_REFERERS = {
-    "bilibili": "https://www.bilibili.com/",
-    "douyin": "https://www.douyin.com/",
-    "weibo": "https://weibo.com/",
-    "xhs": "https://www.xiaohongshu.com/",
-    "zhihu": "https://www.zhihu.com/",
-}
-
-DEFAULT_REMOTE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
-
-
 def content_type_for_path(path: Path, fallback: str = "application/octet-stream") -> str:
     guessed, _encoding = mimetypes.guess_type(path.name)
     return guessed or fallback
@@ -137,21 +126,6 @@ def read_limited_response(response: Any, *, max_bytes: int) -> bytes:
     return content
 
 
-def fetch_remote_image_preview(
-    url: str | None,
-    *,
-    platform_key: str | None = None,
-    max_bytes: int = DEFAULT_REMOTE_IMAGE_MAX_BYTES,
-    timeout_seconds: int = 12,
-) -> RemoteImagePreview:
-    return fetch_remote_image_bytes(
-        url,
-        headers=_remote_image_headers(platform_key),
-        max_bytes=max_bytes,
-        timeout_seconds=timeout_seconds,
-    )
-
-
 def fetch_remote_image_bytes(
     url: str | None,
     *,
@@ -159,7 +133,9 @@ def fetch_remote_image_bytes(
     max_bytes: int,
     timeout_seconds: int,
     allowed_media_types: Collection[str] | None = None,
+    allowed_redirect_hosts: Collection[str] | None = None,
 ) -> RemoteImagePreview:
+    """allowed_redirect_hosts 给出时，重定向目标必须是这些域名或其子域，否则拒绝跟随。"""
     current_url = validate_remote_image_url(url)
     opener = build_opener(_NoRedirectHandler)
     for _attempt in range(4):
@@ -194,6 +170,14 @@ def fetch_remote_image_bytes(
                         http_status=exc.code,
                     ) from exc
                 current_url = validate_remote_image_url(urljoin(current_url, location))
+                if allowed_redirect_hosts is not None and not _host_allowed(
+                    current_url, allowed_redirect_hosts
+                ):
+                    raise RemoteImageFetchError(
+                        f"remote image redirected to a disallowed host: HTTP {exc.code}",
+                        http_status=exc.code,
+                        code="image_source_unavailable",
+                    ) from exc
                 continue
             if exc.code in {401, 403}:
                 code = "image_auth_required"
@@ -237,19 +221,9 @@ def _is_private_or_local(address: ipaddress.IPv4Address | ipaddress.IPv6Address)
     )
 
 
-def _remote_image_headers(platform_key: str | None) -> dict[str, str]:
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-        ),
-        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    }
-    referer = REMOTE_IMAGE_REFERERS.get(platform_key or "")
-    if referer:
-        headers["Referer"] = referer
-    return headers
+def _host_allowed(url: str, allowed_hosts: Collection[str]) -> bool:
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    return any(host == domain or host.endswith("." + domain) for domain in allowed_hosts)
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):

@@ -25,11 +25,17 @@ from trippostcollect.core.paths import ensure_dir
 from trippostcollect.records.formal import CHINA_TZ
 from trippostcollect.records.sanitization import sanitize_author_avatar_data
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
-from .models import BilibiliArticleDetailError, BilibiliFollowerFetchError, BilibiliRuntimeBlocked
+from .models import (
+    BilibiliArticleDetailError,
+    BilibiliFollowerFetchError,
+    BilibiliRuntimeBlocked,
+    BilibiliSearchPage,
+)
 from .parser import hydrate_bilibili_article_record, normalize_bilibili_article_record
 from .client import (
     BILIBILI_DETAIL_MAX_ATTEMPTS,
     BILIBILI_DETAIL_RETRY_DELAY_SECONDS,
+    bilibili_request_stop_detail,
     fetch_bilibili_wbi_keys,
     fetch_bilibili_article_page,
     fetch_bilibili_article_detail_with_retry,
@@ -37,6 +43,7 @@ from .client import (
 )
 
 
+# 详情请求与搜索翻页共用同一请求节奏。
 BILIBILI_DETAIL_PACING_SECONDS = (1.5, 3.0)
 
 
@@ -49,7 +56,6 @@ BILIBILI_IMAGE_RETRY_DELAY_SECONDS = (1.0, 2.0)
 def download_bilibili_record_images(
     record: dict[str, Any],
     *,
-    cookie_header: str,
     platform_data_root: Path,
     fetcher: Any | None = None,
     sleep_fn: Any | None = None,
@@ -86,7 +92,7 @@ def download_bilibili_record_images(
         while attempts < max_attempts:
             attempts += 1
             try:
-                response = fetch(candidate.source_url, candidate.platform_post_id, cookie_header)
+                response = fetch(candidate.source_url, candidate.platform_post_id)
                 http_status = response.http_status
                 if not response.content:
                     raise RemoteImageFetchError(
@@ -253,7 +259,7 @@ def run_bilibili_article_search(
     started = time.monotonic()
     records: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    follower_cache: dict[str, int | None] = {}
+    follower_cache: dict[str, int] = {}
     follower_attempts: dict[str, int] = {}
     valid_seen: set[str] = set()
     valid_new_count = 0
@@ -261,6 +267,8 @@ def run_bilibili_article_search(
     candidate_count = 0
     stagnant_pages = 0
     last_detail_request_at: float | None = None
+    last_search_request_at: float | None = None
+    search_page: BilibiliSearchPage | None = None
     detail_request_pacing_events: list[dict[str, Any]] = []
     image_manifest_entries: list[ImageManifestEntry] = []
     image_candidate_posts: set[str] = set()
@@ -305,7 +313,10 @@ def run_bilibili_article_search(
             run_bilibili_behavior_session(args, behavior_evidence_path)
         )
         cookie_header = str((cookie_export or {}).get("cookie_header") or "")
-        wbi_keys = fetch_bilibili_wbi_keys(cookie_header)
+        try:
+            wbi_keys = fetch_bilibili_wbi_keys(cookie_header)
+        except BilibiliArticleDetailError as exc:
+            raise BilibiliRuntimeBlocked(bilibili_request_stop_detail("nav", exc)) from exc
         frontier_start = max(1, int(args.start_page))
         phases: list[tuple[str, int, int | None]] = []
         if frontier_start > 1 and args.top_refresh_max_pages > 0:
@@ -318,13 +329,54 @@ def run_bilibili_article_search(
         for discovery_phase, phase_start, phase_end in phases:
             page = phase_start
             while phase_end is None or page <= phase_end:
-                page_items = fetch_bilibili_article_page(
-                    args.keyword,
-                    page,
-                    wbi_keys=wbi_keys,
-                    cookie_header=cookie_header,
-                )
+                if last_search_request_at is not None:
+                    applied_page_delay = 0.0
+                    page_delay = random.uniform(*BILIBILI_DETAIL_PACING_SECONDS)
+                    elapsed_since_search = time.monotonic() - last_search_request_at
+                    if elapsed_since_search < page_delay:
+                        applied_page_delay = page_delay - elapsed_since_search
+                        time.sleep(applied_page_delay)
+                    detail_request_pacing_events.append(
+                        {
+                            "stage": "article_search",
+                            "source_page": page,
+                            "seconds": round(applied_page_delay, 3),
+                            "pacing_wait_seconds": round(applied_page_delay, 3),
+                            "status": "completed",
+                            "finished_at": datetime.now(timezone.utc).isoformat(
+                                timespec="seconds"
+                            ),
+                        }
+                    )
+                try:
+                    search_page = fetch_bilibili_article_page(
+                        args.keyword,
+                        page,
+                        wbi_keys=wbi_keys,
+                        cookie_header=cookie_header,
+                    )
+                except BilibiliArticleDetailError as exc:
+                    raise BilibiliRuntimeBlocked(
+                        bilibili_request_stop_detail("article_search", exc)
+                    ) from exc
+                finally:
+                    last_search_request_at = time.monotonic()
+                page_items = search_page.items
                 if not page_items:
+                    # 空结果只有在平台总数证明已越过末页（或首页总数为 0）时才是来源耗尽；
+                    # 页码仍在 numPages 内或缺少总数时是异常响应，按运行级失败保留当前页。
+                    if page == 1 and search_page.num_results == 0:
+                        exhausted_detail = "no_results"
+                    elif search_page.num_pages is not None and page > search_page.num_pages:
+                        exhausted_detail = "empty_page"
+                    elif search_page.num_pages is None:
+                        raise BilibiliRuntimeBlocked(
+                            "bilibili_article_search_empty_without_num_pages"
+                        )
+                    else:
+                        raise BilibiliRuntimeBlocked(
+                            "bilibili_article_search_empty_within_num_pages"
+                        )
                     if discovery_phase == "frontier" and state_path:
                         FrozenExecutionState(state_path).append_event(
                             "adaptive_search_stopped",
@@ -335,10 +387,12 @@ def run_bilibili_article_search(
                                 "valid_existing_count": valid_existing_count,
                                 "stagnant_batches": stagnant_pages,
                                 "stop_reason": "source_exhausted",
-                                "stop_detail": "empty_page",
+                                "stop_detail": exhausted_detail,
                                 "source_page": page,
                                 "resume_page": page,
                                 "source_has_more": False,
+                                "source_num_pages": search_page.num_pages,
+                                "source_num_results": search_page.num_results,
                                 "batch_complete": True,
                                 "discovery_phase": discovery_phase,
                                 "raw_batch_count": 0,
@@ -464,7 +518,6 @@ def run_bilibili_article_search(
                         image_candidate_posts.add(post_id)
                         post_image_entries = download_bilibili_record_images(
                             normalized,
-                            cookie_header=cookie_header,
                             platform_data_root=platform_data_root,
                         )
                         image_manifest_entries.extend(post_image_entries)
@@ -515,28 +568,25 @@ def run_bilibili_article_search(
                             continue
                     creator_id = str(normalized.get("user_id") or "")
                     if creator_id:
+                        follower_error: BilibiliFollowerFetchError | None = None
                         if creator_id not in follower_cache:
-                            follower_count: int | None = None
-                            follower_error: BilibiliFollowerFetchError | None = None
+                            fetched_followers: int | None = None
                             for follower_attempt in range(
                                 1,
                                 BILIBILI_DETAIL_MAX_ATTEMPTS + 1,
                             ):
                                 follower_attempts[creator_id] = follower_attempt
                                 try:
-                                    follower_count = fetch_bilibili_follower_count(
+                                    fetched_followers = fetch_bilibili_follower_count(
                                         creator_id,
                                         cookie_header,
                                     )
                                 except BilibiliFollowerFetchError as exc:
                                     follower_error = exc
-                                    follower_count = None
-                                    if not exc.retryable:
+                                    fetched_followers = None
+                                    if exc.runtime_blocking or not exc.retryable:
                                         break
-                                except Exception:
-                                    follower_error = None
-                                    follower_count = None
-                                if follower_count is not None:
+                                if fetched_followers is not None:
                                     break
                                 if follower_attempt < BILIBILI_DETAIL_MAX_ATTEMPTS:
                                     time.sleep(
@@ -549,21 +599,31 @@ def run_bilibili_article_search(
                                 raise BilibiliRuntimeBlocked(
                                     f"bilibili_relation_stat_blocked:{follower_error.code}"
                                 ) from follower_error
-                            follower_cache[creator_id] = follower_count
+                            # 失败不进缓存：同一作者的下一篇候选重新请求，不被一次失败连坐跳过。
+                            if fetched_followers is not None:
+                                follower_cache[creator_id] = fetched_followers
                             time.sleep(0.15)
-                        follower_count = follower_cache[creator_id]
+                        follower_count = follower_cache.get(creator_id)
                         if follower_count is None:
+                            if follower_error is None:
+                                follower_error_code = "relation_stat_unavailable"
+                            elif follower_error.code is None:
+                                follower_error_code = "relation_stat_transport"
+                            else:
+                                follower_error_code = str(follower_error.code)
                             failure = {
                                 "platform": platform_key,
                                 "identity": post_id,
                                 "failure_scope": "post",
                                 "detail": "creator_profile_failed",
-                                "error_code": "relation_stat_unavailable",
+                                "error_code": follower_error_code,
                                 "attempts": follower_attempts.get(
                                     creator_id,
                                     BILIBILI_DETAIL_MAX_ATTEMPTS,
                                 ),
-                                "retryable": True,
+                                "retryable": (
+                                    bool(follower_error.retryable) if follower_error else True
+                                ),
                                 "source_index": None,
                                 "source_page": page,
                                 "source_offset": None,
@@ -686,12 +746,18 @@ def run_bilibili_article_search(
                     "valid_new_count": valid_new_count,
                     "valid_existing_count": valid_existing_count,
                     "stagnant_batches": stagnant_pages,
-                    "stop_reason": "runtime_failed",
+                    "stop_reason": (
+                        exc.stop_reason
+                        if isinstance(exc, BilibiliRuntimeBlocked)
+                        else "runtime_failed"
+                    ),
                     "stop_detail": (
                         exc.detail
                         if isinstance(exc, BilibiliRuntimeBlocked)
                         else type(exc).__name__
                     ),
+                    "source_num_pages": search_page.num_pages if search_page else None,
+                    "source_num_results": search_page.num_results if search_page else None,
                     "source_page": locals().get("page"),
                     "resume_page": locals().get("page"),
                     "source_has_more": True,

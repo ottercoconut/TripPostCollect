@@ -32,6 +32,7 @@ from trippostcollect.artifacts.image_materialization import write_staging_image
 from trippostcollect.core.execution_state import FrozenExecutionState
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.bilibili import core as bilibili_core
+from trippostcollect.platforms.bilibili.models import BilibiliSearchPage
 from trippostcollect.runtime import process
 from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_path
 from trippostcollect.xhs.engagement import engagement_evidence_path, summarize_engagement_evidence
@@ -336,6 +337,33 @@ def t71_authorized_source(text):
     return text
 
 
+# #115 授权差异：B站图片请求不再携带平台 Cookie，执行器的两个图片薄包装去掉 cookie_header 形参与转发。
+T115_REPLACEMENTS = (
+    (
+        "    post_id: str,\n    cookie_header: str = \"\",\n) -> RemoteImagePreview:\n"
+        "    return _bilibili_client.fetch_bilibili_image_bytes(\n        source_url, post_id, cookie_header,\n",
+        "    post_id: str,\n) -> RemoteImagePreview:\n"
+        "    return _bilibili_client.fetch_bilibili_image_bytes(\n        source_url, post_id,\n",
+    ),
+    (
+        "    *,\n    cookie_header: str,\n    platform_data_root: Path,\n",
+        "    *,\n    platform_data_root: Path,\n",
+    ),
+    (
+        "        record, cookie_header=cookie_header, platform_data_root=platform_data_root,\n",
+        "        record, platform_data_root=platform_data_root,\n",
+    ),
+)
+
+
+def t115_authorized_source(text):
+    """在冻结旧源码上做 #115 的同样替换；每处必须恰好出现一次。"""
+    for old, new in T115_REPLACEMENTS:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    return text
+
+
 def t14_authorized(node):
     """T14 曾在 run_platform 预算守卫前插入 profile 迁移检查；#112 迁移完成后删除，新定义须与冻结原文相同。"""
     assert "require_platform_session_migrated" not in ast.unparse(node)
@@ -435,7 +463,7 @@ def test_a_other_top_level_definitions_unchanged():
     ledger = json.loads((ROOT / "docs/adapter-ledger/symbols.json").read_text())["rows"]
     names |= {r["qualname"].split(".")[0] for r in ledger
               if r["card"] == "T09" and r["file"] == "scripts/mediacrawler_crawl.py"}
-    old = ast.parse((FIXTURES / "mediacrawler_crawl.py.txt").read_text())
+    old = ast.parse(t115_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text()))
     new = (ROOT / "scripts/mediacrawler_crawl.py").read_text()
     assert len(ROWS) == 46 and set(AST_RULES) == {r["qualname"] for r in ROWS}
     for node in old.body:
@@ -487,6 +515,8 @@ def baseline(monkeypatch):
     namespace["NO_PROGRESS_WATCHDOG_SECONDS"] = process.NO_PROGRESS_WATCHDOG_SECONDS
     # #71 有意偏离：访问门禁与逐层解码接入旧执行器，名称取自新实现的同一定义。
     text = t71_authorized_source(text)
+    # #115 有意偏离：B站图片薄包装不再转发平台 Cookie。
+    text = t115_authorized_source(text)
     namespace["VISIT_GATED_PLATFORMS"] = visit_gate.VISIT_GATED_PLATFORMS
     namespace["validate_summary_content_visits"] = visit_gate.validate_summary_content_visits
     namespace["content_visits_path"] = content_visits_path
@@ -962,15 +992,16 @@ def drive(module, root, patch, capsys, platform="weibo", scenario="success", res
 
         def fake_page(keyword, page, **kwargs):
             trace.append(("bilibili.page", page))
-            return [{"id": str(100 + n), "title": "青岛游记", "desc": "青岛搜索摘要",
-                     "pubdate": 1789876800, "like": 3, "reply": 2, "view": 6,
-                     "author": "作者", "mid": "author-1"} for n in (1, 2)] if page == 1 else []
+            items = [{"id": str(100 + n), "title": "青岛游记", "desc": "青岛搜索摘要",
+                      "pubdate": 1789876800, "like": 3, "reply": 2, "view": 6,
+                      "author": "作者", "mid": "author-1"} for n in (1, 2)] if page == 1 else []
+            return BilibiliSearchPage(items=items, num_pages=1, num_results=2)
 
         def fake_detail(post_id, cookie_header):
             trace.append(("bilibili.detail", post_id))
             return {"title": "青岛游记", "content": f'<p>青岛海边完整正文</p><img src="https://i0.hdslb.com/bfs/article/{post_id}.png">'}, 1, 0.0
 
-        def fake_image(url, post_id, cookie_header):
+        def fake_image(url, post_id):
             trace.append(("bilibili.image", post_id))
             buffer = io.BytesIO()
             Image.new("RGB", (6, 4), color=(int(post_id) - 100, 20, 30)).save(buffer, format="PNG")

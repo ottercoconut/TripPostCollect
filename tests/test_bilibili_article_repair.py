@@ -142,7 +142,7 @@ def fake_detail(post_id: str, cookie_header: str):
         {
             "title": f"详情标题-{post_id}",
             "content": f"第一段完整正文-{post_id}\n第二段青岛完整正文",
-            "image_urls": [f"https://example.test/detail-{post_id}.jpg"],
+            "content_pic_list": [f"https://example.test/detail-{post_id}.jpg"],
             "opus": {"content": {"paragraphs": []}},
         },
         1,

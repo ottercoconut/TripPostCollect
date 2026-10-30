@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from trippostcollect.platforms.bilibili import core as bilibili_core
+from support.bilibili_search import search_page
 
 import json
 import sqlite3
@@ -732,8 +733,8 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
     def fetch_page(keyword, page, **kwargs):
         requested_pages.append(page)
         if page > 4:
-            return []
-        return [
+            return search_page([], num_pages=4)
+        return search_page([
             {
                 "id": "known",
                 "title": "known",
@@ -786,7 +787,7 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
                 "author": "new-author",
                 "mid": "new-author-id",
             },
-        ]
+        ], num_pages=4)
 
     follower_ids: list[str] = []
 
@@ -802,7 +803,7 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
             {
                 "title": "new detail title",
                     "content": "青岛完整正文",
-                "image_urls": ["https://example.test/new-detail.jpg"],
+                "content_pic_list": ["https://example.test/new-detail.jpg"],
                 "opus": {"content": {"paragraphs": []}},
             },
             1,
@@ -963,19 +964,25 @@ def _run_bilibili_phases(monkeypatch, tmp_path: Path, pages: dict[int, object]):
     monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
     requested: list[int] = []
 
+    num_pages = max((page for page, value in pages.items() if isinstance(value, list) and value), default=0)
+
     def fetch_page(keyword, page, **kwargs):
         requested.append(page)
         value = pages.get(page, [])
         if isinstance(value, Exception):
             raise value
-        return [_bilibili_item(post_id) for post_id in value]
+        # 空页按平台已越过末页（numPages < page）报告，才构成可验证的耗尽证据。
+        return search_page(
+            [_bilibili_item(post_id) for post_id in value],
+            num_pages=num_pages if value else page - 1,
+        )
 
     monkeypatch.setattr(bilibili_core, "fetch_bilibili_article_page", fetch_page)
     monkeypatch.setattr(
         bilibili_core, "fetch_bilibili_article_detail_with_retry",
         lambda post_id, cookie_header: ({
             "title": post_id, "content": "青岛完整正文",
-            "image_urls": [f"https://example.test/detail-{post_id}.jpg"],
+            "content_pic_list": [f"https://example.test/detail-{post_id}.jpg"],
             "opus": {"content": {"paragraphs": []}},
         }, 1, 0.0),
     )

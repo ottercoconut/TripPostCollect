@@ -1,7 +1,7 @@
 """B站正式 article 链路的离线故障特征化（T13）：只替换浏览器会话与 urllib 网络边界。
 
-固定现行行为，不改变重试层次与分类：搜索页失败为运行级失败且不宣称耗尽；
-详情与粉丝请求的传输层异常按原 3 次重试后转为候选 skip；头像不进入任何产物。
+搜索页失败为运行级失败且不宣称耗尽：风控码与 HTTP 412 命中即停，传输层异常有限重试后停止；
+详情与粉丝请求的传输层异常按 3 次重试后转为候选 skip；头像不进入任何产物。
 """
 
 from __future__ import annotations
@@ -95,7 +95,15 @@ class Network:
             if fault == "code":
                 return Response({"code": -412, "message": "请求被拦截"}, request.full_url)
             page_items = self.items.get(int(query["page"][0]), [])
-            return Response({"code": 0, "data": {"result": page_items}}, request.full_url)
+            num_pages = max((page for page, items in self.items.items() if items), default=0)
+            return Response(
+                {"code": 0, "data": {
+                    "result": page_items,
+                    "numPages": num_pages,
+                    "numResults": sum(len(items) for items in self.items.values()),
+                }},
+                request.full_url,
+            )
         if url.path == "/x/article/view":
             post_id = query["id"][0]
             self.calls[f"detail:{post_id}"] += 1
@@ -151,10 +159,16 @@ def test_search_page_failure_is_runtime_failure_without_exhaustion(monkeypatch, 
     result = mediacrawler_crawl.run_bilibili_article_search(args, tmp_path / "batch")
 
     assert result["ok"] is False
-    assert network.calls == Counter({"search": 1})
+    # 风控码与 412 命中即停；传输层异常有限重试后停止。
+    expected_calls = bilibili_client.BILIBILI_DETAIL_MAX_ATTEMPTS if fault == "transport" else 1
+    assert network.calls == Counter({"search": expected_calls})
     stopped = events_of(state_path, "adaptive_search_stopped")
     assert [event["stop_reason"] for event in stopped] == ["runtime_failed"]
-    expected = {"code": "RuntimeError", "http_412": "HTTPError", "transport": "URLError"}[fault]
+    expected = {
+        "code": "bilibili_article_search_blocked:-412",
+        "http_412": "bilibili_article_search_blocked:412",
+        "transport": "bilibili_article_search_failed:transport",
+    }[fault]
     assert stopped[0]["stop_detail"] == expected
     assert stopped[0]["resume_page"] == 1
     assert stopped[0]["source_has_more"] is True
@@ -170,7 +184,7 @@ def test_later_search_page_failure_keeps_resume_at_failed_page(monkeypatch, tmp_
     assert result["ok"] is False
     stopped = events_of(state_path, "adaptive_search_stopped")[-1]
     assert stopped["stop_reason"] == "runtime_failed"
-    assert stopped["stop_detail"] == "URLError"
+    assert stopped["stop_detail"] == "bilibili_article_search_failed:transport"
     assert stopped["resume_page"] == 2
     assert not [event for event in events_of(state_path, "adaptive_search_stopped")
                 if event["stop_reason"] == "source_exhausted"]
@@ -196,8 +210,8 @@ def test_detail_transport_error_retries_then_skips_candidate(monkeypatch, tmp_pa
     assert result["status"] == "completed"
 
 
-def test_follower_transport_error_is_swallowed_retried_then_skips_candidate(monkeypatch, tmp_path):
-    # 现行 core 以 except Exception 吞掉粉丝请求的非分类异常：不升级为运行阻断，3 次后候选 skip。
+def test_follower_transport_error_is_classified_retried_then_skips_candidate(monkeypatch, tmp_path):
+    # 粉丝请求的传输层异常归入 BilibiliFollowerFetchError：不升级为运行阻断，3 次后候选 skip 并保留错误码。
     network = Network(
         {1: [search_item("101", "456"), search_item("102", "789")]},
         follower={"456": "transport"},
@@ -209,7 +223,9 @@ def test_follower_transport_error_is_swallowed_retried_then_skips_candidate(monk
     assert network.calls["follower:456"] == 3
     assert network.calls["follower:789"] == 1
     skipped = events_of(state_path, "candidate_skipped")
-    assert [(event["identity"], event["detail"]) for event in skipped] == [("101", "creator_profile_failed")]
+    assert [(event["identity"], event["detail"], event["error_code"]) for event in skipped] == [
+        ("101", "creator_profile_failed", "relation_stat_transport")
+    ]
     stopped = events_of(state_path, "adaptive_search_stopped")[-1]
     assert stopped["stop_reason"] == "source_exhausted"
     assert result["status"] == "completed"

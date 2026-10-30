@@ -29,9 +29,16 @@ python scripts/crawl_runner.py \
 
 - 正文来自成功观察的 article/Opus 详情，保存
   `content_detail_status=detail_observed`、`content_detail_source=article_view_api`。
+- 详情 `content` 有两种格式：旧编辑器是 HTML；新编辑器（`template_id=4`）是 Quill delta JSON
+  `{"ops":[{"insert":...}]}`。delta 正文由 `bilibili_delta_to_text()` 按 ops 拼接：字符串 `insert` 原样
+  取文本，对象 `insert`（`native-image` 图片、`cut-off` 分割线、卡片）不进入文本。拼不出任何文本时
+  按“详情无可解析正文”处理，有限重试后形成 `candidate_skipped(failure_scope=post)`。
 - 正文规范化保留段落换行，不使用摘要清洗器把全文压成单行。
-- 正文图按 `opus.content.paragraphs[].pic.pics`、详情 HTML、`content_pic_list` 顺序合并去重；
-  仅当这些来源都未提取到图片时，才使用详情响应的 `origin_image_urls` / `image_urls`。
+- 正文图按 `opus.content.paragraphs[].pic.pics`、详情正文（HTML `<img>` 或 delta `native-image`）、
+  `content_pic_list` 顺序合并，按 BFS 资产路径去重：同一张图在 `hdslb.com` / `biliimg.com`、不同
+  `@` 变换后缀或扩展名下只取第一次出现的地址。
+- 详情响应的 `origin_image_urls` / `image_urls` 是文章封面（banner），不作为正文图，也不作为回退。
+  没有正文图的文章形成 `missing_content_image` 无效记录，不影响整轮运行与来源耗尽判定。
 - 搜索预览图、Opus 封面、作者头像与视频资源均不属于正文图。
 - 作者粉丝来自 `mid` 关系统计，要求数值、`followers_observed=true` 和
   `author_followers_source=relation_stat`。
@@ -46,8 +53,9 @@ python scripts/crawl_runner.py \
 ## 图片资产差异
 
 只有详情观察后的正文 `image_urls` 生成 `ImageCandidate(role=content)`，来源键为 `image_urls`。
-BFS/CDN URL 去除已知变换后缀后形成稳定资产键，避免协议或变换参数制造重复资产。图片请求复用行为
-阶段导出的 B站 Cookie 和 article Referer。
+BFS/CDN URL 去除已知变换后缀后形成稳定资产键，避免协议或变换参数制造重复资产。图片请求只带
+article Referer，不带 B站 Cookie；重定向目标必须是 `*.hdslb.com` 或 `*.biliimg.com`，否则拒绝跟随并
+记 `image_source_unavailable`。
 
 平台层写本轮 staging 与 `image_manifest.jsonl`；根项目负责字节复验、同帖 SHA-256 去重、晋升和
 SQLite 事务。共享错误码和重试规则不在本文重复，见[正式契约](../formal-crawl-contract.md)与
@@ -55,9 +63,25 @@ SQLite 事务。共享错误码和重试规则不在本文重复，见[正式契
 
 ## 搜索、阻断与安全前沿
 
-article 搜索前必须在持久 profile 完成共享行为阶段，并让搜索、详情和关系统计请求复用同一会话
-Cookie。HTTP 401/403/429、业务码 `-101/-509/-412/-352`、登录、授权、频控或风控属于运行级
-阻断；保留当前页且不把该 ID 写入 seen。
+article 搜索前必须在持久 profile 完成共享行为阶段，并让 nav、搜索、详情和关系统计请求复用同一会话
+Cookie。登录态以 nav 响应 `data.isLogin=true` 为准；Cookie 中存在 `SESSDATA` / `DedeUserID` 不能证明
+已登录（过期会话的 Cookie 仍留在浏览器里）。nav 未返回 `isLogin=true` 时以
+`login_required/bilibili_nav_login_required` 停止，不发搜索请求。
+
+HTTP 401/403/412/429、业务码 `-101/-509/-412/-352`、登录、授权、频控或风控属于运行级阻断：命中即停，
+不再重试；保留当前页且不把该 ID 写入 seen。搜索响应 `data.v_voucher` 是风控验证凭据，以
+`captcha_detected/bilibili_article_search_risk_control:v_voucher` 停止。nav、搜索、详情与关系统计共用
+同一错误分类：HTTP 5xx、超时、断连与非法 JSON 有限重试（3 次），仍失败时 nav/搜索按
+`runtime_failed:bilibili_<stage>_failed:transport` 停止，详情/关系统计形成候选跳过并保留错误码。
+同一作者的关系统计失败不进缓存，下一篇同作者候选重新请求。
+
+来源耗尽只接受平台总数证据：首页 `numResults=0`（`stop_detail=no_results`），或当前页码大于
+`numPages` 且结果为空（`stop_detail=empty_page`）；停止事件同时记录 `source_num_pages` 与
+`source_num_results`。结果为空但页码仍在 `numPages` 内，或响应缺少 `numPages`，属于异常响应，以
+`runtime_failed` 停止并保留当前页，不推断为耗尽。
+
+搜索翻页与详情请求使用同一节奏 `BILIBILI_DETAIL_PACING_SECONDS`：第 2 页起每次搜索请求前按区间
+随机等待，行为证据记 `request_pacing_events(stage=article_search)`。
 
 首次从第 1 页开始；有 checkpoint 时先刷新顶部，再从 `resume_page` 继续。数据库、累计摘要、seen、
 人工排除和本轮已处理集合中的 ID 在详情前跳过。完整深层页保存下一页；页中途停止保留当前页。
@@ -76,4 +100,6 @@ Cookie。HTTP 401/403/429、业务码 `-101/-509/-412/-352`、登录、授权、
 
 - `tests/test_bilibili_formal_route.py`：配置、runner 路由和 child 命令。
 - `tests/test_bilibili_article_detail.py`：摘要拒绝、详情正文/图片、重试和阻断。
+- `tests/test_bilibili_issue115.py`：delta 正文与正文图、封面不作正文图、来源耗尽证据、nav 登录态、
+  阻断即停、搜索/nav 错误分类、粉丝失败不入缓存、翻页节奏、图片不带 Cookie 与重定向白名单。
 - `tests/test_discovery_checkpoints.py`：已知 ID 过滤和安全前沿。
