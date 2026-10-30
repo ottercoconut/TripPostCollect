@@ -134,6 +134,8 @@ T71_REMOVED_XHS_ENV = {
     "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR", "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED",
     "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS",
 }
+# #124：抖音每轮从首页全量扫描，三元组续跑的两项 env 唯一消费者删除，所有场景都不再发出（t12、台账同步登记）。
+T124_REMOVED_ENV = {"TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET", "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR"}
 
 
 def test_child_command_switches_only_interpreter_entry_and_cwd(
@@ -151,8 +153,10 @@ def test_child_command_switches_only_interpreter_entry_and_cwd(
             assert new[name][key] == old[key], (name, key)
         # #75：任务级时限删除，无进展看门狗阈值统一为代码常量，不再沿用基线记录的 180。
         assert new[name]["timeout"] == NO_PROGRESS_WATCHDOG_SECONDS, name
-        # T12：规格 D2 授权删除父发无消费者的 6 个 env；T14-C 再删 1 个；#71 对 xhs 场景再删 3 个，其余键值不变。
-        removed = T12_REMOVED_ENV | T14C_REMOVED_ENV | (T71_REMOVED_XHS_ENV if name.startswith("xhs_") else set())
+        # T12：规格 D2 授权删除父发无消费者的 6 个 env；T14-C 再删 1 个；#71 对 xhs 场景再删 3 个；#124 再删 2 个，
+        # 其余键值不变。
+        removed = (T12_REMOVED_ENV | T14C_REMOVED_ENV | T124_REMOVED_ENV
+                   | (T71_REMOVED_XHS_ENV if name.startswith("xhs_") else set()))
         expected_env = {key: value for key, value in old["extra_env"].items() if key not in removed}
         assert new[name]["extra_env"] == expected_env, name
 

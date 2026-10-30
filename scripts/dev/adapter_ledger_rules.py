@@ -2054,6 +2054,14 @@ PROGRESS_RESOLUTIONS = {
     # #114：微博修复回退删除 Playwright 请求接口（L3），只读精确 detail 页的页面状态。
     ("scripts/mediacrawler_export_entrypoint.py", "_weibo_detail_api_url"): (
         "退出", None, "#114：唯一调用方page.request.get(statuses/show)是L3，对所有平台禁止，随回退分支删除"),
+    # #124：抖音每轮从首页全量翻到 has_more=false，搜索只经浏览器截获；三元组续跑、耗尽后 reseed 与
+    # 首页直接请求失败时的可见卡片重建随之删除。
+    ("scripts/mediacrawler_crawl.py", "stable_douyin_search_id"): (
+        "退出", None, "#124：checkpoint 只作审计、不再续跑，无需从批次证据挑稳定 search ID；本轮链上沿用首页 ID"),
+    ("tools/MediaCrawler/media_platform/douyin/client.py", "DouYinClient._build_visible_first_page_fallback"): (
+        "退出", None, "#124：唯一调用方首页直接请求失败分支随直接搜索请求删除；首页只认截获的 /stream/ 响应"),
+    ("tools/MediaCrawler/tools/trippostcollect_adaptive.py", "should_reseed_douyin_frontier"): (
+        "退出", None, "#124：没有顶部刷新与旧耗尽链，每轮从首页全量扫描，不再判定新游标纪元"),
     # #113：知乎登录态只以持久 profile 为准，worker 不再注入快照 Cookie 或轮内登录；pong 失败即 login_required。
     **{
         ("tools/MediaCrawler/media_platform/zhihu/login.py", name): (

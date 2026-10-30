@@ -32,8 +32,6 @@ DOUYIN_PROFILE_FOLLOWER_KEYS = (
 DOUYIN_SEARCH_CONTENT_SOURCE = "search_aweme_info"
 DOUYIN_DETAIL_CONTENT_SOURCE = "aweme_detail"
 DOUYIN_IMAGE_NOTE_AWEME_TYPES = frozenset({"68"})
-# 首页重建用详情接口结果组成搜索项时打的标记，平台响应本身不会带这个键。
-DOUYIN_REBUILT_ITEM_SOURCE_KEY = "trippostcollect_content_source"
 DOUYIN_NO_RESULT_MARKERS = (
     "暂无搜索结果",
     "没有找到相关结果",

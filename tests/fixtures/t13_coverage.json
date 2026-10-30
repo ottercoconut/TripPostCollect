@@ -35,7 +35,7 @@
     {
      "file": "tests/application/test_discovery.py",
      "lane": "component",
-     "min_functions": 13
+     "min_functions": 12
     }
    ],
    "cells": {
@@ -155,19 +155,15 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_discovery_checkpoints.py::test_executor_keeps_first_douyin_search_id_when_response_logids_rotate",
+       "function": "tests/platforms/douyin/test_douyin_issue124.py::test_search_scans_from_first_page_until_has_more_false",
        "lane": "component"
       },
       {
-       "function": "tests/test_discovery_checkpoints.py::test_top_refresh_keeps_saved_douyin_frontier",
+       "function": "tests/platforms/douyin/test_douyin_issue124.py::test_missing_capture_mid_scan_keeps_completed_batches_and_skips_missing_page",
        "lane": "component"
       },
       {
-       "function": "tests/test_discovery_checkpoints.py::test_reseeded_douyin_frontier_replaces_exhausted_cursor",
-       "lane": "component"
-      },
-      {
-       "function": "tests/test_discovery_checkpoints.py::test_runner_retries_unverified_douyin_first_page_checkpoint",
+       "function": "tests/platforms/douyin/test_douyin_issue124.py::test_runner_douyin_child_command_always_scans_from_first_page",
        "lane": "component"
       },
       {
@@ -183,14 +179,6 @@
       },
       {
        "function": "tests/test_mediacrawler_pagination.py::test_verified_douyin_first_page_empty_can_prove_exhaustion",
-       "lane": "component"
-      },
-      {
-       "function": "tests/platforms/douyin/test_douyin_search_safety.py::test_deep_frontier_rebinds_to_current_refresh_session_cursor",
-       "lane": "component"
-      },
-      {
-       "function": "tests/test_adaptive_accumulator.py::test_douyin_exhausted_cursor_reseed_requires_new_candidate_continuation",
        "lane": "component"
       },
       {
@@ -2099,7 +2087,12 @@
       {
        "file": "tests/platforms/douyin/test_douyin_search_safety.py",
        "lane": "component",
-       "min_count": 25
+       "min_count": 20
+      },
+      {
+       "file": "tests/platforms/douyin/test_douyin_issue124.py",
+       "lane": "component",
+       "min_count": 24
       },
       {
        "file": "tests/platforms/douyin/test_douyin_store.py",

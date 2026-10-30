@@ -17,7 +17,7 @@ from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import urlencode
 
 import httpx
 import pytest
@@ -26,6 +26,7 @@ from support import legacy_expectations as expectations
 from support.stable_png import solid_png
 from support import platform_session_deviation as deviation
 from support import douyin_116_deviation
+from support import douyin_full_scan_deviation
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.core import paths
@@ -80,7 +81,7 @@ async def drive(root, patch, scenario, fallback):
     for key, value in {
         "PLATFORM": "dy", "LOGIN_TYPE": "cookie", "COOKIES": "sessionid=fixture",
         "CRAWLER_TYPE": "detail" if detail_mode else "search", "KEYWORDS": KEYWORD,
-        "START_PAGE": 1, "PUBLISH_TIME_TYPE": 0, "MAX_CONCURRENCY_NUM": 1,
+        "START_PAGE": 1, "MAX_CONCURRENCY_NUM": 1,
         "CRAWLER_MAX_SLEEP_SEC": 0, "ENABLE_GET_COMMENTS": False,
         "ENABLE_GET_MEIDAS": True, "ENABLE_IP_PROXY": False, "ENABLE_CDP_MODE": False,
         "SAVE_LOGIN_STATE": True, "HEADLESS": False, "SAVE_DATA_OPTION": "jsonl",
@@ -93,15 +94,12 @@ async def drive(root, patch, scenario, fallback):
         "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": "-1",
         "TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS": "0",
         "TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS": "1",
-        "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES": "0",
-        "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED": "0",
         "TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK": str(fallback),
         "TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_TIMEOUT_MS": "1200",
         "TRIPPOSTCOLLECT_EXECUTION_STATE_PATH": str(root / "state.json"),
     }.items():
         patch.setenv(key, value)
-    for key in ("TRIPPOSTCOLLECT_DB_PATH", "TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH",
-                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET", "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR"):
+    for key in ("TRIPPOSTCOLLECT_DB_PATH", "TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH"):
         patch.delenv(key, raising=False)
     (root / "state.json").write_text('{"events":[]}')
     # 与主机无关的纯色 PNG（见 support/stable_png.py；Pillow 压缩字节随 CPU 不同）。
@@ -133,8 +131,8 @@ async def drive(root, patch, scenario, fallback):
         async def wheel(self, *args):
             trace.append(("wheel", args))
             counters["wheel"] += 1
-            if scenario == "browser_pages" and counters["wheel"] == 1:
-                page.emit(10, "stable-id")
+            # #124：真实浏览器每次可见滚轮加载下一页；只在上一页 has_more=1 时发出。
+            page.emit_next()
 
     class Locator:
         async def count(self):
@@ -166,18 +164,28 @@ async def drive(root, patch, scenario, fallback):
             trace.append(("listen", event))
             self.callback = callback
 
+        emitted_offset = None
+
         def emit(self, offset, search_id):
-            url = "https://www.douyin.com/aweme/v1/web/general/search/stream/?" + urlencode({
+            path = "stream" if offset == 0 else "single"
+            url = f"https://www.douyin.com/aweme/v1/web/general/search/{path}/?" + urlencode({
                 "keyword": KEYWORD, "offset": offset, "search_id": search_id,
             })
+            self.emitted_offset = offset
             self.callback(Response(search_payload(offset), url))
+
+        def emit_next(self):
+            if self.emitted_offset is None or not search_payload(self.emitted_offset).get("has_more"):
+                return
+            self.emit(self.emitted_offset + 10, "stable-id")
 
         async def goto(self, url, **kwargs):
             trace.append(("goto", url, kwargs))
             self.url = url
             if "/search/" in url:
                 assert any(item[0] == "listen" for item in trace)
-                if scenario == "browser_pages":
+                # #124：首页来自进入搜索页时页面自身发出的 /stream/ 请求（detail 模式只取行为证据）。
+                if not detail_mode:
                     self.emit(0, "")
 
         async def evaluate(self, expression, *args):
@@ -262,14 +270,8 @@ async def drive(root, patch, scenario, fallback):
             path = request.url.path
             counters[path] += 1
             query = dict(request.url.params)
-            if "/general/search/" in path:
-                assert query["count"] == "10" and query["list_type"] == "single"
-                assert query["from_group_id"] == ""
-                assert "a_bogus" not in query
-                offset = int(query["offset"])
-                assert path.endswith("/stream/" if offset == 0 else "/single/")
-                payload = search_payload(offset)
-                return httpx.Response(200, content=chunked(payload), request=request)
+            # #124：搜索只经浏览器截获，客户端不得再发搜索请求。
+            assert "/general/search/" not in path, str(request.url)
             if "/aweme/detail/" in path:
                 payload = {"aweme_detail": {} if scenario == "detail_shell" else aweme(query["aweme_id"])}
                 return httpx.Response(200, json=payload, request=request)
@@ -356,6 +358,14 @@ def current_douyin_profile(tmp_path):
     return expectations.scrub(str(paths.platform_profile_dir("douyin")), (tmp_path, "<TMP>"))
 
 
+def legacy_drive_expectation(tmp_path, scenario, fallback):
+    """固化预期依次登记 #59 profile、#116 正文来源与请求头、#124 搜索只经截获三项偏离。"""
+    expected = expectations.load(*T14_DRIVE, f"{scenario}-fallback{fallback}")
+    expected = deviation.douyin_profile(expected, current_douyin_profile(tmp_path))
+    expected = douyin_116_deviation.douyin_drive(expected, scenario)
+    return douyin_full_scan_deviation.douyin_drive(expected, scenario)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback", [0, 1])
 @pytest.mark.parametrize("scenario", SCENARIOS)
@@ -363,8 +373,7 @@ async def test_root_matches_frozen_legacy_requests_records_images_events(tmp_pat
     """T14：根实现与固化的旧实现结果比较（同一 drive、同一 == 语义），不加载 fork 或 E。"""
     with monkeypatch.context() as patch:
         after = await drive(tmp_path / "new", patch, scenario, fallback)
-    assert expectations.scrub(after, (tmp_path, "<TMP>")) == douyin_116_deviation.douyin_drive(deviation.douyin_profile(
-        expectations.load(*T14_DRIVE, f"{scenario}-fallback{fallback}"), current_douyin_profile(tmp_path)), scenario)
+    assert expectations.scrub(after, (tmp_path, "<TMP>")) == legacy_drive_expectation(tmp_path, scenario, fallback)
     check_drive_result(after, scenario, fallback)
 
 
@@ -403,8 +412,7 @@ async def test_root_entry_assembly_matches_frozen_fork_factory(tmp_path, monkeyp
     """T14：替代旧桥工厂对照；根入口装配结果与固化的 fork 工厂结果比较。"""
     with monkeypatch.context() as patch:
         new = await drive_entry_assembly(tmp_path / "new", patch, scenario, fallback)
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == douyin_116_deviation.douyin_drive(deviation.douyin_profile(
-        expectations.load(*T14_BRIDGE, f"{scenario}-fallback{fallback}"), current_douyin_profile(tmp_path)), scenario)
+    assert expectations.scrub(new, (tmp_path, "<TMP>")) == legacy_drive_expectation(tmp_path, scenario, fallback)
     check_drive_result(new, scenario, fallback)
 
 
@@ -417,14 +425,10 @@ def check_drive_result(after, scenario, fallback):
     requests = [row for row in trace if row[0] == "request"]
     assert all("avatar.test" not in row[2] and "never.mp" not in row[2] for row in requests)
     assert all("/videos/" not in path and not path.endswith((".mp4", ".mp3")) for path in after["files"])
-    if scenario == "search_pages":
-        searches = [row for row in requests if "/general/search/" in row[2]]
-        assert [parse_qs(urlsplit(row[2]).query).get("search_id", [""])[0] for row in searches] == ["", "stable-id", "stable-id"]
-        assert sum(row[0] == "wheel" for row in trace) == 16
-    if scenario == "browser_pages":
-        searches = [row for row in requests if "/general/search/" in row[2]]
-        assert len(searches) == 1 and "offset=20" in searches[0][2]
-        assert sum(row[0] == "wheel" for row in trace) == 9
+    # #124：任何场景都不发搜索请求；连续翻页每页只需一屏滚轮。
+    assert not [row for row in requests if "/general/search/" in row[2]]
+    if scenario in ("search_pages", "browser_pages"):
+        assert sum(row[0] == "wheel" for row in trace) == 2
     if scenario == "detail_shell" and fallback:
         routes = [row[1] for row in trace if row[0] == "goto" and any(part in row[1] for part in ("/note/", "/video/"))]
         assert routes == ["https://www.douyin.com/note/101", "https://www.douyin.com/video/101"]
@@ -513,13 +517,13 @@ T14_FIRST_PAGE = ("T06", "first_page_rebuild")
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("visible_count,offset,search_id,verify", FIRST_PAGE_CASES)
-async def test_root_first_page_rebuild_matches_frozen_legacy(visible_count, offset, search_id, verify):
+async def test_root_first_page_without_capture_matches_retired_legacy_rebuild(visible_count, offset, search_id, verify):
+    """#124：首页可见卡片重建随直接请求退出；固化预期经单向变换后与“截获缺失、不请求详情”比较。"""
     params = (visible_count, offset, search_id, verify)
     ports = entry.douyin_dependencies(worker_config())["ports"].client
-    after = await first_page_rebuild(client.DouYinClient, params, ports=ports)
-    assert expectations.scrub(after) == douyin_116_deviation.douyin_first_page_rebuild(
-        expectations.load(*T14_FIRST_PAGE, first_page_case(params)))
-    check_first_page_rebuild(after, params)
+    after = await first_page_without_capture(params, ports=ports)
+    assert expectations.scrub(after) == douyin_full_scan_deviation.first_page_rebuild_retired(
+        douyin_116_deviation.douyin_first_page_rebuild(expectations.load(*T14_FIRST_PAGE, first_page_case(params))))
 
 
 def first_page_case(params):
@@ -527,7 +531,10 @@ def first_page_case(params):
     return f"visible{visible_count}-offset{offset}-search_id_{search_id or 'empty'}-verify{int(verify)}"
 
 
-async def first_page_rebuild(client_class, params, *, ports=None):
+async def first_page_without_capture(params, *, ports):
+    """旧对照的同一组输入（可见卡片数、已截获后页、verify 标记），首页未被截获时的根结果。"""
+    from trippostcollect.platforms.douyin.models import SearchResponseError
+
     visible_count, offset, search_id, verify = params
     calls = []
 
@@ -536,14 +543,12 @@ async def first_page_rebuild(client_class, params, *, ports=None):
             pass
 
         def locator(self, selector):
-            assert selector == '[id^="waterfall_item_"]:visible'
             return self
 
         async def evaluate_all(self, script):
             return [str(100 + i) for i in range(visible_count)]
 
-    kwargs = {"ports": ports} if ports else {}
-    value = client_class(headers={"User-Agent": "fixture"}, playwright_page=Page(), cookie_dict={}, **kwargs)
+    value = client.DouYinClient(headers={"User-Agent": "fixture"}, playwright_page=Page(), cookie_dict={}, ports=ports)
     payload = {"data": [{"aweme_info": aweme(110)}], "has_more": 1, "extra": {"logid": "rotating"}}
     if verify:
         payload["search_nil_info"] = {"search_nil_type": "verify_check"}
@@ -553,16 +558,14 @@ async def first_page_rebuild(client_class, params, *, ports=None):
         calls.append(post_id)
         return aweme(post_id)
 
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("#124: first page must not be requested directly")
+
     value.get_video_by_id = detail
-    result = await value._build_visible_first_page_fallback(keyword=KEYWORD, offset=0, search_id="")
-    return result, calls
-
-
-def check_first_page_rebuild(after, params):
-    if params == (10, 10, "stable", False):
-        assert len(after[0]["data"]) == 10 and after[0]["extra"]["logid"] == "stable"
-    else:
-        assert after == (None, [])
+    value.get = forbidden
+    with pytest.raises(SearchResponseError) as raised:
+        await value.search_info_by_keyword(keyword=KEYWORD, offset=0, search_id="")
+    return raised.value.reason, calls
 
 
 T14_SLIDER = ("T06", "slider_tracks")

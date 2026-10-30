@@ -139,35 +139,6 @@ def test_weibo_stagnation_tracks_candidate_identity_progress(monkeypatch) -> Non
     assert accumulator.stop_reason == ""
 
 
-def test_douyin_exhausted_cursor_reseed_requires_new_candidate_continuation() -> None:
-    should_reseed = candidates.should_reseed_douyin_frontier
-
-    assert should_reseed(
-        saved_source_exhausted=True,
-        refresh_has_more=True,
-        refresh_next_cursor="new-search-id",
-        refresh_new_candidate_count=1,
-    ) is True
-    assert should_reseed(
-        saved_source_exhausted=True,
-        refresh_has_more=True,
-        refresh_next_cursor="new-search-id",
-        refresh_new_candidate_count=0,
-    ) is False
-    assert should_reseed(
-        saved_source_exhausted=True,
-        refresh_has_more=False,
-        refresh_next_cursor="new-search-id",
-        refresh_new_candidate_count=1,
-    ) is False
-    assert should_reseed(
-        saved_source_exhausted=True,
-        refresh_has_more=True,
-        refresh_next_cursor="",
-        refresh_new_candidate_count=1,
-    ) is False
-
-
 def test_common_persisted_seen_candidate_is_loaded_before_detail(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "seen.sqlite"
     with sqlite3.connect(db_path) as conn:

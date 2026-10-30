@@ -121,8 +121,9 @@ HTTP 客户端（httpx 等）不属于以上任何一级：已纳入访问门禁
 请求接口和页面脚本内的主动请求；L3 的静态检查覆盖全部平台目录。
 小红书是唯一纳入访问门禁的平台，搜索、详情、作者、图片与登录态只用 L1，没有例外。B站、微博、抖音和
 知乎长期不纳入访问门禁（#111）：浏览器负责登录、Cookie 与行为证据，搜索、详情、作者与图片由浏览器外
-HTTP 客户端取得，不写访问账本，也不参与 `content_visit_ok`。其中正文图片请求不带平台 Cookie，也不经
-第三方代理。
+HTTP 客户端取得，不写访问账本，也不参与 `content_visit_ok`。抖音搜索例外（#124）：只经浏览器截获本轮
+搜索页自身请求的响应，截获不到即 `runtime_failed:browser_search_response_missing`，不改走浏览器外请求。
+其中正文图片请求不带平台 Cookie，也不经第三方代理。
 
 每轮写只追加的访问账本（行为证据同目录的 `content_visits` JSONL），以单一单调序号记录动作、
 页面响应与页面状态读取、停顿和诊断。账本不截断，不写 token、查询值、正文、头像或完整图片 URL，
@@ -327,11 +328,11 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
   标记与页码矛盾都不算：知乎只认响应 `paging.is_end=true`（`paging_is_end`）；B站只认首页
   `numResults=0`（`no_results`）或页码大于 `numPages`（`empty_page`），停止事件记录
   `source_num_pages`/`source_num_results`；微博只认原始 `cards` 为空或页面明确无内容（`empty_page`）。
-  这些平台的页内空页、缺少结束标记或缺少总数一律写 `runtime_failed`。抖音新鲜游标链的第 1 页是例外：
+  这些平台的页内空页、缺少结束标记或缺少总数一律写 `runtime_failed`。抖音每轮链上的第 1 页是例外：
   `data=[]` 与 `has_more=false` 不能单独证明耗尽；还必须由当前可见搜索页明确显示无结果，停止细节
   写为 `verified_empty_first_page`。可见页仍有作品或页面状态不明确时必须写
   `runtime_failed`，分别使用 `empty_api_response_with_visible_results` 或
-  `ambiguous_empty_first_page`，并保留第 1 页、offset 0、空 search ID 供下轮重取。
+  `ambiguous_empty_first_page`，下一轮照常从第 1 页全量重取。
 - 批次中的 `stagnant_batches` 与 `stagnation_basis` 仅供审计。无论连续多少批没有新候选或有效记录，
   都不能停止正式分页，也不能代替 `source_exhausted`。
 - `login_required` / `captcha_detected`：登录或验证阻断。
@@ -345,7 +346,7 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 
 每个分页批次必须记录平台页码、请求游标或 search ID（平台提供时）、下一游标、可恢复的
 下一页/offset/cursor、批次是否完整、发现阶段、原始返回条数和 `has_more`（平台提供时）。
-小红书例外：页码与 search ID 取自前端发出的搜索请求，只作审计；全量扫描不存在可恢复的下一页。
+小红书与抖音例外：页码与 search ID 只作审计，每轮全量扫描不存在可恢复的下一页。
 抖音搜索响应还必须验证 HTTP 可解析后的业务 envelope：非成功 `status_code`、缺失或非列表
 `data`、缺失或非法 `has_more`，以及 `has_more=true` 但没有下一 `logid`，都属于
 `runtime_failed`，不得降级成空页。状态文件保存脱敏的 `douyin_search_response_observed`；
@@ -359,10 +360,10 @@ URL 和检查错误，不保存完整响应或整页文本。
 
 B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用调度器自动维护发现记忆。SQLite
 `crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates` 与操作人授权的
-`crawl_discovery_candidate_exclusions` 均以 `job_id + query_fingerprint` 隔离；前者保存安全前沿，
-第二张表保存已完成处理的候选 ID，第三张表保存精确、可审计且不计成功的排除 ID。小红书由独立 runner
-维护 `xhs_discovery_checkpoints`，以 `target_key + account_id + query_fingerprint` 唯一定位（不保存前沿，
-每轮全量扫描），
+`crawl_discovery_candidate_exclusions` 均以 `job_id + query_fingerprint` 隔离；前者保存安全前沿
+（抖音只作审计），第二张表保存已完成处理的候选 ID，第三张表保存精确、可审计且不计成功的排除 ID。
+小红书由独立 runner 维护 `xhs_discovery_checkpoints`，以 `target_key + account_id + query_fingerprint`
+唯一定位（不保存前沿，每轮全量扫描），
 并在同一作用域的 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID；两者不与通用任务或
 其他账号共享未入库活动。指纹包含平台、关键词和影响来源结果的查询参数，
 不包含登录和顶部刷新页数。关键词或来源查询参数改变时必须形成新
@@ -387,9 +388,9 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 搜索请求失败或浏览器整体故障仍是运行级失败，不得按候选跳过。数据库已有 ID 的历史内容修复仍必须
 走平台文档定义的独立流程。
 
-首次执行从来源第一页开始，不做顶部刷新。每个完整前沿批次把下一页写入状态事件；抖音还必须
-同时写入下一 offset 和响应 search ID。小红书每轮在首页搜索后从顶部全量滚到 `has_more=false`，不保存
-前沿与 search ID。对应根执行器
+首次执行从来源第一页开始，不做顶部刷新。每个完整前沿批次把下一页写入状态事件。抖音（#124）与小红书
+一样每轮从首页全量翻到 `has_more=false`：抖音从第 1 页、offset 0、空 search ID 开始，状态事件记录的
+offset 与 search ID 只作审计；小红书在首页搜索后从顶部全量滚动，不保存前沿与 search ID。对应根执行器
 在 child 摘要形成后才把状态事件提交到 SQLite，不得由底层循环提前推进数据库游标。中途停止的
 批次保存当前请求位置，下一次允许重取该批次，依靠已知 ID 提前去重；这样可以重复少量边界
 数据，但不能跳过未持久化候选。小红书只有在 child 摘要形成后才提交本轮候选 ID 与累计摘要；
@@ -397,28 +398,26 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 决定性事件或摘要形成前崩溃的候选不会被提前标记为已处理。
 
 存在 checkpoint 时，runner 自动把保存位置传给 child；有未完成累计摘要时再传入上一份
-`summary.json`。顶部刷新仅限通用平台（小红书没有保存位置，每轮全量重滚）：child 先刷新
+`summary.json`。顶部刷新仅限 B站、微博、知乎（小红书与抖音没有保存位置，每轮全量重滚）：child 先刷新
 配置的 `top_refresh_max_pages` 个顶部页面，再从保存前沿继续。顶部刷新用于发现新近发布内容，
 不推进深层 checkpoint；已知 ID 在详情、粉丝和媒体处理前跳过。深层批次
-完整结束才推进到下一页；抖音恢复命令必须同时包含 `--start-page`、`--start-offset` 和非空
-`--start-cursor`。只有页码没有 search ID 的请求是无效恢复。
+完整结束才推进到下一页。抖音 child 命令不含 `--start-page`、顶部刷新与耗尽参数，只在有累计摘要时带
+`--resume-summary`；child 收到这些恢复参数即以 `douyin_full_scan_rejects_resume_args` 报错。
 
 运行级阻断或未取得停止证据的产物不单独入库。runner 保存安全摘要引用，下一次将历史与本次
 JSONL 合并校验并从最后完整前沿继续；只有取得可验证耗尽证据后，才把累计中全部结构有效记录
-（含主题不相关记录）一次性原子入库并清空累计摘要。checkpoint 本身保留；通用平台供下一次定时任务
-先刷新顶部，再判断是否出现新的来源链，小红书下一轮仍全量重滚。运行错误仍按重试策略处理。
+（含主题不相关记录）一次性原子入库并清空累计摘要。checkpoint 本身保留；B站、微博、知乎供下一次定时
+任务先刷新顶部，小红书与抖音下一轮仍全量重滚。运行错误仍按重试策略处理。
 
-通用平台的 `source_exhausted` checkpoint 默认不再盲目请求原深页，只执行顶部刷新；小红书耗尽后与
-其他轮相同，全量重滚。抖音的耗尽只证明旧
-search ID 游标链结束：若顶部刷新同时观察到至少一个不在数据库、累计摘要或持久候选集合中的
-新候选 ID、最新响应 `has_more=true`
-且带非空下一 search ID，child 必须记录 `discovery_frontier_reseeded`，从该刷新链的下一组三元组
-建立新前沿并替换旧耗尽 checkpoint；任一条件缺失时保持耗尽，只做顶部刷新，避免每轮盲扫旧结果。
-来源重新出现未知内容时仍可累计。`--no-import` 诊断自动禁用 checkpoint 写入。通用 runner 的显式 `--resume-summary`、
-`--start-page` 和 `--recovery-keyword` 仅用于人工恢复，不是正常 workflow；使用显式参数时调度器
-不自动混入旧 checkpoint。小红书不开放这些人工恢复参数，也没有可恢复的位置，账号级 checkpoint
-只保存停止审计与累计摘要；换号产生独立记忆，不得解释为同一正式轮次续跑。旧 `search_id` 恢复失败时必须保留原
-checkpoint 并按 `runtime_failed` 停止，不得静默生成新 ID 请求猜测的深页。
+B站、微博、知乎的 `source_exhausted` checkpoint 默认不再盲目请求原深页，只执行顶部刷新；小红书与抖音
+耗尽后与其他轮相同，全量重滚。抖音的 search ID 只标识一次具体排序，新进程打开搜索页即得到新链，旧
+offset 在新链上没有意义，因此不跨进程续跑、不重绑定旧前沿、耗尽后也不 reseed；已处理 ID 在作者、
+详情与媒体请求前滑过。来源重新出现未知内容时仍可累计。`--no-import` 诊断自动禁用 checkpoint 写入。
+通用 runner 的显式 `--resume-summary`、`--start-page` 和 `--recovery-keyword` 仅用于人工恢复，不是
+正常 workflow；使用显式参数时调度器不自动混入旧 checkpoint。小红书不开放这些人工恢复参数，也没有
+可恢复的位置，账号级 checkpoint 只保存停止审计与累计摘要；换号产生独立记忆，不得解释为同一正式轮次
+续跑。抖音的 checkpoint 同样只作审计，runner 拒绝对抖音 job 显式传 `--start-page`；本轮链上截获
+不到目标页时按 `runtime_failed:browser_search_response_missing` 停止，不得请求猜测的深页。
 
 ## 正文图片摘要与错误契约
 

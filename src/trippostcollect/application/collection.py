@@ -81,7 +81,6 @@ from trippostcollect.runtime.process import run_command as run_command
 from trippostcollect.runtime.process import runtime_watchdog_stop_detail as runtime_watchdog_stop_detail
 from trippostcollect.runtime.process import skipped_command as skipped_command
 from trippostcollect.runtime.visit_ledger import content_visits_path
-from trippostcollect.scheduler.discovery import load_checkpoint
 from trippostcollect.scheduler.discovery import save_checkpoint
 from trippostcollect.scheduler.discovery import save_seen_candidates
 from trippostcollect.xhs.engagement import engagement_evidence_path
@@ -160,34 +159,6 @@ SKIPPED_CANDIDATE_EVENT_FIELDS = (
 )
 
 
-DISCOVERY_RESEED_EVENT_FIELDS = (
-    "platform",
-    "reason",
-    "saved_resume_page",
-    "saved_resume_offset",
-    "saved_resume_cursor",
-    "resume_page",
-    "resume_offset",
-    "resume_cursor",
-    "refresh_new_candidate_count",
-)
-
-
-def stable_douyin_search_id(pagination_evidence: dict[str, Any]) -> str:
-    for batch in pagination_evidence.get("batches") or []:
-        if not isinstance(batch, dict) or batch.get("platform") != "douyin":
-            continue
-        if batch.get("discovery_phase") not in (None, "frontier"):
-            continue
-        source_cursor = str(batch.get("source_cursor") or "")
-        next_cursor = str(batch.get("next_cursor") or "")
-        if source_cursor:
-            return source_cursor
-        if batch.get("source_offset") in (None, 0, "0") and next_cursor:
-            return next_cursor
-    return ""
-
-
 def effective_discovery_checkpoint_event(
     pagination_evidence: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -213,17 +184,10 @@ def persist_discovery_checkpoint(
         return {"skipped": True, "reason": "no_frontier_batch_evidence"}
     refresh_only = event.get("discovery_phase") == "refresh"
     if refresh_only:
+        # 顶部刷新只属于按页恢复的通用平台；抖音（#124）每轮全量扫描，没有刷新阶段。
         resume_page = int(args.start_page)
-        resume_offset = (
-            int(args.start_offset)
-            if platform_key == "douyin" and args.start_offset is not None
-            else None
-        )
-        resume_cursor = (
-            (str(args.start_cursor or "") or None)
-            if platform_key == "douyin"
-            else None
-        )
+        resume_offset = None
+        resume_cursor = None
         source_has_more_value = False if args.discovery_source_exhausted else None
     else:
         resume_page = int(
@@ -235,9 +199,8 @@ def persist_discovery_checkpoint(
             if resume_offset_value not in (None, "")
             else None
         )
+        # 抖音（#124）的 page/offset/search ID 只记录本轮最后位置供审计，runner 不再拿它续跑。
         resume_cursor = str(event.get("resume_cursor") or "") or None
-        if platform_key == "douyin":
-            resume_cursor = stable_douyin_search_id(pagination_evidence) or resume_cursor
         source_has_more_value = event.get("source_has_more")
     source_has_more = (
         None if source_has_more_value is None else bool(source_has_more_value)
@@ -248,23 +211,6 @@ def persist_discovery_checkpoint(
         busy_timeout_ms=FORMAL_SQLITE_BUSY_TIMEOUT_MS,
     ) as conn:
         bootstrap_connection(conn, sync_content=False, sync_jobs=False)
-        existing_checkpoint = load_checkpoint(
-            conn,
-            job_id=int(args.discovery_job_id),
-            query_fingerprint_value=str(args.discovery_query_fingerprint),
-        )
-        if (
-            platform_key == "douyin"
-            and stop_detail == "saved_source_exhausted"
-            and source_has_more is False
-            and resume_page == 1
-            and resume_offset in (None, 0)
-            and not resume_cursor
-            and existing_checkpoint
-            and existing_checkpoint.get("last_stop_detail")
-            == "verified_empty_first_page"
-        ):
-            stop_detail = "verified_empty_first_page"
         save_checkpoint(
             conn,
             job_id=int(args.discovery_job_id),
@@ -334,7 +280,6 @@ def load_pagination_evidence(
     batches = []
     stopped_details: dict[str, Any] | None = None
     runtime_terminal: dict[str, Any] | None = None
-    frontier_reseeds: list[dict[str, Any]] = []
     skipped_candidate_failures: list[dict[str, Any]] = []
     for event in payload.get("events") or []:
         if not isinstance(event, dict):
@@ -347,14 +292,6 @@ def load_pagination_evidence(
             batches.append(selected)
         elif event.get("type") == "adaptive_search_stopped":
             stopped_details = selected
-        elif event.get("type") == "discovery_frontier_reseeded":
-            frontier_reseeds.append(
-                {
-                    key: details.get(key)
-                    for key in DISCOVERY_RESEED_EVENT_FIELDS
-                    if key in details
-                }
-            )
         elif event.get("type") == "candidate_skipped":
             skipped_candidate_failures.append(
                 {
@@ -389,7 +326,6 @@ def load_pagination_evidence(
         "stop_reason": str((stopped_details or {}).get("stop_reason") or ""),
         "stop_detail": str((stopped_details or {}).get("stop_detail") or ""),
         "batches": batches,
-        "frontier_reseeds": frontier_reseeds,
         "skipped_candidate_count": len(skipped_candidate_failures),
         "skipped_candidate_failures": skipped_candidate_failures,
         "stop_event": stopped_details,
@@ -829,8 +765,6 @@ def _run_platform_without_policy(
                 "TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT": str(
                     args.discovery_query_fingerprint or ""
                 ),
-                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET": str(args.start_offset),
-                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR": str(args.start_cursor or ""),
                 "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES": str(
                     args.top_refresh_max_pages
                 ),
@@ -980,10 +914,9 @@ def _run_platform_without_policy(
             timeout_reason=runtime_stop_detail,
             platform_key=platform_key,
             start_page=int(args.start_page),
-            start_offset=(
-                int(args.start_offset) if args.start_offset is not None else None
-            ),
-            start_cursor=str(args.start_cursor or "") or None,
+            # #124：offset/search ID 只在抖音链上出现，且每轮从首页开始；首个批次前没有保存位置。
+            start_offset=None,
+            start_cursor=None,
             inactivity_timeout_seconds=NO_PROGRESS_WATCHDOG_SECONDS,
             last_progress_age_seconds=float(
                 run.get("last_progress_age_seconds") or 0.0
@@ -1259,8 +1192,8 @@ def _run_main(
         raise SystemExit(f"unsupported required fields profile: {args.required_fields_profile}")
     if args.start_page <= 0:
         raise SystemExit("--start-page must be positive")
-    if args.start_offset < 0 or args.top_refresh_max_pages < 0:
-        raise SystemExit("--start-offset and --top-refresh-max-pages cannot be negative")
+    if args.top_refresh_max_pages < 0:
+        raise SystemExit("--top-refresh-max-pages cannot be negative")
     discovery_values = (
         args.discovery_job_id,
         args.discovery_query_fingerprint,
@@ -1333,8 +1266,6 @@ def _run_main(
         if (
             args.resume_summary
             or args.start_page != 1
-            or args.start_offset != 0
-            or args.start_cursor
             or args.discovery_job_id is not None
             or args.top_refresh_max_pages != 0
             or args.discovery_source_exhausted
@@ -1361,10 +1292,13 @@ def _run_main(
         }
     elif args.repair_targets_file:
         raise SystemExit("--repair-targets-file requires --post-repair")
-    if "douyin" in platforms and args.start_page > 1 and not args.start_cursor:
-        raise SystemExit(
-            "Douyin continuation requires --start-cursor together with --start-page"
-        )
+    if "douyin" in platforms and (
+        args.start_page != 1
+        or args.top_refresh_max_pages > 0
+        or args.discovery_source_exhausted
+    ):
+        # #124：抖音每轮从首页全量翻到 has_more=false，旧的深层恢复与顶部刷新参数直接视为错误。
+        raise SystemExit("douyin_full_scan_rejects_resume_args")
     if "xhs" in platforms:
         if len(platforms) != 1:
             raise SystemExit("XHS must run alone through scripts/xhs_runner.py")
@@ -1380,7 +1314,6 @@ def _run_main(
             raise SystemExit("XHS requires --behavior-profile xhs_guarded")
         if (
             args.start_page != 1
-            or args.start_cursor
             or args.top_refresh_max_pages > 0
             or args.discovery_source_exhausted
         ):

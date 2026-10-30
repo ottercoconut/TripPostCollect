@@ -161,7 +161,6 @@ def worker_config(*, environ: Mapping[str, str] = os.environ) -> SimpleNamespace
         CRAWLER_MAX_SLEEP_SEC=2,
         DISABLE_SSL_VERIFY=False,
         # 四站配置：原 xhs/dy/weibo/zhihu_config 的同名键。
-        PUBLISH_TIME_TYPE=0,
         WEIBO_SEARCH_TYPE="default",
         ENABLE_WEIBO_FULL_TEXT=True,
         XHS_SPECIFIED_NOTE_URL_LIST=[],
@@ -241,15 +240,11 @@ def douyin_browser_detail_fallback_reader(*, environ=os.environ):
     return lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK") == "1"
 
 
-def douyin_readers(start_page: int, *, environ=os.environ):
-    """保留抖音每个 env 的默认值、转换及读取时点。"""
+def douyin_readers(*, environ=os.environ):
+    """保留抖音每个 env 的默认值、转换及读取时点；#124 起搜索不读续跑与顶部刷新输入。"""
     from trippostcollect.application.contracts import DouyinReaders
 
     return DouyinReaders(
-        refresh_max_pages=env_int_reader("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", 0, environ=environ),
-        source_exhausted=lambda: environ.get("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED"),
-        resume_offset=env_int_reader("TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET", max(0, (start_page - 1) * 10), environ=environ),
-        resume_cursor=lambda: environ.get("TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR", ""),
         enrich_creators=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS"),
         enrich_only_images=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES", "1"),
         max_creator_enrich=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH", "30"),

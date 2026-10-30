@@ -1,6 +1,6 @@
 """#116 抖音 HTTP 状态分类、请求头与 worker 有效性门禁的离线回归。
 
-只替换 httpx 传输与搜索客户端边界；状态分类、作者补全、首页重建与写出判定走真实实现。
+只替换 httpx 传输与搜索客户端边界；状态分类、作者补全与写出判定走真实实现。
 """
 
 from __future__ import annotations
@@ -110,19 +110,6 @@ async def test_other_non_2xx_is_retryable_transport_failure(status, body):
 
 
 @pytest.mark.asyncio
-async def test_argus_block_on_first_search_page_skips_visible_rebuild(monkeypatch):
-    client, _ = make_client(lambda request: (403, ARGUS_BODY), page=Page())
-
-    async def forbidden_rebuild(**kwargs):
-        raise AssertionError("gateway block must not trigger visible first-page rebuild")
-
-    monkeypatch.setattr(client, "_build_visible_first_page_fallback", forbidden_rebuild)
-    with pytest.raises(PlatformRuntimeError) as raised:
-        await client.search_info_by_keyword(keyword="青岛旅游")
-    assert raised.value.code == "blocked_or_forbidden"
-
-
-@pytest.mark.asyncio
 async def test_argus_header_only_on_detail_and_uifid_prefers_uifid(monkeypatch):
     monkeypatch.setattr("trippostcollect.platforms.douyin.client.get_a_bogus", signed_bogus)
 
@@ -141,17 +128,16 @@ async def test_argus_header_only_on_detail_and_uifid_prefers_uifid(monkeypatch):
 
     await client._get_video_by_id("1")
     await client.get_user_info("sec-1")
-    await client.search_info_by_keyword(keyword="青岛旅游")
 
     by_path = {request.url.path: request for request in transport.requests}
     detail = by_path["/aweme/v1/web/aweme/detail/"]
     profile = by_path["/aweme/v1/web/user/profile/other/"]
-    search = by_path["/aweme/v1/web/general/search/stream/"]
+    # #124：搜索只经浏览器截获，客户端不再发搜索请求。
+    assert set(by_path) == {"/aweme/v1/web/aweme/detail/", "/aweme/v1/web/user/profile/other/"}
     assert detail.headers["x-tt-argus"] == "1"
     assert "x-tt-argus" not in profile.headers
-    assert "x-tt-argus" not in search.headers
     assert "x-tt-argus" not in client.headers
-    for request in (detail, profile, search):
+    for request in (detail, profile):
         assert request.url.params["uifid"] == "stable-uifid"
 
 
@@ -195,58 +181,6 @@ async def test_media_request_uses_browser_ua_referer_and_image_accept_without_co
     assert "python-httpx" not in headers["user-agent"]
 
 
-class WaterfallPage:
-    def on(self, *args):
-        pass
-
-    def locator(self, selector):
-        return self
-
-    async def evaluate_all(self, script):
-        return [str(100 + index) for index in range(10)]
-
-
-def seeded_rebuild_client():
-    client, _ = make_client(lambda request: (500, b""), page=WaterfallPage())
-    client._observed_search_responses.append(
-        {
-            "keyword": "青岛旅游",
-            "offset": 10,
-            "search_id": "stable-search-id",
-            "payload": {"status_code": 0, "data": [{"aweme_info": {"aweme_id": "200"}}], "has_more": 1},
-        }
-    )
-    return client
-
-
-@pytest.mark.asyncio
-async def test_partial_first_page_rebuild_returns_none():
-    client = seeded_rebuild_client()
-
-    async def detail(aweme_id):
-        if aweme_id == "105":
-            raise DataFetchError("detail failed")
-        return {"aweme_id": aweme_id}
-
-    client.get_video_by_id = detail
-    assert await client._build_visible_first_page_fallback(keyword="青岛旅游", offset=0, search_id="") is None
-
-
-@pytest.mark.asyncio
-async def test_complete_first_page_rebuild_marks_items_as_detail_source():
-    client = seeded_rebuild_client()
-
-    async def detail(aweme_id):
-        return {"aweme_id": aweme_id}
-
-    client.get_video_by_id = detail
-    rebuilt = await client._build_visible_first_page_fallback(keyword="青岛旅游", offset=0, search_id="")
-
-    assert len(rebuilt["data"]) == 10
-    assert {item["trippostcollect_content_source"] for item in rebuilt["data"]} == {"aweme_detail"}
-    assert rebuilt["extra"]["logid"] == "stable-search-id"
-
-
 # ----------------------------- worker 搜索流程 -----------------------------
 
 
@@ -254,18 +188,13 @@ def prepare(monkeypatch, tmp_path):
     state_path = tmp_path / "state.json"
     state_path.write_text('{"events": []}', encoding="utf-8")
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", "0")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED", "0")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET", "0")
     monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS", "1")
     monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES", "1")
     monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH", "-1")
     monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS", "0")
-    monkeypatch.delenv("TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR", raising=False)
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     monkeypatch.setattr(config, "START_PAGE", 1)
     monkeypatch.setattr(config, "KEYWORDS", "青岛旅游")
-    monkeypatch.setattr(config, "PUBLISH_TIME_TYPE", 0)
     monkeypatch.setattr(config, "SAVE_DATA_OPTION", "jsonl")
     monkeypatch.setattr(douyin_core.asyncio, "sleep", AsyncMock())
     return state_path
@@ -382,22 +311,6 @@ async def test_search_author_placeholder_followers_are_not_valid_and_skip_images
     assert [item[0] for item in stored] == ["1"]
     stopped = events_of(state_path, "adaptive_search_stopped")[-1]
     assert stopped["valid_new_count"] == 0
-
-
-@pytest.mark.asyncio
-async def test_rebuilt_first_page_items_are_labelled_detail_source(monkeypatch, tmp_path):
-    prepare(monkeypatch, tmp_path)
-    stored = []
-    client = SearchClient([], profile={"status_code": 0, "user": {"follower_count": 5}})
-
-    async def rebuilt(**kwargs):
-        return {"status_code": 0, "has_more": 0, "extra": {"logid": "id"},
-                "data": [{"aweme_info": image_aweme("1"), "trippostcollect_content_source": "aweme_detail"}]}
-
-    client.search_info_by_keyword = rebuilt
-    await search_crawler(client, stored).search()
-
-    assert stored == [("1", {"content_detail_source": "aweme_detail", "expected_aweme_id": "1"})]
 
 
 @pytest.mark.asyncio

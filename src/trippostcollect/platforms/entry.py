@@ -294,7 +294,7 @@ def douyin_dependencies(config):
 
     return {
         "settings": settings,
-        "inputs": douyin_readers(settings.START_PAGE),
+        "inputs": douyin_readers(),
         "ports": DouyinCrawlerPorts(
             client=DouyinClientPorts(client_factory, convert_browser_context_cookies, random.random),
             login=DouyinLoginPorts(partial(

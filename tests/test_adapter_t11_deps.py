@@ -47,13 +47,15 @@ CONSTANTS = {
     "db.content": ("FORMAL_SQLITE_BUSY_TIMEOUT_MS",),
     "application.reporting": ("SAMPLE_KEYS", "AUTHOR_FIELD_MARKERS", "IMAGE_SUFFIXES", "VIDEO_SUFFIXES"),
     "application.collection": (
-        "SKIPPED_CANDIDATE_EVENT_FIELDS", "DISCOVERY_RESEED_EVENT_FIELDS",
+        "SKIPPED_CANDIDATE_EVENT_FIELDS",
         "XHS_NETWORK_RECOVERY_WAIT_SECONDS", "XHS_NETWORK_RETRY_MIN_SECONDS",
         "XHS_NETWORK_RETRY_MAX_SECONDS", "XHS_OPERATOR_LOGIN_WAIT_SECONDS",
     ),
     "application.failures": ("RUNTIME_BLOCKING_FAILURE_TYPES",),
     "artifacts.formal_images": ("RASTER_IMAGE_SUFFIX_RE", "LEGACY_ZHIHU_TRANSFORM_SUFFIX_RE"),
 }
+# #124：抖音耗尽后 reseed 证据随 reseed 删除；冻结执行器确有旧常量，根与脚本都不再定义。
+EXITED_CONSTANTS = {"application.collection": ("DISCOVERY_RESEED_EVENT_FIELDS",)}
 
 
 def imports(tree):
@@ -221,3 +223,9 @@ def test_constants_single_definition_and_same_object(monkeypatch):
             assert sum(name in values for values in all_values) == 1
             assert ast.dump(original[name]) == ast.dump(values[name])
             assert getattr(executor, name) is getattr(target, name)
+    for module, names in EXITED_CONSTANTS.items():
+        target = importlib.import_module("trippostcollect." + module)
+        for name in names:
+            assert name in original
+            assert not any(name in values for values in all_values)
+            assert not hasattr(target, name) and not hasattr(executor, name)

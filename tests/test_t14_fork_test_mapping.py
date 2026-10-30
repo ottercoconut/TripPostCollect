@@ -104,7 +104,10 @@ def test_mapping_is_complete_archive_after_fork_removal() -> None:
 
 
 def test_ported_nodes_exist_under_same_name_and_parameters() -> None:
-    """ported_to 指向同名根 node：函数在台账目标文件中，参数 id 与原 fork 用例一致，并列为首个根引用。"""
+    """ported_to 指向同名根 node：函数在台账目标文件中，参数 id 与原 fork 用例一致，并列为首个根引用。
+
+    被后续 issue 删除整条语义的用例（首个根引用 retired，如 #124 删除抖音 reseed）只核对名字与留档，不再要求函数存在。
+    """
     for item in MAPPING["nodes"]:
         if not item.get("ported_to"):
             continue
@@ -113,6 +116,11 @@ def test_ported_nodes_exist_under_same_name_and_parameters() -> None:
         path, _, name = item["ported_to"].partition("::")
         assert name == fork_name, item["fork_node"]
         function, _, case = name.partition("[")
+        if item["root"][0].get("status") == "retired":
+            assert all(reference.get("status") == "retired" for reference in item["root"]), item["fork_node"]
+            assert item["root"][0]["test"] == f"{path}::{function}", item["fork_node"]
+            assert function not in _test_functions(ROOT / path), item["fork_node"]
+            continue
         node = _test_functions(ROOT / path)[function]
         ids = _parametrize_ids(node)
         assert (case.rstrip("]") in ids) if case else ids is None, item["ported_to"]

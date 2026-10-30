@@ -613,11 +613,17 @@
    "root": [
     {
      "test": "tests/application/test_discovery.py::test_douyin_reseed_requires_new_candidate_and_cursor",
-     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块"
+     "asserts": "T14-B2 按台账 target_file 原名移植：同名、同参数 id、原断言逐条不变，直接调用根模块",
+     "status": "retired",
+     "retired_by": "#124",
+     "reason": "抖音每轮从首页全量翻到 has_more=false，没有顶部刷新与旧耗尽链，耗尽后 reseed 与 should_reseed_douyin_frontier 删除；全量扫描、截获缺失即运行级失败与耗尽 checkpoint 不退化为只刷顶部由 tests/platforms/douyin/test_douyin_issue124.py 断言"
     },
     {
      "test": "tests/test_adaptive_accumulator.py::test_douyin_exhausted_cursor_reseed_requires_new_candidate_continuation",
-     "asserts": "同两组断言，另覆盖 has_more=False 与空游标"
+     "asserts": "同两组断言，另覆盖 has_more=False 与空游标",
+     "status": "retired",
+     "retired_by": "#124",
+     "reason": "抖音每轮从首页全量翻到 has_more=false，没有顶部刷新与旧耗尽链，耗尽后 reseed 与 should_reseed_douyin_frontier 删除；全量扫描、截获缺失即运行级失败与耗尽 checkpoint 不退化为只刷顶部由 tests/platforms/douyin/test_douyin_issue124.py 断言"
     }
    ],
    "ported_to": "tests/application/test_discovery.py::test_douyin_reseed_requires_new_candidate_and_cursor"
