@@ -29,6 +29,7 @@ import logging
 from typing import Dict, List, Optional
 from urllib.parse import quote
 
+import httpx
 from playwright.async_api import BrowserContext, BrowserType, Page, Playwright, async_playwright
 
 from trippostcollect.application.contracts import ImageStagingError, WeiboPorts
@@ -90,26 +91,13 @@ class WeiboCrawler:
 
             # Create a client to interact with the xiaohongshu website.
             self.wb_client = await self.create_weibo_client(httpx_proxy_format)
-            if not await self.wb_client.pong():
-                login_obj = WeiboLogin(
-                    login_type=self.config.LOGIN_TYPE,
-                    login_phone="",  # your phone number
-                    browser_context=self.browser_context,
-                    context_page=self.context_page,
-                    cookie_str=self.config.COOKIES,
-                    ports=self.ports.login,
-                )
-                await login_obj.begin()
-
-                # After successful login, redirect to mobile website and update mobile cookies
-                logger.info("[WeiboCrawler.start] redirect weibo mobile homepage and update cookies on mobile platform")
-                await self.context_page.goto(self.mobile_index_url)
-                await asyncio.sleep(3)
-                # Only get mobile cookies to avoid confusion between PC and mobile cookies
-                await self.wb_client.update_cookies(
-                    browser_context=self.browser_context,
-                    urls=self.cookie_urls,
-                )
+            try:
+                await self.ensure_login()
+            except PlatformRuntimeError as exc:
+                # 登录、频控或风控阻断：搜索模式记运行级失败后结束，不得继续搜索写出假耗尽（#114）。
+                if self.config.CRAWLER_TYPE == "search":
+                    self.ports.accumulator().mark_runtime_failed(exc.code)
+                raise
 
             if self.config.CRAWLER_TYPE == "search":
                 # Search for video and retrieve their comment information.
@@ -143,6 +131,35 @@ class WeiboCrawler:
             else:
                 pass
             logger.info("[WeiboCrawler.start] Weibo Crawler finished ...")
+
+    async def ensure_login(self):
+        """移动端登录态必须由 /api/config 确认；登录流程后仍未确认即运行级阻断。"""
+        if await self.wb_client.pong():
+            return
+        login_obj = WeiboLogin(
+            login_type=self.config.LOGIN_TYPE,
+            login_phone="",  # your phone number
+            browser_context=self.browser_context,
+            context_page=self.context_page,
+            cookie_str=self.config.COOKIES,
+            ports=self.ports.login,
+        )
+        await login_obj.begin()
+
+        # After successful login, redirect to mobile website and update mobile cookies
+        logger.info("[WeiboCrawler.start] redirect weibo mobile homepage and update cookies on mobile platform")
+        await self.context_page.goto(self.mobile_index_url)
+        await asyncio.sleep(3)
+        # Only get mobile cookies to avoid confusion between PC and mobile cookies
+        await self.wb_client.update_cookies(
+            browser_context=self.browser_context,
+            urls=self.cookie_urls,
+        )
+        if not await self.wb_client.pong():
+            raise PlatformRuntimeError(
+                "weibo mobile login state not confirmed after login flow",
+                code="login_required",
+            )
 
     async def search(self):
         """
@@ -192,7 +209,16 @@ class WeiboCrawler:
                             page=requested_page,
                             search_type=search_type,
                         )
-                    except DataFetchError:
+                    except PlatformRuntimeError as exc:
+                        accumulator.mark_runtime_failed(
+                            exc.code,
+                            source_page=requested_page,
+                            resume_page=requested_page,
+                            discovery_phase=discovery_phase,
+                        )
+                        raise
+                    except httpx.RequestError:
+                        # DataFetchError 与重试用尽后的传输层异常：运行级失败，不当作空页。
                         accumulator.mark_runtime_failed(
                             "search_request_failed",
                             source_page=requested_page,
@@ -201,8 +227,9 @@ class WeiboCrawler:
                         )
                         raise
                     note_id_list: List[str] = []
-                    note_list = filter_search_result_card(search_res.get("cards"))
-                    if not note_list:
+                    cards = search_res.get("cards") or []
+                    note_list = filter_search_result_card(cards)
+                    if weibo_store.search_page_exhausted(cards):
                         if discovery_phase == "frontier":
                             accumulator.mark_source_exhausted(
                                 "empty_page",
@@ -269,6 +296,23 @@ class WeiboCrawler:
                         if not mblog:
                             continue
                         note_id = str(mblog.get("id") or "")
+                        if weibo_store.weibo_created_at(mblog) is None:
+                            # 发帖时间缺失或无法解析：按候选失败跳过，不写出记录（#114）。
+                            logger.error(
+                                "[WeiboCrawler.search] Skip candidate without parseable "
+                                f"created_at: note_id={note_id}"
+                            )
+                            accumulator.skip_candidate_failure(
+                                note_id,
+                                failure_scope="post",
+                                detail="created_at_unparseable",
+                                error_code="created_at_unparseable",
+                                attempts=1,
+                                retryable=False,
+                                source_page=requested_page,
+                                discovery_phase=discovery_phase,
+                            )
+                            continue
                         user = mblog.get("user") or {}
                         followers_observed = any(
                             key in user and user.get(key) not in (None, "")
@@ -412,6 +456,9 @@ class WeiboCrawler:
                 logger.info(f"[WeiboCrawler.get_note_info_task] Sleeping for {self.config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching note details {note_id}")
 
                 return result
+            except PlatformRuntimeError:
+                # 登录、频控、风控是运行级阻断，不能当作单条详情缺失吞掉（#114）。
+                raise
             except DataFetchError as ex:
                 logger.error(f"[WeiboCrawler.get_note_info_task] Get note detail error: {ex}")
                 return None

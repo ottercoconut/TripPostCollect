@@ -29,22 +29,66 @@ def png_bytes() -> bytes:
     return output.getvalue()
 
 
-def test_weibo_image_urls_do_not_double_wrap_existing_proxy() -> None:
-    assert weibo_image_request_urls(
-        "https://i1.wp.com/ww3.sinaimg.cn/large/example.jpg"
-    ) == [
-        "https://i1.wp.com/ww3.sinaimg.cn/large/example.jpg",
-        "https://ww3.sinaimg.cn/large/example.jpg",
-    ]
-
-
-def test_weibo_image_urls_keep_bounded_proxy_and_direct_fallbacks() -> None:
+def test_weibo_image_urls_try_large_then_original_without_proxy() -> None:
+    # #114：只直连新浪，large 优先，再退到平台原始地址；不再构造第三方图片代理地址。
     assert weibo_image_request_urls(
         "https://wx4.sinaimg.cn/orj360/example.jpg?token=ignored"
     ) == [
-        "https://i1.wp.com/wx4.sinaimg.cn/large/example.jpg",
+        "https://wx4.sinaimg.cn/large/example.jpg",
+        "https://wx4.sinaimg.cn/orj360/example.jpg?token=ignored",
+    ]
+    assert weibo_image_request_urls("https://wx4.sinaimg.cn/large/example.jpg") == [
         "https://wx4.sinaimg.cn/large/example.jpg",
     ]
+
+
+def test_weibo_image_urls_never_wrap_with_third_party_proxy() -> None:
+    for url in (
+        "https://ww3.sinaimg.cn/mw690/example.jpg",
+        "https://wx.test/example.jpg",
+    ):
+        assert not any("wp.com" in candidate for candidate in weibo_image_request_urls(url))
+    assert weibo_image_request_urls("https://wx.test/example.jpg") == ["https://wx.test/example.jpg"]
+
+
+@pytest.mark.asyncio
+async def test_weibo_image_request_sends_no_cookie_or_api_headers() -> None:
+    from support.weibo_adapter import client_ports
+    from trippostcollect.platforms.weibo.client import WeiboClient
+    import httpx
+
+    seen: list[tuple[str, dict]] = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            seen.append((url, kwargs["headers"]))
+            return httpx.Response(200, content=png_bytes(), request=httpx.Request(method, url))
+
+    client = WeiboClient(
+        headers={
+            "User-Agent": "ua-test", "Cookie": "SUB=secret", "Origin": "https://m.weibo.cn",
+            "Referer": "https://m.weibo.cn", "Content-Type": "application/json;charset=UTF-8",
+        },
+        playwright_page=None, cookie_dict={"SUB": "secret"},
+        ports=client_ports(make_async_client=lambda **kwargs: Client()),
+    )
+
+    await client.get_note_image("https://wx1.sinaimg.cn/orj360/example.jpg")
+
+    assert seen == [(
+        "https://wx1.sinaimg.cn/large/example.jpg",
+        {
+            "User-Agent": "ua-test",
+            "Referer": "https://m.weibo.cn/",
+            "Accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8",
+        },
+    )]
 
 
 def valid_mblog(note_id: str) -> dict:

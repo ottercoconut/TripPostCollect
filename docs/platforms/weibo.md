@@ -12,11 +12,28 @@
 - 关闭重开 profile 后，只有移动接口同时返回 `login=true` 和有效 `uid` 才成功；`WBPSESS` 不能
   单独作为登录证据。
 - 行为阶段必须在本轮真实关键词移动搜索页完成并刷新移动端 Cookie。
+- worker 启动时先用 `/api/config` 确认移动端登录；未确认时执行登录流程并刷新移动端 Cookie，之后必须
+  再确认一次。仍未登录即记 `adaptive_search_stopped(runtime_failed, login_required)` 并结束，不发出
+  任何搜索请求，不能把未登录状态下的空结果当作来源耗尽。
+
+## 请求失败分类
+
+- 移动接口（`/api/config`、搜索、长文详情）返回 401/403 记 `login_required`，429 记 `rate_limited`，
+  418/432 风控拦截记 `blocked_or_forbidden`；这些都是运行级阻断，不重试，也不再在每次失败后跳转
+  首页刷新 Cookie。
+- 只有传输层异常（超时、连接错误）和 5xx 才在原预算内重试（搜索 5 次/3 秒，详情 3 次/1 秒），
+  用尽后原样上抛。搜索阶段的任何失败都写 `runtime_failed`（阻断写对应错误码，其余写
+  `search_request_failed`），不得当作空页。
+- 日志与异常只记状态码、`ok`、`msg` 与响应长度，不写响应原文；微博响应含 `avatar_hd`、
+  `profile_image_url` 等头像字段。
 
 ## 字段来源
 
 - 普通微博正文来自完整搜索 `mblog.text`，保存
-  `content_detail_status=detail_observed`、`content_detail_source=search_mblog_complete`。
+  `content_detail_status=detail_observed`、`content_detail_source=search_mblog_complete`。正文写出前先把
+  `<br>` 转为换行，再去标签，最后还原 HTML 实体。
+- 发帖时间只来自 `mblog.created_at`（RFC 2822），换算为 Unix 时间戳与上海时区时间；缺失或无法解析时
+  该候选写 `candidate_skipped(error_code=created_at_unparseable)`，不写出记录，搜索继续。
 - `isLongText=true` 必须请求移动详情并使用 `content_detail_source=mobile_detail`；详情候选级失败
   有限重试后写 `candidate_skipped(failure_scope=post)`，不得保存截断搜索文本。
 - 正文图片只来自 `mblog.pics` 归一后的 `image_list`，来源键为 `image_list`；头像、用户对象图片、
@@ -31,7 +48,15 @@
 下载并写 staging/manifest，通用重试、失败分类、根项目复验和事务见
 [正式契约](../formal-crawl-contract.md)与[数据持久化](../data-persistence.md)。
 
+图片请求只直连新浪图床：先请求 `large` 规格，失败或超限时退回平台原始地址。请求头只含浏览器
+User-Agent、`Referer: https://m.weibo.cn/` 和图片 Accept，不带登录 Cookie、Origin 或 Content-Type，
+也不经任何第三方图片代理。
+
 ## 发现与批次诊断
+
+只有搜索响应的原始 `cards` 为空（含平台“这里还没有内容”空页），或页面没有微博卡片且带“暂无内容”
+这类明确无内容标记时，才写 `source_exhausted(empty_page)`。有卡片但都不是 `card_type=9`（话题、
+用户卡、推荐卡）是正常页，按批次记录后继续翻页。
 
 综合搜索的批次停滞计数按“是否出现未知微博 ID”计算，而不是本页是否有有效图文。批次证据使用
 `stagnation_basis=candidate_identity`；该计数只用于诊断，不触发停止。纯文本或视频页仍继续扫描，
@@ -49,7 +74,7 @@ state、内容 JSONL、图片 manifest 和行为证据同时无变化的持续�
 `scripts/repair_post_details.py --platform weibo` 分批修复。清单把既有微博 ID 与
 `https://m.weibo.cn/detail/<id>` 严格绑定；detail 模式先在本轮青岛关键词移动搜索页完成人类行为
 证据，再从移动详情标记 `content_detail_source=mobile_detail` 并下载 `mblog.pics` 正文图。旧式
-`$render_data` 不存在时，修复入口可以从同一登录浏览器打开的精确 detail 页读取结构化页面状态，
-但仍要求目标 ID 完全一致且正文非空。新浪原图经代理失败、超限或旧 URL 已经带 `i1.wp.com` 时，
-图片客户端只在规范代理 URL 与原始新浪 `large` URL 间有限回退，禁止重复包装代理地址。该入口不写
-搜索 checkpoint，完成含义只覆盖清单中的旧行。
+`$render_data` 不存在时，修复入口打开同一登录浏览器中的精确 detail 页，先看导航响应状态
+（401/403 记 `login_required`，429 记 `rate_limited`，其他非 2xx 视为该条详情不可用），再读取结构化
+页面状态，仍要求目标 ID 完全一致且正文非空；不调用 Playwright `page.request` 等请求接口。
+该入口不写搜索 checkpoint，完成含义只覆盖清单中的旧行。

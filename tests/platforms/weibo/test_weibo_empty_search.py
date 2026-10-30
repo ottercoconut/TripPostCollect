@@ -7,6 +7,8 @@ from trippostcollect.platforms.weibo.client import WeiboClient
 
 
 class _Response:
+    status_code = 200
+
     def json(self):
         return {
             "ok": 0,

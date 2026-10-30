@@ -20,6 +20,7 @@ from playwright.async_api import Error as PlaywrightError
 from tenacity import RetryError
 
 from support import legacy_expectations as expectations
+from support import weibo_fetch_deviation
 from support.stable_png import solid_png
 from support.weibo_adapter import ROOT, settings
 from trippostcollect.application import events
@@ -82,12 +83,12 @@ async def drive(directory, monkeypatch, scenario, post_repair):
     class Page:
         def __init__(self):
             self.context = context
-            self.request = SimpleNamespace(get=self.api)
 
         async def goto(self, url, **kwargs):
             trace.append(("goto", url, kwargs))
             if scenario == "repair_navigation" and "/detail/" in url:
                 raise PlaywrightError("离线导航失败")
+            return SimpleNamespace(status=200)
 
         async def wait_for_timeout(self, timeout):
             trace.append(("wait", timeout))
@@ -97,16 +98,6 @@ async def drive(directory, monkeypatch, scenario, post_repair):
             if scenario == "repair_empty":
                 return {"id": "wrong", "text": "其他帖子"}
             return {"state": mblog(note_id)}
-
-        async def api(self, url, **kwargs):
-            trace.append(("browser_api", "GET", url, kwargs))
-            payload = {"status": mblog("long")} if scenario == "repair_api" else {}
-
-            async def read_json():
-                return payload
-
-            status = 429 if scenario == "repair_rate_limit" else 200
-            return SimpleNamespace(status=status, json=read_json)
 
     class Context:
         async def new_page(self):
@@ -191,7 +182,8 @@ async def drive(directory, monkeypatch, scenario, post_repair):
                     detail = mblog(parsed.path.rsplit("/", 1)[1])
                     content = ("var $render_data = " + json.dumps([{"status": detail}]) + "[0]").encode()
             else:
-                assert parsed.hostname in {"i1.wp.com", "wx1.sinaimg.cn"}
+                # #114：图片只直连新浪，不经第三方代理。
+                assert parsed.hostname == "wx1.sinaimg.cn", url
                 if scenario == "image_failure":
                     status = 404
                 elif scenario == "image_rate_limit":
@@ -249,17 +241,37 @@ DRIVE_SCENARIOS = [
     "login_expired", "repair_api", "repair_page", "repair_empty", "repair_navigation", "repair_rate_limit",
 ]
 T14_DRIVE = ("T05", "frozen_implementation")
+# #114 起这些用例的语义有意改变（重试与阻断分类、登录复查、删除 L3 回退），固化文件已删除，
+# 由 test_root_drive_semantics_changed_by_issue_114 的字面断言覆盖；其余用例经偏离变换后与固化预期比较。
+RETIRED_DRIVE_CASES = frozenset({
+    ("search_retry", 0), ("search_retry", 1), ("search_error", 0), ("search_error", 1),
+    ("login_expired", 0), ("login_expired", 1), ("detail_403", 0), ("detail_403", 1),
+    ("detail_429", 0), ("detail_429", 1), ("repair_api", 1), ("repair_rate_limit", 1),
+})
+FROZEN_DRIVE_CASES = [
+    (scenario, post_repair) for scenario in DRIVE_SCENARIOS for post_repair in (0, 1)
+    if (scenario, post_repair) not in RETIRED_DRIVE_CASES
+]
+
+
+def original_image_url(url):
+    """drive 输入中正文图的平台原始地址；固化预期只记录了 large 直连形态。"""
+    return url.replace("/large/", "/orj360/", 1)
+
+
+def frozen_drive(scenario, post_repair):
+    return weibo_fetch_deviation.drive(
+        expectations.load(*T14_DRIVE, f"{scenario}-repair{post_repair}"), original_url=original_image_url,
+    )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("post_repair", [0, 1])
-@pytest.mark.parametrize("scenario", DRIVE_SCENARIOS)
+@pytest.mark.parametrize("scenario,post_repair", FROZEN_DRIVE_CASES)
 async def test_root_matches_frozen_legacy_requests_artifacts_and_events(tmp_path, scenario, post_repair):
     """T14：根实现与固化的旧实现结果比较（同一 drive、同一 == 语义），不加载 fork 或 E。"""
     with pytest.MonkeyPatch.context() as patch:
         new = await drive(tmp_path / "new", patch, scenario, post_repair)
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == expectations.load(
-        *T14_DRIVE, f"{scenario}-repair{post_repair}")
+    assert expectations.scrub(new, (tmp_path, "<TMP>")) == frozen_drive(scenario, post_repair)
     check_drive_result(new, scenario, post_repair)
 
 
@@ -291,25 +303,29 @@ async def drive_entry_assembly(directory, scenario, post_repair):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("post_repair", [0, 1])
-@pytest.mark.parametrize("scenario", DRIVE_SCENARIOS)
+@pytest.mark.parametrize("scenario,post_repair", FROZEN_DRIVE_CASES)
 async def test_root_entry_assembly_matches_frozen_fork_factory(tmp_path, scenario, post_repair):
     """T14：替代旧桥工厂对照；根入口装配结果与固化的 fork 工厂结果比较。"""
     new = await drive_entry_assembly(tmp_path / "entry", scenario, post_repair)
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == expectations.load(
-        *T14_BRIDGE, f"{scenario}-repair{post_repair}")
+    assert expectations.scrub(new, (tmp_path, "<TMP>")) == frozen_drive(scenario, post_repair)
 
 
 def check_drive_result(new, scenario, post_repair):
-    if scenario in {"search", "detail", "empty", "search_retry", "detail_retry", "login_expired"}:
+    if scenario in {"search", "detail", "empty", "detail_retry"}:
         assert not new["failure"], new["failure"]
     requests = [row for row in new["trace"] if row[0] == "request"]
     assert all("avatar.invalid" not in row[2] for row in requests)
     assert not any("/detail/known" in row[2] for row in requests)
     for row in requests:
-        assert row[3]["headers"]["Cookie"] == "SUB=t05"
         assert row[3]["headers"]["User-Agent"]
         assert row[3]["headers"]["Referer"]
+        if urlparse(row[2]).hostname == "m.weibo.cn":
+            assert row[3]["headers"]["Cookie"] == "SUB=t05"
+        else:
+            # #114：图片请求只直连新浪，且不带 Cookie、Origin、Content-Type。
+            assert urlparse(row[2]).hostname == "wx1.sinaimg.cn", row[2]
+            assert set(row[3]["headers"]) == {"User-Agent", "Referer", "Accept"}
+    assert not any(row[0] == "browser_api" for row in new["trace"])
     serialized = b"".join(new["artifacts"].values())
     assert b"avatar.invalid" not in serialized
     assert "截断".encode() not in serialized
@@ -327,14 +343,57 @@ def check_drive_result(new, scenario, post_repair):
     if scenario.startswith("repair_"):
         detail_requests = [row for row in requests if "/detail/long" in row[2]]
         assert len(detail_requests) == 3
-        browser_api = [row for row in new["trace"] if row[0] == "browser_api"]
-        assert bool(browser_api) == bool(post_repair)
+        detail_pages = [row for row in new["trace"] if row[0] == "goto" and row[1].endswith("/detail/long")]
+        assert bool(detail_pages) == bool(post_repair)
         if post_repair:
-            assert new["trace"].index(browser_api[0]) > new["trace"].index(detail_requests[-1])
-            assert browser_api[0][2] == "https://m.weibo.cn/statuses/show?id=long"
+            assert new["trace"].index(detail_pages[0]) > new["trace"].index(detail_requests[-1])
             if scenario == "repair_empty":
                 # get_note_info_task 原本捕获 DataFetchError；另一个测试检查异常链及 attempts。
                 assert not new["artifacts"]
+
+
+def stopped_events(new):
+    return [(row["details"]["stop_reason"], row["details"]["stop_detail"])
+            for row in new["events"] if row["type"] == "adaptive_search_stopped"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario,post_repair", sorted(RETIRED_DRIVE_CASES))
+async def test_root_drive_semantics_changed_by_issue_114(tmp_path, scenario, post_repair):
+    """#114 有意改变语义的 drive 用例：只断言新的阻断、重试与回退行为，不再与固化预期比较。"""
+    with pytest.MonkeyPatch.context() as patch:
+        new = await drive(tmp_path / "new", patch, scenario, post_repair)
+    check_drive_result(new, scenario, post_repair)
+    searches = [row for row in new["trace"] if row[0] == "request" and "/api/container/getIndex" in row[2]]
+    if scenario in {"search_retry", "search_error"}:
+        # ok=0 业务错误不是传输层失败：不重试，记 search_request_failed 运行级失败而不是空页耗尽。
+        assert len(searches) == 1
+        assert stopped_events(new) == [("runtime_failed", "search_request_failed")]
+        assert new["failure"][0][0] == "DataFetchError"
+        assert not new["artifacts"]
+    elif scenario == "login_expired":
+        # 登录流程后复查仍未登录：运行级阻断 login_required，不发出任何搜索请求。
+        pongs = [row for row in new["trace"] if row[0] == "request" and row[2].endswith("/api/config")]
+        assert len(pongs) == 2 and not searches
+        assert stopped_events(new) == [("runtime_failed", "login_required")]
+        assert new["failure"] == [("PlatformRuntimeError",
+                                   "weibo mobile login state not confirmed after login flow", "login_required")]
+    elif scenario in {"detail_403", "detail_429"}:
+        # 长文详情 403/429 是运行级阻断：一次请求即停，不重试；修复轮也不进浏览器回退。
+        code = "login_required" if scenario == "detail_403" else "rate_limited"
+        detail_requests = [row for row in new["trace"] if row[0] == "request" and "/detail/long" in row[2]]
+        assert len(detail_requests) == 1
+        assert not any(row[0] == "goto" and row[1].endswith("/detail/long") for row in new["trace"])
+        assert stopped_events(new)[0] == ("runtime_failed", code)
+        assert not any("/long" in name for name in new["artifacts"])
+        assert b'"note_id":"long"' not in b"".join(new["artifacts"].values()).replace(b" ", b"")
+    elif scenario in {"repair_api", "repair_rate_limit"}:
+        # L3 浏览器接口回退已删除：两者与 repair_page 相同，只读精确 detail 页页面状态。
+        assert not new["failure"]
+        assert [row for row in new["trace"] if row[0] == "goto" and row[1].endswith("/detail/long")]
+        records = [json.loads(line) for name, value in new["artifacts"].items()
+                   if "/jsonl/" in name for line in value.splitlines()]
+        assert [row["note_id"] for row in records] == ["long"]
 
 
 def test_dependency_direction():
@@ -352,11 +411,13 @@ def test_dependency_direction():
                     assert module.startswith("trippostcollect.platforms.weibo")
 
 
-REPAIR_SCENARIOS = ["empty", "api_error", "navigation", "rate_limit", "no_page"]
+# api_error / rate_limit 只驱动已删除的 L3 浏览器接口回退，随 #114 退役（固化文件一并删除）；
+# 详情页导航返回的 HTTP 状态由 test_root_repair_page_status_is_classified 覆盖。
+REPAIR_SCENARIOS = ["empty", "navigation", "no_page"]
 T14_REPAIR = ("T05", "repair_exception_chain")
 
 
-async def repair_chain(patch, scenario):
+async def repair_chain(patch, scenario, *, page_status=200):
     """同一 fake 下根实现单次修复请求的尝试轨迹与异常链。"""
     trace = []
 
@@ -375,23 +436,11 @@ async def repair_chain(patch, scenario):
             return httpx.Response(200, text="missing render data", request=httpx.Request(method, url))
 
     class Page:
-        def __init__(self):
-            self.request = SimpleNamespace(get=self.api)
-
-        async def api(self, url, **kwargs):
-            trace.append(("api", url, kwargs))
-            if scenario == "api_error":
-                raise ValueError("离线 API 解析失败")
-
-            async def payload():
-                return {"id": "wrong", "text": "其他帖子"}
-
-            return SimpleNamespace(status=429 if scenario == "rate_limit" else 200, json=payload)
-
         async def goto(self, url, **kwargs):
             trace.append(("goto", url, kwargs))
             if scenario == "navigation":
                 raise PlaywrightError("离线导航失败")
+            return SimpleNamespace(status=page_status)
 
         async def wait_for_timeout(self, timeout):
             trace.append(("wait", timeout))
@@ -415,12 +464,12 @@ async def repair_chain(patch, scenario):
 def check_repair_chain(new, scenario):
     trace, errors = new
     assert len([row for row in trace if row[0] == "GET"]) == 3
-    if scenario in {"empty", "api_error"}:
-        api_attempt = "browser_api:http_200:empty_detail" if scenario == "empty" else "browser_api:ValueError"
-        assert f"attempts=['{api_attempt}', 'page_state:empty_detail']" in errors[0][1]
+    assert not any(row[0] == "api" for row in trace)
+    if scenario == "empty":
+        assert "attempts=['page_state:empty_detail']" in errors[0][1]
         assert errors[1][0] == "DataFetchError"
     if scenario != "no_page":
-        assert next(row for row in trace if row[0] == "api")[2]["timeout"] == 5000
+        assert next(row for row in trace if row[0] == "goto")[2]["timeout"] == 5000
 
 
 @pytest.mark.asyncio
@@ -428,8 +477,31 @@ def check_repair_chain(new, scenario):
 async def test_root_repair_attempts_and_exception_chain_match_frozen_legacy(tmp_path, scenario):
     with pytest.MonkeyPatch.context() as patch:
         new = await repair_chain(patch, scenario)
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == expectations.load(*T14_REPAIR, scenario)
+    assert expectations.scrub(new, (tmp_path, "<TMP>")) == weibo_fetch_deviation.repair_chain(
+        expectations.load(*T14_REPAIR, scenario))
     check_repair_chain(new, scenario)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,error,code,attempts",
+    [
+        (403, "PlatformRuntimeError", "login_required", None),
+        (401, "PlatformRuntimeError", "login_required", None),
+        (429, "PlatformRuntimeError", "rate_limited", None),
+        (432, "PlatformRuntimeError", "blocked_or_forbidden", None),
+        (404, "DataFetchError", None, "attempts=['page_state:http_404']"),
+    ],
+)
+async def test_root_repair_page_status_is_classified(status, error, code, attempts):
+    """#114：回退只读页面导航响应的状态；401/403/429/风控即阻断，其他非 2xx 视为详情不可用。"""
+    with pytest.MonkeyPatch.context() as patch:
+        trace, errors = await repair_chain(patch, "page_status", page_status=status)
+    assert errors[0][0] == error and errors[0][2] == code
+    if attempts:
+        assert attempts in errors[0][1]
+    assert not any(row[0] in {"evaluate", "wait", "api"} for row in trace)
+    assert [row[1] for row in trace if row[0] == "goto"] == ["https://m.weibo.cn/detail/123"]
 
 
 @pytest.mark.parametrize("post_repair", ["0", "1"])

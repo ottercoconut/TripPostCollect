@@ -21,34 +21,6 @@
     "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
    ]
   },
-  "T05/frozen_implementation/detail_403-repair0.json": {
-   "sha256": "1afcac32224d0409c7ba4713c21b6d8cdde972d81713532a0a5b5757b991501a",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
-    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
-  "T05/frozen_implementation/detail_403-repair1.json": {
-   "sha256": "f486af8df9a3b575f38a5997cb7729c84dddc0a41658c519deb03f0e79463e43",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
-    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
-  "T05/frozen_implementation/detail_429-repair0.json": {
-   "sha256": "dbd31ba6d65bdede0f506432dc3958fae6a79e58f07676600bfda35cb1b5df81",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
-    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
-  "T05/frozen_implementation/detail_429-repair1.json": {
-   "sha256": "f486af8df9a3b575f38a5997cb7729c84dddc0a41658c519deb03f0e79463e43",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
-    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
   "T05/frozen_implementation/detail_error-repair0.json": {
    "sha256": "8c9f47d72fe53b12359ef29926fe96b9cbfa2a0ca43f6ba71042811896cbdf8c",
    "source_tests": [
@@ -147,29 +119,8 @@
     "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
    ]
   },
-  "T05/frozen_implementation/login_expired-repair0.json": {
-   "sha256": "39ddc0b8bcab89391984b5b05a2da611dd61127eef318e38442c3edf4b25fcb4",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
-    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
-  "T05/frozen_implementation/login_expired-repair1.json": {
-   "sha256": "39ddc0b8bcab89391984b5b05a2da611dd61127eef318e38442c3edf4b25fcb4",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
-    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
   "T05/frozen_implementation/repair_api-repair0.json": {
    "sha256": "5be5a7e6c933d2ba98bcf6ef55b7ca776abf17154f6ae08ec851a462de01762b",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
-    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
-  "T05/frozen_implementation/repair_api-repair1.json": {
-   "sha256": "b437e023022920da93ead260e74878b6d039ac533816eada5ede6d05363750d0",
    "source_tests": [
     "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
     "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
@@ -224,13 +175,6 @@
     "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
    ]
   },
-  "T05/frozen_implementation/repair_rate_limit-repair1.json": {
-   "sha256": "baac2493d9ffdce6a388da6f7f00e47f7cc107136ed1be209e3bdf56ee877a16",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
-    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
   "T05/frozen_implementation/search-repair0.json": {
    "sha256": "fea05df3ab660af3b0fa1fe515c9c53e66a1716db63782be6777521fc387e623",
    "source_tests": [
@@ -243,40 +187,6 @@
    "source_tests": [
     "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
     "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
-  "T05/frozen_implementation/search_error-repair0.json": {
-   "sha256": "245798fc7053934d3e633faf1b8e8b920388f385d0efbd8e2c0702c6519d4fc7",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
-    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
-  "T05/frozen_implementation/search_error-repair1.json": {
-   "sha256": "245798fc7053934d3e633faf1b8e8b920388f385d0efbd8e2c0702c6519d4fc7",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
-    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
-  "T05/frozen_implementation/search_retry-repair0.json": {
-   "sha256": "1fd323a9718c6a1d8bc020124faf8dfbe2931ae623ff3ed2f1ad8cd55040d237",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
-    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
-  "T05/frozen_implementation/search_retry-repair1.json": {
-   "sha256": "1fd323a9718c6a1d8bc020124faf8dfbe2931ae623ff3ed2f1ad8cd55040d237",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_frozen_implementation_matches_requests_artifacts_and_events",
-    "tests/test_adapter_t05_bridge.py::test_fork_factory_matches_new_entry_requests_and_artifacts"
-   ]
-  },
-  "T05/repair_exception_chain/api_error.json": {
-   "sha256": "62693b178e15dfa5f467c93e106450b34d70c15a54b12e27b38c8f1eea8567e5",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_repair_attempts_and_exception_chain_match_frozen_hook"
    ]
   },
   "T05/repair_exception_chain/empty.json": {
@@ -293,12 +203,6 @@
   },
   "T05/repair_exception_chain/no_page.json": {
    "sha256": "40d11f0404722a83404bb31dc60a0153b7aa5ab1b2c8227bc7cfec0531c5cdfc",
-   "source_tests": [
-    "tests/test_adapter_t05.py::test_repair_attempts_and_exception_chain_match_frozen_hook"
-   ]
-  },
-  "T05/repair_exception_chain/rate_limit.json": {
-   "sha256": "7fe39e792a0cf6bb9e607c610c4c57d88f665b14baed82dc3a3ff68815c31156",
    "source_tests": [
     "tests/test_adapter_t05.py::test_repair_attempts_and_exception_chain_match_frozen_hook"
    ]
