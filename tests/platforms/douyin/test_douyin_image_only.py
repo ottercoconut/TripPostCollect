@@ -27,6 +27,8 @@ def image_aweme(aweme_id: str = "dy-note") -> dict:
         "desc": "test image note",
         "create_time": 1_700_000_000,
         "author": {"uid": "author", "nickname": "name", "follower_count": 5},
+        # #116：粉丝量只认作者资料 user 节点；搜索作者对象的 follower_count 不再采信。
+        "creator_profile": {"status_code": 0, "user": {"follower_count": 5}},
         "statistics": {
             "digg_count": 1,
             "collect_count": 2,
@@ -258,11 +260,13 @@ async def test_empty_creator_profile_retries_then_becomes_candidate_failure(
     crawler.dy_client.get_user_info.return_value = {}
     monkeypatch.setattr(douyin_core.asyncio, "sleep", AsyncMock())
     aweme = image_aweme("empty-creator")
+    aweme.pop("creator_profile")
     aweme["author"]["sec_uid"] = "sec-empty-creator"
 
     enriched = await crawler.enrich_aweme_creator(aweme)
 
     second_aweme = image_aweme("empty-creator-second")
+    second_aweme.pop("creator_profile")
     second_aweme["author"]["sec_uid"] = "sec-empty-creator"
     second_enriched = await crawler.enrich_aweme_creator(second_aweme)
 

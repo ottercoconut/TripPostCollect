@@ -8,7 +8,7 @@
 | B站 article | `article_view_api` 详情正文 | 详情观察后的 `image_urls` | 当前会话 staging → manifest → `data/media`；搜索预览/封面/头像排除 | 结构化 | ID/昵称 | 作者关系统计 | 赞/评/浏览 | 正常正式入口使用详情实现；历史完整性事件已完成修复与清理 |
 | 微博 | `search_mblog_complete` / `mobile_detail` | `mblog.pics` → `image_list` | 当前会话 staging → manifest → `data/media`；头像/封面排除 | 结构化 | ID/昵称 | `mblog.user` | 赞/评/转 | 长文详情重试耗尽后记录并跳过，禁止保存截断正文 |
 | 小红书 | `note_detail` 非空 `desc` | 笔记详情 `image_list` | 每个图片对象选择一个正文 URL，staging → manifest → `data/media`；头像/视频排除 | 结构化 | ID/昵称/主页 | 浮层点击打开的作者页页面状态 | 赞/藏/评/分享；feed 空串只在登记所用搜索条目同一项明确为 0 时记为 0 | 详情或作者补全重试耗尽后记录并跳过 |
-| 抖音 | `aweme_detail` 非空 `desc` | `note_download_url` | 保留 `images[].uri` 稳定键，staging → manifest → `data/media`；封面/视频/音乐/头像排除 | 结构化 | ID/昵称/主页 | 作者主页 | 赞/藏/评/分享 | 标题和预览文本不能代替正文 |
+| 抖音 | 搜索卡片 `search_aweme_info` / 详情 `aweme_detail` 非空 `desc` | `note_download_url` | 保留 `images[].uri` 稳定键，staging → manifest → `data/media`；封面/视频/音乐/头像排除，且不写入内容记录 | 结构化 | ID/昵称/主页 | 作者资料 `user` 节点（`creator_profile`） | 赞/藏/评/分享 | 标题和预览文本不能代替正文；搜索作者对象的粉丝数不算已观测 |
 | 知乎 | `search_content` / `answer_detail` / `article_detail` | 正文/详情 `image_list` | 当前会话 staging → manifest → `data/media`；公式/头像/作者主页/zvideo 排除 | 结构化 | ID/昵称/主页 | search author/member | 赞/评 | 详情重试耗尽后记录并跳过，标题/摘要不能通过 |
 
 作者列中的 ID 与昵称均为平台原始值：作者平台 ID 按字符串保存、不哈希，昵称不脱敏；

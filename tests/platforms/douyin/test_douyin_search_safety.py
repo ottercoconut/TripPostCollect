@@ -113,6 +113,7 @@ class FakeBrowserResponse:
 
 
 class FakeDirectResponse:
+    status_code = 200
     content = b"not-json-or-a-chunked-stream"
     text = "not-json-or-a-chunked-stream"
 

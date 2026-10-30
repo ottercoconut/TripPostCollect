@@ -25,6 +25,7 @@ import pytest
 from support import legacy_expectations as expectations
 from support.stable_png import solid_png
 from support import platform_session_deviation as deviation
+from support import douyin_116_deviation
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.core import paths
@@ -277,7 +278,8 @@ async def drive(root, patch, scenario, fallback):
                     return httpx.Response(200, content=b"blocked", request=request)
                 if scenario == "creator_retry" and counters[path] < 3:
                     return httpx.Response(200, content=b"not-json", request=request)
-                payload = {} if scenario == "creator_empty" else {"user": {"follower_count": 42}}
+                # #116：作者资料必须是 status_code=0 且带 user 节点的成功信封（真实平台响应形状）。
+                payload = {} if scenario == "creator_empty" else {"status_code": 0, "user": {"follower_count": 42}}
                 return httpx.Response(200, json=payload, request=request)
             if request.url.host == "image.test":
                 code = 503 if scenario == "image_failed" else 429 if scenario == "image_blocked" else 200
@@ -361,8 +363,8 @@ async def test_root_matches_frozen_legacy_requests_records_images_events(tmp_pat
     """T14：根实现与固化的旧实现结果比较（同一 drive、同一 == 语义），不加载 fork 或 E。"""
     with monkeypatch.context() as patch:
         after = await drive(tmp_path / "new", patch, scenario, fallback)
-    assert expectations.scrub(after, (tmp_path, "<TMP>")) == deviation.douyin_profile(
-        expectations.load(*T14_DRIVE, f"{scenario}-fallback{fallback}"), current_douyin_profile(tmp_path))
+    assert expectations.scrub(after, (tmp_path, "<TMP>")) == douyin_116_deviation.douyin_drive(deviation.douyin_profile(
+        expectations.load(*T14_DRIVE, f"{scenario}-fallback{fallback}"), current_douyin_profile(tmp_path)), scenario)
     check_drive_result(after, scenario, fallback)
 
 
@@ -401,8 +403,8 @@ async def test_root_entry_assembly_matches_frozen_fork_factory(tmp_path, monkeyp
     """T14：替代旧桥工厂对照；根入口装配结果与固化的 fork 工厂结果比较。"""
     with monkeypatch.context() as patch:
         new = await drive_entry_assembly(tmp_path / "new", patch, scenario, fallback)
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == deviation.douyin_profile(
-        expectations.load(*T14_BRIDGE, f"{scenario}-fallback{fallback}"), current_douyin_profile(tmp_path))
+    assert expectations.scrub(new, (tmp_path, "<TMP>")) == douyin_116_deviation.douyin_drive(deviation.douyin_profile(
+        expectations.load(*T14_BRIDGE, f"{scenario}-fallback{fallback}"), current_douyin_profile(tmp_path)), scenario)
     check_drive_result(new, scenario, fallback)
 
 
@@ -485,12 +487,14 @@ def test_unchanged_parser_signer_and_login_support_bodies():
         "cache/abs_cache.py": (login_support, ["AbstractCache"]),
         "tools/slider_util.py": (login_support, ["Slide", "get_track_simple"]),
         "tools/image_manifest.py": (parser, ["douyin_source_asset_key"]),
+        # #116：_normalized_author_stats 改为只读作者资料 user 节点；封面/视频/音乐提取函数随字段删除。
         "store/douyin/__init__.py": (parser, [
             "_first_nonempty", "_nested_value", "_creator_user_profile", "_author_metric",
-            "_normalized_author_stats", "_extract_note_image_list", "_extract_note_image_assets",
-            "_extract_content_cover_url", "_extract_video_download_url", "_extract_music_download_url",
+            "_extract_note_image_list", "_extract_note_image_assets",
         ]),
     }
+    removed = {"_extract_content_cover_url", "_extract_video_download_url", "_extract_music_download_url"}
+    assert not removed & {node.name for node in ast.parse(Path(parser.__file__).read_text()).body if hasattr(node, "name")}
     for name, (module, names) in pairs.items():
         old = {node.name: node for node in ast.parse((FIXTURES / (name + ".txt")).read_text()).body if hasattr(node, "name")}
         new = {node.name: node for node in ast.parse(Path(module.__file__).read_text()).body if hasattr(node, "name")}
@@ -513,7 +517,8 @@ async def test_root_first_page_rebuild_matches_frozen_legacy(visible_count, offs
     params = (visible_count, offset, search_id, verify)
     ports = entry.douyin_dependencies(worker_config())["ports"].client
     after = await first_page_rebuild(client.DouYinClient, params, ports=ports)
-    assert expectations.scrub(after) == expectations.load(*T14_FIRST_PAGE, first_page_case(params))
+    assert expectations.scrub(after) == douyin_116_deviation.douyin_first_page_rebuild(
+        expectations.load(*T14_FIRST_PAGE, first_page_case(params)))
     check_first_page_rebuild(after, params)
 
 

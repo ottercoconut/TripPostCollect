@@ -45,6 +45,7 @@ async def test_douyin_http_404_preserves_terminal_status(monkeypatch) -> None:
     client.ports = SimpleNamespace(make_async_client=async_client_factory(404))
     client.proxy = None
     client.timeout = 1
+    client.headers = {"User-Agent": "test-agent"}
 
     with pytest.raises(ImageDownloadFetchError) as exc_info:
         await client.get_aweme_media("https://example.test/missing.jpg")
