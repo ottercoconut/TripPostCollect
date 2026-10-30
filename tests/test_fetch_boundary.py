@@ -15,6 +15,12 @@
 不在本检查范围内，归 #72。小红书正式轮自 #83 起不注入任何页面脚本，由
 `tests/platforms/xhs/test_xhs_login_contract.py::test_startup_injects_no_page_scripts` 覆盖。
 `runtime/page_readiness.py` 只供页面证据使用，不在扫描清单内。
+
+另有一条不分是否纳入门禁、扫描全部平台目录的规则 L3（#114）：Playwright `page.request` /
+`context.request` 对所有平台禁止。命中条件是从名为 page/context（含 `self.page`、`context_page`、
+`browser_context`、`playwright_page` 等）的对象取 `request` 属性，或经 `getattr(x, "request")` 取得；
+httpx 的 `client.request(...)` 是方法调用、`exc.request.url` / `route.request` 的接收者不是页面或上下文，
+不在命中范围内。
 """
 
 from __future__ import annotations
@@ -312,6 +318,77 @@ def test_runtime_script_module_lists_resolve_to_real_scripts():
         for relative in modules:
             found += len(runtime_scripts((PACKAGE / relative).read_text(encoding="utf-8")))
         assert found, "清单中的 runtime 模块应能解析出传给页面的脚本"
+
+
+# L3 规则（#114）：不论是否纳入门禁，所有平台都不得取 Playwright 的 request 属性。
+PLAYWRIGHT_OWNER = re.compile(r"(?:^|_)(?:page|context)$")
+
+
+def _owner_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return ""
+
+
+def check_playwright_request(source: str, relative: str) -> list[Violation]:
+    found: list[Violation] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr == "request":
+            owner = _owner_name(node.value)
+            if PLAYWRIGHT_OWNER.search(owner):
+                found.append(Violation(relative, node.lineno, "L3", f"{owner}.request"))
+        elif (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+            and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) and node.args[1].value == "request"
+        ):
+            found.append(Violation(relative, node.lineno, "L3", "getattr:request"))
+    return found
+
+
+def test_all_platforms_have_no_playwright_request_context():
+    platforms = PACKAGE / "platforms"
+    found = [
+        violation
+        for path in sorted(platforms.rglob("*.py"))
+        for violation in check_playwright_request(
+            path.read_text(encoding="utf-8"), path.relative_to(PACKAGE).as_posix())
+    ]
+    assert not found, found
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("await page.request.get(url)", "page.request"),
+        ("await self.context.request.post(url)", "context.request"),
+        ("api = browser_context.request", "browser_context.request"),
+        ("api = self.playwright_page.request", "playwright_page.request"),
+        ("api = self.context_page.request", "context_page.request"),
+        ("api = getattr(page, 'request', None)", "getattr:request"),
+        ("api = getattr(self.playwright_page, \"request\")", "getattr:request"),
+    ],
+)
+def test_l3_rule_finds_playwright_request_access(line, expected):
+    source = f"async def run(self, page, browser_context):\n    {line}\n"
+    assert ("L3", expected) in details(check_playwright_request(source, "platforms/x/client.py"))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "response = await client.request('GET', url)",
+        "data = await self.request(method='GET', url=url)",
+        "logger.error(f'{exc.request.url}')",
+        "request = route.request",
+        "request = response.request",
+        "value = page.request_count",
+    ],
+)
+def test_l3_rule_allows_http_clients_and_event_requests(line):
+    source = f"async def run(self, client, exc, route, response, page):\n    {line}\n"
+    assert check_playwright_request(source, "platforms/x/client.py") == []
 
 
 # 自测：合成片段的正反例，保证每条规则本身生效。

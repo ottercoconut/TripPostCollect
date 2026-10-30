@@ -62,7 +62,7 @@ pytest -p pytest_asyncio.plugin \
 ## T14-C
 
 删除 fork/E 时同批删除守卫用例与只测旧桥的用例（标记 `t14_legacy_guard` / `t14_legacy_only`），
-本目录与根侧比较用例保留。之后若根实现有意改变行为，在根侧比较中登记偏离并变换预期，不修改固化文件，也不得用根实现重新生成。已登记：#59（`tests/support/platform_session_deviation.py`：T06 抖音持久 profile 位置、shared_staging 缺省暂存根）。
+本目录与根侧比较用例保留。之后若根实现有意改变行为，在根侧比较中登记偏离并变换预期，不修改固化文件，也不得用根实现重新生成。已登记：#59（`tests/support/platform_session_deviation.py`：T06 抖音持久 profile 位置、shared_staging 缺省暂存根）；#114（`tests/support/weibo_fetch_deviation.py`：T05 微博图片直连新浪且不带 Cookie、修复回退删除 Playwright 请求接口）。
 
 已处理：
 
@@ -72,3 +72,9 @@ pytest -p pytest_asyncio.plugin \
   T09 冻结对照失去对照对象：`tests/test_adapter_t09.py`、本目录 `T09/`（36 个文件，连同 `manifest.json` 中的条目）
   与 `tests/fixtures/adapter_t09/` 整体退役删除，不做偏离登记；非旧实现对照的断言已迁到
   `tests/platforms/xhs/` 下对应用例。历史内容见 Git。
+- #114（微博请求失败分类、登录复查、删除 L3 回退）后，T05 中语义有意改变的 14 个固化文件连同
+  `manifest.json` 条目删除：`frozen_implementation/` 下 `search_retry`、`search_error`、`login_expired`、
+  `detail_403`、`detail_429` 的 repair0/repair1，以及 `repair_api-repair1`、`repair_rate_limit-repair1`；
+  `repair_exception_chain/` 下 `api_error`、`rate_limit`。这些用例改由 `tests/test_adapter_t05.py` 中
+  `test_root_drive_semantics_changed_by_issue_114` 与 `test_root_repair_page_status_is_classified` 的字面断言
+  覆盖；其余 T05 文件保留原字节，经上文 #114 偏离变换后比较。

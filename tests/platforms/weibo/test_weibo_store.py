@@ -40,6 +40,61 @@ def test_persisted_content_text_is_the_topic_classification_source():
     )
 
 
+def test_persisted_content_keeps_line_breaks_and_unescapes_entities():
+    # 离线样本：移动搜索 mblog.text 的真实形态（<br /> 分段、实体转义、话题链接）。
+    text = (
+        '第一段&amp;青岛<br />第二段 &quot;栈桥&quot;<br/>'
+        '<a href="https://m.weibo.cn/search?containerid=231522">#青岛旅游#</a>&lt;完&gt;<BR>尾'
+    )
+    assert weibo_store.persisted_weibo_content_text({"text": text}) == (
+        '第一段&青岛\n第二段 "栈桥"\n#青岛旅游#<完>\n尾'
+    )
+
+
+def test_created_at_timestamp_and_shanghai_datetime_agree():
+    # 上游 04631ba 的时区修复：时间戳按 UTC 换算，展示时间为东八区，两者表示同一时刻。
+    created = weibo_store.weibo_created_at({"created_at": "Sat Jun 14 12:00:00 +0800 2025"})
+    assert created == (1749873600, "2025-06-14 12:00:00+08:00")
+    from datetime import datetime
+
+    assert datetime.fromisoformat(created[1]).timestamp() == created[0]
+    utc = weibo_store.weibo_created_at({"created_at": "Sat Jun 14 04:00:00 +0000 2025"})
+    assert utc == created
+
+
+@pytest.mark.parametrize("value", [None, "", "not a date", 1749873600, "2025-06-14 12:00:00"])
+def test_unparseable_created_at_is_not_projected(value):
+    mblog = {"id": "n1", "text": "正文", "created_at": value, "user": {"id": "u", "screen_name": "名"}}
+    assert weibo_store.weibo_created_at(mblog) is None
+    assert weibo_store.update_weibo_note(
+        {"mblog": mblog}, source_keyword="青岛", current_timestamp=lambda: 0,
+    ) is None
+
+
+def test_projected_record_carries_platform_created_at():
+    mblog = {"id": "n1", "text": "正文", "created_at": "Sat Jun 14 12:00:00 +0800 2025",
+             "user": {"id": "u", "screen_name": "名"}}
+    item = weibo_store.update_weibo_note({"mblog": mblog}, source_keyword="青岛", current_timestamp=lambda: 0)
+    assert (item["create_time"], item["create_date_time"]) == (1749873600, "2025-06-14 12:00:00+08:00")
+
+
+@pytest.mark.parametrize(
+    "cards,exhausted,notes",
+    [
+        ([], True, 0),
+        (None, True, 0),
+        ([{"card_type": 11, "card_group": None}], False, 0),
+        ([{"card_type": 11, "card_group": [{"card_type": 4, "desc": "相关用户"}]}], False, 0),
+        ([{"card_type": 11, "card_group": [{"card_type": 4, "desc": "暂无内容"}]}], True, 0),
+        ([{"card_type": 11, "card_group": [{"card_type": 9, "mblog": {"id": "1"}}]}], False, 1),
+        ([{"card_type": 9, "mblog": {"id": "1"}}, "bad", None], False, 1),
+    ],
+)
+def test_search_page_exhaustion_requires_empty_cards_or_explicit_marker(cards, exhausted, notes):
+    assert weibo_store.search_page_exhausted(cards) is exhausted
+    assert len(weibo_store.filter_search_result_card(cards)) == notes
+
+
 @pytest.mark.asyncio
 async def test_store_uses_true_format_post_directory_and_schema_v1_manifest(
     monkeypatch, tmp_path

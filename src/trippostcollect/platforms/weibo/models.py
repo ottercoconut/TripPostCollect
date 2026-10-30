@@ -65,6 +65,10 @@ class PlatformRuntimeError(DataFetchError):
         self.code = code
 
 
+class WeiboServerError(DataFetchError):
+    """A 5xx response; retried like a transport error."""
+
+
 # -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com
 #

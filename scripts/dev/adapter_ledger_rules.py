@@ -2043,6 +2043,9 @@ PROGRESS_RESOLUTIONS = {
         "退出", None, "#107：全仓库无调用方；登录只在已有标签页中选页，不新开登录页"),
     ("tools/MediaCrawler/media_platform/xhs/core.py", "XiaoHongShuCrawler._new_guarded_page"): (
         "退出", None, "#107：唯一用途是注入给无调用方的_new_login_page；作者页由可信点击打开，经_register_new_page受守卫"),
+    # #114：微博修复回退删除 Playwright 请求接口（L3），只读精确 detail 页的页面状态。
+    ("scripts/mediacrawler_export_entrypoint.py", "_weibo_detail_api_url"): (
+        "退出", None, "#114：唯一调用方page.request.get(statuses/show)是L3，对所有平台禁止，随回退分支删除"),
 }
 
 # 冻结台账的 SHA-256：T14 删除 fork 后台账冻结，`--check` 只做冻结自检，不再重新枚举基线源码。

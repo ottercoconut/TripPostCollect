@@ -34,39 +34,65 @@ from urllib.parse import urlencode, urlparse
 import httpx
 from httpx import Response
 from playwright.async_api import BrowserContext, Page, Error as PlaywrightError
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_fixed
 
 from trippostcollect.application.contracts import WeiboClientPorts
-from .models import DataFetchError, PlatformRuntimeError, SearchType
+from .models import DataFetchError, PlatformRuntimeError, SearchType, WeiboServerError
 from .parser import _find_weibo_detail
 
 logger = logging.getLogger("MediaCrawler")
 
+# 图片请求只带 UA、移动站 Referer 与图片 Accept：不带 Cookie，也不经第三方图片代理（#114）。
+WEIBO_IMAGE_REFERER = "https://m.weibo.cn/"
+WEIBO_IMAGE_ACCEPT = "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8"
+# 平台明确拒绝的状态直接归为运行级阻断，不重试（#114）。
+WEIBO_BLOCKING_STATUS_CODES = {
+    401: "login_required",
+    403: "login_required",
+    418: "blocked_or_forbidden",
+    432: "blocked_or_forbidden",
+    429: "rate_limited",
+}
+
+
+def raise_for_weibo_status(status_code: int, label: str) -> None:
+    code = WEIBO_BLOCKING_STATUS_CODES.get(int(status_code))
+    if code:
+        raise PlatformRuntimeError(f"{label} HTTP {status_code}", code=code)
+
+
+def _retryable_request_error(exc: BaseException) -> bool:
+    """接口请求只对传输层异常与 5xx 重试；平台拒绝和业务错误立即上抛。"""
+    return isinstance(exc, (httpx.TransportError, WeiboServerError))
+
+
+def _retryable_detail_error(exc: BaseException) -> bool:
+    return not isinstance(exc, PlatformRuntimeError)
+
+
+def _response_summary(response: Response) -> str:
+    # 响应原文可能含作者头像等字段，日志和异常只带状态码与长度（#114）。
+    return f"status={response.status_code} length={len(response.content or b'')}"
+
+
+def _payload_summary(data: Dict) -> str:
+    return f"ok={data.get('ok')!r} msg={str(data.get('msg') or '')[:80]!r}"
+
+
 def weibo_image_request_urls(image_url: str) -> List[str]:
-    """Return idempotent proxy/direct candidates for one authoritative image URL."""
+    """Return direct candidates for one authoritative image URL: sinaimg large first, then the original."""
 
     parsed = urlparse(str(image_url or "").strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return []
-    hostname = parsed.hostname.lower()
     candidates: List[str] = []
-
-    if hostname == "i1.wp.com":
-        candidates.append(parsed.geturl())
-        embedded = parsed.path.lstrip("/")
-        embedded_host, separator, embedded_path = embedded.partition("/")
-        if separator and embedded_host.lower().endswith(".sinaimg.cn"):
-            candidates.append(f"https://{embedded_host}/{embedded_path}")
-    elif hostname.endswith(".sinaimg.cn"):
+    if parsed.hostname.lower().endswith(".sinaimg.cn"):
         path_parts = [part for part in parsed.path.split("/") if part]
         if len(path_parts) >= 2:
             path_parts[0] = "large"
         normalized_path = "/" + "/".join(path_parts)
-        direct = parsed._replace(path=normalized_path, query="", fragment="").geturl()
-        candidates.extend((f"https://i1.wp.com/{hostname}{normalized_path}", direct))
-    else:
-        candidates.append(parsed.geturl())
-
+        candidates.append(parsed._replace(path=normalized_path, query="", fragment="").geturl())
+    candidates.append(parsed.geturl())
     return list(dict.fromkeys(candidates))
 
 
@@ -93,7 +119,10 @@ class WeiboClient:
         self.ports = ports
         self.post_repair = post_repair
 
-    @retry(stop=stop_after_attempt(5), wait=wait_fixed(3))
+    @retry(
+        stop=stop_after_attempt(5), wait=wait_fixed(3),
+        retry=retry_if_exception(_retryable_request_error), reraise=True,
+    )
     async def request(self, method, url, **kwargs) -> Union[Response, Dict]:
         enable_return_response = kwargs.pop("return_response", False)
         allow_empty_search = kwargs.pop("allow_empty_search", False)
@@ -103,14 +132,17 @@ class WeiboClient:
         if enable_return_response:
             return response
 
+        label = f"[WeiboClient.request] {method} {urlparse(url).path}"
+        # issue: #771 搜索接口的 432/418 是风控拦截：直接作为运行级阻断，不再逐次重试并刷新 Cookie。
+        raise_for_weibo_status(response.status_code, label)
+        if response.status_code >= 500:
+            logger.error(f"{label} server error, {_response_summary(response)}")
+            raise WeiboServerError(f"{label} HTTP {response.status_code}")
+
         try:
             data: Dict = response.json()
         except json.decoder.JSONDecodeError:
-            # issue: #771 Search API returns error 432, retry multiple times + update h5 cookies
-            logger.error(f"[WeiboClient.request] request {method}:{url} err code: {response.status_code} res:{response.text}")
-            await self.playwright_page.goto(self._host)
-            await asyncio.sleep(2)
-            await self.update_cookies(browser_context=self.playwright_page.context)
+            logger.error(f"{label} non-JSON response, {_response_summary(response)}")
             raise DataFetchError(f"get response code error: {response.status_code}")
 
         ok_code = data.get("ok")
@@ -122,10 +154,13 @@ class WeiboClient:
                 and not (response_data.get("cards") or [])
             ):
                 return response_data
-            logger.error(f"[WeiboClient.request] request {method}:{url} err, res:{data}")
+            logger.error(f"{label} err, {_payload_summary(data)}, {_response_summary(response)}")
             raise DataFetchError(data.get("msg", "response error"))
+        elif ok_code == -100:  # 移动站未登录时返回登录跳转
+            logger.error(f"{label} login required, {_payload_summary(data)}")
+            raise PlatformRuntimeError(f"{label} ok=-100", code="login_required")
         elif ok_code != 1:  # unknown error
-            logger.error(f"[WeiboClient.request] request {method}:{url} err, res:{data}")
+            logger.error(f"{label} err, {_payload_summary(data)}, {_response_summary(response)}")
             raise DataFetchError(data.get("msg", "unknown error"))
         else:  # response right
             return data.get("data", {})
@@ -155,6 +190,11 @@ class WeiboClient:
                 ping_flag = True
             else:
                 logger.error("[WeiboClient.pong] cookie may be invalid and again login...")
+        except PlatformRuntimeError as e:
+            # 频控、风控不是登录失效，原样上抛；只有登录类拒绝回到登录流程。
+            if e.code != "login_required":
+                raise
+            logger.error(f"[WeiboClient.pong] Pong weibo failed: {e}, and try to login again...")
         except Exception as e:
             logger.error(f"[WeiboClient.pong] Pong weibo failed: {e}, and try to login again...")
             ping_flag = False
@@ -203,7 +243,10 @@ class WeiboClient:
 
 
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), reraise=True)
+    @retry(
+        stop=stop_after_attempt(3), wait=wait_fixed(1),
+        retry=retry_if_exception(_retryable_detail_error), reraise=True,
+    )
     async def _get_note_info_direct(self, note_id: str) -> Dict:
         """
         Get note details by note ID
@@ -214,17 +257,8 @@ class WeiboClient:
         async with self.ports.make_async_client(proxy=self.proxy) as client:
             response = await client.request("GET", url, timeout=self.timeout, headers=self.headers)
             if response.status_code != 200:
-                if response.status_code in {401, 403}:
-                    raise PlatformRuntimeError(
-                        f"get weibo detail HTTP {response.status_code}",
-                        code="login_required",
-                    )
-                if response.status_code == 429:
-                    raise PlatformRuntimeError(
-                        "get weibo detail HTTP 429",
-                        code="rate_limited",
-                    )
-                raise DataFetchError(f"get weibo detail err: {response.text}")
+                raise_for_weibo_status(response.status_code, "get weibo detail")
+                raise DataFetchError(f"get weibo detail err: {_response_summary(response)}")
             match = re.search(r'var \$render_data = (\[.*?\])\[0\]', response.text, re.DOTALL)
             if match:
                 render_data_json = match.group(1)
@@ -246,9 +280,10 @@ class WeiboClient:
                 retryable=False,
             )
         last_error: Exception | None = None
-        headers = dict(getattr(self, "headers", {}) or {})
-        headers["Referer"] = headers.get("Referer") or "https://m.weibo.cn/"
-        headers["Accept"] = "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8"
+        headers = {"Referer": WEIBO_IMAGE_REFERER, "Accept": WEIBO_IMAGE_ACCEPT}
+        user_agent = (getattr(self, "headers", None) or {}).get("User-Agent")
+        if user_agent:
+            headers = {"User-Agent": user_agent, **headers}
         for final_uri in candidates:
             try:
                 async with self.ports.make_async_client(proxy=self.proxy) as client:
@@ -306,6 +341,8 @@ class WeiboClient:
             original_detail = _find_weibo_detail(result, note_id)
             if original_detail is not None and str(original_detail.get("text") or "").strip():
                 return {"mblog": original_detail}
+        except PlatformRuntimeError:
+            raise
         except DataFetchError as exc:
             original_error = exc
 
@@ -321,55 +358,24 @@ class WeiboClient:
         if lock is None:
             lock = asyncio.Lock()
             self._trippostcollect_browser_detail_lock = lock
+        # 回退只读同一登录浏览器打开的精确 detail 页的页面状态；不经 Playwright 请求接口（L3，#114）。
         attempts: list[str] = []
+        page_state = None
         try:
             async with lock:
-                request_context = getattr(page, "request", None)
-                if request_context is not None:
-                    try:
-                        api_response = await request_context.get(
-                            _weibo_detail_api_url(note_id),
-                            headers={"Referer": f"https://m.weibo.cn/detail/{note_id}"},
-                            timeout=timeout_ms,
-                        )
-                        api_status = int(api_response.status)
-                        if api_status in {401, 403}:
-                            raise PlatformRuntimeError(
-                                f"get weibo browser detail HTTP {api_status}",
-                                code="login_required",
-                            )
-                        if api_status == 429:
-                            raise PlatformRuntimeError(
-                                "get weibo browser detail HTTP 429",
-                                code="rate_limited",
-                            )
-                        api_payload = await api_response.json() if api_status == 200 else None
-                        api_detail = _find_weibo_detail(api_payload, note_id)
-                        if api_detail is not None and str(
-                            api_detail.get("text") or ""
-                        ).strip():
-                            detail = dict(api_detail)
-                            detail["id"] = str(
-                                detail.get("id") or detail.get("idstr") or note_id
-                            )
-                            logger.warning(
-                                "[TripPostCollect] Used browser-context Weibo detail API "
-                                f"for note_id:{note_id}"
-                            )
-                            return {"mblog": detail}
-                        attempts.append(f"browser_api:http_{api_status}:empty_detail")
-                    except PlatformRuntimeError:
-                        raise
-                    except Exception as exc:
-                        attempts.append(f"browser_api:{type(exc).__name__}")
-
-                await page.goto(
+                response = await page.goto(
                     f"https://m.weibo.cn/detail/{note_id}",
                     wait_until="domcontentloaded",
                     timeout=timeout_ms,
                 )
-                await page.wait_for_timeout(min(2_000, timeout_ms))
-                page_state = await page.evaluate(
+                status = None if response is None else int(response.status)
+                if status is not None:
+                    raise_for_weibo_status(status, "get weibo browser detail")
+                if status is not None and not 200 <= status < 300:
+                    attempts.append(f"page_state:http_{status}")
+                else:
+                    await page.wait_for_timeout(min(2_000, timeout_ms))
+                    page_state = await page.evaluate(
                     """(targetId) => {
                         const roots = [
                             window.$render_data,
@@ -408,9 +414,9 @@ class WeiboClient:
                         }
                         return null;
                     }""",
-                    note_id,
-                )
-                attempts.append("page_state:empty_detail")
+                        note_id,
+                    )
+                    attempts.append("page_state:empty_detail")
         except PlaywrightError as exc:
             raise DataFetchError(
                 "get weibo detail err: browser detail navigation failed "
@@ -429,7 +435,3 @@ class WeiboClient:
             f"[TripPostCollect] Used browser-native Weibo detail fallback for note_id:{note_id}"
         )
         return {"mblog": detail}
-
-
-def _weibo_detail_api_url(note_id: str) -> str:
-    return f"https://m.weibo.cn/statuses/show?id={note_id}"

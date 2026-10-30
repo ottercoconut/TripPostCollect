@@ -1591,8 +1591,9 @@
        ]
       },
       {
-       "function": "tests/test_residual_detail_fallbacks.py::test_weibo_browser_api_is_bound_to_requested_id",
-       "lane": "component"
+       "function": "tests/test_adapter_t05.py::test_root_repair_page_status_is_classified",
+       "lane": "component",
+       "legacy_equivalence": true
       },
       {
        "function": "tests/test_residual_detail_fallbacks.py::test_weibo_repair_hook_recovers_exact_browser_detail",
@@ -1758,11 +1759,15 @@
        "legacy_equivalence": true
       },
       {
-       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_search_transport_error_exhausts_original_retry_budget",
+       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_search_transport_error_exhausts_retry_budget_and_reraises",
        "lane": "component"
       },
       {
-       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_search_transport_failure_propagates_without_exhaustion",
+       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_search_transport_failure_is_runtime_failed_not_exhaustion",
+       "lane": "component"
+      },
+      {
+       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_search_platform_rejection_blocks_run_without_retry",
        "lane": "component"
       },
       {

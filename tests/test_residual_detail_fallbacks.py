@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 # T14：原经旧桥 E 的重导出取用；四个函数本就是根实现（E 中为 `from ... import ... as ...`）。
 from trippostcollect.platforms.douyin.parser import _douyin_detail_urls, _find_douyin_detail
-from trippostcollect.platforms.weibo.client import _weibo_detail_api_url
 from trippostcollect.platforms.weibo.parser import _find_weibo_detail
 
 
@@ -39,10 +39,6 @@ def test_weibo_nested_detail_is_bound_to_requested_id() -> None:
     assert _find_weibo_detail({"id": "456"}, "456") is None
 
 
-def test_weibo_browser_api_is_bound_to_requested_id() -> None:
-    assert _weibo_detail_api_url("456") == "https://m.weibo.cn/statuses/show?id=456"
-
-
 def test_weibo_repair_hook_recovers_exact_browser_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -61,8 +57,9 @@ def test_weibo_repair_hook_recovers_exact_browser_detail(
         def __init__(self) -> None:
             self.goto_urls: list[str] = []
 
-        async def goto(self, url: str, **_: object) -> None:
+        async def goto(self, url: str, **_: object) -> SimpleNamespace:
             self.goto_urls.append(url)
+            return SimpleNamespace(status=200)
 
         async def wait_for_timeout(self, _: int) -> None:
             pass

@@ -24,6 +24,7 @@
 
 
 # TripPostCollect T05：迁自 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303；仅拆分职责与注入依赖。
+import html
 import re
 from hashlib import sha256
 from typing import Any, Dict, List
@@ -34,6 +35,8 @@ from trippostcollect.runtime.helpers import (
     _find_nested_platform_record, normalize_image_url,
     rfc2822_to_timestamp, rfc2822_to_china_datetime,
 )
+
+_WEIBO_BR = re.compile(r"<br\s*/?>", re.I)
 
 def _first_present(*values):
     for value in values:
@@ -102,7 +105,24 @@ def _weibo_pic_assets(mblog: Dict) -> List[Dict]:
 def persisted_weibo_content_text(mblog: Dict) -> str:
     """Project the authoritative body exactly as it is persisted for ``web_posts``."""
 
-    return re.sub(r"<.*?>", "", str(mblog.get("text") or ""))
+    # 段落换行先落成 "\n" 再去标签，最后还原 HTML 实体（&amp;、&quot; 等）。
+    text = _WEIBO_BR.sub("\n", str(mblog.get("text") or ""))
+    return html.unescape(re.sub(r"<.*?>", "", text))
+
+
+def weibo_created_at(mblog: Dict) -> tuple[int, str] | None:
+    """平台原始发帖时间（RFC 2822）换算的时间戳与上海时区时间；缺失或格式异常返回 None。"""
+
+    created_at = mblog.get("created_at")
+    if not isinstance(created_at, str) or not created_at.strip():
+        return None
+    try:
+        return (
+            rfc2822_to_timestamp(created_at),
+            str(rfc2822_to_china_datetime(created_at)),
+        )
+    except ValueError:
+        return None
 
 
 def update_weibo_note(
@@ -120,6 +140,10 @@ def update_weibo_note(
         return
 
     mblog: Dict = note_item.get("mblog") or {}
+    created = weibo_created_at(mblog)
+    if created is None:
+        # 发帖时间只能来自平台原值；缺失或无法解析时不写出该候选（#114）。
+        return
     user_info: Dict = mblog.get("user") or {}
     note_id = mblog.get("id")
     clean_text = persisted_weibo_content_text(mblog)
@@ -140,8 +164,8 @@ def update_weibo_note(
         # Weibo information
         "note_id": note_id,
         "content": clean_text,
-        "create_time": rfc2822_to_timestamp(mblog.get("created_at")),
-        "create_date_time": str(rfc2822_to_china_datetime(mblog.get("created_at"))),
+        "create_time": created[0],
+        "create_date_time": created[1],
         "liked_count": str(mblog.get("attitudes_count", 0)),
         "comments_count": str(mblog.get("comments_count", 0)),
         "shared_count": str(mblog.get("reposts_count", 0)),
@@ -206,16 +230,49 @@ def filter_search_result_card(card_list: List[Dict]) -> List[Dict]:
     :return: Filtered list of note items
     """
     note_list: List[Dict] = []
-    for card_item in card_list:
+    for card_item in card_list or []:
+        if not isinstance(card_item, dict):
+            continue
         if card_item.get("card_type") == 9:
             note_list.append(card_item)
-        if len(card_item.get("card_group", [])) > 0:
-            card_group = card_item.get("card_group")
+        card_group = card_item.get("card_group")
+        if isinstance(card_group, list):
             for card_group_item in card_group:
-                if card_group_item.get("card_type") == 9:
+                if isinstance(card_group_item, dict) and card_group_item.get("card_type") == 9:
                     note_list.append(card_group_item)
 
     return note_list
+
+
+# 平台在搜索结果末尾给出的明确无内容提示（卡片或卡片组内的文本）。
+WEIBO_EMPTY_RESULT_MARKERS = ("暂无内容", "这里还没有内容")
+
+
+def _card_texts(card: Any) -> List[str]:
+    if not isinstance(card, dict):
+        return []
+    texts = [str(card.get(key) or "") for key in ("desc", "desc1", "title_sub", "name")]
+    for nested in card.get("card_group") or []:
+        texts.extend(_card_texts(nested))
+    return texts
+
+
+def search_page_exhausted(card_list: List[Dict]) -> bool:
+    """只有原始 ``cards`` 为空，或页面没有微博卡片且带明确的无内容标记时才算来源耗尽。
+
+    有卡片但都不是 ``card_type=9``（推荐、话题、用户卡）是正常页，应继续翻页。
+    """
+    cards = card_list or []
+    if not cards:
+        return True
+    if filter_search_result_card(cards):
+        return False
+    return any(
+        marker in text
+        for card in cards
+        for text in _card_texts(card)
+        for marker in WEIBO_EMPTY_RESULT_MARKERS
+    )
 
 
 def _find_weibo_detail(value: Any, note_id: str) -> dict[str, Any] | None:

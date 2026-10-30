@@ -581,6 +581,12 @@ T83_DELETED_LEDGER_NODES = {
     "tests/test_cdp_browser.py::test_existing_browser_falls_back_to_discovered_websocket_url",
     "tests/test_cdp_browser.py::test_xhs_cdp_rejects_existing_browser_without_a_retry_path",
 }
+# #114（微博）删除或改写的台账节点：L3 浏览器接口回退与第三方图片代理候选随实现删除。
+T114_DELETED_LEDGER_NODES = {
+    "tests/test_residual_detail_fallbacks.py::test_weibo_browser_api_is_bound_to_requested_id",
+    "tests/test_weibo_image_download.py::test_weibo_image_urls_do_not_double_wrap_existing_proxy",
+    "tests/test_weibo_image_download.py::test_weibo_image_urls_keep_bounded_proxy_and_direct_fallbacks",
+}
 # #71 第一批（小红书取数改为浏览器 L1）删除或改写的台账节点：被替代的旧取数路径用例。
 T71_DELETED_LEDGER_NODES = {
     'tests/test_mediacrawler_behavior.py::test_xhs_api_captcha_does_not_complete_on_blank_redirect',
@@ -722,6 +728,7 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
         | T75_DELETED_LEDGER_NODES
         | T71_DELETED_LEDGER_NODES
         | T83_DELETED_LEDGER_NODES
+        | T114_DELETED_LEDGER_NODES
     )
     for source, target in MOVED_TO_TARGET.items():
         assert source not in collected and target in collected, (source, target)
@@ -732,4 +739,5 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
         - len(T75_DELETED_LEDGER_NODES)
         - len(T71_DELETED_LEDGER_NODES)
         - len(T83_DELETED_LEDGER_NODES)
+        - len(T114_DELETED_LEDGER_NODES)
     )
