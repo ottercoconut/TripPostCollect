@@ -2054,6 +2054,16 @@ PROGRESS_RESOLUTIONS = {
     # #114：微博修复回退删除 Playwright 请求接口（L3），只读精确 detail 页的页面状态。
     ("scripts/mediacrawler_export_entrypoint.py", "_weibo_detail_api_url"): (
         "退出", None, "#114：唯一调用方page.request.get(statuses/show)是L3，对所有平台禁止，随回退分支删除"),
+    # #113：知乎登录态只以持久 profile 为准，worker 不再注入快照 Cookie 或轮内登录；pong 失败即 login_required。
+    **{
+        ("tools/MediaCrawler/media_platform/zhihu/login.py", name): (
+            "退出", None,
+            "#113：唯一调用方（pong失败后重新注入快照Cookie）删除，正式登录只走scripts/login_warmup.py")
+        for name in (
+            "ZhiHuLogin", "ZhiHuLogin.__init__", "ZhiHuLogin.check_login_state", "ZhiHuLogin.begin",
+            "ZhiHuLogin.login_by_mobile", "ZhiHuLogin.login_by_qrcode", "ZhiHuLogin.login_by_cookies",
+        )
+    },
 }
 
 # 冻结台账的 SHA-256：T14 删除 fork 后台账冻结，`--check` 只做冻结自检，不再重新枚举基线源码。

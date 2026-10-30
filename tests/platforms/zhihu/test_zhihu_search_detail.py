@@ -4,7 +4,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock
 
-from .support import config, make_crawler as ZhihuCrawler
+from .support import END, config, make_crawler as ZhihuCrawler, search_client, search_page
 import pytest
 from trippostcollect.platforms.zhihu import models as constant
 from trippostcollect.platforms.zhihu.core import (
@@ -348,8 +348,8 @@ async def test_candidate_with_missing_raw_nickname_is_not_valid(monkeypatch, tmp
         return item
 
     crawler = ZhihuCrawler()
-    crawler.zhihu_client = AsyncMock()
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [contents, []]
+    crawler.zhihu_client = search_client()
+    crawler.zhihu_client.get_note_by_keyword.side_effect = [search_page(contents), END]
     crawler.enrich_search_content_detail = AsyncMock(side_effect=observed)
     crawler.get_content_images = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "_store_content", AsyncMock(return_value=None))

@@ -31,7 +31,7 @@ from trippostcollect.application.contracts import ImageStagingError
 from trippostcollect.records.identity import platform_nickname, platform_user_id
 from trippostcollect.runtime.helpers import extract_text_from_html, normalize_image_url
 from . import models as zhihu_constant
-from .models import ZhihuContent, ZhihuCreator
+from .models import ZhihuContent, ZhihuCreator, ZhihuSearchPage
 
 logger = logging.getLogger("MediaCrawler")
 
@@ -265,12 +265,39 @@ class ZhihuExtractor:
         Returns:
 
         """
-        if not json_data:
-            return []
+        return self.extract_search_page(json_data).contents
 
-        search_result: List[Dict] = json_data.get("data", [])
-        search_result = [s_item for s_item in search_result if s_item.get("type") in ['search_result', 'zvideo']]
-        return self._extract_content_list([sr_item.get("object") for sr_item in search_result if sr_item.get("object")])
+    def extract_search_page(self, json_data: Dict) -> ZhihuSearchPage:
+        """Project one search_v3 page; zvideo is dropped here and only its ID is kept.
+
+        `raw_count` and `is_end` come from the raw response so the caller can tell a
+        filtered-out page from a verified source end.
+        """
+        if not json_data:
+            return ZhihuSearchPage()
+
+        raw_items = json_data.get("data") or []
+        paging = json_data.get("paging") or {}
+        objects = [
+            s_item.get("object")
+            for s_item in raw_items
+            if isinstance(s_item, dict)
+            and s_item.get("type") in ("search_result", "zvideo")
+            and isinstance(s_item.get("object"), dict)
+        ]
+        video_ids = [
+            str(item.get("id") or "")
+            for item in objects
+            if item.get("type") == zhihu_constant.VIDEO_NAME
+        ]
+        return ZhihuSearchPage(
+            contents=self._extract_content_list(
+                [item for item in objects if item.get("type") != zhihu_constant.VIDEO_NAME]
+            ),
+            video_ids=video_ids,
+            raw_count=len(raw_items),
+            is_end=isinstance(paging, dict) and paging.get("is_end") is True,
+        )
 
 
     def _extract_content_list(self, content_list: List[Dict]) -> List[ZhihuContent]:

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from .support import config, make_crawler as ZhihuCrawler
+from .support import END, config, make_crawler as ZhihuCrawler, search_client, search_page
 from trippostcollect.platforms.zhihu.core import (
     ZhihuDetailFetchError,
     ZhihuImageDownloadError,
@@ -164,17 +164,17 @@ async def test_detail_failure_is_recorded_seen_and_search_continues(
     monkeypatch.setattr(config, "CRAWLER_MAX_NOTES_COUNT", 20)
     monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
     crawler = ZhihuCrawler()
-    crawler.zhihu_client = AsyncMock()
+    crawler.zhihu_client = search_client()
     crawler.zhihu_client.get_note_by_keyword.side_effect = [
-        [
+        search_page([
             ZhihuContent(
                 content_id="retry-detail",
                 question_id="question-1",
                 content_type="answer",
                 content_text="search excerpt",
             )
-        ],
-        [],
+        ]),
+        END,
     ]
     crawler.zhihu_client.get_answer_info.side_effect = DataFetchError("temporary")
     store = AsyncMock(return_value=None)
@@ -227,10 +227,10 @@ async def test_image_failure_is_recorded_and_later_zhihu_candidate_continues(
         )
 
     crawler = ZhihuCrawler()
-    crawler.zhihu_client = AsyncMock()
+    crawler.zhihu_client = search_client()
     crawler.zhihu_client.get_note_by_keyword.side_effect = [
-        [content("retry-image"), content("success-image")],
-        [],
+        search_page([content("retry-image"), content("success-image")]),
+        END,
     ]
     crawler.enrich_search_content_detail = AsyncMock(side_effect=lambda item: item)
     crawler.get_content_images = AsyncMock(
@@ -304,10 +304,10 @@ async def test_terminal_image_failure_is_recorded_and_later_candidate_continues(
         content_detail_source="search_content",
     )
     crawler = ZhihuCrawler()
-    crawler.zhihu_client = AsyncMock()
+    crawler.zhihu_client = search_client()
     crawler.zhihu_client.get_note_by_keyword.side_effect = [
-        [terminal, success],
-        [],
+        search_page([terminal, success]),
+        END,
     ]
     crawler.enrich_search_content_detail = AsyncMock(side_effect=lambda item: item)
     crawler.get_content_images = AsyncMock(

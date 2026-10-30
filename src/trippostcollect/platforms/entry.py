@@ -332,7 +332,7 @@ def _zhihu_dependencies(config):
 
     from playwright.async_api import async_playwright
     from trippostcollect.application.contracts import (
-        ZhihuSettings, ZhihuPorts, ZhihuClientPorts, ZhihuLoginPorts,
+        ZhihuSettings, ZhihuPorts, ZhihuClientPorts,
     )
     from trippostcollect.application.candidates import AdaptiveAccumulator
     from trippostcollect.application.events import append_worker_execution_event
@@ -341,12 +341,11 @@ def _zhihu_dependencies(config):
     from trippostcollect.artifacts.image_staging import PostImageStager
     from trippostcollect.artifacts.evidence import write_evidence
     from trippostcollect.db.discovery_read import existing_platform_identities
-    from trippostcollect.runtime import behavior, cookies, login_helpers
+    from trippostcollect.runtime import behavior, cookies
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
     from trippostcollect.runtime.http import make_async_client
     from trippostcollect.runtime.image_retry import fetch_image_bytes_with_retry
     from trippostcollect.platforms.zhihu.client import ZhiHuClient
-    from trippostcollect.platforms.zhihu.login import ZhiHuLogin
     from trippostcollect.platforms.zhihu.parser import zhihu_source_asset_key
 
     values = {field.name: getattr(config, field.name) for field in fields(ZhihuSettings)}
@@ -356,7 +355,6 @@ def _zhihu_dependencies(config):
         field.name: getattr(config, field.name) for field in fields(CDPBrowserSettings)
     })
     save_data_path = config.SAVE_DATA_PATH
-    initial_cookies = config.COOKIES
     logger = logging.getLogger("MediaCrawler")
 
     def accumulator_factory(platform):
@@ -401,14 +399,10 @@ def _zhihu_dependencies(config):
             ),
             convert_browser_context_cookies=cookies.convert_browser_context_cookies,
         )),
-        login_factory=partial(ZhiHuLogin, ports=ZhihuLoginPorts(
-            login_helpers.find_qrcode_img_from_canvas, login_helpers.show_qrcode,
-        )),
         convert_browser_context_cookies=cookies.convert_browser_context_cookies,
         fetch_image_bytes_with_retry=fetch_image_bytes_with_retry,
         accumulator_factory=accumulator_factory,
         refresh_max_pages=refresh, source_exhausted=exhausted, initial_settle_seconds=settle,
-        initial_cookies=lambda: initial_cookies,
         current_timestamp=lambda: int(time.time() * 1000),
         content_sink_factory=lambda: JsonlContentStore(AsyncFileWriter(
             platform="zhihu", crawler_type=settings.CRAWLER_TYPE,

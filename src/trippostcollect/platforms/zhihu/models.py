@@ -64,7 +64,8 @@ class ZhihuContent(BaseModel):
     creator_url_token: str = Field(default="", description="Creator URL token")
     user_nickname: str = Field(default="", description="User raw nickname")
     author_profile_url: str = Field(default="", description="Creator profile URL")
-    avatar_url: str = Field(default="", description="Creator avatar URL")
+    # #113：头像只在内存中用于排除正文图候选，不进入 model_dump 与任何项目序列化。
+    avatar_url: str = Field(default="", description="Creator avatar URL", exclude=True)
     followers_count: int = Field(default=0, description="Creator follower count")
     followers_observed: bool = Field(default=False, description="Whether the platform response explicitly included follower count")
     author_followers_source: str = Field(default="", description="Follower count source")
@@ -81,7 +82,7 @@ class ZhihuCreator(BaseModel):
     url_token: str = Field(default="", description="Creator URL token")
     user_nickname: str = Field(default="", description="User raw nickname")
     profile_url: str = Field(default="", description="Creator profile URL")
-    avatar_url: str = Field(default="", description="Creator avatar URL")
+    avatar_url: str = Field(default="", description="Creator avatar URL", exclude=True)
     follows: int = Field(default=0, description="Follows count")
     fans: int = Field(default=0, description="Fans count")
     followers_observed: bool = Field(default=False, description="Whether the platform response explicitly included follower count")
@@ -94,6 +95,15 @@ class ZhihuCreator(BaseModel):
     article_count: int = Field(default=0, description="Article count")
     column_count: int = Field(default=0, description="Column count")
     get_voteup_count: int = Field(default=0, description="Total upvotes received")
+
+
+class ZhihuSearchPage(BaseModel):
+    """One validated search_v3 page; only `is_end` proves source exhaustion."""
+
+    contents: list[ZhihuContent] = Field(default_factory=list, description="Answer/article candidates")
+    video_ids: list[str] = Field(default_factory=list, description="zvideo candidates dropped before projection")
+    raw_count: int = Field(default=0, description="Raw `data` item count before filtering")
+    is_end: bool = Field(default=False, description="Raw `paging.is_end` value")
 
 
 class SearchTime(Enum):
@@ -138,6 +148,10 @@ class PlatformRuntimeError(DataFetchError):
     def __init__(self, message: str, *, code: str):
         super().__init__(message)
         self.code = code
+
+
+class NotFoundError(DataFetchError):
+    """HTTP 404: deterministic, never retried; each caller decides what absence means."""
 
 
 class ZhihuImageDownloadError(RuntimeError):

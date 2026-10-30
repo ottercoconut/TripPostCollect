@@ -170,7 +170,7 @@
     },
     {
      "test": "tests/platforms/zhihu/test_zhihu_image_download.py::test_client_image_request_reuses_session_headers_proxy_and_referer",
-     "asserts": "根 ZhiHuClient.get_content_image 的 200 正常路径（会话头、代理、referer）"
+     "asserts": "根 ZhiHuClient.get_content_image 的 200 正常路径（代理、UA；#113 起只发 UA/Accept/站点 Referer，不带 Cookie 与签名头）"
     }
    ],
    "ported_to": "tests/artifacts/test_staging.py::test_zhihu_http_404_preserves_terminal_status"

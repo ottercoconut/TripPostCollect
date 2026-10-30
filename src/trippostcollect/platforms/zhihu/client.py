@@ -21,23 +21,37 @@
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 from urllib.parse import urlencode
 
 import httpx
 from httpx import Response
 from playwright.async_api import BrowserContext, Page
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_fixed
 from trippostcollect.application.contracts import ZhihuClientPorts
 from trippostcollect.runtime.image_retry import (
     IMAGE_DOWNLOAD_MAX_BYTES, ImageDownloadFetchError, classified_http_image_error,
 )
 from . import models as zhihu_constant
-from .models import ZhihuContent, DataFetchError, PlatformRuntimeError, SearchSort, SearchTime, SearchType
+from .models import (
+    ZhihuContent, ZhihuSearchPage, DataFetchError, NotFoundError, PlatformRuntimeError,
+    SearchSort, SearchTime, SearchType,
+)
 from .parser import ZhihuExtractor
 from .signer import sign
 
 logger = logging.getLogger("MediaCrawler")
+
+IMAGE_REFERER = "https://www.zhihu.com/"
+
+
+class SearchResponseInvalid(DataFetchError):
+    """A search_v3 response that cannot prove either more pages or a verified end."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.code = "search_response_invalid"
+
 
 class ZhiHuClient:
 
@@ -76,7 +90,13 @@ class ZhiHuClient:
         headers['x-zse-96'] = sign_res["x-zse-96"]
         return headers
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), reraise=True)
+    # 401/403/429 与 404 是平台的确定答复，重试只会重复同一结果；只对其余错误有限重试。
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_fixed(1),
+        retry=retry_if_not_exception_type((PlatformRuntimeError, NotFoundError)),
+        reraise=True,
+    )
     async def request(self, method, url, **kwargs) -> Union[str, Any]:
         """
         Wrapper for httpx common request method with response handling
@@ -95,34 +115,37 @@ class ZhiHuClient:
         async with self.ports.make_async_client(proxy=self.proxy) as client:
             response = await client.request(method, url, timeout=self.timeout, **kwargs)
 
+        path = httpx.URL(url).path
         if response.status_code != 200:
-            logger.error(f"[ZhiHuClient.request] Requset Url: {url}, Request error: {response.text}")
+            # 响应体可能含头像或个人资料，日志与异常只带路径和状态码。
+            logger.error(
+                f"[ZhiHuClient.request] Request failed: path={path}, status={response.status_code}"
+            )
             if response.status_code in {401, 403}:
                 raise PlatformRuntimeError(
-                    response.text or f"HTTP {response.status_code}",
-                    code="login_required",
+                    f"HTTP {response.status_code}", code="login_required",
                 )
             if response.status_code == 429:
-                raise PlatformRuntimeError(
-                    response.text or "HTTP 429",
-                    code="rate_limited",
-                )
-            elif response.status_code == 404:  # Content without comments also returns 404
-                return {}
-
-            raise DataFetchError(response.text)
+                raise PlatformRuntimeError("HTTP 429", code="rate_limited")
+            if response.status_code == 404:
+                raise NotFoundError("HTTP 404")
+            raise DataFetchError(f"HTTP {response.status_code}")
 
         if return_response:
             return response.text
         try:
             data: Dict = response.json()
-            if data.get("error"):
-                logger.error(f"[ZhiHuClient.request] Request error: {data}")
-                raise DataFetchError(data.get("error", {}).get("message"))
-            return data
         except json.JSONDecodeError:
-            logger.error(f"[ZhiHuClient.request] Request error: {response.text}")
-            raise DataFetchError(response.text)
+            logger.error(f"[ZhiHuClient.request] Response is not JSON: path={path}")
+            raise DataFetchError(f"non-JSON response: {path}")
+        if isinstance(data, dict) and data.get("error"):
+            error = data.get("error") or {}
+            logger.error(
+                f"[ZhiHuClient.request] Platform error: path={path}, "
+                f"code={error.get('code') if isinstance(error, dict) else ''}"
+            )
+            raise DataFetchError(error.get("message") if isinstance(error, dict) else "platform error")
+        return data
 
     async def get(self, uri: str, params=None, **kwargs) -> Union[Response, Dict, str]:
         """
@@ -155,9 +178,14 @@ class ZhiHuClient:
                 ping_flag = True
                 logger.info("[ZhiHuClient.pong] Ping zhihu successfully")
             else:
-                logger.error(f"[ZhiHuClient.pong] Ping zhihu failed, response data: {res}")
+                # /me 响应含头像与个人资料，只记录缺哪个登录字段。
+                logger.error(
+                    "[ZhiHuClient.pong] Ping zhihu failed: "
+                    f"uid_present={bool(res.get('uid'))}, name_present={bool(res.get('name'))}"
+                )
         except Exception as e:
-            logger.error(f"[ZhiHuClient.pong] Ping zhihu failed: {e}, and try to login again...")
+            code = getattr(e, "code", "") or e.__class__.__name__
+            logger.error(f"[ZhiHuClient.pong] Ping zhihu failed: {code}")
             ping_flag = False
         return ping_flag
 
@@ -177,6 +205,10 @@ class ZhiHuClient:
         self.default_headers["cookie"] = cookie_str
         self.cookie_dict = cookie_dict
 
+    def set_search_referer(self, referer: str) -> None:
+        """搜索 API 的 Referer 指向本轮实际检索词的搜索页。"""
+        self.default_headers["referer"] = referer
+
     async def get_current_user_info(self) -> Dict:
         """
         Get current logged-in user information
@@ -187,11 +219,17 @@ class ZhiHuClient:
         return await self.get("/api/v4/me", params)
 
     async def get_content_image(self, image_url: str, *, referer: str) -> bytes | None:
-        """Fetch one body image with the active proxy, Cookie and User-Agent session."""
+        """Fetch one body image from the zhimg CDN with UA, Accept and site Referer only.
 
-        headers = self.default_headers.copy()
-        headers["referer"] = referer or "https://www.zhihu.com/"
-        headers["accept"] = "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8"
+        The CDN does not need the zhihu.com session: Cookie and API signing headers stay
+        on www.zhihu.com requests.
+        """
+
+        headers = {
+            "user-agent": self.default_headers.get("user-agent", ""),
+            "accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8",
+            "referer": IMAGE_REFERER,
+        }
         try:
             async with self.ports.make_async_client(proxy=self.proxy) as client:
                 async with client.stream(
@@ -238,7 +276,7 @@ class ZhiHuClient:
         sort: SearchSort = SearchSort.DEFAULT,
         note_type: SearchType = SearchType.DEFAULT,
         search_time: SearchTime = SearchTime.DEFAULT,
-    ) -> List[ZhihuContent]:
+    ) -> ZhihuSearchPage:
         """
         Search by keyword
         Args:
@@ -268,9 +306,24 @@ class ZhiHuClient:
             "sort": sort.value,
             "vertical": note_type.value,
         }
-        search_res = await self.get(uri, params)
-        logger.info(f"[ZhiHuClient.get_note_by_keyword] Search result: {search_res}")
-        return self._extractor.extract_contents_from_search(search_res)
+        try:
+            search_res = await self.get(uri, params)
+        except NotFoundError as exc:
+            raise SearchResponseInvalid("search_v3 returned HTTP 404") from exc
+        paging = search_res.get("paging") if isinstance(search_res, dict) else None
+        raw_items = search_res.get("data") if isinstance(search_res, dict) else None
+        if not isinstance(paging, dict) or not isinstance(raw_items, list):
+            raise SearchResponseInvalid("search_v3 response has no paging/data")
+        if not raw_items and paging.get("is_end") is not True:
+            # 空 data 却未声明 is_end=true：不能证明来源耗尽，也无法翻到下一页。
+            raise SearchResponseInvalid("search_v3 returned empty data without is_end")
+        search_page = self._extractor.extract_search_page(search_res)
+        logger.info(
+            f"[ZhiHuClient.get_note_by_keyword] Search page {page}: raw={search_page.raw_count}, "
+            f"contents={len(search_page.contents)}, videos={len(search_page.video_ids)}, "
+            f"is_end={search_page.is_end}"
+        )
+        return search_page
 
         # uri = f"/api/v4/{content_type}s/{content_id}/root_comments"
         # params = {
@@ -305,7 +358,11 @@ class ZhiHuClient:
 
         """
         uri = f"/question/{question_id}/answer/{answer_id}"
-        response_html = await self.get(uri, return_response=True)
+        try:
+            response_html = await self.get(uri, return_response=True)
+        except NotFoundError:
+            # 回答已删除或不可见：与无法解析出目标实体同样按候选级详情缺失处理。
+            return None
         return self._extractor.extract_answer_content_from_html(response_html, answer_id)
 
     async def get_article_info(self, article_id: str) -> Optional[ZhihuContent]:
@@ -318,7 +375,10 @@ class ZhiHuClient:
 
         """
         uri = f"/p/{article_id}"
-        response_html = await self.get(uri, return_response=True)
+        try:
+            response_html = await self.get(uri, return_response=True)
+        except NotFoundError:
+            return None
         return self._extractor.extract_article_content_from_html(response_html, article_id)
 
     async def get_video_info(self, video_id: str) -> Optional[ZhihuContent]:
