@@ -66,14 +66,21 @@ def test_baseline_records_three_heads_and_resource_hashes() -> None:
         assert len(baseline[key]) == 40
     resources = baseline["resources"]
     assert set(resources) == {"libs/douyin.js", "libs/zhihu.js", "libs/stealth.min.js", "LICENSE"}
-    # 包内资源是唯一运行期真源。
-    package = {"libs/douyin.js": "js/douyin.js", "libs/zhihu.js": "js/zhihu.js",
-               "libs/stealth.min.js": "js/stealth.min.js", "LICENSE": "licenses/MediaCrawler-LICENSE"}
+    # 包内资源是唯一运行期真源；基线每个资源都必须登记承接位置或退出（#127 第 2 项：stealth.min.js 退出）。
+    package = ledger_rules.BASELINE_RESOURCE_RESOLUTIONS
+    assert set(package) == set(resources)
+    assert {relative for relative, name in package.items() if name is None} == {"libs/stealth.min.js"}
     from trippostcollect.core import resources as package_resources
 
     for relative, digest in resources.items():
+        if package[relative] is None:
+            assert digest not in package_resources.RESOURCE_SHA256.values(), relative
+            continue
         assert package_resources.RESOURCE_SHA256[package[relative]] == digest
         assert hashlib.sha256(package_resources.read_bytes(package[relative])).hexdigest() == digest
+    # 包资源表只含基线承接资源与 T12 起新增的 CloakBrowser 许可，退出资源不得留在表中。
+    assert set(package_resources.RESOURCE_SHA256) == (
+        {name for name in package.values() if name is not None} | {"licenses/CloakBrowser-LICENSE"})
 
 
 def test_resource_hashes_match_spec_c0() -> None:

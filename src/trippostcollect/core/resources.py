@@ -9,7 +9,6 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 RESOURCE_SHA256 = {
     "js/douyin.js": "ff5cb3133e2717523ffb3f96679e3f5d23bd31a999411ea604cff9a51da9e26e",
     "js/zhihu.js": "9753572dc21148975600ca8083e92245e69130cd11414a3e3089013b3aaee3f1",
-    "js/stealth.min.js": "02ae012addcdb30b0ed1a512406feb487699b1b217566e87a8086b54dfcc1d4d",
     "licenses/MediaCrawler-LICENSE": "aeff21de8609bec9d6e939bbbba7c2914ae0a6e7c9470ea7945c03f7d17a2a33",
     "licenses/CloakBrowser-LICENSE": "93a9c5b5542faf5ff6c7956406b56930fde10bd4d3e8dc7b89f01a88a8d2b29b",
 }

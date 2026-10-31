@@ -2069,6 +2069,9 @@ PROGRESS_RESOLUTIONS = {
             "#127：唯一用途是写死浏览器与浏览器外请求的 UA；改取 navigator.userAgent（B站取行为会话浏览器）")
         for name in ("get_user_agent", "get_mobile_user_agent")
     },
+    # #127 第 2 项：通用四平台不再注入 stealth.min.js（有头 CfT 下原生值已正常，注入反而写入矛盾假值），资源一并删除。
+    ("tools/MediaCrawler/tools/cdp_browser.py", "CDPBrowserManager.add_stealth_script"): (
+        "退出", None, "#127：唯一调用方抖音CDP路径不再注入stealth.min.js，包资源js/stealth.min.js同批删除"),
     # #113：知乎登录态只以持久 profile 为准，worker 不再注入快照 Cookie 或轮内登录；pong 失败即 login_required。
     **{
         ("tools/MediaCrawler/media_platform/zhihu/login.py", name): (
@@ -2079,6 +2082,16 @@ PROGRESS_RESOLUTIONS = {
             "ZhiHuLogin.login_by_mobile", "ZhiHuLogin.login_by_qrcode", "ZhiHuLogin.login_by_cookies",
         )
     },
+}
+
+# 冻结基线 baseline.json 的 fork 资源 → 包内资源的映射；值为 None 表示该资源已退出，包内不再携带。
+# 基线散列照旧冻结（规格 C0 仍引用），退出只改变“包内有无承接资源”，与符号账的“退出”同义。
+BASELINE_RESOURCE_RESOLUTIONS = {
+    "libs/douyin.js": "js/douyin.js",
+    "libs/zhihu.js": "js/zhihu.js",
+    # #127 第 2 项：通用四平台不再注入 stealth.min.js，包资源删除，再无使用方。
+    "libs/stealth.min.js": None,
+    "LICENSE": "licenses/MediaCrawler-LICENSE",
 }
 
 # 冻结台账的 SHA-256：T14 删除 fork 后台账冻结，`--check` 只做冻结自检，不再重新枚举基线源码。

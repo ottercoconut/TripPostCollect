@@ -34,7 +34,6 @@ SQL_FILES = ("crawl_scheduler.sql", "ctf_captures.sql", "source_platforms.sql", 
 RESOURCE_SOURCES = {
     "js/douyin.js": "src/trippostcollect/resources/js/douyin.js",
     "js/zhihu.js": "src/trippostcollect/resources/js/zhihu.js",
-    "js/stealth.min.js": "src/trippostcollect/resources/js/stealth.min.js",
     "licenses/MediaCrawler-LICENSE": "src/trippostcollect/resources/licenses/MediaCrawler-LICENSE",
     "licenses/CloakBrowser-LICENSE": "src/trippostcollect/resources/licenses/CloakBrowser-LICENSE",
     **{f"sql/{name}": f"db/{name}" for name in SQL_FILES},

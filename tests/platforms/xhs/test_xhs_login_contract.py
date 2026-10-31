@@ -685,12 +685,14 @@ async def test_startup_enters_qrcode_login_once_and_confirms_with_user_me(
 
 
 class _StartupBrowserManager:
-    """真实 launch_browser_with_cdp 调用的 CDP manager 替身；记录伪装脚本调用，不启动浏览器。"""
+    """真实 launch_browser_with_cdp 调用的 CDP manager 替身；只提供启动所需方法，不启动浏览器。
+
+    #127 起真实 CDPBrowserManager 不再有 add_stealth_script；替身同样不提供，任何注入调用都会因缺少属性而失败。
+    """
 
     def __init__(self, context: _LoginFlowContext) -> None:
         self.context = context
         self.launches: list[dict[str, object]] = []
-        self.stealth_calls = 0
 
     async def launch_and_connect(self, **kwargs: object) -> _LoginFlowContext:
         self.launches.append(kwargs)
@@ -698,9 +700,6 @@ class _StartupBrowserManager:
 
     async def get_browser_info(self) -> dict[str, object]:
         return {}
-
-    async def add_stealth_script(self, *_args: object, **_kwargs: object) -> None:
-        self.stealth_calls += 1
 
     def assert_alive(self, _stage: str) -> None:
         return None
@@ -711,7 +710,10 @@ async def test_startup_injects_no_page_scripts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """#83：正式轮只启动一次 CDP，Context 与主页面都不调用 add_init_script，也不调用 add_stealth_script。"""
+    """#83：正式轮只启动一次 CDP，Context 与主页面都不调用 add_init_script；#127 起 manager 也没有 stealth 注入方法。"""
+    from trippostcollect.runtime.browser import CDPBrowserManager
+
+    assert not hasattr(CDPBrowserManager, "add_stealth_script")
     clock = _LoginFlowClock()
     page = _LoginFlowPage(visible_text="扫码登录 打开小红书扫一扫")
     page.visible_selectors.add(XiaoHongShuLogin._QRCODE_SELECTOR)
@@ -743,7 +745,7 @@ async def test_startup_injects_no_page_scripts(
 
     assert len(manager.launches) == 1
     assert crawler.cdp_manager is manager
-    assert manager.stealth_calls == 0
+    assert not hasattr(manager, "add_stealth_script")
     assert context.init_scripts == [] and page.init_scripts == []
     crawler.search.assert_awaited_once_with()
 

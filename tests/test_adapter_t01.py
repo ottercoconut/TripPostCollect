@@ -19,10 +19,10 @@ resources = import_module("trippostcollect.core.resources")
 paths = import_module("trippostcollect.core.paths")
 ledger = import_module("adapter_ledger")
 BASELINE = json.loads((ROOT / "docs" / "adapter-ledger" / "baseline.json").read_text())
+# #127 第 2 项：stealth.min.js 不再注入，包资源删除；基线中的 libs/stealth.min.js 在台账登记为退出。
 PACKAGE_RESOURCES = {
     "js/douyin.js": "libs/douyin.js",
     "js/zhihu.js": "libs/zhihu.js",
-    "js/stealth.min.js": "libs/stealth.min.js",
     "licenses/MediaCrawler-LICENSE": "LICENSE",
 }
 
@@ -36,7 +36,7 @@ def test_package_resource_bytes_match_baseline(name: str, baseline_key: str) -> 
 
 
 def test_resource_path_is_inside_package_not_fork() -> None:
-    with resources.path("js/stealth.min.js") as location:
+    with resources.path("js/douyin.js") as location:
         assert location.is_file()
         assert "MediaCrawler" not in location.parts
         assert "trippostcollect" in location.parts
@@ -105,10 +105,13 @@ def test_prerequisites_check_resources_not_fork_tree(monkeypatch: pytest.MonkeyP
     assert calls == [True]
 
 
-def test_bilibili_stealth_comes_from_package(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bilibili_resources_not_read_from_fork(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #127 第 2 项起B站行为会话不读任何 JS 资源；执行器仍不得回到 fork libs 目录。
     crawl = import_module("mediacrawler_crawl")
     source = Path(crawl.__file__).read_text()
     assert 'MEDIACRAWLER_DIR / "libs"' not in source
+    login = import_module("trippostcollect.platforms.bilibili.login")
+    assert "stealth" not in Path(login.__file__).read_text()
 
 
 # ---------- 台账：基线冻结与迁移进度 ----------

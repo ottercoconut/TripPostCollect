@@ -31,7 +31,6 @@ import asyncio
 import atexit
 import logging
 from collections.abc import Callable
-from contextlib import ExitStack
 from dataclasses import dataclass
 import os
 import signal
@@ -44,7 +43,6 @@ from typing import Any, Dict, Optional
 import httpx
 from playwright.async_api import Browser, BrowserContext, Playwright
 
-from trippostcollect.core import resources
 from trippostcollect.core.paths import (
     platform_cdp_profile_dir,
     platform_key_for_profile_code,
@@ -603,23 +601,6 @@ class CDPBrowserManager:
             logger.info("[CDPBrowserManager] Created new browser context")
 
         return browser_context
-
-    async def add_stealth_script(self, script_path: str | None = None):
-        """从包资源或显式路径注入脚本；资源缺失时保持跳过。"""
-        with ExitStack() as resource_paths:
-            if script_path is None:
-                try:
-                    script_path = str(resource_paths.enter_context(resources.path("js/stealth.min.js")))
-                except FileNotFoundError:
-                    return
-            if self.browser_context and os.path.exists(script_path):
-                try:
-                    await self.browser_context.add_init_script(path=script_path)
-                    logger.info(
-                        f"[CDPBrowserManager] Added anti-detection script: {script_path}"
-                    )
-                except Exception as e:
-                    logger.warning(f"[CDPBrowserManager] Failed to add anti-detection script: {e}")
 
     async def add_cookies(self, cookies: list):
         """

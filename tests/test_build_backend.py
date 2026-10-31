@@ -23,7 +23,7 @@ HOOKS = ("build_wheel", "build_sdist", "build_editable", "get_requires_for_build
          "get_requires_for_build_sdist", "get_requires_for_build_editable",
          "prepare_metadata_for_build_wheel", "prepare_metadata_for_build_editable")
 EXPECTED_RESOURCES = {
-    "js/douyin.js", "js/zhihu.js", "js/stealth.min.js", "licenses/MediaCrawler-LICENSE", "licenses/CloakBrowser-LICENSE",
+    "js/douyin.js", "js/zhihu.js", "licenses/MediaCrawler-LICENSE", "licenses/CloakBrowser-LICENSE",
     "sql/crawl_scheduler.sql", "sql/ctf_captures.sql", "sql/source_platforms.sql", "sql/web_posts.sql",
     "sql/xhs_control.sql", "contracts/formal-crawl-contract.md",
 }

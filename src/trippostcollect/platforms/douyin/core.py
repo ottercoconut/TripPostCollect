@@ -27,7 +27,6 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 from playwright.async_api import BrowserContext, BrowserType, Page, Playwright
 from trippostcollect.application.contracts import DouyinSettings, DouyinReaders, DouyinCrawlerPorts, ImageStagingError
-from trippostcollect.core import resources
 from trippostcollect.core.paths import platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError, is_runtime_blocking_image_error
@@ -89,9 +88,6 @@ class DouYinCrawler:
                     user_agent=None,
                     headless=self.settings.HEADLESS,
                 )
-                # stealth.min.js is a js script to prevent the website from detecting the crawler.
-                with resources.path("js/stealth.min.js") as stealth_path:
-                    await self.browser_context.add_init_script(path=str(stealth_path))
 
             self.context_page = await self.browser_context.new_page()
             await self.context_page.goto(self.index_url, wait_until="domcontentloaded")
@@ -782,9 +778,6 @@ class DouYinCrawler:
                 user_agent=user_agent,
                 headless=headless,
             )
-
-            # Add anti-detection script
-            await self.cdp_manager.add_stealth_script()
 
             # Show browser information
             browser_info = await self.cdp_manager.get_browser_info()

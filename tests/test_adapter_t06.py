@@ -27,6 +27,7 @@ from support.stable_png import solid_png
 from support import platform_session_deviation as deviation
 from support import douyin_116_deviation
 from support import douyin_full_scan_deviation
+from support import stealth_removal_deviation
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.core import paths
@@ -225,8 +226,9 @@ async def drive(root, patch, scenario, fallback):
             trace.append(("new_page",))
             return page
 
-        async def add_init_script(self, *, path):
-            trace.append(("init_script", sha256(Path(path).read_bytes()).hexdigest()))
+        async def add_init_script(self, *args, **kwargs):
+            # #127：抖音不再注入任何 init script；出现即进入轨迹并使比较失败（见 support.stealth_removal_deviation）。
+            trace.append(("init_script", args, kwargs))
 
         async def cookies(self, urls=None):
             trace.append(("cookies", urls))
@@ -359,11 +361,12 @@ def current_douyin_profile(tmp_path):
 
 
 def legacy_drive_expectation(tmp_path, scenario, fallback):
-    """固化预期依次登记 #59 profile、#116 正文来源与请求头、#124 搜索只经截获三项偏离。"""
+    """固化预期依次登记 #59 profile、#116 正文来源与请求头、#124 搜索只经截获、#127 不注入 stealth 四项偏离。"""
     expected = expectations.load(*T14_DRIVE, f"{scenario}-fallback{fallback}")
     expected = deviation.douyin_profile(expected, current_douyin_profile(tmp_path))
     expected = douyin_116_deviation.douyin_drive(expected, scenario)
-    return douyin_full_scan_deviation.douyin_drive(expected, scenario)
+    expected = douyin_full_scan_deviation.douyin_drive(expected, scenario)
+    return stealth_removal_deviation.douyin(expected)
 
 
 @pytest.mark.asyncio
