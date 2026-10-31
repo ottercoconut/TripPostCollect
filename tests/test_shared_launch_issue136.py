@@ -4,6 +4,9 @@
 差别在 crawl 的启动配置：1920×1080 视口、未开沙箱（Playwright 自动追加 ``--no-sandbox``）、无 locale/timezone/env、
 传 ``user_agent=None``、另开空白页。现在四处都经 ``runtime.browser_runtime.launch_profile_context`` 启动。
 
+#139：共享配置不再传 ``viewport``（1280×900 设备模拟），改为 ``no_viewport=True`` 加 ``--window-size=1450,900``，
+与小红书原生窗口一致；本文件中视口相关断言随之更新。
+
 全部离线：替身 chromium 只记录 ``launch_persistent_context(**kwargs)``，不访问网络、不启动浏览器。
 """
 
@@ -19,7 +22,6 @@ from typing import Any
 import pytest
 
 from trippostcollect.core import paths
-from trippostcollect.core.paths import PROFILE_VIEWPORT
 from trippostcollect.runtime import browser_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -198,12 +200,14 @@ def test_four_launchers_share_one_persistent_context_configuration(monkeypatch, 
     assert all(value == reference for value in common.values()), common
     for name, kwargs in launches.items():
         assert kwargs["chromium_sandbox"] is True, name
-        assert kwargs["viewport"] == PROFILE_VIEWPORT, name
+        # #139：不做设备模拟，按原生窗口启动。
+        assert "viewport" not in kwargs and kwargs["no_viewport"] is True, name
+        assert kwargs["args"][-1] == "--window-size=1450,900", name
         assert kwargs["locale"] == "zh-CN" and kwargs["timezone_id"] == "Asia/Shanghai", name
         assert kwargs["env"] == ENV, name
-        assert kwargs["args"][-len(RUNTIME_ARGS):] == RUNTIME_ARGS, name
+        assert kwargs["args"][-len(RUNTIME_ARGS) - 1:-1] == RUNTIME_ARGS, name
         assert "--no-sandbox" not in kwargs["args"], name
-        for absent in ("user_agent", "ignore_default_args", "screen", "proxy", "no_viewport"):
+        for absent in ("user_agent", "ignore_default_args", "screen", "proxy"):
             assert absent not in kwargs, (name, absent)
     assert launches["warmup"]["headless"] is False
     assert launches["douyin"]["headless"] is False and launches["weibo"]["headless"] is False
@@ -236,20 +240,25 @@ def test_standard_mode_opens_a_page_only_when_the_context_has_none(platform, mon
     assert crawler.context_page is context.pages[0]
 
 
-def test_native_window_size_branch_is_unchanged(shared, tmp_path) -> None:
-    chromium = FakeChromium()
-    asyncio.run(shared(chromium, tmp_path, headless=False, native_window_size=(1450, 900)))
-    (kwargs,) = chromium.launches
-    assert "viewport" not in kwargs and kwargs["no_viewport"] is True
-    assert kwargs["args"][-1] == "--window-size=1450,900"
-    assert kwargs["chromium_sandbox"] is True
+def test_native_window_size_defaults_to_the_shared_native_window(shared, tmp_path) -> None:
+    """#139：缺省即原生窗口 1450×900；显式传入的尺寸照样写进 ``--window-size``。"""
+    default, explicit = FakeChromium(), FakeChromium()
+    asyncio.run(shared(default, tmp_path, headless=False))
+    asyncio.run(shared(explicit, tmp_path, headless=False, native_window_size=(1400, 880)))
+    (default_kwargs,), (explicit_kwargs,) = default.launches, explicit.launches
+    for kwargs in (default_kwargs, explicit_kwargs):
+        assert "viewport" not in kwargs and kwargs["no_viewport"] is True
+        assert kwargs["chromium_sandbox"] is True
+    assert default_kwargs["args"][-1] == "--window-size=1450,900"
+    assert explicit_kwargs["args"][-1] == "--window-size=1400,880"
+    assert default_kwargs["args"][:-1] == explicit_kwargs["args"][:-1]
 
 
 def test_shared_launcher_defaults_read_runtime_values_at_call_time(shared, tmp_path) -> None:
     chromium = FakeChromium()
     asyncio.run(shared(chromium, tmp_path, headless=True))
     (kwargs,) = chromium.launches
-    assert kwargs["args"][-1] == RUNTIME_ARGS[-1] and kwargs["env"] == ENV
+    assert kwargs["args"][-2] == RUNTIME_ARGS[-1] and kwargs["env"] == ENV
     signature = inspect.signature(browser_runtime.launch_profile_context)
     assert [name for name, p in signature.parameters.items() if p.kind is p.KEYWORD_ONLY] == [
         "headless", "browser_path", "native_window_size", "runtime_args", "env",

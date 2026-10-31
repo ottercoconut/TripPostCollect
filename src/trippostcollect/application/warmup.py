@@ -134,17 +134,15 @@ async def launch_login_context(
     playwright,
     profile_dir: Path,
     browser_path: str | None,
-    *,
-    native_window_size: tuple[int, int] | None = None,
 ) -> BrowserContext:
     # #136：启动配置下沉到 runtime.browser_runtime.launch_profile_context，与通用平台 crawl 标准模式、
-    # B站行为会话共用；参数与求值次序不变。
+    # B站行为会话共用；参数与求值次序不变。#139：不再透传 native_window_size（调用方从未传入），
+    # 共享函数缺省按原生窗口 NATIVE_WINDOW_SIZE 启动，不做 viewport 设备模拟。
     return await launch_profile_context(
         playwright.chromium,
         profile_dir,
         headless=False,
         browser_path=browser_path,
-        native_window_size=native_window_size,
         runtime_args=browser_runtime_args(),
         env=browser_launch_environment(),
     )

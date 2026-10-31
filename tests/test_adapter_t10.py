@@ -20,7 +20,7 @@ from urllib.parse import parse_qsl
 
 import pytest
 
-from support import fork_removal_deviation, shared_launch_deviation
+from support import fork_removal_deviation, native_window_deviation, shared_launch_deviation
 from trippostcollect.application import inputs, page_evidence, repair, warmup
 from trippostcollect.core import paths as core_paths
 from trippostcollect.runtime import cookies, page_readiness
@@ -388,7 +388,11 @@ def test_warmup_trace_and_files(monkeypatch, tmp_path, entry, scenario):
             monkeypatch.setattr(runner, "async_playwright", lambda: fake)
             monkeypatch.setattr(sys, "argv", ["login_warmup.py", "--targets", "all", "--output-dir", str(root), "--timeout-seconds", "1"])
             result = runner.main() if module is old else runner.login_main()
-        results.append((result, fake.trace, files_under(root)))
+        trace = fake.trace
+        if module is old:
+            # #139：冻结 warmup 的 launch 行钉住 1280×900 视口后换成原生窗口（见 support.native_window_deviation）。
+            trace = native_window_deviation.warmup_trace(trace)
+        results.append((result, trace, files_under(root)))
         shutil.rmtree(root)
     assert results[0] == results[1]
     snapshots = [value for path, value in results[1][2].items() if path.endswith("trippostcollect_cookie_snapshot.json")]

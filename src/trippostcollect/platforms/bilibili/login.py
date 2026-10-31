@@ -37,8 +37,8 @@ async def run_bilibili_behavior_session(
     target_url = "https://search.bilibili.com/article?keyword=" + quote(args.keyword)
 
     async with async_playwright() as playwright:
-        # #136：与 warmup、通用平台 crawl 标准模式共用持久 context 启动配置：沙箱开启、视口 PROFILE_VIEWPORT、
-        # locale/timezone 相同，不再单设 1440×900 视口与 screen，也不再传 ignore_default_args。
+        # #136：与 warmup、通用平台 crawl 标准模式共用持久 context 启动配置：沙箱开启、locale/timezone 相同，
+        # 不再单设 1440×900 视口与 screen，也不再传 ignore_default_args。#139：按原生窗口启动，不做设备模拟。
         context = await launch_profile_context(
             playwright.chromium,
             profile_dir,
