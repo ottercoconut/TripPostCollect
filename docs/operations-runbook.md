@@ -607,6 +607,7 @@ runner run_summary.json
 | path escape / file missing | 检查路径、symlink、清理程序和 staging 完整性 |
 | non-raster / decode / too-large / source-unavailable | 保留终态错误并跳过候选，不改后缀或伪造成功 |
 | HTTP 401/403、429、验证码、封禁 | 运行级阻断；保留前沿，不写候选 seen |
+| `network_timeout` + `stop_detail` 含 `network_unreachable` | 通用四平台浏览器外请求重试用尽后仍是传输层失败（DNS、连接、超时、重置）：网络整体故障，与候选无关；运行级失败，不写 `candidate_skipped` 与 seen，900 秒后重试。先恢复本机网络或代理，不清理候选记忆；正文图片下载不在此列 |
 | `sqlite_import_failed` | 确认整批数据库和本轮新媒体已回滚，checkpoint/seen/campaign 未推进 |
 | `persistence_verified` 失败 | 不 finalize；从摘要身份逐帖核对 SQLite 与文件 |
 | `source_exhaustion_not_persisted` | 子摘要未给出运行级阻断，正式门禁按 `formal_validation.stop_reason` 未满足；按该停止原因排查 |

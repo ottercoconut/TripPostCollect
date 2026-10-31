@@ -64,7 +64,13 @@
 - 其他非 2xx：可重试的传输失败，作者资料按“作者补全失败”有限重试后记为候选跳过。
 
 作者资料遇到前三类时，停止证据为 `runtime_failed`，`stop_detail` 为对应错误码，checkpoint 记录
-当前 page、offset 和 search ID 供审计。作者资料响应 `status_code` 非 0 或缺 `user` 节点时视为空资料，
+当前 page、offset 和 search ID 供审计。
+
+浏览器外请求的传输层失败（DNS、连接失败、超时、连接重置，即 `httpx.TransportError`）是网络整体
+故障，与候选无关（#129）：请求层不重试，`request()` 直接转为 `PlatformRuntimeError(code=network_unreachable)`，
+作者资料与详情都按运行级失败停止，`stop_detail=network_unreachable`，不写 `candidate_skipped`、
+不进 seen；runner 记为 `network_timeout` 并等待 900 秒重试。正文图片下载不在此列，仍记
+`image_download_retryable`。作者资料响应 `status_code` 非 0 或缺 `user` 节点时视为空资料，
 走 `creator_profile_empty` 候选跳过。
 
 只有 `/aweme/v1/web/aweme/detail/` 请求带 `x-tt-argus: 1`（ArgusSecurityPlugin 当前不校验取值）；

@@ -1720,11 +1720,11 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_bilibili_offline_faults.py::test_detail_transport_error_retries_then_skips_candidate",
+       "function": "tests/test_bilibili_offline_faults.py::test_detail_transport_error_retries_then_stops_run",
        "lane": "component"
       },
       {
-       "function": "tests/test_bilibili_offline_faults.py::test_follower_transport_error_is_classified_retried_then_skips_candidate",
+       "function": "tests/test_bilibili_offline_faults.py::test_follower_transport_error_is_classified_retried_then_stops_run",
        "lane": "component"
       },
       {
@@ -1759,7 +1759,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_long_text_detail_transport_error_skips_candidate_after_three_attempts",
+       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_long_text_detail_transport_error_stops_run_after_three_attempts",
        "lane": "component"
       }
      ]

@@ -385,8 +385,16 @@ class DouYinClient:
         raise DataFetchError(f"douyin HTTP {status}")
 
     async def request(self, method, url, **kwargs):
-        async with self.ports.make_async_client(proxy=self.proxy) as client:
-            response = await client.request(method, url, timeout=self.timeout, **kwargs)
+        try:
+            async with self.ports.make_async_client(proxy=self.proxy) as client:
+                response = await client.request(method, url, timeout=self.timeout, **kwargs)
+        except httpx.TransportError as exc:
+            # #129：抖音请求层不重试；传输层失败（DNS、连接、超时、重置）是网络整体故障，与候选无关，
+            # 按运行级失败停止本轮，不按候选跳过、不写 seen。
+            raise PlatformRuntimeError(
+                f"douyin network_unreachable: {type(exc).__name__}",
+                code="network_unreachable",
+            ) from exc
         self._raise_for_http_status(response)
         try:
             if response.content == b"" or response.text == "blocked":

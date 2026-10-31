@@ -75,6 +75,15 @@ XHS_FREQUENT_CHALLENGE_PATTERNS = re.compile(
     re.I,
 )
 TIMEOUT_PATTERNS = re.compile(r"Timeout|timeout|ETIMEDOUT|Navigation timeout|net::ERR_TIMED_OUT", re.I)
+# #129：通用四平台浏览器外请求重试用尽后仍是传输层失败时写出的稳定停止码（网络整体故障）。
+NETWORK_UNREACHABLE_PATTERNS = re.compile(r"(?<![A-Za-z0-9_])network_unreachable(?![A-Za-z0-9_])")
+NETWORK_UNREACHABLE_CLASSIFICATION = {
+    "status": "retry_wait",
+    "failure_type": "network_timeout",
+    "retryable": True,
+    "wait_seconds": 900,
+    "reason": "network_unreachable",
+}
 NO_IMAGE_PATTERNS = re.compile(r"No image-bearing|no_content_images|skipped_no_image", re.I)
 PARSE_PATTERNS = re.compile(r"JSONDecodeError|parse_failed|Selector|KeyError|ValueError", re.I)
 BLOCK_PATTERNS = re.compile(r"forbidden|access denied|拒绝访问|blocked_detected|blocked_by_policy", re.I)
@@ -268,6 +277,9 @@ def _summary_runtime_blocker_classification(
     reason = str(blocker.get("reason") or "")
     if failure_type not in RUNTIME_BLOCKING_FAILURE_TYPES or not reason:
         return None
+    if failure_type == "runtime_failed" and NETWORK_UNREACHABLE_PATTERNS.search(reason):
+        # #129：停止细节是网络整体故障时按网络超时等待重试，原因保留停止细节。
+        return {**NETWORK_UNREACHABLE_CLASSIFICATION, "reason": reason}
     record_classification = _latest_child_classification(summary)
     if record_classification.get("failure_type") == failure_type:
         return record_classification
@@ -679,6 +691,9 @@ def classify_attempt(
             "wait_seconds": 0,
             "reason": "no_content_images",
         }
+
+    if NETWORK_UNREACHABLE_PATTERNS.search(text):
+        return dict(NETWORK_UNREACHABLE_CLASSIFICATION)
 
     if TIMEOUT_PATTERNS.search(text):
         return {

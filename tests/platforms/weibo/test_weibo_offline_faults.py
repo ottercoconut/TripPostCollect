@@ -1,8 +1,9 @@
 """微博离线故障与前沿阶段特征化（T13）：只替换 httpx 传输与浏览器边界，固定现行行为。
 
-- 搜索请求 5 次/3 秒，只对传输层异常与 5xx 重试，重试用尽后原样上抛（reraise），并记
-  search_request_failed 运行级失败；401/403/418/432/429 直接分类为运行级阻断、不重试（#114）；
-- 长文详情 3 次/1 秒/reraise，传输异常转为非阻断的候选 skip；
+- 搜索请求 5 次/3 秒，只对传输层异常与 5xx 重试，重试用尽后原样上抛（reraise）；传输层异常记
+  network_unreachable 运行级失败（#129），其余请求失败记 search_request_failed；
+  401/403/418/432/429 直接分类为运行级阻断、不重试（#114）；
+- 长文详情 3 次/1 秒/reraise，重试用尽后的传输异常按运行级 network_unreachable 停止本轮（#129）；
 - 续跑先刷新顶部有限页，再从保存的深层前沿继续。
 """
 
@@ -158,7 +159,7 @@ async def test_search_transport_failure_is_runtime_failed_not_exhaustion(monkeyp
 
     stopped = events_of(state_path, "adaptive_search_stopped")
     assert [(item["stop_reason"], item["stop_detail"]) for item in stopped] == [
-        ("runtime_failed", "search_request_failed")
+        ("runtime_failed", "network_unreachable")
     ]
     assert stopped[0]["resume_page"] == 1
     assert events_of(state_path, "adaptive_batch_completed") == []
@@ -339,7 +340,7 @@ async def test_pong_login_rejection_returns_false(sleeps):
 
 
 @pytest.mark.asyncio
-async def test_long_text_detail_transport_error_skips_candidate_after_three_attempts(
+async def test_long_text_detail_transport_error_stops_run_after_three_attempts(
     monkeypatch, tmp_path, sleeps,
 ):
     transport = Transport({1: [mblog("long", long=True), mblog("short")]}, detail_fault={"long"})
@@ -347,16 +348,15 @@ async def test_long_text_detail_transport_error_skips_candidate_after_three_atte
 
     await crawler.search()
 
+    # #129：重试预算不变；用尽后仍是传输层失败按运行级 network_unreachable 停止，不按候选跳过。
     assert transport.calls.count("/detail/long") == 3
     assert sleeps.count(1) == 2
-    skipped = events_of(state_path, "candidate_skipped")
-    assert [(item["identity"], item["detail"], item["error_code"], item["attempts"]) for item in skipped] == [
-        ("long", "full_text_request_failed", "unexpected_detail_failure", 3)
-    ]
+    assert events_of(state_path, "candidate_skipped") == []
     stopped = events_of(state_path, "adaptive_search_stopped")[-1]
-    assert stopped["stop_reason"] == "source_exhausted"
-    assert stopped["resume_page"] == 2
-    crawler.update_weibo_note.assert_awaited_once()
+    assert (stopped["stop_reason"], stopped["stop_detail"]) == ("runtime_failed", "network_unreachable")
+    assert stopped["resume_page"] == 1
+    assert "long" not in stopped.get("candidate_identities", [])
+    crawler.update_weibo_note.assert_not_awaited()
 
 
 @pytest.mark.asyncio

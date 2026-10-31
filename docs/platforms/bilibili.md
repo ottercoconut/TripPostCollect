@@ -47,8 +47,9 @@ python scripts/crawl_runner.py \
 - 去重键为 article 内容 ID。
 
 正式记录使用 `image_post_with_followers_v1`。详情已观察且平台明确证明删除、私密或字段永久不符时，
-可以形成决定性无效结果；超时、空响应、HTTP 5xx 或解析失败必须先有限重试，耗尽后形成
-`candidate_skipped(failure_scope=post)`，不能伪装为永久无效。
+可以形成决定性无效结果；空响应、HTTP 5xx 或解析失败必须先有限重试，耗尽后形成
+`candidate_skipped(failure_scope=post)`，不能伪装为永久无效。超时、断连等网络传输失败重试耗尽后是
+运行级 `network_unreachable`，见下文“搜索、阻断与安全前沿”。
 
 ## 图片资产差异
 
@@ -77,9 +78,13 @@ Cookie。这些请求与图片请求的 `User-Agent` 都取自行为会话浏览
 HTTP 401/403/412/429、业务码 `-101/-509/-412/-352`、登录、授权、频控或风控属于运行级阻断：命中即停，
 不再重试；保留当前页且不把该 ID 写入 seen。搜索响应 `data.v_voucher` 是风控验证凭据，以
 `captcha_detected/bilibili_article_search_risk_control:v_voucher` 停止。nav、搜索、详情与关系统计共用
-同一错误分类：HTTP 5xx、超时、断连与非法 JSON 有限重试（3 次），仍失败时 nav/搜索按
-`runtime_failed:bilibili_<stage>_failed:transport` 停止，详情/关系统计形成候选跳过并保留错误码。
-同一作者的关系统计失败不进缓存，下一篇同作者候选重新请求。
+同一错误分类：HTTP 5xx、超时、断连与非法 JSON 有限重试（3 次）。重试用尽后仍是网络传输失败
+（DNS、连接失败、超时、连接重置）是网络整体故障，与候选无关（#129）：nav、搜索、详情与关系统计都按
+`runtime_failed:bilibili_<stage>_failed:network_unreachable` 停止，不写 `candidate_skipped`、不进 seen；
+runner 记为 `network_timeout` 并等待 900 秒重试。非法 JSON 不是网络故障：nav/搜索按
+`bilibili_<stage>_failed:parse` 停止，详情/关系统计仍形成候选跳过并保留错误码。
+同一作者的关系统计失败不进缓存，下一篇同作者候选重新请求。正文图片下载不在此列，仍记
+`image_download_retryable`。
 
 来源耗尽只接受平台总数证据：首页 `numResults=0`（`stop_detail=no_results`），或当前页码大于
 `numPages` 且结果为空（`stop_detail=empty_page`）；停止事件同时记录 `source_num_pages` 与

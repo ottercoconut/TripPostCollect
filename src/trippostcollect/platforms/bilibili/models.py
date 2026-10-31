@@ -18,6 +18,7 @@ class BilibiliArticleDetailError(RuntimeError):
         attempts: int = 1,
         retry_wait_seconds: float = 0.0,
         runtime_blocking: bool = False,
+        network_unreachable: bool = False,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
@@ -25,6 +26,8 @@ class BilibiliArticleDetailError(RuntimeError):
         self.attempts = attempts
         self.retry_wait_seconds = retry_wait_seconds
         self.runtime_blocking = runtime_blocking
+        # #129：网络传输失败（DNS、连接、超时、重置）；仍按原预算重试，用尽后由调用方按运行级失败停止。
+        self.network_unreachable = network_unreachable
 
 
 class BilibiliFollowerFetchError(RuntimeError):
@@ -36,11 +39,14 @@ class BilibiliFollowerFetchError(RuntimeError):
         code: int | None,
         retryable: bool,
         runtime_blocking: bool,
+        network_unreachable: bool = False,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
         self.runtime_blocking = runtime_blocking
+        # #129：同 BilibiliArticleDetailError.network_unreachable。
+        self.network_unreachable = network_unreachable
 
 
 class BilibiliRuntimeBlocked(RuntimeError):

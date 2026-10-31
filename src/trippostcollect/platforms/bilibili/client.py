@@ -57,6 +57,10 @@ BILIBILI_RUNTIME_BLOCKING_CODES = frozenset({-101, -509, -412, -352})
 BILIBILI_RUNTIME_BLOCKING_HTTP_STATUSES = frozenset({401, 403, 412, 429})
 
 
+# #129：重试用尽后仍是网络传输失败时的运行级停止细节后缀。
+BILIBILI_NETWORK_UNREACHABLE = "network_unreachable"
+
+
 # 图片重定向只跟随 B站图床；目标是其他主机时拒绝跟随。
 BILIBILI_IMAGE_REDIRECT_HOSTS = ("hdslb.com", "biliimg.com")
 
@@ -109,10 +113,19 @@ def fetch_bilibili_image_bytes(
 
 
 def bilibili_request_stop_detail(stage: str, exc: BilibiliArticleDetailError) -> str:
-    """分类后的请求错误的运行级停止细节：阶段、是否阻断，以及平台码、HTTP 码或 transport。"""
+    """分类后的请求错误的运行级停止细节：阶段、是否阻断，以及平台码、HTTP 码、network_unreachable 或 parse。
+
+    #129：重试用尽后的网络传输失败记 ``network_unreachable``；其余没有平台码与 HTTP 码的失败
+    （坏 JSON、非对象响应）记 ``parse``。
+    """
 
     kind = "blocked" if exc.runtime_blocking else "failed"
-    code = exc.code if exc.code is not None else "transport"
+    if exc.code is not None:
+        code = exc.code
+    elif getattr(exc, "network_unreachable", False):
+        code = BILIBILI_NETWORK_UNREACHABLE
+    else:
+        code = "parse"
     return f"bilibili_{stage}_{kind}:{code}"
 
 
@@ -137,11 +150,15 @@ def _request_bilibili_json(
         BilibiliArticleDetailError
     ),
 ) -> dict[str, Any]:
-    """发出一个 B站 JSON 请求：阻断状态码命中即停，5xx、超时、断连和坏 JSON 可重试。"""
+    """发出一个 B站 JSON 请求：阻断状态码命中即停，5xx、超时、断连和坏 JSON 可重试。
+
+    #129：超时、断连等网络传输失败带 ``network_unreachable=True``，仍按原预算重试；重试用尽后由
+    调用方按运行级失败停止，不按候选跳过。坏 JSON 只是可重试的候选错误。
+    """
 
     try:
         with urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+            body = response.read()
     except HTTPError as exc:
         raise error_type(
             f"{label} HTTP {exc.code}",
@@ -149,9 +166,19 @@ def _request_bilibili_json(
             code=exc.code,
             runtime_blocking=exc.code in BILIBILI_RUNTIME_BLOCKING_HTTP_STATUSES,
         ) from exc
-    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+    except (URLError, TimeoutError, OSError) as exc:
         raise error_type(
-            f"{label} transport/parse failure: {type(exc).__name__}",
+            f"{label} network failure: {type(exc).__name__}",
+            retryable=True,
+            code=None,
+            runtime_blocking=False,
+            network_unreachable=True,
+        ) from exc
+    try:
+        payload = json.loads(body.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as exc:
+        raise error_type(
+            f"{label} parse failure: {type(exc).__name__}",
             retryable=True,
             code=None,
             runtime_blocking=False,
