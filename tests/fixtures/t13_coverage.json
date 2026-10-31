@@ -1866,7 +1866,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t01.py::test_bilibili_stealth_comes_from_package",
+       "function": "tests/test_adapter_t01.py::test_bilibili_resources_not_read_from_fork",
        "lane": "component"
       },
       {

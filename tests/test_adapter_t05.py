@@ -9,7 +9,6 @@ from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
 import json
-from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -20,7 +19,7 @@ from playwright.async_api import Error as PlaywrightError
 from tenacity import RetryError
 
 from support import legacy_expectations as expectations
-from support import ua_from_browser_deviation, weibo_fetch_deviation
+from support import stealth_removal_deviation, ua_from_browser_deviation, weibo_fetch_deviation
 from support.stable_png import solid_png
 from support.weibo_adapter import ROOT, settings
 from trippostcollect.application import events
@@ -115,7 +114,8 @@ async def drive(directory, monkeypatch, scenario, post_repair):
             trace.append(("add_cookies", values))
 
         async def add_init_script(self, **kwargs):
-            trace.append(("stealth", Path(kwargs["path"]).read_bytes()))
+            # #127：微博不再注入任何 init script；出现即进入轨迹并使比较失败（见 support.stealth_removal_deviation）。
+            trace.append(("init_script", kwargs))
 
         async def close(self):
             trace.append(("close",))
@@ -228,7 +228,7 @@ async def drive(directory, monkeypatch, scenario, post_repair):
     await crawler.close()
     artifacts = {str(path.relative_to(data_root)): path.read_bytes() for path in data_root.rglob("*") if path.is_file()}
     execution_events = json.loads(state.read_text())["events"]
-    # 保存可审阅请求和事件；stealth 资源用哈希标识，图片与 JSONL 原字节保留在 batch 下。
+    # 保存可审阅请求和事件；bytes 用哈希标识，图片与 JSONL 原字节保留在 batch 下。
     (directory / "trace.json").write_text(json.dumps(
         {"trace": trace, "events": execution_events, "failure": failure,
          "artifact_sha256": {name: sha256(value).hexdigest() for name, value in artifacts.items()}},
@@ -263,9 +263,9 @@ def original_image_url(url):
 
 
 def frozen_drive(scenario, post_repair):
-    return ua_from_browser_deviation.weibo(weibo_fetch_deviation.drive(
+    return stealth_removal_deviation.weibo(ua_from_browser_deviation.weibo(weibo_fetch_deviation.drive(
         expectations.load(*T14_DRIVE, f"{scenario}-repair{post_repair}"), original_url=original_image_url,
-    ))
+    )))
 
 
 @pytest.mark.asyncio

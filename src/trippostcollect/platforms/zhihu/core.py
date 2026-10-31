@@ -26,7 +26,6 @@ from urllib.parse import quote
 from playwright.async_api import BrowserContext, BrowserType, Page, Playwright
 from tenacity import RetryError
 from trippostcollect.application.contracts import ImageStagingError, ZhihuSettings, ZhihuPorts
-from trippostcollect.core import resources
 from trippostcollect.core.paths import PROFILE_VIEWPORT, platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError, is_runtime_blocking_image_error
@@ -201,9 +200,6 @@ class ZhihuCrawler:
                 self.browser_context = await self.launch_browser(
                     chromium, None, None, headless=self.settings.HEADLESS
                 )
-                # stealth.min.js is a js script to prevent the website from detecting the crawler.
-                with resources.path("js/stealth.min.js") as stealth_path:
-                    await self.browser_context.add_init_script(path=str(stealth_path))
 
             self.context_page = await self.browser_context.new_page()
             await self._close_stale_pages(self.context_page)

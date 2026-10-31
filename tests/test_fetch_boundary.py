@@ -11,9 +11,9 @@
    `__INITIAL_STATE__`；`STATE_SCRIPTS` 的脚本名只能作为 `read_state(` 的参数被引用，登记表本身只能
    作为 `state_scripts=` 交给通道，不得被下标取用。
 
-盲区：`runtime/browser.py` 以 `add_init_script(path=...)` 注入的 stealth.min.js 是文件而非字符串常量，
-不在本检查范围内，归 #72。小红书正式轮自 #83 起不注入任何页面脚本，由
-`tests/platforms/xhs/test_xhs_login_contract.py::test_startup_injects_no_page_scripts` 覆盖。
+`add_init_script(path=...)` 注入的文件脚本不是字符串常量，不在本检查范围内；#127 起通用四平台已不再注入
+stealth.min.js，包内也不再有该资源，由 `tests/test_stealth_removal_issue127.py` 覆盖。小红书正式轮自 #83 起
+不注入任何页面脚本，由 `tests/platforms/xhs/test_xhs_login_contract.py::test_startup_injects_no_page_scripts` 覆盖。
 `runtime/page_readiness.py` 只供页面证据使用，不在扫描清单内。
 
 另有一条不分是否纳入门禁、扫描全部平台目录的规则 L3（#114）：Playwright `page.request` /

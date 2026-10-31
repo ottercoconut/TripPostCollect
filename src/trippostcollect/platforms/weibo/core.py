@@ -33,7 +33,6 @@ import httpx
 from playwright.async_api import BrowserContext, BrowserType, Page, Playwright, async_playwright
 
 from trippostcollect.application.contracts import ImageStagingError, WeiboPorts
-from trippostcollect.core import resources
 from trippostcollect.core.paths import PROFILE_VIEWPORT, platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from . import parser as weibo_store
@@ -76,11 +75,6 @@ class WeiboCrawler:
                 # Launch a browser context.
                 chromium = playwright.chromium
                 self.browser_context = await self.launch_browser(chromium, None, None, headless=self.config.HEADLESS)
-
-                # stealth.min.js is a js script to prevent the website from detecting the crawler.
-                with resources.path("js/stealth.min.js") as stealth_path:
-                    await self.browser_context.add_init_script(path=str(stealth_path))
-
 
             self.context_page = await self.browser_context.new_page()
             await self.context_page.goto(self.index_url)

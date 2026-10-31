@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from trippostcollect.application.contracts import BilibiliBehaviorPorts
-from trippostcollect.core import resources
 from trippostcollect.core.paths import ensure_dir
 from trippostcollect.records.formal import VIDEO_URL_RE
 
@@ -55,14 +53,6 @@ async def run_bilibili_behavior_session(
             ignore_default_args=["--enable-automation"],
         )
         try:
-            with ExitStack() as resource_paths:
-                try:
-                    stealth_script = resource_paths.enter_context(resources.path("js/stealth.min.js"))
-                except FileNotFoundError:
-                    # 只容忍资源缺失，注入阶段的异常仍交给原有清理流程。
-                    stealth_script = None
-                if stealth_script is not None and stealth_script.is_file():
-                    await context.add_init_script(path=str(stealth_script))
             await install_runtime_hints(context)
 
             async def block_video_media(route) -> None:
