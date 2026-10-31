@@ -18,6 +18,7 @@ import httpx
 import pytest
 
 from support import legacy_expectations as expectations
+from support import runtime_failed_batch_deviation
 from support import ua_from_browser_deviation
 from support import zhihu_login_paging_deviation as deviation
 from support.stable_png import solid_png
@@ -278,11 +279,14 @@ T14_DRIVE = ("T07", "request_event_artifacts")
 
 
 def legacy_expectation(scenario):
-    """固化预期经 #113、#127 偏离变换（见 support.zhihu_login_paging_deviation、ua_from_browser_deviation）后用于根侧比较。"""
+    """固化预期经 #113、#127、#133 偏离变换（见 support.zhihu_login_paging_deviation、ua_from_browser_deviation、
+    runtime_failed_batch_deviation）后用于根侧比较。"""
     expected = ua_from_browser_deviation.zhihu(expectations.load(*T14_DRIVE, scenario))
     if scenario == "login_expired":
-        return deviation.login_expired_expectation(expected)
-    return deviation.zhihu_login_paging(expected, scenario)
+        expected = deviation.login_expired_expectation(expected)
+    else:
+        expected = deviation.zhihu_login_paging(expected, scenario)
+    return runtime_failed_batch_deviation.zhihu_drive(expected, scenario)
 
 
 @pytest.mark.asyncio

@@ -317,6 +317,8 @@ python scripts/crawl_runner.py \
 - `last_summary_path` 非空时，对应摘要及 JSONL 必须存在，否则冻结应失败。
 - child 结束后，摘要中的前沿、SQLite checkpoint 和 `last_run_id` 必须一致。
 - 未完成尾批不得推进；边界页允许下轮重取并依靠已知 ID 前置过滤。
+- 本批内已记运行级失败时，共享累加器强制本批 `batch_complete=false`，恢复位置沿用失败页，
+  即使失败的是本页最后一个候选，checkpoint 也不越过失败页（#133）。
 - `--no-import` 不得写 checkpoint。
 
 先列出精确租约；`list` 不公开 owner token，只显示其 SHA-256 供审计：
