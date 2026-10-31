@@ -203,6 +203,7 @@ from trippostcollect.scheduler.discovery import (
 from trippostcollect.runtime.browser_runtime import (
     browser_launch_environment,
     browser_runtime_args,
+    launch_profile_context,
 )
 
 
@@ -411,6 +412,7 @@ async def run_bilibili_behavior_session(
             cookie_snapshot_path=cookie_snapshot_path,
             cookie_names_from_header=cookie_names_from_header,
             required_cookie_names=required_cookie_names,
+            launch_profile_context=launch_profile_context,
         ),
     )
 

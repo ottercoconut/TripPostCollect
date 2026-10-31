@@ -24,7 +24,7 @@ from types import ModuleType, SimpleNamespace
 from PIL import Image
 import pytest
 
-from support import douyin_full_scan_deviation, fork_removal_deviation, ua_from_browser_deviation
+from support import douyin_full_scan_deviation, fork_removal_deviation, shared_launch_deviation, ua_from_browser_deviation
 from trippostcollect.application import collection, reporting, visit_gate
 from trippostcollect.artifacts.image_candidates import content_image_candidates
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
@@ -33,7 +33,7 @@ from trippostcollect.core.execution_state import FrozenExecutionState
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.platforms.bilibili import core as bilibili_core
 from trippostcollect.platforms.bilibili.models import BilibiliSearchPage
-from trippostcollect.runtime import process
+from trippostcollect.runtime import browser_runtime, process
 from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_path
 from trippostcollect.xhs.engagement import engagement_evidence_path, summarize_engagement_evidence
 from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
@@ -476,8 +476,8 @@ def test_a_other_top_level_definitions_unchanged():
     ledger = json.loads((ROOT / "docs/adapter-ledger/symbols.json").read_text())["rows"]
     names |= {r["qualname"].split(".")[0] for r in ledger
               if r["card"] == "T09" and r["file"] == "scripts/mediacrawler_crawl.py"}
-    old = ast.parse(ua_from_browser_deviation.t11_source(
-        t115_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text())))
+    old = ast.parse(shared_launch_deviation.t11_source(ua_from_browser_deviation.t11_source(
+        t115_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text()))))
     new = (ROOT / "scripts/mediacrawler_crawl.py").read_text()
     assert len(ROWS) == 46 and set(AST_RULES) == {r["qualname"] for r in ROWS}
     for node in old.body:
@@ -536,6 +536,9 @@ def baseline(monkeypatch):
     text = t115_authorized_source(text)
     # #127 有意偏离：B站请求 UA 取自本轮浏览器，写死常量退出，图片薄包装转发会话 UA。
     text = ua_from_browser_deviation.t11_source(text)
+    # #136 有意偏离：B站行为会话薄包装多传与 warmup 共用的持久 context 启动函数。
+    text = shared_launch_deviation.t11_source(text)
+    namespace["launch_profile_context"] = browser_runtime.launch_profile_context
     namespace["VISIT_GATED_PLATFORMS"] = visit_gate.VISIT_GATED_PLATFORMS
     namespace["validate_summary_content_visits"] = visit_gate.validate_summary_content_visits
     namespace["content_visits_path"] = content_visits_path

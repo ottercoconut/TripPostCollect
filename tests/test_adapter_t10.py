@@ -20,7 +20,7 @@ from urllib.parse import parse_qsl
 
 import pytest
 
-from support import fork_removal_deviation
+from support import fork_removal_deviation, shared_launch_deviation
 from trippostcollect.application import inputs, page_evidence, repair, warmup
 from trippostcollect.core import paths as core_paths
 from trippostcollect.runtime import cookies, page_readiness
@@ -230,6 +230,8 @@ def test_migrated_ast(row):
             source = t112_login_api_check(source, name)
         elif name == "launch_login_context":
             source = t127_snapshot_user_agent(t83_sandbox_enabled(source), name)
+            # #136：启动配置原样下沉到共享函数，warmup 改为委托调用（见 support.shared_launch_deviation）。
+            source = shared_launch_deviation.t10_launch_login_context(source)
         elif name == "current_state":
             source = t115_bilibili_nav_login(source)
     if row["disposition"] == "薄":

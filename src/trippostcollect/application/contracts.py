@@ -157,6 +157,8 @@ class WeiboPorts:
     browser_manager: Callable[..., Any]
     project_browser_args: Callable[..., Any]
     run_required_human_behavior: Callable[..., Any]
+    # #136：标准模式持久 context 与 warmup 共用的启动函数（runtime.browser_runtime.launch_profile_context）。
+    launch_profile_context: Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -176,6 +178,8 @@ class DouyinCrawlerPorts:
     content_sink: Callable[[str], ContentSink]
     image_stager: Callable[[], ImageStager]
     fetch_image_bytes_with_retry: Callable[..., Any]
+    # #136：标准模式持久 context 与 warmup 共用的启动函数（runtime.browser_runtime.launch_profile_context）。
+    launch_profile_context: Callable[..., Any]
 
 
 class XhsRuntimeSupervisionError(RuntimeError):
@@ -240,6 +244,8 @@ class BilibiliBehaviorPorts:
     cookie_snapshot_path: Callable[..., Any]
     cookie_names_from_header: Callable[..., Any]
     required_cookie_names: Callable[..., Any]
+    # #136：行为会话与 warmup 共用的持久 context 启动函数（runtime.browser_runtime.launch_profile_context）。
+    launch_profile_context: Callable[..., Any]
 
 
 @dataclass(frozen=True)

@@ -76,7 +76,10 @@ class WeiboCrawler:
                 chromium = playwright.chromium
                 self.browser_context = await self.launch_browser(chromium, None, None, headless=self.config.HEADLESS)
 
-            self.context_page = await self.browser_context.new_page()
+            # #136：标准模式持久 context 复用自带的第一页，不另开空白页；没有页面时才新建。CDP 与非持久分支照旧新建。
+            persistent = self.config.SAVE_LOGIN_STATE and not self.config.ENABLE_CDP_MODE
+            pages = self.browser_context.pages if persistent else []
+            self.context_page = pages[0] if pages else await self.browser_context.new_page()
             await self.context_page.goto(self.index_url)
             await asyncio.sleep(2)
 
@@ -604,17 +607,11 @@ class WeiboCrawler:
         """Launch browser and create browser context"""
         logger.info("[WeiboCrawler.launch_browser] Begin create browser context ...")
         if self.config.SAVE_LOGIN_STATE:
-            user_data_dir = str(platform_profile_dir("weibo"))
-            browser_context = await chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                accept_downloads=True,
-                headless=headless,
-                proxy=playwright_proxy,  # type: ignore
-                viewport=PROFILE_VIEWPORT,
-                user_agent=user_agent,
-                args=self.ports.project_browser_args(),
+            # #136：与 warmup 共用持久 context 启动配置（沙箱开启、视口、locale/timezone），不传 UA。
+            # 正式流程 ENABLE_IP_PROXY=False，playwright_proxy 恒为 None，共享配置不带代理。
+            return await self.ports.launch_profile_context(
+                chromium, platform_profile_dir("weibo"), headless=headless,
             )
-            return browser_context
         else:
             browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
             browser_context = await browser.new_context(viewport=PROFILE_VIEWPORT, user_agent=user_agent)

@@ -1,5 +1,7 @@
 """#127 第 1 项：浏览器外请求的 UA 与浏览器自报的 navigator.userAgent 一致，不再写死或随机。
 
+#136：微博标准模式持久 context 与 B站行为会话改由 ``runtime.browser_runtime.launch_profile_context`` 启动，
+与 warmup 同一套参数，kwargs 中不再出现 ``user_agent`` 键；对应断言随之改为“无 user_agent 键”。
 全部离线：假 page/context/playwright，不访问网络、不启动浏览器。
 """
 
@@ -69,12 +71,21 @@ def _zhihu_crawler(save_login_state: bool):
     return crawler
 
 
-def _weibo_crawler(save_login_state: bool):
+def _shared_launch(monkeypatch):
+    """#136：共享启动函数照真实实现执行，运行时参数与环境取替身值，不在仓库下建目录。"""
+    from trippostcollect.runtime import browser_runtime
+
+    monkeypatch.setattr(browser_runtime, "browser_runtime_args", lambda: [])
+    monkeypatch.setattr(browser_runtime, "browser_launch_environment", lambda: {})
+    return browser_runtime.launch_profile_context
+
+
+def _weibo_crawler(save_login_state: bool, monkeypatch):
     from trippostcollect.platforms.weibo import core
 
     crawler = object.__new__(core.WeiboCrawler)
     crawler.config = SimpleNamespace(SAVE_LOGIN_STATE=save_login_state)
-    crawler.ports = SimpleNamespace(project_browser_args=lambda: [])
+    crawler.ports = SimpleNamespace(project_browser_args=lambda: [], launch_profile_context=_shared_launch(monkeypatch))
     return crawler
 
 
@@ -99,15 +110,22 @@ def test_crawler_start_does_not_force_user_agent(platform, monkeypatch) -> None:
 
 @pytest.mark.parametrize("platform", ["zhihu", "weibo"])
 @pytest.mark.parametrize("save_login_state", [True, False])
-def test_crawler_viewport_matches_warmup(platform, save_login_state) -> None:
+def test_crawler_viewport_matches_warmup(platform, save_login_state, monkeypatch) -> None:
     from trippostcollect.core.paths import PROFILE_VIEWPORT
 
-    crawler = _zhihu_crawler(save_login_state) if platform == "zhihu" else _weibo_crawler(save_login_state)
+    if platform == "zhihu":
+        crawler = _zhihu_crawler(save_login_state)
+    else:
+        crawler = _weibo_crawler(save_login_state, monkeypatch)
     chromium = FakeChromium()
     asyncio.run(type(crawler).launch_browser(crawler, chromium, None, None, True))
     launched = (chromium.persistent or chromium.contexts)[0]
     assert launched["viewport"] == WARMUP_VIEWPORT == PROFILE_VIEWPORT
-    assert launched["user_agent"] is None
+    if platform == "weibo" and save_login_state:
+        # #136：微博标准模式持久 context 走共享启动配置，不传 user_agent 键。
+        assert "user_agent" not in launched
+    else:
+        assert launched["user_agent"] is None
 
 
 def test_warmup_viewport_uses_shared_constant(monkeypatch, tmp_path) -> None:
@@ -389,6 +407,7 @@ def test_bilibili_behavior_session_exports_page_user_agent(monkeypatch, tmp_path
     ports = SimpleNamespace(
         discover_cdp_browser_path=lambda: None, profile_dir_for=lambda key: tmp_path / "profile",
         async_playwright=Playwright, browser_runtime_args=lambda: [], browser_launch_environment=lambda: {},
+        launch_profile_context=_shared_launch(monkeypatch),
         install_runtime_hints=hints, run_page_behavior=behavior, write_evidence=lambda *args: None,
         platform_cookie_url=cookies.platform_cookie_url, cookies_to_header=cookies.cookies_to_header,
         cookie_snapshot_path=lambda key: tmp_path / "snapshot.json",

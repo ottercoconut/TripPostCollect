@@ -29,13 +29,14 @@ from support import douyin_116_deviation
 from support import douyin_full_scan_deviation
 from support import stealth_removal_deviation
 from support import runtime_failed_batch_deviation
+from support import shared_launch_deviation
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.core import paths
 from trippostcollect.artifacts import jsonl
 from trippostcollect.platforms import entry
 from trippostcollect.platforms.douyin import client, core, login, login_support, parser, signer
-from trippostcollect.runtime import image_retry
+from trippostcollect.runtime import browser_runtime, image_retry
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -314,6 +315,9 @@ async def drive(root, patch, scenario, fallback):
     patch.setattr(image_retry, "IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS", (0.0, 0.0))
     patch.setattr(login.DouYinLogin.check_login_state.retry, "sleep", sleep)
     patch.setattr(signer, "douyin_sign_obj", Signer())
+    # #136：共享启动函数的运行时参数与环境取替身值，不在仓库 data/runtime 下建目录、不读真实环境。
+    patch.setattr(browser_runtime, "browser_runtime_args", lambda: [])
+    patch.setattr(browser_runtime, "browser_launch_environment", lambda: {})
     dependencies = entry.douyin_dependencies(config)
     ports = dependencies["ports"]
     # 日期函数是 writer 的默认参数，冻结两边真实 writer 的日期回调。
@@ -363,13 +367,14 @@ def current_douyin_profile(tmp_path):
 
 def legacy_drive_expectation(tmp_path, scenario, fallback):
     """固化预期依次登记 #59 profile、#116 正文来源与请求头、#124 搜索只经截获、#127 不注入 stealth、
-    #133 运行级失败批次不越过失败页五项偏离。"""
+    #133 运行级失败批次不越过失败页、#136 与 warmup 共用启动配置并复用第一页六项偏离。"""
     expected = expectations.load(*T14_DRIVE, f"{scenario}-fallback{fallback}")
     expected = deviation.douyin_profile(expected, current_douyin_profile(tmp_path))
     expected = douyin_116_deviation.douyin_drive(expected, scenario)
     expected = douyin_full_scan_deviation.douyin_drive(expected, scenario)
     expected = stealth_removal_deviation.douyin(expected)
-    return runtime_failed_batch_deviation.douyin_drive(expected, scenario)
+    expected = runtime_failed_batch_deviation.douyin_drive(expected, scenario)
+    return shared_launch_deviation.douyin(expected)
 
 
 @pytest.mark.asyncio

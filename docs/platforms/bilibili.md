@@ -65,7 +65,8 @@ SQLite 事务。共享错误码和重试规则不在本文重复，见[正式契
 ## 搜索、阻断与安全前沿
 
 article 搜索前必须在持久 profile 完成共享行为阶段，并让 nav、搜索、详情和关系统计请求复用同一会话
-Cookie。这些请求与图片请求的 `User-Agent` 都取自行为会话浏览器在关闭前读到的 `navigator.userAgent`，
+Cookie。行为会话与 warmup 共用同一套持久 context 启动配置（沙箱开启、视口 1280×900、`zh-CN` 与
+`Asia/Shanghai`，#136），不再单设 1440×900 视口与 `screen`。这些请求与图片请求的 `User-Agent` 都取自行为会话浏览器在关闭前读到的 `navigator.userAgent`，
 不写死版本串；拿不到 UA 时在发出任何请求前以 `runtime_failed/cookie_export_missing_user_agent` 停止（#127）。
 `scripts/repair_bilibili_articles.py` 不开浏览器，从 warmup 快照读取 Cookie 与 `user_agent`；快照缺
 `user_agent`（#127 前写出的旧快照）时以 `login_required`（错误 `cookie_snapshot_missing_user_agent`）
