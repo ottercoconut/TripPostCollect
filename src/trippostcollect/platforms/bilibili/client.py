@@ -61,16 +61,13 @@ BILIBILI_RUNTIME_BLOCKING_HTTP_STATUSES = frozenset({401, 403, 412, 429})
 BILIBILI_IMAGE_REDIRECT_HOSTS = ("hdslb.com", "biliimg.com")
 
 
-BILIBILI_BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/138.0.0.0 Safari/537.36"
-)
+# #127：B站请求的 User-Agent 由调用方给出，取自本轮行为会话浏览器的 navigator.userAgent（repair 取自
+# warmup 快照），不再写死版本串。
 
 
-def bilibili_detail_headers(post_id: str, cookie_header: str = "") -> dict[str, str]:
+def bilibili_detail_headers(post_id: str, cookie_header: str = "", *, user_agent: str) -> dict[str, str]:
     headers = {
-        "User-Agent": BILIBILI_BROWSER_USER_AGENT,
+        "User-Agent": user_agent,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9",
         "Origin": "https://www.bilibili.com",
@@ -81,10 +78,10 @@ def bilibili_detail_headers(post_id: str, cookie_header: str = "") -> dict[str, 
     return headers
 
 
-def bilibili_image_headers(post_id: str) -> dict[str, str]:
+def bilibili_image_headers(post_id: str, *, user_agent: str) -> dict[str, str]:
     # 图床不需要登录态，bilibili.com 的 Cookie 不发往 CDN。
     return {
-        "User-Agent": BILIBILI_BROWSER_USER_AGENT,
+        "User-Agent": user_agent,
         "Accept": "image/avif,image/webp,image/png,image/jpeg,image/gif;q=0.9",
         "Accept-Language": "zh-CN,zh;q=0.9",
         "Referer": f"https://www.bilibili.com/read/cv{post_id}/",
@@ -95,6 +92,7 @@ def fetch_bilibili_image_bytes(
     source_url: str,
     post_id: str,
     *,
+    user_agent: str,
     ports: BilibiliImageFetchPorts,
 ) -> RemoteImagePreview:
     fetch_remote_image_bytes = ports.fetch_remote_image_bytes
@@ -102,7 +100,7 @@ def fetch_bilibili_image_bytes(
     SUPPORTED_IMAGE_MIME_TYPES = ports.SUPPORTED_IMAGE_MIME_TYPES
     return fetch_remote_image_bytes(
         source_url,
-        headers=bilibili_image_headers(post_id),
+        headers=bilibili_image_headers(post_id, user_agent=user_agent),
         max_bytes=DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
         timeout_seconds=30,
         allowed_media_types=SUPPORTED_IMAGE_MIME_TYPES,
@@ -186,10 +184,10 @@ def _with_transient_retry(call: Callable[[], Any]) -> Any:
     raise AssertionError("retry loop must return or raise")
 
 
-def fetch_bilibili_article_detail(post_id: str, cookie_header: str = "") -> dict[str, Any]:
+def fetch_bilibili_article_detail(post_id: str, cookie_header: str = "", *, user_agent: str) -> dict[str, Any]:
     request = Request(
         BILIBILI_ARTICLE_DETAIL_URL + "?" + urlencode({"id": post_id}),
-        headers=bilibili_detail_headers(post_id, cookie_header),
+        headers=bilibili_detail_headers(post_id, cookie_header, user_agent=user_agent),
     )
     payload = _request_bilibili_json(request, "bilibili article detail")
     code = _payload_code(payload)
@@ -219,13 +217,15 @@ def fetch_bilibili_article_detail(post_id: str, cookie_header: str = "") -> dict
 def fetch_bilibili_article_detail_with_retry(
     post_id: str,
     cookie_header: str = "",
+    *,
+    user_agent: str,
 ) -> tuple[dict[str, Any], int, float]:
     last_error: BilibiliArticleDetailError | None = None
     retry_wait_seconds = 0.0
     for attempt in range(1, BILIBILI_DETAIL_MAX_ATTEMPTS + 1):
         try:
             return (
-                fetch_bilibili_article_detail(post_id, cookie_header),
+                fetch_bilibili_article_detail(post_id, cookie_header, user_agent=user_agent),
                 attempt,
                 round(retry_wait_seconds, 3),
             )
@@ -244,8 +244,8 @@ def fetch_bilibili_article_detail_with_retry(
     raise last_error
 
 
-def fetch_bilibili_wbi_keys(cookie_header: str = "") -> tuple[str, str]:
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.bilibili.com/"}
+def fetch_bilibili_wbi_keys(cookie_header: str = "", *, user_agent: str) -> tuple[str, str]:
+    headers = {"User-Agent": user_agent, "Referer": "https://www.bilibili.com/"}
     if cookie_header:
         headers["Cookie"] = cookie_header
     request = Request(BILIBILI_NAV_URL, headers=headers)
@@ -307,6 +307,7 @@ def fetch_bilibili_article_page(
     *,
     wbi_keys: tuple[str, str] | None = None,
     cookie_header: str = "",
+    user_agent: str,
 ) -> BilibiliSearchPage:
     params = {
         "keyword": keyword,
@@ -314,10 +315,10 @@ def fetch_bilibili_article_page(
         "page_size": BILIBILI_ARTICLE_PAGE_SIZE,
         "search_type": "article",
     }
-    img_key, sub_key = wbi_keys or fetch_bilibili_wbi_keys(cookie_header)
+    img_key, sub_key = wbi_keys or fetch_bilibili_wbi_keys(cookie_header, user_agent=user_agent)
     signed_params = sign_bilibili_wbi_params(params, img_key, sub_key)
     headers = {
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": user_agent,
         "Referer": "https://search.bilibili.com/article?keyword=" + quote(keyword),
     }
     if cookie_header:
@@ -326,11 +327,11 @@ def fetch_bilibili_article_page(
     return _with_transient_retry(lambda: _fetch_bilibili_article_page_once(request))
 
 
-def fetch_bilibili_follower_count(creator_id: str, cookie_header: str = "") -> int | None:
+def fetch_bilibili_follower_count(creator_id: str, cookie_header: str = "", *, user_agent: str) -> int | None:
     if not creator_id:
         return None
     headers = {
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": user_agent,
         "Referer": f"https://space.bilibili.com/{creator_id}",
     }
     if cookie_header:

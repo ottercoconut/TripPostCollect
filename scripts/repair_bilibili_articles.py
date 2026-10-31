@@ -621,11 +621,24 @@ def scoped_state_counts(
 def fetch_repair_article_detail(
     post_id: str,
     cookie_header: str,
+    *,
+    user_agent: str,
 ) -> tuple[dict[str, Any], int, float]:
-    return fetch_bilibili_article_detail(post_id, cookie_header), 1, 0.0
+    return fetch_bilibili_article_detail(post_id, cookie_header, user_agent=user_agent), 1, 0.0
 
 
-def check_bilibili_login(cookie_header: str) -> dict[str, Any]:
+def snapshot_session(snapshot: dict[str, Any]) -> tuple[str, str]:
+    """#127：从 warmup 快照取 Cookie 与浏览器 UA；快照缺 UA 时不回退写死值，要求重跑 warmup。"""
+
+    user_agent = str(snapshot.get("user_agent") or "")
+    if not user_agent:
+        raise BilibiliRepairLoginRequiredError(
+            "cookie_snapshot_missing_user_agent: rerun scripts/login_warmup.py --targets bilibili"
+        )
+    return str(snapshot.get("cookie_header") or ""), user_agent
+
+
+def check_bilibili_login(cookie_header: str, *, user_agent: str) -> dict[str, Any]:
     if not cookie_header or "SESSDATA=" not in cookie_header:
         raise BilibiliRepairLoginRequiredError(
             "Bilibili cookie snapshot has no active SESSDATA"
@@ -633,7 +646,7 @@ def check_bilibili_login(cookie_header: str) -> dict[str, Any]:
     request = Request(
         BILIBILI_NAV_URL,
         headers={
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": user_agent,
             "Accept": "application/json, text/plain, */*",
             "Referer": "https://www.bilibili.com/",
             "Cookie": cookie_header,
@@ -1491,9 +1504,9 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
             invocation["report_path"] = str(report_path)
             return 3, invocation
         cookie = load_cookie_snapshot("bilibili") or {}
-        cookie_header = str(cookie.get("cookie_header") or "")
         try:
-            invocation["login_check"] = check_bilibili_login(cookie_header)
+            cookie_header, user_agent = snapshot_session(cookie)
+            invocation["login_check"] = check_bilibili_login(cookie_header, user_agent=user_agent)
         except BilibiliRepairLoginRequiredError as exc:
             record_login_stop(
                 state_connection,
@@ -1555,7 +1568,7 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
                     last_request_at = None
                     try:
                         invocation["login_check"] = check_bilibili_login(
-                            cookie_header
+                            cookie_header, user_agent=user_agent
                         )
                     except BilibiliRepairLoginRequiredError as exc:
                         record_login_stop(
@@ -1589,6 +1602,7 @@ def run_repair(config: RepairConfig) -> tuple[int, dict[str, Any]]:
                     detail, attempts, retry_wait = fetch_repair_article_detail(
                         str(item["platform_post_id"]),
                         cookie_header,
+                        user_agent=user_agent,
                     )
                     reset_global_retryable_streak(state_connection)
                     last_request_at = time.monotonic()

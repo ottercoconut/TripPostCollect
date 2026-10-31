@@ -344,7 +344,6 @@ from trippostcollect.platforms.bilibili.client import (
     BILIBILI_DETAIL_RETRY_DELAY_SECONDS as BILIBILI_DETAIL_RETRY_DELAY_SECONDS,
     BILIBILI_DETAIL_RETRYABLE_CODES as BILIBILI_DETAIL_RETRYABLE_CODES,
     BILIBILI_RUNTIME_BLOCKING_CODES as BILIBILI_RUNTIME_BLOCKING_CODES,
-    BILIBILI_BROWSER_USER_AGENT as BILIBILI_BROWSER_USER_AGENT,
 )
 from trippostcollect.platforms.bilibili.core import (
     BILIBILI_DETAIL_PACING_SECONDS as BILIBILI_DETAIL_PACING_SECONDS,
@@ -538,9 +537,11 @@ def validate_formal_record(
 def fetch_bilibili_image_bytes(
     source_url: str,
     post_id: str,
+    *,
+    user_agent: str,
 ) -> RemoteImagePreview:
     return _bilibili_client.fetch_bilibili_image_bytes(
-        source_url, post_id,
+        source_url, post_id, user_agent=user_agent,
         ports=BilibiliImageFetchPorts(
             fetch_remote_image_bytes=fetch_remote_image_bytes,
             DEFAULT_ARCHIVE_IMAGE_MAX_BYTES=DEFAULT_ARCHIVE_IMAGE_MAX_BYTES,
@@ -557,10 +558,11 @@ def download_bilibili_record_images(
     sleep_fn: Any | None = None,
     log_fn: Any | None = None,
     max_attempts: int = BILIBILI_IMAGE_MAX_ATTEMPTS,
+    user_agent: str = "",
 ) -> list[ImageManifestEntry]:
     return _bilibili_core.download_bilibili_record_images(
         record, platform_data_root=platform_data_root,
-        fetcher=fetcher, sleep_fn=sleep_fn, log_fn=log_fn, max_attempts=max_attempts,
+        fetcher=fetcher, sleep_fn=sleep_fn, log_fn=log_fn, max_attempts=max_attempts, user_agent=user_agent,
         ports=BilibiliImagePorts(
             ImageManifestEntry=ImageManifestEntry,
             ImageMaterializationError=ImageMaterializationError,

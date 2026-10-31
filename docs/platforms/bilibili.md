@@ -54,7 +54,7 @@ python scripts/crawl_runner.py \
 
 只有详情观察后的正文 `image_urls` 生成 `ImageCandidate(role=content)`，来源键为 `image_urls`。
 BFS/CDN URL 去除已知变换后缀后形成稳定资产键，避免协议或变换参数制造重复资产。图片请求只带
-article Referer，不带 B站 Cookie；重定向目标必须是 `*.hdslb.com` 或 `*.biliimg.com`，否则拒绝跟随并
+article Referer 与本轮浏览器 UA，不带 B站 Cookie；重定向目标必须是 `*.hdslb.com` 或 `*.biliimg.com`，否则拒绝跟随并
 记 `image_source_unavailable`。
 
 平台层写本轮 staging 与 `image_manifest.jsonl`；根项目负责字节复验、同帖 SHA-256 去重、晋升和
@@ -64,7 +64,13 @@ SQLite 事务。共享错误码和重试规则不在本文重复，见[正式契
 ## 搜索、阻断与安全前沿
 
 article 搜索前必须在持久 profile 完成共享行为阶段，并让 nav、搜索、详情和关系统计请求复用同一会话
-Cookie。登录态以 nav 响应 `data.isLogin=true` 为准；Cookie 中存在 `SESSDATA` / `DedeUserID` 不能证明
+Cookie。这些请求与图片请求的 `User-Agent` 都取自行为会话浏览器在关闭前读到的 `navigator.userAgent`，
+不写死版本串；拿不到 UA 时在发出任何请求前以 `runtime_failed/cookie_export_missing_user_agent` 停止（#127）。
+`scripts/repair_bilibili_articles.py` 不开浏览器，从 warmup 快照读取 Cookie 与 `user_agent`；快照缺
+`user_agent`（#127 前写出的旧快照）时以 `login_required`（错误 `cookie_snapshot_missing_user_agent`）
+停止，不发 nav 或详情请求，先重跑 `scripts/login_warmup.py --targets bilibili`。
+
+登录态以 nav 响应 `data.isLogin=true` 为准；Cookie 中存在 `SESSDATA` / `DedeUserID` 不能证明
 已登录（过期会话的 Cookie 仍留在浏览器里）。nav 未返回 `isLogin=true` 时以
 `login_required/bilibili_nav_login_required` 停止，不发搜索请求。
 

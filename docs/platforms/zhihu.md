@@ -13,6 +13,9 @@
   `browser_context.cookies()` 按 `https://www.zhihu.com` 过滤读取。`/api/v4/me` 复验失败即以
   `runtime_failed/login_required` 运行级阻断结束，不在本轮重新登录；操作人先运行
   `scripts/login_warmup.py --platforms zhihu` 再重跑。
+- 启动浏览器时不强制 User-Agent，浏览器自报真实 UA；httpx 请求头的 `user-agent` 在首页加载后从
+  `navigator.userAgent` 读取，与 warmup 登录时同一浏览器一致，不写死版本串（#127）。正式轮走 CDP，
+  复用持久 profile 的默认 context，窗口按 launcher 最大化；标准模式的视口与 warmup 相同（1280×900）。
 - 只接受 answer 和 article；zvideo 在搜索解析阶段丢弃，只计为已处理候选并进入候选记忆，不写项目 JSONL。
 - 去重键为内容 ID，answer URL 同时保留 question ID。
 - 行为阶段必须在本轮真实关键词搜索页完成；页面导航超时可以作为软失败继续检查已验证 Cookie 和
@@ -45,7 +48,7 @@
 
 同帖 `zhimg.com` URL 按稳定资源路径移除 `_r`、`_<width>w` 等已知变换后缀，保留首次 URL 后再下载；
 原始 `image_list` 保留所有 URL 证据。该规则不作用于外部域名，不使用感知哈希或视觉相似度。zhimg CDN
-图片请求只发 UA、图片类 Accept 和 `Referer: https://www.zhihu.com/`，不带 zhihu.com Cookie 和 API
+图片请求只发浏览器 UA（与 API 请求同一 `navigator.userAgent`）、图片类 Accept 和 `Referer: https://www.zhihu.com/`，不带 zhihu.com Cookie 和 API
 签名头；平台层写 staging/manifest，根项目再执行通用字节复验、同帖 SHA-256 去重、晋升和事务。
 
 历史 manifest 中旧 zhimg URL 变体的严格兼容条件见[数据持久化](../data-persistence.md)；它只用于

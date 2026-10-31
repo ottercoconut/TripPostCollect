@@ -330,10 +330,10 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
     monkeypatch.setattr(
         mediacrawler_crawl,
         "run_bilibili_behavior_session",
-        AsyncMock(return_value=({"cookie_header": ""}, behavior)),
+        AsyncMock(return_value=({"cookie_header": "", "user_agent": "Mozilla/5.0 test-browser"}, behavior)),
     )
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
-    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value, **kwargs: ("a", "b"))
     requested_pages: list[int] = []
 
     def fetch_page(keyword, page, **kwargs):
@@ -397,13 +397,13 @@ def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
 
     follower_ids: list[str] = []
 
-    def fetch_followers(creator_id, cookie_header):
+    def fetch_followers(creator_id, cookie_header, **kwargs):
         follower_ids.append(creator_id)
         return 100
 
     detail_ids: list[str] = []
 
-    def fetch_detail(post_id, cookie_header):
+    def fetch_detail(post_id, cookie_header, **kwargs):
         detail_ids.append(post_id)
         return (
             {
@@ -565,9 +565,9 @@ def _run_bilibili_phases(monkeypatch, tmp_path: Path, pages: dict[int, object]):
     )
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
     monkeypatch.setattr(mediacrawler_crawl, "run_bilibili_behavior_session",
-                        AsyncMock(return_value=({"cookie_header": ""}, {"ok": True})))
+                        AsyncMock(return_value=({"cookie_header": "", "user_agent": "Mozilla/5.0 test-browser"}, {"ok": True})))
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
-    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value, **kwargs: ("a", "b"))
     requested: list[int] = []
 
     num_pages = max((page for page, value in pages.items() if isinstance(value, list) and value), default=0)
@@ -586,13 +586,13 @@ def _run_bilibili_phases(monkeypatch, tmp_path: Path, pages: dict[int, object]):
     monkeypatch.setattr(bilibili_core, "fetch_bilibili_article_page", fetch_page)
     monkeypatch.setattr(
         bilibili_core, "fetch_bilibili_article_detail_with_retry",
-        lambda post_id, cookie_header: ({
+        lambda post_id, cookie_header, **kwargs: ({
             "title": post_id, "content": "青岛完整正文",
             "content_pic_list": [f"https://example.test/detail-{post_id}.jpg"],
             "opus": {"content": {"paragraphs": []}},
         }, 1, 0.0),
     )
-    monkeypatch.setattr(bilibili_core, "fetch_bilibili_follower_count", lambda creator, cookie: 100)
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_follower_count", lambda creator, cookie, **kwargs: 100)
     monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
     args = SimpleNamespace(
         keyword="青岛旅游", db=str(db_path), start_page=5, top_refresh_max_pages=2,

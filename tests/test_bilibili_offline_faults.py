@@ -132,10 +132,10 @@ def prepare(monkeypatch, tmp_path: Path, network: Network, *, real_behavior: boo
     if not real_behavior:
         monkeypatch.setattr(
             mediacrawler_crawl, "run_bilibili_behavior_session",
-            AsyncMock(return_value=({"cookie_header": ""}, {"ok": True})),
+            AsyncMock(return_value=({"cookie_header": "", "user_agent": "Mozilla/5.0 test-browser"}, {"ok": True})),
         )
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
-    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a" * 32, "b" * 32))
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value, **kwargs: ("a" * 32, "b" * 32))
     monkeypatch.setattr(bilibili_client, "urlopen", network)
     monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
     args = SimpleNamespace(

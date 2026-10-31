@@ -101,6 +101,7 @@ def test_cookie_snapshot_write_and_load_use_the_same_sibling_path(sessions: Path
     info = cookies.write_cookie_snapshot(
         "zhihu", target, cookie_rows,
         source="reopen_verify", label="知乎", urls=["https://www.zhihu.com"], state={"markers": {}},
+        user_agent="离线浏览器 UA",
     )
     assert info["path"] == str(sessions / "zhihu" / "trippostcollect_cookie_snapshot.json")
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
@@ -109,10 +110,11 @@ def test_cookie_snapshot_write_and_load_use_the_same_sibling_path(sessions: Path
     loaded = cookies.load_cookie_snapshot("zhihu")
     assert loaded["snapshot_path"] == str(target)
     assert loaded["cookie_header"] == "d_c0=d;z_c0=z"
+    assert loaded["user_agent"] == "离线浏览器 UA"
     # warmup 写快照与 collection/cookies 读取取同一定义。
     target.unlink()
     assert warmup.cookie_snapshot_path("zhihu") == target
-    info = warmup.write_cookie_snapshot("zhihu", cookie_rows, source="session", state={})
+    info = warmup.write_cookie_snapshot("zhihu", cookie_rows, source="session", state={}, user_agent="离线浏览器 UA")
     assert info["path"] == str(target)
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert cookies.load_cookie_snapshot("zhihu")["snapshot_path"] == str(target)

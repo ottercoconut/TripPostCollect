@@ -127,11 +127,11 @@ def prepare(monkeypatch, tmp_path: Path, network: Network, *, keep_wbi: bool = F
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
     monkeypatch.setattr(
         mediacrawler_crawl, "run_bilibili_behavior_session",
-        AsyncMock(return_value=({"cookie_header": "SESSDATA=test"}, {"ok": True})),
+        AsyncMock(return_value=({"cookie_header": "SESSDATA=test", "user_agent": "Mozilla/5.0 test-browser"}, {"ok": True})),
     )
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
     if not keep_wbi:
-        monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a" * 32, "b" * 32))
+        monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value, **kwargs: ("a" * 32, "b" * 32))
     monkeypatch.setattr(bilibili_client, "urlopen", network)
     sleeps: list[float] = []
     monkeypatch.setattr(bilibili_core.time, "sleep", sleeps.append)
@@ -207,7 +207,7 @@ def test_delta_detail_without_text_is_detail_parse_failure(monkeypatch):
     )
 
     with pytest.raises(bilibili_client.BilibiliArticleDetailError) as caught:
-        bilibili_client.fetch_bilibili_article_detail("1")
+        bilibili_client.fetch_bilibili_article_detail("1", user_agent="Mozilla/5.0 test-browser")
 
     # 沿用现有“无可解析正文”失败码：可重试，耗尽后形成 candidate_skipped。
     assert caught.value.retryable is True
@@ -366,7 +366,7 @@ def test_nav_without_is_login_is_login_required(monkeypatch, data):
     monkeypatch.setattr(bilibili_client, "urlopen", lambda request, timeout: Response(payload, request.full_url))
 
     with pytest.raises(bilibili_client.BilibiliRuntimeBlocked) as caught:
-        bilibili_client.fetch_bilibili_wbi_keys("SESSDATA=stale")
+        bilibili_client.fetch_bilibili_wbi_keys("SESSDATA=stale", user_agent="Mozilla/5.0 test-browser")
 
     assert caught.value.stop_reason == "login_required"
     assert caught.value.detail == "bilibili_nav_login_required"
@@ -390,7 +390,7 @@ def test_logged_in_nav_returns_wbi_keys(monkeypatch):
     network = Network()
     monkeypatch.setattr(bilibili_client, "urlopen", network)
 
-    assert bilibili_client.fetch_bilibili_wbi_keys("SESSDATA=ok") == ("a" * 32, "b" * 32)
+    assert bilibili_client.fetch_bilibili_wbi_keys("SESSDATA=ok", user_agent="Mozilla/5.0 test-browser") == ("a" * 32, "b" * 32)
     assert network.calls == Counter({"nav": 1})
 
 
@@ -403,7 +403,7 @@ def test_detail_blocking_code_is_not_retried(monkeypatch, code):
     monkeypatch.setattr(bilibili_client.time, "sleep", lambda value: pytest.fail("阻断后不得退避重试"))
 
     with pytest.raises(bilibili_client.BilibiliArticleDetailError) as caught:
-        bilibili_client.fetch_bilibili_article_detail_with_retry("1")
+        bilibili_client.fetch_bilibili_article_detail_with_retry("1", user_agent="Mozilla/5.0 test-browser")
 
     assert network.calls["detail"] == 1
     assert caught.value.runtime_blocking is True and caught.value.attempts == 1
@@ -415,7 +415,7 @@ def test_detail_http_429_is_not_retried(monkeypatch):
     monkeypatch.setattr(bilibili_client.time, "sleep", lambda value: pytest.fail("阻断后不得退避重试"))
 
     with pytest.raises(bilibili_client.BilibiliArticleDetailError) as caught:
-        bilibili_client.fetch_bilibili_article_detail_with_retry("1")
+        bilibili_client.fetch_bilibili_article_detail_with_retry("1", user_agent="Mozilla/5.0 test-browser")
 
     assert network.calls["detail"] == 1
     assert caught.value.runtime_blocking is True
@@ -432,7 +432,7 @@ def test_detail_server_error_is_still_retried(monkeypatch):
     monkeypatch.setattr(bilibili_client, "urlopen", open_request)
     monkeypatch.setattr(bilibili_client.time, "sleep", lambda value: None)
 
-    _, attempts, _ = bilibili_client.fetch_bilibili_article_detail_with_retry("1")
+    _, attempts, _ = bilibili_client.fetch_bilibili_article_detail_with_retry("1", user_agent="Mozilla/5.0 test-browser")
 
     assert attempts == 3
 
@@ -523,7 +523,7 @@ def test_follower_unexpected_exception_is_not_swallowed(monkeypatch, tmp_path):
     network = Network(search=[search_data([search_item("101")], num_pages=1, num_results=1)])
     args, state_path, _ = prepare(monkeypatch, tmp_path, network)
 
-    def broken(creator_id, cookie_header):
+    def broken(creator_id, cookie_header, **kwargs):
         raise KeyError("编程错误不能被当作粉丝缺失")
 
     monkeypatch.setattr(bilibili_core, "fetch_bilibili_follower_count", broken)
@@ -625,7 +625,7 @@ def test_image_request_carries_no_platform_cookie(monkeypatch):
     monkeypatch.setattr(image_proxy, "build_opener", lambda *args: redirecting_opener({}, seen))
 
     preview = bilibili_client.fetch_bilibili_image_bytes(
-        "https://i0.hdslb.com/bfs/article/a.png", "123", ports=image_ports(),
+        "https://i0.hdslb.com/bfs/article/a.png", "123", user_agent="Mozilla/5.0 test-browser", ports=image_ports(),
     )
 
     assert preview.final_url == "https://i0.hdslb.com/bfs/article/a.png"
@@ -639,7 +639,7 @@ def test_image_redirect_within_bilibili_cdn_is_followed(monkeypatch):
     monkeypatch.setattr(image_proxy, "build_opener", lambda *args: redirecting_opener(chain, seen))
 
     preview = bilibili_client.fetch_bilibili_image_bytes(
-        "https://i0.hdslb.com/bfs/article/a.png", "123", ports=image_ports(),
+        "https://i0.hdslb.com/bfs/article/a.png", "123", user_agent="Mozilla/5.0 test-browser", ports=image_ports(),
     )
 
     assert preview.final_url == "https://article.biliimg.com/bfs/article/a.png"
@@ -658,7 +658,7 @@ def test_image_redirect_off_bilibili_cdn_is_refused(monkeypatch, target):
 
     with pytest.raises(image_proxy.RemoteImageFetchError) as caught:
         bilibili_client.fetch_bilibili_image_bytes(
-            "https://i0.hdslb.com/bfs/article/a.png", "123", ports=image_ports(),
+            "https://i0.hdslb.com/bfs/article/a.png", "123", user_agent="Mozilla/5.0 test-browser", ports=image_ports(),
         )
 
     assert caught.value.code == "image_source_unavailable"

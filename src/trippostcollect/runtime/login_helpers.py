@@ -43,7 +43,6 @@ async def find_login_qrcode(
     selector: str,
     *,
     make_async_client: Callable[..., httpx.AsyncClient],
-    get_user_agent: Callable[[], str],
 ) -> str:
     """find login qrcode image from target selector"""
     try:
@@ -54,7 +53,9 @@ async def find_login_qrcode(
         if "http://" in login_qrcode_img or "https://" in login_qrcode_img:
             async with make_async_client(follow_redirects=True) as client:
                 logger.info(f"[find_login_qrcode] get qrcode by url:{login_qrcode_img}")
-                resp = await client.get(login_qrcode_img, headers={"User-Agent": get_user_agent()})
+                # #127：二维码图片请求与浏览器同一 UA，取本轮页面自报的 navigator.userAgent。
+                user_agent = await page.evaluate("() => navigator.userAgent")
+                resp = await client.get(login_qrcode_img, headers={"User-Agent": user_agent})
                 if resp.status_code == 200:
                     image_data = resp.content
                     base64_image = base64.b64encode(image_data).decode('utf-8')

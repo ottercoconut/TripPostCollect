@@ -24,7 +24,7 @@ from types import ModuleType, SimpleNamespace
 from PIL import Image
 import pytest
 
-from support import douyin_full_scan_deviation, fork_removal_deviation
+from support import douyin_full_scan_deviation, fork_removal_deviation, ua_from_browser_deviation
 from trippostcollect.application import collection, reporting, visit_gate
 from trippostcollect.artifacts.image_candidates import content_image_candidates
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
@@ -476,7 +476,8 @@ def test_a_other_top_level_definitions_unchanged():
     ledger = json.loads((ROOT / "docs/adapter-ledger/symbols.json").read_text())["rows"]
     names |= {r["qualname"].split(".")[0] for r in ledger
               if r["card"] == "T09" and r["file"] == "scripts/mediacrawler_crawl.py"}
-    old = ast.parse(t115_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text()))
+    old = ast.parse(ua_from_browser_deviation.t11_source(
+        t115_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text())))
     new = (ROOT / "scripts/mediacrawler_crawl.py").read_text()
     assert len(ROWS) == 46 and set(AST_RULES) == {r["qualname"] for r in ROWS}
     for node in old.body:
@@ -533,6 +534,8 @@ def baseline(monkeypatch):
     text = douyin_full_scan_deviation.t11_after_t71_source(text)
     # #115 有意偏离：B站图片薄包装不再转发平台 Cookie。
     text = t115_authorized_source(text)
+    # #127 有意偏离：B站请求 UA 取自本轮浏览器，写死常量退出，图片薄包装转发会话 UA。
+    text = ua_from_browser_deviation.t11_source(text)
     namespace["VISIT_GATED_PLATFORMS"] = visit_gate.VISIT_GATED_PLATFORMS
     namespace["validate_summary_content_visits"] = visit_gate.validate_summary_content_visits
     namespace["content_visits_path"] = content_visits_path
@@ -1004,7 +1007,7 @@ def drive(module, root, patch, capsys, platform="weibo", scenario="success", res
             trace.append("bilibili.behavior")
             evidence = behavior_for("bilibili")
             evidence_path.write_text(json.dumps(evidence, ensure_ascii=False))
-            return {"cookie_header": "SESSDATA=offline"}, evidence
+            return {"cookie_header": "SESSDATA=offline", "user_agent": "Mozilla/5.0 test-browser"}, evidence
 
         def fake_page(keyword, page, **kwargs):
             trace.append(("bilibili.page", page))
@@ -1013,11 +1016,11 @@ def drive(module, root, patch, capsys, platform="weibo", scenario="success", res
                       "author": "作者", "mid": "author-1"} for n in (1, 2)] if page == 1 else []
             return BilibiliSearchPage(items=items, num_pages=1, num_results=2)
 
-        def fake_detail(post_id, cookie_header):
+        def fake_detail(post_id, cookie_header, **kwargs):
             trace.append(("bilibili.detail", post_id))
             return {"title": "青岛游记", "content": f'<p>青岛海边完整正文</p><img src="https://i0.hdslb.com/bfs/article/{post_id}.png">'}, 1, 0.0
 
-        def fake_image(url, post_id):
+        def fake_image(url, post_id, **kwargs):
             trace.append(("bilibili.image", post_id))
             buffer = io.BytesIO()
             Image.new("RGB", (6, 4), color=(int(post_id) - 100, 20, 30)).save(buffer, format="PNG")
@@ -1026,10 +1029,10 @@ def drive(module, root, patch, capsys, platform="weibo", scenario="success", res
         binding(patch, module, "run_bilibili_article_search", "run_bilibili_behavior_session", fake_behavior)
         binding(patch, module, "download_bilibili_record_images", "fetch_bilibili_image_bytes", fake_image)
         for name, replacement in {
-            "fetch_bilibili_wbi_keys": lambda *a: ("a", "b"),
+            "fetch_bilibili_wbi_keys": lambda *a, **k: ("a", "b"),
             "fetch_bilibili_article_page": fake_page,
             "fetch_bilibili_article_detail_with_retry": fake_detail,
-            "fetch_bilibili_follower_count": lambda *a: 42,
+            "fetch_bilibili_follower_count": lambda *a, **k: 42,
             "datetime": FixedDatetime,
             "time": SimpleNamespace(monotonic=lambda: 100.0, sleep=lambda delay: trace.append(("sleep", delay))),
         }.items():

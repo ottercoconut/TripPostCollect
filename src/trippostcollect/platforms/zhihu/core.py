@@ -27,7 +27,7 @@ from playwright.async_api import BrowserContext, BrowserType, Page, Playwright
 from tenacity import RetryError
 from trippostcollect.application.contracts import ImageStagingError, ZhihuSettings, ZhihuPorts
 from trippostcollect.core import resources
-from trippostcollect.core.paths import platform_profile_dir
+from trippostcollect.core.paths import PROFILE_VIEWPORT, platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError, is_runtime_blocking_image_error
 from . import models as constant
@@ -62,8 +62,6 @@ class ZhihuCrawler:
         self.source_keyword = ""
         self.index_url = "https://www.zhihu.com"
         self.cookie_urls = [self.index_url]
-        # self.user_agent = utils.get_user_agent()
-        self.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
         self._extractor = ZhihuExtractor()
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
@@ -189,10 +187,11 @@ class ZhihuCrawler:
             # Choose launch mode based on configuration
             if self.settings.ENABLE_CDP_MODE:
                 logger.info("[ZhihuCrawler] Launching browser in CDP mode")
+                # #127：不强制 UA，浏览器自报真实 UA；httpx 头从 navigator.userAgent 读取。
                 self.browser_context = await self.launch_browser_with_cdp(
                     playwright,
                     playwright_proxy_format,
-                    self.user_agent,
+                    None,
                     headless=self.settings.CDP_HEADLESS,
                 )
             else:
@@ -200,7 +199,7 @@ class ZhihuCrawler:
                 # Launch a browser context.
                 chromium = playwright.chromium
                 self.browser_context = await self.launch_browser(
-                    chromium, None, self.user_agent, headless=self.settings.HEADLESS
+                    chromium, None, None, headless=self.settings.HEADLESS
                 )
                 # stealth.min.js is a js script to prevent the website from detecting the crawler.
                 with resources.path("js/stealth.min.js") as stealth_path:
@@ -792,7 +791,8 @@ class ZhihuCrawler:
                 "cookie": cookie_str,
                 "priority": "u=1, i",
                 "referer": self._search_page_url(referer_keyword),
-                "user-agent": self.user_agent,
+                # #127：与浏览器一致，取本轮浏览器自报的 UA。
+                "user-agent": await self.context_page.evaluate("() => navigator.userAgent"),
                 "x-api-version": "3.0.91",
                 "x-app-za": "OS=Web",
                 "x-requested-with": "fetch",
@@ -823,7 +823,7 @@ class ZhihuCrawler:
                 accept_downloads=True,
                 headless=headless,
                 proxy=playwright_proxy,  # type: ignore
-                viewport={"width": 1920, "height": 1080},
+                viewport=PROFILE_VIEWPORT,
                 user_agent=user_agent,
                 args=self.ports.project_browser_args(),
             )
@@ -831,7 +831,7 @@ class ZhihuCrawler:
         else:
             browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
             browser_context = await browser.new_context(
-                viewport={"width": 1920, "height": 1080}, user_agent=user_agent
+                viewport=PROFILE_VIEWPORT, user_agent=user_agent
             )
             return browser_context
 

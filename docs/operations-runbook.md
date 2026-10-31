@@ -428,6 +428,9 @@ python scripts/login_warmup.py \
 `bilibili`、`weibo`、`douyin`、`zhihu`），Cookie 快照位于同级的
 `data/runtime/platform_sessions/<platform>/trippostcollect_cookie_snapshot.json`，权限 `0600`；位置只由
 `trippostcollect.core.paths` 定义。新 profile 不存在时按首登流程创建空目录，需要人工登录。
+快照另存登录 page 的 `navigator.userAgent`（`user_agent` 字段），供不开浏览器的请求（B站 repair）与浏览器
+保持同一 UA；#127 前写出的快照没有该字段，B站 repair 遇到时停止并要求重跑 warmup。warmup 与通用平台
+crawl 标准模式的视口统一为 `trippostcollect.core.paths.PROFILE_VIEWPORT`（1280×900）。
 
 `crawl_runner.py` 只读取上述 Cookie 快照，不在缺快照时另起浏览器读取 profile；知乎缺快照或缺 `d_c0`/`z_c0`
 时任务直接失败，先运行本节 warmup 再重跑。warmup 报告中的登录接口结果只保留状态码、`uid`、`name`

@@ -20,7 +20,7 @@ from playwright.async_api import Error as PlaywrightError
 from tenacity import RetryError
 
 from support import legacy_expectations as expectations
-from support import weibo_fetch_deviation
+from support import ua_from_browser_deviation, weibo_fetch_deviation
 from support.stable_png import solid_png
 from support.weibo_adapter import ROOT, settings
 from trippostcollect.application import events
@@ -93,7 +93,10 @@ async def drive(directory, monkeypatch, scenario, post_repair):
         async def wait_for_timeout(self, timeout):
             trace.append(("wait", timeout))
 
-        async def evaluate(self, script, note_id):
+        async def evaluate(self, script, note_id=None):
+            if script == "() => navigator.userAgent":
+                # #127：httpx 头的 UA 取自浏览器；求值不进入轨迹（见 support.ua_from_browser_deviation）。
+                return ua_from_browser_deviation.BROWSER_USER_AGENT
             trace.append(("evaluate", script, note_id))
             if scenario == "repair_empty":
                 return {"id": "wrong", "text": "其他帖子"}
@@ -260,9 +263,9 @@ def original_image_url(url):
 
 
 def frozen_drive(scenario, post_repair):
-    return weibo_fetch_deviation.drive(
+    return ua_from_browser_deviation.weibo(weibo_fetch_deviation.drive(
         expectations.load(*T14_DRIVE, f"{scenario}-repair{post_repair}"), original_url=original_image_url,
-    )
+    ))
 
 
 @pytest.mark.asyncio

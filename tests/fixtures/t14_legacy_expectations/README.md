@@ -62,7 +62,7 @@ pytest -p pytest_asyncio.plugin \
 ## T14-C
 
 删除 fork/E 时同批删除守卫用例与只测旧桥的用例（标记 `t14_legacy_guard` / `t14_legacy_only`），
-本目录与根侧比较用例保留。之后若根实现有意改变行为，在根侧比较中登记偏离并变换预期，不修改固化文件，也不得用根实现重新生成。已登记：#59（`tests/support/platform_session_deviation.py`：T06 抖音持久 profile 位置、shared_staging 缺省暂存根）；#113（`tests/support/zhihu_login_paging_deviation.py`：T07 知乎不注入快照 Cookie、/me 失败即 login_required、来源耗尽只认 `paging.is_end`、401/403/429 不重试、图片请求不带会话头、API Referer 用本轮检索词）；#114（`tests/support/weibo_fetch_deviation.py`：T05 微博图片直连新浪且不带 Cookie、修复回退删除 Playwright 请求接口）；#124（`tests/support/douyin_full_scan_deviation.py`：T06 抖音搜索只经浏览器截获，首页直接请求删除、后续页 8 次滚轮后的直接请求改为一屏滚轮截获，首页可见卡片重建退出；T11 冻结执行器删除抖音三元组续跑参数、env 与 reseed 证据）。
+本目录与根侧比较用例保留。之后若根实现有意改变行为，在根侧比较中登记偏离并变换预期，不修改固化文件，也不得用根实现重新生成。已登记：#59（`tests/support/platform_session_deviation.py`：T06 抖音持久 profile 位置、shared_staging 缺省暂存根）；#113（`tests/support/zhihu_login_paging_deviation.py`：T07 知乎不注入快照 Cookie、/me 失败即 login_required、来源耗尽只认 `paging.is_end`、401/403/429 不重试、图片请求不带会话头、API Referer 用本轮检索词）；#114（`tests/support/weibo_fetch_deviation.py`：T05 微博图片直连新浪且不带 Cookie、修复回退删除 Playwright 请求接口）；#124（`tests/support/douyin_full_scan_deviation.py`：T06 抖音搜索只经浏览器截获，首页直接请求删除、后续页 8 次滚轮后的直接请求改为一屏滚轮截获，首页可见卡片重建退出；T11 冻结执行器删除抖音三元组续跑参数、env 与 reseed 证据）；#127（`tests/support/ua_from_browser_deviation.py`：T05 微博浏览器上下文不再强制 iPhone UA、视口改为与 warmup 相同的 1280×900，接口与图片请求头 UA 取自浏览器 `navigator.userAgent`；T07 知乎 CDP 启动不再传写死的 Chrome/128，API 与图片请求头 UA 取自浏览器；T11 冻结执行器删除 `BILIBILI_BROWSER_USER_AGENT` 重导出，B站图片薄包装转发会话 UA）。
 
 已处理：
 
