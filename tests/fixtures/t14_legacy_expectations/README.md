@@ -78,3 +78,7 @@ pytest -p pytest_asyncio.plugin \
   `repair_exception_chain/` 下 `api_error`、`rate_limit`。这些用例改由 `tests/test_adapter_t05.py` 中
   `test_root_drive_semantics_changed_by_issue_114` 与 `test_root_repair_page_status_is_classified` 的字面断言
   覆盖；其余 T05 文件保留原字节，经上文 #114 偏离变换后比较。
+- #131（抖音 `search_nil_type` 白名单）后，T06 的 `decode_douyin_json_body` 与
+  `validate_douyin_search_response` 不再要求与冻结快照逐字相同：旧实现只把 `verify_check` 当作异常，新实现只
+  放行空值与 `service_empty`。偏离由 `tests/test_adapter_t06.py::test_issue131_search_nil_whitelist_deviation`
+  钉住：先断言旧快照中两函数只认 `verify_check`，再断言新白名单行为。冻结快照本身未改。

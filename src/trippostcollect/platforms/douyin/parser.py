@@ -210,6 +210,8 @@ def decode_douyin_json_body(body: bytes) -> Dict[str, Any]:
             payload = dict(documents[-1])
             merged_data = []
             verify_search_nil_info = None
+            # #131：任一文档带非空 search_nil_type 都要保留给校验，verify_check 优先。
+            other_search_nil_info = None
             for document in documents:
                 document_data = document.get("data")
                 if document_data is None:
@@ -220,14 +222,17 @@ def decode_douyin_json_body(body: bytes) -> Dict[str, Any]:
                 if document.get("status_code") not in (None, 0, "0"):
                     payload["status_code"] = document["status_code"]
                 search_nil_info = document.get("search_nil_info")
-                if (
-                    isinstance(search_nil_info, dict)
-                    and search_nil_info.get("search_nil_type") == "verify_check"
-                ):
-                    verify_search_nil_info = search_nil_info
+                if isinstance(search_nil_info, dict):
+                    search_nil_type = search_nil_info.get("search_nil_type")
+                    if search_nil_type == "verify_check":
+                        verify_search_nil_info = search_nil_info
+                    elif search_nil_type and other_search_nil_info is None:
+                        other_search_nil_info = search_nil_info
             payload["data"] = merged_data
             if verify_search_nil_info is not None:
                 payload["search_nil_info"] = verify_search_nil_info
+            elif other_search_nil_info is not None:
+                payload["search_nil_info"] = other_search_nil_info
             for document in reversed(documents):
                 if "has_more" in document:
                     payload["has_more"] = document["has_more"]
@@ -241,6 +246,10 @@ def decode_douyin_json_body(body: bytes) -> Dict[str, Any]:
     return payload
 
 
+# #131：真实数据中出现过的正常取值：空值，以及深层链尾 data=[]、has_more=0 时的 service_empty。
+DOUYIN_NORMAL_SEARCH_NIL_TYPES = frozenset({"service_empty"})
+
+
 # TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
 def validate_douyin_search_response(payload: Any) -> Dict[str, Any]:
     """Reject parseable error envelopes before pagination interprets them as data."""
@@ -248,8 +257,14 @@ def validate_douyin_search_response(payload: Any) -> Dict[str, Any]:
         raise SearchResponseError("search_response_not_object")
 
     search_nil_info = payload.get("search_nil_info")
-    if isinstance(search_nil_info, dict) and search_nil_info.get("search_nil_type") == "verify_check":
-        raise SearchResponseError("search_verify_check")
+    if isinstance(search_nil_info, dict):
+        search_nil_type = str(search_nil_info.get("search_nil_type") or "")
+        if search_nil_type == "verify_check":
+            raise SearchResponseError("search_verify_check")
+        # #131：只放行空值与链尾的 service_empty；其他取值（如首页 unknown）表示搜索受限，
+        # 按运行级失败停止，不能让 has_more=0 被当成来源耗尽。
+        if search_nil_type and search_nil_type not in DOUYIN_NORMAL_SEARCH_NIL_TYPES:
+            raise SearchResponseError(f"search_nil_{search_nil_type}")
 
     status_code = payload.get("status_code")
     if status_code not in (None, 0, "0"):
