@@ -237,7 +237,6 @@ def douyin_dependencies(config):
     from trippostcollect.runtime import behavior, login_helpers
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
     from trippostcollect.runtime.cookies import convert_browser_context_cookies
-    from trippostcollect.runtime.helpers import get_user_agent
     from trippostcollect.runtime.http import make_async_client
     from trippostcollect.runtime.image_retry import fetch_image_bytes_with_retry
 
@@ -299,7 +298,6 @@ def douyin_dependencies(config):
             client=DouyinClientPorts(client_factory, convert_browser_context_cookies, random.random),
             login=DouyinLoginPorts(partial(
                 login_helpers.find_login_qrcode, make_async_client=client_factory,
-                get_user_agent=get_user_agent,
             ), login_helpers.show_qrcode),
             browser_detail_fallback=_douyin_browser_detail_fallback,
             async_playwright=async_playwright,

@@ -137,7 +137,7 @@ def config_for(
     )
 
 
-def fake_detail(post_id: str, cookie_header: str):
+def fake_detail(post_id: str, cookie_header: str, **kwargs):
     return (
         {
             "title": f"详情标题-{post_id}",
@@ -155,12 +155,12 @@ def valid_bilibili_login(monkeypatch) -> None:
     monkeypatch.setattr(
         repair,
         "load_cookie_snapshot",
-        lambda platform: {"cookie_header": "SESSDATA=test-session"},
+        lambda platform: {"cookie_header": "SESSDATA=test-session", "user_agent": "Mozilla/5.0 test-browser"},
     )
     monkeypatch.setattr(
         repair,
         "check_bilibili_login",
-        lambda cookie_header: {
+        lambda cookie_header, **kwargs: {
             "ok": True,
             "code": 0,
             "is_login": True,
@@ -469,7 +469,7 @@ def test_retryable_failure_preserves_original_row(monkeypatch, tmp_path: Path) -
     config = replace(config, retry_delay_seconds=300)
     calls = 0
 
-    def fail(post_id, cookie_header):
+    def fail(post_id, cookie_header, **kwargs):
         nonlocal calls
         calls += 1
         raise repair.BilibiliArticleDetailError(
@@ -530,7 +530,7 @@ def test_consecutive_retryable_failures_double_global_cooldown(
         retry_delay_seconds=300,
     )
 
-    def fail(post_id, cookie_header):
+    def fail(post_id, cookie_header, **kwargs):
         raise repair.BilibiliArticleDetailError(
             "rate limited",
             retryable=True,
@@ -727,10 +727,10 @@ def test_live_login_loss_stops_before_detail_request(
     )
     detail_calls = 0
 
-    def login_lost(cookie_header):
+    def login_lost(cookie_header, **kwargs):
         raise repair.BilibiliRepairLoginRequiredError("code=-101 isLogin=False")
 
-    def unexpected_detail(post_id, cookie_header):
+    def unexpected_detail(post_id, cookie_header, **kwargs):
         nonlocal detail_calls
         detail_calls += 1
         return fake_detail(post_id, cookie_header)
@@ -774,7 +774,7 @@ def test_article_api_login_code_stops_without_invalidating_item(
         expected_sha256=baseline,
     )
 
-    def login_code(post_id, cookie_header):
+    def login_code(post_id, cookie_header, **kwargs):
         raise repair.BilibiliArticleDetailError(
             "login required",
             retryable=False,

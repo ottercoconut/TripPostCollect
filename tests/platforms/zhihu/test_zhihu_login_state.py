@@ -32,6 +32,10 @@ class Page:
     async def wait_for_load_state(self, *args, **kwargs):
         return None
 
+    async def evaluate(self, script):
+        assert script == "() => navigator.userAgent", script
+        return "Mozilla/5.0 test-browser"
+
 
 class Context:
     def __init__(self, trace):

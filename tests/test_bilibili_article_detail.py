@@ -187,7 +187,7 @@ def test_detail_retries_rate_limit_with_backoff(monkeypatch) -> None:
     calls = 0
     sleeps: list[float] = []
 
-    def fetch(post_id, cookie_header):
+    def fetch(post_id, cookie_header, **kwargs):
         nonlocal calls
         calls += 1
         if calls < 3:
@@ -203,7 +203,7 @@ def test_detail_retries_rate_limit_with_backoff(monkeypatch) -> None:
     monkeypatch.setattr(mediacrawler_crawl.time, "sleep", sleeps.append)
 
     detail, attempts, retry_wait_seconds = (
-        mediacrawler_crawl.fetch_bilibili_article_detail_with_retry("123")
+        mediacrawler_crawl.fetch_bilibili_article_detail_with_retry("123", user_agent="Mozilla/5.0 test-browser")
     )
 
     assert detail["content"] == "完整正文"
@@ -227,7 +227,7 @@ def test_detail_invalid_json_is_retryable(monkeypatch) -> None:
     )
 
     try:
-        mediacrawler_crawl.fetch_bilibili_article_detail("123")
+        mediacrawler_crawl.fetch_bilibili_article_detail("123", user_agent="Mozilla/5.0 test-browser")
     except mediacrawler_crawl.BilibiliArticleDetailError as exc:
         assert exc.retryable is True
         assert "parse" in str(exc)
@@ -252,7 +252,7 @@ def test_relation_stat_rate_limit_is_run_level_failure(monkeypatch) -> None:
     )
 
     try:
-        mediacrawler_crawl.fetch_bilibili_follower_count("456")
+        mediacrawler_crawl.fetch_bilibili_follower_count("456", user_agent="Mozilla/5.0 test-browser")
     except mediacrawler_crawl.BilibiliFollowerFetchError as exc:
         assert exc.code == -509
         assert exc.retryable is True
@@ -284,11 +284,11 @@ def test_rate_limit_detail_stops_run_without_marking_candidate_seen(
     monkeypatch.setattr(
         mediacrawler_crawl,
         "run_bilibili_behavior_session",
-        AsyncMock(return_value=({"cookie_header": ""}, {"ok": True})),
+        AsyncMock(return_value=({"cookie_header": "", "user_agent": "Mozilla/5.0 test-browser"}, {"ok": True})),
     )
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
     monkeypatch.setattr(
-        bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b")
+        bilibili_core, "fetch_bilibili_wbi_keys", lambda value, **kwargs: ("a", "b")
     )
     monkeypatch.setattr(
         bilibili_core,
@@ -296,7 +296,7 @@ def test_rate_limit_detail_stops_run_without_marking_candidate_seen(
         paged_search({1: [search_item("blocked")]}),
     )
 
-    def blocked_detail(post_id, cookie_header):
+    def blocked_detail(post_id, cookie_header, **kwargs):
         raise mediacrawler_crawl.BilibiliArticleDetailError(
             "rate limited",
             retryable=True,
@@ -353,17 +353,17 @@ def test_detail_failure_is_recorded_seen_and_next_post_continues(monkeypatch, tm
     monkeypatch.setattr(
         mediacrawler_crawl,
         "run_bilibili_behavior_session",
-        AsyncMock(return_value=({"cookie_header": ""}, {"ok": True})),
+        AsyncMock(return_value=({"cookie_header": "", "user_agent": "Mozilla/5.0 test-browser"}, {"ok": True})),
     )
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
-    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value, **kwargs: ("a", "b"))
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_article_page",
         paged_search({1: [search_item("failed")], 2: [search_item("success")]}),
     )
 
-    def fail_detail(post_id, cookie_header):
+    def fail_detail(post_id, cookie_header, **kwargs):
         if post_id == "failed":
             raise mediacrawler_crawl.BilibiliArticleDetailError(
                 "detail remained unparsable",
@@ -390,7 +390,7 @@ def test_detail_failure_is_recorded_seen_and_next_post_continues(monkeypatch, tm
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_follower_count",
-        lambda creator_id, cookie_header: 100,
+        lambda creator_id, cookie_header, **kwargs: 100,
     )
     monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
     args = SimpleNamespace(
@@ -440,10 +440,10 @@ def test_follower_failure_retries_then_records_skip_and_continues(
     monkeypatch.setattr(
         mediacrawler_crawl,
         "run_bilibili_behavior_session",
-        AsyncMock(return_value=({"cookie_header": ""}, {"ok": True})),
+        AsyncMock(return_value=({"cookie_header": "", "user_agent": "Mozilla/5.0 test-browser"}, {"ok": True})),
     )
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
-    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value, **kwargs: ("a", "b"))
 
     failed = search_item("failed-followers")
     failed["mid"] = "creator-failed"
@@ -457,7 +457,7 @@ def test_follower_failure_retries_then_records_skip_and_continues(
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_article_detail_with_retry",
-        lambda post_id, cookie_header: (
+        lambda post_id, cookie_header, **kwargs: (
             {
                 "title": "详情标题",
                     "content": "青岛可用的完整正文",
@@ -470,7 +470,7 @@ def test_follower_failure_retries_then_records_skip_and_continues(
     )
     follower_calls: list[str] = []
 
-    def follower_count(creator_id, cookie_header):
+    def follower_count(creator_id, cookie_header, **kwargs):
         follower_calls.append(creator_id)
         return None if creator_id == "creator-failed" else 100
 

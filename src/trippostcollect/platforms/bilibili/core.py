@@ -11,6 +11,7 @@ import shlex
 import sys
 import time
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,7 @@ def download_bilibili_record_images(
     sleep_fn: Any | None = None,
     log_fn: Any | None = None,
     max_attempts: int = BILIBILI_IMAGE_MAX_ATTEMPTS,
+    user_agent: str = "",
     ports: BilibiliImagePorts,
 ) -> list[ImageManifestEntry]:
     ImageManifestEntry = ports.ImageManifestEntry
@@ -76,7 +78,10 @@ def download_bilibili_record_images(
         raise ValueError(
             f"max_attempts must be between 1 and {BILIBILI_IMAGE_MAX_ATTEMPTS}"
         )
-    fetch = fetcher or fetch_bilibili_image_bytes
+    if fetcher is None and not user_agent:
+        # #127：默认图片请求必须带本轮浏览器 UA；没有就不发请求。
+        raise ValueError("bilibili image download requires the session user agent")
+    fetch = fetcher or partial(fetch_bilibili_image_bytes, user_agent=user_agent)
     wait = sleep_fn or time.sleep
     def default_log(message: str) -> None:
         print(message, file=sys.stderr, flush=True)
@@ -313,8 +318,13 @@ def run_bilibili_article_search(
             run_bilibili_behavior_session(args, behavior_evidence_path)
         )
         cookie_header = str((cookie_export or {}).get("cookie_header") or "")
+        # #127：所有 B站请求的 UA 取自本轮行为会话浏览器的 navigator.userAgent；缺失即运行级失败，
+        # 不回退到写死值，也不发任何请求。
+        user_agent = str((cookie_export or {}).get("user_agent") or "")
+        if not user_agent:
+            raise BilibiliRuntimeBlocked("cookie_export_missing_user_agent")
         try:
-            wbi_keys = fetch_bilibili_wbi_keys(cookie_header)
+            wbi_keys = fetch_bilibili_wbi_keys(cookie_header, user_agent=user_agent)
         except BilibiliArticleDetailError as exc:
             raise BilibiliRuntimeBlocked(bilibili_request_stop_detail("nav", exc)) from exc
         frontier_start = max(1, int(args.start_page))
@@ -354,6 +364,7 @@ def run_bilibili_article_search(
                         page,
                         wbi_keys=wbi_keys,
                         cookie_header=cookie_header,
+                        user_agent=user_agent,
                     )
                 except BilibiliArticleDetailError as exc:
                     raise BilibiliRuntimeBlocked(
@@ -439,6 +450,7 @@ def run_bilibili_article_search(
                         detail_result = fetch_bilibili_article_detail_with_retry(
                             post_id,
                             cookie_header,
+                            user_agent=user_agent,
                         )
                         detail, detail_attempts, retry_wait_seconds = detail_result
                         last_detail_request_at = time.monotonic()
@@ -519,6 +531,7 @@ def run_bilibili_article_search(
                         post_image_entries = download_bilibili_record_images(
                             normalized,
                             platform_data_root=platform_data_root,
+                            user_agent=user_agent,
                         )
                         image_manifest_entries.extend(post_image_entries)
                         write_manifest_atomic(manifest_path, image_manifest_entries)
@@ -580,6 +593,7 @@ def run_bilibili_article_search(
                                     fetched_followers = fetch_bilibili_follower_count(
                                         creator_id,
                                         cookie_header,
+                                        user_agent=user_agent,
                                     )
                                 except BilibiliFollowerFetchError as exc:
                                     follower_error = exc

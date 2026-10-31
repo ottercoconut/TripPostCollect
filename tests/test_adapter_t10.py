@@ -63,6 +63,7 @@ def old_module(name, namespace=None):
             source = t112_login_api_check(source, check)
         module.__dict__["project_login_api_result"] = warmup.project_login_api_result
         source = t115_bilibili_nav_login(source)
+        source = t127_snapshot_user_agent(source)
     if "from __future__ import annotations" not in source:
         source = "from __future__ import annotations\n" + source
     exec(compile(source, name, "exec"), module.__dict__)
@@ -150,6 +151,45 @@ def t115_bilibili_nav_login(source):
     return source.replace(anchor, check + "\n\n\n" + anchor)
 
 
+T127_SNAPSHOT_CALL_STATES = {"state=state,": "page", "state=verify_state,": "verify_page"}
+
+
+def t127_snapshot_user_agent(source, name=None):
+    """#127 授权差异：快照保存登录 page 的 navigator.userAgent；登录视口改用共享常量 PROFILE_VIEWPORT（值不变）。
+
+    冻结原文中的旧写法必须恰好出现预期次数；新增的 browser_user_agent 原样取自现行 warmup.py，插在
+    safe_local_storage 之前，其余源码逐字不变。``name`` 为 None 时变换整份冻结文件（old_module 执行），
+    否则只变换该函数所需的部分（test_migrated_ast）。
+    """
+    if name in (None, "launch_login_context"):
+        viewport = '        "viewport": {"width": 1280, "height": 900},\n'
+        assert source.count(viewport) == 1
+        source = source.replace(viewport, '        "viewport": PROFILE_VIEWPORT,\n')
+    if name in (None, "write_cookie_snapshot"):
+        signature = "    state: dict[str, Any],\n) -> dict[str, Any] | None:\n"
+        payload = '        "cookies": cookies,\n    }\n'
+        assert source.count(signature) == 1 and source.count(payload) == 1
+        source = source.replace(signature, "    state: dict[str, Any],\n    user_agent: str,\n) -> dict[str, Any] | None:\n")
+        source = source.replace(payload, '        "user_agent": user_agent,\n' + payload)
+    if name in (None, "warmup_one"):
+        for state, page in T127_SNAPSHOT_CALL_STATES.items():
+            call = f"            {state}\n        )\n" if page == "page" else f"                {state}\n            )\n"
+            expected = 2 if page == "page" else 1
+            assert source.count(call) == expected, (state, source.count(call))
+            indent = call[: len(call) - len(call.lstrip())]
+            source = source.replace(call, call.replace(
+                f"{state}\n", f"{state}\n{indent}user_agent=await browser_user_agent({page}),\n", 1))
+    if name is None:
+        current = (ROOT / "src/trippostcollect/application/warmup.py").read_text()
+        helper = ast.get_source_segment(current, function(current, "browser_user_agent"))
+        anchor = "async def safe_local_storage(page: Page) -> dict[str, Any]:"
+        assert source.count(anchor) == 1 and helper
+        source = source.replace(anchor, helper + "\n\n\n" + anchor)
+        source = source.replace("from __future__ import annotations\n", "", 1)
+        source = "from __future__ import annotations\nfrom trippostcollect.core.paths import PROFILE_VIEWPORT\n" + source
+    return source
+
+
 def t14_without_fork_check(node):
     """T14 授权差异：入口不再要求 fork 目录存在。"""
     for child in ast.walk(node):
@@ -180,15 +220,16 @@ def test_migrated_ast(row):
                 source = re.sub(r"(?<!\.)\b" + old + r"\b", "media_" + old, source)
             name = target_name
         elif name == "write_cookie_snapshot":
+            source = t127_snapshot_user_agent(source, name)
             source = source.replace("    source: str,\n", "    source: str,\n    label: str,\n    urls: list[str],\n")
             source = source.replace('PLATFORMS[platform_key]["label"]', "label").replace('PLATFORMS[platform_key]["urls"]', "urls")
             source = t14_snapshot_writer(source)
         elif name == "warmup_one":
-            source = t14_warmup_one(source)
+            source = t127_snapshot_user_agent(t14_warmup_one(source), name)
         elif name in T112_LOGIN_API_CHECKS:
             source = t112_login_api_check(source, name)
         elif name == "launch_login_context":
-            source = t83_sandbox_enabled(source)
+            source = t127_snapshot_user_agent(t83_sandbox_enabled(source), name)
         elif name == "current_state":
             source = t115_bilibili_nav_login(source)
     if row["disposition"] == "薄":
@@ -284,6 +325,8 @@ class FakePage:
 
     async def evaluate(self, script):
         self.record("evaluate", script)
+        if script == "() => navigator.userAgent":
+            return "离线浏览器 UA"
         if "localStorage" in script:
             return {"HasUserLogin": "1"}
         ok = self.context.authenticated
@@ -528,3 +571,17 @@ def test_thin_entry_requires_existing_delegate(tmp_path, target_exists, body, ex
     manifest.parent.mkdir(parents=True)
     manifest.write_text(json.dumps({"rows": [{"file": "scripts/login.py", "qualname": "main", "card": "T10", "disposition": "薄", "target": "scripts/login.py"}]}))
     assert ledger.build_progress(tmp_path)["rows"][0]["state"] == expected
+
+
+@pytest.mark.parametrize("scenario", ["valid", "skip", "keep"])
+def test_issue127_snapshot_records_login_page_user_agent(monkeypatch, tmp_path, scenario):
+    """#127：新实现写出的每份快照都含登录 page 的 navigator.userAgent（离线替身返回固定值）。"""
+    root = tmp_path / "run"
+    root.mkdir()
+    fake = FakePlaywright(scenario)
+    configure(monkeypatch, warmup, fake, root)
+    args = argparse.Namespace(timeout_seconds=1, output_dir=str(root), browser_path=None,
+                              no_close_on_success=scenario == "keep", skip_reopen_verify=scenario == "skip")
+    asyncio.run(warmup.warmup_one(fake, "weibo", root, args))
+    snapshots = [json.loads(path.read_text()) for path in root.rglob(core_paths.COOKIE_SNAPSHOT_FILENAME)]
+    assert snapshots and all(item["user_agent"] == "离线浏览器 UA" for item in snapshots)

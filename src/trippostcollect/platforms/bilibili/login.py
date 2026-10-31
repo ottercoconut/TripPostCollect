@@ -83,6 +83,8 @@ async def run_bilibili_behavior_session(
                 write_evidence=write_evidence,
             )
             cookies = await context.cookies([platform_cookie_url("bilibili")])
+            # #127：本轮浏览器自报的 UA，随 Cookie 一起交给浏览器外的 B站请求。
+            user_agent = str(await page.evaluate("() => navigator.userAgent") or "")
         finally:
             await context.close()
 
@@ -94,6 +96,7 @@ async def run_bilibili_behavior_session(
         "saved_at": evidence.get("finished_at"),
         "cookie_names": cookie_names_from_header(cookie_header),
         "required_cookie_names": list(required_cookie_names("bilibili")),
+        "user_agent": user_agent,
     }
     return cookie_export, evidence
 

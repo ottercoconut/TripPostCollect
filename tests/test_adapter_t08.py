@@ -167,6 +167,11 @@ def drive(module, root, monkeypatch, scenario):
         async def goto(self, url, **kwargs):
             trace.append(("goto", url, kwargs))
 
+        async def evaluate(self, script):
+            # #127：新实现在关闭 context 前读取浏览器 UA；求值不进入轨迹，冻结旧实现不会调用。
+            assert module is executor and script == "() => navigator.userAgent", script
+            return T127_BROWSER_USER_AGENT
+
     class Context:
         pages = [Page()]
 
@@ -320,11 +325,32 @@ def t115_without_article_search_pacing(evidence):
     return evidence
 
 
-def t115_normalized(value):
+# #127 有意偏离：B站请求 UA 取自本轮行为会话浏览器的 navigator.userAgent。冻结旧实现 nav/search/relation
+# 用裸 "Mozilla/5.0"、detail 与图片用写死的 Chrome/138；新实现五类请求都用浏览器 UA。比较前钉住双侧各自的
+# 取值后去掉该头，其余请求头逐字比较。
+T127_BROWSER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+T127_LEGACY_USER_AGENTS = {
+    "/x/web-interface/nav": "Mozilla/5.0",
+    "/x/web-interface/wbi/search/type": "Mozilla/5.0",
+    "/x/relation/stat": "Mozilla/5.0",
+    "/x/article/view": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+}
+
+
+def t127_pinned_user_agent(event, *, legacy):
+    path = urlparse(event[2]).path
+    expected = (T127_LEGACY_USER_AGENTS.get(path, T127_LEGACY_USER_AGENTS["/x/article/view"])
+                if legacy else T127_BROWSER_USER_AGENT)
+    assert event[3].pop("user-agent") == expected, (legacy, event[2])
+
+
+def t115_normalized(value, *, legacy):
     """双侧同样剥离第 1 类通用差异；新侧特有的翻页等待一并去掉，旧侧本就没有。"""
     value = json.loads(json.dumps(value, ensure_ascii=False, default=lambda raw: raw.decode("latin-1")))
     trace = []
     for index, event in enumerate(value["trace"]):
+        if event[0] == "request":
+            t127_pinned_user_agent(event, legacy=legacy)
         if event[0] == "request" and urlparse(event[2]).path.startswith("/bfs/"):
             event[3].pop("cookie", None)
         following = value["trace"][index + 1] if index + 1 < len(value["trace"]) else None
@@ -356,6 +382,7 @@ def test_formal_request_and_artifact_equivalence(baseline, tmp_path, monkeypatch
         assert (stopped[-1]["source_num_pages"], stopped[-1]["source_num_results"]) == (1, 3)
     requests = [event for event in new["trace"] if event[0] == "request"]
     assert not any("cookie" in event[3] for event in requests if urlparse(event[2]).path.startswith("/bfs/"))
+    assert all(event[3]["user-agent"] == T127_BROWSER_USER_AGENT for event in requests)
     if scenario == "detail_fallback":
         assert not [path for path in new["files"] if "/images/" in path]
         assert all(record["detail_image_sources"] == [] for record in new["records"])
@@ -372,7 +399,7 @@ def test_formal_request_and_artifact_equivalence(baseline, tmp_path, monkeypatch
         assert not new["records"]
         return
     new_raw = new
-    old, new = t115_normalized(old), t115_normalized(new)
+    old, new = t115_normalized(old, legacy=True), t115_normalized(new, legacy=False)
     assert new["files"].keys() == old["files"].keys()
     for path in new["files"]:
         assert new["files"][path] == old["files"][path], path
@@ -442,6 +469,11 @@ T115_REWRITTEN = frozenset({
 })
 
 
+# #127 有意偏离：B站请求 UA 改由调用方传入（取自本轮行为会话浏览器的 navigator.userAgent），下列在 #115 清单
+# 之外的函数随之改写，退出逐字对照；新行为由 tests/test_ua_from_browser_issue127.py 钉住。
+T127_REWRITTEN = frozenset({"bilibili_detail_headers", "run_bilibili_behavior_session"})
+
+
 def test_function_bodies_only_add_ports(baseline):
     old = ast.parse(Path(baseline.__file__).read_text())
     original = {node.name: node for node in old.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
@@ -450,7 +482,7 @@ def test_function_bodies_only_add_ports(baseline):
         for node in ast.parse(Path(implementation.__file__).read_text()).body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if node.name in T115_REWRITTEN:
+            if node.name in T115_REWRITTEN | T127_REWRITTEN:
                 rewritten_seen.add(node.name)
                 continue
             if node.name not in original:
@@ -468,4 +500,4 @@ def test_function_bodies_only_add_ports(baseline):
                         expression.func = ast.Name(id="connect_database", ctx=ast.Load())
             assert ast.dump(ast.Module(body=body, type_ignores=[])) == ast.dump(ast.Module(body=reference, type_ignores=[])), node.name
     # 偏离清单不得含已删除或拼错的名字。
-    assert rewritten_seen == T115_REWRITTEN
+    assert rewritten_seen == T115_REWRITTEN | T127_REWRITTEN

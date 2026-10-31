@@ -7,7 +7,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import random
 import sqlite3
 import sys
 
@@ -396,20 +395,14 @@ def test_http_factory(monkeypatch, disabled, override):
     assert result == {"verify": not disabled if override is None else override}
 
 
+# #127 有意偏离：随机桌面 UA 与固定 iPhone UA 两个辅助函数删除（唯一用途是给浏览器与浏览器外请求写死 UA）；
+# 浏览器外请求改取浏览器自报的 navigator.userAgent，见 tests/test_ua_from_browser_issue127.py。
 @pytest.mark.parametrize("name", ["get_user_agent", "get_mobile_user_agent"])
-def test_user_agents_preserve_candidates_and_randomness(legacy, monkeypatch, name):
-    old = getattr(legacy, name)
-    new = getattr(helpers, name)
+def test_user_agent_helpers_exit_with_issue_127(legacy, name):
     source = BASELINE["sources"]["tools/crawler_util.py"]
-    tree = ast.parse(source)
-    definition = next(n for n in tree.body if n.name == name)
-    expected = ast.literal_eval(definition.body[0].value)
-    captured = []
-    monkeypatch.setattr(random, "choice", lambda values: captured.append(values) or values[0])
-    assert old() == new() == expected[0]
-    assert captured == [expected, expected]
-    left, right = random.Random(73), random.Random(73)
-    assert [new(left) for _ in range(50)] == [right.choice(expected) for _ in range(50)]
+    assert any(isinstance(node, ast.FunctionDef) and node.name == name for node in ast.parse(source).body)
+    assert callable(getattr(legacy, name))
+    assert not hasattr(helpers, name)
 
 
 @pytest.mark.parametrize("platform", ["bilibili", "weibo", "douyin", "zhihu", "xhs", "unknown"])
@@ -455,6 +448,11 @@ def test_cookie_snapshot_matches_baseline(legacy, monkeypatch, tmp_path, state):
         for module in (legacy, cookies):
             with pytest.raises(AttributeError):
                 module.load_cookie_snapshot("zhihu")
+    elif state == "complete":
+        # #127 有意偏离：快照读取多返回 warmup 保存的 user_agent（旧快照无该字段时为空串），其余键值不变。
+        expected = legacy.load_cookie_snapshot("zhihu")
+        assert "user_agent" not in expected
+        assert cookies.load_cookie_snapshot("zhihu") == {**expected, "user_agent": ""}
     else:
         assert cookies.load_cookie_snapshot("zhihu") == legacy.load_cookie_snapshot("zhihu")
 
@@ -488,8 +486,10 @@ def test_t03_ledger_rows(monkeypatch):
     assert len(rows) == 28
     assert result["counts"]["missing"] == 0
     # T14-C 删除 fork 薄子类后，AdaptiveAccumulator 与 from_environment 按 PROGRESS_RESOLUTIONS 归到根定义。
-    assert [row["qualname"] for row in rows if row["state"] != "moved"] == []
-    assert sum(row["state"] == "moved" for row in rows) == 28
+    # #127：两个写死 UA 辅助函数删除，按 PROGRESS_RESOLUTIONS 登记退出。
+    assert sorted(row["qualname"] for row in rows if row["state"] != "moved") == ["get_mobile_user_agent", "get_user_agent"]
+    assert all(row["state"] == "exited" for row in rows if row["state"] != "moved")
+    assert sum(row["state"] == "moved" for row in rows) == 26
 
 
 def test_cookie_imports_share_one_implementation(monkeypatch):

@@ -2062,6 +2062,13 @@ PROGRESS_RESOLUTIONS = {
         "退出", None, "#124：唯一调用方首页直接请求失败分支随直接搜索请求删除；首页只认截获的 /stream/ 响应"),
     ("tools/MediaCrawler/tools/trippostcollect_adaptive.py", "should_reseed_douyin_frontier"): (
         "退出", None, "#124：没有顶部刷新与旧耗尽链，每轮从首页全量扫描，不再判定新游标纪元"),
+    # #127：浏览器外请求的 UA 取自浏览器自报的 navigator.userAgent，写死/随机 UA 辅助函数随之删除。
+    **{
+        ("tools/MediaCrawler/tools/crawler_util.py", name): (
+            "退出", None,
+            "#127：唯一用途是写死浏览器与浏览器外请求的 UA；改取 navigator.userAgent（B站取行为会话浏览器）")
+        for name in ("get_user_agent", "get_mobile_user_agent")
+    },
     # #113：知乎登录态只以持久 profile 为准，worker 不再注入快照 Cookie 或轮内登录；pong 失败即 login_required。
     **{
         ("tools/MediaCrawler/media_platform/zhihu/login.py", name): (

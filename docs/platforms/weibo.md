@@ -12,6 +12,10 @@
 - 关闭重开 profile 后，只有移动接口同时返回 `login=true` 和有效 `uid` 才成功；`WBPSESS` 不能
   单独作为登录证据。
 - 行为阶段必须在本轮真实关键词移动搜索页完成并刷新移动端 Cookie。
+- 启动浏览器时不强制 User-Agent，视口与 warmup 相同（1280×900），同一持久 profile 登录与抓取时的
+  浏览器 UA 一致；`m.weibo.cn` 接口与图片请求头的 `User-Agent` 从 `navigator.userAgent` 读取，
+  不再用固定 iPhone Safari（#127）。桌面 UA 下 `/api/config` 已由 warmup 验证；`/api/container/getIndex`
+  在桌面 UA 下的 `cards` 结构待正式轮实证，结构不同或被拒只会运行级停止，不写错误数据。
 - worker 启动时先用 `/api/config` 确认移动端登录；未确认时执行登录流程并刷新移动端 Cookie，之后必须
   再确认一次。仍未登录即记 `adaptive_search_stopped(runtime_failed, login_required)` 并结束，不发出
   任何搜索请求，不能把未登录状态下的空结果当作来源耗尽。
@@ -49,7 +53,7 @@
 [正式契约](../formal-crawl-contract.md)与[数据持久化](../data-persistence.md)。
 
 图片请求只直连新浪图床：先请求 `large` 规格，失败或超限时退回平台原始地址。请求头只含浏览器
-User-Agent、`Referer: https://m.weibo.cn/` 和图片 Accept，不带登录 Cookie、Origin 或 Content-Type，
+User-Agent（与接口请求同一 `navigator.userAgent`）、`Referer: https://m.weibo.cn/` 和图片 Accept，不带登录 Cookie、Origin 或 Content-Type，
 也不经任何第三方图片代理。
 
 ## 发现与批次诊断

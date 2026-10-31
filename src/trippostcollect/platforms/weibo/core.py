@@ -34,9 +34,8 @@ from playwright.async_api import BrowserContext, BrowserType, Page, Playwright, 
 
 from trippostcollect.application.contracts import ImageStagingError, WeiboPorts
 from trippostcollect.core import resources
-from trippostcollect.core.paths import platform_profile_dir
+from trippostcollect.core.paths import PROFILE_VIEWPORT, platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
-from trippostcollect.runtime.helpers import get_user_agent, get_mobile_user_agent
 from . import parser as weibo_store
 from .client import WeiboClient
 from .models import DataFetchError, PlatformRuntimeError, SearchType, WeiboImageDownloadError, WeiboFullTextFetchError
@@ -57,8 +56,6 @@ class WeiboCrawler:
         self.index_url = "https://www.weibo.com"
         self.mobile_index_url = "https://m.weibo.cn"
         self.cookie_urls = [self.mobile_index_url]
-        self.user_agent = get_user_agent()
-        self.mobile_user_agent = get_mobile_user_agent()
         self.cdp_manager = None
 
     async def start(self):
@@ -67,17 +64,18 @@ class WeiboCrawler:
             # Select launch mode based on configuration
             if self.config.ENABLE_CDP_MODE:
                 logger.info("[WeiboCrawler] Launching browser with CDP mode")
+                # #127：不强制 UA，浏览器自报真实 UA；httpx 头从 navigator.userAgent 读取。
                 self.browser_context = await self.launch_browser_with_cdp(
                     playwright,
                     playwright_proxy_format,
-                    self.mobile_user_agent,
+                    None,
                     headless=self.config.CDP_HEADLESS,
                 )
             else:
                 logger.info("[WeiboCrawler] Launching browser with standard mode")
                 # Launch a browser context.
                 chromium = playwright.chromium
-                self.browser_context = await self.launch_browser(chromium, None, self.mobile_user_agent, headless=self.config.HEADLESS)
+                self.browser_context = await self.launch_browser(chromium, None, None, headless=self.config.HEADLESS)
 
                 # stealth.min.js is a js script to prevent the website from detecting the crawler.
                 with resources.path("js/stealth.min.js") as stealth_path:
@@ -573,7 +571,8 @@ class WeiboCrawler:
         weibo_client_obj = WeiboClient(
             proxy=httpx_proxy,
             headers={
-                "User-Agent": get_mobile_user_agent(),
+                # #127：与浏览器一致，取本轮浏览器自报的 UA；图片请求沿用这里的 UA。
+                "User-Agent": await self.context_page.evaluate("() => navigator.userAgent"),
                 "Cookie": cookie_str,
                 "Origin": "https://m.weibo.cn",
                 "Referer": "https://m.weibo.cn",
@@ -602,17 +601,14 @@ class WeiboCrawler:
                 accept_downloads=True,
                 headless=headless,
                 proxy=playwright_proxy,  # type: ignore
-                viewport={
-                    "width": 1920,
-                    "height": 1080
-                },
+                viewport=PROFILE_VIEWPORT,
                 user_agent=user_agent,
                 args=self.ports.project_browser_args(),
             )
             return browser_context
         else:
             browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
-            browser_context = await browser.new_context(viewport={"width": 1920, "height": 1080}, user_agent=user_agent)
+            browser_context = await browser.new_context(viewport=PROFILE_VIEWPORT, user_agent=user_agent)
             return browser_context
 
     async def launch_browser_with_cdp(

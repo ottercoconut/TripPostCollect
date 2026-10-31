@@ -139,6 +139,8 @@ def load_cookie_snapshot(platform_key: str) -> dict[str, Any] | None:
         "saved_at": payload.get("saved_at"),
         "cookie_names": names,
         "required_cookie_names": list(required_cookie_names(platform_key)),
+        # #127：warmup 登录 page 自报的 UA；旧快照没有该字段时为空串，由调用方决定是否要求重跑 warmup。
+        "user_agent": str(payload.get("user_agent") or ""),
     }
 
 
@@ -180,6 +182,7 @@ def write_cookie_snapshot(
     label: str,
     urls: list[str],
     state: dict[str, Any],
+    user_agent: str,
 ) -> dict[str, Any] | None:
     cookie_values = cookie_dict(cookies)
     missing = [name for name in required_cookie_names(platform_key) if not cookie_values.get(name)]
@@ -196,6 +199,7 @@ def write_cookie_snapshot(
         "urls": urls,
         "required_cookie_names": list(required_cookie_names(platform_key)),
         "state_markers": state.get("markers") if isinstance(state, dict) else {},
+        "user_agent": user_agent,
         "cookies": cookies,
     }
     snapshot_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

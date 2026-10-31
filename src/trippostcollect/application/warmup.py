@@ -22,6 +22,7 @@ from trippostcollect.runtime.cookies import write_cookie_snapshot as _write_cook
 from trippostcollect.core.paths import (
     LOGIN_WARMUP_OUTPUT,
     MEDIACRAWLER_LOGIN_OUTPUT,
+    PROFILE_VIEWPORT,
     PROJECT_ROOT,
     ensure_dir,
 )
@@ -138,7 +139,7 @@ async def launch_login_context(
         "headless": False,
         "locale": "zh-CN",
         "timezone_id": "Asia/Shanghai",
-        "viewport": {"width": 1280, "height": 900},
+        "viewport": PROFILE_VIEWPORT,
         "accept_downloads": True,
         "ignore_https_errors": True,
         # 显式开启沙箱：Playwright 在 chromium_sandbox 不为 True 时会自动追加 --no-sandbox。
@@ -164,6 +165,11 @@ async def launch_login_context(
     if browser_path:
         kwargs["executable_path"] = browser_path
     return await playwright.chromium.launch_persistent_context(**kwargs)
+
+
+async def browser_user_agent(page: Page) -> str:
+    """#127：登录 page 自报的 UA，随快照保存，供不开浏览器的请求与浏览器保持一致。"""
+    return await page.evaluate("() => navigator.userAgent")
 
 
 async def safe_local_storage(page: Page) -> dict[str, Any]:
@@ -494,6 +500,7 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
             session_cookies,
             source="session",
             state=state,
+            user_agent=await browser_user_agent(page),
         )
         print("[login] --no-close-on-success enabled; press Ctrl+C when you want to close this browser.", flush=True)
         try:
@@ -508,6 +515,7 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
             session_cookies,
             source="session_skip_reopen_verify",
             state=state,
+            user_agent=await browser_user_agent(page),
         )
 
     await context.close()
@@ -530,6 +538,7 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
                 verify_cookies,
                 source="reopen_verify",
                 state=verify_state,
+                user_agent=await browser_user_agent(verify_page),
             )
         await verify_context.close()
         result["reopen_verify"] = {
@@ -578,10 +587,11 @@ def write_cookie_snapshot(
     *,
     source: str,
     state: dict[str, Any],
+    user_agent: str,
 ) -> dict[str, Any] | None:
     return _write_cookie_snapshot(
         platform_key, cookie_snapshot_path(platform_key), cookies, source=source, state=state,
-        label=PLATFORMS[platform_key]["label"], urls=PLATFORMS[platform_key]["urls"],
+        label=PLATFORMS[platform_key]["label"], urls=PLATFORMS[platform_key]["urls"], user_agent=user_agent,
     )
 
 

@@ -103,10 +103,10 @@ def install_successful_run_mocks(monkeypatch) -> None:
     monkeypatch.setattr(
         mediacrawler_crawl,
         "run_bilibili_behavior_session",
-        AsyncMock(return_value=({"cookie_header": "SESSDATA=test"}, {"ok": True})),
+        AsyncMock(return_value=({"cookie_header": "SESSDATA=test", "user_agent": "Mozilla/5.0 test-browser"}, {"ok": True})),
     )
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
-    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value, **kwargs: ("a", "b"))
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_article_page",
@@ -115,9 +115,9 @@ def install_successful_run_mocks(monkeypatch) -> None:
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_article_detail_with_retry",
-        lambda post_id, cookie_header: (detail_payload(), 1, 0.0),
+        lambda post_id, cookie_header, **kwargs: (detail_payload(), 1, 0.0),
     )
-    monkeypatch.setattr(bilibili_core, "fetch_bilibili_follower_count", lambda *args: 42)
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_follower_count", lambda *args, **kwargs: 42)
     monkeypatch.setattr(mediacrawler_crawl.time, "sleep", lambda value: None)
 
 
@@ -151,10 +151,11 @@ def test_detail_images_download_in_order_with_current_session_headers(tmp_path: 
     assert all((tmp_path / str(entry.staging_path)).is_file() for entry in entries)
     assert list(tmp_path.rglob("*.mp4")) == []
 
-    headers = mediacrawler_crawl.bilibili_image_headers("123")
+    # #127：UA 由调用方给出（本轮浏览器 navigator.userAgent），不再写死。
+    headers = mediacrawler_crawl.bilibili_image_headers("123", user_agent="Mozilla/5.0 test-browser")
     assert "Cookie" not in headers
     assert headers["Referer"] == "https://www.bilibili.com/read/cv123/"
-    assert headers["User-Agent"] == mediacrawler_crawl.BILIBILI_BROWSER_USER_AGENT
+    assert headers["User-Agent"] == "Mozilla/5.0 test-browser"
 
 
 def test_search_only_record_never_creates_image_request(tmp_path: Path) -> None:
@@ -280,7 +281,7 @@ def test_bilibili_run_writes_manifest_and_never_downloads_preview(monkeypatch, t
     install_successful_run_mocks(monkeypatch)
     fetched: list[str] = []
 
-    def fetch_image(source_url: str, post_id: str):
+    def fetch_image(source_url: str, post_id: str, **kwargs):
         fetched.append(source_url)
         return mediacrawler_crawl.RemoteImagePreview(
             content=png_bytes(),
@@ -334,7 +335,7 @@ def test_image_failure_is_recorded_seen_without_blocking_pages(monkeypatch, tmp_
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
     install_successful_run_mocks(monkeypatch)
 
-    def fail_image(source_url: str, post_id: str):
+    def fail_image(source_url: str, post_id: str, **kwargs):
         raise mediacrawler_crawl.RemoteImageFetchError(
             "HTTP 503",
             http_status=503,
@@ -393,7 +394,7 @@ def test_skipped_candidate_allows_empty_page_exhaustion(
     monkeypatch.setattr(
         mediacrawler_crawl,
         "fetch_bilibili_image_bytes",
-        lambda *args: (_ for _ in ()).throw(
+        lambda *args, **kwargs: (_ for _ in ()).throw(
             mediacrawler_crawl.RemoteImageFetchError(
                 "HTTP 503", http_status=503, retryable=True
             )
@@ -493,7 +494,7 @@ def test_skipped_candidate_continues_until_source_exhaustion(
     monkeypatch.setattr(
         mediacrawler_crawl,
         "fetch_bilibili_image_bytes",
-        lambda *args: (_ for _ in ()).throw(
+        lambda *args, **kwargs: (_ for _ in ()).throw(
             mediacrawler_crawl.RemoteImageFetchError(
                 "HTTP 503", http_status=503, retryable=True
             )
@@ -535,7 +536,7 @@ def test_image_failure_does_not_block_later_bilibili_candidate(
         paged_search({1: [search_item("123"), search_item("124")]}),
     )
 
-    def selective_image(source_url: str, post_id: str):
+    def selective_image(source_url: str, post_id: str, **kwargs):
         if post_id == "123":
             raise mediacrawler_crawl.RemoteImageFetchError(
                 "HTTP 503",
@@ -583,10 +584,10 @@ def test_known_post_id_is_skipped_before_detail_or_image_requests(monkeypatch, t
     monkeypatch.setattr(
         mediacrawler_crawl,
         "run_bilibili_behavior_session",
-        AsyncMock(return_value=({"cookie_header": ""}, {"ok": True})),
+        AsyncMock(return_value=({"cookie_header": "", "user_agent": "Mozilla/5.0 test-browser"}, {"ok": True})),
     )
     monkeypatch.setattr(mediacrawler_crawl, "behavior_evidence_valid", lambda value: True)
-    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value: ("a", "b"))
+    monkeypatch.setattr(bilibili_core, "fetch_bilibili_wbi_keys", lambda value, **kwargs: ("a", "b"))
     requested_pages: list[int] = []
     fetch_page = paged_search({1: [search_item("123")]}, requested=requested_pages)
 
@@ -594,7 +595,7 @@ def test_known_post_id_is_skipped_before_detail_or_image_requests(monkeypatch, t
     monkeypatch.setattr(
         bilibili_core,
         "fetch_bilibili_article_detail_with_retry",
-        lambda *args: (_ for _ in ()).throw(AssertionError("known post detail requested")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("known post detail requested")),
     )
     monkeypatch.setattr(
         mediacrawler_crawl,

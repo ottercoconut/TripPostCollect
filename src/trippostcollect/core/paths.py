@@ -41,6 +41,9 @@ FORMAL_CRAWL_CONTRACT = DOCS_ROOT / "formal-crawl-contract.md"
 
 PLATFORM_PROFILE_CODES = {"bilibili": "bili", "weibo": "wb", "douyin": "dy", "zhihu": "zhihu", "xhs": "xhs"}
 COOKIE_SNAPSHOT_FILENAME = "trippostcollect_cookie_snapshot.json"
+# #127：通用平台持久 profile 在 warmup 登录与 crawl 标准模式启动时用同一视口，避免同一 profile
+# 在 1280×900 与 1920×1080 之间来回切换。
+PROFILE_VIEWPORT = {"width": 1280, "height": 900}
 MEDIACRAWLER_RUNS_OUTPUT = OUTPUTS_ROOT / "mediacrawler_runs"
 MEDIACRAWLER_LOGIN_OUTPUT = OUTPUTS_ROOT / "mediacrawler_login_warmup"
 LOGIN_WARMUP_OUTPUT = OUTPUTS_ROOT / "login_warmup"
