@@ -483,9 +483,9 @@ def test_frozen_source_hashes_and_signature_resource():
 
 def test_unchanged_parser_signer_and_login_support_bodies():
     pairs = {
-        "media_platform/douyin/search_safety.py": (parser, [
-            "decode_douyin_json_body", "validate_douyin_search_response", "classify_empty_first_page",
-        ]),
+        # #131：decode_douyin_json_body 合并流时保留非空 search_nil_info，validate_douyin_search_response
+        # 改为 search_nil_type 白名单；两者的偏离由 test_issue131_search_nil_whitelist_deviation 钉住。
+        "media_platform/douyin/search_safety.py": (parser, ["classify_empty_first_page"]),
         "media_platform/douyin/help.py": (signer, ["get_a_bogus", "get_a_bogus_from_js"]),
         "tools/easing.py": (login_support, [
             "ease_in_quad", "ease_out_quad", "ease_out_quart", "ease_out_expo", "ease_out_bounce", "ease_out_elastic",
@@ -510,6 +510,31 @@ def test_unchanged_parser_signer_and_login_support_bodies():
             actual = ast.parse(ast.unparse(new[symbol])).body[0] if symbol == "Slide" else new[symbol]
             assert ast.dump(expected) == ast.dump(actual), (name, symbol)
 
+
+
+def test_issue131_search_nil_whitelist_deviation():
+    """#131：旧实现只把 search_nil_type == "verify_check" 当作异常，其他取值一律放过；新实现只放行空值与 service_empty。"""
+    old_source = (FIXTURES / "media_platform/douyin/search_safety.py.txt").read_text()
+    old = {node.name: node for node in ast.parse(old_source).body if hasattr(node, "name")}
+    old_validate = ast.unparse(old["validate_douyin_search_response"])
+    old_decode = ast.unparse(old["decode_douyin_json_body"])
+    # 旧侧：校验与合并都只认 verify_check，没有白名单。
+    assert "== 'verify_check'" in old_validate and "service_empty" not in old_validate
+    assert old_decode.count("verify_check") == 1 and "other_search_nil_info" not in old_decode
+    # 新侧：白名单常量与按取值命名的失败原因。
+    assert parser.DOUYIN_NORMAL_SEARCH_NIL_TYPES == frozenset({"service_empty"})
+    new_validate = ast.unparse(next(
+        node for node in ast.parse(Path(parser.__file__).read_text()).body
+        if getattr(node, "name", "") == "validate_douyin_search_response"
+    ))
+    assert "DOUYIN_NORMAL_SEARCH_NIL_TYPES" in new_validate and "search_nil_" in new_validate
+    for value, reason in (("unknown", "search_nil_unknown"), ("verify_check", "search_verify_check")):
+        with pytest.raises(parser.SearchResponseError) as raised:
+            parser.validate_douyin_search_response(
+                {"status_code": 0, "data": [], "has_more": 0, "search_nil_info": {"search_nil_type": value}})
+        assert raised.value.reason == reason
+    service_empty = {"status_code": 0, "data": [], "has_more": 0, "search_nil_info": {"search_nil_type": "service_empty"}}
+    assert parser.validate_douyin_search_response(service_empty) is service_empty
 
 FIRST_PAGE_CASES = [
     (10, 10, "stable", False), (9, 10, "stable", False),

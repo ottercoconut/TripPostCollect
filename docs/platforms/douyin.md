@@ -48,6 +48,10 @@
 非成功 `status_code`、`data` 非列表、`has_more` 缺失/非法，或 `has_more=true` 但没有下一 `logid`，
 均为 `runtime_failed`。`SearchResponseError` 的具体 reason 必须进入停止证据；状态只保存脱敏元数据，
 不保存完整响应。`search_nil_info.search_nil_type=verify_check` 固定为 `search_verify_check`。
+`search_nil_type` 只放行空值与 `service_empty`（深层链尾 `data=[]`、`has_more=0` 时出现，属正常翻到
+底）；其他取值表示搜索受限，按 `runtime_failed`、`stop_detail=search_nil_<取值>` 停止，不能让同一响应
+的 `has_more=0` 被当成来源耗尽（#131：曾在首页收到 1 条非作品卡片、`has_more=0`、`unknown`）。首页流
+合并时保留任一文档的非空标记，`verify_check` 优先。
 响应带 `extra: null` 时按空 `logid` 处理。
 
 ## HTTP 状态与请求头
