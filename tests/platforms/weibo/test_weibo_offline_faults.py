@@ -248,6 +248,21 @@ async def test_long_text_detail_rejection_blocks_without_retry(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_runtime_failure_on_last_candidate_keeps_failed_page_issue133(monkeypatch, tmp_path, sleeps):
+    # 本页唯一候选即末位候选：运行级失败后 finish_batch 不得按下一页判为完整批次（#133）。
+    transport = Transport({1: [mblog("long", long=True)]}, detail_status=403)
+    crawler, state_path = prepare(monkeypatch, tmp_path, transport)
+
+    await crawler.search()
+
+    [batch] = events_of(state_path, "adaptive_batch_completed")
+    assert (batch["source_page"], batch["resume_page"], batch["batch_complete"]) == (1, 1, False)
+    stopped = events_of(state_path, "adaptive_search_stopped")[-1]
+    assert (stopped["stop_reason"], stopped["stop_detail"]) == ("runtime_failed", "login_required")
+    assert (stopped["resume_page"], stopped["batch_complete"]) == (1, False)
+
+
+@pytest.mark.asyncio
 async def test_page_without_note_cards_continues_to_next_page(monkeypatch, tmp_path, sleeps):
     # 有卡片但都不是 card_type=9（话题、用户卡、card_group=None）：正常页，继续翻页（#114）。
     raw = {1: [{"card_type": 11, "card_group": None}, {"card_type": 4, "desc": "相关用户"}]}

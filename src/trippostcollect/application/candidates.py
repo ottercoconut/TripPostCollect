@@ -183,6 +183,13 @@ class AdaptiveAccumulator:
         discovery_phase: str = "frontier",
         count_stagnation: bool = True,
     ) -> bool:
+        if self.stop_reason == "runtime_failed":
+            # #133：运行级失败后调用方仍会收尾本批，但本批并未处理完；恢复位置沿用
+            # mark_runtime_failed 记下的失败页，不得按调用方传入的下一页越过失败页。
+            resume_page = self.last_resume_page
+            resume_offset = self.last_resume_offset
+            resume_cursor = self.last_resume_cursor
+            batch_complete = False
         self._record_source(
             source_page=source_page,
             source_offset=source_offset,

@@ -20,7 +20,7 @@ from .support import END, config, make_crawler as ZhihuCrawler, search_client, s
 from trippostcollect.application.contracts import ZhihuClientPorts
 from trippostcollect.platforms.zhihu import models as constant
 from trippostcollect.platforms.zhihu.client import ZhiHuClient
-from trippostcollect.platforms.zhihu.models import PlatformRuntimeError, ZhihuContent
+from trippostcollect.platforms.zhihu.models import PlatformRuntimeError, ZhihuContent, ZhihuImageDownloadError
 from trippostcollect.platforms.zhihu.parser import ZhihuExtractor
 
 
@@ -186,6 +186,25 @@ async def test_top_refresh_precedes_saved_frontier(monkeypatch, tmp_path):
     assert stopped[0]["stop_reason"] == "source_exhausted"
     assert stopped[0]["discovery_phase"] == "frontier"
     assert stopped[0]["source_page"] == stopped[0]["resume_page"] == 6
+
+
+@pytest.mark.asyncio
+async def test_runtime_failure_on_last_candidate_keeps_failed_page_issue133(monkeypatch, tmp_path):
+    # 末位候选图片运行级阻断：知乎先 processed_count += 1 再 break，本批仍不得判为完整（#133）。
+    crawler, state_path = prepare(monkeypatch, tmp_path, start_page=4)
+    crawler.zhihu_client.get_note_by_keyword.side_effect = [search_page([answer("a1"), answer("a2")]), END]
+    crawler.enrich_search_content_detail = AsyncMock(side_effect=lambda item: item)
+    crawler.get_content_images = AsyncMock(
+        side_effect=[None, ZhihuImageDownloadError("a2", 0, "image_auth_required")]
+    )
+
+    await crawler.search()
+
+    [batch] = events_of(state_path, "adaptive_batch_completed")
+    assert (batch["source_page"], batch["resume_page"], batch["batch_complete"]) == (4, 4, False)
+    stopped = events_of(state_path, "adaptive_search_stopped")[-1]
+    assert (stopped["stop_reason"], stopped["stop_detail"]) == ("runtime_failed", "image_auth_required")
+    assert (stopped["resume_page"], stopped["batch_complete"]) == (4, False)
 
 
 # ---------- #113：来源耗尽只认原始 paging.is_end ----------
