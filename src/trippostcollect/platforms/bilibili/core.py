@@ -36,6 +36,7 @@ from .parser import hydrate_bilibili_article_record, normalize_bilibili_article_
 from .client import (
     BILIBILI_DETAIL_MAX_ATTEMPTS,
     BILIBILI_DETAIL_RETRY_DELAY_SECONDS,
+    BILIBILI_NETWORK_UNREACHABLE,
     bilibili_request_stop_detail,
     fetch_bilibili_wbi_keys,
     fetch_bilibili_article_page,
@@ -502,6 +503,12 @@ def run_bilibili_article_search(
                             raise BilibiliRuntimeBlocked(
                                 f"bilibili_article_detail_blocked:{exc.code}"
                             ) from exc
+                        if exc.network_unreachable:
+                            # #129：重试用尽后仍是网络传输失败：网络整体故障与候选无关，停止本轮，
+                            # 不写 candidate_skipped、不进 seen。
+                            raise BilibiliRuntimeBlocked(
+                                bilibili_request_stop_detail("article_detail", exc)
+                            ) from exc
                         failure = {
                             "platform": platform_key,
                             "identity": post_id,
@@ -584,6 +591,8 @@ def run_bilibili_article_search(
                         follower_error: BilibiliFollowerFetchError | None = None
                         if creator_id not in follower_cache:
                             fetched_followers: int | None = None
+                            # #129：只看最后一次尝试是否为网络传输失败；中途恢复后不算网络整体故障。
+                            follower_network_failed = False
                             for follower_attempt in range(
                                 1,
                                 BILIBILI_DETAIL_MAX_ATTEMPTS + 1,
@@ -595,9 +604,11 @@ def run_bilibili_article_search(
                                         cookie_header,
                                         user_agent=user_agent,
                                     )
+                                    follower_network_failed = False
                                 except BilibiliFollowerFetchError as exc:
                                     follower_error = exc
                                     fetched_followers = None
+                                    follower_network_failed = exc.network_unreachable
                                     if exc.runtime_blocking or not exc.retryable:
                                         break
                                 if fetched_followers is not None:
@@ -613,6 +624,12 @@ def run_bilibili_article_search(
                                 raise BilibiliRuntimeBlocked(
                                     f"bilibili_relation_stat_blocked:{follower_error.code}"
                                 ) from follower_error
+                            if fetched_followers is None and follower_network_failed:
+                                # #129：粉丝请求重试用尽后仍是网络传输失败：运行级停止，不按候选跳过。
+                                raise BilibiliRuntimeBlocked(
+                                    "bilibili_relation_stat_failed:"
+                                    f"{BILIBILI_NETWORK_UNREACHABLE}"
+                                ) from follower_error
                             # 失败不进缓存：同一作者的下一篇候选重新请求，不被一次失败连坐跳过。
                             if fetched_followers is not None:
                                 follower_cache[creator_id] = fetched_followers
@@ -621,8 +638,11 @@ def run_bilibili_article_search(
                         if follower_count is None:
                             if follower_error is None:
                                 follower_error_code = "relation_stat_unavailable"
-                            elif follower_error.code is None:
+                            elif follower_error.network_unreachable:
+                                # 早先尝试断网、最后一次只拿到空粉丝数：沿用原错误码。
                                 follower_error_code = "relation_stat_transport"
+                            elif follower_error.code is None:
+                                follower_error_code = "relation_stat_parse"
                             else:
                                 follower_error_code = str(follower_error.code)
                             failure = {

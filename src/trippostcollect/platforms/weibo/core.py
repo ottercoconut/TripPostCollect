@@ -209,8 +209,17 @@ class WeiboCrawler:
                             discovery_phase=discovery_phase,
                         )
                         raise
+                    except httpx.TransportError:
+                        # #129：重试用尽后仍是传输层失败（DNS、连接、超时、重置）：网络整体故障，运行级失败。
+                        accumulator.mark_runtime_failed(
+                            "network_unreachable",
+                            source_page=requested_page,
+                            resume_page=requested_page,
+                            discovery_phase=discovery_phase,
+                        )
+                        raise
                     except httpx.RequestError:
-                        # DataFetchError 与重试用尽后的传输层异常：运行级失败，不当作空页。
+                        # DataFetchError 等其余请求失败：运行级失败，不当作空页。
                         accumulator.mark_runtime_failed(
                             "search_request_failed",
                             source_page=requested_page,
@@ -451,6 +460,12 @@ class WeiboCrawler:
             except PlatformRuntimeError:
                 # 登录、频控、风控是运行级阻断，不能当作单条详情缺失吞掉（#114）。
                 raise
+            except httpx.TransportError as ex:
+                # #129：重试用尽后的传输层失败不是单条详情缺失，按运行级 network_unreachable 上抛。
+                raise PlatformRuntimeError(
+                    f"weibo network_unreachable: {type(ex).__name__}",
+                    code="network_unreachable",
+                ) from ex
             except DataFetchError as ex:
                 logger.error(f"[WeiboCrawler.get_note_info_task] Get note detail error: {ex}")
                 return None
@@ -681,6 +696,17 @@ class WeiboCrawler:
             raise WeiboFullTextFetchError(
                 note_id,
                 ex.code,
+                runtime_blocking=True,
+            ) from ex
+        except httpx.TransportError as ex:
+            # #129：详情 Tenacity 重试用尽后仍是传输层失败：网络整体故障与候选无关，停止本轮，不按候选跳过。
+            logger.error(
+                f"[WeiboCrawler.get_note_full_text] Network unreachable for {note_id}: "
+                f"{type(ex).__name__}"
+            )
+            raise WeiboFullTextFetchError(
+                note_id,
+                "network_unreachable",
                 runtime_blocking=True,
             ) from ex
         except DataFetchError as ex:

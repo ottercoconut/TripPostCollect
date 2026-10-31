@@ -1,8 +1,9 @@
 """抖音离线故障特征化（T13）：只替换 httpx 传输与搜索客户端边界，固定现行行为。
 
-抖音请求层没有统一 Tenacity：传输层异常只发生一次即原样上抛（规格 E3"DY request/detail"）。
-搜索与作者资料都只把 DataFetchError/SearchResponseError 映射为运行失败或候选失败，
-传输层异常直接终止本轮，不写停止事件、不宣称耗尽。
+抖音请求层没有统一 Tenacity：传输层异常只发生一次（规格 E3"DY request/detail"）；#129 起
+``request()`` 把它转为运行级 ``PlatformRuntimeError(code="network_unreachable")``。
+搜索与作者资料都只把 DataFetchError/SearchResponseError 映射为运行失败或候选失败；
+绕过 ``request()`` 的原始传输层异常仍直接终止本轮，不写停止事件、不宣称耗尽。
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from support.douyin import config, make_crawler as DouYinCrawler
 from trippostcollect.platforms import entry
 from trippostcollect.platforms.douyin import core as douyin_core
 from trippostcollect.platforms.douyin.client import DouYinClient
+from trippostcollect.platforms.douyin.models import PlatformRuntimeError
 
 
 class Transport:
@@ -79,9 +81,12 @@ async def test_request_transport_error_is_raised_once_without_retry(path):
         ports=replace(ports, make_async_client=transport),
     )
 
-    with pytest.raises(httpx.ConnectError):
+    # #129：只请求一次不变；传输层异常转为运行级 network_unreachable，原异常保留为 __cause__。
+    with pytest.raises(PlatformRuntimeError) as caught:
         await client.request("GET", "https://www.douyin.com" + path)
 
+    assert caught.value.code == "network_unreachable"
+    assert isinstance(caught.value.__cause__, httpx.ConnectError)
     assert transport.calls == [path]
 
 

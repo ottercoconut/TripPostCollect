@@ -26,8 +26,12 @@
   418/432 风控拦截记 `blocked_or_forbidden`；这些都是运行级阻断，不重试，也不再在每次失败后跳转
   首页刷新 Cookie。
 - 只有传输层异常（超时、连接错误）和 5xx 才在原预算内重试（搜索 5 次/3 秒，详情 3 次/1 秒），
-  用尽后原样上抛。搜索阶段的任何失败都写 `runtime_failed`（阻断写对应错误码，其余写
-  `search_request_failed`），不得当作空页。
+  用尽后原样上抛。搜索阶段的任何失败都写 `runtime_failed`（阻断写对应错误码，传输层失败写
+  `network_unreachable`，其余写 `search_request_failed`），不得当作空页。
+- 重试用尽后仍是传输层失败（DNS、连接失败、超时、连接重置）是网络整体故障，与候选无关（#129）：
+  长文详情不再落入 `unexpected_detail_failure` 候选跳过，而是以 `runtime_failed/network_unreachable`
+  停止本轮，不写 `candidate_skipped`、不进 seen；指定帖子详情也不把它吞成空结果。runner 记为
+  `network_timeout` 并等待 900 秒重试。正文图片下载仍按 `image_download_retryable`。
 - 日志与异常只记状态码、`ok`、`msg` 与响应长度，不写响应原文；微博响应含 `avatar_hd`、
   `profile_image_url` 等头像字段。
 

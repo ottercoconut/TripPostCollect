@@ -1,7 +1,8 @@
 """知乎离线故障与前沿阶段特征化（T13）：只替换 httpx 传输与搜索客户端边界，固定现行行为。
 
-- 请求沿用原 Tenacity 3 次/1 秒/reraise，传输层异常原样上抛；401/403/429/404 不重试（#113）；
-- 搜索与详情的传输层异常不属于 DataFetchError/RetryError，直接终止本轮且不宣称耗尽；
+- 请求沿用原 Tenacity 3 次/1 秒/reraise；#129 起重试用尽后的传输层异常转为运行级
+  ``network_unreachable``；401/403/429/404 不重试（#113）；
+- 绕过 ``request()`` 的原始传输层异常不属于 DataFetchError/RetryError，直接终止本轮且不宣称耗尽；
 - #113 改掉 R03 基线：只有原始 paging.is_end=true 才是来源耗尽；过滤后为空但 is_end=false 继续翻页，
   空 data 无 is_end、缺 paging 或 HTTP 404 都是运行级失败；
 - 续跑先刷新顶部有限页，再从保存的深层前沿继续。
@@ -19,7 +20,7 @@ from .support import END, config, make_crawler as ZhihuCrawler, search_client, s
 from trippostcollect.application.contracts import ZhihuClientPorts
 from trippostcollect.platforms.zhihu import models as constant
 from trippostcollect.platforms.zhihu.client import ZhiHuClient
-from trippostcollect.platforms.zhihu.models import ZhihuContent
+from trippostcollect.platforms.zhihu.models import PlatformRuntimeError, ZhihuContent
 from trippostcollect.platforms.zhihu.parser import ZhihuExtractor
 
 
@@ -107,9 +108,12 @@ async def test_request_transport_error_reraises_after_three_attempts(sleeps, fau
         cookie_dict={"d_c0": "t13"},
     )
 
-    with pytest.raises(fault):
+    # #129：重试预算不变；用尽后转为运行级 network_unreachable，原传输层异常保留为 __cause__。
+    with pytest.raises(PlatformRuntimeError) as caught:
         await client.request("GET", "https://www.zhihu.com/api/v4/search_v3?q=t13")
 
+    assert caught.value.code == "network_unreachable"
+    assert isinstance(caught.value.__cause__, fault)
     assert transport.calls == ["/api/v4/search_v3"] * 3
     assert sleeps == [1, 1]
 

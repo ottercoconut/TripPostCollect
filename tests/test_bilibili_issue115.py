@@ -440,7 +440,7 @@ def test_detail_server_error_is_still_retried(monkeypatch):
 @pytest.mark.parametrize("fault, expected_calls, detail", [
     (HTTPError("u", 412, "风控", {}, None), 1, "bilibili_article_search_blocked:412"),
     ({"code": -352, "message": "风控校验失败"}, 1, "bilibili_article_search_blocked:-352"),
-    (TimeoutError("timed out"), 3, "bilibili_article_search_failed:transport"),
+    (TimeoutError("timed out"), 3, "bilibili_article_search_failed:network_unreachable"),
 ])
 def test_search_errors_are_classified(monkeypatch, tmp_path, fault, expected_calls, detail):
     network = Network(search=[fault] * 3)
@@ -469,7 +469,7 @@ def test_search_transient_error_recovers_within_retry_budget(monkeypatch, tmp_pa
 
 @pytest.mark.parametrize("fault, expected_calls, detail", [
     (HTTPError("u", 412, "风控", {}, None), 1, "bilibili_nav_blocked:412"),
-    (URLError("断连"), 3, "bilibili_nav_failed:transport"),
+    (URLError("断连"), 3, "bilibili_nav_failed:network_unreachable"),
 ])
 def test_nav_errors_are_classified(monkeypatch, tmp_path, fault, expected_calls, detail):
     network = Network(nav=fault)
@@ -489,7 +489,8 @@ def test_follower_failure_is_not_cached_for_same_author(monkeypatch, tmp_path):
     network = Network(
         search=[search_data([search_item("101", "456"), search_item("102", "456")], num_pages=1, num_results=2),
                 search_data([], num_pages=1, num_results=2)],
-        follower={"456": [URLError("断连")] * 3 + [{"code": 0, "data": {"follower": 7}}]},
+        # #129：网络传输失败重试用尽后已是运行级停止；这里用可重试且不阻断的 HTTP 503 验证不缓存。
+        follower={"456": [HTTPError("u", 503, "忙", {}, None)] * 3 + [{"code": 0, "data": {"follower": 7}}]},
     )
     args, state_path, _ = prepare(monkeypatch, tmp_path, network)
 
@@ -499,7 +500,7 @@ def test_follower_failure_is_not_cached_for_same_author(monkeypatch, tmp_path):
     # 第一篇 3 次失败后跳过；第二篇同作者重新请求一次并成功。
     assert network.calls["follower:456"] == 4
     skipped = events_of(state_path, "candidate_skipped")
-    assert [(item["identity"], item["error_code"]) for item in skipped] == [("101", "relation_stat_transport")]
+    assert [(item["identity"], item["error_code"]) for item in skipped] == [("101", "503")]
     records = [json.loads(line) for line in next((tmp_path / "batch").rglob("*.jsonl")).read_text().splitlines()]
     assert [(record["content_id"], record["author_followers_count"]) for record in records] == [("102", 7)]
 

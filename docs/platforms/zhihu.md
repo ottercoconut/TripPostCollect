@@ -38,6 +38,10 @@
 - 详情候选级失败有限重试后写 `candidate_skipped`；登录、授权、频控和验证仍是运行级阻断。
 - 401/403（`login_required`）、429（`rate_limited`）和 404 是平台确定答复，不重试；其余请求错误按
   3 次、间隔 1 秒有限重试。搜索阶段的运行级失败保留各自错误码。详情 404 按候选级详情缺失处理。
+- 重试用尽后仍是传输层失败（DNS、连接失败、超时、连接重置）是网络整体故障，与候选无关（#129）：
+  `request()` 在 Tenacity 外层把它转为 `PlatformRuntimeError(code=network_unreachable)`，搜索与详情都按
+  运行级失败停止，`stop_detail=network_unreachable`，不写 `candidate_skipped`、不进 seen；runner 记为
+  `network_timeout` 并等待 900 秒重试。重试次数与间隔不变；正文图片下载仍按 `image_download_retryable`。
 - 日志只记录内容 ID、类型、计数和状态码；不打印整条记录、search_v3 原始响应或 `/me` 响应。作者头像
   只在内存中用于排除正文图候选，不进入 `model_dump` 和项目 JSONL。
 

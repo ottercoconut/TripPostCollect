@@ -19,6 +19,7 @@
 
 # TripPostCollect：T07 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
+import functools
 import json
 import logging
 from typing import Any, Dict, Optional, Union
@@ -51,6 +52,27 @@ class SearchResponseInvalid(DataFetchError):
     def __init__(self, message: str):
         super().__init__(message)
         self.code = "search_response_invalid"
+
+
+def _network_unreachable_after_retry(request):
+    """#129：Tenacity 重试用尽后仍是传输层失败时，转为运行级 ``network_unreachable``。
+
+    包在重试装饰器外层：传输层异常照旧参与 3 次重试，只有最后一次的异常才被转换。DNS、连接、
+    超时、重置是网络整体故障，与候选无关，不能按候选跳过或写入 seen。``functools.wraps`` 保留
+    ``request.retry``，测试仍可替换重试等待。
+    """
+
+    @functools.wraps(request)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await request(*args, **kwargs)
+        except httpx.TransportError as exc:
+            raise PlatformRuntimeError(
+                f"zhihu network_unreachable: {type(exc).__name__}",
+                code="network_unreachable",
+            ) from exc
+
+    return wrapper
 
 
 class ZhiHuClient:
@@ -91,6 +113,7 @@ class ZhiHuClient:
         return headers
 
     # 401/403/429 与 404 是平台的确定答复，重试只会重复同一结果；只对其余错误有限重试。
+    @_network_unreachable_after_retry
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_fixed(1),

@@ -1,7 +1,8 @@
 """B站正式 article 链路的离线故障特征化（T13）：只替换浏览器会话与 urllib 网络边界。
 
 搜索页失败为运行级失败且不宣称耗尽：风控码与 HTTP 412 命中即停，传输层异常有限重试后停止；
-详情与粉丝请求的传输层异常按 3 次重试后转为候选 skip；头像不进入任何产物。
+详情与粉丝请求的传输层异常按 3 次重试后以运行级 network_unreachable 停止，不按候选跳过（#129）；
+头像不进入任何产物。
 """
 
 from __future__ import annotations
@@ -167,7 +168,7 @@ def test_search_page_failure_is_runtime_failure_without_exhaustion(monkeypatch, 
     expected = {
         "code": "bilibili_article_search_blocked:-412",
         "http_412": "bilibili_article_search_blocked:412",
-        "transport": "bilibili_article_search_failed:transport",
+        "transport": "bilibili_article_search_failed:network_unreachable",
     }[fault]
     assert stopped[0]["stop_detail"] == expected
     assert stopped[0]["resume_page"] == 1
@@ -184,13 +185,14 @@ def test_later_search_page_failure_keeps_resume_at_failed_page(monkeypatch, tmp_
     assert result["ok"] is False
     stopped = events_of(state_path, "adaptive_search_stopped")[-1]
     assert stopped["stop_reason"] == "runtime_failed"
-    assert stopped["stop_detail"] == "bilibili_article_search_failed:transport"
+    assert stopped["stop_detail"] == "bilibili_article_search_failed:network_unreachable"
     assert stopped["resume_page"] == 2
     assert not [event for event in events_of(state_path, "adaptive_search_stopped")
                 if event["stop_reason"] == "source_exhausted"]
 
 
-def test_detail_transport_error_retries_then_skips_candidate(monkeypatch, tmp_path):
+def test_detail_transport_error_retries_then_stops_run(monkeypatch, tmp_path):
+    # #129：重试预算不变（3 次）；用尽后仍是传输层失败按运行级停止，102 不再请求，101 不进候选记忆。
     network = Network(
         {1: [search_item("101", "456"), search_item("102", "789")]},
         detail={"101": "transport"},
@@ -200,18 +202,17 @@ def test_detail_transport_error_retries_then_skips_candidate(monkeypatch, tmp_pa
     result = mediacrawler_crawl.run_bilibili_article_search(args, tmp_path / "batch")
 
     assert network.calls["detail:101"] == bilibili_client.BILIBILI_DETAIL_MAX_ATTEMPTS == 3
-    assert network.calls["detail:102"] == 1
-    skipped = events_of(state_path, "candidate_skipped")
-    assert [event["identity"] for event in skipped] == ["101"]
+    assert network.calls["detail:102"] == 0
+    assert events_of(state_path, "candidate_skipped") == []
     stopped = events_of(state_path, "adaptive_search_stopped")[-1]
-    assert stopped["stop_reason"] == "source_exhausted"
-    assert stopped["candidate_identities"] == ["101", "102"]
-    assert stopped["skipped_candidate_count"] == 1
-    assert result["status"] == "completed"
+    assert stopped["stop_reason"] == "runtime_failed"
+    assert stopped["stop_detail"] == "bilibili_article_detail_failed:network_unreachable"
+    assert "101" not in stopped["candidate_identities"]
+    assert result["ok"] is False
 
 
-def test_follower_transport_error_is_classified_retried_then_skips_candidate(monkeypatch, tmp_path):
-    # 粉丝请求的传输层异常归入 BilibiliFollowerFetchError：不升级为运行阻断，3 次后候选 skip 并保留错误码。
+def test_follower_transport_error_is_classified_retried_then_stops_run(monkeypatch, tmp_path):
+    # 粉丝请求的传输层异常归入 BilibiliFollowerFetchError 并带 network_unreachable；3 次后运行级停止（#129）。
     network = Network(
         {1: [search_item("101", "456"), search_item("102", "789")]},
         follower={"456": "transport"},
@@ -221,14 +222,13 @@ def test_follower_transport_error_is_classified_retried_then_skips_candidate(mon
     result = mediacrawler_crawl.run_bilibili_article_search(args, tmp_path / "batch")
 
     assert network.calls["follower:456"] == 3
-    assert network.calls["follower:789"] == 1
-    skipped = events_of(state_path, "candidate_skipped")
-    assert [(event["identity"], event["detail"], event["error_code"]) for event in skipped] == [
-        ("101", "creator_profile_failed", "relation_stat_transport")
-    ]
+    assert network.calls["follower:789"] == 0
+    assert events_of(state_path, "candidate_skipped") == []
     stopped = events_of(state_path, "adaptive_search_stopped")[-1]
-    assert stopped["stop_reason"] == "source_exhausted"
-    assert result["status"] == "completed"
+    assert stopped["stop_reason"] == "runtime_failed"
+    assert stopped["stop_detail"] == "bilibili_relation_stat_failed:network_unreachable"
+    assert "101" not in stopped["candidate_identities"]
+    assert result["ok"] is False
 
 
 def test_browser_launch_failure_stops_run_before_any_platform_request(monkeypatch, tmp_path):
