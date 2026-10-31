@@ -2,6 +2,8 @@
 
 #136：微博标准模式持久 context 与 B站行为会话改由 ``runtime.browser_runtime.launch_profile_context`` 启动，
 与 warmup 同一套参数，kwargs 中不再出现 ``user_agent`` 键；对应断言随之改为“无 user_agent 键”。
+#139：共享函数不再传 ``viewport``，改为 ``no_viewport=True`` 加 ``--window-size=1450,900``；warmup 与微博标准模式
+的视口断言随之改为原生窗口，知乎两条路径与微博非持久路径仍用 ``PROFILE_VIEWPORT``。
 全部离线：假 page/context/playwright，不访问网络、不启动浏览器。
 """
 
@@ -20,6 +22,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 WARMUP_VIEWPORT = {"width": 1280, "height": 900}
+# #139：warmup 与共享持久 context 改按原生窗口启动，``WARMUP_VIEWPORT`` 只剩知乎与微博非持久路径对照。
+NATIVE_WINDOW_ARG = "--window-size=1450,900"
 
 
 class FakePage:
@@ -120,23 +124,27 @@ def test_crawler_viewport_matches_warmup(platform, save_login_state, monkeypatch
     chromium = FakeChromium()
     asyncio.run(type(crawler).launch_browser(crawler, chromium, None, None, True))
     launched = (chromium.persistent or chromium.contexts)[0]
-    assert launched["viewport"] == WARMUP_VIEWPORT == PROFILE_VIEWPORT
     if platform == "weibo" and save_login_state:
         # #136：微博标准模式持久 context 走共享启动配置，不传 user_agent 键。
+        # #139：共享配置与 warmup 一样按原生窗口启动，不传 viewport。
         assert "user_agent" not in launched
+        assert "viewport" not in launched and launched["no_viewport"] is True
+        assert launched["args"][-1] == NATIVE_WINDOW_ARG
     else:
+        assert launched["viewport"] == WARMUP_VIEWPORT == PROFILE_VIEWPORT
         assert launched["user_agent"] is None
 
 
-def test_warmup_viewport_uses_shared_constant(monkeypatch, tmp_path) -> None:
+def test_warmup_uses_shared_native_window(monkeypatch, tmp_path) -> None:
+    """#139：warmup 不做设备模拟，按与小红书相同的原生窗口启动。"""
     from trippostcollect.application import warmup
-    from trippostcollect.core.paths import PROFILE_VIEWPORT
 
     monkeypatch.setattr(warmup, "browser_runtime_args", lambda: [])
     monkeypatch.setattr(warmup, "browser_launch_environment", lambda: {})
     chromium = FakeChromium()
     asyncio.run(warmup.launch_login_context(SimpleNamespace(chromium=chromium), tmp_path, None))
-    assert chromium.persistent[0]["viewport"] == PROFILE_VIEWPORT == WARMUP_VIEWPORT
+    assert "viewport" not in chromium.persistent[0] and chromium.persistent[0]["no_viewport"] is True
+    assert chromium.persistent[0]["args"][-1] == NATIVE_WINDOW_ARG
     assert "user_agent" not in chromium.persistent[0]
 
 

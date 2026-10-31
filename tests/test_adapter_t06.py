@@ -30,6 +30,7 @@ from support import douyin_full_scan_deviation
 from support import stealth_removal_deviation
 from support import runtime_failed_batch_deviation
 from support import shared_launch_deviation
+from support import native_window_deviation
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.core import paths
@@ -367,14 +368,14 @@ def current_douyin_profile(tmp_path):
 
 def legacy_drive_expectation(tmp_path, scenario, fallback):
     """固化预期依次登记 #59 profile、#116 正文来源与请求头、#124 搜索只经截获、#127 不注入 stealth、
-    #133 运行级失败批次不越过失败页、#136 与 warmup 共用启动配置并复用第一页六项偏离。"""
+    #133 运行级失败批次不越过失败页、#136 与 warmup 共用启动配置并复用第一页、#139 按原生窗口启动七项偏离。"""
     expected = expectations.load(*T14_DRIVE, f"{scenario}-fallback{fallback}")
     expected = deviation.douyin_profile(expected, current_douyin_profile(tmp_path))
     expected = douyin_116_deviation.douyin_drive(expected, scenario)
     expected = douyin_full_scan_deviation.douyin_drive(expected, scenario)
     expected = stealth_removal_deviation.douyin(expected)
     expected = runtime_failed_batch_deviation.douyin_drive(expected, scenario)
-    return shared_launch_deviation.douyin(expected)
+    return native_window_deviation.douyin(shared_launch_deviation.douyin(expected))
 
 
 @pytest.mark.asyncio

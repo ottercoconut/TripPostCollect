@@ -20,7 +20,10 @@ login_warmup = import_module("login_warmup")
 
 
 def test_login_context_launch_arguments_keep_the_renderer_sandbox(monkeypatch, tmp_path) -> None:
-    """#83：登录预热不传 --no-sandbox，并显式开启沙箱（否则 Playwright 自动追加），其他参数不变。"""
+    """#83：登录预热不传 --no-sandbox，并显式开启沙箱（否则 Playwright 自动追加），其他参数不变。
+
+    #139：启动参数末尾追加原生窗口尺寸 ``--window-size=1450,900``。
+    """
     from trippostcollect.application import warmup
 
     launches = []
@@ -47,6 +50,7 @@ def test_login_context_launch_arguments_keep_the_renderer_sandbox(monkeypatch, t
         "--disable-backgrounding-occluded-windows",
         "--disable-renderer-backgrounding",
         "--lang=zh-CN",
+        "--window-size=1450,900",
     ]
 
 

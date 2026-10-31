@@ -15,7 +15,7 @@
   `scripts/login_warmup.py --platforms zhihu` 再重跑。
 - 启动浏览器时不强制 User-Agent，浏览器自报真实 UA；httpx 请求头的 `user-agent` 在首页加载后从
   `navigator.userAgent` 读取，与 warmup 登录时同一浏览器一致，不写死版本串（#127）。正式轮走 CDP，
-  复用持久 profile 的默认 context，窗口按 launcher 最大化；标准模式的视口与 warmup 相同（1280×900）。
+  复用持久 profile 的默认 context，窗口按 launcher 最大化；标准模式的视口仍为 `PROFILE_VIEWPORT`（1280×900）；warmup 自 #139 起按原生窗口 1450×900 启动，两者不再相同。
 - 只接受 answer 和 article；zvideo 在搜索解析阶段丢弃，只计为已处理候选并进入候选记忆，不写项目 JSONL。
 - 去重键为内容 ID，answer URL 同时保留 question ID。
 - 行为阶段必须在本轮真实关键词搜索页完成；页面导航超时可以作为软失败继续检查已验证 Cookie 和

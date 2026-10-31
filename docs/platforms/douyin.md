@@ -7,8 +7,9 @@
 
 - 正式入口：`crawl_runner.py` 经 `mediacrawler_crawl.py` 启动根包 worker（`trippostcollect.platforms.entry`）
   执行抖音搜索，实现位于 `src/trippostcollect/platforms/douyin/`。
-- 标准模式持久 profile 与 warmup 共用同一套启动配置（沙箱开启、视口 1280×900、`zh-CN` 与
-  `Asia/Shanghai`，不传 UA），首页在持久 context 自带的第一页打开（#136）。
+- 标准模式持久 profile 与 warmup 共用同一套启动配置（沙箱开启、`zh-CN` 与 `Asia/Shanghai`，不传 UA），
+  首页在持久 context 自带的第一页打开（#136）；不做 viewport 设备模拟，按原生窗口 1450×900 启动，
+  `screen` 与 DPR 由浏览器给出真实值（#139）。
 - 登录后先进入本轮关键词页，再执行共享行为阶段并刷新 API Cookie。
 - 只接受图文作品（`aweme_type=68` 或带正文 `images`）；视频计入已处理候选，不请求作者资料，
   不写内容记录，也不下载媒体。内容记录不写 `cover_url`、`video_download_url`、`music_download_url`。

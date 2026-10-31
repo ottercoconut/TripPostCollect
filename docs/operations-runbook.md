@@ -431,12 +431,14 @@ python scripts/login_warmup.py \
 `data/runtime/platform_sessions/<platform>/trippostcollect_cookie_snapshot.json`，权限 `0600`；位置只由
 `trippostcollect.core.paths` 定义。新 profile 不存在时按首登流程创建空目录，需要人工登录。
 快照另存登录 page 的 `navigator.userAgent`（`user_agent` 字段），供不开浏览器的请求（B站 repair）与浏览器
-保持同一 UA；#127 前写出的快照没有该字段，B站 repair 遇到时停止并要求重跑 warmup。warmup 与通用平台
-crawl 标准模式的视口统一为 `trippostcollect.core.paths.PROFILE_VIEWPORT`（1280×900）。
+保持同一 UA；#127 前写出的快照没有该字段，B站 repair 遇到时停止并要求重跑 warmup。
 warmup、抖音与微博 crawl 标准模式的持久 profile、B站行为会话共用同一套持久 context 启动配置
 （`trippostcollect.runtime.browser_runtime.launch_profile_context`，#136）：显式开启沙箱（不带 `--no-sandbox`）、
-视口 `PROFILE_VIEWPORT`、`locale=zh-CN` 与 `timezone_id=Asia/Shanghai`、同一组启动参数和运行时环境，不传 UA
-也不传代理；crawl 复用持久 context 自带的第一页，不另开空白页。只有 `headless` 与浏览器可执行文件路径按入口不同。
+`locale=zh-CN` 与 `timezone_id=Asia/Shanghai`、同一组启动参数和运行时环境，不传 UA 也不传代理；crawl 复用持久
+context 自带的第一页，不另开空白页。只有 `headless` 与浏览器可执行文件路径按入口不同。通用平台持久 context 与
+小红书一样不做设备模拟（#139）：不传 `viewport`，按原生窗口 1450×900（`NATIVE_WINDOW_SIZE`，即
+`--window-size=1450,900`）启动，macOS 会把窗口收进屏幕可用区域；`screen`、DPR 与窗口尺寸由浏览器给出真实值，
+行为证据 `runtime_fingerprint` 记录真实 screen 与 DPR。
 
 `crawl_runner.py` 只读取上述 Cookie 快照，不在缺快照时另起浏览器读取 profile；知乎缺快照或缺 `d_c0`/`z_c0`
 时任务直接失败，先运行本节 warmup 再重跑。warmup 报告中的登录接口结果只保留状态码、`uid`、`name`

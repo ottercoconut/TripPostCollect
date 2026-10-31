@@ -25,6 +25,8 @@ import copy
 from pathlib import Path
 from typing import Any
 
+from support import native_window_deviation
+
 ROOT = Path(__file__).resolve().parents[2]
 
 PROFILE_VIEWPORT = {"width": 1280, "height": 900}
@@ -133,6 +135,8 @@ def t10_launch_login_context(source: str) -> str:
     for legacy, shared in T10_VALUE_SITES:
         assert moved.count(legacy) == 1, legacy
         moved = moved.replace(legacy, shared)
+    # #139：再把视口配置单向换成原生窗口（见 support.native_window_deviation），之后才与共享函数比较。
+    moved = native_window_deviation.t10_launch_body(moved)
     runtime = (ROOT / "src/trippostcollect/runtime/browser_runtime.py").read_text()
     shared_body = _function(runtime, "launch_profile_context").body
     # 共享函数开头是 docstring 与两处缺省求值（runtime_args / env 为 None 时取运行时值），其后与冻结体相同。
