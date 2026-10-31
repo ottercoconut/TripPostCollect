@@ -14,7 +14,11 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, async_playwright
 
-from trippostcollect.runtime.browser_runtime import browser_launch_environment, browser_runtime_args
+from trippostcollect.runtime.browser_runtime import (
+    browser_launch_environment,
+    browser_runtime_args,
+    launch_profile_context,
+)
 from trippostcollect.core import paths
 from trippostcollect.runtime.cookies import required_cookie_names as required_cookie_names
 from trippostcollect.runtime.cookies import cookie_dict, cookie_snapshot_info as cookie_snapshot_info
@@ -22,7 +26,6 @@ from trippostcollect.runtime.cookies import write_cookie_snapshot as _write_cook
 from trippostcollect.core.paths import (
     LOGIN_WARMUP_OUTPUT,
     MEDIACRAWLER_LOGIN_OUTPUT,
-    PROFILE_VIEWPORT,
     PROJECT_ROOT,
     ensure_dir,
 )
@@ -134,37 +137,17 @@ async def launch_login_context(
     *,
     native_window_size: tuple[int, int] | None = None,
 ) -> BrowserContext:
-    kwargs: dict[str, Any] = {
-        "user_data_dir": str(profile_dir),
-        "headless": False,
-        "locale": "zh-CN",
-        "timezone_id": "Asia/Shanghai",
-        "viewport": PROFILE_VIEWPORT,
-        "accept_downloads": True,
-        "ignore_https_errors": True,
-        # 显式开启沙箱：Playwright 在 chromium_sandbox 不为 True 时会自动追加 --no-sandbox。
-        "chromium_sandbox": True,
-        "args": [
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-infobars",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
-            *browser_runtime_args(),
-        ],
-        "env": browser_launch_environment(),
-    }
-    if native_window_size:
-        width, height = native_window_size
-        kwargs.pop("viewport")
-        kwargs["no_viewport"] = True
-        kwargs["args"].append(f"--window-size={width},{height}")
-    if browser_path:
-        kwargs["executable_path"] = browser_path
-    return await playwright.chromium.launch_persistent_context(**kwargs)
+    # #136：启动配置下沉到 runtime.browser_runtime.launch_profile_context，与通用平台 crawl 标准模式、
+    # B站行为会话共用；参数与求值次序不变。
+    return await launch_profile_context(
+        playwright.chromium,
+        profile_dir,
+        headless=False,
+        browser_path=browser_path,
+        native_window_size=native_window_size,
+        runtime_args=browser_runtime_args(),
+        env=browser_launch_environment(),
+    )
 
 
 async def browser_user_agent(page: Page) -> str:

@@ -27,10 +27,17 @@ class _Stop(Exception):
 
 
 class RecordingContext:
-    """记录全部 init script；new_page 即中止，证明检查点在启动阶段之后。"""
+    """记录全部 init script；取第一页或 new_page 即中止，证明检查点在启动阶段之后。
+
+    #136：微博、抖音标准模式持久 context 先复用 ``pages[0]``；没有页面时才 new_page。
+    """
 
     def __init__(self) -> None:
         self.init_scripts: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    @property
+    def pages(self) -> list[Any]:
+        raise _Stop
 
     async def add_init_script(self, *args: Any, **kwargs: Any) -> None:
         self.init_scripts.append((args, kwargs))
@@ -83,7 +90,7 @@ def test_package_resources_no_longer_ship_stealth_script() -> None:
 
 
 def _standard_mode_crawler(platform: str, monkeypatch: pytest.MonkeyPatch, context: RecordingContext):
-    settings = SimpleNamespace(ENABLE_CDP_MODE=False, HEADLESS=False)
+    settings = SimpleNamespace(ENABLE_CDP_MODE=False, HEADLESS=False, SAVE_LOGIN_STATE=True)
     if platform == "weibo":
         from trippostcollect.platforms.weibo import core
 
@@ -174,6 +181,7 @@ def test_douyin_cdp_launch_does_not_inject_stealth() -> None:
 def test_bilibili_behavior_session_only_installs_runtime_hints(tmp_path: Path) -> None:
     from trippostcollect.platforms.bilibili import login
     from trippostcollect.runtime import cookies
+    from trippostcollect.runtime.browser_runtime import launch_profile_context
     from trippostcollect.runtime.human_flow import install_runtime_hints
 
     class Page:
@@ -219,6 +227,7 @@ def test_bilibili_behavior_session_only_installs_runtime_hints(tmp_path: Path) -
     ports = SimpleNamespace(
         discover_cdp_browser_path=lambda: None, profile_dir_for=lambda key: tmp_path / "profile",
         async_playwright=Playwright, browser_runtime_args=lambda: [], browser_launch_environment=lambda: {},
+        launch_profile_context=launch_profile_context,
         install_runtime_hints=install_runtime_hints, run_page_behavior=behavior, write_evidence=lambda *args: None,
         platform_cookie_url=cookies.platform_cookie_url, cookies_to_header=cookies.cookies_to_header,
         cookie_snapshot_path=lambda key: tmp_path / "snapshot.json",

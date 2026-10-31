@@ -245,9 +245,13 @@ def test_crawler_persistent_context_uses_platform_session_profile(
             launches.append(kwargs)
             return "context"
 
+    async def launch_profile_context(chromium, profile_dir, **kwargs):
+        # #136：微博、抖音标准模式经与 warmup 共用的启动函数；替身只按真实函数的方式交出 user_data_dir。
+        return await chromium.launch_persistent_context(user_data_dir=str(profile_dir), **kwargs)
+
     fake_self = SimpleNamespace(
         **{attr: SimpleNamespace(SAVE_LOGIN_STATE=True, PLATFORM=GENERIC[platform])},
-        ports=SimpleNamespace(project_browser_args=lambda: []),
+        ports=SimpleNamespace(project_browser_args=lambda: [], launch_profile_context=launch_profile_context),
     )
     result = asyncio.run(crawler_cls.launch_browser(fake_self, FakeChromium(), None, None, True))
     assert result == "context"

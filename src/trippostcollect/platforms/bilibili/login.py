@@ -23,6 +23,7 @@ async def run_bilibili_behavior_session(
     async_playwright = ports.async_playwright
     browser_runtime_args = ports.browser_runtime_args
     browser_launch_environment = ports.browser_launch_environment
+    launch_profile_context = ports.launch_profile_context
     install_runtime_hints = ports.install_runtime_hints
     run_page_behavior = ports.run_page_behavior
     write_evidence = ports.write_evidence
@@ -36,21 +37,15 @@ async def run_bilibili_behavior_session(
     target_url = "https://search.bilibili.com/article?keyword=" + quote(args.keyword)
 
     async with async_playwright() as playwright:
-        context = await playwright.chromium.launch_persistent_context(
-            user_data_dir=str(profile_dir),
+        # #136：与 warmup、通用平台 crawl 标准模式共用持久 context 启动配置：沙箱开启、视口 PROFILE_VIEWPORT、
+        # locale/timezone 相同，不再单设 1440×900 视口与 screen，也不再传 ignore_default_args。
+        context = await launch_profile_context(
+            playwright.chromium,
+            profile_dir,
             headless=not args.headed,
-            executable_path=browser_path,
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
-            viewport={"width": 1440, "height": 900},
-            screen={"width": 1440, "height": 900},
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                *browser_runtime_args(),
-            ],
+            browser_path=browser_path,
+            runtime_args=browser_runtime_args(),
             env=browser_launch_environment(),
-            ignore_default_args=["--enable-automation"],
         )
         try:
             await install_runtime_hints(context)

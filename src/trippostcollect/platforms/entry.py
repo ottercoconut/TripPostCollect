@@ -109,6 +109,7 @@ def weibo_dependencies(config, *, post_repair=False):
     from trippostcollect.artifacts.evidence import write_evidence
     from trippostcollect.runtime import behavior
     from trippostcollect.runtime.behavior import project_browser_args
+    from trippostcollect.runtime.browser_runtime import launch_profile_context
 
     values = {field.name: getattr(config, field.name) for field in fields(WeiboConfig)}
     values["WEIBO_SPECIFIED_ID_LIST"] = tuple(values["WEIBO_SPECIFIED_ID_LIST"])
@@ -186,6 +187,7 @@ def weibo_dependencies(config, *, post_repair=False):
         browser_manager=lambda: CDPBrowserManager(browser_settings, project_browser_args=project_browser_args),
         project_browser_args=project_browser_args,
         run_required_human_behavior=run_required_human_behavior,
+        launch_profile_context=launch_profile_context,
     )
 
 
@@ -236,6 +238,7 @@ def douyin_dependencies(config):
     from trippostcollect.platforms.douyin.parser import douyin_source_asset_key
     from trippostcollect.runtime import behavior, login_helpers
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
+    from trippostcollect.runtime.browser_runtime import launch_profile_context
     from trippostcollect.runtime.cookies import convert_browser_context_cookies
     from trippostcollect.runtime.http import make_async_client
     from trippostcollect.runtime.image_retry import fetch_image_bytes_with_retry
@@ -308,6 +311,7 @@ def douyin_dependencies(config):
             current_timestamp=lambda: int(time.time() * 1000),
             content_sink=content_sink, image_stager=image_stager,
             fetch_image_bytes_with_retry=fetch_image_bytes_with_retry,
+            launch_profile_context=launch_profile_context,
         ),
     }
 

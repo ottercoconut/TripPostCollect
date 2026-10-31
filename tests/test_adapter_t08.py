@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from PIL import Image
 
-from support import fork_removal_deviation
+from support import fork_removal_deviation, shared_launch_deviation
 from trippostcollect.artifacts import image_materialization, image_proxy
 from trippostcollect.platforms.bilibili import client, core, login, parser, signer
 
@@ -400,6 +400,8 @@ def test_formal_request_and_artifact_equivalence(baseline, tmp_path, monkeypatch
         return
     new_raw = new
     old, new = t115_normalized(old, legacy=True), t115_normalized(new, legacy=False)
+    # #136：冻结旧侧行为会话的启动参数钉住旧值后替换为与 warmup 共用的配置（见 support.shared_launch_deviation）。
+    old = shared_launch_deviation.bilibili(old)
     assert new["files"].keys() == old["files"].keys()
     for path in new["files"]:
         assert new["files"][path] == old["files"][path], path

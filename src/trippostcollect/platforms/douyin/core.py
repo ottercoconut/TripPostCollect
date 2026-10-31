@@ -89,7 +89,10 @@ class DouYinCrawler:
                     headless=self.settings.HEADLESS,
                 )
 
-            self.context_page = await self.browser_context.new_page()
+            # #136：标准模式持久 context 复用自带的第一页，不另开空白页；没有页面时才新建。CDP 与非持久分支照旧新建。
+            persistent = self.settings.SAVE_LOGIN_STATE and not self.settings.ENABLE_CDP_MODE
+            pages = self.browser_context.pages if persistent else []
+            self.context_page = pages[0] if pages else await self.browser_context.new_page()
             await self.context_page.goto(self.index_url, wait_until="domcontentloaded")
 
             self.dy_client = await self.create_douyin_client(httpx_proxy_format)
@@ -741,20 +744,11 @@ class DouYinCrawler:
     ) -> BrowserContext:
         """Launch browser and create browser context"""
         if self.settings.SAVE_LOGIN_STATE:
-            user_data_dir = str(platform_profile_dir("douyin"))
-            browser_context = await chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                accept_downloads=True,
-                headless=headless,
-                proxy=playwright_proxy,  # type: ignore
-                viewport={
-                    "width": 1920,
-                    "height": 1080
-                },
-                user_agent=user_agent,
-                args=self.ports.project_browser_args(),
-            )  # type: ignore
-            return browser_context
+            # #136：与 warmup 共用持久 context 启动配置（沙箱开启、视口、locale/timezone），不传 UA。
+            # 正式流程 ENABLE_IP_PROXY=False，playwright_proxy 恒为 None，共享配置不带代理。
+            return await self.ports.launch_profile_context(
+                chromium, platform_profile_dir("douyin"), headless=headless,
+            )
         else:
             browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
             browser_context = await browser.new_context(viewport={"width": 1920, "height": 1080}, user_agent=user_agent)

@@ -13,7 +13,8 @@
   单独作为登录证据。
 - 行为阶段必须在本轮真实关键词移动搜索页完成并刷新移动端 Cookie。
 - 启动浏览器时不强制 User-Agent，视口与 warmup 相同（1280×900），同一持久 profile 登录与抓取时的
-  浏览器 UA 一致；`m.weibo.cn` 接口与图片请求头的 `User-Agent` 从 `navigator.userAgent` 读取，
+  浏览器 UA 一致；标准模式持久 profile 与 warmup 共用同一套启动配置（沙箱开启、`zh-CN` 与
+  `Asia/Shanghai`），首页在持久 context 自带的第一页打开（#136）；`m.weibo.cn` 接口与图片请求头的 `User-Agent` 从 `navigator.userAgent` 读取，
   不再用固定 iPhone Safari（#127）。桌面 UA 下 `/api/config` 已由 warmup 验证；`/api/container/getIndex`
   在桌面 UA 下的 `cards` 结构待正式轮实证，结构不同或被拒只会运行级停止，不写错误数据。
 - worker 启动时先用 `/api/config` 确认移动端登录；未确认时执行登录流程并刷新移动端 Cookie，之后必须
