@@ -139,10 +139,14 @@ def t10_launch_login_context(source: str) -> str:
     moved = native_window_deviation.t10_launch_body(moved)
     runtime = (ROOT / "src/trippostcollect/runtime/browser_runtime.py").read_text()
     shared_body = _function(runtime, "launch_profile_context").body
-    # 共享函数开头是 docstring 与两处缺省求值（runtime_args / env 为 None 时取运行时值），其后与冻结体相同。
+    # 共享函数开头是 docstring、两处缺省求值与 kwargs 构造；#137 只在真正 launch 前新增 crash 目录准备，
+    # 不参与冻结启动配置等价比较，其余语句仍逐项相同。
     assert isinstance(shared_body[0], ast.Expr) and all(isinstance(node, ast.If) for node in shared_body[1:3])
+    launch_prepare = shared_body[-2]
+    assert isinstance(launch_prepare, ast.Expr) and isinstance(launch_prepare.value, ast.Call)
+    assert ast.dump(launch_prepare.value.func) == ast.dump(ast.Name(id="ensure_dir", ctx=ast.Load()))
     assert [ast.dump(node) for node in _function(moved, "launch_login_context").body] == [
-        ast.dump(node) for node in shared_body[3:]
+        ast.dump(node) for node in [*shared_body[3:-2], shared_body[-1]]
     ]
     current = (ROOT / "src/trippostcollect/application/warmup.py").read_text()
     new = ast.get_source_segment(current, _function(current, "launch_login_context"))

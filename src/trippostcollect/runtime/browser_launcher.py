@@ -39,6 +39,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 import re
 
+from trippostcollect.core.paths import CHROME_CRASH_DUMPS, ensure_dir
+
 
 def discover_cdp_browser_path() -> str | None:
     for env_key in ("TRIPPOSTCOLLECT_CUSTOM_BROWSER_PATH", "CUSTOM_BROWSER_PATH"):
@@ -347,6 +349,7 @@ class BrowserLauncher:
 
         process = None
         try:
+            ensure_dir(CHROME_CRASH_DUMPS)
             # On Windows, use CREATE_NEW_PROCESS_GROUP to prevent Ctrl+C from affecting subprocess
             if self.system == "Windows":
                 process = subprocess.Popen(

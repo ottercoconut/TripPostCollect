@@ -17,6 +17,7 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page, Request, Response, TimeoutError as PlaywrightTimeoutError
 
+from trippostcollect.core.paths import CHROME_CRASH_DUMPS
 from trippostcollect.runtime.browser_runtime import browser_launch_environment, browser_runtime_args
 from trippostcollect.runtime.page_readiness import navigate_with_commit_and_readiness
 from trippostcollect.application.page_evidence import (
@@ -384,6 +385,7 @@ async def open_context(playwright, target: dict[str, Any], args: argparse.Namesp
         if mobile
         else {"width": RANDOM.randint(1280, 1512), "height": RANDOM.randint(820, 980)}
     )
+    ensure_dir(CHROME_CRASH_DUMPS)
     return await playwright.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
         headless=args.headless,
