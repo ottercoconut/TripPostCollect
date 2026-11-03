@@ -439,6 +439,9 @@ context 自带的第一页，不另开空白页。只有 `headless` 与浏览器
 小红书一样不做设备模拟（#139）：不传 `viewport`，按原生窗口 1450×900（`NATIVE_WINDOW_SIZE`，即
 `--window-size=1450,900`）启动，macOS 会把窗口收进屏幕可用区域；`screen`、DPR 与窗口尺寸由浏览器给出真实值，
 行为证据 `runtime_fingerprint` 记录真实 screen 与 DPR。
+知乎正式轮使用 CDP 时，外部 Chrome 以 `--accept-lang=zh-CN`、`TZ=Asia/Shanghai` 和同一原生窗口启动；
+新建 context 及标准/回退持久模式也不做 viewport 设备模拟（#142）。`runtime_fingerprint` 另记录
+`languages` 与 `timezone`，用于核对 CDP 实际环境，不能只凭进程参数判定一致。
 
 `crawl_runner.py` 只读取上述 Cookie 快照，不在缺快照时另起浏览器读取 profile；知乎缺快照或缺 `d_c0`/`z_c0`
 时任务直接失败，先运行本节 warmup 再重跑。warmup 报告中的登录接口结果只保留状态码、`uid`、`name`

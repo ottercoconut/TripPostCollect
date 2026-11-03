@@ -26,7 +26,7 @@ from urllib.parse import quote
 from playwright.async_api import BrowserContext, BrowserType, Page, Playwright
 from tenacity import RetryError
 from trippostcollect.application.contracts import ImageStagingError, ZhihuSettings, ZhihuPorts
-from trippostcollect.core.paths import CHROME_CRASH_DUMPS, PROFILE_VIEWPORT, ensure_dir, platform_profile_dir
+from trippostcollect.core.paths import PROFILE_VIEWPORT, platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError, is_runtime_blocking_image_error
 from . import models as constant
@@ -811,20 +811,10 @@ class ZhihuCrawler:
             "[ZhihuCrawler.launch_browser] Begin create browser context ..."
         )
         if self.settings.SAVE_LOGIN_STATE:
-            # feat issue #14
-            # we will save login state to avoid login every time
-            user_data_dir = str(platform_profile_dir("zhihu"))
-            ensure_dir(CHROME_CRASH_DUMPS)
-            browser_context = await chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                accept_downloads=True,
-                headless=headless,
-                proxy=playwright_proxy,  # type: ignore
-                viewport=PROFILE_VIEWPORT,
-                user_agent=user_agent,
-                args=self.ports.project_browser_args(),
+            # #142：知乎标准模式与 CDP 失败回退也使用共享持久启动配置，不再模拟 viewport。
+            return await self.ports.launch_profile_context(
+                chromium, platform_profile_dir("zhihu"), headless=headless,
             )
-            return browser_context
         else:
             browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
             browser_context = await browser.new_context(

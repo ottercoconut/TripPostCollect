@@ -267,7 +267,7 @@ def test_shared_launcher_defaults_read_runtime_values_at_call_time(shared, tmp_p
 
 def test_platform_adapters_receive_the_launcher_through_ports() -> None:
     """依赖方向：平台包不直接 import runtime.browser_runtime，经 ports 注入共享函数。"""
-    for platform in ("douyin", "weibo", "bilibili"):
+    for platform in ("douyin", "weibo", "bilibili", "zhihu"):
         for path in (ROOT / "src/trippostcollect/platforms" / platform).glob("*.py"):
             nodes = list(ast.walk(ast.parse(path.read_text(encoding="utf-8"))))
             imported = [node.module for node in nodes if isinstance(node, ast.ImportFrom)]
@@ -276,6 +276,6 @@ def test_platform_adapters_receive_the_launcher_through_ports() -> None:
             assert not keywords & {"ignore_default_args", "screen", "chromium_sandbox"}, path
             assert not [node for node in nodes if isinstance(node, ast.Constant) and node.value == "--no-sandbox"], path
     entry = (ROOT / "src/trippostcollect/platforms/entry.py").read_text(encoding="utf-8")
-    assert entry.count("launch_profile_context=launch_profile_context") == 2
+    assert entry.count("launch_profile_context=launch_profile_context") == 3
     executor = (ROOT / "scripts/mediacrawler_crawl.py").read_text(encoding="utf-8")
     assert executor.count("launch_profile_context=launch_profile_context") == 1

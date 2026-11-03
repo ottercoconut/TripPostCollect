@@ -49,6 +49,7 @@ from trippostcollect.core.paths import (
     platform_profile_dir,
 )
 from trippostcollect.runtime.browser_launcher import CDP_LOOPBACK_HOST, BrowserLauncher
+from trippostcollect.runtime.browser_runtime import NATIVE_WINDOW_SIZE
 
 
 logger = logging.getLogger("MediaCrawler")
@@ -490,13 +491,24 @@ class CDPBrowserManager:
             logger.info(f"[CDPBrowserManager] User data directory: {user_data_dir}")
             self._clean_session_restore_tabs(user_data_dir)
 
-        # Launch browser
-        self.launcher.browser_process = self.launcher.launch_browser(
-            browser_path=browser_path,
-            debug_port=self.debug_port,
-            headless=headless,
-            user_data_dir=user_data_dir,
-        )
+        # #142：知乎外部 Chrome 显式对齐中文语言、原生窗口和时区；其他平台（尤其 XHS）保持原调用。
+        launch_kwargs = {
+            "browser_path": browser_path,
+            "debug_port": self.debug_port,
+            "headless": headless,
+            "user_data_dir": user_data_dir,
+        }
+        if self.settings.PLATFORM == "zhihu":
+            launch_env = os.environ.copy()
+            launch_env["TZ"] = "Asia/Shanghai"
+            launch_kwargs.update(
+                extra_args=[
+                    "--accept-lang=zh-CN",
+                    f"--window-size={NATIVE_WINDOW_SIZE[0]},{NATIVE_WINDOW_SIZE[1]}",
+                ],
+                env=launch_env,
+            )
+        self.launcher.browser_process = self.launcher.launch_browser(**launch_kwargs)
 
         # Wait for browser to be ready
         if not self.launcher.wait_for_browser_ready(
@@ -580,10 +592,13 @@ class CDPBrowserManager:
             logger.info("[CDPBrowserManager] Using existing browser context")
         else:
             # Create new context
-            context_options = {
-                "viewport": {"width": 1920, "height": 1080},
-                "accept_downloads": True,
-            }
+            context_options = {"accept_downloads": True}
+            if self.settings.PLATFORM == "zhihu":
+                context_options.update(
+                    no_viewport=True, locale="zh-CN", timezone_id="Asia/Shanghai",
+                )
+            else:
+                context_options["viewport"] = {"width": 1920, "height": 1080}
 
             # Set user agent
             if user_agent:

@@ -101,15 +101,23 @@ def test_page_evidence_launch_creates_crash_directory_before_fake_launch(monkeyp
 
 def test_zhihu_persistent_launch_creates_crash_directory_before_fake_launch(monkeypatch, tmp_path: Path) -> None:
     crash_dir = tmp_path / "chrome_crash_dumps"
-    monkeypatch.setattr(zhihu_core, "CHROME_CRASH_DUMPS", crash_dir)
+    monkeypatch.setattr(browser_runtime, "CHROME_CRASH_DUMPS", crash_dir)
     monkeypatch.setattr(zhihu_core, "platform_profile_dir", lambda platform: str(tmp_path / "profile"))
     crawler = object.__new__(zhihu_core.ZhihuCrawler)
     crawler.settings = SimpleNamespace(SAVE_LOGIN_STATE=True)
-    crawler.ports = SimpleNamespace(project_browser_args=lambda: runtime_args(crash_dir))
+
+    async def shared_launch(chromium, profile_dir, *, headless):
+        # #142：知乎经 ports 委托共享启动，crash 目录准备仍在真正 launch 前执行。
+        return await browser_runtime.launch_profile_context(
+            chromium, profile_dir, headless=headless,
+            runtime_args=runtime_args(crash_dir), env={},
+        )
+
+    crawler.ports = SimpleNamespace(launch_profile_context=shared_launch)
     chromium = FakeChromium()
 
     asyncio.run(crawler.launch_browser(chromium, None, None, headless=True))
 
     assert crash_dir.is_dir()
     (kwargs,) = chromium.launches
-    assert kwargs["args"] == runtime_args(crash_dir)
+    assert kwargs["args"][-4:-1] == runtime_args(crash_dir)

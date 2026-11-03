@@ -268,7 +268,9 @@ class BrowserLauncher:
             return int(s.getsockname()[1])
 
     def launch_browser(self, browser_path: str, debug_port: int, headless: bool = False,
-                      user_data_dir: Optional[str] = None) -> subprocess.Popen:
+                      user_data_dir: Optional[str] = None, *,
+                      extra_args: Optional[list[str]] = None,
+                      env: Optional[dict[str, str]] = None) -> subprocess.Popen:
         """
         Launch browser process
         """
@@ -287,6 +289,7 @@ class BrowserLauncher:
             "--disable-sync",
             "--disable-dev-shm-usage",  # Avoid shared memory issues
             *self._project_browser_args(),
+            *(extra_args or []),
         ]
 
         stable_window_size = self.xhs_window_size_argument()
@@ -301,7 +304,7 @@ class BrowserLauncher:
             ])
         else:
             # Extra arguments for non-headless mode
-            if not stable_window_size:
+            if not any(item.startswith("--window-size=") for item in args):
                 args.append("--start-maximized")
 
         # User data directory
@@ -356,14 +359,16 @@ class BrowserLauncher:
                     args,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                    env=env,
                 )
             else:
                 process = subprocess.Popen(
                     args,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    preexec_fn=os.setsid  # Create new process group
+                    preexec_fn=os.setsid,  # Create new process group
+                    env=env,
                 )
 
             with self._state_lock:
