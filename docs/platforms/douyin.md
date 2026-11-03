@@ -59,6 +59,13 @@
 
 ## HTTP 状态与请求头
 
+平台 client 在一次运行内懒创建并复用同一个 `httpx.AsyncClient`（#127）。worker 清理（含异常与信号路径）先清理浏览器再关闭它，关闭后的请求按运行级 `http_client_closed` 报错，
+不再新建连接。
+短链接解析的 `follow_redirects=False` 与图片的 `follow_redirects=True` 都是请求级选项，不另建 client。
+client 不保留响应的 `Set-Cookie`：Cookie 只来自每次请求显式传入的请求头，图片请求和图片重定向的各跳都不带 Cookie。
+服务端已断开的空闲连接由连接池换新，不报错；请求发出后才发现连接失效时按传输层失败处理，请求层仍不重试，
+本轮按运行级 `network_unreachable` 停止。
+
 作者资料与详情 API 响应在解码前先按 HTTP 状态分类，阻断类不进重试，也不改走浏览器详情：
 
 - 401：`login_required`；

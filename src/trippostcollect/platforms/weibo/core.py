@@ -719,13 +719,19 @@ class WeiboCrawler:
 
 
     async def close(self):
-        """Close browser context"""
-        # Special handling if using CDP mode
-        if self.cdp_manager:
-            await self.cdp_manager.cleanup()
-            self.cdp_manager = None
-        else:
-            await self.browser_context.close()
+        """Close the reused HTTP client and browser context."""
+        try:
+            # start() 在创建 client 前失败时属性尚不存在，浏览器仍要清理。
+            client = getattr(self, "wb_client", None)
+            if client is not None:
+                await client.aclose()
+        finally:
+            # Special handling if using CDP mode
+            if self.cdp_manager:
+                await self.cdp_manager.cleanup()
+                self.cdp_manager = None
+            else:
+                await self.browser_context.close()
         logger.info("[WeiboCrawler.close] Browser context closed ...")
 
     async def update_weibo_note(self, note_item: Dict):

@@ -40,12 +40,11 @@ def async_client_factory(status_code: int, content: bytes = b""):
 async def test_douyin_http_404_preserves_terminal_status(monkeypatch) -> None:
     from types import SimpleNamespace
 
-    client = object.__new__(douyin_client.DouYinClient)
     # T06：HTTP 依赖已迁入显式端口，继续只验证本站原 404 分类。
-    client.ports = SimpleNamespace(make_async_client=async_client_factory(404))
-    client.proxy = None
-    client.timeout = 1
-    client.headers = {"User-Agent": "test-agent"}
+    client = douyin_client.DouYinClient(
+        timeout=1, headers={"User-Agent": "test-agent"}, playwright_page=None, cookie_dict={},
+        ports=SimpleNamespace(make_async_client=async_client_factory(404)),
+    )
 
     with pytest.raises(ImageDownloadFetchError) as exc_info:
         await client.get_aweme_media("https://example.test/missing.jpg")
@@ -60,11 +59,10 @@ async def test_weibo_http_404_preserves_terminal_status(monkeypatch) -> None:
 
     # fork 微博重导出根客户端，HTTP 替身注入根端口的实际调用边界。
     monkeypatch.setattr("trippostcollect.runtime.http.make_async_client", async_client_factory(404))
-    client = object.__new__(weibo_client.WeiboClient)
-    client.ports = weibo_dependencies(worker_config())[1].client
-    client.proxy = None
-    client.timeout = 1
-    client._image_agent_host = "https://i1.wp.com/"
+    client = weibo_client.WeiboClient(
+        timeout=1, headers={}, playwright_page=None, cookie_dict={},
+        ports=weibo_dependencies(worker_config())[1].client,
+    )
 
     with pytest.raises(ImageDownloadFetchError) as exc_info:
         await client.get_note_image("https://wx.test/missing.jpg")
@@ -143,12 +141,11 @@ async def test_xhs_html_response_preserves_security_limit_business_code(
 async def test_zhihu_http_404_preserves_terminal_status(monkeypatch) -> None:
     from types import SimpleNamespace
 
-    client = object.__new__(zhihu_client.ZhiHuClient)
     # T07：fork 类重导出根实现，HTTP 替身经实例端口注入。
-    client.ports = SimpleNamespace(make_async_client=async_client_factory(404))
-    client.proxy = None
-    client.timeout = 1
-    client.default_headers = {}
+    client = zhihu_client.ZhiHuClient(
+        timeout=1, headers={}, playwright_page=None, cookie_dict={},
+        ports=SimpleNamespace(make_async_client=async_client_factory(404)),
+    )
 
     with pytest.raises(ImageDownloadFetchError) as exc_info:
         await client.get_content_image(
@@ -166,12 +163,11 @@ async def test_zhihu_oversized_response_is_terminal(monkeypatch) -> None:
     from trippostcollect.platforms.zhihu import client as root_zhihu_client
 
     monkeypatch.setattr(root_zhihu_client, "IMAGE_DOWNLOAD_MAX_BYTES", 3)
-    client = object.__new__(zhihu_client.ZhiHuClient)
     # T07：只改 mock 接缝，大小上限与错误断言保持原样。
-    client.ports = SimpleNamespace(make_async_client=async_client_factory(200, content=b"four"))
-    client.proxy = None
-    client.timeout = 1
-    client.default_headers = {}
+    client = zhihu_client.ZhiHuClient(
+        timeout=1, headers={}, playwright_page=None, cookie_dict={},
+        ports=SimpleNamespace(make_async_client=async_client_factory(200, content=b"four")),
+    )
 
     with pytest.raises(ImageDownloadFetchError) as exc_info:
         await client.get_content_image(

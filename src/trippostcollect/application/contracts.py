@@ -43,7 +43,7 @@ class ContentSink(Protocol):
 
 @dataclass(frozen=True)
 class WeiboClientPorts:
-    """微博请求边界；HTTP 工厂仍在每次请求时读取 TLS 设置。"""
+    """微博请求边界；HTTP 工厂在 client 懒创建时读取 TLS 设置。"""
 
     make_async_client: Callable[..., Any]
     convert_browser_context_cookies: Callable[..., Any]

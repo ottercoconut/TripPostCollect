@@ -149,6 +149,9 @@ async def drive(directory, monkeypatch, scenario, post_repair):
         async def __aexit__(self, *args):
             return False
 
+        async def aclose(self):
+            pass
+
         async def request(self, method, url, **kwargs):
             trace.append(("request", method, url, deepcopy(kwargs)))
             parsed = urlparse(url)
@@ -433,6 +436,9 @@ async def repair_chain(patch, scenario, *, page_status=200):
 
         async def __aexit__(self, *args):
             return False
+
+        async def aclose(self):
+            pass
 
         async def request(self, method, url, **kwargs):
             trace.append((method, url, kwargs))

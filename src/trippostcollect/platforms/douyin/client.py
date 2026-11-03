@@ -138,10 +138,27 @@ class DouYinClient:
         ]
         self.playwright_page = playwright_page
         self.cookie_dict = cookie_dict
+        self._http_client = None
+        self._http_client_closed = False
         self._observed_search_responses: list[dict[str, Any]] = []
         self._observed_search_response_tasks: set[asyncio.Task] = set()
         if self.playwright_page is not None:
             self.playwright_page.on("response", self._schedule_browser_search_response)
+
+    def _get_http_client(self):
+        """Return the per-run HTTP client; no await point, so concurrent first calls share one."""
+        if self._http_client_closed:
+            raise PlatformRuntimeError("douyin HTTP client closed", code="http_client_closed")
+        if self._http_client is None:
+            self._http_client = self.ports.make_async_client(proxy=self.proxy)
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the reused HTTP client once; later requests fail instead of reconnecting."""
+        self._http_client_closed = True
+        client, self._http_client = self._http_client, None
+        if client is not None:
+            await client.aclose()
 
     def _schedule_browser_search_response(self, response: Any) -> None:
         if "/aweme/v1/web/general/search/" not in response.url:
@@ -386,8 +403,8 @@ class DouYinClient:
 
     async def request(self, method, url, **kwargs):
         try:
-            async with self.ports.make_async_client(proxy=self.proxy) as client:
-                response = await client.request(method, url, timeout=self.timeout, **kwargs)
+            client = self._get_http_client()
+            response = await client.request(method, url, timeout=self.timeout, **kwargs)
         except httpx.TransportError as exc:
             # #129：抖音请求层不重试；传输层失败（DNS、连接、超时、重置）是网络整体故障，与候选无关，
             # 按运行级失败停止本轮，不按候选跳过、不写 seen。
@@ -526,28 +543,28 @@ class DouYinClient:
         return headers
 
     async def get_aweme_media(self, url: str) -> Union[bytes, None]:
-        async with self.ports.make_async_client(proxy=self.proxy) as client:
-            try:
-                response = await client.request(
-                    "GET",
-                    url,
-                    headers=self._media_headers(),
-                    timeout=self.timeout,
-                    follow_redirects=True,
-                )
-                response.raise_for_status()
-                return response.content
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-                logger.error(
-                    f"[DouYinClient.get_aweme_media] HTTP {status} for {exc.request.url}"
-                )
-                raise classified_http_image_error(status, f"HTTP {status}") from exc
-            except httpx.HTTPError as exc:  # transport error without an HTTP response
-                logger.error(f"[DouYinClient.get_aweme_media] {exc.__class__.__name__} for {exc.request.url} - {exc}")  # Keep the original exception type name for developers to debug
-                raise ImageDownloadFetchError(
-                    str(exc), code="image_download_retryable", retryable=True
-                ) from exc
+        client = self._get_http_client()
+        try:
+            response = await client.request(
+                "GET",
+                url,
+                headers=self._media_headers(),
+                timeout=self.timeout,
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            return response.content
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            logger.error(
+                f"[DouYinClient.get_aweme_media] HTTP {status} for {exc.request.url}"
+            )
+            raise classified_http_image_error(status, f"HTTP {status}") from exc
+        except httpx.HTTPError as exc:  # transport error without an HTTP response
+            logger.error(f"[DouYinClient.get_aweme_media] {exc.__class__.__name__} for {exc.request.url} - {exc}")  # Keep the original exception type name for developers to debug
+            raise ImageDownloadFetchError(
+                str(exc), code="image_download_retryable", retryable=True
+            ) from exc
 
     async def resolve_short_url(self, short_url: str) -> str:
         """
@@ -557,22 +574,22 @@ class DouYinClient:
         Returns:
             重定向后的完整URL
         """
-        async with self.ports.make_async_client(proxy=self.proxy, follow_redirects=False) as client:
-            try:
-                logger.info(f"[DouYinClient.resolve_short_url] Resolving short URL: {short_url}")
-                response = await client.get(short_url, timeout=10)
+        client = self._get_http_client()
+        try:
+            logger.info(f"[DouYinClient.resolve_short_url] Resolving short URL: {short_url}")
+            response = await client.get(short_url, timeout=10, follow_redirects=False)
 
-                # Short links usually return a 302 redirect
-                if response.status_code in [301, 302, 303, 307, 308]:
-                    redirect_url = response.headers.get("Location", "")
-                    logger.info(f"[DouYinClient.resolve_short_url] Resolved to: {redirect_url}")
-                    return redirect_url
-                else:
-                    logger.warning(f"[DouYinClient.resolve_short_url] Unexpected status code: {response.status_code}")
-                    return ""
-            except Exception as e:
-                logger.error(f"[DouYinClient.resolve_short_url] Failed to resolve short URL: {e}")
+            # Short links usually return a 302 redirect
+            if response.status_code in [301, 302, 303, 307, 308]:
+                redirect_url = response.headers.get("Location", "")
+                logger.info(f"[DouYinClient.resolve_short_url] Resolved to: {redirect_url}")
+                return redirect_url
+            else:
+                logger.warning(f"[DouYinClient.resolve_short_url] Unexpected status code: {response.status_code}")
                 return ""
+        except Exception as e:
+            logger.error(f"[DouYinClient.resolve_short_url] Failed to resolve short URL: {e}")
+            return ""
 
 
     async def browser_detail(self: Any, aweme_id: str) -> Any:
