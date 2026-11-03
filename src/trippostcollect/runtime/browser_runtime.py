@@ -29,10 +29,9 @@ def browser_launch_environment() -> dict[str, str]:
 
 
 def browser_runtime_args() -> list[str]:
-    crash_dir = ensure_dir(CHROME_CRASH_DUMPS)
     return [
         "--disable-crash-reporter",
-        f"--crash-dumps-dir={crash_dir}",
+        f"--crash-dumps-dir={CHROME_CRASH_DUMPS}",
         "--use-mock-keychain",
     ]
 
@@ -90,4 +89,5 @@ async def launch_profile_context(
     }
     if browser_path:
         kwargs["executable_path"] = browser_path
+    ensure_dir(CHROME_CRASH_DUMPS)
     return await chromium.launch_persistent_context(**kwargs)
