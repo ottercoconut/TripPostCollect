@@ -11,7 +11,6 @@ import signal
 import sqlite3
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -34,15 +33,15 @@ from trippostcollect.core.paths import (
     ensure_dir,
 )
 from trippostcollect.db.bootstrap import bootstrap_database
-from trippostcollect.records.sanitization import (
-    author_avatar_log_marker,
-    redact_author_avatar_text,
-)
+from trippostcollect.records.sanitization import redact_author_avatar_text
 from trippostcollect.runtime.process import (
+    EXECUTION_STATE_PATH_ENV,
     PROCESS_CLEANUP_GRACE_SECONDS,
     PROCESS_FINAL_REAP_SECONDS,
+    decode_text,
+    kill_recorded_child_process_groups,
     operator_interrupt_error,
-    process_group_exists,
+    terminate_managed_process,
     write_command_logs,
 )
 from trippostcollect.xhs.leases import DeferredTerminationSignals
@@ -52,6 +51,12 @@ PLATFORMS = ("douyin", "weibo", "zhihu")
 # 与通用 runner 相同：首个 SIGINT/SIGTERM/SIGHUP 锁存，独立会话里的 child 收不到终端信号。
 REPAIR_INTERRUPT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 REPAIR_CHILD_POLL_SECONDS = 0.2
+# 中间层自己用 PROCESS_CLEANUP_GRACE_SECONDS 等 worker，再用 PROCESS_FINAL_REAP_SECONDS 回收。
+# 总控的倒计时更早开始，所以必须留出这两段再加余量，否则总会先 SIGKILL 中间层，worker 变成孤儿。
+REPAIR_CHILD_INTERRUPT_GRACE_SECONDS = (
+    PROCESS_CLEANUP_GRACE_SECONDS + PROCESS_FINAL_REAP_SECONDS + 15.0
+)
+COMPLETED_REPAIR_OUTCOMES = {"completed", "completed_with_remaining"}
 TRUSTED_DETAIL_SOURCES = {
     "douyin": {"aweme_detail"},
     "weibo": {"search_mblog_complete", "mobile_detail"},
@@ -426,83 +431,37 @@ def load_child_summary(path_value: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _clean_child_streams(stdout: str, stderr: str) -> tuple[str, str]:
-    """任一路含头像词时，两路一起换成同一审计标记，然后才能落盘。"""
+def discard_hung_up_stream(stream: Any) -> None:
+    """输出端已失效时改接 /dev/null，避免解释器退出时 flush 失败把退出码改成 120。"""
 
-    marker = author_avatar_log_marker({"stdout": stdout, "stderr": stderr})
-    if marker is None:
-        return stdout, stderr
-    return marker, marker
-
-
-def _signal_repair_group(pid: int, signum: int) -> None:
     try:
-        os.killpg(pid, signum)
-    except (ProcessLookupError, PermissionError):
-        return
-
-
-def _terminate_repair_child(
-    process: subprocess.Popen[str],
-    *,
-    grace_seconds: float,
-) -> tuple[str, str, bool]:
-    """向 child 进程组发一次 SIGTERM；宽限后组仍在才 SIGKILL。"""
-
-    forced = False
-    stdout: str | None = None
-    stderr: str | None = None
-    reap_needed = False
-    if process.poll() is None:
-        _signal_repair_group(int(process.pid), signal.SIGTERM)
-    deadline = time.monotonic() + max(0.0, grace_seconds)
-    try:
-        stdout, stderr = process.communicate(timeout=max(0.01, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired as exc:
-        stdout, stderr = exc.stdout, exc.stderr
-        reap_needed = True
-    while process_group_exists(int(process.pid)) and time.monotonic() < deadline:
-        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-    if process_group_exists(int(process.pid)):
-        forced = True
-        _signal_repair_group(int(process.pid), signal.SIGKILL)
-        reap_needed = True
-    if reap_needed or stdout is None or stderr is None or process.poll() is None:
+        devnull = os.open(os.devnull, os.O_WRONLY)
         try:
-            final_out, final_err = process.communicate(timeout=PROCESS_FINAL_REAP_SECONDS)
-        except subprocess.TimeoutExpired as exc:
-            final_out = exc.stdout if exc.stdout is not None else stdout
-            final_err = exc.stderr if exc.stderr is not None else stderr
-            for pipe in (process.stdout, process.stderr):
-                if pipe is not None:
-                    try:
-                        pipe.close()
-                    except OSError:
-                        pass
-        else:
-            final_out = final_out if final_out is not None else stdout
-            final_err = final_err if final_err is not None else stderr
-        stdout = final_out
-        stderr = final_err
-    return stdout or "", stderr or "", forced
+            os.dup2(devnull, stream.fileno())
+        finally:
+            os.close(devnull)
+    except (OSError, ValueError, AttributeError):
+        pass
 
 
-def _persist_interrupted_output(
-    command: list[str],
-    stdout: str,
-    stderr: str,
-    log_dir: Path | None,
-) -> tuple[str, str, dict[str, str]]:
-    if log_dir is None:
-        cleaned_out, cleaned_err = _clean_child_streams(stdout, stderr)
-        return cleaned_out, cleaned_err, {}
-    # write_command_logs 对原始两路一起清洗；不能先换成标记再写，否则标记里的 avatar 会被再计一次。
-    logs = write_command_logs(command, log_dir, stdout, stderr)
-    return logs["stdout"], logs["stderr"], logs
+def print_repair_stream(line: str, stream: Any) -> None:
+    try:
+        print(line, file=stream, flush=True)
+    except OSError:
+        discard_hung_up_stream(stream)
 
 
-def interrupt_details(signum: int, *, forced_termination: bool) -> dict[str, Any]:
-    return {
+def _child_text(value: bytes | None) -> str:
+    return decode_text(value).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def interrupt_details(
+    signum: int,
+    *,
+    forced_termination: bool,
+    exception: str = "",
+) -> dict[str, Any]:
+    details = {
         "reason": "operator_interrupt",
         "signum": int(signum),
         "signal": signal.Signals(int(signum)).name,
@@ -510,6 +469,9 @@ def interrupt_details(signum: int, *, forced_termination: bool) -> dict[str, Any
         "error": operator_interrupt_error(signum),
         "forced_termination": bool(forced_termination),
     }
+    if exception:
+        details["exception"] = exception
+    return details
 
 
 def interrupted_batch_result(batch_plan: dict[str, Any], child_run: dict[str, Any]) -> dict[str, Any]:
@@ -529,6 +491,7 @@ def interrupted_batch_result(batch_plan: dict[str, Any], child_run: dict[str, An
         ),
         "stdout_tail": stdout[-6000:],
         "stderr_tail": stderr[-6000:],
+        "killed_child_process_groups": list(child_run.get("killed_groups") or []),
         "logs": {
             key: logs.get(key)
             for key in ("stdout_log", "stderr_log", "command_log")
@@ -542,113 +505,135 @@ def terminalize_repair_interrupt(
     error: str,
     evidence: dict[str, Any],
 ) -> str | None:
-    """把修复 execution state 收成中断失败终态。写入失败时返回原因，不吞掉。"""
+    """未完成的执行状态收成中断失败。已经 completed 的状态不改写。"""
 
     try:
         payload = state.load()
-        if payload.get("status") in {"completed", "completed_with_remaining"}:
-            return "execution state already completed"
-        step = (payload.get("steps") or {}).get("command_executed") or {}
-        status = step.get("status")
-        if status in {"pending", "in_progress"}:
-            state.fail("command_executed", error=error, evidence=evidence)
-        elif status != "failed":
-            return f"command_executed is {status or 'missing'}"
+        if payload.get("status") in COMPLETED_REPAIR_OUTCOMES:
+            return None
+        steps = payload.get("steps") or {}
+        open_step: str | None = None
+        for name in FORMAL_STEPS:
+            if name == "plan_frozen":
+                continue
+            step_status = (steps.get(name) or {}).get("status")
+            if step_status == "failed":
+                open_step = None
+                break
+            if step_status in {"pending", "in_progress"}:
+                open_step = name
+                break
+        if open_step is not None and open_step != "task_finalized":
+            state.fail(open_step, error=error, evidence=evidence)
         state.finalize_failure(error=error, evidence=evidence)
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
     return None
 
 
+def _interrupted_child_result(
+    command: list[str],
+    *,
+    log_dir: Path,
+    signum: int,
+    returncode: int | None,
+    stdout: str,
+    stderr: str,
+    forced_termination: bool,
+    launched: bool,
+    killed_groups: list[dict[str, Any]],
+) -> dict[str, Any]:
+    logs = write_command_logs(command, log_dir, stdout, stderr)
+    return {
+        "returncode": returncode,
+        "stdout": logs["stdout"],
+        "stderr": logs["stderr"],
+        "interrupt_signum": int(signum),
+        "forced_termination": forced_termination,
+        "launched": launched,
+        "killed_groups": killed_groups,
+        "logs": logs,
+    }
+
+
 def run_repair_child(
     command: list[str],
     *,
     cwd: Path,
-    log_dir: Path | None = None,
-    interrupt_signal: Callable[[], int | None] | None = None,
-    grace_seconds: float = PROCESS_CLEANUP_GRACE_SECONDS,
+    log_dir: Path,
+    state_path: Path,
+    interrupt_signal: Callable[[], int | None],
+    grace_seconds: float = REPAIR_CHILD_INTERRUPT_GRACE_SECONDS,
     poll_seconds: float = REPAIR_CHILD_POLL_SECONDS,
 ) -> dict[str, Any]:
-    # 批次不设整轮墙钟上限；卡住由 child 中间层的无进展看门狗收束。
-    # 传入 interrupt_signal 时只锁存调用方已经记下的首个信号，并向 child 进程组转发一次 SIGTERM。
-    if interrupt_signal is not None:
-        signum = interrupt_signal()
-        if signum is not None:
-            stdout, stderr, logs = _persist_interrupted_output(command, "", "", log_dir)
-            return {
-                "returncode": None,
-                "stdout": stdout,
-                "stderr": stderr,
-                "interrupt_signum": int(signum),
-                "forced_termination": False,
-                "launched": False,
-                "logs": logs,
-            }
+    """运行一批修复 child。没有整轮墙钟；首个信号只向中间层发一次 SIGTERM。
+
+    ``TRIPPOSTCOLLECT_EXECUTION_STATE_PATH`` 指向本轮修复状态，让中间层登记 worker 进程组。
+    worker 的 ``append_execution_event`` 会把事件追加进同一份状态；修复模式的 collection
+    只用它补 runtime_terminal，并把它当作无进展看门狗的进度文件。不因此写 discovery checkpoint。
+    宽限盖过中间层自己的 20 秒加 5 秒回收。仍不得不强杀中间层时，按登记兜底杀掉 worker。
+    """
+
+    signum = interrupt_signal()
+    if signum is not None:
+        return _interrupted_child_result(
+            command,
+            log_dir=log_dir,
+            signum=int(signum),
+            returncode=None,
+            stdout="",
+            stderr="",
+            forced_termination=False,
+            launched=False,
+            killed_groups=[],
+        )
+    env = os.environ.copy()
+    env[EXECUTION_STATE_PATH_ENV] = str(state_path)
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
-        env=os.environ.copy(),
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
         start_new_session=True,
     )
-    if interrupt_signal is None:
-        stdout, stderr = process.communicate()
-        return {
-            "returncode": int(process.returncode or 0),
-            "stdout": stdout or "",
-            "stderr": stderr or "",
-        }
+    forced = False
+    killed_groups: list[dict[str, Any]] = []
     while True:
         signum = interrupt_signal()
         if signum is not None:
-            stdout, stderr, forced = _terminate_repair_child(
+            stdout_bytes, stderr_bytes, forced = terminate_managed_process(
                 process,
                 grace_seconds=grace_seconds,
             )
-            stdout, stderr, logs = _persist_interrupted_output(
-                command,
-                stdout,
-                stderr,
-                log_dir,
-            )
-            returncode = process.returncode
-            return {
-                "returncode": None if returncode is None else int(returncode),
-                "stdout": stdout,
-                "stderr": stderr,
-                "interrupt_signum": int(signum),
-                "forced_termination": forced,
-                "launched": True,
-                "logs": logs,
-            }
+            if forced:
+                killed_groups = kill_recorded_child_process_groups(state_path)
+            break
         try:
-            stdout, stderr = process.communicate(timeout=poll_seconds)
+            stdout_bytes, stderr_bytes = process.communicate(timeout=poll_seconds)
         except subprocess.TimeoutExpired:
             continue
         signum = interrupt_signal()
         if signum is None:
             return {
                 "returncode": int(process.returncode or 0),
-                "stdout": stdout or "",
-                "stderr": stderr or "",
+                "stdout": _child_text(stdout_bytes),
+                "stderr": _child_text(stderr_bytes),
             }
-        stdout, stderr, logs = _persist_interrupted_output(
-            command,
-            stdout or "",
-            stderr or "",
-            log_dir,
-        )
-        return {
-            "returncode": int(process.returncode or 0),
-            "stdout": stdout,
-            "stderr": stderr,
-            "interrupt_signum": int(signum),
-            "forced_termination": False,
-            "launched": True,
-            "logs": logs,
-        }
+        forced = False
+        break
+    returncode = process.returncode
+    return _interrupted_child_result(
+        command,
+        log_dir=log_dir,
+        signum=int(signum),
+        returncode=None if returncode is None else int(returncode),
+        stdout=_child_text(stdout_bytes),
+        stderr=_child_text(stderr_bytes),
+        forced_termination=forced,
+        launched=True,
+        killed_groups=killed_groups,
+    )
 
 
 def repaired_rows(
@@ -1038,6 +1023,7 @@ def main() -> int:
     outcome = "failed"
     interrupt_signum: int | None = None
     forced_termination = False
+    interrupt_exception = ""
     state_update_error: str | None = None
     latch = DeferredTerminationSignals(REPAIR_INTERRUPT_SIGNALS)
     latch.install()
@@ -1053,7 +1039,9 @@ def main() -> int:
                 batch_plan["command"],
                 cwd=PROJECT_ROOT,
                 log_dir=run_dir / "logs" / f"batch-{int(batch_plan['batch']):04d}",
+                state_path=state_path,
                 interrupt_signal=lambda: latch.signal_received,
+                grace_seconds=REPAIR_CHILD_INTERRUPT_GRACE_SECONDS,
             )
             if child_run.get("interrupt_signum") is not None:
                 interrupt_signum = int(child_run["interrupt_signum"])
@@ -1202,34 +1190,40 @@ def main() -> int:
     except (OSError, sqlite3.Error, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
         if latch.signal_received is not None:
             interrupt_signum = int(latch.signal_received)
+            interrupt_exception = f"{type(exc).__name__}: {exc}"
         else:
             fatal_error = f"post_detail_repair_exception:{type(exc).__name__}:{exc}"
             _state_fail_open(state, fatal_error)
     if interrupt_signum is None and latch.signal_received is not None:
         interrupt_signum = int(latch.signal_received)
+    interrupt_record: dict[str, Any] | None = None
     if interrupt_signum is not None:
-        fatal_error = operator_interrupt_error(interrupt_signum)
-        outcome = "failed"
-        state_update_error = terminalize_repair_interrupt(
-            state,
-            error=fatal_error,
-            evidence={
-                "interrupt": interrupt_details(
-                    interrupt_signum,
-                    forced_termination=forced_termination,
-                ),
-                "backup": backup,
-                "batches": batch_results,
-            },
+        interrupt_record = interrupt_details(
+            interrupt_signum,
+            forced_termination=forced_termination,
+            exception=interrupt_exception,
         )
-        if state_update_error:
-            print(
-                "runtime_failed:operator_interrupt_state_update_failed:"
-                f"post_detail_repair:{args.platform}: {state_update_error}",
-                file=sys.stderr,
-                flush=True,
-            )
-        print(fatal_error, file=sys.stderr, flush=True)
+        try:
+            current_status = str(state.load().get("status") or "")
+        except Exception as exc:
+            current_status = ""
+            state_update_error = f"{type(exc).__name__}: {exc}"
+        if current_status in COMPLETED_REPAIR_OUTCOMES:
+            outcome = current_status
+            fatal_error = ""
+        else:
+            fatal_error = operator_interrupt_error(interrupt_signum)
+            outcome = "failed"
+            if state_update_error is None:
+                state_update_error = terminalize_repair_interrupt(
+                    state,
+                    error=fatal_error,
+                    evidence={
+                        "interrupt": interrupt_record,
+                        "backup": backup,
+                        "batches": batch_results,
+                    },
+                )
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -1266,20 +1260,28 @@ def main() -> int:
         "candidate_failures_sample": candidate_failures[:20],
         "finished_at": utc_iso(),
     }
-    if interrupt_signum is not None:
-        summary["interrupt"] = interrupt_details(
-            interrupt_signum,
-            forced_termination=forced_termination,
-        )
+    if interrupt_record is not None:
+        summary["interrupt"] = interrupt_record
         summary["forced_termination"] = forced_termination
         if state_update_error:
             summary["state_update_error"] = state_update_error
     write_json(summary_path, summary)
-    print(json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
+    if interrupt_signum is not None and state_update_error:
+        print_repair_stream(
+            "runtime_failed:operator_interrupt_state_update_failed:"
+            f"post_detail_repair:{args.platform}: {state_update_error}",
+            sys.stderr,
+        )
+    if interrupt_signum is not None:
+        print_repair_stream(operator_interrupt_error(interrupt_signum), sys.stderr)
+    print_repair_stream(
+        json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2),
+        sys.stdout,
+    )
     try:
         if interrupt_signum is not None:
             return 128 + interrupt_signum
-        return 0 if outcome in {"completed", "completed_with_remaining"} else 2
+        return 0 if outcome in COMPLETED_REPAIR_OUTCOMES else 2
     finally:
         latch.restore()
 

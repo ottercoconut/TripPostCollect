@@ -8,6 +8,8 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
+import time
 from importlib import import_module
 from pathlib import Path
 
@@ -660,6 +662,27 @@ def test_repair_runtime_stop_reason_preserves_structured_blocker() -> None:
     assert mediacrawler.repair_runtime_stop_reason(records, ["douyin"]) == ""
 
 
+def _repair_state(tmp_path: Path) -> repair.FrozenExecutionState:
+    frozen = tmp_path / "frozen.txt"
+    frozen.write_text("frozen\n", encoding="utf-8")
+    return repair.FrozenExecutionState.create(
+        tmp_path / "execution_state.json",
+        run_id="douyin-interrupt",
+        job_key="post_detail_repair:douyin",
+        site_key="douyin",
+        job_kind="post_detail_repair",
+        plan={"run_id": "douyin-interrupt"},
+        frozen_inputs=[frozen],
+    )
+
+
+def test_repair_child_grace_covers_middle_layer_cleanup() -> None:
+    assert repair.REPAIR_CHILD_INTERRUPT_GRACE_SECONDS == (
+        repair.PROCESS_CLEANUP_GRACE_SECONDS + repair.PROCESS_FINAL_REAP_SECONDS + 15.0
+    )
+    assert repair.REPAIR_CHILD_INTERRUPT_GRACE_SECONDS == 40.0
+
+
 def test_run_repair_child_does_not_launch_after_interrupt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -676,6 +699,7 @@ def test_run_repair_child_does_not_launch_after_interrupt(
         ["child"],
         cwd=ROOT,
         log_dir=tmp_path / "logs",
+        state_path=tmp_path / "execution_state.json",
         interrupt_signal=lambda: signal.SIGINT,
     )
 
@@ -703,29 +727,29 @@ def test_run_repair_child_forwards_one_sigterm_and_redacts_output(
         def poll(self) -> int | None:
             return self.returncode
 
-        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        def terminate(self) -> None:
+            signals_sent.append(signal.SIGTERM)
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
             del timeout
             if signal.SIGTERM not in signals_sent:
-                raise subprocess.TimeoutExpired(["child"], 0.01, output=None, stderr=None)
+                raise subprocess.TimeoutExpired(["child"], 0.01, output=b"", stderr=b"")
             self.returncode = -signal.SIGTERM
-            return 'avatar_url=https://img.example/a.jpg\n', "ok"
+            return b"avatar_url=https://img.example/a.jpg\n", b"ok"
 
     def fake_popen(*_args: object, **kwargs: object) -> FakeProcess:
         assert kwargs["start_new_session"] is True
-        assert kwargs["text"] is True
+        assert kwargs.get("text") is not True
+        assert kwargs["env"]["TRIPPOSTCOLLECT_EXECUTION_STATE_PATH"].endswith(
+            "execution_state.json"
+        )
         return FakeProcess()
 
-    def fake_killpg(pid: int, signum: int) -> None:
-        assert pid == 5151
-        signals_sent.append(signum)
-
-    def group_exists(pid: int) -> bool:
-        assert pid == 5151
-        return signal.SIGTERM not in signals_sent
-
     monkeypatch.setattr(repair.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(repair.os, "killpg", fake_killpg)
-    monkeypatch.setattr(repair, "process_group_exists", group_exists)
+    monkeypatch.setattr(
+        "trippostcollect.runtime.process.process_group_exists",
+        lambda _pid: False,
+    )
 
     def interrupt() -> int | None:
         seen["n"] += 1
@@ -735,6 +759,7 @@ def test_run_repair_child_forwards_one_sigterm_and_redacts_output(
         ["child"],
         cwd=ROOT,
         log_dir=tmp_path / "logs",
+        state_path=tmp_path / "execution_state.json",
         interrupt_signal=interrupt,
         grace_seconds=0,
         poll_seconds=0.01,
@@ -751,125 +776,18 @@ def test_run_repair_child_forwards_one_sigterm_and_redacts_output(
     assert "img.example" not in logged
 
 
-def test_run_repair_child_sigkill_when_group_survives_sigterm(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    signals_sent: list[int] = []
-
-    class FakeProcess:
-        pid = 6161
-        returncode = None
-        stdout = None
-        stderr = None
-
-        def poll(self) -> int | None:
-            return self.returncode
-
-        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
-            del timeout
-            if signal.SIGKILL not in signals_sent:
-                raise subprocess.TimeoutExpired(["child"], 0.01, output="partial", stderr="")
-            self.returncode = -signal.SIGKILL
-            return "partial", ""
-
-    monkeypatch.setattr(repair.subprocess, "Popen", lambda *_a, **_k: FakeProcess())
-    monkeypatch.setattr(
-        repair.os,
-        "killpg",
-        lambda _pid, signum: signals_sent.append(signum),
-    )
-    monkeypatch.setattr(
-        repair,
-        "process_group_exists",
-        lambda _pid: signal.SIGKILL not in signals_sent,
-    )
-    seen = {"n": 0}
-
-    def interrupt() -> int | None:
-        seen["n"] += 1
-        return signal.SIGTERM if seen["n"] > 1 else None
-
-    result = repair.run_repair_child(
-        ["child"],
-        cwd=ROOT,
-        interrupt_signal=interrupt,
-        grace_seconds=0,
-        poll_seconds=0.01,
-    )
-
-    assert signals_sent == [signal.SIGTERM, signal.SIGKILL]
-    assert result["forced_termination"] is True
-    assert result["interrupt_signum"] == signal.SIGTERM
-    assert result["stdout"] == "partial"
-
-
-def test_terminate_repair_child_reaps_real_process_group() -> None:
-    process = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
+def _process_alive(pid: int) -> bool:
     try:
-        _stdout, _stderr, forced = repair._terminate_repair_child(process, grace_seconds=2)
-    finally:
-        if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.communicate(timeout=2)
-
-    assert process.poll() is not None
-    assert forced is False
-    assert not repair.process_group_exists(process.pid)
-
-
-def test_terminate_repair_child_sigkills_group_that_ignores_sigterm() -> None:
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "import signal, sys, time; "
-            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-            "print('ready', flush=True); "
-            "time.sleep(30)",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    assert process.stdout is not None
-    assert process.stdout.readline() == "ready\n"
-    try:
-        _stdout, _stderr, forced = repair._terminate_repair_child(process, grace_seconds=0.2)
-    finally:
-        if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.communicate(timeout=2)
-
-    assert forced is True
-    assert process.poll() is not None
-    assert not repair.process_group_exists(process.pid)
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def test_terminalize_repair_interrupt_fails_open_step(tmp_path: Path) -> None:
-    frozen = tmp_path / "frozen.txt"
-    frozen.write_text("frozen\n", encoding="utf-8")
-    state = repair.FrozenExecutionState.create(
-        tmp_path / "execution_state.json",
-        run_id="douyin-interrupt",
-        job_key="post_detail_repair:douyin",
-        site_key="douyin",
-        job_kind="post_detail_repair",
-        plan={"run_id": "douyin-interrupt"},
-        frozen_inputs=[frozen],
-    )
+    state = _repair_state(tmp_path)
     state.begin("command_executed")
 
     error = repair.terminalize_repair_interrupt(
@@ -886,36 +804,77 @@ def test_terminalize_repair_interrupt_fails_open_step(tmp_path: Path) -> None:
         "runtime_failed:operator_interrupt:SIGINT"
     )
     assert payload["steps"]["task_finalized"]["status"] == "failed"
-    assert payload["steps"]["task_finalized"]["error"] == (
-        "runtime_failed:operator_interrupt:SIGINT"
+
+
+def test_terminalize_repair_interrupt_fails_later_in_progress_step(tmp_path: Path) -> None:
+    state = _repair_state(tmp_path)
+    state.begin("command_executed")
+    state.complete("command_executed", evidence={"ok": True})
+    state.begin("artifacts_verified")
+
+    error = repair.terminalize_repair_interrupt(
+        state,
+        error="runtime_failed:operator_interrupt:SIGINT",
+        evidence={"exception": "OSError: disk"},
     )
+
+    assert error is None
+    payload = state.load()
+    assert payload["status"] == "failed"
+    assert payload["steps"]["command_executed"]["status"] == "completed"
+    assert payload["steps"]["artifacts_verified"]["status"] == "failed"
+    assert payload["steps"]["artifacts_verified"]["evidence"]["exception"] == "OSError: disk"
+    assert payload["steps"]["task_finalized"]["status"] == "failed"
+
+
+def test_terminalize_repair_interrupt_leaves_completed_state(tmp_path: Path) -> None:
+    state = _repair_state(tmp_path)
+    payload = state.load()
+    payload["status"] = "completed"
+    state.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    error = repair.terminalize_repair_interrupt(
+        state,
+        error="runtime_failed:operator_interrupt:SIGINT",
+        evidence={},
+    )
+
+    assert error is None
+    assert state.load()["status"] == "completed"
+    assert state.load()["steps"]["command_executed"]["status"] == "pending"
 
 
 def test_run_repair_child_waits_without_batch_wall_clock_limit(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    events: list[tuple[str, int, int | None]] = []
-
     class FakeProcess:
         pid = 4242
         returncode = None
 
-        def communicate(self, *, timeout: int | None = None) -> tuple[str, str]:
-            assert timeout is None
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            assert timeout == repair.REPAIR_CHILD_POLL_SECONDS
             self.returncode = 0
-            return "out", "err"
+            return b"out", b"err"
 
     def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
         del command
-        events.append(("popen", int(kwargs["start_new_session"]), int(kwargs["text"])))
+        assert kwargs["start_new_session"] is True
+        assert kwargs.get("text") is not True
         return FakeProcess()
 
     monkeypatch.setattr(repair.subprocess, "Popen", fake_popen)
 
-    result = repair.run_repair_child(["child"], cwd=ROOT)
+    result = repair.run_repair_child(
+        ["child"],
+        cwd=ROOT,
+        log_dir=tmp_path / "logs",
+        state_path=tmp_path / "execution_state.json",
+        interrupt_signal=lambda: None,
+        poll_seconds=repair.REPAIR_CHILD_POLL_SECONDS,
+    )
 
     assert result == {"returncode": 0, "stdout": "out", "stderr": "err"}
-    assert events == [("popen", 1, 1)]
 
 
 @pytest.mark.parametrize(
@@ -961,3 +920,307 @@ def test_fatal_child_failure_preserves_structured_stop_reason(stop_reason: str) 
         )
         == stop_reason
     )
+
+
+def _redirect_repair_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(repair, "POST_DETAIL_REPAIR_OUTPUT", tmp_path / "out")
+    monkeypatch.setattr(repair, "POST_DETAIL_REPAIR_RUNTIME_ROOT", tmp_path / "rt")
+    monkeypatch.setattr(repair, "POST_DETAIL_REPAIR_BACKUP_ROOT", tmp_path / "bk")
+
+
+def _seed_pending_douyin(db_path: Path) -> None:
+    from trippostcollect.db.bootstrap import bootstrap_database
+
+    bootstrap_database(db_path, sync_jobs=False)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO web_posts(
+                platform_key, platform_post_id, source_type, source_url,
+                canonical_url, keyword, captured_at, raw_sample_json
+            ) VALUES (
+                'douyin', '123', 'search', 'https://www.douyin.com/video/123',
+                'https://www.douyin.com/video/123', '青岛崂山',
+                '2026-01-01T00:00:00+08:00', '{}'
+            )
+            """
+        )
+        conn.commit()
+
+
+def _repair_argv(db_path: Path) -> list[str]:
+    return [
+        "repair_post_details.py",
+        "--platform",
+        "douyin",
+        "--db",
+        str(db_path),
+        "--keyword",
+        "青岛旅游",
+        "--batch-size",
+        "1",
+        "--headless",
+    ]
+
+
+def _summary_and_state(tmp_path: Path) -> tuple[dict, dict]:
+    summaries = list((tmp_path / "out").glob("*/run_summary.json"))
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].read_text(encoding="utf-8"))
+    state = json.loads(Path(summary["execution_state"]).read_text(encoding="utf-8"))
+    return summary, state
+
+
+def test_main_signal_during_successful_verification_keeps_completed_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+    child_summary = tmp_path / "child-summary.json"
+    child_summary.write_text(
+        json.dumps(
+            {
+                "import_completion_met": True,
+                "formal_validation": {"valid_total_count": 1, "skipped_candidate_failures": []},
+                "import_result": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_child(*_args: object, **_kwargs: object) -> dict:
+        return {
+            "returncode": 0,
+            "stdout": json.dumps({"summary": str(child_summary)}),
+            "stderr": "",
+        }
+
+    def fake_artifacts(*_args: object, **_kwargs: object) -> dict:
+        os.kill(os.getpid(), signal.SIGINT)
+        return {"ok": True}
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    monkeypatch.setattr(repair, "verify_image_artifacts", fake_artifacts)
+    monkeypatch.setattr(repair, "verify_image_persistence", lambda *_a, **_k: {"ok": True})
+    monkeypatch.setattr(
+        repair,
+        "repaired_rows",
+        lambda _conn, _platform, ids: {
+            ids[0]: {
+                "recovered": True,
+                "detail_status": "detail_observed",
+                "detail_source": "aweme_detail",
+                "content_images": 1,
+                "persisted_images": 1,
+            }
+        },
+    )
+    monkeypatch.setattr(repair, "pending_count", lambda *_a, **_k: 0)
+    monkeypatch.setattr(repair, "waived_pending_count", lambda *_a, **_k: 0)
+
+    exit_code = repair.main()
+    summary, state = _summary_and_state(tmp_path)
+
+    assert exit_code == 128 + signal.SIGINT
+    assert state["status"] == "completed"
+    assert summary["status"] == "completed"
+    assert summary["error"] == ""
+    assert summary["interrupt"]["signal"] == "SIGINT"
+    assert summary["interrupt"]["exit_code"] == exit_code
+
+
+def test_main_signal_during_verification_error_finalizes_open_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+    child_summary = tmp_path / "child-summary.json"
+    child_summary.write_text(
+        json.dumps(
+            {
+                "import_completion_met": True,
+                "formal_validation": {"valid_total_count": 1, "skipped_candidate_failures": []},
+                "import_result": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_child(*_args: object, **_kwargs: object) -> dict:
+        return {
+            "returncode": 0,
+            "stdout": json.dumps({"summary": str(child_summary)}),
+            "stderr": "",
+        }
+
+    def fake_artifacts(*_args: object, **_kwargs: object) -> dict:
+        os.kill(os.getpid(), signal.SIGINT)
+        raise OSError("disk")
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    monkeypatch.setattr(repair, "verify_image_artifacts", fake_artifacts)
+
+    exit_code = repair.main()
+    summary, state = _summary_and_state(tmp_path)
+
+    assert exit_code == 128 + signal.SIGINT
+    assert state["status"] == "failed"
+    assert state["steps"]["command_executed"]["status"] == "completed"
+    assert state["steps"]["artifacts_verified"]["status"] == "failed"
+    assert state["steps"]["artifacts_verified"]["evidence"]["interrupt"]["exception"] == (
+        "OSError: disk"
+    )
+    assert state["steps"]["task_finalized"]["status"] == "failed"
+    assert summary["status"] == "failed"
+    assert summary["error"] == "runtime_failed:operator_interrupt:SIGINT"
+    assert summary["interrupt"]["exception"] == "OSError: disk"
+    assert (tmp_path / "out").joinpath(summary["run_id"], "run_summary.json").is_file()
+
+
+def test_main_stuck_worker_is_killed_after_middle_layer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+    monkeypatch.setattr(repair, "REPAIR_CHILD_INTERRUPT_GRACE_SECONDS", 0.3)
+    worker_pid_path = tmp_path / "worker.pid"
+    ready = tmp_path / "middle-ready"
+    middle = tmp_path / "middle.py"
+    middle.write_text(
+        "\n".join(
+            [
+                "import os, signal, subprocess, sys, time",
+                "from pathlib import Path",
+                "from trippostcollect.runtime.process import record_child_process_group",
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                "worker = subprocess.Popen(",
+                "    [sys.executable, '-c',",
+                "     'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); '",
+                "     'print(\"worker-ready\", flush=True); time.sleep(120)'],",
+                "    start_new_session=True,",
+                "    stdout=subprocess.PIPE,",
+                "    stderr=subprocess.DEVNULL,",
+                "    text=True,",
+                ")",
+                "assert worker.stdout is not None",
+                "assert worker.stdout.readline() == 'worker-ready\\n'",
+                "record_child_process_group(worker)",
+                f"Path({str(worker_pid_path)!r}).write_text(str(worker.pid), encoding='utf-8')",
+                f"Path({str(ready)!r}).write_text('1', encoding='utf-8')",
+                "time.sleep(120)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        repair,
+        "build_child_command",
+        lambda **_kwargs: [sys.executable, str(middle)],
+    )
+
+    def interrupt_after_ready() -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not ready.exists():
+            time.sleep(0.02)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    thread = threading.Thread(target=interrupt_after_ready, daemon=True)
+    thread.start()
+    try:
+        exit_code = repair.main()
+    finally:
+        thread.join(timeout=2)
+        if worker_pid_path.is_file():
+            worker_pid = int(worker_pid_path.read_text(encoding="utf-8"))
+            if _process_alive(worker_pid):
+                try:
+                    os.kill(worker_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    summary, state = _summary_and_state(tmp_path)
+    worker_pid = int(worker_pid_path.read_text(encoding="utf-8"))
+    assert exit_code == 128 + signal.SIGINT
+    assert summary["forced_termination"] is True
+    assert summary["batch_results"][0]["killed_child_process_groups"]
+    assert state["status"] == "failed"
+    assert state["steps"]["task_finalized"]["status"] == "failed"
+    assert not _process_alive(worker_pid)
+
+
+def test_main_sighup_still_writes_summary_and_exits_129(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del monkeypatch
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    ready = tmp_path / "child-ready"
+    child_code = (
+        "from pathlib import Path; import time; "
+        f"Path({str(ready)!r}).write_text('1'); time.sleep(120)"
+    )
+    driver = tmp_path / "drive.py"
+    driver.write_text(
+        "\n".join(
+            [
+                "import sys",
+                "from pathlib import Path",
+                f"sys.path.insert(0, {str(SCRIPTS)!r})",
+                "import repair_post_details as repair",
+                f"repair.POST_DETAIL_REPAIR_OUTPUT = Path({str(tmp_path / 'out')!r})",
+                f"repair.POST_DETAIL_REPAIR_RUNTIME_ROOT = Path({str(tmp_path / 'rt')!r})",
+                f"repair.POST_DETAIL_REPAIR_BACKUP_ROOT = Path({str(tmp_path / 'bk')!r})",
+                "repair.REPAIR_CHILD_INTERRUPT_GRACE_SECONDS = 0.3",
+                "sys.argv = [",
+                "    'repair_post_details.py', '--platform', 'douyin', '--db',",
+                f"    {str(db_path)!r}, '--keyword', '青岛旅游',",
+                "    '--batch-size', '1', '--headless',",
+                "]",
+                "def build_child_command(**_kwargs):",
+                f"    return [sys.executable, '-c', {child_code!r}]",
+                "repair.build_child_command = build_child_command",
+                "raise SystemExit(repair.main())",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(
+        [sys.executable, str(driver)],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not ready.exists():
+            if process.poll() is not None:
+                break
+            time.sleep(0.02)
+        assert ready.exists()
+        os.kill(process.pid, signal.SIGHUP)
+        process.stdout.close()
+        process.stderr.close()
+        exit_code = process.wait(timeout=15)
+    finally:
+        if process.poll() is None:
+            os.kill(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+
+    summary, _state = _summary_and_state(tmp_path)
+    assert exit_code == 128 + signal.SIGHUP
+    assert summary["interrupt"]["signal"] == "SIGHUP"
+    assert summary["status"] == "failed"
