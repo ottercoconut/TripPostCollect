@@ -224,6 +224,12 @@ python scripts/repair_post_details.py \
 或行为证据失败）以及 SQLite、媒体持久化一致性失败会停止后续批次。
 修复批次不设整轮墙钟上限，也没有批次时限参数；平台 child 的中间层沿用统一的 1200 秒无持久进展
 看门狗，持续推进时批次运行时长不受限制，卡住时由该看门狗以 `no_progress_timeout` 收束。
+操作人按 Ctrl+C（SIGINT），或总控收到 SIGTERM / SIGHUP 时，只锁存首个信号，不再启动后续批次。
+child 在独立会话里，终端信号到不了它；总控向该 child 进程组转发一次 SIGTERM，宽限后组仍在才
+SIGKILL。stdout / stderr 先做头像审计再写入
+`outputs/post_detail_repair/<run_id>/logs/batch-NNNN/`。execution state 终结为
+`runtime_failed:operator_interrupt:<SIGNAL>`，`run_summary.json` 写入 `interrupt`，进程以
+`128+首个信号` 退出。未完成的目标保持未修复，可以稍后重跑；这次中断不表示修复内容失败。
 无人值守模式下，child 缺摘要、普通详情运行失败或 `repair_no_valid_detail` 只记录在
 批次结果中并跳过该批，随后继续清单中的后续批次；只有上述运行级阻断以及 SQLite、媒体持久化
 一致性失败才会停止该平台总控。

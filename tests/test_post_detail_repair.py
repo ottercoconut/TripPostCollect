@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import sqlite3
+import subprocess
 import sys
 from importlib import import_module
 from pathlib import Path
@@ -655,6 +658,237 @@ def test_repair_runtime_stop_reason_preserves_structured_blocker() -> None:
 
     assert mediacrawler.repair_runtime_stop_reason(records, ["weibo"]) == "rate_limited"
     assert mediacrawler.repair_runtime_stop_reason(records, ["douyin"]) == ""
+
+
+def test_run_repair_child_does_not_launch_after_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[str] = []
+
+    def fake_popen(*_args: object, **_kwargs: object) -> object:
+        launched.append("popen")
+        raise AssertionError("child must not start after the first signal")
+
+    monkeypatch.setattr(repair.subprocess, "Popen", fake_popen)
+
+    result = repair.run_repair_child(
+        ["child"],
+        cwd=ROOT,
+        log_dir=tmp_path / "logs",
+        interrupt_signal=lambda: signal.SIGINT,
+    )
+
+    assert launched == []
+    assert result["launched"] is False
+    assert result["interrupt_signum"] == signal.SIGINT
+    assert result["returncode"] is None
+    assert (tmp_path / "logs" / "command.txt").is_file()
+    assert "avatar" not in (tmp_path / "logs" / "stdout.log").read_text(encoding="utf-8")
+
+
+def test_run_repair_child_forwards_one_sigterm_and_redacts_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals_sent: list[int] = []
+    seen = {"n": 0}
+
+    class FakeProcess:
+        pid = 5151
+        returncode = None
+        stdout = None
+        stderr = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            del timeout
+            if signal.SIGTERM not in signals_sent:
+                raise subprocess.TimeoutExpired(["child"], 0.01, output=None, stderr=None)
+            self.returncode = -signal.SIGTERM
+            return 'avatar_url=https://img.example/a.jpg\n', "ok"
+
+    def fake_popen(*_args: object, **kwargs: object) -> FakeProcess:
+        assert kwargs["start_new_session"] is True
+        assert kwargs["text"] is True
+        return FakeProcess()
+
+    def fake_killpg(pid: int, signum: int) -> None:
+        assert pid == 5151
+        signals_sent.append(signum)
+
+    def group_exists(pid: int) -> bool:
+        assert pid == 5151
+        return signal.SIGTERM not in signals_sent
+
+    monkeypatch.setattr(repair.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(repair.os, "killpg", fake_killpg)
+    monkeypatch.setattr(repair, "process_group_exists", group_exists)
+
+    def interrupt() -> int | None:
+        seen["n"] += 1
+        return signal.SIGINT if seen["n"] > 1 else None
+
+    result = repair.run_repair_child(
+        ["child"],
+        cwd=ROOT,
+        log_dir=tmp_path / "logs",
+        interrupt_signal=interrupt,
+        grace_seconds=0,
+        poll_seconds=0.01,
+    )
+
+    assert signals_sent == [signal.SIGTERM]
+    assert result["interrupt_signum"] == signal.SIGINT
+    assert result["forced_termination"] is False
+    assert result["launched"] is True
+    assert "img.example" not in result["stdout"]
+    assert "author-avatar" in result["stdout"]
+    logged = (tmp_path / "logs" / "stdout.log").read_text(encoding="utf-8")
+    assert logged == result["stdout"]
+    assert "img.example" not in logged
+
+
+def test_run_repair_child_sigkill_when_group_survives_sigterm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals_sent: list[int] = []
+
+    class FakeProcess:
+        pid = 6161
+        returncode = None
+        stdout = None
+        stderr = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            del timeout
+            if signal.SIGKILL not in signals_sent:
+                raise subprocess.TimeoutExpired(["child"], 0.01, output="partial", stderr="")
+            self.returncode = -signal.SIGKILL
+            return "partial", ""
+
+    monkeypatch.setattr(repair.subprocess, "Popen", lambda *_a, **_k: FakeProcess())
+    monkeypatch.setattr(
+        repair.os,
+        "killpg",
+        lambda _pid, signum: signals_sent.append(signum),
+    )
+    monkeypatch.setattr(
+        repair,
+        "process_group_exists",
+        lambda _pid: signal.SIGKILL not in signals_sent,
+    )
+    seen = {"n": 0}
+
+    def interrupt() -> int | None:
+        seen["n"] += 1
+        return signal.SIGTERM if seen["n"] > 1 else None
+
+    result = repair.run_repair_child(
+        ["child"],
+        cwd=ROOT,
+        interrupt_signal=interrupt,
+        grace_seconds=0,
+        poll_seconds=0.01,
+    )
+
+    assert signals_sent == [signal.SIGTERM, signal.SIGKILL]
+    assert result["forced_termination"] is True
+    assert result["interrupt_signum"] == signal.SIGTERM
+    assert result["stdout"] == "partial"
+
+
+def test_terminate_repair_child_reaps_real_process_group() -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        _stdout, _stderr, forced = repair._terminate_repair_child(process, grace_seconds=2)
+    finally:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate(timeout=2)
+
+    assert process.poll() is not None
+    assert forced is False
+    assert not repair.process_group_exists(process.pid)
+
+
+def test_terminate_repair_child_sigkills_group_that_ignores_sigterm() -> None:
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, sys, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); "
+            "time.sleep(30)",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    assert process.stdout is not None
+    assert process.stdout.readline() == "ready\n"
+    try:
+        _stdout, _stderr, forced = repair._terminate_repair_child(process, grace_seconds=0.2)
+    finally:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate(timeout=2)
+
+    assert forced is True
+    assert process.poll() is not None
+    assert not repair.process_group_exists(process.pid)
+
+
+def test_terminalize_repair_interrupt_fails_open_step(tmp_path: Path) -> None:
+    frozen = tmp_path / "frozen.txt"
+    frozen.write_text("frozen\n", encoding="utf-8")
+    state = repair.FrozenExecutionState.create(
+        tmp_path / "execution_state.json",
+        run_id="douyin-interrupt",
+        job_key="post_detail_repair:douyin",
+        site_key="douyin",
+        job_kind="post_detail_repair",
+        plan={"run_id": "douyin-interrupt"},
+        frozen_inputs=[frozen],
+    )
+    state.begin("command_executed")
+
+    error = repair.terminalize_repair_interrupt(
+        state,
+        error="runtime_failed:operator_interrupt:SIGINT",
+        evidence={"interrupt": {"signum": signal.SIGINT}},
+    )
+
+    assert error is None
+    payload = state.load()
+    assert payload["status"] == "failed"
+    assert payload["steps"]["command_executed"]["status"] == "failed"
+    assert payload["steps"]["command_executed"]["error"] == (
+        "runtime_failed:operator_interrupt:SIGINT"
+    )
+    assert payload["steps"]["task_finalized"]["status"] == "failed"
+    assert payload["steps"]["task_finalized"]["error"] == (
+        "runtime_failed:operator_interrupt:SIGINT"
+    )
 
 
 def test_run_repair_child_waits_without_batch_wall_clock_limit(
