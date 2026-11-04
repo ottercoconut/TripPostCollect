@@ -1422,3 +1422,217 @@ def test_omitted_grace_uses_constant_at_call_time(
     )
 
     assert seen["grace"] == 40.0
+
+
+def _ok_child_summary(path: Path) -> str:
+    path.write_text(
+        json.dumps(
+            {
+                "import_completion_met": True,
+                "formal_validation": {"valid_total_count": 1, "skipped_candidate_failures": []},
+                "import_result": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return json.dumps({"summary": str(path)})
+
+
+def _recovered(ids: list[str]) -> dict[str, dict[str, object]]:
+    return {
+        ids[0]: {
+            "recovered": True,
+            "detail_status": "detail_observed",
+            "detail_source": "aweme_detail",
+            "content_images": 1,
+            "persisted_images": 1,
+        }
+    }
+
+
+def test_main_keyerror_with_latched_signal_finalizes_and_exits_130(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+    stdout = _ok_child_summary(tmp_path / "child-summary.json")
+
+    def fake_child(*_args: object, **_kwargs: object) -> dict:
+        return {"returncode": 0, "stdout": stdout, "stderr": ""}
+
+    def fake_artifacts(*_args: object, **_kwargs: object) -> dict:
+        os.kill(os.getpid(), signal.SIGINT)
+        raise KeyError("verification")
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    monkeypatch.setattr(repair, "verify_image_artifacts", fake_artifacts)
+    exit_code = repair.main()
+    summary, state = _summary_and_state(tmp_path)
+
+    assert exit_code == 130
+    assert state["status"] == "failed"
+    assert state["steps"]["task_finalized"]["status"] == "failed"
+    assert summary["interrupt"]["signal"] == "SIGINT"
+    assert "KeyError" in summary["interrupt"]["exception"]
+
+
+def test_main_completed_tail_failure_keeps_error_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+    stdout = _ok_child_summary(tmp_path / "child-summary.json")
+    calls = {"n": 0}
+
+    def fake_child(*_args: object, **_kwargs: object) -> dict:
+        return {"returncode": 0, "stdout": stdout, "stderr": ""}
+
+    def fake_artifacts(*_args: object, **_kwargs: object) -> dict:
+        os.kill(os.getpid(), signal.SIGINT)
+        return {"ok": True}
+
+    def rows(_conn: object, _platform: str, ids: list[str]) -> dict:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise sqlite3.OperationalError("database is locked")
+        return _recovered(ids)
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    monkeypatch.setattr(repair, "verify_image_artifacts", fake_artifacts)
+    monkeypatch.setattr(repair, "verify_image_persistence", lambda *_a, **_k: {"ok": True})
+    monkeypatch.setattr(repair, "repaired_rows", rows)
+    monkeypatch.setattr(repair, "pending_count", lambda *_a, **_k: 0)
+    monkeypatch.setattr(repair, "waived_pending_count", lambda *_a, **_k: 0)
+    exit_code = repair.main()
+    summary, state = _summary_and_state(tmp_path)
+
+    assert exit_code == 130
+    assert summary["status"] == "completed"
+    assert summary["error"] == ""
+    assert summary["interrupt"]["signal"] == "SIGINT"
+    assert summary["tail_error"] == "OperationalError: database is locked"
+    assert state["status"] == "completed"
+
+
+def test_main_signal_during_final_stats_sets_exit_code_without_rewriting_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+    stdout = _ok_child_summary(tmp_path / "child-summary.json")
+    calls = {"n": 0}
+
+    def fake_child(*_args: object, **_kwargs: object) -> dict:
+        return {"returncode": 0, "stdout": stdout, "stderr": ""}
+
+    def rows(_conn: object, _platform: str, ids: list[str]) -> dict:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            os.kill(os.getpid(), signal.SIGINT)
+        return _recovered(ids)
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    monkeypatch.setattr(repair, "verify_image_artifacts", lambda *_a, **_k: {"ok": True})
+    monkeypatch.setattr(repair, "verify_image_persistence", lambda *_a, **_k: {"ok": True})
+    monkeypatch.setattr(repair, "repaired_rows", rows)
+    monkeypatch.setattr(repair, "pending_count", lambda *_a, **_k: 0)
+    monkeypatch.setattr(repair, "waived_pending_count", lambda *_a, **_k: 0)
+    exit_code = repair.main()
+    summary, state = _summary_and_state(tmp_path)
+
+    assert exit_code == 130
+    assert summary["status"] == "completed"
+    assert summary["error"] == ""
+    assert summary["interrupt"]["signal"] == "SIGINT"
+    assert state["status"] == "completed"
+    assert state["steps"]["task_finalized"]["status"] == "completed"
+
+
+def test_main_log_write_failure_keeps_redacted_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+    ready = tmp_path / "child-ready"
+    avatar = "https://img.example/secret-face.jpg"
+    child_code = (
+        "from pathlib import Path; import time; "
+        f"print('avatar_url={avatar}', flush=True); "
+        f"Path({str(ready)!r}).write_text('1'); time.sleep(120)"
+    )
+    monkeypatch.setattr(
+        repair,
+        "build_child_command",
+        lambda **_kwargs: [sys.executable, "-c", child_code],
+    )
+
+    def fail_logs(*_args: object, **_kwargs: object) -> dict:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(repair, "write_command_logs", fail_logs)
+
+    def interrupt_after_ready() -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not ready.exists():
+            time.sleep(0.02)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    thread = threading.Thread(target=interrupt_after_ready, daemon=True)
+    thread.start()
+    try:
+        exit_code = repair.main()
+    finally:
+        thread.join(timeout=2)
+
+    summary, _state = _summary_and_state(tmp_path)
+    rendered = json.dumps(summary, ensure_ascii=False)
+    batch = summary["batch_results"][0]
+    assert exit_code == 130
+    assert summary["forced_termination"] is False
+    assert "killed_child_process_groups" in batch
+    assert batch["log_error"].startswith("OSError:")
+    assert avatar not in rendered
+    assert "author-avatar" in batch["stdout_tail"]
+
+
+def test_main_tail_error_without_signal_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+    stdout = _ok_child_summary(tmp_path / "child-summary.json")
+    calls = {"n": 0}
+
+    def fake_child(*_args: object, **_kwargs: object) -> dict:
+        return {"returncode": 0, "stdout": stdout, "stderr": ""}
+
+    def rows(_conn: object, _platform: str, ids: list[str]) -> dict:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("tail-must-propagate")
+        return _recovered(ids)
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    monkeypatch.setattr(repair, "verify_image_artifacts", lambda *_a, **_k: {"ok": True})
+    monkeypatch.setattr(repair, "verify_image_persistence", lambda *_a, **_k: {"ok": True})
+    monkeypatch.setattr(repair, "repaired_rows", rows)
+    monkeypatch.setattr(repair, "pending_count", lambda *_a, **_k: 0)
+    monkeypatch.setattr(repair, "waived_pending_count", lambda *_a, **_k: 0)
+
+    with pytest.raises(RuntimeError, match="tail-must-propagate"):
+        repair.main()

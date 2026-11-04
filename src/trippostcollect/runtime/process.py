@@ -139,6 +139,19 @@ def decode_text(value: str | bytes | None) -> str:
     return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
 
 
+def discard_hung_up_stream(stream: Any) -> None:
+    """输出端已失效时改接 /dev/null，避免解释器退出时 flush 失败把退出码改成 120。"""
+
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, stream.fileno())
+        finally:
+            os.close(devnull)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 def tail(value: str, limit: int = 4000) -> str:
     return value[-limit:] if len(value) > limit else value
 

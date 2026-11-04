@@ -39,6 +39,7 @@ from trippostcollect.runtime.process import (
     PROCESS_CLEANUP_GRACE_SECONDS,
     PROCESS_FINAL_REAP_SECONDS,
     decode_text,
+    discard_hung_up_stream,
     drain_exited_process,
     kill_recorded_child_process_groups,
     operator_interrupt_error,
@@ -1544,19 +1545,6 @@ def scheduling_summary(
         "execution_started": bool(execution_enabled and jobs),
         "lane_keys": lane_keys,
     }
-
-
-def discard_hung_up_stream(stream: Any) -> None:
-    """输出端已失效时改接 /dev/null：否则缓冲区在解释器退出时 flush 失败，退出码会被改成 120。"""
-
-    try:
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        try:
-            os.dup2(devnull, stream.fileno())
-        finally:
-            os.close(devnull)
-    except (OSError, ValueError, AttributeError):
-        pass
 
 
 def interrupt_exit_code(interrupts: DeferredTerminationSignals, exit_code: int) -> int:
