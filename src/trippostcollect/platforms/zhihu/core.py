@@ -254,7 +254,12 @@ class ZhihuCrawler:
             elif self.settings.CRAWLER_TYPE == "detail":
                 # Get the information and comments of the specified post
                 self.source_keyword = search_cookie_keyword
-                await self.get_specified_notes()
+                from trippostcollect.records.author_observe import identity_targets_file
+
+                if identity_targets_file() is not None:
+                    await self.collect_author_identities()
+                else:
+                    await self.get_specified_notes()
             else:
                 pass
 
@@ -620,6 +625,65 @@ class ZhihuCrawler:
                 logger.info(f"[ZhihuCrawler.get_note_detail] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} seconds after fetching video details {video_id}")
 
                 return result
+
+    async def collect_author_identities(self) -> None:
+        """按一帖回答或文章详情取 author.id 与 name。不下载正文图，不写内容。"""
+
+        from trippostcollect.records.author_observe import (
+            AuthorIdentityBlocked,
+            collect_author_observations,
+            identity_fields,
+            identity_targets_file,
+            load_author_targets,
+            missed_identity,
+            observations_path,
+        )
+        from trippostcollect.platforms.zhihu.parser import judge_zhihu_url
+
+        targets_path = identity_targets_file()
+        if targets_path is None:
+            return
+        targets = load_author_targets(targets_path)
+
+        async def fetch_post(post: dict) -> dict[str, str]:
+            import httpx
+
+            full_note_url = str(post.get("detail_target") or "").split("?")[0]
+            note_type = judge_zhihu_url(full_note_url)
+            try:
+                if note_type == constant.ANSWER_NAME:
+                    parts = full_note_url.rstrip("/").split("/")
+                    result = await self.zhihu_client.get_answer_info(parts[-3], parts[-1])
+                elif note_type == constant.ARTICLE_NAME:
+                    result = await self.zhihu_client.get_article_info(
+                        full_note_url.rstrip("/").split("/")[-1]
+                    )
+                else:
+                    return missed_identity("unsupported_url")
+            except PlatformRuntimeError as exc:
+                raise AuthorIdentityBlocked(str(exc.code or "runtime_failed")) from exc
+            except httpx.TransportError as exc:
+                raise AuthorIdentityBlocked("network_unreachable") from exc
+            except DataFetchError:
+                return missed_identity("detail_missing")
+            except Exception as exc:
+                return missed_identity(type(exc).__name__)
+            if result is None or not result.creator_hash or not result.user_nickname:
+                return missed_identity("missing_author" if result is not None else "detail_missing")
+            return identity_fields(
+                creator_hash=result.creator_hash,
+                user_nickname=result.user_nickname,
+                creator_url_token=result.creator_url_token,
+                author_profile_url=result.author_profile_url,
+            )
+
+        await collect_author_observations(
+            platform="zhihu",
+            targets=targets,
+            destination=observations_path(targets_path.parent),
+            fetch_post=fetch_post,
+            sleep_seconds=float(self.settings.CRAWLER_MAX_SLEEP_SEC),
+        )
 
     async def get_specified_notes(self):
         """
