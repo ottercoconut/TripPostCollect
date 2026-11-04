@@ -1424,6 +1424,176 @@ def test_omitted_grace_uses_constant_at_call_time(
     assert seen["grace"] == 40.0
 
 
+def _arm_completed_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    child_stdout: str,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+
+    def fake_child(*_args: object, **_kwargs: object) -> dict:
+        return {"returncode": 0, "stdout": child_stdout, "stderr": ""}
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    monkeypatch.setattr(repair, "verify_image_persistence", lambda *_a, **_k: {"ok": True})
+    monkeypatch.setattr(repair, "pending_count", lambda *_a, **_k: 0)
+    monkeypatch.setattr(repair, "waived_pending_count", lambda *_a, **_k: 0)
+
+
+def test_main_signal_after_summary_write_only_changes_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = _ok_child_summary(tmp_path / "child-summary.json")
+    _arm_completed_repair(tmp_path, monkeypatch, child_stdout=stdout)
+    monkeypatch.setattr(repair, "verify_image_artifacts", lambda *_a, **_k: {"ok": True})
+    monkeypatch.setattr(
+        repair,
+        "repaired_rows",
+        lambda _conn, _platform, ids: _recovered(ids),
+    )
+    original = repair.write_json
+    snapshot: dict[str, bytes] = {}
+
+    def write_then_signal(path: Path, value: object) -> Path:
+        written = original(path, value)
+        if path.name == "run_summary.json":
+            snapshot["state"] = Path(value["execution_state"]).read_bytes()  # type: ignore[index]
+            os.kill(os.getpid(), signal.SIGINT)
+        return written
+
+    monkeypatch.setattr(repair, "write_json", write_then_signal)
+    exit_code = repair.main()
+    summary, state_path_payload = _summary_and_state(tmp_path)
+    state_path = Path(summary["execution_state"])
+
+    assert exit_code == 130
+    assert "interrupt" not in summary
+    assert state_path.read_bytes() == snapshot["state"]
+    assert state_path_payload["status"] == "completed"
+
+
+def test_main_signal_and_query_failure_in_final_stats_uses_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = _ok_child_summary(tmp_path / "child-summary.json")
+    _arm_completed_repair(tmp_path, monkeypatch, child_stdout=stdout)
+    monkeypatch.setattr(repair, "verify_image_artifacts", lambda *_a, **_k: {"ok": True})
+    calls = {"n": 0}
+
+    def rows(_conn: object, _platform: str, ids: list[str]) -> dict:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            os.kill(os.getpid(), signal.SIGINT)
+            raise sqlite3.OperationalError("database is locked")
+        return _recovered(ids)
+
+    monkeypatch.setattr(repair, "repaired_rows", rows)
+    exit_code = repair.main()
+    summary, state = _summary_and_state(tmp_path)
+
+    assert exit_code == 130
+    assert summary["interrupt"]["signal"] == "SIGINT"
+    assert summary["tail_error"] == "OperationalError: database is locked"
+    assert "recovered_count" not in summary
+    assert state["status"] == "completed"
+
+
+def test_main_keyerror_without_signal_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = _ok_child_summary(tmp_path / "child-summary.json")
+    _arm_completed_repair(tmp_path, monkeypatch, child_stdout=stdout)
+
+    def fake_artifacts(*_args: object, **_kwargs: object) -> dict:
+        raise KeyError("verification")
+
+    monkeypatch.setattr(repair, "verify_image_artifacts", fake_artifacts)
+
+    with pytest.raises(KeyError, match="verification"):
+        repair.main()
+
+
+def test_main_oserror_without_signal_records_exception_and_exits_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = _ok_child_summary(tmp_path / "child-summary.json")
+    _arm_completed_repair(tmp_path, monkeypatch, child_stdout=stdout)
+
+    def fake_artifacts(*_args: object, **_kwargs: object) -> dict:
+        raise OSError("disk")
+
+    monkeypatch.setattr(repair, "verify_image_artifacts", fake_artifacts)
+    exit_code = repair.main()
+    summary, state = _summary_and_state(tmp_path)
+
+    assert exit_code == 2
+    assert summary["error"].startswith("post_detail_repair_exception:OSError")
+    assert state["steps"]["artifacts_verified"]["status"] == "failed"
+    assert state["steps"]["artifacts_verified"]["error"].startswith(
+        "post_detail_repair_exception:OSError"
+    )
+
+
+def test_main_stderr_only_avatar_is_redacted_when_log_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+    ready = tmp_path / "child-ready"
+    avatar = "https://img.example/stderr-only-face.jpg"
+    child_code = (
+        "import sys, time; from pathlib import Path; "
+        f"print('avatar_url={avatar}', file=sys.stderr, flush=True); "
+        f"Path({str(ready)!r}).write_text('1'); time.sleep(120)"
+    )
+    monkeypatch.setattr(
+        repair,
+        "build_child_command",
+        lambda **_kwargs: [sys.executable, "-c", child_code],
+    )
+
+    def fail_logs(*_args: object, **_kwargs: object) -> dict:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(repair, "write_command_logs", fail_logs)
+
+    def interrupt_after_ready() -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not ready.exists():
+            time.sleep(0.02)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    thread = threading.Thread(target=interrupt_after_ready, daemon=True)
+    thread.start()
+    try:
+        exit_code = repair.main()
+    finally:
+        thread.join(timeout=2)
+
+    summary, _state = _summary_and_state(tmp_path)
+    rendered = json.dumps(summary, ensure_ascii=False)
+    batch = summary["batch_results"][0]
+    assert exit_code == 130
+    assert avatar not in rendered
+    assert batch["stdout_tail"] == batch["stderr_tail"]
+    assert batch["stdout_tail"].startswith(
+        "[TripPostCollect redacted child output containing author-avatar fields]"
+    )
+    assert "stdout_lines=0" in batch["stdout_tail"]
+    assert "stderr_lines=1" in batch["stderr_tail"]
+
+
 def _ok_child_summary(path: Path) -> str:
     path.write_text(
         json.dumps(
