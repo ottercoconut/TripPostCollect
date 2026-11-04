@@ -112,30 +112,44 @@ def run(
     asyncio.run(_runner())
 
 
+async def _close_http_clients(crawler) -> None:
+    for attribute in ("dy_client", "wb_client", "zhihu_client"):
+        close_client = getattr(getattr(crawler, attribute, None), "aclose", None)
+        if callable(close_client):
+            try:
+                await close_client()
+            except Exception as e:
+                print(f"[Main] Error closing {attribute} HTTP client: {e}")
+
+
 async def async_cleanup(crawler, platform: str) -> None:
     if crawler:
-        if platform == "xhs" and callable(getattr(crawler, "close", None)):
-            try:
-                await crawler.close(force=True)
-            except Exception as e:
-                error_msg = str(e).lower()
-                if "closed" not in error_msg and "disconnected" not in error_msg:
-                    print(f"[Main] Error closing XHS crawler safely: {e}")
-        elif getattr(crawler, "cdp_manager", None):
-            try:
-                await crawler.cdp_manager.cleanup(force=True)
-            except Exception as e:
-                error_msg = str(e).lower()
-                if "closed" not in error_msg and "disconnected" not in error_msg:
-                    print(f"[Main] Error cleaning up CDP browser: {e}")
+        # 浏览器先清理：HTTP client 关闭挂起或被取消时，不能让 Chrome 进程留到清理超时之后。
+        try:
+            if platform == "xhs" and callable(getattr(crawler, "close", None)):
+                try:
+                    await crawler.close(force=True)
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "closed" not in error_msg and "disconnected" not in error_msg:
+                        print(f"[Main] Error closing XHS crawler safely: {e}")
+            elif getattr(crawler, "cdp_manager", None):
+                try:
+                    await crawler.cdp_manager.cleanup(force=True)
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "closed" not in error_msg and "disconnected" not in error_msg:
+                        print(f"[Main] Error cleaning up CDP browser: {e}")
 
-        elif getattr(crawler, "browser_context", None):
-            try:
-                await crawler.browser_context.close()
-            except Exception as e:
-                error_msg = str(e).lower()
-                if "closed" not in error_msg and "disconnected" not in error_msg:
-                    print(f"[Main] Error closing browser context: {e}")
+            elif getattr(crawler, "browser_context", None):
+                try:
+                    await crawler.browser_context.close()
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "closed" not in error_msg and "disconnected" not in error_msg:
+                        print(f"[Main] Error closing browser context: {e}")
+        finally:
+            await _close_http_clients(crawler)
 
 
 def force_stop(crawler) -> None:

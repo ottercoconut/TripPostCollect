@@ -149,7 +149,7 @@ def weibo_dependencies(config, *, post_repair=False):
 
     return options, WeiboPorts(
         client=WeiboClientPorts(
-            make_async_client=lambda **kwargs: http.make_async_client(
+            make_async_client=lambda **kwargs: http.make_reused_async_client(
                 disable_ssl_verify=getattr(config, "DISABLE_SSL_VERIFY", False), **kwargs,
             ),
             convert_browser_context_cookies=cookies.convert_browser_context_cookies,
@@ -240,7 +240,7 @@ def douyin_dependencies(config):
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
     from trippostcollect.runtime.browser_runtime import launch_profile_context
     from trippostcollect.runtime.cookies import convert_browser_context_cookies
-    from trippostcollect.runtime.http import make_async_client
+    from trippostcollect.runtime.http import make_async_client, make_reused_async_client
     from trippostcollect.runtime.image_retry import fetch_image_bytes_with_retry
 
     values = {field.name: getattr(config, field.name) for field in fields(DouyinSettings)}
@@ -298,7 +298,10 @@ def douyin_dependencies(config):
         "settings": settings,
         "inputs": douyin_readers(),
         "ports": DouyinCrawlerPorts(
-            client=DouyinClientPorts(client_factory, convert_browser_context_cookies, random.random),
+            client=DouyinClientPorts(
+                partial(make_reused_async_client, disable_ssl_verify=settings.DISABLE_SSL_VERIFY),
+                convert_browser_context_cookies, random.random,
+            ),
             login=DouyinLoginPorts(partial(
                 login_helpers.find_login_qrcode, make_async_client=client_factory,
             ), login_helpers.show_qrcode),
@@ -338,7 +341,7 @@ def _zhihu_dependencies(config):
     from trippostcollect.runtime import behavior, cookies
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
     from trippostcollect.runtime.browser_runtime import launch_profile_context
-    from trippostcollect.runtime.http import make_async_client
+    from trippostcollect.runtime.http import make_reused_async_client
     from trippostcollect.runtime.image_retry import fetch_image_bytes_with_retry
     from trippostcollect.platforms.zhihu.client import ZhiHuClient
     from trippostcollect.platforms.zhihu.parser import zhihu_source_asset_key
@@ -390,7 +393,7 @@ def _zhihu_dependencies(config):
         run_required_human_behavior=run_behavior,
         client_factory=partial(ZhiHuClient, ports=ZhihuClientPorts(
             # TLS 开关原本在每次 HTTPX 工厂调用时读取；共享输入暂不提前冻结。
-            make_async_client=lambda **kwargs: make_async_client(
+            make_async_client=lambda **kwargs: make_reused_async_client(
                 disable_ssl_verify=getattr(config, "DISABLE_SSL_VERIFY", False), **kwargs,
             ),
             convert_browser_context_cookies=cookies.convert_browser_context_cookies,

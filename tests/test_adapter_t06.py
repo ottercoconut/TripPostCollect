@@ -267,6 +267,9 @@ async def drive(root, patch, scenario, fallback):
         async def __aexit__(self, *args):
             return False
 
+        async def aclose(self):
+            pass
+
         async def request(self, method, url, **kwargs):
             request = httpx.Request(method, url, params=kwargs.get("params"),
                                     data=kwargs.get("data"), headers=kwargs.get("headers"))

@@ -94,6 +94,23 @@ class ZhiHuClient:
         self.cookie_dict = cookie_dict
         self._extractor = ZhihuExtractor()
         self.ports = ports
+        self._http_client = None
+        self._http_client_closed = False
+
+    def _get_http_client(self):
+        """Return the per-run HTTP client; no await point, so concurrent first calls share one."""
+        if self._http_client_closed:
+            raise PlatformRuntimeError("zhihu HTTP client closed", code="http_client_closed")
+        if self._http_client is None:
+            self._http_client = self.ports.make_async_client(proxy=self.proxy)
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the reused HTTP client once; later requests fail instead of reconnecting."""
+        self._http_client_closed = True
+        client, self._http_client = self._http_client, None
+        if client is not None:
+            await client.aclose()
 
     async def _pre_headers(self, url: str) -> Dict:
         """
@@ -135,8 +152,8 @@ class ZhiHuClient:
         # return response.text
         return_response = kwargs.pop('return_response', False)
 
-        async with self.ports.make_async_client(proxy=self.proxy) as client:
-            response = await client.request(method, url, timeout=self.timeout, **kwargs)
+        client = self._get_http_client()
+        response = await client.request(method, url, timeout=self.timeout, **kwargs)
 
         path = httpx.URL(url).path
         if response.status_code != 200:
@@ -254,27 +271,27 @@ class ZhiHuClient:
             "referer": IMAGE_REFERER,
         }
         try:
-            async with self.ports.make_async_client(proxy=self.proxy) as client:
-                async with client.stream(
-                    "GET", image_url, timeout=self.timeout, headers=headers
-                ) as response:
-                    response.raise_for_status()
-                    chunks = []
-                    size = 0
-                    async for chunk in response.aiter_bytes():
-                        size += len(chunk)
-                        if size > IMAGE_DOWNLOAD_MAX_BYTES:
-                            logger.error(
-                                "[ZhiHuClient.get_content_image] image exceeded byte limit"
-                            )
-                            raise ImageDownloadFetchError(
-                                "image exceeded byte limit",
-                                code="image_too_large",
-                                retryable=False,
-                                http_status=response.status_code,
-                            )
-                        chunks.append(chunk)
-                    return b"".join(chunks)
+            client = self._get_http_client()
+            async with client.stream(
+                "GET", image_url, timeout=self.timeout, headers=headers
+            ) as response:
+                response.raise_for_status()
+                chunks = []
+                size = 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > IMAGE_DOWNLOAD_MAX_BYTES:
+                        logger.error(
+                            "[ZhiHuClient.get_content_image] image exceeded byte limit"
+                        )
+                        raise ImageDownloadFetchError(
+                            "image exceeded byte limit",
+                            code="image_too_large",
+                            retryable=False,
+                            http_status=response.status_code,
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
         except ImageDownloadFetchError:
             raise
         except httpx.HTTPStatusError as exc:
