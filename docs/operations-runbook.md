@@ -283,6 +283,46 @@ state 旁的 worker 进程组兜底强杀。stdout / stderr 先做头像审计�
 详情 `image_list` 正文图时，`desc` 为空不记为 `missing_content`。该例外只作用于 repair 模式，不把
 标题复制成正文，也不放宽正式发现抓取的正文契约；标题、正文和图片都为空仍是内容缺失。
 
+## 通用平台作者身份回填
+
+`scripts/repair_author_identity.py` 只处理微博、抖音、知乎里作者昵称仍是旧脱敏形态、且
+`author_platform_id` 为 16 位小写十六进制的行。它不改正文、计数、粉丝、图片、checkpoint 或 seen。
+三个平台必须分三个进程。`--batch-size` 是每个 child 的作者数，默认 20，可以放到约 200；
+`site_request_guard` 仍按 child 计数，门禁数值不变。
+
+每个 child 是 `author_identity_worker`：先走现有 `site_request_guard`，再启动平台 `detail` 入口。入口在本轮关键词搜索页完成行为证据，然后若 `save_data_path/author_identity_targets.json` 存在，只取作者身份。微博走 `get_note_info_by_id`，
+抖音 `get_video_by_id`（不请求作者资料），知乎 `get_answer_info` / `get_article_info`
+（没有按作者的现成 client，不恢复已退出的 `get_creator_info`）。观察文件每完成一个作者就原子写入。
+总控用 `sha256(新 ID)[:16]` 核对旧哈希。一致且昵称仍符合旧脱敏形态记 `verified`；一致但昵称已变记
+`renamed`，两种都写入平台当前昵称。同哈希的其他目标行在同一事务里一起更新。哈希不符记
+`identity_hash_mismatch` 且不写。一个作者的帖子都取不到才记 `author_unreachable`。运行级阻断、
+看门狗和中断都不把尚未处理的作者记成不可达；已经落盘的观察仍先核验写库，再停止后续批次。
+
+台账在 `data/runtime/author_identity_repair/ledger/<platform>.json`，只保留平台、帖子 ID 和哈希。
+重跑默认跳过不可达和哈希不符；`--retry-unreachable` 只重试不可达。摘要
+`outputs/author_identity_repair/<platform>-<run_id>/run_summary.json` 只累计目标行数、作者数、
+`verified`、`renamed`、回填行数、传播行数、不可达、哈希不符和剩余目标行数，不放昵称原文。
+正式写默认库必须带 `--confirm-default-db-identity`，第一个会访问平台的 child 之前做 SQLite
+一致性备份。
+
+```bash
+source .venv/bin/activate
+python scripts/repair_author_identity.py \
+  --platform weibo \
+  --keyword 青岛旅游 \
+  --batch-size 20 \
+  --dry-run
+```
+
+```bash
+source .venv/bin/activate
+python scripts/repair_author_identity.py \
+  --platform weibo \
+  --keyword 青岛旅游 \
+  --batch-size 20 \
+  --confirm-default-db-identity
+```
+
 ## 自动恢复与检查
 
 正常 workflow 不手工传页码、cursor 或摘要。runner 按 job/目标、查询指纹及小红书账号自动读取

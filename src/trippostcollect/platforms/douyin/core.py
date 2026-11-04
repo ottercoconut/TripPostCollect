@@ -133,7 +133,12 @@ class DouYinCrawler:
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
-                await self.get_specified_awemes()
+                from trippostcollect.records.author_observe import identity_targets_file
+
+                if identity_targets_file() is not None:
+                    await self.collect_author_identities()
+                else:
+                    await self.get_specified_awemes()
             logger.info("[DouYinCrawler.start] Douyin Crawler finished ...")
 
     async def search(self) -> None:
@@ -706,6 +711,50 @@ class DouYinCrawler:
             except Exception as ex:
                 logger.warning(f"[DouYinCrawler.get_aweme_detail] Skip aweme after request error aweme_id:{aweme_id}, err: {ex}")
                 return None
+
+    async def collect_author_identities(self) -> None:
+        """按作品详情取 author.uid 与 nickname。不请求作者资料，也不下载正文图。"""
+
+        from trippostcollect.records.author_observe import (
+            AuthorIdentityBlocked,
+            collect_author_observations,
+            identity_fields,
+            identity_targets_file,
+            load_author_targets,
+            observations_path,
+        )
+        from trippostcollect.platforms.douyin.parser import parse_video_info_from_url
+        from trippostcollect.records.identity import platform_nickname, platform_user_id
+
+        targets_path = identity_targets_file()
+        if targets_path is None:
+            return
+        targets = load_author_targets(targets_path)
+
+        async def fetch_post(post: dict) -> dict[str, str]:
+            detail_target = str(post.get("detail_target") or post.get("platform_post_id") or "")
+            try:
+                aweme_id = parse_video_info_from_url(detail_target).aweme_id
+                detail = await self.dy_client.get_video_by_id(aweme_id)
+            except PlatformRuntimeError as exc:
+                raise AuthorIdentityBlocked(str(exc.code or "runtime_failed")) from exc
+            except (DataFetchError, KeyError, ValueError):
+                return identity_fields()
+            except Exception:
+                return identity_fields()
+            author = (detail or {}).get("author") or {}
+            return identity_fields(
+                creator_hash=platform_user_id(author.get("uid")),
+                nickname=platform_nickname(author.get("nickname")),
+            )
+
+        await collect_author_observations(
+            platform="douyin",
+            targets=targets,
+            destination=observations_path(targets_path.parent),
+            fetch_post=fetch_post,
+            sleep_seconds=float(self.settings.CRAWLER_MAX_SLEEP_SEC),
+        )
 
 
 
