@@ -1224,3 +1224,201 @@ def test_main_sighup_still_writes_summary_and_exits_129(
     assert exit_code == 128 + signal.SIGHUP
     assert summary["interrupt"]["signal"] == "SIGHUP"
     assert summary["status"] == "failed"
+
+
+def _successful_child_stdout(summary_path: Path) -> str:
+    summary_path.write_text(
+        json.dumps(
+            {
+                "import_completion_met": True,
+                "formal_validation": {
+                    "stop_reason": "login_required",
+                    "valid_total_count": 0,
+                    "skipped_candidate_failures": [],
+                },
+                "import_result": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return json.dumps({"summary": str(summary_path)})
+
+
+def test_main_keeps_login_required_when_signal_arrives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+    stdout = _successful_child_stdout(tmp_path / "child-summary.json")
+
+    def fake_child(*_args: object, **_kwargs: object) -> dict:
+        os.kill(os.getpid(), signal.SIGINT)
+        return {"returncode": 2, "stdout": stdout, "stderr": ""}
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    exit_code = repair.main()
+    summary, state = _summary_and_state(tmp_path)
+
+    assert exit_code == 128 + signal.SIGINT
+    assert summary["error"] == "batch_1:login_required"
+    assert summary["interrupt"]["signal"] == "SIGINT"
+    assert state["steps"]["command_executed"]["error"] == "batch_1:login_required"
+    assert "operator_interrupt" not in state["steps"]["command_executed"]["error"]
+
+
+def test_main_keeps_image_failure_when_signal_arrives_during_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+    child_summary = tmp_path / "child-summary.json"
+    child_summary.write_text(
+        json.dumps(
+            {
+                "import_completion_met": True,
+                "formal_validation": {"valid_total_count": 1, "skipped_candidate_failures": []},
+                "import_result": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_child(*_args: object, **_kwargs: object) -> dict:
+        return {
+            "returncode": 0,
+            "stdout": json.dumps({"summary": str(child_summary)}),
+            "stderr": "",
+        }
+
+    def fake_artifacts(*_args: object, **_kwargs: object) -> dict:
+        os.kill(os.getpid(), signal.SIGINT)
+        return {"ok": False}
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    monkeypatch.setattr(repair, "verify_image_artifacts", fake_artifacts)
+    exit_code = repair.main()
+    summary, state = _summary_and_state(tmp_path)
+
+    assert exit_code == 128 + signal.SIGINT
+    assert summary["error"] == "post_detail_repair_image_artifacts_incomplete"
+    assert summary["interrupt"]["reason"] == "operator_interrupt"
+    assert state["steps"]["artifacts_verified"]["error"] == (
+        "post_detail_repair_image_artifacts_incomplete"
+    )
+    assert state["steps"]["task_finalized"]["error"] == (
+        "post_detail_repair_image_artifacts_incomplete"
+    )
+
+
+def test_main_locked_database_after_interrupt_still_writes_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+
+    def fake_child(*_args: object, **_kwargs: object) -> dict:
+        os.kill(os.getpid(), signal.SIGINT)
+        return {
+            "returncode": None,
+            "stdout": "",
+            "stderr": "",
+            "interrupt_signum": signal.SIGINT,
+            "forced_termination": False,
+            "launched": False,
+            "killed_groups": [],
+            "logs": {},
+        }
+
+    def locked(*_args: object, **_kwargs: object) -> dict:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    monkeypatch.setattr(repair, "repaired_rows", locked)
+    exit_code = repair.main()
+    summary, state = _summary_and_state(tmp_path)
+
+    assert exit_code == 128 + signal.SIGINT
+    assert summary["error"] == "runtime_failed:operator_interrupt:SIGINT"
+    assert summary["tail_error"] == "OperationalError: database is locked"
+    assert summary["interrupt"]["signal"] == "SIGINT"
+    assert state["status"] == "failed"
+    assert state["steps"]["task_finalized"]["status"] == "failed"
+
+
+def test_default_grace_is_read_when_main_calls_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_pending_douyin(db_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _repair_argv(db_path))
+    seen: dict[str, object] = {}
+
+    def fake_child(*_args: object, **kwargs: object) -> dict:
+        seen["grace"] = kwargs.get("grace_seconds")
+        os.kill(os.getpid(), signal.SIGINT)
+        return {
+            "returncode": None,
+            "stdout": "",
+            "stderr": "",
+            "interrupt_signum": signal.SIGINT,
+            "forced_termination": False,
+            "launched": False,
+            "killed_groups": [],
+            "logs": {},
+        }
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    repair.main()
+
+    assert "grace_seconds" not in seen or seen["grace"] is None
+    assert seen["grace"] is None
+
+
+def test_omitted_grace_uses_constant_at_call_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, float] = {}
+
+    def fake_terminate(proc: object, *, grace_seconds: float) -> tuple[bytes, bytes, bool]:
+        seen["grace"] = grace_seconds
+        proc.returncode = -signal.SIGINT  # type: ignore[attr-defined]
+        return b"", b"", False
+
+    class FakeProcess:
+        pid = 77
+        returncode = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+    calls = {"n": 0}
+
+    def interrupt() -> int | None:
+        calls["n"] += 1
+        return signal.SIGINT if calls["n"] > 1 else None
+
+    monkeypatch.setattr(repair, "terminate_managed_process", fake_terminate)
+    monkeypatch.setattr(repair.subprocess, "Popen", lambda *_a, **_k: FakeProcess())
+    monkeypatch.setattr(repair, "REPAIR_CHILD_INTERRUPT_GRACE_SECONDS", 40.0)
+    repair.run_repair_child(
+        ["child"],
+        cwd=ROOT,
+        log_dir=tmp_path / "logs",
+        state_path=tmp_path / "execution_state.json",
+        interrupt_signal=interrupt,
+        poll_seconds=0.01,
+    )
+
+    assert seen["grace"] == 40.0

@@ -230,9 +230,11 @@ child 在独立会话里，终端信号到不了它；总控向中间层发一�
 state 旁的 worker 进程组兜底强杀。stdout / stderr 先做头像审计再写入
 `outputs/post_detail_repair/<run_id>/logs/batch-NNNN/`。尚未完成的 execution state 终结为
 `runtime_failed:operator_interrupt:<SIGNAL>`。校验已经完成时不改写该状态，摘要状态跟随它。
-两种情况都写 `run_summary.json` 的 `interrupt`，进程以 `128+首个信号` 退出。终端已经挂断时，
-先写摘要再输出；输出端失效则改接 `/dev/null`，避免退出码变成 120。未完成的目标保持未修复，
-可以稍后重跑。
+两种情况都写 `run_summary.json` 的 `interrupt`，进程以 `128+首个信号` 退出。中断前已经判定的
+运行级或持久化失败留在摘要 `error`，不被中断错误盖掉；`interrupt` 只说明退出原因。终端已经挂断，
+或中断后的收尾查询失败时，仍写摘要再输出；输出端失效则改接 `/dev/null`，避免退出码变成 120。
+没有更早的失败时，未完成目标保持未修复，可以稍后重跑。摘要 `error` 若是登录、验证或图片失败，
+先处理那个原因。
 无人值守模式下，child 缺摘要、普通详情运行失败或 `repair_no_valid_detail` 只记录在
 批次结果中并跳过该批，随后继续清单中的后续批次；只有上述运行级阻断以及 SQLite、媒体持久化
 一致性失败才会停止该平台总控。

@@ -563,17 +563,19 @@ def run_repair_child(
     log_dir: Path,
     state_path: Path,
     interrupt_signal: Callable[[], int | None],
-    grace_seconds: float = REPAIR_CHILD_INTERRUPT_GRACE_SECONDS,
+    grace_seconds: float | None = None,
     poll_seconds: float = REPAIR_CHILD_POLL_SECONDS,
 ) -> dict[str, Any]:
     """运行一批修复 child。没有整轮墙钟；首个信号只向中间层发一次 SIGTERM。
 
-    ``TRIPPOSTCOLLECT_EXECUTION_STATE_PATH`` 指向本轮修复状态，让中间层登记 worker 进程组。
-    worker 的 ``append_execution_event`` 会把事件追加进同一份状态；修复模式的 collection
-    只用它补 runtime_terminal，并把它当作无进展看门狗的进度文件。不因此写 discovery checkpoint。
-    宽限盖过中间层自己的 20 秒加 5 秒回收。仍不得不强杀中间层时，按登记兜底杀掉 worker。
+    ``TRIPPOSTCOLLECT_EXECUTION_STATE_PATH`` 指向本轮修复状态，供中间层登记 worker 进程组。
+    worker 的执行事件也会写进同一份文件，无进展看门狗把这份文件的变化当作进度。
+    不因此写 discovery checkpoint。未传入宽限时用 ``REPAIR_CHILD_INTERRUPT_GRACE_SECONDS``，
+    盖过中间层自己的 20 秒等待和 5 秒回收。仍不得不强杀中间层时，按登记兜底杀掉 worker。
     """
 
+    if grace_seconds is None:
+        grace_seconds = REPAIR_CHILD_INTERRUPT_GRACE_SECONDS
     signum = interrupt_signal()
     if signum is not None:
         return _interrupted_child_result(
@@ -1041,7 +1043,6 @@ def main() -> int:
                 log_dir=run_dir / "logs" / f"batch-{int(batch_plan['batch']):04d}",
                 state_path=state_path,
                 interrupt_signal=lambda: latch.signal_received,
-                grace_seconds=REPAIR_CHILD_INTERRUPT_GRACE_SECONDS,
             )
             if child_run.get("interrupt_signum") is not None:
                 interrupt_signum = int(child_run["interrupt_signum"])
@@ -1210,10 +1211,10 @@ def main() -> int:
             state_update_error = f"{type(exc).__name__}: {exc}"
         if current_status in COMPLETED_REPAIR_OUTCOMES:
             outcome = current_status
-            fatal_error = ""
         else:
-            fatal_error = operator_interrupt_error(interrupt_signum)
             outcome = "failed"
+            if not fatal_error:
+                fatal_error = operator_interrupt_error(interrupt_signum)
             if state_update_error is None:
                 state_update_error = terminalize_repair_interrupt(
                     state,
@@ -1225,60 +1226,90 @@ def main() -> int:
                     },
                 )
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        final_statuses = repaired_rows(
-            conn,
-            args.platform,
-            [item["platform_post_id"] for item in targets],
-        )
-        final_pending = pending_count(conn, args.platform)
-        final_waived_pending = waived_pending_count(conn, args.platform)
-    recovered_ids = sorted(
-        post_id for post_id, value in final_statuses.items() if value["recovered"]
-    )
-    remaining_ids = sorted(
-        {item["platform_post_id"] for item in targets} - set(recovered_ids)
-    )
-    summary = {
-        **base_summary,
-        "status": outcome,
-        "error": fatal_error,
-        "backup": backup,
-        "batch_results": batch_results,
-        "recovered_count": len(recovered_ids),
-        "recovered_ids_sample": recovered_ids[:20],
-        "remaining_target_count": len(remaining_ids),
-        "remaining_target_ids_sample": remaining_ids[:20],
-        "remaining_pending_count": final_pending,
-        "remaining_waived_pending_count": final_waived_pending,
-        "remaining_unwaived_pending_count": max(
-            0, final_pending - final_waived_pending
-        ),
-        "all_selected_targets_recovered": not remaining_ids,
-        "candidate_failure_count": len(candidate_failures),
-        "candidate_failures_sample": candidate_failures[:20],
-        "finished_at": utc_iso(),
-    }
-    if interrupt_record is not None:
-        summary["interrupt"] = interrupt_record
-        summary["forced_termination"] = forced_termination
-        if state_update_error:
-            summary["state_update_error"] = state_update_error
-    write_json(summary_path, summary)
-    if interrupt_signum is not None and state_update_error:
-        print_repair_stream(
-            "runtime_failed:operator_interrupt_state_update_failed:"
-            f"post_detail_repair:{args.platform}: {state_update_error}",
-            sys.stderr,
-        )
-    if interrupt_signum is not None:
-        print_repair_stream(operator_interrupt_error(interrupt_signum), sys.stderr)
-    print_repair_stream(
-        json.dumps({**summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2),
-        sys.stdout,
-    )
     try:
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                final_statuses = repaired_rows(
+                    conn,
+                    args.platform,
+                    [item["platform_post_id"] for item in targets],
+                )
+                final_pending = pending_count(conn, args.platform)
+                final_waived_pending = waived_pending_count(conn, args.platform)
+            recovered_ids = sorted(
+                post_id for post_id, value in final_statuses.items() if value["recovered"]
+            )
+            remaining_ids = sorted(
+                {item["platform_post_id"] for item in targets} - set(recovered_ids)
+            )
+            summary = {
+                **base_summary,
+                "status": outcome,
+                "error": fatal_error,
+                "backup": backup,
+                "batch_results": batch_results,
+                "recovered_count": len(recovered_ids),
+                "recovered_ids_sample": recovered_ids[:20],
+                "remaining_target_count": len(remaining_ids),
+                "remaining_target_ids_sample": remaining_ids[:20],
+                "remaining_pending_count": final_pending,
+                "remaining_waived_pending_count": final_waived_pending,
+                "remaining_unwaived_pending_count": max(
+                    0, final_pending - final_waived_pending
+                ),
+                "all_selected_targets_recovered": not remaining_ids,
+                "candidate_failure_count": len(candidate_failures),
+                "candidate_failures_sample": candidate_failures[:20],
+                "finished_at": utc_iso(),
+            }
+            if interrupt_record is not None:
+                summary["interrupt"] = interrupt_record
+                summary["forced_termination"] = forced_termination
+                if state_update_error:
+                    summary["state_update_error"] = state_update_error
+            write_json(summary_path, summary)
+            if interrupt_signum is not None and state_update_error:
+                print_repair_stream(
+                    "runtime_failed:operator_interrupt_state_update_failed:"
+                    f"post_detail_repair:{args.platform}: {state_update_error}",
+                    sys.stderr,
+                )
+            if interrupt_signum is not None:
+                print_repair_stream(operator_interrupt_error(interrupt_signum), sys.stderr)
+            print_repair_stream(
+                json.dumps(
+                    {**summary, "summary": str(summary_path)},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                sys.stdout,
+            )
+        except Exception as exc:
+            if interrupt_signum is None:
+                raise
+            fallback = {
+                **base_summary,
+                "status": outcome if outcome in {"failed", *COMPLETED_REPAIR_OUTCOMES} else "failed",
+                "error": fatal_error or operator_interrupt_error(interrupt_signum),
+                "backup": backup,
+                "batch_results": batch_results,
+                "finished_at": utc_iso(),
+                "tail_error": f"{type(exc).__name__}: {exc}",
+            }
+            if interrupt_record is not None:
+                fallback["interrupt"] = interrupt_record
+                fallback["forced_termination"] = forced_termination
+            try:
+                write_json(summary_path, fallback)
+            except Exception as write_exc:
+                print_repair_stream(
+                    "runtime_failed:operator_interrupt_summary_write_failed:"
+                    f"post_detail_repair:{args.platform}: "
+                    f"{type(write_exc).__name__}: {write_exc}",
+                    sys.stderr,
+                )
+            print_repair_stream(operator_interrupt_error(interrupt_signum), sys.stderr)
         if interrupt_signum is not None:
             return 128 + interrupt_signum
         return 0 if outcome in COMPLETED_REPAIR_OUTCOMES else 2
