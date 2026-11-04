@@ -33,12 +33,16 @@ from trippostcollect.core.paths import (
     ensure_dir,
 )
 from trippostcollect.db.bootstrap import bootstrap_database
-from trippostcollect.records.sanitization import redact_author_avatar_text
+from trippostcollect.records.sanitization import (
+    author_avatar_log_marker,
+    redact_author_avatar_text,
+)
 from trippostcollect.runtime.process import (
     EXECUTION_STATE_PATH_ENV,
     PROCESS_CLEANUP_GRACE_SECONDS,
     PROCESS_FINAL_REAP_SECONDS,
     decode_text,
+    discard_hung_up_stream,
     kill_recorded_child_process_groups,
     operator_interrupt_error,
     terminate_managed_process,
@@ -431,17 +435,13 @@ def load_child_summary(path_value: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def discard_hung_up_stream(stream: Any) -> None:
-    """输出端已失效时改接 /dev/null，避免解释器退出时 flush 失败把退出码改成 120。"""
+def _redacted_child_output(stdout: str, stderr: str) -> tuple[str, str]:
+    """与 write_command_logs 相同：任一路含头像词时，两路一起换成同一审计标记。"""
 
-    try:
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        try:
-            os.dup2(devnull, stream.fileno())
-        finally:
-            os.close(devnull)
-    except (OSError, ValueError, AttributeError):
-        pass
+    marker = author_avatar_log_marker({"stdout": stdout, "stderr": stderr})
+    if marker is None:
+        return stdout, stderr
+    return marker, marker
 
 
 def print_repair_stream(line: str, stream: Any) -> None:
@@ -479,7 +479,7 @@ def interrupted_batch_result(batch_plan: dict[str, Any], child_run: dict[str, An
     stdout = str(child_run.get("stdout") or "")
     stderr = str(child_run.get("stderr") or "")
     logs = child_run.get("logs") or {}
-    return {
+    result = {
         "batch": batch_plan["batch"],
         "target_count": batch_plan["target_count"],
         "launched": bool(child_run.get("launched", True)),
@@ -497,6 +497,10 @@ def interrupted_batch_result(batch_plan: dict[str, Any], child_run: dict[str, An
             for key in ("stdout_log", "stderr_log", "command_log")
         },
     }
+    log_error = str(child_run.get("log_error") or "")
+    if log_error:
+        result["log_error"] = log_error
+    return result
 
 
 def terminalize_repair_interrupt(
@@ -543,16 +547,24 @@ def _interrupted_child_result(
     launched: bool,
     killed_groups: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    logs = write_command_logs(command, log_dir, stdout, stderr)
+    log_error = ""
+    try:
+        logs = write_command_logs(command, log_dir, stdout, stderr)
+        stdout_out, stderr_out = logs["stdout"], logs["stderr"]
+    except OSError as exc:
+        stdout_out, stderr_out = _redacted_child_output(stdout, stderr)
+        logs = {}
+        log_error = f"{type(exc).__name__}: {exc}"
     return {
         "returncode": returncode,
-        "stdout": logs["stdout"],
-        "stderr": logs["stderr"],
+        "stdout": stdout_out,
+        "stderr": stderr_out,
         "interrupt_signum": int(signum),
         "forced_termination": forced_termination,
         "launched": launched,
         "killed_groups": killed_groups,
         "logs": logs,
+        "log_error": log_error,
     }
 
 
@@ -1188,13 +1200,18 @@ def main() -> int:
                         else "completed_with_remaining"
                     )
                     state.finalize(outcome=outcome, evidence=persistence_evidence)
-    except (OSError, sqlite3.Error, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+    except Exception as exc:
         if latch.signal_received is not None:
             interrupt_signum = int(latch.signal_received)
             interrupt_exception = f"{type(exc).__name__}: {exc}"
-        else:
+        elif isinstance(
+            exc,
+            (OSError, sqlite3.Error, RuntimeError, subprocess.SubprocessError, ValueError),
+        ):
             fatal_error = f"post_detail_repair_exception:{type(exc).__name__}:{exc}"
             _state_fail_open(state, fatal_error)
+        else:
+            raise
     if interrupt_signum is None and latch.signal_received is not None:
         interrupt_signum = int(latch.signal_received)
     interrupt_record: dict[str, Any] | None = None
@@ -1243,6 +1260,13 @@ def main() -> int:
             remaining_ids = sorted(
                 {item["platform_post_id"] for item in targets} - set(recovered_ids)
             )
+            if latch.signal_received is not None and interrupt_signum is None:
+                interrupt_signum = int(latch.signal_received)
+                interrupt_record = interrupt_details(
+                    interrupt_signum,
+                    forced_termination=forced_termination,
+                    exception=interrupt_exception,
+                )
             summary = {
                 **base_summary,
                 "status": outcome,
@@ -1286,12 +1310,26 @@ def main() -> int:
                 sys.stdout,
             )
         except Exception as exc:
+            if interrupt_signum is None and latch.signal_received is not None:
+                interrupt_signum = int(latch.signal_received)
+                interrupt_record = interrupt_details(
+                    interrupt_signum,
+                    forced_termination=forced_termination,
+                    exception=interrupt_exception,
+                )
             if interrupt_signum is None:
                 raise
+            fallback_status = (
+                outcome if outcome in {"failed", *COMPLETED_REPAIR_OUTCOMES} else "failed"
+            )
             fallback = {
                 **base_summary,
-                "status": outcome if outcome in {"failed", *COMPLETED_REPAIR_OUTCOMES} else "failed",
-                "error": fatal_error or operator_interrupt_error(interrupt_signum),
+                "status": fallback_status,
+                "error": (
+                    ""
+                    if fallback_status in COMPLETED_REPAIR_OUTCOMES
+                    else fatal_error or operator_interrupt_error(interrupt_signum)
+                ),
                 "backup": backup,
                 "batch_results": batch_results,
                 "finished_at": utc_iso(),
@@ -1310,8 +1348,9 @@ def main() -> int:
                     sys.stderr,
                 )
             print_repair_stream(operator_interrupt_error(interrupt_signum), sys.stderr)
-        if interrupt_signum is not None:
-            return 128 + interrupt_signum
+        exit_signum = latch.signal_received
+        if exit_signum is not None:
+            return 128 + int(exit_signum)
         return 0 if outcome in COMPLETED_REPAIR_OUTCOMES else 2
     finally:
         latch.restore()

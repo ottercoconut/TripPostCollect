@@ -234,7 +234,12 @@ state 旁的 worker 进程组兜底强杀。stdout / stderr 先做头像审计�
 运行级或持久化失败留在摘要 `error`，不被中断错误盖掉；`interrupt` 只说明退出原因。终端已经挂断，
 或中断后的收尾查询失败时，仍写摘要再输出；输出端失效则改接 `/dev/null`，避免退出码变成 120。
 没有更早的失败时，未完成目标保持未修复，可以稍后重跑。摘要 `error` 若是登录、验证或图片失败，
-先处理那个原因。
+先处理那个原因。已有这类失败时，execution state 记下的是那个失败，不是 `operator_interrupt`。
+本轮 worker 的执行事件写进这一份 execution state，文件变化也算无进展看门狗的进度，
+`candidate_skipped` 这类事件会重置 1200 秒计时。看门狗停止时向同一份文件写
+`adaptive_search_stopped`。各批次共用这一份 state：前面的批次已经写过该事件后，
+后面的批次再超时会被跳过，返回 `terminal_event_already_present`。这个返回值只留在当次运行记录里，
+没有别的代码读取，少的是这一条事件，不改变完成判定。
 无人值守模式下，child 缺摘要、普通详情运行失败或 `repair_no_valid_detail` 只记录在
 批次结果中并跳过该批，随后继续清单中的后续批次；只有上述运行级阻断以及 SQLite、媒体持久化
 一致性失败才会停止该平台总控。
