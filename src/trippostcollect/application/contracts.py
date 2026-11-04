@@ -328,6 +328,7 @@ class ZhihuPorts:
     async_playwright: Callable[..., Any]
     browser_manager_factory: Callable[..., Any]
     project_browser_args: Callable[[], list[str]]
+    launch_profile_context: Callable[..., Any]
     run_required_human_behavior: Callable[..., Any]
     client_factory: Callable[..., Any]
     convert_browser_context_cookies: Callable[..., Any]

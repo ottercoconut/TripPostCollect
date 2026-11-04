@@ -319,12 +319,17 @@ async def test_non_xhs_cdp_profile_behavior_is_unchanged_and_ignores_xhs_env(
     resolved_profile = (
         legacy_to_new[expected_profile] if expected_profile is not None else None
     )
-    manager.launcher.launch_browser.assert_called_once_with(
-        browser_path="/fake/chrome",
-        debug_port=9444,
-        headless=True,
-        user_data_dir=resolved_profile,
-    )
+    expected_kwargs = {
+        "browser_path": "/fake/chrome",
+        "debug_port": 9444,
+        "headless": True,
+        "user_data_dir": resolved_profile,
+        # #142：知乎 CDP 新增中文、原生窗口和时区；profile 与 XHS 隔离规则不变。
+        "extra_args": ["--accept-lang=zh-CN", "--window-size=1450,900"],
+        "env": manager.launcher.launch_browser.call_args.kwargs["env"],
+    }
+    manager.launcher.launch_browser.assert_called_once_with(**expected_kwargs)
+    assert expected_kwargs["env"]["TZ"] == "Asia/Shanghai"
     assert not xhs_only_path.exists()
     if resolved_profile is None:
         manager._clean_session_restore_tabs.assert_not_called()

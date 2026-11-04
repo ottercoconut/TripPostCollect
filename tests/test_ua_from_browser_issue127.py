@@ -3,7 +3,7 @@
 #136：微博标准模式持久 context 与 B站行为会话改由 ``runtime.browser_runtime.launch_profile_context`` 启动，
 与 warmup 同一套参数，kwargs 中不再出现 ``user_agent`` 键；对应断言随之改为“无 user_agent 键”。
 #139：共享函数不再传 ``viewport``，改为 ``no_viewport=True`` 加 ``--window-size=1450,900``；warmup 与微博标准模式
-的视口断言随之改为原生窗口，知乎两条路径与微博非持久路径仍用 ``PROFILE_VIEWPORT``。
+#142：知乎持久模式也改为共享原生窗口；只剩微博、知乎非持久路径用 ``PROFILE_VIEWPORT``。
 全部离线：假 page/context/playwright，不访问网络、不启动浏览器。
 """
 
@@ -22,7 +22,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 WARMUP_VIEWPORT = {"width": 1280, "height": 900}
-# #139：warmup 与共享持久 context 改按原生窗口启动，``WARMUP_VIEWPORT`` 只剩知乎与微博非持久路径对照。
+# #139：warmup 与共享持久 context 改按原生窗口启动，``WARMUP_VIEWPORT`` 只剩两个平台的非持久路径对照。
 NATIVE_WINDOW_ARG = "--window-size=1450,900"
 
 
@@ -66,12 +66,15 @@ async def _no_cookies(context, urls=None):
 # ---------- 1. 知乎、微博：浏览器不强制 UA，视口与 warmup 相同 ----------
 
 
-def _zhihu_crawler(save_login_state: bool):
+def _zhihu_crawler(save_login_state: bool, monkeypatch):
     from trippostcollect.platforms.zhihu import core
 
     crawler = object.__new__(core.ZhihuCrawler)
     crawler.settings = SimpleNamespace(SAVE_LOGIN_STATE=save_login_state)
-    crawler.ports = SimpleNamespace(project_browser_args=lambda: [])
+    crawler.ports = SimpleNamespace(
+        project_browser_args=lambda: [],
+        launch_profile_context=_shared_launch(monkeypatch),
+    )
     return crawler
 
 
@@ -118,14 +121,14 @@ def test_crawler_viewport_matches_warmup(platform, save_login_state, monkeypatch
     from trippostcollect.core.paths import PROFILE_VIEWPORT
 
     if platform == "zhihu":
-        crawler = _zhihu_crawler(save_login_state)
+        crawler = _zhihu_crawler(save_login_state, monkeypatch)
     else:
         crawler = _weibo_crawler(save_login_state, monkeypatch)
     chromium = FakeChromium()
     asyncio.run(type(crawler).launch_browser(crawler, chromium, None, None, True))
     launched = (chromium.persistent or chromium.contexts)[0]
-    if platform == "weibo" and save_login_state:
-        # #136：微博标准模式持久 context 走共享启动配置，不传 user_agent 键。
+    if save_login_state:
+        # #136/#142：微博、知乎标准模式持久 context 都走共享启动配置，不传 user_agent 键。
         # #139：共享配置与 warmup 一样按原生窗口启动，不传 viewport。
         assert "user_agent" not in launched
         assert "viewport" not in launched and launched["no_viewport"] is True

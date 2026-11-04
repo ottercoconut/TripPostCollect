@@ -51,6 +51,7 @@ async def runtime_fingerprint(page: Page) -> dict[str, Any]:
             """() => ({
                 webdriver: navigator.webdriver,
                 languages: Array.from(navigator.languages || []),
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
                 platform: navigator.platform || '',
                 user_agent: navigator.userAgent || '',
                 hardware_concurrency: navigator.hardwareConcurrency || null,

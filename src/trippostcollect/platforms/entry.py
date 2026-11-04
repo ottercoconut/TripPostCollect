@@ -337,6 +337,7 @@ def _zhihu_dependencies(config):
     from trippostcollect.db.discovery_read import existing_platform_identities
     from trippostcollect.runtime import behavior, cookies
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
+    from trippostcollect.runtime.browser_runtime import launch_profile_context
     from trippostcollect.runtime.http import make_async_client
     from trippostcollect.runtime.image_retry import fetch_image_bytes_with_retry
     from trippostcollect.platforms.zhihu.client import ZhiHuClient
@@ -385,6 +386,7 @@ def _zhihu_dependencies(config):
             CDPBrowserManager, browser_settings, project_browser_args=behavior.project_browser_args,
         ),
         project_browser_args=behavior.project_browser_args,
+        launch_profile_context=launch_profile_context,
         run_required_human_behavior=run_behavior,
         client_factory=partial(ZhiHuClient, ports=ZhihuClientPorts(
             # TLS 开关原本在每次 HTTPX 工厂调用时读取；共享输入暂不提前冻结。
