@@ -635,6 +635,7 @@ class ZhihuCrawler:
             identity_fields,
             identity_targets_file,
             load_author_targets,
+            missed_identity,
             observations_path,
         )
         from trippostcollect.platforms.zhihu.parser import judge_zhihu_url
@@ -645,6 +646,8 @@ class ZhihuCrawler:
         targets = load_author_targets(targets_path)
 
         async def fetch_post(post: dict) -> dict[str, str]:
+            import httpx
+
             full_note_url = str(post.get("detail_target") or "").split("?")[0]
             note_type = judge_zhihu_url(full_note_url)
             try:
@@ -656,13 +659,17 @@ class ZhihuCrawler:
                         full_note_url.rstrip("/").split("/")[-1]
                     )
                 else:
-                    return identity_fields()
+                    return missed_identity("unsupported_url")
             except PlatformRuntimeError as exc:
                 raise AuthorIdentityBlocked(str(exc.code or "runtime_failed")) from exc
+            except httpx.TransportError as exc:
+                raise AuthorIdentityBlocked("network_unreachable") from exc
             except DataFetchError:
-                return identity_fields()
-            if result is None:
-                return identity_fields()
+                return missed_identity("detail_missing")
+            except Exception as exc:
+                return missed_identity(type(exc).__name__)
+            if result is None or not result.creator_hash or not result.user_nickname:
+                return missed_identity("missing_author" if result is not None else "detail_missing")
             return identity_fields(
                 creator_hash=result.creator_hash,
                 user_nickname=result.user_nickname,

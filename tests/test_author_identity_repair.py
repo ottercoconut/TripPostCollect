@@ -651,6 +651,320 @@ def test_signal_during_write_finishes_current_author_only(tmp_path: Path, monkey
         assert _row(conn, "3")["author_platform_id"] == _author_id("10003")
 
 
+def test_consecutive_not_observed_drops_the_streak_and_stops(tmp_path: Path) -> None:
+    destination = tmp_path / "author_identity_observations.json"
+    kept = "a" * 16
+
+    async def fetch(post: dict) -> dict[str, str]:
+        if post["platform_post_id"] == "kept":
+            return identity_fields(creator_hash="42", nickname="海边的人")
+        return identity_fields() | {"not_observed_reason": "detail_missing"}
+
+    targets = [{"author_key": kept, "posts": [{"platform_post_id": "kept"}]}]
+    targets.extend(
+        {
+            "author_key": f"{index:016x}",
+            "posts": [{"platform_post_id": f"miss-{index}"}],
+        }
+        for index in range(30)
+    )
+
+    async def scenario() -> None:
+        await collect_author_observations(
+            platform="weibo",
+            targets=targets,
+            destination=destination,
+            fetch_post=fetch,
+            sleep_seconds=0,
+        )
+
+    asyncio.run(scenario())
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    assert payload["stopped_early"] is True
+    assert payload["stop_reason"] == "identity_consecutive_not_observed"
+    assert [item["author_key"] for item in payload["observations"]] == [kept]
+    assert "miss-0" not in destination.read_text(encoding="utf-8")
+
+
+def test_bad_author_json_rolls_back_the_whole_group(tmp_path: Path) -> None:
+    db_path = tmp_path / "identity.sqlite"
+    with _open_db(db_path) as conn:
+        _weibo(conn, "p1", "42", "海边的人")
+        _weibo(conn, "p2", "42", "海边的人")
+        conn.execute(
+            "UPDATE web_posts SET author_json=? WHERE platform_post_id='p2'",
+            ("{not-json",),
+        )
+        conn.commit()
+        before = {
+            row["platform_post_id"]: (
+                row["author_platform_id"],
+                row["author_json"],
+                row["raw_sample_json"],
+            )
+            for row in conn.execute("SELECT * FROM web_posts")
+        }
+    with pytest.raises(identity.IdentityPayloadError):
+        identity.commit_author_group(
+            db_path,
+            platform="weibo",
+            author_key=_author_id("42"),
+            new_id="42",
+            display_name="海边的人",
+            profile_url="",
+            source_post_id="p1",
+        )
+    verify = sqlite3.connect(db_path)
+    verify.row_factory = sqlite3.Row
+    try:
+        after = {
+            row["platform_post_id"]: (
+                row["author_platform_id"],
+                row["author_json"],
+                row["raw_sample_json"],
+            )
+            for row in verify.execute("SELECT * FROM web_posts")
+        }
+    finally:
+        verify.close()
+    assert after == before
+    assert identity._json_object("") == {}
+    assert identity._json_object(None) == {}
+
+
+def test_nonzero_child_stops_later_batches_after_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "identity.sqlite"
+    with _open_db(db_path) as conn:
+        _weibo(conn, "1", "10001", "青岛游客")
+        _weibo(conn, "2", "10002", "崂山向导")
+    calls = {"n": 0}
+
+    def fake_child(command: list[str], **kwargs: object) -> dict:
+        calls["n"] += 1
+        document = {
+            "platform": "weibo",
+            "stopped_early": False,
+            "stop_reason": "",
+            "observations": [
+                {
+                    "author_key": _author_id("10001"),
+                    "platform_post_id": "1",
+                    "attempted_post_ids": ["1"],
+                    "status": "observed",
+                    "creator_hash": "10001",
+                    "nickname": "青岛游客",
+                    "user_nickname": "",
+                    "creator_url_token": "",
+                    "author_profile_url": "",
+                }
+            ],
+        }
+        result = _fake_child_factory(document)(command, **kwargs)
+        result["returncode"] = 1
+        summary_path = json.loads(result["stdout"])["summary"]
+        summary = json.loads(Path(summary_path).read_text(encoding="utf-8"))
+        summary["platform_returncode"] = 1
+        Path(summary_path).write_text(json.dumps(summary), encoding="utf-8")
+        return result
+
+    _redirect(monkeypatch, tmp_path)
+    monkeypatch.setattr(identity, "run_repair_child", fake_child)
+    exit_code = identity.main(
+        ["--platform", "weibo", "--db", str(db_path), "--batch-size", "1", "--headless"]
+    )
+    summary = _summary(tmp_path)
+    assert exit_code == 2
+    assert calls["n"] == 1
+    assert summary["status"] == "failed"
+    assert summary["error"] == "child_nonzero_exit"
+    with _open_db(db_path) as conn:
+        assert _row(conn, "1")["author_platform_id"] == "10001"
+        assert _row(conn, "2")["author_platform_id"] == _author_id("10002")
+
+
+def test_policy_wait_is_visible_and_stops_later_batches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "identity.sqlite"
+    with _open_db(db_path) as conn:
+        _weibo(conn, "1", "10001", "青岛游客")
+        _weibo(conn, "2", "10002", "崂山向导")
+    calls = {"n": 0}
+
+    def fake_child(command: list[str], **kwargs: object) -> dict:
+        calls["n"] += 1
+        result = _fake_child_factory(
+            {
+                "platform": "weibo",
+                "stopped_early": False,
+                "stop_reason": "",
+                "observations": [],
+            },
+            stop_reason="policy_blocked",
+        )(command, **kwargs)
+        summary_path = json.loads(result["stdout"])["summary"]
+        summary = json.loads(Path(summary_path).read_text(encoding="utf-8"))
+        summary["failure_classification"] = {
+            "failure_type": "policy_blocked",
+            "wait_seconds": 90,
+        }
+        Path(summary_path).write_text(json.dumps(summary), encoding="utf-8")
+        return result
+
+    _redirect(monkeypatch, tmp_path)
+    monkeypatch.setattr(identity, "run_repair_child", fake_child)
+    exit_code = identity.main(
+        ["--platform", "weibo", "--db", str(db_path), "--batch-size", "1", "--headless"]
+    )
+    summary = _summary(tmp_path)
+    assert exit_code == 2
+    assert calls["n"] == 1
+    assert summary["policy_blocked"] is True
+    assert summary["policy_wait_seconds"] == 90
+    assert summary["error"] == "policy_blocked"
+
+
+def test_write_errors_fail_the_run_and_stop_later_batches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "identity.sqlite"
+    with _open_db(db_path) as conn:
+        _weibo(conn, "1", "10001", "青岛游客")
+        _weibo(conn, "2", "10002", "崂山向导")
+    document = {
+        "platform": "weibo",
+        "stopped_early": False,
+        "stop_reason": "",
+        "observations": [
+            {
+                "author_key": _author_id("10001"),
+                "platform_post_id": "1",
+                "attempted_post_ids": ["1"],
+                "status": "observed",
+                "creator_hash": "10001",
+                "nickname": "青岛游客",
+                "user_nickname": "",
+                "creator_url_token": "",
+                "author_profile_url": "",
+            }
+        ],
+    }
+    calls = {"n": 0}
+
+    def fail_commit(*_args: object, **_kwargs: object) -> tuple[int, int]:
+        raise sqlite3.OperationalError("locked")
+
+    def fake_child(command: list[str], **kwargs: object) -> dict:
+        calls["n"] += 1
+        return _fake_child_factory(document)(command, **kwargs)
+
+    _redirect(monkeypatch, tmp_path)
+    monkeypatch.setattr(identity, "commit_author_group", fail_commit)
+    monkeypatch.setattr(identity, "run_repair_child", fake_child)
+    exit_code = identity.main(
+        ["--platform", "weibo", "--db", str(db_path), "--batch-size", "1", "--headless"]
+    )
+    summary = _summary(tmp_path)
+    assert exit_code == 2
+    assert calls["n"] == 1
+    assert summary["status"] == "failed"
+    assert summary["error"] == "author_identity_write_failed"
+    assert summary["write_error_count"] == 1
+
+
+def test_ledger_is_atomic_and_kept_when_a_later_batch_crashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger_file = tmp_path / "ledger" / "weibo.json"
+    ledger_file.parent.mkdir(parents=True)
+    ledger_file.write_text("OLD", encoding="utf-8")
+
+    def refuse_replace(*_args: object, **_kwargs: object) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(identity.os, "replace", refuse_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        identity.store_ledger(
+            ledger_file,
+            {
+                "a" * 16: {
+                    "platform": "weibo",
+                    "author_key": "a" * 16,
+                    "post_ids": ["1"],
+                    "outcome": "author_unreachable",
+                }
+            },
+        )
+    assert ledger_file.read_text(encoding="utf-8") == "OLD"
+    monkeypatch.undo()
+
+    db_path = tmp_path / "identity.sqlite"
+    with _open_db(db_path) as conn:
+        _weibo(conn, "9", "10009", "栈桥夜景")
+        _weibo(conn, "10", "10010", "小麦岛")
+    author_key = _author_id("10009")
+    document = {
+        "platform": "weibo",
+        "stopped_early": False,
+        "stop_reason": "",
+        "observations": [
+            {
+                "author_key": author_key,
+                "platform_post_id": "9",
+                "attempted_post_ids": ["9"],
+                "status": "not_observed",
+                "creator_hash": "",
+                "nickname": "",
+                "user_nickname": "",
+                "creator_url_token": "",
+                "author_profile_url": "",
+                "not_observed_reason": "detail_missing",
+            }
+        ],
+    }
+    calls = {"n": 0}
+
+    def fake_child(command: list[str], **kwargs: object) -> dict:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("later batch")
+        return _fake_child_factory(document)(command, **kwargs)
+
+    _redirect(monkeypatch, tmp_path)
+    monkeypatch.setattr(identity, "run_repair_child", fake_child)
+    assert identity.main(
+        ["--platform", "weibo", "--db", str(db_path), "--batch-size", "1", "--headless"]
+    ) == 2
+    stored = json.loads((tmp_path / "ledger" / "weibo.json").read_text(encoding="utf-8"))
+    assert stored["entries"][0]["outcome"] == "author_unreachable"
+    assert stored["entries"][0]["author_key"] == author_key
+    assert not (tmp_path / "ledger" / "weibo.json.tmp").exists()
+    summary = _summary(tmp_path)
+    state = json.loads(next((tmp_path / "rt").rglob("execution_state.json")).read_text(encoding="utf-8"))
+    assert summary["status"] == "failed"
+    assert "RuntimeError" in summary["error"]
+    assert state["status"] != "running"
+
+
+def test_unexpected_exception_still_writes_summary_and_fails_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "identity.sqlite"
+    with _open_db(db_path) as conn:
+        _weibo(conn, "1", "10001", "青岛游客")
+
+    def fake_child(*_args: object, **_kwargs: object) -> dict:
+        raise KeyError("boom")
+
+    _redirect(monkeypatch, tmp_path)
+    monkeypatch.setattr(identity, "run_repair_child", fake_child)
+    with pytest.raises(KeyError, match="boom"):
+        identity.main(["--platform", "weibo", "--db", str(db_path), "--headless"])
+    summary = _summary(tmp_path)
+    state = json.loads(next((tmp_path / "rt").rglob("execution_state.json")).read_text(encoding="utf-8"))
+    assert summary["status"] == "failed"
+    assert "KeyError" in summary["error"]
+    assert state["status"] == "failed"
+
+
 def test_batch_size_counts_authors(tmp_path: Path) -> None:
     authors = [
         {"author_key": f"{index:016x}", "posts": [{"platform_post_id": str(index)}]}

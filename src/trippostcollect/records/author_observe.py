@@ -13,6 +13,8 @@ from trippostcollect.records.sanitization import sanitize_author_avatar_data
 
 
 OBSERVATIONS_NAME = "author_identity_observations.json"
+CONSECUTIVE_NOT_OBSERVED_LIMIT = 30
+CONSECUTIVE_NOT_OBSERVED_STOP = "identity_consecutive_not_observed"
 
 
 class AuthorIdentityBlocked(RuntimeError):
@@ -66,6 +68,12 @@ def empty_observation_document(platform: str) -> dict[str, Any]:
     }
 
 
+def missed_identity(reason: str) -> dict[str, str]:
+    fields = identity_fields()
+    fields["not_observed_reason"] = reason
+    return fields
+
+
 def identity_fields(
     *,
     creator_hash: str = "",
@@ -113,18 +121,21 @@ async def collect_author_observations(
     document = empty_observation_document(platform)
     observations: list[dict[str, Any]] = document["observations"]
     write_observations_atomic(destination, document)
+    consecutive_not_observed = 0
     for author in targets:
         author_key = str(author.get("author_key") or "")
         posts = [item for item in author.get("posts") or [] if isinstance(item, dict)]
         attempted: list[str] = []
         found: dict[str, str] | None = None
         found_post_id = ""
+        last_fields = missed_identity("no_post")
         try:
             for post in posts:
                 post_id = str(post.get("platform_post_id") or "").strip()
                 if post_id:
                     attempted.append(post_id)
                 fields = await fetch_post(post)
+                last_fields = fields
                 if sleep_seconds > 0:
                     await asyncio.sleep(sleep_seconds)
                 if fields.get("creator_hash") and (
@@ -144,7 +155,17 @@ async def collect_author_observations(
                 platform_post_id=found_post_id or (attempted[-1] if attempted else ""),
                 attempted_post_ids=attempted,
                 status="observed" if found else "not_observed",
-                fields=found or identity_fields(),
+                fields=found or last_fields,
             )
         )
+        if found:
+            consecutive_not_observed = 0
+        else:
+            consecutive_not_observed += 1
+            if consecutive_not_observed >= CONSECUTIVE_NOT_OBSERVED_LIMIT:
+                del observations[-consecutive_not_observed:]
+                document["stopped_early"] = True
+                document["stop_reason"] = CONSECUTIVE_NOT_OBSERVED_STOP
+                write_observations_atomic(destination, document)
+                return
         write_observations_atomic(destination, document)

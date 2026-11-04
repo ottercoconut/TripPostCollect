@@ -490,6 +490,7 @@ class WeiboCrawler:
             identity_fields,
             identity_targets_file,
             load_author_targets,
+            missed_identity,
             observations_path,
         )
         from trippostcollect.records.identity import platform_nickname, platform_user_id
@@ -508,12 +509,15 @@ class WeiboCrawler:
             except httpx.TransportError as exc:
                 raise AuthorIdentityBlocked("network_unreachable") from exc
             except (DataFetchError, KeyError):
-                return identity_fields()
+                return missed_identity("detail_missing")
+            except Exception as exc:
+                return missed_identity(type(exc).__name__)
             user = ((result or {}).get("mblog") or {}).get("user") or {}
-            return identity_fields(
-                creator_hash=platform_user_id(user.get("id")),
-                nickname=platform_nickname(user.get("screen_name")),
-            )
+            creator_hash = platform_user_id(user.get("id"))
+            nickname = platform_nickname(user.get("screen_name"))
+            if not creator_hash or not nickname:
+                return missed_identity("missing_author")
+            return identity_fields(creator_hash=creator_hash, nickname=nickname)
 
         await collect_author_observations(
             platform="weibo",

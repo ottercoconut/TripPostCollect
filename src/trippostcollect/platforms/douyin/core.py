@@ -721,6 +721,7 @@ class DouYinCrawler:
             identity_fields,
             identity_targets_file,
             load_author_targets,
+            missed_identity,
             observations_path,
         )
         from trippostcollect.platforms.douyin.parser import parse_video_info_from_url
@@ -732,21 +733,26 @@ class DouYinCrawler:
         targets = load_author_targets(targets_path)
 
         async def fetch_post(post: dict) -> dict[str, str]:
+            import httpx
+
             detail_target = str(post.get("detail_target") or post.get("platform_post_id") or "")
             try:
                 aweme_id = parse_video_info_from_url(detail_target).aweme_id
                 detail = await self.dy_client.get_video_by_id(aweme_id)
             except PlatformRuntimeError as exc:
                 raise AuthorIdentityBlocked(str(exc.code or "runtime_failed")) from exc
+            except httpx.TransportError as exc:
+                raise AuthorIdentityBlocked("network_unreachable") from exc
             except (DataFetchError, KeyError, ValueError):
-                return identity_fields()
-            except Exception:
-                return identity_fields()
+                return missed_identity("detail_missing")
+            except Exception as exc:
+                return missed_identity(type(exc).__name__)
             author = (detail or {}).get("author") or {}
-            return identity_fields(
-                creator_hash=platform_user_id(author.get("uid")),
-                nickname=platform_nickname(author.get("nickname")),
-            )
+            creator_hash = platform_user_id(author.get("uid"))
+            nickname = platform_nickname(author.get("nickname"))
+            if not creator_hash or not nickname:
+                return missed_identity("missing_author")
+            return identity_fields(creator_hash=creator_hash, nickname=nickname)
 
         await collect_author_observations(
             platform="douyin",

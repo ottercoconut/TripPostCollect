@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -16,6 +18,7 @@ from trippostcollect.application.failures import extract_stdout_json
 from trippostcollect.application.repair_runtime import (
     REPAIR_INTERRUPT_SIGNALS,
     _fatal_child_failure,
+    _state_fail_open,
     _strict_batch_blocker,
     create_sqlite_backup,
     interrupt_details,
@@ -38,7 +41,10 @@ from trippostcollect.core.paths import (
     ensure_dir,
 )
 from trippostcollect.db.bootstrap import bootstrap_database
-from trippostcollect.records.author_observe import OBSERVATIONS_NAME
+from trippostcollect.records.author_observe import (
+    CONSECUTIVE_NOT_OBSERVED_STOP,
+    OBSERVATIONS_NAME,
+)
 from trippostcollect.runtime.process import operator_interrupt_error
 from trippostcollect.xhs.leases import DeferredTerminationSignals
 
@@ -50,7 +56,9 @@ IDENTITY_STOP_REASONS = {
     "no_progress_timeout",
     "observations_missing",
     "observations_unreadable",
+    CONSECUTIVE_NOT_OBSERVED_STOP,
 }
+SQLITE_TIMEOUT_SECONDS = 30.0
 UNREACHABLE = "author_unreachable"
 MISMATCH = "identity_hash_mismatch"
 
@@ -188,24 +196,38 @@ def load_ledger(path: Path) -> dict[str, dict[str, Any]]:
     return loaded
 
 
+class IdentityPayloadError(ValueError):
+    """非空作者 JSON 无法解析成对象。整组回滚，不把其余键写成空对象。"""
+
+
 def store_ledger(path: Path, entries: dict[str, dict[str, Any]]) -> None:
-    write_json(
-        path,
-        {
-            "entries": [
-                entries[key]
-                for key in sorted(entries)
-            ]
-        },
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(
+            {"entries": [entries[key] for key in sorted(entries)]},
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
+    os.replace(temporary, path)
 
 
-def _json_object(value: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(value or "")
-    except (TypeError, json.JSONDecodeError):
+def _json_object(value: str | None) -> dict[str, Any]:
+    if value is None:
         return {}
-    return parsed if isinstance(parsed, dict) else {}
+    text = str(value)
+    if not text.strip():
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise IdentityPayloadError(str(exc)) from exc
+    if not isinstance(parsed, dict):
+        raise IdentityPayloadError("author payload is not an object")
+    return parsed
 
 
 def select_identity_authors(
@@ -390,7 +412,18 @@ def blocks_later_batches(error: str) -> bool:
         return False
     if error in IDENTITY_STOP_REASONS or error.startswith("observations_"):
         return True
+    if error in {"child_nonzero_exit", "author_identity_write_failed"}:
+        return True
     return _strict_batch_blocker(error)
+
+
+def _nonzero_code(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    try:
+        return int(value) != 0
+    except (TypeError, ValueError):
+        return True
 
 
 def classify_identity(author_key: str, masked_name: str, fields: dict[str, Any]) -> str:
@@ -473,7 +506,7 @@ def update_author_group(
 
 
 def commit_author_group(db_path: Path, **kwargs: Any) -> tuple[int, int]:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=SQLITE_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("BEGIN")
@@ -552,7 +585,7 @@ def apply_observations(
                 profile_url=str(item.get("author_profile_url") or ""),
                 source_post_id=str(item.get("platform_post_id") or ""),
             )
-        except (sqlite3.Error, TypeError, ValueError):
+        except (sqlite3.Error, TypeError, ValueError, IdentityPayloadError):
             counts["write_errors"] += 1
             continue
         ledger.pop(author_key, None)
@@ -628,7 +661,7 @@ def main(argv: list[str] | None = None) -> int:
     bootstrap_database(db_path, sync_jobs=False)
     ledger_file = ledger_path(args.platform)
     ledger = load_ledger(ledger_file)
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, timeout=SQLITE_TIMEOUT_SECONDS) as conn:
         conn.row_factory = sqlite3.Row
         authors, rejected, pending_rows = select_identity_authors(
             conn,
@@ -732,12 +765,14 @@ def main(argv: list[str] | None = None) -> int:
     backup: dict[str, Any] = {}
     latch = DeferredTerminationSignals(REPAIR_INTERRUPT_SIGNALS)
     latch.install()
+    unexpected: BaseException | None = None
     try:
         if plans:
             backup = create_sqlite_backup(db_path, backup_path)
         totals["unreachable"] += record_local_unreachable(
             authors, platform=args.platform, ledger=ledger
         )
+        store_ledger(ledger_file, ledger)
         if latch.signal_received is None:
             state.begin("command_executed")
         for plan in plans:
@@ -777,6 +812,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 for key, value in applied.items():
                     totals[key] += value
+                store_ledger(ledger_file, ledger)
             else:
                 fatal_error = fatal_error or observation_error
             child_error = observation_error or child_stop_error(summary)
@@ -784,29 +820,45 @@ def main(argv: list[str] | None = None) -> int:
                 child_error = child_error or str(document.get("stop_reason") or "runtime_failed")
             if child_run.get("interrupt_signum") is not None and not child_error:
                 child_error = operator_interrupt_error(int(child_run["interrupt_signum"]))
+            platform_returncode = summary.get("platform_returncode")
+            nonzero_exit = interrupt_signum is None and (
+                _nonzero_code(child_run.get("returncode")) or _nonzero_code(platform_returncode)
+            )
+            if nonzero_exit:
+                child_error = child_error or "child_nonzero_exit"
+            classification = summary.get("failure_classification") or {}
+            stop_reason = str((summary.get("formal_validation") or {}).get("stop_reason") or "")
+            policy_blocked = stop_reason == "policy_blocked" or (
+                classification.get("failure_type") == "policy_blocked"
+            )
+            policy_wait_seconds = int(classification.get("wait_seconds") or 0) if policy_blocked else 0
             batch_results.append(
                 {
                     "batch": plan["batch"],
                     "author_count": plan["author_count"],
                     "exit_code": child_run.get("returncode"),
+                    "platform_returncode": platform_returncode,
                     "error": child_error,
                     "verified_count": applied["verified"],
                     "renamed_count": applied["renamed"],
                     "repaired_row_count": applied["repaired_rows"],
                     "author_unreachable_count": applied["unreachable"],
                     "identity_hash_mismatch_count": applied["mismatch"],
+                    "policy_blocked": policy_blocked,
+                    "policy_wait_seconds": policy_wait_seconds,
                     "observations": "" if observation_path is None else str(observation_path),
                 }
             )
+            if totals["write_errors"] > 0:
+                fatal_error = fatal_error or "author_identity_write_failed"
             stopped_early = bool(document and document.get("stopped_early"))
-            if interrupt_signum is not None or stopped_early or (
+            if interrupt_signum is not None or stopped_early or nonzero_exit or fatal_error or (
                 child_error and blocks_later_batches(child_error)
             ):
                 fatal_error = fatal_error or child_error
                 break
         if interrupt_signum is None and latch.signal_received is not None:
             interrupt_signum = int(latch.signal_received)
-        store_ledger(ledger_file, ledger)
         if interrupt_signum is not None:
             if fatal_error == "":
                 fatal_error = operator_interrupt_error(interrupt_signum)
@@ -832,11 +884,40 @@ def main(argv: list[str] | None = None) -> int:
                 skipped=True,
             )
             state.finalize(outcome="completed", evidence={"batches": batch_results})
+    except Exception as exc:
+        if latch.signal_received is not None:
+            interrupt_signum = int(latch.signal_received)
+            if not fatal_error:
+                fatal_error = f"author_identity_exception:{type(exc).__name__}:{exc}"
+            _state_fail_open(state, fatal_error)
+        elif isinstance(
+            exc,
+            (OSError, sqlite3.Error, RuntimeError, subprocess.SubprocessError, ValueError),
+        ):
+            fatal_error = fatal_error or f"author_identity_exception:{type(exc).__name__}:{exc}"
+            _state_fail_open(state, fatal_error)
+        else:
+            fatal_error = fatal_error or f"author_identity_exception:{type(exc).__name__}:{exc}"
+            _state_fail_open(state, fatal_error)
+            unexpected = exc
     finally:
         latch.restore()
-    with sqlite3.connect(db_path) as conn:
-        remaining = count_remaining_rows(conn, args.platform)
+    try:
+        with sqlite3.connect(db_path, timeout=SQLITE_TIMEOUT_SECONDS) as conn:
+            remaining = count_remaining_rows(conn, args.platform)
+    except sqlite3.Error:
+        remaining = initial_remaining
+    if totals["write_errors"] > 0:
+        fatal_error = fatal_error or "author_identity_write_failed"
     outcome = "failed" if fatal_error or interrupt_signum is not None else "completed"
+    policy_wait = next(
+        (
+            int(item.get("policy_wait_seconds") or 0)
+            for item in batch_results
+            if item.get("policy_blocked")
+        ),
+        0,
+    )
     summary_body = {
         **base_summary,
         "status": outcome,
@@ -844,6 +925,8 @@ def main(argv: list[str] | None = None) -> int:
         "backup": backup,
         "batch_results": batch_results,
         "forced_termination": forced_termination,
+        "policy_blocked": any(bool(item.get("policy_blocked")) for item in batch_results),
+        "policy_wait_seconds": policy_wait,
         "finished_at": utc_iso(),
         **_summary_counts(
             target_row_count=target_rows,
@@ -868,6 +951,8 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps({**summary_body, "summary": str(summary_path)}, ensure_ascii=False),
         sys.stdout,
     )
+    if unexpected is not None:
+        raise unexpected
     if interrupt_signum is not None:
         return 128 + int(interrupt_signum)
     return 0 if not fatal_error else 2

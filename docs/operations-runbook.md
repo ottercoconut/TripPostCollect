@@ -290,18 +290,20 @@ state 旁的 worker 进程组兜底强杀。stdout / stderr 先做头像审计�
 三个平台必须分三个进程。`--batch-size` 是每个 child 的作者数，默认 20，可以放到约 200；
 `site_request_guard` 仍按 child 计数，门禁数值不变。
 
-每个 child 是 `author_identity_worker`：先走现有 `site_request_guard`，再启动平台 `detail` 入口。入口在本轮关键词搜索页完成行为证据，然后若 `save_data_path/author_identity_targets.json` 存在，只取作者身份。微博走 `get_note_info_by_id`，
+每个 child 是 `author_identity_worker`，处在总控和平台入口之间。它先走现有 `site_request_guard`，
+把目标清单复制到行为证据旁边，再启动平台 `detail` 入口。入口在本轮关键词搜索页完成行为证据，然后只取作者身份。微博走 `get_note_info_by_id`，
 抖音 `get_video_by_id`（不请求作者资料），知乎 `get_answer_info` / `get_article_info`
-（没有按作者的现成 client，不恢复已退出的 `get_creator_info`）。观察文件每完成一个作者就原子写入。
+（没有按作者的现成 client，不恢复已退出的 `get_creator_info`）。传输失败记 `network_unreachable` 并停止本批；空壳、404 和其它未知异常记 `not_observed` 与原因，连续 30 个空壳则丢掉这串并停止后续批次，不记入台账。观察文件每完成一个作者就原子写入，并且该文件本身计入无进展看门狗。child 结束后把行为证据、策略事件、`stop_reason` 和平台退出码写入 `summary.json` 并打印既有终端信封。策略阻断记 `policy_blocked` 和 `wait_seconds`，不抛 traceback。
+SIGINT/SIGTERM/SIGHUP 由 worker 转成一次 SIGTERM 收束平台入口，宽限后才 SIGKILL；中断前先写本批摘要。
 总控用 `sha256(新 ID)[:16]` 核对旧哈希。一致且昵称仍符合旧脱敏形态记 `verified`；一致但昵称已变记
-`renamed`，两种都写入平台当前昵称。同哈希的其他目标行在同一事务里一起更新。哈希不符记
+`renamed`，两种都写入平台当前昵称。同哈希的其他目标行在同一事务里一起更新。非空但无法解析的作者 JSON 整组回滚，不把其余键写成空对象。哈希不符记
 `identity_hash_mismatch` 且不写。一个作者的帖子都取不到才记 `author_unreachable`。运行级阻断、
-看门狗和中断都不把尚未处理的作者记成不可达；已经落盘的观察仍先核验写库，再停止后续批次。
+看门狗、child 非零退出和中断都不把尚未处理的作者记成不可达；已经落盘的观察仍先核验写库，再停止后续批次。写库错误同样使本轮失败并停止后续批次。
 
 台账在 `data/runtime/author_identity_repair/ledger/<platform>.json`，只保留平台、帖子 ID 和哈希。
-重跑默认跳过不可达和哈希不符；`--retry-unreachable` 只重试不可达。摘要
+每一批写库后以及登记本地不可达后都原子替换台账。重跑默认跳过不可达和哈希不符；`--retry-unreachable` 只重试不可达。摘要
 `outputs/author_identity_repair/<platform>-<run_id>/run_summary.json` 只累计目标行数、作者数、
-`verified`、`renamed`、回填行数、传播行数、不可达、哈希不符和剩余目标行数，不放昵称原文。
+`verified`、`renamed`、回填行数、传播行数、不可达、哈希不符和剩余目标行数，不放昵称原文。循环里的未捕获异常仍先把执行状态写成失败并落这张摘要。
 正式写默认库必须带 `--confirm-default-db-identity`，第一个会访问平台的 child 之前做 SQLite
 一致性备份。
 
