@@ -305,7 +305,7 @@ SIGINT/SIGTERM/SIGHUP 由 worker 转成一次 SIGTERM 收束平台入口，宽�
 `outputs/author_identity_repair/<platform>-<run_id>/run_summary.json` 只累计目标行数、作者数、
 `verified`、`renamed`、回填行数、传播行数、不可达、哈希不符和剩余目标行数，不放昵称原文。循环里的未捕获异常仍先把执行状态写成失败并落这张摘要。
 正式写默认库必须带 `--confirm-default-db-identity`，第一个会访问平台的 child 之前做 SQLite
-一致性备份。
+一致性备份。台账里仍是脱敏形态的 `author_unreachable` 帖子要整帖删除时，走下一节的清除入口。
 
 ```bash
 source .venv/bin/activate
@@ -323,6 +323,41 @@ python scripts/repair_author_identity.py \
   --keyword 青岛旅游 \
   --batch-size 20 \
   --confirm-default-db-identity
+```
+
+## 删除取不回作者的帖子
+
+`scripts/purge_unreachable_authors.py` 删除微博、抖音、知乎里仍然是旧脱敏形态，且作者哈希在
+`data/runtime/author_identity_repair/ledger/<platform>.json` 中记为 `author_unreachable` 的帖子。
+不在台账里的脱敏行保留，计数记为 `not_in_ledger`。台账记为 `identity_hash_mismatch` 的行不删。
+三个平台分三次运行。`--db` 可指向另一份 SQLite；省略时用默认库。
+
+正式删除在一个开启外键的事务里去掉这些帖子对应的 `crawl_discovery_seen_candidates`、
+`post_detail_repair_waivers`、`web_post_images` 和 `web_posts`。checkpoint、campaign 计数和其他行保持不变。
+提交后才处理图片行里的 `local_path`：只删除解析后位于 `data/media` 内、不是符号链接、并且库中已无任何行引用的文件，
+再去掉因此变空的帖子目录。文件不存在或删除失败分别计入 `media_missing`、`media_failed`，不中断本轮，最终状态为失败。
+然后执行 `VACUUM`，并做 `quick_check` 与 `foreign_key_check`。
+
+写默认库 `data/trippostcollect.sqlite` 必须带 `--confirm-default-db-purge`。正式运行会先把库备份到
+`data/backups/author_identity_purge/purge-<platform>-<stamp>/`。`--dry-run` 只向标准输出打印计数和样本帖子 ID，
+不写数据库、备份、媒体或摘要。正式摘要在
+`outputs/author_identity_repair/purge-<platform>-<stamp>/run_summary.json`，只含计数、帖子 ID、备份路径与 SHA-256、
+校验结果，不含昵称。同一批目标再跑一次应当没有可删行。
+
+SIGINT/SIGTERM/SIGHUP 若发生在删除事务内，回滚该事务或在当前事务结束后退出，写下摘要，退出码为 128 加信号编号。
+
+```bash
+source .venv/bin/activate
+python scripts/purge_unreachable_authors.py \
+  --platform weibo \
+  --dry-run
+```
+
+```bash
+source .venv/bin/activate
+python scripts/purge_unreachable_authors.py \
+  --platform weibo \
+  --confirm-default-db-purge
 ```
 
 ## 自动恢复与检查
