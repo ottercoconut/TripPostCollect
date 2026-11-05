@@ -475,8 +475,9 @@ def update_author_group(
             raw_sample.pop("nickname", None)
         else:
             raw_sample["nickname"] = display_name
-        current_profile = str(row["author_profile_url"] or "")
-        next_profile = current_profile
+        stored_profile = row["author_profile_url"]
+        current_profile = "" if stored_profile is None else str(stored_profile)
+        next_profile = stored_profile
         if not current_profile.strip() and profile_url:
             next_profile = profile_url
         conn.execute(

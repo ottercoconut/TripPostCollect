@@ -273,6 +273,52 @@ def test_propagation_updates_same_hash_and_leaves_other_columns(tmp_path: Path) 
     assert image_after == image_before
 
 
+def test_author_profile_url_keeps_null_and_blank_without_new_profile(tmp_path: Path) -> None:
+    db_path = tmp_path / "identity.sqlite"
+    kept_url = "https://m.weibo.cn/u/kept"
+    filled_url = "https://m.weibo.cn/u/filled"
+    with _open_db(db_path) as conn:
+        _weibo(conn, "null1", "10011", "空链作者")
+        _weibo(conn, "empty1", "10012", "空串作者")
+        _weibo(conn, "blank1", "10013", "空白作者")
+        _weibo(conn, "kept1", "10014", "已有作者")
+        conn.execute("UPDATE web_posts SET author_profile_url=NULL WHERE platform_post_id='null1'")
+        conn.execute("UPDATE web_posts SET author_profile_url='' WHERE platform_post_id='empty1'")
+        conn.execute("UPDATE web_posts SET author_profile_url='  ' WHERE platform_post_id='blank1'")
+        conn.execute(
+            "UPDATE web_posts SET author_profile_url=? WHERE platform_post_id='kept1'",
+            (kept_url,),
+        )
+        conn.commit()
+
+        def _commit(raw_author_id: str, post_id: str, display_name: str, profile_url: str) -> int:
+            updated, _propagated = identity.commit_author_group(
+                db_path,
+                platform="weibo",
+                author_key=_author_id(raw_author_id),
+                new_id=raw_author_id,
+                display_name=display_name,
+                profile_url=profile_url,
+                source_post_id=post_id,
+            )
+            return updated
+
+        assert _commit("10011", "null1", "空链作者", "") == 1
+        assert _commit("10012", "empty1", "空串作者", "") == 1
+        assert _commit("10013", "blank1", "空白作者", filled_url) == 1
+        assert _commit("10014", "kept1", "已有作者", "https://m.weibo.cn/u/other") == 1
+        null_row = _row(conn, "null1")
+        empty_row = _row(conn, "empty1")
+        blank_row = _row(conn, "blank1")
+        kept_row = _row(conn, "kept1")
+    assert null_row["author_platform_id"] == "10011"
+    assert null_row["author_profile_url"] is None
+    assert empty_row["author_platform_id"] == "10012"
+    assert empty_row["author_profile_url"] == ""
+    assert blank_row["author_profile_url"] == filled_url
+    assert kept_row["author_profile_url"] == kept_url
+
+
 def test_zhihu_raw_sample_uses_user_nickname(tmp_path: Path) -> None:
     db_path = tmp_path / "identity.sqlite"
     token = "some-token"
