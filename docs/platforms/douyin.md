@@ -30,9 +30,12 @@
   `sec_uid`、`short_id`、`unique_id`、头像和 IP 归属地不写出。
 - 作者简介（#163）只取作者资料响应 `user` 节点的 `signature` 原文，写入 `author_desc`，入库为
   `author_description`；空串或缺失视为没有简介，不读搜索作者对象里的签名。
-- 认证（#163）：主页“认证信息”对应的字段尚待实测对照页面确定。确定之前，资料 `user` 节点中的
-  `custom_verify`、`enterprise_verify_reason`、`verification_type`、`account_cert_info` 原值只记在
-  `author_verify_evidence`（随 `raw_sample_json` 入库），`author_verified` 与 `author_verified_text` 不填。
+- 认证（#163，实测对照主页“认证信息”）：同样只读资料 `user` 节点。`author_verified_text` 依次取
+  `account_cert_info.label_text`、`enterprise_verify_reason`、`custom_verify` 的非空原文，蓝 V 与黄 V 同样处理；
+  取到文字时 `author_verified=1`。只有 `account_cert_info` 能解析为对象且没有 `label_text`、另两个字段都明确为
+  空串时记 `author_verified=0`；缺资料、缺字段或无法解析时两列都为 NULL。`verification_type`（蓝 V 也为 0）与
+  单独出现的 `is_biz_account`（页面不显示认证）不参与判定。四个字段的原值另记在 `author_verify_evidence`，
+  随 `raw_sample_json` 入库供复核。
 - 去重键为 `aweme_id`。
 
 ## 搜索响应与游标
