@@ -42,7 +42,7 @@ def _redirect(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(purge, "LOCAL_MEDIA_ROOT", tmp_path / "data" / "media")
 
 
-def _connect(path: Path) -> sqlite3.Connection:
+def _connect_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
@@ -51,7 +51,7 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 def _open(path: Path) -> sqlite3.Connection:
     bootstrap_database(path, sync_jobs=False)
-    return _connect(path)
+    return _connect_db(path)
 
 
 def _write_ledger(tmp_path: Path, platform: str, entries: list[dict[str, object]]) -> None:
@@ -385,7 +385,7 @@ def test_deletes_target_rows_and_leaves_shared_symlink_and_outside_files(
     assert masked not in text
     assert NICKNAME not in stdout
     assert masked not in stdout
-    with _connect(db_path) as conn:
+    with _connect_db(db_path) as conn:
         assert _stable_dump(conn) == before
         posts = {
             (row["platform_key"], row["platform_post_id"])
