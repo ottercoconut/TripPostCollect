@@ -27,6 +27,9 @@ from trippostcollect.db.topic_relevance_migration import migrate_topic_relevance
 from trippostcollect.platforms.registry import SITES
 
 
+# 入口可按运行手册分进程并行启动（#151）：另一进程的 bootstrap 或入库事务持有写锁时等待，
+# 不用 sqlite3 默认的 5 秒；与正式入库的 busy timeout 一致。
+BOOTSTRAP_SQLITE_BUSY_TIMEOUT_MS = 60_000
 CURRENT_JOB_KINDS = {"mediacrawler_search", "ctf_resource_crawl"}
 JOB_KIND_CHECK_RE = re.compile(r"CHECK\s*\(\s*job_kind\s+IN\s*\(([^)]*)\)", re.IGNORECASE | re.DOTALL)
 CRAWL_ATTEMPT_COLUMNS = (
@@ -969,7 +972,7 @@ def bootstrap_database(
     sync_jobs: bool = True,
 ) -> dict[str, Any]:
     resolved = ensure_parent(Path(db_path).expanduser())
-    with sqlite3.connect(resolved) as conn:
+    with sqlite3.connect(resolved, timeout=BOOTSTRAP_SQLITE_BUSY_TIMEOUT_MS / 1000) as conn:
         result = bootstrap_connection(
             conn,
             config=config,
