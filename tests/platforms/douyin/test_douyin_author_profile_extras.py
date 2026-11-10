@@ -1,4 +1,4 @@
-"""#163：抖音作者简介取自作者资料 user 节点的 signature；认证候选原值只留作证据，不填认证列。"""
+"""#163：抖音作者简介取自作者资料 user 节点的 signature；认证两列按主页“认证信息”的实测对照取值。"""
 
 from __future__ import annotations
 
@@ -69,27 +69,80 @@ def test_missing_or_blank_profile_signature_leaves_description_empty(profile_use
     assert _row(record)["author_description"] is None
 
 
-def test_verify_candidates_are_kept_as_evidence_without_filling_verified_columns() -> None:
+def test_verify_candidates_are_kept_as_evidence() -> None:
     profile_user = {
         "follower_count": 10,
-        "custom_verify": "青岛市文化和旅游局官方账号",
-        "enterprise_verify_reason": "",
-        "verification_type": 1,
-        "account_cert_info": '{"label_style":1,"label_text":"青岛市文化和旅游局官方账号"}',
+        "custom_verify": "",
+        "enterprise_verify_reason": "青岛市文化和旅游局官方抖音号",
+        "verification_type": 0,
+        "account_cert_info": '{"label_style":5,"label_text":"青岛市文化和旅游局官方抖音号","is_biz_account":1}',
         "unique_id": "not-evidence",
     }
     record = _record(_aweme(profile_user))
 
     assert record["author_verify_evidence"] == {
-        "custom_verify": "青岛市文化和旅游局官方账号",
-        "enterprise_verify_reason": "",
-        "verification_type": 1,
-        "account_cert_info": '{"label_style":1,"label_text":"青岛市文化和旅游局官方账号"}',
+        "custom_verify": "",
+        "enterprise_verify_reason": "青岛市文化和旅游局官方抖音号",
+        "verification_type": 0,
+        "account_cert_info": '{"label_style":5,"label_text":"青岛市文化和旅游局官方抖音号","is_biz_account":1}',
     }
+    assert '"author_verify_evidence"' in _row(record)["raw_sample_json"]
+
+
+# 形态取自 #163 实测：蓝 V 的 label_text 与 enterprise_verify_reason 相同，verification_type 仍为 0；
+# 只有 is_biz_account 的账号页面不显示认证。
+@pytest.mark.parametrize(
+    "profile_user, verified, text",
+    [
+        pytest.param(
+            {"custom_verify": "", "enterprise_verify_reason": "青岛市文化和旅游局官方抖音号", "verification_type": 0,
+             "account_cert_info": '{"label_style":5,"label_text":"青岛市文化和旅游局官方抖音号","is_biz_account":1}'},
+            1, "青岛市文化和旅游局官方抖音号", id="blue_v_government",
+        ),
+        pytest.param(
+            {"custom_verify": "", "enterprise_verify_reason": "商家认证账号",
+             "account_cert_info": '{"label_style":5,"label_text":"商家认证账号","is_biz_account":1}'},
+            1, "商家认证账号", id="blue_v_merchant",
+        ),
+        pytest.param(
+            {"custom_verify": "", "enterprise_verify_reason": "", "account_cert_info": '{"is_biz_account":1}'},
+            0, None, id="biz_account_without_label",
+        ),
+        pytest.param(
+            {"custom_verify": "", "enterprise_verify_reason": "", "verification_type": 0, "account_cert_info": "{}"},
+            0, None, id="unverified",
+        ),
+        pytest.param(
+            {"custom_verify": "旅行领域创作者", "enterprise_verify_reason": "", "account_cert_info": "{}"},
+            1, "旅行领域创作者", id="yellow_v_custom_verify",
+        ),
+        pytest.param(
+            {"custom_verify": "", "enterprise_verify_reason": "某公司", "account_cert_info": "{}"},
+            1, "某公司", id="enterprise_reason_without_label",
+        ),
+        pytest.param(
+            {"custom_verify": "", "enterprise_verify_reason": ""},
+            None, None, id="cert_info_missing",
+        ),
+        pytest.param(
+            {"custom_verify": "", "enterprise_verify_reason": "", "account_cert_info": "not-json"},
+            None, None, id="cert_info_unparseable",
+        ),
+        pytest.param(
+            {"enterprise_verify_reason": "", "account_cert_info": "{}"},
+            None, None, id="custom_verify_missing",
+        ),
+        pytest.param(None, None, None, id="no_creator_profile"),
+    ],
+)
+def test_verified_columns_follow_profile_cert_label(profile_user, verified, text) -> None:
+    record = _record(_aweme(None if profile_user is None else {"follower_count": 10, **profile_user}))
+
+    assert record.get("author_verified") == verified
+    assert record.get("author_verified_text") == text
     row = _row(record)
-    assert row["author_verified"] is None
-    assert row["author_verified_text"] is None
-    assert '"author_verify_evidence"' in row["raw_sample_json"]
+    assert row["author_verified"] == verified
+    assert row["author_verified_text"] == text
 
 
 def test_no_verify_candidates_writes_no_evidence_key() -> None:
@@ -106,3 +159,5 @@ def test_frozen_db_projection_does_not_gain_new_columns() -> None:
 
     assert "author_desc" not in record
     assert "author_verify_evidence" not in record
+    assert "author_verified" not in record
+    assert "author_verified_text" not in record

@@ -28,8 +28,9 @@ DOUYIN_PROFILE_FOLLOWER_KEYS = (
     "fans_count",
     "fans",
 )
-# #163：主页“认证信息”对应哪个字段须实测对照页面后确定；确定前只把作者资料 user 节点里的候选原值
-# 留作证据，不填 author_verified / author_verified_text。
+# #163：作者资料 user 节点里与认证相关的原值，随记录留作证据。实测对照主页（#163 评论）：主页“认证信息”
+# 的文字即 account_cert_info.label_text，蓝 V 时与 enterprise_verify_reason 相同；verification_type 对蓝 V
+# 也是 0，is_biz_account 单独出现时页面不显示认证，二者都不参与判定。
 DOUYIN_PROFILE_VERIFY_EVIDENCE_KEYS = (
     "custom_verify",
     "enterprise_verify_reason",
@@ -508,7 +509,46 @@ def _profile_author_extras(creator_profile: Dict) -> Dict:
     }
     if evidence:
         extras["author_verify_evidence"] = evidence
+    verified, verified_text = _profile_verification(profile_user)
+    if verified is not None:
+        extras["author_verified"] = verified
+    if verified_text is not None:
+        extras["author_verified_text"] = verified_text
     return extras
+
+
+def _nonblank(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _profile_verification(profile_user: Dict) -> tuple[int | None, str | None]:
+    """#163：认证文字依次取 label_text、enterprise_verify_reason、custom_verify 的非空原文（黄 V 与蓝 V
+    同样处理），有文字即已认证。只有 account_cert_info 能解析为对象且没有 label_text，另两个字段也都明确为
+    空串时才记未认证；缺资料、缺字段或无法解析时两列都留空，不推断。"""
+    raw_cert = profile_user.get("account_cert_info")
+    cert: Dict | None = None
+    if isinstance(raw_cert, dict):
+        cert = raw_cert
+    elif isinstance(raw_cert, str):
+        try:
+            parsed = json.loads(raw_cert)
+        except ValueError:
+            parsed = None
+        cert = parsed if isinstance(parsed, dict) else None
+    text = (
+        _nonblank((cert or {}).get("label_text"))
+        or _nonblank(profile_user.get("enterprise_verify_reason"))
+        or _nonblank(profile_user.get("custom_verify"))
+    )
+    if text is not None:
+        return 1, text
+    if (
+        cert is not None
+        and profile_user.get("enterprise_verify_reason") == ""
+        and profile_user.get("custom_verify") == ""
+    ):
+        return 0, None
+    return None, None
 
 
 def _normalized_author_stats(author: Dict, creator_profile: Dict) -> Dict:
