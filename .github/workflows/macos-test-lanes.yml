@@ -3,6 +3,8 @@ name: macOS 隔离测试分组
 on:
   workflow_dispatch:
   pull_request:
+    # draft PR 不跑；标记 ready 时触发，之后的推送照常触发（#149）。
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'src/**'
       - 'scripts/**'
@@ -18,10 +20,16 @@ on:
 permissions:
   contents: read
 
+# 同一 PR 的新推送取消仍在运行的旧 run；手动触发不互相取消（#149）。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lanes:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: macos-26
-    timeout-minutes: 25
+    timeout-minutes: 18
     strategy:
       fail-fast: false
       matrix:
@@ -84,8 +92,8 @@ jobs:
             --no-sync \
             python scripts/dev/adapter_ledger.py progress
       - name: 执行独立副本分组及选站装配
-        # 正常 7–13 分钟；#105 间歇卡死时由步骤超时自动失败，不再等到 job 上限。
-        timeout-minutes: 20
+        # 正常 7–13 分钟；#105 间歇卡死时由步骤超时自动失败，不再等到 job 上限，并留出上传工件的时间（#149）。
+        timeout-minutes: 15
         shell: bash
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ env.TPC_WORK }}/pw-browsers

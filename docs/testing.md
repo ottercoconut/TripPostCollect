@@ -73,7 +73,8 @@ result.json 将其他 lane 标记为“未运行”，未产生计数时为 null
 `TimeoutError`，卡住的用例以失败结束，counts.json 的 failure_diagnostics 给出用例与行号，避免整个 lane
 卡到工作流上限被取消而没有任何定位信息。上限只在主线程、支持 SIGALRM 的平台上生效。
 用例外层（独立副本准备、lane 子进程等待）卡住时看门狗不起作用，由工作流兜底：
-“执行独立副本分组及选站装配”步骤 20 分钟、整个 job 25 分钟超时即失败（正常 7–13 分钟）。
+“执行独立副本分组及选站装配”步骤 15 分钟、整个 job 18 分钟超时即失败（正常 7–13 分钟，#149）；步骤超时后
+仍留有上传计数与证据工件的时间。
 排队等待托管机器不计入 job 超时，job 迟迟不开始执行任何步骤时只能人工取消重派。
 父级预检失败可能尚无 XML，命令非零本身就是不可验收，不能仅靠 XML 是否存在判断成功。
 
@@ -114,6 +115,9 @@ pytest driver 执行原函数全部断言，父进程检查退出码和临时 XM
 Linux 通过不能替代 macOS 证据。
 
 工作流 [.github/workflows/macos-test-lanes.yml](../.github/workflows/macos-test-lanes.yml)
+触发规则（#149）：draft PR 不运行，标记 ready（`ready_for_review`）时运行，之后的推送照常触发；同一 PR
+的新推送取消仍在运行的旧 run，`workflow_dispatch` 手动运行不互相取消。合入前强度不变：PR 头提交必须
+跑完完整的托管 CI 并全绿，draft 期间的本机结果不能代替。
 使用 GitHub-hosted `macos-26`，Python 3.12 单一版本、`contents: read`，不注入 secrets，
 checkout 不保留认证信息。依赖准备阶段联网；根环境使用 `uv sync --locked --extra dev`，
 这是唯一测试环境。所有执行使用临时源码副本，
