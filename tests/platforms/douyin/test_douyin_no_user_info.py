@@ -1,7 +1,8 @@
 """抖音作者字段边界回归：SQLite 直接执行冻结旧列契约。
 
 用例名沿用测试台账登记的 node ID。#49 起作品（根实现）的 creator_hash 为平台原始 uid、nickname
-为原始昵称，sec_uid/short_id/unique_id/头像/签名/IP 归属地仍不得写出。评论属 T12 退出切片，
+为原始昵称，sec_uid/short_id/unique_id/头像/IP 归属地仍不得写出。#163 起作者简介只取作者资料 user 节点的
+signature，且只写入 jsonl 记录；搜索作者对象里的签名与本文件的冻结旧列（db 模式）投影仍不写出。评论属 T12 退出切片，
 原先只验证冻结旧评论投影哈希/脱敏行为的 test_douyin_comment_masks_user_info 随旧身份函数在 T14-C 删除。
 """
 import asyncio
