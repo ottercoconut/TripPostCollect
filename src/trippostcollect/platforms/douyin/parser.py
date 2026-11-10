@@ -28,6 +28,14 @@ DOUYIN_PROFILE_FOLLOWER_KEYS = (
     "fans_count",
     "fans",
 )
+# #163：主页“认证信息”对应哪个字段须实测对照页面后确定；确定前只把作者资料 user 节点里的候选原值
+# 留作证据，不填 author_verified / author_verified_text。
+DOUYIN_PROFILE_VERIFY_EVIDENCE_KEYS = (
+    "custom_verify",
+    "enterprise_verify_reason",
+    "verification_type",
+    "account_cert_info",
+)
 # #116：内容记录如实标注正文来源；两种来源都必须通过 douyin_content_detail_observed。
 DOUYIN_SEARCH_CONTENT_SOURCE = "search_aweme_info"
 DOUYIN_DETAIL_CONTENT_SOURCE = "aweme_detail"
@@ -480,10 +488,32 @@ def _author_metric(author: Dict, creator_profile: Dict, *keys: str):
 # @Time    : 2024/1/14 18:46
 # @Desc    :
 # TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
+def _profile_user_node(creator_profile: Dict) -> Dict:
+    """作者资料响应的 user 节点；与 #116 粉丝量同一来源，不读搜索作者对象。"""
+    profile_user = creator_profile.get("user") if isinstance(creator_profile, dict) else None
+    return profile_user if isinstance(profile_user, dict) else {}
+
+
+def _profile_author_extras(creator_profile: Dict) -> Dict:
+    """#163：作者简介取资料 user 节点的 signature 原文，空串视为没有简介；认证候选原值只作证据。"""
+    profile_user = _profile_user_node(creator_profile)
+    extras: Dict = {}
+    signature = profile_user.get("signature")
+    if isinstance(signature, str) and signature.strip():
+        extras["author_desc"] = signature
+    evidence = {
+        key: profile_user[key]
+        for key in DOUYIN_PROFILE_VERIFY_EVIDENCE_KEYS
+        if key in profile_user and profile_user[key] is not None
+    }
+    if evidence:
+        extras["author_verify_evidence"] = evidence
+    return extras
+
+
 def _normalized_author_stats(author: Dict, creator_profile: Dict) -> Dict:
     # #116：粉丝量只读作者资料响应的 user 节点；搜索作者对象的占位 0 不再记为已观测。
-    profile_user = creator_profile.get("user") if isinstance(creator_profile, dict) else None
-    profile_user = profile_user if isinstance(profile_user, dict) else {}
+    profile_user = _profile_user_node(creator_profile)
     follower_values = [
         profile_user[key]
         for key in DOUYIN_PROFILE_FOLLOWER_KEYS
@@ -707,6 +737,8 @@ def update_douyin_aweme(
             else "detail_unobserved"
         )
         save_content_item["content_detail_source"] = content_detail_source
+        # 冻结旧列契约（db 模式）不含简介与认证证据，只在 jsonl 记录中写出（#163）。
+        save_content_item.update(_profile_author_extras(creator_profile))
     return save_content_item
 
 
