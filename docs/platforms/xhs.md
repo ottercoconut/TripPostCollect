@@ -54,6 +54,9 @@
   视频 store；头像主机的响应从不读取。
 - 作者粉丝必须来自浮层内点击作者名打开的作者页页面状态，保存数值、`followers_observed=true` 和
   `author_followers_source=creator_profile`。
+- 作者简介取同一作者页投影的 `basicInfo.desc`，写入 `author_description`。认证只保留
+  `verifyInfo.redOfficialVerifyType` 类型码，随 `creator_profile_json` 保存，尚未写入 `author_verified` /
+  `author_verified_text`；取值语义待页面对照确认（#167）。
 - 平台层写 `<child_artifact>/xhs/data/xhs/` 下的 staging/manifest；根项目负责通用字节复验、晋升和
   SQLite。共享重试和失败分类不在本文重复。
 

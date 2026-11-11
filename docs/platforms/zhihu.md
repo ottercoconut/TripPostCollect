@@ -37,6 +37,8 @@
 - 作者平台 ID 保存 author/member 原始 `id`（写在 `creator_hash` 键），昵称保存 `name` 原文；
   `url_token` 另存为 `creator_url_token`，只用于拼接主页 `https://www.zhihu.com/people/<url_token>`，
   不作为平台 ID。
+- 作者简介取 author/member 的 `headline`，写入 `author_description`；认证文字取 `verify_bayes`，没有时取
+  `badge_v2.title`，写入 `author_verified_text`。`author_verified` 不判定，保持 NULL。
 - 详情候选级失败有限重试后写 `candidate_skipped`；登录、授权、频控和验证仍是运行级阻断。
 - 401/403（`login_required`）、429（`rate_limited`）和 404 是平台确定答复，不重试；其余请求错误按
   3 次、间隔 1 秒有限重试。搜索阶段的运行级失败保留各自错误码。详情 404 按候选级详情缺失处理。
