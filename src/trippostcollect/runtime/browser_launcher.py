@@ -76,7 +76,7 @@ def discover_cdp_browser_path() -> str | None:
     return None
 
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 # 自启 Chrome 的调试端口只在本机回环地址上监听；连接、就绪检查与取端口都用同一地址。
 CDP_LOOPBACK_HOST = "127.0.0.1"

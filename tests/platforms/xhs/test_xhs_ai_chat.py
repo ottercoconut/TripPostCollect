@@ -56,7 +56,7 @@ def _log_lines(caplog, text: str) -> list[str]:
 
 
 def test_ai_chat_is_closed_after_entering_and_the_scan_runs_in_the_v16_layout(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = _chat_site()
     harness = Harness(tmp_path, site)
     events = _record_sleeps_and_clicks(harness)
@@ -103,7 +103,7 @@ def test_ai_chat_is_closed_after_entering_and_the_scan_runs_in_the_v16_layout(tm
 
 
 def test_layout_that_is_already_v16_is_left_alone_with_one_log_line(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = XhsFakeSite(KEYWORD, _pages(1, 4))
     harness = Harness(tmp_path, site)
 
@@ -129,7 +129,7 @@ def test_layout_that_is_already_v16_is_left_alone_with_one_log_line(tmp_path, ca
 def test_ai_chat_without_a_clickable_button_is_diagnosed_and_the_scan_continues_in_the_ai_layout(
     tmp_path, caplog, mode, fields,
 ):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = _chat_site(ai_chat_button_mode=mode)
     harness = Harness(tmp_path, site)
 
@@ -156,7 +156,7 @@ def test_ai_chat_without_a_clickable_button_is_diagnosed_and_the_scan_continues_
 
 
 def test_first_close_click_without_effect_is_retried_after_a_fresh_hit_test(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = _chat_site(ai_chat_close_ignored=1)
     harness = Harness(tmp_path, site)
     events = _record_sleeps_and_clicks(harness)
@@ -192,7 +192,7 @@ def test_first_close_click_without_effect_is_retried_after_a_fresh_hit_test(tmp_
 
 
 def test_close_that_never_takes_effect_is_diagnosed_after_two_clicks_and_the_scan_continues(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = _chat_site(ai_chat_close_ignored=5)
     harness = Harness(tmp_path, site)
 
@@ -217,7 +217,7 @@ def test_close_that_never_takes_effect_is_diagnosed_after_two_clicks_and_the_sca
 def test_panel_that_closes_late_is_never_pressed_again_at_the_old_position(tmp_path, caplog, delay, dismissals):
     """第 1 次按下生效但对话栏迟迟才关：delay=20 在确认轮询读满之后、第 2 次的命中检测时已关；delay=21 在第 2 次
     到达按钮并静止后的复核时才关。两种情况都不再按下（原位置在 V16 下是第 4 列卡片的封面）。"""
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = _chat_site(ai_chat_close_delay_reads=delay)
     harness = Harness(tmp_path, site)
 
@@ -236,7 +236,7 @@ def test_panel_that_closes_late_is_never_pressed_again_at_the_old_position(tmp_p
 def test_button_covered_by_the_time_the_pointer_arrives_is_not_pressed(tmp_path, caplog):
     """第 1 次读数（是否有对话栏）与反应停顿后的命中检测都可点，光标到达并静止后的复核时按钮已被盖住：不按下，
     第 2 次的命中检测仍被盖住就不再计划点击，写诊断后按 AI 布局继续。"""
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = _chat_site(ai_chat_covered_from_read=3)
     harness = Harness(tmp_path, site)
 
@@ -253,7 +253,7 @@ def test_button_covered_by_the_time_the_pointer_arrives_is_not_pressed(tmp_path,
 
 
 def test_continuation_pages_arriving_after_the_note_type_click_stay_non_target(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = _chat_site(ai_chat_followups_late=True)
     harness = Harness(tmp_path, site)
 
@@ -276,7 +276,7 @@ def test_continuation_pages_arriving_after_the_note_type_click_stay_non_target(t
 
 
 def test_reentering_the_search_closes_the_ai_chat_again(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = _chat_site()
     harness = Harness(tmp_path, site)
     process = harness.process_note
@@ -304,7 +304,7 @@ def test_reentering_the_search_closes_the_ai_chat_again(tmp_path, caplog):
 
 
 def test_ai_chat_reappearing_during_the_scan_is_diagnosed_once_per_session_and_not_closed(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = _chat_site()
     harness = Harness(tmp_path, site)
     process = harness.process_note
@@ -432,7 +432,7 @@ def _within(area: Box, x: float, y: float) -> bool:
 def test_v16_hover_filter_after_closing_keeps_the_panel_open_and_never_touches_the_tag_row(
     tmp_path, monkeypatch, caplog, seed,
 ):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = _chat_site(
         hover_opens_panel=True, entry_box=dict(V16_SPAN), entry_container_box=dict(V16_DIV),
         panel_box=dict(V16_PANEL), option_box=dict(V16_OPTION), hover_gaps=[dict(V16_DIV_GAP)],

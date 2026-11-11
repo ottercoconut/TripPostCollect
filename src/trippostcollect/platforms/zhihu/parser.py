@@ -33,7 +33,7 @@ from trippostcollect.runtime.helpers import extract_text_from_html, normalize_im
 from . import models as zhihu_constant
 from .models import ZhihuContent, ZhihuCreator, ZhihuSearchPage
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 _ZHIHU_BODY_BLOCK_TAGS = frozenset(
     {

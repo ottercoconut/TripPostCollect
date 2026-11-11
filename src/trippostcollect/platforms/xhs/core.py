@@ -51,7 +51,7 @@ from trippostcollect.platforms.xhs.session import XhsSessionMixin
 from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.runtime.page_capture import PageCaptureChannel
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 
 def _mark_cdp_lifecycle_failed(

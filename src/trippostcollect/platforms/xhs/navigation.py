@@ -52,7 +52,7 @@ from trippostcollect.runtime.human_pointer import Box, pointer_for
 from trippostcollect.runtime.page_capture import CapturedResponse
 from trippostcollect.runtime.visit_ledger import line_seq
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 # 搜索结果页路径（V16：回车后为 /search_result_ai），只按路径精确比较，不用子串。
 XHS_SEARCH_RESULT_PATHS = frozenset({"/search_result_ai", "/search_result"})

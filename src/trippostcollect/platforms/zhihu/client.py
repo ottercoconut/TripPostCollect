@@ -41,7 +41,7 @@ from .models import (
 from .parser import ZhihuExtractor
 from .signer import sign
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 IMAGE_REFERER = "https://www.zhihu.com/"
 

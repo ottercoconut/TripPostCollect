@@ -38,7 +38,7 @@ from .client import ZhiHuClient
 from .parser import ZhihuExtractor, judge_zhihu_url, merge_search_content_detail
 from . import parser as zhihu_store
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 class ZhihuCrawler:
     context_page: Page

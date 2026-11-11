@@ -409,7 +409,7 @@ async def test_search_and_store_logs_never_contain_avatar_or_body(monkeypatch, t
         )
 
     monkeypatch.setattr(crawler, "_store_content", store)
-    caplog.set_level("INFO", logger="MediaCrawler")
+    caplog.set_level("INFO", logger="TripPostCollect")
 
     await crawler.search()
 
@@ -430,7 +430,7 @@ async def test_pong_failure_log_omits_me_response(caplog):
 
     client = search_client_for(Me([]))
     client.get = AsyncMock(return_value={"uid": "", "avatar_url": "https://pic1.zhimg.com/v2-me-avatar.jpg"})
-    caplog.set_level("INFO", logger="MediaCrawler")
+    caplog.set_level("INFO", logger="TripPostCollect")
 
     assert await client.pong() is False
     assert "avatar" not in caplog.text
@@ -440,7 +440,7 @@ async def test_pong_failure_log_omits_me_response(caplog):
 @pytest.mark.asyncio
 async def test_request_error_log_omits_response_body(caplog, sleeps):
     http = SearchHttp([(500, '{"avatar_url": "https://pic1.zhimg.com/v2-err-avatar.jpg"}')] * 3)
-    caplog.set_level("INFO", logger="MediaCrawler")
+    caplog.set_level("INFO", logger="TripPostCollect")
 
     with pytest.raises(Exception):
         await search_client_for(http).request("GET", "https://www.zhihu.com/api/v4/search_v3?offset=0")

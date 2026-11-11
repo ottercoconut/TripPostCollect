@@ -55,7 +55,7 @@ from trippostcollect.xhs.engagement import (
     search_zero_evidence,
 )
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 FEED_RULE = XHS_FEED_RULE.name
 XHS_DETAIL_CAPTURE_SECONDS = 20.0

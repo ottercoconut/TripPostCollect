@@ -41,7 +41,7 @@ from .models import DataFetchError, PlatformRuntimeError, SearchType, WeiboImage
 from .parser import filter_search_result_card
 from .login import WeiboLogin
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 class WeiboCrawler:
     context_page: Page

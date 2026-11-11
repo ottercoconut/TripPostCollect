@@ -42,7 +42,7 @@ from trippostcollect.platforms.douyin.parser import (
 )
 from trippostcollect.platforms.douyin.signer import get_a_bogus
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 # 上游 380b426：边缘网关 ArgusSecurityPlugin 只要求 detail 请求带 x-tt-argus，当前不校验取值。
 # 搜索与作者资料请求不加：真实浏览器在这些请求上的取值不是 1。

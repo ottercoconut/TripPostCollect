@@ -51,7 +51,7 @@ from trippostcollect.platforms.xhs.parser import (
     xhs_creator_projection_spec,
 )
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 # 作者页数据就绪的有界等待：domcontentloaded 只是前置条件，成功以粉丝观察成立为准。
 XHS_CREATOR_RUNTIME_READY_SECONDS = 10.0

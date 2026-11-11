@@ -30,7 +30,7 @@ from trippostcollect.platforms.xhs.errors import XHSImageDownloadError
 from trippostcollect.runtime.image_retry import classified_http_image_error
 from trippostcollect.runtime.page_capture import CapturedImage, ImageWindow, image_url_form
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 # 每次翻到下一张之前的停顿（操作人 2026-10-14 要求全面提速，#79）。
 XHS_IMAGE_FLIP_SECONDS = (0.8, 1.8)

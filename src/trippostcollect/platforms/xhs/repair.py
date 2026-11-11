@@ -53,7 +53,7 @@ from trippostcollect.runtime.browser import CDPBrowserLifecycleError
 from trippostcollect.runtime.image_retry import is_runtime_blocking_image_error
 from trippostcollect.runtime.page_capture import ImageWindow
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 # navigate 动作只记路由模板，不记链接与 token。
 XHS_REPAIR_ROUTE = "/explore/<id>"

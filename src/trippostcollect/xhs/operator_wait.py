@@ -21,7 +21,7 @@ OPERATOR_WAIT_STATES = frozenset({"waiting", "ended"})
 OPERATOR_WAIT_REFRESH_SECONDS = 30.0
 BEHAVIOR_EVIDENCE_ENV = "TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE"
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 
 def operator_wait_diagnostics_path(behavior_evidence_path: str | Path) -> Path:

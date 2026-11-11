@@ -219,7 +219,7 @@ def test_root_staging_matches_frozen_baseline(platform, tmp_path, monkeypatch):
     root = tmp_path / "baseline"
     images = asyncio.run(_stage_images(
         lambda: _root_image_stager(platform, str(root)), root, "platform_post_id",
-        lambda sink: patch.object(logging.getLogger("MediaCrawler"), "info", side_effect=sink),
+        lambda sink: patch.object(logging.getLogger("TripPostCollect"), "info", side_effect=sink),
     ))
     assert expectations.scrub(images, (tmp_path, "<TMP>")) == expected["images"]
     assert _tree(root) == expected["tree_after_images"]

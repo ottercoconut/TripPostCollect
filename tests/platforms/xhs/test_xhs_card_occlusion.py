@@ -214,7 +214,7 @@ async def test_v16_cards_under_the_sticky_hot_row_are_clicked_below_it_and_the_t
 ):
     """第 4 行在滚到 1000px 之前不可点，之后它的封面上沿在吸顶的标签排下面、中心在排下方，此时点开。
     reported=False：页面脚本没报出标签排（以后新出现的遮挡），带不抬高，靠落点命中检测拒绝落在排上的点并重抽。"""
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     pages = [[note(f"p{page}-{index}") for index in range(8)] for page in (1, 2, 3)]
     crawler, _, state_path, site = _v16_crawler(monkeypatch, tmp_path, pages)
     site.hot_row_reported = reported
@@ -309,7 +309,7 @@ def test_planned_points_on_the_sticky_hot_row_are_rejected_and_redrawn(tmp_path,
 async def test_card_covered_when_the_pointer_arrives_is_not_pressed_and_leaves_no_click_card(
     monkeypatch, tmp_path, caplog,
 ):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     pages = [[note(f"p1-{index}") for index in range(8)], [note(f"p2-{index}") for index in range(4)]]
     crawler, feeds, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=None, pages=pages)
     site.hit_overrides["p1-1"] = [None, False]  # 落点计划时命中；光标到达并静止后被新出现的遮挡盖住
@@ -344,7 +344,7 @@ async def test_card_covered_when_the_pointer_arrives_is_not_pressed_and_leaves_n
 
 @pytest.mark.asyncio
 async def test_overlay_controls_covered_before_the_press_are_not_pressed(monkeypatch, tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=["only"])
     site.details["only"] = detail_card("only", images=3)
     monkeypatch.setattr(xhs_media, "XHS_IMAGE_KEY_FLIP_SHARE", 0.0)  # 先点箭头
@@ -375,7 +375,7 @@ def _hot_search(site: XhsFakeSite, tag: str = "路线规划") -> None:
 
 
 def test_unexpected_hot_filter_session_reenters_from_home_and_closes_the_chat_again(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = XhsFakeSite(KEYWORD, _pages(3, 4))
     site.ai_chat = True
     harness = Harness(tmp_path, site)
@@ -452,7 +452,7 @@ async def test_card_click_that_starts_a_hot_filter_search_reenters_from_home_and
 
 
 def test_unexpected_sessions_beyond_the_limit_stop_the_run(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = XhsFakeSite(KEYWORD, _pages(1, 8))
     harness = Harness(tmp_path, site)
     original = harness.process_note
@@ -481,7 +481,7 @@ def test_unexpected_sessions_beyond_the_limit_stop_the_run(tmp_path, caplog):
 def test_note_type_already_selected_on_a_late_target_session_is_not_pressed_again(tmp_path, monkeypatch, caplog):
     """第 1 次点选后目标会话第 1 页晚到（等待超时）：第 2 次打开面板时“图文”已选中，当前会话已是目标会话，按成功处理；
     再点会取消“图文”（假站点 option_deselects）。"""
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = XhsFakeSite(KEYWORD, _pages(1, 4))
     site.option_deselects = True
     harness = Harness(tmp_path, site)
@@ -516,7 +516,7 @@ def test_note_type_already_selected_on_a_late_target_session_is_not_pressed_agai
 
 def test_note_type_preselected_with_another_filter_reenters_from_home(tmp_path, caplog):
     """回车会话已带“图文”与热门标签（非目标）：面板里“图文”已选中，原地无法修复，不点；回首页重新输入后照常点选。"""
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
     site = XhsFakeSite(KEYWORD, _pages(1, 4))
     site.option_deselects = True
     site.enter_filters = [list(HOT_FILTERS)]

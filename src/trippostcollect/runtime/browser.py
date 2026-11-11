@@ -52,7 +52,7 @@ from trippostcollect.runtime.browser_launcher import CDP_LOOPBACK_HOST, BrowserL
 from trippostcollect.runtime.browser_runtime import NATIVE_WINDOW_SIZE
 
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 
 @dataclass(frozen=True)

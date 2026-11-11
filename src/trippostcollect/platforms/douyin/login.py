@@ -31,7 +31,7 @@ from trippostcollect.application.contracts import DouyinLoginPorts
 from trippostcollect.runtime.cookies import convert_cookies, convert_str_cookie_to_dict
 from trippostcollect.platforms.douyin.login_support import DouYinLogin as DouyinSliderLogin, ExpiringLocalCache
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 class DouYinLogin(DouyinSliderLogin):
 

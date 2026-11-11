@@ -234,7 +234,7 @@ def test_card_without_registration_for_two_steps_stops_with_card_and_response_di
     site = XhsFakeSite(KEYWORD, _pages(2, 4), unregistered_ids=("stray", "hot-1", "general-1"))
     harness = Harness(tmp_path, site)
 
-    with caplog.at_level(logging.WARNING, logger="MediaCrawler"), pytest.raises(PlatformRuntimeError) as caught:
+    with caplog.at_level(logging.WARNING, logger="TripPostCollect"), pytest.raises(PlatformRuntimeError) as caught:
         harness.run()
 
     assert caught.value.code == "xhs_search_card_unregistered"
@@ -284,7 +284,7 @@ def test_page_item_that_never_renders_stops_with_an_items_never_rendered_diagnos
     site.unrendered_ids = {"n1-1"}
     harness = Harness(tmp_path, site)
 
-    with caplog.at_level(logging.WARNING, logger="MediaCrawler"), pytest.raises(PlatformRuntimeError) as caught:
+    with caplog.at_level(logging.WARNING, logger="TripPostCollect"), pytest.raises(PlatformRuntimeError) as caught:
         harness.run()
 
     assert caught.value.code == "xhs_search_items_unresolved"
@@ -339,7 +339,7 @@ def test_target_session_started_before_the_note_type_click_is_logged_with_its_tr
     site.entry_click_applies_filter = True
     harness = Harness(tmp_path, site)
 
-    with caplog.at_level(logging.WARNING, logger="MediaCrawler"):
+    with caplog.at_level(logging.WARNING, logger="TripPostCollect"):
         harness.run()
 
     assert harness.processed == [f"n1-{index}" for index in range(4)]
@@ -367,7 +367,7 @@ def test_target_session_from_the_note_type_click_logs_no_trigger_warning(tmp_pat
     site = XhsFakeSite(KEYWORD, _pages(1, 4))
     harness = Harness(tmp_path, site)
 
-    with caplog.at_level(logging.WARNING, logger="MediaCrawler"):
+    with caplog.at_level(logging.WARNING, logger="TripPostCollect"):
         harness.run()
 
     assert harness.processed == [f"n1-{index}" for index in range(4)]
@@ -382,7 +382,7 @@ def test_non_note_cards_of_the_session_are_skipped_and_do_not_hold_the_page_open
     site = XhsFakeSite(KEYWORD, pages)
     harness = Harness(tmp_path, site)
 
-    with caplog.at_level(logging.INFO, logger="MediaCrawler"):
+    with caplog.at_level(logging.INFO, logger="TripPostCollect"):
         harness.run()
 
     assert len(hot) == 50
@@ -567,7 +567,7 @@ def test_filter_entry_that_never_renders_waits_out_both_attempts_then_stops_with
     harness = Harness(tmp_path, site)
     events = _record_sleeps_and_clicks(harness)
 
-    with caplog.at_level(logging.WARNING, logger="MediaCrawler"), pytest.raises(XhsSearchEntryFailed) as caught:
+    with caplog.at_level(logging.WARNING, logger="TripPostCollect"), pytest.raises(XhsSearchEntryFailed) as caught:
         harness.run()
 
     assert caught.value.code == "target_filter_not_applied"
@@ -596,7 +596,7 @@ def test_filter_option_missing_on_first_attempt_reopens_the_panel_and_records_th
     site.option_missing_opens = 1
     harness = Harness(tmp_path, site)
 
-    with caplog.at_level(logging.WARNING, logger="MediaCrawler"):
+    with caplog.at_level(logging.WARNING, logger="TripPostCollect"):
         harness.run()
 
     assert harness.processed == [f"n1-{index}" for index in range(4)]
@@ -677,7 +677,7 @@ def test_filter_panel_opened_on_hover_is_used_without_pressing_and_the_path_to_t
     harness = Harness(tmp_path, site)
     events = _record_pointer(harness)
 
-    with caplog.at_level(logging.INFO, logger="MediaCrawler"):
+    with caplog.at_level(logging.INFO, logger="TripPostCollect"):
         harness.run()
 
     assert harness.processed == [f"n1-{index}" for index in range(4)]
@@ -718,7 +718,7 @@ def test_hover_panel_closed_before_the_option_press_fails_the_attempt_at_once_an
 
     harness.crawler._await_target_page_one = counting_wait
 
-    with caplog.at_level(logging.INFO, logger="MediaCrawler"):
+    with caplog.at_level(logging.INFO, logger="TripPostCollect"):
         harness.run()
 
     assert harness.processed == [f"n1-{index}" for index in range(4)]
@@ -887,7 +887,7 @@ def test_hover_panel_with_no_room_on_any_side_is_closed_by_the_entry_along_a_pat
     events = _record_pointer(harness)
     marks = _record_close(harness, events)
 
-    with caplog.at_level(logging.INFO, logger="MediaCrawler"):
+    with caplog.at_level(logging.INFO, logger="TripPostCollect"):
         harness.run()
 
     assert harness.processed == [f"n1-{index}" for index in range(4)]
@@ -916,7 +916,7 @@ def test_missing_list_area_is_logged_and_the_entry_is_pressed_inside_the_hover_r
     harness.crawler._scroll_area = lambda metrics: None
     marks = _record_close(harness, _record_pointer(harness))
 
-    with caplog.at_level(logging.INFO, logger="MediaCrawler"):
+    with caplog.at_level(logging.INFO, logger="TripPostCollect"):
         harness.run()
 
     assert _filter_methods(harness)[-1] == ("panel_close", "entry_press")
@@ -944,7 +944,7 @@ def test_panel_that_stays_open_after_the_pointer_leaves_is_closed_by_pressing_th
 
     harness.crawler._scan_sleep = sleep
 
-    with caplog.at_level(logging.INFO, logger="MediaCrawler"):
+    with caplog.at_level(logging.INFO, logger="TripPostCollect"):
         harness.run()
 
     assert harness.processed == [f"n1-{index}" for index in range(4)]
@@ -1009,7 +1009,7 @@ def test_list_scrolled_inside_a_container_uses_the_container_position_band_and_s
         await original(item, search_page, card)
 
     harness.crawler._process_note_card = process
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
 
     harness.run()
 
@@ -1189,7 +1189,7 @@ def test_first_row_passed_by_the_network_retrigger_is_backfilled_upward_and_the_
     site.list_rect = dict(LIST_RECT)
     harness = Harness(tmp_path, site)
     pauses = _fail_page_two_once(harness)
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
 
     harness.run()
 
@@ -1222,7 +1222,7 @@ def test_item_the_frontend_never_renders_is_backfilled_up_to_the_limit_then_stop
     site.list_rect = dict(LIST_RECT)
     harness = Harness(tmp_path, site)
 
-    with caplog.at_level(logging.WARNING, logger="MediaCrawler"), pytest.raises(PlatformRuntimeError) as caught:
+    with caplog.at_level(logging.WARNING, logger="TripPostCollect"), pytest.raises(PlatformRuntimeError) as caught:
         harness.run()
 
     assert caught.value.code == "xhs_search_items_unresolved"
@@ -1314,7 +1314,7 @@ def test_unread_item_below_the_view_is_read_by_scanning_on_without_backfill(tmp_
     harness = _waterfall_harness(tmp_path)
     site = harness.site
     placements = _record_placements(harness)
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
 
     harness.run()
 
@@ -1356,7 +1356,7 @@ def test_unread_items_above_the_view_are_backfilled_with_their_placement(tmp_pat
     site.dom_margin = 3000.0
     harness = Harness(tmp_path, site)
     _fail_page_two_once(harness)
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
 
     harness.run()
 
@@ -1386,7 +1386,7 @@ def test_unread_item_whose_dom_read_fails_is_backfilled_as_absent_then_stops(tmp
 
     monkeypatch.setattr(xhs_scan, "dom_card_diagnostic", failing)
     harness = _waterfall_harness(tmp_path)
-    caplog.set_level(logging.INFO, logger="MediaCrawler")
+    caplog.set_level(logging.INFO, logger="TripPostCollect")
 
     with pytest.raises(PlatformRuntimeError) as caught:
         harness.run()
