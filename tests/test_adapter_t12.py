@@ -726,6 +726,8 @@ def _normalize(node_id: str) -> str:
 def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> None:
     environment = _child_environment({}, tmp_path)
     environment["PYTHONPATH"] = os.pathsep.join(str(ROOT / name) for name in ("src", "tests", "scripts"))
+    # 显式加载 pytest_asyncio 时必须关掉自动入口，否则同一插件会以两个名字注册。
+    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "tests", "--collect-only", "-q", "-p", "no:cacheprovider",
          "-p", "pytest_asyncio.plugin", "--strict-markers"],

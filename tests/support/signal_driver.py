@@ -17,7 +17,12 @@ def isolated_signal_test(function):
         temporary = kwargs["tmp_path"]
         report = temporary / "signal-driver.xml"
         output = temporary / "signal-driver.log"
+        root = Path(__file__).resolve().parents[2]
         environment = dict(os.environ, TPC_SIGNAL_DRIVER=node)
+        # 与 lane 一致：显式加载 pytest_asyncio，并让 support 可导入。
+        # 自动入口会把同一插件再注册一次；裸 pytest 没有把 tests/ 放进 PYTHONPATH。
+        environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+        environment["PYTHONPATH"] = os.pathsep.join(str(root / name) for name in ("src", "tests", "scripts"))
         environment["TPC_LANE_COUNTS"] = str(temporary / "driver-counts.json")
         environment["TPC_EXEC_GUARD_REPORT"] = str(temporary / "driver-guard.json")
         with output.open("w") as stream:

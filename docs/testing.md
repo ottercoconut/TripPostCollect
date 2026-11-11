@@ -108,6 +108,28 @@ pytest driver 执行原函数全部断言，父进程检查退出码和临时 XM
   “问点点 ai”标签，#99；固定页头与滚动后吸顶的热门筛选标签排，点标签带 filter_hot 重新搜索，另可注入一次误点后的
   这种搜索，#102），站点自带的 JS 是假站点自身的前端，不是项目注入的脚本。
 
+## 本机预检
+
+[scripts/dev/mac_lanes.py](../scripts/dev/mac_lanes.py) 在 macOS 上跑托管 CI 里 `os` lane 以外的检查：
+component、socket、installation，台账四项（`symbols --check`、`inputs --check`、`drift`、`progress`），
+冻结文件校验，以及 ruff。检查对象是当前 HEAD。工作区有未提交改动时直接报错退出。
+`git archive HEAD` 把纯源码解到 `/private/tmp` 下的独立目录，再在该目录用
+`uv sync --locked --extra dev --python 3.12` 建立环境。每个 lane 用 `run_matrix.fresh_source`
+从这份纯源码再复制一份；外层 runner 是纯源码目录里的 `tests/run_lanes.py`，它再启动副本中的 runner。
+Seatbelt 拒绝读取 `~/Documents`，源码副本、解释器和报告都放在 `/private/tmp`。
+进程内会提高 `RLIMIT_NOFILE`，避免默认软限制 256 在 lane 里耗尽文件描述符。
+结束时无论成败都删除临时目录，包括带不可变标志的副本。
+其他操作系统会拒绝运行。命令不接受参数。任一项失败，命令就以非零状态退出。
+
+```bash
+source .venv/bin/activate
+python scripts/dev/mac_lanes.py
+```
+
+本机预检的范围不含 `os` lane。`os` lane 只在 GitHub 托管的 macOS VM 上运行。
+合入前以 Actions 上的完整 lane 结果为准；draft 期间的本机结果不能代替那次 CI。
+触发规则和超时见下一节。
+
 ## 一次性托管 macOS CI
 
 当前个人账号不能解除 sandbox 跑 OS lane。macOS sandbox 内 ps 不可用时直接视为缺能力，
