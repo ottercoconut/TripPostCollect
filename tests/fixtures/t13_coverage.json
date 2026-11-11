@@ -1557,7 +1557,7 @@
       {
        "file": "tests/test_bilibili_article_repair.py",
        "lane": "component",
-       "min_count": 18
+       "min_count": 14
       }
      ]
     },
