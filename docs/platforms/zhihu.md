@@ -90,8 +90,3 @@ workflow 不手工传 `--start-page` 或 `--resume-summary`。搜索 API 的 Ref
 详情解析必须在页面结构化 JSON 中按请求 ID 精确选取非空 answer/article entity，不能取实体字典中的
 第一项或把标题、空对象标为已观察。单帖正文图下载失败只跳过该候选并继续同批后续目标；只有授权、
 频控和登录等运行级错误才中止批次。该修复入口不写搜索 checkpoint，完成含义只覆盖清单中的旧行。
-
-旧脱敏作者身份用 `scripts/repair_author_identity.py --platform zhihu` 回填。现有 client 没有作者接口，
-已退出的 `get_creator_info` 不恢复。child 在搜索页完成行为证据后，按旧行 canonical URL 调用
-`get_answer_info` 或 `get_article_info`，只取 `author.id`、`name` 和 `url_token`。不下载正文图，不写内容和
-checkpoint。

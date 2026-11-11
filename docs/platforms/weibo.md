@@ -87,7 +87,3 @@ state、内容 JSONL、图片 manifest 和行为证据同时无变化的持续�
 （401/403 记 `login_required`，429 记 `rate_limited`，其他非 2xx 视为该条详情不可用），再读取结构化
 页面状态，仍要求目标 ID 完全一致且正文非空；不调用 Playwright `page.request` 等请求接口。
 该入口不写搜索 checkpoint，完成含义只覆盖清单中的旧行。
-
-旧脱敏作者身份用 `scripts/repair_author_identity.py --platform weibo` 回填。child 在搜索页完成行为证据后
-调用 `get_note_info_by_id`，只读取 `mblog.user.id` 与 `screen_name`，不下载 `mblog.pics`，不写内容和
-checkpoint。`$render_data` 缺失时仍走修复详情的页面状态回退。
