@@ -15,7 +15,7 @@ import numpy as np
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from trippostcollect.core.paths import DOUYIN_SLIDER_IMAGE_DIR
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 # -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com

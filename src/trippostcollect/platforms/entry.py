@@ -118,7 +118,7 @@ def weibo_dependencies(config, *, post_repair=False):
         field.name: getattr(config, field.name) for field in fields(CDPBrowserSettings)
     })
     readers = weibo_input_readers()
-    logger = logging.getLogger("MediaCrawler")
+    logger = logging.getLogger("TripPostCollect")
 
     async def run_required_human_behavior(page, platform_key):
         # 原 fork 行为桥：调用时读 env；scripts 不再插入 sys.path，xhs 就绪等待与证据写出改由包内同一实现提供。
@@ -289,7 +289,7 @@ def douyin_dependencies(config):
             save_data_root=_save_data_root(settings.SAVE_DATA_PATH),
             platform="douyin", source_key="note_download_url",
             source_asset_key=lambda item: douyin_source_asset_key(item.get("uri"), item["url"]),
-            log_saved=lambda count, aweme_id: logging.getLogger("MediaCrawler").info(
+            log_saved=lambda count, aweme_id: logging.getLogger("TripPostCollect").info(
                 f"[DouYinImage.store_post_images] saved {count} body images for aweme {aweme_id}"
             ),
         )
@@ -350,7 +350,7 @@ def _zhihu_dependencies(config):
         field.name: getattr(config, field.name) for field in fields(CDPBrowserSettings)
     })
     save_data_path = config.SAVE_DATA_PATH
-    logger = logging.getLogger("MediaCrawler")
+    logger = logging.getLogger("TripPostCollect")
 
     def accumulator_factory(platform):
         accumulator = AdaptiveAccumulator.for_platform(
@@ -446,7 +446,7 @@ def xhs_dependencies(config, *, repair=None):
         field.name: getattr(config, field.name) for field in fields(CDPBrowserSettings)
     })
     save_data_path = config.SAVE_DATA_PATH
-    logger = logging.getLogger("MediaCrawler")
+    logger = logging.getLogger("TripPostCollect")
 
     def accumulator_factory():
         # 小红书可重试的候选失败不写入跨轮 seen：下一轮全量扫描到时就地重试。

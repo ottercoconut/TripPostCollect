@@ -35,7 +35,7 @@ import httpx
 from PIL import Image, ImageDraw, ImageShow
 from playwright.async_api import Page
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 
 async def find_login_qrcode(

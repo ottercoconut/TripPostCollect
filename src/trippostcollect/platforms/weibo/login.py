@@ -35,7 +35,7 @@ from tenacity import (RetryError, retry, retry_if_result, stop_after_attempt,
 import logging
 from trippostcollect.application.contracts import WeiboLoginPorts
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 # TripPostCollect T05：迁自 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303；仅拆分职责与注入依赖。
 
 

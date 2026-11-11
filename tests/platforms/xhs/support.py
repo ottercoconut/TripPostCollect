@@ -74,7 +74,7 @@ def make_capture(directory: Path, *, context=None, mode: str = "discovery") -> P
 
 @contextmanager
 def crawler_log_lines() -> Iterator[list[str]]:
-    """收集期间 MediaCrawler logger 的消息与异常文本（按行），且不传到根 logger：失败报告不会带出原文。"""
+    """收集期间 TripPostCollect logger 的消息与异常文本（按行），且不传到根 logger：失败报告不会带出原文。"""
     lines: list[str] = []
 
     class Collect(logging.Handler):
@@ -83,7 +83,7 @@ def crawler_log_lines() -> Iterator[list[str]]:
             if record.exc_info:
                 lines.extend(logging.Formatter().formatException(record.exc_info).splitlines())
 
-    logger = logging.getLogger("MediaCrawler")
+    logger = logging.getLogger("TripPostCollect")
     handler = Collect(logging.DEBUG)
     saved_level, saved_propagate = logger.level, logger.propagate
     logger.addHandler(handler)

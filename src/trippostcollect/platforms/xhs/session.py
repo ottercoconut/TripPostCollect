@@ -59,7 +59,7 @@ from trippostcollect.platforms.xhs.page_scripts import STATE_SCRIPTS, dom_focus_
 from trippostcollect.runtime.page_capture import CapturedResponse, PageCaptureChannel, route_of
 from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_path
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 
 # 普通新标签页从出现起的最短保留（操作人 2026-10-14 要求全面提速，#79）；作者标签页另按打开时抽到的时长延长。

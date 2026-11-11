@@ -16,22 +16,20 @@ import pytest
 from trippostcollect.application import failures, policy
 from trippostcollect.artifacts.evidence import write_evidence
 from trippostcollect.records import text_signals
-from trippostcollect.runtime import behavior, human_flow
+from trippostcollect.runtime import behavior
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_legacy_forwarders_preserve_function_identity():
-    for name, implementation in (
-        ("crawl_policy", policy),
-        ("failure_classifier", failures),
-        ("human_flow", human_flow),
-    ):
-        legacy = importlib.import_module(name)
-        for symbol, value in vars(implementation).items():
-            if inspect.isfunction(value) or inspect.isclass(value):
-                assert getattr(legacy, symbol) is value, (name, symbol)
+    scripts = str(ROOT / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    legacy = importlib.import_module("crawl_policy")
+    for symbol, value in vars(policy).items():
+        if inspect.isfunction(value) or inspect.isclass(value):
+            assert getattr(legacy, symbol) is value, ("crawl_policy", symbol)
     for name in (
         "_xhs_stable_sms_terminal_reason", "_xhs_sms_terminal_reason",
         "is_xhs_sms_terminal_text", "XHS_LEGACY_LOGIN_TERMINAL_PATTERNS",
@@ -52,18 +50,16 @@ def test_fork_dynamic_imports_and_behavior_injection(tmp_path):
         import sys
 
         sys.path.insert(0, sys.argv[1])
-        from human_flow import install_runtime_hints
         from mediacrawler_behavior import (
             run_page_behavior, run_guarded_request_pause,
             run_xhs_continuity_behavior,
             visible_page_state, record_xhs_platform_security_limit,
             run_xhs_post_interaction,
         )
-        from trippostcollect.runtime import behavior, human_flow
+        from trippostcollect.runtime import behavior
         from trippostcollect.artifacts.evidence import write_evidence
 
         legacy = importlib.import_module("mediacrawler_behavior")
-        assert install_runtime_hints is human_flow.install_runtime_hints
         assert visible_page_state is behavior.visible_page_state
         assert legacy.write_evidence is write_evidence
         for function in (

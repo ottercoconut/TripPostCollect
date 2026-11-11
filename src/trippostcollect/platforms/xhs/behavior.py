@@ -63,7 +63,7 @@ from trippostcollect.runtime.human_flow import (
     random_mouse_moves,
 )
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 
 XHS_SEARCH_READY_TIMEOUT_SECONDS = 90.0

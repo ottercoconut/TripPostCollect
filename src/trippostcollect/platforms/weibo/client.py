@@ -40,7 +40,7 @@ from trippostcollect.application.contracts import WeiboClientPorts
 from .models import DataFetchError, PlatformRuntimeError, SearchType, WeiboServerError
 from .parser import _find_weibo_detail
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 # 图片请求只带 UA、移动站 Referer 与图片 Accept：不带 Cookie，也不经第三方图片代理（#114）。
 WEIBO_IMAGE_REFERER = "https://m.weibo.cn/"

@@ -38,7 +38,7 @@ from trippostcollect.platforms.douyin.models import (
 from trippostcollect.platforms.douyin.parser import parse_video_info_from_url
 from trippostcollect.platforms.douyin.login import DouYinLogin
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 class DouYinCrawler:
     context_page: Page

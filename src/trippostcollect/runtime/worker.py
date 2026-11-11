@@ -159,7 +159,7 @@ def init_loging_config():
         format="%(asctime)s %(name)s %(levelname)s (%(filename)s:%(lineno)d) - %(message)s",
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    _logger = logging.getLogger("MediaCrawler")
+    _logger = logging.getLogger("TripPostCollect")
     _logger.setLevel(level)
 
     # Disable httpx INFO level logs

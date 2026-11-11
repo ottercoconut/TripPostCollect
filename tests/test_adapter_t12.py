@@ -610,6 +610,14 @@ T124_DELETED_LEDGER_NODES = {
     "tests/test_mediacrawler_pagination.py::test_pagination_evidence_keeps_douyin_frontier_reseed_event",
     "tests/test_trippostcollect_adaptive.py::test_douyin_reseed_requires_new_candidate_and_cursor",
 }
+# #70 第一批删除不再属于现行流程的 B站一次性提升与全量监督脚本，对应 4 个台账节点随之删除。
+# 现行修复仍由 tests/test_bilibili_article_repair.py 覆盖。
+T70_DELETED_LEDGER_NODES = {
+    "tests/test_bilibili_article_repair.py::test_incremental_promotion_and_target_state_clone",
+    "tests/test_bilibili_article_repair.py::test_pilot_gate_rejects_retryable_rows",
+    "tests/test_bilibili_article_repair.py::test_promote_validated_successes_into_original_target",
+    "tests/test_bilibili_article_repair.py::test_supervisor_promotes_pilot_and_prepares_full_state",
+}
 # #71 第一批（小红书取数改为浏览器 L1）删除或改写的台账节点：被替代的旧取数路径用例。
 T71_DELETED_LEDGER_NODES = {
     'tests/test_mediacrawler_behavior.py::test_xhs_api_captcha_does_not_complete_on_blank_redirect',
@@ -755,6 +763,7 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
         | T83_DELETED_LEDGER_NODES
         | T114_DELETED_LEDGER_NODES
         | T124_DELETED_LEDGER_NODES
+        | T70_DELETED_LEDGER_NODES
     )
     for source, target in MOVED_TO_TARGET.items():
         assert source not in collected and target in collected, (source, target)
@@ -767,4 +776,5 @@ def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> 
         - len(T83_DELETED_LEDGER_NODES)
         - len(T114_DELETED_LEDGER_NODES)
         - len(T124_DELETED_LEDGER_NODES)
+        - len(T70_DELETED_LEDGER_NODES)
     )

@@ -62,7 +62,7 @@ from trippostcollect.xhs.search_target import (
     search_filter_signature,
 )
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 SEARCH_RULE = XHS_SEARCH_RULE.name
 XHS_SEARCH_LOAD_WAIT_SECONDS = 20.0

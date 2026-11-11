@@ -776,7 +776,7 @@ async def test_author_tab_not_opened_records_a_link_diagnostic_without_query_val
     crawler, _, state_path, site = prepare_crawler(monkeypatch, tmp_path, items=[HEX_NOTE, "success-creator"])
     setup(site)
 
-    with caplog.at_level(logging.WARNING, logger="MediaCrawler"):
+    with caplog.at_level(logging.WARNING, logger="TripPostCollect"):
         await crawler.search()
 
     (skipped,) = events_of(state_path, "candidate_skipped")

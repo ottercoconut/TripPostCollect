@@ -35,7 +35,7 @@ from trippostcollect.platforms.xhs.manual_wait import XHSManualWaitBudget
 from trippostcollect.platforms.xhs.page_scripts import dom_qr_ready
 from trippostcollect.runtime.human_pointer import Box, pointer_for
 
-logger = logging.getLogger("MediaCrawler")
+logger = logging.getLogger("TripPostCollect")
 
 
 class XiaoHongShuLogin:

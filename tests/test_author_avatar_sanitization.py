@@ -233,7 +233,7 @@ def test_unstructured_child_output_without_avatar_key_is_unchanged() -> None:
 
 def log_line(tag: str, message: str, *, filename: str = "core.py:263") -> str:
     """worker logging 格式的一行（见 runtime.worker.init_loging_config）。"""
-    return f"2026-10-14 10:00:00 MediaCrawler INFO ({filename}) - {tag}{message}"
+    return f"2026-10-14 10:00:00 TripPostCollect INFO ({filename}) - {tag}{message}"
 
 
 def test_log_marker_counts_hit_lines_per_stream_and_keeps_only_module_tags() -> None:
@@ -253,7 +253,7 @@ def test_log_marker_counts_hit_lines_per_stream_and_keeps_only_module_tags() -> 
         "tags=[store.xhs.update_xhs_note],[Main]\n"
     )
     # 命中行的其他文字（URL、头像值、正文、token、文件名与行号）都不进标记。
-    for fragment in ("avatar.test", "崂山", "secret", "core.py", "MediaCrawler", "xhs note"):
+    for fragment in ("avatar.test", "崂山", "secret", "core.py", "TripPostCollect INFO", "xhs note"):
         assert fragment not in marker
     assert author_avatar_log_marker({"stdout": "plain\n", "stderr": ""}) is None
 
