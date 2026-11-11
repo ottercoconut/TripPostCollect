@@ -122,12 +122,7 @@ class WeiboCrawler:
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
-                from trippostcollect.records.author_observe import identity_targets_file
-
-                if identity_targets_file() is not None:
-                    await self.collect_author_identities()
-                else:
-                    await self.get_specified_notes()
+                await self.get_specified_notes()
             else:
                 pass
             logger.info("[WeiboCrawler.start] Weibo Crawler finished ...")
@@ -480,52 +475,6 @@ class WeiboCrawler:
             except KeyError as ex:
                 logger.error(f"[WeiboCrawler.get_note_info_task] have not fund note detail note_id:{note_id}, err: {ex}")
                 return None
-
-    async def collect_author_identities(self) -> None:
-        """按冻结作者清单取微博详情里的 user.id 与 screen_name，不下载图片、不写内容。"""
-
-        from trippostcollect.records.author_observe import (
-            AuthorIdentityBlocked,
-            collect_author_observations,
-            identity_fields,
-            identity_targets_file,
-            load_author_targets,
-            missed_identity,
-            observations_path,
-        )
-        from trippostcollect.records.identity import platform_nickname, platform_user_id
-
-        targets_path = identity_targets_file()
-        if targets_path is None:
-            return
-        targets = load_author_targets(targets_path)
-
-        async def fetch_post(post: dict) -> dict[str, str]:
-            note_id = str(post.get("platform_post_id") or "")
-            try:
-                result = await self.wb_client.get_note_info_by_id(note_id)
-            except PlatformRuntimeError as exc:
-                raise AuthorIdentityBlocked(str(exc.code or "runtime_failed")) from exc
-            except httpx.TransportError as exc:
-                raise AuthorIdentityBlocked("network_unreachable") from exc
-            except (DataFetchError, KeyError):
-                return missed_identity("detail_missing")
-            except Exception as exc:
-                return missed_identity(type(exc).__name__)
-            user = ((result or {}).get("mblog") or {}).get("user") or {}
-            creator_hash = platform_user_id(user.get("id"))
-            nickname = platform_nickname(user.get("screen_name"))
-            if not creator_hash or not nickname:
-                return missed_identity("missing_author")
-            return identity_fields(creator_hash=creator_hash, nickname=nickname)
-
-        await collect_author_observations(
-            platform="weibo",
-            targets=targets,
-            destination=observations_path(targets_path.parent),
-            fetch_post=fetch_post,
-            sleep_seconds=float(self.config.CRAWLER_MAX_SLEEP_SEC),
-        )
 
 
 

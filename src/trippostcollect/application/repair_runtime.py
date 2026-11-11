@@ -1,4 +1,4 @@
-"""详情修复与作者身份回填共用的备份、信号收束和 child 监督。"""
+"""详情修复共用的备份、信号收束和 child 监督。"""
 
 from __future__ import annotations
 

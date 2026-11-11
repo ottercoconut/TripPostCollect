@@ -140,10 +140,6 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
 字段的 aweme 对象；ID-only 路由状态和搜索卡片仍不能补签。该入口不写搜索 checkpoint，完成含义只
 覆盖清单中的旧行。
 
-旧脱敏作者身份用 `scripts/repair_author_identity.py --platform douyin` 回填。child 在搜索页完成行为证据后
-只请求 `get_video_by_id`，读取 `author.uid` 与 `author.nickname`。不调用作者资料接口，不下载正文图，
-不写内容和 checkpoint。HTTP 详情为空壳时仍可走现有浏览器详情回退。
-
 共享的有限重试、`candidate_skipped`、运行级阻断和媒体失败语义见
 [正式契约](../formal-crawl-contract.md)。视频、音乐和封面文件计数必须始终为 0，正文图不完整时不能
 URL-only 完成。
