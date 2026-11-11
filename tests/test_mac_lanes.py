@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import resource
+import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -67,17 +68,22 @@ def _patch_execution(monkeypatch, tmp_path, fail=None):
     monkeypatch.setattr(mac_lanes.sys, "platform", "darwin")
     monkeypatch.setattr(mac_lanes, "working_tree_status", lambda root: "")
     monkeypatch.setattr(mac_lanes, "raise_nofile_limit", lambda: 65536)
+    # 这些用例会在 component lane 的 Seatbelt 里执行。沙箱不允许在 /private/tmp 另建目录，
+    # 所以这里不调用真正的 mkdtemp，只验证 main 会建立并清掉自己的工作目录。
     created = []
-    real_mkdtemp = mac_lanes.tempfile.mkdtemp
+    work = tmp_path / "work"
 
-    def spy_mkdtemp(prefix, dir):
-        assert dir == "/private/tmp"
-        assert prefix.startswith("tpc-mac-lanes.")
-        path = real_mkdtemp(prefix=prefix, dir=dir)
-        created.append(Path(path))
-        return path
+    def fake_work_dir():
+        work.mkdir()
+        created.append(work)
+        return work
 
-    monkeypatch.setattr(mac_lanes.tempfile, "mkdtemp", spy_mkdtemp)
+    def fake_cleanup(path):
+        if path.exists():
+            shutil.rmtree(path)
+
+    monkeypatch.setattr(mac_lanes, "temporary_work_dir", fake_work_dir)
+    monkeypatch.setattr(mac_lanes, "cleanup", fake_cleanup)
     lanes = []
     static_names = []
 
@@ -183,6 +189,21 @@ def test_run_lane_reuses_fresh_source_and_temporary_python(monkeypatch, tmp_path
     assert "TPC_BROWSER_REPLAY" not in seen["env_lane_keys"]
     assert item["ok"] is True
     assert item["counts"]["selected"] == 3
+
+
+def test_temporary_work_dir_is_created_under_private_tmp(monkeypatch):
+    def fake_mkdtemp(prefix, dir):
+        assert dir == "/private/tmp"
+        assert prefix.startswith("tpc-mac-lanes.")
+        return "/private/tmp/tpc-mac-lanes.contract"
+
+    monkeypatch.setattr(mac_lanes.tempfile, "mkdtemp", fake_mkdtemp)
+    assert mac_lanes.temporary_work_dir() == Path("/private/tmp/tpc-mac-lanes.contract")
+
+
+def test_cleanup_refuses_to_delete_outside_private_tmp():
+    with pytest.raises(RuntimeError, match="拒绝删除"):
+        mac_lanes.cleanup(Path("/Users/example/mac-lanes-should-not-delete"))
 
 
 def test_raise_nofile_limit_from_default_256(monkeypatch):
