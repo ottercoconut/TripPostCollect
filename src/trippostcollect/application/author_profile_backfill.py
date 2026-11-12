@@ -39,8 +39,7 @@ from trippostcollect.core.paths import (
     PROJECT_ROOT,
     ensure_dir,
 )
-from trippostcollect.platforms.xhs.parser import creator_verified_fields
-from trippostcollect.records.sanitization import sanitize_author_avatar_data
+from trippostcollect.records.sanitization import public_payload
 from trippostcollect.runtime.process import operator_interrupt_error
 from trippostcollect.xhs.leases import DeferredTerminationSignals
 
@@ -57,28 +56,6 @@ COLUMNS = {"xhs": XHS_COLUMNS, "douyin": DOUYIN_COLUMNS}
 AWEME_ID_RE_TEXT = r"^[0-9]+$"
 CHILD_INTERRUPT_GRACE_SECONDS = None
 INTERRUPT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
-_SECRET_KEY = re.compile(r"cookie|token|authorization|secret", re.I)
-
-
-def drop_secret_keys(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            str(key): drop_secret_keys(item)
-            for key, item in value.items()
-            if not _SECRET_KEY.search(str(key))
-        }
-    if isinstance(value, list):
-        return [drop_secret_keys(item) for item in value]
-    return value
-
-
-def public_payload(value: Any) -> Any:
-    """报告、日志和回填证据不保留头像键或凭据键。"""
-
-    cleaned = sanitize_author_avatar_data(drop_secret_keys(value)).value
-    return cleaned
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="回填小红书认证两列，或抖音作者主页、简介和认证。")
     parser.add_argument("--platform", required=True, choices=PLATFORMS)
@@ -196,11 +173,14 @@ def projection_from_row(raw_sample_json: str) -> tuple[dict[str, Any] | None, st
     return profile, ""
 
 
-def xhs_fields_for_row(row: sqlite3.Row) -> tuple[dict[str, Any], str]:
+def xhs_fields_for_row(
+    row: sqlite3.Row,
+    verified_fields: Any,
+) -> tuple[dict[str, Any], str]:
     profile, reason = projection_from_row(str(row["raw_sample_json"] or ""))
     if profile is None:
         return {}, reason
-    fields = creator_verified_fields(profile)
+    fields = verified_fields(profile)
     if not fields:
         return {}, "verification_unknown"
     return fields, ""
@@ -249,6 +229,7 @@ def update_null_columns(
 def apply_xhs_authors(
     connection: sqlite3.Connection,
     authors: list[dict[str, Any]],
+    verified_fields: Any,
 ) -> dict[str, Any]:
     changed = 0
     success = 0
@@ -258,7 +239,7 @@ def apply_xhs_authors(
         row_states: list[str] = []
         row_failures: list[dict[str, str]] = []
         for row in author["rows"]:
-            fields, reason = xhs_fields_for_row(row)
+            fields, reason = xhs_fields_for_row(row, verified_fields)
             if reason:
                 row_states.append("unrecovered")
                 row_failures.append({"author_platform_id": author["author_platform_id"], "reason": reason})
@@ -344,8 +325,7 @@ def build_child_command(
 ) -> list[str]:
     command = [
         sys.executable,
-        "-m",
-        "trippostcollect.platforms.douyin.profile_backfill",
+        str(PROJECT_ROOT / "scripts" / "douyin_author_profile_worker.py"),
         "--targets",
         str(targets_path),
         "--keyword",
@@ -537,6 +517,7 @@ def run_xhs(
     run_dir: Path,
     state: FrozenExecutionState,
     summary_path: Path,
+    verified_fields: Any,
 ) -> int:
     plan = [{"batch": 1, "mode": "offline", "target_author_count": len(authors), "target_row_count": sum(len(a["rows"]) for a in authors)}]
     if dry_run:
@@ -588,7 +569,7 @@ def run_xhs(
             connection.row_factory = sqlite3.Row
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                applied = apply_xhs_authors(connection, authors)
+                applied = apply_xhs_authors(connection, authors, verified_fields)
                 if latch.signal_received is None:
                     connection.execute("COMMIT")
                 else:
@@ -687,9 +668,6 @@ def run_douyin(
                 for author in batch
             ]
         }
-        from trippostcollect.platforms.douyin.profile_backfill import validate_author_works
-
-        validate_author_works(manifest["authors"])
         targets_path = write_json(run_dir / "batches" / f"batch-{index:04d}-targets.json", manifest)
         output_path = run_dir / "children" / f"batch-{index:04d}" / "observations.json"
         command = build_child_command(
@@ -894,7 +872,7 @@ def run_douyin(
     return 2 if blocker else 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, verified_fields: Any = None) -> int:
     args = parse_args(argv)
     if args.max_authors < 0 or args.batch_size <= 0:
         raise SystemExit("--max-authors 不能为负；--batch-size 必须为正")
@@ -955,7 +933,9 @@ def main(argv: list[str] | None = None) -> int:
         "summary_path": summary_path,
     }
     if args.platform == "xhs":
-        return run_xhs(**common)
+        if verified_fields is None:
+            raise SystemExit("小红书回填需要注入与入库相同的认证计算函数")
+        return run_xhs(**common, verified_fields=verified_fields)
     return run_douyin(
         **common,
         keyword=str(args.keyword),

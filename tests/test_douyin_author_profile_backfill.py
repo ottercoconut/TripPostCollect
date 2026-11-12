@@ -9,6 +9,7 @@ import sqlite3
 import sys
 import threading
 import time
+from importlib import import_module
 from pathlib import Path
 
 import pytest
@@ -24,10 +25,12 @@ from test_author_profile_backfill import (
 from trippostcollect.application import author_profile_backfill as backfill
 from trippostcollect.platforms.douyin.profile_backfill import (
     author_profile_fields,
-    backfill_worker_config,
     collect_author_profiles,
     validate_author_works,
 )
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+author_worker = import_module("douyin_author_profile_worker")
 
 
 def test_douyin_fields_come_from_parser_and_drop_avatar() -> None:
@@ -52,7 +55,7 @@ def test_douyin_fields_come_from_parser_and_drop_avatar() -> None:
         validate_author_works([
             {"author_platform_id": "9", "works": [{"aweme_id": "10", "platform_post_id": "11"}]},
         ])
-    config = backfill_worker_config("青岛旅游", headless=True, save_path=Path("/tmp/unused"))
+    config = author_worker.backfill_worker_config("青岛旅游", headless=True, save_path=Path("/tmp/unused"))
     assert config.ENABLE_GET_MEIDAS is False
     assert config.DY_SPECIFIED_ID_LIST == []
     assert config.CRAWLER_TYPE == "detail"
@@ -313,7 +316,7 @@ def test_douyin_dry_run_lists_batches_without_child_or_backup(
     assert report["dry_run"] is True
     assert report["target_author_count"] == 2
     assert report["target_row_count"] == 2
-    assert report["batch_plan"][0]["command"][2] == "trippostcollect.platforms.douyin.profile_backfill"
+    assert report["batch_plan"][0]["command"][1].endswith("douyin_author_profile_worker.py")
     assert "青岛旅游" in report["batch_plan"][0]["command"]
     assert report["unrecovered_by_reason"]["invalid_aweme_id"] == 1
     assert not list((tmp_path / "bk").glob("**/*"))

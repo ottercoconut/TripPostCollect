@@ -81,7 +81,7 @@ def _xhs_raw(profile: dict | None) -> str:
 
 def _run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> int:
     _redirect(monkeypatch, tmp_path)
-    return backfill.main(argv)
+    return backfill.main(argv, verified_fields=xhs_parser.creator_verified_fields)
 
 
 def test_xhs_offline_matches_ingest_function_and_fills_only_nulls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
