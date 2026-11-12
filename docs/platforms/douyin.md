@@ -37,7 +37,9 @@
   取到文字时 `author_verified=1`。只有 `account_cert_info` 能解析为对象且没有 `label_text`、另两个字段都明确为
   空串时记 `author_verified=0`；缺资料、缺字段或无法解析时两列都为 NULL。`verification_type`（蓝 V 也为 0）与
   单独出现的 `is_biz_account`（页面不显示认证）不参与判定。四个字段的原值另记在 `author_verify_evidence`，
-  随 `raw_sample_json` 入库供复核。
+  随 `raw_sample_json` 入库供复核。实测形态：蓝 V 为 `label_style=5`，`label_text` 与
+  `enterprise_verify_reason` 相同；黄 V（如音乐人认证）为 `label_style=3`，`label_text` 是“音乐人、艺术家”，
+  `custom_verify` 与 `enterprise_verify_reason` 都是空串（2026-11-12）。
 - 去重键为 `aweme_id`。
 
 ## 搜索响应与游标

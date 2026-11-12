@@ -117,6 +117,13 @@ def test_verify_candidates_are_kept_as_evidence() -> None:
             {"custom_verify": "旅行领域创作者", "enterprise_verify_reason": "", "account_cert_info": "{}"},
             1, "旅行领域创作者", id="yellow_v_custom_verify",
         ),
+        # 2026-11-12 实测黄 V（“王某某（音乐人认证）”，主页显示认证徽章“音乐人”）：custom_verify 与
+        # enterprise_verify_reason 都是空串，认证文字只在 account_cert_info 的 label_style=3 label_text 里。
+        pytest.param(
+            {"custom_verify": "", "enterprise_verify_reason": "",
+             "account_cert_info": '{"label_style":3,"label_text":"音乐人、艺术家"}'},
+            1, "音乐人、艺术家", id="yellow_v_label_style_3",
+        ),
         pytest.param(
             {"custom_verify": "", "enterprise_verify_reason": "某公司", "account_cert_info": "{}"},
             1, "某公司", id="enterprise_reason_without_label",
