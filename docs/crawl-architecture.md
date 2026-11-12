@@ -15,8 +15,8 @@ config/crawl_targets.json
       -> 通用 SQLite checkpoint / seen / exclusion
       -> data/runtime/crawl_execution_states/<run_id>/<job>.json
       -> scripts/mediacrawler_crawl.py
-          -> scripts/crawl_policy.py
-          -> scripts/mediacrawler_behavior.py
+          -> trippostcollect.application.policy
+          -> trippostcollect.runtime.behavior（小红书特有动作在 trippostcollect.platforms.xhs.behavior）
           -> 根包 worker `python -m trippostcollect.platforms.entry`（微博、抖音、知乎）或进程内 B站 article 分支
           -> 共享头像清除器（失败关闭）
           -> 共享标题/正文投影与主题相关性分类（只读最终 web_posts.title、content_text + 实际关键词）

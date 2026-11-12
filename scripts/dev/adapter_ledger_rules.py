@@ -1874,10 +1874,7 @@ _STAGER = "四站同构整帖staging子类合并为PostImageStager单实现，�
 PROGRESS_RESOLUTIONS = {
     ("scripts/mediacrawler_crawl.py", "ensure_prerequisites"): (
         "迁至", "verify_package_resources", "T12起前置检查即包内资源散列核验；C保留端口适配"),
-    ("scripts/mediacrawler_behavior.py", "run_guarded_request_pause"): (
-        "迁至", "run_guarded_request_pause", "外部同名入口只注入证据出口后委托根实现"),
-    ("scripts/mediacrawler_behavior.py", "run_page_behavior"): (
-        "迁至", "run_page_behavior", "外部同名入口只注入小红书等待与证据出口后委托根实现"),
+    # #70：行为壳已删除。run_page_behavior / run_guarded_request_pause 与包内同名，常规定位即为 moved，不再登记迁至。
     ("scripts/mediacrawler_export_entrypoint.py", "install_xhs_repair_resilience"): (
         "迁至", "run_xhs_repair", "开关读取归worker_inputs.xhs_repair_reader并由entry装配；修复编排为显式分支"),
     ("scripts/mediacrawler_export_entrypoint.py", "install_douyin_browser_detail_fallback"): (

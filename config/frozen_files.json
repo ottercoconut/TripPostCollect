@@ -17,14 +17,14 @@
     },
     {
       "path": "docs/crawl-architecture.md",
-      "sha256": "72ca20cf09cf606ee62e6f399166bf502b689f28ae3e435ef291392a71c8d2c0",
+      "sha256": "908ac9a148091a461c8eb5e5a40af3b45cea77ef3b5fc2afb34b6421e29a1cda",
       "reason": "用户授权更新并重新冻结的五平台抓取与正文图片本地化架构基线；T14（#19）删除 fork 后经用户授权同步更新并重新冻结；#71 新增页面取数通道与访问证据后经用户授权同步更新并重新冻结；#111 通用四平台长期不纳入访问门禁后经用户授权同步更新并重新冻结；#124 抖音改为每轮全量扫描后经用户授权同步更新并重新冻结；#157 通用四平台改为目前沿用、计划 2026-11-12（UTC−8）之后重构，经用户授权同步更新并重新冻结",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
     },
     {
       "path": "docs/data-persistence.md",
-      "sha256": "a9846a3579e49a00c04ee6da37c2cee7537d26ee44f68e148291aafea6d9b396",
+      "sha256": "2b8c6a3ff0d55f7e3601477f10c79aed75ce9cada4d4837c993a94ffde1ebdfe",
       "reason": "用户授权更新并重新冻结的正文图片本地路径、事务和校验规范；T14（#19）删除 fork 后经用户授权同步更新并重新冻结；#71 小红书全量扫描与迁移 23 后经用户授权同步更新并重新冻结；#116 抖音粉丝字段限定为作者主页 user 节点后经用户授权同步更新并重新冻结；#112 写明短头像键只按键写法匹配；#124 抖音改为每轮全量扫描后经用户授权同步更新并重新冻结",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true

@@ -270,9 +270,14 @@ def test_old_locations_keep_no_second_implementation():
     assert set(moved) == {
         "scripts/mediacrawler_behavior.py", "scripts/mediacrawler_export_entrypoint.py", "scripts/mediacrawler_crawl.py",
     }
-    assert not (ROOT / "scripts/mediacrawler_export_entrypoint.py").exists()
+    absent = {
+        "scripts/mediacrawler_behavior.py",
+        "scripts/mediacrawler_export_entrypoint.py",
+    }
+    for relative in absent:
+        assert not (ROOT / relative).exists()
     for relative, names in moved.items():
-        if relative == "scripts/mediacrawler_export_entrypoint.py":
+        if relative in absent:
             continue
         tree = ast.parse((ROOT / relative).read_text())
         definitions = {

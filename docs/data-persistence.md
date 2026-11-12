@@ -188,21 +188,18 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
 
 schema v18 删除 `web_posts.author_avatar_url`，并把 `web_post_images.image_role` 约束为 `content` 或
-页面证据使用的 `page`。迁移在单一事务中删除旧头像关系、递归清理所有 schema 声明的 JSON 列，并
-按小红书导出结构明确清理序列化 `creator_profile_json.basicInfo.imageb/images` 头像字段；不按 URL
-域名、路径或文件名推断头像。随后重建图片表；正文图片、逐帖 `post_images_count` 和非头像作者字段的
-数量与哈希必须保持不变。
-先用 `scripts/migrate_author_avatar_data.py --dry-run` 在临时副本演练，再去掉 `--dry-run` 迁移正式库；
-正式命令会在 `data/backups/author_avatar_removal/` 建一致性备份，并把审计摘要写入
-`outputs/database_migrations/<run_id>/author_avatar_removal.json`。既有历史备份与运行产物只报告残留，
-不由该命令删除或改写。
+页面证据使用的 `page`。现行 `db/web_posts.sql` 已按此建表。`trippostcollect.db.bootstrap.ensure_content_schema`
+在每次打开内容库时调用 `migrate_remove_author_avatars`：新库只登记迁移版本并确认没有头像残留；尚未迁移的
+既有库在同一事务中删除旧头像关系、递归清理所有 schema 声明的 JSON 列，并按小红书导出结构明确清理序列化
+`creator_profile_json.basicInfo.imageb/images` 头像字段；不按 URL 域名、路径或文件名推断头像。随后重建图片表；
+正文图片、逐帖 `post_images_count` 和非头像作者字段的数量与哈希必须保持不变。重复执行只复核残留。
+不再单独运行迁移命令，也不扫描历史备份或运行产物。
 
-schema v20 `topic_relevance` 在单一事务中回填所有历史帖子并建立默认筛选索引；重复执行只报告现有
-分布，不重复改写。迁移不改变帖子总数、图片关系、媒体文件、正文或作者字段，并报告总量以及平台、
-关键词的相关/不相关分布。先在临时库运行
-`python scripts/migrate_topic_relevance.py --db <临时库> --dry-run`；正式迁移必须另行授权，命令会先在
-`data/backups/topic_relevance/<run_id>/` 建 SQLite 一致性备份，再提交并把报告写到
-`outputs/database_migrations/<run_id>/topic_relevance.json`。
+schema v20 的 `topic_relevant` 列已在现行 `db/web_posts.sql` 中。`ensure_content_schema` 对每个内容库调用
+`trippostcollect.db.topic_relevance_migration.migrate_topic_relevance`：缺列时补列，尚未记录版本 20 时按
+标题与正文回填全部历史帖子并写入 `schema_migrations`，然后确保索引 `idx_web_posts_topic_relevant` 存在。
+重复执行只报告现有分布，不重复改写。迁移不改变帖子总数、图片关系、媒体文件、正文或作者字段，并报告
+总量以及平台、关键词的相关/不相关分布。新建库与既有正式库都走这条引导路径，没有单独的迁移命令。
 
 显式使用 `--recovery-keyword` 人工续跑时，最终摘要会合并旧、新两轮记录，
 正常记录的 `web_posts.keyword` 会逐条保存真实来源，因此同一个最终 `artifact_dir` 可以同时

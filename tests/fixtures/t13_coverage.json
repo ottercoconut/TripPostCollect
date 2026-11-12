@@ -1303,7 +1303,7 @@
     {
      "file": "tests/test_adapter_t04a.py",
      "lane": "component",
-     "min_count": 5
+     "min_count": 4
     },
     {
      "function": "tests/test_adapter_t03.py::test_cookie_snapshot_matches_baseline",
