@@ -109,13 +109,13 @@ def _assert_no_forbidden(captured: dict, label: str):
 
 def _assert_raw_values_absent(captured: dict, raw_values, label: str):
     """禁用的原始值(sec_uid/short_id/unique_id/头像/签名/IP 等)不得出现在任何存储值里。
-    creator_hash 单独断言(作品为原始 uid),不参与子串扫描。"""
+    creator_hash(作品为原始 uid)与 author_profile_url(#163 由 sec_uid 拼出)单独断言,不参与子串扫描。"""
     leaked = []
     for rv in raw_values:
         if not rv:
             continue
         for k, v in captured.items():
-            if k == "creator_hash":
+            if k in {"creator_hash", "author_profile_url"}:
                 continue
             if isinstance(v, str) and rv in v:
                 leaked.append((k, rv))
@@ -153,6 +153,8 @@ def test_douyin_aweme_masks_user_info():
     _assert_raw_values_absent(captured, raw_sensitive, "douyin_aweme")
     # 3. creator_hash 为平台原始 uid
     assert captured.get("creator_hash") == raw_uid
+    # 3.1 #163：jsonl 记录的作者主页链接由 sec_uid 拼出，sec_uid 本身不作为键写出
+    assert captured.get("author_profile_url") == f"https://www.douyin.com/user/{aweme['author']['sec_uid']}"
     # 4. nickname 为平台原始昵称
     assert captured.get("nickname") == raw_nick
     # 4.1 作者统计字段保留。
