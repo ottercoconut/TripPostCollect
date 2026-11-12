@@ -1,8 +1,9 @@
 """抖音作者字段边界回归：SQLite 直接执行冻结旧列契约。
 
 用例名沿用测试台账登记的 node ID。#49 起作品（根实现）的 creator_hash 为平台原始 uid、nickname
-为原始昵称，sec_uid/short_id/unique_id/头像/IP 归属地仍不得写出。#163 起作者简介只取作者资料 user 节点的
-signature，且只写入 jsonl 记录；搜索作者对象里的签名与本文件的冻结旧列（db 模式）投影仍不写出。评论属 T12 退出切片，
+为原始昵称，sec_uid/short_id/unique_id/头像/IP 归属地不作为键写出。#163 起作者简介只取作者资料 user 节点的
+signature，且只写入 jsonl 记录；jsonl 记录另由 sec_uid 拼出作者主页链接。搜索作者对象里的签名、主页链接与本文件的
+冻结旧列（db 模式）投影仍不写出。评论属 T12 退出切片，
 原先只验证冻结旧评论投影哈希/脱敏行为的 test_douyin_comment_masks_user_info 随旧身份函数在 T14-C 删除。
 """
 import asyncio
@@ -108,13 +109,13 @@ def _assert_no_forbidden(captured: dict, label: str):
 
 def _assert_raw_values_absent(captured: dict, raw_values, label: str):
     """禁用的原始值(sec_uid/short_id/unique_id/头像/签名/IP 等)不得出现在任何存储值里。
-    creator_hash 单独断言(作品为原始 uid),不参与子串扫描。"""
+    creator_hash(作品为原始 uid)与 author_profile_url(#163 由 sec_uid 拼出)单独断言,不参与子串扫描。"""
     leaked = []
     for rv in raw_values:
         if not rv:
             continue
         for k, v in captured.items():
-            if k == "creator_hash":
+            if k in {"creator_hash", "author_profile_url"}:
                 continue
             if isinstance(v, str) and rv in v:
                 leaked.append((k, rv))
@@ -152,6 +153,8 @@ def test_douyin_aweme_masks_user_info():
     _assert_raw_values_absent(captured, raw_sensitive, "douyin_aweme")
     # 3. creator_hash 为平台原始 uid
     assert captured.get("creator_hash") == raw_uid
+    # 3.1 #163：jsonl 记录的作者主页链接由 sec_uid 拼出，sec_uid 本身不作为键写出
+    assert captured.get("author_profile_url") == f"https://www.douyin.com/user/{aweme['author']['sec_uid']}"
     # 4. nickname 为平台原始昵称
     assert captured.get("nickname") == raw_nick
     # 4.1 作者统计字段保留。
