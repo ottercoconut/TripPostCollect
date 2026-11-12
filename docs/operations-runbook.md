@@ -283,6 +283,53 @@ state 旁的 worker 进程组兜底强杀。stdout / stderr 先做头像审计�
 详情 `image_list` 正文图时，`desc` 为空不记为 `missing_content`。该例外只作用于 repair 模式，不把
 标题复制成正文，也不放宽正式发现抓取的正文契约；标题、正文和图片都为空仍是内容缺失。
 
+## 作者资料回填
+
+`scripts/backfill_author_profiles.py` 只填当前为 NULL 的作者列，不覆盖已有值，也不改粉丝、关注、昵称、正文、图片或 `published_at`。取不回的作者保留原行，不删除。写默认库前必须显式确认；程序在第一笔写入前建立 SQLite 一致性备份并记录 SHA-256。
+
+小红书不访问平台：从该行 `raw_sample_json.creator_profile_json` 用与入库相同的 `creator_verified_fields` 计算 `author_verified` / `author_verified_text`。解析失败或投影为空的行保持不动，并记入报告。
+
+抖音按 `author_platform_id` 分组。每位作者按入库时间从新到旧最多尝试 3 个已有作品：先在 `--keyword` 搜索页完成与详情修复相同的人类行为，再取作品详情和作者资料。详情里的作者 ID 必须与行一致才写。写入的简介、认证和主页链接是回填当时的作者资料，不是原始抓取时刻的；`author_json.profile_backfill` 记录 `observed_at`、`run_id`、`source_aweme_id` 和认证候选原值。登录失效、验证码、频控、安全策略、浏览器整体失败或网络不可达会停止后续批次，已提交的写入保留；再次运行只挑仍有空列、且没有 `profile_backfill` 记录的作者（作者本就没有简介时该列一直为空，不反复联网）。HTTP 详情返回空壳时与详情修复相同，改用浏览器打开作品页取详情；连续 10 位作者都只得到空详情时，按运行级阻断 `consecutive_empty_detail` 停止。
+
+先 dry-run，确认目标数、样本和批次计划。dry-run 不访问平台、不备份、不写库：
+
+```bash
+source .venv/bin/activate
+python scripts/backfill_author_profiles.py \
+  --platform xhs \
+  --dry-run
+```
+
+```bash
+source .venv/bin/activate
+python scripts/backfill_author_profiles.py \
+  --platform douyin \
+  --keyword 青岛旅游 \
+  --batch-size 20 \
+  --dry-run
+```
+
+确认后写默认库。`--max-authors N` 只处理前 N 位作者，`0` 表示全部；`--author-id` 可重复，用于精确重试：
+
+```bash
+source .venv/bin/activate
+python scripts/backfill_author_profiles.py \
+  --platform xhs \
+  --confirm-default-db-backfill
+```
+
+```bash
+source .venv/bin/activate
+python scripts/backfill_author_profiles.py \
+  --platform douyin \
+  --keyword 青岛旅游 \
+  --batch-size 20 \
+  --max-authors 20 \
+  --confirm-default-db-backfill
+```
+
+报告在 `outputs/author_profile_backfill/<platform>-<run_id>/run_summary.json`，执行状态在 `data/runtime/author_profile_backfill/<platform>-<run_id>/execution_state.json`，备份在 `data/backups/author_profile_backfill/<platform>-<run_id>/`。报告含目标作者数、成功数、只部分可得数、按原因计数的取不回数、改动行数、各列填充前后的非空数，以及取不回的作者 ID。报告和日志不写头像或 Cookie。
+
 ## 自动恢复与检查
 
 正常 workflow 不手工传页码、cursor 或摘要。runner 按 job/目标、查询指纹及小红书账号自动读取

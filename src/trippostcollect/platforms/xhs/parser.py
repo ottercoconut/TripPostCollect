@@ -198,7 +198,7 @@ XHS_OFFICIAL_VERIFY_NAMES = {1: "RedOfficial", 2: "BlueOfficial"}
 XHS_PROFESSION_TAG_TYPE = "profession"
 
 
-def _creator_verified_fields(creator: Dict) -> Dict:
+def creator_verified_fields(creator: Dict) -> Dict:
     """#167 作者认证两列（操作人 2026-11-12 确认）：官方认证与职业标签（如“美食博主”）都按认证记。
 
     - 官方认证：``verifyInfo.redOfficialVerifyType`` 为正整数即已认证；为 0、或作者主页投影里没有
@@ -568,7 +568,7 @@ def update_xhs_note(
     }
     if creator_profile:
         # #167：认证两列只在取到作者主页投影时写出；没有作者主页时两列为空。
-        local_db_item.update(_creator_verified_fields(creator_profile))
+        local_db_item.update(creator_verified_fields(creator_profile))
     if note_item.get("content_visit_refs"):
         # 来源引用（§5.3）：本记录引用的搜索、详情、作者与图片访问；随整条记录进 raw_sample_json。
         local_db_item["content_visit_refs"] = note_item["content_visit_refs"]

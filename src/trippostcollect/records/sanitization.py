@@ -278,6 +278,30 @@ def sanitize_author_avatar_data(
     )
 
 
+_SECRET_KEY = re.compile(r"cookie|token|authorization|secret", re.I)
+
+
+def drop_secret_keys(value: Any) -> Any:
+    """报告和回填证据不保留凭据键。键名匹配，不扫描正文。"""
+
+    if isinstance(value, dict):
+        return {
+            str(key): drop_secret_keys(item)
+            for key, item in value.items()
+            if not _SECRET_KEY.search(str(key))
+        }
+    if isinstance(value, list):
+        return [drop_secret_keys(item) for item in value]
+    return value
+
+
+def public_payload(value: Any) -> Any:
+    """去掉头像键、由其证明的重复 URL，以及凭据键。"""
+
+    cleaned = sanitize_author_avatar_data(drop_secret_keys(value)).value
+    return cleaned
+
+
 def sanitize_export_item(item: dict[str, Any]) -> dict[str, Any]:
     if os.environ.get("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS") != "1":
         raise RuntimeError("TripPostCollect MediaCrawler export sanitizer is not enabled")
