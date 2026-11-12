@@ -11,6 +11,7 @@ from trippostcollect.records import formal
 
 SEARCH_SIGNATURE = "搜索作者对象里的签名"
 PROFILE_SIGNATURE = "青岛文旅官方账号\n带你看青岛"
+SEC_UID = "MS4wLjABAAAAq-Qingdao_Test.Sec-Uid"
 
 
 def _aweme(profile_user: dict[str, Any] | None) -> dict[str, Any]:
@@ -152,12 +153,39 @@ def test_no_verify_candidates_writes_no_evidence_key() -> None:
 
 
 def test_frozen_db_projection_does_not_gain_new_columns() -> None:
-    record = _record(
-        _aweme({"follower_count": 10, "signature": PROFILE_SIGNATURE, "custom_verify": "x"}),
-        save_data_option="db",
-    )
+    item = _aweme({"follower_count": 10, "signature": PROFILE_SIGNATURE, "custom_verify": "x"})
+    item["author"]["sec_uid"] = SEC_UID
+    record = _record(item, save_data_option="db")
 
     assert "author_desc" not in record
     assert "author_verify_evidence" not in record
     assert "author_verified" not in record
     assert "author_verified_text" not in record
+    assert "author_profile_url" not in record
+    assert SEC_UID not in str(record)
+
+
+def test_author_profile_url_is_built_from_author_sec_uid() -> None:
+    item = _aweme({"follower_count": 10, "sec_uid": "MS4wLjABAAAAprofile"})
+    item["author"]["sec_uid"] = SEC_UID
+    record = _record(item)
+
+    assert record["author_profile_url"] == "https://www.douyin.com/user/" + SEC_UID
+    assert "sec_uid" not in record
+    assert _row(record)["author_profile_url"] == "https://www.douyin.com/user/" + SEC_UID
+
+
+def test_author_profile_url_falls_back_to_profile_user_sec_uid() -> None:
+    record = _record(_aweme({"follower_count": 10, "sec_uid": SEC_UID}))
+
+    assert record["author_profile_url"] == "https://www.douyin.com/user/" + SEC_UID
+
+
+@pytest.mark.parametrize("sec_uid", [None, "", "  ", 123, "bad/../path", "has space", "a?b=c"])
+def test_missing_or_malformed_sec_uid_writes_no_profile_url(sec_uid) -> None:
+    item = _aweme(None)
+    item["author"]["sec_uid"] = sec_uid
+    record = _record(item)
+
+    assert "author_profile_url" not in record
+    assert _row(record)["author_profile_url"] is None

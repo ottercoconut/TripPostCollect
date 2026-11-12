@@ -777,9 +777,30 @@ def update_douyin_aweme(
             else "detail_unobserved"
         )
         save_content_item["content_detail_source"] = content_detail_source
-        # 冻结旧列契约（db 模式）不含简介与认证证据，只在 jsonl 记录中写出（#163）。
+        # 冻结旧列契约（db 模式）不含简介、认证证据与主页链接，只在 jsonl 记录中写出（#163）。
         save_content_item.update(_profile_author_extras(creator_profile))
+        profile_url = _author_profile_url(user_info, creator_profile)
+        if profile_url is not None:
+            save_content_item["author_profile_url"] = profile_url
     return save_content_item
+
+
+DOUYIN_USER_URL_PREFIX = "https://www.douyin.com/user/"
+_SEC_UID_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+def _author_profile_url(user_info: Dict, creator_profile: Dict) -> str | None:
+    """#163：作者主页链接由 sec_uid 拼出（操作人 2026-11-12 允许保存）；sec_uid 本身不作为单独键写出。
+
+    先取作品作者对象的 sec_uid，缺失时取作者资料 user 节点；只接受字母数字与 ``-_.``，其他值不写。
+    """
+    for source in (user_info if isinstance(user_info, dict) else {}, _profile_user_node(creator_profile)):
+        sec_uid = source.get("sec_uid")
+        if isinstance(sec_uid, str):
+            sec_uid = sec_uid.strip()
+            if sec_uid and _SEC_UID_PATTERN.fullmatch(sec_uid):
+                return DOUYIN_USER_URL_PREFIX + sec_uid
+    return None
 
 
 # TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。

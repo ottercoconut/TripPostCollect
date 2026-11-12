@@ -27,8 +27,9 @@
   也不下载正文图。
 - 作者补全覆盖本轮全部未知图文候选，不使用固定作者数量上限。
 - 作者平台 ID 保存 `author.uid` 原始值（写在 `creator_hash` 键），昵称保存 `author.nickname` 原文；
-  `sec_uid`、`short_id`、`unique_id`、头像和 IP 归属地不写出。网页主页链接要用 `sec_uid`，所以不保存主页链接，
-  `author_profile_url` 为空（#163）。
+  `short_id`、`unique_id`（抖音号）、头像和 IP 归属地不写出。作者主页链接（#163，操作人 2026-11-12 允许）由
+  `sec_uid` 拼成 `https://www.douyin.com/user/<sec_uid>` 写入 `author_profile_url`：先取作品作者对象，缺失时取
+  资料 `user` 节点，只接受字母数字与 `-_.`；`sec_uid` 本身不作为单独键写出。历史行的主页链接为空。
 - 作者简介（#163）只取作者资料响应 `user` 节点的 `signature` 原文，写入 `author_desc`，入库为
   `author_description`；空串或缺失视为没有简介，不读搜索作者对象里的签名。
 - 认证（#163，实测对照主页“认证信息”）：同样只读资料 `user` 节点。`author_verified_text` 依次取
