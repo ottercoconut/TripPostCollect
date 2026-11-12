@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from trippostcollect.application import collection as t11_collection
+from trippostcollect.artifacts.evidence import write_evidence
 
 import asyncio
 import json
@@ -22,7 +23,6 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-mediacrawler_behavior = import_module("mediacrawler_behavior")
 mediacrawler_crawl = import_module("mediacrawler_crawl")
 xhs_behavior = import_module("trippostcollect.platforms.xhs.behavior")
 runtime_behavior = import_module("trippostcollect.runtime.behavior")
@@ -249,8 +249,8 @@ async def test_xhs_bare_visible_login_control_blocks_search_readiness(
         login_control_visible=True,
     )
 
-    visible_text, markers = await mediacrawler_behavior.visible_page_state(page)
-    readiness = await mediacrawler_behavior.wait_for_xhs_search_ready(page, [])
+    visible_text, markers = await runtime_behavior.visible_page_state(page)
+    readiness = await xhs_behavior.wait_for_xhs_search_ready(page, [])
 
     assert "登录" in visible_text
     assert markers["login_required"] is True
@@ -279,13 +279,14 @@ async def test_behavior_stage_writes_complete_evidence(tmp_path: Path, monkeypat
     monkeypatch.setattr(runtime_behavior, "dwell_on_list", fake_dwell_on_list)
     evidence_path = tmp_path / "behavior.json"
 
-    evidence = await mediacrawler_behavior.run_page_behavior(
+    evidence = await runtime_behavior.run_page_behavior(
         FakePage(),
         platform_key="weibo",
         evidence_path=evidence_path,
+        write_evidence=write_evidence,
     )
 
-    assert mediacrawler_behavior.behavior_evidence_valid(evidence) is True
+    assert runtime_behavior.behavior_evidence_valid(evidence) is True
     assert evidence["runtime_fingerprint"] == valid_fingerprint()
     assert json.loads(evidence_path.read_text())["status"] == "completed"
     assert evidence_path.with_suffix(".png").is_file()
@@ -328,7 +329,7 @@ async def test_xhs_search_verification_wait_keeps_page_open_until_cleared(
     page = FakePage(card_count=1, profile_count=1)
     events: list[dict] = []
 
-    readiness = await mediacrawler_behavior.wait_for_xhs_search_ready(page, events)
+    readiness = await xhs_behavior.wait_for_xhs_search_ready(page, events)
 
     assert readiness["ready"] is True
     assert page.brought_to_front == 1
@@ -375,7 +376,7 @@ async def test_xhs_search_login_wait_stops_on_sms_terminal_without_reopening_pag
     monkeypatch.setattr(xhs_behavior.asyncio, "sleep", no_sleep)
     page = FakePage(url="https://www.xiaohongshu.com/login")
 
-    readiness = await mediacrawler_behavior.wait_for_xhs_search_ready(page, [])
+    readiness = await xhs_behavior.wait_for_xhs_search_ready(page, [])
 
     verification = readiness["operator_verification_events"][0]
     assert readiness["ready"] is False
@@ -396,11 +397,14 @@ async def test_visible_challenge_fails_behavior_gate(tmp_path: Path, monkeypatch
     evidence_path = tmp_path / "behavior.json"
 
     with pytest.raises(RuntimeError, match="captcha_or_verify_detected"):
-        await mediacrawler_behavior.run_page_behavior(
+        await runtime_behavior.run_page_behavior(
             FakePage("请完成安全验证"),
             platform_key="xhs",
             evidence_path=evidence_path,
             profile_name="xhs_guarded",
+            write_evidence=write_evidence,
+            xhs_search_ready=xhs_behavior.wait_for_xhs_search_ready,
+            xhs_list_area=xhs_behavior.xhs_list_area,
         )
 
     evidence = json.loads(evidence_path.read_text())
@@ -409,7 +413,7 @@ async def test_visible_challenge_fails_behavior_gate(tmp_path: Path, monkeypatch
     assert evidence["initial_visible_markers"]["captcha_or_verify"] is True
     assert evidence["visible_markers"]["captcha_or_verify"] is True
     assert evidence["operator_verification_events"][0]["status"] == "failed"
-    assert mediacrawler_behavior.behavior_evidence_valid(evidence) is False
+    assert runtime_behavior.behavior_evidence_valid(evidence) is False
 
 
 @pytest.mark.asyncio
@@ -432,18 +436,21 @@ async def test_xhs_platform_security_limit_fails_closed(
     page.url = url
 
     with pytest.raises(RuntimeError, match="platform_security_limit_detected"):
-        await mediacrawler_behavior.run_page_behavior(
+        await runtime_behavior.run_page_behavior(
             page,
             platform_key="xhs",
             evidence_path=evidence_path,
             profile_name="xhs_guarded",
+            write_evidence=write_evidence,
+            xhs_search_ready=xhs_behavior.wait_for_xhs_search_ready,
+            xhs_list_area=xhs_behavior.xhs_list_area,
         )
 
     evidence = json.loads(evidence_path.read_text())
     assert evidence["status"] == "failed"
     assert evidence["challenge"] == "platform_security_limit"
     assert evidence["visible_markers"]["platform_security_limit"] is True
-    assert mediacrawler_behavior.behavior_evidence_valid(evidence) is False
+    assert runtime_behavior.behavior_evidence_valid(evidence) is False
 
 
 @pytest.mark.asyncio
@@ -451,7 +458,7 @@ async def test_non_xhs_retry_text_does_not_set_xhs_security_limit() -> None:
     page = FakePage("Account exception, please retry later")
     page.url = "https://example.test/search"
 
-    _, markers = await mediacrawler_behavior.visible_page_state(page)
+    _, markers = await runtime_behavior.visible_page_state(page)
 
     assert markers["platform_security_limit"] is False
 
@@ -461,7 +468,7 @@ async def test_xhs_captcha_url_is_a_visible_verification_challenge() -> None:
     page = FakePage("Scan with logged-in REDnote App", card_count=0, profile_count=0)
     page.url = "https://www.xiaohongshu.com/website-login/captcha?verifyUuid=test"
 
-    _, markers = await mediacrawler_behavior.visible_page_state(page)
+    _, markers = await runtime_behavior.visible_page_state(page)
 
     assert markers["captcha_or_verify"] is True
 
@@ -485,12 +492,12 @@ async def test_xhs_sms_terminal_challenge_is_detected_in_page_or_frame(
     if frame_text:
         page.frames.append(FakeFrame(frame_text))
 
-    text, markers = await mediacrawler_behavior.visible_page_state(page)
+    text, markers = await runtime_behavior.visible_page_state(page)
 
     assert "SMS" in text or "短信" in text
     assert markers["sms_verification_terminal"] is True
     assert (
-        mediacrawler_behavior.visible_challenge(markers)
+        runtime_behavior.visible_challenge(markers)
         == "sms_verification_terminal"
     )
 
@@ -508,7 +515,7 @@ async def test_xhs_sms_terminal_challenge_is_detected_in_page_or_frame(
 async def test_similar_xhs_sms_text_is_not_a_terminal_challenge(text: str) -> None:
     page = FakePage(text, url="https://www.xiaohongshu.com/explore")
 
-    _, markers = await mediacrawler_behavior.visible_page_state(page)
+    _, markers = await runtime_behavior.visible_page_state(page)
 
     assert markers["sms_verification_terminal"] is False
 
@@ -521,12 +528,12 @@ async def test_xhs_nested_security_frame_prioritizes_rate_limit() -> None:
         FakeFrame("Security Verification Requests too frequent. Try again after 1 minute.")
     )
 
-    text, markers = await mediacrawler_behavior.visible_page_state(page)
+    text, markers = await runtime_behavior.visible_page_state(page)
 
     assert "Requests too frequent" in text
     assert markers["captcha_or_verify"] is True
     assert markers["rate_limited"] is True
-    assert mediacrawler_behavior.visible_challenge(markers) == "rate_limited"
+    assert runtime_behavior.visible_challenge(markers) == "rate_limited"
 
 
 @pytest.mark.asyncio
@@ -534,7 +541,7 @@ async def test_xhs_login_url_is_a_visible_login_challenge() -> None:
     page = FakePage("", card_count=0, profile_count=0)
     page.url = "https://www.xiaohongshu.com/login?redirectPath=%2Fuser%2Fprofile%2Fauthor"
 
-    _, markers = await mediacrawler_behavior.visible_page_state(page)
+    _, markers = await runtime_behavior.visible_page_state(page)
 
     assert markers["login_required"] is True
 
@@ -544,7 +551,7 @@ async def test_xhs_retry_later_without_account_exception_is_not_security_limit()
     page = FakePage("Please retry later")
     page.url = "https://www.xiaohongshu.com/explore"
 
-    _, markers = await mediacrawler_behavior.visible_page_state(page)
+    _, markers = await runtime_behavior.visible_page_state(page)
 
     assert markers["platform_security_limit"] is False
 
@@ -563,12 +570,13 @@ async def test_xhs_platform_security_limit_writer_preserves_page_evidence(tmp_pa
         "login_required": False,
     }
 
-    event = await mediacrawler_behavior.record_xhs_platform_security_limit(
+    event = await xhs_behavior.record_xhs_platform_security_limit(
         page,
         evidence_path=evidence_path,
         stage="creator_profile:abc:arrival",
         visible_text_sample=page.text,
         visible_markers=markers,
+        write_evidence=write_evidence,
     )
 
     evidence = json.loads(evidence_path.read_text())
@@ -595,12 +603,13 @@ async def test_xhs_url_only_security_limit_does_not_invent_error_code(tmp_path: 
         "login_required": False,
     }
 
-    event = await mediacrawler_behavior.record_xhs_platform_security_limit(
+    event = await xhs_behavior.record_xhs_platform_security_limit(
         page,
         evidence_path=evidence_path,
         stage="creator_profile:abc:arrival",
         visible_text_sample="",
         visible_markers=markers,
+        write_evidence=write_evidence,
     )
 
     assert event["classification"] == "platform_security_limit"
@@ -642,11 +651,14 @@ async def test_xhs_dwell_stops_when_rate_limit_appears(
     evidence_path = tmp_path / "behavior.json"
 
     with pytest.raises(RuntimeError, match="rate_limited_detected"):
-        await mediacrawler_behavior.run_page_behavior(
+        await runtime_behavior.run_page_behavior(
             FakePage(),
             platform_key="xhs",
             evidence_path=evidence_path,
             profile_name="xhs_guarded",
+            write_evidence=write_evidence,
+            xhs_search_ready=xhs_behavior.wait_for_xhs_search_ready,
+            xhs_list_area=xhs_behavior.xhs_list_area,
         )
 
     evidence = json.loads(evidence_path.read_text())
@@ -661,14 +673,15 @@ async def test_sms_login_code_text_is_not_a_security_challenge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(runtime_behavior, "dwell_on_list", fake_dwell_on_list)
-    evidence = await mediacrawler_behavior.run_page_behavior(
+    evidence = await runtime_behavior.run_page_behavior(
         FakePage("手机号登录 获取验证码"),
         platform_key="xhs",
         evidence_path=tmp_path / "behavior.json",
+        write_evidence=write_evidence,
     )
 
     assert evidence["visible_markers"]["captcha_or_verify"] is False
-    assert mediacrawler_behavior.behavior_evidence_valid(evidence) is True
+    assert runtime_behavior.behavior_evidence_valid(evidence) is True
 
 
 @pytest.mark.asyncio
@@ -690,16 +703,19 @@ async def test_xhs_login_required_never_runs_behavior(
             "url": page.url,
         }
 
-    monkeypatch.setattr(mediacrawler_behavior, "wait_for_xhs_search_ready", not_ready)
+    monkeypatch.setattr(xhs_behavior, "wait_for_xhs_search_ready", not_ready)
     monkeypatch.setattr(runtime_behavior, "dwell_on_list", fake_dwell_on_list)
     evidence_path = tmp_path / "behavior.json"
 
     with pytest.raises(RuntimeError, match="login_required_detected"):
-        await mediacrawler_behavior.run_page_behavior(
+        await runtime_behavior.run_page_behavior(
             FakePage("登录后查看", card_count=0, profile_count=0),
             platform_key="xhs",
             evidence_path=evidence_path,
             profile_name="xhs_guarded",
+            write_evidence=write_evidence,
+            xhs_search_ready=xhs_behavior.wait_for_xhs_search_ready,
+            xhs_list_area=xhs_behavior.xhs_list_area,
         )
 
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -714,9 +730,9 @@ def test_xhs_behavior_rejects_exposed_webdriver_and_ineffective_scroll() -> None
     ineffective = valid_xhs_evidence()
     ineffective["events"][-1]["effective_passes"] = 0
 
-    assert mediacrawler_behavior.behavior_evidence_valid(valid_xhs_evidence()) is True
-    assert mediacrawler_behavior.behavior_evidence_valid(exposed) is False
-    assert mediacrawler_behavior.behavior_evidence_valid(ineffective) is False
+    assert runtime_behavior.behavior_evidence_valid(valid_xhs_evidence()) is True
+    assert runtime_behavior.behavior_evidence_valid(exposed) is False
+    assert runtime_behavior.behavior_evidence_valid(ineffective) is False
 
 
 @pytest.mark.parametrize("webdriver", [None, "missing", True, 0, "false"])
@@ -728,8 +744,8 @@ def test_xhs_behavior_accepts_only_the_native_false_webdriver(webdriver) -> None
     else:
         evidence["runtime_fingerprint"]["webdriver"] = webdriver
 
-    assert mediacrawler_behavior.runtime_fingerprint_valid(evidence["runtime_fingerprint"]) is False
-    assert mediacrawler_behavior.behavior_evidence_valid(evidence) is False
+    assert runtime_behavior.runtime_fingerprint_valid(evidence["runtime_fingerprint"]) is False
+    assert runtime_behavior.behavior_evidence_valid(evidence) is False
 
 
 @pytest.mark.asyncio
@@ -747,9 +763,9 @@ async def test_window_and_screen_sizes_are_recorded_but_not_gated() -> None:
     assert fingerprint["window_size"] == {"outer_width": 1450, "outer_height": 863}
     for drop in ("window_size", "screen"):
         reduced = {key: value for key, value in fingerprint.items() if key != drop}
-        assert mediacrawler_behavior.runtime_fingerprint_valid(reduced) is True
+        assert runtime_behavior.runtime_fingerprint_valid(reduced) is True
     taller = {**fingerprint, "window_size": {"outer_width": 1450, "outer_height": 900}}
-    assert mediacrawler_behavior.runtime_fingerprint_valid(taller) is True
+    assert runtime_behavior.runtime_fingerprint_valid(taller) is True
 
 
 @pytest.mark.asyncio
@@ -768,14 +784,15 @@ async def test_xhs_guarded_request_pause_is_persisted(tmp_path: Path, monkeypatc
     evidence_path = tmp_path / "behavior.json"
     evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
     monkeypatch.setattr(runtime_behavior, "REQUEST_RANDOM", FixedRandom())
-    monkeypatch.setattr(xhs_behavior.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(runtime_behavior.asyncio, "sleep", fake_sleep)
 
-    event = await mediacrawler_behavior.run_guarded_request_pause(
+    event = await runtime_behavior.run_guarded_request_pause(
         evidence_path=evidence_path,
         profile_name="xhs_guarded",
         stage="note_detail",
         minimum=4.0,
         maximum=10.0,
+        write_evidence=write_evidence,
     )
 
     persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -801,10 +818,11 @@ async def test_xhs_continuity_behavior_is_persisted(
     monkeypatch.setattr(xhs_behavior, "human_pause", fake_pause)
     monkeypatch.setattr(xhs_behavior, "random_mouse_moves", fake_mouse_moves)
 
-    continuity = await mediacrawler_behavior.run_xhs_continuity_behavior(
+    continuity = await xhs_behavior.run_xhs_continuity_behavior(
         FakePage(),
         evidence_path=evidence_path,
         stage="search_results",
+        write_evidence=write_evidence,
     )
 
     persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -854,10 +872,11 @@ async def test_xhs_continuity_waits_for_operator_login_and_continues(
     monkeypatch.setattr(xhs_behavior, "human_pause", fake_pause)
     monkeypatch.setattr(xhs_behavior, "random_mouse_moves", fake_mouse_moves)
 
-    continuity = await mediacrawler_behavior.run_xhs_continuity_behavior(
+    continuity = await xhs_behavior.run_xhs_continuity_behavior(
         page,
         evidence_path=evidence_path,
         stage="search_results",
+        write_evidence=write_evidence,
     )
 
     persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -908,10 +927,11 @@ async def test_xhs_manual_login_stops_on_sms_terminal_without_page_side_effects(
     monkeypatch.setattr(xhs_behavior.asyncio, "sleep", no_sleep)
 
     with pytest.raises(RuntimeError, match="sms_verification_terminal_detected"):
-        await mediacrawler_behavior.run_xhs_continuity_behavior(
+        await xhs_behavior.run_xhs_continuity_behavior(
             page,
             evidence_path=evidence_path,
             stage="search_results",
+            write_evidence=write_evidence,
         )
 
     persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -938,10 +958,11 @@ async def test_xhs_continuity_verification_timeout_is_persisted(
     monkeypatch.setattr(xhs_behavior, "XHS_CONTINUITY_VERIFY_POLL_SECONDS", 0.01)
 
     with pytest.raises(RuntimeError, match="xhs_continuity_verification_timeout"):
-        await mediacrawler_behavior.run_xhs_continuity_behavior(
+        await xhs_behavior.run_xhs_continuity_behavior(
             FakePage("登录后查看"),
             evidence_path=evidence_path,
             stage="search_results",
+            write_evidence=write_evidence,
         )
 
     persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -958,10 +979,11 @@ async def test_xhs_continuity_rate_limit_fails_and_is_persisted(tmp_path: Path) 
     evidence_path.write_text(json.dumps(valid_xhs_evidence()), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="rate_limited_detected"):
-        await mediacrawler_behavior.run_xhs_continuity_behavior(
+        await xhs_behavior.run_xhs_continuity_behavior(
             FakePage("请求过于频繁"),
             evidence_path=evidence_path,
             stage="search_results",
+            write_evidence=write_evidence,
         )
 
     persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -987,11 +1009,12 @@ async def test_xhs_requested_comment_scroll_is_recorded_without_changing_base_ga
     monkeypatch.setattr(xhs_behavior, "human_pause", fake_pause)
     monkeypatch.setattr(xhs_behavior, "_run_xhs_comment_scroll", fake_comment_scroll)
 
-    interaction = await mediacrawler_behavior.run_xhs_post_interaction(
+    interaction = await xhs_behavior.run_xhs_post_interaction(
         FakePage(),
         evidence_path=evidence_path,
         requested_mode="comment-scroll",
         note_id="note-1",
+        write_evidence=write_evidence,
     )
 
     persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -1043,7 +1066,7 @@ async def test_xhs_like_does_not_click_an_already_liked_control(monkeypatch: pyt
     page = LikePage()
     monkeypatch.setattr(xhs_behavior, "random_mouse_moves", no_mouse_moves)
 
-    result = await mediacrawler_behavior._run_xhs_like_once(page, object(), [])
+    result = await xhs_behavior._run_xhs_like_once(page, object(), [])
 
     assert result["status"] == "skipped_already_liked"
     assert page.like.clicked is False
@@ -1135,7 +1158,7 @@ async def test_xhs_like_clicks_once_and_verifies_state_change(monkeypatch: pytes
     monkeypatch.setattr(xhs_behavior, "human_pause", no_pause)
 
     events: list[dict] = []
-    result = await mediacrawler_behavior._run_xhs_like_once(page, object(), events)
+    result = await xhs_behavior._run_xhs_like_once(page, object(), events)
 
     assert result["status"] == "completed"
     assert page.like.click_count == 1
