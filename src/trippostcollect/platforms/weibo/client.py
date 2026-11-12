@@ -118,6 +118,23 @@ class WeiboClient:
         self.cookie_dict = cookie_dict
         self.ports = ports
         self.post_repair = post_repair
+        self._http_client = None
+        self._http_client_closed = False
+
+    def _get_http_client(self):
+        """Return the per-run HTTP client; no await point, so concurrent first calls share one."""
+        if self._http_client_closed:
+            raise PlatformRuntimeError("weibo HTTP client closed", code="http_client_closed")
+        if self._http_client is None:
+            self._http_client = self.ports.make_async_client(proxy=self.proxy)
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the reused HTTP client once; later requests fail instead of reconnecting."""
+        self._http_client_closed = True
+        client, self._http_client = self._http_client, None
+        if client is not None:
+            await client.aclose()
 
     @retry(
         stop=stop_after_attempt(5), wait=wait_fixed(3),
@@ -126,8 +143,8 @@ class WeiboClient:
     async def request(self, method, url, **kwargs) -> Union[Response, Dict]:
         enable_return_response = kwargs.pop("return_response", False)
         allow_empty_search = kwargs.pop("allow_empty_search", False)
-        async with self.ports.make_async_client(proxy=self.proxy) as client:
-            response = await client.request(method, url, timeout=self.timeout, **kwargs)
+        client = self._get_http_client()
+        response = await client.request(method, url, timeout=self.timeout, **kwargs)
 
         if enable_return_response:
             return response
@@ -254,22 +271,22 @@ class WeiboClient:
         :return:
         """
         url = f"{self._host}/detail/{note_id}"
-        async with self.ports.make_async_client(proxy=self.proxy) as client:
-            response = await client.request("GET", url, timeout=self.timeout, headers=self.headers)
-            if response.status_code != 200:
-                raise_for_weibo_status(response.status_code, "get weibo detail")
-                raise DataFetchError(f"get weibo detail err: {_response_summary(response)}")
-            match = re.search(r'var \$render_data = (\[.*?\])\[0\]', response.text, re.DOTALL)
-            if match:
-                render_data_json = match.group(1)
-                render_data_dict = json.loads(render_data_json)
-                note_detail = render_data_dict[0].get("status")
-                note_item = {"mblog": note_detail}
-                return note_item
-            else:
-                raise DataFetchError(
-                    "get weibo detail err: $render_data value not found"
-                )
+        client = self._get_http_client()
+        response = await client.request("GET", url, timeout=self.timeout, headers=self.headers)
+        if response.status_code != 200:
+            raise_for_weibo_status(response.status_code, "get weibo detail")
+            raise DataFetchError(f"get weibo detail err: {_response_summary(response)}")
+        match = re.search(r'var \$render_data = (\[.*?\])\[0\]', response.text, re.DOTALL)
+        if match:
+            render_data_json = match.group(1)
+            render_data_dict = json.loads(render_data_json)
+            note_detail = render_data_dict[0].get("status")
+            note_item = {"mblog": note_detail}
+            return note_item
+        else:
+            raise DataFetchError(
+                "get weibo detail err: $render_data value not found"
+            )
 
     async def get_note_image(self, image_url: str) -> bytes:
         candidates = weibo_image_request_urls(image_url)
@@ -286,13 +303,13 @@ class WeiboClient:
             headers = {"User-Agent": user_agent, **headers}
         for final_uri in candidates:
             try:
-                async with self.ports.make_async_client(proxy=self.proxy) as client:
-                    response = await client.request(
-                        "GET",
-                        final_uri,
-                        timeout=self.timeout,
-                        headers=headers,
-                    )
+                client = self._get_http_client()
+                response = await client.request(
+                    "GET",
+                    final_uri,
+                    timeout=self.timeout,
+                    headers=headers,
+                )
                 response.raise_for_status()
                 if len(response.content) > self.ports.image_max_bytes:
                     last_error = self.ports.image_error(

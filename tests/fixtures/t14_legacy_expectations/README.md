@@ -82,3 +82,6 @@ pytest -p pytest_asyncio.plugin \
   `validate_douyin_search_response` 不再要求与冻结快照逐字相同：旧实现只把 `verify_check` 当作异常，新实现只
   放行空值与 `service_empty`。偏离由 `tests/test_adapter_t06.py::test_issue131_search_nil_whitelist_deviation`
   钉住：先断言旧快照中两函数只认 `verify_check`，再断言新白名单行为。冻结快照本身未改。
+- #127 第 3 项（知乎 client 一次运行内复用 `httpx.AsyncClient`）后，T07 轨迹里每次请求一条的 `http_client` 只保留首条。
+  偏离由 `tests/support/connection_reuse_deviation.py` 钉住：先断言旧轨迹里工厂调用与请求一一对应、参数相同，
+  再做单向替换；`request`/`image` 的内容与次序不动。固化文件未改。

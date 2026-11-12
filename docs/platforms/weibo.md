@@ -23,6 +23,11 @@
 
 ## 请求失败分类
 
+平台 client 在一次运行内懒创建并复用同一个 `httpx.AsyncClient`（#127）。worker 清理（含异常与信号路径）先清理浏览器再关闭它，关闭后的请求按运行级 `http_client_closed` 报错，
+不再新建连接。
+client 不保留响应的 `Set-Cookie`：Cookie 只来自每次请求显式传入的请求头，正文图片请求不带 Cookie。
+连接失效属于传输层失败，走下文同一重试预算；重试时连接池已弃用失效连接，改用新连接。
+
 - 移动接口（`/api/config`、搜索、长文详情）返回 401/403 记 `login_required`，429 记 `rate_limited`，
   418/432 风控拦截记 `blocked_or_forbidden`；这些都是运行级阻断，不重试，也不再在每次失败后跳转
   首页刷新 Cookie。

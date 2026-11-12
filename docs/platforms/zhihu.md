@@ -49,6 +49,11 @@
 - 日志只记录内容 ID、类型、计数和状态码；不打印整条记录、search_v3 原始响应或 `/me` 响应。作者头像
   只在内存中用于排除正文图候选，不进入 `model_dump` 和项目 JSONL。
 
+平台 client 在一次运行内懒创建并复用同一个 `httpx.AsyncClient`（#127）。worker 清理（含异常与信号路径）先清理浏览器再关闭它，关闭后的请求按运行级 `http_client_closed` 报错，
+不再新建连接。
+client 不保留响应的 `Set-Cookie`：Cookie 只来自每次请求显式传入的请求头，正文图片请求不带 Cookie。
+Tenacity 重试复用同一 client，连接池已弃用失效连接，重试走新连接；重试次数和错误分类不变。
+
 ## 正文图片与资产键
 
 正文图只来自最终 answer/article HTML 归一后的 `image_list`。`zvideo`、`/equation` 公式图、头像、
