@@ -54,9 +54,16 @@
   视频 store；头像主机的响应从不读取。
 - 作者粉丝必须来自浮层内点击作者名打开的作者页页面状态，保存数值、`followers_observed=true` 和
   `author_followers_source=creator_profile`。
-- 作者简介取同一作者页投影的 `basicInfo.desc`，写入 `author_description`。认证只保留
-  `verifyInfo.redOfficialVerifyType` 类型码，随 `creator_profile_json` 保存，尚未写入 `author_verified` /
-  `author_verified_text`；取值语义待页面对照确认（#167）。
+- 作者简介取同一作者页投影的 `basicInfo.desc`，写入 `author_description`。认证两列（#167，操作人
+  2026-11-12 确认）同取作者页投影，官方认证与职业标签都按认证记：
+  - 官方认证类型码 `verifyInfo.redOfficialVerifyType` 的语义取自网页前端枚举：`1`=`RedOfficial`（红 V，
+    如薯队长）、`2`=`BlueOfficial`（蓝 V），前端对大于 0 的值显示认证图标。网页不显示认证文字（“官方账号”
+    只在 App 显示），所以认证文字写枚举名原文；未登记的正类型码只记已认证、不写枚举名。
+  - 职业标签取 `tags[]` 中 `tagType=profession` 的非空 `name`（如“美食博主”“旅行博主”），保持页面顺序并去重。
+  - 任一种存在时 `author_verified=1`，`author_verified_text` 为枚举名与职业标签用“；”连接、标签之间用“、”
+    连接，例如 `BlueOfficial；美食博主、旅行博主`。两种都没有且类型码为 0 或缺失（网页同样不显示图标）时为
+    `0`；类型码不是非负整数且没有职业标签、或没有作者页投影时两列为空。
+  - 历史行暂不回填；类型码与标签仍在各行的 `creator_profile_json` 中。
 - 平台层写 `<child_artifact>/xhs/data/xhs/` 下的 staging/manifest；根项目负责通用字节复验、晋升和
   SQLite。共享重试和失败分类不在本文重复。
 
