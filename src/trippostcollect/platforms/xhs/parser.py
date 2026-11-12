@@ -192,6 +192,50 @@ def _creator_profile_url(user_id: str, xsec_token: str = "", xsec_source: str = 
     return url
 
 
+# #167：小红书网页前端枚举（RedOfficial=1 红 V、BlueOfficial=2 蓝 V；前端对 >0 的类型码显示认证图标），
+# 网页不显示认证文字，所以认证文字写平台枚举名原文。
+XHS_OFFICIAL_VERIFY_NAMES = {1: "RedOfficial", 2: "BlueOfficial"}
+XHS_PROFESSION_TAG_TYPE = "profession"
+
+
+def _creator_verified_fields(creator: Dict) -> Dict:
+    """#167 作者认证两列（操作人 2026-11-12 确认）：官方认证与职业标签（如“美食博主”）都按认证记。
+
+    - 官方认证：``verifyInfo.redOfficialVerifyType`` 为正整数即已认证；为 0、或作者主页投影里没有
+      ``verifyInfo`` / 类型码，与网页一样按未认证；其他取值视为不明。
+    - 职业标签：``tags[]`` 中 ``tagType=profession`` 的非空 ``name``，保持页面顺序并去重。
+    - ``author_verified``：任一种存在为 1；都没有且官方认证明确为未认证时为 0；否则不写。
+    - ``author_verified_text``：枚举名与职业标签用“；”连接、标签之间用“、”连接，例如
+      ``BlueOfficial；美食博主、旅行博主``；未登记的正类型码不写枚举名。
+    """
+    verify_info = creator.get("verifyInfo")
+    code = verify_info.get("redOfficialVerifyType") if isinstance(verify_info, dict) else None
+    if code is None and (verify_info is None or isinstance(verify_info, dict)):
+        official: Optional[bool] = False
+    elif isinstance(code, int) and not isinstance(code, bool) and code >= 0:
+        official = code > 0
+    else:
+        official = None
+    professions: List[str] = []
+    tags = creator.get("tags")
+    for tag in tags if isinstance(tags, list) else []:
+        if not isinstance(tag, dict) or tag.get("tagType") != XHS_PROFESSION_TAG_TYPE:
+            continue
+        name = tag.get("name")
+        if isinstance(name, str) and name.strip() and name.strip() not in professions:
+            professions.append(name.strip())
+    if official or professions:
+        parts = []
+        if official and code in XHS_OFFICIAL_VERIFY_NAMES:
+            parts.append(XHS_OFFICIAL_VERIFY_NAMES[code])
+        if professions:
+            parts.append("、".join(professions))
+        return {"author_verified": 1, "author_verified_text": "；".join(parts) or None}
+    if official is False:
+        return {"author_verified": 0, "author_verified_text": None}
+    return {}
+
+
 def _normalized_creator_item(user_id: str, creator: Dict, *, current_timestamp: Callable[[], int]) -> Dict:
     basic = _creator_basic_info(creator)
     return {
@@ -522,6 +566,9 @@ def update_xhs_note(
         "xsec_token": note_item.get("xsec_token"),  # xsec_token
         "creator_profile_json": creator_item.get("creator_profile_json", ""),
     }
+    if creator_profile:
+        # #167：认证两列只在取到作者主页投影时写出；没有作者主页时两列为空。
+        local_db_item.update(_creator_verified_fields(creator_profile))
     if note_item.get("content_visit_refs"):
         # 来源引用（§5.3）：本记录引用的搜索、详情、作者与图片访问；随整条记录进 raw_sample_json。
         local_db_item["content_visit_refs"] = note_item["content_visit_refs"]
