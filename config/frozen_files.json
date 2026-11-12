@@ -24,7 +24,7 @@
     },
     {
       "path": "docs/data-persistence.md",
-      "sha256": "0a392ef51a904f27e74a6bf5a9c7dd95e6d0cde47cfd180c0c7bc38f39930ad1",
+      "sha256": "2b8c6a3ff0d55f7e3601477f10c79aed75ce9cada4d4837c993a94ffde1ebdfe",
       "reason": "用户授权更新并重新冻结的正文图片本地路径、事务和校验规范；T14（#19）删除 fork 后经用户授权同步更新并重新冻结；#71 小红书全量扫描与迁移 23 后经用户授权同步更新并重新冻结；#116 抖音粉丝字段限定为作者主页 user 节点后经用户授权同步更新并重新冻结；#112 写明短头像键只按键写法匹配；#124 抖音改为每轮全量扫描后经用户授权同步更新并重新冻结",
       "change_policy": "explicit-user-unfreeze",
       "require_immutable_flag": true
