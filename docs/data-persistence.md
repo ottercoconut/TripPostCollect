@@ -188,14 +188,12 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
 
 schema v18 删除 `web_posts.author_avatar_url`，并把 `web_post_images.image_role` 约束为 `content` 或
-页面证据使用的 `page`。迁移在单一事务中删除旧头像关系、递归清理所有 schema 声明的 JSON 列，并
-按小红书导出结构明确清理序列化 `creator_profile_json.basicInfo.imageb/images` 头像字段；不按 URL
-域名、路径或文件名推断头像。随后重建图片表；正文图片、逐帖 `post_images_count` 和非头像作者字段的
-数量与哈希必须保持不变。
-先用 `scripts/migrate_author_avatar_data.py --dry-run` 在临时副本演练，再去掉 `--dry-run` 迁移正式库；
-正式命令会在 `data/backups/author_avatar_removal/` 建一致性备份，并把审计摘要写入
-`outputs/database_migrations/<run_id>/author_avatar_removal.json`。既有历史备份与运行产物只报告残留，
-不由该命令删除或改写。
+页面证据使用的 `page`。现行 `db/web_posts.sql` 已按此建表。`trippostcollect.db.bootstrap.ensure_content_schema`
+在每次打开内容库时调用 `migrate_remove_author_avatars`：新库只登记迁移版本并确认没有头像残留；尚未迁移的
+既有库在同一事务中删除旧头像关系、递归清理所有 schema 声明的 JSON 列，并按小红书导出结构明确清理序列化
+`creator_profile_json.basicInfo.imageb/images` 头像字段；不按 URL 域名、路径或文件名推断头像。随后重建图片表；
+正文图片、逐帖 `post_images_count` 和非头像作者字段的数量与哈希必须保持不变。重复执行只复核残留。
+不再单独运行迁移命令，也不扫描历史备份或运行产物。
 
 schema v20 `topic_relevance` 在单一事务中回填所有历史帖子并建立默认筛选索引；重复执行只报告现有
 分布，不重复改写。迁移不改变帖子总数、图片关系、媒体文件、正文或作者字段，并报告总量以及平台、
