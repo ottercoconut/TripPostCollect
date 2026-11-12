@@ -19,6 +19,9 @@ from trippostcollect.records.sanitization import public_payload
 
 
 AWEME_ID_RE = re.compile(r"[0-9]+")
+# 连续这么多位作者都只得到空详情时，按运行级阻断停止，避免签名或接口整体失效时把全部作者误记为取不回。
+CONSECUTIVE_EMPTY_DETAIL_STOP = 10
+EMPTY_DETAIL_BLOCKER = "consecutive_empty_detail"
 FILLABLE_COLUMNS = (
     "author_profile_url",
     "author_description",
@@ -150,6 +153,7 @@ async def collect_author_profiles(
     observations: list[dict[str, Any]] = []
     unrecovered: list[dict[str, str]] = []
     semaphore = asyncio.Semaphore(1)
+    consecutive_empty = 0
     for author in validate_author_works(authors):
         if progress is not None:
             progress()
@@ -174,8 +178,12 @@ async def collect_author_profiles(
             failure = str(outcome.get("reason") or failure)
         if chosen is None:
             unrecovered.append({"author_platform_id": author_id, "reason": failure})
+            consecutive_empty = consecutive_empty + 1 if failure == "empty_detail" else 0
+            if consecutive_empty >= CONSECUTIVE_EMPTY_DETAIL_STOP:
+                return _stopped(observations, unrecovered, EMPTY_DETAIL_BLOCKER)
         else:
             observations.append(chosen)
+            consecutive_empty = 0
     return {"observations": observations, "unrecovered": unrecovered, "runtime_blocker": ""}
 
 

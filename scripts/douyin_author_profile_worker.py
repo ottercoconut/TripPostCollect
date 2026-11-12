@@ -21,6 +21,9 @@ BACKFILL_ENV = {
     "TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS": "1",
     "TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES": "0",
     "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": "-1",
+    # 与详情修复相同：HTTP 详情返回空壳时改用浏览器打开作品页取详情。
+    "TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK": "1",
+    "TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_TIMEOUT_MS": "30000",
 }
 
 
@@ -80,6 +83,10 @@ async def run_worker(args: argparse.Namespace) -> int:
     progress_path = output_path.with_name("progress.txt")
     os.environ.update(behavior_environment(evidence_path, "social_high_risk"))
     os.environ.update(BACKFILL_ENV)
+    # 与通用 worker 相同的时点读取开关；浏览器详情兜底只在这里取值。
+    from trippostcollect.platforms import entry
+
+    entry.install_hooks()
     config = backfill_worker_config(
         str(args.keyword),
         headless=bool(args.headless),

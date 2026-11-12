@@ -115,6 +115,8 @@ def load_rows(connection: sqlite3.Connection, platform: str, author_ids: list[st
         where = (
             "platform_key='douyin' AND ("
             "author_profile_url IS NULL OR author_description IS NULL OR author_verified IS NULL)"
+            # 已回填过的行不再重复联网：作者没有简介等平台本就不提供的列会一直为空。
+            " AND NOT (json_valid(author_json) AND json_extract(author_json, '$.profile_backfill') IS NOT NULL)"
         )
     return list(
         connection.execute(

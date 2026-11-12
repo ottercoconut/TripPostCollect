@@ -373,3 +373,59 @@ def test_douyin_interrupt_keeps_rows_and_closes_state(
     assert row["n"] == 1
     assert row["content_text"] == "正文"
     assert row["author_description"] is None
+
+
+@pytest.mark.asyncio
+async def test_consecutive_empty_details_stop_as_runtime_blocker() -> None:
+    """签名或接口整体失效时详情全为空：连续 10 位作者取不回即停止，不把后面的作者都记为取不回。"""
+
+    class Empty:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def get_aweme_detail(self, aweme_id: str, semaphore: object) -> None:
+            del semaphore
+            self.calls.append(aweme_id)
+            return None
+
+        async def enrich_aweme_creator(self, aweme: dict) -> dict:  # pragma: no cover - 不应调用
+            raise AssertionError(aweme)
+
+    fake = Empty()
+    authors = [
+        {"author_platform_id": str(index), "works": [{"aweme_id": str(100 + index), "platform_post_id": str(100 + index)}]}
+        for index in range(15)
+    ]
+    result = await collect_author_profiles(fake, authors)
+
+    assert result["runtime_blocker"] == "consecutive_empty_detail"
+    assert len(result["unrecovered"]) == 10
+    assert fake.calls == [str(100 + index) for index in range(10)]
+
+
+def test_worker_enables_browser_detail_fallback_like_detail_repair() -> None:
+    assert author_worker.BACKFILL_ENV["TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK"] == "1"
+
+
+def test_already_backfilled_rows_are_not_targeted_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """作者本就没有简介时该列一直为空；已写过 profile_backfill 的行不再联网。"""
+    db_path = _db(tmp_path)
+    with sqlite3.connect(db_path) as connection:
+        _douyin_row(
+            connection,
+            platform_post_id="100",
+            author_profile_url="https://www.douyin.com/user/MS4wLjABAAAAabc",
+            author_verified=0,
+            author_json=json.dumps({"profile_backfill": {"run_id": "earlier"}}),
+        )
+        _douyin_row(connection, platform_post_id="101", author_platform_id="author-2", author_json="not-json")
+        connection.commit()
+
+    monkeypatch.setattr(backfill, "run_repair_child", lambda *_a, **_k: pytest.fail("dry-run 不应启动 child"))
+    assert _run(tmp_path, monkeypatch, ["--platform", "douyin", "--db", str(db_path), "--dry-run"]) == 0
+    report = _summary(tmp_path)
+    assert report["target_author_count"] == 1
+    assert report["target_row_count"] == 1
