@@ -634,7 +634,7 @@ def test_fresh_source_without_tools_directory(monkeypatch, tmp_path):
     assert (copied / "src").is_dir()
 
 
-@pytest.mark.parametrize("extra_module, passed", [(None, True), ("crawl_policy", False)])
+@pytest.mark.parametrize("extra_module, passed", [(None, True), ("ctf_scrapling_preflight", False)])
 def test_assembly_check_rejects_modules_outside_source_src(tmp_path, extra_module, passed):
     """选站装配只允许从源码副本的 src 装载项目模块；scripts 等路径被插入 sys.path 时失败。"""
     import subprocess
@@ -656,7 +656,7 @@ def test_assembly_check_rejects_modules_outside_source_src(tmp_path, extra_modul
         cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=120, check=False)
     assert (result.returncode == 0) is passed, result.stdout[-2000:] + result.stderr[-2000:]
     if not passed:
-        assert "modules loaded outside src: crawl_policy" in result.stderr
+        assert "modules loaded outside src: ctf_scrapling_preflight" in result.stderr
 
 
 def test_policy_denies_project_login_profiles(tmp_path):

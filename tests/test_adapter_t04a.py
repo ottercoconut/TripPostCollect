@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import importlib
-import inspect
 import os
 from pathlib import Path
 import subprocess
@@ -13,7 +12,7 @@ import textwrap
 
 import pytest
 
-from trippostcollect.application import failures, policy
+from trippostcollect.application import failures
 from trippostcollect.artifacts.evidence import write_evidence
 from trippostcollect.records import text_signals
 from trippostcollect.runtime import behavior
@@ -23,13 +22,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_legacy_forwarders_preserve_function_identity():
-    scripts = str(ROOT / "scripts")
-    if scripts not in sys.path:
-        sys.path.insert(0, scripts)
-    legacy = importlib.import_module("crawl_policy")
-    for symbol, value in vars(policy).items():
-        if inspect.isfunction(value) or inspect.isclass(value):
-            assert getattr(legacy, symbol) is value, ("crawl_policy", symbol)
     for name in (
         "_xhs_stable_sms_terminal_reason", "_xhs_sms_terminal_reason",
         "is_xhs_sms_terminal_text", "XHS_LEGACY_LOGIN_TERMINAL_PATTERNS",
