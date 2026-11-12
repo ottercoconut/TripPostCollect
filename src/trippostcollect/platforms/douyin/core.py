@@ -65,6 +65,10 @@ class DouYinCrawler:
         self.creator_profile_cache: Dict[str, Dict] = {}
         self.creator_profile_failure_cache: Dict[str, Dict[str, Any]] = {}
         self.creator_profile_enriched_count = 0
+        # #178：作者资料回填只在被显式挂上冻结清单时走这条路径，搜索和详情不受影响。
+        self.author_profile_targets: List[Dict[str, Any]] | None = None
+        self.author_profile_result: Dict[str, Any] | None = None
+        self.author_profile_progress = None
 
     async def start(self) -> None:
         playwright_proxy_format, httpx_proxy_format = None, None
@@ -110,6 +114,27 @@ class DouYinCrawler:
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
+            if self.author_profile_targets is not None:
+                # 与 detail 模式相同：先在关键词搜索页完成人类行为，再按冻结作品取作者资料。
+                # 不写 checkpoint、不下载正文图、不写内容记录。
+                behavior_keyword = self.settings.KEYWORDS.split(",", maxsplit=1)[0].strip()
+                self.source_keyword = behavior_keyword
+                search_url = f"{self.index_url}/search/{quote(behavior_keyword)}?type=general"
+                await self.context_page.goto(search_url, wait_until="domcontentloaded")
+                await self.ports.run_required_human_behavior(self.context_page, "douyin")
+                await self.dy_client.update_cookies(
+                    browser_context=self.browser_context,
+                    urls=self.cookie_urls,
+                )
+                from trippostcollect.platforms.douyin.profile_backfill import collect_author_profiles
+
+                self.author_profile_result = await collect_author_profiles(
+                    self,
+                    self.author_profile_targets,
+                    progress=self.author_profile_progress,
+                )
+                logger.info("[DouYinCrawler.start] author profile backfill finished")
+                return
             self.crawler_type = self.settings.CRAWLER_TYPE
             if self.settings.CRAWLER_TYPE == "search":
                 # Search for notes and retrieve their comment information.
