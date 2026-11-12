@@ -63,7 +63,7 @@
   - 任一种存在时 `author_verified=1`，`author_verified_text` 为枚举名与职业标签用“；”连接、标签之间用“、”
     连接，例如 `BlueOfficial；美食博主、旅行博主`。两种都没有且类型码为 0 或缺失（网页同样不显示图标）时为
     `0`；类型码不是非负整数且没有职业标签、或没有作者页投影时两列为空。
-  - 历史行暂不回填；类型码与标签仍在各行的 `creator_profile_json` 中。
+  - 历史行的类型码与标签仍在各行的 `creator_profile_json` 中，离线回填见运行手册“作者资料回填”。
 - 平台层写 `<child_artifact>/xhs/data/xhs/` 下的 staging/manifest；根项目负责通用字节复验、晋升和
   SQLite。共享重试和失败分类不在本文重复。
 
