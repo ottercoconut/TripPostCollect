@@ -544,8 +544,13 @@ def _read_following(text: str | None) -> tuple[Any, str]:
     return payload["following_count"], ""
 
 
+# #182 解析修复部署前入库的行才可能是补零库存。此后关注数缺键写 NULL，三处同为 0 只能来自
+# 平台键上的真实 0，不得再改；这类行记为异常，由人工核对。值与 web_posts.created_at 同为 UTC。
+ZHIHU_FOLLOWING_FIX_CREATED_BEFORE = "2026-11-14 00:00:00"
+
+
 def classify_zhihu_following_row(row: sqlite3.Row) -> tuple[str, str]:
-    """三处同为整数 0 才是目标；三处都缺失则跳过；其余记为异常且不改。"""
+    """修复前入库、三处同为整数 0 才是目标；三处都缺失则跳过；其余记为异常且不改。"""
     column = row["author_following_count"]
     author_value, author_error = _read_following(row["author_json"])
     raw_value, raw_error = _read_following(row["raw_sample_json"])
@@ -555,7 +560,13 @@ def classify_zhihu_following_row(row: sqlite3.Row) -> tuple[str, str]:
         return "anomaly", f"raw_sample_json {raw_error}，不能确认三处关注数同为 0"
     observed = (column, author_value, raw_value)
     if all(_is_exact_zero(value) for value in observed):
-        return "target", ""
+        created_at = str(row["created_at"] or "")
+        if created_at and created_at < ZHIHU_FOLLOWING_FIX_CREATED_BEFORE:
+            return "target", ""
+        return "anomaly", (
+            f"入库时间 {created_at or '缺失'} 不早于 {ZHIHU_FOLLOWING_FIX_CREATED_BEFORE}（UTC），"
+            "三处同为 0 可能是真实值，不自动改"
+        )
     if all(_is_absent_count(value) for value in observed):
         return "absent", ""
     detail = (
@@ -629,7 +640,7 @@ def apply_zhihu_following(
         for row in author["rows"]:
             current = connection.execute(
                 """
-                SELECT id, author_following_count, author_json, raw_sample_json
+                SELECT id, author_following_count, author_json, raw_sample_json, created_at
                 FROM web_posts
                 WHERE id=? AND platform_key='zhihu'
                 """,

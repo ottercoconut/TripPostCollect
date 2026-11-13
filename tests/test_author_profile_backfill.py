@@ -330,8 +330,21 @@ def test_zhihu_following_zero_is_nulled_only_when_all_three_match(
             author_json="not-json",
             raw_sample_json=_ordered_raw(0, "坏 JSON"),
         )
+        # 修复部署后入库的三处 0 只能是平台给出的真实 0，不得改。
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="after-fix",
+            author_platform_id="author-after-fix",
+            author_following_count=0,
+            content_text="修复后真实 0",
+            created_at=backfill.ZHIHU_FOLLOWING_FIX_CREATED_BEFORE,
+            author_json=_ordered_author(0),
+            raw_sample_json=_ordered_raw(0, "修复后真实 0"),
+        )
         connection.commit()
-    before = {post_id: _stored(db_path, post_id) for post_id in ("uniform", "mismatch", "nonzero", "already-null", "invalid")}
+    post_ids = ("uniform", "mismatch", "nonzero", "already-null", "invalid", "after-fix")
+    before = {post_id: _stored(db_path, post_id) for post_id in post_ids}
 
     def fail_child(*_args, **_kwargs):
         raise AssertionError("知乎离线修正不应访问平台")
@@ -345,8 +358,8 @@ def test_zhihu_following_zero_is_nulled_only_when_all_three_match(
     assert dry["target_row_count"] == 1
     assert dry["target_author_count"] == 1
     assert dry["changed_row_count"] == 0
-    assert dry["anomaly_count"] == 3
-    assert {item["platform_post_id"] for item in dry["anomalies"]} == {"mismatch", "nonzero", "invalid"}
+    assert dry["anomaly_count"] == 4
+    assert {item["platform_post_id"] for item in dry["anomalies"]} == {"mismatch", "nonzero", "invalid", "after-fix"}
     assert not list((tmp_path / "bk").glob("**/*"))
     assert _stored(db_path, "uniform") == before["uniform"]
     _clear_reports(tmp_path)
@@ -356,7 +369,7 @@ def test_zhihu_following_zero_is_nulled_only_when_all_three_match(
     assert report["changed_row_count"] == 1
     assert report["success_count"] == 1
     assert report["target_row_count"] == 1
-    assert report["anomaly_count"] == 3
+    assert report["anomaly_count"] == 4
     assert report["backup"]["sha256"]
     states = list((tmp_path / "rt").glob("*/execution_state.json"))
     assert len(states) == 1
@@ -366,6 +379,7 @@ def test_zhihu_following_zero_is_nulled_only_when_all_three_match(
     assert "列=0" in reasons["mismatch"]
     assert "列=37" in reasons["nonzero"]
     assert "无法解析" in reasons["invalid"]
+    assert "不自动改" in reasons["after-fix"]
 
     updated = _stored(db_path, "uniform")
     unchanged_columns = set(before["uniform"]) - {"author_following_count", "author_json", "raw_sample_json"}
@@ -393,7 +407,7 @@ def test_zhihu_following_zero_is_nulled_only_when_all_three_match(
     assert raw["voteup_count"] == 0
     assert raw["comment_count"] == 0
     assert raw["meta"] == {"city": "青岛", "n": 1}
-    for post_id in ("mismatch", "nonzero", "already-null", "invalid"):
+    for post_id in ("mismatch", "nonzero", "already-null", "invalid", "after-fix"):
         assert _stored(db_path, post_id) == before[post_id]
     _clear_reports(tmp_path)
 
@@ -402,6 +416,6 @@ def test_zhihu_following_zero_is_nulled_only_when_all_three_match(
     assert again["target_row_count"] == 0
     assert again["target_author_count"] == 0
     assert again["changed_row_count"] == 0
-    assert again["anomaly_count"] == 3
+    assert again["anomaly_count"] == 4
     assert _stored(db_path, "uniform")["author_following_count"] is None
     assert len(list((tmp_path / "bk").glob("*"))) == 1
