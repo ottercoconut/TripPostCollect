@@ -34,6 +34,8 @@
 - 正文 `content_text` 保留块级换行并剔除 figure/figcaption；图片说明文字不进入正文。
 - 作者粉丝来自搜索 author/member 的 `follower_count`，要求
   `followers_observed=true`、`author_followers_source=search_author`；缺失不能补 0。
+- 作者关注数只在搜索 author/member 带 `following_count` 或 `followingCount`、且值不是 None
+  或空串时入库；缺失为 NULL，不补 0。键上的 0 仍记为 0（#182）。
 - 作者平台 ID 保存 author/member 原始 `id`（写在 `creator_hash` 键），昵称保存 `name` 原文；
   `url_token` 另存为 `creator_url_token`，只用于拼接主页 `https://www.zhihu.com/people/<url_token>`，
   不作为平台 ID。
