@@ -277,3 +277,38 @@ def test_v18_migration_removes_xhs_serialized_creator_profile_avatar_fields() ->
             ),
             "title": "青岛亲子游",
         }
+
+
+def test_v18_runs_with_or_without_author_platform_level() -> None:
+    """#181：author_platform_level 按列是否存在选择；删列前后 v18 都能执行。"""
+    with legacy_connection() as conn:
+        insert_legacy_post(conn, 1, "xhs")
+        applied = migrate_remove_author_avatars(conn)
+        conn.execute("ALTER TABLE web_posts DROP COLUMN author_platform_level")
+
+        repeated = migrate_remove_author_avatars(conn)
+
+        assert applied["applied"] is True
+        assert repeated["applied"] is False
+        assert "author_platform_level" not in {
+            row[1] for row in conn.execute("PRAGMA table_info(web_posts)")
+        }
+
+    with legacy_connection() as conn:
+        conn.execute("ALTER TABLE web_posts DROP COLUMN author_platform_level")
+        conn.execute(
+            """
+            INSERT INTO web_posts(
+                id, platform_key, author_display_name, author_platform_id,
+                post_images_count, metrics_json, author_json, raw_sample_json
+            ) VALUES (1, 'xhs', '作者', 'author-1', 0, '{}', '{}', '{}')
+            """
+        )
+
+        report = migrate_remove_author_avatars(conn)
+
+        assert report["applied"] is True
+        assert conn.execute("SELECT COUNT(*) FROM web_posts").fetchone()[0] == 1
+        assert "author_platform_level" not in {
+            row[1] for row in conn.execute("PRAGMA table_info(web_posts)")
+        }

@@ -62,13 +62,13 @@ def create_target(path: Path, count: int = 2) -> None:
                     published_at, captured_at, keyword, content_text, content_length,
                     metrics_json, author_json, raw_sample_json, artifact_dir,
                     capture_method, status, author_followers_count,
-                    post_likes_count, post_comments_count, post_views_count,
+                    post_likes_count, post_comments_count,
                     post_images_count
                 ) VALUES (
                     'bilibili', ?, 'mediacrawler', ?, ?, ?, '作者', '88',
                     '2023-11-15T06:13:20+08:00', '2026-08-02T00:00:00+00:00',
                     '青岛旅游', ?, ?, ?, ?, ?, '/original/artifact',
-                    'import', 'captured', 50, 1, 2, 3, 1
+                    'import', 'captured', 50, 1, 2, 1
                 )
                 """,
                 (
@@ -165,6 +165,57 @@ def valid_bilibili_login(monkeypatch) -> None:
             "source": "test",
         },
     )
+
+
+def test_prepare_search_record_reads_view_only_from_raw_json(tmp_path: Path) -> None:
+    target = tmp_path / "target.sqlite"
+    create_target(target, count=1)
+    with sqlite3.connect(target) as connection:
+        connection.row_factory = sqlite3.Row
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(web_posts)")}
+        connection.execute(
+            """
+            UPDATE web_posts
+            SET metrics_json=json_set(metrics_json, '$.views_count', 99)
+            WHERE platform_post_id='1001'
+            """
+        )
+        raw_view = json.loads(
+            connection.execute(
+                "SELECT raw_sample_json FROM web_posts WHERE platform_post_id='1001'"
+            ).fetchone()[0]
+        )
+        raw_view.pop("view", None)
+        connection.execute(
+            "UPDATE web_posts SET raw_sample_json=? WHERE platform_post_id='1001'",
+            (json.dumps(raw_view, ensure_ascii=False),),
+        )
+        row = connection.execute(
+            "SELECT * FROM web_posts WHERE platform_post_id='1001'"
+        ).fetchone()
+        from_raw = repair.prepare_search_record(row, [])
+        without_view_count = dict(raw_view)
+        without_view_count.pop("view_count", None)
+        without_view_count["view"] = 4
+        connection.execute(
+            """
+            UPDATE web_posts
+            SET raw_sample_json=?,
+                metrics_json=json_set(metrics_json, '$.views_count', 99)
+            WHERE platform_post_id='1001'
+            """,
+            (json.dumps(without_view_count, ensure_ascii=False),),
+        )
+        row = connection.execute(
+            "SELECT * FROM web_posts WHERE platform_post_id='1001'"
+        ).fetchone()
+        from_view = repair.prepare_search_record(row, [])
+
+    assert "post_views_count" not in columns
+    assert from_raw["view"] is None
+    assert from_raw["view_count"] == 3
+    assert from_view["view"] == 4
+    assert from_view["view_count"] == 4
 
 
 def test_dry_run_creates_manifest_without_changing_target(tmp_path: Path) -> None:
