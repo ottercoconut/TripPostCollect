@@ -24,7 +24,6 @@ import logging
 from typing import Dict, List, Optional, cast, Any
 from urllib.parse import quote
 from playwright.async_api import BrowserContext, BrowserType, Page, Playwright
-from tenacity import RetryError
 from trippostcollect.application.contracts import ImageStagingError, ZhihuSettings, ZhihuPorts
 from trippostcollect.core.paths import PROFILE_VIEWPORT, platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
@@ -35,6 +34,7 @@ from .models import (
     ZhihuImageDownloadError, ZhihuDetailFetchError,
 )
 from .client import ZhiHuClient
+from .detail_page import ZhihuDetailPages
 from .parser import ZhihuExtractor, judge_zhihu_url, merge_search_content_detail
 from .search_capture import ZhihuPageCapture
 from . import parser as zhihu_store
@@ -118,64 +118,24 @@ class ZhihuCrawler:
             await asyncio.sleep(settle_seconds)
         await self._activate_latest_zhihu_page()
 
+    def _detail_pages(self) -> ZhihuDetailPages:
+        capture = self._page_capture
+        if capture is None:
+            raise RuntimeError("zhihu_capture_channel_missing")
+        return ZhihuDetailPages(capture, self._extractor, self.context_page)
+
     async def enrich_search_content_detail(
         self,
         content: ZhihuContent,
     ) -> ZhihuContent:
-        """Fetch the full answer/article when search HTML has no content image."""
-        if content.image_list and content.content_text:
-            content.content_detail_status = "detail_observed"
-            content.content_detail_source = "search_content"
-            return content
+        """每条回答/文章都点开详情页。正文、图片和互动以详情页页面状态为准。"""
         if content.content_type not in {
             constant.ANSWER_NAME,
             constant.ARTICLE_NAME,
         }:
             return content
-
-        try:
-            if content.content_type == constant.ANSWER_NAME:
-                detail = await self.zhihu_client.get_answer_info(
-                    content.question_id,
-                    content.content_id,
-                )
-            else:
-                detail = await self.zhihu_client.get_article_info(content.content_id)
-        except (DataFetchError, RetryError) as exc:
-            nested = exc
-            if isinstance(exc, RetryError):
-                try:
-                    nested = exc.last_attempt.exception() or exc
-                except Exception:
-                    nested = exc
-            if isinstance(nested, PlatformRuntimeError):
-                raise ZhihuDetailFetchError(
-                    content.content_id,
-                    nested.code,
-                    runtime_blocking=True,
-                ) from exc
-            logger.warning(
-                "[ZhihuCrawler.enrich_search_content_detail] Detail request failed "
-                f"for {content.content_type}:{content.content_id}: {exc}"
-            )
-            raise ZhihuDetailFetchError(
-                content.content_id,
-                "detail_request_failed",
-            ) from exc
-        else:
-            if detail is None:
-                logger.warning(
-                    "[ZhihuCrawler.enrich_search_content_detail] Detail parse failed "
-                    f"for {content.content_type}:{content.content_id}"
-                )
-                raise ZhihuDetailFetchError(
-                    content.content_id,
-                    "detail_parse_failed",
-                )
-            else:
-                merge_search_content_detail(content, detail)
-
-        await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
+        detail = await self._detail_pages().open_from_search(content)
+        merge_search_content_detail(content, detail)
         return content
 
     async def start(self) -> None:
@@ -227,7 +187,7 @@ class ZhihuCrawler:
                 self._page_capture.install(self.context_page)
 
                 search_cookie_keyword = self.settings.KEYWORDS.split(",", maxsplit=1)[0].strip()
-                # 详情与正文图仍用浏览器外 HTTP；Cookie 与 UA 在首页加载后读取。
+                # 正文图仍用浏览器外 CDN；UA 在首页加载后从浏览器读取。详情改读页面状态。
                 self.zhihu_client = await self.create_zhihu_client(
                     httpx_proxy_format, referer_keyword=search_cookie_keyword,
                 )
@@ -524,109 +484,68 @@ class ZhihuCrawler:
             logger.info(
                 f"[ZhihuCrawler.get_specified_notes] Begin get specified note {full_note_url}"
             )
-            # Judge note type
             note_type: str = judge_zhihu_url(full_note_url)
+            if note_type == constant.VIDEO_NAME:
+                logger.info(
+                    "[ZhihuCrawler.get_note_detail] Skip zvideo URL; video is not a detail target"
+                )
+                return None
             if note_type == constant.ANSWER_NAME:
+                content_id = full_note_url.split("/")[-1]
                 question_id = full_note_url.split("/")[-3]
-                answer_id = full_note_url.split("/")[-1]
-                logger.info(
-                    f"[ZhihuCrawler.get_specified_notes] Get answer info, question_id: {question_id}, answer_id: {answer_id}"
-                )
-                try:
-                    result = await self.zhihu_client.get_answer_info(question_id, answer_id)
-                except DataFetchError as exc:
-                    logger.warning(
-                        "[ZhihuCrawler.get_note_detail] Answer detail request failed "
-                        f"for {answer_id}: {exc}"
-                    )
-                    return ZhihuContent(
-                        content_id=answer_id,
-                        question_id=question_id,
-                        content_type=constant.ANSWER_NAME,
-                        content_url=full_note_url,
-                        content_detail_status="request_failed",
-                    )
-
-                # Sleep after fetching answer details
-                await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
-                logger.info(f"[ZhihuCrawler.get_note_detail] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} seconds after fetching answer details {answer_id}")
-
-                if (
-                    result is None
-                    or str(result.content_id or "") != str(answer_id)
-                    or result.content_type != constant.ANSWER_NAME
-                    or not str(result.content_text or "").strip()
-                ):
-                    logger.warning(
-                        "[ZhihuCrawler.get_note_detail] Answer detail did not contain "
-                        f"the requested non-empty entity: {answer_id}"
-                    )
-                    return ZhihuContent(
-                        content_id=answer_id,
-                        question_id=question_id,
-                        content_type=constant.ANSWER_NAME,
-                        content_url=full_note_url,
-                        content_detail_status="parse_failed",
-                    )
-                result.content_detail_status = "detail_observed"
-                result.content_detail_source = "answer_detail"
-                return result
-
             elif note_type == constant.ARTICLE_NAME:
-                article_id = full_note_url.split("/")[-1]
-                logger.info(
-                    f"[ZhihuCrawler.get_specified_notes] Get article info, article_id: {article_id}"
+                content_id = full_note_url.split("/")[-1]
+                question_id = ""
+            else:
+                return None
+            logger.info(
+                "[ZhihuCrawler.get_note_detail] Open detail page "
+                f"type={note_type} content_id={content_id}"
+            )
+            placeholder = ZhihuContent(
+                content_id=content_id,
+                question_id=question_id,
+                content_type=note_type,
+                content_url=full_note_url,
+            )
+            try:
+                result = await self._detail_pages().open_direct(placeholder, full_note_url)
+            except ZhihuDetailFetchError as exc:
+                if exc.runtime_blocking:
+                    raise PlatformRuntimeError(str(exc), code=exc.code) from exc
+                status = (
+                    "parse_failed"
+                    if exc.code in {"detail_entity_missing", "detail_content_missing"}
+                    else "request_failed"
                 )
-                try:
-                    result = await self.zhihu_client.get_article_info(article_id)
-                except DataFetchError as exc:
-                    logger.warning(
-                        "[ZhihuCrawler.get_note_detail] Article detail request failed "
-                        f"for {article_id}: {exc}"
-                    )
-                    return ZhihuContent(
-                        content_id=article_id,
-                        content_type=constant.ARTICLE_NAME,
-                        content_url=full_note_url,
-                        content_detail_status="request_failed",
-                    )
-
-                # Sleep after fetching article details
-                await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
-                logger.info(f"[ZhihuCrawler.get_note_detail] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} seconds after fetching article details {article_id}")
-
-                if (
-                    result is None
-                    or str(result.content_id or "") != str(article_id)
-                    or result.content_type != constant.ARTICLE_NAME
-                    or not str(result.content_text or "").strip()
-                ):
-                    logger.warning(
-                        "[ZhihuCrawler.get_note_detail] Article detail did not contain "
-                        f"the requested non-empty entity: {article_id}"
-                    )
-                    return ZhihuContent(
-                        content_id=article_id,
-                        content_type=constant.ARTICLE_NAME,
-                        content_url=full_note_url,
-                        content_detail_status="parse_failed",
-                    )
-                result.content_detail_status = "detail_observed"
-                result.content_detail_source = "article_detail"
-                return result
-
-            elif note_type == constant.VIDEO_NAME:
-                video_id = full_note_url.split("/")[-1]
-                logger.info(
-                    f"[ZhihuCrawler.get_specified_notes] Get video info, video_id: {video_id}"
+                logger.warning(
+                    "[ZhihuCrawler.get_note_detail] Detail page unavailable "
+                    f"type={note_type} content_id={content_id} code={exc.code}"
                 )
-                result = await self.zhihu_client.get_video_info(video_id)
-
-                # Sleep after fetching video details
-                await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
-                logger.info(f"[ZhihuCrawler.get_note_detail] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} seconds after fetching video details {video_id}")
-
-                return result
+                return ZhihuContent(
+                    content_id=content_id,
+                    question_id=question_id,
+                    content_type=note_type,
+                    content_url=full_note_url,
+                    content_detail_status=status,
+                )
+            if (
+                str(result.content_id or "") != str(content_id)
+                or result.content_type != note_type
+                or not str(result.content_text or "").strip()
+            ):
+                return ZhihuContent(
+                    content_id=content_id,
+                    question_id=question_id,
+                    content_type=note_type,
+                    content_url=full_note_url,
+                    content_detail_status="parse_failed",
+                )
+            result.content_detail_status = "detail_observed"
+            result.content_detail_source = (
+                "answer_detail" if note_type == constant.ANSWER_NAME else "article_detail"
+            )
+            return result
 
     async def get_specified_notes(self):
         """

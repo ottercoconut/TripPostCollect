@@ -69,7 +69,9 @@ def test_baseline_records_three_heads_and_resource_hashes() -> None:
     # 包内资源是唯一运行期真源；基线每个资源都必须登记承接位置或退出（#127 第 2 项：stealth.min.js 退出）。
     package = ledger_rules.BASELINE_RESOURCE_RESOLUTIONS
     assert set(package) == set(resources)
-    assert {relative for relative, name in package.items() if name is None} == {"libs/stealth.min.js"}
+    assert {relative for relative, name in package.items() if name is None} == {
+        "libs/stealth.min.js", "libs/zhihu.js",
+    }
     from trippostcollect.core import resources as package_resources
 
     for relative, digest in resources.items():

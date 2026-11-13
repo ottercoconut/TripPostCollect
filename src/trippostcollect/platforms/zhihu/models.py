@@ -43,8 +43,10 @@ class ZhihuContent(BaseModel):
     desc: str = Field(default="", description="Content description")
     created_time: int = Field(default=0, description="Create time")
     updated_time: int = Field(default=0, description="Update time")
-    voteup_count: int = Field(default=0, description="Upvote count")
-    comment_count: int = Field(default=0, description="Comment count")
+    voteup_count: int | None = Field(default=None, description="Upvote count")
+    comment_count: int | None = Field(default=None, description="Comment count")
+    collected_count: int | None = Field(default=None, description="Favorite count from detail favlistsCount")
+    share_count: int | None = Field(default=None, description="Share count from detail reaction.statistics.shareCount")
     image_list: list[str] = Field(default_factory=list, description="Content image URLs")
     image_count: int = Field(default=0, description="Content image count")
     image_list_source: str = Field(default="", description="Authoritative body image source")
@@ -70,6 +72,10 @@ class ZhihuContent(BaseModel):
     following_count: int | None = Field(default=None, description="Creator following count")
     author_desc: str = Field(default="", description="Creator headline or description")
     verified_text: str = Field(default="", description="Creator verification text")
+    content_visit_refs: dict = Field(
+        default_factory=dict,
+        description="Detail visit reference prepared for the visit gate",
+    )
 
 
 class ZhihuCreator(BaseModel):

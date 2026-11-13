@@ -83,6 +83,43 @@ def _optional_count(*values):
     return None
 
 
+def _metric(source: Dict, *keys: str):
+    """这些键里第一个既非 None 也非空串的值，包含 0。键都缺失或为空时返回 None，不补 0。"""
+
+    if not isinstance(source, dict):
+        return None
+    for key in keys:
+        if key not in source:
+            continue
+        value = source.get(key)
+        if value in (None, ""):
+            continue
+        return value
+    return None
+
+
+def _present_int(source: Dict, *keys: str) -> int:
+    value = _metric(source, *keys)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value)
+
+
+def _share_count(source: Dict):
+    """详情页分享数在 ``reaction.statistics.shareCount``；搜索对象用 ``share_count``。缺键为 None。"""
+
+    if not isinstance(source, dict):
+        return None
+    reaction = source.get("reaction")
+    if isinstance(reaction, dict):
+        stats = reaction.get("statistics")
+        if isinstance(stats, dict) and ("shareCount" in stats or "share_count" in stats):
+            return _metric(stats, "shareCount", "share_count")
+    if "share_count" in source or "shareCount" in source:
+        return _metric(source, "share_count", "shareCount")
+    return None
+
+
 def _normalize_image_url(url: str) -> str:
     url = (url or "").strip()
     if url.startswith("//"):
@@ -131,6 +168,47 @@ def _find_target_content_entity(
                 expected_type,
                 depth=depth + 1,
             )
+            if found is not None:
+                return found
+    return None
+
+
+def _entity_in_bucket(payload: Dict, bucket: str, content_id: str) -> Optional[Dict]:
+    """详情页实体在 ``initialState.entities.answers|articles.{id}``。"""
+
+    entities = payload.get("initialState", {})
+    entities = entities.get("entities", {}) if isinstance(entities, dict) else {}
+    group = entities.get(bucket) if isinstance(entities, dict) else None
+    entity = group.get(str(content_id)) if isinstance(group, dict) else None
+    if isinstance(entity, dict):
+        if not entity.get("id"):
+            entity = {**entity, "id": str(content_id)}
+        if not entity.get("type"):
+            entity = {
+                **entity,
+                "type": zhihu_constant.ANSWER_NAME if bucket == "answers" else zhihu_constant.ARTICLE_NAME,
+            }
+        return entity
+    return None
+
+
+def _find_entity_by_identity(value, target_id: str, expected_type: str, *, depth: int = 0) -> Optional[Dict]:
+    """按 id 与类型找实体，不要求正文非空，用来区分“没有实体”和“实体没有正文”。"""
+
+    if depth > 12:
+        return None
+    if isinstance(value, dict):
+        identity = str(value.get("id") or value.get("content_id") or "")
+        content_type = str(value.get("type") or value.get("content_type") or "").lower()
+        if identity == str(target_id) and content_type == expected_type:
+            return value
+        for nested in value.values():
+            found = _find_entity_by_identity(nested, target_id, expected_type, depth=depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _find_entity_by_identity(nested, target_id, expected_type, depth=depth + 1)
             if found is not None:
                 return found
     return None
@@ -237,6 +315,14 @@ def merge_search_content_detail(
         search_content.desc = detail_content.desc
     search_content.image_list = list(detail_content.image_list)
     search_content.image_count = len(search_content.image_list)
+    search_content.voteup_count = detail_content.voteup_count
+    search_content.comment_count = detail_content.comment_count
+    search_content.collected_count = detail_content.collected_count
+    search_content.share_count = detail_content.share_count
+    search_content.created_time = detail_content.created_time
+    search_content.updated_time = detail_content.updated_time
+    if detail_content.content_visit_refs:
+        search_content.content_visit_refs = dict(detail_content.content_visit_refs)
     search_content.content_detail_status = "detail_observed"
     search_content.content_detail_source = (
         "answer_detail"
@@ -347,14 +433,22 @@ class ZhihuExtractor:
         res.content_text = extract_zhihu_content_text(content_html)
         res.image_list = extract_image_urls_from_html(content_html)
         res.image_count = len(res.image_list)
-        res.question_id = str(answer.get("question", {}).get("id") or "")
+        question = answer.get("question")
+        if isinstance(question, dict):
+            res.question_id = str(question.get("id") or "")
+        elif question not in (None, ""):
+            res.question_id = str(question)
+        else:
+            res.question_id = ""
         res.content_url = f"{zhihu_constant.ZHIHU_URL}/question/{res.question_id}/answer/{res.content_id}"
         res.title = extract_text_from_html(answer.get("title", ""))
         res.desc = extract_text_from_html(answer.get("description", "") or answer.get("excerpt", ""))
-        res.created_time = answer.get("created_time")
-        res.updated_time = answer.get("updated_time")
-        res.voteup_count = answer.get("voteup_count", 0)
-        res.comment_count = answer.get("comment_count", 0)
+        res.created_time = _present_int(answer, "created_time", "createdTime")
+        res.updated_time = _present_int(answer, "updated_time", "updatedTime")
+        res.voteup_count = _metric(answer, "voteup_count", "voteupCount")
+        res.comment_count = _metric(answer, "comment_count", "commentCount")
+        res.collected_count = _metric(answer, "favlists_count", "favlistsCount")
+        res.share_count = _share_count(answer)
 
         # extract author info
         author_info = self._extract_content_or_comment_author(answer.get("author"))
@@ -380,10 +474,12 @@ class ZhihuExtractor:
         res.content_url = f"{zhihu_constant.ZHIHU_ZHUANLAN_URL}/p/{res.content_id}"
         res.title = extract_text_from_html(article.get("title"))
         res.desc = extract_text_from_html(article.get("excerpt"))
-        res.created_time = article.get("created_time", 0) or article.get("created", 0)
-        res.updated_time = article.get("updated_time", 0) or article.get("updated", 0)
-        res.voteup_count = article.get("voteup_count", 0)
-        res.comment_count = article.get("comment_count", 0)
+        res.created_time = _present_int(article, "created_time", "createdTime", "created")
+        res.updated_time = _present_int(article, "updated_time", "updatedTime", "updated")
+        res.voteup_count = _metric(article, "voteup_count", "voteupCount")
+        res.comment_count = _metric(article, "comment_count", "commentCount")
+        res.collected_count = _metric(article, "favlists_count", "favlistsCount")
+        res.share_count = _share_count(article)
 
         # extract author info
         author_info = self._extract_content_or_comment_author(article.get("author"))
@@ -412,8 +508,8 @@ class ZhihuExtractor:
             res.created_time = zvideo.get("created_at")
         res.title = extract_text_from_html(zvideo.get("title"))
         res.desc = extract_text_from_html(zvideo.get("description"))
-        res.voteup_count = zvideo.get("voteup_count")
-        res.comment_count = zvideo.get("comment_count")
+        res.voteup_count = _metric(zvideo, "voteup_count", "voteupCount")
+        res.comment_count = _metric(zvideo, "comment_count", "commentCount")
 
         # extract author info
         author_info = self._extract_content_or_comment_author(zvideo.get("author"))
@@ -536,6 +632,40 @@ class ZhihuExtractor:
             if article is not None:
                 return self._extract_article_content(article)
         return None
+
+    def content_from_initial_data(
+        self,
+        state_text: str,
+        content_id: str,
+        content_type: str,
+    ) -> tuple[Optional[ZhihuContent], str]:
+        """解析 ``script#js-initialData`` 文本里的目标实体。
+
+        返回 ``(内容, "")``，或 ``(None, 失败码)``。失败码是 ``detail_entity_missing``
+        （页面状态里没有该 id 的回答/文章）或 ``detail_content_missing``（实体没有正文）。
+        """
+
+        text = str(state_text or "").strip()
+        if not text or text[0] not in "{[":
+            return None, "detail_entity_missing"
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return None, "detail_entity_missing"
+        if not isinstance(payload, dict):
+            return None, "detail_entity_missing"
+        bucket = "answers" if content_type == zhihu_constant.ANSWER_NAME else "articles"
+        entity = _entity_in_bucket(payload, bucket, content_id)
+        if entity is None:
+            entity = _find_entity_by_identity(payload, content_id, content_type)
+        if entity is None:
+            return None, "detail_entity_missing"
+        body = entity.get("content") if isinstance(entity.get("content"), str) else ""
+        if not body.strip():
+            return None, "detail_content_missing"
+        if content_type == zhihu_constant.ANSWER_NAME:
+            return self._extract_answer_content(entity), ""
+        return self._extract_article_content(entity), ""
 
     def extract_zvideo_content_from_html(self, html_content: str) -> Optional[ZhihuContent]:
         """

@@ -19,26 +19,16 @@
 
 # TripPostCollect：T07 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-import functools
-import json
 import logging
-from typing import Any, Dict, Optional, Union
-from urllib.parse import urlencode
+from typing import Dict, Optional
 
 import httpx
-from httpx import Response
 from playwright.async_api import BrowserContext, Page
-from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_fixed
 from trippostcollect.application.contracts import ZhihuClientPorts
 from trippostcollect.runtime.image_retry import (
     IMAGE_DOWNLOAD_MAX_BYTES, ImageDownloadFetchError, classified_http_image_error,
 )
-from . import models as zhihu_constant
-from .models import (
-    ZhihuContent, DataFetchError, NotFoundError, PlatformRuntimeError,
-)
-from .parser import ZhihuExtractor
-from .signer import sign
+from .models import DataFetchError
 
 logger = logging.getLogger("TripPostCollect")
 
@@ -51,27 +41,6 @@ class SearchResponseInvalid(DataFetchError):
     def __init__(self, message: str):
         super().__init__(message)
         self.code = "search_response_invalid"
-
-
-def _network_unreachable_after_retry(request):
-    """#129：Tenacity 重试用尽后仍是传输层失败时，转为运行级 ``network_unreachable``。
-
-    包在重试装饰器外层：传输层异常照旧参与 3 次重试，只有最后一次的异常才被转换。DNS、连接、
-    超时、重置是网络整体故障，与候选无关，不能按候选跳过或写入 seen。``functools.wraps`` 保留
-    ``request.retry``，测试仍可替换重试等待。
-    """
-
-    @functools.wraps(request)
-    async def wrapper(*args, **kwargs):
-        try:
-            return await request(*args, **kwargs)
-        except httpx.TransportError as exc:
-            raise PlatformRuntimeError(
-                f"zhihu network_unreachable: {type(exc).__name__}",
-                code="network_unreachable",
-            ) from exc
-
-    return wrapper
 
 
 class ZhiHuClient:
@@ -91,100 +60,7 @@ class ZhiHuClient:
         self.default_headers = headers
         self.cookie_urls = ["https://www.zhihu.com"]
         self.cookie_dict = cookie_dict
-        self._extractor = ZhihuExtractor()
         self.ports = ports
-
-    async def _pre_headers(self, url: str) -> Dict:
-        """
-        Sign request headers
-        Args:
-            url: Request URL with query parameters
-        Returns:
-
-        """
-        d_c0 = self.cookie_dict.get("d_c0")
-        if not d_c0:
-            raise Exception("d_c0 not found in cookies")
-        sign_res = sign(url, self.default_headers["cookie"])
-        headers = self.default_headers.copy()
-        headers['x-zst-81'] = sign_res["x-zst-81"]
-        headers['x-zse-96'] = sign_res["x-zse-96"]
-        return headers
-
-    # 401/403/429 与 404 是平台的确定答复，重试只会重复同一结果；只对其余错误有限重试。
-    @_network_unreachable_after_retry
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_fixed(1),
-        retry=retry_if_not_exception_type((PlatformRuntimeError, NotFoundError)),
-        reraise=True,
-    )
-    async def request(self, method, url, **kwargs) -> Union[str, Any]:
-        """
-        Wrapper for httpx common request method with response handling
-        Args:
-            method: Request method
-            url: Request URL
-            **kwargs: Other request parameters such as headers, body, etc.
-
-        Returns:
-
-        """
-
-        # return response.text
-        return_response = kwargs.pop('return_response', False)
-
-        async with self.ports.make_async_client(proxy=self.proxy) as client:
-            response = await client.request(method, url, timeout=self.timeout, **kwargs)
-
-        path = httpx.URL(url).path
-        if response.status_code != 200:
-            # 响应体可能含头像或个人资料，日志与异常只带路径和状态码。
-            logger.error(
-                f"[ZhiHuClient.request] Request failed: path={path}, status={response.status_code}"
-            )
-            if response.status_code in {401, 403}:
-                raise PlatformRuntimeError(
-                    f"HTTP {response.status_code}", code="login_required",
-                )
-            if response.status_code == 429:
-                raise PlatformRuntimeError("HTTP 429", code="rate_limited")
-            if response.status_code == 404:
-                raise NotFoundError("HTTP 404")
-            raise DataFetchError(f"HTTP {response.status_code}")
-
-        if return_response:
-            return response.text
-        try:
-            data: Dict = response.json()
-        except json.JSONDecodeError:
-            logger.error(f"[ZhiHuClient.request] Response is not JSON: path={path}")
-            raise DataFetchError(f"non-JSON response: {path}")
-        if isinstance(data, dict) and data.get("error"):
-            error = data.get("error") or {}
-            logger.error(
-                f"[ZhiHuClient.request] Platform error: path={path}, "
-                f"code={error.get('code') if isinstance(error, dict) else ''}"
-            )
-            raise DataFetchError(error.get("message") if isinstance(error, dict) else "platform error")
-        return data
-
-    async def get(self, uri: str, params=None, **kwargs) -> Union[Response, Dict, str]:
-        """
-        GET request with header signing
-        Args:
-            uri: Request URI
-            params: Request parameters
-
-        Returns:
-
-        """
-        final_uri = uri
-        if isinstance(params, dict):
-            final_uri += '?' + urlencode(params)
-        headers = await self._pre_headers(final_uri)
-        base_url = (zhihu_constant.ZHIHU_URL if "/p/" not in uri else zhihu_constant.ZHIHU_ZHUANLAN_URL)
-        return await self.request(method="GET", url=base_url + final_uri, headers=headers, **kwargs)
 
     async def update_cookies(self, browser_context: BrowserContext, urls: Optional[list[str]] = None):
         """
@@ -255,55 +131,3 @@ class ZhiHuClient:
             raise ImageDownloadFetchError(
                 str(exc), code="image_download_retryable", retryable=True
             ) from exc
-
-
-    async def get_answer_info(
-        self,
-        question_id: str,
-        answer_id: str,
-    ) -> Optional[ZhihuContent]:
-        """
-        Get answer information
-        Args:
-            question_id:
-            answer_id:
-
-        Returns:
-
-        """
-        uri = f"/question/{question_id}/answer/{answer_id}"
-        try:
-            response_html = await self.get(uri, return_response=True)
-        except NotFoundError:
-            # 回答已删除或不可见：与无法解析出目标实体同样按候选级详情缺失处理。
-            return None
-        return self._extractor.extract_answer_content_from_html(response_html, answer_id)
-
-    async def get_article_info(self, article_id: str) -> Optional[ZhihuContent]:
-        """
-        Get article information
-        Args:
-            article_id:
-
-        Returns:
-
-        """
-        uri = f"/p/{article_id}"
-        try:
-            response_html = await self.get(uri, return_response=True)
-        except NotFoundError:
-            return None
-        return self._extractor.extract_article_content_from_html(response_html, article_id)
-
-    async def get_video_info(self, video_id: str) -> Optional[ZhihuContent]:
-        """
-        Get video information
-        Args:
-            video_id:
-
-        Returns:
-
-        """
-        uri = f"/zvideo/{video_id}"
-        response_html = await self.get(uri, return_response=True)
-        return self._extractor.extract_zvideo_content_from_html(response_html)

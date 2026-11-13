@@ -117,6 +117,8 @@ def formal_records() -> dict[str, dict]:
             "author_followers_source": "search_author",
             "voteup_count": 1,
             "comment_count": 2,
+            "collected_count": 3,
+            "share_count": 4,
         },
     }
 
@@ -244,7 +246,12 @@ EXPECTED_REQUIRED_METRICS = {
     "weibo": (("liked_count",), ("comments_count", "comment_count"), ("shared_count", "reposts_count")),
     "xhs": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
     "douyin": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
-    "zhihu": (("voteup_count", "liked_count"), ("comment_count", "comments_count")),
+    "zhihu": (
+        ("voteup_count", "liked_count"),
+        ("comment_count", "comments_count"),
+        ("collected_count",),
+        ("share_count",),
+    ),
 }
 METRIC_CASES = [
     pytest.param(platform_key, group, id=f"{platform_key}-{'/'.join(group)}")

@@ -343,6 +343,8 @@ def test_repair_fallback_makes_sparse_zhihu_detail_formally_valid() -> None:
         "author_followers_source": "missing",
         "voteup_count": 1,
         "comment_count": 2,
+        "collected_count": 3,
+        "share_count": 0,
     }
     merged = mediacrawler.merge_repair_fallback_metadata(
         "zhihu",

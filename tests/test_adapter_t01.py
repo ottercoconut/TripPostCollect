@@ -22,7 +22,6 @@ BASELINE = json.loads((ROOT / "docs" / "adapter-ledger" / "baseline.json").read_
 # #127 第 2 项：stealth.min.js 不再注入，包资源删除；基线中的 libs/stealth.min.js 在台账登记为退出。
 PACKAGE_RESOURCES = {
     "js/douyin.js": "libs/douyin.js",
-    "js/zhihu.js": "libs/zhihu.js",
     "licenses/MediaCrawler-LICENSE": "LICENSE",
 }
 
@@ -51,7 +50,7 @@ def test_unknown_resource_is_rejected() -> None:
 
 def test_resource_text_preserves_bom_handling() -> None:
     # 原调用以 utf-8-sig 读取 JS；读取接口必须给出与之相同的文本
-    for name in ("js/douyin.js", "js/zhihu.js"):
+    for name in ("js/douyin.js",):
         raw = resources.read_bytes(name)
         assert resources.read_text(name) == raw.decode("utf-8-sig")
 

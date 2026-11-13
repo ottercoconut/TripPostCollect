@@ -53,7 +53,12 @@ PLATFORM_REQUIRED_METRICS: dict[str, tuple[tuple[str, ...], ...]] = {
     "weibo": (("liked_count",), ("comments_count", "comment_count"), ("shared_count", "reposts_count")),
     "xhs": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
     "douyin": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
-    "zhihu": (("voteup_count", "liked_count"), ("comment_count", "comments_count")),
+    "zhihu": (
+        ("voteup_count", "liked_count"),
+        ("comment_count", "comments_count"),
+        ("collected_count",),
+        ("share_count",),
+    ),
 }
 
 

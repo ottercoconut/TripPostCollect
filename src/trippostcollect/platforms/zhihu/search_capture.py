@@ -2,7 +2,7 @@
 
 搜索页加载时的 ``/api/v4/search_v3`` 是第一页；之后用真人分段滚动触发下一页。
 截获不到是运行级失败，不改走浏览器外请求，也不把缺失解释为来源耗尽。
-``/api/v4/me`` 同样只认页面自己的响应。详情与签名仍走浏览器外 HTTP，本段不接入访问门禁。
+``/api/v4/me`` 同样只认页面自己的响应。详情由点击打开的新标签读取页面状态，不走浏览器外 HTTP。
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from trippostcollect.platforms.zhihu.client import SearchResponseInvalid
 from trippostcollect.platforms.zhihu.models import (
     DataFetchError, PlatformRuntimeError, ZhihuSearchPage,
 )
+from trippostcollect.platforms.zhihu.page_scripts import STATE_SCRIPTS
 from trippostcollect.runtime.human_flow import human_scroll, load_behavior_profile
 from trippostcollect.runtime.page_capture import (
     CaptureFailure, CaptureRule, CapturedResponse, PageCaptureChannel,
@@ -146,6 +147,7 @@ class ZhihuPageCapture:
             platform="zhihu",
             rules=ZHIHU_RULES,
             ledger=ledger,
+            state_scripts=STATE_SCRIPTS,
         )
         return cls(channel)
 

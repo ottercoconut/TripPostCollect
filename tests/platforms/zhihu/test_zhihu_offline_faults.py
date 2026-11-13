@@ -11,16 +11,17 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
 import pytest
 
 from .support import END, config, make_crawler as ZhihuCrawler, search_client, search_page
-from trippostcollect.application.contracts import ZhihuClientPorts
 from trippostcollect.platforms.zhihu import models as constant
 from trippostcollect.platforms.zhihu.client import ZhiHuClient
-from trippostcollect.platforms.zhihu.models import PlatformRuntimeError, ZhihuContent, ZhihuImageDownloadError
+from trippostcollect.platforms.zhihu.models import (
+    ZhihuContent, ZhihuDetailFetchError, ZhihuImageDownloadError,
+)
 from trippostcollect.platforms.zhihu.parser import ZhihuExtractor
 from trippostcollect.platforms.zhihu.search_capture import (
     BrowserSearchResponseMissing, ZHIHU_SEARCH_RULE, me_is_logged_in, search_page_from_captured,
@@ -28,39 +29,11 @@ from trippostcollect.platforms.zhihu.search_capture import (
 from trippostcollect.runtime.page_capture import CapturedResponse
 
 
-class Transport:
-    """只登记搜索与详情路径的 httpx 替身；未登记路径直接失败（F09 未匹配请求失败）。"""
-
-    def __init__(self, fault: type[httpx.TransportError] = httpx.ConnectError):
-        self.fault = fault
-        self.calls: list[str] = []
-
-    def __call__(self, **kwargs):
-        return self
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        return False
-
-    async def request(self, method, url, **kwargs):
-        path = httpx.URL(url).path
-        if path != "/api/v4/search_v3" and not path.startswith(("/question/", "/p/")):
-            raise AssertionError(f"未登记的请求：{method} {url}")
-        self.calls.append(path)
-        raise self.fault("离线网络中断", request=httpx.Request(method, url))
-
-
 @pytest.fixture
-def sleeps(monkeypatch):
-    recorded: list[float] = []
+def sleeps():
+    """详情不再走带重试的 httpx。保留夹具，避免旧用例的参数列表失效。"""
 
-    async def sleep(seconds):
-        recorded.append(seconds)
-
-    monkeypatch.setattr(ZhiHuClient.request.retry, "sleep", sleep)
-    return recorded
+    return []
 
 
 def prepare(monkeypatch, tmp_path, *, start_page=1, refresh=0):
@@ -101,36 +74,16 @@ def answer(content_id: str) -> ZhihuContent:
     )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("fault", [httpx.ConnectError, httpx.ReadTimeout])
-async def test_request_transport_error_reraises_after_three_attempts(sleeps, fault):
-    transport = Transport(fault)
-    client = ZhiHuClient(
-        ports=ZhihuClientPorts(transport, AsyncMock()),
-        headers={"cookie": "d_c0=t13", "user-agent": "t13"},
-        playwright_page=MagicMock(),
-        cookie_dict={"d_c0": "t13"},
-    )
+def test_signed_detail_http_is_gone():
+    assert not hasattr(ZhiHuClient, "request")
+    assert not hasattr(ZhiHuClient, "get")
+    assert not hasattr(ZhiHuClient, "_pre_headers")
+    assert not hasattr(ZhiHuClient, "get_answer_info")
+    assert not hasattr(ZhiHuClient, "get_article_info")
+    assert not hasattr(ZhiHuClient, "get_video_info")
+    import execjs
 
-    # #129：重试预算不变；用尽后转为运行级 network_unreachable，原传输层异常保留为 __cause__。
-    with pytest.raises(PlatformRuntimeError) as caught:
-        await client.request("GET", "https://www.zhihu.com/api/v4/search_v3?q=t13")
-
-    assert caught.value.code == "network_unreachable"
-    assert isinstance(caught.value.__cause__, fault)
-    assert transport.calls == ["/api/v4/search_v3"] * 3
-    assert sleeps == [1, 1]
-
-
-@pytest.mark.asyncio
-async def test_unregistered_request_path_fails_instead_of_being_treated_as_detail(sleeps):
-    client = ZhiHuClient(
-        ports=ZhihuClientPorts(Transport(), AsyncMock()),
-        headers={"cookie": "d_c0=t13"}, playwright_page=MagicMock(), cookie_dict={"d_c0": "t13"},
-    )
-
-    with pytest.raises(AssertionError, match="未登记的请求"):
-        await client.request("GET", "https://www.zhihu.com/api/v4/unknown")
+    assert callable(execjs.compile)
 
 
 @pytest.mark.asyncio
@@ -160,15 +113,29 @@ async def test_detail_transport_error_ends_run_without_candidate_skip(monkeypatc
     excerpt.content_detail_source = ""
     excerpt.image_list = []
     crawler._next_search_page = AsyncMock(side_effect=[search_page([excerpt]), END])
-    crawler.zhihu_client.get_answer_info.side_effect = httpx.ReadTimeout("离线读取超时")
+    crawler._page_capture = SimpleNamespace(channel=SimpleNamespace())
+    crawler.context_page = MagicMock()
+    crawler._opened_search_keyword = "青岛旅游"
 
-    with pytest.raises(httpx.ReadTimeout):
-        await crawler.search()
+    async def closed(self, content):
+        raise ZhihuDetailFetchError(
+            content.content_id, "browser_target_closed", attempts=1, runtime_blocking=True,
+        )
 
-    # 详情只捕获 DataFetchError/RetryError（转为候选 skip）；reraise 的传输层异常终止本轮。
-    assert crawler.zhihu_client.get_answer_info.await_count == 1
+    monkeypatch.setattr(
+        "trippostcollect.platforms.zhihu.core.ZhihuDetailPages.open_from_search", closed,
+    )
+
+    await crawler.search()
+
     assert events_of(state_path, "candidate_skipped") == []
-    assert events_of(state_path, "adaptive_search_stopped") == []
+    stopped = events_of(state_path, "adaptive_search_stopped")
+    assert stopped
+    assert all(
+        (item["stop_reason"], item["stop_detail"]) == ("runtime_failed", "browser_target_closed")
+        for item in stopped
+    )
+    assert "needs-detail" not in stopped[-1]["candidate_identities"]
 
 
 @pytest.mark.asyncio
@@ -219,42 +186,6 @@ async def test_runtime_failure_on_last_candidate_keeps_failed_page_issue133(monk
 
 
 # ---------- #113：来源耗尽只认原始 paging.is_end ----------
-
-
-class SearchHttp:
-    """按页返回固定 search_v3 原始响应的 httpx 替身；记录请求路径与 offset。"""
-
-    def __init__(self, responses):
-        self.responses = list(responses)
-        self.calls: list[tuple[str, int]] = []
-
-    def __call__(self, **kwargs):
-        return self
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        return False
-
-    async def request(self, method, url, **kwargs):
-        parsed = httpx.URL(url)
-        offset = int(parsed.params.get("offset", "0"))
-        self.calls.append((parsed.path, offset))
-        status, payload = self.responses.pop(0)
-        request = httpx.Request(method, url)
-        if isinstance(payload, str):
-            return httpx.Response(status, request=request, text=payload)
-        return httpx.Response(status, request=request, json=payload)
-
-
-def search_client_for(http: SearchHttp) -> ZhiHuClient:
-    return ZhiHuClient(
-        ports=ZhihuClientPorts(http, AsyncMock()),
-        headers={"cookie": "d_c0=t13", "user-agent": "t13"},
-        playwright_page=MagicMock(),
-        cookie_dict={"d_c0": "t13"},
-    )
 
 
 def raw_answer(identity: str) -> dict:
@@ -399,15 +330,6 @@ async def test_search_run_level_status_keeps_code_and_is_not_retried(
     assert [(item["stop_reason"], item["stop_detail"]) for item in stopped] == [("runtime_failed", code)]
 
 
-@pytest.mark.asyncio
-async def test_detail_404_is_candidate_miss_not_run_failure(sleeps):
-    http = SearchHttp([(404, "gone")])
-
-    assert await search_client_for(http).get_answer_info("10", "deleted") is None
-    assert http.calls == [("/question/10/answer/deleted", 0)]
-    assert sleeps == []
-
-
 def test_search_page_drops_zvideo_and_keeps_raw_paging():
     page = ZhihuExtractor().extract_search_page(FILTERED_ONLY)
 
@@ -461,13 +383,3 @@ def test_me_capture_log_omits_response_body(caplog):
     assert "uid_present=False" in caplog.text
 
 
-@pytest.mark.asyncio
-async def test_request_error_log_omits_response_body(caplog, sleeps):
-    http = SearchHttp([(500, '{"avatar_url": "https://pic1.zhimg.com/v2-err-avatar.jpg"}')] * 3)
-    caplog.set_level("INFO", logger="TripPostCollect")
-
-    with pytest.raises(Exception):
-        await search_client_for(http).request("GET", "https://www.zhihu.com/api/v4/search_v3?offset=0")
-
-    assert "avatar" not in caplog.text
-    assert "status=500" in caplog.text
