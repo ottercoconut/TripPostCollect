@@ -49,6 +49,8 @@
   封面和视频缩略图不进入正文候选。
 - 作者粉丝来自 `mblog.user` 的明确粉丝字段，保存
   `followers_observed=true`、`author_followers_source=search_author`。原始字段明确为 0 时才接受 0。
+- 互动计数为点赞、评论和分享。转发与分享是同一种互动：`mblog.reposts_count` 经 `shared_count`
+  写入 `post_shares_count`，不另存转发列。
 - 作者平台 ID 保存 `mblog.user.id` 原始值（整数归一为字符串，写在 `creator_hash` 键），昵称保存
   `screen_name` 原文；头像、性别、主页、签名和 IP 归属地不写出。
 - 去重键为微博 ID；没有正文图片的记录不是有效图文。
