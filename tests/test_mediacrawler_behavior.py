@@ -1404,12 +1404,13 @@ def test_xhs_interaction_is_reported_but_does_not_invalidate_crawl() -> None:
     assert validation["platforms"]["xhs"]["post_interaction_ok"] is False
 
 
-GENERIC_BEHAVIOR_PLATFORMS = ("bilibili", "weibo", "douyin", "zhihu")
+# 知乎已纳入访问门禁，缺 content_visit 结果时行为门禁失败关闭，不再走这条未设门禁的分支。
+GENERIC_BEHAVIOR_PLATFORMS = ("bilibili", "weibo", "douyin")
 
 
 @pytest.mark.parametrize("missing_platform", GENERIC_BEHAVIOR_PLATFORMS)
 def test_behavior_validation_requires_evidence_for_each_generic_platform(missing_platform: str) -> None:
-    """T13：四个通用站共用非 XHS 行为门禁分支，逐站证明缺证据即失败、其余站不受影响。"""
+    """T13：未纳入访问门禁的通用站共用非 XHS 行为门禁分支，逐站证明缺证据即失败、其余站不受影响。"""
     events = [{"event": "pause"}, {"event": "mouse_moves"}, {"event": "human_scroll_complete"}]
     records = [
         {

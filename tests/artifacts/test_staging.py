@@ -146,9 +146,8 @@ async def test_zhihu_http_404_preserves_terminal_status(monkeypatch) -> None:
     client = object.__new__(zhihu_client.ZhiHuClient)
     # T07：fork 类重导出根实现，HTTP 替身经实例端口注入。
     client.ports = SimpleNamespace(make_async_client=async_client_factory(404))
-    client.proxy = None
     client.timeout = 1
-    client.default_headers = {}
+    client.user_agent = ""
 
     with pytest.raises(ImageDownloadFetchError) as exc_info:
         await client.get_content_image(
@@ -169,9 +168,8 @@ async def test_zhihu_oversized_response_is_terminal(monkeypatch) -> None:
     client = object.__new__(zhihu_client.ZhiHuClient)
     # T07：只改 mock 接缝，大小上限与错误断言保持原样。
     client.ports = SimpleNamespace(make_async_client=async_client_factory(200, content=b"four"))
-    client.proxy = None
     client.timeout = 1
-    client.default_headers = {}
+    client.user_agent = ""
 
     with pytest.raises(ImageDownloadFetchError) as exc_info:
         await client.get_content_image(

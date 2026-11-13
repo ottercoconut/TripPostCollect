@@ -1918,6 +1918,8 @@ PROGRESS_RESOLUTIONS = {
         "退出", None, "#185：文章详情改为点击新标签读取 js-initialData"),
     ("tools/MediaCrawler/media_platform/zhihu/client.py", "ZhiHuClient.get_video_info"): (
         "退出", None, "#185：不再请求 zvideo 详情；搜索阶段已丢弃视频"),
+    ("tools/MediaCrawler/media_platform/zhihu/client.py", "ZhiHuClient.update_cookies"): (
+        "退出", None, "#185：搜索、详情、作者都改为页面取数后，图片客户端不再保存 Cookie"),
     ("tools/MediaCrawler/media_platform/zhihu/help.py", "sign"): (
         "退出", None, "#185：知乎签名与 zhihu.js 删除；execjs 仍供抖音使用"),
     ("tools/MediaCrawler/store/douyin/__init__.py", "update_dy_aweme_images"): (
