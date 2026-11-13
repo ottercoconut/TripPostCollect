@@ -194,7 +194,8 @@ Cookie、签名计算上下文、Page、BrowserContext、browser 实例不进入
 | B站 article | 原搜索页、详情补全与已知 ID 提前跳过 | [B站](platforms/bilibili.md) |
 | 抖音 | 每轮从首页全量翻到 `has_more=false`，搜索只经浏览器截获（#124）；空首页门禁保留 | [抖音游标](platforms/douyin.md#搜索响应与游标) |
 | XHS | 保存 client search ID；账号隔离；批次 ACK 独立处理 | [XHS](platforms/xhs.md#批次恢复点) |
-| 微博、知乎 | 各自分页和权威详情来源保持 | [微博](platforms/weibo.md)、[知乎](platforms/zhihu.md) |
+| 微博 | 分页和权威详情来源保持 | [微博](platforms/weibo.md) |
+| 知乎 | 每轮从搜索第一页滚到 `paging.is_end`，搜索只经浏览器截获（#185）；详情仍为浏览器外 HTTP | [知乎](platforms/zhihu.md) |
 
 refresh 不推进 deep 前沿；抖音正式文档允许的重建链有独立证据和条件，不能被通用抽象抹掉。
 首次从第一页、有限顶部刷新后恢复深层、耗尽后的刷新规则均直接引用正式契约。

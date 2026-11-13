@@ -9,10 +9,11 @@
   执行知乎搜索，实现位于 `src/trippostcollect/platforms/zhihu/`。
 - 登录态必须具有经关闭重开复验的 `d_c0/z_c0` Cookie snapshot。
 - 持久 profile 是知乎登录态的唯一权威来源。worker 不向浏览器注入快照 Cookie（注入会用无
-  expires/httpOnly/secure 的副本覆盖 profile 中的实时 `z_c0`）；httpx 请求的 Cookie 在首页加载后从
-  `browser_context.cookies()` 按 `https://www.zhihu.com` 过滤读取。`/api/v4/me` 复验失败即以
-  `runtime_failed/login_required` 运行级阻断结束，不在本轮重新登录；操作人先运行
-  `scripts/login_warmup.py --platforms zhihu` 再重跑。
+  expires/httpOnly/secure 的副本覆盖 profile 中的实时 `z_c0`）。登录复验只截获页面自己发出的
+  `/api/v4/me`（首页和搜索页加载时都会自己请求它，#185）：截获不到，或响应不是 HTTP 200 且同时带
+  `uid` 与 `name`，即以 `runtime_failed/login_required` 运行级阻断结束，不在本轮重新登录；操作人先运行
+  `scripts/login_warmup.py --platforms zhihu` 再重跑。详情与正文图仍用浏览器外 HTTP，其 Cookie 在首页加载后从
+  `browser_context.cookies()` 按 `https://www.zhihu.com` 过滤读取。
 - 启动浏览器时不强制 User-Agent，浏览器自报真实 UA；httpx 请求头的 `user-agent` 在首页加载后从
   `navigator.userAgent` 读取，与 warmup 登录时同一浏览器一致，不写死版本串（#127）。正式轮走 CDP，
   复用持久 profile 的默认 context；外部 Chrome 以 `--accept-lang=zh-CN`、原生窗口 1450×900 和
@@ -64,6 +65,17 @@
 历史 manifest 中旧 zhimg URL 变体的严格兼容条件见[数据持久化](../data-persistence.md)；它只用于
 恢复复验，不改变当前候选投影。
 
+## 搜索响应
+
+搜索只消费本轮搜索页自己发出的 `/api/v4/search_v3`（#185）。保留打开搜索页的方式：导航到本轮关键词的
+搜索页，并在该页完成行为阶段。第一页是页面加载时自己请求的那一次响应；之后每次先写翻页停顿，再用
+`social_high_risk` 的一次真人分段滚动触发下一页，然后等待这次响应。滚动最多 8 次，每次滚动后等待 8 秒；
+首页读体最多等 15 秒。在这段等待内截获不到，就以 `runtime_failed`、`stop_detail=browser_search_response_missing`
+结束。不改走浏览器外请求，不猜深页，也不能把“没截获到”解释为来源耗尽；缺失页的候选不写入已处理集合。
+
+搜索页导航、翻页停顿、滚动和 `search_v3` 截获写入访问账本。本段不接入 `content_visit_ok`，知乎也不加入
+访问门禁平台名单。详情请求和签名仍保留，下一阶段再改为页面取数。
+
 ## 发现与诊断
 
 来源耗尽只认 search_v3 原始响应的 `paging.is_end is True`，停止细节为 `paging_is_end`，批次
@@ -72,9 +84,12 @@
 声明 `is_end=true`、HTTP 404 都以 `runtime_failed/search_response_invalid` 结束，不推断为耗尽。
 2026-10-30 之前按“过滤后空页”记下的 `empty_page` 耗尽结论不可信，需重新扫描。
 
-有 checkpoint 时先刷新顶部，再从保存页码继续；完整页保存下一页，页中途停止保留当前页。正常
-workflow 不手工传 `--start-page` 或 `--resume-summary`。搜索 API 的 Referer 使用本轮实际检索词的
-搜索页。
+每轮从搜索第一页滚到 `is_end=true`（#185）。不按保存页码恢复深层前沿，也不做顶部有限刷新。数据库已有
+ID、累计摘要中的有效 ID 与持久已处理候选在详情和图片请求前滑过。runner 不把 checkpoint 转成
+`--start-page`、`--top-refresh-max-pages` 或 `--discovery-source-exhausted`；child 收到这些参数直接以
+`zhihu_full_scan_rejects_resume_args` 报错。运行级失败时的未完成累计摘要仍经 `--resume-summary` 合并，
+下一轮取得 `is_end=true` 后一次性入库。checkpoint 仍写入本轮最后页码与停止原因供审计，不作续跑起点。
+详情 HTTP 的 Referer 使用本轮实际检索词的搜索页。
 
 批次使用 `stagnation_basis=valid_new` 记录诊断计数：只有批次没有新增满足正式字段 profile、且
 数据库中不存在的有效记录时才累计；新无效候选、重复候选和数据库已有记录都不能重置该计数。
