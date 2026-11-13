@@ -12,8 +12,9 @@
   expires/httpOnly/secure 的副本覆盖 profile 中的实时 `z_c0`）。登录复验只截获页面自己发出的
   `/api/v4/me`（首页和搜索页加载时都会自己请求它，#185）：截获不到，或响应不是 HTTP 200 且同时带
   `uid` 与 `name`，即以 `runtime_failed/login_required` 运行级阻断结束，不在本轮重新登录；操作人先运行
-  `scripts/login_warmup.py --platforms zhihu` 再重跑。详情与正文图仍用浏览器外 HTTP，其 Cookie 在首页加载后从
-  `browser_context.cookies()` 按 `https://www.zhihu.com` 过滤读取。
+  `scripts/login_warmup.py --platforms zhihu` 再重跑。详情从点击打开的新标签读取页面状态（#185）。
+  正文图仍用浏览器外 CDN：UA 与 Referer 取自浏览器，不带 Cookie，不经第三方代理。Cookie 仍在首页加载后从
+  `browser_context.cookies()` 按 `https://www.zhihu.com` 过滤读取，只留在客户端内存里，不随图片发出。
 - 启动浏览器时不强制 User-Agent，浏览器自报真实 UA；httpx 请求头的 `user-agent` 在首页加载后从
   `navigator.userAgent` 读取，与 warmup 登录时同一浏览器一致，不写死版本串（#127）。正式轮走 CDP，
   复用持久 profile 的默认 context；外部 Chrome 以 `--accept-lang=zh-CN`、原生窗口 1450×900 和
@@ -26,11 +27,20 @@
 
 ## 正文、作者与详情
 
-- 正文已有非空完整 `content` 和正文图时使用 `content_detail_source=search_content`。
-- 搜索结果缺正文或图片时，必须低频请求详情并使用 `answer_detail` 或 `article_detail`。
-- 详情只有在 HTTP 成功、`js-initialData` 能解析目标 entity 且形成非空内容对象时，才写
-  `content_detail_status=detail_observed`。详情观察后仍无图片才是 `missing_content_image`；
-  `request_failed`、`parse_failed` 和旧产物缺状态都属于 `content_detail_unobserved`。
+- 每条未知候选都在搜索页点击标题，在新标签打开详情（#185）。回答页是
+  `https://www.zhihu.com/question/{qid}/answer/{aid}`，文章页是 `https://zhuanlan.zhihu.com/p/{id}`。
+  搜索结果里正文已经完整的候选也打开，正文、图片、点赞、评论、收藏、分享和发布时间都以详情页为准。
+- 详情数据是新标签里的页面状态 `script#js-initialData`：回答取 `initialState.entities.answers.{id}`，
+  文章取 `initialState.entities.articles.{id}`。点赞是 `voteupCount`，评论是 `commentCount`，收藏是
+  `favlistsCount`（入库 `collected_count` → `post_favorites_count`），分享是
+  `reaction.statistics.shareCount`（入库 `share_count` → `post_shares_count`）。这四项缺键为 NULL，
+  不补 0；键上的 0 仍记为 0。缺任一项按字段 profile 判为不合格。
+- 新标签停留随机 5–9 秒，期间可以有一段真人式滚动，然后关闭标签并把搜索页带回前台。点击、页面状态
+  读取、停留和关闭写入访问账本。记录带上详情访问引用（`content_visit_refs.detail`），供后续访问门禁使用。
+  本段仍不接入 `content_visit_ok`，知乎也不加入访问门禁平台名单。
+- 详情只有在页面状态能解析出目标 entity 且正文非空时，才写 `content_detail_status=detail_observed`，
+  来源为 `answer_detail` 或 `article_detail`。历史记录仍可能是 `search_content`。详情观察后仍无图片才是
+  `missing_content_image`；`request_failed`、`parse_failed` 和旧产物缺状态都属于 `content_detail_unobserved`。
 - `title`、`desc` 和 `excerpt` 不能替代正文。
 - 正文 `content_text` 保留块级换行并剔除 figure/figcaption；图片说明文字不进入正文。
 - 作者粉丝来自搜索 author/member 的 `follower_count`，要求
@@ -42,13 +52,15 @@
   不作为平台 ID。
 - 作者简介取 author/member 的 `headline`，写入 `author_description`；认证文字取 `verify_bayes`，没有时取
   `badge_v2.title`，写入 `author_verified_text`。`author_verified` 不判定，保持 NULL。
-- 详情候选级失败有限重试后写 `candidate_skipped`；登录、授权、频控和验证仍是运行级阻断。
-- 401/403（`login_required`）、429（`rate_limited`）和 404 是平台确定答复，不重试；其余请求错误按
-  3 次、间隔 1 秒有限重试。搜索阶段的运行级失败保留各自错误码。详情 404 按候选级详情缺失处理。
-- 重试用尽后仍是传输层失败（DNS、连接失败、超时、连接重置）是网络整体故障，与候选无关（#129）：
-  `request()` 在 Tenacity 外层把它转为 `PlatformRuntimeError(code=network_unreachable)`，搜索与详情都按
-  运行级失败停止，`stop_detail=network_unreachable`，不写 `candidate_skipped`、不进 seen；runner 记为
-  `network_timeout` 并等待 900 秒重试。重试次数与间隔不变；正文图片下载仍按 `image_download_retryable`。
+- 详情候选级失败（找不到标题卡片、新标签没打开、页面状态里没有目标实体、实体没有正文）按 3 次、
+  间隔 1 秒有限重试，然后写 `candidate_skipped` 并进入已处理记忆。登录页、安全验证页，以及
+  page/context 被关闭，是运行级阻断，不写 seen。登录与验证的 URL 和可见特征是待实测的假设，写在
+  `detail_page.py` 的常量里。
+- 搜索阶段的运行级失败保留各自错误码。搜索响应里的 401/403（`login_required`）和 429（`rate_limited`）
+  仍不重试。
+- 搜索和详情都不再走浏览器外 HTTP（#185），因此不再从 `request()` 产生 `network_unreachable`。
+  正文图片下载仍按 `image_download_retryable`；图片请求的 401/403 与 429 仍是运行级
+  `image_auth_required` / `image_rate_limited`。
 - 日志只记录内容 ID、类型、计数和状态码；不打印整条记录、search_v3 原始响应或 `/me` 响应。作者头像
   只在内存中用于排除正文图候选，不进入 `model_dump` 和项目 JSONL。
 
@@ -73,8 +85,8 @@
 首页读体最多等 15 秒。在这段等待内截获不到，就以 `runtime_failed`、`stop_detail=browser_search_response_missing`
 结束。不改走浏览器外请求，不猜深页，也不能把“没截获到”解释为来源耗尽；缺失页的候选不写入已处理集合。
 
-搜索页导航、翻页停顿、滚动和 `search_v3` 截获写入访问账本。本段不接入 `content_visit_ok`，知乎也不加入
-访问门禁平台名单。详情请求和签名仍保留，下一阶段再改为页面取数。
+搜索页导航、翻页停顿、滚动和 `search_v3` 截获写入访问账本。详情改为点击新标签读取页面状态，不再签名、
+也不再发浏览器外详情请求。本段不接入 `content_visit_ok`，知乎也不加入访问门禁平台名单。
 
 ## 发现与诊断
 
@@ -89,7 +101,6 @@ ID、累计摘要中的有效 ID 与持久已处理候选在详情和图片请�
 `--start-page`、`--top-refresh-max-pages` 或 `--discovery-source-exhausted`；child 收到这些参数直接以
 `zhihu_full_scan_rejects_resume_args` 报错。运行级失败时的未完成累计摘要仍经 `--resume-summary` 合并，
 下一轮取得 `is_end=true` 后一次性入库。checkpoint 仍写入本轮最后页码与停止原因供审计，不作续跑起点。
-详情 HTTP 的 Referer 使用本轮实际检索词的搜索页。
 
 批次使用 `stagnation_basis=valid_new` 记录诊断计数：只有批次没有新增满足正式字段 profile、且
 数据库中不存在的有效记录时才累计；新无效候选、重复候选和数据库已有记录都不能重置该计数。
