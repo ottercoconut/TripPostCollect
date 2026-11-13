@@ -4,6 +4,7 @@
 > 本文中的目标文件、类型和接口尚未实现。主设计保留原则与原研究，本文是目录、接口、读取时点和任务卡的唯一详细定义；
 > 逐符号处置见[附录 C8 全量符号账](platform-adapter-symbol-ledger.md)，执行清单以 GitHub issues 跟踪（见 G）。
 > 当前运行仍遵循[正式契约](formal-crawl-contract.md)。T14 已执行（#19）：fork 子模块 `tools/MediaCrawler`、私有桥 E、`platforms/_fork_bridge.py` 与 `scripts/execution_state.py` 过渡模块均已删除；下文 F 事实中的 M/E/ES 路径和行号只作历史锚点，不再对应仓库文件。
+> 2026-11-13（#185）：知乎 `platforms/zhihu/signer.py` 与 `resources/js/zhihu.js` 已删除。冻结符号台账 JSON 与附录 C8 仍登记迁移时的 `sign` → `platforms/zhihu/signer.py`、`libs/zhihu.js`；退出记在 `PROGRESS_RESOLUTIONS` 与 `BASELINE_RESOURCE_RESOLUTIONS`，台账 JSON 不改。
 
 ## A｜固定基线与证据口径
 
@@ -117,6 +118,7 @@ src/trippostcollect/
 
 普通站点 `core` 只保留本站 workflow；`client` 拥有请求及 IO 补取；`parser` 只做纯解析/投影；
 `login` 拥有本站登录判定；`models` 只包含存活枚举、异常和原 Pydantic 模型；`signer` 保留算法/桥接。
+知乎现行（#185）不再有 `signer.py`，也不再装载 `resources/js/zhihu.js`。上表目录里的这两项是迁移目标，运行时代码已删除。
 XHS `core` 是 search 与 session 调用编排，不再承载 navigation/author/detail/media 的实现。
 `douyin/login_support.py` 专属原 slider/easing 与 phone MEMORY cache，不能被其他站当工具库导入。
 包 `__init__.py` 保持无注册副作用；不复制上游 `tools.__init__`、全平台 factory 或 store registry。
@@ -146,23 +148,23 @@ C8 覆盖 92 个文件、1234 个顶层函数/类/方法，每项有目标模块
 | 类别 | B站 article | 微博 | 抖音 | 知乎 | 小红书 |
 |---|---|---|---|---|---|
 | 入口 | R→C 的 `run_bilibili_article_search`；不经 E/M.main | R→C→E→M.main→WB/core | R→C→E→M.main→DY/core | R→C→E→M.main→ZH/core | X→C→E→M.main→XK/core；独立账号轮次 |
-| client | C 内联搜索/详情/粉丝/图请求；urllib 保留 | WB/client.py，HTTPX/详情浏览器回退 | DY/client.py，HTTPX/浏览器响应监听/短链解析 | ZH/client.py，HTTPX/详情页/图片 | XK/client.py，HTTPX/API→HTML/图片 |
-| signer | C 的 WBI 常量、keys、`sign_bilibili_wbi_params`，无本站JS | 无独立 signer 或签名JS | DY/help.py 的 `get_a_bogus`；execjs；webid生成属client helper | ZH/help.py 的 `sign`；execjs/Node | XK/playwright_sign.py→xhshow；xhs_sign.py 仅活跃 trace helper |
+| client | C 内联搜索/详情/粉丝/图请求；urllib 保留 | WB/client.py，HTTPX/详情浏览器回退 | DY/client.py，HTTPX/浏览器响应监听/短链解析 | ZH/client.py；#185 起搜索/详情/作者为页面取数，图片为 CDN 直连 | XK/client.py，HTTPX/API→HTML/图片 |
+| signer | C 的 WBI 常量、keys、`sign_bilibili_wbi_params`，无本站JS | 无独立 signer 或签名JS | DY/help.py 的 `get_a_bogus`；execjs；webid生成属client helper | ZH/help.py 的 `sign` 与 `resources/js/zhihu.js` 已于 #185 退出 | XK/playwright_sign.py→xhshow；xhs_sign.py 仅活跃 trace helper |
 | login | C 行为会话、W warmup、B repair 三种判别分别保留 | WB/login.py，QR/cookie；phone 空实现不算能力 | DY/login.py，QR/cookie/phone；slider和MEMORY分支保留 | ZH/login.py；QR/cookie，phone 空实现 | XK/login.py、manual_wait.py 与 core 的 session/恢复/扫码守卫 |
 | parser | C normalize/clean/extract/hydrate；共享HTML清理 | WB/help.py、client内详情提取、SW投影、E精确ID提取 | DY/search_safety.py 纯部分、help URL解析、SD投影、E精确ID提取 | ZH/help.py 的Extractor/entity/URL判断、SZ投影 | XK/extractor.py、help.py URL解析、core纯判别、SX投影 |
 | model | C 三异常及本站常量；不用 M/model/m_bilibili.py | WB/field.py、exception.py；m_weibo.py 无活跃内容模型 | DY/field.py、exception.py、M/model/m_douyin.py 的VideoUrlInfo | ZH/field.py、exception.py、core异常、M/model/m_zhihu.py、M/constant/zhihu.py | XK/field.py、exception.py、core异常；M/model/m_xiaohongshu.py 的NoteUrlInfo |
 | store | C 轮末JSONL；共享manifest/SQLite在核心，无fork Bili store | SW/__init__.py、_store_impl.py 的JSONL、weibo_store_media.py | SD/__init__.py、_store_impl.py 的JSONL、douyin_store_media.py | SZ/__init__.py、_store_impl.py 的JSONL、zhihu_store_media.py | SX/__init__.py、_store_impl.py 的JSONL、xhs_store_media.py |
 | helper | C Cookie/浏览器/HTML/helper＋现有artifacts；见C5补项 | WB/help.py＋下表共用闭包 | DY/help.py的get_web_id→client；slider/easing/cache＋共用闭包 | ZH/help.py、M/tools/time_util.py＋共用闭包 | XK/help.py/manual_wait.py/extractor.py＋共用闭包；humps→pyhumps |
-| JS资源 | M/libs/stealth.min.js；没有签名JS | M/libs/stealth.min.js；没有签名JS | M/libs/douyin.js、stealth.min.js | M/libs/zhihu.js；stealth仅原非CDP分支 | 无本地签名JS；stealth仍在原非CDP分支，不能笼统称无JS资源 |
-| 动态import | 本article链无runpy/execjs；资源注入不是Python import | E repair hook 局部import＋共用行为桥 | E repair hook；cache factory局部import＋共用行为桥 | help首签懒编译JS；共用行为桥 | playwright_sign局部import xhshow；E repair/ACK hook＋共用行为桥 |
+| JS资源 | M/libs/stealth.min.js；没有签名JS | M/libs/stealth.min.js；没有签名JS | M/libs/douyin.js、stealth.min.js | `libs/zhihu.js` 已于 #185 退出；stealth仅原非CDP分支 | 无本地签名JS；stealth仍在原非CDP分支，不能笼统称无JS资源 |
+| 动态import | 本article链无runpy/execjs；资源注入不是Python import | E repair hook 局部import＋共用行为桥 | E repair hook；cache factory局部import＋共用行为桥 | 共用行为桥；知乎首签懒编译已于 #185 退出 | playwright_sign局部import xhshow；E repair/ACK hook＋共用行为桥 |
 | 辅助入口 | 两warmup、B repair/晋升/监督；通用benchmark/页面证据 | 两warmup、repair_post_details、benchmark/页面证据 | 两warmup、repair_post_details、benchmark/页面证据 | 两warmup、repair_post_details、benchmark/页面证据 | Q repair；xhs_accounts是核心管理入口；不进warmup/benchmark |
 | 配置读取 | 通用jobs→R→C args/env；不消费bilibili_config业务值 | base_config导入weibo_config；cmd_arg CLI覆盖→core/login | base_config导入dy_config；CLI覆盖→core/login；D2作者/fallback env | base_config导入zhihu_config；CLI覆盖→core/login；Cookie/settle env | xhs pool/target→X/C；base_config导入xhs_config后CLI覆盖；D2登录/导航/恢复/ACK env |
-| 环境依赖 | 根Python、Playwright/浏览器、Pillow、urllib/SQLite/fcntl；无固有Node需求 | HTTPX/Tenacity/Playwright、Pillow/aiofiles及共用闭包 | 左列能力＋PyExecJS/Node、cv2/numpy、MEMORY任务生命周期 | HTTPX/Tenacity/Playwright、Parsel/lxml/Pydantic、PyExecJS/Node、Pillow/aiofiles | HTTPX/Tenacity/Playwright、xhshow、pyhumps/Pydantic、Pillow/aiofiles及共用闭包 |
+| 环境依赖 | 根Python、Playwright/浏览器、Pillow、urllib/SQLite/fcntl；无固有Node需求 | HTTPX/Tenacity/Playwright、Pillow/aiofiles及共用闭包 | 左列能力＋PyExecJS/Node、cv2/numpy、MEMORY任务生命周期 | HTTPX/Tenacity/Playwright、Parsel/lxml/Pydantic、Pillow/aiofiles；知乎 PyExecJS 已于 #185 退出 | HTTPX/Tenacity/Playwright、xhshow、pyhumps/Pydantic、Pillow/aiofiles及共用闭包 |
 
 五个平台未来 adapter 都只拥有本站请求、签名、登录判别、响应解析、游标解释和鉴权下载，保留本站执行循环。
 表中的 store 必须拆成平台纯投影、下载调用与共享净化/JSONL/staging；不能整体搬成 adapter 的长期数据库权限。
 B站维持执行器内同步 article；微博保留长文与修复专属回退；抖音保留 response 监听和三元游标；
-知乎保留权威 entity 选择与首次签名缓存；XHS拥有轮内会话操作，root仍掌握租约、单轮监督、发现提交和终态。
+知乎保留权威 entity 选择；首次签名缓存已随 #185 删除。XHS拥有轮内会话操作，root仍掌握租约、单轮监督、发现提交和终态。
 
 以下是五站闭包的公共部分；每站矩阵引用本表，不重复抄公共源码。
 
@@ -193,7 +195,7 @@ XHS accounts/config/leases/runtime/supervision/terminal/discovery/batch_checkpoi
 | 源资源 | SHA-256 | 目标／校验责任 |
 |---|---|---|
 | `libs/douyin.js` | `ff5cb3133e2717523ffb3f96679e3f5d23bd31a999411ea604cff9a51da9e26e` | resources/js；T01/T12字节及execjs调用等价 |
-| `libs/zhihu.js` | `9753572dc21148975600ca8083e92245e69130cd11414a3e3089013b3aaee3f1` | resources/js；保留Node crypto与首次编译时点 |
+| `libs/zhihu.js` | `9753572dc21148975600ca8083e92245e69130cd11414a3e3089013b3aaee3f1` | 迁移时拟放入 resources/js；#185 已退出，包内不再携带。冻结台账 JSON 不改 |
 | `libs/stealth.min.js` | `02ae012addcdb30b0ed1a512406feb487699b1b217566e87a8086b54dfcc1d4d` | resources/js；逐调用点保留原注入条件；保留其MIT来源头 |
 | `LICENSE` | `aeff21de8609bec9d6e939bbbba7c2914ae0a6e7c9470ea7945c03f7d17a2a33` | resources/licenses/MediaCrawler-LICENSE；fork许可不覆盖资源自身来源标识 |
 
@@ -286,14 +288,14 @@ M/`pyproject.toml`、锁文件分别是旧环境输入，不把上表能力列�
 | 同文件 `_activate_latest_zhihu_page`:124、就绪等待:155、`launch_browser_with_cdp`:982、`close`:1015 | core→RT；现有fallback保留，CDP分支未注入stealth不补注入 | T07；F07 |
 | C:`export_profile_cookies`:899；ZH/`core.py:create_zhihu_client`:919 | RT/cookies＋login；snapshot优先，独立导出fallback；要求d_c0/z_c0 | T07；F07/F09 |
 | ZH/`client.py:ZhiHuClient`:52、`_pre_headers`:73、`request`:91、`get`:140、`pong`:157、`update_cookies`:177 | client；URI编码后签名同URI；3次/1秒/reraise，404空dict保留 | T07；F09/F13 |
-| ZH/`help.py:sign`:241、首次编译:254 | signer＋resources/js/zhihu.js；首次签名编译后复用，Node内建crypto | T07；F09/F10 |
+| ZH/`help.py:sign`:241、首次编译:254 | 迁移目标曾是 signer＋resources/js/zhihu.js；#185 已删除这两处，详情改读页面状态 | T07；F09/F10 |
 | 同文件 `ZhihuExtractor.extract_contents_from_search`:277、answer:318、article:347、作者:407、`_apply_author_info`:264 | parser；原Pydantic投影，头像证据内存保留到净化 | T07；F03/F04/F13 |
 | 同文件 `_find_target_content_entity`:87、`_detail_json_payloads`:131、图片:147、正文:174、merge:219 | parser；扫描script JSON精确ID/type，保留Parsel/lxml树操作 | T07；F13 |
 | ZH/`core.py:enrich_search_content_detail`:173、详情观察:655；ZH/`client.py` 详情请求:617/635 | core/client；已有正文图片纯快分支，否则IO补取，request_failed/parse_failed分开 | T07；F13 |
 | M/`model/m_zhihu.py:ZhihuContent`:25、`ZhihuCreator`:84；M/`constant/zhihu.py`:24 | models；只迁活跃模型/URL常量，不因import自动搬Comment | T07；F03/F13 |
 | ZH/`field.py:SearchTime`:27、`SearchType`:40、`SearchSort`:50；`exception.py:DataFetchError`:24、`PlatformRuntimeError`:28；core的`ZhihuImageDownloadError`:65、`ZhihuDetailFetchError`:79 | models，覆盖搜索默认参数及详情/图片错误；作者enrichment仍需ZhihuCreator，不能随creator批采一起删 | T07；F09/F13 |
 | ZH/`help.py:judge_zhihu_url`:704 | parser；detail/repair入口URL分流保留，不另写只适用于search的解析器 | T07/T10；F08/F13 |
-| SZ/`__init__.py:zhihu_content_image_assets`:41、`update_zhihu_content`:108；ZH/`client.py:get_content_image`:202 | parser/core/client；公式/头像图排除，图片保留Cookie/UA/proxy/Referer，不签内容API | T07；F05/F13 |
+| SZ/`__init__.py:zhihu_content_image_assets`:41、`update_zhihu_content`:108；ZH/`client.py:get_content_image`:202 | parser/core/client；公式/头像图排除，不签内容API。#185 现行图片不带 Cookie，UA 与 Referer 取自浏览器，CDN 直连 | T07；F05/F13 |
 | SZ/`zhihu_store_media.py:ZhihuStoreImage`:20、`_store_impl.py:ZhihuJsonlStoreImplement`:180；ZH/`login.py:ZhiHuLogin`:36 | staging/writer/login；QR/cookie保留，phone为空；worker pong与warmup谓词独立 | T07；F04/F07 |
 
 ### C5｜B站 article
@@ -359,7 +361,7 @@ SESSDATA或DedeUserID；B修复要求SESSDATA且nav.isLogin。迁移不顺手统
 | M/`cache/abs_cache.py:AbstractCache`:31；factory局部import memory/redis:43/46；slider的easing局部import:182 | MEMORY接口/实现→DY login_support，退出Redis factory支路；`temp_image`临时文件由paths定位，保留生成/清理时点与QR系统展示要求 | T06/T12；F07/F10 |
 | M/`store/*/_store_impl.py` 同文件非JSONL实现、`tools/words.py:AsyncWordCloudGenerator`:36 | 拆活跃投影/下载/JSONL后，删DB/CSV/Excel/Mongo/词云牵连；不能整体先删store | T12；F04/F10 |
 | M/`main.py:CrawlerFactory`:49、`config/base_config.py` 星号导入:145、`var.py` DB类型、proxy provider导入 | 退出全注册/全局config/aiomysql/Redis牵连；正式proxy=false不表示旧import没有副作用 | T12；F10 |
-| M/`libs/douyin.js:sign_datail`:429、`sign_reply`:433；`libs/zhihu.js:get_sign`:155；`libs/stealth.min.js`:1 | resources/js原字节；版权头/来源SHA保留；选站才装载，详见 G/T12 | T01/T12；F10 |
+| M/`libs/douyin.js:sign_datail`:429、`sign_reply`:433；`libs/zhihu.js:get_sign`:155；`libs/stealth.min.js`:1 | resources/js原字节；版权头/来源SHA保留；选站才装载，详见 G/T12。`libs/zhihu.js` 已于 #185 退出 | T01/T12；F10 |
 
 未迁功能的删除条件是所有五站及上述辅助入口无静态/动态引用且测试职责已迁，不是文件名像“video/store/UI”。
 明确退出：fork Bili视频主循环、快手/贴吧注册、评论/creator批采、上游DB/GUI/webui/文档npm构建。
@@ -503,7 +505,7 @@ fork的MYSQL/REDIS/MONGODB/POSTGRES凭据族随无用DB/proxy导入退出；不�
 | source_keyword/crawler_type | 原ContextVar在每关键词/模式设置，store写入时消费；改显式WriteContext，不把首词缓存给后续所有词 |
 | Cookie | WB/DY行为后refresh；ZH导航后、行为前refresh；XHS登录后/行为后/验证恢复后refresh；签名按每次请求取当前内存值 |
 | HTTPX/TLS | client每次async with创建/关闭，verify在factory调用取值；连接数不等于BrowserContext数，不改池化策略 |
-| 抖音/知乎签名资源 | 抖音选站加载signer时compile；知乎首次签名compile后缓存；XHS每调用Xhshow，Bili每轮WBI keys/每请求wts |
+| 抖音/知乎签名资源 | 抖音选站加载signer时compile；知乎签名资源已于 #185 删除，不再编译；XHS每调用Xhshow，Bili每轮WBI keys/每请求wts |
 | XHS profile/lease | root LeaseGuard.prepare_runtime_session:1894创建空0700 session并claim；worker仅借用；root精确收束再删除、释放，不靠PID/TTL猜测 |
 | XHS Chrome/Context/Page | launcher在Popen前置launch latch；一个Context；session持主Page与新页守卫，login/client仅借用；主Page死亡即失败 |
 | XHS认证状态 | root按身份/序列/auth读取，接收单调时钟判存活；执行器heartbeat只做监督；root进度callback可提交批次，两者不能同名混用 |

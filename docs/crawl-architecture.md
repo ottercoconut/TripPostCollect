@@ -1,6 +1,8 @@
 # 抓取架构
 
 > **受限冻结：** 本文件属于治理基线；普通抓取、排障或顺手同步不得修改，只有用户明确授权治理变更，并同步核验对应代码、测试与关联文档时才允许更新。
+>
+> **授权记录（2026-11-13）：** 操作人授权临时解冻，同步 #185 知乎页面取数、访问门禁与全量扫描口径。
 
 本文只描述组件边界和数据流。完成谓词、错误分类和候选记忆语义见
 [正式抓取执行契约](formal-crawl-contract.md)，操作步骤见[运行手册](operations-runbook.md)，表结构、
@@ -69,7 +71,7 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
 ```text
 冻结配置与计划
   -> 登录、请求策略与行为证据
-  -> 搜索/顶部刷新/深层发现（小红书：首页输入后全量滚动）
+  -> 搜索/顶部刷新/深层发现（小红书：首页输入后全量滚动；知乎：首页滚到 paging.is_end）
   -> 已知 ID 前置过滤
   -> 详情、作者和权威正文图补全
   -> 头像清除器（失败关闭）
@@ -117,7 +119,7 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
 
 ## 页面取数通道与访问证据
 
-已纳入访问门禁的平台（当前为小红书）只经页面取数通道取得平台数据：
+已纳入访问门禁的平台（当前为小红书与知乎）只经页面取数通道取得平台数据：
 
 - `runtime/page_capture.py`（Channel）：按平台登记的规则（方法、主机、路径、资源类型）被动截获本轮
   页面自身请求的响应，读取登记过的页面状态投影；图片只在单篇的图片窗口内、按期望 URL 读体。
@@ -134,9 +136,14 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
   -> 行为与持久化门禁
 ```
 
+知乎搜索走被动截获（`zhihu.search_v3` / `page_response`），详情与作者走页面状态
+（`zhihu.initial_data` / `page_state`）。正文图不经该通道截获，按平台文档登记的 CDN 直连例外取得，
+账本来源为 `cdn_direct`，并参与 R5。
+
 取数分级以[正式契约](formal-crawl-contract.md#取数来源与真实访问门禁)为准，本文不另行定义：L3 只指
 Playwright `page.request` / `context.request`，所有平台禁止；浏览器外 HTTP 客户端单列，已纳入门禁的
-平台只允许平台文档登记的例外，B站、微博、抖音和知乎目前不纳入门禁（#111），计划在
+平台只允许平台文档登记的例外。小红书没有此类例外。知乎（#185）的例外是正文图 CDN 直连。
+B站、微博和抖音目前不纳入门禁（#111），计划在
 2026-11-12（UTC−8）之后重构（#157）。静态检查 `tests/test_fetch_boundary.py`
 守护旁路导入、Playwright 请求接口和页面脚本内的主动请求。
 
@@ -156,7 +163,7 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 
 通用控制面使用：
 
-- `crawl_discovery_checkpoints` 保存 job 与查询指纹作用域内的安全深层前沿；
+- `crawl_discovery_checkpoints` 保存 job 与查询指纹作用域内的安全深层前沿；知乎（#185）仍写入最后页码与停止原因，只作审计，不作续跑起点；
 - `crawl_discovery_seen_candidates` 保存已有决定性处理结果的候选 ID，包括主题不相关但结构有效且已
   形成 JSONL 的记录；相关性为 false 不产生 `candidate_skipped`；
 - `crawl_discovery_candidate_exclusions` 保存操作人明确授权的精确排除。
@@ -164,8 +171,9 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 小红书使用独立的 `xhs_discovery_checkpoints` 和 `xhs_discovery_seen_candidates`，并额外按人工选择的
 账号隔离。两套控制面都在 child 摘要与批次证据形成后才提交；媒体或 SQLite 失败不得提前推进。
 
-存在 checkpoint 时先有限刷新顶部，再从深层前沿继续。顶部刷新不推进深层位置；边界页允许重取，
-已知 ID 在详情、作者和媒体请求前过滤。小红书没有前沿与顶部刷新，每轮从首页搜索后全量滚到
+存在 checkpoint 时，知乎与小红书以外的平台先有限刷新顶部，再从深层前沿继续。顶部刷新不推进深层位置；边界页允许重取，
+已知 ID 在详情、作者和媒体请求前过滤。知乎（#185）没有可恢复前沿，也不做顶部刷新：每轮从首页滚到
+`paging.is_end`，页码只作审计，已处理 ID 在详情前滑过，runner 拒绝 `--start-page`。小红书没有前沿与顶部刷新，每轮从首页搜索后全量滚到
 `has_more=false`，已知 ID 在点开前滑过。平台 cursor 组成和重新建链规则只写在对应平台文档。
 
 ## 平台拓扑
@@ -175,7 +183,7 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 | B站 article | 项目自有 article 搜索/详情分支 | article API、详情正文门禁 | [B站](platforms/bilibili.md) |
 | 微博 | 根包平台适配器搜索 | 移动端登录与长文详情 | [微博](platforms/weibo.md) |
 | 抖音 | 根包平台适配器搜索 | 浏览器响应监听、每轮全量扫描 | [抖音](platforms/douyin.md) |
-| 知乎 | 根包平台适配器搜索 | answer/article 详情、zhimg 资产键 | [知乎](platforms/zhihu.md) |
+| 知乎 | 根包平台适配器搜索 | 页面截获搜索、详情与作者页面状态、访问账本、zhimg CDN 直连 | [知乎](platforms/zhihu.md) |
 | 小红书 | 独立 runner + 根包平台适配器 | 逻辑账号租约、轮内扫码、标签页保护 | [小红书](platforms/xhs.md) |
 
 平台层产出统一 JSONL、分页事件和图片 manifest，根项目使用同一正式校验和持久化层，避免五套长期
