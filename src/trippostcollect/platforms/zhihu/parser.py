@@ -75,6 +75,14 @@ def _first_non_empty(*values):
     return ""
 
 
+def _optional_count(*values):
+    """第一个既不是 None 也不是空串的值；都没有时返回 None。数值 0 视为已取到。"""
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def _normalize_image_url(url: str) -> str:
     url = (url or "").strip()
     if url.startswith("//"):
@@ -443,7 +451,8 @@ class ZhihuExtractor:
             )
             res.fans = _first_non_empty(author.get("follower_count"), author.get("followerCount"), 0)
             res.author_followers_source = "search_author" if res.followers_observed else "missing"
-            res.follows = _first_non_empty(author.get("following_count"), author.get("followingCount"), 0)
+            # 关注数缺键或空串表示没取到，不能补 0；键上的 0 仍是 0（#182）。
+            res.follows = _optional_count(author.get("following_count"), author.get("followingCount"))
             res.headline = author.get("headline") or ""
             badge_v2 = author.get("badge_v2") or {}
             res.verified_text = author.get("verify_bayes") or badge_v2.get("title") or ""

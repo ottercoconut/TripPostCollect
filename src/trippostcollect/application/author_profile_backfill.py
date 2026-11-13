@@ -1,7 +1,8 @@
-"""小红书离线、抖音联网的作者资料回填。
+"""作者资料回填。
 
-只填当前为 NULL 的列，不覆盖已有值，也不删除取不回的作者。
-抖音写入的是回填时刻的作者资料，不是原始抓取时刻的。
+小红书离线补认证两列，抖音联网补主页、简介和认证：只填当前为 NULL 的列，不覆盖已有值。
+知乎离线把三处同为 0 的关注数改为 NULL，不访问平台，也不改其他列或其他 JSON 键。
+取不回或不一致的行保留原值，不删除。抖音写入的是回填时刻的作者资料，不是原始抓取时刻的。
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import signal
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from trippostcollect.application.failures import extract_stdout_json
 from trippostcollect.application.repair_runtime import (
@@ -44,7 +45,7 @@ from trippostcollect.runtime.process import operator_interrupt_error
 from trippostcollect.xhs.leases import DeferredTerminationSignals
 
 
-PLATFORMS = ("xhs", "douyin")
+PLATFORMS = ("xhs", "douyin", "zhihu")
 XHS_COLUMNS = ("author_verified", "author_verified_text")
 DOUYIN_COLUMNS = (
     "author_profile_url",
@@ -52,12 +53,15 @@ DOUYIN_COLUMNS = (
     "author_verified",
     "author_verified_text",
 )
-COLUMNS = {"xhs": XHS_COLUMNS, "douyin": DOUYIN_COLUMNS}
+ZHIHU_COLUMNS = ("author_following_count",)
+COLUMNS = {"xhs": XHS_COLUMNS, "douyin": DOUYIN_COLUMNS, "zhihu": ZHIHU_COLUMNS}
 AWEME_ID_RE_TEXT = r"^[0-9]+$"
 CHILD_INTERRUPT_GRACE_SECONDS = None
 INTERRUPT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="回填小红书认证两列，或抖音作者主页、简介和认证。")
+    parser = argparse.ArgumentParser(
+        description="回填小红书认证、抖音作者资料，或把知乎三处同为 0 的关注数改为 NULL。",
+    )
     parser.add_argument("--platform", required=True, choices=PLATFORMS)
     parser.add_argument("--db", default=str(DEFAULT_DB))
     parser.add_argument("--dry-run", action="store_true")
@@ -509,8 +513,199 @@ def _finish_state_success(state: FrozenExecutionState, evidence: dict[str, Any])
     state.finalize(outcome="completed", evidence=evidence)
 
 
-def run_xhs(
+_MISSING = object()
+
+
+def _format_count(value: Any) -> str:
+    if value is _MISSING:
+        return "缺失"
+    if value is None:
+        return "null"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _is_exact_zero(value: Any) -> bool:
+    return type(value) is int and value == 0
+
+
+def _is_absent_count(value: Any) -> bool:
+    return value is None or value is _MISSING
+
+
+def _read_following(text: str | None) -> tuple[Any, str]:
+    try:
+        payload = json.loads("" if text is None else str(text))
+    except json.JSONDecodeError:
+        return _MISSING, "无法解析"
+    if not isinstance(payload, dict):
+        return _MISSING, "不是对象"
+    if "following_count" not in payload:
+        return _MISSING, ""
+    return payload["following_count"], ""
+
+
+# #182 解析修复部署前入库的行才可能是补零库存。此后关注数缺键写 NULL，三处同为 0 只能来自
+# 平台键上的真实 0，不得再改；这类行记为异常，由人工核对。值与 web_posts.created_at 同为 UTC。
+ZHIHU_FOLLOWING_FIX_CREATED_BEFORE = "2026-11-14 00:00:00"
+
+
+def classify_zhihu_following_row(row: sqlite3.Row) -> tuple[str, str]:
+    """修复前入库、三处同为整数 0 才是目标；三处都缺失则跳过；其余记为异常且不改。"""
+    column = row["author_following_count"]
+    author_value, author_error = _read_following(row["author_json"])
+    raw_value, raw_error = _read_following(row["raw_sample_json"])
+    if author_error:
+        return "anomaly", f"author_json {author_error}，不能确认三处关注数同为 0"
+    if raw_error:
+        return "anomaly", f"raw_sample_json {raw_error}，不能确认三处关注数同为 0"
+    observed = (column, author_value, raw_value)
+    if all(_is_exact_zero(value) for value in observed):
+        created_at = str(row["created_at"] or "")
+        if created_at and created_at < ZHIHU_FOLLOWING_FIX_CREATED_BEFORE:
+            return "target", ""
+        return "anomaly", (
+            f"入库时间 {created_at or '缺失'} 不早于 {ZHIHU_FOLLOWING_FIX_CREATED_BEFORE}（UTC），"
+            "三处同为 0 可能是真实值，不自动改"
+        )
+    if all(_is_absent_count(value) for value in observed):
+        return "absent", ""
+    detail = (
+        f"列={_format_count(column)}，"
+        f"author_json={_format_count(author_value)}，"
+        f"raw_sample_json={_format_count(raw_value)}"
+    )
+    return "anomaly", f"三处关注数不是同为 0：{detail}"
+
+
+def null_following_count(text: str) -> str:
+    """只把对象里的 following_count 从整数 0 改成 null，保留其余键的顺序和值。"""
+    payload = json.loads(text)
+    if (
+        not isinstance(payload, dict)
+        or type(payload.get("following_count")) is not int
+        or payload["following_count"] != 0
+    ):
+        raise ValueError("following_count is not integer zero")
+    payload["following_count"] = None
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def load_zhihu_following_rows(
+    connection: sqlite3.Connection,
+    author_ids: list[str],
+) -> dict[str, Any]:
+    clause, params = _author_id_clause(author_ids)
+    rows = connection.execute(
+        f"""
+        SELECT id, platform_post_id, author_platform_id, author_profile_url,
+               author_description, author_verified, author_verified_text,
+               author_json, raw_sample_json, content_text, author_display_name,
+               author_followers_count, author_following_count, published_at, created_at
+        FROM web_posts
+        WHERE platform_key='zhihu'{clause}
+        ORDER BY created_at DESC, id DESC
+        """,
+        params,
+    ).fetchall()
+    targets: list[sqlite3.Row] = []
+    anomalies: list[dict[str, Any]] = []
+    for row in rows:
+        kind, reason = classify_zhihu_following_row(row)
+        if kind == "target":
+            targets.append(row)
+            continue
+        if kind != "anomaly":
+            continue
+        anomalies.append(
+            {
+                "id": int(row["id"]),
+                "platform_post_id": str(row["platform_post_id"] or ""),
+                "author_platform_id": str(row["author_platform_id"] or ""),
+                "reason": reason,
+            }
+        )
+    return {"targets": targets, "anomalies": anomalies}
+
+
+def apply_zhihu_following(
+    connection: sqlite3.Connection,
+    authors: list[dict[str, Any]],
+) -> dict[str, Any]:
+    changed = 0
+    success = 0
+    partial = 0
+    unrecovered: list[dict[str, str]] = []
+    for author in authors:
+        row_states: list[str] = []
+        for row in author["rows"]:
+            current = connection.execute(
+                """
+                SELECT id, author_following_count, author_json, raw_sample_json, created_at
+                FROM web_posts
+                WHERE id=? AND platform_key='zhihu'
+                """,
+                (row["id"],),
+            ).fetchone()
+            kind, reason = ("anomaly", "following_count_not_uniform_zero")
+            if current is not None:
+                kind, reason = classify_zhihu_following_row(current)
+            if current is None or kind != "target":
+                row_states.append("unrecovered")
+                unrecovered.append(
+                    {
+                        "author_platform_id": str(author["author_platform_id"]),
+                        "reason": reason or "following_count_not_uniform_zero",
+                    }
+                )
+                continue
+            updated = connection.execute(
+                """
+                UPDATE web_posts
+                SET author_following_count=NULL, author_json=?, raw_sample_json=?
+                WHERE id=? AND platform_key='zhihu' AND author_following_count=0
+                """,
+                (
+                    null_following_count(str(current["author_json"])),
+                    null_following_count(str(current["raw_sample_json"])),
+                    int(current["id"]),
+                ),
+            )
+            if updated.rowcount != 1:
+                row_states.append("unrecovered")
+                unrecovered.append(
+                    {
+                        "author_platform_id": str(author["author_platform_id"]),
+                        "reason": "following_count_not_uniform_zero",
+                    }
+                )
+                continue
+            changed += 1
+            row_states.append("success")
+        if row_states and all(state == "success" for state in row_states):
+            success += 1
+        elif any(state == "success" for state in row_states):
+            partial += 1
+    return {
+        "changed_row_count": changed,
+        "success_count": success,
+        "partial_count": partial,
+        "unrecovered": unrecovered,
+    }
+
+
+def _merged_extra(
+    base: dict[str, Any] | None,
+    extra: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    merged = dict(base or {})
+    if extra:
+        merged.update(extra)
+    return merged or None
+
+
+def run_offline(
     *,
+    platform: str,
     db_path: Path,
     authors: list[dict[str, Any]],
     before: dict[str, int],
@@ -519,19 +714,21 @@ def run_xhs(
     run_dir: Path,
     state: FrozenExecutionState,
     summary_path: Path,
-    verified_fields: Any,
+    apply: Callable[[sqlite3.Connection, list[dict[str, Any]]], dict[str, Any]],
+    report_extra: dict[str, Any] | None = None,
 ) -> int:
     plan = [{"batch": 1, "mode": "offline", "target_author_count": len(authors), "target_row_count": sum(len(a["rows"]) for a in authors)}]
     if dry_run:
         report = _report(
             status="planned",
             run_id=run_id,
-            platform="xhs",
+            platform=platform,
             dry_run=True,
             authors=authors,
             before=before,
             after=before,
             batch_plan=plan,
+            extra=report_extra,
         )
         write_json(summary_path, report)
         print(json.dumps({"summary": str(summary_path), **_public_counts(report)}, ensure_ascii=False, indent=2))
@@ -541,12 +738,12 @@ def run_xhs(
         report = _report(
             status="completed",
             run_id=run_id,
-            platform="xhs",
+            platform=platform,
             dry_run=False,
             authors=[],
             before=before,
             after=before,
-            extra={"no_op": True},
+            extra=_merged_extra(report_extra, {"no_op": True}),
         )
         write_json(summary_path, report)
         print(json.dumps({"summary": str(summary_path), **_public_counts(report)}, ensure_ascii=False, indent=2))
@@ -571,7 +768,7 @@ def run_xhs(
             connection.row_factory = sqlite3.Row
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                applied = apply_xhs_authors(connection, authors, verified_fields)
+                applied = apply(connection, authors)
                 if latch.signal_received is None:
                     connection.execute("COMMIT")
                 else:
@@ -595,7 +792,7 @@ def run_xhs(
         latch.restore()
     after = before
     with connect_readonly(db_path) as connection:
-        after = column_counts(connection, "xhs")
+        after = column_counts(connection, platform)
     if signum is not None:
         terminalize_repair_interrupt(
             state,
@@ -604,10 +801,15 @@ def run_xhs(
         )
         outcome = "failed"
         fatal = operator_interrupt_error(int(signum))
+    error_extra = (
+        {"error": fatal, "interrupt": interrupt_details(int(signum), forced_termination=False)}
+        if signum is not None
+        else ({"error": fatal} if fatal else None)
+    )
     report = _report(
         status=outcome,
         run_id=run_id,
-        platform="xhs",
+        platform=platform,
         dry_run=False,
         authors=authors,
         before=before,
@@ -618,11 +820,7 @@ def run_xhs(
         changed_row_count=int(applied["changed_row_count"]),
         batch_plan=plan,
         backup=backup or None,
-        extra=(
-            {"error": fatal, "interrupt": interrupt_details(int(signum), forced_termination=False)}
-            if signum is not None
-            else ({"error": fatal} if fatal else None)
-        ),
+        extra=_merged_extra(report_extra, error_extra),
     )
     write_json(summary_path, report)
     if signum is not None:
@@ -630,6 +828,32 @@ def run_xhs(
         return 128 + int(signum)
     print(json.dumps({"summary": str(summary_path), **_public_counts(report)}, ensure_ascii=False, indent=2))
     return 0 if outcome == "completed" else 2
+
+
+def run_xhs(
+    *,
+    db_path: Path,
+    authors: list[dict[str, Any]],
+    before: dict[str, int],
+    dry_run: bool,
+    run_id: str,
+    run_dir: Path,
+    state: FrozenExecutionState,
+    summary_path: Path,
+    verified_fields: Any,
+) -> int:
+    return run_offline(
+        platform="xhs",
+        db_path=db_path,
+        authors=authors,
+        before=before,
+        dry_run=dry_run,
+        run_id=run_id,
+        run_dir=run_dir,
+        state=state,
+        summary_path=summary_path,
+        apply=lambda connection, selected: apply_xhs_authors(connection, selected, verified_fields),
+    )
 
 
 def _public_counts(report: dict[str, Any]) -> dict[str, Any]:
@@ -892,8 +1116,14 @@ def main(argv: list[str] | None = None, *, verified_fields: Any = None) -> int:
     runtime_dir = ensure_dir(AUTHOR_PROFILE_BACKFILL_RUNTIME_ROOT / run_id)
     state_path = runtime_dir / "execution_state.json"
     summary_path = run_dir / "run_summary.json"
+    anomalies: list[dict[str, Any]] = []
     with connect_readonly(db_path) as connection:
-        rows = load_rows(connection, args.platform, list(args.author_ids or []))
+        if args.platform == "zhihu":
+            classified = load_zhihu_following_rows(connection, list(args.author_ids or []))
+            rows = classified["targets"]
+            anomalies = list(classified["anomalies"])
+        else:
+            rows = load_rows(connection, args.platform, list(args.author_ids or []))
         before = column_counts(connection, args.platform)
     authors = group_authors(rows, max_authors=args.max_authors)
     manifest_path = write_json(
@@ -938,6 +1168,13 @@ def main(argv: list[str] | None = None, *, verified_fields: Any = None) -> int:
         if verified_fields is None:
             raise SystemExit("小红书回填需要注入与入库相同的认证计算函数")
         return run_xhs(**common, verified_fields=verified_fields)
+    if args.platform == "zhihu":
+        return run_offline(
+            platform="zhihu",
+            apply=apply_zhihu_following,
+            report_extra={"anomalies": anomalies, "anomaly_count": len(anomalies)},
+            **common,
+        )
     return run_douyin(
         **common,
         keyword=str(args.keyword),

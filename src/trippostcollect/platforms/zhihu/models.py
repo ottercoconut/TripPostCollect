@@ -69,7 +69,7 @@ class ZhihuContent(BaseModel):
     followers_count: int = Field(default=0, description="Creator follower count")
     followers_observed: bool = Field(default=False, description="Whether the platform response explicitly included follower count")
     author_followers_source: str = Field(default="", description="Follower count source")
-    following_count: int = Field(default=0, description="Creator following count")
+    following_count: int | None = Field(default=None, description="Creator following count")
     author_desc: str = Field(default="", description="Creator headline or description")
     verified_text: str = Field(default="", description="Creator verification text")
 
@@ -83,7 +83,7 @@ class ZhihuCreator(BaseModel):
     user_nickname: str = Field(default="", description="User raw nickname")
     profile_url: str = Field(default="", description="Creator profile URL")
     avatar_url: str = Field(default="", description="Creator avatar URL", exclude=True)
-    follows: int = Field(default=0, description="Follows count")
+    follows: int | None = Field(default=None, description="Follows count")
     fans: int = Field(default=0, description="Fans count")
     followers_observed: bool = Field(default=False, description="Whether the platform response explicitly included follower count")
     author_followers_source: str = Field(default="", description="Follower count source")

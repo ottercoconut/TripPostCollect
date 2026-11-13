@@ -285,9 +285,11 @@ state 旁的 worker 进程组兜底强杀。stdout / stderr 先做头像审计�
 
 ## 作者资料回填
 
-`scripts/backfill_author_profiles.py` 只填当前为 NULL 的作者列，不覆盖已有值，也不改粉丝、关注、昵称、正文、图片或 `published_at`。取不回的作者保留原行，不删除。写默认库前必须显式确认；程序在第一笔写入前建立 SQLite 一致性备份并记录 SHA-256。
+`scripts/backfill_author_profiles.py` 回填作者资料。小红书和抖音只填当前为 NULL 的作者列，不覆盖已有值，也不改粉丝、关注、昵称、正文、图片或 `published_at`。取不回的作者保留原行，不删除。写默认库前必须显式确认；程序在第一笔写入前建立 SQLite 一致性备份并记录 SHA-256。
 
 小红书不访问平台：从该行 `raw_sample_json.creator_profile_json` 用与入库相同的 `creator_verified_fields` 计算 `author_verified` / `author_verified_text`。解析失败或投影为空的行保持不动，并记入报告。
+
+知乎不访问平台：只把 #182 解析修复部署前入库（`created_at` 早于 `2026-11-14 00:00:00` UTC）、且 `author_following_count`、`author_json.following_count` 和 `raw_sample_json.following_count` 三处同为整数 0 的关注数改为 NULL / JSON null。三处不一致、某处已非 0，或 JSON 无法据此确认的行不改，并写入报告的 `anomalies`。已经是 NULL 的行不是目标。不改粉丝、昵称、正文和其他 JSON 键，也不在 `author_json` 里加修正标记。这是针对历史补零库存的一次性修正：截止时间之后入库的行，三处同为 0 只能来自平台给出的真实 0，一律只记入 `anomalies`，不自动改，所以重复运行不会改动真实值。
 
 抖音按 `author_platform_id` 分组。每位作者按入库时间从新到旧最多尝试 3 个已有作品：先在 `--keyword` 搜索页完成与详情修复相同的人类行为，再取作品详情和作者资料。详情里的作者 ID 必须与行一致才写。写入的简介、认证和主页链接是回填当时的作者资料，不是原始抓取时刻的；`author_json.profile_backfill` 记录 `observed_at`、`run_id`、`source_aweme_id` 和认证候选原值。登录失效、验证码、频控、安全策略、浏览器整体失败或网络不可达会停止后续批次，已提交的写入保留；再次运行只挑仍有空列、且没有 `profile_backfill` 记录的作者（作者本就没有简介时该列一直为空，不反复联网）。HTTP 详情返回空壳时与详情修复相同，改用浏览器打开作品页取详情；连续 10 位作者都只得到空详情时，按运行级阻断 `consecutive_empty_detail` 停止。
 
@@ -309,6 +311,13 @@ python scripts/backfill_author_profiles.py \
   --dry-run
 ```
 
+```bash
+source .venv/bin/activate
+python scripts/backfill_author_profiles.py \
+  --platform zhihu \
+  --dry-run
+```
+
 确认后写默认库。`--max-authors N` 只处理前 N 位作者，`0` 表示全部；`--author-id` 可重复，用于精确重试：
 
 ```bash
@@ -325,6 +334,13 @@ python scripts/backfill_author_profiles.py \
   --keyword 青岛旅游 \
   --batch-size 20 \
   --max-authors 20 \
+  --confirm-default-db-backfill
+```
+
+```bash
+source .venv/bin/activate
+python scripts/backfill_author_profiles.py \
+  --platform zhihu \
   --confirm-default-db-backfill
 ```
 

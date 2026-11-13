@@ -20,6 +20,7 @@ import pytest
 from support import legacy_expectations as expectations
 from support import runtime_failed_batch_deviation
 from support import ua_from_browser_deviation
+from support import zhihu_following_count_deviation
 from support import zhihu_login_paging_deviation as deviation
 from support.stable_png import solid_png
 from trippostcollect.application import events
@@ -279,14 +280,15 @@ T14_DRIVE = ("T07", "request_event_artifacts")
 
 
 def legacy_expectation(scenario):
-    """固化预期经 #113、#127、#133 偏离变换（见 support.zhihu_login_paging_deviation、ua_from_browser_deviation、
-    runtime_failed_batch_deviation）后用于根侧比较。"""
+    """固化预期经 #113、#127、#133、#182 偏离变换（见 support.zhihu_login_paging_deviation、
+    ua_from_browser_deviation、runtime_failed_batch_deviation、zhihu_following_count_deviation）后用于根侧比较。"""
     expected = ua_from_browser_deviation.zhihu(expectations.load(*T14_DRIVE, scenario))
     if scenario == "login_expired":
         expected = deviation.login_expired_expectation(expected)
     else:
         expected = deviation.zhihu_login_paging(expected, scenario)
-    return runtime_failed_batch_deviation.zhihu_drive(expected, scenario)
+    expected = runtime_failed_batch_deviation.zhihu_drive(expected, scenario)
+    return zhihu_following_count_deviation.zhihu_records(expected)
 
 
 @pytest.mark.asyncio
@@ -445,6 +447,23 @@ ISSUE_113_AVATAR_FIELD = (
 )
 # #113：搜索列表投影改由 extract_search_page 承接（丢弃 zvideo、保留原始 paging），原方法只剩委托。
 ISSUE_113_REPLACED_DEFINITIONS = {"ZhihuExtractor.extract_contents_from_search"}
+# #182：关注数缺键不再补 0。只替换这两处字段默认值和搜索作者赋值，粉丝数仍补 0。
+ISSUE_182_FOLLOWING_FIELDS = (
+    (
+        'following_count: int = Field(default=0, description="Creator following count")',
+        'following_count: int | None = Field(default=None, description="Creator following count")',
+    ),
+    (
+        'follows: int = Field(default=0, description="Follows count")',
+        'follows: int | None = Field(default=None, description="Follows count")',
+    ),
+)
+ISSUE_182_FOLLOWS_ASSIGNMENT = (
+    "res.follows = _first_non_empty("
+    'author.get("following_count"), author.get("followingCount"), 0)',
+    "res.follows = _optional_count("
+    'author.get("following_count"), author.get("followingCount"))',
+)
 
 
 def test_pure_definitions_keep_original_bodies():
@@ -478,6 +497,15 @@ def test_pure_definitions_keep_original_bodies():
         if name in {"ZhihuContent", "ZhihuCreator"}:
             assert original.count(ISSUE_113_AVATAR_FIELD[0]) == 2, name
             original = original.replace(*ISSUE_113_AVATAR_FIELD)
+            if name == "ZhihuContent":
+                assert original.count(ISSUE_182_FOLLOWING_FIELDS[0][0]) == 1, name
+            if name == "ZhihuCreator":
+                assert original.count(ISSUE_182_FOLLOWING_FIELDS[1][0]) == 1, name
+            for old, new in ISSUE_182_FOLLOWING_FIELDS:
+                original = original.replace(old, new)
+        if name == "ZhihuExtractor._extract_content_or_comment_author":
+            assert original.count(ISSUE_182_FOLLOWS_ASSIGNMENT[0]) == 1, name
+            original = original.replace(*ISSUE_182_FOLLOWS_ASSIGNMENT)
         current = (ROOT / "src/trippostcollect" / row["target"]).read_text()
         assert ast.dump(definitions(original)[name]) == ast.dump(definitions(current)[name]), name
 
