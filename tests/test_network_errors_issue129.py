@@ -16,7 +16,6 @@ from urllib.error import URLError
 import httpx
 import pytest
 
-from trippostcollect.application.contracts import ZhihuClientPorts
 from trippostcollect.application.failures import classify_attempt
 from trippostcollect.platforms.bilibili import client as bilibili_client
 from trippostcollect.platforms.douyin import core as douyin_core
@@ -24,7 +23,6 @@ from trippostcollect.platforms.douyin.client import DouYinClient
 from trippostcollect.platforms.douyin.models import PlatformRuntimeError as DouyinRuntimeError
 from trippostcollect.platforms.weibo.client import WeiboClient
 from trippostcollect.platforms.zhihu.client import ZhiHuClient
-from trippostcollect.platforms.zhihu.models import PlatformRuntimeError as ZhihuRuntimeError
 
 from platforms.douyin import test_douyin_offline_faults as douyin_faults
 from platforms.weibo import test_weibo_offline_faults as weibo_faults
@@ -111,71 +109,67 @@ async def test_douyin_creator_profile_network_failure_stops_run_without_skip(mon
 # ---------- 知乎 ----------
 
 
-def zhihu_client(transport) -> ZhiHuClient:
-    return ZhiHuClient(
-        ports=ZhihuClientPorts(transport, AsyncMock()),
-        headers={"cookie": "d_c0=t129", "user-agent": "t129"},
-        playwright_page=MagicMock(),
-        cookie_dict={"d_c0": "t129"},
-    )
+def test_zhihu_detail_no_longer_uses_signed_http_client():
+    """#185：知乎详情不再走 httpx，因此不再从 request() 产生 network_unreachable。execjs 仍在。"""
+
+    assert not hasattr(ZhiHuClient, "request")
+    assert not hasattr(ZhiHuClient, "get_answer_info")
+    import execjs
+
+    assert callable(execjs.compile)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault", [httpx.ConnectError, httpx.ReadTimeout])
-async def test_zhihu_request_retries_then_raises_network_unreachable(monkeypatch, fault):
-    sleeps: list[float] = []
+async def test_zhihu_detail_page_closed_stops_run_without_skip(monkeypatch, tmp_path):
+    from types import SimpleNamespace
 
-    async def sleep(seconds):
-        sleeps.append(seconds)
+    from trippostcollect.platforms.zhihu.models import ZhihuDetailFetchError
 
-    monkeypatch.setattr(ZhiHuClient.request.retry, "sleep", sleep)
-    transport = zhihu_faults.Transport(fault)
-
-    with pytest.raises(ZhihuRuntimeError) as caught:
-        await zhihu_client(transport).request("GET", "https://www.zhihu.com/api/v4/search_v3?q=t129")
-
-    # 重试预算不变（3 次 / 1 秒），转换只发生在重试用尽之后。
-    assert transport.calls == ["/api/v4/search_v3"] * 3
-    assert sleeps == [1, 1]
-    assert caught.value.code == "network_unreachable"
-    assert isinstance(caught.value.__cause__, fault)
-
-
-@pytest.mark.asyncio
-async def test_zhihu_detail_network_failure_stops_run_without_skip(monkeypatch, tmp_path):
-    monkeypatch.setattr(ZhiHuClient.request.retry, "sleep", AsyncMock(return_value=None))
     crawler, state_path = zhihu_faults.prepare(monkeypatch, tmp_path)
     excerpt = zhihu_faults.answer("needs-detail")
     excerpt.content_detail_status = "search_only"
     excerpt.content_detail_source = ""
     excerpt.image_list = []
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [
+    crawler._next_search_page = AsyncMock(side_effect=[
         zhihu_faults.search_page([excerpt]), zhihu_faults.END,
-    ]
-    transport = zhihu_faults.Transport(httpx.ReadTimeout)
-    real_client = zhihu_client(transport)
+    ])
+    crawler._page_capture = SimpleNamespace(channel=SimpleNamespace())
+    crawler.context_page = MagicMock()
+    crawler._opened_search_keyword = "青岛旅游"
 
-    async def get_answer_info(question_id, answer_id):
-        return await real_client.request("GET", f"https://www.zhihu.com/question/{question_id}/answer/{answer_id}")
+    async def closed(self, content):
+        raise ZhihuDetailFetchError(
+            content.content_id, "browser_target_closed", attempts=1, runtime_blocking=True,
+        )
 
-    crawler.zhihu_client.get_answer_info.side_effect = get_answer_info
-
-    await crawler.search()  # 不再崩溃到 worker 顶层
-
-    assert transport.calls == ["/question/question-1/answer/needs-detail"] * 3
-    assert_runtime_network_stop(state_path, "needs-detail", "network_unreachable")
-
-
-@pytest.mark.asyncio
-async def test_zhihu_search_network_failure_is_runtime_failed(monkeypatch, tmp_path):
-    crawler, state_path = zhihu_faults.prepare(monkeypatch, tmp_path)
-    crawler.zhihu_client.get_note_by_keyword.side_effect = ZhihuRuntimeError(
-        "zhihu network_unreachable: ConnectError", code="network_unreachable",
+    monkeypatch.setattr(
+        "trippostcollect.platforms.zhihu.core.ZhihuDetailPages.open_from_search", closed,
     )
 
     await crawler.search()
 
-    assert_runtime_network_stop(state_path, "", "network_unreachable")
+    stopped = events_of(state_path, "adaptive_search_stopped")
+    assert stopped[-1]["stop_reason"] == "runtime_failed"
+    assert stopped[-1]["stop_detail"] == "browser_target_closed"
+    assert events_of(state_path, "candidate_skipped") == []
+    assert "needs-detail" not in stopped[-1].get("candidate_identities", [])
+
+
+@pytest.mark.asyncio
+async def test_zhihu_missing_search_capture_is_runtime_failed_without_seen(monkeypatch, tmp_path):
+    from trippostcollect.platforms.zhihu.search_capture import BrowserSearchResponseMissing
+
+    crawler, state_path = zhihu_faults.prepare(monkeypatch, tmp_path)
+    crawler._next_search_page = AsyncMock(side_effect=BrowserSearchResponseMissing())
+
+    await crawler.search()
+
+    stopped = events_of(state_path, "adaptive_search_stopped")
+    assert [(item["stop_reason"], item["stop_detail"]) for item in stopped] == [
+        ("runtime_failed", "browser_search_response_missing"),
+    ]
+    assert stopped[-1]["candidate_identities"] == []
+    assert events_of(state_path, "candidate_skipped") == []
 
 
 # ---------- 微博 ----------

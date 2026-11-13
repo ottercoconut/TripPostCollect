@@ -349,8 +349,8 @@ python scripts/backfill_author_profiles.py \
 ## 自动恢复与检查
 
 正常 workflow 不手工传页码、cursor 或摘要。runner 按 job/目标、查询指纹及小红书账号自动读取
-checkpoint；B站、微博、知乎先有限刷新顶部，再恢复深层前沿；抖音与小红书每轮从首页全量扫描到
-`has_more=false`，checkpoint 的位置只作审计（#124）。检查控制面时只看计数和坐标，不展开候选 ID 或长 JSON。
+checkpoint；B站、微博先有限刷新顶部，再恢复深层前沿；抖音、知乎与小红书每轮从首页全量扫描到平台结束标记，
+checkpoint 的位置只作审计（抖音 #124，知乎 #185）。检查控制面时只看计数和坐标，不展开候选 ID 或长 JSON。
 
 通用 checkpoint：
 
@@ -389,9 +389,9 @@ python scripts/crawl_runner.py \
 
 核对规则：
 
-- 抖音任务的 child 命令不含 `--start-page`、`--top-refresh-max-pages` 与 `--discovery-source-exhausted`，
+- 抖音与知乎任务的 child 命令不含 `--start-page`、`--top-refresh-max-pages` 与 `--discovery-source-exhausted`，
   冻结计划 `full_scan=true`、`resume_page=1`；checkpoint 为 `exhausted` 时下一轮仍从第 1 页全量扫描。
-  对抖音 job 显式传 `--start-page` 会被 runner 拒绝。
+  对这两个平台的 job 显式传 `--start-page` 会被 runner 拒绝（#124、#185）。
 - 其他通用平台首次执行从第 1 页开始且顶部刷新为 0；有 checkpoint 后才执行顶部刷新。
 - `last_summary_path` 非空时，对应摘要及 JSONL 必须存在，否则冻结应失败。
 - child 结束后，摘要中的前沿、SQLite checkpoint 和 `last_run_id` 必须一致。

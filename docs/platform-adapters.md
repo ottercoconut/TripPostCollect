@@ -194,7 +194,8 @@ Cookie、签名计算上下文、Page、BrowserContext、browser 实例不进入
 | B站 article | 原搜索页、详情补全与已知 ID 提前跳过 | [B站](platforms/bilibili.md) |
 | 抖音 | 每轮从首页全量翻到 `has_more=false`，搜索只经浏览器截获（#124）；空首页门禁保留 | [抖音游标](platforms/douyin.md#搜索响应与游标) |
 | XHS | 保存 client search ID；账号隔离；批次 ACK 独立处理 | [XHS](platforms/xhs.md#批次恢复点) |
-| 微博、知乎 | 各自分页和权威详情来源保持 | [微博](platforms/weibo.md)、[知乎](platforms/zhihu.md) |
+| 微博 | 分页和权威详情来源保持 | [微博](platforms/weibo.md) |
+| 知乎 | 每轮从首页滚到 `paging.is_end`，已处理 ID 只滑过，页码只作审计，不做顶部刷新，runner 拒绝 `--start-page`；搜索为页面自身 `search_v3` 被动截获，详情与作者读 `js-initialData`，正文图 CDN 直连（#185） | [知乎](platforms/zhihu.md) |
 
 refresh 不推进 deep 前沿；抖音正式文档允许的重建链有独立证据和条件，不能被通用抽象抹掉。
 首次从第一页、有限顶部刷新后恢复深层、耗尽后的刷新规则均直接引用正式契约。
@@ -239,7 +240,7 @@ runner 准备/收尾、提交前重读与 XHS 逐批重读分别保留，不把�
 
 Chrome for Testing、既有驱动及原请求发送方式已确定保留；正式链上的 Playwright 按原位置使用。
 Patchright/Scrapling 是既有页面证据等辅助路径，不推广为五站正式链；B站 article 的 urllib 不换 HTTPX。
-知乎 `execjs + JS` 没有本次需解决的痛点，保留桥接、JS 与运行时，不转浏览器执行。
+知乎 `execjs + JS` 在迁移设计时保留桥接与运行时。#185（2026-11-13）已删除 `platforms/zhihu/signer.py` 与 `resources/js/zhihu.js`，搜索、详情、作者改为页面取数，仍不做页面回放。
 不制作浏览器交互回放、页面回放、HAR 或 WARC 采集系统。
 
 | 资源或动作 | 所有者 | 借用者与限制 |
@@ -406,7 +407,7 @@ wire/env、外部字段、目录和现行命令的保留，与私有内部函数
 | B站article | 原进程article循环、WBI/urllib、详情/作者/图片解析和请求；不迁上游视频crawler | 行为runtime、字段/完成门禁、JSONL/manifest、图片复验与SQLite、修复晋升/监督 |
 | 微博 | 本站搜索、长文、登录判别、图片、repair专属同Page回退 | 调度/冷却、候选决策、净化writer、发现记忆与内容提交 |
 | 抖音 | 浏览器response监听、三元游标、签名、短链详情、作者补取、phone/slider/MEMORY | 统一字段/来源判定、事件、媒体事务、冻结状态；不把图文VideoUrlInfo当视频能力删除 |
-| 知乎 | HTTPX/execjs、精确entity解析、Cookie刷新、作者/正文图、本站登录 | runtime资源、来源/字段裁决、净化与持久化；辅助driver不决定正式driver |
+| 知乎 | 页面截获 `search_v3`、详情与作者页面状态、正文图 CDN 直连、精确 entity 解析（#185；`signer.py` 与 `zhihu.js` 已删除） | runtime资源、来源/字段裁决、净化与持久化；辅助driver不决定正式driver |
 | 小红书 | 轮内session/login/manual_wait、xhshow签名、导航/恢复、详情/作者/图片 | root账号/租约/临时profile所有权、认证监督、终态、DiscoveryCommit/ACK与SQLite内容提交 |
 
 “核心保留”指职责和权限，不禁止未来把根脚本逻辑搬入项目包。具体共享模块及不迁移清单见详规C0/C1，
@@ -425,7 +426,7 @@ wire/env、外部字段、目录和现行命令的保留，与私有内部函数
 | M09 | `M/main.py:122` | 已定位正常关闭分派；与父监督一起迁，不只搬 core.close |
 | M10 | `M/tools/trippostcollect_behavior.py:38/56` | 真正反向 scripts 导入，改注入；知乎 core.py:54 是合法 records.topic_relevance 引用，不列为反向依赖 |
 | M11 | `M/cmd_arg/arg.py:369`；`M/tools/trippostcollect_adaptive.py:28` | 已定位全局配置写、SQLite 读；S07/S08 隔离 |
-| M12 | `M/media_platform/zhihu/client.py:202`；`help.py:254` | 已定位图片会话与 execjs；保留 transport 和 JS 桥 |
+| M12 | `M/media_platform/zhihu/client.py:202`；`help.py:254` | 已定位图片会话与 execjs；#185 删除 JS 桥，图片改为 CDN 直连且不带 Cookie |
 | M13 | `C:2773 validate_formal_record`；`:6289 apply_formal_completion_gates` | 已定位字段与完成门禁；application 保持唯一裁决 |
 | M14 | `C:3896 materialize_formal_record_images`；`:4335 import_valid_records`；`:4413 import_valid_records_with_media_rollback` | 已定位复验/事务/回滚；分到 artifacts/db 并保留编排 |
 | M15 | `C:2951 persist_discovery_checkpoint`；`:7153` 调用位置 | 已定位通用发现提交；不能和 XHS signal guard 硬合并 |
@@ -613,7 +614,7 @@ v0.5 仅两份文档同步是历史范围；v0.6/v0.7 补主稿/P00/详细规格
 |---|---|---|
 | D01 | 用户已确认 | 五站可用性、行为、证据保持；解除上游运行/配置/目录/持续合并依赖；用户全责维护 |
 | D02 | 用户已确认 | Chrome for Testing、原 Playwright/Patchright 路径与原请求方式保留 |
-| D03 | 用户已确认 | 知乎 execjs+JS/桥接/运行时保留；无浏览器交互或页面回放 |
+| D03 | 用户已确认；#185 已取代签名部分 | 迁移时保留知乎 execjs+JS/桥接/运行时，不做页面回放。2026-11-13 起 `signer.py` 与 `resources/js/zhihu.js` 已删除，搜索、详情、作者改为页面取数 |
 | D04 | 用途已确认；工程约束 | 用户已确认科研无商用；第三方许可证保留属于工程约束，不代表用户另行授予来源权利，不展开法律判断 |
 | D05 | 设计约束 | 原进程形态和 S12 批次协议不变；逻辑分层不等于新进程或新 schema |
 | D06 | 用户已确认 | 统一规则与结果，保留平台特有执行流程，不强迫五站统一完整抓取循环；强调解耦模块化 |
@@ -874,7 +875,7 @@ requests.Session、Cookie/缓存、环境代理和 job 调度有额外状态；�
 目标对象类型/ID 对应检查可作为小段切片候选；并不保证正文或作者完整，也不替代原 Web 签名。
 client 修改会话头、访客初始化、JS/websocket/browser bridge 闭包未闭合；[微博 client](https://github.com/ifccod/social-media-research-cli/blob/a1b13c9a86b1a0ea4d9d2fd79949cfc8a05b4c49/reverse/weibo_reverse/client.py)的缺粉丝补 0、头像/视频与 100 页上限不复用。
 R15 只有 README/许可，明确是 App 协议，不是当前 Web execjs 的等价实现；R16 局部接口及许可证据也不足以替换。
-落点限知乎纯解析和响应身份校验，现有相同能力存在即不重写；浏览器、execjs 和维护责任不重开讨论。
+落点限知乎纯解析和响应身份校验，现有相同能力存在即不重写；浏览器与维护责任在本稿研究时不重开讨论。知乎 execjs 签名已于 #185 删除。
 契约测试：外域/错误对象类型/ID 错配/空正文/缺粉丝分别失败；真实发帖时间保真，不引额外会话、签名或页数停止。
 
 ### T09｜R17：RSSHub routes/sign/parser 的分离与局限
@@ -1001,7 +1002,7 @@ fork 的 `M/pyproject.toml`；v0.3 研究时未运行这些调用，不重新验
 | Pillow | [image_materialization.py](../src/trippostcollect/artifacts/image_materialization.py)：141、156、160 | 图片打开/verify 与项目错误映射，不自写图片解码器 |
 | Tenacity | XHS client（`M/media_platform/xhs/client.py`）：168；微博 client（`M/media_platform/weibo/client.py`）：104；知乎 client（`M/media_platform/zhihu/client.py`）：90 | 保留各自次数/等待/传播，不叠一层全额重试 |
 | Playwright | [mediacrawler_crawl.py](../scripts/mediacrawler_crawl.py)：1011 | 原 CfT/浏览器行为、登录和借用能力，不重包全部 API |
-| pyexecjs/execjs | 知乎 help.py（`M/media_platform/zhihu/help.py`）：253；抖音 client.py（`M/media_platform/douyin/client.py`）：388 | 既有 JS 桥和资源；抖音所读接入排除 general/search，不外推所有请求 |
+| pyexecjs/execjs | 知乎 help.py（`M/media_platform/zhihu/help.py`）：253；抖音 client.py（`M/media_platform/douyin/client.py`）：388 | 知乎侧已于 #185 删除；抖音仍用既有 JS 桥和资源，所读接入排除 general/search，不外推所有请求 |
 | 标准库 urllib | [mediacrawler_crawl.py](../scripts/mediacrawler_crawl.py)：4970 | B站 article 原 HTTP 链，不能为统一请求栈改成 HTTPX |
 | Scrapling/Patchright | [ctf_scrapling_preflight.py](../scripts/ctf_scrapling_preflight.py)：217；[ctf_resource_crawl.py](../scripts/ctf_resource_crawl.py)：794 | 既有辅助路径原样保留，不据此称五站正式路径使用它们 |
 | requests/lxml | v0.6专项静态证据：requests属贴吧client；lxml属知乎Parsel与根Scrapling | requests随死支路退出后裁，lxml活跃闭包保留；T12验引用与安装 |

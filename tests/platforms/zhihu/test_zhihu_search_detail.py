@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from .support import END, config, make_crawler as ZhihuCrawler, search_client, search_page
@@ -11,7 +12,7 @@ from trippostcollect.platforms.zhihu.core import (
     ZhihuDetailFetchError,
     ZhihuImageDownloadError,
 )
-from trippostcollect.platforms.zhihu.models import PlatformRuntimeError
+from trippostcollect.platforms.zhihu.detail_page import ZhihuDetailPages
 from trippostcollect.platforms.zhihu.parser import (
     ZhihuExtractor,
     extract_zhihu_content_text,
@@ -153,19 +154,19 @@ def test_detail_html_rejects_empty_target_even_when_other_entity_has_body() -> N
 
 
 @pytest.mark.asyncio
-async def test_detail_rate_limit_is_preserved_as_run_level_failure() -> None:
+async def test_detail_rate_limit_is_preserved_as_run_level_failure(monkeypatch) -> None:
     crawler = ZhihuCrawler()
-    crawler.zhihu_client = type(
-        "Client",
-        (),
-        {
-            "get_answer_info": lambda self, question_id, answer_id: _raise_async(
-                PlatformRuntimeError("HTTP 429", code="rate_limited")
-            )
-        },
-    )()
+    crawler._page_capture = SimpleNamespace(channel=SimpleNamespace())
+    crawler.context_page = object()
+
+    async def blocked(self, content):
+        raise ZhihuDetailFetchError(
+            content.content_id, "captcha_detected", attempts=1, runtime_blocking=True,
+        )
+
+    monkeypatch.setattr(ZhihuDetailPages, "open_from_search", blocked)
     content = ZhihuContent(
-        content_id="answer-rate-limited",
+        content_id="answer-verify",
         question_id="question-1",
         content_type=constant.ANSWER_NAME,
     )
@@ -173,7 +174,7 @@ async def test_detail_rate_limit_is_preserved_as_run_level_failure() -> None:
     with pytest.raises(ZhihuDetailFetchError) as exc_info:
         await crawler.enrich_search_content_detail(content)
 
-    assert exc_info.value.code == "rate_limited"
+    assert exc_info.value.code == "captcha_detected"
     assert exc_info.value.runtime_blocking is True
 
 
@@ -188,25 +189,21 @@ async def _return_none_async(*_: object) -> None:
 @pytest.mark.asyncio
 async def test_detail_mode_marks_success_and_parse_failure(monkeypatch) -> None:
     crawler = ZhihuCrawler()
+    crawler._page_capture = SimpleNamespace(channel=SimpleNamespace())
+    crawler.context_page = object()
 
-    class Client:
-        async def get_answer_info(self, question_id: str, answer_id: str):
-            if answer_id == "missing":
-                return None
-            return ZhihuContent(
-                content_id=answer_id,
-                question_id=question_id,
-                content_type=constant.ANSWER_NAME,
-                content_text="full body",
-                image_list=[],
-            )
+    async def open_direct(self, content, url):
+        if content.content_id == "missing":
+            raise ZhihuDetailFetchError(content.content_id, "detail_entity_missing", attempts=3)
+        return ZhihuContent(
+            content_id=content.content_id,
+            question_id=content.question_id,
+            content_type=constant.ANSWER_NAME,
+            content_text="full body",
+            image_list=[],
+        )
 
-    crawler.zhihu_client = Client()
-
-    async def no_sleep(_: float) -> None:
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(ZhihuDetailPages, "open_direct", open_direct)
 
     observed = await crawler.get_note_detail(
         "https://www.zhihu.com/question/123/answer/observed",
@@ -349,7 +346,7 @@ async def test_candidate_with_missing_raw_nickname_is_not_valid(monkeypatch, tmp
 
     crawler = ZhihuCrawler()
     crawler.zhihu_client = search_client()
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [search_page(contents), END]
+    crawler._next_search_page = AsyncMock(side_effect=[search_page(contents), END])
     crawler.enrich_search_content_detail = AsyncMock(side_effect=observed)
     crawler.get_content_images = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "_store_content", AsyncMock(return_value=None))

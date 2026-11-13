@@ -33,7 +33,6 @@ SQL_FILES = ("crawl_scheduler.sql", "ctf_captures.sql", "source_platforms.sql", 
 # 包内资源 → 唯一编辑真源（规格 G 节“T01/T12 确定的资源与安装策略”）。
 RESOURCE_SOURCES = {
     "js/douyin.js": "src/trippostcollect/resources/js/douyin.js",
-    "js/zhihu.js": "src/trippostcollect/resources/js/zhihu.js",
     "licenses/MediaCrawler-LICENSE": "src/trippostcollect/resources/licenses/MediaCrawler-LICENSE",
     "licenses/CloakBrowser-LICENSE": "src/trippostcollect/resources/licenses/CloakBrowser-LICENSE",
     **{f"sql/{name}": f"db/{name}" for name in SQL_FILES},

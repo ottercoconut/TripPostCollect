@@ -1,6 +1,8 @@
 # 正式抓取执行契约
 
 > **受限冻结：** 本文件属于治理基线；普通抓取、排障或顺手同步不得修改，只有用户明确授权治理变更，并同步核验对应代码、测试与关联文档时才允许更新。
+>
+> **授权记录（2026-11-13）：** 操作人授权临时解冻，同步 #185 知乎页面取数、访问门禁与全量扫描口径。
 
 本文定义正式抓取的机器语义。平台参数和必需字段 profile：通用平台在
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
@@ -119,8 +121,13 @@ HTTP 客户端（httpx 等）不属于以上任何一级：已纳入访问门禁
 文档登记的例外（如图片直连 CDN，UA 与 Referer 取自浏览器、不带 cookie）可以使用。已纳入访问门禁的
 平台只能经页面取数通道取得平台数据，静态检查 `tests/test_fetch_boundary.py` 禁止旁路导入、Playwright
 请求接口和页面脚本内的主动请求；L3 的静态检查覆盖全部平台目录。
-小红书是唯一纳入访问门禁的平台，搜索、详情、作者、图片与登录态只用 L1，没有例外。B站、微博、抖音和
-知乎目前不纳入访问门禁（#111），计划在 2026-11-12（UTC−8）之后重构（#157）：浏览器负责登录、Cookie
+小红书已纳入访问门禁，搜索、详情、作者、图片与登录态只用 L1，没有例外。知乎（#185）已纳入访问门禁。
+discovery 链为 `search_results → note_detail → creator_profile → images`：搜索是页面自身 `search_v3` 的被动截获
+（L1，`page_response`）；详情与作者由真实点击打开新标签，读取 `script#js-initialData` 页面状态
+（L1，`page_state`）；正文图是登记过的 CDN 直连例外，UA 与 Referer 取自浏览器，不带 Cookie，不经第三方代理，
+访问账本以 `cdn_direct` 登记并参与 R5。repair 链没有搜索访问：指定 URL 以 `navigate` 打开详情，作者仍为点击，
+图片仍为 `cdn_direct`。每条知乎入库记录须经 `content_visit_ok`。B站、微博和抖音目前不纳入访问门禁（#111），
+计划在 2026-11-12（UTC−8）之后重构（#157）：浏览器负责登录、Cookie
 与行为证据，搜索、详情、作者与图片由浏览器外 HTTP 客户端取得，不写访问账本，也不参与 `content_visit_ok`。抖音搜索例外（#124）：只经浏览器截获本轮
 搜索页自身请求的响应，截获不到即 `runtime_failed:browser_search_response_missing`，不改走浏览器外请求。
 其中正文图片请求不带平台 Cookie，也不经第三方代理。
@@ -135,6 +142,7 @@ HTTP 客户端（httpx 等）不属于以上任何一级：已纳入访问门禁
 资产键与哈希与 manifest 一致；规定的停顿位于对应动作之前。程序滚动触发下一页之前须有翻页停顿，
 前端自行加载的页只记诊断。必需节奏阶段按本轮实际发生的访问推导。任一项不满足即
 `behavior_evidence_ok=false`，不能用内容 JSONL 或退出码补签。逐条规则见对应平台文档。
+知乎 discovery 按列表点击、再点作者的顺序核验；repair 链的详情由指定 URL `navigate` 打开，不要求先有搜索访问。
 
 ## 来源耗尽与计数字段
 
@@ -275,12 +283,15 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 | 微博 | `search_mblog_complete`、`mobile_detail` | `content_text/content` | 长文搜索截断 `mblog.text`、标题 |
 | 小红书 | `note_detail` | `desc` | 搜索卡片摘要、标题 |
 | 抖音 | `search_aweme_info`、`aweme_detail` | `desc` | 标题、封面或预览文本 |
-| 知乎 | `search_content`、`answer_detail`、`article_detail` | `content_text/content` | `title`、`desc/excerpt` |
+| 知乎 | `answer_detail`、`article_detail`；历史行仍可能是 `search_content` | `content_text/content` | `title`、`desc/excerpt` |
 
 平台详情、作者与粉丝的具体来源由 `required_fields_profile`、
 [`platform-field-coverage.md`](platform-field-coverage.md) 和对应平台文档共同限定。五个平台当前均为
 `followers_policy=required`；真实 0 必须同时具有原始字段与 `followers_observed=true`，缺失值不得
-转换为 0。详情或作者候选级失败服从上面的 `candidate_skipped` 规则，登录、授权、频控、验证码和
+转换为 0。知乎粉丝只取作者页 `followerCount`，来源为 `author_page`；关注数为 `followingCount`，作品数为
+`answerCount + articlesCount`，缺键为空，不补 0。赞、评、藏、分享四项必需，分别取详情页 `voteupCount`、
+`commentCount`、`favlistsCount`、`reaction.statistics.shareCount`，缺键为空，不补 0。认证判定未改。
+详情或作者候选级失败服从上面的 `candidate_skipped` 规则，登录、授权、频控、验证码和
 风控仍属于运行级阻断。
 
 ## 冻结执行状态
@@ -346,7 +357,7 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 
 每个分页批次必须记录平台页码、请求游标或 search ID（平台提供时）、下一游标、可恢复的
 下一页/offset/cursor、批次是否完整、发现阶段、原始返回条数和 `has_more`（平台提供时）。
-小红书与抖音例外：页码与 search ID 只作审计，每轮全量扫描不存在可恢复的下一页。
+小红书与抖音例外：页码与 search ID 只作审计，每轮全量扫描不存在可恢复的下一页。知乎（#185）同样没有可恢复的下一页，保存页码只作审计。
 抖音搜索响应还必须验证 HTTP 可解析后的业务 envelope：非成功 `status_code`、缺失或非列表
 `data`、缺失或非法 `has_more`，以及 `has_more=true` 但没有下一 `logid`，都属于
 `runtime_failed`，不得降级成空页。状态文件保存脱敏的 `douyin_search_response_observed`；
@@ -361,7 +372,7 @@ URL 和检查错误，不保存完整响应或整页文本。
 B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用调度器自动维护发现记忆。SQLite
 `crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates` 与操作人授权的
 `crawl_discovery_candidate_exclusions` 均以 `job_id + query_fingerprint` 隔离；前者保存安全前沿
-（抖音只作审计），第二张表保存已完成处理的候选 ID，第三张表保存精确、可审计且不计成功的排除 ID。
+（抖音与知乎只作审计），第二张表保存已完成处理的候选 ID，第三张表保存精确、可审计且不计成功的排除 ID。
 小红书由独立 runner 维护 `xhs_discovery_checkpoints`，以 `target_key + account_id + query_fingerprint`
 唯一定位（不保存前沿，每轮全量扫描），
 并在同一作用域的 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID；两者不与通用任务或
@@ -390,7 +401,7 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 
 首次执行从来源第一页开始，不做顶部刷新。每个完整前沿批次把下一页写入状态事件。抖音（#124）与小红书
 一样每轮从首页全量翻到 `has_more=false`：抖音从第 1 页、offset 0、空 search ID 开始，状态事件记录的
-offset 与 search ID 只作审计；小红书在首页搜索后从顶部全量滚动，不保存前沿与 search ID。对应根执行器
+offset 与 search ID 只作审计；小红书在首页搜索后从顶部全量滚动，不保存前沿与 search ID。知乎（#185）每轮从搜索第一页滚到 `paging.is_end=true`，已处理 ID 只滑过，保存页码只作审计，不做顶部刷新。对应根执行器
 在 child 摘要形成后才把状态事件提交到 SQLite，不得由底层循环提前推进数据库游标。中途停止的
 批次保存当前请求位置，下一次允许重取该批次，依靠已知 ID 提前去重；这样可以重复少量边界
 数据，但不能跳过未持久化候选。小红书只有在 child 摘要形成后才提交本轮候选 ID 与累计摘要；
@@ -398,26 +409,30 @@ offset 与 search ID 只作审计；小红书在首页搜索后从顶部全量�
 决定性事件或摘要形成前崩溃的候选不会被提前标记为已处理。
 
 存在 checkpoint 时，runner 自动把保存位置传给 child；有未完成累计摘要时再传入上一份
-`summary.json`。顶部刷新仅限 B站、微博、知乎（小红书与抖音没有保存位置，每轮全量重滚）：child 先刷新
+`summary.json`。顶部刷新仅限 B站、微博（小红书、抖音与知乎没有保存位置，每轮全量重滚）：child 先刷新
 配置的 `top_refresh_max_pages` 个顶部页面，再从保存前沿继续。顶部刷新用于发现新近发布内容，
 不推进深层 checkpoint；已知 ID 在详情、粉丝和媒体处理前跳过。深层批次
 完整结束才推进到下一页。抖音 child 命令不含 `--start-page`、顶部刷新与耗尽参数，只在有累计摘要时带
 `--resume-summary`；child 收到这些恢复参数即以 `douyin_full_scan_rejects_resume_args` 报错。
+知乎 child 同样不含 `--start-page`、顶部刷新与耗尽参数，只在有累计摘要时带 `--resume-summary`；
+child 收到这些恢复参数即以 `zhihu_full_scan_rejects_resume_args` 报错。
 
 运行级阻断或未取得停止证据的产物不单独入库。runner 保存安全摘要引用，下一次将历史与本次
 JSONL 合并校验并从最后完整前沿继续；只有取得可验证耗尽证据后，才把累计中全部结构有效记录
-（含主题不相关记录）一次性原子入库并清空累计摘要。checkpoint 本身保留；B站、微博、知乎供下一次定时
-任务先刷新顶部，小红书与抖音下一轮仍全量重滚。运行错误仍按重试策略处理。
+（含主题不相关记录）一次性原子入库并清空累计摘要。checkpoint 本身保留；B站、微博供下一次定时
+任务先刷新顶部，小红书、抖音与知乎下一轮仍全量重滚。运行错误仍按重试策略处理。
 
-B站、微博、知乎的 `source_exhausted` checkpoint 默认不再盲目请求原深页，只执行顶部刷新；小红书与抖音
+B站、微博的 `source_exhausted` checkpoint 默认不再盲目请求原深页，只执行顶部刷新；小红书、抖音与知乎
 耗尽后与其他轮相同，全量重滚。抖音的 search ID 只标识一次具体排序，新进程打开搜索页即得到新链，旧
 offset 在新链上没有意义，因此不跨进程续跑、不重绑定旧前沿、耗尽后也不 reseed；已处理 ID 在作者、
-详情与媒体请求前滑过。来源重新出现未知内容时仍可累计。`--no-import` 诊断自动禁用 checkpoint 写入。
+详情与媒体请求前滑过。知乎已处理 ID 在详情、作者与媒体请求前滑过，保存页码不作续跑起点。来源重新出现未知内容时仍可累计。`--no-import` 诊断自动禁用 checkpoint 写入。
 通用 runner 的显式 `--resume-summary`、`--start-page` 和 `--recovery-keyword` 仅用于人工恢复，不是
 正常 workflow；使用显式参数时调度器不自动混入旧 checkpoint。小红书不开放这些人工恢复参数，也没有
 可恢复的位置，账号级 checkpoint 只保存停止审计与累计摘要；换号产生独立记忆，不得解释为同一正式轮次
 续跑。抖音的 checkpoint 同样只作审计，runner 拒绝对抖音 job 显式传 `--start-page`；本轮链上截获
 不到目标页时按 `runtime_failed:browser_search_response_missing` 停止，不得请求猜测的深页。
+知乎的 checkpoint 同样只作审计，runner 拒绝对知乎 job 显式传 `--start-page`；截获不到目标页时按
+`runtime_failed:browser_search_response_missing` 停止，不得改走浏览器外请求。
 
 ## 正文图片摘要与错误契约
 

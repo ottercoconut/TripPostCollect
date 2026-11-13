@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -10,7 +11,7 @@ from trippostcollect.platforms.zhihu.core import (
     ZhihuDetailFetchError,
     ZhihuImageDownloadError,
 )
-from trippostcollect.platforms.zhihu.models import DataFetchError
+from trippostcollect.platforms.zhihu.detail_page import ZhihuDetailPages
 from trippostcollect.platforms.zhihu.models import ZhihuContent
 from trippostcollect.platforms.zhihu import parser as zhihu_store
 
@@ -72,7 +73,22 @@ async def test_search_payload_with_body_images_becomes_observed_without_detail_r
 ):
     monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
     crawler = ZhihuCrawler()
-    crawler.zhihu_client = AsyncMock()
+    crawler._page_capture = SimpleNamespace(channel=SimpleNamespace())
+    crawler.context_page = object()
+    opened: list[str] = []
+
+    async def open_from_search(self, content):
+        opened.append(content.content_id)
+        return ZhihuContent(
+            content_id=content.content_id,
+            content_type="answer",
+            content_text="详情正文",
+            image_list=["https://pic1.zhimg.com/v2-detail_r.jpg"],
+            created_time=1_700_000_000,
+            content_visit_refs={"ledger_id": "ledger", "note_detail": "ledger:v000003"},
+        )
+
+    monkeypatch.setattr(ZhihuDetailPages, "open_from_search", open_from_search)
     content = ZhihuContent(
         content_id="search-image",
         content_type="answer",
@@ -82,11 +98,13 @@ async def test_search_payload_with_body_images_becomes_observed_without_detail_r
 
     result = await crawler.enrich_search_content_detail(content)
 
+    assert opened == ["search-image"]
     assert result.content_detail_status == "detail_observed"
-    assert result.content_detail_source == "search_content"
-    crawler.zhihu_client.get_answer_info.assert_not_awaited()
+    assert result.content_detail_source == "answer_detail"
+    assert result.content_text == "详情正文"
+    assert result.content_visit_refs["note_detail"] == "ledger:v000003"
     assert [asset["url"] for asset in zhihu_store.zhihu_content_image_assets(result)] == [
-        "https://pic1.zhimg.com/v2-search_r.jpg"
+        "https://pic1.zhimg.com/v2-detail_r.jpg"
     ]
 
 
@@ -94,16 +112,22 @@ async def test_search_payload_with_body_images_becomes_observed_without_detail_r
 async def test_search_without_images_uses_detail_body_and_filters_formula(monkeypatch):
     monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
     crawler = ZhihuCrawler()
-    crawler.zhihu_client = AsyncMock()
-    crawler.zhihu_client.get_answer_info.return_value = ZhihuContent(
-        content_id="detail-image",
-        content_type="answer",
-        content_text="full body",
-        image_list=[
-            "https://pic1.zhimg.com/v2-detail_b.webp",
-            "https://www.zhihu.com/equation?tex=y",
-        ],
-    )
+    crawler._page_capture = SimpleNamespace(channel=SimpleNamespace())
+    crawler.context_page = object()
+
+    async def open_from_search(self, content):
+        return ZhihuContent(
+            content_id=content.content_id,
+            content_type="answer",
+            content_text="full body",
+            image_list=[
+                "https://pic1.zhimg.com/v2-detail_b.webp",
+                "https://www.zhihu.com/equation?tex=y",
+            ],
+            created_time=1_700_000_000,
+        )
+
+    monkeypatch.setattr(ZhihuDetailPages, "open_from_search", open_from_search)
     search = ZhihuContent(
         content_id="detail-image",
         question_id="question-1",
@@ -123,16 +147,24 @@ async def test_search_without_images_uses_detail_body_and_filters_formula(monkey
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["request_failed", "parse_failed"])
-async def test_failed_or_unparsed_detail_cannot_enter_image_success(monkeypatch, mode):
+@pytest.mark.parametrize(
+    ("mode", "code"),
+    [
+        pytest.param("request_failed", "detail_tab_not_opened", id="request_failed"),
+        pytest.param("parse_failed", "detail_content_missing", id="parse_failed"),
+    ],
+)
+async def test_failed_or_unparsed_detail_cannot_enter_image_success(monkeypatch, mode, code):
     monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", True)
     monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
     crawler = ZhihuCrawler()
-    crawler.zhihu_client = AsyncMock()
-    if mode == "request_failed":
-        crawler.zhihu_client.get_answer_info.side_effect = DataFetchError("failed")
-    else:
-        crawler.zhihu_client.get_answer_info.return_value = None
+    crawler._page_capture = SimpleNamespace(channel=SimpleNamespace())
+    crawler.context_page = object()
+
+    async def fail(self, content):
+        raise ZhihuDetailFetchError(content.content_id, code, attempts=3)
+
+    monkeypatch.setattr(ZhihuDetailPages, "open_from_search", fail)
     content = ZhihuContent(
         content_id=mode,
         question_id="question-1",
@@ -143,8 +175,7 @@ async def test_failed_or_unparsed_detail_cannot_enter_image_success(monkeypatch,
     with pytest.raises(ZhihuDetailFetchError) as exc_info:
         await crawler.enrich_search_content_detail(content)
 
-    assert exc_info.value.code == f"detail_{mode}"
-    crawler.zhihu_client.get_content_image.assert_not_awaited()
+    assert exc_info.value.code == code
     assert zhihu_store.zhihu_content_image_assets(content) == []
 
 
@@ -165,7 +196,10 @@ async def test_detail_failure_is_recorded_seen_and_search_continues(
     monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
     crawler = ZhihuCrawler()
     crawler.zhihu_client = search_client()
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [
+    crawler._page_capture = SimpleNamespace(channel=SimpleNamespace())
+    crawler.context_page = object()
+    crawler._opened_search_keyword = "test"
+    crawler._next_search_page = AsyncMock(side_effect=[
         search_page([
             ZhihuContent(
                 content_id="retry-detail",
@@ -175,8 +209,12 @@ async def test_detail_failure_is_recorded_seen_and_search_continues(
             )
         ]),
         END,
-    ]
-    crawler.zhihu_client.get_answer_info.side_effect = DataFetchError("temporary")
+    ])
+
+    async def fail(self, content):
+        raise ZhihuDetailFetchError(content.content_id, "detail_card_missing", attempts=3)
+
+    monkeypatch.setattr(ZhihuDetailPages, "open_from_search", fail)
     store = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "_store_content", store)
 
@@ -190,7 +228,7 @@ async def test_detail_failure_is_recorded_seen_and_search_continues(
     assert skipped[0]["details"]["failure_scope"] == "post"
     assert skipped[0]["details"]["attempts"] == 3
     assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["resume_page"] == 5
+    assert stopped["details"]["resume_page"] == 2
     assert stopped["details"]["candidate_identities"] == ["retry-detail"]
 
 
@@ -228,10 +266,10 @@ async def test_image_failure_is_recorded_and_later_zhihu_candidate_continues(
 
     crawler = ZhihuCrawler()
     crawler.zhihu_client = search_client()
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [
+    crawler._next_search_page = AsyncMock(side_effect=[
         search_page([content("retry-image"), content("success-image")]),
         END,
-    ]
+    ])
     crawler.enrich_search_content_detail = AsyncMock(side_effect=lambda item: item)
     crawler.get_content_images = AsyncMock(
         side_effect=[
@@ -254,7 +292,7 @@ async def test_image_failure_is_recorded_and_later_zhihu_candidate_continues(
     assert skipped[0]["details"]["failure_scope"] == "image"
     assert skipped[0]["details"]["attempts"] == 3
     assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["resume_page"] == 5
+    assert stopped["details"]["resume_page"] == 2
     assert stopped["details"]["candidate_identities"] == [
         "retry-image",
         "success-image",
@@ -305,10 +343,10 @@ async def test_terminal_image_failure_is_recorded_and_later_candidate_continues(
     )
     crawler = ZhihuCrawler()
     crawler.zhihu_client = search_client()
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [
+    crawler._next_search_page = AsyncMock(side_effect=[
         search_page([terminal, success]),
         END,
-    ]
+    ])
     crawler.enrich_search_content_detail = AsyncMock(side_effect=lambda item: item)
     crawler.get_content_images = AsyncMock(
         side_effect=[
@@ -331,7 +369,7 @@ async def test_terminal_image_failure_is_recorded_and_later_candidate_continues(
     assert skipped[0]["details"]["retryable"] is False
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
     assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["resume_page"] == 5
+    assert stopped["details"]["resume_page"] == 2
     assert stopped["details"]["candidate_identities"] == [
         "success-image",
         "terminal-image",

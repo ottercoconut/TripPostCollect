@@ -156,16 +156,21 @@ def test_zhihu_client_headers_use_browser_user_agent() -> None:
 
     crawler = object.__new__(core.ZhihuCrawler)
     crawler.index_url = "https://www.zhihu.com"
-    crawler.cookie_urls = [crawler.index_url]
-    crawler.browser_context = object()
     crawler.context_page = FakePage()
     created: list[dict[str, Any]] = []
+
+    class Channel:
+        async def read_state(self, page, script_name, **kwargs):
+            value = await page.evaluate("() => navigator.userAgent")
+            return value, "visit"
+
+    crawler._page_capture = SimpleNamespace(channel=Channel())
     crawler.ports = SimpleNamespace(
-        convert_browser_context_cookies=_no_cookies,
         client_factory=lambda **kwargs: created.append(kwargs) or SimpleNamespace(**kwargs),
     )
-    asyncio.run(crawler.create_zhihu_client(None, referer_keyword="青岛旅游"))
+    asyncio.run(crawler.create_zhihu_client())
     assert created[0]["headers"]["user-agent"] == BROWSER_UA
+    assert "cookie" not in created[0]["headers"]
     assert crawler.context_page.scripts
 
 

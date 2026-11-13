@@ -722,8 +722,8 @@ def test_summary_carrying_failed_round_ledger_does_not_fail_entry_rule(tmp_path)
 
 
 def test_policies_never_declare_playwright_requests():
-    assert VISIT_GATED_PLATFORMS == frozenset({"xhs"}) <= set(VISIT_POLICIES)
-    assert set(VISIT_POLICIES) == {"xhs"}
+    assert VISIT_GATED_PLATFORMS == frozenset({"xhs", "zhihu"}) <= set(VISIT_POLICIES)
+    assert set(VISIT_POLICIES) == {"xhs", "zhihu"}
     with pytest.raises(ValueError):
         VisitPolicy(
             platform="demo", chains={"discovery": ("note_detail",)},

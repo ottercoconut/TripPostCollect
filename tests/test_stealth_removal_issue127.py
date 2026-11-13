@@ -81,7 +81,7 @@ def test_package_resources_no_longer_ship_stealth_script() -> None:
 
     assert [name for name in resources.RESOURCE_SHA256 if "stealth" in name] == []
     js = importlib_resources.files("trippostcollect.resources").joinpath("js")
-    assert sorted(item.name for item in js.iterdir() if item.is_file()) == ["douyin.js", "zhihu.js"]
+    assert sorted(item.name for item in js.iterdir() if item.is_file()) == ["douyin.js"]
     with pytest.raises(FileNotFoundError):
         resources.read_bytes("js/stealth.min.js")
 

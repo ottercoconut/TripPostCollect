@@ -20,11 +20,11 @@
 # TripPostCollect：T07 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
 import asyncio
+from hashlib import sha256
 import logging
 from typing import Dict, List, Optional, cast, Any
 from urllib.parse import quote
 from playwright.async_api import BrowserContext, BrowserType, Page, Playwright
-from tenacity import RetryError
 from trippostcollect.application.contracts import ImageStagingError, ZhihuSettings, ZhihuPorts
 from trippostcollect.core.paths import PROFILE_VIEWPORT, platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
@@ -34,8 +34,10 @@ from .models import (
     ZhihuContent, ZhihuSearchPage, DataFetchError, PlatformRuntimeError,
     ZhihuImageDownloadError, ZhihuDetailFetchError,
 )
-from .client import ZhiHuClient
+from .client import ZHIHU_CONTENT_IMAGE_RULE, ZhiHuClient
+from .detail_page import ZhihuDetailPages
 from .parser import ZhihuExtractor, judge_zhihu_url, merge_search_content_detail
+from .search_capture import ZhihuPageCapture
 from . import parser as zhihu_store
 
 logger = logging.getLogger("TripPostCollect")
@@ -60,10 +62,11 @@ class ZhihuCrawler:
         self.ports = ports
         self.source_keyword = ""
         self.index_url = "https://www.zhihu.com"
-        self.cookie_urls = [self.index_url]
         self._extractor = ZhihuExtractor()
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
+        self._page_capture: ZhihuPageCapture | None = None
+        self._opened_search_keyword: str | None = None
 
 
     async def _activate_latest_zhihu_page(self) -> None:
@@ -115,64 +118,24 @@ class ZhihuCrawler:
             await asyncio.sleep(settle_seconds)
         await self._activate_latest_zhihu_page()
 
+    def _detail_pages(self) -> ZhihuDetailPages:
+        capture = self._page_capture
+        if capture is None:
+            raise RuntimeError("zhihu_capture_channel_missing")
+        return ZhihuDetailPages(capture, self._extractor, self.context_page)
+
     async def enrich_search_content_detail(
         self,
         content: ZhihuContent,
     ) -> ZhihuContent:
-        """Fetch the full answer/article when search HTML has no content image."""
-        if content.image_list and content.content_text:
-            content.content_detail_status = "detail_observed"
-            content.content_detail_source = "search_content"
-            return content
+        """每条回答/文章都点开详情页。正文、图片和互动以详情页页面状态为准。"""
         if content.content_type not in {
             constant.ANSWER_NAME,
             constant.ARTICLE_NAME,
         }:
             return content
-
-        try:
-            if content.content_type == constant.ANSWER_NAME:
-                detail = await self.zhihu_client.get_answer_info(
-                    content.question_id,
-                    content.content_id,
-                )
-            else:
-                detail = await self.zhihu_client.get_article_info(content.content_id)
-        except (DataFetchError, RetryError) as exc:
-            nested = exc
-            if isinstance(exc, RetryError):
-                try:
-                    nested = exc.last_attempt.exception() or exc
-                except Exception:
-                    nested = exc
-            if isinstance(nested, PlatformRuntimeError):
-                raise ZhihuDetailFetchError(
-                    content.content_id,
-                    nested.code,
-                    runtime_blocking=True,
-                ) from exc
-            logger.warning(
-                "[ZhihuCrawler.enrich_search_content_detail] Detail request failed "
-                f"for {content.content_type}:{content.content_id}: {exc}"
-            )
-            raise ZhihuDetailFetchError(
-                content.content_id,
-                "detail_request_failed",
-            ) from exc
-        else:
-            if detail is None:
-                logger.warning(
-                    "[ZhihuCrawler.enrich_search_content_detail] Detail parse failed "
-                    f"for {content.content_type}:{content.content_id}"
-                )
-                raise ZhihuDetailFetchError(
-                    content.content_id,
-                    "detail_parse_failed",
-                )
-            else:
-                merge_search_content_detail(content, detail)
-
-        await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
+        detail = await self._detail_pages().open_from_search(content)
+        merge_search_content_detail(content, detail)
         return content
 
     async def start(self) -> None:
@@ -181,84 +144,74 @@ class ZhihuCrawler:
         Returns:
 
         """
-        playwright_proxy_format, httpx_proxy_format = None, None
-        async with self.ports.async_playwright() as playwright:
-            # Choose launch mode based on configuration
-            if self.settings.ENABLE_CDP_MODE:
-                logger.info("[ZhihuCrawler] Launching browser in CDP mode")
-                # #127：不强制 UA，浏览器自报真实 UA；httpx 头从 navigator.userAgent 读取。
-                self.browser_context = await self.launch_browser_with_cdp(
-                    playwright,
-                    playwright_proxy_format,
-                    None,
-                    headless=self.settings.CDP_HEADLESS,
-                )
-            else:
-                logger.info("[ZhihuCrawler] Launching browser in standard mode")
-                # Launch a browser context.
-                chromium = playwright.chromium
-                self.browser_context = await self.launch_browser(
-                    chromium, None, None, headless=self.settings.HEADLESS
-                )
+        playwright_proxy_format = None
+        try:
+            async with self.ports.async_playwright() as playwright:
+                # Choose launch mode based on configuration
+                if self.settings.ENABLE_CDP_MODE:
+                    logger.info("[ZhihuCrawler] Launching browser in CDP mode")
+                    # #127：不强制 UA，浏览器自报真实 UA；httpx 头从 navigator.userAgent 读取。
+                    self.browser_context = await self.launch_browser_with_cdp(
+                        playwright,
+                        playwright_proxy_format,
+                        None,
+                        headless=self.settings.CDP_HEADLESS,
+                    )
+                else:
+                    logger.info("[ZhihuCrawler] Launching browser in standard mode")
+                    # Launch a browser context.
+                    chromium = playwright.chromium
+                    self.browser_context = await self.launch_browser(
+                        chromium, None, None, headless=self.settings.HEADLESS
+                    )
 
-            self.context_page = await self.browser_context.new_page()
-            await self._close_stale_pages(self.context_page)
-            try:
-                await self.context_page.goto(
-                    self.index_url,
-                    wait_until="domcontentloaded",
-                    timeout=30_000,
-                )
-            except Exception as exc:
-                logger.warning(
-                    f"[ZhihuCrawler.start] Initial homepage navigation did not settle: {exc}"
-                )
-            # #113：持久 profile 是知乎登录态的唯一来源；不向浏览器注入快照 Cookie，
-            # 否则会用无 expires/httpOnly/secure 的副本覆盖 profile 中的实时 z_c0。
-            await self._wait_for_initial_login_settle()
-            await self._close_stale_pages(self.context_page)
+                self.context_page = await self.browser_context.new_page()
+                # #185：在首页导航前挂上页面取数通道，才能截获页面自己的 /api/v4/me。
+                ledger_mode = "repair" if self.settings.CRAWLER_TYPE == "detail" else "discovery"
+                self._page_capture = ZhihuPageCapture.open(self.browser_context, mode=ledger_mode)
+                self._page_capture.install(self.context_page)
+                await self._close_stale_pages(self.context_page)
+                try:
+                    await self.context_page.goto(
+                        self.index_url,
+                        wait_until="domcontentloaded",
+                        timeout=30_000,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"[ZhihuCrawler.start] Initial homepage navigation did not settle: {exc}"
+                    )
+                # #113：持久 profile 是知乎登录态的唯一来源；不向浏览器注入快照 Cookie，
+                # 否则会用无 expires/httpOnly/secure 的副本覆盖 profile 中的实时 z_c0。
+                await self._wait_for_initial_login_settle()
+                await self._close_stale_pages(self.context_page)
+                self._page_capture.install(self.context_page)
 
-            search_cookie_keyword = self.settings.KEYWORDS.split(",", maxsplit=1)[0].strip()
-            # Create a client to interact with the zhihu website.
-            self.zhihu_client = await self.create_zhihu_client(
-                httpx_proxy_format, referer_keyword=search_cookie_keyword,
-            )
-            if not await self.zhihu_client.pong():
-                self._stop_for_login_required()
-                return
+                search_cookie_keyword = self.settings.KEYWORDS.split(",", maxsplit=1)[0].strip()
+                # 正文图仍用浏览器外 CDN；UA 经已登记的状态脚本从浏览器读取。
+                self.zhihu_client = await self.create_zhihu_client()
+                if not await self._page_capture.confirm_login():
+                    self._stop_for_login_required()
+                    return
 
-            # Zhihu's search API requires opening the search page first to access cookies, homepage alone won't work
-            logger.info(
-                "[ZhihuCrawler.start] Zhihu navigating to search page to get search page cookies, this process takes about 5 seconds"
-            )
-            try:
-                await self.context_page.goto(
-                    self._search_page_url(search_cookie_keyword),
-                    wait_until="domcontentloaded",
-                    timeout=30_000,
+                logger.info(
+                    "[ZhihuCrawler.start] Zhihu navigating to the keyword search page"
                 )
-            except Exception as exc:
-                logger.warning(
-                    f"[ZhihuCrawler.start] Search-page navigation did not settle: {exc}"
-                )
-            await asyncio.sleep(5)
-            await self.zhihu_client.update_cookies(
-                browser_context=self.browser_context,
-                urls=self.cookie_urls,
-            )
+                await self._open_search_page(search_cookie_keyword)
+                await self.ports.run_required_human_behavior(self.context_page, "zhihu")
+                if self.settings.CRAWLER_TYPE == "search":
+                    # Search for notes and retrieve their comment information.
+                    await self.search()
+                elif self.settings.CRAWLER_TYPE == "detail":
+                    # Get the information and comments of the specified post
+                    self.source_keyword = search_cookie_keyword
+                    await self.get_specified_notes()
+                else:
+                    pass
 
-            await self.ports.run_required_human_behavior(self.context_page, "zhihu")
-            if self.settings.CRAWLER_TYPE == "search":
-                # Search for notes and retrieve their comment information.
-                await self.search()
-            elif self.settings.CRAWLER_TYPE == "detail":
-                # Get the information and comments of the specified post
-                self.source_keyword = search_cookie_keyword
-                await self.get_specified_notes()
-            else:
-                pass
-
-            logger.info("[ZhihuCrawler.start] Zhihu Crawler finished ...")
+                logger.info("[ZhihuCrawler.start] Zhihu Crawler finished ...")
+        finally:
+            await self._close_page_capture()
 
     def _stop_for_login_required(self) -> None:
         """登录态未通过 /me 复验：运行级阻断结束，提示操作人先跑 warmup，不在本轮重新登录。"""
@@ -271,97 +224,138 @@ class ZhihuCrawler:
         accumulator = self.ports.accumulator_factory("zhihu")
         accumulator.mark_runtime_failed(
             "login_required",
-            source_page=self.settings.START_PAGE,
-            resume_page=self.settings.START_PAGE,
+            source_page=1,
+            resume_page=1,
             discovery_phase="frontier",
         )
 
     async def search(self) -> None:
-        """Search for notes and retrieve their comment information."""
+        """#185：每轮从搜索第一页滚到 paging.is_end，不按保存页码恢复，也不做顶部刷新。"""
         logger.info("[ZhihuCrawler.search] Begin search zhihu keywords")
-        start_page = self.settings.START_PAGE
         accumulator = self.ports.accumulator_factory("zhihu")
+        discovery_phase = "frontier"
         for keyword in self.settings.KEYWORDS.split(","):
+            keyword = keyword.strip()
             self.source_keyword = keyword
-            self.zhihu_client.set_search_referer(self._search_page_url(keyword))
             logger.info(
                 f"[ZhihuCrawler.search] Current search keyword: {keyword}"
             )
-            phases: list[tuple[str, int, int | None]] = []
-            refresh_max_pages = self.ports.refresh_max_pages()
-            if start_page > 1 and refresh_max_pages > 0:
-                phases.append(("refresh", 1, min(start_page - 1, refresh_max_pages)))
-            source_exhausted = self.ports.source_exhausted()
-            if not source_exhausted:
-                phases.append(("frontier", start_page, None))
-            for discovery_phase, phase_start, phase_end in phases:
-                page = phase_start
-                while (
-                    accumulator.can_continue
-                    and (phase_end is None or page <= phase_end)
-                ):
-                    try:
-                        requested_page = page
-                        logger.info(
-                            f"[ZhihuCrawler.search] search zhihu keyword: {keyword}, "
-                            f"page: {requested_page}"
-                        )
-                        search_page: ZhihuSearchPage = (
-                            await self.zhihu_client.get_note_by_keyword(
-                                keyword=keyword,
-                                page=requested_page,
+            if self._page_capture is not None and keyword != self._opened_search_keyword:
+                await self._open_search_page(keyword)
+            page = 1
+            while accumulator.can_continue:
+                try:
+                    requested_page = page
+                    logger.info(
+                        f"[ZhihuCrawler.search] search zhihu keyword: {keyword}, "
+                        f"page: {requested_page}"
+                    )
+                    search_page: ZhihuSearchPage = await self._next_search_page(requested_page)
+                    # #113：只有原始 paging.is_end=true 才是来源耗尽证据；过滤后为空的页
+                    # （例如整页都是 zvideo 或非内容卡片）照常完成批次并翻到下一页。
+                    raw_batch_count = search_page.raw_count
+                    source_has_more = not search_page.is_end
+                    if raw_batch_count == 0:
+                        logger.info("[ZhihuCrawler.search] paging.is_end=true on an empty page")
+                        if discovery_phase == "frontier":
+                            accumulator.mark_source_exhausted(
+                                "paging_is_end",
+                                source_page=requested_page,
+                                raw_batch_count=0,
+                                resume_page=requested_page,
+                                source_has_more=False,
+                                discovery_phase=discovery_phase,
+                                source_visit_id=search_page.visit_id or None,
                             )
-                        )
-                        # #113：只有原始 paging.is_end=true 才是来源耗尽证据；过滤后为空的页
-                        # （例如整页都是 zvideo 或非内容卡片）照常完成批次并翻到下一页。
-                        raw_batch_count = search_page.raw_count
-                        source_has_more = not search_page.is_end
-                        if raw_batch_count == 0:
-                            logger.info("[ZhihuCrawler.search] paging.is_end=true on an empty page")
-                            if discovery_phase == "frontier":
-                                accumulator.mark_source_exhausted(
-                                    "paging_is_end",
+                        break
+
+                    content_list: List[ZhihuContent] = search_page.contents
+                    pending_content_ids: set[str] = set()
+                    unknown_contents: List[ZhihuContent] = []
+                    for content in content_list:
+                        content_id = str(content.content_id or "")
+                        if accumulator.is_known(content_id) or (
+                            content_id and content_id in pending_content_ids
+                        ):
+                            continue
+                        if content_id:
+                            pending_content_ids.add(content_id)
+                        unknown_contents.append(content)
+                    content_list = unknown_contents
+                    await self._pause_before_details(self.settings.CRAWLER_MAX_SLEEP_SEC)
+                    logger.info(
+                        f"[ZhihuCrawler.search] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} "
+                        f"seconds after page {requested_page}"
+                    )
+
+                    page += 1
+                    accumulator.begin_batch()
+                    # zvideo 在解析阶段已丢弃；这里只计为已处理候选并进入候选记忆，不写内容记录。
+                    for video_id in search_page.video_ids:
+                        if not accumulator.is_known(video_id):
+                            accumulator.consider(video_id, valid=False)
+                    processed_count = 0
+                    stored_contents: List[ZhihuContent] = []
+                    for content in content_list:
+                        content_id = str(content.content_id or "")
+                        try:
+                            content = await self.enrich_search_content_detail(content)
+                        except ZhihuDetailFetchError as exc:
+                            if exc.runtime_blocking:
+                                accumulator.mark_runtime_failed(
+                                    exc.code,
                                     source_page=requested_page,
-                                    raw_batch_count=0,
                                     resume_page=requested_page,
-                                    source_has_more=False,
                                     discovery_phase=discovery_phase,
                                 )
-                            break
-
-                        content_list: List[ZhihuContent] = search_page.contents
-                        pending_content_ids: set[str] = set()
-                        unknown_contents: List[ZhihuContent] = []
-                        for content in content_list:
-                            content_id = str(content.content_id or "")
-                            if accumulator.is_known(content_id) or (
-                                content_id and content_id in pending_content_ids
-                            ):
-                                continue
-                            if content_id:
-                                pending_content_ids.add(content_id)
-                            unknown_contents.append(content)
-                        content_list = unknown_contents
-                        await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
-                        logger.info(
-                            f"[ZhihuCrawler.search] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} "
-                            f"seconds after page {requested_page}"
+                                processed_count += 1
+                                break
+                            logger.error(
+                                "[ZhihuCrawler.search] Skip content after detail "
+                                f"attempts failed: {exc!r}"
+                            )
+                            processed_count += 1
+                            should_stop = accumulator.skip_candidate_failure(
+                                content_id or str(exc.content_id or ""),
+                                failure_scope="post",
+                                detail="content_detail_failed",
+                                error_code=exc.code,
+                                attempts=exc.attempts,
+                                retryable=True,
+                                source_page=requested_page,
+                                discovery_phase=discovery_phase,
+                            )
+                            if should_stop:
+                                break
+                            continue
+                        image_ready = bool(
+                            content.content_detail_status == "detail_observed"
+                            and content.content_detail_source
+                            in {
+                                "search_content",
+                                "answer_detail",
+                                "article_detail",
+                            }
+                            and zhihu_store.zhihu_content_image_assets(content)
                         )
-
-                        page += 1
-                        accumulator.begin_batch()
-                        # zvideo 在解析阶段已丢弃；这里只计为已处理候选并进入候选记忆，不写内容记录。
-                        for video_id in search_page.video_ids:
-                            if not accumulator.is_known(video_id):
-                                accumulator.consider(video_id, valid=False)
-                        processed_count = 0
-                        stored_contents: List[ZhihuContent] = []
-                        for content in content_list:
-                            content_id = str(content.content_id or "")
+                        valid = bool(
+                            content.content_id
+                            and content.content_type in {
+                                constant.ANSWER_NAME,
+                                constant.ARTICLE_NAME,
+                            }
+                            and content.content_text
+                            and content.created_time
+                            and content.creator_hash
+                            and content.user_nickname
+                            and image_ready
+                            and content.followers_observed
+                        )
+                        if valid:
                             try:
-                                content = await self.enrich_search_content_detail(content)
-                            except ZhihuDetailFetchError as exc:
-                                if exc.runtime_blocking:
+                                await self.get_content_images(content)
+                            except ZhihuImageDownloadError as exc:
+                                if is_runtime_blocking_image_error(exc.code):
                                     accumulator.mark_runtime_failed(
                                         exc.code,
                                         source_page=requested_page,
@@ -370,136 +364,104 @@ class ZhihuCrawler:
                                     )
                                     processed_count += 1
                                     break
-                                logger.error(
-                                    "[ZhihuCrawler.search] Skip content after detail "
-                                    f"attempts failed: {exc!r}"
-                                )
-                                processed_count += 1
                                 should_stop = accumulator.skip_candidate_failure(
-                                    content_id or str(exc.content_id or ""),
-                                    failure_scope="post",
-                                    detail="content_detail_failed",
+                                    str(content.content_id or ""),
+                                    failure_scope="image",
+                                    detail="image_download_failed",
                                     error_code=exc.code,
                                     attempts=exc.attempts,
-                                    retryable=True,
+                                    source_index=exc.source_index,
                                     source_page=requested_page,
                                     discovery_phase=discovery_phase,
                                 )
+                                processed_count += 1
                                 if should_stop:
                                     break
                                 continue
-                            image_ready = bool(
-                                content.content_detail_status == "detail_observed"
-                                and content.content_detail_source
-                                in {
-                                    "search_content",
-                                    "answer_detail",
-                                    "article_detail",
-                                }
-                                and zhihu_store.zhihu_content_image_assets(content)
-                            )
-                            valid = bool(
-                                content.content_id
-                                and content.content_type in {
-                                    constant.ANSWER_NAME,
-                                    constant.ARTICLE_NAME,
-                                }
-                                and content.content_text
-                                and content.created_time
-                                and content.creator_hash
-                                and content.user_nickname
-                                and image_ready
-                                and content.followers_observed
-                            )
-                            if valid:
-                                try:
-                                    await self.get_content_images(content)
-                                except ZhihuImageDownloadError as exc:
-                                    if is_runtime_blocking_image_error(exc.code):
-                                        accumulator.mark_runtime_failed(
-                                            exc.code,
-                                            source_page=requested_page,
-                                            resume_page=requested_page,
-                                            discovery_phase=discovery_phase,
-                                        )
-                                        processed_count += 1
-                                        break
-                                    should_stop = accumulator.skip_candidate_failure(
-                                        str(content.content_id or ""),
-                                        failure_scope="image",
-                                        detail="image_download_failed",
-                                        error_code=exc.code,
-                                        attempts=exc.attempts,
-                                        source_index=exc.source_index,
-                                        source_page=requested_page,
-                                        discovery_phase=discovery_phase,
-                                    )
-                                    processed_count += 1
-                                    if should_stop:
-                                        break
-                                    continue
-                            processed_count += 1
-                            stored_contents.append(content)
-                            await self._store_content(content)
-                            should_stop = accumulator.consider(
-                                str(content.content_id or ""),
-                                valid=valid
-                                and topic_relevant_for_web_post(
-                                    "zhihu",
-                                    content.model_dump(),
-                                    fallback_keyword=keyword,
-                                ),
-                            )
-                            if should_stop:
-                                break
-
-                        batch_complete = processed_count >= len(content_list)
-                        resume_page = page if batch_complete else requested_page
-                        if accumulator.finish_batch(
-                            source_page=requested_page,
-                            source_has_more=source_has_more,
-                            raw_batch_count=raw_batch_count,
-                            resume_page=resume_page,
-                            batch_complete=batch_complete,
-                            discovery_phase=discovery_phase,
-                            count_stagnation=discovery_phase == "frontier",
-                        ):
-                            break
-                        if search_page.is_end:
-                            if discovery_phase == "frontier":
-                                accumulator.mark_source_exhausted(
-                                    "paging_is_end",
-                                    source_page=requested_page,
-                                    raw_batch_count=raw_batch_count,
-                                    resume_page=resume_page,
-                                    source_has_more=False,
-                                    batch_complete=batch_complete,
-                                    discovery_phase=discovery_phase,
-                                )
-                            break
-                    except DataFetchError as exc:
-                        # 登录失效、频控与响应无效保留各自错误码；其余请求失败统一为 search_request_failed。
-                        code = getattr(exc, "code", "") or "search_request_failed"
-                        logger.error(f"[ZhihuCrawler.search] Search request failed: {code}")
-                        accumulator.mark_runtime_failed(
-                            code,
-                            source_page=page,
-                            resume_page=page,
-                            discovery_phase=discovery_phase,
+                        processed_count += 1
+                        stored_contents.append(content)
+                        await self._store_content(content)
+                        should_stop = accumulator.consider(
+                            str(content.content_id or ""),
+                            valid=valid
+                            and topic_relevant_for_web_post(
+                                "zhihu",
+                                content.model_dump(),
+                                fallback_keyword=keyword,
+                            ),
                         )
-                        return
-            if source_exhausted and not accumulator.stop_reason:
-                accumulator.mark_source_exhausted(
-                    "saved_source_exhausted",
-                    source_page=start_page,
-                    resume_page=start_page,
-                    source_has_more=False,
-                    raw_batch_count=0,
-                    discovery_phase="frontier",
-                )
+                        if should_stop:
+                            break
+
+                    batch_complete = processed_count >= len(content_list)
+                    resume_page = page if batch_complete else requested_page
+                    if accumulator.finish_batch(
+                        source_page=requested_page,
+                        source_has_more=source_has_more,
+                        raw_batch_count=raw_batch_count,
+                        resume_page=resume_page,
+                        batch_complete=batch_complete,
+                        discovery_phase=discovery_phase,
+                        count_stagnation=discovery_phase == "frontier",
+                    ):
+                        break
+                    if search_page.is_end:
+                        if discovery_phase == "frontier":
+                            accumulator.mark_source_exhausted(
+                                "paging_is_end",
+                                source_page=requested_page,
+                                raw_batch_count=raw_batch_count,
+                                resume_page=resume_page,
+                                source_has_more=False,
+                                batch_complete=batch_complete,
+                                discovery_phase=discovery_phase,
+                                source_visit_id=search_page.visit_id or None,
+                            )
+                        break
+                except DataFetchError as exc:
+                    # 登录失效、频控与响应无效保留各自错误码；其余请求失败统一为 search_request_failed。
+                    code = getattr(exc, "code", "") or "search_request_failed"
+                    logger.error(f"[ZhihuCrawler.search] Search request failed: {code}")
+                    accumulator.mark_runtime_failed(
+                        code,
+                        source_page=page,
+                        resume_page=page,
+                        discovery_phase=discovery_phase,
+                    )
+                    return
 
 
+    async def _open_search_page(self, keyword: str) -> None:
+        """导航到本轮关键词搜索页。第一页 search_v3 由这次加载发出。"""
+        capture = self._page_capture
+        if capture is None:
+            raise RuntimeError("zhihu_capture_channel_missing")
+        capture.begin_navigation()
+        try:
+            await self.context_page.goto(
+                self._search_page_url(keyword),
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[ZhihuCrawler.start] Search-page navigation did not settle: {exc}"
+            )
+        await capture.settle_pause()
+        self._opened_search_keyword = keyword
 
+    async def _next_search_page(self, page_number: int) -> ZhihuSearchPage:
+        capture = self._page_capture
+        if capture is None:
+            raise RuntimeError("zhihu_capture_channel_missing")
+        return await capture.next_page(page_number, self._extractor)
+
+    async def _close_page_capture(self) -> None:
+        capture = getattr(self, "_page_capture", None)
+        if capture is None:
+            return
+        self._page_capture = None
+        await capture.aclose()
 
     async def get_note_detail(
         self, full_note_url: str, semaphore: asyncio.Semaphore
@@ -517,109 +479,68 @@ class ZhihuCrawler:
             logger.info(
                 f"[ZhihuCrawler.get_specified_notes] Begin get specified note {full_note_url}"
             )
-            # Judge note type
             note_type: str = judge_zhihu_url(full_note_url)
+            if note_type == constant.VIDEO_NAME:
+                logger.info(
+                    "[ZhihuCrawler.get_note_detail] Skip zvideo URL; video is not a detail target"
+                )
+                return None
             if note_type == constant.ANSWER_NAME:
+                content_id = full_note_url.split("/")[-1]
                 question_id = full_note_url.split("/")[-3]
-                answer_id = full_note_url.split("/")[-1]
-                logger.info(
-                    f"[ZhihuCrawler.get_specified_notes] Get answer info, question_id: {question_id}, answer_id: {answer_id}"
-                )
-                try:
-                    result = await self.zhihu_client.get_answer_info(question_id, answer_id)
-                except DataFetchError as exc:
-                    logger.warning(
-                        "[ZhihuCrawler.get_note_detail] Answer detail request failed "
-                        f"for {answer_id}: {exc}"
-                    )
-                    return ZhihuContent(
-                        content_id=answer_id,
-                        question_id=question_id,
-                        content_type=constant.ANSWER_NAME,
-                        content_url=full_note_url,
-                        content_detail_status="request_failed",
-                    )
-
-                # Sleep after fetching answer details
-                await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
-                logger.info(f"[ZhihuCrawler.get_note_detail] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} seconds after fetching answer details {answer_id}")
-
-                if (
-                    result is None
-                    or str(result.content_id or "") != str(answer_id)
-                    or result.content_type != constant.ANSWER_NAME
-                    or not str(result.content_text or "").strip()
-                ):
-                    logger.warning(
-                        "[ZhihuCrawler.get_note_detail] Answer detail did not contain "
-                        f"the requested non-empty entity: {answer_id}"
-                    )
-                    return ZhihuContent(
-                        content_id=answer_id,
-                        question_id=question_id,
-                        content_type=constant.ANSWER_NAME,
-                        content_url=full_note_url,
-                        content_detail_status="parse_failed",
-                    )
-                result.content_detail_status = "detail_observed"
-                result.content_detail_source = "answer_detail"
-                return result
-
             elif note_type == constant.ARTICLE_NAME:
-                article_id = full_note_url.split("/")[-1]
-                logger.info(
-                    f"[ZhihuCrawler.get_specified_notes] Get article info, article_id: {article_id}"
+                content_id = full_note_url.split("/")[-1]
+                question_id = ""
+            else:
+                return None
+            logger.info(
+                "[ZhihuCrawler.get_note_detail] Open detail page "
+                f"type={note_type} content_id={content_id}"
+            )
+            placeholder = ZhihuContent(
+                content_id=content_id,
+                question_id=question_id,
+                content_type=note_type,
+                content_url=full_note_url,
+            )
+            try:
+                result = await self._detail_pages().open_direct(placeholder, full_note_url)
+            except ZhihuDetailFetchError as exc:
+                if exc.runtime_blocking:
+                    raise PlatformRuntimeError(str(exc), code=exc.code) from exc
+                status = (
+                    "parse_failed"
+                    if exc.code in {"detail_entity_missing", "detail_content_missing"}
+                    else "request_failed"
                 )
-                try:
-                    result = await self.zhihu_client.get_article_info(article_id)
-                except DataFetchError as exc:
-                    logger.warning(
-                        "[ZhihuCrawler.get_note_detail] Article detail request failed "
-                        f"for {article_id}: {exc}"
-                    )
-                    return ZhihuContent(
-                        content_id=article_id,
-                        content_type=constant.ARTICLE_NAME,
-                        content_url=full_note_url,
-                        content_detail_status="request_failed",
-                    )
-
-                # Sleep after fetching article details
-                await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
-                logger.info(f"[ZhihuCrawler.get_note_detail] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} seconds after fetching article details {article_id}")
-
-                if (
-                    result is None
-                    or str(result.content_id or "") != str(article_id)
-                    or result.content_type != constant.ARTICLE_NAME
-                    or not str(result.content_text or "").strip()
-                ):
-                    logger.warning(
-                        "[ZhihuCrawler.get_note_detail] Article detail did not contain "
-                        f"the requested non-empty entity: {article_id}"
-                    )
-                    return ZhihuContent(
-                        content_id=article_id,
-                        content_type=constant.ARTICLE_NAME,
-                        content_url=full_note_url,
-                        content_detail_status="parse_failed",
-                    )
-                result.content_detail_status = "detail_observed"
-                result.content_detail_source = "article_detail"
-                return result
-
-            elif note_type == constant.VIDEO_NAME:
-                video_id = full_note_url.split("/")[-1]
-                logger.info(
-                    f"[ZhihuCrawler.get_specified_notes] Get video info, video_id: {video_id}"
+                logger.warning(
+                    "[ZhihuCrawler.get_note_detail] Detail page unavailable "
+                    f"type={note_type} content_id={content_id} code={exc.code}"
                 )
-                result = await self.zhihu_client.get_video_info(video_id)
-
-                # Sleep after fetching video details
-                await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
-                logger.info(f"[ZhihuCrawler.get_note_detail] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} seconds after fetching video details {video_id}")
-
-                return result
+                return ZhihuContent(
+                    content_id=content_id,
+                    question_id=question_id,
+                    content_type=note_type,
+                    content_url=full_note_url,
+                    content_detail_status=status,
+                )
+            if (
+                str(result.content_id or "") != str(content_id)
+                or result.content_type != note_type
+                or not str(result.content_text or "").strip()
+            ):
+                return ZhihuContent(
+                    content_id=content_id,
+                    question_id=question_id,
+                    content_type=note_type,
+                    content_url=full_note_url,
+                    content_detail_status="parse_failed",
+                )
+            result.content_detail_status = "detail_observed"
+            result.content_detail_source = (
+                "answer_detail" if note_type == constant.ANSWER_NAME else "article_detail"
+            )
+            return result
 
     async def get_specified_notes(self):
         """
@@ -733,6 +654,22 @@ class ZhihuCrawler:
                     "image_download_retryable",
                     attempts,
                 )
+            digest = sha256(payload).hexdigest()
+            capture = self._page_capture
+            if capture is not None:
+                visit_id = capture.channel.record_direct_visit(
+                    source="cdn_direct",
+                    stage="note_image",
+                    rule=ZHIHU_CONTENT_IMAGE_RULE,
+                    subject_id=content_id,
+                    trigger=None,
+                    status=200,
+                    asset_key=str(asset["source_asset_key"]),
+                    sha256=digest,
+                )
+                refs = dict(content.content_visit_refs)
+                refs["images"] = [*list(refs.get("images") or []), visit_id]
+                content.content_visit_refs = refs
             fetched_assets.append(
                 {**asset, "content": payload, "attempts": attempts, "http_status": 200}
             )
@@ -767,37 +704,35 @@ class ZhihuCrawler:
     def _search_page_url(self, keyword: str) -> str:
         return f"{self.index_url}/search?q={quote(keyword.strip())}&type=content"
 
-    async def create_zhihu_client(
-        self, httpx_proxy: Optional[str], *, referer_keyword: str,
-    ) -> ZhiHuClient:
-        """Create zhihu client"""
+    async def _pause_before_details(self, seconds: float) -> None:
+        """搜索访问之后、点开本页卡片之前的停顿，阶段名与门禁的 search_results 一致。"""
+
+        capture = self._page_capture
+        pause_started = getattr(getattr(capture, "channel", None), "pause_started", None)
+        if capture is None or not callable(pause_started):
+            await asyncio.sleep(seconds)
+            return
+        start_seq = pause_started()
+        await asyncio.sleep(seconds)
+        capture.channel.pause_finished("search_results", start_seq, float(seconds), "completed")
+
+    async def create_zhihu_client(self) -> ZhiHuClient:
+        """正文图客户端只保留浏览器自报的 UA。不读取、不保存 Cookie。"""
+
         logger.info(
-            "[ZhihuCrawler.create_zhihu_client] Begin create zhihu API client ..."
+            "[ZhihuCrawler.create_zhihu_client] Begin create zhihu image client ..."
         )
-        # httpx 只取浏览器加载首页后、会随 www.zhihu.com 请求发出的 Cookie（按 URL 过滤）。
-        cookie_str, cookie_dict = await self.ports.convert_browser_context_cookies(
-            self.browser_context,
-            urls=self.cookie_urls,
+        capture = self._page_capture
+        if capture is None:
+            raise RuntimeError("zhihu_capture_channel_missing")
+        user_agent, _visit = await capture.channel.read_state(
+            self.context_page,
+            "zhihu.user_agent",
+            stage="browser_ua",
+            subject_id=None,
+            trigger=None,
         )
-        zhihu_client_obj = self.ports.client_factory(
-            proxy=httpx_proxy,
-            headers={
-                "accept": "*/*",
-                "accept-language": "zh-CN,zh;q=0.9",
-                "cookie": cookie_str,
-                "priority": "u=1, i",
-                "referer": self._search_page_url(referer_keyword),
-                # #127：与浏览器一致，取本轮浏览器自报的 UA。
-                "user-agent": await self.context_page.evaluate("() => navigator.userAgent"),
-                "x-api-version": "3.0.91",
-                "x-app-za": "OS=Web",
-                "x-requested-with": "fetch",
-                "x-zse-93": "101_3_3.0",
-            },
-            playwright_page=self.context_page,
-            cookie_dict=cookie_dict,
-        )
-        return zhihu_client_obj
+        return self.ports.client_factory(headers={"user-agent": str(user_agent or "")})
 
     async def launch_browser(
         self,

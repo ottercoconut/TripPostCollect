@@ -44,7 +44,8 @@ REQUIRED_FOLLOWER_SOURCES = {
     "weibo": frozenset({"search_author"}),
     "xhs": frozenset({"creator_profile"}),
     "douyin": frozenset({"creator_profile"}),
-    "zhihu": frozenset({"search_author"}),
+    # #185：知乎粉丝只认作者页 followerCount；搜索结果里的 follower_count 不再作为正式来源。
+    "zhihu": frozenset({"author_page"}),
 }
 
 
@@ -53,7 +54,12 @@ PLATFORM_REQUIRED_METRICS: dict[str, tuple[tuple[str, ...], ...]] = {
     "weibo": (("liked_count",), ("comments_count", "comment_count"), ("shared_count", "reposts_count")),
     "xhs": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
     "douyin": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
-    "zhihu": (("voteup_count", "liked_count"), ("comment_count", "comments_count")),
+    "zhihu": (
+        ("voteup_count", "liked_count"),
+        ("comment_count", "comments_count"),
+        ("collected_count",),
+        ("share_count",),
+    ),
 }
 
 
@@ -582,6 +588,11 @@ def row_for_record(
         "followers_observed": record.get("followers_observed") is True,
         "followers_source": first_value(record, "author_followers_source", "followers_source"),
     }
+    page_counts = record.get("author_page_counts")
+    if isinstance(page_counts, dict):
+        for key in ("answerCount", "articlesCount", "pinsCount", "questionCount"):
+            if key in page_counts and page_counts[key] is not None:
+                author[key] = page_counts[key]
     return {
         "platform_key": platform_key,
         "platform_post_id": post_id_for_record(platform_key, record),

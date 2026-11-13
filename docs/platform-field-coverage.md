@@ -9,7 +9,7 @@
 | 微博 | `search_mblog_complete` / `mobile_detail` | `mblog.pics` → `image_list` | 当前会话 staging → manifest → `data/media`；头像/封面排除 | 结构化 | ID/昵称；简介与认证未采集（#156） | `mblog.user` | 赞/评/分享（转发） | 长文详情重试耗尽后记录并跳过，禁止保存截断正文 |
 | 小红书 | `note_detail` 非空 `desc` | 笔记详情 `image_list` | 每个图片对象选择一个正文 URL，staging → manifest → `data/media`；头像/视频排除 | 结构化 | ID/昵称/主页/简介（作者页 `basicInfo.desc`）/认证（官方认证类型码按前端枚举写 `RedOfficial`/`BlueOfficial`，职业标签如“美食博主”也按认证记，#167） | 浮层点击打开的作者页页面状态 | 赞/藏/评/分享；feed 空串只在登记所用搜索条目同一项明确为 0 时记为 0 | 详情或作者补全重试耗尽后记录并跳过 |
 | 抖音 | 搜索卡片 `search_aweme_info` / 详情 `aweme_detail` 非空 `desc` | `note_download_url` | 保留 `images[].uri` 稳定键，staging → manifest → `data/media`；封面/视频/音乐/头像排除，且不写入内容记录 | 结构化 | ID/昵称/主页（由 `sec_uid` 拼出）/简介（资料 `user.signature`）/认证（资料 `account_cert_info.label_text` 等，#163） | 作者资料 `user` 节点（`creator_profile`） | 赞/藏/评/分享 | 标题和预览文本不能代替正文；搜索作者对象的粉丝数不算已观测 |
-| 知乎 | `search_content` / `answer_detail` / `article_detail` | 正文/详情 `image_list` | 当前会话 staging → manifest → `data/media`；公式/头像/作者主页/zvideo 排除 | 结构化 | ID/昵称/主页/简介（`headline`）/认证文字（`verify_bayes`，否则 `badge_v2.title`）；`author_verified` 不判定；关注数只在搜索作者对象带 `following_count` 或 `followingCount` 时写入，缺失为 NULL，不补 0（#182） | search author/member | 赞/评 | 详情重试耗尽后记录并跳过，标题/摘要不能通过 |
+| 知乎 | `search_content` / `answer_detail` / `article_detail` | 正文/详情 `image_list` | 当前会话 staging → manifest → `data/media`；公式/头像/作者主页/zvideo 排除；正文图 CDN 直连并在访问账本登记 | 结构化 | ID/昵称/主页/简介（`headline`）/认证文字（`verify_bayes`，否则 `badge_v2.title`）；`author_verified` 不判定；关注数取作者页 `followingCount`，缺失为 NULL，不补 0；作品数是作者页 `answerCount + articlesCount`，任一缺失为 NULL（#185） | 作者页 `followerCount`（`author_page`） | 赞/评/藏/分享 | 每条候选都打开详情页并点击作者页（#185）。赞/评/藏/分享取详情页，缺键为 NULL 不补 0，缺任一项不合格。作者链接缺失或作者页没有该用户时跳过。标题/摘要不能通过 |
 
 作者列中的 ID 与昵称均为平台原始值：作者平台 ID 按字符串保存、不哈希，昵称不脱敏；
 作者头像不采集，性别、IP 归属地等未列出的作者字段也不采集。
@@ -28,8 +28,8 @@ B站搜索结果的 `desc` 和 `image_urls` 只是摘要与预览，必须取得
 
 字段代码路径和平台限制见 `docs/platforms/`。
 
-发现记忆与字段能力分开：B站、微博、抖音、知乎由通用 runner 持久化查询指纹、深层前沿、
-所有已完成处理候选 ID 和有效累计摘要；抖音每轮从首页全量扫描，offset/search ID 只作审计（#124）。小红书由独立 runner 按目标和账号持久化停止审计、
+发现记忆与字段能力分开：B站、微博、抖音、知乎由通用 runner 持久化查询指纹、停止位置、
+所有已完成处理候选 ID 和有效累计摘要；抖音（#124）与知乎（#185）每轮从首页全量扫描，保存的页码只作审计。小红书由独立 runner 按目标和账号持久化停止审计、
 已完成处理候选 ID 和累计摘要（不保存页码或 search ID，每轮全量扫描），并在点开笔记前滑过数据库、
 持久候选、累计摘要及本轮已知 ID。
 任何平台的发现记忆都不放宽本表字段要求。

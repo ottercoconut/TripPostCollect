@@ -647,6 +647,39 @@ class PageCaptureChannel:
         self._recorded.add(seq)
         return visit_id
 
+    def record_direct_visit(
+        self,
+        *,
+        source: str,
+        stage: str,
+        rule: str,
+        subject_id: str | None,
+        trigger: str | None,
+        status: int | None,
+        page_role: str = "primary",
+        **audit: Any,
+    ) -> str:
+        """登记浏览器外直连（目前只接受正文图 CDN）。不写 URL，只写状态码、资产键和哈希。"""
+
+        self._raise_if_faulted()
+        if source != "cdn_direct":
+            raise ValueError(f"unsupported direct visit source: {source}")
+        seq = self.next_seq()
+        return self._write_visit(
+            seq=seq,
+            page_role=page_role,
+            at=self._clock(),
+            stage=stage,
+            source=source,
+            rule=rule,
+            endpoint=None,
+            status=status,
+            outcome="ok",
+            subject_id=subject_id,
+            trigger=trigger,
+            **audit,
+        )
+
     async def read_state(
         self,
         page: Any,

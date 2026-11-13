@@ -1,6 +1,8 @@
 # 入库与校验
 
 > **受限冻结：** 本文件属于治理基线；普通抓取、排障或顺手同步不得修改，只有用户明确授权治理变更，并同步核验对应代码、测试与关联文档时才允许更新。
+>
+> **授权记录（2026-11-13）：** 操作人授权临时解冻，同步 #185 知乎页面取数、访问门禁与全量扫描口径。
 
 ## 数据库文件
 
@@ -64,9 +66,10 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 `job_id + query_fingerprint` 唯一定位同一来源查询；`resume_page` 保存下一安全页，`last_stop_reason`
 与 `last_stop_detail` 保存停止分类，`last_summary_path` 指向尚未取得完整来源耗尽证据的累计摘要，
 `campaign_candidate_count` 保存累计报告数。`status=exhausted` 表示已保存深层前沿明确耗尽，
-B站、微博、知乎后续默认只做顶部刷新。抖音（#124）每轮从第 1 页全量翻到 `has_more=false`，其
+B站、微博后续默认只做顶部刷新。抖音（#124）每轮从第 1 页全量翻到 `has_more=false`，其
 `resume_page`、`resume_offset`、`resume_cursor` 与 `status` 只作审计，不作续跑起点，也不因耗尽
-而减为顶部刷新。checkpoint 只能在 child 摘要形成后提交；诊断
+而减为顶部刷新。知乎（#185）每轮从首页滚到 `paging.is_end=true`，已处理 ID 只滑过，`resume_page` 与
+`status` 只作审计，不做顶部刷新。checkpoint 只能在 child 摘要形成后提交；诊断
 `--no-import` 不得更新它。内容仍只在取得可验证来源耗尽证据后写入
 `web_posts` / `web_post_images`。通用已完成处理候选表按 job 与查询指纹保存
 视频、有决定性证据的字段无效候选、结构有效候选（含主题不相关），以及详情、作者或正文图在适用有限重试后仍失败并
@@ -134,8 +137,8 @@ checkpoint、seen 与 campaign 更新。摘要或其 JSONL 缺失时冻结失败
 微博、抖音、知乎等通用结构化结果由 `scripts/mediacrawler_crawl.py`（脚本名历史沿用）调用根包平台
 适配器 worker（`trippostcollect.platforms.entry`；B站 article 为进程内分支）后导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定逻辑账号申请互斥租约、创建本轮临时 profile，
 再调用同一底层执行器并在该轮唯一 BrowserContext 中完成人工登录。
-五个平台都在当前登录/签名会话中把权威正文图下载到本轮 staging，原子生成 schema v1
-`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。只有来源耗尽、
+五个平台都把权威正文图下载到本轮 staging，原子生成 schema v1
+`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。B站、微博、抖音和小红书在当前登录或签名会话中下载。知乎正文图不带平台 Cookie、不经第三方代理，UA 与 Referer 取自浏览器，访问账本以 `cdn_direct` 登记（#185）。只有来源耗尽、
 字段、行为、策略和 staging 图片门禁全部通过，正式运行才晋升到 `data/media` 并注入统一入库映射；
 门禁未通过、晋升失败或已确认发生在提交前的 SQLite 导入回滚时，不得留下本轮新建的无引用长期媒体文件。平台显式投影后的全部 manifest 候选均须通过下载与字节复验；
 知乎已知 `zhimg` 尺寸 URL 变体在投影时按资源路径合并，不重复生成 manifest。下载后再仅在同帖内
@@ -150,9 +153,11 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 门禁的停止原因覆盖。
 微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；`isLongText=true`
 必须用移动详情替换搜索截断文本，失败时不写 JSONL。小红书搜索会补拉
-作者主页指标。知乎回答/文章的原始时间、正文图片和作者粉丝会在清洗前保存并归一化；搜索响应
-缺图时先请求详情补全，并用 `content_detail_status` 区分详情确认无图和详情未观察；
-`zvideo` 记录跳过。B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得 article 详情
+作者主页指标。知乎回答/文章的发布时间、正文、图片和赞评藏分享来自详情页页面状态；粉丝来自作者页
+`followerCount`（`author_followers_count`），关注数来自 `followingCount`（`author_following_count`），作品数是
+`answerCount + articlesCount`（`author_posts_count`），缺键为 NULL，不补 0。
+详情确认无图和详情未观察仍用 `content_detail_status` 区分；`zvideo` 记录跳过。认证判定未改。
+B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得 article 详情
 正文和正文图片证据；搜索 `desc` 与 `image_urls` 仅为摘要和预览，不能直接入库为完整正文。
 所有平台后续 JSONL 中出现的
 视频记录均计入 `skipped_video` 并跳过入库。
@@ -168,20 +173,20 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 | `content_text` | 仅接受 `content_detail_status=detail_observed` 且 `content_detail_source` 受信任的权威正文：B站 `content_text/content`，微博 `content_text/content`，小红书 `desc`，抖音 `desc`，知乎 `content_text/content`。小红书和知乎可在入库文本中拼接标题与已验证正文，但标题、搜索 `desc/excerpt` 或预览文本不能单独通过 |
 | `author_display_name` | `nickname` 或 `user_nickname` |
 | `author_platform_id` | 小红书 `user_id`、`creator_hash` 或其他平台用户 ID |
-| `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎搜索结果 `author.follower_count` 归一后的 `followers_count`，抖音只取作者主页响应 `user` 节点的粉丝字段（`creator_profile`，不读搜索作者对象） |
+| `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎作者页 `followerCount`（`author_followers_source=author_page`）归一后的 `followers_count`，抖音只取作者主页响应 `user` 节点的粉丝字段（`creator_profile`，不读搜索作者对象） |
 | `published_at` | 发帖时间，统一保存为 Asia/Shanghai ISO 字符串，如 `2024-04-06T15:35:00+08:00`。优先取平台原始发布时间字段，如 `create_time`、`publish_time`、`time`、`datePublished`；`captured_at` 只表示本项目抓取时间 |
 | `keyword` | 优先保存每条记录的 `source_keyword`；缺失时回退到最终执行摘要的 `keyword`，即本次 child 命令实际使用的检索词。当前通用结构化 store 会逐条写入 `source_keyword`；自动 checkpoint 延续同一查询词，显式 `--recovery-keyword` 才会产生恢复词。旧记录缺少该字段时，回退值不能作为其原始检索词证据 |
 | `topic_relevant` | 使用与 `keyword` 相同的实际检索词，分别检查最终写入 `web_posts.title` 与 `web_posts.content_text` 的字符串。任一字段经 Unicode NFKC、大小写和空白归一后包含“青岛”或完整检索词为 1，否则为 0；字段之间不拼接，平台清洗前文本、raw JSON、作者、URL 或其他元数据均不参与 |
-| `post_likes_count` | `liked_count`、知乎 `voteup_count` |
-| `post_favorites_count` | `collected_count` 等收藏字段 |
+| `post_likes_count` | `liked_count`、知乎详情 `voteupCount`（入库 `voteup_count`） |
+| `post_favorites_count` | `collected_count` 等收藏字段；知乎详情 `favlistsCount`，缺键为空，不补 0 |
 | `post_comments_count` | `comment_count`、`comments_count` 等评论字段 |
-| `post_shares_count` | `share_count`、`shared_count` 等分享字段。转发与分享是同一种互动，微博 `mblog.reposts_count` 经 `shared_count` 写入这一列，不另存转发列 |
+| `post_shares_count` | `share_count`、`shared_count` 等分享字段。转发与分享是同一种互动，微博 `mblog.reposts_count` 经 `shared_count` 写入这一列，不另存转发列。知乎取详情 `reaction.statistics.shareCount`，缺键为空，不补 0 |
 | `web_post_images.image_url`（`content`） | 只来自权威正文图投影：B站详情 `image_urls`、微博 `mblog.pics` 归一后的 `image_list`、小红书详情 `image_list`、抖音图文 `note_download_url`、知乎正文/详情 `image_list`；作者主页、封面、搜索预览、视频、音乐和公式图不进入正文映射 |
 | `web_post_images.image_role/image_index` | 固定 `content`；知乎先按 `zhimg` 资源路径合并已知尺寸 URL 变体，投影后的候选全部下载复验，再在同帖内按 SHA-256 保留首次来源并从 0 连续编号 |
 | `web_post_images.local_path` | 根项目复验并晋升后的 `data/media/...` 项目相对路径；正式新记录不能为空 |
 | `web_post_images.width/height/mime_type/sha256` | 根项目重新读取本地文件得到并与 manifest 相等的字节证据 |
 | `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；同 SHA 重复来源写入 `local_file.sha256_duplicate_sources`，不混入头像等非正文对象 |
-| `raw_sample_json` | 平台适配器结构化记录经头像清除后的样本；正式记录必须含 `content_detail_status` 和 `content_detail_source`。B站浏览数只保留在 `view_count`，不入列，也不进入 `metrics_json` |
+| `raw_sample_json` | 平台适配器结构化记录经头像清除后的样本；正式记录必须含 `content_detail_status` 和 `content_detail_source`。B站浏览数只保留在 `view_count`，不入列，也不进入 `metrics_json`。知乎 `content_visit_refs` 随该 JSON 入库，不新增列 |
 
 代码在下载前用五个平台显式投影识别正文图，在导入边界识别其他同类字段差异；内部持久化结构
 统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。

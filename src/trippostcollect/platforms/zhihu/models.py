@@ -19,10 +19,7 @@
 
 # TripPostCollect：T07 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-from enum import Enum
-from httpx import RequestError
 from pydantic import BaseModel, Field
-from . import models as zhihu_constant
 
 ZHIHU_URL = "https://www.zhihu.com"
 ZHIHU_ZHUANLAN_URL = "https://zhuanlan.zhihu.com"
@@ -45,8 +42,10 @@ class ZhihuContent(BaseModel):
     desc: str = Field(default="", description="Content description")
     created_time: int = Field(default=0, description="Create time")
     updated_time: int = Field(default=0, description="Update time")
-    voteup_count: int = Field(default=0, description="Upvote count")
-    comment_count: int = Field(default=0, description="Comment count")
+    voteup_count: int | None = Field(default=None, description="Upvote count")
+    comment_count: int | None = Field(default=None, description="Comment count")
+    collected_count: int | None = Field(default=None, description="Favorite count from detail favlistsCount")
+    share_count: int | None = Field(default=None, description="Share count from detail reaction.statistics.shareCount")
     image_list: list[str] = Field(default_factory=list, description="Content image URLs")
     image_count: int = Field(default=0, description="Content image count")
     image_list_source: str = Field(default="", description="Authoritative body image source")
@@ -72,6 +71,18 @@ class ZhihuContent(BaseModel):
     following_count: int | None = Field(default=None, description="Creator following count")
     author_desc: str = Field(default="", description="Creator headline or description")
     verified_text: str = Field(default="", description="Creator verification text")
+    content_visit_refs: dict = Field(
+        default_factory=dict,
+        description="Search, detail, author and image visit references for the visit gate",
+    )
+    author_posts_count: int | None = Field(
+        default=None,
+        description="answerCount + articlesCount from the author page; None when either count is missing",
+    )
+    author_page_counts: dict = Field(
+        default_factory=dict,
+        description="Raw author-page counts stored in author_json; missing keys are omitted",
+    )
 
 
 class ZhihuCreator(BaseModel):
@@ -104,42 +115,11 @@ class ZhihuSearchPage(BaseModel):
     video_ids: list[str] = Field(default_factory=list, description="zvideo candidates dropped before projection")
     raw_count: int = Field(default=0, description="Raw `data` item count before filtering")
     is_end: bool = Field(default=False, description="Raw `paging.is_end` value")
+    visit_id: str = Field(default="", description="Ledger id of the search_results visit for this page")
 
 
-class SearchTime(Enum):
-    """
-    Search time range
-    """
-    DEFAULT = ""  # No time limit
-    ONE_DAY = "a_day"  # Within one day
-    ONE_WEEK = "a_week"  # Within one week
-    ONE_MONTH = "a_month"  # Within one month
-    THREE_MONTH = "three_months"  # Within three months
-    HALF_YEAR = "half_a_year"  # Within half a year
-    ONE_YEAR = "a_year"  # Within one year
-
-
-class SearchType(Enum):
-    """
-    Search result type
-    """
-    DEFAULT = ""  # No type limit
-    ANSWER = zhihu_constant.ANSWER_NAME  # Answers only
-    ARTICLE = zhihu_constant.ARTICLE_NAME  # Articles only
-    VIDEO = zhihu_constant.VIDEO_NAME  # Videos only
-
-
-class SearchSort(Enum):
-    """
-    Search result sorting
-    """
-    DEFAULT = ""  # Default sorting
-    UPVOTED_COUNT = "upvoted_count"  # Most upvoted
-    CREATE_TIME = "created_time"  # Latest published
-
-
-class DataFetchError(RequestError):
-    """something error when fetch"""
+class DataFetchError(Exception):
+    """A search or detail read that did not produce a usable platform payload."""
 
 
 class PlatformRuntimeError(DataFetchError):

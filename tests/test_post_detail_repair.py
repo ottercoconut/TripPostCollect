@@ -343,6 +343,8 @@ def test_repair_fallback_makes_sparse_zhihu_detail_formally_valid() -> None:
         "author_followers_source": "missing",
         "voteup_count": 1,
         "comment_count": 2,
+        "collected_count": 3,
+        "share_count": 0,
     }
     merged = mediacrawler.merge_repair_fallback_metadata(
         "zhihu",
@@ -352,7 +354,7 @@ def test_repair_fallback_makes_sparse_zhihu_detail_formally_valid() -> None:
             "followers_count": 123,
             "author_followers_count": 123,
             "followers_observed": True,
-            "author_followers_source": "search_author",
+            "author_followers_source": "author_page",
         },
     )
 
@@ -365,7 +367,7 @@ def test_repair_fallback_makes_sparse_zhihu_detail_formally_valid() -> None:
 REPAIR_FOLLOWER_SOURCES = {
     "weibo": "search_author",
     "douyin": "creator_profile",
-    "zhihu": "search_author",
+    "zhihu": "author_page",
     "xhs": "creator_profile",
 }
 

@@ -1409,7 +1409,7 @@ GENERIC_BEHAVIOR_PLATFORMS = ("bilibili", "weibo", "douyin", "zhihu")
 
 @pytest.mark.parametrize("missing_platform", GENERIC_BEHAVIOR_PLATFORMS)
 def test_behavior_validation_requires_evidence_for_each_generic_platform(missing_platform: str) -> None:
-    """T13：四个通用站共用非 XHS 行为门禁分支，逐站证明缺证据即失败、其余站不受影响。"""
+    """T13：四个通用站逐站证明缺证据即失败、其余站不受影响。知乎已纳入访问门禁，这里补上通过的访问结果。"""
     events = [{"event": "pause"}, {"event": "mouse_moves"}, {"event": "human_scroll_complete"}]
     records = [
         {
@@ -1425,12 +1425,18 @@ def test_behavior_validation_requires_evidence_for_each_generic_platform(missing
         }
         for platform in GENERIC_BEHAVIOR_PLATFORMS
     ]
+    visits = {
+        "zhihu": {"content_visit_ok": True, "request_pacing_ok": True, "continuity_ok": True},
+    }
 
-    complete = mediacrawler_crawl.collect_behavior_validation(records, list(GENERIC_BEHAVIOR_PLATFORMS), "青岛旅游")
+    complete = mediacrawler_crawl.collect_behavior_validation(
+        records, list(GENERIC_BEHAVIOR_PLATFORMS), "青岛旅游", content_visits=visits,
+    )
     partial = mediacrawler_crawl.collect_behavior_validation(
         [record for record in records if record["platform"] != missing_platform],
         list(GENERIC_BEHAVIOR_PLATFORMS),
         "青岛旅游",
+        content_visits=visits,
     )
 
     assert complete["ok"] is True

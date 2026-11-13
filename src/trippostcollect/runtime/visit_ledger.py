@@ -40,7 +40,7 @@ ACTION_KINDS = frozenset(
         "reload",
     }
 )
-VISIT_SOURCES = frozenset({"page_response", "page_state"})
+VISIT_SOURCES = frozenset({"page_response", "page_state", "cdn_direct"})
 PAUSE_CONTINUITY = frozenset({"completed", "failed", "n/a"})
 SIGNAL_OUTCOMES = frozenset({"ignored", "verification_surfaced"})
 # 账本只存标识与计数；这些键名一旦出现即视为把内容或凭据写进了账本。

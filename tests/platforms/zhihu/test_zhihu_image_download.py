@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 from PIL import Image
 import pytest
@@ -70,13 +70,7 @@ async def test_client_image_request_reuses_session_headers_proxy_and_referer(mon
     ports = ZhihuClientPorts(make_client, AsyncMock())
     client = ZhiHuClient(
         ports=ports,
-        proxy="http://proxy.test:8080",
-        headers={
-            "cookie": "session=active", "user-agent": "test-agent",
-            "x-zse-93": "101_3_3.0", "x-requested-with": "fetch", "x-api-version": "3.0.91",
-        },
-        playwright_page=MagicMock(),
-        cookie_dict={"d_c0": "token"},
+        headers={"user-agent": "test-agent"},
     )
 
     payload = await client.get_content_image(
@@ -85,7 +79,7 @@ async def test_client_image_request_reuses_session_headers_proxy_and_referer(mon
     )
 
     assert payload == b"image-bytes"
-    assert observed["proxy"] == "http://proxy.test:8080"
+    assert observed["proxy"] is None
     # #113：zhimg CDN 不需要 zhihu.com 会话；Cookie 与签名/API 头只发往 www.zhihu.com。
     assert observed["headers"] == {
         "user-agent": "test-agent",

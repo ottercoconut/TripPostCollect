@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 from collections import Counter
 from dataclasses import fields, replace
-from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
@@ -13,7 +12,6 @@ import sys
 from types import SimpleNamespace
 from urllib.parse import parse_qs, quote, urlsplit
 
-import execjs
 import httpx
 import pytest
 
@@ -22,19 +20,22 @@ from support import runtime_failed_batch_deviation
 from support import ua_from_browser_deviation
 from support import zhihu_following_count_deviation
 from support import zhihu_login_paging_deviation as deviation
+from support import zhihu_author_visit_deviation
+from support import zhihu_detail_page_deviation
+from support import zhihu_search_capture_deviation
 from support.stable_png import solid_png
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.artifacts import jsonl
 from trippostcollect.core import resources
 from trippostcollect.platforms import entry
-from trippostcollect.platforms.zhihu import client, core, signer
+from trippostcollect.platforms.zhihu import client, core
+from trippostcollect.platforms.zhihu.models import PlatformRuntimeError
 from trippostcollect.runtime import image_retry
 
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests/fixtures/adapter_t07"
-SIGNATURES = {}
 
 
 async def drive(output, patch, scenario, *, crawler_factory=None):
@@ -52,6 +53,7 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
     patch.setenv("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", "0")
     patch.setenv("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED", "0")
     patch.setenv("TRIPPOSTCOLLECT_ZHIHU_INITIAL_SETTLE_SECONDS", "0")
+    patch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(output / "behavior.json"))
     patch.setattr(events, "_utc_iso", lambda: "2026-09-30T01:02:03+00:00")
     patch.setattr(jsonl.time, "strftime", lambda *args: "2026-09-30")
     patch.setattr(image_retry, "IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS", (0.0, 0.0))
@@ -73,18 +75,113 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
         trace.append(("sleep", float(seconds)))
 
     patch.setattr(core.asyncio, "sleep", sleep)
-    # tenacity 保留 stop/wait/reraise；只截获等待，不改变重试次数。
-    patch.setattr(client.ZhiHuClient.request.retry, "sleep", sleep)
+    import trippostcollect.platforms.zhihu.detail_page as detail_mod
+
+    patch.setattr(detail_mod, "DETAIL_RETRY_PAUSE_SECONDS", 0.0)
+    patch.setattr(detail_mod.random, "uniform", lambda _low, _high: 0.0)
+
+    class Response:
+        def __init__(self, url, status, payload, page):
+            self.url = url
+            self.status = status
+            self.headers = {}
+            self.request = SimpleNamespace(
+                method="GET", resource_type="fetch", url=url, frame=SimpleNamespace(page=page),
+            )
+            if isinstance(payload, str):
+                self._body = payload.encode()
+            else:
+                self._body = json.dumps(payload).encode()
+
+        async def body(self):
+            return self._body
+
+        @property
+        def post_data_json(self):
+            raise AttributeError
+
+    class Mouse:
+        def __init__(self, page):
+            self.page = page
+
+        async def move(self, *args, **kwargs):
+            return None
+
+        async def wheel(self, dx, dy):
+            if dy <= 0:
+                return
+            self.page.scroll_y += 100
+            offset = self.page.search_offset
+            self.page.search_offset += 20
+            self.page.emit_search(offset)
 
     class Page:
         url = "about:blank"
 
+        def __init__(self):
+            self.listeners = {"response": [], "requestfailed": []}
+            self.scroll_y = 0
+            self.search_offset = 20
+            self.mouse = Mouse(self)
+            self.context = None
+            self.cards = []
+            self.closed = False
+            self.fronts = 0
+
         def is_closed(self):
-            return False
+            return self.closed
+
+        def locator(self, selector):
+            return CardLocator(self, selector)
+
+        async def bring_to_front(self):
+            self.fronts += 1
+
+        async def close(self):
+            self.closed = True
+
+        def on(self, event, callback):
+            self.listeners[event].append(callback)
+
+        def emit(self, url, status, payload):
+            response = Response(url, status, payload, self)
+            for callback in list(self.listeners["response"]):
+                callback(response)
+
+        def emit_search(self, offset):
+            # #185：页面自己给出的响应。旧客户端对 search_v3 的 503 重试不再发生。
+            status = 429 if scenario == "search_block" else 200
+            payload = {"data": [] if scenario == "empty" or offset >= 40 else [
+                {"type": "search_result", "object": entity(
+                    "101" if offset == 0 else "102",
+                    "answer" if offset == 0 else "article",
+                    full=scenario == "search_content",
+                )},
+            ]}
+            payload["paging"] = {"is_end": scenario == "empty" or offset >= 40}
+            body = "blocked" if status != 200 else payload
+            self.cards = []
+            for item in payload["data"]:
+                obj = item["object"]
+                identity = str(obj["id"])
+                kind = obj["type"]
+                href = (
+                    f"https://www.zhihu.com/question/10/answer/{identity}"
+                    if kind == "answer"
+                    else f"https://zhuanlan.zhihu.com/p/{identity}"
+                )
+                self.cards.append({"id": identity, "type": kind, "href": href})
+            self.emit(f"https://www.zhihu.com/api/v4/search_v3?offset={offset}", status, body)
 
         async def goto(self, url, **kwargs):
             self.url = url
             trace.append(("goto", url, kwargs))
+            if "/search" in url:
+                self.emit_search(0)
+            elif "zhihu.com" in url:
+                status = 401 if scenario == "login_expired" else 200
+                body = {"uid": "author", "name": "作者"} if status == 200 else {"error": {"message": "login"}}
+                self.emit("https://www.zhihu.com/api/v4/me?include=email", status, body)
             if scenario == "navigation_timeout":
                 raise TimeoutError("导航超时")
 
@@ -94,19 +191,239 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
         async def wait_for_load_state(self, state, **kwargs):
             trace.append(("ready", state, kwargs))
 
-        async def evaluate(self, script):
+        async def wait_for_timeout(self, timeout):
+            return None
+
+        async def evaluate(self, script, arg=None):
             # #127：httpx 头的 UA 取自浏览器；求值不进入轨迹（见 support.ua_from_browser_deviation）。
-            assert script == "() => navigator.userAgent", script
-            return ua_from_browser_deviation.BROWSER_USER_AGENT
+            if script == "() => navigator.userAgent":
+                return ua_from_browser_deviation.BROWSER_USER_AGENT
+            if "innerWidth" in script:
+                return {"width": 1450, "height": 900}
+            if "scrollY" in script or "scrollingElement" in script:
+                return {
+                    "window_y": self.scroll_y, "scrollable_count": 1,
+                    "scroll_top_sum": self.scroll_y, "max_scroll_top": self.scroll_y,
+                }
+            raise AssertionError(script)
+
+    AUTHOR_LINK = {
+        "kind": "author", "id": "author", "href": "https://www.zhihu.com/people/author",
+    }
+    AUTHOR_STATE = json.dumps({"initialState": {"entities": {"users": {"author": {
+        "followerCount": 42, "followingCount": 6, "answerCount": 2, "articlesCount": 1,
+        "pinsCount": 0, "questionCount": 3,
+    }}}}})
+
+    def _author_links(url, text):
+        if not text or "/signin" in url or "unhuman" in url:
+            return []
+        return [AUTHOR_LINK]
+
+    detail_attempts = Counter()
+
+    def detail_document(identity, kind):
+        detail_attempts[identity] += 1
+        attempt = detail_attempts[identity]
+        url = (
+            f"https://www.zhihu.com/question/10/answer/{identity}"
+            if kind == "answer"
+            else f"https://zhuanlan.zhihu.com/p/{identity}"
+        )
+        if scenario in {"search_detail_401", "detail_401"}:
+            return "https://www.zhihu.com/signin", ""
+        if scenario in {"search_detail_429", "detail_429"}:
+            return "https://www.zhihu.com/account/unhuman", ""
+        if scenario == "detail_failed" or (scenario == "detail_retry" and attempt < 3):
+            return url, ""
+        bucket = "answers" if kind == "answer" else "articles"
+        if scenario == "detail_404":
+            return url, json.dumps({"initialState": {"entities": {bucket: {}}}})
+        html = entity(identity, kind, full=scenario != "detail_parse")["content"]
+        body = {
+            "id": identity, "type": kind, "title": "青岛旅游", "excerpt": "青岛搜索摘要", "content": html,
+            "createdTime": 1_700_000_000, "updatedTime": 1_700_000_001,
+            "voteupCount": 7, "commentCount": 1, "favlistsCount": 2,
+            "reaction": {"statistics": {"shareCount": 0}},
+            "question": {"id": "10"},
+            "author": {
+                "id": "author", "name": "测试作者", "url_token": "author", "follower_count": 42,
+                "avatar_url": "https://avatar.test/never.jpg",
+            },
+        }
+        return url, json.dumps({"initialState": {"entities": {bucket: {identity: body}}}})
+
+    class QuietMouse:
+        async def move(self, *args, **kwargs):
+            return None
+
+        async def wheel(self, *args, **kwargs):
+            return None
+
+    class CardLocator:
+        def __init__(self, owner, selector, index=None):
+            self.owner = owner
+            self.selector = selector
+            self.index = index
+
+        def _matches(self):
+            if "/people/" in self.selector:
+                return [
+                    link for link in getattr(self.owner, "author_links", [])
+                    if str(link.get("href") or "").rsplit("/", 1)[-1] in self.selector
+                ]
+            matched = [
+                card for card in getattr(self.owner, "cards", [])
+                if card["id"] in self.selector and (
+                    ("/answer/" in self.selector and card["type"] == "answer")
+                    or ("/p/" in self.selector and card["type"] == "article")
+                )
+            ]
+            if self.index is None:
+                return matched
+            return matched[self.index:self.index + 1] if self.index < len(matched) else []
+
+        async def count(self):
+            return len(self._matches())
+
+        def nth(self, index):
+            return CardLocator(self.owner, self.selector, index)
+
+        @property
+        def first(self):
+            return self.nth(0)
+
+        async def get_attribute(self, name):
+            matched = self._matches()
+            if not matched or name != "href":
+                return None
+            return matched[0]["href"]
+
+        async def is_visible(self):
+            return bool(self._matches())
+
+        async def click(self, timeout=None):
+            matched = self._matches()
+            if not matched:
+                raise AssertionError(self.selector)
+            card = matched[0]
+            if card.get("kind") == "author":
+                self.owner.context.spawn_author(card)
+            else:
+                self.owner.context.spawn(card)
+
+    class DetailPage:
+        def __init__(self, url, text):
+            self.url = url
+            self.initial_text = text
+            self.closed = False
+            self.cards = []
+            self.author_links = []
+            self.mouse = QuietMouse()
+            self.listeners = {"response": [], "requestfailed": []}
+            self.context = None
+
+        def is_closed(self):
+            return self.closed
+
+        def on(self, event, callback):
+            self.listeners.setdefault(event, []).append(callback)
+
+        def locator(self, selector):
+            return CardLocator(self, selector)
+
+        async def goto(self, url, **kwargs):
+            identity = url.rstrip("/").rsplit("/", 1)[-1]
+            kind = "article" if "/p/" in url else "answer"
+            self.url, self.initial_text = detail_document(identity, kind)
+            self.author_links = _author_links(self.url, self.initial_text)
+
+        async def evaluate(self, script, arg=None):
+            if "js-initialData" in script:
+                return self.initial_text
+            if "innerWidth" in script:
+                return {"width": 1450, "height": 900}
+            if "scrollY" in script or "scrollingElement" in script:
+                return {
+                    "window_y": 0, "scrollable_count": 1,
+                    "scroll_top_sum": 0, "max_scroll_top": 0,
+                }
+            raise AssertionError(script)
+
+        async def wait_for_load_state(self, state, **kwargs):
+            return None
+
+        async def wait_for_timeout(self, timeout):
+            return None
+
+        async def bring_to_front(self):
+            return None
+
+        async def close(self):
+            self.closed = True
+
+    class ExpectPage:
+        def __init__(self, context):
+            self.context = context
+            self.page = None
+
+        async def __aenter__(self):
+            self.context.pending = self
+            return self
+
+        async def __aexit__(self, *args):
+            self.context.pending = None
+            return False
+
+        @property
+        def value(self):
+            async def get():
+                if self.page is None:
+                    raise TimeoutError("detail tab was not opened")
+                return self.page
+            return get()
 
     page = Page()
 
     class Context:
-        pages = [page]
+        def __init__(self):
+            self.pages = [page]
+            self.pending = None
+            self.opened = 0
+            page.context = self
+
+        def on(self, event, callback):
+            assert event == "page"
+
+        def expect_page(self, timeout=None):
+            return ExpectPage(self)
+
+        def spawn(self, card):
+            url, text = detail_document(card["id"], card["type"])
+            detail = DetailPage(url, text)
+            detail.author_links = _author_links(url, text)
+            detail.context = self
+            self.pages.append(detail)
+            if self.pending is not None:
+                self.pending.page = detail
+
+        def spawn_author(self, card):
+            author = DetailPage(card["href"], AUTHOR_STATE)
+            author.author_links = []
+            author.context = self
+            self.pages.append(author)
+            if self.pending is not None:
+                self.pending.page = author
 
         async def new_page(self):
-            trace.append(("new_page",))
-            return page
+            self.opened += 1
+            if self.opened == 1:
+                trace.append(("new_page",))
+                return page
+            detail = DetailPage("about:blank", "")
+            detail.context = self
+            self.pages.append(detail)
+            return detail
 
         async def add_cookies(self, cookies):
             trace.append(("add_cookies", cookies))
@@ -138,24 +455,6 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
     async def behavior(observed_page, platform):
         trace.append(("behavior", observed_page.url, platform))
 
-    compile_js = execjs.compile
-
-    def compile_fixed(source):
-        trace.append(("compile", sha256(source.encode()).hexdigest()))
-        js = compile_js("Math.random = () => 0.25;\n" + source)
-
-        def call(name, uri, cookie):
-            trace.append(("sign", uri, cookie))
-            # 相同资源和输入的固定随机签名缓存，减少 Node 启动；两侧都核验资源散列。
-            key = (sha256(source.encode()).hexdigest(), name, uri, cookie)
-            if key not in SIGNATURES:
-                SIGNATURES[key] = js.call(name, uri, cookie)
-            return dict(SIGNATURES[key])
-
-        return SimpleNamespace(call=call)
-
-    patch.setattr(execjs, "compile", compile_fixed)
-    patch.setattr(signer, "ZHIHU_SGIN_JS", None)
     # 与主机无关的纯色 PNG（见 support/stable_png.py；Pillow 压缩字节随 CPU 不同）。
     image_bytes = solid_png(5, 4, (10, 20, 30))
 
@@ -288,16 +587,26 @@ def legacy_expectation(scenario):
     else:
         expected = deviation.zhihu_login_paging(expected, scenario)
     expected = runtime_failed_batch_deviation.zhihu_drive(expected, scenario)
-    return zhihu_following_count_deviation.zhihu_records(expected)
+    expected = zhihu_following_count_deviation.zhihu_records(expected)
+    return zhihu_search_capture_deviation.zhihu_drive(expected, scenario)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", SCENARIOS)
 async def test_root_matches_frozen_legacy_request_event_and_artifacts(tmp_path, monkeypatch, scenario):
     """T14：根实现与固化的旧实现结果比较（同一 drive、同一 == 语义），不加载 fork。"""
+    if scenario in {"detail_401", "detail_429"}:
+        with pytest.raises(PlatformRuntimeError) as caught:
+            with monkeypatch.context() as patch:
+                await drive(tmp_path / "new", patch, scenario)
+        assert caught.value.code == ("login_required" if scenario.endswith("401") else "captcha_detected")
+        return
     with monkeypatch.context() as patch:
         new = await drive(tmp_path / "new", patch, scenario)
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == legacy_expectation(scenario)
+    actual = expectations.scrub(new, (tmp_path, "<TMP>"))
+    actual, expected = zhihu_detail_page_deviation.align(actual, legacy_expectation(scenario), scenario)
+    actual, expected = zhihu_author_visit_deviation.align(actual, expected, scenario)
+    assert actual == expected
     check_drive_result(new, scenario)
 
 
@@ -305,59 +614,77 @@ async def test_root_matches_frozen_legacy_request_event_and_artifacts(tmp_path, 
 @pytest.mark.parametrize("scenario", SCENARIOS)
 async def test_root_entry_matches_frozen_legacy_factory(tmp_path, monkeypatch, scenario):
     """T14：替代旧工厂对照；新入口装配结果与固化预期比较。"""
+    if scenario in {"detail_401", "detail_429"}:
+        with pytest.raises(PlatformRuntimeError) as caught:
+            with monkeypatch.context() as patch:
+                await drive(tmp_path / "entry", patch, scenario,
+                            crawler_factory=lambda: entry.load_crawler("zhihu")())
+        assert caught.value.code == ("login_required" if scenario.endswith("401") else "captcha_detected")
+        return
     with monkeypatch.context() as patch:
         new = await drive(tmp_path / "entry", patch, scenario,
                           crawler_factory=lambda: entry.load_crawler("zhihu")())
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == legacy_expectation(scenario)
+    actual = expectations.scrub(new, (tmp_path, "<TMP>"))
+    actual, expected = zhihu_detail_page_deviation.align(actual, legacy_expectation(scenario), scenario)
+    actual, expected = zhihu_author_visit_deviation.align(actual, expected, scenario)
+    assert actual == expected
 
 
 def check_drive_result(new, scenario):
     trace = new["trace"]
     names = [event[0] for event in trace]
-    assert names.count("compile") == 1
-    # #113：worker 从不向浏览器注入 Cookie；httpx Cookie 只来自按 URL 过滤的 browser_context.cookies()。
-    assert "add_cookies" not in names and "reload" not in names
-    assert "launch" in names
     requests = [event for event in trace if event[0] == "request"]
-    assert all(event[1] == "GET" for event in requests)
-    assert all(event[3]["headers"]["x-zse-96"] and event[3]["headers"]["x-zst-81"] for event in requests)
-    assert all(event[3]["headers"]["x-zse-96"].startswith("2.0_") and event[3]["headers"]["x-zst-81"].startswith("3_2.0") for event in requests)
-    assert all(event[3]["headers"]["cookie"] == "d_c0=t07;z_c0=active" for event in requests)
+    # #185：详情不再签名，也不再发浏览器外详情请求。
+    assert requests == []
+    assert "compile" not in names and "sign" not in names
+    # #185：搜索、详情、作者都改为页面取数后，客户端不再读取 Cookie。
+    assert "add_cookies" not in names and "reload" not in names and "cookies" not in names
+    assert "launch" in names
     assert b"avatar.test" not in b"".join(new["files"].values())
     images = [event for event in trace if event[0] == "image"]
     assert all(set(event[3]["headers"]) == {"user-agent", "accept", "referer"} for event in images)
     if scenario == "login_expired":
-        # #113：/me 401 不重试、不重新注入，直接以 login_required 结束且不进入搜索与行为阶段。
-        assert new["counts"]["/api/v4/me"] == 1
+        # #113/#185：/me 由页面截获，失败即 login_required，不进入搜索与行为阶段，也不再有 httpx /me。
+        assert "/api/v4/me" not in new["counts"]
         assert "behavior" not in names and new["records"] == []
         assert new["events"][-1]["details"]["stop_detail"] == "login_required"
         return
     behavior_index = names.index("behavior")
     assert trace[behavior_index][1] == "https://www.zhihu.com/search?q=" + quote("青岛旅游") + "&type=content"
-    assert names[behavior_index - 1] == "cookies"
+    assert names[behavior_index - 1] == "sleep"
     if scenario in {"success", "navigation_timeout", "search_content", "search_retry", "image_retry"}:
         assert len(new["records"]) == 2
         assert all(record["image_count"] == 1 and len(record["image_assets"]) == 1 for record in new["records"])
         assert all(record["content_text"] == "青岛正文第一段\n青岛正文第二段" for record in new["records"])
         assert new["events"][-1]["details"]["stop_reason"] == "source_exhausted"
         assert new["events"][-1]["details"]["stop_detail"] == "paging_is_end"
-        assert new["counts"]["/api/v4/search_v3"] == (5 if scenario == "search_retry" else 3)
+        assert "/api/v4/search_v3" not in new["counts"]
     # Referer 用本轮实际检索词，不再写死 q=python。
-    assert all("q=python" not in event[3]["headers"]["referer"] for event in requests)
     if scenario == "detail_404":
-        assert new["counts"]["/question/10/answer/101"] == 1
         assert new["records"] == []
-    if scenario == "detail_retry":
-        assert new["counts"]["/question/10/answer/101"] == 3
     if scenario == "detail_failed":
-        assert new["counts"]["/question/10/answer/101"] == 3
-    if scenario in {"detail_401", "detail_429"}:
-        # #113：阻断码不再重试。
-        assert new["counts"]["/question/10/answer/101"] == 1
+        assert new["records"] == []
+    if scenario in {"success", "search_content", "detail_success", "detail_retry", "image_retry", "image_failed"}:
+        assert new["records"]
+        assert all(record["voteup_count"] == 7 for record in new["records"])
+        assert all(record["comment_count"] == 1 for record in new["records"])
+        assert all(record["collected_count"] == 2 for record in new["records"])
+        assert all(record["share_count"] == 0 for record in new["records"])
+        assert all(
+            record["content_visit_refs"]["note_detail"]
+            and record["content_visit_refs"]["creator_profile"]
+            and isinstance(record["content_visit_refs"]["images"], list)
+            and record["content_visit_refs"]["images"]
+            for record in new["records"]
+        )
+    if scenario == "search_content":
+        assert [record["content_detail_source"] for record in new["records"]] == [
+            "answer_detail", "article_detail",
+        ]
     if scenario in {"search_block", "image_block", "search_detail_429", "search_detail_401"}:
         assert new["events"][-1]["details"]["stop_reason"] == "runtime_failed"
     if scenario == "search_block":
-        assert new["counts"]["/api/v4/search_v3"] == 1
+        assert "/api/v4/search_v3" not in new["counts"]
         assert new["events"][-1]["details"]["stop_detail"] == "rate_limited"
     if scenario == "image_failed":
         assert [record["content_id"] for record in new["records"]] == ["102"]
@@ -373,9 +700,17 @@ def check_drive_result(new, scenario):
 
 
 def test_dependency_direction():
-    allowed_runtime = {"trippostcollect.runtime.cookies", "trippostcollect.runtime.helpers", "trippostcollect.runtime.image_retry"}
-    allowed_names = {"convert_cookies", "convert_str_cookie_to_dict", "extract_text_from_html", "normalize_image_url",
-                     "ImageDownloadFetchError", "IMAGE_DOWNLOAD_MAX_BYTES", "classified_http_image_error", "is_runtime_blocking_image_error"}
+    allowed_runtime = {
+        "trippostcollect.runtime.cookies", "trippostcollect.runtime.helpers", "trippostcollect.runtime.image_retry",
+        "trippostcollect.runtime.page_capture", "trippostcollect.runtime.visit_ledger",         "trippostcollect.runtime.human_flow", "trippostcollect.runtime.human_pointer",
+    }
+    allowed_names = {
+        "convert_cookies", "convert_str_cookie_to_dict", "extract_text_from_html", "normalize_image_url",
+        "ImageDownloadFetchError", "IMAGE_DOWNLOAD_MAX_BYTES", "classified_http_image_error", "is_runtime_blocking_image_error",
+        "CaptureFailure", "CaptureRule", "CapturedResponse", "PageCaptureChannel",
+        "VisitLedger", "content_visits_path", "human_scroll", "load_behavior_profile",
+        "ElementNotInView", "pointer_for",
+    }
     for path in (ROOT / "src/trippostcollect/platforms/zhihu").glob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
             modules = [node.module or ""] if isinstance(node, ast.ImportFrom) else [alias.name for alias in node.names] if isinstance(node, ast.Import) else []
@@ -410,15 +745,14 @@ def test_worker_assembly_without_fork_zhihu(tmp_path):
     assert json.loads(result.stdout.splitlines()[-1]) == ["WeiboCrawler", "DouYinCrawler", "XiaoHongShuCrawler"]
 
 
-def test_signer_is_lazy_and_uses_identical_resource(monkeypatch):
-    calls = []
-    monkeypatch.setattr(signer, "ZHIHU_SGIN_JS", None)
-    monkeypatch.setattr(execjs, "compile", lambda source: calls.append(source) or SimpleNamespace(call=lambda *args: args))
-    assert calls == []
-    assert signer.sign("/first", "d_c0=test") == ("get_sign", "/first", "d_c0=test")
-    assert signer.sign("/second", "d_c0=next") == ("get_sign", "/second", "d_c0=next")
-    assert calls == [resources.read_text("js/zhihu.js")]
-    assert resources.read_bytes("js/zhihu.js") == (FIXTURE / "libs/zhihu.js.txt").read_bytes()
+def test_zhihu_signer_and_js_resource_are_gone():
+    import execjs
+
+    assert not (ROOT / "src/trippostcollect/platforms/zhihu/signer.py").exists()
+    assert "js/zhihu.js" not in resources.RESOURCE_SHA256
+    with pytest.raises(FileNotFoundError):
+        resources.read_bytes("js/zhihu.js")
+    assert callable(execjs.compile)
 
 
 def test_settings_are_snapshotted_and_operation_readers_are_lazy(monkeypatch):
@@ -447,6 +781,8 @@ ISSUE_113_AVATAR_FIELD = (
 )
 # #113：搜索列表投影改由 extract_search_page 承接（丢弃 zvideo、保留原始 paging），原方法只剩委托。
 ISSUE_113_REPLACED_DEFINITIONS = {"ZhihuExtractor.extract_contents_from_search"}
+# #185：这三个枚举只服务已删除的 httpx 搜索参数，不保留。
+ISSUE_185_REMOVED_DEFINITIONS = {"SearchTime", "SearchType", "SearchSort", "sign"}
 # #182：关注数缺键不再补 0。只替换这两处字段默认值和搜索作者赋值，粉丝数仍补 0。
 ISSUE_182_FOLLOWING_FIELDS = (
     (
@@ -491,6 +827,17 @@ def test_pure_definitions_keep_original_bodies():
             continue
         original = (FIXTURE / (row["file"].removeprefix("tools/MediaCrawler/") + ".txt")).read_text()
         original = original.replace("utils.logger", "logger")
+        if name in ISSUE_185_REMOVED_DEFINITIONS:
+            assert name in definitions(original)
+            target = ROOT / "src/trippostcollect" / row["target"]
+            if not target.is_file():
+                continue
+            current_names = definitions(target.read_text())
+            assert name not in current_names
+            continue
+        if row["target"] in {"platforms/zhihu/parser.py", "platforms/zhihu/models.py"}:
+            original = zhihu_detail_page_deviation.parser_and_model_source(original)
+            original = zhihu_author_visit_deviation.parser_and_model_source(original)
         # #49 有意偏离：作者 ID/昵称改存平台原始值，只允许身份转换调用与对应字段描述替换。
         for old, new in ISSUE_49_IDENTITY_REPLACEMENTS:
             original = original.replace(old, new)
