@@ -129,8 +129,9 @@ ID、累计摘要中的有效 ID 与持久已处理候选在详情和图片请�
 需要正式修复历史库中非 `detail_observed` 的既有行时，改用
 `scripts/repair_post_details.py --platform zhihu`。总控清单把既有内容 ID 与 answer/article HTTPS URL
 严格绑定，detail 结果仍必须取得 `answer_detail` 或 `article_detail`、作者页粉丝证据和完整正文图，
-再走媒体晋升与 SQLite 事务。知乎 detail 页缺少作者粉丝或 answer 创建时间时，入口会从同一旧行
-保留已观察的 `search_author` 粉丝证据和 `published_at`，只补齐详情载荷缺失的元数据，不替换详情正文。
+再走媒体晋升与 SQLite 事务。知乎 detail 页缺少 answer 创建时间时，入口会从同一旧行保留 `published_at`，
+只补齐详情载荷缺失的元数据，不替换详情正文。粉丝只认作者页 `followerCount`（`author_page`）：旧行里
+#185 之前的 `search_author` 粉丝证据不再是正式来源，修复时必须重新点开作者页取得。
 详情解析必须在页面结构化 JSON 中按请求 ID 精确选取非空 answer/article entity，不能取实体字典中的
 第一项或把标题、空对象标为已观察。单帖正文图下载失败只跳过该候选并继续同批后续目标；只有授权、
 频控和登录等运行级错误才中止批次。该修复入口不写搜索 checkpoint，完成含义只覆盖清单中的旧行。

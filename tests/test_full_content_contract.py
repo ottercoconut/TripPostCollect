@@ -114,7 +114,7 @@ def formal_records() -> dict[str, dict]:
             "created_time": 1_700_000_000,
             "creator_hash": "author-zhihu",
             "user_nickname": "author",
-            "author_followers_source": "search_author",
+            "author_followers_source": "author_page",
             "voteup_count": 1,
             "comment_count": 2,
             "collected_count": 3,

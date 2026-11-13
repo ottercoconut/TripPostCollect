@@ -44,7 +44,8 @@ REQUIRED_FOLLOWER_SOURCES = {
     "weibo": frozenset({"search_author"}),
     "xhs": frozenset({"creator_profile"}),
     "douyin": frozenset({"creator_profile"}),
-    "zhihu": frozenset({"search_author"}),
+    # #185：知乎粉丝只认作者页 followerCount；搜索结果里的 follower_count 不再作为正式来源。
+    "zhihu": frozenset({"author_page"}),
 }
 
 

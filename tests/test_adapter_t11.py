@@ -636,7 +636,7 @@ def record_for(platform, number):
         "content_detail_source": {"weibo": "mobile_detail", "douyin": "aweme_detail",
                                   "zhihu": "answer_detail", "xhs": "note_detail",
                                   "bilibili": "article_view_api"}[platform],
-        "author_followers_source": {"weibo": "search_author", "zhihu": "search_author",
+        "author_followers_source": {"weibo": "search_author", "zhihu": "author_page",
                                     "bilibili": "relation_stat", "xhs": "creator_profile",
                                     "douyin": "creator_profile"}[platform],
     }

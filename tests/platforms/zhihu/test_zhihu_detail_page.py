@@ -433,7 +433,7 @@ def test_explicit_zero_counts_stay_zero_and_pass_metrics():
         "user_nickname": "作者",
         "followers_count": 3,
         "followers_observed": True,
-        "author_followers_source": "search_author",
+        "author_followers_source": "author_page",
         "image_list": ["https://pic1.zhimg.com/v2-detail_r.jpg"],
         "voteup_count": 0,
         "comment_count": 0,
@@ -446,6 +446,33 @@ def test_explicit_zero_counts_stay_zero_and_pass_metrics():
     )
     assert checked["valid"] is True
 
+
+def test_followers_from_search_results_are_not_a_formal_source():
+    """#185 实测回归：知乎粉丝只认作者页；搜索结果的 follower_count 判为不可信来源。"""
+    record = {
+        "content_id": "101",
+        "content_type": "answer",
+        "content_text": "正文",
+        "content_detail_status": "detail_observed",
+        "content_detail_source": "answer_detail",
+        "created_time": 1_700_000_000,
+        "creator_hash": "author-1",
+        "user_nickname": "作者",
+        "followers_count": 3,
+        "followers_observed": True,
+        "author_followers_source": "search_author",
+        "image_list": ["https://pic1.zhimg.com/v2-detail_r.jpg"],
+        "voteup_count": 1,
+        "comment_count": 1,
+        "collected_count": 1,
+        "share_count": 1,
+    }
+    checked = validate_formal_record(
+        "zhihu", record, set(),
+        content_image_candidates=lambda _platform, item: item.get("image_list") or [],
+    )
+    assert checked["valid"] is False
+    assert "untrusted_followers_source" in checked["reasons"]
 
 @pytest.mark.asyncio
 async def test_card_miss_retries_then_skips_without_stopping_the_run(monkeypatch, tmp_path):
