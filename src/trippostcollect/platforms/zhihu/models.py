@@ -19,7 +19,6 @@
 
 # TripPostCollect：T07 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-from httpx import RequestError
 from pydantic import BaseModel, Field
 
 ZHIHU_URL = "https://www.zhihu.com"
@@ -74,7 +73,15 @@ class ZhihuContent(BaseModel):
     verified_text: str = Field(default="", description="Creator verification text")
     content_visit_refs: dict = Field(
         default_factory=dict,
-        description="Detail visit reference prepared for the visit gate",
+        description="Search, detail, author and image visit references for the visit gate",
+    )
+    author_posts_count: int | None = Field(
+        default=None,
+        description="answerCount + articlesCount from the author page; None when either count is missing",
+    )
+    author_page_counts: dict = Field(
+        default_factory=dict,
+        description="Raw author-page counts stored in author_json; missing keys are omitted",
     )
 
 
@@ -108,10 +115,11 @@ class ZhihuSearchPage(BaseModel):
     video_ids: list[str] = Field(default_factory=list, description="zvideo candidates dropped before projection")
     raw_count: int = Field(default=0, description="Raw `data` item count before filtering")
     is_end: bool = Field(default=False, description="Raw `paging.is_end` value")
+    visit_id: str = Field(default="", description="Ledger id of the search_results visit for this page")
 
 
-class DataFetchError(RequestError):
-    """something error when fetch"""
+class DataFetchError(Exception):
+    """A search or detail read that did not produce a usable platform payload."""
 
 
 class PlatformRuntimeError(DataFetchError):

@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import random
+import uuid
 from typing import Any
 
 from trippostcollect.platforms.zhihu.client import SearchResponseInvalid
@@ -37,6 +38,8 @@ ME_CAPTURE_TIMEOUT_SECONDS = 15.0
 # 程序滚动触发下一页之前的翻页停顿。滚动本身的停顿由人类行为组件负责。
 PAGE_TURN_PAUSE_SECONDS = (1.2, 2.8)
 SEARCH_SETTLE_SECONDS = 5.0
+# 正式搜索固定 type=content。签名只记筛选名，不记查询值。
+ZHIHU_FILTER_SIGNATURE = "type=content"
 API_RESOURCE_TYPES = frozenset({"xhr", "fetch"})
 
 ZHIHU_SEARCH_RULE = CaptureRule(
@@ -130,6 +133,8 @@ class ZhihuPageCapture:
         self.page: Any = None
         self.after_seq = 0
         self.trigger_id: str | None = None
+        self.search_session = uuid.uuid4().hex
+        self.last_search_visit_id = ""
         self.closed = False
 
     @classmethod
@@ -178,6 +183,7 @@ class ZhihuPageCapture:
     def begin_navigation(self) -> None:
         """搜索页导航写入账本，并让随后截获的 search_v3 晚于这次动作。"""
 
+        self.search_session = uuid.uuid4().hex
         self.trigger_id = self.channel.action(
             "navigate",
             page_role="primary",
@@ -200,13 +206,15 @@ class ZhihuPageCapture:
             if isinstance(captured, CapturedResponse):
                 self._record_search(captured, page_number=page_number, outcome="invalid")
             raise
-        self._record_search(
+        visit_id = self._record_search(
             captured,
             page_number=page_number,
             outcome="ok",
             is_end=search_page.is_end,
             raw_count=search_page.raw_count,
+            search_page=search_page,
         )
+        search_page.visit_id = visit_id
         logger.info(
             f"[ZhihuPageCapture.next_page] captured search page {page_number}: "
             f"raw={search_page.raw_count}, contents={len(search_page.contents)}, "
@@ -214,16 +222,45 @@ class ZhihuPageCapture:
         )
         return search_page
 
-    def _record_search(self, captured: CapturedResponse, *, page_number: int, outcome: str, **audit: Any) -> None:
-        self.channel.record_visit(
+    def _record_search(
+        self,
+        captured: CapturedResponse,
+        *,
+        page_number: int,
+        outcome: str,
+        search_page: ZhihuSearchPage | None = None,
+        **audit: Any,
+    ) -> str:
+        items: list[dict[str, str]] = []
+        has_more = None
+        if search_page is not None:
+            items = [
+                {"id": str(item.content_id or ""), "type": str(item.content_type or "")}
+                for item in search_page.contents
+                if item.content_id
+            ]
+            items.extend(
+                {"id": str(video_id), "type": "video"}
+                for video_id in search_page.video_ids
+                if video_id
+            )
+            has_more = not search_page.is_end
+        visit_id = self.channel.record_visit(
             captured,
             stage="search_results",
             subject_id=None,
             trigger=self.trigger_id,
             outcome=outcome,
             search_page=page_number,
+            search_session=self.search_session,
+            filter_signature=ZHIHU_FILTER_SIGNATURE,
+            is_target=True,
+            has_more=has_more,
+            items=items,
             **audit,
         )
+        self.last_search_visit_id = visit_id
+        return visit_id
 
     async def _take_search_response(self, page_number: int) -> CapturedResponse:
         if page_number <= 1:
@@ -283,7 +320,7 @@ class ZhihuPageCapture:
         seconds = random.uniform(*PAGE_TURN_PAUSE_SECONDS)
         start_seq = self.channel.pause_started()
         await self.page.wait_for_timeout(int(seconds * 1000))
-        self.channel.pause_finished("search_page", start_seq, seconds, "n/a")
+        self.channel.pause_finished("search_page", start_seq, seconds, "completed")
 
     async def aclose(self) -> None:
         if self.closed:

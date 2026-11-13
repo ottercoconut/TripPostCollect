@@ -733,6 +733,79 @@ def write_xhs_visit_ledger(behavior_path, records, entries):
     return target
 
 
+ZHIHU_LEDGER_ID = "85" * 16
+
+
+def write_zhihu_visit_ledger(behavior_path, records, entries):
+    """#185 合成账本：搜索截获、点击详情、点击作者、CDN 图片，供知乎 content_visit_ok。"""
+
+    ledger = VisitLedger.create(
+        content_visits_path(behavior_path), platform="zhihu", mode="discovery",
+        ledger_id=ZHIHU_LEDGER_ID, clock=lambda: XHS_LEDGER_TIME,
+    )
+
+    def action(kind, target, from_visit=None, page_role="primary"):
+        return ledger.append(
+            "action", seq=ledger.next_seq(), page_role=page_role, action=kind,
+            target=target, from_visit=from_visit,
+        )
+
+    def visit(stage, rule, source, *, trigger, subject_id=None, page_role="primary", **audit):
+        return ledger.append(
+            "visit", seq=ledger.next_seq(), page_role=page_role, recorded_at=XHS_LEDGER_TIME,
+            stage=stage, source=source, rule=rule, endpoint=None,
+            status=200 if source != "page_state" else None, outcome="ok",
+            subject_id=subject_id, trigger=trigger, **audit,
+        )
+
+    def pause(stage, continuity="n/a", page_role="detail"):
+        start = ledger.next_seq()
+        ledger.append(
+            "pause", seq=ledger.next_seq(), page_role=page_role, stage=stage,
+            start_seq=start, seconds=1.0, continuity=continuity,
+        )
+
+    search = visit(
+        "search_results", "zhihu.search_v3", "page_response", trigger=action("navigate", {"route": "/search"}),
+        search_session="zhihu-offline", filter_signature="type=content", is_target=True,
+        search_page=1, has_more=False,
+        items=[{"id": record["content_id"], "type": "answer"} for record in records],
+    )
+    pause("search_results", "completed", "primary")
+    for record in records:
+        content_id = record["content_id"]
+        token = "author-token"
+        record["creator_url_token"] = token
+        click = action("click_card", {"content_id": content_id})
+        detail = visit(
+            "note_detail", "zhihu.initial_data", "page_state", trigger=click,
+            subject_id=content_id, page_role="detail",
+        )
+        pause("note_detail")
+        pause("creator_profile")
+        author_click = action("click_author", {"content_id": content_id}, from_visit=detail, page_role="detail")
+        author = visit(
+            "creator_profile", "zhihu.initial_data", "page_state", trigger=author_click,
+            subject_id=token, url_user_id=token, page_role="author",
+        )
+        images = [
+            visit(
+                "note_image", "zhihu.content_image", "cdn_direct", trigger=click, subject_id=content_id,
+                asset_key=entry.source_asset_key, sha256=entry.sha256,
+            )
+            for entry in entries if entry.platform_post_id == content_id
+        ]
+        record["content_visit_refs"] = {
+            "ledger_id": ZHIHU_LEDGER_ID,
+            "search_results": search,
+            "note_detail": detail,
+            "creator_profile": author,
+            "images": images,
+        }
+    ledger.close()
+    return search
+
+
 def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
     """落盘真实 JSONL、manifest 和 PNG；仅替代 worker，不替代正式门禁。"""
     folder = save_path / platform
@@ -761,13 +834,18 @@ def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
             ))
             if scenario == "missing_image":
                 staged.path.unlink()
-            if platform == "xhs":
-                # 真实小红书记录带 image_assets（门禁 R5 按它逐张核对）。
+            if platform in {"xhs", "zhihu"}:
+                # 访问门禁 R5 按 image_assets 逐张核对。
                 record.setdefault("image_assets", []).append({
                     "url": candidate.source_url, "source_index": candidate.source_index,
                     "source_asset_key": candidate.source_asset_key,
                 })
-    source_visit_id = write_xhs_visit_ledger(behavior_path, records, entries) if platform == "xhs" else None
+    if platform == "xhs":
+        source_visit_id = write_xhs_visit_ledger(behavior_path, records, entries)
+    elif platform == "zhihu":
+        source_visit_id = write_zhihu_visit_ledger(behavior_path, records, entries)
+    else:
+        source_visit_id = None
     (folder / "search_contents_fixed.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
     write_manifest_atomic(folder / "image_manifest.jsonl", entries)
     behavior = behavior_for(platform)

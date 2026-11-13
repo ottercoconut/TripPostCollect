@@ -85,7 +85,7 @@ async def test_search_payload_with_body_images_becomes_observed_without_detail_r
             content_text="详情正文",
             image_list=["https://pic1.zhimg.com/v2-detail_r.jpg"],
             created_time=1_700_000_000,
-            content_visit_refs={"ledger_id": "ledger", "detail": "ledger:v000003"},
+            content_visit_refs={"ledger_id": "ledger", "note_detail": "ledger:v000003"},
         )
 
     monkeypatch.setattr(ZhihuDetailPages, "open_from_search", open_from_search)
@@ -102,7 +102,7 @@ async def test_search_payload_with_body_images_becomes_observed_without_detail_r
     assert result.content_detail_status == "detail_observed"
     assert result.content_detail_source == "answer_detail"
     assert result.content_text == "详情正文"
-    assert result.content_visit_refs["detail"] == "ledger:v000003"
+    assert result.content_visit_refs["note_detail"] == "ledger:v000003"
     assert [asset["url"] for asset in zhihu_store.zhihu_content_image_assets(result)] == [
         "https://pic1.zhimg.com/v2-detail_r.jpg"
     ]

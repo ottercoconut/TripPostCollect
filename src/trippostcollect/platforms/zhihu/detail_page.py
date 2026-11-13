@@ -19,8 +19,9 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from trippostcollect.platforms.zhihu import models as constant
 from trippostcollect.platforms.zhihu.models import ZhihuContent, ZhihuDetailFetchError
-from trippostcollect.platforms.zhihu.page_scripts import INITIAL_DATA_SCRIPT_NAME
-from trippostcollect.platforms.zhihu.parser import ZhihuExtractor
+from trippostcollect.platforms.zhihu.parser import (
+    ZhihuExtractor, apply_author_page, user_from_initial_data,
+)
 from trippostcollect.runtime.human_flow import human_scroll, load_behavior_profile
 from trippostcollect.runtime.human_pointer import ElementNotInView, pointer_for
 
@@ -62,6 +63,15 @@ DETAIL_TAB_NOT_OPENED = "detail_tab_not_opened"
 DETAIL_ENTITY_MISSING = "detail_entity_missing"
 DETAIL_CONTENT_MISSING = "detail_content_missing"
 BROWSER_TARGET_CLOSED = "browser_target_closed"
+# 没有 /people/ 作者链接，或新标签没打开。候选级失败，有限重试后进入已处理记忆。
+AUTHOR_LINK_MISSING = "author_link_missing"
+# 作者页页面状态里没有该 url_token 的用户。同样是候选级失败。
+AUTHOR_PROFILE_MISSING = "author_profile_missing"
+# 点作者之前的节奏停顿（门禁要求停在点击之前）。作者标签打开后的停留另计。
+AUTHOR_CLICK_PAUSE_SECONDS = (1.0, 2.0)
+AUTHOR_TAB_HOLD_SECONDS = (5.0, 9.0)
+_PEOPLE_TOKEN_RE = re.compile(r"/people/([^/?#]+)")
+_SAFE_TOKEN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # 侦察里能点开的标题链接，收窄到本条候选的 id。answer_heading、zhuanlan_anchor 在前。
 ANSWER_TITLE_SELECTORS = (
@@ -87,6 +97,13 @@ def blocking_code_for_url(url: str) -> str | None:
         if ZHIHU_LOGIN_URL_RE.search(probe):
             return "login_required"
     return None
+
+
+def people_token(url: str) -> str:
+    """作者页路径 ``/people/{url_token}`` 中的 token。不是作者页时为空串。"""
+
+    match = _PEOPLE_TOKEN_RE.search(urlsplit(str(url or "")).path)
+    return match.group(1) if match else ""
 
 
 def _href_targets(href: str, content: ZhihuContent) -> bool:
@@ -168,10 +185,18 @@ class ZhihuDetailPages:
                 raise self._runtime(content, BROWSER_TARGET_CLOSED)
             if parsed is None or not visit_id:
                 raise self._candidate(content, code or DETAIL_ENTITY_MISSING)
-            parsed.content_visit_refs = {
+            author_visit = await self._visit_author(detail_page, parsed, visit_id)
+            refs = {
                 "ledger_id": self.channel.ledger.ledger_id,
-                "detail": visit_id,
+                "note_detail": visit_id,
+                "creator_profile": author_visit,
+                "images": [],
             }
+            if not direct_url:
+                search_visit = str(getattr(self.capture, "last_search_visit_id", "") or "")
+                if search_visit:
+                    refs["search_results"] = search_visit
+            parsed.content_visit_refs = refs
             return parsed
         except ZhihuDetailFetchError:
             raise
@@ -261,16 +286,129 @@ class ZhihuDetailPages:
         return None
 
     async def _read_initial_data(self, page: Any, content: ZhihuContent, trigger_id: str) -> tuple[Any, str | None]:
-        stage = (
-            "answer_detail" if content.content_type == constant.ANSWER_NAME else "article_detail"
-        )
         return await self.channel.read_state(
             page,
-            INITIAL_DATA_SCRIPT_NAME,
-            stage=stage,
+            "zhihu.initial_data",
+            stage="note_detail",
             subject_id=str(content.content_id or ""),
             trigger=trigger_id,
         )
+
+    async def _visit_author(self, detail_page: Any, content: ZhihuContent, detail_visit_id: str) -> str:
+        """在详情标签停留结束、关闭前点击作者名，读作者页状态，停留后关闭作者标签。"""
+
+        token = str(content.creator_url_token or "")
+        if not _SAFE_TOKEN.fullmatch(token):
+            raise self._candidate(content, AUTHOR_LINK_MISSING)
+        link = await self._find_author_link(detail_page, content, token)
+        if link is None:
+            raise self._candidate(content, AUTHOR_LINK_MISSING)
+        if not await self._is_visible(link):
+            try:
+                await pointer_for(detail_page).scroll_into_view(link)
+            except ElementNotInView as exc:
+                raise self._candidate(content, AUTHOR_LINK_MISSING) from exc
+        await self._pause(detail_page, "creator_profile", *AUTHOR_CLICK_PAUSE_SECONDS, page_role="detail")
+        click_id = self.channel.action(
+            "click_author",
+            page_role="detail",
+            target={"content_id": str(content.content_id or "")},
+            from_visit=detail_visit_id,
+        )
+        try:
+            async with self.channel.context.expect_page(timeout=DETAIL_TAB_TIMEOUT_MS) as opened:
+                await link.click(timeout=DETAIL_TAB_TIMEOUT_MS)
+            author_page = await opened.value
+        except (PlaywrightTimeoutError, TimeoutError) as exc:
+            raise self._candidate(content, AUTHOR_LINK_MISSING) from exc
+        self.channel.attach(author_page, "author")
+        try:
+            await self._wait_loaded(author_page)
+            await self._raise_if_blocking(author_page)
+            if _page_closed(detail_page) or _page_closed(self.search_page):
+                raise self._runtime(content, BROWSER_TARGET_CLOSED)
+            url_token = people_token(getattr(author_page, "url", "") or "")
+            if not url_token:
+                raise self._candidate(content, AUTHOR_PROFILE_MISSING)
+            state_text, visit_id = await self.channel.read_state(
+                author_page,
+                "zhihu.initial_data",
+                stage="creator_profile",
+                subject_id=url_token,
+                trigger=click_id,
+                url_user_id=url_token,
+            )
+            user = user_from_initial_data(state_text, url_token)
+            if user is None or not visit_id:
+                raise self._candidate(content, AUTHOR_PROFILE_MISSING)
+            apply_author_page(content, user, url_token)
+            await self._pause(author_page, "author_tab", *AUTHOR_TAB_HOLD_SECONDS, page_role="author")
+            return visit_id
+        finally:
+            await self._close_author_tab(author_page, content)
+            await self._bring_detail_forward(detail_page)
+
+    async def _find_author_link(self, page: Any, content: ZhihuContent, token: str) -> Any | None:
+        locator = page.locator(f"a[href*='/people/{token}']")
+        try:
+            count = await locator.count()
+        except (PlaywrightError, PlaywrightTimeoutError) as exc:
+            if _closed_error(exc) or _page_closed(page):
+                raise self._runtime(content, BROWSER_TARGET_CLOSED) from exc
+            return None
+        for index in range(count):
+            item = locator.nth(index)
+            try:
+                href = await item.get_attribute("href")
+            except (PlaywrightError, PlaywrightTimeoutError) as exc:
+                if _closed_error(exc) or _page_closed(page):
+                    raise self._runtime(content, BROWSER_TARGET_CLOSED) from exc
+                continue
+            if people_token(str(href or "")) == token:
+                return item
+        return None
+
+    async def _pause(
+        self, page: Any, stage: str, low: float, high: float, *, page_role: str,
+    ) -> float:
+        seconds = random.uniform(low, high)
+        start_seq = self.channel.pause_started()
+        if seconds > 0:
+            waiter = getattr(page, "wait_for_timeout", None)
+            if waiter is None:
+                await asyncio.sleep(seconds)
+            else:
+                await waiter(int(seconds * 1000))
+        self.channel.pause_finished(stage, start_seq, seconds, "n/a", page_role=page_role)
+        return seconds
+
+    async def _close_author_tab(self, page: Any, content: ZhihuContent) -> None:
+        if page is None or _page_closed(page):
+            return
+        try:
+            self.channel.action(
+                "close_tab",
+                page_role="author",
+                target={"content_id": str(content.content_id or "")},
+            )
+            await page.close()
+        except Exception as exc:
+            logger.info(
+                "[ZhihuDetailPages] author tab close failed "
+                f"content_id={content.content_id} error={type(exc).__name__}"
+            )
+
+    async def _bring_detail_forward(self, page: Any) -> None:
+        bring = getattr(page, "bring_to_front", None)
+        if bring is None or _page_closed(page):
+            return
+        try:
+            await bring()
+        except Exception as exc:
+            logger.info(
+                "[ZhihuDetailPages] could not bring the detail page forward "
+                f"error={type(exc).__name__}"
+            )
 
     async def _dwell(self, page: Any, content: ZhihuContent) -> None:
         seconds = random.uniform(*DETAIL_DWELL_SECONDS)
@@ -281,7 +419,7 @@ class ZhihuDetailPages:
         if remaining > 0:
             await asyncio.sleep(remaining)
         self.channel.pause_finished(
-            "detail_dwell", start_seq, seconds, "n/a", page_role="detail",
+            "note_detail", start_seq, seconds, "n/a", page_role="detail",
         )
         logger.info(
             "[ZhihuDetailPages] detail dwell "

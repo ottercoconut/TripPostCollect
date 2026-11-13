@@ -37,14 +37,21 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src/trippostcollect"
 # 平台 → 包内目录。抖音、知乎、B站在各自改造批次加入；微博见 #73。
-GUARDED_PLATFORMS: dict[str, str] = {"xhs": "platforms/xhs"}
+GUARDED_PLATFORMS: dict[str, str] = {"xhs": "platforms/xhs", "zhihu": "platforms/zhihu"}
 # 平台会调用、且向页面传入脚本字符串的 runtime 模块；平台新增依赖时同步加入。
 RUNTIME_SCRIPT_MODULES: dict[str, tuple[str, ...]] = {
     "xhs": ("runtime/behavior.py", "runtime/human_flow.py", "runtime/human_pointer.py", "runtime/page_capture.py"),
+    "zhihu": ("runtime/human_flow.py", "runtime/human_pointer.py", "runtime/page_capture.py"),
 }
 # 每平台一个显式白名单：(包内相对路径, 规则编号, 命中详情)。条目必须仍然命中，过期即失败。
 WHITELISTS: dict[str, frozenset[tuple[str, str, str]]] = {
     "xhs": frozenset(),
+    #185 正文图片 CDN 直连例外
+    "zhihu": frozenset({
+        ("platforms/zhihu/client.py", "R1", "httpx"),
+        # 非 CDP 回退里创建浏览器上下文，不是平台取数客户端。
+        ("platforms/zhihu/core.py", "R2", "new_context"),
+    }),
 }
 
 FORBIDDEN_MODULES = (

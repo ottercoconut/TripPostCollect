@@ -151,15 +151,10 @@ async def test_start_never_injects_snapshot_cookies_and_reads_live_profile(monke
 
     await crawler.start()
 
-    assert [item for item in trace if item[0] in {"add_cookies", "reload"}] == []
-    assert ("cookies", ["https://www.zhihu.com"]) in trace
+    assert [item for item in trace if item[0] in {"add_cookies", "reload", "cookies"}] == []
     (client,) = clients
-    assert client.kwargs["headers"]["cookie"] == "d_c0=live;z_c0=live-session"
-    assert client.kwargs["cookie_dict"] == {"d_c0": "live", "z_c0": "live-session"}
-    # Referer 使用本轮真实检索词，不再写死 q=python。
-    assert client.kwargs["headers"]["referer"] == (
-        "https://www.zhihu.com/search?q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8&type=content"
-    )
+    assert client.kwargs["headers"] == {"user-agent": "Mozilla/5.0 test-browser"}
+    assert "cookie" not in client.kwargs
     crawler.search.assert_awaited_once()
 
 

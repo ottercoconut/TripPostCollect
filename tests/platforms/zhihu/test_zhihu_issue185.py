@@ -168,6 +168,17 @@ async def test_first_page_and_scrolled_next_page_until_is_end(monkeypatch, tmp_p
     assert [(item["stop_reason"], item["stop_detail"], item["source_page"]) for item in stopped] == [
         ("source_exhausted", "paging_is_end", 2),
     ]
+    assert stopped[0]["source_visit_id"]
+    visits = [
+        line for line in ledger_lines(tmp_path)
+        if line.get("kind") == "visit" and line.get("stage") == "search_results"
+    ]
+    assert [line["search_page"] for line in visits] == [1, 2]
+    assert visits[0]["is_target"] is True and visits[0]["has_more"] is True
+    assert visits[1]["is_target"] is True and visits[1]["has_more"] is False
+    assert visits[0]["search_session"] == visits[1]["search_session"]
+    assert visits[0]["filter_signature"] == "type=content"
+    assert stopped[0]["source_visit_id"] == visits[1]["id"]
     kinds = [(line.get("kind"), line.get("action") or line.get("stage")) for line in ledger_lines(tmp_path)]
     assert ("action", "navigate") in kinds
     assert ("action", "scroll") in kinds

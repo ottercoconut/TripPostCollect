@@ -20,10 +20,8 @@
 # TripPostCollect：T07 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
 import logging
-from typing import Dict, Optional
 
 import httpx
-from playwright.async_api import BrowserContext, Page
 from trippostcollect.application.contracts import ZhihuClientPorts
 from trippostcollect.runtime.image_retry import (
     IMAGE_DOWNLOAD_MAX_BYTES, ImageDownloadFetchError, classified_http_image_error,
@@ -33,6 +31,8 @@ from .models import DataFetchError
 logger = logging.getLogger("TripPostCollect")
 
 IMAGE_REFERER = "https://www.zhihu.com/"
+# 访问账本里正文图 CDN 直连的规则名，与 visit_gate 的知乎图片阶段一致。
+ZHIHU_CONTENT_IMAGE_RULE = "zhihu.content_image"
 
 
 class SearchResponseInvalid(DataFetchError):
@@ -44,58 +44,32 @@ class SearchResponseInvalid(DataFetchError):
 
 
 class ZhiHuClient:
+    """正文图 CDN 直连。只带浏览器 UA、图片 Accept 和站点 Referer，不带 Cookie，不走代理。"""
 
     def __init__(
         self,
         timeout=10,
-        proxy=None,
         *,
-        headers: Dict[str, str],
-        playwright_page: Page,
-        cookie_dict: Dict[str, str],
+        headers: dict[str, str],
         ports: ZhihuClientPorts,
     ):
-        self.proxy = proxy
         self.timeout = timeout
-        self.default_headers = headers
-        self.cookie_urls = ["https://www.zhihu.com"]
-        self.cookie_dict = cookie_dict
+        self.user_agent = headers.get("user-agent", "")
         self.ports = ports
-
-    async def update_cookies(self, browser_context: BrowserContext, urls: Optional[list[str]] = None):
-        """
-        Update cookies method provided by API client, typically called after successful login
-        Args:
-            browser_context: Browser context object
-
-        Returns:
-
-        """
-        cookie_str, cookie_dict = await self.ports.convert_browser_context_cookies(
-            browser_context,
-            urls=urls or self.cookie_urls,
-        )
-        self.default_headers["cookie"] = cookie_str
-        self.cookie_dict = cookie_dict
-
-    def set_search_referer(self, referer: str) -> None:
-        """搜索 API 的 Referer 指向本轮实际检索词的搜索页。"""
-        self.default_headers["referer"] = referer
 
     async def get_content_image(self, image_url: str, *, referer: str) -> bytes | None:
         """Fetch one body image from the zhimg CDN with UA, Accept and site Referer only.
 
-        The CDN does not need the zhihu.com session: Cookie and API signing headers stay
-        on www.zhihu.com requests.
+        ``referer`` 保留调用签名；发出的 Referer 固定为知乎站点，不带会话 Cookie。
         """
 
         headers = {
-            "user-agent": self.default_headers.get("user-agent", ""),
+            "user-agent": self.user_agent,
             "accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8",
             "referer": IMAGE_REFERER,
         }
         try:
-            async with self.ports.make_async_client(proxy=self.proxy) as client:
+            async with self.ports.make_async_client(proxy=None) as client:
                 async with client.stream(
                     "GET", image_url, timeout=self.timeout, headers=headers
                 ) as response:

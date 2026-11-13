@@ -10,7 +10,7 @@ import pytest
 from .support import END, config, make_crawler, search_page
 from trippostcollect.platforms.zhihu.detail_page import blocking_code_for_url
 from trippostcollect.platforms.zhihu.models import ZhihuContent
-from trippostcollect.platforms.zhihu.page_scripts import INITIAL_DATA_SCRIPT_NAME, STATE_SCRIPTS
+from trippostcollect.platforms.zhihu.page_scripts import STATE_SCRIPTS
 from trippostcollect.platforms.zhihu.search_capture import ZhihuPageCapture
 from trippostcollect.records.formal import row_for_record, validate_formal_record
 from trippostcollect.runtime.page_capture import PageCaptureChannel
@@ -24,7 +24,7 @@ def _state(content_id: str, *, kind: str = "answer", content: str = "<p>详情�
         "content": content,
         "createdTime": 1_700_000_000,
         "updatedTime": 1_700_000_100,
-        "author": {"id": "author-1", "name": "作者", "urlToken": "author"},
+        "author": {"id": "author-1", "name": "作者", "url_token": "author", "urlToken": "author"},
     }
     if kind == "answer":
         entity["question"] = {"id": "10"}
@@ -38,6 +38,23 @@ def _state(content_id: str, *, kind: str = "answer", content: str = "<p>详情�
         entity["reaction"] = {"statistics": {"shareCount": share}}
     bucket = "answers" if kind == "answer" else "articles"
     return json.dumps({"initialState": {"entities": {bucket: {content_id: entity}}}})
+
+
+def _author_state(*, omit=(), follower=11, following=5, answers=2, articles=3, pins=1, questions=4) -> str:
+    user = {"urlToken": "author", "name": "作者"}
+    if "followerCount" not in omit:
+        user["followerCount"] = follower
+    if "followingCount" not in omit:
+        user["followingCount"] = following
+    if "answerCount" not in omit:
+        user["answerCount"] = answers
+    if "articlesCount" not in omit:
+        user["articlesCount"] = articles
+    if "pinsCount" not in omit:
+        user["pinsCount"] = pins
+    if "questionCount" not in omit:
+        user["questionCount"] = questions
+    return json.dumps({"initialState": {"entities": {"users": {"author": user}}}})
 
 
 class QuietMouse:
@@ -55,6 +72,11 @@ class Locator:
         self.index = index
 
     def _matches(self):
+        if "/people/" in self.selector:
+            return [
+                link for link in getattr(self.page, "author_links", [])
+                if str(link.get("href") or "").rsplit("/", 1)[-1] in self.selector
+            ]
         if self.selector in self.page.markers:
             return [{"marker": self.selector}] if self.page.markers[self.selector] else []
         matched = [
@@ -92,7 +114,11 @@ class Locator:
         if not matched:
             raise AssertionError(self.selector)
         self.page.clicks.append(matched[0]["id"])
-        if self.page.context is not None:
+        if self.page.context is None:
+            return
+        if matched[0].get("kind") == "author":
+            self.page.context.spawn_author(matched[0])
+        else:
             self.page.context.spawn(matched[0])
 
 
@@ -100,6 +126,9 @@ class Page:
     def __init__(self, url="https://www.zhihu.com/search?type=content&q=qingdao"):
         self.url = url
         self.cards = []
+        self.author_links = []
+        self.author_block = ""
+        self.author_state = ""
         self.markers = {}
         self.clicks = []
         self.initial_text = ""
@@ -197,11 +226,31 @@ class Context:
         else:
             detail.url = card["href"]
             detail.initial_text = self.page.state_for(card)
+        detail.author_links = [] if self.page.author_block == "no-author" else [{
+            "kind": "author", "id": "author",
+            "href": "https://www.zhihu.com/people/author",
+        }]
         self.pages.append(detail)
         if self.pending is not None:
             self.pending.page = detail
         if self._on_page is not None:
             self._on_page(detail)
+
+    def spawn_author(self, link):
+        if self.page.author_block == "no-tab":
+            return
+        author = Page(link["href"])
+        author.context = self
+        author.initial_text = self.page.author_state
+        if self.page.author_block == "login":
+            author.url = "https://www.zhihu.com/signin"
+        elif self.page.author_block == "verify":
+            author.url = "https://www.zhihu.com/account/unhuman"
+        elif self.page.author_block == "closed":
+            author.closed = True
+        self.pages.append(author)
+        if self.pending is not None:
+            self.pending.page = author
 
     async def new_page(self):
         detail = Page("about:blank")
@@ -218,6 +267,7 @@ def prepare(monkeypatch, tmp_path, *, block=""):
     (tmp_path / "state.json").write_text('{"events": []}', encoding="utf-8")
     page = Page()
     page.block = block
+    page.author_state = _author_state()
     page.state_for = lambda card: _state(card["id"], kind=card["type"])
     context = Context(page)
     crawler = make_crawler()
@@ -247,9 +297,9 @@ def test_login_and_verify_url_constants_are_hypotheses():
     assert blocking_code_for_url("https://www.zhihu.com/signin?next=%2F") == "login_required"
     assert blocking_code_for_url("https://www.zhihu.com/account/unhuman") == "captcha_detected"
     assert blocking_code_for_url("https://www.zhihu.com/search?type=content&q=1") is None
-    assert INITIAL_DATA_SCRIPT_NAME in STATE_SCRIPTS
-    assert "fetch(" not in STATE_SCRIPTS[INITIAL_DATA_SCRIPT_NAME]
-    assert "XMLHttpRequest" not in STATE_SCRIPTS[INITIAL_DATA_SCRIPT_NAME]
+    assert "zhihu.initial_data" in STATE_SCRIPTS
+    assert "fetch(" not in STATE_SCRIPTS["zhihu.initial_data"]
+    assert "XMLHttpRequest" not in STATE_SCRIPTS["zhihu.initial_data"]
 
 
 @pytest.mark.asyncio
@@ -292,17 +342,28 @@ async def test_click_opens_tab_and_reads_entity_even_when_search_body_is_complet
     assert result.share_count == 0
     assert result.created_time == 1_700_000_000
     assert result.creator_hash == "author-1"
-    assert result.content_visit_refs["detail"]
+    assert result.creator_url_token == "author"
+    assert result.followers_count == 11
+    assert result.followers_observed is True
+    assert result.author_followers_source == "author_page"
+    assert result.following_count == 5
+    assert result.author_posts_count == 5
+    assert result.author_page_counts == {
+        "answerCount": 2, "articlesCount": 3, "pinsCount": 1, "questionCount": 4,
+    }
+    refs = result.content_visit_refs
+    assert refs["note_detail"] and refs["creator_profile"] and refs["images"] == []
     lines = ledger_lines(root)
     actions = [line["action"] for line in lines if line["kind"] == "action"]
-    assert actions == ["click_card", "close_tab"]
-    visits = [line for line in lines if line["kind"] == "visit"]
-    assert visits[-1]["source"] == "page_state"
-    assert visits[-1]["stage"] == "answer_detail"
-    assert visits[-1]["id"] == result.content_visit_refs["detail"]
-    pauses = [line for line in lines if line["kind"] == "pause"]
-    assert pauses[-1]["stage"] == "detail_dwell"
-    assert pauses[-1]["seconds"] == 6.5
+    assert actions == ["click_card", "click_author", "close_tab", "close_tab"]
+    visits = [line for line in lines if line["kind"] == "visit" and line["stage"] in {"note_detail", "creator_profile"}]
+    assert [line["stage"] for line in visits] == ["note_detail", "creator_profile"]
+    assert visits[0]["id"] == refs["note_detail"]
+    assert visits[1]["id"] == refs["creator_profile"]
+    assert visits[1]["url_user_id"] == "author"
+    assert visits[1]["subject_id"] == "author"
+    pauses = [line["stage"] for line in lines if line["kind"] == "pause"]
+    assert pauses == ["note_detail", "creator_profile", "author_tab"]
     assert page.fronts == 1
     dumped = result.model_dump()
     row = row_for_record(
@@ -315,6 +376,14 @@ async def test_click_opens_tab_and_reads_entity_even_when_search_body_is_complet
     assert row["post_comments_count"] == 1
     assert row["post_favorites_count"] == 4
     assert row["post_shares_count"] == 0
+    author = json.loads(row["author_json"])
+    assert author["following_count"] == 5
+    assert author["posts_count"] == 5
+    assert author["answerCount"] == 2
+    assert author["articlesCount"] == 3
+    assert author["pinsCount"] == 1
+    assert author["questionCount"] == 4
+    assert author["followers_source"] == "author_page"
 
 
 @pytest.mark.asyncio
@@ -440,7 +509,105 @@ def test_capture_channel_registers_initial_data_script():
         ledger=SimpleNamespace(),
         state_scripts=STATE_SCRIPTS,
     )
-    assert channel._state_scripts[INITIAL_DATA_SCRIPT_NAME].startswith("() =>")
+    assert channel._state_scripts["zhihu.initial_data"].startswith("() =>")
+    assert channel._state_scripts["zhihu.user_agent"] == "() => navigator.userAgent"
+
+
+@pytest.mark.asyncio
+async def test_missing_author_link_is_candidate_failure(monkeypatch, tmp_path):
+    from trippostcollect.platforms.zhihu.detail_page import AUTHOR_LINK_MISSING
+    from trippostcollect.platforms.zhihu.models import ZhihuDetailFetchError
+
+    crawler, page, _root = prepare(monkeypatch, tmp_path)
+    page.author_block = "no-author"
+    page.cards = [{
+        "id": "101", "type": "answer",
+        "href": "https://www.zhihu.com/question/10/answer/101",
+    }]
+    content = ZhihuContent(
+        content_id="101", question_id="10", content_type="answer",
+        creator_hash="author-1", user_nickname="作者",
+    )
+    with pytest.raises(ZhihuDetailFetchError) as caught:
+        await crawler.enrich_search_content_detail(content)
+    assert caught.value.code == AUTHOR_LINK_MISSING
+    assert caught.value.runtime_blocking is False
+    assert caught.value.attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_author_page_without_user_is_candidate_failure(monkeypatch, tmp_path):
+    from trippostcollect.platforms.zhihu.detail_page import AUTHOR_PROFILE_MISSING
+    from trippostcollect.platforms.zhihu.models import ZhihuDetailFetchError
+
+    crawler, page, _root = prepare(monkeypatch, tmp_path)
+    page.author_state = json.dumps({"initialState": {"entities": {"users": {}}}})
+    page.cards = [{
+        "id": "101", "type": "answer",
+        "href": "https://www.zhihu.com/question/10/answer/101",
+    }]
+    content = ZhihuContent(
+        content_id="101", question_id="10", content_type="answer",
+        creator_hash="author-1", user_nickname="作者",
+    )
+    with pytest.raises(ZhihuDetailFetchError) as caught:
+        await crawler.enrich_search_content_detail(content)
+    assert caught.value.code == AUTHOR_PROFILE_MISSING
+    assert caught.value.runtime_blocking is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block,code", [("login", "login_required"), ("verify", "captcha_detected")])
+async def test_author_login_or_verify_stops_the_run(monkeypatch, tmp_path, block, code):
+    from trippostcollect.platforms.zhihu.models import ZhihuDetailFetchError
+
+    crawler, page, _root = prepare(monkeypatch, tmp_path)
+    page.author_block = block
+    page.cards = [{
+        "id": "101", "type": "answer",
+        "href": "https://www.zhihu.com/question/10/answer/101",
+    }]
+    content = ZhihuContent(
+        content_id="101", question_id="10", content_type="answer",
+        creator_hash="author-1", user_nickname="作者",
+    )
+    with pytest.raises(ZhihuDetailFetchError) as caught:
+        await crawler.enrich_search_content_detail(content)
+    assert caught.value.runtime_blocking is True
+    assert caught.value.code == code
+    assert caught.value.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_work_count_is_none_and_omitted_from_author_json(monkeypatch, tmp_path):
+    crawler, page, _root = prepare(monkeypatch, tmp_path)
+    page.author_state = _author_state(omit=("articlesCount", "pinsCount"))
+    page.cards = [{
+        "id": "101", "type": "answer",
+        "href": "https://www.zhihu.com/question/10/answer/101",
+    }]
+    content = ZhihuContent(
+        content_id="101", question_id="10", content_type="answer",
+        creator_hash="author-1", user_nickname="作者", followers_observed=True,
+        followers_count=3, image_list=["https://pic1.zhimg.com/v2-search_r.jpg"],
+        content_text="搜索", created_time=1,
+    )
+    result = await crawler.enrich_search_content_detail(content)
+    assert result.author_posts_count is None
+    assert "articlesCount" not in result.author_page_counts
+    assert "pinsCount" not in result.author_page_counts
+    assert result.author_page_counts["answerCount"] == 2
+    row = row_for_record(
+        "zhihu", result.model_dump(), artifact_dir="artifact",
+        captured_at="2026-11-13T00:00:00+08:00", keyword="青岛旅游",
+        materialized_images=None, image_items_for_record=lambda _platform, _record: [],
+        ImagePersistenceError=RuntimeError,
+    )
+    author = json.loads(row["author_json"])
+    assert "articlesCount" not in author
+    assert "pinsCount" not in author
+    assert author["answerCount"] == 2
+    assert author["posts_count"] is None
 
 
 def test_client_has_no_detail_http_or_signer():

@@ -20,6 +20,7 @@ from support import runtime_failed_batch_deviation
 from support import ua_from_browser_deviation
 from support import zhihu_following_count_deviation
 from support import zhihu_login_paging_deviation as deviation
+from support import zhihu_author_visit_deviation
 from support import zhihu_detail_page_deviation
 from support import zhihu_search_capture_deviation
 from support.stable_png import solid_png
@@ -206,6 +207,19 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
                 }
             raise AssertionError(script)
 
+    AUTHOR_LINK = {
+        "kind": "author", "id": "author", "href": "https://www.zhihu.com/people/author",
+    }
+    AUTHOR_STATE = json.dumps({"initialState": {"entities": {"users": {"author": {
+        "followerCount": 42, "followingCount": 6, "answerCount": 2, "articlesCount": 1,
+        "pinsCount": 0, "questionCount": 3,
+    }}}}})
+
+    def _author_links(url, text):
+        if not text or "/signin" in url or "unhuman" in url:
+            return []
+        return [AUTHOR_LINK]
+
     detail_attempts = Counter()
 
     def detail_document(identity, kind):
@@ -253,6 +267,11 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
             self.index = index
 
         def _matches(self):
+            if "/people/" in self.selector:
+                return [
+                    link for link in getattr(self.owner, "author_links", [])
+                    if str(link.get("href") or "").rsplit("/", 1)[-1] in self.selector
+                ]
             matched = [
                 card for card in getattr(self.owner, "cards", [])
                 if card["id"] in self.selector and (
@@ -287,7 +306,11 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
             matched = self._matches()
             if not matched:
                 raise AssertionError(self.selector)
-            self.owner.context.spawn(matched[0])
+            card = matched[0]
+            if card.get("kind") == "author":
+                self.owner.context.spawn_author(card)
+            else:
+                self.owner.context.spawn(card)
 
     class DetailPage:
         def __init__(self, url, text):
@@ -295,6 +318,7 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
             self.initial_text = text
             self.closed = False
             self.cards = []
+            self.author_links = []
             self.mouse = QuietMouse()
             self.listeners = {"response": [], "requestfailed": []}
             self.context = None
@@ -312,6 +336,7 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
             identity = url.rstrip("/").rsplit("/", 1)[-1]
             kind = "article" if "/p/" in url else "answer"
             self.url, self.initial_text = detail_document(identity, kind)
+            self.author_links = _author_links(self.url, self.initial_text)
 
         async def evaluate(self, script, arg=None):
             if "js-initialData" in script:
@@ -376,10 +401,19 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
         def spawn(self, card):
             url, text = detail_document(card["id"], card["type"])
             detail = DetailPage(url, text)
+            detail.author_links = _author_links(url, text)
             detail.context = self
             self.pages.append(detail)
             if self.pending is not None:
                 self.pending.page = detail
+
+        def spawn_author(self, card):
+            author = DetailPage(card["href"], AUTHOR_STATE)
+            author.author_links = []
+            author.context = self
+            self.pages.append(author)
+            if self.pending is not None:
+                self.pending.page = author
 
         async def new_page(self):
             self.opened += 1
@@ -571,6 +605,7 @@ async def test_root_matches_frozen_legacy_request_event_and_artifacts(tmp_path, 
         new = await drive(tmp_path / "new", patch, scenario)
     actual = expectations.scrub(new, (tmp_path, "<TMP>"))
     actual, expected = zhihu_detail_page_deviation.align(actual, legacy_expectation(scenario), scenario)
+    actual, expected = zhihu_author_visit_deviation.align(actual, expected, scenario)
     assert actual == expected
     check_drive_result(new, scenario)
 
@@ -591,6 +626,7 @@ async def test_root_entry_matches_frozen_legacy_factory(tmp_path, monkeypatch, s
                           crawler_factory=lambda: entry.load_crawler("zhihu")())
     actual = expectations.scrub(new, (tmp_path, "<TMP>"))
     actual, expected = zhihu_detail_page_deviation.align(actual, legacy_expectation(scenario), scenario)
+    actual, expected = zhihu_author_visit_deviation.align(actual, expected, scenario)
     assert actual == expected
 
 
@@ -601,8 +637,8 @@ def check_drive_result(new, scenario):
     # #185：详情不再签名，也不再发浏览器外详情请求。
     assert requests == []
     assert "compile" not in names and "sign" not in names
-    # #113：worker 从不向浏览器注入 Cookie；httpx Cookie 只来自按 URL 过滤的 browser_context.cookies()。
-    assert "add_cookies" not in names and "reload" not in names
+    # #185：搜索、详情、作者都改为页面取数后，客户端不再读取 Cookie。
+    assert "add_cookies" not in names and "reload" not in names and "cookies" not in names
     assert "launch" in names
     assert b"avatar.test" not in b"".join(new["files"].values())
     images = [event for event in trace if event[0] == "image"]
@@ -615,7 +651,7 @@ def check_drive_result(new, scenario):
         return
     behavior_index = names.index("behavior")
     assert trace[behavior_index][1] == "https://www.zhihu.com/search?q=" + quote("青岛旅游") + "&type=content"
-    assert names[behavior_index - 1] == "cookies"
+    assert names[behavior_index - 1] == "sleep"
     if scenario in {"success", "navigation_timeout", "search_content", "search_retry", "image_retry"}:
         assert len(new["records"]) == 2
         assert all(record["image_count"] == 1 and len(record["image_assets"]) == 1 for record in new["records"])
@@ -634,7 +670,13 @@ def check_drive_result(new, scenario):
         assert all(record["comment_count"] == 1 for record in new["records"])
         assert all(record["collected_count"] == 2 for record in new["records"])
         assert all(record["share_count"] == 0 for record in new["records"])
-        assert all(record["content_visit_refs"]["detail"] for record in new["records"])
+        assert all(
+            record["content_visit_refs"]["note_detail"]
+            and record["content_visit_refs"]["creator_profile"]
+            and isinstance(record["content_visit_refs"]["images"], list)
+            and record["content_visit_refs"]["images"]
+            for record in new["records"]
+        )
     if scenario == "search_content":
         assert [record["content_detail_source"] for record in new["records"]] == [
             "answer_detail", "article_detail",
@@ -795,6 +837,7 @@ def test_pure_definitions_keep_original_bodies():
             continue
         if row["target"] in {"platforms/zhihu/parser.py", "platforms/zhihu/models.py"}:
             original = zhihu_detail_page_deviation.parser_and_model_source(original)
+            original = zhihu_author_visit_deviation.parser_and_model_source(original)
         # #49 有意偏离：作者 ID/昵称改存平台原始值，只允许身份转换调用与对应字段描述替换。
         for old, new in ISSUE_49_IDENTITY_REPLACEMENTS:
             original = original.replace(old, new)

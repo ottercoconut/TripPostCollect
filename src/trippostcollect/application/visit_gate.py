@@ -58,6 +58,12 @@ class VisitPolicy:
     required_stages: Callable[[LedgerFacts, str], RequiredStages]
     record_id_field: str = "note_id"
     record_user_field: str = "user_id"
+    # 动作 target 里存放记录 ID 的键。小红书写 note_id；知乎沿用内容 ID。
+    target_id_field: str = "note_id"
+    # 详情访问所在页面角色。小红书浮层在主页面；知乎详情是新标签。
+    detail_page_role: str = "primary"
+    # G1（回车后点选筛选）只属于有该入口的平台。知乎用地址栏打开搜索，不跑这条。
+    checks_filter_entry: bool = True
 
     def __post_init__(self) -> None:
         for mode, specs in self.stages.items():
@@ -76,6 +82,12 @@ class LedgerFacts:
     detail_visits: int
     author_clicks: int
     scroll_triggered_pages: int
+
+
+def zhihu_required_stages(facts: LedgerFacts, mode: str) -> RequiredStages:
+    """与小红书相同的节奏推导：有详情才要求搜索结果与详情停顿，有滚动翻页才要求翻页停顿，有点作者才要求作者停顿。"""
+
+    return xhs_required_stages(facts, mode)
 
 
 def xhs_required_stages(facts: LedgerFacts, mode: str) -> RequiredStages:
@@ -117,9 +129,37 @@ VISIT_POLICIES: dict[str, VisitPolicy] = {
         target_filter="note_type",
         required_stages=xhs_required_stages,
     ),
+    "zhihu": VisitPolicy(
+        platform="zhihu",
+        chains={
+            "discovery": ("search_results", "note_detail", "creator_profile", "images"),
+            "repair": ("note_detail", "creator_profile", "images"),
+        },
+        stages={
+            "discovery": {
+                "search_results": StageSpec("zhihu.search_v3", "page_response"),
+                "note_detail": StageSpec("zhihu.initial_data", "page_state", trigger="click_card"),
+                "creator_profile": StageSpec("zhihu.initial_data", "page_state", trigger="click_author"),
+                "note_image": StageSpec("zhihu.content_image", "cdn_direct"),
+            },
+            "repair": {
+                # 指定 URL 直接 navigate 打开详情，仍读同一段页面状态。
+                "note_detail": StageSpec("zhihu.initial_data", "page_state", trigger="navigate"),
+                "creator_profile": StageSpec("zhihu.initial_data", "page_state", trigger="click_author"),
+                "note_image": StageSpec("zhihu.content_image", "cdn_direct"),
+            },
+        },
+        target_filter="",
+        required_stages=zhihu_required_stages,
+        record_id_field="content_id",
+        record_user_field="creator_url_token",
+        target_id_field="content_id",
+        detail_page_role="detail",
+        checks_filter_entry=False,
+    ),
 }
 # 已纳入访问门禁的平台；平台在其取数改造完成的批次加入。
-VISIT_GATED_PLATFORMS: frozenset[str] = frozenset({"xhs"})
+VISIT_GATED_PLATFORMS: frozenset[str] = frozenset({"xhs", "zhihu"})
 
 
 def _seq(line: Mapping[str, Any]) -> int:
@@ -157,7 +197,9 @@ class _LedgerIndex:
     def registered_at(self, visit: Mapping[str, Any], item_id: str) -> bool:
         return self.registrations.get((_session_key(visit), item_id)) == visit["id"]
 
-    def first_registered_click(self, visit: Mapping[str, Any], kind: str) -> dict[str, Any] | None:
+    def first_registered_click(
+        self, visit: Mapping[str, Any], kind: str, *, id_field: str = "note_id",
+    ) -> dict[str, Any] | None:
         """本搜索访问之后第一次点击登记在本访问的条目。瀑布流下第 k 页未处理完时第 k+1 页已到，此后点开的跨页重复
         条目登记在第 k 页、是第 k 页的结果，不算第 k+1 页的点击（#97）。"""
         return next(
@@ -166,7 +208,7 @@ class _LedgerIndex:
                 for line in self.actions
                 if _seq(line) > _seq(visit)
                 and line["action"] == kind
-                and self.registered_at(visit, str((line.get("target") or {}).get("note_id") or ""))
+                and self.registered_at(visit, str((line.get("target") or {}).get(id_field) or ""))
             ),
             None,
         )
@@ -179,6 +221,7 @@ class _LedgerIndex:
         before: int | None = None,
         note_id: str | None = None,
         page_role: str | None = None,
+        id_field: str = "note_id",
     ) -> dict[str, Any] | None:
         wanted = set(kinds)
         for line in self.actions:
@@ -187,7 +230,7 @@ class _LedgerIndex:
                 continue
             if line["action"] not in wanted:
                 continue
-            if note_id is not None and str((line.get("target") or {}).get("note_id") or "") != note_id:
+            if note_id is not None and str((line.get("target") or {}).get(id_field) or "") != note_id:
                 continue
             if page_role is not None and line.get("page_role") != page_role:
                 continue
@@ -355,6 +398,7 @@ def _check_record(
 
     detail_spec = policy.spec(mode, "note_detail")
     trigger_kind = str(detail_spec.trigger)
+    id_field = policy.target_id_field
 
     # R2 搜索访问（仅 discovery）：是本篇在该搜索会话中的登记访问（必含该 ID）。
     search: dict[str, Any] | None = None
@@ -377,12 +421,12 @@ def _check_record(
     detail_ok = (
         _visit_matches(detail, detail_spec, "note_detail")
         and detail.get("subject_id") == note_id
-        and detail.get("page_role") == "primary"
+        and detail.get("page_role") == policy.detail_page_role
         and (detail.get("source") != "page_response" or detail.get("status") == 200)
         and trigger is not None
         and trigger.get("kind") == "action"
         and trigger.get("action") == trigger_kind
-        and str((trigger.get("target") or {}).get("note_id") or "") == note_id
+        and str((trigger.get("target") or {}).get(id_field) or "") == note_id
         and _seq(trigger) < _seq(detail)
         and (search is None or _seq(search) < _seq(trigger))
     )
@@ -418,7 +462,7 @@ def _check_record(
         (item for item in record.get("image_assets") or [] if isinstance(item, Mapping)),
         key=lambda item: int(item.get("source_index") or 0),
     )
-    first_trigger = detail_index.first_action([trigger_kind], note_id=note_id)
+    first_trigger = detail_index.first_action([trigger_kind], note_id=note_id, id_field=id_field)
     image_spec = policy.spec(mode, "note_image")
     images_ok = bool(assets) and len(images) == len(assets) and first_trigger is not None
     if images_ok:
@@ -450,7 +494,7 @@ def _check_record(
     # 详情停顿与作者停顿各在对应动作之前。
     pacing_ok = True
     if search is not None:
-        first_click = search_index.first_registered_click(search, trigger_kind)
+        first_click = search_index.first_registered_click(search, trigger_kind, id_field=id_field)
         if first_click is None:
             pacing_ok = False
         else:
@@ -633,7 +677,8 @@ def validate_content_visits(
     for index in checked_indexes:
         scroll_triggered = 0
         if mode == "discovery":
-            _check_entry(index, policy, report)
+            if policy.checks_filter_entry:
+                _check_entry(index, policy, report)
             scroll_triggered = _check_page_pauses(index, policy, report)
         facts = LedgerFacts(
             detail_visits=sum(

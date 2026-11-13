@@ -20,6 +20,7 @@
 # TripPostCollect：T07 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
 import asyncio
+from hashlib import sha256
 import logging
 from typing import Dict, List, Optional, cast, Any
 from urllib.parse import quote
@@ -33,7 +34,7 @@ from .models import (
     ZhihuContent, ZhihuSearchPage, DataFetchError, PlatformRuntimeError,
     ZhihuImageDownloadError, ZhihuDetailFetchError,
 )
-from .client import ZhiHuClient
+from .client import ZHIHU_CONTENT_IMAGE_RULE, ZhiHuClient
 from .detail_page import ZhihuDetailPages
 from .parser import ZhihuExtractor, judge_zhihu_url, merge_search_content_detail
 from .search_capture import ZhihuPageCapture
@@ -61,7 +62,6 @@ class ZhihuCrawler:
         self.ports = ports
         self.source_keyword = ""
         self.index_url = "https://www.zhihu.com"
-        self.cookie_urls = [self.index_url]
         self._extractor = ZhihuExtractor()
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
@@ -144,7 +144,7 @@ class ZhihuCrawler:
         Returns:
 
         """
-        playwright_proxy_format, httpx_proxy_format = None, None
+        playwright_proxy_format = None
         try:
             async with self.ports.async_playwright() as playwright:
                 # Choose launch mode based on configuration
@@ -167,7 +167,8 @@ class ZhihuCrawler:
 
                 self.context_page = await self.browser_context.new_page()
                 # #185：在首页导航前挂上页面取数通道，才能截获页面自己的 /api/v4/me。
-                self._page_capture = ZhihuPageCapture.open(self.browser_context, mode="discovery")
+                ledger_mode = "repair" if self.settings.CRAWLER_TYPE == "detail" else "discovery"
+                self._page_capture = ZhihuPageCapture.open(self.browser_context, mode=ledger_mode)
                 self._page_capture.install(self.context_page)
                 await self._close_stale_pages(self.context_page)
                 try:
@@ -187,10 +188,8 @@ class ZhihuCrawler:
                 self._page_capture.install(self.context_page)
 
                 search_cookie_keyword = self.settings.KEYWORDS.split(",", maxsplit=1)[0].strip()
-                # 正文图仍用浏览器外 CDN；UA 在首页加载后从浏览器读取。详情改读页面状态。
-                self.zhihu_client = await self.create_zhihu_client(
-                    httpx_proxy_format, referer_keyword=search_cookie_keyword,
-                )
+                # 正文图仍用浏览器外 CDN；UA 经已登记的状态脚本从浏览器读取。
+                self.zhihu_client = await self.create_zhihu_client()
                 if not await self._page_capture.confirm_login():
                     self._stop_for_login_required()
                     return
@@ -199,11 +198,6 @@ class ZhihuCrawler:
                     "[ZhihuCrawler.start] Zhihu navigating to the keyword search page"
                 )
                 await self._open_search_page(search_cookie_keyword)
-                await self.zhihu_client.update_cookies(
-                    browser_context=self.browser_context,
-                    urls=self.cookie_urls,
-                )
-
                 await self.ports.run_required_human_behavior(self.context_page, "zhihu")
                 if self.settings.CRAWLER_TYPE == "search":
                     # Search for notes and retrieve their comment information.
@@ -243,7 +237,6 @@ class ZhihuCrawler:
         for keyword in self.settings.KEYWORDS.split(","):
             keyword = keyword.strip()
             self.source_keyword = keyword
-            self.zhihu_client.set_search_referer(self._search_page_url(keyword))
             logger.info(
                 f"[ZhihuCrawler.search] Current search keyword: {keyword}"
             )
@@ -272,6 +265,7 @@ class ZhihuCrawler:
                                 resume_page=requested_page,
                                 source_has_more=False,
                                 discovery_phase=discovery_phase,
+                                source_visit_id=search_page.visit_id or None,
                             )
                         break
 
@@ -288,7 +282,7 @@ class ZhihuCrawler:
                             pending_content_ids.add(content_id)
                         unknown_contents.append(content)
                     content_list = unknown_contents
-                    await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
+                    await self._pause_before_details(self.settings.CRAWLER_MAX_SLEEP_SEC)
                     logger.info(
                         f"[ZhihuCrawler.search] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} "
                         f"seconds after page {requested_page}"
@@ -421,6 +415,7 @@ class ZhihuCrawler:
                                 source_has_more=False,
                                 batch_complete=batch_complete,
                                 discovery_phase=discovery_phase,
+                                source_visit_id=search_page.visit_id or None,
                             )
                         break
                 except DataFetchError as exc:
@@ -659,6 +654,22 @@ class ZhihuCrawler:
                     "image_download_retryable",
                     attempts,
                 )
+            digest = sha256(payload).hexdigest()
+            capture = self._page_capture
+            if capture is not None:
+                visit_id = capture.channel.record_direct_visit(
+                    source="cdn_direct",
+                    stage="note_image",
+                    rule=ZHIHU_CONTENT_IMAGE_RULE,
+                    subject_id=content_id,
+                    trigger=None,
+                    status=200,
+                    asset_key=str(asset["source_asset_key"]),
+                    sha256=digest,
+                )
+                refs = dict(content.content_visit_refs)
+                refs["images"] = [*list(refs.get("images") or []), visit_id]
+                content.content_visit_refs = refs
             fetched_assets.append(
                 {**asset, "content": payload, "attempts": attempts, "http_status": 200}
             )
@@ -693,37 +704,35 @@ class ZhihuCrawler:
     def _search_page_url(self, keyword: str) -> str:
         return f"{self.index_url}/search?q={quote(keyword.strip())}&type=content"
 
-    async def create_zhihu_client(
-        self, httpx_proxy: Optional[str], *, referer_keyword: str,
-    ) -> ZhiHuClient:
-        """Create zhihu client"""
+    async def _pause_before_details(self, seconds: float) -> None:
+        """搜索访问之后、点开本页卡片之前的停顿，阶段名与门禁的 search_results 一致。"""
+
+        capture = self._page_capture
+        pause_started = getattr(getattr(capture, "channel", None), "pause_started", None)
+        if capture is None or not callable(pause_started):
+            await asyncio.sleep(seconds)
+            return
+        start_seq = pause_started()
+        await asyncio.sleep(seconds)
+        capture.channel.pause_finished("search_results", start_seq, float(seconds), "completed")
+
+    async def create_zhihu_client(self) -> ZhiHuClient:
+        """正文图客户端只保留浏览器自报的 UA。不读取、不保存 Cookie。"""
+
         logger.info(
-            "[ZhihuCrawler.create_zhihu_client] Begin create zhihu API client ..."
+            "[ZhihuCrawler.create_zhihu_client] Begin create zhihu image client ..."
         )
-        # httpx 只取浏览器加载首页后、会随 www.zhihu.com 请求发出的 Cookie（按 URL 过滤）。
-        cookie_str, cookie_dict = await self.ports.convert_browser_context_cookies(
-            self.browser_context,
-            urls=self.cookie_urls,
+        capture = self._page_capture
+        if capture is None:
+            raise RuntimeError("zhihu_capture_channel_missing")
+        user_agent, _visit = await capture.channel.read_state(
+            self.context_page,
+            "zhihu.user_agent",
+            stage="browser_ua",
+            subject_id=None,
+            trigger=None,
         )
-        zhihu_client_obj = self.ports.client_factory(
-            proxy=httpx_proxy,
-            headers={
-                "accept": "*/*",
-                "accept-language": "zh-CN,zh;q=0.9",
-                "cookie": cookie_str,
-                "priority": "u=1, i",
-                "referer": self._search_page_url(referer_keyword),
-                # #127：与浏览器一致，取本轮浏览器自报的 UA。
-                "user-agent": await self.context_page.evaluate("() => navigator.userAgent"),
-                "x-api-version": "3.0.91",
-                "x-app-za": "OS=Web",
-                "x-requested-with": "fetch",
-                "x-zse-93": "101_3_3.0",
-            },
-            playwright_page=self.context_page,
-            cookie_dict=cookie_dict,
-        )
-        return zhihu_client_obj
+        return self.ports.client_factory(headers={"user-agent": str(user_agent or "")})
 
     async def launch_browser(
         self,

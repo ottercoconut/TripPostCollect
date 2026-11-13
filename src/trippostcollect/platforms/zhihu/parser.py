@@ -323,6 +323,16 @@ def merge_search_content_detail(
     search_content.updated_time = detail_content.updated_time
     if detail_content.content_visit_refs:
         search_content.content_visit_refs = dict(detail_content.content_visit_refs)
+    # 只有作者页补全过的详情才覆盖搜索作者；未进作者页时保留搜索侧粉丝证据。
+    if detail_content.author_followers_source in {"author_page", "missing"}:
+        search_content.followers_count = detail_content.followers_count
+        search_content.followers_observed = detail_content.followers_observed
+        search_content.author_followers_source = detail_content.author_followers_source
+        search_content.following_count = detail_content.following_count
+        search_content.author_posts_count = detail_content.author_posts_count
+        search_content.author_page_counts = dict(detail_content.author_page_counts)
+        if detail_content.creator_url_token:
+            search_content.creator_url_token = detail_content.creator_url_token
     search_content.content_detail_status = "detail_observed"
     search_content.content_detail_source = (
         "answer_detail"
@@ -330,6 +340,56 @@ def merge_search_content_detail(
         else "article_detail"
     )
     return search_content
+
+
+_AUTHOR_PAGE_COUNT_KEYS = ("answerCount", "articlesCount", "pinsCount", "questionCount")
+
+
+def user_from_initial_data(state_text: str, url_token: str) -> dict | None:
+    """作者页 ``initialState.entities.users.{url_token}``。没有该用户时返回 None。"""
+
+    text = str(state_text or "").strip()
+    token = str(url_token or "")
+    if not text or not token or text[0] not in "{[":
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    users = payload.get("initialState", {}).get("entities", {}).get("users", {})
+    user = users.get(token) if isinstance(users, dict) else None
+    return user if isinstance(user, dict) else None
+
+
+def apply_author_page(content: ZhihuContent, user: dict, url_token: str) -> None:
+    """用作者页用户实体覆盖粉丝、关注和作品数。认证判定保持不动。
+
+    粉丝数只认 ``followerCount``，来源标为作者页。关注数缺键为 None。作品数是
+    ``answerCount + articlesCount``，任一缺失则为 None。四个原值缺键不写入。
+    """
+
+    content.creator_url_token = url_token
+    if "followerCount" in user and type(user.get("followerCount")) is int:
+        content.followers_count = user["followerCount"]
+        content.followers_observed = True
+        content.author_followers_source = "author_page"
+    else:
+        content.followers_observed = False
+        content.author_followers_source = "missing"
+    content.following_count = _optional_count(user.get("followingCount")) if "followingCount" in user else None
+    answer = user.get("answerCount") if "answerCount" in user else None
+    articles = user.get("articlesCount") if "articlesCount" in user else None
+    if type(answer) is int and type(articles) is int:
+        content.author_posts_count = answer + articles
+    else:
+        content.author_posts_count = None
+    content.author_page_counts = {
+        key: user[key]
+        for key in _AUTHOR_PAGE_COUNT_KEYS
+        if key in user and user[key] is not None
+    }
 
 
 class ZhihuExtractor:
@@ -536,7 +596,7 @@ class ZhihuExtractor:
                 return res
             # 作者平台 ID 取原始 id；主页链接仍由 url_token 拼接。
             res.creator_hash = platform_user_id(author.get("id"))
-            res.url_token = author.get("url_token") or ""
+            res.url_token = author.get("url_token") or author.get("urlToken") or ""
             res.user_nickname = platform_nickname(author.get("name"))
             if res.url_token:
                 res.profile_url = f"{zhihu_constant.ZHIHU_URL}/people/{res.url_token}"
