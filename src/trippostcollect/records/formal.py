@@ -49,7 +49,7 @@ REQUIRED_FOLLOWER_SOURCES = {
 
 
 PLATFORM_REQUIRED_METRICS: dict[str, tuple[tuple[str, ...], ...]] = {
-    "bilibili": (("liked_count",), ("comment_count", "comments_count"), ("view_count", "video_play_count")),
+    "bilibili": (("liked_count",), ("comment_count", "comments_count")),
     "weibo": (("liked_count",), ("comments_count", "comment_count"), ("shared_count", "reposts_count")),
     "xhs": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
     "douyin": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
@@ -561,8 +561,6 @@ def row_for_record(
         "favorites_count": parse_int(first_value(record, "collected_count", "video_favorite_count")),
         "comments_count": parse_int(first_value(record, "comment_count", "comments_count", "video_comment")),
         "shares_count": parse_int(first_value(record, "share_count", "shared_count", "video_share_count")),
-        "reposts_count": parse_int(first_value(record, "reposts_count", "repost_count")),
-        "views_count": parse_int(first_value(record, "video_play_count", "view_count", "play_count")),
     }
     author = {
         "nickname": first_value(record, "nickname", "user_nickname", "user_name", "author_name"),
@@ -598,7 +596,6 @@ def row_for_record(
         "author_followers_count": author["followers_count"],
         "author_following_count": author["following_count"],
         "author_posts_count": author["posts_count"],
-        "author_platform_level": first_value(record, "level", "user_level"),
         # 只接受平台层已判定的 0/1（#163 抖音）；其他平台未判定时保持 NULL。
         "author_verified": record.get("author_verified") if record.get("author_verified") in (0, 1) else None,
         "author_verified_text": first_value(record, "author_verified_text", "verified_text", "verify_info"),
@@ -618,8 +615,6 @@ def row_for_record(
         "post_favorites_count": metrics["favorites_count"],
         "post_comments_count": metrics["comments_count"],
         "post_shares_count": metrics["shares_count"],
-        "post_reposts_count": metrics["reposts_count"],
-        "post_views_count": metrics["views_count"],
         "post_images_count": len([item for item in image_items if item["role"] == "content"]),
         "metrics_json": json_dump(metrics),
         "author_json": json_dump(author),

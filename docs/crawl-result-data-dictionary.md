@@ -53,7 +53,6 @@ checkpoint、失败恢复或迁移字段；实时规模应直接查询 SQLite。
 | `author_followers_count` | INTEGER | 是 | 抓取时观察到的粉丝数；真实 0 有效 |
 | `author_following_count` | INTEGER | 是 | 作者关注数 |
 | `author_posts_count` | INTEGER | 是 | 平台展示的作者发帖或作品总数 |
-| `author_platform_level` | TEXT | 是 | 平台等级 |
 | `author_verified` | INTEGER | 是 | 规范化认证布尔值 |
 | `author_verified_text` | TEXT | 是 | 平台认证说明原文 |
 | `author_json` | TEXT/JSON | 否 | 作者结构化补充字段 |
@@ -87,14 +86,12 @@ SQLite 字段或图片关系中，也不保留 URL-only 参考关系。
 | `post_likes_count` | INTEGER | 是 | 点赞或赞同数 |
 | `post_favorites_count` | INTEGER | 是 | 收藏数 |
 | `post_comments_count` | INTEGER | 是 | 评论数量；不包含评论正文 |
-| `post_shares_count` | INTEGER | 是 | 分享数量 |
-| `post_reposts_count` | INTEGER | 是 | 转发数量 |
-| `post_views_count` | INTEGER | 是 | 浏览、阅读或播放展示数 |
+| `post_shares_count` | INTEGER | 是 | 分享数量。转发与分享是同一种互动，统一记在这一列；微博 `mblog.reposts_count` 经 `shared_count` 写入 |
 | `metrics_json` | TEXT/JSON | 否 | 互动指标结构化对象 |
 
-`metrics_json` 使用 `liked_count`、`favorites_count`、`comments_count`、`shares_count`、
-`reposts_count` 和 `views_count` 保存相应平台值。`NULL` 表示平台未提供或当前没有提取，不能解释为
-0；评论字段只保存评论总数。
+`metrics_json` 使用 `liked_count`、`favorites_count`、`comments_count` 和 `shares_count`
+保存相应平台值。`NULL` 表示平台未提供或当前没有提取，不能解释为 0；评论字段只保存评论总数。
+不再单独保存转发数。B站浏览数只保留在 `raw_sample_json.view_count`，不入列，也不写入 `metrics_json`。
 
 ## `web_post_images` 正文图片字段
 

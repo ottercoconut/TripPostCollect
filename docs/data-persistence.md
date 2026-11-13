@@ -175,14 +175,13 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 | `post_likes_count` | `liked_count`、知乎 `voteup_count` |
 | `post_favorites_count` | `collected_count` 等收藏字段 |
 | `post_comments_count` | `comment_count`、`comments_count` 等评论字段 |
-| `post_shares_count` | `share_count`、`shared_count` 等分享字段 |
-| `post_views_count` | `view_count`、`play_count` 等浏览字段 |
+| `post_shares_count` | `share_count`、`shared_count` 等分享字段。转发与分享是同一种互动，微博 `mblog.reposts_count` 经 `shared_count` 写入这一列，不另存转发列 |
 | `web_post_images.image_url`（`content`） | 只来自权威正文图投影：B站详情 `image_urls`、微博 `mblog.pics` 归一后的 `image_list`、小红书详情 `image_list`、抖音图文 `note_download_url`、知乎正文/详情 `image_list`；作者主页、封面、搜索预览、视频、音乐和公式图不进入正文映射 |
 | `web_post_images.image_role/image_index` | 固定 `content`；知乎先按 `zhimg` 资源路径合并已知尺寸 URL 变体，投影后的候选全部下载复验，再在同帖内按 SHA-256 保留首次来源并从 0 连续编号 |
 | `web_post_images.local_path` | 根项目复验并晋升后的 `data/media/...` 项目相对路径；正式新记录不能为空 |
 | `web_post_images.width/height/mime_type/sha256` | 根项目重新读取本地文件得到并与 manifest 相等的字节证据 |
 | `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；同 SHA 重复来源写入 `local_file.sha256_duplicate_sources`，不混入头像等非正文对象 |
-| `raw_sample_json` | 平台适配器结构化记录经头像清除后的样本；正式记录必须含 `content_detail_status` 和 `content_detail_source` |
+| `raw_sample_json` | 平台适配器结构化记录经头像清除后的样本；正式记录必须含 `content_detail_status` 和 `content_detail_source`。B站浏览数只保留在 `view_count`，不入列，也不进入 `metrics_json` |
 
 代码在下载前用五个平台显式投影识别正文图，在导入边界识别其他同类字段差异；内部持久化结构
 统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。
@@ -200,6 +199,15 @@ schema v20 的 `topic_relevant` 列已在现行 `db/web_posts.sql` 中。`ensure
 标题与正文回填全部历史帖子并写入 `schema_migrations`，然后确保索引 `idx_web_posts_topic_relevant` 存在。
 重复执行只报告现有分布，不重复改写。迁移不改变帖子总数、图片关系、媒体文件、正文或作者字段，并报告
 总量以及平台、关键词的相关/不相关分布。新建库与既有正式库都走这条引导路径，没有单独的迁移命令。
+
+schema v24 删除 `web_posts.post_reposts_count`、`post_views_count` 和 `author_platform_level`。转发与分享是同一种
+互动，只保留 `post_shares_count`。B站浏览数只保留在 `raw_sample_json.view_count`。`ensure_content_schema` 调用
+`trippostcollect.db.unused_metric_columns_migration.migrate_remove_unused_metric_columns`：已登记版本 24 时跳过；
+三列都不存在的新库只登记版本。列仍在时，同一事务内先校验再改动，任一条不满足就回滚且不删数据：
+`post_reposts_count` 与 `author_platform_level` 没有非空值（空串算有值）；`post_views_count` 的非空值只出现在
+`platform_key='bilibili'`，且按整数等于该行 `raw_sample_json.view_count`。通过后删除这三列，并用 `json_remove`
+去掉 `metrics_json` 的 `reposts_count` 与 `views_count`；`raw_sample_json` 保持不变。迁移后核对 B站每行的
+`view_count` 仍在、帖子行数不变。
 
 显式使用 `--recovery-keyword` 人工续跑时，最终摘要会合并旧、新两轮记录，
 正常记录的 `web_posts.keyword` 会逐条保存真实来源，因此同一个最终 `artifact_dir` 可以同时
@@ -340,7 +348,6 @@ SELECT
   post_favorites_count,
   post_comments_count,
   post_shares_count,
-  post_views_count,
   keyword
 FROM web_posts
 ORDER BY captured_at DESC

@@ -42,6 +42,8 @@ python scripts/crawl_runner.py \
 - 搜索预览图、Opus 封面、作者头像与视频资源均不属于正文图。
 - 作者粉丝来自 `mid` 关系统计，要求数值、`followers_observed=true` 和
   `author_followers_source=relation_stat`。
+- 互动计数入库为点赞和评论。解析器仍把浏览数写入记录的 `view_count`，只保留在
+  `raw_sample_json.view_count`，不入列，也不写入 `metrics_json`。
 - 正式搜索记录的发布时间来自搜索响应原始 `pubdate` / `pub_time`；详情补全保留该值，
   不以详情时间覆盖，也不以抓取时间补缺。
 - 去重键为 article 内容 ID。

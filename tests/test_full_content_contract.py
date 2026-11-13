@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from copy import deepcopy
 from importlib import import_module
 from pathlib import Path
 
 import pytest
+
+from trippostcollect.db.bootstrap import bootstrap_connection
+from trippostcollect.db.content import upsert_web_post
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -236,7 +240,7 @@ def test_failed_body_status_cannot_pass_with_body_and_trusted_source(
 
 # T13 补测：指标、粉丝来源、明确视频与小红书 title-image-only 门禁，五站逐一断言。
 EXPECTED_REQUIRED_METRICS = {
-    "bilibili": (("liked_count",), ("comment_count", "comments_count"), ("view_count", "video_play_count")),
+    "bilibili": (("liked_count",), ("comment_count", "comments_count")),
     "weibo": (("liked_count",), ("comments_count", "comment_count"), ("shared_count", "reposts_count")),
     "xhs": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
     "douyin": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
@@ -269,6 +273,46 @@ def test_absent_required_metric_is_invalid(platform_key: str, group: tuple[str, 
 
     assert validation["valid"] is False
     assert validation["reasons"] == [f"missing_metrics:{'/'.join(group)}"]
+
+
+RETIRED_COLUMNS = ("post_reposts_count", "post_views_count", "author_platform_level")
+RETIRED_METRIC_KEYS = ("reposts_count", "views_count")
+
+
+def test_bilibili_row_omits_retired_columns_and_keeps_view_count_in_raw_sample(tmp_path: Path) -> None:
+    record = formal_records()["bilibili"]
+    row = mediacrawler_crawl.row_for_record(
+        "bilibili",
+        record,
+        artifact_dir="synthetic-contract-fixture",
+        captured_at="2026-11-13T00:00:00+08:00",
+        keyword="青岛",
+    )
+
+    assert set(RETIRED_COLUMNS).isdisjoint(row)
+    metrics = json.loads(row["metrics_json"])
+    assert set(RETIRED_METRIC_KEYS).isdisjoint(metrics)
+    assert json.loads(row["raw_sample_json"])["view_count"] == 3
+    with sqlite3.connect(":memory:") as conn:
+        bootstrap_connection(conn, sync_jobs=False)
+        upsert_web_post(conn, row, project_root=tmp_path, media_root=tmp_path / "data" / "media")
+        columns = {item[1] for item in conn.execute("PRAGMA table_info(web_posts)")}
+        stored = conn.execute(
+            "SELECT metrics_json, raw_sample_json FROM web_posts"
+        ).fetchone()
+    assert set(RETIRED_COLUMNS).isdisjoint(columns)
+    assert set(RETIRED_METRIC_KEYS).isdisjoint(json.loads(stored[0]))
+    assert json.loads(stored[1])["view_count"] == 3
+
+
+def test_bilibili_without_view_count_passes_required_metrics() -> None:
+    record = formal_records()["bilibili"]
+    record.pop("view_count")
+
+    validation = mediacrawler_crawl.validate_formal_record("bilibili", record, set())
+
+    assert validation["valid"] is True
+    assert validation["reasons"] == []
 
 
 @pytest.mark.parametrize(("platform_key", "group"), METRIC_CASES)

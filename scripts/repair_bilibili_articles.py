@@ -529,7 +529,7 @@ def prepare_search_record(
             "mid": raw.get("mid") or raw.get("user_id") or target_row["author_platform_id"],
             "like": raw.get("like") if raw.get("like") is not None else target_row["post_likes_count"],
             "reply": raw.get("reply") if raw.get("reply") is not None else target_row["post_comments_count"],
-            "view": raw.get("view") if raw.get("view") is not None else target_row["post_views_count"],
+            "view": raw.get("view"),
         }
     )
     normalized = normalize_bilibili_article_record(
@@ -555,9 +555,10 @@ def prepare_search_record(
             ),
             "liked_count": raw.get("liked_count", metrics.get("liked_count")),
             "comment_count": raw.get("comment_count", metrics.get("comments_count")),
-            "view_count": raw.get("view_count", metrics.get("views_count")),
         }
     )
+    if "view_count" in raw:
+        normalized["view_count"] = raw.get("view_count")
     return normalized
 
 
