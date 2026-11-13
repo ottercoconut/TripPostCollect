@@ -55,6 +55,9 @@ def _insert(connection: sqlite3.Connection, **overrides: object) -> int:
     if platform == "douyin":
         row["source_url"] = f"https://www.douyin.com/video/{post_id}"
         row["canonical_url"] = row["source_url"]
+    elif platform == "zhihu":
+        row["source_url"] = f"https://www.zhihu.com/question/1/answer/{post_id}"
+        row["canonical_url"] = row["source_url"]
     else:
         row["source_url"] = f"https://www.xiaohongshu.com/explore/{post_id}"
         row["canonical_url"] = row["source_url"]
@@ -218,3 +221,187 @@ def test_default_db_write_requires_confirmation(monkeypatch: pytest.MonkeyPatch,
     _redirect(monkeypatch, tmp_path)
     with pytest.raises(SystemExit, match="confirm-default-db-backfill"):
         backfill.main(["--platform", "xhs", "--db", str(backfill.DEFAULT_DB)])
+
+
+def _json_text(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _ordered_author(following: object) -> str:
+    return _json_text(
+        {
+            "nickname": "青岛作者",
+            "following_count": following,
+            "followers_count": 9,
+            "headline": "简介",
+        }
+    )
+
+
+def _ordered_raw(following: object, content: str = "不要改正文") -> str:
+    return _json_text(
+        {
+            "user_nickname": "青岛作者",
+            "content_text": content,
+            "following_count": following,
+            "voteup_count": 0,
+            "comment_count": 0,
+            "meta": {"city": "青岛", "n": 1},
+        }
+    )
+
+
+def _stored(db_path: Path, post_id: str) -> dict:
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT * FROM web_posts WHERE platform_post_id=?",
+            (post_id,),
+        ).fetchone()
+    assert row is not None
+    return dict(row)
+
+
+def _clear_reports(tmp_path: Path) -> None:
+    for name in ("out", "rt"):
+        target = tmp_path / name
+        if target.exists():
+            shutil.rmtree(target)
+
+
+def test_zhihu_following_zero_is_nulled_only_when_all_three_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = _db(tmp_path)
+    with sqlite3.connect(db_path) as connection:
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="uniform",
+            author_platform_id="author-uniform",
+            author_display_name="青岛作者",
+            author_followers_count=9,
+            author_following_count=0,
+            author_description="简介",
+            content_text="不要改正文",
+            author_json=_ordered_author(0),
+            raw_sample_json=_ordered_raw(0),
+        )
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="mismatch",
+            author_platform_id="author-mismatch",
+            author_display_name="不一致",
+            author_followers_count=4,
+            author_following_count=0,
+            content_text="不一致正文",
+            author_json=_ordered_author(5),
+            raw_sample_json=_ordered_raw(0, "不一致正文"),
+        )
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="nonzero",
+            author_platform_id="author-nonzero",
+            author_following_count=37,
+            content_text="已有关注",
+            author_json=_ordered_author(37),
+            raw_sample_json=_ordered_raw(37, "已有关注"),
+        )
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="already-null",
+            author_platform_id="author-null",
+            author_following_count=None,
+            content_text="已经是空",
+            author_json=_ordered_author(None),
+            raw_sample_json=_ordered_raw(None, "已经是空"),
+        )
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="invalid",
+            author_platform_id="author-invalid",
+            author_following_count=0,
+            content_text="坏 JSON",
+            author_json="not-json",
+            raw_sample_json=_ordered_raw(0, "坏 JSON"),
+        )
+        connection.commit()
+    before = {post_id: _stored(db_path, post_id) for post_id in ("uniform", "mismatch", "nonzero", "already-null", "invalid")}
+
+    def fail_child(*_args, **_kwargs):
+        raise AssertionError("知乎离线修正不应访问平台")
+
+    monkeypatch.setattr(backfill, "run_repair_child", fail_child)
+    assert _run(tmp_path, monkeypatch, ["--platform", "zhihu", "--db", str(db_path), "--dry-run"]) == 0
+    dry = _summary(tmp_path)
+    assert dry["dry_run"] is True
+    assert dry["status"] == "planned"
+    assert dry["batch_plan"][0]["mode"] == "offline"
+    assert dry["target_row_count"] == 1
+    assert dry["target_author_count"] == 1
+    assert dry["changed_row_count"] == 0
+    assert dry["anomaly_count"] == 3
+    assert {item["platform_post_id"] for item in dry["anomalies"]} == {"mismatch", "nonzero", "invalid"}
+    assert not list((tmp_path / "bk").glob("**/*"))
+    assert _stored(db_path, "uniform") == before["uniform"]
+    _clear_reports(tmp_path)
+
+    assert _run(tmp_path, monkeypatch, ["--platform", "zhihu", "--db", str(db_path)]) == 0
+    report = _summary(tmp_path)
+    assert report["changed_row_count"] == 1
+    assert report["success_count"] == 1
+    assert report["target_row_count"] == 1
+    assert report["anomaly_count"] == 3
+    assert report["backup"]["sha256"]
+    states = list((tmp_path / "rt").glob("*/execution_state.json"))
+    assert len(states) == 1
+    assert json.loads(states[0].read_text(encoding="utf-8"))["status"] == "completed"
+    reasons = {item["platform_post_id"]: item["reason"] for item in report["anomalies"]}
+    assert "author_json=5" in reasons["mismatch"]
+    assert "列=0" in reasons["mismatch"]
+    assert "列=37" in reasons["nonzero"]
+    assert "无法解析" in reasons["invalid"]
+
+    updated = _stored(db_path, "uniform")
+    unchanged_columns = set(before["uniform"]) - {"author_following_count", "author_json", "raw_sample_json"}
+    for column in unchanged_columns:
+        assert updated[column] == before["uniform"][column], column
+    assert updated["author_following_count"] is None
+    assert updated["author_followers_count"] == 9
+    assert updated["author_display_name"] == "青岛作者"
+    assert updated["content_text"] == "不要改正文"
+    author = json.loads(updated["author_json"])
+    raw = json.loads(updated["raw_sample_json"])
+    assert list(author) == ["nickname", "following_count", "followers_count", "headline"]
+    assert author["following_count"] is None
+    assert author["nickname"] == "青岛作者"
+    assert author["followers_count"] == 9
+    assert author["headline"] == "简介"
+    assert "profile_backfill" not in author
+    expected_author = json.loads(before["uniform"]["author_json"])
+    expected_author["following_count"] = None
+    assert updated["author_json"] == json.dumps(expected_author, ensure_ascii=False)
+    expected_raw = json.loads(before["uniform"]["raw_sample_json"])
+    expected_raw["following_count"] = None
+    assert updated["raw_sample_json"] == json.dumps(expected_raw, ensure_ascii=False)
+    assert raw["content_text"] == "不要改正文"
+    assert raw["voteup_count"] == 0
+    assert raw["comment_count"] == 0
+    assert raw["meta"] == {"city": "青岛", "n": 1}
+    for post_id in ("mismatch", "nonzero", "already-null", "invalid"):
+        assert _stored(db_path, post_id) == before[post_id]
+    _clear_reports(tmp_path)
+
+    assert _run(tmp_path, monkeypatch, ["--platform", "zhihu", "--db", str(db_path)]) == 0
+    again = _summary(tmp_path)
+    assert again["target_row_count"] == 0
+    assert again["target_author_count"] == 0
+    assert again["changed_row_count"] == 0
+    assert again["anomaly_count"] == 3
+    assert _stored(db_path, "uniform")["author_following_count"] is None
+    assert len(list((tmp_path / "bk").glob("*"))) == 1
