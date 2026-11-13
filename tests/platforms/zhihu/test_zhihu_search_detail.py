@@ -349,7 +349,7 @@ async def test_candidate_with_missing_raw_nickname_is_not_valid(monkeypatch, tmp
 
     crawler = ZhihuCrawler()
     crawler.zhihu_client = search_client()
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [search_page(contents), END]
+    crawler._next_search_page = AsyncMock(side_effect=[search_page(contents), END])
     crawler.enrich_search_content_detail = AsyncMock(side_effect=observed)
     crawler.get_content_images = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "_store_content", AsyncMock(return_value=None))

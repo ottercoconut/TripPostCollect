@@ -165,7 +165,7 @@ async def test_detail_failure_is_recorded_seen_and_search_continues(
     monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
     crawler = ZhihuCrawler()
     crawler.zhihu_client = search_client()
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [
+    crawler._next_search_page = AsyncMock(side_effect=[
         search_page([
             ZhihuContent(
                 content_id="retry-detail",
@@ -175,7 +175,7 @@ async def test_detail_failure_is_recorded_seen_and_search_continues(
             )
         ]),
         END,
-    ]
+    ])
     crawler.zhihu_client.get_answer_info.side_effect = DataFetchError("temporary")
     store = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "_store_content", store)
@@ -190,7 +190,7 @@ async def test_detail_failure_is_recorded_seen_and_search_continues(
     assert skipped[0]["details"]["failure_scope"] == "post"
     assert skipped[0]["details"]["attempts"] == 3
     assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["resume_page"] == 5
+    assert stopped["details"]["resume_page"] == 2
     assert stopped["details"]["candidate_identities"] == ["retry-detail"]
 
 
@@ -228,10 +228,10 @@ async def test_image_failure_is_recorded_and_later_zhihu_candidate_continues(
 
     crawler = ZhihuCrawler()
     crawler.zhihu_client = search_client()
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [
+    crawler._next_search_page = AsyncMock(side_effect=[
         search_page([content("retry-image"), content("success-image")]),
         END,
-    ]
+    ])
     crawler.enrich_search_content_detail = AsyncMock(side_effect=lambda item: item)
     crawler.get_content_images = AsyncMock(
         side_effect=[
@@ -254,7 +254,7 @@ async def test_image_failure_is_recorded_and_later_zhihu_candidate_continues(
     assert skipped[0]["details"]["failure_scope"] == "image"
     assert skipped[0]["details"]["attempts"] == 3
     assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["resume_page"] == 5
+    assert stopped["details"]["resume_page"] == 2
     assert stopped["details"]["candidate_identities"] == [
         "retry-image",
         "success-image",
@@ -305,10 +305,10 @@ async def test_terminal_image_failure_is_recorded_and_later_candidate_continues(
     )
     crawler = ZhihuCrawler()
     crawler.zhihu_client = search_client()
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [
+    crawler._next_search_page = AsyncMock(side_effect=[
         search_page([terminal, success]),
         END,
-    ]
+    ])
     crawler.enrich_search_content_detail = AsyncMock(side_effect=lambda item: item)
     crawler.get_content_images = AsyncMock(
         side_effect=[
@@ -331,7 +331,7 @@ async def test_terminal_image_failure_is_recorded_and_later_candidate_continues(
     assert skipped[0]["details"]["retryable"] is False
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
     assert stopped["details"]["stop_reason"] == "source_exhausted"
-    assert stopped["details"]["resume_page"] == 5
+    assert stopped["details"]["resume_page"] == 2
     assert stopped["details"]["candidate_identities"] == [
         "success-image",
         "terminal-image",

@@ -25,6 +25,7 @@ from PIL import Image
 import pytest
 
 from support import douyin_full_scan_deviation, fork_removal_deviation, shared_launch_deviation, ua_from_browser_deviation
+from support import zhihu_search_capture_deviation
 from trippostcollect.application import collection, reporting, visit_gate
 from trippostcollect.artifacts.image_candidates import content_image_candidates
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
@@ -431,10 +432,13 @@ def normalized_pair(old, new, rules):
 
 
 def t124_authorized_source(text):
-    """#124 有意偏离：抖音每轮从首页全量扫描，三元组续跑与 reseed 证据退出（见 support.douyin_full_scan_deviation）。"""
-    return douyin_full_scan_deviation.t11_after_t71_source(
+    """#124 有意偏离：抖音每轮从首页全量扫描，三元组续跑与 reseed 证据退出（见 support.douyin_full_scan_deviation）。
+
+    #185 在同一冻结源上再把知乎并入全量扫描的拒绝条件（见 support.zhihu_search_capture_deviation）。
+    """
+    return zhihu_search_capture_deviation.t11_source(douyin_full_scan_deviation.t11_after_t71_source(
         t71_authorized_source(douyin_full_scan_deviation.t11_source(t75_authorized_source(text)))
-    )
+    ))
 
 
 @pytest.mark.parametrize("row", ROWS, ids=lambda row: row["qualname"])
@@ -532,6 +536,8 @@ def baseline(monkeypatch):
     # #71 有意偏离：访问门禁与逐层解码接入旧执行器，名称取自新实现的同一定义。
     text = t71_authorized_source(text)
     text = douyin_full_scan_deviation.t11_after_t71_source(text)
+    # #185 有意偏离：知乎与抖音同样拒绝深层恢复与顶部刷新参数。
+    text = zhihu_search_capture_deviation.t11_source(text)
     # #115 有意偏离：B站图片薄包装不再转发平台 Cookie。
     text = t115_authorized_source(text)
     # #127 有意偏离：B站请求 UA 取自本轮浏览器，写死常量退出，图片薄包装转发会话 UA。

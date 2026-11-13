@@ -392,12 +392,15 @@ def child_command(tmp_path, platform, *, checkpoint=None, with_summary=False):
 
 
 # 累计摘要只经 checkpoint 交给下一轮，所以“无 checkpoint”只有不带摘要一种。
+@pytest.mark.parametrize("platform", ["douyin", "zhihu"])
 @pytest.mark.parametrize("checkpoint, with_summary", [
     (None, False), ("active", False), ("active", True), ("exhausted", False), ("exhausted", True),
 ])
-def test_runner_douyin_child_command_always_scans_from_first_page(tmp_path, checkpoint, with_summary):
+def test_runner_douyin_child_command_always_scans_from_first_page(
+    tmp_path, platform, checkpoint, with_summary,
+):
     command, plan, summary_path = child_command(
-        tmp_path, "douyin", checkpoint=checkpoint, with_summary=with_summary,
+        tmp_path, platform, checkpoint=checkpoint, with_summary=with_summary,
     )
 
     for flag in FULL_SCAN_REMOVED_FLAGS:
@@ -412,16 +415,17 @@ def test_runner_douyin_child_command_always_scans_from_first_page(tmp_path, chec
         assert "--resume-summary" not in command
 
 
-def test_runner_rejects_explicit_start_page_for_douyin(tmp_path):
+@pytest.mark.parametrize("platform", ["douyin", "zhihu"])
+def test_runner_rejects_explicit_start_page_for_douyin(tmp_path, platform):
     with sqlite3.connect(tmp_path / "explicit.sqlite") as conn:
         conn.row_factory = sqlite3.Row
         bootstrap_connection(conn, sync_content=False, sync_jobs=False)
-        row = insert_job(conn, "douyin")
-        with pytest.raises(ValueError, match="douyin_full_scan_rejects_start_page"):
+        row = insert_job(conn, platform)
+        with pytest.raises(ValueError, match=f"{platform}_full_scan_rejects_start_page"):
             crawl_runner.resolve_discovery_args(conn, row, runner_args(start_page=3), run_id="t124-run")
 
 
-@pytest.mark.parametrize("platform", ["bilibili", "weibo", "zhihu"])
+@pytest.mark.parametrize("platform", ["bilibili", "weibo"])
 def test_runner_other_platforms_keep_saved_page_refresh_and_exhaustion(tmp_path, platform):
     command, plan, summary_path = child_command(tmp_path, platform, checkpoint="exhausted", with_summary=True)
 
@@ -444,16 +448,17 @@ def test_child_cli_rejects_removed_douyin_resume_flags(monkeypatch, capsys, flag
     assert "unrecognized arguments" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("platform", ["douyin", "zhihu"])
 @pytest.mark.parametrize("extra", [
     ["--start-page", "3", "--resume-summary", "prior.json"],
     ["--top-refresh-max-pages", "3"],
     ["--discovery-source-exhausted"],
 ])
-def test_child_rejects_douyin_resume_and_refresh_args(monkeypatch, tmp_path, extra):
+def test_child_rejects_douyin_resume_and_refresh_args(monkeypatch, tmp_path, platform, extra):
     from trippostcollect.application import collection, inputs
 
     monkeypatch.setattr(sys, "argv", [
-        "mediacrawler_crawl.py", "--platforms", "douyin", "--no-import", "--download-images",
+        "mediacrawler_crawl.py", "--platforms", platform, "--no-import", "--download-images",
         "--db", str(tmp_path / "posts.sqlite"), *extra,
     ])
     args = inputs.parse_args()
@@ -464,5 +469,5 @@ def test_child_rejects_douyin_resume_and_refresh_args(monkeypatch, tmp_path, ext
     # 参数校验必须在任何平台执行（策略节流、浏览器、worker）之前拒绝；越过校验即直接失败，不等待。
     monkeypatch.setattr(collection, "run_platform", reached_worker)
     ports = SimpleNamespace(ensure_prerequisites=lambda: None, run_bilibili_article_search=reached_worker)
-    with pytest.raises(SystemExit, match="douyin_full_scan_rejects_resume_args"):
+    with pytest.raises(SystemExit, match=f"{platform}_full_scan_rejects_resume_args"):
         collection._run_main(args, None, ports=ports)

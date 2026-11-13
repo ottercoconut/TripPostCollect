@@ -219,7 +219,7 @@
        ]
       },
       {
-       "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_top_refresh_precedes_saved_frontier",
+       "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_full_scan_ignores_saved_page_and_top_refresh",
        "lane": "component"
       },
       {
@@ -1813,7 +1813,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_search_transport_error_ends_run_without_exhaustion",
+       "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_missing_search_capture_ends_run_without_seen",
        "lane": "component"
       },
       {

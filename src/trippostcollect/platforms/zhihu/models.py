@@ -19,10 +19,8 @@
 
 # TripPostCollect：T07 迁入根平台；来源 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303，许可见 resources/licenses/MediaCrawler-LICENSE。
 
-from enum import Enum
 from httpx import RequestError
 from pydantic import BaseModel, Field
-from . import models as zhihu_constant
 
 ZHIHU_URL = "https://www.zhihu.com"
 ZHIHU_ZHUANLAN_URL = "https://zhuanlan.zhihu.com"
@@ -104,38 +102,6 @@ class ZhihuSearchPage(BaseModel):
     video_ids: list[str] = Field(default_factory=list, description="zvideo candidates dropped before projection")
     raw_count: int = Field(default=0, description="Raw `data` item count before filtering")
     is_end: bool = Field(default=False, description="Raw `paging.is_end` value")
-
-
-class SearchTime(Enum):
-    """
-    Search time range
-    """
-    DEFAULT = ""  # No time limit
-    ONE_DAY = "a_day"  # Within one day
-    ONE_WEEK = "a_week"  # Within one week
-    ONE_MONTH = "a_month"  # Within one month
-    THREE_MONTH = "three_months"  # Within three months
-    HALF_YEAR = "half_a_year"  # Within half a year
-    ONE_YEAR = "a_year"  # Within one year
-
-
-class SearchType(Enum):
-    """
-    Search result type
-    """
-    DEFAULT = ""  # No type limit
-    ANSWER = zhihu_constant.ANSWER_NAME  # Answers only
-    ARTICLE = zhihu_constant.ARTICLE_NAME  # Articles only
-    VIDEO = zhihu_constant.VIDEO_NAME  # Videos only
-
-
-class SearchSort(Enum):
-    """
-    Search result sorting
-    """
-    DEFAULT = ""  # Default sorting
-    UPVOTED_COUNT = "upvoted_count"  # Most upvoted
-    CREATE_TIME = "created_time"  # Latest published
 
 
 class DataFetchError(RequestError):

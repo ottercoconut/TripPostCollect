@@ -1292,13 +1292,14 @@ def _run_main(
         }
     elif args.repair_targets_file:
         raise SystemExit("--repair-targets-file requires --post-repair")
-    if "douyin" in platforms and (
-        args.start_page != 1
-        or args.top_refresh_max_pages > 0
-        or args.discovery_source_exhausted
-    ):
-        # #124：抖音每轮从首页全量翻到 has_more=false，旧的深层恢复与顶部刷新参数直接视为错误。
-        raise SystemExit("douyin_full_scan_rejects_resume_args")
+    for platform_key in ("douyin", "zhihu"):
+        if platform_key in platforms and (
+            args.start_page != 1
+            or args.top_refresh_max_pages > 0
+            or args.discovery_source_exhausted
+        ):
+            # #124/#185：抖音与知乎每轮从首页全量扫描，旧的深层恢复与顶部刷新参数直接视为错误。
+            raise SystemExit(f"{platform_key}_full_scan_rejects_resume_args")
     if "xhs" in platforms:
         if len(platforms) != 1:
             raise SystemExit("XHS must run alone through scripts/xhs_runner.py")

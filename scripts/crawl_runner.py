@@ -261,11 +261,11 @@ def resolve_discovery_args(
         job_id=int(row["id"]),
         query_fingerprint_value=fingerprint,
     )
-    # #124：抖音每轮从第 1 页全量翻到 has_more=false，与小红书一样不保存可恢复前沿；
+    # #124/#185：抖音与知乎每轮从第 1 页全量扫到平台结束标记，不保存可恢复前沿；
     # checkpoint 只作审计，不转成起始页、顶部刷新或耗尽标记。
-    full_scan = platform_key == "douyin"
+    full_scan = platform_key in {"douyin", "zhihu"}
     if full_scan and args.start_page is not None:
-        raise ValueError(f"douyin_full_scan_rejects_start_page: job={row['job_key']}")
+        raise ValueError(f"{platform_key}_full_scan_rejects_start_page: job={row['job_key']}")
     explicit_recovery = bool(args.start_page is not None or args.resume_summary or args.recovery_keyword)
 
     job_args.discovery_job_id = int(row["id"])
@@ -375,8 +375,8 @@ def build_command(row: JobRow, args: argparse.Namespace) -> list[str]:
             getattr(args, "discovery_query_fingerprint", ""),
         )
         add_flag(command, "--discovery-run-id", getattr(args, "discovery_run_id", ""))
-        if platform != "douyin":
-            # #124：抖音 child 拒绝顶部刷新与耗尽参数，每轮自行从首页全量扫描。
+        if platform not in {"douyin", "zhihu"}:
+            # #124/#185：抖音与知乎 child 拒绝顶部刷新与耗尽参数，每轮自行从首页全量扫描。
             add_flag(
                 command,
                 "--top-refresh-max-pages",

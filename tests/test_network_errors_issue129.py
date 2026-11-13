@@ -149,9 +149,9 @@ async def test_zhihu_detail_network_failure_stops_run_without_skip(monkeypatch, 
     excerpt.content_detail_status = "search_only"
     excerpt.content_detail_source = ""
     excerpt.image_list = []
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [
+    crawler._next_search_page = AsyncMock(side_effect=[
         zhihu_faults.search_page([excerpt]), zhihu_faults.END,
-    ]
+    ])
     transport = zhihu_faults.Transport(httpx.ReadTimeout)
     real_client = zhihu_client(transport)
 
@@ -167,15 +167,20 @@ async def test_zhihu_detail_network_failure_stops_run_without_skip(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_zhihu_search_network_failure_is_runtime_failed(monkeypatch, tmp_path):
+async def test_zhihu_missing_search_capture_is_runtime_failed_without_seen(monkeypatch, tmp_path):
+    from trippostcollect.platforms.zhihu.search_capture import BrowserSearchResponseMissing
+
     crawler, state_path = zhihu_faults.prepare(monkeypatch, tmp_path)
-    crawler.zhihu_client.get_note_by_keyword.side_effect = ZhihuRuntimeError(
-        "zhihu network_unreachable: ConnectError", code="network_unreachable",
-    )
+    crawler._next_search_page = AsyncMock(side_effect=BrowserSearchResponseMissing())
 
     await crawler.search()
 
-    assert_runtime_network_stop(state_path, "", "network_unreachable")
+    stopped = events_of(state_path, "adaptive_search_stopped")
+    assert [(item["stop_reason"], item["stop_detail"]) for item in stopped] == [
+        ("runtime_failed", "browser_search_response_missing"),
+    ]
+    assert stopped[-1]["candidate_identities"] == []
+    assert events_of(state_path, "candidate_skipped") == []
 
 
 # ---------- 微博 ----------

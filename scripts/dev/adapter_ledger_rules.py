@@ -1893,6 +1893,19 @@ PROGRESS_RESOLUTIONS = {
         "迁至", "_validate_login_contract", "T09登录契约迁为模块级函数，配置经参数传入"),
     ("tools/MediaCrawler/media_platform/zhihu/core.py", "ZhihuCrawler._env_float"): (
         "迁至", "_env_float", "T07方法迁为两参模块函数_env_float(name, default)；零参reader由zhihu_operation_readers经lambda构造"),
+    # #185：搜索改为截获页面自己的 search_v3，登录复验改为截获 /api/v4/me。
+    ("tools/MediaCrawler/media_platform/zhihu/client.py", "ZhiHuClient.get_note_by_keyword"): (
+        "退出", None, "#185：搜索改为截获页面自己的 search_v3，httpx 搜索删除"),
+    ("tools/MediaCrawler/media_platform/zhihu/client.py", "ZhiHuClient.pong"): (
+        "退出", None, "#185：登录复验改为截获页面自己的 /api/v4/me，httpx pong 删除"),
+    ("tools/MediaCrawler/media_platform/zhihu/client.py", "ZhiHuClient.get_current_user_info"): (
+        "退出", None, "#185：只为 httpx /me 复验服务，随 pong 删除"),
+    ("tools/MediaCrawler/media_platform/zhihu/field.py", "SearchTime"): (
+        "退出", None, "#185：只作为 httpx 搜索的时间参数，随搜索请求删除"),
+    ("tools/MediaCrawler/media_platform/zhihu/field.py", "SearchType"): (
+        "退出", None, "#185：只作为 httpx 搜索的类型参数，随搜索请求删除"),
+    ("tools/MediaCrawler/media_platform/zhihu/field.py", "SearchSort"): (
+        "退出", None, "#185：只作为 httpx 搜索的排序参数，随搜索请求删除"),
     ("tools/MediaCrawler/store/douyin/__init__.py", "update_dy_aweme_images"): (
         "迁至", "DouYinCrawler.update_dy_aweme_images", "改为crawler方法，经ImageStager端口写出"),
     ("tools/MediaCrawler/store/douyin/__init__.py", "record_dy_aweme_image_failure"): (

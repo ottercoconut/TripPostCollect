@@ -5,7 +5,7 @@
 - 绕过 ``request()`` 的原始传输层异常不属于 DataFetchError/RetryError，直接终止本轮且不宣称耗尽；
 - #113 改掉 R03 基线：只有原始 paging.is_end=true 才是来源耗尽；过滤后为空但 is_end=false 继续翻页，
   空 data 无 is_end、缺 paging 或 HTTP 404 都是运行级失败；
-- 续跑先刷新顶部有限页，再从保存的深层前沿继续。
+- #185：每轮从第 1 页全量扫到 is_end，保存页码与顶部刷新不再改变起点；搜索响应来自页面截获。
 """
 
 from __future__ import annotations
@@ -22,6 +22,10 @@ from trippostcollect.platforms.zhihu import models as constant
 from trippostcollect.platforms.zhihu.client import ZhiHuClient
 from trippostcollect.platforms.zhihu.models import PlatformRuntimeError, ZhihuContent, ZhihuImageDownloadError
 from trippostcollect.platforms.zhihu.parser import ZhihuExtractor
+from trippostcollect.platforms.zhihu.search_capture import (
+    BrowserSearchResponseMissing, ZHIHU_SEARCH_RULE, me_is_logged_in, search_page_from_captured,
+)
+from trippostcollect.runtime.page_capture import CapturedResponse
 
 
 class Transport:
@@ -130,16 +134,22 @@ async def test_unregistered_request_path_fails_instead_of_being_treated_as_detai
 
 
 @pytest.mark.asyncio
-async def test_search_transport_error_ends_run_without_exhaustion(monkeypatch, tmp_path):
+async def test_missing_search_capture_ends_run_without_seen(monkeypatch, tmp_path):
     crawler, state_path = prepare(monkeypatch, tmp_path)
-    crawler.zhihu_client.get_note_by_keyword.side_effect = httpx.ConnectError("离线网络中断")
+    crawler._next_search_page = AsyncMock(
+        side_effect=BrowserSearchResponseMissing(),
+    )
 
-    with pytest.raises(httpx.ConnectError):
-        await crawler.search()
+    await crawler.search()
 
-    # 只有 DataFetchError 被映射为 search_request_failed；传输层异常原样上抛，由父进程判运行失败。
-    assert events_of(state_path, "adaptive_search_stopped") == []
+    # 截获不到是运行级失败，不写 seen，也不解释为来源耗尽。
+    stopped = events_of(state_path, "adaptive_search_stopped")
+    assert [(item["stop_reason"], item["stop_detail"]) for item in stopped] == [
+        ("runtime_failed", "browser_search_response_missing"),
+    ]
+    assert stopped[0]["candidate_identities"] == []
     assert events_of(state_path, "adaptive_batch_completed") == []
+    assert events_of(state_path, "candidate_skipped") == []
 
 
 @pytest.mark.asyncio
@@ -149,7 +159,7 @@ async def test_detail_transport_error_ends_run_without_candidate_skip(monkeypatc
     excerpt.content_detail_status = "search_only"
     excerpt.content_detail_source = ""
     excerpt.image_list = []
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [search_page([excerpt]), END]
+    crawler._next_search_page = AsyncMock(side_effect=[search_page([excerpt]), END])
     crawler.zhihu_client.get_answer_info.side_effect = httpx.ReadTimeout("离线读取超时")
 
     with pytest.raises(httpx.ReadTimeout):
@@ -162,37 +172,38 @@ async def test_detail_transport_error_ends_run_without_candidate_skip(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_top_refresh_precedes_saved_frontier(monkeypatch, tmp_path):
+async def test_full_scan_ignores_saved_page_and_top_refresh(monkeypatch, tmp_path):
     crawler, state_path = prepare(monkeypatch, tmp_path, start_page=5, refresh=2)
-    pages = {1: search_page([answer("r1")]), 5: search_page([answer("f5")])}
     requested: list[int] = []
 
-    async def fetch_page(**kwargs):
-        requested.append(kwargs["page"])
-        return pages.get(kwargs["page"], END)
+    async def fetch_page(page_number):
+        requested.append(page_number)
+        if page_number == 1:
+            return search_page([answer("r1")])
+        return END
 
-    crawler.zhihu_client.get_note_by_keyword.side_effect = fetch_page
+    crawler._next_search_page = fetch_page
     crawler.enrich_search_content_detail = AsyncMock(side_effect=lambda item: item)
     crawler.get_content_images = AsyncMock(return_value=None)
 
     await crawler.search()
 
-    # 刷新只到 min(start_page-1, 2) 页，刷新空页不宣称耗尽，随后从保存的前沿继续。
-    assert requested == [1, 2, 5, 6]
+    # #185：保存的第 5 页和顶部刷新都不改变起点，本轮仍从第 1 页扫到 is_end。
+    assert requested == [1, 2]
     batches = [(item["source_page"], item["discovery_phase"]) for item in events_of(state_path, "adaptive_batch_completed")]
-    assert batches == [(1, "refresh"), (5, "frontier")]
+    assert batches == [(1, "frontier")]
     stopped = events_of(state_path, "adaptive_search_stopped")
     assert len(stopped) == 1
     assert stopped[0]["stop_reason"] == "source_exhausted"
     assert stopped[0]["discovery_phase"] == "frontier"
-    assert stopped[0]["source_page"] == stopped[0]["resume_page"] == 6
+    assert stopped[0]["source_page"] == stopped[0]["resume_page"] == 2
 
 
 @pytest.mark.asyncio
 async def test_runtime_failure_on_last_candidate_keeps_failed_page_issue133(monkeypatch, tmp_path):
     # 末位候选图片运行级阻断：知乎先 processed_count += 1 再 break，本批仍不得判为完整（#133）。
     crawler, state_path = prepare(monkeypatch, tmp_path, start_page=4)
-    crawler.zhihu_client.get_note_by_keyword.side_effect = [search_page([answer("a1"), answer("a2")]), END]
+    crawler._next_search_page = AsyncMock(side_effect=[search_page([answer("a1"), answer("a2")]), END])
     crawler.enrich_search_content_detail = AsyncMock(side_effect=lambda item: item)
     crawler.get_content_images = AsyncMock(
         side_effect=[None, ZhihuImageDownloadError("a2", 0, "image_auth_required")]
@@ -201,10 +212,10 @@ async def test_runtime_failure_on_last_candidate_keeps_failed_page_issue133(monk
     await crawler.search()
 
     [batch] = events_of(state_path, "adaptive_batch_completed")
-    assert (batch["source_page"], batch["resume_page"], batch["batch_complete"]) == (4, 4, False)
+    assert (batch["source_page"], batch["resume_page"], batch["batch_complete"]) == (1, 1, False)
     stopped = events_of(state_path, "adaptive_search_stopped")[-1]
     assert (stopped["stop_reason"], stopped["stop_detail"]) == ("runtime_failed", "image_auth_required")
-    assert (stopped["resume_page"], stopped["batch_complete"]) == (4, False)
+    assert (stopped["resume_page"], stopped["batch_complete"]) == (1, False)
 
 
 # ---------- #113：来源耗尽只认原始 paging.is_end ----------
@@ -269,15 +280,34 @@ def observed_search_content(item):
     return item
 
 
+def captured_search(status, payload, seq):
+    body_error = ""
+    data = payload
+    if isinstance(payload, str):
+        data = None
+        body_error = "JSONDecodeError"
+    return CapturedResponse(
+        rule=ZHIHU_SEARCH_RULE, seq=seq, page_role="primary", route="/search",
+        query_keys=("q", "type"), endpoint="GET www.zhihu.com /api/v4/search_v3",
+        status=status, verify_headers_present=False, request_json=None, json=data,
+        observed_at="2026-11-13T00:00:00+00:00", body_error=body_error,
+    )
+
+
 def prepare_real_client(monkeypatch, tmp_path, responses, sleeps):
     crawler, state_path = prepare(monkeypatch, tmp_path)
-    http = SearchHttp(responses)
-    crawler.zhihu_client = search_client_for(http)
-    monkeypatch.setattr("trippostcollect.platforms.zhihu.client.sign",
-                        lambda uri, cookie: {"x-zst-81": "3_2.0", "x-zse-96": "2.0_t13"})
+    queue = list(responses)
+    calls: list[int] = []
+
+    async def _next(page_number):
+        status, payload = queue.pop(0)
+        calls.append(page_number)
+        return search_page_from_captured(captured_search(status, payload, page_number), ZhihuExtractor())
+
+    crawler._next_search_page = _next
     crawler.enrich_search_content_detail = AsyncMock(side_effect=observed_search_content)
     crawler.get_content_images = AsyncMock(return_value=None)
-    return crawler, state_path, http
+    return crawler, state_path, calls
 
 
 @pytest.mark.asyncio
@@ -290,7 +320,7 @@ async def test_filtered_only_page_with_is_end_false_continues_to_next_page(monke
 
     await crawler.search()
 
-    assert http.calls == [("/api/v4/search_v3", 0), ("/api/v4/search_v3", 20)]
+    assert http == [1, 2]
     batches = events_of(state_path, "adaptive_batch_completed")
     assert [(b["source_page"], b["raw_batch_count"], b["source_has_more"]) for b in batches] == [
         (1, 4, True), (2, 1, False),
@@ -331,7 +361,7 @@ async def test_unverifiable_search_response_is_runtime_failure(monkeypatch, tmp_
 
     await crawler.search()
 
-    assert len(http.calls) == 1
+    assert http == [1]
     stopped = events_of(state_path, "adaptive_search_stopped")
     assert [(item["stop_reason"], item["stop_detail"]) for item in stopped] == [
         ("runtime_failed", "search_response_invalid")
@@ -345,7 +375,7 @@ async def test_search_http_404_is_runtime_failure_without_retry(monkeypatch, tmp
 
     await crawler.search()
 
-    assert http.calls == [("/api/v4/search_v3", 0)]
+    assert http == [1]
     assert sleeps == []
     stopped = events_of(state_path, "adaptive_search_stopped")
     assert [(item["stop_reason"], item["stop_detail"]) for item in stopped] == [
@@ -363,7 +393,7 @@ async def test_search_run_level_status_keeps_code_and_is_not_retried(
 
     await crawler.search()
 
-    assert len(http.calls) == 1
+    assert http == [1]
     assert sleeps == []
     stopped = events_of(state_path, "adaptive_search_stopped")
     assert [(item["stop_reason"], item["stop_detail"]) for item in stopped] == [("runtime_failed", code)]
@@ -420,19 +450,13 @@ async def test_search_and_store_logs_never_contain_avatar_or_body(monkeypatch, t
     assert "id:a1" in caplog.text
 
 
-@pytest.mark.asyncio
-async def test_pong_failure_log_omits_me_response(caplog):
-    class Me(SearchHttp):
-        async def request(self, method, url, **kwargs):
-            return httpx.Response(200, request=httpx.Request(method, url), json={
-                "uid": "", "name": "", "avatar_url": "https://pic1.zhimg.com/v2-me-avatar.jpg",
-            })
-
-    client = search_client_for(Me([]))
-    client.get = AsyncMock(return_value={"uid": "", "avatar_url": "https://pic1.zhimg.com/v2-me-avatar.jpg"})
+def test_me_capture_log_omits_response_body(caplog):
+    captured = captured_search(200, {
+        "uid": "", "name": "", "avatar_url": "https://pic1.zhimg.com/v2-me-avatar.jpg",
+    }, 1)
     caplog.set_level("INFO", logger="TripPostCollect")
 
-    assert await client.pong() is False
+    assert me_is_logged_in(captured) is False
     assert "avatar" not in caplog.text
     assert "uid_present=False" in caplog.text
 

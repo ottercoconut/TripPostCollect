@@ -35,8 +35,7 @@ from trippostcollect.runtime.image_retry import (
 )
 from . import models as zhihu_constant
 from .models import (
-    ZhihuContent, ZhihuSearchPage, DataFetchError, NotFoundError, PlatformRuntimeError,
-    SearchSort, SearchTime, SearchType,
+    ZhihuContent, DataFetchError, NotFoundError, PlatformRuntimeError,
 )
 from .parser import ZhihuExtractor
 from .signer import sign
@@ -187,31 +186,6 @@ class ZhiHuClient:
         base_url = (zhihu_constant.ZHIHU_URL if "/p/" not in uri else zhihu_constant.ZHIHU_ZHUANLAN_URL)
         return await self.request(method="GET", url=base_url + final_uri, headers=headers, **kwargs)
 
-    async def pong(self) -> bool:
-        """
-        Check if login status is still valid
-        Returns:
-
-        """
-        logger.info("[ZhiHuClient.pong] Begin to pong zhihu...")
-        ping_flag = False
-        try:
-            res = await self.get_current_user_info()
-            if res.get("uid") and res.get("name"):
-                ping_flag = True
-                logger.info("[ZhiHuClient.pong] Ping zhihu successfully")
-            else:
-                # /me 响应含头像与个人资料，只记录缺哪个登录字段。
-                logger.error(
-                    "[ZhiHuClient.pong] Ping zhihu failed: "
-                    f"uid_present={bool(res.get('uid'))}, name_present={bool(res.get('name'))}"
-                )
-        except Exception as e:
-            code = getattr(e, "code", "") or e.__class__.__name__
-            logger.error(f"[ZhiHuClient.pong] Ping zhihu failed: {code}")
-            ping_flag = False
-        return ping_flag
-
     async def update_cookies(self, browser_context: BrowserContext, urls: Optional[list[str]] = None):
         """
         Update cookies method provided by API client, typically called after successful login
@@ -231,15 +205,6 @@ class ZhiHuClient:
     def set_search_referer(self, referer: str) -> None:
         """搜索 API 的 Referer 指向本轮实际检索词的搜索页。"""
         self.default_headers["referer"] = referer
-
-    async def get_current_user_info(self) -> Dict:
-        """
-        Get current logged-in user information
-        Returns:
-
-        """
-        params = {"include": "email,is_active,is_bind_phone"}
-        return await self.get("/api/v4/me", params)
 
     async def get_content_image(self, image_url: str, *, referer: str) -> bytes | None:
         """Fetch one body image from the zhimg CDN with UA, Accept and site Referer only.
@@ -290,80 +255,6 @@ class ZhiHuClient:
             raise ImageDownloadFetchError(
                 str(exc), code="image_download_retryable", retryable=True
             ) from exc
-
-    async def get_note_by_keyword(
-        self,
-        keyword: str,
-        page: int = 1,
-        page_size: int = 20,
-        sort: SearchSort = SearchSort.DEFAULT,
-        note_type: SearchType = SearchType.DEFAULT,
-        search_time: SearchTime = SearchTime.DEFAULT,
-    ) -> ZhihuSearchPage:
-        """
-        Search by keyword
-        Args:
-            keyword: Search keyword
-            page: Page number
-            page_size: Page size
-            sort: Sorting method
-            note_type: Search result type
-            search_time: Time range for search results
-
-        Returns:
-
-        """
-        uri = "/api/v4/search_v3"
-        params = {
-            "gk_version": "gz-gaokao",
-            "t": "general",
-            "q": keyword,
-            "correction": 1,
-            "offset": (page - 1) * page_size,
-            "limit": page_size,
-            "filter_fields": "",
-            "lc_idx": (page - 1) * page_size,
-            "show_all_topics": 0,
-            "search_source": "Filter",
-            "time_interval": search_time.value,
-            "sort": sort.value,
-            "vertical": note_type.value,
-        }
-        try:
-            search_res = await self.get(uri, params)
-        except NotFoundError as exc:
-            raise SearchResponseInvalid("search_v3 returned HTTP 404") from exc
-        paging = search_res.get("paging") if isinstance(search_res, dict) else None
-        raw_items = search_res.get("data") if isinstance(search_res, dict) else None
-        if not isinstance(paging, dict) or not isinstance(raw_items, list):
-            raise SearchResponseInvalid("search_v3 response has no paging/data")
-        if not raw_items and paging.get("is_end") is not True:
-            # 空 data 却未声明 is_end=true：不能证明来源耗尽，也无法翻到下一页。
-            raise SearchResponseInvalid("search_v3 returned empty data without is_end")
-        search_page = self._extractor.extract_search_page(search_res)
-        logger.info(
-            f"[ZhiHuClient.get_note_by_keyword] Search page {page}: raw={search_page.raw_count}, "
-            f"contents={len(search_page.contents)}, videos={len(search_page.video_ids)}, "
-            f"is_end={search_page.is_end}"
-        )
-        return search_page
-
-        # uri = f"/api/v4/{content_type}s/{content_id}/root_comments"
-        # params = {
-        #     "order": order_by,
-        #     "offset": offset,
-        #     "limit": limit
-        # }
-        # return await self.get(uri, params)
-
-
-
-
-
-
-
-
-
 
 
     async def get_answer_info(
