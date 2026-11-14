@@ -9,7 +9,7 @@
 | 微博 | `search_mblog_complete` / `mobile_detail` | `mblog.pics` → `image_list` | 当前会话 staging → manifest → `data/media`；头像/封面排除 | 结构化 | ID/昵称；简介与认证未采集（#156） | `mblog.user` | 赞/评/分享（转发） | 长文详情重试耗尽后记录并跳过，禁止保存截断正文 |
 | 小红书 | `note_detail` 非空 `desc` | 笔记详情 `image_list` | 每个图片对象选择一个正文 URL，staging → manifest → `data/media`；头像/视频排除 | 结构化 | ID/昵称/主页/简介（作者页 `basicInfo.desc`）/认证（官方认证类型码按前端枚举写 `RedOfficial`/`BlueOfficial`，职业标签如“美食博主”也按认证记，#167） | 浮层点击打开的作者页页面状态 | 赞/藏/评/分享；feed 空串只在登记所用搜索条目同一项明确为 0 时记为 0 | 详情或作者补全重试耗尽后记录并跳过 |
 | 抖音 | 搜索卡片 `search_aweme_info` / 详情 `aweme_detail` 非空 `desc` | `note_download_url` | 保留 `images[].uri` 稳定键，staging → manifest → `data/media`；封面/视频/音乐/头像排除，且不写入内容记录 | 结构化 | ID/昵称/主页（由 `sec_uid` 拼出）/简介（资料 `user.signature`）/认证（资料 `account_cert_info.label_text` 等，#163） | 作者资料 `user` 节点（`creator_profile`） | 赞/藏/评/分享 | 标题和预览文本不能代替正文；搜索作者对象的粉丝数不算已观测 |
-| 知乎 | `search_content` / `answer_detail` / `article_detail` | 正文/详情 `image_list` | 当前会话 staging → manifest → `data/media`；公式/头像/作者主页/zvideo 排除；正文图 CDN 直连并在访问账本登记 | 结构化 | ID/昵称/主页/简介（`headline`）/认证文字（`verify_bayes`，否则 `badge_v2.title`）；`author_verified` 不判定；关注数取作者页 `followingCount`，缺失为 NULL，不补 0；作品数是作者页 `answerCount + articlesCount`，任一缺失为 NULL（#185） | 作者页 `followerCount`（`author_page`） | 赞/评/藏（分享平台不提供，#188） | 每条候选都打开详情页并点击作者页（#185）。赞/评/藏取详情页，缺键为 NULL 不补 0，缺任一项不合格；分享数网页端恒为占位 0，不读取，入库为 NULL（#188）。作者链接缺失或作者页没有该用户时跳过。标题/摘要不能通过 |
+| 知乎 | `search_content` / `answer_detail` / `article_detail` | 正文/详情 `image_list`；同一 `v2-<32位十六进制>` 只保留一张，优先级 `_r` > 无后缀 > `_1440w` > `_720w` > `_b`（#187） | 当前会话 staging → manifest → `data/media`；公式/头像/作者主页/zvideo 排除；正文图 CDN 直连并在访问账本登记。纯文字回答/文章不写图片行（#191） | 结构化 | ID/昵称/主页/简介（`headline`）/认证文字（`verify_bayes`，否则 `badge_v2.title`）；`author_verified` 不判定；关注数取作者页 `followingCount`，缺失为 NULL，不补 0；作品数是作者页 `answerCount + articlesCount`，任一缺失为 NULL（#185） | 作者页 `followerCount`（`author_page`） | 赞/评/藏（分享平台不提供，#188） | 每条候选都打开详情页并点击作者页（#185）。赞/评/藏取详情页，缺键为 NULL 不补 0，缺任一项不合格；分享数网页端恒为占位 0，不读取，入库为 NULL（#188）。已观察且来源受信任的回答/文章可以零张正文图（#191）。作者链接缺失或作者页没有该用户时跳过。标题/摘要不能通过 |
 
 作者列中的 ID 与昵称均为平台原始值：作者平台 ID 按字符串保存、不哈希，昵称不脱敏；
 作者头像不采集，性别、IP 归属地等未列出的作者字段也不采集。
@@ -37,10 +37,14 @@ B站搜索结果的 `desc` 和 `image_urls` 只是摘要与预览，必须取得
 五个平台的正式新记录都要求 `image_materialization.complete=true`。每个权威正文图必须在
 `web_post_images` 保存 `image_role=content`、连续 `image_index`、来源 URL、项目相对
 `local_path`、`width/height/mime_type/sha256`，且本地文件通过根项目复验；只有 URL 不算覆盖。
+知乎已观察且来源受信任的回答/文章可以没有正文图（#191）：`post_images_count=0`、没有 `web_post_images` 行，
+`expected_images` 不增加，物化摘要仍须 `complete=true`。
 显式投影后的所有候选先完成 manifest 和字节复验，再在同一帖子内按 SHA-256 保留源顺序首次出现项；重复
 来源保留在 manifest 和首项别名证据中。该规则不跨帖子，也不合并哈希不同的视觉近似变体。
-知乎在此之前仅按 `zhimg.com` 稳定资源路径合并 `_r`、`_<width>w` 等已知 URL 变体，不使用视觉
-识别；被合并变体保留在内容原始证据中而不重复下载。
+知乎生成 `image_list` 时，同一 `v2-<32位十六进制>` 只保留一张（#187），优先级 `_r` > 无后缀 >
+`_1440w` > `_720w` > `_b`，其他未知后缀排在 `_b` 之后；保留项占该组首次出现的位置。非 `v2-` 形态不参与
+这次合并。非 `v2-` 的 `zhimg.com` URL 仍只按稳定资源路径合并 `_r`、`_<width>w` 等已知变体并保留首次 URL，
+不使用视觉识别，也不重复下载。
 筛除头像等无用资源依赖上表的显式字段投影，不使用递归 URL 扫描或图片尺寸启发式，因此被排除
 资源不会触发下载。作者头像字段还会在首方 JSONL、摘要和 SQLite 序列化前递归清除；五个平台均
 不由 TripPostCollect 对外提供或持久化头像字段、头像 URL、头像关系或头像文件。递归清除的键名清单在

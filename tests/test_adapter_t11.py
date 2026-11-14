@@ -25,6 +25,7 @@ from PIL import Image
 import pytest
 
 from support import douyin_full_scan_deviation, fork_removal_deviation, shared_launch_deviation, ua_from_browser_deviation
+from support import zhihu_image_text_deviation
 from support import zhihu_search_capture_deviation
 from trippostcollect.application import collection, reporting, visit_gate
 from trippostcollect.artifacts.image_candidates import content_image_candidates
@@ -435,9 +436,12 @@ def t124_authorized_source(text):
     """#124 有意偏离：抖音每轮从首页全量扫描，三元组续跑与 reseed 证据退出（见 support.douyin_full_scan_deviation）。
 
     #185 在同一冻结源上再把知乎并入全量扫描的拒绝条件（见 support.zhihu_search_capture_deviation）。
+    #191 允许知乎零张正文图在物化时记为完整（见 support.zhihu_image_text_deviation）。
     """
-    return zhihu_search_capture_deviation.t11_source(douyin_full_scan_deviation.t11_after_t71_source(
-        t71_authorized_source(douyin_full_scan_deviation.t11_source(t75_authorized_source(text)))
+    return zhihu_image_text_deviation.t11_source(zhihu_search_capture_deviation.t11_source(
+        douyin_full_scan_deviation.t11_after_t71_source(
+            t71_authorized_source(douyin_full_scan_deviation.t11_source(t75_authorized_source(text)))
+        )
     ))
 
 

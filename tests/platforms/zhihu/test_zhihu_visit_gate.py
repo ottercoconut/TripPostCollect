@@ -30,6 +30,8 @@ def test_zhihu_policy_matches_ledger_rule_names():
     assert policy.spec("discovery", "note_image").source == "cdn_direct"
     assert "zhihu.initial_data" in STATE_SCRIPTS
     assert policy.checks_filter_entry is False
+    assert policy.allow_zero_content_images is True
+    assert VISIT_POLICIES["xhs"].allow_zero_content_images is False
     assert tuple(policy.chains) == ("discovery", "repair")
 
 
@@ -162,6 +164,18 @@ def test_missing_author_visit_fails_r1(tmp_path):
     )
     assert result["content_visit_ok"] is False
     assert result["problem_counts"].get("R1")
+
+
+def test_zero_image_answer_passes_r5(tmp_path):
+    run, record, last = good_run(tmp_path)
+    record["image_assets"] = []
+    record["content_visit_refs"]["images"] = []
+    result = check(
+        run, record, manifest(tmp_path / "image_manifest.jsonl"),
+        stop={"stop_reason": "source_exhausted", "source_visit_id": last},
+    )
+    assert result["content_visit_ok"] is True, result
+    assert result["problem_counts"] == {}
 
 
 def test_missing_image_registration_fails_r5(tmp_path):

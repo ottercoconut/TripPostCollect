@@ -241,7 +241,7 @@ def extract_image_urls_from_html(html_content: str) -> List[str]:
             seen.add(url)
             image_urls.append(url)
             break
-    return image_urls
+    return collapse_zhihu_v2_image_urls(image_urls)
 
 
 def extract_zhihu_content_text(html_content: str) -> str:
@@ -762,6 +762,71 @@ def judge_zhihu_url(note_detail_url: str) -> str:
         return ""
 
 
+# #187：同一 v2-<32位十六进制> 只留一张。数字越小越优先；未知后缀排在 _b 之后。
+_V2_IMAGE_RE = re.compile(
+    r"v2-([0-9a-fA-F]{32})(_[^./]+)?\.(?:avif|gif|jpe?g|png|webp)$",
+    re.IGNORECASE,
+)
+_V2_SUFFIX_RANK = {
+    "_r": 0,
+    "": 1,
+    "_1440w": 2,
+    "_720w": 3,
+    "_b": 4,
+}
+_V2_UNKNOWN_SUFFIX_RANK = 5
+
+
+def _is_zhimg_host(hostname: str) -> bool:
+    host = hostname.lower()
+    return host == "zhimg.com" or host.endswith(".zhimg.com")
+
+
+def _v2_image_group(url: str) -> tuple[str, int] | None:
+    """zhimg 上的 ``v2-<32hex>`` 返回 ``(哈希, 后缀优先级)``；其他地址返回 None。"""
+
+    parsed = urlsplit(url)
+    if not _is_zhimg_host(parsed.hostname or ""):
+        return None
+    match = _V2_IMAGE_RE.search(unquote(parsed.path))
+    if match is None:
+        return None
+    suffix = (match.group(2) or "").lower()
+    return match.group(1).lower(), _V2_SUFFIX_RANK.get(suffix, _V2_UNKNOWN_SUFFIX_RANK)
+
+
+def collapse_zhihu_v2_image_urls(urls: list[str]) -> list[str]:
+    """同一 ``v2-<32位十六进制>`` 只保留一张，胜者占该组首次出现的位置。
+
+    优先级 ``_r`` > 无后缀 > ``_1440w`` > ``_720w`` > ``_b`` > 其他后缀。
+    同优先级保留先出现的 URL。非 ``v2-`` 形态和非 zhimg 地址不合并，只按完整 URL 去重。
+    """
+
+    grouped: dict[str, list[tuple[int, int, str]]] = {}
+    plain_seen: set[str] = set()
+    slots: list[tuple[str, str]] = []
+    for index, url in enumerate(urls):
+        group = _v2_image_group(url)
+        if group is None:
+            if url in plain_seen:
+                continue
+            plain_seen.add(url)
+            slots.append(("url", url))
+            continue
+        digest, rank = group
+        if digest not in grouped:
+            grouped[digest] = []
+            slots.append(("v2", digest))
+        grouped[digest].append((rank, index, url))
+    collapsed: list[str] = []
+    for kind, key in slots:
+        if kind == "url":
+            collapsed.append(key)
+            continue
+        collapsed.append(min(grouped[key])[2])
+    return collapsed
+
+
 ZHIMG_TRANSFORM_SUFFIX_RE = re.compile(
     r"_(?:[1-9]\d{1,4}w|b|r|qhd|hd|xs|s|m|l|xl|xxl|original|watermark)"
     r"\.(?:avif|gif|jpe?g|png|webp)$",
@@ -798,8 +863,7 @@ def zhihu_content_image_assets(content_item: ZhihuContent) -> List[dict]:
             excluded_urls.add(normalize_image_url(value))
         except ImageStagingError:
             continue
-    assets: List[dict] = []
-    seen = set()
+    normalized_urls: List[str] = []
     for value in content_item.image_list:
         try:
             url = normalize_image_url(value)
@@ -808,6 +872,10 @@ def zhihu_content_image_assets(content_item: ZhihuContent) -> List[dict]:
         path = urlsplit(url).path.lower().rstrip("/")
         if url in excluded_urls or path.endswith("/equation") or "/equation/" in f"{path}/":
             continue
+        normalized_urls.append(url)
+    assets: List[dict] = []
+    seen = set()
+    for url in collapse_zhihu_v2_image_urls(normalized_urls):
         asset_key = zhihu_source_asset_key(url)
         if asset_key in seen:
             continue
