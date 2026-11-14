@@ -7,6 +7,8 @@
 > **授权记录（2026-11-14）：** 操作人决定知乎分享数为平台不提供（#188），同步必需互动口径。
 >
 > **授权记录（2026-11-14）：** 操作人决定知乎纯文字回答/文章可入库（#191），正文图同一张只保留原图（#187）。
+>
+> **授权记录（2026-11-14）：** 操作人决定知乎认证只认作者页官方身份认证（#193）。
 
 本文定义正式抓取的机器语义。平台参数和必需字段 profile：通用平台在
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
@@ -302,7 +304,7 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 转换为 0。知乎粉丝只取作者页 `followerCount`，来源为 `author_page`；关注数为 `followingCount`，作品数为
 `answerCount + articlesCount`，缺键为空，不补 0。赞、评、藏三项必需，分别取详情页 `voteupCount`、
 `commentCount`、`favlistsCount`，缺键为空，不补 0。分享数平台不提供（#188）：网页端 `shareCount` 恒为占位 0，
-不读取，入库为空，不作必需项。认证判定未改。
+不读取，入库为空，不作必需项。认证只认作者页官方身份（#193）：`badgeV2.detailBadges` 中 `type` 为 `identity`、`detailType` 为 `identity_org` 或 `identity_people` 且 `badgeStatus` 为 `passed` 时 `author_verified` 为 1，文字为这些项的 `description`（机构在前，去重后用“、”连接）；读到 `badgeV2` 且 `detailBadges` 是列表但没有这两类时为 0、文字为空；没有 `badgeV2` 或结构不对则不推断。搜索 `verify_bayes` 与 `badge_v2.title` 不是认证来源。
 详情或作者候选级失败服从上面的 `candidate_skipped` 规则，登录、授权、频控、验证码和
 风控仍属于运行级阻断。
 

@@ -24,6 +24,7 @@ from support import zhihu_author_visit_deviation
 from support import zhihu_detail_page_deviation
 from support import zhihu_image_text_deviation
 from support import zhihu_search_capture_deviation
+from support import zhihu_verified_deviation
 from support.stable_png import solid_png
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
@@ -607,6 +608,7 @@ async def test_root_matches_frozen_legacy_request_event_and_artifacts(tmp_path, 
     actual = expectations.scrub(new, (tmp_path, "<TMP>"))
     actual, expected = zhihu_detail_page_deviation.align(actual, legacy_expectation(scenario), scenario)
     actual, expected = zhihu_author_visit_deviation.align(actual, expected, scenario)
+    actual, expected = zhihu_verified_deviation.align(actual, expected, scenario)
     assert actual == expected
     check_drive_result(new, scenario)
 
@@ -628,6 +630,7 @@ async def test_root_entry_matches_frozen_legacy_factory(tmp_path, monkeypatch, s
     actual = expectations.scrub(new, (tmp_path, "<TMP>"))
     actual, expected = zhihu_detail_page_deviation.align(actual, legacy_expectation(scenario), scenario)
     actual, expected = zhihu_author_visit_deviation.align(actual, expected, scenario)
+    actual, expected = zhihu_verified_deviation.align(actual, expected, scenario)
     assert actual == expected
 
 
@@ -840,6 +843,7 @@ def test_pure_definitions_keep_original_bodies():
             original = zhihu_detail_page_deviation.parser_and_model_source(original)
             original = zhihu_author_visit_deviation.parser_and_model_source(original)
             original = zhihu_image_text_deviation.parser_source(original)
+            original = zhihu_verified_deviation.parser_and_model_source(original)
         # #49 有意偏离：作者 ID/昵称改存平台原始值，只允许身份转换调用与对应字段描述替换。
         for old, new in ISSUE_49_IDENTITY_REPLACEMENTS:
             original = original.replace(old, new)

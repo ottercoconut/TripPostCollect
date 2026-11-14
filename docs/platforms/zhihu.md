@@ -60,13 +60,18 @@
   `followers_observed=true`；缺键不能补 0。关注数取作者页 `followingCount`，缺键为 NULL，不补 0；键上的 0
   仍记为 0。作品数 `author_posts_count` 是 `answerCount + articlesCount`，两者任一缺失则为 NULL。
   `answerCount`、`articlesCount`、`pinsCount`、`questionCount` 四个原值写入 `author_json`，缺键不写、不补 0。
-- 认证如何判定暂不改：仍取详情或搜索作者上的 `verify_bayes`，没有时取 `badge_v2.title`，`author_verified`
-  保持 NULL。作者页用户实体上能看到的相关键是 `badgeV2`、`isOrg`、`userType`、`vipInfo`；`verifyBayes`
-  在侦察的页面状态里没有出现。
+- 认证只认作者页用户实体（#193）。`detailBadges` 里存在 `type` 为 `identity`、`detailType` 为
+  `identity_org` 或 `identity_people`、且 `badgeStatus` 为 `passed` 的项时，`author_verified=1`，
+  `verified_text` 为这些项的 `description`：多项按出现顺序去重，用“、”连接，机构项排在个人项之前。
+  作者页实体有字典 `badgeV2` 且 `detailBadges` 是列表、但没有上述两类时，`author_verified=0`，
+  `verified_text` 为空。没有 `badgeV2` 或结构不对时不推断，`author_verified` 为空，`verified_text` 为空。
+  搜索结果上的 `verify_bayes` 与 `badge_v2.title` 不再作为认证来源。其余标识（`badgeV2`、`badge`、
+  `userType`、`isOrg`、`vipInfo`）去掉键名含 `icon`、`url`、`avatar`、`image` 的键后写入
+  `author_page_badges`，只进入 `raw_sample_json`，不进入 `author_json`，不新增数据库列。
 - 作者平台 ID 保存 author/member 原始 `id`（写在 `creator_hash` 键），昵称保存 `name` 原文；
   `url_token` 另存为 `creator_url_token`，只用于拼接主页 `https://www.zhihu.com/people/<url_token>`，
   不作为平台 ID。
-- 作者简介取 author/member 的 `headline`，写入 `author_description`。认证文字的取值见上一条，本段不改判定。
+- 作者简介取 author/member 的 `headline`，写入 `author_description`。认证口径见上一条。
 - 详情候选级失败（找不到标题卡片、新标签没打开、页面状态里没有目标实体、实体没有正文）按 3 次、
   间隔 1 秒有限重试，然后写 `candidate_skipped` 并进入已处理记忆。登录页、安全验证页，以及
   page/context 被关闭，是运行级阻断，不写 seen。登录与验证的 URL 和可见特征是待实测的假设，写在

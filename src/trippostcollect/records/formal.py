@@ -607,7 +607,7 @@ def row_for_record(
         "author_followers_count": author["followers_count"],
         "author_following_count": author["following_count"],
         "author_posts_count": author["posts_count"],
-        # 只接受平台层已判定的 0/1（#163 抖音）；其他平台未判定时保持 NULL。
+        # 只接受平台层已判定的 0/1（#163 抖音、#193 知乎）；未判定时保持 NULL。
         "author_verified": record.get("author_verified") if record.get("author_verified") in (0, 1) else None,
         "author_verified_text": first_value(record, "author_verified_text", "verified_text", "verify_info"),
         "published_at": published_at_for_record(record),
