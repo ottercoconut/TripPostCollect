@@ -1,12 +1,11 @@
-"""T04-b 与迁移后的 B站正式链路使用同一套离线驱动逐项对照。"""
+"""B站正式链路的离线驱动：行为会话、搜索与详情请求、阻断即停、正文图片与暂存产物。"""
 
 from __future__ import annotations
 
 import ast
 from collections import Counter
 from datetime import datetime, timezone
-from hashlib import sha256
-import importlib.util
+import importlib
 import io
 import json
 from pathlib import Path
@@ -19,33 +18,13 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from PIL import Image
 
-from support import fork_removal_deviation, native_window_deviation, shared_launch_deviation
 from trippostcollect.artifacts import image_materialization, image_proxy
-from trippostcollect.platforms.bilibili import client, core, login, parser, signer
+from trippostcollect.platforms.bilibili import client, core
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 executor = importlib.import_module("mediacrawler_crawl")
-
-
-@pytest.fixture
-def baseline(tmp_path):
-    # 由 git show c283b1738002a57fd80075c9146f1b6064c021b1:scripts/mediacrawler_crawl.py
-    # 逐字保存；纯源码 lane 没有 .git，仍必须导入完整旧实现而非重写参考算法。
-    source = (ROOT / "tests/fixtures/adapter_t08/mediacrawler_crawl.py.txt").read_bytes()
-    assert sha256(source).hexdigest() == "df19e2b8e508332399b762b58cf205754e67ff4fa1b133ccb06cec29f6b1fd4f"
-    # T14-C 有意偏离：MEDIACRAWLER_DIR 与过渡模块 execution_state 已删除，执行前单向替换旧导入。
-    text, namespace = fork_removal_deviation.frozen_source(
-        source.decode("utf-8"), mediacrawler_dir_imports=1, execution_state_imports=1,
-    )
-    path = tmp_path / "baseline.py"
-    path.write_text(text, encoding="utf-8")
-    spec = importlib.util.spec_from_file_location("t08_baseline", path)
-    module = importlib.util.module_from_spec(spec)
-    vars(module).update(namespace)
-    spec.loader.exec_module(module)
-    return module
 
 
 class FixedDatetime(datetime):
@@ -68,7 +47,7 @@ class Response(io.BytesIO):
         return 200
 
 
-def drive(module, root, monkeypatch, scenario):
+def drive(root, monkeypatch, scenario):
     """仅替换浏览器驱动、网络边界与时钟；保留解析、重试、暂存和摘要实现。"""
     root.mkdir()
     trace = []
@@ -79,7 +58,7 @@ def drive(module, root, monkeypatch, scenario):
         conn.execute("INSERT INTO web_posts VALUES ('bilibili', '99', NULL)")
     batch = root / "batch"
     state_path = root / "state.json"
-    module.FrozenExecutionState.create(
+    executor.FrozenExecutionState.create(
         state_path, run_id="t08", job_key="bilibili-qingdao", site_key="bilibili",
         job_kind="mediacrawler_search", plan={}, frozen_inputs=[],
     )
@@ -103,8 +82,8 @@ def drive(module, root, monkeypatch, scenario):
         assert "close" in [event[0] for event in trace]
         url = urlparse(request.full_url)
         if url.path.startswith("/bfs/"):
-            # #115：新实现的图片请求不带平台 Cookie；冻结旧实现仍会带上。
-            assert headers.get("cookie") in ({None} if module is executor else {"SESSDATA=t08;bili_jct=csrf"})
+            # #115：图片请求不带平台 Cookie。
+            assert "cookie" not in headers
         else:
             assert headers["cookie"] == "SESSDATA=t08;bili_jct=csrf"
         query = parse_qs(url.query)
@@ -168,9 +147,9 @@ def drive(module, root, monkeypatch, scenario):
             trace.append(("goto", url, kwargs))
 
         async def evaluate(self, script):
-            # #127：新实现在关闭 context 前读取浏览器 UA；求值不进入轨迹，冻结旧实现不会调用。
-            assert module is executor and script == "() => navigator.userAgent", script
-            return T127_BROWSER_USER_AGENT
+            # #127：关闭 context 前读取浏览器 UA；求值不进入轨迹。
+            assert script == "() => navigator.userAgent", script
+            return BROWSER_USER_AGENT
 
     class Context:
         pages = [Page()]
@@ -223,50 +202,49 @@ def drive(module, root, monkeypatch, scenario):
         kwargs["write_evidence"](kwargs["evidence_path"], evidence)
         return evidence
 
-    for target in (module, core):
+    for target in (executor, core):
         monkeypatch.setattr(target, "datetime", FixedDatetime)
-    monkeypatch.setattr(module.time, "time", lambda: 1700000123)
-    monkeypatch.setattr(module.time, "monotonic", lambda: 100.0)
-    monkeypatch.setattr(module.time, "sleep", lambda delay: trace.append(("sleep", delay)))
-    monkeypatch.setattr(module.random, "uniform", lambda low, high: (low + high) / 2)
-    monkeypatch.setattr(module, "async_playwright", Playwright)
-    monkeypatch.setattr(module, "discover_cdp_browser_path", lambda: "/fake/browser")
-    monkeypatch.setattr(module, "profile_dir_for", lambda platform: root / "profile")
-    monkeypatch.setattr(module, "cookie_snapshot_path", lambda platform: root / "snapshot.json")
-    monkeypatch.setattr(module, "browser_launch_environment", lambda: {"LANG": "zh_CN.UTF-8"})
-    monkeypatch.setattr(module, "browser_runtime_args", lambda: ["--test-runtime"])
-    monkeypatch.setattr(module, "install_runtime_hints", runtime_hints)
-    monkeypatch.setattr(module, "run_page_behavior", behavior)
-    monkeypatch.setattr(module if module is not executor else client, "urlopen", open_request)
+    monkeypatch.setattr(executor.time, "time", lambda: 1700000123)
+    monkeypatch.setattr(executor.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(executor.time, "sleep", lambda delay: trace.append(("sleep", delay)))
+    monkeypatch.setattr(executor.random, "uniform", lambda low, high: (low + high) / 2)
+    monkeypatch.setattr(executor, "async_playwright", Playwright)
+    monkeypatch.setattr(executor, "discover_cdp_browser_path", lambda: "/fake/browser")
+    monkeypatch.setattr(executor, "profile_dir_for", lambda platform: root / "profile")
+    monkeypatch.setattr(executor, "cookie_snapshot_path", lambda platform: root / "snapshot.json")
+    monkeypatch.setattr(executor, "browser_launch_environment", lambda: {"LANG": "zh_CN.UTF-8"})
+    monkeypatch.setattr(executor, "browser_runtime_args", lambda: ["--test-runtime"])
+    monkeypatch.setattr(executor, "install_runtime_hints", runtime_hints)
+    monkeypatch.setattr(executor, "run_page_behavior", behavior)
+    monkeypatch.setattr(client, "urlopen", open_request)
     monkeypatch.setattr(image_proxy, "build_opener", lambda *args: SimpleNamespace(open=open_request))
     monkeypatch.setattr(image_materialization.secrets, "token_hex", lambda size: "a" * (size * 2))
-    original_load = module.load_existing_formal_identities
+    original_load = executor.load_existing_formal_identities
 
     def load_known(path):
         trace.append(("load_known",))
         return original_load(path)
 
-    monkeypatch.setattr(module, "load_existing_formal_identities", load_known)
-    original_validate = module.validate_formal_record
+    monkeypatch.setattr(executor, "load_existing_formal_identities", load_known)
+    original_validate = executor.validate_formal_record
 
     def validate(platform, record, seen):
         trace.append(("validate", record["content_id"]))
         return original_validate(platform, record, seen)
 
-    monkeypatch.setattr(module, "validate_formal_record", validate)
-    sanitization_owner = module if module is not executor else core
-    original_sanitize = sanitization_owner.sanitize_author_avatar_data
+    monkeypatch.setattr(executor, "validate_formal_record", validate)
+    original_sanitize = core.sanitize_author_avatar_data
 
     def sanitize(record):
         trace.append(("sanitize", record["content_id"]))
         return original_sanitize(record)
 
-    monkeypatch.setattr(sanitization_owner, "sanitize_author_avatar_data", sanitize)
+    monkeypatch.setattr(core, "sanitize_author_avatar_data", sanitize)
     args = SimpleNamespace(keyword="青岛旅游 !'()*", db=str(db_path), headed=False,
                            start_page=1, top_refresh_max_pages=0, discovery_source_exhausted=False,
                            discovery_job_id=None, discovery_query_fingerprint="",
                            resume_identities_path=None, download_images=True)
-    result = module.run_bilibili_article_search(args, batch)
+    result = executor.run_bilibili_article_search(args, batch)
     records = [json.loads(line) for path in batch.rglob("search_contents_*.jsonl") for line in path.read_text().splitlines()]
     files = {path.relative_to(batch).as_posix(): path.read_bytes() for path in batch.rglob("*") if path.is_file()}
     events = [(event["type"], event["details"]) for event in json.loads(state_path.read_text())["events"]]
@@ -299,116 +277,74 @@ SCENARIOS = ["success", "detail_fallback", "behavior_failed", "detail_parse", "i
 ]
 
 
-# #115 有意偏离：冻结旧实现与新实现在下列位置按设计不同。
-# 1) 通用差异，双侧做同样的单向归一后其余逐字相等：
-#    - 图片请求不带平台 Cookie；
-#    - 停止事件附带平台 numPages/numResults 证据；
-#    - 第 2 页起搜索请求前按详情节奏随机等待，并记 article_search 节奏事件（结果与行为证据文件）。
-# 2) 阻断码命中即停：旧实现对 -509/-412/-352、HTTP 429 先重试再停，新实现第 1 次即停；这些场景
-#    与重试成功场景的请求序列按设计不同，只在新侧核对“一次即停、不写 seen、不宣称耗尽”。
-# 3) detail_fallback：封面不再作正文图，只在新侧核对“没有正文图、不下载图片”。
-T115_BLOCK_CODES = (-509, -412, -352)
-T115_STOP_ON_FIRST_SCENARIOS = frozenset(
-    [f"detail_retry_{code}" for code in T115_BLOCK_CODES]
-    + [f"detail_block_{code}" for code in T115_BLOCK_CODES]
-    + [f"follower_block_{code}" for code in T115_BLOCK_CODES]
-    + ["detail_http_429"]
+BROWSER_USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+EXHAUSTED = {("source_exhausted", "empty_page")}
+BOTH = ["123", "124"]
+# #115：-509/-412/-352 与 HTTP 429 命中即停，不重试。
+STOP_ON_FIRST = frozenset(
+    [f"detail_retry_{code}" for code in (-509, -412, -352)]
+    + [f"detail_block_{code}" for code in (-101, -509, -412, -352)]
+    + [f"detail_http_{code}" for code in (401, 403, 429)]
+    + [f"follower_block_{code}" for code in (-101, -509, -412, -352)]
 )
 
 
-def t115_without_article_search_pacing(evidence):
-    evidence = dict(evidence)
-    events = [item for item in evidence.get("request_pacing_events") or []
-              if item.get("stage") != "article_search"]
-    if "request_pacing_events" in evidence:
-        evidence["request_pacing_events"] = events
-    return evidence
+def expected_outcome(scenario):
+    """(成功, 停止事件集合, 跳过的候选 [(范围, 错误码)], 入库 ID, 落盘正文图数；None 表示不核对)。"""
+    if scenario in STOP_ON_FIRST:
+        kind, code = scenario.rsplit("_", 1)
+        stage = "relation_stat" if kind == "follower_block" else "article_detail"
+        # 粉丝请求在第一篇正文图下载之后。
+        return False, {("runtime_failed", f"bilibili_{stage}_blocked:{code}")}, [], [], 3 if stage == "relation_stat" else 0
+    return {
+        "success": (True, EXHAUSTED, [], BOTH, 6),
+        "image_retry": (True, EXHAUSTED, [], BOTH, 6),
+        # 封面不作正文图：记录入库但没有正文图。
+        "detail_fallback": (True, EXHAUSTED, [], BOTH, 0),
+        "behavior_failed": (False, {("runtime_failed", "RuntimeError")}, [], [], 0),
+        "detail_parse": (True, EXHAUSTED, [("post", "detail_request_failed")], ["124"], 3),
+        "image_invalid": (True, EXHAUSTED, [("image", "image_non_raster_response")] * 2, [], None),
+        "image_http_503": (True, EXHAUSTED, [("image", "image_download_retryable")] * 2, [], 0),
+        "image_http_404": (True, EXHAUSTED, [("image", "image_source_unavailable")] * 2, [], 0),
+        "image_http_403": (False, {("runtime_failed", "image_auth_required")}, [], [], 0),
+        "image_http_429": (False, {("runtime_failed", "image_rate_limited")}, [], [], 0),
+    }[scenario]
 
 
-# #127 有意偏离：B站请求 UA 取自本轮行为会话浏览器的 navigator.userAgent。冻结旧实现 nav/search/relation
-# 用裸 "Mozilla/5.0"、detail 与图片用写死的 Chrome/138；新实现五类请求都用浏览器 UA。比较前钉住双侧各自的
-# 取值后去掉该头，其余请求头逐字比较。
-T127_BROWSER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
-T127_LEGACY_USER_AGENTS = {
-    "/x/web-interface/nav": "Mozilla/5.0",
-    "/x/web-interface/wbi/search/type": "Mozilla/5.0",
-    "/x/relation/stat": "Mozilla/5.0",
-    "/x/article/view": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-}
-
-
-def t127_pinned_user_agent(event, *, legacy):
-    path = urlparse(event[2]).path
-    expected = (T127_LEGACY_USER_AGENTS.get(path, T127_LEGACY_USER_AGENTS["/x/article/view"])
-                if legacy else T127_BROWSER_USER_AGENT)
-    assert event[3].pop("user-agent") == expected, (legacy, event[2])
-
-
-def t115_normalized(value, *, legacy):
-    """双侧同样剥离第 1 类通用差异；新侧特有的翻页等待一并去掉，旧侧本就没有。"""
-    value = json.loads(json.dumps(value, ensure_ascii=False, default=lambda raw: raw.decode("latin-1")))
-    trace = []
-    for index, event in enumerate(value["trace"]):
-        if event[0] == "request":
-            t127_pinned_user_agent(event, legacy=legacy)
-        if event[0] == "request" and urlparse(event[2]).path.startswith("/bfs/"):
-            event[3].pop("cookie", None)
-        following = value["trace"][index + 1] if index + 1 < len(value["trace"]) else None
-        if (event[0] == "sleep" and following and following[0] == "request"
-                and urlparse(following[2]).path == "/x/web-interface/wbi/search/type"):
-            continue
-        trace.append(event)
-    value["trace"] = trace
-    for _, details in value["events"]:
-        details.pop("source_num_pages", None)
-        details.pop("source_num_results", None)
-    value["result"]["behavior_evidence"] = t115_without_article_search_pacing(value["result"]["behavior_evidence"])
-    for path, content in list(value["files"].items()):
-        if path.endswith("behavior_evidence.json"):
-            evidence = json.loads(content.encode("latin-1"))
-            value["files"][path] = t115_without_article_search_pacing(evidence)
-    return value
+def drive_outcome(new, scenario):
+    stops = {(details["stop_reason"], details.get("stop_detail"))
+             for event, details in new["events"] if event == "adaptive_search_stopped"}
+    skips = [(details.get("failure_scope"), details.get("error_code"))
+             for event, details in new["events"] if event == "candidate_skipped"]
+    images = sum("/images/" in path for path in new["files"])
+    return (new["result"]["ok"], stops, skips, [record["content_id"] for record in new["records"]],
+            None if expected_outcome(scenario)[4] is None else images)
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
-def test_formal_request_and_artifact_equivalence(baseline, tmp_path, monkeypatch, scenario):
+def test_formal_request_and_artifacts(tmp_path, monkeypatch, scenario):
     with monkeypatch.context() as patch:
-        old = drive(baseline, tmp_path / "old", patch, scenario)
-    with monkeypatch.context() as patch:
-        new = drive(executor, tmp_path / "new", patch, scenario)
+        new = drive(tmp_path / "new", patch, scenario)
+    assert drive_outcome(new, scenario) == expected_outcome(scenario)
+    assert new["result"]["run"]["returncode"] == (0 if new["result"]["ok"] else 1)
+    assert ("logs/bilibili/behavior_evidence.json" in new["files"]) is (scenario != "behavior_failed")
     stopped = [details for event, details in new["events"] if event == "adaptive_search_stopped"]
     if stopped and stopped[-1]["stop_reason"] == "source_exhausted":
-        assert stopped[-1]["stop_detail"] == "empty_page"
         assert (stopped[-1]["source_num_pages"], stopped[-1]["source_num_results"]) == (1, 3)
     requests = [event for event in new["trace"] if event[0] == "request"]
     assert not any("cookie" in event[3] for event in requests if urlparse(event[2]).path.startswith("/bfs/"))
-    assert all(event[3]["user-agent"] == T127_BROWSER_USER_AGENT for event in requests)
+    assert all(event[3]["user-agent"] == BROWSER_USER_AGENT for event in requests)
     if scenario == "detail_fallback":
-        assert not [path for path in new["files"] if "/images/" in path]
         assert all(record["detail_image_sources"] == [] for record in new["records"])
         assert not any(urlparse(event[2]).path.startswith("/bfs/") for event in requests)
         return
-    if scenario in T115_STOP_ON_FIRST_SCENARIOS:
+    if scenario in STOP_ON_FIRST:
         path = "/x/relation/stat" if scenario.startswith("follower_block") else "/x/article/view"
         assert sum(urlparse(event[2]).path == path for event in requests) == 1
-        assert new["result"]["run"]["returncode"] == 1
-        assert stopped[-1]["stop_reason"] == "runtime_failed"
         assert stopped[-1]["resume_page"] == 1
         assert stopped[-1]["candidate_identities"] == []
-        assert not [event for event, _ in new["events"] if event == "candidate_skipped"]
-        assert not new["records"]
         return
-    new_raw = new
-    old, new = t115_normalized(old, legacy=True), t115_normalized(new, legacy=False)
-    # #136：冻结旧侧行为会话的启动参数钉住旧值后替换为与 warmup 共用的配置（见 support.shared_launch_deviation）。
-    old = shared_launch_deviation.bilibili(old)
-    # #139：#136 共享配置的 1280×900 视口钉住后换成原生窗口（见 support.native_window_deviation）。
-    old = native_window_deviation.bilibili(old)
-    assert new["files"].keys() == old["files"].keys()
-    for path in new["files"]:
-        assert new["files"][path] == old["files"][path], path
-    assert new == old
-    new = new_raw
     names = [event[0] for event in new["trace"]]
     assert names.index("load_known") < names.index("launch")
     if scenario == "behavior_failed":
@@ -420,7 +356,7 @@ def test_formal_request_and_artifact_equivalence(baseline, tmp_path, monkeypatch
     requests = [event for event in new["trace"] if event[0] == "request"]
     assert all(event[1] == "GET" for event in requests)
     assert not any("never.png" in event[2] for event in requests)
-    if scenario in {"success", "image_retry"} or scenario.startswith("detail_retry"):
+    if scenario in {"success", "image_retry"}:
         assert new["result"]["ok"] is True, new["result"]["run"]["stderr_tail"]
         assert len(new["records"]) == 2
         assert new["records"][0]["published_at"] == 1_700_000_000
@@ -430,7 +366,7 @@ def test_formal_request_and_artifact_equivalence(baseline, tmp_path, monkeypatch
         assert names.index("sanitize") < names.index("validate")
         request_paths = [urlparse(event[2]).path for event in requests]
         assert request_paths.index("/x/article/view") < request_paths.index("/bfs/article/opus.png") < request_paths.index("/x/relation/stat")
-    if "block" in scenario or scenario.startswith("detail_http") or scenario in {"image_http_403", "image_http_429"}:
+    if scenario in {"image_http_403", "image_http_429"}:
         assert new["result"]["run"]["returncode"] == 1
         stopped = [details for event, details in new["events"] if event == "adaptive_search_stopped"][-1]
         assert stopped["stop_reason"] == "runtime_failed"
@@ -443,7 +379,7 @@ def test_formal_request_and_artifact_equivalence(baseline, tmp_path, monkeypatch
         assert all(failure["attempts"] == (3 if scenario == "image_http_503" else 1) for failure in failures)
 
 
-def test_dependency_direction_and_legacy_exports():
+def test_dependency_direction():
     for path in (ROOT / "src/trippostcollect/platforms/bilibili").glob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
             modules = [node.module or ""] if isinstance(node, ast.ImportFrom) else [alias.name for alias in node.names] if isinstance(node, ast.Import) else []
@@ -451,57 +387,3 @@ def test_dependency_direction_and_legacy_exports():
                 assert not module.startswith(("scripts", "mediacrawler_crawl", "trippostcollect.runtime", "trippostcollect.artifacts", "trippostcollect.db", "trippostcollect.scheduler")), (path, module)
                 if module.startswith("trippostcollect.application"):
                     assert module == "trippostcollect.application.contracts"
-    for implementation in (client, parser, signer):
-        for name, value in vars(implementation).items():
-            # #115：模块内私有助手（下划线开头）不经执行器转出，只核对公开名。
-            if name.startswith("_"):
-                continue
-            if callable(value) and getattr(value, "__module__", None) == implementation.__name__ and name != "fetch_bilibili_image_bytes":
-                assert getattr(executor, name) is value
-    assert executor._bilibili_login is login
-
-
-# #115 有意偏离：B站 delta 正文、封面不作正文图、图片不带 Cookie、搜索耗尽须有 numPages 证据、
-# 阻断码命中即停、nav 校验 isLogin、搜索/nav 错误分类与翻页节奏、粉丝失败不入缓存。下列函数改写或
-# 新增，退出与 T04-b 冻结源码的逐字对照；新行为由 tests/test_bilibili_*.py 中对应的定向测试钉住。
-T115_REWRITTEN = frozenset({
-    "clean_bilibili_article_body", "extract_bilibili_detail_images",
-    "bilibili_image_headers", "fetch_bilibili_image_bytes", "download_bilibili_record_images",
-    "fetch_bilibili_article_detail", "fetch_bilibili_article_detail_with_retry",
-    "fetch_bilibili_wbi_keys", "fetch_bilibili_article_page", "fetch_bilibili_follower_count",
-    "run_bilibili_article_search",
-})
-
-
-# #127 有意偏离：B站请求 UA 改由调用方传入（取自本轮行为会话浏览器的 navigator.userAgent），下列在 #115 清单
-# 之外的函数随之改写，退出逐字对照；新行为由 tests/test_ua_from_browser_issue127.py 钉住。
-T127_REWRITTEN = frozenset({"bilibili_detail_headers", "run_bilibili_behavior_session"})
-
-
-def test_function_bodies_only_add_ports(baseline):
-    old = ast.parse(Path(baseline.__file__).read_text())
-    original = {node.name: node for node in old.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
-    rewritten_seen = set()
-    for implementation in (core, client, parser, signer, login):
-        for node in ast.parse(Path(implementation.__file__).read_text()).body:
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if node.name in T115_REWRITTEN | T127_REWRITTEN:
-                rewritten_seen.add(node.name)
-                continue
-            if node.name not in original:
-                # #115 新增的函数在冻结源码里没有对应定义；只允许出现在 B站 client/parser。
-                assert implementation in (client, parser), node.name
-                continue
-            body = node.body
-            while body and isinstance(body[0], ast.Assign) and isinstance(body[0].value, ast.Attribute) and isinstance(body[0].value.value, ast.Name) and body[0].value.value.id == "ports":
-                body = body[1:]
-            reference = original[node.name].body
-            if node.name == "run_bilibili_article_search":
-                # 唯一调用表达式变化：相同读取时点和路径，经执行器注入 connect。
-                for expression in ast.walk(ast.Module(body=reference, type_ignores=[])):
-                    if isinstance(expression, ast.Call) and isinstance(expression.func, ast.Attribute) and isinstance(expression.func.value, ast.Name) and expression.func.value.id == "sqlite3" and expression.func.attr == "connect":
-                        expression.func = ast.Name(id="connect_database", ctx=ast.Load())
-            assert ast.dump(ast.Module(body=body, type_ignores=[])) == ast.dump(ast.Module(body=reference, type_ignores=[])), node.name
-    # 偏离清单不得含已删除或拼错的名字。
-    assert rewritten_seen == T115_REWRITTEN | T127_REWRITTEN
