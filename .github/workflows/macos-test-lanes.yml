@@ -71,6 +71,7 @@ jobs:
           command -v node
           node --version
       - name: 执行独立副本分组及选站装配
+        # OS lane 的 PF 只阻断一次性测试用户，runner 与 GitHub 的连接保持可用（#190）。
         # 正常 7–13 分钟；#105 间歇卡死时由步骤超时自动失败，不再等到 job 上限，并留出上传工件的时间（#149）。
         timeout-minutes: 15
         shell: bash
