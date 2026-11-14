@@ -85,11 +85,14 @@ def supervisor_identity():
 
 
 def pf_policy(uid):
-    """TCP/UDP 只匹配测试用户；ICMP 无法按用户匹配，只全局丢弃出站 echo 请求。"""
+    """TCP/UDP 只匹配测试用户；ICMP 无法按用户匹配，只全局丢弃出站 echo 请求。
+
+    pf 语法要求方向写在 quick 之前（`block drop out quick`），反过来是语法错误（#190 首轮 CI）。
+    """
     return (
         f'block drop quick proto {{ tcp udp }} all user {uid} label "tpc_test_deny"\n'
-        'block drop quick out inet proto icmp icmp-type echoreq label "tpc_icmp_echo_deny"\n'
-        'block drop quick out inet6 proto icmp6 icmp6-type echoreq label "tpc_icmp_echo_deny"\n'
+        'block drop out quick inet proto icmp icmp-type echoreq label "tpc_icmp_echo_deny"\n'
+        'block drop out quick inet6 proto icmp6 icmp6-type echoreq label "tpc_icmp_echo_deny"\n'
     )
 
 
@@ -623,7 +626,7 @@ def _remember_failure(evidence, exc):
     extra = f"{getattr(exc, 'stderr', None) or ''}{getattr(exc, 'stdout', None) or ''}".strip()
     if extra:
         detail = f"{detail} {extra}"
-    evidence["supervisor_error_summary"] = detail[:300]
+    evidence["supervisor_error_summary"] = detail[:1200]
 
 
 def run_isolated(command, source, output, environment, log):

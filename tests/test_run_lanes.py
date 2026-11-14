@@ -727,7 +727,7 @@ def test_icmp_packet_counts_do_not_satisfy_the_user_rule(monkeypatch):
     sample = (
         f'block drop quick proto tcp all user = {uid} label "tpc_test_deny"\n'
         "  [ Packets: 0 Bytes: 0 ]\n"
-        'block drop quick out inet proto icmp all icmp-type echoreq label "tpc_icmp_echo_deny"\n'
+        'block drop out quick inet proto icmp all icmp-type echoreq label "tpc_icmp_echo_deny"\n'
         "  [ Packets: 9 Bytes: 500 ]\n"
     )
     monkeypatch.setattr(native_macos, "pf", lambda *args: sample)
@@ -745,16 +745,17 @@ def test_pf_policy_scopes_blocks_to_the_test_user():
     text = native_macos.pf_policy(uid)
     assert text == (
         f'block drop quick proto {{ tcp udp }} all user {uid} label "tpc_test_deny"\n'
-        'block drop quick out inet proto icmp icmp-type echoreq label "tpc_icmp_echo_deny"\n'
-        'block drop quick out inet6 proto icmp6 icmp6-type echoreq label "tpc_icmp_echo_deny"\n'
+        'block drop out quick inet proto icmp icmp-type echoreq label "tpc_icmp_echo_deny"\n'
+        'block drop out quick inet6 proto icmp6 icmp6-type echoreq label "tpc_icmp_echo_deny"\n'
     )
     native_macos.assert_user_scoped(text, uid)
     native_macos.assert_echo_only_icmp(text)
     rewritten = (
         f'block drop quick proto tcp all user = {uid} label "tpc_test_deny"\n'
         f'block drop quick proto udp all user = {uid} label "tpc_test_deny"\n'
-        'block drop quick out inet proto icmp all icmp-type 8 label "tpc_icmp_echo_deny"\n'
-        'block drop quick out inet6 proto icmp6 all icmp6-type 128 label "tpc_icmp_echo_deny"\n'
+        # macOS 26 上 pfctl -nv 对 pf_policy 的实际回显：花括号展开为两条，IPv6 协议名写作 ipv6-icmp。
+        'block drop out quick inet proto icmp all icmp-type echoreq label "tpc_icmp_echo_deny"\n'
+        'block drop out quick inet6 proto ipv6-icmp all icmp6-type echoreq label "tpc_icmp_echo_deny"\n'
     )
     native_macos.assert_user_scoped(rewritten, uid)
     native_macos.assert_echo_only_icmp(rewritten)
