@@ -7,6 +7,8 @@
 > **授权记录（2026-11-14）：** 操作人决定知乎分享数为平台不提供（#188），同步入库映射。
 >
 > **授权记录（2026-11-14）：** 操作人决定知乎纯文字回答/文章可入库（#191），正文图同一张只保留原图（#187）。
+>
+> **授权记录（2026-11-14）：** 操作人决定知乎认证只认作者页官方身份认证（#193）。
 
 ## 数据库文件
 
@@ -160,7 +162,7 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 作者主页指标。知乎回答/文章的发布时间、正文、图片和赞评藏来自详情页页面状态（分享平台不提供，#188）；粉丝来自作者页
 `followerCount`（`author_followers_count`），关注数来自 `followingCount`（`author_following_count`），作品数是
 `answerCount + articlesCount`（`author_posts_count`），缺键为 NULL，不补 0。
-已观察且来源受信任的知乎回答/文章可以没有正文图（#191），`post_images_count=0` 且不写 `web_post_images`；详情未观察仍是 `content_detail_unobserved`。`zvideo` 记录跳过。认证判定未改。
+已观察且来源受信任的知乎回答/文章可以没有正文图（#191），`post_images_count=0` 且不写 `web_post_images`；详情未观察仍是 `content_detail_unobserved`。`zvideo` 记录跳过。认证只认作者页官方身份（#193）：已通过的 `identity_org` / `identity_people` 写入 `author_verified=1` 与 `author_verified_text`（机构项在前，去重后用“、”连接）；读到 `badgeV2` 但没有这两类则为 0、文字为空；没有 `badgeV2` 或结构不对则两列为空。搜索 `verify_bayes` 与 `badge_v2.title` 不是认证来源。
 B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得 article 详情
 正文和正文图片证据；搜索 `desc` 与 `image_urls` 仅为摘要和预览，不能直接入库为完整正文。
 所有平台后续 JSONL 中出现的
@@ -190,7 +192,7 @@ B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得
 | `web_post_images.local_path` | 根项目复验并晋升后的 `data/media/...` 项目相对路径；正式新记录不能为空 |
 | `web_post_images.width/height/mime_type/sha256` | 根项目重新读取本地文件得到并与 manifest 相等的字节证据 |
 | `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；同 SHA 重复来源写入 `local_file.sha256_duplicate_sources`，不混入头像等非正文对象 |
-| `raw_sample_json` | 平台适配器结构化记录经头像清除后的样本；正式记录必须含 `content_detail_status` 和 `content_detail_source`。B站浏览数只保留在 `view_count`，不入列，也不进入 `metrics_json`。知乎 `content_visit_refs` 随该 JSON 入库，不新增列 |
+| `raw_sample_json` | 平台适配器结构化记录经头像清除后的样本；正式记录必须含 `content_detail_status` 和 `content_detail_source`。B站浏览数只保留在 `view_count`，不入列，也不进入 `metrics_json`。知乎 `content_visit_refs` 随该 JSON 入库，不新增列。知乎 `author_page_badges` 同样只进该 JSON，不进 `author_json`，不新增列（#193） |
 
 代码在下载前用五个平台显式投影识别正文图，在导入边界识别其他同类字段差异；内部持久化结构
 统一写入 `web_posts` / `web_post_images`。视频记录只用于识别和跳过，不进入内容主表。

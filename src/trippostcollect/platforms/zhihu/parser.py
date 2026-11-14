@@ -317,6 +317,9 @@ def merge_search_content_detail(
         search_content.following_count = detail_content.following_count
         search_content.author_posts_count = detail_content.author_posts_count
         search_content.author_page_counts = dict(detail_content.author_page_counts)
+        search_content.author_verified = detail_content.author_verified
+        search_content.verified_text = detail_content.verified_text
+        search_content.author_page_badges = dict(detail_content.author_page_badges)
         if detail_content.creator_url_token:
             search_content.creator_url_token = detail_content.creator_url_token
     search_content.content_detail_status = "detail_observed"
@@ -329,6 +332,9 @@ def merge_search_content_detail(
 
 
 _AUTHOR_PAGE_COUNT_KEYS = ("answerCount", "articlesCount", "pinsCount", "questionCount")
+_AUTHOR_PAGE_BADGE_KEYS = ("badgeV2", "badge", "userType", "isOrg", "vipInfo")
+_OFFICIAL_IDENTITY_TYPES = ("identity_org", "identity_people")
+_MEDIA_KEY_MARKERS = ("icon", "url", "avatar", "image")
 
 
 def user_from_initial_data(state_text: str, url_token: str) -> dict | None:
@@ -349,11 +355,113 @@ def user_from_initial_data(state_text: str, url_token: str) -> dict | None:
     return user if isinstance(user, dict) else None
 
 
+def _media_key(key: object) -> bool:
+    text = str(key).casefold()
+    return any(marker in text for marker in _MEDIA_KEY_MARKERS)
+
+
+def _collect_url_strings(node: object, found: set[str]) -> None:
+    if isinstance(node, str):
+        value = node.strip()
+        if value and len(value) <= 8192 and value.casefold().startswith(("http://", "https://", "//")):
+            found.add(value)
+        return
+    if isinstance(node, dict):
+        for item in node.values():
+            _collect_url_strings(item, found)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_url_strings(item, found)
+
+
+def _removed_media_urls(node: object, found: set[str]) -> None:
+    if isinstance(node, dict):
+        for key, item in node.items():
+            if _media_key(key):
+                _collect_url_strings(item, found)
+            else:
+                _removed_media_urls(item, found)
+    elif isinstance(node, list):
+        for item in node:
+            _removed_media_urls(item, found)
+
+
+def _without_media(node: object, removed_urls: set[str]) -> object:
+    if isinstance(node, dict):
+        cleaned: dict = {}
+        for key, item in node.items():
+            if _media_key(key):
+                continue
+            cleaned_item = _without_media(item, removed_urls)
+            if isinstance(cleaned_item, str) and cleaned_item.strip() in removed_urls:
+                continue
+            cleaned[key] = cleaned_item
+        return cleaned
+    if isinstance(node, list):
+        cleaned_list = []
+        for item in node:
+            cleaned_item = _without_media(item, removed_urls)
+            if isinstance(cleaned_item, str) and cleaned_item.strip() in removed_urls:
+                continue
+            cleaned_list.append(cleaned_item)
+        return cleaned_list
+    return node
+
+
+def author_page_badge_payload(user: dict) -> dict:
+    """摘出作者页标识，递归去掉键名含 icon/url/avatar/image 的键及因此证明的重复 URL。"""
+
+    selected = {key: user[key] for key in _AUTHOR_PAGE_BADGE_KEYS if key in user}
+    removed: set[str] = set()
+    _removed_media_urls(selected, removed)
+    stripped = _without_media(selected, removed)
+    return stripped if isinstance(stripped, dict) else {}
+
+
+def official_identity(user: dict, payload: dict) -> tuple[int | None, str]:
+    """作者页官方身份。``(None, "")`` 表示不能判断；``(0, "")`` 表示读过且没有。"""
+
+    if not isinstance(user, dict) or "badgeV2" not in user or not isinstance(user.get("badgeV2"), dict):
+        return None, ""
+    if not isinstance(user["badgeV2"].get("detailBadges"), list):
+        return None, ""
+    stored = payload.get("badgeV2")
+    details = stored.get("detailBadges") if isinstance(stored, dict) else None
+    if not isinstance(details, list):
+        return None, ""
+    grouped: dict[str, list[str]] = {name: [] for name in _OFFICIAL_IDENTITY_TYPES}
+    found = False
+    for item in details:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "identity" or item.get("badgeStatus") != "passed":
+            continue
+        detail_type = item.get("detailType")
+        if detail_type not in grouped:
+            continue
+        found = True
+        description = item.get("description")
+        if isinstance(description, str) and description:
+            grouped[detail_type].append(description)
+    if not found:
+        return 0, ""
+    seen: set[str] = set()
+    parts: list[str] = []
+    for detail_type in _OFFICIAL_IDENTITY_TYPES:
+        for text in grouped[detail_type]:
+            if text in seen:
+                continue
+            seen.add(text)
+            parts.append(text)
+    return 1, "、".join(parts)
+
+
 def apply_author_page(content: ZhihuContent, user: dict, url_token: str) -> None:
-    """用作者页用户实体覆盖粉丝、关注和作品数。认证判定保持不动。
+    """用作者页用户实体覆盖粉丝、关注、作品数和官方身份认证。
 
     粉丝数只认 ``followerCount``，来源标为作者页。关注数缺键为 None。作品数是
     ``answerCount + articlesCount``，任一缺失则为 None。四个原值缺键不写入。
+    认证只认已通过的机构/个人身份；其余标识写入 ``author_page_badges``。
     """
 
     content.creator_url_token = url_token
@@ -376,6 +484,9 @@ def apply_author_page(content: ZhihuContent, user: dict, url_token: str) -> None
         for key in _AUTHOR_PAGE_COUNT_KEYS
         if key in user and user[key] is not None
     }
+    payload = author_page_badge_payload(user)
+    content.author_page_badges = payload
+    content.author_verified, content.verified_text = official_identity(user, payload)
 
 
 class ZhihuExtractor:
@@ -594,8 +705,6 @@ class ZhihuExtractor:
             # 关注数缺键或空串表示没取到，不能补 0；键上的 0 仍是 0（#182）。
             res.follows = _optional_count(author.get("following_count"), author.get("followingCount"))
             res.headline = author.get("headline") or ""
-            badge_v2 = author.get("badge_v2") or {}
-            res.verified_text = author.get("verify_bayes") or badge_v2.get("title") or ""
 
         except Exception as e :
             logger.warning(

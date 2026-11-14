@@ -82,6 +82,14 @@ class ZhihuContent(BaseModel):
         default_factory=dict,
         description="Raw author-page counts stored in author_json; missing keys are omitted",
     )
+    author_verified: int | None = Field(
+        default=None,
+        description="Author-page official identity: 1 passed, 0 read but absent, None unknown",
+    )
+    author_page_badges: dict = Field(
+        default_factory=dict,
+        description="Author-page badges for raw_sample_json; icon, url, avatar and image keys removed",
+    )
 
 
 class ZhihuCreator(BaseModel):
