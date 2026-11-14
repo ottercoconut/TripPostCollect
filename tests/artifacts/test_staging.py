@@ -3,7 +3,7 @@
 来源 tools/MediaCrawler/tests 下 test_image_client_http_classification.py、test_image_download_retry.py、
 test_image_staging_errors.py。原用例经 fork 薄转发（media_platform.* 客户端、tools.image_download_retry、
 tools.image_manifest）调用根实现；这里直接导入根模块并沿用原别名，用例名、参数与断言逐条不变。
-微博用例原经 fork config 装配，改用根配置对象（与 fork 默认值逐键相同，test_adapter_t12 守护）。
+微博用例经根配置对象 worker_config() 装配。
 HTTP 只用 httpx.MockTransport，不访问网络。
 """
 

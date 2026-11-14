@@ -15,7 +15,7 @@ import pytest
 from support import worker_scenarios
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 PACKAGE = ROOT / "src/trippostcollect"
 PLATFORM = PACKAGE / "platforms/xhs"
 FORK_TOPS = {
@@ -187,7 +187,7 @@ def test_runtime_does_not_import_xhs_platform_or_scripts(tmp_path):
 
 
 def test_formal_xhs_accumulator_publishes_through_worker_event_exit():
-    """T14：原 test_adapter_t09_bridge 中正式装配一侧的断言；旧桥一侧随 E 在 T14-C 删除。"""
+    """正式装配的小红书累计器经 worker 事件出口发布批次。"""
     from trippostcollect.application.events import append_worker_execution_event
     from trippostcollect.application.worker_inputs import worker_config
     from trippostcollect.platforms import entry

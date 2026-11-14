@@ -5,8 +5,6 @@ from __future__ import annotations
 from trippostcollect.runtime.process import NO_PROGRESS_WATCHDOG_SECONDS
 
 import argparse
-import json
-import os
 import subprocess
 import sys
 from importlib import import_module
@@ -15,48 +13,15 @@ from pathlib import Path
 import pytest
 
 from support import worker_scenarios as scenarios
+from support.isolated_python import child_environment, json_tail, run_python
 from support.platform_sessions import child_redirect_source
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 ENTRY_MODULE = scenarios.ENTRY_MODULE
-# 退出切片依赖：根环境不安装，四站与入口导入链不得触及。
-EXIT_SLICE_MODULES = ("redis", "sqlalchemy", "aiomysql", "motor", "jieba", "matplotlib", "wordcloud", "typer")
 WORKER_PLATFORMS = {"wb": "weibo", "dy": "douyin", "zhihu": "zhihu", "xhs": "xhs"}
-
-
-def _child_environment() -> dict[str, str]:
-    """只保留被测副本自己的 src，避免 lane 的 tests/scripts 路径或生产 checkout 掩盖入口装载缺陷。"""
-    environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
-    environment["PYTHONPATH"] = str(ROOT / "src")
-    environment["PYTHONIOENCODING"] = "utf-8"
-    return environment
-
-
-def _run_python(code: str, *, cwd: Path, timeout: int = 120) -> subprocess.CompletedProcess[str]:
-    """在隔离子进程中运行，并拦截退出切片依赖的导入。"""
-    blocker = (
-        "import sys\n"
-        f"_BLOCKED = {EXIT_SLICE_MODULES!r}\n"
-        "class _Block:\n"
-        "    def find_spec(self, name, path=None, target=None):\n"
-        "        if name.split('.')[0] in _BLOCKED:\n"
-        "            raise ImportError('exit-slice module imported: ' + name)\n"
-        "        return None\n"
-        "sys.meta_path.insert(0, _Block())\n"
-    )
-    environment = _child_environment()
-    return subprocess.run(
-        [sys.executable, "-P", "-c", blocker + code],
-        cwd=cwd, env=environment, capture_output=True, text=True, timeout=timeout, check=False,
-    )
-
-
-def _json_tail(result: subprocess.CompletedProcess[str]):
-    assert result.returncode == 0, result.stderr[-4000:]
-    return json.loads(result.stdout.strip().splitlines()[-1])
 
 
 # ---------- 父侧构造的 child 命令 ----------
@@ -170,7 +135,7 @@ def test_configure_writes_worker_inputs_to_root_config(name: str, tmp_path: Path
         "config = current_config()\n"
         "print(json.dumps({key: getattr(config, key) for key in dir(config) if key.isupper()}, ensure_ascii=False))\n"
     )
-    config = _json_tail(_run_python(probe, cwd=tmp_path))
+    config = json_tail(run_python(probe, cwd=tmp_path))
     assert {key: config[key] for key in (
         "PLATFORM", "LOGIN_TYPE", "CRAWLER_TYPE", "START_PAGE", "KEYWORDS", "HEADLESS", "CDP_HEADLESS",
         "ENABLE_CDP_MODE", "SAVE_DATA_OPTION", "SAVE_DATA_PATH", "MAX_CONCURRENCY_NUM", "ENABLE_IP_PROXY",
@@ -203,7 +168,7 @@ def test_selected_platform_loads_no_upstream_platform_package(code: str, tmp_pat
         "print(json.dumps({'class': crawler_class.__name__, 'platforms': platforms,\n"
         "                  'execjs': 'execjs' in sys.modules}))\n"
     )
-    report = _json_tail(_run_python(probe, cwd=tmp_path))
+    report = json_tail(run_python(probe, cwd=tmp_path))
     assert report["platforms"] == []
     # 知乎签名 JS 只在首次签名时编译；微博/小红书不装载 execjs
     if code != "zhihu":
@@ -217,7 +182,7 @@ def test_configure_does_not_import_any_platform(tmp_path: Path) -> None:
         f"configure({scenarios.worker_argv('douyin_search_discovery', tmp_path)!r})\n"
         "print(json.dumps(sorted(n for n in sys.modules if n.startswith(('media_platform', 'execjs', 'playwright')))))\n"
     )
-    assert _json_tail(_run_python(probe, cwd=tmp_path)) == []
+    assert json_tail(run_python(probe, cwd=tmp_path)) == []
 
 
 @pytest.mark.installation
@@ -229,7 +194,7 @@ def test_all_worker_platforms_import_in_root_environment_without_exit_slices(tmp
         f"configure({scenarios.worker_argv('weibo_search', tmp_path)!r})\n"
         f"print(json.dumps([load_crawler(code).__name__ for code in {sorted(WORKER_PLATFORMS)!r}]))\n"
     )
-    names = _json_tail(_run_python(probe, cwd=tmp_path, timeout=180))
+    names = json_tail(run_python(probe, cwd=tmp_path, timeout=180))
     assert names == ["DouYinCrawler", "WeiboCrawler", "XiaoHongShuCrawler", "ZhihuCrawler"]
 
 
@@ -266,7 +231,7 @@ def test_entry_main_startup_and_cleanup_trace(tmp_path: Path) -> None:
         f"code = entry.main({scenarios.worker_argv('weibo_search', tmp_path)!r})\n"
         "print(json.dumps({'code': code, 'trace': trace}))\n"
     )
-    report = _json_tail(_run_python(probe, cwd=tmp_path))
+    report = json_tail(run_python(probe, cwd=tmp_path))
     assert report == {
         "code": 0,
         "trace": ["configure", "install_hooks", "load:wb", "start", "cleanup:wb"],
@@ -276,7 +241,7 @@ def test_entry_main_startup_and_cleanup_trace(tmp_path: Path) -> None:
 def test_entry_module_is_runnable_with_isolated_path(tmp_path: Path) -> None:
     result = subprocess.run(
         [sys.executable, "-P", "-m", ENTRY_MODULE, "--platform", "bili"],
-        cwd=tmp_path, env=_child_environment(), capture_output=True, text=True, timeout=60, check=False,
+        cwd=tmp_path, env=child_environment(), capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 2, result.stderr[-2000:]
 

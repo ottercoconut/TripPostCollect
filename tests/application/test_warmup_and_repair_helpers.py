@@ -18,7 +18,7 @@ from trippostcollect.application import inputs, page_evidence, repair, warmup
 from trippostcollect.core import paths as core_paths
 from trippostcollect.runtime import cookies, page_readiness
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 

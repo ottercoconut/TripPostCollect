@@ -16,7 +16,7 @@ from trippostcollect.db.bootstrap import bootstrap_database
 from trippostcollect.runtime import cookies, helpers, http
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 ENV_KEYS = {
     "db_path": "TRIPPOSTCOLLECT_DB_PATH",
     "xhs_target_key": "TRIPPOSTCOLLECT_XHS_DISCOVERY_TARGET_KEY",

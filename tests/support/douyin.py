@@ -9,7 +9,7 @@ from trippostcollect.platforms.douyin import core, parser
 from trippostcollect.platforms.douyin.client import DouYinClient as Client
 
 
-# T14：根配置对象取代 fork config；与 fork 默认值逐键相同由 test_adapter_t12 的配置守护证明。
+# 根配置对象 worker_config()。
 config = worker_config()
 # 迁入用例仍按原样 monkeypatch 这个 fork 数量键；根装配不读取它，只补 fork 默认值供 setattr。
 config.CRAWLER_MAX_NOTES_COUNT = 15

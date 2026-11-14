@@ -17,8 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def settings(**overrides):
     """只复制静态配置；所有输出由测试的临时目录覆盖。
 
-    T14：默认值取根配置对象 worker_config()，不再读取 fork config；两者在这些键上逐键相同由
-    tests/test_adapter_t12.py::test_worker_config_matches_fork_defaults_key_by_key 守护。
+    默认值取根配置对象 worker_config()。
     """
     from trippostcollect.runtime.browser import CDPBrowserSettings
 

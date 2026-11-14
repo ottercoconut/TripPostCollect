@@ -22,7 +22,7 @@ from trippostcollect.artifacts import image_materialization, image_proxy
 from trippostcollect.platforms.bilibili import client, core
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 executor = importlib.import_module("mediacrawler_crawl")
 

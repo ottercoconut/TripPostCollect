@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 for extra in (ROOT / "scripts", ROOT / "scripts" / "dev"):
     if str(extra) not in sys.path:
         sys.path.insert(0, str(extra))

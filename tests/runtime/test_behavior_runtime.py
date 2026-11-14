@@ -12,7 +12,7 @@ from trippostcollect.artifacts.evidence import write_evidence
 from trippostcollect.runtime import behavior
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.asyncio

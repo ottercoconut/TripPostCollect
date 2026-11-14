@@ -523,7 +523,7 @@ async def test_root_repair_page_status_is_classified(status, error, code, attemp
 
 @pytest.mark.parametrize("post_repair", ["0", "1"])
 def test_worker_assembly_uses_root_weibo(tmp_path, post_repair):
-    from test_adapter_t02 import _json_tail, _run_python
+    from support.isolated_python import json_tail as _json_tail, run_python as _run_python
 
     result = _json_tail(_run_python(
         "import os, sys, json\n"

@@ -1,12 +1,11 @@
 """包与入口边界：保留代码不导入 fork、源码 checkout 的工作根、B站不是 worker、前置检查、正式入口 CLI、资源单一真源与 CI 分组。
 
-构建与仓库外安装验收见 `test_adapter_t12_install.py`（installation lane）。
+构建与仓库外安装验收见 `tests/test_installation.py`（installation lane）。
 """
 
 from __future__ import annotations
 
 import ast
-import os
 import subprocess
 import sys
 from importlib import import_module
@@ -14,20 +13,15 @@ from pathlib import Path
 
 import pytest
 
+from support.formal_entries import FORMAL_ENTRIES, child_environment, help_command, help_environment
 
-ROOT = Path(__file__).resolve().parents[1]
+
+ROOT = Path(__file__).resolve().parents[2]
 for extra in (ROOT / "scripts", ROOT / "scripts" / "dev"):
     if str(extra) not in sys.path:
         sys.path.insert(0, str(extra))
 
 PACKAGE = ROOT / "src" / "trippostcollect"
-# 正式入口：scripts 下的脚本与 worker 模块入口。
-FORMAL_ENTRIES = (
-    "crawl_runner", "ctf_resource_crawl", "import_ctf_captures", "info_collection_benchmark", "login_warmup",
-    "mediacrawler_crawl", "mediacrawler_login_warmup", "repair_bilibili_articles", "repair_post_details",
-    "repair_xhs_posts", "trippostcollect.platforms.entry", "xhs_accounts", "xhs_runner",
-)
-
 # 已删除的 MediaCrawler fork 的顶层包名；保留代码不得导入。
 FORK_TOPS = frozenset({
     "api", "base", "cache", "cmd_arg", "config", "constant", "database", "libs", "main",
@@ -96,7 +90,7 @@ def test_retained_package_and_scripts_import_no_fork_package() -> None:
 
 def test_source_checkout_keeps_repository_root_without_explicit_work_root(tmp_path: Path) -> None:
     # 决策 9 的源码 checkout 一侧：未设 TRIPPOST_PROJECT_ROOT 时仍以仓库为根（安装态一侧见 install 用例）。
-    environment = _child_environment({}, tmp_path)
+    environment = child_environment({}, tmp_path)
     result = subprocess.run(
         [sys.executable, "-P", "-c", "import trippostcollect.core.paths as p; print(p.PROJECT_ROOT)"],
         cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=120,
@@ -113,17 +107,6 @@ def test_formal_contract_path_stays_in_repository() -> None:
 
 # ---------- 2. B站进程内运行与前置检查 ----------
 
-def _child_environment(extra_env: dict[str, str], tmp: Path) -> dict[str, str]:
-    environment = {key: value for key, value in os.environ.items()
-                   if not key.startswith("TRIPPOSTCOLLECT_") and key not in {"PYTHONPATH", "TRIPPOST_PROJECT_ROOT"}}
-    environment.update({
-        key: value.replace("<TMP>", str(tmp)).replace("<ROOT>", str(ROOT)) for key, value in extra_env.items()
-    })
-    environment["PYTHONPATH"] = str(ROOT / "src")
-    environment["PYTHONIOENCODING"] = "utf-8"
-    return environment
-
-
 def test_bilibili_runs_in_process_and_is_not_a_worker(tmp_path: Path) -> None:
     probe = (
         "import sys\n"
@@ -135,7 +118,7 @@ def test_bilibili_runs_in_process_and_is_not_a_worker(tmp_path: Path) -> None:
     )
     result = subprocess.run(
         [sys.executable, "-P", "-c", probe, str(ROOT / "scripts")],
-        cwd=tmp_path, env=_child_environment({}, tmp_path), capture_output=True, text=True, timeout=300,
+        cwd=tmp_path, env=child_environment({}, tmp_path), capture_output=True, text=True, timeout=300,
     )
     assert result.returncode == 0, result.stderr[-4000:]
 
@@ -150,21 +133,6 @@ def test_prerequisites_verify_package_resources(monkeypatch: pytest.MonkeyPatch)
 
 
 # ---------- 3. 正式入口 CLI ----------
-
-def help_command(name: str, python: str = sys.executable, root: Path = ROOT) -> list[str]:
-    if name == "trippostcollect.platforms.entry":
-        return [python, "-P", "-m", name, "--help"]
-    return [python, str(root / "scripts" / f"{name}.py"), "--help"]
-
-
-def help_environment(tmp: Path, workroot: Path) -> dict[str, str]:
-    environment = _child_environment({}, tmp)
-    # 显式固定影响 argparse 排版的终端尺寸与区域设置，不依赖宿主终端。
-    environment.update(COLUMNS="100", LINES="24", LC_ALL="C.UTF-8", TRIPPOST_PROJECT_ROOT=str(workroot))
-    for name in ("PYTHON_COLORS", "FORCE_COLOR", "NO_COLOR", "TERM"):
-        environment.pop(name, None)
-    return environment
-
 
 def test_formal_entries_print_help(tmp_path: Path) -> None:
     workroot = tmp_path / "workroot"

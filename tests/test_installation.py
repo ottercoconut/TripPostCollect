@@ -224,7 +224,7 @@ def test_installed_package_bootstraps_schema_from_package_resources(installed, t
 
 def test_installed_formal_entries_help_matches_source_checkout(installed, tmp_path) -> None:
     """安装后的正式入口与源码 checkout 打印相同的 --help（工作根路径归一）。"""
-    from test_adapter_t12 import FORMAL_ENTRIES, help_command, help_environment
+    from support.formal_entries import FORMAL_ENTRIES, help_command, help_environment
 
     source_root = tmp_path / "source-workroot"
     source_root.mkdir()
