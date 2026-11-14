@@ -1,14 +1,12 @@
-"""T03 显式输入、故障子集与迁移基线等价性。所有文件均为临时合成数据。"""
+"""发现读取（已知 ID 的数据库与续跑子集）、候选累计器、Cookie 与 HTTP 辅助函数。所有文件均为临时合成数据。"""
 
 from __future__ import annotations
 
 import ast
-import importlib.util
 import json
 import os
 from pathlib import Path
 import sqlite3
-import sys
 
 import pytest
 
@@ -19,7 +17,6 @@ from trippostcollect.runtime import cookies, helpers, http
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE = json.loads((ROOT / "tests/golden/t03_baseline.json").read_text())
 ENV_KEYS = {
     "db_path": "TRIPPOSTCOLLECT_DB_PATH",
     "xhs_target_key": "TRIPPOSTCOLLECT_XHS_DISCOVERY_TARGET_KEY",
@@ -29,33 +26,6 @@ ENV_KEYS = {
     "fingerprint": "TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT",
     "resume_identities_path": "TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH",
 }
-
-
-def _module(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-@pytest.fixture
-def legacy(tmp_path):
-    # 来自登记提交的原源码；副本测试不依赖 .git 或宿主 checkout。
-    source = "\n\n".join(BASELINE["sources"].values())
-    path = tmp_path / "legacy.py"
-    path.write_text(
-        "from __future__ import annotations\n"
-        "import os, json, sqlite3, random, re, time, urllib.parse\n"
-        "from pathlib import Path\n"
-        "from urllib.parse import urlparse\n"
-        "from typing import Any, Dict, List, Optional, Tuple\n" + source,
-    )
-    return _module(path, "t03_legacy")
-
-
-def _reads(legacy):
-    return [legacy.existing_platform_identities]
 
 
 @pytest.fixture
@@ -107,14 +77,13 @@ def _database(path):
         )
 
 
-def _equal_read(platform, scope, legacy, expected):
-    assert legacy.existing_platform_identities(platform) == expected
+def _read(platform, scope, expected):
     assert discovery_read.existing_platform_identities(platform, **scope) == expected
 
 
 @pytest.mark.parametrize("platform", ["weibo", "xhs"])
 @pytest.mark.parametrize("state", ["unset", "missing", "empty", "directory", "missing-parent", "invalid", "schema-empty"])
-def test_database_unavailable(scope, legacy, monkeypatch, platform, state):
+def test_database_unavailable(scope, monkeypatch, platform, state):
     path = Path(scope["db_path"])
     if state == "unset":
         _set_scope(monkeypatch, scope, db_path="")
@@ -128,12 +97,12 @@ def test_database_unavailable(scope, legacy, monkeypatch, platform, state):
         path.write_text("不是 SQLite")
     elif state == "schema-empty":
         bootstrap_database(path, sync_jobs=False)
-    _equal_read(platform, scope, legacy, set())
+    _read(platform, scope, set())
 
 
 @pytest.mark.parametrize("platform", ["weibo", "xhs"])
 @pytest.mark.parametrize("missing", [None, "web_posts", "seen", "exclusions"])
-def test_database_subset(scope, legacy, platform, missing):
+def test_database_subset(scope, platform, missing):
     _database(scope["db_path"])
     expected = {"post", "url-id", "xhs-seen"} if platform == "xhs" else {"post", "url-id", "seen", "excluded"}
     table = {
@@ -150,25 +119,25 @@ def test_database_subset(scope, legacy, platform, missing):
             expected.discard("xhs-seen" if platform == "xhs" else "seen")
         elif platform != "xhs":
             expected.discard("excluded")
-    _equal_read(platform, scope, legacy, expected)
+    _read(platform, scope, expected)
 
 
 @pytest.mark.parametrize("job_id", ["", "0", "not-int", "-1"])
-def test_job_scope_empty_or_invalid(scope, legacy, monkeypatch, job_id):
+def test_job_scope_empty_or_invalid(scope, monkeypatch, job_id):
     _database(scope["db_path"])
     _set_scope(monkeypatch, scope, job_id=job_id)
-    _equal_read("weibo", scope, legacy, {"post", "url-id"})
+    _read("weibo", scope, {"post", "url-id"})
 
 
 @pytest.mark.parametrize("field", ["xhs_target_key", "xhs_account_id", "xhs_fingerprint", "fingerprint"])
-def test_incomplete_scope(scope, legacy, monkeypatch, field):
+def test_incomplete_scope(scope, monkeypatch, field):
     _database(scope["db_path"])
     _set_scope(monkeypatch, scope, **{field: " "})
-    _equal_read("xhs" if field.startswith("xhs") else "weibo", scope, legacy, {"post", "url-id"})
+    _read("xhs" if field.startswith("xhs") else "weibo", scope, {"post", "url-id"})
 
 
 @pytest.mark.parametrize("state", ["missing", "broken", "directory", "valid", "object", "null", "number"])
-def test_resume_subset(scope, legacy, monkeypatch, tmp_path, state):
+def test_resume_subset(scope, monkeypatch, tmp_path, state):
     _database(scope["db_path"])
     path = tmp_path / "resume.json"
     _set_scope(monkeypatch, scope, resume_identities_path=str(path))
@@ -182,9 +151,6 @@ def test_resume_subset(scope, legacy, monkeypatch, tmp_path, state):
     expected = {"post", "url-id", "seen", "excluded"}
     if state in {"null", "number"}:
         # 迭代在 except 之外；不能擅自把非法形状吞成空集合。
-        for read in _reads(legacy):
-            with pytest.raises(TypeError):
-                read("weibo")
         with pytest.raises(TypeError):
             discovery_read.existing_platform_identities("weibo", **scope)
     else:
@@ -192,11 +158,11 @@ def test_resume_subset(scope, legacy, monkeypatch, tmp_path, state):
             expected.update({"resume", "0", "False"})
         elif state == "object":
             expected.add("resume")
-        _equal_read("weibo", scope, legacy, expected)
+        _read("weibo", scope, expected)
 
 
 @pytest.mark.parametrize("error", [OSError, sqlite3.Error])
-def test_outer_database_errors_preserve_resume(scope, legacy, monkeypatch, tmp_path, error):
+def test_outer_database_errors_preserve_resume(scope, monkeypatch, tmp_path, error):
     resume = tmp_path / "resume.json"
     resume.write_text('["resume"]')
     _set_scope(monkeypatch, scope, resume_identities_path=str(resume))
@@ -205,7 +171,7 @@ def test_outer_database_errors_preserve_resume(scope, legacy, monkeypatch, tmp_p
         raise error("合成连接故障")
 
     monkeypatch.setattr(sqlite3, "connect", fail)
-    _equal_read("weibo", scope, legacy, {"resume"})
+    _read("weibo", scope, {"resume"})
 
 
 @pytest.mark.parametrize("platform,table,error,expected", [
@@ -218,7 +184,7 @@ def test_outer_database_errors_preserve_resume(scope, legacy, monkeypatch, tmp_p
     ("xhs", "seen_candidates", ValueError, None),
     ("weibo", "seen_candidates", TypeError, None),
 ])
-def test_query_error_boundaries(scope, legacy, monkeypatch, platform, table, error, expected):
+def test_query_error_boundaries(scope, monkeypatch, platform, table, error, expected):
     _database(scope["db_path"])
     connect = sqlite3.connect
 
@@ -237,17 +203,14 @@ def test_query_error_boundaries(scope, legacy, monkeypatch, platform, table, err
 
     monkeypatch.setattr(sqlite3, "connect", lambda *_: FaultConnection())
     if expected is not None:
-        _equal_read(platform, scope, legacy, expected)
+        _read(platform, scope, expected)
     else:
-        for read in _reads(legacy):
-            with pytest.raises(error):
-                read(platform)
         with pytest.raises(error):
             discovery_read.existing_platform_identities(platform, **scope)
 
 
 @pytest.mark.parametrize("error", [OSError, TypeError, json.JSONDecodeError])
-def test_resume_read_errors_keep_database(scope, legacy, monkeypatch, error):
+def test_resume_read_errors_keep_database(scope, monkeypatch, error):
     _database(scope["db_path"])
     _set_scope(monkeypatch, scope, resume_identities_path="synthetic.json")
 
@@ -257,18 +220,18 @@ def test_resume_read_errors_keep_database(scope, legacy, monkeypatch, error):
         raise error("合成文件故障")
 
     monkeypatch.setattr(Path, "read_text", fail)
-    _equal_read("weibo", scope, legacy, {"post", "url-id", "seen", "excluded"})
+    _read("weibo", scope, {"post", "url-id", "seen", "excluded"})
 
 
 @pytest.mark.parametrize("value,default,expected", [(None, 3, 3), ("bad", 3, 3), ("-2", 3, 0), ("0", 3, 0), ("17", 3, 17), (None, -3, 0)])
-def test_env_int_reader(legacy, monkeypatch, value, default, expected):
+def test_env_int_reader(monkeypatch, value, default, expected):
     name = "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES"
     if value is None:
         monkeypatch.delenv(name, raising=False)
     else:
         monkeypatch.setenv(name, value)
     read = worker_inputs.env_int_reader(name, default, environ=os.environ)
-    assert read() == legacy.env_int(name, default) == expected
+    assert read() == expected
     monkeypatch.setenv(name, "29")
     assert read() == 29
     bound = {name: "4"}
@@ -282,7 +245,7 @@ def test_env_int_reader(legacy, monkeypatch, value, default, expected):
 
 @pytest.mark.parametrize("platform", ["weibo", "douyin", "zhihu", "xhs"])
 def test_root_factory_loads_known_once(platform):
-    """T14-C：原 fork 工厂用例（from_environment）的根侧断言；env 作用域读取归 entry 装配，构造归 for_platform。"""
+    """env 作用域读取归 entry 装配，构造归 for_platform；已知 ID 只读取一次。"""
     known = {"known"}
     calls = []
 
@@ -350,17 +313,11 @@ def _check_event_sequence(root_events):
 
 
 def test_root_injected_event_sequence():
-    """T14：原对照的根侧字面断言。
-
-    不固化 fork 侧结果：fork 的 tools/trippostcollect_adaptive.AdaptiveAccumulator 是根类子类，只换了默认
-    事件出口，仓库中也没有独立的旧实现，固化它等于根实现与自身比较。事件字段的独立断言见
-    tests/application/test_discovery.py（原 fork 用例原名原断言移植）。
-    """
+    """注入的事件出口按批次完成、来源耗尽的顺序收到事件；字段的逐项断言见 tests/application/test_discovery.py。"""
     _check_event_sequence(_root_event_sequence())
 
 
-def test_root_explicit_sink_is_excluded_from_comparison():
-    """T14：原用例的根侧部分；fork 部分随旧桥在 T14-C 删除。"""
+def test_explicit_sink_is_excluded_from_equality_and_repr():
     events = []
     explicit = candidates.AdaptiveAccumulator("weibo", event_sink=lambda *event: events.append(event))
     default = candidates.AdaptiveAccumulator("weibo")
@@ -395,71 +352,68 @@ def test_http_factory(monkeypatch, disabled, override):
     assert result == {"verify": not disabled if override is None else override}
 
 
-# #127 有意偏离：随机桌面 UA 与固定 iPhone UA 两个辅助函数删除（唯一用途是给浏览器与浏览器外请求写死 UA）；
-# 浏览器外请求改取浏览器自报的 navigator.userAgent，见 tests/test_ua_from_browser_issue127.py。
-@pytest.mark.parametrize("name", ["get_user_agent", "get_mobile_user_agent"])
-def test_user_agent_helpers_exit_with_issue_127(legacy, name):
-    source = BASELINE["sources"]["tools/crawler_util.py"]
-    assert any(isinstance(node, ast.FunctionDef) and node.name == name for node in ast.parse(source).body)
-    assert callable(getattr(legacy, name))
-    assert not hasattr(helpers, name)
+@pytest.mark.parametrize(("platform", "url", "required"), [
+    ("bilibili", "https://www.bilibili.com/", ()), ("weibo", "https://m.weibo.cn/", ()),
+    ("douyin", "https://www.douyin.com/", ()), ("zhihu", "https://www.zhihu.com/", ("d_c0", "z_c0")),
+    ("xhs", "https://www.xiaohongshu.com/", ()),
+])
+def test_platform_cookie_url_and_required_names(platform, url, required):
+    assert cookies.platform_cookie_url(platform) == url
+    assert cookies.required_cookie_names(platform) == required
 
 
-@pytest.mark.parametrize("platform", ["bilibili", "weibo", "douyin", "zhihu", "xhs", "unknown"])
-def test_cookie_pure_functions_match_baseline(legacy, platform, monkeypatch):
+def test_unknown_platform_has_no_cookie_url_or_required_names():
+    with pytest.raises(KeyError):
+        cookies.platform_cookie_url("unknown")
+    assert cookies.required_cookie_names("unknown") == ()
+
+
+def test_cookie_pure_functions(monkeypatch):
     monkeypatch.setattr(cookies.time, "time", lambda: 100)
-    if platform == "unknown":
-        for module in (legacy, cookies):
-            with pytest.raises(KeyError):
-                module.platform_cookie_url(platform)
-    else:
-        assert cookies.platform_cookie_url(platform) == legacy.platform_cookie_url(platform)
-    assert cookies.required_cookie_names(platform) == legacy.required_cookie_names(platform)
+    # 跳过空项、空值与已过期（expires < 现在）；会话 cookie（-1）与恰好到期的保留，名字去首尾空格。
     values = [None, {}, {"name": "empty", "value": ""}, {"name": "zero", "value": 0},
               {"name": " x ", "value": "a=b", "expires": 101}, {"name": "old", "value": "v", "expires": 99},
               {"name": "session", "value": "v", "expires": -1}, {"name": "equal", "value": "v", "expires": 100}]
-    assert cookies.cookies_to_header(values) == legacy.cookies_to_header(values)
-    for header in ("", "a=1;a=2; =x;bare;b=a=b", " z_c0=x ;d_c0=y"):
-        assert cookies.cookie_names_from_header(header) == legacy.cookie_names_from_header(header)
-    # #112 有意偏离：旧实现按 split("=") 切分，值含 "=" 的 cookie（如 b=a=b）被静默丢弃；现按首个 "=" 切分。
+    assert cookies.cookies_to_header(values) == "zero=0;x=a=b;session=v;equal=v"
+    assert cookies.cookie_names_from_header("") == []
+    assert cookies.cookie_names_from_header("a=1;a=2; =x;bare;b=a=b") == ["a", "b"]
+    assert cookies.cookie_names_from_header(" z_c0=x ;d_c0=y") == ["d_c0", "z_c0"]
+    # #112：按首个 "=" 切分，值含 "=" 的 cookie 不丢失；同名取后者。
     assert cookies.convert_str_cookie_to_dict("a=1;a=2; =x;bare;b=a=b") == {"a": "2", "": "x", "b": "a=b"}
-    assert legacy.convert_str_cookie_to_dict("a=1;a=2; =x;bare;b=a=b") == {"a": "2", "": "x"}
-    for header in ("", " z_c0=x ;d_c0=y"):
-        assert cookies.convert_str_cookie_to_dict(header) == legacy.convert_str_cookie_to_dict(header)
-    for values in (None, [], [{"name": "a", "value": "b"}, {"name": "a", "value": "c"}, {}]):
-        assert cookies.convert_cookies(values) == legacy.convert_cookies(values)
+    assert cookies.convert_str_cookie_to_dict("") == {}
+    assert cookies.convert_str_cookie_to_dict(" z_c0=x ;d_c0=y") == {"z_c0": "x", "d_c0": "y"}
+    assert cookies.convert_cookies(None) == cookies.convert_cookies([]) == ("", {})
+    assert cookies.convert_cookies([{"name": "a", "value": "b"}, {"name": "a", "value": "c"}]) == ("a=b;a=c", {"a": "c"})
     export = {"cookie_header": "synthetic", "source": "snapshot", "cookie_names": ["a"]}
-    assert cookies.public_cookie_export(export) == legacy.public_cookie_export(export)
+    assert cookies.public_cookie_export(export) == {"source": "snapshot", "cookie_names": ["a"]}
 
 
-@pytest.mark.parametrize("state", ["missing", "broken", "wrong-list", "incomplete", "complete", "null"])
-def test_cookie_snapshot_matches_baseline(legacy, monkeypatch, tmp_path, state):
+@pytest.mark.parametrize("content", [None, "{", '{"cookies":{}}', '{"cookies":[{"name":"d_c0","value":"x"}]}'])
+def test_cookie_snapshot_rejects_missing_broken_or_incomplete(monkeypatch, tmp_path, content):
     path = tmp_path / "snapshot.json"
     monkeypatch.setattr(cookies, "cookie_snapshot_path", lambda _: path)
-    legacy.cookie_snapshot_path = lambda _: path
-    if state != "missing":
-        path.write_text({
-            "broken": "{", "wrong-list": '{"cookies":{}}',
-            "incomplete": '{"cookies":[{"name":"d_c0","value":"x"}]}',
-            "complete": '{"saved_at":"now","cookies":[{"name":"d_c0","value":"x"},{"name":"z_c0","value":"y"}]}',
-            "null": "null",
-        }[state])
-    if state == "null":
-        for module in (legacy, cookies):
-            with pytest.raises(AttributeError):
-                module.load_cookie_snapshot("zhihu")
-    elif state == "complete":
-        # #127 有意偏离：快照读取多返回 warmup 保存的 user_agent（旧快照无该字段时为空串），其余键值不变。
-        expected = legacy.load_cookie_snapshot("zhihu")
-        assert "user_agent" not in expected
-        assert cookies.load_cookie_snapshot("zhihu") == {**expected, "user_agent": ""}
-    else:
-        assert cookies.load_cookie_snapshot("zhihu") == legacy.load_cookie_snapshot("zhihu")
+    if content is not None:
+        path.write_text(content)
+    assert cookies.load_cookie_snapshot("zhihu") is None
+
+
+def test_cookie_snapshot_returns_header_names_and_user_agent(monkeypatch, tmp_path):
+    path = tmp_path / "snapshot.json"
+    monkeypatch.setattr(cookies, "cookie_snapshot_path", lambda _: path)
+    path.write_text('{"saved_at":"now","cookies":[{"name":"d_c0","value":"x"},{"name":"z_c0","value":"y"}]}')
+    # #127：快照多返回 warmup 保存的 user_agent，旧快照无该字段时为空串。
+    assert cookies.load_cookie_snapshot("zhihu") == {
+        "cookie_header": "d_c0=x;z_c0=y", "source": "snapshot", "snapshot_path": str(path), "saved_at": "now",
+        "cookie_names": ["d_c0", "z_c0"], "required_cookie_names": ["d_c0", "z_c0"], "user_agent": "",
+    }
+    path.write_text("null")
+    with pytest.raises(AttributeError):
+        cookies.load_cookie_snapshot("zhihu")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("urls", [None, [], ["https://example.invalid/"]])
-async def test_context_cookie_call_shape(legacy, urls):
+async def test_context_cookie_call_shape(urls):
     traces = []
 
     class Context:
@@ -467,22 +421,13 @@ async def test_context_cookie_call_shape(legacy, urls):
             traces.append(kwargs)
             return [{"name": "a", "value": "b"}]
 
-    assert await cookies.convert_browser_context_cookies(Context(), urls) == await legacy.convert_browser_context_cookies(Context(), urls)
-    assert traces == ([{"urls": urls}] * 2 if urls else [{}, {}])
+    assert await cookies.convert_browser_context_cookies(Context(), urls) == ("a=b", {"a": "b"})
+    assert traces == ([{"urls": urls}] if urls else [{}])
 
 
-def test_helper_html_and_url_equivalence(legacy):
-    for value in ("", "<script>x</script><style>y</style><b>文本</b>", "<script>\nx\n</script> a &amp; b"):
-        assert helpers.extract_text_from_html(value) == legacy.extract_text_from_html(value)
-    for value in ("", "https://example.invalid/?a=1&a=2&empty=&b=x%20y", "no-query"):
-        assert helpers.extract_url_params_to_dict(value) == legacy.extract_url_params_to_dict(value)
-
-
-def test_cookie_imports_share_one_implementation(monkeypatch):
-    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
-    import mediacrawler_crawl as crawl
-    import mediacrawler_login_warmup as warmup
-    import repair_bilibili_articles as repair
-
-    assert crawl.required_cookie_names is warmup.required_cookie_names is cookies.required_cookie_names
-    assert crawl.load_cookie_snapshot is repair.load_cookie_snapshot is cookies.load_cookie_snapshot
+def test_helper_html_text_and_url_params():
+    assert helpers.extract_text_from_html("") == ""
+    assert helpers.extract_text_from_html("<script>x</script><style>y</style><b>文本</b>") == "文本"
+    assert helpers.extract_url_params_to_dict("") == {}
+    assert helpers.extract_url_params_to_dict("https://example.invalid/?a=1&a=2&empty=&b=x%20y") == {"a": "2", "b": "x y"}
+    assert helpers.extract_url_params_to_dict("no-query") == {}

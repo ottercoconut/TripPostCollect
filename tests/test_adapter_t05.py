@@ -1,4 +1,4 @@
-"""微博根适配器在离线边界上的请求、产物和事件，与 T14 固化的固定旧实现结果对照。"""
+"""微博适配器在离线边界上的请求、产物和事件：搜索、长文详情、正文图片、修复轮与入口装配。"""
 
 from __future__ import annotations
 
@@ -18,8 +18,7 @@ import pytest
 from playwright.async_api import Error as PlaywrightError
 from tenacity import RetryError
 
-from support import legacy_expectations as expectations
-from support import stealth_removal_deviation, ua_from_browser_deviation, weibo_fetch_deviation
+from support import worker_scenarios
 from support.stable_png import solid_png
 from support.weibo_adapter import ROOT, settings
 from trippostcollect.application import events
@@ -27,6 +26,9 @@ from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
 from trippostcollect.platforms import entry
 from trippostcollect.platforms.weibo import client, core
 from trippostcollect.runtime import image_retry
+
+
+BROWSER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 
 
 def mblog(note_id, *, long=False):
@@ -94,8 +96,8 @@ async def drive(directory, monkeypatch, scenario, post_repair):
 
         async def evaluate(self, script, note_id=None):
             if script == "() => navigator.userAgent":
-                # #127：httpx 头的 UA 取自浏览器；求值不进入轨迹（见 support.ua_from_browser_deviation）。
-                return ua_from_browser_deviation.BROWSER_USER_AGENT
+                # #127：httpx 头的 UA 取自浏览器；求值不进入轨迹。
+                return BROWSER_USER_AGENT
             trace.append(("evaluate", script, note_id))
             if scenario == "repair_empty":
                 return {"id": "wrong", "text": "其他帖子"}
@@ -114,7 +116,7 @@ async def drive(directory, monkeypatch, scenario, post_repair):
             trace.append(("add_cookies", values))
 
         async def add_init_script(self, **kwargs):
-            # #127：微博不再注入任何 init script；出现即进入轨迹并使比较失败（见 support.stealth_removal_deviation）。
+            # #127：微博不再注入任何 init script；出现即进入轨迹，由 check_drive_result 判失败。
             trace.append(("init_script", kwargs))
 
         async def close(self):
@@ -243,50 +245,58 @@ DRIVE_SCENARIOS = [
     "detail_403", "detail_429", "image_failure", "image_rate_limit", "image_retry", "image_bad_bytes",
     "login_expired", "repair_api", "repair_page", "repair_empty", "repair_navigation", "repair_rate_limit",
 ]
-T14_DRIVE = ("T05", "frozen_implementation")
-# #114 起这些用例的语义有意改变（重试与阻断分类、登录复查、删除 L3 回退），固化文件已删除，
-# 由 test_root_drive_semantics_changed_by_issue_114 的字面断言覆盖；其余用例经偏离变换后与固化预期比较。
-RETIRED_DRIVE_CASES = frozenset({
+# #114 改变语义的用例另由 test_root_drive_semantics_changed_by_issue_114 逐项断言。
+ISSUE_114_CASES = frozenset({
     ("search_retry", 0), ("search_retry", 1), ("search_error", 0), ("search_error", 1),
     ("login_expired", 0), ("login_expired", 1), ("detail_403", 0), ("detail_403", 1),
     ("detail_429", 0), ("detail_429", 1), ("repair_api", 1), ("repair_rate_limit", 1),
 })
-FROZEN_DRIVE_CASES = [
+DRIVE_CASES = [
     (scenario, post_repair) for scenario in DRIVE_SCENARIOS for post_repair in (0, 1)
-    if (scenario, post_repair) not in RETIRED_DRIVE_CASES
+    if (scenario, post_repair) not in ISSUE_114_CASES
 ]
+EXHAUSTED = {("source_exhausted", "empty_page")}
 
 
-def original_image_url(url):
-    """drive 输入中正文图的平台原始地址；固化预期只记录了 large 直连形态。"""
-    return url.replace("/large/", "/orj360/", 1)
+def expected_outcome(scenario, post_repair):
+    """(停止事件集合, 跳过的候选 [(范围, 错误码)], 落盘正文图数)。"""
+    if scenario in {"search", "detail_retry", "image_retry"} or (scenario == "detail_error" and post_repair):
+        return EXHAUSTED, [], 2
+    if scenario == "detail_error":
+        # 非修复轮长文详情失败：该候选记 post 跳过，另一篇照常入图。
+        return EXHAUSTED, [("post", "detail_request_failed")], 1
+    if scenario == "empty":
+        return EXHAUSTED, [], 0
+    if scenario in {"image_failure", "image_bad_bytes"}:
+        code = "image_source_unavailable" if scenario == "image_failure" else "image_non_raster_response"
+        return EXHAUSTED, [("image", code)] * 2, 0
+    if scenario == "image_rate_limit":
+        return {("runtime_failed", "image_rate_limited")}, [], 0
+    if scenario == "detail" or (scenario == "repair_page" and post_repair):
+        return set(), [], 1
+    return set(), [], 0
 
 
-def frozen_drive(scenario, post_repair):
-    return stealth_removal_deviation.weibo(ua_from_browser_deviation.weibo(weibo_fetch_deviation.drive(
-        expectations.load(*T14_DRIVE, f"{scenario}-repair{post_repair}"), original_url=original_image_url,
-    )))
+def drive_outcome(new):
+    stops = {(row["details"]["stop_reason"], row["details"].get("stop_detail"))
+             for row in new["events"] if row["type"] == "adaptive_search_stopped"}
+    skips = [(row["details"].get("failure_scope"), row["details"].get("error_code"))
+             for row in new["events"] if row["type"] == "candidate_skipped"]
+    images = sum("/images/" in name for name in new["artifacts"])
+    return stops, skips, images
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario,post_repair", FROZEN_DRIVE_CASES)
-async def test_root_matches_frozen_legacy_requests_artifacts_and_events(tmp_path, scenario, post_repair):
-    """T14：根实现与固化的旧实现结果比较（同一 drive、同一 == 语义），不加载 fork 或 E。"""
+@pytest.mark.parametrize("scenario,post_repair", DRIVE_CASES)
+async def test_drive_requests_artifacts_and_events(tmp_path, scenario, post_repair):
     with pytest.MonkeyPatch.context() as patch:
         new = await drive(tmp_path / "new", patch, scenario, post_repair)
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == frozen_drive(scenario, post_repair)
     check_drive_result(new, scenario, post_repair)
-
-
-# 旧桥 fork 工厂与冻结 T05 fixture 的旧侧结果逐字节相同（T14 删除 fork 前由守卫分别证明），共用一份预期。
-T14_BRIDGE = T14_DRIVE
+    assert drive_outcome(new) == expected_outcome(scenario, post_repair)
 
 
 async def drive_entry_assembly(directory, scenario, post_repair):
-    """新 worker 装配路径：install_hooks 读取修复开关后由 load_crawler 无参构造；不加载 fork/E。
-
-    与原 test_adapter_t05_bridge.py（T14-C 随旧桥删除）中新侧构造逐项相同，只是不再装载 fork 工厂做类型比对。
-    """
+    """worker 装配路径：install_hooks 读取修复开关后由 load_crawler 无参构造。"""
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(entry, "_weibo_post_repair", False)
         new_type = entry.load_crawler("wb")
@@ -305,12 +315,19 @@ async def drive_entry_assembly(directory, scenario, post_repair):
         return await drive(directory, patch, scenario, post_repair)
 
 
+def _scrub(value, tmp):
+    return json.loads(json.dumps(value, ensure_ascii=False, default=lambda item: sha256(item).hexdigest()
+                                 if isinstance(item, bytes) else str(item)).replace(str(tmp), "<TMP>"))
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario,post_repair", FROZEN_DRIVE_CASES)
-async def test_root_entry_assembly_matches_frozen_fork_factory(tmp_path, scenario, post_repair):
-    """T14：替代旧桥工厂对照；根入口装配结果与固化的 fork 工厂结果比较。"""
-    new = await drive_entry_assembly(tmp_path / "entry", scenario, post_repair)
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == frozen_drive(scenario, post_repair)
+@pytest.mark.parametrize("scenario,post_repair", [("search", 0), ("search", 1), ("repair_page", 1), ("image_failure", 0)])
+async def test_entry_assembly_matches_direct_construction(tmp_path, scenario, post_repair):
+    """经 worker 入口装配与直接构造得到相同的请求、产物、事件与失败。"""
+    with pytest.MonkeyPatch.context() as patch:
+        direct = await drive(tmp_path / "direct", patch, scenario, post_repair)
+    assembled = await drive_entry_assembly(tmp_path / "entry", scenario, post_repair)
+    assert _scrub(assembled, tmp_path / "entry") == _scrub(direct, tmp_path / "direct")
 
 
 def check_drive_result(new, scenario, post_repair):
@@ -324,11 +341,12 @@ def check_drive_result(new, scenario, post_repair):
         assert row[3]["headers"]["Referer"]
         if urlparse(row[2]).hostname == "m.weibo.cn":
             assert row[3]["headers"]["Cookie"] == "SUB=t05"
+            assert row[3]["headers"]["User-Agent"] == BROWSER_USER_AGENT
         else:
             # #114：图片请求只直连新浪，且不带 Cookie、Origin、Content-Type。
             assert urlparse(row[2]).hostname == "wx1.sinaimg.cn", row[2]
             assert set(row[3]["headers"]) == {"User-Agent", "Referer", "Accept"}
-    assert not any(row[0] == "browser_api" for row in new["trace"])
+    assert not any(row[0] in {"browser_api", "init_script"} for row in new["trace"])
     serialized = b"".join(new["artifacts"].values())
     assert b"avatar.invalid" not in serialized
     assert "截断".encode() not in serialized
@@ -361,7 +379,7 @@ def stopped_events(new):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario,post_repair", sorted(RETIRED_DRIVE_CASES))
+@pytest.mark.parametrize("scenario,post_repair", sorted(ISSUE_114_CASES))
 async def test_root_drive_semantics_changed_by_issue_114(tmp_path, scenario, post_repair):
     """#114 有意改变语义的 drive 用例：只断言新的阻断、重试与回退行为，不再与固化预期比较。"""
     with pytest.MonkeyPatch.context() as patch:
@@ -414,10 +432,8 @@ def test_dependency_direction():
                     assert module.startswith("trippostcollect.platforms.weibo")
 
 
-# api_error / rate_limit 只驱动已删除的 L3 浏览器接口回退，随 #114 退役（固化文件一并删除）；
 # 详情页导航返回的 HTTP 状态由 test_root_repair_page_status_is_classified 覆盖。
 REPAIR_SCENARIOS = ["empty", "navigation", "no_page"]
-T14_REPAIR = ("T05", "repair_exception_chain")
 
 
 async def repair_chain(patch, scenario, *, page_status=200):
@@ -477,11 +493,9 @@ def check_repair_chain(new, scenario):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", REPAIR_SCENARIOS)
-async def test_root_repair_attempts_and_exception_chain_match_frozen_legacy(tmp_path, scenario):
+async def test_root_repair_attempts_and_exception_chain(scenario):
     with pytest.MonkeyPatch.context() as patch:
         new = await repair_chain(patch, scenario)
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == weibo_fetch_deviation.repair_chain(
-        expectations.load(*T14_REPAIR, scenario))
     check_repair_chain(new, scenario)
 
 
@@ -508,14 +522,14 @@ async def test_root_repair_page_status_is_classified(status, error, code, attemp
 
 
 @pytest.mark.parametrize("post_repair", ["0", "1"])
-def test_worker_assembly_uses_root_weibo_without_fork_store(tmp_path, post_repair):
-    from test_adapter_t02 import _json_tail, _old_argv, _run_python
+def test_worker_assembly_uses_root_weibo(tmp_path, post_repair):
+    from test_adapter_t02 import _json_tail, _run_python
 
     result = _json_tail(_run_python(
         "import os, sys, json\n"
         f"os.environ['TRIPPOSTCOLLECT_POST_REPAIR'] = {post_repair!r}\n"
         "from trippostcollect.platforms.entry import configure, install_hooks, load_crawler\n"
-        f"configure({_old_argv('weibo_search', tmp_path)!r})\n"
+        f"configure({worker_scenarios.worker_argv('weibo_search', tmp_path)!r})\n"
         "install_hooks()\n"
         "cls = load_crawler('wb')\n"
         "instance = cls()\n"

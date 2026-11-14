@@ -1,28 +1,13 @@
-"""抖音作者字段边界回归：SQLite 直接执行冻结旧列契约。
+"""抖音作者字段边界回归。
 
-用例名沿用测试台账登记的 node ID。#49 起作品（根实现）的 creator_hash 为平台原始 uid、nickname
-为原始昵称，sec_uid/short_id/unique_id/头像/IP 归属地不作为键写出。#163 起作者简介只取作者资料 user 节点的
-signature，且只写入 jsonl 记录；jsonl 记录另由 sec_uid 拼出作者主页链接。搜索作者对象里的签名、主页链接与本文件的
-冻结旧列（db 模式）投影仍不写出。评论属 T12 退出切片，
-原先只验证冻结旧评论投影哈希/脱敏行为的 test_douyin_comment_masks_user_info 随旧身份函数在 T14-C 删除。
+#49 起作品的 creator_hash 为平台原始 uid、nickname 为原始昵称，sec_uid/short_id/unique_id/头像/IP 归属地
+不作为键写出。#163 起作者简介只取作者资料 user 节点的 signature，且只写入 jsonl 记录；jsonl 记录另由 sec_uid
+拼出作者主页链接。搜索作者对象里的签名与主页链接不写出。
 """
 import asyncio
 
-import json
-import sqlite3
-from pathlib import Path
-from types import SimpleNamespace
 
-from support.douyin import config, douyin_store as ds
-
-LEGACY_COLUMNS = json.loads((Path(__file__).parents[2] / "fixtures/adapter_t06/legacy_columns.json").read_text())
-
-
-def checked_record(columns, values):
-    # 对应旧 ORM 构造时拒绝未知列；属性值仍保持投影原类型。
-    assert set(values) <= set(columns)
-    return SimpleNamespace(**values)
-
+from support.douyin import douyin_store as ds
 
 
 # 抖音禁用字段(键):不得作为存储 dict 的 key 出现；作者平台 ID 只经 creator_hash 写出。
@@ -178,81 +163,3 @@ def test_douyin_aweme_masks_user_info():
     assert captured.get("aweme_url") == f"https://www.douyin.com/video/{aweme['aweme_id']}"
 
 
-def test_douyin_store_end_to_end_sqlite(monkeypatch):
-    monkeypatch.setattr(config, "SAVE_DATA_OPTION", "db")
-    aweme = _build_aweme_item()
-    raw_uid = aweme["author"]["uid"]
-    raw_nick = aweme["author"]["nickname"]
-
-    # ---- 1. FakeStore 捕获 update_douyin_aweme 产出的真实 dict ----
-    fake = _FakeStore()
-    orig = _patch_factory(fake)
-    try:
-        asyncio.run(ds.update_douyin_aweme(aweme))
-    finally:
-        ds.DouyinStoreFactory.create_store = orig
-    assert len(fake.contents) == 1
-    captured = fake.contents[0]
-
-    # ---- 2. DouyinAweme(**captured) 构造校验 ----
-    # dict 多了已删列会 TypeError,少了非空必填列 SQLAlchemy 也会报错;
-    # 此处证明 captured 的 key 与删列后 ORM 列完全对得上,不抛异常。
-    obj = checked_record(LEGACY_COLUMNS["DouyinAweme"], captured)
-    assert obj.aweme_id == aweme["aweme_id"]
-    assert obj.creator_hash == raw_uid
-    assert obj.nickname == raw_nick
-    assert obj.followers_count == 12345
-    assert obj.fans_count == 12345
-    assert obj.following_count == 321
-    assert obj.aweme_count == 88
-    assert obj.author_liked_count == 7654321
-    assert obj.title == aweme["desc"]
-    assert obj.desc == aweme["desc"]
-    _assert_no_forbidden(captured, "douyin_aweme_orm_construct")
-
-    # 同一批根投影写入内存 SQLite；冻结列类型保留字符串与整数的回读契约。
-    columns = LEGACY_COLUMNS["DouyinAweme"]
-    with sqlite3.connect(":memory:") as conn:
-        conn.row_factory = sqlite3.Row
-        conn.execute("CREATE TABLE douyin_aweme (" + ", ".join(
-            f'"{name}" {kind}' for name, kind in columns.items()
-        ) + ")")
-
-        class SqliteStore:
-            async def store_content(self, content_item):
-                names = list(content_item)
-                conn.execute(
-                    "INSERT INTO douyin_aweme (" + ", ".join(names) + ") VALUES (" +
-                    ", ".join("?" for _ in names) + ")",
-                    [content_item[name] for name in names],
-                )
-
-        original = ds.DouyinStoreFactory.create_store
-        ds.DouyinStoreFactory.create_store = staticmethod(SqliteStore)
-        try:
-            asyncio.run(ds.update_douyin_aweme(aweme))
-        finally:
-            ds.DouyinStoreFactory.create_store = original
-        records = conn.execute("SELECT * FROM douyin_aweme WHERE aweme_id = ?", (aweme["aweme_id"],)).fetchall()
-        assert len(records) == 1
-        row = SimpleNamespace(**dict(records[0]))
-
-    # ---- 4. 回读断言 ----
-    assert row is not None, "作品未写入 SQLite"
-    assert row.aweme_id == aweme["aweme_id"]
-    assert row.creator_hash == raw_uid
-    assert row.nickname == raw_nick
-    assert row.followers_count == "12345"
-    assert row.fans_count == "12345"
-    assert row.following_count == "321"
-    assert row.aweme_count == "88"
-    assert row.author_liked_count == "7654321"
-    assert row.desc == aweme["desc"]
-    assert row.title == aweme["desc"]
-    # 禁用列在 ORM 上不存在(自省)
-    orm_cols = set(LEGACY_COLUMNS["DouyinAweme"])
-    assert not (orm_cols & FORBIDDEN_KEYS), f"ORM 仍含禁用列: {orm_cols & FORBIDDEN_KEYS}"
-    # captured 的所有 key 都是合法 ORM 列(无悬空 key)
-    assert set(captured.keys()).issubset(orm_cols), (
-        f"captured 含非 ORM 列: {set(captured.keys()) - orm_cols}"
-    )

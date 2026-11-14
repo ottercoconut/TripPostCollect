@@ -1,28 +1,19 @@
-"""以迁移前冻结源码验证辅助入口的调用顺序、文件字节与判定。"""
+"""辅助入口的调用顺序、文件与判定：登录预热三种入口、补采输入文件、补采判定、页面就绪与抖音 Cookie 清理。"""
 
 from __future__ import annotations
 
 import argparse
-import ast
 import asyncio
 from datetime import datetime
-from hashlib import sha256
-import importlib
 import json
 from pathlib import Path
-import shutil
 import sqlite3
 import stat
 import sys
-from types import ModuleType, SimpleNamespace
-from urllib.parse import parse_qsl
+from types import SimpleNamespace
 
 import pytest
 
-from support import (
-    fork_removal_deviation,
-    native_window_deviation,
-)
 from trippostcollect.application import inputs, page_evidence, repair, warmup
 from trippostcollect.core import paths as core_paths
 from trippostcollect.runtime import cookies, page_readiness
@@ -30,151 +21,6 @@ from trippostcollect.runtime import cookies, page_readiness
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
-FIXTURES = ROOT / "tests/fixtures/adapter_t10"
-
-
-PROVENANCE = json.loads((FIXTURES / "provenance.json").read_text())
-# T14-C 删除的两类旧导入在各冻结文件中的预期次数（MEDIACRAWLER_DIR, execution_state）。
-FORK_REMOVAL_IMPORTS = {
-    "mediacrawler_login_warmup": (1, 0), "login_warmup": (1, 0), "mediacrawler_crawl": (0, 0),
-    "ctf_browser_resilience": (0, 0), "required_cookie_names": (0, 0),
-}
-
-
-def frozen_source(name):
-    """读取冻结原文，先按 provenance.json 核对 sha256。"""
-    data = (FIXTURES / f"{name}.py.txt").read_bytes()
-    assert sha256(data).hexdigest() == PROVENANCE["fixtures_sha256"][f"{name}.py.txt"], name
-    return data.decode("utf-8")
-
-
-def old_module(name, namespace=None):
-    module = ModuleType(f"frozen_{name}")
-    module.__dict__.update(namespace or {})
-    # T14-C 有意偏离：MEDIACRAWLER_DIR 与过渡模块 execution_state 已删除，执行前单向替换旧导入。
-    mediacrawler_dir_imports, execution_state_imports = FORK_REMOVAL_IMPORTS[name]
-    source, preset = fork_removal_deviation.frozen_source(
-        frozen_source(name), mediacrawler_dir_imports=mediacrawler_dir_imports,
-        execution_state_imports=execution_state_imports,
-    )
-    module.__dict__.update(preset)
-    if name == "mediacrawler_login_warmup":
-        source = t83_sandbox_enabled(source)
-        for check in T112_LOGIN_API_CHECKS:
-            source = t112_login_api_check(source, check)
-        module.__dict__["project_login_api_result"] = warmup.project_login_api_result
-        source = t115_bilibili_nav_login(source)
-        source = t127_snapshot_user_agent(source)
-    if "from __future__ import annotations" not in source:
-        source = "from __future__ import annotations\n" + source
-    exec(compile(source, name, "exec"), module.__dict__)
-    return module
-
-
-def function(source, name):
-    return next(node for node in ast.parse(source).body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name)
-
-
-# #112 授权差异：登录检查接口不再把 /api/v4/me 原文前 300 字（含 avatar_url）写进 warmup 报告，结果按白名单
-# 投影（成功只留 uid/name，失败只留状态码与清洗过的错误 code/name）。冻结原文必须仍是被替换的旧实现。
-T112_LOGIN_API_CHECKS = {"zhihu_api_check": "text: text.slice(0, 300)", "weibo_api_check": "uid: data.uid || null"}
-
-
-def t112_login_api_check(source, name):
-    old = ast.get_source_segment(source, function(source, name))
-    assert T112_LOGIN_API_CHECKS[name] in old
-    new_source = (ROOT / "src/trippostcollect/application/warmup.py").read_text()
-    new = ast.get_source_segment(new_source, function(new_source, name))
-    assert "project_login_api_result(result" in new and "text.slice" not in new
-    return source.replace(old, new)
-
-
-def t83_sandbox_enabled(source):
-    """#83 授权差异：登录预热不再传 --no-sandbox，并显式 chromium_sandbox=True，其他参数不变。"""
-    line = '            "--no-sandbox",\n'
-    anchor = '        "ignore_https_errors": True,\n'
-    assert source.count(line) == 1 and source.count(anchor) == 1
-    source = source.replace(line, "")
-    return source.replace(anchor, anchor + '        "chromium_sandbox": True,\n')
-
-
-T115_OLD_BILIBILI_REQUIRED = '        "required": "cookie SESSDATA or DedeUserID",\n'
-T115_NEW_BILIBILI_REQUIRED = '        "required": "api.bilibili.com /x/web-interface/nav isLogin=true",\n'
-T115_OLD_BILIBILI_BRANCH = (
-    '    elif platform_key == "bilibili":\n'
-    '        ok = bool(cookies.get("SESSDATA") or cookies.get("DedeUserID"))\n'
-    "        markers = {\n"
-    '            "SESSDATA": bool(cookies.get("SESSDATA")),\n'
-    '            "DedeUserID": bool(cookies.get("DedeUserID")),\n'
-    "        }\n"
-)
-T115_NEW_BILIBILI_BRANCH = (
-    '    elif platform_key == "bilibili":\n'
-    "        api = await bilibili_api_check(page)\n"
-    '        ok = api.get("login") is True\n'
-    "        markers = {\n"
-    '            "SESSDATA": bool(cookies.get("SESSDATA")),\n'
-    '            "DedeUserID": bool(cookies.get("DedeUserID")),\n'
-    '            "api_ok": api.get("ok"),\n'
-    '            "api_login": api.get("login"),\n'
-    "        }\n"
-)
-
-
-def t115_bilibili_nav_login(source):
-    """#115 授权差异：B站登录判定改为页面内 nav 请求的 isLogin，cookie 存在只作标记。
-
-    旧分支与说明文字必须各恰好出现一次；新增的 bilibili_api_check 原样取自现行 warmup.py，
-    插在 current_state 之前，其余源码逐字不变。
-    """
-    assert source.count(T115_OLD_BILIBILI_REQUIRED) == 1
-    assert source.count(T115_OLD_BILIBILI_BRANCH) == 1
-    source = source.replace(T115_OLD_BILIBILI_REQUIRED, T115_NEW_BILIBILI_REQUIRED)
-    source = source.replace(T115_OLD_BILIBILI_BRANCH, T115_NEW_BILIBILI_BRANCH)
-    current = (ROOT / "src/trippostcollect/application/warmup.py").read_text()
-    check = ast.get_source_segment(current, function(current, "bilibili_api_check"))
-    anchor = "async def current_state(context: BrowserContext, page: Page, platform_key: str)"
-    assert source.count(anchor) == 1 and check
-    return source.replace(anchor, check + "\n\n\n" + anchor)
-
-
-T127_SNAPSHOT_CALL_STATES = {"state=state,": "page", "state=verify_state,": "verify_page"}
-
-
-def t127_snapshot_user_agent(source, name=None):
-    """#127 授权差异：快照保存登录 page 的 navigator.userAgent；登录视口改用共享常量 PROFILE_VIEWPORT（值不变）。
-
-    冻结原文中的旧写法必须恰好出现预期次数；新增的 browser_user_agent 原样取自现行 warmup.py，插在
-    safe_local_storage 之前，其余源码逐字不变。``name`` 为 None 时变换整份冻结文件（old_module 执行），
-    否则只变换该函数所需的部分（test_migrated_ast）。
-    """
-    if name in (None, "launch_login_context"):
-        viewport = '        "viewport": {"width": 1280, "height": 900},\n'
-        assert source.count(viewport) == 1
-        source = source.replace(viewport, '        "viewport": PROFILE_VIEWPORT,\n')
-    if name in (None, "write_cookie_snapshot"):
-        signature = "    state: dict[str, Any],\n) -> dict[str, Any] | None:\n"
-        payload = '        "cookies": cookies,\n    }\n'
-        assert source.count(signature) == 1 and source.count(payload) == 1
-        source = source.replace(signature, "    state: dict[str, Any],\n    user_agent: str,\n) -> dict[str, Any] | None:\n")
-        source = source.replace(payload, '        "user_agent": user_agent,\n' + payload)
-    if name in (None, "warmup_one"):
-        for state, page in T127_SNAPSHOT_CALL_STATES.items():
-            call = f"            {state}\n        )\n" if page == "page" else f"                {state}\n            )\n"
-            expected = 2 if page == "page" else 1
-            assert source.count(call) == expected, (state, source.count(call))
-            indent = call[: len(call) - len(call.lstrip())]
-            source = source.replace(call, call.replace(
-                f"{state}\n", f"{state}\n{indent}user_agent=await browser_user_agent({page}),\n", 1))
-    if name is None:
-        current = (ROOT / "src/trippostcollect/application/warmup.py").read_text()
-        helper = ast.get_source_segment(current, function(current, "browser_user_agent"))
-        anchor = "async def safe_local_storage(page: Page) -> dict[str, Any]:"
-        assert source.count(anchor) == 1 and helper
-        source = source.replace(anchor, helper + "\n\n\n" + anchor)
-        source = source.replace("from __future__ import annotations\n", "", 1)
-        source = "from __future__ import annotations\nfrom trippostcollect.core.paths import PROFILE_VIEWPORT\n" + source
-    return source
 
 
 class FixedDatetime(datetime):
@@ -274,11 +120,7 @@ def configure(monkeypatch, module, fake, root):
     monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: next(ticks) / 100))
     monkeypatch.setattr(module, "datetime", FixedDatetime)
     monkeypatch.setattr(module, "profile_dir_for", lambda key: root / "profiles" / key)
-    if hasattr(module, "MEDIACRAWLER_DIR"):
-        monkeypatch.setattr(module, "MEDIACRAWLER_DIR", root)
-    else:
-        # T14：新实现不再检查 fork 目录，快照经 cookie_snapshot_path 写出；对照时落在与旧实现相同的文件。
-        monkeypatch.setattr(module, "cookie_snapshot_path", lambda key: root / "profiles" / key / core_paths.COOKIE_SNAPSHOT_FILENAME)
+    monkeypatch.setattr(module, "cookie_snapshot_path", lambda key: root / "profiles" / key / core_paths.COOKIE_SNAPSHOT_FILENAME)
     monkeypatch.setattr(module, "discover_cdp_browser_path", lambda: None)
     monkeypatch.setattr(module, "browser_runtime_args", lambda: [])
     monkeypatch.setattr(module, "browser_launch_environment", lambda: {})
@@ -286,57 +128,60 @@ def configure(monkeypatch, module, fake, root):
     monkeypatch.setattr(cookies, "datetime", FixedDatetime)
 
 
+RUN_DIR = "20260930T120000000000+0000"
+ALL_TARGETS = ("bilibili", "douyin", "weibo", "zhihu")
+
+
+def warmup_expected(entry, scenario):
+    """(成功, Chrome 启动次数, 写出快照的平台, 平台报告文件)。
+
+    单平台入口：重开验证失败不写快照；--skip-reopen-verify 与 --no-close-on-success 只启动一次。
+    统一入口不传这两个开关，四个平台各启动两次；重开验证失败时只有不依赖页面接口判定的抖音写出快照。
+    """
+    failed = scenario == "reopen_failed"
+    if entry == "unified":
+        reports = {f"{RUN_DIR}/{key}.json" for key in ALL_TARGETS} | {f"{RUN_DIR}/summary.json", f"{RUN_DIR}/summary.md"}
+        return not failed, 5 if failed else 8, {"douyin"} if failed else set(ALL_TARGETS), reports
+    reports = {"weibo.json"} if entry == "one" else {f"{RUN_DIR}/weibo.json", f"{RUN_DIR}/summary.json"}
+    return not failed, 1 if scenario in {"skip", "keep"} else 2, set() if failed else {"weibo"}, reports
+
+
 @pytest.mark.parametrize("entry", ["one", "media", "unified"])
 @pytest.mark.parametrize("scenario", ["valid", "manual", "reopen_failed", "skip", "keep"])
 def test_warmup_trace_and_files(monkeypatch, tmp_path, entry, scenario):
-    old = old_module("mediacrawler_login_warmup")
-    monkeypatch.setitem(sys.modules, "mediacrawler_login_warmup", old)
-    unified = old_module("login_warmup")
-    results = []
     root = tmp_path / "run"
-    for module in (old, warmup):
-        root.mkdir()
-        fake = FakePlaywright(scenario)
-        configure(monkeypatch, module, fake, root)
-        args = argparse.Namespace(timeout_seconds=1, output_dir=str(root), browser_path=None,
-                                  no_close_on_success=scenario == "keep", skip_reopen_verify=scenario == "skip")
-        if entry == "one":
-            result = asyncio.run(module.warmup_one(fake, "weibo", root, args))
-        elif entry == "media":
-            argv = ["mediacrawler_login_warmup.py", "--platforms", "weibo", "--output-dir", str(root), "--timeout-seconds", "1"]
-            if scenario in {"keep", "skip"}:
-                argv.append("--no-close-on-success" if scenario == "keep" else "--skip-reopen-verify")
-            monkeypatch.setattr(sys, "argv", argv)
-            result = module.main() if module is old else module.media_main()
-        else:
-            runner = unified if module is old else module
-            monkeypatch.setattr(runner, "datetime", FixedDatetime)
-            if hasattr(runner, "MEDIACRAWLER_DIR"):
-                monkeypatch.setattr(runner, "MEDIACRAWLER_DIR", root)
-            monkeypatch.setattr(runner, "async_playwright", lambda: fake)
-            monkeypatch.setattr(sys, "argv", ["login_warmup.py", "--targets", "all", "--output-dir", str(root), "--timeout-seconds", "1"])
-            result = runner.main() if module is old else runner.login_main()
-        trace = fake.trace
-        if module is old:
-            # #139：冻结 warmup 的 launch 行钉住 1280×900 视口后换成原生窗口（见 support.native_window_deviation）。
-            trace = native_window_deviation.warmup_trace(trace)
-        results.append((result, trace, files_under(root)))
-        shutil.rmtree(root)
-    assert results[0] == results[1]
-    snapshots = [value for path, value in results[1][2].items() if path.endswith("trippostcollect_cookie_snapshot.json")]
-    if scenario != "reopen_failed":
-        assert snapshots
-    assert all(mode == 0o600 for _, mode in snapshots)
-    if entry == "unified":
-        assert any(path.endswith("summary.md") for path in results[1][2])
+    root.mkdir()
+    fake = FakePlaywright(scenario)
+    configure(monkeypatch, warmup, fake, root)
+    args = argparse.Namespace(timeout_seconds=1, output_dir=str(root), browser_path=None,
+                              no_close_on_success=scenario == "keep", skip_reopen_verify=scenario == "skip")
+    if entry == "one":
+        result = asyncio.run(warmup.warmup_one(fake, "weibo", root, args))
+        ok = result["ok"]
+        assert result["platform"] == "weibo"
+    elif entry == "media":
+        argv = ["mediacrawler_login_warmup.py", "--platforms", "weibo", "--output-dir", str(root), "--timeout-seconds", "1"]
+        if scenario in {"keep", "skip"}:
+            argv.append("--no-close-on-success" if scenario == "keep" else "--skip-reopen-verify")
+        monkeypatch.setattr(sys, "argv", argv)
+        ok = {0: True, 1: False}[warmup.media_main()]
+    else:
+        monkeypatch.setattr(sys, "argv", ["login_warmup.py", "--targets", "all", "--output-dir", str(root), "--timeout-seconds", "1"])
+        ok = {0: True, 1: False}[warmup.login_main()]
+    files = files_under(root)
+    snapshots = {path.split("/")[1] for path in files if path.endswith(core_paths.COOKIE_SNAPSHOT_FILENAME)}
+    reports = set(files) - {f"profiles/{key}/{core_paths.COOKIE_SNAPSHOT_FILENAME}" for key in snapshots}
+    assert (ok, fake.launches, snapshots, reports) == warmup_expected(entry, scenario)
+    assert all(mode == 0o600 for path, (_, mode) in files.items() if path.endswith(core_paths.COOKIE_SNAPSHOT_FILENAME))
+    kinds = [event[0] if isinstance(event[0], str) else event[2] for event in fake.trace]
+    # 每次启动都在关闭后才进入下一次启动。
+    assert kinds.count("launch") == kinds.count("close") == fake.launches
     if scenario == "manual" and entry != "unified":
-        assert any("front" in event for event in results[1][1])
-        assert any("reload" in event for event in results[1][1])
-
-
-def repair_baseline():
-    crawl = importlib.import_module("mediacrawler_crawl")
-    return old_module("mediacrawler_crawl", {**vars(crawl), "parse_qsl": parse_qsl})
+        # 首次未登录：新开页置前并刷新，等待人工登录后再判定。
+        first = kinds[:kinds.index("close")]
+        assert first.index("new_page") < first.index("front") < first.index("reload") < first.index("wait")
+    if scenario == "keep" and entry != "unified":
+        assert kinds[-2:] == ["wait", "close"]
 
 
 def outcome(function, *args, **kwargs):
@@ -346,66 +191,117 @@ def outcome(function, *args, **kwargs):
         return type(exc).__name__, str(exc)
 
 
-@pytest.mark.parametrize("name,payload", [
-    ("load_zhihu_detail_urls", '["https://www.zhihu.com/question/1/answer/2?token=x#frag"]'),
-    ("load_xhs_detail_urls", '["https://www.xiaohongshu.com/explore/a?xsec_token=secret&xsec_source=pc#frag"]'),
-    ("load_xhs_repair_target_ids", '["a", "a", " b "]'),
-    ("load_xhs_repair_report", '{"successful_ids":["a"]}'),
-    ("load_post_repair_targets", '[{"platform_post_id":"123","detail_target":"123","keyword":"青岛"}]'),
-])
-@pytest.mark.parametrize("state", ["valid", "missing", "broken", "wrong_type", "empty"])
-def test_repair_file_inputs(tmp_path, name, payload, state):
-    path = tmp_path / "input.json"
+# 读取器 → (合法内容, 解析结果, 错误信息中的文件说明)
+REPAIR_INPUTS = {
+    "load_zhihu_detail_urls": ('["https://www.zhihu.com/question/1/answer/2?token=x#frag"]',
+                               ["https://www.zhihu.com/question/1/answer/2"], "Zhihu detail URL file"),
+    "load_xhs_detail_urls": ('["https://www.xiaohongshu.com/explore/a?xsec_token=secret&xsec_source=pc#frag"]',
+                             ["https://www.xiaohongshu.com/explore/a?xsec_token=secret&xsec_source=pc"], "XHS detail URL file"),
+    "load_xhs_repair_target_ids": ('["a", "a", " b "]', {"a", "b"}, "XHS repair target ID file"),
+    "load_post_repair_targets": ('[{"platform_post_id":"123","detail_target":"123","keyword":"青岛"}]',
+                                 [{"platform_post_id": "123", "detail_target": "123", "keyword": "青岛"}],
+                                 "post repair target file"),
+}
+EMPTY_MESSAGES = {
+    "load_zhihu_detail_urls": "Zhihu detail URL file contains no answer/article URLs",
+    "load_xhs_detail_urls": "XHS detail URL file contains no URLs",
+    "load_xhs_repair_target_ids": "XHS repair target ID file contains no post IDs",
+    "load_post_repair_targets": "post repair target file contains no targets",
+}
+
+
+def _write_input(path, payload, state):
     if state != "missing":
         path.write_text({"valid": payload, "broken": "{", "wrong_type": '"text"', "empty": "[]"}[state])
-    old = repair_baseline()
-    new = inputs if hasattr(inputs, name) else repair
-    args = (path, "weibo") if name == "load_post_repair_targets" else (path,)
-    assert outcome(getattr(old, name), *args) == outcome(getattr(new, name), *args)
 
 
-@pytest.mark.parametrize("blocked,child_ok,valid,images,behavior", [
-    (False, True, 0, False, False), (True, True, 1, True, True),
-    (False, False, 1, True, True), (False, False, 0, True, True),
-    (False, False, 1, False, True), (False, False, 1, True, False),
+@pytest.mark.parametrize("name", sorted(REPAIR_INPUTS))
+@pytest.mark.parametrize("state", ["valid", "missing", "broken", "wrong_type", "empty"])
+def test_repair_file_inputs(tmp_path, name, state):
+    payload, parsed, label = REPAIR_INPUTS[name]
+    path = tmp_path / "input.json"
+    _write_input(path, payload, state)
+    reader = getattr(inputs if hasattr(inputs, name) else repair, name)
+    result = outcome(reader, *((path, "weibo") if name == "load_post_repair_targets" else (path,)))
+    if state == "valid":
+        assert result == parsed
+    elif state in {"missing", "broken"}:
+        # 读不到或不是 JSON：以 SystemExit 报出文件路径与原因。
+        assert result[0] == "SystemExit" and result[1].startswith(f"invalid {label}: {path}: ")
+    elif state == "wrong_type":
+        assert result == ("SystemExit", f"{label} must contain a JSON array")
+    else:
+        assert result == ("SystemExit", EMPTY_MESSAGES[name])
+
+
+@pytest.mark.parametrize("state", ["valid", "missing", "broken", "wrong_type", "empty"])
+def test_repair_report_is_optional(tmp_path, state):
+    """补采报告缺失或不可用时视为空报告，不报错。"""
+    path = tmp_path / "input.json"
+    _write_input(path, '{"successful_ids":["a"]}', state)
+    assert repair.load_xhs_repair_report(path) == ({"successful_ids": ["a"]} if state == "valid" else {})
+
+
+@pytest.mark.parametrize("blocked,child_ok,valid,images,behavior,allowed", [
+    # 子进程整体成功时不需要部分放行。
+    (False, True, 0, False, False, True),
+    (True, True, 1, True, True, False),
+    # 子进程失败时，只有未阻断、有有效记录、图片完整且行为证据合格才放行。
+    (False, False, 1, True, True, True),
+    (False, False, 0, True, True, False),
+    (False, False, 1, False, True, False),
+    (False, False, 1, True, False, False),
 ])
-def test_repair_partial_execution(blocked, child_ok, valid, images, behavior):
-    old = repair_baseline()
+def test_repair_partial_execution(blocked, child_ok, valid, images, behavior, allowed):
     kwargs = dict(repair_mode=True, runtime_blocked=blocked, child_execution_ok=child_ok,
                   validation={"valid_total_count": valid}, image_materialization={"complete": images},
                   behavior_validation={"ok": behavior})
-    assert old.repair_partial_child_execution_allowed(**kwargs) == repair.repair_partial_child_execution_allowed(**kwargs)
+    assert repair.repair_partial_child_execution_allowed(**kwargs) is allowed
 
 
-@pytest.mark.parametrize("records", [[], [{"platform": "weibo", "run": {"returncode": 0}, "failure_classification": {"failure_type": "success"}}],
-                                         [{"platform": "weibo", "run": {"returncode": 1}, "failure_classification": {"failure_type": "login_required"}}]])
-def test_repair_completion_and_evidence(records):
-    old = repair_baseline()
-    assert old.repair_candidate_execution_completed(records, ["weibo"]) == repair.repair_candidate_execution_completed(records, ["weibo"])
-    assert old.repair_runtime_stop_reason(records, ["weibo"]) == repair.repair_runtime_stop_reason(records, ["weibo"], latest_runtime_blocker=old.latest_runtime_blocker)
-    assert old.xhs_repair_pagination_evidence(records, target_count=2) == repair.xhs_repair_pagination_evidence(records, target_count=2)
+PROCESSED = {"available": True, "stopped": True, "stop_reason": "repair_targets_processed",
+             "stop_detail": "specified_detail_targets", "candidate_count": 2, "batches": []}
+
+
+@pytest.mark.parametrize("records,completed,stop_reason", [
+    ([], False, ""),
+    ([{"platform": "weibo", "run": {"returncode": 0}, "failure_classification": {"failure_type": "success"}}], True, ""),
+    ([{"platform": "weibo", "run": {"returncode": 1}, "failure_classification": {"failure_type": "login_required"}}],
+     False, "login_required"),
+])
+def test_repair_completion_and_evidence(records, completed, stop_reason):
+    crawl = __import__("mediacrawler_crawl")
+    assert repair.repair_candidate_execution_completed(records, ["weibo"]) is completed
+    assert repair.repair_runtime_stop_reason(records, ["weibo"], latest_runtime_blocker=crawl.latest_runtime_blocker) == stop_reason
+    assert repair.xhs_repair_pagination_evidence(records, target_count=2) == {
+        **PROCESSED, "successful_candidate_count": 0, "skipped_candidate_count": 0, "skipped_candidate_failures": [],
+    }
     targets = [{"platform_post_id": "1"}, {"platform_post_id": "2"}]
-    kwargs = dict(platform="weibo", successful_identities={"weibo:id:1"}, materialization_failures=[{"identity": "weibo:id:2", "error_code": "failed"}])
-    assert old.post_repair_pagination_evidence(targets, **kwargs) == repair.post_repair_pagination_evidence(targets, **kwargs)
+    assert repair.post_repair_pagination_evidence(
+        targets, platform="weibo", successful_identities={"weibo:id:1"},
+        materialization_failures=[{"identity": "weibo:id:2", "error_code": "failed"}],
+    ) == {**PROCESSED, "successful_candidate_count": 1, "skipped_candidate_count": 1, "skipped_candidate_failures": [{
+        "platform": "weibo", "identity": "weibo:id:2", "platform_post_id": "2", "failure_scope": "image",
+        "detail": "explicit repair target produced no formally valid persisted detail record", "error_code": "failed",
+        "retryable": False, "attempts": 1, "source_index": None, "terminal_for_run": True,
+        "evidence_source": "image_materialization",
+    }]}
 
 
 def test_repair_fallback_sqlite(tmp_path):
     path = tmp_path / "fallback.sqlite"
-    old = repair_baseline()
-    assert old.load_post_repair_fallbacks(path, "weibo", {"1"}) == repair.load_post_repair_fallbacks(path, "weibo", {"1"}) == {}
+    assert repair.load_post_repair_fallbacks(path, "weibo", {"1"}) == {}
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE web_posts(platform_key, platform_post_id, keyword, raw_sample_json)")
         conn.execute("INSERT INTO web_posts VALUES (?, ?, ?, ?)", ("weibo", "1", "青岛", '{"liked_count": 0}'))
-    result = repair.load_post_repair_fallbacks(path, "weibo", {"1", "2"})
-    assert result == old.load_post_repair_fallbacks(path, "weibo", {"1", "2"})
-    assert result == {"1": {"keyword": "青岛", "liked_count": 0}}
+    assert repair.load_post_repair_fallbacks(path, "weibo", {"1", "2"}) == {"1": {"keyword": "青岛", "liked_count": 0}}
 
 
-@pytest.mark.parametrize("navigation_error", [None, "timeout", "error"])
+@pytest.mark.parametrize("navigation_error,warnings", [
+    (None, []), ("timeout", ["commit_timeout: navigation"]), ("error", ["commit_error: RuntimeError: navigation"]),
+])
 @pytest.mark.parametrize("ready", [True, False])
-def test_page_readiness_trace(monkeypatch, navigation_error, ready):
-    old = old_module("ctf_browser_resilience")
-
+def test_page_readiness_trace(monkeypatch, navigation_error, warnings, ready):
     class Page:
         url = "https://example.test/"
 
@@ -417,10 +313,10 @@ def test_page_readiness_trace(monkeypatch, navigation_error, ready):
         async def goto(self, url, **kwargs):
             self.trace.append(("goto", url, kwargs))
             if navigation_error:
-                raise (old.PlaywrightTimeoutError if navigation_error == "timeout" else RuntimeError)("navigation")
+                raise (page_readiness.PlaywrightTimeoutError if navigation_error == "timeout" else RuntimeError)("navigation")
 
         async def evaluate(self, script):
-            self.trace.append(("evaluate", script))
+            self.trace.append(("evaluate",))
             self.reads += 1
             return {"ready": ready and self.reads > 1, "body_text_length": 300 if self.reads > 1 else 0, "url": self.url}
 
@@ -428,45 +324,59 @@ def test_page_readiness_trace(monkeypatch, navigation_error, ready):
             self.trace.append(("wait", value))
             self.clock += value / 1000
 
-    results = []
-    for module in (old, page_readiness):
-        page = Page()
-        loop = SimpleNamespace(time=lambda: page.clock)
-        monkeypatch.setattr(module, "asyncio", SimpleNamespace(get_running_loop=lambda: loop))
-        async def run():
-            nav = await module.navigate_with_commit_and_readiness(page, page.url, commit_timeout_ms=10, readiness_timeout_ms=1)
-            enrichment = await module.wait_for_content_enrichment(page, timeout_ms=1, poll_ms=1)
-            return nav, enrichment
-        results.append((asyncio.run(run()), page.trace))
-    assert results[0] == results[1]
+    page = Page()
+    loop = SimpleNamespace(time=lambda: page.clock)
+    monkeypatch.setattr(page_readiness, "asyncio", SimpleNamespace(get_running_loop=lambda: loop))
+
+    async def run():
+        nav = await page_readiness.navigate_with_commit_and_readiness(page, page.url, commit_timeout_ms=10, readiness_timeout_ms=1)
+        enrichment = await page_readiness.wait_for_content_enrichment(page, timeout_ms=1, poll_ms=1)
+        return nav, enrichment
+
+    nav, enrichment = asyncio.run(run())
+    # 提交失败只记警告；就绪超时才是致命。
+    readiness = {"ready": ready, "body_text_length": 300, "url": page.url, "timed_out": not ready}
+    assert nav == {
+        "strategy": "commit_then_content_ready", "url": page.url, "commit_timeout_ms": 10, "readiness_timeout_ms": 1,
+        "commit_ok": navigation_error is None, "content_ready": ready, "fatal": not ready, "warnings": warnings,
+        "readiness": readiness, "final_url": page.url,
+    }
+    # 正文 300 字已达 250 字下限，富化等待立即满足。
+    assert enrichment == {"ready": ready, "body_text_length": 300, "url": page.url, "enriched": True,
+                          "enrichment_targets": {"min_body_chars": 250, "min_images": 8}, "timed_out": False}
+    assert page.trace[:3] == [("goto", page.url, {"wait_until": "commit", "timeout": 10}), ("evaluate",), ("wait", 250)]
 
 
 def test_page_evidence_cookie_cleanup(monkeypatch, tmp_path):
-    old = old_module("ctf_browser_resilience")
-    for module in (old, page_evidence):
-        monkeypatch.setattr(module, "datetime", FixedDatetime)
-    results = []
-    for module in (old, page_evidence):
-        db = tmp_path / "Default/Cookies"
-        db.parent.mkdir(exist_ok=True)
-        with sqlite3.connect(db) as conn:
-            conn.execute("CREATE TABLE cookies(host_key, name, path)")
-            conn.executemany("INSERT INTO cookies VALUES (?, ?, ?)", [(".douyin.com", "a", "/"), (".example.test", "b", "/")])
-        event = module.clean_douyin_profile_cookies(tmp_path)
-        with sqlite3.connect(db) as conn:
-            remaining = conn.execute("SELECT * FROM cookies").fetchall()
-        db.unlink()
-        trace = []
-        class Context:
-            async def cookies(self):
-                trace.append("cookies")
-                return [{"domain": ".douyin.com", "name": "a"}]
-            async def clear_cookies(self):
-                trace.append("clear")
-        context_event = asyncio.run(module.clear_douyin_context_cookies(Context()))
-        results.append((event, remaining, context_event, trace))
-    assert results[0] == results[1]
-    assert results[1][1] == [(".example.test", "b", "/")]
+    monkeypatch.setattr(page_evidence, "datetime", FixedDatetime)
+    db = tmp_path / "Default/Cookies"
+    db.parent.mkdir()
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE cookies(host_key, name, path)")
+        conn.executemany("INSERT INTO cookies VALUES (?, ?, ?)", [(".douyin.com", "a", "/"), (".example.test", "b", "/")])
+    at = "2026-09-30T12:00:00+00:00"
+    assert page_evidence.clean_douyin_profile_cookies(tmp_path) == {
+        "target": "douyin", "strategy": "sqlite_cookie_rotation", "profile_dir": str(tmp_path), "started_at": at,
+        "deleted": 1, "cookies": [{"host": ".douyin.com", "name": "a", "path": "/"}], "ok": True,
+        "cookie_db": str(db), "finished_at": at,
+    }
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT * FROM cookies").fetchall() == [(".example.test", "b", "/")]
+    trace = []
+
+    class Context:
+        async def cookies(self):
+            trace.append("cookies")
+            return [{"domain": ".douyin.com", "name": "a"}]
+
+        async def clear_cookies(self):
+            trace.append("clear")
+
+    assert asyncio.run(page_evidence.clear_douyin_context_cookies(Context())) == {
+        "target": "douyin", "strategy": "runtime_context_clear_cookies", "started_at": at, "ok": True,
+        "deleted": 1, "cookies": [{"domain": ".douyin.com", "name": "a"}], "finished_at": at,
+    }
+    assert trace == ["cookies", "clear"]
 
 
 @pytest.mark.parametrize("scenario", ["valid", "skip", "keep"])

@@ -1,7 +1,6 @@
 """T13：内容事务与发现提交故障按五站逐一驱动新实现（W10）。
 
-复用 T11 冻结对照的离线驱动（只读导入，不修改该锁定测试）；这里只跑新实现，
-断言与 T11 微博分支相同：commit 前失败整批回滚、commit 后失败保留合法提交、
+复用 tests/support/executor_driver.py 的离线驱动，断言与 test_adapter_t11 微博分支相同：commit 前失败整批回滚、commit 后失败保留合法提交、
 发现提交失败不回滚已提交内容。小红书的发现提交走批次 ACK（F02），不在此重复。
 """
 
@@ -9,10 +8,10 @@ from __future__ import annotations
 
 import pytest
 
-import test_adapter_t11 as t11
+from support import executor_driver
 
-# T11 模块内的自动离线守卫只作用于定义模块；显式引入，使本模块同样禁止真实进程与网络。
-offline_guard = t11.offline_guard
+# 离线守卫在 support 中定义；显式引入，使本模块禁止真实进程与网络。
+offline_guard = executor_driver.offline_guard
 
 SITES = ["bilibili", "weibo", "douyin", "zhihu", "xhs"]
 CASES = [pytest.param(site, scenario, id=f"{site}-{scenario}")
@@ -23,7 +22,7 @@ CASES = [pytest.param(site, scenario, id=f"{site}-{scenario}")
 @pytest.mark.parametrize(("platform", "scenario"), CASES)
 def test_content_and_discovery_commit_faults_per_site(tmp_path, monkeypatch, capsys, platform, scenario):
     with monkeypatch.context() as patch:
-        value = t11.drive(t11.executor, tmp_path / "new", patch, capsys, platform, scenario)
+        value = executor_driver.drive(tmp_path / "new", patch, capsys, platform, scenario)
 
     committed = scenario in {"commit_after", "discovery_failure"}
     trace = value["trace"]

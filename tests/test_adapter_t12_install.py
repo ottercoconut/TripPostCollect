@@ -26,9 +26,6 @@ import pytest
 pytestmark = pytest.mark.installation
 
 ROOT = Path(__file__).resolve().parents[1]
-GOLDEN = ROOT / "tests" / "golden"
-HELP_GOLDEN = json.loads((GOLDEN / "t12_cli_help.json").read_text(encoding="utf-8"))
-T02_COMMANDS = json.loads((GOLDEN / "t02_worker_commands.json").read_text(encoding="utf-8"))
 SQL_FILES = ("crawl_scheduler.sql", "ctf_captures.sql", "source_platforms.sql", "web_posts.sql", "xhs_control.sql")
 # 包内资源 → 唯一编辑真源（规格 G 节“T01/T12 确定的资源与安装策略”）。
 RESOURCE_SOURCES = {
@@ -225,21 +222,28 @@ def test_installed_package_bootstraps_schema_from_package_resources(installed, t
     assert schema_rows(installed_db) == schema_rows(reference)
 
 
-def test_installed_formal_entries_help_is_identical_to_main(installed) -> None:
+def test_installed_formal_entries_help_matches_source_checkout(installed, tmp_path) -> None:
+    """安装后的正式入口与源码 checkout 打印相同的 --help（工作根路径归一）。"""
+    from test_adapter_t12 import FORMAL_ENTRIES, help_command, help_environment
+
+    source_root = tmp_path / "source-workroot"
+    source_root.mkdir()
+    source_environment = help_environment(tmp_path, source_root)
     # 显式固定影响 argparse 排版的终端尺寸与区域设置（installed_environment 不继承宿主 env）。
-    environment = installed_environment(installed, COLUMNS=str(HELP_GOLDEN["_meta"]["columns"]), LINES="24")
+    environment = installed_environment(installed, COLUMNS="100", LINES="24")
     differences = []
-    for name, expected in HELP_GOLDEN.items():
-        if name == "_meta":
-            continue
+    for name in FORMAL_ENTRIES:
         if name == "trippostcollect.platforms.entry":
             command = [str(installed["python"]), "-I", "-m", name, "--help"]
         else:
             # -E -s：忽略 PYTHON* 与用户目录，仅保留脚本目录供同目录脚本互相导入。
             command = [str(installed["python"]), "-E", "-s", str(installed["workroot"] / "scripts" / f"{name}.py"), "--help"]
         result = subprocess.run(command, cwd=installed["cwd"], env=environment, capture_output=True, text=True, timeout=120)
+        source = subprocess.run(help_command(name), cwd=tmp_path, env=source_environment,
+                                capture_output=True, text=True, timeout=120)
         actual = result.stdout.replace(str(installed["workroot"]), "<ROOT>")
-        if result.returncode or result.stderr or actual != expected:
+        expected = source.stdout.replace(str(source_root), "<ROOT>")
+        if result.returncode or result.stderr or source.returncode or not expected or actual != expected:
             differences.append([name, result.returncode, result.stderr[-300:]])
     assert differences == []
 
@@ -260,12 +264,14 @@ print(json.dumps({"class": crawler_class.__name__, "fork": fork,
 
 
 @pytest.mark.parametrize("code", sorted(WORKER_SCENARIOS))
-def test_installed_worker_selects_each_platform_without_fork_tree(installed, tmp_path, code) -> None:
-    golden = T02_COMMANDS[WORKER_SCENARIOS[code]]
-    argv = [part.replace("<TMP>", str(tmp_path)) for part in golden["cmd"][4:]]
+def test_installed_worker_selects_each_platform_without_fork_tree(installed, tmp_path, monkeypatch, code) -> None:
+    from support import worker_scenarios
+
+    # 子命令与 env 取自父侧对本场景的真实构造；源码根换成安装态工作根。
+    command = worker_scenarios.capture_parent_commands(monkeypatch, tmp_path)[WORKER_SCENARIOS[code]]
+    argv = command["cmd"][4:]
     environment = installed_environment(installed, **{
-        key: value.replace("<TMP>", str(tmp_path)).replace("<ROOT>", str(installed["workroot"]))
-        for key, value in golden["extra_env"].items()
+        key: value.replace(str(ROOT), str(installed["workroot"])) for key, value in command["extra_env"].items()
     })
     assert not (installed["workroot"] / "tools").exists()
     result = run_installed(installed, SELECT_CODE, json.dumps(argv), code, environment=environment)

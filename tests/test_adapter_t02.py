@@ -1,13 +1,7 @@
-"""T02 验收：worker 改由根解释器运行选站入口，输入/配置/命令与旧桥等价，未选平台不装载。
-
-基线 `tests/golden/t02_worker_*.json` 在 T02 实施前由旧实现生成：
-commands 为 C 构造的 child 命令/cwd/env/超时；config 为原 typer `parse_cmd` 解析后写入的全部 config 键。
-"""
+"""worker 入口：父侧生成的子命令、worker 入参解析与配置写入、选站延迟装配、启动与清理顺序。"""
 
 from __future__ import annotations
 
-from trippostcollect.application import collection as t11_collection
-from trippostcollect.application import reporting as t11_reporting
 from trippostcollect.runtime.process import NO_PROGRESS_WATCHDOG_SECONDS
 
 import argparse
@@ -20,26 +14,17 @@ from pathlib import Path
 
 import pytest
 
+from support import worker_scenarios as scenarios
 from support.platform_sessions import child_redirect_source
 
 ROOT = Path(__file__).resolve().parents[1]
-for extra in (ROOT / "scripts", ROOT / "scripts" / "dev"):
-    if str(extra) not in sys.path:
-        sys.path.insert(0, str(extra))
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
 
-GOLDEN = ROOT / "tests" / "golden"
-COMMANDS = json.loads((GOLDEN / "t02_worker_commands.json").read_text(encoding="utf-8"))
-CONFIG = json.loads((GOLDEN / "t02_worker_config.json").read_text(encoding="utf-8"))
-SCENARIOS = sorted(COMMANDS)
-ENTRY_MODULE = "trippostcollect.platforms.entry"
+ENTRY_MODULE = scenarios.ENTRY_MODULE
 # 退出切片依赖：根环境不安装，四站与入口导入链不得触及。
 EXIT_SLICE_MODULES = ("redis", "sqlalchemy", "aiomysql", "motor", "jieba", "matplotlib", "wordcloud", "typer")
 WORKER_PLATFORMS = {"wb": "weibo", "dy": "douyin", "zhihu": "zhihu", "xhs": "xhs"}
-
-
-def _old_argv(name: str, tmp: Path) -> list[str]:
-    # 旧命令为 ["uv", "run", "python", E.py, *argv]
-    return [part.replace("<TMP>", str(tmp)) for part in COMMANDS[name]["cmd"][4:]]
 
 
 def _child_environment() -> dict[str, str]:
@@ -51,7 +36,7 @@ def _child_environment() -> dict[str, str]:
 
 
 def _run_python(code: str, *, cwd: Path, timeout: int = 120) -> subprocess.CompletedProcess[str]:
-    """在隔离子进程中运行，避免 fork 的 config/tools 顶层包污染当前 pytest 进程。"""
+    """在隔离子进程中运行，并拦截退出切片依赖的导入。"""
     blocker = (
         "import sys\n"
         f"_BLOCKED = {EXIT_SLICE_MODULES!r}\n"
@@ -74,97 +59,38 @@ def _json_tail(result: subprocess.CompletedProcess[str]):
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-# ---------- C 构造的 child 命令 ----------
+# ---------- 父侧构造的 child 命令 ----------
 
-def _capture_new_commands(monkeypatch: pytest.MonkeyPatch, tmp: Path) -> dict[str, dict]:
-    crawl = import_module("mediacrawler_crawl")
-    captured: dict[str, object] = {}
-
-    def fake_run_command(cmd, cwd, timeout, log_dir, **kwargs):
-        captured.update(
-            cmd=list(cmd), cwd=str(cwd), timeout=timeout,
-            extra_env=dict(kwargs.get("extra_env") or {}),
-            startup_grace_seconds=kwargs.get("startup_grace_seconds"),
-            network_diagnostics_path=(
-                str(kwargs["network_diagnostics_path"]) if kwargs.get("network_diagnostics_path") else None
-            ),
-        )
-        return {"returncode": 0, "timed_out": False, "stdout_tail": "", "stderr_tail": ""}
-
-    monkeypatch.delenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", raising=False)
-    monkeypatch.setattr(t11_collection, "run_command", fake_run_command)
-    monkeypatch.setattr(t11_collection, "discover_cdp_browser_path", lambda: "/fake/chrome")
-    monkeypatch.setattr(
-        t11_collection, "export_profile_cookies",
-        lambda *_: {"cookie_header": "d_c0=x; z_c0=y", "cookie_names": ["d_c0", "z_c0"], "source": "fake"},
-    )
-    monkeypatch.setattr(t11_collection, "public_cookie_export", lambda _export: {"source": "fake"})
-    monkeypatch.setattr(
-        t11_reporting, "summarize_output",
-        lambda *_: {"parse_errors": 0, "content_records": 0, "non_video_content_records": 0, "video_like_records": 0},
-    )
-    monkeypatch.setattr(t11_collection, "load_behavior_evidence", lambda *_: {"status": "completed"})
-    monkeypatch.setattr(t11_collection, "behavior_evidence_valid", lambda *_: True)
-
-    result = {}
-    for name in SCENARIOS:
-        golden = COMMANDS[name]
-        args = argparse.Namespace(**{
-            key: (value.replace("<TMP>", str(tmp)) if isinstance(value, str) else value)
-            for key, value in golden["args"].items()
-        })
-        captured.clear()
-        crawl._run_platform_without_policy(golden["platform"], args, tmp / name)
-        text = json.dumps(captured, ensure_ascii=False)
-        text = text.replace(str(tmp), "<TMP>").replace(str(ROOT), "<ROOT>")
-        result[name] = json.loads(text)
-    return result
-
-
-T12_REMOVED_ENV = {
+# 父层不再发出的 env：唯一消费者已删除（T12、T14-C、#124），小红书全量扫描不再注入发现恢复参数（#71）。
+RETIRED_ENV = {
     "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID", "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM", "TRIPPOSTCOLLECT_DISCOVERY_KEYWORD",
     "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE", "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED",
-    "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
+    "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS", "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL",
+    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET", "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR",
 }
-# T14-C：唯一消费者 fork 旧 store 随 fork 删除，父侧不再发出（ledger.AUTHORIZED_ENV_REMOVALS 同步登记）。
-T14C_REMOVED_ENV = {"TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL"}
-# #71：小红书改为全量滚动扫描，深层前沿与顶部刷新三项只对 xhs 场景不再发出（t12 同步登记）。
-T71_REMOVED_XHS_ENV = {
-    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR", "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED",
-    "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS",
+RETIRED_XHS_ENV = {
+    "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED", "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES",
+    "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS",
 }
-# #124：抖音每轮从首页全量扫描，三元组续跑的两项 env 唯一消费者删除，所有场景都不再发出（t12、台账同步登记）。
-T124_REMOVED_ENV = {"TRIPPOSTCOLLECT_DISCOVERY_RESUME_OFFSET", "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR"}
 
 
-def test_child_command_switches_only_interpreter_entry_and_cwd(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    new = _capture_new_commands(monkeypatch, tmp_path)
-    for name in SCENARIOS:
-        old = COMMANDS[name]
-        assert old["cmd"][:4] == ["uv", "run", "python", "<ROOT>/scripts/mediacrawler_export_entrypoint.py"]
-        interpreter = sys.executable.replace(str(tmp_path), "<TMP>").replace(str(ROOT), "<ROOT>")
-        expected_cmd = [interpreter, "-P", "-m", ENTRY_MODULE, *old["cmd"][4:]]
-        assert new[name]["cmd"] == expected_cmd, name
-        assert new[name]["cwd"] == "<ROOT>", name
-        for key in ("startup_grace_seconds", "network_diagnostics_path"):
-            assert new[name][key] == old[key], (name, key)
-        # #75：任务级时限删除，无进展看门狗阈值统一为代码常量，不再沿用基线记录的 180。
-        assert new[name]["timeout"] == NO_PROGRESS_WATCHDOG_SECONDS, name
-        # T12：规格 D2 授权删除父发无消费者的 6 个 env；T14-C 再删 1 个；#71 对 xhs 场景再删 3 个；#124 再删 2 个，
-        # 其余键值不变。
-        removed = (T12_REMOVED_ENV | T14C_REMOVED_ENV | T124_REMOVED_ENV
-                   | (T71_REMOVED_XHS_ENV if name.startswith("xhs_") else set()))
-        expected_env = {key: value for key, value in old["extra_env"].items() if key not in removed}
-        assert new[name]["extra_env"] == expected_env, name
-
-
-def test_executor_source_no_longer_builds_uv_or_private_bridge_command() -> None:
-    source = (ROOT / "scripts" / "mediacrawler_crawl.py").read_text(encoding="utf-8")
-    assert "mediacrawler_export_entrypoint" not in source
-    assert '"uv"' not in source
-    assert "UV_CACHE_DIR" not in source
+def test_child_command_runs_root_entry_with_parent_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured = scenarios.capture_parent_commands(monkeypatch, tmp_path)
+    for name in scenarios.NAMES:
+        command = captured[name]
+        assert command["cmd"] == [sys.executable, "-P", "-m", ENTRY_MODULE,
+                                  *scenarios.worker_argv(name, tmp_path)], name
+        assert command["cwd"] == ROOT, name
+        # #75：任务级时限删除，无进展看门狗阈值统一为代码常量。
+        assert command["timeout"] == NO_PROGRESS_WATCHDOG_SECONDS, name
+        env = command["extra_env"]
+        assert env["TRIPPOSTCOLLECT_DB_PATH"] == str(tmp_path / "content.sqlite"), name
+        # 续跑时已处理候选文件经 env 交给 worker。
+        assert env.get("TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH") == (
+            str(tmp_path / "identities.json") if name == "weibo_search_resume" else None), name
+        retired = RETIRED_ENV | (RETIRED_XHS_ENV if name.startswith("xhs_") else set())
+        assert retired.isdisjoint(env), (name, sorted(retired & set(env)))
+        assert all(key.startswith("TRIPPOSTCOLLECT_") for key in env), name
 
 
 def test_child_environment_does_not_inject_uv_cache_or_pythonpath(
@@ -178,37 +104,24 @@ def test_child_environment_does_not_inject_uv_cache_or_pythonpath(
     assert result["returncode"] == 0, result
 
 
-def test_executor_reexports_moved_runtime_definitions() -> None:
-    # C 仍以模块名暴露迁出的定义，调用方与既有 monkeypatch 目标不变
-    crawl = import_module("mediacrawler_crawl")
-    process = import_module("trippostcollect.runtime.process")
-    helpers = import_module("trippostcollect.runtime.helpers")
-    contracts = import_module("trippostcollect.application.contracts")
-    for name in ("run_command", "skipped_command", "terminate_managed_process", "process_group_exists",
-                 "runtime_watchdog_stop_detail", "append_runtime_watchdog_stop_event", "XhsParentNetworkPauseClock"):
-        assert getattr(crawl, name) is getattr(process, name), name
-    assert crawl.utc_stamp is helpers.utc_stamp
-    assert crawl.XhsRuntimeSupervisionError is contracts.XhsRuntimeSupervisionError
+# ---------- worker 入参与配置写入 ----------
 
-
-# ---------- worker 输入与 fork config 写入 ----------
-
-def test_str2bool_input_set_is_unchanged() -> None:
+def test_str2bool_input_set() -> None:
     worker_inputs = import_module("trippostcollect.application.worker_inputs")
-    for text in CONFIG["__str2bool__"]["true"]:
+    for text in ("yes", "true", "t", "y", "1", "YES", "True", "T", "Y"):
         assert worker_inputs.str2bool(text) is True, text
-    for text in CONFIG["__str2bool__"]["false"]:
+    for text in ("no", "false", "f", "n", "0", "NO", "False", "F", "N"):
         assert worker_inputs.str2bool(text) is False, text
     assert worker_inputs.str2bool(True) is True
     with pytest.raises(argparse.ArgumentTypeError):
         worker_inputs.str2bool("maybe")
 
 
-@pytest.mark.parametrize("name", SCENARIOS)
+@pytest.mark.parametrize("name", scenarios.NAMES)
 def test_parent_generated_argv_parses(name: str, tmp_path: Path) -> None:
     worker_inputs = import_module("trippostcollect.application.worker_inputs")
-    inputs = worker_inputs.parse_cmd(_old_argv(name, tmp_path))
-    assert inputs.platform == COMMANDS[name]["cmd"][COMMANDS[name]["cmd"].index("--platform") + 1]
+    inputs = worker_inputs.parse_cmd(scenarios.worker_argv(name, tmp_path))
+    assert inputs.platform == scenarios.worker_code(name)
 
 
 @pytest.mark.parametrize(
@@ -220,7 +133,7 @@ def test_parent_generated_argv_parses(name: str, tmp_path: Path) -> None:
 )
 def test_worker_inputs_reject_values_the_parent_never_generates(mutation: tuple[str, str], tmp_path: Path) -> None:
     worker_inputs = import_module("trippostcollect.application.worker_inputs")
-    argv = _old_argv("weibo_search", tmp_path)
+    argv = scenarios.worker_argv("weibo_search", tmp_path)
     argv[argv.index(mutation[0]) + 1] = mutation[1]
     with pytest.raises(SystemExit) as raised:
         worker_inputs.parse_cmd(argv)
@@ -231,14 +144,14 @@ def test_worker_inputs_reject_values_the_parent_never_generates(mutation: tuple[
 def test_worker_inputs_reject_unused_upstream_flags(extra: list[str], tmp_path: Path) -> None:
     worker_inputs = import_module("trippostcollect.application.worker_inputs")
     with pytest.raises(SystemExit) as raised:
-        worker_inputs.parse_cmd([*_old_argv("weibo_search", tmp_path), *extra])
+        worker_inputs.parse_cmd([*scenarios.worker_argv("weibo_search", tmp_path), *extra])
     assert raised.value.code == 2
 
 
-# T12：configure 写入根配置对象而非 fork config。上游退出平台、creator、评论计数与代理供应商键不再进入
-# 配置对象；四站指定 ID 不迁上游示例，未由父侧传入时为空列表（规格 C0/D1，决策见 T12 审查包）。
-T12_DROPPED_PREFIXES = ("BILI_", "KS_", "TIEBA_", "IP_PROXY_", "STATIC_PROXY_")
-T12_DROPPED_KEYS = {
+# configure 写入根配置对象。上游退出平台、creator、评论计数与代理供应商键不进入配置对象；
+# 四站指定 ID 未由父侧传入时为空列表。
+DROPPED_PREFIXES = ("BILI_", "KS_", "TIEBA_", "IP_PROXY_", "STATIC_PROXY_")
+DROPPED_KEYS = {
     "DY_CREATOR_ID_LIST", "WEIBO_CREATOR_ID_LIST", "XHS_CREATOR_ID_LIST",
     "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES", "CRAWLER_MAX_NOTES_COUNT",
 }
@@ -246,38 +159,44 @@ SPECIFIED_ID_KEYS = {"dy": "DY_SPECIFIED_ID_LIST", "wb": "WEIBO_SPECIFIED_ID_LIS
                      "zhihu": "ZHIHU_SPECIFIED_ID_LIST", "xhs": "XHS_SPECIFIED_NOTE_URL_LIST"}
 
 
-@pytest.mark.parametrize("name", SCENARIOS)
-def test_configure_writes_same_fork_config_as_old_parse_cmd(name: str, tmp_path: Path) -> None:
-    written = CONFIG[name]["written"]
-    argv = _old_argv(name, tmp_path)
-    expected = {key: value for key, value in written.items()
-                if not key.startswith(T12_DROPPED_PREFIXES) and key not in T12_DROPPED_KEYS}
-    selected = argv[argv.index("--platform") + 1]
-    for code, key in SPECIFIED_ID_KEYS.items():
-        if not (code == selected and "--specified_id" in argv):
-            expected[key] = []
-    code = (
+@pytest.mark.parametrize("name", scenarios.NAMES)
+def test_configure_writes_worker_inputs_to_root_config(name: str, tmp_path: Path) -> None:
+    argv = scenarios.worker_argv(name, tmp_path)
+    _, _, code, login, crawler_type, headed, start, specified, cdp = scenarios.SCENARIOS[name]
+    probe = (
         "import json\n"
         f"from {ENTRY_MODULE} import configure, current_config\n"
         f"configure({argv!r})\n"
         "config = current_config()\n"
-        f"print(json.dumps({{key: getattr(config, key) for key in {sorted(written)!r} if hasattr(config, key)}},"
-        " ensure_ascii=False))\n"
+        "print(json.dumps({key: getattr(config, key) for key in dir(config) if key.isupper()}, ensure_ascii=False))\n"
     )
-    actual = _json_tail(_run_python(code, cwd=tmp_path))
-    actual = json.loads(json.dumps(actual, ensure_ascii=False).replace(str(tmp_path), "<TMP>"))
-    assert actual == expected
+    config = _json_tail(_run_python(probe, cwd=tmp_path))
+    assert {key: config[key] for key in (
+        "PLATFORM", "LOGIN_TYPE", "CRAWLER_TYPE", "START_PAGE", "KEYWORDS", "HEADLESS", "CDP_HEADLESS",
+        "ENABLE_CDP_MODE", "SAVE_DATA_OPTION", "SAVE_DATA_PATH", "MAX_CONCURRENCY_NUM", "ENABLE_IP_PROXY",
+        "ENABLE_GET_COMMENTS", "ENABLE_GET_SUB_COMMENTS", "ENABLE_GET_MEIDAS",
+    )} == {
+        "PLATFORM": code, "LOGIN_TYPE": login, "CRAWLER_TYPE": crawler_type, "START_PAGE": start,
+        "KEYWORDS": scenarios.KEYWORD, "HEADLESS": not headed, "CDP_HEADLESS": not headed,
+        "ENABLE_CDP_MODE": cdp == "true", "SAVE_DATA_OPTION": "jsonl",
+        "SAVE_DATA_PATH": argv[argv.index("--save_data_path") + 1], "MAX_CONCURRENCY_NUM": 1,
+        "ENABLE_IP_PROXY": False, "ENABLE_GET_COMMENTS": False, "ENABLE_GET_SUB_COMMENTS": False,
+        "ENABLE_GET_MEIDAS": True,
+    }
+    for site, key in SPECIFIED_ID_KEYS.items():
+        assert config[key] == ([specified] if specified and site == code else []), key
+    assert not [key for key in config if key.startswith(DROPPED_PREFIXES) or key in DROPPED_KEYS]
 
 
 # ---------- 选站延迟装配（F10） ----------
 
 @pytest.mark.parametrize("code", ["wb", "zhihu", "xhs"])
-def test_selected_platform_is_the_only_fork_platform_loaded(code: str, tmp_path: Path) -> None:
+def test_selected_platform_loads_no_upstream_platform_package(code: str, tmp_path: Path) -> None:
     scenario = {"wb": "weibo_search", "zhihu": "zhihu_search", "xhs": "xhs_search_qrcode"}[code]
     probe = (
         "import json, sys\n"
         f"from {ENTRY_MODULE} import configure, load_crawler\n"
-        f"inputs = configure({_old_argv(scenario, tmp_path)!r})\n"
+        f"inputs = configure({scenarios.worker_argv(scenario, tmp_path)!r})\n"
         "crawler_class = load_crawler(inputs.platform)\n"
         "platforms = sorted({name.split('.')[1] for name in sys.modules\n"
         "                    if name.startswith('media_platform.') and name.count('.') >= 1})\n"
@@ -285,7 +204,7 @@ def test_selected_platform_is_the_only_fork_platform_loaded(code: str, tmp_path:
         "                  'execjs': 'execjs' in sys.modules}))\n"
     )
     report = _json_tail(_run_python(probe, cwd=tmp_path))
-    assert report["platforms"] == []  # T09 起小红书也不再装载 fork 平台包
+    assert report["platforms"] == []
     # 知乎签名 JS 只在首次签名时编译；微博/小红书不装载 execjs
     if code != "zhihu":
         assert report["execjs"] is False
@@ -295,7 +214,7 @@ def test_configure_does_not_import_any_platform(tmp_path: Path) -> None:
     probe = (
         "import json, sys\n"
         f"from {ENTRY_MODULE} import configure\n"
-        f"configure({_old_argv('douyin_search_discovery', tmp_path)!r})\n"
+        f"configure({scenarios.worker_argv('douyin_search_discovery', tmp_path)!r})\n"
         "print(json.dumps(sorted(n for n in sys.modules if n.startswith(('media_platform', 'execjs', 'playwright')))))\n"
     )
     assert _json_tail(_run_python(probe, cwd=tmp_path)) == []
@@ -303,11 +222,11 @@ def test_configure_does_not_import_any_platform(tmp_path: Path) -> None:
 
 @pytest.mark.installation
 def test_all_worker_platforms_import_in_root_environment_without_exit_slices(tmp_path: Path) -> None:
-    # 抖音在导入时编译 libs/douyin.js，需要 Node；以任意 cwd 验证不依赖 fork 目录
+    # 抖音在导入时编译 libs/douyin.js，需要 Node；以任意 cwd 验证不依赖仓库目录
     probe = (
         "import importlib, json\n"
         f"from {ENTRY_MODULE} import configure, load_crawler\n"
-        f"configure({_old_argv('weibo_search', tmp_path)!r})\n"
+        f"configure({scenarios.worker_argv('weibo_search', tmp_path)!r})\n"
         f"print(json.dumps([load_crawler(code).__name__ for code in {sorted(WORKER_PLATFORMS)!r}]))\n"
     )
     names = _json_tail(_run_python(probe, cwd=tmp_path, timeout=180))
@@ -315,7 +234,7 @@ def test_all_worker_platforms_import_in_root_environment_without_exit_slices(tmp
 
 
 def test_entry_main_startup_and_cleanup_trace(tmp_path: Path) -> None:
-    # 产物：选站启动/清理顺序 trace；与原 E.main→M.main→app_runner 顺序一致
+    # 选站启动/清理顺序：configure → install_hooks → 装载 → start → cleanup。
     # T14：子进程不继承 conftest 的进程内重定向；probe 内把登录资料两个根改到 tmp，未迁移的 checkout 不影响本用例。
     probe = (
         "import json\n"
@@ -344,7 +263,7 @@ def test_entry_main_startup_and_cleanup_trace(tmp_path: Path) -> None:
         "    trace.append('cleanup:' + platform)\n"
         "    await original_cleanup(crawler, platform)\n"
         "worker.async_cleanup = cleanup\n"
-        f"code = entry.main({_old_argv('weibo_search', tmp_path)!r})\n"
+        f"code = entry.main({scenarios.worker_argv('weibo_search', tmp_path)!r})\n"
         "print(json.dumps({'code': code, 'trace': trace}))\n"
     )
     report = _json_tail(_run_python(probe, cwd=tmp_path))
@@ -453,8 +372,3 @@ def test_run_bounds_cleanup_time(capsys: pytest.CaptureFixture[str]) -> None:
 
     worker.run(main, slow_cleanup, cleanup_timeout_seconds=0.05)
     assert "[Main] Cleanup timeout (0.05s)" in capsys.readouterr().out
-
-
-# ---------- 迁移进度 ----------
-
-

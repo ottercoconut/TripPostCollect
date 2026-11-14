@@ -1,7 +1,4 @@
-"""T06 以固定 fork 源码为基线，对照请求、签名输入、写出与终态。
-
-基线的运行结果已在 T14 删除 fork 前固化到 tests/fixtures/t14_legacy_expectations/T06；根侧只运行根实现并与之比较。
-"""
+"""抖音适配器在离线边界上的请求、签名输入、写出与终态：浏览器截获搜索、详情兜底、作者页、正文图片与入口装配。"""
 
 from __future__ import annotations
 
@@ -22,19 +19,9 @@ from urllib.parse import urlencode
 import httpx
 import pytest
 
-from support import legacy_expectations as expectations
 from support.stable_png import solid_png
-from support import platform_session_deviation as deviation
-from support import douyin_116_deviation
-from support import douyin_163_deviation
-from support import douyin_full_scan_deviation
-from support import stealth_removal_deviation
-from support import runtime_failed_batch_deviation
-from support import shared_launch_deviation
-from support import native_window_deviation
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
-from trippostcollect.core import paths
 from trippostcollect.artifacts import jsonl
 from trippostcollect.platforms import entry
 from trippostcollect.platforms.douyin import client, core, login, login_support, parser, signer
@@ -42,14 +29,6 @@ from trippostcollect.runtime import browser_runtime, image_retry
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURES = ROOT / "tests/fixtures/adapter_t06"
-def t14_slider_paths(node):
-    """T14 授权差异：滑块临时图从 fork temp_image（及 cwd 相对路径）改到 DOUYIN_SLIDER_IMAGE_DIR。"""
-    source = ast.unparse(node)
-    source = source.replace(
-        "os.path.join(MEDIACRAWLER_DIR, 'temp_image')", "str(DOUYIN_SLIDER_IMAGE_DIR)",
-    ).replace("f'./temp_image/{img_type}.jpg'", "os.path.join(DOUYIN_SLIDER_IMAGE_DIR, f'{img_type}.jpg')")
-    return ast.parse(source).body[0]
 KEYWORD = "青岛崂山旅游攻略"
 
 
@@ -80,7 +59,6 @@ async def drive(root, patch, scenario, fallback):
     root.mkdir()
     trace = []
     counters = Counter()
-    # 根配置对象（与 fork 默认值逐键相同，见 T12 守护），不加载 fork。
     config = worker_config()
     detail_mode = scenario.startswith("detail")
     for key, value in {
@@ -231,7 +209,7 @@ async def drive(root, patch, scenario, fallback):
             return page
 
         async def add_init_script(self, *args, **kwargs):
-            # #127：抖音不再注入任何 init script；出现即进入轨迹并使比较失败（见 support.stealth_removal_deviation）。
+            # #127：抖音不再注入任何 init script；出现即进入轨迹，由 check_drive_result 判失败。
             trace.append(("init_script", args, kwargs))
 
         async def cookies(self, urls=None):
@@ -359,47 +337,55 @@ SCENARIOS = (
 )
 
 
-T14_DRIVE = ("T06", "requests_records_images_events")
+EXHAUSTED = {("source_exhausted", "empty_page")}
 
 
-def current_douyin_profile(tmp_path):
-    """根当前的抖音持久 profile（调用时求值，测试中已由 conftest 重定向），按根侧同样规则 scrub。"""
-    return expectations.scrub(str(paths.platform_profile_dir("douyin")), (tmp_path, "<TMP>"))
+def expected_outcome(scenario, fallback):
+    """(停止事件集合, 跳过的候选 [(范围, 错误码)], 落盘正文图数, 内容文件名, 错误)。"""
+    search = ["image_manifest.jsonl", "search_contents_2026-09-30.jsonl"]
+    detail = ["detail_contents_2026-09-30.jsonl", "image_manifest.jsonl"]
+    return {
+        "search_pages": (EXHAUSTED, [], 2, search, None),
+        "browser_pages": (EXHAUSTED, [], 2, search, None),
+        "detail": (set(), [], 1, detail, None),
+        # 详情只有外壳：兜底开启时经浏览器详情补全，否则不写出。
+        "detail_shell": (set(), [], 1, detail, None) if fallback else (set(), [], 0, [], None),
+        "empty_verified": ({("source_exhausted", "verified_empty_first_page")}, [], 0, [], None),
+        "empty_visible": ({("runtime_failed", "empty_api_response_with_visible_results")}, [], 0, [], None),
+        "empty_ambiguous": ({("runtime_failed", "ambiguous_empty_first_page")}, [], 0, [], None),
+        "search_blocked": ({("runtime_failed", "search_verify_check")}, [], 0, [], None),
+        "creator_empty": (EXHAUSTED, [("post", "creator_profile_empty")] * 2, 0, [], None),
+        "creator_blocked": ({("runtime_failed", "account_blocked")}, [], 0, [], None),
+        "creator_retry": (EXHAUSTED, [], 2, search, None),
+        "image_retry": (EXHAUSTED, [], 2, search, None),
+        "image_failed": (EXHAUSTED, [("image", "image_download_retryable")] * 2, 0, ["image_manifest.jsonl"], None),
+        "image_blocked": ({("runtime_failed", "image_rate_limited")}, [], 0, ["image_manifest.jsonl"], None),
+        "login_expired": (set(), [], 0, [], ("SystemExit", "")),
+    }[scenario]
 
 
-def legacy_drive_expectation(tmp_path, scenario, fallback):
-    """固化预期依次登记 #59 profile、#116 正文来源与请求头、#124 搜索只经截获、#127 不注入 stealth、
-    #133 运行级失败批次不越过失败页、#136 与 warmup 共用启动配置并复用第一页、#139 按原生窗口启动七项偏离、#163 内容记录补作者主页链接。"""
-    expected = expectations.load(*T14_DRIVE, f"{scenario}-fallback{fallback}")
-    expected = deviation.douyin_profile(expected, current_douyin_profile(tmp_path))
-    expected = douyin_116_deviation.douyin_drive(expected, scenario)
-    expected = douyin_full_scan_deviation.douyin_drive(expected, scenario)
-    expected = stealth_removal_deviation.douyin(expected)
-    expected = runtime_failed_batch_deviation.douyin_drive(expected, scenario)
-    expected = douyin_163_deviation.douyin_drive(expected)
-    return native_window_deviation.douyin(shared_launch_deviation.douyin(expected))
+def drive_outcome(after):
+    stops = {(row["details"]["stop_reason"], row["details"].get("stop_detail"))
+             for row in after["events"] if row["type"] == "adaptive_search_stopped"}
+    skips = [(row["details"].get("failure_scope"), row["details"].get("error_code"))
+             for row in after["events"] if row["type"] == "candidate_skipped"]
+    images = sum("/images/" in name for name in after["files"])
+    files = sorted(name.rsplit("/", 1)[-1] for name in after["files"] if "/images/" not in name)
+    return stops, skips, images, files, after["error"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback", [0, 1])
 @pytest.mark.parametrize("scenario", SCENARIOS)
-async def test_root_matches_frozen_legacy_requests_records_images_events(tmp_path, monkeypatch, scenario, fallback):
-    """T14：根实现与固化的旧实现结果比较（同一 drive、同一 == 语义），不加载 fork 或 E。"""
+async def test_drive_requests_records_images_events(tmp_path, monkeypatch, scenario, fallback):
     with monkeypatch.context() as patch:
         after = await drive(tmp_path / "new", patch, scenario, fallback)
-    assert expectations.scrub(after, (tmp_path, "<TMP>")) == legacy_drive_expectation(tmp_path, scenario, fallback)
     check_drive_result(after, scenario, fallback)
-
-
-# 旧桥 fork 工厂与冻结 T06 fixture 的旧侧结果逐字节相同（T14 删除 fork 前由守卫分别证明），共用一份预期。
-T14_BRIDGE = T14_DRIVE
+    assert drive_outcome(after) == expected_outcome(scenario, fallback)
 
 
 async def drive_entry_assembly(root, patch, scenario, fallback):
-    """新 worker 装配路径：install_hooks 读取兜底开关后由 load_crawler 无参构造；不加载 fork/E。
-
-    与原 test_adapter_t06_bridge.py::drive_assembly（T14-C 随旧桥删除）的新侧逐项相同，只是不再装载 fork 工厂做类型比对。
-    """
+    """worker 装配路径：install_hooks 读取兜底开关后由 load_crawler 无参构造。"""
     new_class = entry.load_crawler("dy")
     assert issubclass(new_class, core.DouYinCrawler)
 
@@ -419,20 +405,26 @@ async def drive_entry_assembly(root, patch, scenario, fallback):
     return await drive(root, patch, scenario, fallback)
 
 
+def _scrub(value, tmp):
+    return json.loads(json.dumps(value, ensure_ascii=False, default=lambda item: sha256(item).hexdigest()
+                                 if isinstance(item, bytes) else str(item)).replace(str(tmp), "<TMP>"))
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fallback", [0, 1])
-@pytest.mark.parametrize("scenario", SCENARIOS)
-async def test_root_entry_assembly_matches_frozen_fork_factory(tmp_path, monkeypatch, scenario, fallback):
-    """T14：替代旧桥工厂对照；根入口装配结果与固化的 fork 工厂结果比较。"""
+@pytest.mark.parametrize("scenario,fallback", [("search_pages", 0), ("detail_shell", 1), ("image_failed", 0)])
+async def test_entry_assembly_matches_direct_construction(tmp_path, monkeypatch, scenario, fallback):
+    """经 worker 入口装配与直接构造得到相同的请求、产物、事件与错误。"""
     with monkeypatch.context() as patch:
-        new = await drive_entry_assembly(tmp_path / "new", patch, scenario, fallback)
-    assert expectations.scrub(new, (tmp_path, "<TMP>")) == legacy_drive_expectation(tmp_path, scenario, fallback)
-    check_drive_result(new, scenario, fallback)
+        direct = await drive(tmp_path / "direct", patch, scenario, fallback)
+    with monkeypatch.context() as patch:
+        assembled = await drive_entry_assembly(tmp_path / "entry", patch, scenario, fallback)
+    assert _scrub(assembled, tmp_path / "entry") == _scrub(direct, tmp_path / "direct")
 
 
 def check_drive_result(after, scenario, fallback):
     assert after["error"] is None or scenario == "login_expired", after["error"]
     trace = after["trace"]
+    assert not [row for row in trace if row[0] == "init_script"]
     assert next(i for i, row in enumerate(trace) if row[0] == "listen") < next(
         i for i, row in enumerate(trace) if row[0] == "goto" and "/search/" in row[1]
     ) if scenario != "login_expired" else True
@@ -481,64 +473,9 @@ def test_dependency_direction():
                     assert {alias.name for alias in node.names} <= allowed_runtime[module]
 
 
-def test_frozen_source_hashes_and_signature_resource():
-    manifest = (FIXTURES / "sources.json").read_bytes()
-    assert sha256(manifest).hexdigest() == "18a932b640c8620d79ccaa1ccffdcaaaad1118fad9ffd8621531529bdea98878"
-    sources = json.loads(manifest)
-    assert sources["fork_sha"] == "5a68eb5098fcd17308c7fe0b9d53916ae839b303"
-    for name, digest in sources["files"].items():
-        assert sha256((FIXTURES / name).read_bytes()).hexdigest() == digest, name
-    from trippostcollect.core import resources
-    assert sha256(resources.read_text("js/douyin.js").encode()).hexdigest() == "ff5cb3133e2717523ffb3f96679e3f5d23bd31a999411ea604cff9a51da9e26e"
-
-
-def test_unchanged_parser_signer_and_login_support_bodies():
-    pairs = {
-        # #131：decode_douyin_json_body 合并流时保留非空 search_nil_info，validate_douyin_search_response
-        # 改为 search_nil_type 白名单；两者的偏离由 test_issue131_search_nil_whitelist_deviation 钉住。
-        "media_platform/douyin/search_safety.py": (parser, ["classify_empty_first_page"]),
-        "media_platform/douyin/help.py": (signer, ["get_a_bogus", "get_a_bogus_from_js"]),
-        "tools/easing.py": (login_support, [
-            "ease_in_quad", "ease_out_quad", "ease_out_quart", "ease_out_expo", "ease_out_bounce", "ease_out_elastic",
-        ]),
-        "cache/local_cache.py": (login_support, ["ExpiringLocalCache"]),
-        "cache/abs_cache.py": (login_support, ["AbstractCache"]),
-        "tools/slider_util.py": (login_support, ["Slide", "get_track_simple"]),
-        "tools/image_manifest.py": (parser, ["douyin_source_asset_key"]),
-        # #116：_normalized_author_stats 改为只读作者资料 user 节点；封面/视频/音乐提取函数随字段删除。
-        "store/douyin/__init__.py": (parser, [
-            "_first_nonempty", "_nested_value", "_creator_user_profile", "_author_metric",
-            "_extract_note_image_list", "_extract_note_image_assets",
-        ]),
-    }
-    removed = {"_extract_content_cover_url", "_extract_video_download_url", "_extract_music_download_url"}
-    assert not removed & {node.name for node in ast.parse(Path(parser.__file__).read_text()).body if hasattr(node, "name")}
-    for name, (module, names) in pairs.items():
-        old = {node.name: node for node in ast.parse((FIXTURES / (name + ".txt")).read_text()).body if hasattr(node, "name")}
-        new = {node.name: node for node in ast.parse(Path(module.__file__).read_text()).body if hasattr(node, "name")}
-        for symbol in names:
-            expected = t14_slider_paths(old[symbol]) if symbol == "Slide" else old[symbol]
-            actual = ast.parse(ast.unparse(new[symbol])).body[0] if symbol == "Slide" else new[symbol]
-            assert ast.dump(expected) == ast.dump(actual), (name, symbol)
-
-
-
-def test_issue131_search_nil_whitelist_deviation():
-    """#131：旧实现只把 search_nil_type == "verify_check" 当作异常，其他取值一律放过；新实现只放行空值与 service_empty。"""
-    old_source = (FIXTURES / "media_platform/douyin/search_safety.py.txt").read_text()
-    old = {node.name: node for node in ast.parse(old_source).body if hasattr(node, "name")}
-    old_validate = ast.unparse(old["validate_douyin_search_response"])
-    old_decode = ast.unparse(old["decode_douyin_json_body"])
-    # 旧侧：校验与合并都只认 verify_check，没有白名单。
-    assert "== 'verify_check'" in old_validate and "service_empty" not in old_validate
-    assert old_decode.count("verify_check") == 1 and "other_search_nil_info" not in old_decode
-    # 新侧：白名单常量与按取值命名的失败原因。
+def test_issue131_search_nil_whitelist():
+    """#131：search_nil_type 只放行空值与 service_empty，其他取值按取值命名失败原因。"""
     assert parser.DOUYIN_NORMAL_SEARCH_NIL_TYPES == frozenset({"service_empty"})
-    new_validate = ast.unparse(next(
-        node for node in ast.parse(Path(parser.__file__).read_text()).body
-        if getattr(node, "name", "") == "validate_douyin_search_response"
-    ))
-    assert "DOUYIN_NORMAL_SEARCH_NIL_TYPES" in new_validate and "search_nil_" in new_validate
     for value, reason in (("unknown", "search_nil_unknown"), ("verify_check", "search_verify_check")):
         with pytest.raises(parser.SearchResponseError) as raised:
             parser.validate_douyin_search_response(
@@ -551,23 +488,15 @@ FIRST_PAGE_CASES = [
     (10, 10, "stable", False), (9, 10, "stable", False),
     (10, 10, "", False), (10, 10, "stable", True), (10, 0, "stable", False),
 ]
-T14_FIRST_PAGE = ("T06", "first_page_rebuild")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("visible_count,offset,search_id,verify", FIRST_PAGE_CASES)
-async def test_root_first_page_without_capture_matches_retired_legacy_rebuild(visible_count, offset, search_id, verify):
-    """#124：首页可见卡片重建随直接请求退出；固化预期经单向变换后与“截获缺失、不请求详情”比较。"""
+async def test_first_page_without_capture_fails_without_direct_request(visible_count, offset, search_id, verify):
+    """#124：首页只经浏览器截获；未截获时以 browser_search_response_missing 失败，不直接请求、不请求详情。"""
     params = (visible_count, offset, search_id, verify)
     ports = entry.douyin_dependencies(worker_config())["ports"].client
-    after = await first_page_without_capture(params, ports=ports)
-    assert expectations.scrub(after) == douyin_full_scan_deviation.first_page_rebuild_retired(
-        douyin_116_deviation.douyin_first_page_rebuild(expectations.load(*T14_FIRST_PAGE, first_page_case(params))))
-
-
-def first_page_case(params):
-    visible_count, offset, search_id, verify = params
-    return f"visible{visible_count}-offset{offset}-search_id_{search_id or 'empty'}-verify{int(verify)}"
+    assert await first_page_without_capture(params, ports=ports) == ("browser_search_response_missing", [])
 
 
 async def first_page_without_capture(params, *, ports):
@@ -607,9 +536,6 @@ async def first_page_without_capture(params, *, ports):
     return raised.value.reason, calls
 
 
-T14_SLIDER = ("T06", "slider_tracks")
-
-
 def cache_lifecycle(cache_class):
     value = cache_class()
     value.set("dy_phone", b"123456", 120)
@@ -621,10 +547,13 @@ def cache_lifecycle(cache_class):
 
 
 @pytest.mark.asyncio
-async def test_root_slider_tracks_and_cache_match_frozen_legacy():
-    """T14：滑块轨迹与固化旧值比较；缓存生命周期原本就与字面期望比较，此处照旧。"""
-    tracks = {level: login_support.get_tracks(137, level) for level in ("easy", "hard")}
-    assert tracks == expectations.load(*T14_SLIDER, "get_tracks_137")
+async def test_slider_tracks_and_login_cache_lifecycle():
+    # 滑块轨迹确定：easy 匀加速小步，hard 先大步后逐步收敛。
+    assert login_support.get_tracks(137, "easy") == [
+        0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3,
+        4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 5,
+    ]
+    assert login_support.get_tracks(137, "hard") == [0, 0, 40, 28, 21, 14, 10, 7, 5, 3, 3, 2, 1, 1, 0, 1, 0, 0, 1, 0, 0]
     assert cache_lifecycle(login_support.ExpiringLocalCache) == (b"123456", ["dy_phone"], None)
 
 
@@ -656,11 +585,15 @@ def test_worker_assembly_from_arbitrary_cwd(tmp_path, fallback):
 
 
 REPAIR_CASES = [(False, True), (True, True), (True, False)]
-T14_REPAIR = ("T06", "repair_exception_chain")
-
-
-def repair_case(original_error, page_present):
-    return f"original_error{int(original_error)}-page{int(page_present)}"
+NAVIGATION_FAILED = ("browser detail response did not contain aweme_detail; attempts=["
+                     "'note:reason=navigation_or_response:Error:payload_keys=[]', "
+                     "'video:reason=navigation_or_response:Error:payload_keys=[]']")
+REPAIR_EXPECTED = {
+    (False, True): ("RuntimeError", NAVIGATION_FAILED, "NoneType", "None", [{"timeout": 30000}] * 2),
+    (True, True): ("RuntimeError", NAVIGATION_FAILED, "ValueError", "原详情请求失败", [{"timeout": 30000}] * 2),
+    (True, False): ("RuntimeError", "Douyin browser detail fallback requires a Playwright page",
+                    "ValueError", "原详情请求失败", []),
+}
 
 
 def repair_inputs(monkeypatch, original_error, page_present):
@@ -706,10 +639,10 @@ async def root_repair_chain(monkeypatch, original_error, page_present):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("original_error,page_present", REPAIR_CASES)
-async def test_root_repair_exception_chain_matches_frozen_legacy(monkeypatch, original_error, page_present):
+async def test_root_repair_exception_chain(monkeypatch, original_error, page_present):
+    """浏览器详情兜底先 note 后 video；证据不足时保留异常，原详情请求的异常作为 cause。"""
     after = await root_repair_chain(monkeypatch, original_error, page_present)
-    assert expectations.scrub(after) == expectations.load(*T14_REPAIR, repair_case(original_error, page_present))
-    assert after[2] == ("ValueError" if original_error else "NoneType")
+    assert after == REPAIR_EXPECTED[(original_error, page_present)]
 
 
 async def post_form(module, signer_module, patch, *, ports=None):
@@ -753,20 +686,19 @@ async def post_form(module, signer_module, patch, *, ports=None):
 
 
 def check_post_form(after):
-    assert after[0][3] == {}  # 保留旧 post 没有传 request_method 的签名输入。
+    assert after[0][3] == {}  # post 不传 request_method 的签名输入。
+    for part in ("webid=123", "msToken=fixture", "verifyFp=verify", "fp=verify", "uifid=current"):
+        assert part in after[0][2].split("&"), part
+    assert after[0][4] == "Chrome/125.0.0.0"
     assert b"a_bogus=fixed%2Bbogus%2F%3D" in after[1][3]
     assert "x-tt-argus" not in dict(after[1][4])
 
 
-T14_POST_FORM = ("T06", "post_form_signature_inputs")
-
-
 @pytest.mark.asyncio
-async def test_root_post_form_and_signature_inputs_match_frozen_legacy(monkeypatch):
+async def test_root_post_form_and_signature_inputs(monkeypatch):
     ports = entry.douyin_dependencies(worker_config())["ports"].client
     with monkeypatch.context() as patch:
         after = await post_form(client, signer, patch, ports=ports)
-    assert expectations.scrub(after) == expectations.load(*T14_POST_FORM, "comment_reply")
     check_post_form(after)
 
 

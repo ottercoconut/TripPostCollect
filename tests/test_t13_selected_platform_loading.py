@@ -16,9 +16,10 @@ import sys
 
 import pytest
 
+from support import worker_scenarios
+
 
 ROOT = Path(__file__).resolve().parents[1]
-T02_COMMANDS = json.loads((ROOT / "tests/golden/t02_worker_commands.json").read_text(encoding="utf-8"))
 PLATFORM_PACKAGES = {"wb": "weibo", "dy": "douyin", "zhihu": "zhihu", "xhs": "xhs"}
 REGISTERED_CROSS_SITE_IMPORTS = {("weibo_dependencies", "trippostcollect.platforms.xhs.behavior")}
 
@@ -52,14 +53,15 @@ def _environment(extra_env: dict[str, str], tmp: Path) -> dict[str, str]:
     return environment
 
 
-@pytest.mark.parametrize("scenario", sorted(T02_COMMANDS))
-def test_worker_loads_only_selected_root_platform(scenario: str, tmp_path: Path) -> None:
-    golden = T02_COMMANDS[scenario]
-    argv = [part.replace("<TMP>", str(tmp_path)) for part in golden["cmd"][4:]]
-    code = argv[argv.index("--platform") + 1]
+@pytest.mark.parametrize("scenario", worker_scenarios.NAMES)
+def test_worker_loads_only_selected_root_platform(scenario: str, tmp_path: Path, monkeypatch) -> None:
+    # 子命令与 env 取自父侧对本场景的真实构造。
+    command = worker_scenarios.capture_parent_commands(monkeypatch, tmp_path)[scenario]
+    argv = command["cmd"][4:]
+    code = worker_scenarios.worker_code(scenario)
     result = subprocess.run(
         [sys.executable, "-P", "-c", PROBE, json.dumps(argv), code],
-        cwd=tmp_path, env=_environment(golden["extra_env"], tmp_path),
+        cwd=tmp_path, env=_environment(command["extra_env"], tmp_path),
         capture_output=True, text=True, timeout=300, check=False,
     )
     assert result.returncode == 0, result.stderr[-4000:]

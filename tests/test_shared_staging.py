@@ -1,13 +1,11 @@
-"""四站暂存和内容出口与固定 Git 基线逐字节对照；不启动抓取。
-
-Git 基线类（tests/golden/shared_staging.json 原文）在 fork 包上的运行结果已在 T14 删除 fork 前固化到
-tests/fixtures/t14_legacy_expectations/shared_staging；根侧只运行根入口装配的出口并与之比较。
-"""
+"""四站正文图暂存与 JSONL 内容出口经根入口装配运行：目录布局、manifest 行、拒绝与冲突；不启动抓取。"""
 
 from __future__ import annotations
 
 import ast
 import asyncio
+from hashlib import sha256
+import json
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -15,9 +13,7 @@ from unittest.mock import patch
 from PIL import Image, UnidentifiedImageError
 import pytest
 
-from support import legacy_expectations as expectations
 from support.stable_png import solid_png
-from support import platform_session_deviation as deviation
 from trippostcollect.application.contracts import ContentSink, ImageStager, JsonlWriter
 from trippostcollect.artifacts.jsonl import JsonlContentStore
 
@@ -135,11 +131,6 @@ async def _stage_images(make_store, directory, id_keyword, capture_logs):
     return returned, errors, logs
 
 
-T14_STAGING = ("shared_staging", "baseline_classes")
-# T12 退出切片：根内容出口不再有评论/创作者写出；基线这两类文件不参与根侧比较。
-EXITED_ITEM_TYPES = ("_comments_", "_creators_")
-
-
 def _root_config(platform, save_data_path):
     from trippostcollect.application.worker_inputs import worker_config
 
@@ -208,28 +199,57 @@ async def _root_jsonl(platform, directory, monkeypatch):
     assert item["author"]["avatar_url"] == avatar
 
 
+# 平台 → (manifest 的来源键, 第一张图的资产键)。资产键优先取平台图片 ID，否则按平台规则归一 URL。
+SOURCE_KEYS = {
+    "weibo": ("image_list", "weibo:pid:pid-1"),
+    "douyin": ("note_download_url", "douyin:uri:uri-1"),
+    # 知乎按去掉协议与查询串后的地址取散列。
+    "zhihu": ("image_list", "zhihu:urlsha256:" + sha256(b"pic.example/notes/first.jpg").hexdigest()),
+    "xhs": ("image_list", "xhs:path:/notes/first.jpg"),
+}
+
+
 @pytest.mark.parametrize("platform", PLATFORMS)
-def test_root_staging_matches_frozen_baseline(platform, tmp_path, monkeypatch):
-    """T14：根暂存与内容出口经根入口装配，与固化的 Git 基线类结果比较；不加载 fork。"""
+def test_root_staging_and_jsonl(platform, tmp_path, monkeypatch):
+    """根暂存与内容出口经根入口装配；正式 worker 开关下写出前净化作者头像。"""
     import logging
 
-    # 与基线子进程相同的正式 worker 开关：写出前净化作者头像。
     monkeypatch.setenv("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS", "1")
-    expected = expectations.load(*T14_STAGING, platform)
-    root = tmp_path / "baseline"
-    images = asyncio.run(_stage_images(
+    root = tmp_path / "staging"
+    returned, errors, logs = asyncio.run(_stage_images(
         lambda: _root_image_stager(platform, str(root)), root, "platform_post_id",
         lambda sink: patch.object(logging.getLogger("TripPostCollect"), "info", side_effect=sink),
     ))
-    assert expectations.scrub(images, (tmp_path, "<TMP>")) == expected["images"]
-    assert _tree(root) == expected["tree_after_images"]
+    # 不安全的帖子 ID 用其散列命名目录；拒绝的帖子不留目录。
+    safe = "id-" + sha256("青岛/路径".encode()).hexdigest()
+    images = [f"{platform}/images/{post}/{name}" for post in (safe, "success") for name in ("000.png", "001.jpg", "002.png")]
+    files = {name for name, data in _tree(root).items() if data is not None}
+    assert files == {f"{platform}/image_manifest.jsonl", *images}
+    source_key, asset_key = SOURCE_KEYS[platform]
+    first = returned[0][0]
+    assert {key: first[key] for key in (
+        "platform_key", "platform_post_id", "image_role", "source_index", "source_key", "source_asset_key",
+        "fetch_status", "attempts", "http_status", "staging_path", "mime_type", "width", "height", "error_code",
+    )} == {
+        "platform_key": platform, "platform_post_id": "success", "image_role": "content", "source_index": 0,
+        "source_key": source_key, "source_asset_key": asset_key, "fetch_status": "downloaded", "attempts": 2,
+        "http_status": 200, "staging_path": f"{platform}/images/success/000.png", "mime_type": "image/png",
+        "width": 8, "height": 6, "error_code": None,
+    }
+    assert first["sha256"] == sha256((root / first["staging_path"]).read_bytes()).hexdigest()
+    rejected = returned[2]
+    assert (rejected["platform_post_id"], rejected["fetch_status"], rejected["staging_path"], rejected["error_code"]) == (
+        "unsupported", "failed", None, "image_non_raster_response")
+    manifest = [json.loads(line) for line in (root / platform / "image_manifest.jsonl").read_text().splitlines()]
+    assert {row["platform_post_id"] for row in manifest} >= {"success", "青岛/路径", "unsupported", "broken"}
+    assert [error[2] for error in errors] == ["image_non_raster_response", "image_decode_failed", "image_existing_conflict"]
+    assert len(logs) == 5
     asyncio.run(_root_jsonl(platform, root, monkeypatch))
-    retained = {name: data for name, data in expected["tree_after_jsonl"].items()
-                if not any(kind in name for kind in EXITED_ITEM_TYPES)}
-    assert _tree(root) == retained
-    # #59 有意偏离：根 worker 缺省暂存根不再回落 fork 数据目录。钉住被偏离的旧值，并断言根侧显式失败。
-    assert expected["default_save_data_root"] == deviation.LEGACY_DEFAULT_SAVE_DATA_ROOT
-    with pytest.raises(RuntimeError, match=deviation.SAVE_DATA_PATH_REQUIRED):
+    files_after = {name for name, data in _tree(root).items() if data is not None}
+    assert files_after - files == {f"{platform}/jsonl/search_contents_2026-09-30.jsonl",
+                                   f"changed/{platform}/jsonl/search_contents_2026-10-01.jsonl"}
+    # #59：缺省暂存根不回落到其他数据目录，显式失败。
+    with pytest.raises(RuntimeError, match="worker_save_data_path_required"):
         _root_image_stager(platform, "")
 
 
