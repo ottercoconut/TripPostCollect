@@ -547,7 +547,13 @@ def cache_lifecycle(cache_class):
 
 
 @pytest.mark.asyncio
-async def test_login_cache_lifecycle():
+async def test_slider_tracks_and_login_cache_lifecycle():
+    # 滑块轨迹确定：easy 匀加速小步，hard 先大步后逐步收敛。
+    assert login_support.get_tracks(137, "easy") == [
+        0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3,
+        4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 5,
+    ]
+    assert login_support.get_tracks(137, "hard") == [0, 0, 40, 28, 21, 14, 10, 7, 5, 3, 3, 2, 1, 1, 0, 1, 0, 0, 1, 0, 0]
     assert cache_lifecycle(login_support.ExpiringLocalCache) == (b"123456", ["dy_phone"], None)
 
 

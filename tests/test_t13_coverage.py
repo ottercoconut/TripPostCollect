@@ -22,10 +22,7 @@ from run_lanes import EXPRESSIONS
 
 
 ROOT = Path(__file__).resolve().parents[1]
-# 与冻结旧实现（固化预期或冻结 fixture）对照的测试文件（T05–T10）；T14-C 删除旧桥对照文件后只剩根侧比较。
-# T09 冻结对照随 #71（小红书取数改为浏览器 L1）退役删除。
-LEGACY_FILES = frozenset(f"tests/test_adapter_{name}.py" for name in ("t05", "t06", "t07", "t08", "t10"))
-# 单站卡的对照文件只驱动该站，文件本身即本站证据。
+# 单站适配器测试文件只驱动该站，文件本身即本站证据。
 CARD_SITES = {"t05": "weibo", "t06": "douyin", "t07": "zhihu", "t08": "bilibili", "t09_deps": "xhs"}
 SITE_TOKENS = {
     "bilibili": ("bilibili", "bili"),
@@ -81,14 +78,6 @@ def test_matrix_declares_every_responsibility_for_five_sites() -> None:
     # 每格只能是 covered/shared/na，不得残留 partial、gap 或其他临时状态。
     statuses = {cell["status"] for block in SPEC["responsibilities"].values() for cell in block["cells"].values()}
     assert statuses <= report.STATUSES == {"covered", "shared", "na"}
-
-
-def test_legacy_equivalence_flag_marks_exactly_frozen_comparison_tests() -> None:
-    # T14 删除冻结对照测试时，守护会因缺失这些 node 而强制重新覆盖，这是预期行为。
-    for responsibility, owner, entry in report.iter_entries(SPEC):
-        reference = entry.get("function") or entry.get("node") or entry["file"]
-        assert bool(entry.get("legacy_equivalence")) == (reference.split("::")[0] in LEGACY_FILES), (
-            responsibility, owner, reference)
 
 
 def test_declared_nodes_run_in_declared_lane_without_skip(collected) -> None:

@@ -285,26 +285,22 @@ macos_process；其中真实自发信号也移到 driver。它们计入完整 OS
 - [tests/test_t13_coverage.py](../tests/test_t13_coverage.py)（component）按 `run_lanes.EXPRESSIONS` 的四个表达式各做一次
   `--collect-only`，经 `tests/support/coverage_probe.py` 记录标记，断言每个声明 node 只落在声明的 lane、
   不带 skip/xfail、skipif 条件全为假，并核对每格条目确有本站证据（站点目录、文件或函数名、参数 ID、
-  函数体字面量，或单站卡对照文件）。运行期 `pytest.skip()` 由 lane 计数校验（skipped=0）兜底。
+  函数体字面量，或单站适配器测试文件）。运行期 `pytest.skip()` 由 lane 计数校验（skipped=0）兜底。
 - 同一用例精确断言 issue #1 的 `issue1_component` 17 项、`issue1_os` 11 项、socket 与 installation 各 1 项，
   以及 issue #2 的 `tests/test_xhs_lease_exit.py` 68 项。
-- `legacy_equivalence: true` 标记依赖冻结旧实现 fixture 的 T05–T10 对照测试。T14 删除这些测试时守护会
-  因缺失而失败，必须先补上不依赖旧实现的覆盖再改声明，这是预期行为。
 - CI 中 `run_matrix.py` 在全部 lane 后调用
   [scripts/ci/coverage_report.py](../scripts/ci/coverage_report.py)，按声明读取各 lane 的 junit，
   写出 `coverage.json`（F×站逐格匹配与通过数、按站×lane 的声明/通过计数、各 lane 总计、每站状态计数）；任一声明 node 缺失、未通过或某 lane 无 junit 都使 CI 非零。报告只含 node 名与计数。
 
 新增或删除承担五站责任的测试时同批更新声明；不得为了让守护变绿而删除声明或改用他站用例。
 
-## T14-C 删除批的测试偏离登记
+## 预期值的来源
 
-fork、私有桥与过渡模块删除后，依赖它们的对照用例按以下登记处理；固化文件与冻结 fixture 均不改字节。
-
-- [tests/support/fork_removal_deviation.py](../tests/support/fork_removal_deviation.py)：T08/T10/T11 冻结旧源码执行前
-  先核对原字节哈希，再把已删除的 `MEDIACRAWLER_DIR` 从 `core.paths` 导入中移除并按原值预置，把
-  `from execution_state import` 改为 `trippostcollect.core.execution_state` 的同名导入，其余源码逐字执行。
-- `tests/support/platform_session_deviation.py` 的 `xhs_cdp_settings_without_user_data_dir`：T09 小红书场景预期中
-  每条 `cdp_manager` 记录先钉住 `USER_DATA_DIR == "%s_user_data_dir"`，再删除该键后与根实现比较。
+测试的预期值只来自现行文档、平台契约或可解释的字面值，不与已删除的旧实现（fork、旧执行器源码快照、
+迁移期固化输出）对照。适配器离线驱动（`tests/test_adapter_t05`–`t08`、`t10`、`t11`）只运行根实现，
+按场景断言停止事件、跳过候选、入库记录与产物；worker 子命令的父侧入参与预期 argv 写在
+[tests/support/worker_scenarios.py](../tests/support/worker_scenarios.py)，执行器全链路驱动在
+[tests/support/executor_driver.py](../tests/support/executor_driver.py)。
 
 本机沙箱脚本（如 Linux 工作副本的 `tpc_pytest.sh`）直接在新 worktree 上运行时没有可写 `data/`，t02/t11/t12
 中约 20 个用例会出现环境性失败；这不是代码回归，正式结论以卡片闸门（临时源码副本）和 CI 为准。

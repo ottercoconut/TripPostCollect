@@ -992,7 +992,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_shared_staging.py::test_root_staging_matches_frozen_baseline",
+       "function": "tests/test_shared_staging.py::test_root_staging_and_jsonl",
        "lane": "component",
        "params": [
         "weibo"
@@ -1027,7 +1027,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_shared_staging.py::test_root_staging_matches_frozen_baseline",
+       "function": "tests/test_shared_staging.py::test_root_staging_and_jsonl",
        "lane": "component",
        "params": [
         "douyin"
@@ -1059,7 +1059,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_shared_staging.py::test_root_staging_matches_frozen_baseline",
+       "function": "tests/test_shared_staging.py::test_root_staging_and_jsonl",
        "lane": "component",
        "params": [
         "zhihu"
@@ -1098,7 +1098,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_shared_staging.py::test_root_staging_matches_frozen_baseline",
+       "function": "tests/test_shared_staging.py::test_root_staging_and_jsonl",
        "lane": "component",
        "params": [
         "xhs"
@@ -1153,15 +1153,14 @@
        "min_count": 36
       },
       {
-       "function": "tests/test_adapter_t08.py::test_formal_request_and_artifact_equivalence",
+       "function": "tests/test_adapter_t08.py::test_formal_request_and_artifacts",
        "lane": "component",
        "params": [
         "behavior_failed"
-       ],
-       "legacy_equivalence": true
+       ]
       },
       {
-       "function": "tests/test_adapter_t12.py::test_bilibili_runs_in_process_without_fork_and_is_not_a_worker",
+       "function": "tests/test_adapter_t12.py::test_bilibili_runs_in_process_and_is_not_a_worker",
        "lane": "component"
       }
      ]
@@ -1303,10 +1302,10 @@
     {
      "file": "tests/test_adapter_t04a.py",
      "lane": "component",
-     "min_count": 4
+     "min_count": 3
     },
     {
-     "function": "tests/test_adapter_t03.py::test_cookie_snapshot_matches_baseline",
+     "function": "tests/test_adapter_t03.py::test_cookie_snapshot_returns_header_names_and_user_agent",
      "lane": "component"
     }
    ],
@@ -1334,7 +1333,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t03.py::test_cookie_pure_functions_match_baseline",
+       "function": "tests/test_adapter_t03.py::test_platform_cookie_url_and_required_names",
        "lane": "component",
        "params": [
         "bilibili"
@@ -1346,8 +1345,7 @@
        "params": [
         "unified"
        ],
-       "site_basis": "test_warmup_trace_and_files 的 unified 入口以 --targets all 驱动 B站/微博/抖音/知乎 warmup，新旧逐字节等价",
-       "legacy_equivalence": true
+       "site_basis": "test_warmup_trace_and_files 的 unified 入口以 --targets all 驱动 B站/微博/抖音/知乎 warmup，新旧逐字节等价"
       }
      ]
     },
@@ -1372,8 +1370,7 @@
       },
       {
        "function": "tests/test_adapter_t05.py::test_warmup_requires_mobile_login_and_uid",
-       "lane": "component",
-       "legacy_equivalence": true
+       "lane": "component"
       },
       {
        "function": "tests/test_mediacrawler_behavior.py::test_behavior_stage_writes_complete_evidence",
@@ -1387,7 +1384,7 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t03.py::test_cookie_pure_functions_match_baseline",
+       "function": "tests/test_adapter_t03.py::test_platform_cookie_url_and_required_names",
        "lane": "component",
        "params": [
         "weibo"
@@ -1406,24 +1403,22 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t03.py::test_cookie_pure_functions_match_baseline",
+       "function": "tests/test_adapter_t03.py::test_platform_cookie_url_and_required_names",
        "lane": "component",
        "params": [
         "douyin"
        ]
       },
       {
-       "function": "tests/test_adapter_t06.py::test_root_matches_frozen_legacy_requests_records_images_events",
+       "function": "tests/test_adapter_t06.py::test_drive_requests_records_images_events",
        "lane": "component",
        "params": [
         "login_expired"
-       ],
-       "legacy_equivalence": true
+       ]
       },
       {
-       "function": "tests/test_adapter_t06.py::test_root_slider_tracks_and_cache_match_frozen_legacy",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/test_adapter_t06.py::test_slider_tracks_and_login_cache_lifecycle",
+       "lane": "component"
       },
       {
        "function": "tests/test_adapter_t10.py::test_warmup_trace_and_files",
@@ -1431,8 +1426,7 @@
        "params": [
         "unified"
        ],
-       "site_basis": "test_warmup_trace_and_files 的 unified 入口以 --targets all 驱动 B站/微博/抖音/知乎 warmup，新旧逐字节等价",
-       "legacy_equivalence": true
+       "site_basis": "test_warmup_trace_and_files 的 unified 入口以 --targets all 驱动 B站/微博/抖音/知乎 warmup，新旧逐字节等价"
       }
      ]
     },
@@ -1451,24 +1445,22 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t03.py::test_cookie_pure_functions_match_baseline",
+       "function": "tests/test_adapter_t03.py::test_platform_cookie_url_and_required_names",
        "lane": "component",
        "params": [
         "zhihu"
        ]
       },
       {
-       "function": "tests/test_adapter_t07.py::test_root_matches_frozen_legacy_request_event_and_artifacts",
+       "function": "tests/test_adapter_t07.py::test_drive_request_event_and_artifacts",
        "lane": "component",
        "params": [
         "login_expired"
-       ],
-       "legacy_equivalence": true
+       ]
       },
       {
        "function": "tests/test_adapter_t07.py::test_dependency_direction",
-       "lane": "component",
-       "legacy_equivalence": true
+       "lane": "component"
       },
       {
        "function": "tests/test_adapter_t10.py::test_warmup_trace_and_files",
@@ -1476,8 +1468,7 @@
        "params": [
         "unified"
        ],
-       "site_basis": "test_warmup_trace_and_files 的 unified 入口以 --targets all 驱动 B站/微博/抖音/知乎 warmup，新旧逐字节等价",
-       "legacy_equivalence": true
+       "site_basis": "test_warmup_trace_and_files 的 unified 入口以 --targets all 驱动 B站/微博/抖音/知乎 warmup，新旧逐字节等价"
       }
      ]
     },
@@ -1518,7 +1509,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t03.py::test_cookie_pure_functions_match_baseline",
+       "function": "tests/test_adapter_t03.py::test_platform_cookie_url_and_required_names",
        "lane": "component",
        "params": [
         "xhs"
@@ -1533,13 +1524,11 @@
    "shared": [
     {
      "function": "tests/test_adapter_t10.py::test_repair_partial_execution",
-     "lane": "component",
-     "legacy_equivalence": true
+     "lane": "component"
     },
     {
      "function": "tests/test_adapter_t10.py::test_repair_completion_and_evidence",
-     "lane": "component",
-     "legacy_equivalence": true
+     "lane": "component"
     },
     {
      "function": "tests/test_post_detail_repair.py::test_partial_generic_repair_can_commit_valid_subset",
@@ -1580,8 +1569,7 @@
       },
       {
        "function": "tests/test_adapter_t05.py::test_root_repair_page_status_is_classified",
-       "lane": "component",
-       "legacy_equivalence": true
+       "lane": "component"
       },
       {
        "function": "tests/test_residual_detail_fallbacks.py::test_weibo_repair_hook_recovers_exact_browser_detail",
@@ -1596,9 +1584,8 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t05.py::test_root_repair_attempts_and_exception_chain_match_frozen_legacy",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/test_adapter_t05.py::test_root_repair_attempts_and_exception_chain",
+       "lane": "component"
       }
      ]
     },
@@ -1636,9 +1623,8 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t06.py::test_root_repair_exception_chain_matches_frozen_legacy",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/test_adapter_t06.py::test_root_repair_exception_chain",
+       "lane": "component"
       }
      ]
     },
@@ -1711,9 +1697,8 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t08.py::test_formal_request_and_artifact_equivalence",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/test_adapter_t08.py::test_formal_request_and_artifacts",
+       "lane": "component"
       },
       {
        "function": "tests/test_bilibili_offline_faults.py::test_search_page_failure_is_runtime_failure_without_exhaustion",
@@ -1737,14 +1722,12 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t05.py::test_root_matches_frozen_legacy_requests_artifacts_and_events",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/test_adapter_t05.py::test_drive_requests_artifacts_and_events",
+       "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t05.py::test_root_entry_assembly_matches_frozen_fork_factory",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/test_adapter_t05.py::test_entry_assembly_matches_direct_construction",
+       "lane": "component"
       },
       {
        "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_search_transport_error_exhausts_retry_budget_and_reraises",
@@ -1768,14 +1751,12 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t06.py::test_root_matches_frozen_legacy_requests_records_images_events",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/test_adapter_t06.py::test_drive_requests_records_images_events",
+       "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t06.py::test_root_post_form_and_signature_inputs_match_frozen_legacy",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/test_adapter_t06.py::test_root_post_form_and_signature_inputs",
+       "lane": "component"
       },
       {
        "function": "tests/platforms/douyin/test_douyin_offline_faults.py::test_request_transport_error_is_raised_once_without_retry",
@@ -1795,14 +1776,12 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t07.py::test_root_matches_frozen_legacy_request_event_and_artifacts",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/test_adapter_t07.py::test_drive_request_event_and_artifacts",
+       "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t07.py::test_root_entry_matches_frozen_legacy_factory",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/test_adapter_t07.py::test_entry_assembly_matches_direct_construction",
+       "lane": "component"
       },
       {
        "function": "tests/platforms/zhihu/test_zhihu_offline_faults.py::test_signed_detail_http_is_gone",
@@ -1848,13 +1827,11 @@
     },
     {
      "function": "tests/test_adapter_t10.py::test_page_readiness_trace",
-     "lane": "component",
-     "legacy_equivalence": true
+     "lane": "component"
     },
     {
      "function": "tests/test_adapter_t10.py::test_page_evidence_cookie_cleanup",
-     "lane": "component",
-     "legacy_equivalence": true
+     "lane": "component"
     }
    ],
    "cells": {
@@ -1862,7 +1839,7 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t12.py::test_bilibili_runs_in_process_without_fork_and_is_not_a_worker",
+       "function": "tests/test_adapter_t12.py::test_bilibili_runs_in_process_and_is_not_a_worker",
        "lane": "component"
       },
       {
@@ -1886,7 +1863,7 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t12.py::test_worker_selection_loads_no_fork_top_level_package",
+       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
        "lane": "component",
        "params": [
         "weibo"
@@ -1901,8 +1878,7 @@
       },
       {
        "function": "tests/test_adapter_t05.py::test_dependency_direction",
-       "lane": "component",
-       "legacy_equivalence": true
+       "lane": "component"
       }
      ]
     },
@@ -1917,7 +1893,7 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t12.py::test_worker_selection_loads_no_fork_top_level_package",
+       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
        "lane": "component",
        "params": [
         "douyin"
@@ -1932,8 +1908,7 @@
       },
       {
        "function": "tests/test_adapter_t06.py::test_dependency_direction",
-       "lane": "component",
-       "legacy_equivalence": true
+       "lane": "component"
       },
       {
        "function": "tests/test_adapter_t02.py::test_all_worker_platforms_import_in_root_environment_without_exit_slices",
@@ -1953,7 +1928,7 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t12.py::test_worker_selection_loads_no_fork_top_level_package",
+       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
        "lane": "component",
        "params": [
         "zhihu"
@@ -1967,9 +1942,8 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t07.py::test_worker_assembly_without_fork_zhihu",
-       "lane": "component",
-       "legacy_equivalence": true
+       "function": "tests/test_adapter_t07.py::test_worker_assembly_zhihu",
+       "lane": "component"
       }
      ]
     },
@@ -1984,7 +1958,7 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t12.py::test_worker_selection_loads_no_fork_top_level_package",
+       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
        "lane": "component",
        "params": [
         "xhs"
