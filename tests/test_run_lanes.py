@@ -4,7 +4,10 @@ import errno
 import json
 import os
 from pathlib import Path
+import signal
 import socket
+import stat
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -143,6 +146,8 @@ def test_native_controller_restores_anchor_and_token(monkeypatch, tmp_path,
     import native_macos
 
     events = []
+    uid = native_macos.TEST_UID
+    loaded = {"on": False}
     monkeypatch.setattr(native_macos, "hosted_only", lambda: None)
     monkeypatch.setattr(native_macos.signal, "signal", lambda *args: None)
     monkeypatch.setenv("GITHUB_RUN_ID", "test")
@@ -155,8 +160,23 @@ def test_native_controller_restores_anchor_and_token(monkeypatch, tmp_path,
             if temporary_dispatcher:
                 return ""
             return 'anchor "com.apple/*" all'
+        if args[0] == "-n":
+            return ""
+        if args[:2] == ("-s", "info"):
+            return "Status: Enabled\n"
+        if len(args) >= 3 and args[0] == "-a" and args[2] == "-f":
+            loaded["on"] = True
+            return ""
+        if len(args) >= 3 and args[0] == "-a" and args[2] == "-F":
+            loaded["on"] = False
+            return ""
+        if len(args) >= 3 and args[0] == "-a" and args[2] == "-sr":
+            return native_macos.pf_policy(uid) if loaded["on"] else ""
         if "-vvsr" in args:
-            return "Packets: 4"
+            return (
+                f'block drop quick proto tcp all user = {uid} label "tpc_test_deny"\n'
+                "  [ Packets: 4 Bytes: 240 ]\n"
+            )
         return ""
 
     def fake_run(command, **kwargs):
@@ -167,8 +187,21 @@ def test_native_controller_restores_anchor_and_token(monkeypatch, tmp_path,
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(native_macos, "pf", fake_pf)
+    monkeypatch.setattr(native_macos, "create_test_user", lambda: {
+        "name": native_macos.TEST_USER, "uid": uid, "gid": native_macos.TEST_GID,
+        "shell": "/usr/bin/false", "deleted": False,
+        "deletion": "not_attempted_vm_disposable",
+    })
+    monkeypatch.setattr(native_macos, "grant_test_user_access",
+                        lambda *args: events.append(("grant", args[0])) or {"work": str(tmp_path)})
     monkeypatch.setattr(native_macos, "listeners", lambda stack: [])
-    monkeypatch.setattr(native_macos, "verify_drop", lambda servers: [])
+    monkeypatch.setattr(native_macos, "verify_user_open",
+                        lambda user, environment, servers: events.append(("baseline", user)) or [])
+    monkeypatch.setattr(native_macos, "verify_user_drop",
+                        lambda user, environment, servers: [{"user": user, "restricted": "timeout",
+                                                            "family": "AF_INET", "address": ["127.0.0.1", 9]}])
+    monkeypatch.setattr(native_macos, "verify_runner_open",
+                        lambda servers: [{"user": "runner", "uid": 501, "connected": True}])
     def connected(servers):
         events.append(("connected",))
         return []
@@ -181,7 +214,8 @@ def test_native_controller_restores_anchor_and_token(monkeypatch, tmp_path,
     monkeypatch.setattr(native_macos, "prepare_anchor", prepare)
     monkeypatch.setattr(native_macos, "verify_connected", connected)
     monkeypatch.setattr(native_macos.subprocess, "run", fake_run)
-    def fake_test(command, source, environment, log, *, cleanup):
+    def fake_test(command, source, environment, log, *, cleanup, user):
+        events.append(("launched", user))
         events.append(("environment", {key: environment.get(key) for key in native_macos.BROWSER_REPLAY_KEYS}))
         if fail_execution == "cleanup":
             cleanup.update(confirmed=False, status="cleanup_failed")
@@ -203,6 +237,16 @@ def test_native_controller_restores_anchor_and_token(monkeypatch, tmp_path,
         else:
             assert native_macos.run_isolated(["test"], tmp_path, tmp_path, {}, log) == 0
     evidence = json.loads((tmp_path / "os-policy.json").read_text())
+    submitted = (tmp_path / "native.pf").read_text()
+    native_macos.assert_user_scoped(submitted, uid)
+    native_macos.assert_echo_only_icmp(submitted)
+    assert 'block drop quick all label "tpc_test_deny"' not in submitted
+    assert evidence["test_user"]["name"] == native_macos.TEST_USER
+    assert evidence["test_user"]["uid"] == uid
+    assert evidence["test_user"]["deleted"] is False
+    assert evidence["test_user_negative"][0]["user"] == native_macos.TEST_USER
+    assert evidence["runner_positive"][0]["connected"] is True
+    assert evidence["pf_policy"]
     if fail_execution == "cleanup":
         assert ("-a", "com.apple/trippostcollect-tests", "-F", "rules") not in events
         assert ("-X", "123") not in events
@@ -233,6 +277,7 @@ def test_native_owned_group_cleanup(monkeypatch, scenario):
     cleanup = {}
     owner = (410, "owned-start")
     unrelated = {999: (999, "other-start")}
+    monkeypatch.setattr(native_macos, "hosted_only", lambda: None)
 
     def wait(timeout):
         assert timeout == 1800
@@ -243,8 +288,12 @@ def test_native_owned_group_cleanup(monkeypatch, scenario):
             raise KeyboardInterrupt()
         return 0
 
-    def popen(*args, **kwargs):
+    def popen(argv, **kwargs):
         assert kwargs["start_new_session"] is True
+        assert kwargs["env"] == {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+        assert argv[:6] == ["/usr/bin/sudo", "-n", "-u", "_tpcci", "/usr/bin/env", "-i"]
+        assert "HOME=/lane-home" in argv
+        assert argv[-1] == "fake"
         return SimpleNamespace(pid=410, wait=wait, poll=lambda: 0)
 
     def observe(timeout):
@@ -266,16 +315,21 @@ def test_native_owned_group_cleanup(monkeypatch, scenario):
         events.append("members" if alive else "empty")
         return {**unrelated, **({411: owner} if alive else {})}
 
-    def killpg(pgid, signum):
-        assert pgid == 410
-        state["signal"] = signum
-        events.append(signum)
+    def fake_admin(*arguments):
+        assert arguments[:4] == ("/bin/kill", "-s", arguments[2], "--")
+        assert arguments[4] == "-410"
+        state["signal"] = {"TERM": native_macos.signal.SIGTERM,
+                           "KILL": native_macos.signal.SIGKILL}[arguments[2]]
+        events.append(state["signal"])
+        return ""
 
     def sleep(seconds):
         now[0] += seconds
 
     monkeypatch.setattr(native_macos.subprocess, "Popen", popen)
-    monkeypatch.setattr(native_macos.os, "killpg", killpg)
+    monkeypatch.setattr(native_macos, "admin", fake_admin)
+    monkeypatch.setattr(native_macos.os, "killpg",
+                        lambda *args: pytest.fail("cross-user signals must use admin()"))
     monkeypatch.setattr(native_macos, "test_process_snapshot",
                         lambda *args: pytest.fail("real host observation forbidden"))
     errors = {"stuck": RuntimeError, "observe_error": OSError, "reused": RuntimeError,
@@ -283,8 +337,9 @@ def test_native_owned_group_cleanup(monkeypatch, scenario):
               "cancel": KeyboardInterrupt}
 
     def run():
-        return native_macos.run_test_command(["fake"], None, {}, None, cleanup=cleanup,
-                                             observe=observe, clock=lambda: now[0], sleep=sleep)
+        return native_macos.run_test_command(
+            ["fake"], None, {"HOME": "/lane-home"}, None, user="_tpcci", cleanup=cleanup,
+            observe=observe, clock=lambda: now[0], sleep=sleep)
 
     if scenario in errors:
         with pytest.raises(errors[scenario]):
@@ -326,14 +381,60 @@ def test_native_process_observation_is_strict_and_bounded(monkeypatch, table):
             native_macos.test_process_snapshot(2.5)
 
 
-def test_native_rejects_receipt_when_kernel_rule_is_missing(monkeypatch):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/ci"))
+def test_child_probe_times_out_without_pfctl(monkeypatch):
     import native_macos
 
-    monkeypatch.setattr(native_macos, "hosted_only", lambda: None)
-    monkeypatch.setattr(native_macos, "pf", lambda *args: "")
-    with pytest.raises(RuntimeError, match="PF 规则不存在"):
-        native_macos.verify_active({"enforced": True})
+    def forbidden(*args, **kwargs):
+        pytest.fail("child probe must not call pfctl or sudo")
+
+    monkeypatch.setattr(native_macos, "pf", forbidden)
+    monkeypatch.setattr(native_macos, "admin", forbidden)
+    monkeypatch.setattr(native_macos, "hosted_only", forbidden)
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def settimeout(self, value):
+            pass
+
+        def connect(self, address):
+            self.address = address
+            raise TimeoutError()
+
+    monkeypatch.setattr(socket, "socket", lambda *args: Client())
+    native_macos.verify_active({
+        "test_user": {"uid": os.getuid()},
+        "probes": [{"family": "AF_INET", "address": ["127.0.0.1", 9]}],
+    })
+    with pytest.raises(RuntimeError, match="不在测试用户中"):
+        native_macos.verify_active({
+            "test_user": {"uid": os.getuid() + 1},
+            "probes": [{"family": "AF_INET", "address": ["127.0.0.1", 9]}],
+        })
+
+    class Open:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def settimeout(self, value):
+            pass
+
+        def connect(self, address):
+            return None
+
+    monkeypatch.setattr(socket, "socket", lambda *args: Open())
+    with pytest.raises(RuntimeError, match="负例连接成功"):
+        native_macos.verify_active({
+            "test_user": {"uid": os.getuid()},
+            "probes": [{"family": "AF_INET", "address": ["127.0.0.1", 9]}],
+        })
 
 
 def test_ci_upload_junit_removes_source_and_captured_content(tmp_path):
@@ -616,6 +717,298 @@ def test_pf_without_real_packet_counts_fails(monkeypatch):
     monkeypatch.setattr(native_macos, "pf", lambda *args: "Packets: 0")
     with pytest.raises(RuntimeError, match="实际阻断计数"):
         native_macos.checked_counters("test")
+
+
+def test_icmp_packet_counts_do_not_satisfy_the_user_rule(monkeypatch):
+    import native_macos
+
+    uid = native_macos.TEST_UID
+    sample = (
+        f'block drop quick proto tcp all user = {uid} label "tpc_test_deny"\n'
+        "  [ Packets: 0 Bytes: 0 ]\n"
+        'block drop quick out inet proto icmp all icmp-type echoreq label "tpc_icmp_echo_deny"\n'
+        "  [ Packets: 9 Bytes: 500 ]\n"
+    )
+    monkeypatch.setattr(native_macos, "pf", lambda *args: sample)
+    with pytest.raises(RuntimeError, match="实际阻断计数"):
+        native_macos.checked_counters("test")
+    counted = sample.replace("Packets: 0", "Packets: 2", 1)
+    monkeypatch.setattr(native_macos, "pf", lambda *args: counted)
+    assert "Packets: 2" in native_macos.checked_counters("test")
+
+
+def test_pf_policy_scopes_blocks_to_the_test_user():
+    import native_macos
+
+    uid = native_macos.TEST_UID
+    text = native_macos.pf_policy(uid)
+    assert text == (
+        f'block drop quick proto {{ tcp udp }} all user {uid} label "tpc_test_deny"\n'
+        'block drop quick out inet proto icmp icmp-type echoreq label "tpc_icmp_echo_deny"\n'
+        'block drop quick out inet6 proto icmp6 icmp6-type echoreq label "tpc_icmp_echo_deny"\n'
+    )
+    native_macos.assert_user_scoped(text, uid)
+    native_macos.assert_echo_only_icmp(text)
+    rewritten = (
+        f'block drop quick proto tcp all user = {uid} label "tpc_test_deny"\n'
+        f'block drop quick proto udp all user = {uid} label "tpc_test_deny"\n'
+        'block drop quick out inet proto icmp all icmp-type 8 label "tpc_icmp_echo_deny"\n'
+        'block drop quick out inet6 proto icmp6 all icmp6-type 128 label "tpc_icmp_echo_deny"\n'
+    )
+    native_macos.assert_user_scoped(rewritten, uid)
+    native_macos.assert_echo_only_icmp(rewritten)
+    with pytest.raises(RuntimeError, match="整机"):
+        native_macos.assert_user_scoped('block drop quick all label "tpc_test_deny"\n', uid)
+
+
+def test_negative_probe_uses_the_test_user_and_positive_uses_the_runner(monkeypatch):
+    import native_macos
+
+    launches = []
+
+    def fake_run_as_user(user, argv, environment, *, timeout):
+        launches.append(user)
+        assert argv[1:3] == ["-c", native_macos._CONNECT_PROBE]
+        assert environment["HOME"] == "/lane-home"
+        return SimpleNamespace(returncode=10, stdout="", stderr="")
+
+    monkeypatch.setattr(native_macos, "run_as_user", fake_run_as_user)
+    server = SimpleNamespace(getsockname=lambda: ("127.0.0.1", 9))
+    dropped = native_macos.verify_user_drop("_tpcci", {"HOME": "/lane-home"}, [(socket.AF_INET, server)])
+    assert launches == ["_tpcci"]
+    assert dropped[0]["restricted"] == "timeout"
+    assert dropped[0]["user"] == "_tpcci"
+
+    def connected_probe(user, argv, environment, *, timeout):
+        launches.append(("open", user))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(native_macos, "run_as_user", connected_probe)
+    accepted = []
+    server.accept = lambda: accepted.append("accepted") or (SimpleNamespace(close=lambda: None), None)
+    opened = native_macos.verify_user_open("_tpcci", {"HOME": "/lane-home"}, [(socket.AF_INET, server)])
+    assert opened[0]["connected"] is True
+    assert accepted == ["accepted"]
+
+    monkeypatch.setattr(native_macos, "run_as_user",
+                        lambda *args, **kwargs: pytest.fail("runner probe must not switch user"))
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def settimeout(self, value):
+            pass
+
+        def connect(self, address):
+            self.address = address
+
+    monkeypatch.setattr(socket, "socket", lambda *args: Client())
+    positive = native_macos.verify_runner_open([(socket.AF_INET, server)])
+    assert positive[0]["connected"] is True
+    assert positive[0]["uid"] == os.getuid()
+    assert positive[0]["uid"] != native_macos.TEST_UID
+
+
+def test_user_probe_command_passes_the_lane_environment_explicitly():
+    import native_macos
+
+    command = native_macos.as_user_command(
+        "_tpcci", ["/tmp/python", "-m", "pytest"], {"HOME": "/lane-home", "PATH": "/usr/bin"},
+    )
+    assert command == [
+        "/usr/bin/sudo", "-n", "-u", "_tpcci", "/usr/bin/env", "-i",
+        "HOME=/lane-home", "PATH=/usr/bin", "/tmp/python", "-m", "pytest",
+    ]
+
+
+def test_test_user_already_exists_is_rejected(monkeypatch):
+    import native_macos
+
+    calls = []
+
+    def fake_admin(*args):
+        calls.append(args)
+        if args == ("/usr/bin/dscl", ".", "-list", "/Users"):
+            return "runner\n_tpcci\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(native_macos, "hosted_only", lambda: None)
+    monkeypatch.setattr(native_macos, "admin", fake_admin)
+    with pytest.raises(RuntimeError, match="拒绝复用"):
+        native_macos.create_test_user()
+    assert not any("-create" in args for args in calls)
+
+
+def test_test_user_uid_collision_is_rejected(monkeypatch):
+    import native_macos
+
+    def fake_admin(*args):
+        if args == ("/usr/bin/dscl", ".", "-list", "/Users"):
+            return "runner\n"
+        if args == ("/usr/bin/dscl", ".", "-list", "/Users", "UniqueID"):
+            return f"runner {native_macos.TEST_UID}\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(native_macos, "hosted_only", lambda: None)
+    monkeypatch.setattr(native_macos, "admin", fake_admin)
+    with pytest.raises(RuntimeError, match="已被 runner 占用"):
+        native_macos.create_test_user()
+
+
+def test_create_test_user_refuses_private_host(monkeypatch):
+    import native_macos
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.setattr(native_macos, "admin", lambda *args: pytest.fail("must not create users"))
+    with pytest.raises(RuntimeError, match="GitHub-hosted"):
+        native_macos.create_test_user()
+
+
+def test_create_test_user_is_unprivileged_and_not_deleted(monkeypatch):
+    import native_macos
+
+    calls = []
+    user = native_macos.TEST_USER
+    uid = str(native_macos.TEST_UID)
+
+    def fake_admin(*args):
+        calls.append(args)
+        if args == ("/usr/bin/dscl", ".", "-list", "/Users"):
+            return "runner\n"
+        if args == ("/usr/bin/dscl", ".", "-list", "/Users", "UniqueID"):
+            return "runner 501\n"
+        if args[:3] == ("/usr/bin/dscl", ".", "-create"):
+            return ""
+        if args == ("/usr/bin/dscacheutil", "-flushcache"):
+            return ""
+        if args[:5] == ("/usr/bin/sudo", "-n", "-u", user, "/usr/bin/id") and args[-1] == "-u":
+            return uid + "\n"
+        if args[:5] == ("/usr/bin/sudo", "-n", "-u", user, "/usr/bin/id") and args[-1] == "-g":
+            return "20\n"
+        if args[:5] == ("/usr/bin/sudo", "-n", "-u", user, "/usr/bin/id") and args[-1] == "-Gn":
+            return "staff\n"
+        if args[:6] == ("/usr/bin/sudo", "-n", "-u", user, "/usr/bin/sudo", "-n"):
+            raise subprocess.CalledProcessError(1, args, stderr="user is not in the sudoers file")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(native_macos, "hosted_only", lambda: None)
+    monkeypatch.setattr(native_macos, "admin", fake_admin)
+    created = native_macos.create_test_user()
+    assert created["name"] == user
+    assert created["uid"] == native_macos.TEST_UID
+    assert created["gid"] == 20
+    assert created["deleted"] is False
+    assert created["deletion"] == "not_attempted_vm_disposable"
+    assert "admin" not in created["groups"]
+    assert not any(arg == "-delete" for args in calls for arg in args)
+    node = f"/Users/{user}"
+    assert ("/usr/bin/dscl", ".", "-create", node, "UniqueID", uid) in calls
+    assert ("/usr/bin/dscl", ".", "-create", node, "PrimaryGroupID", "20") in calls
+    assert ("/usr/bin/dscl", ".", "-create", node, "UserShell", "/usr/bin/false") in calls
+    assert ("/usr/bin/dscl", ".", "-create", node, "NFSHomeDirectory", "/var/empty") in calls
+    assert not any("admin" in args for args in calls if args[:3] == ("/usr/bin/dscl", ".", "-create"))
+
+
+def test_signal_group_uses_admin_and_ignores_a_missing_process(monkeypatch):
+    import native_macos
+
+    calls = []
+
+    def fake_admin(*args):
+        calls.append(args)
+        if args[-1] == "-7":
+            raise subprocess.CalledProcessError(1, args, stderr="kill: 7: No such process")
+        raise subprocess.CalledProcessError(1, args, stderr="Operation not permitted")
+
+    monkeypatch.setattr(native_macos, "admin", fake_admin)
+    native_macos.signal_group(7, signal.SIGTERM)
+    with pytest.raises(subprocess.CalledProcessError):
+        native_macos.signal_group(8, signal.SIGKILL)
+    assert calls[0] == ("/bin/kill", "-s", "TERM", "--", "-7")
+    assert calls[1][2] == "KILL"
+
+
+def test_access_grants_stay_inside_work(monkeypatch, tmp_path):
+    import native_macos
+
+    work = tmp_path / "tpc-work"
+    source = work / "lane-os"
+    output = work / "reports" / "os"
+    venv = work / "root-venv"
+    browsers = work / "pw-browsers"
+    outside = tmp_path / "outside-python"
+    for path in (source / "pkg", output / "home", output / "t", venv / "bin", browsers / "chromium"):
+        path.mkdir(parents=True)
+    (source / "pkg" / "module.py").write_text("x")
+    frozen = source / "frozen.txt"
+    frozen.write_text("frozen")
+    frozen.chmod(0o644)
+    outside.write_text("interpreter")
+    (venv / "bin" / "python").symlink_to(outside)
+    recorded = []
+
+    def fake_acl(user, path, permissions):
+        resolved = Path(path).resolve()
+        assert resolved.is_relative_to(work.resolve())
+        assert not Path(path).is_symlink()
+        recorded.append((str(user), resolved, permissions))
+
+    monkeypatch.setattr(native_macos, "change_acl", fake_acl)
+    monkeypatch.setattr(native_macos, "acl_skipped", lambda path: Path(path) == frozen)
+    environment = {
+        "HOME": str(output / "home"),
+        "TMPDIR": str(output / "t"),
+        "PLAYWRIGHT_BROWSERS_PATH": str(browsers),
+    }
+    grants = native_macos.grant_test_user_access(
+        "_tpcci", [str(venv / "bin" / "python")], source, output, environment)
+    assert grants["interpreter_outside_work"] is True
+    assert all(path.is_relative_to(work.resolve()) for _, path, _ in recorded)
+    assert outside.resolve() not in {path for _, path, _ in recorded}
+    assert frozen.resolve() not in {path for _, path, _ in recorded}
+    write_paths = {path for user, path, permissions in recorded
+                   if user == "_tpcci" and permissions.startswith("read,write")}
+    assert write_paths
+    assert all(path.is_relative_to(output.resolve()) for path in write_paths)
+    assert (work.resolve(),) and any(path == work.resolve() and permissions == "execute"
+                                     for user, path, permissions in recorded if user == "_tpcci")
+    runner = native_macos.supervisor_identity()["name"]
+    assert any(user == runner and path.is_relative_to(output.resolve()) for user, path, _ in recorded)
+    assert not any(user.isdigit() for user, _, _ in recorded)
+
+    recorded.clear()
+    environment["PLAYWRIGHT_BROWSERS_PATH"] = str(tmp_path / "outside-browsers")
+    (tmp_path / "outside-browsers").mkdir()
+    with pytest.raises(RuntimeError, match="TPC_WORK"):
+        native_macos.grant_test_user_access(
+            "_tpcci", [str(venv / "bin" / "python")], source, output, environment)
+    assert recorded == []
+
+
+def test_private_immutable_file_is_not_silently_skipped(monkeypatch, tmp_path):
+    import native_macos
+
+    target = tmp_path / "frozen"
+    target.write_text("secret")
+    target.chmod(0o600)
+
+    class Private:
+        st_flags = stat.UF_IMMUTABLE
+        st_mode = stat.S_IFREG | 0o600
+
+    class Readable:
+        st_flags = stat.UF_IMMUTABLE
+        st_mode = stat.S_IFREG | 0o644
+
+    monkeypatch.setattr(Path, "lstat", lambda self: Private())
+    with pytest.raises(RuntimeError, match="不可读"):
+        native_macos.acl_skipped(target)
+    monkeypatch.setattr(Path, "lstat", lambda self: Readable())
+    assert native_macos.acl_skipped(target) is True
 
 
 def test_fresh_source_without_tools_directory(monkeypatch, tmp_path):
