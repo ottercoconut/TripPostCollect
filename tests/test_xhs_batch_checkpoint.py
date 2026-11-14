@@ -565,8 +565,8 @@ def test_worker_explicit_checkpoint_uses_real_publisher_and_ack(scenario, monkey
     for key, value in s.env.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(events, "_batch_publisher", None)
-    # T14：原同时把旧桥 E 的各 hook 换成拒绝桩，证明新 worker 不经 E；E 随 T14 删除，
-    # "根入口不导入 E"由 tests/test_adapter_t12.py 的导入扫描与选站子进程检查承担。
+    # 根入口不导入 fork 由 tests/architecture/test_package_boundaries.py 的导入扫描承担，
+    # 选站只装载本站由 tests/architecture/test_selected_platform_loading.py 承担。
     for name in ("_weibo_post_repair", "_douyin_browser_detail_fallback", "_xhs_repair"):
         monkeypatch.setattr(entry, name, getattr(entry, name))
     entry.install_hooks()

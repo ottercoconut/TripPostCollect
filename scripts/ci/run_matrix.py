@@ -182,7 +182,7 @@ def main():
            check=False, timeout=120)
     results["assembly"] = {"returncode": result.returncode, "modules": list(ROOT_ASSEMBLY_MODULES),
                            "worker_platforms": list(WORKER_PLATFORM_CODES)}
-    # 五站覆盖：按 tests/fixtures/t13_coverage.json 核对各 lane 的 junit，任一声明 node 缺失或未通过即失败。
+    # 五站覆盖：按 tests/fixtures/site_coverage.json 核对各 lane 的 junit，任一声明 node 缺失或未通过即失败。
     coverage = coverage_report.write_report(source / coverage_report.SPEC_PATH, reports, coverage_report.ROOT_LANES)
     results["coverage"] = {"returncode": int(not coverage["ok"]), "problems": len(coverage["problems"]),
                            "status_counts": coverage["status_counts"]}

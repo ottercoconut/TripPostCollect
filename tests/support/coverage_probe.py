@@ -1,7 +1,7 @@
 """覆盖守护收集探针：仅在子进程 `--collect-only` 中以 `-p support.coverage_probe` 装载。
 
 把每个已选中的测试项写成 JSON（nodeid、标记名、skip/xfail 标记、skipif 条件），
-供 `tests/test_t13_coverage.py` 核对五站责任 node 是否落在声明的 lane 且不被跳过。
+供 `tests/test_site_coverage.py` 核对五站责任 node 是否落在声明的 lane 且不被跳过。
 只用 pytest 公开的 item 接口，不修改收集结果。
 """
 

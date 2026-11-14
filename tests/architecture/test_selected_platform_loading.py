@@ -19,7 +19,7 @@ import pytest
 from support import worker_scenarios
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PLATFORM_PACKAGES = {"wb": "weibo", "dy": "douyin", "zhihu": "zhihu", "xhs": "xhs"}
 REGISTERED_CROSS_SITE_IMPORTS = {("weibo_dependencies", "trippostcollect.platforms.xhs.behavior")}
 

@@ -12,7 +12,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-_SPEC = importlib.util.spec_from_file_location("t13_ci_coverage_report", ROOT / "scripts/ci/coverage_report.py")
+_SPEC = importlib.util.spec_from_file_location("ci_coverage_report", ROOT / "scripts/ci/coverage_report.py")
 report = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(report)
 SPEC = report.load_spec(ROOT / report.SPEC_PATH)
@@ -92,7 +92,7 @@ def test_any_declared_node_not_passing_fails_the_report(tmp_path, outcome):
 
 def test_lost_parametrized_site_instance_is_reported(tmp_path):
     def change(lane, outcomes):
-        for nodeid in [n for n in outcomes if n.startswith("tests/test_adapter_t11.py::test_b_full_chain[")
+        for nodeid in [n for n in outcomes if n.startswith("tests/application/test_collection_executor.py::test_b_full_chain[")
                        and n.endswith("-douyin]")]:
             del outcomes[nodeid]
 

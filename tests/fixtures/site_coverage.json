@@ -21,15 +21,15 @@
      "lane": "component"
     },
     {
-     "function": "tests/test_adapter_t03.py::test_resume_subset",
+     "function": "tests/runtime/test_shared_runtime.py::test_resume_subset",
      "lane": "component"
     },
     {
-     "function": "tests/test_adapter_t03.py::test_outer_database_errors_preserve_resume",
+     "function": "tests/runtime/test_shared_runtime.py::test_outer_database_errors_preserve_resume",
      "lane": "component"
     },
     {
-     "function": "tests/test_adapter_t11.py::test_d_completion_requires_stop_evidence",
+     "function": "tests/application/test_collection_executor.py::test_d_completion_requires_stop_evidence",
      "lane": "component"
     },
     {
@@ -82,7 +82,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t11.py::test_b_full_chain",
+       "function": "tests/application/test_collection_executor.py::test_b_full_chain",
        "lane": "component",
        "params": [
         "bilibili"
@@ -117,14 +117,14 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t03.py::test_database_subset",
+       "function": "tests/runtime/test_shared_runtime.py::test_database_subset",
        "lane": "component",
        "params": [
         "weibo"
        ]
       },
       {
-       "function": "tests/test_adapter_t03.py::test_root_factory_loads_known_once",
+       "function": "tests/runtime/test_shared_runtime.py::test_root_factory_loads_known_once",
        "lane": "component",
        "params": [
         "weibo"
@@ -135,7 +135,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t11.py::test_b_full_chain",
+       "function": "tests/application/test_collection_executor.py::test_b_full_chain",
        "lane": "component",
        "params": [
         "weibo"
@@ -182,14 +182,14 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t03.py::test_root_factory_loads_known_once",
+       "function": "tests/runtime/test_shared_runtime.py::test_root_factory_loads_known_once",
        "lane": "component",
        "params": [
         "douyin"
        ]
       },
       {
-       "function": "tests/test_adapter_t11.py::test_b_full_chain",
+       "function": "tests/application/test_collection_executor.py::test_b_full_chain",
        "lane": "component",
        "params": [
         "douyin"
@@ -212,7 +212,7 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t03.py::test_root_factory_loads_known_once",
+       "function": "tests/runtime/test_shared_runtime.py::test_root_factory_loads_known_once",
        "lane": "component",
        "params": [
         "zhihu"
@@ -227,7 +227,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t11.py::test_b_full_chain",
+       "function": "tests/application/test_collection_executor.py::test_b_full_chain",
        "lane": "component",
        "params": [
         "zhihu"
@@ -252,14 +252,14 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t03.py::test_database_subset",
+       "function": "tests/runtime/test_shared_runtime.py::test_database_subset",
        "lane": "component",
        "params": [
         "xhs"
        ]
       },
       {
-       "function": "tests/test_adapter_t03.py::test_incomplete_scope",
+       "function": "tests/runtime/test_shared_runtime.py::test_incomplete_scope",
        "lane": "component",
        "params": [
         "xhs"
@@ -271,7 +271,7 @@
        "min_count": 23
       },
       {
-       "function": "tests/test_adapter_t11.py::test_b_full_chain",
+       "function": "tests/application/test_collection_executor.py::test_b_full_chain",
        "lane": "component",
        "params": [
         "xhs"
@@ -335,7 +335,7 @@
        "lane": "os"
       },
       {
-       "function": "tests/test_adapter_t09_deps.py::test_formal_xhs_accumulator_publishes_through_worker_event_exit",
+       "function": "tests/platforms/xhs/test_xhs_worker_dependencies.py::test_formal_xhs_accumulator_publishes_through_worker_event_exit",
        "lane": "component"
       }
      ]
@@ -964,7 +964,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_t13_transaction_faults.py::test_content_and_discovery_commit_faults_per_site",
+       "function": "tests/application/test_collection_executor.py::test_content_and_discovery_commit_faults_per_site",
        "lane": "component",
        "params": [
         "bilibili"
@@ -999,7 +999,7 @@
        ]
       },
       {
-       "function": "tests/test_t13_transaction_faults.py::test_content_and_discovery_commit_faults_per_site",
+       "function": "tests/application/test_collection_executor.py::test_content_and_discovery_commit_faults_per_site",
        "lane": "component",
        "params": [
         "weibo"
@@ -1034,7 +1034,7 @@
        ]
       },
       {
-       "function": "tests/test_t13_transaction_faults.py::test_content_and_discovery_commit_faults_per_site",
+       "function": "tests/application/test_collection_executor.py::test_content_and_discovery_commit_faults_per_site",
        "lane": "component",
        "params": [
         "douyin"
@@ -1066,7 +1066,7 @@
        ]
       },
       {
-       "function": "tests/test_t13_transaction_faults.py::test_content_and_discovery_commit_faults_per_site",
+       "function": "tests/application/test_collection_executor.py::test_content_and_discovery_commit_faults_per_site",
        "lane": "component",
        "params": [
         "zhihu"
@@ -1105,7 +1105,7 @@
        ]
       },
       {
-       "function": "tests/test_t13_transaction_faults.py::test_content_and_discovery_commit_faults_per_site",
+       "function": "tests/application/test_collection_executor.py::test_content_and_discovery_commit_faults_per_site",
        "lane": "component",
        "params": [
         "xhs"
@@ -1138,7 +1138,7 @@
      "lane": "component"
     },
     {
-     "function": "tests/test_adapter_t02.py::test_entry_main_startup_and_cleanup_trace",
+     "function": "tests/platforms/test_worker_entry.py::test_entry_main_startup_and_cleanup_trace",
      "lane": "component"
     }
    ],
@@ -1153,14 +1153,14 @@
        "min_count": 36
       },
       {
-       "function": "tests/test_adapter_t08.py::test_formal_request_and_artifacts",
+       "function": "tests/platforms/bilibili/test_bilibili_offline_drive.py::test_formal_request_and_artifacts",
        "lane": "component",
        "params": [
         "behavior_failed"
        ]
       },
       {
-       "function": "tests/test_adapter_t12.py::test_bilibili_runs_in_process_and_is_not_a_worker",
+       "function": "tests/architecture/test_package_boundaries.py::test_bilibili_runs_in_process_and_is_not_a_worker",
        "lane": "component"
       }
      ]
@@ -1300,12 +1300,12 @@
      "min_count": 10
     },
     {
-     "file": "tests/test_adapter_t04a.py",
+     "file": "tests/runtime/test_behavior_runtime.py",
      "lane": "component",
      "min_count": 3
     },
     {
-     "function": "tests/test_adapter_t03.py::test_cookie_snapshot_returns_header_names_and_user_agent",
+     "function": "tests/runtime/test_shared_runtime.py::test_cookie_snapshot_returns_header_names_and_user_agent",
      "lane": "component"
     }
    ],
@@ -1333,14 +1333,14 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t03.py::test_platform_cookie_url_and_required_names",
+       "function": "tests/runtime/test_shared_runtime.py::test_platform_cookie_url_and_required_names",
        "lane": "component",
        "params": [
         "bilibili"
        ]
       },
       {
-       "function": "tests/test_adapter_t10.py::test_warmup_trace_and_files",
+       "function": "tests/application/test_warmup_and_repair_helpers.py::test_warmup_trace_and_files",
        "lane": "component",
        "params": [
         "unified"
@@ -1369,7 +1369,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t05.py::test_warmup_requires_mobile_login_and_uid",
+       "function": "tests/platforms/weibo/test_weibo_offline_drive.py::test_warmup_requires_mobile_login_and_uid",
        "lane": "component"
       },
       {
@@ -1384,7 +1384,7 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t03.py::test_platform_cookie_url_and_required_names",
+       "function": "tests/runtime/test_shared_runtime.py::test_platform_cookie_url_and_required_names",
        "lane": "component",
        "params": [
         "weibo"
@@ -1403,25 +1403,25 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t03.py::test_platform_cookie_url_and_required_names",
+       "function": "tests/runtime/test_shared_runtime.py::test_platform_cookie_url_and_required_names",
        "lane": "component",
        "params": [
         "douyin"
        ]
       },
       {
-       "function": "tests/test_adapter_t06.py::test_drive_requests_records_images_events",
+       "function": "tests/platforms/douyin/test_douyin_offline_drive.py::test_drive_requests_records_images_events",
        "lane": "component",
        "params": [
         "login_expired"
        ]
       },
       {
-       "function": "tests/test_adapter_t06.py::test_slider_tracks_and_login_cache_lifecycle",
+       "function": "tests/platforms/douyin/test_douyin_offline_drive.py::test_slider_tracks_and_login_cache_lifecycle",
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t10.py::test_warmup_trace_and_files",
+       "function": "tests/application/test_warmup_and_repair_helpers.py::test_warmup_trace_and_files",
        "lane": "component",
        "params": [
         "unified"
@@ -1445,25 +1445,25 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t03.py::test_platform_cookie_url_and_required_names",
+       "function": "tests/runtime/test_shared_runtime.py::test_platform_cookie_url_and_required_names",
        "lane": "component",
        "params": [
         "zhihu"
        ]
       },
       {
-       "function": "tests/test_adapter_t07.py::test_drive_request_event_and_artifacts",
+       "function": "tests/platforms/zhihu/test_zhihu_offline_drive.py::test_drive_request_event_and_artifacts",
        "lane": "component",
        "params": [
         "login_expired"
        ]
       },
       {
-       "function": "tests/test_adapter_t07.py::test_dependency_direction",
+       "function": "tests/platforms/zhihu/test_zhihu_offline_drive.py::test_dependency_direction",
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t10.py::test_warmup_trace_and_files",
+       "function": "tests/application/test_warmup_and_repair_helpers.py::test_warmup_trace_and_files",
        "lane": "component",
        "params": [
         "unified"
@@ -1509,7 +1509,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t03.py::test_platform_cookie_url_and_required_names",
+       "function": "tests/runtime/test_shared_runtime.py::test_platform_cookie_url_and_required_names",
        "lane": "component",
        "params": [
         "xhs"
@@ -1523,11 +1523,11 @@
    "semantics": "精确ID、禁发现写、同Page回退、部分成功、XHS signal终态优先、fresh零值不覆盖",
    "shared": [
     {
-     "function": "tests/test_adapter_t10.py::test_repair_partial_execution",
+     "function": "tests/application/test_warmup_and_repair_helpers.py::test_repair_partial_execution",
      "lane": "component"
     },
     {
-     "function": "tests/test_adapter_t10.py::test_repair_completion_and_evidence",
+     "function": "tests/application/test_warmup_and_repair_helpers.py::test_repair_completion_and_evidence",
      "lane": "component"
     },
     {
@@ -1568,7 +1568,7 @@
        ]
       },
       {
-       "function": "tests/test_adapter_t05.py::test_root_repair_page_status_is_classified",
+       "function": "tests/platforms/weibo/test_weibo_offline_drive.py::test_root_repair_page_status_is_classified",
        "lane": "component"
       },
       {
@@ -1584,7 +1584,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t05.py::test_root_repair_attempts_and_exception_chain",
+       "function": "tests/platforms/weibo/test_weibo_offline_drive.py::test_root_repair_attempts_and_exception_chain",
        "lane": "component"
       }
      ]
@@ -1623,7 +1623,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t06.py::test_root_repair_exception_chain",
+       "function": "tests/platforms/douyin/test_douyin_offline_drive.py::test_root_repair_exception_chain",
        "lane": "component"
       }
      ]
@@ -1697,7 +1697,7 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t08.py::test_formal_request_and_artifacts",
+       "function": "tests/platforms/bilibili/test_bilibili_offline_drive.py::test_formal_request_and_artifacts",
        "lane": "component"
       },
       {
@@ -1722,11 +1722,11 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t05.py::test_drive_requests_artifacts_and_events",
+       "function": "tests/platforms/weibo/test_weibo_offline_drive.py::test_drive_requests_artifacts_and_events",
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t05.py::test_entry_assembly_matches_direct_construction",
+       "function": "tests/platforms/weibo/test_weibo_offline_drive.py::test_entry_assembly_matches_direct_construction",
        "lane": "component"
       },
       {
@@ -1751,11 +1751,11 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t06.py::test_drive_requests_records_images_events",
+       "function": "tests/platforms/douyin/test_douyin_offline_drive.py::test_drive_requests_records_images_events",
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t06.py::test_root_post_form_and_signature_inputs",
+       "function": "tests/platforms/douyin/test_douyin_offline_drive.py::test_root_post_form_and_signature_inputs",
        "lane": "component"
       },
       {
@@ -1776,11 +1776,11 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t07.py::test_drive_request_event_and_artifacts",
+       "function": "tests/platforms/zhihu/test_zhihu_offline_drive.py::test_drive_request_event_and_artifacts",
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t07.py::test_entry_assembly_matches_direct_construction",
+       "function": "tests/platforms/zhihu/test_zhihu_offline_drive.py::test_entry_assembly_matches_direct_construction",
        "lane": "component"
       },
       {
@@ -1817,20 +1817,20 @@
    "semantics": "wheel/sdist仓库外资源、选站懒加载、无fork/cwd/PYTHONPATH补齐、Node桥、SQL/契约、辅助CLI、未选平台/DB不导入",
    "shared": [
     {
-     "file": "tests/test_adapter_t12_install.py",
+     "file": "tests/test_installation.py",
      "lane": "installation",
      "min_count": 11
     },
     {
-     "function": "tests/test_t13_selected_platform_loading.py::test_cross_site_imports_in_worker_assembly_are_exactly_registered",
+     "function": "tests/architecture/test_selected_platform_loading.py::test_cross_site_imports_in_worker_assembly_are_exactly_registered",
      "lane": "component"
     },
     {
-     "function": "tests/test_adapter_t10.py::test_page_readiness_trace",
+     "function": "tests/application/test_warmup_and_repair_helpers.py::test_page_readiness_trace",
      "lane": "component"
     },
     {
-     "function": "tests/test_adapter_t10.py::test_page_evidence_cookie_cleanup",
+     "function": "tests/application/test_warmup_and_repair_helpers.py::test_page_evidence_cookie_cleanup",
      "lane": "component"
     }
    ],
@@ -1839,15 +1839,15 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t12.py::test_bilibili_runs_in_process_and_is_not_a_worker",
+       "function": "tests/architecture/test_package_boundaries.py::test_bilibili_runs_in_process_and_is_not_a_worker",
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t01.py::test_bilibili_resources_not_read_from_fork",
+       "function": "tests/core/test_resources_and_paths.py::test_bilibili_resources_not_read_from_fork",
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t12.py::test_ci_fork_check_drops_upstream_bilibili_video_and_checks_root_five_site_assembly",
+       "function": "tests/architecture/test_package_boundaries.py::test_ci_fork_check_drops_upstream_bilibili_video_and_checks_root_five_site_assembly",
        "lane": "component"
       }
      ]
@@ -1856,28 +1856,28 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t12_install.py::test_installed_worker_selects_each_platform_without_fork_tree",
+       "function": "tests/test_installation.py::test_installed_worker_selects_each_platform_without_fork_tree",
        "lane": "installation",
        "params": [
         "wb"
        ]
       },
       {
-       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
+       "function": "tests/architecture/test_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
        "lane": "component",
        "params": [
         "weibo"
        ]
       },
       {
-       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
+       "function": "tests/architecture/test_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
        "lane": "component",
        "params": [
         "weibo"
        ]
       },
       {
-       "function": "tests/test_adapter_t05.py::test_dependency_direction",
+       "function": "tests/platforms/weibo/test_weibo_offline_drive.py::test_dependency_direction",
        "lane": "component"
       }
      ]
@@ -1886,32 +1886,32 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t12_install.py::test_installed_worker_selects_each_platform_without_fork_tree",
+       "function": "tests/test_installation.py::test_installed_worker_selects_each_platform_without_fork_tree",
        "lane": "installation",
        "params": [
         "dy"
        ]
       },
       {
-       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
+       "function": "tests/architecture/test_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
        "lane": "component",
        "params": [
         "douyin"
        ]
       },
       {
-       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
+       "function": "tests/architecture/test_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
        "lane": "component",
        "params": [
         "douyin"
        ]
       },
       {
-       "function": "tests/test_adapter_t06.py::test_dependency_direction",
+       "function": "tests/platforms/douyin/test_douyin_offline_drive.py::test_dependency_direction",
        "lane": "component"
       },
       {
-       "function": "tests/test_adapter_t02.py::test_all_worker_platforms_import_in_root_environment_without_exit_slices",
+       "function": "tests/platforms/test_worker_entry.py::test_all_worker_platforms_import_in_root_environment_without_exit_slices",
        "lane": "installation",
        "site_basis": "抖音签名 JS 在根环境导入时经 Node 桥从任意 cwd 编译（原 fork 签名用例随旧桥删除）"
       }
@@ -1921,28 +1921,28 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t12_install.py::test_installed_worker_selects_each_platform_without_fork_tree",
+       "function": "tests/test_installation.py::test_installed_worker_selects_each_platform_without_fork_tree",
        "lane": "installation",
        "params": [
         "zhihu"
        ]
       },
       {
-       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
+       "function": "tests/architecture/test_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
        "lane": "component",
        "params": [
         "zhihu"
        ]
       },
       {
-       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
+       "function": "tests/architecture/test_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
        "lane": "component",
        "params": [
         "zhihu"
        ]
       },
       {
-       "function": "tests/test_adapter_t07.py::test_worker_assembly_zhihu",
+       "function": "tests/platforms/zhihu/test_zhihu_offline_drive.py::test_worker_assembly_zhihu",
        "lane": "component"
       }
      ]
@@ -1951,28 +1951,28 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_adapter_t12_install.py::test_installed_worker_selects_each_platform_without_fork_tree",
+       "function": "tests/test_installation.py::test_installed_worker_selects_each_platform_without_fork_tree",
        "lane": "installation",
        "params": [
         "xhs"
        ]
       },
       {
-       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
+       "function": "tests/architecture/test_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
        "lane": "component",
        "params": [
         "xhs"
        ]
       },
       {
-       "function": "tests/test_t13_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
+       "function": "tests/architecture/test_selected_platform_loading.py::test_worker_loads_only_selected_root_platform",
        "lane": "component",
        "params": [
         "xhs"
        ]
       },
       {
-       "file": "tests/test_adapter_t09_deps.py",
+       "file": "tests/platforms/xhs/test_xhs_worker_dependencies.py",
        "lane": "component",
        "min_count": 7
       }
@@ -2266,7 +2266,7 @@
        "min_count": 1
       },
       {
-       "function": "tests/test_adapter_t03.py::test_root_factory_loads_known_once",
+       "function": "tests/runtime/test_shared_runtime.py::test_root_factory_loads_known_once",
        "lane": "component",
        "params": [
         "xhs"

@@ -28,7 +28,7 @@ from trippostcollect.platforms.douyin import client, core, login, login_support,
 from trippostcollect.runtime import browser_runtime, image_retry
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 KEYWORD = "青岛崂山旅游攻略"
 
 

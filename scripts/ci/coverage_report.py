@@ -1,7 +1,7 @@
-"""五站覆盖声明的匹配与 CI 报告（T13）。
+"""五站覆盖声明的匹配与 CI 报告。
 
-声明位于 `tests/fixtures/t13_coverage.json`。同一套匹配规则供两处使用：
-- `tests/test_t13_coverage.py` 在收集阶段核对声明 node 落在声明的 lane 且不带 skip/xfail；
+声明位于 `tests/fixtures/site_coverage.json`。同一套匹配规则供两处使用：
+- `tests/test_site_coverage.py` 在收集阶段核对声明 node 落在声明的 lane 且不带 skip/xfail；
 - `scripts/ci/run_matrix.py` 在各 lane 执行后读取 junit，按 F×站、按站×lane 汇总并要求全部通过。
 本模块只读 JSON/XML，不导入被测代码、不启动进程；产物不含 traceback 或捕获输出。
 """
@@ -20,13 +20,13 @@ SITES = ("bilibili", "weibo", "douyin", "zhihu", "xhs")
 RESPONSIBILITIES = tuple(f"F{number:02d}" for number in range(1, 16))
 ROOT_LANES = ("component", "socket", "installation", "os")
 STATUSES = {"covered", "shared", "na"}
-SPEC_PATH = Path("tests/fixtures/t13_coverage.json")
+SPEC_PATH = Path("tests/fixtures/site_coverage.json")
 
 
 def load_spec(path: Path) -> dict[str, Any]:
     spec = json.loads(Path(path).read_text(encoding="utf-8"))
     if spec.get("schema_version") != 1:
-        raise ValueError("t13 覆盖声明版本错误")
+        raise ValueError("五站覆盖声明版本错误")
     return spec
 
 

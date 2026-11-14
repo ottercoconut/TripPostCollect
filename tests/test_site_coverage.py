@@ -1,4 +1,4 @@
-"""T13 五站覆盖守护：`tests/fixtures/t13_coverage.json` 声明的每个 node 必须在声明的 lane 被收集且不被跳过。
+"""五站覆盖守护：`tests/fixtures/site_coverage.json` 声明的每个 node 必须在声明的 lane 被收集且不被跳过。
 
 按 `run_lanes.EXPRESSIONS` 的四个表达式各做一次 `--collect-only`（与 CI 选择完全相同），
 由 `support.coverage_probe` 记录标记。运行期 `pytest.skip()` 由 lane 计数校验（skipped=0）兜底，
@@ -22,8 +22,6 @@ from run_lanes import EXPRESSIONS
 
 
 ROOT = Path(__file__).resolve().parents[1]
-# 单站适配器测试文件只驱动该站，文件本身即本站证据。
-CARD_SITES = {"t05": "weibo", "t06": "douyin", "t07": "zhihu", "t08": "bilibili", "t09_deps": "xhs"}
 SITE_TOKENS = {
     "bilibili": ("bilibili", "bili"),
     "weibo": ("weibo", "wb"),
@@ -40,7 +38,7 @@ def _load(name: str, path: Path):
     return module
 
 
-report = _load("t13_coverage_report", ROOT / "scripts" / "ci" / "coverage_report.py")
+report = _load("site_coverage_report", ROOT / "scripts" / "ci" / "coverage_report.py")
 SPEC = report.load_spec(ROOT / report.SPEC_PATH)
 
 
@@ -106,7 +104,8 @@ def _function_source(path: str, function: str) -> str:
 def _site_evidence(site: str, nodeid: str) -> bool:
     path, function, params = report.split_nodeid(nodeid)
     pattern = re.compile(r"(?<![0-9A-Za-z])(" + "|".join(SITE_TOKENS[site]) + r")(?![0-9A-Za-z])", re.I)
-    if f"/platforms/{site}/" in path or CARD_SITES.get(Path(path).stem.removeprefix("test_adapter_")) == site:
+    # 站点目录下的测试文件只驱动该站，文件本身即本站证据。
+    if f"/platforms/{site}/" in path:
         return True
     for text in (Path(path).name.replace("_", " "), function.replace("_", " "), params or ""):
         if pattern.search(text):

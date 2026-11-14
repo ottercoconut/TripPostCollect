@@ -25,7 +25,7 @@ from support import worker_scenarios
 
 from trippostcollect.core import paths
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src" / "trippostcollect"
 GENERIC = {"bilibili": "bili", "weibo": "wb", "douyin": "dy", "zhihu": "zhihu"}
 SECRET = "t14-secret-cookie-value"

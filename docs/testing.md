@@ -45,7 +45,7 @@ source .venv/bin/activate
 
 安装包不在源码 checkout 内运行时，必须设置现有 `TRIPPOST_PROJECT_ROOT` 指向工作根，否则导入
 `trippostcollect.core.paths` 明确失败；源码 checkout 未设置时仍以仓库为根。
-installation lane 的 `tests/test_adapter_t12_install.py` 在副本中用锁定环境的 setuptools 离线构建 sdist 与 wheel
+installation lane 的 `tests/test_installation.py` 在副本中用锁定环境的 setuptools 离线构建 sdist 与 wheel
 （并由 sdist 再构建 wheel），在仓库外全新 venv 中解包安装，核对资源字节、全部子模块导入、各正式入口 `--help`
 与 main 逐字相同，以及仓库外工作根中的四站选站装配。
 
@@ -275,17 +275,17 @@ macos_process；其中真实自发信号也移到 driver。它们计入完整 OS
 通过 `pytest --collect-only -m macos_process` 可查看当前完整清单，报告必须在仓库外。
 组件新增宿主调用时应先明确其能力归属，不能自动注入空扫描或将其悄悄跳过。
 
-## 五站覆盖守护（T13）
+## 五站覆盖守护
 
-[tests/fixtures/t13_coverage.json](../tests/fixtures/t13_coverage.json) 是 F01–F15 × 五站（B站、微博、抖音、知乎、小红书）
+[tests/fixtures/site_coverage.json](../tests/fixtures/site_coverage.json) 是 F01–F15 × 五站（B站、微博、抖音、知乎、小红书）
 的机器可读覆盖声明：每格为 `covered`（列出本站 node）、`shared`（平台无关的共享实现，写明依据）、
 `na`（规格限定他站，写明依据），不接受其他状态。条目可写精确 `node`、`function`（可带必须出现的 `params` 与本站证据例外
 `site_basis`）或 `file`（`min_count`/`count`/`min_functions`）；原 fork 离线条目已随移植改为 component lane 的 `min_functions` 条目。
 
-- [tests/test_t13_coverage.py](../tests/test_t13_coverage.py)（component）按 `run_lanes.EXPRESSIONS` 的四个表达式各做一次
+- [tests/test_site_coverage.py](../tests/test_site_coverage.py)（component）按 `run_lanes.EXPRESSIONS` 的四个表达式各做一次
   `--collect-only`，经 `tests/support/coverage_probe.py` 记录标记，断言每个声明 node 只落在声明的 lane、
   不带 skip/xfail、skipif 条件全为假，并核对每格条目确有本站证据（站点目录、文件或函数名、参数 ID、
-  函数体字面量，或单站适配器测试文件）。运行期 `pytest.skip()` 由 lane 计数校验（skipped=0）兜底。
+  函数体字面量）。运行期 `pytest.skip()` 由 lane 计数校验（skipped=0）兜底。
 - 同一用例精确断言 issue #1 的 `issue1_component` 17 项、`issue1_os` 11 项、socket 与 installation 各 1 项，
   以及 issue #2 的 `tests/test_xhs_lease_exit.py` 68 项。
 - CI 中 `run_matrix.py` 在全部 lane 后调用
@@ -297,7 +297,7 @@ macos_process；其中真实自发信号也移到 driver。它们计入完整 OS
 ## 预期值的来源
 
 测试的预期值只来自现行文档、平台契约或可解释的字面值，不与已删除的旧实现（fork、旧执行器源码快照、
-迁移期固化输出）对照。适配器离线驱动（`tests/test_adapter_t05`–`t08`、`t10`、`t11`）只运行根实现，
+迁移期固化输出）对照。各站离线驱动（`tests/platforms/<站>/test_<站>_offline_drive.py`）与执行器全链路（`tests/application/test_collection_executor.py`）只运行根实现，
 按场景断言停止事件、跳过候选、入库记录与产物；worker 子命令的父侧入参与预期 argv 写在
 [tests/support/worker_scenarios.py](../tests/support/worker_scenarios.py)，执行器全链路驱动在
 [tests/support/executor_driver.py](../tests/support/executor_driver.py)。
