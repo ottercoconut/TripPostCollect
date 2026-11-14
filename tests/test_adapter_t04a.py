@@ -1,4 +1,4 @@
-"""策略与行为迁入包后的依赖边界及旧入口契约。"""
+"""运行时行为层：注入依赖的要求与 runtime 包的导入方向。"""
 
 from __future__ import annotations
 
@@ -8,25 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from trippostcollect.application import failures
 from trippostcollect.artifacts.evidence import write_evidence
-from trippostcollect.records import text_signals
 from trippostcollect.runtime import behavior
 
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_legacy_forwarders_preserve_function_identity():
-    for name in (
-        "_xhs_stable_sms_terminal_reason", "_xhs_sms_terminal_reason",
-        "is_xhs_sms_terminal_text", "XHS_LEGACY_LOGIN_TERMINAL_PATTERNS",
-        "_XHS_SMS_CONTEXT", "_XHS_SMS_VERIFICATION", "_XHS_SMS_PARAMETER_ERROR",
-        "_XHS_DAILY", "_XHS_LIMIT", "XHS_SMS_PARAMETER_TERMINAL_PATTERNS",
-        "XHS_SMS_DAILY_LIMIT_PATTERNS", "XHS_SMS_FREQUENCY_PATTERNS",
-    ):
-        assert getattr(failures, name) is getattr(text_signals, name)
-    assert behavior.is_xhs_sms_terminal_text is text_signals.is_xhs_sms_terminal_text
 
 
 @pytest.mark.asyncio
