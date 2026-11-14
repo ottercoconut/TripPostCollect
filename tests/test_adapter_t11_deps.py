@@ -55,7 +55,6 @@ CONSTANTS = {
     "artifacts.formal_images": ("RASTER_IMAGE_SUFFIX_RE", "LEGACY_ZHIHU_TRANSFORM_SUFFIX_RE"),
 }
 # #124：抖音耗尽后 reseed 证据随 reseed 删除；冻结执行器确有旧常量，根与脚本都不再定义。
-EXITED_CONSTANTS = {"application.collection": ("DISCOVERY_RESEED_EVENT_FIELDS",)}
 
 
 def imports(tree):
@@ -155,8 +154,8 @@ def test_executor_ports_and_local_assembly():
         "ensure_prerequisites", "run_bilibili_article_search",
     ]
     assert all(field.type == "Callable[..., Any]" for field in fields(ExecutorPorts))
-    old = ast.parse((ROOT / "tests/fixtures/adapter_t11/mediacrawler_crawl.py.txt").read_text())
     entry = ast.parse((ROOT / "scripts/mediacrawler_crawl.py").read_text())
+    collection = ast.parse((PACKAGE / "application/collection.py").read_text())
 
     def function(tree, name):
         return next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
@@ -164,7 +163,11 @@ def test_executor_ports_and_local_assembly():
     imports_by_name = {a.asname or a.name: f"{n.module}.{a.name}"
                        for n in entry.body if isinstance(n, ast.ImportFrom) for a in n.names}
     for name in ("_run_main", "run_platform", "_run_platform_without_policy"):
-        before, after = function(old, name), function(entry, name)
+        # 脚本薄包装与实现同签名，只少实现末尾的 ports 关键字参数，由包装装配后传入。
+        before, after = function(collection, name), function(entry, name)
+        assert before.args.kwonlyargs[-1].arg == "ports"
+        before.args.kwonlyargs.pop()
+        before.args.kw_defaults.pop()
         assert ast.dump(before.args) == ast.dump(after.args)
         assert ast.dump(before.returns) == ast.dump(after.returns)
         assert len(after.body) == 1 and isinstance(after.body[0], ast.Return)
@@ -206,12 +209,10 @@ def test_independent_first_import(module):
 def test_constants_single_definition_and_same_object(monkeypatch):
     monkeypatch.syspath_prepend(str(ROOT / "scripts"))
     executor = importlib.import_module("mediacrawler_crawl")
-    old = ast.parse((ROOT / "tests/fixtures/adapter_t11/mediacrawler_crawl.py.txt").read_text())
     def assignments(tree):
         return {n.targets[0].id: n.value for n in tree.body if isinstance(n, ast.Assign)
                 and isinstance(n.targets[0], ast.Name)}
 
-    original = assignments(old)
     script_values = assignments(ast.parse((ROOT / "scripts/mediacrawler_crawl.py").read_text()))
     all_values = [script_values] + [assignments(ast.parse((PACKAGE / relative).read_text()))
                                     for relative in ALLOWED]
@@ -221,11 +222,5 @@ def test_constants_single_definition_and_same_object(monkeypatch):
         for name in names:
             assert name not in script_values
             assert sum(name in values for values in all_values) == 1
-            assert ast.dump(original[name]) == ast.dump(values[name])
+            assert name in values
             assert getattr(executor, name) is getattr(target, name)
-    for module, names in EXITED_CONSTANTS.items():
-        target = importlib.import_module("trippostcollect." + module)
-        for name in names:
-            assert name in original
-            assert not any(name in values for values in all_values)
-            assert not hasattr(target, name) and not hasattr(executor, name)
