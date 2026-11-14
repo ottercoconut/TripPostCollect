@@ -118,7 +118,6 @@ def formal_records() -> dict[str, dict]:
             "voteup_count": 1,
             "comment_count": 2,
             "collected_count": 3,
-            "share_count": 4,
         },
     }
 
@@ -250,7 +249,6 @@ EXPECTED_REQUIRED_METRICS = {
         ("voteup_count", "liked_count"),
         ("comment_count", "comments_count"),
         ("collected_count",),
-        ("share_count",),
     ),
 }
 METRIC_CASES = [

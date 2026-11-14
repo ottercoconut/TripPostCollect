@@ -339,7 +339,7 @@ async def test_click_opens_tab_and_reads_entity_even_when_search_body_is_complet
     assert result.voteup_count == 7
     assert result.comment_count == 1
     assert result.collected_count == 4
-    assert result.share_count == 0
+    assert not hasattr(result, "share_count")
     assert result.created_time == 1_700_000_000
     assert result.creator_hash == "author-1"
     assert result.creator_url_token == "author"
@@ -375,7 +375,7 @@ async def test_click_opens_tab_and_reads_entity_even_when_search_body_is_complet
     assert row["post_likes_count"] == 7
     assert row["post_comments_count"] == 1
     assert row["post_favorites_count"] == 4
-    assert row["post_shares_count"] == 0
+    assert row["post_shares_count"] is None  # #188：页面给出 shareCount=0 也不记录
     author = json.loads(row["author_json"])
     assert author["following_count"] == 5
     assert author["posts_count"] == 5
@@ -406,7 +406,6 @@ async def test_missing_count_keys_are_none_and_fail_validation(monkeypatch, tmp_
     assert result.voteup_count is None
     assert result.comment_count is None
     assert result.collected_count is None
-    assert result.share_count is None
     record = result.model_dump()
     record["image_list"] = ["https://pic1.zhimg.com/v2-detail_r.jpg"]
     checked = validate_formal_record(
@@ -418,7 +417,7 @@ async def test_missing_count_keys_are_none_and_fail_validation(monkeypatch, tmp_
     assert "voteup_count/liked_count" in missing
     assert "comment_count/comments_count" in missing
     assert "collected_count" in missing
-    assert "share_count" in missing
+    assert "share_count" not in missing
 
 
 def test_explicit_zero_counts_stay_zero_and_pass_metrics():
@@ -438,7 +437,6 @@ def test_explicit_zero_counts_stay_zero_and_pass_metrics():
         "voteup_count": 0,
         "comment_count": 0,
         "collected_count": 0,
-        "share_count": 0,
     }
     checked = validate_formal_record(
         "zhihu", record, set(),
@@ -446,6 +444,31 @@ def test_explicit_zero_counts_stay_zero_and_pass_metrics():
     )
     assert checked["valid"] is True
 
+
+def test_share_count_is_not_provided_by_zhihu():
+    """#188：知乎网页端 shareCount 恒为占位 0，分享为平台不提供；缺分享不影响合格，入库为空。"""
+    record = {
+        "content_id": "101",
+        "content_type": "answer",
+        "content_text": "正文",
+        "content_detail_status": "detail_observed",
+        "content_detail_source": "answer_detail",
+        "created_time": 1_700_000_000,
+        "creator_hash": "author-1",
+        "user_nickname": "作者",
+        "followers_count": 3,
+        "followers_observed": True,
+        "author_followers_source": "author_page",
+        "image_list": ["https://pic1.zhimg.com/v2-detail_r.jpg"],
+        "voteup_count": 1,
+        "comment_count": 1,
+        "collected_count": 1,
+    }
+    checked = validate_formal_record(
+        "zhihu", record, set(),
+        content_image_candidates=lambda _platform, item: item.get("image_list") or [],
+    )
+    assert checked["valid"] is True
 
 def test_followers_from_search_results_are_not_a_formal_source():
     """#185 实测回归：知乎粉丝只认作者页；搜索结果的 follower_count 判为不可信来源。"""
@@ -465,7 +488,6 @@ def test_followers_from_search_results_are_not_a_formal_source():
         "voteup_count": 1,
         "comment_count": 1,
         "collected_count": 1,
-        "share_count": 1,
     }
     checked = validate_formal_record(
         "zhihu", record, set(),

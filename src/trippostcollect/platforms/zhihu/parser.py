@@ -105,19 +105,6 @@ def _present_int(source: Dict, *keys: str) -> int:
     return int(value)
 
 
-def _share_count(source: Dict):
-    """详情页分享数在 ``reaction.statistics.shareCount``；搜索对象用 ``share_count``。缺键为 None。"""
-
-    if not isinstance(source, dict):
-        return None
-    reaction = source.get("reaction")
-    if isinstance(reaction, dict):
-        stats = reaction.get("statistics")
-        if isinstance(stats, dict) and ("shareCount" in stats or "share_count" in stats):
-            return _metric(stats, "shareCount", "share_count")
-    if "share_count" in source or "shareCount" in source:
-        return _metric(source, "share_count", "shareCount")
-    return None
 
 
 def _normalize_image_url(url: str) -> str:
@@ -318,7 +305,6 @@ def merge_search_content_detail(
     search_content.voteup_count = detail_content.voteup_count
     search_content.comment_count = detail_content.comment_count
     search_content.collected_count = detail_content.collected_count
-    search_content.share_count = detail_content.share_count
     search_content.created_time = detail_content.created_time
     search_content.updated_time = detail_content.updated_time
     if detail_content.content_visit_refs:
@@ -508,7 +494,6 @@ class ZhihuExtractor:
         res.voteup_count = _metric(answer, "voteup_count", "voteupCount")
         res.comment_count = _metric(answer, "comment_count", "commentCount")
         res.collected_count = _metric(answer, "favlists_count", "favlistsCount")
-        res.share_count = _share_count(answer)
 
         # extract author info
         author_info = self._extract_content_or_comment_author(answer.get("author"))
@@ -539,7 +524,6 @@ class ZhihuExtractor:
         res.voteup_count = _metric(article, "voteup_count", "voteupCount")
         res.comment_count = _metric(article, "comment_count", "commentCount")
         res.collected_count = _metric(article, "favlists_count", "favlistsCount")
-        res.share_count = _share_count(article)
 
         # extract author info
         author_info = self._extract_content_or_comment_author(article.get("author"))

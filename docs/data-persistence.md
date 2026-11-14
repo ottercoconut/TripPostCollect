@@ -3,6 +3,8 @@
 > **受限冻结：** 本文件属于治理基线；普通抓取、排障或顺手同步不得修改，只有用户明确授权治理变更，并同步核验对应代码、测试与关联文档时才允许更新。
 >
 > **授权记录（2026-11-13）：** 操作人授权临时解冻，同步 #185 知乎页面取数、访问门禁与全量扫描口径。
+>
+> **授权记录（2026-11-14）：** 操作人决定知乎分享数为平台不提供（#188），同步入库映射。
 
 ## 数据库文件
 
@@ -153,7 +155,7 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 门禁的停止原因覆盖。
 微博 store 会保留搜索结果中的 `mblog.pics` 图片 URL 和作者粉丝字段；`isLongText=true`
 必须用移动详情替换搜索截断文本，失败时不写 JSONL。小红书搜索会补拉
-作者主页指标。知乎回答/文章的发布时间、正文、图片和赞评藏分享来自详情页页面状态；粉丝来自作者页
+作者主页指标。知乎回答/文章的发布时间、正文、图片和赞评藏来自详情页页面状态（分享平台不提供，#188）；粉丝来自作者页
 `followerCount`（`author_followers_count`），关注数来自 `followingCount`（`author_following_count`），作品数是
 `answerCount + articlesCount`（`author_posts_count`），缺键为 NULL，不补 0。
 详情确认无图和详情未观察仍用 `content_detail_status` 区分；`zvideo` 记录跳过。认证判定未改。
@@ -180,7 +182,7 @@ B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得
 | `post_likes_count` | `liked_count`、知乎详情 `voteupCount`（入库 `voteup_count`） |
 | `post_favorites_count` | `collected_count` 等收藏字段；知乎详情 `favlistsCount`，缺键为空，不补 0 |
 | `post_comments_count` | `comment_count`、`comments_count` 等评论字段 |
-| `post_shares_count` | `share_count`、`shared_count` 等分享字段。转发与分享是同一种互动，微博 `mblog.reposts_count` 经 `shared_count` 写入这一列，不另存转发列。知乎取详情 `reaction.statistics.shareCount`，缺键为空，不补 0 |
+| `post_shares_count` | `share_count`、`shared_count` 等分享字段。转发与分享是同一种互动，微博 `mblog.reposts_count` 经 `shared_count` 写入这一列，不另存转发列。知乎平台不提供（#188）：网页端 `shareCount` 恒为占位 0，不读取，本列为 NULL |
 | `web_post_images.image_url`（`content`） | 只来自权威正文图投影：B站详情 `image_urls`、微博 `mblog.pics` 归一后的 `image_list`、小红书详情 `image_list`、抖音图文 `note_download_url`、知乎正文/详情 `image_list`；作者主页、封面、搜索预览、视频、音乐和公式图不进入正文映射 |
 | `web_post_images.image_role/image_index` | 固定 `content`；知乎先按 `zhimg` 资源路径合并已知尺寸 URL 变体，投影后的候选全部下载复验，再在同帖内按 SHA-256 保留首次来源并从 0 连续编号 |
 | `web_post_images.local_path` | 根项目复验并晋升后的 `data/media/...` 项目相对路径；正式新记录不能为空 |

@@ -669,7 +669,7 @@ def check_drive_result(new, scenario):
         assert all(record["voteup_count"] == 7 for record in new["records"])
         assert all(record["comment_count"] == 1 for record in new["records"])
         assert all(record["collected_count"] == 2 for record in new["records"])
-        assert all(record["share_count"] == 0 for record in new["records"])
+        assert all("share_count" not in record for record in new["records"])
         assert all(
             record["content_visit_refs"]["note_detail"]
             and record["content_visit_refs"]["creator_profile"]
