@@ -83,7 +83,7 @@ result.json 将其他 lane 标记为“未运行”，未产生计数时为 null
 | component | not macos_process and not local_socket and not installation and not browser_replay | macOS Seatbelt allow-default，保留动态库/Python 运行时能力；显式禁止凭证/生产数据访问、临时目录外写入、IP 网络、AF_UNIX bind、浏览器执行 |
 | socket | local_socket | 同上；仅增加本轮输出 t/ 下 AF_UNIX bind；先检查目录外 bind、TCP 被拒绝 |
 | installation | installation | 同组件隔离；真实导入根依赖与 CLI，保留 run-ID 格式断言 |
-| os | macos_process or browser_replay | 独立 GitHub 托管 macOS VM，外部网络/浏览器策略；真实枚举、身份、组与 profile 预检；`browser_replay` 用本地 Chromium headless shell 离线回放 |
+| os | macos_process or browser_replay | 独立 GitHub 托管 macOS VM；PF 只阻断一次性测试用户，runner 保持联网（#190）；真实枚举、身份、组与 profile 预检；`browser_replay` 用本地 Chromium headless shell 离线回放 |
 
 asyncio 插件在禁用自动加载后显式加载。进程信号用例通过 support/signal_driver.py 在独立
 pytest driver 执行原函数全部断言，父进程检查退出码和临时 XML；不再向主 pytest 发真实信号。
@@ -101,7 +101,10 @@ pytest driver 执行原函数全部断言，父进程检查退出码和临时 XM
   跳过）；component lane 按标记直接排除，OS lane 不接受 skip，因此缺浏览器会使 OS lane 失败。
 - 执行路径：Python 只启动 Playwright driver（node），浏览器由 driver 拉起，两者经管道通信。执行守卫的
   canary 不变，Python 侧直接拉起浏览器仍被拒绝；driver 拉起浏览器不经 Python 审计钩子，只在没有
-  Seatbelt 浏览器执行限制的 OS lane 发生。OS lane 的 PF 阻断全部 IP 网络（含回环），不影响管道。
+  Seatbelt 浏览器执行限制的 OS lane 发生。OS lane 的 PF 只阻断一次性测试用户的 TCP/UDP（含回环），
+  runner 用户不匹配这些规则，因此 GitHub runner 与服务端的连接不会在 OS lane 期间被整机规则丢弃（#190）。
+  管道不走 IP，不受影响。ICMP 无法按用户匹配，anchor 里另有全局出站 echo 请求阻断（IPv4 `echoreq` 与
+  IPv6 `echoreq`），其他 ICMPv6（含邻居发现）不阻断；测试用户仍可发出非 echo 的 ICMP。
 - 页面的全部请求由 `context.route("**/*")` 交给离线站点 `tests/support/xhs_offline_site/` 用 fixture
   回应或拒绝，用例结束时断言没有任何请求逃逸路由。离线站点按 V1、V16、R2 定值建模搜索界面、虚拟列表、
   笔记浮层、作者页与验证层，按 Mac 人工侦察建模 AI 对话布局及关闭对话栏后的 V16 布局（关闭按钮、续页、标签行与
@@ -164,16 +167,30 @@ B站正式 article 的行为仍由根项目测试覆盖，上游 video 主循环
 任何失败、缺结果或选站装配失败均使 CI 非零。
 执行期 root 三个 lane 与选站装配使用 Seatbelt。
 OS lane 调用 [scripts/ci/native_macos.py](../scripts/ci/native_macos.py)：每次管理员操作均检查
-GitHub-hosted/macOS/镜像环境标志；优先向已有 Apple wildcard anchor 添加临时 PF 子规则。
+GitHub-hosted/macOS/镜像环境标志。`hosted_only()` 之后用 dscl 创建一次性测试用户 `_tpcci`
+（固定 UID，创建前核对用户名与 UID 都未占用；已存在则失败，不复用）。主组为 staff，不在 admin 组，
+shell 为 `/usr/bin/false`，没有 sudo。VM 一次性使用，结束时不删除，并在证据里写明。测试进程经
+`sudo -n -u` 启动，lane 环境用 `env -i` 显式传入。跨用户的 SIGTERM/SIGKILL 经 `admin()` 发出。
+优先向已有 Apple wildcard anchor 添加临时 PF 子规则。
 没有 dispatcher 时，只有确认根过滤/NAT规则、anchors、tables、states 全空才加载最小临时
 dispatcher，finally 恢复空规则；未知已占用策略拒绝替换。缺控制能力即失败。
 
-PF 部署前分别建立 IPv4/IPv6 回环监听者并验证连接成功，部署后验证这些仍存活的监听者
-连接超时，并要求 PF 规则有实际包计数；执行后再次验证。原生探针不要求 PF 阻断 AF_UNIX。
+anchor 内的 TCP/UDP 规则是 `block drop quick proto { tcp udp } all user <uid> label "tpc_test_deny"`，
+覆盖 IPv4/IPv6 与回环，没有不带 `user` 的 `block ... all`。ICMP 不能按用户匹配，因此另有两条只丢弃出站
+echo 请求的规则（inet `icmp-type echoreq`、inet6 `icmp6-type echoreq`），不阻断其他 ICMPv6，以免破坏邻居发现。
+这是按用户收窄后仍在的缺口：测试用户仍可发出非 echo 的 ICMP。runner 的 TCP/UDP，包括与 GitHub 的通信，不受影响。
+收束未确认时仍把 PF 留到 VM 销毁；这时断网的只有测试用户。
+
+PF 部署前由测试用户连接已建立的 IPv4/IPv6 回环监听者并确认成功；部署后与执行后确认同一监听者从测试用户
+连接超时，并要求带 `user` 的 `tpc_test_deny` 规则有实际包计数，不能把超时当成成功，也不能用 ICMP 规则上的计数代替。
+supervisor 自己的连接不再充当阻断证据。规则生效期间，supervisor 以 runner 用户连接同一监听者必须成功。
+测试进程内的探针只复测“当前用户连接超时”，不调用 pfctl；规则文本、启用状态与计数由 supervisor 在执行前后核对。
+按用户收窄后，这条规则的包计数应接近探针和测试进程自己被丢弃的报文，而不再包含 runner 与 GitHub 之间的流量。
+原生探针不要求 PF 阻断 AF_UNIX。
 Seatbelt 探针独立要求 connect/bind 的 EPERM/EACCES，socket 构造失败不能冒充连接被拒绝。
 禁止把两种控制层的超时、拒绝错误混用。
 
-浏览器执行采用已审阅测试专用的 Python 防误用守卫，结合一次性无私人数据 VM 与 PF 网络限制；
+浏览器执行采用已审阅测试专用的 Python 防误用守卫，结合一次性无私人数据 VM 与按用户收窄的 PF；
 这不是可承载任意恶意代码的安全沙箱。守卫覆盖 Python subprocess/exec/posix_spawn/system 边界，
 不修改系统浏览器、权限或 SIP。ExitStack/finally 清空仅本轮 PF anchor，恢复本轮新增 dispatcher，
 并释放本轮 PF enable token；恢复后重新验证监听者可达、原规则和启用状态。
@@ -187,7 +204,9 @@ python tests/run_lanes.py \
   -o /private/tmp/tpc-os-311
 ```
 
-上面的 OS 命令只允许在托管 VM 内使用。`os-policy.json` 记录真实控制层、探针、PF 计数及恢复状态。
+上面的 OS 命令只允许在托管 VM 内使用。`os-policy.json` 记录真实控制层、测试用户名与 uid、
+实际加载的规则文本（`pf_policy`）、测试用户负例（`test_user_negative`）、runner 用户正例
+（`runner_positive`）、PF 计数及恢复状态。用户不删除，见 `test_user.deletion`。
 工作流只上传计数、清除 traceback/捕获内容的 JUnit XML、控制证据、matrix.json 与 coverage.json，
 不上传源码、原始日志、SQLite 或浏览器存储。
 counts.json 的 failure_diagnostics 仅保留失败节点（去掉参数值）、源码相对文件/行号、
