@@ -169,7 +169,7 @@ def denied_network_probe(output: Path, lane: str) -> None:
 
     observations = []
     if lane == "os":
-        # 阻断证据由 supervisor 写入。子进程只复测本用户连接超时，不再调用 pfctl
+        # 阻断证据由 supervisor 写入。子进程只复测本用户连接失败（非拒绝），不再调用 pfctl
         # （测试用户没有 sudo）。超时语义不是 Seatbelt 的 EPERM。
         evidence = json.loads((output / "os-policy.json").read_text())
         require(evidence.get("mechanism") == "pf+python-execution-guard"

@@ -182,9 +182,10 @@ echo 请求的规则（inet `icmp-type echoreq`、inet6 `icmp6-type echoreq`）�
 收束未确认时仍把 PF 留到 VM 销毁；这时断网的只有测试用户。
 
 PF 部署前由测试用户连接已建立的 IPv4/IPv6 回环监听者并确认成功；部署后与执行后确认同一监听者从测试用户
-连接超时，并要求带 `user` 的 `tpc_test_deny` 规则有实际包计数，不能把超时当成成功，也不能用 ICMP 规则上的计数代替。
+连接失败且监听者没有收到连接。失败可以是超时，也可以是非拒绝的立即错误：macOS 上按用户匹配的 PF 丢弃本机出站
+SYN 时 connect 会立即报错（#190 实测 `OSError` errno 0），错误细节写入证据；被拒绝或重置说明对端可达，直接失败。另要求带 `user` 的 `tpc_test_deny` 规则有实际包计数，不能把超时当成成功，也不能用 ICMP 规则上的计数代替。
 supervisor 自己的连接不再充当阻断证据。规则生效期间，supervisor 以 runner 用户连接同一监听者必须成功。
-测试进程内的探针只复测“当前用户连接超时”，不调用 pfctl；规则文本、启用状态与计数由 supervisor 在执行前后核对。
+测试进程内的探针只复测“当前用户连接失败且不是被拒绝或重置”，不调用 pfctl；规则文本、启用状态与计数由 supervisor 在执行前后核对。
 按用户收窄后，这条规则的包计数应接近探针和测试进程自己被丢弃的报文，而不再包含 runner 与 GitHub 之间的流量。
 原生探针不要求 PF 阻断 AF_UNIX。
 Seatbelt 探针独立要求 connect/bind 的 EPERM/EACCES，socket 构造失败不能冒充连接被拒绝。

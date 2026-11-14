@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+import errno
 import json
 import os
 from pathlib import Path
@@ -38,24 +39,29 @@ _ACL_READ_FILE = "read,execute"
 _ACL_WRITE_DIR = "read,write,execute,delete,add_file,add_subdirectory,file_inherit,directory_inherit"
 _ACL_WRITE_FILE = "read,write,execute,delete"
 
-# 子进程探针：0 连上，10 超时，11 其他套接字错误。超时以外的失败不能当成 PF 阻断。
+# 子进程探针：0 连上，10 超时，12 被拒绝或重置，13 其他套接字错误（stdout 为一行 JSON 细节）。
+# macOS 上按用户匹配的 PF 丢弃本机出站 SYN 时，connect 可能立即报错而不是超时（#190 第二轮 CI：
+# OSError errno 0）；被拒绝/重置说明对端可达，不能当成阻断。
 _CONNECT_PROBE = (
-    "import socket, sys\n"
+    "import errno, json, socket, sys, time\n"
     "family, host, port, timeout = sys.argv[1:5]\n"
     "client = socket.socket(int(family), socket.SOCK_STREAM)\n"
+    "started = time.monotonic()\n"
     "try:\n"
     "    client.settimeout(float(timeout))\n"
     "    client.connect((host, int(port)))\n"
     "except TimeoutError:\n"
     "    raise SystemExit(10)\n"
     "except OSError as exc:\n"
-    "    print(type(exc).__name__, getattr(exc, 'errno', ''), file=sys.stderr)\n"
-    "    raise SystemExit(11)\n"
+    "    print(json.dumps({'type': type(exc).__name__, 'errno': exc.errno, 'strerror': exc.strerror,\n"
+    "                      'elapsed': round(time.monotonic() - started, 3)}))\n"
+    "    raise SystemExit(12 if exc.errno in (errno.ECONNREFUSED, errno.ECONNRESET) else 13)\n"
     "else:\n"
     "    raise SystemExit(0)\n"
     "finally:\n"
     "    client.close()\n"
 )
+_REFUSED_ERRNOS = (errno.ECONNREFUSED, errno.ECONNRESET)
 
 
 def browser_replay_environment():
@@ -441,6 +447,7 @@ def run_as_user(user, argv, environment, *, timeout):
 
 
 def _probe_outcome(user, environment, family, server, *, timeout):
+    """返回 (connected|timeout|error, 细节)。被拒绝或重置说明对端可达，直接失败。"""
     host, port = server.getsockname()[:2]
     result = run_as_user(
         user,
@@ -449,12 +456,33 @@ def _probe_outcome(user, environment, family, server, *, timeout):
         timeout=timeout + 15,
     )
     if result.returncode == 0:
-        return "connected"
+        return "connected", None
     if result.returncode == 10:
-        return "timeout"
+        return "timeout", None
+    if result.returncode in (12, 13):
+        try:
+            detail = json.loads((result.stdout or "").strip().splitlines()[-1])
+        except (IndexError, ValueError):
+            detail = {"raw": (result.stdout or "")[-200:]}
+        if result.returncode == 12:
+            raise RuntimeError(f"测试用户连接被拒绝或重置，不能当作 PF 阻断: {detail}")
+        return "error", detail
     detail = (result.stderr or result.stdout or "").strip().splitlines()
     tail = detail[-1] if detail else ""
     raise RuntimeError(f"测试用户探针失败 exit={result.returncode} {tail}")
+
+
+def _assert_nothing_arrived(server):
+    """负例之后监听者必须没有待接受的连接，否则说明测试用户的连接其实到达了。"""
+    server.settimeout(0.3)
+    try:
+        connection, _ = server.accept()
+    except TimeoutError:
+        return
+    finally:
+        server.settimeout(2)
+    connection.close()
+    raise RuntimeError("负例探针后监听者收到了测试用户的连接")
 
 
 def _probe_record(user, family, server, **fields):
@@ -465,7 +493,7 @@ def verify_user_open(user, environment, servers):
     """部署前基线：测试用户必须能连上仍存活的回环监听者。"""
     observations = []
     for family, server in servers:
-        outcome = _probe_outcome(user, environment, family, server, timeout=2)
+        outcome, _ = _probe_outcome(user, environment, family, server, timeout=2)
         if outcome != "connected":
             raise RuntimeError("部署前测试用户未能连上已建立的监听者")
         _accept(server)
@@ -474,15 +502,19 @@ def verify_user_open(user, environment, servers):
 
 
 def verify_user_drop(user, environment, servers):
-    """负例只能从测试用户发起。ECONNREFUSED 和其他错误不能当成 drop。"""
+    """负例只能从测试用户发起：超时，或非拒绝/重置的立即错误，且监听者没收到连接。"""
     observations = []
     for family, server in servers:
-        outcome = _probe_outcome(user, environment, family, server, timeout=1)
-        if outcome != "timeout":
+        outcome, detail = _probe_outcome(user, environment, family, server, timeout=1)
+        if outcome == "connected":
             raise RuntimeError("PF 未阻止测试用户连接已验证监听者")
-        observations.append(_probe_record(
-            user, family, server, baseline="connected", restricted="timeout", listener_alive=True,
-        ))
+        _assert_nothing_arrived(server)
+        record = _probe_record(
+            user, family, server, baseline="connected", restricted=outcome, listener_alive=True,
+        )
+        if detail is not None:
+            record["error"] = detail
+        observations.append(record)
     return observations
 
 
@@ -516,7 +548,7 @@ def assert_pf_enabled():
 
 
 def verify_active(evidence):
-    """子进程只证明当前用户连不上监听者。规则文本、启用状态和计数由 supervisor 核对。"""
+    """子进程只证明当前用户连不上监听者（超时或非拒绝的立即错误）。规则文本、启用状态和计数由 supervisor 核对。"""
     expected = evidence.get("test_user", {}).get("uid")
     if expected is None or os.getuid() != expected:
         raise RuntimeError("执行期负例探针不在测试用户中")
@@ -529,6 +561,10 @@ def verify_active(evidence):
             try:
                 client.connect(tuple(probe["address"]))
             except TimeoutError:
+                continue
+            except OSError as exc:
+                if exc.errno in _REFUSED_ERRNOS:
+                    raise RuntimeError(f"执行期负例被拒绝或重置: {exc.errno}") from exc
                 continue
             raise RuntimeError("执行期 PF 负例连接成功")
 

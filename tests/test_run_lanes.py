@@ -437,6 +437,25 @@ def test_child_probe_times_out_without_pfctl(monkeypatch):
             "probes": [{"family": "AF_INET", "address": ["127.0.0.1", 9]}],
         })
 
+    class Failing(Open):
+        error = OSError(0, "Error 0")
+
+        def connect(self, address):
+            raise self.error
+
+    # macOS 上按用户匹配的 PF 丢弃本机出站 SYN 时 connect 可能立即报错（#190 第二轮 CI）。
+    monkeypatch.setattr(socket, "socket", lambda *args: Failing())
+    native_macos.verify_active({
+        "test_user": {"uid": os.getuid()},
+        "probes": [{"family": "AF_INET", "address": ["127.0.0.1", 9]}],
+    })
+    Failing.error = ConnectionRefusedError(native_macos.errno.ECONNREFUSED, "refused")
+    with pytest.raises(RuntimeError, match="被拒绝"):
+        native_macos.verify_active({
+            "test_user": {"uid": os.getuid()},
+            "probes": [{"family": "AF_INET", "address": ["127.0.0.1", 9]}],
+        })
+
 
 def test_ci_upload_junit_removes_source_and_captured_content(tmp_path):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/ci"))
@@ -775,7 +794,12 @@ def test_negative_probe_uses_the_test_user_and_positive_uses_the_runner(monkeypa
         return SimpleNamespace(returncode=10, stdout="", stderr="")
 
     monkeypatch.setattr(native_macos, "run_as_user", fake_run_as_user)
-    server = SimpleNamespace(getsockname=lambda: ("127.0.0.1", 9))
+
+    def nothing_pending():
+        raise TimeoutError()
+
+    server = SimpleNamespace(getsockname=lambda: ("127.0.0.1", 9), settimeout=lambda value: None,
+                             accept=nothing_pending)
     dropped = native_macos.verify_user_drop("_tpcci", {"HOME": "/lane-home"}, [(socket.AF_INET, server)])
     assert launches == ["_tpcci"]
     assert dropped[0]["restricted"] == "timeout"
@@ -1061,3 +1085,41 @@ def test_policy_denies_project_login_profiles(tmp_path):
     relative = "data/runtime/platform_sessions"
     assert f'(deny file-read* file-write* (subpath {json.dumps(str(source / relative))}))' in policy
     assert "tools/MediaCrawler" not in policy
+
+
+def test_negative_probe_accepts_immediate_errors_but_not_refusals_or_arrivals(monkeypatch):
+    import native_macos
+
+    def probe(code, stdout=""):
+        return lambda *args, **kwargs: SimpleNamespace(returncode=code, stdout=stdout, stderr="")
+
+    def nothing_pending():
+        raise TimeoutError()
+
+    server = SimpleNamespace(getsockname=lambda: ("127.0.0.1", 9), settimeout=lambda value: None,
+                             accept=nothing_pending)
+    detail = '{"type": "OSError", "errno": 0, "strerror": "Error 0", "elapsed": 0.001}'
+    monkeypatch.setattr(native_macos, "run_as_user", probe(13, detail))
+    dropped = native_macos.verify_user_drop("_tpcci", {}, [(socket.AF_INET, server)])
+    assert dropped[0]["restricted"] == "error"
+    assert dropped[0]["error"]["errno"] == 0
+
+    monkeypatch.setattr(native_macos, "run_as_user", probe(12, '{"errno": 61}'))
+    with pytest.raises(RuntimeError, match="被拒绝"):
+        native_macos.verify_user_drop("_tpcci", {}, [(socket.AF_INET, server)])
+
+    monkeypatch.setattr(native_macos, "run_as_user", probe(0))
+    with pytest.raises(RuntimeError, match="未阻止"):
+        native_macos.verify_user_drop("_tpcci", {}, [(socket.AF_INET, server)])
+
+    closed = []
+    arrived = SimpleNamespace(getsockname=lambda: ("127.0.0.1", 9), settimeout=lambda value: None,
+                              accept=lambda: (SimpleNamespace(close=lambda: closed.append(True)), None))
+    monkeypatch.setattr(native_macos, "run_as_user", probe(13, detail))
+    with pytest.raises(RuntimeError, match="收到了测试用户的连接"):
+        native_macos.verify_user_drop("_tpcci", {}, [(socket.AF_INET, arrived)])
+    assert closed == [True]
+
+    monkeypatch.setattr(native_macos, "run_as_user", probe(13, detail))
+    with pytest.raises(RuntimeError, match="未能连上"):
+        native_macos.verify_user_open("_tpcci", {}, [(socket.AF_INET, server)])
