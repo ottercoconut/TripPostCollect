@@ -85,6 +85,9 @@ def test_child_command_runs_root_entry_with_parent_argv(monkeypatch: pytest.Monk
         assert command["timeout"] == NO_PROGRESS_WATCHDOG_SECONDS, name
         env = command["extra_env"]
         assert env["TRIPPOSTCOLLECT_DB_PATH"] == str(tmp_path / "content.sqlite"), name
+        # 续跑时已处理候选文件经 env 交给 worker。
+        assert env.get("TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH") == (
+            str(tmp_path / "identities.json") if name == "weibo_search_resume" else None), name
         retired = RETIRED_ENV | (RETIRED_XHS_ENV if name.startswith("xhs_") else set())
         assert retired.isdisjoint(env), (name, sorted(retired & set(env)))
         assert all(key.startswith("TRIPPOSTCOLLECT_") for key in env), name

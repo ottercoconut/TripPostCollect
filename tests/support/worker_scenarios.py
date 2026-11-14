@@ -37,6 +37,8 @@ SCENARIOS = {
     "weibo_post_repair": ("weibo", {"post_repair": True, "post_repair_detail_targets": ["5000000000000001"]},
                           "wb", "cookie", "detail", False, 1, "5000000000000001", None),
     "weibo_search": ("weibo", {}, "wb", "cookie", "search", False, 1, None, None),
+    "weibo_search_resume": ("weibo", {"resume_identities_path": "<TMP>/identities.json"},
+                            "wb", "cookie", "search", False, 1, None, None),
     "xhs_repair": ("xhs", {"xhs_detail_urls": ["https://www.xiaohongshu.com/explore/abc"], "xhs_repair": True},
                    "xhs", "cookie", "detail", False, 1, "https://www.xiaohongshu.com/explore/abc", "true"),
     "xhs_search_qrcode": ("xhs", {"headed": True, "login_type": "qrcode", "resume_summary": "<TMP>/resume.json"},

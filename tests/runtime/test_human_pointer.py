@@ -120,6 +120,11 @@ def test_short_moves_go_in_a_single_stroke():
         assert len(_segments(moves)) == 1 and moves[-1][:2] == (530.0, 540.0)
 
 
+def test_no_moves_when_already_at_target():
+    # 位移不到一个坐标步长时不发事件（真实指针不报告没有位移的移动）。
+    assert hp.plan_approach((500.0, 500.0), (500.05, 500.0), random.Random(1), bounds=VIEW) == []
+
+
 def test_main_stroke_duration_barely_grows_with_distance():
     rng = random.Random(3)
     short = statistics.median(hp.stroke_ms(225, rng) for _ in range(400))
