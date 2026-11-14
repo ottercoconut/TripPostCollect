@@ -20,7 +20,12 @@ from urllib.parse import parse_qsl
 
 import pytest
 
-from support import fork_removal_deviation, native_window_deviation, shared_launch_deviation
+from support import (
+    fork_removal_deviation,
+    native_window_deviation,
+    shared_launch_deviation,
+    zhihu_history_backfill_deviation,
+)
 from trippostcollect.application import inputs, page_evidence, repair, warmup
 from trippostcollect.core import paths as core_paths
 from trippostcollect.runtime import cookies, page_readiness
@@ -234,6 +239,9 @@ def test_migrated_ast(row):
             source = shared_launch_deviation.t10_launch_login_context(source)
         elif name == "current_state":
             source = t115_bilibili_nav_login(source)
+    if row["qualname"] == "load_post_repair_fallbacks":
+        # #194：知乎旧行只回落发帖时间（见 support.zhihu_history_backfill_deviation）。
+        source = zhihu_history_backfill_deviation.t10_load_post_repair_fallbacks(source)
     if row["disposition"] == "薄":
         target = ROOT / "src/trippostcollect/application/warmup.py"
         if row["file"] == "scripts/login_warmup.py":

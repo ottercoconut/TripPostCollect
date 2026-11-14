@@ -181,16 +181,13 @@ shasum -a 256 data/backups/trippostcollect-before-<run_id>.sqlite
 
 ## 通用平台历史详情修复
 
-`scripts/repair_post_details.py` 只处理抖音、微博或知乎中已经存在、但
-`raw_sample_json.content_detail_status != detail_observed` 的记录。它不是新内容发现入口：每个 child
+`scripts/repair_post_details.py` 默认只处理抖音、微博或知乎中已经存在、但
+`raw_sample_json.content_detail_status != detail_observed` 的记录。知乎另有离线图片去重和全量刷新两种模式，见下文「知乎历史回填」。它不是新内容发现入口：每个 child
 只接收冻结清单中的平台 ID 和详情入口，强制 `--no-checkpoint-write`，成功子集仍经过正文、作者粉丝、
 图片 staging/manifest、行为策略、长期媒体晋升和 SQLite 事务门禁。修复时逐条保留原记录的关键词，
 不会把本轮行为搜索词冒充原始发现词。
 
-知乎 detail 页可能不返回作者粉丝或 answer 创建时间。修复 child 会按平台 ID 从同一 SQLite 旧行读取
-已持久化的 `published_at`、`followers_observed`、`author_followers_source` 和粉丝数，仅补齐详情载荷
-缺失的元数据。本轮 `followers_observed=true` 且带有数值的粉丝量（包括真实 `0`）始终优先，不得被旧行
-覆盖；本轮未观测时，旧行的粉丝数、`followers_observed` 和来源整组回填，保证数值与来源一致。正文、图片和 `answer_detail`/`article_detail` 来源仍必须来自本次详情访问。若补齐后仍无
+知乎详情只在本轮页面缺少创建时间时，从同一旧行回填 `published_at`（载荷里的 `created_time` 同样只用于补这个时间）。粉丝、粉丝来源、`followers_observed`、关注、作品数、认证以及其他作者字段必须来自本次作者页，不得从旧行带回。微博和抖音仍可在本轮没有观察到粉丝时，把旧行的粉丝数、`followers_observed` 和来源整组回填；本轮已经观察到的粉丝数（包括真实 `0`）优先。正文、图片和 `answer_detail`/`article_detail` 来源仍必须来自本次详情访问。若补齐后仍无
 有效详情，child 将本批标记为 `repair_no_valid_detail` 且不得把搜索载荷直接当作详情成功；无人值守总控
 按下文规则记录该批失败并继续后续批次，只有运行级阻断才停止平台总控。
 
@@ -282,6 +279,64 @@ state 旁的 worker 进程组兜底强杀。stdout / stderr 先做头像审计�
 小红书既有记录修复允许一种平台原生完整形态：本轮 `note_detail` 已同时观察到非空 `title` 和至少一张
 详情 `image_list` 正文图时，`desc` 为空不记为 `missing_content`。该例外只作用于 repair 模式，不把
 标题复制成正文，也不放宽正式发现抓取的正文契约；标题、正文和图片都为空仍是内容缺失。
+
+## 知乎历史回填
+
+`scripts/repair_post_details.py` 的两种知乎专用模式只接受 `--platform zhihu`，并且 `--dedupe-images` 与 `--refresh-all` 不能同时使用。默认选择（两个开关都不加）仍只处理非 `detail_observed` 的行。写默认库前都要 `--confirm-default-db-repair`。非 dry-run 会先用与详情修复相同的 SQLite 一致性备份，写到 `data/backups/post_detail_repair/<run_id>/`。
+
+建议顺序：先对两种模式分别 dry-run，确认计划后再去重，去重完成后再刷新。
+
+### 离线图片去重
+
+`--dedupe-images` 不访问平台、不启动浏览器。它对每条知乎帖子的 `image_role='content'` 行按与解析器相同的规则去重：同一 `v2-<32位十六进制>` 只留一张，优先级 `_r` > 无后缀 > `_1440w` > `_720w` > `_b`。解析不出 v2 哈希的 URL 原样保留。被淘汰的 `web_post_images` 行删除，保留行的 `image_index` 按原顺序从该帖原来的起始值重新连续编号，`post_images_count` 重算。`raw_sample_json` 不改，它仍是原始证据，与 #184 迁移一致。
+
+被淘汰行的本地媒体文件只在没有任何其他 `web_post_images` 行仍引用同一 `local_path` 时，移动到 `data/backups/post_detail_repair/<run_id>/media/<原相对路径>`，不删除。整次改写在一个事务里。`--dry-run` 只写计划摘要，不写库、不移动文件。重复执行的变更数为 0。摘要 `outputs/post_detail_repair/<run_id>/run_summary.json` 给出前后行数、帖子数、每帖删除数分布和移动文件清单路径。
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform zhihu \
+  --dedupe-images \
+  --dry-run
+```
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform zhihu \
+  --dedupe-images \
+  --confirm-default-db-repair
+```
+
+### 全量刷新
+
+`--refresh-all` 选择知乎行里 `json_type(raw_sample_json, '$.author_page_badges') IS NULL` 的记录，不论 `content_detail_status`。`post_detail_repair_waivers` 里的行仍以 `post_detail_repair_waived` 拒绝。`--post-id`、`--max-items`、批次、计划、执行状态、备份和中断处理与默认修复相同。
+
+作者页读到之后，记录总会把 `author_page_badges` 写入 `raw_sample_json`；没有标识时是 `{}`。因此重跑会跳过已经刷新的行。作者页没读到的记录不合格，不会入库，原行保持不变。
+
+恢复判定只认 `answer_detail` / `article_detail`。纯文字回答或文章没有正文图也算恢复。刷新模式还要求 `author_followers_source='author_page'`，并且 `author_page_badges` 键已经存在。当前详情路径不再产生 `search_content`，修复恢复不再把它当作受信任来源。
+
+运行摘要逐行给出 `refreshed`、`candidate_failed`（原因沿用 child 的 `error_code`，例如详情实体缺失、作者页失败）和 `rejected`（豁免等）。dry-run 里选中但尚未执行的行记为 `planned`。候选失败的行保持原值，不删除。
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform zhihu \
+  --refresh-all \
+  --keyword 青岛旅游 \
+  --batch-size 20 \
+  --dry-run
+```
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform zhihu \
+  --refresh-all \
+  --keyword 青岛旅游 \
+  --batch-size 20 \
+  --confirm-default-db-repair
+```
 
 ## 作者资料回填
 

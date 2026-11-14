@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import signal
 import sqlite3
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -30,6 +32,7 @@ from trippostcollect.core.paths import (
     ensure_dir,
 )
 from trippostcollect.db.bootstrap import bootstrap_database
+from trippostcollect.platforms.zhihu.parser import collapse_zhihu_v2_image_urls
 from trippostcollect.runtime.process import (
     PROCESS_CLEANUP_GRACE_SECONDS,
     PROCESS_FINAL_REAP_SECONDS,
@@ -72,8 +75,10 @@ COMPLETED_REPAIR_OUTCOMES = {"completed", "completed_with_remaining"}
 TRUSTED_DETAIL_SOURCES = {
     "douyin": {"aweme_detail"},
     "weibo": {"search_mblog_complete", "mobile_detail"},
-    "zhihu": {"search_content", "answer_detail", "article_detail"},
+    # #194：详情路径只写 answer_detail / article_detail，当前代码不再产生 search_content。
+    "zhihu": {"answer_detail", "article_detail"},
 }
+RAW_SAMPLE_UNCHANGED_NOTE = "raw_sample_json 不改，原始证据与 #184 迁移一致"
 
 
 def run_repair_child(
@@ -109,8 +114,9 @@ def run_repair_child(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Repair existing non-detail_observed Douyin, Weibo, or Zhihu rows in "
-            "bounded detail-mode batches without touching discovery state."
+            "Repair existing Douyin, Weibo, or Zhihu rows in bounded detail-mode "
+            "batches without touching discovery state. Zhihu also accepts "
+            "--dedupe-images and --refresh-all."
         )
     )
     parser.add_argument("--platform", required=True, choices=PLATFORMS)
@@ -130,6 +136,19 @@ def parse_args() -> argparse.Namespace:
         "--confirm-default-db-repair",
         action="store_true",
         help="Required for a non-dry-run repair of data/trippostcollect.sqlite.",
+    )
+    parser.add_argument(
+        "--dedupe-images",
+        action="store_true",
+        help="Zhihu-only offline content-image dedupe. Mutually exclusive with --refresh-all.",
+    )
+    parser.add_argument(
+        "--refresh-all",
+        action="store_true",
+        help=(
+            "Zhihu-only refresh of rows whose raw_sample_json has no author_page_badges key, "
+            "regardless of content_detail_status."
+        ),
     )
     return parser.parse_args()
 
@@ -269,26 +288,66 @@ def waive_post_detail_repairs(
     return normalized_ids
 
 
+def _selection_predicate(refresh_all: bool, *, column: str = "raw_sample_json") -> str:
+    """默认只选未观察详情；知乎全量刷新改选没有 author_page_badges 键的行。"""
+
+    if refresh_all:
+        return f"json_type({column}, '$.author_page_badges') IS NULL"
+    return f"""COALESCE(
+            CASE WHEN json_valid({column})
+                 THEN json_extract({column}, '$.content_detail_status') END,
+            ''
+          ) <> 'detail_observed'"""
+
+
+def _repair_fallback_for_row(
+    platform: str,
+    row: sqlite3.Row,
+    raw_sample: dict[str, Any],
+) -> dict[str, Any]:
+    if platform == "zhihu":
+        # #194：只回落发帖时间。作者字段必须来自本次作者页。
+        fields = {
+            "published_at": row["published_at"],
+            "created_time": raw_sample.get("created_time"),
+        }
+    else:
+        fields = {
+            "published_at": row["published_at"],
+            "author_followers_count": row["author_followers_count"],
+            "author_display_name": row["author_display_name"],
+            "author_platform_id": row["author_platform_id"],
+            "author_profile_url": row["author_profile_url"],
+            "author_description": row["author_description"],
+            "created_time": raw_sample.get("created_time"),
+            "updated_time": raw_sample.get("updated_time"),
+            "creator_hash": raw_sample.get("creator_hash"),
+            "creator_url_token": raw_sample.get("creator_url_token"),
+            "user_nickname": raw_sample.get("user_nickname"),
+            "author_followers_source": raw_sample.get("author_followers_source"),
+            "followers_observed": raw_sample.get("followers_observed"),
+            "followers_count": raw_sample.get("followers_count"),
+        }
+    return {key: value for key, value in fields.items() if value not in (None, "")}
+
+
 def select_targets(
     conn: sqlite3.Connection,
     *,
     platform: str,
     post_ids: list[str],
     max_items: int,
+    refresh_all: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     rows = conn.execute(
-        """
+        f"""
         SELECT id, platform_post_id, canonical_url, keyword, artifact_dir,
                published_at, author_followers_count, author_display_name,
                author_platform_id, author_profile_url, author_description,
                raw_sample_json
         FROM web_posts
         WHERE platform_key=?
-          AND COALESCE(
-                CASE WHEN json_valid(raw_sample_json)
-                     THEN json_extract(raw_sample_json, '$.content_detail_status') END,
-                ''
-              ) <> 'detail_observed'
+          AND {_selection_predicate(refresh_all)}
         ORDER BY id
         """,
         (platform,),
@@ -314,26 +373,7 @@ def select_targets(
                 raw_sample = parsed_raw
         except (TypeError, json.JSONDecodeError):
             raw_sample = {}
-        repair_fallback = {
-            key: value
-            for key, value in {
-                "published_at": row["published_at"],
-                "author_followers_count": row["author_followers_count"],
-                "author_display_name": row["author_display_name"],
-                "author_platform_id": row["author_platform_id"],
-                "author_profile_url": row["author_profile_url"],
-                "author_description": row["author_description"],
-                "created_time": raw_sample.get("created_time"),
-                "updated_time": raw_sample.get("updated_time"),
-                "creator_hash": raw_sample.get("creator_hash"),
-                "creator_url_token": raw_sample.get("creator_url_token"),
-                "user_nickname": raw_sample.get("user_nickname"),
-                "author_followers_source": raw_sample.get("author_followers_source"),
-                "followers_observed": raw_sample.get("followers_observed"),
-                "followers_count": raw_sample.get("followers_count"),
-            }.items()
-            if value not in (None, "")
-        }
+        repair_fallback = _repair_fallback_for_row(platform, row, raw_sample)
         item = {
             "web_post_id": int(row["id"]),
             "platform_post_id": post_id,
@@ -426,6 +466,8 @@ def repaired_rows(
     conn: sqlite3.Connection,
     platform: str,
     target_ids: list[str],
+    *,
+    refresh_all: bool = False,
 ) -> dict[str, dict[str, Any]]:
     if not target_ids:
         return {}
@@ -444,6 +486,9 @@ def repaired_rows(
                    CASE WHEN json_valid(p.raw_sample_json)
                         THEN json_extract(p.raw_sample_json, '$.content_detail_source') END
                         AS detail_source,
+                   json_extract(p.raw_sample_json, '$.author_followers_source')
+                        AS followers_source,
+                   json_type(p.raw_sample_json, '$.author_page_badges') AS badges_type,
                    SUM(CASE WHEN i.image_role='content' THEN 1 ELSE 0 END) AS content_images,
                    SUM(CASE WHEN i.image_role='content'
                                  AND COALESCE(i.local_path, '') <> ''
@@ -460,77 +505,504 @@ def repaired_rows(
             source = str(row["detail_source"] or "")
             content_images = int(row["content_images"] or 0)
             persisted_images = int(row["persisted_images"] or 0)
+            # #191：知乎纯文字回答/文章没有正文图也算恢复。有图时仍要求全部落盘。
+            images_ok = content_images > 0 and persisted_images == content_images
+            if platform == "zhihu" and content_images == 0:
+                images_ok = True
+            recovered = bool(
+                row["detail_status"] == "detail_observed"
+                and source in trusted
+                and str(row["content_text"] or "").strip()
+                and images_ok
+            )
+            badges_present = row["badges_type"] is not None
+            followers_source = str(row["followers_source"] or "")
+            if refresh_all:
+                recovered = recovered and followers_source == "author_page" and badges_present
             result[str(row["platform_post_id"])] = {
                 "detail_status": str(row["detail_status"] or ""),
                 "detail_source": source,
                 "content_images": content_images,
                 "persisted_images": persisted_images,
-                "recovered": bool(
-                    row["detail_status"] == "detail_observed"
-                    and source in trusted
-                    and str(row["content_text"] or "").strip()
-                    and content_images > 0
-                    and persisted_images == content_images
-                ),
+                "author_followers_source": followers_source,
+                "author_page_badges_present": badges_present,
+                "recovered": recovered,
             }
     return result
 
 
-def pending_count(conn: sqlite3.Connection, platform: str) -> int:
+def pending_count(
+    conn: sqlite3.Connection,
+    platform: str,
+    *,
+    refresh_all: bool = False,
+) -> int:
     row = conn.execute(
-        """
+        f"""
         SELECT COUNT(*)
         FROM web_posts
         WHERE platform_key=?
-          AND COALESCE(
-                CASE WHEN json_valid(raw_sample_json)
-                     THEN json_extract(raw_sample_json, '$.content_detail_status') END,
-                ''
-              ) <> 'detail_observed'
+          AND {_selection_predicate(refresh_all)}
         """,
         (platform,),
     ).fetchone()
     return int(row[0] or 0)
 
 
-def waived_pending_count(conn: sqlite3.Connection, platform: str) -> int:
+def waived_pending_count(
+    conn: sqlite3.Connection,
+    platform: str,
+    *,
+    refresh_all: bool = False,
+) -> int:
     if not conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='post_detail_repair_waivers'"
     ).fetchone():
         return 0
     row = conn.execute(
-        """
+        f"""
         SELECT COUNT(*)
         FROM post_detail_repair_waivers AS w
         JOIN web_posts AS p ON p.id=w.web_post_id
         WHERE p.platform_key=?
-          AND COALESCE(
-                CASE WHEN json_valid(p.raw_sample_json)
-                     THEN json_extract(p.raw_sample_json, '$.content_detail_status') END,
-                ''
-              ) <> 'detail_observed'
+          AND {_selection_predicate(refresh_all, column="p.raw_sample_json")}
         """,
         (platform,),
     ).fetchone()
     return int(row[0] or 0)
 
 
+def build_target_results(
+    *,
+    targets: list[dict[str, Any]],
+    rejected: list[dict[str, Any]],
+    statuses: dict[str, dict[str, Any]],
+    candidate_failures: list[dict[str, Any]],
+    executed: bool,
+) -> list[dict[str, Any]]:
+    """刷新摘要逐行结果：已刷新、候选失败、被拒绝。dry-run 的选中行记为 planned。"""
+
+    failure_by_id: dict[str, dict[str, Any]] = {}
+    for item in candidate_failures:
+        post_id = str(item.get("platform_post_id") or "")
+        if post_id and post_id not in failure_by_id:
+            failure_by_id[post_id] = item
+    results: list[dict[str, Any]] = []
+    for item in rejected:
+        results.append(
+            {
+                "platform_post_id": str(item.get("platform_post_id") or ""),
+                "web_post_id": item.get("web_post_id"),
+                "outcome": "rejected",
+                "reason": str(item.get("reason") or ""),
+                "detail": "",
+            }
+        )
+    for item in targets:
+        post_id = str(item.get("platform_post_id") or "")
+        if not executed:
+            results.append(
+                {
+                    "platform_post_id": post_id,
+                    "web_post_id": item.get("web_post_id"),
+                    "outcome": "planned",
+                    "reason": "",
+                    "detail": "",
+                }
+            )
+            continue
+        status = statuses.get(post_id) or {}
+        if status.get("recovered"):
+            results.append(
+                {
+                    "platform_post_id": post_id,
+                    "web_post_id": item.get("web_post_id"),
+                    "outcome": "refreshed",
+                    "reason": "",
+                    "detail": "",
+                }
+            )
+            continue
+        failure = failure_by_id.get(post_id) or {}
+        results.append(
+            {
+                "platform_post_id": post_id,
+                "web_post_id": item.get("web_post_id"),
+                "outcome": "candidate_failed",
+                "reason": str(failure.get("error_code") or "not_recovered"),
+                "detail": str(failure.get("detail") or ""),
+            }
+        )
+    return results
+
+
+def kept_content_images(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按解析器的 v2 哈希合并保留正文图行，胜者占该组首次出现的位置。"""
+
+    urls = [str(row.get("image_url") or "") for row in rows]
+    kept_urls = collapse_zhihu_v2_image_urls(urls)
+    used: set[int] = set()
+    kept: list[dict[str, Any]] = []
+    for url in kept_urls:
+        for index, row in enumerate(rows):
+            if index in used:
+                continue
+            if str(row.get("image_url") or "") == url:
+                used.add(index)
+                kept.append(row)
+                break
+    return kept
+
+
+def _relative_media_path(local_path: str) -> Path:
+    raw = Path(local_path)
+    if raw.is_absolute():
+        relative = raw.resolve().relative_to(PROJECT_ROOT.resolve())
+    else:
+        relative = raw
+    if relative.is_absolute() or any(part in {"", ".."} for part in relative.parts):
+        raise ValueError(f"unsafe media path: {local_path}")
+    return relative
+
+
+def plan_zhihu_content_image_dedupe(conn: sqlite3.Connection) -> dict[str, Any]:
+    """只读计划：不写库、不移动文件。无法解析 v2 哈希的 URL 原样保留。"""
+
+    rows = conn.execute(
+        """
+        SELECT p.id AS web_post_id,
+               p.platform_post_id,
+               p.post_images_count,
+               i.id AS image_id,
+               i.image_index,
+               i.image_url,
+               i.image_role,
+               i.local_path
+        FROM web_posts AS p
+        JOIN web_post_images AS i ON i.web_post_id=p.id
+        WHERE p.platform_key='zhihu' AND i.image_role='content'
+        ORDER BY p.id, i.image_index, i.id
+        """
+    ).fetchall()
+    ref_counts = {
+        str(row[0]): int(row[1])
+        for row in conn.execute(
+            """
+            SELECT local_path, COUNT(*)
+            FROM web_post_images
+            WHERE COALESCE(local_path, '') <> ''
+            GROUP BY local_path
+            """
+        )
+    }
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    identity: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        web_post_id = int(row["web_post_id"])
+        identity[web_post_id] = {
+            "web_post_id": web_post_id,
+            "platform_post_id": str(row["platform_post_id"] or ""),
+            "post_images_count": int(row["post_images_count"] or 0),
+        }
+        grouped.setdefault(web_post_id, []).append(
+            {
+                "id": int(row["image_id"]),
+                "image_index": int(row["image_index"]),
+                "image_url": str(row["image_url"] or ""),
+                "local_path": str(row["local_path"] or ""),
+            }
+        )
+    posts: list[dict[str, Any]] = []
+    deleted_paths: Counter[str] = Counter()
+    for web_post_id, content_rows in grouped.items():
+        kept = kept_content_images(content_rows)
+        kept_ids = {int(item["id"]) for item in kept}
+        deleted = [item for item in content_rows if int(item["id"]) not in kept_ids]
+        start = min(int(item["image_index"]) for item in content_rows)
+        kept_plan = [
+            {**item, "new_index": start + offset} for offset, item in enumerate(kept)
+        ]
+        for item in deleted:
+            if item["local_path"]:
+                deleted_paths[item["local_path"]] += 1
+        posts.append(
+            {
+                **identity[web_post_id],
+                "start_index": start,
+                "kept": kept_plan,
+                "deleted": deleted,
+                "deleted_count": len(deleted),
+                "count_after": len(kept_plan),
+            }
+        )
+    moves: list[dict[str, str]] = []
+    shared_skipped = 0
+    for local_path, deleted_count in sorted(deleted_paths.items()):
+        if ref_counts.get(local_path, 0) != deleted_count:
+            shared_skipped += 1
+            continue
+        moves.append({"local_path": local_path, "status": "planned"})
+    return {
+        "posts": posts,
+        "moves": moves,
+        "shared_path_skipped_count": shared_skipped,
+        "content_image_rows_before": sum(len(post["kept"]) + post["deleted_count"] for post in posts),
+    }
+
+
+def _post_dedupe_changes(post: dict[str, Any]) -> bool:
+    if post["deleted_count"]:
+        return True
+    if int(post["post_images_count"]) != int(post["count_after"]):
+        return True
+    return any(int(item["image_index"]) != int(item["new_index"]) for item in post["kept"])
+
+
+def apply_zhihu_content_image_dedupe(
+    conn: sqlite3.Connection,
+    plan: dict[str, Any],
+) -> int:
+    """在调用方事务里删除被淘汰行、重编号并重算 post_images_count。不改 raw_sample_json。"""
+
+    changed_posts = 0
+    for post in plan["posts"]:
+        if not _post_dedupe_changes(post):
+            continue
+        changed_posts += 1
+        for offset, item in enumerate(post["kept"]):
+            conn.execute(
+                "UPDATE web_post_images SET image_index=? WHERE id=?",
+                (-1_000_000 - offset, int(item["id"])),
+            )
+        delete_ids = [int(item["id"]) for item in post["deleted"]]
+        if delete_ids:
+            conn.executemany(
+                "DELETE FROM web_post_images WHERE id=?",
+                [(image_id,) for image_id in delete_ids],
+            )
+        for item in post["kept"]:
+            conn.execute(
+                "UPDATE web_post_images SET image_index=? WHERE id=?",
+                (int(item["new_index"]), int(item["id"])),
+            )
+        conn.execute(
+            "UPDATE web_posts SET post_images_count=? WHERE id=?",
+            (int(post["count_after"]), int(post["web_post_id"])),
+        )
+    return changed_posts
+
+
+def _resolve_media_file(local_path: str) -> Path:
+    raw = Path(local_path).expanduser()
+    return raw if raw.is_absolute() else PROJECT_ROOT / raw
+
+
+def move_deduped_media(
+    moves: list[dict[str, str]],
+    *,
+    backup_media_root: Path,
+) -> list[dict[str, str]]:
+    """只移动已经没有任何 web_post_images 行引用的文件。缺失文件留在清单里，不删除。"""
+
+    results: list[dict[str, str]] = []
+    for item in moves:
+        local_path = item["local_path"]
+        record = {"local_path": local_path, "destination": "", "status": "error", "error": ""}
+        try:
+            relative = _relative_media_path(local_path)
+            destination = backup_media_root / relative
+            source = _resolve_media_file(local_path)
+            record["destination"] = str(destination)
+            if not source.is_file():
+                record["status"] = "missing"
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if destination.exists():
+                    raise FileExistsError(f"backup media already exists: {destination}")
+                shutil.move(str(source), str(destination))
+                record["status"] = "moved"
+        except (OSError, ValueError) as exc:
+            record["status"] = "error"
+            record["error"] = f"{type(exc).__name__}: {exc}"
+        results.append(record)
+    return results
+
+
+def _dedupe_summary(
+    *,
+    run_id: str,
+    db_path: Path,
+    summary_path: Path,
+    plan: dict[str, Any],
+    dry_run: bool,
+    backup: dict[str, Any],
+    move_results: list[dict[str, str]],
+    manifest_path: Path,
+) -> dict[str, Any]:
+    posts = plan["posts"]
+    deleted_row_count = sum(int(post["deleted_count"]) for post in posts)
+    histogram = Counter(str(int(post["deleted_count"])) for post in posts)
+    changed = [post for post in posts if _post_dedupe_changes(post)]
+    sample = [
+        {
+            "platform_post_id": post["platform_post_id"],
+            "web_post_id": post["web_post_id"],
+            "deleted_count": post["deleted_count"],
+            "count_before": post["post_images_count"],
+            "count_after": post["count_after"],
+            "kept_urls": [item["image_url"] for item in post["kept"]],
+            "dropped_urls": [item["image_url"] for item in post["deleted"]],
+        }
+        for post in changed[:10]
+    ]
+    moved = [item for item in move_results if item.get("status") == "moved"]
+    return {
+        "status": "planned" if dry_run else "completed",
+        "mode": "dedupe_images",
+        "run_id": run_id,
+        "job_kind": "post_detail_repair",
+        "platform": "zhihu",
+        "dry_run": dry_run,
+        "db": str(db_path),
+        "posts_examined": len(posts),
+        "posts_changed": len(changed),
+        "content_image_rows_before": int(plan["content_image_rows_before"]),
+        "content_image_rows_after": int(plan["content_image_rows_before"]) - deleted_row_count,
+        "deleted_row_count": deleted_row_count,
+        "deletion_histogram": dict(sorted(histogram.items(), key=lambda item: int(item[0]))),
+        "moved_file_count": len(plan["moves"]) if dry_run else len(moved),
+        "shared_path_skipped_count": int(plan["shared_path_skipped_count"]),
+        "sample": sample,
+        "moved_files_path": str(manifest_path),
+        "moved_files_sample": (plan["moves"] if dry_run else move_results)[:10],
+        "raw_sample_json_unchanged": True,
+        "raw_sample_json_note": RAW_SAMPLE_UNCHANGED_NOTE,
+        "backup": backup,
+        "summary": str(summary_path),
+        "finished_at": utc_iso(),
+    }
+
+
+def _validate_repair_modes(args: argparse.Namespace) -> None:
+    if args.dedupe_images and args.refresh_all:
+        raise SystemExit("--dedupe-images and --refresh-all are mutually exclusive")
+    if args.dedupe_images and args.platform != "zhihu":
+        raise SystemExit("--dedupe-images requires --platform zhihu")
+    if args.refresh_all and args.platform != "zhihu":
+        raise SystemExit("--refresh-all requires --platform zhihu")
+    if args.dedupe_images and (args.post_ids or args.max_items):
+        raise SystemExit("--dedupe-images does not accept --post-id or --max-items")
+
+
+def _require_default_db_confirmation(args: argparse.Namespace, db_path: Path) -> None:
+    if (
+        not args.dry_run
+        and db_path == DEFAULT_DB.resolve()
+        and not args.confirm_default_db_repair
+    ):
+        raise SystemExit("default database repair requires --confirm-default-db-repair")
+
+
+def run_zhihu_image_dedupe(args: argparse.Namespace) -> int:
+    db_path = Path(args.db).expanduser().resolve()
+    _require_default_db_confirmation(args, db_path)
+    run_id = f"zhihu-{utc_stamp()}"
+    run_dir = ensure_dir(POST_DETAIL_REPAIR_OUTPUT / run_id)
+    summary_path = run_dir / "run_summary.json"
+    manifest_path = run_dir / "media_moves.json"
+    backup_path = POST_DETAIL_REPAIR_BACKUP_ROOT / run_id / db_path.name
+    if not db_path.is_file():
+        raise SystemExit(f"database does not exist: {db_path}")
+
+    def read_plan() -> dict[str, Any]:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            return plan_zhihu_content_image_dedupe(conn)
+
+    if args.dry_run:
+        plan = read_plan()
+        write_json(
+            manifest_path,
+            {"dry_run": True, "moves": plan["moves"]},
+        )
+        summary = _dedupe_summary(
+            run_id=run_id,
+            db_path=db_path,
+            summary_path=summary_path,
+            plan=plan,
+            dry_run=True,
+            backup={},
+            move_results=[],
+            manifest_path=manifest_path,
+        )
+        write_json(summary_path, summary)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+
+    bootstrap_database(db_path, sync_jobs=False)
+    plan = read_plan()
+    backup = create_sqlite_backup(db_path, backup_path)
+    if any(_post_dedupe_changes(post) for post in plan["posts"]):
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                apply_zhihu_content_image_dedupe(conn, plan)
+                conn.commit()
+        except sqlite3.Error as exc:
+            summary = _dedupe_summary(
+                run_id=run_id,
+                db_path=db_path,
+                summary_path=summary_path,
+                plan=plan,
+                dry_run=False,
+                backup=backup,
+                move_results=[],
+                manifest_path=manifest_path,
+            )
+            summary["status"] = "failed"
+            summary["error"] = f"post_detail_repair_exception:{type(exc).__name__}:{exc}"
+            write_json(manifest_path, {"dry_run": False, "moves": []})
+            write_json(summary_path, summary)
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 2
+    move_results = move_deduped_media(
+        plan["moves"],
+        backup_media_root=POST_DETAIL_REPAIR_BACKUP_ROOT / run_id / "media",
+    )
+    write_json(manifest_path, {"dry_run": False, "moves": move_results})
+    summary = _dedupe_summary(
+        run_id=run_id,
+        db_path=db_path,
+        summary_path=summary_path,
+        plan=plan,
+        dry_run=False,
+        backup=backup,
+        move_results=move_results,
+        manifest_path=manifest_path,
+    )
+    if any(item.get("status") == "error" for item in move_results):
+        summary["status"] = "failed"
+        summary["error"] = "post_detail_repair_media_move_failed"
+        write_json(summary_path, summary)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 2
+    write_json(summary_path, summary)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main() -> int:
     args = parse_args()
+    _validate_repair_modes(args)
+    if args.dedupe_images:
+        return run_zhihu_image_dedupe(args)
     if args.batch_size <= 0 or args.max_items < 0:
         raise SystemExit("--batch-size must be positive; --max-items cannot be negative")
     if not str(args.keyword or "").strip():
         raise SystemExit("--keyword cannot be empty")
 
     db_path = Path(args.db).expanduser().resolve()
-    if (
-        not args.dry_run
-        and db_path == DEFAULT_DB.resolve()
-        and not args.confirm_default_db_repair
-    ):
-        raise SystemExit(
-            "default database repair requires --confirm-default-db-repair"
-        )
+    _require_default_db_confirmation(args, db_path)
     bootstrap_database(db_path, sync_jobs=False)
     run_id = f"{args.platform}-{utc_stamp()}"
     run_dir = ensure_dir(POST_DETAIL_REPAIR_OUTPUT / run_id)
@@ -546,8 +1018,13 @@ def main() -> int:
             platform=args.platform,
             post_ids=args.post_ids,
             max_items=args.max_items,
+            refresh_all=args.refresh_all,
         )
-        initial_waived_pending = waived_pending_count(conn, args.platform)
+        initial_waived_pending = waived_pending_count(
+            conn,
+            args.platform,
+            refresh_all=args.refresh_all,
+        )
     selected_waived = [
         item for item in rejected if item.get("reason") == "post_detail_repair_waived"
     ]
@@ -616,6 +1093,7 @@ def main() -> int:
         "backup_path": str(backup_path),
         "manifest": str(manifest_path),
         "commands": str(commands_path),
+        "selection": "refresh_all" if args.refresh_all else "pending_detail",
     }
     state = FrozenExecutionState.create(
         state_path,
@@ -638,6 +1116,15 @@ def main() -> int:
         "rejected_sample": rejected[:10],
         "started_at": utc_iso(),
     }
+    if args.refresh_all:
+        base_summary["selection"] = "refresh_all"
+        base_summary["target_results"] = build_target_results(
+            targets=targets,
+            rejected=rejected,
+            statuses={},
+            candidate_failures=[],
+            executed=False,
+        )
     if args.dry_run:
         write_json(summary_path, base_summary)
         print(json.dumps({**base_summary, "summary": str(summary_path)}, ensure_ascii=False, indent=2))
@@ -822,10 +1309,20 @@ def main() -> int:
                 target_ids = [item["platform_post_id"] for item in targets]
                 with sqlite3.connect(db_path) as conn:
                     conn.row_factory = sqlite3.Row
-                    statuses = repaired_rows(conn, args.platform, target_ids)
-                    remaining_pending = pending_count(conn, args.platform)
-                    remaining_waived_pending = waived_pending_count(
-                        conn, args.platform
+                    statuses = (
+                        repaired_rows(conn, args.platform, target_ids, refresh_all=True)
+                        if args.refresh_all
+                        else repaired_rows(conn, args.platform, target_ids)
+                    )
+                    remaining_pending = (
+                        pending_count(conn, args.platform, refresh_all=True)
+                        if args.refresh_all
+                        else pending_count(conn, args.platform)
+                    )
+                    remaining_waived_pending = (
+                        waived_pending_count(conn, args.platform, refresh_all=True)
+                        if args.refresh_all
+                        else waived_pending_count(conn, args.platform)
                     )
                 recovered_ids = sorted(
                     post_id for post_id, value in statuses.items() if value["recovered"]
@@ -914,13 +1411,22 @@ def main() -> int:
         try:
             with sqlite3.connect(db_path) as conn:
                 conn.row_factory = sqlite3.Row
-                final_statuses = repaired_rows(
-                    conn,
-                    args.platform,
-                    [item["platform_post_id"] for item in targets],
+                final_target_ids = [item["platform_post_id"] for item in targets]
+                final_statuses = (
+                    repaired_rows(conn, args.platform, final_target_ids, refresh_all=True)
+                    if args.refresh_all
+                    else repaired_rows(conn, args.platform, final_target_ids)
                 )
-                final_pending = pending_count(conn, args.platform)
-                final_waived_pending = waived_pending_count(conn, args.platform)
+                final_pending = (
+                    pending_count(conn, args.platform, refresh_all=True)
+                    if args.refresh_all
+                    else pending_count(conn, args.platform)
+                )
+                final_waived_pending = (
+                    waived_pending_count(conn, args.platform, refresh_all=True)
+                    if args.refresh_all
+                    else waived_pending_count(conn, args.platform)
+                )
             recovered_ids = sorted(
                 post_id for post_id, value in final_statuses.items() if value["recovered"]
             )
@@ -954,6 +1460,14 @@ def main() -> int:
                 "candidate_failures_sample": candidate_failures[:20],
                 "finished_at": utc_iso(),
             }
+            if args.refresh_all:
+                summary["target_results"] = build_target_results(
+                    targets=targets,
+                    rejected=rejected,
+                    statuses=final_statuses,
+                    candidate_failures=candidate_failures,
+                    executed=True,
+                )
             if interrupt_record is not None:
                 summary["interrupt"] = interrupt_record
                 summary["forced_termination"] = forced_termination
@@ -1002,6 +1516,14 @@ def main() -> int:
                 "finished_at": utc_iso(),
                 "tail_error": f"{type(exc).__name__}: {exc}",
             }
+            if args.refresh_all:
+                fallback["target_results"] = build_target_results(
+                    targets=targets,
+                    rejected=rejected,
+                    statuses={},
+                    candidate_failures=candidate_failures,
+                    executed=True,
+                )
             if interrupt_record is not None:
                 fallback["interrupt"] = interrupt_record
                 fallback["forced_termination"] = forced_termination

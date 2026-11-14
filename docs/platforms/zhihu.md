@@ -144,12 +144,53 @@ ID、累计摘要中的有效 ID 与持久已处理候选在详情和图片请�
 `--zhihu-detail-urls-file <JSON数组文件> --no-import` 诊断模式。它不写正式 checkpoint 或数据库，
 也不能作为正式轮次完成证据；不要绕过根执行器直接运行 worker 入口。
 
-需要正式修复历史库中非 `detail_observed` 的既有行时，改用
-`scripts/repair_post_details.py --platform zhihu`。总控清单把既有内容 ID 与 answer/article HTTPS URL
+历史库回填走 `scripts/repair_post_details.py`，只接受知乎的两种专用模式，并且二者互斥。建议先分别 dry-run，再去重，去重完成后再刷新。写默认库前加 `--confirm-default-db-repair`。非 dry-run 会先做 SQLite 一致性备份。
+
+离线图片去重（`--dedupe-images`）不访问平台。每条知乎帖子的 `image_role='content'` 行按与解析器相同的规则合并：同一 `v2-<32位十六进制>` 只留一张，优先级 `_r` > 无后缀 > `_1440w` > `_720w` > `_b`。解析不出 v2 哈希的 URL 原样保留。被淘汰的图片行删除，保留行的 `image_index` 从该帖原来的起始值重新连续编号，`post_images_count` 重算。`raw_sample_json` 不改，与 #184 迁移一样保留原始证据。被淘汰行的本地文件只在没有任何其他 `web_post_images` 行仍引用同一 `local_path` 时，移动到 `data/backups/post_detail_repair/<run_id>/media/<原相对路径>`，不删除。改写在一个事务里。`--dry-run` 只输出计划。重复执行变更数为 0。
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform zhihu \
+  --dedupe-images \
+  --dry-run
+```
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform zhihu \
+  --dedupe-images \
+  --confirm-default-db-repair
+```
+
+全量刷新（`--refresh-all`）选择 `json_type(raw_sample_json, '$.author_page_badges') IS NULL` 的知乎行，不论 `content_detail_status`。豁免表 `post_detail_repair_waivers` 中的行仍拒绝。`--post-id`、`--max-items`、批次、计划、执行状态、备份和中断处理与默认修复相同。作者页读到后总会把 `author_page_badges` 写入 `raw_sample_json`，没有标识时为 `{}`，重跑因此跳过已刷新行。作者页没读到的记录不合格，不会入库。
+
+刷新后的粉丝、粉丝来源、`followers_observed`、关注、作品数和认证必须来自本次作者页。旧行只在详情缺少创建时间时回填 `published_at`。恢复只认 `answer_detail` / `article_detail`；纯文字回答/文章没有正文图也算恢复（#191），并要求 `author_followers_source='author_page'` 且已有 `author_page_badges`。当前详情路径不再产生 `search_content`。候选失败的行保持原值，不删除；摘要逐行给出已刷新、候选失败和被拒绝。
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform zhihu \
+  --refresh-all \
+  --keyword 青岛旅游 \
+  --batch-size 20 \
+  --dry-run
+```
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform zhihu \
+  --refresh-all \
+  --keyword 青岛旅游 \
+  --batch-size 20 \
+  --confirm-default-db-repair
+```
+
+默认模式（不加上述两个开关）仍只处理非 `detail_observed` 的既有行。总控清单把既有内容 ID 与 answer/article HTTPS URL
 严格绑定，detail 结果仍必须取得 `answer_detail` 或 `article_detail` 和作者页粉丝证据；有正文图时还要完整正文图，
-纯文字回答/文章可以没有正文图（#191），再走媒体晋升与 SQLite 事务。知乎 detail 页缺少 answer 创建时间时，入口会从同一旧行保留 `published_at`，
-只补齐详情载荷缺失的元数据，不替换详情正文。粉丝只认作者页 `followerCount`（`author_page`）：旧行里
-#185 之前的 `search_author` 粉丝证据不再是正式来源，修复时必须重新点开作者页取得。
+纯文字回答/文章可以没有正文图（#191），再走媒体晋升与 SQLite 事务。
 详情解析必须在页面结构化 JSON 中按请求 ID 精确选取非空 answer/article entity，不能取实体字典中的
 第一项或把标题、空对象标为已观察。单帖正文图下载失败只跳过该候选并继续同批后续目标；只有授权、
 频控和登录等运行级错误才中止批次。该修复入口不写搜索 checkpoint，完成含义只覆盖清单中的旧行。

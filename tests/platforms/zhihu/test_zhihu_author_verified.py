@@ -204,6 +204,23 @@ def test_honors_only_are_unverified_but_kept(tmp_path: Path) -> None:
     assert row["author_verified_text"] is None
 
 
+def test_author_page_without_badge_keys_writes_empty_object(tmp_path: Path) -> None:
+    """#194：作者页读到但没有任何标识键时，raw_sample_json 仍写入 author_page_badges={}。"""
+
+    content = _from_author_page({
+        "followerCount": 11,
+        "followingCount": 5,
+        "answerCount": 2,
+        "articlesCount": 3,
+        "name": "青岛作者",
+    })
+
+    assert content.author_page_badges == {}
+    raw = json.loads(_row(content, tmp_path)["raw_sample_json"])
+    assert "author_page_badges" in raw
+    assert raw["author_page_badges"] == {}
+
+
 def test_empty_badge_v2_is_unverified() -> None:
     content = _from_author_page(_user(_badge_v2()))
 

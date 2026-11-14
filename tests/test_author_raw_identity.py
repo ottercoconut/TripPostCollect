@@ -221,7 +221,10 @@ def test_reimport_of_same_post_replaces_legacy_hashed_author(tmp_path) -> None:
 
 
 def test_repair_fallback_never_replaces_raw_identity_with_legacy_values() -> None:
-    """修复回填只补空值：本轮已有原始 ID/昵称时保留本轮值；本轮缺失时才沿用旧行（含旧哈希）。"""
+    """本轮已有原始 ID/昵称时保留本轮值。
+
+    #194：知乎作者字段不得从旧行带回。微博仍只在本轮缺失时沿用旧行。
+    """
     fallback = {
         "creator_hash": LEGACY_HASH, "author_platform_id": LEGACY_HASH,
         "user_nickname": LEGACY_MASKED, "author_display_name": LEGACY_MASKED,
@@ -235,6 +238,11 @@ def test_repair_fallback_never_replaces_raw_identity_with_legacy_values() -> Non
 
     missing = dict(current, creator_hash="", user_nickname="")
     merged = merge_repair_fallback_metadata("zhihu", missing, fallback)
+    assert merged["creator_hash"] == ""
+    assert merged["user_nickname"] == ""
+
+    weibo_missing = {"creator_hash": "", "user_nickname": ""}
+    merged = merge_repair_fallback_metadata("weibo", weibo_missing, fallback)
     assert (merged["creator_hash"], merged["user_nickname"]) == (LEGACY_HASH, LEGACY_MASKED)
 
 

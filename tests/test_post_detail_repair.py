@@ -183,9 +183,16 @@ def test_select_targets_carries_existing_repair_metadata(tmp_path: Path) -> None
 
     assert pending == 1
     assert not rejected
-    assert targets[0]["repair_fallback"]["published_at"] == "2026-07-13T12:00:00+08:00"
-    assert targets[0]["repair_fallback"]["followers_observed"] is True
-    assert targets[0]["repair_fallback"]["author_followers_source"] == "search_author"
+    fallback = targets[0]["repair_fallback"]
+    assert fallback["published_at"] == "2026-07-13T12:00:00+08:00"
+    assert fallback["created_time"] == 1780000000
+    assert "followers_observed" not in fallback
+    assert "author_followers_source" not in fallback
+    assert "followers_count" not in fallback
+    assert "author_followers_count" not in fallback
+    assert "author_display_name" not in fallback
+    assert "creator_hash" not in fallback
+    assert "user_nickname" not in fallback
     conn.close()
 
 
@@ -355,13 +362,31 @@ def test_repair_fallback_makes_sparse_zhihu_detail_formally_valid() -> None:
             "author_followers_count": 123,
             "followers_observed": True,
             "author_followers_source": "author_page",
+            "following_count": 9,
+            "author_posts_count": 8,
+            "author_verified": 1,
+            "verified_text": "旧认证",
         },
     )
 
     validation = mediacrawler.validate_formal_record("zhihu", merged, set())
-    assert validation["valid"] is True
+    assert merged["published_at"] == "2026-07-13T12:00:00+08:00"
     assert merged["content_detail_source"] == "answer_detail"
     assert merged["content_text"] == "完整正文"
+    assert merged["followers_observed"] is False
+    assert merged["author_followers_source"] == "missing"
+    assert merged["followers_count"] == 0
+    assert "author_followers_count" not in merged
+    assert "following_count" not in merged
+    assert "author_posts_count" not in merged
+    assert "author_verified" not in merged
+    assert "verified_text" not in merged
+    assert validation["valid"] is False
+    assert {
+        "followers_not_observed",
+        "missing_followers_source",
+        "untrusted_followers_source",
+    } & set(validation["reasons"])
 
 
 REPAIR_FOLLOWER_SOURCES = {
@@ -423,6 +448,14 @@ def test_repair_fallback_restores_unobserved_followers_with_matching_source(
     }
 
     merged = mediacrawler.merge_repair_fallback_metadata(platform, dict(detail), fallback)
+    if platform == "zhihu":
+        # #194：知乎未观察到的粉丝不得用旧行补上。
+        assert merged["followers_count"] == fresh_count
+        assert merged["followers_observed"] is False
+        assert merged["author_followers_source"] == "missing"
+        assert "author_followers_count" not in merged
+        assert merged["published_at"] == fallback["published_at"]
+        return
 
     validation = mediacrawler.validate_formal_record(platform, merged, set())
     assert merged["followers_count"] == 1234
