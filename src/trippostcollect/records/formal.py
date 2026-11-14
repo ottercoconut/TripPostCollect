@@ -700,15 +700,23 @@ def validate_formal_record(
         reasons.append("missing_author_name")
     content_images = content_image_candidates(platform_key, record)
     if not content_images:
-        detail_status = str(record.get("content_detail_status") or "")
-        if (
+        content_type = str(record.get("content_type") or "")
+        # #191：已观察且来源受信任的知乎回答/文章可以没有正文图。有图时下面的图片原子条件不变。
+        zhihu_text_only = (
             platform_key == "zhihu"
-            and str(record.get("content_type") or "") in {"answer", "article"}
-            and detail_status != "detail_observed"
-        ):
-            reasons.append("content_detail_unobserved")
-        else:
-            reasons.append("missing_content_image")
+            and content_type in {"answer", "article"}
+            and detail_status == "detail_observed"
+            and detail_source in TRUSTED_CONTENT_DETAIL_SOURCES.get(platform_key, frozenset())
+        )
+        if not zhihu_text_only:
+            if (
+                platform_key == "zhihu"
+                and content_type in {"answer", "article"}
+                and detail_status != "detail_observed"
+            ):
+                reasons.append("content_detail_unobserved")
+            else:
+                reasons.append("missing_content_image")
 
     followers_count = parse_int(
         first_value(

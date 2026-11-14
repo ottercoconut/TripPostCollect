@@ -328,7 +328,7 @@ class ZhihuCrawler:
                             if should_stop:
                                 break
                             continue
-                        image_ready = bool(
+                        observed_detail = (
                             content.content_detail_status == "detail_observed"
                             and content.content_detail_source
                             in {
@@ -336,7 +336,12 @@ class ZhihuCrawler:
                                 "answer_detail",
                                 "article_detail",
                             }
-                            and zhihu_store.zhihu_content_image_assets(content)
+                        )
+                        # #191：已观察的回答/文章允许零张正文图；有图时仍须投影出正文图再下载。
+                        image_ready = observed_detail and (
+                            bool(zhihu_store.zhihu_content_image_assets(content))
+                            or content.content_type
+                            in {constant.ANSWER_NAME, constant.ARTICLE_NAME}
                         )
                         valid = bool(
                             content.content_id
@@ -571,12 +576,12 @@ class ZhihuCrawler:
             note_detail = cast(ZhihuContent, note_detail)  # only for type check
             content_id = str(note_detail.content_id or "")
             image_assets = zhihu_store.zhihu_content_image_assets(note_detail)
+            # #191：已观察的回答/文章可以没有正文图。有图时下面仍下载，失败则跳过该候选。
             detail_ready = bool(
                 note_detail.content_detail_status == "detail_observed"
                 and note_detail.content_detail_source
                 in {"answer_detail", "article_detail"}
                 and str(note_detail.content_text or "").strip()
-                and image_assets
             )
             if not detail_ready:
                 logger.warning(

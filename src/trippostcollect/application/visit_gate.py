@@ -64,6 +64,8 @@ class VisitPolicy:
     detail_page_role: str = "primary"
     # G1（回车后点选筛选）只属于有该入口的平台。知乎用地址栏打开搜索，不跑这条。
     checks_filter_entry: bool = True
+    # #191：知乎回答/文章可以没有正文图。小红书仍要求至少一张，零图不能通过 R5。
+    allow_zero_content_images: bool = False
 
     def __post_init__(self) -> None:
         for mode, specs in self.stages.items():
@@ -156,6 +158,7 @@ VISIT_POLICIES: dict[str, VisitPolicy] = {
         target_id_field="content_id",
         detail_page_role="detail",
         checks_filter_entry=False,
+        allow_zero_content_images=True,
     ),
 }
 # 已纳入访问门禁的平台；平台在其取数改造完成的批次加入。
@@ -458,14 +461,18 @@ def _check_record(
         report.fail("R4", subject)
 
     # R5 逐张图片：资产键、哈希与 manifest 一致，且晚于本账本中该笔记的首个触发动作。
+    # 策略允许零图时，记录没有正文图且 images 为空列表即通过；有图时逐张核验不变。
     assets = sorted(
         (item for item in record.get("image_assets") or [] if isinstance(item, Mapping)),
         key=lambda item: int(item.get("source_index") or 0),
     )
     first_trigger = detail_index.first_action([trigger_kind], note_id=note_id, id_field=id_field)
     image_spec = policy.spec(mode, "note_image")
-    images_ok = bool(assets) and len(images) == len(assets) and first_trigger is not None
-    if images_ok:
+    if policy.allow_zero_content_images and not assets and images == []:
+        images_ok = True
+    else:
+        images_ok = bool(assets) and len(images) == len(assets) and first_trigger is not None
+    if images_ok and assets:
         for position, asset in enumerate(assets):
             if int(asset.get("source_index") or 0) != position:
                 images_ok = False

@@ -200,6 +200,24 @@ def check(run: Run, records: list[dict], manifest_path: Path, *, paths=None, mod
     )
 
 
+def test_xhs_zero_image_record_fails_r5(tmp_path):
+    run = Run(tmp_path / "ledger.jsonl")
+    run.enter([("n1", "normal")])
+    run.behavior_stage()
+    run.note("n1", "u1", images=0, early_image=False)
+    run.action("scroll", {"delta_y": 600})
+    last = run.search(2, [], has_more=False)
+    record = run.record("n1", "u1", images=0)
+    assert record["image_assets"] == []
+    assert record["content_visit_refs"]["images"] == []
+    result = check(
+        run, [record], manifest(tmp_path / "m.jsonl", {}),
+        stop={"stop_reason": "source_exhausted", "source_visit_id": last},
+    )
+    assert result["content_visit_ok"] is False
+    assert result["problem_counts"] == {"R5": 1}
+
+
 def test_discovery_chain_passes_with_all_stages_and_out_of_order_lines(tmp_path):
     run, records, manifest_path = standard_run(tmp_path)
     result = check(run, records, manifest_path)

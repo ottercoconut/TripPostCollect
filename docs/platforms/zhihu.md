@@ -50,8 +50,10 @@
   `author_profile_missing`），按 3 次、间隔 1 秒重试后写 `candidate_skipped` 并进入已处理记忆。作者页落到
   登录或安全验证，沿用详情页的同一组 URL 与可见特征，是运行级阻断。
 - 详情只有在页面状态能解析出目标 entity 且正文非空时，才写 `content_detail_status=detail_observed`，
-  来源为 `answer_detail` 或 `article_detail`。历史记录仍可能是 `search_content`。详情观察后仍无图片才是
-  `missing_content_image`；`request_failed`、`parse_failed` 和旧产物缺状态都属于 `content_detail_unobserved`。
+  来源为 `answer_detail` 或 `article_detail`。历史记录仍可能是 `search_content`。已观察且来源属于受信任
+  详情来源的回答/文章允许零张正文图（#191）；有图时全部权威正文图仍须下载并校验。详情未观察仍是
+  `content_detail_unobserved`，不另记 `missing_content_image`。`request_failed`、`parse_failed` 和旧产物缺状态
+  都属于 `content_detail_unobserved`。zvideo 仍在搜索解析阶段丢弃。
 - `title`、`desc` 和 `excerpt` 不能替代正文。
 - 正文 `content_text` 保留块级换行并剔除 figure/figcaption；图片说明文字不进入正文。
 - 作者粉丝以作者页 `followerCount` 为准，`author_followers_source=author_page`，并要求
@@ -80,11 +82,20 @@
 ## 正文图片与资产键
 
 正文图只来自最终 answer/article HTML 归一后的 `image_list`。`zvideo`、`/equation` 公式图、头像、
-作者主页、封面和搜索预览在候选阶段排除。
+作者主页、封面和搜索预览在候选阶段排除。已观察的纯文字回答/文章 `image_list` 为空，不下载、不登记
+`cdn_direct`，入库 `post_images_count=0`（#191）。
 
-同帖 `zhimg.com` URL 按稳定资源路径移除 `_r`、`_<width>w` 等已知变换后缀，保留首次 URL 后再下载；
-原始 `image_list` 保留所有 URL 证据。该规则不作用于外部域名，不使用感知哈希或视觉相似度。zhimg CDN
-图片请求只发浏览器 UA（与 API 请求同一 `navigator.userAgent`）、图片类 Accept 和 `Referer: https://www.zhihu.com/`，不带 zhihu.com Cookie 和 API
+同一张图会同时出现原图 `picx.zhimg.com/v2-<32位十六进制>_r.jpg` 与缩略
+`pic*.zhimg.com/50/v2-<同一哈希>_720w.jpg`（#187）。生成 `image_list` 时按 `v2-<32位十六进制>` 合并，
+只保留一张，并占该组在正文中首次出现的位置；顺序按各组首次出现排列。优先级为 `_r` > 无后缀 >
+`_1440w` > `_720w` > `_b`，其他未知后缀排在 `_b` 之后。同优先级保留先出现的 URL。非 `v2-` 形态，
+以及非 `zhimg.com` 域名，不参与这次合并，仍按完整 URL 去重。`image_list`、`image_count`、
+`image_assets`、manifest 和访问账本的 `cdn_direct` 只含保留的那张，不再下载被合并掉的缩略图。
+
+非 `v2-` 的 `zhimg.com` URL 仍按稳定资源路径去掉 `_r`、`_<width>w` 等已知变换后缀后保留首次 URL，
+不重复下载。该规则不作用于外部域名，不使用感知哈希或视觉相似度。
+
+zhimg CDN 图片请求只发浏览器 UA（与 API 请求同一 `navigator.userAgent`）、图片类 Accept 和 `Referer: https://www.zhihu.com/`，不带 zhihu.com Cookie 和 API
 签名头，也不经第三方代理。每张成功下载的正文图在访问账本以来源 `cdn_direct`、规则
 `zhihu.content_image` 登记状态码、资产键和 sha256，供门禁 R5 与 manifest 对账。平台层写
 staging/manifest，根项目再执行通用字节复验、同帖 SHA-256 去重、晋升和事务。
@@ -130,8 +141,8 @@ ID、累计摘要中的有效 ID 与持久已处理候选在详情和图片请�
 
 需要正式修复历史库中非 `detail_observed` 的既有行时，改用
 `scripts/repair_post_details.py --platform zhihu`。总控清单把既有内容 ID 与 answer/article HTTPS URL
-严格绑定，detail 结果仍必须取得 `answer_detail` 或 `article_detail`、作者页粉丝证据和完整正文图，
-再走媒体晋升与 SQLite 事务。知乎 detail 页缺少 answer 创建时间时，入口会从同一旧行保留 `published_at`，
+严格绑定，detail 结果仍必须取得 `answer_detail` 或 `article_detail` 和作者页粉丝证据；有正文图时还要完整正文图，
+纯文字回答/文章可以没有正文图（#191），再走媒体晋升与 SQLite 事务。知乎 detail 页缺少 answer 创建时间时，入口会从同一旧行保留 `published_at`，
 只补齐详情载荷缺失的元数据，不替换详情正文。粉丝只认作者页 `followerCount`（`author_page`）：旧行里
 #185 之前的 `search_author` 粉丝证据不再是正式来源，修复时必须重新点开作者页取得。
 详情解析必须在页面结构化 JSON 中按请求 ID 精确选取非空 answer/article entity，不能取实体字典中的

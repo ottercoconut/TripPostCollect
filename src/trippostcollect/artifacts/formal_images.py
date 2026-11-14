@@ -380,6 +380,12 @@ def materialize_formal_record_images(
         record = item.get("record") if isinstance(item.get("record"), dict) else {}
         candidates = content_image_candidates(platform_key, record)
         expected_images += len(candidates)
+        # #191：知乎纯文字回答/文章没有正文图候选。零张也是完整，不要求 manifest 行。
+        if not candidates:
+            if promote:
+                materialized_by_identity[identity] = []
+            complete_identities.add(identity)
+            continue
         post_id = post_id_for_record(platform_key, record)
         post_manifest_rows: list[
             tuple[ImageManifestEntry, Path, int]

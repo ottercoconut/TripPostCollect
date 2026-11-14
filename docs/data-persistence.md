@@ -5,6 +5,8 @@
 > **授权记录（2026-11-13）：** 操作人授权临时解冻，同步 #185 知乎页面取数、访问门禁与全量扫描口径。
 >
 > **授权记录（2026-11-14）：** 操作人决定知乎分享数为平台不提供（#188），同步入库映射。
+>
+> **授权记录（2026-11-14）：** 操作人决定知乎纯文字回答/文章可入库（#191），正文图同一张只保留原图（#187）。
 
 ## 数据库文件
 
@@ -143,7 +145,7 @@ checkpoint、seen 与 campaign 更新。摘要或其 JSONL 缺失时冻结失败
 `image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。B站、微博、抖音和小红书在当前登录或签名会话中下载。知乎正文图不带平台 Cookie、不经第三方代理，UA 与 Referer 取自浏览器，访问账本以 `cdn_direct` 登记（#185）。只有来源耗尽、
 字段、行为、策略和 staging 图片门禁全部通过，正式运行才晋升到 `data/media` 并注入统一入库映射；
 门禁未通过、晋升失败或已确认发生在提交前的 SQLite 导入回滚时，不得留下本轮新建的无引用长期媒体文件。平台显式投影后的全部 manifest 候选均须通过下载与字节复验；
-知乎已知 `zhimg` 尺寸 URL 变体在投影时按资源路径合并，不重复生成 manifest。下载后再仅在同帖内
+知乎同一 `v2-<32位十六进制>` 在生成 `image_list` 时只保留一张（#187），优先级 `_r` > 无后缀 > `_1440w` > `_720w` > `_b`，未知后缀排在 `_b` 之后，非 `v2-` 地址不参与合并。下载、manifest 和 `cdn_direct` 只含保留的那张。已观察且来源受信任的知乎回答/文章可以没有正文图（#191）：该帖不要求 manifest 行，`image_materialization` 的预期张数不增加，仍须 `complete=true`。下载后再仅在同帖内
 按 SHA-256 保留首次来源并记录重复来源证据。任何图片失败都使该整帖失去正式资格。有限重试耗尽后
 的 `image_download_retryable` 与格式、解码、大小或 HTTP 400/404 等候选自身终态错误，都在写完 manifest
 与 `candidate_skipped(failure_scope=image)` 后继续其他候选；终态错误保留 `retryable=false` 且不补做
@@ -158,7 +160,7 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 作者主页指标。知乎回答/文章的发布时间、正文、图片和赞评藏来自详情页页面状态（分享平台不提供，#188）；粉丝来自作者页
 `followerCount`（`author_followers_count`），关注数来自 `followingCount`（`author_following_count`），作品数是
 `answerCount + articlesCount`（`author_posts_count`），缺键为 NULL，不补 0。
-详情确认无图和详情未观察仍用 `content_detail_status` 区分；`zvideo` 记录跳过。认证判定未改。
+已观察且来源受信任的知乎回答/文章可以没有正文图（#191），`post_images_count=0` 且不写 `web_post_images`；详情未观察仍是 `content_detail_unobserved`。`zvideo` 记录跳过。认证判定未改。
 B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得 article 详情
 正文和正文图片证据；搜索 `desc` 与 `image_urls` 仅为摘要和预览，不能直接入库为完整正文。
 所有平台后续 JSONL 中出现的
@@ -184,7 +186,7 @@ B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得
 | `post_comments_count` | `comment_count`、`comments_count` 等评论字段 |
 | `post_shares_count` | `share_count`、`shared_count` 等分享字段。转发与分享是同一种互动，微博 `mblog.reposts_count` 经 `shared_count` 写入这一列，不另存转发列。知乎平台不提供（#188）：网页端 `shareCount` 恒为占位 0，不读取，本列为 NULL |
 | `web_post_images.image_url`（`content`） | 只来自权威正文图投影：B站详情 `image_urls`、微博 `mblog.pics` 归一后的 `image_list`、小红书详情 `image_list`、抖音图文 `note_download_url`、知乎正文/详情 `image_list`；作者主页、封面、搜索预览、视频、音乐和公式图不进入正文映射 |
-| `web_post_images.image_role/image_index` | 固定 `content`；知乎先按 `zhimg` 资源路径合并已知尺寸 URL 变体，投影后的候选全部下载复验，再在同帖内按 SHA-256 保留首次来源并从 0 连续编号 |
+| `web_post_images.image_role/image_index` | 固定 `content`；知乎 `v2-<32位十六进制>` 在 `image_list` 只保留一张（#187，`_r` 优先），投影后的候选全部下载复验，再在同帖内按 SHA-256 保留首次来源并从 0 连续编号。知乎纯文字回答/文章没有图片行（#191） |
 | `web_post_images.local_path` | 根项目复验并晋升后的 `data/media/...` 项目相对路径；正式新记录不能为空 |
 | `web_post_images.width/height/mime_type/sha256` | 根项目重新读取本地文件得到并与 manifest 相等的字节证据 |
 | `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；同 SHA 重复来源写入 `local_file.sha256_duplicate_sources`，不混入头像等非正文对象 |
