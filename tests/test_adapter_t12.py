@@ -29,7 +29,6 @@ for extra in (ROOT / "scripts", ROOT / "scripts" / "dev"):
     if str(extra) not in sys.path:
         sys.path.insert(0, str(extra))
 
-ledger = import_module("adapter_ledger")
 GOLDEN = ROOT / "tests" / "golden"
 FORK = ROOT / "tools" / "MediaCrawler"
 PACKAGE = ROOT / "src" / "trippostcollect"
@@ -37,7 +36,6 @@ ENV_GOLDEN = json.loads((GOLDEN / "t12_worker_env.json").read_text(encoding="utf
 HELP_GOLDEN = json.loads((GOLDEN / "t12_cli_help.json").read_text(encoding="utf-8"))
 CONFIG_GOLDEN = json.loads((GOLDEN / "t12_worker_config.json").read_text(encoding="utf-8"))
 T02_COMMANDS = json.loads((GOLDEN / "t02_worker_commands.json").read_text(encoding="utf-8"))
-SELF = {"tests/test_adapter_t12.py", "tests/test_adapter_t12_install.py"}
 
 # fork 顶层包；T12 起新 worker 选站后一个都不得装载（清单见 temp/t12-inventory.md 第 2 节）。
 FORK_TOPS = frozenset({
@@ -49,8 +47,6 @@ T12_CUT_FORK_TOPS = frozenset({"config", "tools"})
 # 留到 T14 的 fork 顶层包：无。旧桥 E→fork main.py 不经过新入口，不在此列。
 T14_ALLOWED_FORK_TOPS: frozenset[str] = frozenset()
 
-# 旧桥 E 与过渡装载点：T12 只放行，T14-C 随 fork 删除；之后保留代码一律扫描，不再有放行文件。
-DELETED_BRIDGE_FILES = ("scripts/mediacrawler_export_entrypoint.py", "src/trippostcollect/platforms/_fork_bridge.py")
 # 闸门与台账工具由 G 卡独占，其中的退出名是规则数据，不是调用点。
 GOVERNANCE_DIRS = ("scripts/dev/",)
 
@@ -78,37 +74,7 @@ T124_REMOVED_ENV = frozenset({
     "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR",
 })
 
-# 根测试中允许保留的退出名引用：(文件, 名字) → 类别。T14-C 删旧桥时已清理旧桥对照（原 A 类）。
-# B＝负向守卫（断言不存在或不被调用）；D＝沿用旧存储出口名的测试装配与隐私用例（名字指向根实现或
-# 冻结旧 ORM 列契约，不加载 fork）。
-TEST_ALLOWLIST: dict[tuple[str, str], str] = {}
-for _file, _names, _kind in (
-    ("tests/test_shared_staging.py", ("store_comment", "store_creator"), "B"),
-    ("tests/platforms/xhs/test_xhs_media_policy.py", ("get_notice_video", "update_xhs_note_video"), "B"),
-    ("tests/platforms/xhs/test_xhs_login_contract.py", ("CacheFactory",), "B"),
-    ("tests/platforms/douyin/test_douyin_image_only.py", ("get_aweme_video", "update_dy_aweme_video"), "B"),
-    ("tests/test_adapter_t06.py", ("get_aweme_video",), "B"),
-    ("tests/test_adapter_ledger.py", ("ProxyRefreshMixin", "AbstractCrawler", "create_ip_pool"), "B"),
-    ("tests/platforms/douyin/test_douyin_store.py", ("DouyinStoreFactory", "create_store"), "D"),
-    ("tests/platforms/douyin/test_douyin_no_user_info.py", ("DouyinStoreFactory", "create_store", "DouyinAweme"), "D"),
-    ("tests/platforms/weibo/test_weibo_no_user_info.py", ("WeibostoreFactory", "create_store", "WeiboNote"), "D"),
-    ("tests/support/douyin.py", ("create_store", "DouyinStoreFactory"), "D"),
-    ("tests/support/weibo_privacy.py", ("create_store", "WeibostoreFactory"), "D"),
-):
-    for _name in _names:
-        TEST_ALLOWLIST[(_file, _name)] = _kind
-
-
 # ---------- 通用扫描 ----------
-
-def exit_names() -> frozenset[str]:
-    """与台账 exit_references 同一口径：退出定义名减去保留定义名；协议性 dunder 名不算调用点。"""
-    rows = ledger.load_symbols(ROOT)["rows"]
-    exited = {row["qualname"].split(".")[-1] for row in rows if row["disposition"] == "退"}
-    kept = {row["qualname"].split(".")[-1] for row in rows if row["disposition"] != "退"}
-    names = frozenset(name for name in exited - kept if not (name.startswith("__") and name.endswith("__")))
-    assert len(names) > 200, "退出名集合异常偏小，不能以空集冒充零引用"
-    return names
 
 
 def python_files(*relatives: str) -> list[Path]:
@@ -119,28 +85,6 @@ def python_files(*relatives: str) -> list[Path]:
         files.extend(path for path in candidates if "__pycache__" not in path.parts)
     assert files, relatives
     return files
-
-
-def references(path: Path, names: frozenset[str]):
-    """静态名、属性、导入别名、关键字参数，以及作为 getattr/patch 目标的字符串常量。"""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            found, kind = node.name, "def"
-        elif isinstance(node, ast.Name):
-            found, kind = node.id, "name"
-        elif isinstance(node, ast.Attribute):
-            found, kind = node.attr, "attr"
-        elif isinstance(node, ast.alias):
-            found, kind = node.name.split(".")[-1], "import"
-        elif isinstance(node, ast.keyword):
-            found, kind = node.arg, "keyword"
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            found, kind = node.value, "string"
-        else:
-            continue
-        if found in names:
-            yield found, kind, getattr(node, "lineno", 0)
 
 
 def relative(path: Path) -> str:
@@ -170,15 +114,6 @@ def module_targets(tree: ast.AST):
 
 # ---------- 1. 退出符号在保留代码中的引用为零 ----------
 
-def test_retained_package_and_scripts_have_no_exit_symbol_references() -> None:
-    names = exit_names()
-    hits = [
-        f"{relative(path)}:{line} {kind} {name}"
-        for path in retained_production_files()
-        for name, kind, line in references(path, names)
-    ]
-    assert hits == []
-
 
 def test_retained_package_and_scripts_import_no_fork_package() -> None:
     hits = []
@@ -195,34 +130,6 @@ def test_retained_package_and_scripts_import_no_fork_package() -> None:
             ):
                 hits.append(f"{relative(path)}:{node.lineno} 过渡装载 _fork_bridge")
     assert hits == []
-
-
-def test_root_tests_reference_exit_symbols_only_through_registered_exceptions() -> None:
-    names = exit_names()
-    unexpected = []
-    for path in python_files("tests"):
-        if relative(path) in SELF:
-            continue
-        for name, kind, line in references(path, names):
-            if (relative(path), name) not in TEST_ALLOWLIST:
-                unexpected.append(f"{relative(path)}:{line} {kind} {name}")
-    assert unexpected == []
-
-
-def test_old_bridge_and_fork_no_longer_exist() -> None:
-    # T14-C：旧桥 E 与过渡装载点已删除，保留代码不再有放行文件。fork 目录不在此断言：Mac 工作副本删除
-    # gitlink 后旧目录可作为未跟踪备份留在磁盘（已由 .gitignore 忽略），以台账与 CI 副本为准。
-    for name in DELETED_BRIDGE_FILES:
-        assert not (ROOT / name).exists(), name
-    assert {kind for kind in TEST_ALLOWLIST.values()} <= {"B", "D"}
-
-
-def test_test_allowlist_has_no_stale_entries() -> None:
-    # 放行项必须仍有对应引用；删除用例后同步收缩，不得留作扩大放行的空位。
-    names = exit_names()
-    used = {(relative(path), name) for path in python_files("tests") if relative(path) not in SELF
-            for name, _, _ in references(path, names)}
-    assert set(TEST_ALLOWLIST) - used == set()
 
 
 def test_source_checkout_keeps_repository_root_without_explicit_work_root(tmp_path: Path) -> None:
@@ -534,247 +441,3 @@ def test_ci_source_copy_includes_build_inputs() -> None:
     assert {"build_support.py", "MANIFEST.in"} <= copied
     workflow = (ROOT / ".github" / "workflows" / "macos-test-lanes.yml").read_text(encoding="utf-8")
     assert "'build_support.py'" in workflow and "'MANIFEST.in'" in workflow
-
-
-def _ledger_nodes():
-    return json.loads((ROOT / "docs" / "adapter-ledger" / "tests.json").read_text(encoding="utf-8"))
-
-
-ERRNO_PARAMS = {"51": "ENETUNREACH", "60": "ETIMEDOUT", "61": "ECONNREFUSED",
-                "101": "ENETUNREACH", "110": "ETIMEDOUT", "111": "ECONNREFUSED"}
-# 台账收集于 macOS：errno 参数值随平台变化，按符号名归一。
-ERRNO_PARAMETRIZED = {"tests/test_run_lanes.py::test_seatbelt_does_not_accept_other_layers_errors"}
-# 台账删除登记（决策 12，不手改 tests.json、不写入 testing.md）：
-# T09（#41）随 creator 批采退出删除该 fork 节点，小红书迁入用例由 250 变为 249。T14 前不得再出现其他缺失。
-DELETED_LEDGER_NODES = {"tests/test_xhs_core_access_error.py::test_creator_flow_stops_on_blocked_creator"}
-# T14-C 随 fork、私有桥 E 与旧身份函数删除的 6 个台账节点（用户授权的删除批）：
-# - E 的 export/批次 hook 自测（根侧由 worker 出口用例覆盖：test_worker_store_files_remove_avatar_before_serialization、
-#   test_worker_checkpoint_exit_order_and_failures[worker-*]）；
-# - 只断言冻结旧评论投影哈希/脱敏的两个 fork 隐私用例（评论为 T12 退出切片，anonymize_user_id/mask_nickname 已删除）。
-T14C_DELETED_LEDGER_NODES = {
-    "tests/test_author_avatar_sanitization.py::test_mediacrawler_export_hook_wraps_writer_before_persistence",
-    "tests/test_xhs_batch_checkpoint.py::test_exporter_checkpoint_failure_keeps_precise_terminal_evidence"
-    "[error0-xhs_batch_checkpoint_filenotfounderror]",
-    "tests/test_xhs_batch_checkpoint.py::test_exporter_checkpoint_failure_keeps_precise_terminal_evidence"
-    "[error1-xhs_batch_checkpoint_ack_timeout]",
-    "tests/test_xhs_batch_checkpoint.py::test_exporter_hook_publishes_only_after_durable_event",
-    "tests/test_douyin_no_user_info.py::test_douyin_comment_masks_user_info",
-    "tests/test_weibo_no_user_info.py::test_weibo_comment_masks_user_info",
-}
-# #64 清理批随 fork 过渡代码与台账生成路径删除的 4 个台账节点：fork lane 的 PYTHONPATH/命令拼装、
-# 符号账生成的未映射报告、产物比对 check_file、tests 收集子命令（生成与收集已删除，台账只做冻结自检）。
-T64_DELETED_LEDGER_NODES = {
-    "tests/test_run_lanes.py::test_fork_worker_paths_and_pytest_boundary",
-    "tests/test_adapter_ledger.py::test_unmapped_definition_is_reported",
-    "tests/test_adapter_ledger.py::test_check_mode_detects_stale_artifact",
-    "tests/test_adapter_ledger.py::test_tests_collector_refuses_production_checkout",
-}
-# #75 删除任务级时限随之删除或改写的 6 个台账节点：中间层墙钟模式（progress_paths 改为必填）、
-# LeaseGuard 无心跳绝对超时、修复批次墙钟上限与其失败码、以任务时长计算租期的预算用例。
-T75_DELETED_LEDGER_NODES = {
-    "tests/test_mediacrawler_process_watchdog.py::test_runtime_reporter_requires_progress_tracking_before_popen",
-    "tests/test_post_detail_repair.py::test_run_repair_child_timeout_uses_formal_process_group_contract",
-    "tests/test_post_detail_repair.py::test_strict_batch_blocker_only_stops_unattended_repair"
-    "[post_detail_repair_batch_timeout:2040-False]",
-    "tests/test_xhs_leases.py::test_xhs_exact_lease_schema_and_dynamic_budgets",
-    "tests/test_xhs_parent_watchdog.py::test_legacy_mode_keeps_absolute_timeout_and_generates_no_runtime_key",
-    "tests/test_xhs_pool.py::test_long_xhs_target_uses_time_budget_only",
-}
-# #83 随“连接已有浏览器”路径删除的台账节点。
-T83_DELETED_LEDGER_NODES = {
-    "tests/test_cdp_browser.py::test_existing_browser_connects_directly_to_devtools_browser",
-    "tests/test_cdp_browser.py::test_existing_browser_falls_back_to_discovered_websocket_url",
-    "tests/test_cdp_browser.py::test_xhs_cdp_rejects_existing_browser_without_a_retry_path",
-}
-# #114（微博）删除或改写的台账节点：L3 浏览器接口回退与第三方图片代理候选随实现删除。
-T114_DELETED_LEDGER_NODES = {
-    "tests/test_residual_detail_fallbacks.py::test_weibo_browser_api_is_bound_to_requested_id",
-    "tests/test_weibo_image_download.py::test_weibo_image_urls_do_not_double_wrap_existing_proxy",
-    "tests/test_weibo_image_download.py::test_weibo_image_urls_keep_bounded_proxy_and_direct_fallbacks",
-}
-# #124（抖音每轮从首页全量扫描、搜索只经浏览器截获）删除的台账节点：三元组续跑、耗尽后 reseed、
-# 首页直接请求参数契约与首页可见卡片重建用例。新语义由 tests/platforms/douyin/test_douyin_issue124.py 断言。
-T124_DELETED_LEDGER_NODES = {
-    "tests/test_adaptive_accumulator.py::test_douyin_exhausted_cursor_reseed_requires_new_candidate_continuation",
-    "tests/test_discovery_checkpoints.py::test_executor_keeps_first_douyin_search_id_when_response_logids_rotate",
-    "tests/test_discovery_checkpoints.py::test_reseeded_douyin_frontier_replaces_exhausted_cursor",
-    "tests/test_discovery_checkpoints.py::test_runner_repairs_rotated_douyin_cursor_from_frozen_summary",
-    "tests/test_discovery_checkpoints.py::test_runner_retries_unverified_douyin_first_page_checkpoint",
-    "tests/test_discovery_checkpoints.py::test_saved_empty_first_page_keeps_verified_exhaustion_detail",
-    "tests/test_discovery_checkpoints.py::test_top_refresh_keeps_saved_douyin_frontier",
-    "tests/test_douyin_search_safety.py::test_deep_frontier_rebinds_to_current_refresh_session_cursor",
-    "tests/test_douyin_search_safety.py::test_search_request_uses_current_single_column_contract",
-    "tests/test_douyin_search_safety.py::test_visible_first_page_rebuild_does_not_mask_business_error",
-    "tests/test_douyin_search_safety.py::test_visible_first_page_rebuild_requires_healthy_next_page[invalid_stream_json]",
-    "tests/test_douyin_search_safety.py::test_visible_first_page_rebuild_requires_healthy_next_page[search_verify_check]",
-    "tests/test_mediacrawler_pagination.py::test_pagination_evidence_keeps_douyin_frontier_reseed_event",
-    "tests/test_trippostcollect_adaptive.py::test_douyin_reseed_requires_new_candidate_and_cursor",
-}
-# #70 第一批删除不再属于现行流程的 B站一次性提升与全量监督脚本，对应 4 个台账节点随之删除。
-# 现行修复仍由 tests/test_bilibili_article_repair.py 覆盖。
-T70_DELETED_LEDGER_NODES = {
-    "tests/test_bilibili_article_repair.py::test_incremental_promotion_and_target_state_clone",
-    "tests/test_bilibili_article_repair.py::test_pilot_gate_rejects_retryable_rows",
-    "tests/test_bilibili_article_repair.py::test_promote_validated_successes_into_original_target",
-    "tests/test_bilibili_article_repair.py::test_supervisor_promotes_pilot_and_prepares_full_state",
-}
-# #71 第一批（小红书取数改为浏览器 L1）删除或改写的台账节点：被替代的旧取数路径用例。
-T71_DELETED_LEDGER_NODES = {
-    'tests/test_mediacrawler_behavior.py::test_xhs_api_captcha_does_not_complete_on_blank_redirect',
-    'tests/test_mediacrawler_behavior.py::test_xhs_api_captcha_opens_operator_page_and_resumes',
-    'tests/test_xhs_batch_checkpoint.py::test_empty_refresh_commits_history_without_creating_export_files[False]',
-    'tests/test_xhs_batch_checkpoint.py::test_empty_refresh_commits_history_without_creating_export_files[True]',
-    'tests/test_xhs_batch_checkpoint.py::test_top_refresh_retains_deep_frontier',
-    'tests/test_xhs_core_access_error.py::test_gather_stops_on_single_blocked_note',
-    'tests/test_xhs_core_access_error.py::test_note_detail_task_preserves_access_error[error0]',
-    'tests/test_xhs_core_access_error.py::test_note_detail_task_preserves_access_error[error1]',
-    'tests/test_xhs_creator_enrichment.py::test_behavior_search_does_not_retry_when_shell_is_visible',
-    'tests/test_xhs_creator_enrichment.py::test_behavior_search_uses_explore_fallback_after_blank_shell',
-    'tests/test_xhs_creator_enrichment.py::test_browser_identity_headers_follow_current_chromium_version',
-    'tests/test_xhs_creator_enrichment.py::test_browser_identity_headers_reject_version_mismatch',
-    'tests/test_xhs_creator_enrichment.py::test_creator_browser_fallback_keeps_qr_page_open_until_verified',
-    'tests/test_xhs_creator_enrichment.py::test_creator_browser_login_returns_to_original_page',
-    'tests/test_xhs_creator_enrichment.py::test_creator_enrichment_does_not_hide_ip_block',
-    'tests/test_xhs_creator_enrichment.py::test_creator_enrichment_does_not_hide_visible_browser_block',
-    'tests/test_xhs_creator_enrichment.py::test_creator_enrichment_falls_back_to_signed_in_browser',
-    'tests/test_xhs_creator_enrichment.py::test_creator_enrichment_reports_empty_profile_after_all_fallbacks',
-    'tests/test_xhs_creator_enrichment.py::test_creator_enrichment_uses_signed_in_profile_without_note_token',
-    'tests/test_xhs_creator_enrichment.py::test_creator_html_extractor_preserves_undefined_fallback',
-    'tests/test_xhs_creator_enrichment.py::test_creator_html_extractor_stops_at_end_of_initial_state_object',
-    'tests/test_xhs_creator_enrichment.py::test_original_page_login_prevents_opening_creator_tab',
-    'tests/test_xhs_creator_enrichment.py::test_search_navigation_timeout_can_defer_to_visible_readiness',
-    'tests/test_xhs_discovery.py::test_frontier_commit_advances_and_clears_completed_campaign',
-    'tests/test_xhs_discovery.py::test_incomplete_last_page_does_not_mark_frontier_exhausted',
-    'tests/test_xhs_discovery.py::test_query_fingerprint_tracks_source_but_not_refresh_budget',
-    'tests/test_xhs_discovery.py::test_refresh_commit_preserves_exhausted_frontier',
-    'tests/test_xhs_discovery_memory.py::test_browser_context_close_is_recorded_as_resumable_runtime_failure',
-    'tests/test_xhs_discovery_memory.py::test_cdp_disconnect_after_transport_pause_preserves_same_frontier',
-    'tests/test_xhs_discovery_memory.py::test_cdp_lifecycle_failure_preserves_frontier_without_retry_or_relaunch[xhs_browser_context_closed_unexpected-browser_context_closed]',
-    'tests/test_xhs_discovery_memory.py::test_cdp_lifecycle_failure_preserves_frontier_without_retry_or_relaunch[xhs_browser_process_exited-browser_process_exited]',
-    'tests/test_xhs_discovery_memory.py::test_cdp_lifecycle_failure_preserves_frontier_without_retry_or_relaunch[xhs_cdp_disconnected_unexpected-cdp_disconnected]',
-    'tests/test_xhs_discovery_memory.py::test_cdp_process_exit_from_detail_gather_is_not_candidate_failure',
-    'tests/test_xhs_discovery_memory.py::test_creator_failure_is_recorded_and_later_xhs_candidate_continues',
-    'tests/test_xhs_discovery_memory.py::test_detail_failure_is_recorded_seen_and_search_continues',
-    'tests/test_xhs_discovery_memory.py::test_detail_fallback_attempt_count_matches_actual_requests',
-    'tests/test_xhs_discovery_memory.py::test_detail_transport_outage_retries_same_detail_without_html_fallback',
-    'tests/test_xhs_discovery_memory.py::test_image_failure_is_recorded_and_later_xhs_candidate_continues',
-    'tests/test_xhs_discovery_memory.py::test_search_disconnect_retries_same_page_cursor_and_browser_session',
-    'tests/test_xhs_discovery_memory.py::test_search_disconnect_timeout_preserves_current_recovery_frontier',
-    'tests/test_xhs_discovery_memory.py::test_shared_manual_budget_exhaustion_is_a_fixed_runtime_stop',
-    'tests/test_xhs_discovery_memory.py::test_terminal_image_failure_is_recorded_and_later_candidate_continues',
-    'tests/test_xhs_discovery_memory.py::test_top_refresh_uses_fresh_search_id_before_saved_frontier',
-    'tests/test_xhs_discovery_memory.py::test_wrapped_login_expiry_timeout_keeps_current_page_as_frontier',
-    'tests/test_xhs_discovery_memory.py::test_wrapped_login_expiry_waits_and_retries_same_search_page',
-    'tests/test_xhs_image_download.py::test_equivalent_xhs_asset_variants_are_deduplicated',
-    'tests/test_xhs_image_download.py::test_one_image_object_downloads_one_authoritative_url_with_true_format',
-    'tests/test_xhs_image_download.py::test_terminal_http_fetch_error_preserves_manifest_evidence',
-    'tests/test_xhs_image_download.py::test_transient_xhs_image_failure_recovers_and_records_attempts',
-    'tests/test_xhs_image_download.py::test_xhs_failed_image_writes_no_success_file_or_manifest',
-    'tests/test_xhs_login_contract.py::test_context_cookies_still_seed_the_api_client',
-    'tests/test_xhs_login_contract.py::test_failed_startup_pong_enters_real_qrcode_state_machine_once',
-    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_always_uses_the_run_scoped_profile[False]',
-    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_always_uses_the_run_scoped_profile[True]',
-    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[ \\t -False]',
-    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[ \\t -True]',
-    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[-False]',
-    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[-True]',
-    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[None-False]',
-    'tests/test_xhs_login_contract.py::test_standard_xhs_launch_rejects_missing_profile_before_chrome[None-True]',
-    'tests/test_xhs_media_policy.py::test_disabled_media_mode_reaches_no_media_method',
-    'tests/test_xhs_media_policy.py::test_image_mode_never_reaches_video_method_or_store',
-    'tests/test_xhs_midrun_login_recovery.py::test_checkpoint_race_after_pong_blocks_navigation',
-    'tests/test_xhs_midrun_login_recovery.py::test_midrun_network_confirmation_and_navigation_do_not_use_manual_budget',
-    'tests/test_xhs_midrun_login_recovery.py::test_profile_shell_without_self_info_never_navigates',
-    'tests/test_xhs_midrun_login_recovery.py::test_recovered_session_does_not_hide_navigation_failure',
-    'tests/test_xhs_midrun_login_recovery.py::test_sms_checkpoint_with_stale_profile_never_probes_or_navigates',
-    'tests/test_xhs_network_recovery.py::test_committed_timeout_after_network_pause_is_deferred_not_recovered',
-    'tests/test_xhs_network_recovery.py::test_creator_network_timeout_never_opens_browser_fallback',
-    'tests/test_xhs_network_recovery.py::test_retry_error_is_unwrapped_before_same_operation_retry',
-    'tests/test_xhs_network_recovery.py::test_uncommitted_navigation_timeout_retries_but_committed_search_does_not',
-    'tests/test_xhs_popup_guard.py::test_crawler_opened_xhs_tab_waits_30_seconds_after_failed_scroll',
-    'tests/test_xhs_raw_response_errors.py::test_api_captcha_error_after_budget_boundary_uses_fixed_terminal_reason',
-    'tests/test_xhs_raw_response_errors.py::test_api_captcha_popups_share_the_crawler_manual_budget',
-    'tests/test_xhs_raw_response_errors.py::test_html_detail_does_not_multiply_transport_retries',
-    'tests/test_xhs_raw_response_errors.py::test_html_detail_still_retries_parse_failures',
-    'tests/test_xhs_raw_response_errors.py::test_pong_does_not_swallow_cancellation',
-    'tests/test_xhs_raw_response_errors.py::test_pong_does_not_turn_platform_checkpoint_into_logged_out[429-rate_limited]',
-    'tests/test_xhs_raw_response_errors.py::test_pong_does_not_turn_platform_checkpoint_into_logged_out[461-verification_required]',
-    'tests/test_xhs_raw_response_errors.py::test_pong_does_not_turn_platform_checkpoint_into_logged_out[471-verification_required]',
-    'tests/test_xhs_raw_response_errors.py::test_pong_preserves_business_block_from_successful_http_response[300011-PlatformRuntimeError]',
-    'tests/test_xhs_raw_response_errors.py::test_pong_preserves_business_block_from_successful_http_response[300012-IPBlockError]',
-    'tests/test_xhs_raw_response_errors.py::test_pong_propagates_temporary_transport_outage[ConnectError]',
-    'tests/test_xhs_raw_response_errors.py::test_pong_propagates_temporary_transport_outage[ReadTimeout]',
-    'tests/test_xhs_raw_response_errors.py::test_pong_returns_false_only_for_explicit_unauthenticated_status[401]',
-    'tests/test_xhs_raw_response_errors.py::test_pong_returns_false_only_for_explicit_unauthenticated_status[403]',
-    'tests/test_xhs_raw_response_errors.py::test_raw_response_keeps_successful_html',
-    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status[401-login_required]',
-    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status[403-login_required]',
-    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_access_http_status[429-rate_limited]',
-    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block[300011-PlatformRuntimeError-platform_security_limit_300011-False]',
-    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block[300011-PlatformRuntimeError-platform_security_limit_300011-True]',
-    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block[300012-IPBlockError-None-False]',
-    'tests/test_xhs_raw_response_errors.py::test_raw_response_rejects_known_business_block[300012-IPBlockError-None-True]',
-    'tests/test_xhs_raw_response_errors.py::test_successful_json_keeps_raw_and_parsed_return_modes',
-    'tests/test_xhs_raw_response_errors.py::test_transport_classifier_unwraps_retry_error_without_broad_request_errors',
-}
-# 决策 13：按台账 target_file 迁移，名称与断言不变；迁移后只能出现在目标文件。
-MOVED_TO_TARGET = {
-    "tests/test_run_ids.py::test_all_script_run_ids_include_microseconds":
-        "tests/test_platform_package_resources.py::test_all_script_run_ids_include_microseconds",
-}
-
-
-def _normalize(node_id: str) -> str:
-    base, bracket, rest = node_id.partition("[")
-    if base in ERRNO_PARAMETRIZED and bracket:
-        return f"{base}[{ERRNO_PARAMS.get(rest.rstrip(']'), rest.rstrip(']'))}]"
-    return node_id
-
-
-def test_ledger_nodes_reconcile_with_current_root_collection(tmp_path: Path) -> None:
-    environment = _child_environment({}, tmp_path)
-    environment["PYTHONPATH"] = os.pathsep.join(str(ROOT / name) for name in ("src", "tests", "scripts"))
-    # 显式加载 pytest_asyncio 时必须关掉自动入口，否则同一插件会以两个名字注册。
-    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "tests", "--collect-only", "-q", "-p", "no:cacheprovider",
-         "-p", "pytest_asyncio.plugin", "--strict-markers"],
-        cwd=ROOT, env=environment, capture_output=True, text=True, timeout=600,
-    )
-    assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
-    collected = {_normalize(line.strip()) for line in result.stdout.splitlines() if "::" in line}
-    data = _ledger_nodes()
-    missing = []
-    for side in ("root", "fork"):
-        for node in data[side]["nodes"]:
-            name = node["node_id"].split("::", 1)[1]
-            places = {_normalize(f"{node['target_file']}::{name}")}
-            if side == "root":
-                places.add(_normalize(node["node_id"]))
-            # fork 离线 lane 已随 fork 删除：两侧台账节点都只能在根收集中找到。
-            if not places & collected:
-                missing.append(node["node_id"])
-    assert set(missing) == (
-        DELETED_LEDGER_NODES
-        | T14C_DELETED_LEDGER_NODES
-        | T64_DELETED_LEDGER_NODES
-        | T75_DELETED_LEDGER_NODES
-        | T71_DELETED_LEDGER_NODES
-        | T83_DELETED_LEDGER_NODES
-        | T114_DELETED_LEDGER_NODES
-        | T124_DELETED_LEDGER_NODES
-        | T70_DELETED_LEDGER_NODES
-    )
-    for source, target in MOVED_TO_TARGET.items():
-        assert source not in collected and target in collected, (source, target)
-    assert len(data["root"]["nodes"]) + len(data["fork"]["nodes"]) - len(missing) == (
-        1418
-        - len(T14C_DELETED_LEDGER_NODES)
-        - len(T64_DELETED_LEDGER_NODES)
-        - len(T75_DELETED_LEDGER_NODES)
-        - len(T71_DELETED_LEDGER_NODES)
-        - len(T83_DELETED_LEDGER_NODES)
-        - len(T114_DELETED_LEDGER_NODES)
-        - len(T124_DELETED_LEDGER_NODES)
-        - len(T70_DELETED_LEDGER_NODES)
-    )

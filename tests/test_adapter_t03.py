@@ -478,20 +478,6 @@ def test_helper_html_and_url_equivalence(legacy):
         assert helpers.extract_url_params_to_dict(value) == legacy.extract_url_params_to_dict(value)
 
 
-def test_t03_ledger_rows(monkeypatch):
-    monkeypatch.syspath_prepend(str(ROOT / "scripts/dev"))
-    ledger = _module(ROOT / "scripts/dev/adapter_ledger.py", "t03_ledger")
-    result = ledger.build_progress(ROOT)
-    rows = [row for row in result["rows"] if row["card"] == "T03"]
-    assert len(rows) == 28
-    assert result["counts"]["missing"] == 0
-    # T14-C 删除 fork 薄子类后，AdaptiveAccumulator 与 from_environment 按 PROGRESS_RESOLUTIONS 归到根定义。
-    # #127：两个写死 UA 辅助函数删除，按 PROGRESS_RESOLUTIONS 登记退出。
-    assert sorted(row["qualname"] for row in rows if row["state"] != "moved") == ["get_mobile_user_agent", "get_user_agent"]
-    assert all(row["state"] == "exited" for row in rows if row["state"] != "moved")
-    assert sum(row["state"] == "moved" for row in rows) == 26
-
-
 def test_cookie_imports_share_one_implementation(monkeypatch):
     monkeypatch.syspath_prepend(str(ROOT / "scripts"))
     import mediacrawler_crawl as crawl

@@ -1,5 +1,7 @@
 # 平台适配 P00 v0.7：设计准备与证据索引
 
+> **历史资料：** 平台适配迁移（T00–T14）已完成。迁移台账工具（`scripts/dev/adapter_ledger*.py`）、台账产物（`docs/adapter-ledger/`）与附录 C8（`platform-adapter-symbol-ledger.md`）已在 #197 删除，卡片闸门不再做台账与 AST 复核；文中相关内容只作历史记录，需要时从 Git 查询。
+
 本单记录 v0.6/v0.7 前置准备，不重复定义正式契约，也不是迁移完成报告。
 设计边界见 [平台实现解耦设计](platform-adapters.md)，版本操作见 [版本管理](version-control.md)，
 现行行为仍以 [文档入口](README.md) 所指权威文档为准。工作单完成后按项目文档归档规则处理。

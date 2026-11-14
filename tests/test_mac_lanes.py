@@ -119,7 +119,7 @@ def _patch_execution(monkeypatch, tmp_path, fail=None):
 
 
 @pytest.mark.parametrize("fail", [
-    "component", "socket", "installation", "symbols", "inputs", "drift", "progress", "frozen", "ruff", "prepare",
+    "component", "socket", "installation", "frozen", "ruff", "prepare",
 ])
 def test_any_failed_item_exits_nonzero(monkeypatch, capsys, tmp_path, fail):
     created, lanes, static_names = _patch_execution(monkeypatch, tmp_path, fail=fail)
@@ -128,7 +128,7 @@ def test_any_failed_item_exits_nonzero(monkeypatch, capsys, tmp_path, fail):
     assert "合计：未通过" in output
     assert "os lane 没跑，需要 GitHub CI。" in output
     assert "os" not in lanes
-    assert static_names == ["symbols", "inputs", "drift", "progress", "frozen", "ruff"]
+    assert static_names == ["frozen", "ruff"]
     if fail == "prepare":
         assert lanes == []
     else:
@@ -141,7 +141,7 @@ def test_success_reports_counts_duration_and_skips_os_lane(monkeypatch, capsys, 
     assert mac_lanes.main([]) == 0
     output = capsys.readouterr().out
     assert lanes == ["component", "socket", "installation"]
-    assert static_names == ["symbols", "inputs", "drift", "progress", "frozen", "ruff"]
+    assert static_names == ["frozen", "ruff"]
     assert "component：通过，选中 4，通过 4，失败 0，错误 0，跳过 0，耗时 1.5 秒" in output
     assert "合计：通过" in output
     assert output.rstrip().endswith("os lane 没跑，需要 GitHub CI。")

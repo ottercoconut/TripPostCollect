@@ -1,5 +1,7 @@
 # 平台适配详细迁移规格 v0.7
 
+> **历史资料：** 平台适配迁移（T00–T14）已完成。迁移台账工具（`scripts/dev/adapter_ledger*.py`）、台账产物（`docs/adapter-ledger/`）与附录 C8（`platform-adapter-symbol-ledger.md`）已在 #197 删除，卡片闸门不再做台账与 AST 复核；文中相关内容只作历史记录，需要时从 Git 查询。
+
 > 2026-09-28 完成 P00-08 静态复核并补齐全量符号账；设计就绪 D 门禁的静态部分已满足，实施另需授权。
 > 本文中的目标文件、类型和接口尚未实现。主设计保留原则与原研究，本文是目录、接口、读取时点和任务卡的唯一详细定义；
 > 逐符号处置见[附录 C8 全量符号账](platform-adapter-symbol-ledger.md)，执行清单以 GitHub issues 跟踪（见 G）。

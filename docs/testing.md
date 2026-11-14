@@ -111,8 +111,7 @@ pytest driver 执行原函数全部断言，父进程检查退出码和临时 XM
 ## 本机预检
 
 [scripts/dev/mac_lanes.py](../scripts/dev/mac_lanes.py) 在 macOS 上跑托管 CI 里 `os` lane 以外的检查：
-component、socket、installation，台账四项（`symbols --check`、`inputs --check`、`drift`、`progress`），
-冻结文件校验，以及 ruff。检查对象是当前 HEAD。工作区有未提交改动时直接报错退出。
+component、socket、installation，冻结文件校验，以及 ruff。检查对象是当前 HEAD。工作区有未提交改动时直接报错退出。
 `git archive HEAD` 把纯源码解到 `/private/tmp` 下的独立目录，再在该目录用
 `uv sync --locked --extra dev --python 3.12` 建立环境。每个 lane 用 `run_matrix.fresh_source`
 从这份纯源码再复制一份；外层 runner 是纯源码目录里的 `tests/run_lanes.py`，它再启动副本中的 runner。
@@ -148,9 +147,8 @@ checkout 不保留认证信息。依赖准备阶段联网；根环境使用 `uv 
 （`run_matrix.ROOT_ASSEMBLY_MODULES`）并对四站调用 `trippostcollect.platforms.entry.load_crawler`，
 不调用抓取入口；装配后源码副本中只允许 `src/` 下的模块被装载，scripts 等其他路径的模块一经装载即失败
 （防止旧桥式 `sys.path` 插入回归）；上游 B站视频主循环不再导入。
-原 fork 离线用例已全部移植到根 tests：T14-B2 把最后 4 文件、34 个用例按台账 target_file 原名原断言移植到
-`tests/artifacts/test_staging.py` 与 `tests/application/test_discovery.py`（component lane，映射见
-`tests/fixtures/t14_fork_test_mapping.json`）；T14-C 删除 fork 子模块，#64 随后删除 fork 离线 lane 代码与
+原 fork 离线用例已全部移植到根 tests：T14-B2 把最后 4 文件、34 个用例原名原断言移植到
+`tests/artifacts/test_staging.py` 与 `tests/application/test_discovery.py`（component lane）；T14-C 删除 fork 子模块，#64 随后删除 fork 离线 lane 代码与
 `run_matrix.py --fork-python` 参数，CI 只运行根 lane。
 原浏览器与 CDP 生命周期的 41 个用例已迁入根 `tests/runtime/`，归入 component lane；
 知乎的 3 文件、27 个用例已迁入根 `tests/platforms/zhihu/`，同样归入 component lane。
@@ -264,7 +262,7 @@ LeaseGuard、带租约环境的中间层 `run_command` 与独立 worker 进程�
 | `tests/test_xhs_terminalizer.py::test_formal_os_signal_immediately_after_acquire_has_one_failed_terminal_commit` | os | 2 |
 | `tests/test_xhs_terminalizer.py::test_sms_terminal_before_pagination_keeps_precise_reason_and_checkpoint` | component | 1 |
 | `tests/test_xhs_runtime_status.py::test_socket_is_rejected_without_blocking` | socket | 1 |
-| `tests/test_platform_package_resources.py::test_all_script_run_ids_include_microseconds`（原在 `tests/test_run_ids.py`，T12 按台账迁移，名称不变） | installation | 1 |
+| `tests/test_platform_package_resources.py::test_all_script_run_ids_include_microseconds`（原在 `tests/test_run_ids.py`，T12 迁移，名称不变） | installation | 1 |
 
 issue1_component / issue1_os 是原失败节点的精确标签，不是整个 lane 的别名。
 另加 test_guard_cleanup_requires_observed_absence 的 5 个场景：absent、alive、unknown、
@@ -298,27 +296,6 @@ macos_process；其中真实自发信号也移到 driver。它们计入完整 OS
 
 新增或删除承担五站责任的测试时同批更新声明；不得为了让守护变绿而删除声明或改用他站用例。
 
-## 迁移台账核对
-
-pytest 只校验已提交的迁移台账产物、由符号 JSON 渲染的 C8 附录，以及当前工作树的输入漂移
-和迁移进度；纯源码副本不需要 `.git`，也不调用 Git 重建基线。
-
-T14 删除 fork 子模块后台账冻结：生成代码、`tests` 收集与 `make-source` 子命令已在 #64 删除；
-`symbols`、`inputs`、`baseline`、`all` 只接受 `--check`，不带时直接报“迁移台账已冻结”并返回 1。
-`--check` 只做不调用 Git 的冻结自检（登记散列、C8 附录由 JSON 逐字节重现、规则与冻结行一致）。
-在仓库 checkout 中执行：
-
-```bash
-source .venv/bin/activate
-python scripts/dev/adapter_ledger.py symbols --check
-python scripts/dev/adapter_ledger.py inputs --check
-python scripts/dev/adapter_ledger.py drift
-python scripts/dev/adapter_ledger.py progress
-```
-
-CI 在“准备纯源码模板与独立锁定环境”之后的“核对迁移台账”步骤用已创建的 root-venv 执行上述四项核对；
-独立测试 lane 继续在无 Git 的源码副本中运行。
-
 ## T14-C 删除批的测试偏离登记
 
 fork、私有桥与过渡模块删除后，依赖它们的对照用例按以下登记处理；固化文件与冻结 fixture 均不改字节。
@@ -328,21 +305,25 @@ fork、私有桥与过渡模块删除后，依赖它们的对照用例按以下�
   `from execution_state import` 改为 `trippostcollect.core.execution_state` 的同名导入，其余源码逐字执行。
 - `tests/support/platform_session_deviation.py` 的 `xhs_cdp_settings_without_user_data_dir`：T09 小红书场景预期中
   每条 `cdp_manager` 记录先钉住 `USER_DATA_DIR == "%s_user_data_dir"`，再删除该键后与根实现比较。
-- `tests/test_adapter_t12.py` 的 `T14C_DELETED_LEDGER_NODES` 登记 6 个随删除批消失的台账节点（只测旧导出
-  hook 或 fork 评论脱敏的用例）；台账节点对账总数相应扣除。
-- `tests/test_adapter_t12.py` 的 `T64_DELETED_LEDGER_NODES` 登记 #64 清理批删除的 4 个台账节点（fork lane
-  的路径/命令拼装、台账生成的未映射报告、`check_file`、`tests` 收集子命令；对应代码已删除），对账总数同样扣除。
-- 台账收口规则新增 fork `tools/trippostcollect_adaptive.py:env_int` → `env_int_reader`：T03 迁入的单次读取包装
-  `worker_inputs.env_int` 只供 fork 旧委托，随删除批删除，根实现统一经零参 `env_int_reader` 读取。
-- `TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL` 已登记到 `adapter_ledger.AUTHORIZED_ENV_REMOVALS`，`drift` 不把它计为
-  意外删除。
 
 本机沙箱脚本（如 Linux 工作副本的 `tpc_pytest.sh`）直接在新 worktree 上运行时没有可写 `data/`，t02/t11/t12
 中约 20 个用例会出现环境性失败；这不是代码回归，正式结论以卡片闸门（临时源码副本）和 CI 为准。
 
 ## 本机卡片闸门：macOS 与 Linux 并行
 
-[scripts/dev/card_gate.py](../scripts/dev/card_gate.py) 是开发期复核工具，按运行平台选择沙箱后端：
+[scripts/dev/card_gate.py](../scripts/dev/card_gate.py) 是开发期复核工具：在沙箱内对当前工作树做冻结文件校验、
+改动文件的 `py_compile` 与 ruff，并在临时源码副本中运行 component、installation、os 三组，把失败集合与
+`--base`（默认与 main 的 merge-base）导出的基线比较。基线缓存位于 `<git common dir>/card-gate/baseline-<基线提交>.json`，
+闸门代码变化会重算，也可用 `--refresh-baseline` 强制刷新；`--skip-tests` 只做静态检查，`--keep` 保留源码副本。
+退出码为 0（通过）、1（未通过或跳过测试）、2（预检、canary 等自身错误）。
+
+```bash
+source .venv/bin/activate
+python scripts/dev/card_gate.py \
+  --base main
+```
+
+闸门按运行平台选择沙箱后端：
 macOS 为 Seatbelt（[sandbox_macos.py](../scripts/dev/sandbox_macos.py)），Linux 为 bubblewrap
 （[sandbox_linux.py](../scripts/dev/sandbox_linux.py)）。两者语义逐项对应，子孙进程继承限制；
 闸门编排进程在沙箱外，每个检查子进程单独套沙箱，启动前先跑 canary，任一项未被拒绝即终止。

@@ -9,7 +9,6 @@ from datetime import datetime
 from hashlib import sha256
 import importlib
 import json
-import re
 from pathlib import Path
 import shutil
 import sqlite3
@@ -23,8 +22,6 @@ import pytest
 from support import (
     fork_removal_deviation,
     native_window_deviation,
-    shared_launch_deviation,
-    zhihu_history_backfill_deviation,
 )
 from trippostcollect.application import inputs, page_evidence, repair, warmup
 from trippostcollect.core import paths as core_paths
@@ -34,7 +31,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 FIXTURES = ROOT / "tests/fixtures/adapter_t10"
-ROWS = [row for row in json.loads((ROOT / "docs/adapter-ledger/symbols.json").read_text())["rows"] if row["card"] == "T10"]
 
 
 PROVENANCE = json.loads((FIXTURES / "provenance.json").read_text())
@@ -77,20 +73,6 @@ def old_module(name, namespace=None):
 
 def function(source, name):
     return next(node for node in ast.parse(source).body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name)
-
-
-def t14_snapshot_writer(source):
-    """T14 授权差异：快照路径由调用方经 platform_cookie_snapshot_path 给出，写前确保同级父目录存在。"""
-    source = source.replace(
-        "def write_cookie_snapshot(\n    platform_key: str,\n    profile_dir: Path,\n",
-        "def write_cookie_snapshot(\n    platform_key: str,\n    snapshot_path: Path,\n",
-    )
-    return source.replace("    snapshot_path = profile_dir / COOKIE_SNAPSHOT_FILENAME\n", "    ensure_parent(snapshot_path)\n")
-
-
-def t14_warmup_one(source):
-    """T14 授权差异：快照写出不再传 profile 目录（#112 删除了 T14 迁移 `.partial` 检查，不再插入）。"""
-    return re.sub(r"(write_cookie_snapshot\(\n\s+platform_key,\n)\s+profile_dir,\n", r"\1", source)
 
 
 # #112 授权差异：登录检查接口不再把 /api/v4/me 原文前 300 字（含 avatar_url）写进 warmup 报告，结果按白名单
@@ -193,68 +175,6 @@ def t127_snapshot_user_agent(source, name=None):
         source = source.replace("from __future__ import annotations\n", "", 1)
         source = "from __future__ import annotations\nfrom trippostcollect.core.paths import PROFILE_VIEWPORT\n" + source
     return source
-
-
-def t14_without_fork_check(node):
-    """T14 授权差异：入口不再要求 fork 目录存在。"""
-    for child in ast.walk(node):
-        body = getattr(child, "body", None)
-        if isinstance(body, list):
-            child.body = [statement for statement in body
-                          if not (isinstance(statement, ast.If) and "MEDIACRAWLER_DIR" in ast.unparse(statement.test))]
-    return node
-
-
-@pytest.mark.parametrize("row", ROWS, ids=lambda r: f"{Path(r['file']).stem}.{r['qualname']}")
-def test_migrated_ast(row):
-    name = row["qualname"]
-    source = frozen_source(Path(row["file"]).stem)
-    target_name = name
-    target = ROOT / "src/trippostcollect" / row["target"]
-    if row["file"] == "scripts/mediacrawler_login_warmup.py":
-        source = source.replace("ALIASES.get(value)", "MEDIACRAWLER_ALIASES.get(value)")
-        if name == "required_cookie_names":
-            # T03 已合并，HEAD 中原入口直接重导出唯一实现。
-            tree = ast.parse(source)
-            assert any(isinstance(n, ast.ImportFrom) and n.module == "trippostcollect.runtime.cookies" and any(a.name == name for a in n.names) for n in tree.body)
-            source = frozen_source("required_cookie_names")
-        elif name in {"parse_args", "utc_stamp", "main_async", "main"}:
-            target_name = "media_" + name
-            for old in ("parse_args", "utc_stamp", "main_async", "main"):
-                import re
-                source = re.sub(r"(?<!\.)\b" + old + r"\b", "media_" + old, source)
-            name = target_name
-        elif name == "write_cookie_snapshot":
-            source = t127_snapshot_user_agent(source, name)
-            source = source.replace("    source: str,\n", "    source: str,\n    label: str,\n    urls: list[str],\n")
-            source = source.replace('PLATFORMS[platform_key]["label"]', "label").replace('PLATFORMS[platform_key]["urls"]', "urls")
-            source = t14_snapshot_writer(source)
-        elif name == "warmup_one":
-            source = t127_snapshot_user_agent(t14_warmup_one(source), name)
-        elif name in T112_LOGIN_API_CHECKS:
-            source = t112_login_api_check(source, name)
-        elif name == "launch_login_context":
-            source = t127_snapshot_user_agent(t83_sandbox_enabled(source), name)
-            # #136：启动配置原样下沉到共享函数，warmup 改为委托调用（见 support.shared_launch_deviation）。
-            source = shared_launch_deviation.t10_launch_login_context(source)
-        elif name == "current_state":
-            source = t115_bilibili_nav_login(source)
-    if row["qualname"] == "load_post_repair_fallbacks":
-        # #194：知乎旧行只回落发帖时间（见 support.zhihu_history_backfill_deviation）。
-        source = zhihu_history_backfill_deviation.t10_load_post_repair_fallbacks(source)
-    if row["disposition"] == "薄":
-        target = ROOT / "src/trippostcollect/application/warmup.py"
-        if row["file"] == "scripts/login_warmup.py":
-            target_name = "login_main"
-        entry = function((ROOT / row["file"]).read_text(), "main")
-        assert len(entry.body) == 1 and isinstance(entry.body[0], ast.Return)
-    old = t14_without_fork_check(function(source, name))
-    old.name = target_name
-    new = function(target.read_text(), target_name)
-    if target_name == "repair_runtime_stop_reason":
-        new.args.kwonlyargs.clear()
-        new.args.kw_defaults.clear()
-    assert ast.dump(old) == ast.dump(new)
 
 
 class FixedDatetime(datetime):
@@ -547,44 +467,6 @@ def test_page_evidence_cookie_cleanup(monkeypatch, tmp_path):
         results.append((event, remaining, context_event, trace))
     assert results[0] == results[1]
     assert results[1][1] == [(".example.test", "b", "/")]
-
-
-def test_cli_definition_selection():
-    sys.path.insert(0, str(ROOT / "scripts/dev"))
-    ledger = importlib.import_module("adapter_ledger")
-    assert ledger.build_input_drift(ROOT) == {"cli_changed": {}, "env_added": [], "env_removed": []}
-
-
-def test_missing_cli_definition_is_drift(tmp_path):
-    sys.path.insert(0, str(ROOT / "scripts/dev"))
-    ledger = importlib.import_module("adapter_ledger")
-    entry = "scripts/login_warmup.py"
-    selected = {entry: ("shared.py:chosen",)}
-    source = 'def chosen():\n    parser.add_argument("--targets")\ndef other():\n    parser.add_argument("--platforms")\n'
-    result = ledger.extract_inputs([], lambda name: source if name == "shared.py" else "", definition_sources=selected)
-    assert result["cli"][entry] == [{"flags": ["--targets"]}]
-    absent = ledger.extract_inputs([], lambda name: "", definition_sources=selected)
-    assert absent["cli"][entry] == []
-
-
-@pytest.mark.parametrize("target_exists,body,expected", [
-    (True, "return run()", "moved"),
-    (False, "return run()", "pending"),
-    (True, "print('business'); return run()", "pending"),
-])
-def test_thin_entry_requires_existing_delegate(tmp_path, target_exists, body, expected):
-    sys.path.insert(0, str(ROOT / "scripts/dev"))
-    ledger = importlib.import_module("adapter_ledger")
-    entry = tmp_path / "scripts/login.py"
-    entry.parent.mkdir()
-    entry.write_text(f"from trippostcollect.application.warmup import run\ndef main():\n    {body}\n")
-    destination = tmp_path / "src/trippostcollect/application/warmup.py"
-    destination.parent.mkdir(parents=True)
-    destination.write_text("def run():\n    return 0\n" if target_exists else "")
-    manifest = tmp_path / "docs/adapter-ledger/symbols.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text(json.dumps({"rows": [{"file": "scripts/login.py", "qualname": "main", "card": "T10", "disposition": "薄", "target": "scripts/login.py"}]}))
-    assert ledger.build_progress(tmp_path)["rows"][0]["state"] == expected
 
 
 @pytest.mark.parametrize("scenario", ["valid", "skip", "keep"])

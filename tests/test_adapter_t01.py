@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import sys
 from importlib import import_module
 from pathlib import Path
@@ -17,21 +15,9 @@ for extra in (ROOT / "scripts", ROOT / "scripts" / "dev"):
 
 resources = import_module("trippostcollect.core.resources")
 paths = import_module("trippostcollect.core.paths")
-ledger = import_module("adapter_ledger")
-BASELINE = json.loads((ROOT / "docs" / "adapter-ledger" / "baseline.json").read_text())
-# #127 第 2 项：stealth.min.js 不再注入，包资源删除；基线中的 libs/stealth.min.js 在台账登记为退出。
-PACKAGE_RESOURCES = {
-    "js/douyin.js": "libs/douyin.js",
-    "licenses/MediaCrawler-LICENSE": "LICENSE",
-}
 
 
 # ---------- 包内资源 ----------
-
-@pytest.mark.parametrize(("name", "baseline_key"), sorted(PACKAGE_RESOURCES.items()))
-def test_package_resource_bytes_match_baseline(name: str, baseline_key: str) -> None:
-    data = resources.read_bytes(name)
-    assert hashlib.sha256(data).hexdigest() == BASELINE["resources"][baseline_key]
 
 
 def test_resource_path_is_inside_package_not_fork() -> None:
@@ -115,54 +101,4 @@ def test_bilibili_resources_not_read_from_fork(monkeypatch: pytest.MonkeyPatch) 
 
 # ---------- 台账：基线冻结与迁移进度 ----------
 
-def test_committed_symbols_are_frozen_baseline() -> None:
-    # 纯源码副本只核对已提交基线，逐字节重建由 CI 的 Git checkout 负责。
-    result = ledger.load_symbols(ROOT)
-    assert result["stat"]["total"] == 1234
-    assert len(BASELINE["root_head"]) == 40
-    assert len(BASELINE["fork_head"]) == 40
 
-
-def test_progress_reports_every_baseline_row() -> None:
-    report = ledger.build_progress(ROOT)
-    assert report["total"] == 1234
-    assert set(report["counts"]) <= {"pending", "moved", "exited", "missing"}
-    assert sum(report["counts"].values()) == 1234
-    assert report["missing"] == []
-    # T14-C 删除 fork、私有桥 E 与过渡模块后迁移收口：不再有 pending 行。
-    assert report["counts"].get("pending", 0) == 0
-
-
-def test_progress_detects_moved_definition() -> None:
-    report = ledger.build_progress(ROOT)
-    moved = {(row["file"], row["qualname"]) for row in report["rows"] if row["state"] == "moved"}
-    assert ("scripts/mediacrawler_crawl.py", "discover_cdp_browser_path") in moved
-
-
-def test_inputs_are_unchanged_during_migration() -> None:
-    # CLI 参数与默认值、env 名称在迁移全程必须与基线一致；
-    # 唯一例外是规格 D2 授权删除的 6 个父发名字与 T14-C 删除的 XHS_KEEP_AUTHOR_DETAIL
-    # （ledger.AUTHORIZED_ENV_REMOVALS），已在漂移计算中排除。
-    report = ledger.build_input_drift(ROOT)
-    assert set(report) == {"cli_changed", "env_added", "env_removed"}
-    assert report["cli_changed"] == {}
-    assert report["env_added"] == []
-    assert report["env_removed"] == []
-
-
-@pytest.mark.parametrize("has_constructor", [True, False])
-def test_progress_verifies_reexported_class_member(tmp_path, monkeypatch, has_constructor):
-    """类的一跳重导出必须实际找到成员，不能仅凭类名算迁移完成。"""
-    row = {"file": "old.py", "qualname": "Failure.__init__", "card": "T04",
-           "disposition": "迁", "target": "artifacts/staging.py"}
-    monkeypatch.setattr(ledger, "load_symbols", lambda _: {"rows": [row]})
-    (tmp_path / "old.py").write_text("")
-    target = tmp_path / "src/trippostcollect/artifacts/staging.py"
-    target.parent.mkdir(parents=True)
-    target.write_text("from trippostcollect.application.contracts import Failure\n")
-    implementation = tmp_path / "src/trippostcollect/application/contracts.py"
-    implementation.parent.mkdir(parents=True)
-    body = "    def __init__(self): pass" if has_constructor else "    pass"
-    implementation.write_text(f"class Failure(ValueError):\n{body}\n")
-    report = ledger.build_progress(tmp_path)
-    assert report["rows"][0]["state"] == ("moved" if has_constructor else "missing")

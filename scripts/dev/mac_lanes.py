@@ -1,4 +1,4 @@
-"""在 macOS 上预检已提交的 HEAD：三个 lane、台账、冻结文件和 ruff。
+"""在 macOS 上预检已提交的 HEAD：三个 lane、冻结文件和 ruff。
 
 不运行 os lane，也没有跳过或改跑它的参数。临时源码、独立环境和报告放在
 /private/tmp，结束时删除，包括带不可变标志的副本。
@@ -24,10 +24,6 @@ LABELS = {
     "component": "component",
     "socket": "socket",
     "installation": "installation",
-    "symbols": "台账 symbols",
-    "inputs": "台账 inputs",
-    "drift": "台账 drift",
-    "progress": "台账 progress",
     "frozen": "冻结文件",
     "ruff": "ruff",
 }
@@ -154,12 +150,7 @@ def format_item(item) -> str:
 
 
 def static_commands(python: Path):
-    ledger = [str(python), "scripts/dev/adapter_ledger.py"]
     return (
-        ("symbols", [*ledger, "symbols", "--check"]),
-        ("inputs", [*ledger, "inputs", "--check"]),
-        ("drift", [*ledger, "drift"]),
-        ("progress", [*ledger, "progress"]),
         ("frozen", [str(python), "scripts/verify_frozen_files.py"]),
         ("ruff", [str(python), "-m", "ruff", "check", "--no-cache"]),
     )

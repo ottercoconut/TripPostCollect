@@ -22,7 +22,6 @@ from support import zhihu_following_count_deviation
 from support import zhihu_login_paging_deviation as deviation
 from support import zhihu_author_visit_deviation
 from support import zhihu_detail_page_deviation
-from support import zhihu_image_text_deviation
 from support import zhihu_search_capture_deviation
 from support import zhihu_verified_deviation
 from support.stable_png import solid_png
@@ -37,7 +36,6 @@ from trippostcollect.runtime import image_retry
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "tests/fixtures/adapter_t07"
 
 
 async def drive(output, patch, scenario, *, crawler_factory=None):
@@ -772,96 +770,3 @@ def test_settings_are_snapshotted_and_operation_readers_are_lazy(monkeypatch):
     assert ports.initial_settle_seconds() == 0
 
 
-ISSUE_49_IDENTITY_REPLACEMENTS = (
-    ("anonymize_user_id(", "platform_user_id("),
-    ("mask_nickname(", "platform_nickname("),
-    ('"Creator anonymized hash"', '"Creator raw platform user ID"'),
-    ('"User nickname (masked)"', '"User raw nickname"'),
-)
-# #113 有意偏离：头像字段只留在内存中排除正文图，不进入 model_dump；两个模型各恰好一处。
-ISSUE_113_AVATAR_FIELD = (
-    'avatar_url: str = Field(default="", description="Creator avatar URL")',
-    'avatar_url: str = Field(default="", description="Creator avatar URL", exclude=True)',
-)
-# #113：搜索列表投影改由 extract_search_page 承接（丢弃 zvideo、保留原始 paging），原方法只剩委托。
-ISSUE_113_REPLACED_DEFINITIONS = {"ZhihuExtractor.extract_contents_from_search"}
-# #185：这三个枚举只服务已删除的 httpx 搜索参数，不保留。
-ISSUE_185_REMOVED_DEFINITIONS = {"SearchTime", "SearchType", "SearchSort", "sign"}
-# #182：关注数缺键不再补 0。只替换这两处字段默认值和搜索作者赋值，粉丝数仍补 0。
-ISSUE_182_FOLLOWING_FIELDS = (
-    (
-        'following_count: int = Field(default=0, description="Creator following count")',
-        'following_count: int | None = Field(default=None, description="Creator following count")',
-    ),
-    (
-        'follows: int = Field(default=0, description="Follows count")',
-        'follows: int | None = Field(default=None, description="Follows count")',
-    ),
-)
-ISSUE_182_FOLLOWS_ASSIGNMENT = (
-    "res.follows = _first_non_empty("
-    'author.get("following_count"), author.get("followingCount"), 0)',
-    "res.follows = _optional_count("
-    'author.get("following_count"), author.get("followingCount"))',
-)
-
-
-def test_pure_definitions_keep_original_bodies():
-    """模型、签名、解析定义只允许来源模块与 logger 名称替换。"""
-    ledger = json.loads((ROOT / "docs/adapter-ledger/symbols.json").read_text())["rows"]
-
-    def definitions(source):
-        result = {}
-        for node in ast.parse(source).body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                result[node.name] = node
-                if isinstance(node, ast.ClassDef):
-                    for child in node.body:
-                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                            result[f"{node.name}.{child.name}"] = child
-        return result
-
-    for row in ledger:
-        if row["card"] != "T07" or row["target"] not in {
-            "platforms/zhihu/parser.py", "platforms/zhihu/models.py", "platforms/zhihu/signer.py",
-        }:
-            continue
-        name = row["qualname"]
-        if name in {"ZhihuExtractor", "update_zhihu_content"} | ISSUE_113_REPLACED_DEFINITIONS:
-            continue
-        original = (FIXTURE / (row["file"].removeprefix("tools/MediaCrawler/") + ".txt")).read_text()
-        original = original.replace("utils.logger", "logger")
-        if name in ISSUE_185_REMOVED_DEFINITIONS:
-            assert name in definitions(original)
-            target = ROOT / "src/trippostcollect" / row["target"]
-            if not target.is_file():
-                continue
-            current_names = definitions(target.read_text())
-            assert name not in current_names
-            continue
-        if row["target"] in {"platforms/zhihu/parser.py", "platforms/zhihu/models.py"}:
-            original = zhihu_detail_page_deviation.parser_and_model_source(original)
-            original = zhihu_author_visit_deviation.parser_and_model_source(original)
-            original = zhihu_image_text_deviation.parser_source(original)
-            original = zhihu_verified_deviation.parser_and_model_source(original)
-        # #49 有意偏离：作者 ID/昵称改存平台原始值，只允许身份转换调用与对应字段描述替换。
-        for old, new in ISSUE_49_IDENTITY_REPLACEMENTS:
-            original = original.replace(old, new)
-        if name in {"ZhihuContent", "ZhihuCreator"}:
-            assert original.count(ISSUE_113_AVATAR_FIELD[0]) == 2, name
-            original = original.replace(*ISSUE_113_AVATAR_FIELD)
-            if name == "ZhihuContent":
-                assert original.count(ISSUE_182_FOLLOWING_FIELDS[0][0]) == 1, name
-            if name == "ZhihuCreator":
-                assert original.count(ISSUE_182_FOLLOWING_FIELDS[1][0]) == 1, name
-            for old, new in ISSUE_182_FOLLOWING_FIELDS:
-                original = original.replace(old, new)
-        if name == "ZhihuExtractor._extract_content_or_comment_author":
-            assert original.count(ISSUE_182_FOLLOWS_ASSIGNMENT[0]) == 1, name
-            original = original.replace(*ISSUE_182_FOLLOWS_ASSIGNMENT)
-        current = (ROOT / "src/trippostcollect" / row["target"]).read_text()
-        assert ast.dump(definitions(original)[name]) == ast.dump(definitions(current)[name]), name
-
-
-# 旧 fork 工厂结果与冻结 T07 fixture 结果相同已在 T14 删除 fork 前由守卫分别证明，共用一份预期。
-T14_FACTORY = T14_DRIVE
