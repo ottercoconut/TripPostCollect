@@ -101,154 +101,6 @@ def write_sources(root, files):
         path.write_text(source, encoding="utf-8")
 
 
-@pytest.mark.parametrize("case,bucket", [
-    ("equal", "equal"), ("different", "different"), ("missing", "missing"),
-    ("pending", "pending"), ("delegated", "equal"), ("reexported", "equal"),
-    ("mixin", "equal"), ("exited", "exited"),
-])
-def test_ast_review_uses_ledger_locator(tmp_path, case, bucket):
-    original, target = "scripts/original.py", "src/trippostcollect/platforms/xhs/session.py"
-    old = "def f():\n    return 1\n"
-    files = {original: "", target: old}
-    row = {"file": original, "qualname": "f", "disposition": "迁", "card": "T09",
-           "target": "platforms/xhs/session.py"}
-    rows = [row]
-    if case == "different":
-        files[target] = old.replace("1", "2")
-    elif case == "missing":
-        files[target] = ""
-    elif case == "pending":
-        files[original] = old.replace("1", "2")
-    elif case == "delegated":
-        files[original] = ("from trippostcollect.platforms.xhs.session import f as worker\n"
-                           "def f():\n    return worker()\n")
-    elif case == "reexported":
-        files[target] = "from trippostcollect.records.shared import f\n"
-        files["src/trippostcollect/records/shared.py"] = old
-    elif case == "mixin":
-        old = "class C:\n    def f(self):\n        return 1\n"
-        row["qualname"] = "C.f"
-        rows.append({**row, "qualname": "C", "target": "platforms/xhs/core.py"})
-        files[target] = old.replace("class C:", "class Session:")
-        files["src/trippostcollect/platforms/xhs/core.py"] = (
-            "from trippostcollect.platforms.xhs.session import Session\nclass C(Session):\n    pass\n")
-    elif case == "exited":
-        row["disposition"] = "退"
-    write_sources(tmp_path, files)
-    result = gate.ast_review(tmp_path, rows, lambda path: old, cards=["T09"])
-    assert result[bucket][0]["definition"] == f"{original}:{row['qualname']}"
-    if case == "different":
-        assert "-    return 1" in result[bucket][0]["diff"]
-        assert "+    return 2" in result[bucket][0]["diff"]
-    if case in ("delegated", "reexported", "mixin"):
-        location = result["equal"][0]["location"]
-        assert location["file"] != original
-        assert location["qualname"] == ("Session.f" if case == "mixin" else "f")
-    if case == "pending":
-        assert result["missing"] == []
-
-
-def test_ast_automatic_scope_and_manual_pair(tmp_path):
-    definition = "def f():\n    return 1\n"
-    write_sources(tmp_path, {"scripts/a.py": definition, "scripts/b.py": definition})
-    row = {"file": "scripts/a.py", "qualname": "f", "disposition": "迁",
-           "target": "scripts/b.py", "card": "T00"}
-    assert gate.ast_review(tmp_path, [row], lambda _: definition)["cards"] == []
-    result = gate.ast_review(tmp_path, [row], lambda _: definition,
-                             pairs=[("scripts/a.py", "scripts/b.py")])
-    assert len(result["equal"]) == 1
-    (tmp_path / "scripts/a.py").write_text("")
-    result = gate.ast_review(tmp_path, [row], lambda _: definition)
-    assert result["cards"] == ["T00"]
-    assert len(result["equal"]) == 1
-
-
-@pytest.mark.parametrize("case,bucket,previously_moved", [
-    ("changed", "different", 1), ("unchanged", None, 0),
-    ("new-move", "equal", 0), ("missing", "missing", 1),
-    ("pending", "pending", 1), ("pending-changed", "different", 1),
-])
-def test_ast_review_locates_both_revisions(tmp_path, case, bucket, previously_moved):
-    original, target = "scripts/original.py", "src/trippostcollect/platforms/xhs/session.py"
-    old = "def f():\n    return 1\n"
-    row = {"file": original, "qualname": "f", "disposition": "迁", "card": "T09",
-           "target": "platforms/xhs/session.py"}
-    before = {original: "", target: old}
-    after = before.copy()
-    if case == "changed":
-        after[target] = old.replace("1", "2")
-    elif case == "new-move":
-        before = {original: old, target: ""}
-    elif case == "missing":
-        after[target] = ""
-    elif case == "pending":
-        after[original] = old
-    elif case == "pending-changed":
-        after[original] = old.replace("1", "2")
-    reads = []
-
-    def reader(path):
-        reads.append(path)
-        return before.get(path, "")
-
-    write_sources(tmp_path, after)
-    result = gate.ast_review(tmp_path, [row], reader)
-    if bucket:
-        assert len(result[bucket]) == 1
-    assert result["cards"] == (["T09"] if bucket else [])
-    assert result["previously_moved"] == previously_moved
-    assert len(reads) == len(set(reads))
-    if bucket:
-        item = result[bucket][0]
-        assert item["base_location"]["file"] == (original if case == "new-move" else target)
-        assert item["base_location"]["state"] == ("pending" if case == "new-move" else "moved")
-        assert item["location"]["state"] == (
-            "missing" if case == "missing" else "pending" if case.startswith("pending") else "moved"
-        )
-        if case in ("changed", "pending-changed"):
-            assert "+    return 2" in item["diff"]
-        if case.startswith("pending"):
-            assert len(result["pending"]) == 1
-    else:
-        assert not any(result[key] for key in ("equal", "different", "missing", "pending", "exited"))
-    summary = gate.render_summary({"ast": result, "canary": {"passed": True}, "report_path": "/tmp/report.json"})
-    assert f"其中前序已迁 {previously_moved}" in summary
-
-
-@pytest.mark.parametrize("binding", ["delegated", "reexported", "mixin"])
-def test_ast_base_location_follows_shared_resolution(tmp_path, binding):
-    original = "scripts/original.py"
-    target = "src/trippostcollect/platforms/xhs/session.py"
-    implementation = target
-    row = {"file": original, "qualname": "f", "disposition": "迁", "card": "T09",
-           "target": "platforms/xhs/session.py"}
-    rows = [row]
-    files = {original: "", target: "def f():\n    return 1\n"}
-    if binding == "delegated":
-        files[original] = ("from trippostcollect.platforms.xhs.session import f as worker\n"
-                           "def f():\n    return worker()\n")
-    elif binding == "reexported":
-        implementation = "src/trippostcollect/records/shared.py"
-        files[implementation] = files[target]
-        files[target] = "from trippostcollect.records.shared import f\n"
-    else:
-        row["qualname"] = "C.f"
-        rows.append({**row, "qualname": "C", "target": "platforms/xhs/core.py"})
-        files[target] = "class Session:\n    def f(self):\n        return 1\n"
-        files["src/trippostcollect/platforms/xhs/core.py"] = (
-            "from trippostcollect.platforms.xhs.session import Session\nclass C(Session):\n    pass\n")
-    before = files.copy()
-    files[implementation] = files[implementation].replace("return 1", "return 2")
-    write_sources(tmp_path, files)
-    result = gate.ast_review(tmp_path, rows, lambda path: before.get(path, ""))
-    assert len(result["different"]) == result["previously_moved"] == 1
-    item = result["different"][0]
-    assert item["base_location"] == item["location"] == {
-        "state": "moved", "file": implementation, "qualname": "Session.f" if binding == "mixin" else "f",
-    }
-    assert "return 1" in item["diff"] and "return 2" in item["diff"]
-
-
 def test_changed_files_only_existing_python(tmp_path):
     write_sources(tmp_path, {"scripts/new.py": "", "README.md": ""})
     result = gate.changed_files(tmp_path, "temp/test.py\0scripts/gone.py\0scripts/new.py\0README.md\0temp\0")
@@ -294,7 +146,6 @@ def test_summary_has_no_fork_transition_line():
     summary = gate.render_summary({
         "canary": {"passed": True}, "report_path": "/tmp/r.json",
         "files": {"root": ["scripts/a.py"], "compile": ["scripts/a.py"], "ruff": ["scripts/a.py"], "failures": []},
-        "ast": {"equal": [], "different": [], "missing": [], "pending": [], "exited": [], "previously_moved": 0},
     })
     assert "改动文件：1；编译 1，ruff 1" in summary
     assert "fork" not in summary
@@ -315,7 +166,7 @@ def test_summary_conclusion(skip, errors, conclusion):
 
 
 def test_no_production_imports():
-    # 闸门的依赖限于标准库和台账工具，不依赖或执行业务模块。
+    # 闸门只依赖标准库与同目录沙箱后端，不导入或执行业务模块。
     tree = ast.parse(Path(gate.__file__).read_text())
     imports = [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
     imports += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]

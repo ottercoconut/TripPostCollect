@@ -29,9 +29,9 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 
 ## 内容归属
 
-平台迁移 v0.7：[主设计与历史研究](platform-adapters.md)、[详细迁移规格](platform-adapter-specification.md)、
-[附录 C8 全量符号账](platform-adapter-symbol-ledger.md)、[P00 工作单与证据索引](platform-adapter-preflight.md)。
-详细规格定义迁移清单、接口/读取时点、任务和门禁；C8 逐项处置每个定义；任务卡的执行清单以 GitHub issues 跟踪。
+平台迁移 v0.7（已完成，历史资料）：[主设计与历史研究](platform-adapters.md)、[详细迁移规格](platform-adapter-specification.md)、
+[P00 工作单与证据索引](platform-adapter-preflight.md)。详细规格定义迁移清单、接口/读取时点、任务和门禁；任务卡的执行清单以
+GitHub issues 跟踪。迁移台账工具、台账产物与附录 C8 全量符号账已在 #197 删除，历史从 Git 查询。
 平台适配迁移已于 T14（#19）收口，fork 子模块与私有桥已删除；四者保留为迁移设计、决策与证据记录，
 不构成现行操作契约。五个平台的现行实现位于 `src/trippostcollect/platforms/<platform>/`。
 分工、单卡流程、验证与接力规则见[重构执行手册](refactor-playbook.md)。

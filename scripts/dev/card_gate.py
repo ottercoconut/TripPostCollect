@@ -1,11 +1,8 @@
-"""在本机沙箱中复核迁移卡片；终端只输出摘要，明细保存在临时报告。"""
+"""在本机沙箱中对当前工作树做改动检查与分 lane 测试，并与基线提交的失败集合比较；终端只输出摘要，明细保存在临时报告。"""
 
 from __future__ import annotations
 
 import argparse
-import ast
-from collections import Counter, defaultdict
-import difflib
 import hashlib
 import importlib.util
 import io
@@ -18,8 +15,6 @@ import sys
 import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
-
-import adapter_ledger as ledger
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -132,70 +127,16 @@ class Sandbox:
         return record["returncode"]
 
 
+def json_text(value):
+    """报告统一编码、缩进、键顺序及末尾换行。"""
+    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
 def changed_files(root, names):
     """解析 NUL 分隔文件名；删除文件计入清单，只检查现存 Python 文件。"""
     files = sorted({p for p in names.split("\0") if p and p != "temp" and not p.startswith("temp/")})
     python = [p for p in files if p.endswith(".py") and (root / p).is_file()]
     return {"root": files, "compile": python, "ruff": python}
-
-
-def ast_text(node):
-    return ast.dump(node, include_attributes=False) if node is not None else None
-
-
-def ast_review(root, rows, reader, cards=(), pairs=()):
-    """两侧共用按文件缓存的定位器，覆盖本卡迁移和前序已迁实现的变化。"""
-    inspect = ledger.definition_inspector(root)
-    base_inspect = ledger.definition_inspector(root, reader)
-
-    result = {"equal": [], "different": [], "missing": [], "pending": [], "exited": [],
-              "cards": [], "previously_moved": 0}
-    selected_cards = set(cards)
-
-    def position(located):
-        return {"state": located.state, "file": located.file, "qualname": located.qualname}
-
-    def compare(item, old, new):
-        if old is None or new is None:
-            item["reason"] = "基线无定义" if old is None else "工作树未定位"
-            result["missing"].append(item)
-        elif ast_text(old) == ast_text(new):
-            result["equal"].append(item)
-        else:
-            diff = list(difflib.unified_diff(
-                ast.unparse(old).splitlines(), ast.unparse(new).splitlines(),
-                fromfile="基线", tofile="工作树", lineterm="",
-            ))
-            item["diff"] = "\n".join(diff[:120])[:16000]
-            item["truncated"] = len(diff) > 120 or len("\n".join(diff[:120])) > 16000
-            result["different"].append(item)
-
-    for row in rows:
-        if cards and row["card"] not in cards:
-            continue
-        previous = ledger.locate_definition(root, row, base_inspect, rows=rows)
-        located = ledger.locate_definition(root, row, inspect, rows=rows)
-        if not cards and previous.state == located.state and ast_text(previous.node) == ast_text(located.node):
-            continue
-        selected_cards.add(row["card"])
-        result["previously_moved"] += previous.state == "moved"
-        item = {"definition": f"{row['file']}:{row['qualname']}",
-                "base_location": position(previous), "location": position(located)}
-        if located.state in ("pending", "exited"):
-            result[located.state].append(item.copy())
-            # 原位 pending 仍单列；已迁实现退回原位且内容改变时不能掩盖差异。
-            if (located.state == "exited" or previous.state != "moved"
-                    or ast_text(previous.node) == ast_text(located.node)):
-                continue
-        compare(item, previous.node, located.node)
-    for original, target in pairs:
-        new = inspect(target)[0]
-        for name, old in base_inspect(original)[0].items():
-            compare({"definition": f"{original}:{name}",
-                     "base_location": {"file": original, "qualname": name},
-                     "location": {"file": target, "qualname": name}}, old, new.get(name))
-    result["cards"] = sorted(selected_cards)
-    return result
 
 
 def junit_result(xml_path, counts, returncode=0):
@@ -333,29 +274,12 @@ def archive_source(root, base, destination):
 def render_summary(report):
     """三态结论始终在最后一行；跳过测试不能成为通过。"""
     lines = ["沙箱 canary：" + ("通过" if report.get("canary", {}).get("passed") else "未通过")]
-    if "ledger" in report:
-        item = report["ledger"]
-        lines.append(f"台账：总计 {item['progress']['total']}，{item['progress']['counts']}")
-        for card, counts in item["cards"].items():
-            lines.append(f"  {card}：{counts}")
-        lines.append("台账四项：" + ("通过" if item["passed"] else "未通过"))
-        lines.extend("  缺失：" + f"{r['file']}:{r['qualname']}" for r in item["progress"]["missing"][:20])
-        if any(item["drift"].values()):
-            lines.extend(ledger.json_text(item["drift"]).splitlines()[:20])
     if "frozen" in report:
         lines.append("冻结文件：" + ("通过" if report["frozen"] else "未通过"))
     if "files" in report:
         item = report["files"]
         lines.append(f"改动文件：{len(item['root'])}；"
                      f"编译 {len(item['compile'])}，ruff {len(item['ruff'])}；失败 {item['failures']}")
-    if "ast" in report:
-        item = report["ast"]
-        def names(key):
-            return [r["definition"] for r in item[key]]
-
-        lines.append(f"AST：逐字 {len(item['equal'])}，差异 {names('different')}，未定位 {names('missing')}；"
-                     f"原位 pending {len(item['pending'])}，退出 {len(item['exited'])}；"
-                     f"其中前序已迁 {item['previously_moved']}")
     if report.get("skip_tests"):
         lines.append("测试：未运行（--skip-tests）")
     for lane, item in report.get("tests", {}).items():
@@ -382,8 +306,6 @@ def render_summary(report):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base")
-    parser.add_argument("--card", action="append", default=[])
-    parser.add_argument("--pair", action="append", default=[])
     parser.add_argument("--skip-tests", action="store_true")
     parser.add_argument("--refresh-baseline", action="store_true")
     parser.add_argument("--keep", action="store_true")
@@ -416,18 +338,6 @@ def main(argv=None):
         backend.preflight()
         if not python.is_file():
             raise RuntimeError("缺少工作树解释器")
-        rows = ledger.load_symbols(ROOT)["rows"]
-        if set(args.card) - {r["card"] for r in rows}:
-            raise ValueError("未知卡号")
-        pairs = []
-        for pair in args.pair:
-            original, separator, target = pair.partition(":")
-            if not separator or not original or not target:
-                raise ValueError("--pair 必须是原文件:新文件")
-            for path in (original, target):
-                if Path(path).is_absolute() or ".." in Path(path).parts:
-                    raise ValueError("--pair 必须使用仓库内相对路径")
-            pairs.append((original, target))
         lanes = load_module(ROOT / "tests/run_lanes.py", "card_gate_runtime")
         home = Path.home().resolve()
         probe_checkout, profile_probes = canary_profile_probes(output, backend.PROFILE_STORES)
@@ -453,18 +363,6 @@ def main(argv=None):
             log = output / (name + ".log")
             return sandbox.run(command, ROOT, log), log
 
-        checks = {}
-        for name, arguments in (("symbols", ["symbols", "--check"]), ("inputs", ["inputs", "--check"]),
-                                ("drift", ["drift"]), ("progress", ["progress", "--json"])):
-            rc, log = check(name, [python, "scripts/dev/adapter_ledger.py", *arguments])
-            checks[name] = {"returncode": rc, "log": str(log)}
-        drift = json.loads((output / "drift.log").read_text())
-        progress = json.loads((output / "progress.log").read_text())
-        report["ledger"] = {"checks": checks, "drift": drift, "progress": progress, "cards": {},
-                            "passed": not any(c["returncode"] for c in checks.values())
-                            and not any(drift.values()) and progress["counts"]["missing"] == 0}
-        if not report["ledger"]["passed"]:
-            report["errors"].append("台账检查失败")
         report["frozen"] = check("frozen", [python, "scripts/verify_frozen_files.py"])[0] == 0
         if not report["frozen"]:
             report["errors"].append("冻结文件校验失败")
@@ -483,18 +381,6 @@ def main(argv=None):
         if files["failures"]:
             report["errors"].append("改动文件检查失败")
 
-        def reader(path):
-            listed = git_bytes(ROOT, "ls-tree", "--name-only", base, "--", path).decode().splitlines()
-            return git_bytes(ROOT, "show", f"{base}:{path}").decode() if path in listed else ""
-
-        report["ast"] = ast_review(ROOT, rows, reader, args.card, pairs)
-        counts = defaultdict(Counter)
-        for row in progress["rows"]:
-            if row["card"] in report["ast"]["cards"]:
-                counts[row["card"]][row["state"]] += 1
-        report["ledger"]["cards"] = dict(sorted(counts.items()))
-        if report["ast"]["different"] or report["ast"]["missing"]:
-            report["errors"].append("AST 存在差异或未定位定义")
         if not args.skip_tests:
             identity = cache_identity(base, hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
             cache = common / "card-gate" / f"baseline-{base}.json"
@@ -507,7 +393,7 @@ def main(argv=None):
                 cached = {"identity": identity, "lanes": baseline}
                 # 缓存是编排进程唯一写入临时根以外的报告，不经子进程执行。
                 cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_text(ledger.json_text(cached), encoding="utf-8")
+                cache.write_text(json_text(cached), encoding="utf-8")
                 report["cache"] = "重建 " + str(cache)
             else:
                 report["cache"] = "命中 " + str(cache)
@@ -534,7 +420,7 @@ def main(argv=None):
         report["exitcode"] = code
         summary = render_summary(report)
         report["summary"] = summary
-        Path(report["report_path"]).write_text(ledger.json_text(report), encoding="utf-8")
+        Path(report["report_path"]).write_text(json_text(report), encoding="utf-8")
         (output / "summary.txt").write_text(summary + "\n", encoding="utf-8")
         print(summary)
     return code

@@ -1,5 +1,7 @@
 # 平台适配重构执行手册
 
+> **历史资料：** 平台适配迁移（T00–T14）已完成。迁移台账工具（`scripts/dev/adapter_ledger*.py`）、台账产物（`docs/adapter-ledger/`）与附录 C8（`platform-adapter-symbol-ledger.md`）已在 #197 删除，卡片闸门不再做台账与 AST 复核；文中相关内容只作历史记录，需要时从 Git 查询。
+
 本手册规定平台适配重构（T00–T14）的分工、单卡流程、验证与审查标准、并行与接力规则。
 设计与迁移清单以 `platform-adapters.md`、`platform-adapter-specification.md`、`platform-adapter-symbol-ledger.md` 为准；
 本手册只规定"怎么做、怎么验、何时停"。当前进度与本机配置不写在这里，见本地交接说明

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import importlib
 import json
 import os
 from pathlib import Path
@@ -23,36 +22,11 @@ FORK_TOPS = {
 }
 SCRIPT_MODULES = {path.stem for path in (ROOT / "scripts").glob("*.py")} | {"scripts"}
 WORKER_CODES = ("wb", "dy", "zhihu", "xhs")
-MIXIN_MODULES = {"session", "navigation", "login", "author", "detail", "media", "errors", "parser", "behavior"}
-# #71 新增、台账之外的 mixin 模块。
-T71_MIXIN_MODULES = {"scan", "overlay"}
 # 平台层只可依赖根侧父子共用的格式定义，不得依赖租约、发现等控制面。
 # #94：互动计数取证的逐篇证据与子摘要汇总共用 xhs.engagement（只依赖标准库与 records.formal）。
 XHS_ROOT_MODULES_ALLOWED = {
     "trippostcollect.xhs.engagement", "trippostcollect.xhs.operator_wait", "trippostcollect.xhs.search_target",
 }
-
-
-def _resolutions() -> dict:
-    sys.path.insert(0, str(ROOT / "scripts/dev"))
-    try:
-        rules = importlib.import_module("adapter_ledger_rules")
-    finally:
-        sys.path.remove(str(ROOT / "scripts/dev"))
-    return rules.PROGRESS_RESOLUTIONS
-
-
-def exited_rows() -> set[tuple[str, str]]:
-    return {key for key, (action, _, _) in _resolutions().items() if action == "退出"}
-
-
-def migrated_names() -> dict[tuple[str, str], str]:
-    """“迁至”行的承接方法名（限定名最后一段）。"""
-    return {
-        key: target.rsplit(".", 1)[-1]
-        for key, (action, target, _) in _resolutions().items()
-        if action == "迁至" and target
-    }
 
 
 def resolved_imports(path: Path, package: str):
@@ -209,82 +183,6 @@ def test_runtime_does_not_import_xhs_platform_or_scripts(tmp_path):
     result = run_child(code, tmp_path)
     assert result.returncode == 0, result.stderr[-3000:]
     assert json.loads(result.stdout.splitlines()[-1]) == []
-
-
-def ledger_rows():
-    rows = json.loads((ROOT / "docs/adapter-ledger/symbols.json").read_text())["rows"]
-    return [row for row in rows if row["card"] == "T09"]
-
-
-def test_crawler_methods_live_in_ledger_target_mixins():
-    core = importlib.import_module("trippostcollect.platforms.xhs.core")
-    crawler = core.XiaoHongShuCrawler
-    rows = [
-        row for row in ledger_rows()
-        if row["file"].endswith("media_platform/xhs/core.py") and row["qualname"].startswith("XiaoHongShuCrawler.")
-        and row["target"].startswith("platforms/xhs/")
-    ]
-    assert len(rows) == 69
-    # #71 起被替代的方法按规则文件登记“退出”，不再要求存在。
-    rows = [row for row in rows if (row["file"], row["qualname"]) not in exited_rows()]
-    migrated = migrated_names()
-    for row in rows:
-        name = migrated.get((row["file"], row["qualname"]), row["qualname"].split(".", 1)[1])
-        owner = next(cls for cls in crawler.__mro__ if name in vars(cls))
-        expected = "trippostcollect." + row["target"][:-3].replace("/", ".")
-        assert owner.__module__ == expected, (name, owner, expected)
-    # 每个目标模块一个 mixin，作为组合类的直接基类；排在前面的 mixin 只继承 object。
-    mixins = [base for base in crawler.__bases__ if base.__module__ != core.__name__]
-    assert {base.__module__.rsplit(".", 1)[-1] for base in mixins} == {
-        row["target"][len("platforms/xhs/"):-3] for row in rows if row["target"] != "platforms/xhs/core.py"
-    } | T71_MIXIN_MODULES
-    for base in mixins:
-        assert base.__module__.rsplit(".", 1)[-1] in MIXIN_MODULES | T71_MIXIN_MODULES
-        assert base.__bases__ == (object,), base
-    tree = ast.parse((PLATFORM / "core.py").read_text())
-    imported = {}
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("trippostcollect.platforms.xhs."):
-            assert node.level == 0
-            imported.update({alias.asname or alias.name: node.module for alias in node.names})
-    (class_node,) = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "XiaoHongShuCrawler"]
-    moved = {row["qualname"].split(".", 1)[1] for row in rows if row["target"] != "platforms/xhs/core.py"}
-    for base in class_node.bases[: len(mixins)]:
-        assert isinstance(base, ast.Name), ast.unparse(base)
-        assert imported.get(base.id, "").startswith("trippostcollect.platforms.xhs."), base.id
-    defined = {node.name for node in class_node.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    assert not defined & moved, sorted(defined & moved)
-    # 原实例属性名保持，fork 测试与旧桥仍按这些名字替换。
-    for name in ("_popup_sleep", "_popup_monotonic", "_get_manual_wait_budget", "_run_browser_session",
-                 "launch_browser_with_cdp"):
-        assert callable(getattr(crawler, name))
-
-
-def test_old_locations_keep_no_second_implementation():
-    """旧 scripts 位置只能薄转发或重导出，不保留第二份权威定义；私有桥 E 已在 T14-C 整体删除。"""
-    moved = {}
-    for row in ledger_rows():
-        if (row["file"].startswith("scripts/") and "." not in row["qualname"]
-                and row["target"].startswith(("platforms/xhs/", "artifacts/", "xhs/"))):
-            moved.setdefault(row["file"], set()).add(row["qualname"])
-    assert set(moved) == {
-        "scripts/mediacrawler_behavior.py", "scripts/mediacrawler_export_entrypoint.py", "scripts/mediacrawler_crawl.py",
-    }
-    absent = {
-        "scripts/mediacrawler_behavior.py",
-        "scripts/mediacrawler_export_entrypoint.py",
-    }
-    for relative in absent:
-        assert not (ROOT / relative).exists()
-    for relative, names in moved.items():
-        if relative in absent:
-            continue
-        tree = ast.parse((ROOT / relative).read_text())
-        definitions = {
-            node.name: node for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        }
-        assert not set(definitions) & names, (relative, sorted(set(definitions) & names))
 
 
 def test_formal_xhs_accumulator_publishes_through_worker_event_exit():

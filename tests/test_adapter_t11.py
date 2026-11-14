@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import ast
 from contextlib import contextmanager
-from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
 import importlib
@@ -25,7 +23,6 @@ from PIL import Image
 import pytest
 
 from support import douyin_full_scan_deviation, fork_removal_deviation, shared_launch_deviation, ua_from_browser_deviation
-from support import zhihu_image_text_deviation
 from support import zhihu_search_capture_deviation
 from trippostcollect.application import collection, reporting, visit_gate
 from trippostcollect.artifacts.image_candidates import content_image_candidates
@@ -42,88 +39,8 @@ from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/adapter_t11"
-ROWS = [r for r in json.loads((ROOT / "docs/adapter-ledger/symbols.json").read_text())["rows"] if r["card"] == "T11"]
 sys.path.insert(0, str(ROOT / "scripts"))
 executor = importlib.import_module("mediacrawler_crawl")
-
-# 第一阶段每项均为零差异；第二阶段只能逐项登记并审阅，不允许通配规则。
-# 可用规则键：leading_ports_bindings（名称元组）、trailing_keyword_ports（布尔值）、
-# injected_keyword_params（名称元组：签名新增的必填仅关键字注入参数，按原全局名命名）、
-# ports_call_sites（被调名称元组：对这些名字的每一处直接调用都必须恰好追加 ports=ports，归一化时剥离）、
-# annotation_names（旧名到新名的映射，仅遍历注解）。控制流和其他调用表达式不归一化。
-AST_RULES = {
-    "item_type_from_path": {},
-    "truncate": {},
-    "extract_sample": {},
-    "summarize_jsonl": {},
-    "summarize_output": {},
-    "summarize_output_with_progress": {},
-    "write_json_with_progress": {},
-    "terminal_summary_envelope": {},
-    "ensure_web_schema": {},
-    "stable_douyin_search_id": {},
-    "effective_discovery_checkpoint_event": {},
-    "persist_discovery_checkpoint": {},
-    "load_pagination_evidence": {},
-    "attach_skipped_candidate_evidence": {},
-    "collect_formal_records": {},
-    "resolve_media_root": {},
-    "_project_relative_evidence_path": {},
-    "_load_manifest_with_evidence": {},
-    "_staging_root_for_manifest_entry": {},
-    "rollback_newly_promoted_images": {},
-    "formal_media_persistence_lock": {},
-    "_validated_manifest_rows_for_post": {},
-    "materialize_formal_record_images": {},
-    "find_existing_post": {},
-    "upsert_web_post": {},
-    "FormalImportBeforeCommitError": {},
-    "FormalImportBeforeCommitError.__init__": {},
-    "commit_formal_import": {},
-    "import_valid_records": {},
-    "import_valid_records_with_media_rollback": {},
-    "_run_platform_without_policy": {'trailing_keyword_ports': True, 'leading_ports_bindings': ('run_bilibili_article_search',)},
-    "effective_attempt_exit_code": {},
-    "run_platform": {'trailing_keyword_ports': True, 'ports_call_sites': ('_run_platform_without_policy',)},
-    "collect_behavior_validation": {},
-    "latest_platform_result_counts": {},
-    "write_markdown": {},
-    "apply_formal_completion_gates": {},
-    "formal_import_gate_met": {},
-    "formal_image_promotion_allowed": {},
-    "runtime_blocker_stop_reason": {},
-    "runtime_blocker_from_terminal_event": {},
-    "runtime_blocker_from_pagination_evidence": {},
-    "latest_runtime_blocker": {},
-    "apply_runtime_blocker": {},
-    "_run_main": {'trailing_keyword_ports': True, 'leading_ports_bindings': ('ensure_prerequisites',), 'ports_call_sites': ('run_platform',)},
-    # 协调者预置：原 main 三行逐字，三个全局名改为同名注入参数（由脚本薄入口调用时传入）。
-    "main": {"injected_keyword_params": ("parse_args", "xhs_supervisor_runtime_reporter_from_context", "_run_main")},
-}
-
-
-# T12 按规格授权的两处改动，在冻结旧定义上做同样的删除后再逐字比较，其余差异仍由 AST 断言拦截：
-# 规格 D2（469/485 行）删除 6 个父发无消费者的 env；规格 C1 以包内资源替代 fork 源码树存在检查。
-T12_REMOVED_ENV = {
-    "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID", "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM", "TRIPPOSTCOLLECT_DISCOVERY_KEYWORD",
-    "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE", "TRIPPOSTCOLLECT_DISCOVERY_CHECKPOINT_WRITE_DISABLED",
-    "TRIPPOSTCOLLECT_XHS_CREATOR_VERIFY_WAIT_SECONDS",
-}
-# T14-C 授权差异：唯一消费者 fork 旧 store 随 fork 删除，父侧不再发出（ledger.AUTHORIZED_ENV_REMOVALS 同步登记）。
-T14C_REMOVED_ENV = {"TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL"}
-
-
-def t12_authorized(node):
-    node = deepcopy(node)
-    for child in ast.walk(node):
-        if isinstance(child, ast.Dict):
-            kept = [(key, value) for key, value in zip(child.keys, child.values)
-                    if not (isinstance(key, ast.Constant) and key.value in T12_REMOVED_ENV | T14C_REMOVED_ENV)]
-            child.keys, child.values = [key for key, _ in kept], [value for _, value in kept]
-    if isinstance(node, ast.FunctionDef) and node.name == "ensure_prerequisites":
-        node.body = [statement for statement in node.body
-                     if not (isinstance(statement, ast.If) and "MEDIACRAWLER_DIR" in ast.unparse(statement.test))]
-    return node
 
 
 # #75 授权差异：删除 timeout_per_platform 与按平台的下限，无进展看门狗阈值改为代码常量。
@@ -366,160 +283,6 @@ def t115_authorized_source(text):
     return text
 
 
-def t14_authorized(node):
-    """T14 曾在 run_platform 预算守卫前插入 profile 迁移检查；#112 迁移完成后删除，新定义须与冻结原文相同。"""
-    assert "require_platform_session_migrated" not in ast.unparse(node)
-    return node
-
-
-def definition(source, qualname):
-    node = ast.parse(source)
-    for name in qualname.split("."):
-        found = [n for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name == name]
-        assert len(found) == 1, f"新定义不存在或不唯一：{qualname}"
-        node = found[0]
-    return node
-
-
-def normalized_pair(old, new, rules):
-    """严格限定三类接缝；未登记的差异保留给 AST 断言。"""
-    old, new = deepcopy(old), deepcopy(new)
-    assert set(rules) <= {"leading_ports_bindings", "trailing_keyword_ports", "injected_keyword_params",
-                          "ports_call_sites", "annotation_names"}
-    names = rules.get("leading_ports_bindings", ())
-    offset = int(bool(new.body and isinstance(new.body[0], ast.Expr)
-                      and isinstance(new.body[0].value, ast.Constant)
-                      and isinstance(new.body[0].value.value, str)))
-    for name in names:
-        expected = ast.parse(f"{name} = ports.{name}").body[0]
-        assert ast.dump(new.body[offset]) == ast.dump(expected)
-        del new.body[offset]
-    injected = tuple(rules.get("injected_keyword_params", ()))
-    if injected:
-        assert tuple(a.arg for a in new.args.kwonlyargs[:len(injected)]) == injected
-        assert all(default is None for default in new.args.kw_defaults[:len(injected)])
-        del new.args.kwonlyargs[:len(injected)]
-        del new.args.kw_defaults[:len(injected)]
-    if rules.get("trailing_keyword_ports"):
-        assert new.args.kwonlyargs[-1].arg == "ports"
-        assert new.args.kw_defaults[-1] is None
-        new.args.kwonlyargs.pop()
-        new.args.kw_defaults.pop()
-
-    callees = set(rules.get("ports_call_sites", ()))
-    if callees:
-        stripped = 0
-        for node in ast.walk(new):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in callees:
-                tail = node.keywords[-1] if node.keywords else None
-                assert tail is not None and tail.arg == "ports" and isinstance(tail.value, ast.Name) \
-                    and tail.value.id == "ports", f"{node.func.id} 调用缺少末尾 ports=ports"
-                node.keywords.pop()
-                stripped += 1
-        assert stripped, "登记了 ports_call_sites 却没有对应调用"
-
-    class AnnotationNames(ast.NodeTransformer):
-        def visit_Name(self, node):
-            return ast.Name(id=rules["annotation_names"].get(node.id, node.id), ctx=node.ctx)
-
-    if rules.get("annotation_names"):
-        rewrite = AnnotationNames()
-        for node in ast.walk(old):
-            for field in ("annotation", "returns"):
-                annotation = getattr(node, field, None)
-                if annotation is not None:
-                    setattr(node, field, rewrite.visit(annotation))
-    return ast.dump(old), ast.dump(new)
-
-
-def t124_authorized_source(text):
-    """#124 有意偏离：抖音每轮从首页全量扫描，三元组续跑与 reseed 证据退出（见 support.douyin_full_scan_deviation）。
-
-    #185 在同一冻结源上再把知乎并入全量扫描的拒绝条件（见 support.zhihu_search_capture_deviation）。
-    #191 允许知乎零张正文图在物化时记为完整（见 support.zhihu_image_text_deviation）。
-    """
-    return zhihu_image_text_deviation.t11_source(zhihu_search_capture_deviation.t11_source(
-        douyin_full_scan_deviation.t11_after_t71_source(
-            t71_authorized_source(douyin_full_scan_deviation.t11_source(t75_authorized_source(text)))
-        )
-    ))
-
-
-@pytest.mark.parametrize("row", ROWS, ids=lambda row: row["qualname"])
-def test_a_migrated_ast(row):
-    name = row["qualname"]
-    target = ROOT / "src/trippostcollect" / row["target"]
-    if row["disposition"] == "薄":
-        target = ROOT / "src/trippostcollect/application/collection.py"
-    assert target.exists(), f"新定义不存在：{target.relative_to(ROOT)}::{name}"
-    frozen = t124_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text())
-    if name in douyin_full_scan_deviation.T11_EXITED_DEFINITIONS:
-        # #124：旧定义确在冻结源码，新侧已删除且无人引用。
-        assert definition(frozen, name)
-        assert name not in {n.name for n in ast.parse(target.read_text()).body if hasattr(n, "name")}
-        assert name not in target.read_text()
-        return
-    old = t12_authorized(definition(frozen, name))
-    new = t14_authorized(definition(target.read_text(), name))
-    assert normalized_pair(old, new, AST_RULES[name])[0] == normalized_pair(old, new, AST_RULES[name])[1]
-    if row["disposition"] == "薄":
-        tree = ast.parse((ROOT / row["file"]).read_text())
-        entry = definition((ROOT / row["file"]).read_text(), name)
-        assert len(entry.body) == 1 and isinstance(entry.body[0], ast.Return)
-        call = entry.body[0].value
-        # 薄入口只把脚本全局名按同名关键字传入，调用时取值，现有对脚本名的 patch 继续生效。
-        assert isinstance(call, ast.Call) and not call.args
-        injected = tuple(AST_RULES[name].get("injected_keyword_params", ()))
-        assert tuple(k.arg for k in call.keywords) == injected
-        assert all(isinstance(k.value, ast.Name) and k.value.id == k.arg for k in call.keywords)
-        imports = {a.asname or a.name: (n.module, a.name) for n in tree.body
-                   if isinstance(n, ast.ImportFrom) for a in n.names}
-        assert isinstance(call.func, ast.Name)
-        assert imports[call.func.id] == ("trippostcollect.application.collection", "main")
-
-
-def test_a_other_top_level_definitions_unchanged():
-    names = {r["qualname"].split(".")[0] for r in ROWS}
-    # T09 按台账迁出的定义（child reporter 等）不再留在脚本，排除台账 card=="T09" 的行。
-    ledger = json.loads((ROOT / "docs/adapter-ledger/symbols.json").read_text())["rows"]
-    names |= {r["qualname"].split(".")[0] for r in ledger
-              if r["card"] == "T09" and r["file"] == "scripts/mediacrawler_crawl.py"}
-    old = ast.parse(shared_launch_deviation.t11_source(ua_from_browser_deviation.t11_source(
-        t115_authorized_source((FIXTURES / "mediacrawler_crawl.py.txt").read_text()))))
-    new = (ROOT / "scripts/mediacrawler_crawl.py").read_text()
-    assert len(ROWS) == 46 and set(AST_RULES) == {r["qualname"] for r in ROWS}
-    for node in old.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name not in names:
-            assert ast.dump(t12_authorized(node)) == ast.dump(definition(new, node.name)), node.name
-
-
-def test_ast_normalization_interface():
-    old = definition("def sample(value: Old):\n    first(value)\n    second(value)\n    return 1\n", "sample")
-    new = definition("def sample(value: New, *, ports):\n    first = ports.first\n    first(value)\n    second(value)\n    return 1\n", "sample")
-    assert normalized_pair(old, new, {})[0] != normalized_pair(old, new, {})[1]
-    rules = {"leading_ports_bindings": ("first",), "trailing_keyword_ports": True,
-             "annotation_names": {"Old": "New"}}
-    assert normalized_pair(old, new, rules)[0] == normalized_pair(old, new, rules)[1]
-    call_old = definition("def sample(value):\n    return inner(value, flag=1)\n", "sample")
-    call_new = definition("def sample(value, *, ports):\n    return inner(value, flag=1, ports=ports)\n", "sample")
-    call_rules = {"trailing_keyword_ports": True, "ports_call_sites": ("inner",)}
-    assert normalized_pair(call_old, call_new, call_rules)[0] == normalized_pair(call_old, call_new, call_rules)[1]
-    for bad in ("return inner(value, ports=ports, flag=1)", "return inner(value, flag=1, ports=other)",
-                "return inner(value, flag=2, ports=ports)"):
-        changed = definition("def sample(value, *, ports):\n    " + bad + "\n", "sample")
-        try:
-            pair = normalized_pair(call_old, changed, call_rules)
-        except AssertionError:
-            continue
-        assert pair[0] != pair[1], bad
-    for body in ("first(value)\n    second(value)\n    return 2",
-                 "second(value)\n    first(value)\n    return 1",
-                 "first(value)\n    second(value)\n    raise RuntimeError",
-                 "if value:\n        first(value)\n    second(value)\n    return 1"):
-        changed = definition("def sample(value: New, *, ports):\n    first = ports.first\n    " + body, "sample")
-        assert normalized_pair(old, changed, rules)[0] != normalized_pair(old, changed, rules)[1]
-
-
 @pytest.fixture
 def baseline(monkeypatch):
     source = (FIXTURES / "mediacrawler_crawl.py.txt").read_bytes()
@@ -569,11 +332,45 @@ def strict_patch(monkeypatch, target, name, value):
 
 # 执行器端口字段：新实现经 ports 取得，装配在脚本入口调用时读取脚本全局名。
 PORT_FIELDS = {"ensure_prerequisites", "run_bilibili_article_search"}
-TARGETS = {r["qualname"]: r["target"] for r in ROWS if not r["target"].startswith("scripts/")}
+# 执行器各函数的实际定义模块（原 T11 迁移目标）；薄包装不经脚本，直接定位到这里读取全局名。
+TARGETS = {
+    name: target
+    for target, names in (
+        ("application/reporting.py", (
+            "item_type_from_path", "truncate", "extract_sample", "summarize_jsonl", "summarize_output",
+            "summarize_output_with_progress", "write_json_with_progress", "terminal_summary_envelope",
+            "collect_behavior_validation", "latest_platform_result_counts", "write_markdown",
+        )),
+        ("db/content.py", (
+            "ensure_web_schema", "find_existing_post", "upsert_web_post", "FormalImportBeforeCommitError",
+            "FormalImportBeforeCommitError.__init__", "commit_formal_import", "import_valid_records",
+        )),
+        ("application/collection.py", (
+            "stable_douyin_search_id", "effective_discovery_checkpoint_event", "persist_discovery_checkpoint",
+            "load_pagination_evidence", "attach_skipped_candidate_evidence", "collect_formal_records",
+            "import_valid_records_with_media_rollback", "_run_platform_without_policy",
+            "effective_attempt_exit_code", "run_platform", "apply_formal_completion_gates",
+            "formal_import_gate_met", "formal_image_promotion_allowed", "_run_main",
+        )),
+        ("artifacts/paths.py", (
+            "resolve_media_root",
+        )),
+        ("artifacts/formal_images.py", (
+            "_project_relative_evidence_path", "_load_manifest_with_evidence", "_staging_root_for_manifest_entry",
+            "rollback_newly_promoted_images", "formal_media_persistence_lock", "_validated_manifest_rows_for_post",
+            "materialize_formal_record_images",
+        )),
+        ("application/failures.py", (
+            "runtime_blocker_stop_reason", "runtime_blocker_from_terminal_event",
+            "runtime_blocker_from_pagination_evidence", "latest_runtime_blocker", "apply_runtime_blocker",
+        )),
+    )
+    for name in names
+}
 
 
 def owner(module, function, name=None):
-    """找到函数真正读取全局变量的模块；新侧 T11 函数按台账 target 定位，不经脚本薄包装。"""
+    """找到函数真正读取全局变量的模块；新侧执行器函数按 TARGETS 定位，不经脚本薄包装。"""
     migrated = None
     if module is executor and function in TARGETS and name not in PORT_FIELDS:
         module_name = "trippostcollect." + TARGETS[function].removesuffix(".py").replace("/", ".")

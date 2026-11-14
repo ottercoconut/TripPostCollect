@@ -35,7 +35,6 @@ ENTRY_MODULE = "trippostcollect.platforms.entry"
 # 退出切片依赖：根环境不安装，四站与入口导入链不得触及。
 EXIT_SLICE_MODULES = ("redis", "sqlalchemy", "aiomysql", "motor", "jieba", "matplotlib", "wordcloud", "typer")
 WORKER_PLATFORMS = {"wb": "weibo", "dy": "douyin", "zhihu": "zhihu", "xhs": "xhs"}
-UNSELECTED_FORK_PLATFORMS = {"weibo", "douyin", "zhihu", "xhs", "bilibili", "kuaishou", "tieba"}
 
 
 def _old_argv(name: str, tmp: Path) -> list[str]:
@@ -458,17 +457,4 @@ def test_run_bounds_cleanup_time(capsys: pytest.CaptureFixture[str]) -> None:
 
 # ---------- 迁移进度 ----------
 
-def test_t02_first_batch_definitions_are_moved() -> None:
-    ledger = import_module("adapter_ledger")
-    report = ledger.build_progress(ROOT)
-    assert report["missing"] == []
-    rows = [row for row in report["rows"] if row["card"] == "T02"]
-    assert len(rows) == 81
-    # T14-C 删除 fork 与旧桥后不再有 pending：每行都已迁入（moved）或随旧桥退出（exited）。
-    unresolved = sorted((row["file"], row["qualname"]) for row in rows if row["state"] not in {"moved", "exited"})
-    assert unresolved == []
 
-
-def test_inputs_still_match_baseline() -> None:
-    ledger = import_module("adapter_ledger")
-    assert ledger.build_input_drift(ROOT) == {"cli_changed": {}, "env_added": [], "env_removed": []}
