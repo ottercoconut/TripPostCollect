@@ -1,12 +1,14 @@
-"""知乎 T07：根适配在离线边界下运行，与 T14 固化的冻结旧实现请求、事件与字节逐项比对。"""
+"""知乎适配器在离线边界上的页面取数、事件与写出：搜索截获、详情与作者页面状态、正文图片与入口装配。"""
 
 from __future__ import annotations
 
 import ast
 from collections import Counter
 from dataclasses import fields, replace
+from hashlib import sha256
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -15,20 +17,11 @@ from urllib.parse import parse_qs, quote, urlsplit
 import httpx
 import pytest
 
-from support import legacy_expectations as expectations
-from support import runtime_failed_batch_deviation
-from support import ua_from_browser_deviation
-from support import zhihu_following_count_deviation
-from support import zhihu_login_paging_deviation as deviation
-from support import zhihu_author_visit_deviation
-from support import zhihu_detail_page_deviation
-from support import zhihu_search_capture_deviation
-from support import zhihu_verified_deviation
+from support import worker_scenarios
 from support.stable_png import solid_png
 from trippostcollect.application import events
 from trippostcollect.application.worker_inputs import worker_config
 from trippostcollect.artifacts import jsonl
-from trippostcollect.core import resources
 from trippostcollect.platforms import entry
 from trippostcollect.platforms.zhihu import client, core
 from trippostcollect.platforms.zhihu.models import PlatformRuntimeError
@@ -36,10 +29,12 @@ from trippostcollect.runtime import image_retry
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BROWSER_USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
 
 
 async def drive(output, patch, scenario, *, crawler_factory=None):
-    """只替换 HTTP、Playwright、时钟和 JS 随机源，保留业务及全部重试层；配置取根配置对象，不加载 fork。"""
+    """只替换 HTTP、Playwright、时钟和 JS 随机源，保留业务及全部重试层。"""
     output.mkdir()
     trace = []
     counts = Counter()
@@ -57,19 +52,17 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
     patch.setattr(events, "_utc_iso", lambda: "2026-09-30T01:02:03+00:00")
     patch.setattr(jsonl.time, "strftime", lambda *args: "2026-09-30")
     patch.setattr(image_retry, "IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS", (0.0, 0.0))
-    # 根配置对象与 fork config 在装配读取的键上逐键相同（T12 守护）；词云等退出键根对象没有。
     config = worker_config()
     for name, value in dict(
         PLATFORM="zhihu", KEYWORDS="青岛旅游", LOGIN_TYPE="cookie", COOKIES="d_c0=t07;z_c0=active",
         CRAWLER_TYPE="detail" if scenario.startswith("detail_") else "search",
         ENABLE_CDP_MODE=True, ENABLE_IP_PROXY=False, ENABLE_GET_MEIDAS=True,
-        ENABLE_GET_COMMENTS=False, ENABLE_GET_SUB_COMMENTS=False, ENABLE_GET_WORDCLOUD=False,
+        ENABLE_GET_COMMENTS=False, ENABLE_GET_SUB_COMMENTS=False,
         START_PAGE=1, MAX_CONCURRENCY_NUM=1, CRAWLER_MAX_SLEEP_SEC=0,
         SAVE_DATA_OPTION="jsonl", SAVE_DATA_PATH=str(output / "data"),
         ZHIHU_SPECIFIED_ID_LIST=["https://www.zhihu.com/question/10/answer/101", "https://zhuanlan.zhihu.com/p/102"],
     ).items():
-        # 只有词云这一个 fork 退出键在根配置对象上不存在，仅对它放宽；其余键缺失即报错。
-        patch.setattr(config, name, value, raising=name != "ENABLE_GET_WORDCLOUD")
+        patch.setattr(config, name, value)
 
     async def sleep(seconds):
         trace.append(("sleep", float(seconds)))
@@ -195,9 +188,9 @@ async def drive(output, patch, scenario, *, crawler_factory=None):
             return None
 
         async def evaluate(self, script, arg=None):
-            # #127：httpx 头的 UA 取自浏览器；求值不进入轨迹（见 support.ua_from_browser_deviation）。
+            # #127：图片请求头的 UA 取自浏览器；求值不进入轨迹。
             if script == "() => navigator.userAgent":
-                return ua_from_browser_deviation.BROWSER_USER_AGENT
+                return BROWSER_USER_AGENT
             if "innerWidth" in script:
                 return {"width": 1450, "height": 900}
             if "scrollY" in script or "scrollingElement" in script:
@@ -575,61 +568,98 @@ SCENARIOS = ["success", "navigation_timeout", "search_content", "empty", "search
              "image_failed", "image_retry", "image_block", "login_expired"]
 
 
-T14_DRIVE = ("T07", "request_event_artifacts")
+SEARCH_FILES = ["zhihu/image_manifest.jsonl", "zhihu/images/101/000.png", "zhihu/images/102/000.png",
+                "zhihu/jsonl/search_contents_2026-09-30.jsonl"]
+DETAIL_FILES = ["zhihu/image_manifest.jsonl", "zhihu/images/101/000.png", "zhihu/images/102/000.png",
+                "zhihu/jsonl/detail_contents_2026-09-30.jsonl"]
+BOTH = [("101", "answer_detail", 1), ("102", "article_detail", 1)]
+PAGING_END = {("source_exhausted", "paging_is_end")}
+NOTHING = (set(), [], [], [])
+# 场景 → (停止事件集合, 跳过的候选 [(范围, 错误码)], 入库记录 [(ID, 详情来源, 图数)], 写出文件)
+EXPECTED = {
+    "success": (PAGING_END, [], BOTH, SEARCH_FILES),
+    "navigation_timeout": (PAGING_END, [], BOTH, SEARCH_FILES),
+    "search_content": (PAGING_END, [], BOTH, SEARCH_FILES),
+    "search_retry": (PAGING_END, [], BOTH, SEARCH_FILES),
+    "image_retry": (PAGING_END, [], BOTH, SEARCH_FILES),
+    "empty": (PAGING_END, [], [], []),
+    "search_block": ({("runtime_failed", "rate_limited")}, [], [], []),
+    "search_detail_429": ({("runtime_failed", "captcha_detected")}, [], [], []),
+    "search_detail_401": ({("runtime_failed", "login_required")}, [], [], []),
+    "detail_success": (set(), [], BOTH, DETAIL_FILES),
+    "detail_retry": (set(), [], BOTH, DETAIL_FILES),
+    "detail_failed": NOTHING,
+    "detail_parse": NOTHING,
+    "detail_404": NOTHING,
+    "image_failed": (PAGING_END, [("image", "image_download_retryable")], [("102", "article_detail", 1)],
+                     ["zhihu/image_manifest.jsonl", "zhihu/images/102/000.png",
+                      "zhihu/jsonl/search_contents_2026-09-30.jsonl"]),
+    "image_block": ({("runtime_failed", "image_auth_required")}, [], [], ["zhihu/image_manifest.jsonl"]),
+    "login_expired": ({("runtime_failed", "login_required")}, [], [], []),
+}
+# 指定 URL 详情遇 401/429 直接以运行级错误退出。
+RAISING = {"detail_401": "login_required", "detail_429": "captcha_detected"}
 
 
-def legacy_expectation(scenario):
-    """固化预期经 #113、#127、#133、#182 偏离变换（见 support.zhihu_login_paging_deviation、
-    ua_from_browser_deviation、runtime_failed_batch_deviation、zhihu_following_count_deviation）后用于根侧比较。"""
-    expected = ua_from_browser_deviation.zhihu(expectations.load(*T14_DRIVE, scenario))
-    if scenario == "login_expired":
-        expected = deviation.login_expired_expectation(expected)
-    else:
-        expected = deviation.zhihu_login_paging(expected, scenario)
-    expected = runtime_failed_batch_deviation.zhihu_drive(expected, scenario)
-    expected = zhihu_following_count_deviation.zhihu_records(expected)
-    return zhihu_search_capture_deviation.zhihu_drive(expected, scenario)
+def drive_outcome(after):
+    stops = {(row["details"]["stop_reason"], row["details"].get("stop_detail"))
+             for row in after["events"] if row["type"] == "adaptive_search_stopped"}
+    skips = [(row["details"].get("failure_scope"), row["details"].get("error_code"))
+             for row in after["events"] if row["type"] == "candidate_skipped"]
+    records = [(row["content_id"], row["content_detail_source"], row["image_count"]) for row in after["records"]]
+    return stops, skips, records, sorted(after["files"])
+
+
+def entry_factory():
+    return entry.load_crawler("zhihu")()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", SCENARIOS)
-async def test_root_matches_frozen_legacy_request_event_and_artifacts(tmp_path, monkeypatch, scenario):
-    """T14：根实现与固化的旧实现结果比较（同一 drive、同一 == 语义），不加载 fork。"""
-    if scenario in {"detail_401", "detail_429"}:
+async def test_drive_request_event_and_artifacts(tmp_path, monkeypatch, scenario):
+    if scenario in RAISING:
         with pytest.raises(PlatformRuntimeError) as caught:
             with monkeypatch.context() as patch:
                 await drive(tmp_path / "new", patch, scenario)
-        assert caught.value.code == ("login_required" if scenario.endswith("401") else "captcha_detected")
+        assert caught.value.code == RAISING[scenario]
         return
     with monkeypatch.context() as patch:
         new = await drive(tmp_path / "new", patch, scenario)
-    actual = expectations.scrub(new, (tmp_path, "<TMP>"))
-    actual, expected = zhihu_detail_page_deviation.align(actual, legacy_expectation(scenario), scenario)
-    actual, expected = zhihu_author_visit_deviation.align(actual, expected, scenario)
-    actual, expected = zhihu_verified_deviation.align(actual, expected, scenario)
-    assert actual == expected
+    assert drive_outcome(new) == EXPECTED[scenario]
     check_drive_result(new, scenario)
 
 
+def _bytes(item):
+    try:
+        return item.decode()
+    except UnicodeDecodeError:
+        return sha256(item).hexdigest()
+
+
+def _scrub(value, tmp):
+    """去掉临时目录与每轮随机的访问账本 ID。"""
+    text = json.dumps(value, ensure_ascii=False, default=lambda item: _bytes(item) if isinstance(item, bytes) else str(item))
+    return json.loads(re.sub(r"\b[0-9a-f]{32}\b", "<LEDGER>", text.replace(str(tmp), "<TMP>")))
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", SCENARIOS)
-async def test_root_entry_matches_frozen_legacy_factory(tmp_path, monkeypatch, scenario):
-    """T14：替代旧工厂对照；新入口装配结果与固化预期比较。"""
-    if scenario in {"detail_401", "detail_429"}:
-        with pytest.raises(PlatformRuntimeError) as caught:
-            with monkeypatch.context() as patch:
-                await drive(tmp_path / "entry", patch, scenario,
-                            crawler_factory=lambda: entry.load_crawler("zhihu")())
-        assert caught.value.code == ("login_required" if scenario.endswith("401") else "captcha_detected")
-        return
+@pytest.mark.parametrize("scenario", ["success", "image_failed", "detail_success", "login_expired"])
+async def test_entry_assembly_matches_direct_construction(tmp_path, monkeypatch, scenario):
+    """经 worker 入口装配与直接构造得到相同的轨迹、产物与事件。"""
     with monkeypatch.context() as patch:
-        new = await drive(tmp_path / "entry", patch, scenario,
-                          crawler_factory=lambda: entry.load_crawler("zhihu")())
-    actual = expectations.scrub(new, (tmp_path, "<TMP>"))
-    actual, expected = zhihu_detail_page_deviation.align(actual, legacy_expectation(scenario), scenario)
-    actual, expected = zhihu_author_visit_deviation.align(actual, expected, scenario)
-    actual, expected = zhihu_verified_deviation.align(actual, expected, scenario)
-    assert actual == expected
+        direct = await drive(tmp_path / "direct", patch, scenario)
+    with monkeypatch.context() as patch:
+        assembled = await drive(tmp_path / "entry", patch, scenario, crawler_factory=entry_factory)
+    assert _scrub(assembled, tmp_path / "entry") == _scrub(direct, tmp_path / "direct")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", sorted(RAISING))
+async def test_entry_assembly_raises_on_detail_runtime_error(tmp_path, monkeypatch, scenario):
+    with pytest.raises(PlatformRuntimeError) as caught:
+        with monkeypatch.context() as patch:
+            await drive(tmp_path / "entry", patch, scenario, crawler_factory=entry_factory)
+    assert caught.value.code == RAISING[scenario]
 
 
 def check_drive_result(new, scenario):
@@ -645,6 +675,7 @@ def check_drive_result(new, scenario):
     assert b"avatar.test" not in b"".join(new["files"].values())
     images = [event for event in trace if event[0] == "image"]
     assert all(set(event[3]["headers"]) == {"user-agent", "accept", "referer"} for event in images)
+    assert all(event[3]["headers"]["user-agent"] == BROWSER_USER_AGENT for event in images)
     if scenario == "login_expired":
         # #113/#185：/me 由页面截获，失败即 login_required，不进入搜索与行为阶段，也不再有 httpx /me。
         assert "/api/v4/me" not in new["counts"]
@@ -728,10 +759,9 @@ def test_dependency_direction():
                     assert {alias.name for alias in node.names} <= allowed_names
 
 
-def test_worker_assembly_without_fork_zhihu(tmp_path):
-    commands = json.loads((ROOT / "tests/golden/t02_worker_commands.json").read_text())
-    # 从已有父侧 argv golden 复用私有参数，启动点只到构造，不 start。
-    argv = commands["zhihu_search"]["cmd"][4:]
+def test_worker_assembly_zhihu(tmp_path):
+    # 父侧生成的 worker argv，启动点只到构造，不 start。
+    argv = worker_scenarios.worker_argv("zhihu_search", tmp_path)
     code = (
         "import sys,json\n"
         "from trippostcollect.platforms.entry import configure,install_hooks,load_crawler\n"
@@ -747,18 +777,8 @@ def test_worker_assembly_without_fork_zhihu(tmp_path):
     assert json.loads(result.stdout.splitlines()[-1]) == ["WeiboCrawler", "DouYinCrawler", "XiaoHongShuCrawler"]
 
 
-def test_zhihu_signer_and_js_resource_are_gone():
-    import execjs
-
-    assert not (ROOT / "src/trippostcollect/platforms/zhihu/signer.py").exists()
-    assert "js/zhihu.js" not in resources.RESOURCE_SHA256
-    with pytest.raises(FileNotFoundError):
-        resources.read_bytes("js/zhihu.js")
-    assert callable(execjs.compile)
-
-
 def test_settings_are_snapshotted_and_operation_readers_are_lazy(monkeypatch):
-    # T14：根配置对象取代 fork config（逐键相同由 T12 守护）；本用例只验证根装配快照与读取时机。
+    # 根装配快照配置值，运行参数在读取时才取环境变量。
     config = worker_config()
     original = {field.name: getattr(config, field.name) for field in fields(entry._zhihu_dependencies(config)[0])}
     settings, ports = entry._zhihu_dependencies(config)
