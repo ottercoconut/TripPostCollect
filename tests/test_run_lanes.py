@@ -359,6 +359,7 @@ def test_native_owned_group_cleanup(monkeypatch, scenario):
         assert events[-1] == "empty"
     else:
         assert cleanup["status"] == "cleanup_failed"
+        assert cleanup["error"]
 
 
 @pytest.mark.parametrize("table", ["", "410 invalid start", "410 410", "valid"])

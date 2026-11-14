@@ -612,7 +612,8 @@ def run_test_command(command, source, environment, log, *, user, cleanup=None,
                 raise RuntimeError("CI test group still present after SIGKILL")
             cleanup.update(confirmed=True, status="group_exited")
         except BaseException as exc:
-            cleanup.update(status="cleanup_failed", error_type=type(exc).__name__)
+            cleanup.update(status="cleanup_failed", error_type=type(exc).__name__,
+                           error=str(exc)[:300])
             raise
 
 
@@ -678,9 +679,10 @@ def run_isolated(command, source, output, environment, log):
                 stack.callback(pf, "-a", anchor, "-F", "rules")
                 pf("-a", anchor, "-f", str(policy))
                 loaded = pf("-a", anchor, "-sr")
+                # 先落盘再核对，断言失败时 os-policy.json 里仍有 pfctl 实际回显。
+                evidence["pf_policy"] = loaded
                 assert_user_scoped(loaded, user["uid"])
                 assert_echo_only_icmp(loaded)
-                evidence["pf_policy"] = loaded
                 evidence["test_user_negative"] = verify_user_drop(user["name"], environment, servers)
                 evidence["probes"] = evidence["test_user_negative"]
                 evidence["runner_positive"] = verify_runner_open(servers)
