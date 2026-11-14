@@ -970,6 +970,10 @@ def test_access_grants_stay_inside_work(monkeypatch, tmp_path):
     for path in (source / "pkg", output / "home", output / "t", venv / "bin", browsers / "chromium"):
         path.mkdir(parents=True)
     (source / "pkg" / "module.py").write_text("x")
+    (source / "pkg" / "module.py").chmod(0o644)
+    private = source / "pkg" / "private.py"
+    private.write_text("x")
+    private.chmod(0o600)
     frozen = source / "frozen.txt"
     frozen.write_text("frozen")
     frozen.chmod(0o644)
@@ -996,6 +1000,11 @@ def test_access_grants_stay_inside_work(monkeypatch, tmp_path):
     assert all(path.is_relative_to(work.resolve()) for _, path, _ in recorded)
     assert outside.resolve() not in {path for _, path, _ in recorded}
     assert frozen.resolve() not in {path for _, path, _ in recorded}
+    # mode 位已对其他用户开放的文件不再逐个加 ACL；私有文件仍要授权读取。
+    test_user_paths = {path for user, path, _ in recorded if user == "_tpcci"}
+    assert (source / "pkg" / "module.py").resolve() not in test_user_paths
+    assert private.resolve() in test_user_paths
+    assert grants["readable_already_open"] >= 1
     write_paths = {path for user, path, permissions in recorded
                    if user == "_tpcci" and permissions.startswith("read,write")}
     assert write_paths

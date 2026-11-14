@@ -273,6 +273,18 @@ def _acl_permissions(path, kind):
     raise RuntimeError(f"未知授权类型: {kind}")
 
 
+def open_to_others(path):
+    """mode 位已对其他用户开放读（目录与可执行文件还要执行位）时不必再加 ACL。
+
+    托管 VM 上 venv、浏览器与源码副本几乎都是 0644/0755；逐个 chmod 会给 OS lane 多出约一分钟（#190）。
+    """
+    mode = Path(path).lstat().st_mode
+    need = stat.S_IROTH
+    if stat.S_ISDIR(mode) or mode & stat.S_IXUSR:
+        need |= stat.S_IXOTH
+    return mode & need == need
+
+
 def _require_inside(path, work):
     resolved = Path(path).resolve()
     if not resolved.is_relative_to(work):
@@ -324,8 +336,12 @@ def grant_test_user_access(user, command, source, output, environment):
         while cursor != work:
             remember(user, cursor, "traverse")
             cursor = cursor.parent
+    already_open = 0
     for root in readable:
         for path in iter_acl_paths(root):
+            if open_to_others(path):
+                already_open += 1
+                continue
             remember(user, path, "read")
     for root in writable:
         for path in iter_acl_paths(root):
@@ -343,6 +359,7 @@ def grant_test_user_access(user, command, source, output, environment):
         "readable": [str(path) for path in readable],
         "writable": [str(path) for path in writable],
         "entries": len(planned),
+        "readable_already_open": already_open,
         "interpreter": str(python),
         "interpreter_outside_work": not interpreter.is_relative_to(work),
     }
