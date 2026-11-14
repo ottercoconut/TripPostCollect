@@ -22,6 +22,7 @@ from support import zhihu_following_count_deviation
 from support import zhihu_login_paging_deviation as deviation
 from support import zhihu_author_visit_deviation
 from support import zhihu_detail_page_deviation
+from support import zhihu_image_text_deviation
 from support import zhihu_search_capture_deviation
 from support.stable_png import solid_png
 from trippostcollect.application import events
@@ -838,6 +839,7 @@ def test_pure_definitions_keep_original_bodies():
         if row["target"] in {"platforms/zhihu/parser.py", "platforms/zhihu/models.py"}:
             original = zhihu_detail_page_deviation.parser_and_model_source(original)
             original = zhihu_author_visit_deviation.parser_and_model_source(original)
+            original = zhihu_image_text_deviation.parser_source(original)
         # #49 有意偏离：作者 ID/昵称改存平台原始值，只允许身份转换调用与对应字段描述替换。
         for old, new in ISSUE_49_IDENTITY_REPLACEMENTS:
             original = original.replace(old, new)
