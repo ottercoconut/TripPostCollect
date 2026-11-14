@@ -459,6 +459,18 @@
         "flags": [
           "--confirm-default-db-repair"
         ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--dedupe-images"
+        ]
+      },
+      {
+        "action": "'store_true'",
+        "flags": [
+          "--refresh-all"
+        ]
       }
     ],
     "scripts/repair_xhs_posts.py": [

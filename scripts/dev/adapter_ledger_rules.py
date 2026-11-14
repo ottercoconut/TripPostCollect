@@ -2123,7 +2123,8 @@ BASELINE_RESOURCE_RESOLUTIONS = {
 # 冻结台账的 SHA-256：T14 删除 fork 后台账冻结，`--check` 只做冻结自检，不再重新枚举基线源码。
 FROZEN_LEDGER_SHA256 = {
     "docs/adapter-ledger/baseline.json": "b62f94305137d05b0e6b81d5bbf1976ca4721b895aec1e14fc7f21791376cfb2",
-    "docs/adapter-ledger/inputs.json": "33f9a23c3cc83dd744d782cf5ff2d0364ec8c7cc68c83c5f39f6af9aede24068",
+    # #194：repair_post_details.py 增加 --dedupe-images 与 --refresh-all。
+    "docs/adapter-ledger/inputs.json": "684cf405f53bdc082a72fb249cc7afa44953c125bf349ff14de5818a71f2f718",
     "docs/adapter-ledger/symbols.json": "a47757dc9356c742dc0c68f888e00c65515cd44b016fac03e9339499237ce804",
     "docs/adapter-ledger/tests.json": "d16068e5192c8ed006b62aece17dbb98464215f5f60347b21ad796494e3c3e44",
     "docs/platform-adapter-symbol-ledger.md": "047c1cc3d48d9079f375855c1fb0b6d5da66a2dd925e606cf37af203867b20dc",

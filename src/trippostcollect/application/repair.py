@@ -53,6 +53,19 @@ def load_post_repair_fallbacks(
                 raw = parsed
         except (TypeError, json.JSONDecodeError):
             pass
+        if platform_key == "zhihu":
+            # #194：只回落发帖时间。作者字段必须来自本次作者页。
+            fallback = {
+                key: value
+                for key, value in {
+                    "keyword": row_value("keyword"),
+                    "published_at": row_value("published_at"),
+                    "created_time": raw.get("created_time"),
+                }.items()
+                if value not in (None, "")
+            }
+            fallbacks[str(row["platform_post_id"])] = fallback
+            continue
         fallback = {
             key: value
             for key, value in {

@@ -263,6 +263,11 @@ def merge_repair_fallback_metadata(
                 if published_at_for_record(merged):
                     break
 
+    # #194：知乎粉丝、关注、作品数、认证和其他作者字段必须来自本次作者页。
+    # 旧行只允许补详情缺少的发帖时间，不能把历史作者资料带回新记录。
+    if platform_key == "zhihu":
+        return merged
+
     fallback_observed = metadata.get("followers_observed") is True
     current_observed = merged.get("followers_observed") is True
     # 本轮已观测到粉丝数（包括真实 0）时以本轮数值和来源为准，不用旧行覆盖。
