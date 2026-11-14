@@ -1,1062 +1,121 @@
-"""T11 冻结源码与执行器共用离线驱动，核对编排、提交和产物。"""
+"""执行器全链路：五站完整收集与入库、内容事务与发现提交故障、完成门禁与运行阻断、终态信封与 Markdown。"""
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from hashlib import sha256
 import importlib
-import importlib.util
-import inspect
-import io
 import json
-from pathlib import Path
-import random
-import re
-import socket
-import sqlite3
 import subprocess
-import sys
-from types import ModuleType, SimpleNamespace
 
-from PIL import Image
 import pytest
 
-from support import douyin_full_scan_deviation, fork_removal_deviation, shared_launch_deviation, ua_from_browser_deviation
-from support import zhihu_search_capture_deviation
-from trippostcollect.application import collection, reporting, visit_gate
-from trippostcollect.artifacts.image_candidates import content_image_candidates
-from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
-from trippostcollect.artifacts.image_materialization import write_staging_image
-from trippostcollect.core.execution_state import FrozenExecutionState
-from trippostcollect.db.bootstrap import bootstrap_connection
-from trippostcollect.platforms.bilibili import core as bilibili_core
-from trippostcollect.platforms.bilibili.models import BilibiliSearchPage
-from trippostcollect.runtime import browser_runtime, process
-from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_path
-from trippostcollect.xhs.engagement import engagement_evidence_path, summarize_engagement_evidence
-from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
+from support import executor_driver
+from support.executor_driver import drive, forbid, strict_patch
+from trippostcollect.application import collection, reporting
+from trippostcollect.runtime import process
 
-ROOT = Path(__file__).resolve().parents[1]
-FIXTURES = ROOT / "tests/fixtures/adapter_t11"
-sys.path.insert(0, str(ROOT / "scripts"))
-executor = importlib.import_module("mediacrawler_crawl")
+offline_guard = executor_driver.offline_guard
 
 
-# #75 授权差异：删除 timeout_per_platform 与按平台的下限，无进展看门狗阈值改为代码常量。
-T75_OLD_TIMEOUT_SOURCE = (
-    "    timeout = args.timeout_per_platform\n"
-    "    if platform_key == \"xhs\" and (args.login_type == \"qrcode\" or args.headed):\n"
-    "        timeout = max(timeout, 420)\n"
-    "    if platform_key == \"zhihu\":\n"
-    "        timeout = max(timeout, 300)\n"
-)
-T75_REPLACEMENTS = (
-    (T75_OLD_TIMEOUT_SOURCE, ""),
-    ("        ROOT,\n        timeout,\n        log_dir,", "        ROOT,\n        NO_PROGRESS_WATCHDOG_SECONDS,\n        log_dir,"),
-    ("inactivity_timeout_seconds=float(timeout),", "inactivity_timeout_seconds=NO_PROGRESS_WATCHDOG_SECONDS,"),
-    # 人工等待与网络暂停同样冻结看门狗：小红书额外传入人工等待诊断路径。
-    (
-        "            navigation_diagnostics_path if platform_key == \"xhs\" else None\n"
-        "        ),\n"
-        "        startup_grace_seconds=HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS,",
-        "            navigation_diagnostics_path if platform_key == \"xhs\" else None\n"
-        "        ),\n"
-        "        operator_wait_diagnostics_path=(\n"
-        "            operator_wait_diagnostics_path(behavior_evidence_path)\n"
-        "            if platform_key == \"xhs\"\n"
-        "            else None\n"
-        "        ),\n"
-        "        startup_grace_seconds=HUMAN_BEHAVIOR_TIMEOUT_BUDGET_SECONDS,",
-    ),
-)
-
-
-def t75_authorized_source(text):
-    """在冻结旧源码上做 #75 的同样替换；每处必须恰好出现一次。"""
-    for old, new in T75_REPLACEMENTS:
-        assert text.count(old) == 1, old
-        text = text.replace(old, new)
-    return text
-
-
-T71_ENVELOPE_PRINT = (
-    "    print(\n        json.dumps(\n            terminal_summary_envelope(\n"
-    "                summary_path=summary_path,\n                report_path=report_path,\n"
-    "                batch_dir=batch_dir,\n                summary=summary,\n            ),\n"
-    "            ensure_ascii=False,\n        ),\n        flush=True,\n    )\n"
-)
-
-# #71 授权差异：访问门禁 content_visit_ok 接入行为门禁，target_url_ok 改为逐层解码；
-# 纳入访问门禁的平台把访问账本列入看门狗进展路径与平台记录输出。旧执行器同样替换后执行。
-T71_REPLACEMENTS = (
-    (
-        "    repair_mode: bool = False,\n) -> dict[str, Any]:\n    latest_by_platform",
-        "    repair_mode: bool = False,\n"
-        "    content_visits: dict[str, dict[str, Any]] | None = None,\n"
-        ") -> dict[str, Any]:\n    latest_by_platform",
-    ),
-    (
-        "            or \"search_results\" in continuity_stages\n        )\n",
-        "            or \"search_results\" in continuity_stages\n        )\n"
-        "        # 纳入访问门禁的平台：节奏与连续性改由不截断的访问账本按本轮实际访问推导。\n"
-        "        visit_validation = (content_visits or {}).get(platform_key)\n"
-        "        if visit_validation is None and platform_key in VISIT_GATED_PLATFORMS:\n"
-        "            # 门禁平台缺少访问门禁结果时失败关闭，不能因调用方漏传而静默放行。\n"
-        "            visit_validation = {\"content_visit_ok\": False, \"problem\": \"visit_validation_missing\"}\n"
-        "        if visit_validation is not None:\n"
-        "            pacing_ok = bool(visit_validation.get(\"request_pacing_ok\"))\n"
-        "            continuity_ok = bool(visit_validation.get(\"continuity_ok\"))\n"
-        "        content_visit_ok = visit_validation is None or bool(visit_validation.get(\"content_visit_ok\"))\n",
-    ),
-    (
-        "        target_url_ok = bool(keyword) and keyword in unquote(behavior_url)\n",
-        "        target_url_ok = _url_contains_keyword(behavior_url, keyword)\n",
-    ),
-    (
-        "                and pacing_ok\n                and continuity_ok\n            ),",
-        "                and pacing_ok\n                and continuity_ok\n                and content_visit_ok\n            ),",
-    ),
-    (
-        "            \"continuity_ok\": continuity_ok,\n            \"post_interaction_requested\"",
-        "            \"continuity_ok\": continuity_ok,\n"
-        "            \"content_visit_ok\": None if visit_validation is None else content_visit_ok,\n"
-        "            \"content_visit_validation\": visit_validation,\n"
-        "            \"post_interaction_requested\"",
-    ),
-    (
-        "    return {\n        \"required\": True,\n        \"ok\": behavior_ok and policy_ok,\n"
-        "        \"behavior_ok\": behavior_ok,\n        \"policy_ok\": policy_ok,\n",
-        "    visit_results = [\n"
-        "        item[\"content_visit_ok\"] for item in platform_results.values() if item[\"content_visit_ok\"] is not None\n"
-        "    ]\n"
-        "    return {\n        \"required\": True,\n        \"ok\": behavior_ok and policy_ok,\n"
-        "        \"behavior_ok\": behavior_ok,\n        \"policy_ok\": policy_ok,\n"
-        "        \"content_visit_ok\": all(visit_results) if visit_results else None,\n",
-    ),
-    (
-        "    progress_paths = [save_path, behavior_evidence_path]\n",
-        "    progress_paths = [save_path, behavior_evidence_path]\n"
-        "    if platform_key in VISIT_GATED_PLATFORMS:\n"
-        "        progress_paths.append(content_visits_path(behavior_evidence_path))\n",
-    ),
-    (
-        "        runtime_reporter.checkpoint if runtime_reporter is not None else None,\n    )\n",
-        "        runtime_reporter.checkpoint if runtime_reporter is not None else None,\n    )\n"
-        "    if platform_key in VISIT_GATED_PLATFORMS:\n"
-        "        ledger_path = content_visits_path(behavior_evidence_path)\n"
-        "        output[\"content_visit_paths\"] = [str(ledger_path)] if ledger_path.is_file() else []\n",
-    ),
-    (
-        "    gated[\"policy_evidence_ok\"] = bool(behavior_validation.get(\"policy_ok\"))\n",
-        "    gated[\"policy_evidence_ok\"] = bool(behavior_validation.get(\"policy_ok\"))\n"
-        "    gated[\"content_visit_ok\"] = behavior_validation.get(\"content_visit_ok\")\n",
-    ),
-    (
-        "    materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}\n",
-        "    content_visits = {\n"
-        "        platform_key: validate_summary_content_visits(\n"
-        "            summary,\n            content_valid_records,\n            platform_key,\n"
-        "            repair_mode=repair_mode,\n"
-        "            stop_event=pagination_evidence.get(\"stop_event\"),\n"
-        "        )\n"
-        "        for platform_key in platforms\n"
-        "        if platform_key in VISIT_GATED_PLATFORMS\n"
-        "    }\n"
-        "    if content_visits:\n"
-        "        behavior_validation = collect_behavior_validation(\n"
-        "            records,\n            platforms,\n            args.keyword,\n            args.xhs_post_interaction,\n"
-        "            repair_mode=repair_mode,\n            content_visits=content_visits,\n        )\n"
-        "        summary[\"behavior_validation\"] = behavior_validation\n"
-        "    materialized_images_by_identity: dict[str, list[MaterializedImage]] = {}\n",
-    ),
-    # 小红书每轮全量扫描：child 不再注入深层前沿与顶部刷新变量，拒绝恢复参数。
-    (
-        '    if platform_key == "xhs":\n        extra_env.update(\n            {\n                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_PAGE": str(args.start_page),\n                "TRIPPOSTCOLLECT_DISCOVERY_RESUME_CURSOR": str(args.start_cursor or ""),\n                "TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES": str(\n                    args.top_refresh_max_pages\n                ),\n                "TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED": (\n                    "1" if args.discovery_source_exhausted else "0"\n                ),\n            }\n        )\n    if args.resume_identities_path:',
-        '    if args.resume_identities_path:',
-    ),
-    (
-        '    xhs_managed_resume = bool(args.xhs_account_id and args.start_cursor)\n    if (\n        args.start_page > 1\n        and not args.resume_summary\n        and args.discovery_job_id is None\n        and not xhs_managed_resume\n    ):',
-        '    if (\n        args.start_page > 1\n        and not args.resume_summary\n        and args.discovery_job_id is None\n    ):',
-    ),
-    (
-        '        if not args.xhs_repair and args.start_page > 1 and not args.start_cursor:\n            raise SystemExit("XHS continuation requires --start-cursor together with --start-page")',
-        '        if (\n            args.start_page != 1\n            or args.start_cursor\n            or args.top_refresh_max_pages > 0\n            or args.discovery_source_exhausted\n        ):\n            raise SystemExit("xhs_full_scan_rejects_resume_args")',
-    ),
-    # 作者补全恒为点击作者名（正式发现与 repair 同一路径），不再注入开关。
-    (
-        '                "TRIPPOSTCOLLECT_XHS_ENRICH_CREATORS": "1",\n                "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",\n',
-        '                "TRIPPOSTCOLLECT_XHS_KEEP_AUTHOR_DETAIL": "1",\n',
-    ),
-    # #91：累计摘要里中断轮次的批次检查点记录（status=incomplete）只有产物路径，摘要表的计数列显示“—”。
-    (
-        '        output = record["output"]\n        lines.append(\n'
-        '            "| {label} | {status} | {contents} | {published_at} | {skipped_videos} | {images} | {videos} | {fields} |".format(\n'
-        '                label=record.get("label") or PLATFORMS[record["platform"]]["label"],\n'
-        '                status=record["status"],\n'
-        '                contents=output["non_video_content_records"],\n'
-        '                published_at=output["published_at_records"],\n'
-        '                skipped_videos=output["video_like_records"],\n'
-        '                images=output["image_file_count"],\n'
-        '                videos=output["video_file_count"],\n'
-        '                fields=", ".join(output["author_like_fields"]) or "无",\n'
-        '            )\n        )\n'
-        '    lines.extend(["", "## 样本", ""])\n',
-        '        output = record["output"]\n'
-        '        if record["status"] == "incomplete":\n'
-        '            incomplete = True\n'
-        '            counts = dict.fromkeys(("contents", "published_at", "skipped_videos", "images", "videos", "fields"), "—")\n'
-        '        else:\n'
-        '            counts = {\n'
-        '                "contents": output["non_video_content_records"],\n'
-        '                "published_at": output["published_at_records"],\n'
-        '                "skipped_videos": output["video_like_records"],\n'
-        '                "images": output["image_file_count"],\n'
-        '                "videos": output["video_file_count"],\n'
-        '                "fields": ", ".join(output["author_like_fields"]) or "无",\n'
-        '            }\n'
-        '        lines.append(\n'
-        '            "| {label} | {status} | {contents} | {published_at} | {skipped_videos} | {images} | {videos} | {fields} |".format(\n'
-        '                label=record.get("label") or PLATFORMS[record["platform"]]["label"],\n'
-        '                status=record["status"],\n'
-        '                **counts,\n'
-        '            )\n        )\n'
-        '    if incomplete:\n'
-        '        lines.extend(["", "- `incomplete`：中断轮次由批次检查点写入的累计记录，只有产物路径，没有计数。"])\n'
-        '    lines.extend(["", "## 样本", ""])\n',
-    ),
-    (
-        '        "|---|---|---:|---:|---:|---:|---:|---|",\n    ]\n    for record in summary["records"]:\n        output',
-        '        "|---|---|---:|---:|---:|---:|---:|---|",\n    ]\n    incomplete = False\n'
-        '    for record in summary["records"]:\n        output',
-    ),
-    # #91：终版 summary.json 写出后立即打印终态信封，再写 Markdown。
-    (
-        "    _runtime_progress(progress_callback)\n    write_markdown(summary, report_path)\n"
-        "    _runtime_progress(progress_callback)\n" + T71_ENVELOPE_PRINT,
-        T71_ENVELOPE_PRINT + "    _runtime_progress(progress_callback)\n    write_markdown(summary, report_path)\n"
-        "    _runtime_progress(progress_callback)\n",
-    ),
-    # #94：小红书平台记录的 output 带互动计数取证汇总（只取证，判定未变）。
-    (
-        "        output[\"content_visit_paths\"] = [str(ledger_path)] if ledger_path.is_file() else []\n",
-        "        output[\"content_visit_paths\"] = [str(ledger_path)] if ledger_path.is_file() else []\n"
-        "    if platform_key == \"xhs\":\n"
-        "        output[\"engagement_observation\"] = summarize_engagement_evidence(\n"
-        "            engagement_evidence_path(behavior_evidence_path)\n"
-        "        )\n",
-    ),
-)
-
-def t71_authorized_source(text):
-    """在冻结旧源码上做 #71 的同样替换；每处必须恰好出现一次。"""
-    for old, new in T71_REPLACEMENTS:
-        assert text.count(old) == 1, old
-        text = text.replace(old, new)
-    return text
-
-
-# #115 授权差异：B站图片请求不再携带平台 Cookie，执行器的两个图片薄包装去掉 cookie_header 形参与转发。
-T115_REPLACEMENTS = (
-    (
-        "    post_id: str,\n    cookie_header: str = \"\",\n) -> RemoteImagePreview:\n"
-        "    return _bilibili_client.fetch_bilibili_image_bytes(\n        source_url, post_id, cookie_header,\n",
-        "    post_id: str,\n) -> RemoteImagePreview:\n"
-        "    return _bilibili_client.fetch_bilibili_image_bytes(\n        source_url, post_id,\n",
-    ),
-    (
-        "    *,\n    cookie_header: str,\n    platform_data_root: Path,\n",
-        "    *,\n    platform_data_root: Path,\n",
-    ),
-    (
-        "        record, cookie_header=cookie_header, platform_data_root=platform_data_root,\n",
-        "        record, platform_data_root=platform_data_root,\n",
-    ),
-)
-
-
-def t115_authorized_source(text):
-    """在冻结旧源码上做 #115 的同样替换；每处必须恰好出现一次。"""
-    for old, new in T115_REPLACEMENTS:
-        assert text.count(old) == 1, old
-        text = text.replace(old, new)
-    return text
-
-
-@pytest.fixture
-def baseline(monkeypatch):
-    source = (FIXTURES / "mediacrawler_crawl.py.txt").read_bytes()
-    provenance = json.loads((FIXTURES / "provenance.json").read_text())
-    assert sha256(source).hexdigest() == provenance["fixtures_sha256"]["mediacrawler_crawl.py.txt"]
-    module = ModuleType("t11_frozen_executor")
-    module.__file__ = str(FIXTURES / "mediacrawler_crawl.py.txt")
-    monkeypatch.setitem(sys.modules, module.__name__, module)
-    # T14-C 有意偏离：MEDIACRAWLER_DIR 与过渡模块 execution_state 已删除，执行前单向替换旧导入。
-    text, namespace = fork_removal_deviation.frozen_source(
-        source.decode("utf-8"), mediacrawler_dir_imports=1, execution_state_imports=1,
-    )
-    # #75 有意偏离：任务级时限删除，旧执行器同样改用统一的无进展看门狗常量。
-    text = t75_authorized_source(text)
-    namespace["NO_PROGRESS_WATCHDOG_SECONDS"] = process.NO_PROGRESS_WATCHDOG_SECONDS
-    # #124 有意偏离：抖音续跑参数、env、reseed 证据退出，抖音收到恢复参数即拒绝。
-    text = douyin_full_scan_deviation.t11_source(text)
-    # #71 有意偏离：访问门禁与逐层解码接入旧执行器，名称取自新实现的同一定义。
-    text = t71_authorized_source(text)
-    text = douyin_full_scan_deviation.t11_after_t71_source(text)
-    # #185 有意偏离：知乎与抖音同样拒绝深层恢复与顶部刷新参数。
-    text = zhihu_search_capture_deviation.t11_source(text)
-    # #115 有意偏离：B站图片薄包装不再转发平台 Cookie。
-    text = t115_authorized_source(text)
-    # #127 有意偏离：B站请求 UA 取自本轮浏览器，写死常量退出，图片薄包装转发会话 UA。
-    text = ua_from_browser_deviation.t11_source(text)
-    # #136 有意偏离：B站行为会话薄包装多传与 warmup 共用的持久 context 启动函数。
-    text = shared_launch_deviation.t11_source(text)
-    namespace["launch_profile_context"] = browser_runtime.launch_profile_context
-    namespace["VISIT_GATED_PLATFORMS"] = visit_gate.VISIT_GATED_PLATFORMS
-    namespace["validate_summary_content_visits"] = visit_gate.validate_summary_content_visits
-    namespace["content_visits_path"] = content_visits_path
-    namespace["_url_contains_keyword"] = reporting._url_contains_keyword
-    namespace["operator_wait_diagnostics_path"] = operator_wait_diagnostics_path
-    namespace["engagement_evidence_path"] = engagement_evidence_path
-    namespace["summarize_engagement_evidence"] = summarize_engagement_evidence
-    vars(module).update(namespace)
-    exec(compile(text, module.__file__, "exec"), vars(module))
-    return module
-
-
-def strict_patch(monkeypatch, target, name, value):
-    """不存在的属性必须失败，禁止默默增加一个没有被调用的 mock。"""
-    assert hasattr(target, name), f"patch 目标不存在：{target}.{name}"
-    monkeypatch.setattr(target, name, value, raising=True)
-
-
-# 执行器端口字段：新实现经 ports 取得，装配在脚本入口调用时读取脚本全局名。
-PORT_FIELDS = {"ensure_prerequisites", "run_bilibili_article_search"}
-# 执行器各函数的实际定义模块（原 T11 迁移目标）；薄包装不经脚本，直接定位到这里读取全局名。
-TARGETS = {
-    name: target
-    for target, names in (
-        ("application/reporting.py", (
-            "item_type_from_path", "truncate", "extract_sample", "summarize_jsonl", "summarize_output",
-            "summarize_output_with_progress", "write_json_with_progress", "terminal_summary_envelope",
-            "collect_behavior_validation", "latest_platform_result_counts", "write_markdown",
-        )),
-        ("db/content.py", (
-            "ensure_web_schema", "find_existing_post", "upsert_web_post", "FormalImportBeforeCommitError",
-            "FormalImportBeforeCommitError.__init__", "commit_formal_import", "import_valid_records",
-        )),
-        ("application/collection.py", (
-            "stable_douyin_search_id", "effective_discovery_checkpoint_event", "persist_discovery_checkpoint",
-            "load_pagination_evidence", "attach_skipped_candidate_evidence", "collect_formal_records",
-            "import_valid_records_with_media_rollback", "_run_platform_without_policy",
-            "effective_attempt_exit_code", "run_platform", "apply_formal_completion_gates",
-            "formal_import_gate_met", "formal_image_promotion_allowed", "_run_main",
-        )),
-        ("artifacts/paths.py", (
-            "resolve_media_root",
-        )),
-        ("artifacts/formal_images.py", (
-            "_project_relative_evidence_path", "_load_manifest_with_evidence", "_staging_root_for_manifest_entry",
-            "rollback_newly_promoted_images", "formal_media_persistence_lock", "_validated_manifest_rows_for_post",
-            "materialize_formal_record_images",
-        )),
-        ("application/failures.py", (
-            "runtime_blocker_stop_reason", "runtime_blocker_from_terminal_event",
-            "runtime_blocker_from_pagination_evidence", "latest_runtime_blocker", "apply_runtime_blocker",
-        )),
-    )
-    for name in names
-}
-
-
-def owner(module, function, name=None):
-    """找到函数真正读取全局变量的模块；新侧执行器函数按 TARGETS 定位，不经脚本薄包装。"""
-    migrated = None
-    if module is executor and function in TARGETS and name not in PORT_FIELDS:
-        module_name = "trippostcollect." + TARGETS[function].removesuffix(".py").replace("/", ".")
-        if importlib.util.find_spec(module_name) is not None:
-            migrated = importlib.import_module(module_name)
-    # 迁移前目标尚无定义时回落脚本，仅供旧对旧自检；A 组另行要求全部目标存在。
-    if migrated is not None and hasattr(migrated, function):
-        target = migrated
-        implementation = inspect.unwrap(getattr(target, function))
-    else:
-        implementation = inspect.unwrap(getattr(module, function))
-        target = sys.modules[implementation.__module__]
-    assert implementation.__globals__ is vars(target)
-    return target
-
-
-def global_reads(code):
-    """递归收集代码对象（含嵌套函数、生成器）读取的全局/属性名。"""
-    names = set(code.co_names)
-    for constant in code.co_consts:
-        if inspect.iscode(constant):
-            names |= global_reads(constant)
-    return names
-
-
-def binding(monkeypatch, module, function, name, value):
-    target = owner(module, function, name)
-    reader = inspect.unwrap(getattr(module if target is module else target, function))
-    # 死 patch 防线：被替换的名字必须由实际执行的函数读取，否则 mock 不生效。
-    assert name in global_reads(reader.__code__), f"patch 不会生效：{target.__name__}.{function} 不读取 {name}"
-    strict_patch(monkeypatch, target, name, value)
-
-
-def forbid(*args, **kwargs):
-    pytest.fail("离线驱动漏拦：禁止启动真实进程、浏览器或网络")
-
-
-@pytest.fixture(autouse=True)
-def offline_guard(monkeypatch):
-    strict_patch(monkeypatch, subprocess, "Popen", forbid)
-    strict_patch(monkeypatch, process, "run_command", forbid)
-    strict_patch(monkeypatch, socket.socket, "connect", forbid)
-    strict_patch(monkeypatch, socket.socket, "connect_ex", forbid)
-
-
-class FixedDatetime(datetime):
-    @classmethod
-    def now(cls, tz=None):
-        value = cls(2026, 10, 1, 1, 2, 3, tzinfo=timezone.utc)
-        return value.astimezone(tz) if tz else value.replace(tzinfo=None)
-
-
-def record_for(platform, number):
-    post_id = str(100 + number)
-    url = f"https://images.example.test/{platform}/{post_id}.png"
-    record = {
-        "title": "青岛游记", "content": "青岛海边完整正文", "content_text": "青岛海边完整正文",
-        "desc": "青岛海边完整正文", "user_id": "author-1", "nickname": "作者",
-        "published_at": "2026-09-20T12:00:00+08:00", "followers_count": 42,
-        "followers_observed": True, "liked_count": 3, "comment_count": 2,
-        "comments_count": 2, "shared_count": 1, "share_count": 1,
-        "collected_count": 4, "view_count": 6, "voteup_count": 3,
-        "source_keyword": "青岛旅游", "content_detail_status": "detail_observed",
-        "content_detail_source": {"weibo": "mobile_detail", "douyin": "aweme_detail",
-                                  "zhihu": "answer_detail", "xhs": "note_detail",
-                                  "bilibili": "article_view_api"}[platform],
-        "author_followers_source": {"weibo": "search_author", "zhihu": "author_page",
-                                    "bilibili": "relation_stat", "xhs": "creator_profile",
-                                    "douyin": "creator_profile"}[platform],
-    }
-    if platform == "bilibili":
-        record.update(content_id=post_id, content_type="article", image_urls=[url],
-                      content_images_detail_status="detail_observed")
-    elif platform == "weibo":
-        record.update(note_id=post_id, image_list=[url], image_list_source="mblog.pics")
-    elif platform == "douyin":
-        record.update(aweme_id=post_id, aweme_type=68, note_download_url=url,
-                      image_assets=[{"url": url, "uri": post_id}])
-    elif platform == "zhihu":
-        record.update(content_id=post_id, content_type="answer", question_id="80", image_list=[url])
-    else:
-        record.update(note_id=post_id, type="normal", image_list=[{"url_default": url}])
-    return record
-
-
-def behavior_for(platform):
-    return {
-        "status": "completed", "profile": "xhs_guarded" if platform == "xhs" else "social_high_risk",
-        "url": "https://example.test/search?keyword=青岛旅游",
-        "events": [{"event": "pause"}, {"event": "mouse_moves"},
-                   {"event": "human_scroll_complete", "effective_passes": 1}],
-        "page_readiness": {"ready": True},
-        "runtime_fingerprint": {"webdriver": False, "languages": ["zh-CN"], "platform": "MacIntel", "visibility_state": "visible",
-                                "user_agent": "离线驱动", "viewport": {"width": 1280, "height": 900}},
-        "request_pacing_events": [{"stage": s} for s in ("search_results", "note_detail", "creator_profile")],
-        "continuity_events": [{"stage": "search_results", "status": "completed"}],
-    }
-
-
-XHS_LEDGER_ID = "71" * 16
-XHS_LEDGER_TIME = "2026-10-01T01:02:03+00:00"
-
-
-def write_xhs_visit_ledger(behavior_path, records, entries):
-    """#71 合成账本：与离线记录、manifest 一致的回车 → 点选“图文” → 逐篇浮层与作者页访问。
-
-    只替代 worker 的取数过程，账本与 `content_visit_refs` 按真实 worker 的写法给出，访问门禁在全链路上照常执行。
-    返回目标会话（has_more=false）搜索访问 id，供来源耗尽停止事件引用。
-    """
-    ledger = VisitLedger.create(
-        content_visits_path(behavior_path), platform="xhs", mode="discovery",
-        ledger_id=XHS_LEDGER_ID, clock=lambda: XHS_LEDGER_TIME,
-    )
-
-    def action(kind, target, from_visit=None):
-        return ledger.append("action", seq=ledger.next_seq(), page_role="primary", action=kind, target=target,
-                             from_visit=from_visit)
-
-    def visit(stage, rule, source, *, trigger, subject_id=None, **audit):
-        return ledger.append("visit", seq=ledger.next_seq(), page_role="primary", recorded_at=XHS_LEDGER_TIME,
-                             stage=stage, source=source, rule=rule, endpoint=None,
-                             status=200 if source == "page_response" else None, outcome="ok", route="/search_result_ai",
-                             query_keys=[], subject_id=subject_id, trigger=trigger, **audit)
-
-    def pause(stage, continuity="n/a"):
-        start = ledger.next_seq()
-        ledger.append("pause", seq=ledger.next_seq(), page_role="primary", stage=stage, start_seq=start,
-                      seconds=1.0, continuity=continuity)
-
-    def search(trigger, *, target, items):
-        return visit("search_results", "xhs.search_notes", "page_response", trigger=trigger,
-                     search_session="offline-2" if target else "offline-1",
-                     filter_signature="target" if target else "none", is_target=target, keyword_matches_target=True,
-                     search_page=1, has_more=not target, items=items)
-
-    search(action("press_enter", {}), target=False, items=[])
-    target = search(action("apply_filter", {"filter": "note_type"}), target=True,
-                    items=[{"id": record["note_id"], "type": "normal"} for record in records])
-    pause("search_results", "completed")
-    creator = None
-    for record in records:
-        note_id = record["note_id"]
-        click = action("click_card", {"note_id": note_id})
-        detail = visit("note_detail", "xhs.feed", "page_response", trigger=click, subject_id=note_id)
-        images = [
-            visit("note_image", "xhs.note_image", "page_response", trigger=click, subject_id=note_id,
-                  asset_key=entry.source_asset_key, sha256=entry.sha256, bytes=entry.size_bytes)
-            for entry in entries if entry.platform_post_id == note_id
-        ]
-        pause("note_detail")
-        if creator is None:
-            pause("creator_profile")
-            author = action("click_author", {"note_id": note_id}, from_visit=detail)
-            creator = visit("creator_profile", "creator_page_data", "page_state", trigger=author,
-                            subject_id=record["user_id"], url_user_id=record["user_id"])
-            action("close_tab", {"note_id": note_id})
-        action("close_overlay", {"note_id": note_id})
-        record["content_visit_refs"] = {"ledger_id": XHS_LEDGER_ID, "search_results": target, "note_detail": detail,
-                                        "creator_profile": creator, "images": images}
-    ledger.close()
-    return target
-
-
-ZHIHU_LEDGER_ID = "85" * 16
-
-
-def write_zhihu_visit_ledger(behavior_path, records, entries):
-    """#185 合成账本：搜索截获、点击详情、点击作者、CDN 图片，供知乎 content_visit_ok。"""
-
-    ledger = VisitLedger.create(
-        content_visits_path(behavior_path), platform="zhihu", mode="discovery",
-        ledger_id=ZHIHU_LEDGER_ID, clock=lambda: XHS_LEDGER_TIME,
-    )
-
-    def action(kind, target, from_visit=None, page_role="primary"):
-        return ledger.append(
-            "action", seq=ledger.next_seq(), page_role=page_role, action=kind,
-            target=target, from_visit=from_visit,
-        )
-
-    def visit(stage, rule, source, *, trigger, subject_id=None, page_role="primary", **audit):
-        return ledger.append(
-            "visit", seq=ledger.next_seq(), page_role=page_role, recorded_at=XHS_LEDGER_TIME,
-            stage=stage, source=source, rule=rule, endpoint=None,
-            status=200 if source != "page_state" else None, outcome="ok",
-            subject_id=subject_id, trigger=trigger, **audit,
-        )
-
-    def pause(stage, continuity="n/a", page_role="detail"):
-        start = ledger.next_seq()
-        ledger.append(
-            "pause", seq=ledger.next_seq(), page_role=page_role, stage=stage,
-            start_seq=start, seconds=1.0, continuity=continuity,
-        )
-
-    search = visit(
-        "search_results", "zhihu.search_v3", "page_response", trigger=action("navigate", {"route": "/search"}),
-        search_session="zhihu-offline", filter_signature="type=content", is_target=True,
-        search_page=1, has_more=False,
-        items=[{"id": record["content_id"], "type": "answer"} for record in records],
-    )
-    pause("search_results", "completed", "primary")
-    for record in records:
-        content_id = record["content_id"]
-        token = "author-token"
-        record["creator_url_token"] = token
-        click = action("click_card", {"content_id": content_id})
-        detail = visit(
-            "note_detail", "zhihu.initial_data", "page_state", trigger=click,
-            subject_id=content_id, page_role="detail",
-        )
-        pause("note_detail")
-        pause("creator_profile")
-        author_click = action("click_author", {"content_id": content_id}, from_visit=detail, page_role="detail")
-        author = visit(
-            "creator_profile", "zhihu.initial_data", "page_state", trigger=author_click,
-            subject_id=token, url_user_id=token, page_role="author",
-        )
-        images = [
-            visit(
-                "note_image", "zhihu.content_image", "cdn_direct", trigger=click, subject_id=content_id,
-                asset_key=entry.source_asset_key, sha256=entry.sha256,
-            )
-            for entry in entries if entry.platform_post_id == content_id
-        ]
-        record["content_visit_refs"] = {
-            "ledger_id": ZHIHU_LEDGER_ID,
-            "search_results": search,
-            "note_detail": detail,
-            "creator_profile": author,
-            "images": images,
-        }
-    ledger.close()
-    return search
-
-
-def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
-    """落盘真实 JSONL、manifest 和 PNG；仅替代 worker，不替代正式门禁。"""
-    folder = save_path / platform
-    folder.mkdir(parents=True)
-    records, entries = [], []
-    for number in (1, 2):
-        record = record_for(platform, number)
-        if scenario == "missing_required":
-            record.pop("user_id")
-        if scenario == "followers_unobserved":
-            record["followers_observed"] = False
-        records.append(record)
-        for candidate in content_image_candidates(platform, record):
-            image = io.BytesIO()
-            Image.new("RGB", (6, 4), color=(number, 20, 30)).save(image, format="PNG")
-            staged = write_staging_image([image.getvalue()], staging_root=folder,
-                                         relative_stem=f"images/{number}/{candidate.source_index}")
-            entries.append(ImageManifestEntry(
-                schema_version=1, platform_key=platform, platform_post_id=candidate.platform_post_id,
-                image_role=candidate.image_role, source_index=candidate.source_index,
-                source_key=candidate.source_key, source_asset_key=candidate.source_asset_key,
-                source_url=candidate.source_url, fetch_status="downloaded", attempts=1, http_status=200,
-                staging_path=staged.path.relative_to(folder).as_posix(), size_bytes=staged.size_bytes,
-                mime_type=staged.mime_type, width=staged.width, height=staged.height,
-                sha256=staged.sha256, error_code=None,
-            ))
-            if scenario == "missing_image":
-                staged.path.unlink()
-            if platform in {"xhs", "zhihu"}:
-                # 访问门禁 R5 按 image_assets 逐张核对。
-                record.setdefault("image_assets", []).append({
-                    "url": candidate.source_url, "source_index": candidate.source_index,
-                    "source_asset_key": candidate.source_asset_key,
-                })
-    if platform == "xhs":
-        source_visit_id = write_xhs_visit_ledger(behavior_path, records, entries)
-    elif platform == "zhihu":
-        source_visit_id = write_zhihu_visit_ledger(behavior_path, records, entries)
-    else:
-        source_visit_id = None
-    (folder / "search_contents_fixed.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
-    write_manifest_atomic(folder / "image_manifest.jsonl", entries)
-    behavior = behavior_for(platform)
-    if scenario == "invalid_behavior":
-        behavior["events"] = []
-    behavior_path.parent.mkdir(parents=True, exist_ok=True)
-    behavior_path.write_text(json.dumps(behavior, ensure_ascii=False))
-    details = {
-        "platform": platform, "batch_no": 1, "candidate_count": 2, "valid_new_count": 2,
-        "source_page": 2, "resume_page": 3, "batch_complete": True, "source_has_more": False,
-        "candidate_identities": ["101", "102"], "discovery_phase": "frontier",
-        "raw_batch_count": 2, "pages_fetched": 2, "stop_reason": "source_exhausted",
-        "stop_detail": "has_more_false",
-    }
-    if source_visit_id is not None:
-        details["source_visit_id"] = source_visit_id
-    if scenario.startswith("count_"):
-        details["candidate_count"] = int(scenario.split("_")[1])
-    if scenario == "many_pages":
-        details["pages_fetched"] = details["source_page"] = 100000
-    if scenario == "stagnant":
-        details["stagnant_batches"] = 100000
-    if scenario == "empty_page":
-        details["raw_batch_count"] = 0
-    if scenario == "unverified_empty_first_page":
-        details.update(source_page=1, source_offset=0, source_cursor=None, raw_batch_count=0, stop_detail="empty_page")
-    no_stop = scenario in {"missing_stop", "many_pages", "stagnant", "empty_page"} or scenario.startswith("count_")
-    if scenario == "pagination_block":
-        details.update(stop_reason="runtime_failed", stop_detail="blocked_or_forbidden")
-    if scenario == "items_unresolved":
-        # 小红书全量扫描停止（#92）：运行级失败，来源未耗尽。
-        details.update(source_has_more=True, stop_reason="runtime_failed", stop_detail="xhs_search_items_unresolved")
-    state.append_event("adaptive_batch_completed", details)
-    if not no_stop:
-        state.append_event("adaptive_search_stopped", details)
-    if scenario == "terminal_block":
-        state.append_event("xhs_runtime_terminal", {
-            "phase": "search", "failure_type": "platform_security_limit",
-            "stop_reason": "runtime_failed", "stop_detail": "安全限制 300011", "retryable": False,
-        })
-    return behavior
-
-
-def normalize(value, root):
-    """只归一临时绝对路径与运行时钟；主键、内容、图片字节和顺序不变。"""
-    if isinstance(value, bytes):
-        return value.replace(str(root).encode(), b"<run>")
-    if isinstance(value, str):
-        value = value.replace(str(root), "<run>")
-        return re.sub(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?", "<time>", value)
-    if isinstance(value, (list, tuple)):
-        return [normalize(v, root) for v in value]
-    if isinstance(value, dict):
-        return {k: normalize(v, root) for k, v in value.items()}
-    return value
-
-
-def database_snapshot(path):
-    with sqlite3.connect(path) as conn:
-        conn.row_factory = sqlite3.Row
-        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-                  if r[0] in {"web_posts", "web_post_images", "ctf_captures", "ctf_capture_images"}
-                  or "discovery" in r[0]]
-        snapshot = {}
-        for table in tables:
-            columns = list(conn.execute(f'PRAGMA table_info("{table}")'))
-            primary = [r["name"] for r in sorted(columns, key=lambda r: r["pk"]) if r["pk"]]
-            order = ", ".join(f'"{name}"' for name in primary)
-            assert order, table
-            snapshot[table] = [dict(r) for r in conn.execute(f'SELECT * FROM "{table}" ORDER BY {order}')]
-    return snapshot
-
-
-def drive(module, root, patch, capsys, platform="weibo", scenario="success", resume_summary=None):
-    """旧新两侧共用边界、故障和 SQL 观测；不替换收集、晋升、事务或门禁。`resume_summary` 为累计摘要路径。"""
-    root.mkdir()
-    media = root / "temp/media"
-    db = root / "posts.sqlite"
-    profile = root / "empty-profile"
-    profile.mkdir()
-    trace, held_locks = [], []
-    state = FrozenExecutionState.create(root / "state.json", run_id="t11", job_key="青岛旅游",
-                                        site_key=platform, job_kind="mediacrawler_search", plan={}, frozen_inputs=[])
-    patch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state.path))
-    argv = ["mediacrawler_crawl.py", "--platforms", platform, "--keyword", "青岛旅游",
-            "--db", str(db), "--output-dir", str(root / "batches"), "--media-root", str(media),
-            "--download-images", "--xhs-profile-dir", str(profile)]
-    if platform == "xhs":
-        argv += ["--xhs-account-id", "offline", "--xhs-discovery-target-key", "青岛旅游",
-                 "--xhs-discovery-query-fingerprint", "query", "--behavior-profile", "xhs_guarded",
-                 "--login-type", "qrcode"]
-    else:
-        argv += ["--discovery-job-id", "1", "--discovery-query-fingerprint", "query", "--discovery-run-id", "t11"]
-    if resume_summary is not None:
-        argv += ["--resume-summary", str(resume_summary)]
-    strict_patch(patch, sys, "argv", argv)
-    args = module.parse_args()
-    assert args.resume_summary == (None if resume_summary is None else str(resume_summary))
-    for name in ("zhihu_detail_urls_file", "xhs_detail_urls_file", "xhs_repair_target_ids_file", "repair_targets_file"):
-        assert getattr(args, name) is None
-    with sqlite3.connect(db) as conn:
-        bootstrap_connection(conn, sync_jobs=False)
-        conn.execute("INSERT INTO crawl_jobs (id, job_key, site_key, target_url, job_kind, next_run_at) VALUES (1, ?, ?, '', 'mediacrawler_search', '2026-10-01')", ("青岛旅游", platform))
-    # 只替换函数体实际读取的全局名；默认参数在定义时已绑定，替换模块全局不会生效，不计为读取。
-    for function in ("_run_main", "materialize_formal_record_images", "import_valid_records"):
-        for name, replacement in (("PROJECT_ROOT", root), ("datetime", FixedDatetime)):
-            if name in global_reads(inspect.unwrap(getattr(owner(module, function), function)).__code__):
-                binding(patch, module, function, name, replacement)
-    for function in ("load_pagination_evidence", "summarize_output"):
-        binding(patch, module, function, "time", SimpleNamespace(monotonic=lambda: 100.0, time=lambda: 1790816523.0, sleep=forbid))
-    binding(patch, module, "_run_main", "ensure_prerequisites", lambda: None)
-    resolve = getattr(owner(module, "_run_main"), "resolve_media_root")
-    binding(patch, module, "_run_main", "resolve_media_root",
-            lambda value: resolve(value, project_root=root, default_media_root=media))
-    binding(patch, module, "_run_main", "utc_stamp", lambda: "fixed")
-    binding(patch, module, "_run_platform_without_policy", "ROOT", root)
-    binding(patch, module, "_run_platform_without_policy", "discover_cdp_browser_path", lambda: None)
-    binding(patch, module, "_run_platform_without_policy", "export_profile_cookies",
-            lambda *a: {"cookie_header": "d_c0=test;z_c0=test", "source": "offline"})
-    binding(patch, module, "_run_platform_without_policy", "cookie_snapshot_path", lambda *a: root / "snapshot.json")
-    binding(patch, module, "run_platform", "clear_site_policy_state", lambda *a: None)
-    binding(patch, module, "run_platform", "record_site_cooldown", forbid)
-    strict_patch(patch, random, "uniform", lambda low, high: (low + high) / 2)
-
-    @contextmanager
-    def policy(*a, **kw):
-        yield {"allowed": True, "disabled": platform == "xhs"}
-
-    binding(patch, module, "run_platform", "site_request_guard", policy)
-    lock = getattr(owner(module, "_run_main"), "formal_media_persistence_lock")
-
-    @contextmanager
-    def observed_lock(*, enabled, progress_callback=None):
-        acquired = False
-        try:
-            with lock(enabled=enabled, lock_path=root / "media.lock", progress_callback=progress_callback):
-                acquired = enabled
-                if enabled:
-                    trace.append("media.acquire")
-                yield
-        finally:
-            if acquired:
-                trace.append("media.release")
-
-    binding(patch, module, "_run_main", "formal_media_persistence_lock", observed_lock)
-    db_owner = owner(module, "import_valid_records")
-    connect = db_owner.connect_db
-
-    def observed_connect(*a, **kw):
-        conn = connect(*a, **kw)
-        trace.append(("sqlite.busy_timeout", conn.execute("PRAGMA busy_timeout").fetchone()[0]))
-        conn.set_trace_callback(lambda sql: trace.append(sql) if sql in {"BEGIN", "BEGIN IMMEDIATE", "COMMIT", "ROLLBACK"} else None)
-        return conn
-
-    # 内容事务与发现提交各自读取 connect_db；两处都挂同一观测，保证 ContentCommit/DiscoveryCommit 顺序可比。
-    for function in ("import_valid_records", "persist_discovery_checkpoint"):
-        binding(patch, module, function, "connect_db", observed_connect)
-    upsert = db_owner.upsert_web_post
-    calls = 0
-    failure = module.XhsRuntimeSupervisionError("监督失败") if scenario == "supervision" else RuntimeError("提交探测失败")
-
-    def observed_upsert(*a, **kw):
-        nonlocal calls
-        calls += 1
-        trace.append(f"content.upsert.{calls}")
-        result = upsert(*a, **kw)
-        if calls == 2 and scenario in {"upsert_failure", "supervision"}:
-            raise failure
-        return result
-
-    strict_patch(patch, db_owner, "upsert_web_post", observed_upsert)
-    commit = db_owner.commit_formal_import
-
-    def observed_commit(conn):
-        trace.append("content.commit.enter")
-        if scenario != "commit_before":
-            commit(conn)
-        trace.append(f"content.in_transaction.{conn.in_transaction}")
-        if scenario in {"commit_before", "commit_after"}:
-            raise failure
-        trace.append("content.commit.exit")
-
-    strict_patch(patch, db_owner, "commit_formal_import", observed_commit)
-    imported = getattr(owner(module, "import_valid_records_with_media_rollback"), "import_valid_records")
-
-    def observed_import(*a, **kw):
-        try:
-            return imported(*a, **kw)
-        except BaseException as exc:
-            trace.append(("content.exception", type(exc).__name__, exc is failure))
-            raise
-
-    binding(patch, module, "import_valid_records_with_media_rollback", "import_valid_records", observed_import)
-    if scenario == "sqlite_busy":
-        schema = db_owner.ensure_web_schema
-
-        def busy_schema(conn):
-            result = schema(conn)
-            holder = sqlite3.connect(db)
-            holder.execute("BEGIN IMMEDIATE")
-            held_locks.append(holder)
-            trace.append("other.begin_immediate")
-            return result
-
-        strict_patch(patch, db_owner, "ensure_web_schema", busy_schema)
-        strict_patch(patch, db_owner, "FORMAL_SQLITE_BUSY_TIMEOUT_MS", 10)
-    promotion_owner = owner(module, "materialize_formal_record_images")
-    promote = promotion_owner.promote_validated_image
-    promotions = 0
-
-    def observed_promote(*a, **kw):
-        nonlocal promotions
-        promotions += 1
-        trace.append(f"media.promote.{promotions}")
-        if promotions == 2 and scenario == "promotion_failure":
-            raise OSError("晋升失败")
-        return promote(*a, **kw)
-
-    strict_patch(patch, promotion_owner, "promote_validated_image", observed_promote)
-    persist = getattr(owner(module, "_run_main"), "persist_discovery_checkpoint")
-
-    def observed_persist(*a, **kw):
-        trace.append("discovery.enter")
-        if scenario == "discovery_failure":
-            raise sqlite3.OperationalError("发现提交失败")
-        result = persist(*a, **kw)
-        trace.append("discovery.exit")
-        return result
-
-    binding(patch, module, "_run_main", "persist_discovery_checkpoint", observed_persist)
-
-    def fake_command(cmd, cwd, timeout, log_dir, **kw):
-        assert Path(cwd) == root
-        assert cmd[1:4] == ["-P", "-m", "trippostcollect.platforms.entry"]
-        save_path = Path(cmd[cmd.index("--save_data_path") + 1])
-        assert save_path.is_relative_to(root)
-        assert kw["extra_env"]["TRIPPOSTCOLLECT_DB_PATH"] == str(db)
-        trace.append("worker.run")
-        write_worker_artifacts(platform, save_path, log_dir / "behavior_evidence.json", state, scenario)
-        return {"returncode": 0, "timed_out": False, "stdout_tail": "", "stderr_tail": ""}
-
-    binding(patch, module, "_run_platform_without_policy", "run_command", fake_command)
-    if platform == "bilibili":
-        # B站没有 worker；保持执行器转发与 article search 本体，只替换会话/请求边界。
-        async def fake_behavior(args, evidence_path):
-            trace.append("bilibili.behavior")
-            evidence = behavior_for("bilibili")
-            evidence_path.write_text(json.dumps(evidence, ensure_ascii=False))
-            return {"cookie_header": "SESSDATA=offline", "user_agent": "Mozilla/5.0 test-browser"}, evidence
-
-        def fake_page(keyword, page, **kwargs):
-            trace.append(("bilibili.page", page))
-            items = [{"id": str(100 + n), "title": "青岛游记", "desc": "青岛搜索摘要",
-                      "pubdate": 1789876800, "like": 3, "reply": 2, "view": 6,
-                      "author": "作者", "mid": "author-1"} for n in (1, 2)] if page == 1 else []
-            return BilibiliSearchPage(items=items, num_pages=1, num_results=2)
-
-        def fake_detail(post_id, cookie_header, **kwargs):
-            trace.append(("bilibili.detail", post_id))
-            return {"title": "青岛游记", "content": f'<p>青岛海边完整正文</p><img src="https://i0.hdslb.com/bfs/article/{post_id}.png">'}, 1, 0.0
-
-        def fake_image(url, post_id, **kwargs):
-            trace.append(("bilibili.image", post_id))
-            buffer = io.BytesIO()
-            Image.new("RGB", (6, 4), color=(int(post_id) - 100, 20, 30)).save(buffer, format="PNG")
-            return SimpleNamespace(content=buffer.getvalue(), http_status=200, media_type="image/png", final_url=url)
-
-        binding(patch, module, "run_bilibili_article_search", "run_bilibili_behavior_session", fake_behavior)
-        binding(patch, module, "download_bilibili_record_images", "fetch_bilibili_image_bytes", fake_image)
-        for name, replacement in {
-            "fetch_bilibili_wbi_keys": lambda *a, **k: ("a", "b"),
-            "fetch_bilibili_article_page": fake_page,
-            "fetch_bilibili_article_detail_with_retry": fake_detail,
-            "fetch_bilibili_follower_count": lambda *a, **k: 42,
-            "datetime": FixedDatetime,
-            "time": SimpleNamespace(monotonic=lambda: 100.0, sleep=lambda delay: trace.append(("sleep", delay))),
-        }.items():
-            strict_patch(patch, bilibili_core, name, replacement)
-    capsys.readouterr()
-    try:
-        result = module._run_main(args, None)
-    except (RuntimeError, sqlite3.Error) as exc:
-        result = {"exception": type(exc).__name__, "message": str(exc), "original": exc is failure}
-    finally:
-        for holder in held_locks:
-            holder.rollback()
-            holder.close()
-    stdout, stderr = capsys.readouterr()
-    summary_path = root / "batches/fixed/summary.json"
-    summary = json.loads(summary_path.read_text()) if summary_path.exists() else None
-    envelope = [json.loads(line) for line in stdout.splitlines() if line.startswith("{")]
-    files = {p.relative_to(media).as_posix(): p.read_bytes() for p in media.rglob("*") if p.is_file()}
-    dirs = sorted(p.relative_to(media).as_posix() for p in media.rglob("*") if p.is_dir())
-    markdown = summary_path.with_suffix(".md")
-    snapshot = database_snapshot(db)
-    for row in snapshot["web_posts"]:
-        assert row["published_at"] == "2026-09-20T12:00:00+08:00"
-    for row in snapshot["web_post_images"]:
-        assert sha256((root / row["local_path"]).read_bytes()).hexdigest() == row["sha256"]
-    return normalize({"result": result, "trace": trace, "database": snapshot,
-                      "media": files, "media_dirs": dirs, "summary": summary,
-                      "markdown": normalize(markdown.read_text(), root).encode() if markdown.exists() else None,
-                      "envelope": envelope, "state": json.loads(state.path.read_text()),
-                      "stderr": stderr}, root)
-
-
-def paired(baseline, tmp_path, monkeypatch, capsys, platform, scenario):
-    values = []
-    for label, module in (("old", baseline), ("new", executor)):
-        with monkeypatch.context() as patch:
-            values.append(drive(module, tmp_path / label, patch, capsys, platform, scenario))
-    assert values[0] == values[1]
-    return values
+def run(tmp_path, monkeypatch, capsys, platform, scenario):
+    with monkeypatch.context() as patch:
+        return drive(tmp_path / "new", patch, capsys, platform, scenario)
 
 
 @pytest.mark.parametrize("platform", ["bilibili", "weibo", "douyin", "zhihu", "xhs"])
-def test_b_full_chain(baseline, tmp_path, monkeypatch, capsys, platform):
-    for value in paired(baseline, tmp_path, monkeypatch, capsys, platform, "success"):
-        assert value["result"] == 0, {
-            "validation": value["summary"]["formal_validation"]["invalid_reason_counts"],
-            "stderr": value["summary"]["records"][-1]["run"].get("stderr_tail"),
-            "images": value["summary"]["image_materialization"]["failures"],
-        }
-        assert value["summary"]["import_completion_met"] is True
-        assert len(value["database"]["web_posts"]) == len(value["database"]["web_post_images"]) == len(value["media"]) == 2
-        assert value["database"]["ctf_captures"] == []
-        if platform != "xhs":
-            assert len(value["database"]["crawl_discovery_checkpoints"]) == 1
-            assert len(value["database"]["crawl_discovery_seen_candidates"]) == 2
-        trace = value["trace"]
-        assert ("worker.run" in trace) is (platform != "bilibili")
-        assert ("bilibili.behavior" in trace) is (platform == "bilibili")
-        assert trace.index("media.acquire") < trace.index("media.promote.1") < trace.index("BEGIN IMMEDIATE")
-        assert trace.index("BEGIN IMMEDIATE") < trace.index("content.commit.enter") < trace.index("content.commit.exit")
-        assert trace.index("content.commit.exit") < trace.index("media.release") < trace.index("discovery.enter")
+def test_b_full_chain(tmp_path, monkeypatch, capsys, platform):
+    value = run(tmp_path, monkeypatch, capsys, platform, "success")
+    assert value["result"] == 0, {
+        "validation": value["summary"]["formal_validation"]["invalid_reason_counts"],
+        "stderr": value["summary"]["records"][-1]["run"].get("stderr_tail"),
+        "images": value["summary"]["image_materialization"]["failures"],
+    }
+    assert value["summary"]["import_completion_met"] is True
+    assert len(value["database"]["web_posts"]) == len(value["database"]["web_post_images"]) == len(value["media"]) == 2
+    assert value["database"]["ctf_captures"] == []
+    if platform != "xhs":
+        assert len(value["database"]["crawl_discovery_checkpoints"]) == 1
+        assert len(value["database"]["crawl_discovery_seen_candidates"]) == 2
+    trace = value["trace"]
+    assert ("worker.run" in trace) is (platform != "bilibili")
+    assert ("bilibili.behavior" in trace) is (platform == "bilibili")
+    assert trace.index("media.acquire") < trace.index("media.promote.1") < trace.index("BEGIN IMMEDIATE")
+    assert trace.index("BEGIN IMMEDIATE") < trace.index("content.commit.enter") < trace.index("content.commit.exit")
+    assert trace.index("content.commit.exit") < trace.index("media.release") < trace.index("discovery.enter")
 
 
 @pytest.mark.parametrize("scenario", ["upsert_failure", "commit_before", "commit_after", "promotion_failure",
                                       "sqlite_busy", "supervision", "discovery_failure"])
-def test_c_transaction_faults(baseline, tmp_path, monkeypatch, capsys, scenario):
-    for value in paired(baseline, tmp_path, monkeypatch, capsys, "xhs" if scenario == "supervision" else "weibo", scenario):
-        committed = scenario in {"commit_after", "discovery_failure"}
-        assert len(value["database"]["web_posts"]) == (2 if committed else 0)
-        assert len(value["database"]["web_post_images"]) == (2 if committed else 0)
-        assert len(value["media"]) == (2 if committed or scenario == "supervision" else 0)
-        assert value["database"]["crawl_discovery_checkpoints"] == [] or scenario == "promotion_failure"
-        trace = value["trace"]
-        if scenario in {"upsert_failure", "commit_before", "sqlite_busy"}:
-            assert ["content.exception", "FormalImportBeforeCommitError", False] in trace
-            assert value["summary"]["import_result"]["reason"] == "sqlite_import_failed"
-            assert value["summary"]["image_materialization"]["rolled_back_images"] == 2
-            assert "discovery.enter" not in trace
-            assert value["result"] == 2
-        if scenario in {"upsert_failure", "commit_before", "supervision"}:
-            assert "ROLLBACK" in trace
-        if scenario in {"commit_after", "supervision"}:
-            assert value["result"]["original"] is True
-            assert value["result"]["exception"] == ("RuntimeError" if committed else "XhsRuntimeSupervisionError")
-            assert "discovery.enter" not in trace
-        if scenario == "commit_after":
-            assert "content.in_transaction.False" in trace and "ROLLBACK" not in trace
-        if scenario == "commit_before":
-            assert "content.in_transaction.True" in trace
-        if scenario == "sqlite_busy":
-            assert ["sqlite.busy_timeout", 10] in trace
-            assert "other.begin_immediate" in trace and "BEGIN IMMEDIATE" in trace
-            assert "content.upsert.1" not in trace
-            assert "database is locked" in value["summary"]["import_result"]["error"]
-        if scenario == "promotion_failure":
-            assert value["summary"]["image_materialization"]["rolled_back_images"] == 1
-            assert "content.commit.enter" not in trace
-        if scenario == "discovery_failure":
-            assert value["result"] == 2
-            assert value["summary"]["failure_reason"] == "discovery_checkpoint_write_failed"
-            assert trace.index("content.commit.exit") < trace.index("discovery.enter")
+def test_c_transaction_faults(tmp_path, monkeypatch, capsys, scenario):
+    value = run(tmp_path, monkeypatch, capsys, "xhs" if scenario == "supervision" else "weibo", scenario)
+    committed = scenario in {"commit_after", "discovery_failure"}
+    assert len(value["database"]["web_posts"]) == (2 if committed else 0)
+    assert len(value["database"]["web_post_images"]) == (2 if committed else 0)
+    assert len(value["media"]) == (2 if committed or scenario == "supervision" else 0)
+    assert value["database"]["crawl_discovery_checkpoints"] == [] or scenario == "promotion_failure"
+    trace = value["trace"]
+    if scenario in {"upsert_failure", "commit_before", "sqlite_busy"}:
+        assert ["content.exception", "FormalImportBeforeCommitError", False] in trace
+        assert value["summary"]["import_result"]["reason"] == "sqlite_import_failed"
+        assert value["summary"]["image_materialization"]["rolled_back_images"] == 2
+        assert "discovery.enter" not in trace
+        assert value["result"] == 2
+    if scenario in {"upsert_failure", "commit_before", "supervision"}:
+        assert "ROLLBACK" in trace
+    if scenario in {"commit_after", "supervision"}:
+        assert value["result"]["original"] is True
+        assert value["result"]["exception"] == ("RuntimeError" if committed else "XhsRuntimeSupervisionError")
+        assert "discovery.enter" not in trace
+    if scenario == "commit_after":
+        assert "content.in_transaction.False" in trace and "ROLLBACK" not in trace
+    if scenario == "commit_before":
+        assert "content.in_transaction.True" in trace
+    if scenario == "sqlite_busy":
+        assert ["sqlite.busy_timeout", 10] in trace
+        assert "other.begin_immediate" in trace and "BEGIN IMMEDIATE" in trace
+        assert "content.upsert.1" not in trace
+        assert "database is locked" in value["summary"]["import_result"]["error"]
+    if scenario == "promotion_failure":
+        assert value["summary"]["image_materialization"]["rolled_back_images"] == 1
+        assert "content.commit.enter" not in trace
+    if scenario == "discovery_failure":
+        assert value["result"] == 2
+        assert value["summary"]["failure_reason"] == "discovery_checkpoint_write_failed"
+        assert trace.index("content.commit.exit") < trace.index("discovery.enter")
 
 
 @pytest.mark.parametrize("scenario", ["missing_stop", "missing_required", "followers_unobserved",
                                       "invalid_behavior", "missing_image", "terminal_block", "pagination_block"])
-def test_c_gates_and_blockers(baseline, tmp_path, monkeypatch, capsys, scenario):
-    for value in paired(baseline, tmp_path, monkeypatch, capsys, "xhs" if scenario == "terminal_block" else "weibo", scenario):
-        summary = value["summary"]
-        assert value["database"]["web_posts"] == [] and value["media"] == {}
-        validation = summary["formal_validation"]
-        if scenario in {"missing_required", "followers_unobserved"}:
-            reason = "missing_author_id" if scenario == "missing_required" else "followers_not_observed"
-            assert validation["invalid_reason_counts"][reason] == 2
-        else:
-            assert value["result"] == 2 and summary["import_completion_met"] is False
-        if scenario in {"terminal_block", "pagination_block"}:
-            assert validation["stop_reason"] == "runtime_failed"
-            assert summary["runtime_blocker"]["reason"] == ("安全限制 300011" if scenario == "terminal_block" else "blocked_or_forbidden")
-            assert validation["stop_detail"] == summary["runtime_blocker"]["reason"]
+def test_c_gates_and_blockers(tmp_path, monkeypatch, capsys, scenario):
+    value = run(tmp_path, monkeypatch, capsys, "xhs" if scenario == "terminal_block" else "weibo", scenario)
+    summary = value["summary"]
+    assert value["database"]["web_posts"] == [] and value["media"] == {}
+    validation = summary["formal_validation"]
+    if scenario in {"missing_required", "followers_unobserved"}:
+        reason = "missing_author_id" if scenario == "missing_required" else "followers_not_observed"
+        assert validation["invalid_reason_counts"][reason] == 2
+    else:
+        assert value["result"] == 2 and summary["import_completion_met"] is False
+    if scenario in {"terminal_block", "pagination_block"}:
+        assert validation["stop_reason"] == "runtime_failed"
+        assert summary["runtime_blocker"]["reason"] == ("安全限制 300011" if scenario == "terminal_block" else "blocked_or_forbidden")
+        assert validation["stop_detail"] == summary["runtime_blocker"]["reason"]
 
 
 @pytest.mark.parametrize("scenario", ["success", "missing_stop", "count_0", "count_1", "count_1000000",
                                       "many_pages", "stagnant", "empty_page", "unverified_empty_first_page"])
-def test_d_completion_requires_stop_evidence(baseline, tmp_path, monkeypatch, capsys, scenario):
+def test_d_completion_requires_stop_evidence(tmp_path, monkeypatch, capsys, scenario):
     platform = "douyin" if scenario == "unverified_empty_first_page" else "weibo"
-    for value in paired(baseline, tmp_path, monkeypatch, capsys, platform, scenario):
-        summary = value["summary"]
-        completed = scenario == "success"
-        events = value["state"]["events"]
-        has_stop = any(e["type"] == "adaptive_search_stopped" and e["details"].get("stop_reason") == "source_exhausted" for e in events)
-        assert has_stop is (scenario in {"success", "unverified_empty_first_page"})
-        assert summary["formal_validation"]["source_exhausted_met"] is completed
-        assert summary["formal_validation"]["completion_met"] is completed
-        assert summary["import_completion_met"] is completed
-        assert value["result"] == (0 if completed else 2)
-        assert value["envelope"][-1]["status"] == ("completed" if completed else "failed")
+    value = run(tmp_path, monkeypatch, capsys, platform, scenario)
+    summary = value["summary"]
+    completed = scenario == "success"
+    events = value["state"]["events"]
+    has_stop = any(e["type"] == "adaptive_search_stopped" and e["details"].get("stop_reason") == "source_exhausted" for e in events)
+    assert has_stop is (scenario in {"success", "unverified_empty_first_page"})
+    assert summary["formal_validation"]["source_exhausted_met"] is completed
+    assert summary["formal_validation"]["completion_met"] is completed
+    assert summary["import_completion_met"] is completed
+    assert value["result"] == (0 if completed else 2)
+    assert value["envelope"][-1]["status"] == ("completed" if completed else "failed")
 
 
 @pytest.mark.parametrize("scenario", ["success", "items_unresolved"])
@@ -1072,7 +131,7 @@ def test_e_incomplete_campaign_records_still_write_markdown_and_keep_the_stop_re
     campaign.write_text(json.dumps({"keyword": "青岛旅游", "records": [incomplete, incomplete]}))
     root = tmp_path / "run"
 
-    value = drive(executor, root, monkeypatch, capsys, "xhs", scenario, resume_summary=campaign)
+    value = drive(root, monkeypatch, capsys, "xhs", scenario, resume_summary=campaign)
 
     completed = scenario == "success"
     assert value["result"] == (0 if completed else 2)
@@ -1114,7 +173,7 @@ def test_e_markdown_failure_after_the_envelope_fails_the_child_and_keeps_the_chi
     root = tmp_path / "run"
 
     with pytest.raises(KeyError):
-        process.run_main_with_operator_interrupt(lambda: drive(executor, root, monkeypatch, capsys, platform, scenario))
+        process.run_main_with_operator_interrupt(lambda: drive(root, monkeypatch, capsys, platform, scenario))
 
     stdout = capsys.readouterr().out
     batch_dir = root / "batches/fixed"
