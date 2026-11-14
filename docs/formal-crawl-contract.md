@@ -3,6 +3,8 @@
 > **受限冻结：** 本文件属于治理基线；普通抓取、排障或顺手同步不得修改，只有用户明确授权治理变更，并同步核验对应代码、测试与关联文档时才允许更新。
 >
 > **授权记录（2026-11-13）：** 操作人授权临时解冻，同步 #185 知乎页面取数、访问门禁与全量扫描口径。
+>
+> **授权记录（2026-11-14）：** 操作人决定知乎分享数为平台不提供（#188），同步必需互动口径。
 
 本文定义正式抓取的机器语义。平台参数和必需字段 profile：通用平台在
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
@@ -289,8 +291,9 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 [`platform-field-coverage.md`](platform-field-coverage.md) 和对应平台文档共同限定。五个平台当前均为
 `followers_policy=required`；真实 0 必须同时具有原始字段与 `followers_observed=true`，缺失值不得
 转换为 0。知乎粉丝只取作者页 `followerCount`，来源为 `author_page`；关注数为 `followingCount`，作品数为
-`answerCount + articlesCount`，缺键为空，不补 0。赞、评、藏、分享四项必需，分别取详情页 `voteupCount`、
-`commentCount`、`favlistsCount`、`reaction.statistics.shareCount`，缺键为空，不补 0。认证判定未改。
+`answerCount + articlesCount`，缺键为空，不补 0。赞、评、藏三项必需，分别取详情页 `voteupCount`、
+`commentCount`、`favlistsCount`，缺键为空，不补 0。分享数平台不提供（#188）：网页端 `shareCount` 恒为占位 0，
+不读取，入库为空，不作必需项。认证判定未改。
 详情或作者候选级失败服从上面的 `candidate_skipped` 规则，登录、授权、频控、验证码和
 风控仍属于运行级阻断。
 

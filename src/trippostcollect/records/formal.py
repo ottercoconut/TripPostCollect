@@ -54,11 +54,11 @@ PLATFORM_REQUIRED_METRICS: dict[str, tuple[tuple[str, ...], ...]] = {
     "weibo": (("liked_count",), ("comments_count", "comment_count"), ("shared_count", "reposts_count")),
     "xhs": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
     "douyin": (("liked_count",), ("collected_count",), ("comment_count",), ("share_count",)),
+    # #188（用户 2026-11-14 决定）：知乎网页端不下发真实分享数（shareCount 恒为占位 0），分享为平台不提供。
     "zhihu": (
         ("voteup_count", "liked_count"),
         ("comment_count", "comments_count"),
         ("collected_count",),
-        ("share_count",),
     ),
 }
 

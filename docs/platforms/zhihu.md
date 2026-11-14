@@ -29,12 +29,14 @@
 
 - 每条未知候选都在搜索页点击标题，在新标签打开详情（#185）。回答页是
   `https://www.zhihu.com/question/{qid}/answer/{aid}`，文章页是 `https://zhuanlan.zhihu.com/p/{id}`。
-  搜索结果里正文已经完整的候选也打开，正文、图片、点赞、评论、收藏、分享和发布时间都以详情页为准。
+  搜索结果里正文已经完整的候选也打开，正文、图片、点赞、评论、收藏和发布时间都以详情页为准。
 - 详情数据是新标签里的页面状态 `script#js-initialData`：回答取 `initialState.entities.answers.{id}`，
   文章取 `initialState.entities.articles.{id}`。点赞是 `voteupCount`，评论是 `commentCount`，收藏是
-  `favlistsCount`（入库 `collected_count` → `post_favorites_count`），分享是
-  `reaction.statistics.shareCount`（入库 `share_count` → `post_shares_count`）。这四项缺键为 NULL，
+  `favlistsCount`（入库 `collected_count` → `post_favorites_count`）。这三项缺键为 NULL，
   不补 0；键上的 0 仍记为 0。缺任一项按字段 profile 判为不合格。
+- 分享数平台不提供（#188）：网页端 `reaction.statistics.shareCount` 对任何内容都是占位 0（同组 `pvCount`
+  也是 0、`republishers` 为空），页面与手机端都不显示分享数，页面自身请求里也没有非 0 的分享字段。
+  知乎不读取该键，`post_shares_count` 为 NULL，分享不是知乎必需项。
 - 详情标签停留随机 5–9 秒（账本阶段 `note_detail`），然后在关闭前点击作者名。作者页
   `https://www.zhihu.com/people/{url_token}` 在新标签打开，数据仍是 `script#js-initialData` 的
   `initialState.entities.users.{url_token}`。点作者前先写一段 `creator_profile` 停顿（1–2 秒）；作者标签

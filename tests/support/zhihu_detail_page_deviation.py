@@ -4,7 +4,7 @@
 
 1. 删除回答/文章详情的 httpx 请求，以及紧挨着的 ``http_client``、``sign``、``compile`` 和请求后的
    ``sleep 0`` / ``sleep 1``。没有剩余签名时去掉 ``compile``。
-2. 已观察的回答/文章把点赞、评论、收藏、分享改成详情页的值（7/1/2/0）；``search_content`` 改为
+2. 已观察的回答/文章把点赞、评论、收藏改成详情页的值（7/1/2），分享不再记录（#188 平台不提供）；``search_content`` 改为
    ``answer_detail`` 或 ``article_detail``。
 3. 两侧内容 JSONL 去掉 ``content_visit_refs`` 后按键排序再比较，避免账本序号进入固化字节。
 4. 搜索详情 429 的停止细节从 ``rate_limited`` 改为页面上的 ``captcha_detected``。
@@ -25,8 +25,7 @@ PARSER_AND_MODEL_REPLACEMENTS = (
         '    comment_count: int = Field(default=0, description="Comment count")',
         '    voteup_count: int | None = Field(default=None, description="Upvote count")\n'
         '    comment_count: int | None = Field(default=None, description="Comment count")\n'
-        '    collected_count: int | None = Field(default=None, description="Favorite count from detail favlistsCount")\n'
-        '    share_count: int | None = Field(default=None, description="Share count from detail reaction.statistics.shareCount")',
+        '    collected_count: int | None = Field(default=None, description="Favorite count from detail favlistsCount")',
     ),
     (
         '    author_desc: str = Field(default="", description="Creator headline or description")\n'
@@ -57,8 +56,7 @@ PARSER_AND_MODEL_REPLACEMENTS = (
         '        res.updated_time = _present_int(answer, "updated_time", "updatedTime")\n'
         '        res.voteup_count = _metric(answer, "voteup_count", "voteupCount")\n'
         '        res.comment_count = _metric(answer, "comment_count", "commentCount")\n'
-        '        res.collected_count = _metric(answer, "favlists_count", "favlistsCount")\n'
-        '        res.share_count = _share_count(answer)',
+        '        res.collected_count = _metric(answer, "favlists_count", "favlistsCount")',
     ),
     (
         '        res.created_time = article.get("created_time", 0) or article.get("created", 0)\n'
@@ -69,8 +67,7 @@ PARSER_AND_MODEL_REPLACEMENTS = (
         '        res.updated_time = _present_int(article, "updated_time", "updatedTime", "updated")\n'
         '        res.voteup_count = _metric(article, "voteup_count", "voteupCount")\n'
         '        res.comment_count = _metric(article, "comment_count", "commentCount")\n'
-        '        res.collected_count = _metric(article, "favlists_count", "favlistsCount")\n'
-        '        res.share_count = _share_count(article)',
+        '        res.collected_count = _metric(article, "favlists_count", "favlistsCount")',
     ),
     (
         '        res.voteup_count = zvideo.get("voteup_count")\n'
@@ -85,7 +82,6 @@ PARSER_AND_MODEL_REPLACEMENTS = (
         '    search_content.voteup_count = detail_content.voteup_count\n'
         '    search_content.comment_count = detail_content.comment_count\n'
         '    search_content.collected_count = detail_content.collected_count\n'
-        '    search_content.share_count = detail_content.share_count\n'
         '    search_content.created_time = detail_content.created_time\n'
         '    search_content.updated_time = detail_content.updated_time\n'
         '    if detail_content.content_visit_refs:\n'
@@ -142,7 +138,7 @@ def _project_record(record: dict, *, from_expected: bool) -> dict:
         record["voteup_count"] = 7
         record["comment_count"] = 1
         record["collected_count"] = 2
-        record["share_count"] = 0
+        record.pop("share_count", None)
         if record.get("content_detail_source") == "search_content":
             record["content_detail_source"] = (
                 "answer_detail" if record.get("content_type") == "answer" else "article_detail"

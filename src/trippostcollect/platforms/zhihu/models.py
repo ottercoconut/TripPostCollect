@@ -45,7 +45,6 @@ class ZhihuContent(BaseModel):
     voteup_count: int | None = Field(default=None, description="Upvote count")
     comment_count: int | None = Field(default=None, description="Comment count")
     collected_count: int | None = Field(default=None, description="Favorite count from detail favlistsCount")
-    share_count: int | None = Field(default=None, description="Share count from detail reaction.statistics.shareCount")
     image_list: list[str] = Field(default_factory=list, description="Content image URLs")
     image_count: int = Field(default=0, description="Content image count")
     image_list_source: str = Field(default="", description="Authoritative body image source")
