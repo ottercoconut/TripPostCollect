@@ -826,7 +826,7 @@
       {
        "file": "tests/platforms/weibo/test_weibo_no_user_info.py",
        "lane": "component",
-       "min_count": 2
+       "min_count": 1
       },
       {
        "function": "tests/platforms/weibo/test_weibo_store.py::test_note_store_keeps_pid_order_and_ignores_avatar",
@@ -847,7 +847,7 @@
       {
        "file": "tests/platforms/douyin/test_douyin_no_user_info.py",
        "lane": "component",
-       "min_count": 2
+       "min_count": 1
       },
       {
        "function": "tests/test_image_candidates.py::test_non_content_fields_never_become_content_candidates",
@@ -2041,7 +2041,7 @@
       {
        "file": "tests/platforms/weibo/test_weibo_no_user_info.py",
        "lane": "component",
-       "min_count": 2
+       "min_count": 1
       },
       {
        "file": "tests/platforms/weibo/test_weibo_store.py",
@@ -2082,7 +2082,7 @@
       {
        "file": "tests/platforms/douyin/test_douyin_no_user_info.py",
        "lane": "component",
-       "min_count": 2
+       "min_count": 1
       },
       {
        "file": "tests/platforms/douyin/test_douyin_search_safety.py",

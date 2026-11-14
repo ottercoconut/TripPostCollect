@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import argparse
+from importlib import import_module
 from pathlib import Path
+import sys
 
 ENTRY_MODULE = "trippostcollect.platforms.entry"
 KEYWORD = "青岛旅游"
@@ -77,3 +79,45 @@ def worker_argv(name: str, tmp: Path) -> list[str]:
     if cdp:
         argv += ["--enable_cdp_mode", cdp]
     return argv
+
+
+def capture_parent_commands(monkeypatch, tmp: Path) -> dict[str, dict]:
+    """按各场景运行父侧 `_run_platform_without_policy`，截下交给 run_command 的子命令、cwd、超时与 env。"""
+    from trippostcollect.application import collection, reporting
+
+    scripts = str(Path(__file__).resolve().parents[2] / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    crawl = import_module("mediacrawler_crawl")
+    captured: dict[str, object] = {}
+
+    def fake_run_command(cmd, cwd, timeout, log_dir, **kwargs):
+        captured.update(
+            cmd=list(cmd), cwd=Path(cwd), timeout=timeout,
+            extra_env=dict(kwargs.get("extra_env") or {}),
+            startup_grace_seconds=kwargs.get("startup_grace_seconds"),
+            network_diagnostics_path=kwargs.get("network_diagnostics_path"),
+        )
+        return {"returncode": 0, "timed_out": False, "stdout_tail": "", "stderr_tail": ""}
+
+    monkeypatch.delenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", raising=False)
+    monkeypatch.setattr(collection, "run_command", fake_run_command)
+    monkeypatch.setattr(collection, "discover_cdp_browser_path", lambda: "/fake/chrome")
+    monkeypatch.setattr(
+        collection, "export_profile_cookies",
+        lambda *_: {"cookie_header": "d_c0=x; z_c0=y", "cookie_names": ["d_c0", "z_c0"], "source": "fake"},
+    )
+    monkeypatch.setattr(collection, "public_cookie_export", lambda _export: {"source": "fake"})
+    monkeypatch.setattr(
+        reporting, "summarize_output",
+        lambda *_: {"parse_errors": 0, "content_records": 0, "non_video_content_records": 0, "video_like_records": 0},
+    )
+    monkeypatch.setattr(collection, "load_behavior_evidence", lambda *_: {"status": "completed"})
+    monkeypatch.setattr(collection, "behavior_evidence_valid", lambda *_: True)
+
+    result = {}
+    for name in NAMES:
+        captured.clear()
+        crawl._run_platform_without_policy(platform(name), parent_args(name, tmp), tmp / name)
+        result[name] = dict(captured)
+    return result

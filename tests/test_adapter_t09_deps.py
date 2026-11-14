@@ -12,6 +12,8 @@ import tomllib
 
 import pytest
 
+from support import worker_scenarios
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src/trippostcollect"
@@ -50,9 +52,8 @@ def resolved_imports(path: Path, package: str):
 
 
 def worker_argv(tmp_path: Path) -> list[str]:
-    commands = json.loads((ROOT / "tests/golden/t02_worker_commands.json").read_text())
-    argv = list(commands["xhs_search_qrcode"]["cmd"][4:])
-    return [str(tmp_path / "data") if item == "<TMP>/xhs_search_qrcode/xhs/data" else item for item in argv]
+    argv = worker_scenarios.worker_argv("xhs_search_qrcode", tmp_path)
+    return [str(tmp_path / "data") if item == f"{tmp_path}/xhs_search_qrcode/xhs/data" else item for item in argv]
 
 
 def run_child(code: str, tmp_path: Path, **env) -> subprocess.CompletedProcess:

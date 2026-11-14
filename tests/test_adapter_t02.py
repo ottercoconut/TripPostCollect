@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from trippostcollect.application import collection
-from trippostcollect.application import reporting
 from trippostcollect.runtime.process import NO_PROGRESS_WATCHDOG_SECONDS
 
 import argparse
@@ -63,42 +61,6 @@ def _json_tail(result: subprocess.CompletedProcess[str]):
 
 # ---------- 父侧构造的 child 命令 ----------
 
-def _capture_commands(monkeypatch: pytest.MonkeyPatch, tmp: Path) -> dict[str, dict]:
-    crawl = import_module("mediacrawler_crawl")
-    captured: dict[str, object] = {}
-
-    def fake_run_command(cmd, cwd, timeout, log_dir, **kwargs):
-        captured.update(
-            cmd=list(cmd), cwd=Path(cwd), timeout=timeout,
-            extra_env=dict(kwargs.get("extra_env") or {}),
-            startup_grace_seconds=kwargs.get("startup_grace_seconds"),
-            network_diagnostics_path=kwargs.get("network_diagnostics_path"),
-        )
-        return {"returncode": 0, "timed_out": False, "stdout_tail": "", "stderr_tail": ""}
-
-    monkeypatch.delenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", raising=False)
-    monkeypatch.setattr(collection, "run_command", fake_run_command)
-    monkeypatch.setattr(collection, "discover_cdp_browser_path", lambda: "/fake/chrome")
-    monkeypatch.setattr(
-        collection, "export_profile_cookies",
-        lambda *_: {"cookie_header": "d_c0=x; z_c0=y", "cookie_names": ["d_c0", "z_c0"], "source": "fake"},
-    )
-    monkeypatch.setattr(collection, "public_cookie_export", lambda _export: {"source": "fake"})
-    monkeypatch.setattr(
-        reporting, "summarize_output",
-        lambda *_: {"parse_errors": 0, "content_records": 0, "non_video_content_records": 0, "video_like_records": 0},
-    )
-    monkeypatch.setattr(collection, "load_behavior_evidence", lambda *_: {"status": "completed"})
-    monkeypatch.setattr(collection, "behavior_evidence_valid", lambda *_: True)
-
-    result = {}
-    for name in scenarios.NAMES:
-        captured.clear()
-        crawl._run_platform_without_policy(scenarios.platform(name), scenarios.parent_args(name, tmp), tmp / name)
-        result[name] = dict(captured)
-    return result
-
-
 # 父层不再发出的 env：唯一消费者已删除（T12、T14-C、#124），小红书全量扫描不再注入发现恢复参数（#71）。
 RETIRED_ENV = {
     "TRIPPOSTCOLLECT_DISCOVERY_RUN_ID", "TRIPPOSTCOLLECT_DISCOVERY_PLATFORM", "TRIPPOSTCOLLECT_DISCOVERY_KEYWORD",
@@ -113,7 +75,7 @@ RETIRED_XHS_ENV = {
 
 
 def test_child_command_runs_root_entry_with_parent_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    captured = _capture_commands(monkeypatch, tmp_path)
+    captured = scenarios.capture_parent_commands(monkeypatch, tmp_path)
     for name in scenarios.NAMES:
         command = captured[name]
         assert command["cmd"] == [sys.executable, "-P", "-m", ENTRY_MODULE,

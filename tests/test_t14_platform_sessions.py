@@ -21,6 +21,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from support import worker_scenarios
+
 from trippostcollect.core import paths
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -290,11 +292,6 @@ def test_cdp_manager_profile_follows_share_flag(
 
 # ---------- 带残留的 checkout 下测试隔离仍成立 ----------
 
-def _golden_argv(name: str, tmp: Path) -> list[str]:
-    commands = json.loads((ROOT / "tests/golden/t02_worker_commands.json").read_text(encoding="utf-8"))
-    return [part.replace("<TMP>", str(tmp)) for part in commands[name]["cmd"][4:]]
-
-
 ENTRY_PROBE = (
     "import json\n"
     "{redirect}"
@@ -319,7 +316,7 @@ def _run_entry_probe(tmp_path: Path, checkout: Path, *, redirect: bool) -> subpr
     environment["TRIPPOST_PROJECT_ROOT"] = str(checkout)
     code = ENTRY_PROBE.format(
         redirect=child_redirect_source(tmp_path / "isolation") if redirect else "",
-        argv=_golden_argv("weibo_search", tmp_path),
+        argv=worker_scenarios.worker_argv("weibo_search", tmp_path),
     )
     return subprocess.run(
         [sys.executable, "-P", "-c", code], cwd=tmp_path, env=environment,
