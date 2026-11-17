@@ -37,16 +37,19 @@
 - 分享数平台不提供（#188）：网页端 `reaction.statistics.shareCount` 对任何内容都是占位 0（同组 `pvCount`
   也是 0、`republishers` 为空），页面与手机端都不显示分享数，页面自身请求里也没有非 0 的分享字段。
   知乎不读取该键，`post_shares_count` 为 NULL，分享不是知乎必需项。
-- 详情标签停留随机 5–9 秒（账本阶段 `note_detail`），然后在关闭前点击作者名。作者页
-  `https://www.zhihu.com/people/{url_token}` 在新标签打开，数据仍是 `script#js-initialData` 的
-  `initialState.entities.users.{url_token}`。点作者前先写一段 `creator_profile` 停顿（1–2 秒）；作者标签
+- 详情标签停留随机 5–9 秒（账本阶段 `note_detail`），然后在关闭前点击作者名。个人作者页是
+  `https://www.zhihu.com/people/{url_token}`，机构号作者页是 `https://www.zhihu.com/org/{url_token}`
+  （#202）。两者都在新标签打开，数据仍是 `script#js-initialData` 的
+  `initialState.entities.users.{url_token}`，结构相同，含粉丝、关注、作品数和标识。只点击路径正好是
+  `/people/{token}` 或 `/org/{token}` 的主页；可以带查询串或片段，`/org/{token}/answers`、
+  `/people/{token}/followers` 这类子页不点。点作者前先写一段 `creator_profile` 停顿（1–2 秒）；作者标签
   再停留随机 5–9 秒后关闭，回到详情标签，再关闭详情标签回到搜索页。点击、页面状态读取、停留和关闭都写入
   访问账本。`url_user_id` 取作者页 URL 的 token。
 - 每条入库记录带 `content_visit_refs`：`ledger_id`、`search_results`、`note_detail`、`creator_profile`、
   `images`。访问阶段统一用这些链名；正文来源字段仍是 `answer_detail` 或 `article_detail`。知乎已纳入
   访问门禁，正式记录要过 `content_visit_ok`（#185）。指定 URL 的修复链没有搜索访问：详情由 `navigate`
   打开，仍读页面状态。
-- 没有 `/people/{token}` 作者链接，或作者页状态里没有该用户，是候选级失败（`author_link_missing` /
+- 没有 `/people/{token}` 或 `/org/{token}` 作者主页链接，或作者页状态里没有该用户，是候选级失败（`author_link_missing` /
   `author_profile_missing`），按 3 次、间隔 1 秒重试后写 `candidate_skipped` 并进入已处理记忆。作者页落到
   登录或安全验证，沿用详情页的同一组 URL 与可见特征，是运行级阻断。
 - 详情只有在页面状态能解析出目标 entity 且正文非空时，才写 `content_detail_status=detail_observed`，
@@ -60,17 +63,18 @@
   `followers_observed=true`；缺键不能补 0。关注数取作者页 `followingCount`，缺键为 NULL，不补 0；键上的 0
   仍记为 0。作品数 `author_posts_count` 是 `answerCount + articlesCount`，两者任一缺失则为 NULL。
   `answerCount`、`articlesCount`、`pinsCount`、`questionCount` 四个原值写入 `author_json`，缺键不写、不补 0。
-- 认证只认作者页用户实体（#193）。`detailBadges` 里存在 `type` 为 `identity`、`detailType` 为
+- 认证只认作者页用户实体（#193），机构号作者页同样适用，不因打开的是 `/org/` 而改变。`detailBadges` 里存在 `type` 为 `identity`、`detailType` 为
   `identity_org` 或 `identity_people`、且 `badgeStatus` 为 `passed` 的项时，`author_verified=1`，
   `verified_text` 为这些项的 `description`：多项按出现顺序去重，用“、”连接，机构项排在个人项之前。
   作者页实体有字典 `badgeV2` 且 `detailBadges` 是列表、但没有上述两类时，`author_verified=0`，
   `verified_text` 为空。没有 `badgeV2` 或结构不对时不推断，`author_verified` 为空，`verified_text` 为空。
-  搜索结果上的 `verify_bayes` 与 `badge_v2.title` 不再作为认证来源。其余标识（`badgeV2`、`badge`、
+  搜索结果上的 `verify_bayes` 与 `badge_v2.title` 不再作为认证来源。`isOrg`、`userType` 和
+  `orgVerifyStatus` 也不是认证来源。其余标识（`badgeV2`、`badge`、
   `userType`、`isOrg`、`vipInfo`）去掉键名含 `icon`、`url`、`avatar`、`image` 的键后写入
   `author_page_badges`，只进入 `raw_sample_json`，不进入 `author_json`，不新增数据库列。
 - 作者平台 ID 保存 author/member 原始 `id`（写在 `creator_hash` 键），昵称保存 `name` 原文；
-  `url_token` 另存为 `creator_url_token`，只用于拼接主页 `https://www.zhihu.com/people/<url_token>`，
-  不作为平台 ID。
+  `url_token` 另存为 `creator_url_token`，不作为平台 ID。作者页确认后，`author_profile_url` 按实际打开的路径写成
+  `https://www.zhihu.com/people/<url_token>` 或 `https://www.zhihu.com/org/<url_token>`。
 - 作者简介取 author/member 的 `headline`，写入 `author_description`。认证口径见上一条。
 - 详情候选级失败（找不到标题卡片、新标签没打开、页面状态里没有目标实体、实体没有正文）按 3 次、
   间隔 1 秒有限重试，然后写 `candidate_skipped` 并进入已处理记忆。登录页、安全验证页，以及
