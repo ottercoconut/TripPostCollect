@@ -724,3 +724,13 @@ def test_org_identity_switch_requires_zhihu(tmp_path: Path, monkeypatch: pytest.
     _redirect(monkeypatch, tmp_path)
     with pytest.raises(SystemExit, match="只适用于 --platform zhihu"):
         backfill.main(["--platform", "xhs", "--org-identity", "--db", str(tmp_path / "none.sqlite")])
+
+
+def test_org_identity_text_does_not_double_prefix():
+    from trippostcollect.application.author_profile_backfill import org_identity_text
+
+    assert org_identity_text("") == "机构号"
+    assert org_identity_text(None) == "机构号"
+    assert org_identity_text("已认证机构号") == "机构号、已认证机构号"
+    assert org_identity_text("机构号、已认证机构号") == "机构号、已认证机构号"
+    assert org_identity_text("机构号") == "机构号"

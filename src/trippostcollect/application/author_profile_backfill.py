@@ -714,10 +714,12 @@ def apply_zhihu_following(
 
 
 def org_identity_text(current: Any) -> str:
-    """有原文字时写成“机构号、<原文字>”；空文字写成“机构号”。"""
+    """有原文字时写成“机构号、<原文字>”；空文字写成“机构号”。已以“机构号”开头的不重复加。"""
 
     if not isinstance(current, str) or current == "":
         return ORG_IDENTITY_PREFIX
+    if current.startswith(ORG_IDENTITY_PREFIX):
+        return current
     return f"{ORG_IDENTITY_PREFIX}、{current}"
 
 
