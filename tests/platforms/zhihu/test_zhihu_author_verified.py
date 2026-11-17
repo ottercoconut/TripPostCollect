@@ -183,7 +183,7 @@ def test_org_only() -> None:
     ), isOrg=True))
 
     assert content.author_verified == 1
-    assert content.verified_text == "已认证机构号"
+    assert content.verified_text == "机构号、已认证机构号"
     assert content.author_page_badges["isOrg"] is True
     assert content.author_page_badges["userType"] == "organization"
 
@@ -319,3 +319,58 @@ def test_rows_persist_verified_columns(tmp_path: Path) -> None:
         else:
             assert "badgeV2" not in raw["author_page_badges"]
         _assert_no_media(raw["author_page_badges"])
+
+
+def test_org_account_prefixes_identity_description(tmp_path: Path) -> None:
+    content = _from_author_page(_user(_badge_v2(
+        _badge("identity", "identity_people", "已认证的个人", "新闻业 新媒体运营"),
+        _badge("identity", "identity_org", "已认证机构号", "已认证机构号"),
+    ), isOrg=True))
+
+    assert content.author_verified == 1
+    assert content.verified_text == "机构号、已认证机构号、新闻业 新媒体运营"
+    row = _row(content, tmp_path)
+    raw = json.loads(row["raw_sample_json"])
+    assert row["author_verified"] == raw["author_verified"] == 1
+    assert row["author_verified_text"] == raw["verified_text"] == content.verified_text
+
+
+def test_org_account_without_description_is_still_verified(tmp_path: Path) -> None:
+    """#205：isOrg 为严格布尔 True 时，没有身份描述、甚至 badgeV2 不能判断，也记为机构号。"""
+
+    honors = _from_author_page(_user(_badge_v2(
+        _badge("best", "best_answerer", "优秀答主", "优秀答主"),
+    ), isOrg=True))
+    assert honors.author_verified == 1
+    assert honors.verified_text == "机构号"
+
+    missing = _from_author_page(_user(include_badge_v2=False, isOrg=True))
+    assert missing.author_verified == 1
+    assert missing.verified_text == "机构号"
+    malformed = _from_author_page(_user({"title": "", "detailBadges": {}}, isOrg=True))
+    assert malformed.author_verified == 1
+    assert malformed.verified_text == "机构号"
+
+    row = _row(missing, tmp_path)
+    raw = json.loads(row["raw_sample_json"])
+    assert row["author_verified"] == raw["author_verified"] == 1
+    assert row["author_verified_text"] == raw["verified_text"] == "机构号"
+    assert raw["author_page_badges"]["isOrg"] is True
+    assert "badgeV2" not in raw["author_page_badges"]
+
+
+def test_non_boolean_is_org_keeps_identity_rules() -> None:
+    string_true = _from_author_page(_user(include_badge_v2=False, isOrg="true"))
+    assert string_true.author_verified is None
+    assert string_true.verified_text == ""
+
+    number = _from_author_page(_user(_badge_v2(), isOrg=1))
+    assert number.author_verified == 0
+    assert number.verified_text == ""
+
+    people = _from_author_page(_user(_badge_v2(
+        _badge("identity", "identity_people", "已认证的个人", "哈尔滨工业大学 控制工程硕士"),
+    ), isOrg=False))
+    assert people.author_verified == 1
+    assert people.verified_text == "哈尔滨工业大学 控制工程硕士"
+    assert not people.verified_text.startswith("机构号")

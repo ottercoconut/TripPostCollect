@@ -1,7 +1,9 @@
 """作者资料回填。
 
 小红书离线补认证两列，抖音联网补主页、简介和认证：只填当前为 NULL 的列，不覆盖已有值。
-知乎离线把三处同为 0 的关注数改为 NULL，不访问平台，也不改其他列或其他 JSON 键。
+知乎有两条互斥的离线修正，一次命令只跑一条：默认把三处同为 0 的关注数改为 NULL；
+``--org-identity`` 只把作者页 ``isOrg`` 为 JSON 布尔 true 的机构号写成认证。
+两条都不访问平台，也不改本次目标以外的列或 JSON 键。
 取不回或不一致的行保留原值，不删除。抖音写入的是回填时刻的作者资料，不是原始抓取时刻的。
 """
 
@@ -54,17 +56,24 @@ DOUYIN_COLUMNS = (
     "author_verified_text",
 )
 ZHIHU_COLUMNS = ("author_following_count",)
+ZHIHU_ORG_COLUMNS = ("author_verified", "author_verified_text")
 COLUMNS = {"xhs": XHS_COLUMNS, "douyin": DOUYIN_COLUMNS, "zhihu": ZHIHU_COLUMNS}
+ORG_IDENTITY_PREFIX = "机构号"
 AWEME_ID_RE_TEXT = r"^[0-9]+$"
 CHILD_INTERRUPT_GRACE_SECONDS = None
 INTERRUPT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="回填小红书认证、抖音作者资料，或把知乎三处同为 0 的关注数改为 NULL。",
+        description="回填小红书认证、抖音作者资料，或离线修正知乎关注数与机构号认证。",
     )
     parser.add_argument("--platform", required=True, choices=PLATFORMS)
     parser.add_argument("--db", default=str(DEFAULT_DB))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--org-identity",
+        action="store_true",
+        help="只回填知乎机构号认证。与默认的关注数修正互斥，不能和其他平台一起用。",
+    )
     parser.add_argument(
         "--confirm-default-db-backfill",
         action="store_true",
@@ -85,9 +94,13 @@ def connect_readonly(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def column_counts(connection: sqlite3.Connection, platform: str) -> dict[str, int]:
+def column_counts(
+    connection: sqlite3.Connection,
+    platform: str,
+    columns: tuple[str, ...] | None = None,
+) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for column in COLUMNS[platform]:
+    for column in columns or COLUMNS[platform]:
         row = connection.execute(
             f"SELECT COUNT({column}) FROM web_posts WHERE platform_key=?",
             (platform,),
@@ -426,12 +439,17 @@ def _reason_counts(items: list[dict[str, str]]) -> dict[str, int]:
     return counts
 
 
-def _sample(authors: list[dict[str, Any]], platform: str) -> list[dict[str, Any]]:
+def _sample(
+    authors: list[dict[str, Any]],
+    platform: str,
+    columns: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    selected = columns or COLUMNS[platform]
     sample = []
     for author in authors[:10]:
         nulls: set[str] = set()
         for row in author["rows"]:
-            for column in COLUMNS[platform]:
+            for column in selected:
                 if row[column] is None:
                     nulls.add(column)
         sample.append(
@@ -461,7 +479,9 @@ def _report(
     backup: dict[str, Any] | None = None,
     runtime_blocker: str = "",
     extra: dict[str, Any] | None = None,
+    columns: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
+    selected = columns or COLUMNS[platform]
     unrecovered = unrecovered or []
     # 同一作者多行失败只在作者列表里保留一次，原因计数仍按行。
     seen: set[str] = set()
@@ -485,10 +505,10 @@ def _report(
         "changed_row_count": changed_row_count,
         "column_counts": {
             column: {"before": before.get(column, 0), "after": (after or before).get(column, 0)}
-            for column in COLUMNS[platform]
+            for column in selected
         },
         "unrecovered_author_ids": author_ids,
-        "sample": _sample(authors, platform),
+        "sample": _sample(authors, platform, selected),
         "batch_plan": batch_plan or [],
         "backup": backup,
         "runtime_blocker": runtime_blocker,
@@ -693,6 +713,165 @@ def apply_zhihu_following(
     }
 
 
+def org_identity_text(current: Any) -> str:
+    """有原文字时写成“机构号、<原文字>”；空文字写成“机构号”。已以“机构号”开头的不重复加。"""
+
+    if not isinstance(current, str) or current == "":
+        return ORG_IDENTITY_PREFIX
+    if current.startswith(ORG_IDENTITY_PREFIX):
+        return current
+    return f"{ORG_IDENTITY_PREFIX}、{current}"
+
+
+def _org_identity_predicate() -> str:
+    # json_extract 会把 JSON true 收成整数 1，和数字 1 无法区分。json_type 才是严格布尔。
+    return f"""
+platform_key='zhihu'
+AND json_valid(raw_sample_json)
+AND json_type(raw_sample_json, '$.author_page_badges.isOrg') = 'true'
+AND NOT (
+    author_verified = 1
+    AND IFNULL(author_verified_text, '') LIKE '{ORG_IDENTITY_PREFIX}%'
+)
+"""
+
+
+def write_org_identity_sample(text: str, verified_text: str) -> str:
+    """只改 raw_sample_json 的 author_verified 与 verified_text，保留其余键和顺序。"""
+
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("raw_sample_json is not an object")
+    payload["author_verified"] = 1
+    payload["verified_text"] = verified_text
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def zhihu_verification_distribution(connection: sqlite3.Connection) -> dict[str, dict[str, int]]:
+    """知乎全表认证分布：author_verified 的 1/0/null，以及文字是否以“机构号”开头。"""
+
+    verified = {"1": 0, "0": 0, "null": 0}
+    text_kinds = {"org_prefix": 0, "other": 0, "empty": 0}
+    rows = connection.execute(
+        """
+        SELECT author_verified, author_verified_text
+        FROM web_posts
+        WHERE platform_key='zhihu'
+        """
+    )
+    for row in rows:
+        value = row["author_verified"]
+        if value == 1:
+            verified["1"] += 1
+        elif value == 0:
+            verified["0"] += 1
+        else:
+            verified["null"] += 1
+        raw_text = row["author_verified_text"]
+        if raw_text is None or raw_text == "":
+            text_kinds["empty"] += 1
+        elif isinstance(raw_text, str) and raw_text.startswith(ORG_IDENTITY_PREFIX):
+            text_kinds["org_prefix"] += 1
+        else:
+            text_kinds["other"] += 1
+    return {"author_verified": verified, "author_verified_text": text_kinds}
+
+
+def load_zhihu_org_rows(
+    connection: sqlite3.Connection,
+    author_ids: list[str],
+) -> list[sqlite3.Row]:
+    """作者页 isOrg 为 JSON true、且尚未写成机构号认证的知乎行。"""
+
+    clause, params = _author_id_clause(author_ids)
+    return list(
+        connection.execute(
+            f"""
+            SELECT id, platform_post_id, author_platform_id, author_profile_url,
+                   author_description, author_verified, author_verified_text,
+                   author_json, raw_sample_json, content_text, author_display_name,
+                   author_followers_count, author_following_count, published_at, created_at
+            FROM web_posts
+            WHERE {_org_identity_predicate()}{clause}
+            ORDER BY created_at DESC, id DESC
+            """,
+            params,
+        ).fetchall()
+    )
+
+
+def apply_zhihu_org_identity(
+    connection: sqlite3.Connection,
+    authors: list[dict[str, Any]],
+) -> dict[str, Any]:
+    changed = 0
+    success = 0
+    partial = 0
+    unrecovered: list[dict[str, str]] = []
+    predicate = _org_identity_predicate()
+    for author in authors:
+        row_states: list[str] = []
+        for row in author["rows"]:
+            current = connection.execute(
+                f"""
+                SELECT id, author_verified_text, raw_sample_json
+                FROM web_posts
+                WHERE id=? AND {predicate}
+                """,
+                (row["id"],),
+            ).fetchone()
+            if current is None:
+                row_states.append("unrecovered")
+                unrecovered.append(
+                    {
+                        "author_platform_id": str(author["author_platform_id"]),
+                        "reason": "org_identity_not_target",
+                    }
+                )
+                continue
+            text = org_identity_text(current["author_verified_text"])
+            try:
+                sample = write_org_identity_sample(str(current["raw_sample_json"]), text)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                row_states.append("unrecovered")
+                unrecovered.append(
+                    {
+                        "author_platform_id": str(author["author_platform_id"]),
+                        "reason": "raw_sample_json_not_object",
+                    }
+                )
+                continue
+            updated = connection.execute(
+                f"""
+                UPDATE web_posts
+                SET author_verified=1, author_verified_text=?, raw_sample_json=?
+                WHERE id=? AND {predicate}
+                """,
+                (text, sample, int(current["id"])),
+            )
+            if updated.rowcount != 1:
+                row_states.append("unrecovered")
+                unrecovered.append(
+                    {
+                        "author_platform_id": str(author["author_platform_id"]),
+                        "reason": "org_identity_not_target",
+                    }
+                )
+                continue
+            changed += 1
+            row_states.append("success")
+        if row_states and all(state == "success" for state in row_states):
+            success += 1
+        elif any(state == "success" for state in row_states):
+            partial += 1
+    return {
+        "changed_row_count": changed,
+        "success_count": success,
+        "partial_count": partial,
+        "unrecovered": unrecovered,
+    }
+
+
 def _merged_extra(
     base: dict[str, Any] | None,
     extra: dict[str, Any] | None,
@@ -716,7 +895,24 @@ def run_offline(
     summary_path: Path,
     apply: Callable[[sqlite3.Connection, list[dict[str, Any]]], dict[str, Any]],
     report_extra: dict[str, Any] | None = None,
+    columns: tuple[str, ...] | None = None,
+    distribution: Callable[[sqlite3.Connection], dict[str, Any]] | None = None,
 ) -> int:
+    selected = columns or COLUMNS[platform]
+    dist_before = None
+    if distribution is not None:
+        with connect_readonly(db_path) as connection:
+            dist_before = distribution(connection)
+
+    def observed_extra(*, reread: bool) -> dict[str, Any] | None:
+        if distribution is None or dist_before is None:
+            return None
+        after_dist = dist_before
+        if reread:
+            with connect_readonly(db_path) as connection:
+                after_dist = distribution(connection)
+        return {"verification_distribution": {"before": dist_before, "after": after_dist}}
+
     plan = [{"batch": 1, "mode": "offline", "target_author_count": len(authors), "target_row_count": sum(len(a["rows"]) for a in authors)}]
     if dry_run:
         report = _report(
@@ -728,7 +924,8 @@ def run_offline(
             before=before,
             after=before,
             batch_plan=plan,
-            extra=report_extra,
+            extra=_merged_extra(report_extra, observed_extra(reread=False)),
+            columns=selected,
         )
         write_json(summary_path, report)
         print(json.dumps({"summary": str(summary_path), **_public_counts(report)}, ensure_ascii=False, indent=2))
@@ -743,7 +940,11 @@ def run_offline(
             authors=[],
             before=before,
             after=before,
-            extra=_merged_extra(report_extra, {"no_op": True}),
+            extra=_merged_extra(
+                _merged_extra(report_extra, {"no_op": True}),
+                observed_extra(reread=False),
+            ),
+            columns=selected,
         )
         write_json(summary_path, report)
         print(json.dumps({"summary": str(summary_path), **_public_counts(report)}, ensure_ascii=False, indent=2))
@@ -792,7 +993,7 @@ def run_offline(
         latch.restore()
     after = before
     with connect_readonly(db_path) as connection:
-        after = column_counts(connection, platform)
+        after = column_counts(connection, platform, selected)
     if signum is not None:
         terminalize_repair_interrupt(
             state,
@@ -820,7 +1021,8 @@ def run_offline(
         changed_row_count=int(applied["changed_row_count"]),
         batch_plan=plan,
         backup=backup or None,
-        extra=_merged_extra(report_extra, error_extra),
+        extra=_merged_extra(_merged_extra(report_extra, observed_extra(reread=True)), error_extra),
+        columns=selected,
     )
     write_json(summary_path, report)
     if signum is not None:
@@ -1104,6 +1306,8 @@ def main(argv: list[str] | None = None, *, verified_fields: Any = None) -> int:
         raise SystemExit("--max-authors 不能为负；--batch-size 必须为正")
     if args.platform == "douyin" and not str(args.keyword or "").strip():
         raise SystemExit("抖音回填需要非空的 --keyword")
+    if args.org_identity and args.platform != "zhihu":
+        raise SystemExit("--org-identity 只适用于 --platform zhihu")
     db_path = Path(args.db).expanduser().resolve()
     if (
         not args.dry_run
@@ -1117,14 +1321,18 @@ def main(argv: list[str] | None = None, *, verified_fields: Any = None) -> int:
     state_path = runtime_dir / "execution_state.json"
     summary_path = run_dir / "run_summary.json"
     anomalies: list[dict[str, Any]] = []
+    org_identity = args.platform == "zhihu" and bool(args.org_identity)
+    count_columns = ZHIHU_ORG_COLUMNS if org_identity else None
     with connect_readonly(db_path) as connection:
-        if args.platform == "zhihu":
+        if org_identity:
+            rows = load_zhihu_org_rows(connection, list(args.author_ids or []))
+        elif args.platform == "zhihu":
             classified = load_zhihu_following_rows(connection, list(args.author_ids or []))
             rows = classified["targets"]
             anomalies = list(classified["anomalies"])
         else:
             rows = load_rows(connection, args.platform, list(args.author_ids or []))
-        before = column_counts(connection, args.platform)
+        before = column_counts(connection, args.platform, count_columns)
     authors = group_authors(rows, max_authors=args.max_authors)
     manifest_path = write_json(
         run_dir / "targets.json",
@@ -1150,6 +1358,11 @@ def main(argv: list[str] | None = None, *, verified_fields: Any = None) -> int:
             "platform": args.platform,
             "target_author_count": len(authors),
             "dry_run": bool(args.dry_run),
+            **(
+                {"zhihu_mode": "org_identity" if org_identity else "following_null"}
+                if args.platform == "zhihu"
+                else {}
+            ),
         },
         frozen_inputs=[FORMAL_CRAWL_CONTRACT, manifest_path],
         dry_run=bool(args.dry_run),
@@ -1168,6 +1381,15 @@ def main(argv: list[str] | None = None, *, verified_fields: Any = None) -> int:
         if verified_fields is None:
             raise SystemExit("小红书回填需要注入与入库相同的认证计算函数")
         return run_xhs(**common, verified_fields=verified_fields)
+    if org_identity:
+        return run_offline(
+            platform="zhihu",
+            apply=apply_zhihu_org_identity,
+            report_extra={"mode": "org_identity"},
+            columns=ZHIHU_ORG_COLUMNS,
+            distribution=zhihu_verification_distribution,
+            **common,
+        )
     if args.platform == "zhihu":
         return run_offline(
             platform="zhihu",

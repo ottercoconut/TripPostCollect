@@ -84,7 +84,7 @@ class ZhihuContent(BaseModel):
     )
     author_verified: int | None = Field(
         default=None,
-        description="Author-page official identity: 1 passed, 0 read but absent, None unknown",
+        description="1 for an org account or a passed official identity, 0 when read and absent, None when unknown",
     )
     author_page_badges: dict = Field(
         default_factory=dict,

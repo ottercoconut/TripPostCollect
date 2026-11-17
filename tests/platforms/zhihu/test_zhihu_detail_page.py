@@ -466,7 +466,8 @@ async def test_org_author_home_is_clicked_and_profile_url_uses_org(monkeypatch, 
     assert result.author_profile_url == "https://www.zhihu.com/org/author"
     assert result.author_followers_source == "author_page"
     assert result.followers_count == 20
-    assert result.author_verified is None
+    assert result.author_verified == 1
+    assert result.verified_text == "机构号"
     assert result.author_page_badges["isOrg"] is True
     assert result.author_page_badges["userType"] == "organization"
 

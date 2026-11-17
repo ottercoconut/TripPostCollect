@@ -419,3 +419,318 @@ def test_zhihu_following_zero_is_nulled_only_when_all_three_match(
     assert again["anomaly_count"] == 4
     assert _stored(db_path, "uniform")["author_following_count"] is None
     assert len(list((tmp_path / "bk").glob("*"))) == 1
+
+
+def _org_sample(
+    *,
+    is_org: object = True,
+    include_is_org: bool = True,
+    author_verified: object = None,
+    verified_text: str = "",
+    content: str = "正文",
+) -> str:
+    badges: dict[str, object] = {"badgeV2": {"title": ""}}
+    if include_is_org:
+        badges["isOrg"] = is_org
+    return json.dumps(
+        {
+            "content_text": content,
+            "author_verified": author_verified,
+            "verified_text": verified_text,
+            "following_count": 4,
+            "author_page_badges": badges,
+            "meta": {"city": "青岛", "n": 1},
+        },
+        ensure_ascii=False,
+    )
+
+
+def _same_except(before: dict, after: dict, *changed: str) -> None:
+    for column, value in before.items():
+        if column not in changed:
+            assert after[column] == value, column
+
+
+def test_zhihu_org_identity_backfill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = _db(tmp_path)
+    described_author = json.dumps({"nickname": "有描述", "following_count": 4, "headline": "简介"}, ensure_ascii=False)
+    blank_author = json.dumps({"nickname": "无描述", "following_count": 4}, ensure_ascii=False)
+    with sqlite3.connect(db_path) as connection:
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="described",
+            author_platform_id="author-described",
+            author_display_name="有描述",
+            author_followers_count=9,
+            author_following_count=4,
+            author_verified=1,
+            author_verified_text="已认证机构号",
+            content_text="有描述正文",
+            author_json=described_author,
+            raw_sample_json=_org_sample(
+                author_verified=1,
+                verified_text="已认证机构号",
+                content="有描述正文",
+            ),
+        )
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="blank",
+            author_platform_id="author-blank",
+            author_display_name="无描述",
+            author_followers_count=2,
+            author_following_count=4,
+            content_text="无描述正文",
+            author_json=blank_author,
+            raw_sample_json=_org_sample(content="无描述正文"),
+        )
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="people",
+            author_platform_id="author-people",
+            author_verified=0,
+            content_text="个人正文",
+            author_json=json.dumps({"nickname": "个人", "following_count": 4}, ensure_ascii=False),
+            raw_sample_json=_org_sample(is_org=False, author_verified=0, content="个人正文"),
+        )
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="string-true",
+            author_platform_id="author-string",
+            content_text="字符串",
+            author_json=json.dumps({"nickname": "字符串", "following_count": 4}, ensure_ascii=False),
+            raw_sample_json=_org_sample(is_org="true", content="字符串"),
+        )
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="missing",
+            author_platform_id="author-missing",
+            content_text="缺失",
+            author_json=json.dumps({"nickname": "缺失", "following_count": 4}, ensure_ascii=False),
+            raw_sample_json=_org_sample(include_is_org=False, content="缺失"),
+        )
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="already",
+            author_platform_id="author-already",
+            author_verified=1,
+            author_verified_text="机构号、已有",
+            content_text="已写过",
+            author_json=json.dumps({"nickname": "已写过", "following_count": 4}, ensure_ascii=False),
+            raw_sample_json=_org_sample(
+                author_verified=1,
+                verified_text="机构号、已有",
+                content="已写过",
+            ),
+        )
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="number",
+            author_platform_id="author-number",
+            author_verified=0,
+            content_text="数字",
+            author_json=json.dumps({"nickname": "数字", "following_count": 4}, ensure_ascii=False),
+            raw_sample_json=_org_sample(is_org=1, author_verified=0, content="数字"),
+        )
+        connection.commit()
+    post_ids = ("described", "blank", "people", "string-true", "missing", "already", "number")
+    before = {post_id: _stored(db_path, post_id) for post_id in post_ids}
+
+    def fail_child(*_args, **_kwargs):
+        raise AssertionError("知乎机构号回填不应访问平台")
+
+    monkeypatch.setattr(backfill, "run_repair_child", fail_child)
+    assert _run(
+        tmp_path,
+        monkeypatch,
+        ["--platform", "zhihu", "--org-identity", "--db", str(db_path), "--dry-run"],
+    ) == 0
+    dry = _summary(tmp_path)
+    assert dry["dry_run"] is True
+    assert dry["status"] == "planned"
+    assert dry["mode"] == "org_identity"
+    assert dry["target_row_count"] == 2
+    assert dry["target_author_count"] == 2
+    assert dry["changed_row_count"] == 0
+    assert dry["verification_distribution"]["before"] == {
+        "author_verified": {"1": 2, "0": 2, "null": 3},
+        "author_verified_text": {"org_prefix": 1, "other": 1, "empty": 5},
+    }
+    assert dry["verification_distribution"]["after"] == dry["verification_distribution"]["before"]
+    assert dry["column_counts"]["author_verified"] == {"before": 4, "after": 4}
+    assert not list((tmp_path / "bk").glob("**/*"))
+    for post_id in post_ids:
+        assert _stored(db_path, post_id) == before[post_id]
+    _clear_reports(tmp_path)
+
+    assert _run(
+        tmp_path,
+        monkeypatch,
+        ["--platform", "zhihu", "--org-identity", "--db", str(db_path)],
+    ) == 0
+    report = _summary(tmp_path)
+    assert report["changed_row_count"] == 2
+    assert report["target_row_count"] == 2
+    assert report["target_author_count"] == 2
+    assert report["success_count"] == 2
+    assert report["verification_distribution"]["before"] == dry["verification_distribution"]["before"]
+    assert report["verification_distribution"]["after"] == {
+        "author_verified": {"1": 3, "0": 2, "null": 2},
+        "author_verified_text": {"org_prefix": 3, "other": 0, "empty": 4},
+    }
+    assert report["column_counts"]["author_verified"] == {"before": 4, "after": 5}
+    assert report["column_counts"]["author_verified_text"] == {"before": 2, "after": 3}
+    assert report["backup"]["sha256"]
+    states = list((tmp_path / "rt").glob("*/execution_state.json"))
+    assert len(states) == 1
+    assert json.loads(states[0].read_text(encoding="utf-8"))["status"] == "completed"
+
+    described = _stored(db_path, "described")
+    _same_except(before["described"], described, "author_verified", "author_verified_text", "raw_sample_json")
+    assert described["author_verified"] == 1
+    assert described["author_verified_text"] == "机构号、已认证机构号"
+    assert described["author_json"] == described_author
+    assert described["author_following_count"] == 4
+    assert described["content_text"] == "有描述正文"
+    described_raw = json.loads(described["raw_sample_json"])
+    assert list(described_raw) == list(json.loads(before["described"]["raw_sample_json"]))
+    assert described_raw["author_verified"] == 1
+    assert described_raw["verified_text"] == "机构号、已认证机构号"
+    assert described_raw["author_page_badges"]["isOrg"] is True
+    assert described_raw["content_text"] == "有描述正文"
+    assert described_raw["following_count"] == 4
+    assert described_raw["meta"] == {"city": "青岛", "n": 1}
+
+    blank = _stored(db_path, "blank")
+    _same_except(before["blank"], blank, "author_verified", "author_verified_text", "raw_sample_json")
+    assert blank["author_verified"] == 1
+    assert blank["author_verified_text"] == "机构号"
+    assert blank["author_json"] == blank_author
+    blank_raw = json.loads(blank["raw_sample_json"])
+    assert list(blank_raw) == list(json.loads(before["blank"]["raw_sample_json"]))
+    assert blank_raw["author_verified"] == 1
+    assert blank_raw["verified_text"] == "机构号"
+    assert blank_raw["author_page_badges"] == {"badgeV2": {"title": ""}, "isOrg": True}
+    for post_id in ("people", "string-true", "missing", "already", "number"):
+        assert _stored(db_path, post_id) == before[post_id]
+    _clear_reports(tmp_path)
+
+    assert _run(
+        tmp_path,
+        monkeypatch,
+        ["--platform", "zhihu", "--org-identity", "--db", str(db_path)],
+    ) == 0
+    again = _summary(tmp_path)
+    assert again["target_row_count"] == 0
+    assert again["target_author_count"] == 0
+    assert again["changed_row_count"] == 0
+    assert again["verification_distribution"]["before"] == again["verification_distribution"]["after"]
+    assert _stored(db_path, "described")["author_verified_text"] == "机构号、已认证机构号"
+    assert _stored(db_path, "blank")["author_verified_text"] == "机构号"
+    assert len(list((tmp_path / "bk").glob("*"))) == 1
+
+
+def test_zhihu_org_identity_and_following_do_not_mix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = _db(tmp_path)
+    org_author = json.dumps({"nickname": "机构", "following_count": 4}, ensure_ascii=False)
+    zero_author = json.dumps({"nickname": "关注为零", "following_count": 0}, ensure_ascii=False)
+    zero_raw = json.dumps(
+        {
+            "content_text": "关注为零",
+            "following_count": 0,
+            "author_verified": 0,
+            "verified_text": "",
+            "author_page_badges": {"isOrg": False},
+        },
+        ensure_ascii=False,
+    )
+    with sqlite3.connect(db_path) as connection:
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="org",
+            author_platform_id="author-org",
+            author_following_count=4,
+            author_verified=1,
+            author_verified_text="已认证机构号",
+            content_text="机构正文",
+            author_json=org_author,
+            raw_sample_json=_org_sample(
+                author_verified=1,
+                verified_text="已认证机构号",
+                content="机构正文",
+            ),
+        )
+        _insert(
+            connection,
+            platform_key="zhihu",
+            platform_post_id="zero",
+            author_platform_id="author-zero",
+            author_following_count=0,
+            author_verified=0,
+            content_text="关注为零",
+            created_at="2026-11-13 00:00:00",
+            author_json=zero_author,
+            raw_sample_json=zero_raw,
+        )
+        connection.commit()
+
+    def fail_child(*_args, **_kwargs):
+        raise AssertionError("知乎离线修正不应访问平台")
+
+    monkeypatch.setattr(backfill, "run_repair_child", fail_child)
+    assert _run(
+        tmp_path,
+        monkeypatch,
+        ["--platform", "zhihu", "--org-identity", "--db", str(db_path)],
+    ) == 0
+    org = _stored(db_path, "org")
+    zero = _stored(db_path, "zero")
+    assert org["author_verified"] == 1
+    assert org["author_verified_text"] == "机构号、已认证机构号"
+    assert org["author_following_count"] == 4
+    assert org["author_json"] == org_author
+    assert json.loads(org["raw_sample_json"])["following_count"] == 4
+    assert zero["author_following_count"] == 0
+    assert zero["author_verified"] == 0
+    assert zero["author_verified_text"] is None
+    assert zero["raw_sample_json"] == zero_raw
+    _clear_reports(tmp_path)
+
+    assert _run(tmp_path, monkeypatch, ["--platform", "zhihu", "--db", str(db_path)]) == 0
+    org_after = _stored(db_path, "org")
+    zero_after = _stored(db_path, "zero")
+    assert org_after["author_verified_text"] == "机构号、已认证机构号"
+    assert org_after["author_following_count"] == 4
+    assert org_after["author_json"] == org_author
+    assert zero_after["author_following_count"] is None
+    assert zero_after["author_verified"] == 0
+    assert zero_after["author_verified_text"] is None
+    assert json.loads(zero_after["author_json"])["following_count"] is None
+    assert json.loads(zero_after["raw_sample_json"])["author_page_badges"] == {"isOrg": False}
+
+
+def test_org_identity_switch_requires_zhihu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _redirect(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit, match="只适用于 --platform zhihu"):
+        backfill.main(["--platform", "xhs", "--org-identity", "--db", str(tmp_path / "none.sqlite")])
+
+
+def test_org_identity_text_does_not_double_prefix():
+    from trippostcollect.application.author_profile_backfill import org_identity_text
+
+    assert org_identity_text("") == "机构号"
+    assert org_identity_text(None) == "机构号"
+    assert org_identity_text("已认证机构号") == "机构号、已认证机构号"
+    assert org_identity_text("机构号、已认证机构号") == "机构号、已认证机构号"
+    assert org_identity_text("机构号") == "机构号"

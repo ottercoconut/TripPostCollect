@@ -420,8 +420,8 @@ def author_page_badge_payload(user: dict) -> dict:
     return stripped if isinstance(stripped, dict) else {}
 
 
-def official_identity(user: dict, payload: dict) -> tuple[int | None, str]:
-    """作者页官方身份。``(None, "")`` 表示不能判断；``(0, "")`` 表示读过且没有。"""
+def _passed_official_identity(user: dict, payload: dict) -> tuple[int | None, str]:
+    """已通过的机构/个人身份。``(None, "")`` 表示不能判断；``(0, "")`` 表示读过且没有。"""
 
     if not isinstance(user, dict) or "badgeV2" not in user or not isinstance(user.get("badgeV2"), dict):
         return None, ""
@@ -458,6 +458,22 @@ def official_identity(user: dict, payload: dict) -> tuple[int | None, str]:
     return 1, "、".join(parts)
 
 
+def official_identity(user: dict, payload: dict) -> tuple[int | None, str]:
+    """作者页认证。机构号（``isOrg is True``）一律已认证，文字以“机构号”开头。
+
+    非机构号仍只认已通过的 ``identity_org`` / ``identity_people``。``(None, "")`` 表示
+    不能判断；``(0, "")`` 表示读过且没有。字符串 ``"true"``、整数 ``1`` 和其他非布尔真值
+    都不是机构号。
+    """
+
+    verified, text = _passed_official_identity(user, payload)
+    if isinstance(user, dict) and user.get("isOrg") is True:
+        if text:
+            return 1, f"机构号、{text}"
+        return 1, "机构号"
+    return verified, text
+
+
 def apply_author_page(
     content: ZhihuContent,
     user: dict,
@@ -465,13 +481,14 @@ def apply_author_page(
     *,
     profile_kind: str = "",
 ) -> None:
-    """用作者页用户实体覆盖粉丝、关注、作品数和官方身份认证。
+    """用作者页用户实体覆盖粉丝、关注、作品数和认证。
 
     粉丝数只认 ``followerCount``，来源标为作者页。关注数缺键为 None。作品数是
     ``answerCount + articlesCount``，任一缺失则为 None。四个原值缺键不写入。
-    认证只认已通过的机构/个人身份；其余标识写入 ``author_page_badges``。
+    ``isOrg is True`` 的机构号一律记为已认证，文字以“机构号”开头；否则只认已通过的
+    机构/个人身份。其余标识写入 ``author_page_badges``。
     ``profile_kind`` 是已经打开的作者页路径类型（``people`` 或 ``org``）。确认后按这个
-    实际路径写 ``author_profile_url``，不用 ``isOrg`` 或 ``userType`` 猜测。
+    实际路径写 ``author_profile_url``，不用 ``isOrg`` 或 ``userType`` 猜测路径。
     """
 
     content.creator_url_token = url_token
