@@ -1841,3 +1841,264 @@ def test_main_tail_error_without_signal_propagates(
 
     with pytest.raises(RuntimeError, match="tail-must-propagate"):
         repair.main()
+
+
+def _seed_refresh_posts(db_path: Path, post_ids: list[str]) -> None:
+    from trippostcollect.db.bootstrap import bootstrap_database
+
+    bootstrap_database(db_path, sync_jobs=False)
+    with sqlite3.connect(db_path) as conn:
+        for post_id in post_ids:
+            url = f"https://www.zhihu.com/question/10/answer/{post_id}"
+            conn.execute(
+                """
+                INSERT INTO web_posts(
+                    platform_key, platform_post_id, source_type, source_url,
+                    canonical_url, captured_at, keyword, content_text,
+                    raw_sample_json, post_images_count
+                ) VALUES (
+                    'zhihu', ?, 'import', ?, ?, '2026-11-01T00:00:00+08:00',
+                    '青岛旅游', '青岛正文', ?, 0
+                )
+                """,
+                (
+                    post_id,
+                    url,
+                    url,
+                    json.dumps(
+                        {
+                            "content_detail_status": "detail_observed",
+                            "content_detail_source": "answer_detail",
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+        conn.commit()
+
+
+def _refresh_argv(db_path: Path) -> list[str]:
+    return [
+        "repair_post_details.py",
+        "--platform",
+        "zhihu",
+        "--db",
+        str(db_path),
+        "--keyword",
+        "青岛旅游",
+        "--batch-size",
+        "1",
+        "--refresh-all",
+        "--headless",
+    ]
+
+
+def _target_post_id(command: list[str]) -> str:
+    path = Path(command[command.index("--repair-targets-file") + 1])
+    targets = json.loads(path.read_text(encoding="utf-8"))
+    return str(targets[0]["platform_post_id"])
+
+
+def _write_child_summary(path: Path, payload: dict) -> str:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return json.dumps({"summary": str(path)})
+
+
+def _mark_refreshed(db_path: Path, post_id: str) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE web_posts
+            SET content_text=?, raw_sample_json=?
+            WHERE platform_post_id=?
+            """,
+            (
+                "刷新后的正文",
+                json.dumps(
+                    {
+                        "content_detail_status": "detail_observed",
+                        "content_detail_source": "answer_detail",
+                        "author_followers_source": "author_page",
+                        "author_page_badges": {},
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                post_id,
+            ),
+        )
+        conn.commit()
+
+
+def test_refresh_stops_after_policy_refusal_and_leaves_later_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_refresh_posts(db_path, ["row-a", "row-b", "row-c"])
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _refresh_argv(db_path))
+    launched: list[str] = []
+
+    def fake_child(command: list[str], **_kwargs: object) -> dict:
+        post_id = _target_post_id(command)
+        launched.append(post_id)
+        if post_id == "row-a":
+            _mark_refreshed(db_path, post_id)
+            stdout = _write_child_summary(
+                tmp_path / "child-a.json",
+                {
+                    "import_completion_met": True,
+                    "formal_validation": {
+                        "valid_total_count": 1,
+                        "skipped_candidate_failures": [],
+                    },
+                    "import_result": {"processed_rows": 1},
+                    "records": [{
+                        "policy_events": [{"allowed": True, "reason": ""}],
+                    }],
+                },
+            )
+            return {"returncode": 0, "stdout": stdout, "stderr": "batch finished"}
+        assert post_id == "row-b"
+        stdout = _write_child_summary(
+            tmp_path / "child-b.json",
+            {
+                "import_completion_met": False,
+                "formal_validation": {
+                    "stop_reason": "runtime_failed",
+                    "valid_total_count": 0,
+                    "skipped_candidate_failures": [{
+                        "platform_post_id": "row-b",
+                        "error_code": "repair_target_no_valid_output",
+                        "detail": "explicit repair target produced no formally valid persisted detail record",
+                    }],
+                },
+                "records": [{
+                    "status": "policy_blocked",
+                    "policy_events": [{
+                        "allowed": False,
+                        "reason": "max_requests_per_session",
+                        "cooldown_until": "2026-11-16T20:00:00+00:00",
+                        "wait_seconds": 3600,
+                    }],
+                }],
+            },
+        )
+        return {"returncode": 2, "stdout": stdout, "stderr": "worker refused before navigation"}
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    exit_code = repair.main()
+    summary, state = _summary_and_state(tmp_path)
+    by_id = {item["platform_post_id"]: item for item in summary["target_results"]}
+
+    assert launched == ["row-a", "row-b"]
+    assert exit_code == 2
+    assert summary["status"] == "throttle_wait"
+    assert summary["error"] == "batch_2:throttle_wait"
+    assert summary["throttle"]["reason"] == "max_requests_per_session"
+    assert summary["throttle"]["cooldown_until"] == "2026-11-16T20:00:00+00:00"
+    assert summary["candidate_failure_count"] == 0
+    assert summary["not_attempted_count"] == 1
+    assert summary["batch_runtime_failed_count"] == 1
+    assert by_id["row-a"]["outcome"] == "refreshed"
+    assert by_id["row-b"]["outcome"] == "batch_runtime_failed"
+    assert by_id["row-b"]["reason"] == "throttle_wait"
+    assert by_id["row-c"]["outcome"] == "not_attempted"
+    assert state["steps"]["command_executed"]["error"] == "batch_2:throttle_wait"
+    with sqlite3.connect(db_path) as conn:
+        badges = {
+            row[0]: row[1]
+            for row in conn.execute(
+                """
+                SELECT platform_post_id, json_type(raw_sample_json, '$.author_page_badges')
+                FROM web_posts
+                ORDER BY id
+                """
+            )
+        }
+    assert badges["row-a"] == "object"
+    assert badges["row-b"] is None
+    assert badges["row-c"] is None
+
+
+def test_batch_runtime_failure_is_not_a_candidate_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_refresh_posts(db_path, ["row-a", "row-b", "row-c"])
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _refresh_argv(db_path))
+    launched: list[str] = []
+
+    def fake_child(command: list[str], **_kwargs: object) -> dict:
+        post_id = _target_post_id(command)
+        launched.append(post_id)
+        if post_id == "row-a":
+            stdout = _write_child_summary(
+                tmp_path / "child-a.json",
+                {
+                    "import_completion_met": False,
+                    "formal_validation": {
+                        "stop_reason": "runtime_failed",
+                        "stop_detail": "ERR_NETWORK_CHANGED",
+                        "valid_total_count": 0,
+                        "skipped_candidate_failures": [{
+                            "platform_post_id": "row-a",
+                            "error_code": "repair_target_no_valid_output",
+                            "detail": "browser context closed",
+                        }],
+                    },
+                },
+            )
+            return {"returncode": 2, "stdout": stdout, "stderr": "ERR_NETWORK_CHANGED"}
+        if post_id == "row-b":
+            stdout = _write_child_summary(
+                tmp_path / "child-b.json",
+                {
+                    "import_completion_met": False,
+                    "formal_validation": {
+                        "valid_total_count": 0,
+                        "skipped_candidate_failures": [{
+                            "platform_post_id": "row-b",
+                            "error_code": "detail_entity_missing",
+                            "detail": "page state has no answer entity",
+                        }],
+                    },
+                },
+            )
+            return {"returncode": 2, "stdout": stdout, "stderr": ""}
+        _mark_refreshed(db_path, post_id)
+        stdout = _write_child_summary(
+            tmp_path / "child-c.json",
+            {
+                "import_completion_met": True,
+                "formal_validation": {
+                    "valid_total_count": 1,
+                    "skipped_candidate_failures": [],
+                },
+                "import_result": {"processed_rows": 1},
+            },
+        )
+        return {"returncode": 0, "stdout": stdout, "stderr": ""}
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    monkeypatch.setattr(repair, "verify_image_artifacts", lambda *_a, **_k: {"ok": True})
+    monkeypatch.setattr(repair, "verify_image_persistence", lambda *_a, **_k: {"ok": True})
+    exit_code = repair.main()
+    summary, _state = _summary_and_state(tmp_path)
+    by_id = {item["platform_post_id"]: item for item in summary["target_results"]}
+
+    assert launched == ["row-a", "row-b", "row-c"]
+    assert exit_code == 0
+    assert summary["status"] == "completed_with_remaining"
+    assert summary["candidate_failure_count"] == 1
+    assert summary["candidate_failures_sample"][0]["platform_post_id"] == "row-b"
+    assert summary["batch_runtime_failed_count"] == 1
+    assert summary["not_attempted_count"] == 0
+    assert by_id["row-a"]["outcome"] == "batch_runtime_failed"
+    assert by_id["row-a"]["reason"] == "runtime_failed"
+    assert by_id["row-b"]["outcome"] == "candidate_failed"
+    assert by_id["row-b"]["reason"] == "detail_entity_missing"
+    assert by_id["row-c"]["outcome"] == "refreshed"
