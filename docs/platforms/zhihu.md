@@ -63,15 +63,17 @@
   `followers_observed=true`；缺键不能补 0。关注数取作者页 `followingCount`，缺键为 NULL，不补 0；键上的 0
   仍记为 0。作品数 `author_posts_count` 是 `answerCount + articlesCount`，两者任一缺失则为 NULL。
   `answerCount`、`articlesCount`、`pinsCount`、`questionCount` 四个原值写入 `author_json`，缺键不写、不补 0。
-- 认证只认作者页用户实体（#193），机构号作者页同样适用，不因打开的是 `/org/` 而改变。`detailBadges` 里存在 `type` 为 `identity`、`detailType` 为
-  `identity_org` 或 `identity_people`、且 `badgeStatus` 为 `passed` 的项时，`author_verified=1`，
-  `verified_text` 为这些项的 `description`：多项按出现顺序去重，用“、”连接，机构项排在个人项之前。
-  作者页实体有字典 `badgeV2` 且 `detailBadges` 是列表、但没有上述两类时，`author_verified=0`，
-  `verified_text` 为空。没有 `badgeV2` 或结构不对时不推断，`author_verified` 为空，`verified_text` 为空。
-  搜索结果上的 `verify_bayes` 与 `badge_v2.title` 不再作为认证来源。`isOrg`、`userType` 和
-  `orgVerifyStatus` 也不是认证来源。其余标识（`badgeV2`、`badge`、
-  `userType`、`isOrg`、`vipInfo`）去掉键名含 `icon`、`url`、`avatar`、`image` 的键后写入
-  `author_page_badges`，只进入 `raw_sample_json`，不进入 `author_json`，不新增数据库列。
+- 认证只认作者页用户实体（#193、#205）。机构号只认该实体的 `isOrg` 为严格布尔 true，不用 `userType`、`/org/`
+  路径或 `orgVerifyStatus` 推断；读不到作者页、没有用户实体时不改认证。机构号一律 `author_verified=1`，
+  `verified_text` 以“机构号”开头：已通过的 `identity_org` / `identity_people` 有 `description` 时写成
+  `机构号、<原描述>`（多项仍按出现顺序去重，用“、”连接，机构项排在个人项之前），没有描述时写成 `机构号`。
+  `badgeV2` 缺失或结构不对时，机构号仍写 1 与 `机构号`。非机构号保持 #193：`detailBadges` 里存在 `type` 为
+  `identity`、`detailType` 为 `identity_org` 或 `identity_people`、且 `badgeStatus` 为 `passed` 的项时，
+  `author_verified=1`，`verified_text` 为这些项的 `description`。有字典 `badgeV2` 且 `detailBadges` 是列表、
+  但没有上述两类时，`author_verified=0`，`verified_text` 为空。没有 `badgeV2` 或结构不对时不推断，两列为空。
+  搜索结果上的 `verify_bayes` 与 `badge_v2.title` 不是认证来源。作者页路径不参与认证判断。
+  其余标识（`badgeV2`、`badge`、`userType`、`isOrg`、`vipInfo`）去掉键名含 `icon`、`url`、`avatar`、`image`
+  的键后写入 `author_page_badges`，只进入 `raw_sample_json`，不进入 `author_json`，不新增数据库列。
 - 作者平台 ID 保存 author/member 原始 `id`（写在 `creator_hash` 键），昵称保存 `name` 原文；
   `url_token` 另存为 `creator_url_token`，不作为平台 ID。作者页确认后，`author_profile_url` 按实际打开的路径写成
   `https://www.zhihu.com/people/<url_token>` 或 `https://www.zhihu.com/org/<url_token>`。

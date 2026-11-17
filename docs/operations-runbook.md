@@ -348,6 +348,8 @@ python scripts/repair_post_details.py \
 
 知乎不访问平台：只把 #182 解析修复部署前入库（`created_at` 早于 `2026-11-14 00:00:00` UTC）、且 `author_following_count`、`author_json.following_count` 和 `raw_sample_json.following_count` 三处同为整数 0 的关注数改为 NULL / JSON null。三处不一致、某处已非 0，或 JSON 无法据此确认的行不改，并写入报告的 `anomalies`。已经是 NULL 的行不是目标。不改粉丝、昵称、正文和其他 JSON 键，也不在 `author_json` 里加修正标记。这是针对历史补零库存的一次性修正：截止时间之后入库的行，三处同为 0 只能来自平台给出的真实 0，一律只记入 `anomalies`，不自动改，所以重复运行不会改动真实值。
 
+知乎机构号认证是另一条离线修正，用 `--org-identity` 单独打开，与上面的关注数修正互斥：一次命令只做其中一件。不带该开关时，知乎仍只做关注数修正；带上该开关时只改机构号认证，不改关注数，也不访问平台。选行要求 `author_page_badges.isOrg` 为 JSON 布尔 true（`json_type` 为 `true`；字符串 `"true"` 或缺失都不改）。命中的行写 `author_verified=1`，`author_verified_text` 为 `机构号` 或 `机构号、<原文字>`，并同步 `raw_sample_json` 的 `author_verified` 与 `verified_text`。已经是 `author_verified=1` 且文字以“机构号”开头的行跳过，重复执行变更为 0。
+
 抖音按 `author_platform_id` 分组。每位作者按入库时间从新到旧最多尝试 3 个已有作品：先在 `--keyword` 搜索页完成与详情修复相同的人类行为，再取作品详情和作者资料。详情里的作者 ID 必须与行一致才写。写入的简介、认证和主页链接是回填当时的作者资料，不是原始抓取时刻的；`author_json.profile_backfill` 记录 `observed_at`、`run_id`、`source_aweme_id` 和认证候选原值。登录失效、验证码、频控、安全策略、浏览器整体失败或网络不可达会停止后续批次，已提交的写入保留；再次运行只挑仍有空列、且没有 `profile_backfill` 记录的作者（作者本就没有简介时该列一直为空，不反复联网）。HTTP 详情返回空壳时与详情修复相同，改用浏览器打开作品页取详情；连续 10 位作者都只得到空详情时，按运行级阻断 `consecutive_empty_detail` 停止。
 
 先 dry-run，确认目标数、样本和批次计划。dry-run 不访问平台、不备份、不写库：
@@ -372,6 +374,14 @@ python scripts/backfill_author_profiles.py \
 source .venv/bin/activate
 python scripts/backfill_author_profiles.py \
   --platform zhihu \
+  --dry-run
+```
+
+```bash
+source .venv/bin/activate
+python scripts/backfill_author_profiles.py \
+  --platform zhihu \
+  --org-identity \
   --dry-run
 ```
 
@@ -401,7 +411,15 @@ python scripts/backfill_author_profiles.py \
   --confirm-default-db-backfill
 ```
 
-报告在 `outputs/author_profile_backfill/<platform>-<run_id>/run_summary.json`，执行状态在 `data/runtime/author_profile_backfill/<platform>-<run_id>/execution_state.json`，备份在 `data/backups/author_profile_backfill/<platform>-<run_id>/`。报告含目标作者数、成功数、只部分可得数、按原因计数的取不回数、改动行数、各列填充前后的非空数，以及取不回的作者 ID。报告和日志不写头像或 Cookie。
+```bash
+source .venv/bin/activate
+python scripts/backfill_author_profiles.py \
+  --platform zhihu \
+  --org-identity \
+  --confirm-default-db-backfill
+```
+
+报告在 `outputs/author_profile_backfill/<platform>-<run_id>/run_summary.json`，执行状态在 `data/runtime/author_profile_backfill/<platform>-<run_id>/execution_state.json`，备份在 `data/backups/author_profile_backfill/<platform>-<run_id>/`。报告含目标作者数、成功数、只部分可得数、按原因计数的取不回数、改动行数、各列填充前后的非空数，以及取不回的作者 ID。知乎 `--org-identity` 的报告另有 `mode=org_identity` 和 `verification_distribution`：`author_verified` 的 1、0、null 计数，以及认证文字以“机构号”开头、其他文字或为空的计数，各给出回填前后。报告和日志不写头像或 Cookie。
 
 ## 自动恢复与检查
 

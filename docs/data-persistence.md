@@ -9,6 +9,8 @@
 > **授权记录（2026-11-14）：** 操作人决定知乎纯文字回答/文章可入库（#191），正文图同一张只保留原图（#187）。
 >
 > **授权记录（2026-11-14）：** 操作人决定知乎认证只认作者页官方身份认证（#193）。
+>
+> **授权记录（2026-11-17）：** 操作人决定知乎机构号（作者页 isOrg 为 true）认证记为是、文字以“机构号”开头（#205）。
 
 ## 数据库文件
 
@@ -162,7 +164,7 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 作者主页指标。知乎回答/文章的发布时间、正文、图片和赞评藏来自详情页页面状态（分享平台不提供，#188）；粉丝来自作者页
 `followerCount`（`author_followers_count`），关注数来自 `followingCount`（`author_following_count`），作品数是
 `answerCount + articlesCount`（`author_posts_count`），缺键为 NULL，不补 0。
-已观察且来源受信任的知乎回答/文章可以没有正文图（#191），`post_images_count=0` 且不写 `web_post_images`；详情未观察仍是 `content_detail_unobserved`。`zvideo` 记录跳过。认证只认作者页官方身份（#193）：已通过的 `identity_org` / `identity_people` 写入 `author_verified=1` 与 `author_verified_text`（机构项在前，去重后用“、”连接）；读到 `badgeV2` 但没有这两类则为 0、文字为空；没有 `badgeV2` 或结构不对则两列为空。搜索 `verify_bayes` 与 `badge_v2.title` 不是认证来源。
+已观察且来源受信任的知乎回答/文章可以没有正文图（#191），`post_images_count=0` 且不写 `web_post_images`；详情未观察仍是 `content_detail_unobserved`。`zvideo` 记录跳过。认证以作者页为准（#193、#205）：`isOrg` 为严格布尔 true 的机构号写入 `author_verified=1`，`author_verified_text` 以“机构号”开头（有身份描述时为“机构号、<原描述>”，否则为“机构号”；`badgeV2` 缺失或结构不对也记这两列）。非机构号仍只认已通过的 `identity_org` / `identity_people`（`author_verified=1`，文字为描述，机构项在前，去重后用“、”连接）；读到 `badgeV2` 但没有这两类则为 0、文字为空；没有 `badgeV2` 或结构不对则两列为空。不用 `userType`、`/org/` 路径或 `orgVerifyStatus` 判断机构号。搜索 `verify_bayes` 与 `badge_v2.title` 不是认证来源。
 B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得 article 详情
 正文和正文图片证据；搜索 `desc` 与 `image_urls` 仅为摘要和预览，不能直接入库为完整正文。
 所有平台后续 JSONL 中出现的

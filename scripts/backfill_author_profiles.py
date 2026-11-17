@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""回填小红书认证、抖音作者资料，或把知乎三处同为 0 的关注数改为 NULL。"""
+"""回填小红书认证、抖音作者资料，或离线修正知乎关注数与机构号认证。"""
 
 from trippostcollect.application.author_profile_backfill import main as run_backfill
 from trippostcollect.platforms.xhs.parser import creator_verified_fields
