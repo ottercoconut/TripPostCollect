@@ -1034,7 +1034,7 @@ child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_t
 | 非规则端点 401/403/429/461/471 | 只写账本 `signal`；461/471 出现验证界面才进入等待，否则继续 |
 | 作者页二维码 | 保持作者页置前，人工扫码后继续；计入同一人工预算 |
 | 任意新标签页 | 至少保留 5 秒（作者标签页按打开时抽到的 5–9 秒），确为 hidden 才置前（#107）；明确登录与验证页立即置前，按本轮剩余人工预算等待 |
-| 短时网络中断 | 同一 Chrome/Context/Page 内暂停并退避；恢复后继续原操作，默认 600 秒 |
+| 短时网络中断 | 同一 Chrome/Context/Page 内暂停并退避；恢复后继续原操作，等待上限固定 600 秒 |
 | `network_recovery_timeout` | 运行级失败并保留最后安全 checkpoint；不得启动第二个浏览器 |
 | page/context/browser 关闭或 CDP 断开 | 终端浏览器失败；记录非计划关闭证据，不得轮内重启 |
 | 详情、作者或正文图候选级失败 | 核对 `candidate_skipped` 和 manifest；整帖不入库，只有 `retryable=false` 的 ID 写账号 seen（`retryable=true` 的下一轮重试），继续候选 |
@@ -1057,7 +1057,7 @@ child 最长等待 60 秒确认；没有确认即以 `xhs_batch_checkpoint_ack_t
 | 两个恢复命令并发 | 同账号 `flock` 与 `BEGIN IMMEDIATE` 串行化；只有精确 DELETE rowcount=1 的一个成功 |
 | 错误 lease/run/owner | 删除谓词不匹配并失败关闭；不得写成功恢复事件或改变账号健康 |
 
-小红书不向操作人开放手工 `--resume-summary`、`--start-page` 或 `--start-cursor`；runner 只在有未完成
+小红书不向操作人开放手工 `--resume-summary` 或 `--start-page`（`--start-cursor` 已删除）；runner 只在有未完成
 累计时把上一份摘要交给 child。checkpoint/seen 以 `target_key + account_id + query_fingerprint` 隔离；
 换号不是原账号续跑。分页事件中的页码与 search ID 取自前端搜索请求，只作审计，不是恢复位置。
 

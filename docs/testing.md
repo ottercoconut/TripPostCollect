@@ -17,7 +17,7 @@ CI 保留不运行测试的 pristine 模板，每个 lane 新建独立源码副�
 根锁定环境放在模板外；每个子进程的 PYTHONPATH 绑定自己的源码副本。
 
 根项目 uv.lock 已核实包含 trippostcollect 的 dev extra：pytest、pytest-asyncio、
-pytest-cov、ruff、mypy、pre-commit，以及与 `[build-system]` 同一约束的 setuptools（供测试期离线构建）。项目只支持 Python 3.12；完整安装用根锁文件，
+pytest-cov、ruff、mypy、pre-commit，以及与 `[build-system]` 同一约束的 setuptools（供测试期离线构建）。项目以 Python 3.12 为准（pyproject 声明 `>=3.12`，锁文件与 CI 只验证 3.12）；完整安装用根锁文件，
 在 macOS Python 3.12 独立副本中准备环境，例如先切换到对应临时源码目录再执行：
 
 ```bash
@@ -158,8 +158,8 @@ checkout 不保留认证信息。依赖准备阶段联网；根环境使用 `uv 
 进程、信号和 socket 调用均使用替身，不启动真实浏览器或进程。
 微博的 4 个测试文件、24 个用例已迁入根 `tests/platforms/weibo/`，归入 component lane。
 抖音的 4 个测试文件、41 个用例已迁入根 `tests/platforms/douyin/`，归入 component lane。
-小红书测试在根 `tests/platforms/xhs/`（fork 移植时为 15 个文件、249 个用例），#71 后为 18 个文件、389 个用例：
-386 个归入 component lane，`test_xhs_browser_replay.py` 的 3 个归入 OS lane。
+小红书测试在根 `tests/platforms/xhs/`（fork 移植时为 15 个文件、249 个用例），2026-11-17 为 24 个测试文件：
+`test_xhs_browser_replay.py` 的 8 个测试函数归入 OS lane，其余归入 component lane。
 CI 显式 setup-node；执行 PATH 保留检测到的 Node 目录、/usr/local/bin 与 /opt/homebrew/bin。
 B站正式 article 的行为仍由根项目测试覆盖，上游 video 主循环不作为替代。
 
@@ -225,7 +225,7 @@ child 自身有 20 秒等待上限；启动迟到不能无限伪装为 network_p
 启动宽限，之后无进度必须停止且输出各一次。finalizing 测试也用 ready/release 代替 sleep。
 注册失败、gate 取消与信号注入仍验证同步事件次序及资源回收；身份变化测试的耗时上限仅作
 15 秒外层保护，不要求共享 VM 在 2 秒内完成清理。真实信号及这些 native 用例只在 Actions
-OS lane 验收，本地纯时钟通过不能替代两版本真实 OS 结果。
+OS lane 验收，本地纯时钟通过不能替代 Actions（macOS、Python 3.12）的真实 OS 结果。
 通用 runner 中断用例（`tests/test_crawl_runner_interrupt.py`）用真实进程贯通 runner → 中间层 →
 独立 worker 进程组，只覆盖 `crawl_runner.py` 通用路径；小红书租约链路由
 `tests/test_xhs_runner_interrupt_logs.py` 覆盖（见下）。runner 驱动经
@@ -251,7 +251,7 @@ LeaseGuard、带租约环境的中间层 `run_command` 与独立 worker 进程�
 且日志仍落盘；中间层超出 Guard 中断宽限被强杀时 exporter 只收 SIGKILL、不收第二次 SIGTERM（这两例
 经计划缩短预算）；另以常量断言中间层等待上限与收尾余量严格小于 Guard 的中断宽限、且不加长 child
 关闭总预算。浏览器、扫码与真实平台不在覆盖内。
-提交工作流不等于 CI 验收通过；必须由 Actions 的两版本实际产物证明。不要在私人宿主伪造环境变量。
+提交工作流不等于 CI 验收通过；必须由 Actions（macOS、Python 3.12）的实际产物证明。不要在私人宿主伪造环境变量。
 
 ## issue #1 节点映射
 
@@ -317,13 +317,13 @@ macos_process；其中真实自发信号也移到 driver。它们计入完整 OS
 ## 预期值的来源
 
 测试的预期值只来自现行文档、平台契约或可解释的字面值，不与已删除的旧实现（fork、旧执行器源码快照、
-迁移期固化输出）对照。各站离线驱动（`tests/platforms/<站>/test_<站>_offline_drive.py`）与执行器全链路（`tests/application/test_collection_executor.py`）只运行根实现，
+迁移期固化输出）对照。B站、微博、抖音、知乎四站的离线驱动（`tests/platforms/<站>/test_<站>_offline_drive.py`；小红书没有该文件）与执行器全链路（`tests/application/test_collection_executor.py`）只运行根实现，
 按场景断言停止事件、跳过候选、入库记录与产物；worker 子命令的父侧入参与预期 argv 写在
 [tests/support/worker_scenarios.py](../tests/support/worker_scenarios.py)，执行器全链路驱动在
 [tests/support/executor_driver.py](../tests/support/executor_driver.py)。
 
-本机沙箱脚本（如 Linux 工作副本的 `tpc_pytest.sh`）直接在新 worktree 上运行时没有可写 `data/`，t02/t11/t12
-中约 20 个用例会出现环境性失败；这不是代码回归，正式结论以卡片闸门（临时源码副本）和 CI 为准。
+本机沙箱脚本（如 Linux 工作副本的 `tpc_pytest.sh`）直接在新 worktree 上运行时没有可写 `data/`，`tests/platforms/test_worker_entry.py`、
+`tests/application/test_collection_executor.py` 与 `tests/architecture/test_package_boundaries.py`（#197 前的 t02/t11/t12）中约 20 个用例会出现环境性失败；这不是代码回归，正式结论以卡片闸门（临时源码副本）和 CI 为准。
 
 ## 本机卡片闸门：macOS 与 Linux 并行
 

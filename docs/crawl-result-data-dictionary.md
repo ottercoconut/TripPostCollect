@@ -17,9 +17,9 @@ checkpoint、失败恢复或迁移字段；实时规模应直接查询 SQLite。
 平台内作者关联键为 `platform_key + author_platform_id`；帖子与图片通过
 `web_posts.id = web_post_images.web_post_id` 关联。作者平台 ID 与昵称保存平台原始值：ID 统一按
 字符串归一（整数转字符串、去首尾空白），昵称按原文保存。issue #49 之前入库的微博、抖音、知乎行，
-其作者 ID 为 16 位哈希、昵称为首尾留字的脱敏值，不能与原始 ID 的行按作者关联。正式抓取会在详情
-前跳过库中已知帖子，日常抓取不会更新这些历史行；只有详情修复流程重取作者时以本轮原始值覆盖，
-历史数据修复见 issue #50。
+其作者 ID 曾为 16 位哈希、昵称为首尾留字的脱敏值；issue #50 已按原始值回填（2026-11-17 核对正式库：
+三个平台均无残留的十六进制哈希 ID）。正式抓取会在详情前跳过库中已知帖子，日常抓取不会更新历史行；
+只有详情修复流程重取作者时以本轮原始值覆盖。
 
 ## `web_posts` 帖子字段
 
@@ -28,10 +28,10 @@ checkpoint、失败恢复或迁移字段；实时规模应直接查询 SQLite。
 | `id` | INTEGER | 否 | 数据库内部帖子主键 |
 | `platform_key` | TEXT | 否 | `bilibili`、`douyin`、`weibo`、`xhs` 或 `zhihu` |
 | `platform_post_id` | TEXT | 是 | 平台原始帖子 ID |
-| `source_type` | TEXT | 否 | 内容来源或平台内容类型 |
+| `source_type` | TEXT | 否 | 入库通道，不区分内容类型：结构化抓取为 `mediacrawler_search`，页面证据导入为 `ctf_capture_page` |
 | `source_url` | TEXT | 否 | 抓取输入或原始来源 URL |
 | `canonical_url` | TEXT | 是 | 规范化帖子 URL |
-| `title` | TEXT | 是 | 平台标题；没有独立标题的平台可以为空 |
+| `title` | TEXT | 是 | 平台标题；为空时抖音取整段 `desc`，小红书取 `desc` 前 255 字，其他平台为空串 |
 | `published_at` | TEXT | 是 | 平台原始发帖时间，保存为 Asia/Shanghai ISO |
 | `keyword` | TEXT | 是 | 发现该帖时实际使用的检索词 |
 | `topic_relevant` | INTEGER/布尔 | 否 | 最终 `title` 或最终 `content_text` 是否包含“青岛”或该记录的完整实际检索词；两字段分别判定，0 仍保留供审计 |
@@ -75,6 +75,7 @@ SQLite 字段或图片关系中，也不保留 URL-only 参考关系。
 | `following_count` | integer/null | 作者关注数 |
 | `posts_count` | integer/null | 作者作品或发帖总数 |
 | `liked_count` | integer/null | 平台展示的作者累计获赞等作者级指标 |
+| `answerCount`、`articlesCount`、`pinsCount`、`questionCount` | integer | 仅知乎：作者页原值，缺键不写；`posts_count` 为前两者之和 |
 
 顶层作者列用于 SQL 查询，`author_json` 保留观察状态、来源和平台补充信息。两者冲突时必须核对
 导入记录，不能任意选择其一。
@@ -107,21 +108,21 @@ SQLite 字段或图片关系中，也不保留 URL-only 参考关系。
 | `height` | INTEGER | 是 | 本地复验得到的图片高度 |
 | `mime_type` | TEXT | 是 | 本地文件真实 MIME 类型 |
 | `sha256` | TEXT | 是 | 本地文件 SHA-256 |
-| `raw_image_json` | TEXT/JSON | 是 | 图片来源与字节复验证据 |
+| `raw_image_json` | TEXT/JSON | 否 | 图片来源与字节复验证据，默认 `{}` |
 
-`web_post_id + image_index` 具有唯一性。正文图片不包含作者头像、作者主页图片、视频、音乐、公式图、
+`web_post_id + image_role + image_index` 具有唯一性（`image_role` 取 `content` 或 `page`）。正文图片不包含作者头像、作者主页图片、视频、音乐、公式图、
 封面或仅用于搜索预览的图片。
 
 ## 过程字段边界
 
 以下内容存在于控制面或证据表，但不属于面向研究使用的抓取结果字段：
 
-- 调度、运行和重试：`crawl_jobs`、`crawl_attempts`、`crawl_run_reports`、`collection_batches`；
+- 调度、运行和重试：`crawl_jobs`、`crawl_attempts`、`crawl_run_reports`；
 - 发现前沿和候选记忆：`crawl_discovery_*`、`xhs_discovery_*`；
-- 小红书逻辑槽位与运行控制面：`xhs_accounts`、`xhs_account_leases`、`xhs_account_events`、`xhs_runs`；
+- 小红书逻辑槽位与运行控制面：`xhs_accounts`、`xhs_account_leases`、`xhs_lease_processes`、`xhs_account_events`、`xhs_runs`；
 - 页面调试证据：`ctf_captures`、`ctf_capture_images`；
-- 登录健康、迁移和历史排除：`profile_health_checks`、`schema_migrations`、
-  `historical_image_exclusions`；
+- 登录健康与迁移：`profile_health_checks`、`schema_migrations`；较早建立的库里可能还留有
+  `historical_image_exclusions`（已随 3db005c 的图片补全工具链退役，当前结构不再创建）；
 - `web_posts` 的 `captured_at`、`raw_sample_json`、`artifact_dir`、`capture_method`、`status`、
   `created_at`、`updated_at`、`source_capture_id`；
 - `web_post_images` 的 `created_at`。

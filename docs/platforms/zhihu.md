@@ -12,8 +12,8 @@
   expires/httpOnly/secure 的副本覆盖 profile 中的实时 `z_c0`）。登录复验只截获页面自己发出的
   `/api/v4/me`（首页和搜索页加载时都会自己请求它，#185）：截获不到，或响应不是 HTTP 200 且同时带
   `uid` 与 `name`，即以 `runtime_failed/login_required` 运行级阻断结束，不在本轮重新登录；操作人先运行
-  `scripts/login_warmup.py --platforms zhihu` 再重跑。详情从点击打开的新标签读取页面状态（#185）。
-  正文图仍用浏览器外 CDN：UA 与 Referer 取自浏览器，不带 Cookie，不经第三方代理。搜索、详情和作者都改为
+  `scripts/login_warmup.py --targets zhihu` 再重跑。详情从点击打开的新标签读取页面状态（#185）。
+  正文图仍用浏览器外 CDN：UA 取自浏览器，Referer 固定为 `https://www.zhihu.com/`，不带 Cookie，不经第三方代理。搜索、详情和作者都改为
   页面取数之后，图片客户端不再读取或保存 Cookie（#185）。
 - 启动浏览器时不强制 User-Agent，浏览器自报真实 UA；httpx 请求头的 `user-agent` 在首页加载后经已登记的
   状态脚本读取 `navigator.userAgent`，与 warmup 登录时同一浏览器一致，不写死版本串（#127）。正式轮走 CDP，
@@ -22,8 +22,8 @@
   模拟设备（#142）。行为证据 `runtime_fingerprint` 同时记录 `languages`、`timezone`、真实 screen 与 DPR。
 - 只接受 answer 和 article；zvideo 在搜索解析阶段丢弃，只计为已处理候选并进入候选记忆，不写项目 JSONL。
 - 去重键为内容 ID，answer URL 同时保留 question ID。
-- 行为阶段必须在本轮真实关键词搜索页完成；页面导航超时可以作为软失败继续检查已验证 Cookie 和
-  API，最终仍以 API、字段和阻断证据决定结果。
+- 行为阶段必须在本轮真实关键词搜索页完成。首页导航超时只记警告，登录仍以被动截获的 `/api/v4/me`
+  为准；最终以页面取数结果、字段和阻断证据决定结果。
 
 ## 正文、作者与详情
 
@@ -106,7 +106,7 @@
 非 `v2-` 的 `zhimg.com` URL 仍按稳定资源路径去掉 `_r`、`_<width>w` 等已知变换后缀后保留首次 URL，
 不重复下载。该规则不作用于外部域名，不使用感知哈希或视觉相似度。
 
-zhimg CDN 图片请求只发浏览器 UA（与 API 请求同一 `navigator.userAgent`）、图片类 Accept 和 `Referer: https://www.zhihu.com/`，不带 zhihu.com Cookie 和 API
+zhimg CDN 图片请求只发浏览器 UA（经状态脚本读取的 `navigator.userAgent`）、图片类 Accept 和 `Referer: https://www.zhihu.com/`，不带 zhihu.com Cookie 和 API
 签名头，也不经第三方代理。每张成功下载的正文图在访问账本以来源 `cdn_direct`、规则
 `zhihu.content_image` 登记状态码、资产键和 sha256，供门禁 R5 与 manifest 对账。平台层写
 staging/manifest，根项目再执行通用字节复验、同帖 SHA-256 去重、晋升和事务。
@@ -150,7 +150,7 @@ ID、累计摘要中的有效 ID 与持久已处理候选在详情和图片请�
 `--zhihu-detail-urls-file <JSON数组文件> --no-import` 诊断模式。它不写正式 checkpoint 或数据库，
 也不能作为正式轮次完成证据；不要绕过根执行器直接运行 worker 入口。
 
-历史库回填走 `scripts/repair_post_details.py`，只接受知乎的两种专用模式，并且二者互斥。建议先分别 dry-run，再去重，去重完成后再刷新。写默认库前加 `--confirm-default-db-repair`。非 dry-run 会先做 SQLite 一致性备份。
+历史库回填走 `scripts/repair_post_details.py`，知乎另有两种专用模式（二者互斥；默认模式见下文）。建议先分别 dry-run，再去重，去重完成后再刷新。写默认库前加 `--confirm-default-db-repair`。非 dry-run 会先做 SQLite 一致性备份。
 
 离线图片去重（`--dedupe-images`）不访问平台。每条知乎帖子的 `image_role='content'` 行按与解析器相同的规则合并：同一 `v2-<32位十六进制>` 只留一张，优先级 `_r` > 无后缀 > `_1440w` > `_720w` > `_b`。解析不出 v2 哈希的 URL 原样保留。被淘汰的图片行删除，保留行的 `image_index` 从该帖原来的起始值重新连续编号，`post_images_count` 重算。`raw_sample_json` 不改，与 #184 迁移一样保留原始证据。被淘汰行的本地文件只在没有任何其他 `web_post_images` 行仍引用同一 `local_path` 时，移动到 `data/backups/post_detail_repair/<run_id>/media/<原相对路径>`，不删除。改写在一个事务里。`--dry-run` 只输出计划。重复执行变更数为 0。
 

@@ -851,7 +851,7 @@ def _run_platform_without_policy(
             if not cookie_export:
                 reason = (
                     "missing_zhihu_login_cookies: run "
-                    ".venv/bin/python scripts/mediacrawler_login_warmup.py --platforms zhihu "
+                    ".venv/bin/python scripts/login_warmup.py --targets zhihu "
                     "until d_c0/z_c0 are verified and snapshotted"
                 )
                 run = skipped_command(cmd, log_dir, reason)

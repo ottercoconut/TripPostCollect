@@ -71,7 +71,8 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
 ```text
 冻结配置与计划
   -> 登录、请求策略与行为证据
-  -> 搜索/顶部刷新/深层发现（小红书：首页输入后全量滚动；知乎：首页滚到 paging.is_end）
+  -> 搜索/顶部刷新/深层发现（顶部刷新仅 B站、微博；抖音：首页全量翻到 has_more=false；
+     小红书：首页输入后全量滚动；知乎：首页滚到 paging.is_end）
   -> 已知 ID 前置过滤
   -> 详情、作者和权威正文图补全
   -> 头像清除器（失败关闭）
@@ -93,7 +94,9 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
 ```text
 平台详情/正文结构
   -> 显式 ImageCandidate(role=content)
-  -> 通用平台：当前登录/签名会话下载到本轮 staging
+  -> B站、微博、抖音：浏览器外 HTTP 客户端直连图片 CDN 下载到本轮 staging（只带 UA、Referer、Accept，
+     不带平台 Cookie，不经第三方代理）
+     知乎：登记的 CDN 直连例外（UA 取自浏览器，Referer 固定为知乎站点，不带 Cookie，访问账本记 cdn_direct）
      小红书：浏览器翻看时截获的图片响应体写入本轮 staging
   -> 原子追加 image_manifest.jsonl
   -> 根项目按同一投影核对身份和数量
@@ -163,7 +166,7 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 
 通用控制面使用：
 
-- `crawl_discovery_checkpoints` 保存 job 与查询指纹作用域内的安全深层前沿；知乎（#185）仍写入最后页码与停止原因，只作审计，不作续跑起点；
+- `crawl_discovery_checkpoints` 保存 job 与查询指纹作用域内的安全深层前沿；抖音（#124）与知乎（#185）仍写入最后页码或 offset 与停止原因，只作审计，不作续跑起点；
 - `crawl_discovery_seen_candidates` 保存已有决定性处理结果的候选 ID，包括主题不相关但结构有效且已
   形成 JSONL 的记录；相关性为 false 不产生 `candidate_skipped`；
 - `crawl_discovery_candidate_exclusions` 保存操作人明确授权的精确排除。
@@ -171,8 +174,9 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 小红书使用独立的 `xhs_discovery_checkpoints` 和 `xhs_discovery_seen_candidates`，并额外按人工选择的
 账号隔离。两套控制面都在 child 摘要与批次证据形成后才提交；媒体或 SQLite 失败不得提前推进。
 
-存在 checkpoint 时，知乎与小红书以外的平台先有限刷新顶部，再从深层前沿继续。顶部刷新不推进深层位置；边界页允许重取，
-已知 ID 在详情、作者和媒体请求前过滤。知乎（#185）没有可恢复前沿，也不做顶部刷新：每轮从首页滚到
+存在 checkpoint 时，只有 B站、微博先有限刷新顶部，再从深层前沿继续。顶部刷新不推进深层位置；边界页允许重取，
+已知 ID 在详情、作者和媒体请求前过滤。抖音（#124）每轮从首页全量翻到 `has_more=false`，checkpoint 只作审计，
+已处理 ID 在作者、详情与媒体请求前滑过，runner 拒绝 `--start-page`。知乎（#185）没有可恢复前沿，也不做顶部刷新：每轮从首页滚到
 `paging.is_end`，页码只作审计，已处理 ID 在详情前滑过，runner 拒绝 `--start-page`。小红书没有前沿与顶部刷新，每轮从首页搜索后全量滚到
 `has_more=false`，已知 ID 在点开前滑过。平台 cursor 组成和重新建链规则只写在对应平台文档。
 
@@ -201,8 +205,9 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 
 - `login_warmup.py`：验证或刷新 B站、微博、抖音和知乎登录态。
 - `xhs_accounts.py`：管理小红书逻辑槽位、精确租约和孤儿租约恢复；平台登录只在正式 runner 轮内完成。
-- `mediacrawler_login_warmup.py`：通用登录入口调用的平台实现（脚本名历史沿用），登录资料位于
-  `data/runtime/platform_sessions/<platform>/`。
+- `mediacrawler_login_warmup.py`：与 `login_warmup.py` 并列的底层登录入口（脚本名历史沿用，参数为
+  `--platforms`），两者共用 `trippostcollect.application.warmup` 的平台实现；日常恢复用 `login_warmup.py --targets`。
+  登录资料位于 `data/runtime/platform_sessions/<platform>/`。
 - `info_collection_benchmark.py`：通用平台诊断和容量评估，不是正式完成证据。
 
 辅助入口不创建完整正式阶段，不能替代 runner。

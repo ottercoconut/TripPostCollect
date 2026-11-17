@@ -8,6 +8,9 @@
 以后若新增固定 URL 正式任务，必须在配置中声明 `job_kind=ctf_resource_crawl`，并从
 `crawl_runner.py` 进入；runner 状态、冻结阶段、页面证据和导入结果全部成功后，才算该 URL 完成。
 
+- 站点限速按页面计数：每打开一个 URL 计 1 次（`ctf-resource-crawl:page`），启用 Scrapling 预检时预检另计 1 次。
+  计数与结构化抓取共用 `data/runtime/scrapling_throttle.json` 中同一站点键的每日与连续会话计数，所以对 B站、微博、
+  抖音、知乎的页面证据会占用这些平台正式抓取的当日会话预算（传入 `--no-throttle` 时不计）。
 - 单个显式 URL 成功仍只代表该 URL 完成，不能汇报为平台批量来源耗尽。
 - 页面错误、搜索页、中间页和验证码页只保留证据，不生成用户内容记录。
 - 页面没有明确平台发布时间时保持 NULL，不得用抓取时间代替。

@@ -3,13 +3,15 @@
 > **受限冻结：** 本文件属于治理基线；普通抓取、排障或顺手同步不得修改，只有用户明确授权治理变更，并同步核验对应代码、测试与关联文档时才允许更新。
 >
 > **授权记录（2026-11-13）：** 操作人授权临时解冻，同步 #185 知乎页面取数、访问门禁与全量扫描口径。
+>
+> **授权记录（2026-11-17）：** 操作人授权解冻，按 #208 文档审计修正与代码不一致之处。
 
 TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、证据保留和 SQLite 入库项目。开始任务前先读 `docs/README.md`，再按问题类型读取对应文档。
 
 ## 仓库地图
 
 - `config/`: 长期抓取任务配置；通用入口是 `crawl_targets.json`，小红书使用独立 `xhs_*.json`。
-- `db/`: SQLite 表结构，包括平台表、内容表、证据表和调度表。
+- `db/`: SQLite 表结构，包括平台表、内容表、证据表、调度表和小红书控制面表（`xhs_control.sql`）。
 - `docs/`: 架构、入库、字段覆盖说明；字段能力变化必须同步文档。
 - `scripts/`: 调度、结构化抓取薄入口（`mediacrawler_*.py` 为历史沿用名）、页面证据抓取、导入和共享策略。
 - `src/trippostcollect/`: 根包实现；五个正式平台的适配器在 `platforms/<platform>/`，worker 入口是
@@ -25,7 +27,9 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
   应确认检索词与青岛相关，通常使用“青岛…”或“崂山…”；这是操作约定，不在配置解析器、抓取器
   或导入器中设置关键词硬门禁，也不用正文文本猜测城市或恢复 `city_name` 字段。
 - B站、微博、抖音、知乎和小红书五个正式结构化搜索平台默认均可运行。通用任务是否进入调度只由
-  `config/crawl_targets.json` 中现存 job 的 `enabled` 与到期状态决定；小红书由操作人显式运行独立
+  `config/crawl_targets.json` 中现存 job 的 `enabled`、调度状态（`pending`、`completed`、`retry_wait`）与到期时间决定；
+  `blocked`、`login_required`、`captcha_detected`、`failed_final` 不再推进到期时间，也不会被自动选中，处理阻断后用
+  `--job-key` 显式重跑；小红书由操作人显式运行独立
   runner。入口不同是账号隔离架构，不代表平台被特殊启用、暂停或降级。
 - 只采集图文内容、研究所需作者字段（平台 ID、名称、主页、简介、粉丝等）、权威正文图片和页面证据；
   作者头像不是作者字段或图片角色，不请求下载，也不得写入项目 JSON/JSONL、摘要、子进程日志、
@@ -40,11 +44,12 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
   来自本轮页面自身请求的被动截获响应或页面状态（L1），不得在页面内主动请求（L2），也没有浏览器外
   HTTP 客户端的例外；每条入库记录须经 `content_visit_ok` 追溯到真实访问。知乎（#185）已纳入访问门禁：
   搜索为页面自身 `search_v3` 的被动截获（L1，`page_response`），详情与作者页由真实点击打开新标签，读取
-  `js-initialData` 页面状态（L1，`page_state`）；正文图是登记过的 CDN 直连例外（UA 与 Referer 取自浏览器，
-  不带 Cookie，不经第三方代理，访问账本以 `cdn_direct` 登记并参与 R5）；discovery 链为
+  `js-initialData` 页面状态（L1，`page_state`）；正文图是登记过的 CDN 直连例外（UA 取自浏览器，Referer 固定为
+  `https://www.zhihu.com/`，不带 Cookie，不经第三方代理，访问账本以 `cdn_direct` 登记并参与 R5）；discovery 链为
   `search_results → note_detail → creator_profile → images`，另有 repair 链（指定 URL `navigate` 打开详情）；
   每条入库记录须经 `content_visit_ok`。B站、微博和抖音目前沿用
-  浏览器负责登录、Cookie 与行为证据、取数走浏览器外 HTTP 客户端的方案（#111），不纳入访问门禁；该方案
+  浏览器负责登录、Cookie 与行为证据、取数走浏览器外 HTTP 客户端的方案（#111），不纳入访问门禁；抖音搜索例外（#124），只经浏览器截获本轮
+  搜索页自身请求的响应；该方案
   计划在 2026-11-12（UTC−8）之后重构（#157）。其正文图片请求不带平台 Cookie、不经第三方代理。分级与规则见
   `docs/formal-crawl-contract.md` 的“取数来源与真实访问门禁”。
 - 通用正式任务从 `scripts/crawl_runner.py` 进入；小红书的正式抓取与轮内扫码登录只从
@@ -58,7 +63,7 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
   遇到运行级阻断。数量目标、候选硬上限和停滞停止条件均已删除；旧配置字段和旧 CLI 参数直接
   视为错误，不保留兼容层。`required_fields_profile`、行为/策略、正文图片和 SQLite 持久化门禁仍然
   全部生效。
-- 五个正式结构化搜索平台都由 runner 自动维护 SQLite 抓取记忆；正常 workflow 不手工传页码、摘要或游标。通用平台首次从第一页开始，续跑先有限刷新顶部再恢复深层前沿，按 job 与查询指纹保存安全前沿、有效累计摘要和所有已处理候选 ID。知乎除外（#185）：每轮从首页扫到 `paging.is_end`，已处理 ID 只滑过，页码只作审计，不做顶部刷新，runner 拒绝 `--start-page`。小红书每轮在首页搜索后从顶部滚到 `has_more=false`，已处理 ID 只滑过，不保存深层位置，也不做顶部刷新；独立表按目标、账号和查询指纹保存已处理 ID 与累计摘要。
+- 五个正式结构化搜索平台都由 runner 自动维护 SQLite 抓取记忆；正常 workflow 不手工传页码、摘要或游标。B站、微博首次从第一页开始，续跑先有限刷新顶部再恢复深层前沿，按 job 与查询指纹保存安全前沿、有效累计摘要和所有已处理候选 ID。抖音（#124）与知乎（#185）每轮从首页全量扫到平台结束标记（抖音 `has_more=false`，知乎 `paging.is_end`），已处理 ID 只滑过，保存的页码或 offset 只作审计，不做顶部刷新，runner 拒绝 `--start-page`。小红书每轮在首页搜索后从顶部滚到 `has_more=false`，已处理 ID 只滑过，不保存深层位置，也不做顶部刷新；独立表按目标、账号和查询指纹保存已处理 ID 与累计摘要。
 - 每个小红书正式轮次创建空的临时 profile 并要求人工扫码，不读取或保存跨轮登录态。轮初纯未扫码
   页面明确显示二维码过期时，只允许在连续两次确认仍无登录进展后点击二维码组件内的刷新控件；新
   二维码出现后重新计算 180 秒整页 reload 下限。未过期二维码所在页面至少等待 180 秒才允许 reload。
@@ -79,7 +84,7 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
   失败次数。中间层在信号前已提交的 checkpoint/seen 属真实确认数据，予以保留。两层 child 的
   stdout/stderr 在中断后先清洗再落盘。小红书租约链路不适用本条，见 `docs/platforms/xhs.md`。
 - 通用 `--dry-run` 不访问平台内容，但默认会同步调度表并写 run report、摘要和 execution state；小红书 dry-run 不构造 child 命令且没有 `import_result`，以后四阶段保持 `frozen` 证明未执行。
-- B站、微博、小红书、抖音、知乎粉丝量为必需字段；数值、来源和 `followers_observed=true` 必须同时存在，平台不提供时只能由配置声明 `ignored`。
+- B站、微博、小红书、抖音、知乎粉丝量为必需字段；数值、来源和 `followers_observed=true` 必须同时存在；配置的 `followers_policy` 只接受 `required`，其他值直接视为配置错误。
 - 路径定义集中在 `trippostcollect.core.paths`；新增代码不要硬编码 `outputs/`、`data/runtime/`、浏览器配置目录等目录。
 - 文档和总结默认使用中文。
 
@@ -91,11 +96,11 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
 - 不为已废弃的命令、字段、数据类型或文档保留兼容层；确认当前流程无调用后直接删除，历史需要从 Git 查询。
 - `config/frozen_files.json` 中登记的资产是用户确认的冻结快照。除非用户明确要求解冻对应文件，
   不得移除不可变标志、修改资产正文或更新登记哈希；提交前运行
-  `python scripts/verify_frozen_files.py`。用户明确解冻时才依次执行 `chflags nouchg`、修改资产与
-  哈希、重新执行 `chflags uchg` 和完整验证。
+  `python scripts/verify_frozen_files.py`。用户明确解冻时才依次移除不可变标志（macOS `chflags nouchg`，Linux
+  `chattr -i`）、修改资产与哈希、重新设置标志（`chflags uchg` / `chattr +i`）和完整验证。
 - 大型抓取产物优先看 `summary.json`、`summary.md`、`run_summary.json`、计数、字段列表、样本和标准输出/标准错误尾部摘要；不要全文展开 JSONL、HTML、过长 JSON 或截图元数据。
 - 输出包含 3 个及以上参数、长路径、JSON、环境变量或多个 `--xxx` 选项的命令时，必须用反斜杠 `\` 分行展示；每个参数或逻辑参数组单独一行，避免压缩成长单行。命令很短且参数简单时可以保持单行。
-- Python 测试使用 `pytest`，当前测试目录是 `tests/`；开发依赖通过 `python -m pip install -e '.[dev]'` 安装。
+- Python 测试使用 `pytest`，当前测试目录是 `tests/`；开发依赖按根 `uv.lock` 安装（`uv sync --locked --extra dev --python 3.12`，见 `docs/testing.md`）。
 - 模型输出尽量用中文。
 - `info_collection_benchmark.py` 只用于通用平台诊断/开发，不能作为正式轮次完成证据，也不接受小红书。
 

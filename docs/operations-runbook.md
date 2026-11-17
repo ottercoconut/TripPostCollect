@@ -260,11 +260,11 @@ state 旁的 worker 进程组兜底强杀。stdout / stderr 先做头像审计�
 `remaining_waived_pending_count` 与 `remaining_unwaived_pending_count`，不得把 waiver 数量解释为修复成功数。
 撤销 waiver 需要用户重新明确指定精确平台帖子 ID，不能批量清空整表。
 
-控制面产物位于：
+控制面产物位于（`run_id` 形如 `<platform>-<UTC 时间戳>`）：
 
-- `outputs/post_detail_repair/<platform>-<run_id>/run_summary.json`
-- `data/runtime/post_detail_repair/<platform>-<run_id>/execution_state.json`
-- `data/backups/post_detail_repair/<platform>-<run_id>/trippostcollect.sqlite`
+- `outputs/post_detail_repair/<run_id>/run_summary.json`
+- `data/runtime/post_detail_repair/<run_id>/execution_state.json`
+- `data/backups/post_detail_repair/<run_id>/trippostcollect.sqlite`
 
 三个独立平台进程可以并行访问平台。长期媒体晋升和 SQLite 导入仍使用项目全局跨进程锁，因此写入
 阶段会自动串行；不得绕过该锁或手工改 execution state。小红书继续使用独立的
@@ -318,7 +318,9 @@ python scripts/repair_post_details.py \
 
 运行摘要逐行给出 `refreshed`、`candidate_failed`（原因沿用 child 的 `error_code`，例如详情实体缺失、作者页失败）、`batch_runtime_failed`、`not_attempted` 和 `rejected`（豁免等）。dry-run 里选中但尚未执行的行记为 `planned`。候选失败、整批运行级失败和未派发的行都保持原值，不删除。`candidate_failure_count` 只计真正逐条失败的行；摘要另给 `batch_runtime_failed_count` 和 `not_attempted_count`。
 
-会话限速用尽时，child 在访问平台前被项目策略拒绝。总控读取 child 摘要里的拒绝事件（`policy_events` 中 `allowed` 为 false，例如原因 `max_requests_per_session`），停止后续批次。这一轮的状态是 `throttle_wait`，摘要写明 `cooldown_until` 和原因。被拒绝的那一批记为 `batch_runtime_failed`，还没派发的行记为 `not_attempted`。已入库的行保留。冷却结束后重跑同一条 `--refresh-all` 命令，仍按 `author_page_badges` 为空重选这些行。整批 `runtime_failed`（例如浏览器上下文被关、`ERR_NETWORK_CHANGED`）也不把该批未恢复的行算成逐条 `candidate_failed`。
+限速以“正式平台会话”为单位：每派发一批 child（默认 `--batch-size 20`）计 1 次，批内打开多少详情页、作者页都不另计；每 UTC 日会话数上限是 `daily_request_budget`（知乎 25），连续会话数达到 `max_requests_per_session`（知乎 10）后冷却 `cooldown_minutes`（知乎 120 分钟）。该行为对所有经限速门禁的 repair 平台相同，不限于知乎。
+
+限速用尽时，child 在访问平台前被项目策略拒绝。总控读取 child 摘要里的拒绝事件（`policy_events` 中 `allowed` 为 false），停止后续批次。这一轮的状态是 `throttle_wait`，摘要写明原因、`cooldown_until` 和 `wait_seconds`。何时重跑按原因区分：`max_requests_per_session` 与其他站点冷却（`cooldown_active`，或验证码、频控写入的冷却原因）等到 `cooldown_until` 之后；`daily_request_budget_exhausted` 没有 `cooldown_until`，要等下一个 UTC 日（北京时间 08:00），`wait_seconds` 给出剩余秒数。被拒绝的那一批记为 `batch_runtime_failed`，还没派发的行记为 `not_attempted`。已入库的行保留。可以重跑后执行同一条 `--refresh-all` 命令，仍按 `author_page_badges` 为空重选这些行。整批 `runtime_failed`（例如浏览器上下文被关、`ERR_NETWORK_CHANGED`）也不把该批未恢复的行算成逐条 `candidate_failed`。
 
 ```bash
 source .venv/bin/activate
@@ -419,7 +421,7 @@ python scripts/backfill_author_profiles.py \
   --confirm-default-db-backfill
 ```
 
-报告在 `outputs/author_profile_backfill/<platform>-<run_id>/run_summary.json`，执行状态在 `data/runtime/author_profile_backfill/<platform>-<run_id>/execution_state.json`，备份在 `data/backups/author_profile_backfill/<platform>-<run_id>/`。报告含目标作者数、成功数、只部分可得数、按原因计数的取不回数、改动行数、各列填充前后的非空数，以及取不回的作者 ID。知乎 `--org-identity` 的报告另有 `mode=org_identity` 和 `verification_distribution`：`author_verified` 的 1、0、null 计数，以及认证文字以“机构号”开头、其他文字或为空的计数，各给出回填前后。报告和日志不写头像或 Cookie。
+报告在 `outputs/author_profile_backfill/<run_id>/run_summary.json`（`run_id` 形如 `<platform>-<UTC 时间戳>`），执行状态在 `data/runtime/author_profile_backfill/<run_id>/execution_state.json`，备份在 `data/backups/author_profile_backfill/<run_id>/`。报告含目标作者数、成功数、只部分可得数、按原因计数的取不回数、改动行数、各列填充前后的非空数，以及取不回的作者 ID。知乎 `--org-identity` 的报告另有 `mode=org_identity` 和 `verification_distribution`：`author_verified` 的 1、0、null 计数，以及认证文字以“机构号”开头、其他文字或为空的计数，各给出回填前后。报告和日志不写头像或 Cookie。
 
 ## 自动恢复与检查
 
@@ -467,7 +469,7 @@ python scripts/crawl_runner.py \
 - 抖音与知乎任务的 child 命令不含 `--start-page`、`--top-refresh-max-pages` 与 `--discovery-source-exhausted`，
   冻结计划 `full_scan=true`、`resume_page=1`；checkpoint 为 `exhausted` 时下一轮仍从第 1 页全量扫描。
   对这两个平台的 job 显式传 `--start-page` 会被 runner 拒绝（#124、#185）。
-- 其他通用平台首次执行从第 1 页开始且顶部刷新为 0；有 checkpoint 后才执行顶部刷新。
+- B站、微博首次执行从第 1 页开始且顶部刷新为 0；有 checkpoint 后才执行顶部刷新。
 - `last_summary_path` 非空时，对应摘要及 JSONL 必须存在，否则冻结应失败。
 - child 结束后，摘要中的前沿、SQLite checkpoint 和 `last_run_id` 必须一致。
 - 未完成尾批不得推进；边界页允许下轮重取并依靠已知 ID 前置过滤。
@@ -772,7 +774,7 @@ runner run_summary.json
 | path escape / file missing | 检查路径、symlink、清理程序和 staging 完整性 |
 | non-raster / decode / too-large / source-unavailable | 保留终态错误并跳过候选，不改后缀或伪造成功 |
 | HTTP 401/403、429、验证码、封禁 | 运行级阻断；保留前沿，不写候选 seen |
-| `network_timeout` + `stop_detail` 含 `network_unreachable` | 通用四平台浏览器外请求重试用尽后仍是传输层失败（DNS、连接、超时、重置）：网络整体故障，与候选无关；运行级失败，不写 `candidate_skipped` 与 seen，900 秒后重试。先恢复本机网络或代理，不清理候选记忆；正文图片下载不在此列 |
+| `network_timeout` + `stop_detail` 含 `network_unreachable` | B站、微博、抖音的浏览器外请求重试用尽后仍是传输层失败（DNS、连接、超时、重置）：网络整体故障，与候选无关；运行级失败，不写 `candidate_skipped` 与 seen，900 秒后重试。先恢复本机网络或代理，不清理候选记忆；正文图片下载不在此列 |
 | `sqlite_import_failed` | 确认整批数据库和本轮新媒体已回滚，checkpoint/seen/campaign 未推进 |
 | `persistence_verified` 失败 | 不 finalize；从摘要身份逐帖核对 SQLite 与文件 |
 | `source_exhaustion_not_persisted` | 子摘要未给出运行级阻断，正式门禁按 `formal_validation.stop_reason` 未满足；按该停止原因排查 |
