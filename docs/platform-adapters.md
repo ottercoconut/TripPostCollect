@@ -2,13 +2,32 @@
 
 > **历史资料：** 平台适配迁移（T00–T14）已完成。迁移台账工具（`scripts/dev/adapter_ledger*.py`）、台账产物（`docs/adapter-ledger/`）与附录 C8（`platform-adapter-symbol-ledger.md`）已在 #197 删除，卡片闸门不再做台账与 AST 复核；文中相关内容只作历史记录，需要时从 Git 查询。
 
-> 状态：P00 已完成（含 P00-08 复核与附录 C8 全量符号账），设计就绪 D 静态部分满足；不是实施授权、迁移完成报告或现行操作手册。
+> **与现行实现的已知差异（2026-11-17，#208 文档审计核对）：** 本文是迁移设计记录，下列条目已与现行代码不同，
+> 以现行权威文档和 `src/trippostcollect/` 为准，正文不逐处改写：
+> - 站点限额（`platforms/registry.py` 的 delay/jitter/session/daily/cooldown）**作用于正式路径**：`site_request_guard`
+>   在每个正式平台会话（一个 worker 批次）开始时检查并计 1，适用于 B站、微博、抖音、知乎，小红书不计；
+>   只有 preferred_engine、profile_dir_override、mobile_context 等属于页面证据专用。语义见
+>   [正式契约](formal-crawl-contract.md)“请求预算”一节与[运行手册](operations-runbook.md)。
+> - 小红书已改为浏览器 L1 取数（#71）：没有 xhshow 签名或 HTTPX client，不保存 client search ID，没有 refresh
+>   续跑或恢复位置；查询指纹另含 `target_search_fingerprint_params()` 与 `count_rule`（#94）；`xhs_guarded`
+>   列表停留为 8–20 秒（#78）。
+> - 查询指纹排除的非来源参数现为 5 个（`followers_policy`、`headless`、`login_type`、`required_fields_profile`、
+>   `top_refresh_max_pages`）；`timeout_per_platform`、小红书 `timeout_seconds`/`top_refresh_max_pages`、
+>   `--timeout-per-platform`、`--timeout-per-batch`、`--start-offset`、`--start-cursor` 均已删除，出现即报错。
+> - `platform_session_migration_required` 检查与错误码已于 #112 删除。
+> - B 节“确定目录”中部分目标文件未按原计划建立（如 `application/bilibili_repair.py`、`scheduler/runner.py`、
+>   `xhs/runner.py`、`platforms/zhihu/login.py`、`resources/js/stealth.min.js`），另有 `visit_gate.py`、
+>   `page_capture.py` 等后来新增的模块未列出；实际目录以仓库为准。
+> - 项目 Python 目标为 3.12（不是 3.11）。
+> - 粉丝策略 `followers_policy` 只接受 `required`；文中“平台不提供时声明 `ignored`”的设想没有实现。
+
+> 状态：（标题与本段为 P00 当时状态；迁移已于 T14（#19）完成）P00 已完成（含 P00-08 复核与附录 C8 全量符号账），设计就绪 D 静态部分满足；不是实施授权、迁移完成报告或现行操作手册。
 > v0.6/v0.7 只修改设计文档、导航及B站两处现状说明，不进入实现，不改变正式路径、数据、测试、配置、依赖、AGENTS 或冻结资产，不提交 Git。
 > 本文的“必须”约束未来迁移方案；现行运行仍以权威文档和当前实现为准。
 > T14（#19）已执行：五站迁移收口，fork 子模块 `tools/MediaCrawler`、私有桥 E 与过渡装载模块已删除。本稿的“现状”描述及 `M/`、`E` 锚点均指迁移前（B01/B02），现行实现见 `src/trippostcollect/platforms/` 与[文档入口](README.md)所列权威文档。
 
 确定目录、逐符号迁移表、接口、配置读取时点、错误映射和任务卡以
-[详细迁移规格 v0.7](platform-adapter-specification.md) 及其[附录 C8](platform-adapter-symbol-ledger.md)为唯一详细定义；本稿保留原则、决策和历史研究。
+[详细迁移规格 v0.7](platform-adapter-specification.md) 及其附录 C8（已于 #197 删除，从 Git 查询）为唯一详细定义；本稿保留原则、决策和历史研究。
 
 ## S01｜目标、基线与证据边界
 
@@ -1089,4 +1108,4 @@ v0.6 将当前状态分层；S24/S25未采用外部候选的历史证据缺口�
 XHS 单 Context、无跨轮登录态不变；其它通用平台现有登录态策略不变；无 raw 归档不变。
 S02 仍是唯一真源，S20 仍控制治理切换。
 任何工具或候选若要求破坏这些边界，应保留现有实现或另行评审真实需求，不能通过“复用优先”自动豁免。
-本稿为**讨论稿 v0.7，P00已完成／未批准实施**；不表示迁移或端点验收完成。
+本稿为**讨论稿 v0.7，P00已完成／未批准实施**（P00 当时状态；迁移已于 T14 完成，本稿不更新为完成报告）。

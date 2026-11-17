@@ -2,9 +2,27 @@
 
 > **历史资料：** 平台适配迁移（T00–T14）已完成。迁移台账工具（`scripts/dev/adapter_ledger*.py`）、台账产物（`docs/adapter-ledger/`）与附录 C8（`platform-adapter-symbol-ledger.md`）已在 #197 删除，卡片闸门不再做台账与 AST 复核；文中相关内容只作历史记录，需要时从 Git 查询。
 
+> **与现行实现的已知差异（2026-11-17，#208 文档审计核对）：** 本文是迁移设计记录，下列条目已与现行代码不同，
+> 以现行权威文档和 `src/trippostcollect/` 为准，正文不逐处改写：
+> - 站点限额（`platforms/registry.py` 的 delay/jitter/session/daily/cooldown）**作用于正式路径**：`site_request_guard`
+>   在每个正式平台会话（一个 worker 批次）开始时检查并计 1，适用于 B站、微博、抖音、知乎，小红书不计；
+>   只有 preferred_engine、profile_dir_override、mobile_context 等属于页面证据专用。语义见
+>   [正式契约](formal-crawl-contract.md)“请求预算”一节与[运行手册](operations-runbook.md)。
+> - 小红书已改为浏览器 L1 取数（#71）：没有 xhshow 签名或 HTTPX client，不保存 client search ID，没有 refresh
+>   续跑或恢复位置；查询指纹另含 `target_search_fingerprint_params()` 与 `count_rule`（#94）；`xhs_guarded`
+>   列表停留为 8–20 秒（#78）。
+> - 查询指纹排除的非来源参数现为 5 个（`followers_policy`、`headless`、`login_type`、`required_fields_profile`、
+>   `top_refresh_max_pages`）；`timeout_per_platform`、小红书 `timeout_seconds`/`top_refresh_max_pages`、
+>   `--timeout-per-platform`、`--timeout-per-batch`、`--start-offset`、`--start-cursor` 均已删除，出现即报错。
+> - `platform_session_migration_required` 检查与错误码已于 #112 删除。
+> - B 节“确定目录”中部分目标文件未按原计划建立（如 `application/bilibili_repair.py`、`scheduler/runner.py`、
+>   `xhs/runner.py`、`platforms/zhihu/login.py`、`resources/js/stealth.min.js`），另有 `visit_gate.py`、
+>   `page_capture.py` 等后来新增的模块未列出；实际目录以仓库为准。
+> - 项目 Python 目标为 3.12（不是 3.11）。
+
 > 2026-09-28 完成 P00-08 静态复核并补齐全量符号账；设计就绪 D 门禁的静态部分已满足，实施另需授权。
-> 本文中的目标文件、类型和接口尚未实现。主设计保留原则与原研究，本文是目录、接口、读取时点和任务卡的唯一详细定义；
-> 逐符号处置见[附录 C8 全量符号账](platform-adapter-symbol-ledger.md)，执行清单以 GitHub issues 跟踪（见 G）。
+> （以下为 2026-09-28 当时状态；迁移已于 T14 完成。）本文中的目标文件、类型和接口当时尚未实现。主设计保留原则与原研究，本文是目录、接口、读取时点和任务卡的唯一详细定义；
+> 逐符号处置见附录 C8 全量符号账（已于 #197 删除，从 Git 查询），执行清单以 GitHub issues 跟踪（见 G）。
 > 当前运行仍遵循[正式契约](formal-crawl-contract.md)。T14 已执行（#19）：fork 子模块 `tools/MediaCrawler`、私有桥 E、`platforms/_fork_bridge.py` 与 `scripts/execution_state.py` 过渡模块均已删除；下文 F 事实中的 M/E/ES 路径和行号只作历史锚点，不再对应仓库文件。
 > 2026-11-13（#185）：知乎 `platforms/zhihu/signer.py` 与 `resources/js/zhihu.js` 已删除。冻结符号台账 JSON 与附录 C8 仍登记迁移时的 `sign` → `platforms/zhihu/signer.py`、`libs/zhihu.js`；退出记在 `PROGRESS_RESOLUTIONS` 与 `BASELINE_RESOURCE_RESOLUTIONS`，台账 JSON 不改。
 
@@ -136,7 +154,7 @@ bootstrap 可延迟引用实现，平台仅调用注入的 application 端口；
 本节全部“旧”是 F；箭头右侧是 T。处置“迁”表示保留实际调用顺序、次数、异常与 wire；“拆”只改变所有权。
 前置卡见 G；测试代号见 F。同一源码的纯 helper 与 IO 调用分别归位，不整文件复制两份权威实现。
 
-C0–C7 是按能力组织的主链与边界说明；**逐定义的完整处置以[附录 C8](platform-adapter-symbol-ledger.md)为准**。
+C0–C7 是按能力组织的主链与边界说明；**逐定义的完整处置以附录 C8（已于 #197 删除）为准**。
 C8 覆盖 92 个文件、1234 个顶层函数/类/方法，每项有目标模块、处置（迁/拆/并/薄/退）、任务卡和测试责任，
 并列出 73 个“退出符号仍被保留代码引用”的调用点及切断方式。C0–C7 与 C8 不一致时以 C8 为准，并在同批修正 C0–C7。
 
@@ -358,7 +376,7 @@ SESSDATA或DedeUserID；B修复要求SESSDATA且nav.isLogin。迁移不顺手统
 | B:`run_repair`:1424、`run_continuous_repair`:1737 | 现行 B站历史修复留在 `scripts/repair_bilibili_articles.py`；内容与修复状态事务不合并。一次性结果提升与全量监督脚本已删除（#70） | T10；F08/F14 |
 | `scripts/info_collection_benchmark.py:run_mediacrawler_job`:130、`run_ctf_resource_job`:230；`ctf_resource_crawl.py` 主流程；`ctf_scrapling_preflight.py:run_scrapling_static_preflight`:175 | A/diagnostics、page_evidence、scrapling_probe；保留辅助driver，benchmark排除XHS | T10；F10 |
 | `scripts/ctf_browser_resilience.py:page_readiness_state`:99、`wait_for_content_ready`:134、`wait_for_content_enrichment`:152、`navigate_with_commit_and_readiness`:183；抖音Cookie清理:32/72 | 就绪/导航→RT/page_readiness；仅页面证据使用的Cookie清理→A/page_evidence；不推广为正式DY登录逻辑。`scripts/import_ctf_captures.py`保留独立导入入口 | T10；F10补页面证据就绪/Cookie场景，当前未发现同名专项测试 |
-| `platforms/registry.py:WebSite`:23、SITES:50；HF:`BehaviorProfile`:19 | registry仍辅助资料，按实际调用拆输入；XHS warmed-profile notes是旧文字，知乎preferred_engine=patchright不是正式驱动选择 | T03/T10；F07/F10 |
+| `platforms/registry.py:WebSite`:23、SITES:50；HF:`BehaviorProfile`:19 | registry限额经 `site_request_guard` 作用于正式平台会话（2026-11-17 更正），其余字段按实际调用拆输入；XHS warmed-profile notes是旧文字，知乎preferred_engine=patchright不是正式驱动选择 | T03/T10；F07/F10 |
 | M/`tools/slider_util.py:Slide`:34、`get_tracks`:178；M/`tools/easing.py:get_tracks`:77；M/`cache/cache_factory.py:create_cache`:34、M/`cache/local_cache.py:__del__`:48 | P/douyin/login_support；保留内存清理task及临时图片生命周期，其他平台不import | T06；F07 |
 | M/`cache/abs_cache.py:AbstractCache`:31；factory局部import memory/redis:43/46；slider的easing局部import:182 | MEMORY接口/实现→DY login_support，退出Redis factory支路；`temp_image`临时文件由paths定位，保留生成/清理时点与QR系统展示要求 | T06/T12；F07/F10 |
 | M/`store/*/_store_impl.py` 同文件非JSONL实现、`tools/words.py:AsyncWordCloudGenerator`:36 | 拆活跃投影/下载/JSONL后，删DB/CSV/Excel/Mongo/词云牵连；不能整体先删store | T12；F04/F10 |
@@ -846,7 +864,7 @@ T01/T12确定的资源与安装策略（T）：JS和LICENSE迁入上述resources
 源码checkout的现有core.paths常量兼容；仓库外入口明确要求工作根（现有TRIPPOST_PROJECT_ROOT），不把site-packages上三级当运行根。
 非XHS通用profile新目标固定为paths集中定义的 `data/runtime/platform_sessions/<platform>/profile` 与同目录 `trippostcollect_cookie_snapshot.json`（沿用现名，不改文件名）；
 T14在旧轮结束且独占资源后按清单迁移/校验，再切新轮；XHS仍 `XHS_SESSION_ROOT` 每轮空session，不迁持久登录态。
-T14 已执行：T14-A 起运行期只读写 `platform_sessions`，删除批只去掉“旧 fork 目录存在而新目录不存在”的对照检查，`.partial` 残留检查保留（错误码仍为 `platform_session_migration_required`）；旧目录处置见[运维手册](operations-runbook.md)。
+T14 已执行：T14-A 起运行期只读写 `platform_sessions`，删除批只去掉“旧 fork 目录存在而新目录不存在”的对照检查，`.partial` 残留检查保留（错误码当时为 `platform_session_migration_required`；该检查与错误码后于 #112 删除）；旧目录处置见[运维手册](operations-runbook.md)。
 历史媒体/manifest相对路径不改；`FONT_PATH/STOP_WORDS_FILE`只属关闭词云，字体/词云文件不列运行安装资源。
 依赖与解释器前移（2026-09-29 用户确认）：T01 把迁入代码的直接依赖按原 worker 环境精确版本写入根 pyproject/uv.lock，根 venv 成为唯一运行环境；T02 起 worker 用根解释器运行新入口，禁PYTHONPATH/cwd伪补齐。上游 DB/GUI/词云等退出切片的依赖不进入根。
 T02 过渡装载（2026-09-29 用户确认）：未迁站仍是 fork 顶层包，`platforms/_fork_bridge.py` 是唯一把 fork 目录与 `scripts/` 显式插入 `sys.path` 的位置，
@@ -877,7 +895,7 @@ v0.7复核补齐执行器与共用fork的全量符号账（C8），修正锚点�
 | 另案风险 R02 | U:28/131现行容错、事件无fsync；E:143/BC:96另有强校验 | E3保持首期时点/分类；将来strict需要显式行为变更和故障矩阵，不强制本期全局传播 |
 | 另案风险 R03 | DY search对象投影标aweme_detail；WB/ZH过滤后空；WB长文一次却异常attempts默认3 | 原实现/文档差异静态证据在C/E；先记录等价trace，若修来源判定/重试/耗尽条件须单独行为diff及授权，不用新抽象掩盖 |
 | 另案风险 R04 | DY/WB投影可能过早丢头像证据；C.merge_repair_fallback_metadata:1186/1220有0被旧值覆盖分支；明确视频当前有root后置过滤 | T04/各站加入出口负例；若负例证实现行违规，单列修正、来源与行为差分审阅，不能以等价测试放过头像/视频边界，也不能称本轮已修 |
-| 另案风险 R05 | registry:XHS warmed profile notes、知乎preferred_engine等是共享辅助定义，不是正式路径 | T10治理文案按实际调用方清理；不自动改driver/正式配置或重开XHS登录设计 |
+| 另案风险 R05 | registry:XHS warmed profile notes、知乎preferred_engine等是共享辅助定义（限额字段除外：其作用于正式平台会话，2026-11-17 更正） | T10治理文案按实际调用方清理；不自动改driver/正式配置或重开XHS登录设计 |
 | 另案风险 R06 | 上游380b426/cf513e7为抖音detail补`uifid/verifyFp/fp`参数及`x-tt-argus`头；fork公共参数已带前三者，无后者 | 首期机械迁移不引入；正式运行若出现“Blocked by ArgusSecurityPlugin”，按独立行为变更、F12补例并单独授权 |
 | 后续可选研究 | 原30候选的许可/Python/外来切片尚未采用；本期不需新增包 | 保留主稿S23–S27历史，不作为当前设计阻塞；确需采用再独立补证 |
 | 本轮文档差异 A05 | B站平台说明曾写详情时间优先、图片来源“优先”；实际hydrate保留搜索时间，图片按多源合并后fallback | 本轮仅纠正平台文案，C5保持源码行为；没有新增时间补缺或改变图片算法 |

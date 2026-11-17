@@ -23,7 +23,7 @@ data/trippostcollect.sqlite
 正式正文图片根目录：
 
 ```text
-data/media/<platform_key>/<safe_platform_post_id>/<source_index>-<asset_hash>.<real_ext>
+data/media/<platform_key>/<safe_platform_post_id>/<source_index:03d>-<文件 SHA-256 前 16 位>.<real_ext>
 ```
 
 `web_post_images.local_path` 只保存项目相对路径；对应行还必须保存 `width`、`height`、真实
@@ -51,7 +51,7 @@ staging；正式文件只有在根项目复验后才能原子晋升到 `data/med
 | `db/web_posts.sql` | `web_posts`、`web_post_images`、`post_detail_repair_waivers` |
 | `db/ctf_captures.sql` | `ctf_captures`、`ctf_capture_images` |
 | `db/crawl_scheduler.sql` | `crawl_jobs`、`crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates`、`crawl_discovery_candidate_exclusions`、`crawl_attempts`、`crawl_run_reports`、`profile_health_checks`；任务类型包含通用搜索和页面证据 |
-| `db/xhs_control.sql` | `xhs_accounts`、`xhs_account_events`、`xhs_account_leases`、`xhs_runs`、`xhs_discovery_checkpoints`、`xhs_discovery_seen_candidates` |
+| `db/xhs_control.sql` | `xhs_accounts`、`xhs_account_events`、`xhs_account_leases`、`xhs_lease_processes`、`xhs_runs`、`xhs_discovery_checkpoints`、`xhs_discovery_seen_candidates` |
 
 `trippostcollect.db.bootstrap` 是统一实现。通用 runner、小红书 runner、结构化平台结果入库和
 CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度任务仍只同步到
@@ -73,7 +73,7 @@ CTF artifact 导入都会自动执行 bootstrap，补齐 schema；通用调度�
 `crawl_discovery_candidate_exclusions` 是 B站、微博、抖音和知乎正式搜索的控制面记忆，不是内容表。
 `job_id + query_fingerprint` 唯一定位同一来源查询；`resume_page` 保存下一安全页，`last_stop_reason`
 与 `last_stop_detail` 保存停止分类，`last_summary_path` 指向尚未取得完整来源耗尽证据的累计摘要，
-`campaign_candidate_count` 保存累计报告数。`status=exhausted` 表示已保存深层前沿明确耗尽，
+`campaign_candidate_count` 保存累计报告数。`status` 取 `active`、`exhausted` 或 `cursor_invalid`；`status=exhausted` 表示已保存深层前沿明确耗尽，
 B站、微博后续默认只做顶部刷新。抖音（#124）每轮从第 1 页全量翻到 `has_more=false`，其
 `resume_page`、`resume_offset`、`resume_cursor` 与 `status` 只作审计，不作续跑起点，也不因耗尽
 而减为顶部刷新。知乎（#185）每轮从首页滚到 `paging.is_end=true`，已处理 ID 只滑过，`resume_page` 与
@@ -105,7 +105,7 @@ schema migration `19/post_detail_repair_waivers` 记录该表已进入现行内�
 
 `xhs_*` 表只保存小红书控制面和审计信息，不替代内容主表：`xhs_accounts` 只保存逻辑槽位 ID、状态及
 审计时间；`xhs_account_leases` 防止同一逻辑槽位并发使用，并记录本轮临时 profile 路径及精确 owner/
-进程身份；`xhs_account_events`、`xhs_runs` 保存人工状态变化、挑战信号和运行摘要。项目不持久化小红书
+进程身份，`xhs_lease_processes` 登记租约下各进程的精确身份供收束核对；`xhs_account_events`、`xhs_runs` 保存人工状态变化、挑战信号和运行摘要。项目不持久化小红书
 Cookie、localStorage、sessionStorage、独立浏览器快照、平台身份哈希或加密密钥；本轮临时 profile
 只在租约生命周期内存在，精确收束运行树后删除。`xhs_discovery_checkpoints` 按目标、账号和查询指纹保存最近
 停止原因、上次是否完整到达来源末尾（审计）和未完成累计摘要路径；不保存页码或 search ID，不保存
@@ -122,7 +122,8 @@ runner、`xhs_accounts.py list` 无活动租约，并用 SQLite `.backup` 备份
 核对备份（步骤见运行手册）；回退只能用备份覆盖并同时回到旧代码。
 
 可捕获的 SIGINT/SIGTERM 不提交 `xhs_discovery_checkpoints` 或 `xhs_discovery_seen_candidates`；runner
-必须先把 execution state 与 `xhs_runs` 终结为 `runtime_failed/operator_interrupt`，写顶层
+必须先把 execution state 终结为 `runtime_failed/operator_interrupt`、`xhs_runs` 终结为 `status=failed`（中断原因
+`operator_interrupt` 写在 `report_json`），写顶层
 `run_summary.json`，再记录包含精确 `lease_id`、signal 和 `process_check.safe_to_release` 的
 `lease_cleanup`。只有 `runtime_session_removed=true`、`lease_released=true` 和
 `lease_cleanup.ok=true` 同时成立，才证明该中断轮的控制面与运行树已完整收束。
@@ -146,7 +147,7 @@ checkpoint、seen 与 campaign 更新。摘要或其 JSONL 缺失时冻结失败
 适配器 worker（`trippostcollect.platforms.entry`；B站 article 为进程内分支）后导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定逻辑账号申请互斥租约、创建本轮临时 profile，
 再调用同一底层执行器并在该轮唯一 BrowserContext 中完成人工登录。
 五个平台都把权威正文图下载到本轮 staging，原子生成 schema v1
-`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。B站、微博、抖音和小红书在当前登录或签名会话中下载。知乎正文图不带平台 Cookie、不经第三方代理，UA 与 Referer 取自浏览器，访问账本以 `cdn_direct` 登记（#185）。只有来源耗尽、
+`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。B站、微博、抖音由浏览器外 HTTP 客户端直连图片 CDN 下载，只带 UA、Referer 与 Accept，不带平台 Cookie、不经第三方代理；小红书写入页面翻看时截获的图片响应体。知乎正文图不带平台 Cookie、不经第三方代理，UA 取自浏览器，Referer 固定为 `https://www.zhihu.com/`，访问账本以 `cdn_direct` 登记（#185）。只有来源耗尽、
 字段、行为、策略和 staging 图片门禁全部通过，正式运行才晋升到 `data/media` 并注入统一入库映射；
 门禁未通过、晋升失败或已确认发生在提交前的 SQLite 导入回滚时，不得留下本轮新建的无引用长期媒体文件。平台显式投影后的全部 manifest 候选均须通过下载与字节复验；
 知乎同一 `v2-<32位十六进制>` 在生成 `image_list` 时只保留一张（#187），优先级 `_r` > 无后缀 > `_1440w` > `_720w` > `_b`，未知后缀排在 `_b` 之后，非 `v2-` 地址不参与合并。下载、manifest 和 `cdn_direct` 只含保留的那张。已观察且来源受信任的知乎回答/文章可以没有正文图（#191）：该帖不要求 manifest 行，`image_materialization` 的预期张数不增加，仍须 `complete=true`。下载后再仅在同帖内
@@ -177,9 +178,9 @@ B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得
 | `platform_key` | 运行平台：`bilibili`、`xhs`、`weibo`、`douyin`、`zhihu` |
 | `platform_post_id` | `note_id`、`aweme_id`、`content_id`、`id` 等非视频内容 ID |
 | `canonical_url` | `note_url`、`aweme_url`、`content_url`、`url`、`share_url`，缺失时按平台 ID 拼接 |
-| `title` | `title` |
+| `title` | `title`；为空时抖音取整段 `desc`，小红书取 `desc` 前 255 字，其他平台为空串 |
 | `content_text` | 仅接受 `content_detail_status=detail_observed` 且 `content_detail_source` 受信任的权威正文：B站 `content_text/content`，微博 `content_text/content`，小红书 `desc`，抖音 `desc`，知乎 `content_text/content`。小红书和知乎可在入库文本中拼接标题与已验证正文，但标题、搜索 `desc/excerpt` 或预览文本不能单独通过 |
-| `author_display_name` | `nickname` 或 `user_nickname` |
+| `author_display_name` | `nickname`、`user_nickname`、`user_name` 或 `author_name`（按此顺序取第一个非空值） |
 | `author_platform_id` | 小红书 `user_id`、`creator_hash` 或其他平台用户 ID |
 | `author_followers_count` | 微博 `followers_count/fans_count`，小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎作者页 `followerCount`（`author_followers_source=author_page`）归一后的 `followers_count`，抖音只取作者主页响应 `user` 节点的粉丝字段（`creator_profile`，不读搜索作者对象） |
 | `published_at` | 发帖时间，统一保存为 Asia/Shanghai ISO 字符串，如 `2024-04-06T15:35:00+08:00`。优先取平台原始发布时间字段，如 `create_time`、`publish_time`、`time`、`datePublished`；`captured_at` 只表示本项目抓取时间 |

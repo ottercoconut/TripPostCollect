@@ -13,7 +13,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 | 取数来源与真实访问门禁 | [正式抓取执行契约](formal-crawl-contract.md#取数来源与真实访问门禁) |
 | 命令、登录、恢复和结果检查 | [正式抓取运行手册](operations-runbook.md) |
 | 抖音、微博、知乎历史详情修复 | [正式抓取运行手册](operations-runbook.md#通用平台历史详情修复) |
-| 小红书、抖音作者资料历史回填 | [正式抓取运行手册](operations-runbook.md#作者资料回填) |
+| 小红书、抖音、知乎作者资料历史回填 | [正式抓取运行手册](operations-runbook.md#作者资料回填) |
 | 调度器、执行器和数据流 | [抓取架构](crawl-architecture.md) |
 | 本地分支清理、提交、版本标签和 Git 备份恢复 | [本地分支与版本管理](version-control.md) |
 | SQLite、媒体文件、事务和入库校验 | [数据持久化](data-persistence.md) |
@@ -32,7 +32,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 平台迁移 v0.7（已完成，历史资料）：[主设计与历史研究](platform-adapters.md)、[详细迁移规格](platform-adapter-specification.md)、
 [P00 工作单与证据索引](platform-adapter-preflight.md)。详细规格定义迁移清单、接口/读取时点、任务和门禁；任务卡的执行清单以
 GitHub issues 跟踪。迁移台账工具、台账产物与附录 C8 全量符号账已在 #197 删除，历史从 Git 查询。
-平台适配迁移已于 T14（#19）收口，fork 子模块与私有桥已删除；四者保留为迁移设计、决策与证据记录，
+平台适配迁移已于 T14（#19）收口，fork 子模块与私有桥已删除；三者保留为迁移设计、决策与证据记录，
 不构成现行操作契约。五个平台的现行实现位于 `src/trippostcollect/platforms/<platform>/`。
 分工、单卡流程、验证与接力规则见[重构执行手册](refactor-playbook.md)。
 

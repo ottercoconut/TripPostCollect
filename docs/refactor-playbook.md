@@ -3,7 +3,7 @@
 > **历史资料：** 平台适配迁移（T00–T14）已完成。迁移台账工具（`scripts/dev/adapter_ledger*.py`）、台账产物（`docs/adapter-ledger/`）与附录 C8（`platform-adapter-symbol-ledger.md`）已在 #197 删除，卡片闸门不再做台账与 AST 复核；文中相关内容只作历史记录，需要时从 Git 查询。
 
 本手册规定平台适配重构（T00–T14）的分工、单卡流程、验证与审查标准、并行与接力规则。
-设计与迁移清单以 `platform-adapters.md`、`platform-adapter-specification.md`、`platform-adapter-symbol-ledger.md` 为准；
+设计与迁移清单以 `platform-adapters.md`、`platform-adapter-specification.md` 为准（附录 C8 `platform-adapter-symbol-ledger.md` 已在 #197 删除，从 Git 查询）；
 本手册只规定"怎么做、怎么验、何时停"。当前进度与本机配置不写在这里，见本地交接说明
 `.git/platform-adapter-handoff.md`（不进版本控制）。
 
@@ -32,7 +32,7 @@
 
 1. **开工核对**
    - 阅读 issue、规格 G 节中该卡的行，以及台账中卡号为该卡的全部行。
-   - 运行台账四项检查：`symbols --check`、`inputs --check`、`drift`（必须为空）、`progress`（missing 必须为 0）。
+   - （历史，台账工具已在 #197 删除）当时运行台账四项检查：`symbols --check`、`inputs --check`、`drift`（必须为空）、`progress`（missing 必须为 0）。
    - 确认前置卡的 PR 状态：不仅看 PR 是否已合并，还要确认其内容已经进入 main（见第 7 节）。
 2. **准备工作区**：按第 7 节建 worktree、独立环境与冻结标志。
 3. **验收测试**
@@ -46,8 +46,8 @@
 ## 4. 验证：卡片闸门
 
 每张卡的复核以闸门脚本（`scripts/dev/card_gate.py`）的输出为准。一条命令跑完，只输出摘要。
-在工作树激活独立环境后运行下例；省略 `--card` 时自动选择原定义发生变化的台账行。
-基线缓存位于 `<git common dir>/card-gate/baseline-<根提交>.json`，
+在工作树激活独立环境后运行下例。现行参数只有 `--base`、`--skip-tests`、`--refresh-baseline`、`--keep`、`--output`；
+迁移期的 `--card` 与台账行选择已在 #197 删除。基线缓存位于 `<git common dir>/card-gate/baseline-<基线提交>.json`，
 闸门代码变化会重算，也可用 `--refresh-baseline` 强制刷新。
 退出码为 0（通过）、1（未通过或跳过测试的部分验收）、2（预检、canary 等自身错误）。
 详细 JSON 与摘要写入本次临时目录，`--keep` 可保留源码副本。
@@ -55,8 +55,7 @@
 ```bash
 source .venv/bin/activate
 python scripts/dev/card_gate.py \
-  --base main \
-  --card T09
+  --base main
 ```
 
 过渡期逐项运行的做法已由闸门脚本替代，复核项目与结论口径如下。
@@ -64,9 +63,9 @@ python scripts/dev/card_gate.py \
 - **测试**：在临时源码副本（与 CI 相同的 `run_matrix.fresh_source` 白名单）中，于沙箱内运行 component、installation、os 三组；基线从 `--base` 提交导出，两侧使用同一组 lane。
   - 与基线比较的是**失败集合**，不是通过数量：macOS 本机沙箱会限制 `ps`，os 组固定有少量失败，只要失败集合不变即可；Linux 沙箱不限制 `ps`。
   - 最终的 OS 结论以 CI 托管 VM 为准。
-- **台账四项检查**。
+- （历史，#197 已删除）台账四项检查。
 - **冻结文件校验、`py_compile`、`ruff`**。
-- **迁移定义的 AST 等价比对**：列出有差异的定义名，每一项都必须在审查包中说明。
+- （历史，#197 已删除）迁移定义的 AST 等价比对：列出有差异的定义名，每一项都必须在审查包中说明。
 
 沙箱要求（闸门脚本内置并自动生成策略，不依赖临时目录中的遗留文件；macOS 用 Seatbelt `scripts/dev/sandbox_macos.py`，
 Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linux 前置条件见 `docs/testing.md`）：
@@ -141,7 +140,7 @@ Linux 用 bubblewrap `scripts/dev/sandbox_linux.py`，两者语义对照与 Linu
 
 - commit、PR、issue、汇报全部使用中文。commit 沿用现有格式 `type(范围): 描述`，例如 `refactor(运行时)`、`docs(架构)`、`chore(台账)`、`build(依赖)`。
 - commit、PR、issue 中不加任何署名行或生成标记，即使工具默认要求添加也不加。
-- 不直接推送 main，不启用自动合并；PR 由操作人合并。推送只涉及功能分支。
+- 不直接推送 main，不启用自动合并；迁移期 PR 由操作人合并（现行合入方式见 [本地分支与版本管理](version-control.md#合并与版本)）。推送只涉及功能分支。
 - 暂存时按文件逐个添加，不整目录添加；`temp/` 下的产物不提交。
 - PR 描述包含：关联 issue、合并顺序、改动摘要、等价性说明、验证命令与计数、偏离说明。PR 标题控制在 70 字符以内。
 

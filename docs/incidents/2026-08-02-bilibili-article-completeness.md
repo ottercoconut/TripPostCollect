@@ -6,7 +6,7 @@
 - 结论：已确认是根项目 B站 article 抓取与正式校验缺陷，不是 SQLite 字段截断。
 - 当前阶段：新抓取详情逻辑、正式门禁、自动测试和真实诊断小样已验收；历史冻结范围 3,009 条完成
   处理后，用户进一步要求从当前业务数据删除 2 条 `operator_excluded` 和 1 条 `invalid_detail`。
-  当前默认库保留 3,006 条 B站记录，全部已取得详情。
+  2026-08-07 处置后默认库保留 3,006 条 B站记录，全部已取得详情（此后数量随正式抓取变化）。
 - 运行限制：修复后的新产物只有通过详情门禁才可报告完整；历史 sidecar、原始 artifact、报告和
   修复前备份仍记录原始 3,009 条范围，但不属于当前内容数据。
 
@@ -101,13 +101,13 @@ article 解析正文 HTML/详情图片数组，并把搜索预览与正文图片
 
 2026-08-07，用户明确要求从当前业务数据删除 2 条 `operator_excluded` 和 1 条 `invalid_detail`。
 默认库删除 3 条 `web_posts` 及外键级联的 3 条 `web_post_images`，随后执行安全删除和 `VACUUM`；
-当前 B站记录数、唯一平台 ID 数和 `detail_observed` 数均为 3,006。非 B站内容和调度控制面指纹未变，
+当时 B站记录数、唯一平台 ID 数和 `detail_observed` 数均为 3,006。非 B站内容和调度控制面指纹未变，
 SQLite 快速检查及外键检查通过。历史 sidecar、原始 artifact、修复报告和备份不改写，以保留本事件
 的原始证据链；其中既有候选记忆仅作为防止对应被删除项重新入库的负向控制面记录，不是内容记录。
 
 ## 证据位置
 
-- B站正式执行器：`scripts/mediacrawler_crawl.py`
+- B站正式执行器：`scripts/mediacrawler_crawl.py`（事件当时；现行 article 分支在 `src/trippostcollect/platforms/bilibili/core.py`）
 - 本轮原始产物：
   `outputs/mediacrawler_runs/20260802T040510558017+0000/bilibili/data/bili/jsonl/search_contents_2026-08-02.jsonl`
 - 默认数据库：`data/trippostcollect.sqlite`

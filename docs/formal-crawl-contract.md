@@ -82,15 +82,18 @@ attempt 或 worker，只冻结与正式运行相同的通道计划。小红书�
 
 B站、微博、抖音和知乎的结构化任务必须按以下顺序执行：
 
-1. `site_request_guard()` 检查平台级最小间隔、随机抖动、单会话预算、每日预算和冷却；
+1. `site_request_guard()` 检查平台级最小间隔、随机抖动、连续会话数上限、每日会话预算和冷却；
 2. 使用正式抓取的持久 profile 完成登录态确认；
 3. 在实际搜索使用的浏览器页面执行 `social_high_risk` 行为阶段，包括随机停留、鼠标移动
    和随机触摸/滚轮滚动；
 4. 行为阶段通过后才执行原平台搜索、分页、字段补全和候选累计；
 5. 汇总行为证据、分页证据和字段校验后决定是否入库。
 
-请求预算的计量单位是一次正式平台抓取会话，不按页面加载产生的每个图片、脚本或底层 API
-请求重复计数。该门禁不改变原平台分页大小、字段映射或去重规则。
+请求预算的计量单位是一次正式平台抓取会话（一个 worker 批次，repair 的每一批同样计 1），不按会话内打开的
+页面、图片、脚本或底层 API 请求计数。`daily_request_budget` 是每个 UTC 日（北京时间 08:00 重置）允许启动的
+会话数，耗尽后要等下一个 UTC 日；`max_requests_per_session` 是连续会话数上限，达到后进入
+`cooldown_minutes` 冷却，空闲满冷却时长后计数清零。小红书不经该门禁计数。该门禁不改变原平台分页大小、
+字段映射或去重规则。
 
 每个平台本轮摘要必须包含 `policy_events` 和 `behavior_evidence`。行为证据至少包含
 `pause`、`mouse_moves`、`human_scroll_complete`、运行时指纹、可见页面阻断标记，以及截图
@@ -126,13 +129,13 @@ BrowserContext；只有触发轮的精确租约已经释放且 `runtime_session_
 取数来源分三级：L1 为被动截获页面自身发出的请求的响应，或读取页面状态；L2 为在页面上下文中
 主动发起请求；L3 为 Playwright `page.request` / `context.request`。L3 对所有平台禁止。浏览器外
 HTTP 客户端（httpx 等）不属于以上任何一级：已纳入访问门禁的平台不得用它取得平台数据，只有平台
-文档登记的例外（如图片直连 CDN，UA 与 Referer 取自浏览器、不带 cookie）可以使用。已纳入访问门禁的
+文档登记的例外（如知乎图片直连 CDN：UA 取自浏览器、Referer 固定为站点、不带 cookie）可以使用。已纳入访问门禁的
 平台只能经页面取数通道取得平台数据，静态检查 `tests/test_fetch_boundary.py` 禁止旁路导入、Playwright
 请求接口和页面脚本内的主动请求；L3 的静态检查覆盖全部平台目录。
 小红书已纳入访问门禁，搜索、详情、作者、图片与登录态只用 L1，没有例外。知乎（#185）已纳入访问门禁。
 discovery 链为 `search_results → note_detail → creator_profile → images`：搜索是页面自身 `search_v3` 的被动截获
 （L1，`page_response`）；详情与作者由真实点击打开新标签，读取 `script#js-initialData` 页面状态
-（L1，`page_state`）；正文图是登记过的 CDN 直连例外，UA 与 Referer 取自浏览器，不带 Cookie，不经第三方代理，
+（L1，`page_state`）；正文图是登记过的 CDN 直连例外，UA 取自浏览器，Referer 固定为 `https://www.zhihu.com/`，不带 Cookie，不经第三方代理，
 访问账本以 `cdn_direct` 登记并参与 R5。repair 链没有搜索访问：指定 URL 以 `navigate` 打开详情，作者仍为点击，
 图片仍为 `cdn_direct`。每条知乎入库记录须经 `content_visit_ok`。B站、微博和抖音目前不纳入访问门禁（#111），
 计划在 2026-11-12（UTC−8）之后重构（#157）：浏览器负责登录、Cookie
@@ -221,8 +224,9 @@ checkpoint，但必须通过新的 dry-run 冻结并核对计划。
 主页资源、搜索预览、封面、视频、音乐和知乎公式图片均不得生成正文候选、下载任务、manifest
 行、长期文件或任何图片关系；B站搜索预览图尤其不能替代详情正文图。作者头像不是可选图片角色，
 不得形成下载请求、JSONL/摘要字段、子进程日志内容、`web_posts` 字段、JSON 值或
-`web_post_images` 关系。导出与入库边界必须递归删除 `avatar_url`、`author_avatar`、
-`author_avatar_url`、`avatar`、`user_avatar`，并删除
+`web_post_images` 关系。导出与入库边界必须递归删除 `trippostcollect.records.sanitization.AUTHOR_AVATAR_KEYS` 中的键：
+`avatar_url`、`author_avatar`、`author_avatar_url`、`avatar`、`user_avatar`，微博 `avatar_hd`、`avatar_large`、
+`profile_image_url`，知乎 `avatar_url_template`，B站 `face`、`upic`，并删除
 同一记录内与这些键下 URL 完全相同的重复值；不得按域名、路径或文件名推测头像。
 
 平台特有的 URL/资产键归一规则写在对应平台文档；所有平台都必须保留原始来源证据，且不得使用
@@ -234,18 +238,18 @@ checkpoint，但必须通过新的 dry-run 冻结并核对计划。
 知乎零张正文图的回答/文章没有图片候选：不要求该帖的 manifest 行，`expected_images` 不因此增加，
 `image_materialization.complete` 仍须为真。入库 `post_images_count=0`，且不写 `web_post_images`。
 
-每条进入正式有效集合的记录还必须满足整帖图片原子条件：所有权威正文图都已使用当前平台会话
-下载到 staging；`image_manifest.jsonl` 的平台、帖子、角色、顺序、来源字段、稳定资产键和 URL 与
+每条进入正式有效集合的记录还必须满足整帖图片原子条件：所有权威正文图都已按平台文档规定的图片通道
+下载到 staging（B站、微博、抖音与知乎为直连图片 CDN，不带平台 Cookie；小红书为页面截获的响应体）；`image_manifest.jsonl` 的平台、帖子、角色、顺序、来源字段、稳定资产键和 URL 与
 根项目投影完全一致；根项目重新验证文件边界、SHA-256、真实 MIME、后缀、尺寸和解码；正式模式
 在同一帖子内按验证后的文件 SHA-256 保留源顺序首次出现项，重复来源仍保留在 manifest 和首项的
 `local_file.sha256_duplicate_sources` 证据中；保留项从 0 连续重编号后晋升到
-`data/media/<platform>/<safe_post_id>/<index>-<asset_hash>.<ext>`，并在同一 SQLite 事务写入帖子和带
+`data/media/<platform>/<safe_post_id>/<index:03d>-<文件 SHA-256 前 16 位>.<ext>`，并在同一 SQLite 事务写入帖子和带
 `local_path/width/height/mime_type/sha256` 的图片关系。SHA-256 去重只表示字节完全相同，不合并仅在
 视觉上相同但缩放、转码或重新编码后哈希不同的文件，也不跨帖子合并图片关系。任一图片缺失、失败或
 不一致时整帖不得入库；先写 URL、以后再补本地路径不满足本契约。
 
-平台 child 对单张正文图的 `None`、HTTP 200 空字节、超时、HTTP 408/425/5xx 或其他临时请求错误最多执行 3 次有限指数
-退避重试。客户端不得把 `raise_for_status()` 的 HTTP 状态折叠为 `None`：明确终态状态至少保存真实
+平台 child 对单张正文图的 `None`、HTTP 200 空字节、超时、HTTP 408/425/5xx 或其他临时请求错误最多共尝试 3 次（即最多重试 2 次），
+按有限指数退避。客户端不得把 `raise_for_status()` 的 HTTP 状态折叠为 `None`：明确终态状态至少保存真实
 `http_status` 和 `image_source_unavailable`，临时状态在耗尽后保存 `image_download_retryable`；明确
 非重试 HTTP、非图片、解码失败或过大等终态错误不做无意义重试。候选帖详情、作者必需字段或任一
 正文图在适用尝试结束后仍失败时，必须写 `candidate_skipped` 事件；图片失败还必须先写失败 manifest。

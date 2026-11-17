@@ -57,10 +57,12 @@ cherry-pick、rebase 和后续修复已经吸收的改动，以最终实现及�
 
 - `main` 保存已验证的集成结果。待合并分支必须与对应 `main` 比较，检查独有提交和最终文件树
   差异，不能仅凭分支名称或提交日期判断已完成。
-- 工作区准备好、验证通过后再更新 `main`。快进使用 `git merge --ff-only <分支名>`；出现分叉时先在
-  集成分支处理并重新验证，不自动创建未经检查的合并。
-- 本地设置 `pull.ff=only`，使 `git pull` 遇到分叉时停止；`push.default=simple`
-  使用同名分支推送规则。这些设置位于 `.git/config`，不会随 clone 复制，且不代替人工核对。
+- 改动在任务分支上验证通过后，经 GitHub PR 以 squash 方式合入 `main`（带 `sha=` 防止竞态，标题沿用
+  `... (#PR)`）。合入前给分支头打 `archive/<分支名去斜杠>` 带说明标签并推送，保住 issue/PR 里引用的分支 SHA；
+  合入后核对 `main` 与分支头树哈希相同，阶段性成果再打 `milestone/<主题>` 标签。不在本地创建未经检查的合并。
+- 本地 `main` 只跟随 `origin/main` 快进（`git pull --ff-only` 或 `git merge --ff-only origin/main`），遇到分叉即停止核对。
+  可在 `.git/config` 设置 `pull.ff=only`、`push.default=simple`；这些设置不会随 clone 复制，各工作副本是否已设置
+  需自行确认（2026-11-17：VPS 已设，Mac 未设），且不代替人工核对。
 - 拉取或快进会改动本机带不可变标志的文件（`config/frozen_files.json` 登记的冻结资产，以及本机额外加了
   标志的文件，例如登记文件本身）时，`git pull` 无法替换这些文件，快进会中途停下、工作树只更新一部分。
   先 `git fetch origin`，用 `git diff --name-only HEAD..origin/main` 列出要变动的文件，并查看其中哪些

@@ -2,13 +2,16 @@
 
 > **历史资料：** 平台适配迁移（T00–T14）已完成。迁移台账工具（`scripts/dev/adapter_ledger*.py`）、台账产物（`docs/adapter-ledger/`）与附录 C8（`platform-adapter-symbol-ledger.md`）已在 #197 删除，卡片闸门不再做台账与 AST 复核；文中相关内容只作历史记录，需要时从 Git 查询。
 
+> **注（2026-11-17，#208）：** 本单为 2026-09-28 的准备记录，文中以现在时提到的 `mediacrawler_export_entrypoint.py`、
+> 知乎 HTTPX + zhihu.js 取数等均已退役（知乎自 #185 起页面取数），现行实现见 `src/trippostcollect/platforms/`。
+
 本单记录 v0.6/v0.7 前置准备，不重复定义正式契约，也不是迁移完成报告。
 设计边界见 [平台实现解耦设计](platform-adapters.md)，版本操作见 [版本管理](version-control.md)，
 现行行为仍以 [文档入口](README.md) 所指权威文档为准。工作单完成后按项目文档归档规则处理。
 
 **当前状态（2026-09-28）：P00-01–08 全部完成，设计就绪 D 门禁的静态部分满足；未获实现授权。**
 [详细迁移规格](platform-adapter-specification.md) C0–C7记录五站十三类闭包与主链，
-[附录 C8](platform-adapter-symbol-ledger.md)逐项处置1234个定义，D记录接口和读取时点，G记录获准实施后的任务，
+附录 C8（已于 #197 删除）逐项处置1234个定义，D记录接口和读取时点，G记录获准实施后的任务，
 各任务卡的执行清单以 GitHub issues 跟踪。实施回归、安装、正式试跑与治理切换是独立门禁，本轮均未执行。
 T14（#19）已删除 fork 子模块与私有桥 E；本单中的 `M/`、fork 解释器、子模块归档等步骤只作历史记录，不能在现行仓库复现。
 
