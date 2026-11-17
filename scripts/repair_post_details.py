@@ -572,6 +572,34 @@ def waived_pending_count(
     return int(row[0] or 0)
 
 
+def policy_refusal_event(summary: dict[str, Any]) -> dict[str, Any] | None:
+    """child 在访问平台前被项目策略拒绝时，返回那条结构化事件。
+
+    先读 child 摘要里的 ``records[].policy_events``（``allowed`` 为 false，带
+    ``reason`` 和 ``cooldown_until``）。没有事件时，再看 ``runtime_blocker`` 的
+    ``failure_type=policy_blocked``。不扫描日志文本。
+    """
+
+    if not summary:
+        return None
+    for record in summary.get("records") or []:
+        if not isinstance(record, dict):
+            continue
+        for event in record.get("policy_events") or []:
+            if isinstance(event, dict) and event.get("allowed") is False:
+                return event
+    validation = summary.get("formal_validation") if isinstance(summary.get("formal_validation"), dict) else {}
+    blocker = validation.get("runtime_blocker") or summary.get("runtime_blocker") or {}
+    if isinstance(blocker, dict) and str(blocker.get("failure_type") or "") == "policy_blocked":
+        return {
+            "allowed": False,
+            "reason": str(blocker.get("reason") or "policy_blocked"),
+            "cooldown_until": str(blocker.get("cooldown_until") or ""),
+            "wait_seconds": blocker.get("wait_seconds"),
+        }
+    return None
+
+
 def build_target_results(
     *,
     targets: list[dict[str, Any]],
@@ -579,9 +607,20 @@ def build_target_results(
     statuses: dict[str, dict[str, Any]],
     candidate_failures: list[dict[str, Any]],
     executed: bool,
+    not_attempted_ids: set[str] | None = None,
+    batch_runtime_failed_ids: set[str] | None = None,
+    batch_runtime_reasons: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """刷新摘要逐行结果：已刷新、候选失败、被拒绝。dry-run 的选中行记为 planned。"""
+    """刷新摘要逐行结果。
 
+    dry-run 的选中行记为 planned。已派发但整批运行级失败的行记为
+    ``batch_runtime_failed``，尚未派发的行记为 ``not_attempted``。只有真正逐条
+    失败的行才是 ``candidate_failed``。
+    """
+
+    skipped = not_attempted_ids or set()
+    runtime_failed = batch_runtime_failed_ids or set()
+    runtime_reasons = batch_runtime_reasons or {}
     failure_by_id: dict[str, dict[str, Any]] = {}
     for item in candidate_failures:
         post_id = str(item.get("platform_post_id") or "")
@@ -623,6 +662,28 @@ def build_target_results(
                 }
             )
             continue
+        if post_id in skipped:
+            results.append(
+                {
+                    "platform_post_id": post_id,
+                    "web_post_id": item.get("web_post_id"),
+                    "outcome": "not_attempted",
+                    "reason": "",
+                    "detail": "",
+                }
+            )
+            continue
+        if post_id in runtime_failed:
+            results.append(
+                {
+                    "platform_post_id": post_id,
+                    "web_post_id": item.get("web_post_id"),
+                    "outcome": "batch_runtime_failed",
+                    "reason": runtime_reasons.get(post_id) or "runtime_failed",
+                    "detail": "",
+                }
+            )
+            continue
         failure = failure_by_id.get(post_id) or {}
         results.append(
             {
@@ -634,6 +695,13 @@ def build_target_results(
             }
         )
     return results
+
+
+def _mark_batch_rows(bucket: set[str], reasons: dict[str, str], batch_plan: dict[str, Any], reason: str) -> None:
+    for post_id in batch_plan.get("target_ids") or []:
+        text = str(post_id)
+        bucket.add(text)
+        reasons.setdefault(text, reason)
 
 
 def kept_content_images(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1187,6 +1255,11 @@ def main() -> int:
     batch_results: list[dict[str, Any]] = []
     child_summaries: list[dict[str, Any]] = []
     candidate_failures: list[dict[str, Any]] = []
+    not_attempted_ids: set[str] = set()
+    batch_runtime_failed_ids: set[str] = set()
+    batch_runtime_reasons: dict[str, str] = {}
+    started_batches: set[int] = set()
+    throttle_stop: dict[str, Any] | None = None
     fatal_error = ""
     outcome = "failed"
     interrupt_signum: int | None = None
@@ -1214,6 +1287,13 @@ def main() -> int:
                 interrupt_signum = int(child_run["interrupt_signum"])
                 forced_termination = bool(child_run.get("forced_termination"))
                 batch_results.append(interrupted_batch_result(batch_plan, child_run))
+                started_batches.add(int(batch_plan["batch"]))
+                _mark_batch_rows(
+                    batch_runtime_failed_ids,
+                    batch_runtime_reasons,
+                    batch_plan,
+                    "operator_interrupt",
+                )
                 break
             stdout = child_run["stdout"]
             stderr = child_run["stderr"]
@@ -1225,8 +1305,21 @@ def main() -> int:
                 child_error = f"missing_child_summary_exit_{child_run['returncode']}"
             else:
                 child_error = _fatal_child_failure(child_summary)
-            batch_candidate_failures = child_candidate_failures(child_summary)
-            candidate_failures.extend(batch_candidate_failures)
+            refusal = policy_refusal_event(child_summary)
+            runtime_batch = bool(refusal) or bool(
+                child_error and not str(child_error).startswith("missing_child_summary")
+            )
+            if runtime_batch:
+                _mark_batch_rows(
+                    batch_runtime_failed_ids,
+                    batch_runtime_reasons,
+                    batch_plan,
+                    "throttle_wait" if refusal else child_error,
+                )
+                batch_candidate_failures = []
+            else:
+                batch_candidate_failures = child_candidate_failures(child_summary)
+                candidate_failures.extend(batch_candidate_failures)
             batch_result = {
                 "batch": batch_plan["batch"],
                 "target_count": batch_plan["target_count"],
@@ -1244,12 +1337,26 @@ def main() -> int:
                 "stderr_tail": tail(stderr),
             }
             batch_results.append(batch_result)
+            started_batches.add(int(batch_plan["batch"]))
             if child_summary:
                 child_summaries.append(child_summary)
             state.append_event("post_detail_repair_batch_finished", batch_result)
+            if refusal:
+                throttle_stop = {
+                    "batch": batch_plan["batch"],
+                    "reason": str(refusal.get("reason") or ""),
+                    "cooldown_until": str(refusal.get("cooldown_until") or ""),
+                    "wait_seconds": refusal.get("wait_seconds"),
+                }
+                fatal_error = f"batch_{batch_plan['batch']}:throttle_wait"
+                break
             if child_error and _strict_batch_blocker(child_error):
                 fatal_error = f"batch_{batch_plan['batch']}:{child_error}"
                 break
+
+        for plan in batch_plans:
+            if int(plan["batch"]) not in started_batches:
+                not_attempted_ids.update(str(post_id) for post_id in plan.get("target_ids") or [])
 
         if interrupt_signum is None and latch.signal_received is not None:
             interrupt_signum = int(latch.signal_received)
@@ -1261,6 +1368,8 @@ def main() -> int:
                 error=fatal_error,
                 evidence={"backup": backup, "batches": batch_results},
             )
+            if throttle_stop is not None:
+                outcome = "throttle_wait"
         else:
             state.complete(
                 "command_executed",
@@ -1458,8 +1567,20 @@ def main() -> int:
                 "all_selected_targets_recovered": not remaining_ids,
                 "candidate_failure_count": len(candidate_failures),
                 "candidate_failures_sample": candidate_failures[:20],
+                "not_attempted_count": sum(
+                    1
+                    for post_id in not_attempted_ids
+                    if not (final_statuses.get(post_id) or {}).get("recovered")
+                ),
+                "batch_runtime_failed_count": sum(
+                    1
+                    for post_id in batch_runtime_failed_ids
+                    if not (final_statuses.get(post_id) or {}).get("recovered")
+                ),
                 "finished_at": utc_iso(),
             }
+            if throttle_stop is not None:
+                summary["throttle"] = throttle_stop
             if args.refresh_all:
                 summary["target_results"] = build_target_results(
                     targets=targets,
@@ -1467,6 +1588,9 @@ def main() -> int:
                     statuses=final_statuses,
                     candidate_failures=candidate_failures,
                     executed=True,
+                    not_attempted_ids=not_attempted_ids,
+                    batch_runtime_failed_ids=batch_runtime_failed_ids,
+                    batch_runtime_reasons=batch_runtime_reasons,
                 )
             if interrupt_record is not None:
                 summary["interrupt"] = interrupt_record
@@ -1523,7 +1647,12 @@ def main() -> int:
                     statuses={},
                     candidate_failures=candidate_failures,
                     executed=True,
+                    not_attempted_ids=not_attempted_ids,
+                    batch_runtime_failed_ids=batch_runtime_failed_ids,
+                    batch_runtime_reasons=batch_runtime_reasons,
                 )
+            if throttle_stop is not None:
+                fallback["throttle"] = throttle_stop
             if interrupt_record is not None:
                 fallback["interrupt"] = interrupt_record
                 fallback["forced_termination"] = forced_termination

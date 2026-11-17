@@ -63,14 +63,17 @@ DETAIL_TAB_NOT_OPENED = "detail_tab_not_opened"
 DETAIL_ENTITY_MISSING = "detail_entity_missing"
 DETAIL_CONTENT_MISSING = "detail_content_missing"
 BROWSER_TARGET_CLOSED = "browser_target_closed"
-# 没有 /people/ 作者链接，或新标签没打开。候选级失败，有限重试后进入已处理记忆。
+# 没有 /people/{token} 或 /org/{token} 作者主页链接，或新标签没打开。候选级失败，有限重试后进入已处理记忆。
+# 子页（/org/{token}/answers、/people/{token}/followers 等）不算作者主页。
 AUTHOR_LINK_MISSING = "author_link_missing"
 # 作者页页面状态里没有该 url_token 的用户。同样是候选级失败。
 AUTHOR_PROFILE_MISSING = "author_profile_missing"
 # 点作者之前的节奏停顿（门禁要求停在点击之前）。作者标签打开后的停留另计。
 AUTHOR_CLICK_PAUSE_SECONDS = (1.0, 2.0)
 AUTHOR_TAB_HOLD_SECONDS = (5.0, 9.0)
-_PEOPLE_TOKEN_RE = re.compile(r"/people/([^/?#]+)")
+# 路径正好是 /people/{token} 或 /org/{token}。查询串和片段在 path 之外，不构成子路径。
+_AUTHOR_HOME_RE = re.compile(r"^/(people|org)/([^/?#]+)$")
+_AUTHOR_HOME_KINDS = ("people", "org")
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # 侦察里能点开的标题链接，收窄到本条候选的 id。answer_heading、zhuanlan_anchor 在前。
@@ -99,11 +102,28 @@ def blocking_code_for_url(url: str) -> str | None:
     return None
 
 
-def people_token(url: str) -> str:
-    """作者页路径 ``/people/{url_token}`` 中的 token。不是作者页时为空串。"""
+def _author_home(url: str) -> tuple[str, str]:
+    """作者主页的 ``(people|org, token)``。不是主页本身时为 ``("", "")``。"""
 
-    match = _PEOPLE_TOKEN_RE.search(urlsplit(str(url or "")).path)
-    return match.group(1) if match else ""
+    match = _AUTHOR_HOME_RE.fullmatch(urlsplit(str(url or "")).path or "")
+    if not match:
+        return "", ""
+    return match.group(1), match.group(2)
+
+
+def author_page_token(url: str) -> str:
+    """作者主页 ``/people/{token}`` 或 ``/org/{token}`` 中的 token。
+
+    路径必须正好是这两段。可以带查询串或片段。``/org/{token}/answers`` 这类子页返回空串。
+    """
+
+    return _author_home(url)[1]
+
+
+def author_page_kind(url: str) -> str:
+    """作者主页路径类型：``people`` 或 ``org``。不是主页本身时为空串。"""
+
+    return _author_home(url)[0]
 
 
 def _href_targets(href: str, content: ZhihuContent) -> bool:
@@ -327,8 +347,10 @@ class ZhihuDetailPages:
             await self._raise_if_blocking(author_page)
             if _page_closed(detail_page) or _page_closed(self.search_page):
                 raise self._runtime(content, BROWSER_TARGET_CLOSED)
-            url_token = people_token(getattr(author_page, "url", "") or "")
-            if not url_token:
+            author_url = getattr(author_page, "url", "") or ""
+            url_token = author_page_token(author_url)
+            profile_kind = author_page_kind(author_url)
+            if not url_token or not profile_kind:
                 raise self._candidate(content, AUTHOR_PROFILE_MISSING)
             state_text, visit_id = await self.channel.read_state(
                 author_page,
@@ -341,7 +363,7 @@ class ZhihuDetailPages:
             user = user_from_initial_data(state_text, url_token)
             if user is None or not visit_id:
                 raise self._candidate(content, AUTHOR_PROFILE_MISSING)
-            apply_author_page(content, user, url_token)
+            apply_author_page(content, user, url_token, profile_kind=profile_kind)
             await self._pause(author_page, "author_tab", *AUTHOR_TAB_HOLD_SECONDS, page_role="author")
             return visit_id
         finally:
@@ -349,23 +371,26 @@ class ZhihuDetailPages:
             await self._bring_detail_forward(detail_page)
 
     async def _find_author_link(self, page: Any, content: ZhihuContent, token: str) -> Any | None:
-        locator = page.locator(f"a[href*='/people/{token}']")
-        try:
-            count = await locator.count()
-        except (PlaywrightError, PlaywrightTimeoutError) as exc:
-            if _closed_error(exc) or _page_closed(page):
-                raise self._runtime(content, BROWSER_TARGET_CLOSED) from exc
-            return None
-        for index in range(count):
-            item = locator.nth(index)
+        """个人主页与机构号主页都可以点。子页链接即使包含同一 token 也不选。"""
+
+        for kind in _AUTHOR_HOME_KINDS:
+            locator = page.locator(f"a[href*='/{kind}/{token}']")
             try:
-                href = await item.get_attribute("href")
+                count = await locator.count()
             except (PlaywrightError, PlaywrightTimeoutError) as exc:
                 if _closed_error(exc) or _page_closed(page):
                     raise self._runtime(content, BROWSER_TARGET_CLOSED) from exc
                 continue
-            if people_token(str(href or "")) == token:
-                return item
+            for index in range(count):
+                item = locator.nth(index)
+                try:
+                    href = await item.get_attribute("href")
+                except (PlaywrightError, PlaywrightTimeoutError) as exc:
+                    if _closed_error(exc) or _page_closed(page):
+                        raise self._runtime(content, BROWSER_TARGET_CLOSED) from exc
+                    continue
+                if author_page_token(str(href or "")) == token:
+                    return item
         return None
 
     async def _pause(

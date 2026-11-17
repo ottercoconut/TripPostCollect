@@ -322,6 +322,8 @@ def merge_search_content_detail(
         search_content.author_page_badges = dict(detail_content.author_page_badges)
         if detail_content.creator_url_token:
             search_content.creator_url_token = detail_content.creator_url_token
+        if detail_content.author_profile_url:
+            search_content.author_profile_url = detail_content.author_profile_url
     search_content.content_detail_status = "detail_observed"
     search_content.content_detail_source = (
         "answer_detail"
@@ -456,15 +458,25 @@ def official_identity(user: dict, payload: dict) -> tuple[int | None, str]:
     return 1, "、".join(parts)
 
 
-def apply_author_page(content: ZhihuContent, user: dict, url_token: str) -> None:
+def apply_author_page(
+    content: ZhihuContent,
+    user: dict,
+    url_token: str,
+    *,
+    profile_kind: str = "",
+) -> None:
     """用作者页用户实体覆盖粉丝、关注、作品数和官方身份认证。
 
     粉丝数只认 ``followerCount``，来源标为作者页。关注数缺键为 None。作品数是
     ``answerCount + articlesCount``，任一缺失则为 None。四个原值缺键不写入。
     认证只认已通过的机构/个人身份；其余标识写入 ``author_page_badges``。
+    ``profile_kind`` 是已经打开的作者页路径类型（``people`` 或 ``org``）。确认后按这个
+    实际路径写 ``author_profile_url``，不用 ``isOrg`` 或 ``userType`` 猜测。
     """
 
     content.creator_url_token = url_token
+    if profile_kind in {"people", "org"} and url_token:
+        content.author_profile_url = f"{zhihu_constant.ZHIHU_URL}/{profile_kind}/{url_token}"
     if "followerCount" in user and type(user.get("followerCount")) is int:
         content.followers_count = user["followerCount"]
         content.followers_observed = True
@@ -693,6 +705,7 @@ class ZhihuExtractor:
             res.creator_hash = platform_user_id(author.get("id"))
             res.url_token = author.get("url_token") or author.get("urlToken") or ""
             res.user_nickname = platform_nickname(author.get("name"))
+            # 作者页打开前的占位。确认作者页后由 apply_author_page 按实际 /people/ 或 /org/ 覆盖。
             if res.url_token:
                 res.profile_url = f"{zhihu_constant.ZHIHU_URL}/people/{res.url_token}"
             res.avatar_url = author.get("avatar_url") or ""

@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from .support import END, config, make_crawler, search_page
-from trippostcollect.platforms.zhihu.detail_page import blocking_code_for_url
+from trippostcollect.platforms.zhihu.detail_page import (
+    author_page_kind,
+    author_page_token,
+    blocking_code_for_url,
+)
 from trippostcollect.platforms.zhihu.models import ZhihuContent
 from trippostcollect.platforms.zhihu.page_scripts import STATE_SCRIPTS
 from trippostcollect.platforms.zhihu.search_capture import ZhihuPageCapture
@@ -72,20 +76,24 @@ class Locator:
         self.index = index
 
     def _matches(self):
-        if "/people/" in self.selector:
-            return [
-                link for link in getattr(self.page, "author_links", [])
-                if str(link.get("href") or "").rsplit("/", 1)[-1] in self.selector
+        if "/people/" in self.selector or "/org/" in self.selector:
+            needles = [
+                piece for piece in self.selector.split("'") if piece.startswith("/people/") or piece.startswith("/org/")
             ]
-        if self.selector in self.page.markers:
-            return [{"marker": self.selector}] if self.page.markers[self.selector] else []
-        matched = [
-            card for card in self.page.cards
-            if card["id"] in self.selector and (
-                ("/answer/" in self.selector and card["type"] == "answer")
-                or ("/p/" in self.selector and card["type"] == "article")
-            )
-        ]
+            matched = [
+                link for link in getattr(self.page, "author_links", [])
+                if any(needle in str(link.get("href") or "") for needle in needles)
+            ]
+        elif self.selector in self.page.markers:
+            matched = [{"marker": self.selector}] if self.page.markers[self.selector] else []
+        else:
+            matched = [
+                card for card in self.page.cards
+                if card["id"] in self.selector and (
+                    ("/answer/" in self.selector and card["type"] == "answer")
+                    or ("/p/" in self.selector and card["type"] == "article")
+                )
+            ]
         if self.index is None:
             return matched
         return matched[self.index:self.index + 1] if self.index < len(matched) else []
@@ -226,10 +234,15 @@ class Context:
         else:
             detail.url = card["href"]
             detail.initial_text = self.page.state_for(card)
-        detail.author_links = [] if self.page.author_block == "no-author" else [{
-            "kind": "author", "id": "author",
-            "href": "https://www.zhihu.com/people/author",
-        }]
+        if self.page.author_block == "no-author":
+            detail.author_links = []
+        elif getattr(self.page, "detail_author_links", None):
+            detail.author_links = [dict(item) for item in self.page.detail_author_links]
+        else:
+            detail.author_links = [{
+                "kind": "author", "id": "author",
+                "href": "https://www.zhihu.com/people/author",
+            }]
         self.pages.append(detail)
         if self.pending is not None:
             self.pending.page = detail
@@ -297,9 +310,22 @@ def test_login_and_verify_url_constants_are_hypotheses():
     assert blocking_code_for_url("https://www.zhihu.com/signin?next=%2F") == "login_required"
     assert blocking_code_for_url("https://www.zhihu.com/account/unhuman") == "captcha_detected"
     assert blocking_code_for_url("https://www.zhihu.com/search?type=content&q=1") is None
+    assert blocking_code_for_url("https://www.zhihu.com/org/author") is None
     assert "zhihu.initial_data" in STATE_SCRIPTS
     assert "fetch(" not in STATE_SCRIPTS["zhihu.initial_data"]
     assert "XMLHttpRequest" not in STATE_SCRIPTS["zhihu.initial_data"]
+
+
+def test_author_page_token_accepts_only_the_home_path():
+    assert author_page_token("https://www.zhihu.com/people/author") == "author"
+    assert author_page_kind("https://www.zhihu.com/people/author") == "people"
+    assert author_page_token("https://www.zhihu.com/org/org-author?utm=1#top") == "org-author"
+    assert author_page_kind("/org/org-author") == "org"
+    assert author_page_token("https://www.zhihu.com/org/author/answers") == ""
+    assert author_page_token("https://www.zhihu.com/org/author/followers") == ""
+    assert author_page_token("https://www.zhihu.com/org/author/posts") == ""
+    assert author_page_token("https://www.zhihu.com/people/author/answers") == ""
+    assert author_page_kind("https://www.zhihu.com/people/author/followers") == ""
 
 
 @pytest.mark.asyncio
@@ -362,6 +388,7 @@ async def test_click_opens_tab_and_reads_entity_even_when_search_body_is_complet
     assert visits[1]["id"] == refs["creator_profile"]
     assert visits[1]["url_user_id"] == "author"
     assert visits[1]["subject_id"] == "author"
+    assert result.author_profile_url == "https://www.zhihu.com/people/author"
     pauses = [line["stage"] for line in lines if line["kind"] == "pause"]
     assert pauses == ["note_detail", "creator_profile", "author_tab"]
     assert page.fronts == 1
@@ -384,6 +411,85 @@ async def test_click_opens_tab_and_reads_entity_even_when_search_body_is_complet
     assert author["pinsCount"] == 1
     assert author["questionCount"] == 4
     assert author["followers_source"] == "author_page"
+
+
+def _search_answer() -> ZhihuContent:
+    return ZhihuContent(
+        content_id="101",
+        question_id="10",
+        content_type="answer",
+        content_text="搜索里已经完整",
+        creator_hash="author-1",
+        user_nickname="作者",
+        creator_url_token="author",
+        author_profile_url="https://www.zhihu.com/people/author",
+        followers_observed=True,
+        author_followers_source="search_author",
+        followers_count=3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_org_author_home_is_clicked_and_profile_url_uses_org(monkeypatch, tmp_path):
+    crawler, page, _root = prepare(monkeypatch, tmp_path)
+    page.cards = [{
+        "id": "101",
+        "type": "answer",
+        "href": "https://www.zhihu.com/question/10/answer/101",
+    }]
+    page.detail_author_links = [
+        {"kind": "author", "id": "org-answers", "href": "https://www.zhihu.com/org/author/answers"},
+        {"kind": "author", "id": "org-followers", "href": "https://www.zhihu.com/org/author/followers"},
+        {"kind": "author", "id": "org-posts", "href": "/org/author/posts"},
+        {
+            "kind": "author",
+            "id": "org-home",
+            "href": "https://www.zhihu.com/org/author?utm_source=detail",
+        },
+    ]
+    page.author_state = json.dumps({"initialState": {"entities": {"users": {"author": {
+        "urlToken": "author",
+        "name": "机构",
+        "followerCount": 20,
+        "followingCount": 1,
+        "answerCount": 4,
+        "articlesCount": 6,
+        "isOrg": True,
+        "userType": "organization",
+    }}}}})
+
+    result = await crawler.enrich_search_content_detail(_search_answer())
+
+    clicked = [click for item in crawler.browser_context.pages for click in item.clicks]
+    assert clicked == ["101", "org-home"]
+    assert result.creator_url_token == "author"
+    assert result.author_profile_url == "https://www.zhihu.com/org/author"
+    assert result.author_followers_source == "author_page"
+    assert result.followers_count == 20
+    assert result.author_verified is None
+    assert result.author_page_badges["isOrg"] is True
+    assert result.author_page_badges["userType"] == "organization"
+
+
+@pytest.mark.asyncio
+async def test_people_author_skips_subpages_and_keeps_people_profile_url(monkeypatch, tmp_path):
+    crawler, page, _root = prepare(monkeypatch, tmp_path)
+    page.cards = [{
+        "id": "101",
+        "type": "answer",
+        "href": "https://www.zhihu.com/question/10/answer/101",
+    }]
+    page.detail_author_links = [
+        {"kind": "author", "id": "people-answers", "href": "https://www.zhihu.com/people/author/answers"},
+        {"kind": "author", "id": "people-home", "href": "https://www.zhihu.com/people/author#header"},
+    ]
+
+    result = await crawler.enrich_search_content_detail(_search_answer())
+
+    clicked = [click for item in crawler.browser_context.pages for click in item.clicks]
+    assert clicked == ["101", "people-home"]
+    assert result.author_profile_url == "https://www.zhihu.com/people/author"
+    assert result.author_followers_source == "author_page"
 
 
 @pytest.mark.asyncio

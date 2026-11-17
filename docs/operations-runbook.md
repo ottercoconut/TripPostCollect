@@ -316,7 +316,9 @@ python scripts/repair_post_details.py \
 
 恢复判定只认 `answer_detail` / `article_detail`。纯文字回答或文章没有正文图也算恢复。刷新模式还要求 `author_followers_source='author_page'`，并且 `author_page_badges` 键已经存在。当前详情路径不再产生 `search_content`，修复恢复不再把它当作受信任来源。
 
-运行摘要逐行给出 `refreshed`、`candidate_failed`（原因沿用 child 的 `error_code`，例如详情实体缺失、作者页失败）和 `rejected`（豁免等）。dry-run 里选中但尚未执行的行记为 `planned`。候选失败的行保持原值，不删除。
+运行摘要逐行给出 `refreshed`、`candidate_failed`（原因沿用 child 的 `error_code`，例如详情实体缺失、作者页失败）、`batch_runtime_failed`、`not_attempted` 和 `rejected`（豁免等）。dry-run 里选中但尚未执行的行记为 `planned`。候选失败、整批运行级失败和未派发的行都保持原值，不删除。`candidate_failure_count` 只计真正逐条失败的行；摘要另给 `batch_runtime_failed_count` 和 `not_attempted_count`。
+
+会话限速用尽时，child 在访问平台前被项目策略拒绝。总控读取 child 摘要里的拒绝事件（`policy_events` 中 `allowed` 为 false，例如原因 `max_requests_per_session`），停止后续批次。这一轮的状态是 `throttle_wait`，摘要写明 `cooldown_until` 和原因。被拒绝的那一批记为 `batch_runtime_failed`，还没派发的行记为 `not_attempted`。已入库的行保留。冷却结束后重跑同一条 `--refresh-all` 命令，仍按 `author_page_badges` 为空重选这些行。整批 `runtime_failed`（例如浏览器上下文被关、`ERR_NETWORK_CHANGED`）也不把该批未恢复的行算成逐条 `candidate_failed`。
 
 ```bash
 source .venv/bin/activate
