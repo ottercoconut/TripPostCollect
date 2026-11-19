@@ -19,6 +19,10 @@
 >   `xhs/runner.py`、`platforms/zhihu/login.py`、`resources/js/stealth.min.js`），另有 `visit_gate.py`、
 >   `page_capture.py` 等后来新增的模块未列出；实际目录以仓库为准。
 > - 项目 Python 目标为 3.12（不是 3.11）。
+> - 微博已改为桌面站页面取数并纳入访问门禁（#211），详见[微博平台文档](platforms/weibo.md)。本文中以下微博条目均已删除：
+>   - `m.weibo.cn` 搜索与详情、`get_note_full_text` 长文直连、`$render_data` 提取、repair 浏览器回退；
+>   - `WEIBO_SEARCH_TYPE`、`ENABLE_WEIBO_FULL_TEXT`；
+>   - warmup 的 `weibo_api_check`、移动站 `/api/config` 判定与微博 Cookie 快照。
 
 > 2026-09-28 完成 P00-08 静态复核并补齐全量符号账；设计就绪 D 门禁的静态部分已满足，实施另需授权。
 > （以下为 2026-09-28 当时状态；迁移已于 T14 完成。）本文中的目标文件、类型和接口当时尚未实现。主设计保留原则与原研究，本文是目录、接口、读取时点和任务卡的唯一详细定义；
