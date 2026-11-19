@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime
-import json
 from pathlib import Path
 import sqlite3
 import stat
@@ -71,6 +70,9 @@ class FakeContext:
             values["SSOLoginState"] = "signed" if self.desktop_reads > 1 else ""
         return [{"name": k, "value": v, "domain": ".example.test"} for k, v in values.items()]
 
+    def on(self, _event, _callback=None):
+        return None
+
     async def close(self):
         self.owner.trace.append(("close", self.index))
 
@@ -99,7 +101,10 @@ class FakePage:
         if milliseconds == 60_000:
             raise KeyboardInterrupt
 
-    async def evaluate(self, script):
+    def on(self, _event, _callback=None):
+        return None
+
+    async def evaluate(self, script, arg=None):
         self.record("evaluate", script)
         if script == "() => navigator.userAgent":
             return "离线浏览器 UA"
@@ -108,6 +113,8 @@ class FakePage:
         ok = self.context.authenticated
         if self.context.owner.scenario == "reopen_failed" and self.context.index > 1:
             ok = False
+        if "$CONFIG" in script:
+            return {"exists": ok, "truthy": ok}
         return {"ok": ok, "login": ok, "uid": "123" if ok else None}
 
 
@@ -137,13 +144,15 @@ def warmup_expected(entry, scenario):
 
     单平台入口：重开验证失败不写快照；--skip-reopen-verify 与 --no-close-on-success 只启动一次。
     统一入口不传这两个开关，四个平台各启动两次；重开验证失败时只有不依赖页面接口判定的抖音写出快照。
+    微博不再写 Cookie 快照。
     """
     failed = scenario == "reopen_failed"
     if entry == "unified":
         reports = {f"{RUN_DIR}/{key}.json" for key in ALL_TARGETS} | {f"{RUN_DIR}/summary.json", f"{RUN_DIR}/summary.md"}
-        return not failed, 5 if failed else 8, {"douyin"} if failed else set(ALL_TARGETS), reports
+        snapshots = {"douyin"} if failed else set(ALL_TARGETS) - {"weibo"}
+        return not failed, 5 if failed else 8, snapshots, reports
     reports = {"weibo.json"} if entry == "one" else {f"{RUN_DIR}/weibo.json", f"{RUN_DIR}/summary.json"}
-    return not failed, 1 if scenario in {"skip", "keep"} else 2, set() if failed else {"weibo"}, reports
+    return not failed, 1 if scenario in {"skip", "keep"} else 2, set(), reports
 
 
 @pytest.mark.parametrize("entry", ["one", "media", "unified"])
@@ -198,9 +207,11 @@ REPAIR_INPUTS = {
     "load_xhs_detail_urls": ('["https://www.xiaohongshu.com/explore/a?xsec_token=secret&xsec_source=pc#frag"]',
                              ["https://www.xiaohongshu.com/explore/a?xsec_token=secret&xsec_source=pc"], "XHS detail URL file"),
     "load_xhs_repair_target_ids": ('["a", "a", " b "]', {"a", "b"}, "XHS repair target ID file"),
-    "load_post_repair_targets": ('[{"platform_post_id":"123","detail_target":"123","keyword":"青岛"}]',
-                                 [{"platform_post_id": "123", "detail_target": "123", "keyword": "青岛"}],
-                                 "post repair target file"),
+    "load_post_repair_targets": (
+        '[{"platform_post_id":"123","detail_target":"https://weibo.com/88/123","keyword":"青岛"}]',
+        [{"platform_post_id": "123", "detail_target": "https://weibo.com/88/123", "keyword": "青岛"}],
+        "post repair target file",
+    ),
 }
 EMPTY_MESSAGES = {
     "load_zhihu_detail_urls": "Zhihu detail URL file contains no answer/article URLs",
@@ -380,14 +391,16 @@ def test_page_evidence_cookie_cleanup(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("scenario", ["valid", "skip", "keep"])
-def test_issue127_snapshot_records_login_page_user_agent(monkeypatch, tmp_path, scenario):
-    """#127：新实现写出的每份快照都含登录 page 的 navigator.userAgent（离线替身返回固定值）。"""
+def test_weibo_warmup_does_not_write_cookie_snapshot(monkeypatch, tmp_path, scenario):
+    """#211：微博登录结果只看首页 uid 是否存在且为真，不再写 Cookie 快照。"""
     root = tmp_path / "run"
     root.mkdir()
     fake = FakePlaywright(scenario)
     configure(monkeypatch, warmup, fake, root)
     args = argparse.Namespace(timeout_seconds=1, output_dir=str(root), browser_path=None,
                               no_close_on_success=scenario == "keep", skip_reopen_verify=scenario == "skip")
-    asyncio.run(warmup.warmup_one(fake, "weibo", root, args))
-    snapshots = [json.loads(path.read_text()) for path in root.rglob(core_paths.COOKIE_SNAPSHOT_FILENAME)]
-    assert snapshots and all(item["user_agent"] == "离线浏览器 UA" for item in snapshots)
+    result = asyncio.run(warmup.warmup_one(fake, "weibo", root, args))
+    snapshots = list(root.rglob(core_paths.COOKIE_SNAPSHOT_FILENAME))
+    assert snapshots == []
+    assert result["cookie_snapshot"] is None
+    assert set(result["state"]["markers"]) == {"uid_exists", "uid_truthy"}

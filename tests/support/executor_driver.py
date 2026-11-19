@@ -324,6 +324,78 @@ def write_zhihu_visit_ledger(behavior_path, records, entries):
     return search
 
 
+WEIBO_LEDGER_ID = "21" * 16
+
+
+def write_weibo_visit_ledger(behavior_path, records, entries):
+    """#211 合成账本：页面状态搜索、点击详情、同标签 sideUser、CDN 图片。"""
+
+    ledger = VisitLedger.create(
+        content_visits_path(behavior_path), platform="weibo", mode="discovery",
+        ledger_id=WEIBO_LEDGER_ID, clock=lambda: XHS_LEDGER_TIME,
+    )
+
+    def action(kind, target, page_role="primary"):
+        return ledger.append(
+            "action", seq=ledger.next_seq(), page_role=page_role, action=kind, target=target,
+        )
+
+    def visit(stage, rule, source, *, trigger, subject_id=None, page_role="primary", **audit):
+        return ledger.append(
+            "visit", seq=ledger.next_seq(), page_role=page_role, recorded_at=XHS_LEDGER_TIME,
+            stage=stage, source=source, rule=rule, endpoint=None,
+            status=200 if source == "page_response" or source == "cdn_direct" else None,
+            outcome="ok", subject_id=subject_id, trigger=trigger, **audit,
+        )
+
+    def pause(stage, continuity="n/a", page_role="primary"):
+        start = ledger.next_seq()
+        ledger.append(
+            "pause", seq=ledger.next_seq(), page_role=page_role, stage=stage,
+            start_seq=start, seconds=1.0, continuity=continuity,
+        )
+
+    search = visit(
+        "search_results", "weibo.search_cards", "page_state",
+        trigger=action("navigate", {"route": "/weibo", "query_keys": ["q", "nodup"]}),
+        search_session="weibo-offline", filter_signature="nodup=1", is_target=True,
+        search_page=1, has_more=False,
+        items=[{"id": record["note_id"], "type": "pic"} for record in records],
+    )
+    pause("search_results", "completed")
+    for record in records:
+        note_id = record["note_id"]
+        if record.get("user_id"):
+            record["creator_hash"] = record["user_id"]
+        author_id = str(record.get("creator_hash") or "missing")
+        click = action("click_card", {"note_id": note_id})
+        detail = visit(
+            "note_detail", "weibo.statuses_show", "page_response", trigger=click,
+            subject_id=note_id, page_role="detail",
+        )
+        pause("note_detail", page_role="detail")
+        author = visit(
+            "creator_profile", "weibo.side_user", "page_response", trigger=click,
+            subject_id=author_id, page_role="detail",
+        )
+        images = [
+            visit(
+                "note_image", "weibo.content_image", "cdn_direct", trigger=click, subject_id=note_id,
+                asset_key=entry.source_asset_key, sha256=entry.sha256,
+            )
+            for entry in entries if entry.platform_post_id == note_id
+        ]
+        record["content_visit_refs"] = {
+            "ledger_id": WEIBO_LEDGER_ID,
+            "search_results": search,
+            "note_detail": detail,
+            "creator_profile": author,
+            "images": images,
+        }
+    ledger.close()
+    return search
+
+
 def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
     """落盘真实 JSONL、manifest 和 PNG；仅替代 worker，不替代正式门禁。"""
     folder = save_path / platform
@@ -352,7 +424,7 @@ def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
             ))
             if scenario == "missing_image":
                 staged.path.unlink()
-            if platform in {"xhs", "zhihu"}:
+            if platform in {"xhs", "zhihu", "weibo"}:
                 # 访问门禁 R5 按 image_assets 逐张核对。
                 record.setdefault("image_assets", []).append({
                     "url": candidate.source_url, "source_index": candidate.source_index,
@@ -362,6 +434,8 @@ def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
         source_visit_id = write_xhs_visit_ledger(behavior_path, records, entries)
     elif platform == "zhihu":
         source_visit_id = write_zhihu_visit_ledger(behavior_path, records, entries)
+    elif platform == "weibo":
+        source_visit_id = write_weibo_visit_ledger(behavior_path, records, entries)
     else:
         source_visit_id = None
     (folder / "search_contents_fixed.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))

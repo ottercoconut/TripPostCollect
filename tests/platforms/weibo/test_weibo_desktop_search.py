@@ -10,6 +10,7 @@ from dataclasses import replace
 import pytest
 from playwright._impl._driver import compute_driver_executable
 
+from trippostcollect.application.collection import load_pagination_evidence
 from support.weibo_adapter import crawler as make_crawler
 from support.weibo_adapter import settings
 from trippostcollect.platforms.weibo import detail_page as detail_mod
@@ -453,6 +454,10 @@ async def test_next_click_advances_and_disabled_last_page_sets_page_cap(monkeypa
     assert visits[0]["search_session"] == visits[1]["search_session"]
     assert visits[0]["filter_signature"] == FILTER_SIGNATURE
     assert stopped[-1]["source_visit_id"] == visits[1]["id"]
+    evidence = load_pagination_evidence(state_path)
+    assert evidence["stopped"] is True
+    assert evidence["stop_reason"] == "source_exhausted"
+    assert evidence["stop_detail"] == "next_disabled"
     assert ("pause", "search_page") in [
         (line.get("kind"), line.get("stage")) for line in ledger_lines(tmp_path)
     ]

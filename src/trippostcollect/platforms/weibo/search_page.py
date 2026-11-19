@@ -11,6 +11,7 @@ import random
 import re
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -136,6 +137,42 @@ def blocking_code_for_url(url: str) -> str | None:
         if WEIBO_PASSPORT_URL_RE.search(probe) or WEIBO_VISITOR_URL_RE.search(probe):
             return "login_required"
     return None
+
+
+async def read_homepage_uid(context: Any, page: Any) -> dict[str, bool]:
+    """经 ``read_state`` 读首页 uid。异常或非投影结果都视为不存在、不为真。"""
+
+    from tempfile import TemporaryDirectory
+
+    from trippostcollect.runtime.visit_ledger import VisitLedger
+
+    try:
+        with TemporaryDirectory() as directory:
+            ledger = VisitLedger.create(
+                Path(directory) / "content_visits.jsonl",
+                platform="weibo",
+                mode="discovery",
+            )
+            channel = PageCaptureChannel(
+                context,
+                platform="weibo",
+                rules=(),
+                ledger=ledger,
+                state_scripts=STATE_SCRIPTS,
+            )
+            channel.install(page)
+            value, _visit = await channel.read_state(
+                page,
+                "weibo.config_uid",
+                stage="login_state",
+                subject_id=None,
+                trigger=None,
+            )
+    except Exception:
+        return {"exists": False, "truthy": False}
+    if not isinstance(value, dict):
+        return {"exists": False, "truthy": False}
+    return {"exists": value.get("exists") is True, "truthy": value.get("truthy") is True}
 
 
 def uid_is_logged_in(value: Any) -> bool:

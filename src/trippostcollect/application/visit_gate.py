@@ -66,6 +66,9 @@ class VisitPolicy:
     checks_filter_entry: bool = True
     # #191：知乎回答/文章可以没有正文图。小红书仍要求至少一张，零图不能通过 R5。
     allow_zero_content_images: bool = False
+    # #211：作者访问是详情标签上的页面响应，不另点作者名。同一标签、晚于打开详情的那次触发，
+    # subject_id 等于记录上的作者 ID。小红书与知乎仍走点击作者名的 R4。
+    creator_from_detail_page_response: bool = False
 
     def __post_init__(self) -> None:
         for mode, specs in self.stages.items():
@@ -90,6 +93,12 @@ def zhihu_required_stages(facts: LedgerFacts, mode: str) -> RequiredStages:
     """与小红书相同的节奏推导：有详情才要求搜索结果与详情停顿，有滚动翻页才要求翻页停顿，有点作者才要求作者停顿。"""
 
     return xhs_required_stages(facts, mode)
+
+
+def weibo_required_stages(facts: LedgerFacts, mode: str) -> RequiredStages:
+    """与知乎相同。微博不点作者，没有 click_author 时不要求 creator_profile 停顿。"""
+
+    return zhihu_required_stages(facts, mode)
 
 
 def xhs_required_stages(facts: LedgerFacts, mode: str) -> RequiredStages:
@@ -160,9 +169,35 @@ VISIT_POLICIES: dict[str, VisitPolicy] = {
         checks_filter_entry=False,
         allow_zero_content_images=True,
     ),
+    "weibo": VisitPolicy(
+        platform="weibo",
+        chains={
+            "discovery": ("search_results", "note_detail", "creator_profile", "images"),
+            "repair": ("note_detail", "creator_profile", "images"),
+        },
+        stages={
+            "discovery": {
+                "search_results": StageSpec("weibo.search_cards", "page_state"),
+                "note_detail": StageSpec("weibo.statuses_show", "page_response", trigger="click_card"),
+                "creator_profile": StageSpec("weibo.side_user", "page_response"),
+                "note_image": StageSpec("weibo.content_image", "cdn_direct"),
+            },
+            "repair": {
+                "note_detail": StageSpec("weibo.statuses_show", "page_response", trigger="navigate"),
+                "creator_profile": StageSpec("weibo.side_user", "page_response"),
+                "note_image": StageSpec("weibo.content_image", "cdn_direct"),
+            },
+        },
+        target_filter="",
+        required_stages=weibo_required_stages,
+        record_user_field="creator_hash",
+        detail_page_role="detail",
+        checks_filter_entry=False,
+        creator_from_detail_page_response=True,
+    ),
 }
 # 已纳入访问门禁的平台；平台在其取数改造完成的批次加入。
-VISIT_GATED_PLATFORMS: frozenset[str] = frozenset({"xhs", "zhihu"})
+VISIT_GATED_PLATFORMS: frozenset[str] = frozenset({"xhs", "zhihu", "weibo"})
 
 
 def _seq(line: Mapping[str, Any]) -> int:
@@ -410,7 +445,7 @@ def _check_record(
         types = _search_item_types(search)
         if not (
             _visit_matches(search, policy.spec(mode, "search_results"), "search_results")
-            and search.get("status") == 200
+            and (search.get("source") != "page_response" or search.get("status") == 200)
             and search.get("is_target") is True
             and search_index.registered_at(search, note_id)
             and types[note_id] != "video"
@@ -436,27 +471,42 @@ def _check_record(
     if not detail_ok:
         report.fail("R3", subject)
 
-    # R4 作者访问由详情内点击作者名触发，作者 ID 与页面 URL 一致。
+    # R4 作者访问。默认由详情内点击作者名触发，作者 ID 与页面 URL 一致。
+    # 微博声明 creator_from_detail_page_response：与详情同一标签，晚于打开详情的那次触发。
     creator_index, creator = resolved["creator_profile"]
     creator_spec = policy.spec(mode, "creator_profile")
-    author_click = creator_index.by_id.get(str(creator.get("trigger") or ""))
-    from_visit = (
-        creator_index.by_id.get(str(author_click.get("from_visit") or "")) if author_click is not None else None
-    )
-    creator_ok = bool(
-        user_id
-        and creator_index is detail_index
-        and _visit_matches(creator, creator_spec, "creator_profile")
-        and creator.get("subject_id") == user_id
-        and creator.get("url_user_id") == user_id
-        and author_click is not None
-        and author_click.get("kind") == "action"
-        and author_click.get("action") == creator_spec.trigger
-        and _seq(author_click) < _seq(creator)
-        and from_visit is not None
-        and from_visit.get("kind") == "visit"
-        and from_visit.get("stage") == "note_detail"
-    )
+    if policy.creator_from_detail_page_response:
+        author_click = None
+        creator_ok = bool(
+            user_id
+            and creator_index is detail_index
+            and _visit_matches(creator, creator_spec, "creator_profile")
+            and creator.get("subject_id") == user_id
+            and creator.get("page_role") == detail.get("page_role")
+            and trigger is not None
+            and str(creator.get("trigger") or "") == str(detail.get("trigger") or "")
+            and _seq(trigger) < _seq(creator)
+            and (creator.get("source") != "page_response" or creator.get("status") == 200)
+        )
+    else:
+        author_click = creator_index.by_id.get(str(creator.get("trigger") or ""))
+        from_visit = (
+            creator_index.by_id.get(str(author_click.get("from_visit") or "")) if author_click is not None else None
+        )
+        creator_ok = bool(
+            user_id
+            and creator_index is detail_index
+            and _visit_matches(creator, creator_spec, "creator_profile")
+            and creator.get("subject_id") == user_id
+            and creator.get("url_user_id") == user_id
+            and author_click is not None
+            and author_click.get("kind") == "action"
+            and author_click.get("action") == creator_spec.trigger
+            and _seq(author_click) < _seq(creator)
+            and from_visit is not None
+            and from_visit.get("kind") == "visit"
+            and from_visit.get("stage") == "note_detail"
+        )
     if not creator_ok:
         report.fail("R4", subject)
 

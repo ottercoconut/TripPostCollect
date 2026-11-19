@@ -1,11 +1,12 @@
-"""#211 微博详情：搜索页点击时间链接，在新标签截获 show 与 sideUser。
+"""#211 微博详情：搜索页点击时间链接，或修复链 navigate 打开桌面详情。
 
-不另开作者页，不走浏览器外详情请求。repair 的 ``navigate`` 链不在本段。
+不另开作者页，不走浏览器外详情请求。作者资料来自同一标签的 sideUser。
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import random
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ DETAIL_RESPONSE_TIMEOUT_SECONDS = 15.0
 DETAIL_CARD_MISSING = "detail_card_missing"
 DETAIL_TAB_NOT_OPENED = "detail_tab_not_opened"
 DETAIL_SHOW_MISSING = "detail_show_missing"
+DETAIL_UNAVAILABLE = "detail_unavailable"
 BROWSER_TARGET_CLOSED = "browser_target_closed"
 LOGIN_REQUIRED = "login_required"
 RATE_LIMITED = "rate_limited"
@@ -84,6 +86,31 @@ def _page_closed(page: Any) -> bool:
         return bool(closed() if callable(closed) else closed)
     except Exception:
         return True
+
+
+def _navigation_status(response: Any) -> int | None:
+    if response is None:
+        return None
+    status = getattr(response, "status", None)
+    if isinstance(status, bool) or not isinstance(status, int):
+        return None
+    return status
+
+
+def _repair_identity(url: str) -> tuple[str, str]:
+    """``https://weibo.com/{作者平台 ID}/{mid}``。不符合时两个字段都为空。"""
+
+    parts = urlsplit(str(url or "").strip())
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or host not in {"weibo.com", "www.weibo.com"}:
+        return "", ""
+    segments = [segment for segment in parts.path.split("/") if segment]
+    if len(segments) != 2:
+        return "", ""
+    author_id, mid = segments
+    if not author_id.isalnum() or not mid.isascii() or not mid.isdigit():
+        return "", ""
+    return author_id, mid
 
 
 def _href_matches(href: str, candidate: Any) -> bool:
@@ -130,6 +157,59 @@ class WeiboDetailPages:
                     await asyncio.sleep(DETAIL_RETRY_PAUSE_SECONDS)
         raise WeiboDetailFetchError(mid, last_code, attempts=DETAIL_ATTEMPTS, retryable=False)
 
+    async def open_by_navigate(self, url: str) -> WeiboOpened:
+        """修复链：navigate 打开 ``https://weibo.com/{uid}/{mid}``，截获规则与点击相同。"""
+
+        author_id, mid = _repair_identity(url)
+        if not author_id or not mid:
+            raise self._candidate(mid, DETAIL_UNAVAILABLE, retryable=False)
+        self._opened = None
+        detail_page: Any = None
+        try:
+            detail_page = await self._new_detail_page()
+            self._opened = detail_page
+            self.channel.attach(detail_page, "detail")
+            after_seq = self.channel.ledger.last_seq
+            trigger_id = self.channel.action(
+                "navigate",
+                page_role="detail",
+                target={"note_id": mid, "mid": mid},
+            )
+            try:
+                response = await detail_page.goto(
+                    url, wait_until="domcontentloaded", timeout=DETAIL_LOAD_TIMEOUT_MS,
+                )
+            except (PlaywrightError, PlaywrightTimeoutError) as exc:
+                if _closed_error(exc):
+                    raise self._runtime(mid, BROWSER_TARGET_CLOSED) from exc
+                raise self._candidate(mid, DETAIL_TAB_NOT_OPENED) from exc
+            status = _navigation_status(response)
+            if status in (401, 403):
+                raise self._runtime(mid, LOGIN_REQUIRED)
+            if status == 429:
+                raise self._runtime(mid, RATE_LIMITED)
+            if status is None or status < 200 or status >= 300:
+                raise self._candidate(mid, DETAIL_UNAVAILABLE, retryable=False)
+            return await self._observe_open_detail(
+                detail_page,
+                mid,
+                trigger_id,
+                after_seq,
+                mblogid="",
+                include_search=False,
+            )
+        except WeiboDetailFetchError:
+            raise
+        finally:
+            await self._best_effort_close(detail_page or self._opened, mid)
+
+    async def _new_detail_page(self) -> Any:
+        factory = self.channel.context.new_page
+        opened = factory()
+        if inspect.isawaitable(opened):
+            return await opened
+        return opened
+
     async def _open_once(self, candidate: Any) -> WeiboOpened:
         mid = str(getattr(candidate, "mid", "") or "")
         self._raise_if_closed(self.search_page)
@@ -138,49 +218,14 @@ class WeiboDetailPages:
         try:
             detail_page, trigger_id, after_seq = await self._click_open(candidate)
             detail_page = detail_page or self._opened
-            await self._wait_loaded(detail_page)
-            await self._raise_if_blocking(detail_page)
-            show = await self._wait_show(mid, after_seq)
-            if isinstance(show, CapturedResponse) and show.status in SHOW_STATUS_CODES:
-                self._record(show, stage="note_detail", subject_id=mid, trigger=trigger_id)
-                raise self._runtime(mid, SHOW_STATUS_CODES[show.status])
-            if not isinstance(show, CapturedResponse):
-                await self._dwell(detail_page, mid)
-                raise self._candidate(mid, DETAIL_SHOW_MISSING)
-            user_id = show_user_id(show.json)
-            show_visit = self._record(show, stage="note_detail", subject_id=mid, trigger=trigger_id)
-            side = await self._wait_side_user(user_id, after_seq)
-            if not isinstance(side, CapturedResponse) or not user_id:
-                await self._dwell(detail_page, mid)
-                raise self._candidate(mid, AUTHOR_PROFILE_MISSING)
-            side_visit = self._record(
-                side, stage="creator_profile", subject_id=user_id, trigger=trigger_id,
-            )
-            refs = {
-                "ledger_id": self.channel.ledger.ledger_id,
-                "search_results": str(getattr(self.capture, "last_search_visit_id", "") or ""),
-                "note_detail": show_visit,
-                "creator_profile": side_visit,
-                "images": [],
-            }
-            parsed = parse_weibo_detail(
-                show.json if isinstance(show.json, dict) else {},
-                side_user_of(side.json) or {},
+            return await self._observe_open_detail(
+                detail_page,
+                mid,
+                trigger_id,
+                after_seq,
                 mblogid=str(getattr(candidate, "mblogid", "") or ""),
-                source_keyword="",
-                current_timestamp=lambda: 0,
-                visit_refs=refs,
+                include_search=True,
             )
-            await self._dwell(detail_page, mid)
-            if parsed.video:
-                return WeiboOpened(video=True)
-            if parsed.skip_code == CREATED_AT_UNPARSEABLE:
-                raise self._candidate(mid, CREATED_AT_UNPARSEABLE, retryable=False)
-            if parsed.record is None or parsed.skip_code == DETAIL_CONTENT_EMPTY:
-                raise self._candidate(mid, DETAIL_CONTENT_EMPTY)
-            record = dict(parsed.record)
-            record["content_visit_refs"] = refs
-            return WeiboOpened(record=record)
         except WeiboDetailFetchError:
             raise
         except (PlaywrightError, PlaywrightTimeoutError) as exc:
@@ -195,10 +240,70 @@ class WeiboDetailPages:
                 raise self._runtime(mid, BROWSER_TARGET_CLOSED)
             await self._best_effort_restore()
 
+    async def _observe_open_detail(
+        self,
+        detail_page: Any,
+        mid: str,
+        trigger_id: str,
+        after_seq: int,
+        *,
+        mblogid: str,
+        include_search: bool,
+    ) -> WeiboOpened:
+        await self._wait_loaded(detail_page)
+        await self._raise_if_blocking(detail_page)
+        show = await self._wait_show(mid, after_seq)
+        if isinstance(show, CapturedResponse) and show.status in SHOW_STATUS_CODES:
+            self._record(show, stage="note_detail", subject_id=mid, trigger=trigger_id)
+            raise self._runtime(mid, SHOW_STATUS_CODES[show.status])
+        if not isinstance(show, CapturedResponse):
+            await self._dwell(detail_page, mid)
+            raise self._candidate(mid, DETAIL_SHOW_MISSING)
+        user_id = show_user_id(show.json)
+        show_visit = self._record(show, stage="note_detail", subject_id=mid, trigger=trigger_id)
+        side = await self._wait_side_user(user_id, after_seq)
+        if not isinstance(side, CapturedResponse) or not user_id:
+            await self._dwell(detail_page, mid)
+            raise self._candidate(mid, AUTHOR_PROFILE_MISSING)
+        side_visit = self._record(
+            side, stage="creator_profile", subject_id=user_id, trigger=trigger_id,
+        )
+        refs = {
+            "ledger_id": self.channel.ledger.ledger_id,
+            "note_detail": show_visit,
+            "creator_profile": side_visit,
+            "images": [],
+        }
+        if include_search:
+            refs["search_results"] = str(getattr(self.capture, "last_search_visit_id", "") or "")
+        status = show.json if isinstance(show.json, dict) else {}
+        parsed = parse_weibo_detail(
+            status,
+            side_user_of(side.json) or {},
+            mblogid=mblogid or str(status.get("mblogid") or ""),
+            source_keyword="",
+            current_timestamp=lambda: 0,
+            visit_refs=refs,
+        )
+        await self._dwell(detail_page, mid)
+        if parsed.video:
+            return WeiboOpened(video=True)
+        if parsed.skip_code == CREATED_AT_UNPARSEABLE:
+            raise self._candidate(mid, CREATED_AT_UNPARSEABLE, retryable=False)
+        if parsed.record is None or parsed.skip_code == DETAIL_CONTENT_EMPTY:
+            raise self._candidate(mid, DETAIL_CONTENT_EMPTY)
+        record = dict(parsed.record)
+        record["content_visit_refs"] = refs
+        return WeiboOpened(record=record)
+
     async def _click_open(self, candidate: Any) -> tuple[Any, str, int]:
         mid = str(getattr(candidate, "mid", "") or "")
         await self._pause(
-            self.search_page, "search_results", *SEARCH_RESULT_PAUSE_SECONDS, page_role="primary",
+            self.search_page,
+            "search_results",
+            *SEARCH_RESULT_PAUSE_SECONDS,
+            page_role="primary",
+            continuity="completed",
         )
         link = await self._find_time_link(candidate)
         if link is None:
@@ -292,7 +397,16 @@ class WeiboDetailPages:
             outcome=outcome,
         )
 
-    async def _pause(self, page: Any, stage: str, low: float, high: float, *, page_role: str) -> None:
+    async def _pause(
+        self,
+        page: Any,
+        stage: str,
+        low: float,
+        high: float,
+        *,
+        page_role: str,
+        continuity: str = "n/a",
+    ) -> None:
         seconds = random.uniform(low, high)
         start_seq = self.channel.pause_started()
         if seconds > 0:
@@ -301,7 +415,7 @@ class WeiboDetailPages:
                 await asyncio.sleep(seconds)
             else:
                 await waiter(int(seconds * 1000))
-        self.channel.pause_finished(stage, start_seq, seconds, "n/a", page_role=page_role)
+        self.channel.pause_finished(stage, start_seq, seconds, continuity, page_role=page_role)
 
     async def _dwell(self, page: Any, mid: str) -> None:
         seconds = random.uniform(*DETAIL_DWELL_SECONDS)

@@ -11,6 +11,26 @@ from typing import Any
 from urllib.parse import urlparse
 
 
+# #211：这些作者字段必须来自本次 sideUser，修复回退不得从旧行带回。
+WEIBO_SIDE_USER_FIELDS = frozenset({
+    "author_followers_count",
+    "author_followers_source",
+    "followers_observed",
+    "followers_count",
+    "author_description",
+    "author_following_count",
+    "author_posts_count",
+    "following_count",
+    "posts_count",
+})
+
+MISSING_WEIBO_AUTHOR_PLATFORM_ID = "missing_author_platform_id"
+
+
+def without_weibo_side_user_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in fields.items() if key not in WEIBO_SIDE_USER_FIELDS}
+
+
 def load_post_repair_fallbacks(
     db_path: str | Path | None,
     platform_key: str,
@@ -106,6 +126,8 @@ def load_post_repair_fallbacks(
             }.items()
             if value not in (None, "")
         }
+        if platform_key == "weibo":
+            fallback = without_weibo_side_user_fields(fallback)
         fallbacks[str(row["platform_post_id"])] = fallback
     return fallbacks
 
@@ -144,7 +166,10 @@ def load_post_repair_targets(
             raise SystemExit(f"duplicate post repair platform_post_id: {post_id}")
 
         if platform_key == "weibo":
-            valid = detail_target == post_id and bool(re.fullmatch(r"[0-9A-Za-z]+", post_id))
+            valid = bool(
+                re.fullmatch(r"https://weibo\.com/[0-9A-Za-z]+/" + re.escape(post_id), detail_target)
+                and re.fullmatch(r"[0-9]+", post_id)
+            )
         else:
             parsed = urlparse(detail_target.split("#", 1)[0].split("?", 1)[0])
             if platform_key == "douyin":

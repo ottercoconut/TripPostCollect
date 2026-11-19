@@ -1255,15 +1255,18 @@ def test_all_selected_platforms_require_behavior_and_policy_evidence() -> None:
         for platform in ("bilibili", "weibo")
     ]
 
+    weibo_visits = {"weibo": {"content_visit_ok": True, "request_pacing_ok": True, "continuity_ok": True}}
     complete = mediacrawler_crawl.collect_behavior_validation(
         records,
         ["bilibili", "weibo"],
         "青岛旅游",
+        content_visits=weibo_visits,
     )
     missing = mediacrawler_crawl.collect_behavior_validation(
         records[:1],
         ["bilibili", "weibo"],
         "青岛旅游",
+        content_visits=weibo_visits,
     )
 
     assert complete["ok"] is True
@@ -1427,6 +1430,7 @@ def test_behavior_validation_requires_evidence_for_each_generic_platform(missing
     ]
     visits = {
         "zhihu": {"content_visit_ok": True, "request_pacing_ok": True, "continuity_ok": True},
+        "weibo": {"content_visit_ok": True, "request_pacing_ok": True, "continuity_ok": True},
     }
 
     complete = mediacrawler_crawl.collect_behavior_validation(

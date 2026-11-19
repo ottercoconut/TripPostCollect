@@ -39,13 +39,13 @@ from playwright.async_api import (
 )
 
 from trippostcollect.application.contracts import ImageStagingError, WeiboPorts
-from trippostcollect.core.paths import PROFILE_VIEWPORT, platform_profile_dir
+from trippostcollect.core.paths import platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from . import parser as weibo_store
 from .client import WEIBO_CONTENT_IMAGE_RULE, WeiboClient
 from .detail_page import WeiboDetailPages, WeiboOpened
 from .models import (
-    PlatformRuntimeError, WeiboDetailFetchError, WeiboImageDownloadError, WeiboRepairNotImplemented,
+    PlatformRuntimeError, WeiboDetailFetchError, WeiboImageDownloadError,
 )
 from .search_page import (
     HOME_URL,
@@ -126,8 +126,6 @@ class WeiboCrawler:
         )
 
     async def _run_after_browser_ready(self, httpx_proxy_format: Optional[str]) -> None:
-        if getattr(self.config, "CRAWLER_TYPE", "search") == "detail":
-            raise WeiboRepairNotImplemented()
         try:
             await self.context_page.goto(
                 self.index_url, wait_until="domcontentloaded", timeout=30_000,
@@ -149,6 +147,10 @@ class WeiboCrawler:
         keyword = self.config.KEYWORDS.split(",", maxsplit=1)[0].strip()
         await self._open_search_page(keyword)
         await self.ports.run_required_human_behavior(self.context_page, "weibo")
+        if getattr(self.config, "CRAWLER_TYPE", "search") == "detail":
+            self.source_keyword = keyword
+            await self.repair_specified()
+            return
         await self.search()
 
     async def _open_search_page(self, keyword: str) -> None:
@@ -335,6 +337,45 @@ class WeiboCrawler:
                     return
                 page += 1
 
+    async def repair_specified(self) -> None:
+        """行为阶段已经在搜索页完成。逐条 navigate 打开清单里的桌面详情。"""
+
+        pages = self.detail_pages
+        if pages is None:
+            raise RuntimeError("weibo_capture_channel_missing")
+        for raw in tuple(getattr(self.config, "WEIBO_SPECIFIED_ID_LIST", ()) or ()):
+            url = str(raw or "").strip()
+            try:
+                opened = await pages.open_by_navigate(url)
+            except WeiboDetailFetchError as exc:
+                if exc.runtime_blocking:
+                    raise PlatformRuntimeError(str(exc), code=exc.code) from exc
+                logger.warning(
+                    "[WeiboCrawler.repair_specified] skip unavailable detail url=%s code=%s",
+                    url,
+                    exc.code,
+                )
+                continue
+            if not isinstance(opened, WeiboOpened) or opened.video or opened.record is None:
+                continue
+            record = dict(opened.record)
+            record["source_keyword"] = self.source_keyword
+            record["last_modify_ts"] = self.ports.current_timestamp()
+            if weibo_store.structural_skip_code(record):
+                continue
+            try:
+                await self.get_note_images(record)
+            except WeiboImageDownloadError as exc:
+                if self.ports.is_runtime_blocking_image_error(exc.code):
+                    raise PlatformRuntimeError(str(exc), code=exc.code) from exc
+                logger.warning(
+                    "[WeiboCrawler.repair_specified] skip image failure note_id=%s code=%s",
+                    record.get("note_id"),
+                    exc.code,
+                )
+                continue
+            await self.update_weibo_note(record)
+
     def _unknown_candidates(self, accumulator: Any, snapshot: WeiboSearchSnapshot) -> list:
         pending: set[str] = set()
         unknown = []
@@ -501,16 +542,11 @@ class WeiboCrawler:
     ) -> BrowserContext:
         """Launch browser and create browser context"""
         logger.info("[WeiboCrawler.launch_browser] Begin create browser context ...")
-        if self.config.SAVE_LOGIN_STATE:
-            # #136：与 warmup 共用持久 context 启动配置（沙箱开启、视口、locale/timezone），不传 UA。
-            # 正式流程 ENABLE_IP_PROXY=False，playwright_proxy 恒为 None，共享配置不带代理。
-            return await self.ports.launch_profile_context(
-                chromium, platform_profile_dir("weibo"), headless=headless,
-            )
-        else:
-            browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
-            browser_context = await browser.new_context(viewport=PROFILE_VIEWPORT, user_agent=user_agent)
-            return browser_context
+        # #211：持久 profile 是唯一登录态。不再创建不带登录态的临时上下文。
+        _ = (playwright_proxy, user_agent)
+        return await self.ports.launch_profile_context(
+            chromium, platform_profile_dir("weibo"), headless=headless,
+        )
 
     async def launch_browser_with_cdp(
         self,

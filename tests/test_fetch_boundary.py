@@ -37,11 +37,16 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src/trippostcollect"
 # 平台 → 包内目录。抖音、知乎、B站在各自改造批次加入；微博见 #73。
-GUARDED_PLATFORMS: dict[str, str] = {"xhs": "platforms/xhs", "zhihu": "platforms/zhihu"}
+GUARDED_PLATFORMS: dict[str, str] = {
+    "xhs": "platforms/xhs",
+    "zhihu": "platforms/zhihu",
+    "weibo": "platforms/weibo",
+}
 # 平台会调用、且向页面传入脚本字符串的 runtime 模块；平台新增依赖时同步加入。
 RUNTIME_SCRIPT_MODULES: dict[str, tuple[str, ...]] = {
     "xhs": ("runtime/behavior.py", "runtime/human_flow.py", "runtime/human_pointer.py", "runtime/page_capture.py"),
     "zhihu": ("runtime/human_flow.py", "runtime/human_pointer.py", "runtime/page_capture.py"),
+    "weibo": ("runtime/human_flow.py", "runtime/human_pointer.py", "runtime/page_capture.py"),
 }
 # 每平台一个显式白名单：(包内相对路径, 规则编号, 命中详情)。条目必须仍然命中，过期即失败。
 WHITELISTS: dict[str, frozenset[tuple[str, str, str]]] = {
@@ -51,6 +56,10 @@ WHITELISTS: dict[str, frozenset[tuple[str, str, str]]] = {
         ("platforms/zhihu/client.py", "R1", "httpx"),
         # 非 CDP 回退里创建浏览器上下文，不是平台取数客户端。
         ("platforms/zhihu/core.py", "R2", "new_context"),
+    }),
+    #211 正文图片 CDN 直连例外
+    "weibo": frozenset({
+        ("platforms/weibo/client.py", "R1", "httpx"),  #211 正文图片 CDN 直连例外
     }),
 }
 
@@ -604,6 +613,13 @@ async def run(page, channel, page_scripts, context, ledger):
     await channel.read_state(page, script_name="creator_page_data", stage="x", subject_id=None, trigger=None)
 '''
     assert check_state_references(source, "platforms/x/session.py", frozenset({"creator_page_data"})) == []
+
+
+def test_weibo_httpx_outside_the_image_client_is_not_whitelisted():
+    source = "import httpx\n\nasync def fetch():\n    return httpx.get('https://weibo.com/ajax/statuses/show')\n"
+    found = check_module(source, "platforms/weibo/core.py")
+    assert ("platforms/weibo/core.py", "R1", "httpx") in {item.key() for item in found}
+    assert ("platforms/weibo/core.py", "R1", "httpx") not in WHITELISTS["weibo"]
 
 
 def test_whitelist_must_match_exact_hits(monkeypatch, tmp_path):

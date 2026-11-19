@@ -137,7 +137,7 @@ def test_crawler_viewport_matches_warmup(platform, save_login_state, monkeypatch
     chromium = FakeChromium()
     asyncio.run(type(crawler).launch_browser(crawler, chromium, None, None, True))
     launched = (chromium.persistent or chromium.contexts)[0]
-    if save_login_state:
+    if platform == "weibo" or save_login_state:
         # #136/#142：微博、知乎标准模式持久 context 都走共享启动配置，不传 user_agent 键。
         # #139：共享配置与 warmup 一样按原生窗口启动，不传 viewport。
         assert "user_agent" not in launched
@@ -188,7 +188,6 @@ def test_weibo_client_headers_use_browser_user_agent(monkeypatch) -> None:
     from trippostcollect.platforms.weibo import core
 
     crawler = object.__new__(core.WeiboCrawler)
-    crawler.cookie_urls = ["https://m.weibo.cn"]
     crawler.browser_context = object()
     crawler.context_page = FakePage()
     crawler._capture = _weibo_ua_capture(crawler.context_page)
@@ -210,7 +209,6 @@ def test_weibo_image_request_uses_client_user_agent(monkeypatch) -> None:
     from trippostcollect.platforms.weibo import core
 
     crawler = object.__new__(core.WeiboCrawler)
-    crawler.cookie_urls = ["https://m.weibo.cn"]
     crawler.browser_context = object()
     crawler.context_page = FakePage()
     crawler._capture = _weibo_ua_capture(crawler.context_page)

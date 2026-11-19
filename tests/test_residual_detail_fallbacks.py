@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -39,7 +38,8 @@ def test_weibo_repair_hook_recovers_exact_browser_detail(
     from trippostcollect.application import events
     from trippostcollect.platforms import entry
     from trippostcollect.platforms.weibo.client import WeiboClient
-    from trippostcollect.platforms.weibo.models import WeiboRepairNotImplemented
+    from trippostcollect.platforms.weibo import models as weibo_models
+    from trippostcollect.platforms.weibo.detail_page import WeiboDetailPages
 
     for name in ("_weibo_post_repair", "_douyin_browser_detail_fallback", "_xhs_repair"):
         monkeypatch.setattr(entry, name, getattr(entry, name))
@@ -51,5 +51,5 @@ def test_weibo_repair_hook_recovers_exact_browser_detail(
     crawler.config = SimpleNamespace(**{**crawler.config.__dict__, "CRAWLER_TYPE": "detail"})
     assert crawler.ports.post_repair is True
     assert not hasattr(WeiboClient, "get_note_info_by_id")
-    with pytest.raises(WeiboRepairNotImplemented):
-        asyncio.run(crawler._run_after_browser_ready(None))
+    assert not hasattr(weibo_models, "WeiboRepairNotImplemented")
+    assert hasattr(WeiboDetailPages, "open_by_navigate")

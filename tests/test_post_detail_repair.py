@@ -37,8 +37,8 @@ mediacrawler = import_module("mediacrawler_crawl")
         (
             "weibo",
             "456",
-            "https://m.weibo.cn/detail/456",
-            "456",
+            "https://weibo.com/88/456",
+            "https://weibo.com/88/456",
         ),
         (
             "zhihu",
@@ -60,6 +60,19 @@ def test_detail_target_is_strictly_bound_to_platform_id(
     url: str,
     expected: str,
 ) -> None:
+    if platform == "weibo":
+        assert repair._detail_target(
+            platform, post_id, url, author_platform_id="88",
+        ) == (expected, "")
+        missing, missing_reason = repair._detail_target(platform, post_id, url)
+        assert missing is None
+        assert missing_reason == repair.MISSING_WEIBO_AUTHOR_PLATFORM_ID
+        target, reason = repair._detail_target(
+            platform, "different", url, author_platform_id="88",
+        )
+        assert target is None
+        assert reason.startswith("invalid_")
+        return
     assert repair._detail_target(platform, post_id, url) == (expected, "")
     target, reason = repair._detail_target(platform, "different", url)
     assert target is None
@@ -254,7 +267,7 @@ def test_user_waiver_keeps_unobserved_post_but_removes_it_from_targets(
     ("platform", "detail_target"),
     [
         ("douyin", "https://www.douyin.com/video/123"),
-        ("weibo", "123"),
+        ("weibo", "https://weibo.com/88/123"),
         ("zhihu", "https://www.zhihu.com/question/1/answer/123"),
     ],
 )
@@ -448,8 +461,8 @@ def test_repair_fallback_restores_unobserved_followers_with_matching_source(
     }
 
     merged = mediacrawler.merge_repair_fallback_metadata(platform, dict(detail), fallback)
-    if platform == "zhihu":
-        # #194：知乎未观察到的粉丝不得用旧行补上。
+    if platform in {"zhihu", "weibo"}:
+        # 知乎与微博未观察到的粉丝不得用旧行补上。微博简介、关注和作品数同样不回填。
         assert merged["followers_count"] == fresh_count
         assert merged["followers_observed"] is False
         assert merged["author_followers_source"] == "missing"

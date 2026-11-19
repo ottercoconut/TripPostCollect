@@ -113,85 +113,68 @@ def test_markdown_summary_includes_login_refresh_state() -> None:
     assert "| weibo | mediacrawler | ok | False | True | True |" in report
 
 
-def test_weibo_login_accepts_current_mobile_session(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_weibo_login_accepts_truthy_config_uid(monkeypatch: pytest.MonkeyPatch) -> None:
     media_login = import_module("mediacrawler_login_warmup")
 
     class FakeContext:
-        async def cookies(self, _urls):
-            return [
-                {"name": "SUB", "value": "present"},
-                {"name": "MLOGIN", "value": "1"},
-            ]
+        def on(self, _event, _callback=None):
+            return None
 
     class FakePage:
-        url = "https://m.weibo.cn"
+        url = "https://weibo.com/"
+
+        def on(self, _event, _callback=None):
+            return None
+
+        async def evaluate(self, script, arg=None):
+            assert "$CONFIG" in script
+            return {"exists": True, "truthy": True, "uid": "secret-uid"}
 
     async def fake_storage(_page):
         return {}
 
-    async def fake_api(_page):
-        return {"ok": True, "login": True, "uid": "123"}
-
     monkeypatch.setattr("trippostcollect.application.warmup.safe_local_storage", fake_storage)
-    monkeypatch.setattr("trippostcollect.application.warmup.weibo_api_check", fake_api)
-
     state = asyncio.run(media_login.current_state(FakeContext(), FakePage(), "weibo"))
 
     assert state["ok"] is True
-    assert state["markers"]["current_cookie_pair"] is True
-    assert state["markers"]["api_login"] is True
+    assert state["markers"] == {"uid_exists": True, "uid_truthy": True}
+    assert set(state["api"]) == {"exists", "truthy"}
 
 
-def test_weibo_login_rejects_desktop_cookie_without_mobile_api(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_weibo_login_rejects_missing_or_false_config_uid(monkeypatch: pytest.MonkeyPatch) -> None:
     media_login = import_module("mediacrawler_login_warmup")
 
     class FakeContext:
-        async def cookies(self, urls):
-            assert urls == ["https://m.weibo.cn"]
-            return [{"name": "WBPSESS", "value": "desktop-only"}]
+        def on(self, _event, _callback=None):
+            return None
 
     class FakePage:
-        url = "https://m.weibo.cn"
+        url = "https://weibo.com/"
+
+        def on(self, _event, _callback=None):
+            return None
+
+        async def evaluate(self, _script, _arg=None):
+            return {"exists": True, "truthy": False}
 
     async def fake_storage(_page):
         return {}
 
-    async def fake_api(_page):
-        return {"ok": True, "login": False, "uid": None}
-
     monkeypatch.setattr("trippostcollect.application.warmup.safe_local_storage", fake_storage)
-    monkeypatch.setattr("trippostcollect.application.warmup.weibo_api_check", fake_api)
-
     state = asyncio.run(media_login.current_state(FakeContext(), FakePage(), "weibo"))
 
     assert state["ok"] is False
-    assert state["markers"]["api_login"] is False
+    assert state["markers"] == {"uid_exists": True, "uid_truthy": False}
 
 
-def test_weibo_login_uses_desktop_login_and_mobile_verification() -> None:
+def test_weibo_login_uses_desktop_home_and_passport() -> None:
     media_login = import_module("mediacrawler_login_warmup")
     config = media_login.PLATFORMS["weibo"]
 
-    assert config["login_url"] == "https://passport.weibo.com/sso/signin?entry=miniblog&source=miniblog"
-    assert config["verify_url"] == "https://m.weibo.cn"
-    assert config["login_url"] != config["verify_url"]
-
-
-def test_weibo_desktop_login_requires_sso_or_changed_session() -> None:
-    media_login = import_module("mediacrawler_login_warmup")
-
-    assert media_login.weibo_desktop_login_completed(
-        {"WBPSESS": "anonymous"},
-        {"WBPSESS": "anonymous", "SSOLoginState": None},
-    ) is False
-    assert media_login.weibo_desktop_login_completed(
-        {"WBPSESS": "anonymous"},
-        {"WBPSESS": "authenticated", "SSOLoginState": None},
-    ) is True
-    assert media_login.weibo_desktop_login_completed(
-        {"WBPSESS": "anonymous"},
-        {"WBPSESS": "anonymous", "SSOLoginState": "present"},
-    ) is True
+    assert config["urls"] == ["https://weibo.com/"]
+    assert config["verify_url"] == "https://weibo.com/"
+    assert config["login_url"] == "https://passport.weibo.com/sso/signin"
+    assert "m.weibo.cn" not in config["required"]
 
 
 # ---------- #112：warmup 报告不含平台原始响应与头像 ----------
@@ -231,11 +214,6 @@ ERROR_BODY = json.dumps({"error": {
     "code": 100, "name": "AuthenticationInvalidRequest",
     "message": "请求头或参数封装错误 " + AVATAR, "need_login": True,
 }})
-WEIBO_BODY = json.dumps({"ok": 1, "data": {
-    "login": True, "uid": "7654321", "avatar_hd": AVATAR, "profile_image_url": AVATAR, "screen_name": "n",
-}})
-
-
 def evaluate_login_script(name: str, *, status: int, body: str = "", throws: bool = False) -> dict:
     from trippostcollect.application import warmup
 
@@ -286,18 +264,32 @@ def test_zhihu_me_non_json_body_keeps_no_raw_text() -> None:
 
 
 def test_login_check_network_error_keeps_only_error_name() -> None:
-    for name in ("zhihu_api_check", "weibo_api_check"):
-        result = evaluate_login_script(name, status=0, throws=True)
+    result = evaluate_login_script("zhihu_api_check", status=0, throws=True)
 
-        assert result["ok"] is False and result["error_name"] == "TypeError"
-        assert_no_avatar_or_raw_text(result)
-
-
-def test_weibo_config_keeps_only_login_and_uid() -> None:
-    result = evaluate_login_script("weibo_api_check", status=200, body=WEIBO_BODY)
-
-    assert result == {"ok": True, "status": 200, "login": True, "uid": "7654321"}
+    assert result["ok"] is False and result["error_name"] == "TypeError"
     assert_no_avatar_or_raw_text(result)
+
+
+def test_weibo_config_uid_script_reports_exists_and_truthy_only() -> None:
+    from trippostcollect.platforms.weibo.page_scripts import STATE_SCRIPTS
+
+    script = STATE_SCRIPTS["weibo.config_uid"]
+    node, _cli = compute_driver_executable()
+    runner = r"""
+const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+globalThis.window = { $CONFIG: input.config };
+const result = eval('(' + input.script + ')')();
+process.stdout.write(JSON.stringify(result));
+"""
+    completed = subprocess.run(
+        [str(node), "-e", runner],
+        input=json.dumps({
+            "script": script,
+            "config": {"uid": "7654321", "avatar_hd": AVATAR},
+        }),
+        capture_output=True, text=True, timeout=60, env={}, check=True,
+    )
+    assert json.loads(completed.stdout) == {"exists": True, "truthy": True}
 
 
 def test_login_check_projection_drops_unknown_and_unsafe_fields() -> None:

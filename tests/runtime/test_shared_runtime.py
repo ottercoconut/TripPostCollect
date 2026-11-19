@@ -353,7 +353,7 @@ def test_http_factory(monkeypatch, disabled, override):
 
 
 @pytest.mark.parametrize(("platform", "url", "required"), [
-    ("bilibili", "https://www.bilibili.com/", ()), ("weibo", "https://m.weibo.cn/", ()),
+    ("bilibili", "https://www.bilibili.com/", ()), ("weibo", "https://weibo.com/", ()),
     ("douyin", "https://www.douyin.com/", ()), ("zhihu", "https://www.zhihu.com/", ("d_c0", "z_c0")),
     ("xhs", "https://www.xiaohongshu.com/", ()),
 ])

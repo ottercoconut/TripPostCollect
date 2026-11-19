@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 
@@ -56,10 +55,10 @@ def test_root_repair_page_status_is_classified(status, code):
     """详情 show 的阻断状态由桌面详情测试覆盖；这里确认修复入口不再导航到移动详情。"""
 
     from trippostcollect.platforms.weibo.detail_page import SHOW_STATUS_CODES
-    from trippostcollect.platforms.weibo.models import WeiboRepairNotImplemented
+    from trippostcollect.platforms.weibo import models as weibo_models
 
     assert SHOW_STATUS_CODES[status] == code
-    assert WeiboRepairNotImplemented.__name__ == "WeiboRepairNotImplemented"
+    assert not hasattr(weibo_models, "WeiboRepairNotImplemented")
 
 
 @pytest.mark.parametrize("post_repair", ["0", "1"])
@@ -83,8 +82,11 @@ def test_worker_assembly_uses_root_weibo(tmp_path, post_repair):
     assert result == {"repair": post_repair == "1", "others": ["DouYinCrawler", "ZhihuCrawler", "XiaoHongShuCrawler"]}
 
 
-@pytest.mark.parametrize("login,uid,expected", [(True, "123", True), (True, "", False), (False, "123", False)])
-def test_warmup_requires_mobile_login_and_uid(monkeypatch, login, uid, expected):
+@pytest.mark.parametrize(
+    "exists,truthy,expected",
+    [(True, True, True), (True, False, False), (False, True, False)],
+)
+def test_warmup_requires_desktop_config_uid(monkeypatch, exists, truthy, expected):
     import sys
     from pathlib import Path
 
@@ -92,16 +94,23 @@ def test_warmup_requires_mobile_login_and_uid(monkeypatch, login, uid, expected)
     import mediacrawler_login_warmup as warmup
 
     class Context:
-        async def cookies(self, urls):
-            assert urls == ["https://m.weibo.cn"]
-            return [{"name": "WBPSESS", "value": "desktop-only"}]
+        def on(self, _event, _callback=None):
+            return None
 
-    async def api(_):
-        return {"ok": True, "login": login, "uid": uid}
+    class Page:
+        url = "https://weibo.com/"
 
-    monkeypatch.setattr("trippostcollect.application.warmup.weibo_api_check", api)
-    state = asyncio.run(warmup.current_state(Context(), SimpleNamespace(url="https://m.weibo.cn"), "weibo"))
+        def on(self, _event, _callback=None):
+            return None
+
+        async def evaluate(self, script, arg=None):
+            assert "$CONFIG" in script
+            return {"exists": exists, "truthy": truthy}
+
+    state = asyncio.run(warmup.current_state(Context(), Page(), "weibo"))
     assert state["ok"] is expected
+    assert state["markers"] == {"uid_exists": exists, "uid_truthy": truthy}
+    assert "uid" not in state["api"]
 
 
 def test_configuration_snapshot_and_operation_readers(monkeypatch):

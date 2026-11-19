@@ -1353,23 +1353,23 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_login_warmup.py::test_weibo_login_accepts_current_mobile_session",
+       "function": "tests/test_login_warmup.py::test_weibo_login_accepts_truthy_config_uid",
        "lane": "component"
       },
       {
-       "function": "tests/test_login_warmup.py::test_weibo_login_rejects_desktop_cookie_without_mobile_api",
+       "function": "tests/test_login_warmup.py::test_weibo_login_rejects_missing_or_false_config_uid",
        "lane": "component"
       },
       {
-       "function": "tests/test_login_warmup.py::test_weibo_login_uses_desktop_login_and_mobile_verification",
+       "function": "tests/test_login_warmup.py::test_weibo_login_uses_desktop_home_and_passport",
        "lane": "component"
       },
       {
-       "function": "tests/test_login_warmup.py::test_weibo_desktop_login_requires_sso_or_changed_session",
+       "function": "tests/test_login_warmup.py::test_weibo_config_uid_script_reports_exists_and_truthy_only",
        "lane": "component"
       },
       {
-       "function": "tests/platforms/weibo/test_weibo_offline_drive.py::test_warmup_requires_mobile_login_and_uid",
+       "function": "tests/platforms/weibo/test_weibo_offline_drive.py::test_warmup_requires_desktop_config_uid",
        "lane": "component"
       },
       {

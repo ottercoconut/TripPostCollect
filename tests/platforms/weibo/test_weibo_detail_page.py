@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
@@ -21,12 +22,13 @@ from trippostcollect.platforms.weibo.detail_page import (
     DETAIL_CARD_MISSING,
     DETAIL_CONTENT_EMPTY,
     DETAIL_SHOW_MISSING,
+    DETAIL_UNAVAILABLE,
     LOGIN_REQUIRED,
     RATE_LIMITED,
     BLOCKED_OR_FORBIDDEN,
     WeiboDetailPages,
 )
-from trippostcollect.platforms.weibo.models import WeiboDetailFetchError, WeiboRepairNotImplemented
+from trippostcollect.platforms.weibo.models import PlatformRuntimeError, WeiboDetailFetchError
 from trippostcollect.platforms.weibo.parser import CREATED_AT_UNPARSEABLE
 from trippostcollect.platforms.weibo.search_page import WeiboPageCapture, WeiboSearchCandidate
 from trippostcollect.records.formal import validate_formal_record
@@ -176,14 +178,22 @@ def _detail_load(page: FakePage):
     async def wait_for_timeout(timeout):
         return None
 
+    async def goto(url, wait_until=None, timeout=None):
+        page.url = url
+        page.gotos.append(url)
+        return type("Nav", (), {"status": getattr(page, "nav_status", 200)})()
+
     async def close():
         page.closed = True
 
     def is_closed():
         return page.closed
 
+    page.gotos = []
+    page.nav_status = 200
     page.wait_for_load_state = wait_for_load_state
     page.wait_for_timeout = wait_for_timeout
+    page.goto = goto
     page.close = close
     page.is_closed = is_closed
     return page
@@ -487,8 +497,146 @@ def detail_mod_client(crawler, handler):
     return WeiboClient(user_agent="SyntheticAgent/1", ports=ports, timeout=5)
 
 
-def test_repair_entry_is_unimplemented(monkeypatch, tmp_path):
-    crawler = make_crawler(settings(CRAWLER_TYPE="detail"))
-    with pytest.raises(WeiboRepairNotImplemented):
-        import asyncio
-        asyncio.run(crawler._run_after_browser_ready(None))
+@pytest.mark.asyncio
+async def test_navigate_captures_show_and_side_user(monkeypatch, tmp_path):
+    page, capture, context = _bind(monkeypatch, tmp_path)
+    context.nav_payloads = [{
+        "url": SHOW,
+        "json": show_body(),
+    }, {
+        "url": SIDE,
+        "json": side_body(),
+    }]
+
+    def new_page(url="about:blank", *, page=None):
+        opened = _detail_load(FakeContext.new_page(context, url, page=page))
+        opened.payloads = list(context.nav_payloads)
+        return opened
+
+    context.new_page = new_page
+    pages = WeiboDetailPages(capture, page)
+    opened = await pages.open_by_navigate("https://weibo.com/88/525")
+    record = opened.record
+    assert record["note_id"] == "525"
+    assert record["creator_hash"] == "88"
+    assert record["author_followers_source"] == "detail_side_user"
+    assert record["note_url"] == "https://weibo.com/88/Abc12"
+    visits = {
+        line["id"]: line
+        for line in _visits(tmp_path)
+        if line.get("kind") == "visit"
+    }
+    detail = visits[record["content_visit_refs"]["note_detail"]]
+    author = visits[record["content_visit_refs"]["creator_profile"]]
+    assert detail["rule"] == "weibo.statuses_show"
+    assert detail["source"] == "page_response"
+    assert author["rule"] == "weibo.side_user"
+    assert author["page_role"] == detail["page_role"] == "detail"
+    assert author["subject_id"] == "88"
+    assert author["trigger"] == detail["trigger"]
+    trigger = next(line for line in _visits(tmp_path) if line["id"] == detail["trigger"])
+    assert trigger["action"] == "navigate"
+    assert capture.channel.ledger.mode == "discovery"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status", "code"), [(401, LOGIN_REQUIRED), (403, LOGIN_REQUIRED), (429, RATE_LIMITED)])
+async def test_navigate_blocking_status_is_runtime(monkeypatch, tmp_path, status, code):
+    page, capture, context = _bind(monkeypatch, tmp_path)
+
+    def new_page(url="about:blank", *, page=None):
+        opened = _detail_load(FakeContext.new_page(context, url, page=page))
+        opened.nav_status = status
+        return opened
+
+    context.new_page = new_page
+    pages = WeiboDetailPages(capture, page)
+    with pytest.raises(WeiboDetailFetchError) as raised:
+        await pages.open_by_navigate("https://weibo.com/88/525")
+    assert raised.value.runtime_blocking is True
+    assert raised.value.code == code
+
+
+@pytest.mark.asyncio
+async def test_navigate_other_status_is_unavailable(monkeypatch, tmp_path):
+    page, capture, context = _bind(monkeypatch, tmp_path)
+
+    def new_page(url="about:blank", *, page=None):
+        opened = _detail_load(FakeContext.new_page(context, url, page=page))
+        opened.nav_status = 404
+        return opened
+
+    context.new_page = new_page
+    pages = WeiboDetailPages(capture, page)
+    with pytest.raises(WeiboDetailFetchError) as raised:
+        await pages.open_by_navigate("https://weibo.com/88/525")
+    assert raised.value.runtime_blocking is False
+    assert raised.value.code == DETAIL_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_repair_stores_success_subset_and_stops_on_login(monkeypatch, tmp_path):
+    page, capture, context = _bind(monkeypatch, tmp_path)
+    save = tmp_path / "data"
+    save.mkdir()
+    crawler = make_crawler(settings(
+        CRAWLER_TYPE="detail",
+        SAVE_DATA_PATH=str(save),
+        WEIBO_SPECIFIED_ID_LIST=("https://weibo.com/88/525", "https://weibo.com/88/526"),
+        ENABLE_GET_MEIDAS=False,
+    ))
+    crawler.context_page = page
+    crawler.browser_context = context
+    crawler._capture = capture
+    crawler.detail_pages = WeiboDetailPages(capture, page)
+    crawler.wb_client = None
+    opened_pages = []
+
+    def new_page(url="about:blank", *, page=None):
+        opened = _detail_load(FakeContext.new_page(context, url, page=page))
+        first = not opened_pages
+        opened.nav_status = 200 if first else 401
+        opened.payloads = [{
+            "url": SHOW,
+            "json": show_body(),
+        }, {
+            "url": SIDE,
+            "json": side_body(),
+        }] if first else []
+        opened_pages.append(opened)
+        return opened
+
+    context.new_page = new_page
+    with pytest.raises(PlatformRuntimeError) as raised:
+        await crawler.repair_specified()
+    assert raised.value.code == LOGIN_REQUIRED
+    assert [item.gotos for item in opened_pages] == [
+        ["https://weibo.com/88/525"],
+        ["https://weibo.com/88/526"],
+    ]
+    stored = list(save.rglob("*.jsonl"))
+    assert stored
+    rows = [
+        json.loads(line)
+        for line in stored[0].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [row["note_id"] for row in rows] == ["525"]
+    from trippostcollect.artifacts.image_candidates import image_items_for_record
+    from trippostcollect.db.bootstrap import bootstrap_connection
+    from trippostcollect.db.content import upsert_web_post
+    from trippostcollect.records.formal import row_for_record
+
+    with sqlite3.connect(tmp_path / "repair.sqlite") as conn:
+        bootstrap_connection(conn, sync_jobs=False)
+        row = row_for_record(
+            "weibo", rows[0], artifact_dir=str(tmp_path),
+            captured_at="2026-11-19T00:00:00+08:00", keyword="青岛旅游",
+            image_items_for_record=image_items_for_record,
+            ImagePersistenceError=RuntimeError,
+        )
+        upsert_web_post(conn, row, project_root=tmp_path, media_root=tmp_path / "media")
+        found = conn.execute(
+            "SELECT platform_post_id, canonical_url FROM web_posts"
+        ).fetchall()
+    assert found == [("525", "https://weibo.com/88/Abc12")]

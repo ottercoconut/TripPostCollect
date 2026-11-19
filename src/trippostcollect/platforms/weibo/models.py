@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from httpx import RequestError
-
 
 @dataclass(frozen=True)
 class WeiboConfig:
@@ -19,20 +17,18 @@ class WeiboConfig:
     CRAWLER_TYPE: str
     KEYWORDS: str
     START_PAGE: int
-    WEIBO_SEARCH_TYPE: str
     CRAWLER_MAX_SLEEP_SEC: float
     MAX_CONCURRENCY_NUM: int
     WEIBO_SPECIFIED_ID_LIST: tuple[str, ...]
     ENABLE_GET_MEIDAS: bool
     SAVE_LOGIN_STATE: bool
     PLATFORM: str
-    ENABLE_WEIBO_FULL_TEXT: bool
     SAVE_DATA_OPTION: str
     SAVE_DATA_PATH: str
 
 
-class DataFetchError(RequestError):
-    """something error when fetch"""
+class DataFetchError(Exception):
+    """搜索页或运行级取数失败。不再继承浏览器外 HTTP 异常。"""
 
 
 class PlatformRuntimeError(DataFetchError):
@@ -77,10 +73,3 @@ class WeiboDetailFetchError(RuntimeError):
         self.attempts = max(1, int(attempts))
         self.runtime_blocking = runtime_blocking
         self.retryable = bool(retryable) and not runtime_blocking
-
-
-class WeiboRepairNotImplemented(NotImplementedError):
-    """桌面 repair 链在下一段实现。不得再走移动详情。"""
-
-    def __init__(self) -> None:
-        super().__init__("weibo desktop repair is not implemented")
