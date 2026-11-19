@@ -187,6 +187,8 @@ def weibo_image_assets(status: dict) -> list[dict[str, Any]]:
                 "url": urls[0],
                 "urls": urls,
                 "source_index": len(assets),
+                # 访问门禁 R5 按资产键把记录图片与账本 cdn_direct 登记、manifest 对应。
+                "source_asset_key": weibo_source_asset_key(pid, urls[0]),
             }
         )
     return assets

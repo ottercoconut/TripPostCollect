@@ -231,6 +231,8 @@ def test_image_spec_order_skips_unknown_types_and_missing_pids():
     )
     assets = weibo_store.weibo_image_assets(status)
     assert [asset["pid"] for asset in assets] == ["a", "b"]
+    assert [asset["source_index"] for asset in assets] == [0, 1]
+    assert [asset["source_asset_key"] for asset in assets] == ["weibo:pid:a", "weibo:pid:b"]
     assert assets[0]["urls"] == [
         "https://wx1.sinaimg.cn/large/a.jpg",
         "https://wx1.sinaimg.cn/mw2000/a.jpg",
