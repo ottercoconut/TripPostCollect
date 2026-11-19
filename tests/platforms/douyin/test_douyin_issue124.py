@@ -392,7 +392,7 @@ def child_command(tmp_path, platform, *, checkpoint=None, with_summary=False):
 
 
 # 累计摘要只经 checkpoint 交给下一轮，所以“无 checkpoint”只有不带摘要一种。
-@pytest.mark.parametrize("platform", ["douyin", "zhihu"])
+@pytest.mark.parametrize("platform", ["douyin", "zhihu", "weibo"])
 @pytest.mark.parametrize("checkpoint, with_summary", [
     (None, False), ("active", False), ("active", True), ("exhausted", False), ("exhausted", True),
 ])
@@ -415,7 +415,7 @@ def test_runner_douyin_child_command_always_scans_from_first_page(
         assert "--resume-summary" not in command
 
 
-@pytest.mark.parametrize("platform", ["douyin", "zhihu"])
+@pytest.mark.parametrize("platform", ["douyin", "zhihu", "weibo"])
 def test_runner_rejects_explicit_start_page_for_douyin(tmp_path, platform):
     with sqlite3.connect(tmp_path / "explicit.sqlite") as conn:
         conn.row_factory = sqlite3.Row
@@ -425,7 +425,7 @@ def test_runner_rejects_explicit_start_page_for_douyin(tmp_path, platform):
             crawl_runner.resolve_discovery_args(conn, row, runner_args(start_page=3), run_id="t124-run")
 
 
-@pytest.mark.parametrize("platform", ["bilibili", "weibo"])
+@pytest.mark.parametrize("platform", ["bilibili"])
 def test_runner_other_platforms_keep_saved_page_refresh_and_exhaustion(tmp_path, platform):
     command, plan, summary_path = child_command(tmp_path, platform, checkpoint="exhausted", with_summary=True)
 
@@ -448,7 +448,7 @@ def test_child_cli_rejects_removed_douyin_resume_flags(monkeypatch, capsys, flag
     assert "unrecognized arguments" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("platform", ["douyin", "zhihu"])
+@pytest.mark.parametrize("platform", ["douyin", "zhihu", "weibo"])
 @pytest.mark.parametrize("extra", [
     ["--start-page", "3", "--resume-summary", "prior.json"],
     ["--top-refresh-max-pages", "3"],

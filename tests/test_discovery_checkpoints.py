@@ -253,9 +253,13 @@ def test_runner_auto_resumes_only_matching_query(tmp_path: Path) -> None:
 
     assert plan is not None
     assert plan["auto_resume"] is True
-    assert resolved.start_page == 7
+    assert plan["full_scan"] is True
+    assert plan["resume_page"] == 1
+    assert plan["top_refresh_max_pages"] == 0
+    assert plan["source_exhausted"] is False
+    assert resolved.start_page in (None, 1)
     assert resolved.resume_summary == str(summary_path.resolve())
-    assert resolved.top_refresh_max_pages == 3
+    assert resolved.top_refresh_max_pages == 0
 
 
 def test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup(
