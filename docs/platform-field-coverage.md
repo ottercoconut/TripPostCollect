@@ -6,7 +6,7 @@
 | 平台 | 图文/正文来源 | 权威正文图字段 | 本地存储与排除 | 发布时间 | 作者 | 粉丝量 | 互动 | 当前说明 |
 |---|---|---|---|---|---|---|---|---|
 | B站 article | `article_view_api` 详情正文（HTML 或 delta） | 详情观察后的 `image_urls` | 不带 Cookie 下载 → staging → manifest → `data/media`；搜索预览/封面/头像排除 | 结构化 | ID/昵称；简介与认证未采集（#156） | 作者关系统计 | 赞/评 | 正常正式入口使用详情实现；历史完整性事件已完成修复与清理。浏览数只留在 `raw_sample_json.view_count` |
-| 微博 | `search_mblog_complete` / `mobile_detail` | `mblog.pics` → `image_list` | 不带 Cookie 直连图片 CDN 下载 → staging → manifest → `data/media`；头像/封面排除 | 结构化 | ID/昵称；简介与认证未采集（#156） | `mblog.user` | 赞/评/分享（转发） | 长文详情重试耗尽后记录并跳过，禁止保存截断正文 |
+| 微博 | `desktop_detail`（详情页 `statuses/show`，#211）；历史行为 `search_mblog_complete` / `mobile_detail` | `pic_infos` 按 `pic_ids` 顺序取原尺寸 → `image_list` | 不带 Cookie 直连图片 CDN 下载 → staging → manifest → `data/media`；头像/封面/视频/转发原帖图排除；正文图 CDN 直连在访问账本登记为 `cdn_direct` | 结构化 | ID/昵称/主页（`weibo.com/u/{uid}`）/简介（详情页 `sideUser.description`）；关注 `friends_count`、作品数 `statuses_count`；认证原值入 `author_json`，判定口径待定（#211） | 详情页 `sideUser.followers_count`（`detail_side_user`） | 赞/评/分享（转发），缺键为空；收藏平台不提供 | 已纳入访问门禁；每轮全量扫描，单查询最多 50 页（上限口径待定，#211） |
 | 小红书 | `note_detail` 非空 `desc` | 笔记详情 `image_list` | 每个图片对象选择一个正文 URL，staging → manifest → `data/media`；头像/视频排除 | 结构化 | ID/昵称/主页/简介（作者页 `basicInfo.desc`）/认证（官方认证类型码按前端枚举写 `RedOfficial`/`BlueOfficial`，职业标签如“美食博主”也按认证记，#167） | 浮层点击打开的作者页页面状态 | 赞/藏/评/分享；feed 空串只在登记所用搜索条目同一项明确为 0 时记为 0 | 详情或作者补全重试耗尽后记录并跳过 |
 | 抖音 | 搜索卡片 `search_aweme_info` / 详情 `aweme_detail` 非空 `desc` | `note_download_url` | 保留 `images[].uri` 稳定键，staging → manifest → `data/media`；封面/视频/音乐/头像排除，且不写入内容记录 | 结构化 | ID/昵称/主页（由 `sec_uid` 拼出）/简介（资料 `user.signature`）/认证（资料 `account_cert_info.label_text` 等，#163） | 作者资料 `user` 节点（`creator_profile`） | 赞/藏/评/分享 | 标题和预览文本不能代替正文；搜索作者对象的粉丝数不算已观测 |
 | 知乎 | `answer_detail` / `article_detail`（详情页页面状态，#185） | 正文/详情 `image_list`；同一 `v2-<32位十六进制>` 只保留一张，优先级 `_r` > 无后缀 > `_1440w` > `_720w` > `_b`（#187） | 不带 Cookie 直连图片 CDN 下载 → staging → manifest → `data/media`；公式/头像/作者主页/zvideo 排除；正文图 CDN 直连在访问账本登记为 `cdn_direct`。纯文字回答/文章不写图片行（#191） | 结构化 | ID/昵称/主页/简介（`headline`）/认证（#193/#205：作者页 `isOrg` 为严格布尔 true 的机构号为 1，文字以“机构号”开头，有身份描述时写成“机构号、<原描述>”，没有描述时为“机构号”，`badgeV2` 缺失或结构不对也如此；非机构号仍以已通过的 `identity_org`/`identity_people` 为 1，文字为 `description`；读到 `badgeV2` 但没有则为 0；没有或结构不对不推断）；关注数取作者页 `followingCount`，缺失为 NULL，不补 0；作品数是作者页 `answerCount + articlesCount`，任一缺失为 NULL（#185） | 作者页 `followerCount`（`author_page`） | 赞/评/藏（分享平台不提供，#188） | 每条候选都打开详情页并点击作者页（#185）。认证只在这次作者页读取上判定。机构号只认用户实体 `isOrg` 为严格布尔 true，不用 `userType`、`/org/` 路径或 `orgVerifyStatus`（#205）。搜索 `verify_bayes` 与 `badge_v2.title` 不是认证（#193）。赞/评/藏取详情页，缺键为 NULL 不补 0，缺任一项不合格；分享数网页端恒为占位 0，不读取，入库为 NULL（#188）。已观察且来源受信任的回答/文章可以零张正文图（#191）。作者链接缺失或作者页没有该用户时跳过。标题/摘要不能通过 |
@@ -33,7 +33,7 @@ B站搜索结果的 `desc` 和 `image_urls` 只是摘要与预览，必须取得
 字段代码路径和平台限制见 `docs/platforms/`。
 
 发现记忆与字段能力分开：B站、微博、抖音、知乎由通用 runner 持久化查询指纹、停止位置、
-所有已完成处理候选 ID 和有效累计摘要；抖音（#124）与知乎（#185）每轮从首页全量扫描，保存的页码只作审计。小红书由独立 runner 按目标和账号持久化停止审计、
+所有已完成处理候选 ID 和有效累计摘要；抖音（#124）、知乎（#185）与微博（#211）每轮从首页全量扫描，保存的页码只作审计。小红书由独立 runner 按目标和账号持久化停止审计、
 已完成处理候选 ID 和累计摘要（不保存页码或 search ID，每轮全量扫描），并在点开笔记前滑过数据库、
 持久候选、累计摘要及本轮已知 ID。
 任何平台的发现记忆都不放宽本表字段要求。

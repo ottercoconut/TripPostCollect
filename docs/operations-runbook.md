@@ -187,7 +187,7 @@ shasum -a 256 data/backups/trippostcollect-before-<run_id>.sqlite
 图片 staging/manifest、行为策略、长期媒体晋升和 SQLite 事务门禁。修复时逐条保留原记录的关键词，
 不会把本轮行为搜索词冒充原始发现词。
 
-知乎详情只在本轮页面缺少创建时间时，从同一旧行回填 `published_at`（载荷里的 `created_time` 同样只用于补这个时间）。粉丝、粉丝来源、`followers_observed`、关注、作品数、认证以及其他作者字段必须来自本次作者页，不得从旧行带回。微博和抖音仍可在本轮没有观察到粉丝时，把旧行的粉丝数、`followers_observed` 和来源整组回填；本轮已经观察到的粉丝数（包括真实 `0`）优先。正文、图片和 `answer_detail`/`article_detail` 来源仍必须来自本次详情访问。若补齐后仍无
+知乎详情只在本轮页面缺少创建时间时，从同一旧行回填 `published_at`（载荷里的 `created_time` 同样只用于补这个时间）。粉丝、粉丝来源、`followers_observed`、关注、作品数、认证以及其他作者字段必须来自本次作者页，不得从旧行带回。微博（#211）的粉丝、关注、作品数与简介同样必须来自本次详情页 `sideUser`，不得从旧行带回。抖音仍可在本轮没有观察到粉丝时，把旧行的粉丝数、`followers_observed` 和来源整组回填；本轮已经观察到的粉丝数（包括真实 `0`）优先。正文、图片和 `answer_detail`/`article_detail`/`desktop_detail` 来源仍必须来自本次详情访问。若补齐后仍无
 有效详情，child 将本批标记为 `repair_no_valid_detail` 且不得把搜索载荷直接当作详情成功；无人值守总控
 按下文规则记录该批失败并继续后续批次，只有运行级阻断才停止平台总控。
 
@@ -215,7 +215,7 @@ python scripts/repair_post_details.py \
   --confirm-default-db-repair
 ```
 
-微博和知乎只替换 `--platform`。单轮会按 `--batch-size` 扫描当前所有可执行待修复记录；
+微博和知乎只替换 `--platform`。微博清单按 `https://weibo.com/{作者平台 ID}/{mid}` 绑定，没有作者平台 ID 的旧行被拒绝（#211）。单轮会按 `--batch-size` 扫描当前所有可执行待修复记录；
 `--max-items N` 用于小批试跑，`--post-id ID` 用于精确重试。详情或图片候选失败只留下该旧记录继续
 待修复，成功子集可以入库；运行级阻断（登录、验证码、频控、安全或策略、浏览器整体失败、运行权限
 或行为证据失败）以及 SQLite、媒体持久化一致性失败会停止后续批次。
@@ -426,8 +426,8 @@ python scripts/backfill_author_profiles.py \
 ## 自动恢复与检查
 
 正常 workflow 不手工传页码、cursor 或摘要。runner 按 job/目标、查询指纹及小红书账号自动读取
-checkpoint；B站、微博先有限刷新顶部，再恢复深层前沿；抖音、知乎与小红书每轮从首页全量扫描到平台结束标记，
-checkpoint 的位置只作审计（抖音 #124，知乎 #185）。检查控制面时只看计数和坐标，不展开候选 ID 或长 JSON。
+checkpoint；B站先有限刷新顶部，再恢复深层前沿；抖音、知乎、微博与小红书每轮从首页全量扫描到平台结束标记，
+checkpoint 的位置只作审计（抖音 #124，知乎 #185，微博 #211）。检查控制面时只看计数和坐标，不展开候选 ID 或长 JSON。
 
 通用 checkpoint：
 
@@ -466,10 +466,10 @@ python scripts/crawl_runner.py \
 
 核对规则：
 
-- 抖音与知乎任务的 child 命令不含 `--start-page`、`--top-refresh-max-pages` 与 `--discovery-source-exhausted`，
+- 抖音、知乎与微博任务的 child 命令不含 `--start-page`、`--top-refresh-max-pages` 与 `--discovery-source-exhausted`，
   冻结计划 `full_scan=true`、`resume_page=1`；checkpoint 为 `exhausted` 时下一轮仍从第 1 页全量扫描。
-  对这两个平台的 job 显式传 `--start-page` 会被 runner 拒绝（#124、#185）。
-- B站、微博首次执行从第 1 页开始且顶部刷新为 0；有 checkpoint 后才执行顶部刷新。
+  对这三个平台的 job 显式传 `--start-page` 会被 runner 拒绝（#124、#185、#211）。
+- B站首次执行从第 1 页开始且顶部刷新为 0；有 checkpoint 后才执行顶部刷新。
 - `last_summary_path` 非空时，对应摘要及 JSONL 必须存在，否则冻结应失败。
 - child 结束后，摘要中的前沿、SQLite checkpoint 和 `last_run_id` 必须一致。
 - 未完成尾批不得推进；边界页允许下轮重取并依靠已知 ID 前置过滤。
@@ -600,11 +600,14 @@ context 自带的第一页，不另开空白页。只有 `headless` 与浏览器
 `languages` 与 `timezone`，用于核对 CDP 实际环境，不能只凭进程参数判定一致。
 
 `crawl_runner.py` 只读取上述 Cookie 快照，不在缺快照时另起浏览器读取 profile；知乎缺快照或缺 `d_c0`/`z_c0`
-时任务直接失败，先运行本节 warmup 再重跑。warmup 报告中的登录接口结果只保留状态码、`uid`、`name`
-（微博为 `login`、`uid`）和清洗过的错误码/错误名，不保存平台原始响应。
+时任务直接失败，先运行本节 warmup 再重跑。微博（#211）不读取 Cookie 快照，持久 profile 是唯一登录态来源。
+warmup 报告中的登录结果只保留状态码、`uid`、`name`（微博只记 `$CONFIG.uid` 是否存在且为真）和清洗过的
+错误码/错误名，不保存平台原始响应或页面状态原值。
 
-微博必须在桌面 SSO 页完成人工登录，再回到移动端刷新 Cookie；最终只有移动接口同时返回
-`login=true` 和有效 `uid` 才成功。`WBPSESS` 不能单独作为成功证据。
+微博（#211）只认桌面首页 `https://weibo.com/` 页面状态 `window.$CONFIG.uid` 存在且为真；未登录时把桌面
+`passport.weibo.com/sso/signin` 登录页置前，人工完成登录后关闭重开 profile，再读一次首页 `$CONFIG.uid`。
+Cookie 名称（如 `SUB`、`WBPSESS`）不能单独作为成功证据。正式抓取开始时同样读取首页 `$CONFIG.uid`，
+未登录即以 `login_required` 停止，不在本轮登录。
 
 B站只有页面内请求 `api.bilibili.com/x/web-interface/nav` 返回 `isLogin=true` 才成功；`SESSDATA`、
 `DedeUserID` 只作标记，过期会话的 Cookie 仍会留在 profile 里，不能单独作为成功证据。正式抓取开始时
@@ -774,7 +777,7 @@ runner run_summary.json
 | path escape / file missing | 检查路径、symlink、清理程序和 staging 完整性 |
 | non-raster / decode / too-large / source-unavailable | 保留终态错误并跳过候选，不改后缀或伪造成功 |
 | HTTP 401/403、429、验证码、封禁 | 运行级阻断；保留前沿，不写候选 seen |
-| `network_timeout` + `stop_detail` 含 `network_unreachable` | B站、微博、抖音的浏览器外请求重试用尽后仍是传输层失败（DNS、连接、超时、重置）：网络整体故障，与候选无关；运行级失败，不写 `candidate_skipped` 与 seen，900 秒后重试。先恢复本机网络或代理，不清理候选记忆；正文图片下载不在此列 |
+| `network_timeout` + `stop_detail` 含 `network_unreachable` | B站、抖音的浏览器外请求重试用尽后仍是传输层失败（DNS、连接、超时、重置）：网络整体故障，与候选无关；运行级失败，不写 `candidate_skipped` 与 seen，900 秒后重试。先恢复本机网络或代理，不清理候选记忆；正文图片下载不在此列 |
 | `sqlite_import_failed` | 确认整批数据库和本轮新媒体已回滚，checkpoint/seen/campaign 未推进 |
 | `persistence_verified` 失败 | 不 finalize；从摘要身份逐帖核对 SQLite 与文件 |
 | `source_exhaustion_not_persisted` | 子摘要未给出运行级阻断，正式门禁按 `formal_validation.stop_reason` 未满足；按该停止原因排查 |
