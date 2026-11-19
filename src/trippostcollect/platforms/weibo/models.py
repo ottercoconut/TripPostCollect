@@ -1,31 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2025 relakkes@gmail.com
-#
-# This file is part of MediaCrawler project.
-# Repository: https://github.com/NanmiCoder/MediaCrawler/blob/main/media_platform/weibo/exception.py
-# GitHub: https://github.com/NanmiCoder
-# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-#
+"""微博 worker 配置与错误。正文投影在 ``parser``，不在这里保存头像或移动详情状态。"""
 
-# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
+from __future__ import annotations
 
-
-# -*- coding: utf-8 -*-
-# @Author  : relakkes@gmail.com
-# @Time    : 2023/12/2 18:44
-# @Desc    :
-
-
-# TripPostCollect T05：迁自 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303；仅拆分职责与注入依赖。
 from dataclasses import dataclass
+
 from httpx import RequestError
 
 
@@ -52,6 +30,7 @@ class WeiboConfig:
     SAVE_DATA_OPTION: str
     SAVE_DATA_PATH: str
 
+
 class DataFetchError(RequestError):
     """something error when fetch"""
 
@@ -64,58 +43,6 @@ class PlatformRuntimeError(DataFetchError):
         self.code = code
 
 
-# -*- coding: utf-8 -*-
-# Copyright (c) 2025 relakkes@gmail.com
-#
-# This file is part of MediaCrawler project.
-# Repository: https://github.com/NanmiCoder/MediaCrawler/blob/main/media_platform/weibo/field.py
-# GitHub: https://github.com/NanmiCoder
-# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-#
-
-# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
-
-
-# -*- coding: utf-8 -*-
-# @Author  : relakkes@gmail.com
-# @Time    : 2023/12/23 15:41
-# @Desc    :
-
-# -*- coding: utf-8 -*-
-# Copyright (c) 2025 relakkes@gmail.com
-#
-# This file is part of MediaCrawler project.
-# Repository: https://github.com/NanmiCoder/MediaCrawler/blob/main/media_platform/weibo/core.py
-# GitHub: https://github.com/NanmiCoder
-# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-#
-
-# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
-
-# -*- coding: utf-8 -*-
-# @Author  : relakkes@gmail.com
-# @Time    : 2023/12/23 15:41
-# @Desc    : Weibo crawler main workflow code
-
-# TripPostCollect：资源与 profile 基目录不再依赖进程 cwd。
-
-# TripPostCollect T05：迁自 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303；仅拆分职责与注入依赖。
 class WeiboImageDownloadError(RuntimeError):
     """A post image exhausted its applicable fetch attempts."""
 
@@ -130,21 +57,30 @@ class WeiboImageDownloadError(RuntimeError):
         self.attempts = max(1, int(attempts))
 
 
-class WeiboFullTextFetchError(RuntimeError):
-    """A long Weibo post remained unavailable after its detail attempts."""
+class WeiboDetailFetchError(RuntimeError):
+    """详情候选失败或运行级阻断。运行级阻断不得写入 seen。"""
 
     def __init__(
         self,
         note_id: str,
         code: str,
-        attempts: int = 3,
+        attempts: int = 1,
         *,
         runtime_blocking: bool = False,
+        retryable: bool = True,
     ):
         super().__init__(
-            f"Weibo full-text fetch failed: note_id={note_id or '<missing>'}, code={code}"
+            f"weibo detail failed: note_id={note_id or '<missing>'}, code={code}"
         )
         self.note_id = note_id
         self.code = code
         self.attempts = max(1, int(attempts))
         self.runtime_blocking = runtime_blocking
+        self.retryable = bool(retryable) and not runtime_blocking
+
+
+class WeiboRepairNotImplemented(NotImplementedError):
+    """桌面 repair 链在下一段实现。不得再走移动详情。"""
+
+    def __init__(self) -> None:
+        super().__init__("weibo desktop repair is not implemented")

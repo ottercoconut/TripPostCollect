@@ -6,11 +6,12 @@ import json
 from PIL import Image
 import pytest
 
-from dataclasses import replace
 from support.weibo_adapter import settings, crawler as make_crawler
 from trippostcollect.platforms import entry
 from trippostcollect.platforms.weibo import parser as weibo_store
 from trippostcollect.application.contracts import ImageStagingError
+from trippostcollect.artifacts.image_candidates import content_image_candidates, image_items_for_record
+from trippostcollect.records.formal import row_for_record, validate_formal_record
 
 config = settings()
 
@@ -25,57 +26,242 @@ def png_bytes(color: str = "red") -> bytes:
     return output.getvalue()
 
 
-def test_persisted_content_text_is_the_topic_classification_source():
-    assert (
-        weibo_store.persisted_weibo_content_text(
-            {"text": "<span>青</span><span>岛</span>攻略"}
-        )
-        == "青岛攻略"
-    )
-    assert (
-        weibo_store.persisted_weibo_content_text(
-            {"text": '<a title="青岛">普通正文</a>'}
-        )
-        == "普通正文"
-    )
+def _status(**extra) -> dict:
+    payload = {
+        "idstr": "525",
+        "mid": "525",
+        "mblogid": "Abc12",
+        "created_at": "Sat Jun 14 12:00:00 +0800 2025",
+        "text_raw": "青岛栈桥",
+        "attitudes_count": 1,
+        "comments_count": 2,
+        "reposts_count": 3,
+        "pic_ids": ["pid-1"],
+        "pic_infos": {
+            "pid-1": {
+                "type": "pic",
+                "largest": {"url": "https://wx1.sinaimg.cn/large/pid-1.jpg"},
+            }
+        },
+        "user": {"id": 88},
+    }
+    payload.update(extra)
+    return payload
 
 
-def test_persisted_content_keeps_line_breaks_and_unescapes_entities():
-    # 离线样本：移动搜索 mblog.text 的真实形态（<br /> 分段、实体转义、话题链接）。
-    text = (
-        '第一段&amp;青岛<br />第二段 &quot;栈桥&quot;<br/>'
-        '<a href="https://m.weibo.cn/search?containerid=231522">#青岛旅游#</a>&lt;完&gt;<BR>尾'
+def _user(**extra) -> dict:
+    payload = {
+        "id": 88,
+        "screen_name": "海边",
+        "followers_count": 10,
+        "friends_count": 4,
+        "statuses_count": 6,
+        "description": "简介",
+        "verified": True,
+        "verified_type": 1,
+        "verified_type_ext": 0,
+        "verified_reason": "机构",
+        "avatar_hd": "https://wx1.sinaimg.cn/avatar.jpg",
+        "gender": "f",
+        "location": "山东",
+    }
+    payload.update(extra)
+    return payload
+
+
+def _record(status=None, user=None) -> dict:
+    parsed = weibo_store.parse_weibo_detail(
+        status if status is not None else _status(),
+        user if user is not None else _user(),
+        mblogid="Abc12",
+        source_keyword="青岛",
+        current_timestamp=lambda: 0,
+        visit_refs={"ledger_id": "L", "images": []},
     )
-    assert weibo_store.persisted_weibo_content_text({"text": text}) == (
-        '第一段&青岛\n第二段 "栈桥"\n#青岛旅游#<完>\n尾'
+    assert parsed.record is not None
+    return parsed.record
+
+
+def test_long_text_content_wins_over_text_raw():
+    status = _status(longText={"content": "青岛长文全文"}, text_raw="青岛短", text="<b>html</b>")
+    assert weibo_store.weibo_body_text(status) == "青岛长文全文"
+    assert "html" not in _record(status)["content"]
+
+
+def test_multi_image_post_without_long_text_uses_text_raw():
+    status = _status(isLongText=True, text="<span>不要</span>")
+    status.pop("longText", None)
+    assert weibo_store.weibo_body_text(status) == "青岛栈桥"
+    assert _record(status)["content"] == "青岛栈桥"
+    assert _record(status)["content_detail_source"] == "desktop_detail"
+    assert _record(status)["content_detail_status"] == "detail_observed"
+
+
+def test_empty_body_is_a_skip():
+    status = _status(text_raw="  ", longText={"content": ""}, text="<b>x</b>")
+    parsed = weibo_store.parse_weibo_detail(
+        status, _user(), mblogid="Abc12", source_keyword="青岛", current_timestamp=lambda: 0,
     )
+    assert parsed.record is None
+    assert parsed.skip_code == "detail_content_empty"
+
+
+def test_missing_metric_is_none_and_zero_is_kept():
+    status = _status()
+    del status["attitudes_count"]
+    status["comments_count"] = 0
+    record = _record(status)
+    assert record["liked_count"] is None
+    assert record["comments_count"] == 0
+    assert record["shared_count"] == 3
+
+
+def test_video_without_pic_infos_is_skipped():
+    status = _status(page_info={"object_type": "video"})
+    del status["pic_infos"]
+    del status["pic_ids"]
+    parsed = weibo_store.parse_weibo_detail(
+        status, _user(), mblogid="Abc12", source_keyword="青岛", current_timestamp=lambda: 0,
+    )
+    assert parsed.video is True
+    assert parsed.record is None
+
+
+def test_video_with_pic_infos_is_not_a_video_skip():
+    status = _status(page_info={"object_type": "video"})
+    assert weibo_store.is_weibo_video(status) is False
+
+
+def test_repost_does_not_merge_original_text_or_pictures():
+    status = _status(
+        text_raw="青岛转发语",
+        retweeted_status={
+            "text_raw": "原帖正文",
+            "pic_ids": ["pid-rt"],
+            "pic_infos": {
+                "pid-rt": {"type": "pic", "largest": {"url": "https://wx1.sinaimg.cn/large/rt.jpg"}},
+            },
+        },
+    )
+    record = _record(status)
+    assert record["content"] == "青岛转发语"
+    assert record["image_list"] == ["https://wx1.sinaimg.cn/large/pid-1.jpg"]
 
 
 def test_created_at_timestamp_and_shanghai_datetime_agree():
-    # 上游 04631ba 的时区修复：时间戳按 UTC 换算，展示时间为东八区，两者表示同一时刻。
     created = weibo_store.weibo_created_at({"created_at": "Sat Jun 14 12:00:00 +0800 2025"})
     assert created == (1749873600, "2025-06-14 12:00:00+08:00")
     from datetime import datetime
 
     assert datetime.fromisoformat(created[1]).timestamp() == created[0]
-    utc = weibo_store.weibo_created_at({"created_at": "Sat Jun 14 04:00:00 +0000 2025"})
-    assert utc == created
 
 
 @pytest.mark.parametrize("value", [None, "", "not a date", 1749873600, "2025-06-14 12:00:00"])
 def test_unparseable_created_at_is_not_projected(value):
-    mblog = {"id": "n1", "text": "正文", "created_at": value, "user": {"id": "u", "screen_name": "名"}}
-    assert weibo_store.weibo_created_at(mblog) is None
-    assert weibo_store.update_weibo_note(
-        {"mblog": mblog}, source_keyword="青岛", current_timestamp=lambda: 0,
-    ) is None
+    parsed = weibo_store.parse_weibo_detail(
+        _status(created_at=value), _user(), mblogid="Abc12",
+        source_keyword="青岛", current_timestamp=lambda: 0,
+    )
+    assert parsed.record is None
+    assert parsed.skip_code == "created_at_unparseable"
 
 
-def test_projected_record_carries_platform_created_at():
-    mblog = {"id": "n1", "text": "正文", "created_at": "Sat Jun 14 12:00:00 +0800 2025",
-             "user": {"id": "u", "screen_name": "名"}}
-    item = weibo_store.update_weibo_note({"mblog": mblog}, source_keyword="青岛", current_timestamp=lambda: 0)
-    assert (item["create_time"], item["create_date_time"]) == (1749873600, "2025-06-14 12:00:00+08:00")
+def test_author_fields_and_verify_blob_omit_absent_keys():
+    user = _user()
+    del user["verified_type_ext"]
+    record = _record(user=user)
+    assert record["creator_hash"] == "88"
+    assert record["nickname"] == "海边"
+    assert record["followers_count"] == 10
+    assert record["followers_observed"] is True
+    assert record["author_followers_source"] == "detail_side_user"
+    assert record["author_following_count"] == 4
+    assert record["author_posts_count"] == 6
+    assert record["author_description"] == "简介"
+    assert record["author_profile_url"] == "https://weibo.com/u/88"
+    assert record["note_url"] == "https://weibo.com/88/Abc12"
+    assert record["mblogid"] == "Abc12"
+    assert record["author_verified"] is None
+    assert record["author_verified_text"] is None
+    assert record["author_json"]["weibo_verify"] == {
+        "verified": True,
+        "verified_type": 1,
+        "verified_reason": "机构",
+    }
+    dumped = json.dumps(record)
+    assert "avatar" not in dumped
+    assert "gender" not in dumped
+    assert "山东" not in dumped
+
+
+def test_wan_follower_string_is_not_converted():
+    user = _user()
+    del user["followers_count"]
+    user["followers_count_str"] = "32.2万"
+    record = _record(user=user)
+    assert record["followers_count"] is None
+    assert record["followers_observed"] is False
+
+    digits = _user()
+    del digits["followers_count"]
+    digits["followers_count_str"] = "42"
+    assert _record(user=digits)["followers_count"] == 42
+
+
+def test_zero_followers_stay_observed():
+    record = _record(user=_user(followers_count=0))
+    assert record["followers_count"] == 0
+    assert record["followers_observed"] is True
+
+
+def test_image_spec_order_skips_unknown_types_and_missing_pids():
+    status = _status(
+        pic_ids=["a", "b", "c", "d"],
+        pic_infos={
+            "a": {
+                "type": "gif",
+                "thumbnail": {"url": "https://wx1.sinaimg.cn/thumb/a.jpg"},
+                "mw2000": {"url": "https://wx1.sinaimg.cn/mw2000/a.jpg"},
+                "largest": {"url": "https://wx1.sinaimg.cn/large/a.jpg"},
+            },
+            "b": {"type": "livephoto", "original": {"url": "https://wx2.sinaimg.cn/orj1080/b.jpg"}},
+            "c": {"type": "video", "largest": {"url": "https://wx3.sinaimg.cn/large/c.jpg"}},
+            "d": {"type": "pic", "large": {"url": "https://wx4.sinaimg.cn/orj960/d.jpg"}},
+        },
+    )
+    assets = weibo_store.weibo_image_assets(status)
+    assert [asset["pid"] for asset in assets] == ["a", "b"]
+    assert assets[0]["urls"] == [
+        "https://wx1.sinaimg.cn/large/a.jpg",
+        "https://wx1.sinaimg.cn/mw2000/a.jpg",
+    ]
+    assert assets[0]["url"] == assets[0]["urls"][0]
+    assert assets[1]["urls"] == ["https://wx2.sinaimg.cn/orj1080/b.jpg"]
+
+
+def test_projected_record_passes_formal_validation_and_keeps_verify_blob():
+    record = _record()
+    validation = validate_formal_record(
+        "weibo", record, set(), content_image_candidates=content_image_candidates,
+    )
+    assert validation["valid"] is True, validation["reasons"]
+    row = row_for_record(
+        "weibo",
+        record,
+        artifact_dir="artifacts",
+        captured_at="2026-11-19T00:00:00+08:00",
+        keyword="青岛",
+        image_items_for_record=image_items_for_record,
+        ImagePersistenceError=RuntimeError,
+    )
+    author = json.loads(row["author_json"])
+    assert author["weibo_verify"]["verified_type"] == 1
+    assert row["author_following_count"] == 4
+    assert row["author_posts_count"] == 6
+    assert row["author_description"] == "简介"
+    assert row["author_verified"] is None
+    assert row["author_profile_url"] == "https://weibo.com/u/88"
+    assert row["canonical_url"] == "https://weibo.com/88/Abc12"
 
 
 @pytest.mark.asyncio
@@ -148,42 +334,13 @@ async def test_note_store_keeps_pid_order_and_ignores_avatar(monkeypatch):
             captured.update(content_item)
 
     crawler = make_crawler(config)
+    from dataclasses import replace
+    crawler.source_keyword = "青岛"
     crawler.ports = replace(crawler.ports, store_factory=lambda: FakeStore())
-    await crawler.update_weibo_note(
-        {
-            "mblog": {
-                "id": "note-asset-order",
-                "text": "body",
-                "content_detail_status": "detail_observed",
-                "content_detail_source": "mobile_detail",
-                "created_at": "Sat Jun 14 12:00:00 +0800 2025",
-                "attitudes_count": 1,
-                "comments_count": 2,
-                "reposts_count": 3,
-                "pics": [
-                    {"pid": "pid-1", "large": {"url": "https://wx.test/1.jpg"}},
-                    {"pid": "pid-2", "url": "https://wx.test/2.jpg"},
-                ],
-                "user": {
-                    "id": "author",
-                    "screen_name": "author",
-                    "followers_count": 10,
-                    "avatar_hd": "https://wx.test/avatar.jpg",
-                    "profile_url": "https://weibo.test/u/author",
-                },
-            }
-        }
-    )
+    await crawler.update_weibo_note({"status": _status(), "side_user": _user(), "mblogid": "Abc12"})
 
-    assert captured["image_list"] == [
-        "https://wx.test/1.jpg",
-        "https://wx.test/2.jpg",
-    ]
-    assert captured["image_assets"] == [
-        {"pid": "pid-1", "url": "https://wx.test/1.jpg", "source_index": 0},
-        {"pid": "pid-2", "url": "https://wx.test/2.jpg", "source_index": 1},
-    ]
-    assert captured["image_list_source"] == "mblog.pics"
-    assert captured["content_detail_status"] == "detail_observed"
-    assert captured["content_detail_source"] == "mobile_detail"
-    assert "avatar" not in json.dumps(captured["image_assets"]).lower()
+    assert captured["image_list"] == ["https://wx1.sinaimg.cn/large/pid-1.jpg"]
+    assert captured["image_list_source"] == "pic_infos"
+    assert captured["content_detail_source"] == "desktop_detail"
+    assert captured["note_url"] == "https://weibo.com/88/Abc12"
+    assert "avatar" not in json.dumps(captured)

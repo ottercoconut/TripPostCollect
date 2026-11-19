@@ -32,20 +32,27 @@ def _clock() -> int:
 
 
 def weibo_record() -> dict:
-    note = {
-        "mblog": {
-            "id": "5100000000000001",
-            "text": "青岛栈桥正文",
+    parsed = weibo_parser.parse_weibo_detail(
+        {
+            "idstr": "5100000000000001",
             "created_at": "Sat Jun 14 12:00:00 +0800 2025",
-            "user": {
-                "id": 7654321,
-                "screen_name": "青岛 旅行者",
-                "followers_count": 10,
-                "avatar_hd": AVATAR,
-            },
-        }
-    }
-    return weibo_parser.update_weibo_note(note, source_keyword="青岛旅游", current_timestamp=_clock)
+            "text_raw": "青岛栈桥正文",
+            "attitudes_count": 1,
+            "comments_count": 1,
+            "reposts_count": 1,
+        },
+        {
+            "id": 7654321,
+            "screen_name": "青岛 旅行者",
+            "followers_count": 10,
+            "avatar_hd": AVATAR,
+        },
+        mblogid="Abc",
+        source_keyword="青岛旅游",
+        current_timestamp=_clock,
+    )
+    assert parsed.record is not None
+    return parsed.record
 
 
 def douyin_record() -> dict:
@@ -263,17 +270,25 @@ def test_root_package_no_longer_calls_legacy_identity_transforms() -> None:
 @pytest.mark.parametrize("missing_name", [None, ""])
 def test_missing_nickname_is_rejected_as_missing_author_name(missing_name) -> None:
     """旧脱敏把空昵称变成 "*" 可通过门禁；现在缺昵称如实为空串，按正式契约判 missing_author_name。"""
-    note = {
-        "mblog": {
-            "id": "5100000000000002",
-            "text": "青岛正文",
-            "created_at": "Sat Jun 14 12:00:00 +0800 2025",
-            "user": {"id": 7654321, "screen_name": missing_name, "followers_count": 10},
-        }
-    }
+    user = {"id": 7654321, "screen_name": missing_name, "followers_count": 10}
     if missing_name is None:
-        del note["mblog"]["user"]["screen_name"]
-    record = weibo_parser.update_weibo_note(note, source_keyword="青岛旅游", current_timestamp=_clock)
+        del user["screen_name"]
+    parsed = weibo_parser.parse_weibo_detail(
+        {
+            "idstr": "5100000000000002",
+            "created_at": "Sat Jun 14 12:00:00 +0800 2025",
+            "text_raw": "青岛正文",
+            "attitudes_count": 1,
+            "comments_count": 1,
+            "reposts_count": 1,
+        },
+        user,
+        mblogid="Abc",
+        source_keyword="青岛旅游",
+        current_timestamp=_clock,
+    )
+    record = parsed.record
+    assert record is not None
     assert (record["creator_hash"], record["nickname"]) == ("7654321", "")
     reasons = validate_formal_record("weibo", record, set())["reasons"]
     assert "missing_author_name" in reasons

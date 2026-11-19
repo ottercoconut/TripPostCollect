@@ -197,7 +197,7 @@ def test_weibo_client_headers_use_browser_user_agent(monkeypatch) -> None:
         post_repair=False,
     )
     client = asyncio.run(crawler.create_weibo_client(None))
-    assert client.headers["User-Agent"] == BROWSER_UA
+    assert client.user_agent == BROWSER_UA
     assert crawler.context_page.scripts
     assert not hasattr(crawler, "user_agent")
     assert not hasattr(crawler, "mobile_user_agent")
@@ -207,8 +207,6 @@ def test_weibo_client_headers_use_browser_user_agent(monkeypatch) -> None:
 
 
 def test_weibo_image_request_uses_client_user_agent(monkeypatch) -> None:
-    import httpx
-
     from trippostcollect.platforms.weibo import core
 
     crawler = object.__new__(core.WeiboCrawler)
@@ -218,6 +216,21 @@ def test_weibo_image_request_uses_client_user_agent(monkeypatch) -> None:
     crawler._capture = _weibo_ua_capture(crawler.context_page)
     requests: list[dict[str, Any]] = []
 
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            yield b"image"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
     class Http:
         async def __aenter__(self):
             return self
@@ -225,9 +238,9 @@ def test_weibo_image_request_uses_client_user_agent(monkeypatch) -> None:
         async def __aexit__(self, *args):
             return False
 
-        async def request(self, method, url, **kwargs):
+        def stream(self, method, url, **kwargs):
             requests.append(kwargs)
-            return httpx.Response(200, content=b"image", request=httpx.Request(method, url))
+            return Response()
 
     crawler.ports = SimpleNamespace(
         client=SimpleNamespace(
@@ -239,7 +252,8 @@ def test_weibo_image_request_uses_client_user_agent(monkeypatch) -> None:
     )
     client = asyncio.run(crawler.create_weibo_client(None))
     assert asyncio.run(client.get_note_image("https://wx1.sinaimg.cn/large/abc.jpg")) == b"image"
-    assert requests[0]["headers"]["User-Agent"] == client.headers["User-Agent"] == BROWSER_UA
+    assert requests[0]["headers"]["user-agent"] == client.user_agent == BROWSER_UA
+    assert "cookie" not in {key.lower() for key in requests[0]["headers"]}
 
 
 # ---------- 3. warmup：Cookie 快照保存登录 page 的 navigator.userAgent ----------

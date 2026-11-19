@@ -74,7 +74,7 @@ REPAIR_CHILD_INTERRUPT_GRACE_SECONDS = (
 COMPLETED_REPAIR_OUTCOMES = {"completed", "completed_with_remaining"}
 TRUSTED_DETAIL_SOURCES = {
     "douyin": {"aweme_detail"},
-    "weibo": {"search_mblog_complete", "mobile_detail"},
+    "weibo": {"desktop_detail", "search_mblog_complete", "mobile_detail"},
     # #194：详情路径只写 answer_detail / article_detail，当前代码不再产生 search_content。
     "zhihu": {"answer_detail", "article_detail"},
 }

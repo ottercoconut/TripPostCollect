@@ -29,7 +29,9 @@ BILIBILI_TRUSTED_DETAIL_SOURCES = frozenset({"article_view_api"})
 
 TRUSTED_CONTENT_DETAIL_SOURCES = {
     "bilibili": BILIBILI_TRUSTED_DETAIL_SOURCES,
-    "weibo": frozenset({"search_mblog_complete", "mobile_detail"}),
+    # desktop_detail 是 #211 新写入的来源。search_mblog_complete / mobile_detail 仍受信任：
+    # 导入会重新跑 validate_formal_record，repair 用同一组来源判断历史行是否已经恢复。
+    "weibo": frozenset({"desktop_detail", "search_mblog_complete", "mobile_detail"}),
     "xhs": frozenset({"note_detail"}),
     "douyin": frozenset({"aweme_detail", "search_aweme_info"}),
     "zhihu": frozenset({"search_content", "answer_detail", "article_detail"}),
@@ -41,7 +43,8 @@ FOLLOWERS_REQUIRED_PLATFORMS = frozenset(PLATFORMS)
 
 REQUIRED_FOLLOWER_SOURCES = {
     "bilibili": frozenset({"relation_stat"}),
-    "weibo": frozenset({"search_author"}),
+    # detail_side_user 是 #211 的粉丝来源。search_author 仍接受，避免重新校验历史行时被判不可信。
+    "weibo": frozenset({"detail_side_user", "search_author"}),
     "xhs": frozenset({"creator_profile"}),
     "douyin": frozenset({"creator_profile"}),
     # #185：知乎粉丝只认作者页 followerCount；搜索结果里的 follower_count 不再作为正式来源。
@@ -598,6 +601,17 @@ def row_for_record(
         for key in ("answerCount", "articlesCount", "pinsCount", "questionCount"):
             if key in page_counts and page_counts[key] is not None:
                 author[key] = page_counts[key]
+    if platform_key == "weibo":
+        nested = record.get("author_json")
+        verify = nested.get("weibo_verify") if isinstance(nested, dict) else None
+        if isinstance(verify, dict):
+            kept = {
+                key: verify[key]
+                for key in ("verified", "verified_type", "verified_type_ext", "verified_reason")
+                if key in verify
+            }
+            if kept:
+                author["weibo_verify"] = kept
     return {
         "platform_key": platform_key,
         "platform_post_id": post_id_for_record(platform_key, record),
@@ -608,7 +622,7 @@ def row_for_record(
         "author_display_name": author["nickname"],
         "author_platform_id": author["creator_hash"],
         "author_profile_url": first_value(record, "author_profile_url", "user_link", "profile_url", "user_url"),
-        "author_description": first_value(record, "author_desc", "user_desc"),
+        "author_description": first_value(record, "author_desc", "user_desc", "author_description"),
         "author_followers_count": author["followers_count"],
         "author_following_count": author["following_count"],
         "author_posts_count": author["posts_count"],

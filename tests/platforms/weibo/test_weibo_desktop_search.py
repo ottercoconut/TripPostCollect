@@ -12,7 +12,8 @@ from playwright._impl._driver import compute_driver_executable
 
 from support.weibo_adapter import crawler as make_crawler
 from support.weibo_adapter import settings
-from trippostcollect.platforms.weibo.detail_page import WeiboDetailNotImplemented, WeiboDetailPages
+from trippostcollect.platforms.weibo import detail_page as detail_mod
+from trippostcollect.platforms.weibo.detail_page import WeiboDetailPages
 from trippostcollect.platforms.weibo.page_scripts import DOM_SCRIPTS, STATE_SCRIPTS
 from trippostcollect.platforms.weibo.search_page import (
     FILTER_SIGNATURE,
@@ -583,8 +584,10 @@ async def test_known_ids_are_skipped_before_detail(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_default_detail_hook_is_unimplemented_and_not_mobile(monkeypatch, tmp_path):
-    crawler, page, _state_path, _opened, capture = prepare(
+async def test_missing_time_link_is_skipped_without_mobile_detail(monkeypatch, tmp_path):
+    monkeypatch.setattr(detail_mod, "DETAIL_RETRY_PAUSE_SECONDS", 0)
+    monkeypatch.setattr(detail_mod.random, "uniform", lambda a, b: 0.0)
+    crawler, page, state_path, _opened, capture = prepare(
         monkeypatch,
         tmp_path,
         [dom_page([card("11")], has_pager=False, next_disabled=None, max_page=None, info="", current="")],
@@ -592,11 +595,13 @@ async def test_default_detail_hook_is_unimplemented_and_not_mobile(monkeypatch, 
     crawler.detail_pages = WeiboDetailPages(capture, page)
     await install_scroll(monkeypatch, page)
     try:
-        with pytest.raises(WeiboDetailNotImplemented):
-            await crawler.search()
+        await crawler.search()
     finally:
         await capture.aclose()
 
+    skipped = events_of(state_path, "candidate_skipped")
+    assert skipped[-1]["identity"] == "11"
+    assert skipped[-1]["error_code"] == "detail_card_missing"
     assert page.gotos == []
     assert "m.weibo.cn" not in page.url
 

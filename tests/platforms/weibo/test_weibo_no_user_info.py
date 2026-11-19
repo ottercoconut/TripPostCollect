@@ -8,8 +8,7 @@ update_weibo_note,用 FakeStore 捕获拍平后的存储 dict,断言:
 - creator_hash 为平台原始用户 ID(整数 ID 归一为字符串),nickname 为原始昵称
 - 头像、性别、主页、签名、IP 归属地的原始值不出现在任何存储值里
 
-说明:微博 note 的正文存于 content 字段,update_weibo_note 不产生 desc 键
-故不存在用户 description 被持久化的风险。
+说明:头像、性别、所在地、IP 与移动站主页不进入记录。简介写入 author_description。
 """
 import asyncio
 
@@ -33,26 +32,33 @@ FORBIDDEN_KEYS = {
 # ----------------------------- mock 数据 -----------------------------
 
 def make_mock_note() -> dict:
-    """贴近真实 m.weibo.cn 接口结构的 mock note_item(含嵌套 user 信息)。"""
+    """桌面 show + sideUser。头像等字段只出现在输入里，用来确认不会被抄进记录。"""
     return {
-        "mblog": {
-            "id": NOTE_ID,
+        "mblogid": "Abc12",
+        "status": {
+            "idstr": NOTE_ID,
+            "mid": NOTE_ID,
+            "mblogid": "Abc12",
+            "text_raw": "今天天气不错，出去玩",
             "text": "今天天气不错 <a href='#'>@好友</a> 出去玩",
             "created_at": RFC2822_TIME,
             "attitudes_count": 10,
             "comments_count": 2,
             "reposts_count": 1,
-            "user": {
-                "id": RAW_USER_ID,
-                "screen_name": RAW_NICKNAME,
-                "avatar_hd": "https://wx avatar.example.com/7654321.jpg",
-                "gender": "f",
-                "profile_url": "https://m.weibo.cn/profile/7654321",
-                "description": "这是一个用户签名",
-                "ip_location": "上海",
-                "followers_count": 9999,
-            },
-        }
+            "pic_ids": [],
+            "pic_infos": {},
+        },
+        "side_user": {
+            "id": RAW_USER_ID,
+            "screen_name": RAW_NICKNAME,
+            "avatar_hd": "https://wx-avatar.example.com/7654321.jpg",
+            "gender": "f",
+            "profile_url": "https://m.weibo.cn/profile/7654321",
+            "description": "这是一个用户签名",
+            "location": "上海",
+            "ip_location": "上海",
+            "followers_count": 9999,
+        },
     }
 
 
@@ -83,7 +89,7 @@ def _restore(wb, orig):
 
 def _assert_forbidden_values_absent(captured: dict, user: dict, label: str):
     """头像、主页、签名、IP 归属地的原始值不得出现在任何存储值里(性别为单字符,只按键检查)。"""
-    raw_values = [user[key] for key in ("avatar_hd", "profile_url", "description", "ip_location") if key in user]
+    raw_values = [user[key] for key in ("avatar_hd", "profile_url", "ip_location", "location") if key in user]
     leaked = [
         (key, raw) for raw in raw_values for key, value in captured.items()
         if isinstance(value, str) and raw in value
@@ -111,7 +117,7 @@ def test_weibo_note_masks_user_info():
     hit = set(captured.keys()) & FORBIDDEN_KEYS
     assert not hit, f"note 存储 dict 仍含禁用字段键: {hit}"
 
-    _assert_forbidden_values_absent(captured, make_mock_note()["mblog"]["user"], "weibo_note")
+    _assert_forbidden_values_absent(captured, make_mock_note()["side_user"], "weibo_note")
 
     # 2. creator_hash 为平台原始用户 ID;微博整数 ID 归一为字符串
     assert captured.get("creator_hash") == str(RAW_USER_ID)
@@ -121,11 +127,13 @@ def test_weibo_note_masks_user_info():
 
     # 4. 内容字段正确(正文存于 content,不是 desc)
     assert "hello" not in captured  # 确认没误存
-    assert "今天天气不错" in captured["content"]
+    assert captured["content"] == "今天天气不错，出去玩"
+    assert "<a" not in captured["content"]
     assert captured["note_id"] == NOTE_ID
-    assert captured["liked_count"] == "10"
-    assert captured["comments_count"] == "2"
-    assert captured["shared_count"] == "1"
+    assert captured["author_description"] == "这是一个用户签名"
+    assert captured["liked_count"] == 10
+    assert captured["comments_count"] == 2
+    assert captured["shared_count"] == 1
 
 
 if __name__ == "__main__":

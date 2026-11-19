@@ -26,9 +26,9 @@
 # TripPostCollect T05：迁自 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303；仅拆分职责与注入依赖。
 import asyncio
 import logging
+from hashlib import sha256
 from typing import Any, Dict, List, Optional
 
-import httpx
 from playwright.async_api import (
     BrowserContext,
     BrowserType,
@@ -40,10 +40,13 @@ from playwright.async_api import (
 
 from trippostcollect.application.contracts import ImageStagingError, WeiboPorts
 from trippostcollect.core.paths import PROFILE_VIEWPORT, platform_profile_dir
+from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from . import parser as weibo_store
-from .client import WeiboClient
-from .detail_page import WeiboDetailPages
-from .models import DataFetchError, PlatformRuntimeError, WeiboImageDownloadError, WeiboFullTextFetchError
+from .client import WEIBO_CONTENT_IMAGE_RULE, WeiboClient
+from .detail_page import WeiboDetailPages, WeiboOpened
+from .models import (
+    PlatformRuntimeError, WeiboDetailFetchError, WeiboImageDownloadError, WeiboRepairNotImplemented,
+)
 from .search_page import (
     HOME_URL,
     WeiboPageCapture,
@@ -64,8 +67,6 @@ class WeiboCrawler:
         self.ports = ports
         self.source_keyword = ""
         self.index_url = HOME_URL
-        self.mobile_index_url = "https://m.weibo.cn"
-        self.cookie_urls = [self.mobile_index_url]
         self.cdp_manager = None
         self._capture: WeiboPageCapture | None = None
         self.detail_pages: WeiboDetailPages | None = None
@@ -125,6 +126,8 @@ class WeiboCrawler:
         )
 
     async def _run_after_browser_ready(self, httpx_proxy_format: Optional[str]) -> None:
+        if getattr(self.config, "CRAWLER_TYPE", "search") == "detail":
+            raise WeiboRepairNotImplemented()
         try:
             await self.context_page.goto(
                 self.index_url, wait_until="domcontentloaded", timeout=30_000,
@@ -144,15 +147,9 @@ class WeiboCrawler:
             return
         self.wb_client = await self.create_weibo_client(httpx_proxy_format)
         keyword = self.config.KEYWORDS.split(",", maxsplit=1)[0].strip()
-        if self.config.CRAWLER_TYPE == "search":
-            await self._open_search_page(keyword)
-            await self.ports.run_required_human_behavior(self.context_page, "weibo")
-            await self.search()
-        elif self.config.CRAWLER_TYPE == "detail":
-            self.source_keyword = keyword
-            await self._open_search_page(keyword)
-            await self.ports.run_required_human_behavior(self.context_page, "weibo")
-            await self.get_specified_notes()
+        await self._open_search_page(keyword)
+        await self.ports.run_required_human_behavior(self.context_page, "weibo")
+        await self.search()
 
     async def _open_search_page(self, keyword: str) -> None:
         capture = self._capture
@@ -217,9 +214,94 @@ class WeiboCrawler:
                 accumulator.begin_batch()
                 processed_count = 0
                 for candidate in unknown:
-                    # 未实现的详情直接抛出，不写成候选级失败，也不回退到移动详情。
-                    await self.detail_pages.open_from_search(candidate)
+                    try:
+                        opened = await self.detail_pages.open_from_search(candidate)
+                    except WeiboDetailFetchError as exc:
+                        if exc.runtime_blocking:
+                            accumulator.mark_runtime_failed(
+                                exc.code,
+                                source_page=requested_page,
+                                resume_page=requested_page,
+                                discovery_phase=discovery_phase,
+                            )
+                            processed_count += 1
+                            break
+                        logger.error(
+                            "[WeiboCrawler.search] Skip note after detail attempts failed "
+                            "mid=%s code=%s attempts=%s",
+                            candidate.mid,
+                            exc.code,
+                            exc.attempts,
+                        )
+                        processed_count += 1
+                        if accumulator.skip_candidate_failure(
+                            candidate.mid,
+                            failure_scope="post",
+                            detail="content_detail_failed",
+                            error_code=exc.code,
+                            attempts=exc.attempts,
+                            retryable=exc.retryable,
+                            source_page=requested_page,
+                            discovery_phase=discovery_phase,
+                        ):
+                            break
+                        continue
                     processed_count += 1
+                    if not isinstance(opened, WeiboOpened):
+                        continue
+                    if opened.video:
+                        accumulator.consider(candidate.mid, valid=False)
+                        continue
+                    record = opened.record
+                    if record is None:
+                        continue
+                    record["source_keyword"] = self.source_keyword
+                    record["last_modify_ts"] = self.ports.current_timestamp()
+                    skip_code = weibo_store.structural_skip_code(record)
+                    if skip_code:
+                        if accumulator.skip_candidate_failure(
+                            candidate.mid,
+                            failure_scope="post",
+                            detail="content_detail_failed",
+                            error_code=skip_code,
+                            attempts=1,
+                            retryable=False,
+                            source_page=requested_page,
+                            discovery_phase=discovery_phase,
+                        ):
+                            break
+                        continue
+                    try:
+                        await self.get_note_images(record)
+                    except WeiboImageDownloadError as exc:
+                        if self.ports.is_runtime_blocking_image_error(exc.code):
+                            accumulator.mark_runtime_failed(
+                                exc.code,
+                                source_page=requested_page,
+                                resume_page=requested_page,
+                                discovery_phase=discovery_phase,
+                            )
+                            break
+                        if accumulator.skip_candidate_failure(
+                            candidate.mid,
+                            failure_scope="image",
+                            detail="image_download_failed",
+                            error_code=exc.code,
+                            attempts=exc.attempts,
+                            source_index=exc.source_index,
+                            source_page=requested_page,
+                            discovery_phase=discovery_phase,
+                        ):
+                            break
+                        continue
+                    await self.update_weibo_note(record)
+                    if accumulator.consider(
+                        candidate.mid,
+                        valid=topic_relevant_for_web_post(
+                            "weibo", record, fallback_keyword=keyword,
+                        ),
+                    ):
+                        break
                 batch_complete = processed_count >= len(unknown)
                 resume_page = requested_page + 1 if batch_complete and snapshot.has_more else requested_page
                 if accumulator.finish_batch(
@@ -287,89 +369,25 @@ class WeiboCrawler:
             page_cap_reached=snapshot.page_cap_reached,
         )
 
-    async def get_specified_notes(self):
-        """
-        get specified notes info
-        :return:
-        """
-        semaphore = asyncio.Semaphore(self.config.MAX_CONCURRENCY_NUM)
-        task_list = [self.get_note_info_task(note_id=note_id, semaphore=semaphore) for note_id in self.config.WEIBO_SPECIFIED_ID_LIST]
-        video_details = await asyncio.gather(*task_list)
-        for note_item in video_details:
-            if note_item:
-                mblog = note_item.get("mblog") or {}
-                if weibo_store._weibo_pic_urls(mblog):
-                    try:
-                        await self.get_note_images(mblog)
-                    except WeiboImageDownloadError as exc:
-                        if self.ports.is_runtime_blocking_image_error(exc.code):
-                            raise
-                        logger.warning(
-                            "[WeiboCrawler.get_specified_notes] Skip note after image "
-                            f"failure: {exc}"
-                        )
-                        continue
-                await self.update_weibo_note(note_item)
-        
 
-    async def get_note_info_task(self, note_id: str, semaphore: asyncio.Semaphore) -> Optional[Dict]:
-        """
-        Get note detail task
-        :param note_id:
-        :param semaphore:
-        :return:
-        """
-        async with semaphore:
-            try:
-                result = await self.wb_client.get_note_info_by_id(note_id)
-                mblog = (result or {}).get("mblog") or {}
-                if mblog.get("text"):
-                    mblog["content_detail_status"] = "detail_observed"
-                    mblog["content_detail_source"] = "mobile_detail"
+    async def get_note_images(self, record: Dict):
+        """下载本条 pic_infos 正文图，并按 cdn_direct 登记。"""
 
-                # Sleep after fetching note details
-                await asyncio.sleep(self.config.CRAWLER_MAX_SLEEP_SEC)
-                logger.info(f"[WeiboCrawler.get_note_info_task] Sleeping for {self.config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching note details {note_id}")
-
-                return result
-            except PlatformRuntimeError:
-                # 登录、频控、风控是运行级阻断，不能当作单条详情缺失吞掉（#114）。
-                raise
-            except httpx.TransportError as ex:
-                # #129：重试用尽后的传输层失败不是单条详情缺失，按运行级 network_unreachable 上抛。
-                raise PlatformRuntimeError(
-                    f"weibo network_unreachable: {type(ex).__name__}",
-                    code="network_unreachable",
-                ) from ex
-            except DataFetchError as ex:
-                logger.error(f"[WeiboCrawler.get_note_info_task] Get note detail error: {ex}")
-                return None
-            except KeyError as ex:
-                logger.error(f"[WeiboCrawler.get_note_info_task] have not fund note detail note_id:{note_id}, err: {ex}")
-                return None
-
-
-
-    async def get_note_images(self, mblog: Dict):
-        """
-        get note images
-        :param mblog:
-        :return:
-        """
         if not self.config.ENABLE_GET_MEIDAS:
             logger.info("[WeiboCrawler.get_note_images] Crawling image mode is not enabled")
             return
-
-        note_id = str(mblog.get("id") or "")
-        image_assets = weibo_store._weibo_pic_assets(mblog)
+        note_id = str(record.get("note_id") or "")
+        image_assets = list(record.get("image_assets") or [])
         if not image_assets:
             return
         fetched_assets: List[Dict] = []
+        capture = self._capture
         for asset in image_assets:
             source_index = int(asset["source_index"])
+            urls = list(asset.get("urls") or [asset.get("url")])
             try:
                 content, attempts = await self.ports.fetch_image_bytes_with_retry(
-                    lambda: self.wb_client.get_note_image(asset["url"]),
+                    lambda urls=urls: self.wb_client.get_note_image(urls),
                     logger=logger,
                     label=(
                         f"platform=weibo note_id={note_id} "
@@ -389,11 +407,8 @@ class WeiboCrawler:
                 raise WeiboImageDownloadError(
                     note_id, source_index, exc.code, exc.attempts
                 ) from exc
-            await asyncio.sleep(self.config.CRAWLER_MAX_SLEEP_SEC)
-            logger.info(
-                f"[WeiboCrawler.get_note_images] Sleeping for "
-                f"{self.config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching image"
-            )
+            if self.config.CRAWLER_MAX_SLEEP_SEC:
+                await asyncio.sleep(self.config.CRAWLER_MAX_SLEEP_SEC)
             if content is None:
                 failure = {
                     **asset,
@@ -408,6 +423,22 @@ class WeiboCrawler:
                     "image_download_retryable",
                     attempts,
                 )
+            digest = sha256(content).hexdigest()
+            asset_key = weibo_store.weibo_source_asset_key(asset.get("pid"), str(asset.get("url") or ""))
+            if capture is not None:
+                visit_id = capture.channel.record_direct_visit(
+                    source="cdn_direct",
+                    stage="note_image",
+                    rule=WEIBO_CONTENT_IMAGE_RULE,
+                    subject_id=note_id,
+                    trigger=None,
+                    status=200,
+                    asset_key=asset_key,
+                    sha256=digest,
+                )
+                refs = dict(record.get("content_visit_refs") or {})
+                refs["images"] = [*list(refs.get("images") or []), visit_id]
+                record["content_visit_refs"] = refs
             fetched_assets.append(
                 {
                     **asset,
@@ -444,14 +475,11 @@ class WeiboCrawler:
                 int(failed_asset.get("attempts") or 1),
             ) from exc
 
-
     async def create_weibo_client(self, httpx_proxy: Optional[str]) -> WeiboClient:
-        """Create xhs client"""
-        logger.info("[WeiboCrawler.create_weibo_client] Begin create weibo API client ...")
-        cookie_str, cookie_dict = await self.ports.client.convert_browser_context_cookies(
-            self.browser_context,
-            urls=self.cookie_urls,
-        )
+        """正文图只带浏览器 UA。代理参数保留调用签名，图片请求不使用它。"""
+
+        logger.info("[WeiboCrawler.create_weibo_client] Begin create weibo image client")
+        _ = httpx_proxy
         capture = self._capture
         if capture is None:
             raise RuntimeError("weibo_capture_channel_missing")
@@ -462,22 +490,7 @@ class WeiboCrawler:
             subject_id=None,
             trigger=None,
         )
-        weibo_client_obj = WeiboClient(
-            proxy=httpx_proxy,
-            headers={
-                # #127/#211：与浏览器一致，经已登记的状态脚本读取 UA；图片请求沿用这里的 UA。
-                "User-Agent": str(user_agent or ""),
-                "Cookie": cookie_str,
-                "Origin": "https://m.weibo.cn",
-                "Referer": "https://m.weibo.cn",
-                "Content-Type": "application/json;charset=UTF-8",
-            },
-            playwright_page=self.context_page,
-            cookie_dict=cookie_dict,
-            ports=self.ports.client,
-            post_repair=self.ports.post_repair,
-        )
-        return weibo_client_obj
+        return WeiboClient(user_agent=str(user_agent or ""), ports=self.ports.client)
 
     async def launch_browser(
         self,
@@ -530,76 +543,6 @@ class WeiboCrawler:
             chromium = playwright.chromium
             return await self.launch_browser(chromium, playwright_proxy, user_agent, headless)
 
-    async def get_note_full_text(self, note_item: Dict) -> Dict:
-        """
-        Get full text content of a post
-        If the post content is truncated (isLongText=True), request the detail API to get complete content
-        :param note_item: Post data, contains mblog field
-        :return: Updated post data
-        """
-        mblog = note_item.get("mblog", {})
-        if not mblog:
-            return note_item
-
-        # Check if it's a long text
-        is_long_text = mblog.get("isLongText", False)
-        if not is_long_text:
-            mblog["content_detail_status"] = "detail_observed"
-            mblog["content_detail_source"] = "search_mblog_complete"
-            return note_item
-
-        note_id = str(mblog.get("id") or "")
-        if not note_id:
-            raise WeiboFullTextFetchError(note_id, "missing_note_id", attempts=1)
-        if not self.config.ENABLE_WEIBO_FULL_TEXT:
-            raise WeiboFullTextFetchError(note_id, "full_text_disabled", attempts=1)
-
-        try:
-            logger.info(f"[WeiboCrawler.get_note_full_text] Fetching full text for note: {note_id}")
-            full_note = await self.wb_client.get_note_info_by_id(note_id)
-            if full_note and full_note.get("mblog"):
-                # Replace original content with complete content
-                note_item["mblog"] = full_note["mblog"]
-                note_item["mblog"]["content_detail_status"] = "detail_observed"
-                note_item["mblog"]["content_detail_source"] = "mobile_detail"
-                logger.info(f"[WeiboCrawler.get_note_full_text] Successfully fetched full text for note: {note_id}")
-            else:
-                raise WeiboFullTextFetchError(note_id, "empty_detail_payload")
-
-            # Sleep after request to avoid rate limiting
-            await asyncio.sleep(self.config.CRAWLER_MAX_SLEEP_SEC)
-        except PlatformRuntimeError as ex:
-            logger.error(
-                f"[WeiboCrawler.get_note_full_text] Platform runtime failure for {note_id}: {ex}"
-            )
-            raise WeiboFullTextFetchError(
-                note_id,
-                ex.code,
-                runtime_blocking=True,
-            ) from ex
-        except httpx.TransportError as ex:
-            # #129：详情 Tenacity 重试用尽后仍是传输层失败：网络整体故障与候选无关，停止本轮，不按候选跳过。
-            logger.error(
-                f"[WeiboCrawler.get_note_full_text] Network unreachable for {note_id}: "
-                f"{type(ex).__name__}"
-            )
-            raise WeiboFullTextFetchError(
-                note_id,
-                "network_unreachable",
-                runtime_blocking=True,
-            ) from ex
-        except DataFetchError as ex:
-            logger.error(f"[WeiboCrawler.get_note_full_text] Failed to fetch full text for note {note_id}: {ex}")
-            raise WeiboFullTextFetchError(note_id, "detail_request_failed") from ex
-        except WeiboFullTextFetchError:
-            raise
-        except Exception as ex:
-            logger.error(f"[WeiboCrawler.get_note_full_text] Unexpected error for note {note_id}: {ex}")
-            raise WeiboFullTextFetchError(note_id, "unexpected_detail_failure") from ex
-
-        return note_item
-
-
     async def close(self):
         """Close browser context"""
         await self._close_capture()
@@ -612,16 +555,30 @@ class WeiboCrawler:
         logger.info("[WeiboCrawler.close] Browser context closed ...")
 
     async def update_weibo_note(self, note_item: Dict):
-        """纯投影完成后，沿原调用次序创建内容出口并写出。"""
-        item = weibo_store.update_weibo_note(
-            note_item, source_keyword=self.source_keyword,
-            current_timestamp=self.ports.current_timestamp,
-            save_data_option=self.config.SAVE_DATA_OPTION,
-        )
-        if item is None:
+        """写出已经投影的记录，或把 show/side_user 包投影后再写出。"""
+
+        if note_item.get("note_id") and note_item.get("content_detail_source") == "desktop_detail":
+            record = dict(note_item)
+        else:
+            parsed = weibo_store.parse_weibo_detail(
+                note_item.get("status") or note_item.get("mblog") or {},
+                note_item.get("side_user") or {},
+                mblogid=str(note_item.get("mblogid") or ""),
+                source_keyword=self.source_keyword,
+                current_timestamp=self.ports.current_timestamp,
+                visit_refs=note_item.get("content_visit_refs") or {},
+            )
+            record = parsed.record
+        if not record:
             return
-        logger.info(f"[store.weibo.update_weibo_note] weibo note id:{item['note_id']}, title:{item.get('content')[:24]} ...")
-        await self.ports.store_factory().store_content(content_item=item)
+        record["source_keyword"] = self.source_keyword or record.get("source_keyword") or ""
+        record["last_modify_ts"] = self.ports.current_timestamp()
+        logger.info(
+            "[store.weibo.update_weibo_note] weibo note id:%s images:%s",
+            record.get("note_id"),
+            record.get("image_count"),
+        )
+        await self.ports.store_factory().store_content(content_item=record)
 
     async def update_weibo_note_images(self, note_id: str, image_content_items: List[Dict]):
         return await self.ports.image_stager().store_post_images(note_id, image_content_items)

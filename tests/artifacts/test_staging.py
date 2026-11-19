@@ -62,12 +62,11 @@ async def test_weibo_http_404_preserves_terminal_status(monkeypatch) -> None:
     monkeypatch.setattr("trippostcollect.runtime.http.make_async_client", async_client_factory(404))
     client = object.__new__(weibo_client.WeiboClient)
     client.ports = weibo_dependencies(worker_config())[1].client
-    client.proxy = None
     client.timeout = 1
-    client._image_agent_host = "https://i1.wp.com/"
+    client.user_agent = "test-agent"
 
     with pytest.raises(ImageDownloadFetchError) as exc_info:
-        await client.get_note_image("https://wx.test/missing.jpg")
+        await client.get_note_image("https://wx1.sinaimg.cn/large/missing.jpg")
 
     assert exc_info.value.code == "image_source_unavailable"
     assert exc_info.value.http_status == 404

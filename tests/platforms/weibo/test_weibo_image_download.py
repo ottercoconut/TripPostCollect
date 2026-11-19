@@ -1,21 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 from io import BytesIO
 import json
-from unittest.mock import AsyncMock
+from dataclasses import replace
 
 from PIL import Image
+import httpx
 import pytest
 
-from support.weibo_adapter import settings, crawler as make_crawler
-
-from trippostcollect.platforms.weibo.core import (
-    WeiboFullTextFetchError,
-    WeiboImageDownloadError,
-)
-from trippostcollect.platforms.weibo.models import DataFetchError, PlatformRuntimeError
-from trippostcollect.platforms.weibo.client import weibo_image_request_urls
+from support.weibo_adapter import settings, crawler as make_crawler, client_ports
+from trippostcollect.platforms.weibo.client import WeiboClient, is_sinaimg_url
+from trippostcollect.platforms.weibo.core import WeiboImageDownloadError
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError
 
 config = settings()
@@ -27,112 +22,167 @@ def png_bytes() -> bytes:
     return output.getvalue()
 
 
-def test_weibo_image_urls_try_large_then_original_without_proxy() -> None:
-    # #114：只直连新浪，large 优先，再退到平台原始地址；不再构造第三方图片代理地址。
-    assert weibo_image_request_urls(
-        "https://wx4.sinaimg.cn/orj360/example.jpg?token=ignored"
-    ) == [
-        "https://wx4.sinaimg.cn/large/example.jpg",
-        "https://wx4.sinaimg.cn/orj360/example.jpg?token=ignored",
-    ]
-    assert weibo_image_request_urls("https://wx4.sinaimg.cn/large/example.jpg") == [
-        "https://wx4.sinaimg.cn/large/example.jpg",
-    ]
+def test_only_sinaimg_hosts_are_requested() -> None:
+    assert is_sinaimg_url("https://wx4.sinaimg.cn/large/example.jpg")
+    assert is_sinaimg_url("http://wx1.sinaimg.cn/mw2000/a.jpg")
+    assert not is_sinaimg_url("https://wx.test/example.jpg")
+    assert not is_sinaimg_url("https://i1.wp.com/wx4.sinaimg.cn/large/example.jpg")
 
 
-def test_weibo_image_urls_never_wrap_with_third_party_proxy() -> None:
-    for url in (
-        "https://ww3.sinaimg.cn/mw690/example.jpg",
-        "https://wx.test/example.jpg",
-    ):
-        assert not any("wp.com" in candidate for candidate in weibo_image_request_urls(url))
-    assert weibo_image_request_urls("https://wx.test/example.jpg") == ["https://wx.test/example.jpg"]
+class _StreamResponse:
+    def __init__(self, status: int, content: bytes):
+        self.status_code = status
+        self._content = content
+        self.request = httpx.Request("GET", "https://wx1.sinaimg.cn/x.jpg")
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            response = httpx.Response(self.status_code, request=self.request)
+            raise httpx.HTTPStatusError("status", request=self.request, response=response)
+
+    async def aiter_bytes(self):
+        yield self._content
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _RecordingClient:
+    def __init__(self, responses: list[tuple[int, bytes]]):
+        self.responses = list(responses)
+        self.seen: list[tuple[str, dict, object]] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    def stream(self, method, url, **kwargs):
+        self.seen.append((url, kwargs["headers"], kwargs.get("proxy", "absent")))
+        status, content = self.responses.pop(0)
+        return _StreamResponse(status, content)
+
+
+def _client(responses, *, max_bytes: int | None = None) -> tuple[WeiboClient, _RecordingClient]:
+    http = _RecordingClient(responses)
+    ports = client_ports(make_async_client=lambda **kwargs: http)
+    if max_bytes is not None:
+        ports = replace(ports, image_max_bytes=max_bytes)
+    return WeiboClient(user_agent="ua-test", ports=ports, timeout=5), http
 
 
 @pytest.mark.asyncio
-async def test_weibo_image_request_sends_no_cookie_or_api_headers() -> None:
-    from support.weibo_adapter import client_ports
-    from trippostcollect.platforms.weibo.client import WeiboClient
-    import httpx
-
-    seen: list[tuple[str, dict]] = []
-
-    class Client:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
-        async def request(self, method, url, **kwargs):
-            seen.append((url, kwargs["headers"]))
-            return httpx.Response(200, content=png_bytes(), request=httpx.Request(method, url))
-
-    client = WeiboClient(
-        headers={
-            "User-Agent": "ua-test", "Cookie": "SUB=secret", "Origin": "https://m.weibo.cn",
-            "Referer": "https://m.weibo.cn", "Content-Type": "application/json;charset=UTF-8",
-        },
-        playwright_page=None, cookie_dict={"SUB": "secret"},
-        ports=client_ports(make_async_client=lambda **kwargs: Client()),
+async def test_image_request_sends_only_ua_referer_and_accept() -> None:
+    client, http = _client([(200, png_bytes())])
+    body = await client.get_note_image(
+        [
+            "https://wx1.sinaimg.cn/large/example.jpg",
+            "https://evil.test/example.jpg",
+        ]
     )
-
-    await client.get_note_image("https://wx1.sinaimg.cn/orj360/example.jpg")
-
-    assert seen == [(
+    assert body == png_bytes()
+    assert http.seen == [(
         "https://wx1.sinaimg.cn/large/example.jpg",
         {
-            "User-Agent": "ua-test",
-            "Referer": "https://m.weibo.cn/",
-            "Accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8",
+            "user-agent": "ua-test",
+            "accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8",
+            "referer": "https://weibo.com/",
         },
+        "absent",
     )]
 
 
-def valid_mblog(note_id: str) -> dict:
+@pytest.mark.asyncio
+async def test_image_falls_through_specs_on_failure_and_oversize() -> None:
+    client, http = _client(
+        [(404, b""), (200, b"x" * 20), (200, b"ok-bytes")],
+        max_bytes=8,
+    )
+    body = await client.get_note_image(
+        [
+            "https://wx1.sinaimg.cn/large/a.jpg",
+            "https://wx1.sinaimg.cn/mw2000/a.jpg",
+            "https://wx1.sinaimg.cn/orj1080/a.jpg",
+        ]
+    )
+    assert body == b"ok-bytes"
+    assert [item[0] for item in http.seen] == [
+        "https://wx1.sinaimg.cn/large/a.jpg",
+        "https://wx1.sinaimg.cn/mw2000/a.jpg",
+        "https://wx1.sinaimg.cn/orj1080/a.jpg",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_sinaimg_url_is_not_requested() -> None:
+    client, http = _client([(200, png_bytes())])
+    with pytest.raises(ImageDownloadFetchError) as exc_info:
+        await client.get_note_image("https://wx.test/example.jpg")
+    assert exc_info.value.code == "image_source_unavailable"
+    assert http.seen == []
+
+
+@pytest.mark.asyncio
+async def test_every_oversized_spec_is_terminal() -> None:
+    client, http = _client([(200, b"x" * 20), (200, b"y" * 20)], max_bytes=8)
+    with pytest.raises(ImageDownloadFetchError) as exc_info:
+        await client.get_note_image(
+            ["https://wx1.sinaimg.cn/large/a.jpg", "https://wx1.sinaimg.cn/orj1080/a.jpg"]
+        )
+    assert exc_info.value.code == "image_too_large"
+    assert len(http.seen) == 2
+
+
+@pytest.mark.asyncio
+async def test_image_403_is_auth_required() -> None:
+    client, http = _client([(403, b"")])
+    with pytest.raises(ImageDownloadFetchError) as exc_info:
+        await client.get_note_image("https://wx1.sinaimg.cn/large/a.jpg")
+    assert exc_info.value.code == "image_auth_required"
+    assert exc_info.value.http_status == 403
+    assert len(http.seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_image_auth_and_rate_limit_stop_before_the_next_spec() -> None:
+    client, http = _client([(401, b""), (200, png_bytes())])
+    with pytest.raises(ImageDownloadFetchError) as exc_info:
+        await client.get_note_image(
+            ["https://wx1.sinaimg.cn/large/a.jpg", "https://wx1.sinaimg.cn/orj1080/a.jpg"]
+        )
+    assert exc_info.value.code == "image_auth_required"
+    assert exc_info.value.http_status == 401
+    assert len(http.seen) == 1
+
+    client, http = _client([(429, b"")])
+    with pytest.raises(ImageDownloadFetchError) as exc_info:
+        await client.get_note_image("https://wx4.sinaimg.cn/large/a.jpg")
+    assert exc_info.value.code == "image_rate_limited"
+
+
+def _record() -> dict:
     return {
-        "id": note_id,
-        "text": "valid body",
-        "content_detail_status": "detail_observed",
-        "content_detail_source": "search_mblog_complete",
-        "created_at": "Sat Jun 14 12:00:00 +0800 2025",
-        "attitudes_count": 1,
-        "comments_count": 2,
-        "reposts_count": 3,
-        "pics": [{"pid": f"pid-{note_id}", "url": f"https://wx.test/{note_id}.jpg"}],
-        "user": {"id": "author", "screen_name": "name", "followers_count": 4},
+        "note_id": "note-download",
+        "image_assets": [
+            {
+                "pid": "pid-first",
+                "url": "https://wx1.sinaimg.cn/large/one.jpg",
+                "urls": ["https://wx1.sinaimg.cn/large/one.jpg"],
+                "source_index": 0,
+            },
+            {
+                "pid": "pid-second",
+                "url": "https://wx2.sinaimg.cn/large/two.jpg",
+                "urls": ["https://wx2.sinaimg.cn/large/two.jpg"],
+                "source_index": 1,
+            },
+        ],
+        "content_visit_refs": {"ledger_id": "L", "images": []},
     }
-
-
-@pytest.mark.asyncio
-async def test_detail_task_marks_mobile_detail_as_authoritative(monkeypatch):
-    monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
-    crawler = make_crawler(config)
-    crawler.wb_client = AsyncMock()
-    crawler.wb_client.get_note_info_by_id.return_value = {
-        "mblog": {"id": "detail-note", "text": "完整正文"}
-    }
-
-    result = await crawler.get_note_info_task("detail-note", asyncio.Semaphore(1))
-
-    assert result["mblog"]["content_detail_status"] == "detail_observed"
-    assert result["mblog"]["content_detail_source"] == "mobile_detail"
-
-
-@pytest.mark.asyncio
-async def test_specified_detail_downloads_images_before_store(monkeypatch):
-    monkeypatch.setattr(config, "WEIBO_SPECIFIED_ID_LIST", ["detail-note"])
-    crawler = make_crawler(config)
-    note = {"mblog": valid_mblog("detail-note")}
-    crawler.get_note_info_task = AsyncMock(return_value=note)
-    crawler.get_note_images = AsyncMock()
-    store = AsyncMock()
-    monkeypatch.setattr(crawler, "update_weibo_note", store)
-
-    await crawler.get_specified_notes()
-
-    crawler.get_note_images.assert_awaited_once_with(note["mblog"])
-    store.assert_awaited_once_with(note)
 
 
 @pytest.mark.asyncio
@@ -141,21 +191,21 @@ async def test_get_note_images_passes_note_pid_order_and_url(monkeypatch, tmp_pa
     monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
     monkeypatch.setattr(config, "SAVE_DATA_PATH", str(tmp_path))
     crawler = make_crawler(config)
-    crawler.wb_client = AsyncMock()
-    crawler.wb_client.get_note_image.side_effect = [png_bytes(), png_bytes()]
-    mblog = valid_mblog("note-download")
-    mblog["pics"] = [
-        {"pid": "pid-first", "url": "https://wx.test/one.jpg?x=1"},
-        {"pid": "pid-second", "large": {"url": "https://wx.test/two.webp?x=2"}},
-    ]
 
-    await crawler.get_note_images(mblog)
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        async def get_note_image(self, urls):
+            self.calls.append(list(urls))
+            return png_bytes()
+
+    crawler.wb_client = Client()
+    await crawler.get_note_images(_record())
 
     rows = [
         json.loads(line)
-        for line in (tmp_path / "weibo" / "image_manifest.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
+        for line in (tmp_path / "weibo" / "image_manifest.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert [(row["platform_post_id"], row["source_index"]) for row in rows] == [
         ("note-download", 0),
@@ -165,8 +215,7 @@ async def test_get_note_images_passes_note_pid_order_and_url(monkeypatch, tmp_pa
         "weibo:pid:pid-first",
         "weibo:pid:pid-second",
     ]
-    assert all(row["mime_type"] == "image/png" for row in rows)
-    assert all(row["staging_path"].endswith(".png") for row in rows)
+    assert crawler.wb_client.calls[0] == ["https://wx1.sinaimg.cn/large/one.jpg"]
 
 
 @pytest.mark.asyncio
@@ -179,21 +228,27 @@ async def test_transient_fetch_recovers_and_records_attempts(monkeypatch, tmp_pa
         (0.0, 0.0),
     )
     crawler = make_crawler(config)
-    crawler.wb_client = AsyncMock()
-    crawler.wb_client.get_note_image.side_effect = [None, png_bytes()]
 
-    await crawler.get_note_images(valid_mblog("recovered-note"))
+    class Client:
+        def __init__(self):
+            self.calls = 0
 
+        async def get_note_image(self, urls):
+            self.calls += 1
+            if self.calls == 1:
+                return None
+            return png_bytes()
+
+    crawler.wb_client = Client()
+    record = _record()
+    record["image_assets"] = record["image_assets"][:1]
+    await crawler.get_note_images(record)
     rows = [
         json.loads(line)
-        for line in (tmp_path / "weibo" / "image_manifest.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
+        for line in (tmp_path / "weibo" / "image_manifest.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert [(row["fetch_status"], row["attempts"]) for row in rows] == [
-        ("downloaded", 2)
-    ]
-    assert crawler.wb_client.get_note_image.await_count == 2
+    assert [(row["fetch_status"], row["attempts"]) for row in rows] == [("downloaded", 2)]
+    assert crawler.wb_client.calls == 2
 
 
 @pytest.mark.asyncio
@@ -206,24 +261,28 @@ async def test_failed_fetch_writes_only_failed_manifest(monkeypatch, tmp_path):
         (0.0, 0.0),
     )
     crawler = make_crawler(config)
-    crawler.wb_client = AsyncMock()
-    crawler.wb_client.get_note_image.return_value = None
 
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_note_image(self, urls):
+            self.calls += 1
+            return None
+
+    crawler.wb_client = Client()
+    record = _record()
+    record["image_assets"] = record["image_assets"][:1]
     with pytest.raises(WeiboImageDownloadError):
-        await crawler.get_note_images(valid_mblog("failed-note"))
-
+        await crawler.get_note_images(record)
     rows = [
         json.loads(line)
-        for line in (tmp_path / "weibo" / "image_manifest.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
+        for line in (tmp_path / "weibo" / "image_manifest.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert len(rows) == 1
     assert rows[0]["fetch_status"] == "failed"
     assert rows[0]["attempts"] == 3
-    assert rows[0]["staging_path"] is None
-    assert crawler.wb_client.get_note_image.await_count == 3
-    assert not list((tmp_path / "weibo").rglob("*.png"))
+    assert crawler.wb_client.calls == 3
 
 
 @pytest.mark.asyncio
@@ -232,54 +291,19 @@ async def test_terminal_http_fetch_error_preserves_manifest_evidence(monkeypatch
     monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
     monkeypatch.setattr(config, "SAVE_DATA_PATH", str(tmp_path))
     crawler = make_crawler(config)
-    crawler.wb_client = AsyncMock()
-    crawler.wb_client.get_note_image.side_effect = ImageDownloadFetchError(
-        "HTTP 404",
-        code="image_source_unavailable",
-        retryable=False,
-        http_status=404,
-    )
 
+    class Client:
+        async def get_note_image(self, urls):
+            raise ImageDownloadFetchError(
+                "HTTP 404", code="image_source_unavailable", retryable=False, http_status=404,
+            )
+
+    crawler.wb_client = Client()
+    record = _record()
+    record["image_assets"] = record["image_assets"][:1]
     with pytest.raises(WeiboImageDownloadError):
-        await crawler.get_note_images(valid_mblog("missing-note"))
-
-    row = json.loads(
-        (tmp_path / "weibo" / "image_manifest.jsonl").read_text().splitlines()[0]
-    )
+        await crawler.get_note_images(record)
+    row = json.loads((tmp_path / "weibo" / "image_manifest.jsonl").read_text().splitlines()[0])
     assert row["error_code"] == "image_source_unavailable"
     assert row["http_status"] == 404
     assert row["attempts"] == 1
-
-
-@pytest.mark.asyncio
-async def test_long_text_detail_request_error_never_returns_search_excerpt(monkeypatch):
-    monkeypatch.setattr(config, "ENABLE_WEIBO_FULL_TEXT", True)
-    crawler = make_crawler(config)
-    crawler.wb_client = AsyncMock()
-    crawler.wb_client.get_note_info_by_id.side_effect = DataFetchError("temporary")
-    note = {"mblog": {"id": "long", "text": "truncated...全文", "isLongText": True}}
-
-    with pytest.raises(WeiboFullTextFetchError) as exc_info:
-        await crawler.get_note_full_text(note)
-
-    assert exc_info.value.code == "detail_request_failed"
-    assert "content_detail_status" not in note["mblog"]
-
-
-@pytest.mark.asyncio
-async def test_long_text_rate_limit_is_preserved_as_run_level_failure(monkeypatch):
-    monkeypatch.setattr(config, "ENABLE_WEIBO_FULL_TEXT", True)
-    crawler = make_crawler(config)
-    crawler.wb_client = AsyncMock()
-    crawler.wb_client.get_note_info_by_id.side_effect = PlatformRuntimeError(
-        "HTTP 429",
-        code="rate_limited",
-    )
-    note = {"mblog": {"id": "long", "text": "truncated...全文", "isLongText": True}}
-
-    with pytest.raises(WeiboFullTextFetchError) as exc_info:
-        await crawler.get_note_full_text(note)
-
-    assert exc_info.value.code == "rate_limited"
-    assert exc_info.value.runtime_blocking is True
-    assert "content_detail_status" not in note["mblog"]

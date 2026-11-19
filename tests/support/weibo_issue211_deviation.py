@@ -2,7 +2,8 @@
 
 `tests/platforms/weibo/test_weibo_offline_drive.py` 里以下三组仍按移动搜索的请求路径、
 `mobile_detail` / `search_mblog_complete` 正文来源和 `empty_page` 耗尽细节固化预期。
-详情点击、`statuses/show` 与正文图留到下一段。component lane 不接受 skip，因此这三组用例从
+第二段已接上详情点击、`statuses/show` 与 CDN 正文图，并删除移动详情修复链用例。
+component lane 不接受 skip，因此这三组用例从
 `test_weibo_offline_drive.py` 删除，而不是标成跳过：
 
 - test_drive_requests_artifacts_and_events

@@ -17,7 +17,7 @@ from urllib.parse import quote, urlsplit
 from trippostcollect.platforms.weibo.models import DataFetchError, PlatformRuntimeError
 from trippostcollect.platforms.weibo.page_scripts import STATE_SCRIPTS, read_dom
 from trippostcollect.runtime.human_flow import human_scroll, load_behavior_profile
-from trippostcollect.runtime.page_capture import PageCaptureChannel
+from trippostcollect.runtime.page_capture import CaptureRule, PageCaptureChannel
 from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_path
 
 
@@ -63,6 +63,26 @@ WEIBO_RATE_LIMIT_LOCATORS = (
     "text=访问频繁",
     "text=操作过于频繁",
 )
+API_RESOURCE_TYPES = frozenset({"xhr", "fetch"})
+WEIBO_SHOW_RULE = CaptureRule(
+    name="weibo.statuses_show",
+    stage="note_detail",
+    method="GET",
+    host="weibo.com",
+    path="/ajax/statuses/show",
+    resource_types=API_RESOURCE_TYPES,
+    body="json",
+)
+WEIBO_SIDE_USER_RULE = CaptureRule(
+    name="weibo.side_user",
+    stage="creator_profile",
+    method="GET",
+    host="weibo.com",
+    path="/ajax/side/cards/sideUser",
+    resource_types=API_RESOURCE_TYPES,
+    body="json",
+)
+WEIBO_CAPTURE_RULES = (WEIBO_SHOW_RULE, WEIBO_SIDE_USER_RULE)
 
 
 class WeiboSearchPageInvalid(DataFetchError):
@@ -244,6 +264,7 @@ class WeiboPageCapture:
         self.page: Any = None
         self.trigger_id: str | None = None
         self.search_session = uuid.uuid4().hex
+        self.last_search_visit_id = ""
         self.closed = False
 
     @classmethod
@@ -259,9 +280,11 @@ class WeiboPageCapture:
         channel = PageCaptureChannel(
             context,
             platform="weibo",
-            rules=(),
+            rules=WEIBO_CAPTURE_RULES,
             ledger=ledger,
             state_scripts=STATE_SCRIPTS,
+            # 详情与作者是同一个新标签。打开时就标成 detail，避免响应先于二次 attach 被记成 new_tab。
+            new_page_role="detail",
         )
         return cls(channel)
 
@@ -331,6 +354,7 @@ class WeiboPageCapture:
             has_more=snapshot.has_more,
         )
         snapshot.visit_id = visit_id
+        self.last_search_visit_id = visit_id
         logger.info(
             "[WeiboPageCapture.read_search] page=%s cards=%s has_more=%s stop=%s",
             page_number,

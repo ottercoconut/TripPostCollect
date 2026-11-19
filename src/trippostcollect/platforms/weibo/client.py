@@ -1,208 +1,100 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2025 relakkes@gmail.com
-#
-# This file is part of MediaCrawler project.
-# Repository: https://github.com/NanmiCoder/MediaCrawler/blob/main/media_platform/weibo/client.py
-# GitHub: https://github.com/NanmiCoder
-# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-#
+"""微博正文图 CDN 直连。
 
-# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
+只请求 ``*.sinaimg.cn``。请求头只有浏览器 UA、站点 Referer 和图片 Accept。
+不带 Cookie、Origin、Content-Type，不经代理。移动详情已删除。
+"""
 
-# -*- coding: utf-8 -*-
-# @Author  : relakkes@gmail.com
-# @Time    : 2023/12/23 15:40
-# @Desc    : Weibo crawler API request client
+from __future__ import annotations
 
-
-# TripPostCollect T05：迁自 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303；仅拆分职责与注入依赖。
-import asyncio
-import json
 import logging
-import re
-from typing import Dict, List, Optional
+from typing import Iterable
 from urllib.parse import urlparse
 
 import httpx
-from playwright.async_api import BrowserContext, Page, Error as PlaywrightError
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_fixed
 
 from trippostcollect.application.contracts import WeiboClientPorts
-from .models import DataFetchError, PlatformRuntimeError
-from .parser import _find_weibo_detail
 
 logger = logging.getLogger("TripPostCollect")
 
-# 图片请求只带 UA、移动站 Referer 与图片 Accept：不带 Cookie，也不经第三方图片代理（#114）。
-WEIBO_IMAGE_REFERER = "https://m.weibo.cn/"
+WEIBO_IMAGE_REFERER = "https://weibo.com/"
 WEIBO_IMAGE_ACCEPT = "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8"
-# 平台明确拒绝的状态直接归为运行级阻断，不重试（#114）。
-WEIBO_BLOCKING_STATUS_CODES = {
-    401: "login_required",
-    403: "login_required",
-    418: "blocked_or_forbidden",
-    432: "blocked_or_forbidden",
-    429: "rate_limited",
-}
+WEIBO_CONTENT_IMAGE_RULE = "weibo.content_image"
+_BLOCKING_IMAGE_CODES = frozenset({"image_auth_required", "image_rate_limited"})
 
 
-def raise_for_weibo_status(status_code: int, label: str) -> None:
-    code = WEIBO_BLOCKING_STATUS_CODES.get(int(status_code))
-    if code:
-        raise PlatformRuntimeError(f"{label} HTTP {status_code}", code=code)
-
-
-def _retryable_detail_error(exc: BaseException) -> bool:
-    return not isinstance(exc, PlatformRuntimeError)
-
-
-def _response_summary(response: httpx.Response) -> str:
-    # 响应原文可能含作者头像等字段，日志和异常只带状态码与长度（#114）。
-    return f"status={response.status_code} length={len(response.content or b'')}"
-
-
-def weibo_image_request_urls(image_url: str) -> List[str]:
-    """Return direct candidates for one authoritative image URL: sinaimg large first, then the original."""
-
+def is_sinaimg_url(image_url: str) -> bool:
     parsed = urlparse(str(image_url or "").strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        return []
-    candidates: List[str] = []
-    if parsed.hostname.lower().endswith(".sinaimg.cn"):
-        path_parts = [part for part in parsed.path.split("/") if part]
-        if len(path_parts) >= 2:
-            path_parts[0] = "large"
-        normalized_path = "/" + "/".join(path_parts)
-        candidates.append(parsed._replace(path=normalized_path, query="", fragment="").geturl())
-    candidates.append(parsed.geturl())
-    return list(dict.fromkeys(candidates))
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or not host:
+        return False
+    return host == "sinaimg.cn" or host.endswith(".sinaimg.cn")
 
 
 class WeiboClient:
+    """正文图 CDN。``user_agent`` 来自浏览器 ``navigator.userAgent``。"""
 
-    def __init__(
-        self,
-        timeout=60,  # If media crawling is enabled, Weibo images need a longer timeout
-        proxy=None,
-        *,
-        headers: Dict[str, str],
-        playwright_page: Page,
-        cookie_dict: Dict[str, str],
-        ports: WeiboClientPorts,
-        post_repair: bool = False,
-    ):
-        self.proxy = proxy
-        self.timeout = timeout
-        self.headers = headers
-        self._host = "https://m.weibo.cn"
-        self.cookie_urls = [self._host]
-        self.playwright_page = playwright_page
-        self.cookie_dict = cookie_dict
+    def __init__(self, *, user_agent: str, ports: WeiboClientPorts, timeout: float = 60):
+        self.user_agent = str(user_agent or "")
         self.ports = ports
-        self.post_repair = post_repair
+        self.timeout = timeout
 
-    async def update_cookies(self, browser_context: BrowserContext, urls: Optional[List[str]] = None):
-        """
-        Update cookies from browser context
-        :param browser_context: Browser context
-        :param urls: Optional list of URLs to filter cookies (e.g., ["https://m.weibo.cn"])
-                     If provided, only cookies for these URLs will be retrieved
-        """
-        cookie_urls = urls or self.cookie_urls
-        cookie_str, cookie_dict = await self.ports.convert_browser_context_cookies(
-            browser_context,
-            urls=cookie_urls,
-        )
-        self.headers["Cookie"] = cookie_str
-        self.cookie_dict = cookie_dict
-        logger.info(
-            f"[WeiboClient.update_cookies] Cookie updated successfully for {cookie_urls}, total: {len(cookie_dict)} cookies"
-        )
+    async def get_note_image(self, image_urls: str | Iterable[str]) -> bytes:
+        """按给定顺序请求规格。首选失败或超限时退到下一规格。"""
 
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_fixed(1),
-        retry=retry_if_exception(_retryable_detail_error), reraise=True,
-    )
-    async def _get_note_info_direct(self, note_id: str) -> Dict:
-        """
-        Get note details by note ID
-        :param note_id:
-        :return:
-        """
-        url = f"{self._host}/detail/{note_id}"
-        async with self.ports.make_async_client(proxy=self.proxy) as client:
-            response = await client.request("GET", url, timeout=self.timeout, headers=self.headers)
-            if response.status_code != 200:
-                raise_for_weibo_status(response.status_code, "get weibo detail")
-                raise DataFetchError(f"get weibo detail err: {_response_summary(response)}")
-            match = re.search(r'var \$render_data = (\[.*?\])\[0\]', response.text, re.DOTALL)
-            if match:
-                render_data_json = match.group(1)
-                render_data_dict = json.loads(render_data_json)
-                note_detail = render_data_dict[0].get("status")
-                note_item = {"mblog": note_detail}
-                return note_item
-            else:
-                raise DataFetchError(
-                    "get weibo detail err: $render_data value not found"
-                )
-
-    async def get_note_image(self, image_url: str) -> bytes:
-        candidates = weibo_image_request_urls(image_url)
+        if isinstance(image_urls, str):
+            raw_urls = [image_urls]
+        else:
+            raw_urls = [str(url) for url in image_urls]
+        candidates = [url for url in raw_urls if is_sinaimg_url(url)]
         if not candidates:
             raise self.ports.image_error(
                 "invalid Weibo image URL",
                 code="image_source_unavailable",
                 retryable=False,
             )
+        headers = {
+            "user-agent": self.user_agent,
+            "accept": WEIBO_IMAGE_ACCEPT,
+            "referer": WEIBO_IMAGE_REFERER,
+        }
         last_error: Exception | None = None
-        headers = {"Referer": WEIBO_IMAGE_REFERER, "Accept": WEIBO_IMAGE_ACCEPT}
-        user_agent = (getattr(self, "headers", None) or {}).get("User-Agent")
-        if user_agent:
-            headers = {"User-Agent": user_agent, **headers}
         for final_uri in candidates:
             try:
-                async with self.ports.make_async_client(proxy=self.proxy) as client:
-                    response = await client.request(
-                        "GET",
-                        final_uri,
-                        timeout=self.timeout,
-                        headers=headers,
-                    )
-                response.raise_for_status()
-                if len(response.content) > self.ports.image_max_bytes:
-                    last_error = self.ports.image_error(
-                        "Weibo image exceeded byte limit",
-                        code="image_too_large",
-                        retryable=False,
-                        http_status=response.status_code,
-                    )
-                    continue
-                return response.content
+                async with self.ports.make_async_client(proxy=None) as client:
+                    async with client.stream(
+                        "GET", final_uri, timeout=self.timeout, headers=headers,
+                    ) as response:
+                        response.raise_for_status()
+                        chunks: list[bytes] = []
+                        size = 0
+                        async for chunk in response.aiter_bytes():
+                            size += len(chunk)
+                            if size > self.ports.image_max_bytes:
+                                last_error = self.ports.image_error(
+                                    "Weibo image exceeded byte limit",
+                                    code="image_too_large",
+                                    retryable=False,
+                                    http_status=response.status_code,
+                                )
+                                chunks = []
+                                break
+                            chunks.append(chunk)
+                        else:
+                            return b"".join(chunks)
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
-                logger.error(
-                    f"[WeiboClient.get_note_image] HTTP {status} for {exc.request.url}"
-                )
+                logger.error("[WeiboClient.get_note_image] HTTP %s", status)
                 classified = self.ports.classified_http_image_error(status, f"HTTP {status}")
-                if classified.code in {"image_auth_required", "image_rate_limited"}:
+                if classified.code in _BLOCKING_IMAGE_CODES:
                     raise classified from exc
                 last_error = classified
-            except httpx.HTTPError as exc:  # transport error without an HTTP response
+            except httpx.HTTPError as exc:
                 logger.error(
-                    f"[WeiboClient.get_note_image] {exc.__class__.__name__} "
-                    f"for {exc.request.url} - {exc}"
+                    "[WeiboClient.get_note_image] %s",
+                    exc.__class__.__name__,
                 )
                 last_error = self.ports.image_error(
-                    str(exc), code="image_download_retryable", retryable=True
+                    str(exc), code="image_download_retryable", retryable=True,
                 )
         if last_error is not None:
             raise last_error
@@ -211,111 +103,3 @@ class WeiboClient:
             code="image_source_unavailable",
             retryable=False,
         )
-
-    async def get_note_info_by_id(self, note_id: str) -> Dict:
-        """修复轮显式走原浏览器回退；普通详情保留原 Tenacity 层。"""
-        if self.post_repair:
-            return await self._get_note_info_repair(note_id)
-        return await self._get_note_info_direct(note_id)
-
-    async def _get_note_info_repair(self, note_id: str) -> Dict:
-        original_error: Exception | None = None
-        try:
-            result = await self._get_note_info_direct(note_id)
-            original_detail = _find_weibo_detail(result, note_id)
-            if original_detail is not None and str(original_detail.get("text") or "").strip():
-                return {"mblog": original_detail}
-        except PlatformRuntimeError:
-            raise
-        except DataFetchError as exc:
-            original_error = exc
-
-        page = getattr(self, "playwright_page", None)
-        if page is None:
-            if original_error is not None:
-                raise original_error
-            raise DataFetchError(
-                "get weibo detail err: browser detail fallback has no Playwright page"
-            )
-        timeout_ms = self.ports.detail_timeout()
-        lock = getattr(self, "_trippostcollect_browser_detail_lock", None)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._trippostcollect_browser_detail_lock = lock
-        # 回退只读同一登录浏览器打开的精确 detail 页的页面状态；不经 Playwright 请求接口（L3，#114）。
-        attempts: list[str] = []
-        page_state = None
-        try:
-            async with lock:
-                response = await page.goto(
-                    f"https://m.weibo.cn/detail/{note_id}",
-                    wait_until="domcontentloaded",
-                    timeout=timeout_ms,
-                )
-                status = None if response is None else int(response.status)
-                if status is not None:
-                    raise_for_weibo_status(status, "get weibo browser detail")
-                if status is not None and not 200 <= status < 300:
-                    attempts.append(f"page_state:http_{status}")
-                else:
-                    await page.wait_for_timeout(min(2_000, timeout_ms))
-                    page_state = await page.evaluate(
-                    """(targetId) => {
-                        const roots = [
-                            window.$render_data,
-                            window.__INITIAL_STATE__,
-                            window.__NEXT_DATA__,
-                        ];
-                        const seen = new WeakSet();
-                        const walk = (value, depth) => {
-                            if (depth > 12 || value === null || value === undefined) return null;
-                            if (typeof value !== 'object') return null;
-                            if (seen.has(value)) return null;
-                            seen.add(value);
-                            const identity = String(value.id || value.idstr || value.mid || '');
-                            const shaped = ['text', 'pics', 'user', 'created_at', 'isLongText']
-                                .some(key => Object.prototype.hasOwnProperty.call(value, key));
-                            if (identity === String(targetId) && shaped) return value;
-                            for (const nested of Object.values(value)) {
-                                const found = walk(nested, depth + 1);
-                                if (found) return found;
-                            }
-                            return null;
-                        };
-                        for (const root of roots) {
-                            const found = walk(root, 0);
-                            if (found) return found;
-                        }
-                        for (const script of document.querySelectorAll('script')) {
-                            const text = (script.textContent || '').trim();
-                            if (!text || (!text.startsWith('{') && !text.startsWith('['))) continue;
-                            try {
-                                const found = walk(JSON.parse(text), 0);
-                                if (found) return found;
-                            } catch (_) {
-                                continue;
-                            }
-                        }
-                        return null;
-                    }""",
-                        note_id,
-                    )
-                    attempts.append("page_state:empty_detail")
-        except PlaywrightError as exc:
-            raise DataFetchError(
-                "get weibo detail err: browser detail navigation failed "
-                f"({type(exc).__name__})"
-            ) from (original_error or exc)
-
-        detail = _find_weibo_detail(page_state, note_id)
-        if detail is None or not str(detail.get("text") or "").strip():
-            raise DataFetchError(
-                "get weibo detail err: browser fallbacks have no matching full mblog; "
-                f"attempts={attempts}"
-            ) from original_error
-        detail = dict(detail)
-        detail["id"] = str(detail.get("id") or detail.get("idstr") or note_id)
-        logger.warning(
-            f"[TripPostCollect] Used browser-native Weibo detail fallback for note_id:{note_id}"
-        )
-        return {"mblog": detail}
